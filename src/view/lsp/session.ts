@@ -96,13 +96,14 @@ class Session {
 	}
 
 	/**
-	 * Whether the server offers a custom request (docs/LSP-REQUESTS.md): listed
-	 * under capabilities.experimental, as a key or in a `requests` list.
+	 * Whether the server offers a custom request: starlims-lsp lists them as
+	 * `experimental.ssl.<name>: <shape version>` (its docs/features/custom-requests.md).
+	 * Shape version 1 is the one SSL Studio reads.
 	 */
 	supports(method: string): boolean {
-		const experimental = this.capabilities.experimental ?? {};
-		const short = method.replace(/^ssl\//, "");
-		return Boolean(experimental[method] ?? experimental[short] ?? (Array.isArray(experimental.requests) && experimental.requests.includes(method)));
+		const name = method.replace(/^ssl\//, "");
+		const version = this.capabilities.experimental?.ssl?.[name];
+		return version === 1;
 	}
 
 	/** Sends a changed style profile; the server re-checks open documents. */

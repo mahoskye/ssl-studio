@@ -133,11 +133,13 @@ export function swapLines(lines: string[], a: { start: number; end: number }, b:
 
 // --- From the server's syntax tree (L1, docs/LSP-REQUESTS.md) ------------------
 //
-// The request's kinds are the server's to name; this maps them loosely so a
-// renamed kind degrades to a plain block rather than breaking the view.
+// starlims-lsp's ssl/syntaxTree, shape version 1 (its catalog entry
+// feature.syntax_tree). Kinds a later server adds degrade to a plain block or
+// chip rather than breaking the view.
 
 export type Position = { line: number; character: number };
-export type SyntaxNodeIn = { kind: string; range: { start: Position; end: Position }; name?: string; children?: SyntaxNodeIn[] };
+type RangeIn = { start: Position; end: Position };
+export type SyntaxNodeIn = { kind: string; range: RangeIn; keyword?: string; name?: string; headerRange?: RangeIn; closerRange?: RangeIn; children?: SyntaxNodeIn[] };
 
 function viewKind(kind: string, hasChildren: boolean): NodeKind {
 	const k = kind.toLowerCase().replace(/[^a-z]/g, "");
@@ -154,10 +156,16 @@ function viewKind(kind: string, hasChildren: boolean): NodeKind {
 const lastLine = (r: { start: Position; end: Position }) => (r.end.character === 0 && r.end.line > r.start.line ? r.end.line - 1 : r.end.line);
 
 /** The blocks tree from a syntax tree; gaps the tree leaves are filled, so coverage still holds. */
-export function treeFromSyntax(lines: string[], nodes: SyntaxNodeIn[]): Node {
+export function treeFromSyntax(lines: string[], nodes: SyntaxNodeIn[], paramsOf?: (procedure: string) => string[] | undefined): Node {
 	const count = lines.length;
 	const root: Node = { kind: "file", start: 1, end: count, children: [], key: "file" };
 	const convert = (n: SyntaxNodeIn, parent: Node) => {
+		// `if` and `try` hold only branches, and the first one opens on the block's
+		// own first line: its body is the block's body, the later arms nest inside.
+		if ((n.kind === "if" || n.kind === "try") && n.children?.[0]?.kind === "branch" && n.children[0].range.start.line === n.range.start.line) {
+			const [first, ...rest] = n.children;
+			n = { ...n, children: [...(first!.children ?? []), ...rest] };
+		}
 		const start = n.range.start.line + 1;
 		const end = Math.min(count, lastLine(n.range) + 1);
 		if (start < 1 || end < start || start < parent.start || end > parent.end) return;
@@ -167,10 +175,7 @@ export function treeFromSyntax(lines: string[], nodes: SyntaxNodeIn[]): Node {
 		if (previous && start <= previous.end) return;
 		const children = n.children ?? [];
 		const kind = viewKind(n.kind, children.length > 0);
-		const params =
-			kind === "procedure"
-				? children.filter((c) => /param/i.test(c.kind)).flatMap((c) => (c.children?.length ? c.children.map((p) => p.name ?? "") : c.name ? [c.name] : [])).filter(Boolean)
-				: undefined;
+		const params = kind === "procedure" ? paramsOf?.(n.name ?? "") : undefined;
 		const node: Node = { kind, start, end, name: n.name, params, children: [], key: `${kind}:${n.name ?? ""}:${start}` };
 		parent.children.push(node);
 		if (!LEAVES.has(kind) && kind !== "comment") for (const c of children) convert(c, node);

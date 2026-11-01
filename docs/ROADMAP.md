@@ -62,9 +62,11 @@ editing of chips and drops from the palette are all text edits on the same
 model, with one undo stack. The coverage test runs over recorded server
 data for every fixture.
 
-Still needs L1 from [LSP-REQUESTS.md](LSP-REQUESTS.md): statement-level
-chips (today a chip is a run of lines), `:ELSE`/`:CASE` arms as their own
-blocks, and condition fields edited apart from their keyword.
+With L1 (the server's `ssl/syntaxTree`, on a starlims-lsp branch, checked
+end to end 2026-11-01): statement-level chips, `:ELSE`/`:CASE`/`:CATCH` arms
+as their own blocks, unreadable spans as raw blocks. Turns on by itself once
+the pinned server ships it. Left: condition fields edited apart from their
+keyword (the tree's `headerRange` makes that possible).
 
 1. Read-only blocks view, synced selection with text mode, region frames with
    colours, collapse. The round-trip coverage test over all fixtures.
@@ -102,9 +104,9 @@ already resolve `DoProc` and `ExecFunction` targets, so the graph comes from
 workspace symbols, document symbols and references: scripts as boxes (marked
 near or over the size ceiling), regions inside them, procedures as nodes,
 calls as edges, laid out by ELK. Filters: every call, calls between scripts,
-and a procedure's or script's neighbourhood to a chosen depth. Still needs
-L2: `RunDS` data sources and `:INCLUDE` edges, unresolved targets as nodes,
-and one request instead of one per procedure.
+and a procedure's or script's neighbourhood to a chosen depth. With L2 (`ssl/callGraph`, same branch, checked end to end): data sources,
+`Include` edges and unresolved targets as nodes, from one request. Turns on
+with the server release that ships it.
 
 Needs L2. Workspace graph with ELK layout, region and script groups, filters.
 

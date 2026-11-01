@@ -60,21 +60,23 @@ export function visible(graph: Graph, filter: Filter): { nodes: Set<string>; edg
 	return { nodes: keep, edges: graph.edges.filter((e) => keep.has(e.from) && keep.has(e.to)) };
 }
 
-// --- From the server's call graph (L2, docs/LSP-REQUESTS.md) -------------------
+// --- From the server's call graph -------------------------------------------
 //
-// Provisional shape: { nodes: [{ id, kind, name, uri?, range?, region?, script? }],
-// edges: [{ from, to, kind, uri?, range?, resolved? }] }. Kinds are matched
-// loosely; an edge whose ends are scripts (:INCLUDE) runs between their top levels.
+// starlims-lsp's ssl/callGraph, shape version 1 (its catalog entry
+// feature.call_graph): nodes are scripts, procedures, data sources and
+// unresolved targets; edges are DoProc, ExecFunction, RunDS and Include, from
+// the procedure holding the call or from the file for code outside every
+// procedure. Include edges run between scripts' top levels here.
 
 type Pos = { line: number; character: number };
+type Location = { uri: string; range: { start: Pos; end: Pos } };
 export type CallGraphIn = {
-	nodes: { id: string; kind: string; name: string; uri?: string; path?: string; range?: { start: Pos; end: Pos }; region?: string; script?: string; bytes?: number }[];
-	edges: { from: string; to: string; kind?: string; uri?: string; path?: string; range?: { start: Pos; end: Pos }; resolved?: boolean }[];
+	nodes: { id: string; kind: string; name: string; container?: string; regions?: string[]; location?: Location; isClass?: boolean }[];
+	edges: { from: string; to: string; kind?: string; target?: string; resolved?: boolean; ambiguous?: boolean; location?: Location }[];
+	indexing?: boolean;
 };
 
 export function fromCallGraph(input: CallGraphIn, toPath: (uri: string) => string, sizes: Map<string, number> = new Map()): Graph {
-	const k = (s: string) => s.toLowerCase().replace(/[^a-z]/g, "");
-	const where = (n: { uri?: string; path?: string }) => (n.path ?? (n.uri ? toPath(n.uri) : ""));
 	const scriptsByPath = new Map<string, ScriptIn>();
 	const ids = new Map<string, string>(); // server id -> graph id
 	const script = (path: string) => {
@@ -84,20 +86,21 @@ export function fromCallGraph(input: CallGraphIn, toPath: (uri: string) => strin
 	const nodes: GraphNode[] = [];
 	const topLevel = new Set<string>();
 	for (const n of input.nodes) {
-		const kind = k(n.kind);
-		const path = where(n) || (n.script ? toPath(n.script) : "");
-		if (kind === "script") {
+		const uri = n.location?.uri ?? n.container;
+		const path = uri ? toPath(uri) : "";
+		if (n.kind === "script") {
 			script(path);
 			ids.set(n.id, `${path}#`);
 			continue;
 		}
-		const nodeKind: GraphNodeKind = kind.includes("datasource") ? "datasource" : kind.includes("unresolved") || kind.includes("missing") ? "unresolved" : "procedure";
-		const scriptPath = path || `(${nodeKind})`;
-		const id = procId(scriptPath, n.name);
+		const kind: GraphNodeKind = n.kind === "dataSource" ? "datasource" : n.kind === "unresolved" ? "unresolved" : "procedure";
+		// Procedures sit in their script; a data source is its own file; unresolved targets share one box.
+		const box = kind === "unresolved" ? "(unresolved)" : n.container ? toPath(n.container) : path;
+		const id = procId(box, n.name);
 		ids.set(n.id, id);
-		const line = n.range?.start.line ?? 0;
-		script(scriptPath).procedures.push({ name: n.name, region: n.region, startLine: line, endLine: n.range?.end.line ?? line });
-		nodes.push({ id, name: n.name, path: scriptPath, region: n.region, line, kind: nodeKind });
+		const line = n.location?.range.start.line ?? 0;
+		script(box).procedures.push({ name: n.name, region: n.regions?.[0], startLine: line, endLine: n.location?.range.end.line ?? line });
+		nodes.push({ id, name: n.name, path: box, region: n.regions?.[0], line, kind });
 	}
 	const edges = new Map<string, GraphEdge>();
 	for (const e of input.edges) {
@@ -108,8 +111,7 @@ export function fromCallGraph(input: CallGraphIn, toPath: (uri: string) => strin
 		if (to.endsWith("#")) topLevel.add(to.slice(0, -1));
 		const key = `${from}→${to}`;
 		const edge = edges.get(key) ?? { from, to, crossScript: from.split("#")[0] !== to.split("#")[0], sites: [], kind: e.kind, resolved: e.resolved };
-		const site = where(e);
-		if (site) edge.sites.push({ path: site, line: e.range?.start.line ?? 0 });
+		if (e.location) edge.sites.push({ path: toPath(e.location.uri), line: e.location.range.start.line });
 		edges.set(key, edge);
 	}
 	return { scripts: [...scriptsByPath.values()].sort((a, b) => a.path.localeCompare(b.path)), nodes, edges: [...edges.values()], topLevel: [...topLevel] };

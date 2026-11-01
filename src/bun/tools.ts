@@ -48,7 +48,8 @@ export async function findLsp(configured?: string): Promise<ToolStatus> {
 	for (const path of lspCandidates(configured)) {
 		if (!existsSync(path)) continue;
 		const out = await run([path, "--version"]);
-		const version = out && /version (\d+\.\d+\.\d+)/.exec(out)?.[1];
+		// A developer build says "version dev": usable, with the pin warning.
+		const version = out && /starlims-lsp version (\S+)/.exec(out)?.[1];
 		if (!version) continue;
 		const message =
 			version === LSP_PIN ? undefined : `starlims-lsp ${version} found; SSL Studio is tested with ${LSP_PIN}.`;

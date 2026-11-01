@@ -35,30 +35,38 @@ test("filters", () => {
 
 import { fromCallGraph } from "../src/view/graph/model";
 
-test("a call graph from the server (L2, provisional shape)", () => {
-	const r = (l: number) => ({ start: { line: l, character: 0 }, end: { line: l + 5, character: 0 } });
+test("a call graph from ssl/callGraph (shape version 1)", () => {
+	const loc = (uri: string, l: number) => ({ uri, range: { start: { line: l, character: 0 }, end: { line: l + 5, character: 0 } } });
+	const O = "file:///w/Orders.ssl";
+	const R = "file:///w/Report.ssl";
 	const g = fromCallGraph(
 		{
 			nodes: [
-				{ id: "s1", kind: "script", name: "Orders", uri: "file:///w/Orders.ssl" },
-				{ id: "s2", kind: "script", name: "Report", uri: "file:///w/Report.ssl" },
-				{ id: "p1", kind: "procedure", name: "Count", uri: "file:///w/Orders.ssl", range: r(28), region: "Queries" },
-				{ id: "p2", kind: "procedure", name: "Summary", uri: "file:///w/Report.ssl", range: r(22) },
-				{ id: "d1", kind: "dataSource", name: "Orders.GetOpen", uri: "file:///w/GetOpen.ds" },
-				{ id: "u1", kind: "unresolved", name: "Gone.Missing" },
+				{ id: O, kind: "script", name: "Sample.Orders", location: loc(O, 0) },
+				{ id: R, kind: "script", name: "Sample.Report", location: loc(R, 0) },
+				{ id: `${O}#count`, kind: "procedure", name: "Count", container: O, regions: ["Queries"], location: loc(O, 28) },
+				{ id: `${R}#summary`, kind: "procedure", name: "Summary", container: R, location: loc(R, 22) },
+				{ id: "file:///w/GetOpen.ds", kind: "dataSource", name: "Orders.GetOpen", location: loc("file:///w/GetOpen.ds", 0) },
+				{ id: "unresolved:Gone.Missing", kind: "unresolved", name: "Gone.Missing" },
 			],
 			edges: [
-				{ from: "p2", to: "p1", kind: "ExecFunction", uri: "file:///w/Report.ssl", range: r(26), resolved: true },
-				{ from: "p1", to: "d1", kind: "RunDS", uri: "file:///w/Orders.ssl", range: r(30), resolved: true },
-				{ from: "p2", to: "u1", kind: "DoProc", resolved: false },
-				{ from: "s2", to: "s1", kind: ":INCLUDE" },
+				{ from: `${R}#summary`, to: `${O}#count`, kind: "ExecFunction", target: "Sample.Orders.Count", resolved: true, location: loc(R, 26) },
+				{ from: `${O}#count`, to: "file:///w/GetOpen.ds", kind: "RunDS", resolved: true, location: loc(O, 30) },
+				{ from: `${R}#summary`, to: "unresolved:Gone.Missing", kind: "DoProc", resolved: false, location: loc(R, 27) },
+				{ from: R, to: O, kind: "Include", resolved: true, location: loc(R, 1) },
 			],
+			indexing: false,
 		},
 		(uri) => uri.replace("file://", ""),
 	);
-	expect(g.nodes.map((n) => `${n.kind}:${n.name}`)).toEqual(["procedure:Count", "procedure:Summary", "datasource:Orders.GetOpen", "unresolved:Gone.Missing"]);
-	expect(g.edges.map((e) => e.kind)).toEqual(["ExecFunction", "RunDS", "DoProc", ":INCLUDE"]);
-	expect(g.edges.find((e) => e.kind === ":INCLUDE")).toMatchObject({ from: "/w/Report.ssl#", to: "/w/Orders.ssl#" });
+	expect(g.nodes.map((n) => `${n.kind}:${n.name}:${n.path}`)).toEqual([
+		"procedure:Count:/w/Orders.ssl",
+		"procedure:Summary:/w/Report.ssl",
+		"datasource:Orders.GetOpen:/w/GetOpen.ds",
+		"unresolved:Gone.Missing:(unresolved)",
+	]);
+	expect(g.edges.map((e) => e.kind)).toEqual(["ExecFunction", "RunDS", "DoProc", "Include"]);
+	expect(g.edges.find((e) => e.kind === "Include")).toMatchObject({ from: "/w/Report.ssl#", to: "/w/Orders.ssl#", sites: [{ path: "/w/Report.ssl", line: 1 }] });
 	expect(g.topLevel.sort()).toEqual(["/w/Orders.ssl", "/w/Report.ssl"]);
 	expect(g.nodes.find((n) => n.name === "Count")!.region).toBe("Queries");
 });

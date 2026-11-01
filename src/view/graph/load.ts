@@ -1,6 +1,7 @@
 // Collects graph mode's input from the language server, a few requests at a time.
 import { monaco } from "../editor/monaco";
 import { session } from "../lsp/session";
+import { backend } from "../backend";
 import { assemble, fromCallGraph, procId, type CallIn, type Graph, type ProcIn, type ScriptIn } from "./model";
 
 const PROCEDURE = new Set([monaco.languages.SymbolKind.Function, monaco.languages.SymbolKind.Method]);
@@ -19,7 +20,12 @@ export async function loadGraph(progress: (done: number, total: number) => void)
 		progress(0, 1);
 		const result = await session.request("ssl/callGraph", {});
 		progress(1, 1);
-		return { ...fromCallGraph({ nodes: result?.nodes ?? [], edges: result?.edges ?? [] }, (uri) => monaco.Uri.parse(uri).fsPath), truncated: false };
+		const toPath = (uri: string) => monaco.Uri.parse(uri).fsPath;
+		const scriptPaths = (result?.nodes ?? []).filter((n: any) => n.kind === "script" && n.location?.uri).map((n: any) => toPath(n.location.uri));
+		const sizes = new Map(Object.entries(await backend.sizes(scriptPaths).catch(() => ({}))));
+		const graph = fromCallGraph({ nodes: result?.nodes ?? [], edges: result?.edges ?? [] }, toPath, sizes);
+		// While the server is still indexing, calls into unindexed files show as unresolved.
+		return { ...graph, truncated: Boolean(result?.indexing) };
 	}
 	const symbols = await session.workspaceSymbols("");
 	const uris = [...new Set(symbols.filter((s) => s.kind === 12 || s.kind === 6).map((s) => s.location.uri))];

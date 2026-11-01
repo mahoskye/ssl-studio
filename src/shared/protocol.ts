@@ -73,6 +73,8 @@ export interface BackendApi {
 	list(dir: string): Promise<Entry[]>;
 	/** Every file in the workspace (for quick open), up to a limit. */
 	files(): Promise<string[]>;
+	/** Sizes in bytes of workspace files (missing ones are left out). */
+	sizes(paths: string[]): Promise<Record<string, number>>;
 	read(path: string): Promise<FileText>;
 	write(path: string, text: string): Promise<{ mtime: number }>;
 	create(path: string, kind: "file" | "dir"): Promise<void>;

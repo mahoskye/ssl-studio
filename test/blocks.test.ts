@@ -65,8 +65,8 @@ test("swapping siblings keeps what is between them", () => {
 
 import { treeFromSyntax, type SyntaxNodeIn } from "../src/view/blocks/model";
 
-describe("blocks tree from a syntax tree (L1, provisional shape)", () => {
-	const r = (a: number, b: number) => ({ start: { line: a, character: 0 }, end: { line: b, character: 9 } });
+describe("blocks tree from ssl/syntaxTree (shape version 1)", () => {
+	const r = (a: number, b: number, endChar = 9) => ({ start: { line: a, character: 0 }, end: { line: b, character: endChar } });
 	const lines = [
 		"/* banner;", // 0
 		"", // 1
@@ -83,21 +83,31 @@ describe("blocks tree from a syntax tree (L1, provisional shape)", () => {
 		"/* endregion;", // 12
 		"junk (((", // 13
 	];
+	// As the server builds it: if holds branches, the IF branch opening on the if's line.
 	const tree: SyntaxNodeIn[] = [
-		{ kind: "fileBanner", range: r(0, 0) },
-		{ kind: "blank", range: r(1, 1) },
+		{ kind: "banner", range: r(0, 0) },
+		{ kind: "blankLines", range: r(1, 1, 0) },
 		{
-			kind: "commentRegion",
+			kind: "region",
 			name: "R",
 			range: r(2, 12),
 			children: [
 				{
 					kind: "procedure",
+					keyword: "PROCEDURE",
 					name: "P",
 					range: r(3, 11),
 					children: [
-						{ kind: "parameters", range: r(4, 4), children: [{ kind: "parameter", name: "a", range: r(4, 4) }, { kind: "parameter", name: "b", range: r(4, 4) }] },
-						{ kind: "if", range: r(5, 9), children: [{ kind: "statement", range: r(6, 6) }, { kind: "else", range: r(7, 8), children: [{ kind: "statement", range: r(8, 8) }] }] },
+						{ kind: "parameters", keyword: "PARAMETERS", range: r(4, 4) },
+						{
+							kind: "if",
+							range: r(5, 9),
+							closerRange: r(9, 9),
+							children: [
+								{ kind: "branch", keyword: "IF", range: r(5, 6), headerRange: r(5, 5), children: [{ kind: "statement", range: r(6, 6) }] },
+								{ kind: "branch", keyword: "ELSE", range: r(7, 8), headerRange: r(7, 7), children: [{ kind: "statement", range: r(8, 8) }] },
+							],
+						},
 						{ kind: "statement", range: r(10, 10) },
 					],
 				},
@@ -105,16 +115,19 @@ describe("blocks tree from a syntax tree (L1, provisional shape)", () => {
 		},
 		{ kind: "error", range: r(13, 13) },
 	];
+	const params = (name: string) => (name === "P" ? ["a", "b"] : undefined);
 	test("covers every line once", () => {
-		expect(coveredLines(treeFromSyntax(lines, tree))).toEqual(lines.map((_, i) => i + 1));
+		expect(coveredLines(treeFromSyntax(lines, tree, params))).toEqual(lines.map((_, i) => i + 1));
 	});
 	test("statements, arms and errors become their own blocks", () => {
-		const root = treeFromSyntax(lines, tree);
+		const root = treeFromSyntax(lines, tree, params);
+		expect(root.children.map((c) => c.kind)).toEqual(["comment", "blank", "region", "raw"]);
 		const proc = root.children.find((c) => c.kind === "region")!.children.find((c) => c.kind === "procedure")!;
 		expect(proc.params).toEqual(["a", "b"]);
+		expect(proc.children.filter((c) => c.kind !== "blank").map((c) => c.kind)).toEqual(["text", "block", "text", "text"]);
 		const ifBlock = proc.children.find((c) => c.kind === "block")!;
-		expect(ifBlock.children.map((c) => c.kind)).toEqual(["text", "block", "text"]);
-		expect(root.children.at(-1)!.kind).toBe("raw");
+		// IF body, the ELSE arm, then the :ENDIF line.
+		expect(ifBlock.children.map((c) => `${c.kind}:${c.start}`)).toEqual(["text:7", "block:8", "text:10"]);
 	});
 	test("an unknown kind degrades to a block or a chip", () => {
 		const root = treeFromSyntax(["a", "b", "c"], [{ kind: "somethingNew", range: r(0, 2), children: [{ kind: "alsoNew", range: r(1, 1) }] }]);

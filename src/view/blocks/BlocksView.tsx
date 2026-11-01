@@ -74,9 +74,16 @@ export function BlocksView(props: { path: string; group: number }) {
 				let root: Node;
 				if (session.supports("ssl/syntaxTree")) {
 					// The server's own parse (L1): statement-level chips, arms, unreadable spans.
-					const result = await session.request("ssl/syntaxTree", { textDocument: { uri: model.uri.toString() } });
-					const nodes = result?.nodes ?? result?.children ?? result?.root?.children ?? (Array.isArray(result) ? result : []);
-					root = treeFromSyntax(model.getLinesContent(), nodes);
+					const [result, symbols] = await Promise.all([
+						session.request("ssl/syntaxTree", { textDocument: { uri: model.uri.toString() } }),
+						session.documentSymbols(model).catch(() => []),
+					]);
+					// Parameter names come from the outline, which lists them per procedure.
+					const params = new Map<string, string[]>();
+					const walk = (list: monaco.languages.DocumentSymbol[]) =>
+						list.forEach((s) => (s.kind === monaco.languages.SymbolKind.Function || s.kind === monaco.languages.SymbolKind.Method ? params.set(s.name, (s.children ?? []).map((c) => c.name)) : walk(s.children ?? [])));
+					walk(symbols);
+					root = treeFromSyntax(model.getLinesContent(), result?.nodes ?? [], (name) => params.get(name));
 				} else {
 					const [symbols, folds] = await Promise.all([
 						session.documentSymbols(model),

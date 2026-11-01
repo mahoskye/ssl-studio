@@ -1,5 +1,6 @@
 // The BackendApi (src/shared/protocol.ts), whichever host carries it.
 import { basename } from "node:path";
+import { statSync } from "node:fs";
 import type { BackendApi, BackendEvents, Info, LspState, Workspace } from "../shared/protocol";
 import { History } from "./history";
 import { LspProcess } from "./lsp";
@@ -79,6 +80,17 @@ export function createBackend(host: Host, initial?: string) {
 			return all;
 		},
 		read: (path) => need().read(path),
+		sizes: async (paths) => {
+			const out: Record<string, number> = {};
+			for (const path of paths) {
+				try {
+					out[path] = statSync(need().inside(path)).size;
+				} catch {
+					// Outside the workspace or gone.
+				}
+			}
+			return out;
+		},
 		write: async (path, text) => {
 			const result = await need().write(path, text);
 			await history!.record(need().inside(path), text);

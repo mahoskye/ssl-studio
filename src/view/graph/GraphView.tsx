@@ -144,7 +144,7 @@ export function GraphView() {
 					<span class="hint">{filter().focus ? baseName(filter().focus!) : ""}</span>
 				</Show>
 				<span class="spacer" />
-				<span class="hint">{progress() || (graph() ? `${graph()!.nodes.length} procedures, ${graph()!.edges.length} calls${graph()!.truncated ? " (truncated)" : ""}` : "")}</span>
+				<span class="hint">{progress() || (graph() ? `${graph()!.nodes.length} procedures, ${graph()!.edges.length} calls${graph()!.truncated ? " (incomplete: refresh when indexing ends)" : ""}` : "")}</span>
 				<button onClick={() => void refresh()}>Refresh</button>
 				<button onClick={() => setView({ x: 20, y: 20, scale: 1 })}>Fit</button>
 				<button onClick={() => setState("centerView", "editors")}>Close</button>
