@@ -217,3 +217,45 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .checks .fail { color: var(--error); }
 .checks .unknown { color: var(--muted); }
 .review-note { flex: 1; margin: 0; white-space: pre-wrap; font: 12px/1.45 ui-monospace, monospace; color: var(--muted); }
+
+/* M3: blocks mode */
+.tabs-row { display: flex; background: var(--tab-bg); }
+.tabs-row .tabs { flex: 1; min-width: 0; }
+.mode-switch { display: flex; align-items: center; gap: 0; padding: 0 6px; }
+.mode-switch button { font-size: 11px; padding: 2px 8px; border: 1px solid var(--border); border-radius: 0; color: var(--muted); }
+.mode-switch button:first-child { border-radius: 3px 0 0 3px; }
+.mode-switch button:last-child { border-radius: 0 3px 3px 0; border-left: 0; }
+.mode-switch button.on { background: var(--selected); color: var(--fg); }
+.editor-row.hidden { display: none; }
+.blocks { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--bg); }
+.blocks-bar { display: flex; align-items: center; gap: 6px; padding: 4px 10px; border-bottom: 1px solid var(--border); }
+.blocks-bar .hint { margin: 0; }
+.blocks-scroll { overflow: auto; flex: 1; padding: 10px 14px 40px; font: 13px/1.5 ui-monospace, "Cascadia Code", Menlo, monospace; }
+.block-code { white-space: pre; font: inherit; }
+.block-head { display: flex; align-items: center; gap: 6px; padding: 3px 6px; cursor: pointer; border-radius: 4px; }
+.block-head:hover { background: var(--hover); }
+.block-head .twisty { padding: 0 2px; color: var(--muted); }
+.block-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.block-head .meta { color: var(--muted); font-size: 11px; font-family: system-ui, sans-serif; }
+.block-tools { display: none; gap: 0; }
+.block-head:hover .block-tools { display: inline-flex; }
+.block-tools button { padding: 0 5px; color: var(--muted); font-family: system-ui, sans-serif; }
+.block-tools button:hover { color: var(--fg); }
+.block-body { padding-left: 18px; }
+.comment-first, .comment-text { color: var(--muted); font-style: italic; }
+.comment-text { margin: 0; padding: 0 6px; white-space: pre; font: inherit; font-style: italic; }
+.b-region { border-left: 3px solid var(--region); background: color-mix(in srgb, var(--region) 7%, transparent); border-radius: 4px; margin: 6px 0; padding: 2px 0 4px; }
+.b-region > .block-head strong { color: var(--region); }
+.b-procedure { border: 1px solid var(--border); background: var(--side-bg); border-radius: 6px; margin: 6px 0; }
+.b-procedure > .block-head { border-bottom: 1px solid var(--border); border-radius: 6px 6px 0 0; }
+.proc-icon { color: var(--warning); }
+.params { color: var(--muted); }
+.b-block { border-left: 2px solid var(--selected); margin: 3px 0; }
+.b-comment > .block-head { color: var(--muted); }
+.b-comment.banner { border: 1px dashed var(--border); border-radius: 6px; margin-bottom: 8px; }
+.b-text { padding: 1px 6px; border-radius: 3px; cursor: text; }
+.b-text:hover { background: var(--hover); }
+.b-blank { height: 8px; }
+.selected > .block-head, .b-text.selected { box-shadow: inset 2px 0 0 var(--accent); background: var(--selected); }
+.drop { box-shadow: inset 0 2px 0 var(--accent) !important; }
+.b-edit { width: 100%; font: inherit; background: var(--input-bg); color: var(--input-fg); border: 1px solid var(--accent); border-radius: 3px; padding: 2px 6px; resize: vertical; }

@@ -52,7 +52,19 @@ preset turns off `c_style_comment_closer`, which flags the Designer banner's
 
 ## M3: blocks mode
 
-Needs L1 from [LSP-REQUESTS.md](LSP-REQUESTS.md).
+**First version done (2026-11-01), on what the server already gives.** The
+tree is built from document symbols (comment regions, procedures and their
+parameters) and folding ranges (control flow, comments, `:REGION` text):
+region frames in their colours, procedure cards, control-flow blocks, code
+chips coloured by the theme, the banner as a card. Selection follows the text
+cursor; moves (siblings up and down), wrap in a region, delete, in-place
+editing of chips and drops from the palette are all text edits on the same
+model, with one undo stack. The coverage test runs over recorded server
+data for every fixture.
+
+Still needs L1 from [LSP-REQUESTS.md](LSP-REQUESTS.md): statement-level
+chips (today a chip is a run of lines), `:ELSE`/`:CASE` arms as their own
+blocks, and condition fields edited apart from their keyword.
 
 1. Read-only blocks view, synced selection with text mode, region frames with
    colours, collapse. The round-trip coverage test over all fixtures.

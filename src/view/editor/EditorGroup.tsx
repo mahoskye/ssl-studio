@@ -5,6 +5,7 @@ import { monaco } from "./monaco";
 import { activePath, closeTab, documents, openFile, revealSignal, setState, state, takeReveal } from "../state";
 import { symbols } from "../panels/Objects";
 import { flatRegions, regionColor, symbolPath } from "./regions";
+import { BlocksView } from "../blocks/BlocksView";
 
 const viewStates = new Map<string, monaco.editor.ICodeEditorViewState | null>();
 export const editors: monaco.editor.IStandaloneCodeEditor[] = [];
@@ -77,6 +78,7 @@ export function EditorGroup(props: { index: number }) {
 
 	return (
 		<section class="group" classList={{ active: state.activeGroup === props.index }} onMouseDown={() => setState("activeGroup", props.index)}>
+			<div class="tabs-row">
 			<div class="tabs" role="tablist">
 				<For each={group().tabs}>
 					{(path) => (
@@ -101,6 +103,17 @@ export function EditorGroup(props: { index: number }) {
 					)}
 				</For>
 			</div>
+				<Show when={group().active && documents.get(group().active!)?.model.getLanguageId() === "ssl"}>
+					<div class="mode-switch" role="group" aria-label="View">
+						<button classList={{ on: group().mode !== "blocks" }} onClick={() => setState("groups", props.index, "mode", "text")}>
+							Text
+						</button>
+						<button classList={{ on: group().mode === "blocks" }} onClick={() => setState("groups", props.index, "mode", "blocks")}>
+							Blocks
+						</button>
+					</div>
+				</Show>
+			</div>
 			<Show when={group().active && group().active === activePath() && symbols().length}>
 				<nav class="breadcrumbs" aria-label="Breadcrumbs">
 					<For each={symbolPath(symbols(), state.cursor.line)}>
@@ -117,7 +130,10 @@ export function EditorGroup(props: { index: number }) {
 					</For>
 				</nav>
 			</Show>
-			<div class="editor-row">
+			<Show when={group().mode === "blocks" && group().active}>
+				<BlocksView path={group().active!} group={props.index} />
+			</Show>
+			<div class="editor-row" classList={{ hidden: group().mode === "blocks" }}>
 				<Show when={group().active && group().active === activePath() && lineCount() > 0}>
 					<div class="region-strip" aria-label="Regions">
 						<For each={flatRegions(symbols())}>

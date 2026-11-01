@@ -2,6 +2,7 @@
 import { ask } from "./dialogs";
 import { activeEditor } from "./editor/EditorGroup";
 import { backend, inApp } from "./backend";
+import { monaco } from "./editor/monaco";
 import { openStyleProfile } from "./StyleProfile";
 import { insertTemplate } from "./panels/Palette";
 import { TEMPLATES } from "../shared/houseStyle";
@@ -22,6 +23,8 @@ export const commands: Command[] = [
 	{ id: "revert", label: "Revert file to disk", run: () => activePath() && void revert(activePath()!) },
 	{ id: "close", label: "Close editor", keys: "Ctrl+W", run: () => activePath() && void closeTab(activePath()!) },
 	{ id: "split", label: "Split editor", keys: "Ctrl+\\", run: split },
+	{ id: "blocks", label: "Toggle blocks view", keys: "Ctrl+Shift+B", run: () => setState("groups", state.activeGroup, "mode", (m) => (m === "blocks" ? "text" : "blocks")) },
+	{ id: "wrap-region", label: "Wrap the selected lines in a region…", run: () => void wrapInRegion() },
 	{ id: "format", label: "Format document", keys: "Ctrl+Shift+I", run: () => void activeEditor()?.getAction("editor.action.formatDocument")?.run() },
 	{ id: "search", label: "Search the workspace", keys: "Ctrl+Shift+F", run: () => (setState("leftView", "search"), setState("settings", "layout", "left", true)) },
 	{ id: "explorer", label: "Show Explorer", keys: "Ctrl+Shift+E", run: () => (setState("leftView", "explorer"), setState("settings", "layout", "left", true)) },
@@ -48,6 +51,30 @@ export const commands: Command[] = [
 let settingsOpener: () => void = () => {};
 export const onOpenSettings = (open: () => void) => (settingsOpener = open);
 const openSettings = () => settingsOpener();
+
+/** Puts the selected lines inside a new comment region (a frame in blocks mode). */
+async function wrapInRegion() {
+	const editor = activeEditor();
+	const model = editor?.getModel();
+	const selection = editor?.getSelection();
+	if (!editor || !model || !selection) return;
+	const name = await ask("Name of the new region");
+	if (!name) return;
+	const start = selection.startLineNumber;
+	const end = selection.endColumn === 1 && selection.endLineNumber > start ? selection.endLineNumber - 1 : selection.endLineNumber;
+	const eol = model.getEOL();
+	model.pushStackElement();
+	model.pushEditOperations(
+		[],
+		[
+			{ range: new monaco.Range(start, 1, start, 1), text: `/* region ${name};${eol}${eol}` },
+			{ range: new monaco.Range(end, model.getLineMaxColumn(end), end, model.getLineMaxColumn(end)), text: `${eol}${eol}/* endregion;` },
+		],
+		() => null,
+	);
+	model.pushStackElement();
+	editor.focus();
+}
 
 async function askCommand() {
 	const question = await ask("Ask the agent about the selection");
@@ -80,6 +107,7 @@ const KEYS: Record<string, string> = {
 	"ctrl+shift+m": "problems",
 	"ctrl+,": "settings",
 	"ctrl+shift+a": "agent-ask",
+	"ctrl+shift+b": "blocks",
 };
 
 export function installKeys() {

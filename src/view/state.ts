@@ -10,7 +10,7 @@ import { session } from "./lsp/session";
 import { changedRanges, minimalReplace } from "./lsp/edits";
 import { choose } from "./dialogs";
 
-export type Group = { tabs: string[]; active: string | null };
+export type Group = { tabs: string[]; active: string | null; mode?: "text" | "blocks" };
 export type LeftView = "explorer" | "objects" | "palette" | "reference" | "search" | "history";
 export type RightView = "health" | "agent";
 export type BottomView = "problems" | "output";

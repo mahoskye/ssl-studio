@@ -1,0 +1,554 @@
+{
+ "server": "0.28.2",
+ "files": {
+  "Sample/Untidy.ssl": {
+   "text": "/* A deliberately untidy script, for trying format and diagnostics;\n:PROCEDURE untidy;\n:PARAMETERS a,b;\n:IF a>b;\nx:=a;\n:ELSE;\nx:=b;\n:ENDIF;\n:RETURN x;\n:ENDPROC;\n",
+   "symbols": [
+    {
+     "name": "untidy",
+     "detail": "(a, b)",
+     "kind": 12,
+     "range": {
+      "start": {
+       "line": 1,
+       "character": 0
+      },
+      "end": {
+       "line": 9,
+       "character": 0
+      }
+     },
+     "selectionRange": {
+      "start": {
+       "line": 1,
+       "character": 11
+      },
+      "end": {
+       "line": 1,
+       "character": 17
+      }
+     },
+     "children": [
+      {
+       "name": "a",
+       "detail": "parameter",
+       "kind": 13,
+       "range": {
+        "start": {
+         "line": 2,
+         "character": 12
+        },
+        "end": {
+         "line": 2,
+         "character": 13
+        }
+       },
+       "selectionRange": {
+        "start": {
+         "line": 2,
+         "character": 12
+        },
+        "end": {
+         "line": 2,
+         "character": 13
+        }
+       }
+      },
+      {
+       "name": "b",
+       "detail": "parameter",
+       "kind": 13,
+       "range": {
+        "start": {
+         "line": 2,
+         "character": 14
+        },
+        "end": {
+         "line": 2,
+         "character": 15
+        }
+       },
+       "selectionRange": {
+        "start": {
+         "line": 2,
+         "character": 14
+        },
+        "end": {
+         "line": 2,
+         "character": 15
+        }
+       }
+      }
+     ]
+    }
+   ],
+   "folds": [
+    {
+     "startLine": 1,
+     "endLine": 9,
+     "kind": "region"
+    },
+    {
+     "startLine": 3,
+     "endLine": 7,
+     "kind": "region"
+    }
+   ]
+  },
+  "Sample/Orders.ssl": {
+   "text": "/********************************************************************************\nDescription.. : Sample script for SSL Studio: order helpers.\nParameters... : -\nReturns...... : -\nAuthor....... :\nDate......... : 2026-11-01\n********************************************************************************\n_______________________________________________________________________________\nModification. : Added CountOpenOrders.\nAuthor....... :\nDate......... : 2026-11-01\n_______________________________________________________________________________\nModification. : First version.\nAuthor....... :\nDate......... : 2026-10-31\n_______________________________________________________________________________\n********************************************************************************/;\n\n/* region Queries;\n\n/*\n * Procedure: CountOpenOrders\n * Description: Counts the orders still open for a customer.\n * Parameters:\n *   sCustomer - the customer code\n * Returns: the number of open orders\n;\n:PROCEDURE CountOpenOrders;\n\t:PARAMETERS sCustomer;\n\t:DEFAULT sCustomer, \"\";\n\n\t:DECLARE nCount;\n\n\t:IF Empty(sCustomer);\n\t\t:RETURN 0;\n\t:ENDIF;\n\n\tnCount := LSearch(\"SELECT COUNT(*) FROM ORDERS WHERE CUSTNO = ? AND STATUS = ?\", 0, \"DATABASE\", {sCustomer, \"Open\"});\n\n\t:RETURN nCount;\n:ENDPROC;\n\n/* endregion;\n\n/* region Formatting;\n\n/*\n * Procedure: OrderTitle\n * Description: A short title for an order.\n * Parameters:\n *   sOrdNo - the order number\n *   nItems - how many items it has\n * Returns: the title\n;\n:PROCEDURE OrderTitle;\n\t:PARAMETERS sOrdNo, nItems;\n\n\t:DECLARE sTitle, i;\n\n\tsTitle := \"Order \" + sOrdNo;\n\n\t:FOR i := 1 :TO nItems;\n\t\tsTitle := sTitle + \".\";\n\t:NEXT;\n\n\t:TRY;\n\t\tsTitle := Upper(sTitle);\n\t:CATCH;\n\t\tsTitle := \"Order\";\n\t:ENDTRY;\n\n\t:RETURN sTitle;\n:ENDPROC;\n\n/* endregion;\n",
+   "symbols": [
+    {
+     "name": "Queries",
+     "detail": "region",
+     "kind": 3,
+     "range": {
+      "start": {
+       "line": 18,
+       "character": 0
+      },
+      "end": {
+       "line": 42,
+       "character": 0
+      }
+     },
+     "selectionRange": {
+      "start": {
+       "line": 18,
+       "character": 10
+      },
+      "end": {
+       "line": 18,
+       "character": 17
+      }
+     },
+     "children": [
+      {
+       "name": "CountOpenOrders",
+       "detail": "(sCustomer)",
+       "kind": 12,
+       "range": {
+        "start": {
+         "line": 27,
+         "character": 0
+        },
+        "end": {
+         "line": 40,
+         "character": 0
+        }
+       },
+       "selectionRange": {
+        "start": {
+         "line": 27,
+         "character": 11
+        },
+        "end": {
+         "line": 27,
+         "character": 26
+        }
+       },
+       "children": [
+        {
+         "name": "sCustomer",
+         "detail": "parameter",
+         "kind": 13,
+         "range": {
+          "start": {
+           "line": 28,
+           "character": 13
+          },
+          "end": {
+           "line": 28,
+           "character": 22
+          }
+         },
+         "selectionRange": {
+          "start": {
+           "line": 28,
+           "character": 13
+          },
+          "end": {
+           "line": 28,
+           "character": 22
+          }
+         }
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "name": "Formatting",
+     "detail": "region",
+     "kind": 3,
+     "range": {
+      "start": {
+       "line": 44,
+       "character": 0
+      },
+      "end": {
+       "line": 74,
+       "character": 0
+      }
+     },
+     "selectionRange": {
+      "start": {
+       "line": 44,
+       "character": 10
+      },
+      "end": {
+       "line": 44,
+       "character": 20
+      }
+     },
+     "children": [
+      {
+       "name": "OrderTitle",
+       "detail": "(sOrdNo, nItems)",
+       "kind": 12,
+       "range": {
+        "start": {
+         "line": 54,
+         "character": 0
+        },
+        "end": {
+         "line": 72,
+         "character": 0
+        }
+       },
+       "selectionRange": {
+        "start": {
+         "line": 54,
+         "character": 11
+        },
+        "end": {
+         "line": 54,
+         "character": 21
+        }
+       },
+       "children": [
+        {
+         "name": "sOrdNo",
+         "detail": "parameter",
+         "kind": 13,
+         "range": {
+          "start": {
+           "line": 55,
+           "character": 13
+          },
+          "end": {
+           "line": 55,
+           "character": 19
+          }
+         },
+         "selectionRange": {
+          "start": {
+           "line": 55,
+           "character": 13
+          },
+          "end": {
+           "line": 55,
+           "character": 19
+          }
+         }
+        },
+        {
+         "name": "nItems",
+         "detail": "parameter",
+         "kind": 13,
+         "range": {
+          "start": {
+           "line": 55,
+           "character": 21
+          },
+          "end": {
+           "line": 55,
+           "character": 27
+          }
+         },
+         "selectionRange": {
+          "start": {
+           "line": 55,
+           "character": 21
+          },
+          "end": {
+           "line": 55,
+           "character": 27
+          }
+         }
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "folds": [
+    {
+     "startLine": 27,
+     "endLine": 40,
+     "kind": "region"
+    },
+    {
+     "startLine": 54,
+     "endLine": 72,
+     "kind": "region"
+    },
+    {
+     "startLine": 18,
+     "endLine": 42,
+     "kind": "region"
+    },
+    {
+     "startLine": 44,
+     "endLine": 74,
+     "kind": "region"
+    },
+    {
+     "startLine": 33,
+     "endLine": 35,
+     "kind": "region"
+    },
+    {
+     "startLine": 61,
+     "endLine": 63,
+     "kind": "region"
+    },
+    {
+     "startLine": 65,
+     "endLine": 69,
+     "kind": "region"
+    },
+    {
+     "startLine": 0,
+     "endLine": 16,
+     "kind": "comment"
+    },
+    {
+     "startLine": 20,
+     "endLine": 26,
+     "kind": "comment"
+    },
+    {
+     "startLine": 46,
+     "endLine": 53,
+     "kind": "comment"
+    }
+   ]
+  },
+  "Regions.ssl": {
+   "text": "/********************************************************************************\nDescription.. : Spike fixture: regions, procedures and control flow.\nParameters... : -\nReturns...... : -\nAuthor....... :\nDate......... : 2026-10-31\n********************************************************************************\n_______________________________________________________________________________\nModification. :\nAuthor....... :\nDate......... :\n_______________________________________________________________________________\n********************************************************************************/;\n\n/* region Validation;\n\n/*\n    Checks that a sample id is present and well formed.\n\n    sSampleId - the id to check\n    Returns .T. when the id is usable\n;\n:PROCEDURE IsUsableId;\n:PARAMETERS sSampleId;\n:DEFAULT sSampleId, \"\";\n\n:IF Empty(sSampleId);\n    :RETURN .F.;\n:ENDIF;\n\n:RETURN Len(sSampleId) <= 20;\n:ENDPROC;\n\n/* endregion;\n\n/* region Labels;\n\n/*\n    The label text for a status code.\n\n    nStatus - the status code\n    Returns the label\n;\n:PROCEDURE StatusLabel;\n:PARAMETERS nStatus;\n\n:DECLARE sLabel;\n\n:BEGINCASE;\n:CASE nStatus == 1;\n    sLabel := \"Logged\";\n:CASE nStatus == 2;\n    sLabel := \"Released\";\n:OTHERWISE;\n    sLabel := \"Unknown\";\n:ENDCASE;\n\n:RETURN sLabel;\n:ENDPROC;\n\n/* endregion;\n\n:REGION sqlPending;\n    SELECT ORDNO FROM ORDERS WHERE STATUS = ?\n:ENDREGION;\n",
+   "symbols": [
+    {
+     "name": "Validation",
+     "detail": "region",
+     "kind": 3,
+     "range": {
+      "start": {
+       "line": 14,
+       "character": 0
+      },
+      "end": {
+       "line": 33,
+       "character": 0
+      }
+     },
+     "selectionRange": {
+      "start": {
+       "line": 14,
+       "character": 10
+      },
+      "end": {
+       "line": 14,
+       "character": 20
+      }
+     },
+     "children": [
+      {
+       "name": "IsUsableId",
+       "detail": "(sSampleId)",
+       "kind": 12,
+       "range": {
+        "start": {
+         "line": 22,
+         "character": 0
+        },
+        "end": {
+         "line": 31,
+         "character": 0
+        }
+       },
+       "selectionRange": {
+        "start": {
+         "line": 22,
+         "character": 11
+        },
+        "end": {
+         "line": 22,
+         "character": 21
+        }
+       },
+       "children": [
+        {
+         "name": "sSampleId",
+         "detail": "parameter",
+         "kind": 13,
+         "range": {
+          "start": {
+           "line": 23,
+           "character": 12
+          },
+          "end": {
+           "line": 23,
+           "character": 21
+          }
+         },
+         "selectionRange": {
+          "start": {
+           "line": 23,
+           "character": 12
+          },
+          "end": {
+           "line": 23,
+           "character": 21
+          }
+         }
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "name": "Labels",
+     "detail": "region",
+     "kind": 3,
+     "range": {
+      "start": {
+       "line": 35,
+       "character": 0
+      },
+      "end": {
+       "line": 60,
+       "character": 0
+      }
+     },
+     "selectionRange": {
+      "start": {
+       "line": 35,
+       "character": 10
+      },
+      "end": {
+       "line": 35,
+       "character": 16
+      }
+     },
+     "children": [
+      {
+       "name": "StatusLabel",
+       "detail": "(nStatus)",
+       "kind": 12,
+       "range": {
+        "start": {
+         "line": 43,
+         "character": 0
+        },
+        "end": {
+         "line": 58,
+         "character": 0
+        }
+       },
+       "selectionRange": {
+        "start": {
+         "line": 43,
+         "character": 11
+        },
+        "end": {
+         "line": 43,
+         "character": 22
+        }
+       },
+       "children": [
+        {
+         "name": "nStatus",
+         "detail": "parameter",
+         "kind": 13,
+         "range": {
+          "start": {
+           "line": 44,
+           "character": 12
+          },
+          "end": {
+           "line": 44,
+           "character": 19
+          }
+         },
+         "selectionRange": {
+          "start": {
+           "line": 44,
+           "character": 12
+          },
+          "end": {
+           "line": 44,
+           "character": 19
+          }
+         }
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "folds": [
+    {
+     "startLine": 22,
+     "endLine": 31,
+     "kind": "region"
+    },
+    {
+     "startLine": 43,
+     "endLine": 58,
+     "kind": "region"
+    },
+    {
+     "startLine": 14,
+     "endLine": 33,
+     "kind": "region"
+    },
+    {
+     "startLine": 35,
+     "endLine": 60,
+     "kind": "region"
+    },
+    {
+     "startLine": 26,
+     "endLine": 28,
+     "kind": "region"
+    },
+    {
+     "startLine": 48,
+     "endLine": 55,
+     "kind": "region"
+    },
+    {
+     "startLine": 62,
+     "endLine": 64,
+     "kind": "region"
+    },
+    {
+     "startLine": 0,
+     "endLine": 12,
+     "kind": "comment"
+    },
+    {
+     "startLine": 16,
+     "endLine": 21,
+     "kind": "comment"
+    },
+    {
+     "startLine": 37,
+     "endLine": 42,
+     "kind": "comment"
+    }
+   ]
+  }
+ }
+}
