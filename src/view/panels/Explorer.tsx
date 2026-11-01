@@ -5,7 +5,8 @@ import type { Entry } from "../../shared/protocol";
 import { level } from "../../shared/houseStyle";
 import { backend } from "../backend";
 import { ask, choose } from "../dialogs";
-import { activePath, notify, openFile, setState, state } from "../state";
+import { activePath, canonical, notify, openFile, setState, state } from "../state";
+import { baseName, dirName, joinPath } from "../../shared/paths";
 
 const [expanded, setExpanded] = createSignal<Set<string>>(new Set());
 const toggle = (path: string) =>
@@ -28,7 +29,7 @@ function Folder(props: { path: string; depth: number }) {
 				<>
 					<div
 						class="tree-row"
-						classList={{ selected: activePath() === entry.path }}
+						classList={{ selected: activePath() === canonical(entry.path) }}
 						style={{ "padding-left": `${8 + props.depth * 14}px` }}
 						title={entry.path}
 						onClick={() => (entry.kind === "dir" ? toggle(entry.path) : void openFile(entry.path))}
@@ -56,18 +57,18 @@ function Folder(props: { path: string; depth: number }) {
 
 async function entryMenu(entry: Entry) {
 	const action = await choose(entry.name, entry.kind === "dir" ? ["New file", "New folder", "Rename", "Delete"] : ["Rename", "Delete"]);
-	const parent = entry.kind === "dir" ? entry.path : entry.path.slice(0, entry.path.lastIndexOf("/"));
+	const parent = entry.kind === "dir" ? entry.path : dirName(entry.path);
 	try {
 		if (action === "New file" || action === "New folder") {
-			const name = await ask(`${action} in ${parent.split("/").pop()}`);
+			const name = await ask(`${action} in ${baseName(parent)}`);
 			if (!name) return;
-			await backend.create(`${parent}/${name}`, action === "New file" ? "file" : "dir");
+			await backend.create(joinPath(parent, name), action === "New file" ? "file" : "dir");
 			setExpanded((set) => new Set(set).add(parent));
-			if (action === "New file") void openFile(`${parent}/${name}`);
+			if (action === "New file") void openFile(joinPath(parent, name));
 		} else if (action === "Rename") {
 			const name = await ask(`Rename ${entry.name}`, entry.name);
 			if (!name || name === entry.name) return;
-			await backend.rename(entry.path, `${entry.path.slice(0, entry.path.lastIndexOf("/"))}/${name}`);
+			await backend.rename(entry.path, joinPath(dirName(entry.path), name));
 		} else if (action === "Delete") {
 			if ((await choose(`Move ${entry.name} to the trash?`, ["Move to trash"])) !== "Move to trash") return;
 			await backend.trash(entry.path);

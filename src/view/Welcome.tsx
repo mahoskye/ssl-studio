@@ -3,6 +3,7 @@ import { createResource, For, Show } from "solid-js";
 import { backend, inApp } from "./backend";
 import { ask } from "./dialogs";
 import { openFolder, state } from "./state";
+import { baseName } from "../shared/paths";
 
 export function Welcome() {
 	const [recent] = createResource(() => backend.recent());
@@ -25,7 +26,7 @@ export function Welcome() {
 						{(path) => (
 							<li>
 								<button class="link" onClick={() => void openFolder(path)}>
-									{path.split("/").pop()} <span class="hint">{path}</span>
+									{baseName(path)} <span class="hint">{path}</span>
 								</button>
 							</li>
 						)}

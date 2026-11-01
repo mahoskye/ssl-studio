@@ -14,6 +14,7 @@ import { codeOnly } from "../editor/textmate";
 import { session } from "../lsp/session";
 import { activePath, applyText, documents, notify, state } from "../state";
 import { addEntry, ask } from "./store";
+import { baseName, joinPath, relativeTo } from "../../shared/paths";
 
 export type StepKind = "note" | "code" | "report";
 export const STEPS: { skill: string; title: string; kind: StepKind; commentsOnly?: boolean }[] = [
@@ -28,9 +29,9 @@ export type StepState = "pending" | "running" | "review" | "accepted" | "rejecte
 
 export const [tidy, setTidy] = createStore({ path: null as string | null, steps: STEPS.map(() => "pending" as StepState) });
 
-const rel = (path: string) => (state.workspace ? path.slice(state.workspace.root.length + 1) : path);
-const base = (path: string) => path.split("/").pop()!.replace(/\.[^.]+$/, "");
-export const notePath = (path: string) => `${state.workspace!.root}/design/${base(path)}.tidy.md`;
+const rel = (path: string) => relativeTo(state.workspace?.root, path);
+const base = (path: string) => baseName(path).replace(/\.[^.]+$/, "");
+export const notePath = (path: string) => joinPath(state.workspace!.root, "design", `${base(path)}.tidy.md`);
 
 export function startTidy() {
 	const path = activePath();
@@ -68,7 +69,7 @@ async function callers(path: string, model: monaco.editor.ITextModel): Promise<s
 			.catch(() => [])) as { uri: string; range: any }[];
 		for (const r of refs ?? []) {
 			const file = monaco.Uri.parse(r.uri).fsPath;
-			if (file === path) continue;
+			if (relativeTo(state.workspace?.root, file) === relativeTo(state.workspace?.root, path)) continue;
 			const target = await session.ensureModel(r.uri);
 			lines.push(`${p.name} ← ${rel(file)}:${r.range.start.line + 1}: ${target?.getLineContent(r.range.start.line + 1).trim() ?? ""}`);
 		}

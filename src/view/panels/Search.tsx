@@ -6,6 +6,7 @@ import { session } from "../lsp/session";
 import type { SearchHit } from "../../shared/protocol";
 import { backend } from "../backend";
 import { notify, openFile, state } from "../state";
+import { relativeTo } from "../../shared/paths";
 
 export function Search() {
 	let input!: HTMLInputElement;
@@ -44,7 +45,7 @@ export function Search() {
 		for (const hit of list) map.set(place(hit), [...(map.get(place(hit)) ?? []), hit]);
 		return [...map];
 	};
-	const rel = (path: string) => (state.workspace ? path.slice(state.workspace.root.length + 1) : path);
+	const rel = (path: string) => relativeTo(state.workspace?.root, path);
 	return (
 		<div class="panel-body">
 			<div class="panel-title">

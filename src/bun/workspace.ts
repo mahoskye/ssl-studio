@@ -21,7 +21,9 @@ export class WorkspaceFiles {
 
 	inside(path: string): string {
 		const full = resolve(path);
-		if (full !== this.root && !full.startsWith(this.root + sep)) throw new Error(`outside the workspace: ${path}`);
+		// Windows paths compare without case (drive letters come both ways).
+		const fold = (p: string) => (process.platform === "win32" ? p.toLowerCase() : p);
+		if (fold(full) !== fold(this.root) && !fold(full).startsWith(fold(this.root) + sep)) throw new Error(`outside the workspace: ${path}`);
 		return full;
 	}
 

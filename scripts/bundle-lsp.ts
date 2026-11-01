@@ -5,6 +5,7 @@
 //
 //   bun scripts/bundle-lsp.ts [--download]
 import { $ } from "bun";
+import { homedir } from "node:os";
 import { chmodSync, copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { findLsp, LSP_PIN } from "../src/bun/tools";
@@ -26,7 +27,7 @@ if (process.argv.includes("--download")) {
 	if (!found.ok || found.version !== LSP_PIN) throw new Error(`No local starlims-lsp ${LSP_PIN} (found: ${found.version ?? "none"}). Use --download.`);
 	copyFileSync(found.path!, target);
 	// Its license and notices travel with it.
-	const repo = process.env.STARLIMS_LSP_REPO ?? `${process.env.HOME}/dev/starlims-projects/starlims-lsp`;
+	const repo = process.env.STARLIMS_LSP_REPO ?? `${homedir()}/dev/starlims-projects/starlims-lsp`;
 	for (const file of ["LICENSE", "THIRD-PARTY-NOTICES.md"]) if (existsSync(join(repo, file))) copyFileSync(join(repo, file), join(vendor, file === "LICENSE" ? "STARLIMS-LSP-LICENSE" : file));
 }
 chmodSync(target, 0o755);

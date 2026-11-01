@@ -5,6 +5,7 @@ import { monaco } from "../editor/monaco";
 import { backend, on } from "../backend";
 import { LspClient } from "./client";
 import { trimEdit } from "./edits";
+import { baseName } from "../../shared/paths";
 
 export type Diagnostic = {
 	uri: string;
@@ -70,7 +71,7 @@ class Session {
 				processId: null,
 				initializationOptions: { ssl: this.sslSettings() },
 				rootUri: monaco.Uri.file(root).toString(),
-				workspaceFolders: [{ uri: monaco.Uri.file(root).toString(), name: root.split("/").pop() }],
+				workspaceFolders: [{ uri: monaco.Uri.file(root).toString(), name: baseName(root) }],
 				capabilities: {
 					textDocument: {
 						synchronization: { didSave: true },

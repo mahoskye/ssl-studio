@@ -5,6 +5,7 @@ import { commands, keysFor } from "./commands";
 import { monaco } from "./editor/monaco";
 import { session } from "./lsp/session";
 import { openFile, setState, state } from "./state";
+import { baseName, relativeTo } from "../shared/paths";
 
 type Item = { label: string; detail?: string; run: () => void };
 
@@ -32,7 +33,7 @@ export function QuickPick() {
 		setQuery("");
 		setSelected(0);
 	};
-	const rel = (path: string) => (state.workspace ? path.slice(state.workspace.root.length + 1) : path);
+	const rel = (path: string) => relativeTo(state.workspace?.root, path);
 	const [files] = createResource(
 		() => state.quickPick === "files" && state.workspace?.root,
 		() => backend.files(),
@@ -45,7 +46,7 @@ export function QuickPick() {
 		const mode = state.quickPick;
 		let list: Item[] = [];
 		if (mode === "files")
-			list = (files() ?? []).map((path) => ({ label: path.split("/").pop()!, detail: rel(path), run: () => void openFile(path) }));
+			list = (files() ?? []).map((path) => ({ label: baseName(path), detail: rel(path), run: () => void openFile(path) }));
 		if (mode === "commands") list = commands.map((c) => ({ label: c.label, detail: keysFor(c.id), run: c.run }));
 		if (mode === "symbols")
 			return (symbols() ?? []).slice(0, 200).map((s) => {

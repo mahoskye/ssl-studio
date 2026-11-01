@@ -6,11 +6,12 @@ import { activePath, closeTab, documents, openFile, revealSignal, setState, stat
 import { symbols } from "../panels/Objects";
 import { flatRegions, regionColor, symbolPath } from "./regions";
 import { BlocksView } from "../blocks/BlocksView";
+import { baseName } from "../../shared/paths";
 
 const viewStates = new Map<string, monaco.editor.ICodeEditorViewState | null>();
 export const editors: monaco.editor.IStandaloneCodeEditor[] = [];
 
-const base = (path: string) => path.split("/").pop()!;
+const base = baseName;
 
 export function EditorGroup(props: { index: number }) {
 	let host!: HTMLDivElement;

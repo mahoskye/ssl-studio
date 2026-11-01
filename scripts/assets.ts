@@ -7,6 +7,7 @@
 //   bun scripts/assets.ts              copy the wasm
 //   bun scripts/assets.ts --grammar    also update the grammar from SSL_FORMATTER
 import { $ } from "bun";
+import { homedir } from "node:os";
 import { mkdirSync } from "node:fs";
 
 const root = `${import.meta.dir}/..`;
@@ -15,7 +16,7 @@ mkdirSync(`${pub}/grammar`, { recursive: true });
 await Bun.write(`${pub}/onig.wasm`, Bun.file(`${root}/node_modules/vscode-oniguruma/release/onig.wasm`));
 
 if (process.argv.includes("--grammar")) {
-	const formatter = process.env.SSL_FORMATTER ?? `${process.env.HOME}/dev/starlims-projects/vs-code-ssl-formatter`;
+	const formatter = process.env.SSL_FORMATTER ?? `${homedir()}/dev/starlims-projects/vs-code-ssl-formatter`;
 	const path = "syntaxes/ssl.tmLanguage.json";
 	const config = "language-configuration.json";
 	const commit = (await $`git -C ${formatter} log -1 --format=%H -- ${path} ${config}`.text()).trim();

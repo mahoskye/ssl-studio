@@ -9,6 +9,7 @@ import { languageFor, monaco } from "./editor/monaco";
 import { session } from "./lsp/session";
 import { changedRanges, minimalReplace } from "./lsp/edits";
 import { choose } from "./dialogs";
+import { baseName, isInside } from "../shared/paths";
 
 export type Group = { tabs: string[]; active: string | null; mode?: "text" | "blocks" };
 export type PanelId = "explorer" | "objects" | "palette" | "reference" | "search" | "history" | "health" | "agent";
@@ -108,7 +109,11 @@ export async function saveSetting(patch: Partial<Settings>, scope: "user" | "wor
 
 // --- documents ---------------------------------------------------------------
 
+/** One spelling per file: Monaco's (on Windows it lowercases the drive letter). */
+export const canonical = (path: string) => monaco.Uri.file(path).fsPath;
+
 async function loadDoc(path: string): Promise<Doc> {
+	path = canonical(path);
 	const existing = docs.get(path);
 	if (existing) return existing;
 	const file = await backend.read(path);
@@ -126,7 +131,7 @@ session.sslSettings = () => JSON.parse(JSON.stringify(state.settings.ssl ?? {}))
 /** Models for files the language server points at (peek, rename) without opening a tab. */
 session.ensureModel = async (uri) => {
 	const path = monaco.Uri.parse(uri).fsPath;
-	if (!state.workspace || !path.startsWith(state.workspace.root)) return null;
+	if (!state.workspace || !isInside(state.workspace.root, path)) return null;
 	try {
 		return (await loadDoc(path)).model;
 	} catch {
@@ -143,6 +148,7 @@ export const takeReveal = (path: string) => {
 };
 
 export async function openFile(path: string, options: { group?: number; reveal?: Reveal } = {}) {
+	path = canonical(path);
 	const doc = await guarded(() => loadDoc(path));
 	if (!doc) return;
 	const group = options.group ?? state.activeGroup;
@@ -173,7 +179,7 @@ export const revealSignal = (() => {
 export async function closeTab(path: string, group = state.activeGroup) {
 	const lastView = state.groups.filter((g) => g.tabs.includes(path)).length === 1;
 	if (state.dirty[path] && lastView) {
-		const answer = await choose(`${path.split("/").pop()} has unsaved changes.`, ["Save", "Discard"]);
+		const answer = await choose(`${baseName(path)} has unsaved changes.`, ["Save", "Discard"]);
 		if (!answer) return;
 		if (answer === "Save") await save(path);
 	}
@@ -314,7 +320,8 @@ export async function revert(path: string) {
 	});
 }
 
-on("fileChanged", async ({ path }) => {
+on("fileChanged", async ({ path: changed }) => {
+	const path = canonical(changed);
 	setState("treeVersion", (v) => v + 1);
 	const doc = docs.get(path);
 	if (!doc) return;
@@ -327,7 +334,7 @@ on("fileChanged", async ({ path }) => {
 	if (file.text === doc.model.getValue()) return;
 	if (state.dirty[path]) {
 		setState("conflicts", path, true);
-		notify(`${path.split("/").pop()} changed on disk while you have unsaved edits.`, "error");
+		notify(`${baseName(path)} changed on disk while you have unsaved edits.`, "error");
 	} else {
 		await revert(path);
 		log(`reloaded ${path} after an external change`);

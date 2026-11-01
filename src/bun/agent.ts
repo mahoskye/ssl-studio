@@ -9,7 +9,7 @@
 import { randomBytes } from "node:crypto";
 import type { Subprocess } from "bun";
 import type { AgentModel, AgentReply, AgentStatus } from "../shared/protocol";
-import { compareVersions, OPENCODE_RANGE } from "./tools";
+import { compareVersions, OPENCODE_RANGE, opencodeCommand } from "./tools";
 
 const DENY = ["shell", "webfetch", "websearch", "external_directory", "question"];
 /** Providers that run on the user's own machines. Anything else may bill. */
@@ -42,7 +42,7 @@ export class Agent {
 		readonly emit: (type: string, data: unknown) => void,
 		readonly root: () => string | null,
 		/** For tests: the opencode command. */
-		private command = ["opencode", "serve", "--stdio", "--port", "0"],
+		private command = [...opencodeCommand(), "serve", "--stdio", "--port", "0"],
 	) {}
 
 	configure(options: Options) {

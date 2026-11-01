@@ -46,10 +46,25 @@ Opens the app on `fixtures/workspace`, checks highlighting, the language
 server, symbols, diagnostics, hover and format with undo, writes
 `selftest.json` and quits. Its settings go to `.selftest/`, not yours.
 
-## The remote machine
+## Windows (the remote machine)
 
-Not known yet (OS and opencode version). On Windows or macOS, build there
-with the steps above; the language server has release assets for
-`windows-amd64`, `darwin-amd64` and `darwin-arm64`. The opencode adapter
-accepts 2.2.x; another minor version is refused with a message until it has
-been tried (ADR 0004).
+The remote machine runs Windows (2026-11-01). Two ways to a build:
+
+- **CI:** `.github/workflows/build.yml` builds on Windows, Linux and macOS
+  once the repository is on GitHub, and uploads each OS's installer with the
+  pinned language server inside.
+- **A Windows checkout:** the steps above, in Git Bash or PowerShell, with
+  Bun and Node installed.
+
+On Windows:
+
+- settings are in `%APPDATA%\ssl-studio\`, local history in
+  `%LOCALAPPDATA%\ssl-studio\history\`;
+- opencode installed with npm leaves an `opencode.cmd` shim; SSL Studio runs
+  the real `opencode.exe` beside it (or goes through `cmd.exe`);
+- the system webview is WebView2, which current Windows ships. M0 measured
+  WebKitGTK only; run `hutch run selftest` on the machine once to check it.
+
+The opencode version there is still unknown. The adapter accepts 2.2.x and
+refuses another minor version with a message until it has been tried
+(ADR 0004).

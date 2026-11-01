@@ -1,7 +1,8 @@
 // Finding the external tools: starlims-lsp (pinned, ADR 0003) and opencode
 // (a supported range, ADR 0004).
 import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { homedir } from "node:os";
+import { delimiter, dirname, join, resolve } from "node:path";
 import type { ToolStatus } from "../shared/protocol";
 
 export const LSP_PIN = "0.28.2";
@@ -27,7 +28,7 @@ export function compareVersions(a: string, b: string): number {
 }
 
 export function lspCandidates(configured?: string): string[] {
-	const home = process.env.HOME ?? "";
+	const home = homedir();
 	const arch = process.arch === "arm64" ? "arm64" : "amd64";
 	const platform = process.platform === "win32" ? "windows" : process.platform;
 	const suffix = process.platform === "win32" ? ".exe" : "";
@@ -37,7 +38,7 @@ export function lspCandidates(configured?: string): string[] {
 		configured,
 		process.env.STARLIMS_LSP,
 		bundled,
-		...(process.env.PATH ?? "").split(":").map((dir) => `${dir}/starlims-lsp${suffix}`),
+		...(process.env.PATH ?? "").split(delimiter).filter(Boolean).map((dir) => join(dir, `starlims-lsp${suffix}`)),
 		`${home}/dev/starlims-projects/starlims-lsp/starlims-lsp-${platform}-${arch}${suffix}`,
 		`${home}/dev/starlims-projects/ssl-style-guide/ssl-mcp-server/bin/lsp/starlims-lsp-${platform}-${arch}${suffix}`,
 	].filter((p): p is string => Boolean(p));
@@ -59,8 +60,20 @@ export async function findLsp(configured?: string): Promise<ToolStatus> {
 	};
 }
 
+/**
+ * The command that runs opencode. On Windows npm installs a `.cmd` shim, which
+ * a process cannot be spawned from directly; the shim sits beside the real
+ * binary's package, so use that, else go through cmd.exe.
+ */
+export function opencodeCommand(): string[] {
+	const found = Bun.which("opencode");
+	if (!found || process.platform !== "win32" || !/\.(cmd|bat)$/i.test(found)) return [found ?? "opencode"];
+	const exe = join(dirname(found), "node_modules", "@opencode", "cli", "bin", "opencode.exe");
+	return existsSync(exe) ? [exe] : ["cmd.exe", "/d", "/s", "/c", found];
+}
+
 export async function findOpencode(): Promise<ToolStatus> {
-	const out = await run(["opencode", "--version"]);
+	const out = await run([...opencodeCommand(), "--version"]);
 	const version = out && /(\d+\.\d+\.\d+)/.exec(out)?.[1];
 	if (!version) return { ok: false, message: "opencode not found on PATH: the Agent panel is off." };
 	const inRange = compareVersions(version, OPENCODE_RANGE.min) >= 0 && compareVersions(version, OPENCODE_RANGE.below) < 0;

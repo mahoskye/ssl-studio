@@ -1,0 +1,61 @@
+# Tests, then a release build on each OS (Electrobun builds only for the
+# machine it runs on). Artifacts carry the pinned language server.
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Electrobun runtime and Hutch
+        run: |
+          npx --yes electrobun@2.0.5 prepare
+          hutch_bin="$(find "$HOME/.hutch/npm/electrobun/2.0.5" -type f \( -name hutch -o -name hutch.exe \) -path '*/bin/*' | head -1)"
+          echo "$(dirname "$hutch_bin")" >> "$GITHUB_PATH"
+
+      - name: Packages
+        run: hutch install --frozen-lockfile
+
+      - name: Type check and tests
+        run: |
+          bun scripts/assets.ts
+          hutch run check
+          bun test
+
+      - name: Language server
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bun scripts/bundle-lsp.ts --download
+
+      - name: Release build
+        run: hutch run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ssl-studio-${{ matrix.os }}
+          path: artifacts/
+          if-no-files-found: error

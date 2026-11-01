@@ -8,6 +8,7 @@ import { regionColor } from "../editor/regions";
 import { openFile, setState, state } from "../state";
 import { loadGraph } from "./load";
 import { visible, type Filter, type Graph } from "./model";
+import { baseName, relativeTo } from "../../shared/paths";
 
 type Box = { id: string; x: number; y: number; width: number; height: number; label: string; kind: "script" | "region" | "proc" | "top"; path?: string; line?: number; region?: string; bytes?: number };
 type Line = { id: string; points: { x: number; y: number }[]; cross: boolean; count: number };
@@ -21,7 +22,7 @@ export function GraphView() {
 	const [filter, setFilter] = createSignal<Filter>({ mode: "all", depth: 1 });
 	const [layout, setLayout] = createSignal<{ boxes: Box[]; lines: Line[]; width: number; height: number } | null>(null);
 	const [view, setView] = createSignal({ x: 20, y: 20, scale: 1 });
-	const rel = (path: string) => (state.workspace ? path.slice(state.workspace.root.length + 1) : path);
+	const rel = (path: string) => relativeTo(state.workspace?.root, path);
 
 	const refresh = async () => {
 		setProgress("Reading the workspace…");
@@ -138,7 +139,7 @@ export function GraphView() {
 					<label>
 						depth <input type="number" min="1" max="6" value={filter().depth} onChange={(e) => setFilter({ ...filter(), depth: Number(e.currentTarget.value) || 1 })} />
 					</label>
-					<span class="hint">{filter().focus?.split("/").pop()}</span>
+					<span class="hint">{filter().focus ? baseName(filter().focus!) : ""}</span>
 				</Show>
 				<span class="spacer" />
 				<span class="hint">{progress() || (graph() ? `${graph()!.nodes.length} procedures, ${graph()!.edges.length} calls${graph()!.truncated ? " (truncated)" : ""}` : "")}</span>

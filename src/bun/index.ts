@@ -5,6 +5,7 @@ import { BrowserView, BrowserWindow, Utils } from "electrobun/main";
 import type { ElectrobunRPCSchema, RPCSchema } from "electrobun/main";
 import type { BackendEvents } from "../shared/protocol";
 import { createBackend, dispatch } from "./backend";
+import { homedir } from "node:os";
 
 type Schema = {
 	bun: RPCSchema<{ requests: { invoke: { params: { method: string; args: unknown[] }; response: unknown } }; messages: {} }>;
@@ -21,7 +22,7 @@ const backend = createBackend(
 		emit: (event, payload) => rpc.send.event({ event, payload }),
 		pick: async (kind) => {
 			const paths = await Utils.openFileDialog({
-				startingFolder: process.env.HOME ?? "~/",
+				startingFolder: homedir(),
 				canChooseFiles: kind === "file",
 				canChooseDirectory: kind === "folder",
 				allowsMultipleSelection: false,

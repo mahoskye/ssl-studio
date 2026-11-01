@@ -6,6 +6,7 @@ import { activeDoc, activePath, state } from "../state";
 import { agent, ask, chooseModel, currentModel, interrupt, setAgent, start } from "./store";
 import { notePath, runStep, startTidy, STEPS, tidy } from "./tidy";
 import { backend } from "../backend";
+import { baseName, relativeTo } from "../../shared/paths";
 
 const ICON: Record<string, string> = { pending: "○", running: "◌", review: "◐", accepted: "●", rejected: "✗", unchanged: "–", failed: "!" };
 
@@ -22,7 +23,7 @@ export function selectionContext(): { label: string; code: string } | null {
 export async function askAbout(question: string, includeSelection: boolean) {
 	const path = activePath();
 	const context = includeSelection ? selectionContext() : null;
-	const file = path && state.workspace ? path.slice(state.workspace.root.length + 1) : "";
+	const file = path ? relativeTo(state.workspace?.root, path) : "";
 	const text = context
 		? `${question}\n\nAbout this code from ${file}, ${context.label}:\n\`\`\`ssl\n${context.code}\n\`\`\`\n\nYou cannot read files in this session; answer from the code above.`
 		: question;
@@ -81,7 +82,7 @@ export function AgentPanel() {
 			<section class="tidy">
 				<div class="tidy-head">
 					<strong>Tidy</strong>
-					<span class="hint">{tidy.path ? tidy.path.split("/").pop() : "the six ssl-tidy steps, reviewed one by one"}</span>
+					<span class="hint">{tidy.path ? baseName(tidy.path) : "the six ssl-tidy steps, reviewed one by one"}</span>
 					<span class="spacer" />
 					<button onClick={startTidy} disabled={!activeDoc() || agent.busy}>
 						{tidy.path && tidy.path === activePath() ? "Restart" : "This file"}
@@ -102,7 +103,7 @@ export function AgentPanel() {
 							</div>
 						)}
 					</For>
-					<p class="hint">Notes go to {notePath(tidy.path!).slice((state.workspace?.root.length ?? 0) + 1)}. Accepted steps are edits in the editor: save to keep them.</p>
+					<p class="hint">Notes go to {relativeTo(state.workspace?.root, notePath(tidy.path!))}. Accepted steps are edits in the editor: save to keep them.</p>
 				</Show>
 			</section>
 

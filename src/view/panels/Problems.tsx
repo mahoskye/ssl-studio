@@ -4,6 +4,7 @@ import { For, Show } from "solid-js";
 import { monaco } from "../editor/monaco";
 import { diagnostics, type Diagnostic } from "../lsp/session";
 import { openFile, state } from "../state";
+import { relativeTo } from "../../shared/paths";
 
 const ICON = ["", "✖", "⚠", "ℹ", "·"];
 const CLASS = ["", "error", "warning", "info", "hint"];
@@ -18,7 +19,7 @@ export function Problems() {
 	const files = () => Object.entries(diagnostics).filter(([, list]) => list?.length) as [string, Diagnostic[]][];
 	const rel = (uri: string) => {
 		const path = monaco.Uri.parse(uri).fsPath;
-		return state.workspace ? path.slice(state.workspace.root.length + 1) : path;
+		return relativeTo(state.workspace?.root, path);
 	};
 	return (
 		<div class="problems">
