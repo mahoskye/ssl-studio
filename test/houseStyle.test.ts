@@ -13,3 +13,14 @@ test("levels", () => {
 	expect(level(370, 400)).toBe("near");
 	expect(level(401, 400)).toBe("over");
 });
+
+import { getPath, setPath, HOUSE_STYLE } from "../src/shared/styleProfile";
+
+test("style profile paths", () => {
+	const s = setPath({ format: { sql: { enabled: true } } }, "format.sql.style", "expanded");
+	expect(s).toEqual({ format: { sql: { enabled: true, style: "expanded" } } });
+	expect(getPath(s, "format.sql.style")).toBe("expanded");
+	expect(getPath(s, "diagnostics.rules.x")).toBeUndefined();
+	expect(setPath(s, "format.sql", undefined)).toEqual({ format: {} });
+	expect(getPath(HOUSE_STYLE, "format.indentStyle")).toBe("tab");
+});

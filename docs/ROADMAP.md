@@ -21,6 +21,11 @@ model, Solid chosen. Left: the remote machine's details.
 
 ## M1: a text IDE for daily use
 
+**Done (2026-11-01).** Electrobun app and a browser host for development;
+every server feature, multi-file definition and references, rename; format
+on save widened to the changed procedures; local history with diff and
+restore; `hutch run selftest` checks the desktop build.
+
 - Open a folder; file tree; tabs; split editors.
 - All the language server's features; format on save; the Problems panel.
 - Light and dark themes; VS Code theme import.
@@ -28,6 +33,13 @@ model, Solid chosen. Left: the remote machine's details.
 - Local history on save.
 
 ## M2: panels and house style
+
+**Done (2026-11-01)**, except what waits on the language server: the Objects
+panel shows what document symbols carry (regions, procedures, parameters);
+`:INCLUDE`s and calls need L2. The style profile edits the server's own
+`ssl` settings over a house preset (decisions 0002, 0005, 0006); the house
+preset turns off `c_style_comment_closer`, which flags the Designer banner's
+`*/;` closer that decision 0005 prescribes.
 
 - Objects panel from document symbols (regions, procedures, publics, includes,
   calls).

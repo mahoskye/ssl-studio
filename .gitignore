@@ -9,3 +9,4 @@ src/view/public/onig.wasm
 *.tsbuildinfo
 selftest.json
 .cottontail-tmp/
+.selftest/

@@ -11,7 +11,8 @@ import { changedRanges } from "./lsp/edits";
 import { choose } from "./dialogs";
 
 export type Group = { tabs: string[]; active: string | null };
-export type LeftView = "explorer" | "objects" | "search" | "history";
+export type LeftView = "explorer" | "objects" | "palette" | "reference" | "search" | "history";
+export type RightView = "health" | "agent";
 export type BottomView = "problems" | "output";
 export type Message = { id: number; kind: "info" | "error"; text: string };
 
@@ -30,6 +31,7 @@ export const [state, setState] = createStore({
 	conflicts: {} as Record<string, boolean>,
 	leftView: "explorer" as LeftView,
 	bottomView: "problems" as BottomView,
+	rightView: "health" as RightView,
 	messages: [] as Message[],
 	output: [] as string[],
 	cursor: { line: 1, column: 1 },
@@ -116,6 +118,8 @@ async function loadDoc(path: string): Promise<Doc> {
 	session.track(model);
 	return doc;
 }
+
+session.sslSettings = () => JSON.parse(JSON.stringify(state.settings.ssl ?? {}));
 
 /** Models for files the language server points at (peek, rename) without opening a tab. */
 session.ensureModel = async (uri) => {

@@ -3,6 +3,7 @@
 import { mkdirSync, readdirSync, existsSync } from "node:fs";
 import { basename, join } from "node:path";
 import { DEFAULT_SETTINGS, type Settings, type SettingsScope, type ThemeFile } from "../shared/protocol";
+import { HOUSE_STYLE } from "../shared/styleProfile";
 import { dirs, workspaceDir } from "./paths";
 
 async function readJson<T>(path: string, fallback: T): Promise<T> {
@@ -18,11 +19,18 @@ export function merge(...layers: Partial<Settings>[]): Settings {
 	for (const layer of layers) {
 		for (const [key, value] of Object.entries(layer)) {
 			if (value === undefined) continue;
-			result[key] =
-				value && typeof value === "object" && !Array.isArray(value) ? { ...result[key], ...value } : value;
+			result[key] = key === "ssl" ? deepMerge(result[key], value) : value && typeof value === "object" && !Array.isArray(value) ? { ...result[key], ...value } : value;
 		}
 	}
+	result.ssl = deepMerge(result.stylePreset === "server" ? {} : HOUSE_STYLE, result.ssl);
 	return result;
+}
+
+function deepMerge(base: any, over: any): any {
+	if (!over || typeof over !== "object" || Array.isArray(over)) return over;
+	const out: any = { ...(base ?? {}) };
+	for (const [k, v] of Object.entries(over)) out[k] = v && typeof v === "object" && !Array.isArray(v) ? deepMerge(out[k], v) : v;
+	return out;
 }
 
 export class SettingsStore {

@@ -4,6 +4,7 @@ import { createEffect, createSignal, For, on, onCleanup, Show } from "solid-js";
 import { monaco } from "../editor/monaco";
 import { session } from "../lsp/session";
 import { activeDoc, activePath, openFile, state } from "../state";
+import { cycleRegionColor, isRegion, regionColor } from "../editor/regions";
 
 type Sym = monaco.languages.DocumentSymbol;
 const ICONS: Record<number, string> = { 1: "▣", 2: "▣", 4: "◆", 5: "◆", 11: "ƒ", 12: "ƒ", 13: "·", 14: "π" };
@@ -43,7 +44,14 @@ export function Objects() {
 					if (path) void openFile(path, { reveal: { line: r.startLineNumber, column: r.startColumn, endLine: r.endLineNumber, endColumn: r.endColumn } });
 				}}
 			>
-				<span class="icon">{ICONS[props.symbol.kind] ?? "•"}</span>
+				<Show when={isRegion(props.symbol)} fallback={<span class="icon">{ICONS[props.symbol.kind] ?? "•"}</span>}>
+					<button
+						class="swatch"
+						title="Region colour: click to change (kept in workspace settings)"
+						style={{ background: regionColor(props.symbol.name) }}
+						onClick={(e) => (e.stopPropagation(), cycleRegionColor(props.symbol.name))}
+					/>
+				</Show>
 				<span class="label">{props.symbol.name}</span>
 				<span class="meta">{props.symbol.range.endLineNumber - props.symbol.range.startLineNumber + 1}</span>
 			</div>

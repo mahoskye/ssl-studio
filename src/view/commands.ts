@@ -2,6 +2,9 @@
 import { ask } from "./dialogs";
 import { activeEditor } from "./editor/EditorGroup";
 import { backend, inApp } from "./backend";
+import { openStyleProfile } from "./StyleProfile";
+import { insertTemplate } from "./panels/Palette";
+import { TEMPLATES } from "../shared/houseStyle";
 import { activePath, closeTab, openFolder, revert, save, saveAll, setState, split, state } from "./state";
 
 export type Command = { id: string; label: string; keys?: string; run: () => void };
@@ -26,6 +29,12 @@ export const commands: Command[] = [
 	{ id: "toggle-panel", label: "Toggle bottom panel", keys: "Ctrl+J", run: () => toggle("bottom") },
 	{ id: "problems", label: "Show problems", keys: "Ctrl+Shift+M", run: () => (setState("bottomView", "problems"), setState("settings", "layout", "bottom", true)) },
 	{ id: "output", label: "Show output", run: () => (setState("bottomView", "output"), setState("settings", "layout", "bottom", true)) },
+	{ id: "style-profile", label: "Style profile…", run: () => openStyleProfile() },
+	{ id: "palette", label: "Show the template palette", run: () => (setState("leftView", "palette"), setState("settings", "layout", "left", true)) },
+	{ id: "reference", label: "Show the SSL reference", run: () => (setState("leftView", "reference"), setState("settings", "layout", "left", true)) },
+	{ id: "health", label: "Show script health", run: () => (setState("rightView", "health"), setState("settings", "layout", "right", true)) },
+	{ id: "insert-banner", label: "Insert the file banner", run: () => insertTemplate(TEMPLATES.find((t) => t.id === "banner")!) },
+	{ id: "insert-procedure", label: "Insert a procedure", run: () => insertTemplate(TEMPLATES.find((t) => t.id === "procedure")!) },
 	{ id: "lsp-restart", label: "Restart the language server", run: () => void backend.lspRestart() },
 	{ id: "settings", label: "Settings…", keys: "Ctrl+,", run: () => openSettings() },
 	{ id: "editor-commands", label: "Editor commands…", keys: "F1", run: () => activeEditor()?.trigger("app", "editor.action.quickCommand", null) },

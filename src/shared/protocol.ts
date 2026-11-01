@@ -39,6 +39,13 @@ export type Settings = {
 	limits: { bytes: number; codeLines: number; historyEntries: number };
 	/** Panel layout, saved per workspace. */
 	layout: { left: boolean; right: boolean; bottom: boolean; leftWidth: number; rightWidth: number; bottomHeight: number };
+	/**
+	 * The style profile: the language server's own `ssl` settings (its
+	 * docs/configuration/CONFIGURATION.md), chosen here, applied there.
+	 */
+	ssl: Record<string, any>;
+	/** The base the `ssl` overrides sit on: the house style, or the server's defaults. */
+	stylePreset: "house" | "server";
 	/** Agent: provider/model ids for new sessions; local by default. */
 	agentModel?: string;
 };
@@ -98,4 +105,6 @@ export const DEFAULT_SETTINGS: Settings = {
 	regionColors: {},
 	limits: { bytes: 50 * 1024, codeLines: 400, historyEntries: 3 },
 	layout: { left: true, right: false, bottom: true, leftWidth: 260, rightWidth: 360, bottomHeight: 200 },
+	ssl: {},
+	stylePreset: "house",
 };

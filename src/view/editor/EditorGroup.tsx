@@ -1,8 +1,10 @@
 // One editor group: a tab strip over one Monaco editor that shows the
 // group's active document. Two groups side by side make a split.
-import { createEffect, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { monaco } from "./monaco";
-import { activePath, closeTab, documents, revealSignal, setState, state, takeReveal } from "../state";
+import { activePath, closeTab, documents, openFile, revealSignal, setState, state, takeReveal } from "../state";
+import { symbols } from "../panels/Objects";
+import { flatRegions, regionColor, symbolPath } from "./regions";
 
 const viewStates = new Map<string, monaco.editor.ICodeEditorViewState | null>();
 export const editors: monaco.editor.IStandaloneCodeEditor[] = [];
@@ -14,6 +16,7 @@ export function EditorGroup(props: { index: number }) {
 	let editor: monaco.editor.IStandaloneCodeEditor;
 	const group = () => state.groups[props.index]!;
 	let shown: string | null = null;
+	const [lineCount, setLineCount] = createSignal(0);
 
 	onMount(() => {
 		editor = monaco.editor.create(host, {
@@ -30,6 +33,8 @@ export function EditorGroup(props: { index: number }) {
 		});
 		editors[props.index] = editor;
 		editor.onDidFocusEditorText(() => setState("activeGroup", props.index));
+		editor.onDidChangeModelContent(() => setLineCount(editor.getModel()?.getLineCount() ?? 0));
+		editor.onDidChangeModel(() => setLineCount(editor.getModel()?.getLineCount() ?? 0));
 		editor.onDidChangeCursorPosition((e) => {
 			if (state.activeGroup === props.index) setState("cursor", { line: e.position.lineNumber, column: e.position.column });
 		});
@@ -96,7 +101,44 @@ export function EditorGroup(props: { index: number }) {
 					)}
 				</For>
 			</div>
-			<div class="editor-host" ref={host} />
+			<Show when={group().active && group().active === activePath() && symbols().length}>
+				<nav class="breadcrumbs" aria-label="Breadcrumbs">
+					<For each={symbolPath(symbols(), state.cursor.line)}>
+						{(s, i) => (
+							<>
+								<Show when={i() > 0}>
+									<span class="sep">›</span>
+								</Show>
+								<button class={`crumb kind-${s.kind}`} onClick={() => void openFile(group().active!, { reveal: { line: s.selectionRange.startLineNumber, column: s.selectionRange.startColumn } })}>
+									{s.name}
+								</button>
+							</>
+						)}
+					</For>
+				</nav>
+			</Show>
+			<div class="editor-row">
+				<Show when={group().active && group().active === activePath() && lineCount() > 0}>
+					<div class="region-strip" aria-label="Regions">
+						<For each={flatRegions(symbols())}>
+							{({ symbol, depth }) => (
+								<div
+									class="region-band"
+									title={`${symbol.name}: ${symbol.range.endLineNumber - symbol.range.startLineNumber + 1} lines`}
+									style={{
+										top: `${((symbol.range.startLineNumber - 1) / lineCount()) * 100}%`,
+										height: `${Math.max(0.5, ((symbol.range.endLineNumber - symbol.range.startLineNumber + 1) / lineCount()) * 100)}%`,
+										left: `${depth * 3}px`,
+										background: regionColor(symbol.name),
+									}}
+									onClick={() => void openFile(group().active!, { reveal: { line: symbol.selectionRange.startLineNumber, column: 1 } })}
+								/>
+							)}
+						</For>
+					</div>
+				</Show>
+				<div class="editor-host" ref={host} />
+			</div>
 			<Show when={!group().active}>
 				<div class="empty-group">
 					<p>Open a file from the Explorer, or press Ctrl+P.</p>

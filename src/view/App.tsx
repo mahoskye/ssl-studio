@@ -10,6 +10,11 @@ import { History } from "./panels/History";
 import { Objects, useSymbols } from "./panels/Objects";
 import { Output, Problems, counts } from "./panels/Problems";
 import { Search } from "./panels/Search";
+import { Palette } from "./panels/Palette";
+import { Reference } from "./panels/Reference";
+import { Health } from "./panels/Health";
+import { StyleProfile } from "./StyleProfile";
+import { session } from "./lsp/session";
 import { QuickPick } from "./QuickPick";
 import { SettingsDialog } from "./Settings";
 import { StatusBar } from "./StatusBar";
@@ -20,14 +25,17 @@ import { Welcome } from "./Welcome";
 const VIEWS: { id: LeftView; icon: string; title: string }[] = [
 	{ id: "explorer", icon: "🗀", title: "Explorer (Ctrl+Shift+E)" },
 	{ id: "objects", icon: "◇", title: "Objects" },
+	{ id: "palette", icon: "▤", title: "Palette" },
+	{ id: "reference", icon: "📖", title: "Reference" },
 	{ id: "search", icon: "⌕", title: "Search (Ctrl+Shift+F)" },
 	{ id: "history", icon: "⟲", title: "Local history" },
 ];
 
-function Splitter(props: { axis: "x" | "y"; onDrag: (delta: number) => void }) {
+function Splitter(props: { axis: "x" | "y"; column?: number; onDrag: (delta: number) => void }) {
 	return (
 		<div
 			class={`splitter ${props.axis}`}
+			style={props.column ? { "grid-column": String(props.column) } : undefined}
 			onMouseDown={(start) => {
 				start.preventDefault();
 				let last = props.axis === "x" ? start.clientX : start.clientY;
@@ -66,14 +74,21 @@ function useLayoutPersistence() {
 	);
 }
 
+function toggleRight(view: "health" | "agent") {
+	if (state.settings.layout.right && state.rightView === view) setState("settings", "layout", "right", false);
+	else (setState("rightView", view), setState("settings", "layout", "right", true));
+}
+
 export function App() {
 	useTheme();
+	// A changed style profile goes to the language server, which re-checks.
+	createEffect(on(() => JSON.stringify(state.settings.ssl), (_now, before) => before !== undefined && session.configure()));
 	useSymbols();
 	useLayoutPersistence();
 	const layout = () => state.settings.layout;
 	const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
 	return (
-		<div class="app" style={{ "--left": `${layout().left ? layout().leftWidth : 0}px`, "--bottom": `${layout().bottom ? layout().bottomHeight : 0}px` }}>
+		<div class="app" style={{ "--left": `${layout().left ? layout().leftWidth : 0}px`, "--right": `${layout().right ? layout().rightWidth : 0}px`, "--bottom": `${layout().bottom ? layout().bottomHeight : 0}px` }}>
 			<nav class="activity" aria-label="Views">
 				<For each={VIEWS}>
 					{(view) => (
@@ -90,6 +105,9 @@ export function App() {
 					)}
 				</For>
 				<span class="spacer" />
+				<button title="Health" classList={{ active: layout().right && state.rightView === "health" }} onClick={() => toggleRight("health")}>
+					♥
+				</button>
 				<button title="Command palette (Ctrl+Shift+P)" onClick={() => setState("quickPick", "commands")}>
 					⌘
 				</button>
@@ -106,6 +124,12 @@ export function App() {
 						<Match when={state.leftView === "objects"}>
 							<Objects />
 						</Match>
+						<Match when={state.leftView === "palette"}>
+							<Palette />
+						</Match>
+						<Match when={state.leftView === "reference"}>
+							<Reference />
+						</Match>
 						<Match when={state.leftView === "search"}>
 							<Search />
 						</Match>
@@ -114,7 +138,7 @@ export function App() {
 						</Match>
 					</Switch>
 				</aside>
-				<Splitter axis="x" onDrag={(d) => setState("settings", "layout", "leftWidth", (w) => clamp(w + d, 160, 700))} />
+				<Splitter axis="x" column={3} onDrag={(d) => setState("settings", "layout", "leftWidth", (w) => clamp(w + d, 160, 700))} />
 			</Show>
 			<main class="center">
 				<div class="editors">
@@ -150,12 +174,23 @@ export function App() {
 					</section>
 				</Show>
 			</main>
+			<Show when={layout().right && state.workspace}>
+				<Splitter axis="x" column={5} onDrag={(d) => setState("settings", "layout", "rightWidth", (w) => clamp(w - d, 220, 800))} />
+				<aside class="rightbar">
+					<Switch>
+						<Match when={state.rightView === "health"}>
+							<Health />
+						</Match>
+					</Switch>
+				</aside>
+			</Show>
 			<StatusBar />
 			<div class="toasts" aria-live="polite">
 				<For each={state.messages}>{(m) => <div class={`toast ${m.kind}`}>{m.text}</div>}</For>
 			</div>
 			<QuickPick />
 			<SettingsDialog />
+			<StyleProfile />
 			<Dialogs />
 		</div>
 	);

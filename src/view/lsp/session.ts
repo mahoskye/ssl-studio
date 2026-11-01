@@ -42,12 +42,16 @@ class Session {
 	private root = "";
 	private versions = new Map<string, number>();
 	server: ServerInfo | null = null;
+	/** The style profile's `ssl` settings, sent at start and on change. */
+	sslSettings: () => Record<string, unknown> = () => ({});
 	/** Loads a model for a URI the server pointed at (definition, references). */
 	ensureModel: (uri: string) => Promise<monaco.editor.ITextModel | null> = async () => null;
 
 	constructor() {
 		this.client.on("textDocument/publishDiagnostics", (params) => this.publish(params));
-		this.client.onRequest("workspace/configuration", (params) => (params?.items ?? []).map(() => null));
+		this.client.onRequest("workspace/configuration", (params) =>
+			(params?.items ?? []).map((item: { section?: string }) => (item.section === "ssl" ? this.sslSettings() : item.section ? null : { ssl: this.sslSettings() })),
+		);
 		this.client.onRequest("client/registerCapability", () => null);
 		this.client.onRequest("window/workDoneProgress/create", () => null);
 		on("lspState", (state) => {
@@ -64,6 +68,7 @@ class Session {
 		this.initialized = (async () => {
 			const result = await this.client.request("initialize", {
 				processId: null,
+				initializationOptions: { ssl: this.sslSettings() },
 				rootUri: monaco.Uri.file(root).toString(),
 				workspaceFolders: [{ uri: monaco.Uri.file(root).toString(), name: root.split("/").pop() }],
 				capabilities: {
@@ -85,6 +90,11 @@ class Session {
 			for (const model of monaco.editor.getModels()) if (this.versions.has(model.uri.toString())) this.open(model);
 		})();
 		return this.initialized;
+	}
+
+	/** Sends a changed style profile; the server re-checks open documents. */
+	configure() {
+		if (this.initialized) this.client.notify("workspace/didChangeConfiguration", { settings: { ssl: this.sslSettings() } });
 	}
 
 	private ready() {
@@ -125,6 +135,8 @@ class Session {
 	}
 
 	private publish(params: { uri: string; diagnostics: any[] }) {
+		// Scratch documents (the Reference panel's) are not the user's files.
+		if (params.uri.includes("/.ssl-studio/")) return;
 		const model = monaco.editor.getModel(monaco.Uri.parse(params.uri));
 		const list: Diagnostic[] = params.diagnostics.map((d) => ({
 			uri: params.uri,

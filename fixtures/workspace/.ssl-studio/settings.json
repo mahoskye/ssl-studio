@@ -1,0 +1,10 @@
+{
+  "layout": {
+    "left": true,
+    "right": true,
+    "bottom": true,
+    "leftWidth": 260,
+    "rightWidth": 360,
+    "bottomHeight": 200
+  }
+}

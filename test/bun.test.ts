@@ -80,3 +80,11 @@ test("version comparison", () => {
 	expect(compareVersions("2.10.0", "2.3.0")).toBeGreaterThan(0);
 	expect(compareVersions("0.28.2", "0.28.2")).toBe(0);
 });
+
+test("the style preset sits under the overrides", () => {
+	const house = merge({ ssl: { format: { maxLineLength: 120 } } });
+	expect(house.ssl.format.indentStyle).toBe("tab");
+	expect(house.ssl.format.maxLineLength).toBe(120);
+	const server = merge({ stylePreset: "server", ssl: { format: { maxLineLength: 120 } } });
+	expect(server.ssl).toEqual({ format: { maxLineLength: 120 } });
+});
