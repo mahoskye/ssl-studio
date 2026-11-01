@@ -15,6 +15,7 @@ import { Reference } from "./panels/Reference";
 import { Health } from "./panels/Health";
 import { StyleProfile } from "./StyleProfile";
 import { AgentPanel } from "./agent/Agent";
+import { GraphView } from "./graph/GraphView";
 import { session } from "./lsp/session";
 import { QuickPick } from "./QuickPick";
 import { SettingsDialog } from "./Settings";
@@ -105,6 +106,9 @@ export function App() {
 						</button>
 					)}
 				</For>
+				<button title="Graph of calls" classList={{ active: state.centerView === "graph" }} onClick={() => setState("centerView", state.centerView === "graph" ? "editors" : "graph")}>
+					⌬
+				</button>
 				<span class="spacer" />
 				<button title="Agent" classList={{ active: layout().right && state.rightView === "agent" }} onClick={() => toggleRight("agent")}>
 					✦
@@ -147,8 +151,13 @@ export function App() {
 			<main class="center">
 				<div class="editors">
 					<Show when={state.workspace} fallback={<Welcome />}>
-						<Show when={review()} keyed fallback={<For each={state.groups}>{(_, i) => <EditorGroup index={i()} />}</For>}>
-							{(_r) => <ReviewView />}
+						<Show when={state.centerView === "graph"}>
+							<GraphView />
+						</Show>
+						<Show when={state.centerView === "editors"}>
+							<Show when={review()} keyed fallback={<For each={state.groups}>{(_, i) => <EditorGroup index={i()} />}</For>}>
+								{(_r) => <ReviewView />}
+							</Show>
 						</Show>
 					</Show>
 				</div>

@@ -1,0 +1,44 @@
+/********************************************************************************
+Description.. : Sample script for SSL Studio: calls into Orders.
+Parameters... : -
+Returns...... : -
+Author....... :
+Date......... : 2026-11-01
+********************************************************************************
+_______________________________________________________________________________
+Modification. :
+Author....... :
+Date......... :
+_______________________________________________________________________________
+********************************************************************************/;
+
+/*
+ * Procedure: CustomerSummary
+ * Description: A one-line summary of a customer's open orders.
+ * Parameters:
+ *   sCustomer - the customer code
+ * Returns: the summary text
+;
+:PROCEDURE CustomerSummary;
+	:PARAMETERS sCustomer;
+
+	:DECLARE nOpen, sTitle;
+
+	nOpen := ExecFunction("Sample.Orders.CountOpenOrders", {sCustomer});
+	sTitle := DoProc("ReportTitle", {sCustomer});
+
+	:RETURN sTitle + ": " + LimsString(nOpen) + " open";
+:ENDPROC;
+
+/*
+ * Procedure: ReportTitle
+ * Description: The report's title line.
+ * Parameters:
+ *   sCustomer - the customer code
+ * Returns: the title
+;
+:PROCEDURE ReportTitle;
+	:PARAMETERS sCustomer;
+
+	:RETURN "Customer " + sCustomer;
+:ENDPROC;

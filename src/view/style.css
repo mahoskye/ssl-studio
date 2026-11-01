@@ -259,3 +259,24 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .selected > .block-head, .b-text.selected { box-shadow: inset 2px 0 0 var(--accent); background: var(--selected); }
 .drop { box-shadow: inset 0 2px 0 var(--accent) !important; }
 .b-edit { width: 100%; font: inherit; background: var(--input-bg); color: var(--input-fg); border: 1px solid var(--accent); border-radius: 3px; padding: 2px 6px; resize: vertical; }
+
+/* M5: graph mode */
+.graph { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.graph-bar { display: flex; align-items: center; gap: 8px; padding: 4px 10px; background: var(--tab-bg); border-bottom: 1px solid var(--border); }
+.graph-bar .hint { margin: 0; }
+.graph-bar input { width: 52px; }
+.graph-help { margin: 4px 10px; }
+.graph-canvas { flex: 1; min-height: 0; width: 100%; cursor: grab; user-select: none; }
+.graph-canvas text { font: 12px system-ui, sans-serif; fill: var(--fg); }
+.g-script rect { fill: color-mix(in srgb, var(--side-bg) 80%, transparent); stroke: var(--border); }
+.g-script text { fill: var(--muted); font-weight: 600; cursor: pointer; }
+.g-script.near rect { stroke: var(--warning); stroke-width: 2; }
+.g-script.over rect { stroke: var(--error); stroke-width: 2.5; }
+.g-region rect { stroke-dasharray: 4 3; }
+.g-proc rect, .g-top rect { fill: var(--input-bg); stroke: var(--input-border); cursor: pointer; }
+.g-proc:hover rect { stroke: var(--accent); }
+.g-proc.focus rect { stroke: var(--accent); stroke-width: 2; fill: var(--selected); }
+.g-top rect { stroke-dasharray: 3 3; }
+.g-edge { fill: none; stroke: var(--muted); opacity: .7; }
+.g-edge.cross { stroke: var(--accent); opacity: .9; }
+.arrow { fill: var(--muted); }

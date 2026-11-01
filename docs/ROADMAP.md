@@ -94,6 +94,15 @@ on the local model. Open: the helper tools opencode's code mode offers
 
 ## M5: graph mode
 
+**First version done (2026-11-01), without L2.** The server's references
+already resolve `DoProc` and `ExecFunction` targets, so the graph comes from
+workspace symbols, document symbols and references: scripts as boxes (marked
+near or over the size ceiling), regions inside them, procedures as nodes,
+calls as edges, laid out by ELK. Filters: every call, calls between scripts,
+and a procedure's or script's neighbourhood to a chosen depth. Still needs
+L2: `RunDS` data sources and `:INCLUDE` edges, unresolved targets as nodes,
+and one request instead of one per procedure.
+
 Needs L2. Workspace graph with ELK layout, region and script groups, filters.
 
 ## M6: packaging

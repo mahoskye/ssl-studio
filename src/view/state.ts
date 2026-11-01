@@ -32,6 +32,7 @@ export const [state, setState] = createStore({
 	leftView: "explorer" as LeftView,
 	bottomView: "problems" as BottomView,
 	rightView: "health" as RightView,
+	centerView: "editors" as "editors" | "graph",
 	messages: [] as Message[],
 	output: [] as string[],
 	cursor: { line: 1, column: 1 },

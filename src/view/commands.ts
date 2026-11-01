@@ -25,6 +25,7 @@ export const commands: Command[] = [
 	{ id: "split", label: "Split editor", keys: "Ctrl+\\", run: split },
 	{ id: "blocks", label: "Toggle blocks view", keys: "Ctrl+Shift+B", run: () => setState("groups", state.activeGroup, "mode", (m) => (m === "blocks" ? "text" : "blocks")) },
 	{ id: "wrap-region", label: "Wrap the selected lines in a region…", run: () => void wrapInRegion() },
+	{ id: "graph", label: "Show the call graph", keys: "Ctrl+Shift+G", run: () => setState("centerView", state.centerView === "graph" ? "editors" : "graph") },
 	{ id: "format", label: "Format document", keys: "Ctrl+Shift+I", run: () => void activeEditor()?.getAction("editor.action.formatDocument")?.run() },
 	{ id: "search", label: "Search the workspace", keys: "Ctrl+Shift+F", run: () => (setState("leftView", "search"), setState("settings", "layout", "left", true)) },
 	{ id: "explorer", label: "Show Explorer", keys: "Ctrl+Shift+E", run: () => (setState("leftView", "explorer"), setState("settings", "layout", "left", true)) },
@@ -108,6 +109,7 @@ const KEYS: Record<string, string> = {
 	"ctrl+,": "settings",
 	"ctrl+shift+a": "agent-ask",
 	"ctrl+shift+b": "blocks",
+	"ctrl+shift+g": "graph",
 };
 
 export function installKeys() {

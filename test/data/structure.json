@@ -95,6 +95,142 @@
     }
    ]
   },
+  "Sample/Report.ssl": {
+   "text": "/********************************************************************************\nDescription.. : Sample script for SSL Studio: calls into Orders.\nParameters... : -\nReturns...... : -\nAuthor....... :\nDate......... : 2026-11-01\n********************************************************************************\n_______________________________________________________________________________\nModification. :\nAuthor....... :\nDate......... :\n_______________________________________________________________________________\n********************************************************************************/;\n\n/*\n * Procedure: CustomerSummary\n * Description: A one-line summary of a customer's open orders.\n * Parameters:\n *   sCustomer - the customer code\n * Returns: the summary text\n;\n:PROCEDURE CustomerSummary;\n\t:PARAMETERS sCustomer;\n\n\t:DECLARE nOpen, sTitle;\n\n\tnOpen := ExecFunction(\"Sample.Orders.CountOpenOrders\", {sCustomer});\n\tsTitle := DoProc(\"ReportTitle\", {sCustomer});\n\n\t:RETURN sTitle + \": \" + LimsString(nOpen) + \" open\";\n:ENDPROC;\n\n/*\n * Procedure: ReportTitle\n * Description: The report's title line.\n * Parameters:\n *   sCustomer - the customer code\n * Returns: the title\n;\n:PROCEDURE ReportTitle;\n\t:PARAMETERS sCustomer;\n\n\t:RETURN \"Customer \" + sCustomer;\n:ENDPROC;\n",
+   "symbols": [
+    {
+     "name": "CustomerSummary",
+     "detail": "(sCustomer)",
+     "kind": 12,
+     "range": {
+      "start": {
+       "line": 21,
+       "character": 0
+      },
+      "end": {
+       "line": 30,
+       "character": 0
+      }
+     },
+     "selectionRange": {
+      "start": {
+       "line": 21,
+       "character": 11
+      },
+      "end": {
+       "line": 21,
+       "character": 26
+      }
+     },
+     "children": [
+      {
+       "name": "sCustomer",
+       "detail": "parameter",
+       "kind": 13,
+       "range": {
+        "start": {
+         "line": 22,
+         "character": 13
+        },
+        "end": {
+         "line": 22,
+         "character": 22
+        }
+       },
+       "selectionRange": {
+        "start": {
+         "line": 22,
+         "character": 13
+        },
+        "end": {
+         "line": 22,
+         "character": 22
+        }
+       }
+      }
+     ]
+    },
+    {
+     "name": "ReportTitle",
+     "detail": "(sCustomer)",
+     "kind": 12,
+     "range": {
+      "start": {
+       "line": 39,
+       "character": 0
+      },
+      "end": {
+       "line": 43,
+       "character": 0
+      }
+     },
+     "selectionRange": {
+      "start": {
+       "line": 39,
+       "character": 11
+      },
+      "end": {
+       "line": 39,
+       "character": 22
+      }
+     },
+     "children": [
+      {
+       "name": "sCustomer",
+       "detail": "parameter",
+       "kind": 13,
+       "range": {
+        "start": {
+         "line": 40,
+         "character": 13
+        },
+        "end": {
+         "line": 40,
+         "character": 22
+        }
+       },
+       "selectionRange": {
+        "start": {
+         "line": 40,
+         "character": 13
+        },
+        "end": {
+         "line": 40,
+         "character": 22
+        }
+       }
+      }
+     ]
+    }
+   ],
+   "folds": [
+    {
+     "startLine": 21,
+     "endLine": 30,
+     "kind": "region"
+    },
+    {
+     "startLine": 39,
+     "endLine": 43,
+     "kind": "region"
+    },
+    {
+     "startLine": 0,
+     "endLine": 12,
+     "kind": "comment"
+    },
+    {
+     "startLine": 14,
+     "endLine": 20,
+     "kind": "comment"
+    },
+    {
+     "startLine": 32,
+     "endLine": 38,
+     "kind": "comment"
+    }
+   ]
+  },
   "Sample/Orders.ssl": {
    "text": "/********************************************************************************\nDescription.. : Sample script for SSL Studio: order helpers.\nParameters... : -\nReturns...... : -\nAuthor....... :\nDate......... : 2026-11-01\n********************************************************************************\n_______________________________________________________________________________\nModification. : Added CountOpenOrders.\nAuthor....... :\nDate......... : 2026-11-01\n_______________________________________________________________________________\nModification. : First version.\nAuthor....... :\nDate......... : 2026-10-31\n_______________________________________________________________________________\n********************************************************************************/;\n\n/* region Queries;\n\n/*\n * Procedure: CountOpenOrders\n * Description: Counts the orders still open for a customer.\n * Parameters:\n *   sCustomer - the customer code\n * Returns: the number of open orders\n;\n:PROCEDURE CountOpenOrders;\n\t:PARAMETERS sCustomer;\n\t:DEFAULT sCustomer, \"\";\n\n\t:DECLARE nCount;\n\n\t:IF Empty(sCustomer);\n\t\t:RETURN 0;\n\t:ENDIF;\n\n\tnCount := LSearch(\"SELECT COUNT(*) FROM ORDERS WHERE CUSTNO = ? AND STATUS = ?\", 0, \"DATABASE\", {sCustomer, \"Open\"});\n\n\t:RETURN nCount;\n:ENDPROC;\n\n/* endregion;\n\n/* region Formatting;\n\n/*\n * Procedure: OrderTitle\n * Description: A short title for an order.\n * Parameters:\n *   sOrdNo - the order number\n *   nItems - how many items it has\n * Returns: the title\n;\n:PROCEDURE OrderTitle;\n\t:PARAMETERS sOrdNo, nItems;\n\n\t:DECLARE sTitle, i;\n\n\tsTitle := \"Order \" + sOrdNo;\n\n\t:FOR i := 1 :TO nItems;\n\t\tsTitle := sTitle + \".\";\n\t:NEXT;\n\n\t:TRY;\n\t\tsTitle := Upper(sTitle);\n\t:CATCH;\n\t\tsTitle := \"Order\";\n\t:ENDTRY;\n\n\t:RETURN sTitle;\n:ENDPROC;\n\n/* endregion;\n",
    "symbols": [
