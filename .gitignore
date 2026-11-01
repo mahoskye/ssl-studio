@@ -10,3 +10,5 @@ src/view/public/onig.wasm
 selftest.json
 .cottontail-tmp/
 .selftest/
+vendor/
+src/view/public/THIRD-PARTY-NOTICES.md

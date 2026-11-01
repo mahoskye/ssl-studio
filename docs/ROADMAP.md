@@ -107,6 +107,12 @@ Needs L2. Workspace graph with ELK layout, region and script groups, filters.
 
 ## M6: packaging
 
+**Done for Linux (2026-11-01).** `hutch run build` makes an installer and an
+update bundle, with the pinned language server and the third-party notices
+inside; [INSTALL.md](INSTALL.md) covers installing, building per OS and the
+self-test. Other OSes build on that OS; the remote machine's OS is still
+unknown.
+
 - Builds for the remote machine's OS; a pinned language server bundled or
   checked; an install note.
 

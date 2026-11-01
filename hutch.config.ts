@@ -14,6 +14,7 @@ export default {
 		selftest:
 			"hutch electrobun prepare && bun scripts/assets.ts && hutch pm exec -- vite build && XDG_CONFIG_HOME=$PWD/.selftest/config XDG_DATA_HOME=$PWD/.selftest/data XDG_STATE_HOME=$PWD/.selftest/state SSL_STUDIO_SELFTEST=$PWD/selftest.json SSL_STUDIO_FOLDER=$PWD/fixtures/workspace hutch electrobun dev",
 		check: "hutch pm exec -- tsc --noEmit -p .",
-		build: "hutch electrobun prepare && bun scripts/assets.ts && hutch pm exec -- vite build && hutch electrobun build --env=stable",
+		// A release: the pinned language server goes inside (bun scripts/bundle-lsp.ts --download fetches it).
+		build: "hutch electrobun prepare && bun scripts/assets.ts && bun scripts/bundle-lsp.ts && bun scripts/notices.ts && hutch pm exec -- vite build && hutch electrobun build --env=stable",
 	},
 };

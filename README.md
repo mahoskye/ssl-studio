@@ -10,7 +10,7 @@ the source of truth.
 - **Blocks mode:** the same file as nested blocks. Procedures are cards,
   control flow is nested, and comment regions are coloured frames that group
   the code inside them.
-- **Graph mode (later):** a whole workspace as procedures and data sources
+- **Graph mode:** a whole workspace as procedures and data sources
   joined by their `DoProc`, `ExecFunction`, `RunDS` and `:INCLUDE` calls,
   grouped by region.
 - **Agents:** the SSL agents and `ssl-tidy-*` cleanup skills from
@@ -20,7 +20,8 @@ the source of truth.
 - **House style:** the team's Designer header, procedure doc block, spacing
   and script size limit built into templates, the formatter and a size meter.
 
-Status: milestone M1, a text IDE. See [docs/VISION.md](docs/VISION.md),
+Status: M1 to M6 done in a first version (see the roadmap for what waits on
+the language server). Install and build: [docs/INSTALL.md](docs/INSTALL.md). See [docs/VISION.md](docs/VISION.md),
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
 [docs/ROADMAP.md](docs/ROADMAP.md).
 
