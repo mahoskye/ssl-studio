@@ -1,7 +1,7 @@
 // Collects graph mode's input from the language server, a few requests at a time.
 import { monaco } from "../editor/monaco";
 import { session } from "../lsp/session";
-import { assemble, procId, type CallIn, type Graph, type ProcIn, type ScriptIn } from "./model";
+import { assemble, fromCallGraph, procId, type CallIn, type Graph, type ProcIn, type ScriptIn } from "./model";
 
 const PROCEDURE = new Set([monaco.languages.SymbolKind.Function, monaco.languages.SymbolKind.Method]);
 const MAX_PROCEDURES = 3000;
@@ -14,6 +14,13 @@ async function pool<T>(items: T[], size: number, work: (item: T) => Promise<void
 }
 
 export async function loadGraph(progress: (done: number, total: number) => void): Promise<Graph & { truncated: boolean }> {
+	if (session.supports("ssl/callGraph")) {
+		// One request (L2): data sources, :INCLUDEs and unresolved targets too.
+		progress(0, 1);
+		const result = await session.request("ssl/callGraph", {});
+		progress(1, 1);
+		return { ...fromCallGraph({ nodes: result?.nodes ?? [], edges: result?.edges ?? [] }, (uri) => monaco.Uri.parse(uri).fsPath), truncated: false };
+	}
 	const symbols = await session.workspaceSymbols("");
 	const uris = [...new Set(symbols.filter((s) => s.kind === 12 || s.kind === 6).map((s) => s.location.uri))];
 	const scripts: ScriptIn[] = [];

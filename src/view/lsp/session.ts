@@ -43,6 +43,7 @@ class Session {
 	private root = "";
 	private versions = new Map<string, number>();
 	server: ServerInfo | null = null;
+	capabilities: Record<string, any> = {};
 	/** The style profile's `ssl` settings, sent at start and on change. */
 	sslSettings: () => Record<string, unknown> = () => ({});
 	/** Loads a model for a URI the server pointed at (definition, references). */
@@ -87,10 +88,21 @@ class Session {
 				},
 			});
 			this.server = result?.serverInfo ?? null;
+			this.capabilities = result?.capabilities ?? {};
 			this.client.notify("initialized", {});
 			for (const model of monaco.editor.getModels()) if (this.versions.has(model.uri.toString())) this.open(model);
 		})();
 		return this.initialized;
+	}
+
+	/**
+	 * Whether the server offers a custom request (docs/LSP-REQUESTS.md): listed
+	 * under capabilities.experimental, as a key or in a `requests` list.
+	 */
+	supports(method: string): boolean {
+		const experimental = this.capabilities.experimental ?? {};
+		const short = method.replace(/^ssl\//, "");
+		return Boolean(experimental[method] ?? experimental[short] ?? (Array.isArray(experimental.requests) && experimental.requests.includes(method)));
 	}
 
 	/** Sends a changed style profile; the server re-checks open documents. */

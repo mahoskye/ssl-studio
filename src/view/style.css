@@ -283,3 +283,6 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .tree-row.place .label { color: var(--accent); font-size: 12px; }
 .shortcuts { font-size: 12px; max-height: 40vh; overflow: auto; }
 .shortcut-row { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: center; padding: 2px 0; }
+.b-raw { border-left: 2px dashed var(--error); background: color-mix(in srgb, var(--error) 6%, transparent); }
+.g-proc.datasource rect { fill: color-mix(in srgb, var(--info) 18%, var(--input-bg)); stroke: var(--info); }
+.g-proc.unresolved rect { stroke: var(--error); stroke-dasharray: 4 2; }

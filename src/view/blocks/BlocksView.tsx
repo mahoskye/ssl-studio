@@ -10,7 +10,7 @@ import { regionColor } from "../editor/regions";
 import { session } from "../lsp/session";
 import { ask, choose } from "../dialogs";
 import { documents, notify, setState, state } from "../state";
-import { buildTree, neighbour, pathTo, swapLines, type Node, type SymbolIn } from "./model";
+import { buildTree, neighbour, pathTo, swapLines, treeFromSyntax, type Node, type SymbolIn } from "./model";
 
 const collapsedByPath = new Map<string, Set<string>>();
 
@@ -71,11 +71,19 @@ export function BlocksView(props: { path: string; group: number }) {
 			const model = doc()?.model;
 			if (!model) return;
 			try {
-				const [symbols, folds] = await Promise.all([
-					session.documentSymbols(model),
-					session.request("textDocument/foldingRange", { textDocument: { uri: model.uri.toString() } }).then((f) => f ?? []),
-				]);
-				const root = buildTree(model.getLinesContent(), toSymbols(symbols), folds);
+				let root: Node;
+				if (session.supports("ssl/syntaxTree")) {
+					// The server's own parse (L1): statement-level chips, arms, unreadable spans.
+					const result = await session.request("ssl/syntaxTree", { textDocument: { uri: model.uri.toString() } });
+					const nodes = result?.nodes ?? result?.children ?? result?.root?.children ?? (Array.isArray(result) ? result : []);
+					root = treeFromSyntax(model.getLinesContent(), nodes);
+				} else {
+					const [symbols, folds] = await Promise.all([
+						session.documentSymbols(model),
+						session.request("textDocument/foldingRange", { textDocument: { uri: model.uri.toString() } }).then((f) => f ?? []),
+					]);
+					root = buildTree(model.getLinesContent(), toSymbols(symbols), folds);
+				}
 				const first = tree.root === null;
 				setTree("root", reconcile(root, { key: "key", merge: false }));
 				// The banner opens folded; long files open as a region outline.
@@ -297,6 +305,13 @@ export function BlocksView(props: { path: string; group: number }) {
 							onBlur={(e) => commitEdit(n, e.currentTarget.value)}
 						/>
 					</Show>
+				</Match>
+				<Match when={n.kind === "raw"}>
+					<div class="b-text b-raw" classList={{ selected: selectedKey() === n.key }} title="The language server could not read this; it is kept as written. Double-click to edit." onClick={() => select(n)} onDblClick={() => setEditing(n.key)}>
+						<Show when={editing() === n.key} fallback={<Code text={lines(n)} />}>
+							<textarea class="b-edit" ref={(el) => queueMicrotask(() => el.focus())} value={lines(n)} rows={n.end - n.start + 1} onKeyDown={(e) => e.key === "Escape" && setEditing(null)} onBlur={(e) => commitEdit(n, e.currentTarget.value)} />
+						</Show>
+					</div>
 				</Match>
 				<Match when={n.kind === "blank"}>
 					<div class="b-blank" {...dropZone(n.start)} classList={{ drop: dropAt() === n.start }} />

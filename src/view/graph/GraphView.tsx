@@ -7,10 +7,11 @@ import { level } from "../../shared/houseStyle";
 import { regionColor } from "../editor/regions";
 import { openFile, setState, state } from "../state";
 import { loadGraph } from "./load";
+import { session } from "../lsp/session";
 import { visible, type Filter, type Graph } from "./model";
 import { baseName, relativeTo } from "../../shared/paths";
 
-type Box = { id: string; x: number; y: number; width: number; height: number; label: string; kind: "script" | "region" | "proc" | "top"; path?: string; line?: number; region?: string; bytes?: number };
+type Box = { id: string; x: number; y: number; width: number; height: number; label: string; kind: "script" | "region" | "proc" | "top"; path?: string; line?: number; region?: string; bytes?: number; nodeKind?: string };
 type Line = { id: string; points: { x: number; y: number }[]; cross: boolean; count: number };
 
 const elk = new ELK();
@@ -97,6 +98,7 @@ export function GraphView() {
 							kind: script ? "script" : id.startsWith("region:") ? "region" : id.endsWith("#") ? "top" : "proc",
 							path: script?.path ?? node?.path,
 							line: node?.line,
+							nodeKind: node?.kind,
 							region: id.startsWith("region:") ? n.labels?.[0]?.text : undefined,
 							bytes: script?.bytes,
 						});
@@ -147,7 +149,10 @@ export function GraphView() {
 				<button onClick={() => setView({ x: 20, y: 20, scale: 1 })}>Fit</button>
 				<button onClick={() => setState("centerView", "editors")}>Close</button>
 			</div>
-			<p class="hint graph-help">Click a procedure to focus its callers and callees; double-click to open it. Scripts over the size ceiling are marked (decision 0006). Data sources and :INCLUDEs wait for the server's call graph.</p>
+			<p class="hint graph-help">
+				Click a procedure to focus its callers and callees; double-click to open it. Scripts over the size ceiling are marked (decision 0006).{" "}
+				{session.supports("ssl/callGraph") ? "Data sources and unresolved targets come from the server's call graph." : "Data sources and :INCLUDEs appear once the server offers its call graph."}
+			</p>
 			<svg
 				class="graph-canvas"
 				onWheel={(e) => {
@@ -189,7 +194,7 @@ export function GraphView() {
 							<For each={l().boxes.filter((b) => b.kind === "proc" || b.kind === "top")}>
 								{(b) => (
 									<g
-										class={`g-${b.kind}`}
+										class={`g-${b.kind} ${b.nodeKind ?? ""}`}
 										classList={{ focus: filter().focus === b.id }}
 										onClick={(e) => (e.stopPropagation(), focus(b.id))}
 										onDblClick={() => b.path && (setState("centerView", "editors"), void openFile(b.path, { reveal: { line: (b.line ?? 0) + 1 } }))}

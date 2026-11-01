@@ -62,3 +62,63 @@ test("swapping siblings keeps what is between them", () => {
 	const [, validation, labels] = root.children.filter((c) => c.kind !== "blank");
 	expect(neighbour(root, validation!, 1)).toBe(labels);
 });
+
+import { treeFromSyntax, type SyntaxNodeIn } from "../src/view/blocks/model";
+
+describe("blocks tree from a syntax tree (L1, provisional shape)", () => {
+	const r = (a: number, b: number) => ({ start: { line: a, character: 0 }, end: { line: b, character: 9 } });
+	const lines = [
+		"/* banner;", // 0
+		"", // 1
+		"/* region R;", // 2
+		":PROCEDURE P;", // 3
+		":PARAMETERS a, b;", // 4
+		":IF a > b;", // 5
+		"x := a;", // 6
+		":ELSE;", // 7
+		"x := b;", // 8
+		":ENDIF;", // 9
+		":RETURN x;", // 10
+		":ENDPROC;", // 11
+		"/* endregion;", // 12
+		"junk (((", // 13
+	];
+	const tree: SyntaxNodeIn[] = [
+		{ kind: "fileBanner", range: r(0, 0) },
+		{ kind: "blank", range: r(1, 1) },
+		{
+			kind: "commentRegion",
+			name: "R",
+			range: r(2, 12),
+			children: [
+				{
+					kind: "procedure",
+					name: "P",
+					range: r(3, 11),
+					children: [
+						{ kind: "parameters", range: r(4, 4), children: [{ kind: "parameter", name: "a", range: r(4, 4) }, { kind: "parameter", name: "b", range: r(4, 4) }] },
+						{ kind: "if", range: r(5, 9), children: [{ kind: "statement", range: r(6, 6) }, { kind: "else", range: r(7, 8), children: [{ kind: "statement", range: r(8, 8) }] }] },
+						{ kind: "statement", range: r(10, 10) },
+					],
+				},
+			],
+		},
+		{ kind: "error", range: r(13, 13) },
+	];
+	test("covers every line once", () => {
+		expect(coveredLines(treeFromSyntax(lines, tree))).toEqual(lines.map((_, i) => i + 1));
+	});
+	test("statements, arms and errors become their own blocks", () => {
+		const root = treeFromSyntax(lines, tree);
+		const proc = root.children.find((c) => c.kind === "region")!.children.find((c) => c.kind === "procedure")!;
+		expect(proc.params).toEqual(["a", "b"]);
+		const ifBlock = proc.children.find((c) => c.kind === "block")!;
+		expect(ifBlock.children.map((c) => c.kind)).toEqual(["text", "block", "text"]);
+		expect(root.children.at(-1)!.kind).toBe("raw");
+	});
+	test("an unknown kind degrades to a block or a chip", () => {
+		const root = treeFromSyntax(["a", "b", "c"], [{ kind: "somethingNew", range: r(0, 2), children: [{ kind: "alsoNew", range: r(1, 1) }] }]);
+		expect(root.children[0]!.kind).toBe("block");
+		expect(coveredLines(root)).toEqual([1, 2, 3]);
+	});
+});

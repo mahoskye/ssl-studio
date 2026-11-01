@@ -10,7 +10,7 @@
 export type SymbolIn = { name: string; kind: number; startLine: number; endLine: number; children?: SymbolIn[] };
 export type FoldIn = { startLine: number; endLine: number; kind?: string };
 
-export type NodeKind = "file" | "region" | "procedure" | "block" | "comment" | "text" | "blank";
+export type NodeKind = "file" | "region" | "procedure" | "block" | "comment" | "text" | "blank" | "raw";
 export type Node = {
 	kind: NodeKind;
 	start: number;
@@ -73,8 +73,11 @@ export function buildTree(lines: string[], symbols: SymbolIn[], folds: FoldIn[])
 	return root;
 }
 
+const LEAVES = new Set<NodeKind>(["text", "blank", "raw"]);
+
 /** Fills the lines no child covers with text and blank leaves. */
 function fill(node: Node, lines: string[]) {
+	if (LEAVES.has(node.kind)) return;
 	const filled: Node[] = [];
 	// A container's own first line is its header; leaves start after it.
 	let line = node.kind === "file" ? node.start : node.start + 1;
@@ -100,7 +103,7 @@ function fill(node: Node, lines: string[]) {
 
 /** Each line's leaf, in order: the coverage property's witness. */
 export function coveredLines(node: Node): number[] {
-	if (node.kind === "text" || node.kind === "blank") return Array.from({ length: node.end - node.start + 1 }, (_, i) => node.start + i);
+	if (LEAVES.has(node.kind)) return Array.from({ length: node.end - node.start + 1 }, (_, i) => node.start + i);
 	return [...(node.kind === "file" ? [] : [node.start]), ...node.children.flatMap(coveredLines)];
 }
 
@@ -126,4 +129,53 @@ export function swapLines(lines: string[], a: { start: number; end: number }, b:
 	const between = lines.slice(a.end, b.start - 1);
 	const second = lines.slice(b.start - 1, b.end);
 	return { start: a.start, end: b.end, lines: [...second, ...between, ...first] };
+}
+
+// --- From the server's syntax tree (L1, docs/LSP-REQUESTS.md) ------------------
+//
+// The request's kinds are the server's to name; this maps them loosely so a
+// renamed kind degrades to a plain block rather than breaking the view.
+
+export type Position = { line: number; character: number };
+export type SyntaxNodeIn = { kind: string; range: { start: Position; end: Position }; name?: string; children?: SyntaxNodeIn[] };
+
+function viewKind(kind: string, hasChildren: boolean): NodeKind {
+	const k = kind.toLowerCase().replace(/[^a-z]/g, "");
+	if (k === "region" || k === "commentregion") return "region";
+	if (k === "procedure") return "procedure";
+	if (k.includes("banner") || k.includes("docblock") || k === "comment") return "comment";
+	if (k === "blank" || k.includes("blankline")) return "blank";
+	if (k === "error" || k.includes("unparsed") || k === "raw") return "raw";
+	// Statements are chips even when the server details their parts.
+	if (k === "statement" || k === "parameters" || k === "default" || k === "declare" || k === "parameter") return "text";
+	return hasChildren ? "block" : "text";
+}
+
+const lastLine = (r: { start: Position; end: Position }) => (r.end.character === 0 && r.end.line > r.start.line ? r.end.line - 1 : r.end.line);
+
+/** The blocks tree from a syntax tree; gaps the tree leaves are filled, so coverage still holds. */
+export function treeFromSyntax(lines: string[], nodes: SyntaxNodeIn[]): Node {
+	const count = lines.length;
+	const root: Node = { kind: "file", start: 1, end: count, children: [], key: "file" };
+	const convert = (n: SyntaxNodeIn, parent: Node) => {
+		const start = n.range.start.line + 1;
+		const end = Math.min(count, lastLine(n.range) + 1);
+		if (start < 1 || end < start || start < parent.start || end > parent.end) return;
+		// A container's first line is its header; a child must start after it.
+		if (parent.kind !== "file" && start <= parent.start) return;
+		const previous = parent.children.at(-1);
+		if (previous && start <= previous.end) return;
+		const children = n.children ?? [];
+		const kind = viewKind(n.kind, children.length > 0);
+		const params =
+			kind === "procedure"
+				? children.filter((c) => /param/i.test(c.kind)).flatMap((c) => (c.children?.length ? c.children.map((p) => p.name ?? "") : c.name ? [c.name] : [])).filter(Boolean)
+				: undefined;
+		const node: Node = { kind, start, end, name: n.name, params, children: [], key: `${kind}:${n.name ?? ""}:${start}` };
+		parent.children.push(node);
+		if (!LEAVES.has(kind) && kind !== "comment") for (const c of children) convert(c, node);
+	};
+	for (const n of nodes) convert(n, root);
+	fill(root, lines);
+	return root;
 }
