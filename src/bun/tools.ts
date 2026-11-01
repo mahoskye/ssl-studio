@@ -1,6 +1,7 @@
 // Finding the external tools: starlims-lsp (pinned, ADR 0003) and opencode
 // (a supported range, ADR 0004).
 import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import type { ToolStatus } from "../shared/protocol";
 
 export const LSP_PIN = "0.28.2";
@@ -31,7 +32,7 @@ export function lspCandidates(configured?: string): string[] {
 	const platform = process.platform === "win32" ? "windows" : process.platform;
 	const suffix = process.platform === "win32" ? ".exe" : "";
 	// A build may carry its own copy (scripts/bundle-lsp.ts): app/bin, beside app/bun.
-	const bundled = `${import.meta.dir}/../bin/starlims-lsp${suffix}`;
+	const bundled = resolve(import.meta.dir, "..", "bin", `starlims-lsp${suffix}`);
 	return [
 		configured,
 		process.env.STARLIMS_LSP,

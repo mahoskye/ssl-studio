@@ -1,8 +1,11 @@
 import type { ElectrobunConfig } from "electrobun";
 import { existsSync } from "node:fs";
 
+// Electrobun evaluates this file with its working directory in a temp folder,
+// so look for files relative to the file itself.
+const has = (path: string) => existsSync(new URL(path, import.meta.url));
 // The pinned language server, when scripts/bundle-lsp.ts has put it in vendor/.
-const lsp = ["vendor/starlims-lsp", "vendor/starlims-lsp.exe"].find((p) => existsSync(p));
+const lsp = ["vendor/starlims-lsp", "vendor/starlims-lsp.exe"].find(has);
 
 export default {
 	app: {
@@ -20,10 +23,10 @@ export default {
 			"dist/assets": "views/main/assets",
 			"dist/onig.wasm": "views/main/onig.wasm",
 			"dist/grammar": "views/main/grammar",
-			...(existsSync("dist/THIRD-PARTY-NOTICES.md") ? { "dist/THIRD-PARTY-NOTICES.md": "THIRD-PARTY-NOTICES.md" } : {}),
+			...(has("dist/THIRD-PARTY-NOTICES.md") ? { "dist/THIRD-PARTY-NOTICES.md": "THIRD-PARTY-NOTICES.md" } : {}),
 			...(lsp ? { [lsp]: `bin/${lsp.slice("vendor/".length)}` } : {}),
-			...(existsSync("vendor/STARLIMS-LSP-LICENSE") ? { "vendor/STARLIMS-LSP-LICENSE": "bin/STARLIMS-LSP-LICENSE" } : {}),
-			...(existsSync("vendor/THIRD-PARTY-NOTICES.md") ? { "vendor/THIRD-PARTY-NOTICES.md": "bin/STARLIMS-LSP-THIRD-PARTY-NOTICES.md" } : {}),
+			...(has("vendor/STARLIMS-LSP-LICENSE") ? { "vendor/STARLIMS-LSP-LICENSE": "bin/STARLIMS-LSP-LICENSE" } : {}),
+			...(has("vendor/THIRD-PARTY-NOTICES.md") ? { "vendor/THIRD-PARTY-NOTICES.md": "bin/STARLIMS-LSP-THIRD-PARTY-NOTICES.md" } : {}),
 		},
 		watchIgnore: ["dist/**"],
 		linux: { bundleCEF: false },

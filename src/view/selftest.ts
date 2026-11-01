@@ -20,7 +20,7 @@ async function until<T>(get: () => T | undefined | null | false, ms = 8000): Pro
 }
 
 export async function selftest() {
-	const report: Record<string, unknown> = { host: state.info?.host, userAgent: navigator.userAgent };
+	const report: Record<string, unknown> = { host: state.info?.host, userAgent: navigator.userAgent, lspPath: state.info?.lsp.path, lspVersion: state.info?.lsp.version };
 	const timings: Record<string, number> = {};
 	const timed = async <T>(name: string, work: () => Promise<T>) => {
 		const start = performance.now();
