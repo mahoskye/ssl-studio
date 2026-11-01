@@ -65,6 +65,5 @@ On Windows:
 - the system webview is WebView2, which current Windows ships. M0 measured
   WebKitGTK only; run `hutch run selftest` on the machine once to check it.
 
-The opencode version there is still unknown. The adapter accepts 2.2.x and
-refuses another minor version with a message until it has been tried
-(ADR 0004).
+opencode there is 2.2.x (the user, 2026-11-01), inside the adapter's
+supported range (ADR 0004).
