@@ -21,17 +21,11 @@ import { QuickPick } from "./QuickPick";
 import { SettingsDialog } from "./Settings";
 import { StatusBar } from "./StatusBar";
 import { applyTheme, resolveTheme } from "./themes/themes";
-import { openFolder, setState, state, type LeftView } from "./state";
+import { openFolder, setState, state, type PanelId } from "./state";
+import { isOpen, movePanel, PANELS, sideOf, togglePanel } from "./panels/registry";
 import { Welcome } from "./Welcome";
 
-const VIEWS: { id: LeftView; icon: string; title: string }[] = [
-	{ id: "explorer", icon: "🗀", title: "Explorer (Ctrl+Shift+E)" },
-	{ id: "objects", icon: "◇", title: "Objects" },
-	{ id: "palette", icon: "▤", title: "Palette" },
-	{ id: "reference", icon: "📖", title: "Reference" },
-	{ id: "search", icon: "⌕", title: "Search (Ctrl+Shift+F)" },
-	{ id: "history", icon: "⟲", title: "Local history" },
-];
+
 
 function Splitter(props: { axis: "x" | "y"; column?: number; onDrag: (delta: number) => void }) {
 	return (
@@ -76,9 +70,50 @@ function useLayoutPersistence() {
 	);
 }
 
-function toggleRight(view: "health" | "agent") {
-	if (state.settings.layout.right && state.rightView === view) setState("settings", "layout", "right", false);
-	else (setState("rightView", view), setState("settings", "layout", "right", true));
+/** One panel by id, whichever side it is docked on. */
+function Panel(props: { id: PanelId }) {
+	return (
+		<Switch>
+			<Match when={props.id === "explorer"}>
+				<Explorer />
+			</Match>
+			<Match when={props.id === "objects"}>
+				<Objects />
+			</Match>
+			<Match when={props.id === "palette"}>
+				<Palette />
+			</Match>
+			<Match when={props.id === "reference"}>
+				<Reference />
+			</Match>
+			<Match when={props.id === "search"}>
+				<Search />
+			</Match>
+			<Match when={props.id === "history"}>
+				<History />
+			</Match>
+			<Match when={props.id === "health"}>
+				<Health />
+			</Match>
+			<Match when={props.id === "agent"}>
+				<AgentPanel />
+			</Match>
+		</Switch>
+	);
+}
+
+function PanelButton(props: { id: PanelId }) {
+	const panel = () => PANELS.find((p) => p.id === props.id)!;
+	return (
+		<button
+			title={`${panel().title} (right-click: move to the ${sideOf(props.id) === "left" ? "right" : "left"} side)`}
+			classList={{ active: isOpen(props.id) }}
+			onClick={() => togglePanel(props.id)}
+			onContextMenu={(e) => (e.preventDefault(), movePanel(props.id))}
+		>
+			{panel().icon}
+		</button>
+	);
 }
 
 export function App() {
@@ -92,30 +127,12 @@ export function App() {
 	return (
 		<div class="app" style={{ "--left": `${layout().left ? layout().leftWidth : 0}px`, "--right": `${layout().right ? layout().rightWidth : 0}px`, "--bottom": `${layout().bottom ? layout().bottomHeight : 0}px` }}>
 			<nav class="activity" aria-label="Views">
-				<For each={VIEWS}>
-					{(view) => (
-						<button
-							title={view.title}
-							classList={{ active: layout().left && state.leftView === view.id }}
-							onClick={() => {
-								if (layout().left && state.leftView === view.id) setState("settings", "layout", "left", false);
-								else (setState("leftView", view.id), setState("settings", "layout", "left", true));
-							}}
-						>
-							{view.icon}
-						</button>
-					)}
-				</For>
-				<button title="Graph of calls" classList={{ active: state.centerView === "graph" }} onClick={() => setState("centerView", state.centerView === "graph" ? "editors" : "graph")}>
+				<For each={PANELS.filter((p) => sideOf(p.id) === "left")}>{(p) => <PanelButton id={p.id} />}</For>
+				<button title="Graph of calls (Ctrl+Shift+G)" classList={{ active: state.centerView === "graph" }} onClick={() => setState("centerView", state.centerView === "graph" ? "editors" : "graph")}>
 					⌬
 				</button>
 				<span class="spacer" />
-				<button title="Agent" classList={{ active: layout().right && state.rightView === "agent" }} onClick={() => toggleRight("agent")}>
-					✦
-				</button>
-				<button title="Health" classList={{ active: layout().right && state.rightView === "health" }} onClick={() => toggleRight("health")}>
-					♥
-				</button>
+				<For each={PANELS.filter((p) => sideOf(p.id) === "right")}>{(p) => <PanelButton id={p.id} />}</For>
 				<button title="Command palette (Ctrl+Shift+P)" onClick={() => setState("quickPick", "commands")}>
 					⌘
 				</button>
@@ -125,26 +142,7 @@ export function App() {
 			</nav>
 			<Show when={layout().left && state.workspace}>
 				<aside class="sidebar">
-					<Switch>
-						<Match when={state.leftView === "explorer"}>
-							<Explorer />
-						</Match>
-						<Match when={state.leftView === "objects"}>
-							<Objects />
-						</Match>
-						<Match when={state.leftView === "palette"}>
-							<Palette />
-						</Match>
-						<Match when={state.leftView === "reference"}>
-							<Reference />
-						</Match>
-						<Match when={state.leftView === "search"}>
-							<Search />
-						</Match>
-						<Match when={state.leftView === "history"}>
-							<History />
-						</Match>
-					</Switch>
+					<Panel id={state.leftView} />
 				</aside>
 				<Splitter axis="x" column={3} onDrag={(d) => setState("settings", "layout", "leftWidth", (w) => clamp(w + d, 160, 700))} />
 			</Show>
@@ -190,14 +188,7 @@ export function App() {
 			<Show when={layout().right && state.workspace}>
 				<Splitter axis="x" column={5} onDrag={(d) => setState("settings", "layout", "rightWidth", (w) => clamp(w - d, 220, 800))} />
 				<aside class="rightbar">
-					<Switch>
-						<Match when={state.rightView === "health"}>
-							<Health />
-						</Match>
-						<Match when={state.rightView === "agent"}>
-							<AgentPanel />
-						</Match>
-					</Switch>
+					<Panel id={state.rightView} />
 				</aside>
 			</Show>
 			<StatusBar />

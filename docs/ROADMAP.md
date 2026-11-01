@@ -83,8 +83,11 @@ step; since the agent has no file tools (M0), the IDE supplies the file,
 the note at `design/<name>.tidy.md` and the callers it finds through the
 language server, and reviews each step with the runner's checks. Tests use
 a fake of the API (`test/fake-opencode.ts`); the real path was checked once
-on the local model. Open: the helper tools opencode's code mode offers
-(worktrees, `session_move`) have no known permission names to deny.
+on the local model. opencode 2.2.5 runs two code-mode helpers,
+`worktree_create` and `session_move`, without any permission check, so no
+rule or policy can deny them (found in the binary, 2026-11-01); the adapter
+interrupts any turn whose code names them. That is best effort, and worth
+raising with opencode.
 
 - Agent panel: one session per workspace, model picker, local model by
   default.
@@ -118,9 +121,6 @@ unknown.
 
 ## Later
 
-- Panels docked anywhere: today the side bars hold fixed panels (left: files,
-  objects, palette, reference, search, history; right: agent, health), each
-  can be hidden, and sizes are kept per workspace.
 - Statement-level blocks, `:ELSE` and `:CASE` arms, condition fields (L1).
 - Data sources and `:INCLUDE`s in the graph (L2).
 

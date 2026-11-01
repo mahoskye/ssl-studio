@@ -28,6 +28,7 @@ export function addEntry(entry: Omit<Entry, "id">) {
 on("agent", ({ type, data }) => {
 	const d = data as any;
 	if (type === "status") setAgent("status", d as AgentStatus);
+	else if (type === "guard") addEntry({ role: "note", text: `Stopped the turn: the agent reached for ${d.tool}, which opencode runs without asking permission.`, sessionID: d.sessionID });
 	else if (type === "session.text.delta") {
 		let id = streaming.get(d.sessionID);
 		if (id === undefined) {

@@ -38,7 +38,7 @@ export type Settings = {
 	/** House style: limits from program decision 0006. */
 	limits: { bytes: number; codeLines: number; historyEntries: number };
 	/** Panel layout, saved per workspace. */
-	layout: { left: boolean; right: boolean; bottom: boolean; leftWidth: number; rightWidth: number; bottomHeight: number };
+	layout: { left: boolean; right: boolean; bottom: boolean; leftWidth: number; rightWidth: number; bottomHeight: number; dock?: Record<string, "left" | "right"> };
 	/**
 	 * The style profile: the language server's own `ssl` settings (its
 	 * docs/configuration/CONFIGURATION.md), chosen here, applied there.

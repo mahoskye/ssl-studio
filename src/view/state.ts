@@ -11,8 +11,10 @@ import { changedRanges, minimalReplace } from "./lsp/edits";
 import { choose } from "./dialogs";
 
 export type Group = { tabs: string[]; active: string | null; mode?: "text" | "blocks" };
-export type LeftView = "explorer" | "objects" | "palette" | "reference" | "search" | "history";
-export type RightView = "health" | "agent";
+export type PanelId = "explorer" | "objects" | "palette" | "reference" | "search" | "history" | "health" | "agent";
+/** @deprecated names kept for readers: both sides hold any panel. */
+export type LeftView = PanelId;
+export type RightView = PanelId;
 export type BottomView = "problems" | "output";
 export type Message = { id: number; kind: "info" | "error"; text: string };
 

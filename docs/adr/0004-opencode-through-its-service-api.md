@@ -56,6 +56,16 @@ See [opencode-api.md](../spikes/opencode-api.md) and [M0](../spikes/M0.md).
   shell. The IDE puts the code in the prompt and applies the answer itself
   as range edits (ADR 0002); it does not rely on agent file tools.
 - The private server's model is pinned with `OPENCODE_CONFIG_CONTENT`.
+
+## Unguarded helpers (2026-11-01)
+
+- In 2.2.5, code mode's `worktree_create` and `session_move` call no
+  permission check (`worktree_remove` and `worktree_list` check `edit`; the
+  MCP resource tools check their own actions). Config `policies` apply only
+  inside permission checks, so they cannot deny these two either.
+- The adapter interrupts a turn as soon as its code, or a tool-progress
+  event, names one of them, and reports it. Best effort: a turn could act
+  before the interrupt lands. Revisit when opencode adds a check.
 - A small hand-written client with types generated from `/openapi.json`, not
   `@opencode/client`, which describes itself as private.
 - The SSL agents are not visible to opencode v2 (it does not read

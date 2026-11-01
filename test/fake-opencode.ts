@@ -18,6 +18,12 @@ function run(sessionID: string, text: string) {
 	const answer = process.env.FAKE_MODE === "tidy" ? tidyReply(text) : reply.replace("{prompt}", text);
 	setTimeout(() => {
 		send("session.execution.started", { sessionID });
+		if (process.env.FAKE_MODE === "escape") {
+			// Code mode reaching for a helper that asks no permission.
+			send("session.tool.called", { sessionID, assistantMessageID: messageID, id: "call_1", input: { code: "await tools.opencode.worktree_create({ name: 'x' })" }, executed: false });
+			sessions.get(sessionID).interruptWanted = true;
+			return;
+		}
 		send("session.step.started", { sessionID, agent: "build", model: sessions.get(sessionID).model, assistantMessageID: messageID, started: Date.now() });
 		for (const delta of answer.match(/.{1,20}/gs) ?? []) send("session.text.delta", { sessionID, assistantMessageID: messageID, ordinal: 0, delta });
 		send("session.text.ended", { sessionID, assistantMessageID: messageID, ordinal: 0, text: answer });
@@ -94,7 +100,11 @@ const server = Bun.serve({
 				return Response.json({ data: { id: `inb_${++n}`, sessionID: session.id, type: "user", payload: { text: body.text }, delivery: "queue" } });
 			}
 			if (m[2]?.startsWith("/message")) return Response.json({ data: session.messages });
-			if (m[2] === "/interrupt") return Response.json({ interrupted: false });
+			if (m[2] === "/interrupt") {
+				session.interrupted = true;
+				if (session.interruptWanted) setTimeout(() => send("session.execution.interrupted", { sessionID: session.id }), 10);
+				return Response.json({ interrupted: true });
+			}
 			if (!m[2] && req.method === "DELETE") return new Response(null, { status: 204 });
 		}
 		return new Response("not found", { status: 404 });

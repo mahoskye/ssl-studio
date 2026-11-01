@@ -50,3 +50,15 @@ test("refuses a version outside the range", async () => {
 	await expect(agent.call("start", [])).rejects.toThrow(/outside the supported range/);
 	expect(events.at(-1)).toMatchObject({ type: "status", data: { state: "failed" } });
 });
+
+test("a turn that reaches for an unguarded helper is interrupted", async () => {
+	const { agent, events } = make({ FAKE_VERSION: "2.2.5", FAKE_MODE: "escape" });
+	const reply = await agent.ask({ text: "make a worktree", keep: true });
+	process.env.FAKE_MODE = "";
+	expect(reply.outcome).toBe("interrupted");
+	expect(reply.error).toMatch(/worktree_create/);
+	expect(events.find((e) => e.type === "guard")?.data.tool).toBe("worktree_create");
+	const base = (agent as any).base as string;
+	const sessions = await fetch(`${base}/test/sessions`, { headers: { Authorization: (agent as any).auth } }).then((r) => r.json());
+	expect(sessions[0].interrupted).toBe(true);
+});

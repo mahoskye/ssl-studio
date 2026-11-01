@@ -15,9 +15,17 @@ const DENY = ["shell", "webfetch", "websearch", "external_directory", "question"
 /** Providers that run on the user's own machines. Anything else may bill. */
 const LOCAL_PROVIDERS = new Set(["ollama", "lmstudio", "llama.cpp", "llamacpp", "local"]);
 const TURN_TIMEOUT_MS = 15 * 60_000;
+/**
+ * Code-mode helpers that opencode 2.2.5 runs without any permission check, so
+ * no rule can deny them (they do not call the permission service, which is
+ * also where config policies apply). The adapter interrupts a turn whose code
+ * names one, before or while it runs: best effort, not a sandbox.
+ */
+export const UNGUARDED_TOOLS = ["worktree_create", "session_move"];
+const UNGUARDED = new RegExp(`\\b(${UNGUARDED_TOOLS.join("|")})\\b`);
 
 type Options = { serverConfig?: string; serverUrl?: string; model?: string };
-type Waiter = { resolve: (outcome: AgentReply["outcome"]) => void };
+type Waiter = { resolve: (outcome: AgentReply["outcome"]) => void; blocked?: string };
 
 export class Agent {
 	private proc?: Subprocess<"pipe", "pipe", "pipe">;
@@ -186,6 +194,7 @@ export class Agent {
 		const sessionID = event.data?.sessionID ?? event.data?.form?.sessionID;
 		if (!sessionID || !this.sessions.has(sessionID)) return;
 		this.emit(event.type, event.data);
+		this.guard(sessionID, event);
 		const end = /^session\.execution\.(succeeded|failed|interrupted)$/.exec(event.type);
 		if (end) {
 			this.waiters.get(sessionID)?.resolve(end[1] as AgentReply["outcome"]);
@@ -193,6 +202,19 @@ export class Agent {
 		}
 		// A form would hold the turn forever (M0); `question` is denied, so cancel any other.
 		if (event.type === "form.created") void this.api("DELETE", `/api/session/${sessionID}/form/${event.data.form.id}`).catch(() => {});
+	}
+
+	/** Stops a turn that reaches for a tool no permission rule can deny (UNGUARDED_TOOLS). */
+	private guard(sessionID: string, event: { type: string; data?: any }) {
+		let hit: string | undefined;
+		if (event.type === "session.tool.called") hit = UNGUARDED.exec(JSON.stringify(event.data?.input ?? ""))?.[1];
+		if (event.type === "session.tool.progress") hit = (event.data?.metadata?.toolCalls ?? []).map((c: any) => String(c.tool)).find((t: string) => UNGUARDED.test(t));
+		if (event.type === "session.moved") hit = "session_move";
+		if (!hit) return;
+		const waiter = this.waiters.get(sessionID);
+		if (waiter && !waiter.blocked) waiter.blocked = hit;
+		this.emit("guard", { sessionID, tool: hit });
+		void this.api("POST", `/api/session/${sessionID}/interrupt`).catch(() => {});
 	}
 
 	async models(): Promise<AgentModel[]> {
@@ -247,8 +269,10 @@ export class Agent {
 			this.emit("session", { sessionID, title: input.title, model });
 		}
 		const seen = ((await this.api("GET", `/api/session/${sessionID}/message?limit=200&order=asc`))?.data ?? []).length;
+		const waiter: Waiter = { resolve: () => {} };
 		const done = new Promise<AgentReply["outcome"]>((resolve) => {
-			this.waiters.set(sessionID, { resolve });
+			waiter.resolve = resolve;
+			this.waiters.set(sessionID, waiter);
 			setTimeout(() => resolve("timeout"), input.timeoutMs ?? TURN_TIMEOUT_MS);
 		});
 		await this.api("POST", `/api/session/${sessionID}/prompt`, { text: input.text, ...(input.skills?.length ? { skills: input.skills.map((id) => ({ id })) } : {}) });
@@ -259,12 +283,14 @@ export class Agent {
 		const text = assistant.flatMap((m) => (m.content ?? []).filter((p: any) => p.type === "text").map((p: any) => p.text)).join("\n");
 		const tokens = assistant.reduce((t, m) => ({ input: t.input + (m.tokens?.input ?? 0), output: t.output + (m.tokens?.output ?? 0) }), { input: 0, output: 0 });
 		const cost = assistant.reduce((c, m) => c + (m.cost ?? 0), 0);
-		const error = assistant.map((m) => m.error).find(Boolean);
+		const error = waiter.blocked
+			? { message: `Stopped: the agent tried ${waiter.blocked}, which opencode runs without a permission check.` }
+			: assistant.map((m) => m.error).find(Boolean);
 		if (!input.keep) {
 			this.sessions.delete(sessionID);
 			void this.api("DELETE", `/api/session/${sessionID}`).catch(() => {});
 		}
-		return { sessionID, text, outcome, tokens, cost, error: error ? String(error.message ?? JSON.stringify(error)) : undefined };
+		return { sessionID, text: waiter.blocked ? "" : text, outcome: waiter.blocked ? "interrupted" : outcome, tokens, cost, error: error ? String(error.message ?? JSON.stringify(error)) : undefined };
 	}
 }
 

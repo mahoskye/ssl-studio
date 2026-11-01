@@ -7,6 +7,7 @@ import { session } from "./lsp/session";
 import { symbols } from "./panels/Objects";
 import { symbolPath } from "./editor/regions";
 import { openStyleProfile } from "./StyleProfile";
+import { movePanel, showPanel } from "./panels/registry";
 import { insertTemplate } from "./panels/Palette";
 import { TEMPLATES } from "../shared/houseStyle";
 import { askAbout } from "./agent/Agent";
@@ -31,23 +32,25 @@ export const commands: Command[] = [
 	{ id: "wrap-region", label: "Wrap the selected lines in a region…", run: () => void wrapInRegion() },
 	{ id: "graph", label: "Show the call graph", keys: "Ctrl+Shift+G", run: () => setState("centerView", state.centerView === "graph" ? "editors" : "graph") },
 	{ id: "format", label: "Format document", keys: "Ctrl+Shift+I", run: () => void activeEditor()?.getAction("editor.action.formatDocument")?.run() },
-	{ id: "search", label: "Search the workspace", keys: "Ctrl+Shift+F", run: () => (setState("leftView", "search"), setState("settings", "layout", "left", true)) },
-	{ id: "explorer", label: "Show Explorer", keys: "Ctrl+Shift+E", run: () => (setState("leftView", "explorer"), setState("settings", "layout", "left", true)) },
-	{ id: "objects", label: "Show Objects", run: () => (setState("leftView", "objects"), setState("settings", "layout", "left", true)) },
-	{ id: "history", label: "Show local history", run: () => (setState("leftView", "history"), setState("settings", "layout", "left", true)) },
+	{ id: "search", label: "Search the workspace", keys: "Ctrl+Shift+F", run: () => showPanel("search") },
+	{ id: "explorer", label: "Show Explorer", keys: "Ctrl+Shift+E", run: () => showPanel("explorer") },
+	{ id: "objects", label: "Show Objects", run: () => showPanel("objects") },
+	{ id: "history", label: "Show local history", run: () => showPanel("history") },
 	{ id: "toggle-sidebar", label: "Toggle side bar", keys: "Ctrl+B", run: () => toggle("left") },
 	{ id: "toggle-panel", label: "Toggle bottom panel", keys: "Ctrl+J", run: () => toggle("bottom") },
 	{ id: "problems", label: "Show problems", keys: "Ctrl+Shift+M", run: () => (setState("bottomView", "problems"), setState("settings", "layout", "bottom", true)) },
 	{ id: "output", label: "Show output", run: () => (setState("bottomView", "output"), setState("settings", "layout", "bottom", true)) },
 	{ id: "style-profile", label: "Style profile…", run: () => openStyleProfile() },
-	{ id: "palette", label: "Show the template palette", run: () => (setState("leftView", "palette"), setState("settings", "layout", "left", true)) },
-	{ id: "reference", label: "Show the SSL reference", run: () => (setState("leftView", "reference"), setState("settings", "layout", "left", true)) },
-	{ id: "health", label: "Show script health", run: () => (setState("rightView", "health"), setState("settings", "layout", "right", true)) },
+	{ id: "palette", label: "Show the template palette", run: () => showPanel("palette") },
+	{ id: "reference", label: "Show the SSL reference", run: () => showPanel("reference") },
+	{ id: "health", label: "Show script health", run: () => showPanel("health") },
 	{ id: "insert-banner", label: "Insert the file banner", run: () => insertTemplate(TEMPLATES.find((t) => t.id === "banner")!) },
 	{ id: "insert-procedure", label: "Insert a procedure", run: () => insertTemplate(TEMPLATES.find((t) => t.id === "procedure")!) },
-	{ id: "agent", label: "Show the agent", run: () => (setState("rightView", "agent"), setState("settings", "layout", "right", true)) },
+	{ id: "agent", label: "Show the agent", run: () => showPanel("agent") },
 	{ id: "agent-ask", label: "Ask the agent about the selection…", keys: "Ctrl+Shift+A", run: () => void askCommand() },
-	{ id: "tidy", label: "Tidy this file with the agent", run: () => (startTidy(), setState("rightView", "agent"), setState("settings", "layout", "right", true)) },
+	{ id: "tidy", label: "Tidy this file with the agent", run: () => (startTidy(), showPanel("agent")) },
+	{ id: "move-panel", label: "Move the open left panel to the right", run: () => state.settings.layout.left && movePanel(state.leftView) },
+	{ id: "move-panel-back", label: "Move the open right panel to the left", run: () => state.settings.layout.right && movePanel(state.rightView) },
 	{ id: "lsp-restart", label: "Restart the language server", run: () => void backend.lspRestart() },
 	{ id: "settings", label: "Settings…", keys: "Ctrl+,", run: () => openSettings() },
 	{ id: "editor-commands", label: "Editor commands…", keys: "F1", run: () => activeEditor()?.trigger("app", "editor.action.quickCommand", null) },
@@ -109,8 +112,7 @@ async function copyForDesigner() {
 async function askCommand() {
 	const question = await ask("Ask the agent about the selection");
 	if (!question) return;
-	setState("rightView", "agent");
-	setState("settings", "layout", "right", true);
+	showPanel("agent");
 	await askAbout(question, true);
 }
 
