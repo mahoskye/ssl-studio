@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SSL Studio spike</title>
+    <style>
+      :root { color-scheme: dark; --bg: #1b1d23; --panel: #21242b; --text: #d4d7de; --muted: #7f8796; --accent: #c792ea; }
+      html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 13px system-ui, sans-serif; }
+      body { display: grid; grid-template-columns: 240px 1fr; grid-template-rows: 1fr 24px; height: 100vh; }
+      #objects { background: var(--panel); overflow: auto; padding: 6px 0; border-right: 1px solid #2c3039; }
+      #objects h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 4px 10px 8px; }
+      .object { display: block; width: 100%; text-align: left; background: none; border: 0; color: inherit; font: inherit; padding: 3px 8px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .object:hover { background: #2c3039; }
+      .kind-2 { color: var(--accent); font-weight: 600; } /* comment regions arrive as Namespace symbols */
+      .kind-12 { color: #ffcb6b; }
+      .kind-13 { color: var(--muted); }
+      #editor { min-width: 0; }
+      #status { grid-column: 1 / -1; background: #16181d; color: var(--muted); padding: 4px 10px; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <nav id="objects" aria-label="Objects"></nav>
+    <main id="editor"></main>
+    <footer id="status">loading…</footer>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
