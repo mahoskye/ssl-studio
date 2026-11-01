@@ -77,3 +77,13 @@ function merge(ranges: [number, number][]): [number, number][] {
 	}
 	return result;
 }
+
+/** The smallest single replacement turning `before` into `after`, by offsets into `before`. */
+export function minimalReplace(before: string, after: string): { start: number; end: number; text: string } | null {
+	if (before === after) return null;
+	let start = 0;
+	while (start < before.length && start < after.length && before[start] === after[start]) start++;
+	let tail = 0;
+	while (tail < before.length - start && tail < after.length - start && before[before.length - 1 - tail] === after[after.length - 1 - tail]) tail++;
+	return { start, end: before.length - tail, text: after.slice(start, after.length - tail) };
+}

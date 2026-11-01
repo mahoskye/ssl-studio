@@ -44,6 +44,7 @@ export class WorkspaceFiles {
 	/** Writes through a temporary file, so a crash never leaves half a script. */
 	async write(path: string, text: string) {
 		const full = this.inside(path);
+		mkdirSync(dirname(full), { recursive: true });
 		const temp = join(dirname(full), `.${basename(full)}.ssl-studio-tmp`);
 		this.ownWrites.set(full, Date.now());
 		await Bun.write(temp, text);

@@ -63,6 +63,17 @@ Needs L1 from [LSP-REQUESTS.md](LSP-REQUESTS.md).
 
 ## M4: agents
 
+**Done (2026-11-01).** A private `opencode serve --stdio` per app run (or an
+attached server), version-checked, every session with a set model (local
+by default; a paid one asks first) and deny rules for shell, web,
+outside-workspace access and questions. The tidy sequence runs step by
+step; since the agent has no file tools (M0), the IDE supplies the file,
+the note at `design/<name>.tidy.md` and the callers it finds through the
+language server, and reviews each step with the runner's checks. Tests use
+a fake of the API (`test/fake-opencode.ts`); the real path was checked once
+on the local model. Open: the helper tools opencode's code mode offers
+(worktrees, `session_move`) have no known permission names to deny.
+
 - Agent panel: one session per workspace, model picker, local model by
   default.
 - Tidy: the six `ssl-tidy-*` steps, a diff and the checks after each, accept

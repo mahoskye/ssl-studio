@@ -7,7 +7,7 @@ import { DEFAULT_SETTINGS, type Info, type LspState, type Settings, type ThemeFi
 import { backend, on } from "./backend";
 import { languageFor, monaco } from "./editor/monaco";
 import { session } from "./lsp/session";
-import { changedRanges } from "./lsp/edits";
+import { changedRanges, minimalReplace } from "./lsp/edits";
 import { choose } from "./dialogs";
 
 export type Group = { tabs: string[]; active: string | null };
@@ -38,7 +38,6 @@ export const [state, setState] = createStore({
 	/** Bumped when the tree should reload a folder. */
 	treeVersion: 0,
 	quickPick: null as null | "files" | "commands" | "symbols",
-	diffWith: null as null | { path: string; id: string; text: string },
 });
 
 const docs = new Map<string, Doc>();
@@ -277,6 +276,21 @@ export function widenToProcedures(ranges: [number, number][], symbols: monaco.la
 			else out.push([...r]);
 			return out;
 		}, []);
+}
+
+/** Replaces a document's text with one undoable edit over the part that changed. */
+export function applyText(path: string, text: string) {
+	const doc = docs.get(path);
+	if (!doc) return;
+	const edit = minimalReplace(doc.model.getValue(), text.replace(/\r?\n/g, doc.model.getEOL()));
+	if (!edit) return;
+	doc.model.pushStackElement();
+	doc.model.pushEditOperations(
+		[],
+		[{ range: monaco.Range.fromPositions(doc.model.getPositionAt(edit.start), doc.model.getPositionAt(edit.end)), text: edit.text }],
+		() => null,
+	);
+	doc.model.pushStackElement();
 }
 
 export async function saveAll() {

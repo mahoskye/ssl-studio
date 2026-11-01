@@ -5,6 +5,8 @@ import { backend, inApp } from "./backend";
 import { openStyleProfile } from "./StyleProfile";
 import { insertTemplate } from "./panels/Palette";
 import { TEMPLATES } from "../shared/houseStyle";
+import { askAbout } from "./agent/Agent";
+import { startTidy } from "./agent/tidy";
 import { activePath, closeTab, openFolder, revert, save, saveAll, setState, split, state } from "./state";
 
 export type Command = { id: string; label: string; keys?: string; run: () => void };
@@ -35,6 +37,9 @@ export const commands: Command[] = [
 	{ id: "health", label: "Show script health", run: () => (setState("rightView", "health"), setState("settings", "layout", "right", true)) },
 	{ id: "insert-banner", label: "Insert the file banner", run: () => insertTemplate(TEMPLATES.find((t) => t.id === "banner")!) },
 	{ id: "insert-procedure", label: "Insert a procedure", run: () => insertTemplate(TEMPLATES.find((t) => t.id === "procedure")!) },
+	{ id: "agent", label: "Show the agent", run: () => (setState("rightView", "agent"), setState("settings", "layout", "right", true)) },
+	{ id: "agent-ask", label: "Ask the agent about the selection…", keys: "Ctrl+Shift+A", run: () => void askCommand() },
+	{ id: "tidy", label: "Tidy this file with the agent", run: () => (startTidy(), setState("rightView", "agent"), setState("settings", "layout", "right", true)) },
 	{ id: "lsp-restart", label: "Restart the language server", run: () => void backend.lspRestart() },
 	{ id: "settings", label: "Settings…", keys: "Ctrl+,", run: () => openSettings() },
 	{ id: "editor-commands", label: "Editor commands…", keys: "F1", run: () => activeEditor()?.trigger("app", "editor.action.quickCommand", null) },
@@ -43,6 +48,14 @@ export const commands: Command[] = [
 let settingsOpener: () => void = () => {};
 export const onOpenSettings = (open: () => void) => (settingsOpener = open);
 const openSettings = () => settingsOpener();
+
+async function askCommand() {
+	const question = await ask("Ask the agent about the selection");
+	if (!question) return;
+	setState("rightView", "agent");
+	setState("settings", "layout", "right", true);
+	await askAbout(question, true);
+}
 
 async function openFolderCommand() {
 	if (inApp) return openFolder();
@@ -66,6 +79,7 @@ const KEYS: Record<string, string> = {
 	"ctrl+j": "toggle-panel",
 	"ctrl+shift+m": "problems",
 	"ctrl+,": "settings",
+	"ctrl+shift+a": "agent-ask",
 };
 
 export function installKeys() {

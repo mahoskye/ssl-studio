@@ -46,8 +46,16 @@ export type Settings = {
 	ssl: Record<string, any>;
 	/** The base the `ssl` overrides sit on: the house style, or the server's defaults. */
 	stylePreset: "house" | "server";
-	/** Agent: provider/model ids for new sessions; local by default. */
+	/** Agent: "providerID/modelID" for new sessions; a local model by default. */
 	agentModel?: string;
+	/**
+	 * Extra opencode config for the IDE's private server only (JSON, passed as
+	 * OPENCODE_CONFIG_CONTENT): e.g. a local provider's address. Never written
+	 * to opencode's own config.
+	 */
+	agentServerConfig?: string;
+	/** Attach to a running opencode server instead of starting one ("url"; password from OPENCODE_SERVER_PASSWORD). */
+	agentServerUrl?: string;
 };
 
 export type SettingsScope = "user" | "workspace";
@@ -92,6 +100,10 @@ export type BackendEvents = {
 	fileChanged: { path: string };
 	agent: { type: string; data: unknown };
 };
+
+export type AgentModel = { providerID: string; id: string; name: string; local: boolean; tools: boolean; variants: string[] };
+export type AgentStatus = { state: "off" | "starting" | "ready" | "failed"; version?: string; message?: string; model?: string };
+export type AgentReply = { sessionID: string; text: string; outcome: "succeeded" | "failed" | "interrupted" | "timeout"; tokens?: { input: number; output: number }; cost?: number; error?: string };
 
 export type Call = { id: number; method: keyof BackendApi; args: unknown[] };
 export type Reply = { id: number; result?: unknown; error?: string };

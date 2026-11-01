@@ -2,7 +2,7 @@
 import { createEffect, For, Match, on, onCleanup, Show, Switch } from "solid-js";
 import { backend } from "./backend";
 import { Dialogs } from "./dialogs";
-import { DiffView } from "./editor/DiffView";
+import { review, ReviewView } from "./editor/Review";
 import { EditorGroup } from "./editor/EditorGroup";
 import { commands } from "./commands";
 import { Explorer } from "./panels/Explorer";
@@ -14,6 +14,7 @@ import { Palette } from "./panels/Palette";
 import { Reference } from "./panels/Reference";
 import { Health } from "./panels/Health";
 import { StyleProfile } from "./StyleProfile";
+import { AgentPanel } from "./agent/Agent";
 import { session } from "./lsp/session";
 import { QuickPick } from "./QuickPick";
 import { SettingsDialog } from "./Settings";
@@ -105,6 +106,9 @@ export function App() {
 					)}
 				</For>
 				<span class="spacer" />
+				<button title="Agent" classList={{ active: layout().right && state.rightView === "agent" }} onClick={() => toggleRight("agent")}>
+					✦
+				</button>
 				<button title="Health" classList={{ active: layout().right && state.rightView === "health" }} onClick={() => toggleRight("health")}>
 					♥
 				</button>
@@ -143,8 +147,8 @@ export function App() {
 			<main class="center">
 				<div class="editors">
 					<Show when={state.workspace} fallback={<Welcome />}>
-						<Show when={state.diffWith} fallback={<For each={state.groups}>{(_, i) => <EditorGroup index={i()} />}</For>}>
-							<DiffView />
+						<Show when={review()} keyed fallback={<For each={state.groups}>{(_, i) => <EditorGroup index={i()} />}</For>}>
+							{(_r) => <ReviewView />}
 						</Show>
 					</Show>
 				</div>
@@ -180,6 +184,9 @@ export function App() {
 					<Switch>
 						<Match when={state.rightView === "health"}>
 							<Health />
+						</Match>
+						<Match when={state.rightView === "agent"}>
+							<AgentPanel />
 						</Match>
 					</Switch>
 				</aside>

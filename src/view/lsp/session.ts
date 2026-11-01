@@ -97,6 +97,33 @@ class Session {
 		if (this.initialized) this.client.notify("workspace/didChangeConfiguration", { settings: { ssl: this.sslSettings() } });
 	}
 
+	private scratchWaiters = new Map<string, (diagnostics: any[]) => void>();
+	private scratchCount = 0;
+
+	/** Diagnostics and symbols for text that is not in any editor (a proposed change). */
+	async analyze(text: string): Promise<{ diagnostics: { code?: string; severity: number; message: string; line: number }[]; symbols: monaco.languages.DocumentSymbol[] }> {
+		await this.ready();
+		const uri = monaco.Uri.file(`${this.root}/.ssl-studio/scratch-${++this.scratchCount}.ssl`).toString();
+		const published = new Promise<any[]>((resolve) => {
+			this.scratchWaiters.set(uri, resolve);
+			setTimeout(() => resolve([]), 8000);
+		});
+		this.client.notify("textDocument/didOpen", { textDocument: { uri, languageId: "ssl", version: 1, text } });
+		try {
+			const raw = await published;
+			const symbols = ((await this.client.request("textDocument/documentSymbol", { textDocument: { uri } })) ?? []).map(function convert(s: any): monaco.languages.DocumentSymbol {
+				return { name: s.name, detail: s.detail ?? "", kind: s.kind - 1, tags: [], range: toRange(s.range), selectionRange: toRange(s.selectionRange ?? s.range), children: (s.children ?? []).map(convert) };
+			});
+			return {
+				diagnostics: raw.map((d) => ({ code: d.code == null ? undefined : String(typeof d.code === "object" ? d.code.value : d.code), severity: d.severity ?? 1, message: d.message, line: d.range.start.line + 1 })),
+				symbols,
+			};
+		} finally {
+			this.scratchWaiters.delete(uri);
+			this.client.notify("textDocument/didClose", { textDocument: { uri } });
+		}
+	}
+
 	private ready() {
 		return this.initialized ?? Promise.reject(new Error("language server not running"));
 	}
@@ -135,8 +162,11 @@ class Session {
 	}
 
 	private publish(params: { uri: string; diagnostics: any[] }) {
-		// Scratch documents (the Reference panel's) are not the user's files.
-		if (params.uri.includes("/.ssl-studio/")) return;
+		// Scratch documents (Reference panel, agent checks) are not the user's files.
+		if (params.uri.includes("/.ssl-studio/")) {
+			this.scratchWaiters.get(params.uri)?.(params.diagnostics);
+			return;
+		}
 		const model = monaco.editor.getModel(monaco.Uri.parse(params.uri));
 		const list: Diagnostic[] = params.diagnostics.map((d) => ({
 			uri: params.uri,

@@ -1,0 +1,110 @@
+// A stand-in for `opencode serve --stdio --port 0` (v2.2.5), for tests: the
+// endpoints and event shapes recorded in docs/spikes/opencode-api.md (M0).
+// Replies come from FAKE_REPLY; no model is involved.
+const password = process.env.OPENCODE_PASSWORD ?? "";
+const version = process.env.FAKE_VERSION ?? "2.2.5";
+const reply = process.env.FAKE_REPLY ?? "Fake reply.";
+const sessions = new Map<string, any>();
+const streams = new Set<ReadableStreamDefaultController>();
+let n = 0;
+
+const send = (type: string, data: unknown) => {
+	const text = `data: ${JSON.stringify({ id: `evt_${++n}`, type, created: Date.now(), data })}\n\n`;
+	for (const s of streams) s.enqueue(new TextEncoder().encode(text));
+};
+
+function run(sessionID: string, text: string) {
+	const messageID = `msg_${++n}`;
+	const answer = process.env.FAKE_MODE === "tidy" ? tidyReply(text) : reply.replace("{prompt}", text);
+	setTimeout(() => {
+		send("session.execution.started", { sessionID });
+		send("session.step.started", { sessionID, agent: "build", model: sessions.get(sessionID).model, assistantMessageID: messageID, started: Date.now() });
+		for (const delta of answer.match(/.{1,20}/gs) ?? []) send("session.text.delta", { sessionID, assistantMessageID: messageID, ordinal: 0, delta });
+		send("session.text.ended", { sessionID, assistantMessageID: messageID, ordinal: 0, text: answer });
+		const tokens = { input: 100, output: 20, reasoning: 0, cache: { read: 0, write: 0 } };
+		send("session.step.ended", { sessionID, assistantMessageID: messageID, finish: "stop", rawFinish: "stop", tokens, cost: 0 });
+		sessions.get(sessionID).messages.push(
+			{ type: "user", text },
+			{ type: "assistant", content: [{ type: "text", text: answer }], tokens, cost: 0 },
+			{ type: "idle", outcome: "succeeded" },
+		);
+		send("session.execution.succeeded", { sessionID });
+	}, 20);
+}
+
+/** FAKE_MODE=tidy: a context note for step 1, the file with one added comment otherwise. */
+function tidyReply(text: string) {
+	if (text.includes("Run step 1 ")) return "```markdown\n# Context\n\nFake note: no callers found.\n```";
+	if (text.includes("Run step 6 ")) return "```markdown\nFake verification: every change re-checked.\n```";
+	const file = /```ssl\n([\s\S]*?)\n```/.exec(text)?.[1] ?? "";
+	const step = /Run step (\d)/.exec(text)?.[1];
+	return `\`\`\`ssl\n/* Tidied by the fake, step ${step};\n${file}\n\`\`\`\n\n\`\`\`markdown\nStep ${step}: added a comment.\n\`\`\``;
+}
+
+// Heartbeats as SSE comments, as opencode sends them.
+setInterval(() => {
+	for (const s of streams) s.enqueue(new TextEncoder().encode(": heartbeat\n\n"));
+}, 3000);
+
+const server = Bun.serve({
+	hostname: "127.0.0.1",
+	port: 0,
+	idleTimeout: 0,
+	async fetch(req) {
+		const url = new URL(req.url);
+		if (req.headers.get("authorization") !== `Basic ${btoa(`opencode:${password}`)}`) return new Response("unauthorized", { status: 401 });
+		const path = url.pathname;
+		if (path === "/api/info") return Response.json({ data: { version } });
+		if (path === "/api/model")
+			return Response.json({
+				data: [
+					{ id: "openrouter/paid", modelID: "paid-model", providerID: "openrouter", name: "Paid", capabilities: { tools: true }, variants: [] },
+					{ id: "ollama/qwen3:14b", modelID: "qwen3:14b", providerID: "ollama", name: "Qwen3 14B", capabilities: { tools: true }, variants: [{ id: "no-thinking" }] },
+				],
+			});
+		if (path === "/api/skill") return Response.json({ data: [{ id: "ssl-tidy-context", name: "ssl-tidy-context" }] });
+		if (path === "/api/event")
+			return new Response(
+				new ReadableStream({
+					start(controller) {
+						streams.add(controller);
+						controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ id: "evt_0", type: "server.connected", data: {} })}\n\n`));
+					},
+					cancel(controller) {
+						streams.delete(controller as any);
+					},
+				}),
+				{ headers: { "content-type": "text/event-stream" } },
+			);
+		if (path === "/api/session" && req.method === "POST") {
+			const body = await req.json();
+			const id = `ses_${++n}`;
+			sessions.set(id, { ...body, id, messages: [], prompts: [] });
+			return Response.json({ data: { id } });
+		}
+		if (path === "/test/sessions") return Response.json([...sessions.values()]);
+		const m = /^\/api\/session\/([^/]+)(\/.*)?$/.exec(path);
+		if (m) {
+			const session = sessions.get(m[1]!);
+			if (!session) return new Response("no session", { status: 404 });
+			if (m[2] === "/prompt") {
+				const body = await req.json();
+				session.prompts.push(body);
+				run(session.id, body.text);
+				return Response.json({ data: { id: `inb_${++n}`, sessionID: session.id, type: "user", payload: { text: body.text }, delivery: "queue" } });
+			}
+			if (m[2]?.startsWith("/message")) return Response.json({ data: session.messages });
+			if (m[2] === "/interrupt") return Response.json({ interrupted: false });
+			if (!m[2] && req.method === "DELETE") return new Response(null, { status: 204 });
+		}
+		return new Response("not found", { status: 404 });
+	},
+});
+
+console.log(JSON.stringify({ url: `http://127.0.0.1:${server.port}` }));
+// Stop when stdin closes, as `serve --stdio` does.
+(async () => {
+	for await (const _ of Bun.stdin.stream()) {
+	}
+	process.exit(0);
+})();

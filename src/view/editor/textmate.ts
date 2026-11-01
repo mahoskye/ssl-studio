@@ -14,6 +14,7 @@ const TOKEN_TYPE = (m: number) => (m & 0x00000300) >>> 8;
 const FONT_STYLE = (m: number) => (m & 0x00007800) >>> 11;
 const FOREGROUND = (m: number) => (m & 0x00ff8000) >>> 15;
 export const COMMENT_TOKEN = 1;
+const STRING_TOKEN = 2;
 
 class State implements monaco.languages.IState {
 	constructor(readonly stack: StateStack) {}
@@ -95,4 +96,21 @@ export function measure(text: string): { codeLines: number; bannerLines: string[
 		}
 	});
 	return { codeLines, bannerLines: lines.slice(0, bannerEnd < 0 ? lines.length : bannerEnd) };
+}
+
+/** The text without comments or whitespace: equal before and after means only comments and layout changed. */
+export function codeOnly(text: string): string {
+	let stack = INITIAL;
+	let out = "";
+	for (const line of text.split(/\r?\n/)) {
+		const result = grammar.tokenizeLine2(line, stack, 500);
+		stack = result.ruleStack;
+		for (let i = 0; i < result.tokens.length; i += 2) {
+			if (TOKEN_TYPE(result.tokens[i + 1]!) === COMMENT_TOKEN) continue;
+			const end = i + 2 < result.tokens.length ? result.tokens[i + 2]! : line.length;
+			const token = line.slice(result.tokens[i]!, end);
+			out += TOKEN_TYPE(result.tokens[i + 1]!) === STRING_TOKEN ? token : token.replace(/\s+/g, "");
+		}
+	}
+	return out;
 }

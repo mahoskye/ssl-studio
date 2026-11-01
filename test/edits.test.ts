@@ -31,3 +31,15 @@ describe("changedRanges", () => {
 		expect(changedRanges(before, after)).toEqual([[10, 10], [1400, 1400]]);
 	});
 });
+
+import { minimalReplace } from "../src/view/lsp/edits";
+
+describe("minimalReplace", () => {
+	const apply = (before: string, after: string) => {
+		const e = minimalReplace(before, after);
+		return e ? before.slice(0, e.start) + e.text + before.slice(e.end) : before;
+	};
+	for (const [a, b] of [["abc", "abc"], ["abc", "aXc"], ["abc", "ab"], ["", "x"], ["x", ""], ["aaa", "aaaa"], ["line1\nline2\n", "line1\nnew\nline2\n"]])
+		test(`${JSON.stringify(a)} → ${JSON.stringify(b)}`, () => expect(apply(a!, b!)).toBe(b!));
+	test("small span", () => expect(minimalReplace("hello world", "hello there world")).toEqual({ start: 6, end: 6, text: "there " }));
+});

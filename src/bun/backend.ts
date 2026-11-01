@@ -29,7 +29,9 @@ export function createBackend(host: Host, initial?: string) {
 		host.emit("lspState", state);
 	};
 	const settings = new SettingsStore(() => files?.root ?? null);
-	const agent = new Agent((type, data) => host.emit("agent", { type, data }), () => files?.root ?? null);
+	// SSL_STUDIO_OPENCODE replaces the opencode command (tests use test/fake-opencode.ts).
+	const command = process.env.SSL_STUDIO_OPENCODE?.split(" ");
+	const agent = new Agent((type, data) => host.emit("agent", { type, data }), () => files?.root ?? null, command);
 
 	const need = () => {
 		if (!files) throw new Error("no workspace open");
@@ -100,7 +102,11 @@ export function createBackend(host: Host, initial?: string) {
 			else if (files) await open(files.root);
 		},
 		lspState: async () => lspState,
-		agent: (method, args) => agent.call(method, args),
+		agent: async (method, args) => {
+			const { effective } = await settings.load();
+			agent.configure({ serverConfig: effective.agentServerConfig, serverUrl: effective.agentServerUrl, model: effective.agentModel });
+			return agent.call(method, args);
+		},
 		selftestDone: async (report) => {
 			const path = process.env.SSL_STUDIO_SELFTEST;
 			if (!path) return;

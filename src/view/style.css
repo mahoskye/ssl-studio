@@ -185,3 +185,35 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .profile-field input[type="number"] { width: 90px; }
 .profile-field.own span { color: var(--fg); font-weight: 600; }
 .profile-field .reset { padding: 0; color: var(--muted); }
+
+/* M4: agent */
+.agent-status { display: flex; align-items: center; gap: 8px; padding: 0 12px 6px; font-size: 12px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.dot.ready { background: var(--ok); }
+.dot.starting { background: var(--warning); }
+.dot.failed { background: var(--error); }
+.agent-model { display: flex; flex-direction: column; gap: 4px; padding: 0 12px 8px; font-size: 12px; }
+.tidy { margin: 0 8px 8px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; }
+.tidy-head { display: flex; align-items: center; gap: 6px; }
+.tidy-head .hint { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tidy-step { display: flex; align-items: center; gap: 6px; font-size: 12px; padding: 2px 0; }
+.tidy-step .label { flex: 1; }
+.tidy-step.accepted .icon { color: var(--ok); }
+.tidy-step.failed .icon, .tidy-step.rejected .icon { color: var(--error); }
+.tidy-step.review .icon, .tidy-step.running .icon { color: var(--warning); }
+.conversation { flex: 1; overflow: auto; padding: 0 8px; display: flex; flex-direction: column; gap: 6px; }
+.entry pre { margin: 0; white-space: pre-wrap; word-break: break-word; font: 12px/1.45 ui-monospace, monospace; }
+.entry.user { align-self: flex-end; background: var(--selected); padding: 6px 8px; border-radius: 6px; max-width: 92%; }
+.entry.agent { padding: 6px 8px; border-left: 2px solid var(--accent); }
+.entry.agent.streaming { border-left-color: var(--warning); }
+.entry.note pre { color: var(--muted); font-size: 11px; }
+.composer { border-top: 1px solid var(--border); padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+.composer textarea { font: inherit; background: var(--input-bg); color: var(--input-fg); border: 1px solid var(--input-border); border-radius: 3px; min-height: 64px; resize: vertical; padding: 6px; }
+.composer-bar { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.composer-bar .check { display: flex; align-items: center; gap: 4px; color: var(--muted); }
+.review-info { display: flex; gap: 16px; padding: 6px 12px; background: var(--panel-bg); border-bottom: 1px solid var(--border); max-height: 30%; overflow: auto; }
+.checks { list-style: none; margin: 0; padding: 0; font-size: 12px; min-width: 280px; }
+.checks .pass { color: var(--ok); }
+.checks .fail { color: var(--error); }
+.checks .unknown { color: var(--muted); }
+.review-note { flex: 1; margin: 0; white-space: pre-wrap; font: 12px/1.45 ui-monospace, monospace; color: var(--muted); }

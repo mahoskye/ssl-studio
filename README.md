@@ -50,6 +50,26 @@ Other scripts:
 | `hutch run selftest` | Opens the app on `fixtures/workspace`, checks the editor and language server, writes `selftest.json`, quits |
 | `hutch run build` | A release build |
 
+## The agent
+
+The Agent panel starts its own opencode server when first used. It picks a
+local model (Ollama) unless you choose another; a paid provider asks first.
+To point the IDE's private server at a model without touching opencode's own
+config, put opencode config JSON in the `agentServerConfig` setting
+(`~/.config/ssl-studio/settings.json`), for example:
+
+```json
+{
+  "agentServerConfig": "{\"provider\":{\"ollama\":{\"api\":\"http://127.0.0.1:11434/v1\",\"models\":{\"qwen3:14b\":{\"tool_call\":true}}}}}",
+  "agentModel": "ollama/qwen3:14b"
+}
+```
+
+Tidy runs the style guide's six `ssl-tidy-*` steps on the open file. Each
+step's result opens as a diff with checks (no new findings, procedures and
+parameters unchanged, comments-only for the comments step); accepting it
+edits the file in the editor, and you save it.
+
 ## Keys
 
 | Key | Does |
@@ -60,6 +80,7 @@ Other scripts:
 | Ctrl+\\ | Split editor |
 | Ctrl+Shift+F | Search the workspace |
 | Ctrl+B, Ctrl+J | Side bar, bottom panel |
+| Ctrl+Shift+A | Ask the agent about the selection |
 | F1 | Editor commands |
 
 ## Disclaimer
