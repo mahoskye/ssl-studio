@@ -1,0 +1,10 @@
+/* A deliberately untidy script, for trying format and diagnostics;
+:PROCEDURE untidy;
+:PARAMETERS a,b;
+:IF a>b;
+x:=a;
+:ELSE;
+x:=b;
+:ENDIF;
+:RETURN x;
+:ENDPROC;

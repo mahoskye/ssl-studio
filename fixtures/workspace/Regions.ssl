@@ -1,0 +1,65 @@
+/********************************************************************************
+Description.. : Spike fixture: regions, procedures and control flow.
+Parameters... : -
+Returns...... : -
+Author....... :
+Date......... : 2026-10-31
+********************************************************************************
+_______________________________________________________________________________
+Modification. :
+Author....... :
+Date......... :
+_______________________________________________________________________________
+********************************************************************************/;
+
+/* region Validation;
+
+/*
+    Checks that a sample id is present and well formed.
+
+    sSampleId - the id to check
+    Returns .T. when the id is usable
+;
+:PROCEDURE IsUsableId;
+:PARAMETERS sSampleId;
+:DEFAULT sSampleId, "";
+
+:IF Empty(sSampleId);
+    :RETURN .F.;
+:ENDIF;
+
+:RETURN Len(sSampleId) <= 20;
+:ENDPROC;
+
+/* endregion;
+
+/* region Labels;
+
+/*
+    The label text for a status code.
+
+    nStatus - the status code
+    Returns the label
+;
+:PROCEDURE StatusLabel;
+:PARAMETERS nStatus;
+
+:DECLARE sLabel;
+
+:BEGINCASE;
+:CASE nStatus == 1;
+    sLabel := "Logged";
+:CASE nStatus == 2;
+    sLabel := "Released";
+:OTHERWISE;
+    sLabel := "Unknown";
+:ENDCASE;
+
+:RETURN sLabel;
+:ENDPROC;
+
+/* endregion;
+
+:REGION sqlPending;
+    SELECT ORDNO FROM ORDERS WHERE STATUS = ?
+:ENDREGION;

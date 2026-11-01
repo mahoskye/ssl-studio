@@ -20,9 +20,47 @@ the source of truth.
 - **House style:** the team's Designer header, procedure doc block, spacing
   and script size limit built into templates, the formatter and a size meter.
 
-Status: planning. See [docs/VISION.md](docs/VISION.md),
+Status: milestone M1, a text IDE. See [docs/VISION.md](docs/VISION.md),
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
 [docs/ROADMAP.md](docs/ROADMAP.md).
+
+## Running it
+
+Needs [Bun](https://bun.sh), and
+[`starlims-lsp`](https://github.com/mahoskye/starlims-lsp/releases) 0.28.2 on
+`PATH` (or set `lspPath` in Settings). opencode 2.2.x is optional: it powers
+the Agent panel.
+
+The app builds with [Electrobun](https://blackboard.sh/electrobun/) through
+its Hutch toolchain, which downloads the Electrobun runtime on first use:
+
+```bash
+npx electrobun@2.0.5 prepare      # once: fetch Hutch and the runtime
+hutch install                     # packages, from hutch.lock
+hutch run start [folder]          # build and open the app
+```
+
+Other scripts:
+
+| Script | What it does |
+| --- | --- |
+| `hutch run web [folder]` | The same UI in a browser tab at http://127.0.0.1:5190, for development |
+| `hutch run test` | Unit tests (`bun test`) |
+| `hutch run check` | Type check |
+| `hutch run selftest` | Opens the app on `fixtures/workspace`, checks the editor and language server, writes `selftest.json`, quits |
+| `hutch run build` | A release build |
+
+## Keys
+
+| Key | Does |
+| --- | --- |
+| Ctrl+O | Open folder |
+| Ctrl+P / Ctrl+Shift+P / Ctrl+T | Go to file / command palette / symbol in workspace |
+| Ctrl+S, Ctrl+Alt+S | Save (formats the changed procedures), save all |
+| Ctrl+\\ | Split editor |
+| Ctrl+Shift+F | Search the workspace |
+| Ctrl+B, Ctrl+J | Side bar, bottom panel |
+| F1 | Editor commands |
 
 ## Disclaimer
 

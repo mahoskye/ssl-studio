@@ -1,0 +1,75 @@
+/********************************************************************************
+Description.. : Sample script for SSL Studio: order helpers.
+Parameters... : -
+Returns...... : -
+Author....... :
+Date......... : 2026-11-01
+********************************************************************************
+_______________________________________________________________________________
+Modification. : Added CountOpenOrders.
+Author....... :
+Date......... : 2026-11-01
+_______________________________________________________________________________
+Modification. : First version.
+Author....... :
+Date......... : 2026-10-31
+_______________________________________________________________________________
+********************************************************************************/;
+
+/* region Queries;
+
+/*
+ * Procedure: CountOpenOrders
+ * Description: Counts the orders still open for a customer.
+ * Parameters:
+ *   sCustomer - the customer code
+ * Returns: the number of open orders
+;
+:PROCEDURE CountOpenOrders;
+	:PARAMETERS sCustomer;
+	:DEFAULT sCustomer, "";
+
+	:DECLARE nCount;
+
+	:IF Empty(sCustomer);
+		:RETURN 0;
+	:ENDIF;
+
+	nCount := LSearch("SELECT COUNT(*) FROM ORDERS WHERE CUSTNO = ? AND STATUS = ?", 0, "DATABASE", {sCustomer, "Open"});
+
+	:RETURN nCount;
+:ENDPROC;
+
+/* endregion;
+
+/* region Formatting;
+
+/*
+ * Procedure: OrderTitle
+ * Description: A short title for an order.
+ * Parameters:
+ *   sOrdNo - the order number
+ *   nItems - how many items it has
+ * Returns: the title
+;
+:PROCEDURE OrderTitle;
+	:PARAMETERS sOrdNo, nItems;
+
+	:DECLARE sTitle, i;
+
+	sTitle := "Order " + sOrdNo;
+
+	:FOR i := 1 :TO nItems;
+		sTitle := sTitle + ".";
+	:NEXT;
+
+	:TRY;
+		sTitle := Upper(sTitle);
+	:CATCH;
+		sTitle := "Order";
+	:ENDTRY;
+
+	:RETURN sTitle;
+:ENDPROC;
+
+/* endregion;

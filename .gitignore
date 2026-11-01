@@ -3,3 +3,9 @@ dist/
 .hutch/
 spikes/*/web/public/
 spikes/*/reports/
+build/
+artifacts/
+src/view/public/onig.wasm
+*.tsbuildinfo
+selftest.json
+.cottontail-tmp/
