@@ -118,6 +118,12 @@ unknown.
 
 ## Later
 
+- Panels docked anywhere: today the side bars hold fixed panels (left: files,
+  objects, palette, reference, search, history; right: agent, health), each
+  can be hidden, and sizes are kept per workspace.
+- Statement-level blocks, `:ELSE` and `:CASE` arms, condition fields (L1).
+- Data sources and `:INCLUDE`s in the graph (L2).
+
 - Run a procedure in the sandbox through a configured command (the sandbox is
   private; the IDE would only call it).
 - Semantic token highlighting (L3).

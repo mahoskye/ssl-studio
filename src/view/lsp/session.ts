@@ -124,6 +124,24 @@ class Session {
 		}
 	}
 
+	/** The formatter's output for text not in any editor. */
+	async formatText(text: string, options: { tabSize: number; insertSpaces: boolean }): Promise<string> {
+		await this.ready();
+		const uri = monaco.Uri.file(`${this.root}/.ssl-studio/format-${++this.scratchCount}.ssl`).toString();
+		this.client.notify("textDocument/didOpen", { textDocument: { uri, languageId: "ssl", version: 1, text } });
+		try {
+			const edits = ((await this.client.request("textDocument/formatting", { textDocument: { uri }, options })) ?? []) as { range: Range; newText: string }[];
+			const lines = text.split("\n");
+			const offset = (p: { line: number; character: number }) => lines.slice(0, p.line).reduce((n, l) => n + l.length + 1, 0) + p.character;
+			let out = text;
+			for (const e of [...edits].sort((a, b) => offset(b.range.start) - offset(a.range.start)))
+				out = out.slice(0, offset(e.range.start)) + e.newText + out.slice(Math.min(out.length, offset(e.range.end)));
+			return out;
+		} finally {
+			this.client.notify("textDocument/didClose", { textDocument: { uri } });
+		}
+	}
+
 	private ready() {
 		return this.initialized ?? Promise.reject(new Error("language server not running"));
 	}

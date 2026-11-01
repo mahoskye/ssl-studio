@@ -32,6 +32,7 @@ const backend = createBackend(
 		trash: async (path) => {
 			Utils.moveToTrash(path);
 		},
+		clipboard: (text) => Utils.clipboardWriteText(text),
 	},
 	folder,
 );

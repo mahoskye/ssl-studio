@@ -1,5 +1,8 @@
 // Workspace search, results grouped by file.
-import { createSignal, For } from "solid-js";
+import { createResource, createSignal, For, Show } from "solid-js";
+import { monaco } from "../editor/monaco";
+import { symbolPath } from "../editor/regions";
+import { session } from "../lsp/session";
 import type { SearchHit } from "../../shared/protocol";
 import { backend } from "../backend";
 import { notify, openFile, state } from "../state";
@@ -22,6 +25,23 @@ export function Search() {
 	const groups = () => {
 		const map = new Map<string, SearchHit[]>();
 		for (const hit of hits()) map.set(hit.path, [...(map.get(hit.path) ?? []), hit]);
+		return [...map];
+	};
+	// Where each hit sits, region › procedure, from the server's symbols (first 40 files).
+	const [places] = createResource(groups, async (list) => {
+		const out = new Map<string, string>();
+		for (const [path, fileHits] of list.slice(0, 40)) {
+			const model = await session.ensureModel(monaco.Uri.file(path).toString());
+			if (!model || model.getLanguageId() !== "ssl") continue;
+			const symbols = await session.documentSymbols(model).catch(() => []);
+			for (const hit of fileHits) out.set(`${path}:${hit.line}:${hit.column}`, symbolPath(symbols, hit.line).filter((s) => s.kind === monaco.languages.SymbolKind.Namespace || s.kind === monaco.languages.SymbolKind.Function || s.kind === monaco.languages.SymbolKind.Method).map((s) => s.name).join(" › "));
+		}
+		return out;
+	});
+	const place = (hit: SearchHit) => places()?.get(`${hit.path}:${hit.line}:${hit.column}`) ?? "";
+	const byPlace = (list: SearchHit[]) => {
+		const map = new Map<string, SearchHit[]>();
+		for (const hit of list) map.set(place(hit), [...(map.get(place(hit)) ?? []), hit]);
 		return [...map];
 	};
 	const rel = (path: string) => (state.workspace ? path.slice(state.workspace.root.length + 1) : path);
@@ -48,7 +68,15 @@ export function Search() {
 								<span class="label">{rel(path)}</span>
 								<span class="meta">{list.length}</span>
 							</div>
-							<For each={list}>
+							<For each={byPlace(list)}>
+								{([where, placeHits]) => (
+									<>
+										<Show when={where}>
+											<div class="tree-row place" style={{ "padding-left": "16px" }}>
+												<span class="label">{where}</span>
+											</div>
+										</Show>
+										<For each={placeHits}>
 								{(hit) => (
 									<div class="tree-row hit" style={{ "padding-left": "22px" }} onClick={() => void openFile(hit.path, { reveal: { line: hit.line, column: hit.column, endLine: hit.line, endColumn: hit.column + hit.length } })}>
 										<span class="meta">{hit.line}</span>
@@ -58,6 +86,9 @@ export function Search() {
 											{hit.text.slice(hit.column - 1 + hit.length, hit.column + 80)}
 										</span>
 									</div>
+								)}
+										</For>
+									</>
 								)}
 							</For>
 						</>

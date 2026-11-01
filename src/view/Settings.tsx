@@ -1,11 +1,30 @@
 // Settings: theme, editor, format on save, the language server's path.
 import { createSignal, For, Show } from "solid-js";
 import { backend } from "./backend";
-import { onOpenSettings } from "./commands";
+import { commands, keysFor, onOpenSettings } from "./commands";
 import { loadSettings, notify, saveSetting, state } from "./state";
 
 export function SettingsDialog() {
 	const [open, setOpen] = createSignal(false);
+	const [capturing, setCapturing] = createSignal<string | null>(null);
+	window.addEventListener(
+		"keydown",
+		(e) => {
+			const id = capturing();
+			if (!id || ["Control", "Shift", "Alt", "Meta"].includes(e.key)) return;
+			e.preventDefault();
+			e.stopPropagation();
+			setCapturing(null);
+			if (e.key === "Escape") return;
+			const key = `${e.ctrlKey || e.metaKey ? "ctrl+" : ""}${e.altKey ? "alt+" : ""}${e.shiftKey ? "shift+" : ""}${e.key.toLowerCase()}`;
+			// Unbind the command's old keys, bind the new one.
+			const keys = { ...state.settings.keys };
+			for (const k of keysFor(id).toLowerCase().split(", ").filter(Boolean)) keys[k] = "";
+			keys[key] = id;
+			void saveSetting({ keys });
+		},
+		true,
+	);
 	onOpenSettings(() => setOpen(true));
 	const importTheme = async () => {
 		try {
@@ -48,6 +67,19 @@ export function SettingsDialog() {
 						starlims-lsp path (empty: find it)
 						<input value={state.settings.lspPath ?? ""} onChange={(e) => void saveSetting({ lspPath: e.currentTarget.value || undefined })} />
 					</label>
+					<details class="shortcuts">
+						<summary>Keyboard shortcuts</summary>
+						<For each={commands}>
+							{(c) => (
+								<div class="shortcut-row">
+									<span>{c.label}</span>
+									<span class="hint">{capturing() === c.id ? "press keys…" : keysFor(c.id) || "—"}</span>
+									<button onClick={() => setCapturing(c.id)}>Set</button>
+								</div>
+							)}
+						</For>
+						<button onClick={() => void saveSetting({ keys: {} })}>Reset to defaults</button>
+					</details>
 					<p class="hint">
 						Language server: {state.info?.lsp.path ?? "not found"} {state.info?.lsp.message ? `— ${state.info.lsp.message}` : ""}
 					</p>

@@ -56,6 +56,8 @@ export type Settings = {
 	agentServerConfig?: string;
 	/** Attach to a running opencode server instead of starting one ("url"; password from OPENCODE_SERVER_PASSWORD). */
 	agentServerUrl?: string;
+	/** Shortcut overrides: key ("ctrl+shift+x") to command id; "" unbinds a default. */
+	keys: Record<string, string>;
 };
 
 export type SettingsScope = "user" | "workspace";
@@ -92,6 +94,8 @@ export interface BackendApi {
 	agent(method: string, args: unknown[]): Promise<unknown>;
 	/** Self-test mode (SSL_STUDIO_SELFTEST=<report path>): the UI reports, then the app quits. */
 	selftestDone(report: object): Promise<void>;
+	/** Copies text with the app's clipboard; false when the host has none (the UI falls back). */
+	clipboard(text: string): Promise<boolean>;
 }
 
 export type BackendEvents = {
@@ -119,4 +123,5 @@ export const DEFAULT_SETTINGS: Settings = {
 	layout: { left: true, right: false, bottom: true, leftWidth: 260, rightWidth: 360, bottomHeight: 200 },
 	ssl: {},
 	stylePreset: "house",
+	keys: {},
 };

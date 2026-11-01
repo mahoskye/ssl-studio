@@ -13,6 +13,7 @@ export type Host = {
 	/** A native folder or file dialog; null when cancelled or unavailable. */
 	pick(kind: "folder" | "file"): Promise<string | null>;
 	trash(path: string): Promise<void>;
+	clipboard?(text: string): void;
 	app: string;
 	kind: "app" | "browser";
 	quit(): void;
@@ -106,6 +107,11 @@ export function createBackend(host: Host, initial?: string) {
 			const { effective } = await settings.load();
 			agent.configure({ serverConfig: effective.agentServerConfig, serverUrl: effective.agentServerUrl, model: effective.agentModel });
 			return agent.call(method, args);
+		},
+		clipboard: async (text) => {
+			if (!host.clipboard) return false;
+			host.clipboard(text);
+			return true;
 		},
 		selftestDone: async (report) => {
 			const path = process.env.SSL_STUDIO_SELFTEST;

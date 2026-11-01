@@ -3,12 +3,15 @@ import { ask } from "./dialogs";
 import { activeEditor } from "./editor/EditorGroup";
 import { backend, inApp } from "./backend";
 import { monaco } from "./editor/monaco";
+import { session } from "./lsp/session";
+import { symbols } from "./panels/Objects";
+import { symbolPath } from "./editor/regions";
 import { openStyleProfile } from "./StyleProfile";
 import { insertTemplate } from "./panels/Palette";
 import { TEMPLATES } from "../shared/houseStyle";
 import { askAbout } from "./agent/Agent";
 import { startTidy } from "./agent/tidy";
-import { activePath, closeTab, openFolder, revert, save, saveAll, setState, split, state } from "./state";
+import { activePath, closeTab, notify, openFolder, revert, save, saveAll, setState, split, state } from "./state";
 
 export type Command = { id: string; label: string; keys?: string; run: () => void };
 
@@ -24,6 +27,7 @@ export const commands: Command[] = [
 	{ id: "close", label: "Close editor", keys: "Ctrl+W", run: () => activePath() && void closeTab(activePath()!) },
 	{ id: "split", label: "Split editor", keys: "Ctrl+\\", run: split },
 	{ id: "blocks", label: "Toggle blocks view", keys: "Ctrl+Shift+B", run: () => setState("groups", state.activeGroup, "mode", (m) => (m === "blocks" ? "text" : "blocks")) },
+	{ id: "copy-designer", label: "Copy for Designer (selection, procedure or file, formatted)", keys: "Ctrl+Shift+C", run: () => void copyForDesigner() },
 	{ id: "wrap-region", label: "Wrap the selected lines in a region…", run: () => void wrapInRegion() },
 	{ id: "graph", label: "Show the call graph", keys: "Ctrl+Shift+G", run: () => setState("centerView", state.centerView === "graph" ? "editors" : "graph") },
 	{ id: "format", label: "Format document", keys: "Ctrl+Shift+I", run: () => void activeEditor()?.getAction("editor.action.formatDocument")?.run() },
@@ -77,6 +81,31 @@ async function wrapInRegion() {
 	editor.focus();
 }
 
+/** The selection, else the procedure at the cursor, else the file: formatted, then copied. */
+async function copyForDesigner() {
+	const editor = activeEditor();
+	const model = editor?.getModel();
+	if (!editor || !model) return;
+	const selection = editor.getSelection();
+	let text: string;
+	let what: string;
+	if (selection && !selection.isEmpty()) {
+		text = model.getValueInRange(selection);
+		what = "selection";
+	} else {
+		const path = symbolPath(symbols(), editor.getPosition()!.lineNumber);
+		const proc = [...path].reverse().find((s) => s.kind === monaco.languages.SymbolKind.Function || s.kind === monaco.languages.SymbolKind.Method);
+		text = proc ? model.getValueInRange(new monaco.Range(proc.range.startLineNumber, 1, proc.range.endLineNumber, model.getLineMaxColumn(proc.range.endLineNumber))) : model.getValue();
+		what = proc ? `procedure ${proc.name}` : "file";
+	}
+	if (model.getLanguageId() === "ssl" && state.lsp.state === "running") {
+		const options = model.getOptions();
+		text = await session.formatText(text, { tabSize: options.tabSize, insertSpaces: options.insertSpaces }).catch(() => text);
+	}
+	const copied = (await backend.clipboard(text).catch(() => false)) || (await navigator.clipboard?.writeText(text).then(() => true, () => false));
+	notify(copied ? `Copied the ${what}, formatted, for Designer.` : "Could not reach the clipboard.", copied ? "info" : "error");
+}
+
 async function askCommand() {
 	const question = await ask("Ask the agent about the selection");
 	if (!question) return;
@@ -92,7 +121,7 @@ async function openFolderCommand() {
 	if (path) await openFolder(path);
 }
 
-const KEYS: Record<string, string> = {
+export const DEFAULT_KEYS: Record<string, string> = {
 	"ctrl+o": "open-folder",
 	"ctrl+p": "quick-open",
 	"ctrl+t": "symbols",
@@ -110,14 +139,32 @@ const KEYS: Record<string, string> = {
 	"ctrl+shift+a": "agent-ask",
 	"ctrl+shift+b": "blocks",
 	"ctrl+shift+g": "graph",
+	"ctrl+shift+c": "copy-designer",
+	"ctrl+shift+i": "format",
 };
+
+/** The default shortcuts with the user's overrides ("" unbinds). */
+export function keymap(): Record<string, string> {
+	const map: Record<string, string> = { ...DEFAULT_KEYS };
+	for (const [key, id] of Object.entries(state.settings.keys ?? {})) {
+		if (id) map[key.toLowerCase()] = id;
+		else delete map[key.toLowerCase()];
+	}
+	return map;
+}
+
+export const keysFor = (id: string) =>
+	Object.entries(keymap())
+		.filter(([, c]) => c === id)
+		.map(([k]) => k.replace(/\b\w/g, (c) => c.toUpperCase()))
+		.join(", ");
 
 export function installKeys() {
 	window.addEventListener(
 		"keydown",
 		(e) => {
 			const key = `${e.ctrlKey || e.metaKey ? "ctrl+" : ""}${e.altKey ? "alt+" : ""}${e.shiftKey ? "shift+" : ""}${e.key.toLowerCase()}`;
-			const id = KEYS[key];
+			const id = keymap()[key];
 			if (!id) return;
 			e.preventDefault();
 			e.stopPropagation();

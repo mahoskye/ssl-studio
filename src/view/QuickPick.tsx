@@ -1,7 +1,7 @@
 // Ctrl+P files, Ctrl+Shift+P commands, Ctrl+T workspace symbols.
 import { createEffect, createMemo, createResource, createSignal, For, Show } from "solid-js";
 import { backend } from "./backend";
-import { commands } from "./commands";
+import { commands, keysFor } from "./commands";
 import { monaco } from "./editor/monaco";
 import { session } from "./lsp/session";
 import { openFile, setState, state } from "./state";
@@ -46,7 +46,7 @@ export function QuickPick() {
 		let list: Item[] = [];
 		if (mode === "files")
 			list = (files() ?? []).map((path) => ({ label: path.split("/").pop()!, detail: rel(path), run: () => void openFile(path) }));
-		if (mode === "commands") list = commands.map((c) => ({ label: c.label, detail: c.keys, run: c.run }));
+		if (mode === "commands") list = commands.map((c) => ({ label: c.label, detail: keysFor(c.id), run: c.run }));
 		if (mode === "symbols")
 			return (symbols() ?? []).slice(0, 200).map((s) => {
 				const path = monaco.Uri.parse(s.location.uri).fsPath;

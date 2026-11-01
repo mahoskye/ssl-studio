@@ -280,3 +280,6 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .g-edge { fill: none; stroke: var(--muted); opacity: .7; }
 .g-edge.cross { stroke: var(--accent); opacity: .9; }
 .arrow { fill: var(--muted); }
+.tree-row.place .label { color: var(--accent); font-size: 12px; }
+.shortcuts { font-size: 12px; max-height: 40vh; overflow: auto; }
+.shortcut-row { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: center; padding: 2px 0; }

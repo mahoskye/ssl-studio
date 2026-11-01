@@ -97,7 +97,9 @@ export function BlocksView(props: { path: string; group: number }) {
 	const lines = (n: Node) => doc()!.model.getValueInRange(new monaco.Range(n.start, 1, n.end, doc()!.model.getLineMaxColumn(n.end)));
 	const firstLine = (n: Node) => doc()!.model.getLineContent(n.start);
 	const selectedKey = () => {
-		if (!tree.root || state.activeGroup !== props.group) return null;
+		// Follows the text cursor of whichever group shows this file: side by side, the blocks track the text.
+		const active = state.groups[state.activeGroup]?.active;
+		if (!tree.root || active !== props.path) return null;
 		const path = pathTo(tree.root, state.cursor.line);
 		return path.at(-1)?.key ?? null;
 	};
