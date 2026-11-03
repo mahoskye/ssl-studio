@@ -48,13 +48,16 @@ server, symbols, diagnostics, hover and format with undo, writes
 
 ## Windows (the remote machine)
 
-The remote machine runs Windows (2026-11-01). Two ways to a build:
+The remote machine runs Windows (2026-11-01). Three ways to a build:
 
 - **CI:** `.github/workflows/build.yml` builds on Windows, Linux and macOS
   once the repository is on GitHub, and uploads each OS's installer with the
   pinned language server inside.
 - **A Windows checkout:** the steps above, in Git Bash or PowerShell, with
-  Bun and Node installed.
+  Bun, Node and the Visual C++ runtime installed (`winget install
+  Microsoft.VCRedist.2015+.x64`). Hutch's runtime libraries need the last
+  one, and a fresh Windows does not have it: without it the Vite step fails
+  with "compression.dll: The specified module could not be found".
 - **A test VM on Linux:** [tools/windows-vm](../tools/windows-vm/README.md)
   sets up Microsoft's Windows 11 evaluation in QEMU, builds there and runs
   the self-test in its desktop.

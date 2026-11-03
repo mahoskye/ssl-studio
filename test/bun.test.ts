@@ -7,6 +7,7 @@ import { History } from "../src/bun/history";
 import { merge } from "../src/bun/settings";
 import { compareVersions } from "../src/bun/tools";
 import { WorkspaceFiles } from "../src/bun/workspace";
+import { fitWindow } from "../src/bun/window";
 
 const dir = mkdtempSync(join(tmpdir(), "ssl-studio-test-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -87,4 +88,19 @@ test("the style preset sits under the overrides", () => {
 	expect(house.ssl.format.maxLineLength).toBe(120);
 	const server = merge({ stylePreset: "server", ssl: { format: { maxLineLength: 120 } } });
 	expect(server.ssl).toEqual({ format: { maxLineLength: 120 } });
+});
+
+describe("the first window frame", () => {
+	test("keeps 1400 by 900 on a large screen", () => {
+		expect(fitWindow({ x: 0, y: 0, width: 2560, height: 1400 })).toEqual({ x: 80, y: 60, width: 1400, height: 900 });
+	});
+	test("fills a small screen's work area", () => {
+		expect(fitWindow({ x: 0, y: 0, width: 1280, height: 752 })).toEqual({ x: 0, y: 0, width: 1280, height: 752 });
+	});
+	test("moves in only as far as the screen allows", () => {
+		expect(fitWindow({ x: 0, y: 30, width: 1440, height: 870 })).toEqual({ x: 40, y: 30, width: 1400, height: 870 });
+	});
+	test("an unknown screen keeps the wanted frame", () => {
+		expect(fitWindow({ x: 0, y: 0, width: 0, height: 0 })).toEqual({ x: 80, y: 60, width: 1400, height: 900 });
+	});
 });

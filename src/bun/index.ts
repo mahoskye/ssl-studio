@@ -1,10 +1,11 @@
 // The desktop app: one Electrobun window, the backend over Electrobun's RPC.
 //
 //   hutch run start [folder]
-import { BrowserView, BrowserWindow, Utils } from "electrobun/main";
+import { BrowserView, BrowserWindow, Screen, Utils } from "electrobun/main";
 import type { ElectrobunRPCSchema, RPCSchema } from "electrobun/main";
 import type { BackendEvents } from "../shared/protocol";
 import { createBackend, dispatch } from "./backend";
+import { fitWindow } from "./window";
 import { homedir } from "node:os";
 
 type Schema = {
@@ -55,7 +56,7 @@ new BrowserWindow({
 	title: "SSL Studio",
 	url: "views://main/index.html",
 	rpc,
-	frame: { width: 1400, height: 900, x: 80, y: 60 },
+	frame: fitWindow(Screen.getPrimaryDisplay().workArea),
 });
 
 process.on("exit", () => backend.dispose());

@@ -15,6 +15,12 @@ const suffix = process.platform === "win32" ? ".exe" : "";
 const target = join(vendor, `starlims-lsp${suffix}`);
 mkdirSync(vendor, { recursive: true });
 
+async function versionOf(path: string) {
+	if (!existsSync(path)) return undefined;
+	const out = await $`${path} --version`.nothrow().quiet().text();
+	return /starlims-lsp version (\S+)/.exec(out)?.[1];
+}
+
 if (process.argv.includes("--download")) {
 	const platform = process.platform === "win32" ? "windows" : process.platform;
 	const arch = process.arch === "arm64" ? "arm64" : "amd64";
@@ -29,6 +35,8 @@ if (process.argv.includes("--download")) {
 	await fetchTo(`${release}/${asset}`, target);
 	await fetchTo(`${release}/THIRD-PARTY-NOTICES.md`, join(vendor, "THIRD-PARTY-NOTICES.md"));
 	await fetchTo(`https://raw.githubusercontent.com/mahoskye/starlims-lsp/v${LSP_PIN}/LICENSE`, join(vendor, "STARLIMS-LSP-LICENSE"));
+} else if ((await versionOf(target)) === LSP_PIN && existsSync(join(vendor, "STARLIMS-LSP-LICENSE"))) {
+	// Already here, from an earlier --download (CI and the Windows VM do that first).
 } else {
 	const found = await findLsp();
 	if (!found.ok || found.version !== LSP_PIN) throw new Error(`No local starlims-lsp ${LSP_PIN} (found: ${found.version ?? "none"}). Use --download.`);
