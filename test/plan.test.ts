@@ -15,7 +15,8 @@ describe("reading and printing a plan", () => {
 		expect(isPlanPath(null)).toBe(false);
 	});
 	test("the sample round-trips byte for byte", () => {
-		expect(printPlan(parsed(sample))).toBe(sample);
+		// A Windows checkout may give the file CRLF; a plan prints LF, and the editor applies its own.
+		expect(printPlan(parsed(sample))).toBe(sample.replace(/\r\n/g, "\n"));
 	});
 	test("keeps fields it does not know", () => {
 		const plan = parsed(JSON.stringify({ version: 1, title: "t", nodes: [{ id: "n1", kind: "step", text: "x", future: 1 }], edges: [], decisions: [{ q: "why" }] }));
