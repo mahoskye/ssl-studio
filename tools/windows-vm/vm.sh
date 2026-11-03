@@ -4,8 +4,10 @@
 # devices Windows has drivers for out of the box (SATA disk, e1000e network).
 # SSH from the host reaches the guest on 127.0.0.1:2222 only.
 #
-#   tools/windows-vm/vm.sh install <Win11_Enterprise_Eval.iso>   first boot, from the ISO
-#   tools/windows-vm/vm.sh run                                    later boots
+#   tools/windows-vm/vm.sh install <Win11_Enterprise_Eval.iso>   first boot, from the ISO (detached)
+#   tools/windows-vm/vm.sh run                                    later boots (detached)
+#   tools/windows-vm/vm.sh screen                                 a screenshot of the guest, as PNG
+#   tools/windows-vm/vm.sh serve                                  enable-ssh.ps1 and the host key, for the guest
 #   tools/windows-vm/vm.sh push                                   copy this repo in (git bundle)
 #   tools/windows-vm/vm.sh ssh [command]                          a shell in the guest
 #   tools/windows-vm/vm.sh fetch                                  the guest's selftest.json and log
@@ -22,6 +24,9 @@ CODE=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd
 VARS_TEMPLATE=/usr/share/OVMF/OVMF_VARS_4M.ms.fd
 SSH_PORT="${SSL_STUDIO_VM_SSH_PORT:-2222}"
 SSH_USER="${SSL_STUDIO_VM_USER:-tester}"
+# A key of the VM's own, without a passphrase: it opens nothing but this VM.
+KEY="$VM/id_ed25519"
+SERVE_PORT=8765
 CPUS="${SSL_STUDIO_VM_CPUS:-4}"
 MEMORY="${SSL_STUDIO_VM_MEMORY:-8G}"
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -50,8 +55,10 @@ start_tpm() {
 
 boot() {
 	local extra=("$@")
+	pgrep -f "^qemu-system-x86_64 -name ssl-studio-win11" >/dev/null && { echo "the VM is already running" >&2; exit 1; }
 	start_tpm
-	exec qemu-system-x86_64 \
+	# Its own session, so closing the terminal that started it does not stop it.
+	setsid qemu-system-x86_64 \
 		-name ssl-studio-win11 \
 		-enable-kvm -machine q35,smm=on -cpu host -smp "$CPUS" -m "$MEMORY" \
 		-global driver=cfi.pflash01,property=secure,value=on \
@@ -62,10 +69,13 @@ boot() {
 		-netdev user,id=net0,hostfwd=tcp:127.0.0.1:"$SSH_PORT"-:22 -device e1000e,netdev=net0 \
 		-device qemu-xhci -device usb-tablet \
 		-vga virtio -display gtk \
-		"${extra[@]}"
+		-monitor unix:"$VM/monitor.sock",server,nowait \
+		"${extra[@]}" </dev/null >"$VM/qemu.log" 2>&1 &
+	echo "VM started (log: $VM/qemu.log)."
 }
 
-ssh_guest() { ssh -p "$SSH_PORT" -o StrictHostKeyChecking=accept-new "$SSH_USER@127.0.0.1" "$@"; }
+SSH_OPTS=(-i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new)
+ssh_guest() { ssh -p "$SSH_PORT" "${SSH_OPTS[@]}" "$SSH_USER@127.0.0.1" "$@"; }
 
 case "${1:-}" in
 install)
@@ -78,11 +88,32 @@ run)
 	prepare
 	boot
 	;;
+screen)
+	# A screendump through the QEMU monitor, for seeing where setup is.
+	need socat socat
+	rm -f "$VM/screen.ppm"
+	echo "screendump $VM/screen.ppm" | socat - UNIX-CONNECT:"$VM/monitor.sock" >/dev/null
+	for _ in $(seq 30); do [[ -s $VM/screen.ppm ]] && break; sleep 0.1; done
+	python3 -c 'import sys; from PIL import Image; Image.open(sys.argv[1]).save(sys.argv[2])' "$VM/screen.ppm" "$VM/screen.png"
+	echo "$VM/screen.png"
+	;;
+serve)
+	# QEMU's user network shows the host's loopback to the guest as 10.0.2.2, so
+	# this binds to 127.0.0.1 and nothing outside the machine can reach it. Only
+	# the script and the public key are in the served folder.
+	mkdir -p "$VM"
+	[[ -f $KEY ]] || ssh-keygen -q -t ed25519 -N "" -C ssl-studio-vm -f "$KEY"
+	dir="$(mktemp -d)"
+	cp "$REPO/tools/windows-vm/enable-ssh.ps1" "$dir/"
+	cp "$KEY.pub" "$dir/host-key.txt"  # .txt, so it is served as text/plain
+	echo "In the guest, in PowerShell as administrator: irm http://10.0.2.2:$SERVE_PORT/enable-ssh.ps1 | iex"
+	exec python3 -m http.server --bind 127.0.0.1 --directory "$dir" "$SERVE_PORT"
+	;;
 push)
 	# The repo is not published: hand the guest a bundle of main plus the provisioning scripts.
 	bundle="$(mktemp -d)/ssl-studio.bundle"
 	git -C "$REPO" bundle create "$bundle" main
-	scp -P "$SSH_PORT" -o StrictHostKeyChecking=accept-new "$bundle" "$REPO/tools/windows-vm/provision.ps1" "$REPO/tools/windows-vm/selftest.ps1" "$SSH_USER@127.0.0.1:"
+	scp -P "$SSH_PORT" "${SSH_OPTS[@]}" "$bundle" "$REPO/tools/windows-vm/provision.ps1" "$REPO/tools/windows-vm/selftest.ps1" "$SSH_USER@127.0.0.1:"
 	echo "Copied. In the guest: powershell -ExecutionPolicy Bypass -File provision.ps1"
 	;;
 ssh)
@@ -91,7 +122,7 @@ ssh)
 	;;
 fetch)
 	# The guest's last self-test report and log, into the VM folder.
-	scp -P "$SSH_PORT" "$SSH_USER@127.0.0.1:ssl-studio/selftest.json" "$SSH_USER@127.0.0.1:selftest.log" "$VM/" && cat "$VM/selftest.json"
+	scp -P "$SSH_PORT" "${SSH_OPTS[@]}" "$SSH_USER@127.0.0.1:ssl-studio/selftest.json" "$SSH_USER@127.0.0.1:selftest.log" "$VM/" && cat "$VM/selftest.json"
 	;;
 *)
 	sed -n '2,14p' "$0"
