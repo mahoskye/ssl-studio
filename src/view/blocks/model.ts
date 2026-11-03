@@ -17,10 +17,15 @@ export type Node = {
 	end: number;
 	name?: string;
 	params?: string[];
+	/** A block's opening statement, when the server gives it on one line (L1). */
+	header?: Header;
 	children: Node[];
 	/** Stable across edits that do not move the node: kind, name and start. */
 	key: string;
 };
+
+/** A one-line statement's place: 1-based line, Monaco columns (end exclusive), and its keyword. */
+export type Header = { line: number; startColumn: number; endColumn: number; keyword: string };
 
 // LSP SymbolKind, 1-based as the server sends it.
 const NAMESPACE = 3;
@@ -164,7 +169,7 @@ export function treeFromSyntax(lines: string[], nodes: SyntaxNodeIn[], paramsOf?
 		// own first line: its body is the block's body, the later arms nest inside.
 		if ((n.kind === "if" || n.kind === "try") && n.children?.[0]?.kind === "branch" && n.children[0].range.start.line === n.range.start.line) {
 			const [first, ...rest] = n.children;
-			n = { ...n, children: [...(first!.children ?? []), ...rest] };
+			n = { ...n, keyword: first!.keyword, headerRange: first!.headerRange, children: [...(first!.children ?? []), ...rest] };
 		}
 		const start = n.range.start.line + 1;
 		const end = Math.min(count, lastLine(n.range) + 1);
@@ -177,10 +182,27 @@ export function treeFromSyntax(lines: string[], nodes: SyntaxNodeIn[], paramsOf?
 		const kind = viewKind(n.kind, children.length > 0);
 		const params = kind === "procedure" ? paramsOf?.(n.name ?? "") : undefined;
 		const node: Node = { kind, start, end, name: n.name, params, children: [], key: `${kind}:${n.name ?? ""}:${start}` };
+		const h = n.headerRange;
+		if (kind === "block" && h && n.keyword && h.start.line === h.end.line && h.start.line + 1 === start)
+			node.header = { line: start, startColumn: h.start.character + 1, endColumn: h.end.character + 1, keyword: n.keyword };
 		parent.children.push(node);
 		if (!LEAVES.has(kind) && kind !== "comment") for (const c of children) convert(c, node);
 	};
 	for (const n of nodes) convert(n, root);
 	fill(root, lines);
 	return root;
+}
+
+/**
+ * A header statement split around what follows its keyword, the part a block
+ * edits as a field: `:IF ` · `a > b` · `;`. The server's range ends at the
+ * statement's own `;`, so one inside a string stays in the condition. Null
+ * when nothing follows the keyword (`:ELSE;`, `:BEGINCASE;`).
+ */
+export function splitHeader(text: string, keyword: string): { before: string; condition: string; after: string } | null {
+	const open = new RegExp(`^:${keyword.replace(/[^A-Za-z]/g, "")}(?![A-Za-z0-9_])\\s*`, "i").exec(text);
+	if (!open || !text.endsWith(";")) return null;
+	const condition = text.slice(open[0].length, -1).trimEnd();
+	if (!condition || /[\r\n]/.test(condition)) return null;
+	return { before: open[0], condition, after: text.slice(open[0].length + condition.length) };
 }

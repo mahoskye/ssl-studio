@@ -7,7 +7,7 @@ Ranked. Each milestone ends in something usable.
 **Mostly done (2026-11-01)**, results in [spikes/M0.md](spikes/M0.md).
 Monaco works in WebKitGTK and in the Electrobun window, the LSP bridge works
 over Electrobun's RPC, opencode's API is mapped and tried on the local
-model, Solid chosen. Left: the remote machine's details.
+model, Solid chosen. The remote machine turned out to be Windows (see M6).
 
 - An Electrobun window on Linux running Monaco with the TextMate grammar and
   a VS Code theme, talking to `starlims-lsp --stdio` through Bun. Decide CEF
@@ -65,8 +65,10 @@ data for every fixture.
 With L1 (the server's `ssl/syntaxTree`, released in starlims-lsp 0.29.0 on
 2026-11-03, the pinned version): statement-level chips,
 `:ELSE`/`:CASE`/`:CATCH` arms as their own blocks, unreadable spans as raw
-blocks. The self-test checks the tree on Linux and Windows. Left: condition fields edited apart from their
-keyword (the tree's `headerRange` makes that possible).
+blocks. The self-test checks the tree on Linux and Windows. A block's header
+shows its condition as a field (`:IF` · `Empty(sSampleId)` · `;`), cut from
+the server's `headerRange`; editing it replaces only that span, as one undo
+step (2026-11-03).
 
 1. Read-only blocks view, synced selection with text mode, region frames with
    colours, collapse. The round-trip coverage test over all fixtures.
@@ -125,9 +127,6 @@ release build, installer, self-test and opencode 2.2.5 pass.
 
 ## Later
 
-- Condition fields edited apart from their keyword (L1's `headerRange`).
-
 - Run a procedure in the sandbox through a configured command (the sandbox is
   private; the IDE would only call it).
 - Semantic token highlighting (L3).
-- Copy for Designer.

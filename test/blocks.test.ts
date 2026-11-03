@@ -63,7 +63,7 @@ test("swapping siblings keeps what is between them", () => {
 	expect(neighbour(root, validation!, 1)).toBe(labels);
 });
 
-import { treeFromSyntax, type SyntaxNodeIn } from "../src/view/blocks/model";
+import { splitHeader, treeFromSyntax, type SyntaxNodeIn } from "../src/view/blocks/model";
 
 describe("blocks tree from ssl/syntaxTree (shape version 1)", () => {
 	const r = (a: number, b: number, endChar = 9) => ({ start: { line: a, character: 0 }, end: { line: b, character: endChar } });
@@ -129,9 +129,39 @@ describe("blocks tree from ssl/syntaxTree (shape version 1)", () => {
 		// IF body, the ELSE arm, then the :ENDIF line.
 		expect(ifBlock.children.map((c) => `${c.kind}:${c.start}`)).toEqual(["text:7", "block:8", "text:10"]);
 	});
+	test("blocks carry their one-line header, the IF's from its first branch", () => {
+		const root = treeFromSyntax(lines, tree, params);
+		const proc = root.children.find((c) => c.kind === "region")!.children.find((c) => c.kind === "procedure")!;
+		const ifBlock = proc.children.find((c) => c.kind === "block")!;
+		expect(ifBlock.header).toEqual({ line: 6, startColumn: 1, endColumn: 10, keyword: "IF" });
+		expect(ifBlock.children.find((c) => c.kind === "block")!.header?.keyword).toBe("ELSE");
+		expect(proc.header).toBeUndefined();
+	});
 	test("an unknown kind degrades to a block or a chip", () => {
 		const root = treeFromSyntax(["a", "b", "c"], [{ kind: "somethingNew", range: r(0, 2), children: [{ kind: "alsoNew", range: r(1, 1) }] }]);
 		expect(root.children[0]!.kind).toBe("block");
 		expect(coveredLines(root)).toEqual([1, 2, 3]);
+	});
+});
+
+describe("a block header's condition", () => {
+	// Header texts as starlims-lsp 0.29.0 reports them (headerRange, end exclusive).
+	test("splits around what follows the keyword", () => {
+		expect(splitHeader(":IF a > b;", "IF")).toEqual({ before: ":IF ", condition: "a > b", after: ";" });
+		expect(splitHeader(":WHILE  nI < 10 ;", "WHILE")).toEqual({ before: ":WHILE  ", condition: "nI < 10", after: " ;" });
+		expect(splitHeader(":FOR nI := 1 :TO 10;", "FOR")?.condition).toBe("nI := 1 :TO 10");
+		expect(splitHeader(":if lower_case;", "IF")?.condition).toBe("lower_case");
+	});
+	test("keeps a semicolon inside a string", () => {
+		expect(splitHeader(':IF a > b .AND. s = "x;y";', "IF")?.condition).toBe('a > b .AND. s = "x;y"');
+	});
+	test("has nothing to edit after :ELSE, :OTHERWISE or :BEGINCASE", () => {
+		expect(splitHeader(":ELSE;", "ELSE")).toBeNull();
+		expect(splitHeader(":OTHERWISE;", "OTHERWISE")).toBeNull();
+		expect(splitHeader(":BEGINCASE;", "BEGINCASE")).toBeNull();
+	});
+	test("refuses text that is not that keyword's statement", () => {
+		expect(splitHeader(":IFX a;", "IF")).toBeNull();
+		expect(splitHeader(":IF a", "IF")).toBeNull();
 	});
 });

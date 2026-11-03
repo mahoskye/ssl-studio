@@ -10,7 +10,7 @@ import { regionColor } from "../editor/regions";
 import { session } from "../lsp/session";
 import { ask, choose } from "../dialogs";
 import { documents, notify, setState, state } from "../state";
-import { buildTree, neighbour, pathTo, swapLines, treeFromSyntax, type Node, type SymbolIn } from "./model";
+import { buildTree, neighbour, pathTo, splitHeader, swapLines, treeFromSyntax, type Node, type SymbolIn } from "./model";
 
 const collapsedByPath = new Map<string, Set<string>>();
 
@@ -185,6 +185,38 @@ export function BlocksView(props: { path: string; group: number }) {
 		if ((await choose(`Delete ${n.name ?? `lines ${n.start}-${n.end}`}? Undo brings it back.`, ["Delete"])) !== "Delete") return;
 		replaceLines(n.start, n.end, null);
 	};
+	/**
+	 * An in-place editor's text, set once as it opens: bound reactively, a tree
+	 * refresh while it is open would write the old text over what is typed.
+	 */
+	const opened = (el: HTMLInputElement | HTMLTextAreaElement, text: string, select = false) => {
+		el.value = text;
+		queueMicrotask(() => (el.focus(), select && el.select()));
+	};
+	/** A block header's condition (`:IF a > b;` → `a > b`), read fresh from the text. */
+	const headerParts = (n: Node) => {
+		const h = n.header;
+		if (!h) return null;
+		const model = doc()!.model;
+		const split = splitHeader(model.getValueInRange(new monaco.Range(h.line, h.startColumn, h.line, h.endColumn)), h.keyword);
+		return split && { ...split, rest: model.getLineContent(h.line).slice(h.endColumn - 1) };
+	};
+	const conditionKey = (n: Node) => `${n.key}:condition`;
+	/** Replaces only the condition, as one undoable edit; keyword, spacing and `;` stay as written. */
+	const commitCondition = (n: Node, value: string) => {
+		if (editing() !== conditionKey(n)) return;
+		setEditing(null);
+		const parts = headerParts(n);
+		const condition = value.trim();
+		if (!parts || condition === parts.condition) return;
+		if (!condition) return notify("A condition cannot be empty; edit the statement in text to remove it.");
+		const h = n.header!;
+		const from = h.startColumn + parts.before.length;
+		const model = doc()!.model;
+		model.pushStackElement();
+		model.pushEditOperations([], [{ range: new monaco.Range(h.line, from, h.line, from + parts.condition.length), text: condition }], () => null);
+		model.pushStackElement();
+	};
 	const commitEdit = (n: Node, text: string) => {
 		setEditing(null);
 		if (text !== lines(n)) replaceLines(n.start, n.end, text);
@@ -225,6 +257,42 @@ export function BlocksView(props: { path: string; group: number }) {
 			</button>
 		</span>
 	);
+
+	/** A block's first line: keyword, an editable condition field, and the rest as written. */
+	const HeadLine = (props: { node: Node }) => {
+		const n = props.node;
+		return (
+			<Show when={headerParts(n)} fallback={<Code text={firstLine(n).trim()} />}>
+				{(parts) => (
+					<span class="b-head-line">
+						<Code text={parts().before.trim()} />
+						<Show
+							when={editing() === conditionKey(n)}
+							fallback={
+								<span class="b-cond" title="Click to edit the condition" onClick={(e) => (e.stopPropagation(), setEditing(conditionKey(n)))} onDblClick={(e) => e.stopPropagation()}>
+									<Code text={parts().condition} />
+								</span>
+							}
+						>
+							<input
+								class="b-cond-edit"
+								ref={(el) => opened(el, parts().condition, true)}
+								size={Math.max(8, parts().condition.length + 2)}
+								onClick={(e) => e.stopPropagation()}
+								onDblClick={(e) => e.stopPropagation()}
+								onKeyDown={(e) => {
+									if (e.key === "Escape") setEditing(null);
+									if (e.key === "Enter") commitCondition(n, e.currentTarget.value);
+								}}
+								onBlur={(e) => commitCondition(n, e.currentTarget.value)}
+							/>
+						</Show>
+						<Code text={(parts().after + parts().rest).trim()} />
+					</span>
+				)}
+			</Show>
+		);
+	};
 
 	const Children = (props: { node: Node }) => <For each={props.node.children}>{(child) => <Block node={child} />}</For>;
 
@@ -273,7 +341,7 @@ export function BlocksView(props: { path: string; group: number }) {
 				</Match>
 				<Match when={n.kind === "block"}>
 					<section class="b-block" classList={{ selected: selectedKey() === n.key }}>
-						{header(<Code text={firstLine(n).trim()} />, n.end - n.start > 1 ? size : undefined)}
+						{header(<HeadLine node={n} />, n.end - n.start > 1 ? size : undefined)}
 						<Show when={!isCollapsed(n)}>
 							<div class="block-body">
 								<Children node={n} />
@@ -302,8 +370,7 @@ export function BlocksView(props: { path: string; group: number }) {
 					>
 						<textarea
 							class="b-edit"
-							ref={(el) => queueMicrotask(() => el.focus())}
-							value={lines(n)}
+							ref={(el) => opened(el, lines(n))}
 							rows={n.end - n.start + 1}
 							onKeyDown={(e) => {
 								if (e.key === "Escape") setEditing(null);
@@ -316,7 +383,7 @@ export function BlocksView(props: { path: string; group: number }) {
 				<Match when={n.kind === "raw"}>
 					<div class="b-text b-raw" classList={{ selected: selectedKey() === n.key }} title="The language server could not read this; it is kept as written. Double-click to edit." onClick={() => select(n)} onDblClick={() => setEditing(n.key)}>
 						<Show when={editing() === n.key} fallback={<Code text={lines(n)} />}>
-							<textarea class="b-edit" ref={(el) => queueMicrotask(() => el.focus())} value={lines(n)} rows={n.end - n.start + 1} onKeyDown={(e) => e.key === "Escape" && setEditing(null)} onBlur={(e) => commitEdit(n, e.currentTarget.value)} />
+							<textarea class="b-edit" ref={(el) => opened(el, lines(n))} rows={n.end - n.start + 1} onKeyDown={(e) => e.key === "Escape" && setEditing(null)} onBlur={(e) => commitEdit(n, e.currentTarget.value)} />
 						</Show>
 					</div>
 				</Match>
