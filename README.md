@@ -84,6 +84,19 @@ edits the file in the editor, and you save it.
 | Ctrl+Shift+A | Ask the agent about the selection |
 | F1 | Editor commands |
 
+## License
+
+SSL Studio is MIT licensed ([LICENSE](LICENSE)). Every build carries
+`THIRD-PARTY-NOTICES.md` with the licenses of what it ships:
+
+- Monaco, Solid, vscode-textmate and vscode-oniguruma (MIT), elkjs (EPL-2.0,
+  unmodified) and the Codicons font (CC BY 4.0);
+- the desktop runtime: Bun and Electrobun (MIT) with the libraries they
+  link, and on Windows Microsoft's WebView2 loader.
+  [third-party/](third-party/README.md) has those texts and where each comes
+  from;
+- starlims-lsp (MIT), whose license and notices sit beside it in `bin/`.
+
 ## Disclaimer
 
 This is an unofficial community project and is not affiliated with, endorsed
