@@ -127,6 +127,13 @@ release build, installer, self-test and opencode 2.2.5 pass.
 
 ## Later
 
+- **Planning mode (idea, 2026-11-03, not designed yet).** Design a process or
+  script as a flow chart, then hand it to an agent that takes over and works
+  through the details to build it. To settle when this is picked up: a chart
+  describes code that does not exist yet, so it cannot be a view of the text
+  as blocks and graph are (ADR 0002), and needs a place of its own to live.
+  The agent would work as the tidy steps do, with the IDE supplying the files
+  and each change reviewed (ADR 0004).
 - Run a procedure in the sandbox through a configured command (the sandbox is
   private; the IDE would only call it).
 - Semantic token highlighting (L3).
