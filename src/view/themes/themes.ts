@@ -3,6 +3,7 @@
 // become CSS variables for the panels, tabs and status bar.
 import type { IRawTheme } from "vscode-textmate";
 import { monaco } from "../editor/monaco";
+import { refreshSemanticTokens, semanticRules } from "../editor/semantic";
 import { applyTokenTheme } from "../editor/textmate";
 import { parseJsonc } from "../../shared/jsonc";
 import dark from "./studio-dark.json";
@@ -12,6 +13,8 @@ export type VsTheme = {
 	name?: string;
 	type?: "dark" | "light" | "hc" | "hcLight";
 	colors?: Record<string, string>;
+	semanticHighlighting?: boolean;
+	semanticTokenColors?: Record<string, string | { foreground?: string; fontStyle?: string; bold?: boolean; italic?: boolean; underline?: boolean; strikethrough?: boolean }>;
 	tokenColors?: { name?: string; scope?: string | string[]; settings: { foreground?: string; background?: string; fontStyle?: string } }[];
 };
 
@@ -61,10 +64,11 @@ export function applyTheme(theme: VsTheme) {
 	monaco.editor.defineTheme("studio", {
 		base: isDark(theme) ? "vs-dark" : "vs",
 		inherit: true,
-		rules,
+		rules: [...rules, ...semanticRules(theme)],
 		colors: Object.fromEntries(Object.entries(colors).filter(([, v]) => validColor(v))),
 	});
 	monaco.editor.setTheme("studio");
+	refreshSemanticTokens();
 	const root = document.documentElement;
 	for (const [cssVar, key] of CSS_VARS) {
 		const value = colors[key] ?? base.colors![key];

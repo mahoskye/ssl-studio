@@ -57,6 +57,10 @@ export async function selftest() {
 				const tree: any = await timed("syntaxTree", () => session.request("ssl/syntaxTree", { textDocument: { uri: doc!.model.uri.toString() } }));
 				report.syntaxTreeNodes = tree?.nodes?.length ?? 0;
 			}
+			if (session.capabilities.semanticTokensProvider) {
+				const tokens = await timed("semanticTokens", () => session.semanticTokens(doc!.model));
+				report.semanticTokens = (tokens?.length ?? 0) / 5;
+			}
 		}
 		if (session.supports("ssl/callGraph")) {
 			// The sample's Report calls Sample.Orders.CountOpenOrders through ExecFunction.
@@ -85,6 +89,7 @@ export async function selftest() {
 		report.revertedClean === true &&
 		// A server that offers its views must answer with them.
 		(report.syntaxTreeNodes === undefined || Number(report.syntaxTreeNodes) > 0) &&
+		(report.semanticTokens === undefined || Number(report.semanticTokens) > 0) &&
 		(report.callGraph === undefined || report.callGraphResolvesExecFunction === true);
 	await backend.selftestDone(report);
 }

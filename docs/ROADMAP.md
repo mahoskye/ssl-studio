@@ -25,6 +25,7 @@ model, Solid chosen. The remote machine turned out to be Windows (see M6).
 every server feature, multi-file definition and references, rename; format
 on save widened to the changed procedures; local history with diff and
 restore; `hutch run selftest` checks the desktop build.
+Semantic highlighting from starlims-lsp 0.30.0 (L3, 2026-11-03).
 
 - Open a folder; file tree; tabs; split editors.
 - All the language server's features; format on save; the Problems panel.
@@ -63,7 +64,7 @@ model, with one undo stack. The coverage test runs over recorded server
 data for every fixture.
 
 With L1 (the server's `ssl/syntaxTree`, released in starlims-lsp 0.29.0 on
-2026-11-03, the pinned version): statement-level chips,
+2026-11-03): statement-level chips,
 `:ELSE`/`:CASE`/`:CATCH` arms as their own blocks, unreadable spans as raw
 blocks. The self-test checks the tree on Linux and Windows. A block's header
 shows its condition as a field (`:IF` · `Empty(sSampleId)` · `;`), cut from
@@ -136,4 +137,3 @@ release build, installer, self-test and opencode 2.2.5 pass.
   and each change reviewed (ADR 0004).
 - Run a procedure in the sandbox through a configured command (the sandbox is
   private; the IDE would only call it).
-- Semantic token highlighting (L3).

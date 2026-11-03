@@ -2,6 +2,8 @@
 // SSL support comes from the grammar and the language server only.
 import * as monaco from "monaco-editor/editor/editor.api";
 import "monaco-editor/features/register.all";
+// Not in register.all: without it Monaco never asks for semantic tokens.
+import "monaco-editor/editor/contrib/semanticTokens/browser/documentSemanticTokens";
 import EditorWorker from "monaco-editor/editor/editor.worker?worker";
 
 self.MonacoEnvironment = { getWorker: () => new EditorWorker() };

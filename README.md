@@ -6,7 +6,8 @@ the source of truth.
 
 - **Text mode:** a full editor backed by
   [`starlims-lsp`](https://github.com/mahoskye/starlims-lsp): completion,
-  hover, diagnostics, formatting, navigation.
+  hover, diagnostics, formatting, navigation, and semantic highlighting: the
+  server colours parameters, `:PUBLIC` variables and undeclared names apart.
 - **Blocks mode:** the same file as nested blocks. Procedures are cards,
   control flow is nested, and comment regions are coloured frames that group
   the code inside them.
@@ -28,7 +29,7 @@ the language server). Install and build: [docs/INSTALL.md](docs/INSTALL.md). See
 ## Running it
 
 Needs [Bun](https://bun.sh), and
-[`starlims-lsp`](https://github.com/mahoskye/starlims-lsp/releases) 0.29.0 on
+[`starlims-lsp`](https://github.com/mahoskye/starlims-lsp/releases) 0.30.0 on
 `PATH` (or set `lspPath` in Settings). opencode 2.2.x is optional: it powers
 the Agent panel.
 

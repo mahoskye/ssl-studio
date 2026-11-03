@@ -56,8 +56,15 @@ targets, `RunDS` data sources and `:INCLUDE` paths for go to definition.
   `:INCLUDE`), call-site location, and whether the target was resolved.
 - Unresolved targets as their own nodes, so missing scripts are visible.
 
-## L3 (later): semantic tokens
+## L3: semantic tokens
 
-The IDE highlights with the formatter's TextMate grammar. Semantic tokens
-would let it colour procedures, parameters, `:PUBLIC` variables and unknown
-names apart. Not needed to start.
+**Released in starlims-lsp 0.30.0 (2026-11-03)**, SSL Studio's pinned version
+(mahoskye/starlims-lsp#366, PR #367).
+
+The IDE highlights with the formatter's TextMate grammar. Semantic tokens let
+it colour procedures, parameters, `:PUBLIC` variables and unknown names apart.
+`src/view/editor/semantic.ts` follows VS Code's rules: a theme opts in with
+`semanticHighlighting`, `semanticTokenColors` comes first, then the scopes VS
+Code maps each token to. A token no rule colours is dropped, so the grammar's
+colour stands. Studio Dark and Light opt in and colour `variable.public` and
+`variable.unknown`. Blocks mode's code chips stay with the grammar.

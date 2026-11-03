@@ -1,6 +1,13 @@
 {
 	"name": "Studio Dark",
 	"type": "dark",
+	"semanticHighlighting": true,
+	"semanticTokenColors": {
+		"method": "#7fdbca",
+		"variable.defaultLibrary": "#ff9cac",
+		"variable.public": { "foreground": "#f78c6c", "italic": true },
+		"variable.unknown": { "foreground": "#ff5572", "underline": true }
+	},
 	"colors": {
 		"editor.background": "#1b1d23",
 		"editor.foreground": "#d4d7de",

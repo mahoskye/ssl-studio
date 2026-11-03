@@ -25,7 +25,7 @@ export const HOUSE_STYLE = {
 };
 
 /**
- * The server's documented defaults (starlims-lsp 0.29.0,
+ * The server's documented defaults (starlims-lsp 0.30.0,
  * docs/configuration/CONFIGURATION.md section 10.4), shown for unset fields.
  */
 export const SERVER_DEFAULTS = {

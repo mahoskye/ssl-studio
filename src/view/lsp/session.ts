@@ -2,6 +2,7 @@
 // and every Monaco provider the server's capabilities allow.
 import { createStore, reconcile } from "solid-js/store";
 import { monaco } from "../editor/monaco";
+import { LEGEND, onSemanticThemeChange, refreshSemanticTokens, translateTokens } from "../editor/semantic";
 import { backend, on } from "../backend";
 import { LspClient } from "./client";
 import { trimEdit } from "./edits";
@@ -83,6 +84,7 @@ class Session {
 						rename: { prepareSupport: true },
 						publishDiagnostics: { relatedInformation: false },
 						foldingRange: { lineFoldingOnly: true },
+						semanticTokens: { requests: { full: true }, tokenTypes: LEGEND.tokenTypes, tokenModifiers: LEGEND.tokenModifiers, formats: ["relative"] },
 					},
 					workspace: { workspaceFolders: true, configuration: true },
 				},
@@ -91,6 +93,7 @@ class Session {
 			this.capabilities = result?.capabilities ?? {};
 			this.client.notify("initialized", {});
 			for (const model of monaco.editor.getModels()) if (this.versions.has(model.uri.toString())) this.open(model);
+			refreshSemanticTokens();
 		})();
 		return this.initialized;
 	}
@@ -104,6 +107,15 @@ class Session {
 		const name = method.replace(/^ssl\//, "");
 		const version = this.capabilities.experimental?.ssl?.[name];
 		return version === 1;
+	}
+
+	/** The server's semantic tokens in Monaco's form; null from a server without them. */
+	async semanticTokens(model: monaco.editor.ITextModel) {
+		await this.ready();
+		const legend = this.capabilities.semanticTokensProvider?.legend;
+		if (!legend) return null;
+		const result = await this.request("textDocument/semanticTokens/full", { textDocument: { uri: model.uri.toString() } });
+		return result ? translateTokens(result.data ?? [], legend) : null;
 	}
 
 	/** Sends a changed style profile; the server re-checks open documents. */
@@ -425,6 +437,15 @@ export function registerProviders() {
 			});
 			return toMinimalEdits(model, edits ?? []);
 		},
+	});
+	monaco.languages.registerDocumentSemanticTokensProvider("ssl", {
+		onDidChange: onSemanticThemeChange,
+		getLegend: () => LEGEND,
+		async provideDocumentSemanticTokens(model) {
+			const result = await quiet(session.semanticTokens(model), null);
+			return result && { data: result };
+		},
+		releaseDocumentSemanticTokens() {},
 	});
 	monaco.languages.registerInlayHintsProvider("ssl", {
 		async provideInlayHints(model, range) {

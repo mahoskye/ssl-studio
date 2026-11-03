@@ -4,7 +4,7 @@
 
 | | Needed for | Notes |
 | --- | --- | --- |
-| `starlims-lsp` 0.29.0 | everything SSL | Release builds carry it (`app/bin/starlims-lsp`). From source, put it on `PATH`, set `STARLIMS_LSP`, or set `lspPath` in Settings. Another version runs with a warning in the status bar. |
+| `starlims-lsp` 0.30.0 | everything SSL | Release builds carry it (`app/bin/starlims-lsp`). From source, put it on `PATH`, set `STARLIMS_LSP`, or set `lspPath` in Settings. Another version runs with a warning in the status bar. |
 | opencode 2.2.x | the Agent panel only | On `PATH`. The IDE starts its own private server; nothing is shared with opencode's background service. |
 | A local model | the Agent panel's default | Ollama through opencode's `ollama` provider, or any provider set in `agentServerConfig`. A paid provider is used only after you choose it. |
 | WebKitGTK 4.1 (Linux) | the window | The system webview Electrobun uses on Linux (`libwebkit2gtk-4.1`). Present on current Ubuntu and Fedora desktops. |
@@ -32,7 +32,7 @@ bun scripts/bundle-lsp.ts --download     # once per OS: the pinned language serv
 hutch run build                          # artifacts/ gets the installer and the update bundle
 ```
 
-`bundle-lsp.ts` without `--download` copies a local starlims-lsp 0.29.0
+`bundle-lsp.ts` without `--download` copies a local starlims-lsp 0.30.0
 instead. The build also writes `THIRD-PARTY-NOTICES.md` (the bundled
 packages' licenses) into the app.
 

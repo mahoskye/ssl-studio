@@ -28,7 +28,7 @@ export function EditorGroup(props: { index: number }) {
 			fontSize: state.settings.fontSize,
 			minimap: { enabled: state.settings.minimap },
 			renderWhitespace: "selection",
-			"semanticHighlighting.enabled": false,
+			"semanticHighlighting.enabled": true,
 			inlayHints: { enabled: "on" },
 			fixedOverflowWidgets: true,
 			scrollBeyondLastLine: false,
