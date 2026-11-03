@@ -38,6 +38,22 @@ const markdown = (value: any) => (value == null ? undefined : typeof value === "
 
 export type ServerInfo = { name: string; version: string };
 
+/** Findings that come from SSL Studio rather than the server (a plan's check): Problems and markers, under their own owner. */
+export function publishFindings(model: monaco.editor.ITextModel, owner: string, list: Omit<Diagnostic, "uri">[] | null) {
+	const uri = model.uri.toString();
+	if (!list) {
+		setDiagnostics(uri, undefined!);
+		monaco.editor.setModelMarkers(model, owner, []);
+		return;
+	}
+	setDiagnostics(uri, reconcile(list.map((d) => ({ ...d, uri }))));
+	monaco.editor.setModelMarkers(
+		model,
+		owner,
+		list.map((d) => ({ startLineNumber: d.line, startColumn: d.column, endLineNumber: d.endLine, endColumn: d.endColumn, severity: d.severity === 1 ? monaco.MarkerSeverity.Error : monaco.MarkerSeverity.Warning, message: d.message, code: d.code, source: d.source })),
+	);
+}
+
 class Session {
 	readonly client = new LspClient();
 	private initialized: Promise<void> | null = null;

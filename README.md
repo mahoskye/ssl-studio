@@ -14,6 +14,10 @@ the source of truth.
 - **Graph mode:** a whole workspace as procedures and data sources
   joined by their `DoProc`, `ExecFunction`, `RunDS` and `:INCLUDE` calls,
   grouped by region.
+- **Planning:** a process or script as a flow chart in plain words, kept as
+  `design/<name>.plan.json`, with a Chart and Text view and a check that needs
+  no model. Handing a plan to an agent to build comes next
+  ([design](docs/PLANNING-MODE.md)).
 - **Agents:** the SSL agents and `ssl-tidy-*` cleanup skills from
   [`ssl-style-guide`](https://github.com/mahoskye/ssl-style-guide), run
   through opencode, with every change shown as a diff and checked by the
@@ -21,8 +25,8 @@ the source of truth.
 - **House style:** the team's Designer header, procedure doc block, spacing
   and script size limit built into templates, the formatter and a size meter.
 
-Status: M1 to M6 done in a first version (see the roadmap for what waits on
-the language server). Install and build: [docs/INSTALL.md](docs/INSTALL.md). See [docs/VISION.md](docs/VISION.md),
+Status: M1 to M6 done in a first version, and tested on Linux and Windows
+(see the roadmap). Install and build: [docs/INSTALL.md](docs/INSTALL.md). See [docs/VISION.md](docs/VISION.md),
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
 [docs/ROADMAP.md](docs/ROADMAP.md).
 

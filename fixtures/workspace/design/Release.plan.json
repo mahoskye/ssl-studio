@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "title": "Release a sample",
+  "goal": "Release a sample once its results are approved, and tell the lab.",
+  "targets": ["Sample/Release.ssl"],
+  "groups": [
+    { "id": "g1", "name": "Validation" }
+  ],
+  "nodes": [
+    { "id": "n1", "kind": "start", "text": "A sample id arrives" },
+    { "id": "n2", "kind": "call", "text": "Check the id", "ref": "IsUsableId", "group": "g1" },
+    { "id": "n3", "kind": "decision", "text": "Is the id usable?", "group": "g1" },
+    { "id": "n4", "kind": "step", "text": "Mark the sample released", "notes": "Inside a transaction." },
+    { "id": "n5", "kind": "step", "text": "Tell the lab" },
+    { "id": "n6", "kind": "end", "text": "Return the new status" }
+  ],
+  "edges": [
+    { "from": "n1", "to": "n2" },
+    { "from": "n2", "to": "n3" },
+    { "from": "n3", "to": "n4", "label": "yes" },
+    { "from": "n3", "to": "n6", "label": "no" },
+    { "from": "n4", "to": "n5" },
+    { "from": "n5", "to": "n6" }
+  ]
+}

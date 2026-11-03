@@ -290,3 +290,39 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .b-raw { border-left: 2px dashed var(--error); background: color-mix(in srgb, var(--error) 6%, transparent); }
 .g-proc.datasource rect { fill: color-mix(in srgb, var(--info) 18%, var(--input-bg)); stroke: var(--info); }
 .g-proc.unresolved rect { stroke: var(--error); stroke-dasharray: 4 2; }
+
+/* Planning mode: a plan's chart */
+.plan { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; background: var(--bg); }
+.plan-bar { flex-wrap: wrap; }
+.plan-bar button.on { color: var(--accent); box-shadow: inset 0 -1px 0 var(--accent); }
+.plan-canvas { flex: 1; min-height: 0; position: relative; display: flex; outline: none; overflow: hidden; }
+.plan-canvas:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); }
+.plan-canvas.linking .plan-node { cursor: crosshair; }
+.plan-node { cursor: pointer; }
+.plan-node rect, .plan-node polygon { fill: var(--input-bg); stroke: var(--input-border); stroke-width: 1; }
+.plan-node line { stroke: var(--input-border); }
+.plan-node text { font: 13px system-ui, sans-serif; fill: var(--fg); pointer-events: none; }
+.plan-node.start rect, .plan-node.end rect { fill: var(--selected); }
+.plan-node.decision polygon { fill: color-mix(in srgb, var(--accent) 12%, var(--input-bg)); stroke: var(--accent); }
+.plan-node.call rect { fill: color-mix(in srgb, var(--info) 12%, var(--input-bg)); stroke: var(--info); }
+.plan-node.call line { stroke: var(--info); }
+.plan-node:hover rect, .plan-node:hover polygon { stroke: var(--accent); }
+.plan-node.selected rect, .plan-node.selected polygon { stroke: var(--accent); stroke-width: 2.5; }
+.plan-dot { fill: var(--warning); stroke: var(--bg); stroke-width: 1.5; }
+.plan-group text { font: 600 12px system-ui, sans-serif; }
+.plan-edge .g-edge { opacity: 1; }
+.plan-edge-hit { fill: none; stroke: transparent; stroke-width: 12; cursor: pointer; }
+.plan-edge.on .g-edge { stroke: var(--accent); stroke-width: 2.5; }
+.plan-label { cursor: pointer; }
+.plan-label rect { fill: var(--bg); stroke: var(--border); }
+.plan-label text { font: 12px system-ui, sans-serif; fill: var(--fg); pointer-events: none; }
+.plan-label.missing rect { stroke: var(--warning); stroke-dasharray: 3 2; }
+.plan-label.missing text { fill: var(--warning); }
+.plan-edit { position: absolute; font: 13px system-ui, sans-serif; background: var(--input-bg); color: var(--input-fg); border: 1px solid var(--accent); border-radius: 3px; padding: 3px 6px; text-align: center; box-sizing: border-box; }
+.plan-hint { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); background: var(--selected); color: var(--fg); padding: 3px 10px; border-radius: 4px; font-size: 12px; }
+.plan-error { padding: 24px; }
+.plan-details { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 5px 10px; background: var(--tab-bg); border-top: 1px solid var(--border); font-size: 12px; min-height: 34px; box-sizing: border-box; }
+.plan-details label { display: flex; align-items: center; gap: 5px; color: var(--muted); }
+.plan-details label.grow { flex: 1; min-width: 150px; }
+.plan-details label.grow input { flex: 1; min-width: 0; }
+.plan-kind { color: var(--muted); font-weight: 600; text-transform: capitalize; }

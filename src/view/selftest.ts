@@ -6,6 +6,7 @@ import { activeEditor } from "./editor/EditorGroup";
 import { monaco } from "./editor/monaco";
 import { errors } from "./main";
 import { session, diagnostics } from "./lsp/session";
+import { isPlanPath } from "./plan/model";
 import { activeDoc, openFile, state } from "./state";
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -31,7 +32,8 @@ export async function selftest() {
 	try {
 		report.workspace = Boolean(await until(() => state.workspace));
 		report.lsp = await until(() => state.lsp.state === "running" && state.lsp.state);
-		const file = (await backend.files()).find((p) => p.endsWith(".ssl"));
+		const files = await backend.files();
+		const file = files.find((p) => p.endsWith(".ssl"));
 		report.file = Boolean(file);
 		if (file) {
 			await timed("open", () => openFile(file));
@@ -79,6 +81,17 @@ export async function selftest() {
 	} catch (e: any) {
 		errors.push(String(e?.stack ?? e));
 	}
+	try {
+		// A plan's chart, in this webview: laid out, and its findings in Problems.
+		const plan = (await backend.files()).find(isPlanPath);
+		if (plan) {
+			await openFile(plan);
+			report.planNodes = (await until(() => document.querySelectorAll(".plan-node").length, 5000)) ?? 0;
+			report.planEdges = document.querySelectorAll(".plan-edge").length;
+		}
+	} catch (e: any) {
+		errors.push(String(e?.stack ?? e));
+	}
 	report.timingsMs = timings;
 	report.errors = errors;
 	report.ok =
@@ -90,6 +103,7 @@ export async function selftest() {
 		// A server that offers its views must answer with them.
 		(report.syntaxTreeNodes === undefined || Number(report.syntaxTreeNodes) > 0) &&
 		(report.semanticTokens === undefined || Number(report.semanticTokens) > 0) &&
+		(report.planNodes === undefined || Number(report.planNodes) > 0) &&
 		(report.callGraph === undefined || report.callGraphResolvesExecFunction === true);
 	await backend.selftestDone(report);
 }

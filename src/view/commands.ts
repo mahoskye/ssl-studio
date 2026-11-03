@@ -12,7 +12,9 @@ import { insertTemplate } from "./panels/Palette";
 import { TEMPLATES } from "../shared/houseStyle";
 import { askAbout } from "./agent/Agent";
 import { startTidy } from "./agent/tidy";
-import { activePath, closeTab, notify, openFolder, revert, save, saveAll, setState, split, state } from "./state";
+import { joinPath } from "../shared/paths";
+import { isPlanPath, newPlan, printPlan } from "./plan/model";
+import { activePath, closeTab, notify, openFile, openFolder, revert, save, saveAll, setState, split, state } from "./state";
 
 export type Command = { id: string; label: string; keys?: string; run: () => void };
 
@@ -27,7 +29,8 @@ export const commands: Command[] = [
 	{ id: "revert", label: "Revert file to disk", run: () => activePath() && void revert(activePath()!) },
 	{ id: "close", label: "Close editor", keys: "Ctrl+W", run: () => activePath() && void closeTab(activePath()!) },
 	{ id: "split", label: "Split editor", keys: "Ctrl+\\", run: split },
-	{ id: "blocks", label: "Toggle blocks view", keys: "Ctrl+Shift+B", run: () => setState("groups", state.activeGroup, "mode", (m) => (m === "blocks" ? "text" : "blocks")) },
+	{ id: "blocks", label: "Toggle blocks view (a plan: its chart)", keys: "Ctrl+Shift+B", run: toggleVisual },
+	{ id: "new-plan", label: "New plan…", run: () => void newPlanCommand() },
 	{ id: "copy-designer", label: "Copy for Designer (selection, procedure or file, formatted)", keys: "Ctrl+Shift+C", run: () => void copyForDesigner() },
 	{ id: "wrap-region", label: "Wrap the selected lines in a region…", run: () => void wrapInRegion() },
 	{ id: "graph", label: "Show the call graph", keys: "Ctrl+Shift+G", run: () => setState("centerView", state.centerView === "graph" ? "editors" : "graph") },
@@ -85,6 +88,29 @@ async function wrapInRegion() {
 }
 
 /** The selection, else the procedure at the cursor, else the file: formatted, then copied. */
+function toggleVisual() {
+	const path = activePath();
+	if (isPlanPath(path)) setState("planText", path!, (text) => !text);
+	else setState("groups", state.activeGroup, "mode", (m) => (m === "blocks" ? "text" : "blocks"));
+}
+
+/** A new plan in `design/`, beside the tidy notes, opened as its chart (ADR 0005). */
+async function newPlanCommand() {
+	if (!state.workspace) return notify("Open a folder first.");
+	const name = (await ask("Name of the new plan"))?.trim();
+	if (!name) return;
+	const path = joinPath(state.workspace.root, "design", `${name.replace(/\.plan\.json$/i, "").replace(/[\\/:*?"<>|]+/g, "-")}.plan.json`);
+	const exists = await backend.read(path).then(
+		() => true,
+		() => false,
+	);
+	if (!exists) {
+		await backend.write(path, printPlan(newPlan(name)));
+		setState("treeVersion", (v) => v + 1);
+	}
+	await openFile(path);
+}
+
 async function copyForDesigner() {
 	const editor = activeEditor();
 	const model = editor?.getModel();

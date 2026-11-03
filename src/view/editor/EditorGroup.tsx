@@ -6,6 +6,8 @@ import { activePath, closeTab, documents, openFile, revealSignal, setState, stat
 import { symbols } from "../panels/Objects";
 import { flatRegions, regionColor, symbolPath } from "./regions";
 import { BlocksView } from "../blocks/BlocksView";
+import { isPlanPath } from "../plan/model";
+import { PlanView } from "../plan/PlanView";
 import { baseName } from "../../shared/paths";
 
 const viewStates = new Map<string, monaco.editor.ICodeEditorViewState | null>();
@@ -19,6 +21,9 @@ export function EditorGroup(props: { index: number }) {
 	const group = () => state.groups[props.index]!;
 	let shown: string | null = null;
 	const [lineCount, setLineCount] = createSignal(0);
+	const isPlan = () => isPlanPath(group().active);
+	const showChart = () => isPlan() && !state.planText[group().active!];
+	const showBlocks = () => group().mode === "blocks" && !isPlan();
 
 	onMount(() => {
 		editor = monaco.editor.create(host, {
@@ -114,6 +119,16 @@ export function EditorGroup(props: { index: number }) {
 						</button>
 					</div>
 				</Show>
+				<Show when={isPlan()}>
+					<div class="mode-switch" role="group" aria-label="View">
+						<button classList={{ on: !showChart() }} onClick={() => setState("planText", group().active!, true)}>
+							Text
+						</button>
+						<button classList={{ on: showChart() }} onClick={() => setState("planText", group().active!, false)}>
+							Chart
+						</button>
+					</div>
+				</Show>
 			</div>
 			<Show when={group().active && group().active === activePath() && symbols().length}>
 				<nav class="breadcrumbs" aria-label="Breadcrumbs">
@@ -131,10 +146,13 @@ export function EditorGroup(props: { index: number }) {
 					</For>
 				</nav>
 			</Show>
-			<Show when={group().mode === "blocks" && group().active}>
+			<Show when={showBlocks() && group().active}>
 				<BlocksView path={group().active!} group={props.index} />
 			</Show>
-			<div class="editor-row" classList={{ hidden: group().mode === "blocks" }}>
+			<Show when={showChart() && group().active} keyed>
+				{(path) => <PlanView path={path} group={props.index} />}
+			</Show>
+			<div class="editor-row" classList={{ hidden: showBlocks() || showChart() }}>
 				<Show when={group().active && group().active === activePath() && lineCount() > 0}>
 					<div class="region-strip" aria-label="Regions">
 						<For each={flatRegions(symbols())}>

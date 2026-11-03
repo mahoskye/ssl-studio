@@ -10,6 +10,8 @@ import { session } from "./lsp/session";
 import { changedRanges, minimalReplace } from "./lsp/edits";
 import { choose } from "./dialogs";
 import { baseName, isInside } from "../shared/paths";
+import { isPlanPath } from "./plan/model";
+import { trackPlan } from "./plan/check";
 
 export type Group = { tabs: string[]; active: string | null; mode?: "text" | "blocks" };
 export type PanelId = "explorer" | "objects" | "palette" | "reference" | "search" | "history" | "health" | "agent";
@@ -36,6 +38,8 @@ export const [state, setState] = createStore({
 	bottomView: "problems" as BottomView,
 	rightView: "health" as RightView,
 	centerView: "editors" as "editors" | "graph",
+	/** Plans shown as text; a plan opens as its chart. */
+	planText: {} as Record<string, boolean>,
 	messages: [] as Message[],
 	output: [] as string[],
 	cursor: { line: 1, column: 1 },
@@ -123,6 +127,7 @@ async function loadDoc(path: string): Promise<Doc> {
 	docs.set(path, doc);
 	model.onDidChangeContent(() => setState("dirty", path, model.getAlternativeVersionId() !== doc.savedVersion));
 	session.track(model);
+	if (isPlanPath(path)) trackPlan(model);
 	return doc;
 }
 
