@@ -52,12 +52,39 @@ export async function selftest() {
 			report.revertedClean = doc!.model.getValue() === before;
 			report.monacoTheme = Boolean(document.querySelector(".monaco-editor"));
 			report.markers = monaco.editor.getModelMarkers({ resource: doc!.model.uri }).length;
+			// The server's own views of the code (blocks and graph modes), when it offers them.
+			if (session.supports("ssl/syntaxTree")) {
+				const tree: any = await timed("syntaxTree", () => session.request("ssl/syntaxTree", { textDocument: { uri: doc!.model.uri.toString() } }));
+				report.syntaxTreeNodes = tree?.nodes?.length ?? 0;
+			}
+		}
+		if (session.supports("ssl/callGraph")) {
+			// The sample's Report calls Sample.Orders.CountOpenOrders through ExecFunction.
+			const graph: any = await timed("callGraph", async () => {
+				const end = Date.now() + 8000;
+				let result: any = await session.request("ssl/callGraph", {});
+				while (result?.indexing && Date.now() < end) {
+					await wait(250);
+					result = await session.request("ssl/callGraph", {});
+				}
+				return result;
+			});
+			report.callGraph = { nodes: graph?.nodes?.length ?? 0, edges: graph?.edges?.length ?? 0 };
+			report.callGraphResolvesExecFunction = Boolean(graph?.edges?.some((e: any) => e.kind === "ExecFunction" && e.resolved));
 		}
 	} catch (e: any) {
 		errors.push(String(e?.stack ?? e));
 	}
 	report.timingsMs = timings;
 	report.errors = errors;
-	report.ok = !errors.length && report.lsp === "running" && Number(report.tokenClasses) > 1 && Number(report.symbols) >= 0 && report.revertedClean === true;
+	report.ok =
+		!errors.length &&
+		report.lsp === "running" &&
+		Number(report.tokenClasses) > 1 &&
+		Number(report.symbols) >= 0 &&
+		report.revertedClean === true &&
+		// A server that offers its views must answer with them.
+		(report.syntaxTreeNodes === undefined || Number(report.syntaxTreeNodes) > 0) &&
+		(report.callGraph === undefined || report.callGraphResolvesExecFunction === true);
 	await backend.selftestDone(report);
 }

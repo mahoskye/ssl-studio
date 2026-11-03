@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import type { ToolStatus } from "../shared/protocol";
 
-export const LSP_PIN = "0.28.2";
+export const LSP_PIN = "0.29.0";
 export const OPENCODE_RANGE = { min: "2.2.5", below: "2.3.0" };
 
 async function run(cmd: string[]): Promise<string | null> {

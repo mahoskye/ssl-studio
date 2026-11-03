@@ -15,6 +15,7 @@ export const HOUSE_STYLE = {
 	diagnostics: {
 		hungarianNotation: true,
 		infoDiagnostics: true,
+		maxScriptBytes: 50 * 1024,
 		maxScriptCodeLines: 400,
 		maxScriptProcedures: 12,
 		// The Designer banner (decision 0005) closes with `*/;` by design.
@@ -24,7 +25,7 @@ export const HOUSE_STYLE = {
 };
 
 /**
- * The server's documented defaults (starlims-lsp 0.28.2,
+ * The server's documented defaults (starlims-lsp 0.29.0,
  * docs/configuration/CONFIGURATION.md section 10.4), shown for unset fields.
  */
 export const SERVER_DEFAULTS = {
@@ -50,6 +51,7 @@ export const SERVER_DEFAULTS = {
 		infoDiagnostics: false,
 		maxBlockDepth: 4,
 		maxProcedureCodeLines: 80,
+		maxScriptBytes: 51200,
 		maxScriptCodeLines: 400,
 		maxScriptProcedures: 12,
 	},
@@ -97,6 +99,7 @@ export const SECTIONS: { title: string; fields: Field[] }[] = [
 			{ path: "diagnostics.infoDiagnostics", label: "Info-level findings", kind: "boolean" },
 			{ path: "diagnostics.maxBlockDepth", label: "Deepest nesting", kind: "number", min: 1, max: 12 },
 			{ path: "diagnostics.maxProcedureCodeLines", label: "Procedure code lines", kind: "number", min: 10, max: 2000 },
+			{ path: "diagnostics.maxScriptBytes", label: "Script size in bytes (0 is off)", kind: "number", min: 0, max: 1048576 },
 			{ path: "diagnostics.maxScriptCodeLines", label: "Script code lines", kind: "number", min: 50, max: 10000 },
 			{ path: "diagnostics.maxScriptProcedures", label: "Procedures per script", kind: "number", min: 1, max: 200 },
 		],

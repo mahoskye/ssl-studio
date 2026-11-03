@@ -1,19 +1,17 @@
 # What SSL Studio needs from starlims-lsp
 
-Draft text for issues on `starlims-lsp`, being worked in a separate session
+What SSL Studio asked of `starlims-lsp`, filed there as #359 and #360
 (2026-11-01). The language server owns the design; this says what the IDE
 needs and why.
 
-**Implemented on starlims-lsp's `feat/syntax-tree-call-graph` branch
-(2026-11-01), not yet released.** The server advertises them as
+**Released in starlims-lsp 0.29.0 (2026-11-03)**, SSL Studio's pinned
+version (mahoskye/starlims-lsp#359, #360, PR #361). The server advertises them as
 `capabilities.experimental.ssl.{syntaxTree, callGraph}: 1` (shape version 1,
 its `docs/features/custom-requests.md`). SSL Studio reads shape version 1
 (`treeFromSyntax` in `src/view/blocks/model.ts`, `fromCallGraph` in
-`src/view/graph/model.ts`, tested on that shape) and was checked end to end
-against a build of the branch: statement chips, `:CASE`/`:OTHERWISE` arms as
-blocks, the graph from one request. With a released server that lacks them,
-it keeps using document symbols, folding ranges and references. The pin
-moves to the release that ships them.
+`src/view/graph/model.ts`, tested on that shape), and the self-test calls
+both against the bundled server. With an older server that lacks them, it
+keeps using document symbols, folding ranges and references.
 
 ## L1: a syntax tree request (needed for blocks mode, M3)
 
