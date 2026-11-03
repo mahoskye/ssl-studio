@@ -1,7 +1,7 @@
 // Puts the pinned starlims-lsp into vendor/, so `hutch run build` ships it
 // inside the app (electrobun.config.ts copies it to app/bin). Uses a local
 // copy of the pinned version when one is found; with --download, fetches the
-// release asset for this platform with `gh` (mahoskye/starlims-lsp, public).
+// release asset for this platform (mahoskye/starlims-lsp, public).
 //
 //   bun scripts/bundle-lsp.ts [--download]
 import { $ } from "bun";
@@ -19,9 +19,16 @@ if (process.argv.includes("--download")) {
 	const platform = process.platform === "win32" ? "windows" : process.platform;
 	const arch = process.arch === "arm64" ? "arm64" : "amd64";
 	const asset = `starlims-lsp-${platform}-${arch}${suffix}`;
-	await $`gh release download v${LSP_PIN} -R mahoskye/starlims-lsp -p ${asset} -p THIRD-PARTY-NOTICES.md -D ${vendor} --clobber`;
-	await $`mv ${join(vendor, asset)} ${target}`;
-	await $`gh api repos/mahoskye/starlims-lsp/contents/LICENSE?ref=v${LSP_PIN} -H "Accept: application/vnd.github.raw" > ${join(vendor, "STARLIMS-LSP-LICENSE")}`;
+	// The release is public: plain HTTPS works where gh is not installed (a fresh Windows VM).
+	const release = `https://github.com/mahoskye/starlims-lsp/releases/download/v${LSP_PIN}`;
+	const fetchTo = async (url: string, path: string) => {
+		const response = await fetch(url);
+		if (!response.ok) throw new Error(`${url}: ${response.status}`);
+		await Bun.write(path, response);
+	};
+	await fetchTo(`${release}/${asset}`, target);
+	await fetchTo(`${release}/THIRD-PARTY-NOTICES.md`, join(vendor, "THIRD-PARTY-NOTICES.md"));
+	await fetchTo(`https://raw.githubusercontent.com/mahoskye/starlims-lsp/v${LSP_PIN}/LICENSE`, join(vendor, "STARLIMS-LSP-LICENSE"));
 } else {
 	const found = await findLsp();
 	if (!found.ok || found.version !== LSP_PIN) throw new Error(`No local starlims-lsp ${LSP_PIN} (found: ${found.version ?? "none"}). Use --download.`);

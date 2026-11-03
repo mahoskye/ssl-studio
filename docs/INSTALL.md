@@ -55,6 +55,9 @@ The remote machine runs Windows (2026-11-01). Two ways to a build:
   pinned language server inside.
 - **A Windows checkout:** the steps above, in Git Bash or PowerShell, with
   Bun and Node installed.
+- **A test VM on Linux:** [tools/windows-vm](../tools/windows-vm/README.md)
+  sets up Microsoft's Windows 11 evaluation in QEMU, builds there and runs
+  the self-test in its desktop.
 
 On Windows:
 
