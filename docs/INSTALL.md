@@ -46,6 +46,14 @@ Opens the app on `fixtures/workspace`, checks highlighting, the language
 server, symbols, diagnostics, hover and format with undo, writes
 `selftest.json` and quits. Its settings go to `.selftest/`, not yours.
 
+## A local model through Ollama
+
+Ollama's default context is 4096 tokens, and it drops what does not fit without an
+error. A prompt with a skill and a file does not fit, so agent steps quietly work from
+part of what they were given. `ollama ps` shows the context in use. Give the service
+more, for example `OLLAMA_CONTEXT_LENGTH=16384` in its environment. A larger context
+uses more memory. See the [spike](spikes/planning-mode.md).
+
 ## Windows (the remote machine)
 
 The remote machine runs Windows (2026-11-01). Three ways to a build:

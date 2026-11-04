@@ -1,8 +1,9 @@
 # Planning mode
 
 **Status:** Accepted (2026-11-03), [ADR 0005](adr/0005-a-plan-is-a-document-of-its-own.md).
-P1, the chart, is built. The agent stages (P2 to P4) are not: the spike decides
-how far they can go.
+P1, the chart, is built. The agent stages (P2 to P4) are not. The
+[spike](spikes/planning-mode.md) found a local model good for refining a plan and for
+a first draft, not yet for building unattended; this design now reflects that.
 
 **The idea, in the user's words:** "a planning mode where I can use a flow
 chart to design a process or script and then have an agent take over and work
@@ -99,11 +100,14 @@ itself, since the agent cannot: workspace symbols and text search for the
 chart's nouns, callers and callees from `ssl/callGraph`, and the target files'
 outlines. The result goes in the prompt, and into the spec as its prior art.
 
-**The agent replies with blocks,** which SSL Studio turns into UI:
+**The agent replies with blocks,** which SSL Studio turns into UI. They use marker
+lines, not fences, since a spec holds fences of its own. Parsing is lenient (a block
+ends at the next marker), and a missing block is asked for again once:
 
 - ```` ```questions ````: JSON, each with an optional node id and suggested
   answers. They appear as a short form beside the chart. Answers are kept in the
-  plan's `decisions` list, so no later prompt asks again.
+  plan's `decisions` list, so no later prompt asks again. **Open questions block
+  the spec:** in the spike, models asked the right question, then guessed.
 - ```` ```chart ````: added or changed nodes and edges. They appear on the chart
   highlighted, to accept or decline one by one.
 - ```` ```context ````: files, procedures or built-in elements it wants to read.
@@ -132,16 +136,21 @@ in a fresh session so prompts stay small:
 1. **Prompt:** the spec, the unit's section, the target file's outline, and the
    signatures of what it calls. Skills: `ssl-new-procedure`, `ssl-new-datasource`
    or `ssl-new-class`. The reply is that unit only, never a reprinted file.
-2. **Check, with the language server:** no new findings (`session.analyze`), the
-   name and parameters match the spec, the size limits hold, and the calls the
-   chart's edges promise are there. `ssl/callGraph` reads an open document from
-   its buffer, so it sees the pending text with nothing saved (tested against
-   0.30.0).
+2. **Check, with the language server:** a reply with no code fails outright, so "no
+   findings" cannot mean "nothing written". Then: no new findings
+   (`session.analyze`), the name and parameters match the spec, the size limits
+   hold, the calls the chart's edges promise are there, and **every call the code
+   makes resolves**. `ssl/callGraph` reads an open document from its buffer, so it
+   sees the pending text with nothing saved (tested against 0.30.0).
 3. **On a failed check,** send the findings back, twice at most. Then stop that
    unit and mark it on the chart, and carry on with units that do not depend on
    it.
 
 Each unit lights up on the chart as it finishes: running, passed, stuck.
+
+**Every node is accounted for.** The spec maps each node to a unit or a statement. A
+node with nothing to show keeps the run from reporting success. The spike's model
+replaced a whole step with a comment and had no findings at all.
 
 **Nothing is written during a build.** Results collect in a pending change set,
 `.ssl-studio/plans/<name>.run.json`, with each unit's status and text. Closing
@@ -153,16 +162,18 @@ retried.
 a unit that stays stuck, or the budget.
 
 **Cost is visible and capped.** The run uses the Agent panel's model, local by
-default; a paid provider is the user's explicit choice, as today. Before a build
-SSL Studio shows the unit count and that model. During it, tokens and cost per
+default; a paid provider is the user's explicit choice, as today. A local build is
+labelled a draft. Before a build SSL Studio shows the unit count and that model, and
+warns if prompts look cut off (Ollama's default context silently drops what does not
+fit; see [INSTALL](INSTALL.md)). During it, tokens and cost per
 unit (`ask` already returns them). A budget stops the run between units.
 
 ## Stage 5: review
 
-- **A second opinion first.** A fresh session, with the `ssl-review` skill and
-  no sight of the builder's reasoning, reads the code against the chart and spec.
-  The report sits above the diff, findings tied to nodes. Agent output is judged,
-  not assumed.
+- **A second opinion first, advisory.** A fresh session, with no sight of the
+  builder's reasoning, reads the code against the chart and spec. The report sits
+  above the diff, findings tied to nodes. Agent output is judged, not assumed. Locally
+  this found real gaps and also made up rules, so it informs you and decides nothing.
 - **One review per file,** using `openReview`, with the checks above. A new file
   shows as a diff against nothing. Reject takes a reason and rebuilds only that
   file's units.
@@ -212,9 +223,9 @@ Each step is usable before the next starts.
    in the command palette. Keys: Enter adds the next step, Tab a branch, F2 edits
    the words, D switches step and decision, C connects, Delete removes, arrows
    move, Ctrl+Z undoes.
-2. **Spike, before P2.** On a sample plan, by hand, on the local model: can it
-   produce a usable spec and units through this prompt shape? **This decides how
-   far an unattended build can be trusted.** Paid models only if you ask.
+2. **Spike, before P2. Done (2026-11-03),** [results](spikes/planning-mode.md). A
+   local model is useful for refining and for a draft, not for building unattended.
+   A larger or paid model is untested, and only runs if you ask.
 3. **P2, refine and spec.** Survey, reply blocks, the question form, chart
    suggestions, spec review. Code is not touched.
 4. **P3, build and review.** The unit loop, checks and retries, pending change
@@ -224,10 +235,10 @@ Each step is usable before the next starts.
 
 ## Risks
 
-- **The local model may not be up to it.** Tidy edits code that already works;
-  this writes new code from a description, which is harder. The spike exists to
-  find out early. If it falls short, the honest result is a better spec and
-  review on local, and building on a paid model you choose.
+- **The local model is not up to an unattended build.** The spike confirmed it: code
+  with the right shape, an invented procedure, and a step reduced to a comment. So
+  plan on a better spec and review locally, with local builds labelled drafts, and
+  building for real on a model you choose.
 - **Lint-clean is not correct.** The checks catch what the server can see, not
   wrong logic. Nothing here runs SSL. That is why review is not optional, the
   second opinion is a separate session, and the review says the code was not run.
