@@ -83,3 +83,35 @@ See [PLANNING-MODE.md](../PLANNING-MODE.md).
 - A local build is labelled a **draft**. The review stays required, and says so.
 - Not tested: a larger or paid model. That needs the user's say, and is the obvious
   next measurement.
+
+## After P3: building through the app (2026-11-03)
+
+The same plan and model, through the real build loop, with the plan's questions
+already answered, and a 16,384-token context.
+
+| Try | What changed | Result |
+| --- | --- | --- |
+| 1 | The `ssl-new-procedure` skill alone | No code. The model spent 126,000 tokens in a turn trying to write the file with `execute`, said it had, and had not. Two more turns returned no text. Stuck, correctly |
+| 2 | Told to call no tool, shown the palette's templates as worked examples, tool calls limited | **Passed on the third try**, using real `RunSQL`, `LSearch` and `:TRY`/`:CATCH`. 124,000 tokens |
+
+- Comparing four prompts over eight fresh runs: with the skill, 8 to 14 findings;
+  without it, 18 to 24. **The skill earns its place**; the loop in the first try is
+  intermittent, which is why it is limited rather than designed away.
+- **The worked examples are what stopped the invented syntax:** `:BEGINTRANSACTION`,
+  bare `UPDATE`, `:EXCEPT` and `:CALL` all went once it had been shown the real thing.
+
+The code that passed still had faults no check saw:
+
+- It looked the sample up by a `SAMPLEID` column it made up; the answer said `ORDNO`.
+- It has no transaction: the node's note was dropped.
+- "Log it" fetches the error and throws it away.
+- It calls another script with `DoProc`, where the style guide says `ExecFunction`.
+  The server resolves it and raises no finding. Worth asking `starlims-lsp` about.
+
+The second opinion **caught the missing transaction**, which no check can, and then
+offered a wrong fix and a wrong point about SQL injection. It stays advisory, and the
+review says it may be wrong.
+
+**So:** a local build gives a draft worth reading, on one small plan. It is not a working
+script. Whether a stronger model closes that gap is still untested, and needs the user's
+say.

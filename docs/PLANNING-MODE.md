@@ -1,10 +1,10 @@
 # Planning mode
 
 **Status:** Accepted (2026-11-03), [ADR 0005](adr/0005-a-plan-is-a-document-of-its-own.md).
-P1, the chart, and P2, refine and spec, are built. P3 and P4, building and what
-follows, are not. The [spike](spikes/planning-mode.md) found a local model good for
-refining a plan and for a first draft, not yet for building unattended; this design
-now reflects that.
+P1 (the chart), P2 (refine and spec) and P3 (build and review) are built. P4, what
+follows a build, is not. The [spike](spikes/planning-mode.md) found a local model good
+for refining a plan and for a first draft, not for a working script; this design
+reflects that.
 
 **The idea, in the user's words:** "a planning mode where I can use a flow
 chart to design a process or script and then have an agent take over and work
@@ -134,15 +134,17 @@ This is "take over and work through all the details". SSL Studio runs a loop,
 one **unit** at a time (a procedure, data source or class from the spec), each
 in a fresh session so prompts stay small:
 
-1. **Prompt:** the spec, the unit's section, the target file's outline, and the
-   signatures of what it calls. Skills: `ssl-new-procedure`, `ssl-new-datasource`
-   or `ssl-new-class`. The reply is that unit only, never a reprinted file.
+1. **Prompt:** the spec, the unit, its chart steps and notes, what you decided,
+   what already exists, and the palette's templates as worked examples, which is what
+   stopped models inventing syntax. Skill: `ssl-new-procedure`. It is told to call no
+   tool, and a turn that keeps trying is stopped. The reply is that unit only, never a
+   reprinted file.
 2. **Check, with the language server:** a reply with no code fails outright, so "no
-   findings" cannot mean "nothing written". Then: no new findings
-   (`session.analyze`), the name and parameters match the spec, the size limits
-   hold, the calls the chart's edges promise are there, and **every call the code
-   makes resolves**. `ssl/callGraph` reads an open document from its buffer, so it
-   sees the pending text with nothing saved (tested against 0.30.0).
+   findings" cannot mean "nothing written". So does a placeholder comment. Then: no new
+   findings (`session.analyze`), the name and parameters match the spec, the size limits
+   hold, the calls the spec promises are there, and **every call the code makes
+   resolves**. `ssl/callGraph` reads an open document from its buffer, so it sees the
+   pending text with nothing saved (tested against 0.30.0).
 3. **On a failed check,** send the findings back, twice at most. Then stop that
    unit and mark it on the chart, and carry on with units that do not depend on
    it.
@@ -232,8 +234,10 @@ Each step is usable before the next starts.
    through the app: its questions were good and its spec usable, and it also proposed
    an approval step nobody asked for, and named an API that does not exist. No check
    caught those: that is what accepting one by one, and reviewing the spec, are for.
-4. **P3, build and review.** The unit loop, checks and retries, pending change
-   set, resume, budget, second opinion, file-by-file review.
+4. **P3, build and review. Done (2026-11-03).** The unit loop, checks and retries,
+   pending change set, resume, stop, budget, second opinion, file-by-file review. On
+   the local model it now produces a draft that passes the checks and still has real
+   faults (see the [spike](spikes/planning-mode.md)). The review says so.
 5. **P4, after the build.** Links, drift, rebuilding changed nodes, the test
    script.
 

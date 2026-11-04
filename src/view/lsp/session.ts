@@ -166,6 +166,21 @@ class Session {
 		}
 	}
 
+	/** Calls in text not in any editor, named by the procedure that makes them. The server reads an open document from its buffer. */
+	async scratchCalls(text: string): Promise<{ from: string; target: string; resolved: boolean }[]> {
+		if (!this.supports("ssl/callGraph")) return [];
+		await this.ready();
+		const uri = monaco.Uri.file(`${this.root}/.ssl-studio/calls-${++this.scratchCount}.ssl`).toString();
+		this.client.notify("textDocument/didOpen", { textDocument: { uri, languageId: "ssl", version: 1, text } });
+		try {
+			const graph = await this.client.request("ssl/callGraph", { textDocument: { uri } });
+			const names = new Map<string, string>((graph?.nodes ?? []).map((n: any) => [n.id, n.name]));
+			return (graph?.edges ?? []).filter((e: any) => e.location?.uri === uri).map((e: any) => ({ from: names.get(e.from) ?? e.from, target: e.target, resolved: Boolean(e.resolved) }));
+		} finally {
+			this.client.notify("textDocument/didClose", { textDocument: { uri } });
+		}
+	}
+
 	/** The formatter's output for text not in any editor. */
 	async formatText(text: string, options: { tabSize: number; insertSpaces: boolean }): Promise<string> {
 		await this.ready();

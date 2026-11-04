@@ -5,7 +5,7 @@ const password = process.env.OPENCODE_PASSWORD ?? "";
 const version = process.env.FAKE_VERSION ?? "2.2.5";
 const reply = process.env.FAKE_REPLY ?? "Fake reply.";
 const started = Date.now();
-const SKILLS = ["ssl-tidy-context", "ssl-tidy-guards", "ssl-tidy-structure", "ssl-tidy-clarity", "ssl-tidy-comments", "ssl-tidy-verify"];
+const SKILLS = ["ssl-new-procedure", "ssl-tidy-context", "ssl-tidy-guards", "ssl-tidy-structure", "ssl-tidy-clarity", "ssl-tidy-comments", "ssl-tidy-verify"];
 const sessions = new Map<string, any>();
 const streams = new Set<ReadableStreamDefaultController>();
 let n = 0;
@@ -20,6 +20,12 @@ function run(sessionID: string, text: string) {
 	const answer = process.env.FAKE_MODE === "tidy" ? tidyReply(text) : process.env.FAKE_MODE === "plan" ? planReply(text) : reply.replace("{prompt}", text);
 	setTimeout(() => {
 		send("session.execution.started", { sessionID });
+		if (process.env.FAKE_MODE === "loop") {
+			// A model trying again and again to call something that cannot help.
+			for (let i = 0; i < 5; i++) send("session.tool.called", { sessionID, assistantMessageID: messageID, id: `call_${i}`, input: { code: "await tools.write()" } });
+			sessions.get(sessionID).interruptWanted = true;
+			return;
+		}
 		if (process.env.FAKE_MODE === "escape") {
 			// Code mode reaching for a helper that asks no permission.
 			send("session.tool.called", { sessionID, assistantMessageID: messageID, id: "call_1", input: { code: "await tools.opencode.worktree_create({ name: 'x' })" }, executed: false });
@@ -49,8 +55,19 @@ function planReply(text: string) {
 	}
 	if (text.startsWith("PLAN STAGE: spec")) {
 		const map = process.env.FAKE_SPEC_INCOMPLETE ? [{ node: "n1", becomes: "the parameters" }] : ["n1", "n2", "n3", "n4", "n5", "n6"].map((node) => ({ node, becomes: "part of ReleaseSample" }));
-		return `<<<SPEC\n# Release a sample\n\n## Prior art\n\nIsUsableId already checks the id.\n\n## Procedures\n\nReleaseSample(sSampleId).\n>>>SPEC\n<<<UNITS\n[{"name":"ReleaseSample","script":"Sample/Release.ssl","parameters":["sSampleId"],"nodes":["n1"],"calls":["IsUsableId"],"lines":${process.env.FAKE_SPEC_LINES ?? 40}}]\n>>>UNITS\n<<<MAP\n${JSON.stringify(map)}\n>>>MAP\n<<<QUESTIONS\n[]\n>>>QUESTIONS`;
+		const units = [{ name: "ReleaseSample", script: "Sample/Release.ssl", parameters: ["sSampleId"], nodes: ["n1", "n2", "n3", "n4"], calls: ["IsUsableId"], lines: Number(process.env.FAKE_SPEC_LINES ?? 40) }, ...(process.env.FAKE_BUILD_HARD ? [{ name: "NeverRight", script: "Sample/Release.ssl", parameters: ["sSampleId"], nodes: ["n5"], calls: [] }, { name: "AfterHard", script: "Sample/Release.ssl", parameters: ["sSampleId"], nodes: ["n6"], calls: ["NeverRight"] }, { name: "AskFirst", script: "Sample/Other.ssl", parameters: ["sSampleId"], nodes: [], calls: [] }] : [])];
+		return `<<<SPEC\n# Release a sample\n\n## Prior art\n\nIsUsableId already checks the id.\n\n## Procedures\n\nReleaseSample(sSampleId).\n>>>SPEC\n<<<UNITS\n${JSON.stringify(units)}\n>>>UNITS\n<<<MAP\n${JSON.stringify(map)}\n>>>MAP\n<<<QUESTIONS\n[]\n>>>QUESTIONS`;
 	}
+	// A unit: wrong first, as models are, then right after the findings come back.
+	const unit = /^PLAN STAGE: build (\w+)/.exec(text)?.[1];
+	if (unit) {
+		if (text.includes("YOU ASKED:") === false && unit === "AskFirst") return '<<<QUESTIONS\n[{"question":"Which group is told?"}]\n>>>QUESTIONS';
+		const fixed = text.includes("THESE ARE WRONG WITH IT");
+		const body = fixed || unit === "AskFirst" ? `:RETURN ExecFunction("Regions.IsUsableId", {sSampleId});` : `/* Placeholder: implement actual logic here;\n:RETURN Gone(sSampleId);`;
+		if (unit === "NeverRight") return "```ssl\n:PROCEDURE NeverRight;\n:PARAMETERS sSampleId;\n/* TODO later;\n:RETURN 1;\n:ENDPROC;\n```";
+		return `\`\`\`ssl\n/*\n    ${unit}.\n\n    sSampleId - the id\n;\n:PROCEDURE ${unit};\n:PARAMETERS sSampleId;\n${body}\n:ENDPROC;\n\`\`\``;
+	}
+	if (text.startsWith("PLAN STAGE: second opinion")) return "Each step of the chart is carried out, as far as this reader can tell.";
 	return "Fake reply.";
 }
 

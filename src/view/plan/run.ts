@@ -12,10 +12,11 @@ import { describeElement } from "../panels/Reference";
 import { applyText, documents, notify, setState, state } from "../state";
 import { joinPath, relativeTo } from "../../shared/paths";
 import { addQuestions, answerQuestion, applySuggestion, formatSurvey, looksCut, nounsOf, openQuestions, overLimit, parseContext, parseQuestions, parseSpec, parseSuggestions, planHash, printSpec, readBlocks, refinePrompt, specHash, specPrompt, unaccounted, type ContextRequest, type Suggestion, type Survey } from "./assist";
+import type { BuildRun } from "./build";
 import { parsePlan, printPlan, type Plan } from "./model";
 
-export type AssistState = { running: "" | "refine" | "spec"; progress: string; warnings: string[]; suggestions: Suggestion[]; tokens: number; cost: number; specVersion: number };
-const blank = (): AssistState => ({ running: "", progress: "", warnings: [], suggestions: [], tokens: 0, cost: 0, specVersion: 0 });
+export type AssistState = { running: "" | "refine" | "spec" | "build"; progress: string; warnings: string[]; suggestions: Suggestion[]; tokens: number; cost: number; specVersion: number; run: BuildRun | null };
+const blank = (): AssistState => ({ running: "", progress: "", warnings: [], suggestions: [], tokens: 0, cost: 0, specVersion: 0, run: null });
 
 const [assists, setAssists] = createStore<Record<string, AssistState>>({});
 const newIds = new Map<string, Map<string, string>>();
@@ -25,10 +26,11 @@ const update = (path: string, patch: Partial<AssistState>) => {
 	if (!assists[path]) setAssists(path, blank());
 	setAssists(path, patch);
 };
+export const updateAssist = update;
 
 export const specPath = (planPath: string) => planPath.replace(/\.plan\.json$/i, ".spec.md");
 
-const planOf = (path: string): Plan | undefined => {
+export const planOf = (path: string): Plan | undefined => {
 	const doc = documents.get(path);
 	return doc ? parsePlan(doc.model.getValue()).plan : undefined;
 };
@@ -47,7 +49,7 @@ async function readLines(uri: string, start: number, end: number): Promise<strin
 }
 
 /** Survey before you build: the agent cannot look, so SSL Studio does. */
-async function survey(plan: Plan): Promise<string> {
+export async function survey(plan: Plan): Promise<string> {
 	const found: Survey = { calls: [], targets: [], symbols: [], hits: [], callGraph: [] };
 	for (const word of nounsOf(plan)) {
 		const symbols = await session.workspaceSymbols(word).catch(() => []);
@@ -132,9 +134,9 @@ function warn(path: string, text: string) {
 
 const CUT = "This prompt looks cut off: the model reported fewer tokens than it was sent, so it may have missed part of it. With Ollama, set a larger context (docs/INSTALL.md).";
 
-async function askAgent(path: string, stage: string, text: string, skills: string[]): Promise<string | null> {
-	update(path, { progress: `Waiting for the agent (${currentModel() || "no model"})…` });
-	const reply = await ask(text, { title: `${stage}: ${rel(path)}`, skills, show: `${stage}: ${rel(path)}` });
+export async function askAgent(path: string, stage: string, text: string, skills: string[], toolLimit?: number): Promise<string | null> {
+	update(path, { progress: `${stage}: waiting for ${currentModel() || "the agent"}…` });
+	const reply = await ask(text, { title: `${stage}: ${rel(path)}`, skills, show: `${stage}: ${rel(path)}`, toolLimit });
 	if (!reply) return null;
 	const soFar = assistOf(path);
 	const input = reply.tokens?.input ?? 0;
@@ -147,7 +149,7 @@ async function askAgent(path: string, stage: string, text: string, skills: strin
 	return reply.text;
 }
 
-const begin = (path: string, running: AssistState["running"], work: () => Promise<void>) => {
+export const begin = (path: string, running: AssistState["running"], work: () => Promise<void>) => {
 	if (assistOf(path).running) return Promise.resolve();
 	if (!state.workspace) return Promise.resolve(notify("Open a folder first."));
 	update(path, { running, warnings: [], progress: "" });

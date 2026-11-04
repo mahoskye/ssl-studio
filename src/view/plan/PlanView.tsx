@@ -9,6 +9,7 @@ import { monaco } from "../editor/monaco";
 import { regionColor } from "../editor/regions";
 import { diagnostics } from "../lsp/session";
 import { documents, notify, setState, state, applyText } from "../state";
+import { nodeStatuses } from "./build";
 import { assistOf } from "./run";
 import { PlanAssistant } from "./PlanAssistant";
 import { previewPlan } from "./assist";
@@ -201,6 +202,7 @@ export function PlanView(props: { path: string; group: number }) {
 		}
 		return map;
 	});
+	const unitStatuses = createMemo(() => nodeStatuses(assistOf(props.path).run));
 	const findingCount = () => diagnostics[doc()?.model.uri.toString() ?? ""]?.length ?? 0;
 
 	const apply = (next: Plan, selectId?: string | null) => {
@@ -519,7 +521,7 @@ export function PlanView(props: { path: string; group: number }) {
 											const trouble = () => issues().get(n.id);
 											return (
 												<g
-													class={`plan-node ${n.kind}`}
+													class={`plan-node ${n.kind} unit-${unitStatuses().get(n.id) ?? "none"}`}
 													classList={{ selected: selected() === n.id, trouble: Boolean(trouble()), pending: Boolean(n.pending) }}
 													onMouseDown={(e) => e.stopPropagation()}
 													onClick={(e) => (e.stopPropagation(), !n.pending && clickNode(n.id))}

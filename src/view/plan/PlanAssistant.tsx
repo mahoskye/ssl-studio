@@ -1,16 +1,21 @@
 // The agent's side of a plan, beside the chart: its questions, its suggestions,
 // and the spec. Answers and accepted suggestions are text edits on the plan, so
 // undo covers them too.
-import { createResource, For, Show } from "solid-js";
+import { createResource, For, onMount, Show } from "solid-js";
 import { agent, currentModel } from "../agent/store";
 import { showPanel } from "../panels/registry";
 import { openFile } from "../state";
 import { decisionsOf, describeSuggestion, openQuestions } from "./assist";
 import type { Plan } from "./model";
+import { unbuiltNodes } from "./build";
+import { answerUnit, discardRun, loadRun, retryUnit, reviewBuild, scriptsToReview, startBuild, stopBuild } from "./buildRun";
 import { acceptAll, acceptSuggestion, answer, assistOf, declineSuggestion, dismissWarning, refine, specPath, specState, writeSpec } from "./run";
 
 export function PlanAssistant(props: { path: string; plan: Plan; text: string; onSelect: (node: string) => void }) {
 	const a = () => assistOf(props.path);
+	onMount(() => void loadRun(props.path));
+	const run = () => a().run;
+	const STATUS = { pending: "Waiting", running: "Building", passed: "Passed", stuck: "Stuck", skipped: "Waiting on a stuck unit" } as const;
 	const open = () => openQuestions(props.plan);
 	const closed = () => decisionsOf(props.plan).filter((d) => d.answer?.trim());
 	const [spec] = createResource(
@@ -135,7 +140,78 @@ export function PlanAssistant(props: { path: string; plan: Plan; text: string; o
 					Open the spec
 				</button>
 			</Show>
-			<p class="hint plan-assist-foot">Nothing here changes your code. Building from a spec comes next.</p>
+
+			<h4 class="plan-assist-head">
+				<span>Build</span>
+				<Show when={a().running === "build"}>
+					<button onClick={() => stopBuild(props.path)}>Stop</button>
+				</Show>
+			</h4>
+			<Show when={spec() === "current" && !run()}>
+				<p class="hint">The agent builds from the spec without stopping. Nothing is written until you have reviewed it.</p>
+			</Show>
+			<Show when={spec() !== "current" && !run()}>
+				<p class="hint">Needs an approved spec, up to date with the plan.</p>
+			</Show>
+			<Show when={!a().running && spec() === "current" && (!run() || run()!.status !== "built" || run()!.units.some((u) => u.status === "pending"))}>
+				<button class="primary" onClick={() => void startBuild(props.path)}>
+					{run() ? "Carry on building" : "Build"}
+				</button>
+			</Show>
+			<Show when={run()}>
+				{(r) => (
+					<>
+						<p class="hint">
+							{r().units.filter((u) => u.status === "passed").length} of {r().units.length} units passed · {r().tokens.toLocaleString()} tokens
+							<Show when={r().cost}>, cost {r().cost.toFixed(2)}</Show>
+							<Show when={r().status === "budget"}> · stopped at its budget</Show>
+							<Show when={r().status === "stopped" && !a().running}> · stopped</Show>
+						</p>
+						<For each={r().units}>
+							{(unit) => (
+								<div class={`plan-unit ${unit.status}`}>
+									<p>
+										<strong>{unit.name}</strong> <span class="hint">{STATUS[unit.status]}{unit.attempts > 1 && unit.status !== "pending" ? `, try ${unit.attempts}` : ""}</span>
+									</p>
+									<Show when={unit.problems?.length}>
+										<ul class="plan-problems">
+											<For each={unit.problems}>{(p) => <li>{p}</li>}</For>
+										</ul>
+									</Show>
+									<Show when={unit.status === "stuck" && unit.question && !unit.answer}>
+										<input
+											placeholder="Your answer"
+											aria-label={unit.question}
+											onKeyDown={(e) => {
+												if (e.key === "Enter") answerUnit(props.path, unit.name, e.currentTarget.value);
+											}}
+										/>
+									</Show>
+									<Show when={unit.status === "stuck" && !a().running && !(unit.question && !unit.answer)}>
+										<button onClick={() => retryUnit(props.path, unit.name)}>Try again</button>
+									</Show>
+								</div>
+							)}
+						</For>
+						<Show when={!a().running && scriptsToReview(r(), props.plan).length}>
+							<button class="primary" onClick={() => void reviewBuild(props.path)}>
+								Review {scriptsToReview(r(), props.plan).length === 1 ? scriptsToReview(r(), props.plan)[0] : `${scriptsToReview(r(), props.plan).length} scripts`}
+							</button>
+						</Show>
+						<Show when={!a().running && r().status === "built" && !scriptsToReview(r(), props.plan).length && r().accepted.length}>
+							<p class="hint">
+								{unbuiltNodes(props.plan, r()).length ? `Accepted, but nothing is built yet for: ${unbuiltNodes(props.plan, r()).join(", ")}.` : "Accepted. This code has not been run: test it in STARLIMS."}
+							</p>
+						</Show>
+						<Show when={!a().running}>
+							<button class="link" onClick={() => discardRun(props.path)}>
+								Discard this build
+							</button>
+						</Show>
+					</>
+				)}
+			</Show>
+			<p class="hint plan-assist-foot">Nothing here changes your code until you accept it at review.</p>
 		</aside>
 	);
 }

@@ -350,3 +350,18 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .review-blocked { color: var(--error); margin: 0 0 6px; flex-basis: 100%; }
 .diff-bar button.primary:disabled { opacity: .45; cursor: not-allowed; }
 .review-info:has(.review-blocked) { flex-wrap: wrap; }
+
+/* Planning mode: a build's progress, on the chart and beside it */
+.plan-node.unit-passed rect, .plan-node.unit-passed polygon { stroke: var(--ok); stroke-width: 2; }
+.plan-node.unit-running rect, .plan-node.unit-running polygon { stroke: var(--accent); stroke-width: 2.5; stroke-dasharray: 6 3; }
+.plan-node.unit-stuck rect, .plan-node.unit-stuck polygon { stroke: var(--error); stroke-width: 2.5; }
+.plan-node.unit-skipped rect, .plan-node.unit-skipped polygon { stroke: var(--warning); stroke-dasharray: 3 3; }
+.plan-unit { padding: 5px 0 5px 8px; margin-bottom: 4px; border-left: 2px solid var(--border); }
+.plan-unit p { margin: 0 0 3px; }
+.plan-unit.passed { border-left-color: var(--ok); }
+.plan-unit.running { border-left-color: var(--accent); }
+.plan-unit.stuck { border-left-color: var(--error); }
+.plan-unit.skipped { border-left-color: var(--warning); }
+.plan-unit input { width: 100%; box-sizing: border-box; }
+.plan-problems { margin: 2px 0 5px; padding-left: 14px; color: var(--error); }
+.plan-assist > button.primary { margin: 4px 0; }
