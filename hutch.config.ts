@@ -19,6 +19,8 @@ export default {
 		// Runs the desktop app on the sample workspace, checks it, writes selftest.json, quits.
 		// Settings and history go to .selftest/, not the user's own. Fails when a check fails.
 		selftest: `hutch electrobun prepare && bun scripts/assets.ts && ${vite} && bun scripts/selftest.ts`,
+		// The same, plus a plan built, changed and rebuilt in the window, with the fake in place of a model.
+		"selftest-cycle": `hutch electrobun prepare && bun scripts/assets.ts && ${vite} && bun scripts/selftest.ts --cycle`,
 		check: "hutch pm exec -- tsc --noEmit -p .",
 		// A release: the pinned language server goes inside (bun scripts/bundle-lsp.ts --download fetches it).
 		build: `hutch electrobun prepare && bun scripts/assets.ts && bun scripts/bundle-lsp.ts && bun scripts/notices.ts && ${vite} && hutch electrobun build --env=stable`,

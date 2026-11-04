@@ -5,7 +5,7 @@ const password = process.env.OPENCODE_PASSWORD ?? "";
 const version = process.env.FAKE_VERSION ?? "2.2.5";
 const reply = process.env.FAKE_REPLY ?? "Fake reply.";
 const started = Date.now();
-const SKILLS = ["ssl-new-procedure", "ssl-tidy-context", "ssl-tidy-guards", "ssl-tidy-structure", "ssl-tidy-clarity", "ssl-tidy-comments", "ssl-tidy-verify"];
+const SKILLS = ["ssl-new-procedure", "ssl-unit-test", "ssl-tidy-context", "ssl-tidy-guards", "ssl-tidy-structure", "ssl-tidy-clarity", "ssl-tidy-comments", "ssl-tidy-verify"];
 const sessions = new Map<string, any>();
 const streams = new Set<ReadableStreamDefaultController>();
 let n = 0;
@@ -53,6 +53,12 @@ function planReply(text: string) {
 		const asked = text.includes("Which table holds") ? "" : '<<<QUESTIONS\n[{"question":"Which table holds the status?","node":"n4","answers":["SAMPLES","ORDERS"]},{"question":"How is the lab told?","node":"n5"}]\n>>>QUESTIONS\n';
 		return `${asked}<<<CHART\n{"nodes":[{"id":"a","kind":"step","text":"Report the failure","why":"The chart does not say what happens when the update fails."}],"edges":[{"from":"n3","to":"a","label":"locked"},{"from":"a","to":"n6"}],"changes":[{"id":"n5","notes":"Only after the commit.","why":"A failed notice should not undo the release."}]}\n>>>CHART`;
 	}
+	if (text.startsWith("PLAN STAGE: spec") && text.includes("THIS IS A CHANGE TO WHAT IS ALREADY BUILT")) {
+		// Only what changed, as the prompt asks: nodes it names, in the unit that carries most of them.
+		const named = [...text.split("WHAT IS BUILT:")[1]!.matchAll(/^- (n\d+):/gm)].map((m) => m[1]!);
+		const units = [{ name: "ReleaseSample", script: "Sample/Release.ssl", parameters: ["sSampleId"], nodes: ["n1", "n2", "n3", "n4", ...named.filter((n) => !["n1", "n2", "n3", "n4"].includes(n))], calls: ["IsUsableId"], lines: 40 }];
+		return `<<<SPEC\n# Release a sample\n\n## Prior art\n\nReleaseSample is built. It changes for the new step.\n>>>SPEC\n<<<UNITS\n${JSON.stringify(units)}\n>>>UNITS\n<<<MAP\n${JSON.stringify(named.map((node) => ({ node, becomes: "part of ReleaseSample" })))}\n>>>MAP\n<<<QUESTIONS\n[]\n>>>QUESTIONS`;
+	}
 	if (text.startsWith("PLAN STAGE: spec")) {
 		const map = process.env.FAKE_SPEC_INCOMPLETE ? [{ node: "n1", becomes: "the parameters" }] : ["n1", "n2", "n3", "n4", "n5", "n6"].map((node) => ({ node, becomes: "part of ReleaseSample" }));
 		const units = [{ name: "ReleaseSample", script: "Sample/Release.ssl", parameters: ["sSampleId"], nodes: ["n1", "n2", "n3", "n4"], calls: ["IsUsableId"], lines: Number(process.env.FAKE_SPEC_LINES ?? 40) }, ...(process.env.FAKE_BUILD_HARD ? [{ name: "NeverRight", script: "Sample/Release.ssl", parameters: ["sSampleId"], nodes: ["n5"], calls: [] }, { name: "AfterHard", script: "Sample/Release.ssl", parameters: ["sSampleId"], nodes: ["n6"], calls: ["NeverRight"] }, { name: "AskFirst", script: "Sample/Other.ssl", parameters: ["sSampleId"], nodes: [], calls: [] }] : [])];
@@ -62,10 +68,17 @@ function planReply(text: string) {
 	const unit = /^PLAN STAGE: build (\w+)/.exec(text)?.[1];
 	if (unit) {
 		if (text.includes("YOU ASKED:") === false && unit === "AskFirst") return '<<<QUESTIONS\n[{"question":"Which group is told?"}]\n>>>QUESTIONS';
-		const fixed = text.includes("THESE ARE WRONG WITH IT");
+		const fixed = text.includes("THESE ARE WRONG WITH IT") || text.includes("ALREADY EXISTS, as below");
 		const body = fixed || unit === "AskFirst" ? `:RETURN ExecFunction("Regions.IsUsableId", {sSampleId});` : `/* Placeholder: implement actual logic here;\n:RETURN Gone(sSampleId);`;
 		if (unit === "NeverRight") return "```ssl\n:PROCEDURE NeverRight;\n:PARAMETERS sSampleId;\n/* TODO later;\n:RETURN 1;\n:ENDPROC;\n```";
 		return `\`\`\`ssl\n/*\n    ${unit}.\n\n    sSampleId - the id\n;\n:PROCEDURE ${unit};\n:PARAMETERS sSampleId;\n${body}\n:ENDPROC;\n\`\`\``;
+	}
+	// A test script: one path short at first, then one test for each path it was given.
+	if (text.startsWith("PLAN STAGE: tests")) {
+		const count = text.match(/^Path \d+:/gm)?.length ?? 0;
+		const fixed = text.includes("THESE ARE WRONG WITH IT");
+		const tests = Array.from({ length: fixed ? count : Math.max(0, count - 1) }, (_, i) => `:PROCEDURE TestPath${i + 1};\n/* Path ${i + 1}: as the chart has it;\n:RETURN {"Path ${i + 1}", .T.};\n:ENDPROC;`);
+		return `\`\`\`ssl\n/* Tests for the plan. Run by calling RunTests;\n\n:PROCEDURE RunTests;\n:RETURN {};\n:ENDPROC;\n\n${tests.join("\n\n")}\n\`\`\``;
 	}
 	if (text.startsWith("PLAN STAGE: second opinion")) return "Each step of the chart is carried out, as far as this reader can tell.";
 	return "Fake reply.";

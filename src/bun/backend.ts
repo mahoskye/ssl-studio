@@ -43,7 +43,7 @@ export function createBackend(host: Host, initial?: string) {
 	async function loadInfo(): Promise<Info> {
 		const { effective } = await settings.load();
 		const [lspStatus, opencode] = await Promise.all([findLsp(effective.lspPath), findOpencode()]);
-		info = { app: host.app, lsp: lspStatus, opencode, host: host.kind, selftest: Boolean(process.env.SSL_STUDIO_SELFTEST) };
+		info = { app: host.app, lsp: lspStatus, opencode, host: host.kind, selftest: Boolean(process.env.SSL_STUDIO_SELFTEST), selftestCycle: Boolean(process.env.SSL_STUDIO_SELFTEST_CYCLE) };
 		return info;
 	}
 

@@ -6,7 +6,8 @@
 import { decisionsOf, readBlocks, type NodeMap, type SpecUnit } from "./assist";
 import type { Plan } from "./model";
 
-export type UnitStatus = "pending" | "running" | "passed" | "stuck" | "skipped";
+/** `kept`: already built, and the chart has not touched it. It is never sent to the agent or reprinted. */
+export type UnitStatus = "pending" | "running" | "passed" | "stuck" | "skipped" | "kept";
 export type BuildUnit = SpecUnit & {
 	status: UnitStatus;
 	code?: string;
@@ -20,6 +21,8 @@ export type BuildUnit = SpecUnit & {
 	answer?: string;
 	/** Your reason for rejecting it at review. */
 	feedback?: string;
+	/** It edits a procedure that exists, rather than adding one. */
+	change?: boolean;
 };
 export type RunStatus = "running" | "stopped" | "budget" | "built";
 export type BuildRun = {
@@ -73,7 +76,7 @@ export function newRun(plan: { hash: string; model: string }, units: SpecUnit[],
 	};
 }
 
-const lastPart = (name: string) => String(name).split(".").at(-1)!.toLowerCase();
+export const lastPart = (name: string) => String(name).split(".").at(-1)!.toLowerCase();
 const namesOf = (calls: unknown): string[] => (Array.isArray(calls) ? calls.filter((c): c is string => typeof c === "string") : []);
 
 /**
@@ -165,7 +168,7 @@ export function requiredCalls(unit: SpecUnit, plan: Plan, units: SpecUnit[]): st
 /** Each node's state for the chart: the worst of the units that build it. */
 export function nodeStatuses(run: BuildRun | null | undefined): Map<string, UnitStatus> {
 	const map = new Map<string, UnitStatus>();
-	const rank: UnitStatus[] = ["passed", "pending", "running", "skipped", "stuck"];
+	const rank: UnitStatus[] = ["kept", "passed", "pending", "running", "skipped", "stuck"];
 	for (const unit of run?.units ?? [])
 		for (const node of unit.nodes ?? []) {
 			const was = map.get(node);
@@ -178,7 +181,8 @@ export function nodeStatuses(run: BuildRun | null | undefined): Map<string, Unit
 export function unbuiltNodes(plan: Plan, run: BuildRun): string[] {
 	const statuses = nodeStatuses(run);
 	const said = new Set(run.map.map((m) => m.node));
-	return plan.nodes.filter((n) => (statuses.has(n.id) ? statuses.get(n.id) !== "passed" : !said.has(n.id))).map((n) => n.text);
+	const done = (id: string) => statuses.get(id) === "passed" || statuses.get(id) === "kept";
+	return plan.nodes.filter((n) => (statuses.has(n.id) ? !done(n.id) : !said.has(n.id))).map((n) => n.text);
 }
 
 export const scriptOf = (unit: SpecUnit, plan: Plan) => unit.script ?? (Array.isArray(plan.targets) && plan.targets.length ? String(plan.targets[0]) : `${plan.title.replace(/[^\w-]+/g, "") || "Plan"}.ssl`);
@@ -207,11 +211,52 @@ function assembleUnits(units: BuildUnit[], plan: Plan): string {
 	return parts.join("\n\n");
 }
 
-/** The script a run proposes: what is there now, or a banner for a new one, then the new units. */
-export function assembleScript(existing: string | null, banner: string, units: BuildUnit[], plan: Plan): string {
-	const added = assembleUnits(units.filter((u) => u.code), plan);
-	const head = existing === null ? banner.trimEnd() : existing.trimEnd();
-	return `${head ? `${head}\n\n` : ""}${added}\n`;
+/** Where a procedure sits, in 0-based lines, with the doc comment directly above it. */
+export type ProcedureSpan = { name: string; startLine: number; endLine: number };
+
+/** Procedures from the server's syntax tree, whose procedure nodes start at the keyword. */
+export function procedureSpans(nodes: any[]): ProcedureSpan[] {
+	const spans: ProcedureSpan[] = [];
+	const walk = (list: any[]) =>
+		list.forEach((node, i) => {
+			if (node.kind !== "procedure" || !node.name) return walk(node.children ?? []);
+			let startLine: number = node.range.start.line;
+			for (let j = i - 1; j >= 0; j--) {
+				const above = list[j];
+				if ((above.kind !== "docBlock" && above.kind !== "comment") || above.range.end.line !== startLine - 1) break;
+				startLine = above.range.start.line;
+			}
+			spans.push({ name: node.name, startLine, endLine: node.range.end.line });
+		});
+	walk(nodes);
+	return spans;
+}
+
+const spanOf = (spans: ProcedureSpan[], name: string) => spans.find((s) => s.name.toLowerCase() === name.toLowerCase());
+
+/** A procedure's text as it stands, from its span. */
+export function procedureText(text: string, spans: ProcedureSpan[], name: string): string | null {
+	const span = spanOf(spans, name);
+	return span ? text.split("\n").slice(span.startLine, span.endLine + 1).join("\n").trim() : null;
+}
+
+/**
+ * The script a run proposes: what is there now, or a banner for a new one, with changed
+ * procedures replaced where they stand and new units after. The lines around them are
+ * never touched: this is a text edit on ranges the server gave (ADR 0002).
+ */
+export function assembleScript(existing: string | null, banner: string, units: BuildUnit[], plan: Plan, spans: ProcedureSpan[] = []): string {
+	const coded = units.filter((u) => u.code);
+	const inPlace = existing === null ? [] : coded.filter((u) => u.change && spanOf(spans, u.name));
+	const lines = (existing ?? banner).split("\n");
+	for (const unit of [...inPlace].sort((a, b) => spanOf(spans, b.name)!.startLine - spanOf(spans, a.name)!.startLine)) {
+		const span = spanOf(spans, unit.name)!;
+		lines.splice(span.startLine, span.endLine - span.startLine + 1, ...unit.code!.trim().split("\n"));
+	}
+	const head = lines.join("\n").trimEnd();
+	const rest = coded.filter((u) => !inPlace.includes(u));
+	if (!rest.length) return `${head}\n`;
+	return `${head ? `${head}\n\n` : ""}${assembleUnits(rest, plan)}\n`;
 }
 
 /** A question for you, if the agent's reply asks one instead of answering. */
@@ -237,7 +282,7 @@ export function patternsFrom(templates: { label: string; group: string; body: ()
 		.join("\n");
 }
 
-export function unitPrompt(plan: Plan, spec: string, unit: BuildUnit, built: BuildUnit[], callable: string, patterns = ""): string {
+export function unitPrompt(plan: Plan, spec: string, unit: BuildUnit, built: BuildUnit[], callable: string, patterns = "", changing = ""): string {
 	const nodes = plan.nodes.filter((n) => unit.nodes?.includes(n.id));
 	const decided = decisionsOf(plan).filter((d) => d.answer?.trim());
 	return [
@@ -248,6 +293,7 @@ export function unitPrompt(plan: Plan, spec: string, unit: BuildUnit, built: Bui
 		"",
 		"THE UNIT:",
 		JSON.stringify({ name: unit.name, script: unit.script, parameters: unit.parameters, calls: unit.calls }),
+		...(changing ? ["", changing] : []),
 		...(nodes.length ? ["", "THE STEPS IT CARRIES OUT, FROM THE CHART:", ...nodes.map((n) => `- ${n.text}${n.notes ? ` (${n.notes})` : ""}`)] : []),
 		...(decided.length ? ["", "WHAT THE USER DECIDED:", ...decided.map((d) => `- ${d.question} ${d.answer}`)] : []),
 		...(unit.question && unit.answer ? ["", `YOU ASKED: ${unit.question}`, `THE USER SAID: ${unit.answer}`] : []),
@@ -268,13 +314,14 @@ export function retryPrompt(base: string, code: string | null, problems: string[
 }
 
 /** A second opinion: a fresh session, told plainly what to judge. Advisory, and never the only check. */
-export function reviewPrompt(plan: Plan, spec: string, scripts: { path: string; text: string }[]): string {
+export function reviewPrompt(plan: Plan, spec: string, scripts: { path: string; text: string }[], only?: string[]): string {
 	return [
 		"PLAN STAGE: second opinion",
-		"You did not write this code, and you cannot read files: all of it is below. Do not ask for a file. Read it against the chart and the spec, and say what is missing or wrong, most serious first. Say which chart step each point concerns. Say whether each step of the chart is really carried out. Do not state rules of the language you are not sure of.",
+		"You did not write this code, and you cannot read files: all of it is below. Do not ask for a file, and do not call any tool: none can help. Read it against the chart and the spec, and say what is missing or wrong, most serious first. Say which chart step each point concerns. Say whether each step of the chart is really carried out. Do not state rules of the language you are not sure of.",
+		...(only ? ["The rest of the chart is already built and is not shown: judge only these steps and this code."] : []),
 		"",
 		"THE CHART:",
-		...plan.nodes.map((n) => `- ${n.text}${n.notes ? ` (${n.notes})` : ""}`),
+		...plan.nodes.filter((n) => !only || only.includes(n.id)).map((n) => `- ${n.text}${n.notes ? ` (${n.notes})` : ""}`),
 		"",
 		"THE SPEC:",
 		spec,

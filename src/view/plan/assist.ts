@@ -207,9 +207,9 @@ export function parseSpec(text: string) {
 	return { spec: blocks.SPEC ?? "", units, map, questions: parseQuestions(blocks.QUESTIONS) };
 }
 
-/** Nodes the spec does not say what happens to. A chart's start and end still need saying. */
-export function unaccounted(plan: Plan, units: SpecUnit[], map: NodeMap[]): PlanNode[] {
-	const said = new Set([...map.map((m) => m.node), ...units.flatMap((u) => u.nodes ?? [])]);
+/** Nodes the spec does not say what happens to. A chart's start and end still need saying; what is built and untouched does not. */
+export function unaccounted(plan: Plan, units: SpecUnit[], map: NodeMap[], settled: string[] = []): PlanNode[] {
+	const said = new Set([...map.map((m) => m.node), ...units.flatMap((u) => u.nodes ?? []), ...settled]);
 	return plan.nodes.filter((n) => !said.has(n.id));
 }
 
@@ -223,7 +223,10 @@ export function overLimit(plan: Plan, units: SpecUnit[], limit: number): { scrip
 
 /** The plan as the spec was written from: words and structure, not who answered what when. */
 export function planHash(plan: Plan): string {
-	const text = JSON.stringify([plan.title, plan.goal, plan.nodes, plan.edges, decisionsOf(plan).map((d) => [d.question, d.answer])]);
+	return hashText(JSON.stringify([plan.title, plan.goal, plan.nodes, plan.edges, decisionsOf(plan).map((d) => [d.question, d.answer])]));
+}
+
+export function hashText(text: string): string {
 	let hash = 5381;
 	for (let i = 0; i < text.length; i++) hash = ((hash * 33) ^ text.charCodeAt(i)) >>> 0;
 	return hash.toString(16);
@@ -282,7 +285,7 @@ const answered = (plan: Plan) => {
 	return list.length ? ["", "THE USER HAS ALREADY DECIDED (do not ask these again):", ...list.map((d) => `- ${d.question} ${d.answer}`)] : [];
 };
 const planFor = (plan: Plan) => {
-	const { decisions: _kept, ...rest } = plan;
+	const { decisions: _kept, built: _built, ...rest } = plan;
 	return JSON.stringify(rest, null, 1);
 };
 

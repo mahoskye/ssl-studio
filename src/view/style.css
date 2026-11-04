@@ -356,6 +356,12 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .plan-node.unit-running rect, .plan-node.unit-running polygon { stroke: var(--accent); stroke-width: 2.5; stroke-dasharray: 6 3; }
 .plan-node.unit-stuck rect, .plan-node.unit-stuck polygon { stroke: var(--error); stroke-width: 2.5; }
 .plan-node.unit-skipped rect, .plan-node.unit-skipped polygon { stroke: var(--warning); stroke-dasharray: 3 3; }
+.plan-node.changed rect, .plan-node.changed polygon { stroke: var(--warning); stroke-width: 2; }
+.plan-node.gone rect, .plan-node.gone polygon { stroke: var(--error); stroke-dasharray: 3 3; }
+.plan-node rect.plan-built { fill: var(--ok); stroke: none; }
+.plan-change { margin: 0 0 4px; }
+.plan-drift { margin: 0 0 6px; }
+.plan-drift.warning { color: var(--warning); }
 .plan-unit { padding: 5px 0 5px 8px; margin-bottom: 4px; border-left: 2px solid var(--border); }
 .plan-unit p { margin: 0 0 3px; }
 .plan-unit.passed { border-left-color: var(--ok); }

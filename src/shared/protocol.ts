@@ -21,7 +21,7 @@ export type ToolStatus = {
 	message?: string;
 };
 
-export type Info = { app: string; lsp: ToolStatus; opencode: ToolStatus; host: "app" | "browser"; selftest: boolean };
+export type Info = { app: string; lsp: ToolStatus; opencode: ToolStatus; host: "app" | "browser"; selftest: boolean; selftestCycle?: boolean };
 
 export type ThemeFile = { id: string; name: string; json: string };
 

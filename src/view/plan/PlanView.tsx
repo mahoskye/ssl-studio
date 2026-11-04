@@ -10,9 +10,12 @@ import { regionColor } from "../editor/regions";
 import { diagnostics } from "../lsp/session";
 import { documents, notify, setState, state, applyText } from "../state";
 import { nodeStatuses } from "./build";
+import { builtOf, chartChanges, unitsOfNode } from "./built";
+import { recheckPlan } from "./check";
+import { driftFor, openProcedure } from "./drift";
 import { assistOf } from "./run";
 import { PlanAssistant } from "./PlanAssistant";
-import { previewPlan } from "./assist";
+import { planHash, previewPlan } from "./assist";
 import { addAfter, addBranch, addCall, connect, nodeAtLine, nodeLines, parsePlan, printPlan, PROCEDURE_DRAG, removeEdge, removeNode, setDecision, setEdgeLabel, setGroup, setText, type Edit, type NodeKind, type Plan, type PlanEdge, type PlanNode } from "./model";
 
 type Box = { id: string; x: number; y: number; width: number; height: number; node?: PlanNode; lines: string[]; group?: string };
@@ -127,6 +130,8 @@ export function PlanView(props: { path: string; group: number }) {
 		if (!model) return;
 		const sub = model.onDidChangeContent(() => setTextSignal(model.getValue()));
 		onCleanup(() => sub.dispose());
+		// A file may have gone or changed on disk while this was not showing.
+		recheckPlan(model.uri.toString());
 		queueMicrotask(() => canvas?.focus());
 	});
 
@@ -196,13 +201,39 @@ export function PlanView(props: { path: string; group: number }) {
 		const p = plan();
 		const uri = doc()?.model.uri.toString();
 		if (!p || !uri) return map;
-		for (const d of diagnostics[uri] ?? []) {
+		// Notes (a call the chart does not show) are for Problems and the assistant, not a badge.
+		for (const d of (diagnostics[uri] ?? []).filter((x) => x.severity <= 2)) {
 			const id = nodeAtLine(text(), p, d.line);
 			if (id) map.set(id, [...(map.get(id) ?? []), d.message]);
 		}
 		return map;
 	});
-	const unitStatuses = createMemo(() => nodeStatuses(assistOf(props.path).run));
+	const currentRun = () => {
+		const run = assistOf(props.path).run;
+		const p = plan();
+		return run && p && run.planHash === planHash(p) ? run : null;
+	};
+	const unitStatuses = createMemo(() => nodeStatuses(currentRun()));
+	const changed = createMemo(() => {
+		const p = plan();
+		const c = p ? chartChanges(p, assistOf(props.path).run) : null;
+		return new Set(c ? [...c.changed, ...c.added] : []);
+	});
+	const planUri = () => doc()?.model.uri.toString();
+	const gone = createMemo(() => {
+		const names = new Set(driftFor(planUri()).items.filter((d) => d.kind === "gone").map((d) => d.unit));
+		const p = plan();
+		return new Set(p ? (builtOf(p)?.units ?? []).filter((u) => names.has(u.name)).flatMap((u) => u.nodes) : []);
+	});
+	const linksOf = (id: string | null | undefined) => {
+		const p = plan();
+		return id && p ? unitsOfNode(p, id) : [];
+	};
+	const openCode = (id: string | null | undefined) => {
+		const unit = linksOf(id)[0];
+		if (unit) void openProcedure(planUri(), unit);
+		else if (id) notify("Nothing is built for this step yet.");
+	};
 	const findingCount = () => diagnostics[doc()?.model.uri.toString() ?? ""]?.length ?? 0;
 
 	const apply = (next: Plan, selectId?: string | null) => {
@@ -306,6 +337,7 @@ export function PlanView(props: { path: string; group: number }) {
 			Backspace: remove,
 			d: toggleDecision,
 			c: beginLink,
+			g: () => openCode(selected()),
 			Escape: () => {
 				if (linking()) setLinking(null);
 				else select(null);
@@ -438,7 +470,7 @@ export function PlanView(props: { path: string; group: number }) {
 					ref={canvas}
 					tabIndex={0}
 					role="application"
-					aria-label="Plan chart. Enter adds a step, Tab adds a branch, F2 edits the words, arrow keys move between nodes."
+					aria-label="Plan chart. Enter adds a step, Tab adds a branch, F2 edits the words, G opens a step's code, arrow keys move between nodes."
 					classList={{ linking: Boolean(linking()) }}
 					onKeyDown={onKey}
 					onWheel={(e) => {
@@ -522,12 +554,17 @@ export function PlanView(props: { path: string; group: number }) {
 											return (
 												<g
 													class={`plan-node ${n.kind} unit-${unitStatuses().get(n.id) ?? "none"}`}
-													classList={{ selected: selected() === n.id, trouble: Boolean(trouble()), pending: Boolean(n.pending) }}
+													classList={{ selected: selected() === n.id, trouble: Boolean(trouble()), pending: Boolean(n.pending), changed: changed().has(n.id), gone: gone().has(n.id) }}
 													onMouseDown={(e) => e.stopPropagation()}
-													onClick={(e) => (e.stopPropagation(), !n.pending && clickNode(n.id))}
+													onClick={(e) => {
+														e.stopPropagation();
+														if (n.pending) return;
+														if (e.ctrlKey || e.metaKey) openCode(n.id);
+														else clickNode(n.id);
+													}}
 													onDblClick={(e) => (e.stopPropagation(), !n.pending && setEditing({ node: n.id }))}
 												>
-													<title>{[n.text, n.notes, ...(trouble() ?? [])].filter(Boolean).join("\n")}</title>
+													<title>{[n.text, n.notes, ...linksOf(n.id).map((u) => `Built as ${u.name} in ${u.script}. Ctrl+click opens it.`), changed().has(n.id) ? "Changed since it was built." : "", ...(trouble() ?? [])].filter(Boolean).join("\n")}</title>
 													<Show when={n.kind === "decision"} fallback={<rect x={b.x} y={b.y} width={b.width} height={b.height} rx={n.kind === "start" || n.kind === "end" ? b.height / 2 : 5} />}>
 														<polygon points={`${cx},${b.y} ${b.x + b.width},${cy} ${cx},${b.y + b.height} ${b.x},${cy}`} />
 													</Show>
@@ -542,6 +579,9 @@ export function PlanView(props: { path: string; group: number }) {
 															</text>
 														)}
 													</For>
+													<Show when={linksOf(n.id).length && n.kind !== "decision"}>
+														<rect class="plan-built" x={b.x + 5} y={b.y + b.height - 9} width="5" height="5" />
+													</Show>
 													<Show when={trouble()}>
 														<circle class="plan-dot" cx={b.x + b.width - (n.kind === "decision" ? b.width / 4 : 2)} cy={b.y + (n.kind === "decision" ? b.height / 4 : 2)} r="5" />
 													</Show>
@@ -607,6 +647,13 @@ export function PlanView(props: { path: string; group: number }) {
 						{(node) => (
 							<>
 								<span class="plan-kind">{node.kind}</span>
+								<For each={linksOf(node.id)}>
+									{(unit) => (
+										<button class="link" title={`Open this step's code (G)${unit.script ? `: ${unit.script}` : ""}`} onClick={() => void openProcedure(planUri(), unit)}>
+											{unit.name}
+										</button>
+									)}
+								</For>
 								<Show when={node.kind === "call"}>
 									<label>
 										Calls <input value={node.ref ?? ""} onChange={(e) => setNodeField("ref", e.currentTarget.value)} />

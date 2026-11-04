@@ -58,9 +58,15 @@ const row = (value: Record<string, unknown>, first: string[]) => {
 const rows = (name: string, list: Record<string, unknown>[], first: string[]) =>
 	list.length ? `  ${JSON.stringify(name)}: [\n${list.map((item) => `    ${row(item, first)}`).join(",\n")}\n  ]` : `  ${JSON.stringify(name)}: []`;
 
+/** The record of a build, as `built.ts` has it: a unit a line, a node a line. */
+function printBuilt(built: Record<string, unknown>) {
+	const inner = Object.entries(built).map(([k, v]) => (k === "units" && Array.isArray(v) ? `    "units": [\n${v.map((u) => `      ${row(u, ["name", "script", "parameters", "nodes", "calls"])}`).join(",\n")}\n    ]` : `    ${JSON.stringify(k)}: ${JSON.stringify(v, null, 2).replace(/\n/g, "\n    ")}`));
+	return `  "built": {\n${inner.join(",\n")}\n  }`;
+}
+
 /** One node or edge a line, in a stable order, so a change shows as a small diff. */
 export function printPlan(plan: Plan): string {
-	const { version, title, goal, targets, groups, nodes, edges, ...rest } = plan;
+	const { version, title, goal, targets, groups, nodes, edges, built, ...rest } = plan;
 	const head = { version, title, goal, targets };
 	const lines = [
 		...Object.entries(head)
@@ -70,6 +76,7 @@ export function printPlan(plan: Plan): string {
 		rows("nodes", nodes, ["id", "kind", "text", "ref", "group", "notes"]),
 		rows("edges", edges, ["from", "to", "label"]),
 		...Object.entries(rest).map(([k, v]) => JSON.stringify({ [k]: v }, null, 2).split("\n").slice(1, -1).join("\n")),
+		...(isObject(built) ? [printBuilt(built)] : built === undefined ? [] : [`  "built": ${JSON.stringify(built)}`]),
 	];
 	return `{\n${lines.join(",\n")}\n}\n`;
 }
@@ -191,7 +198,7 @@ export function setGroup(plan: Plan, id: string, name: string): Plan {
 
 // --- the check: no agent, no cost ------------------------------------------------
 
-export type Finding = { severity: "error" | "warning"; code: string; message: string; node?: string; edge?: { from: string; to: string } };
+export type Finding = { severity: "error" | "warning" | "info"; code: string; message: string; node?: string; edge?: { from: string; to: string } };
 
 export function checkPlan(plan: Plan): Finding[] {
 	const out: Finding[] = [];

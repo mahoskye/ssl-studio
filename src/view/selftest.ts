@@ -6,6 +6,7 @@ import { activeEditor } from "./editor/EditorGroup";
 import { monaco } from "./editor/monaco";
 import { errors } from "./main";
 import { session, diagnostics } from "./lsp/session";
+import { procedureSpans } from "./plan/build";
 import { isPlanPath } from "./plan/model";
 import { activeDoc, openFile, state } from "./state";
 
@@ -77,6 +78,13 @@ export async function selftest() {
 			});
 			report.callGraph = { nodes: graph?.nodes?.length ?? 0, edges: graph?.edges?.length ?? 0 };
 			report.callGraphResolvesExecFunction = Boolean(graph?.edges?.some((e: any) => e.kind === "ExecFunction" && e.resolved));
+			// What a plan's drift report and its in-place edits read, on this machine's paths.
+			const caller = graph?.edges?.find((e: any) => e.kind === "ExecFunction" && e.resolved)?.location?.uri;
+			if (caller) {
+				const calls = await session.scriptCalls(caller);
+				report.scriptCalls = { procedures: calls?.procedures.length ?? 0, edges: calls?.edges.length ?? 0 };
+			}
+			report.procedureSpans = procedureSpans(await session.scratchTree("/* Doc;\n:PROCEDURE P;\n:ENDPROC;\n"));
 		}
 	} catch (e: any) {
 		errors.push(String(e?.stack ?? e));
@@ -92,10 +100,13 @@ export async function selftest() {
 	} catch (e: any) {
 		errors.push(String(e?.stack ?? e));
 	}
+	const plan = state.info?.selftestCycle ? (await backend.files()).find(isPlanPath) : undefined;
+	if (plan) report.cycle = await import("./selftestCycle").then((m) => m.selftestCycle(plan));
 	report.timingsMs = timings;
-	report.errors = errors;
+	// Monaco cancels work when a diff or an editor closes before it finishes, as an accepted review does.
+	report.errors = errors.filter((e) => !/^(Canceled|no diff result available)/.test(e));
 	report.ok =
-		!errors.length &&
+		!(report.errors as string[]).length &&
 		report.lsp === "running" &&
 		Number(report.tokenClasses) > 1 &&
 		Number(report.symbols) >= 0 &&
@@ -104,6 +115,9 @@ export async function selftest() {
 		(report.syntaxTreeNodes === undefined || Number(report.syntaxTreeNodes) > 0) &&
 		(report.semanticTokens === undefined || Number(report.semanticTokens) > 0) &&
 		(report.planNodes === undefined || Number(report.planNodes) > 0) &&
-		(report.callGraph === undefined || report.callGraphResolvesExecFunction === true);
+		(report.callGraph === undefined || report.callGraphResolvesExecFunction === true) &&
+		(report.scriptCalls === undefined || (Number((report.scriptCalls as any).procedures) > 0 && Number((report.scriptCalls as any).edges) > 0)) &&
+		(report.procedureSpans === undefined || (report.procedureSpans as any[])[0]?.startLine === 0) &&
+		(!state.info?.selftestCycle || Boolean(report.cycle && !(report.cycle as any).failed));
 	await backend.selftestDone(report);
 }

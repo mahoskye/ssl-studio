@@ -13,9 +13,10 @@ import { applyText, documents, notify, setState, state } from "../state";
 import { joinPath, relativeTo } from "../../shared/paths";
 import { addQuestions, answerQuestion, applySuggestion, formatSurvey, looksCut, nounsOf, openQuestions, overLimit, parseContext, parseQuestions, parseSpec, parseSuggestions, planHash, printSpec, readBlocks, refinePrompt, specHash, specPrompt, unaccounted, type ContextRequest, type Suggestion, type Survey } from "./assist";
 import type { BuildRun } from "./build";
+import { revisionText, settledNodes } from "./built";
 import { parsePlan, printPlan, type Plan } from "./model";
 
-export type AssistState = { running: "" | "refine" | "spec" | "build"; progress: string; warnings: string[]; suggestions: Suggestion[]; tokens: number; cost: number; specVersion: number; run: BuildRun | null };
+export type AssistState = { running: "" | "refine" | "spec" | "build" | "tests"; progress: string; warnings: string[]; suggestions: Suggestion[]; tokens: number; cost: number; specVersion: number; run: BuildRun | null };
 const blank = (): AssistState => ({ running: "", progress: "", warnings: [], suggestions: [], tokens: 0, cost: 0, specVersion: 0, run: null });
 
 const [assists, setAssists] = createStore<Record<string, AssistState>>({});
@@ -34,7 +35,7 @@ export const planOf = (path: string): Plan | undefined => {
 	const doc = documents.get(path);
 	return doc ? parsePlan(doc.model.getValue()).plan : undefined;
 };
-const savePlan = (path: string, plan: Plan) => applyText(path, printPlan(plan));
+export const savePlan = (path: string, plan: Plan) => applyText(path, printPlan(plan));
 const rel = (path: string) => relativeTo(state.workspace?.root, path);
 const PROCEDURES = new Set([6, 12]); // LSP SymbolKind: Method, Function.
 const fileOf = (uri: string) => monaco.Uri.parse(uri).fsPath;
@@ -74,19 +75,18 @@ export async function survey(plan: Plan): Promise<string> {
 	}
 	found.callGraph = [...new Set(found.callGraph)].slice(0, 20);
 	for (const target of Array.isArray(plan.targets) ? (plan.targets as string[]) : []) {
-		const path = joinPath(state.workspace!.root, target);
-		const exists = await backend.read(path).then(
-			() => true,
-			() => false,
+		const text = await backend.read(joinPath(state.workspace!.root, target)).then(
+			(f) => f.text,
+			() => null,
 		);
-		if (!exists) {
+		if (text === null) {
 			found.targets.push({ path: target, outline: null });
 			continue;
 		}
-		const model = await session.ensureModel(monaco.Uri.file(path).toString());
+		// Read as scratch text: looking must not put its findings in Problems.
 		const lines: string[] = [];
 		const walk = (list: monaco.languages.DocumentSymbol[], depth: number) => list.forEach((s) => (lines.push(`${"  ".repeat(depth)}${s.name}`), walk(s.children ?? [], depth + 1)));
-		if (model) walk(await session.documentSymbols(model).catch(() => []), 1);
+		walk((await session.analyze(text).catch(() => ({ symbols: [] }))).symbols, 1);
 		found.targets.push({ path: target, outline: lines.join("\n") });
 	}
 	return formatSurvey(found);
@@ -205,12 +205,19 @@ export function writeSpec(path: string) {
 		const found = await survey(plan);
 		const skills = await planningSkills(path);
 		const limits = state.settings.limits;
-		let text = await askAgent(path, "Write the spec", specPrompt(plan, found, limits), skills);
+		const file = specPath(path);
+		const original = await backend.read(file).then(
+			(f) => f.text,
+			() => "",
+		);
+		// With code already built, this revises the spec, and only what changed needs saying.
+		const revision = revisionText(plan, original ? original.split("\n## Units")[0]!.trim() : null);
+		let text = await askAgent(path, "Write the spec", specPrompt(plan, found, limits, revision), skills);
 		if (text === null) return;
 		let parsed = parseSpec(text);
-		const lacking = () => [!parsed.spec && "SPEC", !parsed.units.length && "UNITS", !parsed.map.length && "MAP"].filter(Boolean);
+		const lacking = () => [!parsed.spec && "SPEC", !revision && !parsed.units.length && "UNITS", !revision && !parsed.map.length && "MAP"].filter(Boolean);
 		if (lacking().length) {
-			text = await askAgent(path, "Write the spec", specPrompt(plan, found, limits, `Your last reply lacked these blocks, or they did not parse as JSON: ${lacking().join(", ")}. Reply again with every block.`), skills);
+			text = await askAgent(path, "Write the spec", specPrompt(plan, found, limits, [revision, `Your last reply lacked these blocks, or they did not parse as JSON: ${lacking().join(", ")}. Reply again with every block.`].filter(Boolean).join("\n\n")), skills);
 			if (text === null) return;
 			parsed = parseSpec(text);
 		}
@@ -220,7 +227,7 @@ export function writeSpec(path: string) {
 			savePlan(path, asked);
 			return notify("The agent has questions before it can finish the spec.");
 		}
-		const missing = unaccounted(plan, parsed.units, parsed.map);
+		const missing = unaccounted(plan, parsed.units, parsed.map, settledNodes(plan));
 		const over = overLimit(plan, parsed.units, limits.codeLines);
 		const checks: Check[] = [
 			{ label: "Every node is accounted for", ok: !missing.length, detail: missing.length ? `nothing says what becomes of ${missing.map((n) => `"${n.text}"`).join(", ")}` : undefined },
@@ -228,11 +235,6 @@ export function writeSpec(path: string) {
 			{ label: "Says what already exists", ok: /prior art/i.test(parsed.spec) },
 		];
 		const blocked = missing.length ? "Every node needs an answer before this can be approved. Reject it, and write it again." : over.length ? "A script goes over the size limit: the spec must split it (decision 0006). Reject it, and write it again." : undefined;
-		const file = specPath(path);
-		const original = await backend.read(file).then(
-			(f) => f.text,
-			() => "",
-		);
 		openReview({
 			title: `Spec: ${rel(file)}`,
 			original,

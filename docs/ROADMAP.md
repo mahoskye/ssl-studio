@@ -128,10 +128,11 @@ release build, installer, self-test and opencode 2.2.5 pass.
 
 ## Later
 
-- **Planning mode: chart, refine, spec and build are done (2026-11-03).** Design a
-  process or script as a flow chart, let an agent ask what it leaves undecided, write
-  the spec and build from it, and review the result. Left, P4: links from nodes to code,
-  drift, rebuilding changed nodes, and a test script.
+- **Planning mode: all four stages are done (2026-11-04).** Design a process or script as
+  a flow chart, let an agent ask what it leaves undecided, write the spec and build from
+  it, review the result, then follow nodes to their code, see where chart and code differ,
+  rebuild only what changed, and generate a test script from the chart's paths. Left: trying
+  a stronger model, which needs the user's say, and drawing a chart from existing code.
   Design and build order: [PLANNING-MODE.md](PLANNING-MODE.md),
   [ADR 0005](adr/0005-a-plan-is-a-document-of-its-own.md).
 - Run a procedure in the sandbox through a configured command (the sandbox is

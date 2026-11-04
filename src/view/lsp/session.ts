@@ -50,7 +50,7 @@ export function publishFindings(model: monaco.editor.ITextModel, owner: string, 
 	monaco.editor.setModelMarkers(
 		model,
 		owner,
-		list.map((d) => ({ startLineNumber: d.line, startColumn: d.column, endLineNumber: d.endLine, endColumn: d.endColumn, severity: d.severity === 1 ? monaco.MarkerSeverity.Error : monaco.MarkerSeverity.Warning, message: d.message, code: d.code, source: d.source })),
+		list.map((d) => ({ startLineNumber: d.line, startColumn: d.column, endLineNumber: d.endLine, endColumn: d.endColumn, severity: d.severity === 1 ? monaco.MarkerSeverity.Error : d.severity === 2 ? monaco.MarkerSeverity.Warning : monaco.MarkerSeverity.Info, message: d.message, code: d.code, source: d.source })),
 	);
 }
 
@@ -179,6 +179,41 @@ class Session {
 		} finally {
 			this.client.notify("textDocument/didClose", { textDocument: { uri } });
 		}
+	}
+
+	/** A file changed outside the editor. The server re-reads it, so what it knows across files stays true. */
+	fileChanged(path: string, exists: boolean) {
+		if (this.initialized) this.client.notify("workspace/didChangeWatchedFiles", { changes: [{ uri: monaco.Uri.file(path).toString(), type: exists ? 2 : 3 }] });
+	}
+
+	/** The server's syntax tree for text not in any editor. */
+	async scratchTree(text: string): Promise<any[]> {
+		if (!this.supports("ssl/syntaxTree")) return [];
+		await this.ready();
+		const uri = monaco.Uri.file(`${this.root}/.ssl-studio/tree-${++this.scratchCount}.ssl`).toString();
+		this.client.notify("textDocument/didOpen", { textDocument: { uri, languageId: "ssl", version: 1, text } });
+		try {
+			return (await this.client.request("ssl/syntaxTree", { textDocument: { uri } }))?.nodes ?? [];
+		} finally {
+			this.client.notify("textDocument/didClose", { textDocument: { uri } });
+		}
+	}
+
+	/** One script's procedures and the calls they make: from its buffer if it is open, else the index. Null while it cannot be known. */
+	async scriptCalls(uri: string): Promise<{ name: string; procedures: { name: string; line: number }[]; edges: { from: string; target: string; resolved: boolean }[] } | null> {
+		if (!this.supports("ssl/callGraph")) return null;
+		await this.ready();
+		const graph = await this.client.request("ssl/callGraph", { textDocument: { uri } });
+		if (graph?.indexing) return null;
+		const path = monaco.Uri.parse(uri).fsPath;
+		const here = (other?: string) => Boolean(other) && monaco.Uri.parse(other!).fsPath === path;
+		const nodes: any[] = graph?.nodes ?? [];
+		const names = new Map<string, string>(nodes.map((n) => [n.id, n.name]));
+		return {
+			name: nodes.find((n) => n.kind === "script" && here(n.location?.uri))?.name ?? "",
+			procedures: nodes.filter((n) => n.kind === "procedure" && here(n.location?.uri)).map((n) => ({ name: n.name, line: n.location.range.start.line + 1 })),
+			edges: (graph?.edges ?? []).filter((e: any) => here(e.location?.uri)).map((e: any) => ({ from: names.get(e.from) ?? e.from, target: e.target, resolved: Boolean(e.resolved) })),
+		};
 	}
 
 	/** The formatter's output for text not in any editor. */

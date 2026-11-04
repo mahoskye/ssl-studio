@@ -115,3 +115,38 @@ review says it may be wrong.
 **So:** a local build gives a draft worth reading, on one small plan. It is not a working
 script. Whether a stronger model closes that gap is still untested, and needs the user's
 say.
+
+## After P4: changing what is built (2026-11-04)
+
+The same local model and 16,384-token context, through the app, on a build of three
+procedures written for this trial. One step's notes changed: "also write a line to the log
+saying the lab was told".
+
+| Step | What happened |
+| --- | --- |
+| Spec | Asked two questions first, one about a step that had not changed. Then revised the spec. Its units listed `NotifyLab`, and `ReleaseSample`, which did not need to change |
+| Rebuild | **Only `NotifyLab` went to the model:** SSL Studio kept `ReleaseSample` despite the spec, and `MarkReleased`. It passed on the first try, at 27,705 tokens with the second opinion |
+| Review | The diff was that one procedure. The other two kept their hand formatting, and a comment written by hand stayed |
+| Tests | A script in the skill's shape on the first try, with both paths named, its calls resolving and no findings |
+
+The checks passed, and the code still has faults no check can see:
+
+- It logged by inserting into a `LOG` table it made up, not by a log call.
+- The test script's banner says "no database writes", and its first test releases a sample.
+- It added a "Path 3" the chart does not have, a rollback test that needs a failure you would
+  have to cause by hand.
+- Its first test needs a sample "12345" to exist, and does not say so.
+
+The trial also changed the design:
+
+- **An answer no longer marks a node as changed.** Answering "leave it as it is" would have
+  rewritten that procedure.
+- **The second opinion gave nothing useful:** it called a `models` tool, and reported that its
+  own model was missing. It is now told to call no tool, and a turn that keeps trying is
+  stopped.
+- **The survey** read a target script in a way that put its findings in Problems. It no longer
+  does.
+
+**So:** on one small change, the mechanism did what it should: the blast radius was one
+procedure. The code inside it is still a draft to read, and the tests are a starting point. A
+stronger model is still untested, and needs the user's say.

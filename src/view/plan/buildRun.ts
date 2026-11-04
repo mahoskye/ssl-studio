@@ -10,13 +10,15 @@ import { openReview, type Check } from "../editor/Review";
 import { monaco } from "../editor/monaco";
 import { measure } from "../editor/textmate";
 import { session } from "../lsp/session";
-import { applyText, notify, openFile, setState, state } from "../state";
+import { applyText, canonical, documents, notify, openFile, setState, state } from "../state";
 import { baseName, joinPath } from "../../shared/paths";
 import { bannerTemplate, TEMPLATES } from "../../shared/houseStyle";
 import { planHash, specHash } from "./assist";
-import { assembleScript, judgeUnit, MAX_ATTEMPTS, newRun, nextUnit, overBudget, patternsFrom, questionIn, readSpecFile, requiredCalls, retryPrompt, reviewPrompt, scriptOf, unbuiltNodes, unitPrompt, type BuildRun, type BuildUnit, type Edge } from "./build";
+import { assembleScript, judgeUnit, MAX_ATTEMPTS, newRun, nextUnit, overBudget, patternsFrom, procedureSpans, procedureText, questionIn, readSpecFile, requiredCalls, retryPrompt, reviewPrompt, scriptOf, unbuiltNodes, unitPrompt, type BuildRun, type BuildUnit, type Edge } from "./build";
+import { builtOf, changeText, classifyUnits, recordBuilt, settleBuilt } from "./built";
+import { driftFor } from "./drift";
 import type { Plan } from "./model";
-import { askAgent, assistOf, begin, planOf, specPath, survey, updateAssist } from "./run";
+import { askAgent, assistOf, begin, planOf, savePlan, specPath, survey, updateAssist } from "./run";
 
 const stopping = new Set<string>();
 /** Tool calls in a turn before it is stopped. Nothing here needs any; a skill may take one to load. */
@@ -45,16 +47,26 @@ export async function loadRun(path: string) {
 		for (const unit of run.units) if (unit.status === "running") unit.status = "pending";
 		if (run.status === "running") run.status = "stopped";
 		updateAssist(path, { run });
+		// Accepted, and the plan closed without saving its record: the code is still what was accepted.
+		const recorded = new Set((builtOf(plan)?.units ?? []).map((u) => u.name.toLowerCase()));
+		for (const script of run.accepted) if (run.units.some((u) => u.status === "passed" && scriptOf(u, plan) === script && !recorded.has(u.name.toLowerCase()))) recordAccepted(path, script);
 	} catch {
 		// Not a run this version can read: a new build starts afresh.
 	}
 }
 
-const readScript = (script: string) =>
-	backend.read(joinPath(state.workspace!.root, script)).then(
+/** A script as it stands: its buffer if it is open, so accepted and unsaved work is built on, not overwritten. */
+export function readScript(script: string): Promise<string | null> {
+	const full = joinPath(state.workspace!.root, script);
+	const doc = documents.get(canonical(full));
+	if (doc) return Promise.resolve(doc.model.getValue());
+	return backend.read(full).then(
 		(f) => f.text,
 		() => null,
 	);
+}
+
+export const spansIn = async (text: string | null) => (text === null ? [] : procedureSpans(await session.scratchTree(text)));
 
 function bannerFor(plan: Plan) {
 	const goal = typeof plan.goal === "string" && plan.goal ? plan.goal : plan.title;
@@ -64,7 +76,7 @@ function bannerFor(plan: Plan) {
 type Reading = { findings: { code?: string; severity: number; message: string; line: number }[]; symbols: { name: string; parameters: string[] }[]; edges: Edge[]; size: { bytes: number; codeLines: number } };
 
 /** What the language server makes of text that exists nowhere yet. */
-async function read(text: string): Promise<Reading> {
+export async function read(text: string): Promise<Reading> {
 	const { diagnostics, symbols } = await session.analyze(text);
 	const procedures: Reading["symbols"] = [];
 	const walk = (list: monaco.languages.DocumentSymbol[]) =>
@@ -79,11 +91,17 @@ async function buildUnit(path: string, plan: Plan, spec: string, run: BuildRun, 
 	publish(path, run);
 	const script = scriptOf(unit, plan);
 	const existing = await readScript(script);
+	const spans = await spansIn(existing);
 	const passed = run.units.filter((u) => u.status === "passed");
 	const banner = bannerFor(plan);
-	const without = assembleScript(existing, banner, passed.filter((u) => scriptOf(u, plan) === script), plan);
+	const others = passed.filter((u) => scriptOf(u, plan) === script);
+	const without = assembleScript(existing, banner, others, plan, spans);
 	const was = await read(without);
-	const base = unitPrompt(plan, spec, unit, passed, callable, patternsFrom(TEMPLATES));
+	// Taken away by hand since it was built: written again, as new.
+	const current = unit.change && existing !== null ? procedureText(existing, spans, unit.name) : null;
+	if (!current) delete unit.change;
+	const known = run.units.filter((u) => u.status === "passed" || u.status === "kept");
+	const base = unitPrompt(plan, spec, unit, known, callable, patternsFrom(TEMPLATES), current ? changeText(plan, unit, current) : "");
 	const units = run.units;
 	let prompt = base;
 	let problems: string[] = [];
@@ -113,13 +131,13 @@ async function buildUnit(path: string, plan: Plan, spec: string, run: BuildRun, 
 			unit.problems = [`It needs your answer: ${question}`];
 			return publish(path, run);
 		}
-		const withUnit = code ? await read(`${without.trimEnd()}\n\n${code}\n`) : null;
+		const withUnit = code ? await read(assembleScript(existing, banner, [...others, { ...unit, code }], plan, spans)) : null;
 		problems = judgeUnit({
 			unit,
 			code,
 			before: was.findings,
 			after: withUnit?.findings ?? was.findings,
-			existing: was.symbols,
+			existing: current ? was.symbols.filter((s) => s.name.toLowerCase() !== unit.name.toLowerCase()) : was.symbols,
 			symbols: withUnit?.symbols ?? [],
 			edges: withUnit?.edges ?? [],
 			planned: units.map((u) => u.name),
@@ -150,7 +168,9 @@ async function secondOpinion(path: string, plan: Plan, spec: string, run: BuildR
 	for (const script of new Set(passed.map((u) => scriptOf(u, plan)))) scripts.push({ path: script, text: assembleScript(null, "", passed.filter((u) => scriptOf(u, plan) === script), plan) });
 	const spent = assistOf(path);
 	const before = { tokens: spent.tokens, cost: spent.cost };
-	const reply = await askAgent(path, "A second opinion", reviewPrompt(plan, spec, scripts), []);
+	// Rebuilding part of a chart: the rest is not in front of the reader, so it is not asked about.
+	const partial = run.units.some((u) => u.status === "kept" || u.change);
+	const reply = await askAgent(path, "A second opinion", reviewPrompt(plan, spec, scripts, partial ? passed.flatMap((u) => u.nodes ?? []) : undefined), [], TOOL_LIMIT);
 	const now = assistOf(path);
 	run.tokens += now.tokens - before.tokens;
 	run.cost += now.cost - before.cost;
@@ -171,7 +191,7 @@ export function startBuild(path: string) {
 		const hash = planHash(plan);
 		if (specHash(specText) !== hash) return notify("The plan has changed since its spec was approved. Write the spec again first.");
 		const { units, map } = readSpecFile(specText);
-		if (!units.length) return notify("The spec lists nothing to build.");
+		if (!units.length && !builtOf(plan)) return notify("The spec lists nothing to build.");
 		const model = currentModel();
 		const local = agent.models.find((m) => `${m.providerID}/${m.id}` === model)?.local ?? true;
 		let run: BuildRun | null = assistOf(path).run ? plain(assistOf(path).run) : null;
@@ -184,6 +204,7 @@ export function startBuild(path: string) {
 				if (!Number.isFinite(cost) || cost <= 0) return notify("Give the budget as a number above zero.");
 			}
 			run = newRun({ hash, model }, units, map, cost === undefined ? {} : { cost });
+			classifyUnits(run, plan, driftFor(documents.get(path)?.model.uri.toString()).moved);
 		}
 		stopping.delete(path);
 		run.status = "running";
@@ -216,8 +237,11 @@ export function startBuild(path: string) {
 		}
 		publish(path, run);
 		stopping.delete(path);
-		if (run.status === "built") {
-			const stuck = run.units.filter((u) => u.status !== "passed").length;
+		if (run.status === "built" && run.units.every((u) => u.status === "kept")) {
+			savePlan(path, settleBuilt(plan, run));
+			notify("Nothing in the code needed to change. The chart is recorded as built.");
+		} else if (run.status === "built") {
+			const stuck = run.units.filter((u) => u.status !== "passed" && u.status !== "kept").length;
 			notify(stuck ? `The build is done, but ${stuck} ${stuck === 1 ? "unit is" : "units are"} stuck. Nothing has been written.` : "The build is ready to review. Nothing has been written.");
 		}
 	});
@@ -266,7 +290,18 @@ export function answerUnit(path: string, name: string, answer: string) {
 
 export const discardRun = (path: string) => publish(path, null);
 
-export const scriptsToReview = (run: BuildRun, plan: Plan) => [...new Set(run.units.filter((u) => u.status === "passed").map((u) => scriptOf(u, plan)))].filter((s) => !run.accepted.includes(s));
+export const scriptsToReview = (run: BuildRun, plan: Plan): string[] => [...new Set(run.units.filter((u) => u.status === "passed").map((u) => scriptOf(u, plan)))].filter((s) => !run.accepted.includes(s));
+
+/** The links, in the plan's text: an undoable edit, saved when you save the plan. */
+function recordAccepted(path: string, script: string) {
+	const plan = planOf(path);
+	const run = assistOf(path).run;
+	if (!plan || !run) return;
+	const accepted = run.units.filter((u) => u.status === "passed" && scriptOf(u, plan) === script);
+	const recorded = recordBuilt(plan, plain(accepted), plain(run.units));
+	const finished = !scriptsToReview(run, plan).length && run.units.every((u) => u.status === "passed" || u.status === "kept");
+	savePlan(path, finished ? settleBuilt(recorded, run) : recorded);
+}
 
 /** Stage 5: one review per script, walked in turn. Nothing is applied until you accept it. */
 export async function reviewBuild(path: string) {
@@ -278,7 +313,7 @@ export async function reviewBuild(path: string) {
 	if (!script) return notify("Nothing is waiting for review.");
 	const existing = await readScript(script);
 	const passed = run.units.filter((u) => u.status === "passed" && scriptOf(u, plan) === script);
-	const proposed = assembleScript(existing, bannerFor(plan), passed, plan);
+	const proposed = assembleScript(existing, bannerFor(plan), passed, plan, await spansIn(existing));
 	const reading = await read(proposed);
 	const unresolved = reading.edges.filter((e) => !e.resolved).map((e) => e.target);
 	const unbuilt = unbuiltNodes(plan, run);
@@ -300,6 +335,8 @@ export async function reviewBuild(path: string) {
 		note: run.review ? `A second opinion, which may be wrong:\n\n${run.review}` : undefined,
 		acceptLabel: existing === null ? "Accept and create the file" : "Accept into the editor",
 		onAccept: async (final) => {
+			// The plan records this, so it must be open; the script is what you see afterwards.
+			if (!planOf(path)) await openFile(path);
 			const full = joinPath(state.workspace!.root, script);
 			if (existing === null) {
 				await backend.write(full, final);
@@ -310,6 +347,7 @@ export async function reviewBuild(path: string) {
 				applyText(monaco.Uri.file(full).fsPath, final);
 			}
 			mutate(path, (r) => r.accepted.push(script));
+			recordAccepted(path, script);
 			notify(existing === null ? `Created ${script}.` : `Applied to ${script}. Review and save it; undo reverts it.`);
 			const after = assistOf(path).run;
 			if (after && scriptsToReview(after, plan).length) void reviewBuild(path);

@@ -11,7 +11,7 @@ import { changedRanges, minimalReplace } from "./lsp/edits";
 import { choose } from "./dialogs";
 import { baseName, isInside } from "../shared/paths";
 import { isPlanPath } from "./plan/model";
-import { trackPlan } from "./plan/check";
+import { recheckPlans, trackPlan } from "./plan/check";
 
 export type Group = { tabs: string[]; active: string | null; mode?: "text" | "blocks" };
 export type PanelId = "explorer" | "objects" | "palette" | "reference" | "search" | "history" | "health" | "agent";
@@ -329,13 +329,23 @@ on("fileChanged", async ({ path: changed }) => {
 	const path = canonical(changed);
 	setState("treeVersion", (v) => v + 1);
 	const doc = docs.get(path);
-	if (!doc) return;
+	// The kinds of file the server asks to be told about.
+	const script = /\.(srvscr|ssl|ds)(\.txt)?$/i.test(path);
+	if (!doc && !script) return;
+	const told = (exists: boolean) => {
+		if (!script) return;
+		session.fileChanged(path, exists);
+		recheckPlans();
+	};
 	let file;
 	try {
 		file = await backend.read(path);
 	} catch {
+		told(false);
 		return; // Deleted or moved: keep the open copy.
 	}
+	told(true);
+	if (!doc) return;
 	if (file.text === doc.model.getValue()) return;
 	if (state.dirty[path]) {
 		setState("conflicts", path, true);

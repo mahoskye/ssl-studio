@@ -1,10 +1,10 @@
 # Planning mode
 
 **Status:** Accepted (2026-11-03), [ADR 0005](adr/0005-a-plan-is-a-document-of-its-own.md).
-P1 (the chart), P2 (refine and spec) and P3 (build and review) are built. P4, what
-follows a build, is not. The [spike](spikes/planning-mode.md) found a local model good
-for refining a plan and for a first draft, not for a working script; this design
-reflects that.
+All four stages of the build order are done: the chart, refine and spec, build and
+review, and what follows a build. The [spike](spikes/planning-mode.md) found a local
+model good for refining a plan and for a first draft, not for a working script; this
+design reflects that. Neither a stronger model nor a real STARLIMS run has been tried.
 
 **The idea, in the user's words:** "a planning mode where I can use a flow
 chart to design a process or script and then have an agent take over and work
@@ -189,14 +189,44 @@ unit (`ask` already returns them). A budget stops the run between units.
 
 ## After the build
 
-- **Links:** accepted nodes record their script and procedure in the plan. Click
-  a node to open its code. A badge marks a node whose procedure has gone.
-- **Drift:** the chart compares its edges with `ssl/callGraph` and reports the
-  difference: "the chart says Release calls IsUsableId; the code no longer does".
-  A report only. The code may well be right.
-- **Changing the chart:** only changed nodes rebuild, as edits to existing
-  procedures, through the same checks and review. Untouched code is never
-  reprinted.
+Accepting a script records in the plan, under `"built"`, which procedures carry which
+nodes and what each node said then. It is an undoable edit on the plan's text, saved when
+you save the plan; recording it does not make the spec stale. If the plan closes without
+saving, the record comes back from the accepted run when the plan next opens.
+
+- **Links:** a node shows its procedure in the details bar. Clicking a node selects it, as
+  it always has, so Ctrl+click or G opens its code. A small green square marks a node with
+  code behind it.
+- **Drift:** the chart is compared with `ssl/callGraph`, for each built script, as the
+  plan or a script changes or a file changes on disk. It reports a procedure that has gone
+  (a badge on its nodes) or moved, a call the chart promises and the code does not make, a
+  call the chart does not show, and a procedure with no steps left. These go to Problems
+  and the assistant. A report only. The code may well be right, and nothing is repaired.
+  "They agree" covers procedures and calls, and says nothing about what the code does.
+
+  A chart's edge is order, not a call: "Mark, then Notify" may mean Release calls both. So
+  what must show as a call is what a call node names, and what the spec said one unit calls
+  of another.
+- **Changing the chart:** a node counts as changed if its words, notes, kind, target or ways
+  out change. Moving it to another group does not: that only files the code, and existing
+  code is not moved. Nor does an answer to a question: on the local model, answering "leave
+  it as it is" would otherwise have rewritten that procedure. What a step must newly do goes
+  in its notes. The assistant lists what changed. Write
+  the spec again (the agent is told what is built and what changed, and revises the spec),
+  then build.
+
+  SSL Studio decides what rebuilds, not the agent. A unit whose nodes, parameters and calls
+  are untouched is kept, whatever the spec lists, and is never sent to the agent. A
+  touched unit is an edit: the agent gets the procedure as it stands, buffer included, and
+  returns that procedure, which replaces only its own lines and the doc comment above it,
+  by the ranges in the server's syntax tree. A built procedure the spec leaves out is not
+  touched, and removing a node leaves its code for you to remove.
+- **Tests:** "Write the test script" asks the agent, with `ssl-unit-test`, for an SSL script
+  with one test per path through the chart (a loop is taken once; at most 24 paths, and the
+  review says if there are more). It goes through the server's checks and up to three
+  tries, then review, even if a check still fails, since you can edit it there. It lands
+  beside the code as `<Plan>Tests.ssl`. **Nothing has run it.** The review and the
+  assistant say so.
 - **Later, not now:** drawing a chart from existing code. Blocks and graph already
   show what exists, and a chart inferred from code would look more certain than it
   is.
@@ -214,6 +244,9 @@ unit (`ask` already returns them). A budget stops the run between units.
 | Review | `editor/Review.tsx` | Reused; multi-file walk added |
 | Agent | `bun/agent.ts` `ask` | Unchanged |
 | Run state | `backend.read`, `backend.write` | Reused |
+| What is built, what changed, drift, paths: pure | `src/view/plan/built.ts` | New |
+| Reading the server for drift | `src/view/plan/drift.ts` | New; run by `plan/check.ts` |
+| The test script | `src/view/plan/testScript.ts` | New |
 
 No new dependency, and no change to the opencode adapter.
 
@@ -238,8 +271,13 @@ Each step is usable before the next starts.
    pending change set, resume, stop, budget, second opinion, file-by-file review. On
    the local model it now produces a draft that passes the checks and still has real
    faults (see the [spike](spikes/planning-mode.md)). The review says so.
-5. **P4, after the build.** Links, drift, rebuilding changed nodes, the test
-   script.
+5. **P4, after the build. Done (2026-11-04).** Links, drift, rebuilding changed nodes,
+   the test script. `hutch run selftest-cycle` drives all of it in the real window with the
+   recorded fake, and passed on 2026-11-04 from source and from the installed package, on
+   Linux (WebKit) and Windows 11 (WebView2). On the local model
+   ([results](spikes/planning-mode.md)), one changed step rebuilt one procedure and left the
+   rest alone. The code it wrote and its tests still had faults only reading finds. No build
+   or test has run in STARLIMS, and a stronger model is untested.
 
 ## Risks
 

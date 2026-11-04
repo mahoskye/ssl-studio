@@ -18,8 +18,11 @@ the source of truth.
   `design/<name>.plan.json`, with a Chart and Text view and a check that needs
   no model. An agent then asks what the chart leaves undecided, suggests changes
   you accept one by one, writes the spec, and builds from it without stopping.
-  Nothing is written until you review it. On a local model that is a draft to read,
-  not a working script ([design](docs/PLANNING-MODE.md)).
+  Nothing is written until you review it. Afterwards a node opens its code, differences
+  between chart and code are reported, a changed chart rebuilds only what it touched,
+  and each path through the chart becomes a case in an SSL test script for you to run in
+  STARLIMS. On a local model that is a draft to read, not a working script
+  ([design](docs/PLANNING-MODE.md)).
 - **Agents:** the SSL agents and `ssl-tidy-*` cleanup skills from
   [`ssl-style-guide`](https://github.com/mahoskye/ssl-style-guide), run
   through opencode, with every change shown as a diff and checked by the
