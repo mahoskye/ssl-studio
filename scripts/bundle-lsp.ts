@@ -28,7 +28,7 @@ if (process.argv.includes("--download")) {
 	// The release is public: plain HTTPS works where gh is not installed (a fresh Windows VM).
 	const release = `https://github.com/mahoskye/starlims-lsp/releases/download/v${LSP_PIN}`;
 	const fetchTo = async (url: string, path: string) => {
-		const response = await fetch(url);
+		const response = await fetch(url, { signal: AbortSignal.timeout(120_000) });
 		if (!response.ok) throw new Error(`${url}: ${response.status}`);
 		await Bun.write(path, response);
 	};
