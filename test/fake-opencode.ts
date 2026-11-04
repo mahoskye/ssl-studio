@@ -4,6 +4,8 @@
 const password = process.env.OPENCODE_PASSWORD ?? "";
 const version = process.env.FAKE_VERSION ?? "2.2.5";
 const reply = process.env.FAKE_REPLY ?? "Fake reply.";
+const started = Date.now();
+const SKILLS = ["ssl-tidy-context", "ssl-tidy-guards", "ssl-tidy-structure", "ssl-tidy-clarity", "ssl-tidy-comments", "ssl-tidy-verify"];
 const sessions = new Map<string, any>();
 const streams = new Set<ReadableStreamDefaultController>();
 let n = 0;
@@ -68,7 +70,13 @@ const server = Bun.serve({
 					{ id: "ollama/qwen3:14b", modelID: "qwen3:14b", providerID: "ollama", name: "Qwen3 14B", capabilities: { tools: true }, variants: [{ id: "no-thinking" }] },
 				],
 			});
-		if (path === "/api/skill") return Response.json({ data: [{ id: "ssl-tidy-context", name: "ssl-tidy-context" }] });
+		// A real server fills this in stages after it starts: nothing, the built-ins, then all.
+		if (path === "/api/skill") {
+			const after = Number(process.env.FAKE_SKILLS_AFTER_MS ?? 0);
+			const age = Date.now() - started;
+			const ids = age >= after ? SKILLS : age >= after / 2 ? ["opencode", "report"] : [];
+			return Response.json({ data: ids.map((id) => ({ id, name: id })) });
+		}
 		if (path === "/api/event")
 			return new Response(
 				new ReadableStream({

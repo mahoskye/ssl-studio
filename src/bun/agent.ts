@@ -15,6 +15,8 @@ const DENY = ["shell", "webfetch", "websearch", "external_directory", "question"
 /** Providers that run on the user's own machines. Anything else may bill. */
 const LOCAL_PROVIDERS = new Set(["ollama", "lmstudio", "llama.cpp", "llamacpp", "local"]);
 const TURN_TIMEOUT_MS = 15 * 60_000;
+const SKILLS_WAIT_MS = 5_000;
+const SKILLS_STEADY_MS = 2_000;
 /**
  * Code-mode helpers that opencode 2.2.5 runs without any permission check, so
  * no rule can deny them (they do not call the permission service, which is
@@ -232,10 +234,28 @@ export class Agent {
 			.sort((a, b) => Number(b.local) - Number(a.local) || a.providerID.localeCompare(b.providerID) || a.name.localeCompare(b.name));
 	}
 
-	async skills(): Promise<{ id: string; name: string; description?: string }[]> {
+	/**
+	 * A server that has just started fills its skill list in stages (on 2.2.5:
+	 * none, then the two built-ins, then all, within about 1.5 s), so the list
+	 * counts once it stops growing, or holds the skills asked for.
+	 */
+	async skills(wanted: string[] = []): Promise<{ id: string; name: string; description?: string }[]> {
 		await this.ensure();
-		const list = ((await this.api("GET", "/api/skill"))?.data ?? []) as any[];
-		return list.map((s) => ({ id: s.id, name: s.name ?? s.id, description: s.description }));
+		const end = Date.now() + SKILLS_WAIT_MS;
+		let last = -1;
+		let steadySince = Date.now();
+		for (;;) {
+			const list = ((await this.api("GET", "/api/skill"))?.data ?? []) as any[];
+			if (list.length !== last) {
+				last = list.length;
+				steadySince = Date.now();
+			}
+			const found = wanted.length > 0 && wanted.every((id) => list.some((s) => s.id === id));
+			// A list that has stopped growing will not get what it lacks.
+			const settled = list.length > 0 && Date.now() - steadySince >= SKILLS_STEADY_MS;
+			if (found || settled || Date.now() >= end) return list.map((s) => ({ id: s.id, name: s.name ?? s.id, description: s.description }));
+			await Bun.sleep(100);
+		}
 	}
 
 	/** The model for new sessions: the chosen one, else the first local one. Never a paid default. */
@@ -254,6 +274,12 @@ export class Agent {
 		await this.ensure();
 		const root = this.root();
 		if (!root) throw new Error("Open a folder first.");
+		// A step without its skill would still answer, from nothing but the model's guesses.
+		if (input.skills?.length) {
+			const known = new Set((await this.skills(input.skills)).map((s) => s.id));
+			const missing = input.skills.filter((id) => !known.has(id));
+			if (missing.length) throw new Error(`opencode does not have the skill ${missing.join(", ")}. Install the style guide's skills on this machine (ssl-style-guide).`);
+		}
 		let sessionID = input.sessionID && this.sessions.has(input.sessionID) ? input.sessionID : "";
 		if (!sessionID) {
 			const model = await this.model();

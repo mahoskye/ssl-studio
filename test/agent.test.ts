@@ -62,3 +62,28 @@ test("a turn that reaches for an unguarded helper is interrupted", async () => {
 	const sessions = await fetch(`${base}/test/sessions`, { headers: { Authorization: (agent as any).auth } }).then((r) => r.json());
 	expect(sessions[0].interrupted).toBe(true);
 });
+
+test("waits for a new server's skills, which arrive in stages", async () => {
+	const { agent } = make({ FAKE_SKILLS_AFTER_MS: "1000", FAKE_REPLY: "ok", FAKE_VERSION: "2.2.5" });
+	try {
+		// Asked at once: nothing yet, then only the built-ins, then all.
+		const reply = await agent.ask({ text: "tidy this", skills: ["ssl-tidy-guards"] });
+		expect(reply.outcome).toBe("succeeded");
+	} finally {
+		delete process.env.FAKE_SKILLS_AFTER_MS;
+	}
+});
+
+test("the full list is the one that has stopped growing", async () => {
+	const { agent } = make({ FAKE_SKILLS_AFTER_MS: "1000", FAKE_VERSION: "2.2.5" });
+	try {
+		expect((await agent.skills()).map((s) => s.id)).toContain("ssl-tidy-context");
+	} finally {
+		delete process.env.FAKE_SKILLS_AFTER_MS;
+	}
+});
+
+test("refuses to run a step whose skill is missing, rather than run it without", async () => {
+	const { agent } = make({ FAKE_REPLY: "ok", FAKE_VERSION: "2.2.5" });
+	await expect(agent.ask({ text: "plan this", skills: ["ssl-no-such-skill"] })).rejects.toThrow("ssl-no-such-skill");
+});
