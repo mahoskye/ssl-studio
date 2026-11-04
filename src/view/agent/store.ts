@@ -71,7 +71,7 @@ export async function chooseModel(ref: string) {
 }
 
 /** One prompt; streams into the conversation; returns the reply. */
-export async function ask(text: string, options: { title?: string; skills?: string[]; show?: string; keep?: boolean; sessionID?: string } = {}): Promise<AgentReply | null> {
+export async function ask(text: string, options: { title?: string; skills?: string[]; show?: string; keep?: boolean; sessionID?: string; toolLimit?: number } = {}): Promise<AgentReply | null> {
 	if (agent.busy) {
 		notify("The agent is still working on the last request.");
 		return null;
@@ -80,7 +80,7 @@ export async function ask(text: string, options: { title?: string; skills?: stri
 	addEntry({ role: "user", text: options.show ?? text });
 	try {
 		if (agent.status.state !== "ready") await start();
-		const reply = (await backend.agent("ask", [{ text, title: options.title, skills: options.skills, keep: options.keep, sessionID: options.sessionID }])) as AgentReply;
+		const reply = (await backend.agent("ask", [{ text, title: options.title, skills: options.skills, keep: options.keep, sessionID: options.sessionID, toolLimit: options.toolLimit }])) as AgentReply;
 		const cost = reply.cost ? `, cost ${reply.cost}` : "";
 		addEntry({ role: "note", text: `${reply.outcome} · ${reply.tokens?.input ?? 0} in / ${reply.tokens?.output ?? 0} out tokens${cost}${reply.error ? ` · ${reply.error}` : ""}` });
 		return reply;

@@ -34,6 +34,7 @@ test("asks on a fresh session with deny rules and a local model", async () => {
 		"websearch:deny",
 		"external_directory:deny",
 		"question:deny",
+		"edit:deny",
 	]);
 	expect(sessions[0].prompts[0].skills).toEqual([{ id: "ssl-tidy-context" }]);
 });
@@ -86,4 +87,15 @@ test("the full list is the one that has stopped growing", async () => {
 test("refuses to run a step whose skill is missing, rather than run it without", async () => {
 	const { agent } = make({ FAKE_REPLY: "ok", FAKE_VERSION: "2.2.5" });
 	await expect(agent.ask({ text: "plan this", skills: ["ssl-no-such-skill"] })).rejects.toThrow("ssl-no-such-skill");
+});
+
+test("stops a turn that keeps calling tools, when told to", async () => {
+	const { agent } = make({ FAKE_VERSION: "2.2.5", FAKE_MODE: "loop" });
+	try {
+		const reply = await agent.ask({ text: "write the unit", toolLimit: 2 });
+		expect(reply.outcome).toBe("interrupted");
+		expect(reply.error).toMatch(/kept calling tools/);
+	} finally {
+		delete process.env.FAKE_MODE;
+	}
 });

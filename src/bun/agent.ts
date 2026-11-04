@@ -11,7 +11,7 @@ import type { Subprocess } from "bun";
 import type { AgentModel, AgentReply, AgentStatus } from "../shared/protocol";
 import { compareVersions, OPENCODE_RANGE, opencodeCommand } from "./tools";
 
-const DENY = ["shell", "webfetch", "websearch", "external_directory", "question"];
+const DENY = ["shell", "webfetch", "websearch", "external_directory", "question", "edit"];
 /** Providers that run on the user's own machines. Anything else may bill. */
 const LOCAL_PROVIDERS = new Set(["ollama", "lmstudio", "llama.cpp", "llamacpp", "local"]);
 const TURN_TIMEOUT_MS = 15 * 60_000;
@@ -27,7 +27,7 @@ export const UNGUARDED_TOOLS = ["worktree_create", "session_move"];
 const UNGUARDED = new RegExp(`\\b(${UNGUARDED_TOOLS.join("|")})\\b`);
 
 type Options = { serverConfig?: string; serverUrl?: string; model?: string };
-type Waiter = { resolve: (outcome: AgentReply["outcome"]) => void; blocked?: string };
+type Waiter = { resolve: (outcome: AgentReply["outcome"]) => void; blocked?: string; tools: number; toolLimit?: number; overLimit?: boolean };
 
 export class Agent {
 	private proc?: Subprocess<"pipe", "pipe", "pipe">;
@@ -212,8 +212,13 @@ export class Agent {
 		if (event.type === "session.tool.called") hit = UNGUARDED.exec(JSON.stringify(event.data?.input ?? ""))?.[1];
 		if (event.type === "session.tool.progress") hit = (event.data?.metadata?.toolCalls ?? []).map((c: any) => String(c.tool)).find((t: string) => UNGUARDED.test(t));
 		if (event.type === "session.moved") hit = "session_move";
-		if (!hit) return;
 		const waiter = this.waiters.get(sessionID);
+		// A model with nothing useful to call can still loop on it, at the turn's expense.
+		if (!hit && event.type === "session.tool.called" && waiter?.toolLimit !== undefined && ++waiter.tools > waiter.toolLimit && !waiter.overLimit) {
+			waiter.overLimit = true;
+			void this.api("POST", `/api/session/${sessionID}/interrupt`).catch(() => {});
+		}
+		if (!hit) return;
 		if (waiter && !waiter.blocked) waiter.blocked = hit;
 		this.emit("guard", { sessionID, tool: hit });
 		void this.api("POST", `/api/session/${sessionID}/interrupt`).catch(() => {});
@@ -295,7 +300,7 @@ export class Agent {
 			this.emit("session", { sessionID, title: input.title, model });
 		}
 		const seen = ((await this.api("GET", `/api/session/${sessionID}/message?limit=200&order=asc`))?.data ?? []).length;
-		const waiter: Waiter = { resolve: () => {} };
+		const waiter: Waiter = { resolve: () => {}, tools: 0, toolLimit: input.toolLimit };
 		const done = new Promise<AgentReply["outcome"]>((resolve) => {
 			waiter.resolve = resolve;
 			this.waiters.set(sessionID, waiter);
@@ -311,17 +316,19 @@ export class Agent {
 		const cost = assistant.reduce((c, m) => c + (m.cost ?? 0), 0);
 		const error = waiter.blocked
 			? { message: `Stopped: the agent tried ${waiter.blocked}, which opencode runs without a permission check.` }
-			: assistant.map((m) => m.error).find(Boolean);
+			: waiter.overLimit
+				? { message: `Stopped: the agent kept calling tools (more than ${waiter.toolLimit}), which can only waste the turn here.` }
+				: assistant.map((m) => m.error).find(Boolean);
 		if (!input.keep) {
 			this.sessions.delete(sessionID);
 			void this.api("DELETE", `/api/session/${sessionID}`).catch(() => {});
 		}
-		return { sessionID, text: waiter.blocked ? "" : text, outcome: waiter.blocked ? "interrupted" : outcome, tokens, cost, error: error ? String(error.message ?? JSON.stringify(error)) : undefined };
+		return { sessionID, text: waiter.blocked ? "" : text, outcome: waiter.blocked || waiter.overLimit ? "interrupted" : outcome, tokens, cost, error: error ? String(error.message ?? JSON.stringify(error)) : undefined };
 	}
 }
 
 /** `sessionID` continues a kept session; otherwise each ask is a fresh one. */
-export type AskInput = { text: string; title?: string; skills?: string[]; keep?: boolean; sessionID?: string; timeoutMs?: number };
+export type AskInput = { text: string; title?: string; skills?: string[]; keep?: boolean; sessionID?: string; timeoutMs?: number; toolLimit?: number };
 
 /** `serve --stdio` prints `{"url": ...}` as its first line. */
 async function firstUrl(proc: Subprocess<"pipe", "pipe", "pipe">): Promise<string> {
