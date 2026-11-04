@@ -78,6 +78,8 @@ export function printPlan(plan: Plan): string {
 
 export type Edit = { plan: Plan; select?: string };
 
+export const nextNodeId = (plan: Plan) => nextId(plan);
+
 function nextId(plan: Plan, prefix = "n") {
 	const pattern = new RegExp(`^${prefix}(\\d+)$`);
 	const used = [...plan.nodes, ...plan.groups].map((x) => pattern.exec(x.id)?.[1]).filter(Boolean).map(Number);

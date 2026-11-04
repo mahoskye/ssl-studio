@@ -39,6 +39,9 @@ async function describe(entry: Entry, root: string): Promise<string> {
 	}
 }
 
+/** The server's words on a built-in, for an agent that asked. */
+export const describeElement = (name: string, root: string) => describe({ label: name, kind: 3 }, root);
+
 /** Plain rendering of the server's markdown: code fences and bold kept readable. */
 function Markdown(props: { text: string }) {
 	const parts = () => props.text.split(/```(?:\w+)?\n?/);

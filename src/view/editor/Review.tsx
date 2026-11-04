@@ -14,6 +14,8 @@ export type Review = {
 	/** Shown above the diff: the agent's note for this step. */
 	note?: string;
 	acceptLabel?: string;
+	/** Why this cannot be accepted as it stands: a check it must pass has failed. */
+	blocked?: string;
 	onAccept: (text: string) => void | Promise<void>;
 	onReject?: () => void;
 };
@@ -53,13 +55,16 @@ export function ReviewView() {
 				<strong>{r.title}</strong>
 				<span class="hint">current ← → proposed (you can edit the right side)</span>
 				<span class="spacer" />
-				<button class="primary" onClick={() => void accept()}>
+				<button class="primary" disabled={Boolean(r.blocked)} title={r.blocked} onClick={() => void accept()}>
 					{r.acceptLabel ?? "Accept"}
 				</button>
 				<button onClick={reject}>Reject</button>
 			</div>
-			<Show when={r.checks?.length || r.note}>
+			<Show when={r.checks?.length || r.note || r.blocked}>
 				<div class="review-info">
+					<Show when={r.blocked}>
+						<p class="review-blocked">{r.blocked}</p>
+					</Show>
 					<Show when={r.checks?.length}>
 						<ul class="checks">
 							<For each={r.checks}>

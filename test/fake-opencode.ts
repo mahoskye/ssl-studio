@@ -17,7 +17,7 @@ const send = (type: string, data: unknown) => {
 
 function run(sessionID: string, text: string) {
 	const messageID = `msg_${++n}`;
-	const answer = process.env.FAKE_MODE === "tidy" ? tidyReply(text) : reply.replace("{prompt}", text);
+	const answer = process.env.FAKE_MODE === "tidy" ? tidyReply(text) : process.env.FAKE_MODE === "plan" ? planReply(text) : reply.replace("{prompt}", text);
 	setTimeout(() => {
 		send("session.execution.started", { sessionID });
 		if (process.env.FAKE_MODE === "escape") {
@@ -38,6 +38,20 @@ function run(sessionID: string, text: string) {
 		);
 		send("session.execution.succeeded", { sessionID });
 	}, 20);
+}
+
+/** FAKE_MODE=plan: asks to read something, then asks and suggests; a spec that accounts for the sample's nodes. */
+function planReply(text: string) {
+	if (text.startsWith("PLAN STAGE: refine")) {
+		if (!text.includes("CONTEXT YOU ASKED FOR")) return '<<<CONTEXT\n[{"procedure":"IsUsableId"},{"file":"Regions.ssl"},{"element":"Empty"},{"file":"nope.ssl"}]\n>>>CONTEXT';
+		const asked = text.includes("Which table holds") ? "" : '<<<QUESTIONS\n[{"question":"Which table holds the status?","node":"n4","answers":["SAMPLES","ORDERS"]},{"question":"How is the lab told?","node":"n5"}]\n>>>QUESTIONS\n';
+		return `${asked}<<<CHART\n{"nodes":[{"id":"a","kind":"step","text":"Report the failure","why":"The chart does not say what happens when the update fails."}],"edges":[{"from":"n3","to":"a","label":"locked"},{"from":"a","to":"n6"}],"changes":[{"id":"n5","notes":"Only after the commit.","why":"A failed notice should not undo the release."}]}\n>>>CHART`;
+	}
+	if (text.startsWith("PLAN STAGE: spec")) {
+		const map = process.env.FAKE_SPEC_INCOMPLETE ? [{ node: "n1", becomes: "the parameters" }] : ["n1", "n2", "n3", "n4", "n5", "n6"].map((node) => ({ node, becomes: "part of ReleaseSample" }));
+		return `<<<SPEC\n# Release a sample\n\n## Prior art\n\nIsUsableId already checks the id.\n\n## Procedures\n\nReleaseSample(sSampleId).\n>>>SPEC\n<<<UNITS\n[{"name":"ReleaseSample","script":"Sample/Release.ssl","parameters":["sSampleId"],"nodes":["n1"],"calls":["IsUsableId"],"lines":${process.env.FAKE_SPEC_LINES ?? 40}}]\n>>>UNITS\n<<<MAP\n${JSON.stringify(map)}\n>>>MAP\n<<<QUESTIONS\n[]\n>>>QUESTIONS`;
+	}
+	return "Fake reply.";
 }
 
 /** FAKE_MODE=tidy: a context note for step 1, the file with one added comment otherwise. */

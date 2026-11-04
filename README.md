@@ -16,7 +16,8 @@ the source of truth.
   grouped by region.
 - **Planning:** a process or script as a flow chart in plain words, kept as
   `design/<name>.plan.json`, with a Chart and Text view and a check that needs
-  no model. Handing a plan to an agent to build comes next
+  no model. An agent then asks what the chart leaves undecided, suggests changes
+  you accept one by one, and writes the spec. Building from it comes next
   ([design](docs/PLANNING-MODE.md)).
 - **Agents:** the SSL agents and `ssl-tidy-*` cleanup skills from
   [`ssl-style-guide`](https://github.com/mahoskye/ssl-style-guide), run

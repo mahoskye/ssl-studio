@@ -1,9 +1,10 @@
 # Planning mode
 
 **Status:** Accepted (2026-11-03), [ADR 0005](adr/0005-a-plan-is-a-document-of-its-own.md).
-P1, the chart, is built. The agent stages (P2 to P4) are not. The
-[spike](spikes/planning-mode.md) found a local model good for refining a plan and for
-a first draft, not yet for building unattended; this design now reflects that.
+P1, the chart, and P2, refine and spec, are built. P3 and P4, building and what
+follows, are not. The [spike](spikes/planning-mode.md) found a local model good for
+refining a plan and for a first draft, not yet for building unattended; this design
+now reflects that.
 
 **The idea, in the user's words:** "a planning mode where I can use a flow
 chart to design a process or script and then have an agent take over and work
@@ -226,8 +227,11 @@ Each step is usable before the next starts.
 2. **Spike, before P2. Done (2026-11-03),** [results](spikes/planning-mode.md). A
    local model is useful for refining and for a draft, not for building unattended.
    A larger or paid model is untested, and only runs if you ask.
-3. **P2, refine and spec.** Survey, reply blocks, the question form, chart
-   suggestions, spec review. Code is not touched.
+3. **P2, refine and spec. Done (2026-11-03).** Survey, reply blocks, the question
+   form, chart suggestions, spec review. Code is not touched. Tried on the local model
+   through the app: its questions were good and its spec usable, and it also proposed
+   an approval step nobody asked for, and named an API that does not exist. No check
+   caught those: that is what accepting one by one, and reviewing the spec, are for.
 4. **P3, build and review.** The unit loop, checks and retries, pending change
    set, resume, budget, second opinion, file-by-file review.
 5. **P4, after the build.** Links, drift, rebuilding changed nodes, the test
@@ -243,11 +247,10 @@ Each step is usable before the next starts.
   wrong logic. Nothing here runs SSL. That is why review is not optional, the
   second opinion is a separate session, and the review says the code was not run.
 - **Skills may be missing.** The private server loads user-level skills, and the
-  Windows machine may not have them. A build checks `skills()` first and says
-  what to install. There is also no planning skill yet, because opencode cannot
-  see the `ssl-planner` agent: P2 either carries those instructions in its prompt
-  or asks the style guide for an `ssl-plan` skill. The second is better, and is
-  an issue on that repository.
+  Windows machine may not have them. `ask` refuses a step whose named skill is
+  missing. There is also no planning skill yet, because opencode cannot see the
+  `ssl-planner` agent. P2 uses `ssl-plan` when it is installed; until the style guide
+  has one, it says so and works from a basic prompt.
 - **Your code goes to the chosen model.** As with tidy. The corpus and other
   restricted material stay out by the existing boundaries, and the model in use
   is shown before any build.
@@ -262,5 +265,5 @@ The user accepted these on 2026-11-03.
    the change set.
 3. **Layout:** automatic only at first. Dragging can be added later without
    breaking files.
-4. **Planning instructions:** ask the style guide for an `ssl-plan` skill, when
-   P2 is scheduled.
+4. **Planning instructions:** ask the style guide for an `ssl-plan` skill. Proposed
+   as its own task on that repository (2026-11-03).

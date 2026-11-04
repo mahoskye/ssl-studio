@@ -128,9 +128,10 @@ release build, installer, self-test and opencode 2.2.5 pass.
 
 ## Later
 
-- **Planning mode: the chart is done, the agent stages are not.** Design a
-  process or script as a flow chart (done, 2026-11-03), then hand it to an agent
-  that works through the details to build it (next: a spike on the local model).
+- **Planning mode: the chart, refining and the spec are done; building is not.**
+  Design a process or script as a flow chart, let an agent ask what it leaves
+  undecided and write the spec (done, 2026-11-03), then have it build from the spec
+  (next: P3).
   Design and build order: [PLANNING-MODE.md](PLANNING-MODE.md),
   [ADR 0005](adr/0005-a-plan-is-a-document-of-its-own.md).
 - Run a procedure in the sandbox through a configured command (the sandbox is

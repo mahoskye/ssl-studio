@@ -326,3 +326,27 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .plan-details label.grow { flex: 1; min-width: 150px; }
 .plan-details label.grow input { flex: 1; min-width: 0; }
 .plan-kind { color: var(--muted); font-weight: 600; text-transform: capitalize; }
+
+/* Planning mode: the assistant beside the chart */
+.plan-main { flex: 1; min-height: 0; display: flex; }
+.plan-main .plan-canvas { min-width: 0; }
+.plan-node.pending rect, .plan-node.pending polygon { stroke: var(--accent); stroke-dasharray: 5 3; fill: color-mix(in srgb, var(--accent) 8%, transparent); }
+.plan-node.pending { cursor: default; }
+.plan-edge.pending .g-edge { stroke: var(--accent); stroke-dasharray: 5 3; }
+.plan-edge.removing .g-edge { stroke: var(--error); stroke-dasharray: 2 3; }
+.plan-assist { width: 280px; flex: none; overflow-y: auto; padding: 10px; border-left: 1px solid var(--border); background: var(--side-bg); color: var(--side-fg); font-size: 12px; box-sizing: border-box; }
+.plan-assist h4 { margin: 14px 0 6px; font-size: 12px; font-weight: 600; }
+.plan-assist-head { display: flex; align-items: center; justify-content: space-between; }
+.plan-assist-actions { display: flex; gap: 6px; }
+.plan-assist-model { margin: 6px 0; }
+.plan-assist-progress { color: var(--accent); margin: 6px 0; }
+.plan-assist-warning { color: var(--warning); margin: 6px 0; }
+.plan-assist-foot { margin-top: 14px; }
+.plan-question, .plan-suggestion { margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+.plan-question p, .plan-suggestion p { margin: 0 0 5px; }
+.plan-question input { width: 100%; box-sizing: border-box; }
+.plan-answers { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 5px; }
+.plan-chip { font-size: 11px; }
+.review-blocked { color: var(--error); margin: 0 0 6px; flex-basis: 100%; }
+.diff-bar button.primary:disabled { opacity: .45; cursor: not-allowed; }
+.review-info:has(.review-blocked) { flex-wrap: wrap; }

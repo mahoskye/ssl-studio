@@ -9,10 +9,13 @@ import { monaco } from "../editor/monaco";
 import { regionColor } from "../editor/regions";
 import { diagnostics } from "../lsp/session";
 import { documents, notify, setState, state, applyText } from "../state";
+import { assistOf } from "./run";
+import { PlanAssistant } from "./PlanAssistant";
+import { previewPlan } from "./assist";
 import { addAfter, addBranch, addCall, connect, nodeAtLine, nodeLines, parsePlan, printPlan, PROCEDURE_DRAG, removeEdge, removeNode, setDecision, setEdgeLabel, setGroup, setText, type Edit, type NodeKind, type Plan, type PlanEdge, type PlanNode } from "./model";
 
 type Box = { id: string; x: number; y: number; width: number; height: number; node?: PlanNode; lines: string[]; group?: string };
-type Line = { id: string; from: string; to: string; label?: string; points: { x: number; y: number }[]; at: { x: number; y: number }; missing: boolean };
+type Line = { id: string; from: string; to: string; label?: string; points: { x: number; y: number }[]; at: { x: number; y: number }; missing: boolean; pending: boolean; removing: boolean };
 type Layout = { boxes: Box[]; lines: Line[]; width: number; height: number };
 
 const elk = new ELK();
@@ -95,7 +98,7 @@ async function layoutPlan(plan: Plan): Promise<Layout> {
 		const edge: PlanEdge = edges[i]!;
 		const section = e.sections?.[0];
 		const points = section ? [section.startPoint, ...(section.bendPoints ?? []), section.endPoint] : [];
-		return { id: e.id, from: edge.from, to: edge.to, label: edge.label, points, at: labelPoint(points), missing: decisions.has(edge.from) && !edge.label?.trim() };
+		return { id: e.id, from: edge.from, to: edge.to, label: edge.label, points, at: labelPoint(points), missing: decisions.has(edge.from) && !edge.label?.trim(), pending: Boolean(edge.pending), removing: Boolean(edge.removing) };
 	});
 	return { boxes, lines, width: result.width, height: result.height };
 }
@@ -111,10 +114,12 @@ export function PlanView(props: { path: string; group: number }) {
 	const [view, setView] = createSignal({ x: 20, y: 20, scale: 1 });
 	const [edge, setEdge] = createSignal<{ from: string; to: string } | null>(null);
 	const [linking, setLinking] = createSignal<string | null>(null);
+	const [assistant, setAssistant] = createSignal(true);
 	/** What the small text box is editing, over the chart. */
 	const [editing, setEditing] = createSignal<{ node: string } | { from: string; to: string } | null>(null);
 	let canvas!: HTMLDivElement;
 	let fitted = false;
+	let seen = 0;
 
 	onMount(() => {
 		const model = doc()?.model;
@@ -126,17 +131,18 @@ export function PlanView(props: { path: string; group: number }) {
 
 	let layoutRun = 0;
 	createEffect(
-		on(parsed, async (result) => {
+		on([parsed, () => assistOf(props.path).suggestions] as const, async ([result, suggestions]) => {
 			if (!result.plan) return;
 			const run = ++layoutRun;
 			try {
-				const next = await layoutPlan(result.plan);
+				// What the agent proposes is drawn, marked, until you accept or decline it.
+				const next = await layoutPlan(previewPlan(result.plan, suggestions));
 				if (run !== layoutRun) return;
 				setLayout(next);
-				if (!fitted) {
-					fitted = true;
-					fit();
-				}
+				// New suggestions can grow the chart past the view.
+				if (!fitted || suggestions.length !== seen) fit();
+				fitted = true;
+				seen = suggestions.length;
 			} catch (e: any) {
 				notify(`Could not lay out the chart: ${e?.message ?? e}`, "error");
 			}
@@ -416,11 +422,15 @@ export function PlanView(props: { path: string; group: number }) {
 						Delete
 					</button>
 					<span class="spacer" />
+					<button title="The agent's questions, suggestions and spec" classList={{ on: assistant() }} onClick={() => setAssistant((v) => !v)}>
+						Assistant
+					</button>
 					<button class="link" title="Show the findings in Problems" onClick={() => (setState("bottomView", "problems"), setState("settings", "layout", "bottom", true))}>
 						{findingCount() ? `${findingCount()} ${findingCount() === 1 ? "finding" : "findings"}` : "No findings"}
 					</button>
 					<button onClick={() => (fit(), refocus())}>Fit</button>
 				</div>
+				<div class="plan-main">
 				<div
 					class="plan-canvas"
 					ref={canvas}
@@ -486,7 +496,7 @@ export function PlanView(props: { path: string; group: number }) {
 											const on = () => edge()?.from === line.from && edge()?.to === line.to;
 											const choose = (e: MouseEvent) => (e.stopPropagation(), setEdge({ from: line.from, to: line.to }), refocus());
 											return (
-												<g class="plan-edge" classList={{ on: on() }}>
+												<g class="plan-edge" classList={{ on: on(), pending: line.pending, removing: line.removing }}>
 													<path d={pathOf(line.points)} class="plan-edge-hit" onClick={choose} />
 													<path d={pathOf(line.points)} class="g-edge" marker-end="url(#plan-arrow)" />
 													<Show when={line.label || line.missing}>
@@ -510,10 +520,10 @@ export function PlanView(props: { path: string; group: number }) {
 											return (
 												<g
 													class={`plan-node ${n.kind}`}
-													classList={{ selected: selected() === n.id, trouble: Boolean(trouble()) }}
+													classList={{ selected: selected() === n.id, trouble: Boolean(trouble()), pending: Boolean(n.pending) }}
 													onMouseDown={(e) => e.stopPropagation()}
-													onClick={(e) => (e.stopPropagation(), clickNode(n.id))}
-													onDblClick={(e) => (e.stopPropagation(), setEditing({ node: n.id }))}
+													onClick={(e) => (e.stopPropagation(), !n.pending && clickNode(n.id))}
+													onDblClick={(e) => (e.stopPropagation(), !n.pending && setEditing({ node: n.id }))}
 												>
 													<title>{[n.text, n.notes, ...(trouble() ?? [])].filter(Boolean).join("\n")}</title>
 													<Show when={n.kind === "decision"} fallback={<rect x={b.x} y={b.y} width={b.width} height={b.height} rx={n.kind === "start" || n.kind === "end" ? b.height / 2 : 5} />}>
@@ -569,6 +579,10 @@ export function PlanView(props: { path: string; group: number }) {
 					<Show when={linking()}>
 						<div class="plan-hint">Click the node this leads to. Esc cancels.</div>
 					</Show>
+				</div>
+				<Show when={assistant()}>
+					<PlanAssistant path={props.path} plan={plan()!} text={text()} onSelect={select} />
+				</Show>
 				</div>
 				<div class="plan-details">
 					<Show
