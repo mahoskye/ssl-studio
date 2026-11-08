@@ -1,0 +1,1023 @@
+{
+  "schema_version": 1,
+  "script_root": "..",
+  "fixture": "../fixtures/sample_lab.sql",
+  "config": {
+    "clock": "2026-11-08T12:00:00",
+    "user_data": "SAMPLE",
+    "session_id": "SAMPLE-LAB-1",
+    "data_source_languages": {
+      "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Data Sources/EquipmentList.ds": "SQL",
+      "Data Sources/SAMPLE_LOOKUPS/UnitsLookup.ds": "SQL",
+      "Data Sources/SAMPLE_LOOKUPS/StatusCodes.ds": "SQL"
+    }
+  },
+  "case_defaults": {
+    "trace": false,
+    "expected_logs": [],
+    "expected_warning_messages": [],
+    "globals": {
+      "MYUSERNAME": "SAMPLE"
+    }
+  },
+  "cases": [
+    {
+      "name": "GetEquipment by identifier answers the one row",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/GetEquipment.srvscr",
+      "expected_result": [
+        [
+          "PH-02",
+          "pH meter",
+          "A",
+          90,
+          "2026-10-01T00:00:00"
+        ]
+      ],
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "args": [
+        "PH-02"
+      ]
+    },
+    {
+      "name": "GetEquipment hides an inactive row unless asked",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/GetEquipment.srvscr",
+      "expected_result": [],
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "args": [
+        "OV-03"
+      ]
+    },
+    {
+      "name": "GetEquipment with the flag off answers the inactive row",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/GetEquipment.srvscr",
+      "expected_result": [
+        [
+          "OV-03",
+          "Drying oven",
+          "I",
+          180,
+          "0001-01-01T00:00:00"
+        ]
+      ],
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "args": [
+        "OV-03",
+        false
+      ],
+      "review": "A NULL date column reads as the minimum date, as the product does; Empty() is true for it."
+    },
+    {
+      "name": "GetEquipment with no identifier lists the active rows",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/GetEquipment.srvscr",
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "expected_result_length": 5,
+      "args": []
+    },
+    {
+      "name": "GetEquipment with the flag off lists everything",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/GetEquipment.srvscr",
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "expected_result_length": 6,
+      "args": [
+        null,
+        false
+      ]
+    },
+    {
+      "name": "ActiveIds flattens the identifiers",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/GetEquipment.srvscr",
+      "expected_result": [
+        "BAL-01",
+        "MC-06",
+        "PH-02",
+        "SC-05",
+        "TH-04"
+      ],
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "procedure_calls": [
+        {
+          "procedure": "ActiveIds",
+          "args": []
+        }
+      ]
+    },
+    {
+      "name": "ListByStatus runs the SQL data source for the active rows",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/GetEquipment.srvscr",
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "expected_result_length": 5,
+      "procedure_calls": [
+        {
+          "procedure": "ListByStatus",
+          "args": [
+            "A"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "ListByStatus reads a missing date as blank",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/GetEquipment.srvscr",
+      "expected_result": [
+        [
+          "OV-03",
+          "Drying oven",
+          "I",
+          180,
+          ""
+        ]
+      ],
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "procedure_calls": [
+        {
+          "procedure": "ListByStatus",
+          "args": [
+            "I"
+          ]
+        }
+      ],
+      "review": "NULLASBLANK is true in the data source, so the NULL date column comes back as an empty string."
+    },
+    {
+      "name": "ListByStatus with a blank status answers every row",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/GetEquipment.srvscr",
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "expected_result_length": 6,
+      "procedure_calls": [
+        {
+          "procedure": "ListByStatus",
+          "args": [
+            ""
+          ]
+        }
+      ]
+    },
+    {
+      "name": "ListByStatus can answer the dataset shape",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/GetEquipment.srvscr",
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "procedure_calls": [
+        {
+          "procedure": "ListByStatus",
+          "args": [
+            "A",
+            "dataset"
+          ]
+        }
+      ],
+      "result_assertions": [
+        {
+          "path": [
+            "Tables",
+            0,
+            "TableName"
+          ],
+          "expected": "EquipmentList"
+        },
+        {
+          "path": [
+            "Tables",
+            0,
+            "Columns"
+          ],
+          "expected": [
+            "EQUIPMENT_ID",
+            "DESCRIPTION",
+            "STATUS",
+            "INTERVAL_DAYS",
+            "LAST_CALIBRATED"
+          ]
+        },
+        {
+          "path": [
+            "Tables",
+            0,
+            "Rows"
+          ],
+          "length": 5
+        }
+      ]
+    },
+    {
+      "name": "StatusNames runs the banner-only data source",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/GetEquipment.srvscr",
+      "expected_result": [
+        [
+          "A",
+          "Active"
+        ],
+        [
+          "I",
+          "Inactive"
+        ]
+      ],
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "procedure_calls": [
+        {
+          "procedure": "StatusNames",
+          "args": []
+        }
+      ]
+    },
+    {
+      "name": "UnitNames uses the data source default",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/GetEquipment.srvscr",
+      "expected_result": [
+        [
+          "m",
+          "metre"
+        ],
+        [
+          "mm",
+          "millimetre"
+        ]
+      ],
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "procedure_calls": [
+        {
+          "procedure": "UnitNames",
+          "args": []
+        }
+      ]
+    },
+    {
+      "name": "UnitNames passes the type through",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/GetEquipment.srvscr",
+      "expected_result": [
+        [
+          "g",
+          "gram"
+        ]
+      ],
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "procedure_calls": [
+        {
+          "procedure": "UnitNames",
+          "args": [
+            "MASS"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "DataSourceParameters reads an SSL data source header",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/GetEquipment.srvscr",
+      "expected_result": [
+        "dBefore",
+        "bActiveOnly"
+      ],
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "procedure_calls": [
+        {
+          "procedure": "DataSourceParameters",
+          "args": [
+            "EQUIPMENT_CALIBRATION.DueCalibrations"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "DataSourceParameters reads a SQL data source header",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/GetEquipment.srvscr",
+      "expected_result": [
+        "sUnitType"
+      ],
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "procedure_calls": [
+        {
+          "procedure": "DataSourceParameters",
+          "args": [
+            "SAMPLE_LOOKUPS.UnitsLookup"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "ValidateReading accepts a reading inside the default limits",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/ValidateReading.srvscr",
+      "expected_result": true,
+      "args": [
+        7.5
+      ]
+    },
+    {
+      "name": "ValidateReading rejects a reading above them",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/ValidateReading.srvscr",
+      "expected_result": false,
+      "args": [
+        150
+      ]
+    },
+    {
+      "name": "ValidateReading takes explicit limits",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/ValidateReading.srvscr",
+      "expected_result": true,
+      "args": [
+        150,
+        [
+          100,
+          200
+        ]
+      ]
+    },
+    {
+      "name": "ValidateReading answers false through its error block for text, and logs why",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/ValidateReading.srvscr",
+      "expected_result": false,
+      "args": [
+        "abc"
+      ],
+      "expected_logs": [
+        "ValidateReading: Reading is not numeric: abc"
+      ]
+    },
+    {
+      "name": "CalibrationConstants main sets and answers the public",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/CalibrationConstants.srvscr",
+      "expected_result": 30,
+      "args": []
+    },
+    {
+      "name": "LimitsFor knows the pH range",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/CalibrationConstants.srvscr",
+      "expected_result": [
+        0,
+        14
+      ],
+      "procedure_calls": [
+        {
+          "procedure": "LimitsFor",
+          "args": [
+            "PH-02"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "LimitsFor falls back to the default range",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/CalibrationConstants.srvscr",
+      "expected_result": [
+        0,
+        100
+      ],
+      "procedure_calls": [
+        {
+          "procedure": "LimitsFor",
+          "args": [
+            "BAL-01"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "ResultFor names the outcome",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/CalibrationConstants.srvscr",
+      "expected_result": "FAIL",
+      "procedure_calls": [
+        {
+          "procedure": "ResultFor",
+          "args": [
+            false
+          ]
+        }
+      ]
+    },
+    {
+      "name": "CalibrationSchedule lists what is due in the default window, sorted",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/CalibrationSchedule.srvscr",
+      "expected_result": [
+        [
+          "SC-05",
+          "2026-10-28T00:00:00",
+          "OVERDUE"
+        ],
+        [
+          "MC-06",
+          "2026-11-14T00:00:00",
+          "THIS_WEEK"
+        ],
+        [
+          "TH-04",
+          "2026-11-19T00:00:00",
+          "THIS_MONTH"
+        ]
+      ],
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "args": []
+    },
+    {
+      "name": "CalibrationSchedule with inactive rows and a wide window",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/CalibrationSchedule.srvscr",
+      "expected_result": [
+        [
+          "SC-05",
+          "2026-10-28T00:00:00",
+          "OVERDUE"
+        ],
+        [
+          "OV-03",
+          "2026-11-08T00:00:00",
+          "THIS_WEEK"
+        ],
+        [
+          "MC-06",
+          "2026-11-14T00:00:00",
+          "THIS_WEEK"
+        ],
+        [
+          "TH-04",
+          "2026-11-19T00:00:00",
+          "THIS_MONTH"
+        ],
+        [
+          "PH-02",
+          "2026-12-30T00:00:00",
+          "LATER"
+        ],
+        [
+          "BAL-01",
+          "2027-01-15T00:00:00",
+          "LATER"
+        ]
+      ],
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "args": [
+        {
+          "$date": "2025-11-08"
+        },
+        {
+          "$date": "2027-11-08"
+        },
+        true
+      ],
+      "review": "OV-03 was never calibrated, so it is due on the clock date; the window is one year either side."
+    },
+    {
+      "name": "Summary counts each urgency",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/CalibrationSchedule.srvscr",
+      "expected_result": [
+        1,
+        1,
+        1,
+        0
+      ],
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "procedure_calls": [
+        {
+          "procedure": "Summary",
+          "args": [
+            [
+              [
+                "SC-05",
+                "2026-10-28T00:00:00",
+                "OVERDUE"
+              ],
+              [
+                "MC-06",
+                "2026-11-14T00:00:00",
+                "THIS_WEEK"
+              ],
+              [
+                "TH-04",
+                "2026-11-19T00:00:00",
+                "THIS_MONTH"
+              ]
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "MonthBuckets groups by month through DateUtils in another category",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/CalibrationSchedule.srvscr",
+      "expected_result": [
+        [
+          "2026-10",
+          1
+        ],
+        [
+          "2026-11",
+          2
+        ]
+      ],
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "procedure_calls": [
+        {
+          "procedure": "MonthBuckets",
+          "args": [
+            [
+              [
+                "SC-05",
+                {
+                  "$date": "2026-10-28"
+                },
+                "OVERDUE"
+              ],
+              [
+                "MC-06",
+                {
+                  "$date": "2026-11-14"
+                },
+                "THIS_WEEK"
+              ],
+              [
+                "TH-04",
+                {
+                  "$date": "2026-11-19"
+                },
+                "THIS_MONTH"
+              ]
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "DueFromDataSource runs the SSL data source with its defaults",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/CalibrationSchedule.srvscr",
+      "expected_result": [
+        [
+          "SC-05",
+          "Bench scale",
+          "2026-10-28T00:00:00"
+        ]
+      ],
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "procedure_calls": [
+        {
+          "procedure": "DueFromDataSource",
+          "args": []
+        }
+      ]
+    },
+    {
+      "name": "DueFromDataSource with a later date and inactive rows",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/CalibrationSchedule.srvscr",
+      "expected_result": [
+        [
+          "MC-06",
+          "Micropipette",
+          "2026-11-14T00:00:00"
+        ],
+        [
+          "OV-03",
+          "Drying oven",
+          "2026-11-08T00:00:00"
+        ],
+        [
+          "PH-02",
+          "pH meter",
+          "2026-12-30T00:00:00"
+        ],
+        [
+          "SC-05",
+          "Bench scale",
+          "2026-10-28T00:00:00"
+        ],
+        [
+          "TH-04",
+          "Thermometer",
+          "2026-11-19T00:00:00"
+        ]
+      ],
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "procedure_calls": [
+        {
+          "procedure": "DueFromDataSource",
+          "args": [
+            {
+              "$date": "2026-12-31"
+            },
+            false
+          ]
+        }
+      ],
+      "review": "The data source keeps the query order (by identifier); the schedule script sorts by date."
+    },
+    {
+      "name": "Urgency on an explicit as-of date",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/CalibrationSchedule.srvscr",
+      "expected_result": "THIS_MONTH",
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "procedure_calls": [
+        {
+          "procedure": "Urgency",
+          "args": [
+            {
+              "$date": "2026-12-01"
+            },
+            {
+              "$date": "2026-11-10"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "CalibrationBase loads the row and describes it",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/CalibrationBase.srvscr",
+      "expected_result": "BAL-01: Analytical balance",
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "args": [
+        "bal-01"
+      ],
+      "class_calls": [
+        {
+          "method": "Describe"
+        }
+      ]
+    },
+    {
+      "name": "CalibrationBase computes the next due date",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/CalibrationBase.srvscr",
+      "expected_result": "2027-01-15T00:00:00",
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "args": [
+        "BAL-01"
+      ],
+      "class_calls": [
+        {
+          "method": "NextDue"
+        }
+      ]
+    },
+    {
+      "name": "CalibrationBase is not due yet",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/CalibrationBase.srvscr",
+      "expected_result": false,
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "args": [
+        "BAL-01"
+      ],
+      "class_calls": [
+        {
+          "method": "IsDue"
+        }
+      ]
+    },
+    {
+      "name": "CalibrationBase with no calibration is due now",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/CalibrationBase.srvscr",
+      "expected_result": true,
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "args": [
+        "OV-03"
+      ],
+      "class_calls": [
+        {
+          "method": "IsDue"
+        }
+      ]
+    },
+    {
+      "name": "CalibrationBase for an unknown identifier is empty",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/CalibrationBase.srvscr",
+      "expected_result": "ZZ-99: ",
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "args": [
+        "ZZ-99"
+      ],
+      "class_calls": [
+        {
+          "method": "Describe"
+        }
+      ]
+    },
+    {
+      "name": "CalibrationRecord judges a pH reading against the pH limits",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/CalibrationRecord.srvscr",
+      "expected_result": "PH-02: pH meter read 7.01 on 20261108: PASS",
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "args": [
+        "PH-02",
+        7.01
+      ],
+      "class_calls": [
+        {
+          "method": "Describe"
+        }
+      ]
+    },
+    {
+      "name": "CalibrationRecord fails a reading outside them",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/CalibrationRecord.srvscr",
+      "expected_result": "FAIL",
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "args": [
+        "PH-02",
+        15
+      ],
+      "class_calls": [
+        {
+          "method": "Verdict"
+        }
+      ]
+    },
+    {
+      "name": "SaveCalibration inserts, updates the equipment and answers the counter value",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/SaveCalibration.srvscr",
+      "expected_result": [
+        true,
+        101
+      ],
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "args": [
+        "PH-02",
+        7.01
+      ],
+      "state": [
+        {
+          "sql": "select CALIBRATION_ID, EQUIPMENT_ID, date(CALIBRATED_ON), READING, RESULT, CALIBRATED_BY from SAMPLE_CALIBRATION order by CALIBRATION_ID",
+          "expected_rows": [
+            [
+              101,
+              "PH-02",
+              "2026-11-08",
+              7.01,
+              "PASS",
+              "SAMPLE"
+            ]
+          ]
+        },
+        {
+          "sql": "select date(LAST_CALIBRATED) from SAMPLE_EQUIPMENT where EQUIPMENT_ID = 'PH-02'",
+          "expected_rows": [
+            [
+              "2026-11-08"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "SaveCalibration refuses an unknown identifier",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/SaveCalibration.srvscr",
+      "expected_result": [
+        false,
+        "UNKNOWN_EQUIPMENT"
+      ],
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "args": [
+        "ZZ-99",
+        1
+      ]
+    },
+    {
+      "name": "SaveCalibration refuses a reading outside the equipment limits",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/SaveCalibration.srvscr",
+      "expected_result": [
+        false,
+        "READING_OUT_OF_RANGE"
+      ],
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "args": [
+        "PH-02",
+        15
+      ]
+    },
+    {
+      "name": "SaveCalibration refuses text, logging the validator message",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/SaveCalibration.srvscr",
+      "expected_result": [
+        false,
+        "READING_OUT_OF_RANGE"
+      ],
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "args": [
+        "BAL-01",
+        "abc"
+      ],
+      "expected_logs": [
+        "ValidateReading: Reading is not numeric: abc"
+      ]
+    },
+    {
+      "name": "SaveCalibration rolls back when the insert fails",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/SaveCalibration.srvscr",
+      "expected_warning_messages": [
+        "Variable 'MYUSERNAME' is undefined!",
+        "Use of non-string literals"
+      ],
+      "args": [
+        "BAL-01",
+        0.5
+      ],
+      "globals": {},
+      "review": "With no user in the session the insert raises inside the transaction; the catch rolls it back, so the calibration count and the equipment date are unchanged. The answer is {false, reason}.",
+      "result_assertions": [
+        {
+          "path": [
+            0
+          ],
+          "expected": false
+        },
+        {
+          "path": [
+            1
+          ],
+          "pattern": "NOT_SAVED: .*"
+        }
+      ],
+      "state": [
+        {
+          "sql": "select count(*) from SAMPLE_CALIBRATION",
+          "expected_rows": [
+            [
+              1
+            ]
+          ]
+        },
+        {
+          "sql": "select date(LAST_CALIBRATED) from SAMPLE_EQUIPMENT where EQUIPMENT_ID = 'BAL-01'",
+          "expected_rows": [
+            [
+              "2026-01-15"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "SaveCalibration through CalibrationRecord",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/CalibrationRecord.srvscr",
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "args": [
+        "TH-04",
+        21.5,
+        {
+          "$date": "2026-11-07"
+        }
+      ],
+      "class_calls": [
+        {
+          "method": "Save"
+        }
+      ],
+      "result_assertions": [
+        {
+          "path": [
+            0
+          ],
+          "expected": true
+        }
+      ],
+      "review": "The counter is independent of the transaction, so the value the rolled-back save drew (102) is consumed and this record is 103.",
+      "state": [
+        {
+          "sql": "select CALIBRATION_ID, EQUIPMENT_ID, READING, RESULT from SAMPLE_CALIBRATION order by CALIBRATION_ID",
+          "expected_rows": [
+            [
+              101,
+              "PH-02",
+              7.01,
+              "PASS"
+            ],
+            [
+              103,
+              "TH-04",
+              21.5,
+              "PASS"
+            ]
+          ]
+        },
+        {
+          "sql": "select date(LAST_CALIBRATED) from SAMPLE_EQUIPMENT where EQUIPMENT_ID = 'TH-04'",
+          "expected_rows": [
+            [
+              "2026-11-07"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "DueFromDataSource after the saves",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/CalibrationSchedule.srvscr",
+      "expected_result": [
+        [
+          "MC-06",
+          "Micropipette",
+          "2026-11-14T00:00:00"
+        ],
+        [
+          "SC-05",
+          "Bench scale",
+          "2026-10-28T00:00:00"
+        ],
+        [
+          "TH-04",
+          "Thermometer",
+          "2026-12-07T00:00:00"
+        ]
+      ],
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "procedure_calls": [
+        {
+          "procedure": "DueFromDataSource",
+          "args": [
+            {
+              "$date": "2026-12-31"
+            }
+          ]
+        }
+      ],
+      "review": "PH-02 was calibrated today, so its next date is in February and outside the asked window."
+    },
+    {
+      "name": "CalibrationSchedule after the saves",
+      "script": "Applications/SAMPLE_LAB/EQUIPMENT_CALIBRATION/Server Scripts/CalibrationSchedule.srvscr",
+      "expected_result": [
+        [
+          "SC-05",
+          "2026-10-28T00:00:00",
+          "OVERDUE"
+        ],
+        [
+          "MC-06",
+          "2026-11-14T00:00:00",
+          "THIS_WEEK"
+        ],
+        [
+          "TH-04",
+          "2026-12-07T00:00:00",
+          "THIS_MONTH"
+        ]
+      ],
+      "expected_warning_messages": [
+        "Use of non-string literals"
+      ],
+      "args": [],
+      "review": "TH-04 moved out by its 30-day interval from the saved date; PH-02 is now due in February and outside the window."
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+:DECLARE;
+:DECLARE n;
+n := 1;
+:RETURN n;

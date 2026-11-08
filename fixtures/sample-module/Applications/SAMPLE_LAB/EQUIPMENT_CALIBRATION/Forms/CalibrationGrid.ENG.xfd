@@ -1,0 +1,160 @@
+<?xml version="1.0"?>
+<Form xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <Id>CalibrationGrid</Id>
+  <ScriptLanguage>JScript</ScriptLanguage>
+  <Guid>98ca6cd9-6e4c-5f16-8ddf-283f63b589f6</Guid>
+  <Text>Calibrations due</Text>
+  <Width>720</Width>
+  <Height>480</Height>
+  <Left>0</Left>
+  <Top>0</Top>
+  <BackColor>Control</BackColor>
+  <TabStop>true</TabStop>
+  <TabIndex>0</TabIndex>
+  <__array__Controls>
+    <item xsi:type="Panel">
+      <Id>pnlTop</Id>
+      <ScriptLanguage>JScript</ScriptLanguage>
+      <Guid>b783fa71-4404-568b-a5ef-a27719d4d3e7</Guid>
+      <Width>720</Width>
+      <Height>40</Height>
+      <Left>0</Left>
+      <Top>0</Top>
+      <TabStop>true</TabStop>
+      <TabIndex>0</TabIndex>
+      <Anchor>Top, Left, Right</Anchor>
+      <__array__Controls>
+    <item xsi:type="Label">
+          <Id>lblWindow</Id>
+          <ScriptLanguage>JScript</ScriptLanguage>
+          <Guid>5c46212a-c555-5ff9-a0d4-ccdd38398803</Guid>
+          <Text>Due within (days)</Text>
+          <Width>160</Width>
+          <Height>20</Height>
+          <Left>16</Left>
+          <Top>10</Top>
+          <TabStop>true</TabStop>
+          <TabIndex>0</TabIndex>
+          <AutoSize>true</AutoSize>
+        </item>
+        <item xsi:type="TextBox">
+          <Id>txtDays</Id>
+          <ScriptLanguage>JScript</ScriptLanguage>
+          <Guid>4d4f89d6-cc25-562d-a583-a3f2c09cbe0d</Guid>
+          <Width>48</Width>
+          <Height>22</Height>
+          <Left>180</Left>
+          <Top>8</Top>
+          <TabStop>true</TabStop>
+          <TabIndex>0</TabIndex>
+          <MaxLength>3</MaxLength>
+        </item>
+        <item xsi:type="Label">
+          <Id>lblSelected</Id>
+          <ScriptLanguage>JScript</ScriptLanguage>
+          <Guid>6453e462-3e48-56b2-9016-0c1dcdf080e5</Guid>
+          <Text></Text>
+          <Width>400</Width>
+          <Height>20</Height>
+          <Left>260</Left>
+          <Top>10</Top>
+          <TabStop>true</TabStop>
+          <TabIndex>0</TabIndex>
+          <AutoSize>false</AutoSize>
+        </item>
+          </__array__Controls>
+      <BorderStyle>None</BorderStyle>
+    </item>
+    <item xsi:type="DataGrid">
+      <Id>grdDue</Id>
+      <ScriptLanguage>JScript</ScriptLanguage>
+      <Guid>ddf92208-64d5-566b-b0df-953357d4cac7</Guid>
+      <Width>720</Width>
+      <Height>400</Height>
+      <Left>0</Left>
+      <Top>40</Top>
+      <TabStop>true</TabStop>
+      <TabIndex>0</TabIndex>
+      <Anchor>Top, Bottom, Left, Right</Anchor>
+      <RootTable>DueCalibrations</RootTable>
+      <Data>SAMPLE_LAB.EQUIPMENT_CALIBRATION.DueCalibrations?ProviderId=868b1ae5-1cee-54ed-bf0f-c4eb66f2671d</Data>
+      <__array__Columns>
+        <item>
+          <Caption>Equipment</Caption>
+          <DataMember>EQUIPMENT_ID</DataMember>
+          <Type>Text</Type>
+        </item>
+        <item>
+          <Caption>Description</Caption>
+          <DataMember>DESCRIPTION</DataMember>
+          <Type>Text</Type>
+        </item>
+        <item>
+          <Caption>Due on</Caption>
+          <DataMember>DUE_ON</DataMember>
+          <Type>Date</Type>
+        </item>
+      </__array__Columns>
+      <Hierarchical>false</Hierarchical>
+      <AllowEdit>false</AllowEdit>
+      <AllowSort>true</AllowSort>
+      <FilterRowVisible>true</FilterRowVisible>
+      <OnRowChange>grdDue_OnRowChange</OnRowChange>
+      <OnDoubleClick>btnCalibrate_OnClick</OnDoubleClick>
+    </item>
+    <item xsi:type="Button">
+      <Id>btnCalibrate</Id>
+      <ScriptLanguage>JScript</ScriptLanguage>
+      <Guid>996d0c56-8a4e-5d44-a0a0-bc3aa00d3033</Guid>
+      <Text>Calibrate</Text>
+      <Width>80</Width>
+      <Height>28</Height>
+      <Left>536</Left>
+      <Top>448</Top>
+      <TabStop>true</TabStop>
+      <TabIndex>0</TabIndex>
+      <Anchor>Bottom, Right</Anchor>
+      <Enabled>false</Enabled>
+      <OnClick>btnCalibrate_OnClick</OnClick>
+    </item>
+    <item xsi:type="Button">
+      <Id>btnRefresh</Id>
+      <ScriptLanguage>JScript</ScriptLanguage>
+      <Guid>85284091-b421-5570-9f07-9b599da0b14b</Guid>
+      <Text>Refresh</Text>
+      <Width>80</Width>
+      <Height>28</Height>
+      <Left>624</Left>
+      <Top>448</Top>
+      <TabStop>true</TabStop>
+      <TabIndex>0</TabIndex>
+      <Anchor>Bottom, Right</Anchor>
+      <OnClick>btnRefresh_OnClick</OnClick>
+    </item>
+  </__array__Controls>
+  <AutoScroll>false</AutoScroll>
+  <UpdateProvider />
+  <DataLoadingBehavior>Automatic</DataLoadingBehavior>
+  <Resources>
+    <ScriptLanguage>JScript</ScriptLanguage>
+    <__array__Items />
+    <KeyItem>Key</KeyItem>
+    <TextItem>Text</TextItem>
+    <ResolveEscapeChars>false</ResolveEscapeChars>
+  </Resources>
+  <__array__Scripts>
+    <item>
+      <Id>SampleLib</Id>
+      <ScriptLanguage>JScript</ScriptLanguage>
+      <Src>SAMPLE_LIB.LIB.SampleLib?ProviderId=5c03d33f-62e2-5d51-aaad-fdd83e0c8c84</Src>
+    </item>
+    <item>
+      <Id>CalibrationHelpers</Id>
+      <ScriptLanguage>JScript</ScriptLanguage>
+      <Src>SAMPLE_LAB.EQUIPMENT_CALIBRATION.CalibrationHelpers?ProviderId=d5d7cda3-3216-530e-a985-2f0d5e8770ad</Src>
+    </item>
+  </__array__Scripts>
+  <CloseOnEscape>true</CloseOnEscape>
+  <OnLoad>Form_OnLoad</OnLoad>
+  <ValidateOnClose>false</ValidateOnClose>
+</Form>

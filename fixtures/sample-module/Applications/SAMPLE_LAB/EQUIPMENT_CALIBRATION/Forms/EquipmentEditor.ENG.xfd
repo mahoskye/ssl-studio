@@ -1,0 +1,182 @@
+<?xml version="1.0"?>
+<Form xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <Id>EquipmentEditor</Id>
+  <ScriptLanguage>JScript</ScriptLanguage>
+  <Guid>22d70090-6969-582b-8626-9d459801d839</Guid>
+  <Text>Record calibration</Text>
+  <Width>480</Width>
+  <Height>320</Height>
+  <Left>0</Left>
+  <Top>0</Top>
+  <BackColor>Control</BackColor>
+  <TabStop>true</TabStop>
+  <TabIndex>0</TabIndex>
+  <__array__Controls>
+    <item xsi:type="Label">
+      <Id>lblEquipmentId</Id>
+      <ScriptLanguage>JScript</ScriptLanguage>
+      <Guid>43fa33b1-3ed0-53f9-9ba4-1101e6e1a531</Guid>
+      <Text>Equipment</Text>
+      <Width>120</Width>
+      <Height>20</Height>
+      <Left>16</Left>
+      <Top>16</Top>
+      <TabStop>true</TabStop>
+      <TabIndex>0</TabIndex>
+      <AutoSize>true</AutoSize>
+    </item>
+    <item xsi:type="TextBox">
+      <Id>txtEquipmentId</Id>
+      <ScriptLanguage>JScript</ScriptLanguage>
+      <Guid>474d3db6-5ee8-5f4c-89a2-df837e0cae80</Guid>
+      <Width>200</Width>
+      <Height>22</Height>
+      <Left>144</Left>
+      <Top>16</Top>
+      <TabStop>true</TabStop>
+      <TabIndex>0</TabIndex>
+      <ReadOnly>false</ReadOnly>
+      <MaxLength>20</MaxLength>
+    </item>
+    <item xsi:type="Label">
+      <Id>lblStatus</Id>
+      <ScriptLanguage>JScript</ScriptLanguage>
+      <Guid>bf0ac796-d088-5f34-ba81-593f6faad1b3</Guid>
+      <Text>Status</Text>
+      <Width>120</Width>
+      <Height>20</Height>
+      <Left>16</Left>
+      <Top>48</Top>
+      <TabStop>true</TabStop>
+      <TabIndex>0</TabIndex>
+      <AutoSize>true</AutoSize>
+    </item>
+    <item xsi:type="ComboBox">
+      <Id>cboStatus</Id>
+      <ScriptLanguage>JScript</ScriptLanguage>
+      <Guid>b122efbd-5815-59f9-9b57-70426b207952</Guid>
+      <Width>200</Width>
+      <Height>22</Height>
+      <Left>144</Left>
+      <Top>48</Top>
+      <TabStop>true</TabStop>
+      <TabIndex>0</TabIndex>
+      <__array__Items />
+      <Data>SAMPLE_LOOKUPS.LOOKUPS.StatusCodes?ProviderId=7559478f-27ec-5f03-9cb8-fa7420af1e2c</Data>
+      <DisplayMember>STATUS_NAME</DisplayMember>
+      <ValueMember>STATUS_CODE</ValueMember>
+    </item>
+    <item xsi:type="CheckBox">
+      <Id>chkActive</Id>
+      <ScriptLanguage>JScript</ScriptLanguage>
+      <Guid>5688057d-8a68-5d5f-9fd6-6781e4c40038</Guid>
+      <Text>Active</Text>
+      <Width>200</Width>
+      <Height>22</Height>
+      <Left>144</Left>
+      <Top>80</Top>
+      <TabStop>true</TabStop>
+      <TabIndex>0</TabIndex>
+    </item>
+    <item xsi:type="Label">
+      <Id>lblReading</Id>
+      <ScriptLanguage>JScript</ScriptLanguage>
+      <Guid>04e6e909-bd51-57e0-b3df-de2989b0dc81</Guid>
+      <Text>Reading</Text>
+      <Width>120</Width>
+      <Height>20</Height>
+      <Left>16</Left>
+      <Top>112</Top>
+      <TabStop>true</TabStop>
+      <TabIndex>0</TabIndex>
+      <AutoSize>true</AutoSize>
+    </item>
+    <item xsi:type="TextBox">
+      <Id>txtReading</Id>
+      <ScriptLanguage>JScript</ScriptLanguage>
+      <Guid>9a7f2087-4e80-5367-bdea-903128e91d8f</Guid>
+      <Width>96</Width>
+      <Height>22</Height>
+      <Left>144</Left>
+      <Top>112</Top>
+      <TabStop>true</TabStop>
+      <TabIndex>0</TabIndex>
+      <MaxLength>12</MaxLength>
+    </item>
+    <item xsi:type="Label">
+      <Id>lblCalibrated</Id>
+      <ScriptLanguage>JScript</ScriptLanguage>
+      <Guid>7667d9c9-3e45-5273-814f-7a9af4254787</Guid>
+      <Text>Calibrated on</Text>
+      <Width>120</Width>
+      <Height>20</Height>
+      <Left>16</Left>
+      <Top>144</Top>
+      <TabStop>true</TabStop>
+      <TabIndex>0</TabIndex>
+      <AutoSize>true</AutoSize>
+    </item>
+    <item xsi:type="DateTimePicker">
+      <Id>dtpCalibrated</Id>
+      <ScriptLanguage>JScript</ScriptLanguage>
+      <Guid>1172c201-c379-586e-8cfa-b75006a35556</Guid>
+      <Width>200</Width>
+      <Height>22</Height>
+      <Left>144</Left>
+      <Top>144</Top>
+      <TabStop>true</TabStop>
+      <TabIndex>0</TabIndex>
+    </item>
+    <item xsi:type="Button">
+      <Id>btnSave</Id>
+      <ScriptLanguage>JScript</ScriptLanguage>
+      <Guid>3c18d266-6223-5ad5-8b7f-1637d19b95b3</Guid>
+      <Text>Save</Text>
+      <Width>80</Width>
+      <Height>28</Height>
+      <Left>264</Left>
+      <Top>260</Top>
+      <TabStop>true</TabStop>
+      <TabIndex>0</TabIndex>
+      <OnClick>btnSave_OnClick</OnClick>
+    </item>
+    <item xsi:type="Button">
+      <Id>btnCancel</Id>
+      <ScriptLanguage>JScript</ScriptLanguage>
+      <Guid>59601300-6346-52ae-9aa1-feaf96fd9426</Guid>
+      <Text>Cancel</Text>
+      <Width>80</Width>
+      <Height>28</Height>
+      <Left>352</Left>
+      <Top>260</Top>
+      <TabStop>true</TabStop>
+      <TabIndex>0</TabIndex>
+      <OnClick>btnCancel_OnClick</OnClick>
+    </item>
+  </__array__Controls>
+  <AutoScroll>false</AutoScroll>
+  <UpdateProvider />
+  <DataLoadingBehavior>Automatic</DataLoadingBehavior>
+  <Resources>
+    <ScriptLanguage>JScript</ScriptLanguage>
+    <__array__Items />
+    <KeyItem>Key</KeyItem>
+    <TextItem>Text</TextItem>
+    <ResolveEscapeChars>false</ResolveEscapeChars>
+  </Resources>
+  <__array__Scripts>
+    <item>
+      <Id>SampleLib</Id>
+      <ScriptLanguage>JScript</ScriptLanguage>
+      <Src>SAMPLE_LIB.LIB.SampleLib?ProviderId=5c03d33f-62e2-5d51-aaad-fdd83e0c8c84</Src>
+    </item>
+    <item>
+      <Id>CalibrationHelpers</Id>
+      <ScriptLanguage>JScript</ScriptLanguage>
+      <Src>SAMPLE_LAB.EQUIPMENT_CALIBRATION.CalibrationHelpers?ProviderId=d5d7cda3-3216-530e-a985-2f0d5e8770ad</Src>
+    </item>
+  </__array__Scripts>
+  <CloseOnEscape>true</CloseOnEscape>
+  <OnLoad>Form_OnLoad</OnLoad>
+  <ValidateOnClose>false</ValidateOnClose>
+</Form>

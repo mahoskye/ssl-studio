@@ -1,0 +1,44 @@
+/* Sample module: the rare constructs, once each.
+   Covers checklist rows: B1 labels, B1 inline code, B1 procedure error block, B1 resume, B3 power operator, B4 mixed indentation, B4 lowercase keywords, C3 ExecUDF.
+   Status: verified in the sandbox by manifests/sample-utilities.json;
+
+:BEGININLINECODE Doubler;
+:PARAMETERS n;
+:RETURN n * 2;
+:ENDINLINECODE;
+
+:PROCEDURE Square;
+:PARAMETERS n;
+	:RETURN n ^ 2;
+:ENDPROC;
+
+:PROCEDURE Cube;
+:PARAMETERS n;
+	:RETURN n ** 3;
+:ENDPROC;
+
+:PROCEDURE SafeDivide;
+:PARAMETERS nNumerator, nDenominator;
+	:RETURN nNumerator / nDenominator;
+:ERROR;
+	:RESUME;
+	:RETURN 0;
+:ENDPROC;
+
+:PROCEDURE Doubled;
+:PARAMETERS n;
+	:RETURN ExecUDF(GetInlineCode("Doubler"), {n});
+:ENDPROC;
+
+:PROCEDURE Clamp;
+:PARAMETERS n, nLow, nHigh;
+:LABEL Start;
+    /* Lower-case keywords and space indentation, as some product scripts have them;
+    :if n < nLow;
+        :return nLow;
+    :endif;
+    :if n > nHigh;
+        :return nHigh;
+    :endif;
+    :return n;
+:ENDPROC;

@@ -1,0 +1,34 @@
+/* Sample module: insert a calibration inside a transaction, drawing its counter.
+   Covers checklist rows: C2 BeginLimsTransaction, C2 EndLimsTransaction, C2 LimsSetCounter, B2 try, C7 RaiseError, C1 LimsRecordsAffected, C1 RunSql, C1 SqlExecute, C3 ExecFunction, C8 globals.
+   Status: verified in the sandbox by manifests/sample-lab.json;
+
+:PARAMETERS sEquipmentId, nReading, dCalibrated, sResult;
+:DEFAULT dCalibrated, Today();
+:DEFAULT sResult, "PASS";
+:DECLARE aEquipment, aLimits, nCalibrationId;
+
+aEquipment := ExecFunction("EQUIPMENT_CALIBRATION.GetEquipment", {sEquipmentId, .F.});
+:IF Empty(aEquipment);
+	:RETURN {.F., "UNKNOWN_EQUIPMENT"};
+:ENDIF;
+aLimits := ExecFunction("EQUIPMENT_CALIBRATION.CalibrationConstants.LimitsFor", {sEquipmentId});
+:IF !ExecFunction("EQUIPMENT_CALIBRATION.ValidateReading", {nReading, aLimits});
+	:RETURN {.F., "READING_OUT_OF_RANGE"};
+:ENDIF;
+
+BeginLimsTransaction("DATABASE");
+:TRY;
+	/* No Insert: the counter row is drawn, and the insert below writes the whole record;
+	nCalibrationId := LimsSetCounter("SAMPLE_CALIBRATION", "CALIBRATION_ID", "", {"No Insert"}, {});
+	RunSQL("insert into SAMPLE_CALIBRATION (CALIBRATION_ID, EQUIPMENT_ID, CALIBRATED_ON, READING, RESULT, CALIBRATED_BY) values (?, ?, ?, ?, ?, ?)",
+		"DATABASE", {nCalibrationId, sEquipmentId, dCalibrated, nReading, sResult, MYUSERNAME});
+	SqlExecute("update SAMPLE_EQUIPMENT set LAST_CALIBRATED = ?dCalibrated? where EQUIPMENT_ID = ?sEquipmentId?");
+	:IF LimsRecordsAffected() != 1;
+		RaiseError("Equipment row not updated: " + sEquipmentId);
+	:ENDIF;
+	EndLimsTransaction("DATABASE");
+:CATCH;
+	EndLimsTransaction("DATABASE", .F.);
+	:RETURN {.F., "NOT_SAVED: " + LimsString(GetLastSSLError())};
+:ENDTRY;
+:RETURN {.T., nCalibrationId};

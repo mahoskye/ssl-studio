@@ -1,0 +1,117 @@
+/* Sample module: the long script: due list, urgency, an in-place sort, summaries.
+   Covers checklist rows: B1 procedures, B2 while, B2 for, B2 case, B2 nesting, B2 loop exits, B3 compound assignment, B3 increment, B4 long script, C3 DoProc, C3 ExecFunction, C1 RunDS, C6 dates.
+   Status: verified in the sandbox by manifests/sample-lab.json;
+
+:PARAMETERS dFrom, dTo, bIncludeInactive;
+:DEFAULT dFrom, Today() - 90;
+:DEFAULT dTo, Today() + 30;
+:DEFAULT bIncludeInactive, .F.;
+:DECLARE aEquipment, aDue, i, dNext;
+
+aEquipment := ExecFunction("EQUIPMENT_CALIBRATION.GetEquipment", {"", !bIncludeInactive});
+aDue := {};
+:FOR i := 1 :TO Len(aEquipment);
+	dNext := DoProc("NextDueFor", {aEquipment[i, 5], aEquipment[i, 4]});
+	:IF dNext < dFrom .OR. dNext > dTo;
+		:LOOP;
+	:ENDIF;
+	AAdd(aDue, {aEquipment[i, 1], dNext, DoProc("Urgency", {dNext})});
+:NEXT;
+:RETURN DoProc("SortByDate", {aDue});
+
+:PROCEDURE NextDueFor;
+:PARAMETERS dLast, nIntervalDays;
+	/* Never calibrated means due now;
+	:IF Empty(dLast);
+		:RETURN Today();
+	:ENDIF;
+	:RETURN dLast + nIntervalDays;
+:ENDPROC;
+
+:PROCEDURE Urgency;
+:PARAMETERS dDue, dAsOf;
+:DEFAULT dAsOf, Today();
+	:BEGINCASE;
+	:CASE dDue < dAsOf;
+		:RETURN "OVERDUE";
+	:CASE dDue <= dAsOf + 7;
+		:RETURN "THIS_WEEK";
+	:CASE dDue <= dAsOf + 30;
+		:RETURN "THIS_MONTH";
+	:OTHERWISE;
+		:RETURN "LATER";
+	:ENDCASE;
+:ENDPROC;
+
+:PROCEDURE SortByDate;
+:PARAMETERS aDue;
+:DECLARE n, i, bSwapped, aTemp;
+	/* An exchange sort on the due date, in place;
+	n := Len(aDue);
+	bSwapped := .T.;
+	:WHILE bSwapped;
+		bSwapped := .F.;
+		i := 1;
+		:WHILE i < n;
+			:IF aDue[i, 2] > aDue[i + 1, 2];
+				aTemp := aDue[i];
+				aDue[i] := aDue[i + 1];
+				aDue[i + 1] := aTemp;
+				bSwapped := .T.;
+			:ENDIF;
+			i++;
+		:ENDWHILE;
+		n -= 1;
+	:ENDWHILE;
+	:RETURN aDue;
+:ENDPROC;
+
+:PROCEDURE Summary;
+:PARAMETERS aDue;
+:DECLARE aCounts, i;
+	/* Counts of OVERDUE, THIS_WEEK, THIS_MONTH and LATER;
+	aCounts := {0, 0, 0, 0};
+	:FOR i := 1 :TO Len(aDue);
+		:BEGINCASE;
+		:CASE aDue[i, 3] == "OVERDUE";
+			aCounts[1] += 1;
+		:CASE aDue[i, 3] == "THIS_WEEK";
+			aCounts[2] += 1;
+		:CASE aDue[i, 3] == "THIS_MONTH";
+			aCounts[3] += 1;
+		:OTHERWISE;
+			aCounts[4] += 1;
+		:ENDCASE;
+	:NEXT;
+	:RETURN aCounts;
+:ENDPROC;
+
+:PROCEDURE DueFromDataSource;
+:PARAMETERS dBefore, bActiveOnly;
+:DEFAULT dBefore, Today();
+:DEFAULT bActiveOnly, .T.;
+	/* The same question answered by the SSL data source the grid form binds to;
+	:RETURN RunDS("EQUIPMENT_CALIBRATION.DueCalibrations", {dBefore, bActiveOnly});
+:ENDPROC;
+
+:PROCEDURE MonthBuckets;
+:PARAMETERS aDue;
+:DECLARE aBuckets, i, sKey, nAt;
+	/* {month key, count} pairs, in due-date order, through a utility of another category;
+	aBuckets := {};
+	:FOR i := 1 :TO Len(aDue);
+		sKey := ExecFunction("SAMPLE_UTILITIES.DateUtils.MonthKey", {aDue[i, 2]});
+		nAt := 0;
+		:IF Len(aBuckets) > 0;
+			:IF aBuckets[Len(aBuckets), 1] == sKey;
+				nAt := Len(aBuckets);
+			:ENDIF;
+		:ENDIF;
+		:IF nAt == 0;
+			AAdd(aBuckets, {sKey, 0});
+			nAt := Len(aBuckets);
+		:ENDIF;
+		aBuckets[nAt, 2]++;
+	:NEXT;
+	:RETURN aBuckets;
+:ENDPROC;

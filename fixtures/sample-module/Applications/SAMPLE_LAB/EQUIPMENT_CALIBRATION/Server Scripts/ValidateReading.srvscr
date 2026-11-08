@@ -1,0 +1,21 @@
+/* Sample module: reading validation with a script-level error block.
+   Covers checklist rows: B1 script error block, C7 RaiseError, C7 UsrMes, C7 GetLastSSLError, C8 GetRegion, C4 ValidateNumeric, B3 array literal, B3 indexing.
+   Status: verified in the sandbox by manifests/sample-lab.json;
+
+:PARAMETERS xReading, aLimits;
+:DEFAULT aLimits, {0, 100};
+:DECLARE nReading;
+
+:IF !ValidateNumeric(LimsString(xReading));
+	RaiseError(AllTrim(GetRegion("NotNumeric")) + " " + LimsString(xReading));
+:ENDIF;
+nReading := Val(LimsString(xReading));
+:RETURN nReading >= aLimits[1] .AND. nReading <= aLimits[2];
+
+:ERROR;
+UsrMes("ValidateReading: " + GetLastSSLError());
+:RETURN .F.;
+
+:REGION NotNumeric;
+Reading is not numeric:
+:ENDREGION;

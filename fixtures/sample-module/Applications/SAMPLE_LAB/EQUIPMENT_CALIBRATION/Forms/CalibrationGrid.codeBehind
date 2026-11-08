@@ -1,0 +1,56 @@
+// EQUIPMENT_CALIBRATION.CalibrationGrid: equipment due for calibration within a window of days.
+// Sample module, written fresh. Binds the grid to the DueCalibrations data source and opens
+// EquipmentEditor as a modal dialog for the selected row.
+
+var g_sSelectedEquipmentId = "";
+
+function Form_OnLoad() {
+    Form.Text = Form.Resources.Title;
+    Form.All.txtDays.Text = "30";
+    refreshGrid();
+}
+
+function refreshGrid() {
+    var sDays = Form.All.txtDays.Text;
+    if (!SampleLib.isWholeNumber(sDays)) {
+        alert(Form.Resources.DaysNotNumeric);
+        return;
+    }
+    Form.DisplayWaitMessage(true);
+    try {
+        Form.All.grdDue.Data = lims.GetDataSource("EQUIPMENT_CALIBRATION.DueCalibrations",
+            [CalibrationHelpers.dueWindowEnd(parseInt(sDays, 10)), true]);
+    } finally {
+        Form.DisplayWaitMessage(false);
+    }
+    g_sSelectedEquipmentId = "";
+    Form.All.btnCalibrate.Enabled = false;
+    Form.All.lblSelected.Text = Form.Resources.NothingSelected;
+}
+
+function grdDue_OnRowChange() {
+    var aRow = Form.All.grdDue.GetCurrentRowData();
+    if (!aRow) {
+        return;
+    }
+    g_sSelectedEquipmentId = aRow[0];
+    Form.All.lblSelected.Text = Form.Resources.Selected + aRow[0] + " (" + aRow[1] + "), "
+        + CalibrationHelpers.urgency(aRow[2], SampleLib.isoDate(new Date()));
+    Form.All.btnCalibrate.Enabled = true;
+}
+
+function btnCalibrate_OnClick() {
+    if (g_sSelectedEquipmentId === "") {
+        alert(Form.Resources.NothingSelected);
+        return;
+    }
+    var nCalibrationId = Form.ShowModalDialog(lims.GetFormSource("EQUIPMENT_CALIBRATION.EquipmentEditor"),
+        [g_sSelectedEquipmentId]);
+    if (nCalibrationId) {
+        refreshGrid();
+    }
+}
+
+function btnRefresh_OnClick() {
+    refreshGrid();
+}

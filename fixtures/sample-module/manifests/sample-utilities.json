@@ -1,0 +1,950 @@
+{
+  "schema_version": 1,
+  "script_root": "..",
+  "config": {
+    "clock": "2026-11-08T12:00:00",
+    "user_data": "SAMPLE",
+    "session_id": "SAMPLE-UTILITIES-1"
+  },
+  "case_defaults": {
+    "trace": false,
+    "expected_logs": [],
+    "expected_warning_messages": []
+  },
+  "cases": [
+    {
+      "name": "NormalizeCode upper-cases, trims and removes inner spaces",
+      "script": "Server Scripts/SAMPLE_UTILITIES/StringUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "NormalizeCode",
+          "args": [
+            " ab cd "
+          ]
+        }
+      ],
+      "expected_result": "ABCD"
+    },
+    {
+      "name": "PadLeft fills to the width with the given character",
+      "script": "Server Scripts/SAMPLE_UTILITIES/StringUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "PadLeft",
+          "args": [
+            "7",
+            3,
+            "0"
+          ]
+        }
+      ],
+      "expected_result": "007"
+    },
+    {
+      "name": "PadLeft defaults to spaces and converts a number",
+      "script": "Server Scripts/SAMPLE_UTILITIES/StringUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "PadLeft",
+          "args": [
+            42,
+            4
+          ]
+        }
+      ],
+      "expected_result": "  42"
+    },
+    {
+      "name": "PadCode zero-pads the numeric code",
+      "script": "Server Scripts/SAMPLE_UTILITIES/StringUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "PadCode",
+          "args": [
+            "7",
+            4
+          ]
+        }
+      ],
+      "expected_result": "0007"
+    },
+    {
+      "name": "SplitList splits on the default comma and trims",
+      "script": "Server Scripts/SAMPLE_UTILITIES/StringUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "SplitList",
+          "args": [
+            "a, b,c"
+          ]
+        }
+      ],
+      "expected_result": [
+        "a",
+        "b",
+        "c"
+      ]
+    },
+    {
+      "name": "SplitList of an empty string is an empty array",
+      "script": "Server Scripts/SAMPLE_UTILITIES/StringUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "SplitList",
+          "args": [
+            "",
+            ";"
+          ]
+        }
+      ],
+      "expected_result": []
+    },
+    {
+      "name": "JoinList joins with the separator",
+      "script": "Server Scripts/SAMPLE_UTILITIES/StringUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "JoinList",
+          "args": [
+            [
+              "x",
+              "y"
+            ],
+            "-"
+          ]
+        }
+      ],
+      "expected_result": "x-y"
+    },
+    {
+      "name": "JoinList converts numbers and uses the default separator",
+      "script": "Server Scripts/SAMPLE_UTILITIES/StringUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "JoinList",
+          "args": [
+            [
+              1,
+              2
+            ]
+          ]
+        }
+      ],
+      "expected_result": "1, 2"
+    },
+    {
+      "name": "HasVowel finds a vowel",
+      "script": "Server Scripts/SAMPLE_UTILITIES/StringUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "HasVowel",
+          "args": [
+            "tree"
+          ]
+        }
+      ],
+      "expected_result": true
+    },
+    {
+      "name": "HasVowel is false without one",
+      "script": "Server Scripts/SAMPLE_UTILITIES/StringUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "HasVowel",
+          "args": [
+            "xyz"
+          ]
+        }
+      ],
+      "expected_result": false
+    },
+    {
+      "name": "Abbreviate shortens with an ellipsis",
+      "script": "Server Scripts/SAMPLE_UTILITIES/StringUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "Abbreviate",
+          "args": [
+            "calibration",
+            8
+          ]
+        }
+      ],
+      "expected_result": "calib..."
+    },
+    {
+      "name": "Abbreviate leaves short text alone",
+      "script": "Server Scripts/SAMPLE_UTILITIES/StringUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "Abbreviate",
+          "args": [
+            "short"
+          ]
+        }
+      ],
+      "expected_result": "short"
+    },
+    {
+      "name": "ColumnOf extracts a column",
+      "script": "Server Scripts/SAMPLE_UTILITIES/ArrayUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "ColumnOf",
+          "args": [
+            [
+              [
+                1,
+                "a"
+              ],
+              [
+                2,
+                "b"
+              ]
+            ],
+            2
+          ]
+        }
+      ],
+      "expected_result": [
+        "a",
+        "b"
+      ]
+    },
+    {
+      "name": "IndexOf is one-based",
+      "script": "Server Scripts/SAMPLE_UTILITIES/ArrayUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "IndexOf",
+          "args": [
+            [
+              "x",
+              "y"
+            ],
+            "y"
+          ]
+        }
+      ],
+      "expected_result": 2
+    },
+    {
+      "name": "Unique keeps first occurrences",
+      "script": "Server Scripts/SAMPLE_UTILITIES/ArrayUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "Unique",
+          "args": [
+            [
+              1,
+              2,
+              1,
+              3,
+              2
+            ]
+          ]
+        }
+      ],
+      "expected_result": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "name": "SumColumn adds through a code block",
+      "script": "Server Scripts/SAMPLE_UTILITIES/ArrayUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "SumColumn",
+          "args": [
+            [
+              [
+                1,
+                10
+              ],
+              [
+                2,
+                20
+              ]
+            ],
+            2
+          ]
+        }
+      ],
+      "expected_result": 30
+    },
+    {
+      "name": "FirstPositive skips non-positive values and stops",
+      "script": "Server Scripts/SAMPLE_UTILITIES/ArrayUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "FirstPositive",
+          "args": [
+            [
+              0,
+              -1,
+              3,
+              5
+            ]
+          ]
+        }
+      ],
+      "expected_result": 3
+    },
+    {
+      "name": "FirstIndexAbove leaves the loop at the first hit",
+      "script": "Server Scripts/SAMPLE_UTILITIES/ArrayUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "FirstIndexAbove",
+          "args": [
+            [
+              1,
+              5,
+              9
+            ],
+            4
+          ]
+        }
+      ],
+      "expected_result": 2
+    },
+    {
+      "name": "Transpose swaps rows and columns",
+      "script": "Server Scripts/SAMPLE_UTILITIES/ArrayUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "Transpose",
+          "args": [
+            [
+              [
+                1,
+                2,
+                3
+              ],
+              [
+                4,
+                5,
+                6
+              ]
+            ]
+          ]
+        }
+      ],
+      "expected_result": [
+        [
+          1,
+          4
+        ],
+        [
+          2,
+          5
+        ],
+        [
+          3,
+          6
+        ]
+      ]
+    },
+    {
+      "name": "SampleMatrix is a nested literal",
+      "script": "Server Scripts/SAMPLE_UTILITIES/ArrayUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "SampleMatrix",
+          "args": []
+        }
+      ],
+      "expected_result": [
+        [
+          1,
+          2,
+          3
+        ],
+        [
+          4,
+          5,
+          6
+        ]
+      ]
+    },
+    {
+      "name": "SortedCopy sorts a copy",
+      "script": "Server Scripts/SAMPLE_UTILITIES/ArrayUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "SortedCopy",
+          "args": [
+            [
+              3,
+              1,
+              2
+            ]
+          ]
+        }
+      ],
+      "expected_result": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "name": "DaysUntil counts from the clock",
+      "script": "Server Scripts/SAMPLE_UTILITIES/DateUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "DaysUntil",
+          "args": [
+            {
+              "$date": "2026-12-01"
+            }
+          ]
+        }
+      ],
+      "expected_result": 23
+    },
+    {
+      "name": "IsOverdue compares with the clock",
+      "script": "Server Scripts/SAMPLE_UTILITIES/DateUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "IsOverdue",
+          "args": [
+            {
+              "$date": "2026-10-01"
+            }
+          ]
+        }
+      ],
+      "expected_result": true
+    },
+    {
+      "name": "NextDue adds the interval",
+      "script": "Server Scripts/SAMPLE_UTILITIES/DateUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "NextDue",
+          "args": [
+            {
+              "$date": "2026-10-01"
+            },
+            90
+          ]
+        }
+      ],
+      "expected_result": "2026-12-30T00:00:00"
+    },
+    {
+      "name": "NextDue with a zero interval is the same date",
+      "script": "Server Scripts/SAMPLE_UTILITIES/DateUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "NextDue",
+          "args": [
+            {
+              "$date": "2026-10-01"
+            },
+            0
+          ]
+        }
+      ],
+      "expected_result": "2026-10-01T00:00:00"
+    },
+    {
+      "name": "MonthKey formats year and month",
+      "script": "Server Scripts/SAMPLE_UTILITIES/DateUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "MonthKey",
+          "args": [
+            {
+              "$date": "2026-03-05"
+            }
+          ]
+        }
+      ],
+      "expected_result": "2026-03"
+    },
+    {
+      "name": "IsSameDay compares the date part",
+      "script": "Server Scripts/SAMPLE_UTILITIES/DateUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "IsSameDay",
+          "args": [
+            {
+              "$date": "2026-10-01"
+            },
+            {
+              "$date": "2026-10-01"
+            }
+          ]
+        }
+      ],
+      "expected_result": true
+    },
+    {
+      "name": "CalibrationStatus is DUE_SOON inside the warning window",
+      "script": "Server Scripts/SAMPLE_UTILITIES/DateUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "CalibrationStatus",
+          "args": [
+            {
+              "$date": "2026-11-20"
+            }
+          ]
+        }
+      ],
+      "expected_result": "DUE_SOON"
+    },
+    {
+      "name": "CalibrationStatus is OK beyond it",
+      "script": "Server Scripts/SAMPLE_UTILITIES/DateUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "CalibrationStatus",
+          "args": [
+            {
+              "$date": "2027-06-01"
+            }
+          ]
+        }
+      ],
+      "expected_result": "OK"
+    },
+    {
+      "name": "CalibrationStatus is OVERDUE in the past",
+      "script": "Server Scripts/SAMPLE_UTILITIES/DateUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "CalibrationStatus",
+          "args": [
+            {
+              "$date": "2026-01-01"
+            }
+          ]
+        }
+      ],
+      "expected_result": "OVERDUE"
+    },
+    {
+      "name": "RequestJson carries the kind and a GUID",
+      "script": "Server Scripts/SAMPLE_UTILITIES/FileUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "RequestJson",
+          "args": [
+            "CALIBRATION"
+          ]
+        }
+      ],
+      "expected_result_pattern": "^\\{\"CreatedOn\":\"20261108\",\"Id\":\"[0-9A-Fa-f-]{36}\",\"Kind\":\"CALIBRATION\"\\}$"
+    },
+    {
+      "name": "IsValidRequest accepts a well-formed request",
+      "script": "Server Scripts/SAMPLE_UTILITIES/FileUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "IsValidRequest",
+          "args": [
+            "{\"Id\":\"6f1c2a4e-9d2b-4f0e-8c3a-5b7d1e2f3a40\",\"Kind\":\"CALIBRATION\"}"
+          ]
+        }
+      ],
+      "expected_result": true
+    },
+    {
+      "name": "IsValidRequest rejects a bad identifier",
+      "script": "Server Scripts/SAMPLE_UTILITIES/FileUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "IsValidRequest",
+          "args": [
+            "{\"Id\":\"nope\",\"Kind\":\"CALIBRATION\"}"
+          ]
+        }
+      ],
+      "expected_result": false
+    },
+    {
+      "name": "AppendLog creates then appends, and LogLines reads it back through StringUtils",
+      "script": "Server Scripts/SAMPLE_UTILITIES/FileUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "AppendLog",
+          "args": [
+            "sample",
+            "first"
+          ]
+        },
+        {
+          "procedure": "AppendLog",
+          "args": [
+            "sample",
+            "second"
+          ]
+        },
+        {
+          "procedure": "LogLines",
+          "args": [
+            "sample"
+          ]
+        }
+      ],
+      "expected_result": [
+        "first",
+        "second"
+      ],
+      "capture_files": [
+        "logs\\sample.log"
+      ],
+      "expected_files": {
+        "logs\\sample.log": "first\r\nsecond"
+      }
+    },
+    {
+      "name": "UnitName resolves a known code",
+      "script": "Server Scripts/SAMPLE_UTILITIES/FileUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "UnitName",
+          "args": [
+            "g"
+          ]
+        }
+      ],
+      "expected_result": "gram"
+    },
+    {
+      "name": "UnitName falls back to the code",
+      "script": "Server Scripts/SAMPLE_UTILITIES/FileUtils.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "UnitName",
+          "args": [
+            "zz"
+          ]
+        }
+      ],
+      "expected_result": "zz"
+    },
+    {
+      "name": "NetVersion names the hosted framework",
+      "script": "Server Scripts/SAMPLE_UTILITIES/NetInterop.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "NetVersion",
+          "args": []
+        }
+      ],
+      "expected_result": "4.0.30319"
+    },
+    {
+      "name": "SortedNames sorts through an ArrayList",
+      "script": "Server Scripts/SAMPLE_UTILITIES/NetInterop.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "SortedNames",
+          "args": [
+            [
+              "pear",
+              "apple",
+              "fig"
+            ]
+          ]
+        }
+      ],
+      "expected_result": [
+        "apple",
+        "fig",
+        "pear"
+      ]
+    },
+    {
+      "name": "CountByKey counts through a Hashtable",
+      "script": "Server Scripts/SAMPLE_UTILITIES/NetInterop.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "CountByKey",
+          "args": [
+            [
+              "a",
+              "b",
+              "a"
+            ]
+          ]
+        }
+      ],
+      "expected_result": [
+        2,
+        2
+      ]
+    },
+    {
+      "name": "BuildText appends through a StringBuilder",
+      "script": "Server Scripts/SAMPLE_UTILITIES/NetInterop.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "BuildText",
+          "args": [
+            [
+              "a",
+              "b",
+              "c"
+            ]
+          ]
+        }
+      ],
+      "expected_result": "abc"
+    },
+    {
+      "name": "AsInteger casts",
+      "script": "Server Scripts/SAMPLE_UTILITIES/NetInterop.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "AsInteger",
+          "args": [
+            7
+          ]
+        }
+      ],
+      "expected_result": 7
+    },
+    {
+      "name": "main body with no job answers the setting",
+      "script": "Server Scripts/SAMPLE_UTILITIES/BatchJobs.srvscr",
+      "args": [],
+      "globals": {
+        "SETTINGS": {
+          "SampleMode": "demo"
+        }
+      },
+      "expected_result": "demo"
+    },
+    {
+      "name": "main body with no setting answers an empty string",
+      "script": "Server Scripts/SAMPLE_UTILITIES/BatchJobs.srvscr",
+      "args": [],
+      "expected_result": ""
+    },
+    {
+      "name": "main body dispatches a job through ExecFunction",
+      "script": "Server Scripts/SAMPLE_UTILITIES/BatchJobs.srvscr",
+      "args": [
+        "StringUtils.PadCode",
+        [
+          "7",
+          3
+        ]
+      ],
+      "expected_result": "007"
+    },
+    {
+      "name": "RunJob counts runs in the session",
+      "script": "Server Scripts/SAMPLE_UTILITIES/BatchJobs.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "RunJob",
+          "args": [
+            "StringUtils.HasVowel",
+            [
+              "tree"
+            ]
+          ]
+        },
+        {
+          "procedure": "RunJob",
+          "args": [
+            "ArrayUtils.IndexOf",
+            [
+              [
+                "x",
+                "y"
+              ],
+              "y"
+            ]
+          ]
+        },
+        {
+          "procedure": "RunsThisSession",
+          "args": []
+        }
+      ],
+      "review": "Manifest cases share one session, and the main-body dispatch case above already ran one job, so the count is three, not two.",
+      "expected_result": [
+        3,
+        "ArrayUtils.IndexOf"
+      ]
+    },
+    {
+      "name": "QueueJob answers a batch identifier",
+      "script": "Server Scripts/SAMPLE_UTILITIES/BatchJobs.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "QueueJob",
+          "args": [
+            "StringUtils.PadCode",
+            [
+              "1",
+              2
+            ]
+          ]
+        }
+      ],
+      "expected_result_pattern": "^[0-9A-Fa-f-]{36}$"
+    },
+    {
+      "name": "NotifyOperator without mail settings does nothing",
+      "script": "Server Scripts/SAMPLE_UTILITIES/BatchJobs.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "NotifyOperator",
+          "args": [
+            "subject",
+            "body"
+          ]
+        }
+      ],
+      "expected_result": false
+    },
+    {
+      "name": "NotifyOperator with settings reaches the mail boundary and answers false",
+      "script": "Server Scripts/SAMPLE_UTILITIES/BatchJobs.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "NotifyOperator",
+          "args": [
+            "subject",
+            "body"
+          ]
+        }
+      ],
+      "globals": {
+        "SETTINGS": {
+          "SampleSmtpHost": "mail.example.test",
+          "SampleMailFrom": "lims@example.test",
+          "SampleOperatorMail": "operator@example.test"
+        }
+      },
+      "expected_result": false,
+      "expected_logs": [
+        "SendLimsEmail\r\nError:\nSMTP delivery is unavailable in the isolated runtime"
+      ]
+    },
+    {
+      "name": "Square uses the caret power operator",
+      "script": "Server Scripts/SAMPLE_UTILITIES/RareForms.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "Square",
+          "args": [
+            4
+          ]
+        }
+      ],
+      "expected_result": 16
+    },
+    {
+      "name": "Cube uses the double-star power operator",
+      "script": "Server Scripts/SAMPLE_UTILITIES/RareForms.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "Cube",
+          "args": [
+            2
+          ]
+        }
+      ],
+      "expected_result": 8
+    },
+    {
+      "name": "SafeDivide divides",
+      "script": "Server Scripts/SAMPLE_UTILITIES/RareForms.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "SafeDivide",
+          "args": [
+            10,
+            4
+          ]
+        }
+      ],
+      "expected_result": 2.5
+    },
+    {
+      "name": "SafeDivide answers zero through its error block",
+      "script": "Server Scripts/SAMPLE_UTILITIES/RareForms.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "SafeDivide",
+          "args": [
+            10,
+            0
+          ]
+        }
+      ],
+      "expected_result": 0
+    },
+    {
+      "name": "Doubled runs the inline code block through ExecUDF",
+      "script": "Server Scripts/SAMPLE_UTILITIES/RareForms.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "Doubled",
+          "args": [
+            21
+          ]
+        }
+      ],
+      "expected_result": 42
+    },
+    {
+      "name": "Clamp caps at the upper bound",
+      "script": "Server Scripts/SAMPLE_UTILITIES/RareForms.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "Clamp",
+          "args": [
+            15,
+            0,
+            10
+          ]
+        }
+      ],
+      "expected_result": 10
+    },
+    {
+      "name": "Clamp raises to the lower bound",
+      "script": "Server Scripts/SAMPLE_UTILITIES/RareForms.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "Clamp",
+          "args": [
+            -3,
+            0,
+            10
+          ]
+        }
+      ],
+      "expected_result": 0
+    },
+    {
+      "name": "Clamp leaves a value in range",
+      "script": "Server Scripts/SAMPLE_UTILITIES/RareForms.srvscr",
+      "procedure_calls": [
+        {
+          "procedure": "Clamp",
+          "args": [
+            5,
+            0,
+            10
+          ]
+        }
+      ],
+      "expected_result": 5
+    }
+  ]
+}

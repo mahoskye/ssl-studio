@@ -1,0 +1,4 @@
+:PARAMETERS sCode;
+:DECLARE n;
+:DEFAULT sCode, "A";
+:RETURN sCode;

@@ -1,0 +1,69 @@
+/* Sample module: file, serialization and object helpers.
+   Covers checklist rows: C9 files, C9 ToJson, C9 CreateGuid, C10 CreateUDObject, C10 dictionary constructor, C3 ExecFunction, B3 member access.
+   Status: verified in the sandbox by manifests/sample-utilities.json;
+
+:PROCEDURE NewRequest;
+:PARAMETERS sKind;
+:DEFAULT sKind, "CALIBRATION";
+:DECLARE oRequest;
+	oRequest := CreateUDObject();
+	oRequest:Id := CreateGuid();
+	oRequest:Kind := sKind;
+	oRequest:CreatedOn := DtoS(Today());
+	:RETURN oRequest;
+:ENDPROC;
+
+:PROCEDURE RequestJson;
+:PARAMETERS sKind;
+	:RETURN ToJson(DoProc("NewRequest", {sKind}));
+:ENDPROC;
+
+:PROCEDURE IsValidRequest;
+:PARAMETERS sJson;
+:DECLARE oRequest;
+	oRequest := FromJson(sJson);
+	:RETURN HasProperty(oRequest, "Id") .AND. IsGuid(oRequest:Id) .AND. !Empty(oRequest:Kind);
+:ENDPROC;
+
+:PROCEDURE LogPath;
+:PARAMETERS sName;
+	:RETURN GetLogsFolder() + sName + ".log";
+:ENDPROC;
+
+:PROCEDURE AppendLog;
+:PARAMETERS sName, sLine;
+:DECLARE sPath;
+	sPath := DoProc("LogPath", {sName});
+	:IF FileSupport(sPath, "CHECK");
+		WriteText(sPath, CRLF + sLine, , "Y");
+	:ELSE;
+		WriteText(sPath, sLine);
+	:ENDIF;
+	:RETURN sPath;
+:ENDPROC;
+
+:PROCEDURE LogLines;
+:PARAMETERS sName;
+:DECLARE sText;
+	sText := ReadText(DoProc("LogPath", {sName}));
+	:RETURN ExecFunction("SAMPLE_UTILITIES.StringUtils.SplitList", {sText, CRLF});
+:ENDPROC;
+
+:PROCEDURE UnitLookup;
+:DECLARE oUnits;
+	oUnits := SSLStringDictionary{};
+	oUnits:AddValue("mm", "millimetre");
+	oUnits:AddValue("g", "gram");
+	oUnits:AddValue("degC", "degree Celsius");
+	:RETURN oUnits;
+:ENDPROC;
+
+:PROCEDURE UnitName;
+:PARAMETERS sCode;
+:DECLARE oUnits;
+	oUnits := DoProc("UnitLookup", {});
+	:IF oUnits:Contains(sCode);
+		:RETURN oUnits:GetValue(sCode);
+	:ENDIF;
+	:RETURN sCode;
+:ENDPROC;

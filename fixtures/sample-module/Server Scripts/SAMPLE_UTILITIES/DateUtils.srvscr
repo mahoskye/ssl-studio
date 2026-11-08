@@ -1,0 +1,50 @@
+/* Sample module: date helpers.
+   Covers checklist rows: C6 dates, B3 comparison both spellings, B3 arithmetic, B2 case, B1 defaults.
+   Status: verified in the sandbox by manifests/sample-utilities.json;
+
+:PROCEDURE DaysUntil;
+:PARAMETERS dDue, dAsOf;
+:DEFAULT dAsOf, Today();
+	:RETURN dDue - dAsOf;
+:ENDPROC;
+
+:PROCEDURE IsOverdue;
+:PARAMETERS dDue, dAsOf;
+:DEFAULT dAsOf, Today();
+	:RETURN dDue < dAsOf;
+:ENDPROC;
+
+:PROCEDURE NextDue;
+:PARAMETERS dLast, nIntervalDays;
+:DEFAULT nIntervalDays, 365;
+	:IF nIntervalDays = 0;
+		:RETURN dLast;
+	:ENDIF;
+	:RETURN dLast + nIntervalDays;
+:ENDPROC;
+
+:PROCEDURE MonthKey;
+:PARAMETERS dDate;
+	:RETURN Str(Year(dDate), 4) + "-" + StrZero(Month(dDate), 2);
+:ENDPROC;
+
+:PROCEDURE IsSameDay;
+:PARAMETERS dFirst, dSecond;
+	:RETURN DtoS(dFirst) == DtoS(dSecond);
+:ENDPROC;
+
+:PROCEDURE CalibrationStatus;
+:PARAMETERS dDue, dAsOf, nWarnDays;
+:DEFAULT dAsOf, Today();
+:DEFAULT nWarnDays, 30;
+:DECLARE nDays;
+	nDays := dDue - dAsOf;
+	:BEGINCASE;
+	:CASE nDays < 0;
+		:RETURN "OVERDUE";
+	:CASE nDays <= nWarnDays;
+		:RETURN "DUE_SOON";
+	:OTHERWISE;
+		:RETURN "OK";
+	:ENDCASE;
+:ENDPROC;

@@ -1,0 +1,38 @@
+/* Sample module: derived class with an include: one reading against the equipment limits.
+   Covers checklist rows: B1 class inheritance, B1 includes, B3 member call, C3 DoProc.
+   Status: verified in the sandbox by manifests/sample-lab.json;
+
+:CLASS CalibrationRecord;
+:INHERIT EQUIPMENT_CALIBRATION.CalibrationBase;
+:INCLUDE EQUIPMENT_CALIBRATION.CalibrationConstants;
+:DECLARE nReading, dCalibrated, sResult;
+
+:PROCEDURE Constructor;
+:PARAMETERS sEquipmentId, nReading, dCalibrated;
+	/* The base constructor takes a parameter, so it does not run for a subclass: load here;
+	Me:Load(sEquipmentId);
+	Me:nReading := nReading;
+	Me:dCalibrated := dCalibrated;
+	:IF Empty(Me:dCalibrated);
+		Me:dCalibrated := Today();
+	:ENDIF;
+	Me:sResult := DoProc("ResultFor", {Me:WithinTolerance()});
+:ENDPROC;
+
+:PROCEDURE WithinTolerance;
+:DECLARE aLimits;
+	aLimits := DoProc("LimitsFor", {Me:sEquipmentId});
+	:RETURN Me:nReading >= aLimits[1] .AND. Me:nReading <= aLimits[2];
+:ENDPROC;
+
+:PROCEDURE Describe;
+	:RETURN Base:Describe() + " read " + LimsString(Me:nReading) + " on " + DtoS(Me:dCalibrated) + ": " + Me:sResult;
+:ENDPROC;
+
+:PROCEDURE Verdict;
+	:RETURN Me:sResult;
+:ENDPROC;
+
+:PROCEDURE Save;
+	:RETURN ExecFunction("EQUIPMENT_CALIBRATION.SaveCalibration", {Me:sEquipmentId, Me:nReading, Me:dCalibrated, Me:sResult});
+:ENDPROC;

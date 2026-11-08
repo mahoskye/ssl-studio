@@ -1,0 +1,38 @@
+<NewDataSet>
+  <Table1>
+    <ParentGuid>98ca6cd9-6e4c-5f16-8ddf-283f63b589f6</ParentGuid>
+    <Guid>98ca6cd9-6e4c-5f16-8ddf-283f63b589f6</Guid>
+    <PropertyName>Text</PropertyName>
+    <PropertyValue>Calibrations due</PropertyValue>
+  </Table1>
+  <Table1>
+    <ParentGuid>98ca6cd9-6e4c-5f16-8ddf-283f63b589f6</ParentGuid>
+    <Guid>98ca6cd9-6e4c-5f16-8ddf-283f63b589f6</Guid>
+    <PropertyName>Width</PropertyName>
+    <PropertyValue>720</PropertyValue>
+  </Table1>
+  <Table1>
+    <ParentGuid>98ca6cd9-6e4c-5f16-8ddf-283f63b589f6</ParentGuid>
+    <Guid>98ca6cd9-6e4c-5f16-8ddf-283f63b589f6</Guid>
+    <PropertyName>Height</PropertyName>
+    <PropertyValue>480</PropertyValue>
+  </Table1>
+  <Table1>
+    <ParentGuid>98ca6cd9-6e4c-5f16-8ddf-283f63b589f6</ParentGuid>
+    <Guid>5c46212a-c555-5ff9-a0d4-ccdd38398803</Guid>
+    <PropertyName>Text</PropertyName>
+    <PropertyValue>Due within (days)</PropertyValue>
+  </Table1>
+  <Table1>
+    <ParentGuid>98ca6cd9-6e4c-5f16-8ddf-283f63b589f6</ParentGuid>
+    <Guid>996d0c56-8a4e-5d44-a0a0-bc3aa00d3033</Guid>
+    <PropertyName>Text</PropertyName>
+    <PropertyValue>Calibrate</PropertyValue>
+  </Table1>
+  <Table1>
+    <ParentGuid>98ca6cd9-6e4c-5f16-8ddf-283f63b589f6</ParentGuid>
+    <Guid>85284091-b421-5570-9f07-9b599da0b14b</Guid>
+    <PropertyName>Text</PropertyName>
+    <PropertyValue>Refresh</PropertyValue>
+  </Table1>
+</NewDataSet>

@@ -1,0 +1,30 @@
+/* Sample module: shared constants: a public, and procedures reached through :INCLUDE.
+   Covers checklist rows: B1 includes, B1 public declarations, B2 case, C5 IIf, C4 strings.
+   Status: verified in the sandbox by manifests/sample-lab.json;
+
+:PUBLIC nDefaultToleranceDays;
+nDefaultToleranceDays := 30;
+:RETURN nDefaultToleranceDays;
+
+:PROCEDURE DefaultLimits;
+	:RETURN {0, 100};
+:ENDPROC;
+
+:PROCEDURE LimitsFor;
+:PARAMETERS sEquipmentId;
+:DECLARE sPrefix;
+	sPrefix := Upper(Left(LimsString(sEquipmentId), 2));
+	:BEGINCASE;
+	:CASE sPrefix == "PH";
+		:RETURN {0, 14};
+	:CASE sPrefix == "TH";
+		:RETURN {-50, 250};
+	:OTHERWISE;
+		:RETURN DoProc("DefaultLimits", {});
+	:ENDCASE;
+:ENDPROC;
+
+:PROCEDURE ResultFor;
+:PARAMETERS bWithinTolerance;
+	:RETURN IIf(bWithinTolerance, "PASS", "FAIL");
+:ENDPROC;

@@ -1,0 +1,9 @@
+-- Units of one type, for combo boxes.
+:DSN := DATABASE;
+:TABLENAME := Units;
+:NULLASBLANK := true;
+:PARAMETERS sUnitType := 'LENGTH';
+select UNIT_CODE, UNIT_NAME
+from SAMPLE_UNITS
+where UNIT_TYPE = @sUnitType
+order by UNIT_NAME
