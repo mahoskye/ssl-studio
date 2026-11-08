@@ -1,0 +1,7 @@
+:DECLARE n;
+n := 1;
+:IF n == 1;
+	n := 2;
+:ENDIF;
+:ENDIF;
+:RETURN n;

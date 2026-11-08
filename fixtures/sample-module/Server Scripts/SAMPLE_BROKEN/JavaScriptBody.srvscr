@@ -1,0 +1,3 @@
+var total = 0;
+function add(n) { total += n; }
+add(1);

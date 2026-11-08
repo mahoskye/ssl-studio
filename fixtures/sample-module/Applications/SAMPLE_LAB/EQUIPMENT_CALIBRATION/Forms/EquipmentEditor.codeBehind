@@ -1,0 +1,49 @@
+// EQUIPMENT_CALIBRATION.EquipmentEditor: record one calibration for one piece of equipment.
+// Sample module, written fresh. Opened with the equipment identifier as its argument;
+// answers the new calibration identifier through Form.returnValue, or null.
+
+function Form_OnLoad() {
+    var sEquipmentId = Form.formArguments && Form.formArguments.length > 0 ? Form.formArguments[0] : "";
+    Form.Text = Form.Resources.Title;
+    Form.All.cboStatus.Data = lims.GetDataSource("SAMPLE_LOOKUPS.StatusCodes", []);
+    Form.All.dtpCalibrated.Value = SampleLib.isoDate(new Date());
+    if (sEquipmentId !== "") {
+        loadEquipment(sEquipmentId);
+    }
+}
+
+function loadEquipment(sEquipmentId) {
+    var aRows = lims.CallServer("EQUIPMENT_CALIBRATION.GetEquipment", [sEquipmentId, false]);
+    if (!aRows || aRows.length === 0) {
+        alert(Form.Resources.NotFound);
+        return;
+    }
+    var aRow = aRows[0];
+    Form.All.txtEquipmentId.Text = aRow[0];
+    Form.All.txtEquipmentId.ReadOnly = true;
+    Form.All.cboStatus.SelectedValue = aRow[2];
+    Form.All.chkActive.Checked = aRow[2] === "A";
+    Form.All.txtReading.Focus();
+}
+
+function btnSave_OnClick() {
+    var sReading = Form.All.txtReading.Text;
+    if (!SampleLib.isNumeric(sReading)) {
+        alert(Form.Resources.ReadingNotNumeric);
+        Form.All.txtReading.Focus();
+        return;
+    }
+    var aResult = lims.CallServer("EQUIPMENT_CALIBRATION.SaveCalibration",
+        [Form.All.txtEquipmentId.Text, CalibrationHelpers.parseReading(sReading), Form.All.dtpCalibrated.Value]);
+    if (!aResult[0]) {
+        alert(Form.Resources.NotSaved + aResult[1]);
+        return;
+    }
+    Form.returnValue = aResult[1];
+    Form.Close();
+}
+
+function btnCancel_OnClick() {
+    Form.returnValue = null;
+    Form.Close();
+}

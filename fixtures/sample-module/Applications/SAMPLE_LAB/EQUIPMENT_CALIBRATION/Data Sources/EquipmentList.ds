@@ -1,0 +1,10 @@
+-- Equipment list for the forms: one status, or every status when the
+-- parameter is blank. NULLASBLANK makes a missing date read as "".
+:DSN := DATABASE;
+:TABLENAME := EquipmentList;
+:NULLASBLANK := true;
+:PARAMETERS sStatus := 'A';
+select EQUIPMENT_ID, DESCRIPTION, STATUS, INTERVAL_DAYS, LAST_CALIBRATED
+from SAMPLE_EQUIPMENT
+where (@sStatus = '' or STATUS = @sStatus)
+order by EQUIPMENT_ID

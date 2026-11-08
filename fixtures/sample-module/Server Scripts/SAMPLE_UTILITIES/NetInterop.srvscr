@@ -1,0 +1,53 @@
+/* Sample module: .NET interop from SSL.
+   Covers checklist rows: C11 LimsNetConnect, C11 LimsNetCast, E1 interop, B3 member call.
+   Status: verified in the sandbox by manifests/sample-utilities.json;
+
+:PROCEDURE NetVersion;
+	:RETURN NetFrameworkVersion();
+:ENDPROC;
+
+:PROCEDURE SortedNames;
+:PARAMETERS aNames;
+:DECLARE oList, aOut, i;
+	oList := LimsNetConnect("", "System.Collections.ArrayList");
+	:FOR i := 1 :TO Len(aNames);
+		oList:Add(aNames[i]);
+	:NEXT;
+	oList:Sort();
+	/* CLR collections index from zero;
+	aOut := {};
+	:FOR i := 0 :TO oList:Count - 1;
+		AAdd(aOut, oList[i]);
+	:NEXT;
+	:RETURN aOut;
+:ENDPROC;
+
+:PROCEDURE CountByKey;
+:PARAMETERS aKeys;
+:DECLARE oTable, i, sKey;
+	oTable := LimsNetConnect("", "System.Collections.Hashtable");
+	:FOR i := 1 :TO Len(aKeys);
+		sKey := aKeys[i];
+		:IF oTable:ContainsKey(sKey);
+			oTable[sKey] := oTable[sKey] + 1;
+		:ELSE;
+			oTable:Add(sKey, 1);
+		:ENDIF;
+	:NEXT;
+	:RETURN {oTable:Count, oTable[aKeys[1]]};
+:ENDPROC;
+
+:PROCEDURE BuildText;
+:PARAMETERS aParts;
+:DECLARE oBuilder, i;
+	oBuilder := LimsNetConnect("", "System.Text.StringBuilder");
+	:FOR i := 1 :TO Len(aParts);
+		oBuilder:Append(aParts[i]);
+	:NEXT;
+	:RETURN oBuilder:ToString();
+:ENDPROC;
+
+:PROCEDURE AsInteger;
+:PARAMETERS nValue;
+	:RETURN LimsNetCast(nValue, "System.Int32");
+:ENDPROC;

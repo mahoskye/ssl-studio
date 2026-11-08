@@ -1,0 +1,81 @@
+/* Sample module: string helpers.
+   Covers checklist rows: C4 strings, B3 string concatenation, B3 containment, B3 bracket string literal, B1 procedures, B1 defaults, B2 while.
+   Status: verified in the sandbox by manifests/sample-utilities.json;
+
+:PROCEDURE NormalizeCode;
+:PARAMETERS sCode;
+	/* Upper case, trimmed, inner spaces removed;
+	:RETURN Upper(AllTrim(StrTran(LimsString(sCode), " ", "")));
+:ENDPROC;
+
+:PROCEDURE PadLeft;
+:PARAMETERS sText, nWidth, sFill;
+:DEFAULT nWidth, 10;
+:DEFAULT sFill, " ";
+:DECLARE sOut;
+	sOut := LimsString(sText);
+	:WHILE Len(sOut) < nWidth;
+		sOut := sFill + sOut;
+	:ENDWHILE;
+	:RETURN sOut;
+:ENDPROC;
+
+:PROCEDURE PadCode;
+:PARAMETERS sCode, nWidth;
+:DEFAULT nWidth, 10;
+	/* A numeric code, zero-padded to the column width;
+	:RETURN StrZero(Val(sCode), nWidth);
+:ENDPROC;
+
+:PROCEDURE SplitList;
+:PARAMETERS sList, sSeparator;
+:DEFAULT sSeparator, [,];
+:DECLARE aItems, nPos, sRest;
+	aItems := {};
+	sRest := LimsString(sList);
+	nPos := At(sSeparator, sRest);
+	:WHILE nPos > 0;
+		AAdd(aItems, AllTrim(Left(sRest, nPos - 1)));
+		sRest := SubStr(sRest, nPos + Len(sSeparator));
+		nPos := At(sSeparator, sRest);
+	:ENDWHILE;
+	:IF !Empty(AllTrim(sRest));
+		AAdd(aItems, AllTrim(sRest));
+	:ENDIF;
+	:RETURN aItems;
+:ENDPROC;
+
+:PROCEDURE JoinList;
+:PARAMETERS aItems, sSeparator;
+:DEFAULT sSeparator, ", ";
+:DECLARE sOut, i;
+	sOut := "";
+	:FOR i := 1 :TO Len(aItems);
+		:IF i > 1;
+			sOut += sSeparator;
+		:ENDIF;
+		sOut += LimsString(aItems[i]);
+	:NEXT;
+	:RETURN sOut;
+:ENDPROC;
+
+:PROCEDURE HasVowel;
+:PARAMETERS sText;
+:DECLARE sUpper, i;
+	sUpper := Upper(LimsString(sText));
+	:FOR i := 1 :TO 5;
+		:IF SubStr("AEIOU", i, 1) $ sUpper;
+			:RETURN .T.;
+		:ENDIF;
+	:NEXT;
+	:RETURN .F.;
+:ENDPROC;
+
+:PROCEDURE Abbreviate;
+:PARAMETERS sText, nMax;
+:DEFAULT nMax, 12;
+	:IF Len(sText) <= nMax;
+		:RETURN sText;
+	:ENDIF;
+	:RETURN Left(sText, nMax - 3) + "...";
+:ENDPROC;

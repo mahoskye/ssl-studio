@@ -1,0 +1,33 @@
+// EQUIPMENT_CALIBRATION.CalibrationHelpers: calibration rules shared by the application's forms.
+// Sample module, written fresh. Mirrors the urgency bands of the CalibrationSchedule server script.
+
+var CalibrationHelpers = {
+    // A reading typed into a text box, as a number.
+    parseReading: function (text) {
+        return parseFloat(String(text).replace(",", "."));
+    },
+
+    // yyyy-mm-dd for the end of a window of days from a start date (today when omitted).
+    dueWindowEnd: function (days, start) {
+        var date = start ? new Date(start + "T00:00:00") : new Date();
+        date.setDate(date.getDate() + days);
+        return SampleLib.isoDate(date);
+    },
+
+    // The urgency band of a due date, both as yyyy-mm-dd text, as the server script names them.
+    urgency: function (dueOn, asOf) {
+        var due = new Date(String(dueOn).substring(0, 10) + "T00:00:00");
+        var today = new Date(asOf + "T00:00:00");
+        var days = Math.round((due - today) / 86400000);
+        if (days < 0) {
+            return "OVERDUE";
+        }
+        if (days <= 7) {
+            return "THIS_WEEK";
+        }
+        if (days <= 30) {
+            return "THIS_MONTH";
+        }
+        return "LATER";
+    }
+};

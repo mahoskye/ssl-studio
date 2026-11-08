@@ -1,0 +1,22 @@
+/* Sample module: SSL-bodied data source. Equipment whose next calibration
+   falls on or before a date. An SSL data source is a script whose
+   :PARAMETERS carry their defaults inline;
+:PARAMETERS dBefore := Today(), bActiveOnly := .T.;
+:DECLARE aRows, aDue, i, dNext;
+
+aRows := SqlExecute("select EQUIPMENT_ID, DESCRIPTION, INTERVAL_DAYS, LAST_CALIBRATED, STATUS from SAMPLE_EQUIPMENT order by EQUIPMENT_ID");
+aDue := {};
+:FOR i := 1 :TO Len(aRows);
+	:IF bActiveOnly .AND. aRows[i, 5] != "A";
+		:LOOP;
+	:ENDIF;
+	:IF Empty(aRows[i, 4]);
+		dNext := Today();
+	:ELSE;
+		dNext := aRows[i, 4] + aRows[i, 3];
+	:ENDIF;
+	:IF dNext <= dBefore;
+		AAdd(aDue, {aRows[i, 1], aRows[i, 2], dNext});
+	:ENDIF;
+:NEXT;
+:RETURN aDue;

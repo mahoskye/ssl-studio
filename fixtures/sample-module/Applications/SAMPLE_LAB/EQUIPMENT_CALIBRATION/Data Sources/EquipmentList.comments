@@ -1,0 +1,1 @@
+update limsSOURCECONTROL set REASONFORCHECKOUT = 'Sample module skeleton - initial check-in' where versionID = ?

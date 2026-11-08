@@ -1,0 +1,52 @@
+/* Sample module: dispatch, batch, settings and session helpers.
+   Covers checklist rows: C3 ExecFunction, C3 SubmitToBatch, C8 GetSetting, C8 session, C12 SendLimsEmail, B1 parameters, B2 try.
+   Status: verified in the sandbox by manifests/sample-utilities.json;
+
+:PARAMETERS sJob, aArgs;
+:DEFAULT aArgs, {};
+:DECLARE sMode;
+sMode := GetSetting("SampleMode");
+:IF Empty(sJob);
+	:RETURN sMode;
+:ENDIF;
+:RETURN DoProc("RunJob", {sJob, aArgs});
+
+:PROCEDURE RunJob;
+:PARAMETERS sJob, aArgs;
+:DECLARE xResult, nRuns;
+	/* sJob is Script.Procedure within this category;
+	xResult := ExecFunction("SAMPLE_UTILITIES." + sJob, aArgs);
+	nRuns := GetFromSession("SampleJobRuns");
+	:IF Empty(nRuns);
+		nRuns := 0;
+	:ENDIF;
+	AddToSession("SampleJobRuns", nRuns + 1);
+	AddToSession("SampleLastJob", sJob);
+	:RETURN xResult;
+:ENDPROC;
+
+:PROCEDURE RunsThisSession;
+	:RETURN {GetFromSession("SampleJobRuns"), GetFromSession("SampleLastJob")};
+:ENDPROC;
+
+:PROCEDURE QueueJob;
+:PARAMETERS sJob, aArgs;
+:DEFAULT aArgs, {};
+	:RETURN SubmitToBatch("SAMPLE_UTILITIES." + sJob, aArgs);
+:ENDPROC;
+
+:PROCEDURE NotifyOperator;
+:PARAMETERS sSubject, sBody;
+:DECLARE sSmtp, sFrom, sTo;
+	sSmtp := GetSetting("SampleSmtpHost");
+	sFrom := GetSetting("SampleMailFrom");
+	sTo := GetSetting("SampleOperatorMail");
+	:IF Empty(sSmtp) .OR. Empty(sTo);
+		:RETURN .F.;
+	:ENDIF;
+	:TRY;
+		:RETURN SendLimsEmail(sSmtp, {sTo}, sFrom, sSubject, sBody);
+	:CATCH;
+		:RETURN .F.;
+	:ENDTRY;
+:ENDPROC;

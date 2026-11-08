@@ -1,0 +1,56 @@
+/* Sample module: equipment lookup by identifier or all rows, active by default.
+   Covers checklist rows: B1 parameters, B1 defaults, B1 regions, B2 if, B3 logical, B3 compound assignment, C1 SqlExecute, C1 RunDS, C1 GetDSParameters, C4 Empty, C5 AAdd, C8 GetRegion.
+   Status: verified in the sandbox by manifests/sample-lab.json;
+
+:PARAMETERS sEquipmentId, bActiveOnly;
+:DEFAULT bActiveOnly, .T.;
+:DECLARE sSql;
+
+sSql := AllTrim(GetRegion("EquipmentSelect"));
+:IF !Empty(sEquipmentId);
+	sSql += " and EQUIPMENT_ID = ?sEquipmentId?";
+:ENDIF;
+:IF bActiveOnly;
+	sSql += " and STATUS = 'A'";
+:ENDIF;
+sSql += " order by EQUIPMENT_ID";
+:RETURN SqlExecute(sSql);
+
+:PROCEDURE ActiveIds;
+:DECLARE aRows, aIds, i;
+	aRows := ExecFunction("EQUIPMENT_CALIBRATION.GetEquipment", {"", .T.});
+	aIds := {};
+	:FOR i := 1 :TO Len(aRows);
+		AAdd(aIds, aRows[i, 1]);
+	:NEXT;
+	:RETURN aIds;
+:ENDPROC;
+
+:PROCEDURE ListByStatus;
+:PARAMETERS sStatus, sShape;
+:DEFAULT sStatus, "A";
+:DEFAULT sShape, "array";
+	/* The forms' data source, reused on the server: rows as an array, or the dataset shape;
+	:RETURN RunDS("EQUIPMENT_CALIBRATION.EquipmentList", {sStatus}, sShape);
+:ENDPROC;
+
+:PROCEDURE StatusNames;
+	:RETURN RunDS("SAMPLE_LOOKUPS.StatusCodes");
+:ENDPROC;
+
+:PROCEDURE UnitNames;
+:PARAMETERS sUnitType;
+:DEFAULT sUnitType, "LENGTH";
+	:RETURN RunDS("SAMPLE_LOOKUPS.UnitsLookup", {sUnitType});
+:ENDPROC;
+
+:PROCEDURE DataSourceParameters;
+:PARAMETERS sDataSource;
+	:RETURN GetDSParameters(sDataSource);
+:ENDPROC;
+
+:REGION EquipmentSelect;
+select EQUIPMENT_ID, DESCRIPTION, STATUS, INTERVAL_DAYS, LAST_CALIBRATED
+from SAMPLE_EQUIPMENT
+where 1 = 1
+:ENDREGION;

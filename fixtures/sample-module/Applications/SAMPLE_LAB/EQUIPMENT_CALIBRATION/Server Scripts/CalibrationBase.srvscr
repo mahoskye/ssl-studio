@@ -1,0 +1,45 @@
+/* Sample module: base class: one equipment row and its due date.
+   Covers checklist rows: B1 class, B3 member access, B3 member call, C3 ExecFunction.
+   Status: verified in the sandbox by manifests/sample-lab.json;
+
+:CLASS CalibrationBase;
+:DECLARE sEquipmentId, sDescription, nIntervalDays, dLastCalibrated, bFound;
+
+:PROCEDURE Constructor;
+:PARAMETERS sEquipmentId;
+	Me:Load(sEquipmentId);
+:ENDPROC;
+
+:PROCEDURE Load;
+:PARAMETERS sEquipmentId;
+:DECLARE aRow;
+	Me:sEquipmentId := Upper(AllTrim(LimsString(sEquipmentId)));
+	aRow := ExecFunction("EQUIPMENT_CALIBRATION.GetEquipment", {Me:sEquipmentId, .F.});
+	Me:bFound := !Empty(aRow);
+	:IF Me:bFound;
+		Me:sDescription := aRow[1, 2];
+		Me:nIntervalDays := aRow[1, 4];
+		Me:dLastCalibrated := aRow[1, 5];
+	:ELSE;
+		Me:sDescription := "";
+		Me:nIntervalDays := 0;
+		Me:dLastCalibrated := NIL;
+	:ENDIF;
+:ENDPROC;
+
+:PROCEDURE NextDue;
+	:IF Empty(Me:dLastCalibrated);
+		:RETURN Today();
+	:ENDIF;
+	:RETURN Me:dLastCalibrated + Me:nIntervalDays;
+:ENDPROC;
+
+:PROCEDURE IsDue;
+:PARAMETERS dAsOf;
+:DEFAULT dAsOf, Today();
+	:RETURN Me:NextDue() <= dAsOf;
+:ENDPROC;
+
+:PROCEDURE Describe;
+	:RETURN Me:sEquipmentId + ": " + Me:sDescription;
+:ENDPROC;

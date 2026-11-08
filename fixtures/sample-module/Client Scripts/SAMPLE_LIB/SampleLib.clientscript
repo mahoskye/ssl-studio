@@ -1,0 +1,47 @@
+// SAMPLE_LIB.SampleLib: client-side helpers shared by the sample module's forms.
+// Sample module, written fresh. Loaded into a form through its scripts list, so the
+// SampleLib object is a global the code-behind can use.
+
+var SampleLib = {
+    // Left-pad text with a character to a width.
+    padLeft: function (value, width, fill) {
+        var text = String(value);
+        fill = fill || " ";
+        while (text.length < width) {
+            text = fill + text;
+        }
+        return text;
+    },
+
+    // A decimal number, with an optional sign; blanks are not numbers.
+    isNumeric: function (text) {
+        return /^\s*[-+]?(\d+\.?\d*|\.\d+)\s*$/.test(String(text));
+    },
+
+    isWholeNumber: function (text) {
+        return /^\s*\d+\s*$/.test(String(text));
+    },
+
+    // yyyy-mm-dd for a Date, the form the server scripts accept.
+    isoDate: function (date) {
+        return date.getFullYear() + "-" + SampleLib.padLeft(date.getMonth() + 1, 2, "0")
+            + "-" + SampleLib.padLeft(date.getDate(), 2, "0");
+    },
+
+    // A dataset ({Tables: [{Columns, Rows}]}) as an array of column-named objects.
+    datasetRows: function (dataset) {
+        var rows = [];
+        if (!dataset || !dataset.Tables || dataset.Tables.length === 0) {
+            return rows;
+        }
+        var table = dataset.Tables[0];
+        for (var r = 0; r < table.Rows.length; r++) {
+            var row = {};
+            for (var c = 0; c < table.Columns.length; c++) {
+                row[table.Columns[c]] = table.Rows[r][c];
+            }
+            rows.push(row);
+        }
+        return rows;
+    }
+};

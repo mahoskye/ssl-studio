@@ -1,0 +1,5 @@
+:PARAMETERS a, b;
+:IF a > 0 and b > 0;
+	:RETURN .T.;
+:ENDIF;
+:RETURN .F.;

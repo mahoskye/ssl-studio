@@ -1,0 +1,5 @@
+/* The minimal shape: a block-comment banner, no directives (the connection
+   defaults to DATABASE), no parameters. */
+select STATUS_CODE, STATUS_NAME
+from SAMPLE_STATUS
+order by STATUS_CODE

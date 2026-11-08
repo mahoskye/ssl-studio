@@ -1,0 +1,89 @@
+/* Sample module: array helpers.
+   Covers checklist rows: C5 arrays, B3 nested array literal, B3 multiple indices, B3 code block, B2 loop exits, B2 for, B3 increment.
+   Status: verified in the sandbox by manifests/sample-utilities.json;
+
+:PROCEDURE ColumnOf;
+:PARAMETERS aRows, nColumn;
+	:RETURN ExtractCol(aRows, nColumn);
+:ENDPROC;
+
+:PROCEDURE IndexOf;
+:PARAMETERS aItems, xValue;
+	:RETURN AScanExact(aItems, xValue);
+:ENDPROC;
+
+:PROCEDURE Unique;
+:PARAMETERS aItems;
+:DECLARE aOut, i;
+	aOut := {};
+	:FOR i := 1 :TO Len(aItems);
+		:IF AScanExact(aOut, aItems[i]) > 0;
+			:LOOP;
+		:ENDIF;
+		AAdd(aOut, aItems[i]);
+	:NEXT;
+	:RETURN aOut;
+:ENDPROC;
+
+:PROCEDURE SumColumn;
+:PARAMETERS aRows, nColumn;
+:DECLARE nTotal;
+	nTotal := 0;
+	AEval(aRows, {|aRow| nTotal += aRow[nColumn]});
+	:RETURN nTotal;
+:ENDPROC;
+
+:PROCEDURE FirstPositive;
+:PARAMETERS aNumbers;
+:DECLARE i, nFound;
+	nFound := 0;
+	i := 0;
+	:WHILE i < Len(aNumbers);
+		i++;
+		:IF aNumbers[i] <= 0;
+			:LOOP;
+		:ENDIF;
+		nFound := aNumbers[i];
+		:EXITWHILE;
+	:ENDWHILE;
+	:RETURN nFound;
+:ENDPROC;
+
+:PROCEDURE FirstIndexAbove;
+:PARAMETERS aNumbers, nLimit;
+:DECLARE i, nIndex;
+	nIndex := 0;
+	:FOR i := 1 :TO Len(aNumbers);
+		:IF aNumbers[i] > nLimit;
+			nIndex := i;
+			:EXITFOR;
+		:ENDIF;
+	:NEXT;
+	:RETURN nIndex;
+:ENDPROC;
+
+:PROCEDURE Transpose;
+:PARAMETERS aMatrix;
+:DECLARE aOut, nRows, nCols, r, c;
+	nRows := Len(aMatrix);
+	nCols := Len(aMatrix[1]);
+	aOut := {};
+	:FOR c := 1 :TO nCols;
+		AAdd(aOut, {});
+		:FOR r := 1 :TO nRows;
+			AAdd(aOut[c], aMatrix[r, c]);
+		:NEXT;
+	:NEXT;
+	:RETURN aOut;
+:ENDPROC;
+
+:PROCEDURE SampleMatrix;
+	:RETURN {{1, 2, 3}, {4, 5, 6}};
+:ENDPROC;
+
+:PROCEDURE SortedCopy;
+:PARAMETERS aItems;
+:DECLARE aCopy;
+	aCopy := ArrayCalc(aItems, "DUP");
+	:RETURN SortArray(aCopy);
+:ENDPROC;
