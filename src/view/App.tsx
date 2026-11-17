@@ -13,6 +13,8 @@ import { Search } from "./panels/Search";
 import { Palette } from "./panels/Palette";
 import { Reference } from "./panels/Reference";
 import { Health } from "./panels/Health";
+import { Docs } from "./panels/Docs";
+import { setUpProject, useProject } from "./project";
 import { StyleProfile } from "./StyleProfile";
 import { AgentPanel } from "./agent/Agent";
 import { GraphView } from "./graph/GraphView";
@@ -77,6 +79,9 @@ function Panel(props: { id: PanelId }) {
 			<Match when={props.id === "explorer"}>
 				<Explorer />
 			</Match>
+			<Match when={props.id === "docs"}>
+				<Docs />
+			</Match>
 			<Match when={props.id === "objects"}>
 				<Objects />
 			</Match>
@@ -111,7 +116,8 @@ function PanelButton(props: { id: PanelId }) {
 			onClick={() => togglePanel(props.id)}
 			onContextMenu={(e) => (e.preventDefault(), movePanel(props.id))}
 		>
-			{panel().icon}
+			{/* Icons in the private use area are Codicons, drawn with that font. */}
+			{/[\ue000-\uf8ff]/.test(panel().icon) ? <span class="codicon-glyph" aria-hidden="true">{panel().icon}</span> : panel().icon}
 		</button>
 	);
 }
@@ -121,7 +127,11 @@ export function App() {
 	// A changed style profile goes to the language server, which re-checks.
 	createEffect(on(() => JSON.stringify(state.settings.ssl), (_now, before) => before !== undefined && session.configure()));
 	useSymbols();
+	useProject();
 	useLayoutPersistence();
+	createEffect(() => {
+		if (state.settings.layout.right && sideOf(state.rightView) === "left") setState("settings", "layout", "right", false);
+	});
 	const layout = () => state.settings.layout;
 	const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
 	return (
@@ -147,6 +157,15 @@ export function App() {
 				<Splitter axis="x" column={3} onDrag={(d) => setState("settings", "layout", "leftWidth", (w) => clamp(w + d, 160, 700))} />
 			</Show>
 			<main class="center">
+				<Show when={state.project && !state.project.configured && !state.setupDismissed && !state.info?.selftest}>
+					<div class="setup-bar" role="status">
+						<span>This folder is not set up as a project. Setting it up adds project settings, a README and an AGENTS file; nothing is overwritten.</span>
+						<button class="primary" onClick={() => void setUpProject()}>
+							Set up project
+						</button>
+						<button onClick={() => setState("setupDismissed", true)}>Not now</button>
+					</div>
+				</Show>
 				<div class="editors">
 					<Show when={state.workspace} fallback={<Welcome />}>
 						<Show when={state.centerView === "graph"}>

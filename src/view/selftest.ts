@@ -40,6 +40,7 @@ export async function selftest() {
 			await timed("open", () => openFile(file));
 			const doc = await until(() => activeDoc());
 			const editor = await until(() => activeEditor()?.getModel() && activeEditor());
+			editor!.revealLineInCenter(doc!.model.getLineCount());
 			await wait(800);
 			report.tokenClasses = new Set([...document.querySelectorAll(".view-lines span span[class*='mtk']")].map((e) => e.className)).size;
 			report.symbols = (await timed("documentSymbols", () => session.documentSymbols(doc!.model))).length;

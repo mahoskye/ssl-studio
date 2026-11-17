@@ -26,7 +26,7 @@ const SKILLS_STEADY_MS = 2_000;
 export const UNGUARDED_TOOLS = ["worktree_create", "session_move"];
 const UNGUARDED = new RegExp(`\\b(${UNGUARDED_TOOLS.join("|")})\\b`);
 
-type Options = { serverConfig?: string; serverUrl?: string; model?: string };
+type Options = { serverConfig?: string; serverUrl?: string; model?: string; ownModels?: string[] };
 type Waiter = { resolve: (outcome: AgentReply["outcome"]) => void; blocked?: string; tools: number; toolLimit?: number; overLimit?: boolean };
 
 export class Agent {
@@ -227,12 +227,14 @@ export class Agent {
 	async models(): Promise<AgentModel[]> {
 		await this.ensure();
 		const list = ((await this.api("GET", "/api/model"))?.data ?? []) as any[];
+		// Models the user says run on their own machines, whatever the provider.
+		const own = new Set(this.options.ownModels ?? []);
 		return list
 			.map((m) => ({
 				providerID: m.providerID,
 				id: m.modelID ?? m.id,
 				name: m.name ?? m.modelID ?? m.id,
-				local: LOCAL_PROVIDERS.has(String(m.providerID).toLowerCase()),
+				local: LOCAL_PROVIDERS.has(String(m.providerID).toLowerCase()) || own.has(`${m.providerID}/${m.modelID ?? m.id}`),
 				tools: Boolean(m.capabilities?.tools),
 				variants: (m.variants ?? []).map((v: any) => v.id),
 			}))

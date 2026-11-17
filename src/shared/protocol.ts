@@ -8,6 +8,40 @@ export type Workspace = { root: string; name: string };
 
 export type FileText = { path: string; text: string; mtime: number };
 
+/** What `.ssl-studio/project.toml` says, with defaults for what it leaves out. */
+export type Project = {
+	/** False until the folder has a project.toml. */
+	configured: boolean;
+	/** Where project.toml is, or would be. */
+	path: string;
+	name: string;
+	description: string;
+	/** Folders relative to the root. The Docs panel lists the Markdown in `docs` and `schema`. */
+	docs: string;
+	/** What the tables the project uses are. */
+	schema: string;
+	tests: string;
+	/** Scripts and data sources; "." when they are at the root. */
+	code: string;
+	/** Where plans and tidy notes are: always `design` (ADR 0005). */
+	plans: string;
+	agentModel?: string;
+	stylePreset?: "house" | "server";
+	/** Why project.toml could not be read; the defaults apply. */
+	error?: string;
+};
+
+/** One row of the Docs panel. README.md and AGENTS.md are listed even when missing. */
+export type DocFile = {
+	path: string;
+	/** Relative to the group's folder. */
+	name: string;
+	group: "project" | "docs" | "schema" | "plans";
+	exists: boolean;
+	/** Still holds the placeholder text "Set up project" wrote. */
+	untouched?: boolean;
+};
+
 export type Snapshot = { id: string; time: number; size: number };
 
 export type SearchHit = { path: string; line: number; column: number; length: number; text: string };
@@ -49,6 +83,11 @@ export type Settings = {
 	/** Agent: "providerID/modelID" for new sessions; a local model by default. */
 	agentModel?: string;
 	/**
+	 * Models ("providerID/modelID") on a remote provider that run on the user's
+	 * own machines: treated as local, so they need no cost prompt.
+	 */
+	agentOwnModels?: string[];
+	/**
 	 * Extra opencode config for the IDE's private server only (JSON, passed as
 	 * OPENCODE_CONFIG_CONTENT): e.g. a local provider's address. Never written
 	 * to opencode's own config.
@@ -83,6 +122,12 @@ export interface BackendApi {
 	search(query: string, options: { regex?: boolean; caseSensitive?: boolean }): Promise<SearchHit[]>;
 	history(path: string): Promise<Snapshot[]>;
 	snapshot(path: string, id: string): Promise<string>;
+	/** The open folder's project settings (defaults when it has no project.toml). */
+	project(): Promise<Project>;
+	/** Writes project.toml, README.md and AGENTS.md where missing; returns what it created, relative to the root. */
+	setupProject(): Promise<string[]>;
+	/** README.md, AGENTS.md and project.toml, then the Markdown and plans in the project's docs and plans folders. */
+	docs(): Promise<DocFile[]>;
 	settings(): Promise<{ effective: Settings; user: Partial<Settings>; workspace: Partial<Settings> }>;
 	saveSettings(scope: SettingsScope, patch: Partial<Settings>): Promise<Settings>;
 	themes(): Promise<ThemeFile[]>;

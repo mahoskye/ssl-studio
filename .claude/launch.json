@@ -1,0 +1,14 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "ssl-studio-web",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": [
+        "-c",
+        "PATH=\"$HOME/.hutch/npm/electrobun/2.0.5/linux-x64/bin:$PATH\" exec hutch run web fixtures/workspace"
+      ],
+      "port": 5190
+    }
+  ]
+}

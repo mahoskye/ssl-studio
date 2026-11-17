@@ -3,7 +3,7 @@
 // (ADR 0002).
 import { batch } from "solid-js";
 import { createStore, produce } from "solid-js/store";
-import { DEFAULT_SETTINGS, type Info, type LspState, type Settings, type ThemeFile, type Workspace } from "../shared/protocol";
+import { DEFAULT_SETTINGS, type Info, type LspState, type Project, type Settings, type ThemeFile, type Workspace } from "../shared/protocol";
 import { backend, on } from "./backend";
 import { languageFor, monaco } from "./editor/monaco";
 import { session } from "./lsp/session";
@@ -14,7 +14,7 @@ import { isPlanPath } from "./plan/model";
 import { recheckPlans, trackPlan } from "./plan/check";
 
 export type Group = { tabs: string[]; active: string | null; mode?: "text" | "blocks" };
-export type PanelId = "explorer" | "objects" | "palette" | "reference" | "search" | "history" | "health" | "agent";
+export type PanelId = "explorer" | "objects" | "palette" | "reference" | "search" | "history" | "health" | "agent" | "docs";
 /** @deprecated names kept for readers: both sides hold any panel. */
 export type LeftView = PanelId;
 export type RightView = PanelId;
@@ -25,6 +25,10 @@ type Doc = { path: string; model: monaco.editor.ITextModel; savedVersion: number
 
 export const [state, setState] = createStore({
 	workspace: null as Workspace | null,
+	/** The open folder's project settings; null until a folder is open. */
+	project: null as Project | null,
+	/** The "set up project" offer was turned down for this folder. */
+	setupDismissed: false,
 	info: null as Info | null,
 	lsp: { state: "stopped" } as LspState,
 	settings: DEFAULT_SETTINGS as Settings,
@@ -40,6 +44,8 @@ export const [state, setState] = createStore({
 	centerView: "editors" as "editors" | "graph",
 	/** Plans shown as text; a plan opens as its chart. */
 	planText: {} as Record<string, boolean>,
+	/** Markdown shown as text; a Markdown file opens rendered. */
+	mdText: {} as Record<string, boolean>,
 	messages: [] as Message[],
 	output: [] as string[],
 	cursor: { line: 1, column: 1 },
@@ -90,12 +96,19 @@ export async function openFolder(path?: string) {
 		setState("activeGroup", 0);
 		setState("dirty", {});
 		setState("treeVersion", (v) => v + 1);
+		setState("project", null);
+		setState("setupDismissed", false);
 	});
-	await loadSettings();
+	await Promise.all([loadSettings(), loadProject()]);
 	setState("info", await backend.info());
 	setState("lsp", await backend.lspState());
 	void session.start(workspace.root);
 	log(`opened ${workspace.root}`);
+}
+
+export async function loadProject() {
+	const project = await guarded(() => backend.project());
+	if (project) setState("project", project);
 }
 
 export async function loadSettings() {
@@ -240,6 +253,8 @@ export async function save(path = activePath()) {
 	});
 	session.saved(doc.model);
 	historyChanged.fire(path);
+	// project.toml chooses the docs folders, and the model and style for this project.
+	if (state.project && path === canonical(state.project.path)) await Promise.all([loadProject(), loadSettings()]);
 }
 
 export const historyChanged = (() => {

@@ -14,6 +14,7 @@ import { askAbout } from "./agent/Agent";
 import { startTidy } from "./agent/tidy";
 import { joinPath } from "../shared/paths";
 import { isPlanPath, newPlan, printPlan } from "./plan/model";
+import { isMarkdown, newDoc, setUpProject } from "./project";
 import { activePath, closeTab, notify, openFile, openFolder, revert, save, saveAll, setState, split, state } from "./state";
 
 export type Command = { id: string; label: string; keys?: string; run: () => void };
@@ -29,7 +30,11 @@ export const commands: Command[] = [
 	{ id: "revert", label: "Revert file to disk", run: () => activePath() && void revert(activePath()!) },
 	{ id: "close", label: "Close editor", keys: "Ctrl+W", run: () => activePath() && void closeTab(activePath()!) },
 	{ id: "split", label: "Split editor", keys: "Ctrl+\\", run: split },
-	{ id: "blocks", label: "Toggle blocks view (a plan: its chart)", keys: "Ctrl+Shift+B", run: toggleVisual },
+	{ id: "blocks", label: "Toggle blocks view (a plan: its chart; Markdown: rendered)", keys: "Ctrl+Shift+B", run: toggleVisual },
+	{ id: "setup-project", label: "Set up project (settings, README, AGENTS)", run: () => void setUpProject() },
+	{ id: "project-settings", label: "Open project settings (project.toml)", run: () => void openProjectSettings() },
+	{ id: "docs", label: "Show Docs", run: () => showPanel("docs") },
+	{ id: "new-doc", label: "New document…", run: () => void newDoc() },
 	{ id: "new-plan", label: "New plan…", run: () => void newPlanCommand() },
 	{ id: "copy-designer", label: "Copy for Designer (selection, procedure or file, formatted)", keys: "Ctrl+Shift+C", run: () => void copyForDesigner() },
 	{ id: "wrap-region", label: "Wrap the selected lines in a region…", run: () => void wrapInRegion() },
@@ -91,7 +96,14 @@ async function wrapInRegion() {
 function toggleVisual() {
 	const path = activePath();
 	if (isPlanPath(path)) setState("planText", path!, (text) => !text);
+	else if (isMarkdown(path)) setState("mdText", path!, (text) => !text);
 	else setState("groups", state.activeGroup, "mode", (m) => (m === "blocks" ? "text" : "blocks"));
+}
+
+async function openProjectSettings() {
+	if (!state.project) return notify("Open a folder first.");
+	if (!state.project.configured) return setUpProject();
+	await openFile(state.project.path);
 }
 
 /** A new plan in `design/`, beside the tidy notes, opened as its chart (ADR 0005). */

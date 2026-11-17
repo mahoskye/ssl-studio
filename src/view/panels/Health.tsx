@@ -1,12 +1,14 @@
-// The current script against the house style: size, procedures, findings.
+// The project's documents, and the current script against the house style:
+// size, procedures, findings.
 import { For, Show } from "solid-js";
 import { level } from "../../shared/houseStyle";
 import { monaco } from "../editor/monaco";
 import { diagnostics } from "../lsp/session";
 import { size } from "../StatusBar";
-import { activeDoc, activePath, setState, state } from "../state";
+import { activeDoc, activePath, openFile, setState, state } from "../state";
 import { symbols } from "./Objects";
 import { openStyleProfile } from "../StyleProfile";
+import { docs, setUpProject } from "../project";
 
 const PROCEDURE = new Set([monaco.languages.SymbolKind.Function, monaco.languages.SymbolKind.Method]);
 
@@ -51,6 +53,23 @@ export function Health() {
 					⚙
 				</button>
 			</div>
+			<section>
+				<h3>Project</h3>
+				<For each={docs().filter((d) => d.group === "project")}>
+					{(file) => (
+						<div
+							class="meter-row compact clickable"
+							title={file.exists ? file.path : "Click to create it."}
+							onClick={() => (file.exists ? void openFile(file.path) : void setUpProject())}
+						>
+							<span>{file.name}</span>
+							<Show when={file.exists && !file.untouched} fallback={<span class="meta warn">⚠ {file.exists ? "template" : "missing"}</span>}>
+								<span class="meta">✓</span>
+							</Show>
+						</div>
+					)}
+				</For>
+			</section>
 			<Show when={activePath() && size()} fallback={<p class="hint">Open an SSL file.</p>}>
 				<section>
 					<h3>Size (decision 0006)</h3>

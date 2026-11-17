@@ -128,6 +128,10 @@ release build, installer, self-test and opencode 2.2.5 pass.
 
 ## Later
 
+- **Projects and docs: done in a first version (2026-11-09).** Project settings in
+  `.ssl-studio/project.toml`, "Set up project" for the settings, README and AGENTS
+  files, a Docs panel, Markdown rendered for reading, and missing documents flagged
+  in Health ([ADR 0006](adr/0006-a-project-has-settings-a-readme-and-an-agents-file.md)).
 - **Planning mode: all four stages are done (2026-11-04).** Design a process or script as
   a flow chart, let an agent ask what it leaves undecided, write the spec and build from
   it, review the result, then follow nodes to their code, see where chart and code differ,

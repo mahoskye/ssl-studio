@@ -9,6 +9,8 @@ import { BlocksView } from "../blocks/BlocksView";
 import { isPlanPath } from "../plan/model";
 import { PlanView } from "../plan/PlanView";
 import { baseName } from "../../shared/paths";
+import { isMarkdown } from "../project";
+import { MarkdownView } from "./MarkdownView";
 
 const viewStates = new Map<string, monaco.editor.ICodeEditorViewState | null>();
 export const editors: monaco.editor.IStandaloneCodeEditor[] = [];
@@ -24,6 +26,8 @@ export function EditorGroup(props: { index: number }) {
 	const isPlan = () => isPlanPath(group().active);
 	const showChart = () => isPlan() && !state.planText[group().active!];
 	const showBlocks = () => group().mode === "blocks" && !isPlan();
+	const isDoc = () => isMarkdown(group().active);
+	const showRendered = () => isDoc() && !state.mdText[group().active!];
 
 	onMount(() => {
 		editor = monaco.editor.create(host, {
@@ -129,6 +133,16 @@ export function EditorGroup(props: { index: number }) {
 						</button>
 					</div>
 				</Show>
+				<Show when={isDoc()}>
+					<div class="mode-switch" role="group" aria-label="View">
+						<button classList={{ on: !showRendered() }} onClick={() => setState("mdText", group().active!, true)}>
+							Text
+						</button>
+						<button classList={{ on: showRendered() }} onClick={() => setState("mdText", group().active!, false)}>
+							Read
+						</button>
+					</div>
+				</Show>
 			</div>
 			<Show when={group().active && group().active === activePath() && symbols().length}>
 				<nav class="breadcrumbs" aria-label="Breadcrumbs">
@@ -152,7 +166,10 @@ export function EditorGroup(props: { index: number }) {
 			<Show when={showChart() && group().active} keyed>
 				{(path) => <PlanView path={path} group={props.index} />}
 			</Show>
-			<div class="editor-row" classList={{ hidden: showBlocks() || showChart() }}>
+			<Show when={showRendered() && group().active} keyed>
+				{(path) => <MarkdownView path={path} />}
+			</Show>
+			<div class="editor-row" classList={{ hidden: showBlocks() || showChart() || showRendered() }}>
 				<Show when={group().active && group().active === activePath() && lineCount() > 0}>
 					<div class="region-strip" aria-label="Regions">
 						<For each={flatRegions(symbols())}>

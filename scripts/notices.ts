@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 const root = join(import.meta.dir, "..");
 // Vite is here for the small helpers it copies into the bundle.
-const packages = ["monaco-editor", "solid-js", "vscode-textmate", "vscode-oniguruma", "elkjs", "vite"];
+const packages = ["monaco-editor", "solid-js", "vscode-textmate", "vscode-oniguruma", "elkjs", "marked", "dompurify", "vite"];
 const fence = (text: string) => `\`\`\`\n${text.trim()}\n\`\`\`\n`;
 const parts = ["# Third-party notices\n", "SSL Studio is MIT licensed (LICENSE). It ships the following.\n"];
 for (const name of packages) {

@@ -7,7 +7,7 @@ import { loadLanguageConfiguration } from "./editor/monaco";
 import "./editor/opener";
 import { loadGrammar } from "./editor/textmate";
 import { registerProviders, session } from "./lsp/session";
-import { loadSettings, setState, state } from "./state";
+import { loadProject, loadSettings, setState, state } from "./state";
 import { applyTheme, resolveTheme } from "./themes/themes";
 
 export const errors: string[] = [];
@@ -26,7 +26,7 @@ async function start() {
 	if (workspace) {
 		setState("workspace", workspace);
 		setState("lsp", await backend.lspState());
-		await loadSettings();
+		await Promise.all([loadSettings(), loadProject()]);
 		void session.start(workspace.root);
 	}
 	render(() => <App />, document.getElementById("app")!);

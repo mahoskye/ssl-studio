@@ -1,10 +1,12 @@
-// User settings in ~/.config/ssl-studio, workspace overrides in
-// <workspace>/.ssl-studio, merged with the workspace winning.
+// User settings in ~/.config/ssl-studio, then the project's own
+// (.ssl-studio/project.toml), then what the IDE saved for this workspace
+// (.ssl-studio/settings.json): each later one wins.
 import { mkdirSync, readdirSync, existsSync } from "node:fs";
 import { basename, join } from "node:path";
 import { DEFAULT_SETTINGS, type Settings, type SettingsScope, type ThemeFile } from "../shared/protocol";
 import { HOUSE_STYLE } from "../shared/styleProfile";
 import { dirs, workspaceDir } from "./paths";
+import { projectSettings, readProject } from "./project";
 
 async function readJson<T>(path: string, fallback: T): Promise<T> {
 	try {
@@ -44,8 +46,10 @@ export class SettingsStore {
 
 	async load() {
 		const user = await readJson<Partial<Settings>>(this.path("user"), {});
-		const workspace = this.root() ? await readJson<Partial<Settings>>(this.path("workspace"), {}) : {};
-		return { effective: merge(user, workspace), user, workspace };
+		const root = this.root();
+		const workspace = root ? await readJson<Partial<Settings>>(this.path("workspace"), {}) : {};
+		const project = root ? projectSettings(await readProject(root)) : {};
+		return { effective: merge(user, project, workspace), user, workspace };
 	}
 
 	async save(scope: SettingsScope, patch: Partial<Settings>) {

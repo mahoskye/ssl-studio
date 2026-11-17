@@ -27,6 +27,11 @@ the source of truth.
   [`ssl-style-guide`](https://github.com/mahoskye/ssl-style-guide), run
   through opencode, with every change shown as a diff and checked by the
   language server before you accept it.
+- **Projects and docs:** "Set up project" gives a folder its settings
+  (`.ssl-studio/project.toml`), a `README.md`, an `AGENTS.md`, and folders
+  for docs, schema, tests and code. The Docs panel lists the two files with
+  the Markdown under `docs/` and `schema/`, rendered for reading, and
+  Health says which are missing or still the template.
 - **House style:** the team's Designer header, procedure doc block, spacing
   and script size limit built into templates, the formatter and a size meter.
 
@@ -77,6 +82,12 @@ config, put opencode config JSON in the `agentServerConfig` setting
   "agentModel": "ollama/qwen3:14b"
 }
 ```
+
+A model you host yourself behind a remote provider (a gateway of your own)
+looks paid to the IDE. Choose it in the Agent panel and answer "It runs on my
+own machine": it is added to `agentOwnModels` in your settings, counts as
+local, and is not asked about again. A project can name its model in
+`.ssl-studio/project.toml` (`[agent] model = "provider/model"`).
 
 Tidy runs the style guide's six `ssl-tidy-*` steps on the open file. Each
 step's result opens as a diff with checks (no new findings, procedures and

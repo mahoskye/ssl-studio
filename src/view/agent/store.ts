@@ -63,10 +63,15 @@ export const currentModel = () => {
 export async function chooseModel(ref: string) {
 	const model = agent.models.find((m) => `${m.providerID}/${m.id}` === ref);
 	if (model && !model.local) {
-		const answer = await choose(`${model.name} (${model.providerID}) is not a local model and may cost money. Use it for new agent sessions?`, ["Use it"]);
-		if (answer !== "Use it") return;
+		const MINE = "It runs on my own machine";
+		const answer = await choose(`${model.name} (${model.providerID}) is not a local model and may cost money. Use it for new agent sessions?`, ["Use it", MINE]);
+		if (answer !== "Use it" && answer !== MINE) return;
+		// Remembered for this user: the model counts as local from now on, and is not asked about again.
+		if (answer === MINE) await saveSetting({ agentOwnModels: [...new Set([...(state.settings.agentOwnModels ?? []), ref])] });
 	}
-	await saveSetting({ agentModel: ref || undefined });
+	// A project that names its model wins over the user's own setting, so the choice is kept with the workspace there.
+	await saveSetting({ agentModel: ref || undefined }, state.project?.agentModel ? "workspace" : "user");
+	setAgent("models", (await backend.agent("models", [])) as AgentModel[]);
 	setAgent("chatSession", null);
 }
 

@@ -4,6 +4,7 @@ import { statSync } from "node:fs";
 import type { BackendApi, BackendEvents, Info, LspState, Workspace } from "../shared/protocol";
 import { History } from "./history";
 import { LspProcess } from "./lsp";
+import { listDocs, readProject, setupProject } from "./project";
 import { recent, SettingsStore } from "./settings";
 import { findLsp, findOpencode } from "./tools";
 import { WorkspaceFiles } from "./workspace";
@@ -102,6 +103,9 @@ export function createBackend(host: Host, initial?: string) {
 		search: (query, options) => need().search(query, options),
 		history: async (path) => history?.list(need().inside(path)) ?? [],
 		snapshot: (path, id) => history!.read(need().inside(path), id),
+		project: async () => readProject(need().root),
+		setupProject: async () => setupProject(need().root),
+		docs: async () => listDocs(need(), await readProject(need().root)),
 		settings: () => settings.load(),
 		saveSettings: (scope, patch) => settings.save(scope, patch),
 		themes: () => settings.themes(),
@@ -117,7 +121,7 @@ export function createBackend(host: Host, initial?: string) {
 		lspState: async () => lspState,
 		agent: async (method, args) => {
 			const { effective } = await settings.load();
-			agent.configure({ serverConfig: effective.agentServerConfig, serverUrl: effective.agentServerUrl, model: effective.agentModel });
+			agent.configure({ serverConfig: effective.agentServerConfig, serverUrl: effective.agentServerUrl, model: effective.agentModel, ownModels: effective.agentOwnModels });
 			return agent.call(method, args);
 		},
 		clipboard: async (text) => {

@@ -19,6 +19,17 @@ export const dirName = (path: string) => {
 /** Joins with the separator the base path already uses. */
 export const joinPath = (base: string, ...parts: string[]) => [base.replace(/[\\/]+$/, ""), ...parts].join(base.includes("\\") && !base.includes("/") ? "\\" : "/");
 
+/** `relative` applied to `dir`, "." and ".." included, with the separator `dir` uses. */
+export function resolvePath(dir: string, relative: string): string {
+	const parts = dir.replace(/[\\/]+$/, "").split(/[\\/]/);
+	for (const part of relative.split(/[\\/]/)) {
+		if (!part || part === ".") continue;
+		if (part !== "..") parts.push(part);
+		else if (parts.length > 1) parts.pop();
+	}
+	return parts.join(dir.includes("\\") && !dir.includes("/") ? "\\" : "/");
+}
+
 export function isInside(root: string, path: string): boolean {
 	const r = norm(root);
 	const p = norm(path);

@@ -6,13 +6,14 @@ import { setState, state, type PanelId } from "../state";
 export type Side = "left" | "right";
 export const PANELS: { id: PanelId; icon: string; title: string; home: Side }[] = [
 	{ id: "explorer", icon: "🗀", title: "Explorer (Ctrl+Shift+E)", home: "left" },
+	{ id: "docs", icon: "\ueb9c", title: "Docs: README, AGENTS and the project's documents", home: "left" },
 	{ id: "objects", icon: "◇", title: "Objects", home: "left" },
 	{ id: "palette", icon: "▤", title: "Palette", home: "left" },
-	{ id: "reference", icon: "📖", title: "Reference", home: "left" },
+	{ id: "reference", icon: "\ueaa4", title: "Reference", home: "left" },
 	{ id: "search", icon: "⌕", title: "Search (Ctrl+Shift+F)", home: "left" },
 	{ id: "history", icon: "⟲", title: "Local history", home: "left" },
 	{ id: "agent", icon: "✦", title: "Agent", home: "right" },
-	{ id: "health", icon: "♥", title: "Health", home: "right" },
+	{ id: "health", icon: "♥", title: "Health", home: "left" },
 ];
 
 export const sideOf = (id: PanelId): Side => state.settings.layout.dock?.[id] ?? PANELS.find((p) => p.id === id)!.home;
