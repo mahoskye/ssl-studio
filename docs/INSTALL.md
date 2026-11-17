@@ -64,11 +64,12 @@ hutch run selftest
 ```
 
 Opens the app on `fixtures/workspace`, checks highlighting, the language
-server, symbols, diagnostics, hover and format with undo, writes
-`selftest.json` and quits. Its settings go to `.selftest/`, not yours. `hutch run selftest-cycle`
+server, symbols, diagnostics, hover, format with undo and what the Docs panel
+lists, writes `selftest.json` and quits. Its settings go to `.selftest/`, not yours. `hutch run selftest-cycle`
 does the same and then drives a plan's whole life in the window (build, follow a link, see drift,
 change the chart and rebuild, write the tests), on a copy of the workspace, with the recorded
-fake in place of a model. It costs nothing.
+fake in place of a model. On that copy it also presses "Set up project" and reads the documents
+that makes, rendered and as text. It costs nothing.
 
 ## A local model through Ollama
 

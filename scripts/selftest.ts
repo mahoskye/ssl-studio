@@ -42,6 +42,7 @@ if (!(await file.exists())) {
 	process.exit(1);
 }
 const result = await file.json();
-if (cycle) console.log(JSON.stringify(result.cycle));
+console.log(JSON.stringify({ docs: result.docs }));
+if (cycle) console.log(JSON.stringify({ cycle: result.cycle, docsSetup: result.docsSetup }));
 console.log(`selftest: ${result.ok ? "ok" : "FAILED"}${result.errors?.length ? ` (${result.errors.length} errors)` : ""}`);
 process.exit(result.ok ? 0 : 1);

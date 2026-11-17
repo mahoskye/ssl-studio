@@ -101,8 +101,16 @@ export async function selftest() {
 	} catch (e: any) {
 		errors.push(String(e?.stack ?? e));
 	}
+	const docs = await import("./selftestDocs");
+	try {
+		report.docs = await docs.selftestDocs();
+	} catch (e: any) {
+		errors.push(String(e?.stack ?? e));
+	}
 	const plan = state.info?.selftestCycle ? (await backend.files()).find(isPlanPath) : undefined;
 	if (plan) report.cycle = await import("./selftestCycle").then((m) => m.selftestCycle(plan));
+	// Setting a project up writes files, so only on the cycle run’s copy of the workspace.
+	if (state.info?.selftestCycle) report.docsSetup = await docs.selftestDocsSetup();
 	report.timingsMs = timings;
 	// Monaco cancels work when a diff or an editor closes before it finishes, as an accepted review does.
 	report.errors = errors.filter((e) => !/^(Canceled|no diff result available)/.test(e));
@@ -119,6 +127,7 @@ export async function selftest() {
 		(report.callGraph === undefined || report.callGraphResolvesExecFunction === true) &&
 		(report.scriptCalls === undefined || (Number((report.scriptCalls as any).procedures) > 0 && Number((report.scriptCalls as any).edges) > 0)) &&
 		(report.procedureSpans === undefined || (report.procedureSpans as any[])[0]?.startLine === 0) &&
-		(!state.info?.selftestCycle || Boolean(report.cycle && !(report.cycle as any).failed));
+		Boolean(report.docs && !(report.docs as any).failed) &&
+		(!state.info?.selftestCycle || Boolean(report.cycle && !(report.cycle as any).failed && report.docsSetup && !(report.docsSetup as any).failed));
 	await backend.selftestDone(report);
 }
