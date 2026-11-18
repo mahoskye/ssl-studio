@@ -142,6 +142,55 @@ release build, installer, self-test and opencode 2.2.5 pass.
 - Run a procedure in the sandbox through a configured command (the sandbox is
   private; the IDE would only call it).
 
+## Review of 2026-11-18
+
+An adversarial review of the demo project and a UI and accessibility audit of
+the app, then everything they recommended. The rules it left are
+[ADR 0009](adr/0009-nothing-is-lost-or-destroyed-without-a-say.md) (nothing
+is lost or destroyed without a say) and
+[ADR 0010](adr/0010-everything-works-from-the-keyboard.md) (everything works
+from the keyboard, and says what it is).
+
+- **Lost work and breakage:** Blocks no longer breaks on a file that is not
+  SSL; a failed save keeps the tab; opening a folder, and closing the window
+  (in a browser and in the desktop app, where `hutch run selftest-close`
+  presses the real close button, on Linux and on Windows 11), ask about
+  unsaved files; a file changed on disk is compared
+  before it is overwritten; "Set up project" lists what it will create.
+- **Keyboard and focus:** one dialog that holds and returns focus; lists,
+  trees, tabs, Blocks, the plan chart, the call graph and the splitters all
+  work without a mouse.
+- **Legibility:** both themes pass a contrast test; one scale for type,
+  spacing and corners; an interface size setting; the code's font size
+  reaches Blocks, diffs and rendered documents.
+- **The demo project:** review fixes, a report script, an include, a rough
+  script to tidy, a spec and a build record for its plan.
+- **Classes:** Blocks draws a class's head as one card and a procedure with
+  its doc block as one; the call graph marks class files and draws
+  inheritance. Both use what the server's syntax tree already marks.
+- **Classes in the call graph (L4).** Built in the language server
+  (mahoskye/starlims-lsp#373, open for review, not yet released): an edge for an
+  object created, a method called and a class inherited. The graph draws
+  each with its own line, names them in its key and its list, and counts
+  them apart from calls. The pin stays at 0.30.0 until a release has them.
+- **Left for the language server** ([LSP-REQUESTS](LSP-REQUESTS.md), filed
+  as mahoskye/starlims-lsp#370 to #372): the
+  tables a script uses (L6), the required exception to "prefer unannotated
+  procedures" (L7), and what running the demo showed the server accepts and
+  STARLIMS does not (L8).
+- **The demo project runs.** `bun scripts/demo-sandbox.ts` runs its tests in
+  the SSL sandbox runner (a separate, private compatibility runtime). The
+  first run found defects that validation had not.
+- **A narrow window keeps the panel you asked for.** With room for one side
+  panel of two, the one opened last is shown; before, the left one always
+  won and the other's button looked pressed with nothing on screen. A panel
+  with no room is not marked as open, and its button brings it back.
+- **The Agent panel shows what is so.** After a reload it reads whether
+  opencode is already running, and no longer says it is not.
+- **The agent says why a turn failed.** A turn that fails before the model
+  answers used to show "failed" and nothing else. It now shows opencode's
+  reason and what to check, in the panel and in Output.
+
 ## On hold
 
 - **Forms, client scripts and code-behind (2026-11-17).** Wanted eventually, in

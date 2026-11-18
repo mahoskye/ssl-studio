@@ -91,8 +91,8 @@ this order:
   read.
 - The check cannot see "one fact in a cell" or "the rows are the same kind of
   thing". A reviewer does.
-- The IDE does not yet flag a table that breaks the rule in a project's own
-  docs. The check is written so that Health or Problems can call it; that is
-  not built.
+- The IDE flags a table that breaks the rule in any Markdown file it has
+  open, as information in Problems (2026-11-18). It is advice: a README that
+  came from somewhere else is not this project's to fix.
 - None of the 23 tables in this repository's other documents meets the text
   limits today. They are held to the column limit only until they are edited.

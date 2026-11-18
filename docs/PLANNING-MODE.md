@@ -85,7 +85,8 @@ A plan is one file, kept with the project in `design/` beside the tidy notes:
   code, with the same colour in the chart, blocks and graph.
 - **No positions are stored.** ELK lays the chart out, as in graph mode. Diffs
   stay small, and there is nothing to tidy by hand. Keyboard first: Enter adds
-  the next step, Tab adds a branch, double-click edits the words.
+  the next step, B adds a branch, double-click edits the words. Tab is left
+  alone: it moves on to the next part of the window (ADR 0010).
 - **A check with no agent and no cost:** unreachable nodes, dead ends, a decision
   with one way out, unlabelled branches, a `ref` the server cannot resolve. These
   show in Problems like any other finding.
@@ -256,7 +257,8 @@ Each step is usable before the next starts.
 
 1. **P1, the chart. Done (2026-11-03).** File format, Chart and Text views,
    keyboard editing, the no-agent check, drag from Objects. No model. New plan is
-   in the command palette. Keys: Enter adds the next step, Tab a branch, F2 edits
+   in the command palette. Keys: Enter adds the next step, B a branch (Tab until
+   2026-11-18, when it was given back to moving focus), F2 edits
    the words, D switches step and decision, C connects, Delete removes, arrows
    move, Ctrl+Z undoes.
 2. **Spike, before P2. Done (2026-11-03),** [results](spikes/planning-mode.md). A

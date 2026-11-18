@@ -64,6 +64,7 @@ Other scripts:
 | `hutch run test` | Unit tests (`bun test`) |
 | `hutch run check` | Type check |
 | `hutch run selftest` | Opens the app on `fixtures/workspace`, checks the editor and language server, writes `selftest.json`, quits |
+| `hutch run selftest-close` | Leaves an edit unsaved and presses the window's close button: the app must ask first (Linux with X11, Windows) |
 
 A second fixture, `fixtures/sample-module`, is a whole module in STARLIMS export layout (server scripts, data sources, forms with code-behind, client scripts, resources, sidecars, and deliberately broken scripts); `hutch run start fixtures/sample-module` opens it. Its README says what the IDE does and does not open yet.
 | `hutch run build` | A release build |
@@ -99,13 +100,24 @@ edits the file in the editor, and you save it.
 | Key | Does |
 | --- | --- |
 | Ctrl+O | Open folder |
-| Ctrl+P / Ctrl+Shift+P / Ctrl+T | Go to file / command palette / symbol in workspace |
+| Ctrl+P, Ctrl+T | Go to file, go to symbol |
+| Ctrl+Shift+P | All commands |
 | Ctrl+S, Ctrl+Alt+S | Save (formats the changed procedures), save all |
+| Ctrl+W, Ctrl+Shift+T | Close tab, reopen the last closed tab |
+| Ctrl+PageDown, Ctrl+PageUp | Next tab, previous tab |
 | Ctrl+\\ | Split editor |
-| Ctrl+Shift+F | Search the workspace |
+| Ctrl+1, Ctrl+0 | Focus the editor, focus the side panel |
+| Ctrl+Shift+B | Blocks view (a plan: its chart; Markdown: rendered) |
+| Ctrl+Shift+G | Call graph |
+| Ctrl+Shift+F, Ctrl+Shift+E | Show Search, show Explorer |
 | Ctrl+B, Ctrl+J | Side bar, bottom panel |
-| Ctrl+Shift+A | Ask the agent about the selection |
-| F1 | Editor commands |
+| Ctrl+Shift+H | Ask the agent about the selection |
+| Ctrl+=, Ctrl+-, Ctrl+Shift+0 | Interface size: larger, smaller, reset |
+| F1 | The text editor's own commands |
+
+Every shortcut can be changed in Settings (Ctrl+,). The lists and trees, the
+editor tabs, Blocks, the plan chart and the call graph all work with the arrow
+keys; Tab moves between them ([ADR 0010](docs/adr/0010-everything-works-from-the-keyboard.md)).
 
 ## License
 

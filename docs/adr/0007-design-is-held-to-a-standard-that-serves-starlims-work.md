@@ -37,8 +37,10 @@ aim, developing functionality for STARLIMS (2026-11-17). The practices under
   in the light and the dark theme.
 - **The work gets the room.** Code and documents get the space and the
   contrast; the frame around them stays quiet.
-- **One system.** Colours come from the theme's variables, and sizes and
-  spacing from the scales already in `style.css`. A new value needs a reason.
+- **One system.** Colours come from the theme's variables, and type, spacing
+  and corners from the scales at the top of `style.css` (`--text-*`,
+  `--space-*`, `--radius-*`, there since 2026-11-18; before that the sheet had
+  literal values and no scale). A new value needs a reason.
 - **Nothing for show.** Beauty here is order, proportion and restraint. A
   flourish that does not help the reader is left out, and so is a design change
   that does not help the STARLIMS work.
@@ -49,8 +51,10 @@ aim, developing functionality for STARLIMS (2026-11-17). The practices under
 
 - A change that can be seen is looked at in the running app before it is called
   done, and what was looked at is said: which layout, which theme.
-- A rule a machine can check gets a test, so it cannot quietly lapse
-  (`test/docTables.test.ts` is the first).
+- A rule a machine can check gets a test, so it cannot quietly lapse:
+  `test/docTables.test.ts` (tables), `test/contrast.test.ts` (both themes
+  against WCAG contrast), `test/examples.test.ts` (the demo project against
+  the pinned language server).
 - A rule a machine cannot check is written down specifically enough for a
   reviewer to say yes or no.
 

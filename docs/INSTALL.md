@@ -71,6 +71,12 @@ change the chart and rebuild, write the tests), on a copy of the workspace, with
 fake in place of a model. On that copy it also presses "Set up project" and reads the documents
 that makes, rendered and as text. It costs nothing.
 
+`hutch run selftest-close` checks that closing the window never loses work. It makes an edit on a
+copy of the workspace, leaves it unsaved, and presses the window's close button from outside. The
+window has to stay and ask; cancelled, the edit is still there; asked again and told to save, the
+app saves the file and closes. It runs on Linux with X11 and `xdotool`, and on Windows; it is not
+written for macOS.
+
 ## A local model through Ollama
 
 Ollama's default context is 4096 tokens, and it drops what does not fit without an
