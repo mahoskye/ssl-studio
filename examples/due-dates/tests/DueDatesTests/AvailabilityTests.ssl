@@ -1,0 +1,188 @@
+/********************************************************************************
+Description.. : Unit tests for DueDates.Availability. No database is read or written.
+                Run DueDatesTests.AvailabilityTests.RunTests and read the server log.
+Parameters... : -
+Returns...... : -
+Author....... :
+Date......... : 2026-11-17
+********************************************************************************
+_______________________________________________________________________________
+Modification. :
+Author....... :
+Date......... :
+_______________________________________________________________________________
+********************************************************************************/;
+
+/*
+ * Procedure: RunTests
+ * Description: Runs every test and logs how many passed.
+ * Returns: one {sLabel, bPassed} row for each test
+;
+:PROCEDURE RunTests;
+	:DECLARE aResults, nIndex, nPassed;
+
+	aResults := {};
+	AAdd(aResults, DoProc("TestAvailableNoOutages"));
+	AAdd(aResults, DoProc("TestUnavailableLastDay"));
+	AAdd(aResults, DoProc("TestAvailableOtherInstrument"));
+	AAdd(aResults, DoProc("TestAvailableNoInstrument"));
+	AAdd(aResults, DoProc("TestAvailableExactId"));
+	AAdd(aResults, DoProc("TestNextAvailableSameDay"));
+	AAdd(aResults, DoProc("TestNextAvailableAfterOutage"));
+	AAdd(aResults, DoProc("TestOutageDaysOverlapOnce"));
+	AAdd(aResults, DoProc("TestOutageDaysReversedSpan"));
+
+	nPassed := 0;
+
+	:FOR nIndex := 1 :TO ALen(aResults);
+		:IF aResults[nIndex][2];
+			nPassed += 1;
+		:ENDIF;
+	:NEXT;
+
+	InfoMes("[INFO] AvailabilityTests", LimsString(nPassed) + " of "
+	        + LimsString(ALen(aResults)) + " passed");
+
+	:RETURN aResults;
+:ENDPROC;
+
+:PROCEDURE TestAvailableNoOutages;
+	/* Empty case: with no outages listed, an instrument is available;
+	:DECLARE aArgs, bActual;
+
+	aArgs := {"BAL-01", DateFromNumbers(2026, 11, 18), {}};
+	bActual := ExecFunction("DueDates.Availability.IsAvailable", aArgs);
+
+	:RETURN DoProc("CheckEqual", {"No outages, always available", .T., bActual});
+:ENDPROC;
+
+:PROCEDURE TestUnavailableLastDay;
+	/* Thursday 19 is the last day of the BAL-01 outage, and that day is included;
+	:DECLARE aArgs, bActual;
+
+	aArgs := {"BAL-01", DateFromNumbers(2026, 11, 19), DoProc("SampleOutages")};
+	bActual := ExecFunction("DueDates.Availability.IsAvailable", aArgs);
+
+	:RETURN DoProc("CheckEqual", {"Out on the last day of an outage", .F., bActual});
+:ENDPROC;
+
+:PROCEDURE TestAvailableOtherInstrument;
+	/* HPLC-02 is not held up by the BAL-01 outage on Wednesday 18;
+	:DECLARE aArgs, bActual;
+
+	aArgs := {"HPLC-02", DateFromNumbers(2026, 11, 18), DoProc("SampleOutages")};
+	bActual := ExecFunction("DueDates.Availability.IsAvailable", aArgs);
+
+	:RETURN DoProc("CheckEqual", {"Another instrument is not affected", .T., bActual});
+:ENDPROC;
+
+:PROCEDURE TestAvailableNoInstrument;
+	/* Work that needs no instrument ignores every outage;
+	:DECLARE aArgs, bActual;
+
+	aArgs := {"", DateFromNumbers(2026, 11, 18), DoProc("SampleOutages")};
+	bActual := ExecFunction("DueDates.Availability.IsAvailable", aArgs);
+
+	:RETURN DoProc("CheckEqual", {"No instrument, always available", .T., bActual});
+:ENDPROC;
+
+:PROCEDURE TestAvailableExactId;
+	/* BAL is not BAL-01: an id that is only the start of another does not match;
+	:DECLARE aArgs, bActual;
+
+	aArgs := {"BAL", DateFromNumbers(2026, 11, 18), DoProc("SampleOutages")};
+	bActual := ExecFunction("DueDates.Availability.IsAvailable", aArgs);
+
+	:RETURN DoProc("CheckEqual", {"Instrument ids match exactly", .T., bActual});
+:ENDPROC;
+
+:PROCEDURE TestNextAvailableSameDay;
+	/* Tuesday 17 is before the outage, so BAL-01 is available that same day;
+	:DECLARE aArgs, dActual;
+
+	aArgs := {"BAL-01", DateFromNumbers(2026, 11, 17), DoProc("SampleOutages")};
+	dActual := ExecFunction("DueDates.Availability.NextAvailableDay", aArgs);
+
+	:RETURN DoProc("CheckEqual", {"An available day is returned", "20261117", dActual});
+:ENDPROC;
+
+:PROCEDURE TestNextAvailableAfterOutage;
+	/* From Wednesday 18, BAL-01 is next available on Friday 20, after its outage;
+	:DECLARE aArgs, dActual;
+
+	aArgs := {"BAL-01", DateFromNumbers(2026, 11, 18), DoProc("SampleOutages")};
+	dActual := ExecFunction("DueDates.Availability.NextAvailableDay", aArgs);
+
+	:RETURN DoProc("CheckEqual", {"Next day is after the outage", "20261120", dActual});
+:ENDPROC;
+
+:PROCEDURE TestOutageDaysOverlapOnce;
+	/* A second outage, 19 to 20, overlaps the first. In the week from Monday 16 to
+	   Sunday 22, BAL-01 is out on 18, 19 and 20, and the 19th is counted once;
+	:DECLARE aArgs, aOutages, dFrom, dTo, nActual;
+
+	dFrom := DateFromNumbers(2026, 11, 16);
+	dTo := DateFromNumbers(2026, 11, 22);
+	aOutages := DoProc("SampleOutages");
+	AAdd(aOutages, {"BAL-01", dFrom + 3, dFrom + 4});
+	aArgs := {"BAL-01", dFrom, dTo, aOutages};
+	nActual := ExecFunction("DueDates.Availability.OutageDays", aArgs);
+
+	:RETURN DoProc("CheckEqual", {"Overlapping outages count a day once", 3, nActual});
+:ENDPROC;
+
+:PROCEDURE TestOutageDaysReversedSpan;
+	/* Empty case: a span that ends before it starts has no days in it;
+	:DECLARE aArgs, dFrom, nActual;
+
+	dFrom := DateFromNumbers(2026, 11, 19);
+	aArgs := {"BAL-01", dFrom, dFrom - 3, DoProc("SampleOutages")};
+	nActual := ExecFunction("DueDates.Availability.OutageDays", aArgs);
+
+	:RETURN DoProc("CheckEqual", {"A reversed span has no outage days", 0, nActual});
+:ENDPROC;
+
+/*
+ * Procedure: SampleOutages
+ * Description: Builds the outages the tests share, the same as in schema/demo.sql.
+ * Returns: BAL-01 out 18 and 19 November 2026, HPLC-02 out 1 to 3 December 2026
+;
+:PROCEDURE SampleOutages;
+	:RETURN {
+		{"BAL-01", DateFromNumbers(2026, 11, 18), DateFromNumbers(2026, 11, 19)},
+		{"HPLC-02", DateFromNumbers(2026, 12, 1), DateFromNumbers(2026, 12, 3)}
+	};
+:ENDPROC;
+
+/*
+ * Procedure: CheckEqual
+ * Description: Compares what a test got with what it expected, and logs a mismatch.
+ * Parameters:
+ *   sLabel    - what the test checks
+ *   vExpected - the value expected. For a date, its yyyyMMdd text
+ *   vActual   - the value the code under test returned
+ * Returns: {sLabel, bPassed}
+;
+:PROCEDURE CheckEqual;
+	:PARAMETERS sLabel, vExpected, vActual;
+
+	:DECLARE bPassed, sText, vShown;
+
+	vShown := vActual;
+
+	:IF LimsTypeEx(vActual) == "DATE";
+		vShown := DToS(vActual);
+	:ENDIF;
+
+	/* The types are compared first because == does not convert one to the other.
+	   == and not = for the values: = would pass a string on a matching prefix;
+	bPassed := LimsTypeEx(vExpected) == LimsTypeEx(vShown) .AND. vExpected == vShown;
+
+	:IF .NOT. bPassed;
+		sText := sLabel + ": expected [" + LimsString(vExpected) + "]";
+		sText += " got [" + LimsString(vShown) + "]";
+		ErrorMes("[ERROR] AvailabilityTests", sText);
+	:ENDIF;
+
+	:RETURN {sLabel, bPassed};
+:ENDPROC;

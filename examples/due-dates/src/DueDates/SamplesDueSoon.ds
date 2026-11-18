@@ -1,0 +1,22 @@
+/* =============================================================================;
+/* DATA SOURCE: SamplesDueSoon (SSL);
+/* PURPOSE:     The samples due from today through nDays days ahead, soonest first.
+                Samples already past their due date are left out;
+/* PARAMS:      nDays - how many days ahead to look;
+/* RETURNS:     rows {SAMPLE_ID, PRIORITY, INSTRUMENT_ID, RECEIVED_ON, DUE_ON};
+/* =============================================================================;
+:PARAMETERS nDays := 3;
+:DECLARE dFrom, dTo;
+
+dFrom := Today();
+dTo := dFrom + nDays;
+
+/* The two date columns are whole days, read as invariant so that a server which
+   keeps times in UTC does not shift them by its offset into the day before;
+:RETURN SQLExecute("
+    SELECT SAMPLE_ID, PRIORITY, INSTRUMENT_ID, RECEIVED_ON, DUE_ON
+    FROM DEMO_SAMPLES
+    WHERE DUE_ON >= ?dFrom?
+      AND DUE_ON <= ?dTo?
+    ORDER BY DUE_ON, SAMPLE_ID
+",,,, {"RECEIVED_ON", "DUE_ON"});

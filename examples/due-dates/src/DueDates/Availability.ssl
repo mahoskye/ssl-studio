@@ -1,0 +1,121 @@
+/********************************************************************************
+Description.. : Instrument availability for due dates: which days an outage takes away.
+Parameters... : -
+Returns...... : -
+Author....... :
+Date......... : 2026-11-17
+********************************************************************************
+_______________________________________________________________________________
+Modification. :
+Author....... :
+Date......... :
+_______________________________________________________________________________
+********************************************************************************/;
+
+/* region Availability;
+
+/*
+ * Procedure: IsAvailable
+ * Description: Tells whether an instrument can be used on a date.
+ * Parameters:
+ *   sInstrumentId - the instrument, or empty when the work needs none
+ *   dDate         - the date to test
+ *   aOutages      - the outages, each row {sInstrumentId, dFrom, dTo} with dTo included
+ * Returns: .F. when an outage of that instrument covers the date, .T. otherwise
+;
+:PROCEDURE IsAvailable;
+	:PARAMETERS sInstrumentId, dDate, aOutages;
+	:DEFAULT sInstrumentId, "";
+	:DEFAULT aOutages, {};
+
+	:DECLARE aOutage, nIndex;
+
+	/* Work that needs no instrument is never held up by an outage;
+	:IF Empty(sInstrumentId);
+		:RETURN .T.;
+	:ENDIF;
+
+	:FOR nIndex := 1 :TO ALen(aOutages);
+		aOutage := aOutages[nIndex];
+
+		/* == and not = here: = matches a string on its prefix, so the outages of
+		   instrument HPLC-10 would also be taken for HPLC-1;
+		:IF aOutage[1] == sInstrumentId
+			.AND. dDate >= aOutage[2]
+			.AND. dDate <= aOutage[3];
+			:RETURN .F.;
+		:ENDIF;
+	:NEXT;
+
+	:RETURN .T.;
+:ENDPROC;
+
+/*
+ * Procedure: NextAvailableDay
+ * Description: Finds the first day on or after a date when an instrument can be used.
+ * Parameters:
+ *   sInstrumentId - the instrument, or empty when the work needs none
+ *   dDate         - the date to start from
+ *   aOutages      - the outages, each row {sInstrumentId, dFrom, dTo} with dTo included
+ * Returns: dDate itself when the instrument is available, otherwise the next day it is
+;
+:PROCEDURE NextAvailableDay;
+	:PARAMETERS sInstrumentId, dDate, aOutages;
+	:DEFAULT sInstrumentId, "";
+	:DEFAULT aOutages, {};
+
+	:DECLARE dDay;
+
+	dDay := dDate;
+
+	:WHILE .NOT. DoProc("IsAvailable", {sInstrumentId, dDay, aOutages});
+		dDay := dDay + 1;
+	:ENDWHILE;
+
+	:RETURN dDay;
+:ENDPROC;
+
+/* endregion;
+
+/* region Outage totals;
+
+/*
+ * Procedure: OutageDays
+ * Description: Counts the days in a span on which an instrument is out.
+ * Parameters:
+ *   sInstrumentId - the instrument, or empty when the work needs none
+ *   dFrom         - the first day of the span
+ *   dTo           - the last day of the span, included
+ *   aOutages      - the outages, each row {sInstrumentId, dFrom, dTo} with dTo included
+ * Returns: the number of days out, each day once, or 0 for an empty or reversed span
+;
+:PROCEDURE OutageDays;
+	:PARAMETERS sInstrumentId, dFrom, dTo, aOutages;
+	:DEFAULT sInstrumentId, "";
+	:DEFAULT aOutages, {};
+
+	:DECLARE dDay, nOut;
+
+	nOut := 0;
+
+	/* An empty date stays empty when a day is added, so the walk below would never
+	   reach dTo;
+	:IF Empty(dFrom) .OR. Empty(dTo);
+		:RETURN nOut;
+	:ENDIF;
+
+	dDay := dFrom;
+
+	/* Day by day, not outage by outage, so overlapping outages count a day once;
+	:WHILE dDay <= dTo;
+		:IF .NOT. DoProc("IsAvailable", {sInstrumentId, dDay, aOutages});
+			nOut += 1;
+		:ENDIF;
+
+		dDay := dDay + 1;
+	:ENDWHILE;
+
+	:RETURN nOut;
+:ENDPROC;
+
+/* endregion;

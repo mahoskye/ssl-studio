@@ -1,0 +1,56 @@
+/********************************************************************************
+Description.. : The rush due-date rule: the routine rule, with Saturday as a working day.
+Parameters... : nTurnaroundDays - how many days the work takes
+                aHolidays       - the holidays, an array of dates
+                aOutages        - the outages, each row {sInstrumentId, dFrom, dTo}
+Returns...... : -
+Author....... :
+Date......... : 2026-11-17
+********************************************************************************
+_______________________________________________________________________________
+Modification. :
+Author....... :
+Date......... :
+_______________________________________________________________________________
+********************************************************************************/;
+
+:CLASS RushDueRule;
+:INHERIT DueDates.DueRule;
+
+/*
+ * Procedure: CountsSaturday
+ * Description: Tells whether this rule treats Saturday as a working day.
+ * Returns: .T. for rush work. The inherited CountsDay and DueDate ask this method
+;
+:PROCEDURE CountsSaturday;
+	:RETURN .T.;
+:ENDPROC;
+
+/*
+ * Procedure: Describe
+ * Description: Adds the Saturday rule to the description the base class gives.
+ * Returns: a text such as "Rush: 2 working days, Saturdays included"
+;
+:PROCEDURE Describe;
+	:RETURN Base:Describe() + ", Saturdays included";
+:ENDPROC;
+
+/*
+ * Procedure: Constructor
+ * Description: Sets the rule up as the base does, under the name Rush.
+ * Parameters:
+ *   nTurnaroundDays - how many days the work takes
+ *   aHolidays       - the holidays, an array of dates
+ *   aOutages        - the outages, each row {sInstrumentId, dFrom, dTo} with dTo included
+ * Returns: nothing
+;
+:PROCEDURE Constructor;
+	:PARAMETERS nTurnaroundDays, aHolidays, aOutages;
+
+	/* A base constructor that takes parameters does not run on its own for a
+	   subclass, so it is called here with the same arguments;
+	Base:Constructor(nTurnaroundDays, aHolidays, aOutages);
+
+	/* After the base call, which sets the routine name;
+	Me:sRuleName := "Rush";
+:ENDPROC;

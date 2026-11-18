@@ -1,0 +1,191 @@
+/********************************************************************************
+Description.. : Unit tests for the classes DueDates.DueRule and DueDates.RushDueRule,
+                on the samples of docs/Worked-examples.md. No database is read or written.
+                Run DueDatesTests.DueRuleTests.RunTests and read the server log.
+Parameters... : -
+Returns...... : -
+Author....... :
+Date......... : 2026-11-17
+********************************************************************************
+_______________________________________________________________________________
+Modification. :
+Author....... :
+Date......... :
+_______________________________________________________________________________
+********************************************************************************/;
+
+/*
+ * Procedure: RunTests
+ * Description: Runs every test and logs how many passed.
+ * Returns: one {sLabel, bPassed} row for each test
+;
+:PROCEDURE RunTests;
+	:DECLARE aResults, nIndex, nPassed;
+
+	aResults := {};
+	AAdd(aResults, DoProc("TestNoInstrumentPlainDays"));
+	AAdd(aResults, DoProc("TestOutagePushesDueDate"));
+	AAdd(aResults, DoProc("TestOtherOutageIgnored"));
+	AAdd(aResults, DoProc("TestRoutineSkipsSaturday"));
+	AAdd(aResults, DoProc("TestRushCountsSaturday"));
+	AAdd(aResults, DoProc("TestDueDateSkipsHoliday"));
+	AAdd(aResults, DoProc("TestDueDateZeroDays"));
+	AAdd(aResults, DoProc("TestDescribe"));
+
+	nPassed := 0;
+
+	:FOR nIndex := 1 :TO ALen(aResults);
+		:IF aResults[nIndex][2];
+			nPassed += 1;
+		:ENDIF;
+	:NEXT;
+
+	InfoMes("[INFO] DueRuleTests", LimsString(nPassed) + " of "
+	        + LimsString(ALen(aResults)) + " passed");
+
+	:RETURN aResults;
+:ENDPROC;
+
+:PROCEDURE TestNoInstrumentPlainDays;
+	/* S-1001: Monday 16 November 2026, 3 days, no instrument: Tuesday to Thursday count;
+	:DECLARE dActual, oRule;
+
+	oRule := DoProc("NewRule", {3});
+	dActual := oRule:DueDate(DateFromNumbers(2026, 11, 16), "");
+
+	:RETURN DoProc("CheckEqual", {"No instrument, no outage", "20261119", dActual});
+:ENDPROC;
+
+:PROCEDURE TestOutagePushesDueDate;
+	/* S-1002: the same on BAL-01, out on 18 and 19: Tuesday, Friday and Monday count;
+	:DECLARE dActual, oRule;
+
+	oRule := DoProc("NewRule", {3});
+	dActual := oRule:DueDate(DateFromNumbers(2026, 11, 16), "BAL-01");
+
+	:RETURN DoProc("CheckEqual", {"An outage pushes the due date", "20261123", dActual});
+:ENDPROC;
+
+:PROCEDURE TestOtherOutageIgnored;
+	/* The same on HPLC-02, not out until December: the BAL-01 outage does not apply;
+	:DECLARE dActual, oRule;
+
+	oRule := DoProc("NewRule", {3});
+	dActual := oRule:DueDate(DateFromNumbers(2026, 11, 16), "HPLC-02");
+
+	:RETURN DoProc("CheckEqual", {"Another instrument's outage", "20261119", dActual});
+:ENDPROC;
+
+:PROCEDURE TestRoutineSkipsSaturday;
+	/* S-1003: Thursday 19, 2 days: Friday 20 and Monday 23 count, the weekend does not;
+	:DECLARE dActual, oRule;
+
+	oRule := DoProc("NewRule", {2});
+	dActual := oRule:DueDate(DateFromNumbers(2026, 11, 19), "");
+
+	:RETURN DoProc("CheckEqual", {"Routine work skips the weekend", "20261123", dActual});
+:ENDPROC;
+
+:PROCEDURE TestRushCountsSaturday;
+	/* S-1004: the same as rush: Friday 20 and Saturday 21 count. DueDate is the
+	   base's, so this passes only when it asks the rush CountsSaturday;
+	:DECLARE dActual, oRule;
+
+	oRule := DoProc("NewRule", {2, .T.});
+	dActual := oRule:DueDate(DateFromNumbers(2026, 11, 19), "");
+
+	:RETURN DoProc("CheckEqual", {"Rush work counts Saturday", "20261121", dActual});
+:ENDPROC;
+
+:PROCEDURE TestDueDateSkipsHoliday;
+	/* S-1005: Tuesday 24, 2 days, Thursday 26 a holiday: Wednesday and Friday count;
+	:DECLARE dActual, oRule;
+
+	oRule := DoProc("NewRule", {2});
+	dActual := oRule:DueDate(DateFromNumbers(2026, 11, 24), "");
+
+	:RETURN DoProc("CheckEqual", {"A holiday is not counted", "20261127", dActual});
+:ENDPROC;
+
+:PROCEDURE TestDueDateZeroDays;
+	/* Empty case: a turnaround of 0 counts nothing and gives the received date back;
+	:DECLARE dActual, oRule;
+
+	oRule := DoProc("NewRule", {0});
+	dActual := oRule:DueDate(DateFromNumbers(2026, 11, 16), "");
+
+	:RETURN DoProc("CheckEqual", {"Zero days, the received date", "20261116", dActual});
+:ENDPROC;
+
+:PROCEDURE TestDescribe;
+	/* The rush text is the base text, under the rush name, plus the Saturday rule.
+	   One day is written without the plural;
+	:DECLARE oRoutine, oRush, sActual, sExpected;
+
+	oRoutine := DoProc("NewRule", {3});
+	oRush := DoProc("NewRule", {1, .T.});
+	sActual := oRoutine:Describe() + " | " + oRush:Describe();
+	sExpected := "Routine: 3 working days | Rush: 1 working day, Saturdays included";
+
+	:RETURN DoProc("CheckEqual", {"Each rule describes itself", sExpected, sActual});
+:ENDPROC;
+
+/*
+ * Procedure: NewRule
+ * Description: Builds a rule on the holidays and outages of schema/demo.sql.
+ * Parameters:
+ *   nDays - the turnaround in days
+ *   bRush - .T. for a RushDueRule, otherwise a DueRule
+ * Returns: the rule object
+;
+:PROCEDURE NewRule;
+	:PARAMETERS nDays, bRush;
+	:DEFAULT bRush, .F.;
+
+	:DECLARE aHolidays, aOutages;
+
+	aHolidays := {DateFromNumbers(2026, 11, 26), DateFromNumbers(2026, 12, 25)};
+	aOutages := {
+		{"BAL-01", DateFromNumbers(2026, 11, 18), DateFromNumbers(2026, 11, 19)},
+		{"HPLC-02", DateFromNumbers(2026, 12, 1), DateFromNumbers(2026, 12, 3)}
+	};
+
+	:IF bRush;
+		:RETURN CreateUdObject("DueDates.RushDueRule", {nDays, aHolidays, aOutages});
+	:ENDIF;
+
+	:RETURN CreateUdObject("DueDates.DueRule", {nDays, aHolidays, aOutages});
+:ENDPROC;
+
+/*
+ * Procedure: CheckEqual
+ * Description: Compares what a test got with what it expected, and logs a mismatch.
+ * Parameters:
+ *   sLabel    - what the test checks
+ *   vExpected - the value expected. For a date, its yyyyMMdd text
+ *   vActual   - the value the code under test returned
+ * Returns: {sLabel, bPassed}
+;
+:PROCEDURE CheckEqual;
+	:PARAMETERS sLabel, vExpected, vActual;
+
+	:DECLARE bPassed, sText, vShown;
+
+	vShown := vActual;
+
+	:IF LimsTypeEx(vActual) == "DATE";
+		vShown := DToS(vActual);
+	:ENDIF;
+
+	/* The types are compared first because == does not convert one to the other.
+	   == and not = for the values: = would pass a string on a matching prefix;
+	bPassed := LimsTypeEx(vExpected) == LimsTypeEx(vShown) .AND. vExpected == vShown;
+
+	:IF .NOT. bPassed;
+		sText := sLabel + ": expected [" + LimsString(vExpected) + "]";
+		sText += " got [" + LimsString(vShown) + "]";
+		ErrorMes("[ERROR] DueRuleTests", sText);
+	:ENDIF;
+
+	:RETURN {sLabel, bPassed};
+:ENDPROC;

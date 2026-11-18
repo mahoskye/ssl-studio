@@ -1,0 +1,183 @@
+/********************************************************************************
+Description.. : Unit tests for DueDates.WorkCalendar. No database is read or written.
+                Run DueDatesTests.WorkCalendarTests.RunTests and read the server log.
+Parameters... : -
+Returns...... : -
+Author....... :
+Date......... : 2026-11-17
+********************************************************************************
+_______________________________________________________________________________
+Modification. :
+Author....... :
+Date......... :
+_______________________________________________________________________________
+********************************************************************************/;
+
+/*
+ * Procedure: RunTests
+ * Description: Runs every test and logs how many passed.
+ * Returns: one {sLabel, bPassed} row for each test
+;
+:PROCEDURE RunTests;
+	:DECLARE aResults, nIndex, nPassed;
+
+	aResults := {};
+	AAdd(aResults, DoProc("TestIsWeekendSaturday"));
+	AAdd(aResults, DoProc("TestIsHolidayEmptyList"));
+	AAdd(aResults, DoProc("TestIsWorkingDayHoliday"));
+	AAdd(aResults, DoProc("TestNextWorkingDaySameDay"));
+	AAdd(aResults, DoProc("TestNextWorkingDaySkips"));
+	AAdd(aResults, DoProc("TestAddDaysCrossesWeekend"));
+	AAdd(aResults, DoProc("TestAddDaysSkipsHoliday"));
+	AAdd(aResults, DoProc("TestAddDaysMonthEnd"));
+	AAdd(aResults, DoProc("TestAddDaysZero"));
+	AAdd(aResults, DoProc("TestAddDaysRushSaturday"));
+
+	nPassed := 0;
+
+	:FOR nIndex := 1 :TO ALen(aResults);
+		:IF aResults[nIndex][2];
+			nPassed += 1;
+		:ENDIF;
+	:NEXT;
+
+	InfoMes("[INFO] WorkCalendarTests", LimsString(nPassed) + " of "
+	        + LimsString(ALen(aResults)) + " passed");
+
+	:RETURN aResults;
+:ENDPROC;
+
+:PROCEDURE TestIsWeekendSaturday;
+	/* 14 November 2026 is a Saturday: a weekend day, unless Saturdays count;
+	:DECLARE bActual, bRoutine, bRush, dSaturday;
+
+	dSaturday := DateFromNumbers(2026, 11, 14);
+	bRoutine := ExecFunction("DueDates.WorkCalendar.IsWeekend", {dSaturday});
+	bRush := ExecFunction("DueDates.WorkCalendar.IsWeekend", {dSaturday, .T.});
+	bActual := bRoutine .AND. .NOT. bRush;
+
+	:RETURN DoProc("CheckEqual", {"Saturday is off unless it counts", .T., bActual});
+:ENDPROC;
+
+:PROCEDURE TestIsHolidayEmptyList;
+	/* Empty case: with no holidays listed, no date is a holiday;
+	:DECLARE aArgs, bActual;
+
+	aArgs := {DateFromNumbers(2026, 11, 18), {}};
+	bActual := ExecFunction("DueDates.WorkCalendar.IsHoliday", aArgs);
+
+	:RETURN DoProc("CheckEqual", {"No holidays, no holiday", .F., bActual});
+:ENDPROC;
+
+:PROCEDURE TestIsWorkingDayHoliday;
+	/* Wednesday 18 November is a weekday, but not a working day once it is a holiday;
+	:DECLARE aArgs, bActual;
+
+	aArgs := {DateFromNumbers(2026, 11, 18), {DateFromNumbers(2026, 11, 18)}};
+	bActual := ExecFunction("DueDates.WorkCalendar.IsWorkingDay", aArgs);
+
+	:RETURN DoProc("CheckEqual", {"A weekday holiday is no working day", .F., bActual});
+:ENDPROC;
+
+:PROCEDURE TestNextWorkingDaySameDay;
+	/* Tuesday 17 November is a working day, so it is its own next working day;
+	:DECLARE aArgs, dActual;
+
+	aArgs := {DateFromNumbers(2026, 11, 17)};
+	dActual := ExecFunction("DueDates.WorkCalendar.NextWorkingDay", aArgs);
+
+	:RETURN DoProc("CheckEqual", {"A working day is its own next", "20261117", dActual});
+:ENDPROC;
+
+:PROCEDURE TestNextWorkingDaySkips;
+	/* From Saturday 14, with Monday 16 a holiday: Sunday and Monday are passed over;
+	:DECLARE aArgs, dActual;
+
+	aArgs := {DateFromNumbers(2026, 11, 14), {DateFromNumbers(2026, 11, 16)}};
+	dActual := ExecFunction("DueDates.WorkCalendar.NextWorkingDay", aArgs);
+
+	:RETURN DoProc("CheckEqual", {"Weekend and holiday skipped", "20261117", dActual});
+:ENDPROC;
+
+:PROCEDURE TestAddDaysCrossesWeekend;
+	/* Thursday 12 plus 3 working days: Friday 13, Monday 16, Tuesday 17;
+	:DECLARE aArgs, dActual;
+
+	aArgs := {DateFromNumbers(2026, 11, 12), 3};
+	dActual := ExecFunction("DueDates.WorkCalendar.AddWorkingDays", aArgs);
+
+	:RETURN DoProc("CheckEqual", {"A weekend is not counted", "20261117", dActual});
+:ENDPROC;
+
+:PROCEDURE TestAddDaysSkipsHoliday;
+	/* Monday 16 plus 2, with Wednesday 18 a holiday: Tuesday 17, Thursday 19;
+	:DECLARE aArgs, dActual;
+
+	aArgs := {DateFromNumbers(2026, 11, 16), 2, {DateFromNumbers(2026, 11, 18)}};
+	dActual := ExecFunction("DueDates.WorkCalendar.AddWorkingDays", aArgs);
+
+	:RETURN DoProc("CheckEqual", {"A holiday is not counted", "20261119", dActual});
+:ENDPROC;
+
+:PROCEDURE TestAddDaysMonthEnd;
+	/* Friday 27 November plus 2: Monday 30 November, Tuesday 1 December;
+	:DECLARE aArgs, dActual;
+
+	aArgs := {DateFromNumbers(2026, 11, 27), 2};
+	dActual := ExecFunction("DueDates.WorkCalendar.AddWorkingDays", aArgs);
+
+	:RETURN DoProc("CheckEqual", {"The count passes a month end", "20261201", dActual});
+:ENDPROC;
+
+:PROCEDURE TestAddDaysZero;
+	/* Empty case: zero days gives the start back, even when it is a Saturday;
+	:DECLARE aArgs, dActual;
+
+	aArgs := {DateFromNumbers(2026, 11, 14), 0};
+	dActual := ExecFunction("DueDates.WorkCalendar.AddWorkingDays", aArgs);
+
+	:RETURN DoProc("CheckEqual", {"Zero days returns the start", "20261114", dActual});
+:ENDPROC;
+
+:PROCEDURE TestAddDaysRushSaturday;
+	/* Friday 13 plus 2 with Saturdays counted: Saturday 14, Monday 16;
+	:DECLARE aArgs, dActual;
+
+	aArgs := {DateFromNumbers(2026, 11, 13), 2, {}, .T.};
+	dActual := ExecFunction("DueDates.WorkCalendar.AddWorkingDays", aArgs);
+
+	:RETURN DoProc("CheckEqual", {"Rush work counts Saturday", "20261116", dActual});
+:ENDPROC;
+
+/*
+ * Procedure: CheckEqual
+ * Description: Compares what a test got with what it expected, and logs a mismatch.
+ * Parameters:
+ *   sLabel    - what the test checks
+ *   vExpected - the value expected. For a date, its yyyyMMdd text
+ *   vActual   - the value the code under test returned
+ * Returns: {sLabel, bPassed}
+;
+:PROCEDURE CheckEqual;
+	:PARAMETERS sLabel, vExpected, vActual;
+
+	:DECLARE bPassed, sText, vShown;
+
+	vShown := vActual;
+
+	:IF LimsTypeEx(vActual) == "DATE";
+		vShown := DToS(vActual);
+	:ENDIF;
+
+	/* The types are compared first because == does not convert one to the other.
+	   == and not = for the values: = would pass a string on a matching prefix;
+	bPassed := LimsTypeEx(vExpected) == LimsTypeEx(vShown) .AND. vExpected == vShown;
+
+	:IF .NOT. bPassed;
+		sText := sLabel + ": expected [" + LimsString(vExpected) + "]";
+		sText += " got [" + LimsString(vShown) + "]";
+		ErrorMes("[ERROR] WorkCalendarTests", sText);
+	:ENDIF;
+
+	:RETURN {sLabel, bPassed};
+:ENDPROC;

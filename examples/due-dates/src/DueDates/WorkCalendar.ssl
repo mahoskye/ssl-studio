@@ -1,0 +1,147 @@
+/********************************************************************************
+Description.. : Working-day rules for due dates: weekends, holidays and counting forward.
+Parameters... : -
+Returns...... : -
+Author....... :
+Date......... : 2026-11-17
+********************************************************************************
+_______________________________________________________________________________
+Modification. :
+Author....... :
+Date......... :
+_______________________________________________________________________________
+********************************************************************************/;
+
+/* region Day tests;
+
+/*
+ * Procedure: IsWeekend
+ * Description: Tells whether a date falls on a weekend.
+ * Parameters:
+ *   dDate          - the date to test
+ *   bCountSaturday - .T. when Saturday is a working day (rush work)
+ * Returns: .T. on a Sunday, and on a Saturday unless bCountSaturday is .T.
+;
+:PROCEDURE IsWeekend;
+	:PARAMETERS dDate, bCountSaturday;
+	:DEFAULT bCountSaturday, .F.;
+
+	:DECLARE nWeekday;
+
+	/* DOW numbers the week from Sunday = 1 to Saturday = 7. An empty date gives 0,
+	   which is neither, so an empty date is not a weekend;
+	nWeekday := DOW(dDate);
+
+	:IF nWeekday == 7;
+		:RETURN .NOT. bCountSaturday;
+	:ENDIF;
+
+	:RETURN nWeekday == 1;
+:ENDPROC;
+
+/*
+ * Procedure: IsHoliday
+ * Description: Tells whether a date is in the list of holidays.
+ * Parameters:
+ *   dDate     - the date to test
+ *   aHolidays - the holidays, an array of dates
+ * Returns: .T. when the date is a holiday, .F. otherwise and for an empty list
+;
+:PROCEDURE IsHoliday;
+	:PARAMETERS dDate, aHolidays;
+	:DEFAULT aHolidays, {};
+
+	:DECLARE nIndex;
+
+	:FOR nIndex := 1 :TO ALen(aHolidays);
+		:IF aHolidays[nIndex] == dDate;
+			:RETURN .T.;
+		:ENDIF;
+	:NEXT;
+
+	:RETURN .F.;
+:ENDPROC;
+
+/*
+ * Procedure: IsWorkingDay
+ * Description: Tells whether work is done on a date.
+ * Parameters:
+ *   dDate          - the date to test
+ *   aHolidays      - the holidays, an array of dates
+ *   bCountSaturday - .T. when Saturday is a working day (rush work)
+ * Returns: .T. when the date is neither a weekend day nor a holiday
+;
+:PROCEDURE IsWorkingDay;
+	:PARAMETERS dDate, aHolidays, bCountSaturday;
+	:DEFAULT aHolidays, {};
+	:DEFAULT bCountSaturday, .F.;
+
+	:IF DoProc("IsWeekend", {dDate, bCountSaturday});
+		:RETURN .F.;
+	:ENDIF;
+
+	:RETURN .NOT. DoProc("IsHoliday", {dDate, aHolidays});
+:ENDPROC;
+
+/* endregion;
+
+/* region Counting forward;
+
+/*
+ * Procedure: NextWorkingDay
+ * Description: Finds the first working day on or after a date.
+ * Parameters:
+ *   dDate          - the date to start from
+ *   aHolidays      - the holidays, an array of dates
+ *   bCountSaturday - .T. when Saturday is a working day (rush work)
+ * Returns: dDate itself when it is a working day, otherwise the next one
+;
+:PROCEDURE NextWorkingDay;
+	:PARAMETERS dDate, aHolidays, bCountSaturday;
+	:DEFAULT aHolidays, {};
+	:DEFAULT bCountSaturday, .F.;
+
+	:DECLARE dDay;
+
+	dDay := dDate;
+
+	:WHILE .NOT. DoProc("IsWorkingDay", {dDay, aHolidays, bCountSaturday});
+		dDay := dDay + 1;
+	:ENDWHILE;
+
+	:RETURN dDay;
+:ENDPROC;
+
+/*
+ * Procedure: AddWorkingDays
+ * Description: Counts working days forward from the day after a start date.
+ * Parameters:
+ *   dStart         - the date to count from, which is not counted itself
+ *   nDays          - how many working days to count
+ *   aHolidays      - the holidays, an array of dates
+ *   bCountSaturday - .T. when Saturday is a working day (rush work)
+ * Returns: the date of the last day counted, or dStart unchanged when nDays is 0 or less
+;
+:PROCEDURE AddWorkingDays;
+	:PARAMETERS dStart, nDays, aHolidays, bCountSaturday;
+	:DEFAULT nDays, 0;
+	:DEFAULT aHolidays, {};
+	:DEFAULT bCountSaturday, .F.;
+
+	:DECLARE dDay, nCounted;
+
+	dDay := dStart;
+	nCounted := 0;
+
+	:WHILE nCounted < nDays;
+		dDay := dDay + 1;
+
+		:IF DoProc("IsWorkingDay", {dDay, aHolidays, bCountSaturday});
+			nCounted += 1;
+		:ENDIF;
+	:ENDWHILE;
+
+	:RETURN dDay;
+:ENDPROC;
+
+/* endregion;

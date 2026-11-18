@@ -1,0 +1,187 @@
+/********************************************************************************
+Description.. : Sets the due date of every sample that has none yet.
+Parameters... : -
+Returns...... : Success: {.T., {nSet, nSkipped, aSkipped}}, each skip {sSampleId, sReason}
+                Failure: {.F., {sCode, sMessage}}, with every update rolled back
+Author....... :
+Date......... : 2026-11-17
+********************************************************************************
+_______________________________________________________________________________
+Modification. :
+Author....... :
+Date......... :
+_______________________________________________________________________________
+********************************************************************************/;
+
+:DECLARE aHolidays, aOutages, aSummary;
+:DECLARE oErr;
+
+:TRY;
+	aHolidays := DoProc("LoadHolidays");
+	aOutages := DoProc("LoadOutages");
+	aSummary := DoProc("ApplyDueDates", {aHolidays, aOutages});
+:CATCH;
+	/* The error text goes to the server log only. The caller gets a fixed code;
+	oErr := GetLastSSLError();
+	ErrorMes("[ERROR] SetSampleDueDates", Left(oErr:Description, 2000));
+	ClearLastSSLError();
+
+	:RETURN {.F., {"DUE_DATES_NOT_SAVED", "No due dates were saved."}};
+:ENDTRY;
+
+:RETURN {.T., aSummary};
+
+/* region Loading;
+
+/*
+ * Procedure: LoadHolidays
+ * Description: Reads the holidays.
+ * Returns: the holidays as an array of dates, empty when there are none
+;
+:PROCEDURE LoadHolidays;
+	:DECLARE aHolidays, aRows, nIndex;
+
+	/* Whole-day columns are read as invariant, so that a server which keeps times
+	   in UTC does not shift them by its offset into the day before;
+	aRows := LSelect1("
+	    SELECT HOLIDAY_ON
+	    FROM DEMO_HOLIDAYS
+	",,,, {"HOLIDAY_ON"});
+
+	aHolidays := {};
+
+	:FOR nIndex := 1 :TO ALen(aRows);
+		AAdd(aHolidays, aRows[nIndex][1]);
+	:NEXT;
+
+	:RETURN aHolidays;
+:ENDPROC;
+
+/*
+ * Procedure: LoadOutages
+ * Description: Reads the instrument outages.
+ * Returns: rows {sInstrumentId, dFrom, dTo} with dTo included, empty when there are none
+;
+:PROCEDURE LoadOutages;
+	:RETURN LSelect1("
+	    SELECT INSTRUMENT_ID, FROM_ON, TO_ON
+	    FROM DEMO_OUTAGES
+	",,,, {"FROM_ON", "TO_ON"});
+:ENDPROC;
+
+/* endregion;
+
+/* region Due dates;
+
+/*
+ * Procedure: RuleFor
+ * Description: Picks the due-date rule for a priority.
+ * Parameters:
+ *   sPriority - RUSH for the rush rule, anything else for the routine rule
+ *   nDays     - the turnaround, how many days the work takes
+ *   aHolidays - the holidays, an array of dates
+ *   aOutages  - the outages, each row {sInstrumentId, dFrom, dTo}
+ * Returns: a DueDates.RushDueRule or a DueDates.DueRule object
+;
+:PROCEDURE RuleFor;
+	:PARAMETERS sPriority, nDays, aHolidays, aOutages;
+
+	:IF Upper(AllTrim(sPriority)) == "RUSH";
+		:RETURN CreateUdObject("DueDates.RushDueRule", {nDays, aHolidays, aOutages});
+	:ENDIF;
+
+	:RETURN CreateUdObject("DueDates.DueRule", {nDays, aHolidays, aOutages});
+:ENDPROC;
+
+/*
+ * Procedure: ApplyDueDates
+ * Description: Sets the due date of each sample that has none, in one transaction.
+ * Parameters:
+ *   aHolidays - the holidays, an array of dates
+ *   aOutages  - the outages, each row {sInstrumentId, dFrom, dTo}
+ * Returns: {nSet, nSkipped, aSkipped}. Raises on any failure, after rolling back
+;
+:PROCEDURE ApplyDueDates;
+	:PARAMETERS aHolidays, aOutages;
+
+	:DECLARE aSamples, aSkipped, nIndex, nSet, sReason;
+	:DECLARE bCommit, bStarted;
+
+	aSkipped := {};
+	nSet := 0;
+	bStarted := .F.;
+	bCommit := .F.;
+
+	:TRY;
+		bStarted := BeginLimsTransaction();
+
+		/* A NULL comes back as the empty value of its column: an empty date, 0 or "";
+		aSamples := LSelect1("
+		    SELECT SAMPLE_ID, RECEIVED_ON, PRIORITY, TURNAROUND_DAYS, INSTRUMENT_ID
+		    FROM DEMO_SAMPLES
+		    WHERE DUE_ON IS NULL
+		    ORDER BY SAMPLE_ID
+		",,,, {"RECEIVED_ON"});
+
+		:FOR nIndex := 1 :TO ALen(aSamples);
+			sReason := DoProc("SaveDueDate", {aSamples[nIndex], aHolidays, aOutages});
+
+			:IF Empty(sReason);
+				nSet += 1;
+			:ELSE;
+				AAdd(aSkipped, {aSamples[nIndex][1], sReason});
+			:ENDIF;
+		:NEXT;
+
+		/* Reached only when every sample above went through;
+		bCommit := .T.;
+	:FINALLY;
+		/* Always runs. After an error bCommit is still .F., so this rolls back;
+		:IF bStarted;
+			EndLimsTransaction(, bCommit);
+		:ENDIF;
+	:ENDTRY;
+
+	:RETURN {nSet, ALen(aSkipped), aSkipped};
+:ENDPROC;
+
+/*
+ * Procedure: SaveDueDate
+ * Description: Works out the due date of one sample and writes it.
+ * Parameters:
+ *   aSample   - {sSampleId, dReceived, sPriority, nTurnaroundDays, sInstrumentId}
+ *   aHolidays - the holidays, an array of dates
+ *   aOutages  - the outages, each row {sInstrumentId, dFrom, dTo}
+ * Returns: "" when the due date was saved, otherwise the reason the sample was skipped
+;
+:PROCEDURE SaveDueDate;
+	:PARAMETERS aSample, aHolidays, aOutages;
+
+	:DECLARE dDue, dReceived, nDays, oRule;
+
+	dReceived := aSample[2];
+	nDays := aSample[4];
+
+	:IF Empty(dReceived);
+		:RETURN "No received date";
+	:ENDIF;
+
+	:IF nDays <= 0;
+		:RETURN "No turnaround";
+	:ENDIF;
+
+	oRule := DoProc("RuleFor", {aSample[3], nDays, aHolidays, aOutages});
+	dDue := oRule:DueDate(dReceived, aSample[5]);
+
+	RunSQL("
+	    UPDATE DEMO_SAMPLES SET
+	        DUE_ON = ?
+	    WHERE SAMPLE_ID = ?
+	      AND DUE_ON IS NULL
+	",, {dDue, aSample[1]});
+
+	/* No row changed means the sample got a due date, or was removed, after it was read;
+	:RETURN IIf(LimsRecordsAffected() == 1, "", "No longer waiting for a due date");
+:ENDPROC;
+
+/* endregion;

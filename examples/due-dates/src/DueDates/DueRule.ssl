@@ -1,0 +1,123 @@
+/********************************************************************************
+Description.. : The routine due-date rule: a turnaround counted in working days on which
+                the instrument is available.
+Parameters... : nTurnaroundDays - how many days the work takes
+                aHolidays       - the holidays, an array of dates
+                aOutages        - the outages, each row {sInstrumentId, dFrom, dTo}
+Returns...... : -
+Author....... :
+Date......... : 2026-11-17
+********************************************************************************
+_______________________________________________________________________________
+Modification. :
+Author....... :
+Date......... :
+_______________________________________________________________________________
+********************************************************************************/;
+
+:CLASS DueRule;
+
+:DECLARE aHolidays, aOutages, nTurnaroundDays, sRuleName;
+
+/*
+ * Procedure: CountsSaturday
+ * Description: Tells whether this rule treats Saturday as a working day.
+ * Returns: .F. for routine work. A subclass overrides this to change the answer
+;
+:PROCEDURE CountsSaturday;
+	:RETURN .F.;
+:ENDPROC;
+
+/*
+ * Procedure: CountsDay
+ * Description: Tells whether a day counts toward the turnaround.
+ * Parameters:
+ *   dDate         - the day to test
+ *   sInstrumentId - the instrument the sample needs, or empty when it needs none
+ * Returns: .T. when the day is a working day and the instrument is available on it
+;
+:PROCEDURE CountsDay;
+	:PARAMETERS dDate, sInstrumentId;
+	:DEFAULT sInstrumentId, "";
+
+	:DECLARE aDayArgs, aOutageArgs;
+
+	/* CountsSaturday is asked through Me: so that a subclass which overrides it
+	   changes the days this method, and DueDate with it, accepts;
+	aDayArgs := {dDate, Me:aHolidays, Me:CountsSaturday()};
+
+	:IF .NOT. ExecFunction("DueDates.WorkCalendar.IsWorkingDay", aDayArgs);
+		:RETURN .F.;
+	:ENDIF;
+
+	aOutageArgs := {sInstrumentId, dDate, Me:aOutages};
+
+	:RETURN ExecFunction("DueDates.Availability.IsAvailable", aOutageArgs);
+:ENDPROC;
+
+/*
+ * Procedure: DueDate
+ * Description: Works out the day a sample is due.
+ * Parameters:
+ *   dReceived     - the day the sample was received, which is not counted itself
+ *   sInstrumentId - the instrument the sample needs, or empty when it needs none
+ * Returns: the due day, or dReceived unchanged when it is empty or the turnaround is 0
+;
+:PROCEDURE DueDate;
+	:PARAMETERS dReceived, sInstrumentId;
+	:DEFAULT sInstrumentId, "";
+
+	:DECLARE dDay, nCounted;
+
+	/* Nothing to count from;
+	:IF Empty(dReceived);
+		:RETURN dReceived;
+	:ENDIF;
+
+	dDay := dReceived;
+	nCounted := 0;
+
+	:WHILE nCounted < Me:nTurnaroundDays;
+		dDay := dDay + 1;
+
+		:IF Me:CountsDay(dDay, sInstrumentId);
+			nCounted += 1;
+		:ENDIF;
+	:ENDWHILE;
+
+	:RETURN dDay;
+:ENDPROC;
+
+/*
+ * Procedure: Describe
+ * Description: Describes the rule in a few words, for a log line or a tooltip.
+ * Returns: a text such as "Routine: 5 working days"
+;
+:PROCEDURE Describe;
+	:DECLARE sUnit;
+
+	sUnit := IIf(Me:nTurnaroundDays == 1, " working day", " working days");
+
+	:RETURN Me:sRuleName + ": " + LimsString(Me:nTurnaroundDays) + sUnit;
+:ENDPROC;
+
+/*
+ * Procedure: Constructor
+ * Description: Keeps the turnaround and the calendar the rule counts against.
+ * Parameters:
+ *   nTurnaroundDays - how many days the work takes
+ *   aHolidays       - the holidays, an array of dates
+ *   aOutages        - the outages, each row {sInstrumentId, dFrom, dTo} with dTo included
+ * Returns: nothing
+;
+:PROCEDURE Constructor;
+	:PARAMETERS nTurnaroundDays, aHolidays, aOutages;
+	:DEFAULT nTurnaroundDays, 0;
+	:DEFAULT aHolidays, {};
+	:DEFAULT aOutages, {};
+
+	Me:nTurnaroundDays := nTurnaroundDays;
+	Me:aHolidays := aHolidays;
+	Me:aOutages := aOutages;
+	Me:sRuleName := "Routine";
+:ENDPROC;
