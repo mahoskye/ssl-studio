@@ -6,9 +6,18 @@
       "runtimeExecutable": "sh",
       "runtimeArgs": [
         "-c",
-        "PATH=\"$HOME/.hutch/npm/electrobun/2.0.5/linux-x64/bin:$PATH\" exec hutch run web fixtures/workspace"
+        "[ -x vendor/starlims-lsp ] && export STARLIMS_LSP=\"${STARLIMS_LSP:-$PWD/vendor/starlims-lsp}\"; PATH=\"$HOME/.hutch/npm/electrobun/2.0.5/linux-x64/bin:$PATH\" exec hutch run web fixtures/workspace"
       ],
       "port": 5190
+    },
+    {
+      "name": "ssl-studio-demo",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": [
+        "-c",
+        "[ -x vendor/starlims-lsp ] && export STARLIMS_LSP=\"${STARLIMS_LSP:-$PWD/vendor/starlims-lsp}\"; PORT=5191 PATH=\"$HOME/.hutch/npm/electrobun/2.0.5/linux-x64/bin:$PATH\" exec hutch run web examples/due-dates"
+      ],
+      "port": 5191
     }
   ]
 }

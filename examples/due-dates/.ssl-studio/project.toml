@@ -1,0 +1,23 @@
+# SSL Studio project settings. Edit this file by hand: the IDE reads it and
+# never rewrites it. Window layout and region colours are in settings.json.
+
+[project]
+name = "Due dates"
+description = "Sets sample due dates from the working calendar and instrument availability. A demo project for SSL Studio."
+
+[folders]
+# Where things are, relative to this project. Plans and tidy notes are always
+# in design/.
+docs = "docs"      # notes and decisions; the Docs panel lists the Markdown here
+schema = "schema"  # the tables the project uses; also in the Docs panel
+tests = "tests"    # test scripts and what they need
+code = "src"       # the scripts and data sources ("." when they are at the root)
+
+[agent]
+# The model for new agent sessions in this project, as "provider/model".
+# Leave it out to use your own default.
+# model = "ollama/qwen3:14b"
+
+[style]
+# "house" for the house style, "server" for the language server's defaults.
+preset = "house"

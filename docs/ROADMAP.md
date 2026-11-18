@@ -141,3 +141,9 @@ release build, installer, self-test and opencode 2.2.5 pass.
   [ADR 0005](adr/0005-a-plan-is-a-document-of-its-own.md).
 - Run a procedure in the sandbox through a configured command (the sandbox is
   private; the IDE would only call it).
+
+## On hold
+
+- **Forms, client scripts and code-behind (2026-11-17).** Wanted eventually, in
+  the IDE and in the demo project (`examples/due-dates`), which is server side
+  only until then. No date: it starts when the user says so, not before.
