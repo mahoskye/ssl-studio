@@ -1,17 +1,22 @@
 /********************************************************************************
 Description.. : Sets the due date of every sample that has none yet.
 Parameters... : -
-Returns...... : Success: {.T., {nSet, nSkipped, aSkipped}}, each skip {sSampleId, sReason}
-                Failure: {.F., {sCode, sMessage}}, with every update rolled back
+Returns...... : Success: {.T., {nSet, nSkipped, aSkipped}}, each skip {sSampleId, sCode, sText}
+                Failure: {.F., {sCode, sMessage}}, with no due date saved
 Author....... :
 Date......... : 2026-11-17
 ********************************************************************************
 _______________________________________________________________________________
-Modification. :
+Modification. : The helpers are private and a skip carries a code with its text.
+                Writing is now DueDates.SaveDueDates, which owns the transaction:
+                this script reads, works the dates out and hands them over.
+                Its answer is read by DueDates.DueDateSummary.Combine.
 Author....... :
-Date......... :
+Date......... : 2026-11-18
 _______________________________________________________________________________
 ********************************************************************************/;
+
+:INCLUDE DueDates.DueDateConstants;
 
 :DECLARE aHolidays, aOutages, aSummary;
 :DECLARE oErr;
@@ -36,37 +41,21 @@ _______________________________________________________________________________
 /*
  * Procedure: LoadHolidays
  * Description: Reads the holidays.
- * Returns: the holidays as an array of dates, empty when there are none
+ * Returns: the holidays as an array of dates, empty when there are none. Raises on failure
 ;
+/*@private;
 :PROCEDURE LoadHolidays;
-	:DECLARE aHolidays, aRows, nIndex;
-
-	/* Whole-day columns are read as invariant, so that a server which keeps times
-	   in UTC does not shift them by its offset into the day before;
-	aRows := LSelect1("
-	    SELECT HOLIDAY_ON
-	    FROM DEMO_HOLIDAYS
-	",,,, {"HOLIDAY_ON"});
-
-	aHolidays := {};
-
-	:FOR nIndex := 1 :TO ALen(aRows);
-		AAdd(aHolidays, aRows[nIndex][1]);
-	:NEXT;
-
-	:RETURN aHolidays;
+	:RETURN RunDS("DueDates.Holidays");
 :ENDPROC;
 
 /*
  * Procedure: LoadOutages
  * Description: Reads the instrument outages.
- * Returns: rows {sInstrumentId, dFrom, dTo} with dTo included, empty when there are none
+ * Returns: rows {sInstrumentId, dFrom, dTo} with dTo included, empty when there are none. Raises on failure
 ;
+/*@private;
 :PROCEDURE LoadOutages;
-	:RETURN LSelect1("
-	    SELECT INSTRUMENT_ID, FROM_ON, TO_ON
-	    FROM DEMO_OUTAGES
-	",,,, {"FROM_ON", "TO_ON"});
+	:RETURN RunDS("DueDates.Outages");
 :ENDPROC;
 
 /* endregion;
@@ -74,114 +63,101 @@ _______________________________________________________________________________
 /* region Due dates;
 
 /*
- * Procedure: RuleFor
- * Description: Picks the due-date rule for a priority.
- * Parameters:
- *   sPriority - RUSH for the rush rule, anything else for the routine rule
- *   nDays     - the turnaround, how many days the work takes
- *   aHolidays - the holidays, an array of dates
- *   aOutages  - the outages, each row {sInstrumentId, dFrom, dTo}
- * Returns: a DueDates.RushDueRule or a DueDates.DueRule object
-;
-:PROCEDURE RuleFor;
-	:PARAMETERS sPriority, nDays, aHolidays, aOutages;
-
-	:IF Upper(AllTrim(sPriority)) == "RUSH";
-		:RETURN CreateUdObject("DueDates.RushDueRule", {nDays, aHolidays, aOutages});
-	:ENDIF;
-
-	:RETURN CreateUdObject("DueDates.DueRule", {nDays, aHolidays, aOutages});
-:ENDPROC;
-
-/*
  * Procedure: ApplyDueDates
- * Description: Sets the due date of each sample that has none, in one transaction.
+ * Description: Works out the due date of each waiting sample, then has them all saved.
  * Parameters:
  *   aHolidays - the holidays, an array of dates
  *   aOutages  - the outages, each row {sInstrumentId, dFrom, dTo}
- * Returns: {nSet, nSkipped, aSkipped}. Raises on any failure, after rolling back
+ * Returns: {nSet, nSkipped, aSkipped}, each skip {sSampleId, sCode, sText}. Raises on any failure
 ;
+/*@private;
 :PROCEDURE ApplyDueDates;
 	:PARAMETERS aHolidays, aOutages;
 
-	:DECLARE aSamples, aSkipped, nIndex, nSet, sReason;
-	:DECLARE bCommit, bStarted;
+	:DECLARE aCombined, aPlan, aSamples, aSaved, aSkipped, aToSave, nIndex, sSampleId;
 
 	aSkipped := {};
-	nSet := 0;
-	bStarted := .F.;
-	bCommit := .F.;
+	aToSave := {};
 
-	:TRY;
-		bStarted := BeginLimsTransaction();
+	/* Reading and working out come first, so that a transaction is open only
+	   while rows are written. RECEIVED_ON is a whole day, read without timezone
+	   conversion, and a NULL comes back as the empty value of its column;
+	aSamples := LSelect1("
+	    SELECT SAMPLE_ID, RECEIVED_ON, PRIORITY, TURNAROUND_DAYS, INSTRUMENT_ID
+	    FROM DEMO_SAMPLES
+	    WHERE DUE_ON IS NULL
+	    ORDER BY SAMPLE_ID
+	",,, .T., {"RECEIVED_ON"});
 
-		/* A NULL comes back as the empty value of its column: an empty date, 0 or "";
-		aSamples := LSelect1("
-		    SELECT SAMPLE_ID, RECEIVED_ON, PRIORITY, TURNAROUND_DAYS, INSTRUMENT_ID
-		    FROM DEMO_SAMPLES
-		    WHERE DUE_ON IS NULL
-		    ORDER BY SAMPLE_ID
-		",,,, {"RECEIVED_ON"});
+	:FOR nIndex := 1 :TO ALen(aSamples);
+		sSampleId := aSamples[nIndex][1];
+		aPlan := DoProc("PlanDueDate", {aSamples[nIndex], aHolidays, aOutages});
 
-		:FOR nIndex := 1 :TO ALen(aSamples);
-			sReason := DoProc("SaveDueDate", {aSamples[nIndex], aHolidays, aOutages});
-
-			:IF Empty(sReason);
-				nSet += 1;
-			:ELSE;
-				AAdd(aSkipped, {aSamples[nIndex][1], sReason});
-			:ENDIF;
-		:NEXT;
-
-		/* Reached only when every sample above went through;
-		bCommit := .T.;
-	:FINALLY;
-		/* Always runs. After an error bCommit is still .F., so this rolls back;
-		:IF bStarted;
-			EndLimsTransaction(, bCommit);
+		:IF Empty(aPlan[2]);
+			AAdd(aToSave, {sSampleId, aPlan[1]});
+		:ELSE;
+			AAdd(aSkipped, {sSampleId, aPlan[2][1], aPlan[2][2]});
 		:ENDIF;
-	:ENDTRY;
+	:NEXT;
 
-	:RETURN {nSet, ALen(aSkipped), aSkipped};
+	/* SaveDueDates owns the writes and their one transaction: all of the dates
+	   are saved or none is. It answers with an envelope and logs its own failure;
+	aSaved := ExecFunction("DueDates.SaveDueDates", {aToSave});
+
+	/* Combine reads the answer and adds its skips, the samples that stopped
+	   waiting after they were read here, to the ones found above. It raises
+	   nothing: {sProblem, aSummary} says what was wrong with the answer, if anything;
+	aCombined := ExecFunction("DueDates.DueDateSummary.Combine", {aSkipped, aSaved});
+
+	/* Anything but success is raised here, so that the :CATCH of this script
+	   gives the caller the one failure the script has;
+	:IF .NOT. Empty(aCombined[1]);
+		RaiseError(aCombined[1]);
+	:ENDIF;
+
+	:RETURN aCombined[2];
 :ENDPROC;
 
 /*
- * Procedure: SaveDueDate
- * Description: Works out the due date of one sample and writes it.
+ * Procedure: PlanDueDate
+ * Description: Works out the due date of one sample, or why it has none. Writes nothing.
  * Parameters:
  *   aSample   - {sSampleId, dReceived, sPriority, nTurnaroundDays, sInstrumentId}
  *   aHolidays - the holidays, an array of dates
  *   aOutages  - the outages, each row {sInstrumentId, dFrom, dTo}
- * Returns: "" when the due date was saved, otherwise the reason the sample was skipped
+ * Returns: {dDue, aSkip}: the due date and {}, or an empty date and one of the Skip constants
 ;
-:PROCEDURE SaveDueDate;
+/*@private;
+:PROCEDURE PlanDueDate;
 	:PARAMETERS aSample, aHolidays, aOutages;
 
-	:DECLARE dDue, dReceived, nDays, oRule;
+	:DECLARE aRuleArgs, dDue, dReceived, nDays, oRule, sInstrumentId, sPriority;
 
+	/* One name for each column that is read, in the order ApplyDueDates selects;
 	dReceived := aSample[2];
+	sPriority := aSample[3];
 	nDays := aSample[4];
+	sInstrumentId := aSample[5];
 
 	:IF Empty(dReceived);
-		:RETURN "No received date";
+		:RETURN {CToD(""), DoProc("SkipNoReceived")};
 	:ENDIF;
 
+	/* The rule gives no date for a turnaround of 0 or less either. It is tested
+	   here so that the summary can say which of the two reasons applies;
 	:IF nDays <= 0;
-		:RETURN "No turnaround";
+		:RETURN {CToD(""), DoProc("SkipNoTurnaround")};
 	:ENDIF;
 
-	oRule := DoProc("RuleFor", {aSample[3], nDays, aHolidays, aOutages});
-	dDue := oRule:DueDate(dReceived, aSample[5]);
+	aRuleArgs := {sPriority, nDays, aHolidays, aOutages};
+	oRule := ExecFunction("DueDates.DueRules.RuleFor", aRuleArgs);
+	dDue := oRule:DueDate(dReceived, sInstrumentId);
 
-	RunSQL("
-	    UPDATE DEMO_SAMPLES SET
-	        DUE_ON = ?
-	    WHERE SAMPLE_ID = ?
-	      AND DUE_ON IS NULL
-	",, {dDue, aSample[1]});
+	:IF Empty(dDue);
+		:RETURN {dDue, DoProc("SkipNotReached")};
+	:ENDIF;
 
-	/* No row changed means the sample got a due date, or was removed, after it was read;
-	:RETURN IIf(LimsRecordsAffected() == 1, "", "No longer waiting for a due date");
+	:RETURN {dDue, {}};
 :ENDPROC;
 
 /* endregion;

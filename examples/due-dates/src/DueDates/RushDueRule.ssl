@@ -8,14 +8,26 @@ Author....... :
 Date......... : 2026-11-17
 ********************************************************************************
 _______________________________________________________________________________
-Modification. :
+Modification. : The name is an overridden method, where it was a field written
+                after the base constructor ran.
 Author....... :
-Date......... :
+Date......... : 2026-11-18
 _______________________________________________________________________________
 ********************************************************************************/;
 
 :CLASS RushDueRule;
 :INHERIT DueDates.DueRule;
+
+/* region Overrides;
+
+/*
+ * Procedure: RuleName
+ * Description: Names the rule, for the inherited Describe.
+ * Returns: "Rush"
+;
+:PROCEDURE RuleName;
+	:RETURN "Rush";
+:ENDPROC;
 
 /*
  * Procedure: CountsSaturday
@@ -32,14 +44,20 @@ _______________________________________________________________________________
  * Returns: a text such as "Rush: 2 working days, Saturdays included"
 ;
 :PROCEDURE Describe;
-	:RETURN Base:Describe() + ", Saturdays included";
+	:DECLARE sFmt;
+
+	sFmt := "";
+
+	:RETURN sFmt:Format("{0}, Saturdays included", {Base:Describe()});
 :ENDPROC;
+
+/* endregion;
 
 /*
  * Procedure: Constructor
- * Description: Sets the rule up as the base does, under the name Rush.
+ * Description: Sets the rule up as the base does.
  * Parameters:
- *   nTurnaroundDays - how many days the work takes
+ *   nTurnaroundDays - how many days the work takes. 0 or less means no turnaround
  *   aHolidays       - the holidays, an array of dates
  *   aOutages        - the outages, each row {sInstrumentId, dFrom, dTo} with dTo included
  * Returns: nothing
@@ -48,9 +66,7 @@ _______________________________________________________________________________
 	:PARAMETERS nTurnaroundDays, aHolidays, aOutages;
 
 	/* A base constructor that takes parameters does not run on its own for a
-	   subclass, so it is called here with the same arguments;
+	   subclass, so it is called here. An argument the caller left out arrives as
+	   NIL and takes the default the base constructor gives it;
 	Base:Constructor(nTurnaroundDays, aHolidays, aOutages);
-
-	/* After the base call, which sets the routine name;
-	Me:sRuleName := "Rush";
 :ENDPROC;

@@ -1,0 +1,100 @@
+/********************************************************************************
+Description.. : Unit tests for DueDates.DueRules, and for how the two rule classes describe
+                themselves. No database is read or written.
+                Run DueDatesTests.DueRulesTests.RunTests. It returns the tally.
+Parameters... : -
+Returns...... : -
+Author....... :
+Date......... : 2026-11-18
+********************************************************************************
+_______________________________________________________________________________
+Modification. :
+Author....... :
+Date......... :
+_______________________________________________________________________________
+********************************************************************************/;
+
+/*
+ * Procedure: RunTests
+ * Description: Runs every test of this script, each on its own.
+ * Returns: {nPassed, nTotal, aResults}, each result {sLabel, bPassed}
+;
+:PROCEDURE RunTests;
+	:DECLARE aArgs, aTests;
+
+	aTests := {
+		"TestRuleForRush", "TestRuleForPaddedLowerCase", "TestRuleForUnknownPriority",
+		"TestRuleForNoPriority", "TestMaxWalkDays", "TestDescribe"
+	};
+	aArgs := {"DueDatesTests.DueRulesTests", aTests};
+
+	:RETURN ExecFunction("DueDatesTests.TestSupport.RunAll", aArgs);
+:ENDPROC;
+
+/* region The rule for a priority;
+
+:PROCEDURE TestRuleForRush;
+	/* RUSH gets the rule that counts Saturdays;
+	:DECLARE oRule;
+
+	oRule := ExecFunction("DueDates.DueRules.RuleFor", {"RUSH", 2});
+
+	:RETURN {"RUSH gets the rush rule", "Rush", oRule:RuleName()};
+:ENDPROC;
+
+:PROCEDURE TestRuleForPaddedLowerCase;
+	/* The priority is typed by people: " rush " is still rush work;
+	:DECLARE oRule;
+
+	oRule := ExecFunction("DueDates.DueRules.RuleFor", {" rush ", 2});
+
+	:RETURN {"A padded lower-case rush is rush", .T., oRule:CountsSaturday()};
+:ENDPROC;
+
+:PROCEDURE TestRuleForUnknownPriority;
+	/* A priority nobody defined is routine work, not an error;
+	:DECLARE oRule;
+
+	oRule := ExecFunction("DueDates.DueRules.RuleFor", {"URGENT", 2});
+
+	:RETURN {"An unknown priority gets the routine rule", "Routine", oRule:RuleName()};
+:ENDPROC;
+
+:PROCEDURE TestRuleForNoPriority;
+	/* Empty case: no priority at all is routine work too;
+	:DECLARE oRule;
+
+	oRule := ExecFunction("DueDates.DueRules.RuleFor", {"", 2});
+
+	:RETURN {"No priority gets the routine rule", .F., oRule:CountsSaturday()};
+:ENDPROC;
+
+/* endregion;
+
+/* region What the rules say;
+
+:PROCEDURE TestMaxWalkDays;
+	/* The limit is written here as a number on purpose: a change to the constant
+	   should fail a test and be looked at;
+	:DECLARE nActual;
+
+	nActual := ExecFunction("DueDates.DueDateConstants.MaxWalkDays");
+
+	:RETURN {"A walk looks 730 days ahead", 730, nActual};
+:ENDPROC;
+
+:PROCEDURE TestDescribe;
+	/* The rush text is the base text, under the name the rush class gives, plus
+	   the Saturday rule. One day is written without the plural;
+	:DECLARE oRoutine, oRush, sActual, sExpected, sFmt;
+
+	sFmt := "";
+	oRoutine := ExecFunction("DueDatesTests.TestSupport.NewRule", {3});
+	oRush := ExecFunction("DueDatesTests.TestSupport.NewRule", {1, .T.});
+	sActual := sFmt:Format("{0} | {1}", {oRoutine:Describe(), oRush:Describe()});
+	sExpected := "Routine: 3 working days | Rush: 1 working day, Saturdays included";
+
+	:RETURN {"Each rule describes itself", sExpected, sActual};
+:ENDPROC;
+
+/* endregion;

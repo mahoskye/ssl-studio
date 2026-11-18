@@ -24,25 +24,56 @@ A sample with no instrument is never held up by an outage.
 
 | Folder | What it holds |
 | --- | --- |
-| `src/DueDates/` | The scripts, the two classes and the data source |
+| `src/DueDates/` | The scripts, the two classes, the include and the data sources |
+| `src/Legacy/` | One script left rough on purpose, for the IDE to tidy |
 | `docs/` | Notes and decisions |
 | `schema/` | The three tables the project reads and writes |
-| `tests/DueDatesTests/` | Test scripts for the calendar, availability and the rules |
-| `design/` | The plan for `SetSampleDueDates` as a flow chart |
+| `tests/DueDatesTests/` | Test scripts, and the two scripts they share |
+| `design/` | The plan for `SetSampleDueDates`: its chart and its spec |
 
 ## The scripts
 
 | Script | Kind | What it does |
 | --- | --- | --- |
-| `WorkCalendar` | utility | Weekends, holidays, adding working days |
-| `Availability` | utility | Whether an instrument is available on a day |
+| `SetSampleDueDates` | script | Plans a due date for every sample that has none |
+| `SaveDueDates` | script | Saves planned due dates, all of them or none |
+| `DueDateSummary` | utility | Joins the skips and reads what saving answered |
+| `DueSoonReport` | script | Lists the samples due soon, with their rule and status |
 | `DueRule` | class | A turnaround in working days; returns a due date |
 | `RushDueRule` | child class | `DueRule`, counting Saturdays as well |
-| `SetSampleDueDates` | script | Sets `DUE_ON` for every sample that has none |
+| `DueRules` | utility | Picks the rule for a priority |
+| `WorkCalendar` | utility | Weekends, holidays, counting working days |
+| `Availability` | utility | Whether an instrument is available on a day |
+| `DueDateConstants` | include | Priorities, skip codes and the 730-day limit |
 | `SamplesDueSoon` | data source | The samples due in the next few days |
+| `Holidays` | data source | The days the lab is closed |
+| `Outages` | data source | The days each instrument is out |
+| `OldDueDateCheck` | rough on purpose | Flags overdue samples the old way; nothing calls it |
+
+[src/README.md](src/README.md) says how the scripts call each other.
+
+## What it shows in SSL Studio
+
+- **`SetSampleDueDates.ssl`:** regions as frames in Blocks, the size meter, the Objects outline.
+- **`DueSoonReport.ssl`:** `:BEGINCASE` arms, a text `:REGION`, nested regions, a `RunDS` call.
+- **`DueRule.ssl` and `RushDueRule.ssl`:** a class and the one that inherits it.
+- **The call graph:** scripts joined by their calls, the data sources and the include.
+- **`SetSampleDueDates.plan.json`:** a plan with its spec and build record, so its steps link to the code.
+- **`OldDueDateCheck.ssl`:** findings in Problems and Health, and something to run Tidy on.
+- **The Docs panel:** these documents rendered, and the schema.
 
 ## Working on it
 
 Open this folder in SSL Studio (`hutch run web examples/due-dates` from the
-repository root). The tests are SSL procedures that run inside STARLIMS; they
-have not been run there.
+repository root).
+
+- **Checked:** every script but `OldDueDateCheck` is clean under the pinned
+  language server's strict validation, and the repository's tests keep it so
+  (`test/examples.test.ts`).
+- **Run:** all 104 tests pass in the SSL sandbox runner
+  (`bun scripts/demo-sandbox.ts`, 2026-11-18). The runner is a compatibility
+  runtime on SQLite, not STARLIMS: nothing here has run in STARLIMS itself.
+  [tests/README.md](tests/README.md) says what the run does and does not show.
+- **Expected in Problems:** an information row for each `/*@private;` marker
+  in `SetSampleDueDates`, `SaveDueDates` and `DueSoonReport`. The markers are
+  required ([decision 7](docs/Decisions.md)).

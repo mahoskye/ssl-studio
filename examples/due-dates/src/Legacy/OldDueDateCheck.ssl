@@ -1,0 +1,73 @@
+/********************************************************************************
+Description.. : Lists the samples that are past their due date.
+                LEFT ROUGH ON PURPOSE. This script is tidy material for SSL Studio: it
+                is written the way code inherited from years ago often is, so that the
+                Problems panel, the Health findings and the tidy sequence have
+                something to work on. Nothing calls it, and nothing should.
+Parameters... : days - how many days late a sample must be before it is listed
+                prio - a priority to keep, or nothing for all of them
+Returns...... : a text, one line for each late sample
+Author....... :
+Date......... : 2026-11-18
+********************************************************************************
+_______________________________________________________________________________
+Modification. :
+Author....... :
+Date......... :
+_______________________________________________________________________________
+********************************************************************************/;
+
+:PROCEDURE chkOverdue;
+:PARAMETERS days, prio;
+:DECLARE rows, i, msg, cnt, tmp, d, Late, oldCount;
+cnt := 0;
+msg := "";
+sep := Chr(13);
+d := Today() - days;
+:IF .NOT. Empty(prio);
+rows := SQLExecute("select SAMPLE_ID, PRIORITY, DUE_ON, INSTRUMENT_ID from DEMO_SAMPLES where DUE_ON < '" + DToS(d) + "' and PRIORITY = '" + prio + "'");
+:ELSE;
+rows := SQLExecute("select SAMPLE_ID, PRIORITY, DUE_ON, INSTRUMENT_ID from DEMO_SAMPLES where DUE_ON < '" + DToS(d) + "'");
+:ENDIF;
+:FOR i := 1 :TO Len(rows);
+	:IF .NOT. Empty(rows[i][3]);
+		Late := Today() - rows[i][3];
+		:IF rows[i][2] = "RUSH" .AND. Late > 2 .OR. Late > 14;
+			:IF rows[i][2] = "RUSH";
+				:IF rows[i][4] <> "";
+					:IF Late > 14;
+						msg := msg + rows[i][1] + " RUSH VERY LATE on " + rows[i][4] + sep;
+					:ELSE;
+						msg := msg + rows[i][1] + " RUSH LATE on " + rows[i][4] + sep;
+					:ENDIF;
+				:ELSE;
+					msg := msg + rows[i][1] + " RUSH LATE" + sep;
+				:ENDIF;
+			:ELSE;
+				msg := msg + rows[i][1] + " VERY LATE" + sep;
+			:ENDIF;
+			cnt := cnt + 1;
+		:ELSE;
+			:IF Late > 0;
+				msg := msg + rows[i][1] + " late" + sep;
+				cnt := cnt + 1;
+			:ENDIF;
+		:ENDIF;
+	:ENDIF;
+:NEXT;
+:BEGINCASE;
+:CASE cnt = 0;
+	msg := "nothing late";
+:CASE cnt > 10;
+	msg := "MANY LATE" + sep + msg;
+:ENDCASE;
+/* the old count, kept in case it is wanted again;
+:IF .F.;
+	tmp := LSearch("select count(*) from DEMO_SAMPLES where DUE_ON is not null", 0);
+	msg := msg + " of " + LimsString(tmp);
+:ENDIF;
+:RETURN msg;
+:ERROR;
+ErrorMes("chkOverdue", "could not list the late samples");
+:RETURN "";
+:ENDPROC;

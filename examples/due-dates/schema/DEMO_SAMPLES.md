@@ -1,6 +1,6 @@
 # DEMO_SAMPLES
 
-One row for each sample. `SetSampleDueDates` fills `DUE_ON` where it is empty.
+One row for each sample. `SetSampleDueDates` plans a due date where `DUE_ON` is empty, and `SaveDueDates` writes it.
 
 | Column | Type | Null | What it holds |
 | --- | --- | --- | --- |

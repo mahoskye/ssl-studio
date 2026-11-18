@@ -1,0 +1,15 @@
+/* =============================================================================
+   DATA SOURCE: Outages (SQL)
+   PURPOSE:     The days an instrument is not available, by instrument and
+                first day.
+   PARAMS:      none
+   RETURNS:     rows {INSTRUMENT_ID, FROM_ON, TO_ON} with TO_ON included, the
+                form DueDates.Availability takes. FROM_ON and TO_ON are whole
+                days, read without timezone conversion.
+   ============================================================================= */
+:NULLASBLANK := true;
+:INVARIANTDATECOLUMNS := FROM_ON, TO_ON;
+
+SELECT INSTRUMENT_ID, FROM_ON, TO_ON
+FROM DEMO_OUTAGES
+ORDER BY INSTRUMENT_ID, FROM_ON

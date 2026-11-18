@@ -6,11 +6,15 @@ Author....... :
 Date......... : 2026-11-17
 ********************************************************************************
 _______________________________________________________________________________
-Modification. :
+Modification. : An empty date is handled on purpose, counting forward uses the
+                walk of the rule classes in place of a second one, and the
+                constants are read as procedures of the include.
 Author....... :
-Date......... :
+Date......... : 2026-11-18
 _______________________________________________________________________________
 ********************************************************************************/;
+
+:INCLUDE DueDates.DueDateConstants;
 
 /* region Day tests;
 
@@ -20,7 +24,7 @@ _______________________________________________________________________________
  * Parameters:
  *   dDate          - the date to test
  *   bCountSaturday - .T. when Saturday is a working day (rush work)
- * Returns: .T. on a Sunday, and on a Saturday unless bCountSaturday is .T.
+ * Returns: .T. on a Sunday, and on a Saturday unless bCountSaturday is .T. An empty date is .F.
 ;
 :PROCEDURE IsWeekend;
 	:PARAMETERS dDate, bCountSaturday;
@@ -28,8 +32,13 @@ _______________________________________________________________________________
 
 	:DECLARE nWeekday;
 
-	/* DOW numbers the week from Sunday = 1 to Saturday = 7. An empty date gives 0,
-	   which is neither, so an empty date is not a weekend;
+	/* DOW numbers the week from Sunday = 1 to Saturday = 7, and gives 0 for an
+	   empty date. An empty date is no day of the week, so it is said here and not
+	   left to fall through the tests below;
+	:IF Empty(dDate);
+		:RETURN .F.;
+	:ENDIF;
+
 	nWeekday := DOW(dDate);
 
 	:IF nWeekday == 7;
@@ -69,14 +78,16 @@ _______________________________________________________________________________
  *   dDate          - the date to test
  *   aHolidays      - the holidays, an array of dates
  *   bCountSaturday - .T. when Saturday is a working day (rush work)
- * Returns: .T. when the date is neither a weekend day nor a holiday
+ * Returns: .T. when the date is neither a weekend day nor a holiday. An empty date is .F.
 ;
 :PROCEDURE IsWorkingDay;
 	:PARAMETERS dDate, aHolidays, bCountSaturday;
 	:DEFAULT aHolidays, {};
 	:DEFAULT bCountSaturday, .F.;
 
-	:IF DoProc("IsWeekend", {dDate, bCountSaturday});
+	/* An empty date is neither a weekend day nor a holiday, and still no day on
+	   which work is done;
+	:IF Empty(dDate) .OR. DoProc("IsWeekend", {dDate, bCountSaturday});
 		:RETURN .F.;
 	:ENDIF;
 
@@ -94,22 +105,20 @@ _______________________________________________________________________________
  *   dDate          - the date to start from
  *   aHolidays      - the holidays, an array of dates
  *   bCountSaturday - .T. when Saturday is a working day (rush work)
- * Returns: dDate itself when it is a working day, otherwise the next one
+ * Returns: dDate when it is a working day, otherwise the next one. An empty date for an empty dDate, or when none is found within the day limit
 ;
 :PROCEDURE NextWorkingDay;
 	:PARAMETERS dDate, aHolidays, bCountSaturday;
 	:DEFAULT aHolidays, {};
 	:DEFAULT bCountSaturday, .F.;
 
-	:DECLARE dDay;
+	:IF Empty(dDate);
+		:RETURN dDate;
+	:ENDIF;
 
-	dDay := dDate;
-
-	:WHILE .NOT. DoProc("IsWorkingDay", {dDay, aHolidays, bCountSaturday});
-		dDay := dDay + 1;
-	:ENDWHILE;
-
-	:RETURN dDay;
+	/* The first working day on or after a date is one working day counted from
+	   the day before it;
+	:RETURN DoProc("AddWorkingDays", {dDate - 1, 1, aHolidays, bCountSaturday});
 :ENDPROC;
 
 /*
@@ -120,7 +129,7 @@ _______________________________________________________________________________
  *   nDays          - how many working days to count
  *   aHolidays      - the holidays, an array of dates
  *   bCountSaturday - .T. when Saturday is a working day (rush work)
- * Returns: the date of the last day counted, or dStart unchanged when nDays is 0 or less
+ * Returns: the last day counted. dStart unchanged when it is empty or nDays is 0 or less. An empty date when nDays is not reached within the day limit
 ;
 :PROCEDURE AddWorkingDays;
 	:PARAMETERS dStart, nDays, aHolidays, bCountSaturday;
@@ -128,20 +137,59 @@ _______________________________________________________________________________
 	:DEFAULT aHolidays, {};
 	:DEFAULT bCountSaturday, .F.;
 
-	:DECLARE dDay, nCounted;
+	:DECLARE oRule, sPriority;
 
-	dDay := dStart;
-	nCounted := 0;
+	:IF Empty(dStart) .OR. nDays <= 0;
+		:RETURN dStart;
+	:ENDIF;
 
-	:WHILE nCounted < nDays;
-		dDay := dDay + 1;
+	/* A due date with no instrument is working days counted forward, so the rule
+	   classes do the counting. There is one walk through the days, and its limit
+	   and the Saturday rule are theirs;
+	sPriority := DoProc("PriorityRoutine");
 
-		:IF DoProc("IsWorkingDay", {dDay, aHolidays, bCountSaturday});
-			nCounted += 1;
-		:ENDIF;
+	:IF bCountSaturday;
+		sPriority := DoProc("PriorityRush");
+	:ENDIF;
+
+	oRule := ExecFunction("DueDates.DueRules.RuleFor", {sPriority, nDays, aHolidays});
+
+	:RETURN oRule:DueDate(dStart);
+:ENDPROC;
+
+/*
+ * Procedure: WorkingDaysUntil
+ * Description: Counts the working days after a day, up to and including a later day.
+ * Parameters:
+ *   dFrom          - the day to count from, which is not counted itself
+ *   dTo            - the last day to count
+ *   aHolidays      - the holidays, an array of dates
+ *   bCountSaturday - .T. when Saturday is a working day (rush work)
+ * Returns: the number of working days. 0 for an empty date or when dTo is not after dFrom. A span longer than the day limit is counted up to the limit
+;
+:PROCEDURE WorkingDaysUntil;
+	:PARAMETERS dFrom, dTo, aHolidays, bCountSaturday;
+	:DEFAULT aHolidays, {};
+	:DEFAULT bCountSaturday, .F.;
+
+	:DECLARE dDay, dLast, nCount;
+
+	nCount := 0;
+
+	:IF Empty(dFrom) .OR. Empty(dTo);
+		:RETURN nCount;
+	:ENDIF;
+
+	dLast := Min(dTo, dFrom + DoProc("MaxWalkDays"));
+	dDay := DoProc("NextWorkingDay", {dFrom + 1, aHolidays, bCountSaturday});
+
+	/* From one working day to the next. An empty day means none is in reach;
+	:WHILE .NOT. Empty(dDay) .AND. dDay <= dLast;
+		nCount += 1;
+		dDay := DoProc("NextWorkingDay", {dDay + 1, aHolidays, bCountSaturday});
 	:ENDWHILE;
 
-	:RETURN dDay;
+	:RETURN nCount;
 :ENDPROC;
 
 /* endregion;

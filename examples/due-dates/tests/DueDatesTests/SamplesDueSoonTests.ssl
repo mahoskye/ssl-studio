@@ -1,0 +1,143 @@
+/********************************************************************************
+Description.. : Tests for the data source DueDates.SamplesDueSoon against the database.
+                NEEDS THE ROWS OF schema/demo.sql, loaded fresh: no sample has a due
+                date yet. Each test runs inside a transaction that is rolled back,
+                so the rows are left as they were.
+                Run DueDatesTests.SamplesDueSoonTests.RunTests. It returns the tally.
+Parameters... : -
+Returns...... : -
+Author....... :
+Date......... : 2026-11-18
+********************************************************************************
+_______________________________________________________________________________
+Modification. :
+Author....... :
+Date......... :
+_______________________________________________________________________________
+********************************************************************************/;
+
+/*
+ * Procedure: RunTests
+ * Description: Runs every test of this script, each on its own and rolled back.
+ * Returns: {nPassed, nTotal, aResults}, each result {sLabel, bPassed}
+;
+:PROCEDURE RunTests;
+	:DECLARE aArgs, aTests;
+
+	aTests := {
+		"TestWindowBothEnds", "TestWindowLeavesOutEarlier", "TestWindowOfOneDay",
+		"TestNothingDue", "TestReturnsTurnaround", "TestNegativeDays",
+		"TestDaysNotANumber", "TestFromNotADate"
+	};
+	aArgs := {"DueDatesTests.SamplesDueSoonTests", aTests, .T.};
+
+	:RETURN ExecFunction("DueDatesTests.TestSupport.RunAll", aArgs);
+:ENDPROC;
+
+/* region The window;
+
+:PROCEDURE TestWindowBothEnds;
+	/* Two days from Thursday 19: S-1001 is due on the first day and S-1004 on the
+	   last, Saturday 21. Both ends are in. S-1002 and S-1003, due Monday 23, are not;
+	:DECLARE aRows;
+
+	ExecFunction("DueDates.SetSampleDueDates");
+	aRows := RunDS("DueDates.SamplesDueSoon", {2, DateFromNumbers(2026, 11, 19)});
+
+	:RETURN {"Both ends of the window are in", "S-1001 S-1004", DoProc("Ids", {aRows})};
+:ENDPROC;
+
+:PROCEDURE TestWindowLeavesOutEarlier;
+	/* Three days from Friday 20: S-1001, due the day before, is left out. The
+	   rest come soonest first, and by sample id on the same day;
+	:DECLARE aRows;
+
+	ExecFunction("DueDates.SetSampleDueDates");
+	aRows := RunDS("DueDates.SamplesDueSoon", {3, DateFromNumbers(2026, 11, 20)});
+
+	:RETURN {"Earlier days are left out", "S-1004 S-1002 S-1003", DoProc("Ids", {aRows})};
+:ENDPROC;
+
+:PROCEDURE TestWindowOfOneDay;
+	/* 0 days ahead is the day itself: Monday 23 has S-1002 and S-1003;
+	:DECLARE aRows;
+
+	ExecFunction("DueDates.SetSampleDueDates");
+	aRows := RunDS("DueDates.SamplesDueSoon", {0, DateFromNumbers(2026, 11, 23)});
+
+	:RETURN {"0 days is a window of one day", "S-1002 S-1003", DoProc("Ids", {aRows})};
+:ENDPROC;
+
+:PROCEDURE TestNothingDue;
+	/* Empty case: nothing is due in the first days of March 2027;
+	:DECLARE aRows;
+
+	ExecFunction("DueDates.SetSampleDueDates");
+	aRows := RunDS("DueDates.SamplesDueSoon", {3, DateFromNumbers(2027, 3, 1)});
+
+	:RETURN {"No sample due, no rows", 0, ALen(aRows)};
+:ENDPROC;
+
+:PROCEDURE TestReturnsTurnaround;
+	/* S-1004, alone on Saturday 21, has a turnaround of 2 as the sixth column;
+	:DECLARE aRows;
+
+	ExecFunction("DueDates.SetSampleDueDates");
+	aRows := RunDS("DueDates.SamplesDueSoon", {0, DateFromNumbers(2026, 11, 21)});
+
+	:RETURN {"The turnaround is the sixth column", 2, aRows[1][6]};
+:ENDPROC;
+
+/* endregion;
+
+/* region A window that is not one;
+
+:PROCEDURE TestNegativeDays;
+	/* Failure path: a window that ends before it starts has no rows, and no error;
+	:DECLARE aRows;
+
+	aRows := RunDS("DueDates.SamplesDueSoon", {-1, DateFromNumbers(2026, 11, 19)});
+
+	:RETURN {"Negative days, no rows", 0, ALen(aRows)};
+:ENDPROC;
+
+:PROCEDURE TestDaysNotANumber;
+	/* Failure path: days given as a text are not added to a date. No rows, no error;
+	:DECLARE aRows;
+
+	aRows := RunDS("DueDates.SamplesDueSoon", {"3", DateFromNumbers(2026, 11, 19)});
+
+	:RETURN {"Days that are not a number, no rows", 0, ALen(aRows)};
+:ENDPROC;
+
+:PROCEDURE TestFromNotADate;
+	/* Failure path: a first day given as a text is not compared with DUE_ON;
+	:DECLARE aRows;
+
+	aRows := RunDS("DueDates.SamplesDueSoon", {3, "2026-11-19"});
+
+	:RETURN {"A first day that is not a date, no rows", 0, ALen(aRows)};
+:ENDPROC;
+
+/*
+ * Procedure: Ids
+ * Description: Lists the sample ids of data source rows, in the order they came.
+ * Parameters:
+ *   aRows - rows that start with a sample id
+ * Returns: the ids with a space between them, "" for no rows
+;
+:PROCEDURE Ids;
+	:PARAMETERS aRows;
+
+	:DECLARE nIndex, sIds;
+
+	sIds := "";
+
+	:FOR nIndex := 1 :TO ALen(aRows);
+		sIds += AllTrim(aRows[nIndex][1]) + " ";
+	:NEXT;
+
+	:RETURN AllTrim(sIds);
+:ENDPROC;
+
+/* endregion;

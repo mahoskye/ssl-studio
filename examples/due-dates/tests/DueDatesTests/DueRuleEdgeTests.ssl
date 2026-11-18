@@ -1,0 +1,155 @@
+/********************************************************************************
+Description.. : Unit tests for DueDates.DueRule and DueDates.RushDueRule away from the worked
+                examples: rush cases, empty inputs, defaults and the day limit.
+                No database is read or written. The limit tests walk 730 days.
+                Run DueDatesTests.DueRuleEdgeTests.RunTests. It returns the tally.
+Parameters... : -
+Returns...... : -
+Author....... :
+Date......... : 2026-11-18
+********************************************************************************
+_______________________________________________________________________________
+Modification. :
+Author....... :
+Date......... :
+_______________________________________________________________________________
+********************************************************************************/;
+
+/*
+ * Procedure: RunTests
+ * Description: Runs every test of this script, each on its own.
+ * Returns: {nPassed, nTotal, aResults}, each result {sLabel, bPassed}
+;
+:PROCEDURE RunTests;
+	:DECLARE aArgs, aTests;
+
+	aTests := {
+		"TestOutageOnTheLastDay", "TestRushSkipsHoliday", "TestRushSkipsSunday",
+		"TestTrimmedInstrumentId", "TestConstructorDefaults", "TestEmptyReceivedDate",
+		"TestNegativeTurnaround", "TestLastDayInReach", "TestTurnaroundOutOfReach",
+		"TestOutageOutOfReach"
+	};
+	aArgs := {"DueDatesTests.DueRuleEdgeTests", aTests};
+
+	:RETURN ExecFunction("DueDatesTests.TestSupport.RunAll", aArgs);
+:ENDPROC;
+
+/* region Days that do not count;
+
+:PROCEDURE TestOutageOnTheLastDay;
+	/* Monday 16, 2 days, on BAL-01. Tuesday 17 counts, and Wednesday 18 would be
+	   the due day but BAL-01 is out on 18 and 19: the count finishes on Friday 20;
+	:DECLARE dActual, oRule;
+
+	oRule := ExecFunction("DueDatesTests.TestSupport.NewRule", {2});
+	dActual := oRule:DueDate(DateFromNumbers(2026, 11, 16), "BAL-01");
+
+	:RETURN {"An outage on the day the count would finish", "20261120", dActual};
+:ENDPROC;
+
+:PROCEDURE TestRushSkipsHoliday;
+	/* Rush, Wednesday 25, 2 days: Thursday 26 is a holiday for rush work too, so
+	   Friday 27 and Saturday 28 count;
+	:DECLARE dActual, oRule;
+
+	oRule := ExecFunction("DueDatesTests.TestSupport.NewRule", {2, .T.});
+	dActual := oRule:DueDate(DateFromNumbers(2026, 11, 25), "");
+
+	:RETURN {"A holiday does not count for rush work", "20261128", dActual};
+:ENDPROC;
+
+:PROCEDURE TestRushSkipsSunday;
+	/* Rush, Friday 20, 2 days: Saturday 21 counts, Sunday 22 never does, Monday 23 counts;
+	:DECLARE dActual, oRule;
+
+	oRule := ExecFunction("DueDatesTests.TestSupport.NewRule", {2, .T.});
+	dActual := oRule:DueDate(DateFromNumbers(2026, 11, 20), "");
+
+	:RETURN {"Sunday does not count for rush work", "20261123", dActual};
+:ENDPROC;
+
+:PROCEDURE TestTrimmedInstrumentId;
+	/* S-1002 with its instrument typed as " bal-01 ": the BAL-01 outage still applies;
+	:DECLARE dActual, oRule;
+
+	oRule := ExecFunction("DueDatesTests.TestSupport.NewRule", {3});
+	dActual := oRule:DueDate(DateFromNumbers(2026, 11, 16), " bal-01 ");
+
+	:RETURN {"A padded lower-case id still has its outage", "20261123", dActual};
+:ENDPROC;
+
+/* endregion;
+
+/* region Defaults and empty inputs;
+
+:PROCEDURE TestConstructorDefaults;
+	/* A rush rule made with a turnaround and nothing else has no holidays and no
+	   outages. Thursday 19, 2 days: Friday 20 and Saturday 21 count;
+	:DECLARE dActual, oRule;
+
+	oRule := CreateUdObject("DueDates.RushDueRule", {2});
+	dActual := oRule:DueDate(DateFromNumbers(2026, 11, 19));
+
+	:RETURN {"A rule with only a turnaround", "20261121", dActual};
+:ENDPROC;
+
+:PROCEDURE TestEmptyReceivedDate;
+	/* Empty case: with no received date there is no due date, and no walk;
+	:DECLARE dActual, oRule;
+
+	oRule := ExecFunction("DueDatesTests.TestSupport.NewRule", {3});
+	dActual := oRule:DueDate(CToD(""), "");
+
+	:RETURN {"No received date, no due date", "", dActual};
+:ENDPROC;
+
+:PROCEDURE TestNegativeTurnaround;
+	/* Empty case: a turnaround below 0 is no turnaround, the same as 0;
+	:DECLARE dActual, oRule;
+
+	oRule := ExecFunction("DueDatesTests.TestSupport.NewRule", {-2});
+	dActual := oRule:DueDate(DateFromNumbers(2026, 11, 16), "");
+
+	:RETURN {"A negative turnaround, no due date", "", dActual};
+:ENDPROC;
+
+/* endregion;
+
+/* region The day limit;
+
+:PROCEDURE TestLastDayInReach;
+	/* From Monday 16 November 2026 the walk reaches Wednesday 15 November 2028,
+	   730 days on. Those days hold 522 weekdays and two holidays, 26 November
+	   and 25 December 2026: the 520th working day is the last day in reach;
+	:DECLARE dActual, oRule;
+
+	oRule := ExecFunction("DueDatesTests.TestSupport.NewRule", {520});
+	dActual := oRule:DueDate(DateFromNumbers(2026, 11, 16), "");
+
+	:RETURN {"The last day in reach is a due date", "20281115", dActual};
+:ENDPROC;
+
+:PROCEDURE TestTurnaroundOutOfReach;
+	/* Failure path: one working day more than the limit holds gives no due date;
+	:DECLARE dActual, oRule;
+
+	oRule := ExecFunction("DueDatesTests.TestSupport.NewRule", {521});
+	dActual := oRule:DueDate(DateFromNumbers(2026, 11, 16), "");
+
+	:RETURN {"A turnaround past the limit, no due date", "", dActual};
+:ENDPROC;
+
+:PROCEDURE TestOutageOutOfReach;
+	/* Failure path: an outage with no known end is recorded with a far-off last
+	   day. The walk stops at the limit and gives no due date;
+	:DECLARE aOutages, dActual, dReceived, oRule;
+
+	dReceived := DateFromNumbers(2026, 11, 16);
+	aOutages := {{"GC-07", dReceived, DateFromNumbers(2099, 12, 31)}};
+	oRule := CreateUdObject("DueDates.DueRule", {1, {}, aOutages});
+	dActual := oRule:DueDate(dReceived, "GC-07");
+
+	:RETURN {"An outage past the limit, no due date", "", dActual};
+:ENDPROC;
+
+/* endregion;

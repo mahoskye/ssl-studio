@@ -16,9 +16,22 @@ Nobody runs it in production; it has to stay small, readable and correct.
 - Do not rename a procedure or change its parameters unless asked.
 - Everything here is invented. Do not bring in code, table names or data from
   a real STARLIMS system.
-- `WorkCalendar` and `Availability` take their holidays and outages as
-  arrays and run no SQL. Only `SetSampleDueDates` and `SamplesDueSoon` touch
-  the database.
+- `WorkCalendar`, `Availability`, `DueRules`, `DueDateSummary` and the two
+  classes run no SQL: they are given what they work on. SQL is in
+  `SetSampleDueDates`, `SaveDueDates` and the three data sources only.
+- A procedure that reports failure by raising is `/*@private;`, so that only
+  the script's own `:TRY` can call it. Nothing else is annotated.
+- A walk through days never looks more than 730 days ahead (`MaxWalkDays`),
+  and returns an empty date for an empty one.
+- A constant is a procedure in `DueDateConstants`, read with a one-part
+  `DoProc("MaxWalkDays")`. A variable declared in an include is not there
+  when another script calls one of this script's procedures by name.
+- `DoProc`'s arguments are written as an array literal, `{a, b}`, never
+  passed as a variable: the compiler refuses the second form.
+- Run the tests after a change: `bun scripts/demo-sandbox.ts` from the
+  repository root. The language server accepts things that do not run.
+- `src/Legacy/OldDueDateCheck.ssl` is rough on purpose. Do not tidy it in a
+  commit, call it, or copy from it.
 - A rule about which days count belongs in `DueRule` or a class that inherits
   it, not in `SetSampleDueDates`.
 - A table in the docs has at most four columns, short values in every column
@@ -29,9 +42,13 @@ Nobody runs it in production; it has to stay small, readable and correct.
 
 ## Where things are
 
-- `src/DueDates/`: scripts and the data source. The folder name is the script
-  category: `ExecFunction("DueDates.WorkCalendar.AddWorkingDays", ...)`.
+- `src/DueDates/`: the scripts, classes, include and data sources. The folder
+  name is the script category:
+  `ExecFunction("DueDates.WorkCalendar.AddWorkingDays", ...)`.
+- `src/Legacy/`: the one rough script.
 - `docs/`: notes and decisions.
 - `schema/`: the tables the project reads and writes. Check a table here before writing SQL for it.
-- `tests/DueDatesTests/`: test scripts and what they need.
-- `design/`: plans and tidy notes.
+- `tests/DueDatesTests/`: test scripts and what they need. `TestSupport` runs
+  them; `DbTestSupport` is for the ones that need the database.
+- `design/`: the plan for `SetSampleDueDates` (chart, spec, build record),
+  and tidy notes.

@@ -9,15 +9,27 @@ Author....... :
 Date......... : 2026-11-17
 ********************************************************************************
 _______________________________________________________________________________
-Modification. :
+Modification. : A walk stops at the day limit, a turnaround of 0 or less gives no
+                due date, and the name is a method a subclass overrides.
 Author....... :
-Date......... :
+Date......... : 2026-11-18
 _______________________________________________________________________________
 ********************************************************************************/;
 
 :CLASS DueRule;
 
-:DECLARE aHolidays, aOutages, nTurnaroundDays, sRuleName;
+:DECLARE aHolidays, aOutages, nMaxWalkDays, nTurnaroundDays;
+
+/* region Answers a subclass may change;
+
+/*
+ * Procedure: RuleName
+ * Description: Names the rule, for Describe.
+ * Returns: "Routine". A subclass overrides this to change the answer
+;
+:PROCEDURE RuleName;
+	:RETURN "Routine";
+:ENDPROC;
 
 /*
  * Procedure: CountsSaturday
@@ -27,6 +39,24 @@ _______________________________________________________________________________
 :PROCEDURE CountsSaturday;
 	:RETURN .F.;
 :ENDPROC;
+
+/*
+ * Procedure: Describe
+ * Description: Describes the rule in a few words, for a report line or a tooltip.
+ * Returns: a text such as "Routine: 5 working days"
+;
+:PROCEDURE Describe;
+	:DECLARE sFmt, sUnit;
+
+	sFmt := "";
+	sUnit := IIf(Me:nTurnaroundDays == 1, "working day", "working days");
+
+	:RETURN sFmt:Format("{0}: {1} {2}", {Me:RuleName(), Me:nTurnaroundDays, sUnit});
+:ENDPROC;
+
+/* endregion;
+
+/* region Counting days;
 
 /*
  * Procedure: CountsDay
@@ -57,27 +87,29 @@ _______________________________________________________________________________
 
 /*
  * Procedure: DueDate
- * Description: Works out the day a sample is due.
+ * Description: Works out the day a sample is due. This is the one walk through the days.
  * Parameters:
  *   dReceived     - the day the sample was received, which is not counted itself
  *   sInstrumentId - the instrument the sample needs, or empty when it needs none
- * Returns: the due day, or dReceived unchanged when it is empty or the turnaround is 0
+ * Returns: the due day, or an empty date when dReceived is empty, the turnaround is 0 or less, or the turnaround is not reached within the day limit
 ;
 :PROCEDURE DueDate;
 	:PARAMETERS dReceived, sInstrumentId;
 	:DEFAULT sInstrumentId, "";
 
-	:DECLARE dDay, nCounted;
+	:DECLARE dDay, dLast, nCounted;
 
-	/* Nothing to count from;
-	:IF Empty(dReceived);
-		:RETURN dReceived;
+	/* Nothing to count from, or nothing to count. An empty date also stays empty
+	   when a day is added, so a walk that started from one would never move;
+	:IF Empty(dReceived) .OR. Me:nTurnaroundDays <= 0;
+		:RETURN CToD("");
 	:ENDIF;
 
 	dDay := dReceived;
+	dLast := dReceived + Me:nMaxWalkDays;
 	nCounted := 0;
 
-	:WHILE nCounted < Me:nTurnaroundDays;
+	:WHILE nCounted < Me:nTurnaroundDays .AND. dDay < dLast;
 		dDay := dDay + 1;
 
 		:IF Me:CountsDay(dDay, sInstrumentId);
@@ -85,27 +117,22 @@ _______________________________________________________________________________
 		:ENDIF;
 	:ENDWHILE;
 
+	/* The limit came first: a long outage, or a turnaround longer than the limit.
+	   No date is better than one that is wrong;
+	:IF nCounted < Me:nTurnaroundDays;
+		:RETURN CToD("");
+	:ENDIF;
+
 	:RETURN dDay;
 :ENDPROC;
 
-/*
- * Procedure: Describe
- * Description: Describes the rule in a few words, for a log line or a tooltip.
- * Returns: a text such as "Routine: 5 working days"
-;
-:PROCEDURE Describe;
-	:DECLARE sUnit;
-
-	sUnit := IIf(Me:nTurnaroundDays == 1, " working day", " working days");
-
-	:RETURN Me:sRuleName + ": " + LimsString(Me:nTurnaroundDays) + sUnit;
-:ENDPROC;
+/* endregion;
 
 /*
  * Procedure: Constructor
  * Description: Keeps the turnaround and the calendar the rule counts against.
  * Parameters:
- *   nTurnaroundDays - how many days the work takes
+ *   nTurnaroundDays - how many days the work takes. 0 or less means no turnaround
  *   aHolidays       - the holidays, an array of dates
  *   aOutages        - the outages, each row {sInstrumentId, dFrom, dTo} with dTo included
  * Returns: nothing
@@ -119,5 +146,8 @@ _______________________________________________________________________________
 	Me:nTurnaroundDays := nTurnaroundDays;
 	Me:aHolidays := aHolidays;
 	Me:aOutages := aOutages;
-	Me:sRuleName := "Routine";
+
+	/* An :INCLUDE here would make every shared constant a method of the rule, so
+	   the limit is asked for by its three-part name, once for each rule;
+	Me:nMaxWalkDays := ExecFunction("DueDates.DueDateConstants.MaxWalkDays");
 :ENDPROC;

@@ -1,0 +1,146 @@
+/********************************************************************************
+Description.. : What the tests against the database share: a transaction that is always
+                rolled back, and the reading and adding of DEMO_SAMPLES rows.
+                Nothing here is left in the database once RolledBack returns.
+Parameters... : -
+Returns...... : -
+Author....... :
+Date......... : 2026-11-18
+********************************************************************************
+_______________________________________________________________________________
+Modification. :
+Author....... :
+Date......... :
+_______________________________________________________________________________
+********************************************************************************/;
+
+/*
+ * Procedure: RolledBack
+ * Description: Runs a script or a procedure inside a transaction and rolls the transaction back.
+ * Parameters:
+ *   sTarget - what to run, as Category.Script or Category.Script.Procedure
+ *   aArgs   - its arguments
+ * Returns: what it returned. Raises what it raised, after rolling back
+;
+:PROCEDURE RolledBack;
+	:PARAMETERS sTarget, aArgs;
+	:DEFAULT aArgs, {};
+
+	:DECLARE bStarted, vResult;
+
+	bStarted := .F.;
+
+	/* The tests that write run through here, so the demo rows are left as they
+	   were. This counts on a commit made inside being undone with the rest when
+	   the outer transaction rolls back. A rollback made inside is carried out
+	   only when the outer transaction ends: DueDatesTests.RollbackTests;
+	:TRY;
+		bStarted := BeginLimsTransaction();
+		vResult := ExecFunction(sTarget, aArgs);
+	:FINALLY;
+		:IF bStarted;
+			EndLimsTransaction(, .F.);
+		:ENDIF;
+	:ENDTRY;
+
+	:RETURN vResult;
+:ENDPROC;
+
+/* region Samples;
+
+/*
+ * Procedure: AddSample
+ * Description: Adds a sample with no instrument and no due date.
+ * Parameters:
+ *   sSampleId - the sample
+ *   dDay      - the day it was received. Empty leaves RECEIVED_ON NULL
+ *   sPriority - its priority, as typed
+ *   nDays     - its turnaround
+ * Returns: nothing
+;
+:PROCEDURE AddSample;
+	:PARAMETERS sSampleId, dDay, sPriority, nDays;
+
+	:DECLARE dReceived;
+
+	RunSQL("
+	    INSERT INTO DEMO_SAMPLES (
+	        SAMPLE_ID, PRIORITY, TURNAROUND_DAYS
+	    )
+	    VALUES (
+	        ?, ?, ?
+	    )
+	",, {sSampleId, sPriority, nDays});
+
+	/* No empty date is bound: how one is saved is not something to count on. A
+	   day is bound as an invariant date at midnight, so no time of day goes with it;
+	:IF .NOT. Empty(dDay);
+		dReceived := DateFromNumbers(Year(dDay), Month(dDay), Day(dDay),,,,, .T.);
+		RunSQL("
+		    UPDATE DEMO_SAMPLES SET
+		        RECEIVED_ON = ?
+		    WHERE SAMPLE_ID = ?
+		",, {dReceived, sSampleId});
+	:ENDIF;
+:ENDPROC;
+
+/*
+ * Procedure: PlannedRow
+ * Description: Builds a row for DueDates.SaveDueDates, due on a day of November 2026.
+ * Parameters:
+ *   sSampleId - the sample
+ *   nDay      - the day of November 2026
+ * Returns: {sSampleId, dDue}, the day as an invariant date at midnight
+;
+:PROCEDURE PlannedRow;
+	:PARAMETERS sSampleId, nDay;
+
+	:RETURN {sSampleId, DateFromNumbers(2026, 11, nDay,,,,, .T.)};
+:ENDPROC;
+
+/*
+ * Procedure: DueOn
+ * Description: Reads the due date of one sample.
+ * Parameters:
+ *   sSampleId - the sample, which must exist
+ * Returns: its DUE_ON, an empty date when it has none
+;
+:PROCEDURE DueOn;
+	:PARAMETERS sSampleId;
+
+	:DECLARE aRows;
+
+	aRows := LSelect1("
+	    SELECT DUE_ON
+	    FROM DEMO_SAMPLES
+	    WHERE SAMPLE_ID = ?
+	",, {sSampleId}, .T., {"DUE_ON"});
+
+	:RETURN aRows[1][1];
+:ENDPROC;
+
+/*
+ * Procedure: SkipCode
+ * Description: Finds why a sample was skipped, in what SetSampleDueDates or SaveDueDates returned.
+ * Parameters:
+ *   aResult   - {.T., {nSet, nSkipped, aSkipped}}, each skip {sSampleId, sCode, sText}
+ *   sSampleId - the sample to find
+ * Returns: the code of its skip, or "" when the sample was not skipped
+;
+:PROCEDURE SkipCode;
+	:PARAMETERS aResult, sSampleId;
+
+	:DECLARE aSkipped, nIndex;
+
+	aSkipped := aResult[2][3];
+
+	:FOR nIndex := 1 :TO ALen(aSkipped);
+		:IF AllTrim(aSkipped[nIndex][1]) == sSampleId;
+			:RETURN aSkipped[nIndex][2];
+		:ENDIF;
+	:NEXT;
+
+	:RETURN "";
+:ENDPROC;
+
+/* endregion;
