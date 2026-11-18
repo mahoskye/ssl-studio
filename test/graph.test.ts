@@ -71,8 +71,8 @@ test("a call graph from ssl/callGraph (shape version 1)", () => {
 	expect(g.nodes.find((n) => n.name === "Count")!.region).toBe("Queries");
 });
 
-// Classes: the server marks a class file (isClass) and, once it sends them (L4), class relations as edge kinds.
-import { addInheritance, relationOf } from "../src/view/graph/model";
+// Classes: the server marks a class file (isClass) and sends class relations as edge kinds (L4).
+import { relationOf } from "../src/view/graph/model";
 
 describe("classes in the graph", () => {
 	const uri = (name: string) => `file:///w/src/DueDates/${name}.ssl`;
@@ -83,7 +83,6 @@ describe("classes in the graph", () => {
 		{ id: uri("RushDueRule"), kind: "script", name: "DueDates.RushDueRule", isClass: true, location: loc("RushDueRule") },
 		{ id: uri("SetSampleDueDates"), kind: "script", name: "DueDates.SetSampleDueDates", location: loc("SetSampleDueDates") },
 	];
-	const names = new Map(nodes.map((n) => [n.name, toPath(n.location.uri)]));
 
 	test("a class file is marked as one", () => {
 		const g = fromCallGraph({ nodes, edges: [] }, toPath);
@@ -92,36 +91,6 @@ describe("classes in the graph", () => {
 			["RushDueRule.ssl", true],
 			["SetSampleDueDates.ssl", false],
 		]);
-	});
-
-	test("a class inherits its parent: one edge between the two scripts, whatever the case of the name", () => {
-		const g = addInheritance(fromCallGraph({ nodes, edges: [] }, toPath), new Map([[toPath(uri("RushDueRule")), "duedates.DUERULE"]]), names);
-		expect(g.edges).toEqual([{ from: `${toPath(uri("RushDueRule"))}#`, to: `${toPath(uri("DueRule"))}#`, crossScript: true, sites: [], kind: "Inherit", resolved: true }]);
-		expect(relationOf(g.edges[0]!.kind)).toBe("inherits");
-		// Both scripts need a top-level node for the edge to land on.
-		expect(g.topLevel.sort()).toEqual([toPath(uri("DueRule")), toPath(uri("RushDueRule"))].sort());
-	});
-
-	test("a parent outside the workspace, or a class that names itself, adds nothing", () => {
-		const base = fromCallGraph({ nodes, edges: [] }, toPath);
-		expect(addInheritance(base, new Map([[toPath(uri("RushDueRule")), "Other.Base"]]), names).edges).toEqual([]);
-		expect(addInheritance(base, new Map([[toPath(uri("DueRule")), "DueDates.DueRule"]]), names).edges).toEqual([]);
-	});
-
-	test("outside a canonical layout the parent is found by the last part of its name, when one script has it", () => {
-		const base = fromCallGraph({ nodes, edges: [] }, toPath);
-		const flat = new Map([["DueRule", toPath(uri("DueRule"))], ["RushDueRule", toPath(uri("RushDueRule"))]]);
-		const parents = new Map([[toPath(uri("RushDueRule")), "DueDates.DueRule"]]);
-		expect(addInheritance(base, parents, flat).edges.map((e) => [e.from, e.to])).toEqual([[`${toPath(uri("RushDueRule"))}#`, `${toPath(uri("DueRule"))}#`]]);
-		// Two scripts of that name: which one is meant cannot be told, so no line is drawn.
-		const two = new Map([...flat, ["Other.DueRule", "/w/other/DueRule.ssl"]]);
-		expect(addInheritance(base, parents, two).edges).toEqual([]);
-	});
-
-	test("adding the same inheritance twice gives one edge", () => {
-		const parents = new Map([[toPath(uri("RushDueRule")), "DueDates.DueRule"]]);
-		const once = addInheritance(fromCallGraph({ nodes, edges: [] }, toPath), parents, names);
-		expect(addInheritance(once, parents, names).edges.length).toBe(1);
 	});
 
 	test("when the server sends class relations, they are read as what they are, beside any call between the same two", () => {
@@ -138,9 +107,13 @@ describe("classes in the graph", () => {
 			toPath,
 		);
 		expect(g.edges.map((e) => relationOf(e.kind)).sort()).toEqual(["call", "creates", "inherits", "method"]);
+		// An edge between two files lands on their top levels, so each needs that node.
+		const inherits = g.edges.find((e) => relationOf(e.kind) === "inherits")!;
+		expect([inherits.from, inherits.to]).toEqual([`${toPath(uri("RushDueRule"))}#`, `${toPath(uri("DueRule"))}#`]);
+		expect(g.topLevel.sort()).toEqual([toPath(uri("DueRule")), toPath(uri("RushDueRule")), toPath(uri("SetSampleDueDates"))].sort());
 	});
 
-	test("the kinds the server sends today are all calls", () => {
+	test("the four call kinds, and no kind at all, are calls", () => {
 		expect(["DoProc", "ExecFunction", "RunDS", "Include", undefined].map(relationOf)).toEqual(["call", "call", "call", "call", "call"]);
 	});
 });

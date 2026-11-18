@@ -2,8 +2,7 @@
 import { monaco } from "../editor/monaco";
 import { session } from "../lsp/session";
 import { backend } from "../backend";
-import { splitHeader } from "../blocks/model";
-import { addInheritance, assemble, fromCallGraph, procId, relationOf, type CallIn, type Graph, type ProcIn, type ScriptIn } from "./model";
+import { assemble, fromCallGraph, procId, type CallIn, type Graph, type ProcIn, type ScriptIn } from "./model";
 
 const PROCEDURE = new Set([monaco.languages.SymbolKind.Function, monaco.languages.SymbolKind.Method]);
 const MAX_PROCEDURES = 3000;
@@ -15,38 +14,6 @@ async function pool<T>(items: T[], size: number, work: (item: T) => Promise<void
 	}));
 }
 
-type ServerNode = { kind: string; name: string; isClass?: boolean; location?: { uri: string } };
-
-const scriptNames = (nodes: ServerNode[], toPath: (uri: string) => string) => new Map(nodes.filter((n) => n.kind === "script" && n.location?.uri).map((n) => [n.name, toPath(n.location!.uri)]));
-
-/**
- * Each class file and the class it inherits. The server's syntax tree marks
- * the `:INHERIT` statement and gives its range; what follows the keyword in
- * that statement is the parent's name, cut out the way a block's condition is
- * (blocks/model.ts splitHeader). Nothing else of the file is read (ADR 0003).
- */
-async function inheritedBy(nodes: ServerNode[], toPath: (uri: string) => string): Promise<Map<string, string>> {
-	const parents = new Map<string, string>();
-	if (!session.supports("ssl/syntaxTree")) return parents;
-	await pool(
-		nodes.filter((n) => n.kind === "script" && n.isClass && n.location?.uri),
-		6,
-		async (n) => {
-			const uri = n.location!.uri;
-			const model = await session.ensureModel(uri);
-			if (!model) return;
-			const tree = await session.request("ssl/syntaxTree", { textDocument: { uri: model.uri.toString() } }).catch(() => null);
-			const inherit = (tree?.nodes ?? []).find((node: any) => node.kind === "statement" && String(node.keyword).toUpperCase() === "INHERIT");
-			if (!inherit) return;
-			const { start, end } = inherit.range;
-			const text = model.getValueInRange(new monaco.Range(start.line + 1, start.character + 1, end.line + 1, end.character + 1));
-			const parent = splitHeader(text, "INHERIT")?.condition;
-			if (parent) parents.set(toPath(uri), parent);
-		},
-	);
-	return parents;
-}
-
 export async function loadGraph(progress: (done: number, total: number) => void): Promise<Graph & { truncated: boolean }> {
 	if (session.supports("ssl/callGraph")) {
 		// One request (L2): data sources, :INCLUDEs and unresolved targets too.
@@ -56,9 +23,8 @@ export async function loadGraph(progress: (done: number, total: number) => void)
 		const toPath = (uri: string) => monaco.Uri.parse(uri).fsPath;
 		const scriptPaths = (result?.nodes ?? []).filter((n: any) => n.kind === "script" && n.location?.uri).map((n: any) => toPath(n.location.uri));
 		const sizes = new Map(Object.entries(await backend.sizes(scriptPaths).catch(() => ({}))));
-		let graph = fromCallGraph({ nodes: result?.nodes ?? [], edges: result?.edges ?? [] }, toPath, sizes);
-		// A server that does not send inheritance itself (0.30.0, before L4): it is read from each class file's own :INHERIT statement.
-		if (!graph.edges.some((e) => relationOf(e.kind) === "inherits")) graph = addInheritance(graph, await inheritedBy(result?.nodes ?? [], toPath), scriptNames(result?.nodes ?? [], toPath));
+		// Calls and class relations alike are the server's (L2, L4): nothing of a file is read here.
+		const graph = fromCallGraph({ nodes: result?.nodes ?? [], edges: result?.edges ?? [] }, toPath, sizes);
 		// While the server is still indexing, calls into unindexed files show as unresolved.
 		return { ...graph, truncated: Boolean(result?.indexing) };
 	}

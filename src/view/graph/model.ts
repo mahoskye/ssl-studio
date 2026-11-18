@@ -17,10 +17,9 @@ export const procId = (path: string, name: string) => `${path}#${name}`;
 
 /**
  * What an edge says, from the server's kind for it. DoProc, ExecFunction,
- * RunDS and Include are calls. The three class relations (CreateUdObject,
- * Method, Inherit) come from a server that sends them (L4 in
- * docs/LSP-REQUESTS.md); for one that does not, "inherits" is worked out
- * here, from the `:INHERIT` statement its syntax tree marks (graph/load.ts).
+ * RunDS and Include are calls. CreateUdObject, Method and Inherit are the
+ * three class relations, sent since starlims-lsp 0.31.0 (L4 in
+ * docs/LSP-REQUESTS.md). An older server sends none, and none is drawn.
  */
 export type Relation = "call" | "inherits" | "creates" | "method";
 export const relationOf = (kind?: string): Relation => {
@@ -28,32 +27,6 @@ export const relationOf = (kind?: string): Relation => {
 	return k.startsWith("inherit") ? "inherits" : k.startsWith("create") ? "creates" : k.startsWith("method") ? "method" : "call";
 };
 export const RELATION_WORDS: Record<Relation, string> = { call: "calls", inherits: "inherits", creates: "creates an object of", method: "calls the method" };
-
-/**
- * Adds "this class inherits that one" to a graph, between the two scripts.
- * `parents` is each class file's path and the name it inherits, as written;
- * `scripts` is every script's name, as the server gives it, and its path. A
- * parent that is not in the workspace is left out: there is nothing to point at.
- */
-export function addInheritance(graph: Graph, parents: Map<string, string>, scripts: Map<string, string>): Graph {
-	const byName = new Map([...scripts].map(([name, path]) => [name.toLowerCase(), path]));
-	// Outside a canonical layout the server names a script by its file alone, and :INHERIT still
-	// names the category: the last part is then the name, as in the server's own resolution, when one script has it.
-	const last = (name: string) => name.toLowerCase().split(".").pop()!;
-	const byLast = new Map<string, string[]>();
-	for (const [name, path] of scripts) byLast.set(last(name), [...(byLast.get(last(name)) ?? []), path]);
-	const edges = [...graph.edges];
-	const topLevel = new Set(graph.topLevel);
-	for (const [path, parent] of parents) {
-		const named = parent.trim().toLowerCase();
-		const sameLast = byLast.get(last(named)) ?? [];
-		const to = byName.get(named) ?? (sameLast.length === 1 ? sameLast[0] : undefined);
-		if (!to || to === path || edges.some((e) => e.from === `${path}#` && e.to === `${to}#` && relationOf(e.kind) === "inherits")) continue;
-		edges.push({ from: `${path}#`, to: `${to}#`, crossScript: true, sites: [], kind: "Inherit", resolved: true });
-		topLevel.add(path).add(to);
-	}
-	return { ...graph, edges, topLevel: [...topLevel] };
-}
 
 /** Joins call sites to the procedures that contain them. A site outside any procedure counts as its script's top level. */
 export function assemble(scripts: ScriptIn[], calls: CallIn[]): Graph {
@@ -154,9 +127,9 @@ export function callList(graph: Graph, edges: GraphEdge[]): ListedScript[] {
 // feature.call_graph): nodes are scripts, procedures, data sources and
 // unresolved targets; edges are DoProc, ExecFunction, RunDS and Include, from
 // the procedure holding the call or from the file for code outside every
-// procedure. Include edges run between scripts' top levels here. A server
-// after 0.30.0 adds the class edges: CreateUdObject and Inherit end at a
-// class file, which is that script's top level here, and Method at a method.
+// procedure. Include edges run between scripts' top levels here. The class
+// edges (since 0.31.0): CreateUdObject and Inherit end at a class file,
+// which is that script's top level here, and Method at a method.
 
 type Pos = { line: number; character: number };
 type Location = { uri: string; range: { start: Pos; end: Pos } };

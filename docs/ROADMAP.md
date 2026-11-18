@@ -168,11 +168,11 @@ from the keyboard, and says what it is).
 - **Classes:** Blocks draws a class's head as one card and a procedure with
   its doc block as one; the call graph marks class files and draws
   inheritance. Both use what the server's syntax tree already marks.
-- **Classes in the call graph (L4).** Built in the language server
-  (mahoskye/starlims-lsp#373, open for review, not yet released): an edge for an
-  object created, a method called and a class inherited. The graph draws
-  each with its own line, names them in its key and its list, and counts
-  them apart from calls. The pin stays at 0.30.0 until a release has them.
+- **Classes in the call graph (L4).** In the language server since 0.31.0
+  (mahoskye/starlims-lsp#373), the pinned version: an edge for an object
+  created, a method called and a class inherited. The graph draws each with
+  its own line, names them in its key and its list, and counts them apart
+  from calls. The IDE no longer works inheritance out by itself.
 - **Left for the language server** ([LSP-REQUESTS](LSP-REQUESTS.md), filed
   as mahoskye/starlims-lsp#370 to #372): the
   tables a script uses (L6), the required exception to "prefer unannotated

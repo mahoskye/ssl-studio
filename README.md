@@ -43,7 +43,7 @@ Status: M1 to M6 done in a first version, and tested on Linux and Windows
 ## Running it
 
 Needs [Bun](https://bun.sh), and
-[`starlims-lsp`](https://github.com/mahoskye/starlims-lsp/releases) 0.30.0 on
+[`starlims-lsp`](https://github.com/mahoskye/starlims-lsp/releases) 0.31.0 on
 `PATH` (or set `lspPath` in Settings). opencode 2.2.x is optional: it powers
 the Agent panel.
 

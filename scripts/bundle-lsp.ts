@@ -6,7 +6,7 @@
 //   bun scripts/bundle-lsp.ts [--download]
 import { $ } from "bun";
 import { homedir } from "node:os";
-import { chmodSync, copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { findLsp, LSP_PIN } from "../src/bun/tools";
 
@@ -32,7 +32,10 @@ if (process.argv.includes("--download")) {
 		if (!response.ok) throw new Error(`${url}: ${response.status}`);
 		await Bun.write(path, response);
 	};
-	await fetchTo(`${release}/${asset}`, target);
+	// Beside the old one, then renamed over it: a server that is running (an open
+	// SSL Studio) keeps its own copy, where writing into the file in use fails.
+	await fetchTo(`${release}/${asset}`, `${target}.new`);
+	renameSync(`${target}.new`, target);
 	await fetchTo(`${release}/THIRD-PARTY-NOTICES.md`, join(vendor, "THIRD-PARTY-NOTICES.md"));
 	await fetchTo(`https://raw.githubusercontent.com/mahoskye/starlims-lsp/v${LSP_PIN}/LICENSE`, join(vendor, "STARLIMS-LSP-LICENSE"));
 } else if ((await versionOf(target)) === LSP_PIN && existsSync(join(vendor, "STARLIMS-LSP-LICENSE"))) {

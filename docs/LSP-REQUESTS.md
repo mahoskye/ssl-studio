@@ -58,7 +58,7 @@ targets, `RunDS` data sources and `:INCLUDE` paths for go to definition.
 
 ## L3: semantic tokens
 
-**Released in starlims-lsp 0.30.0 (2026-11-03)**, SSL Studio's pinned version
+**Released in starlims-lsp 0.30.0 (2026-11-03)**
 (mahoskye/starlims-lsp#366, PR #367).
 
 The IDE highlights with the formatter's TextMate grammar. Semantic tokens let
@@ -92,9 +92,9 @@ edges. A project built on classes shows little of its real structure:
 `SetSampleDueDates` has no line to the rule it creates or to the method it
 calls on it.
 
-**Built in the server (2026-11-18), not yet released.** In
-mahoskye/starlims-lsp#373, open for review, `ssl/callGraph` sends three more
-edge kinds, and the shape version stays 1:
+**Released in starlims-lsp 0.31.0 (2026-11-18)**, SSL Studio's pinned
+version (mahoskye/starlims-lsp#369, PR #373). `ssl/callGraph` sends three
+more edge kinds, and the shape version stays 1:
 
 - `CreateUdObject`: from the procedure holding
   `CreateUdObject("Category.Class", …)` to the class file.
@@ -117,12 +117,10 @@ and dot for a method call), the key names the ones on screen, the list says
 file's top-level box is labelled as the class
 (`src/view/graph/model.ts`, `relationOf`).
 
-**With the pinned 0.30.0,** which sends none of the three, the IDE still
-marks a class file (the server's `isClass`) and draws "this class inherits
-that one" from the `:INHERIT` statement the syntax tree marks: what follows
-the keyword in that one statement is taken as the parent's name, the way a
-block's condition is cut out. That reading goes when the pin moves to a
-release with these edges.
+**No reading of its own:** until 0.31.0 the IDE worked inheritance out by
+itself, from the `:INHERIT` statement the syntax tree marks. That is gone.
+With an older server the graph marks class files and draws no class
+relation.
 
 ### L5: a class header and doc blocks in the syntax tree
 
