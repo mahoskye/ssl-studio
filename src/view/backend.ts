@@ -18,6 +18,10 @@ export function on<K extends keyof BackendEvents>(event: K, listener: Listener<K
 
 type Caller = (method: string, args: unknown[]) => Promise<unknown>;
 
+/** Told when the browser host's connection drops: nothing works until the page is reloaded. */
+const lost: (() => void)[] = [];
+export const onConnectionLost = (listener: () => void) => void lost.push(listener);
+
 export const inApp = typeof (window as any).__electrobun !== "undefined";
 
 async function connectElectrobun(): Promise<Caller> {
@@ -46,8 +50,16 @@ async function connectSocket(): Promise<Caller> {
 		socket.addEventListener("open", resolve);
 		socket.addEventListener("error", reject);
 	});
+	let open = true;
+	socket.addEventListener("close", () => {
+		open = false;
+		for (const waiter of pending.values()) waiter.reject(new Error("The connection to SSL Studio was lost."));
+		pending.clear();
+		lost.forEach((listener) => listener());
+	});
 	return (method, args) =>
 		new Promise((resolve, reject) => {
+			if (!open) return reject(new Error("The connection to SSL Studio was lost. Reload the page."));
 			const id = next++;
 			pending.set(id, { resolve, reject });
 			socket.send(JSON.stringify({ id, method, args } as Call));

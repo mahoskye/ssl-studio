@@ -2,7 +2,7 @@
 // README.md and an AGENTS.md at its root. The IDE writes all three once, from
 // the templates below, and after that only reads them: project.toml is edited
 // as text, so its comments survive.
-import { existsSync, mkdirSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmdirSync, unlinkSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import type { DocFile, Project, Settings } from "../shared/protocol";
 import { workspaceDir } from "./paths";
@@ -77,15 +77,22 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 	return list;
 }
 
-/** Writes what a project needs and does not have. Never overwrites. */
-export async function setupProject(root: string): Promise<string[]> {
+/**
+ * Writes what a project needs and does not have. Never overwrites. With
+ * `dryRun` nothing is written: the answer is what would be, for the user to
+ * see before agreeing.
+ */
+export async function setupProject(root: string, dryRun = false): Promise<string[]> {
 	const project = await readProject(root);
 	const made: string[] = [];
+	const wrote = new Map<string, string>();
 	const put = async (path: string, content: string) => {
 		if (existsSync(path)) return;
+		made.push(relative(root, path));
+		if (dryRun) return;
 		mkdirSync(dirname(path), { recursive: true });
 		await Bun.write(path, content);
-		made.push(relative(root, path));
+		wrote.set(path, content);
 	};
 	await put(project.path, projectToml(project.name));
 	if (!found(root, "README.md")) await put(join(root, "README.md"), readme(project));
@@ -101,7 +108,37 @@ export async function setupProject(root: string): Promise<string[]> {
 	let scripts = false;
 	for (const path of new WorkspaceFiles(root).files()) if ((scripts = SCRIPT.test(path))) break;
 	if (!scripts) await start(project.code, "Code", "The project's scripts and data sources.");
+	if (!dryRun) lastSetup.set(root, wrote);
 	return made;
+}
+
+/** What the last "Set up project" wrote in each folder, exactly as written, for taking it back. */
+const lastSetup = new Map<string, Map<string, string>>();
+
+/**
+ * Takes back the last "Set up project" in this folder: each file it wrote is
+ * removed if it still says what was written, and so is a folder it left
+ * empty. A file someone has changed since is theirs, and stays. Says what
+ * was removed and what was kept.
+ */
+export async function undoSetup(root: string): Promise<{ removed: string[]; kept: string[] }> {
+	const wrote = lastSetup.get(root);
+	lastSetup.delete(root);
+	const removed: string[] = [];
+	const kept: string[] = [];
+	const name = (path: string) => relative(root, path);
+	for (const [path, content] of wrote ?? []) {
+		if (!existsSync(path)) continue;
+		if ((await Bun.file(path).text()) !== content) {
+			kept.push(name(path));
+			continue;
+		}
+		unlinkSync(path);
+		removed.push(name(path));
+		// The folder it was in, and the one above, when the file was all they held.
+		for (let dir = dirname(path); dir !== root && dir.startsWith(root) && !readdirSync(dir).length; dir = dirname(dir)) rmdirSync(dir);
+	}
+	return { removed, kept };
 }
 
 export const projectToml = (name: string) => `# SSL Studio project settings. Edit this file by hand: the IDE reads it and

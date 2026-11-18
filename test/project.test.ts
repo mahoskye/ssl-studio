@@ -1,8 +1,8 @@
 import { afterAll, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { listDocs, projectSettings, readProject, setupProject } from "../src/bun/project";
+import { listDocs, projectSettings, readProject, setupProject, undoSetup } from "../src/bun/project";
 import { merge } from "../src/bun/settings";
 import { WorkspaceFiles } from "../src/bun/workspace";
 
@@ -85,4 +85,43 @@ test("the document list puts README and AGENTS first, missing or not, and says w
 		["schema", "README.md", true, undefined],
 		["plans", "Orders.plan.json", true, undefined],
 	]);
+});
+
+test("the preview says what setup would create and writes nothing", async () => {
+	const root = fresh("preview");
+	const planned = await setupProject(root, true);
+	expect(planned.sort()).toEqual([join(".ssl-studio", "project.toml"), "AGENTS.md", "README.md", join("docs", "README.md"), join("schema", "README.md"), join("src", "README.md"), join("tests", "README.md")].sort());
+	expect(readdirSync(root)).toEqual([]);
+	// What was previewed is what gets written.
+	expect((await setupProject(root)).sort()).toEqual(planned.sort());
+});
+
+test("undoing a setup removes what it wrote, with the folders it left empty", async () => {
+	const root = fresh("undo");
+	writeFileSync(join(root, "Notes.txt"), "mine\n");
+	await setupProject(root);
+	const { removed, kept } = await undoSetup(root);
+	expect(removed.length).toBe(7);
+	expect(kept).toEqual([]);
+	expect(readdirSync(root)).toEqual(["Notes.txt"]);
+});
+
+test("undoing a setup keeps a file that was changed since, and a folder that now holds something else", async () => {
+	const root = fresh("undo-kept");
+	await setupProject(root);
+	writeFileSync(join(root, "README.md"), "# Written by hand\n");
+	writeFileSync(join(root, "docs", "Decisions.md"), "# Decisions\n");
+	const { removed, kept } = await undoSetup(root);
+	expect(kept).toEqual(["README.md"]);
+	expect(removed).toContain(join("docs", "README.md"));
+	expect(readdirSync(root).sort()).toEqual(["README.md", "docs"]);
+	expect(readdirSync(join(root, "docs"))).toEqual(["Decisions.md"]);
+});
+
+test("there is nothing to undo twice, or in a folder that was never set up", async () => {
+	const root = fresh("undo-once");
+	await setupProject(root);
+	await undoSetup(root);
+	expect(await undoSetup(root)).toEqual({ removed: [], kept: [] });
+	expect(await undoSetup(fresh("never"))).toEqual({ removed: [], kept: [] });
 });

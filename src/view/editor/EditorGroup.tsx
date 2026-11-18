@@ -2,13 +2,15 @@
 // group's active document. Two groups side by side make a split.
 import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { monaco } from "./monaco";
-import { activePath, closeTab, documents, openFile, revealSignal, setState, state, takeReveal } from "../state";
+import { activePath, closeAllTabs, closeOtherTabs, closeTab, documents, focusRequest, openFile, revealSignal, revert, save, saveAll, setState, split, state, takeReveal } from "../state";
 import { symbols } from "../panels/Objects";
 import { flatRegions, regionColor, symbolPath } from "./regions";
 import { BlocksView } from "../blocks/BlocksView";
 import { isPlanPath } from "../plan/model";
 import { PlanView } from "../plan/PlanView";
 import { baseName } from "../../shared/paths";
+import { tabLabels } from "./tabs";
+import { Menu, type MenuItem } from "../Menu";
 import { isMarkdown } from "../project";
 import { MarkdownView } from "./MarkdownView";
 
@@ -25,7 +27,10 @@ export function EditorGroup(props: { index: number }) {
 	const [lineCount, setLineCount] = createSignal(0);
 	const isPlan = () => isPlanPath(group().active);
 	const showChart = () => isPlan() && !state.planText[group().active!];
-	const showBlocks = () => group().mode === "blocks" && !isPlan();
+	const isSsl = () => Boolean(group().active && documents.get(group().active!)?.model.getLanguageId() === "ssl");
+	// Blocks are a view of SSL only. The group remembers the choice, so the next
+	// script opens as blocks again, but a Markdown or SQL file never does.
+	const showBlocks = () => group().mode === "blocks" && isSsl() && !isPlan();
 	const isDoc = () => isMarkdown(group().active);
 	const showRendered = () => isDoc() && !state.mdText[group().active!];
 
@@ -38,7 +43,7 @@ export function EditorGroup(props: { index: number }) {
 			minimap: { enabled: state.settings.minimap },
 			renderWhitespace: "selection",
 			"semanticHighlighting.enabled": true,
-			inlayHints: { enabled: "on" },
+			inlayHints: { enabled: state.settings.inlayHints === false ? "off" : "on" },
 			fixedOverflowWidgets: true,
 			scrollBeyondLastLine: false,
 		});
@@ -52,8 +57,15 @@ export function EditorGroup(props: { index: number }) {
 		const stop = revealSignal.listen((path) => {
 			if (path === group().active && shown === path) reveal(path);
 		});
+		// "Focus editor": the text editor, or whichever view of the file is showing in its place.
+		const stopFocus = focusRequest.listen((target) => {
+			if (target !== "editor" || state.activeGroup !== props.index) return;
+			if (!showBlocks() && !showChart() && !showRendered()) return editor.focus();
+			section.querySelector<HTMLElement>(".blocks-scroll, .plan [tabindex], .md-view")?.focus();
+		});
 		onCleanup(() => {
 			stop();
+			stopFocus();
 			if (shown) viewStates.set(`${props.index}:${shown}`, editor.saveViewState());
 			editor.dispose();
 			delete editors[props.index];
@@ -84,61 +96,149 @@ export function EditorGroup(props: { index: number }) {
 		}
 	});
 
-	createEffect(() => editor?.updateOptions({ fontSize: state.settings.fontSize, minimap: { enabled: state.settings.minimap } }));
+	createEffect(() =>
+		editor?.updateOptions({
+			fontSize: state.settings.fontSize,
+			minimap: { enabled: state.settings.minimap },
+			inlayHints: { enabled: state.settings.inlayHints === false ? "off" : "on" },
+		}),
+	);
+
+	// The active tab is always in view, however many are open.
+	const tabs = new Map<string, HTMLElement>();
+	createEffect(() => {
+		const path = group().active;
+		if (path) tabs.get(path)?.scrollIntoView({ block: "nearest", inline: "nearest" });
+	});
+	const labels = () => tabLabels(group().tabs, state.workspace?.root);
+	const activate = (path: string, focus = false) => {
+		setState("groups", props.index, "active", path);
+		if (focus) queueMicrotask(() => tabs.get(path)?.focus());
+	};
+	/** Left and Right walk the tabs, as in any tab strip; Delete closes one. */
+	const onTabKey = (e: KeyboardEvent, path: string) => {
+		const list = group().tabs;
+		const at = list.indexOf(path);
+		const to = ({ ArrowLeft: at - 1, ArrowRight: at + 1, Home: 0, End: list.length - 1 } as Record<string, number>)[e.key];
+		if (to !== undefined) {
+			e.preventDefault();
+			activate(list[(to + list.length) % list.length]!, true);
+		} else if (e.key === "Enter" || e.key === " ") {
+			e.preventDefault();
+			activate(path);
+			editor.focus();
+		} else if (e.key === "Delete") {
+			e.preventDefault();
+			void closeTab(path, props.index);
+		}
+	};
+	const onStripKey = (e: KeyboardEvent) => {
+		if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+		e.preventDefault();
+		const bands = [...(e.currentTarget as HTMLElement).querySelectorAll<HTMLElement>(".region-band")];
+		bands[(bands.indexOf(document.activeElement as HTMLElement) + (e.key === "ArrowDown" ? 1 : -1) + bands.length) % bands.length]?.focus();
+	};
+	let section!: HTMLElement;
+	/**
+	 * What can be done with the file in front: until now these were only in the
+	 * command palette. The commands are loaded when the menu opens, because
+	 * commands.ts imports this file.
+	 */
+	const fileActions = async (): Promise<MenuItem[]> => {
+		const { commands, keysFor } = await import("../commands");
+		const path = group().active;
+		const none = "Open a file first";
+		const command = (id: string, label: string): MenuItem => {
+			const found = commands.find((c) => c.id === id);
+			return { label, keys: keysFor(id) || undefined, run: () => found?.run(), disabled: !found || !path, why: found ? none : "Not available" };
+		};
+		return [
+			{ label: "Save", keys: keysFor("save") || undefined, run: () => void save(path), disabled: !path || !state.dirty[path], why: path ? "Nothing to save" : none },
+			{ label: "Save all", keys: keysFor("save-all") || undefined, run: () => void saveAll(), disabled: !Object.values(state.dirty).some(Boolean), why: "Nothing to save" },
+			{ label: "Revert to the file on disk", run: () => path && void revert(path), disabled: !path || !state.dirty[path], why: path ? "No unsaved changes" : none },
+			"separator",
+			command("format", "Format document"),
+			command("copy-designer", "Copy for Designer"),
+			command("wrap-region", "Wrap the selected lines in a region…"),
+			command("tidy", "Tidy this file with the agent"),
+			"separator",
+			{ label: "Split editor", keys: keysFor("split") || undefined, run: split, disabled: !path, why: none },
+			{ label: "Close other tabs", run: () => void closeOtherTabs(), disabled: group().tabs.length < 2, why: "No other tabs" },
+			{ label: "Close all tabs", run: () => void closeAllTabs(), disabled: !group().tabs.length, why: "No tabs" },
+		];
+	};
 
 	return (
-		<section class="group" classList={{ active: state.activeGroup === props.index }} onMouseDown={() => setState("activeGroup", props.index)}>
+		<section ref={section} class="group" classList={{ active: state.activeGroup === props.index }} onMouseDown={() => setState("activeGroup", props.index)}>
 			<div class="tabs-row">
-			<div class="tabs" role="tablist">
-				<For each={group().tabs}>
-					{(path) => (
-						<div
-							class="tab"
-							role="tab"
-							title={path}
-							classList={{ active: group().active === path, dirty: Boolean(state.dirty[path]), conflict: Boolean(state.conflicts[path]) }}
-							onMouseDown={(e) => {
-								if (e.button === 1) {
-									e.preventDefault();
-									void closeTab(path, props.index);
-								} else setState("groups", props.index, "active", path);
-							}}
-						>
-							<span class="name">{base(path)}</span>
-							<button class="close" title="Close (Ctrl+W)" onMouseDown={(e) => e.stopPropagation()} onClick={() => void closeTab(path, props.index)}>
-								<span class="dot">●</span>
-								<span class="x">×</span>
-							</button>
-						</div>
-					)}
-				</For>
-			</div>
-				<Show when={group().active && documents.get(group().active!)?.model.getLanguageId() === "ssl"}>
-					<div class="mode-switch" role="group" aria-label="View">
-						<button classList={{ on: group().mode !== "blocks" }} onClick={() => setState("groups", props.index, "mode", "text")}>
+				<div class="tabs" role="tablist" aria-label="Open files">
+					<For each={group().tabs}>
+						{(path) => (
+							<div
+								class="tab"
+								role="tab"
+								ref={(el) => (tabs.set(path, el), onCleanup(() => tabs.delete(path)))}
+								title={`${path}${state.conflicts[path] ? "\nChanged on disk since you opened it" : state.dirty[path] ? "\nUnsaved changes" : ""}`}
+								tabindex={group().active === path ? 0 : -1}
+								aria-selected={group().active === path}
+								classList={{ active: group().active === path, dirty: Boolean(state.dirty[path]), conflict: Boolean(state.conflicts[path]) }}
+								onKeyDown={(e) => e.target === e.currentTarget && onTabKey(e, path)}
+								onMouseDown={(e) => {
+									if (e.button === 1) {
+										e.preventDefault();
+										void closeTab(path, props.index);
+									} else activate(path);
+								}}
+							>
+								<span class="name">{labels().get(path) ?? base(path)}</span>
+								<Show when={state.conflicts[path]}>
+									<span class="conflict-mark" aria-label="changed on disk">
+										!
+									</span>
+								</Show>
+								<button class="close" tabindex={-1} title="Close (Ctrl+W)" aria-label={`Close ${base(path)}${state.dirty[path] ? " (unsaved changes)" : ""}`} onMouseDown={(e) => e.stopPropagation()} onClick={() => void closeTab(path, props.index)}>
+									<span class="dot" aria-hidden="true">
+										●
+									</span>
+									<span class="x" aria-hidden="true">
+										×
+									</span>
+								</button>
+							</div>
+						)}
+					</For>
+				</div>
+				<Show when={group().active}>
+					<Menu label="File actions" title="File actions: save, format, split, close…" class="tab-menu" items={fileActions}>
+						<span aria-hidden="true">⋯</span>
+					</Menu>
+				</Show>
+				<Show when={isSsl() && !isPlan()}>
+					<div class="mode-switch" role="group" aria-label="View of this script">
+						<button classList={{ on: group().mode !== "blocks" }} aria-pressed={group().mode !== "blocks"} onClick={() => setState("groups", props.index, "mode", "text")}>
 							Text
 						</button>
-						<button classList={{ on: group().mode === "blocks" }} onClick={() => setState("groups", props.index, "mode", "blocks")}>
+						<button classList={{ on: group().mode === "blocks" }} aria-pressed={group().mode === "blocks"} onClick={() => setState("groups", props.index, "mode", "blocks")}>
 							Blocks
 						</button>
 					</div>
 				</Show>
 				<Show when={isPlan()}>
-					<div class="mode-switch" role="group" aria-label="View">
-						<button classList={{ on: !showChart() }} onClick={() => setState("planText", group().active!, true)}>
+					<div class="mode-switch" role="group" aria-label="View of this plan">
+						<button classList={{ on: !showChart() }} aria-pressed={!showChart()} onClick={() => setState("planText", group().active!, true)}>
 							Text
 						</button>
-						<button classList={{ on: showChart() }} onClick={() => setState("planText", group().active!, false)}>
+						<button classList={{ on: showChart() }} aria-pressed={showChart()} onClick={() => setState("planText", group().active!, false)}>
 							Chart
 						</button>
 					</div>
 				</Show>
 				<Show when={isDoc()}>
-					<div class="mode-switch" role="group" aria-label="View">
-						<button classList={{ on: !showRendered() }} onClick={() => setState("mdText", group().active!, true)}>
+					<div class="mode-switch" role="group" aria-label="View of this document">
+						<button classList={{ on: !showRendered() }} aria-pressed={!showRendered()} onClick={() => setState("mdText", group().active!, true)}>
 							Text
 						</button>
-						<button classList={{ on: showRendered() }} onClick={() => setState("mdText", group().active!, false)}>
+						<button classList={{ on: showRendered() }} aria-pressed={showRendered()} onClick={() => setState("mdText", group().active!, false)}>
 							Read
 						</button>
 					</div>
@@ -160,8 +260,9 @@ export function EditorGroup(props: { index: number }) {
 					</For>
 				</nav>
 			</Show>
-			<Show when={showBlocks() && group().active}>
-				<BlocksView path={group().active!} group={props.index} />
+			{/* Keyed by the file: a view built for one script is never reused for the next. */}
+			<Show when={showBlocks() && group().active} keyed>
+				{(path) => <BlocksView path={path} group={props.index} />}
 			</Show>
 			<Show when={showChart() && group().active} keyed>
 				{(path) => <PlanView path={path} group={props.index} />}
@@ -170,13 +271,17 @@ export function EditorGroup(props: { index: number }) {
 				{(path) => <MarkdownView path={path} />}
 			</Show>
 			<div class="editor-row" classList={{ hidden: showBlocks() || showChart() || showRendered() }}>
-				<Show when={group().active && group().active === activePath() && lineCount() > 0}>
-					<div class="region-strip" aria-label="Regions">
+				<div class="editor-host" ref={host} />
+				{/* An overview of the whole file, top to bottom, like the minimap it sits beside: not marks on the lines in view. */}
+				<Show when={group().active && group().active === activePath() && lineCount() > 0 && flatRegions(symbols()).length}>
+					<nav class="region-strip" aria-label="Regions in this file, top to bottom" onKeyDown={onStripKey}>
 						<For each={flatRegions(symbols())}>
-							{({ symbol, depth }) => (
-								<div
+							{({ symbol, depth }, i) => (
+								<button
 									class="region-band"
-									title={`${symbol.name}: ${symbol.range.endLineNumber - symbol.range.startLineNumber + 1} lines`}
+									tabindex={i() === 0 ? 0 : -1}
+									title={`Region ${symbol.name}: lines ${symbol.range.startLineNumber} to ${symbol.range.endLineNumber}. Click to go there.`}
+									aria-label={`Go to region ${symbol.name}, lines ${symbol.range.startLineNumber} to ${symbol.range.endLineNumber}`}
 									style={{
 										top: `${((symbol.range.startLineNumber - 1) / lineCount()) * 100}%`,
 										height: `${Math.max(0.5, ((symbol.range.endLineNumber - symbol.range.startLineNumber + 1) / lineCount()) * 100)}%`,
@@ -187,9 +292,8 @@ export function EditorGroup(props: { index: number }) {
 								/>
 							)}
 						</For>
-					</div>
+					</nav>
 				</Show>
-				<div class="editor-host" ref={host} />
 			</div>
 			<Show when={!group().active}>
 				<div class="empty-group">

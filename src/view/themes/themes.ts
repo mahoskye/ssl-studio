@@ -45,6 +45,8 @@ const CSS_VARS: [string, string][] = [
 	["--error", "editorError.foreground"],
 	["--warning", "editorWarning.foreground"],
 	["--info", "editorInfo.foreground"],
+	// "Passed", "ready", "within the limit": VS Code's own key for a passed test.
+	["--ok", "testing.iconPassed"],
 ];
 
 const isDark = (theme: VsTheme) => theme.type !== "light" && theme.type !== "hcLight";

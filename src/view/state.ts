@@ -3,15 +3,17 @@
 // (ADR 0002).
 import { batch } from "solid-js";
 import { createStore, produce } from "solid-js/store";
-import { DEFAULT_SETTINGS, type Info, type LspState, type Project, type Settings, type ThemeFile, type Workspace } from "../shared/protocol";
+import { DEFAULT_SETTINGS, type Info, type LspState, type Project, type Settings, type SettingsPatch, type ThemeFile, type Workspace } from "../shared/protocol";
 import { backend, on } from "./backend";
 import { languageFor, monaco } from "./editor/monaco";
 import { session } from "./lsp/session";
 import { changedRanges, minimalReplace } from "./lsp/edits";
 import { choose } from "./dialogs";
+import { openReview } from "./editor/Review";
 import { baseName, isInside } from "../shared/paths";
 import { isPlanPath } from "./plan/model";
 import { recheckPlans, trackPlan } from "./plan/check";
+import { trackDoc } from "./docCheck";
 
 export type Group = { tabs: string[]; active: string | null; mode?: "text" | "blocks" };
 export type PanelId = "explorer" | "objects" | "palette" | "reference" | "search" | "history" | "health" | "agent" | "docs";
@@ -19,7 +21,9 @@ export type PanelId = "explorer" | "objects" | "palette" | "reference" | "search
 export type LeftView = PanelId;
 export type RightView = PanelId;
 export type BottomView = "problems" | "output";
-export type Message = { id: number; kind: "info" | "error"; text: string };
+export type Message = { id: number; kind: "info" | "error"; text: string; action?: { label: string; run: () => void } };
+/** What "Save" was able to do: a caller that goes on to close or discard must check it. */
+export type Saved = boolean;
 
 type Doc = { path: string; model: monaco.editor.ITextModel; savedVersion: number; savedText: string; mtime: number };
 
@@ -58,15 +62,37 @@ const docs = new Map<string, Doc>();
 export const documents = docs;
 
 let nextMessage = 1;
-export function notify(text: string, kind: Message["kind"] = "info") {
+/**
+ * A passing note goes away by itself. An error stays until it is dismissed,
+ * and is written to Output, so it can be read again and copied.
+ */
+export function notify(text: string, kind: Message["kind"] = "info", action?: Message["action"]) {
 	const id = nextMessage++;
-	setState("messages", (list) => [...list, { id, kind, text }]);
-	setTimeout(() => setState("messages", (list) => list.filter((m) => m.id !== id)), kind === "error" ? 8000 : 4000);
+	setState("messages", (list) => [...list.filter((m) => m.text !== text).slice(-4), { id, kind, text, action }]);
+	if (kind === "error") log(`error: ${text}`);
+	// A note that offers something to do stays long enough to do it.
+	else setTimeout(() => dismiss(id), action ? 20000 : 4000);
 }
+
+export const dismiss = (id: number) => setState("messages", (list) => list.filter((m) => m.id !== id));
 
 export function log(line: string) {
 	setState("output", (list) => [...list.slice(-499), `${new Date().toLocaleTimeString()}  ${line}`]);
 }
+
+/** Asks the editor, or the open side panel, to take the keyboard. */
+export const focusRequest = (() => {
+	const listeners = new Set<(target: "editor" | "side") => void>();
+	return {
+		fire: (target: "editor" | "side") => listeners.forEach((l) => l(target)),
+		listen: (l: (target: "editor" | "side") => void) => (listeners.add(l), () => listeners.delete(l)),
+	};
+})();
+export const focusEditor = () => focusRequest.fire("editor");
+export const focusSidePanel = () => {
+	if (!state.settings.layout.left) setState("settings", "layout", "left", true);
+	focusRequest.fire("side");
+};
 
 export const activePath = () => state.groups[state.activeGroup]?.active ?? null;
 export const activeDoc = () => {
@@ -85,7 +111,24 @@ async function guarded<T>(work: () => Promise<T>): Promise<T | undefined> {
 
 // --- workspace -------------------------------------------------------------
 
+/** Files with edits that are not on disk. */
+export const unsavedPaths = () => Object.keys(state.dirty).filter((path) => state.dirty[path]);
+
+/**
+ * Before anything that would drop every open document. Says whether to go on:
+ * nothing unsaved, everything saved, or the user chose to discard.
+ */
+export async function settleUnsaved(what: string): Promise<boolean> {
+	const unsaved = unsavedPaths();
+	if (!unsaved.length) return true;
+	const names = unsaved.slice(0, 3).map(baseName).join(", ") + (unsaved.length > 3 ? ` and ${unsaved.length - 3} more` : "");
+	const answer = await choose(`${unsaved.length === 1 ? "1 file has" : `${unsaved.length} files have`} unsaved changes (${names}). ${what}`, ["Save all", "Discard changes"], { danger: "Discard changes" });
+	if (answer === "Save all") return saveAll();
+	return answer === "Discard changes";
+}
+
 export async function openFolder(path?: string) {
+	if (!(await settleUnsaved("Opening another folder closes them."))) return;
 	const workspace = await guarded(() => backend.openFolder(path));
 	if (!workspace) return;
 	for (const doc of docs.values()) doc.model.dispose();
@@ -95,6 +138,10 @@ export async function openFolder(path?: string) {
 		setState("groups", [{ tabs: [], active: null }]);
 		setState("activeGroup", 0);
 		setState("dirty", {});
+		setState("conflicts", {});
+		// What was said about the folder that is gone is no longer news.
+		setState("messages", []);
+		setState("centerView", "editors");
 		setState("treeVersion", (v) => v + 1);
 		setState("project", null);
 		setState("setupDismissed", false);
@@ -119,7 +166,7 @@ export async function loadSettings() {
 	});
 }
 
-export async function saveSetting(patch: Partial<Settings>, scope: "user" | "workspace" = "user") {
+export async function saveSetting(patch: SettingsPatch, scope: "user" | "workspace" = "user") {
 	const effective = await guarded(() => backend.saveSettings(scope, patch));
 	if (effective) setState("settings", effective);
 }
@@ -129,19 +176,26 @@ export async function saveSetting(patch: Partial<Settings>, scope: "user" | "wor
 /** One spelling per file: Monaco's (on Windows it lowercases the drive letter). */
 export const canonical = (path: string) => monaco.Uri.file(path).fsPath;
 
+/** Makes a model the open document for a path, and follows its edits. */
+function attach(path: string, text: string, saved: { text: string; mtime: number }): Doc {
+	const uri = monaco.Uri.file(path);
+	const model = monaco.editor.getModel(uri) ?? monaco.editor.createModel(text, languageFor(path), uri);
+	const doc: Doc = { path, model, savedVersion: text === saved.text ? model.getAlternativeVersionId() : -1, savedText: saved.text, mtime: saved.mtime };
+	docs.set(path, doc);
+	model.onDidChangeContent(() => setState("dirty", path, model.getAlternativeVersionId() !== doc.savedVersion));
+	session.track(model);
+	if (isPlanPath(path)) trackPlan(model);
+	if (/\.(md|markdown)$/i.test(path)) trackDoc(model);
+	return doc;
+}
+
 async function loadDoc(path: string): Promise<Doc> {
 	path = canonical(path);
 	const existing = docs.get(path);
 	if (existing) return existing;
 	const file = await backend.read(path);
-	const uri = monaco.Uri.file(path);
-	const model = monaco.editor.getModel(uri) ?? monaco.editor.createModel(file.text, languageFor(path), uri);
-	const doc: Doc = { path, model, savedVersion: model.getAlternativeVersionId(), savedText: file.text, mtime: file.mtime };
-	docs.set(path, doc);
-	model.onDidChangeContent(() => setState("dirty", path, model.getAlternativeVersionId() !== doc.savedVersion));
-	session.track(model);
-	if (isPlanPath(path)) trackPlan(model);
-	return doc;
+	// Two callers may have asked for the same file while it was being read.
+	return docs.get(path) ?? attach(path, file.text, file);
 }
 
 session.sslSettings = () => JSON.parse(JSON.stringify(state.settings.ssl ?? {}));
@@ -181,6 +235,8 @@ export async function openFile(path: string, options: { group?: number; reveal?:
 			}),
 		);
 		setState("activeGroup", group);
+		// The call graph covers the editors: a file opened behind it would look like nothing happened.
+		setState("centerView", "editors");
 	});
 	revealSignal.fire(path);
 }
@@ -194,13 +250,20 @@ export const revealSignal = (() => {
 	};
 })();
 
-export async function closeTab(path: string, group = state.activeGroup) {
+/** Tabs closed in this session, newest last, for "Reopen closed tab". */
+const closedTabs: string[] = [];
+
+/** Says whether the tab closed: a refused or failed save keeps it open. */
+export async function closeTab(path: string, group = state.activeGroup, options: { discard?: boolean } = {}): Promise<boolean> {
+	if (!state.groups[group]?.tabs.includes(path)) return true;
 	const lastView = state.groups.filter((g) => g.tabs.includes(path)).length === 1;
-	if (state.dirty[path] && lastView) {
-		const answer = await choose(`${baseName(path)} has unsaved changes.`, ["Save", "Discard"]);
-		if (!answer) return;
-		if (answer === "Save") await save(path);
+	if (state.dirty[path] && lastView && !options.discard) {
+		const answer = await choose(`${baseName(path)} has unsaved changes.`, ["Save", "Discard changes"], { danger: "Discard changes" });
+		if (!answer) return false;
+		// A save that failed has already said why: the tab stays, with the edits in it.
+		if (answer === "Save" && !(await save(path))) return false;
 	}
+	if (lastView) closedTabs.push(path);
 	batch(() => {
 		setState(
 			"groups",
@@ -221,8 +284,93 @@ export async function closeTab(path: string, group = state.activeGroup) {
 		if (doc) {
 			docs.delete(path);
 			doc.model.dispose();
-			setState("dirty", path, undefined!);
+			batch(() => {
+				setState("dirty", path, undefined!);
+				setState("conflicts", path, undefined!);
+			});
 		}
+	}
+	return true;
+}
+
+/** The tabs of the active group, to step through. */
+function stepTab(by: number) {
+	const group = state.groups[state.activeGroup];
+	if (!group?.active || group.tabs.length < 2) return;
+	const next = group.tabs[(group.tabs.indexOf(group.active) + by + group.tabs.length) % group.tabs.length]!;
+	setState("groups", state.activeGroup, "active", next);
+	revealSignal.fire(next);
+	focusEditor();
+}
+export const nextTab = () => stepTab(1);
+export const previousTab = () => stepTab(-1);
+
+export async function closeOtherTabs() {
+	const group = state.activeGroup;
+	const keep = activePath();
+	for (const path of [...(state.groups[group]?.tabs ?? [])]) if (path !== keep && !(await closeTab(path, group))) return;
+}
+
+export async function closeAllTabs() {
+	for (let group = state.groups.length - 1; group >= 0; group--) {
+		for (const path of [...(state.groups[group]?.tabs ?? [])]) if (!(await closeTab(path, group))) return;
+	}
+}
+
+export async function reopenClosedTab() {
+	for (let path = closedTabs.pop(); path; path = closedTabs.pop()) {
+		if (state.groups.some((g) => g.tabs.includes(path!))) continue;
+		try {
+			await loadDoc(path);
+		} catch {
+			continue; // Gone from disk since it was closed: try the one before.
+		}
+		return openFile(path);
+	}
+	notify("No closed tab to reopen.");
+}
+
+/** A file or folder was renamed in the Explorer: its open tabs follow it, with their edits. */
+export function fileRenamed(oldPath: string, newPath: string) {
+	oldPath = canonical(oldPath);
+	newPath = canonical(newPath);
+	for (const [path, doc] of [...docs]) {
+		if (path !== oldPath && !isInside(oldPath, path)) continue;
+		const target = path === oldPath ? newPath : newPath + path.slice(oldPath.length);
+		const dirty = Boolean(state.dirty[path]);
+		const text = doc.model.getValue();
+		docs.delete(path);
+		const moved = attach(target, text, { text: doc.savedText, mtime: doc.mtime });
+		batch(() => {
+			setState(
+				"groups",
+				produce((groups: Group[]) => {
+					for (const g of groups) {
+						g.tabs = g.tabs.map((tab) => (tab === path ? target : tab));
+						if (g.active === path) g.active = target;
+					}
+				}),
+			);
+			setState("dirty", path, undefined!);
+			setState("conflicts", path, undefined!);
+			setState("dirty", target, dirty || moved.savedVersion === -1);
+			if (state.planText[path]) setState("planText", target, true);
+			if (state.mdText[path]) setState("mdText", target, true);
+		});
+		doc.model.dispose();
+	}
+}
+
+/** A file or folder went to the trash: its tabs close, except those holding edits nobody saved. */
+export function fileRemoved(removed: string) {
+	removed = canonical(removed);
+	for (const path of [...docs.keys()]) {
+		if (path !== removed && !isInside(removed, path)) continue;
+		if (state.dirty[path]) {
+			notify(`${baseName(path)} was moved to the trash. Its unsaved edits are still open: save to put the file back.`, "error");
+			continue;
+		}
+		state.groups.forEach((g, i) => g.tabs.includes(path) && void closeTab(path, i, { discard: true }));
 	}
 }
 
@@ -233,16 +381,53 @@ export function split() {
 	void openFile(path, { group: state.activeGroup === 0 ? 1 : 0 });
 }
 
-export async function save(path = activePath()) {
-	if (!path) return;
+/**
+ * The file on disk is not the one these edits started from. Nothing is written
+ * until the user has chosen; says whether to go on and write.
+ */
+async function settleConflict(doc: Doc): Promise<boolean> {
+	let disk;
+	try {
+		disk = await backend.read(doc.path);
+	} catch {
+		return true; // Deleted or moved on disk: saving puts it back.
+	}
+	if (disk.mtime === doc.mtime || disk.text === doc.savedText || disk.text === doc.model.getValue()) return true;
+	const name = baseName(doc.path);
+	const answer = await choose(`${name} changed on disk after you opened it. Saving would replace what is there.`, ["Compare", "Overwrite the file on disk", "Reload from disk"], { danger: "Overwrite the file on disk" });
+	if (answer === "Overwrite the file on disk") return true;
+	if (answer === "Reload from disk") await revert(doc.path);
+	if (answer === "Compare") {
+		openReview({
+			title: `${name}: the file on disk, against your edits`,
+			original: disk.text,
+			proposed: doc.model.getValue(),
+			language: doc.model.getLanguageId(),
+			note: "Left: the file as it is on disk now. Right: your edits, which you can change here. Accept keeps the right side and saves it over the file.",
+			acceptLabel: "Keep mine and save",
+			onAccept: async (text) => {
+				applyText(doc.path, text);
+				doc.mtime = disk.mtime;
+				doc.savedText = disk.text;
+				await save(doc.path);
+			},
+		});
+	}
+	return false;
+}
+
+/** Says whether the file is on disk as it is in the editor. */
+export async function save(path = activePath()): Promise<Saved> {
+	if (!path) return false;
 	const doc = docs.get(path);
-	if (!doc) return;
+	if (!doc) return false;
+	if (!(await settleConflict(doc))) return false;
 	if (state.settings.formatOnSave && doc.model.getLanguageId() === "ssl" && state.lsp.state === "running") {
 		await formatChanged(doc);
 	}
 	const text = doc.model.getValue();
 	const result = await guarded(() => backend.write(path, text));
-	if (!result) return;
+	if (!result) return false;
 	doc.savedText = text;
 	doc.savedVersion = doc.model.getAlternativeVersionId();
 	doc.mtime = result.mtime;
@@ -255,6 +440,7 @@ export async function save(path = activePath()) {
 	historyChanged.fire(path);
 	// project.toml chooses the docs folders, and the model and style for this project.
 	if (state.project && path === canonical(state.project.path)) await Promise.all([loadProject(), loadSettings()]);
+	return true;
 }
 
 export const historyChanged = (() => {
@@ -322,14 +508,17 @@ export function applyText(path: string, text: string) {
 	doc.model.pushStackElement();
 }
 
-export async function saveAll() {
-	for (const [path, dirty] of Object.entries(state.dirty)) if (dirty) await save(path);
+/** Says whether every file was saved: it stops at the first that could not be. */
+export async function saveAll(): Promise<Saved> {
+	for (const path of unsavedPaths()) if (!(await save(path))) return false;
+	return true;
 }
 
 export async function revert(path: string) {
 	const doc = docs.get(path);
 	if (!doc) return;
-	const file = await backend.read(path);
+	const file = await guarded(() => backend.read(path));
+	if (!file) return;
 	doc.model.pushEditOperations([], [{ range: doc.model.getFullModelRange(), text: file.text }], () => null);
 	doc.savedText = file.text;
 	doc.savedVersion = doc.model.getAlternativeVersionId();
@@ -363,12 +552,17 @@ on("fileChanged", async ({ path: changed }) => {
 	if (!doc) return;
 	if (file.text === doc.model.getValue()) return;
 	if (state.dirty[path]) {
+		if (!state.conflicts[path]) notify(`${baseName(path)} changed on disk while you have unsaved edits. Saving will ask which to keep.`, "error");
 		setState("conflicts", path, true);
-		notify(`${baseName(path)} changed on disk while you have unsaved edits.`, "error");
 	} else {
 		await revert(path);
 		log(`reloaded ${path} after an external change`);
 	}
+});
+
+// The desktop window was asked to close with edits that are not on disk.
+on("closeRequested", async () => {
+	if (await settleUnsaved("Closing the window would lose them.")) await backend.closeWindow();
 });
 
 on("lspState", (lsp) => {

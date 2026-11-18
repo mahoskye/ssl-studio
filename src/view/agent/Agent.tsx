@@ -1,14 +1,19 @@
 // The Agent panel: opencode status and model, the tidy sequence for the
 // current file, and a conversation that can include the selection.
-import { createSignal, For, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onMount, Show } from "solid-js";
 import { activeEditor } from "../editor/EditorGroup";
+import { review } from "../editor/Review";
 import { activeDoc, activePath, state } from "../state";
-import { agent, ask, chooseModel, currentModel, interrupt, setAgent, start } from "./store";
-import { notePath, runStep, startTidy, STEPS, tidy } from "./tidy";
-import { backend } from "../backend";
-import { baseName, relativeTo } from "../../shared/paths";
+import { addEntry, agent, ask, chooseModel, currentModel, interrupt, resume, safely, setAgent, start, stop, type Entry } from "./store";
+import { composerSend, modelRef, stepAction } from "./logic";
+import { followReplyLink, renderReply } from "./markdown";
+import { notePath, proposalOf, runStep, showReview, startTidy, STEPS, tidy } from "./tidy";
+import { relativeTo } from "../../shared/paths";
 
 const ICON: Record<string, string> = { pending: "○", running: "◌", review: "◐", accepted: "●", rejected: "✗", unchanged: "–", failed: "!" };
+const NEW_CONVERSATION = "New conversation: the next question starts fresh. The agent will not see the earlier ones.";
+/** How near the end of the conversation counts as "at the end", in pixels. */
+const NEAR_END = 24;
 
 /** The selection, or the procedure around the cursor when nothing is selected. */
 export function selectionContext(): { label: string; code: string } | null {
@@ -31,42 +36,116 @@ export async function askAbout(question: string, includeSelection: boolean) {
 	if (reply) setAgent("chatSession", reply.sessionID);
 }
 
+/** One entry of the conversation. A reply is Markdown; the user's words and the notes are shown as written. */
+function EntryView(props: { entry: Entry }) {
+	const html = createMemo(() => (props.entry.role === "agent" ? renderReply(props.entry.text) : ""));
+	return (
+		<div class={`entry ${props.entry.role}`} classList={{ streaming: Boolean(props.entry.streaming) }} aria-busy={props.entry.streaming ? "true" : undefined}>
+			<Show when={props.entry.role === "agent"} fallback={<pre>{props.entry.text}</pre>}>
+				<div class="md" innerHTML={html()} onClick={followReplyLink} />
+			</Show>
+		</div>
+	);
+}
+
 export function AgentPanel() {
+	onMount(() => void resume());
 	const [draft, setDraft] = createSignal("");
+	const [notSent, setNotSent] = createSignal("");
 	const [withSelection, setWithSelection] = createSignal(true);
-	const send = () => {
-		const q = draft().trim();
-		if (!q) return;
-		setDraft("");
-		void askAbout(q, withSelection());
+	const modelOf = (ref: string) => agent.models.find((m) => modelRef(m) === ref);
+	const usable = () => agent.models.filter((m) => m.tools);
+
+	// The conversation follows the reply as it is written, until the user scrolls up to read.
+	let scroller!: HTMLDivElement;
+	let pinned = true;
+	const toEnd = () => {
+		pinned = true;
+		scroller.scrollTop = scroller.scrollHeight;
 	};
-	const modelLabel = (ref: string) => agent.models.find((m) => `${m.providerID}/${m.id}` === ref);
+	createEffect(() => {
+		// Text arriving in any entry moves the end, as a new entry does.
+		agent.entries.reduce((n, e) => n + e.text.length, agent.entries.length);
+		agent.busy;
+		if (pinned) scroller.scrollTop = scroller.scrollHeight;
+	});
+	// The reason goes when it no longer holds.
+	createEffect(() => !agent.busy && setNotSent(""));
+
+	const send = () => {
+		const result = composerSend(draft(), agent.busy);
+		setDraft(result.draft);
+		setNotSent(result.why ?? "");
+		if (result.send === null) return;
+		toEnd();
+		void safely("The question was not sent", () => askAbout(result.send!, withSelection()));
+	};
+	const pickModel = async (select: HTMLSelectElement) => {
+		const saved = await safely("The model was not changed", () => chooseModel(select.value));
+		// Declined, or not saved: the list goes back to the model still in use.
+		if (!saved) select.value = currentModel();
+	};
+	const newConversation = () => {
+		setAgent("chatSession", null);
+		if (agent.entries.at(-1)?.text !== NEW_CONVERSATION) addEntry({ role: "note", text: NEW_CONVERSATION });
+		toEnd();
+	};
+	const tidyBlocked = () => {
+		const doc = activeDoc();
+		if (!doc) return "Open an SSL file to tidy it.";
+		if (doc.model.getLanguageId() !== "ssl") return "Tidy works on SSL files. This is not one.";
+		if (agent.busy) return "The agent is still working on the last request.";
+		if (tidy.steps.includes("review")) return "A step is under review. Accept or reject it first.";
+		return "";
+	};
+
 	return (
 		<div class="panel-body agent">
 			<div class="panel-title">
 				<span>Agent</span>
-				<Show when={agent.status.state === "ready"} fallback={<button onClick={() => void start()}>Start</button>}>
-					<button title="Stop opencode" onClick={() => void backend.agent("stop", []).then((s: any) => setAgent("status", s))}>
-						Stop
+				<Show
+					when={agent.status.state === "ready"}
+					fallback={
+						<button disabled={agent.status.state === "starting"} title={agent.status.state === "starting" ? "opencode is starting." : "Start the opencode server"} onClick={() => void start()}>
+							Start opencode
+						</button>
+					}
+				>
+					<button title="Stop the opencode server. A reply in progress ends with it." onClick={() => void stop()}>
+						Stop opencode
 					</button>
 				</Show>
 			</div>
 			<div class="agent-status">
-				<span class={`dot ${agent.status.state}`} />
+				<span class={`dot ${agent.status.state}`} aria-hidden="true" />
 				<span>
 					{agent.status.state === "ready" ? `opencode ${agent.status.version}` : agent.status.state === "starting" ? "Starting opencode…" : agent.status.state === "failed" ? "opencode failed" : state.info?.opencode.ok ? "opencode is not running" : "opencode not found"}
 				</span>
 			</div>
 			<Show when={agent.status.message}>
-				<p class="hint warn">{agent.status.message}</p>
+				<p class="agent-note warn">{agent.status.message}</p>
 			</Show>
-			<Show when={agent.models.length}>
+			<Show
+				when={usable().length}
+				fallback={
+					<p class="agent-note">
+						Model for a new session: <strong>{state.settings.agentModel || "the first local model opencode offers"}</strong>
+						{agent.models.length ? ". opencode offers no model that can use tools." : ". The list to choose from appears when opencode has started."}
+					</p>
+				}
+			>
 				<label class="agent-model">
-					Model
-					<select value={currentModel()} onChange={(e) => void chooseModel(e.currentTarget.value)}>
-						<For each={agent.models.filter((m) => m.tools)}>
+					Model for a new session
+					<select value={currentModel()} onChange={(e) => void pickModel(e.currentTarget)}>
+						{/* A saved model opencode does not list must not read as the first one in the list. */}
+						<Show when={!modelOf(currentModel())?.tools}>
+							<option value={currentModel()} selected disabled>
+								{currentModel() ? `${currentModel()} (not in the list below)` : "No model chosen"}
+							</option>
+						</Show>
+						<For each={usable()}>
 							{(m) => (
-								<option value={`${m.providerID}/${m.id}`}>
+								<option value={modelRef(m)} selected={modelRef(m) === currentModel()}>
 									{m.local ? "" : "$ "}
 									{m.name} · {m.providerID}
 								</option>
@@ -74,69 +153,87 @@ export function AgentPanel() {
 						</For>
 					</select>
 				</label>
-				<Show when={modelLabel(currentModel()) && !modelLabel(currentModel())!.local}>
-					<p class="hint warn">Not a local model: prompts may cost money.</p>
+				<Show when={usable().some((m) => !m.local)}>
+					<p class="agent-note">$ marks a model that is not local. Its prompts may cost money, and choosing one asks first.</p>
+				</Show>
+				<Show when={modelOf(currentModel()) && !modelOf(currentModel())!.local}>
+					<p class="agent-note warn">The chosen model is not local: prompts may cost money.</p>
 				</Show>
 			</Show>
 
-			<section class="tidy">
+			<section class="tidy" aria-label="Tidy">
 				<div class="tidy-head">
 					<strong>Tidy</strong>
-					<span class="hint">{tidy.path ? baseName(tidy.path) : "the six ssl-tidy steps, reviewed one by one"}</span>
 					<span class="spacer" />
-					<button onClick={startTidy} disabled={!activeDoc() || agent.busy}>
+					<button onClick={() => void safely("Tidy did not start", startTidy)} disabled={Boolean(tidyBlocked())} title={tidyBlocked() || (tidy.path && tidy.path === activePath() ? "Start again from step 1" : "Tidy the file in the editor, one reviewed step at a time")}>
 						{tidy.path && tidy.path === activePath() ? "Restart" : "This file"}
 					</button>
 				</div>
+				<p class="tidy-about">{tidy.path ? relativeTo(state.workspace?.root, tidy.path) : "The six ssl-tidy steps, each reviewed before anything changes."}</p>
 				<Show when={tidy.path}>
 					<For each={STEPS}>
-						{(step, i) => (
-							<div class={`tidy-step ${tidy.steps[i()]}`}>
-								<span class="icon">{ICON[tidy.steps[i()]!]}</span>
-								<span class="label">
-									{i() + 1}. {step.title}
-								</span>
-								<span class="meta">{tidy.steps[i()]}</span>
-								<button disabled={agent.busy || tidy.steps[i()] === "running" || tidy.steps[i()] === "review"} onClick={() => void runStep(i())}>
-									{tidy.steps[i()] === "pending" ? "Run" : "Again"}
-								</button>
-							</div>
-						)}
+						{(step, i) => {
+							const action = () => stepAction(tidy.steps[i()]!, { busy: agent.busy, reviewOpen: review() !== null && review() === proposalOf(i()) });
+							return (
+								<>
+									<div class={`tidy-step ${tidy.steps[i()]}`}>
+										<span class="icon" aria-hidden="true">
+											{ICON[tidy.steps[i()]!]}
+										</span>
+										<span class="label">
+											{i() + 1}. {step.title}
+										</span>
+										<span class="meta">{tidy.steps[i()]}</span>
+										<button disabled={action().disabled} title={action().title} onClick={() => void (tidy.steps[i()] === "review" ? safely("The review did not open", () => showReview(i())) : runStep(i()))}>
+											{action().label}
+										</button>
+									</div>
+									<Show when={tidy.problems[i()]}>
+										<p class="tidy-problem">{tidy.problems[i()]}</p>
+									</Show>
+								</>
+							);
+						}}
 					</For>
-					<p class="hint">Notes go to {relativeTo(state.workspace?.root, notePath(tidy.path!))}. Accepted steps are edits in the editor: save to keep them.</p>
+					<p class="tidy-about">Notes go to {relativeTo(state.workspace?.root, notePath(tidy.path!))}. Accepted steps are edits in the editor: save to keep them.</p>
 				</Show>
 			</section>
 
-			<div class="conversation">
-				<For each={agent.entries} fallback={<p class="hint">Ask about the selection, or run a tidy step. Shell, web and files outside the workspace are denied to the agent.</p>}>
-					{(e) => (
-						<div class={`entry ${e.role}`} classList={{ streaming: Boolean(e.streaming) }}>
-							<pre>{e.text}</pre>
-						</div>
-					)}
+			<div class="conversation" ref={scroller} role="log" aria-live="polite" aria-label="Conversation with the agent" onScroll={() => (pinned = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < NEAR_END)}>
+				<For each={agent.entries} fallback={<p class="agent-note">Ask about the selection, or run a tidy step. Shell, web and files outside the workspace are denied to the agent.</p>}>
+					{(e) => <EntryView entry={e} />}
 				</For>
+				<Show when={agent.busy && !agent.entries.some((e) => e.streaming)}>
+					<p class="agent-waiting">{agent.stopping ? "Stopping…" : "Waiting for the agent. A local model can take a while before its first words."}</p>
+				</Show>
 			</div>
 			<form class="composer" onSubmit={(e) => (e.preventDefault(), send())}>
 				<textarea
+					aria-label="Question for the agent"
 					placeholder="Ask about this code (Ctrl+Enter)"
 					value={draft()}
-					onInput={(e) => setDraft(e.currentTarget.value)}
+					onInput={(e) => (setDraft(e.currentTarget.value), setNotSent(""))}
 					onKeyDown={(e) => e.key === "Enter" && (e.ctrlKey || e.metaKey) && (e.preventDefault(), send())}
 				/>
+				<Show when={notSent()}>
+					<p class="composer-note" role="status">
+						{notSent()}
+					</p>
+				</Show>
+				<label class="check">
+					<input type="checkbox" checked={withSelection()} onChange={(e) => setWithSelection(e.currentTarget.checked)} /> include the selection
+				</label>
 				<div class="composer-bar">
-					<label class="check">
-						<input type="checkbox" checked={withSelection()} onChange={(e) => setWithSelection(e.currentTarget.checked)} /> include the selection
-					</label>
-					<span class="spacer" />
-					<Show when={agent.busy}>
-						<button type="button" onClick={() => void interrupt()}>
-							Stop
-						</button>
-					</Show>
-					<button type="button" title="Start a new conversation" onClick={() => setAgent("chatSession", null)}>
+					<button type="button" aria-label="Start a new conversation" disabled={agent.busy} title={agent.busy ? "Wait for this reply, or stop it, before starting a new conversation." : "Start a new conversation: the agent will not see the earlier questions"} onClick={newConversation}>
 						New
 					</button>
-					<button class="primary" type="submit" disabled={agent.busy}>
+					<span class="spacer" />
+					<Show when={agent.busy}>
+						<button type="button" title={agent.stopping ? "opencode was asked to stop this reply. Press again to ask once more." : "Stop this reply. opencode keeps running."} onClick={() => void safely("The reply was not stopped", interrupt)}>
+							{agent.stopping ? "Stopping…" : "Stop this reply"}
+						</button>
+					</Show>
+					<button class="primary" type="submit" disabled={agent.busy} title={agent.busy ? "The agent is still working on the last request. Stop this reply to send another." : "Send (Ctrl+Enter)"}>
 						Send
 					</button>
 				</div>

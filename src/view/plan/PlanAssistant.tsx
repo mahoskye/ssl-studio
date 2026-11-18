@@ -1,22 +1,24 @@
 // The agent's side of a plan, beside the chart: its questions, its suggestions,
 // and the spec. Answers and accepted suggestions are text edits on the plan, so
 // undo covers them too.
-import { createResource, For, onMount, Show } from "solid-js";
+import { createResource, createUniqueId, For, onMount, Show } from "solid-js";
 import { agent, currentModel } from "../agent/store";
+import { choose } from "../dialogs";
 import { showPanel } from "../panels/registry";
 import { documents, openFile, state } from "../state";
 import { joinPath } from "../../shared/paths";
 import { decisionsOf, describeSuggestion, openQuestions, planHash } from "./assist";
 import type { Plan } from "./model";
-import { unbuiltNodes } from "./build";
+import { scriptOf, unbuiltNodes } from "./build";
 import { anyChanges, builtOf, chartChanges, planPaths } from "./built";
 import { recheckPlan } from "./check";
 import { driftFor, openProcedure } from "./drift";
 import { writeTests } from "./testScript";
 import { answerUnit, discardRun, loadRun, retryUnit, reviewBuild, scriptsToReview, startBuild, stopBuild } from "./buildRun";
-import { acceptAll, acceptSuggestion, answer, assistOf, declineSuggestion, dismissWarning, refine, specPath, specState, writeSpec } from "./run";
+import { acceptAll, acceptSuggestion, answer, assistOf, declineSuggestion, dismissWarning, refine, specPath, specState, stopAssist, writeSpec } from "./run";
 
-export function PlanAssistant(props: { path: string; plan: Plan; text: string; onSelect: (node: string) => void }) {
+/** Mounted while its plan shows, and hidden when collapsed: a build under way is not lost from sight for good. */
+export function PlanAssistant(props: { path: string; plan: Plan; text: string; onSelect: (node: string) => void; id?: string; hidden?: boolean }) {
 	const a = () => assistOf(props.path);
 	onMount(() => void loadRun(props.path));
 	const run = () => a().run;
@@ -35,6 +37,17 @@ export function PlanAssistant(props: { path: string; plan: Plan; text: string; o
 		() => [props.path, props.text, a().specVersion] as const,
 		([path]) => specState(path),
 	);
+	const DISCARD = "Discard the build";
+	/** A build is paid for in tokens, and discarding it cannot be undone: ask first, say what goes, and let Enter mean Cancel (ADR 0009). */
+	const discard = async () => {
+		const r = run();
+		if (!r) return;
+		const done = r.units.filter((u) => u.status === "passed" && !r.accepted.includes(scriptOf(u, props.plan))).length;
+		const spent = `${r.tokens.toLocaleString()} tokens${r.cost ? `, cost ${r.cost.toFixed(2)}` : ""}`;
+		const what = done ? `${done} built ${done === 1 ? "unit" : "units"} not yet accepted (${spent})` : `its progress (${spent})`;
+		if ((await choose(`Discard this build? It throws away ${what}, and that cannot be brought back. Code already accepted stays.`, [DISCARD], { danger: DISCARD })) === DISCARD) discardRun(props.path);
+	};
+	const specHint = createUniqueId();
 	const isLocal = () => {
 		const model = agent.models.find((m) => `${m.providerID}/${m.id}` === currentModel());
 		return model ? model.local : true;
@@ -47,15 +60,25 @@ export function PlanAssistant(props: { path: string; plan: Plan; text: string; o
 		</Show>
 	);
 	return (
-		<aside class="plan-assist" aria-label="Plan assistant">
+		<aside class="plan-assist" id={props.id} hidden={props.hidden} aria-label="Plan assistant">
 			<div class="plan-assist-actions">
 				<button class="primary" disabled={Boolean(a().running)} title="The agent looks for what the chart leaves undecided" onClick={() => void refine(props.path)}>
 					Refine
 				</button>
-				<button disabled={Boolean(a().running)} title={open().length ? "Answer the open questions first" : "The agent writes the spec, for you to review"} onClick={() => void writeSpec(props.path)}>
+				<button disabled={Boolean(a().running) || open().length > 0} title="The agent writes the spec, for you to review" aria-describedby={open().length ? specHint : undefined} onClick={() => void writeSpec(props.path)}>
 					Write spec
 				</button>
+				<Show when={a().running && a().running !== "build"}>
+					<button title="Stop the agent; nothing is changed" onClick={() => stopAssist(props.path)}>
+						Stop
+					</button>
+				</Show>
 			</div>
+			<Show when={open().length}>
+				<p class="hint plan-assist-why" id={specHint}>
+					Write spec waits for your {open().length === 1 ? "answer to the open question" : `answers to the ${open().length} open questions`}.
+				</p>
+			</Show>
 			<p class="hint plan-assist-model">
 				<button class="link" title="Choose the model in the Agent panel" onClick={() => showPanel("agent")}>
 					{currentModel() || "The model is chosen in the Agent panel"}
@@ -242,7 +265,7 @@ export function PlanAssistant(props: { path: string; plan: Plan; text: string; o
 							</p>
 						</Show>
 						<Show when={!a().running}>
-							<button class="link" onClick={() => discardRun(props.path)}>
+							<button class="link" onClick={() => void discard()}>
 								Discard this build
 							</button>
 						</Show>
@@ -252,8 +275,8 @@ export function PlanAssistant(props: { path: string; plan: Plan; text: string; o
 			<Show when={built()?.units.length}>
 				<h4 class="plan-assist-head">
 					<span>Chart and code</span>
-					<button title="Compare them again" onClick={() => recheckPlan(uri() ?? "")}>
-						Check
+					<button title="Compare the chart with the code again" onClick={() => recheckPlan(uri() ?? "")}>
+						Refresh
 					</button>
 				</h4>
 				<Show when={drift().items.length} fallback={<p class="hint">{drift().checked ? "They agree on procedures and calls. That says nothing about what the code does." : "Not compared yet: the language server is still reading the workspace."}</p>}>

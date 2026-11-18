@@ -4,7 +4,7 @@ import { statSync } from "node:fs";
 import type { BackendApi, BackendEvents, Info, LspState, Workspace } from "../shared/protocol";
 import { History } from "./history";
 import { LspProcess } from "./lsp";
-import { listDocs, readProject, setupProject } from "./project";
+import { listDocs, readProject, setupProject, undoSetup } from "./project";
 import { recent, SettingsStore } from "./settings";
 import { findLsp, findOpencode } from "./tools";
 import { WorkspaceFiles } from "./workspace";
@@ -40,11 +40,13 @@ export function createBackend(host: Host, initial?: string) {
 		if (!files) throw new Error("no workspace open");
 		return files;
 	};
+	/** How many open files have edits that are not on disk, as the view last said. */
+	let unsaved = 0;
 
 	async function loadInfo(): Promise<Info> {
 		const { effective } = await settings.load();
 		const [lspStatus, opencode] = await Promise.all([findLsp(effective.lspPath), findOpencode()]);
-		info = { app: host.app, lsp: lspStatus, opencode, host: host.kind, selftest: Boolean(process.env.SSL_STUDIO_SELFTEST), selftestCycle: Boolean(process.env.SSL_STUDIO_SELFTEST_CYCLE) };
+		info = { app: host.app, lsp: lspStatus, opencode, host: host.kind, selftest: Boolean(process.env.SSL_STUDIO_SELFTEST), selftestCycle: Boolean(process.env.SSL_STUDIO_SELFTEST_CYCLE), selftestClose: Boolean(process.env.SSL_STUDIO_SELFTEST_CLOSE) };
 		return info;
 	}
 
@@ -105,6 +107,15 @@ export function createBackend(host: Host, initial?: string) {
 		snapshot: (path, id) => history!.read(need().inside(path), id),
 		project: async () => readProject(need().root),
 		setupProject: async () => setupProject(need().root),
+		setupPreview: async () => setupProject(need().root, true),
+		setupUndo: async () => undoSetup(need().root),
+		unsavedChanged: async (count) => {
+			unsaved = Math.max(0, Number(count) || 0);
+		},
+		closeWindow: async () => {
+			unsaved = 0;
+			setTimeout(() => host.quit(), 50);
+		},
 		docs: async () => listDocs(need(), await readProject(need().root)),
 		settings: () => settings.load(),
 		saveSettings: (scope, patch) => settings.save(scope, patch),
@@ -129,6 +140,10 @@ export function createBackend(host: Host, initial?: string) {
 			host.clipboard(text);
 			return true;
 		},
+		selftestNote: async (report) => {
+			const path = process.env.SSL_STUDIO_SELFTEST;
+			if (path) await Bun.write(path, JSON.stringify(report, null, 2) + "\n");
+		},
 		selftestDone: async (report) => {
 			const path = process.env.SSL_STUDIO_SELFTEST;
 			if (!path) return;
@@ -141,6 +156,16 @@ export function createBackend(host: Host, initial?: string) {
 	return {
 		api,
 		ready,
+		/**
+		 * Asked when the window is about to close. With unsaved edits the answer is
+		 * no, and the view is told to ask the user; it closes the app itself once
+		 * they have saved or chosen to discard (ADR 0009).
+		 */
+		mayClose: () => {
+			if (!unsaved) return true;
+			host.emit("closeRequested", {});
+			return false;
+		},
 		dispose: () => {
 			files?.close();
 			lsp?.stop();

@@ -15,7 +15,7 @@ export function Welcome() {
 	return (
 		<div class="welcome">
 			<h1>SSL Studio</h1>
-			<p class="hint">An SSL editor: text today, blocks and graph views to come, over one text.</p>
+			<p class="hint">An SSL editor: text, blocks, a call graph and plans, all views of one text.</p>
 			<button class="primary" onClick={() => void open()}>
 				Open folder…
 			</button>

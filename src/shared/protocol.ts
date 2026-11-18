@@ -55,16 +55,21 @@ export type ToolStatus = {
 	message?: string;
 };
 
-export type Info = { app: string; lsp: ToolStatus; opencode: ToolStatus; host: "app" | "browser"; selftest: boolean; selftestCycle?: boolean };
+export type Info = { app: string; lsp: ToolStatus; opencode: ToolStatus; host: "app" | "browser"; selftest: boolean; selftestCycle?: boolean; selftestClose?: boolean };
 
 export type ThemeFile = { id: string; name: string; json: string };
 
 export type Settings = {
 	/** "system", "dark", "light" or an imported theme's id. */
 	theme: string;
+	/** The size of code and documents: the editor, Blocks, diffs and rendered Markdown. */
 	fontSize: number;
 	formatOnSave: boolean;
 	minimap: boolean;
+	/** Parameter names shown beside the arguments of a call. On unless set to false. */
+	inlayHints?: boolean;
+	/** The size of the whole interface: 1 is as designed, from 0.8 to 1.6. */
+	uiScale?: number;
 	/** Overrides discovery of the starlims-lsp binary. */
 	lspPath?: string;
 	/** Region colour by region name, kept outside the code (VISION). */
@@ -100,6 +105,8 @@ export type Settings = {
 };
 
 export type SettingsScope = "user" | "workspace";
+/** What to change in one settings file. A value of null takes the setting out of that file. */
+export type SettingsPatch = { [K in keyof Settings]?: Settings[K] | null };
 
 export type LspState = { state: "starting" | "running" | "restarting" | "stopped" | "failed"; message?: string };
 
@@ -126,10 +133,18 @@ export interface BackendApi {
 	project(): Promise<Project>;
 	/** Writes project.toml, README.md and AGENTS.md where missing; returns what it created, relative to the root. */
 	setupProject(): Promise<string[]>;
+	/** What "Set up project" would create, without creating it. */
+	setupPreview(): Promise<string[]>;
+	/** Takes back the last "Set up project": removes what it wrote and nobody has changed since. */
+	setupUndo(): Promise<{ removed: string[]; kept: string[] }>;
+	/** How many open files have edits that are not on disk, so the app can ask before its window closes. */
+	unsavedChanged(count: number): Promise<void>;
+	/** Closes the app whatever is unsaved: the user has just said what to do with it. */
+	closeWindow(): Promise<void>;
 	/** README.md, AGENTS.md and project.toml, then the Markdown and plans in the project's docs and plans folders. */
 	docs(): Promise<DocFile[]>;
 	settings(): Promise<{ effective: Settings; user: Partial<Settings>; workspace: Partial<Settings> }>;
-	saveSettings(scope: SettingsScope, patch: Partial<Settings>): Promise<Settings>;
+	saveSettings(scope: SettingsScope, patch: SettingsPatch): Promise<Settings>;
 	themes(): Promise<ThemeFile[]>;
 	/** Asks for a VS Code theme file and keeps a copy; null when cancelled. */
 	importTheme(): Promise<ThemeFile | null>;
@@ -141,6 +156,8 @@ export interface BackendApi {
 	agent(method: string, args: unknown[]): Promise<unknown>;
 	/** Self-test mode (SSL_STUDIO_SELFTEST=<report path>): the UI reports, then the app quits. */
 	selftestDone(report: object): Promise<void>;
+	/** Writes the self-test's report as it stands and stays open: the close check is read from outside while it runs. */
+	selftestNote(report: object): Promise<void>;
 	/** Copies text with the app's clipboard; false when the host has none (the UI falls back). */
 	clipboard(text: string): Promise<boolean>;
 }
@@ -150,6 +167,8 @@ export type BackendEvents = {
 	lspState: LspState;
 	fileChanged: { path: string };
 	agent: { type: string; data: unknown };
+	/** The window was asked to close while files had unsaved edits: the view asks what to do. */
+	closeRequested: Record<string, never>;
 };
 
 export type AgentModel = { providerID: string; id: string; name: string; local: boolean; tools: boolean; variants: string[] };

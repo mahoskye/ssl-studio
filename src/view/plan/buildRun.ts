@@ -77,7 +77,9 @@ type Reading = { findings: { code?: string; severity: number; message: string; l
 
 /** What the language server makes of text that exists nowhere yet. */
 export async function read(text: string): Promise<Reading> {
-	const { diagnostics, symbols } = await session.analyze(text);
+	const { diagnostics, symbols, timedOut } = await session.analyze(text);
+	// No answer is not a clean answer: said as a finding, so "no errors" cannot be read from silence.
+	if (timedOut) diagnostics.push({ code: "server-timeout", severity: 1, message: "The language server did not answer, so this text was not checked. Try again.", line: 1 });
 	const procedures: Reading["symbols"] = [];
 	const walk = (list: monaco.languages.DocumentSymbol[]) =>
 		list.forEach((s) => (s.kind === monaco.languages.SymbolKind.Function || s.kind === monaco.languages.SymbolKind.Method ? procedures.push({ name: s.name, parameters: (s.children ?? []).map((c) => c.name) }) : walk(s.children ?? [])));

@@ -1,58 +1,82 @@
 // In-app prompts and confirmations: the system webview may not implement
-// window.prompt or window.confirm.
-import { createSignal, For, Show } from "solid-js";
+// window.prompt or window.confirm. One is shown at a time; the rest wait
+// their turn (dialogQueue.ts).
+import { createSignal, createUniqueId, For, Show } from "solid-js";
+import { defaultButton, DialogQueue, type Request } from "./dialogQueue";
+import { Modal } from "./modal";
 
-type Ask = { title: string; value?: string; buttons: string[]; input: boolean; resolve: (r: { button: string; value: string } | null) => void };
-const [current, setCurrent] = createSignal<Ask | null>(null);
+const [current, setCurrent] = createSignal<Request | null>(null);
+const queue = new DialogQueue(setCurrent);
 
+/** Asks for a line of text. Null when cancelled. */
 export function ask(title: string, value = ""): Promise<string | null> {
-	return new Promise((resolve) =>
-		setCurrent({ title, value, input: true, buttons: ["OK"], resolve: (r) => resolve(r && r.button === "OK" ? r.value : null) }),
+	return queue.ask(title, value);
+}
+
+/**
+ * Asks for one of `buttons`; "Cancel" is always offered too and gives null.
+ * Enter presses the first button, unless it is the one named in `danger`:
+ * a choice that cannot be undone is never the default, and Cancel is.
+ */
+export function choose(title: string, buttons: string[], options: { danger?: string } = {}): Promise<string | null> {
+	return queue.choose(title, buttons, options);
+}
+
+function Dialog(props: { request: Request }) {
+	const request = props.request;
+	const titleId = createUniqueId();
+	const inputId = createUniqueId();
+	let input: HTMLInputElement | undefined;
+	const enter = defaultButton(request);
+	const finish = (button: string | null) => queue.finish(request, button ? { button, value: input?.value ?? "" } : null);
+	return (
+		<Modal
+			class="dialog"
+			labelledBy={titleId}
+			onClose={() => finish(null)}
+			onSubmit={(e) => {
+				e.preventDefault();
+				finish(enter);
+			}}
+		>
+			<Show
+				when={request.input}
+				fallback={
+					<p class="dialog-message" id={titleId}>
+						{request.title}
+					</p>
+				}
+			>
+				<label for={inputId}>
+					<span id={titleId}>{request.title}</span>
+					<input id={inputId} ref={input} value={request.value ?? ""} data-autofocus="select" autocomplete="off" spellcheck={false} />
+				</label>
+			</Show>
+			<div class="buttons">
+				<For each={request.buttons}>
+					{(button) => (
+						<button
+							type={button === enter ? "submit" : "button"}
+							classList={{ primary: button === enter, danger: button === request.danger }}
+							data-autofocus={!request.input && button === enter ? "" : undefined}
+							onClick={() => button !== enter && finish(button)}
+						>
+							{button}
+						</button>
+					)}
+				</For>
+				<button type="button" classList={{ primary: enter === null }} data-autofocus={!request.input && enter === null ? "" : undefined} onClick={() => finish(null)}>
+					Cancel
+				</button>
+			</div>
+		</Modal>
 	);
 }
 
-export function choose(title: string, buttons: string[]): Promise<string | null> {
-	return new Promise((resolve) => setCurrent({ title, buttons, input: false, resolve: (r) => resolve(r?.button ?? null) }));
-}
-
 export function Dialogs() {
-	let input!: HTMLInputElement;
-	const finish = (button: string | null) => {
-		const dialog = current();
-		setCurrent(null);
-		dialog?.resolve(button ? { button, value: input?.value ?? "" } : null);
-	};
 	return (
-		<Show when={current()}>
-			{(dialog) => (
-				<div class="overlay" onMouseDown={(e) => e.target === e.currentTarget && finish(null)}>
-					<form
-						class="dialog"
-						onSubmit={(e) => {
-							e.preventDefault();
-							finish(dialog().buttons[0]!);
-						}}
-						onKeyDown={(e) => e.key === "Escape" && finish(null)}
-					>
-						<label>{dialog().title}</label>
-						<Show when={dialog().input}>
-							<input ref={(el) => ((input = el), queueMicrotask(() => (el.focus(), el.select())))} value={dialog().value} />
-						</Show>
-						<div class="buttons">
-							<For each={dialog().buttons}>
-								{(button, i) => (
-									<button type={i() === 0 ? "submit" : "button"} class={i() === 0 ? "primary" : ""} ref={(el) => !dialog().input && i() === 0 && queueMicrotask(() => el.focus())} onClick={() => i() > 0 && finish(button)}>
-										{button}
-									</button>
-								)}
-							</For>
-							<button type="button" onClick={() => finish(null)}>
-								Cancel
-							</button>
-						</div>
-					</form>
-				</div>
-			)}
+		<Show when={current()} keyed>
+			{(request) => <Dialog request={request} />}
 		</Show>
 	);
 }

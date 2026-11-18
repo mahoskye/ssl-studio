@@ -19,6 +19,12 @@ export type Node = {
 	params?: string[];
 	/** A block's opening statement, when the server gives it on one line (L1). */
 	header?: Header;
+	/** A statement's leading keyword, uppercase without its colon, as the server names it ("DECLARE", "INHERIT"). */
+	keyword?: string;
+	/** A comment the server says is the doc block of the procedure below it. */
+	doc?: boolean;
+	/** The head of a class file: `:CLASS`, with the `:INHERIT` and field `:DECLARE` lines under it. */
+	classHead?: boolean;
 	children: Node[];
 	/** Stable across edits that do not move the node: kind, name and start. */
 	key: string;
@@ -164,6 +170,7 @@ const lastLine = (r: { start: Position; end: Position }) => (r.end.character ===
 export function treeFromSyntax(lines: string[], nodes: SyntaxNodeIn[], paramsOf?: (procedure: string) => string[] | undefined): Node {
 	const count = lines.length;
 	const root: Node = { kind: "file", start: 1, end: count, children: [], key: "file" };
+	const statementRanges = new WeakMap<Node, RangeIn>();
 	const convert = (n: SyntaxNodeIn, parent: Node) => {
 		// `if` and `try` hold only branches, and the first one opens on the block's
 		// own first line: its body is the block's body, the later arms nest inside.
@@ -182,6 +189,11 @@ export function treeFromSyntax(lines: string[], nodes: SyntaxNodeIn[], paramsOf?
 		const kind = viewKind(n.kind, children.length > 0);
 		const params = kind === "procedure" ? paramsOf?.(n.name ?? "") : undefined;
 		const node: Node = { kind, start, end, name: n.name, params, children: [], key: `${kind}:${n.name ?? ""}:${start}` };
+		if (kind === "text" && n.keyword) {
+			node.keyword = n.keyword.toUpperCase();
+			statementRanges.set(node, n.range);
+		}
+		if (kind === "comment" && n.kind.toLowerCase() === "docblock") node.doc = true;
 		const h = n.headerRange;
 		if (kind === "block" && h && n.keyword && h.start.line === h.end.line && h.start.line + 1 === start)
 			node.header = { line: start, startColumn: h.start.character + 1, endColumn: h.end.character + 1, keyword: n.keyword };
@@ -189,8 +201,62 @@ export function treeFromSyntax(lines: string[], nodes: SyntaxNodeIn[], paramsOf?
 		if (!LEAVES.has(kind) && kind !== "comment") for (const c of children) convert(c, node);
 	};
 	for (const n of nodes) convert(n, root);
+	groupClassHead(root, statementRanges);
 	fill(root, lines);
 	return root;
+}
+
+/** What may sit under `:CLASS` in a class's head. */
+const CLASS_HEAD = new Set(["INHERIT", "DECLARE"]);
+
+/**
+ * A class file opens with `:CLASS Name;`, then perhaps `:INHERIT` and the
+ * `:DECLARE`s of its fields. The server gives each as a statement with its
+ * keyword; here they become one block, headed by the `:CLASS` line, so that a
+ * class reads as a class. Nothing is read from the text: the grouping is by
+ * the server's own keywords, and blank lines between them go along.
+ */
+function groupClassHead(root: Node, ranges: WeakMap<Node, RangeIn>) {
+	const at = root.children.findIndex((c) => c.kind === "text" && c.keyword === "CLASS" && c.start === c.end);
+	if (at < 0) return;
+	const head = root.children[at]!;
+	let last = at;
+	for (let i = at + 1; i < root.children.length; i++) {
+		const c = root.children[i]!;
+		if (c.kind === "blank") continue;
+		if (c.kind !== "text" || !c.keyword || !CLASS_HEAD.has(c.keyword)) break;
+		last = i;
+	}
+	const inside = root.children.slice(at + 1, last + 1);
+	const range = ranges.get(head);
+	const node: Node = { kind: "block", start: head.start, end: inside.at(-1)?.end ?? head.end, classHead: true, children: inside, key: `class:${head.start}` };
+	if (range && range.start.line === range.end.line) node.header = { line: head.start, startColumn: range.start.character + 1, endColumn: range.end.character + 1, keyword: "CLASS" };
+	root.children.splice(at, last - at + 1, node);
+}
+
+/**
+ * What a view draws as one card: a procedure with the doc block the server
+ * says is its own, and whatever sits between the two (a visibility
+ * annotation, blank lines). Every other node is a group of one. The tree is
+ * not changed: each line still belongs to the node it did.
+ */
+export function procedureGroups(children: Node[]): Node[][] {
+	const groups: Node[][] = [];
+	for (let i = 0; i < children.length; i++) {
+		const child = children[i]!;
+		if (child.kind === "comment" && child.doc) {
+			let j = i + 1;
+			// Between a doc block and its procedure: blank lines, and comments of one line (the annotation).
+			while (j < children.length && (children[j]!.kind === "blank" || (children[j]!.kind === "comment" && !children[j]!.doc && children[j]!.start === children[j]!.end))) j++;
+			if (children[j]?.kind === "procedure") {
+				groups.push(children.slice(i, j + 1));
+				i = j;
+				continue;
+			}
+		}
+		groups.push([child]);
+	}
+	return groups;
 }
 
 /**

@@ -3,7 +3,7 @@
 // (.ssl-studio/settings.json): each later one wins.
 import { mkdirSync, readdirSync, existsSync } from "node:fs";
 import { basename, join } from "node:path";
-import { DEFAULT_SETTINGS, type Settings, type SettingsScope, type ThemeFile } from "../shared/protocol";
+import { DEFAULT_SETTINGS, type Settings, type SettingsPatch, type SettingsScope, type ThemeFile } from "../shared/protocol";
 import { HOUSE_STYLE } from "../shared/styleProfile";
 import { dirs, workspaceDir } from "./paths";
 import { projectSettings, readProject } from "./project";
@@ -52,11 +52,15 @@ export class SettingsStore {
 		return { effective: merge(user, project, workspace), user, workspace };
 	}
 
-	async save(scope: SettingsScope, patch: Partial<Settings>) {
+	async save(scope: SettingsScope, patch: SettingsPatch) {
 		const path = this.path(scope);
 		const current = await readJson<Partial<Settings>>(path, {});
 		mkdirSync(join(path, ".."), { recursive: true });
-		await Bun.write(path, JSON.stringify({ ...current, ...patch }, null, 2) + "\n");
+		// A value of null takes the setting out of this file, so the layer below shows through.
+		// (undefined cannot say it: it does not survive the trip from the view.)
+		const next: Record<string, unknown> = { ...current, ...patch };
+		for (const [key, value] of Object.entries(next)) if (value === null) delete next[key];
+		await Bun.write(path, JSON.stringify(next, null, 2) + "\n");
 		return (await this.load()).effective;
 	}
 

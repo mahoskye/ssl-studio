@@ -52,12 +52,12 @@ export async function findLsp(configured?: string): Promise<ToolStatus> {
 		const version = out && /starlims-lsp version (\S+)/.exec(out)?.[1];
 		if (!version) continue;
 		const message =
-			version === LSP_PIN ? undefined : `starlims-lsp ${version} found; SSL Studio is tested with ${LSP_PIN}.`;
+			version === LSP_PIN ? undefined : `Language server ${version} found; SSL Studio is tested with ${LSP_PIN}.`;
 		return { ok: true, version, path, message };
 	}
 	return {
 		ok: false,
-		message: `starlims-lsp not found. Install ${LSP_PIN} from github.com/mahoskye/starlims-lsp/releases, put it on PATH or set "lspPath".`,
+		message: `The language server (starlims-lsp) was not found. Install ${LSP_PIN} from github.com/mahoskye/starlims-lsp/releases and put it on PATH, or give its path in Settings under "Language server program".`,
 	};
 }
 

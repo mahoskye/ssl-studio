@@ -20,10 +20,20 @@ function run(sessionID: string, text: string) {
 	const answer = process.env.FAKE_MODE === "tidy" ? tidyReply(text) : process.env.FAKE_MODE === "plan" ? planReply(text) : reply.replace("{prompt}", text);
 	setTimeout(() => {
 		send("session.execution.started", { sessionID });
+		if (process.env.FAKE_MODE === "wait") {
+			// A model thinking before its first token: nothing more arrives until the turn is interrupted.
+			sessions.get(sessionID).interruptWanted = true;
+			return;
+		}
 		if (process.env.FAKE_MODE === "loop") {
 			// A model trying again and again to call something that cannot help.
 			for (let i = 0; i < 5; i++) send("session.tool.called", { sessionID, assistantMessageID: messageID, id: `call_${i}`, input: { code: "await tools.write()" } });
 			sessions.get(sessionID).interruptWanted = true;
+			return;
+		}
+		if (process.env.FAKE_MODE === "noroute" || process.env.FAKE_MODE === "silent") {
+			// A turn that fails before the model says anything, as 2.2.5 does for a provider it cannot reach (recorded 2026-11-18).
+			send("session.execution.failed", process.env.FAKE_MODE === "silent" ? { sessionID } : { sessionID, error: { type: "provider.no-route", message: "Unsupported package for ollama/qwen3:14b: " } });
 			return;
 		}
 		if (process.env.FAKE_MODE === "escape") {

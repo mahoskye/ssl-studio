@@ -54,3 +54,11 @@ export function checkTables(markdown: string): TableFinding[] {
 	walk(marked.lexer(markdown));
 	return findings;
 }
+
+/** A heading's anchor, as a link to it is usually written: "## What is here" is #what-is-here. */
+export const headingAnchor = (text: string) =>
+	text
+		.trim()
+		.toLowerCase()
+		.replace(/[^\p{L}\p{N}\s-]/gu, "")
+		.replace(/\s+/g, "-");

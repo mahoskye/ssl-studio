@@ -8,12 +8,13 @@
 // comments step changing comments only.
 import { createStore } from "solid-js/store";
 import { backend } from "../backend";
-import { openReview, type Check } from "../editor/Review";
+import { openReview, type Check, type Review } from "../editor/Review";
 import { monaco } from "../editor/monaco";
 import { codeOnly } from "../editor/textmate";
 import { session } from "../lsp/session";
 import { activePath, applyText, documents, notify, state } from "../state";
-import { addEntry, ask } from "./store";
+import { addEntry, ask, safely } from "./store";
+import type { StepState } from "./logic";
 import { baseName, joinPath, relativeTo } from "../../shared/paths";
 
 export type StepKind = "note" | "code" | "report";
@@ -25,9 +26,19 @@ export const STEPS: { skill: string; title: string; kind: StepKind; commentsOnly
 	{ skill: "ssl-tidy-comments", title: "Comments", kind: "code", commentsOnly: true },
 	{ skill: "ssl-tidy-verify", title: "Verify", kind: "report" },
 ];
-export type StepState = "pending" | "running" | "review" | "accepted" | "rejected" | "unchanged" | "failed";
+export type { StepState };
 
-export const [tidy, setTidy] = createStore({ path: null as string | null, steps: STEPS.map(() => "pending" as StepState) });
+export const [tidy, setTidy] = createStore({
+	path: null as string | null,
+	steps: STEPS.map(() => "pending" as StepState),
+	/** Why a step failed, or what it is waiting for; empty otherwise. */
+	problems: STEPS.map(() => ""),
+});
+
+/** Each step's proposal while it is under review, so it can be shown again if another review took its place. */
+const proposals = new Map<number, Review>();
+/** Counts the tidy runs: a step that finishes after "Restart" must not mark the new run's steps. */
+let generation = 0;
 
 const rel = (path: string) => relativeTo(state.workspace?.root, path);
 const base = (path: string) => baseName(path).replace(/\.[^.]+$/, "");
@@ -36,7 +47,26 @@ export const notePath = (path: string) => joinPath(state.workspace!.root, "desig
 export function startTidy() {
 	const path = activePath();
 	if (!path || documents.get(path)?.model.getLanguageId() !== "ssl") return notify("Open an SSL file to tidy.");
-	setTidy({ path, steps: STEPS.map(() => "pending") });
+	generation++;
+	proposals.clear();
+	setTidy({ path, steps: STEPS.map(() => "pending"), problems: STEPS.map(() => "") });
+}
+
+/** The proposal a step has under review, if any: the panel compares it with the review that is open. */
+export const proposalOf = (index: number) => proposals.get(index);
+
+/** Opens a step's proposal again, after another review was kept in its place. */
+export async function showReview(index: number) {
+	const proposal = proposals.get(index);
+	if (proposal) await present(index, proposal);
+}
+
+/** Shows a proposal. If the user keeps another review open instead, it waits behind the step's "Show review". */
+async function present(index: number, proposal: Review) {
+	const shown = await openReview(proposal);
+	if (proposals.get(index) !== proposal) return;
+	setTidy("problems", index, shown ? "" : "Its proposal is waiting: press Show review when the other review is closed.");
+	if (!shown) notify(`${STEPS[index]!.title}: the proposal is kept. Press Show review in the Agent panel to see it.`);
 }
 
 async function readNote(path: string): Promise<string | null> {
@@ -117,8 +147,12 @@ async function checks(before: string, after: string, commentsOnly: boolean): Pro
 	const added = [...count(b.diagnostics)].filter(([code, n]) => n > (ca.get(code) ?? 0)).map(([code, n]) => `${code} +${n - (ca.get(code) ?? 0)}`);
 	const shapeA = procedureShape(a.symbols).join("; ");
 	const shapeB = procedureShape(b.symbols).join("; ");
+	// A server that did not answer has found nothing because it said nothing: that is not a pass.
+	const silent = a.timedOut || b.timedOut;
 	const result: Check[] = [
-		{ label: "No new findings", ok: !added.length, detail: added.join(", ") || `${b.diagnostics.length} findings after, ${a.diagnostics.length} before` },
+		silent
+			? { label: "The language server did not answer", ok: null, detail: "new findings could not be checked. Reject and run the step again when the server is ready, or check the result yourself." }
+			: { label: "No new findings", ok: !added.length, detail: added.join(", ") || `${b.diagnostics.length} findings after, ${a.diagnostics.length} before` },
 		{ label: "Procedures and parameters unchanged", ok: shapeA === shapeB, detail: shapeA === shapeB ? undefined : `before: ${shapeA} · after: ${shapeB}` },
 	];
 	if (commentsOnly) result.push({ label: "Only comments changed", ok: codeOnly(before) === codeOnly(after) });
@@ -132,61 +166,86 @@ async function appendToNote(path: string, heading: string, entry: string) {
 	await backend.write(notePath(path), `${note.replace(/\s*$/, "")}\n\n## ${heading} (${new Date().toISOString().slice(0, 10)})\n\n${entry.trim()}\n`);
 }
 
+/** Runs one step. Whatever goes wrong, the step ends in a state it can be run again from. */
 export async function runStep(index: number) {
 	const path = tidy.path;
 	const doc = path ? documents.get(path) : undefined;
 	if (!path || !doc) return notify("The file being tidied is not open.");
 	const step = STEPS[index]!;
-	const note = await readNote(path);
-	if (index > 0 && !note && step.kind !== "note") return notify("Run the context step first: the later steps rely on its note.");
-	setTidy("steps", index, "running");
-	const text = doc.model.getValue();
-	const found = step.kind === "note" ? await callers(path, doc.model) : undefined;
-	const reply = await ask(prompt(step, index, path, text, note, found), { title: `Tidy ${step.title}: ${rel(path)}`, skills: [step.skill], show: `Tidy step ${index + 1}, ${step.title.toLowerCase()}: ${rel(path)}` });
-	if (!reply || reply.outcome !== "succeeded") return setTidy("steps", index, "failed");
-	const markdown = fenced(reply.text, "markdown").join("\n\n") || (step.kind === "code" ? "" : reply.text.trim());
+	const mine = generation;
+	/** Moves the step on, unless the tidy was restarted meanwhile. */
+	const mark = (to: StepState, problem = "") => {
+		if (mine !== generation) return;
+		if (to !== "review") proposals.delete(index);
+		setTidy("steps", index, to);
+		setTidy("problems", index, problem);
+	};
+	/** Puts a proposal up for review and remembers it until it is accepted or rejected. */
+	const propose = async (proposal: Review) => {
+		if (mine !== generation) return;
+		proposals.set(index, proposal);
+		mark("review");
+		await present(index, proposal);
+	};
+	await safely(
+		`Tidy step ${index + 1} (${step.title}) did not finish`,
+		async () => {
+			const note = await readNote(path);
+			if (index > 0 && !note && step.kind !== "note") return notify("Run the context step first: the later steps rely on its note.");
+			mark("running");
+			const text = doc.model.getValue();
+			const found = step.kind === "note" ? await callers(path, doc.model) : undefined;
+			const reply = await ask(prompt(step, index, path, text, note, found), { title: `Tidy ${step.title}: ${rel(path)}`, skills: [step.skill], show: `Tidy step ${index + 1}, ${step.title.toLowerCase()}: ${rel(path)}` });
+			if (!reply) return mark("failed", "The request did not go through: the conversation below says why.");
+			if (reply.outcome !== "succeeded") return mark("failed", reply.outcome === "interrupted" ? `Stopped before it finished${reply.error ? `: ${reply.error}` : "."}` : `The reply ${reply.outcome === "timeout" ? "timed out" : "failed"}${reply.error ? `: ${reply.error}` : "."}`);
+			const markdown = fenced(reply.text, "markdown").join("\n\n") || (step.kind === "code" ? "" : reply.text.trim());
 
-	if (step.kind === "note" || step.kind === "report") {
-		const current = note ?? "";
-		const proposed = step.kind === "note" ? markdown : `${current.replace(/\s*$/, "")}\n\n## Verify (${new Date().toISOString().slice(0, 10)})\n\n${markdown}\n`;
-		setTidy("steps", index, "review");
-		return openReview({
-			title: `Tidy ${index + 1}/6 ${step.title}: design/${base(path)}.tidy.md`,
-			original: current,
-			proposed,
-			language: "markdown",
-			acceptLabel: "Save the note",
-			onAccept: async (final) => {
-				await backend.write(notePath(path), final.replace(/\s*$/, "") + "\n");
-				setTidy("steps", index, "accepted");
-			},
-			onReject: () => setTidy("steps", index, "rejected"),
-		});
-	}
+			if (step.kind === "note" || step.kind === "report") {
+				const current = note ?? "";
+				const proposed = step.kind === "note" ? markdown : `${current.replace(/\s*$/, "")}\n\n## Verify (${new Date().toISOString().slice(0, 10)})\n\n${markdown}\n`;
+				return propose({
+					title: `Tidy ${index + 1}/6 ${step.title}`,
+					path: notePath(path),
+					original: current,
+					proposed,
+					language: "markdown",
+					effect: `Accepting saves the right side as the context note, ${rel(notePath(path))}.`,
+					onAccept: async (final) => {
+						await backend.write(notePath(path), final.replace(/\s*$/, "") + "\n");
+						mark("accepted");
+					},
+					onReject: () => mark("rejected"),
+				});
+			}
 
-	const code = fenced(reply.text, "ssl").at(-1);
-	if (!code) {
-		setTidy("steps", index, "unchanged");
-		if (markdown) await appendToNote(path, `Step ${index + 1}: ${step.title}`, markdown);
-		addEntry({ role: "note", text: `${step.title}: no changes proposed.` });
-		return;
-	}
-	const proposed = code.endsWith("\n") || !text.endsWith("\n") ? code : code + "\n";
-	setTidy("steps", index, "review");
-	openReview({
-		title: `Tidy ${index + 1}/6 ${step.title}: ${rel(path)}`,
-		original: text,
-		proposed,
-		language: "ssl",
-		checks: await checks(text, proposed, Boolean(step.commentsOnly)),
-		note: markdown || undefined,
-		acceptLabel: "Accept into the editor",
-		onAccept: async (final) => {
-			applyText(path, final);
-			if (markdown) await appendToNote(path, `Step ${index + 1}: ${step.title}`, markdown);
-			setTidy("steps", index, "accepted");
-			notify(`${step.title} applied. Review and save the file; undo reverts it.`);
+			const code = fenced(reply.text, "ssl").at(-1);
+			if (!code) {
+				mark("unchanged");
+				if (markdown) await appendToNote(path, `Step ${index + 1}: ${step.title}`, markdown);
+				addEntry({ role: "note", text: `${step.title}: no changes proposed.` });
+				return;
+			}
+			const proposed = code.endsWith("\n") || !text.endsWith("\n") ? code : code + "\n";
+			await propose({
+				title: `Tidy ${index + 1}/6 ${step.title}`,
+				path,
+				original: text,
+				proposed,
+				language: "ssl",
+				checks: await checks(text, proposed, Boolean(step.commentsOnly)),
+				note: markdown || undefined,
+				effect: "Accepting puts the right side into the editor as one edit you can undo. The file is not saved.",
+				onAccept: async (final) => {
+					// The note first: if it cannot be written, nothing has been applied and the review is still open.
+					if (!documents.get(path)) throw new Error(`${rel(path)} is no longer open. Open it again, then accept`);
+					if (markdown) await appendToNote(path, `Step ${index + 1}: ${step.title}`, markdown);
+					applyText(path, final);
+					mark("accepted");
+					notify(`${step.title} applied. Review and save the file; undo reverts it.`);
+				},
+				onReject: () => mark("rejected"),
+			});
 		},
-		onReject: () => setTidy("steps", index, "rejected"),
-	});
+		(message) => mark("failed", message),
+	);
 }

@@ -63,7 +63,7 @@ test("swapping siblings keeps what is between them", () => {
 	expect(neighbour(root, validation!, 1)).toBe(labels);
 });
 
-import { splitHeader, treeFromSyntax, type SyntaxNodeIn } from "../src/view/blocks/model";
+import { procedureGroups, splitHeader, treeFromSyntax, type SyntaxNodeIn } from "../src/view/blocks/model";
 
 describe("blocks tree from ssl/syntaxTree (shape version 1)", () => {
 	const r = (a: number, b: number, endChar = 9) => ({ start: { line: a, character: 0 }, end: { line: b, character: endChar } });
@@ -163,5 +163,77 @@ describe("a block header's condition", () => {
 	test("refuses text that is not that keyword's statement", () => {
 		expect(splitHeader(":IFX a;", "IF")).toBeNull();
 		expect(splitHeader(":IF a", "IF")).toBeNull();
+	});
+});
+
+// The shape the server gives for a class file (starlims-lsp 0.30.0, examples/due-dates RushDueRule):
+// `:CLASS` and `:INHERIT` are statements with those keywords, and the comment above a procedure is a docBlock.
+describe("a class file", () => {
+	const span = (from: number, to: number, endChar = 0) => ({ start: { line: from - 1, character: 0 }, end: { line: to - 1, character: endChar } });
+	const lines = [
+		"/* A class;", //                    1 banner
+		"", //                               2
+		":CLASS RushDueRule;", //            3
+		":INHERIT DueDates.DueRule;", //     4
+		"", //                               5
+		":DECLARE nDays;", //                6
+		"", //                               7
+		"/*", //                             8 doc block
+		" * Procedure: CountsSaturday", //   9
+		";", //                             10
+		"/*@private;", //                   11
+		":PROCEDURE CountsSaturday;", //    12
+		"\t:RETURN .T.;", //               13
+		":ENDPROC;", //                     14
+		"", //                              15
+		"/* a loose comment;", //           16
+		":PROCEDURE Describe;", //          17
+		":ENDPROC;", //                     18
+	];
+	const tree: SyntaxNodeIn[] = [
+		{ kind: "banner", range: span(1, 1, 11) },
+		{ kind: "blankLines", range: span(2, 2) },
+		{ kind: "statement", keyword: "CLASS", range: span(3, 3, 19) },
+		{ kind: "statement", keyword: "INHERIT", range: span(4, 4, 26) },
+		{ kind: "blankLines", range: span(5, 5) },
+		{ kind: "statement", keyword: "DECLARE", range: span(6, 6, 15) },
+		{ kind: "blankLines", range: span(7, 7) },
+		{ kind: "docBlock", range: span(8, 10, 1) },
+		{ kind: "comment", range: span(11, 11, 11) },
+		{ kind: "procedure", keyword: "PROCEDURE", name: "CountsSaturday", range: span(12, 14, 9), children: [{ kind: "statement", keyword: "RETURN", range: span(13, 13, 13) }] },
+		{ kind: "blankLines", range: span(15, 15) },
+		{ kind: "comment", range: span(16, 16, 19) },
+		{ kind: "procedure", keyword: "PROCEDURE", name: "Describe", range: span(17, 18, 9) },
+	];
+	const root = () => treeFromSyntax(lines, tree);
+
+	test("still covers every line once", () => {
+		expect(coveredLines(root())).toEqual(lines.map((_, i) => i + 1));
+	});
+
+	test("the :CLASS line heads one block, holding what it inherits and its fields", () => {
+		const head = root().children.find((c) => c.classHead)!;
+		expect(head).toMatchObject({ kind: "block", start: 3, end: 6, header: { line: 3, startColumn: 1, endColumn: 20, keyword: "CLASS" } });
+		expect(head.children.map((c) => `${c.kind}:${c.keyword ?? ""}:${c.start}`)).toEqual(["text:INHERIT:4", "blank::5", "text:DECLARE:6"]);
+		// The blank line after the last field is not part of the head.
+		expect(root().children.map((c) => c.kind)).toEqual(["comment", "blank", "block", "blank", "comment", "comment", "procedure", "blank", "comment", "procedure"]);
+	});
+
+	test("the head's name is the field after its keyword, as a block's condition is", () => {
+		expect(splitHeader(lines[2]!, "CLASS")).toMatchObject({ before: ":CLASS ", condition: "RushDueRule" });
+	});
+
+	test("a doc block is drawn with its procedure, and the annotation between them", () => {
+		const groups = procedureGroups(root().children).map((g) => g.map((n) => `${n.kind}${n.doc ? "(doc)" : ""}:${n.start}`));
+		expect(groups).toContainEqual(["comment(doc):8", "comment:11", "procedure:12"]);
+		// A comment the server does not call a doc block stays on its own, even right above a procedure.
+		expect(groups).toContainEqual(["comment:16"]);
+		expect(groups).toContainEqual(["procedure:17"]);
+		// Grouping is for drawing only: every node is in exactly one group, in order.
+		expect(procedureGroups(root().children).flat()).toEqual(root().children);
+	});
+
+	test("a script that is not a class has no class head", () => {
+		expect(treeFromSyntax([":DECLARE a;", "a := 1;"], [{ kind: "statement", keyword: "DECLARE", range: span(1, 1, 11) }, { kind: "statement", range: span(2, 2, 7) }]).children.some((c) => c.classHead)).toBe(false);
 	});
 });

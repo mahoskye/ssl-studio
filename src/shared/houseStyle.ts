@@ -60,12 +60,64 @@ export function procedureTemplate(name = "${1:Name}") {
 	].join("\n");
 }
 
-export type Template = { id: string; label: string; detail: string; group: "File" | "Structure" | "Flow" | "Data"; body: () => string };
+/** A class file: its fields, room for its methods, and the constructor last (the form of examples/due-dates). */
+export function classTemplate() {
+	return [
+		":CLASS ${1:Name};",
+		"",
+		":DECLARE ${2:sField};",
+		"",
+		"$0",
+		"",
+		"/*",
+		" * Procedure: Constructor",
+		" * Description: ${3:What a new one is set up with}",
+		" * Parameters:",
+		" *   ${2:sField} - ${4:what it means}",
+		" * Returns: nothing",
+		";",
+		":PROCEDURE Constructor;",
+		"\t:PARAMETERS ${2:sField};",
+		"",
+		"\tMe:${2:sField} := ${2:sField};",
+		":ENDPROC;",
+		"",
+	].join("\n");
+}
+
+/** An SSL data source: every parameter with its default on the :PARAMETERS line, and the rows returned. */
+export function dataSourceTemplate() {
+	const rule = `/* ${"=".repeat(77)};`;
+	return [
+		rule,
+		"/* DATA SOURCE: ${1:Name} (SSL);",
+		"/* PURPOSE:     ${2:What it returns};",
+		"/* PARAMS:      ${3:sId} - ${4:what it means};",
+		"/* RETURNS:     rows {${5:COL}};",
+		rule,
+		':PARAMETERS ${3:sId} := ${6:""};',
+		"",
+		':RETURN SQLExecute("',
+		"\tSELECT ${5:COL}",
+		"\tFROM ${7:TABLE}",
+		"\tWHERE ${8:ID} = ?${3:sId}?",
+		'");',
+		"",
+	].join("\n");
+}
+
+/** `note` is where a template's form was decided, for a tooltip: the row itself says what the template is. */
+export type Template = { id: string; label: string; detail: string; note?: string; group: "File" | "Structure" | "Flow" | "Data"; body: () => string };
+
+/** A template's text with its tab stops taken out and their defaults left in: what a drag drops. */
+export const snippetAsText = (body: string) => body.replace(/\$\{\d+:([^}]*)\}/g, "$1").replace(/\$\{?\d+\}?/g, "");
 
 /** Palette templates. Snippet syntax ($1, ${1:default}, $0) as in VS Code. */
 export const TEMPLATES: Template[] = [
-	{ id: "banner", label: "File banner", detail: "Designer header (decision 0005)", group: "File", body: () => bannerTemplate() },
-	{ id: "procedure", label: "Procedure", detail: "With its doc block (decision 0005)", group: "Structure", body: () => procedureTemplate() },
+	{ id: "banner", label: "File banner", detail: "House file banner", note: "Program decision 0005", group: "File", body: () => bannerTemplate() },
+	{ id: "class", label: "Class", detail: "A class file: fields and a constructor", group: "File", body: () => classTemplate() },
+	{ id: "datasource", label: "Data source", detail: "An SSL data source: parameters and a query", group: "File", body: () => dataSourceTemplate() },
+	{ id: "procedure", label: "Procedure", detail: "With its doc block", note: "Program decision 0005", group: "Structure", body: () => procedureTemplate() },
 	{ id: "region", label: "Region", detail: "A comment region: a frame in blocks mode", group: "Structure", body: () => "/* region ${1:Name};\n\n$0\n\n/* endregion;\n" },
 	{ id: "if", label: ":IF", detail: "Condition", group: "Flow", body: () => ":IF ${1:condition};\n\t$0\n:ENDIF;\n" },
 	{ id: "ifelse", label: ":IF … :ELSE", detail: "Condition with an else branch", group: "Flow", body: () => ":IF ${1:condition};\n\t$2\n:ELSE;\n\t$0\n:ENDIF;\n" },

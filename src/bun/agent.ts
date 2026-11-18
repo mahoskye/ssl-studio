@@ -27,7 +27,30 @@ export const UNGUARDED_TOOLS = ["worktree_create", "session_move"];
 const UNGUARDED = new RegExp(`\\b(${UNGUARDED_TOOLS.join("|")})\\b`);
 
 type Options = { serverConfig?: string; serverUrl?: string; model?: string; ownModels?: string[] };
-type Waiter = { resolve: (outcome: AgentReply["outcome"]) => void; blocked?: string; tools: number; toolLimit?: number; overLimit?: boolean };
+type Waiter = { resolve: (outcome: AgentReply["outcome"]) => void; blocked?: string; tools: number; toolLimit?: number; overLimit?: boolean; /** Why the turn failed, when opencode says so on the event and not on a message. */ failure?: string };
+
+/**
+ * The reason on a failed turn's event, in words. opencode puts it in different
+ * places for different failures (a model that is not there, a provider that
+ * does not answer); only short text is taken, never a whole object, which may
+ * hold a provider's settings.
+ */
+export function failureText(data: any): string | undefined {
+	for (const value of [data?.error?.message, data?.error?.data?.message, data?.error?.name, data?.error, data?.message, data?.reason]) {
+		if (typeof value !== "string" || !value.trim()) continue;
+		const text = value.trim().replace(/:$/, "").slice(0, 400);
+		const hint = HINTS[String(data?.error?.type)];
+		return hint ? `${text}. ${hint}` : text;
+	}
+	return undefined;
+}
+
+const NO_REASON = "opencode gave no reason. The model may not be installed, or its provider may not be reachable: choose another model.";
+
+/** What to do about a failure opencode names by type, where its own words do not say. */
+const HINTS: Record<string, string> = {
+	"provider.no-route": "opencode cannot reach this model's provider: check the provider's entry in opencode's configuration (its package and address), or choose another model.",
+};
 
 export class Agent {
 	private proc?: Subprocess<"pipe", "pipe", "pipe">;
@@ -183,7 +206,10 @@ export class Agent {
 				// Aborted or dropped; a dropped stream fails the waiting turns below.
 			}
 			if (!controller.signal.aborted) {
-				for (const waiter of this.waiters.values()) waiter.resolve("failed");
+				for (const waiter of this.waiters.values()) {
+					waiter.failure = "Lost opencode's event stream before the turn ended.";
+					waiter.resolve("failed");
+				}
 				this.waiters.clear();
 				const alive = this.options.serverUrl || (this.proc && this.proc.exitCode === null);
 				if (alive && attempt < 3) setTimeout(() => this.events === controller && this.subscribe(attempt + 1), 1000);
@@ -199,7 +225,9 @@ export class Agent {
 		this.guard(sessionID, event);
 		const end = /^session\.execution\.(succeeded|failed|interrupted)$/.exec(event.type);
 		if (end) {
-			this.waiters.get(sessionID)?.resolve(end[1] as AgentReply["outcome"]);
+			const waiting = this.waiters.get(sessionID);
+			if (waiting && end[1] === "failed") waiting.failure = failureText(event.data);
+			waiting?.resolve(end[1] as AgentReply["outcome"]);
 			this.waiters.delete(sessionID);
 		}
 		// A form would hold the turn forever (M0); `question` is denied, so cancel any other.
@@ -320,7 +348,9 @@ export class Agent {
 			? { message: `Stopped: the agent tried ${waiter.blocked}, which opencode runs without a permission check.` }
 			: waiter.overLimit
 				? { message: `Stopped: the agent kept calling tools (more than ${waiter.toolLimit}), which can only waste the turn here.` }
-				: assistant.map((m) => m.error).find(Boolean);
+				: (assistant.map((m) => m.error).find(Boolean) ??
+					// A turn can fail before the model says anything: the model is not there, or its provider does not answer.
+					(outcome === "failed" ? { message: waiter.failure ?? NO_REASON } : undefined));
 		if (!input.keep) {
 			this.sessions.delete(sessionID);
 			void this.api("DELETE", `/api/session/${sessionID}`).catch(() => {});

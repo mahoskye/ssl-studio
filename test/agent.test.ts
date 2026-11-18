@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent } from "../src/bun/agent";
+import { Agent, failureText } from "../src/bun/agent";
 
 const fake = ["bun", join(import.meta.dir, "fake-opencode.ts")];
 const root = mkdtempSync(join(tmpdir(), "ssl-studio-agent-"));
@@ -98,4 +98,29 @@ test("stops a turn that keeps calling tools, when told to", async () => {
 	} finally {
 		delete process.env.FAKE_MODE;
 	}
+});
+
+test("a turn that fails before the model answers says why", async () => {
+	const { agent } = make({ FAKE_VERSION: "2.2.5", FAKE_MODE: "noroute" });
+	const reply = await agent.ask({ text: "hello" });
+	process.env.FAKE_MODE = "";
+	expect(reply.outcome).toBe("failed");
+	expect(reply.text).toBe("");
+	expect(reply.error).toMatch(/^Unsupported package for ollama\/qwen3:14b\. opencode cannot reach this model's provider/);
+});
+
+test("a turn that fails without a reason still says what to try", async () => {
+	const { agent } = make({ FAKE_VERSION: "2.2.5", FAKE_MODE: "silent" });
+	const reply = await agent.ask({ text: "hello" });
+	process.env.FAKE_MODE = "";
+	expect(reply.outcome).toBe("failed");
+	expect(reply.error).toMatch(/opencode gave no reason.*choose another model/);
+});
+
+test("a failure's reason is short text, never the event's whole object", () => {
+	expect(failureText({ error: { message: "model not found" } })).toBe("model not found");
+	expect(failureText({ error: "connection refused" })).toBe("connection refused");
+	expect(failureText({ error: { options: { headers: { secret: "x" } } } })).toBeUndefined();
+	expect(failureText({ error: { message: "x".repeat(900) } })).toHaveLength(400);
+	expect(failureText({})).toBeUndefined();
 });

@@ -4,7 +4,9 @@ import { createResource, createSignal, For, Show } from "solid-js";
 import { monaco } from "../editor/monaco";
 import { activeEditor } from "../editor/EditorGroup";
 import { session } from "../lsp/session";
-import { state } from "../state";
+import { notify, state } from "../state";
+import { focusRowsBelow, IconButton, Row, RowGroup, Rows } from "./Rows";
+import { serverDown } from "./server";
 
 type Entry = { label: string; kind: number; detail?: string; doc?: string };
 const KINDS: Record<number, string> = { 3: "Functions", 2: "Methods", 7: "Classes", 14: "Keywords", 21: "Constants" };
@@ -55,56 +57,100 @@ function Markdown(props: { text: string }) {
 export function Reference() {
 	const [filter, setFilter] = createSignal("");
 	const [open, setOpen] = createSignal<Entry | null>(null);
-	const [entries] = createResource(
+	const [reference, { refetch }] = createResource(
 		() => state.lsp.state === "running" && state.workspace?.root,
-		(root) => loadReference(root as string).catch(() => []),
+		(root) => loadReference(root as string).then((entries) => ({ entries, error: "" }), (e) => ({ entries: [] as Entry[], error: String(e?.message ?? e) })),
 	);
+	const entries = () => reference()?.entries ?? [];
 	const [details] = createResource(
 		() => open() && state.workspace && ([open()!, state.workspace.root] as const),
-		([entry, root]) => describe(entry, root),
+		([entry, root]) => describe(entry, root).catch(() => entry.detail ?? ""),
 	);
-	const shown = () => (entries() ?? []).filter((e) => !filter() || e.label.toLowerCase().includes(filter().toLowerCase()));
+	const shown = () => entries().filter((e) => !filter() || e.label.toLowerCase().includes(filter().toLowerCase()));
+	const insert = (label: string) => {
+		const editor = activeEditor();
+		if (!editor?.getModel()) return notify(`Open a file to insert ${label}.`);
+		editor.focus();
+		editor.trigger("reference", "type", { text: label });
+	};
+	/** Why the list is empty, and whether trying again can help. */
+	const empty = (): { text: string; retry?: boolean } => {
+		if (serverDown()) return { text: `${serverDown()} The reference comes from it.` };
+		if (reference.loading && !entries().length) return { text: "Loading the reference…" };
+		if (reference()?.error) return { text: `The reference could not be loaded: ${reference()!.error}`, retry: true };
+		if (!entries().length) return { text: "The language server sent no reference entries.", retry: true };
+		return { text: `No entry matches “${filter()}”. Clear the filter to see them all.` };
+	};
 	return (
-		<div class="panel-body">
+		<div class="panel-body" data-panel="reference">
 			<div class="panel-title">
 				<span>Reference</span>
 			</div>
-			<input class="filter" placeholder={`Filter ${entries()?.length ?? ""} entries`} value={filter()} onInput={(e) => setFilter(e.currentTarget.value)} />
+			<input
+				class="filter"
+				data-autofocus=""
+				aria-label="Filter the reference"
+				placeholder={entries().length ? `Filter ${entries().length} entries` : "Filter"}
+				value={filter()}
+				onInput={(e) => setFilter(e.currentTarget.value)}
+				onKeyDown={(e) => e.key === "ArrowDown" && focusRowsBelow(e.currentTarget) && e.preventDefault()}
+			/>
 			<Show when={open()}>
 				{(entry) => (
-					<div class="reference-detail">
+					<div class="reference-detail" role="region" aria-label={`About ${entry().label}`}>
 						<div class="reference-head">
 							<strong>{entry().label}</strong>
 							<span class="spacer" />
-							<button title="Insert at the cursor" onClick={() => activeEditor()?.trigger("reference", "type", { text: entry().label })}>
+							<button title="Insert the name at the cursor" onClick={() => insert(entry().label)}>
 								Insert
 							</button>
-							<button onClick={() => setOpen(null)}>×</button>
+							<IconButton label="Close the description" glyph="×" onClick={() => setOpen(null)} />
 						</div>
-						<Show when={details()} fallback={<p class="hint">Loading…</p>}>
-							<Markdown text={details()!} />
+						<Show when={!details.loading} fallback={<p class="hint">Loading the description…</p>}>
+							<Show when={details()?.trim()} fallback={<p class="hint">The language server has no description of {entry().label}.</p>}>
+								<Markdown text={details()!} />
+							</Show>
 						</Show>
 					</div>
 				)}
 			</Show>
-			<div class="tree">
-				<Show when={entries()?.length} fallback={<p class="hint">{state.lsp.state === "running" ? "Loading the reference…" : "The reference needs the language server."}</p>}>
+			<Show
+				when={shown().length}
+				fallback={
+					<p class="hint">
+						{empty().text}{" "}
+						<Show when={empty().retry}>
+							<button class="link" onClick={() => void refetch()}>
+								Try again
+							</button>
+						</Show>
+					</p>
+				}
+			>
+				<Rows label="Reference entries">
 					<For each={Object.entries(KINDS)}>
 						{([kind, title]) => (
 							<Show when={shown().some((e) => e.kind === Number(kind))}>
-								<div class="group-head">{title}</div>
-								<For each={shown().filter((e) => e.kind === Number(kind)).slice(0, 400)}>
-									{(e) => (
-										<div class="tree-row" classList={{ selected: open()?.label === e.label }} onClick={() => setOpen(e)} title={e.detail}>
-											<span class="label">{e.label}</span>
-										</div>
-									)}
-								</For>
+								<RowGroup head={title}>
+									<For each={shown().filter((e) => e.kind === Number(kind)).slice(0, 400)}>
+										{(e) => (
+											<Row
+												key={`${kind}:${e.label}`}
+												selected={open()?.label === e.label && open()?.kind === e.kind}
+												classList={{ selected: open()?.label === e.label && open()?.kind === e.kind }}
+												onActivate={() => setOpen(e)}
+												title={e.detail ? `${e.label}: ${e.detail}` : e.label}
+											>
+												<span class="label">{e.label}</span>
+											</Row>
+										)}
+									</For>
+								</RowGroup>
 							</Show>
 						)}
 					</For>
-				</Show>
-			</div>
+				</Rows>
+			</Show>
 		</div>
 	);
 }

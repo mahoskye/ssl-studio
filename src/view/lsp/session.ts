@@ -142,25 +142,35 @@ class Session {
 	private scratchWaiters = new Map<string, (diagnostics: any[]) => void>();
 	private scratchCount = 0;
 
-	/** Diagnostics and symbols for text that is not in any editor (a proposed change). */
-	async analyze(text: string): Promise<{ diagnostics: { code?: string; severity: number; message: string; line: number }[]; symbols: monaco.languages.DocumentSymbol[] }> {
+	/**
+	 * Diagnostics and symbols for text that is not in any editor (a proposed change).
+	 * `timedOut` says the server published nothing in time: `diagnostics` is then
+	 * empty because nothing is known, not because nothing was found, and must not
+	 * be read as a pass.
+	 */
+	async analyze(text: string): Promise<{ diagnostics: { code?: string; severity: number; message: string; line: number }[]; symbols: monaco.languages.DocumentSymbol[]; timedOut: boolean }> {
 		await this.ready();
 		const uri = monaco.Uri.file(`${this.root}/.ssl-studio/scratch-${++this.scratchCount}.ssl`).toString();
-		const published = new Promise<any[]>((resolve) => {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const published = new Promise<any[] | null>((resolve) => {
 			this.scratchWaiters.set(uri, resolve);
-			setTimeout(() => resolve([]), 8000);
+			timer = setTimeout(() => resolve(null), 8000);
 		});
 		this.client.notify("textDocument/didOpen", { textDocument: { uri, languageId: "ssl", version: 1, text } });
 		try {
-			const raw = await published;
+			const answer = await published;
+			clearTimeout(timer);
+			const raw = answer ?? [];
 			const symbols = ((await this.client.request("textDocument/documentSymbol", { textDocument: { uri } })) ?? []).map(function convert(s: any): monaco.languages.DocumentSymbol {
 				return { name: s.name, detail: s.detail ?? "", kind: s.kind - 1, tags: [], range: toRange(s.range), selectionRange: toRange(s.selectionRange ?? s.range), children: (s.children ?? []).map(convert) };
 			});
 			return {
 				diagnostics: raw.map((d) => ({ code: d.code == null ? undefined : String(typeof d.code === "object" ? d.code.value : d.code), severity: d.severity ?? 1, message: d.message, line: d.range.start.line + 1 })),
 				symbols,
+				timedOut: answer === null,
 			};
 		} finally {
+			clearTimeout(timer);
 			this.scratchWaiters.delete(uri);
 			this.client.notify("textDocument/didClose", { textDocument: { uri } });
 		}

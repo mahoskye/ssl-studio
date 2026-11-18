@@ -52,11 +52,17 @@ const rpc = BrowserView.defineRPC<Schema>({
 	},
 });
 
-new BrowserWindow({
+const window = new BrowserWindow({
 	title: "SSL Studio",
 	url: "views://main/index.html",
 	rpc,
 	frame: fitWindow(Screen.getPrimaryDisplay().workArea),
+});
+
+// Electrobun asks before a window closes, and takes no for an answer: with
+// unsaved edits the window stays, and the view asks the user (ADR 0009).
+window.on("will-close", (event: unknown) => {
+	if (!backend.mayClose()) (event as { response?: { allow: boolean } }).response = { allow: false };
 });
 
 process.on("exit", () => backend.dispose());

@@ -4,7 +4,7 @@
 // needs arrives in the prompt, and what it returns is applied after you agree.
 import { createStore } from "solid-js/store";
 import { backend } from "../backend";
-import { ask, agent, currentModel, start } from "../agent/store";
+import { ask, agent, currentModel, interrupt, start } from "../agent/store";
 import { openReview, type Check } from "../editor/Review";
 import { monaco } from "../editor/monaco";
 import { session } from "../lsp/session";
@@ -134,13 +134,36 @@ function warn(path: string, text: string) {
 
 const CUT = "This prompt looks cut off: the model reported fewer tokens than it was sent, so it may have missed part of it. With Ollama, set a larger context (docs/INSTALL.md).";
 
+/** Plans whose refine, spec or test script was told to stop. A build has its own, in `buildRun.ts`. */
+const stopped = new Set<string>();
+class Stopped extends Error {}
+
+/**
+ * Stops a refine, a spec or a test script. The turn in flight is interrupted,
+ * whether or not it has begun to answer (the agent store follows a turn from
+ * the moment it is asked), and its reply is dropped. Nothing more is asked, and
+ * what the turn cost stays in the totals.
+ */
+export function stopAssist(path: string) {
+	const running = assistOf(path).running;
+	if (!running || running === "build") return;
+	stopped.add(path);
+	update(path, { progress: "Stopping…" });
+	void interrupt();
+}
+
 export async function askAgent(path: string, stage: string, text: string, skills: string[], toolLimit?: number): Promise<string | null> {
+	if (stopped.has(path)) throw new Stopped();
 	update(path, { progress: `${stage}: waiting for ${currentModel() || "the agent"}…` });
 	const reply = await ask(text, { title: `${stage}: ${rel(path)}`, skills, show: `${stage}: ${rel(path)}`, toolLimit });
-	if (!reply) return null;
+	if (!reply) {
+		if (stopped.has(path)) throw new Stopped();
+		return null;
+	}
 	const soFar = assistOf(path);
 	const input = reply.tokens?.input ?? 0;
 	update(path, { tokens: soFar.tokens + input + (reply.tokens?.output ?? 0), cost: soFar.cost + (reply.cost ?? 0) });
+	if (stopped.has(path)) throw new Stopped();
 	if (reply.outcome !== "succeeded") {
 		notify(`The agent did not finish: ${reply.error ?? reply.outcome}`, "error");
 		return null;
@@ -152,10 +175,14 @@ export async function askAgent(path: string, stage: string, text: string, skills
 export const begin = (path: string, running: AssistState["running"], work: () => Promise<void>) => {
 	if (assistOf(path).running) return Promise.resolve();
 	if (!state.workspace) return Promise.resolve(notify("Open a folder first."));
+	stopped.delete(path);
 	update(path, { running, warnings: [], progress: "" });
 	return work()
-		.catch((e: any) => notify(`${e?.message ?? e}`, "error"))
-		.finally(() => update(path, { running: "", progress: "" }));
+		.catch((e: any) => (e instanceof Stopped ? notify("Stopped. Nothing was changed.") : notify(`${e?.message ?? e}`, "error")))
+		.finally(() => {
+			stopped.delete(path);
+			update(path, { running: "", progress: "" });
+		});
 };
 
 /** Stage 2: the agent finds what the chart leaves undecided. */
