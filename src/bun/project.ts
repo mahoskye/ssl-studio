@@ -163,6 +163,8 @@ ${PLACEHOLDER["AGENTS.md"]}
 - Follow the house style. The language server reports what breaks it.
 - Keep each script under the size limits the Health panel shows.
 - Do not rename a procedure or change its parameters unless asked.
+- A table in the docs has at most four columns, short values in every column
+  but the last, and at most one sentence in a cell.
 
 ## Where things are
 
