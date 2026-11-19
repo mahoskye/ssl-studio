@@ -485,6 +485,15 @@ the work comes from ([ADR 0012](adr/0012-a-projects-work-is-written-down.md)).
   to the old name, and offers to point them at the new one. A link is
   placed only where it is written as a link: the same words in a block or
   a span of code are an example, and are never edited.
+- **A rename rewrites front matter too.** A ticket's `specs:` line and a
+  spec's `plan:` line name files from the project's top; a rename finds
+  them with the links and writes the new name in each.
+- **A link is written from a list.** After `](` in a Markdown document the
+  project's documents are offered, the work first, and the path written is
+  the way there from the document.
+- **The selected row of the editor's suggest list is readable in the light
+  theme.** It was white on pale blue, for SSL completion as well: the
+  theme set the row's background and not its text.
 - **A ticket's key in the prose is a link.** Only the keys of tickets the
   project has; not in code, not in a link someone wrote, not the page's
   own ticket. A key of digits alone is one only as "#12".

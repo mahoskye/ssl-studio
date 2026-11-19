@@ -1,3 +1,4 @@
+import { registerMarkdownLinks } from "./editor/markdownLinks";
 import "./style.css";
 import { render } from "solid-js/web";
 import { App } from "./App";
@@ -34,6 +35,7 @@ async function start() {
 	applyTheme(resolveTheme(state.settings.theme, state.themes));
 	shapeEditorMenus();
 	registerProviders();
+	registerMarkdownLinks();
 	installKeys();
 	setState("info", await backend.info());
 	window.addEventListener("error", (e) => uncaught(e.error ?? e.message));

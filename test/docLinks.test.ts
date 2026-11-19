@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { linksTo, listDocs, readProject } from "../src/bun/project";
 import { WorkspaceFiles } from "../src/bun/workspace";
 import { docChecks } from "../src/shared/docChecks";
-import { fileLinks, linkFile, withLinkFile, withLinkFiles } from "../src/shared/docLinks";
+import { fileLinks, frontPaths, linkBeingWritten, linkChoices, linkFile, withLinkFile, withLinkFiles } from "../src/shared/docLinks";
 import type { DocFile } from "../src/shared/protocol";
 
 describe("the file a link names", () => {
@@ -188,11 +188,11 @@ describe("the links that lead to a file", () => {
 			writeFileSync(join(root, "README.md"), "# P\n\n[late](docs/specs/reports/Late.md#checks) and [from the top](/docs/specs/reports/Late.md)\n");
 			writeFileSync(join(root, "docs", "tickets", "T-1.md"), "# T-1\n\n```md\n[not a link](../specs/reports/Late.md)\n```\n\n[late](../specs/reports/Late.md) [soon](../specs/reports/Soon.md) [web](https://example.com/Late.md)\n");
 			const files = new WorkspaceFiles(root);
-			const short = (links: Awaited<ReturnType<typeof linksTo>>) => links.map((link) => [link.path.slice(root.length + 1).split("\\").join("/"), link.line, link.column, link.href, link.rest.split("\\").join("/"), link.fromTop]).sort();
+			const short = (links: Awaited<ReturnType<typeof linksTo>>) => links.map((link) => [link.path.slice(root.length + 1).split("\\").join("/"), link.line, link.column, link.href, link.rest.split("\\").join("/"), link.from]).sort();
 			expect(short(await linksTo(files, join(root, "docs", "specs", "reports", "Late.md")))).toEqual([
-				["README.md", 3, 61, "/docs/specs/reports/Late.md", "", true],
-				["README.md", 3, 7, "docs/specs/reports/Late.md#checks", "", false],
-				["docs/tickets/T-1.md", 7, 7, "../specs/reports/Late.md", "", false],
+				["README.md", 3, 61, "/docs/specs/reports/Late.md", "", "top"],
+				["README.md", 3, 7, "docs/specs/reports/Late.md#checks", "", "doc"],
+				["docs/tickets/T-1.md", 7, 7, "../specs/reports/Late.md", "", "doc"],
 			]);
 			// A folder: everything that leads into it, with what follows the folder in each path.
 			const into = short(await linksTo(files, join(root, "docs", "specs", "reports")));
@@ -225,5 +225,74 @@ describe("where a link is placed in the text", () => {
 	});
 	test("a reference in a quotation is placed", () => {
 		expect(fileLinks("> See [the notes][n].\n>\n> [n]: <my notes.md>\n")).toEqual([{ href: "my notes.md", file: "my notes.md", line: 3, column: 8 }]);
+	});
+});
+
+describe("the files a document's front matter names", () => {
+	test("are a ticket's specs and a spec's plan, each with its place", () => {
+		const text = ["---", "ticket: T-1", 'specs: [design/Due.spec.md, "docs/specs/My spec.md"]', "plan: design/Due.plan.json", "plans:", "  - design/A.plan.json", "  - 'design/B.plan.json'", "related: [T-2]", "---", "", "specs: not/this.md"].join("\n");
+		expect(frontPaths(text)).toEqual([
+			{ value: "design/Due.spec.md", line: 3, column: 8 },
+			{ value: "docs/specs/My spec.md", line: 3, column: 29 },
+			{ value: "design/Due.plan.json", line: 4, column: 6 },
+			{ value: "design/A.plan.json", line: 6, column: 4 },
+			{ value: "design/B.plan.json", line: 7, column: 5 },
+		]);
+	});
+	test("a document with no front matter names none", () => {
+		expect(frontPaths("specs: [a.md]\n")).toEqual([]);
+	});
+	test("a path in front matter is rewritten as it is, with no escape", () => {
+		const text = '---\nspecs: [design/Due.spec.md, "docs/specs/My spec.md"]\n---\n';
+		const edits = frontPaths(text).map((named) => ({ line: named.line, column: named.column, href: named.value, instead: named.value.replace("specs/My spec", "specs/Our spec").replace("Due", "Due dates"), plain: true }));
+		expect(withLinkFiles(text, edits)).toEqual({ text: '---\nspecs: [design/Due dates.spec.md, "docs/specs/Our spec.md"]\n---\n', done: 2 });
+	});
+});
+
+describe("a rename finds the front matter that names the file", () => {
+	test("a ticket's specs line is one of the places", async () => {
+		const root = mkdtempSync(join(tmpdir(), "ssl-studio-front-"));
+		try {
+			mkdirSync(join(root, "docs", "tickets"), { recursive: true });
+			mkdirSync(join(root, "design"), { recursive: true });
+			writeFileSync(join(root, "design", "Due.spec.md"), "# Due\n");
+			writeFileSync(join(root, "docs", "tickets", "T-1.md"), "---\nticket: T-1\nspecs: [design/Due.spec.md]\n---\n\n# T-1\n\nNo links here.\n");
+			const found = await linksTo(new WorkspaceFiles(root), join(root, "design", "Due.spec.md"));
+			expect(found.map((link) => [link.line, link.column, link.href, link.rest, link.from])).toEqual([[3, 8, "design/Due.spec.md", "", "root"]]);
+			// The folder it is in: the path that follows the folder is kept.
+			const into = await linksTo(new WorkspaceFiles(root), join(root, "design"));
+			expect(into.map((link) => link.rest.split("\\").join("/"))).toEqual(["/Due.spec.md"]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("the documents offered while a link is written", () => {
+	const files: DocFile[] = [
+		{ path: "/p/docs/tickets/T-1.md", name: "T-1.md", group: "tickets", exists: true, ticket: "T-1", title: "Due dates" },
+		{ path: "/p/docs/specs/Due dates.md", name: "Due dates.md", group: "specs", exists: true, title: "The due date spec" },
+		{ path: "/p/docs/knowledge/snippets/late.sql", name: "snippets/late.sql", group: "knowledge", exists: true },
+		{ path: "/p/README.md", name: "README.md", group: "project", exists: false },
+	];
+	test("the work comes first, whatever order the listing has", () => {
+		const mixed: DocFile[] = [{ path: "/p/AGENTS.md", name: "AGENTS.md", group: "project", exists: true }, ...files];
+		expect(linkChoices(mixed, "/p/docs/x.md", "/p").map((choice) => choice.label)).toEqual(["T-1 Due dates", "The due date spec", "late.sql", "AGENTS.md"]);
+	});
+	test("are each called by what they are, and written as the way there from this document", () => {
+		expect(linkChoices(files, "/p/docs/tickets/T-1.md", "/p")).toEqual([
+			{ label: "The due date spec", detail: "docs/specs/Due dates.md", insert: "../specs/Due%20dates.md" },
+			{ label: "late.sql", detail: "docs/knowledge/snippets/late.sql", insert: "../knowledge/snippets/late.sql" },
+		]);
+		expect(linkChoices(files, "/p/docs/specs/Due dates.md", "/p")[0]).toEqual({ label: "T-1 Due dates", detail: "docs/tickets/T-1.md", insert: "../tickets/T-1.md" });
+	});
+	test("are offered after the mark that opens a link's target, and nowhere else", () => {
+		expect(linkBeingWritten("See [the spec](")).toBe("");
+		expect(linkBeingWritten("See [the spec](../sp")).toBe("../sp");
+		expect(linkBeingWritten("See [the spec](<../my sp")).toBeNull();
+		expect(linkBeingWritten("See [the spec](<../sp")).toBe("../sp");
+		expect(linkBeingWritten("See [the spec](a.md) and then")).toBeNull();
+		expect(linkBeingWritten("A call(")).toBeNull();
+		expect(linkBeingWritten("In code: `[a](")).toBeNull();
 	});
 });

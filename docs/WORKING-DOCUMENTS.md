@@ -114,11 +114,14 @@ clicks it. Links to the web, and to files outside the project, are not
 checked. Where the project has one file of that name somewhere else, the
 row offers "Mend": the link is pointed there, and Ctrl+Z undoes it.
 
-A file or a folder renamed in the Explorer takes its links along: the IDE
-says how many links, in how many documents, lead to the old name, and on
-your word points them at the new one. A ticket's `specs:` line is not a
-link and is not rewritten; Health says when a spec is not where its ticket
-says.
+A file or a folder renamed in the Explorer takes what names it along: the
+IDE says how many places, in how many documents, still say the old name,
+and on your word writes the new one in each. A link is one such place; a
+ticket's `specs:` line and a spec's `plan:` line are the others.
+
+Writing a link, the project's documents are offered once `](` is typed:
+tickets first, each by its key and title. Typing narrows the list by title,
+key or path, and the path written is the way there from the document.
 
 ## The agent
 

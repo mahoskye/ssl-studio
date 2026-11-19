@@ -395,8 +395,9 @@ export async function followRename(from: string, to: string) {
 	const holders = [...new Set(links.map((link) => link.path))];
 	const one = links.length === 1;
 	const where = holders.length === 1 ? relativeTo(root(), holders[0]!) : `${holders.length} documents`;
-	const go = one ? "Point it at the new name" : "Point them at the new name";
-	if ((await choose(`${one ? "A link" : `${links.length} links`} in ${where} ${one ? "leads" : "lead"} to the old name, ${baseName(from)}.`, [go])) !== go) return;
+	const go = one ? "Write the new name there" : "Write the new name in each";
+	// A ticket's "specs:" line is counted with the links: it names the file as a link does.
+	if ((await choose(`${one ? "One place" : `${links.length} places`} in ${where} still ${one ? "says" : "say"} the old name, ${baseName(from)}.`, [go])) !== go) return;
 	let done = 0;
 	for (const path of holders) {
 		const before = await current(path);
@@ -405,8 +406,9 @@ export async function followRename(from: string, to: string) {
 			.filter((link) => link.path === path)
 			.map((link) => {
 				const target = `${to}${link.rest}`;
-				// A link written from the project's top stays written from the top.
-				return { line: link.line, column: link.column, href: link.href, instead: link.fromTop ? `/${relativeTo(root(), target)}` : relativePath(dirName(path), target) };
+				// What is written from the project's top stays written from the top; a path in front matter is written as it is.
+				const fromTop = relativeTo(root(), target);
+				return { line: link.line, column: link.column, href: link.href, instead: link.from === "root" ? fromTop : link.from === "top" ? `/${fromTop}` : relativePath(dirName(path), target), plain: link.from === "root" };
 			});
 		const changed = withLinkFiles(before, edits);
 		if (!changed.done) continue;
@@ -418,8 +420,8 @@ export async function followRename(from: string, to: string) {
 		}
 	}
 	setState("treeVersion", (v) => v + 1);
-	if (done) notify(`${done} ${done === 1 ? "link now leads" : "links now lead"} to ${baseName(to)}.`);
-	if (done < links.length) notify(`${links.length - done} of the links ${links.length - done === 1 ? "is" : "are"} not where ${links.length - done === 1 ? "it was" : "they were"}: the document has changed since. Mend ${links.length - done === 1 ? "it" : "them"} in the text.`, "error");
+	if (done) notify(`${done} ${done === 1 ? "place now says" : "places now say"} ${baseName(to)}.`);
+	if (done < links.length) notify(`${links.length - done} of them ${links.length - done === 1 ? "is" : "are"} not where ${links.length - done === 1 ? "it was" : "they were"}: the document has changed since. Mend ${links.length - done === 1 ? "it" : "them"} in the text.`, "error");
 }
 
 /** Where the project stands, in plain words. */

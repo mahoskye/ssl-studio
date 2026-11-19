@@ -1,6 +1,8 @@
 import { marked, type Token } from "marked";
 import { fenced } from "./catalog";
-import { bodyOffset } from "./frontMatter";
+import { bodyOffset, frontMatter } from "./frontMatter";
+import { baseName, dirName, relativePath, relativeTo } from "./paths";
+import type { DocFile } from "./protocol";
 
 // The links of a Markdown document that lead to a file: a catalog's line for
 // a ticket, a decision's link to the spec it settles, a question's link to
@@ -115,7 +117,7 @@ export function fileLinks(text: string): DocLink[] {
  * Given its column, the link must be there; without one, the first on the
  * line is taken. Null when the link is not where it was read.
  */
-export function withLinkFile(text: string, line: number, href: string, instead: string, column?: number): string | null {
+export function withLinkFile(text: string, line: number, href: string, instead: string, column?: number, plain = false): string | null {
 	let start = 0;
 	for (let at = 1; at < line; at++) {
 		const end = text.indexOf("\n", start);
@@ -128,13 +130,14 @@ export function withLinkFile(text: string, line: number, href: string, instead: 
 		const at = column === undefined ? here.indexOf(written) : here.startsWith(written, column) ? column : -1;
 		if (at < 0) continue;
 		const rest = /[?#].*$/.exec(written)?.[0] ?? "";
-		return `${text.slice(0, start + at)}${instead.replace(/ /g, "%20")}${rest}${text.slice(start + at + written.length)}`;
+		// A link's space is written as its escape; a path in front matter is written as it is.
+		return `${text.slice(0, start + at)}${plain ? instead : instead.replace(/ /g, "%20")}${rest}${text.slice(start + at + written.length)}`;
 	}
 	return null;
 }
 
 /** A link to rewrite: where it is, as it was read, and the file to name in its place. */
-export type LinkEdit = { line: number; column?: number; href: string; instead: string };
+export type LinkEdit = { line: number; column?: number; href: string; instead: string; /** Written as it is, with no escape: a path in front matter. */ plain?: boolean };
 
 /**
  * The text with each of these links pointed at its new file, and how many
@@ -144,10 +147,75 @@ export type LinkEdit = { line: number; column?: number; href: string; instead: s
 export function withLinkFiles(text: string, edits: readonly LinkEdit[]): { text: string; done: number } {
 	let done = 0;
 	for (const edit of [...edits].sort((a, b) => b.line - a.line || (b.column ?? 0) - (a.column ?? 0))) {
-		const next = withLinkFile(text, edit.line, edit.href, edit.instead, edit.column);
+		const next = withLinkFile(text, edit.line, edit.href, edit.instead, edit.column, edit.plain);
 		if (next === null) continue;
 		text = next;
 		done++;
 	}
 	return { text, done };
+}
+
+/** The keys of a document's front matter whose values are files, named from the project's top: a ticket's specs, a spec's plan. */
+const PATH_KEYS = new Set(["spec", "specs", "plan", "plans"]);
+
+/**
+ * The files a document's front matter names ("specs: [design/Due.spec.md]"),
+ * each with its place in the text: not links, but a rename leaves them
+ * naming the old file all the same.
+ */
+export function frontPaths(text: string): { value: string; line: number; column: number }[] {
+	const count = frontMatter(text).lines;
+	if (!count) return [];
+	const found: { value: string; line: number; column: number }[] = [];
+	let key = "";
+	text
+		.split(/\r?\n/)
+		.slice(0, count)
+		.forEach((line, index) => {
+			const pair = /^([A-Za-z0-9_-]+)\s*:\s*(.*)$/.exec(line);
+			const item = pair ? null : /^\s*-\s+(.*)$/.exec(line);
+			if (pair) key = pair[1]!.toLowerCase();
+			const rest = pair?.[2] ?? item?.[1];
+			if (rest === undefined || !PATH_KEYS.has(key)) return;
+			const at = line.length - rest.length;
+			for (const match of rest.matchAll(/"([^"]*)"|'([^']*)'|([^\s,[\]"'#][^,[\]]*)/g)) {
+				const quoted = match[1] !== undefined || match[2] !== undefined;
+				const value = (match[1] ?? match[2] ?? match[3] ?? "").trim();
+				if (value) found.push({ value, line: index + 1, column: at + match.index + (quoted ? 1 : 0) });
+			}
+		});
+	return found;
+}
+
+/** A document to link to, as it is offered while a link is written: what it is called, where it is, and what to write. */
+export type LinkChoice = { label: string; detail: string; insert: string };
+
+/**
+ * The project's documents as a link in one of them would name each: offered
+ * when "](" is typed, so the path is not typed from memory. A ticket is
+ * called by its key and its title; the path written is from the document
+ * the link is in, a space as its escape.
+ */
+export function linkChoices(files: readonly DocFile[], path: string, root: string): LinkChoice[] {
+	const dir = dirName(path);
+	// The work first: a link in a working document is most often to a ticket, a spec or something learned.
+	const order = ["tickets", "specs", "knowledge", "registries", "plans", "docs", "schema", "project"];
+	return files
+		.filter((file) => file.exists && file.path !== path)
+		.map((file, index) => ({ file, index }))
+		.sort((a, b) => order.indexOf(a.file.group) - order.indexOf(b.file.group) || a.index - b.index)
+		.map(({ file }) => ({
+			label: file.ticket ? [file.ticket, file.title].filter(Boolean).join(" ") : file.title || baseName(file.path),
+			detail: relativeTo(root, file.path).split("\\").join("/"),
+			insert: relativePath(dir, file.path).replace(/ /g, "%20"),
+		}));
+}
+
+/** What has been typed of a link's target, when the cursor is in one: the text after "](" on this line, up to the cursor. Null anywhere else. */
+export function linkBeingWritten(lineToCursor: string): string | null {
+	const found = /\]\(<?([^()<>\s]*)$/.exec(lineToCursor);
+	if (!found) return null;
+	// In a span of code the same characters are an example of a link.
+	const lead = lineToCursor.slice(0, found.index);
+	return (lead.match(/`/g)?.length ?? 0) % 2 === 1 ? null : found[1]!;
 }

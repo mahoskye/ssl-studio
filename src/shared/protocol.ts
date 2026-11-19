@@ -75,12 +75,14 @@ export type DocFile = {
 	catalog?: { stale: boolean };
 };
 /**
- * A link in a Markdown document that leads to a file, or into a folder: the
- * document, the link's line, the link as written, what follows the file or
- * folder asked about in the path it leads to ("" for the file itself), and
- * whether it is written from the project's top ("/docs/…").
+ * A place in a Markdown document that leads to a file, or into a folder: the
+ * document, the place's line and column, the path as written, what follows
+ * the file or folder asked about in the path it leads to ("" for the file
+ * itself), and how it is written: a link from the document ("doc"), a link
+ * from the project's top ("/docs/…", "top"), or a path in front matter,
+ * which is from the project's top with no mark ("root").
  */
-export type LinkTo = { path: string; line: number; column: number; href: string; rest: string; fromTop: boolean };
+export type LinkTo = { path: string; line: number; column: number; href: string; rest: string; from: "doc" | "top" | "root" };
 /** One file of the project, for the file manifest. */
 export type ManifestFile = { path: string; kind: string; bytes: number; lines: number; sha256: string };
 

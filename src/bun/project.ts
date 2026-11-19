@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, readdirSync, rmdirSync, unlinkSync } from "node:
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { CATALOG_FILE, catalogStale } from "../shared/catalog";
 import { parseCsv, tally } from "../shared/csv";
-import { fileLinks } from "../shared/docLinks";
+import { fileLinks, frontPaths } from "../shared/docLinks";
 import { frontMatter, many, one, summaryOf, titleOf } from "../shared/frontMatter";
 import { catalogItems, DOC_FOLDERS, isCatalog, isPrompt, STATE_FILE, type DocArea } from "../shared/projectDocs";
 import { taskTally } from "../shared/tasks";
@@ -152,11 +152,17 @@ export async function linksTo(files: WorkspaceFiles, target: string): Promise<Li
 		} catch {
 			continue;
 		}
+		const leadsThere = (leads: string) => fold(leads) === wanted || fold(leads).startsWith(wanted + sep);
+		// A ticket's "specs:" line names files from the project's top: not links, and left behind by a rename all the same.
+		for (const named of frontPaths(text)) {
+			const leads = join(root, named.value);
+			if (leadsThere(leads)) found.push({ path, line: named.line, column: named.column, href: named.value, rest: leads.slice(resolve(target).length), from: "root" });
+		}
 		if (!text.includes("](") && !text.includes("]:")) continue;
 		for (const link of fileLinks(text)) {
 			if (!link.line) continue;
 			const leads = linkTarget(root, path, link.file);
-			if (fold(leads) === wanted || fold(leads).startsWith(wanted + sep)) found.push({ path, line: link.line, column: link.column, href: link.href, rest: leads.slice(resolve(target).length), fromTop: link.file.startsWith("/") });
+			if (leadsThere(leads)) found.push({ path, line: link.line, column: link.column, href: link.href, rest: leads.slice(resolve(target).length), from: link.file.startsWith("/") ? "top" : "doc" });
 		}
 	}
 	return found;
