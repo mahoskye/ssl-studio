@@ -128,6 +128,17 @@ describe("a catalog", () => {
 		expect(catalogStale(after, items)).toBe(false);
 	});
 
+	test("is the same catalog whichever line ends the file has, and is written in the file's own", () => {
+		const items = [{ path: "a.md", title: "A", status: "done" }, { path: "b.md", title: "B" }];
+		const dos = withCatalog("# T\n\nMine.\n", items).replace(/\n/g, "\r\n");
+		expect(catalogStale(dos, items)).toBe(false);
+		expect(catalogStale(dos, items.slice(0, 1))).toBe(true);
+		const again = withCatalog(dos, [...items, { path: "c.md", title: "C" }]);
+		expect(again).toContain("- [B](b.md)\r\n- [C](c.md)\r\n\r\n<!-- /catalog -->");
+		expect(again.replace(/\r\n/g, "")).not.toContain("\n");
+		expect(withCatalog("# T\r\n", items)).toBe(`# T\r\n\r\n${CATALOG_START}\r\n\r\n- [A](a.md): done.\r\n- [B](b.md)\r\n\r\n${CATALOG_END}\r\n`);
+	});
+
 	test("is out of date when a document is added, retitled or in another state", () => {
 		const text = withCatalog("", items);
 		expect(catalogStale(text, items)).toBe(false);

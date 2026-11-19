@@ -96,7 +96,9 @@ const line = (file: DocFile) => `- ${file.ticket && !file.title?.startsWith(file
  * cannot be read: the document is then said by its title alone. The specs are
  * left out for an agent that is about to write one.
  */
-export async function workText(work: Work, read: (path: string) => Promise<string | null>, options: { specs?: boolean } = {}): Promise<string> {
+export async function workText(work: Work, readFile: (path: string) => Promise<string | null>, options: { specs?: boolean } = {}): Promise<string> {
+	// A prompt has plain line ends, whichever the files are written with.
+	const read = async (path: string) => (await readFile(path))?.replace(/\r\n/g, "\n") ?? null;
 	const parts: string[] = ["THE WORK THIS IS FOR, from the project's own documents:"];
 	const ticket = work.ticket;
 	parts.push(`TICKET ${ticket.ticket}: ${ticket.title || ticket.name}${ticket.status ? ` (${ticket.status})` : ""}`);

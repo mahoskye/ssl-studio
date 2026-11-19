@@ -45,17 +45,19 @@ export function catalogBlock(text: string): { start: number; end: number; inner:
 	const start = text.indexOf(CATALOG_START);
 	const close = start < 0 ? -1 : text.indexOf(CATALOG_END, start + CATALOG_START.length);
 	if (start < 0 || close < 0) return null;
-	return { start, end: close + CATALOG_END.length, inner: text.slice(start + CATALOG_START.length, close).trim() };
+	// The list is compared and shown with plain line ends, whichever the file is written with.
+	return { start, end: close + CATALOG_END.length, inner: text.slice(start + CATALOG_START.length, close).replace(/\r\n/g, "\n").trim() };
 }
 
 const block = (items: readonly CatalogItem[]) => `${CATALOG_START}\n\n${catalogList(items)}\n\n${CATALOG_END}`;
 
-/** The catalog's text with its list written afresh. A file with no markers gets the list at its end. */
+/** The catalog's text with its list written afresh, in the line ends the file already has. A file with no markers gets the list at its end. */
 export function withCatalog(text: string, items: readonly CatalogItem[]): string {
+	const eol = (written: string) => (text.includes("\r\n") ? written.replace(/\n/g, "\r\n") : written);
 	const at = catalogBlock(text);
-	if (at) return text.slice(0, at.start) + block(items) + text.slice(at.end);
+	if (at) return text.slice(0, at.start) + eol(block(items)) + text.slice(at.end);
 	const body = text.replace(/\s+$/, "");
-	return `${body}${body ? "\n\n" : ""}${block(items)}\n`;
+	return `${body}${eol(`${body ? "\n\n" : ""}${block(items)}\n`)}`;
 }
 
 /** Whether the list no longer says what the documents do: a document added, gone, retitled, or in another state. */
