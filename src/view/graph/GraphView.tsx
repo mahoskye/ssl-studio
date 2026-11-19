@@ -15,7 +15,7 @@ import { canvasMeasure, fitShare, fitView, legibleScale, nearest, recall, rememb
 import { loadGraph } from "./load";
 import { Minimap, type MapBox } from "./Minimap";
 import { session } from "../lsp/session";
-import { callList, dirId, fold, FOLD_ABOVE, FOLD_DIRS_ABOVE, foldId, isDir, isFold, RELATION_WORDS, scriptOf, topLabel, UNRESOLVED, visible, type Filter, type Graph, type ListedProc, relationOf, type Relation } from "./model";
+import { callList, choices, chosen, dirId, keptFolds, fold, FOLD_ABOVE, FOLD_DIRS_ABOVE, foldId, isDir, isFold, RELATION_WORDS, scriptOf, topLabel, UNRESOLVED, visible, type Filter, type Graph, type ListedProc, relationOf, type Relation } from "./model";
 import { baseName, dirName, relativeTo } from "../../shared/paths";
 
 type Box = {
@@ -53,6 +53,7 @@ const FIT_FLOOR = legibleScale(FONT_PX);
 const MIN_ZOOM = 0.15;
 const MAX_ZOOM = 3;
 const MODE_KEY = "graph.view";
+const FOLDS_KEY = "graph.folds";
 /** A folded script's node: room for its name and, under it, what is inside. */
 const FOLD_HEIGHT = 46;
 /** A line's width for the number of places it stands for: each doubling adds the same, up to a limit that stays a line. */
@@ -103,6 +104,17 @@ export function GraphView() {
 	const [pointed, setPointed] = createSignal<string | null>(null);
 	const [walked, setWalked] = createSignal<string | null>(null);
 	const [pointedLine, setPointedLine] = createSignal<string | null>(null);
+	/** What the finder offers, and what it does with a name. */
+	const findId = createUniqueId();
+	const findable = createMemo(() => (graph() ? choices(graph()!, rel) : []));
+	const find = (input: HTMLInputElement) => {
+		const found = chosen(findable(), input.value);
+		if (!found) return;
+		input.value = "";
+		setCurrent(found.id);
+		setMode("graph");
+		focus(found.id);
+	};
 	/** Whether the list of the graph's keys is showing. */
 	const [keysOpen, setKeysOpen] = createSignal(false);
 	const keysId = createUniqueId();
@@ -117,10 +129,12 @@ export function GraphView() {
 			// The first picture of a large workspace is of its scripts: every one folded.
 			const root = state.workspace?.root ?? "";
 			if (foldedFor !== root) {
-				setFolded(new Set(read.nodes.length > FOLD_ABOVE ? read.scripts.map((s) => s.path) : []));
+				const kept = keptFolds(recall(`${FOLDS_KEY}:${root}`));
+				// What was folded here last time, if anything was kept; otherwise the opening picture.
+				setFolded(new Set(kept?.scripts ?? (read.nodes.length > FOLD_ABOVE ? read.scripts.map((s) => s.path) : [])));
 				// And of a workspace of many scripts, its folders: a picture that fits a screen, to unfold from.
 				const folders = foldersOf(read);
-				setFoldedDirs(read.scripts.length > FOLD_DIRS_ABOVE && folders.size > 1 ? folders : new Set<string>());
+				setFoldedDirs(new Set(kept?.folders ?? (read.scripts.length > FOLD_DIRS_ABOVE && folders.size > 1 ? folders : [])));
 			}
 			foldedFor = root;
 			setGraph(read);
@@ -134,6 +148,12 @@ export function GraphView() {
 	const shown = createMemo(() => {
 		const g = graph();
 		return g ? visible(g, filter()) : null;
+	});
+	// What is folded is kept with the workspace, so the graph opens next time as it was left.
+	createEffect(() => {
+		const root = state.workspace?.root ?? "";
+		const kept = JSON.stringify({ scripts: [...folded()], folders: [...foldedDirs()] });
+		if (root && foldedFor === root) remember(`${FOLDS_KEY}:${root}`, kept);
 	});
 	/** What is drawn of it: around a focus the neighbourhood is small, and is shown procedure by procedure. */
 	const drawn = createMemo(() => {
@@ -562,6 +582,24 @@ export function GraphView() {
 						Depth <input type="number" min="1" max="6" value={filter().depth} onChange={(e) => setFilter({ ...filter(), depth: Number(e.currentTarget.value) || 1 })} />
 					</label>
 					<span class="hint">{filter().focus ? baseName(filter().focus!) : ""}</span>
+				</Show>
+				<Show when={graph()?.nodes.length}>
+					{/* A procedure by name: the picture then shows it with what calls it and what it calls. */}
+					<input
+						class="graph-find"
+						type="search"
+						list={findId}
+						aria-label="Find a procedure and show its callers and callees"
+						title="Type a procedure's name and press Enter: the graph shows it with what calls it and what it calls"
+						placeholder="Find a procedure…"
+						autocomplete="off"
+						spellcheck={false}
+						onChange={(e) => find(e.currentTarget)}
+						onKeyDown={(e) => e.key === "Enter" && find(e.currentTarget)}
+					/>
+					<datalist id={findId}>
+						<For each={findable()}>{(c) => <option value={c.label} />}</For>
+					</datalist>
 				</Show>
 				<span class="spacer" />
 				<span class="hint" role="status">

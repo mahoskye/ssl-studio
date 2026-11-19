@@ -4,6 +4,7 @@ import { backend, inApp } from "./backend";
 import { ask } from "./dialogs";
 import { openFolder, state } from "./state";
 import { baseName } from "../shared/paths";
+import { FileMark } from "./FileMark";
 
 export function Welcome() {
 	const [recent] = createResource(() => backend.recent());
@@ -25,8 +26,13 @@ export function Welcome() {
 					<For each={recent()}>
 						{(path) => (
 							<li>
-								<button class="link" onClick={() => void openFolder(path)}>
-									{baseName(path)} <span class="hint">{path}</span>
+								<button title={`Open ${path}`} onClick={() => void openFolder(path)}>
+									<FileMark name={path} folder={{ open: false }} />
+									<span class="recent-name">{baseName(path)}</span>
+									{/* A long path keeps its end, which is the part that tells two folders apart. */}
+									<span class="hint">
+										<bdi>{path}</bdi>
+									</span>
 								</button>
 							</li>
 						)}

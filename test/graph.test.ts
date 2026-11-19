@@ -184,3 +184,34 @@ describe("scripts folded to one node", () => {
 		expect([isFold(foldId("/w/A.ssl")), isFold("/w/A.ssl#Main")]).toEqual([true, false]);
 	});
 });
+
+import { choices, chosen } from "../src/view/graph/model";
+
+describe("finding a node by name", () => {
+	const node = (name: string, path: string, kind?: "procedure" | "datasource" | "unresolved") => ({ id: `${path}#${name}`, name, path, line: 0, kind });
+	const graph = { nodes: [node("Run", "/w/B.ssl"), node("calc", "/w/A.ssl"), node("Run", "/w/A.ssl"), node("Samples", "/w/Samples.ds", "datasource"), node("Gone", "(unresolved)", "unresolved")] };
+	const list = choices(graph, (path) => path.replace("/w/", ""));
+
+	test("each procedure and data source is listed once, by name then script; what did not resolve is not", () => {
+		expect(list.map((c) => c.label)).toEqual(["calc  ·  A.ssl", "Run  ·  A.ssl", "Run  ·  B.ssl", "Samples  ·  Samples.ds"]);
+		expect(list[1]!.id).toBe("/w/A.ssl#Run");
+	});
+
+	test("a label is chosen as it stands, and a bare name when one node has it", () => {
+		expect(chosen(list, "Run  ·  B.ssl")?.id).toBe("/w/B.ssl#Run");
+		expect(chosen(list, " CALC ")?.id).toBe("/w/A.ssl#calc");
+		// Two procedures are called Run: the name alone does not say which.
+		expect(chosen(list, "Run")).toBeUndefined();
+		expect(chosen(list, "")).toBeUndefined();
+		expect(chosen(list, "Nothing")).toBeUndefined();
+	});
+});
+
+import { keptFolds } from "../src/view/graph/model";
+
+test("what was kept of the folded scripts and folders is read with suspicion", () => {
+	expect(keptFolds(JSON.stringify({ scripts: ["/w/A.ssl", 3], folders: ["src"] }))).toEqual({ scripts: ["/w/A.ssl"], folders: ["src"] });
+	// Nothing folded is a choice too, and is kept as one.
+	expect(keptFolds(JSON.stringify({ scripts: [], folders: [] }))).toEqual({ scripts: [], folders: [] });
+	for (const bad of [null, "", "not json", "[]", JSON.stringify({ scripts: "all" }), JSON.stringify({ scripts: [] })]) expect(keptFolds(bad)).toBeNull();
+});

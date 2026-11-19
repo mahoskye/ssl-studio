@@ -246,6 +246,12 @@ call at once, in lines with sharp corners.
 - **Search** keeps a match in sight in a narrow panel.
 - **A plan's chart has a key:** its Keys list also shows what each shape and
   line means, drawn by the chart's own rules.
+- **A procedure is found by name in the graph:** typed into the bar, it is
+  shown with what calls it and what it calls.
+- **The graph opens as it was left:** what was folded is kept with the
+  workspace.
+- **Welcome** lists the recent folders as rows, each with its mark, its name
+  and the end of its path.
 
 ## On hold
 

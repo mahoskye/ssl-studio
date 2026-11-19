@@ -255,3 +255,42 @@ export function fold(shown: { nodes: ReadonlySet<string>; edges: readonly GraphE
 export const FOLD_ABOVE = 40;
 /** More scripts than this, in more than one folder, and it opens with its folders folded too: the picture is of the folders first. */
 export const FOLD_DIRS_ABOVE = 24;
+
+// --- Finding a node by name ----------------------------------------------------
+
+export type Choice = { label: string; id: string };
+
+/**
+ * The procedures and data sources a graph can be asked to show, each under a
+ * label that says it and no other: its name, and the script it is in. Targets
+ * the server could not resolve are left out; there is nothing of them to go to.
+ */
+export function choices(graph: Pick<Graph, "nodes">, rel: (path: string) => string): Choice[] {
+	return graph.nodes
+		.filter((n) => n.kind !== "unresolved")
+		.map((n) => ({ label: `${n.name}  ·  ${rel(n.path)}`, id: n.id }))
+		.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: "base" }));
+}
+
+/** The choice typed: its label exactly, or failing that the one name that matches whatever its case. */
+export function chosen(list: readonly Choice[], typed: string): Choice | undefined {
+	const text = typed.trim();
+	if (!text) return undefined;
+	const exact = list.find((c) => c.label === text);
+	if (exact) return exact;
+	const named = list.filter((c) => c.label.split("  ·  ")[0]!.toLowerCase() === text.toLowerCase());
+	return named.length === 1 ? named[0] : undefined;
+}
+
+/** What was kept of the folded scripts and folders, read with suspicion; null when there is nothing usable. */
+export function keptFolds(text: string | null): { scripts: string[]; folders: string[] } | null {
+	try {
+		const raw: any = JSON.parse(text ?? "null");
+		const strings = (list: unknown) => (Array.isArray(list) ? list.filter((item): item is string => typeof item === "string") : null);
+		const scripts = strings(raw?.scripts);
+		const folders = strings(raw?.folders);
+		return scripts && folders ? { scripts, folders } : null;
+	} catch {
+		return null;
+	}
+}
