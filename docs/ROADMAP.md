@@ -334,6 +334,15 @@ From a second look:
   one pointed at fade, as the other lines already did.
 - **In a narrow graph the key is one row** that scrolls sideways, with the
   counts under it; stacked, it took the room of the picture.
+- **A decision is met at its points,** as on paper: every way in arrives at
+  the top, the way on leaves by the bottom, and the other way leaves by a
+  side. Before, they met the diamond part of the way along its slanted
+  edges. A way that closes a loop from a decision is tried out of each side,
+  and the chart with fewer crossings is kept.
+- **The steps of a stage stand as far apart as the rest:** inside a stage
+  they stood closer, and a way's label lay on the step under it.
+- **The chart's bar is one row** at the usual width: its keys and Save
+  picture are in a menu, as the graph's are.
 
 ## On hold
 

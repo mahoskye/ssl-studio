@@ -8,6 +8,7 @@ import { editors } from "../editor/EditorGroup";
 import { monaco } from "../editor/monaco";
 import { Minimap, type MapBox } from "../graph/Minimap";
 import { Finder } from "../graph/Finder";
+import { Menu, type MenuItem } from "../Menu";
 import { pictureName, savePicture } from "../graph/picture";
 import { dirName, joinPath, relativeTo } from "../../shared/paths";
 import { regionColor } from "../editor/regions";
@@ -16,7 +17,7 @@ import { diagnostics } from "../lsp/session";
 import { documents, notify, setState, state, applyText } from "../state";
 import { nodeStatuses } from "./build";
 import { builtOf, chartChanges, unitsOfNode } from "./built";
-import { chartGraph, cycleEdge, describeEdge, describeNode, KEYS, labelPoint, LINE, MARK_WORDS, routeOf, sizeNode, statusMark, type Mark, type NodeState, type Sized } from "./chart";
+import { chartGraph, crossings, cycleEdge, describeEdge, describeNode, KEYS, labelPoint, LINE, MARK_WORDS, routeOf, sizeNode, statusMark, type ChartGraph, type Mark, type NodeState, type Sized } from "./chart";
 import { recheckPlan } from "./check";
 import { driftFor, openProcedure } from "./drift";
 import { assistOf } from "./run";
@@ -75,7 +76,15 @@ function probeMeasure(probe: () => SVGTextElement | undefined, fallback: Measure
 async function layoutPlan(plan: Plan, measure: { node: Measure; label: Measure }): Promise<Layout> {
 	const sized = new Map<string, Sized>();
 	for (const n of plan.nodes) if (!sized.has(n.id)) sized.set(n.id, sizeNode(n.kind, n.text, measure.node));
-	const { graph, nodes, edges, groups, reversed } = chartGraph(plan, sized);
+	const east = await layoutWith(chartGraph(plan, sized), sized, measure);
+	if (!east.sided) return east.layout;
+	// A loop closed from a decision can leave by either side, and which is clearer depends on
+	// where the layout puts the rest: both are laid out, and the one with fewer crossings is kept.
+	const west = await layoutWith(chartGraph(plan, sized, "WEST"), sized, measure);
+	return west.crossings < east.crossings ? west.layout : east.layout;
+}
+
+async function layoutWith({ graph, nodes, edges, groups, reversed, sided }: ChartGraph, sized: ReadonlyMap<string, Sized>, measure: { node: Measure; label: Measure }): Promise<{ layout: Layout; crossings: number; sided: boolean }> {
 	const result: any = await elk.layout(graph as any);
 	const boxes: Box[] = [];
 	const walk = (n: any, ox: number, oy: number) => {
@@ -99,7 +108,7 @@ async function layoutPlan(plan: Plan, measure: { node: Measure; label: Measure }
 		const labelWidth = shown ? Math.ceil(measure.label(shown)) + 12 : 0;
 		return { id: e.id, from: edge.from, to: edge.to, label: edge.label, shown, labelWidth, points, at: labelPoint(points, labelWidth), missing, pending: Boolean(edge.pending), removing: Boolean(edge.removing), back: reversed.has(index) };
 	});
-	return { boxes, lines, width: result.width, height: result.height };
+	return { layout: { boxes, lines, width: result.width, height: result.height }, crossings: crossings(lines.map((l) => l.points)), sided };
 }
 
 /** A way out as it is drawn: its corners rounded, so that it reads as one line through each turn. */
@@ -145,6 +154,16 @@ export function PlanView(props: { path: string; group: number }) {
 	const [editing, setEditing] = createSignal<{ node: string } | { from: string; to: string } | null>(null);
 	const assistantId = createUniqueId();
 	const keysId = createUniqueId();
+	/** The bar's menu: what is not needed at every look. */
+	const more = (): MenuItem[] => [
+		{ label: keysOpen() ? "Hide the keys" : "Keys, and what the shapes mean", keys: "?", run: () => setKeysOpen((open) => !open) },
+		{
+			label: "Save picture…",
+			run: () => void savePicture(canvas.querySelector<SVGSVGElement>("svg.graph-canvas") ?? undefined, layout(), joinPath(relativeTo(state.workspace?.root, dirName(props.path)), pictureName(plan()?.title || "plan"))),
+			disabled: !layout(),
+			why: "The chart is not drawn yet",
+		},
+	];
 	let canvas!: HTMLDivElement;
 	let nodeProbe: SVGTextElement | undefined;
 	let labelProbe: SVGTextElement | undefined;
@@ -564,9 +583,6 @@ export function PlanView(props: { path: string; group: number }) {
 						onChoose={(id) => (select(id), refocus())}
 					/>
 					<span class="spacer" />
-					<button title="The chart's keys (?)" classList={{ on: keysOpen() }} aria-expanded={keysOpen()} aria-controls={keysId} onClick={() => setKeysOpen((open) => !open)} onKeyDown={(e) => e.key === "Escape" && setKeysOpen(false)}>
-						Keys
-					</button>
 					<button title="The agent's questions, suggestions and spec" classList={{ on: assistantOpen() }} aria-expanded={assistantOpen()} aria-controls={assistantId} onClick={toggleAssistant}>
 						Assistant
 					</button>
@@ -588,13 +604,10 @@ export function PlanView(props: { path: string; group: number }) {
 					<button title="The whole chart, or as much as stays legible (0)" onClick={(e) => (fit(), after(e))}>
 						Fit
 					</button>
-					<button
-						title="Save this chart as an SVG file in the workspace, for a document"
-						disabled={!layout()}
-						onClick={() => void savePicture(canvas.querySelector<SVGSVGElement>("svg.graph-canvas") ?? undefined, layout(), joinPath(relativeTo(state.workspace?.root, dirName(props.path)), pictureName(plan()?.title || "plan")))}
-					>
-						Save picture…
-					</button>
+					{/* What is used now and then, so the bar stays one row. */}
+					<Menu label="More for the chart" title="More: keys, save picture" class="graph-more" items={more}>
+						<span aria-hidden="true">⋯</span>
+					</Menu>
 				</div>
 				<div class="plan-main" classList={{ stacked: narrow() && assistantOpen() }} ref={watchWidth}>
 				<div
@@ -602,7 +615,7 @@ export function PlanView(props: { path: string; group: number }) {
 					ref={canvas}
 					tabIndex={0}
 					role="application"
-					aria-label="Plan chart. The arrow keys move between nodes; the Keys button lists the rest."
+					aria-label="Plan chart. The arrow keys move between nodes; the question mark key lists the rest."
 					aria-describedby={keysOpen() ? keysId : undefined}
 					classList={{ linking: Boolean(linking()), pathing: Boolean(onPath()) }}
 					onKeyDown={onKey}

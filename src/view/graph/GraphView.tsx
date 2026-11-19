@@ -63,7 +63,7 @@ const GATHER_KEY = "graph.gather";
 const FOLD_HEIGHT = 46;
 /** A line's width for the number of places it stands for: each doubling adds the same, up to a limit that stays a line. */
 const lineWidth = (count: number) => Math.min(3.4, 1 + Math.log2(Math.max(1, count)) * 0.6);
-/** The graph's keys and what the pointer does, as its Keys button lists them. */
+/** The graph's keys and what the pointer does, as its menu lists them. */
 const GRAPH_KEYS: readonly (readonly [keys: string, what: string])[] = [
 	["Arrow keys", "Move between nodes; the calls of the one you are on are lit"],
 	["Enter", "Open a procedure; unfold a folded script or folder"],
@@ -749,7 +749,7 @@ export function GraphView() {
 						class="graph-canvas"
 						ref={svg}
 						role="group"
-						aria-label="Call graph. The arrow keys move between nodes; the Keys button lists the rest."
+						aria-label="Call graph. The arrow keys move between nodes; the question mark key lists the rest."
 						aria-describedby={keysOpen() ? keysId : undefined}
 						onFocusOut={(e) => !e.currentTarget.contains(e.relatedTarget as Node | null) && setWalked(null)}
 						onKeyDown={onKey}

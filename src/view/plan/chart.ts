@@ -102,6 +102,11 @@ export function backEdges(nodes: readonly Pick<PlanNode, "id" | "kind">[], edges
 
 // --- what ELK is asked ----------------------------------------------------------------
 
+type Side = "NORTH" | "SOUTH" | "EAST" | "WEST";
+/** The points of a decision its ways out leave by, in order: down, then out of each side. */
+const TIPS: readonly Side[] = ["SOUTH", "EAST", "WEST"];
+/** The room between steps side by side, and between one row of steps and the next: enough for a way's label. */
+const SPACING = { "elk.spacing.nodeNode": "34", "elk.layered.spacing.nodeNodeBetweenLayers": "46" };
 type ElkNode = { id: string; width?: number; height?: number; layoutOptions?: Record<string, string>; children?: ElkNode[]; ports?: ElkNode[] };
 export type ElkInput = ElkNode & { edges: { id: string; sources: string[]; targets: string[] }[] };
 export type ChartGraph = {
@@ -112,15 +117,19 @@ export type ChartGraph = {
 	groups: PlanGroup[];
 	/** Edges given to ELK the other way round, by their place in `edges`: its route for one runs from the edge's end to its start. */
 	reversed: Set<number>;
+	/** A way that closes a loop leaves a decision by the side asked for: the other side is another chart, worth trying. */
+	sided: boolean;
 };
 
 /**
  * The plan as a graph for ELK's layered layout, top to bottom. A loop's closing
  * edge is given reversed, so it cannot decide the layers, and tied to the top of
  * the node it returns to and the bottom of the node it leaves: drawn, it goes
- * down, round and back in at the top, as a loop does on paper.
+ * down, round and back in at the top, as a loop does on paper. A decision's
+ * ways meet it at its points: in at the top, on at the bottom, the others out
+ * of its sides; `loopTip` is the side a way that closes a loop leaves by.
  */
-export function chartGraph(plan: Plan, sizes: ReadonlyMap<string, Size>): ChartGraph {
+export function chartGraph(plan: Plan, sizes: ReadonlyMap<string, Size>, loopTip: "EAST" | "WEST" = "EAST"): ChartGraph {
 	const ids = new Set<string>();
 	const nodes = plan.nodes.filter((n) => !ids.has(n.id) && ids.add(n.id));
 	const edges = plan.edges.filter((e) => ids.has(e.from) && ids.has(e.to));
@@ -131,12 +140,33 @@ export function chartGraph(plan: Plan, sizes: ReadonlyMap<string, Size>): ChartG
 	let stem = "port";
 	while ([...ids, ...known].some((id) => id.startsWith(`${stem}:`))) stem += "_";
 	const ports = new Map<string, ElkNode[]>();
-	const port = (node: string, id: string, side: "NORTH" | "SOUTH") => {
-		ports.set(node, [...(ports.get(node) ?? []), { id, width: 0, height: 0, layoutOptions: { "elk.port.side": side } }]);
+	const port = (node: string, id: string, side: Side) => {
+		if (!ports.get(node)?.some((p) => p.id === id)) ports.set(node, [...(ports.get(node) ?? []), { id, width: 0, height: 0, layoutOptions: { "elk.port.side": side } }]);
 		return id;
 	};
+	// A decision is a diamond, and its ways in and out meet it at its points, as on paper: in at
+	// the top, the first way out at the bottom, the next out of a side. The ways that go on come
+	// before a way that closes a loop, so what goes on goes down.
+	const decisions = new Set(nodes.filter((n) => n.kind === "decision").map((n) => n.id));
+	const wayOut = new Map<number, Side>();
+	let sided = false;
+	for (const id of decisions) {
+		const outs = edges.map((e, i) => ({ e, i })).filter(({ e }) => e.from === id && e.to !== id);
+		const [on, back] = [outs.filter(({ i }) => !reversed.has(i)), outs.filter(({ i }) => reversed.has(i))];
+		const free = [...TIPS];
+		const take = (side: Side | undefined) => (side && free.includes(side) ? free.splice(free.indexOf(side), 1)[0]! : (free.shift() ?? "SOUTH"));
+		// The way that closes a loop takes the side asked for while it is free; which side is shorter depends on the layout.
+		const loops = new Map(back.map(({ i }, at) => [i, at === 0 && on.length <= 1 ? loopTip : undefined] as const));
+		if (on.length) wayOut.set(on[0]!.i, take("SOUTH"));
+		for (const { i } of back) if (loops.get(i)) (sided = true), wayOut.set(i, take(loops.get(i)));
+		for (const { i } of [...on.slice(1), ...back]) if (!wayOut.has(i)) wayOut.set(i, take(undefined));
+	}
+	const leaves = (e: PlanEdge, i: number) => (decisions.has(e.from) ? port(e.from, `${stem}:${i}:out`, wayOut.get(i) ?? "SOUTH") : null);
+	const arrives = (e: PlanEdge) => (decisions.has(e.to) ? port(e.to, `${stem}:${e.to}:in`, "NORTH") : null);
 	const elkEdges = edges.map((e, i) =>
-		reversed.has(i) ? { id: `e${i}`, sources: [port(e.to, `${stem}:${i}:in`, "NORTH")], targets: [port(e.from, `${stem}:${i}:out`, "SOUTH")] } : { id: `e${i}`, sources: [e.from], targets: [e.to] },
+		reversed.has(i)
+			? { id: `e${i}`, sources: [arrives(e) ?? port(e.to, `${stem}:${i}:in`, "NORTH")], targets: [leaves(e, i) ?? port(e.from, `${stem}:${i}:out`, "SOUTH")] }
+			: { id: `e${i}`, sources: [leaves(e, i) ?? e.from], targets: [arrives(e) ?? e.to] },
 	);
 	const leaf = (n: PlanNode): ElkNode => {
 		const size = sizes.get(n.id) ?? { width: SHAPES[n.kind].width, height: LINE + SHAPES[n.kind].pad };
@@ -148,6 +178,7 @@ export function chartGraph(plan: Plan, sizes: ReadonlyMap<string, Size>): ChartG
 		edges,
 		groups,
 		reversed,
+		sided,
 		graph: {
 			id: "root",
 			layoutOptions: {
@@ -155,15 +186,15 @@ export function chartGraph(plan: Plan, sizes: ReadonlyMap<string, Size>): ChartG
 				"elk.direction": "DOWN",
 				"elk.hierarchyHandling": "INCLUDE_CHILDREN",
 				"elk.edgeRouting": "ORTHOGONAL",
-				"elk.spacing.nodeNode": "34",
-				"elk.layered.spacing.nodeNodeBetweenLayers": "46",
+				...SPACING,
 				"elk.json.edgeCoords": "ROOT",
 			},
 			children: [
 				...nodes.filter((n) => !n.group || !known.has(n.group)).map(leaf),
 				...groups.map((g) => ({
 					id: g.id,
-					layoutOptions: { "elk.padding": "[top=30,left=16,bottom=16,right=16]" },
+					// ELK reads the spacing from the box the nodes are in: without it a group's steps stand closer than the rest.
+					layoutOptions: { "elk.padding": "[top=30,left=16,bottom=16,right=16]", ...SPACING },
 					children: nodes.filter((n) => n.group === g.id).map(leaf),
 				})),
 			],
@@ -201,6 +232,21 @@ export function routeOf(points: readonly Point[], isReversed: boolean, from: Rec
 	if (from) route[0] = onDiamond(route[0]!, from);
 	if (to) route[route.length - 1] = onDiamond(route[route.length - 1]!, to);
 	return route;
+}
+
+/**
+ * How many times the routes cross one another: two stretches of different
+ * routes that pass through each other. Meeting at an end, as two ways into one
+ * step do, is not a crossing. A chart with fewer is easier to follow.
+ */
+export function crossings(routes: readonly (readonly Point[])[]): number {
+	const turn = (a: Point, b: Point, c: Point) => Math.sign((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x));
+	const cross = (a: Point, b: Point, c: Point, d: Point) => turn(a, b, c) * turn(a, b, d) < 0 && turn(c, d, a) * turn(c, d, b) < 0;
+	let count = 0;
+	for (let i = 0; i < routes.length; i++)
+		for (let j = i + 1; j < routes.length; j++)
+			for (let p = 1; p < routes[i]!.length; p++) for (let q = 1; q < routes[j]!.length; q++) if (cross(routes[i]![p - 1]!, routes[i]![p]!, routes[j]![q - 1]!, routes[j]![q]!)) count++;
+	return count;
 }
 
 /**

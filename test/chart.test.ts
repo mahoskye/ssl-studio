@@ -146,16 +146,43 @@ describe("what ELK is asked", () => {
 		const tangled = plan([["a", "start"], ["b", "decision"], ["c"], ["d", "end"]], [["a", "b"], ["b", "c"], ["c", "b"], ["c", "a"], ["b", "d"], ["d", "a"], ["c", "c"]]);
 		expect(acyclic(ends(tangled))).toBe(true);
 	});
+	const find = (graph: ReturnType<typeof chartGraph>["graph"], id: string) => [...(graph.children ?? []), ...(graph.children ?? []).flatMap((c) => c.children ?? [])].find((n) => n.id === id)!;
+	/** The side of a node each of its edges meets it by: "n6>n7" leaves n6 by `from` and reaches n7 by `to`. */
+	const sides = (p: Plan, loopTip?: "EAST" | "WEST") => {
+		const { graph, edges, reversed } = chartGraph(p, sizes(p), loopTip);
+		const side = (node: string, port: string) => find(graph, node).ports?.find((q) => q.id === port)?.layoutOptions?.["elk.port.side"];
+		return new Map(edges.map((e, i) => [`${e.from}>${e.to}`, reversed.has(i) ? { from: side(e.from, graph.edges[i]!.targets[0]!), to: side(e.to, graph.edges[i]!.sources[0]!) } : { from: side(e.from, graph.edges[i]!.sources[0]!), to: side(e.to, graph.edges[i]!.targets[0]!) }]));
+	};
 	test("a reversed edge leaves the top of the node it returns to and reaches the bottom of the node it leaves", () => {
-		const { graph, edges, reversed } = chartGraph(dueDates, sizes(dueDates));
-		const index = [...reversed].find((i) => edges[i]!.from === "n11")!;
-		const find = (id: string) => [...(graph.children ?? []), ...(graph.children ?? []).flatMap((c) => c.children ?? [])].find((n) => n.id === id)!;
-		const head = find("n6").ports!.find((p) => p.id === graph.edges[index]!.sources[0])!;
-		const tail = find("n11").ports!.find((p) => p.id === graph.edges[index]!.targets[0])!;
-		expect(head.layoutOptions).toEqual({ "elk.port.side": "NORTH" });
-		expect(tail.layoutOptions).toEqual({ "elk.port.side": "SOUTH" });
-		expect(find("n6").layoutOptions).toEqual({ "elk.portConstraints": "FIXED_SIDE" });
-		expect(find("n7").ports).toBeUndefined();
+		const { graph } = chartGraph(dueDates, sizes(dueDates));
+		expect(sides(dueDates).get("n12>n6")).toEqual({ from: "SOUTH", to: "NORTH" });
+		expect(find(graph, "n6").layoutOptions).toEqual({ "elk.portConstraints": "FIXED_SIDE" });
+		expect(find(graph, "n8").ports).toBeUndefined();
+	});
+	test("a decision is met at its points: in at the top, on at the bottom, the other way out of a side", () => {
+		const met = sides(dueDates);
+		expect(met.get("n5>n6")).toEqual({ from: undefined, to: "NORTH" });
+		expect(met.get("n6>n7")).toEqual({ from: "SOUTH", to: "NORTH" });
+		expect(met.get("n6>n13")).toEqual({ from: "EAST", to: undefined });
+		expect(met.get("n7>n12")).toEqual({ from: "EAST", to: undefined });
+	});
+	test("every way into a decision shares the one point at its top", () => {
+		const { graph, edges } = chartGraph(dueDates, sizes(dueDates));
+		const into = edges.map((e, i) => ({ e, i })).filter(({ e }) => e.to === "n6");
+		expect(into.length).toBe(3);
+		expect(find(graph, "n6").ports!.filter((p) => p.layoutOptions?.["elk.port.side"] === "NORTH").length).toBe(1);
+	});
+	test("the way on goes down even when the way that closes a loop was drawn first, and the loop takes the side asked for", () => {
+		// n11's first way out closes the loop; its second goes on.
+		expect(sides(dueDates).get("n11>n12")!.from).toBe("SOUTH");
+		expect(sides(dueDates).get("n11>n6")!.from).toBe("EAST");
+		expect(sides(dueDates, "WEST").get("n11>n6")!.from).toBe("WEST");
+		expect(chartGraph(dueDates, sizes(dueDates)).sided).toBe(true);
+		expect(chartGraph(release, sizes(release)).sided).toBe(false);
+	});
+	test("a third way out takes the other side", () => {
+		const p = plan([["a", "start"], ["d", "decision"], ["x"], ["y"], ["z"]], [["a", "d"], ["d", "x"], ["d", "y"], ["d", "z"]]);
+		expect(["d>x", "d>y", "d>z"].map((k) => sides(p).get(k)!.from)).toEqual(["SOUTH", "EAST", "WEST"]);
 	});
 	test("a loop to itself is left for ELK to draw", () => {
 		const p = plan([["a", "start"], ["b"]], [["a", "b"], ["b", "b"]]);
@@ -297,5 +324,23 @@ describe("the chart's keys", () => {
 	});
 	test("no key is listed twice", () => {
 		expect(new Set(keys).size).toBe(keys.length);
+	});
+});
+
+import { crossings } from "../src/view/plan/chart";
+
+describe("ways that cross", () => {
+	test("two ways that pass through each other cross once", () => {
+		expect(crossings([[{ x: 0, y: 0 }, { x: 10, y: 0 }], [{ x: 5, y: -5 }, { x: 5, y: 5 }]])).toBe(1);
+	});
+	test("ways that meet at an end, or run side by side, do not cross", () => {
+		const down = [{ x: 0, y: 0 }, { x: 0, y: 10 }];
+		expect(crossings([down, [{ x: -5, y: 10 }, { x: 0, y: 10 }]])).toBe(0);
+		expect(crossings([down, [{ x: 4, y: 0 }, { x: 4, y: 10 }]])).toBe(0);
+	});
+	test("a way does not cross itself, and each crossing of two ways counts", () => {
+		const zigzag = [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }, { x: 0, y: 10 }];
+		expect(crossings([zigzag])).toBe(0);
+		expect(crossings([zigzag, [{ x: 5, y: -5 }, { x: 5, y: 15 }]])).toBe(2);
 	});
 });
