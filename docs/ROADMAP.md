@@ -370,6 +370,16 @@ From a second look:
   of its side crossed one of them. They can now arrive at the decision's
   left point, all up the one side; both are laid out with the rest, and the
   chart with the fewest crossings is kept. The demo's plan has none left.
+- **Fit, and Fit again for the whole picture.** Fit shows as much as stays
+  legible; pressed again where that left some out of sight, it shows the
+  whole graph or chart however small, and once more goes back. The 0 key
+  does the same.
+- **Far out, the graph names its scripts and folders.** Zoomed out past
+  the point a procedure's name can be read, those words are left out and
+  each script is named across its middle, each folder above it, at a size
+  that reads at that zoom as far as the box allows.
+- **A picture of up to 250 nodes is laid out both across and down** (it was
+  150), and the one the view shows more of is kept.
 - **A procedure found from the list is fitted in the graph.** Finding one
   while the list was showing laid out two pictures, and the view was fitted
   to the wrong one: the focus came up small, cut off at the top, with a

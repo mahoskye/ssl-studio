@@ -36,7 +36,7 @@ const NODE_FONT_PX = 13;
 const LABEL_FONT_PX = 12;
 /** Fit never draws a node's words smaller than can be read; a larger chart is panned. */
 const FIT_FLOOR = legibleScale(NODE_FONT_PX);
-const MIN_ZOOM = 0.2;
+const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 2.5;
 /** The assistant's width (.plan-assist), and the least the chart keeps beside it before the assistant goes below. */
 const ASSIST_WIDTH = 280;
@@ -191,6 +191,8 @@ export function PlanView(props: { path: string; group: number }) {
 	let fitted = false;
 	/** The view as the last fit left it: while it is still that, a change of the chart's size fits it again. */
 	let fittedView: { x: number; y: number; scale: number } | null = null;
+	/** Whether that fit was of the whole chart, however small, and not of as much as stays legible. */
+	let fittedWhole = false;
 	let seen = 0;
 	const measure = {
 		node: probeMeasure(() => nodeProbe, canvasMeasure(`${NODE_FONT_PX}px system-ui, sans-serif`, NODE_FONT_PX)),
@@ -216,7 +218,7 @@ export function PlanView(props: { path: string; group: number }) {
 				setNarrow(width < ASSIST_WIDTH + MIN_CHART_WIDTH);
 				setCompact(width < BAR_FITS_FROM);
 				// A chart nobody has moved since it was fitted stays fitted when the window or a panel changes its room.
-				if (view() === fittedView) queueMicrotask(fit);
+				if (view() === fittedView) queueMicrotask(fittedWhole ? whole : fit);
 			});
 		});
 		observer.observe(el);
@@ -285,6 +287,21 @@ export function PlanView(props: { path: string; group: number }) {
 		if (!l || !canvas) return;
 		const here = l.boxes.find((b) => b.node && b.id === selected()) ?? l.boxes.find((b) => b.node?.kind === "start");
 		fittedView = fitView(l, canvas.getBoundingClientRect(), { floor: FIT_FLOOR, anchor: here && { x: here.x + here.width / 2, y: here.y + here.height / 2 } });
+		fittedWhole = false;
+		setView(fittedView);
+	};
+	/** Fit, and Fit again: as much as stays legible, then, where that left some out of sight, the whole chart however small. */
+	const fitOrWhole = () => {
+		const l = layout();
+		const box = canvas?.getBoundingClientRect();
+		if (l && box && view() === fittedView && !fittedWhole && outOfSight(l, view(), box)) whole();
+		else fit();
+	};
+	const whole = () => {
+		const l = layout();
+		if (!l || !canvas) return;
+		fittedView = fitView(l, canvas.getBoundingClientRect(), { floor: MIN_ZOOM });
+		fittedWhole = true;
 		setView(fittedView);
 	};
 	/** Zooms about a point of the canvas: the pointer, or its middle for the keys. */
@@ -499,7 +516,7 @@ export function PlanView(props: { path: string; group: number }) {
 			"+": () => zoomBy(1.2),
 			"=": () => zoomBy(1.2),
 			"-": () => zoomBy(1 / 1.2),
-			"0": fit,
+			"0": fitOrWhole,
 			"?": () => setKeysOpen((open) => !open),
 			Escape: () => {
 				if (keysOpen()) setKeysOpen(false);
@@ -660,7 +677,7 @@ export function PlanView(props: { path: string; group: number }) {
 							+
 						</button>
 					</div>
-					<button title="The whole chart, or as much as stays legible (0)" onClick={(e) => (fit(), after(e))}>
+					<button title="As much of the chart as stays legible; again for the whole of it, however small (0)" onClick={(e) => (fitOrWhole(), after(e))}>
 						Fit
 					</button>
 					{/* What is used now and then, so the bar stays one row. */}

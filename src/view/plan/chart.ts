@@ -371,7 +371,7 @@ export const KEYS: readonly (readonly [keys: string, what: string])[] = [
 	["E, Shift+E", "Select the next or the previous way out of the node"],
 	["Delete", "Delete the selected node or way out"],
 	["G", "Open the step's code"],
-	["+, −, 0", "Zoom in, zoom out, fit"],
+	["+, −, 0", "Zoom in, zoom out, fit; 0 again shows the whole chart"],
 	["Ctrl+Z, Ctrl+Y", "Undo, redo"],
 	["Esc", "Cancel, then clear the selection"],
 	["?", "Show or hide this list"],

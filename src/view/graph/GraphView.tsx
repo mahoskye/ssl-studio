@@ -53,7 +53,9 @@ const measureBold = canvasMeasure(`600 ${FONT_PX}px system-ui, sans-serif`, FONT
 const textWidth = (s: string) => Math.max(60, Math.ceil(measure(s)) + 24);
 /** Fit never draws the words smaller than can be read; a larger graph is panned. */
 const FIT_FLOOR = legibleScale(FONT_PX);
-const MIN_ZOOM = 0.15;
+const MIN_ZOOM = 0.05;
+/** Zoomed out past this, a procedure's name cannot be read: the picture is of scripts and folders, named at a size that can. */
+const FAR_UNDER = 0.6;
 const MAX_ZOOM = 3;
 const MODE_KEY = "graph.view";
 const FOLDS_KEY = "graph.folds";
@@ -70,12 +72,12 @@ const GRAPH_KEYS: readonly (readonly [keys: string, what: string])[] = [
 	["F", "Show only the node's callers and callees"],
 	["X", "Fold a script to one node, or unfold it"],
 	["Shift+X", "Fold the script's folder to one node, or unfold it"],
-	["+, −, 0", "Zoom in, zoom out, fit"],
+	["+, −, 0", "Zoom in, zoom out, fit; 0 again shows the whole picture"],
 	["?", "Show or hide this list"],
 	["Pointer", "Point at a node or a line to light it; click a node to focus on it, double-click to open it; drag to move, the wheel zooms"],
 ];
 /** A picture of up to this many nodes is laid out both across and down, to keep the one that fits the view better. */
-const BOTH_WAYS_UP_TO = 150;
+const BOTH_WAYS_UP_TO = 250;
 /** A graph narrower than this keeps its zoom buttons in the menu: in the bar they cost it a third row. */
 const NARROW_UNDER = 600;
 /** How far along a line its number of places is written. */
@@ -101,6 +103,8 @@ export function GraphView() {
 	let layoutRun = 0;
 	/** The view as the last fit left it: while it is still that, a change of the graph's size fits it again. */
 	let fittedView: { x: number; y: number; scale: number } | null = null;
+	/** Whether that fit was of the whole picture, however small, and not of as much as stays legible. */
+	let fittedWhole = false;
 	/** The scripts drawn as one node each, by path. */
 	const [folded, setFolded] = createSignal<ReadonlySet<string>>(new Set());
 	/** The folders drawn as one node each. */
@@ -470,7 +474,31 @@ export function GraphView() {
 		if (!l || !svg) return;
 		const here = procs().find((b) => b.id === cursor());
 		fittedView = fitView(l, size(), { floor: FIT_FLOOR, anchor: current() || filter().focus ? here && centreOf(here) : undefined });
+		fittedWhole = false;
 		setView(fittedView);
+	};
+	/** Fit, and Fit again: as much as stays legible, then, where that left some out of sight, the whole picture however small. */
+	const fitOrWhole = () => {
+		const l = layout();
+		if (l && svg && view() === fittedView && !fittedWhole && outOfSight(l, view(), size())) whole();
+		else fit();
+	};
+	const whole = () => {
+		const l = layout();
+		if (!l || !svg) return;
+		fittedView = fitView(l, size(), { floor: MIN_ZOOM });
+		fittedWhole = true;
+		setView(fittedView);
+	};
+	/** Zoomed far out: the words of the nodes give way to the names of scripts and folders, drawn to be read. */
+	const far = () => view().scale < FAR_UNDER;
+	/** A name's size in that far picture: what reads at this zoom, as far as its box has room for it. */
+	const farSize = (b: Box, room = b.width - 16, height = b.height * 0.7) => {
+		const natural = measureBold(b.label) || 1;
+		const fits = Math.min((room / natural) * FONT_PX, height);
+		// A long name in a narrow box may run a little past its sides, rather than be too small to read.
+		const least = Math.min(9 / view().scale, ((1.8 * b.width) / natural) * FONT_PX, height);
+		return Math.max(FONT_PX, Math.min(11 / view().scale, Math.max(fits, least)));
 	};
 	/** Zooms about a point of the canvas: the pointer, or its middle for the buttons and keys. */
 	const zoomBy = (factor: number, at?: Point) => {
@@ -508,7 +536,7 @@ export function GraphView() {
 			"+": () => zoomBy(1.2),
 			"=": () => zoomBy(1.2),
 			"-": () => zoomBy(1 / 1.2),
-			"0": fit,
+			"0": fitOrWhole,
 			"?": () => setKeysOpen((open) => !open),
 			Escape: () => setKeysOpen(false),
 		};
@@ -674,7 +702,7 @@ export function GraphView() {
 			frame = requestAnimationFrame(() => {
 				setNarrow(width < NARROW_UNDER);
 				// A picture nobody has moved since it was fitted stays fitted when the window or a panel changes its room.
-				if (view() === fittedView) queueMicrotask(fit);
+				if (view() === fittedView) queueMicrotask(fittedWhole ? whole : fit);
 			});
 		});
 		observer.observe(el);
@@ -744,7 +772,7 @@ export function GraphView() {
 					</div>
 				</Show>
 				<Show when={mode() === "graph"}>
-					<button title="The whole graph, or as much as stays legible (0)" onClick={fit}>
+					<button title="As much of the graph as stays legible; again for the whole of it, however small (0)" onClick={fitOrWhole}>
 						Fit
 					</button>
 				</Show>
@@ -834,7 +862,7 @@ export function GraphView() {
 						</defs>
 						<Show when={layout()}>
 							{(l) => (
-								<g class="g-root" classList={{ lit: lit() !== null || pointedLine() !== null }} transform={`translate(${view().x},${view().y}) scale(${view().scale})`}>
+								<g class="g-root" classList={{ lit: lit() !== null || pointedLine() !== null, far: far() }} transform={`translate(${view().x},${view().y}) scale(${view().scale})`}>
 									<For each={l().boxes.filter((b) => b.kind === "folder" || b.kind === "script" || b.kind === "region")}>
 										{(b) => (
 											<g class={`g-${b.kind}`} classList={{ [level(b.bytes ?? 0, state.settings.limits.bytes)]: b.kind === "script" }}>
@@ -937,6 +965,27 @@ export function GraphView() {
 											</g>
 										)}
 									</For>
+									{/* Far out, the names of scripts and folders over the picture, at a size that reads: in a script's middle, and above a folder. */}
+									<Show when={far()}>
+										<g class="g-far" aria-hidden="true">
+											<For each={l().boxes.filter((b) => b.kind === "script" || b.kind === "fold" || b.kind === "dir" || b.kind === "folder")}>
+												{(b) => {
+													const size = () => (b.kind === "folder" ? farSize(b, b.width, Infinity) : farSize(b));
+													return (
+														<text
+															classList={{ folder: b.kind === "folder" }}
+															x={b.kind === "folder" ? b.x : b.x + b.width / 2}
+															y={b.kind === "folder" ? b.y - size() * 0.3 : b.y + b.height / 2 + size() * 0.35}
+															text-anchor={b.kind === "folder" ? "start" : "middle"}
+															style={{ "font-size": `${size()}px`, "stroke-width": `${size() * 0.28}px` }}
+														>
+															{b.label}
+														</text>
+													);
+												}}
+											</For>
+										</g>
+									</Show>
 								</g>
 							)}
 						</Show>
