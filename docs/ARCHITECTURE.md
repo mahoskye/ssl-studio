@@ -16,7 +16,7 @@ milestone M0.
 │           └──── typed RPC (Electrobun) ────┘                   │
 └───────────────────────────────┼────────────────────────────────┘
                                 ▼
-                  opencode background service (v2.2.5)
+                  opencode background service (2.2.5 to 2.3)
                   SSL agents + ssl-tidy-* skills (user level)
                   model: a local one, or a chosen provider
 ```

@@ -11,7 +11,14 @@ import type { Subprocess } from "bun";
 import type { AgentModel, AgentReply, AgentStatus } from "../shared/protocol";
 import { compareVersions, OPENCODE_RANGE, opencodeCommand } from "./tools";
 
-const DENY = ["shell", "webfetch", "websearch", "external_directory", "question", "edit"];
+/**
+ * What every session is denied. The last five were added for opencode 2.3:
+ * its image tool calls a connected provider's image model, which may bill and
+ * writes a file; its MCP resource tools read from whatever servers the user
+ * has connected, which is outside the workspace; `browser` is the web by
+ * another name. A rule for an action a server does not have denies nothing.
+ */
+const DENY = ["shell", "webfetch", "websearch", "external_directory", "question", "edit", "browser", "experimental_image_generate", "opencode_list_mcp_resources", "opencode_read_mcp_resource", "opencode_watch_mcp_event"];
 /** Providers that run on the user's own machines. Anything else may bill. */
 const LOCAL_PROVIDERS = new Set(["ollama", "lmstudio", "llama.cpp", "llamacpp", "local"]);
 const TURN_TIMEOUT_MS = 15 * 60_000;

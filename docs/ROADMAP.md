@@ -476,13 +476,26 @@ the work comes from ([ADR 0012](adr/0012-a-projects-work-is-written-down.md)).
   the decisions that stand when it refines the plan or writes the spec; a
   chat is sent the same once in a conversation, on a tick box that says
   which ticket ([ADR 0013](adr/0013-the-agent-is-told-the-work-a-question-is-for.md)).
-  Checked by tests of the text that is sent; not yet tried with a model.
+  Tried with the local model on opencode 2.3.2: asked what DEMO-103 asks
+  for and which question is open, it said both from what it was sent.
+- **opencode 2.3 is supported.** The machine's opencode had moved to 2.3.2
+  and the Agent panel was off. The adapter works against it unchanged; its
+  new image tool and MCP resource tools are denied to every session
+  ([the record](spikes/opencode-api.md), section 13). The panel says why
+  when opencode is there and cannot be used; it said "not found".
+- **A prompt the model's context cut is said in the conversation.** With
+  Ollama's default of 4096 tokens, the second question of a conversation
+  that carries a ticket no longer fits, and the model answers as if it had
+  not been told. The note says so and what to do.
 - **Tickets are read from an export:** a table (CSV) or an API's JSON, in
   the project's folder. New tickets get their files; those already there
   have their state, title and kind brought up to date and keep everything
   else. People are left out
   ([ADR 0014](adr/0014-tickets-come-in-from-an-export.md)). Tried with
-  invented exports; not with one from a real ticket system.
+  invented exports, and checked against what Jira's own tracker says of
+  its CSV: a column for each kind of link, several keys in one cell, a
+  field of its own as "Custom field (…)", a parent as a number. Not tried
+  with an export from a real ticket system.
 - **Kept snippets are in the Palette,** under "Kept in this project": one
   is inserted at the cursor as it is written, copied, or opened to change.
 - **A ticket shows its plans** as well as its specs, since a plan names its

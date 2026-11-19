@@ -93,7 +93,7 @@ export function StatusBar() {
 			<Show
 				when={opencode()?.ok}
 				fallback={
-					<button class="item warn" title="Show why opencode is not available" onClick={() => notify(opencode()?.message ?? "opencode was not found. The Agent panel needs opencode 2.2.x on PATH.", "error")}>
+					<button class="item warn" title="Show why opencode is not available" onClick={() => notify(opencode()?.message ?? "opencode was not found. The Agent panel needs opencode 2.2.5 or 2.3.x on PATH.", "error")}>
 						opencode not available
 					</button>
 				}

@@ -445,6 +445,16 @@ describe("tickets from a ticket system's export", () => {
 		expect(ticketsFromTable(parseCsv("key,value\na,b\n")).problem).toBe("It has no column for a ticket's title (Summary, Title).");
 	});
 
+	test("a parent or a link given as the ticket system's own number is not taken for a ticket, and a field of its own is read by its name", () => {
+		const { tickets } = ticketsFromTable(parseCsv("Issue key,Summary,Parent,Custom field (Epic Link),Outward issue link (Relates)\nDEMO-5,Five,10002,DEMO-1,\"DEMO-2, 10003\"\nDEMO-6,Six,10002,,\n"));
+		expect(tickets.map((t) => [t.key, t.parent, t.related])).toEqual([["DEMO-5", undefined, ["DEMO-2"]], ["DEMO-6", undefined, []]]);
+		const epic = ticketsFromTable(parseCsv("Issue key,Summary,Custom field (Epic Link)\nDEMO-5,Five,DEMO-1\n")).tickets[0]!;
+		expect(epic.parent).toBe("DEMO-1");
+		// Where tickets are numbers, a number is a ticket.
+		expect(ticketsFromTable(parseCsv("ID,Title,Parent\n41,Check,40\n")).tickets[0]!.parent).toBe("40");
+		expect(ticketsFromJson({ key: "A-1", fields: { summary: "S", "sub-tasks": [{ outwardIssue: { key: "A-2" } }], subtasks: [{ key: "A-3" }] } }).tickets[0]!.related).toEqual(["A-3", "A-2"]);
+	});
+
 	test("what an API returns is read: one issue, a list, or a list under issues, with a description that is a tree", () => {
 		const issue = {
 			key: "DEMO-103",

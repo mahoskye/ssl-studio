@@ -1,4 +1,4 @@
-import { columnOf, type Table } from "./csv";
+import type { Table } from "./csv";
 import { ticketKey } from "./projectDocs";
 
 // Tickets as a ticket system gives them out: a table exported from it (Jira's
@@ -37,8 +37,17 @@ const keysIn = (text: string) =>
 		.map(ticketKey);
 const unique = (keys: string[], not: string[]) => [...new Set(keys)].filter((key) => !not.some((other) => other.toLowerCase() === key.toLowerCase()));
 
+/** A column's name as it is looked up: a ticket system writes a field of its own as "Custom field (Epic Link)". */
+const headerName = (header: string) => header.trim().replace(/^custom field \((.*)\)$/i, "$1").trim().toLowerCase();
 /** The first column whose name is one of these, in this order of preference; -1 when none is. */
-const column = (table: Table, names: string[]) => names.map((name) => columnOf(table, name)).find((at) => at >= 0) ?? -1;
+const column = (table: Table, names: string[]) => names.map((name) => table.header.findIndex((cell) => headerName(cell.text) === name)).find((at) => at >= 0) ?? -1;
+/**
+ * The keys among these that are the same kind of key as the ticket's own. An
+ * export gives a parent or a link as a key in one column and as the ticket
+ * system's own number in another: for a ticket called DEMO-103, 10002 is not
+ * a ticket anyone could find.
+ */
+const likeOwn = (own: string, keys: string[]) => (/^\d+$/.test(own) ? keys : keys.filter((key) => !/^\d+$/.test(key)));
 /** Every column whose name says it ties one ticket to another: a system writes one for each kind of link, and one for each link. */
 const linkColumns = (table: Table) => table.header.map((cell, at) => (/issue link|linked issue|related|relates|blocks|blocked|depends|duplicat|sub-?tasks?$/i.test(cell.text) ? at : -1)).filter((at) => at >= 0);
 
@@ -62,7 +71,7 @@ export function ticketsFromTable(table: Table): Imported {
 			skipped++;
 			continue;
 		}
-		const above = keysIn(at(parent))[0];
+		const above = likeOwn(own, keysIn(at(parent)))[0];
 		tickets.push({
 			key: own,
 			title: at(title).replace(/\s+/g, " "),
@@ -70,7 +79,7 @@ export function ticketsFromTable(table: Table): Imported {
 			type: at(type) || undefined,
 			source: /^https?:\/\//i.test(at(source)) ? at(source) : undefined,
 			parent: above && above.toLowerCase() !== own.toLowerCase() ? above : undefined,
-			related: unique(links.flatMap((index) => keysIn(at(index))), [own, above ?? ""]),
+			related: unique(likeOwn(own, links.flatMap((index) => keysIn(at(index)))), [own, above ?? ""]),
 			description: at(description),
 		});
 	}
@@ -113,7 +122,9 @@ export function ticketsFromJson(value: unknown): Imported {
 		}
 		const above = ticketKey(keyOf(fields.parent));
 		const links = Array.isArray(fields.issuelinks) ? fields.issuelinks.flatMap((link) => [keyOf((link as Record<string, unknown>)?.outwardIssue), keyOf((link as Record<string, unknown>)?.inwardIssue)]) : [];
-		const subtasks = Array.isArray(fields.subtasks) ? fields.subtasks.map(keyOf) : [];
+		// Under one name or the other, and as a key or as a link to one.
+		const under = [fields.subtasks, fields["sub-tasks"]].flatMap((list) => (Array.isArray(list) ? list : []));
+		const subtasks = under.flatMap((task) => [keyOf(task), keyOf((task as Record<string, unknown>)?.outwardIssue)]);
 		const related = Array.isArray(fields.related) ? fields.related.map(keyOf) : [];
 		tickets.push({
 			key: own,

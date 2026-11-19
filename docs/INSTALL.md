@@ -5,7 +5,7 @@
 | | Needed for | Notes |
 | --- | --- | --- |
 | `starlims-lsp` 0.31.0 | everything SSL | Release builds carry it (`app/bin/starlims-lsp`). From source, put it on `PATH`, set `STARLIMS_LSP`, or set `lspPath` in Settings. Another version runs with a warning in the status bar. |
-| opencode 2.2.x | the Agent panel only | On `PATH`. The IDE starts its own private server; nothing is shared with opencode's background service. |
+| opencode 2.2.5 to 2.3.x | the Agent panel only | On `PATH`. The IDE starts its own private server; nothing is shared with opencode's background service. |
 | A local model | the Agent panel's default | Ollama through opencode's `ollama` provider, or any provider set in `agentServerConfig`. A paid provider is used only after you choose it. |
 | GTK 3, WebKitGTK 4.1, Ayatana AppIndicator, librsvg (Linux) | the window | Native Electrobun runtime libraries. Install the packages for your distribution below. |
 

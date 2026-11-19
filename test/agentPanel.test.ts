@@ -367,3 +367,22 @@ describe("a question as it is sent", () => {
 		expect(composeQuestion("Q", { file: "a.ssl", label: "lines 1-2", code: "x" }, "WORK")).toEndWith("answer from the code and the documents above.");
 	});
 });
+
+import { cutNote } from "../src/view/agent/logic";
+import { looksCut } from "../src/view/plan/assist";
+
+describe("a prompt the model's context cut", () => {
+	test("is known by the tokens the model took: exactly a context's size, or far fewer than were sent", () => {
+		expect(looksCut(2000, 4096)).toBe(true);
+		expect(looksCut(60_000, 5000)).toBe(true);
+		expect(looksCut(2000, 2493)).toBe(false);
+		expect(looksCut(2000, 0)).toBe(false);
+	});
+
+	test("is said in the conversation, with what was most likely lost", () => {
+		expect(cutNote(false, true)).toBeNull();
+		expect(cutNote(true, false)).toBe("This prompt looks cut off: the model took in exactly as much as its context holds, or less than it was sent, so it missed part of it. With Ollama, set a larger context (docs/INSTALL.md).");
+		expect(cutNote(true, true)).toContain("most likely the start of this conversation: the ticket and the earlier questions");
+		expect(cutNote(true, true)).toEndWith("or start a new conversation.");
+	});
+});

@@ -4,7 +4,8 @@ import type { AgentModel, AgentReply, AgentStatus } from "../../shared/protocol"
 import { backend, on } from "../backend";
 import { log, notify, saveSetting, state } from "../state";
 import { choose } from "../dialogs";
-import { attempt, decideModel, errorText, Turns } from "./logic";
+import { looksCut } from "../plan/assist";
+import { attempt, cutNote, decideModel, errorText, Turns } from "./logic";
 
 export type Entry = { id: number; role: "user" | "agent" | "note"; text: string; sessionID?: string; streaming?: boolean; meta?: string };
 
@@ -120,6 +121,9 @@ export async function ask(text: string, options: { title?: string; skills?: stri
 		const cost = reply.cost ? `, cost ${reply.cost}` : "";
 		const outcome = reply.outcome === "interrupted" && turns.stopping ? "stopped by you" : reply.outcome;
 		addEntry({ role: "note", text: `${outcome} · ${reply.tokens?.input ?? 0} in / ${reply.tokens?.output ?? 0} out tokens${cost}${reply.error ? ` · ${reply.error}` : ""}` });
+		// A local model's context drops what does not fit without a word: the reply then answers a question it only half saw.
+		const cut = cutNote(looksCut(text.length, reply.tokens?.input ?? 0), Boolean(options.sessionID));
+		if (cut) addEntry({ role: "note", text: cut });
 		// A turn that did not finish is kept in Output too: the conversation can be cleared, and the reason is what gets fixed.
 		if (reply.outcome !== "succeeded" && outcome !== "stopped by you") log(`agent turn ${reply.outcome}${reply.error ? `: ${reply.error}` : ""}`);
 		return reply;

@@ -118,6 +118,17 @@ export function composeQuestion(question: string, code?: { file: string; label: 
 	return parts.join("\n");
 }
 
+/**
+ * What to say when a prompt looks cut: a model's context limit drops what
+ * does not fit with no error, and the count of tokens it took gives it away.
+ * In a kept conversation it is the start that goes: the ticket, the earlier
+ * questions. Null when nothing looks cut.
+ */
+export function cutNote(cut: boolean, kept: boolean): string | null {
+	if (!cut) return null;
+	return `This prompt looks cut off: the model took in exactly as much as its context holds, or less than it was sent, so it missed part of it${kept ? ", most likely the start of this conversation: the ticket and the earlier questions" : ""}. With Ollama, set a larger context (docs/INSTALL.md)${kept ? ", or start a new conversation" : ""}.`;
+}
+
 export const NOT_SENT = "Not sent: the agent is still working on the last request. Your question is kept here. Send it when the reply ends, or stop the reply.";
 
 /** What Send does with the draft. The draft is cleared only when it goes out. */

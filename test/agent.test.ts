@@ -35,6 +35,12 @@ test("asks on a fresh session with deny rules and a local model", async () => {
 		"external_directory:deny",
 		"question:deny",
 		"edit:deny",
+		// For opencode 2.3: its image tool (a connected provider's image model), its MCP resource tools, and the browser.
+		"browser:deny",
+		"experimental_image_generate:deny",
+		"opencode_list_mcp_resources:deny",
+		"opencode_read_mcp_resource:deny",
+		"opencode_watch_mcp_event:deny",
 	]);
 	expect(sessions[0].prompts[0].skills).toEqual([{ id: "ssl-tidy-context" }]);
 });
@@ -44,6 +50,11 @@ test("lists local models first and never defaults to a paid one", async () => {
 	const models = await agent.models();
 	expect(models[0]).toMatchObject({ providerID: "ollama", local: true });
 	expect(models.find((m) => m.providerID === "openrouter")!.local).toBe(false);
+});
+
+test("opencode 2.3 is within the range", async () => {
+	const { agent } = make({ FAKE_VERSION: "2.3.2" });
+	expect(await agent.call("start", [])).toMatchObject({ state: "ready", version: "2.3.2" });
 });
 
 test("refuses a version outside the range", async () => {
