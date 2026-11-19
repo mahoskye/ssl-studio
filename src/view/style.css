@@ -903,6 +903,17 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .md-front dt { color: var(--muted); font-size: var(--text-sm); text-transform: uppercase; letter-spacing: .04em; }
 .md-front dd { margin: 0; display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); min-width: 0; overflow-wrap: anywhere; }
 .md-front + .md { padding-top: var(--space-6); }
+/* A ticket's page: what is tied to it, a kind to a row, under what the ticket says of itself. */
+.md-work { margin: var(--space-4) var(--space-7) 0; padding: var(--space-4) var(--space-5); border: 1px solid var(--border); border-radius: var(--radius-lg); font-size: var(--text-md); }
+.md-work h2 { margin: 0 0 var(--space-3); font-size: var(--text-sm); font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.md-work-group { display: grid; grid-template-columns: 9.5em 1fr; gap: var(--space-2) var(--space-4); align-items: baseline; padding: var(--space-2) 0; }
+.md-work-group + .md-work-group { border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
+.md-work-group h3 { margin: 0; font-size: var(--text-md); font-weight: 400; color: var(--muted); }
+.md-work-group ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
+.md-work-group li { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2) var(--space-4); min-width: 0; }
+.md-work-group li button { text-align: left; overflow-wrap: anywhere; }
+.md-work + .md { padding-top: var(--space-6); }
+@container (max-width: 520px) { .md-work-group { grid-template-columns: 1fr; gap: var(--space-1); } }
 .doc-status { padding: 0 var(--space-3); border-radius: 999px; border: 1px solid var(--border); white-space: nowrap; font-size: var(--text-sm); }
 .doc-status.tone-done { color: var(--ok, var(--fg)); border-color: color-mix(in srgb, var(--ok, var(--fg)) 45%, transparent); }
 .doc-status.tone-active { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }

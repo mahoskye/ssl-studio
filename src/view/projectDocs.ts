@@ -10,10 +10,12 @@ import { parseCsv } from "../shared/csv";
 import { frontMatter, one, withFrontMatter } from "../shared/frontMatter";
 import { importSummary, ticketsFromJson, ticketsFromTable, type Imported, type ImportedTicket } from "../shared/ticketImport";
 import { manifestSummary, mergeManifest } from "../shared/manifest";
-import { baseName, joinPath, relativeTo } from "../shared/paths";
+import { baseName, joinPath, relativePath, relativeTo } from "../shared/paths";
+import { activeEditor } from "./editor/EditorGroup";
 import {
 	catalogItems,
 	catalogTemplate,
+	codeSection,
 	decisionTemplate,
 	DOC_FOLDERS,
 	KNOWLEDGE,
@@ -215,12 +217,33 @@ export async function newSpec() {
 	await start(joinPath(areaFolder("specs"), `${slug(title)}.md`), specTemplate({ title, ticket: ticket || undefined }), "specs");
 }
 
+/**
+ * The code a new question or decision is about: what is selected in the
+ * editor, when it is in a file that is not one of the project's documents.
+ * Null when nothing is selected.
+ */
+function codeAtHand(): { path: string; from: number; to: number; text: string; language: string } | null {
+	const path = activePath();
+	const editor = activeEditor();
+	const model = editor?.getModel();
+	const selection = editor?.getSelection();
+	if (!path || !editor || !model || !selection || selection.isEmpty()) return null;
+	if (isMarkdown(path) || path.startsWith(docsFolder())) return null;
+	// Whole lines: a selection that stops at a line's start does not take that line.
+	const to = selection.endColumn === 1 && selection.endLineNumber > selection.startLineNumber ? selection.endLineNumber - 1 : selection.endLineNumber;
+	const language = model.getLanguageId();
+	return { path, from: selection.startLineNumber, to, text: model.getValueInRange({ startLineNumber: selection.startLineNumber, startColumn: 1, endLineNumber: to, endColumn: model.getLineMaxColumn(to) }), language: language === "plaintext" ? "" : language };
+}
+
 /** Something for the knowledge base: a decision, a question, a snippet or a reference note. */
 export async function newKnowledge(kind: KnowledgeKind["id"]) {
 	if (!ready()) return;
 	const what = KNOWLEDGE.find((k) => k.id === kind)!;
 	const folder = joinPath(areaFolder("knowledge"), kind);
-	const title = (await ask(kind === "questions" ? "The question, as you would ask it" : kind === "snippets" ? "What the snippet is for, in a few words" : `The ${what.one}, in a few words`))?.trim();
+	// Read before anything is asked: a dialog takes the keyboard, and the selection with it.
+	const code = kind === "questions" || kind === "decisions" ? codeAtHand() : null;
+	const aboutCode = code ? ` (about ${code.from === code.to ? `line ${code.from}` : `lines ${code.from} to ${code.to}`} of ${baseName(code.path)})` : "";
+	const title = (await ask(kind === "questions" ? `The question, as you would ask it${aboutCode}` : kind === "snippets" ? "What the snippet is for, in a few words" : `The ${what.one}, in a few words${aboutCode}`))?.trim();
 	if (!title || !slug(title)) return;
 	if (kind === "snippets") {
 		const language = await choose("A snippet of what?", ["SQL", "SSL"]);
@@ -230,11 +253,13 @@ export async function newKnowledge(kind: KnowledgeKind["id"]) {
 	if (kind === "reference") return start(joinPath(folder, `${slug(title)}.md`), referenceTemplate({ title }), "knowledge");
 	// Only what the open document says: a decision is not put to a ticket on a guess.
 	const ticket = ticketOfOpen() || undefined;
-	if (kind === "questions") return start(joinPath(folder, `${slug(title)}.md`), questionTemplate({ title, date: today(), ticket }), "knowledge");
+	// Started with code selected, it is about that code: it says where, and keeps the lines as they were.
+	const about = code ? codeSection({ file: relativeTo(root(), code.path).split("\\").join("/"), link: relativePath(folder, code.path), from: code.from, to: code.to, text: code.text, language: code.language, date: today() }) : "";
+	if (kind === "questions") return start(joinPath(folder, `${slug(title)}.md`), questionTemplate({ title, date: today(), ticket }) + about, "knowledge");
 	// Decisions are numbered, so that one can be named by its number and they list in the order they were made.
 	const taken = (await backend.docs()).filter((d) => d.group === "knowledge" && d.kind === "decisions").map((d) => Number(/^(\d+)/.exec(baseName(d.name))?.[1] ?? 0));
 	const number = String(Math.max(0, ...taken) + 1).padStart(4, "0");
-	await start(joinPath(folder, `${number}-${slug(title)}.md`), decisionTemplate({ title, date: today(), ticket }), "knowledge");
+	await start(joinPath(folder, `${number}-${slug(title)}.md`), decisionTemplate({ title, date: today(), ticket }) + about, "knowledge");
 }
 
 /** A registry: a table of what a migration must carry across, each row with how far it has come. */

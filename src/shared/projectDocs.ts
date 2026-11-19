@@ -253,3 +253,30 @@ export function catalogItems(area: DocArea, files: readonly DocFile[], docsFolde
 			return { path, title: named, status: file.status, summary: file.tickets?.length ? `For ${file.tickets.join(", ")}.${file.summary ? ` ${file.summary}` : ""}` : file.summary };
 		});
 }
+
+/** The most lines of code a question or a decision takes with it: enough to say what it is about, not a copy of the file. */
+export const CODE_LINES_KEPT = 40;
+
+/**
+ * The part of a question or a decision that says which code it is about: a
+ * link to the lines, which opens them, and the lines as they were when it was
+ * written. `link` is the way to the file from the document's folder.
+ */
+export function codeSection(code: { file: string; link: string; from: number; to: number; text: string; language: string; date: string }): string {
+	const lines = code.text.replace(/\r\n/g, "\n").replace(/\n+$/, "").split("\n");
+	const kept = lines.slice(0, CODE_LINES_KEPT);
+	const where = code.from === code.to ? `line ${code.from}` : `lines ${code.from} to ${code.to}`;
+	const anchor = code.from === code.to ? `#L${code.from}` : `#L${code.from}-L${code.to}`;
+	// A fence longer than any run of backticks in the code, so the code cannot close it.
+	const fence = "`".repeat(Math.max(3, ...(code.text.match(/`+/g) ?? []).map((run) => run.length + 1)));
+	return `\n## In the code\n\n[${code.file}, ${where}](${code.link.split("/").map(encodeURIComponent).join("/")}${anchor}), as it was on ${code.date}:\n\n${fence}${code.language}\n${kept.join("\n")}\n${fence}\n${lines.length > kept.length ? `\nThe first ${kept.length} of ${lines.length} lines.\n` : ""}`;
+}
+
+/** The lines a link to code asks for: "#L12" or "#L12-L18". Null when the link names none. */
+export function linkedLines(href: string): { line: number; endLine?: number } | null {
+	const found = /#L(\d+)(?:-L?(\d+))?$/i.exec(href);
+	if (!found) return null;
+	const line = Number(found[1]);
+	const endLine = found[2] ? Number(found[2]) : undefined;
+	return line > 0 ? { line, ...(endLine && endLine >= line ? { endLine } : {}) } : null;
+}

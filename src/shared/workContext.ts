@@ -123,3 +123,30 @@ export async function workText(work: Work, readFile: (path: string) => Promise<s
 	if (work.decisions.length) parts.push("", "DECISIONS ALREADY MADE (keep to them):", ...work.decisions.map(line));
 	return parts.join("\n");
 }
+
+/** One kind of thing tied to a ticket, with the documents of that kind. */
+export type WorkGroup = { kind: "plan" | "spec" | "ticket" | "question" | "answer" | "decision"; name: string; files: DocFile[] };
+
+/**
+ * Everything in the folder that is tied to a ticket, for the ticket's own
+ * page: the plans drawn for it, the specs written for it, the tickets around
+ * it, what is asked and not yet known, what was answered, and what was
+ * decided for it. A decision made for another ticket still stands, and is
+ * sent to an agent, but is not this ticket's work: it is not listed here.
+ * Groups with nothing in them are left out.
+ */
+export function ticketWork(files: readonly DocFile[], key: string): WorkGroup[] {
+	const work = workFor(files, key);
+	if (!work) return [];
+	const forIt = (file: DocFile) => Boolean(file.tickets?.some((named) => same(named, key)));
+	const plans = files.filter((file) => file.exists && file.group === "plans" && forIt(file));
+	const groups: WorkGroup[] = [
+		{ kind: "plan", name: "Plans", files: plans },
+		{ kind: "spec", name: "Specs", files: work.specs },
+		{ kind: "ticket", name: "Related tickets", files: work.related },
+		{ kind: "question", name: "Open questions", files: work.open.filter(forIt) },
+		{ kind: "answer", name: "Answered", files: work.answered },
+		{ kind: "decision", name: "Decisions", files: work.decisions.filter(forIt) },
+	];
+	return groups.filter((group) => group.files.length);
+}

@@ -45,9 +45,9 @@ the source of truth.
   date, not written yet, or named and not there. Tickets are read from a
   ticket system's export (CSV or JSON), without the people in it
   ([ADR 0014](docs/adr/0014-tickets-come-in-from-an-export.md)). A plan
-  names its ticket,
-  and the agent is told what the ticket asks, the open questions and the
-  decisions already made
+  names its ticket, a ticket's page lists everything tied to it, a question
+  or a decision can start from selected code, and the agent is told what
+  the ticket asks, the open questions and the decisions already made
   ([ADR 0012](docs/adr/0012-a-projects-work-is-written-down.md),
   [ADR 0013](docs/adr/0013-the-agent-is-told-the-work-a-question-is-for.md)).
 - **Documents as what they are:** Markdown, SQL, JSON, TOML, CSV, YAML, XML

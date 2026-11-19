@@ -510,6 +510,17 @@ the work comes from ([ADR 0012](adr/0012-a-projects-work-is-written-down.md)).
   is marked at the place, not at its first line.
 - **CSV columns keep their colour down the file.** They drifted from line to
   line: a line's end did not give the turn back to the first column.
+- **A ticket's page shows its work:** under what the ticket says of
+  itself, the plans drawn for it, its specs, the tickets around it, the
+  questions asked and answered for it and the decisions made for it, each a
+  link with its state.
+- **A question or a decision can be about code.** Started with lines
+  selected in a script, it takes a link to those lines, which opens them,
+  and the lines as they were that day. A link to lines (`#L12`, `#L12-L18`)
+  in any document opens the file there.
+- **Tried in the app with the local model, on opencode 2.3.2:** the chat's
+  ticket box, Refine on a plan started from a ticket, and a tidy step with
+  its skill. Not tried: writing a spec, a build, the test script.
 - **From looking at it:** in a narrow Docs panel a state is a dot in its
   tone, so the title has the room; a new document's opening prompt is not
   listed as its summary; a date is the day it is here, not in UTC; and a
@@ -522,7 +533,6 @@ Not done, and worth doing next:
 - Checking a registry's rows against the code: a setting nothing reads, a
   table no data source uses. The second needs the language server to say
   which tables a script uses.
-- A question or a decision started from the line of code it is about.
 
 ## On hold
 

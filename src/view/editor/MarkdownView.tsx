@@ -7,9 +7,11 @@ import { headingAnchor } from "../../shared/docTables";
 import { finishMarkdown, outlineOf } from "./markdownHtml";
 import { frontMatter } from "../../shared/frontMatter";
 import { dirName, isInside, joinPath, resolvePath } from "../../shared/paths";
-import { DOC_FOLDERS, toneOf } from "../../shared/projectDocs";
+import { DOC_FOLDERS, linkedLines, toneOf } from "../../shared/projectDocs";
 import { colourCode } from "./markdownCode";
-import { documents, openFile, state } from "../state";
+import { ticketWork } from "../../shared/workContext";
+import { docs } from "../project";
+import { canonical, documents, openFile, state } from "../state";
 
 export function MarkdownView(props: { path: string }) {
 	const model = documents.get(props.path)?.model;
@@ -34,6 +36,12 @@ export function MarkdownView(props: { path: string }) {
 		if (["specs", "spec", "plan", "plans"].includes(key) && state.workspace) return { file: joinPath(state.workspace.root, ...value.split("/")) };
 		return {};
 	};
+	/** A ticket's page shows what is tied to it: its plans and specs, the tickets around it, the questions and the decisions (ADR 0012). */
+	const ticket = createMemo(() => {
+		const file = docs().find((d) => d.group === "tickets" && d.ticket && canonical(d.path) === props.path);
+		return file?.ticket ?? "";
+	});
+	const work = createMemo(() => (ticket() ? ticketWork(docs(), ticket()) : []));
 	const go = (target: { file?: string; web?: string }) => (target.web ? void window.open(target.web, "_blank", "noopener") : target.file ? void openFile(target.file) : undefined);
 
 	/** Links to files in the workspace open as tabs; web links open outside. */
@@ -52,7 +60,9 @@ export function MarkdownView(props: { path: string }) {
 		}
 		if (!href || /^[a-z][a-z0-9+.-]*:/i.test(href)) return;
 		const target = resolvePath(dirName(props.path), decodeURIComponent(href.split(/[?#]/)[0]!));
-		if (state.workspace && isInside(state.workspace.root, target)) void openFile(target);
+		// A link to lines of a file opens the file at them: "#L12", "#L12-L18".
+		const lines = linkedLines(href);
+		if (state.workspace && isInside(state.workspace.root, target)) void openFile(target, lines ? { reveal: lines } : {});
 	};
 
 	let view!: HTMLDivElement;
@@ -103,6 +113,33 @@ export function MarkdownView(props: { path: string }) {
 								)}
 							</For>
 						</dl>
+					</Show>
+					<Show when={work().length}>
+						<section class="md-work" aria-label={`The work for ${ticket()}`}>
+							<h2>The work for {ticket()}</h2>
+							<For each={work()}>
+								{(group) => (
+									<div class="md-work-group">
+										<h3>{group.name}</h3>
+										<ul>
+											<For each={group.files}>
+												{(file) => (
+													<li>
+														<button class="link" title={[file.path, file.summary].filter(Boolean).join("\n")} onClick={() => void openFile(file.path)}>
+															{file.ticket && !file.title?.startsWith(file.ticket) ? `${file.ticket}: ` : ""}
+															{file.title || file.name.replace(/\.plan\.json$/i, "")}
+														</button>
+														<Show when={file.status}>
+															<span class={`doc-status tone-${toneOf(file.status)}`}>{file.status}</span>
+														</Show>
+													</li>
+												)}
+											</For>
+										</ul>
+									</div>
+								)}
+							</For>
+						</section>
 					</Show>
 					<article class="md" ref={article} innerHTML={html()} onClick={follow} />
 				</div>

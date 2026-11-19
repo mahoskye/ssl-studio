@@ -566,3 +566,58 @@ describe("the registries a project is offered", () => {
 		expect(checks.map((check) => check.text)).toEqual(["LIMS-9 is not among the tickets; A.plan.json names it."]);
 	});
 });
+
+import { CODE_LINES_KEPT, codeSection, linkedLines } from "../src/shared/projectDocs";
+import { ticketWork } from "../src/shared/workContext";
+
+describe("a question or a decision about code", () => {
+	const code = { file: "src/Due Dates/DueRule.ssl", link: "../../../src/Due Dates/DueRule.ssl", from: 12, to: 14, text: ":IF nDays > 730;\r\n\t:RETURN NIL;\r\n:ENDIF;\r\n", language: "ssl", date: "2026-11-18" };
+
+	test("says where the code is, with a link to its lines, and keeps the lines as they were", () => {
+		expect(codeSection(code)).toBe("\n## In the code\n\n[src/Due Dates/DueRule.ssl, lines 12 to 14](../../../src/Due%20Dates/DueRule.ssl#L12-L14), as it was on 2026-11-18:\n\n```ssl\n:IF nDays > 730;\n\t:RETURN NIL;\n:ENDIF;\n```\n");
+		expect(codeSection({ ...code, from: 12, to: 12, text: ":RETURN NIL;" })).toContain("[src/Due Dates/DueRule.ssl, line 12](../../../src/Due%20Dates/DueRule.ssl#L12), as it was");
+	});
+
+	test("code that holds a fence of its own cannot close the one around it, and a long piece is cut and says so", () => {
+		expect(codeSection({ ...code, text: "a\n```\nb", language: "" })).toContain("\n````\na\n```\nb\n````\n");
+		const long = codeSection({ ...code, text: Array.from({ length: CODE_LINES_KEPT + 5 }, (_, i) => `line ${i + 1};`).join("\n") });
+		expect(long).toContain(`line ${CODE_LINES_KEPT};\n\`\`\`\n\nThe first ${CODE_LINES_KEPT} of ${CODE_LINES_KEPT + 5} lines.\n`);
+		expect(long).not.toContain(`line ${CODE_LINES_KEPT + 1};`);
+	});
+
+	test("it is found again by the document's own reading: a title, a summary, and what it is for", () => {
+		const text = questionTemplate({ title: "Why 730 days?", date: "2026-11-18", ticket: "DEMO-101" }) + codeSection(code);
+		expect(titleOf(text)).toBe("Why 730 days?");
+		expect(frontMatter(text).values.ticket).toBe("DEMO-101");
+	});
+
+	test("a link to lines says which", () => {
+		expect(linkedLines("../src/A.ssl#L12")).toEqual({ line: 12 });
+		expect(linkedLines("../src/A.ssl#L12-L18")).toEqual({ line: 12, endLine: 18 });
+		expect(linkedLines("../src/A.ssl#L12-18")).toEqual({ line: 12, endLine: 18 });
+		expect(linkedLines("../src/A.ssl#L18-L12")).toEqual({ line: 18 });
+		expect(linkedLines("../src/A.ssl#heading")).toBeNull();
+		expect(linkedLines("../src/A.ssl")).toBeNull();
+	});
+});
+
+describe("a ticket's own page", () => {
+	const root = join(import.meta.dir, "..", "examples", "due-dates");
+	const listed = async () => listDocs(new WorkspaceFiles(root), await readProject(root));
+
+	test("lists what is tied to the ticket, a kind at a time, and leaves out the kinds it has none of", async () => {
+		const docs = await listed();
+		const first = ticketWork(docs, "DEMO-101");
+		expect(first.map((group) => [group.name, group.files.map((file) => file.title || file.name)])).toEqual([
+			["Plans", ["SetSampleDueDates.plan.json"]],
+			["Specs", ["Set sample due dates"]],
+			["Related tickets", ["Rush samples count Saturday as a working day", "A report of the samples due soon"]],
+			["Open questions", ["Which holidays does each site keep?"]],
+			["Decisions", ["A walk looks at most 730 days ahead", "Planning and saving are two scripts"]],
+		]);
+		// A decision made for another ticket stands, and is not this ticket's work.
+		expect(ticketWork(docs, "DEMO-103").map((group) => group.name)).toEqual(["Specs", "Related tickets"]);
+		expect(ticketWork(docs, "DEMO-102").map((group) => group.name)).toContain("Answered");
+		expect(ticketWork(docs, "DEMO-999")).toEqual([]);
+	});
+});
