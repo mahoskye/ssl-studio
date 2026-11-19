@@ -8,7 +8,7 @@ import { errors } from "./main";
 import { session, diagnostics } from "./lsp/session";
 import { procedureSpans } from "./plan/build";
 import { isPlanPath } from "./plan/model";
-import { activeDoc, openFile, state } from "./state";
+import { activeDoc, openFile, setState, state } from "./state";
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function until<T>(get: () => T | undefined | null | false, ms = 8000): Promise<T | null> {
@@ -19,6 +19,15 @@ async function until<T>(get: () => T | undefined | null | false, ms = 8000): Pro
 		await wait(100);
 	}
 	return null;
+}
+
+/** Whether the picture of what an SVG shows is written out as a file another program can read: its size, or 0. */
+async function pictureParses(svg: SVGSVGElement): Promise<number> {
+	const { pictureOf } = await import("./graph/picture");
+	const box = svg.querySelector<SVGGElement>(":scope > g[transform]")?.getBBox();
+	const text = pictureOf(svg, { width: box?.width ?? 0, height: box?.height ?? 0 });
+	const parsed = new DOMParser().parseFromString(text, "image/svg+xml");
+	return text && !parsed.querySelector("parsererror") && parsed.documentElement.nodeName === "svg" ? text.length : 0;
 }
 
 export async function selftest() {
@@ -101,6 +110,38 @@ export async function selftest() {
 	} catch (e: any) {
 		errors.push(String(e?.stack ?? e));
 	}
+	try {
+		// The chart's lines are drawn with rounded corners, and its picture can be written out, in this webview.
+		const chart = document.querySelector<SVGSVGElement>(".plan svg.graph-canvas");
+		if (chart) {
+			report.planCurvedEdges = [...chart.querySelectorAll(".plan-edge .g-edge")].filter((e) => /^M[^Z]*[LQ]/.test(e.getAttribute("d") ?? "")).length;
+			report.planArrows = chart.querySelectorAll("defs marker").length;
+			report.planPicture = await pictureParses(chart);
+		}
+	} catch (e: any) {
+		errors.push(String(e?.stack ?? e));
+	}
+	try {
+		// The call graph, in this webview: laid out and drawn, with its key, and its picture written out.
+		if (session.supports("ssl/callGraph")) {
+			setState("centerView", "graph");
+			const graph = await until(() => {
+				const svg = document.querySelector<SVGSVGElement>(".graph svg.graph-canvas");
+				return svg && svg.querySelectorAll(".g-proc, .g-top, .g-fold").length > 0 && svg;
+			}, 15000);
+			if (graph) {
+				report.graphNodes = graph.querySelectorAll(".g-proc, .g-top, .g-fold").length;
+				report.graphLines = [...graph.querySelectorAll(".g-edge")].filter((e) => (e.getAttribute("d") ?? "").startsWith("M")).length;
+				report.graphKey = document.querySelectorAll(".graph-legend li").length;
+				const box = graph.querySelector<SVGGElement>(".g-root")?.getBBox();
+				report.graphDrawn = Boolean(box && box.width > 0 && box.height > 0);
+				report.graphPicture = await pictureParses(graph);
+			} else report.graphNodes = 0;
+			setState("centerView", "editors");
+		}
+	} catch (e: any) {
+		errors.push(String(e?.stack ?? e));
+	}
 	const docs = await import("./selftestDocs");
 	try {
 		report.docs = await docs.selftestDocs();
@@ -124,6 +165,9 @@ export async function selftest() {
 		(report.syntaxTreeNodes === undefined || Number(report.syntaxTreeNodes) > 0) &&
 		(report.semanticTokens === undefined || Number(report.semanticTokens) > 0) &&
 		(report.planNodes === undefined || Number(report.planNodes) > 0) &&
+		(report.planPicture === undefined || (Number(report.planPicture) > 0 && Number(report.planArrows) > 0)) &&
+		// A server that gives a call graph must end in a picture of it: nodes, lines, a key, and a file of it.
+		(report.graphNodes === undefined || (Number(report.graphNodes) > 0 && report.graphDrawn === true && Number(report.graphKey) > 0 && Number(report.graphPicture) > 0)) &&
 		(report.callGraph === undefined || report.callGraphResolvesExecFunction === true) &&
 		(report.scriptCalls === undefined || (Number((report.scriptCalls as any).procedures) > 0 && Number((report.scriptCalls as any).edges) > 0)) &&
 		(report.procedureSpans === undefined || (report.procedureSpans as any[])[0]?.startLine === 0) &&

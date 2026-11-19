@@ -16,7 +16,7 @@ import { loadGraph } from "./load";
 import { Minimap, type MapBox } from "./Minimap";
 import { savePicture } from "./picture";
 import { session } from "../lsp/session";
-import { callList, choices, chosen, dirId, keptFolds, fold, FOLD_ABOVE, FOLD_DIRS_ABOVE, foldId, isDir, isFold, RELATION_WORDS, scriptOf, topLabel, UNRESOLVED, visible, type Filter, type Graph, type ListedProc, relationOf, type Relation } from "./model";
+import { callList, choices, chosen, dirId, keptFolds, withoutUnresolved, fold, FOLD_ABOVE, FOLD_DIRS_ABOVE, foldId, isDir, isFold, RELATION_WORDS, scriptOf, topLabel, UNRESOLVED, visible, type Filter, type Graph, type ListedProc, relationOf, type Relation } from "./model";
 import { baseName, dirName, relativeTo } from "../../shared/paths";
 
 type Box = {
@@ -55,6 +55,7 @@ const MIN_ZOOM = 0.15;
 const MAX_ZOOM = 3;
 const MODE_KEY = "graph.view";
 const FOLDS_KEY = "graph.folds";
+const UNRESOLVED_KEY = "graph.unresolved";
 /** How many matches the finder lists: enough to choose from, few enough to read. */
 const FIND_SHOWS = 8;
 /** A folded script's node: room for its name and, under it, what is inside. */
@@ -158,9 +159,14 @@ export function GraphView() {
 	};
 	createEffect(on(() => [state.workspace?.root, state.lsp.state] as const, ([root, lsp]) => root && lsp === "running" && void refresh()));
 
+	/** Whether the targets the server could not resolve are drawn: a choice the view remembers. */
+	const [unresolved, setUnresolved] = createSignal(recall(UNRESOLVED_KEY) !== "hidden");
+	const unresolvedCount = () => graph()?.nodes.filter((n) => n.kind === "unresolved").length ?? 0;
 	const shown = createMemo(() => {
 		const g = graph();
-		return g ? visible(g, filter()) : null;
+		if (!g) return null;
+		const keep = visible(g, filter());
+		return unresolved() ? keep : withoutUnresolved(g, keep);
 	});
 	// What is folded is kept with the workspace, so the graph opens next time as it was left.
 	createEffect(() => {
@@ -649,6 +655,21 @@ export function GraphView() {
 				<span class="hint" role="status">
 					{progress() || (graph() ? `${graph()!.nodes.length} procedures, ${counted()}${graph()!.truncated ? " (incomplete: refresh when indexing ends)" : ""}` : "")}
 				</span>
+				<Show when={unresolvedCount()}>
+					<button
+						classList={{ on: unresolved() }}
+						aria-pressed={unresolved()}
+						title={`${unresolved() ? "Hide" : "Show"} the ${unresolvedCount()} targets the language server could not resolve, and the lines to them`}
+						onClick={() => {
+							const next = !unresolved();
+							fittedFor = "";
+							setUnresolved(next);
+							remember(UNRESOLVED_KEY, next ? "shown" : "hidden");
+						}}
+					>
+						Unresolved
+					</button>
+				</Show>
 				<Show when={mode() === "graph" && folding() && graph()?.nodes.length}>
 					<div class="mode-switch" role="group" aria-label="Scripts">
 						<button title="Draw every folder, or every script where there is one folder, as one node" disabled={allFolded()} onClick={() => foldAll(true)}>

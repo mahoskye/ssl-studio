@@ -215,3 +215,14 @@ test("what was kept of the folded scripts and folders is read with suspicion", (
 	expect(keptFolds(JSON.stringify({ scripts: [], folders: [] }))).toEqual({ scripts: [], folders: [] });
 	for (const bad of [null, "", "not json", "[]", JSON.stringify({ scripts: "all" }), JSON.stringify({ scripts: [] })]) expect(keptFolds(bad)).toBeNull();
 });
+
+import { withoutUnresolved } from "../src/view/graph/model";
+
+test("the targets that did not resolve can be put aside, with the lines to them", () => {
+	const node = (id: string, kind?: "unresolved") => ({ id, name: id, path: "/w/A.ssl", line: 0, kind });
+	const edge = (from: string, to: string) => ({ from, to, crossScript: false, sites: [] });
+	const graph = { nodes: [node("a"), node("b"), node("gone", "unresolved")] };
+	const left = withoutUnresolved(graph, { nodes: new Set(["a", "b", "gone"]), edges: [edge("a", "b"), edge("a", "gone"), edge("b", "gone")] });
+	expect([...left.nodes]).toEqual(["a", "b"]);
+	expect(left.edges.map((e) => [e.from, e.to])).toEqual([["a", "b"]]);
+});

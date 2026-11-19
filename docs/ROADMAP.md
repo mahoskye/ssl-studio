@@ -269,6 +269,11 @@ call at once, in lines with sharp corners.
 - **The status bar's line and column** open the editor's "go to line".
 - **A plan's paths can be walked:** the assistant steps through them one at
   a time, and the chart lights the one shown and lists its steps.
+- **Unresolved targets can be put aside** in the graph, with the lines to
+  them; the choice is remembered.
+- **The self-test opens the graph and a chart in the desktop app's own
+  window,** and checks that each is drawn and that its picture is written
+  out as a file that parses.
 - **A picture can be kept:** the graph and a plan's chart each save what
   they show as an SVG file in the workspace, whole and at full size, with
   its styles written into it. A file already there is replaced only on a yes.

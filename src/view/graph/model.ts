@@ -294,3 +294,13 @@ export function keptFolds(text: string | null): { scripts: string[]; folders: st
 		return null;
 	}
 }
+
+/**
+ * What is shown, without the targets the server could not resolve and the
+ * lines to them. They are worth seeing once; after that they are every
+ * picture's thickest lines, and can be put aside.
+ */
+export function withoutUnresolved(graph: Pick<Graph, "nodes">, shown: { nodes: ReadonlySet<string>; edges: readonly GraphEdge[] }): { nodes: Set<string>; edges: GraphEdge[] } {
+	const gone = new Set(graph.nodes.filter((n) => n.kind === "unresolved").map((n) => n.id));
+	return { nodes: new Set([...shown.nodes].filter((id) => !gone.has(id))), edges: shown.edges.filter((e) => !gone.has(e.from) && !gone.has(e.to)) };
+}
