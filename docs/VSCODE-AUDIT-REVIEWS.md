@@ -1,8 +1,9 @@
 # What the reviews found, finding by finding
 
-Four reviews of the work on [the audit](VSCODE-AUDIT.md) were made by a
+Five reviews of the work on [the audit](VSCODE-AUDIT.md) were made by a
 reader who was given the commits and not the author's conclusions: three
-of the build's steps, and one of the fix that the last pass made. This
+of the build's steps, one of the fix that the last pass made, and one of
+the fixes that followed it. This
 lists every finding, what was done about it, and the commit that did it.
 "Left" means not changed, with the reason.
 
@@ -298,3 +299,36 @@ confirmed and fixed, in the commit after it.
    the other 60 tabs, none for that file, and nothing said or broken.
    The second was not seen: that way of reading scripts is used only
    with a language server that has no call graph of its own.
+
+## The fifth review: the fixes of the fourth
+
+The fourth review's fixes were code too, so they were reviewed in turn
+(`0b5b593`). Six findings, all confirmed; all are fixed in the commit
+after it, the third of them in part.
+
+1. **The refusal said "was removed" of a file that was there.** A name
+   that is taken on disk is now left to say so itself. Seen: "already
+   exists", for a script with unsaved edits and no tab that was still on
+   disk.
+2. **"Save all, then try again" could not work,** since saving puts the
+   file back and the name is then taken. The note now offers "Open it":
+   to save the edits, or to close the tab and give them up, after which
+   the name is free. Seen, to the end: refused, opened, closed without
+   saving, renamed.
+3. **A new file was not refused as a move was.** Fixed for a new file or
+   folder in the Explorer and for a new document. Seen for a new file.
+   **Left:** the app's own writers of working documents, which write
+   through the editor when the file is held there.
+4. **Opening a file could fail without a word** when its document was
+   let go while the file was read. Fixed: what is done after the read is
+   done to the document that is there then.
+5. **A file that changed and then went could get a tab on nothing.**
+6. **Undo in a newly opened tab brought back the old reading.** Both
+   fixed by one change: what was only read is let go when its file is
+   opened, and the file is read as it is now, with nothing to undo.
+   Seen: "go to definition" into a script with no tab opened it with its
+   text, at the definition.
+
+Seen on the way, older than this work, and fixed: the status bar went on
+saying the last file's line and column when a file was opened with the
+cursor at its first line. It now says 1 and 1.

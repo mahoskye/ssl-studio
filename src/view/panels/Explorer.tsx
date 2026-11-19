@@ -10,7 +10,7 @@ import type { Entry } from "../../shared/protocol";
 import { level } from "../../shared/houseStyle";
 import { backend } from "../backend";
 import { ask, choose } from "../dialogs";
-import { activePath, canonical, fileRemoved, fileRenamed, heldAt, notify, openFile, scriptsCameTo, setState, state } from "../state";
+import { activePath, canonical, fileRemoved, fileRenamed, heldFromBefore, notify, openFile, scriptsCameTo, setState, state } from "../state";
 import { baseName, dirName, isInside, joinPath } from "../../shared/paths";
 import { COPY, COPY_PATH, COPY_RELATIVE, CUT, folderFor, holdsRoot, menuFor, nameProblem, NEW_FILE, NEW_FOLDER, openFolders, PASTE, RENAME, retarget, TRASH, without } from "./explorerMenu";
 import { copyName, copyProblem, folderOf, moveProblem, type Clip } from "./explorerMoves";
@@ -180,6 +180,7 @@ async function create(parent: string, kind: "file" | "dir"): Promise<string | nu
 	const problem = nameProblem(name);
 	if (problem) return notify(problem, "error"), null;
 	const path = joinPath(parent, name);
+	if (await heldFromBefore(path)) return null;
 	await backend.create(path, kind);
 	setExpanded((set) => new Set(set).add(parent));
 	refresh();
@@ -194,7 +195,7 @@ async function rename(entry: Entry): Promise<string | null> {
 	const problem = nameProblem(name);
 	if (problem) return notify(problem, "error"), null;
 	const to = joinPath(dirName(entry.path), name);
-	if (staleAt(to)) return null;
+	if (await heldFromBefore(to)) return null;
 	await backend.rename(entry.path, to);
 	// Open tabs follow the file, so saving one does not bring the old name back.
 	fileRenamed(entry.path, to);
@@ -221,22 +222,6 @@ async function trash(entry: Entry): Promise<string | null> {
 	return "";
 }
 
-/**
- * A path nothing is at on disk may still have a tab on it, or edits nobody saved: a file that was removed, kept
- * for them. Something moved there would take that text for its own. Says so, and says true, when there is one.
- */
-function staleAt(to: string): boolean {
-	const held = heldAt(to);
-	if (!held) return false;
-	notify(
-		held === "tab"
-			? `${baseName(to)} is still open in a tab from before it was removed. Close that tab first, then try again.`
-			: `${baseName(to)} was removed while it held changes nobody saved. “Save all” puts it back with them; then try again.`,
-		"error",
-	);
-	return true;
-}
-
 /** Moves a file or folder into another folder, under its own name. Returns where it is now. */
 async function moveInto(from: { path: string; kind: "file" | "dir" }, into: string, options: { ask: boolean }): Promise<string | null> {
 	const root = state.workspace?.root;
@@ -247,7 +232,7 @@ async function moveInto(from: { path: string; kind: "file" | "dir" }, into: stri
 	// A drop is easily made by a slip of the hand: it asks. A paste was asked for twice already.
 	if (options.ask && (await choose(`Move ${from.kind === "dir" ? `the folder ${name} and everything in it` : name} into ${baseName(into)}?`, ["Move"])) !== "Move") return null;
 	const to = joinPath(into, name);
-	if (staleAt(to)) return null;
+	if (await heldFromBefore(to)) return null;
 	await backend.rename(from.path, to);
 	fileRenamed(from.path, to);
 	setExpanded((set) => new Set([...retarget(set, from.path, to), into]));
@@ -268,7 +253,7 @@ async function copyInto(from: { path: string; kind: "file" | "dir" }, into: stri
 	const taken = (name: string) => there.has(name.toLowerCase());
 	const name = baseName(from.path);
 	const to = joinPath(into, taken(name) ? copyName(name, taken, from.kind) : name);
-	if (staleAt(to)) return null;
+	if (await heldFromBefore(to)) return null;
 	await backend.copy(from.path, to);
 	setExpanded((set) => new Set(set).add(into));
 	void scriptsCameTo(to, undefined, from.kind);

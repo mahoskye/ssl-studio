@@ -11,7 +11,7 @@ import { session } from "./lsp/session";
 import { changedRanges, minimalReplace } from "./lsp/edits";
 import { choose } from "./dialogs";
 import { closeComparison, openReview } from "./editor/Review";
-import { baseName, isInside, plainFileError } from "../shared/paths";
+import { baseName, dirName, isInside, plainFileError } from "../shared/paths";
 import { lineEnds } from "../shared/fileKind";
 import { isPlanPath } from "./plan/model";
 import { recheckPlans, trackPlan } from "./plan/check";
@@ -324,8 +324,8 @@ export const takeReveal = (path: string) => {
 export async function openFile(path: string, options: { group?: number; reveal?: Reveal } = {}) {
 	path = canonical(path);
 	// What was only read (a definition peeked at) had no tab to keep it true, and the file may have changed, gone, or
-	// been made anew since: it is looked at again before it is shown.
-	if (docs.has(path) && !state.dirty[path] && !state.groups.some((g) => g.tabs.includes(path))) await fileChangedOnDisk(path);
+	// been made anew since. It is let go, and the file is read as it is now: nothing of the old reading is left to undo.
+	letGoIfOnlyRead(path);
 	const doc = await guarded(() => loadDoc(path));
 	if (!doc) return;
 	const group = options.group ?? state.activeGroup;
@@ -582,15 +582,39 @@ export async function scriptsCameTo(to: string, from?: string, kind: "file" | "d
 }
 
 /**
- * What is still held at a path, or under it, of a file that is gone from disk: a tab, or edits nobody saved in a
- * document that has no tab (a rename across files changes scripts that are not open). A file moved there would be
- * taken for it. A file that was only read (for a search's results, a definition) is neither, and does not count.
+ * What is held at a path, or under it: a tab, or edits nobody saved in a document that has no tab (a rename across
+ * files changes scripts that are not open). A file that was only read (for a search's results, a definition) is
+ * neither, and does not count.
  */
-export function heldAt(path: string): "tab" | "unsaved" | null {
+function heldAt(path: string): { kind: "tab" | "unsaved"; path: string } | null {
 	const at = canonical(path);
 	const there = (other: string) => other === at || isInside(at, other);
-	if (state.groups.some((group) => group.tabs.some(there))) return "tab";
-	return [...docs.keys()].some((other) => there(other) && state.dirty[other]) ? "unsaved" : null;
+	for (const group of state.groups) for (const tab of group.tabs) if (there(tab)) return { kind: "tab", path: tab };
+	for (const other of docs.keys()) if (there(other) && state.dirty[other]) return { kind: "unsaved", path: other };
+	return null;
+}
+
+/**
+ * A path nothing is at on disk may still have a tab on it, or edits nobody saved: a file that was removed, kept
+ * for them. A file put there (moved, copied or made new) would be taken for it. Says so, and says true, when that
+ * is so. Where something is there on disk the path is simply taken, and whoever writes there says that instead.
+ */
+export async function heldFromBefore(to: string): Promise<boolean> {
+	const held = heldAt(to);
+	if (!held) return false;
+	const name = baseName(to);
+	const onDisk = await backend.list(dirName(to)).then(
+		(entries) => entries.some((entry) => entry.name === name),
+		() => false,
+	);
+	if (onDisk) return false;
+	if (held.kind === "tab") notify(`${baseName(held.path)} is still open in a tab from before it was removed. Close that tab first, then try again.`, "error");
+	else
+		notify(`${baseName(held.path)} was removed while it held changes nobody saved. Open it to save them or to give them up: the name is free once they are given up.`, "error", {
+			label: "Open it",
+			run: () => void openFile(held.path),
+		});
+	return true;
 }
 
 /** A file or folder went to the trash: its tabs close, except those holding edits nobody saved. */
@@ -817,7 +841,8 @@ export async function fileChangedOnDisk(changed: string) {
 		return;
 	}
 	told(true);
-	if (!doc) return;
+	// It may have been let go, or moved away, while the file was read.
+	if (!doc || docs.get(path) !== doc) return;
 	// A picture, or other bytes, has no text to compare: a later date on it is the change.
 	if (doc.binary && file.binary) {
 		if (file.mtime !== doc.mtime) {

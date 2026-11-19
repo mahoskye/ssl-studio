@@ -116,7 +116,13 @@ export function EditorGroup(props: { index: number }) {
 		editor.onDidLayoutChange((layout) => setRoomy(layout.width >= MINIMAP_FROM));
 		editor.onDidFocusEditorText(() => setState("activeGroup", props.index));
 		editor.onDidChangeModelContent(() => setLineCount(editor.getModel()?.getLineCount() ?? 0));
-		editor.onDidChangeModel(() => setLineCount(editor.getModel()?.getLineCount() ?? 0));
+		editor.onDidChangeModel(() => {
+			setLineCount(editor.getModel()?.getLineCount() ?? 0);
+			// A file taken up with the cursor where the editor already had it moves no cursor: without this the status bar
+			// would go on saying the last file's line.
+			const at = editor.getPosition();
+			if (at && state.activeGroup === props.index) setState("cursor", { line: at.lineNumber, column: at.column });
+		});
 		editor.onDidChangeCursorPosition((e) => {
 			if (state.activeGroup !== props.index) return;
 			setState("cursor", { line: e.position.lineNumber, column: e.position.column });

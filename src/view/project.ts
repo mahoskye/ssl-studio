@@ -7,7 +7,7 @@ import { joinPath } from "../shared/paths";
 import { backend } from "./backend";
 import { ask, choose } from "./dialogs";
 import { showPanel } from "./panels/registry";
-import { fileRemoved, loadProject, loadSettings, notify, openFile, setState, state } from "./state";
+import { fileRemoved, heldFromBefore, loadProject, loadSettings, notify, openFile, setState, state } from "./state";
 
 const [docs, setDocs] = createSignal<DocFile[]>([]);
 export { docs };
@@ -91,6 +91,7 @@ export async function newDoc() {
 	if (!title) return;
 	const file = title.replace(/\.md$/i, "").replace(/[\\/:*?"<>|]+/g, "-");
 	const path = joinPath(state.workspace.root, ...state.project.docs.split(/[\\/]/), `${file}.md`);
+	if (await heldFromBefore(path)) return;
 	try {
 		await backend.create(path, "file");
 		await backend.write(path, `# ${title.replace(/\.md$/i, "")}\n`);
