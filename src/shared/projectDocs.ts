@@ -102,7 +102,7 @@ ${ticket.description?.trim() || PROMPTS.ticket}
 
 ## What done looks like
 
--
+- [ ] What must be true when this is done: one thing to a line, ticked as it is.
 
 ## Notes
 
@@ -127,7 +127,7 @@ ${PROMPTS.spec}
 
 ## How it is checked
 
--
+- [ ] A case that shows it works: one to a line, ticked as it passes.
 `;
 
 export const decisionTemplate = (decision: { title: string; date: string; ticket?: string }) => `${fence([

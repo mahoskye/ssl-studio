@@ -9,7 +9,8 @@ import { frontMatter, plainMarkdown } from "../../shared/frontMatter";
 import { dirName, isInside, joinPath, resolvePath } from "../../shared/paths";
 import { DOC_FOLDERS, linkedLines, statusChoices, toneOf } from "../../shared/projectDocs";
 import { Menu } from "../Menu";
-import { setStatus } from "../projectDocs";
+import { setStatus, tickTask } from "../projectDocs";
+import { tasks } from "../../shared/tasks";
 import { colourCode } from "./markdownCode";
 import { ticketWork } from "../../shared/workContext";
 import { docs } from "../project";
@@ -107,7 +108,22 @@ export function MarkdownView(props: { path: string }) {
 	// Code in the document is coloured as the editor colours it, each block in its own language.
 	let article!: HTMLElement;
 	createEffect(
-		on(html, () => queueMicrotask(() => article && void colourCode(article))),
+		on(html, () =>
+			queueMicrotask(() => {
+				if (!article) return;
+				void colourCode(article);
+				// A task list's boxes can be ticked here: each is the item of that place in the text. Where the page and the
+				// text do not count the same items, the boxes stay as the renderer made them, for reading only.
+				const boxes = [...article.querySelectorAll<HTMLInputElement>('li > input[type="checkbox"], li > p > input[type="checkbox"]')];
+				const items = tasks(text());
+				if (boxes.length !== items.length) return;
+				boxes.forEach((box, index) => {
+					box.disabled = false;
+					box.setAttribute("aria-label", `${items[index]!.done ? "Done" : "Not done"}: ${items[index]!.text}`);
+					box.addEventListener("change", () => void tickTask(props.path, index));
+				});
+			}),
+		),
 	);
 	return (
 		<div class="md-view" ref={view} tabindex={0} aria-label={`${props.path.split(/[\\/]/).pop()}, rendered`} onScroll={follows}>

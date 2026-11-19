@@ -18,9 +18,9 @@ each one needs.
 
 ## What done looks like
 
-- The list has every sample due in the window and none outside it.
-- Each row says whether the sample is due today, the next working day, or soon.
-- A sample whose due date has passed is marked late.
+- [x] The list has every sample due in the window and none outside it.
+- [x] Each row says whether the sample is due today, the next working day, or soon.
+- [ ] A sample whose due date has passed is marked late.
 
 ## Notes
 

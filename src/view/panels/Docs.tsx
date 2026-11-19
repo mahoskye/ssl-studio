@@ -101,6 +101,12 @@ function ItemRow(props: { file: DocFile; depth?: number; lead?: string; note?: s
 					</Show>
 				</span>
 			</Show>
+			{/* How far through its list a ticket or a spec is: what done looks like, ticked. */}
+			<Show when={props.file.tasks}>
+				<span class="meta doc-tasks" title={`${props.file.tasks!.done} of ${props.file.tasks!.total} items ticked`}>
+					{props.file.tasks!.done}/{props.file.tasks!.total}
+				</span>
+			</Show>
 			<Show when={stale()}>
 				<span class="meta warn" title="The list in this catalog no longer says what the folder holds. ＋, Update catalogs, writes it afresh.">
 					out of date

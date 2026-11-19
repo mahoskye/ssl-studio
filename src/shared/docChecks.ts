@@ -66,6 +66,13 @@ export function docChecks(files: readonly DocFile[]): DocCheck[] {
 		}
 	}
 
+	// A ticket or a spec that is finished while something it lists as to do is not ticked.
+	for (const file of [...tickets, ...specs]) {
+		if (toneOf(file.status) !== "done" || !file.tasks || file.tasks.done >= file.tasks.total) continue;
+		const left = file.tasks.total - file.tasks.done;
+		checks.push({ level: "note", text: `${called(file)} is ${file.status}, with ${left} of its ${file.tasks.total} ${file.tasks.total === 1 ? "item" : "items"} not ticked.`, path: file.path });
+	}
+
 	// A ticket named by another, or by a spec, a decision or a question, that is not among the tickets.
 	const named = new Map<string, DocFile>();
 	for (const file of files) {

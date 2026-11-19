@@ -41,7 +41,10 @@ demo project (`examples/due-dates`) has one of everything, invented for it.
    reference note goes in the knowledge base. Started with code selected, a
    question or a decision keeps a link to those lines and the lines as they
    were.
-5. **Move its state.** The status on a document's page is a menu. So is a
+5. **Tick what is done.** A ticket's "What done looks like" and a spec's
+   "How it is checked" are task lists. Their boxes are ticked on the
+   document's page, and the Docs panel shows how many are ("2/3").
+6. **Move its state.** The status on a document's page is a menu. So is a
    row's menu in the Docs panel: right-click, the menu key or Shift+F10.
 
 "Spec'd out work" is the right way to see it: a ticket says what was asked,

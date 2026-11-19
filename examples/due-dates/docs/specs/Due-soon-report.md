@@ -21,6 +21,6 @@ What the morning list of samples shows, and what it leaves out.
 
 ## How it is checked
 
-- The window is tested at both ends, with no samples, and with a window of
+- [x] The window is tested at both ends, with no samples, and with a window of
   no days.
-- The statuses are tested across a weekend and a holiday.
+- [x] The statuses are tested across a weekend and a holiday.

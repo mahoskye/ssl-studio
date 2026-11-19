@@ -221,6 +221,17 @@ export function selftestWork(): Promise<Steps> {
 			return until(() => docs().find((d) => canonical(d.path) === ticket)?.status === "done" && docs().filter((d) => d.catalog).every((d) => !d.catalog!.stale));
 		});
 
+		// What done looks like is a list that is ticked on the ticket's page: the box is the item of that place in the text.
+		await step("taskTickedFromPage", async () => {
+			await openFile(ticket);
+			const box = await until(() => {
+				const found = document.querySelector<HTMLInputElement>('.md input[type="checkbox"]');
+				return found && !found.disabled && found;
+			});
+			box?.click();
+			return until(() => docs().find((d) => canonical(d.path) === ticket)?.tasks?.done === 1);
+		});
+
 		// A row's menu, asked for the way a right-click or the menu key asks, whichever panel is showing.
 		showPanel("docs");
 		await step("rowMenuOpens", async () => {

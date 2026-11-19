@@ -39,6 +39,7 @@ import type { DocFile } from "../shared/protocol";
 import { backend } from "./backend";
 import { ask, choose } from "./dialogs";
 import { createdObjects } from "../shared/outline";
+import { toggleTask } from "../shared/tasks";
 import { parsePlan, isPlanPath } from "./plan/model";
 import { docs, isMarkdown } from "./project";
 import { ticketAtHand as listedTicketAtHand, workFor, workLabel, workText } from "../shared/workContext";
@@ -329,6 +330,23 @@ export async function setStatus(path: string, status: string) {
 		const group = listing.find((d) => canonical(d.path) === canonical(path))?.group;
 		const area = (Object.keys(DOC_FOLDERS) as DocArea[]).find((name) => name === group);
 		if (area) await writeCatalog(area, listing);
+		setState("treeVersion", (v) => v + 1);
+	} catch (e: any) {
+		notify(String(e?.message ?? e), "error");
+	}
+}
+
+/**
+ * Ticks or unticks the nth task of a document: the one character between its
+ * brackets, through the editor. Its folder's catalog does not change: a
+ * catalog says a document's state, not how far through its list it is.
+ */
+export async function tickTask(path: string, index: number) {
+	const before = await current(path);
+	const after = before === null ? null : toggleTask(before, index);
+	if (after === null || after === before) return;
+	try {
+		await put(path, after, true);
 		setState("treeVersion", (v) => v + 1);
 	} catch (e: any) {
 		notify(String(e?.message ?? e), "error");

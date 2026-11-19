@@ -19,9 +19,9 @@ count for neither.
 
 ## What done looks like
 
-- A rush sample received on a Friday with a turnaround of one day is due on
+- [x] A rush sample received on a Friday with a turnaround of one day is due on
   the Saturday.
-- A routine sample received the same day is due on the Monday.
+- [x] A routine sample received the same day is due on the Monday.
 
 ## Notes
 

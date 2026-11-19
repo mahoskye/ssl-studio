@@ -553,6 +553,11 @@ the work comes from ([ADR 0012](adr/0012-a-projects-work-is-written-down.md)).
   answered writes the day beside it.
 - **A spec the planner wrote is called what its plan is called.** It has no
   heading of its own, and was listed by its first section, "Units".
+- **What done looks like is ticked off.** A task list in a rendered
+  document has boxes that can be ticked: each changes the one character
+  between its brackets in the text. A ticket's and a spec's row shows how
+  many are ticked, and Health notes a finished one with items not ticked.
+  New tickets and specs start with such a list.
 - **The Work list is in the order of the work.** What is under way comes
   first, then what waits, then what is finished. A ticket that is part of
   another (an epic's story, a task's sub-task) is listed under it, and a

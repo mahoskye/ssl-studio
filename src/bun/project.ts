@@ -8,6 +8,7 @@ import { CATALOG_FILE, catalogStale } from "../shared/catalog";
 import { parseCsv, tally } from "../shared/csv";
 import { frontMatter, many, one, summaryOf, titleOf } from "../shared/frontMatter";
 import { catalogItems, DOC_FOLDERS, isCatalog, isPrompt, STATE_FILE, type DocArea } from "../shared/projectDocs";
+import { taskTally } from "../shared/tasks";
 import type { DocFile, ManifestFile, Project, Settings } from "../shared/protocol";
 import { workspaceDir } from "./paths";
 import { WorkspaceFiles } from "./workspace";
@@ -90,10 +91,10 @@ const planTicket = async (path: string) => (await planSays(path)).ticket;
 const said = (summary: string | undefined) => (summary && !isPrompt(summary) ? summary : undefined);
 
 /** What a Markdown document says of itself, for the panel and the catalogs. */
-function described(text: string): Pick<DocFile, "title" | "status" | "summary" | "tickets" | "untouched"> {
+function described(text: string): Pick<DocFile, "title" | "status" | "summary" | "tickets" | "untouched" | "tasks"> {
 	const { values } = frontMatter(text);
 	const tickets = [...many(values.ticket), ...many(values.tickets)];
-	return { title: titleOf(text) || undefined, status: one(values.status) || undefined, summary: said(summaryOf(text)), ...(tickets.length ? { tickets } : {}), ...(isPrompt(summaryOf(text)) ? { untouched: true } : {}) };
+	return { title: titleOf(text) || undefined, status: one(values.status) || undefined, summary: said(summaryOf(text)), ...(tickets.length ? { tickets } : {}), ...(isPrompt(summaryOf(text)) ? { untouched: true } : {}), ...(taskTally(text) ? { tasks: taskTally(text)! } : {}) };
 }
 
 /** A snippet's title and what it is for: the first two lines of the comment it opens with. */

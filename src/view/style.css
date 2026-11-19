@@ -874,6 +874,11 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .doc-row .doc-status.tone-active { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
 .doc-row .doc-status.tone-off { text-decoration: line-through; opacity: .75; }
 .doc-row.catalog .label { color: var(--muted); font-style: italic; }
+.doc-row .doc-tasks { font-variant-numeric: tabular-nums; }
+/* A task list in a rendered document: boxes that can be ticked, no bullets beside them. */
+.md li:has(> input[type="checkbox"]), .md li:has(> p > input[type="checkbox"]) { list-style: none; margin-left: -1.4em; padding-left: 1.7em; text-indent: -1.7em; }
+/* The box sits in the indent, so an item that runs to a second line stays in line with its first. */
+.md li > input[type="checkbox"], .md li > p > input[type="checkbox"] { width: 1em; height: 1em; margin: 0 0.7em 0 0; vertical-align: -2px; cursor: pointer; accent-color: var(--accent); }
 .doc-row.doc-more .label { color: var(--muted); }
 /* In a narrow panel the title has the room: a state is a dot in its tone (the word is in the row's tooltip), and a note that only repeats where the row sits is left out. */
 [data-panel="docs"] { container: docs / inline-size; }

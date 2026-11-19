@@ -21,9 +21,9 @@ on a day the sample's instrument is out of service.
 
 ## What done looks like
 
-- Every sample with a received date and a turnaround has a due date.
-- A sample that cannot be given one is left alone, and the reason is reported.
-- Running it twice changes nothing the second time.
+- [x] Every sample with a received date and a turnaround has a due date.
+- [x] A sample that cannot be given one is left alone, and the reason is reported.
+- [x] Running it twice changes nothing the second time.
 
 ## Notes
 
