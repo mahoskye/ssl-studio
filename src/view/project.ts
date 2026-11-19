@@ -13,6 +13,8 @@ const [docs, setDocs] = createSignal<DocFile[]>([]);
 export { docs };
 
 export const isMarkdown = (path: string | null | undefined) => Boolean(path && /\.(md|markdown)$/i.test(path));
+/** A table of values: a registry, or any other CSV or TSV file. */
+export const isTable = (path: string | null | undefined) => Boolean(path && /\.(csv|tsv)$/i.test(path));
 
 /** What the project should have and does not, in words for the user. */
 export function projectGaps(): { file: DocFile; problem: string }[] {

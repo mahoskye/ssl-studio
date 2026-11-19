@@ -17,7 +17,7 @@ import { askAbout } from "./agent/Agent";
 import { startTidy } from "./agent/tidy";
 import { joinPath } from "../shared/paths";
 import { isPlanPath, newPlan, printPlan } from "./plan/model";
-import { isMarkdown, newDoc, setUpProject, undoSetUp } from "./project";
+import { isMarkdown, isTable, newDoc, setUpProject, undoSetUp } from "./project";
 import { displayKey, effectiveKeys, isModifierKey, keyNames, keysOf } from "./keys";
 import { modalOpen, setFocusFallback } from "./modal";
 import { noteUsed } from "./quickRank";
@@ -160,7 +160,7 @@ async function wrapInRegion() {
 function toggleVisual() {
 	const path = activePath();
 	if (isPlanPath(path)) setState("planText", path!, (text) => !text);
-	else if (isMarkdown(path)) setState("mdText", path!, (text) => !text);
+	else if (isMarkdown(path) || isTable(path)) setState("mdText", path!, (text) => !text);
 	else setState("groups", state.activeGroup, "mode", (m) => (m === "blocks" ? "text" : "blocks"));
 }
 

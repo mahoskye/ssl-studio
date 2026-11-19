@@ -1,11 +1,14 @@
 // A Markdown document, rendered. It is a reading view of the text in the
 // editor (ADR 0002): the Text switch edits it, and this follows.
-import { createMemo, createSignal, For, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
 import { headingAnchor } from "../../shared/docTables";
 import { finishMarkdown, outlineOf } from "./markdownHtml";
-import { dirName, isInside, resolvePath } from "../../shared/paths";
+import { frontMatter } from "../../shared/frontMatter";
+import { dirName, isInside, joinPath, resolvePath } from "../../shared/paths";
+import { DOC_FOLDERS, toneOf } from "../../shared/projectDocs";
+import { colourCode } from "./markdownCode";
 import { documents, openFile, state } from "../state";
 
 export function MarkdownView(props: { path: string }) {
@@ -14,7 +17,24 @@ export function MarkdownView(props: { path: string }) {
 	const listener = model?.onDidChangeContent(() => setText(model.getValue()));
 	onCleanup(() => listener?.dispose());
 	// A README can come from anywhere: its HTML is cleaned before it is shown.
-	const html = createMemo(() => finishMarkdown(DOMPurify.sanitize(marked.parse(text(), { async: false, gfm: true }) as string), { anchors: true }));
+	// What the document says of itself in the lines it opens with is shown as a heading of its own, not as text.
+	const front = createMemo(() => frontMatter(text()));
+	const html = createMemo(() => finishMarkdown(DOMPurify.sanitize(marked.parse(front().body, { async: false, gfm: true }) as string), { anchors: true }));
+	/** The front matter as it is shown: each key with its values, a ticket or a file as a link to it. */
+	const facts = createMemo(() =>
+		Object.entries(front().values)
+			.filter(([key, value]) => key !== "title" && (Array.isArray(value) ? value.length : value))
+			.map(([key, value]) => ({ key, values: Array.isArray(value) ? value : [value] })),
+	);
+	const ticketFile = (key: string) => (state.workspace && state.project ? joinPath(state.workspace.root, ...state.project.docs.split(/[\\/]/), DOC_FOLDERS.tickets, `${key}.md`) : "");
+	/** Where a value leads, if anywhere: a ticket's file, a file of the project, a page outside. */
+	const targetOf = (key: string, value: string): { file?: string; web?: string } => {
+		if (/^https?:\/\//i.test(value)) return { web: value };
+		if (["ticket", "tickets", "related", "parent", "blocks", "blocked-by"].includes(key)) return { file: ticketFile(value) };
+		if (["specs", "spec", "plan", "plans"].includes(key) && state.workspace) return { file: joinPath(state.workspace.root, ...value.split("/")) };
+		return {};
+	};
+	const go = (target: { file?: string; web?: string }) => (target.web ? void window.open(target.web, "_blank", "noopener") : target.file ? void openFile(target.file) : undefined);
 
 	/** Links to files in the workspace open as tabs; web links open outside. */
 	const follow = (e: MouseEvent) => {
@@ -49,11 +69,43 @@ export function MarkdownView(props: { path: string }) {
 		}
 		setAt(last || (headings()[0]?.id ?? ""));
 	};
-	const go = (id: string) => [...view.querySelectorAll<HTMLElement>(".md h1, .md h2, .md h3")].find((h) => h.id === id)?.scrollIntoView({ block: "start" });
+	const goTo = (id: string) => [...view.querySelectorAll<HTMLElement>(".md h1, .md h2, .md h3")].find((h) => h.id === id)?.scrollIntoView({ block: "start" });
+	// Code in the document is coloured as the editor colours it, each block in its own language.
+	let article!: HTMLElement;
+	createEffect(
+		on(html, () => queueMicrotask(() => article && void colourCode(article))),
+	);
 	return (
 		<div class="md-view" ref={view} tabindex={0} aria-label={`${props.path.split(/[\\/]/).pop()}, rendered`} onScroll={follows}>
 			<div class="md-page">
-				<article class="md" innerHTML={html()} onClick={follow} />
+				<div class="md-column">
+					<Show when={facts().length}>
+						<dl class="md-front" aria-label="About this document">
+							<For each={facts()}>
+								{(fact) => (
+									<div>
+										<dt>{fact.key}</dt>
+										<dd>
+											<For each={fact.values}>
+												{(value) => {
+													const target = targetOf(fact.key, value);
+													return (
+														<Show when={target.file || target.web} fallback={<span classList={{ "doc-status": fact.key === "status", [`tone-${toneOf(value)}`]: fact.key === "status" }}>{value}</span>}>
+															<button class="link" title={target.web ?? target.file} onClick={() => go(target)}>
+																{value}
+															</button>
+														</Show>
+													);
+												}}
+											</For>
+										</dd>
+									</div>
+								)}
+							</For>
+						</dl>
+					</Show>
+					<article class="md" ref={article} innerHTML={html()} onClick={follow} />
+				</div>
 				{/* A document with a few headings gets a list of them beside it, where the view is wide enough. */}
 				<Show when={headings().length >= 3}>
 					<nav class="md-outline" aria-label="On this page">
@@ -62,7 +114,7 @@ export function MarkdownView(props: { path: string }) {
 							<For each={headings()}>
 								{(h) => (
 									<li class={`level-${h.level}`}>
-										<button classList={{ on: (at() || headings()[0]!.id) === h.id }} aria-current={(at() || headings()[0]!.id) === h.id ? "location" : undefined} title={h.text} onClick={() => go(h.id)}>
+										<button classList={{ on: (at() || headings()[0]!.id) === h.id }} aria-current={(at() || headings()[0]!.id) === h.id ? "location" : undefined} title={h.text} onClick={() => goTo(h.id)}>
 											{h.text}
 										</button>
 									</li>

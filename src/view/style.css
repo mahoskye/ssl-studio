@@ -871,6 +871,37 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .md-view { container-type: inline-size; }
 .md-page { display: flex; justify-content: center; align-items: flex-start; }
 .md-page > .md { flex: 0 1 820px; min-width: 0; margin: 0; }
+.md-column { flex: 0 1 820px; min-width: 0; }
+.md-column > .md { margin: 0; }
+/* What a document says of itself in its first lines: who it is for, what state it is in. Each a small label and its values. */
+.md-front { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-6); margin: var(--space-7) var(--space-7) 0; padding: var(--space-4) var(--space-5); border: 1px solid var(--border); border-radius: var(--radius-lg); background: color-mix(in srgb, var(--side-bg) 55%, transparent); font-size: var(--text-md); }
+.md-front > div { display: flex; align-items: baseline; gap: var(--space-3); min-width: 0; }
+.md-front dt { color: var(--muted); font-size: var(--text-sm); text-transform: uppercase; letter-spacing: .04em; }
+.md-front dd { margin: 0; display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); min-width: 0; overflow-wrap: anywhere; }
+.md-front + .md { padding-top: var(--space-6); }
+.doc-status { padding: 0 var(--space-3); border-radius: 999px; border: 1px solid var(--border); white-space: nowrap; font-size: var(--text-sm); }
+.doc-status.tone-done { color: var(--ok, var(--fg)); border-color: color-mix(in srgb, var(--ok, var(--fg)) 45%, transparent); }
+.doc-status.tone-active { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.doc-status.tone-off { text-decoration: line-through; opacity: .75; }
+
+/* A table of values, as a table: its names stay in sight, a status is in the tone of what it comes to, and a cell is changed in place. */
+.table-view { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--bg); }
+.table-bar { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-3) var(--space-5); padding: var(--space-3) var(--space-5); border-bottom: 1px solid var(--border); background: var(--tab-bg); }
+.table-bar .filter { width: clamp(140px, 24vw, 280px); margin: 0; }
+.table-bar .hint { margin: 0; white-space: nowrap; }
+.table-tally { display: inline-flex; flex-wrap: wrap; gap: var(--space-2); }
+.table-tally button { min-height: 0; padding: 0 var(--space-3); line-height: 1.6; }
+.table-problems { margin: 0; padding: var(--space-3) var(--space-5); }
+.table-scroll { flex: 1; min-height: 0; overflow: auto; }
+.table-scroll > .hint { padding: var(--space-4) var(--space-5); }
+.table-view table { border-collapse: separate; border-spacing: 0; font: var(--code-size)/1.5 var(--code-font, ui-monospace, monospace); }
+.table-view th { position: sticky; top: 0; z-index: 1; padding: 0; text-align: left; background: var(--side-bg); border-bottom: 1px solid var(--border); border-right: 1px solid var(--border); font: 600 var(--text-md) system-ui, sans-serif; white-space: nowrap; }
+.table-view th button { width: 100%; min-height: var(--target); padding: var(--space-2) var(--space-4); text-align: left; border-radius: 0; font: inherit; color: var(--fg); }
+.table-view td { max-width: 46ch; padding: var(--space-1) var(--space-4); border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent); border-right: 1px solid color-mix(in srgb, var(--border) 60%, transparent); vertical-align: top; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.table-view td.number { text-align: right; font-variant-numeric: tabular-nums; }
+.table-view td:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.table-view tbody tr:hover td { background: var(--hover); }
+.table-view td input { width: 100%; min-width: 12ch; margin: -1px 0; padding: 0 var(--space-2); font: inherit; color: var(--input-fg); background: var(--input-bg); border: 1px solid var(--accent); border-radius: var(--radius-sm); }
 .md-outline { display: none; flex: 0 0 220px; position: sticky; top: 0; max-height: calc(100vh - 120px); overflow: auto; padding: var(--space-7) var(--space-5) var(--space-7) 0; font-size: var(--text-md); }
 @container (min-width: 1000px) { .md-outline { display: block; } }
 .md-outline h2 { margin: 0 0 var(--space-3); font-size: var(--text-sm); font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }

@@ -11,8 +11,9 @@ import { PlanView } from "../plan/PlanView";
 import { baseName } from "../../shared/paths";
 import { tabLabels } from "./tabs";
 import { Menu, type MenuItem } from "../Menu";
-import { isMarkdown } from "../project";
+import { isMarkdown, isTable } from "../project";
 import { MarkdownView } from "./MarkdownView";
+import { TableView } from "./TableView";
 import { Start } from "../Start";
 import { FileMark } from "../FileMark";
 import { getPath, SERVER_DEFAULTS } from "../../shared/styleProfile";
@@ -39,6 +40,9 @@ export function EditorGroup(props: { index: number }) {
 	const showBlocks = () => group().mode === "blocks" && isSsl() && !isPlan();
 	const isDoc = () => isMarkdown(group().active);
 	const showRendered = () => isDoc() && !state.mdText[group().active!];
+	// A table of values opens as a table, with the same switch to its text as a document has.
+	const isTabular = () => isTable(group().active);
+	const showTable = () => isTabular() && !state.mdText[group().active!];
 
 	/** The ruler at the style's line length, and the fainter ones the chosen number of columns to each side of it. */
 	const rulers = () =>
@@ -81,8 +85,8 @@ export function EditorGroup(props: { index: number }) {
 		// "Focus editor": the text editor, or whichever view of the file is showing in its place.
 		const stopFocus = focusRequest.listen((target) => {
 			if (target !== "editor" || state.activeGroup !== props.index) return;
-			if (!showBlocks() && !showChart() && !showRendered()) return editor.focus();
-			section.querySelector<HTMLElement>(".blocks-scroll, .plan [tabindex], .md-view")?.focus();
+			if (!showBlocks() && !showChart() && !showRendered() && !showTable()) return editor.focus();
+			section.querySelector<HTMLElement>(".blocks-scroll, .plan [tabindex], .md-view, .table-view input")?.focus();
 		});
 		onCleanup(() => {
 			stop();
@@ -256,6 +260,16 @@ export function EditorGroup(props: { index: number }) {
 						</button>
 					</div>
 				</Show>
+				<Show when={isTabular()}>
+					<div class="mode-switch" role="group" aria-label="View of this table">
+						<button classList={{ on: !showTable() }} aria-pressed={!showTable()} onClick={() => setState("mdText", group().active!, true)}>
+							Text
+						</button>
+						<button classList={{ on: showTable() }} aria-pressed={showTable()} onClick={() => setState("mdText", group().active!, false)}>
+							Table
+						</button>
+					</div>
+				</Show>
 				<Show when={isDoc()}>
 					<div class="mode-switch" role="group" aria-label="View of this document">
 						<button classList={{ on: !showRendered() }} aria-pressed={!showRendered()} onClick={() => setState("mdText", group().active!, true)}>
@@ -293,7 +307,10 @@ export function EditorGroup(props: { index: number }) {
 			<Show when={showRendered() && group().active} keyed>
 				{(path) => <MarkdownView path={path} />}
 			</Show>
-			<div class="editor-row" classList={{ hidden: showBlocks() || showChart() || showRendered() }}>
+			<Show when={showTable() && group().active} keyed>
+				{(path) => <TableView path={path} />}
+			</Show>
+			<div class="editor-row" classList={{ hidden: showBlocks() || showChart() || showRendered() || showTable() }}>
 				{/* An overview of the whole file, top to bottom, to the left of the line numbers: not marks on the lines in view. */}
 				<Show when={group().active && group().active === activePath() && lineCount() > 0 && flatRegions(symbols()).length}>
 					<nav class="region-strip" aria-label="Regions in this file, top to bottom" onKeyDown={onStripKey}>
