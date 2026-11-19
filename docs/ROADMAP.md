@@ -252,6 +252,13 @@ call at once, in lines with sharp corners.
   workspace.
 - **Welcome** lists the recent folders as rows, each with its mark, its name
   and the end of its path.
+- **The graph's finder lists its matches** under the box, with the script
+  each is in; the arrow keys and Enter choose.
+- **A rendered document lists its headings** beside it where the view is
+  wide enough, and marks the one being read.
+- **Go to file** shows each file's mark; **a plan's chart** has the graph's
+  zoom controls; **Output** follows new lines and says what it is for while
+  it is empty.
 
 ## On hold
 

@@ -552,6 +552,18 @@ export function PlanView(props: { path: string; group: number }) {
 					<button class="link" title="Show the findings in Problems" onClick={() => (setState("bottomView", "problems"), setState("settings", "layout", "bottom", true))}>
 						{findingCount() ? `${findingCount()} ${findingCount() === 1 ? "finding" : "findings"}` : "No findings"}
 					</button>
+					{/* The same three as the call graph has: out, the scale (which resets it), in. */}
+					<div class="graph-zoom" role="group" aria-label="Zoom">
+						<button title="Zoom out (−)" aria-label="Zoom out" onClick={(e) => (zoomBy(1 / 1.2), after(e))}>
+							−
+						</button>
+						<button title="Reset the zoom to 100%" aria-label={`Zoom ${Math.round(view().scale * 100)}%. Reset to 100%`} onClick={(e) => (zoomBy(1 / view().scale), after(e))}>
+							{Math.round(view().scale * 100)}%
+						</button>
+						<button title="Zoom in (+)" aria-label="Zoom in" onClick={(e) => (zoomBy(1.2), after(e))}>
+							+
+						</button>
+					</div>
 					<button title="The whole chart, or as much as stays legible (0)" onClick={(e) => (fit(), after(e))}>
 						Fit
 					</button>

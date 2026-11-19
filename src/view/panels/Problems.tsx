@@ -1,6 +1,6 @@
 // Diagnostics from the language server for every open file, by file, then
 // by rule.
-import { For, Show } from "solid-js";
+import { createEffect, For, on, Show } from "solid-js";
 import { monaco } from "../editor/monaco";
 import { diagnostics, type Diagnostic } from "../lsp/session";
 import { openFile, state } from "../state";
@@ -92,9 +92,32 @@ export function Problems() {
 }
 
 export function Output() {
+	let box: HTMLPreElement | undefined;
+	// A new line is followed while the view is at the end; someone reading further up is left where they are.
+	createEffect(
+		on(
+			() => state.output.length,
+			() => {
+				if (box && box.scrollHeight - box.scrollTop - box.clientHeight < 40) queueMicrotask(() => box && (box.scrollTop = box.scrollHeight));
+			},
+		),
+	);
 	return (
-		<pre class="output">
-			<For each={state.output}>{(line) => <div>{line}</div>}</For>
+		<pre class="output" ref={box}>
+			<Show when={state.output.length} fallback={<span class="output-empty">Nothing here yet. Output keeps what the app did and what went wrong: folders opened, the language server's and the agent's failures.</span>}>
+				<For each={state.output}>
+					{(line) => {
+						// A line is its time, two spaces, and what happened.
+						const cut = line.indexOf("  ");
+						return (
+							<div>
+								<span class="output-time">{cut > 0 ? line.slice(0, cut) : ""}</span>
+								{cut > 0 ? line.slice(cut) : line}
+							</div>
+						);
+					}}
+				</For>
+			</Show>
 		</pre>
 	);
 }

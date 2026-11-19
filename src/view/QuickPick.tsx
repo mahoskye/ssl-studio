@@ -1,4 +1,5 @@
 // Ctrl+P files, Ctrl+Shift+P commands, Ctrl+T workspace symbols.
+import { FileMark } from "./FileMark";
 import { createEffect, createMemo, createResource, createSignal, createUniqueId, For, Show } from "solid-js";
 import { backend } from "./backend";
 import { commands, keysFor, recentCommands, runCommand } from "./commands";
@@ -11,7 +12,7 @@ import { baseName, relativeTo } from "../shared/paths";
 
 type Mode = "files" | "symbols" | "commands";
 /** `detail` follows the label on its line (a path, a shortcut); `note` is the quieter line below. */
-type Item = { label: string; detail?: string; note?: string; divide?: boolean; run: () => void };
+type Item = { label: string; detail?: string; note?: string; divide?: boolean; /** A file's name, for its mark beside the label. */ file?: string; run: () => void };
 
 const TITLES: Record<Mode, string> = { files: "Go to file", commands: "Run a command", symbols: "Go to symbol in workspace" };
 const PAGE = 10;
@@ -35,7 +36,7 @@ function Picker(props: { mode: Mode }) {
 	const items = createMemo<Item[]>(() => {
 		if (mode === "files") {
 			const found = (files() ?? []).map((path) => ({ path, rel: rel(path) }));
-			return rankFiles(query(), found, (f) => f.rel).map((f) => ({ label: baseName(f.path), detail: f.rel, run: () => void openFile(f.path) }));
+			return rankFiles(query(), found, (f) => f.rel).map((f) => ({ label: baseName(f.path), detail: f.rel, file: baseName(f.path), run: () => void openFile(f.path) }));
 		}
 		if (mode === "commands") {
 			// Recently used first, then the alphabet; a query matches words in any order.
@@ -130,6 +131,7 @@ function Picker(props: { mode: Mode }) {
 							onMouseMove={(e) => pointed(e, i())}
 							onMouseDown={(e) => e.button === 0 && (e.preventDefault(), pick(item))}
 						>
+							<Show when={item.file}>{(name) => <FileMark name={name()} />}</Show>
 							<span class="label">{item.label}</span>
 							<span class="detail" classList={{ "quick-keys": mode === "commands" }}>
 								{item.detail}

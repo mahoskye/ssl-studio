@@ -38,3 +38,14 @@ export function finishMarkdown(html: string, options: { anchors?: boolean } = {}
 	markShortColumns(holder);
 	return holder.innerHTML;
 }
+
+export type OutlineEntry = { id: string; text: string; level: 1 | 2 | 3 };
+
+/** The headings of a finished document (its anchors already set), down to the third level: what a list of its sections shows. */
+export function outlineOf(html: string): OutlineEntry[] {
+	const holder = document.createElement("template");
+	holder.innerHTML = html;
+	return [...holder.content.querySelectorAll<HTMLElement>("h1, h2, h3")]
+		.filter((h) => h.id && (h.textContent ?? "").trim())
+		.map((h) => ({ id: h.id, text: (h.textContent ?? "").trim(), level: Number(h.tagName[1]) as 1 | 2 | 3 }));
+}

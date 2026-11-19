@@ -238,7 +238,9 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .review-error { margin: 0; padding: var(--space-3) var(--space-5); font-size: var(--text-md); color: var(--error); background: var(--panel-bg); border-bottom: 1px solid var(--border); }
 
 .problems, .output { overflow: auto; flex: 1; margin: 0; padding: var(--space-2) 0; }
-.output { font: var(--text-md)/1.5 ui-monospace, monospace; padding: var(--space-2) var(--space-5); color: var(--muted); }
+.output { font: var(--text-md)/1.5 ui-monospace, monospace; padding: var(--space-2) var(--space-5); color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere; }
+.output .output-time { color: var(--muted); }
+.output .output-empty { font-family: system-ui, sans-serif; color: var(--muted); }
 .sev.error { color: var(--error); }
 .sev.warning { color: var(--warning); }
 .sev.info, .sev.hint { color: var(--info); }
@@ -481,6 +483,13 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .graph-bar .hint { margin: 0; }
 .graph-bar input { width: 52px; }
 .graph-bar input.graph-find { width: clamp(130px, 16vw, 190px); }
+/* The finder and, under it while something is typed, the procedures that match. */
+.graph-find-box { position: relative; display: inline-flex; }
+.graph-find-list { position: absolute; top: calc(100% + var(--space-1)); left: 0; z-index: 40; min-width: 280px; max-width: min(460px, 80vw); margin: 0; padding: var(--space-2); list-style: none; background: var(--side-bg); color: var(--side-fg); border: 1px solid var(--input-border); border-radius: var(--radius-lg); box-shadow: var(--shadow); }
+.graph-find-list li { display: flex; align-items: baseline; gap: var(--space-4); padding: var(--space-2) var(--space-4); border-radius: var(--radius-md); cursor: pointer; white-space: nowrap; }
+.graph-find-list li.on { background: var(--selected); box-shadow: inset 2px 0 0 var(--accent); }
+.graph-find-list li .hint { margin: 0; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; text-align: right; }
+.graph-find-list li.none { cursor: default; color: var(--muted); white-space: normal; }
 .graph-help { margin: var(--space-2) var(--space-5); }
 .graph-bar label { display: inline-flex; align-items: center; gap: var(--space-2); }
 .graph > .graph-bar { flex-wrap: wrap; }
@@ -743,6 +752,18 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .md-view { flex: 1; min-height: 0; overflow: auto; background: var(--bg); }
 /* Long addresses and paths may break; a word never does, and "anywhere" would also let a table squeeze its columns to a letter. */
 .md-view:focus-visible { outline-offset: -2px; }
+/* The document and, beside it where there is room, the list of its headings. */
+.md-view { container-type: inline-size; }
+.md-page { display: flex; justify-content: center; align-items: flex-start; }
+.md-page > .md { flex: 0 1 820px; min-width: 0; margin: 0; }
+.md-outline { display: none; flex: 0 0 220px; position: sticky; top: 0; max-height: calc(100vh - 120px); overflow: auto; padding: var(--space-7) var(--space-5) var(--space-7) 0; font-size: var(--text-md); }
+@container (min-width: 1000px) { .md-outline { display: block; } }
+.md-outline h2 { margin: 0 0 var(--space-3); font-size: var(--text-sm); font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.md-outline ul { list-style: none; margin: 0; padding: 0; border-left: 1px solid var(--border); }
+.md-outline button { display: block; width: 100%; min-height: var(--target); padding: var(--space-1) var(--space-4); margin-left: -1px; border-left: 2px solid transparent; border-radius: 0; text-align: left; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.md-outline .level-3 button { padding-left: var(--space-6); }
+.md-outline button:hover { color: var(--fg); }
+.md-outline button.on { color: var(--accent); border-left-color: var(--accent); }
 .md { max-width: 820px; margin: 0 auto; padding: var(--space-7) var(--space-7) var(--space-10); font-size: calc(var(--code-size) + 1px); line-height: 1.6; overflow-wrap: break-word; }
 .md h1, .md h2, .md h3, .md h4 { font-weight: 600; line-height: 1.25; margin: 1.4em 0 .5em; }
 .md h1 { font-size: 1.7em; margin-top: 0; padding-bottom: .3em; border-bottom: 1px solid var(--border); }
