@@ -63,6 +63,12 @@ A sample with no instrument is never held up by an outage.
 - **`SetSampleDueDates.plan.json`:** a plan with its spec and build record, so its steps link to the code.
 - **`OldDueDateCheck.ssl`:** findings in Problems and Health, and something to run Tidy on.
 - **The Docs panel:** these documents rendered, and the schema.
+- **`docs/tickets/`, `docs/specs/`:** three invented tickets and the specs written for them,
+  shown in the Docs panel as the work, each ticket with its state.
+- **`docs/knowledge/`:** two decisions, an open and an answered question, three SQL snippets
+  and a reference note, with the catalog that lists them.
+- **`docs/registries/`:** the settings, the database objects and a file manifest, as tables
+  with how far each row has come.
 
 ## Working on it
 

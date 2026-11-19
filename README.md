@@ -36,6 +36,17 @@ the source of truth.
   for docs, schema, tests and code. The Docs panel lists the two files with
   the Markdown under `docs/` and `schema/`, rendered for reading, and
   Health says which are missing or still the template.
+- **The work, written down:** under `docs/`, the tickets that drive the
+  work, the specs written from them, a knowledge base (decisions, questions,
+  snippets, reference notes) and registries: tables of the settings, files
+  and database objects a migration must carry across. Each folder has a
+  catalog the IDE keeps, and the Docs panel shows each ticket with its
+  specs, each registry with how far it is
+  ([ADR 0012](docs/adr/0012-a-projects-work-is-written-down.md)).
+- **Documents as what they are:** Markdown, SQL, JSON, TOML, CSV, YAML, XML
+  and INI are coloured by the same themes as SSL. A CSV opens as a table
+  whose cells are edited in place; Markdown opens rendered, with what its
+  front matter says shown above it and its code coloured.
 - **House style:** the team's Designer header, procedure doc block, spacing
   and script size limit built into templates, the formatter and a size meter.
 

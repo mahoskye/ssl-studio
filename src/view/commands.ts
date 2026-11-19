@@ -18,6 +18,7 @@ import { startTidy } from "./agent/tidy";
 import { joinPath } from "../shared/paths";
 import { isPlanPath, newPlan, printPlan } from "./plan/model";
 import { isMarkdown, isTable, newDoc, setUpProject, undoSetUp } from "./project";
+import { newKnowledge, newRegistry, newSpec, newState, newTicket, updateCatalogs, updateManifest } from "./projectDocs";
 import { displayKey, effectiveKeys, isModifierKey, keyNames, keysOf } from "./keys";
 import { modalOpen, setFocusFallback } from "./modal";
 import { noteUsed } from "./quickRank";
@@ -87,6 +88,16 @@ export const commands: Command[] = [
 	{ id: "project-settings", label: "Open project settings", detail: "project.toml", run: () => void openProjectSettings() },
 	{ id: "new-doc", label: "New document…", run: () => void newDoc() },
 	{ id: "new-plan", label: "New plan…", run: () => void newPlanCommand() },
+	{ id: "new-ticket", label: "New ticket…", detail: "The work as it was asked for", run: () => void newTicket() },
+	{ id: "new-spec", label: "New spec…", detail: "What is to be built, for a ticket", run: () => void newSpec() },
+	{ id: "new-decision", label: "New decision…", detail: "In the knowledge base", run: () => void newKnowledge("decisions") },
+	{ id: "new-question", label: "New question…", detail: "In the knowledge base", run: () => void newKnowledge("questions") },
+	{ id: "new-snippet", label: "New snippet…", detail: "SQL or SSL kept for use", run: () => void newKnowledge("snippets") },
+	{ id: "new-reference", label: "New reference note…", detail: "How something works", run: () => void newKnowledge("reference") },
+	{ id: "new-registry", label: "New registry…", detail: "Settings, files, database objects", run: () => void newRegistry() },
+	{ id: "project-state", label: "Project state…", detail: "Where the project stands, in plain words", run: () => void newState() },
+	{ id: "update-catalogs", label: "Update catalogs", detail: "Write each INDEX.md's list afresh", run: () => void updateCatalogs() },
+	{ id: "update-manifest", label: "Update file manifest", detail: "Sizes and checksums of the project's files", run: () => void updateManifest() },
 	// Panels: one form, "Show" and the panel's name
 	{ id: "explorer", label: "Show Explorer", run: () => showPanel("explorer") },
 	{ id: "docs", label: "Show Docs", run: () => showPanel("docs") },

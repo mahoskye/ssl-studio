@@ -298,7 +298,7 @@ ${PLACEHOLDER["README.md"]}
 | Folder | What it holds |
 | --- | --- |
 | \`${project.code}/\` | Scripts and data sources |
-| \`${project.docs}/\` | Notes and decisions |
+| \`${project.docs}/\` | Notes, tickets, specs, the knowledge base, registries |
 | \`${project.schema}/\` | The tables the project reads and writes |
 | \`${project.tests}/\` | Test scripts and what they need |
 | \`${project.plans}/\` | Plans (\`*.plan.json\`) and tidy notes |
@@ -306,7 +306,9 @@ ${PLACEHOLDER["README.md"]}
 ## Working on it
 
 Open this folder in SSL Studio. The Docs panel lists this file, \`AGENTS.md\`
-and everything under \`${project.docs}/\` and \`${project.schema}/\`.
+and everything under \`${project.docs}/\` and \`${project.schema}/\`: the
+tickets the work comes from with their specs, the knowledge base, and the
+registries, each folder with its catalog (\`INDEX.md\`).
 `;
 
 export const agents = (project: Project) => `# Instructions for agents working on ${project.name}
@@ -330,6 +332,11 @@ ${PLACEHOLDER["AGENTS.md"]}
 
 - \`${project.code}/\`: scripts and data sources.
 - \`${project.docs}/\`: notes and decisions.
+- \`${project.docs}/tickets/\`: the tickets that drive the work, one file each. Read the ticket before starting on it.
+- \`${project.docs}/specs/\`: what is to be built, written from the tickets.
+- \`${project.docs}/knowledge/\`: decisions, questions, snippets and notes. Look here before deciding again; write a question here when something is not known.
+- \`${project.docs}/registries/\`: tables of the settings, files and database objects a migration must carry across.
+- Each of those four folders has an \`INDEX.md\`: its catalog. Find a document there, and do not edit the list between its markers.
 - \`${project.schema}/\`: the tables the project reads and writes. Check a table here before writing SQL for it.
 - \`${project.tests}/\`: test scripts and what they need.
 - \`${project.plans}/\`: plans and tidy notes.

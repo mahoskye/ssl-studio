@@ -446,6 +446,36 @@ From a second look:
   to the wrong one: the focus came up small, cut off at the top, with a
   corner map it did not need. Only the last layout asked for is drawn now.
 
+## The work, written down (2026-11-19)
+
+Asked for by the user: the docs side of a project, driven by the tickets
+the work comes from ([ADR 0012](adr/0012-a-projects-work-is-written-down.md)).
+
+- **Documents are coloured.** Markdown, SQL, JSON, TOML, CSV, YAML, XML and
+  INI, where every file that was not SSL was plain text. Their colours come
+  from the active theme, as SSL's do.
+- **Tickets, specs, a knowledge base and registries** each have a folder
+  under `docs/`, a catalog (`INDEX.md`) the IDE writes, and a section of the
+  Docs panel. A ticket is shown with its specs under it, a registry with
+  how far it is.
+- **A registry opens as a table.** Filtered, ordered, tallied by status, and
+  edited a cell at a time, each change one piece of text.
+- **The file manifest is written from the folder,** and written again says
+  what is new, changed and gone, keeping a person's own status and notes.
+- **A document shows what it says of itself:** its front matter above it,
+  a ticket or a file as a link, and its code coloured.
+- **The demo project has one of each,** invented for it.
+
+Not done, and worth doing next:
+
+- Reading a ticket from a ticket system, or from an export of one.
+- Checking a registry's rows against the code: a setting nothing reads, a
+  table no data source uses. The second needs the language server to say
+  which tables a script uses.
+- Giving the agent the ticket and the open questions when it plans or
+  writes a spec.
+- A question or a decision started from the line of code it is about.
+
 ## On hold
 
 - **Forms, client scripts and code-behind (2026-11-17).** Wanted eventually, in
