@@ -852,6 +852,15 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .docs-setup { padding: 0 var(--space-5) var(--space-4); }
 .docs-setup .hint { margin: 0 0 var(--space-4); }
 .group-head .folder { text-transform: none; letter-spacing: 0; opacity: .8; }
+/* The working documents: a ticket's key, a state in the tone of what it comes to, and the kinds of the knowledge base. */
+.doc-row .doc-key { font-weight: 600; font-variant-numeric: tabular-nums; }
+.doc-row .doc-status { padding: 0 var(--space-3); border-radius: 999px; border: 1px solid var(--border); white-space: nowrap; }
+.doc-row .doc-status.tone-done { color: var(--ok, var(--fg)); border-color: color-mix(in srgb, var(--ok, var(--fg)) 45%, transparent); }
+.doc-row .doc-status.tone-active { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.doc-row .doc-status.tone-off { text-decoration: line-through; opacity: .75; }
+.doc-row.catalog .label { color: var(--muted); font-style: italic; }
+.doc-kind { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-2) var(--space-5) 0 calc(var(--space-5) + 2px); font-size: var(--text-sm); color: var(--muted); }
+.doc-kind .count { padding: 0 var(--space-3); border-radius: 999px; background: var(--hover); color: var(--fg); font-variant-numeric: tabular-nums; }
 .doc-row { padding-left: var(--space-6); }
 .doc-row.missing .label { color: var(--muted); font-style: italic; }
 .doc-row .meta.warn, .health .meta.warn { color: var(--warning); }

@@ -41,3 +41,12 @@ export function relativeTo(root: string | undefined | null, path: string): strin
 	if (!root || !isInside(root, path)) return path;
 	return path.replace(/\\/g, "/").slice(root.replace(/[\\/]+$/, "").length + 1);
 }
+
+/** The way from one folder to a file, with forward slashes: "../design/A.spec.md". Both are whole paths. */
+export function relativePath(fromDir: string, to: string): string {
+	const split = (path: string) => path.split(/[\\/]/).filter(Boolean);
+	const [from, target] = [split(fromDir), split(to)];
+	let same = 0;
+	while (same < from.length && same < target.length && from[same] === target[same]) same++;
+	return [...from.slice(same).map(() => ".."), ...target.slice(same)].join("/");
+}

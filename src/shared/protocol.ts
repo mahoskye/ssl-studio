@@ -32,15 +32,38 @@ export type Project = {
 };
 
 /** One row of the Docs panel. README.md and AGENTS.md are listed even when missing. */
+export type DocGroup = "project" | "tickets" | "specs" | "knowledge" | "registries" | "docs" | "schema" | "plans";
 export type DocFile = {
 	path: string;
 	/** Relative to the group's folder. */
 	name: string;
-	group: "project" | "docs" | "schema" | "plans";
+	group: DocGroup;
 	exists: boolean;
 	/** Still holds the placeholder text "Set up project" wrote. */
 	untouched?: boolean;
+	/** What the document calls itself: its front matter's title, its first heading, or a snippet's first comment. */
+	title?: string;
+	/** The state its front matter says it is in. */
+	status?: string;
+	/** What it is about, in one line. */
+	summary?: string;
+	/** A ticket's own key. */
+	ticket?: string;
+	/** The tickets a spec, a decision or a question is for; for a ticket, the tickets it is related to. */
+	tickets?: string[];
+	/** A ticket: the specs it names, as paths from the project's root. */
+	specs?: string[];
+	/** Knowledge: the folder it is in under the knowledge base ("decisions", "snippets"); "" at its top. */
+	kind?: string;
+	/** A registry: how many rows, how many in each status (when it has that column), and what is wrong with it as a table. */
+	rows?: number;
+	tally?: { total: number; by: [status: string, count: number][] };
+	problems?: string[];
+	/** A catalog (INDEX.md): whether its list no longer says what the documents do. */
+	catalog?: { stale: boolean };
 };
+/** One file of the project, for the file manifest. */
+export type ManifestFile = { path: string; kind: string; bytes: number; lines: number; sha256: string };
 
 export type Snapshot = { id: string; time: number; size: number };
 
@@ -147,6 +170,8 @@ export interface BackendApi {
 	closeWindow(): Promise<void>;
 	/** README.md, AGENTS.md and project.toml, then the Markdown and plans in the project's docs and plans folders. */
 	docs(): Promise<DocFile[]>;
+	/** Every file of the project with its size and a checksum, for the file manifest. */
+	manifest(): Promise<ManifestFile[]>;
 	settings(): Promise<{ effective: Settings; user: Partial<Settings>; workspace: Partial<Settings> }>;
 	saveSettings(scope: SettingsScope, patch: SettingsPatch): Promise<Settings>;
 	themes(): Promise<ThemeFile[]>;

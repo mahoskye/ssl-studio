@@ -3,8 +3,12 @@
 // the templates below, and after that only reads them: project.toml is edited
 // as text, so its comments survive.
 import { existsSync, mkdirSync, readdirSync, rmdirSync, unlinkSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, relative } from "node:path";
-import type { DocFile, Project, Settings } from "../shared/protocol";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
+import { CATALOG_FILE, catalogStale } from "../shared/catalog";
+import { parseCsv, tally } from "../shared/csv";
+import { frontMatter, many, one, summaryOf, titleOf } from "../shared/frontMatter";
+import { catalogItems, DOC_FOLDERS, isCatalog, STATE_FILE, type DocArea } from "../shared/projectDocs";
+import type { DocFile, ManifestFile, Project, Settings } from "../shared/protocol";
 import { workspaceDir } from "./paths";
 import { WorkspaceFiles } from "./workspace";
 
@@ -52,6 +56,38 @@ function found(root: string, name: string): string | undefined {
 	return readdirSync(root).find((f) => f.toLowerCase() === name.toLowerCase());
 }
 
+/** The most of a document that is read to learn its title and state. */
+const HEAD_BYTES = 64 * 1024;
+/** A registry larger than this is listed without being read. */
+const REGISTRY_BYTES = 4 * 1024 * 1024;
+const MARKDOWN = /\.(md|markdown)$/i;
+
+async function head(path: string): Promise<string> {
+	try {
+		return await Bun.file(path).slice(0, HEAD_BYTES).text();
+	} catch {
+		return "";
+	}
+}
+
+/** What a Markdown document says of itself, for the panel and the catalogs. */
+function described(text: string): Pick<DocFile, "title" | "status" | "summary" | "tickets"> {
+	const { values } = frontMatter(text);
+	const tickets = [...many(values.ticket), ...many(values.tickets)];
+	return { title: titleOf(text) || undefined, status: one(values.status) || undefined, summary: summaryOf(text) || undefined, ...(tickets.length ? { tickets } : {}) };
+}
+
+/** A snippet's title and what it is for: the first two lines of the comment it opens with. */
+function snippet(text: string): Pick<DocFile, "title" | "summary"> {
+	const said = (line: string | undefined) => /^\s*(?:--+|\/\*+|#+|\/\/+|\*)?\s*(.+?)\s*(?:\*\/|;)?\s*$/.exec(line ?? "")?.[1];
+	const lines = text.split(/\r?\n/).filter((line) => line.trim());
+	const commented = (line: string | undefined) => /^\s*(--|\/\*|#|\/\/)/.test(line ?? "");
+	if (!commented(lines[0])) return {};
+	// The second line is part of the comment when it is marked as one, or the comment is a block still open.
+	const second = commented(lines[1]) || (/^\s*\/\*/.test(lines[0]!) && !/(\*\/|;)\s*$/.test(lines[0]!)) ? said(lines[1]) : undefined;
+	return { title: said(lines[0]), summary: second };
+}
+
 export async function listDocs(files: WorkspaceFiles, project: Project): Promise<DocFile[]> {
 	const root = files.root;
 	const list: DocFile[] = [];
@@ -62,19 +98,106 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 		list.push({ path, name: actual ?? name, group: "project", exists: Boolean(actual), untouched });
 	}
 	list.push({ path: project.path, name: PROJECT_FILE, group: "project", exists: project.configured });
-	const collect = (dir: string, group: DocFile["group"], pattern: RegExp) => {
-		const full = join(root, dir);
-		if (!existsSync(full)) return;
+	const docs = join(root, project.docs);
+	const state = existsSync(docs) ? found(docs, STATE_FILE) : undefined;
+	if (state) list.push({ path: join(docs, state), name: state, group: "project", exists: true, ...described(await head(join(docs, state))) });
+
+	/** The files under a folder that match, by name, up to the limit. */
+	const under = (full: string, pattern: RegExp) => {
+		if (!existsSync(full)) return [];
 		const paths: string[] = [];
 		for (const path of files.files(full)) if (pattern.test(path) && paths.push(path) >= DOC_LIMIT) break;
-		for (const path of paths.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }))) {
-			list.push({ path, name: relative(full, path), group, exists: true });
-		}
+		return paths.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base", numeric: true }));
 	};
-	collect(project.docs, "docs", /\.(md|markdown)$/i);
-	collect(project.schema, "schema", /\.(md|markdown|sql)$/i);
-	collect(project.plans, "plans", /\.(plan\.json|md)$/i);
+	const area = (name: DocArea) => join(docs, DOC_FOLDERS[name]);
+	const inArea = (path: string) => (Object.keys(DOC_FOLDERS) as DocArea[]).some((name) => path.startsWith(area(name) + sep));
+
+	// The tickets that drive the work.
+	for (const path of under(area("tickets"), MARKDOWN)) {
+		const text = await head(path);
+		const { values } = frontMatter(text);
+		const name = relative(area("tickets"), path);
+		const key = one(values.ticket) || basename(path).replace(MARKDOWN, "");
+		const specs = many(values.specs);
+		const related = [...many(values.related), ...many(values.blocks), ...many(values["blocked-by"]), ...many(values.parent)];
+		list.push({ path, name, group: "tickets", exists: true, ...described(text), ...(isCatalog({ name }) ? {} : { ticket: key, tickets: related.length ? related : undefined, specs: specs.length ? specs : undefined }) });
+	}
+	// The specs: those written by hand, and those the planner writes beside a plan.
+	for (const path of [...under(area("specs"), MARKDOWN), ...under(join(root, project.plans), /\.spec\.md$/i)]) {
+		const fromPlan = !path.startsWith(area("specs") + sep);
+		list.push({ path, name: fromPlan ? `${project.plans}/${relative(join(root, project.plans), path)}` : relative(area("specs"), path), group: "specs", exists: true, ...described(await head(path)) });
+	}
+	// The knowledge base: decisions, questions, snippets and notes, each kind in its folder.
+	for (const path of under(area("knowledge"), /\.(md|markdown|sql|ssl|srvscr|ds|txt|json|toml|csv)$/i)) {
+		const name = relative(area("knowledge"), path);
+		const kind = name.includes(sep) ? name.split(sep)[0]! : "";
+		const text = await head(path);
+		list.push({ path, name, group: "knowledge", exists: true, kind, ...(MARKDOWN.test(path) ? described(text) : snippet(text)) });
+	}
+	// The registries: tables of values, each row with how far it has come.
+	for (const path of under(area("registries"), /\.(md|markdown|csv|tsv)$/i)) {
+		const name = relative(area("registries"), path);
+		if (MARKDOWN.test(path)) {
+			list.push({ path, name, group: "registries", exists: true, ...described(await head(path)) });
+			continue;
+		}
+		const file = Bun.file(path);
+		if (file.size > REGISTRY_BYTES) {
+			list.push({ path, name, group: "registries", exists: true, problems: ["It is too large to read here."] });
+			continue;
+		}
+		const table = parseCsv(await file.text());
+		list.push({ path, name, group: "registries", exists: true, rows: table.rows.length, tally: tally(table) ?? undefined, problems: table.problems.length ? table.problems : undefined });
+	}
+	// Everything else in the docs folder.
+	for (const path of under(docs, MARKDOWN)) {
+		if (inArea(path) || (state && path === join(docs, state))) continue;
+		list.push({ path, name: relative(docs, path), group: "docs", exists: true });
+	}
+	for (const path of under(join(root, project.schema), /\.(md|markdown|sql)$/i)) list.push({ path, name: relative(join(root, project.schema), path), group: "schema", exists: true });
+	for (const path of under(join(root, project.plans), /\.(plan\.json|md)$/i)) {
+		if (/\.spec\.md$/i.test(path)) continue;
+		list.push({ path, name: relative(join(root, project.plans), path), group: "plans", exists: true });
+	}
+	// Each catalog says whether its list is still what the documents are.
+	for (const name of Object.keys(DOC_FOLDERS) as DocArea[]) {
+		if (!existsSync(area(name))) continue;
+		const catalog = list.find((file) => file.path === join(area(name), found(area(name), CATALOG_FILE) ?? CATALOG_FILE));
+		if (catalog) catalog.catalog = { stale: catalogStale(await Bun.file(catalog.path).text(), catalogItems(name, list, docs)) };
+	}
 	return list;
+}
+
+/** What kind of file one is, for the manifest: by what its name ends with. */
+const KINDS: [RegExp, string][] = [
+	[/\.(ssl|srvscr)$/i, "script"],
+	[/\.ds$/i, "data source"],
+	[/\.sql$/i, "sql"],
+	[/\.plan\.json$/i, "plan"],
+	[/\.(md|markdown|txt)$/i, "document"],
+	[/\.(json|toml|ya?ml|xml|ini|csv|tsv|config)$/i, "data"],
+];
+
+/**
+ * Every file that is the project's work, with its size, its lines and a
+ * checksum: what a file manifest is written from. The documents about the
+ * work are not in it (the docs and plans folders, the files at the root, the
+ * IDE's own folder): they change as the work is written up, and are not what
+ * a migration carries across.
+ */
+export async function fileManifest(files: WorkspaceFiles, project: Project): Promise<ManifestFile[]> {
+	const rows: ManifestFile[] = [];
+	const apart = [project.docs, project.plans, ".ssl-studio"].map((folder) => `${folder.split(/[\\/]/).join("/")}/`);
+	for (const path of files.files()) {
+		const name = relative(files.root, path).split(sep).join("/");
+		if (!name.includes("/") || apart.some((folder) => name.startsWith(folder))) continue;
+		const bytes = new Uint8Array(await Bun.file(path).arrayBuffer());
+		let lines = bytes.length ? 1 : 0;
+		for (const byte of bytes) if (byte === 10) lines++;
+		if (bytes.length && bytes[bytes.length - 1] === 10) lines--;
+		rows.push({ path: name, kind: KINDS.find(([pattern]) => pattern.test(name))?.[1] ?? "other", bytes: bytes.length, lines, sha256: new Bun.CryptoHasher("sha256").update(bytes).digest("hex") });
+	}
+	return rows.sort((a, b) => a.path.localeCompare(b.path, undefined, { sensitivity: "base", numeric: true }));
 }
 
 /**

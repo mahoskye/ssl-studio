@@ -1,0 +1,192 @@
+// The project's working documents, made and kept from here: the tickets that
+// drive the work, the specs, the knowledge base, the registries, and the
+// catalog each of those folders is found by (ADR 0012). What these write is
+// text like any other: an open file is changed through the editor, so it can
+// be undone, and a file that exists is never written over.
+import { CATALOG_FILE, catalogStale, withCatalog } from "../shared/catalog";
+import { csvRow } from "../shared/csv";
+import { frontMatter, one } from "../shared/frontMatter";
+import { manifestSummary, mergeManifest } from "../shared/manifest";
+import { baseName, joinPath, relativeTo } from "../shared/paths";
+import {
+	catalogItems,
+	catalogTemplate,
+	decisionTemplate,
+	DOC_FOLDERS,
+	KNOWLEDGE,
+	questionTemplate,
+	referenceTemplate,
+	REGISTRIES,
+	slug,
+	snippetTemplate,
+	specTemplate,
+	STATE_FILE,
+	stateTemplate,
+	ticketKey,
+	ticketTemplate,
+	type DocArea,
+	type KnowledgeKind,
+} from "../shared/projectDocs";
+import type { DocFile } from "../shared/protocol";
+import { backend } from "./backend";
+import { ask, choose } from "./dialogs";
+import { isMarkdown } from "./project";
+import { activeDoc, activePath, applyText, canonical, documents, notify, openFile, setState, state } from "./state";
+
+const today = () => new Date().toISOString().slice(0, 10);
+const root = () => state.workspace?.root ?? "";
+const docsFolder = () => joinPath(root(), ...(state.project?.docs ?? "docs").split(/[\\/]/));
+const areaFolder = (area: DocArea) => joinPath(docsFolder(), DOC_FOLDERS[area]);
+const ready = () => (state.workspace && state.project ? true : (notify("Open a folder first."), false));
+
+/** A file's text as it stands: in the editor if it is open there, on disk otherwise, null when there is no such file. */
+async function current(path: string): Promise<string | null> {
+	const open = documents.get(canonical(path));
+	if (open) return open.model.getValue();
+	try {
+		return (await backend.read(path)).text;
+	} catch {
+		return null;
+	}
+}
+
+/** Writes a file's text: through the editor when it is open there, where the change can be undone. */
+async function put(path: string, text: string, existed: boolean) {
+	if (documents.get(canonical(path))) return applyText(canonical(path), text);
+	if (!existed) await backend.create(path, "file");
+	await backend.write(path, text);
+}
+
+/** Writes an area's catalog afresh from its documents; makes the catalog where there is none. True when it changed. */
+async function writeCatalog(area: DocArea, files: readonly DocFile[]): Promise<boolean> {
+	const path = joinPath(areaFolder(area), CATALOG_FILE);
+	const items = catalogItems(area, files, docsFolder());
+	const before = await current(path);
+	if (before === null && !items.length) return false;
+	if (before !== null && !catalogStale(before, items)) return false;
+	await put(path, withCatalog(before ?? catalogTemplate(area), items), before !== null);
+	return true;
+}
+
+/** Makes a document from its template, lists it in its folder's catalog, and opens it as text. A file already there is opened, not replaced. */
+async function start(path: string, text: string, area?: DocArea) {
+	if ((await current(path)) !== null) {
+		notify(`${relativeTo(root(), path)} is already there: opened.`);
+		return openFile(path);
+	}
+	try {
+		await backend.create(path, "file");
+		await backend.write(path, text);
+		if (area) await writeCatalog(area, await backend.docs());
+	} catch (e: any) {
+		return notify(String(e?.message ?? e), "error");
+	}
+	setState("treeVersion", (v) => v + 1);
+	if (isMarkdown(path)) setState("mdText", canonical(path), true);
+	await openFile(path);
+}
+
+/** The ticket the open document is, or is for: what a new spec or decision is most likely about. */
+function ticketAtHand(): string {
+	const path = activePath();
+	const doc = activeDoc();
+	if (!path || !doc || !isMarkdown(path)) return "";
+	const { values } = frontMatter(doc.model.getValue());
+	return one(values.ticket).split(",")[0]?.trim() ?? "";
+}
+
+/** A ticket: the work as it was asked for. Its key names its file. */
+export async function newTicket() {
+	if (!ready()) return;
+	const key = ticketKey((await ask("The ticket's key, as in LIMS-123")) ?? "");
+	if (!key) return;
+	const title = (await ask(`${key}: its title, as the ticket has it`))?.trim();
+	if (!title) return;
+	const source = (await ask(`${key}: a link to the ticket (leave empty for none)`))?.trim();
+	await start(joinPath(areaFolder("tickets"), `${key}.md`), ticketTemplate({ key, title, source: source || undefined }), "tickets");
+}
+
+/** A spec: what is to be built, written from a ticket. */
+export async function newSpec() {
+	if (!ready()) return;
+	const title = (await ask("What the spec is for, in a few words"))?.trim();
+	if (!title || !slug(title)) return;
+	const ticket = ticketKey((await ask("The ticket it is for (leave empty for none)", ticketAtHand())) ?? "");
+	await start(joinPath(areaFolder("specs"), `${slug(title)}.md`), specTemplate({ title, ticket: ticket || undefined }), "specs");
+}
+
+/** Something for the knowledge base: a decision, a question, a snippet or a reference note. */
+export async function newKnowledge(kind: KnowledgeKind["id"]) {
+	if (!ready()) return;
+	const what = KNOWLEDGE.find((k) => k.id === kind)!;
+	const folder = joinPath(areaFolder("knowledge"), kind);
+	const title = (await ask(kind === "questions" ? "The question, as you would ask it" : kind === "snippets" ? "What the snippet is for, in a few words" : `The ${what.one}, in a few words`))?.trim();
+	if (!title || !slug(title)) return;
+	if (kind === "snippets") {
+		const language = await choose("A snippet of what?", ["SQL", "SSL"]);
+		if (!language) return;
+		return start(joinPath(folder, `${slug(title)}.${language.toLowerCase()}`), snippetTemplate({ title, language: language === "SQL" ? "sql" : "ssl" }), "knowledge");
+	}
+	if (kind === "reference") return start(joinPath(folder, `${slug(title)}.md`), referenceTemplate({ title }), "knowledge");
+	const ticket = ticketAtHand() || undefined;
+	if (kind === "questions") return start(joinPath(folder, `${slug(title)}.md`), questionTemplate({ title, date: today(), ticket }), "knowledge");
+	// Decisions are numbered, so that one can be named by its number and they list in the order they were made.
+	const taken = (await backend.docs()).filter((d) => d.group === "knowledge" && d.kind === "decisions").map((d) => Number(/^(\d+)/.exec(baseName(d.name))?.[1] ?? 0));
+	const number = String(Math.max(0, ...taken) + 1).padStart(4, "0");
+	await start(joinPath(folder, `${number}-${slug(title)}.md`), decisionTemplate({ title, date: today(), ticket }), "knowledge");
+}
+
+/** A registry: a table of what a migration must carry across, each row with how far it has come. */
+export async function newRegistry() {
+	if (!ready()) return;
+	const other = "Another…";
+	const picked = await choose("A registry of what?", [...REGISTRIES.map((r) => r.title), other]);
+	if (!picked) return;
+	const kind = REGISTRIES.find((r) => r.title === picked);
+	if (kind?.id === "files") return updateManifest();
+	if (kind) return start(joinPath(areaFolder("registries"), kind.file), `${csvRow(kind.columns)}\n`, "registries");
+	const name = (await ask("What the registry lists, in a word or two"))?.trim();
+	if (!name || !slug(name)) return;
+	const columns = (await ask("Its columns, separated by commas. A status column says how far each row has come.", "name, status, note"))?.split(",").map((c) => c.trim()).filter(Boolean);
+	if (!columns?.length) return;
+	await start(joinPath(areaFolder("registries"), `${slug(name).toLowerCase()}.csv`), `${csvRow(columns)}\n`, "registries");
+}
+
+/** Where the project stands, in plain words. */
+export async function newState() {
+	if (!ready()) return;
+	await start(joinPath(docsFolder(), STATE_FILE), stateTemplate(state.project!.name, today()));
+}
+
+/** Writes every catalog afresh from the documents in its folder. */
+export async function updateCatalogs() {
+	if (!ready()) return;
+	try {
+		const files = await backend.docs();
+		const changed: string[] = [];
+		for (const area of Object.keys(DOC_FOLDERS) as DocArea[]) if (await writeCatalog(area, files)) changed.push(`${DOC_FOLDERS[area]}/${CATALOG_FILE}`);
+		setState("treeVersion", (v) => v + 1);
+		notify(changed.length ? `Updated ${changed.join(", ")}.` : "Every catalog already says what its folder holds.");
+	} catch (e: any) {
+		notify(String(e?.message ?? e), "error");
+	}
+}
+
+/** Writes the file manifest afresh from the folder: what is new, what has changed, what has gone. A person's status and notes are kept. */
+export async function updateManifest() {
+	if (!ready()) return;
+	const path = joinPath(areaFolder("registries"), REGISTRIES.find((r) => r.id === "files")!.file);
+	try {
+		const own = relativeTo(root(), path).split("\\").join("/");
+		const files = (await backend.manifest()).filter((file) => file.path !== own);
+		const before = await current(path);
+		const change = mergeManifest(before, files);
+		if (before !== change.text) await put(path, change.text, before !== null);
+		await writeCatalog("registries", await backend.docs());
+		setState("treeVersion", (v) => v + 1);
+		notify(manifestSummary(change));
+		await openFile(path);
+	} catch (e: any) {
+		notify(String(e?.message ?? e), "error");
+	}
+}
