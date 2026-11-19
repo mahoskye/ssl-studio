@@ -412,6 +412,11 @@ From a second look:
   closer look, the larger script's kept before the smaller's, as a map
   shows its names. The whole of the unfolded demo, at 10%, names 24 of its
   33 scripts and folders.
+- **Far out, a chart names its stages.** Below 60% a step's words cannot
+  be read: they are left out, and each stage is named across its middle,
+  with where the chart starts and ends, at a size that reads; a name that
+  would lie over another waits for a closer look. A click on a stage there
+  brings the view in on it.
 - **A procedure found from the list is fitted in the graph.** Finding one
   while the list was showing laid out two pictures, and the view was fitted
   to the wrong one: the focus came up small, cut off at the top, with a

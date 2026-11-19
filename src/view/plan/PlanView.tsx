@@ -12,7 +12,7 @@ import { Menu, type MenuItem } from "../Menu";
 import { pictureName, savePicture } from "../graph/picture";
 import { dirName, joinPath, relativeTo } from "../../shared/paths";
 import { regionColor } from "../editor/regions";
-import { canvasMeasure, centredOn, clearOf, fitView, legibleScale, mapArea, nearest, outOfSight, recall, remember, reveal, roundedPath, zoomAt, type Measure, type Point } from "../graph/canvas";
+import { canvasMeasure, centredOn, clearLabels, clearOf, fitView, legibleScale, mapArea, nearest, outOfSight, recall, remember, reveal, roundedPath, zoomAt, type Measure, type Point } from "../graph/canvas";
 import { diagnostics } from "../lsp/session";
 import { documents, notify, setState, state, applyText } from "../state";
 import { nodeStatuses } from "./build";
@@ -38,6 +38,13 @@ const LABEL_FONT_PX = 12;
 const FIT_FLOOR = legibleScale(NODE_FONT_PX);
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 2.5;
+/** Zoomed out past this a step's words cannot be read: the chart is of its stages, named at a size that can. */
+const FAR_UNDER = 0.6;
+/** The size, on screen, of a name in that far chart. */
+const FAR_NAME_PX = 11;
+/** The first words of a sentence, up to about thirty letters: enough to know a step by, over a chart seen from far off. */
+const shortly = (text: string, most = 30) => (text.length <= most ? text : `${text.slice(0, text.lastIndexOf(" ", most) > 10 ? text.lastIndexOf(" ", most) : most).replace(/[,;:.]$/, "")}…`);
+const measureName = canvasMeasure(`600 ${FAR_NAME_PX}px system-ui, sans-serif`, FAR_NAME_PX);
 /** The assistant's width (.plan-assist), and the least the chart keeps beside it before the assistant goes below. */
 const ASSIST_WIDTH = 280;
 const MIN_CHART_WIDTH = 360;
@@ -303,6 +310,46 @@ export function PlanView(props: { path: string; group: number }) {
 		fittedView = fitView(l, canvas.getBoundingClientRect(), { floor: MIN_ZOOM });
 		fittedWhole = true;
 		setView(fittedView);
+	};
+	/** Zoomed far out: the steps' words give way to the names of the stages, drawn to be read. */
+	const far = () => view().scale < FAR_UNDER;
+	/** The zoom of the far chart, or 0 while the view is nearer: moving the chart changes nothing a name depends on. */
+	const farScale = createMemo(() => (far() ? view().scale : 0));
+	/**
+	 * The names of the far chart, as a map shows its names: each stage across its middle, and where
+	 * it starts and ends, all large enough to read; one that would lie over another waits for a
+	 * closer look, a stage before a step and the larger before the smaller.
+	 */
+	const farNames = createMemo(() => {
+		const scale = farScale();
+		const l = layout();
+		if (!scale || !l) return [];
+		const size = FAR_NAME_PX / scale;
+		return clearLabels(
+			l.boxes
+				.filter((b) => b.group || b.node?.kind === "start" || b.node?.kind === "end")
+				.map((b) => {
+					// A stage has a name; where the chart starts and ends has a sentence, which is cut short.
+					const words = b.group ?? shortly(b.node!.text.trim());
+					const width = measureName(words) / scale;
+					const x = Math.max(0, Math.min(b.x + b.width / 2 - width / 2, l.width - width));
+					const y = Math.max(0, Math.min(b.y + b.height / 2 - size * 0.6, l.height - size * 1.2));
+					return { item: { words, stage: Boolean(b.group) }, x, y, width, height: size * 1.2, weight: (b.group ? 1e15 : 0) + b.width * b.height };
+				}),
+			size * 0.3,
+		).map((name) => ({ ...name, size }));
+	});
+	/** Far out, a click goes to what is clicked: the view comes in on that stage, or that step, as large as fits and its words can be read. */
+	const comeIn = (at: Point) => {
+		const l = layout();
+		if (!l || !canvas) return false;
+		const holds = (b: Box) => at.x >= b.x && at.x <= b.x + b.width && at.y >= b.y && at.y <= b.y + b.height;
+		const to = l.boxes.find((b) => b.group && holds(b)) ?? l.boxes.find((b) => b.node && holds(b));
+		if (!to) return false;
+		const box = canvas.getBoundingClientRect();
+		const scale = Math.max(FIT_FLOOR, Math.min(1, (box.width - 80) / to.width, (box.height - 80) / to.height));
+		setView({ scale, x: box.width / 2 - (to.x + to.width / 2) * scale, y: box.height / 2 - (to.y + to.height / 2) * scale });
+		return true;
 	};
 	/** Zooms about a point of the canvas: the pointer, or its middle for the keys. */
 	const zoomBy = (factor: number, at?: Point) => {
@@ -601,6 +648,8 @@ export function PlanView(props: { path: string; group: number }) {
 	const groupName = () => plan()?.groups.find((g) => g.id === selectedNode()?.group)?.name ?? "";
 
 	let dragging: { x: number; y: number; moved: boolean } | null = null;
+	/** How far the pointer has moved the chart since it was pressed. */
+	let panned = 0;
 
 	return (
 		<div class="plan">
@@ -693,7 +742,7 @@ export function PlanView(props: { path: string; group: number }) {
 					role="application"
 					aria-label="Plan chart. The arrow keys move between nodes; the question mark key lists the rest."
 					aria-describedby={keysOpen() ? keysId : undefined}
-					classList={{ linking: Boolean(linking()), pathing: Boolean(onPath()) }}
+					classList={{ linking: Boolean(linking()), pathing: Boolean(onPath()), far: far() }}
 					onKeyDown={onKey}
 					onWheel={(e) => {
 						e.preventDefault();
@@ -703,11 +752,13 @@ export function PlanView(props: { path: string; group: number }) {
 					onMouseDown={(e) => {
 						if (e.target instanceof Element && e.target.closest(".plan-edit, .plan-keys")) return;
 						dragging = { x: e.clientX, y: e.clientY, moved: false };
+						panned = 0;
 					}}
 					onMouseMove={(e) => {
 						if (!dragging) return;
 						const v = view();
 						if (Math.abs(e.clientX - dragging.x) + Math.abs(e.clientY - dragging.y) > 2) dragging.moved = true;
+						panned += Math.abs(e.clientX - dragging.x) + Math.abs(e.clientY - dragging.y);
 						setView({ ...v, x: v.x + e.clientX - dragging.x, y: v.y + e.clientY - dragging.y });
 						dragging = { ...dragging, x: e.clientX, y: e.clientY };
 					}}
@@ -725,7 +776,22 @@ export function PlanView(props: { path: string; group: number }) {
 						refocus();
 					}}
 				>
-					<svg class="graph-canvas" onClick={(e) => {
+					<svg
+						class="graph-canvas"
+						ref={(el) =>
+							// Far out, a click comes in on what it is on, before it can select a step nobody could read.
+							el.addEventListener(
+								"click",
+								(e) => {
+									if (!far() || panned > 3 || linking()) return;
+									const box = el.getBoundingClientRect();
+									const v = view();
+									if (comeIn({ x: (e.clientX - box.left - v.x) / v.scale, y: (e.clientY - box.top - v.y) / v.scale })) e.stopPropagation();
+								},
+								true,
+							)
+						}
+						onClick={(e) => {
 						if (e.target === e.currentTarget && !linking()) select(null);
 						refocus();
 					}}>
@@ -842,6 +908,18 @@ export function PlanView(props: { path: string; group: number }) {
 											);
 										}}
 									</For>
+									{/* Far out, the stages' names over the chart, at a size that reads. */}
+									<Show when={far()}>
+										<g class="g-far" aria-hidden="true">
+											<For each={farNames()}>
+												{(name) => (
+													<text classList={{ folder: !name.item.stage }} x={name.x + name.width / 2} y={name.y + name.size * 0.95} text-anchor="middle" style={{ "font-size": `${name.size}px`, "stroke-width": `${name.size * 0.28}px` }}>
+														{name.item.words}
+													</text>
+												)}
+											</For>
+										</g>
+									</Show>
 								</g>
 							)}
 						</Show>
