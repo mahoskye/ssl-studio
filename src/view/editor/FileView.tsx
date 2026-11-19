@@ -24,7 +24,7 @@ export function FileView(props: { path: string }) {
 				fallback={
 					<div class="file-note">
 						<p class="file-what">{name()} is not text.</p>
-						<p>It is {sizeText(file()?.size ?? 0)} of bytes, so it is not shown here, and nothing here changes it. Open it with the program it belongs to.</p>
+						<p>It holds {sizeText(file()?.size ?? 0)} that do not read as text, so it is not shown here, and nothing here changes it. Open it with the program it belongs to.</p>
 					</div>
 				}
 			>

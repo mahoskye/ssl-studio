@@ -3,13 +3,16 @@
 Every row of [the audit](VSCODE-AUDIT.md) was tried again in the running
 app when the building was done (2026-11-19), in an instance of its own on
 a scratch copy of the demo project, made a git repository for the
-purpose. This says, row by row, what was seen. Two rows were wrong and
-were corrected: the bottom panel has two tabs, and Settings' search does
-find a command by its key.
+purpose. This says, row by row, what was seen. Three rows were wrong and
+were corrected: the bottom panel has two tabs, Settings' search does
+find a command by its key, and the file watching misses some changes
+made by other programs.
 
 "The list" is the app's command list (84 commands, read in full). "The
-editor's list" is the text editor's own (F1), asked term by term. Where a
-row was seen while it was built and not tried again, it says so.
+editor's list" is the text editor's own (F1), asked term by term. The rows
+first left untried (a conflict, a PDF and a Word file, TOML, the editor's
+right-click menu, the Review view) were tried in a last pass, on files
+and a conflict made for it.
 
 ## Window
 
@@ -46,7 +49,7 @@ row was seen while it was built and not tried again, it says so.
 
 | Row | Seen |
 | --- | --- |
-| Editor menu | "Ask the Agent About This…" is in the editor's list; the menu was seen when step 2 was built |
+| Editor menu | A right-click showed sixteen entries, the app's five among them, in all four layouts |
 | Tab menu | Opened on a pinned tab in all four layouts: eight entries read |
 | Explorer menu | Cut, Copy, Copy path, Copy path in the project, Rename, Move to trash read from a file's row |
 | Docs row menu | Open, Set to open, Set to done, Set to blocked, Set to dropped read from a ticket's row |
@@ -113,7 +116,7 @@ row was seen while it was built and not tried again, it says so.
 | --- | --- |
 | Tree, new, rename | F2 on a row asked for a new name; Delete asked before the trash, with Cancel the default |
 | Follows the editor | The open file's row was the one marked |
-| File watching | A file made outside the app appeared in the tree |
+| File watching | A file made outside appeared in the tree; a file git put back went unseen until a restart |
 | Copy path | Two commands in the list, one with Alt+Shift+C; not run again, since it writes the clipboard |
 | Copy, cut, paste | Ctrl+C and Ctrl+V made "Holidays copy.ds"; Ctrl+X dimmed it; Ctrl+V in Legacy moved it |
 | Drag to move | A row dragged with the pointer asked "Move … into …?", and moved on yes |
@@ -148,7 +151,7 @@ row was seen while it was built and not tried again, it says so.
 | Switch branch | Nothing in the list |
 | Push and pull | Nothing in the list |
 | Blame, timeline | Nothing in the list; Local history lists a file's snapshots |
-| Merge editor | Nothing in the list; no conflict was made to see how one is listed |
+| Merge editor | A conflict was made: its row shows “!”, has no discard, and Commit says to settle it |
 
 ## Run and terminal
 
@@ -182,7 +185,7 @@ row was seen while it was built and not tried again, it says so.
 | --- | --- |
 | Markdown preview | A ticket showed its front matter as a header, and three ticked boxes |
 | CSV as a table | files.csv showed five headed columns and 36 rows |
-| JSON, TOML, XML | JSON was coloured and outlined; a broken XML file raised a problem. TOML was not opened again |
+| JSON, TOML, XML | JSON and TOML were coloured and outlined; a key set twice and a broken XML file were reported |
 | Line ends kept | crlf.sql read CRLF in the status bar; it was saved with them at the first check |
 | Encoding kept | ansi.sql read Windows-1252 in the status bar |
 | Images | picture.png was drawn, with "64 × 40 pixels · 146 bytes" |
@@ -192,7 +195,7 @@ row was seen while it was built and not tried again, it says so.
 | YAML | Coloured; a broken YAML file raised no problem |
 | SQL | Coloured; "Format document" changed nothing |
 | Language picker | The language in the status bar is text, not a button |
-| PDF, Office files | Not tried: there is none in the scratch copy |
+| PDF, Office files | A PDF and a Word file each opened as “is not text”; the status bar said Not text |
 
 ## Accessibility
 
@@ -211,6 +214,6 @@ row was seen while it was built and not tried again, it says so.
 | Row | Seen |
 | --- | --- |
 | Chat | The Agent panel opened with its box; opencode was not started and nothing was sent |
-| Agent edits as diff | The Review view showed a comparison; no agent's edit was made, since that runs a model |
+| Agent edits as diff | The Review view compared a snapshot, with Restore and Reject; no agent ran, as that needs a model |
 | Inline suggestions | Nothing appeared while typing; "Trigger Inline Suggestion" is listed, with nothing to give |
 | Extensions | No such panel, and nothing in the list |

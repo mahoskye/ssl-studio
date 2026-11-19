@@ -14,7 +14,7 @@ or by opening a file made for it (an image, a file of bytes, a file with
 Windows line ends, a file in the one-byte Windows encoding). Where a
 feature was plainly not there (no menu bar, nothing that runs git), that
 is what was seen. The VS Code side is from knowledge of the product.
-[What could not be checked](#not-checked) is listed at the end, and
+[What could not be checked](#looked-at-and-not-checked) is listed at the end, and
 [what was seen for each row](VSCODE-AUDIT-CHECKED.md) is a list of its
 own: every row was tried again when the building was done.
 
@@ -140,7 +140,7 @@ of the text editor, and nothing of its own.
 | --- | --- | --- | --- |
 | Tree, new, rename | Yes | Have | And move to trash; F2 and Delete work on a row |
 | Follows the editor | Yes | Have | The open file's row is marked |
-| File watching | Yes | Have | The tree follows the disk |
+| File watching | Partly | Later | Misses a file git puts back and later changes to a new file; needs a check of its own |
 | Copy path | Yes | Bring | Built: whole (Alt+Shift+C) and from the project's folder, as commands |
 | Copy, cut, paste | Yes | Bring | Built: Ctrl+C, Ctrl+X, Ctrl+V and the row's menu; a copy beside itself is "… copy" |
 | Drag to move | Yes | Bring | Built: a row onto a folder, or onto the tree for the workspace folder; it asks first |
@@ -501,14 +501,24 @@ runs them on Windows and macOS too).
 ## What the reviews found
 
 Three reviews were made by a reader who was given the commits and not
-the author's conclusions: after steps 1 to 3, after steps 4 to 6, and
-after steps 7 and 8. What each confirmed was fixed before the next step;
-the fixes are the commits named "defects found by a review".
+the author's conclusions: after step 3 (of steps 1 to 3), after step 6
+(of steps 4 to 6), and after step 8 (of steps 7 and 8). So a review came
+after every three, three and two steps, and none came between the steps
+of a group. What each confirmed was fixed before the next step; the
+fixes are the commits named "defects found by a review".
 
 Every finding of the three reviews, with what was done about it and in
 which commit, is in [a list of its own](VSCODE-AUDIT-REVIEWS.md). In
 short: of the last review's 42 findings, 33 were fixed, 5 were fixed in
 part and say what was left, and 4 were left, each with its reason.
+
+When the building was done, each fix was shown working by itself: in the
+running app where it can be seen there, by its named test where it
+cannot. That list says which, fix by fix. Showing them found two more
+defects, both fixed: a file that was only peeked at kept its old text
+after it was removed by another program, and gave that text to a file
+renamed onto its path; and a small file of bytes was said to be "4 bytes
+of bytes".
 
 ## Why not an extension
 
@@ -521,18 +531,34 @@ switch to an extension, I worry about losing what we have built."
 One rule keeps that door open at no cost: nothing in `src/shared` depends
 on the shell. It holds today.
 
-## Not checked
+## Looked at, and not checked
 
 Each step was looked at in the light theme at 720 wide and the dark theme
-at 1440 wide as it was built. At the end, everything the steps added was
-looked at again the other way round, in the dark theme at 720 wide and
-the light theme at 1440 wide: the menu bar with an entry that cannot
-run, the quick pick's list of what can be typed, a pinned tab and its
-menu, a cut row and a drop mark in the Explorer, a picture, the status
-bar's encoding and line ends, the replace preview with its file boxes,
-the Source control panel with a row's own steps, a comparison, and the
-margin's marks. A pinned tab's menu was seen in all four. The menu bar
-was also seen with no folder open, where each entry says what it needs.
+at 1440 wide as it was built. When the building was done, every step was
+looked at again in all four: 720 and 1440 wide, each in the light and the
+dark theme. In none of them did anything run off the window, a menu fall
+outside it, or text become unreadable.
+
+| Step | Seen in all four |
+| --- | --- |
+| 1, small habits | Word wrap on, with a long line wrapped at 720; the search's three switches |
+| 2, menus | The editor's menu with the app's five entries; a pinned tab's menu, in the pass before |
+| 3, the menu bar | The File menu open from Alt+F, inside the window, over the Explorer |
+| 4, finding | The quick pick's list of what can be typed, from "?" |
+| 5, files by hand | A cut row in the Explorer, its label saying it is cut and waiting to be pasted |
+| 6, not text | A picture with its size; the status bar saying Picture, or UTF-8 and LF for a text |
+| 7, replace | Old and new words in each result, the count of results, "Replace all" |
+| 8, source control | The panel with its rows' buttons, a comparison, the margin's marks |
+
+At 720 wide a comparison is one column, the old lines above the new; at
+1440 it is two. In the pictures at 1440 the cut row lay under the open
+File menu, and was read from the page; it was seen by eye in all four in
+the passes before. The menu bar was also seen with no folder open, where
+each entry says what it needs. A drop mark between tabs and the search's
+file boxes were seen as their steps were built and in the second look,
+not in this last one.
+
+Not checked:
 
 - A screen reader was not run against the app.
 - The desktop app's own window (its title bar, its system file dialog)
@@ -540,5 +566,17 @@ was also seen with no folder open, where each entry says what it needs.
   same view.
 - Column selection by dragging: the keys that add cursors were tried, the
   drag was not.
+- An agent's edit in the Review view: the view was seen with a local
+  history snapshot, and no agent was run, since the instance used for the
+  checks can reach paid models.
 - VS Code features with no row: remote development, notebooks, live
   share, ports, profiles' details. None looked worth one.
+
+Found and not fixed: the file watching, which is older than this work,
+misses some changes made by other programs. On Linux with the runtime in
+use (Bun 1.3.3), a file that `git checkout` puts back is not reported,
+and neither is a later change to a file made after the app started. The
+tree and an open tab then show the old state, and the language server
+does not learn of a script that came back, until the folder is opened
+again. The row is now Partly, for later: it needs a check that does not
+rest on the runtime's watching alone.

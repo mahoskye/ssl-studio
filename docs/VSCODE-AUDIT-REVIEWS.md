@@ -153,3 +153,110 @@ Fixed in `d55c814` or `801e1cc`, as named.
 - **G2. ADRs 0021 and 0022 overstated.** Fixed, `d55c814`.
 - **G3. One fix commit was looked at in one layout only.** Fixed,
   `801e1cc`: everything added was looked at again in the other two.
+
+## Each fix, shown working
+
+When the building was done, each fix above was shown by itself
+(2026-11-19): in the running app, in an instance of its own on a scratch
+copy of the demo project, or by its test where the app cannot show it.
+"Test" names a test that passes in `bun test`.
+
+### The first review
+
+- **1, 3, 8.** With the keyboard in the Search box, the Selection menu
+  offered "Select all" and marked the rest "For the code: the keyboard is
+  in a text box"; Enter on one of those did nothing; "Select all"
+  selected the box's twelve characters and gave the box the keyboard back.
+- **2.** A pinned tab with a typed space read "pinned, unsaved changes"
+  and showed its dot; after undo, "pinned".
+- **4.** "Close all" on the right group's tab closed that group's one tab
+  and left the left group's twenty.
+- **6.** Tests: "an expression that reads only the older way is still
+  searched", "an expression that cannot be read at all says so".
+- **10.** Test: "a walk through the tabs … is over when a tab of it was
+  closed".
+- **5, 7, 9, 11.** In the code and the documents; nothing to run.
+
+### The second review
+
+- **1.** Seen when it was fixed, as said above.
+- **2.** A one-line file with Windows line ends, changed to LF from the
+  status bar, read CRLF again after "Revert file".
+- **3.** A file with unsaved edits was renamed: its tab took the new
+  name, kept "unsaved changes", and no alarm was raised.
+- **4.** A script was renamed with its tab closed; "go to definition"
+  from a caller in another script then opened it under its new name.
+- **5.** With a split, "Go back" and "Go forward" went between two files
+  inside the group that held them: six tabs and two before, and after.
+- **6.** A file of bytes showed "is not text" and "Not text" in the
+  status bar. Tests: "other bytes are not read as text either".
+- **7.** Test: "a text file with a zero byte typed into it can still be
+  saved by the editor that holds it".
+- **8.** A file with unsaved edits was removed by another program; a
+  rename of another file onto its name was refused: "is still open in a
+  tab from before it was removed".
+
+### The last review
+
+- **A1, A2, A3.** Tests: "in a workspace that is a folder inside the
+  repository, each step acts on the file asked for", "a file's name is
+  only a name", "what is staged above the workspace's folder is counted".
+- **A4.** The discard dialog said "Where it is text, the file as it is
+  now on disk is kept in its local history", for a text file and for one
+  of bytes.
+- **A5a.** Staging a file with unsaved edits said "has unsaved changes:
+  what is staged is what is saved".
+- **A5c, A5d.** In the code: a hundred paths to a command, 500 rows to a
+  list. Not run with that many files.
+- **A5f.** Enter on a changed file of bytes said "is not text in git:
+  there is nothing of it to compare"; on a conflict, that there is no one
+  earlier text to show.
+- **A5g.** A discard of a file open in a tab put its text back with no
+  "changed on disk".
+- **A5h, A5i, G1, G2.** In the documents and the code; nothing to run.
+- **B1.** After a replace in three files, each had two new copies in
+  local history: as it was, and as it became.
+- **B2.** A file was given one more match after the search; the replace
+  said "Replaced 7 matches in 3 files. 6 matches were listed". A line of
+  ten thousand characters showed "…" and no replacement.
+- **B3.** The file with no tab was changed on disk and got no tab.
+- **B4.** Test: "the walk steps past the whole character".
+- **B5.** A script that may be run still could be after the replace
+  (mode 755). Test: "a file written again keeps whether it may be run".
+- **C1.** A script was peeked at, so read with no tab, then removed by
+  another program; a file renamed onto its name was let through.
+- **C2.** An empty file open in a tab was turned into four bytes by
+  another program: the tab showed "is not text", and nothing was written.
+- **C3.** A snapshot was compared from line 30; on closing, the cursor
+  was at line 30.
+- **C4b.** As the second review's 2: the file had one line.
+- **D1.** A commit message typed, another panel shown, and Source
+  control shown again: the message was there.
+- **D2.** The margin's marks were there in all four layouts. That they
+  no longer blink between git's answers was not measured.
+- **D4.** The words searched for, the replacement and the results were
+  there after the Explorer was shown and Search shown again.
+- **D5.** A replace in a file with unsaved edits left a note that was
+  still there eight seconds on, with "Save all".
+- **D6, D7.** In the code; a replace that throws was not provoked.
+- **E1.** A result reads "tallyho becomes tallyhey".
+- **E2, E3.** Each row has its steps as buttons with names ("Stage
+  long.txt"); the count "1 staged, 4 not staged" is a status.
+- **E4.** The status bar's label: "Branch main, 3 changed files. Show
+  Source control."
+- **F1, F2.** The tests pass on Linux, macOS and Windows in CI.
+
+### Found while showing them
+
+- **A file only peeked at kept its text past its file.** With C1 fixed, a
+  rename onto the path of a peeked script that another program had
+  removed was let through, and the renamed file's tab showed the old
+  script: an edit and a save there would have written it over the file.
+  Fixed: a document that was only read is let go when its file is
+  removed, by the app or by another program, and before a move lands on
+  its path. Seen: the same steps then showed the renamed file's own text.
+- **"4 bytes of bytes".** The not-text view's sentence, for a file under
+  a kilobyte. Fixed, and seen: "It holds 4 bytes that do not read as
+  text".
+- **The file watching misses some changes.** Not fixed: see
+  [the audit](VSCODE-AUDIT.md#looked-at-and-not-checked).

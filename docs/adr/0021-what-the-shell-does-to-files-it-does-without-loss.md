@@ -46,6 +46,10 @@ Under [ADR 0009](0009-nothing-is-lost-or-destroyed-without-a-say.md),
   the editor, where undo takes it back as well.
 - **A file with unsaved changes is never saved by the way.** A replace
   changes it in the editor and leaves it unsaved, and says so.
+- **A file's text is never another file's.** What the app read of a file
+  without opening a tab on it (a definition peeked at, a search's
+  results) is let go when that file is removed or moved onto, so that
+  what comes to be at its path is shown with its own text.
 
 ## Consequences
 
@@ -58,3 +62,6 @@ Under [ADR 0009](0009-nothing-is-lost-or-destroyed-without-a-say.md),
   writes.
 - Copying a file between two workspaces, or in from the system's file
   manager, is not done by cut and paste here.
+- All of this rests on the app hearing of changes made by other
+  programs, and it does not hear of all of them: see
+  [the audit](../VSCODE-AUDIT.md#looked-at-and-not-checked).

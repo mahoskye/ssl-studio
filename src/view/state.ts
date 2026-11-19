@@ -507,6 +507,18 @@ export const pathChanges = {
 	gone: new Set<(gone: (path: string) => boolean) => void>(),
 };
 
+/**
+ * Lets go of a document that was only read (a search's results, a definition peeked at): it has no tab, so nobody
+ * is shown it and nothing else would let it go. One with a tab, or with edits nobody saved, is left alone. Kept
+ * past its file, it would be taken for the text of whatever comes to be at that path next.
+ */
+function letGoIfOnlyRead(path: string) {
+	const doc = docs.get(path);
+	if (!doc || state.dirty[path] || state.groups.some((g) => g.tabs.includes(path))) return;
+	docs.delete(path);
+	doc.model.dispose();
+}
+
 /** A file or folder was renamed in the Explorer: its open tabs follow it, with their edits. */
 export function fileRenamed(oldPath: string, newPath: string) {
 	oldPath = canonical(oldPath);
@@ -518,6 +530,8 @@ export function fileRenamed(oldPath: string, newPath: string) {
 		const dirty = Boolean(state.dirty[path]);
 		const text = doc.model.getValue();
 		docs.delete(path);
+		// What was read at the new path before its file went is not this file's text.
+		letGoIfOnlyRead(target);
 		const moved = attach(target, text, { text: doc.savedText, mtime: doc.mtime });
 		moved.encoding = doc.encoding;
 		moved.binary = doc.binary;
@@ -582,12 +596,7 @@ export function fileRemoved(removed: string) {
 			continue;
 		}
 		state.groups.forEach((g, i) => g.tabs.includes(path) && void closeTab(path, i, { discard: true, pinned: true }));
-		// A file that was read without a tab (a search's results, a definition) is let go here: nothing else would.
-		if (!state.groups.some((g) => g.tabs.includes(path))) {
-			const doc = docs.get(path);
-			docs.delete(path);
-			doc?.model.dispose();
-		}
+		letGoIfOnlyRead(path);
 	}
 }
 
@@ -793,7 +802,9 @@ export async function fileChangedOnDisk(changed: string) {
 		file = await backend.read(path);
 	} catch {
 		told(false);
-		return; // Deleted or moved: keep the open copy.
+		// Deleted or moved: a copy open in a tab is kept, and one that was only read is not.
+		letGoIfOnlyRead(path);
+		return;
 	}
 	told(true);
 	if (!doc) return;
