@@ -224,6 +224,8 @@ export async function restoreTabs() {
 			}
 			// The folder may have been changed for another while these were read.
 			if (state.workspace?.root !== root) return;
+			// And a file may have gone while the others were read: it is no longer there to have a tab.
+			for (const path of [...tabs]) if (!docs.has(path)) tabs.splice(tabs.indexOf(path), 1);
 			if (!tabs.length && index > 0) continue;
 			const active = group.active && tabs.includes(canonical(group.active)) ? canonical(group.active) : (tabs[tabs.length - 1] ?? null);
 			setState("groups", (groups) => {
@@ -321,6 +323,9 @@ export const takeReveal = (path: string) => {
 
 export async function openFile(path: string, options: { group?: number; reveal?: Reveal } = {}) {
 	path = canonical(path);
+	// What was only read (a definition peeked at) had no tab to keep it true, and the file may have changed, gone, or
+	// been made anew since: it is looked at again before it is shown.
+	if (docs.has(path) && !state.dirty[path] && !state.groups.some((g) => g.tabs.includes(path))) await fileChangedOnDisk(path);
 	const doc = await guarded(() => loadDoc(path));
 	if (!doc) return;
 	const group = options.group ?? state.activeGroup;
@@ -517,6 +522,7 @@ function letGoIfOnlyRead(path: string) {
 	if (!doc || state.dirty[path] || state.groups.some((g) => g.tabs.includes(path))) return;
 	docs.delete(path);
 	doc.model.dispose();
+	if (state.conflicts[path]) setState("conflicts", path, undefined!);
 }
 
 /** A file or folder was renamed in the Explorer: its open tabs follow it, with their edits. */
@@ -524,14 +530,14 @@ export function fileRenamed(oldPath: string, newPath: string) {
 	oldPath = canonical(oldPath);
 	newPath = canonical(newPath);
 	pathChanges.renamed.forEach((told) => told((path) => (path === oldPath ? newPath : isInside(oldPath, path) ? newPath + path.slice(oldPath.length) : path)));
+	// What was only read at the new path, or under it, before its file went is not what has come to be there.
+	for (const path of [...docs.keys()]) if (path === newPath || isInside(newPath, path)) letGoIfOnlyRead(path);
 	for (const [path, doc] of [...docs]) {
 		if (path !== oldPath && !isInside(oldPath, path)) continue;
 		const target = path === oldPath ? newPath : newPath + path.slice(oldPath.length);
 		const dirty = Boolean(state.dirty[path]);
 		const text = doc.model.getValue();
 		docs.delete(path);
-		// What was read at the new path before its file went is not this file's text.
-		letGoIfOnlyRead(target);
 		const moved = attach(target, text, { text: doc.savedText, mtime: doc.mtime });
 		moved.encoding = doc.encoding;
 		moved.binary = doc.binary;
@@ -576,12 +582,15 @@ export async function scriptsCameTo(to: string, from?: string, kind: "file" | "d
 }
 
 /**
- * Whether a tab is still open on a path, or under it: a file that is gone from disk and kept for its unsaved
- * edits. A file that was only read (for a search's results, a definition) has no tab, and does not count.
+ * What is still held at a path, or under it, of a file that is gone from disk: a tab, or edits nobody saved in a
+ * document that has no tab (a rename across files changes scripts that are not open). A file moved there would be
+ * taken for it. A file that was only read (for a search's results, a definition) is neither, and does not count.
  */
-export function openAt(path: string): boolean {
+export function heldAt(path: string): "tab" | "unsaved" | null {
 	const at = canonical(path);
-	return state.groups.some((group) => group.tabs.some((tab) => tab === at || isInside(at, tab)));
+	const there = (other: string) => other === at || isInside(at, other);
+	if (state.groups.some((group) => group.tabs.some(there))) return "tab";
+	return [...docs.keys()].some((other) => there(other) && state.dirty[other]) ? "unsaved" : null;
 }
 
 /** A file or folder went to the trash: its tabs close, except those holding edits nobody saved. */
@@ -595,7 +604,8 @@ export function fileRemoved(removed: string) {
 			notify(`${baseName(path)} was moved to the trash. Its unsaved edits are still open: save to put the file back.`, "error");
 			continue;
 		}
-		state.groups.forEach((g, i) => g.tabs.includes(path) && void closeTab(path, i, { discard: true, pinned: true }));
+		// From the last group back: a group left empty goes, and those after it move up a place.
+		for (let i = state.groups.length - 1; i >= 0; i--) if (state.groups[i]?.tabs.includes(path)) void closeTab(path, i, { discard: true, pinned: true });
 		letGoIfOnlyRead(path);
 	}
 }

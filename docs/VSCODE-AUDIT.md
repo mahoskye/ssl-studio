@@ -507,7 +507,7 @@ after every three, three and two steps, and none came between the steps
 of a group. What each confirmed was fixed before the next step; the
 fixes are the commits named "defects found by a review".
 
-Every finding of the three reviews, with what was done about it and in
+Every finding of the reviews, with what was done about it and in
 which commit, is in [a list of its own](VSCODE-AUDIT-REVIEWS.md). In
 short: of the last review's 42 findings, 33 were fixed, 5 were fixed in
 part and say what was left, and 4 were left, each with its reason.
@@ -518,7 +518,9 @@ cannot. That list says which, fix by fix. Showing them found two more
 defects, both fixed: a file that was only peeked at kept its old text
 after it was removed by another program, and gave that text to a file
 renamed onto its path; and a small file of bytes was said to be "4 bytes
-of bytes".
+of bytes". The first of those fixes changed code after the last review,
+so a fourth review was made of it alone. It confirmed five findings, and
+all five were fixed.
 
 ## Why not an extension
 

@@ -46,7 +46,10 @@ export async function loadGraph(progress: (done: number, total: number) => void)
 				} else walk(s.children ?? [], region);
 			}
 		};
-		walk(await session.documentSymbols(model).catch(() => []));
+		const symbols = await session.documentSymbols(model).catch(() => []);
+		// The file may have gone while the server was asked, and its model with it.
+		if (model.isDisposed()) return;
+		walk(symbols);
 		scripts.push({ path, bytes: new TextEncoder().encode(model.getValue()).length, procedures });
 	});
 	const truncated = targets.length > MAX_PROCEDURES;

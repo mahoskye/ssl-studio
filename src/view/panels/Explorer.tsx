@@ -10,7 +10,7 @@ import type { Entry } from "../../shared/protocol";
 import { level } from "../../shared/houseStyle";
 import { backend } from "../backend";
 import { ask, choose } from "../dialogs";
-import { activePath, canonical, fileRemoved, fileRenamed, notify, openAt, openFile, scriptsCameTo, setState, state } from "../state";
+import { activePath, canonical, fileRemoved, fileRenamed, heldAt, notify, openFile, scriptsCameTo, setState, state } from "../state";
 import { baseName, dirName, isInside, joinPath } from "../../shared/paths";
 import { COPY, COPY_PATH, COPY_RELATIVE, CUT, folderFor, holdsRoot, menuFor, nameProblem, NEW_FILE, NEW_FOLDER, openFolders, PASTE, RENAME, retarget, TRASH, without } from "./explorerMenu";
 import { copyName, copyProblem, folderOf, moveProblem, type Clip } from "./explorerMoves";
@@ -222,12 +222,18 @@ async function trash(entry: Entry): Promise<string | null> {
 }
 
 /**
- * A path nothing is at on disk may still have a tab on it: a file that was removed, kept open for its unsaved
- * edits. Something moved there would take that tab's text for its own. Says so, and says true, when there is one.
+ * A path nothing is at on disk may still have a tab on it, or edits nobody saved: a file that was removed, kept
+ * for them. Something moved there would take that text for its own. Says so, and says true, when there is one.
  */
 function staleAt(to: string): boolean {
-	if (!openAt(to)) return false;
-	notify(`${baseName(to)} is still open in a tab from before it was removed. Close that tab first, then try again.`, "error");
+	const held = heldAt(to);
+	if (!held) return false;
+	notify(
+		held === "tab"
+			? `${baseName(to)} is still open in a tab from before it was removed. Close that tab first, then try again.`
+			: `${baseName(to)} was removed while it held changes nobody saved. “Save all” puts it back with them; then try again.`,
+		"error",
+	);
 	return true;
 }
 

@@ -48,8 +48,11 @@ Under [ADR 0009](0009-nothing-is-lost-or-destroyed-without-a-say.md),
   changes it in the editor and leaves it unsaved, and says so.
 - **A file's text is never another file's.** What the app read of a file
   without opening a tab on it (a definition peeked at, a search's
-  results) is let go when that file is removed or moved onto, so that
-  what comes to be at its path is shown with its own text.
+  results) is let go when that file is removed or moved onto, and is
+  read again before it is given a tab, so that what comes to be at its
+  path is shown with its own text. Where such a file holds edits nobody
+  saved (a rename across files makes them), a move onto its path is
+  refused until they are saved.
 
 ## Consequences
 

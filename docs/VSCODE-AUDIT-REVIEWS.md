@@ -1,7 +1,8 @@
 # What the reviews found, finding by finding
 
-Three reviews of the work on [the audit](VSCODE-AUDIT.md) were made by a
-reader who was given the commits and not the author's conclusions. This
+Four reviews of the work on [the audit](VSCODE-AUDIT.md) were made by a
+reader who was given the commits and not the author's conclusions: three
+of the build's steps, and one of the fix that the last pass made. This
 lists every finding, what was done about it, and the commit that did it.
 "Left" means not changed, with the reason.
 
@@ -260,3 +261,32 @@ copy of the demo project, or by its test where the app cannot show it.
   text".
 - **The file watching misses some changes.** Not fixed: see
   [the audit](VSCODE-AUDIT.md#looked-at-and-not-checked).
+
+## The fourth review: the fix above
+
+The fix for the file that was only peeked at changed code after the last
+review, so it was reviewed by itself (`a8c8fbf`). All five findings were
+confirmed and fixed, in the commit after it.
+
+1. **Edits nobody saved, in a file with no tab, still gave their text to
+   a file moved onto its path.** A rename across files changes scripts
+   that are not open. Fixed: such a move is refused, and says "Save all"
+   puts the file back. Seen: a procedure renamed from its caller, its
+   script removed by another program, a rename onto its name refused with
+   that note; "Save all" then wrote the script back, renamed procedure
+   and all.
+2. **"Before a move lands" held only when the moved file was open,** and
+   not for a new file or a copy. Fixed: what was only read is let go
+   before any move onto its path, and is looked at again on disk before
+   it is given a tab. Seen: a script was peeked at, changed by another
+   program, then opened: its tab showed the file as it is on disk.
+3. **A trashed file kept its tab in a second group** when the first was
+   left empty. Older than this work, in the function the fix touched.
+   Fixed: the groups are gone through from the last back. Not seen: the
+   preview cannot move a file to the trash ("only available in the app").
+4. **A "changed on disk" mark could outlive a document that was let go.**
+   Fixed: it goes with the document.
+5. **Two narrow races.** A file removed while the tabs were being read at
+   the start got a tab with nothing behind it; the call graph read a
+   script whose model had gone. Fixed: both look again first. Not seen:
+   neither can be timed by hand.
