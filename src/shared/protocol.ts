@@ -206,6 +206,13 @@ export interface BackendApi {
 	themes(): Promise<ThemeFile[]>;
 	/** Asks for a VS Code theme file and keeps a copy; null when cancelled. */
 	importTheme(): Promise<ThemeFile | null>;
+	/**
+	 * A ticket export chosen with the system's own file dialog, from anywhere on the machine: its path and its text.
+	 * Null when nothing was chosen, and where there is no such dialog (a browser tab).
+	 */
+	pickExport(): Promise<{ path: string; text: string } | null>;
+	/** A ticket export's text by a path the person named, which may be outside the workspace: where a download lands. */
+	readExport(path: string): Promise<string>;
 	/** One JSON-RPC message for the language server, unframed. */
 	lspSend(message: string): Promise<void>;
 	lspRestart(): Promise<void>;

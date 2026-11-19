@@ -30,6 +30,8 @@ demo project (`examples/due-dates`) has one of everything, invented for it.
 
 1. **Bring the tickets in.** Docs panel, ＋, "Import tickets…" reads an
    export from the ticket system: a CSV table, or the JSON its API returns.
+   In the app it asks with the system's file dialog, so the export can
+   stay where it was downloaded; in a browser tab, type its whole path.
    "New ticket…" makes one by hand. Reporter and assignee are not read. A
    sub-task is put under its parent and a story under its epic; a
    description in Jira's wiki markup, or as Jira Cloud's tree of nodes,

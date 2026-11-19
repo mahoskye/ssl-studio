@@ -1,4 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { readExport } from "../src/bun/project";
 import { parseCsv } from "../src/shared/csv";
 import { importSummary, ticketsFromJson, ticketsFromTable } from "../src/shared/ticketImport";
 import { toneOf } from "../src/shared/projectDocs";
@@ -173,5 +177,21 @@ describe("wiki markup as Markdown", () => {
 	});
 	test("what it does not know, and every word, is left as it was", () => {
 		expect(wikiToMarkdown("A plain sentence, with *stars* and _lines_ and {a brace}.")).toBe("A plain sentence, with *stars* and _lines_ and {a brace}.");
+	});
+});
+
+describe("an export read from where it was downloaded", () => {
+	test("is a table or JSON at a whole path, read without its byte-order mark", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "ssl-studio-export-"));
+		try {
+			writeFileSync(join(dir, "export.csv"), "\uFEFFIssue key,Summary\nLAB-1,One\n");
+			expect(await readExport(join(dir, "export.csv"))).toBe("Issue key,Summary\nLAB-1,One\n");
+			writeFileSync(join(dir, "notes.txt"), "not an export");
+			await expect(readExport(join(dir, "notes.txt"))).rejects.toThrow("An export is a .csv, .tsv or .json file.");
+			await expect(readExport(join(dir, "gone.json"))).rejects.toThrow("is not there.");
+			await expect(readExport("export.csv")).rejects.toThrow("is not a whole path.");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });

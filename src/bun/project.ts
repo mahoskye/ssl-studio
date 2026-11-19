@@ -534,3 +534,22 @@ export function yamlProblem(text: string): { message: string; line: number } | n
 	return { message: `${YAML_WORDS.find(([pattern]) => pattern.test(said))?.[1] ?? `${said}.`} The reader stopped at or near this line.`, line };
 }
 
+/** The kinds of file a ticket system exports, as a file dialog takes them. */
+export const EXPORT_TYPES = "csv,tsv,json";
+/** An export larger than this is not read. */
+const EXPORT_BYTES = 20 * 1024 * 1024;
+
+/**
+ * The text of a ticket export at a path the person named: anywhere on the
+ * machine, since an export is downloaded and not written in the project.
+ * Only a table or JSON, and only of a size worth reading.
+ */
+export async function readExport(path: string): Promise<string> {
+	if (!/\.(csv|tsv|json)$/i.test(path)) throw new Error("An export is a .csv, .tsv or .json file.");
+	if (!isAbsolute(path)) throw new Error(`${path} is not a whole path.`);
+	const file = Bun.file(path);
+	if (!(await file.exists())) throw new Error(`${path} is not there.`);
+	if (file.size > EXPORT_BYTES) throw new Error(`${path} is too large to read here: more than 20 MB.`);
+	return (await file.text()).replace(/^\uFEFF/, "");
+}
+

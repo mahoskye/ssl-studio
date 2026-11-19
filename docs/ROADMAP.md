@@ -507,6 +507,12 @@ the work comes from ([ADR 0012](adr/0012-a-projects-work-is-written-down.md)).
   when the row has a parent column that is empty; and the description,
   which is in Jira's wiki markup and read as headings and stray braces. A
   ticket read from the API also keeps the address a person opens for it.
+- **An export is read from where it was downloaded.** The import asked
+  for a path inside the project, so a download had to be copied in first.
+  In the app it now asks with the system's own file dialog; a whole path
+  typed in the box is read from anywhere. The dialog itself has not been
+  seen: neither the preview nor the self-test can open one. It is the
+  dialog "Import theme" already uses, given other kinds of file.
 - **And against what Jira Cloud gives out.** A public Jira Cloud site's
   search API was read for the kinds of node a description holds there: it
   is a tree, not text. The reader took its words and dropped its shape:

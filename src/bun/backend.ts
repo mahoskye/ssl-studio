@@ -5,7 +5,7 @@ import { statSync } from "node:fs";
 import type { BackendApi, BackendEvents, Info, LspState, Workspace } from "../shared/protocol";
 import { History } from "./history";
 import { LspProcess } from "./lsp";
-import { fileManifest, linksTo, listDocs, readProject, setupProject, tomlProblem, undoSetup, yamlProblem } from "./project";
+import { EXPORT_TYPES, fileManifest, linksTo, listDocs, readExport, readProject, setupProject, tomlProblem, undoSetup, yamlProblem } from "./project";
 import { recent, SettingsStore } from "./settings";
 import { findLsp, findOpencode } from "./tools";
 import { WorkspaceFiles } from "./workspace";
@@ -14,7 +14,7 @@ import { Agent } from "./agent";
 export type Host = {
 	emit<K extends keyof BackendEvents>(event: K, payload: BackendEvents[K]): void;
 	/** A native folder or file dialog; null when cancelled or unavailable. */
-	pick(kind: "folder" | "file"): Promise<string | null>;
+	pick(kind: "folder" | "file", types?: string): Promise<string | null>;
 	trash(path: string): Promise<void>;
 	clipboard?(text: string): void;
 	app: string;
@@ -129,6 +129,12 @@ export function createBackend(host: Host, initial?: string) {
 			const path = await host.pick("file");
 			return path ? settings.importTheme(path) : null;
 		},
+		// An export is read from where the person says it is: a download is not in the project's folder.
+		pickExport: async () => {
+			const path = await host.pick("file", EXPORT_TYPES);
+			return path ? { path, text: await readExport(path) } : null;
+		},
+		readExport: async (path) => readExport(path),
 		lspSend: async (message) => lsp?.send(message),
 		lspRestart: async () => {
 			if (lsp) lsp.restart();

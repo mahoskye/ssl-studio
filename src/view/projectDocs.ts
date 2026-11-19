@@ -10,7 +10,7 @@ import { parseCsv } from "../shared/csv";
 import { frontMatter, one, withFrontMatter } from "../shared/frontMatter";
 import { importSummary, ticketsFromJson, ticketsFromTable, type Imported, type ImportedTicket } from "../shared/ticketImport";
 import { manifestSummary, mergeManifest } from "../shared/manifest";
-import { baseName, dirName, joinPath, relativePath, relativeTo } from "../shared/paths";
+import { baseName, dirName, isInside, joinPath, relativePath, relativeTo } from "../shared/paths";
 import { activeEditor } from "./editor/EditorGroup";
 import {
 	catalogItems,
@@ -165,11 +165,30 @@ export async function importTickets() {
 	const open = activePath();
 	// Both spelled the one way the editor spells a path: a drive's letter is lowered there.
 	const inFolder = open && exported.test(open) && !canonical(open).startsWith(canonical(areaFolder("registries"))) ? relativeTo(root(), open) : "";
-	const typed = (await ask("The exported file (CSV or JSON): its path in this folder", inFolder))?.trim();
-	if (!typed) return;
-	const from = /^([A-Za-z]:[\\/]|\/)/.test(typed) ? typed : joinPath(root(), ...typed.split(/[\\/]/));
-	const text = await current(from);
-	if (text === null) return notify(`${typed} could not be read. The file has to be in this folder.`, "error");
+	let typed: string;
+	let from: string;
+	let text: string | null;
+	// In the app, with no export open, the system's own dialog finds the file: a download is not in the project.
+	if (!inFolder && state.info?.host === "app") {
+		let picked: { path: string; text: string } | null;
+		try {
+			picked = await backend.pickExport();
+		} catch (e: any) {
+			return notify(String(e?.message ?? e), "error");
+		}
+		if (!picked) return;
+		[typed, from, text] = [baseName(picked.path), picked.path, picked.text];
+	} else {
+		typed = (await ask("The exported file (CSV or JSON): its path in this folder, or its whole path anywhere", inFolder))?.trim() ?? "";
+		if (!typed) return;
+		const whole = /^([A-Za-z]:[\\/]|\/)/.test(typed);
+		from = whole ? typed : joinPath(root(), ...typed.split(/[\\/]/));
+		// In the folder it is read as the editor has it; anywhere else, from the disk.
+		text = !whole || isInside(root(), from) ? await current(from) : await backend.readExport(from).catch((e: any) => (notify(String(e?.message ?? e), "error"), null));
+		if (text === null) return whole && !isInside(root(), from) ? undefined : notify(`${typed} could not be read.`, "error");
+		// From outside the folder it is called by its name: the way there is long, and not the point.
+		if (whole && !isInside(root(), from)) typed = baseName(from);
+	}
 	let read: Imported;
 	if (/\.json$/i.test(from)) {
 		try {

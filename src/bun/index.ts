@@ -21,13 +21,13 @@ const backend = createBackend(
 		kind: "app",
 		quit: () => Utils.quit(),
 		emit: (event, payload) => rpc.send.event({ event, payload }),
-		pick: async (kind) => {
+		pick: async (kind, types) => {
 			const paths = await Utils.openFileDialog({
 				startingFolder: homedir(),
 				canChooseFiles: kind === "file",
 				canChooseDirectory: kind === "folder",
 				allowsMultipleSelection: false,
-				allowedFileTypes: kind === "file" ? "json,jsonc" : "*",
+				allowedFileTypes: types ?? (kind === "file" ? "json,jsonc" : "*"),
 			});
 			return paths.find((p) => p) ?? null;
 		},
