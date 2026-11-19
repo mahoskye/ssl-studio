@@ -518,9 +518,11 @@ defects, both fixed: a file that was only peeked at kept its old text
 after it was removed by another program, and gave that text to a file
 renamed onto its path; and a small file of bytes was said to be "4 bytes
 of bytes". The first of those fixes changed code after the last review,
-so a fourth review was made of it alone, and a fifth of the fixes that
-came of the fourth. They confirmed five and six findings, and all were
-fixed.
+so a fourth review was made of it alone, a fifth of the fixes that came
+of the fourth, and a sixth of those that came of the fifth. They
+confirmed five, six and four findings. All were fixed but two small ones
+of the last, which are left with their reasons; the last review found
+nothing that loses work.
 
 ## Why not an extension
 

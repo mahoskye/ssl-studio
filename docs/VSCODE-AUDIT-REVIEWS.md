@@ -1,9 +1,10 @@
 # What the reviews found, finding by finding
 
-Five reviews of the work on [the audit](VSCODE-AUDIT.md) were made by a
+Six reviews of the work on [the audit](VSCODE-AUDIT.md) were made by a
 reader who was given the commits and not the author's conclusions: three
-of the build's steps, one of the fix that the last pass made, and one of
-the fixes that followed it. This
+of the build's steps, and three of the fixes the last pass made, each of
+the fixes that came of the one before. The last found nothing that
+loses work. This
 lists every finding, what was done about it, and the commit that did it.
 "Left" means not changed, with the reason.
 
@@ -332,3 +333,23 @@ after it, the third of them in part.
 Seen on the way, older than this work, and fixed: the status bar went on
 saying the last file's line and column when a file was opened with the
 cursor at its first line. It now says 1 and 1.
+
+## The sixth review: the fixes of the fifth
+
+The fifth review's fixes were reviewed in turn (`ae3e4d2`). Its answer:
+nothing that loses work or leaves a tab on a document that is gone, and
+four small things. The two that were fixed were read by the same
+reviewer before they were committed, who found nothing in them.
+
+1. **On Windows, a name that differs only by case was still said to be
+   "removed".** So was a name the folder's list does not show. Fixed:
+   the disk itself is asked whether something is at the path. Seen, on
+   Linux: "already exists" for an open file on disk, and the refusal
+   once another program had removed it. Not seen on Windows.
+2. **A reload could touch a document let go while the file was read.**
+   Fixed: it looks again first.
+3. **A peek goes blank when its file is opened** in the other group of a
+   split. Left: it is a preview, and the next reference fills it again.
+4. **A file is read twice** when a closed tab is reopened or a
+   definition is gone to. Left: the second reading is the one that keeps
+   the tab true, and it costs one read.

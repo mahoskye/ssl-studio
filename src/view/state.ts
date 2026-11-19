@@ -11,7 +11,7 @@ import { session } from "./lsp/session";
 import { changedRanges, minimalReplace } from "./lsp/edits";
 import { choose } from "./dialogs";
 import { closeComparison, openReview } from "./editor/Review";
-import { baseName, dirName, isInside, plainFileError } from "../shared/paths";
+import { baseName, isInside, plainFileError } from "../shared/paths";
 import { lineEnds } from "../shared/fileKind";
 import { isPlanPath } from "./plan/model";
 import { recheckPlans, trackPlan } from "./plan/check";
@@ -602,9 +602,9 @@ function heldAt(path: string): { kind: "tab" | "unsaved"; path: string } | null 
 export async function heldFromBefore(to: string): Promise<boolean> {
 	const held = heldAt(to);
 	if (!held) return false;
-	const name = baseName(to);
-	const onDisk = await backend.list(dirName(to)).then(
-		(entries) => entries.some((entry) => entry.name === name),
+	// Asked of the disk itself, which knows whether two spellings of a name are one file, and of names no list shows.
+	const onDisk = await backend.sizes([to]).then(
+		(sizes) => to in sizes,
 		() => false,
 	);
 	if (onDisk) return false;
@@ -784,7 +784,8 @@ export async function revert(path: string) {
 	const doc = docs.get(path);
 	if (!doc) return;
 	const file = await guarded(() => backend.read(path));
-	if (!file) return;
+	// The document may have been let go, or moved away, while the file was read.
+	if (!file || docs.get(path) !== doc) return;
 	doc.encoding = file.encoding;
 	doc.binary = file.binary;
 	// The line ends go back to the file's too: put in as an edit, the text would take on whichever kind the editor
