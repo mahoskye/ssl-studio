@@ -569,8 +569,12 @@ the work comes from ([ADR 0012](adr/0012-a-projects-work-is-written-down.md)).
   build of it. The build ran its three tries; the judge sent each back for
   parameter names against the house style, and nothing was written. Every
   build prompt was cut at Ollama's default 4096 tokens, and both the
-  conversation and the planner said so. Not tried: the test script, which
-  needs a build that passes.
+  conversation and the planner said so. The test script was then run on the
+  demo's plan, which is built: three tries, each prompt cut, ending in a
+  review that marked "a test for every path" and "no errors" as failed and
+  listed what the model got wrong. It was rejected and nothing was written.
+  So every stage has now run on opencode 2.3.2 with the deny rules as they
+  are; none has been tried with a larger context or a stronger model.
 - **From looking at it:** in a narrow Docs panel a state is a dot in its
   tone, so the title has the room; a new document's opening prompt is not
   listed as its summary; a date is the day it is here, not in UTC; and a

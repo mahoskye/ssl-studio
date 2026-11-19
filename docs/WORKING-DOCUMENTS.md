@@ -142,5 +142,7 @@ Kept snippets are in the Palette, to insert at the cursor.
 - A table a script uses that no registry lists. It needs the language
   server to say which tables a script uses
   ([LSP-REQUESTS.md](LSP-REQUESTS.md), L6).
-- The planner's test script has not been run against a model on opencode
-  2.3. Refine, the spec, a build and a tidy step have, with a local model.
+- Every stage of the planner has been run on opencode 2.3 with a local
+  model at Ollama's default context, where a build and a test script are
+  cut and do not pass. None has been tried with a larger context or a
+  stronger model.
