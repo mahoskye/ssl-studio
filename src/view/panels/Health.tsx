@@ -14,9 +14,9 @@ import { chooseFromMenu } from "./RowMenu";
 import { serverDown } from "./server";
 import { openStyleProfile } from "../StyleProfile";
 import { docs, setUpProject } from "../project";
-import { checksSummary, docChecks, type DocCheck } from "../../shared/docChecks";
+import { checksSummary, docChecks, type DocCheck, type LinkMend } from "../../shared/docChecks";
 import { isCatalog, registryTitle, toneOf } from "../../shared/projectDocs";
-import { newTicket, updateCatalogs } from "../projectDocs";
+import { mendLinks, newTicket, updateCatalogs } from "../projectDocs";
 
 const PROCEDURE = new Set([monaco.languages.SymbolKind.Function, monaco.languages.SymbolKind.Method]);
 
@@ -75,15 +75,19 @@ export function Health() {
 				const left = d.tally ? d.tally.by.filter(([status]) => toneOf(status) !== "done").map(([status, count]) => `${count} ${status || "with no status"}`) : [];
 				return { file: d, title: registryTitle(d.name), total, done, counted: Boolean(d.tally), left };
 			});
-	const fixLabel = (check: DocCheck) => (check.fix?.kind === "catalogs" ? "Update" : "Start it");
-	const fixTitle = (check: DocCheck) => (check.fix?.kind === "catalogs" ? "Write every catalog afresh from the documents in its folder" : check.fix?.kind === "ticket" ? `Start ${check.fix.key} as a ticket of its own` : "");
-	const fix = (check: DocCheck) => (check.fix?.kind === "catalogs" ? void updateCatalogs() : check.fix?.kind === "ticket" ? void newTicket(check.fix.key, check.fix.related) : undefined);
+	const fixLabel = (check: DocCheck) => (check.fix?.kind === "catalogs" ? "Update" : check.fix?.kind === "links" ? "Mend" : "Start it");
+	/** What mending a document's links does, in a line: where the one link will lead, or how many will be pointed where their files are. */
+	const mendTitle = (mends: LinkMend[]) => (mends.length === 1 ? `Point the link at ${mends[0]!.instead}, where a file of that name is` : `Point ${mends.length} links at where files of their names are`);
+	const fixTitle = (check: DocCheck) =>
+		check.fix?.kind === "catalogs" ? "Write every catalog afresh from the documents in its folder" : check.fix?.kind === "ticket" ? `Start ${check.fix.key} as a ticket of its own` : check.fix?.kind === "links" ? mendTitle(check.fix.mends) : "";
+	const fix = (check: DocCheck) =>
+		check.fix?.kind === "catalogs" ? void updateCatalogs() : check.fix?.kind === "ticket" ? void newTicket(check.fix.key, check.fix.related) : check.fix?.kind === "links" ? void mendLinks(check.path, check.fix.mends) : undefined;
 	/** A check's document, at the place the check is about where it is about one. */
 	const openCheck = (check: DocCheck) => openFile(check.path, check.line ? { reveal: { line: check.line } } : {});
 	/** A check's menu: open its document, or put it right where the IDE can. */
 	const checkMenu = async (check: DocCheck, at: Point) => {
 		const open = "Open the document";
-		const put = check.fix?.kind === "catalogs" ? "Update the catalogs" : check.fix?.kind === "ticket" ? `Start ${check.fix.key} as a ticket` : "";
+		const put = check.fix?.kind === "catalogs" ? "Update the catalogs" : check.fix?.kind === "ticket" ? `Start ${check.fix.key} as a ticket` : check.fix?.kind === "links" ? mendTitle(check.fix.mends) : "";
 		const picked = await chooseFromMenu("What to do about it", [open, ...(put ? [put] : [])], at);
 		if (picked === open) await openCheck(check);
 		else if (picked && picked === put) fix(check);

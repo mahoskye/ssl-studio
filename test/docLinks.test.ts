@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { listDocs, readProject } from "../src/bun/project";
 import { WorkspaceFiles } from "../src/bun/workspace";
 import { docChecks } from "../src/shared/docChecks";
-import { fileLinks, linkFile } from "../src/shared/docLinks";
+import { fileLinks, linkFile, withLinkFile } from "../src/shared/docLinks";
 import type { DocFile } from "../src/shared/protocol";
 
 describe("the file a link names", () => {
@@ -102,5 +102,58 @@ describe("the listing says which links lead nowhere", () => {
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("a link pointed at another file", () => {
+	const text = "# T\n\nSee [the notes](../specs/Notes.md#columns) and [again](../specs/Notes.md).\n\n[one more](<../specs/My notes.md>)\n";
+	test("has its file part rewritten on that line, and keeps what follows the mark", () => {
+		expect(withLinkFile(text, 3, "../specs/Notes.md#columns", "../specs/reports/Notes.md")).toBe(text.replace("../specs/Notes.md#columns", "../specs/reports/Notes.md#columns"));
+	});
+	test("only the one link is changed, and a space is written as an escape", () => {
+		const after = withLinkFile(text, 5, "../specs/My notes.md", "../kept/My notes.md");
+		expect(after).toBe(text.replace("<../specs/My notes.md>", "<../kept/My%20notes.md>"));
+	});
+	test("is not made when the link is no longer on that line", () => {
+		expect(withLinkFile(text, 1, "../specs/Notes.md", "x.md")).toBeNull();
+		expect(withLinkFile(text, 99, "../specs/Notes.md", "x.md")).toBeNull();
+	});
+	test("Windows line ends are kept", () => {
+		const windows = text.replace(/\n/g, "\r\n");
+		expect(withLinkFile(windows, 3, "../specs/Notes.md#columns", "a.md")).toBe(windows.replace("../specs/Notes.md#columns", "a.md#columns"));
+	});
+});
+
+describe("a link whose file was moved", () => {
+	test("is offered the one file of its name elsewhere in the project, and the check can mend it", async () => {
+		const root = mkdtempSync(join(tmpdir(), "ssl-studio-moved-"));
+		try {
+			mkdirSync(join(root, "docs", "tickets"), { recursive: true });
+			mkdirSync(join(root, "docs", "specs", "reports"), { recursive: true });
+			mkdirSync(join(root, "docs", "specs", "old"), { recursive: true });
+			writeFileSync(join(root, "docs", "specs", "reports", "Report.md"), "# The report\n");
+			writeFileSync(join(root, "docs", "specs", "reports", "Twice.md"), "# One\n");
+			writeFileSync(join(root, "docs", "specs", "old", "Twice.md"), "# Another\n");
+			writeFileSync(join(root, "docs", "tickets", "T-1.md"), "# T-1\n\n[the report](../specs/report.md#columns), [two of these](../specs/Twice.md), [none of these](../specs/Nowhere.md)\n");
+			// A document of the same name as the file its link meant is not that file.
+			writeFileSync(join(root, "docs", "specs", "reports", "Solo.md"), "# A spec\n");
+			writeFileSync(join(root, "docs", "tickets", "Solo.md"), "# Notes on the spec\n\n[the spec](../specs/Solo.md)\n");
+			const list = await listDocs(new WorkspaceFiles(root), await readProject(root));
+			const ticket = list.find((file) => file.name === "T-1.md")!;
+			expect(ticket.broken).toEqual([
+				{ href: "../specs/report.md#columns", line: 3, instead: "../specs/reports/Report.md" },
+				{ href: "../specs/Twice.md", line: 3 },
+				{ href: "../specs/Nowhere.md", line: 3 },
+			]);
+			expect(list.find((file) => file.group === "tickets" && file.name === "Solo.md")?.broken).toEqual([{ href: "../specs/Solo.md", line: 3, instead: "../specs/reports/Solo.md" }]);
+			const check = docChecks(list).find((c) => c.text.startsWith("T-1 ") && c.text.includes("not there"));
+			expect(check?.fix).toEqual({ kind: "links", mends: [{ line: 3, href: "../specs/report.md#columns", instead: "../specs/reports/Report.md" }] });
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+	test("a check with nowhere to point has nothing to offer", () => {
+		const checks = docChecks([{ path: "/p/docs/tickets/T-1.md", name: "T-1.md", group: "tickets", exists: true, ticket: "T-1", broken: [{ href: "gone.md", line: 2 }] }]);
+		expect(checks.find((c) => c.text.includes("not there"))?.fix).toBeUndefined();
 	});
 });

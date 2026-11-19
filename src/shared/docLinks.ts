@@ -74,3 +74,26 @@ export function fileLinks(text: string): DocLink[] {
 		return { href, file: linkFile(href), line: at < 0 ? 0 : before + at + 1 };
 	});
 }
+
+/**
+ * The text with one link pointed at another file: the file part of the link
+ * on that line is rewritten, and what follows "?" or "#" is kept (ADR 0002).
+ * Null when the link is not on that line as it was read.
+ */
+export function withLinkFile(text: string, line: number, href: string, instead: string): string | null {
+	let start = 0;
+	for (let at = 1; at < line; at++) {
+		const end = text.indexOf("\n", start);
+		if (end < 0) return null;
+		start = end + 1;
+	}
+	const end = text.indexOf("\n", start);
+	const here = text.slice(start, end < 0 ? text.length : end);
+	for (const written of [href, href.replace(/ /g, "%20")]) {
+		const at = here.indexOf(written);
+		if (at < 0) continue;
+		const rest = /[?#].*$/.exec(written)?.[0] ?? "";
+		return `${text.slice(0, start + at)}${instead.replace(/ /g, "%20")}${rest}${text.slice(start + at + written.length)}`;
+	}
+	return null;
+}

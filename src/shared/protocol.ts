@@ -65,8 +65,12 @@ export type DocFile = {
 	rows?: number;
 	tally?: { total: number; by: [status: string, count: number][] };
 	problems?: string[];
-	/** A Markdown document: its links to files of the project that are not there, as written, each with its line. */
-	broken?: { href: string; line: number }[];
+	/**
+	 * A Markdown document: its links to files of the project that are not there, as written, each with its line.
+	 * `instead` is the one file of that name elsewhere in the project, as a link from this document would name it:
+	 * where the file was moved to, most likely.
+	 */
+	broken?: { href: string; line: number; instead?: string }[];
 	/** A catalog (INDEX.md): whether its list no longer says what the documents do. */
 	catalog?: { stale: boolean };
 };

@@ -264,5 +264,22 @@ export function selftestWork(): Promise<Steps> {
 				return links.length === 2 && links.filter((link) => link.classList.contains("broken")).map((link) => link.textContent).join() === "a file since removed";
 			});
 		});
+
+		// A link whose file was moved is pointed at where the file is, from the row that says so; and a ticket's key
+		// written in the prose is a way to that ticket.
+		await write(["specs", "kept", "Moved.md"], "# A spec that was moved\n");
+		const moved = await write(["knowledge", "reference", "Moved.md"], "# Where the spec went\n\nIt follows SELF-1. The spec is [here](../../specs/Moved.md#checks).\n");
+		setState("treeVersion", (v) => v + 1);
+		showPanel("health");
+		await step("movedLinkMended", async () => {
+			const row = await until(() => [...document.querySelectorAll<HTMLElement>(".check-row")].find((r) => r.textContent?.includes("../../specs/Moved.md")));
+			row?.querySelector<HTMLButtonElement>("button.link")?.click();
+			if (!(await until(() => !checks().some((text) => text.includes("../../specs/Moved.md"))))) return false;
+			return (await backend.read(moved)).text.includes("](../../specs/kept/Moved.md#checks)");
+		});
+		await step("ticketKeyLinked", async () => {
+			await openFile(moved);
+			return until(() => [...document.querySelectorAll<HTMLAnchorElement>(".md a.ticket-ref")].some((link) => link.textContent === "SELF-1" && link.title.startsWith("SELF-1")));
+		});
 	});
 }

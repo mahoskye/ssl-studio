@@ -33,7 +33,9 @@ demo project (`examples/due-dates`) has one of everything, invented for it.
    "New ticket…" makes one by hand. Reporter and assignee are not read.
 2. **Read the ticket's page.** It shows what the ticket says of itself, and
    under that everything tied to it: plans, specs, related tickets,
-   questions, decisions.
+   questions, decisions. On any document's page, a ticket's key written in
+   the prose ("this waits on DEMO-101") is a link to that ticket, with its
+   title and state in the tooltip.
 3. **Spec it out.** "New spec…" writes a spec for the ticket. A plan
    (`design/*.plan.json`) names its ticket too, and the spec the planner
    writes from it is listed with the ticket.
@@ -109,7 +111,8 @@ A link to a file that is not there is one to fix: the document it led to
 was moved, renamed or never written. Health names the file and opens the
 document at the link; the document's page marks the link before anyone
 clicks it. Links to the web, and to files outside the project, are not
-checked.
+checked. Where the project has one file of that name somewhere else, the
+row offers "Mend": the link is pointed there, and Ctrl+Z undoes it.
 
 ## The agent
 

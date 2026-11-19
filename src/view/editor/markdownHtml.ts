@@ -1,6 +1,43 @@
 // What is done to Markdown's HTML after it is cleaned, wherever it is shown:
 // a document in the reading view, a reply in the Agent panel.
 import { MAX_SHORT, headingAnchor } from "../../shared/docTables";
+import { ticketMentions } from "../../shared/ticketRefs";
+
+/** A ticket of the project, as a document's page links to it: where it is from that document, and what it is in a line. */
+export type TicketRef = { key: string; href: string; about: string };
+
+/**
+ * A ticket's key written in the prose becomes a link to that ticket, with
+ * what the ticket is in its tooltip. Text that is already a link, and code,
+ * are left as written.
+ */
+function linkTickets(holder: HTMLTemplateElement, tickets: readonly TicketRef[]) {
+	const by = new Map(tickets.map((ticket) => [ticket.key, ticket]));
+	const keys = [...by.keys()];
+	const walker = document.createTreeWalker(holder.content, NodeFilter.SHOW_TEXT);
+	const nodes: Text[] = [];
+	for (let node = walker.nextNode(); node; node = walker.nextNode()) if (!node.parentElement?.closest("a, code, pre")) nodes.push(node as Text);
+	for (const node of nodes) {
+		const text = node.data;
+		const mentions = ticketMentions(text, keys);
+		if (!mentions.length) continue;
+		const parts = document.createDocumentFragment();
+		let at = 0;
+		for (const mention of mentions) {
+			const ticket = by.get(mention.key)!;
+			parts.append(text.slice(at, mention.from));
+			const link = document.createElement("a");
+			link.className = "ticket-ref";
+			link.setAttribute("href", ticket.href);
+			link.title = ticket.about;
+			link.textContent = text.slice(mention.from, mention.to);
+			parts.append(link);
+			at = mention.to;
+		}
+		parts.append(text.slice(at));
+		node.replaceWith(parts);
+	}
+}
 
 /** Gives each heading the anchor a link in the same document can point at. */
 function anchorHeadings(holder: HTMLTemplateElement) {
@@ -30,11 +67,12 @@ function markShortColumns(holder: HTMLTemplateElement) {
 }
 
 /** `html` must already be sanitised. Anchors are for a document; a reply has no links into itself. */
-export function finishMarkdown(html: string, options: { anchors?: boolean } = {}): string {
-	if (!options.anchors && !html.includes("<table")) return html;
+export function finishMarkdown(html: string, options: { anchors?: boolean; tickets?: readonly TicketRef[] } = {}): string {
+	if (!options.anchors && !options.tickets?.length && !html.includes("<table")) return html;
 	const holder = document.createElement("template");
 	holder.innerHTML = html;
 	if (options.anchors) anchorHeadings(holder);
+	if (options.tickets?.length) linkTickets(holder, options.tickets);
 	markShortColumns(holder);
 	return holder.innerHTML;
 }

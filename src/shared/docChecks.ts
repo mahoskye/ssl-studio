@@ -17,8 +17,15 @@ export type DocCheck = {
 	path: string;
 	/** The line of it to go to, where the check is about one place. */
 	line?: number;
-	/** What would put it right, where the IDE can: write the catalogs afresh, or start the ticket of this key. */
-	fix?: { kind: "catalogs" } | { kind: "ticket"; key: string; related?: string };
+	/**
+	 * What would put it right, where the IDE can: write the catalogs afresh, start the ticket of this key, or point
+	 * each link at the one file of its name that the project has elsewhere.
+	 */
+	fix?: { kind: "catalogs" } | { kind: "ticket"; key: string; related?: string } | { kind: "links"; mends: LinkMend[] };
+};
+
+/** A link to rewrite: the link as written on that line, and the file to name in its place. */
+export type LinkMend = { line: number; href: string; instead: string;
 };
 
 const AREAS = Object.keys(DOC_FOLDERS) as DocArea[];
@@ -66,11 +73,14 @@ export function docChecks(files: readonly DocFile[]): DocCheck[] {
 		const names = [...new Set(file.broken.map((link) => linkFile(link.href)))];
 		const shown = names.slice(0, LINKS_NAMED);
 		const more = names.length - shown.length;
+		// A file of the same name elsewhere in the project is where it went: the link can be pointed there.
+		const mends = file.broken.flatMap((link) => (link.instead && link.line ? [{ line: link.line, href: link.href, instead: link.instead }] : []));
 		checks.push({
 			level: "warn",
 			text: names.length === 1 ? `${called(file)} links to a file that is not there: ${names[0]}` : `${called(file)} links to ${names.length} files that are not there: ${shown.join(", ")}${more ? ` and ${more} more` : ""}`,
 			path: file.path,
 			...(file.broken[0]!.line ? { line: file.broken[0]!.line } : {}),
+			...(mends.length ? { fix: { kind: "links" as const, mends } } : {}),
 		});
 	}
 

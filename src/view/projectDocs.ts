@@ -40,6 +40,8 @@ import { backend } from "./backend";
 import { ask, choose } from "./dialogs";
 import { createdObjects } from "../shared/outline";
 import { toggleTask } from "../shared/tasks";
+import type { LinkMend } from "../shared/docChecks";
+import { withLinkFile } from "../shared/docLinks";
 import { parsePlan, isPlanPath } from "./plan/model";
 import { docs, isMarkdown } from "./project";
 import { ticketAtHand as listedTicketAtHand, workFor, workLabel, workText } from "../shared/workContext";
@@ -351,6 +353,32 @@ export async function tickTask(path: string, index: number) {
 	try {
 		await put(path, after, true);
 		setState("treeVersion", (v) => v + 1);
+	} catch (e: any) {
+		notify(String(e?.message ?? e), "error");
+	}
+}
+
+/**
+ * Points a document's links at where their files are now: each link's file
+ * part, on its line, through the editor so it can be undone.
+ */
+export async function mendLinks(path: string, mends: readonly LinkMend[]) {
+	const before = await current(path);
+	if (before === null) return;
+	let after = before;
+	const mended: string[] = [];
+	for (const mend of mends) {
+		const next = withLinkFile(after, mend.line, mend.href, mend.instead);
+		if (next === null) continue;
+		after = next;
+		mended.push(mend.instead);
+	}
+	// The listing may be older than the text: a link that is no longer where it was is left to the person.
+	if (!mended.length) return notify("The link is not where it was: the document has changed since. Mend it in the text.", "error");
+	try {
+		await put(path, after, true);
+		setState("treeVersion", (v) => v + 1);
+		notify(mended.length === 1 ? `The link now leads to ${mended[0]}.` : `${mended.length} links now lead to where their files are.`);
 	} catch (e: any) {
 		notify(String(e?.message ?? e), "error");
 	}

@@ -5,9 +5,9 @@ import DOMPurify from "dompurify";
 import { marked } from "marked";
 import { linkFile } from "../../shared/docLinks";
 import { headingAnchor } from "../../shared/docTables";
-import { finishMarkdown, outlineOf } from "./markdownHtml";
+import { finishMarkdown, outlineOf, type TicketRef } from "./markdownHtml";
 import { frontMatter, plainMarkdown } from "../../shared/frontMatter";
-import { dirName, isInside, joinPath, resolvePath } from "../../shared/paths";
+import { dirName, isInside, joinPath, relativePath, resolvePath } from "../../shared/paths";
 import { DOC_FOLDERS, linkedLines, statusChoices, toneOf } from "../../shared/projectDocs";
 import { Menu } from "../Menu";
 import { setStatus, tickTask } from "../projectDocs";
@@ -26,7 +26,23 @@ export function MarkdownView(props: { path: string }) {
 	// A README can come from anywhere: its HTML is cleaned before it is shown.
 	// What the document says of itself in the lines it opens with is shown as a heading of its own, not as text.
 	const front = createMemo(() => frontMatter(text()));
-	const html = createMemo(() => finishMarkdown(DOMPurify.sanitize(marked.parse(front().body, { async: false, gfm: true }) as string), { anchors: true }));
+	/**
+	 * The project's other tickets, as this page links to them where the prose names one: each by its key, with what it
+	 * is in a line. The same list is the same page: a listing read again does not draw the page again.
+	 */
+	const mentioned = createMemo(
+		(): TicketRef[] =>
+			docs()
+				.filter((d) => d.group === "tickets" && d.exists && d.ticket && canonical(d.path) !== props.path)
+				.map((d) => {
+					const title = d.title ?? "";
+					const named = title.toLowerCase().startsWith(d.ticket!.toLowerCase()) ? title : [d.ticket, title].filter(Boolean).join(": ");
+					return { key: d.ticket!, href: encodeURI(relativePath(dirName(props.path), d.path)), about: `${named}${d.status ? ` (${d.status})` : ""}` };
+				}),
+		[],
+		{ equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) },
+	);
+	const html = createMemo(() => finishMarkdown(DOMPurify.sanitize(marked.parse(front().body, { async: false, gfm: true }) as string), { anchors: true, tickets: mentioned() }));
 	/** The front matter as it is shown: each key with its values, a ticket or a file as a link to it. */
 	const facts = createMemo(() =>
 		Object.entries(front().values)

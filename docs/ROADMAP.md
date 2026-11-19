@@ -476,6 +476,13 @@ the work comes from ([ADR 0012](adr/0012-a-projects-work-is-written-down.md)).
   clicked. A file that is not there is said in plain words wherever one is
   opened, with its path as the project names it: the note used to be the
   file system's own ("ENOENT: no such file or directory, open …").
+- **A link to a moved file is mended from Health.** Where one file of the
+  link's name is elsewhere in the project, the row offers to point the link
+  there: the link's file part is rewritten on its line, and what follows
+  "#" is kept.
+- **A ticket's key in the prose is a link.** Only the keys of tickets the
+  project has; not in code, not in a link someone wrote, not the page's
+  own ticket. A key of digits alone is one only as "#12".
 - **The agent is told the work.** A plan names its ticket; the planner is
   sent what the ticket asks, the tickets around it, the open questions and
   the decisions that stand when it refines the plan or writes the spec; a
