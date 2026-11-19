@@ -629,6 +629,7 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 @media (prefers-reduced-motion: reduce) { .g-proc, .g-top, .g-fold { transition: none; } }
 /* Zoomed far out, the words nobody could read are left out, and scripts and folders are named over the picture at a size that reads. */
 .g-root.far :is(.g-proc, .g-top, .g-fold) text, .g-root.far :is(.g-script, .g-folder, .g-region) > text, .g-root.far :is(.g-count, .g-toggle, .g-chevron) { display: none; }
+.g-root.far :is(.g-proc, .g-top, .g-fold, .g-script, .g-folder) { cursor: zoom-in; }
 .g-far text { font-weight: 600; fill: var(--fg); stroke: var(--bg); paint-order: stroke; stroke-linejoin: round; pointer-events: none; }
 .g-far text.folder { fill: var(--muted); }
 .arrow { fill: var(--muted); }

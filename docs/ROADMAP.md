@@ -390,6 +390,15 @@ From a second look:
 - **A target that did not resolve is one node.** The server names it once
   for each kind of call to it, and it was drawn once for each: the demo
   showed 19 such targets and has 13.
+- **Far out, a click comes in.** Clicking a script or folder in the far
+  picture brings the view in on it, as large as fits with its words
+  readable; it used to focus whichever procedure was under the pointer,
+  which nobody could read.
+- **Moving the picture is not a click.** Dragging the graph by a node and
+  letting go over it focused that node.
+- **Brackets in the two built-in themes have the themes' own colours,**
+  three that are told apart at a glance, where the editor's stock gold
+  stood out of the dark theme.
 - **A procedure found from the list is fitted in the graph.** Finding one
   while the list was showing laid out two pictures, and the view was fitted
   to the wrong one: the focus came up small, cut off at the top, with a

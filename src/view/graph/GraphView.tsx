@@ -74,7 +74,7 @@ const GRAPH_KEYS: readonly (readonly [keys: string, what: string])[] = [
 	["Shift+X", "Fold the script's folder to one node, or unfold it"],
 	["+, −, 0", "Zoom in, zoom out, fit; 0 again shows the whole picture"],
 	["?", "Show or hide this list"],
-	["Pointer", "Point at a node or a line to light it; click a node to focus on it, double-click to open it; drag to move, the wheel zooms"],
+	["Pointer", "Point at a node or a line to light it; click a node to focus on it, double-click to open it; drag to move, the wheel zooms. Far out, a click comes in on that script or folder"],
 ];
 /** A picture of up to this many nodes is laid out both across and down, to keep the one that fits the view better. */
 const BOTH_WAYS_UP_TO = 250;
@@ -524,6 +524,14 @@ export function GraphView() {
 		const least = Math.min(9 / view().scale, ((1.8 * b.width) / natural) * FONT_PX, height);
 		return Math.max(FONT_PX, Math.min(11 / view().scale, Math.max(fits, least)));
 	};
+	/** Far out, a click goes to what is clicked: the view comes in on that script or folder, as large as fits and its words can be read. */
+	const comeIn = (b: Box) => {
+		const own = b.kind === "proc" || b.kind === "top" ? layout()?.boxes.find((s) => s.kind === "script" && s.path === b.path) : undefined;
+		const to = own ?? b;
+		const box = size();
+		const scale = Math.max(FIT_FLOOR, Math.min(1, (box.width - 80) / to.width, (box.height - 80) / to.height));
+		setView({ scale, x: box.width / 2 - (to.x + to.width / 2) * scale, y: box.height / 2 - (to.y + to.height / 2) * scale });
+	};
 	/** Zooms about a point of the canvas: the pointer, or its middle for the buttons and keys. */
 	const zoomBy = (factor: number, at?: Point) => {
 		const box = size();
@@ -714,6 +722,8 @@ export function GraphView() {
 		</>
 	);
 	let dragging: { x: number; y: number } | null = null;
+	/** How far the pointer has moved the picture since it was pressed. */
+	let panned = 0;
 	/** Too narrow for every button of the bar: the zoom buttons go to the menu. */
 	const [narrow, setNarrow] = createSignal(false);
 	const watchWidth = (el: HTMLDivElement) => {
@@ -854,7 +864,11 @@ export function GraphView() {
 					<div class="graph-stage">
 					<svg
 						class="graph-canvas"
-						ref={svg}
+						ref={(el) => {
+							svg = el;
+							// The picture was moved by what the pointer was on: letting go of it there is not a click on it.
+							el.addEventListener("click", (e) => panned > 3 && (e.stopPropagation(), (panned = 0)), true);
+						}}
 						role="group"
 						aria-label="Call graph. The arrow keys move between nodes; the question mark key lists the rest."
 						aria-describedby={keysOpen() ? keysId : undefined}
@@ -865,10 +879,11 @@ export function GraphView() {
 							const box = e.currentTarget.getBoundingClientRect();
 							zoomBy(e.deltaY < 0 ? 1.1 : 0.9, { x: e.clientX - box.left, y: e.clientY - box.top });
 						}}
-						onMouseDown={(e) => (dragging = { x: e.clientX, y: e.clientY })}
+						onMouseDown={(e) => ((dragging = { x: e.clientX, y: e.clientY }), (panned = 0))}
 						onMouseMove={(e) => {
 							if (!dragging) return;
 							const v = view();
+							panned += Math.abs(e.clientX - dragging.x) + Math.abs(e.clientY - dragging.y);
 							setView({ ...v, x: v.x + e.clientX - dragging.x, y: v.y + e.clientY - dragging.y });
 							dragging = { x: e.clientX, y: e.clientY };
 						}}
@@ -889,7 +904,7 @@ export function GraphView() {
 								<g class="g-root" classList={{ lit: lit() !== null || pointedLine() !== null, far: far() }} transform={`translate(${view().x},${view().y}) scale(${view().scale})`}>
 									<For each={l().boxes.filter((b) => b.kind === "folder" || b.kind === "script" || b.kind === "region")}>
 										{(b) => (
-											<g class={`g-${b.kind}`} classList={{ [level(b.bytes ?? 0, state.settings.limits.bytes)]: b.kind === "script" }}>
+											<g class={`g-${b.kind}`} classList={{ [level(b.bytes ?? 0, state.settings.limits.bytes)]: b.kind === "script" }} onClick={(e) => far() && b.kind !== "region" && (e.stopPropagation(), comeIn(b))}>
 												<Show when={b.kind === "script"}>
 													<title>{`${[b.path ?? b.label, sizeNote(b.bytes ?? 0)].filter(Boolean).join(": ")}. Click its name to show only this script's calls.`}</title>
 												</Show>
@@ -961,7 +976,7 @@ export function GraphView() {
 												onFocus={() => setCurrent(b.id)}
 												onMouseEnter={() => setPointed(b.id)}
 												onMouseLeave={() => setPointed(null)}
-												onClick={(e) => (e.stopPropagation(), b.kind === "dir" ? toggleDir(b.folder) : b.kind === "fold" ? toggleFold(b.path) : focus(b.id))}
+												onClick={(e) => (e.stopPropagation(), far() ? comeIn(b) : b.kind === "dir" ? toggleDir(b.folder) : b.kind === "fold" ? toggleFold(b.path) : focus(b.id))}
 												onDblClick={() => b.kind !== "fold" && b.kind !== "dir" && open(b)}
 											>
 												<Show
