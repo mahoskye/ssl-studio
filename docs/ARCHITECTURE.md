@@ -138,6 +138,37 @@ findings after, `:PARAMETERS` compared, and for the comments step the code
 with comments stripped compared. Each step runs in a fresh session and hands
 over through the context note, as the skills expect.
 
+## The working documents (ADR 0012)
+
+What a project writes down about its work: tickets, specs, a knowledge
+base, registries, and a catalog for each folder. The guide is
+[WORKING-DOCUMENTS.md](WORKING-DOCUMENTS.md).
+
+- **The logic is pure and shared,** in `src/shared/`, and tested without a
+  window: `frontMatter.ts` (what a document says of itself), `catalog.ts`
+  (the list between two markers), `csv.ts` (a table with each cell's place
+  in the text), `manifest.ts` (the file manifest, merged), `projectDocs.ts`
+  (folders, templates, states), `workList.ts` (the Work list's order and
+  nesting), `docChecks.ts` (what Health says), `workContext.ts` (what the
+  agent is sent), `ticketImport.ts` (tickets from an export),
+  `registryCheck.ts` (a name looked for in the files).
+- **The Bun side lists and reads** (`src/bun/project.ts`): `listDocs`
+  gives every working document with its title, state and what it is tied
+  to; `fileManifest` gives the files with their checksums; `tomlProblem`
+  reads TOML with the reader `project.toml` is loaded with.
+- **The view writes through the editor** (`src/view/projectDocs.ts`): a
+  document that is open is changed by an edit, so it can be undone, and one
+  that is not is written to disk. A file that exists is never replaced.
+- **A table is a view of the text** (`src/view/editor/TableView.tsx`): a
+  cell changed is that cell's characters changed (ADR 0002).
+- **Files that are not SSL are read here**
+  ([ADR 0015](adr/0015-what-is-not-ssl-is-read-here.md)): `outline.ts`,
+  `jsonCheck.ts` and `jsonFormat.ts` in `src/shared/`, and the grammars in
+  `src/view/editor/languages.ts`. SSL stays with the language server.
+- **The self-test's cycle run** writes a ticket, a spec, a question and a
+  registry into its copy of the workspace and checks them in the window
+  (`src/view/selftestDocs.ts`).
+
 ## Settings and state
 
 | What | Where |

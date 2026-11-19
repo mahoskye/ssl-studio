@@ -48,7 +48,8 @@ the source of truth.
   names its ticket, a ticket's page lists everything tied to it, a question
   or a decision can start from selected code, and the agent is told what
   the ticket asks, the open questions and the decisions already made
-  ([ADR 0012](docs/adr/0012-a-projects-work-is-written-down.md),
+  ([guide](docs/WORKING-DOCUMENTS.md),
+  [ADR 0012](docs/adr/0012-a-projects-work-is-written-down.md),
   [ADR 0013](docs/adr/0013-the-agent-is-told-the-work-a-question-is-for.md)).
 - **Documents as what they are:** Markdown, SQL, JSON, TOML, CSV, YAML, XML
   and INI are coloured by the same themes as SSL. JSON and TOML that
