@@ -3,10 +3,11 @@
 Every row of [the audit](VSCODE-AUDIT.md) was tried again in the running
 app when the building was done (2026-11-19), in an instance of its own on
 a scratch copy of the demo project, made a git repository for the
-purpose. This says, row by row, what was seen. Three rows were wrong and
+purpose. This says, row by row, what was seen. Four rows were wrong and
 were corrected: the bottom panel has two tabs, Settings' search does
-find a command by its key, and the file watching misses some changes
-made by other programs.
+find a command by its key, the file watching misses some changes made by
+other programs, and (seen later, in use) the editor does keep the
+enclosing lines at the top as it scrolls.
 
 "The list" is the app's command list (84 commands, read in full). "The
 editor's list" is the text editor's own (F1), asked term by term. The rows
@@ -92,7 +93,7 @@ and a conflict made for it.
 | Toggle comment | Ctrl+/ wrote `--` in a SQL file and `#` in an INI file, and wrapped an SSL line |
 | User snippets | "New snippet…" is in the list; nothing in the editor's list expands one by its prefix |
 | Indent settings | Convert and detect indentation are in the editor's list; the status bar shows neither |
-| Sticky scroll | Nothing in the editor's list with "sticky" |
+| Sticky scroll | Scrolled into a procedure, “region Report” and “region One sample” held at the top |
 | Emmet | Nothing in the editor's list with "emmet" |
 
 ## Go and the palette
@@ -217,3 +218,21 @@ and a conflict made for it.
 | Agent edits as diff | The Review view compared a snapshot, with Restore and Reject; no agent ran, as that needs a model |
 | Inline suggestions | Nothing appeared while typing; "Trigger Inline Suggestion" is listed, with nothing to give |
 | Extensions | No such panel, and nothing in the list |
+
+## Added in use
+
+Asked for by the user after trying the app (2026-11-19), and seen in the
+same kind of instance, at 720 and 1440 wide, each in the light and the
+dark theme.
+
+| Row | Seen |
+| --- | --- |
+| Layout controls | Each button showed and hid its part; Ctrl+Alt+B did the right panel; Reset put all three back |
+| Page menu | A right-click on a rendered page listed five entries; “Edit the text” went to the text |
+| Text box menu | In the Docs filter: Cut, Copy, Paste, Select all, and Select all selected the eight letters |
+| No menu elsewhere | A right-click on a hint, the status bar, the activity bar and the menu bar opened nothing |
+| Scroll past the end | Scrolled down from line 200, the view went on past it |
+| Copy name | In the tab's menu, the Explorer's and the page's; not run, since it writes the clipboard |
+| Sections fold | Work shut by a click and Decisions by Left; both were still shut after a restart |
+| Unsaved mark | A drawn dot, round in both themes; it was an oval from whatever font the system found |
+| Region strip | Across all 18 pixels of the strip the pointer was on a region, not on the bar that resizes |

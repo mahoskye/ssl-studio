@@ -2,6 +2,7 @@
 // blocks and code chips. A view of the text, never a copy: every action here
 // is a text edit on the model the text editor shows, so one undo stack serves
 // both modes (ADR 0002).
+import { Icon } from "../Icon";
 import { createEffect, createResource, createSignal, For, Match, on, onCleanup, Show, Switch } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import { monaco } from "../editor/monaco";
@@ -266,19 +267,19 @@ export function BlocksView(props: { path: string; group: number }) {
 	const Tools = (props: { node: Node }) => (
 		<span class="block-tools" onClick={(e) => e.stopPropagation()}>
 			<button tabindex={-1} title="Move up (Alt+Up)" aria-label="Move up" onClick={() => void move(props.node, -1)}>
-				↑
+				<Icon name="arrow-up" />
 			</button>
 			<button tabindex={-1} title="Move down (Alt+Down)" aria-label="Move down" onClick={() => void move(props.node, 1)}>
-				↓
+				<Icon name="arrow-down" />
 			</button>
 			<button tabindex={-1} title="Wrap in a region" aria-label="Wrap in a region" onClick={() => void wrap(props.node)}>
-				▣
+				<Icon name="symbol-namespace" />
 			</button>
 			<button tabindex={-1} title="Show in text" aria-label="Show in text" onClick={() => select(props.node, true)}>
-				⇥
+				<Icon name="go-to-file" />
 			</button>
 			<button tabindex={-1} title="Delete (Delete)" aria-label="Delete this block" onClick={() => void remove(props.node)}>
-				×
+				<Icon name="trash" />
 			</button>
 		</span>
 	);
@@ -397,7 +398,7 @@ export function BlocksView(props: { path: string; group: number }) {
 		const header = (label: any, meta?: string) => (
 			<div class="block-head" {...dropZone(n.start)} classList={{ drop: dropAt() === n.start }} onClick={() => select(n)} onDblClick={() => toggle(n)}>
 				<button class="twisty" tabindex={-1} aria-label={isCollapsed(n) ? "Unfold" : "Fold"} aria-expanded={!isCollapsed(n)} onClick={(e) => (e.stopPropagation(), toggle(n))}>
-					{isCollapsed(n) ? "▸" : "▾"}
+					<Icon name={isCollapsed(n) ? "chevron-right" : "chevron-down"} />
 				</button>
 				<span class="block-label">{label}</span>
 				<Show when={meta}>

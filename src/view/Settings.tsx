@@ -1,5 +1,6 @@
 // Settings: appearance, the editor, the language server and the keyboard,
 // each saying where it is saved.
+import { Icon } from "./Icon";
 import { RULER_MARGIN } from "../shared/houseStyle";
 import { createSignal, createUniqueId, For, Show, type JSX } from "solid-js";
 import type { Settings } from "../shared/protocol";
@@ -213,13 +214,13 @@ export function SettingsDialog() {
 							{(ids) => (
 								<div class="settings-stepper" role="group" aria-labelledby={ids.label} aria-describedby={ids.hint}>
 									<button aria-label="Smaller" disabled={scale() <= UI_SCALE.min} onClick={() => void save("uiScale", stepScale(scale(), -1))}>
-										−
+										<Icon name="remove" />
 									</button>
 									<output id={ids.control} aria-live="polite">
 										{Math.round(scale() * 100)}%
 									</output>
 									<button aria-label="Larger" disabled={scale() >= UI_SCALE.max} onClick={() => void save("uiScale", stepScale(scale(), 1))}>
-										+
+										<Icon name="add" />
 									</button>
 									<button disabled={scale() === UI_SCALE.normal} onClick={() => void save("uiScale", UI_SCALE.normal)}>
 										Reset

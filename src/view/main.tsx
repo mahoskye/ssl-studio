@@ -4,6 +4,7 @@ import { render } from "solid-js/web";
 import { App } from "./App";
 import { connect, backend, onConnectionLost } from "./backend";
 import { installKeys } from "./commands";
+import { installContextMenu } from "./contextMenu";
 import { loadLanguageConfiguration } from "./editor/monaco";
 import "./editor/opener";
 import { loadGrammar } from "./editor/textmate";
@@ -37,6 +38,7 @@ async function start() {
 	registerProviders();
 	registerMarkdownLinks();
 	installKeys();
+	installContextMenu();
 	setState("info", await backend.info());
 	window.addEventListener("error", (e) => uncaught(e.error ?? e.message));
 	window.addEventListener("unhandledrejection", (e) => uncaught(e.reason));

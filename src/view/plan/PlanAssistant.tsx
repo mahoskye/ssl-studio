@@ -1,6 +1,7 @@
 // The agent's side of a plan, beside the chart: its questions, its suggestions,
 // and the spec. Answers and accepted suggestions are text edits on the plan, so
 // undo covers them too.
+import { Icon } from "../Icon";
 import { createEffect, createResource, createSignal, createUniqueId, For, onCleanup, onMount, Show } from "solid-js";
 import { agent, currentModel } from "../agent/store";
 import { choose } from "../dialogs";
@@ -121,7 +122,7 @@ export function PlanAssistant(props: { path: string; plan: Plan; text: string; o
 					{(stage) => (
 						<li class={stage.state} title={stage.words}>
 							<span class="plan-stage-mark" aria-hidden="true">
-								{stage.state === "done" ? "✓" : stage.state === "warn" ? "!" : "·"}
+								{stage.state === "done" ? <Icon name="check" /> : stage.state === "warn" ? "!" : "·"}
 							</span>
 							<span class="plan-stage-name">{stage.name}</span>
 							<span class="plan-stage-words">{stage.words}</span>
@@ -343,11 +344,11 @@ export function PlanAssistant(props: { path: string; plan: Plan; text: string; o
 				<Show when={paths().paths.length}>
 					<div class="plan-paths" role="group" aria-label="Paths through the chart">
 						<button title="The path before" aria-label="The path before" onClick={() => stepPath(-1)}>
-							◂
+							<Icon name="chevron-left" />
 						</button>
 						<span role="status">{shownPath() === null ? "Show a path on the chart" : `Path ${shownPath()! + 1} of ${paths().paths.length}`}</span>
 						<button title="The next path" aria-label="The next path" onClick={() => stepPath(1)}>
-							▸
+							<Icon name="chevron-right" />
 						</button>
 						<Show when={shownPath() !== null}>
 							<button title="Stop showing a path" onClick={() => setShownPath(null)}>

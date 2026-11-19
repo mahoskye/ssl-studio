@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { moveIndex, restoreIndex, ringStep, stopIndex, treeStep, typeAhead, isMoveKey, type TreeRow } from "../src/view/panels/rowMoves";
-import { COPY, COPY_PATH, COPY_RELATIVE, CUT, folderFor, holdsRoot, menuFor, nameProblem, NEW_FILE, NEW_FOLDER, PASTE, RENAME, retarget, TRASH, without } from "../src/view/panels/explorerMenu";
+import { foldedFrom, moveIndex, restoreIndex, ringStep, stopIndex, treeStep, typeAhead, isMoveKey, withFold, type TreeRow } from "../src/view/panels/rowMoves";
+import { COPY, COPY_NAME, COPY_PATH, COPY_RELATIVE, CUT, folderFor, holdsRoot, menuFor, nameProblem, NEW_FILE, NEW_FOLDER, PASTE, RENAME, retarget, TRASH, without } from "../src/view/panels/explorerMenu";
 import { byLine, markedColumns, segments } from "../src/view/panels/searchLines";
 import { snippetAsText, TEMPLATES } from "../src/shared/houseStyle";
 import { patternsFrom } from "../src/view/plan/build";
@@ -140,16 +140,16 @@ test("the workspace folder is offered what adds to it and its path, never a rena
 });
 
 test("a folder and a file get their menus, with one wording for the trash", () => {
-	expect(menuFor("dir", "/w/Sample", "/w")).toEqual([NEW_FILE, NEW_FOLDER, CUT, COPY, COPY_PATH, COPY_RELATIVE, RENAME, TRASH]);
-	expect(menuFor("file", "/w/Sample/Orders.ssl", "/w")).toEqual([CUT, COPY, COPY_PATH, COPY_RELATIVE, RENAME, TRASH]);
+	expect(menuFor("dir", "/w/Sample", "/w")).toEqual([NEW_FILE, NEW_FOLDER, CUT, COPY, COPY_PATH, COPY_RELATIVE, COPY_NAME, RENAME, TRASH]);
+	expect(menuFor("file", "/w/Sample/Orders.ssl", "/w")).toEqual([CUT, COPY, COPY_PATH, COPY_RELATIVE, COPY_NAME, RENAME, TRASH]);
 	expect(TRASH).toBe("Move to trash");
 	for (const kind of ["file", "dir"] as const) expect(menuFor(kind, "/w/x", "/w")).not.toContain("Delete");
 });
 
 test("paste is offered once something was cut or copied, and into the workspace folder too", () => {
 	expect(menuFor("file", "/w/a.ssl", "/w")).not.toContain(PASTE);
-	expect(menuFor("file", "/w/a.ssl", "/w", true)).toEqual([CUT, COPY, PASTE, COPY_PATH, COPY_RELATIVE, RENAME, TRASH]);
-	expect(menuFor("dir", "/w/Sample", "/w", true)).toEqual([NEW_FILE, NEW_FOLDER, CUT, COPY, PASTE, COPY_PATH, COPY_RELATIVE, RENAME, TRASH]);
+	expect(menuFor("file", "/w/a.ssl", "/w", true)).toEqual([CUT, COPY, PASTE, COPY_PATH, COPY_RELATIVE, COPY_NAME, RENAME, TRASH]);
+	expect(menuFor("dir", "/w/Sample", "/w", true)).toEqual([NEW_FILE, NEW_FOLDER, CUT, COPY, PASTE, COPY_PATH, COPY_RELATIVE, COPY_NAME, RENAME, TRASH]);
 	expect(menuFor("dir", "/w", "/w", true)).toEqual([NEW_FILE, NEW_FOLDER, PASTE, COPY_PATH]);
 	// The workspace folder itself is never cut or copied.
 	expect(menuFor("dir", "/w", "/w", true)).not.toContain(CUT);
@@ -300,4 +300,25 @@ test("a match inside the one before it, or of nothing, has no mark and no column
 	expect(markedColumns(line)).toEqual([1, 6]);
 	expect(segments(line).filter((part) => part.match).map((part) => part.text)).toEqual(["aaa", "b"]);
 	expect(markedColumns({ path: "p", line: 1, text: "x", matches: [] })).toEqual([]);
+});
+
+test("the folded groups are read with suspicion: only names count, each once", () => {
+	expect(foldedFrom(JSON.stringify(["docs:work", "docs:plans", "docs:work", 7, "", null]))).toEqual(["docs:work", "docs:plans"]);
+	expect(foldedFrom(null)).toEqual([]);
+	expect(foldedFrom("not json")).toEqual([]);
+	expect(foldedFrom('{"docs:work":true}')).toEqual([]);
+});
+
+test("a group that is shut is on the list once, and one that is opened is off it", () => {
+	expect(withFold([], "docs:work", true)).toEqual(["docs:work"]);
+	expect(withFold(["docs:work"], "docs:work", true)).toEqual(["docs:work"]);
+	expect(withFold(["docs:work", "docs:plans"], "docs:work", false)).toEqual(["docs:plans"]);
+	expect(withFold(["docs:plans"], "docs:work", false)).toEqual(["docs:plans"]);
+});
+
+test("a file's menu in the Explorer copies its name as well as its paths", () => {
+	expect(menuFor("file", "/w/Sample/Orders.ssl", "/w")).toContain(COPY_NAME);
+	expect(menuFor("dir", "/w/Sample", "/w")).toContain(COPY_NAME);
+	// The workspace's own folder is known by its path.
+	expect(menuFor("dir", "/w", "/w")).not.toContain(COPY_NAME);
 });

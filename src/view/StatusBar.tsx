@@ -1,5 +1,6 @@
 // Workspace, language server and opencode status, cursor, and the size meter
 // for the current script (program decision 0006).
+import { Icon } from "./Icon";
 import { createEffect, createSignal, on, onCleanup, Show } from "solid-js";
 import { level, countHistoryEntries, type SizeReport } from "../shared/houseStyle";
 import { backend } from "./backend";
@@ -124,9 +125,7 @@ export function StatusBar() {
 				onClick={() => (notify("Restarting the language server."), void backend.lspRestart())}
 			>
 				{lspLabel()}
-				<span class="restart" aria-hidden="true">
-					{" ⟳"}
-				</span>
+				<Icon name="refresh" class="restart" />
 			</button>
 			<Show when={gitStatus()}>
 				<button
@@ -165,8 +164,8 @@ export function StatusBar() {
 					setState("settings", "layout", "bottom", true);
 				}}
 			>
-				<span aria-hidden="true">
-					✖ {counts().errors} ⚠ {counts().warnings}
+				<span class="problem-counts" aria-hidden="true">
+					<Icon name="error" /> {counts().errors} <Icon name="warning" /> {counts().warnings}
 				</span>
 			</button>
 			<Show when={where().length}>

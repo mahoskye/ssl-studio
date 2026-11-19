@@ -282,6 +282,12 @@ export type Call = { id: number; method: keyof BackendApi; args: unknown[] };
 export type Reply = { id: number; result?: unknown; error?: string };
 export type Push = { event: keyof BackendEvents; payload: unknown };
 
+/**
+ * The layout a folder first opens with. Made anew each time it is asked for: the view keeps its settings in the
+ * very object it was given, so one that was handed out once is no longer the default.
+ */
+export const defaultLayout = (): Settings["layout"] => ({ left: true, right: false, bottom: true, leftWidth: 260, rightWidth: 360, bottomHeight: 200 });
+
 export const DEFAULT_SETTINGS: Settings = {
 	theme: "system",
 	fontSize: 13,
@@ -289,7 +295,7 @@ export const DEFAULT_SETTINGS: Settings = {
 	minimap: true,
 	regionColors: {},
 	limits: { bytes: 50 * 1024, codeLines: 400, historyEntries: 3 },
-	layout: { left: true, right: false, bottom: true, leftWidth: 260, rightWidth: 360, bottomHeight: 200 },
+	layout: defaultLayout(),
 	ssl: {},
 	stylePreset: "house",
 	keys: {},

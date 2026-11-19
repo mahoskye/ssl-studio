@@ -48,6 +48,7 @@ whether it is built.
 | Zen and full screen | No | Later | A command each |
 | Several windows | No | Later | One folder to a window |
 | Custom title bar | No | Leave | The system's own is enough |
+| Layout controls | Yes | Have | Asked for in use: side, bottom and right panel buttons in the menu bar, and a Layout menu |
 
 ## The menu bar, menu by menu
 
@@ -80,6 +81,8 @@ of the text editor, and nothing of its own.
 | Health row menu | Yes | Have | Open, and what puts the row right |
 | Search row menu | No | Later | Copy the line or its path |
 | Problems row menu | No | Later | Copy the message |
+| Page menu | Yes | Have | Asked for in use: a rendered document's own (copy, link, edit the text, paths, name) |
+| Text box menu | Yes | Have | The app's own cut, copy, paste and select all; the web view's menu never opens (ADR 0023) |
 
 ## Tabs and groups
 
@@ -116,8 +119,9 @@ of the text editor, and nothing of its own.
 | Toggle comment | Yes | Have | Ctrl+/ is the editor's own, with each kind's marks; SSL is wrapped in `/*` and `;` |
 | User snippets | Partly | Later | Kept in the knowledge base, not by prefix and Tab |
 | Indent settings | Partly | Later | The editor converts tabs and spaces; nothing shows which a file uses |
-| Sticky scroll | No | Later | The enclosing procedure stays at the top |
+| Sticky scroll | Yes | Have | The enclosing regions and procedure stay at the top; the audit had missed it |
 | Emmet | No | Leave | For HTML; forms are on hold |
+| Scroll past the end | Yes | Have | Asked for in use: the last line can be brought to the top of the view |
 
 ## Go and the palette
 
@@ -141,7 +145,8 @@ of the text editor, and nothing of its own.
 | Tree, new, rename | Yes | Have | And move to trash; F2 and Delete work on a row |
 | Follows the editor | Yes | Have | The open file's row is marked |
 | File watching | Partly | Later | Misses a file git puts back and later changes to a new file; needs a check of its own |
-| Copy path | Yes | Bring | Built: whole (Alt+Shift+C) and from the project's folder, as commands |
+| Copy path | Yes | Bring | Built: whole (Alt+Shift+C), from the project's folder, and the name alone, as commands |
+| Sections fold | Yes | Have | Asked for in use: each group in the Docs panel folds, and stays folded |
 | Copy, cut, paste | Yes | Bring | Built: Ctrl+C, Ctrl+X, Ctrl+V and the row's menu; a copy beside itself is "… copy" |
 | Drag to move | Yes | Bring | Built: a row onto a folder, or onto the tree for the workspace folder; it asks first |
 | Reveal in system | No | Later | Open the folder in the file manager |

@@ -5,6 +5,7 @@
 // Click a procedure, or press F on it, to focus its neighbourhood;
 // double-click it, or press Enter, to open it. The same calls can be read as
 // a plain list.
+import { Icon } from "../Icon";
 import ELK from "elkjs/lib/elk.bundled.js";
 import { batch, createEffect, createMemo, createSignal, createUniqueId, For, on, onCleanup, Show } from "solid-js";
 import { level } from "../../shared/houseStyle";
@@ -834,13 +835,13 @@ export function GraphView() {
 				<Show when={mode() === "graph" && !narrow()}>
 					<div class="graph-zoom" role="group" aria-label="Zoom">
 						<button title="Zoom out (−)" aria-label="Zoom out" onClick={() => zoomBy(1 / 1.2)}>
-							−
+							<Icon name="remove" />
 						</button>
 						<button title="Reset the zoom to 100%" aria-label={`Zoom ${Math.round(view().scale * 100)}%. Reset to 100%`} onClick={() => zoomBy(1 / view().scale)}>
 							{Math.round(view().scale * 100)}%
 						</button>
 						<button title="Zoom in (+)" aria-label="Zoom in" onClick={() => zoomBy(1.2)}>
-							+
+							<Icon name="add" />
 						</button>
 					</div>
 				</Show>
@@ -851,10 +852,10 @@ export function GraphView() {
 				</Show>
 				{/* What is used now and then goes in a menu, so that the bar stays one row: folding, the key, the picture, reading again. */}
 				<Menu label="More for the graph" title="More: fold, unresolved targets, keys, save picture, refresh" class="graph-more" items={more}>
-					<span aria-hidden="true">⋯</span>
+					<Icon name="ellipsis" />
 				</Menu>
 				<button class="graph-close" title="Close the graph and go back to the editors" aria-label="Close the graph" onClick={() => setState("centerView", "editors")}>
-					<span aria-hidden="true">×</span>
+					<Icon name="close" />
 				</button>
 			</div>
 			<Show when={idle()}>

@@ -42,6 +42,7 @@ export const MENU_BAR: BarMenu[] = [
 			forFolder("Move to trash…", "trash-file"),
 			forFile("Copy path", "copy-path"),
 			forFile("Copy path in the project", "copy-relative-path"),
+			forFile("Copy file name", "copy-file-name"),
 			"separator",
 			forFile("Close tab", "close"),
 			forFile("Close other tabs", "close-others"),
@@ -117,7 +118,9 @@ export const MENU_BAR: BarMenu[] = [
 			"separator",
 			forFolder("Toggle side bar", "toggle-sidebar"),
 			forFolder("Toggle bottom panel", "toggle-panel"),
+			forFolder("Toggle right panel", "toggle-right-panel"),
 			{ label: "Hide the menu bar", command: "toggle-menu-bar" },
+			forFolder("Reset the layout", "reset-layout"),
 			"separator",
 			forFile("Split editor", "split"),
 			forFile("Toggle blocks view", "blocks"),
@@ -192,6 +195,16 @@ export const FIELD_COMMANDS: Readonly<Record<string, "undo" | "redo" | "cut" | "
 	"editor.action.clipboardPasteAction": "paste",
 	"editor.action.selectAll": "selectAll",
 };
+
+/**
+ * What a right-click on a text box offers, of the box's own commands: only
+ * what would do something now. Nothing to cut from a box that cannot be typed
+ * in, nothing to copy with nothing selected, no paste where the window may not
+ * read the clipboard, nothing to select in an empty box.
+ */
+export function boxMenu(box: { selected: boolean; editable: boolean; filled: boolean; canPaste: boolean }): ("cut" | "copy" | "paste" | "selectAll")[] {
+	return [...(box.selected && box.editable ? (["cut"] as const) : []), ...(box.selected ? (["copy"] as const) : []), ...(box.editable && box.canPaste ? (["paste"] as const) : []), ...(box.filled ? (["selectAll"] as const) : [])];
+}
 
 /** The menu Alt and a letter opens: its place in the bar, or -1. */
 export const menuForLetter = (letter: string, menus: readonly BarMenu[] = MENU_BAR) => menus.findIndex((menu) => menu.letter === letter.toLowerCase());

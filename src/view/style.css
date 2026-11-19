@@ -85,6 +85,10 @@ button:disabled, button[aria-disabled="true"] { opacity: .5; cursor: default; }
 button:disabled:hover, button[aria-disabled="true"]:hover { background: none; filter: none; }
 button.primary:disabled:hover { background: var(--button-bg); }
 input, select { font: inherit; background: var(--input-bg); color: var(--input-fg); border: 1px solid var(--input-border); border-radius: var(--radius-sm); padding: var(--space-2) var(--space-3); }
+/* A graphic from the icon font (Icon.tsx, icons.ts): one family for every small picture in the window. */
+.codicon-glyph { display: inline-block; flex: none; font: normal calc(16px * var(--ui-scale))/1 codicon; text-align: center; vertical-align: text-bottom; text-transform: none; letter-spacing: 0; -webkit-font-smoothing: antialiased; }
+/* Beside small words it is their size, not a button's. */
+.statusbar .codicon-glyph, .meta .codicon-glyph, .here-mark .codicon-glyph, .doc-status .codicon-glyph, .md-status .codicon-glyph, .table-view th .codicon-glyph, .plan-stage-mark .codicon-glyph, .review li > .codicon-glyph, .check-mark .codicon-glyph, .sev .codicon-glyph, .twisty .codicon-glyph, .codicon-glyph.twisty { font-size: calc(13px * var(--ui-scale)); }
 .hint { color: var(--muted); font-size: var(--text-md); margin: var(--space-3) var(--space-5); }
 .warn { color: var(--warning); }
 .spacer { flex: 1; }
@@ -100,10 +104,16 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .menubar { grid-row: 1; grid-column: 1 / -1; display: flex; align-items: center; min-width: 0; height: var(--menubar-height); padding: 0 var(--space-2); background: var(--status-bg); color: var(--status-fg); border-bottom: 1px solid var(--border); font-size: var(--text-md); }
 .menubar-name { padding: var(--space-1) var(--space-4); }
 .menubar-name.open { background: var(--selected); }
-.menubar .menu-pop { left: 0; right: auto; max-height: calc(100vh - var(--menubar-height) - var(--status-height)); overflow-y: auto; font-size: var(--text-base); }
+.menubar-menus { display: flex; align-items: center; min-width: 0; }
+.menubar-menus .menu-pop { left: 0; right: auto; max-height: calc(100vh - var(--menubar-height) - var(--status-height)); overflow-y: auto; font-size: var(--text-base); }
 /* One entry is at hand, whether the pointer or the arrow keys put it there. */
-.menubar .menu-item:hover { background: none; }
-.menubar .menu-item:focus { background: var(--selected); }
+.menubar-menus .menu-item:hover { background: none; }
+.menubar-menus .menu-item:focus { background: var(--selected); }
+/* The window's parts at the bar's far end: a button each, pressed while its part is showing, and a menu for the rest. */
+.layout-controls { display: flex; align-items: center; flex: none; gap: var(--space-1); }
+.layout-controls > button, .layout-controls > .menu > button { display: inline-flex; align-items: center; justify-content: center; width: var(--target); height: var(--target); padding: 0; color: var(--muted); }
+.layout-controls > button[aria-pressed="true"], .layout-controls > button:hover:not(:disabled), .layout-controls > .menu > button:hover, .layout-controls > .menu > button[aria-expanded="true"] { color: var(--fg); }
+.layout-controls .menu-pop { font-size: var(--text-base); }
 /* Why the entry at hand cannot run: the menu's last line, there only while there is something to say. */
 .menu-why { display: none; margin-top: var(--space-2); padding: var(--space-2) var(--space-4) var(--space-1); border-top: 1px solid var(--border); color: var(--muted); font-size: var(--text-md); white-space: normal; }
 .menu-why.shown { display: block; }
@@ -115,10 +125,12 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .sidebar { grid-row: 2; grid-column: 2; width: var(--left); min-width: 0; background: var(--side-bg); color: var(--side-fg); overflow: hidden; display: flex; flex-direction: column; }
 .splitter { position: relative; z-index: 1; }
 .splitter.x { grid-row: 2; grid-column: 3; width: 4px; cursor: col-resize; background: var(--border); }
-/* The bar is 4px; what the pointer can catch is 12px. */
+/* The bar is 4px; what the pointer can catch is 10px, and the 6px more are on the panel's side of it, never the */
+/* editors': what stands at the editors' edge (the strip of regions, the scroll bars) is not taken from the pointer. */
 .splitter::after { content: ""; position: absolute; }
-.splitter.x::after { inset: 0 -4px; }
-.splitter.y::after { inset: -4px 0; }
+.splitter.x::after { inset: 0 0 0 -6px; }
+.splitter.x.after-editors::after { inset: 0 -6px 0 0; }
+.splitter.y::after { inset: 0 0 -6px 0; }
 .splitter.x:hover, .splitter.y:hover, .splitter:focus-visible { background: var(--accent); outline: none; }
 .center { grid-row: 2; grid-column: 4; min-width: 0; display: flex; flex-direction: column; }
 .editors { flex: 1; min-height: 0; display: flex; }
@@ -156,7 +168,7 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .git-letter.added, .git-letter.untracked { color: var(--ok); }
 .git-letter.deleted, .git-letter.conflict { color: var(--error); }
 .statusbar .git-item { display: inline-flex; align-items: center; gap: var(--space-2); }
-.statusbar .git-item .codicon-glyph { font: normal var(--text-md)/1 codicon; }
+.statusbar .problem-counts { display: inline-flex; align-items: center; gap: var(--space-2); }
 .statusbar .git-count { background: var(--selected); border-radius: var(--radius-lg); padding: 0 var(--space-3); }
 
 /* A file that is not text, where the editor would be: a picture on a ground that shows what of it is clear, or a note. */
@@ -170,7 +182,7 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 
 .panel-body { display: flex; flex-direction: column; min-height: 0; height: 100%; }
 .panel-title { display: flex; align-items: center; gap: var(--space-1); padding: var(--space-4) var(--space-4) var(--space-3) var(--space-5); font-size: var(--text-sm); text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
-.panel-title span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.panel-title > span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .filter { margin: 0 var(--space-4) var(--space-3); }
 .tree { overflow: auto; flex: 1; padding-bottom: var(--space-5); }
 .tree-row { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-1) var(--space-4); cursor: pointer; white-space: nowrap; }
@@ -187,7 +199,7 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .proc-script { display: flex; align-items: baseline; gap: var(--space-3); }
 .proc-script .proc-script-name { flex: none; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); text-transform: none; letter-spacing: 0; font-weight: 600; }
 .proc-script .meta { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; color: var(--muted); font-size: var(--text-sm); text-transform: none; letter-spacing: 0; font-weight: 400; }
-.tree-row .twisty { width: 10px; color: var(--muted); }
+.tree-row .twisty { flex: none; width: calc(14px * var(--ui-scale)); color: var(--muted); }
 /* A file's mark: a glyph in its kind's colour. The colour only repeats what the glyph and the name already say. */
 .file-mark { flex: none; width: calc(16px * var(--ui-scale)); font: normal calc(14px * var(--ui-scale))/1 codicon; text-align: center; color: var(--muted); }
 .file-mark.fm-folder { color: color-mix(in srgb, var(--warning) 60%, var(--muted)); }
@@ -196,7 +208,7 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .file-mark.fm-plan { color: var(--ok); }
 .file-mark.fm-doc { color: color-mix(in srgb, var(--fg) 70%, var(--muted)); }
 .tab .file-mark { margin-right: var(--space-2); }
-.tree-row .icon { width: 14px; text-align: center; color: var(--muted); }
+.tree-row .icon { flex: none; width: calc(16px * var(--ui-scale)); text-align: center; color: var(--muted); }
 .tree-row.kind-2 .icon, .tree-row.kind-2 .label { color: var(--accent); font-weight: 600; }
 .tree-row.kind-11 .icon, .tree-row.kind-12 .icon { color: var(--warning); }
 .tree-row.file-head { font-weight: 600; }
@@ -261,24 +273,27 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .group.active .tab.active { box-shadow: inset 0 1px 0 var(--accent); }
 .tab:focus-visible { outline-offset: -2px; }
 .tab .name { overflow: hidden; text-overflow: ellipsis; max-width: 32ch; }
-.tab .close { width: var(--target); height: var(--target); padding: 0; line-height: var(--target); text-align: center; }
+.tab .close { display: inline-flex; align-items: center; justify-content: center; width: var(--target); height: var(--target); padding: 0; }
+/* Unsaved changes: a dot that is drawn, so that it is round on every system. */
+.tab .dot { width: calc(8px * var(--ui-scale)); height: calc(8px * var(--ui-scale)); border-radius: 50%; background: currentColor; }
 .tab .close .dot { display: none; }
 /* A pinned tab: a pin where the cross is, and no cross. The glyph is the editor's own icon font's. */
-.tab .pin { width: var(--target); height: var(--target); padding: 0; line-height: var(--target); text-align: center; color: var(--accent); }
-.tab .pin-mark::before { font-family: codicon; content: "\eba0"; font-size: 14px; vertical-align: middle; }
+.tab .pin { display: inline-flex; align-items: center; justify-content: center; width: var(--target); height: var(--target); padding: 0; color: var(--accent); }
+.tab .pin-mark::before { font: normal calc(14px * var(--ui-scale))/1 codicon; content: "\eba0"; }
 .tab.pinned .close { display: none; }
-.tab .pinned-dot { width: var(--target); text-align: center; line-height: var(--target); }
-.tab.dirty .close .dot { display: inline; }
+.tab .pinned-dot { display: inline-flex; align-items: center; justify-content: center; width: var(--target); height: var(--target); }
+.tab .pinned-dot .dot { display: block; }
+.tab.dirty .close .dot { display: block; }
 .tab.dirty .close .x { display: none; }
 .tab.dirty .close:hover .dot { display: none; }
-.tab.dirty .close:hover .x { display: inline; }
+.tab.dirty .close:hover .x { display: inline-block; }
 /* A background tab shows its close button when the pointer or the keyboard is on it. */
 .tab:not(.active):not(.dirty):not(:hover):not(:focus-visible) .close { visibility: hidden; }
 .tab.conflict .name { color: var(--error); }
 /* Changed on disk: said with a mark as well as the colour. */
 .tab .conflict-mark { color: var(--error); font-weight: 700; }
 .tab-menu { display: flex; align-items: center; padding: 0 var(--space-1); position: relative; }
-.tab-menu > button { width: var(--target); height: var(--target); padding: 0; color: var(--muted); }
+.tab-menu > button { display: inline-flex; align-items: center; justify-content: center; width: var(--target); height: var(--target); padding: 0; color: var(--muted); }
 .menu { position: relative; }
 .menu-pop { position: absolute; right: 0; top: 100%; z-index: 50; min-width: 240px; padding: var(--space-2); background: var(--side-bg); color: var(--side-fg); border: 1px solid var(--input-border); border-radius: var(--radius-lg); box-shadow: var(--shadow); display: flex; flex-direction: column; }
 .menu-item { display: flex; align-items: center; gap: var(--space-6); padding: var(--space-2) var(--space-4); text-align: left; white-space: nowrap; border-radius: var(--radius-sm); }
@@ -426,9 +441,11 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .crumb:hover { color: var(--fg); }
 .sep { opacity: .6; }
 .editor-row { flex: 1; min-height: 0; min-width: 0; display: flex; }
-.region-strip { width: 12px; position: relative; flex: none; background: var(--tab-bg); border-right: 1px solid var(--border); }
-.region-band { position: absolute; width: 5px; padding: 0; border-radius: var(--radius-sm); opacity: .85; cursor: pointer; min-height: 3px; }
-.region-band:hover, .region-band:focus-visible { opacity: 1; width: 9px; }
+/* Wide enough to point at: a band is caught anywhere across the strip at its height, not only on its own few pixels. */
+.region-strip { width: 18px; position: relative; flex: none; overflow: hidden; background: var(--tab-bg); border-right: 1px solid var(--border); }
+.region-band { position: absolute; width: 6px; margin-left: 3px; padding: 0; border-radius: var(--radius-sm); opacity: .85; cursor: pointer; min-height: 3px; }
+.region-band::after { content: ""; position: absolute; inset: 0 -18px; }
+.region-band:hover, .region-band:focus-visible { opacity: 1; width: 10px; }
 .health section { padding: 0 var(--space-5) var(--space-5); }
 .health h3 { font-size: var(--text-md); font-weight: 600; margin: var(--space-4) 0 var(--space-3); }
 .meter-row { display: grid; grid-template-columns: 1fr auto; gap: var(--space-1) var(--space-4); margin-bottom: var(--space-4); font-size: var(--text-md); align-items: center; }
@@ -939,6 +956,16 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .docs-setup { padding: 0 var(--space-5) var(--space-4); }
 .docs-setup .hint { margin: 0 0 var(--space-4); }
 .group-head .folder { text-transform: none; letter-spacing: 0; opacity: .8; }
+/* A heading that folds its group: a bar across the list with its own ground and a twisty, so that it is not taken for one of the files under it. */
+.group-head.foldable, .doc-kind.foldable { display: flex; align-items: center; gap: var(--space-2); cursor: pointer; user-select: none; white-space: nowrap; }
+.group-head.foldable { margin-top: var(--space-3); padding: var(--space-2) var(--space-4) var(--space-2) var(--space-2); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--fg) 5%, transparent); color: var(--fg); font-weight: 600; }
+.group-head.foldable:first-child { margin-top: 0; }
+.foldable .head-words { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.foldable .folder { font-weight: 400; color: var(--muted); }
+.foldable .twisty { color: var(--muted); }
+.foldable .count { flex: none; margin-left: 0; padding: 0 var(--space-3); border-radius: 999px; background: var(--hover); color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; letter-spacing: 0; }
+.foldable:hover, .foldable:focus-visible { background: var(--hover); }
+.foldable:hover .twisty, .foldable:focus-visible .twisty { color: var(--fg); }
 /* The working documents: a ticket's key, a state in the tone of what it comes to, and the kinds of the knowledge base. */
 .doc-row .doc-key { font-weight: 600; font-variant-numeric: tabular-nums; }
 .doc-row .doc-status { padding: 0 var(--space-3); border-radius: 999px; border: 1px solid var(--border); white-space: nowrap; }
@@ -965,11 +992,11 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 	.doc-row .meta.shortens .short { display: inline; }
 	/* A warning is its mark here; its words are in the row's tooltip and are still read out. */
 	.doc-row .meta.warn { font-size: 0; }
-	.doc-row .meta.warn::before { content: "⚠"; font-size: var(--text-sm); }
+	.doc-row .meta.warn::before { content: "\ea6c"; font: normal var(--text-md)/1 codicon; }
 }
 .doc-row .meta .short { display: none; }
-.doc-kind { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-2) var(--space-5) 0 calc(var(--space-5) + 2px); font-size: var(--text-sm); color: var(--muted); }
-.doc-kind .count { padding: 0 var(--space-3); border-radius: 999px; background: var(--hover); color: var(--fg); font-variant-numeric: tabular-nums; }
+/* A kind inside the knowledge base: a heading one step in, quieter than the group's own. */
+.doc-kind { padding: var(--space-2) var(--space-4) var(--space-1) var(--space-5); font-size: var(--text-sm); font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
 .doc-row { padding-left: var(--space-6); }
 .doc-row.missing .label { color: var(--muted); font-style: italic; }
 .doc-row .meta.warn, .health .meta.warn { color: var(--warning); }

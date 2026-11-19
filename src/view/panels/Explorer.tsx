@@ -3,6 +3,7 @@
 // is on its menu (right-click, the menu key, Shift+F10), on F2 and Delete,
 // on Ctrl+X, Ctrl+C and Ctrl+V, and in the command palette. A row dragged
 // onto a folder is moved there, after asking.
+import { Icon } from "../Icon";
 import { FileMark } from "../FileMark";
 import { batch, createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
@@ -12,7 +13,7 @@ import { backend } from "../backend";
 import { ask, choose } from "../dialogs";
 import { activePath, canonical, fileRemoved, fileRenamed, heldFromBefore, notify, openFile, scriptsCameTo, setState, state } from "../state";
 import { baseName, dirName, isInside, joinPath } from "../../shared/paths";
-import { COPY, COPY_PATH, COPY_RELATIVE, CUT, folderFor, holdsRoot, menuFor, nameProblem, NEW_FILE, NEW_FOLDER, openFolders, PASTE, RENAME, retarget, TRASH, without } from "./explorerMenu";
+import { COPY, COPY_NAME, COPY_PATH, COPY_RELATIVE, CUT, folderFor, holdsRoot, menuFor, nameProblem, NEW_FILE, NEW_FOLDER, openFolders, PASTE, RENAME, retarget, TRASH, without } from "./explorerMenu";
 import { copyName, copyProblem, folderOf, moveProblem, type Clip } from "./explorerMoves";
 import { chooseFromMenu } from "./RowMenu";
 import { showPanel } from "./registry";
@@ -78,7 +79,7 @@ function Listed(props: { listing: Listing; path: string; depth: number }) {
 		<>
 			<Show when={props.listing.error}>
 				<Row role="treeitem" key={`${props.path}?error`} level={props.depth + 1} class="tree-row tree-note warn" style={indent(props.depth)} onActivate={refresh}>
-					<span class="label">This folder could not be read: {props.listing.error}. Press Enter here, or ⟳ above, to try again.</span>
+					<span class="label">This folder could not be read: {props.listing.error}. Press Enter here, or Refresh above, to try again.</span>
 				</Row>
 			</Show>
 			<For each={props.listing.entries}>{(entry) => <EntryRow entry={entry} depth={props.depth} />}</For>
@@ -143,7 +144,9 @@ function EntryRow(props: { entry: Entry; depth: number }) {
 				}}
 			>
 				<span class="twisty" aria-hidden="true">
-					{isDir() ? (open() ? "▾" : "▸") : ""}
+					<Show when={isDir()}>
+						<Icon name={open() ? "chevron-down" : "chevron-right"} />
+					</Show>
 				</span>
 				<FileMark name={props.entry.name} folder={isDir() ? { open: open() } : undefined} />
 				<span class="label">{props.entry.name}</span>
@@ -308,9 +311,9 @@ async function act(action: string | null, entry: Entry, where: { home?: string; 
 			}
 			back = entry.path;
 		} else if (action === PASTE) back = await paste(entry);
-		else if (action === COPY_PATH || action === COPY_RELATIVE) {
+		else if (action === COPY_PATH || action === COPY_RELATIVE || action === COPY_NAME) {
 			// The commands are loaded when asked for, because commands.ts imports this file.
-			await (await import("../commands")).copyPath(action === COPY_PATH ? "whole" : "relative", entry.path);
+			await (await import("../commands")).copyPath(action === COPY_PATH ? "whole" : action === COPY_NAME ? "name" : "relative", entry.path);
 			back = entry.path;
 		} else return;
 	} catch (e) {
@@ -444,20 +447,20 @@ export function Explorer() {
 				<span>{state.workspace?.name}</span>
 				<IconButton
 					label="New file or folder"
-					glyph="＋"
+					icon="add"
 					menu
 					onClick={(e) => {
 						const box = e.currentTarget.getBoundingClientRect();
 						rootMenu({ x: box.left, y: box.bottom });
 					}}
 				/>
-				<IconButton label="Refresh the file list" title="Refresh" glyph="⟳" onClick={refresh} />
+				<IconButton label="Refresh the file list" title="Refresh" icon="refresh" onClick={refresh} />
 			</div>
 			<Show when={!read()}>
 				<p class="hint">Reading the folder…</p>
 			</Show>
 			<Show when={read() && !root.error && !root.entries.length}>
-				<p class="hint">This folder is empty. Use ＋ to add a file or a folder.</p>
+				<p class="hint">This folder is empty. Use New, above, to add a file or a folder.</p>
 			</Show>
 			<Rows
 				role="tree"

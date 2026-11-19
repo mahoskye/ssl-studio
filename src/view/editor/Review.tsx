@@ -2,6 +2,7 @@
 // and every agent step go through here. Nothing changes until Accept, and
 // Accept is an undoable edit, not a save (ADR 0002). The review stays open
 // until the accept has worked, so a failed write loses nothing.
+import { Icon } from "../Icon";
 import { createEffect, createSignal, For, onCleanup, onMount, Show, untrack } from "solid-js";
 import { choose } from "../dialogs";
 import { state, notify } from "../state";
@@ -170,7 +171,7 @@ export function ReviewView() {
 							<For each={r.checks}>
 								{(c) => (
 									<li class={c.ok === null ? "unknown" : c.ok ? "pass" : "fail"} title={c.detail}>
-										{c.ok === null ? "?" : c.ok ? "✓" : "✗"} {c.label}
+										{c.ok === null ? "?" : <Icon name={c.ok ? "check" : "close"} />} {c.label}
 										<Show when={c.detail}>
 											<span class="hint"> {c.detail}</span>
 										</Show>

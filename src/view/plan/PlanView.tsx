@@ -1,6 +1,7 @@
 // A plan as a flow chart, laid out by ELK. A view of the plan's text: every
 // action is one undoable text edit on the model the text view shows, and the
 // selected node is the one under the text cursor (ADR 0002, ADR 0005).
+import { Icon } from "../Icon";
 import ELK from "elkjs/lib/elk.bundled.js";
 import { createEffect, createMemo, createSignal, createUniqueId, For, on, onCleanup, onMount, Show, untrack } from "solid-js";
 import { ask } from "../dialogs";
@@ -718,13 +719,13 @@ export function PlanView(props: { path: string; group: number }) {
 					{/* The same three as the call graph has: out, the scale (which resets it), in. */}
 					<div class="graph-zoom" role="group" aria-label="Zoom">
 						<button title="Zoom out (−)" aria-label="Zoom out" onClick={(e) => (zoomBy(1 / 1.2), after(e))}>
-							−
+							<Icon name="remove" />
 						</button>
 						<button title="Reset the zoom to 100%" aria-label={`Zoom ${Math.round(view().scale * 100)}%. Reset to 100%`} onClick={(e) => (zoomBy(1 / view().scale), after(e))}>
 							{Math.round(view().scale * 100)}%
 						</button>
 						<button title="Zoom in (+)" aria-label="Zoom in" onClick={(e) => (zoomBy(1.2), after(e))}>
-							+
+							<Icon name="add" />
 						</button>
 					</div>
 					<button title="As much of the chart as stays legible; again for the whole of it, however small (0)" onClick={(e) => (fitOrWhole(), after(e))}>
@@ -732,7 +733,7 @@ export function PlanView(props: { path: string; group: number }) {
 					</button>
 					{/* What is used now and then, so the bar stays one row. */}
 					<Menu label="More for the chart" title="More: keys, save picture" class="graph-more" items={more}>
-						<span aria-hidden="true">⋯</span>
+						<Icon name="ellipsis" />
 					</Menu>
 				</div>
 				<div class="plan-main" classList={{ stacked: narrow() && assistantOpen() }} ref={watchWidth}>

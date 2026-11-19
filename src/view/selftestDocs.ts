@@ -6,6 +6,7 @@ import { monaco } from "./editor/monaco";
 import { baseName, joinPath } from "../shared/paths";
 import { questionTemplate, specTemplate, ticketTemplate } from "../shared/projectDocs";
 import { backend } from "./backend";
+import { ICON } from "./icons";
 import { showPanel } from "./panels/registry";
 import { docs } from "./project";
 import { followRename, setStatus, updateCatalogs } from "./projectDocs";
@@ -39,7 +40,7 @@ const healthMark = (name: string) => healthRows().find((r) => r.querySelector("s
 /** Health agrees with what the Bun side says about each root file. */
 const healthAgrees = () => {
 	const files = docs().filter((d) => d.group === "project");
-	return files.length > 0 && healthRows().length === files.length && files.every((f) => healthMark(f.name).includes(!f.exists ? "missing" : f.untouched ? "template" : "✓"));
+	return files.length > 0 && healthRows().length === files.length && files.every((f) => healthMark(f.name).includes(!f.exists ? "missing" : f.untouched ? "template" : ICON.check));
 };
 const link = (text: string) => [...(rendered()?.querySelectorAll("a") ?? [])].find((a) => a.textContent === text);
 const tabs = () => state.groups.reduce((count, group) => count + group.tabs.length, 0);
@@ -118,7 +119,7 @@ export function selftestDocsSetup(): Promise<Steps> {
 
 		showPanel("health");
 		await step("healthSaysTemplate", () => until(() => healthAgrees() && healthMark("README.md").includes("template") && healthMark("AGENTS.md").includes("template")));
-		await step("healthSaysSetUp", async () => healthMark("project.toml").includes("✓"));
+		await step("healthSaysSetUp", async () => healthMark("project.toml").includes(ICON.check));
 		await step("healthRowOpens", async () => {
 			healthRows()[0]!.click();
 			return until(() => baseName(activePath() ?? "") === "README.md" && rendered()?.querySelector("h1")?.textContent === state.project!.name);

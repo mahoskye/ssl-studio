@@ -1,6 +1,7 @@
 // The project's documents in one place: README.md and AGENTS.md first,
 // whether or not they exist yet, then the Markdown in the docs folder and the
 // plans. Which folders those are comes from .ssl-studio/project.toml.
+import { Icon } from "../Icon";
 import { FileMark } from "../FileMark";
 import { createMemo, createResource, createSignal, For, Show } from "solid-js";
 import type { DocFile } from "../../shared/protocol";
@@ -110,7 +111,7 @@ function ItemRow(props: { file: DocFile; depth?: number; lead?: string; note?: s
 				</span>
 			</Show>
 			<Show when={stale()}>
-				<span class="meta warn" title="The list in this catalog no longer says what the folder holds. ＋, Update catalogs, writes it afresh.">
+				<span class="meta warn" title="The list in this catalog no longer says what the folder holds. “Update catalogs”, under New above, writes it afresh.">
 					out of date
 				</span>
 			</Show>
@@ -151,7 +152,7 @@ function Work(props: { files: DocFile[]; empty?: string; filtered?: boolean }) {
 	const everything = createMemo(() => (props.filtered ? 0 : workList(props.files, state.workspace?.root).folded));
 	const catalogs = () => props.files.filter((d) => (d.group === "tickets" || d.group === "specs") && isCatalog(d));
 	return (
-		<RowGroup head={<Head title="Work" folder={`${state.project?.docs}/${DOC_FOLDERS.tickets}`} />} rows={props.files.some((d) => d.group === "tickets" || d.group === "specs")} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
+		<RowGroup fold="docs:work" label="Work" open={props.filtered} count={props.files.filter((d) => (d.group === "tickets" || d.group === "specs") && !isCatalog(d)).length} head={<Head title="Work" folder={`${state.project?.docs}/${DOC_FOLDERS.tickets}`} />} rows={props.files.some((d) => d.group === "tickets" || d.group === "specs")} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
 			<For each={list().rows}>
 				{(row) =>
 					row.kind === "ticket" ? (
@@ -176,31 +177,33 @@ function Work(props: { files: DocFile[]; empty?: string; filtered?: boolean }) {
 }
 
 /** The knowledge base: its decisions, questions, snippets and notes, each kind together. */
-function Knowledge(props: { files: DocFile[]; empty?: string }) {
+function Knowledge(props: { files: DocFile[]; empty?: string; filtered?: boolean }) {
 	const files = () => props.files.filter((d) => d.group === "knowledge");
 	const kinds = () => [...KNOWLEDGE.map((k) => ({ id: k.id as string, name: k.name })), { id: "", name: "Other" }].map((kind) => ({ ...kind, files: files().filter((d) => !isCatalog(d) && (kind.id ? d.kind === kind.id : !KNOWLEDGE.some((k) => k.id === d.kind))) })).filter((kind) => kind.files.length);
 	return (
-		<RowGroup head={<Head title="Knowledge base" folder={`${state.project?.docs}/${DOC_FOLDERS.knowledge}`} />} rows={files().length > 0} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
+		<RowGroup fold="docs:knowledge" label="Knowledge base" open={props.filtered} count={files().filter((d) => !isCatalog(d)).length} role="group" head={<Head title="Knowledge base" folder={`${state.project?.docs}/${DOC_FOLDERS.knowledge}`} />} rows={files().length > 0} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
+			{/* Each kind is a group of its own inside: it folds by itself. */}
 			<For each={kinds()}>
 				{(kind) => (
-					<>
-						<div class="doc-kind" role="presentation">
-							{kind.name} <span class="count">{kind.files.length}</span>
-						</div>
+					<RowGroup fold={`docs:knowledge:${kind.id || "other"}`} label={kind.name} open={props.filtered} count={kind.files.length} headClass="doc-kind" head={kind.name}>
 						<For each={kind.files}>{(file) => <ItemRow file={file} depth={1} />}</For>
-					</>
+					</RowGroup>
 				)}
 			</For>
-			<For each={files().filter(isCatalog)}>{(catalog) => <ItemRow file={catalog} />}</For>
+			<Show when={files().some(isCatalog)}>
+				<div role="listbox" aria-label="The knowledge base's catalog">
+					<For each={files().filter(isCatalog)}>{(catalog) => <ItemRow file={catalog} />}</For>
+				</div>
+			</Show>
 		</RowGroup>
 	);
 }
 
 /** The registries: each with how far it is. */
-function Registries(props: { files: DocFile[]; empty?: string }) {
+function Registries(props: { files: DocFile[]; empty?: string; filtered?: boolean }) {
 	const files = () => props.files.filter((d) => d.group === "registries");
 	return (
-		<RowGroup head={<Head title="Registries" folder={`${state.project?.docs}/${DOC_FOLDERS.registries}`} />} rows={files().length > 0} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
+		<RowGroup fold="docs:registries" label="Registries" open={props.filtered} count={files().filter((d) => !isCatalog(d)).length} head={<Head title="Registries" folder={`${state.project?.docs}/${DOC_FOLDERS.registries}`} />} rows={files().length > 0} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
 			<For each={files().filter((d) => !isCatalog(d))}>{(file) => <ItemRow file={{ ...file, title: registryTitle(file.name) }} note={progress(file)} short={progressShort(file)} />}</For>
 			<For each={files().filter(isCatalog)}>{(catalog) => <ItemRow file={catalog} />}</For>
 		</RowGroup>
@@ -211,14 +214,11 @@ function Group(props: { title: string; folder?: string; group: DocFile["group"];
 	const files = () => docs().filter((d) => d.group === props.group && docMatches(d, props.filter ?? ""));
 	return (
 		<RowGroup
-			head={
-				<>
-					{props.title}{" "}
-					<Show when={props.folder}>
-						<span class="folder">{props.folder}/</span>
-					</Show>
-				</>
-			}
+			fold={`docs:${props.group}`}
+			label={props.title}
+			open={Boolean(props.filter?.trim())}
+			count={files().length}
+			head={<Head title={props.title} folder={props.folder} />}
 			rows={files().length > 0}
 			empty={
 				<Show when={props.empty}>
@@ -269,9 +269,9 @@ export function Docs() {
 					{ label: "Project state…", run: () => void newState() },
 					{ label: "Update catalogs", run: () => void updateCatalogs() },
 				]}>
-					<span aria-hidden="true">＋</span>
+					<Icon name="add" />
 				</Menu>
-				<IconButton label="Refresh the document list" title="Refresh" glyph="⟳" onClick={() => setState("treeVersion", (v) => v + 1)} />
+				<IconButton label="Refresh the document list" title="Refresh" icon="refresh" onClick={() => setState("treeVersion", (v) => v + 1)} />
 			</div>
 			<Show when={state.project?.description}>
 				<p class="hint">{state.project!.description}</p>
@@ -292,7 +292,7 @@ export function Docs() {
 			</Show>
 			<Show when={!reading() && failure()}>
 				<p class="hint warn" role="alert">
-					The documents could not be listed: {failure()}. Press ⟳ to try again.
+					The documents could not be listed: {failure()}. Press Refresh, above, to try again.
 				</p>
 			</Show>
 			{/* Shown for a list long enough to need it, and for as long as it is narrowing the list: it is the way to clear itself. */}
@@ -316,23 +316,23 @@ export function Docs() {
 				</Show>
 				<Show when={state.project?.configured || docs().some((d) => d.group === "tickets" || d.group === "specs" || d.group === "knowledge" || d.group === "registries")}>
 					<Show when={has("tickets", "specs")}>
-						<Work files={shown()} filtered={filtering()} empty={settled() ? "No tickets yet. Use ＋ to add the ticket this work comes from." : undefined} />
+						<Work files={shown()} filtered={filtering()} empty={settled() ? "No tickets yet. Use New, above, to add the ticket this work comes from." : undefined} />
 					</Show>
 					<Show when={has("knowledge")}>
-						<Knowledge files={shown()} empty={settled() ? "Nothing kept yet. Use ＋ to write down a decision, a question or a snippet." : undefined} />
+						<Knowledge files={shown()} filtered={filtering()} empty={settled() ? "Nothing kept yet. Use New, above, to write down a decision, a question or a snippet." : undefined} />
 					</Show>
 					<Show when={has("registries")}>
-						<Registries files={shown()} empty={settled() ? "No registries yet. Use ＋ to start one: settings, files, database objects." : undefined} />
+						<Registries files={shown()} filtered={filtering()} empty={settled() ? "No registries yet. Use New, above, to start one: settings, files, database objects." : undefined} />
 					</Show>
 				</Show>
 				<Show when={has("docs")}>
-					<Group title="Docs" folder={state.project?.docs} group="docs" filter={filter()} empty={settled() ? "No Markdown files here yet. Use ＋ to add one." : undefined} />
+					<Group title="Docs" folder={state.project?.docs} group="docs" filter={filter()} empty={settled() ? "No Markdown files here yet. Use New, above, to add one." : undefined} />
 				</Show>
 				<Show when={has("schema")}>
 					<Group title="Schema" folder={state.project?.schema} group="schema" filter={filter()} empty={settled() ? "No tables described yet. Add a Markdown file to this folder for each table." : undefined} />
 				</Show>
 				<Show when={has("plans")}>
-					<Group title="Plans" folder={state.project?.plans} group="plans" filter={filter()} empty={settled() ? "No plans yet. Use ＋ to draw one." : undefined} />
+					<Group title="Plans" folder={state.project?.plans} group="plans" filter={filter()} empty={settled() ? "No plans yet. Use New, above, to draw one." : undefined} />
 				</Show>
 			</Rows>
 		</div>

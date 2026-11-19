@@ -1,6 +1,7 @@
 // A table of values (CSV or TSV), as a table. It is a view of the text in the
 // editor (ADR 0002): a cell changed here is that cell's part of the text
 // changed, and nothing else; the Text switch shows the same file as written.
+import { Icon } from "../Icon";
 import { createEffect, createMemo, createSignal, createUniqueId, For, onCleanup, Show } from "solid-js";
 import { columnOf, csvCell, csvRow, parseCsv, rowSpan, tally, type Cell } from "../../shared/csv";
 import { relativeTo } from "../../shared/paths";
@@ -233,7 +234,7 @@ export function TableView(props: { path: string }) {
 				</span>
 				<Show when={onlyTicket()}>
 					<button class="doc-status tone-active table-for" aria-pressed="true" title="Show every row again" onClick={() => setOnlyTicket(null)}>
-						for {onlyTicket()} ×
+						for {onlyTicket()} <Icon name="close" />
 					</button>
 				</Show>
 				<Show when={counted()}>
@@ -291,7 +292,9 @@ export function TableView(props: { path: string }) {
 									<th scope="col" aria-sort={order()?.column === column() ? (order()!.down ? "descending" : "ascending") : "none"}>
 										<button title={`Order the rows by ${cell.text.trim() || "this column"}. The file's own order is not changed.`} onClick={() => sortBy(column())}>
 											{cell.text.trim() || "(no name)"}
-											<span aria-hidden="true">{order()?.column === column() ? (order()!.down ? " ↓" : " ↑") : ""}</span>
+											<Show when={order()?.column === column()}>
+												<Icon name={order()!.down ? "arrow-down" : "arrow-up"} />
+											</Show>
 										</button>
 									</th>
 								)}

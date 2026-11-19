@@ -3,8 +3,9 @@
 // End and the page keys move, Enter and Space act, Left and Right close and
 // open in a tree, letters jump to a row, and the menu key or Shift+F10 opens a
 // row's menu. The arithmetic is in rowMoves.ts; this file applies it to the DOM.
-import { createUniqueId, onCleanup, onMount, Show, type JSX } from "solid-js";
-import { isMoveKey, moveIndex, restoreIndex, stopIndex, treeStep, typeAhead, type TreeRow } from "./rowMoves";
+import { Icon, type IconName } from "../Icon";
+import { createSignal, createUniqueId, onCleanup, onMount, Show, type JSX } from "solid-js";
+import { foldedFrom, isMoveKey, moveIndex, restoreIndex, stopIndex, treeStep, typeAhead, withFold, type TreeRow } from "./rowMoves";
 
 export type Point = { x: number; y: number };
 type Handlers = { activate(e: KeyboardEvent): void; toggle(): void; key(e: KeyboardEvent): boolean | void; chord(e: KeyboardEvent): boolean | void; menu?: (at: Point) => void };
@@ -17,6 +18,28 @@ const treeRow = (row: HTMLElement): TreeRow => ({
 	level: Number(row.getAttribute("aria-level") ?? 1),
 	expanded: row.hasAttribute("aria-expanded") ? row.getAttribute("aria-expanded") === "true" : undefined,
 });
+
+/** Where the folded groups are kept from one session to the next. */
+const FOLDED = "ssl-studio.folded";
+/** The web view's own store, which may not be there (a private window): then nothing is kept, and nothing fails. */
+const kept = (): Storage | null => {
+	try {
+		return localStorage;
+	} catch {
+		return null;
+	}
+};
+/** The headed groups that are folded shut, by the names they fold under. */
+const [folded, setFolded] = createSignal(foldedFrom(kept()?.getItem(FOLDED) ?? null));
+export const isFolded = (name: string) => folded().includes(name);
+export function setFold(name: string, shut: boolean) {
+	setFolded(withFold(folded(), name, shut));
+	try {
+		kept()?.setItem(FOLDED, JSON.stringify(folded()));
+	} catch {
+		// Not kept: the group is folded for this session all the same.
+	}
+}
 
 /** How long typed letters are read as one word. */
 const TYPE_AHEAD_MS = 700;
@@ -156,6 +179,12 @@ export function Rows(props: {
 			const page = Math.floor(el.clientHeight / Math.max(1, target.offsetHeight)) - 1;
 			focusRow(list[moveIndex(list.length, index, e.key, { page })], list);
 		} else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+			// A group's heading that folds: Left shuts it, Right opens it, as in a tree.
+			if (target.hasAttribute("data-head")) {
+				e.preventDefault();
+				if ((target.getAttribute("aria-expanded") === "true") === (e.key === "ArrowLeft")) row?.toggle();
+				return;
+			}
 			if (target.getAttribute("role") !== "treeitem") return;
 			e.preventDefault();
 			const step = treeStep(list.map(treeRow), index, e.key);
@@ -294,28 +323,81 @@ export function Row(props: {
 /**
  * A headed run of rows inside Rows. The heading names the list for assistive
  * tech. With no rows (`rows` false) the heading stands over `empty` instead.
+ *
+ * Given a name to fold under (`fold`), the heading opens and shuts the group:
+ * by a click, by Enter or Space, by Left and Right. It is then one of the
+ * list's rows as far as the keyboard goes, so Up and Down land on it. What was
+ * shut stays shut the next time the app is opened.
  */
-export function RowGroup(props: { head: JSX.Element; headClass?: string; title?: string; rows?: boolean; empty?: JSX.Element; children: JSX.Element }) {
+export function RowGroup(props: {
+	head: JSX.Element;
+	headClass?: string;
+	title?: string;
+	rows?: boolean;
+	empty?: JSX.Element;
+	/** The name the group folds under: the same for as long as it is the same group. Without one the group does not fold. */
+	fold?: string;
+	/** Open whatever was folded: what a filter found is not hidden behind a heading. */
+	open?: boolean;
+	/** What typed letters match on a heading that folds: its words. */
+	label?: string;
+	/** How many the group holds, beside its heading: what a shut group still says of itself. */
+	count?: number;
+	/** "group" for a group that holds groups of its own; its rows are then in theirs. */
+	role?: "listbox" | "group";
+	children: JSX.Element;
+}) {
 	const id = createUniqueId();
+	const shut = () => Boolean(props.fold) && !props.open && isFolded(props.fold!);
+	const flip = () => props.fold && !props.open && setFold(props.fold, !shut());
 	return (
 		<>
-			<div class={props.headClass ?? "group-head"} id={id} title={props.title}>
-				{props.head}
-			</div>
-			<Show when={props.rows ?? true} fallback={props.empty}>
-				<div role="listbox" aria-labelledby={id}>
-					{props.children}
+			<Show
+				when={props.fold}
+				fallback={
+					<div class={props.headClass ?? "group-head"} id={id} title={props.title}>
+						{props.head}
+					</div>
+				}
+			>
+				<div
+					ref={(el) => handlers.set(el, { activate: flip, toggle: flip, key: () => false, chord: () => false })}
+					class={`${props.headClass ?? "group-head"} foldable`}
+					id={id}
+					role="button"
+					tabindex={-1}
+					data-row={`head:${props.fold}`}
+					data-head=""
+					data-label={props.label}
+					aria-expanded={shut() ? "false" : "true"}
+					title={props.title ?? (props.open ? "Shown open while the filter is narrowing the list" : shut() ? "Show these" : "Hide these")}
+					onClick={flip}
+				>
+					<Icon name={shut() ? "chevron-right" : "chevron-down"} class="twisty" />
+					<span class="head-words">{props.head}</span>
+					<Show when={props.count !== undefined}>
+						<span class="count">{props.count}</span>
+					</Show>
 				</div>
+			</Show>
+			<Show when={!shut()}>
+				<Show when={props.rows ?? true} fallback={props.empty}>
+					<div role={props.role ?? "listbox"} aria-labelledby={id}>
+						{props.children}
+					</div>
+				</Show>
 			</Show>
 		</>
 	);
 }
 
-/** A button that shows only a glyph: named for assistive tech, with the glyph hidden from it. */
+/** A button that shows only an icon: named for assistive tech, with the icon hidden from it. */
 export function IconButton(props: {
 	/** The button's name, and its tooltip unless `title` says more. */
 	label: string;
-	glyph: string;
+	/** A graphic from the icon font, or else a few letters that are the button's face ("Aa"). */
+	icon?: IconName;
+	glyph?: string;
 	title?: string;
 	/** For a switch: on or off. */
 	pressed?: boolean;
@@ -333,7 +415,9 @@ export function IconButton(props: {
 			aria-haspopup={props.menu ? "menu" : undefined}
 			onClick={(e) => props.onClick(e)}
 		>
-			<span aria-hidden="true">{props.glyph}</span>
+			<Show when={props.icon} fallback={<span aria-hidden="true">{props.glyph}</span>}>
+				{(name) => <Icon name={name()} />}
+			</Show>
 		</button>
 	);
 }

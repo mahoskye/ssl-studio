@@ -1,4 +1,5 @@
 // The window: menu bar, activity bar, side bar, editor groups, bottom panel, status bar.
+import { Icon } from "./Icon";
 import { createEffect, createSignal, For, Match, on, onCleanup, Show, Switch } from "solid-js";
 import { backend } from "./backend";
 import { Dialogs } from "./dialogs";
@@ -44,7 +45,7 @@ import { ACTIVITY, fitPanels } from "./layout";
 function Splitter(props: { axis: "x" | "y"; column?: number; label: string; value: number; min: number; max: number; onDrag: (delta: number) => void; onReset: () => void }) {
 	return (
 		<div
-			class={`splitter ${props.axis}`}
+			class={`splitter ${props.axis}${props.column === 5 ? " after-editors" : ""}`}
 			role="separator"
 			tabindex={0}
 			aria-orientation={props.axis === "x" ? "vertical" : "horizontal"}
@@ -174,7 +175,12 @@ export function App() {
 	useGit();
 	useLayoutPersistence();
 	createEffect(() => {
-		if (state.settings.layout.right && sideOf(state.rightView) === "left") setState("settings", "layout", "right", false);
+		if (!state.settings.layout.right || sideOf(state.rightView) === "right") return;
+		// The right side is open on a panel that is not docked there (it was moved away, or the app has only just
+		// started): it shows one that is, and closes when there is none. Left open at the last close, it opens again.
+		const docked = PANELS.find((panel) => sideOf(panel.id) === "right");
+		if (docked) setState("rightView", docked.id);
+		else setState("settings", "layout", "right", false);
 	});
 	// Which files are open is kept with the folder, so that it opens next time as it was left.
 	createEffect(on(() => JSON.stringify([state.groups.map((g) => [g.tabs, g.active]), state.activeGroup]), rememberTabs));
@@ -297,7 +303,7 @@ export function App() {
 							</button>
 							<span class="spacer" />
 							<button title={`Close panel${shortcut("toggle-panel")}`} aria-label="Close the bottom panel" onClick={() => setState("settings", "layout", "bottom", false)}>
-								<span aria-hidden="true">×</span>
+								<Icon name="close" />
 							</button>
 						</div>
 						<Switch>
@@ -341,7 +347,7 @@ export function App() {
 								)}
 							</Show>
 							<button class="toast-close" title="Dismiss" aria-label="Dismiss this message" onClick={() => dismiss(m.id)}>
-								<span aria-hidden="true">×</span>
+								<Icon name="close" />
 							</button>
 						</div>
 					)}

@@ -3,6 +3,7 @@
 // procedure's parameters under it. A file that is not SSL has an outline of
 // its own kind (shared/outline.ts): a document's headings, a settings file's
 // tables and keys, a SQL file's statements.
+import { Icon, type IconName } from "../Icon";
 import { createEffect, createResource, createSignal, For, on, onCleanup, Show } from "solid-js";
 import { monaco } from "../editor/monaco";
 import { session } from "../lsp/session";
@@ -16,7 +17,8 @@ import { serverDown } from "./server";
 
 type Sym = monaco.languages.DocumentSymbol;
 // By Monaco's SymbolKind: Module, Namespace (a region), Class, Method, Function, Variable, Constant, String.
-const ICONS: Record<number, string> = { 1: "▣", 2: "▣", 3: "§", 4: "◆", 5: "◆", 11: "ƒ", 12: "•", 13: "·", 14: "π", 18: "▣", 19: "·", 22: "▤" };
+// And for an outline: Package (a heading), Object (a table or section), Key, Struct (a statement).
+const ICONS: Record<number, IconName> = { 1: "symbol-namespace", 2: "symbol-namespace", 3: "symbol-string", 4: "symbol-class", 5: "symbol-method", 11: "symbol-method", 12: "symbol-variable", 13: "symbol-constant", 14: "symbol-string", 18: "symbol-namespace", 19: "symbol-key", 22: "symbol-structure" };
 /** An outline's kinds as the symbols the panel draws: a heading, a table or section, a key, a statement. */
 const OUTLINE_KIND: Record<OutlineItem["kind"], number> = { heading: monaco.languages.SymbolKind.Package, section: monaco.languages.SymbolKind.Object, key: monaco.languages.SymbolKind.Key, statement: monaco.languages.SymbolKind.Struct };
 const OUTLINE_KINDS = new Set(Object.values(OUTLINE_KIND));
@@ -220,14 +222,14 @@ export function Objects() {
 							toggle(key());
 						}}
 					>
-						{children().length ? (open() ? "▾" : "▸") : ""}
+						<Show when={children().length}>
+							<Icon name={open() ? "chevron-down" : "chevron-right"} />
+						</Show>
 					</span>
 					<Show
 						when={isRegion(props.symbol)}
 						fallback={
-							<span class="icon" aria-hidden="true">
-								{parameter() ? "·" : (ICONS[props.symbol.kind] ?? "•")}
-							</span>
+							<Icon name={parameter() ? "circle-small-filled" : (ICONS[props.symbol.kind] ?? "circle-small-filled")} class="icon" />
 						}
 					>
 						<button
@@ -242,7 +244,7 @@ export function Objects() {
 					<span class="label">{props.symbol.name}</span>
 					<Show when={here() === props.symbol}>
 						<span class="here-mark" title="The cursor is in here">
-							<span aria-hidden="true">◂</span>
+							<Icon name="arrow-left" />
 							<span class="visually-hidden">The cursor is in here</span>
 						</span>
 					</Show>

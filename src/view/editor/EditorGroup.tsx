@@ -1,5 +1,6 @@
 // One editor group: a tab strip over one Monaco editor that shows the
 // group's active document. Two groups side by side make a split.
+import { Icon } from "../Icon";
 import { tabShown } from "../recentTabs";
 import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { monaco } from "./monaco";
@@ -89,7 +90,8 @@ export function EditorGroup(props: { index: number }) {
 			"semanticHighlighting.enabled": true,
 			inlayHints: { enabled: state.settings.inlayHints === false ? "off" : "on" },
 			fixedOverflowWidgets: true,
-			scrollBeyondLastLine: false,
+			// The last lines can be brought up to the top of the view, to be read there and not at the window's foot.
+			scrollBeyondLastLine: true,
 			rulers: rulers(),
 		});
 		// The editor is filed under the group's place in the row, and filed again when that place changes (the group
@@ -245,6 +247,7 @@ export function EditorGroup(props: { index: number }) {
 		const PIN = pinned() ? "Unpin" : "Pin";
 		const PATH = "Copy path";
 		const RELATIVE = "Copy path in the project";
+		const NAME = "Copy file name";
 		const SHOW = "Show in the Explorer";
 		const SIDE = "Open to the side";
 		const inFolder = Boolean(state.workspace && isInside(state.workspace.root, path));
@@ -256,7 +259,9 @@ export function EditorGroup(props: { index: number }) {
 			ALL,
 			PIN,
 			PATH,
-			...(inFolder ? [RELATIVE, SHOW] : []),
+			...(inFolder ? [RELATIVE] : []),
+			NAME,
+			...(inFolder ? [SHOW] : []),
 			SIDE,
 		];
 		const picked = await chooseFromMenu(`Actions for the tab ${base(path)}`, items, at);
@@ -266,7 +271,7 @@ export function EditorGroup(props: { index: number }) {
 		// This row's tabs, as its neighbours in the menu are: the command "Close all tabs" closes every group's.
 		else if (picked === ALL) await closeAllTabs(props.index);
 		else if (picked === PIN) togglePin(path, props.index);
-		else if (picked === PATH || picked === RELATIVE) await (await import("../commands")).copyPath(picked === PATH ? "whole" : "relative", path);
+		else if (picked === PATH || picked === RELATIVE || picked === NAME) await (await import("../commands")).copyPath(picked === PATH ? "whole" : picked === NAME ? "name" : "relative", path);
 		else if (picked === SHOW) (await import("../panels/Explorer")).showInExplorer(path);
 		else if (picked === SIDE) {
 			// This group is the one at hand, even when the keyboard came to its tabs without a click.
@@ -405,7 +410,7 @@ export function EditorGroup(props: { index: number }) {
 								<Show when={group().pinned?.includes(path) && state.dirty[path]}>
 									{/* The cross that turns into a dot is not on a pinned tab: its unsaved changes have a dot of their own. */}
 									<span class="pinned-dot" aria-hidden="true">
-										●
+										<span class="dot" />
 									</span>
 								</Show>
 								<Show when={group().pinned?.includes(path)}>
@@ -415,12 +420,8 @@ export function EditorGroup(props: { index: number }) {
 									</button>
 								</Show>
 								<button class="close" tabindex={-1} title="Close (Ctrl+W)" aria-label={`Close ${base(path)}${state.dirty[path] ? " (unsaved changes)" : ""}`} onMouseDown={(e) => e.stopPropagation()} onClick={() => void closeTab(path, props.index)}>
-									<span class="dot" aria-hidden="true">
-										●
-									</span>
-									<span class="x" aria-hidden="true">
-										×
-									</span>
+									<span class="dot" aria-hidden="true" />
+									<Icon name="close" class="x" />
 								</button>
 							</div>
 						)}
@@ -428,7 +429,7 @@ export function EditorGroup(props: { index: number }) {
 				</div>
 				<Show when={group().active}>
 					<Menu label="File actions" title="File actions: save, format, split, close…" class="tab-menu" items={fileActions}>
-						<span aria-hidden="true">⋯</span>
+						<Icon name="ellipsis" />
 					</Menu>
 				</Show>
 				<Show when={isSsl() && !isPlan() && !showFile()}>

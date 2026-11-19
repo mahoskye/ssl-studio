@@ -1,5 +1,6 @@
 // The style profile editor: the language server's `ssl` settings, per user
 // or per workspace, with the house preset (decisions 0002, 0005, 0006).
+import { Icon } from "./Icon";
 import { createEffect, createResource, createSignal, createUniqueId, For, Show } from "solid-js";
 import { getPath, SERVER_DEFAULTS, RULE_LEVELS, SECTIONS, setPath, type Field } from "../shared/styleProfile";
 import { backend } from "./backend";
@@ -125,7 +126,7 @@ export function StyleProfile() {
 				)}
 				<Show when={own()}>
 					<button class="reset" title="Clear: inherit" aria-label={`Clear ${f.label}: inherit`} onClick={(e) => (e.preventDefault(), set(f.path, undefined))}>
-						↺
+						<Icon name="discard" />
 					</button>
 				</Show>
 			</label>

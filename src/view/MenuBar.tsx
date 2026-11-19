@@ -10,12 +10,18 @@
 //
 // An entry that cannot run now is still an entry: the keyboard lands on it,
 // and the menu's last line says why it cannot.
+//
+// At the bar's far end are the window's parts as buttons: the side panel, the
+// bottom panel and the right panel, each shown or hidden by a press, and a
+// menu for the rest of the layout.
 import { createSignal, createUniqueId, For, onCleanup, onMount, Show } from "solid-js";
 import { FIELD_COMMANDS, letterItem, MENU_BAR, missing, stepMenu, type BarEntry, type Has } from "../shared/menuBar";
-import { keysFor, onOpenMenu, runCommand } from "./commands";
+import { keysFor, onOpenMenu, rightPanel, runCommand } from "./commands";
+import { Icon } from "./Icon";
+import { crowdedOut, togglePanel } from "./panels/registry";
 import { activeEditor } from "./editor/EditorGroup";
 import { review } from "./editor/Review";
-import { nextItem, type MenuItem } from "./Menu";
+import { Menu, nextItem, type MenuItem } from "./Menu";
 import { canGo } from "./navigation";
 import { isPlanPath } from "./plan/model";
 import { isMarkdown, isTable } from "./project";
@@ -64,7 +70,7 @@ function textBox(el: Element | null): HTMLElement | null {
 }
 
 /** One of a text box's own six commands, run in the box. */
-async function runInBox(box: HTMLElement, name: (typeof FIELD_COMMANDS)[string]) {
+export async function runInBox(box: HTMLElement, name: (typeof FIELD_COMMANDS)[string]) {
 	box.focus();
 	if (name !== "paste") return void document.execCommand(name);
 	// A page may not paste by itself; it may read the clipboard where the web view allows, and type what it read.
@@ -112,6 +118,58 @@ function track(e: MouseEvent) {
 	const at = `${e.screenX},${e.screenY}`;
 	pointed = at !== pointerAt;
 	pointerAt = at;
+}
+
+/**
+ * The window's parts, at the bar's far end: a button each for the side panel, the bottom panel and the right panel,
+ * pressed while its part is showing, and a menu for what is done less often. Each is a command too, with its key.
+ */
+function LayoutControls() {
+	const folder = () => Boolean(state.workspace);
+	const layout = () => state.settings.layout;
+	// A side that is open but has no room in the window is not showing: its button brings it back.
+	const left = () => folder() && layout().left && crowdedOut() !== "left";
+	const right = () => folder() && layout().right && crowdedOut() !== "right";
+	const bottom = () => folder() && layout().bottom;
+	const keys = (id: string) => (keysFor(id) ? ` (${keysFor(id)})` : "");
+	const tip = (shown: boolean, what: string, id: string) => (folder() ? `${shown ? "Hide" : "Show"} the ${what}${keys(id)}` : `The ${what}: open a folder first`);
+	const items = (): MenuItem[] => {
+		const none = "Open a folder first";
+		const entry = (label: string, id: string, why = ""): MenuItem => ({ label, keys: keysFor(id) || undefined, run: () => runCommand(id), disabled: !folder() || Boolean(why), why: folder() ? why : none });
+		return [
+			entry(`${left() ? "Hide" : "Show"} the side panel`, "toggle-sidebar"),
+			entry(`${bottom() ? "Hide" : "Show"} the bottom panel`, "toggle-panel"),
+			entry(`${right() ? "Hide" : "Show"} the right panel`, "toggle-right-panel", rightPanel() ? "" : "No panel is docked on the right"),
+			{ label: "Hide the menu bar", keys: keysFor("toggle-menu-bar") || undefined, run: () => runCommand("toggle-menu-bar") },
+			"separator",
+			entry("Move the side panel to the right", "move-panel", left() ? "" : "The side panel is not showing"),
+			entry("Move the right panel to the left", "move-panel-back", right() ? "" : "The right panel is not showing"),
+			"separator",
+			entry("Reset the layout", "reset-layout"),
+		];
+	};
+	return (
+		<div class="layout-controls" role="group" aria-label="Layout">
+			<button title={tip(left(), "side panel", "toggle-sidebar")} aria-label="Side panel" aria-pressed={left()} disabled={!folder()} onClick={() => togglePanel(state.leftView)}>
+				<Icon name={left() ? "layout-sidebar-left" : "layout-sidebar-left-off"} />
+			</button>
+			<button title={tip(bottom(), "bottom panel", "toggle-panel")} aria-label="Bottom panel" aria-pressed={bottom()} disabled={!folder()} onClick={() => runCommand("toggle-panel")}>
+				<Icon name={bottom() ? "layout-panel" : "layout-panel-off"} />
+			</button>
+			<button
+				title={folder() && !rightPanel() ? "The right panel: no panel is docked there. Right-click a panel's button to move it." : tip(right(), "right panel", "toggle-right-panel")}
+				aria-label="Right panel"
+				aria-pressed={right()}
+				disabled={!folder() || !rightPanel()}
+				onClick={() => runCommand("toggle-right-panel")}
+			>
+				<Icon name={right() ? "layout-sidebar-right" : "layout-sidebar-right-off"} />
+			</button>
+			<Menu label="Layout" title="Layout: what is shown, where the panels are, and back to how it started" class="layout-menu" items={items}>
+				<Icon name="layout" />
+			</Menu>
+		</div>
+	);
 }
 
 export function MenuBar() {
@@ -238,84 +296,88 @@ export function MenuBar() {
 	};
 
 	return (
-		<div
-			class="menubar"
-			role="menubar"
-			aria-label="Menus"
-			ref={bar}
-			onKeyDown={onKey}
-			onFocusIn={(e) => {
-				const from = e.relatedTarget as HTMLElement | null;
-				if (from && !bar.contains(from)) before = from;
-			}}
-			onFocusOut={(e) => {
-				if (moving || bar.contains(e.relatedTarget as Node | null)) return;
-				// The keyboard went somewhere else: an open menu does not stay behind.
-				if (open() !== null) shut("nowhere");
-				else before = null;
-			}}
-		>
-			<For each={MENU_BAR}>
-				{(menu, index) => (
-					<span class="menu">
-						<button
-							class="menubar-name"
-							classList={{ open: open() === index() }}
-							role="menuitem"
-							aria-haspopup="menu"
-							aria-expanded={open() === index()}
-							title={`${menu.name} (Alt+${menu.letter.toUpperCase()})`}
-							tabindex={stop() === index() ? 0 : -1}
-							// A press does not move the keyboard by itself in every web view: the click does it, and says how it came.
-							onMouseDown={(e) => e.preventDefault()}
-							onClick={(e) => {
-								if (open() === index()) return shut("before");
-								// Enter and Space arrive as a click that no pointer made.
-								show(index(), e.detail === 0);
-							}}
-							onMouseMove={() => pointed && open() !== null && open() !== index() && show(index(), false)}
-						>
-							{menu.name}
-						</button>
-						<Show when={open() === index()}>
-							{/* A press on the menu's own ground leaves the keyboard where it is and the menu open. */}
-							<div class="menu-pop" role="menu" aria-label={menu.name} ref={place} onMouseDown={(e) => e.preventDefault()}>
-								<For each={items()}>
-									{(item, at) =>
-										item === "separator" ? (
-											<div class="menu-sep" role="separator" data-item />
-										) : (
-											<button
-												class="menu-item"
-												role="menuitem"
-												data-item
-												tabindex={-1}
-												// Not the button's own "disabled": the keyboard must be able to land on it to hear why.
-												aria-disabled={item.why ? "true" : undefined}
-												aria-describedby={item.why ? whyId : undefined}
-												title={item.why || undefined}
-												onFocus={() => setOnItem(at())}
-												// The pointer and the arrow keys move the same mark: there is one entry at hand, not two.
-												onMouseMove={(e) => pointed && document.activeElement !== e.currentTarget && e.currentTarget.focus({ preventScroll: true })}
-												onClick={() => pick(item)}
-											>
-												<span class="menu-label">{item.label}</span>
-												<Show when={item.keys}>
-													<span class="menu-keys">{item.keys}</span>
-												</Show>
-											</button>
-										)
-									}
-								</For>
-								{/* Why the entry at hand cannot run. Always there, so that what reads the screen aloud hears it change. */}
-								<div class="menu-why" id={whyId} role="status" classList={{ shown: Boolean(why()) }}>
-									{why()}
+		<div class="menubar">
+			<div
+				class="menubar-menus"
+				role="menubar"
+				aria-label="Menus"
+				ref={bar}
+				onKeyDown={onKey}
+				onFocusIn={(e) => {
+					const from = e.relatedTarget as HTMLElement | null;
+					if (from && !bar.contains(from)) before = from;
+				}}
+				onFocusOut={(e) => {
+					if (moving || bar.contains(e.relatedTarget as Node | null)) return;
+					// The keyboard went somewhere else: an open menu does not stay behind.
+					if (open() !== null) shut("nowhere");
+					else before = null;
+				}}
+			>
+				<For each={MENU_BAR}>
+					{(menu, index) => (
+						<span class="menu">
+							<button
+								class="menubar-name"
+								classList={{ open: open() === index() }}
+								role="menuitem"
+								aria-haspopup="menu"
+								aria-expanded={open() === index()}
+								title={`${menu.name} (Alt+${menu.letter.toUpperCase()})`}
+								tabindex={stop() === index() ? 0 : -1}
+								// A press does not move the keyboard by itself in every web view: the click does it, and says how it came.
+								onMouseDown={(e) => e.preventDefault()}
+								onClick={(e) => {
+									if (open() === index()) return shut("before");
+									// Enter and Space arrive as a click that no pointer made.
+									show(index(), e.detail === 0);
+								}}
+								onMouseMove={() => pointed && open() !== null && open() !== index() && show(index(), false)}
+							>
+								{menu.name}
+							</button>
+							<Show when={open() === index()}>
+								{/* A press on the menu's own ground leaves the keyboard where it is and the menu open. */}
+								<div class="menu-pop" role="menu" aria-label={menu.name} ref={place} onMouseDown={(e) => e.preventDefault()}>
+									<For each={items()}>
+										{(item, at) =>
+											item === "separator" ? (
+												<div class="menu-sep" role="separator" data-item />
+											) : (
+												<button
+													class="menu-item"
+													role="menuitem"
+													data-item
+													tabindex={-1}
+													// Not the button's own "disabled": the keyboard must be able to land on it to hear why.
+													aria-disabled={item.why ? "true" : undefined}
+													aria-describedby={item.why ? whyId : undefined}
+													title={item.why || undefined}
+													onFocus={() => setOnItem(at())}
+													// The pointer and the arrow keys move the same mark: there is one entry at hand, not two.
+													onMouseMove={(e) => pointed && document.activeElement !== e.currentTarget && e.currentTarget.focus({ preventScroll: true })}
+													onClick={() => pick(item)}
+												>
+													<span class="menu-label">{item.label}</span>
+													<Show when={item.keys}>
+														<span class="menu-keys">{item.keys}</span>
+													</Show>
+												</button>
+											)
+										}
+									</For>
+									{/* Why the entry at hand cannot run. Always there, so that what reads the screen aloud hears it change. */}
+									<div class="menu-why" id={whyId} role="status" classList={{ shown: Boolean(why()) }}>
+										{why()}
+									</div>
 								</div>
-							</div>
-						</Show>
-					</span>
-				)}
-			</For>
+							</Show>
+						</span>
+					)}
+				</For>
+			</div>
+			<span class="spacer" />
+			<LayoutControls />
 		</div>
 	);
 }

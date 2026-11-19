@@ -3,6 +3,7 @@
 // before anything is written, and nothing is written until it is confirmed.
 // The search, the preview and the replace all find their matches with the
 // one expression (src/shared/searchPattern.ts), so they agree.
+import { Icon } from "../Icon";
 import { FileMark } from "../FileMark";
 import { createEffect, createMemo, createResource, createSignal, For, Show } from "solid-js";
 import { monaco } from "../editor/monaco";
@@ -290,7 +291,7 @@ export function Search() {
 			>
 				<div class="search-row">
 					<button type="button" class="search-fold" title={replacing() ? "Hide the replace row" : "Replace across files"} aria-label="Replace across files" aria-expanded={replacing()} onClick={() => setReplacing(!replacing())}>
-						<span aria-hidden="true">{replacing() ? "▾" : "▸"}</span>
+						<Icon name={replacing() ? "chevron-down" : "chevron-right"} />
 					</button>
 					<input
 						ref={(el) => ((input = el), queueMicrotask(() => el.focus()))}

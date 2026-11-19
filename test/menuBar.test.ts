@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { FIELD_COMMANDS, letterItem, MENU_BAR, menuForLetter, missing, stepMenu, type BarEntry } from "../src/shared/menuBar";
+import { boxMenu, FIELD_COMMANDS, letterItem, MENU_BAR, menuForLetter, missing, stepMenu, type BarEntry } from "../src/shared/menuBar";
 
 const entries = (name: string) => MENU_BAR.find((menu) => menu.name === name)!.entries;
 const named = (name: string, label: string) => entries(name).find((entry) => entry !== "separator" && entry.label === label) as Exclude<BarEntry, "separator">;
@@ -130,5 +130,40 @@ describe("the keyboard in the bar", () => {
 	test("a letter never lands on a line between entries", () => {
 		expect(letterItem([null, "Cut", null], "c", 1)).toBe(1);
 		expect(letterItem([null, null], "c", -1)).toBe(-1);
+	});
+});
+
+describe("the window's parts", () => {
+	test("each side and the bottom panel has its entry in View, and the layout can be put back", () => {
+		for (const command of ["toggle-sidebar", "toggle-panel", "toggle-right-panel", "reset-layout"]) expect(entries("View").some((entry) => entry !== "separator" && "command" in entry && entry.command === command)).toBe(true);
+	});
+
+	test("a file's name can be copied from File, beside its paths", () => {
+		const labels = entries("File").map((entry) => (entry === "separator" ? "" : entry.label));
+		expect(labels.indexOf("Copy file name")).toBe(labels.indexOf("Copy path in the project") + 1);
+		expect(missing(named("File", "Copy file name"), { folder: true, file: false, text: false })).toBe("Open a file first");
+	});
+});
+
+describe("a right-click on a text box", () => {
+	const box = { selected: true, editable: true, filled: true, canPaste: true };
+	test("offers the box's own four, in the order they are everywhere", () => {
+		expect(boxMenu(box)).toEqual(["cut", "copy", "paste", "selectAll"]);
+	});
+
+	test("offers nothing to cut or copy with nothing selected", () => {
+		expect(boxMenu({ ...box, selected: false })).toEqual(["paste", "selectAll"]);
+	});
+
+	test("offers no paste where the window may not read the clipboard", () => {
+		expect(boxMenu({ ...box, canPaste: false })).toEqual(["cut", "copy", "selectAll"]);
+	});
+
+	test("a box that cannot be typed in is only copied from", () => {
+		expect(boxMenu({ ...box, editable: false })).toEqual(["copy", "selectAll"]);
+	});
+
+	test("an empty box that cannot be pasted into has no menu at all", () => {
+		expect(boxMenu({ selected: false, editable: true, filled: false, canPaste: false })).toEqual([]);
 	});
 });

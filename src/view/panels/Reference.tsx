@@ -111,7 +111,7 @@ export function Reference() {
 							<button title="Insert the name at the cursor" onClick={() => insert(entry().label)}>
 								Insert
 							</button>
-							<IconButton label="Close the description" glyph="×" onClick={() => setOpen(null)} />
+							<IconButton label="Close the description" icon="close" onClick={() => setOpen(null)} />
 						</div>
 						<Show when={!details.loading} fallback={<p class="hint">Loading the description…</p>}>
 							<Show when={details()?.trim()} fallback={<p class="hint">The language server has no description of {entry().label}.</p>}>

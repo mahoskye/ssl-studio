@@ -9,13 +9,14 @@ import { session } from "./lsp/session";
 import { symbols } from "./panels/Objects";
 import { symbolPath } from "./editor/regions";
 import { openStyleProfile } from "./StyleProfile";
-import { movePanel, showPanel } from "./panels/registry";
+import { movePanel, PANELS, showPanel, sideOf, togglePanel } from "./panels/registry";
 import { explorerDelete, explorerNewFile, explorerRename } from "./panels/Explorer";
 import { insertTemplate } from "./panels/Palette";
 import { TEMPLATES } from "../shared/houseStyle";
 import { askAbout } from "./agent/Agent";
 import { startTidy } from "./agent/tidy";
-import { joinPath, relativeTo } from "../shared/paths";
+import { baseName, joinPath, relativeTo } from "../shared/paths";
+import { defaultLayout } from "../shared/protocol";
 import { menuForLetter } from "../shared/menuBar";
 import { installRecentTabs, stepRecent } from "./recentTabs";
 import { goAlong } from "./navigation";
@@ -56,6 +57,19 @@ import {
 export type Command = { id: string; label: string; detail?: string; run: () => void };
 
 const toggle = (key: "left" | "bottom" | "right") => setState("settings", "layout", key, (v) => !v);
+/** The panels docked on the right side, which is empty when every one was moved to the left. */
+export const rightPanel = () => (sideOf(state.rightView) === "right" ? state.rightView : PANELS.find((panel) => sideOf(panel.id) === "right")?.id);
+function toggleRight() {
+	const panel = rightPanel();
+	if (!state.workspace) return;
+	if (!panel) return notify("No panel is docked on the right. Right-click a panel's button to move it there.");
+	togglePanel(panel);
+}
+/** The layout as a folder first opens with: what was moved goes home, what was resized is its first size. The menu bar is shown. */
+function resetLayout() {
+	setState("settings", "layout", { ...defaultLayout(), dock: {} });
+	if (state.settings.menuBar === false) void switchSetting("menuBar", true, () => state.settings.menuBar !== false);
+}
 const showBottom = (view: "problems" | "output") => (setState("bottomView", view), setState("settings", "layout", "bottom", true));
 /** Puts text on the clipboard: by the app's own way where there is one, by the web view's otherwise. */
 export async function copyText(text: string, said: string) {
@@ -64,9 +78,10 @@ export async function copyText(text: string, said: string) {
 	notify(copied ? said : `Could not reach the clipboard. It was: ${text.length > 300 ? `${text.slice(0, 300)}…` : text}`, copied ? "info" : "error");
 }
 
-/** A file's path, whole or from the project's folder, with the slashes the system writes. */
-export async function copyPath(kind: "whole" | "relative", path = activePath()) {
+/** A file's path, whole or from the project's folder, with the slashes the system writes; or its name alone. */
+export async function copyPath(kind: "whole" | "relative" | "name", path = activePath()) {
 	if (!path) return notify("No file is open to copy the path of.");
+	if (kind === "name") return copyText(baseName(path), `Copied ${baseName(path)}`);
 	const root = state.workspace?.root;
 	// The path from the folder is kept with forward slashes; where the folder's own are the other kind, so are these.
 	const backward = Boolean(root && root.includes("\\") && !root.includes("/"));
@@ -124,6 +139,7 @@ export const commands: Command[] = [
 	{ id: "split", label: "Split editor", run: split },
 	{ id: "copy-path", label: "Copy path", detail: "The open file's whole path", run: () => void copyPath("whole") },
 	{ id: "copy-relative-path", label: "Copy path in the project", detail: "The open file's path from the project's folder", run: () => void copyPath("relative") },
+	{ id: "copy-file-name", label: "Copy file name", detail: "The open file's name, without its folder", run: () => void copyPath("name") },
 	{ id: "word-wrap", label: "Toggle word wrap", detail: "Long lines wrapped at the editor's edge, or not", run: () => void switchSetting("wordWrap", !state.settings.wordWrap, () => Boolean(state.settings.wordWrap)) },
 	{ id: "focus-editor", label: "Focus editor", run: focusEditor },
 	{ id: "focus-side-panel", label: "Focus side panel", run: focusSidePanel },
@@ -169,6 +185,8 @@ export const commands: Command[] = [
 	{ id: "graph", label: "Show Call graph", detail: "Again to go back to the editors", run: () => setState("centerView", state.centerView === "graph" ? "editors" : "graph") },
 	{ id: "toggle-sidebar", label: "Toggle side bar", run: () => toggle("left") },
 	{ id: "toggle-panel", label: "Toggle bottom panel", run: () => toggle("bottom") },
+	{ id: "toggle-right-panel", label: "Toggle right panel", detail: "The panel docked on the right: the Agent, unless another was moved there", run: toggleRight },
+	{ id: "reset-layout", label: "Reset the layout", detail: "Every panel back on its own side and at its first size", run: resetLayout },
 	{ id: "menu-bar", label: "Focus the menu bar", detail: "Then the arrow keys. Alt and a menu's first letter opens that menu", run: () => void (openMenu() || notify(MENU_HIDDEN)) },
 	{ id: "toggle-menu-bar", label: "Toggle menu bar", detail: "File, Edit, Selection, View, Go and Help across the top of the window", run: () => void toggleMenuBar() },
 	{ id: "move-panel", label: "Move left panel to the right", detail: "The one that is open", run: () => state.settings.layout.left && movePanel(state.leftView) },
@@ -348,6 +366,7 @@ const KEYS: Record<string, string> = {
 	"ctrl+shift+f": "search",
 	"ctrl+shift+e": "explorer",
 	"ctrl+b": "toggle-sidebar",
+	"ctrl+alt+b": "toggle-right-panel",
 	"ctrl+j": "toggle-panel",
 	"ctrl+shift+m": "problems",
 	"ctrl+,": "settings",

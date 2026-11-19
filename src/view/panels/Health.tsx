@@ -1,6 +1,7 @@
 // The project's documents and what the documents of the work need from
 // someone, and the current script against the house style: size, procedures,
 // findings.
+import { Icon } from "../Icon";
 import { For, Show } from "solid-js";
 import { level } from "../../shared/houseStyle";
 import { monaco } from "../editor/monaco";
@@ -97,7 +98,7 @@ export function Health() {
 		<div class="panel-body health" data-panel="health">
 			<div class="panel-title">
 				<span>Health</span>
-				<IconButton label="Style profile" title="Open the style profile" glyph="⚙" onClick={() => openStyleProfile()} />
+				<IconButton label="Style profile" title="Open the style profile" icon="gear" onClick={() => openStyleProfile()} />
 			</div>
 			<section>
 				<h3>Project</h3>
@@ -111,8 +112,12 @@ export function Health() {
 								onActivate={() => (file.exists ? void openFile(file.path) : void setUpProject())}
 							>
 								<span>{file.name}</span>
-								<Show when={file.exists && !file.untouched} fallback={<span class="meta warn">⚠ {file.exists ? "template" : "missing"}</span>}>
-									<span class="meta">✓</span>
+								<Show when={file.exists && !file.untouched} fallback={<span class="meta warn">
+										<Icon name="warning" /> {file.exists ? "template" : "missing"}
+									</span>}>
+									<span class="meta">
+										<Icon name="check" />
+									</span>
 								</Show>
 							</Row>
 						)}
@@ -137,7 +142,7 @@ export function Health() {
 										onMenu={(at) => void checkMenu(check, at)}
 									>
 										<span class={`check-mark ${check.level}`} aria-hidden="true">
-											{check.level === "warn" ? "⚠" : "•"}
+											<Icon name={check.level === "warn" ? "warning" : "circle-small-filled"} />
 										</span>
 										<span class="label">{check.text}</span>
 										<Show when={check.fix}>

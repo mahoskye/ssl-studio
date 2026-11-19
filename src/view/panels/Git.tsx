@@ -3,6 +3,7 @@
 // beside what git has of the file; its menu stages it, takes it out again,
 // or lets its changes go (after asking). Everything stays on this machine:
 // there is no fetch, pull or push here.
+import { Icon } from "../Icon";
 import { createSignal, For, Show } from "solid-js";
 import { changeLetter, changeWord, commitProblem, GIT_ACTIONS, rowActions, stagedOf, unstagedOf, type GitFile } from "../../shared/gitStatus";
 import { baseName, dirName, relativeTo } from "../../shared/paths";
@@ -80,11 +81,11 @@ export function GitPanel() {
 				<span class="git-acts" onClick={(e) => e.stopPropagation()}>
 					<Show when={!props.staged && kind() !== "conflict"}>
 						<button type="button" tabindex={-1} title={kind() === "untracked" ? "Move to trash…" : "Discard changes…"} aria-label={`${kind() === "untracked" ? "Move to trash" : "Discard the changes to"} ${name()}`} onClick={() => void discard(props.file)}>
-							<span aria-hidden="true">↶</span>
+							<Icon name="discard" />
 						</button>
 					</Show>
 					<button type="button" tabindex={-1} title={props.staged ? "Unstage" : "Stage"} aria-label={`${props.staged ? "Unstage" : "Stage"} ${name()}`} onClick={() => void (props.staged ? unstage([props.file]) : stage([props.file]))}>
-						<span aria-hidden="true">{props.staged ? "−" : "＋"}</span>
+						<Icon name={props.staged ? "remove" : "add"} />
 					</button>
 				</span>
 				<span class={`git-letter ${kind()}`} aria-label={changeWord(kind())}>
@@ -97,7 +98,7 @@ export function GitPanel() {
 		<div class="panel-body" data-panel="git">
 			<div class="panel-title">
 				<span>Source control</span>
-				<IconButton label="Ask git again" title="Refresh" glyph="⟳" onClick={() => void refreshGit()} />
+				<IconButton label="Ask git again" title="Refresh" icon="refresh" onClick={() => void refreshGit()} />
 			</div>
 			<Show when={gitFailure()}>
 				<p class="hint warn" role="alert">
@@ -152,7 +153,7 @@ export function GitPanel() {
 									<>
 										<span class="label">Staged for the commit</span>
 										<span class="count">{staged().length}</span>
-										<IconButton label="Unstage all" title="Take every file out of the commit" glyph="−" onClick={() => void unstage(staged())} />
+										<IconButton label="Unstage all" title="Take every file out of the commit" icon="remove" onClick={() => void unstage(staged())} />
 									</>
 								}
 							>
@@ -167,7 +168,7 @@ export function GitPanel() {
 									<>
 										<span class="label">Changes</span>
 										<span class="count">{changes().length}</span>
-										<IconButton label="Stage all" title="Put every change into the commit" glyph="＋" onClick={() => void stage(changes())} />
+										<IconButton label="Stage all" title="Put every change into the commit" icon="add" onClick={() => void stage(changes())} />
 									</>
 								}
 							>

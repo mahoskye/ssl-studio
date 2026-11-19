@@ -90,3 +90,16 @@ export function ringStep(index: number, step: 1 | -1, count: number): number {
 	if (index < 0 || index >= count) return step === 1 ? 0 : count - 1;
 	return (index + step + count) % count;
 }
+
+/** The folded groups as they were kept, read with suspicion: only a list of names counts, each once. */
+export function foldedFrom(kept: string | null): string[] {
+	try {
+		const list: unknown = JSON.parse(kept ?? "[]");
+		return Array.isArray(list) ? [...new Set(list.filter((name): name is string => typeof name === "string" && name !== ""))] : [];
+	} catch {
+		return [];
+	}
+}
+
+/** The folded groups after one was shut or opened. */
+export const withFold = (folded: readonly string[], name: string, shut: boolean): string[] => (shut ? [...folded.filter((other) => other !== name), name] : folded.filter((other) => other !== name));

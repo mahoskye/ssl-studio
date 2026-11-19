@@ -4,6 +4,7 @@ import { describe, expect, test } from "bun:test";
 import { headingAnchor } from "../src/shared/docTables";
 import { tabLabels } from "../src/view/editor/tabs";
 import { fitPanels } from "../src/view/layout";
+import { DEFAULT_SETTINGS, defaultLayout } from "../src/shared/protocol";
 
 describe("tab labels", () => {
 	const root = "/work/due-dates";
@@ -75,5 +76,19 @@ describe("heading anchors", () => {
 		expect(headingAnchor("What is here")).toBe("what-is-here");
 		expect(headingAnchor("S-1002: an outage and a weekend")).toBe("s-1002-an-outage-and-a-weekend");
 		expect(headingAnchor("  How it's enforced, and why  ")).toBe("how-its-enforced-and-why");
+	});
+});
+
+describe("the layout a folder first opens with", () => {
+	test("is what the default settings hold", () => {
+		expect(defaultLayout()).toEqual(DEFAULT_SETTINGS.layout);
+	});
+
+	test("is made anew each time: changing one that was handed out does not change the next", () => {
+		const first = defaultLayout();
+		first.right = true;
+		first.leftWidth = 500;
+		expect(defaultLayout()).toEqual({ left: true, right: false, bottom: true, leftWidth: 260, rightWidth: 360, bottomHeight: 200 });
+		expect(defaultLayout()).not.toBe(defaultLayout());
 	});
 });

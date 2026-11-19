@@ -51,6 +51,9 @@ if (typeof window !== "undefined") {
 		(e) => {
 			const top = stack[stack.length - 1];
 			if (!top) return;
+			// A menu opened over the dialog (a right-click in one of its boxes) has the keys while it is open: Escape shuts
+			// the menu, not the dialog under it.
+			if (e.target instanceof Element && e.target.closest(".row-menu")) return;
 			if (top.key(e)) return;
 			if (e.key === "Escape") {
 				e.preventDefault();

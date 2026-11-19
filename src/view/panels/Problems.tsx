@@ -1,5 +1,6 @@
 // Diagnostics from the language server for every open file, by file, then
 // by rule.
+import { Icon, type IconName } from "../Icon";
 import { createEffect, For, on, Show } from "solid-js";
 import { monaco } from "../editor/monaco";
 import { diagnostics, type Diagnostic } from "../lsp/session";
@@ -9,7 +10,7 @@ import { Row, RowGroup, Rows } from "./Rows";
 import { serverDown } from "./server";
 import { FileMark } from "../FileMark";
 
-const ICON = ["", "✖", "⚠", "ℹ", "·"];
+const MARK: (IconName | null)[] = [null, "error", "warning", "info", "circle-small-filled"];
 const CLASS = ["", "error", "warning", "info", "hint"];
 /** What a severity mark means, in a word: read out, and shown on hover. */
 export const SEVERITY = ["", "Error", "Warning", "Note", "Hint"];
@@ -24,7 +25,7 @@ export const counts = () => {
 export function SeverityMark(props: { severity: number }) {
 	return (
 		<span class={`sev ${CLASS[props.severity]}`} role="img" aria-label={SEVERITY[props.severity]} title={SEVERITY[props.severity]}>
-			{ICON[props.severity]}
+			<Show when={MARK[props.severity]}>{(name) => <Icon name={name()} />}</Show>
 		</span>
 	);
 }

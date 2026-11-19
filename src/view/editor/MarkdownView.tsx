@@ -1,5 +1,6 @@
 // A Markdown document, rendered. It is a reading view of the text in the
 // editor (ADR 0002): the Text switch edits it, and this follows.
+import { Icon } from "../Icon";
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
@@ -18,7 +19,8 @@ import { colourCode } from "./markdownCode";
 import { ticketWork } from "../../shared/workContext";
 import { docs } from "../project";
 import { outline, type OutlineItem } from "../../shared/outline";
-import { canonical, documents, openFile, revealSignal, state } from "../state";
+import { canonical, documents, openFile, revealSignal, setState, state } from "../state";
+import { chooseFromMenu } from "../panels/RowMenu";
 
 export function MarkdownView(props: { path: string }) {
 	const model = documents.get(props.path)?.model;
@@ -93,6 +95,41 @@ export function MarkdownView(props: { path: string }) {
 	};
 
 	let view!: HTMLDivElement;
+	/**
+	 * What a right-click on the page offers (or the menu key, with the page holding the keyboard): the words selected
+	 * and the link under the pointer first, then the document itself. The page is for reading, so one entry goes to
+	 * its text.
+	 */
+	const pageMenu = async (e: MouseEvent) => {
+		const on = e.target instanceof Element ? e.target : null;
+		// A box on the page and a menu that is open on it keep what they have.
+		if (on?.closest("input, textarea, .menu-pop")) return;
+		e.preventDefault();
+		const link = on?.closest<HTMLElement>(".md a[href]") ?? null;
+		const selection = window.getSelection();
+		const words = selection && !selection.isCollapsed && view.contains(selection.anchorNode) ? selection.toString() : "";
+		const inFolder = Boolean(state.workspace && isInside(state.workspace.root, props.path));
+		const COPY = "Copy";
+		const OPEN = "Open link";
+		const COPY_LINK = "Copy link";
+		const EDIT = "Edit the text";
+		const PATH = "Copy path";
+		const RELATIVE = "Copy path in the project";
+		const NAME = "Copy file name";
+		const SHOW = "Show in the Explorer";
+		const items = [...(words.trim() ? [COPY] : []), ...(link ? [OPEN, COPY_LINK] : []), EDIT, PATH, ...(inFolder ? [RELATIVE] : []), NAME, ...(inFolder ? [SHOW] : [])];
+		const box = view.getBoundingClientRect();
+		const picked = await chooseFromMenu(`Actions for ${props.path.split(/[\\/]/).pop()}`, items, e.clientX || e.clientY ? { x: e.clientX, y: e.clientY } : { x: box.left + 24, y: box.top + 24 });
+		if (!picked) return;
+		// The commands are loaded when asked for, because commands.ts imports the editors.
+		const { copyPath, copyText } = await import("../commands");
+		if (picked === COPY) await copyText(words, "Copied the selected text.");
+		else if (picked === OPEN) link?.click();
+		else if (picked === COPY_LINK) await copyText(link?.getAttribute("href") ?? "", "Copied the link.");
+		else if (picked === EDIT) setState("mdText", props.path, true);
+		else if (picked === SHOW) (await import("../panels/Explorer")).showInExplorer(props.path);
+		else await copyPath(picked === PATH ? "whole" : picked === NAME ? "name" : "relative", props.path);
+	};
 	/** The document's headings, down to the third level, for the list beside it. */
 	const headings = createMemo(() => outlineOf(html()));
 	/** The heading the reader is at or past: the last one above the top of the view. */
@@ -166,7 +203,7 @@ export function MarkdownView(props: { path: string }) {
 		),
 	);
 	return (
-		<div class="md-view" ref={view} tabindex={0} aria-label={`${props.path.split(/[\\/]/).pop()}, rendered`} onScroll={follows}>
+		<div class="md-view" ref={view} tabindex={0} aria-label={`${props.path.split(/[\\/]/).pop()}, rendered`} aria-haspopup="menu" onScroll={follows} onContextMenu={(e) => void pageMenu(e)}>
 			<div class="md-page">
 				<div class="md-column">
 					<Show when={facts().length}>
@@ -192,7 +229,7 @@ export function MarkdownView(props: { path: string }) {
 																		items={() => statusChoices(listed()).map((status) => ({ label: status, disabled: status.toLowerCase() === value.toLowerCase(), why: "It is this already", run: () => void setStatus(props.path, status) }))}
 																	>
 																		<span class={`doc-status tone-${toneOf(value)}`}>{value}</span>
-																		<span aria-hidden="true"> ▾</span>
+																		<Icon name="chevron-down" />
 																	</Menu>
 																</Show>
 															}

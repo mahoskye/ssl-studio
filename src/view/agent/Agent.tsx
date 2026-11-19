@@ -1,5 +1,6 @@
 // The Agent panel: opencode status and model, the tidy sequence for the
 // current file, and a conversation that can include the selection.
+import { Icon, type IconName } from "../Icon";
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { activeEditor } from "../editor/EditorGroup";
 import { review } from "../editor/Review";
@@ -12,7 +13,8 @@ import { relativeTo } from "../../shared/paths";
 import { ticketAtHand, workPrompt } from "../projectDocs";
 import { recall, remember } from "../graph/canvas";
 
-const ICON: Record<string, string> = { pending: "○", running: "◌", review: "◐", accepted: "●", rejected: "✗", unchanged: "–", failed: "!" };
+/** A step's state as a mark: not yet, under way, waiting to be looked at, taken, turned down, nothing to change, failed. */
+const STEP_ICON: Record<string, IconName> = { pending: "circle-outline", running: "sync", review: "eye", accepted: "pass-filled", rejected: "close", unchanged: "dash", failed: "error" };
 const NEW_CONVERSATION = "New conversation: the next question starts fresh. The agent will not see the earlier ones.";
 /** How near the end of the conversation counts as "at the end", in pixels. */
 const NEAR_END = 24;
@@ -207,9 +209,7 @@ export function AgentPanel() {
 							return (
 								<>
 									<div class={`tidy-step ${tidy.steps[i()]}`}>
-										<span class="icon" aria-hidden="true">
-											{ICON[tidy.steps[i()]!]}
-										</span>
+										<Icon name={STEP_ICON[tidy.steps[i()]!] ?? "circle-outline"} class="icon" />
 										<span class="label">
 											{i() + 1}. {step.title}
 										</span>
