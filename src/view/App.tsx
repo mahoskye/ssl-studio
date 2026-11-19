@@ -24,6 +24,7 @@ import { session } from "./lsp/session";
 import { QuickPick } from "./QuickPick";
 import { SettingsDialog } from "./Settings";
 import { MenuBar } from "./MenuBar";
+import { useNavigation } from "./navigation";
 import { StatusBar } from "./StatusBar";
 import { applyTheme, resolveTheme } from "./themes/themes";
 import { dismiss, focusRequest, openFolder, rememberTabs, rememberViews, setState, state, unsavedPaths, type PanelId } from "./state";
@@ -164,6 +165,7 @@ export function App() {
 	createEffect(on(() => JSON.stringify(state.settings.ssl), (_now, before) => before !== undefined && session.configure()));
 	useSymbols();
 	useProject();
+	useNavigation();
 	useLayoutPersistence();
 	createEffect(() => {
 		if (state.settings.layout.right && sideOf(state.rightView) === "left") setState("settings", "layout", "right", false);

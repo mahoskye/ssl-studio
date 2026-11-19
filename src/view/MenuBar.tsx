@@ -14,6 +14,7 @@ import { copyText, keysFor, onOpenMenu, openSettings, runCommand } from "./comma
 import { activeEditor } from "./editor/EditorGroup";
 import { review } from "./editor/Review";
 import { nextItem, type MenuItem } from "./Menu";
+import { canGo } from "./navigation";
 import { isPlanPath } from "./plan/model";
 import { isMarkdown, isTable } from "./project";
 import { activeDoc, activePath, documents, focusEditor, notify, state } from "./state";
@@ -66,7 +67,12 @@ function itemsOf(entries: readonly BarEntry[]): MenuItem[] {
 		// A web view that may not read the clipboard cannot paste from a menu; the key still does.
 		const why = missing(entry, now) || ("editor" in entry && entry.editor === PASTE && !navigator.clipboard?.readText ? "This window cannot read the clipboard: paste with the keyboard" : "");
 		const can = { disabled: Boolean(why), why };
-		if ("command" in entry) return { label: entry.label, keys: keysFor(entry.command), run: () => runCommand(entry.command), ...can };
+		// Back and forward have somewhere to go, or they do not.
+		if ("command" in entry) {
+			const way = ({ "go-back": -1, "go-forward": 1 } as Record<string, 1 | -1>)[entry.command];
+			const nowhere = way && !why && !canGo(way) ? (way < 0 ? "Nowhere to go back to yet" : "Nowhere to go forward to") : "";
+			return { label: entry.label, keys: keysFor(entry.command), run: () => runCommand(entry.command), disabled: Boolean(why || nowhere), why: why || nowhere };
+		}
 		if ("editor" in entry) return { label: entry.label, keys: editorKeys(entry.editor), run: () => runEditor(entry.editor, now.text), ...can };
 		return { label: entry.label, run: entry.does === "about" ? about : () => openSettings("keyboard"), ...can };
 	});

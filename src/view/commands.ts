@@ -18,6 +18,7 @@ import { startTidy } from "./agent/tidy";
 import { joinPath, relativeTo } from "../shared/paths";
 import { menuForLetter } from "../shared/menuBar";
 import { installRecentTabs, stepRecent } from "./recentTabs";
+import { goAlong } from "./navigation";
 import { isPlanPath, newPlan, printPlan } from "./plan/model";
 import { isMarkdown, isTable, newDoc, setUpProject, undoSetUp } from "./project";
 import { importTickets, newKnowledge, newRegistry, newSpec, newState, newTicket, ticketAtHand, updateCatalogs, updateManifest } from "./projectDocs";
@@ -92,6 +93,8 @@ export const commands: Command[] = [
 	{ id: "reopen-tab", label: "Reopen closed tab", run: () => void reopenClosedTab() },
 	{ id: "recent-tab", label: "Go to the tab used before", detail: "And with Ctrl held, on through the ones before that", run: () => stepRecent(1) },
 	{ id: "recent-tab-back", label: "Go back through the tabs used", run: () => stepRecent(-1) },
+	{ id: "go-back", label: "Go back", detail: "To where the cursor was before: another file, or far off in this one", run: () => void goAlong(-1) },
+	{ id: "go-forward", label: "Go forward", detail: "Again to where “Go back” came from", run: () => void goAlong(1) },
 	{ id: "next-tab", label: "Next tab", run: nextTab },
 	{ id: "previous-tab", label: "Previous tab", run: previousTab },
 	{ id: "split", label: "Split editor", run: split },
@@ -290,7 +293,7 @@ async function openFolderCommand() {
  * Every default shortcut: the one place a command's keys are written down.
  * A command may have more than one (a key that differs between layouts).
  */
-export const DEFAULT_KEYS: Record<string, string> = {
+const KEYS: Record<string, string> = {
 	"ctrl+o": "open-folder",
 	"ctrl+p": "quick-open",
 	"ctrl+t": "symbols",
@@ -301,6 +304,8 @@ export const DEFAULT_KEYS: Record<string, string> = {
 	"ctrl+shift+t": "reopen-tab",
 	"ctrl+tab": "recent-tab",
 	"ctrl+shift+tab": "recent-tab-back",
+	"alt+arrowleft": "go-back",
+	"alt+arrowright": "go-forward",
 	"alt+z": "word-wrap",
 	"alt+shift+c": "copy-path",
 	"ctrl+pagedown": "next-tab",
@@ -330,6 +335,11 @@ export const DEFAULT_KEYS: Record<string, string> = {
 	f1: "editor-commands",
 	f10: "menu-bar",
 };
+
+/** On a Mac, Alt with an arrow moves the cursor by a word, in the editor and in every box: those keys stay the text's. */
+const NOT_ON_A_MAC = new Set(["alt+arrowleft", "alt+arrowright"]);
+const onMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform ?? "");
+export const DEFAULT_KEYS: Record<string, string> = onMac ? Object.fromEntries(Object.entries(KEYS).filter(([key]) => !NOT_ON_A_MAC.has(key))) : KEYS;
 
 /** The default shortcuts with the user's overrides ("" unbinds). */
 export function keymap(): Record<string, string> {

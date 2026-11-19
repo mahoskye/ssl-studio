@@ -129,8 +129,8 @@ of the text editor, and nothing of its own.
 | Peek, references | Yes | Have | From the language server |
 | Rename symbol | Yes | Have | From the language server |
 | Next problem | Yes | Have | F8, the editor's own |
-| Palette prefixes | No | Bring | Three boxes, each its own; `>`, `@` and `:` typed into Go to file find nothing |
-| Back and forward | No | Bring | Alt+Left after a jump left the cursor where it was |
+| Palette prefixes | Yes | Bring | Built: one box; `>`, `@`, `#`, `:` and `?` say what it lists, and `name:12` opens at a line |
+| Back and forward | Yes | Bring | Built: Alt+Left and Alt+Right, and in the Go menu; fifty places are kept |
 
 ## Explorer and files
 
@@ -303,8 +303,15 @@ the person at the machine has copied.
 
 | Feature | Size | Done | What it takes |
 | --- | --- | --- | --- |
-| Palette prefixes | Medium | No | One box: a name finds files, `>` commands, `@` symbols, `#` any symbol, `:` a line |
-| Back and forward | Medium | No | Alt+Left and Alt+Right through where the cursor has been |
+| Palette prefixes | Medium | Yes | One box: a name finds files, `>` commands, `@` symbols, `#` any symbol, `:` a line |
+| Back and forward | Medium | Yes | Alt+Left and Alt+Right through where the cursor has been |
+
+A place is kept when the cursor lands in another file, or ten lines or
+more from where it was; nearer than that, the place moves with it. On a
+Mac the two keys are left to the text, where Alt and an arrow move by a
+word: the commands are there to be given keys. The mouse's back and
+forward buttons are not wired: they could not be tried here. Ctrl+G and
+Ctrl+Shift+O still open the text editor's own boxes.
 
 ### Step 5: files by hand
 

@@ -437,10 +437,17 @@ export async function reopenClosedTab() {
 	notify("No closed tab to reopen.");
 }
 
+/** Told when files are renamed or go, for whatever keeps paths of its own: the places to go back to. */
+export const pathChanges = {
+	renamed: new Set<(rename: (path: string) => string) => void>(),
+	gone: new Set<(gone: (path: string) => boolean) => void>(),
+};
+
 /** A file or folder was renamed in the Explorer: its open tabs follow it, with their edits. */
 export function fileRenamed(oldPath: string, newPath: string) {
 	oldPath = canonical(oldPath);
 	newPath = canonical(newPath);
+	pathChanges.renamed.forEach((told) => told((path) => (path === oldPath ? newPath : isInside(oldPath, path) ? newPath + path.slice(oldPath.length) : path)));
 	for (const [path, doc] of [...docs]) {
 		if (path !== oldPath && !isInside(oldPath, path)) continue;
 		const target = path === oldPath ? newPath : newPath + path.slice(oldPath.length);
@@ -472,6 +479,8 @@ export function fileRenamed(oldPath: string, newPath: string) {
 /** A file or folder went to the trash: its tabs close, except those holding edits nobody saved. */
 export function fileRemoved(removed: string) {
 	removed = canonical(removed);
+	// A file whose unsaved edits stay open is still somewhere to go.
+	pathChanges.gone.forEach((told) => told((path) => (path === removed || isInside(removed, path)) && !state.dirty[path]));
 	for (const path of [...docs.keys()]) {
 		if (path !== removed && !isInside(removed, path)) continue;
 		if (state.dirty[path]) {

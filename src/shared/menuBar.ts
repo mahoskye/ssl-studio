@@ -132,6 +132,9 @@ export const MENU_BAR: BarMenu[] = [
 		name: "Go",
 		letter: "g",
 		entries: [
+			forFolder("Back", "go-back"),
+			forFolder("Forward", "go-forward"),
+			"separator",
 			forFolder("Go to file…", "quick-open"),
 			forFolder("Go to symbol in the workspace…", "symbols"),
 			text("Go to symbol in the file…", "editor.action.quickOutline"),

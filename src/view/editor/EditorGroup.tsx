@@ -22,6 +22,7 @@ import { Start } from "../Start";
 import { FileMark } from "../FileMark";
 import { getPath, SERVER_DEFAULTS } from "../../shared/styleProfile";
 import { RULER_MARGIN, rulerColumns } from "../../shared/houseStyle";
+import { noteCursor } from "../navigation";
 
 const viewStates = new Map<string, monaco.editor.ICodeEditorViewState | null>();
 /** The editor width, in pixels, from which the minimap is shown: under it, code at the line length would run beneath the map. */
@@ -94,7 +95,11 @@ export function EditorGroup(props: { index: number }) {
 		editor.onDidChangeModelContent(() => setLineCount(editor.getModel()?.getLineCount() ?? 0));
 		editor.onDidChangeModel(() => setLineCount(editor.getModel()?.getLineCount() ?? 0));
 		editor.onDidChangeCursorPosition((e) => {
-			if (state.activeGroup === props.index) setState("cursor", { line: e.position.lineNumber, column: e.position.column });
+			if (state.activeGroup !== props.index) return;
+			setState("cursor", { line: e.position.lineNumber, column: e.position.column });
+			// Where the cursor comes to rest is somewhere to go back to. Not where the editor puts it as it takes a file
+			// up or puts it back as it was: the file coming to the front says that, once it is where it was asked to be.
+			if (shown && e.source !== "model" && e.source !== "restoreState") noteCursor({ path: shown, line: e.position.lineNumber, column: e.position.column });
 		});
 		const stop = revealSignal.listen((path) => {
 			if (path === group().active && shown === path) reveal(path);
