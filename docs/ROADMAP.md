@@ -532,6 +532,16 @@ the work comes from ([ADR 0012](adr/0012-a-projects-work-is-written-down.md)).
   heading chosen while a document is being read scrolls the page to it.
 - **TOML that cannot be read says where,** by the reader project.toml is
   loaded with, in plain words: a key set twice, a string not closed.
+- **A document's state is changed where it is read.** On a ticket's, a
+  spec's, a decision's or a question's page the status is a menu of the
+  states that kind of document moves through. Choosing one changes that one
+  line of the text and writes the folder's catalog afresh.
+- **"Format document" lays out JSON,** a value to a line. Every string and
+  number is written as it was: a number of twenty digits comes out as it
+  went in. A plan keeps its own layout.
+- **A registry of database objects starts from the schema.** Each table,
+  view, procedure and sequence the schema folder's SQL creates is a row,
+  marked found, with the file it came from.
 - **The Work list is in the order of the work.** What is under way comes
   first, then what waits, then what is finished. A ticket that is part of
   another (an epic's story, a task's sub-task) is listed under it, and a

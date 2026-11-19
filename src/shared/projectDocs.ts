@@ -280,3 +280,16 @@ export function linkedLines(href: string): { line: number; endLine?: number } | 
 	const endLine = found[2] ? Number(found[2]) : undefined;
 	return line > 0 ? { line, ...(endLine && endLine >= line ? { endLine } : {}) } : null;
 }
+
+/**
+ * The states a document of each kind is usually in, in the order it moves
+ * through them: what a status is chosen from. Any other word can still be
+ * written in the text.
+ */
+export function statusChoices(file: { group?: string; kind?: string } | undefined): string[] {
+	if (file?.group === "tickets") return ["open", "in progress", "done", "blocked", "dropped"];
+	if (file?.group === "specs") return ["draft", "ready", "in progress", "done", "superseded"];
+	if (file?.group === "knowledge" && file.kind === "decisions") return ["proposed", "accepted", "superseded", "rejected"];
+	if (file?.group === "knowledge" && file.kind === "questions") return ["open", "answered"];
+	return ["draft", "in progress", "done"];
+}

@@ -3,6 +3,7 @@
 // here. None of this is SSL: that comes from the language server and the
 // formatter's grammar (ADR 0003). These colour a file and pair its brackets,
 // and nothing more.
+import { formatJson } from "../../shared/jsonFormat";
 import { monaco } from "./monaco";
 import "monaco-editor/languages/definitions/markdown/register";
 import "monaco-editor/languages/definitions/sql/register";
@@ -197,3 +198,13 @@ export const DOCUMENT_SCOPES: Readonly<Record<string, string>> = {
 	column4: "variable.parameter",
 	column5: "support.function.method",
 };
+
+// "Format document" for JSON: the layout only, every value written as it was (shared/jsonFormat.ts). A plan is laid out
+// by its own printer, a row to a line, and is left alone here.
+monaco.languages.registerDocumentFormattingEditProvider("json", {
+	provideDocumentFormattingEdits(model, options) {
+		if (/\.plan\.json$/i.test(model.uri.path)) return [];
+		const formatted = formatJson(model.getValue(), options.insertSpaces ? " ".repeat(options.tabSize) : "\t");
+		return formatted === null || formatted === model.getValue() ? [] : [{ range: model.getFullModelRange(), text: formatted }];
+	},
+});

@@ -36,6 +36,7 @@ import {
 import type { DocFile } from "../shared/protocol";
 import { backend } from "./backend";
 import { ask, choose } from "./dialogs";
+import { createdObjects } from "../shared/outline";
 import { parsePlan, isPlanPath } from "./plan/model";
 import { docs, isMarkdown } from "./project";
 import { ticketAtHand as listedTicketAtHand, workFor, workLabel, workText } from "../shared/workContext";
@@ -262,6 +263,26 @@ export async function newKnowledge(kind: KnowledgeKind["id"]) {
 	await start(joinPath(folder, `${number}-${slug(title)}.md`), decisionTemplate({ title, date: today(), ticket }) + about, "knowledge");
 }
 
+/** A row for each object the schema folder's SQL creates: object, kind, used by (empty), status, and where it was found. */
+async function schemaRows(): Promise<string> {
+	const rows: string[] = [];
+	const seen = new Set<string>();
+	try {
+		for (const file of (await backend.docs()).filter((d) => d.group === "schema" && d.exists && /\.sql$/i.test(d.name))) {
+			const text = await current(file.path);
+			if (text === null) continue;
+			for (const made of createdObjects(text)) {
+				if (seen.has(made.object.toLowerCase())) continue;
+				seen.add(made.object.toLowerCase());
+				rows.push(csvRow([made.object, made.kind, "", "found", `From ${relativeTo(root(), file.path).split("\\").join("/")}`]));
+			}
+		}
+	} catch {
+		// The registry starts empty: what the schema says is a convenience, not a condition.
+	}
+	return rows.length ? `${rows.join("\n")}\n` : "";
+}
+
 /** A registry: a table of what a migration must carry across, each row with how far it has come. */
 export async function newRegistry() {
 	if (!ready()) return;
@@ -270,12 +291,35 @@ export async function newRegistry() {
 	if (!picked) return;
 	const kind = REGISTRIES.find((r) => r.title === picked);
 	if (kind?.id === "files") return updateManifest();
+	// The database objects start from what the project's schema already says, where it is kept as SQL.
+	if (kind?.id === "database") return start(joinPath(areaFolder("registries"), kind.file), `${csvRow(kind.columns)}\n${await schemaRows()}`, "registries");
 	if (kind) return start(joinPath(areaFolder("registries"), kind.file), `${csvRow(kind.columns)}\n`, "registries");
 	const name = (await ask("What the registry lists, in a word or two"))?.trim();
 	if (!name || !slug(name)) return;
 	const columns = (await ask("Its columns, separated by commas. A status column says how far each row has come.", "name, status, note"))?.split(",").map((c) => c.trim()).filter(Boolean);
 	if (!columns?.length) return;
 	await start(joinPath(areaFolder("registries"), `${slug(name).toLowerCase()}.csv`), `${csvRow(columns)}\n`, "registries");
+}
+
+/**
+ * Sets a document's status: the one line of its front matter, through the
+ * editor, so it can be undone. The catalog of its folder is written afresh,
+ * since it says each document's state.
+ */
+export async function setStatus(path: string, status: string) {
+	const before = await current(path);
+	if (before === null) return;
+	const after = withFrontMatter(before, "status", frontValue(status));
+	if (after === null) return notify("The status could not be set here: it is written as a list. Change it in the text.", "error");
+	if (after === before) return;
+	try {
+		await put(path, after, true);
+		const area = (Object.keys(DOC_FOLDERS) as DocArea[]).find((name) => canonical(path).startsWith(canonical(areaFolder(name))));
+		if (area) await writeCatalog(area, await backend.docs());
+		setState("treeVersion", (v) => v + 1);
+	} catch (e: any) {
+		notify(String(e?.message ?? e), "error");
+	}
 }
 
 /** Where the project stands, in plain words. */

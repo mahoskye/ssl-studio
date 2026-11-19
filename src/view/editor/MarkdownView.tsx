@@ -7,7 +7,9 @@ import { headingAnchor } from "../../shared/docTables";
 import { finishMarkdown, outlineOf } from "./markdownHtml";
 import { frontMatter } from "../../shared/frontMatter";
 import { dirName, isInside, joinPath, resolvePath } from "../../shared/paths";
-import { DOC_FOLDERS, linkedLines, toneOf } from "../../shared/projectDocs";
+import { DOC_FOLDERS, linkedLines, statusChoices, toneOf } from "../../shared/projectDocs";
+import { Menu } from "../Menu";
+import { setStatus } from "../projectDocs";
 import { colourCode } from "./markdownCode";
 import { ticketWork } from "../../shared/workContext";
 import { docs } from "../project";
@@ -43,6 +45,8 @@ export function MarkdownView(props: { path: string }) {
 		return file?.ticket ?? "";
 	});
 	const work = createMemo(() => (ticket() ? ticketWork(docs(), ticket()) : []));
+	/** This document among the project's tickets, specs and knowledge base, if it is one of them: those have a state that is kept in their catalog. */
+	const listed = createMemo(() => docs().find((d) => ["tickets", "specs", "knowledge"].includes(d.group) && canonical(d.path) === props.path));
 	const go = (target: { file?: string; web?: string }) => (target.web ? void window.open(target.web, "_blank", "noopener") : target.file ? void openFile(target.file) : undefined);
 
 	/** Links to files in the workspace open as tabs; web links open outside. */
@@ -115,7 +119,23 @@ export function MarkdownView(props: { path: string }) {
 												{(value) => {
 													const target = targetOf(fact.key, value);
 													return (
-														<Show when={target.file || target.web} fallback={<span classList={{ "doc-status": fact.key === "status", [`tone-${toneOf(value)}`]: fact.key === "status" }}>{value}</span>}>
+														<Show
+															when={target.file || target.web}
+															fallback={
+																<Show when={fact.key === "status" && listed()} fallback={<span classList={{ "doc-status": fact.key === "status", [`tone-${toneOf(value)}`]: fact.key === "status" }}>{value}</span>}>
+																	{/* One of the project's working documents: its state is changed here, without going to the text. */}
+																	<Menu
+																		class="md-status"
+																		label={`Status: ${value}. Change it`}
+																		title="Change the status"
+																		items={() => statusChoices(listed()).map((status) => ({ label: status, disabled: status.toLowerCase() === value.toLowerCase(), why: "It is this already", run: () => void setStatus(props.path, status) }))}
+																	>
+																		<span class={`doc-status tone-${toneOf(value)}`}>{value}</span>
+																		<span aria-hidden="true"> ▾</span>
+																	</Menu>
+																</Show>
+															}
+														>
 															<button class="link" title={target.web ?? target.file} onClick={() => go(target)}>
 																{value}
 															</button>

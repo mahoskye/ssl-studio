@@ -265,3 +265,24 @@ function yaml(lines: string[]): OutlineItem[] {
 	}
 	return top;
 }
+
+/** The kinds of thing a schema's SQL makes that a registry of database objects lists. An index belongs to its table and is not one. */
+const OBJECT_KINDS = ["table", "view", "procedure", "function", "sequence", "trigger"];
+
+/**
+ * The database objects a SQL text creates: each `CREATE TABLE`, view,
+ * procedure, function, sequence or trigger, by its name, once. What a
+ * registry of database objects starts from, where the project keeps its
+ * schema as SQL.
+ */
+export function createdObjects(text: string): { object: string; kind: string }[] {
+	const found: { object: string; kind: string }[] = [];
+	for (const item of outline("sql", text)) {
+		const made = /^CREATE (\w+) (.+)$/.exec(item.name);
+		const kind = made?.[1]?.toLowerCase();
+		if (!made || !kind || !OBJECT_KINDS.includes(kind)) continue;
+		const object = made[2]!.replace(/[\[\]"]/g, "");
+		if (!found.some((other) => other.object.toLowerCase() === object.toLowerCase())) found.push({ object, kind });
+	}
+	return found;
+}

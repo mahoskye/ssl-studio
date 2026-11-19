@@ -83,3 +83,62 @@ describe("a TOML document that cannot be read", () => {
 		expect(tomlProblem(await Bun.file(join(import.meta.dir, "..", "examples", "due-dates", ".ssl-studio", "project.toml")).text())).toBeNull();
 	});
 });
+
+import { createdObjects } from "../src/shared/outline";
+import { formatJson } from "../src/shared/jsonFormat";
+import { statusChoices } from "../src/shared/projectDocs";
+
+describe("the database objects a schema's SQL creates", () => {
+	test("each table, view, procedure and sequence once, and no index", () => {
+		const text = "CREATE TABLE DEMO_SAMPLES (ID INT);\nCREATE UNIQUE INDEX IX ON DEMO_SAMPLES (ID);\ncreate or replace view dbo.[Due Soon] as select 1;\nCREATE SEQUENCE SEQ_SAMPLE;\nCREATE TABLE demo_samples (ID INT);\nINSERT INTO DEMO_SAMPLES VALUES (1);\nCREATE PROCEDURE SetDue AS BEGIN SELECT 1 END;";
+		expect(createdObjects(text)).toEqual([
+			{ object: "DEMO_SAMPLES", kind: "table" },
+			{ object: "dbo.Due Soon", kind: "view" },
+			{ object: "SEQ_SAMPLE", kind: "sequence" },
+			{ object: "SetDue", kind: "procedure" },
+		]);
+	});
+
+	test("the demo's schema gives its three tables", async () => {
+		const text = await Bun.file(join(import.meta.dir, "..", "examples", "due-dates", "schema", "demo.sql")).text();
+		expect(createdObjects(text)).toEqual([
+			{ object: "DEMO_SAMPLES", kind: "table" },
+			{ object: "DEMO_HOLIDAYS", kind: "table" },
+			{ object: "DEMO_OUTAGES", kind: "table" },
+		]);
+	});
+});
+
+describe("a JSON document laid out afresh", () => {
+	test("one value to a line, by its depth, and what is empty stays on its line", () => {
+		expect(formatJson('{"a":1,"b":[true,null,{"c":"x"}],"d":{},"e":[ ]}')).toBe('{\n\t"a": 1,\n\t"b": [\n\t\ttrue,\n\t\tnull,\n\t\t{\n\t\t\t"c": "x"\n\t\t}\n\t],\n\t"d": {},\n\t"e": []\n}\n');
+		expect(formatJson('{ "a" : 1 }', "  ")).toBe('{\n  "a": 1\n}\n');
+		expect(formatJson('"alone"')).toBe('"alone"\n');
+	});
+
+	test("every string and number is written exactly as it was", () => {
+		const text = '{"n":12345678901234567890.10,"e":1E+5,"s":"a, b: {c} [d] \\" \\\\","u":"\\u00e9","dup":1,"dup":2}';
+		const formatted = formatJson(text)!;
+		for (const piece of ["12345678901234567890.10", "1E+5", '"a, b: {c} [d] \\" \\\\"', '"\\u00e9"']) expect(formatted).toContain(piece);
+		expect(formatted.match(/"dup"/g)).toHaveLength(2);
+		expect(JSON.parse(formatted)).toEqual(JSON.parse(text));
+	});
+
+	test("laid out twice it is the same, its line ends are kept, and what is not JSON is left alone", () => {
+		const once = formatJson('{"a":[1,2,{"b":null}]}')!;
+		expect(formatJson(once)).toBe(once);
+		expect(formatJson('{\r\n"a":1}')).toBe('{\r\n\t"a": 1\r\n}\r\n');
+		expect(formatJson('{"a":1,}')).toBeNull();
+		expect(formatJson("")).toBeNull();
+	});
+});
+
+describe("the states a document is chosen to be in", () => {
+	test("follow what kind of document it is", () => {
+		expect(statusChoices({ group: "tickets" })).toEqual(["open", "in progress", "done", "blocked", "dropped"]);
+		expect(statusChoices({ group: "knowledge", kind: "questions" })).toEqual(["open", "answered"]);
+		expect(statusChoices({ group: "knowledge", kind: "decisions" })).toContain("accepted");
+		expect(statusChoices({ group: "specs" })[0]).toBe("draft");
+		expect(statusChoices(undefined)).toEqual(["draft", "in progress", "done"]);
+	});
+});
