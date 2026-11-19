@@ -6,7 +6,9 @@
 import { CATALOG_FILE, catalogStale, withCatalog } from "../shared/catalog";
 import { csvRow } from "../shared/csv";
 import { localDay } from "../shared/dates";
-import { frontMatter, one } from "../shared/frontMatter";
+import { parseCsv } from "../shared/csv";
+import { frontMatter, one, withFrontMatter } from "../shared/frontMatter";
+import { importSummary, ticketsFromJson, ticketsFromTable, type Imported, type ImportedTicket } from "../shared/ticketImport";
 import { manifestSummary, mergeManifest } from "../shared/manifest";
 import { baseName, joinPath, relativeTo } from "../shared/paths";
 import {
@@ -25,6 +27,7 @@ import {
 	stateTemplate,
 	ticketKey,
 	ticketTemplate,
+	frontValue,
 	type DocArea,
 	type KnowledgeKind,
 } from "../shared/projectDocs";
@@ -137,6 +140,70 @@ export async function newTicket(known?: string, related?: string) {
 	if (!title) return;
 	const source = (await ask(`${key}: a link to the ticket (leave empty for none)`))?.trim();
 	await start(joinPath(areaFolder("tickets"), `${key}.md`), ticketTemplate({ key, title, source: source || undefined, related: related ? [related] : undefined }), "tickets");
+}
+
+/**
+ * Tickets from an export of a ticket system: a table (CSV) or what its API
+ * returns (JSON). A ticket not here yet gets its file; one already here has
+ * its state, title and kind brought up to date in its front matter, and
+ * nothing else in it is touched. Read from the open document when that is
+ * such a file, or from a path.
+ */
+export async function importTickets() {
+	if (!ready()) return;
+	const exported = /\.(csv|tsv|json)$/i;
+	const open = activePath();
+	const inFolder = open && exported.test(open) && !open.startsWith(areaFolder("registries")) ? relativeTo(root(), open) : "";
+	const typed = (await ask("The exported file (CSV or JSON): its path in this folder", inFolder))?.trim();
+	if (!typed) return;
+	const from = /^([A-Za-z]:[\\/]|\/)/.test(typed) ? typed : joinPath(root(), ...typed.split(/[\\/]/));
+	const text = await current(from);
+	if (text === null) return notify(`${typed} could not be read. The file has to be in this folder.`, "error");
+	let read: Imported;
+	if (/\.json$/i.test(from)) {
+		try {
+			read = ticketsFromJson(JSON.parse(text));
+		} catch (e: any) {
+			return notify(`${typed} is not JSON that can be read: ${e?.message ?? e}`, "error");
+		}
+	} else read = ticketsFromTable(parseCsv(text));
+	if (read.problem) return notify(`${typed}: ${read.problem}`, "error");
+	if (!read.tickets.length) return notify(importSummary({ made: 0, updated: 0, same: 0, skipped: read.skipped }));
+	const path = (ticket: ImportedTicket) => joinPath(areaFolder("tickets"), `${ticket.key}.md`);
+	const before = await Promise.all(read.tickets.map((ticket) => current(path(ticket))));
+	const here = before.filter((was) => was !== null).length;
+	const go = "Import";
+	const said = `${read.tickets.length} ${read.tickets.length === 1 ? "ticket" : "tickets"} in ${typed}: ${read.tickets.length - here} new, ${here} already here. Those here keep what was written in them; their state, title and kind are brought up to date.`;
+	if ((await choose(said, [go])) !== go) return;
+	const counts = { made: 0, updated: 0, same: 0, skipped: read.skipped };
+	try {
+		for (const [at, ticket] of read.tickets.entries()) {
+			const was = before[at]!;
+			if (was === null) {
+				await put(path(ticket), ticketTemplate(ticket), false);
+				counts.made++;
+				continue;
+			}
+			// Only what the ticket system knows better: what a person wrote in the file stays.
+			const { values } = frontMatter(was);
+			let now = was;
+			for (const [key, value] of [["status", ticket.status], ["title", ticket.title], ["type", ticket.type]] as const) {
+				if (!value || one(values[key]).toLowerCase() === value.toLowerCase()) continue;
+				now = withFrontMatter(now, key, frontValue(value)) ?? now;
+			}
+			if (now === was) counts.same++;
+			else {
+				await put(path(ticket), now, true);
+				counts.updated++;
+			}
+		}
+		await writeCatalog("tickets", await backend.docs());
+	} catch (e: any) {
+		notify(String(e?.message ?? e), "error");
+	}
+	setState("treeVersion", (v) => v + 1);
+	notify(importSummary(counts));
+	if (counts.made === 1 && read.tickets.length === 1) await openFile(path(read.tickets[0]!));
 }
 
 /** A spec: what is to be built, written from a ticket. */

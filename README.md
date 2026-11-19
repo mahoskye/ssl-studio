@@ -42,7 +42,10 @@ the source of truth.
   and database objects a migration must carry across. Each folder has a
   catalog the IDE keeps, the Docs panel shows each ticket with its specs
   and each registry with how far it is, and Health says what is out of
-  date, not written yet, or named and not there. A plan names its ticket,
+  date, not written yet, or named and not there. Tickets are read from a
+  ticket system's export (CSV or JSON), without the people in it
+  ([ADR 0014](docs/adr/0014-tickets-come-in-from-an-export.md)). A plan
+  names its ticket,
   and the agent is told what the ticket asks, the open questions and the
   decisions already made
   ([ADR 0012](docs/adr/0012-a-projects-work-is-written-down.md),

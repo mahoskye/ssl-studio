@@ -78,19 +78,23 @@ export const isPrompt = (line: string | undefined) => Object.values(PROMPTS).som
 
 const fence = (pairs: [string, string | undefined][]) => `---\n${pairs.filter(([, v]) => v !== undefined).map(([k, v]) => `${k}: ${v}`).join("\n")}\n---\n`;
 const quoted = (text: string) => (/[:#\[\]{}"',]|^\s|\s$/.test(text) ? JSON.stringify(text) : text);
+/** A value as it is written in front matter: quoted when it holds what would be read as something else. */
+export const frontValue = quoted;
 
-export const ticketTemplate = (ticket: { key: string; title: string; source?: string; related?: readonly string[] }) => `${fence([
+export const ticketTemplate = (ticket: { key: string; title: string; source?: string; related?: readonly string[]; status?: string; type?: string; parent?: string; description?: string }) => `${fence([
 	["ticket", ticket.key],
 	["title", quoted(ticket.title)],
+	["type", ticket.type ? quoted(ticket.type) : undefined],
 	["source", ticket.source || undefined],
-	["status", "open"],
+	["status", ticket.status ? quoted(ticket.status) : "open"],
+	["parent", ticket.parent || undefined],
 	["related", `[${(ticket.related ?? []).join(", ")}]`],
 ])}
 # ${ticket.key}: ${ticket.title}
 
 ## What is asked
 
-${PROMPTS.ticket}
+${ticket.description?.trim() || PROMPTS.ticket}
 
 ## What done looks like
 

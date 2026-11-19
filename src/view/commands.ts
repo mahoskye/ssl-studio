@@ -18,7 +18,7 @@ import { startTidy } from "./agent/tidy";
 import { joinPath } from "../shared/paths";
 import { isPlanPath, newPlan, printPlan } from "./plan/model";
 import { isMarkdown, isTable, newDoc, setUpProject, undoSetUp } from "./project";
-import { newKnowledge, newRegistry, newSpec, newState, newTicket, ticketAtHand, updateCatalogs, updateManifest } from "./projectDocs";
+import { importTickets, newKnowledge, newRegistry, newSpec, newState, newTicket, ticketAtHand, updateCatalogs, updateManifest } from "./projectDocs";
 import { displayKey, effectiveKeys, isModifierKey, keyNames, keysOf } from "./keys";
 import { modalOpen, setFocusFallback } from "./modal";
 import { noteUsed } from "./quickRank";
@@ -89,6 +89,7 @@ export const commands: Command[] = [
 	{ id: "new-doc", label: "New document…", run: () => void newDoc() },
 	{ id: "new-plan", label: "New plan…", run: () => void newPlanCommand() },
 	{ id: "new-ticket", label: "New ticket…", detail: "The work as it was asked for", run: () => void newTicket() },
+	{ id: "import-tickets", label: "Import tickets…", detail: "From a ticket system's export: a CSV table or its API's JSON", run: () => void importTickets() },
 	{ id: "new-spec", label: "New spec…", detail: "What is to be built, for a ticket", run: () => void newSpec() },
 	{ id: "new-decision", label: "New decision…", detail: "In the knowledge base", run: () => void newKnowledge("decisions") },
 	{ id: "new-question", label: "New question…", detail: "In the knowledge base", run: () => void newKnowledge("questions") },

@@ -8,7 +8,7 @@ import { backend } from "../backend";
 import { relativeTo } from "../../shared/paths";
 import { DOC_FOLDERS, isCatalog, KNOWLEDGE, progress, registryTitle, toneOf } from "../../shared/projectDocs";
 import { docs, newDoc, setUpProject } from "../project";
-import { newKnowledge, newRegistry, newSpec, newState, newTicket, updateCatalogs, updateManifest } from "../projectDocs";
+import { importTickets, newKnowledge, newRegistry, newSpec, newState, newTicket, updateCatalogs, updateManifest } from "../projectDocs";
 import { activePath, canonical, openFile, setState, state } from "../state";
 import { IconButton, Row, RowGroup, Rows } from "./Rows";
 import { Menu } from "../Menu";
@@ -195,8 +195,9 @@ export function Docs() {
 		<div class="panel-body" data-panel="docs">
 			<div class="panel-title">
 				<span>Docs</span>
-				<Menu label="New document, or update the catalogs" title="New ticket, spec, decision, question, snippet, registry, document or plan; update the catalogs" items={() => [
+				<Menu label="New document, or update the catalogs" title="New ticket, spec, decision, question, snippet, registry, document or plan; import tickets; update the catalogs" items={() => [
 					{ label: "New ticket…", run: () => void newTicket() },
+					{ label: "Import tickets…", run: () => void importTickets() },
 					{ label: "New spec…", run: () => void newSpec() },
 					{ label: "New plan…", run: () => void import("../commands").then((m) => m.runCommand("new-plan")) },
 					"separator",

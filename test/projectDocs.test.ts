@@ -412,3 +412,83 @@ describe("a plan's ticket", () => {
 		expect(refinePrompt(newPlan("x"), "SURVEY", "THE WORK THIS IS FOR:\nTICKET LIMS-7")).toEndWith("SURVEY\n\nTHE WORK THIS IS FOR:\nTICKET LIMS-7");
 	});
 });
+
+import { withFrontMatter } from "../src/shared/frontMatter";
+import { importSummary, ticketsFromJson, ticketsFromTable } from "../src/shared/ticketImport";
+
+describe("tickets from a ticket system's export", () => {
+	// Invented, in the shape such an export has: a column for each kind of link, some of them twice, and people.
+	const exported = [
+		"Summary,Issue key,Issue id,Issue Type,Status,Assignee,Reporter,Description,Outward issue link (Relates),Outward issue link (Relates),Inward issue link (Blocks),Parent key",
+		'A report of the samples due soon,DEMO-103,10003,Story,In Progress,Someone,Someone Else,"Each morning the lab wants a list.',
+		"",
+		'It is sorted, ""soonest first"".",DEMO-101,DEMO-102,,DEMO-100',
+		"Rush samples count Saturday,demo-102,10002,Bug,Done,,,,DEMO-101,,DEMO-103,",
+		",DEMO-999,10999,Task,Open,,,No title: not a ticket,,,,",
+	].join("\r\n");
+
+	test("a table gives each row with a key and a title, its links and its parent, and no people", () => {
+		const { tickets, skipped, problem } = ticketsFromTable(parseCsv(exported));
+		expect(problem).toBeUndefined();
+		expect(skipped).toBe(1);
+		expect(tickets).toEqual([
+			{ key: "DEMO-103", title: "A report of the samples due soon", status: "In Progress", type: "Story", source: undefined, parent: "DEMO-100", related: ["DEMO-101", "DEMO-102"], description: 'Each morning the lab wants a list.\n\nIt is sorted, "soonest first".' },
+			{ key: "DEMO-102", title: "Rush samples count Saturday", status: "Done", type: "Bug", source: undefined, parent: undefined, related: ["DEMO-101", "DEMO-103"], description: "" },
+		]);
+		expect(JSON.stringify(tickets)).not.toContain("Someone");
+	});
+
+	test("a table of work items is read by the names it uses, and one with no key or title column says so", () => {
+		const { tickets } = ticketsFromTable(parseCsv("ID,Work Item Type,Title,State,URL\n41,Task,Check the holidays,To Do,https://tickets.example.test/41\n"));
+		expect(tickets).toEqual([{ key: "41", title: "Check the holidays", status: "To Do", type: "Task", source: "https://tickets.example.test/41", parent: undefined, related: [], description: "" }]);
+		expect(ticketsFromTable(parseCsv("name,value\na,b\n")).problem).toBe("It has no column for a ticket's key (Issue key, Key, ID).");
+		expect(ticketsFromTable(parseCsv("key,value\na,b\n")).problem).toBe("It has no column for a ticket's title (Summary, Title).");
+	});
+
+	test("what an API returns is read: one issue, a list, or a list under issues, with a description that is a tree", () => {
+		const issue = {
+			key: "DEMO-103",
+			fields: {
+				summary: "A report of the samples due soon",
+				status: { name: "In Progress" },
+				issuetype: { name: "Story" },
+				assignee: { displayName: "Someone" },
+				parent: { key: "DEMO-100" },
+				issuelinks: [{ outwardIssue: { key: "DEMO-101" } }, { inwardIssue: { key: "DEMO-102" } }, { outwardIssue: { key: "DEMO-103" } }],
+				description: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Each morning the lab wants a list." }] }, { type: "bulletList", content: [{ type: "listItem", content: [{ type: "paragraph", content: [{ type: "text", text: "soonest first" }] }] }] }] },
+			},
+		};
+		const expected = { key: "DEMO-103", title: "A report of the samples due soon", status: "In Progress", type: "Story", source: undefined, parent: "DEMO-100", related: ["DEMO-101", "DEMO-102"], description: "Each morning the lab wants a list.\n\n- soonest first" };
+		expect(ticketsFromJson(issue).tickets).toEqual([expected]);
+		expect(ticketsFromJson([issue]).tickets).toEqual([expected]);
+		expect(ticketsFromJson({ issues: [issue, { key: "DEMO-1" }] })).toEqual({ tickets: [expected], skipped: 1 });
+		expect(ticketsFromJson({ key: "A-1", summary: "Plain", status: "open", description: "As text." }).tickets[0]).toMatchObject({ key: "A-1", title: "Plain", status: "open", description: "As text." });
+		expect(ticketsFromJson("nothing").problem).toBeDefined();
+	});
+
+	test("an imported ticket's file says what the ticket system said, and its own words are what was asked", () => {
+		const [ticket] = ticketsFromTable(parseCsv(exported)).tickets;
+		const text = ticketTemplate(ticket!);
+		expect(frontMatter(text).values).toEqual({ ticket: "DEMO-103", title: "A report of the samples due soon", type: "Story", status: "In Progress", parent: "DEMO-100", related: ["DEMO-101", "DEMO-102"] });
+		expect(text).toContain('## What is asked\n\nEach morning the lab wants a list.\n\nIt is sorted, "soonest first".\n\n## What done looks like');
+		expect(summaryOf(text)).toBe("Each morning the lab wants a list.");
+		expect(toneOf("In Progress")).toBe("active");
+	});
+
+	test("one value of a document's front matter is set, and nothing else in it changes", () => {
+		const text = "---\nticket: A-1\nstatus: open\nrelated:\n  - A-2\n---\n\n# A-1\n\nMine.\n";
+		expect(withFrontMatter(text, "status", "Done")).toBe(text.replace("status: open", "status: Done"));
+		expect(withFrontMatter(text, "type", "Bug")).toBe(text.replace("  - A-2\n---", "  - A-2\ntype: Bug\n---"));
+		expect(withFrontMatter(text, "related", "[A-3]")).toBeNull();
+		expect(withFrontMatter("# Plain\n", "status", "open")).toBe("---\nstatus: open\n---\n\n# Plain\n");
+		const dos = text.replace(/\n/g, "\r\n");
+		expect(withFrontMatter(dos, "status", "Done")).toBe(dos.replace("status: open", "status: Done"));
+	});
+
+	test("what an import came to is said in a sentence", () => {
+		expect(importSummary({ made: 2, updated: 1, same: 3, skipped: 0 })).toBe("6 tickets: 2 new, 1 updated, 3 as they were.");
+		expect(importSummary({ made: 1, updated: 0, same: 0, skipped: 2 })).toBe("1 ticket: 1 new. 2 without a key or a title were passed over.");
+		expect(importSummary({ made: 0, updated: 0, same: 0, skipped: 1 })).toBe("No tickets: 1 row has no key or no title.");
+		expect(importSummary({ made: 0, updated: 0, same: 0, skipped: 0 })).toBe("No tickets there.");
+	});
+});

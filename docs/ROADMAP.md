@@ -477,6 +477,12 @@ the work comes from ([ADR 0012](adr/0012-a-projects-work-is-written-down.md)).
   chat is sent the same once in a conversation, on a tick box that says
   which ticket ([ADR 0013](adr/0013-the-agent-is-told-the-work-a-question-is-for.md)).
   Checked by tests of the text that is sent; not yet tried with a model.
+- **Tickets are read from an export:** a table (CSV) or an API's JSON, in
+  the project's folder. New tickets get their files; those already there
+  have their state, title and kind brought up to date and keep everything
+  else. People are left out
+  ([ADR 0014](adr/0014-tickets-come-in-from-an-export.md)). Tried with
+  invented exports; not with one from a real ticket system.
 - **From looking at it:** in a narrow Docs panel a state is a dot in its
   tone, so the title has the room; a new document's opening prompt is not
   listed as its summary; a date is the day it is here, not in UTC; and a
@@ -485,7 +491,7 @@ the work comes from ([ADR 0012](adr/0012-a-projects-work-is-written-down.md)).
 
 Not done, and worth doing next:
 
-- Reading a ticket from a ticket system, or from an export of one.
+- Reading tickets from a ticket system itself, without an export.
 - Checking a registry's rows against the code: a setting nothing reads, a
   table no data source uses. The second needs the language server to say
   which tables a script uses.

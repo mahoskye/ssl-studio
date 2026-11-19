@@ -104,3 +104,26 @@ export function summaryOf(text: string): string {
 	const sentence = /^(.*?[.!?])(\s|$)/.exec(flat)?.[1] ?? flat;
 	return sentence.length <= SUMMARY_MAX ? sentence : `${sentence.slice(0, sentence.lastIndexOf(" ", SUMMARY_MAX - 1))}…`;
 }
+
+/**
+ * The text with one value of its front matter set: the key's own line is
+ * changed where it has one, and added at the block's end where it has not.
+ * A document with no front matter gets a block. Nothing else is touched, and
+ * the file's own line ends are kept. A value that is a list under its key is
+ * left alone: null says it could not be set.
+ */
+export function withFrontMatter(text: string, key: string, value: string): string | null {
+	const eol = text.includes("\r\n") ? "\r\n" : "\n";
+	const lines = text.split(/\r?\n/);
+	const fenced = lines[0]?.replace(/^﻿/, "").trim() === "---";
+	const end = fenced ? lines.findIndex((line, i) => i > 0 && /^(---|\.\.\.)\s*$/.test(line)) : -1;
+	if (end < 0) return `---${eol}${key}: ${value}${eol}---${eol}${eol}${text}`;
+	const at = lines.findIndex((line, i) => i > 0 && i < end && new RegExp(`^${key}\\s*:`, "i").test(line));
+	if (at < 0) lines.splice(end, 0, `${key}: ${value}`);
+	else {
+		// A list written as dashes under the key is the person's layout: not rewritten here.
+		if (/:\s*$/.test(lines[at]!) && /^\s*-\s+/.test(lines[at + 1] ?? "")) return null;
+		lines[at] = `${lines[at]!.slice(0, lines[at]!.indexOf(":"))}: ${value}`;
+	}
+	return lines.join(eol);
+}
