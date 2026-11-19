@@ -447,7 +447,8 @@ describe("tickets from a ticket system's export", () => {
 
 	test("a parent or a link given as the ticket system's own number is not taken for a ticket, and a field of its own is read by its name", () => {
 		const { tickets } = ticketsFromTable(parseCsv("Issue key,Summary,Parent,Custom field (Epic Link),Outward issue link (Relates)\nDEMO-5,Five,10002,DEMO-1,\"DEMO-2, 10003\"\nDEMO-6,Six,10002,,\n"));
-		expect(tickets.map((t) => [t.key, t.parent, t.related])).toEqual([["DEMO-5", undefined, ["DEMO-2"]], ["DEMO-6", undefined, []]]);
+		// A parent that is only a number nobody could find falls through to the epic the ticket is linked to.
+		expect(tickets.map((t) => [t.key, t.parent, t.related])).toEqual([["DEMO-5", "DEMO-1", ["DEMO-2"]], ["DEMO-6", undefined, []]]);
 		const epic = ticketsFromTable(parseCsv("Issue key,Summary,Custom field (Epic Link)\nDEMO-5,Five,DEMO-1\n")).tickets[0]!;
 		expect(epic.parent).toBe("DEMO-1");
 		// Where tickets are numbers, a number is a ticket.

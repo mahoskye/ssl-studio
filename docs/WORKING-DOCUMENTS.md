@@ -30,7 +30,9 @@ demo project (`examples/due-dates`) has one of everything, invented for it.
 
 1. **Bring the tickets in.** Docs panel, ＋, "Import tickets…" reads an
    export from the ticket system: a CSV table, or the JSON its API returns.
-   "New ticket…" makes one by hand. Reporter and assignee are not read.
+   "New ticket…" makes one by hand. Reporter and assignee are not read. A
+   sub-task is put under its parent and a story under its epic; a
+   description in Jira's wiki markup comes across as Markdown.
 2. **Read the ticket's page.** It shows what the ticket says of itself, and
    under that everything tied to it: plans, specs, related tickets,
    questions, decisions. On any document's page, a ticket's key written in
@@ -162,9 +164,12 @@ Kept snippets are in the Palette, to insert at the cursor.
 
 ## Not done
 
-- Reading tickets from a ticket system itself, without an export. No
-  export from a real ticket system has been tried: the reader follows what
-  Jira's own tracker says of its CSV.
+- Reading tickets from a ticket system itself, without an export.
+- An export from your own ticket system has not been tried. The reader was
+  checked against the column names and the structure a public Jira server
+  gives out (its "all fields" CSV export and its search API), with
+  invented tickets. Jira Cloud's exports, and other systems', have not
+  been read.
 - A table a script uses that no registry lists. It needs the language
   server to say which tables a script uses
   ([LSP-REQUESTS.md](LSP-REQUESTS.md), L6).

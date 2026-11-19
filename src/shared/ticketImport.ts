@@ -1,5 +1,6 @@
 import type { Table } from "./csv";
 import { ticketKey } from "./projectDocs";
+import { looksLikeWiki, wikiToMarkdown } from "./wikiMarkup";
 
 // Tickets as a ticket system gives them out: a table exported from it (Jira's
 // CSV, a work-item list), or the JSON its API returns. Read here into what a
@@ -51,6 +52,9 @@ const likeOwn = (own: string, keys: string[]) => (/^\d+$/.test(own) ? keys : key
 /** Every column whose name says it ties one ticket to another: a system writes one for each kind of link, and one for each link. */
 const linkColumns = (table: Table) => table.header.map((cell, at) => (/issue link|linked issue|related|relates|blocks|blocked|depends|duplicat|sub-?tasks?$/i.test(cell.text) ? at : -1)).filter((at) => at >= 0);
 
+/** A description as Markdown: one written in a ticket system's wiki markup is turned into it. `wiki` says it surely is. */
+const described = (text: string, wiki: boolean) => (text && (wiki || looksLikeWiki(text)) ? wikiToMarkdown(text) : text);
+
 /** The tickets in a table: one for each row that has a key and a title. */
 export function ticketsFromTable(table: Table): Imported {
 	const key = column(table, ["issue key", "key", "ticket", "work item id", "id", "number", "issue id"]);
@@ -60,8 +64,17 @@ export function ticketsFromTable(table: Table): Imported {
 	const type = column(table, ["issue type", "work item type", "type"]);
 	const description = column(table, ["description", "details", "body"]);
 	const source = column(table, ["url", "issue url", "link"]);
-	const parent = column(table, ["parent key", "parent", "parent id", "epic link"]);
-	const links = linkColumns(table).filter((at) => at !== parent && at !== key);
+	// What a ticket is part of, the nearest first: its parent, then the larger piece of work it belongs to. An export
+	// has a column for each, most of them empty in any one row.
+	const parents = ["parent key", "parent", "parent id", "parent link", "epic link"].map((name) => column(table, [name])).filter((at) => at >= 0 && at !== key);
+	const links = linkColumns(table).filter((at) => !parents.includes(at) && at !== key);
+	// An export of the Jira kind gives a parent by the system's own number ("Parent id") and each ticket's number
+	// beside its key ("Issue id"): the parent's key is the key of the row with that number.
+	const number = column(table, ["issue id"]);
+	const byNumber = new Map(number >= 0 && number !== key ? table.rows.flatMap((cells) => (clean(cells[number]?.text) && clean(cells[key]?.text) ? [[clean(cells[number]!.text), ticketKey(clean(cells[key]!.text))] as const] : [])) : []);
+	const keyed = (own: string, keys: string[]) => likeOwn(own, keys.map((found) => (/^\d+$/.test(found) && !/^\d+$/.test(own) ? (byNumber.get(found) ?? found) : found)));
+	// Its descriptions are in that system's wiki markup.
+	const wiki = column(table, ["issue key"]) >= 0;
 	const tickets: ImportedTicket[] = [];
 	let skipped = 0;
 	for (const cells of table.rows) {
@@ -71,7 +84,7 @@ export function ticketsFromTable(table: Table): Imported {
 			skipped++;
 			continue;
 		}
-		const above = likeOwn(own, keysIn(at(parent)))[0];
+		const above = parents.map((index) => keyed(own, keysIn(at(index)))[0]).find(Boolean);
 		tickets.push({
 			key: own,
 			title: at(title).replace(/\s+/g, " "),
@@ -79,8 +92,8 @@ export function ticketsFromTable(table: Table): Imported {
 			type: at(type) || undefined,
 			source: /^https?:\/\//i.test(at(source)) ? at(source) : undefined,
 			parent: above && above.toLowerCase() !== own.toLowerCase() ? above : undefined,
-			related: unique(likeOwn(own, links.flatMap((index) => keysIn(at(index)))), [own, above ?? ""]),
-			description: at(description),
+			related: unique(keyed(own, links.flatMap((index) => keysIn(at(index)))), [own, above ?? ""]),
+			description: described(at(description), wiki),
 		});
 	}
 	return { tickets, skipped };
@@ -106,6 +119,12 @@ const keyOf = (value: unknown): string => {
 	if (!value || typeof value !== "object") return "";
 	const held = value as { key?: unknown; number?: unknown; id?: unknown };
 	return typeof held.key === "string" ? held.key : typeof held.number === "number" ? String(held.number) : typeof held.id === "number" ? String(held.id) : "";
+};
+
+/** The page a person opens for a ticket, from the address the API gives for it: ".../rest/api/2/issue/10011" is ".../browse/KEY". */
+const browseLink = (self: unknown, key: string) => {
+	const found = typeof self === "string" ? /^(https?:\/\/.+?)\/rest\/api\/[^/]+\/issue\/[^/]+$/i.exec(self) : null;
+	return found ? `${found[1]}/browse/${key}` : undefined;
 };
 
 /**
@@ -138,10 +157,11 @@ export function ticketsFromJson(value: unknown): Imported {
 			title,
 			status: named(fields.status ?? fields.state) || undefined,
 			type: named(fields.issuetype ?? fields.type) || undefined,
-			source: typeof issue.url === "string" && /^https?:\/\//i.test(issue.url) ? issue.url : undefined,
+			source: typeof issue.url === "string" && /^https?:\/\//i.test(issue.url) ? issue.url : browseLink(issue.self, own),
 			parent: above && above.toLowerCase() !== own.toLowerCase() ? above : undefined,
 			related: unique(likeOwn(own, [...links, ...subtasks, ...related].filter(Boolean).map(ticketKey)), [own, above]),
-			description: clean(flat(fields.description)).replace(/\n{3,}/g, "\n\n"),
+			// An API of the Jira kind gives the fields under "fields", and a description that is text in its wiki markup.
+			description: described(clean(flat(fields.description)).replace(/\n{3,}/g, "\n\n"), typeof fields.description === "string" && fields !== issue),
 		});
 	}
 	return { tickets, skipped };

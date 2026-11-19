@@ -498,6 +498,15 @@ the work comes from ([ADR 0012](adr/0012-a-projects-work-is-written-down.md)).
   reader, which gives the line and column. The runtime's YAML reader says
   only that it gave up, so the place is the line after the longest start
   of the document that still reads, and the note says "at or near".
+- **The import was checked against what a real Jira gives out.** A public
+  Jira server's "all fields" CSV export and its search API were read for
+  their column names and structure, and invented tickets in those shapes
+  were run through the reader. Three things did not come across, and now
+  do: a sub-task's parent, which the CSV gives as the system's own number
+  ("Parent id") beside each ticket's number ("Issue id"); a story's epic,
+  when the row has a parent column that is empty; and the description,
+  which is in Jira's wiki markup and read as headings and stray braces. A
+  ticket read from the API also keeps the address a person opens for it.
 - **A registry's rows say which ticket carries them.** A `ticket` column
   in a registry ties each row to a ticket: the ticket's page lists what it
   has to carry across and how much of it has come, the table's key leads
