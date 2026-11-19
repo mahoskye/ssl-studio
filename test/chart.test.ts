@@ -180,6 +180,23 @@ describe("what ELK is asked", () => {
 		expect(chartGraph(dueDates, sizes(dueDates)).sided).toBe(true);
 		expect(chartGraph(release, sizes(release)).sided).toBe(false);
 	});
+	test("a loop's way back can arrive at its decision's side, where no way out has taken it", () => {
+		const { graph, edges, reversed, returning } = chartGraph(dueDates, sizes(dueDates), "EAST", "WEST");
+		expect(returning).toBe(true);
+		const back = [...reversed].filter((i) => edges[i]!.to === "n6");
+		expect(back.length).toBe(2);
+		// Both ways back share the one point at the left; the way in from above keeps the top.
+		const sideOf = (portId: string) => find(graph, "n6").ports!.find((q) => q.id === portId)!.layoutOptions!["elk.port.side"];
+		expect(new Set(back.map((i) => graph.edges[i]!.sources[0])).size).toBe(1);
+		expect(sideOf(graph.edges[back[0]!]!.sources[0]!)).toBe("WEST");
+		expect(sides(dueDates).get("n5>n6")!.to).toBe("NORTH");
+		// A decision whose third way out left by that side keeps its ways back at the top.
+		const p = plan([["a", "start"], ["d", "decision"], ["x"], ["y"], ["z"]], [["a", "d"], ["d", "x"], ["d", "y"], ["d", "z"], ["z", "d"]]);
+		const taken = chartGraph(p, sizes(p), "EAST", "WEST");
+		const index = [...taken.reversed][0]!;
+		expect(find(taken.graph, "d").ports!.find((q) => q.id === taken.graph.edges[index]!.sources[0])!.layoutOptions!["elk.port.side"]).toBe("NORTH");
+		expect(chartGraph(release, sizes(release)).returning).toBe(false);
+	});
 	test("a third way out takes the other side", () => {
 		const p = plan([["a", "start"], ["d", "decision"], ["x"], ["y"], ["z"]], [["a", "d"], ["d", "x"], ["d", "y"], ["d", "z"]]);
 		expect(["d>x", "d>y", "d>z"].map((k) => sides(p).get(k)!.from)).toEqual(["SOUTH", "EAST", "WEST"]);

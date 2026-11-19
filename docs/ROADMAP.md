@@ -365,6 +365,11 @@ From a second look:
   zoomed it is left where it was put.
 - **In Blocks, what closes a line stands against it:** `:CLASS DueRule;`,
   where a gap made it `DueRule ;`.
+- **A loop comes back into its decision's side.** The ways back used to
+  come up both sides of a loop's decision and in at its top, so the way out
+  of its side crossed one of them. They can now arrive at the decision's
+  left point, all up the one side; both are laid out with the rest, and the
+  chart with the fewest crossings is kept. The demo's plan has none left.
 - **A procedure found from the list is fitted in the graph.** Finding one
   while the list was showing laid out two pictures, and the view was fitted
   to the wrong one: the focus came up small, cut off at the top, with a

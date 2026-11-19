@@ -119,6 +119,8 @@ export type ChartGraph = {
 	reversed: Set<number>;
 	/** A way that closes a loop leaves a decision by the side asked for: the other side is another chart, worth trying. */
 	sided: boolean;
+	/** A loop's way back arrives at a decision, at its top or its side as asked: again another chart worth trying. */
+	returning: boolean;
 };
 
 /**
@@ -127,9 +129,11 @@ export type ChartGraph = {
  * the node it returns to and the bottom of the node it leaves: drawn, it goes
  * down, round and back in at the top, as a loop does on paper. A decision's
  * ways meet it at its points: in at the top, on at the bottom, the others out
- * of its sides; `loopTip` is the side a way that closes a loop leaves by.
+ * of its sides; `loopTip` is the side a way that closes a loop leaves by, and
+ * `returnsAt` where a loop's way back arrives: the top, or the left point,
+ * where every way back then runs up the one side.
  */
-export function chartGraph(plan: Plan, sizes: ReadonlyMap<string, Size>, loopTip: "EAST" | "WEST" = "EAST"): ChartGraph {
+export function chartGraph(plan: Plan, sizes: ReadonlyMap<string, Size>, loopTip: "EAST" | "WEST" = "EAST", returnsAt: "NORTH" | "WEST" = "NORTH"): ChartGraph {
 	const ids = new Set<string>();
 	const nodes = plan.nodes.filter((n) => !ids.has(n.id) && ids.add(n.id));
 	const edges = plan.edges.filter((e) => ids.has(e.from) && ids.has(e.to));
@@ -150,6 +154,7 @@ export function chartGraph(plan: Plan, sizes: ReadonlyMap<string, Size>, loopTip
 	const decisions = new Set(nodes.filter((n) => n.kind === "decision").map((n) => n.id));
 	const wayOut = new Map<number, Side>();
 	let sided = false;
+	let returning = false;
 	for (const id of decisions) {
 		const outs = edges.map((e, i) => ({ e, i })).filter(({ e }) => e.from === id && e.to !== id);
 		const [on, back] = [outs.filter(({ i }) => !reversed.has(i)), outs.filter(({ i }) => reversed.has(i))];
@@ -163,9 +168,17 @@ export function chartGraph(plan: Plan, sizes: ReadonlyMap<string, Size>, loopTip
 	}
 	const leaves = (e: PlanEdge, i: number) => (decisions.has(e.from) ? port(e.from, `${stem}:${i}:out`, wayOut.get(i) ?? "SOUTH") : null);
 	const arrives = (e: PlanEdge) => (decisions.has(e.to) ? port(e.to, `${stem}:${e.to}:in`, "NORTH") : null);
+	// A loop's way back may come in at the decision's side instead, where no way out has taken it:
+	// then every way back runs up that side, and the way out of the other side crosses none of them.
+	const sideTaken = new Set(edges.map((e, i) => (wayOut.get(i) === "WEST" ? e.from : "")));
+	const returns = (e: PlanEdge) => {
+		if (!decisions.has(e.to)) return null;
+		if (!sideTaken.has(e.to)) returning = true;
+		return returnsAt === "WEST" && !sideTaken.has(e.to) ? port(e.to, `${stem}:${e.to}:back`, "WEST") : arrives(e);
+	};
 	const elkEdges = edges.map((e, i) =>
 		reversed.has(i)
-			? { id: `e${i}`, sources: [arrives(e) ?? port(e.to, `${stem}:${i}:in`, "NORTH")], targets: [leaves(e, i) ?? port(e.from, `${stem}:${i}:out`, "SOUTH")] }
+			? { id: `e${i}`, sources: [returns(e) ?? port(e.to, `${stem}:${i}:in`, "NORTH")], targets: [leaves(e, i) ?? port(e.from, `${stem}:${i}:out`, "SOUTH")] }
 			: { id: `e${i}`, sources: [leaves(e, i) ?? e.from], targets: [arrives(e) ?? e.to] },
 	);
 	const leaf = (n: PlanNode): ElkNode => {
@@ -179,6 +192,7 @@ export function chartGraph(plan: Plan, sizes: ReadonlyMap<string, Size>, loopTip
 		groups,
 		reversed,
 		sided,
+		returning,
 		graph: {
 			id: "root",
 			layoutOptions: {

@@ -78,16 +78,22 @@ function probeMeasure(probe: () => SVGTextElement | undefined, fallback: Measure
 async function layoutPlan(plan: Plan, measure: { node: Measure; label: Measure }): Promise<Layout> {
 	const sized = new Map<string, Sized>();
 	for (const n of plan.nodes) if (!sized.has(n.id)) sized.set(n.id, sizeNode(n.kind, n.text, measure.node));
-	const east = await layoutWith(chartGraph(plan, sized), sized, measure);
-	if (!east.sided) return east.layout;
-	// A loop closed from a decision can leave by either side, and which is clearer depends on
-	// where the layout puts the rest: both are laid out, and the one with fewer crossings is kept,
-	// or of two with as many, the one with less line.
-	const west = await layoutWith(chartGraph(plan, sized, "WEST"), sized, measure);
-	return west.crossings < east.crossings || (west.crossings === east.crossings && west.length < east.length) ? west.layout : east.layout;
+	// Two things can be drawn either way, and which is clearer depends on where the layout puts
+	// the rest: the side a loop closed from a decision leaves by, and whether a loop's way back
+	// arrives at its decision's top or its side. Each way that the plan has a use for is laid out,
+	// and the chart with the fewest crossings is kept, or of those the one with the least line.
+	const first = await layoutWith(chartGraph(plan, sized), sized, measure);
+	let best = first;
+	for (const loopTip of first.sided ? (["EAST", "WEST"] as const) : (["EAST"] as const))
+		for (const returnsAt of first.returning ? (["NORTH", "WEST"] as const) : (["NORTH"] as const)) {
+			if (loopTip === "EAST" && returnsAt === "NORTH") continue;
+			const next = await layoutWith(chartGraph(plan, sized, loopTip, returnsAt), sized, measure);
+			if (next.crossings < best.crossings || (next.crossings === best.crossings && next.length < best.length)) best = next;
+		}
+	return best.layout;
 }
 
-async function layoutWith({ graph, nodes, edges, groups, reversed, sided }: ChartGraph, sized: ReadonlyMap<string, Sized>, measure: { node: Measure; label: Measure }): Promise<{ layout: Layout; crossings: number; length: number; sided: boolean }> {
+async function layoutWith({ graph, nodes, edges, groups, reversed, sided, returning }: ChartGraph, sized: ReadonlyMap<string, Sized>, measure: { node: Measure; label: Measure }): Promise<{ layout: Layout; crossings: number; length: number; sided: boolean; returning: boolean }> {
 	const result: any = await elk.layout(graph as any);
 	const boxes: Box[] = [];
 	const walk = (n: any, ox: number, oy: number) => {
@@ -111,7 +117,7 @@ async function layoutWith({ graph, nodes, edges, groups, reversed, sided }: Char
 		const labelWidth = shown ? Math.ceil(measure.label(shown)) + 12 : 0;
 		return { id: e.id, from: edge.from, to: edge.to, label: edge.label, shown, labelWidth, points, at: labelPoint(points, labelWidth), missing, pending: Boolean(edge.pending), removing: Boolean(edge.removing), back: reversed.has(index) };
 	});
-	return { layout: { boxes, lines, width: result.width, height: result.height }, crossings: crossings(lines.map((l) => l.points)), length: routeLength(lines.map((l) => l.points)), sided };
+	return { layout: { boxes, lines, width: result.width, height: result.height }, crossings: crossings(lines.map((l) => l.points)), length: routeLength(lines.map((l) => l.points)), sided, returning };
 }
 
 /** A way out as it is drawn: its corners rounded, so that it reads as one line through each turn. */
