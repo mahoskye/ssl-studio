@@ -1,6 +1,8 @@
 # ADR 0014: Tickets come in from an export, and people are left out
 
-**Status:** Accepted
+**Status:** Accepted; two points superseded by
+[ADR 0016](0016-an-export-is-read-where-it-lies-and-comes-across-as-markdown.md)
+(where the export is, and a description's markup)
 **Date:** 2026-11-18
 **Decided by:** the user said most projects come from a Jira ticket or a
 similar source, with its related tickets (2026-11-18). How they are read in

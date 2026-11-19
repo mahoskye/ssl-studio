@@ -3,9 +3,13 @@
 **Status:** built (2026-11-19). Decisions:
 [ADR 0012](adr/0012-a-projects-work-is-written-down.md),
 [0013](adr/0013-the-agent-is-told-the-work-a-question-is-for.md),
-[0014](adr/0014-tickets-come-in-from-an-export.md) and
-[0015](adr/0015-what-is-not-ssl-is-read-here.md), each drafted from the
-user's request and not yet reviewed by them point by point.
+[0014](adr/0014-tickets-come-in-from-an-export.md),
+[0015](adr/0015-what-is-not-ssl-is-read-here.md),
+[0016](adr/0016-an-export-is-read-where-it-lies-and-comes-across-as-markdown.md),
+[0017](adr/0017-documents-link-to-each-other-and-the-links-are-kept-true.md)
+and [0018](adr/0018-a-check-is-not-built-on-a-reader-that-is-wrong.md), each
+drafted from the user's request and not yet reviewed by them point by
+point.
 
 **The idea, in the user's words:** "most often the project will come from a
 jira ticket or some similar source. it and any related tickets will be the
@@ -29,15 +33,8 @@ demo project (`examples/due-dates`) has one of everything, invented for it.
 ## From a ticket to the work
 
 1. **Bring the tickets in.** Docs panel, ＋, "Import tickets…" reads an
-   export from the ticket system: a CSV table, or the JSON its API returns.
-   In the app it asks with the system's file dialog, so the export can
-   stay where it was downloaded; in a browser tab, type its whole path.
-   "New ticket…" makes one by hand. Reporter and assignee are not read. A
-   sub-task is put under its parent and a story under its epic; a
-   description in Jira's wiki markup, or as Jira Cloud's tree of nodes,
-   comes across as Markdown. From
-   GitHub, an issue's body is what was asked, and pull requests listed
-   among the issues are passed over.
+   export from the ticket system; "New ticket…" makes one by hand. See
+   [Importing tickets](#importing-tickets).
 2. **Read the ticket's page.** It shows what the ticket says of itself, and
    under that everything tied to it: plans, specs, related tickets,
    questions, decisions. On any document's page, a ticket's key written in
@@ -59,6 +56,29 @@ demo project (`examples/due-dates`) has one of everything, invented for it.
 "Spec'd out work" is the right way to see it: a ticket says what was asked,
 a spec says what will be built for it, and a plan is the chart a spec is
 written from.
+
+## Importing tickets
+
+"Import tickets…" reads a file the ticket system gave out: a CSV table, or
+the JSON its API returns
+([ADR 0016](adr/0016-an-export-is-read-where-it-lies-and-comes-across-as-markdown.md)).
+
+- **The export stays where it was downloaded.** In the app the system's
+  file dialog finds it; in a browser tab, type its whole path.
+- **It asks first,** saying how many tickets are new and how many are
+  already here. A ticket already here keeps what was written in it; its
+  state, title and kind are brought up to date.
+- **A ticket goes under what it is part of:** a sub-task under its parent,
+  a story under its epic.
+- **A description comes across as Markdown,** every word kept.
+- **People are left out.** Reporter and assignee are not read.
+
+| From | Read as |
+| --- | --- |
+| Jira server | CSV ("all fields") or its API's JSON; wiki markup becomes Markdown |
+| Jira Cloud | Its API's JSON; the description's tree of nodes becomes Markdown |
+| GitHub | `gh issue list --json` or its API; pull requests are passed over |
+| Anything else | A table with a key and a title column, or a list of issues |
 
 ## What the Docs panel shows
 
@@ -120,23 +140,27 @@ Health's Work section says what the working documents need.
 A row's menu puts right what the IDE can: the catalogs are written afresh,
 a named ticket is started. The Registries section shows a bar for each.
 
-A link to a file that is not there is one to fix: the document it led to
-was moved, renamed or never written. Health names the file and opens the
-document at the link; the document's page marks the link before anyone
-clicks it. Links to the web, and to files outside the project, are not
-checked. Where the project has one file of that name somewhere else, the
-row offers "Mend": the link is pointed there, and Ctrl+Z undoes it.
+## Links between documents
 
-A file or a folder renamed in the Explorer takes what names it along: the
-IDE says how many places, in how many documents, still say the old name,
-and on your word writes the new one in each. A link is one such place; a
-ticket's `specs:` line and a spec's `plan:` line are the others. A name
-typed with a folder in it ("archive/Old.md") moves the file there, and the
-links the moved document holds are written from where it is now.
+The documents point at each other, and the IDE keeps those links true
+([ADR 0017](adr/0017-documents-link-to-each-other-and-the-links-are-kept-true.md)).
 
-Writing a link, the project's documents are offered once `](` is typed:
-tickets first, each by its key and title. Typing narrows the list by title,
-key or path, and the path written is the way there from the document.
+- **Writing a link:** once `](` is typed, the project's documents are
+  offered, tickets first, each by its key and title. Typing narrows the
+  list, and the path written is the way there from the document.
+- **A broken link is said.** Health names the file that is not there and
+  opens the document at the link; the document's page marks the link
+  before anyone clicks it. Links to the web, and to files outside the
+  project, are not checked.
+- **"Mend"** is offered where the project has one file of that name
+  somewhere else: the link is pointed there, and Ctrl+Z undoes it.
+- **A rename takes what names the file along.** Renaming a file or a
+  folder in the Explorer says how many places, in how many documents,
+  still say the old name, and on your word writes the new one in each. A
+  ticket's `specs:` line and a spec's `plan:` line count as such places.
+- **A move does too.** A name typed with a folder in it
+  ("archive/Old.md") moves the file there, and the links the moved
+  document holds are written from where it is now.
 
 ## The agent
 
@@ -166,6 +190,8 @@ decisions that stand.
 
 SSL is not on this list: its outline, findings and formatting are the
 language server's ([ADR 0015](adr/0015-what-is-not-ssl-is-read-here.md)).
+YAML has no check: the reader it would be built on marks right documents
+as wrong ([ADR 0018](adr/0018-a-check-is-not-built-on-a-reader-that-is-wrong.md)).
 Kept snippets are in the Palette, to insert at the cursor.
 
 ## Not done
