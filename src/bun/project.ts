@@ -487,3 +487,47 @@ export function tomlProblem(text: string): { message: string; line: number; colu
 		return { message: worded ? worded[1](worded[0]!) : said, line, column: Math.max(Number(first?.position?.column ?? 1), 1) };
 	}
 }
+
+/** What the YAML reader says, in a sentence a person can act on. */
+const YAML_WORDS: [RegExp, string][] = [
+	[/^Unexpected token/i, "Something here is not where YAML expects it: check the indentation, and that brackets and quotes are closed."],
+	[/^Unexpected character/i, "A character here cannot be read: a quote that is not closed, most often."],
+	[/^Unresolved alias/i, "An alias (*name) names an anchor that is not there."],
+	[/^Multiline implicit key/i, "A key has no colon after it."],
+];
+/** A YAML document longer than this is said to be unreadable, without looking for where. */
+const YAML_LINES = 1000;
+
+/**
+ * What keeps a text from being YAML, and about where; null when it can be
+ * read, or when the runtime has no YAML reader. The reader says only that
+ * it gave up, not where: the place is the line after the longest start of
+ * the document that still reads, which is at or just before the fault.
+ */
+export function yamlProblem(text: string): { message: string; line: number } | null {
+	const read = (Bun as unknown as { YAML?: { parse(text: string): unknown } }).YAML;
+	if (!read || !text.trim()) return null;
+	const fails = (part: string): string | null => {
+		try {
+			read.parse(part);
+			return null;
+		} catch (e: any) {
+			return String(e?.message ?? e).replace(/^YAML Parse error:\s*/i, "");
+		}
+	};
+	const said = fails(text);
+	if (said === null) return null;
+	const lines = text.split(/\r?\n/);
+	let line = 1;
+	if (lines.length <= YAML_LINES) {
+		for (let count = lines.length - 1; count > 0; count--) {
+			if (fails(lines.slice(0, count).join("\n")) !== null) continue;
+			line = count + 1;
+			break;
+		}
+	}
+	// Past the last line with anything on it, the fault is that line's: a document cannot break on nothing.
+	while (line > 1 && !lines[line - 1]?.trim()) line--;
+	return { message: `${YAML_WORDS.find(([pattern]) => pattern.test(said))?.[1] ?? `${said}.`} The reader stopped at or near this line.`, line };
+}
+

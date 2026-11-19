@@ -146,7 +146,8 @@ decisions that stand.
 | TOML, INI | Colours it, outlines its tables; TOML says where it breaks |
 | SQL | Colours it, outlines its statements |
 | CSV, TSV | Colours each column; opens as a table |
-| YAML, XML | Colours it; YAML outlines its top keys |
+| YAML | Colours it, outlines its top keys, says about where it breaks |
+| XML | Colours it, says where it is not well formed |
 
 SSL is not on this list: its outline, findings and formatting are the
 language server's ([ADR 0015](adr/0015-what-is-not-ssl-is-read-here.md)).

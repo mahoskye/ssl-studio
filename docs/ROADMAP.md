@@ -494,6 +494,10 @@ the work comes from ([ADR 0012](adr/0012-a-projects-work-is-written-down.md)).
 - **The selected row of the editor's suggest list is readable in the light
   theme.** It was white on pale blue, for SSL completion as well: the
   theme set the row's background and not its text.
+- **YAML and XML say where they break.** XML is read by the browser's own
+  reader, which gives the line and column. The runtime's YAML reader says
+  only that it gave up, so the place is the line after the longest start
+  of the document that still reads, and the note says "at or near".
 - **A ticket's key in the prose is a link.** Only the keys of tickets the
   project has; not in code, not in a link someone wrote, not the page's
   own ticket. A key of digits alone is one only as "#12".

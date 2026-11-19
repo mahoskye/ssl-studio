@@ -2,6 +2,7 @@
 // the folder as it is. The cycle run works on a copy of the workspace, so it
 // also presses "Set up project" and reads the documents that makes. Health
 // says the same about the root files, and is checked beside it.
+import { monaco } from "./editor/monaco";
 import { baseName, joinPath } from "../shared/paths";
 import { questionTemplate, specTemplate, ticketTemplate } from "../shared/projectDocs";
 import { backend } from "./backend";
@@ -277,6 +278,19 @@ export function selftestWork(): Promise<Steps> {
 			if (!(await until(() => !checks().some((text) => text.includes("../../specs/Moved.md"))))) return false;
 			return (await backend.read(moved)).text.includes("](../../specs/kept/Moved.md#checks)");
 		});
+		// A document that is not SSL says where it cannot be read: XML by the view's own reader, YAML by the backend's.
+		const marked = (path: string, code: string) => monaco.editor.getModelMarkers({ resource: monaco.Uri.file(path) }).find((marker) => (typeof marker.code === "string" ? marker.code : marker.code?.value) === code);
+		await step("xmlSaysWhere", async () => {
+			const path = await write(["reference.xml"], '<?xml version="1.0"?>\n<settings>\n  <setting name="a">1</settng>\n</settings>\n');
+			await openFile(path);
+			return until(() => marked(path, "xml")?.startLineNumber === 3);
+		});
+		await step("yamlSaysWhere", async () => {
+			const path = await write(["reference.yaml"], "name: self-test\nitems: [1,\n  2]\n bad: 1\n");
+			await openFile(path);
+			return until(() => marked(path, "yaml")?.startLineNumber === 4);
+		});
+
 		// A file that is renamed takes the links that led to it along, on the person's word.
 		await step("linksFollowRename", async () => {
 			const from = canonical(joinPath(root, ...folder, "specs", "kept", "Moved.md"));
