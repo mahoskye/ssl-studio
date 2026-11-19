@@ -399,6 +399,13 @@ From a second look:
 - **Brackets in the two built-in themes have the themes' own colours,**
   three that are told apart at a glance, where the editor's stock gold
   stood out of the dark theme.
+- **The page before a folder is open says what a folder opens to:** the
+  four views by name, each with a line of what it is for, the keys that
+  open a folder, and the ways to all commands and to Settings. It was a
+  title, a sentence and a button.
+- **With no folder, the language server is not a warning.** The status bar
+  said "Language server stopped" in the warning colour; it says that the
+  server starts with a folder.
 - **A procedure found from the list is fitted in the graph.** Finding one
   while the list was showing laid out two pictures, and the view was fitted
   to the wrong one: the focus came up small, cut off at the top, with a

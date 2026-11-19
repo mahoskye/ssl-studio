@@ -47,8 +47,11 @@ export function StatusBar() {
 	const lspLabel = () => {
 		const s = state.lsp.state;
 		const version = state.info?.lsp.version ? ` ${state.info.lsp.version}` : "";
+		// With no folder there is nothing for it to read: it is not a fault that it is not running.
+		if (!state.workspace && s === "stopped") return "Language server starts with a folder";
 		return s === "running" ? `Language server${version}` : `Language server ${s}`;
 	};
+	const lspWaits = () => !state.workspace && state.lsp.state === "stopped" && !state.info?.lsp.message;
 	const lspNote = () => state.lsp.message ?? state.info?.lsp.message;
 	const opencode = () => state.info?.opencode;
 	// "near" and "over" are also said in words, for anyone who cannot tell them by colour.
@@ -68,7 +71,7 @@ export function StatusBar() {
 			</span>
 			<button
 				class="item"
-				classList={{ warn: state.lsp.state !== "running" || Boolean(state.info?.lsp.message) }}
+				classList={{ warn: !lspWaits() && (state.lsp.state !== "running" || Boolean(state.info?.lsp.message)) }}
 				title={`${lspNote() ? `${lspNote()}\n` : ""}Click to restart the language server.`}
 				aria-label={`${lspLabel()}${lspNote() ? `: ${lspNote()}` : ""}. Restart the language server.`}
 				onClick={() => (notify("Restarting the language server."), void backend.lspRestart())}
