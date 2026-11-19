@@ -59,6 +59,30 @@ const validColor = (value: unknown): value is string => typeof value === "string
  * variables of the element that holds it, so the same declarations are given
  * to that element.
  */
+/** The shape of the app's own menus (style.css, .menu-pop and .menu-item), for the editor's menu in its own tree. */
+const MENU_SHAPE = `
+.monaco-menu-container { border-radius: var(--radius-lg) !important; box-shadow: var(--shadow) !important; overflow: hidden; }
+.monaco-menu { font: var(--text-base)/1.4 system-ui, -apple-system, "Segoe UI", sans-serif !important; }
+.monaco-menu .monaco-action-bar.vertical { padding: var(--space-2) !important; }
+.monaco-menu .monaco-action-bar.vertical .action-item { border-radius: var(--radius-sm); }
+.monaco-menu .monaco-action-bar.vertical .keybinding { color: var(--muted) !important; opacity: 1 !important; font-size: var(--text-sm) !important; }
+`;
+
+/** Gives each of the editor's menus, as it is made, the shape of the app's own. */
+export function shapeEditorMenus() {
+	const shape = (host: Element) => {
+		const root = host.shadowRoot;
+		if (!root || root.querySelector("style[data-studio]")) return;
+		const style = document.createElement("style");
+		style.dataset.studio = "";
+		style.textContent = MENU_SHAPE;
+		root.append(style);
+	};
+	new MutationObserver((changes) => {
+		for (const change of changes) for (const node of change.addedNodes) if (node instanceof Element && node.classList.contains("shadow-root-host")) shape(node);
+	}).observe(document.body, { childList: true, subtree: true });
+}
+
 function carryMenuColours() {
 	const declared = [...document.querySelectorAll("style.monaco-colors")].map((style) => style.textContent ?? "").join("\n");
 	const block = /\{([^{}]*--vscode-menu-background[^{}]*)\}/.exec(declared)?.[1];
@@ -74,7 +98,18 @@ function carryMenuColours() {
 
 export function applyTheme(theme: VsTheme) {
 	const base = isDark(theme) ? builtIn.dark! : builtIn.light!;
-	const colors = { ...base.colors, ...theme.colors };
+	const themed: Record<string, string> = { ...base.colors, ...theme.colors };
+	// The editor's right-click menu takes the colours the app's own menus are drawn in, whatever the theme says of
+	// "menu.*": those keys are for a window's menu bar, which this app does not have.
+	const colors: Record<string, string> = {
+		...themed,
+		"menu.background": themed["sideBar.background"],
+		"menu.foreground": themed["sideBar.foreground"],
+		"menu.selectionBackground": themed["list.hoverBackground"],
+		"menu.selectionForeground": themed["sideBar.foreground"],
+		"menu.separatorBackground": themed["sideBar.border"],
+		"menu.border": themed["input.border"],
+	};
 	const raw: IRawTheme = {
 		name: theme.name,
 		settings: [

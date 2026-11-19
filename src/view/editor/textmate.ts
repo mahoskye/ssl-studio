@@ -15,6 +15,8 @@ const FONT_STYLE = (m: number) => (m & 0x00007800) >>> 11;
 const FOREGROUND = (m: number) => (m & 0x00ff8000) >>> 15;
 export const COMMENT_TOKEN = 1;
 const STRING_TOKEN = 2;
+/** The words the editor reads a token's standard type from, after the token's own type: a theme rule matches the part before. */
+const STANDARD: Record<number, string> = { [COMMENT_TOKEN]: ".comment", [STRING_TOKEN]: ".string", 3: ".regex" };
 
 class State implements monaco.languages.IState {
 	constructor(readonly stack: StateStack) {}
@@ -64,7 +66,9 @@ export function applyTokenTheme(theme: IRawTheme): monaco.editor.ITokenThemeRule
 			const tokens: monaco.languages.IToken[] = [];
 			for (let i = 0; i < result.tokens.length; i += 2) {
 				const m = result.tokens[i + 1]!;
-				tokens.push({ startIndex: result.tokens[i]!, scopes: `c${FOREGROUND(m)}.${FONT_STYLE(m)}` });
+				// The colour is the token's type as the theme sees it; what follows it says, to the editor, that the
+				// token is a comment or a string, so that a bracket in one is text and not a bracket to pair and colour.
+				tokens.push({ startIndex: result.tokens[i]!, scopes: `c${FOREGROUND(m)}.${FONT_STYLE(m)}${STANDARD[TOKEN_TYPE(m)] ?? ""}` });
 			}
 			return { tokens, endState: new State(result.ruleStack) };
 		},

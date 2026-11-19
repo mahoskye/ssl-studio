@@ -8,7 +8,7 @@ import "./editor/opener";
 import { loadGrammar } from "./editor/textmate";
 import { registerProviders, session } from "./lsp/session";
 import { loadProject, loadSettings, log, notify, restoreTabs, setState, state, unsavedPaths } from "./state";
-import { applyTheme, resolveTheme } from "./themes/themes";
+import { applyTheme, resolveTheme, shapeEditorMenus } from "./themes/themes";
 
 export const errors: string[] = [];
 
@@ -30,6 +30,7 @@ async function start() {
 	await connect();
 	await Promise.all([loadGrammar(), loadLanguageConfiguration(), loadSettings()]);
 	applyTheme(resolveTheme(state.settings.theme, state.themes));
+	shapeEditorMenus();
 	registerProviders();
 	installKeys();
 	setState("info", await backend.info());

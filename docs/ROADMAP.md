@@ -311,6 +311,18 @@ What the user found in a first look at the round above, and what was done.
 - **What is found or selected stays clear of the corner map,** in the graph
   and in a chart.
 
+From a second look:
+
+- **The rulers are much fainter:** there for the eye that looks for them,
+  not seen all the time.
+- **A bracket in a comment or a string is part of it.** The editor paired
+  and coloured braces inside comments; each token now says when it is a
+  comment or a string, so only brackets in code are paired and coloured.
+- **The editor's right-click menu looks like the app's other menus:** the
+  same background, border, highlight, corners and type.
+- **A narrow editor has no minimap:** under 640 pixels the map would lie
+  over the code it is a map of.
+
 ## On hold
 
 - **Forms, client scripts and code-behind (2026-11-17).** Wanted eventually, in

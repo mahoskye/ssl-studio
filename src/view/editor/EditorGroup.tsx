@@ -19,6 +19,8 @@ import { getPath, SERVER_DEFAULTS } from "../../shared/styleProfile";
 import { RULER_MARGIN, rulerColumns } from "../../shared/houseStyle";
 
 const viewStates = new Map<string, monaco.editor.ICodeEditorViewState | null>();
+/** The editor width, in pixels, from which the minimap is shown: under it, code at the line length would run beneath the map. */
+const MINIMAP_FROM = 640;
 export const editors: monaco.editor.IStandaloneCodeEditor[] = [];
 
 const base = baseName;
@@ -42,8 +44,13 @@ export function EditorGroup(props: { index: number }) {
 	const rulers = () =>
 		rulerColumns(state.settings.rulers !== false, Number(getPath(state.settings.ssl, "format.maxLineLength") ?? SERVER_DEFAULTS.format.maxLineLength), state.settings.rulerMargin ?? RULER_MARGIN).map((ruler) => ({
 			column: ruler.column,
-			color: ruler.main ? "color-mix(in srgb, var(--fg) 40%, transparent)" : "color-mix(in srgb, var(--fg) 18%, transparent)",
+			// Barely there: a ruler is for the eye to find when it looks, not to see all the time.
+			color: ruler.main ? "color-mix(in srgb, var(--fg) 13%, transparent)" : "color-mix(in srgb, var(--fg) 6%, transparent)",
 		}));
+
+	// A narrow editor has no room to give: the map would lie over the code it is a map of.
+	const [roomy, setRoomy] = createSignal(true);
+	const minimap = () => state.settings.minimap && roomy();
 
 	onMount(() => {
 		editor = monaco.editor.create(host, {
@@ -51,7 +58,7 @@ export function EditorGroup(props: { index: number }) {
 			theme: "studio",
 			automaticLayout: true,
 			fontSize: state.settings.fontSize,
-			minimap: { enabled: state.settings.minimap },
+			minimap: { enabled: minimap() },
 			renderWhitespace: "selection",
 			"semanticHighlighting.enabled": true,
 			inlayHints: { enabled: state.settings.inlayHints === false ? "off" : "on" },
@@ -60,6 +67,8 @@ export function EditorGroup(props: { index: number }) {
 			rulers: rulers(),
 		});
 		editors[props.index] = editor;
+		setRoomy(editor.getLayoutInfo().width >= MINIMAP_FROM);
+		editor.onDidLayoutChange((layout) => setRoomy(layout.width >= MINIMAP_FROM));
 		editor.onDidFocusEditorText(() => setState("activeGroup", props.index));
 		editor.onDidChangeModelContent(() => setLineCount(editor.getModel()?.getLineCount() ?? 0));
 		editor.onDidChangeModel(() => setLineCount(editor.getModel()?.getLineCount() ?? 0));
@@ -111,7 +120,7 @@ export function EditorGroup(props: { index: number }) {
 	createEffect(() =>
 		editor?.updateOptions({
 			fontSize: state.settings.fontSize,
-			minimap: { enabled: state.settings.minimap },
+			minimap: { enabled: minimap() },
 			inlayHints: { enabled: state.settings.inlayHints === false ? "off" : "on" },
 			rulers: rulers(),
 		}),
