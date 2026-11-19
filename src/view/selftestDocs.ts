@@ -3,9 +3,11 @@
 // also presses "Set up project" and reads the documents that makes. Health
 // says the same about the root files, and is checked beside it.
 import { baseName, joinPath } from "../shared/paths";
+import { questionTemplate, specTemplate, ticketTemplate } from "../shared/projectDocs";
 import { backend } from "./backend";
 import { showPanel } from "./panels/registry";
 import { docs } from "./project";
+import { setStatus, updateCatalogs } from "./projectDocs";
 import { activePath, canonical, openFile, setState, state } from "./state";
 
 type Steps = Record<string, boolean | string>;
@@ -156,5 +158,87 @@ export function selftestDocsSetup(): Promise<Steps> {
 		} finally {
 			window.open = open;
 		}
+	});
+}
+
+/**
+ * The working documents (ADR 0012), on the cycle run's copy of the workspace:
+ * a ticket with a part under it, a spec, a question and a registry are
+ * written, and the panel, Health, the table, the ticket's page, a state set
+ * from it and a row's menu are each checked as a person would meet them.
+ */
+export function selftestWork(): Promise<Steps> {
+	return run({}, async (step) => {
+		const root = state.workspace!.root;
+		const folder = state.project!.docs.split(/[\\/]/);
+		const write = async (parts: string[], text: string) => {
+			const path = canonical(joinPath(root, ...folder, ...parts));
+			await backend.create(path, "file");
+			await backend.write(path, text);
+			return path;
+		};
+		const ticket = await write(["tickets", "SELF-1.md"], ticketTemplate({ key: "SELF-1", title: "A ticket for the self-test", description: "Asked for by the self-test." }));
+		await write(["tickets", "SELF-2.md"], ticketTemplate({ key: "SELF-2", title: "Its part", parent: "SELF-1", status: "in progress", description: "Part of the first." }));
+		await write(["specs", "Self-spec.md"], specTemplate({ title: "Self spec", ticket: "SELF-1" }));
+		const question = await write(["knowledge", "questions", "Is-it-read.md"], questionTemplate({ title: "Is it read?", date: "2026-01-01", ticket: "SELF-1" }));
+		const registry = await write(["registries", "settings.csv"], "name,value,status\nAlpha,1,found\nBeta,2,verified\n");
+		setState("treeVersion", (v) => v + 1);
+
+		showPanel("docs");
+		const keyed = (key: string) => rows().find((r) => r.querySelector(".doc-key")?.textContent === key);
+		const named = (text: string) => rows().find((r) => label(r).includes(text));
+		const indent = (r: HTMLElement | undefined) => Number.parseFloat(r?.style.paddingLeft ?? "0");
+		await step("workListed", () => until(() => keyed("SELF-1") && keyed("SELF-2")));
+		// A ticket that is part of another is under it; with something under way beneath it, the parent comes first.
+		await step("partUnderParent", async () => rows().indexOf(keyed("SELF-1")!) < rows().indexOf(keyed("SELF-2")!) && indent(keyed("SELF-2")) > indent(keyed("SELF-1")));
+		await step("specUnderTicket", async () => named("Self spec") && indent(named("Self spec")) > indent(keyed("SELF-1")));
+		await step("knowledgeListed", async () => named("Is it read?"));
+		await step("registryProgress", async () => named("Application settings")?.textContent?.includes("1 of 2 done"));
+
+		// The catalogs are written from the documents, and then say what the folders hold.
+		await step("catalogsWritten", async () => {
+			await updateCatalogs();
+			return until(() => {
+				const catalogs = docs().filter((d) => d.catalog);
+				return catalogs.length === 4 && catalogs.every((d) => !d.catalog!.stale);
+			});
+		});
+		showPanel("health");
+		const checks = () => [...document.querySelectorAll<HTMLElement>(".check-row")].map((r) => r.textContent ?? "");
+		await step("healthSaysWork", () => until(() => checks().some((text) => text.includes("question is open")) && !checks().some((text) => text.includes("out of date"))));
+
+		await step("registryOpensAsTable", async () => {
+			await openFile(registry);
+			return until(() => document.querySelectorAll(".table-view tbody tr").length === 2);
+		});
+		await step("ticketPageShowsWork", async () => {
+			await openFile(ticket);
+			return until(() => document.querySelector(".md-front") && [...document.querySelectorAll(".md-work li")].some((li) => li.textContent?.includes("Self spec")));
+		});
+		// A state set from the document's page is the file's one line and the catalog's, both.
+		await step("statusSetFromPage", async () => {
+			await setStatus(ticket, "done");
+			return until(() => docs().find((d) => canonical(d.path) === ticket)?.status === "done" && docs().filter((d) => d.catalog).every((d) => !d.catalog!.stale));
+		});
+
+		// A row's menu, asked for the way a right-click or the menu key asks, whichever panel is showing.
+		showPanel("docs");
+		await step("rowMenuOpens", async () => {
+			const target = await until(() => keyed("SELF-2"));
+			const box = target!.getBoundingClientRect();
+			target!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: box.left + 8, clientY: box.top + 4 }));
+			return until(() => [...document.querySelectorAll(".menu-pop.row-menu [role=menuitem], .menu-pop.row-menu button")].some((item) => item.textContent?.trim() === "Set to done"));
+		});
+		await step("rowMenuCloses", async () => {
+			(document.activeElement ?? document.body).dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+			return until(() => !document.querySelector(".menu-pop.row-menu"));
+		});
+
+		// A document that is not SSL has an outline of its own.
+		showPanel("objects");
+		await step("documentOutlined", async () => {
+			await openFile(question);
+			return until(() => [...document.querySelectorAll('[data-panel="objects"] [data-row]')].some((r) => r.textContent?.includes("Why it matters")));
+		});
 	});
 }

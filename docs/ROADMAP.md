@@ -616,6 +616,15 @@ working-documents code, for defects only, found these; each has a test now
   and under way were told apart by colour alone. A registry's progress is
   "7/11" there and a warning is its mark, so the title keeps the room.
 
+**The self-test covers the working documents (2026-11-19).** The cycle
+run writes a ticket with a part under it, a spec, a question and a
+registry into its copy of the workspace, and checks thirteen things as a
+person would meet them: the Work list's order and nesting, the registry's
+progress, the catalogs written and then current, Health, the table, the
+ticket's page, a state set from it, a row's menu opening and closing, and
+a document's outline. The row menu that never appeared would have failed
+it.
+
 Left as they are: a ticket file whose name differs only in case from an
 imported key on a file system that ignores case, and a catalog written
 while its document has unsaved changes, which Health then reports.
