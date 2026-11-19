@@ -1,12 +1,48 @@
 // The style profile editor: the language server's `ssl` settings, per user
 // or per workspace, with the house preset (decisions 0002, 0005, 0006).
-import { createEffect, createSignal, createUniqueId, For, Show } from "solid-js";
+import { createEffect, createResource, createSignal, createUniqueId, For, Show } from "solid-js";
 import { getPath, SERVER_DEFAULTS, RULE_LEVELS, SECTIONS, setPath, type Field } from "../shared/styleProfile";
 import { backend } from "./backend";
 import { choose } from "./dialogs";
-import { diagnostics } from "./lsp/session";
+import { diagnostics, session } from "./lsp/session";
+import { applyTextEdits, type TextEdit } from "./lsp/edits";
+import { monaco } from "./editor/monaco";
 import { Modal } from "./modal";
 import { loadSettings, notify, state } from "./state";
+
+/**
+ * A few untidy lines, written for this dialog, that touch what the profile
+ * decides: spacing, indentation, blank lines, the case of a built-in and the
+ * layout of a SQL string.
+ */
+const SAMPLE = `:PROCEDURE LateSamples;
+:PARAMETERS nDays,sPriority;
+:DECLARE aRows,nIndex,sText;
+aRows:=sqlexecute("select SAMPLE_ID, DUE_ON from DEMO_SAMPLES where DUE_ON < ? and PRIORITY = ? order by DUE_ON",,,{today()-nDays,sPriority});
+sText:="";
+:FOR nIndex:=1 :TO alen(aRows);
+:IF empty(aRows[nIndex][2]);
+:LOOP;
+:ENDIF;
+sText:=sText+aRows[nIndex][1]+chr(13);
+:NEXT;
+
+
+:RETURN sText;
+:ENDPROC;
+`;
+
+/** The sample as the language server formats it now, with the profile in force. */
+async function formatSample(root: string): Promise<string> {
+	const uri = monaco.Uri.file(`${root}/.ssl-studio/style-preview.ssl`).toString();
+	session.client.notify("textDocument/didOpen", { textDocument: { uri, languageId: "ssl", version: 1, text: SAMPLE } });
+	try {
+		const edits = (await session.request("textDocument/formatting", { textDocument: { uri }, options: { tabSize: 4, insertSpaces: false } })) as TextEdit[] | null;
+		return applyTextEdits(SAMPLE, edits ?? []);
+	} finally {
+		session.client.notify("textDocument/didClose", { textDocument: { uri } });
+	}
+}
 
 const [open, setOpen] = createSignal(false);
 export const openStyleProfile = () => setOpen(true);
@@ -29,6 +65,19 @@ export function StyleProfile() {
 	};
 	createEffect(() => open() && void reload());
 	const current = () => layers()[scope()];
+	// What the profile does, shown: the sample is formatted again whenever a setting changes. The wait lets the
+	// change reach the server first (App sends it when the settings change).
+	const [preview] = createResource(
+		() => open() && state.lsp.state === "running" && state.workspace && ([state.workspace.root, JSON.stringify(state.settings.ssl ?? {}), state.settings.theme] as const),
+		async ([root]) => {
+			await new Promise((done) => setTimeout(done, 150));
+			try {
+				return { html: await monaco.editor.colorize(await formatSample(root), "ssl", { tabSize: 4 }), error: "" };
+			} catch (e: any) {
+				return { html: "", error: String(e?.message ?? e) };
+			}
+		},
+	);
 	const write = async (ssl: any) => {
 		try {
 			await backend.saveSettings(scope(), { ssl });
@@ -138,6 +187,17 @@ export function StyleProfile() {
 						</Show>
 					</fieldset>
 				</div>
+				{/* What the profile does to a few untidy lines, as the language server formats them now. */}
+				<section class="profile-preview" aria-label="Preview">
+					<h3>
+						Preview <span class="hint">a sample, formatted with this profile</span>
+					</h3>
+					<Show when={state.lsp.state === "running" && state.workspace} fallback={<p class="hint">The preview is formatted by the language server, and appears when it is running with a folder open.</p>}>
+						<Show when={!preview()?.error} fallback={<p class="hint">The sample could not be formatted: {preview()?.error}</p>}>
+							<pre class="block-code" innerHTML={preview.latest?.html ?? ""} />
+						</Show>
+					</Show>
+				</section>
 				<div class="buttons">
 					<button class="primary" onClick={() => setOpen(false)}>
 						Done

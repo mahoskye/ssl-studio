@@ -259,6 +259,14 @@ call at once, in lines with sharp corners.
 - **Go to file** shows each file's mark; **a plan's chart** has the graph's
   zoom controls; **Output** follows new lines and says what it is for while
   it is empty.
+- **The style profile shows what it does:** a sample under the settings is
+  formatted by the language server with the profile in force, and again
+  whenever a setting changes.
+- **A review names its two sides** ("Now" and "Proposed") over the diff, and
+  says how many lines the proposal adds and takes away.
+- **The plan assistant opens with where the plan stands:** spec, build, and
+  the code against the chart, each with a mark and a word.
+- **The status bar's line and column** open the editor's "go to line".
 
 ## On hold
 

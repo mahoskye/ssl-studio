@@ -311,3 +311,16 @@ describe("a review (items 12 to 14)", () => {
 		expect(s.failures[0]).toMatch(/plan not open/);
 	});
 });
+
+import { changeSize } from "../src/view/editor/reviewFlow";
+
+test("a proposed change says how large it is", () => {
+	const change = (o: [number, number], m: [number, number]) => ({ originalStartLineNumber: o[0], originalEndLineNumber: o[1], modifiedStartLineNumber: m[0], modifiedEndLineNumber: m[1] });
+	// One line taken away: the other side has no lines there (an end of 0).
+	expect(changeSize([change([6, 6], [5, 0])])).toBe("1 line removed or changed");
+	expect(changeSize([change([3, 0], [4, 6])])).toBe("3 lines added or changed");
+	expect(changeSize([change([2, 3], [2, 2]), change([9, 0], [8, 8])])).toBe("2 lines added or changed, 2 lines removed or changed");
+	expect(changeSize([])).toBe("No lines differ");
+	// Not worked out yet.
+	expect(changeSize(null)).toBe("");
+});

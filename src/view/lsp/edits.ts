@@ -87,3 +87,25 @@ export function minimalReplace(before: string, after: string): { start: number; 
 	while (tail < before.length - start && tail < after.length - start && before[before.length - 1 - tail] === after[after.length - 1 - tail]) tail++;
 	return { start, end: before.length - tail, text: after.slice(start, after.length - tail) };
 }
+
+/** A text edit as the language server sends it: a range of lines and UTF-16 columns, and what replaces it. */
+export type TextEdit = { range: { start: { line: number; character: number }; end: { line: number; character: number } }; newText: string };
+
+/**
+ * A text with the server's edits applied, for text that is in no editor. The
+ * edits are the server's own (a formatting's), so they do not overlap; they are
+ * applied from the last to the first, so an earlier one does not move a later.
+ */
+export function applyTextEdits(text: string, edits: readonly TextEdit[]): string {
+	const starts = [0];
+	for (let i = 0; i < text.length; i++) if (text[i] === "\n") starts.push(i + 1);
+	const offset = (at: { line: number; character: number }) => {
+		if (at.line >= starts.length) return text.length;
+		const end = at.line + 1 < starts.length ? starts[at.line + 1]! : text.length;
+		return Math.min(starts[at.line]! + at.character, end);
+	};
+	const placed = edits.map((e) => ({ from: offset(e.range.start), to: offset(e.range.end), text: e.newText })).sort((a, b) => b.from - a.from || b.to - a.to);
+	let out = text;
+	for (const e of placed) out = out.slice(0, e.from) + e.text + out.slice(e.to);
+	return out;
+}

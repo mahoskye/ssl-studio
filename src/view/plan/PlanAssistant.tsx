@@ -59,6 +59,16 @@ export function PlanAssistant(props: { path: string; plan: Plan; text: string; o
 			</button>
 		</Show>
 	);
+	/** The three things a plan goes through, each with how it stands now. */
+	const stages = (): { name: string; state: "done" | "warn" | "todo"; words: string }[] => {
+		const hasCode = Boolean(built()?.units.length);
+		const changed = anyChanges(changes());
+		return [
+			{ name: "Spec", state: spec() === "current" ? "done" : spec() === "stale" ? "warn" : "todo", words: spec() === "current" ? "approved" : spec() === "stale" ? "out of date" : "not written" },
+			{ name: "Build", state: hasCode ? (changed ? "warn" : "done") : "todo", words: hasCode ? (changed ? "chart changed since" : "built") : "not built" },
+			{ name: "Code", state: !drift().checked ? "todo" : drift().items.length ? "warn" : "done", words: !drift().checked ? "not compared" : drift().items.length ? "differs from the chart" : "agrees with the chart" },
+		];
+	};
 	return (
 		<aside class="plan-assist" id={props.id} hidden={props.hidden} aria-label="Plan assistant">
 			<div class="plan-assist-actions">
@@ -90,6 +100,20 @@ export function PlanAssistant(props: { path: string; plan: Plan; text: string; o
 					<Show when={a().cost}>, cost {a().cost.toFixed(2)}</Show>
 				</Show>
 			</p>
+			{/* Where the plan stands, at a glance: each stage with a mark and a word, and its section below says the rest. */}
+			<ol class="plan-stages" aria-label="Where the plan stands">
+				<For each={stages()}>
+					{(stage) => (
+						<li class={stage.state} title={stage.words}>
+							<span class="plan-stage-mark" aria-hidden="true">
+								{stage.state === "done" ? "✓" : stage.state === "warn" ? "!" : "·"}
+							</span>
+							<span class="plan-stage-name">{stage.name}</span>
+							<span class="plan-stage-words">{stage.words}</span>
+						</li>
+					)}
+				</For>
+			</ol>
 			<Show when={a().progress}>
 				<p class="plan-assist-progress">{a().progress}</p>
 			</Show>

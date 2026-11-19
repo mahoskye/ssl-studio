@@ -32,6 +32,15 @@ function useSizeMeter() {
 	);
 }
 
+/** Opens the text editor's "go to line". The editors import the commands, so they are loaded here when they are needed. */
+async function goToLine() {
+	const { activeEditor } = await import("./editor/EditorGroup");
+	const editor = activeEditor();
+	if (!editor) return;
+	editor.focus();
+	await editor.getAction("editor.action.gotoLine")?.run();
+}
+
 export function StatusBar() {
 	useSizeMeter();
 	const limits = () => state.settings.limits;
@@ -105,9 +114,10 @@ export function StatusBar() {
 				)}
 			</Show>
 			<Show when={activePath()}>
-				<span class="item">
+				{/* Where the cursor is, and the way to another line: the editor's own "go to line". */}
+				<button class="item" title="Go to a line (Ctrl+G in the editor)" aria-label={`Line ${state.cursor.line}, column ${state.cursor.column}. Go to a line.`} onClick={() => void goToLine()}>
 					Ln {state.cursor.line}, Col {state.cursor.column}
-				</span>
+				</button>
 				<span class="item">{activeDoc()?.model.getLanguageId().toUpperCase()}</span>
 			</Show>
 		</footer>

@@ -225,6 +225,11 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 
 .diff { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .diff-bar { display: flex; align-items: center; gap: var(--space-4); padding: var(--space-2) var(--space-5); background: var(--tab-bg); }
+/* What each side of a comparison is, over it, and how large the change is. */
+.diff-sides { display: grid; grid-template-columns: 1fr 1fr; padding: var(--space-2) var(--space-5); background: var(--panel-bg); border-bottom: 1px solid var(--border); font-size: var(--text-md); font-weight: 600; color: var(--muted); }
+.diff-sides .hint { margin: 0 0 0 var(--space-3); font-weight: 400; }
+.diff-sides > span:last-child { display: flex; align-items: baseline; }
+.diff-sides .diff-size { margin-left: auto; font-weight: 400; font-variant-numeric: tabular-nums; }
 .diff-host { flex: 1; min-height: 0; }
 /* A review's header: what is under review, which file, and what accepting will do. It wraps; nothing is cut. */
 .review-bar { align-items: flex-start; padding: var(--space-3) var(--space-5); }
@@ -364,6 +369,11 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .profile-sections legend { font-size: var(--text-md); color: var(--muted); padding: 0 var(--space-2); }
 .dialog .profile-field { display: grid; grid-template-columns: 1fr auto 20px; align-items: center; gap: var(--space-3); flex-direction: row; font-size: var(--text-md); margin: var(--space-2) 0; }
 .profile-field input[type="number"] { width: 90px; }
+/* The profile's effect on a few lines, under the settings: it changes as they do. */
+.profile-preview { flex: none; }
+.profile-preview h3 { margin: 0 0 var(--space-2); font-size: var(--text-md); font-weight: 600; color: var(--muted); }
+.profile-preview h3 .hint { margin: 0 0 0 var(--space-3); font-weight: 400; }
+.profile-preview pre { margin: 0; max-height: 170px; overflow: auto; padding: var(--space-4); background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-md); font: var(--text-md)/1.5 ui-monospace, "Cascadia Code", Menlo, monospace; tab-size: 4; white-space: pre; }
 .profile-field.own span { color: var(--fg); font-weight: 600; }
 .profile-field .reset { padding: 0; color: var(--muted); }
 .profile-error { margin: 0; color: var(--error); }
@@ -705,6 +715,14 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .plan-assist-progress { color: var(--accent); margin: var(--space-3) 0; }
 .plan-assist-warning { color: var(--warning); margin: var(--space-3) 0; }
 .plan-assist-foot { margin-top: var(--space-6); }
+/* Where the plan stands: a row for each stage, its mark saying the state without leaning on colour. */
+.plan-stages { list-style: none; margin: var(--space-4) 0; padding: var(--space-3) var(--space-4); display: flex; flex-direction: column; gap: var(--space-2); background: var(--panel-bg); border: 1px solid var(--border); border-radius: var(--radius-md); }
+.plan-stages li { display: grid; grid-template-columns: var(--space-6) auto 1fr; align-items: baseline; gap: var(--space-3); }
+.plan-stage-mark { text-align: center; font-weight: 700; color: var(--muted); }
+.plan-stages li.done .plan-stage-mark { color: var(--ok); }
+.plan-stages li.warn .plan-stage-mark { color: var(--warning); }
+.plan-stage-name { font-weight: 600; }
+.plan-stage-words { color: var(--muted); text-align: right; }
 .plan-question, .plan-suggestion { margin-bottom: var(--space-5); padding-bottom: var(--space-4); border-bottom: 1px solid var(--border); }
 .plan-question p, .plan-suggestion p { margin: 0 0 var(--space-3); }
 .plan-question input { width: 100%; box-sizing: border-box; }

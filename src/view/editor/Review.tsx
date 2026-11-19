@@ -7,7 +7,7 @@ import { choose } from "../dialogs";
 import { state, notify } from "../state";
 import { relativeTo } from "../../shared/paths";
 import { monaco } from "./monaco";
-import { reviewFlow } from "./reviewFlow";
+import { changeSize, reviewFlow } from "./reviewFlow";
 
 /** `ok: null` is a check that could not be made, or a fact to keep in mind: it is never shown as a pass. */
 export type Check = { label: string; ok: boolean | null; detail?: string };
@@ -61,6 +61,8 @@ export function ReviewView() {
 	const r = untrack(review)!;
 	const [busy, setBusy] = createSignal(false);
 	const [error, setError] = createSignal("");
+	/** The lines the proposal adds and takes away, once the diff has been worked out. */
+	const [size, setSize] = createSignal("");
 	const label = r.acceptLabel ?? "Accept";
 	const file = r.path ? relativeTo(state.workspace?.root, r.path) : "";
 	const effect = r.effect ?? `"${label}" applies the right side.`;
@@ -70,6 +72,9 @@ export function ReviewView() {
 		const proposed = (proposedModel = monaco.editor.createModel(r.proposed, r.language));
 		const diff = (editor = monaco.editor.createDiffEditor(host, { automaticLayout: true, renderSideBySide: true, originalEditable: false, readOnly: false, fontSize: state.settings.fontSize }));
 		diff.setModel({ original, modified: proposed });
+		// How large the change is, kept up to date as the right side is edited.
+		const sized = diff.onDidUpdateDiff(() => setSize(changeSize(diff.getLineChanges())));
+		onCleanup(() => sized.dispose());
 		untouched = proposed.getAlternativeVersionId();
 		// Escape needs the keyboard in here. Typing somewhere else (the agent's composer) is left alone.
 		const focused = document.activeElement;
@@ -120,7 +125,7 @@ export function ReviewView() {
 						</Show>
 					</div>
 					<p class="review-effect">
-						Left: the current text. Right: the proposed text, which you can edit. {effect} Reject (Esc) changes nothing.
+						{effect} Reject (Esc) changes nothing.
 					</p>
 				</div>
 				<div class="review-actions">
@@ -161,6 +166,17 @@ export function ReviewView() {
 					</Show>
 				</div>
 			</Show>
+			{/* What each side is, over it: the two halves are the diff's own. */}
+			<div class="diff-sides" aria-hidden="true">
+				<span>Now</span>
+				<span>
+					Proposed <span class="hint">you can edit this side</span>
+					<span class="diff-size">{size()}</span>
+				</span>
+			</div>
+			<p class="visually-hidden" role="status">
+				{size()}
+			</p>
 			<div class="diff-host" ref={host} />
 		</div>
 	);

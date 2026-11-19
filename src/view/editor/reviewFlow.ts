@@ -95,3 +95,17 @@ export function reviewFlow<R extends Reviewable>(io: ReviewIO<R>) {
 		},
 	};
 }
+
+/** One change of a diff, as the diff editor reports it: an end line of 0 means that side has no lines in it. */
+export type LineChange = { originalStartLineNumber: number; originalEndLineNumber: number; modifiedStartLineNumber: number; modifiedEndLineNumber: number };
+
+/** How large a proposed change is, in words: the lines it adds and the lines it takes away. */
+export function changeSize(changes: readonly LineChange[] | null | undefined): string {
+	if (!changes) return "";
+	const span = (start: number, end: number) => (end > 0 ? end - start + 1 : 0);
+	const removed = changes.reduce((n, c) => n + span(c.originalStartLineNumber, c.originalEndLineNumber), 0);
+	const added = changes.reduce((n, c) => n + span(c.modifiedStartLineNumber, c.modifiedEndLineNumber), 0);
+	if (!added && !removed) return "No lines differ";
+	const lines = (n: number) => `${n} ${n === 1 ? "line" : "lines"}`;
+	return [added ? `${lines(added)} added or changed` : "", removed ? `${lines(removed)} removed or changed` : ""].filter(Boolean).join(", ");
+}
