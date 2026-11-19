@@ -176,6 +176,7 @@ export function fromCallGraph(input: CallGraphIn, toPath: (uri: string) => strin
 		return scriptsByPath.get(path)!;
 	};
 	const nodes: GraphNode[] = [];
+	const drawn = new Set<string>();
 	const topLevel = new Set<string>();
 	for (const n of input.nodes) {
 		const uri = n.location?.uri ?? n.container;
@@ -191,6 +192,10 @@ export function fromCallGraph(input: CallGraphIn, toPath: (uri: string) => strin
 		const box = kind === "unresolved" ? UNRESOLVED : n.container ? toPath(n.container) : path;
 		const id = procId(box, n.name);
 		ids.set(n.id, id);
+		// The server gives a target it could not resolve once for each kind of call to it; in the one
+		// box they share, a name is one node, and every line to it ends there.
+		if (drawn.has(id)) continue;
+		drawn.add(id);
 		const line = n.location?.range.start.line ?? 0;
 		script(box).procedures.push({ name: n.name, region: n.regions?.[0], startLine: line, endLine: n.location?.range.end.line ?? line });
 		nodes.push({ id, name: n.name, path: box, region: n.regions?.[0], line, kind });
@@ -334,6 +339,32 @@ export function gather(edges: readonly GraphEdge[], folderOf: (id: string) => st
 		return out;
 	};
 	return pass(pass([...edges], true), false);
+}
+
+/**
+ * The nodes in groups that stand at the same step of the calls among them: a
+ * node's step is one more than the latest of its callers', and a call that
+ * closes a circle is passed over. A layered layout lays each group in one
+ * line; no call runs between two nodes of a group, so they can be set out
+ * otherwise. Groups come in the order of their steps, nodes in the order given.
+ */
+export function sameStep(ids: readonly string[], callers: ReadonlyMap<string, ReadonlySet<string>>): string[][] {
+	const step = new Map<string, number>();
+	const walking = new Set<string>();
+	const at = (id: string): number => {
+		const known = step.get(id);
+		if (known !== undefined) return known;
+		if (walking.has(id)) return -1;
+		walking.add(id);
+		let depth = 0;
+		for (const caller of callers.get(id) ?? []) depth = Math.max(depth, at(caller) + 1);
+		walking.delete(id);
+		step.set(id, depth);
+		return depth;
+	};
+	const groups = new Map<number, string[]>();
+	for (const id of ids) groups.set(at(id), [...(groups.get(at(id)) ?? []), id]);
+	return [...groups].sort(([a], [b]) => a - b).map(([, group]) => group);
 }
 
 /** More procedures than this, and the graph opens with its scripts folded: the picture is of the scripts first. */

@@ -380,6 +380,16 @@ From a second look:
   that reads at that zoom as far as the box allows.
 - **A picture of up to 250 nodes is laid out both across and down** (it was
   150), and the one the view shows more of is kept.
+- **A folder's scripts stand as a block, not in one line.** Scripts at the
+  same step of a folder's calls (the callers of one helper, or scripts no
+  line joins) were laid in a single row or column, as long as there were
+  scripts: the demo with everything unfolded was 5080 by 7579. Six or more
+  of them are now set out so many across and so many down. Unfolded, the
+  demo is 7189 by 5131, close to the shape of the window, and the whole of
+  it shows at 10% where it was 7%.
+- **A target that did not resolve is one node.** The server names it once
+  for each kind of call to it, and it was drawn once for each: the demo
+  showed 19 such targets and has 13.
 - **A procedure found from the list is fitted in the graph.** Finding one
   while the list was showing laid out two pictures, and the view was fitted
   to the wrong one: the focus came up small, cut off at the top, with a

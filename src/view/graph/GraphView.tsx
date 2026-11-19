@@ -18,7 +18,7 @@ import { Finder } from "./Finder";
 import { Menu, type MenuItem } from "../Menu";
 import { savePicture } from "./picture";
 import { session } from "../lsp/session";
-import { aroundFocus, callList, choices, dirId, keptFolds, withoutUnresolved, fold, gather, isFolderEnd, FOLD_ABOVE, FOLD_DIRS_ABOVE, foldId, isDir, isFold, RELATION_WORDS, scriptOf, topLabel, UNRESOLVED, visible, type Direction, type DrawnEdge, type Filter, type FocusLink, type Graph, type ListedProc, relationOf, type Relation } from "./model";
+import { aroundFocus, callList, choices, sameStep, dirId, keptFolds, withoutUnresolved, fold, gather, isFolderEnd, FOLD_ABOVE, FOLD_DIRS_ABOVE, foldId, isDir, isFold, RELATION_WORDS, scriptOf, topLabel, UNRESOLVED, visible, type Direction, type DrawnEdge, type Filter, type FocusLink, type Graph, type ListedProc, relationOf, type Relation } from "./model";
 import { baseName, dirName, relativeTo } from "../../shared/paths";
 
 type Box = {
@@ -78,6 +78,8 @@ const GRAPH_KEYS: readonly (readonly [keys: string, what: string])[] = [
 ];
 /** A picture of up to this many nodes is laid out both across and down, to keep the one that fits the view better. */
 const BOTH_WAYS_UP_TO = 250;
+/** This many scripts of one folder with no line between them, and they are set out as a block, not in one line. */
+const BLOCK_FROM = 6;
 /** A graph narrower than this keeps its zoom buttons in the menu: in the bar they cost it a third row. */
 const NARROW_UNDER = 600;
 /** How far along a line its number of places is written. */
@@ -282,6 +284,28 @@ export function GraphView() {
 			const drawnEdges = gathering && folding() ? gather(keep.edges, openFolder) : keep.edges;
 			const edges = drawnEdges.map((e, i) => ({ id: `e${i}`, sources: [e.from], targets: [e.to] }));
 			try {
+				// The scripts of a folder that stand at the same step of its calls (the callers of one
+				// helper, say, or scripts no line joins) would all be laid in one row or column, as long as
+				// there are scripts. Lines the layout sees and nobody else does set them out as a block
+				// instead, so many across and so many down.
+				const abreast = folders.flatMap((folder) => {
+					const own = scriptNodes.filter((n) => folderOf(pathOfNode(n.id)) === folder);
+					const holder = new Map<string, string>();
+					const hold = (n: any, top: string) => (holder.set(n.id, top), (n.children ?? []).forEach((c: any) => hold(c, top)));
+					for (const n of own) hold(n, n.id);
+					const callers = new Map<string, Set<string>>();
+					for (const e of drawnEdges) {
+						const [a, b] = [holder.get(e.from), holder.get(e.to)];
+						if (a && b && a !== b) callers.set(b, (callers.get(b) ?? new Set()).add(a));
+					}
+					return sameStep(own.map((n) => n.id as string), callers).filter((ids) => ids.length >= BLOCK_FROM);
+				});
+				const block = (direction: "RIGHT" | "DOWN") =>
+					abreast.flatMap((ids, g) => {
+						// Across the flow there is room for more than along it: a screen is wider than it is high.
+						const perLayer = Math.ceil(Math.sqrt(direction === "RIGHT" ? ids.length / 2 : ids.length * 2));
+						return ids.slice(perLayer).map((id, i) => ({ id: `b${g}:${i}`, sources: [ids[i]!], targets: [id] }));
+					});
 				const lay = (direction: "RIGHT" | "DOWN"): Promise<any> =>
 					elk.layout({
 						id: "root",
@@ -304,7 +328,7 @@ export function GraphView() {
 							"elk.layered.considerModelOrder.strategy": "NODES_AND_EDGES",
 						},
 						children: JSON.parse(JSON.stringify(scripts)),
-						edges: JSON.parse(JSON.stringify(edges)),
+						edges: [...JSON.parse(JSON.stringify(edges)), ...block(direction)],
 					});
 				// Calls run left to right. A picture small enough to lay out twice is also tried top to
 				// bottom, and that is kept when the view shows clearly more of it: wide nodes in few
@@ -347,7 +371,7 @@ export function GraphView() {
 					for (const c of n.children ?? []) walk(c, x, y);
 				};
 				walk(result, 0, 0);
-				const lines: Line[] = (result.edges ?? []).map((e: any) => {
+				const lines: Line[] = (result.edges ?? []).filter((e: any) => String(e.id).startsWith("e")).map((e: any) => {
 					const edge: DrawnEdge = drawnEdges[Number(String(e.id).slice(1))]!;
 					const section = e.sections?.[0];
 					const relation = relationOf(edge.kind);

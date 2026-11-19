@@ -71,6 +71,30 @@ test("a call graph from ssl/callGraph (shape version 1)", () => {
 	expect(g.nodes.find((n) => n.name === "Count")!.region).toBe("Queries");
 });
 
+test("a target that did not resolve is one node, however many times the server names it", () => {
+	const A = "file:///w/A.ssl";
+	const g = fromCallGraph(
+		{
+			nodes: [
+				{ id: A, kind: "script", name: "A" },
+				{ id: `${A}#one`, kind: "procedure", name: "One", container: A },
+				{ id: `${A}#two`, kind: "procedure", name: "Two", container: A },
+				{ id: "unresolved:DoProc:Gone", kind: "unresolved", name: "Gone" },
+				{ id: "unresolved:ExecFunction:Gone", kind: "unresolved", name: "Gone" },
+			],
+			edges: [
+				{ from: `${A}#one`, to: "unresolved:DoProc:Gone", kind: "DoProc", resolved: false },
+				{ from: `${A}#two`, to: "unresolved:ExecFunction:Gone", kind: "ExecFunction", resolved: false },
+			],
+			indexing: false,
+		},
+		(uri) => uri.replace("file://", ""),
+	);
+	expect(g.nodes.filter((n) => n.kind === "unresolved").map((n) => n.id)).toEqual(["(unresolved)#Gone"]);
+	expect(g.scripts.find((s) => s.path === "(unresolved)")!.procedures.length).toBe(1);
+	expect(g.edges.map((e) => e.to)).toEqual(["(unresolved)#Gone", "(unresolved)#Gone"]);
+});
+
 // Classes: the server marks a class file (isClass) and sends class relations as edge kinds (L4).
 import { relationOf } from "../src/view/graph/model";
 
@@ -313,5 +337,34 @@ describe("what calls a focus, and what it calls", () => {
 
 	test("a focus nothing calls has no callers", () => {
 		expect(aroundFocus(graph, edges, "/w/A.ssl#a2").callers).toEqual([]);
+	});
+});
+
+import { sameStep } from "../src/view/graph/model";
+
+describe("nodes at the same step of the calls among them", () => {
+	const callers = (pairs: [string, string][]) => {
+		const map = new Map<string, Set<string>>();
+		for (const [from, to] of pairs) map.set(to, (map.get(to) ?? new Set()).add(from));
+		return map;
+	};
+
+	test("the callers of one helper stand together, and the helper after them", () => {
+		expect(sameStep(["t1", "t2", "helper", "t3"], callers([["t1", "helper"], ["t2", "helper"], ["t3", "helper"]]))).toEqual([["t1", "t2", "t3"], ["helper"]]);
+	});
+
+	test("a node's step is past the latest of its callers", () => {
+		expect(sameStep(["a", "b", "c"], callers([["a", "b"], ["b", "c"], ["a", "c"]]))).toEqual([["a"], ["b"], ["c"]]);
+	});
+
+	test("nodes no call joins are all at the first step", () => {
+		expect(sameStep(["a", "b", "c"], new Map())).toEqual([["a", "b", "c"]]);
+	});
+
+	test("a circle of calls does not go round for ever, and no call runs within a group", () => {
+		const pairs: [string, string][] = [["a", "b"], ["b", "c"], ["c", "a"], ["c", "d"]];
+		const groups = sameStep(["a", "b", "c", "d"], callers(pairs));
+		expect(groups.flat().sort()).toEqual(["a", "b", "c", "d"]);
+		for (const group of groups) for (const [from, to] of pairs) expect(group.includes(from) && group.includes(to)).toBe(false);
 	});
 });
