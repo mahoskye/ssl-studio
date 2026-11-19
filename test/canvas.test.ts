@@ -206,3 +206,12 @@ test("how much of a picture a fitted view shows", () => {
 	expect(fitShare({ width: 1100, height: 700 }, box)).toBeGreaterThan(fitShare({ width: 1900, height: 560 }, box));
 	expect(fitShare({ width: 0, height: 0 }, box)).toBe(1);
 });
+
+import { pictureName } from "../src/view/graph/canvas";
+
+test("a picture's file is named for what it is of", () => {
+	expect(pictureName("Set sample due dates")).toBe("Set-sample-due-dates.svg");
+	expect(pictureName("  Due dates: step 2/3  ")).toBe("Due-dates-step-2-3.svg");
+	expect(pictureName("???")).toBe("picture.svg");
+	expect(pictureName("")).toBe("picture.svg");
+});

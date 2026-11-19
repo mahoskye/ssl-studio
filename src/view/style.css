@@ -715,6 +715,17 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .plan-assist-progress { color: var(--accent); margin: var(--space-3) 0; }
 .plan-assist-warning { color: var(--warning); margin: var(--space-3) 0; }
 .plan-assist-foot { margin-top: var(--space-6); }
+/* One path through the chart, shown: it keeps its strength and the rest steps back. */
+.plan-canvas.pathing .plan-node:not(.on-path) { opacity: .38; }
+.plan-canvas.pathing .plan-edge:not(.on-path) .g-edge, .plan-canvas.pathing .plan-edge:not(.on-path) .plan-label { opacity: .25; }
+.plan-canvas.pathing .plan-edge.on-path .g-edge { stroke: var(--accent); stroke-width: 2.5px; }
+.plan-canvas.pathing .plan-node.on-path rect:not(.plan-built), .plan-canvas.pathing .plan-node.on-path polygon { stroke: var(--accent); stroke-width: 2; }
+/* The stepper through the paths, and the steps of the one shown. */
+.plan-paths { display: flex; align-items: center; gap: var(--space-3); margin: var(--space-3) 0; }
+.plan-paths span { flex: 1; min-width: 0; color: var(--side-fg); font-variant-numeric: tabular-nums; }
+.plan-paths button { min-width: var(--target); min-height: var(--target); border: 1px solid var(--border); border-radius: var(--radius-md); }
+.plan-path-steps { margin: 0 0 var(--space-4); padding-left: var(--space-7); color: var(--muted); display: flex; flex-direction: column; gap: var(--space-1); }
+.plan-path-label { color: var(--accent); font-weight: 600; }
 /* Where the plan stands: a row for each stage, its mark saying the state without leaning on colour. */
 .plan-stages { list-style: none; margin: var(--space-4) 0; padding: var(--space-3) var(--space-4); display: flex; flex-direction: column; gap: var(--space-2); background: var(--panel-bg); border: 1px solid var(--border); border-radius: var(--radius-md); }
 .plan-stages li { display: grid; grid-template-columns: var(--space-6) auto 1fr; align-items: baseline; gap: var(--space-3); }

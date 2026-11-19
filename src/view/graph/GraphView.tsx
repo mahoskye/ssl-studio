@@ -14,6 +14,7 @@ import { openFile, setState, state } from "../state";
 import { canvasMeasure, fitShare, fitView, legibleScale, nearest, recall, remember, reveal, splinePath, splinePoint, zoomAt, type Point } from "./canvas";
 import { loadGraph } from "./load";
 import { Minimap, type MapBox } from "./Minimap";
+import { savePicture } from "./picture";
 import { session } from "../lsp/session";
 import { callList, choices, chosen, dirId, keptFolds, fold, FOLD_ABOVE, FOLD_DIRS_ABOVE, foldId, isDir, isFold, RELATION_WORDS, scriptOf, topLabel, UNRESOLVED, visible, type Filter, type Graph, type ListedProc, relationOf, type Relation } from "./model";
 import { baseName, dirName, relativeTo } from "../../shared/paths";
@@ -675,6 +676,9 @@ export function GraphView() {
 					</div>
 					<button title="The whole graph, or as much as stays legible (0)" onClick={fit}>
 						Fit
+					</button>
+					<button title="Save this picture as an SVG file in the workspace, for a document" disabled={!layout()} onClick={() => void savePicture(svg, layout(), "docs/call-graph.svg")}>
+						Save picture…
 					</button>
 				</Show>
 				<button disabled={state.lsp.state !== "running"} title={state.lsp.state === "running" ? "Read the calls again" : "Needs the language server"} onClick={() => void refresh()}>

@@ -1,7 +1,7 @@
 // The agent's side of a plan, beside the chart: its questions, its suggestions,
 // and the spec. Answers and accepted suggestions are text edits on the plan, so
 // undo covers them too.
-import { createResource, createUniqueId, For, onMount, Show } from "solid-js";
+import { createEffect, createResource, createSignal, createUniqueId, For, onCleanup, onMount, Show } from "solid-js";
 import { agent, currentModel } from "../agent/store";
 import { choose } from "../dialogs";
 import { showPanel } from "../panels/registry";
@@ -18,8 +18,10 @@ import { answerUnit, discardRun, loadRun, retryUnit, reviewBuild, scriptsToRevie
 import { acceptAll, acceptSuggestion, answer, assistOf, declineSuggestion, dismissWarning, refine, specPath, specState, stopAssist, writeSpec } from "./run";
 
 /** Mounted while its plan shows, and hidden when collapsed: a build under way is not lost from sight for good. */
-export function PlanAssistant(props: { path: string; plan: Plan; text: string; onSelect: (node: string) => void; id?: string; hidden?: boolean }) {
+export function PlanAssistant(props: { path: string; plan: Plan; text: string; onSelect: (node: string) => void; /** A path to light on the chart, as its nodes in order; null for none. */ onPath?: (nodes: string[] | null) => void; id?: string; hidden?: boolean }) {
 	const a = () => assistOf(props.path);
+	/** The path being shown on the chart, by its place among the paths; null for none. */
+	const [shownPath, setShownPath] = createSignal<number | null>(null);
 	onMount(() => void loadRun(props.path));
 	const run = () => a().run;
 	const STATUS = { pending: "Waiting", running: "Building", passed: "Passed", stuck: "Stuck", skipped: "Waiting on a stuck unit", kept: "Untouched" } as const;
@@ -59,6 +61,19 @@ export function PlanAssistant(props: { path: string; plan: Plan; text: string; o
 			</button>
 		</Show>
 	);
+	const stepPath = (by: 1 | -1) => {
+		const count = paths().paths.length;
+		if (!count) return;
+		setShownPath((at) => (at === null ? (by > 0 ? 0 : count - 1) : (at + by + count) % count));
+	};
+	// The chart is told which path to light; a chart that has changed may no longer have that many.
+	createEffect(() => {
+		const at = shownPath();
+		const path = at === null ? undefined : paths().paths[at];
+		if (at !== null && !path) return void setShownPath(null);
+		props.onPath?.(path ? path.steps.map((step) => step.id) : null);
+	});
+	onCleanup(() => props.onPath?.(null));
 	/** The three things a plan goes through, each with how it stands now. */
 	const stages = (): { name: string; state: "done" | "warn" | "todo"; words: string }[] => {
 		const hasCode = Boolean(built()?.units.length);
@@ -324,6 +339,39 @@ export function PlanAssistant(props: { path: string; plan: Plan; text: string; o
 					Each path through the chart is a case: {paths().paths.length}
 					{paths().truncated ? " or more" : ""}. SSL Studio cannot run SSL, so you run them in STARLIMS.
 				</p>
+				{/* One path at a time, lit on the chart: what a test of that case walks through. */}
+				<Show when={paths().paths.length}>
+					<div class="plan-paths" role="group" aria-label="Paths through the chart">
+						<button title="The path before" aria-label="The path before" onClick={() => stepPath(-1)}>
+							◂
+						</button>
+						<span role="status">{shownPath() === null ? "Show a path on the chart" : `Path ${shownPath()! + 1} of ${paths().paths.length}`}</span>
+						<button title="The next path" aria-label="The next path" onClick={() => stepPath(1)}>
+							▸
+						</button>
+						<Show when={shownPath() !== null}>
+							<button title="Stop showing a path" onClick={() => setShownPath(null)}>
+								Hide
+							</button>
+						</Show>
+					</div>
+					<Show when={shownPath() !== null && paths().paths[shownPath()!]}>
+						{(path) => (
+							<ol class="plan-path-steps">
+								<For each={path().steps}>
+									{(step) => (
+										<li>
+											<Show when={step.label}>
+												<span class="plan-path-label">{step.label}</span>{" "}
+											</Show>
+											<Node id={step.id} />
+										</li>
+									)}
+								</For>
+							</ol>
+						)}
+					</Show>
+				</Show>
 				<button disabled={Boolean(a().running)} title="The agent writes an SSL test script, for you to review" onClick={() => void writeTests(props.path)}>
 					Write the test script
 				</button>

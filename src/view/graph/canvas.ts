@@ -235,3 +235,6 @@ export function fitShare(content: Size, box: Size, margin = 20): number {
 	if (!(content.width > 0) || !(content.height > 0)) return 1;
 	return Math.max(0, Math.min(1, (box.width - 2 * margin) / content.width, (box.height - 2 * margin) / content.height));
 }
+
+/** A name for a picture's file, from what the picture is of: letters, digits, dots and hyphens, and ".svg". */
+export const pictureName = (of: string) => `${of.trim().replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "picture"}.svg`;

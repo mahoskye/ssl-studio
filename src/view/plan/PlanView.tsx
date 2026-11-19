@@ -7,6 +7,8 @@ import { ask } from "../dialogs";
 import { editors } from "../editor/EditorGroup";
 import { monaco } from "../editor/monaco";
 import { Minimap, type MapBox } from "../graph/Minimap";
+import { pictureName, savePicture } from "../graph/picture";
+import { dirName, joinPath, relativeTo } from "../../shared/paths";
 import { regionColor } from "../editor/regions";
 import { canvasMeasure, fitView, legibleScale, nearest, recall, remember, reveal, roundedPath, zoomAt, type Measure, type Point } from "../graph/canvas";
 import { diagnostics } from "../lsp/session";
@@ -127,6 +129,12 @@ export function PlanView(props: { path: string; group: number }) {
 	const [view, setView] = createSignal({ x: 20, y: 20, scale: 1 });
 	const [edge, setEdge] = createSignal<{ from: string; to: string } | null>(null);
 	const [linking, setLinking] = createSignal<string | null>(null);
+	/** A path through the chart being shown, as its nodes in order: it is lit, and the rest steps back. */
+	const [walked, setWalked] = createSignal<string[] | null>(null);
+	const onPath = createMemo(() => {
+		const path = walked();
+		return path ? { nodes: new Set(path), ways: new Set(path.slice(1).map((to, i) => `${path[i]}>${to}`)) } : null;
+	});
 	/** The node the pointer is on: its ways in and out are lit. */
 	const [pointed, setPointed] = createSignal<string | null>(null);
 	const [keysOpen, setKeysOpen] = createSignal(false);
@@ -567,6 +575,13 @@ export function PlanView(props: { path: string; group: number }) {
 					<button title="The whole chart, or as much as stays legible (0)" onClick={(e) => (fit(), after(e))}>
 						Fit
 					</button>
+					<button
+						title="Save this chart as an SVG file in the workspace, for a document"
+						disabled={!layout()}
+						onClick={() => void savePicture(canvas.querySelector<SVGSVGElement>("svg.graph-canvas") ?? undefined, layout(), joinPath(relativeTo(state.workspace?.root, dirName(props.path)), pictureName(plan()?.title || "plan")))}
+					>
+						Save picture…
+					</button>
 				</div>
 				<div class="plan-main" classList={{ stacked: narrow() && assistantOpen() }} ref={watchWidth}>
 				<div
@@ -576,7 +591,7 @@ export function PlanView(props: { path: string; group: number }) {
 					role="application"
 					aria-label="Plan chart. The arrow keys move between nodes; the Keys button lists the rest."
 					aria-describedby={keysOpen() ? keysId : undefined}
-					classList={{ linking: Boolean(linking()) }}
+					classList={{ linking: Boolean(linking()), pathing: Boolean(onPath()) }}
 					onKeyDown={onKey}
 					onWheel={(e) => {
 						e.preventDefault();
@@ -649,9 +664,9 @@ export function PlanView(props: { path: string; group: number }) {
 											};
 											const choose = (e: MouseEvent) => (e.stopPropagation(), setEdge({ from: line.from, to: line.to }), refocus());
 											return (
-												<g class="plan-edge" classList={{ on: on(), near: near(), back: line.back, pending: line.pending, removing: line.removing }} role="img" aria-label={plan() ? describeEdge(plan()!, line) : undefined}>
+												<g class="plan-edge" classList={{ on: on(), near: near(), back: line.back, pending: line.pending, removing: line.removing, "on-path": Boolean(onPath()?.ways.has(`${line.from}>${line.to}`)) }} role="img" aria-label={plan() ? describeEdge(plan()!, line) : undefined}>
 													<path d={pathOf(line.points)} class="plan-edge-hit" onClick={choose} />
-													<path d={pathOf(line.points)} class="g-edge" marker-end={`url(#plan-arrow-${on() ? "on" : near() ? "near" : line.back ? "back" : "plain"})`} />
+													<path d={pathOf(line.points)} class="g-edge" marker-end={`url(#plan-arrow-${on() || onPath()?.ways.has(`${line.from}>${line.to}`) ? "on" : near() ? "near" : line.back ? "back" : "plain"})`} />
 													<Show when={line.shown}>
 														<g class="plan-label" classList={{ missing: line.missing }} onClick={choose} onDblClick={(e) => (e.stopPropagation(), setEditing({ from: line.from, to: line.to }))}>
 															<rect x={line.at.x - line.labelWidth / 2} y={line.at.y - 10} width={line.labelWidth} height="20" rx="4" />
@@ -676,7 +691,7 @@ export function PlanView(props: { path: string; group: number }) {
 											return (
 												<g
 													class={`plan-node ${n.kind} unit-${unitStatuses().get(n.id) ?? "none"}`}
-													classList={{ selected: selected() === n.id, origin: linking() === n.id, trouble: Boolean(trouble()), pending: Boolean(n.pending), changed: changed().has(n.id), gone: gone().has(n.id) }}
+													classList={{ "on-path": Boolean(onPath()?.nodes.has(n.id)), selected: selected() === n.id, origin: linking() === n.id, trouble: Boolean(trouble()), pending: Boolean(n.pending), changed: changed().has(n.id), gone: gone().has(n.id) }}
 													role="img"
 													aria-label={describeNode(n, stateOf(n))}
 													onMouseDown={(e) => e.stopPropagation()}
@@ -843,7 +858,7 @@ export function PlanView(props: { path: string; group: number }) {
 						</div>
 					</Show>
 				</div>
-				<PlanAssistant id={assistantId} hidden={!assistantOpen()} path={props.path} plan={plan()!} text={text()} onSelect={select} />
+				<PlanAssistant id={assistantId} hidden={!assistantOpen()} path={props.path} plan={plan()!} text={text()} onSelect={select} onPath={setWalked} />
 				</div>
 				{/* Read out by a screen reader when the selection changes; not seen. */}
 				<p class="plan-live" role="status" aria-live="polite">
