@@ -479,8 +479,9 @@ the work comes from ([ADR 0012](adr/0012-a-projects-work-is-written-down.md)).
   Tried with the local model on opencode 2.3.2: asked what DEMO-103 asks
   for and which question is open, it said both from what it was sent.
 - **opencode 2.3 is supported.** The machine's opencode had moved to 2.3.2
-  and the Agent panel was off. The adapter works against it unchanged; its
-  new image tool and MCP resource tools are denied to every session
+  and the Agent panel was off. The adapter works against it; its new image
+  tool, its MCP resource tools and the file tools it gives a model are
+  denied to every session, which leaves a model in the code mode of 2.2.5
   ([the record](spikes/opencode-api.md), section 13). The panel says why
   when opencode is there and cannot be used; it said "not found".
 - **A prompt the model's context cut is said in the conversation.** With

@@ -41,6 +41,12 @@ test("asks on a fresh session with deny rules and a local model", async () => {
 		"opencode_list_mcp_resources:deny",
 		"opencode_read_mcp_resource:deny",
 		"opencode_watch_mcp_event:deny",
+		// And the tools 2.3 gives a model of its own: with them denied it is in code mode, as on 2.2.5.
+		"read:deny",
+		"glob:deny",
+		"grep:deny",
+		"subagent:deny",
+		"skill:deny",
 	]);
 	expect(sessions[0].prompts[0].skills).toEqual([{ id: "ssl-tidy-context" }]);
 });

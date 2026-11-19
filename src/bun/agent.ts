@@ -12,13 +12,25 @@ import type { AgentModel, AgentReply, AgentStatus } from "../shared/protocol";
 import { compareVersions, OPENCODE_RANGE, opencodeCommand } from "./tools";
 
 /**
- * What every session is denied. The last five were added for opencode 2.3:
+ * opencode 2.2.5 gave a model no tools of its own, only code mode; 2.3 gives
+ * it `read`, `glob`, `grep`, `subagent` and `skill`. The IDE puts what a turn
+ * needs in its prompt and says so there (ADR 0004). Tried on 2.3.2 with a
+ * local model: left the file tools, it searched the folder for what it had
+ * already been sent and filled its context; left only `skill`, it loaded a
+ * skill that had nothing to do with the question. Denied, 2.3 falls back to
+ * the code mode of 2.2.5 and a turn is what its prompt says it is. A skill
+ * attached to a prompt still arrives: that is not the `skill` tool.
+ */
+const NO_TOOLS_OF_ITS_OWN = ["read", "glob", "grep", "subagent", "skill"];
+
+/**
+ * What every session is denied. From `browser` on, added for opencode 2.3:
  * its image tool calls a connected provider's image model, which may bill and
  * writes a file; its MCP resource tools read from whatever servers the user
  * has connected, which is outside the workspace; `browser` is the web by
  * another name. A rule for an action a server does not have denies nothing.
  */
-const DENY = ["shell", "webfetch", "websearch", "external_directory", "question", "edit", "browser", "experimental_image_generate", "opencode_list_mcp_resources", "opencode_read_mcp_resource", "opencode_watch_mcp_event"];
+const DENY = ["shell", "webfetch", "websearch", "external_directory", "question", "edit", "browser", "experimental_image_generate", "opencode_list_mcp_resources", "opencode_read_mcp_resource", "opencode_watch_mcp_event", ...NO_TOOLS_OF_ITS_OWN];
 /** Providers that run on the user's own machines. Anything else may bill. */
 const LOCAL_PROVIDERS = new Set(["ollama", "lmstudio", "llama.cpp", "llamacpp", "local"]);
 const TURN_TIMEOUT_MS = 15 * 60_000;

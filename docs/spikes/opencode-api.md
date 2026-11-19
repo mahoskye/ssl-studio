@@ -805,12 +805,36 @@ What is new in 2.3 and what was done about it:
 - With those rules the model named its tools as `glob`, `grep`, `read`,
   `skill` and `subagent`, and asked to create a file by any means, it could
   not: no file appeared.
+- **Tools of the model's own.** 2.2.5 gave a model code mode and nothing
+  else; 2.3 gives it `read`, `glob`, `grep`, `subagent` and `skill`
+  directly. Three sets of rules were tried, each with the same two
+  questions in one conversation (the first carrying a ticket):
+
+| Also denied | Model is left | Overhead, tokens |
+| --- | --- | --- |
+| nothing | file tools, `skill` | about 1,600 |
+| file tools, `subagent` | `skill` | about 480 |
+| those and `skill` | code mode | about 2,570 |
+
+  - With the file tools, the second question sent the model searching
+    the folder for what the first had already carried; the context
+    (4096 tokens, Ollama's default) filled and the prompt was cut.
+  - With only `skill`, the second question made it load a skill that had
+    nothing to do with it, and it answered about that.
+  - With `skill` denied too, it is in code mode as on 2.2.5 (`execute`,
+    with the helpers the adapter already guards against). Both questions
+    were answered from what was sent, with no tool call, and a skill
+    attached to a prompt still arrived.
+  - The adapter denies all five: a turn is then what its prompt says it
+    is, on either version (ADR 0004). The cost is the largest overhead of
+    the three; the middle row is worth another look for a small context.
 
 Not checked: opencode 2.2.x with the longer rule list (it is not installed
 here any more; a rule for an action a server does not have should deny
 nothing, and the rules are plain strings in its API); whether the two
 helpers the adapter guards against (`worktree_create`, `session_move`) still
-skip the permission check in 2.3; what a `subagent` may do that its session
-may not; any 2.3.x other than 2.3.2.
+skip the permission check in 2.3; any 2.3.x other than 2.3.2. The overhead
+figures are what the model reported for a prompt of a line or two, once
+each.
 
 The range is now `>=2.2.5 <2.4.0`.
