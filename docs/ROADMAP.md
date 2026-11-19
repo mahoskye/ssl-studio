@@ -438,6 +438,9 @@ From a second look:
   [ADR 0011](adr/0011-a-picture-is-of-what-can-be-followed.md) (a picture is
   of what can be followed), and the README and the architecture notes say
   what the graph and the chart now do.
+- **The status bar says where the cursor is:** the region and the procedure
+  it is in, which in a long script only the Objects panel showed. A click
+  shows it there. A window under 900 pixels wide has no room for it.
 - **A procedure found from the list is fitted in the graph.** Finding one
   while the list was showing laid out two pictures, and the view was fitted
   to the wrong one: the focus came up small, cut off at the top, with a

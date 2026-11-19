@@ -4,7 +4,11 @@ import { createEffect, createSignal, on, onCleanup, Show } from "solid-js";
 import { level, countHistoryEntries, type SizeReport } from "../shared/houseStyle";
 import { backend } from "./backend";
 import { measure } from "./editor/textmate";
+import { symbols } from "./panels/Objects";
 import { counts } from "./panels/Problems";
+import { showPanel } from "./panels/registry";
+import { monaco } from "./editor/monaco";
+import { symbolPath } from "./editor/regions";
 import { activeDoc, activePath, notify, setState, state } from "./state";
 
 const [size, setSize] = createSignal<SizeReport | null>(null);
@@ -52,6 +56,10 @@ export function StatusBar() {
 		return s === "running" ? `Language server${version}` : `Language server ${s}`;
 	};
 	const lspWaits = () => !state.workspace && state.lsp.state === "stopped" && !state.info?.lsp.message;
+	/** The regions and the procedure the cursor is in, outermost first: where one is, in a long script. */
+	const where = () => (state.centerView === "editors" ? symbolPath(symbols(), state.cursor.line).filter((s) => s.kind !== monaco.languages.SymbolKind.Variable) : []);
+	/** The same in a sentence, innermost first: "DueDate, in Counting days". */
+	const whereWords = () => [...where()].reverse().map((s) => s.name).join(", in ");
 	const lspNote = () => state.lsp.message ?? state.info?.lsp.message;
 	const opencode = () => state.info?.opencode;
 	// "near" and "over" are also said in words, for anyone who cannot tell them by colour.
@@ -106,6 +114,17 @@ export function StatusBar() {
 					✖ {counts().errors} ⚠ {counts().warnings}
 				</span>
 			</button>
+			<Show when={where().length}>
+				<button
+					class="item where"
+					title={`The cursor is in ${whereWords()}. Show it in Objects.`}
+					aria-label={`The cursor is in ${whereWords()}. Show Objects.`}
+					onClick={() => showPanel("objects")}
+				>
+					{/* Cut short from the front: the end is the procedure, the part that matters most. */}
+					<bdi>{where().map((s) => s.name).join(" › ")}</bdi>
+				</button>
+			</Show>
 			<span class="spacer" />
 			<Show when={size()}>
 				{(s) => (

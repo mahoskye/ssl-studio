@@ -259,6 +259,10 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .statusbar { grid-row: 2; grid-column: 1 / -1; display: flex; align-items: center; gap: var(--space-1); background: var(--status-bg); color: var(--status-fg); font-size: var(--text-md); padding: 0 var(--space-3); border-top: 1px solid var(--border); min-width: 0; overflow: hidden; }
 .statusbar .item { padding: 0 var(--space-4); height: calc(var(--status-height) - 2px); display: inline-flex; align-items: center; gap: var(--space-5); border-radius: 0; white-space: nowrap; min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
 .statusbar .item.meter { flex-shrink: 4; }
+/* Where the cursor is: it gives way before the counts do, and keeps its end, the procedure. */
+.statusbar .item.where { flex-shrink: 8; direction: rtl; text-align: left; color: var(--status-fg); }
+/* In a narrow window there is no room to say it legibly, and a few letters of it say nothing: the Objects panel still shows it. */
+@media (max-width: 900px) { .statusbar .item.where { display: none; } }
 .statusbar .restart { color: var(--muted); }
 .statusbar .near { color: var(--warning); }
 .statusbar .over { color: var(--error); }
