@@ -450,7 +450,7 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 /* Wide enough to point at: a band is caught from its own left edge to the strip's right edge, not only on its own few pixels. */
 .region-strip { width: 18px; position: relative; flex: none; overflow: hidden; background: var(--tab-bg); border-right: 1px solid var(--border); }
 .region-band { position: absolute; width: 6px; margin-left: 2px; padding: 0; border-radius: var(--radius-sm); opacity: .85; cursor: pointer; min-height: 3px; }
-/* Caught from its own left edge to the strip's right edge. To its left are the regions it is inside, each still caught on its own first pixels. */
+/* Caught from its own left edge to the strip's right edge. To its left are the regions it is inside, each still caught on its own first pixels, down to three deep; deeper ones share the third step. */
 .region-band::after { content: ""; position: absolute; inset: 0 -18px 0 0; }
 /* Brighter under the pointer, and no wider: the deepest band already ends at the strip's edge. */
 .region-band:hover, .region-band:focus-visible { opacity: 1; filter: brightness(1.15) saturate(1.2); }

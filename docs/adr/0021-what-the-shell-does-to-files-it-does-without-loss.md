@@ -68,3 +68,15 @@ Under [ADR 0009](0009-nothing-is-lost-or-destroyed-without-a-say.md),
 - All of this rests on the app hearing of changes made by other
   programs, and it does not hear of all of them: see
   [the audit](../VSCODE-AUDIT.md#looked-at-and-not-checked).
+
+## Changes to this draft
+
+A decision is superseded, not rewritten. This one has not been accepted,
+and was changed while it was a draft; what changed is kept here.
+
+- 2026-11-19, with the fixes that followed the reviews of steps 4 to 8
+  and of the fixes after them: rules were added as the reviews found
+  cases the first text did not cover, the last of them "A file's text is
+  never another file's", and the consequence about changes made by other
+  programs. The commits are those that touch this file.
+- 2026-11-19, with the fixes of the review of `defb4df`: this section.

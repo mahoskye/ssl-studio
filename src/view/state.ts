@@ -168,7 +168,7 @@ export async function openFolder(path?: string) {
 		setState("project", null);
 		setState("setupDismissed", false);
 	});
-	await Promise.all([loadSettings(), loadProject()]);
+	await Promise.all([loadSettings(true), loadProject()]);
 	setState("info", await backend.info());
 	setState("lsp", await backend.lspState());
 	void session.start(workspace.root);
@@ -253,10 +253,16 @@ export async function loadProject() {
 	if (project) setState("project", project);
 }
 
-export async function loadSettings() {
+/**
+ * Reads the settings. `fresh` is for a folder that has just been opened: everything is taken as it is on disk. A
+ * later reading (a setting saved, project.toml changed) keeps the layout on screen, which is the view's own and may
+ * not be on disk yet (see saveSetting).
+ */
+export async function loadSettings(fresh = false) {
 	const [{ effective }, themes] = await Promise.all([backend.settings(), backend.themes()]);
+	const { layout: onDisk, ...rest } = effective;
 	batch(() => {
-		setState("settings", effective);
+		setState("settings", fresh ? effective : rest);
 		setState("themes", themes);
 	});
 }

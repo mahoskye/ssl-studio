@@ -6,7 +6,7 @@
 // "Reload", "Inspect". It looks like nothing else here, and nothing in it is
 // for this window. So it never opens: a text box gets the app's menu for a
 // text box, selected words get "Copy", and anything else gets no menu.
-import { boxMenu } from "../shared/menuBar";
+import { askedByKey, boxMenu } from "../shared/menuBar";
 import { copyText } from "./commands";
 import { runInBox } from "./MenuBar";
 import { chooseFromMenu } from "./panels/RowMenu";
@@ -64,6 +64,11 @@ function wordBoxes(range: Range): DOMRect[] {
 }
 
 export function installContextMenu() {
+	// When the menu's key and a pointer's button were last pressed: what tells a menu asked for by key from a click.
+	let keyAt = 0;
+	let pressAt = 0;
+	window.addEventListener("keydown", (e) => (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) && (keyAt = e.timeStamp), true);
+	window.addEventListener("mousedown", (e) => (pressAt = e.timeStamp), true);
 	window.addEventListener("contextmenu", (e) => {
 		// The app's own menu for this place is open already.
 		if (e.defaultPrevented) return;
@@ -87,8 +92,9 @@ export function installContextMenu() {
 		const selection = window.getSelection();
 		const words = selection?.toString() ?? "";
 		if (!on || !selection || selection.isCollapsed || !selection.rangeCount || !words.trim()) return;
-		// A right-click is the right button; the menu key and Shift+F10 are not, whatever place the web view gives them.
-		const pointed = e.button === 2;
+		// A click is told from the menu's key by which was pressed last, not by the event: a web view may give the
+		// key's menu the right button and a place of its own choosing, which need not lie on the words.
+		const pointed = !askedByKey(keyAt, pressAt, e.timeStamp);
 		const onWords = pointed ? wordBoxes(selection.getRangeAt(0)).some((rect) => e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom) : selection.containsNode(on, true);
 		if (!onWords) return;
 		void chooseFromMenu("Actions for the selected text", [NAMES.copy], at).then((picked) => picked === NAMES.copy && void copyText(words, "Copied the selected text."));

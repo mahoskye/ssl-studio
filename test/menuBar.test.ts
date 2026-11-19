@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { boxMenu, FIELD_COMMANDS, letterItem, MENU_BAR, menuForLetter, missing, stepMenu, type BarEntry } from "../src/shared/menuBar";
+import { askedByKey, boxMenu, FIELD_COMMANDS, letterItem, MENU_BAR, menuForLetter, missing, stepMenu, type BarEntry } from "../src/shared/menuBar";
 
 const entries = (name: string) => MENU_BAR.find((menu) => menu.name === name)!.entries;
 const named = (name: string, label: string) => entries(name).find((entry) => entry !== "separator" && entry.label === label) as Exclude<BarEntry, "separator">;
@@ -165,5 +165,24 @@ describe("a right-click on a text box", () => {
 
 	test("an empty box that cannot be pasted into has no menu at all", () => {
 		expect(boxMenu({ selected: false, editable: true, filled: false, canPaste: false })).toEqual([]);
+	});
+});
+
+describe("a menu asked for by its key", () => {
+	test("is one whose key was pressed after the last press of the pointer, a moment ago", () => {
+		expect(askedByKey(5000, 3000, 5010)).toBe(true);
+		// No pointer was ever pressed.
+		expect(askedByKey(5000, 0, 5200)).toBe(true);
+	});
+
+	test("a click is not: the pointer was pressed last, whatever button the event says", () => {
+		expect(askedByKey(3000, 5000, 5010)).toBe(false);
+		// The key was never pressed.
+		expect(askedByKey(0, 5000, 5010)).toBe(false);
+		expect(askedByKey(0, 0, 10)).toBe(false);
+	});
+
+	test("a key pressed long ago does not make a later menu the key's", () => {
+		expect(askedByKey(1000, 0, 9000)).toBe(false);
 	});
 });

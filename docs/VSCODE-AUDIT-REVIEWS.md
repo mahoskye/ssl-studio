@@ -473,9 +473,52 @@ Eleven findings, none that loses work or traps the user.
    window's layout now does for every cause. Left: harmless, and it
    says what a move does where a move is written.
 9. **Six comments said what the code no longer does.** Fixed.
-10. **A right-click is told from the menu key by its button.** Left,
-    and not checked in the desktop window: if its web view reports the
-    menu key as the right button, Copy for selected words will not open
-    from the keyboard there.
+10. **A right-click is told from the menu key by its button.** Left
+    here; fixed after the reading below, which showed that the desktop
+    window's web view is likely to report the menu key that way.
 11. **The deepest band grew past the strip under the pointer.** Fixed:
     it brightens, and does not widen.
+
+### The same commit, read by a second reviewer
+
+Each of the two sessions had asked for a review of `defb4df`. This is
+the other one's: eleven findings, none that loses work or traps the
+user. Four were answered by the fixes above; the rest were fixed after
+them by one session, the other having stopped. The reviewer read these
+fixes before they were committed.
+
+1. **The menu's opening was said twice, and the line that says it was
+   inside the menu**, where only entries belong. Fixed: one line,
+   beside the menu, filled a moment after it is on the page.
+2. **"Copy" for selected words would probably not open from the menu
+   key in the desktop window**: its web view gives that key's menu the
+   right button and a place beside the words. Fixed: a click is told
+   from the key by which was pressed last. A test holds the rule. Not
+   seen in the desktop window.
+3. **With room for neither side, the right side's button shut it.**
+   Only one side could be named as crowded out. Fixed: each side is
+   said for itself, and a test holds it. Seen at 540 wide: neither
+   key shut a side, and both were back at 1440.
+4. **"Edit the text" from the keyboard put the keyboard in the other
+   group.** Fixed: the page's own group becomes the one at hand. Seen,
+   with the other group at hand when the menu was opened.
+5. **A menu that opens under a resting pointer marked an entry at
+   once.** Fixed: only a pointer that has moved marks one. The keys
+   with Ctrl, Alt or Shift and the mark left behind were fixed above.
+6. **Tab over a dialog had two answers.** Fixed above.
+7. **The message of `defb4df` gives counts the commit does not bear
+   out.** Left: a pushed commit's message is not rewritten. The
+   documents give the counts.
+8. **A box that names a row of its own to a screen reader could get a
+   stale name back** when its menu shut. Fixed: what it names is read
+   afresh. A box taken off the page while its menu is open leaves the
+   menu until the next key or click; that is left, and said in the code.
+9. **Comments that said what the code does not.** Fixed, the strip's
+   among them.
+10. **ADR 0023 was changed in place**, where decisions are superseded
+    and not rewritten. It is a draft nobody has accepted; it and ADR
+    0021, changed the same way earlier, now end with what was changed
+    and when.
+11. **Reading the settings again brought an older layout back** over
+    the one on screen, within a moment of a change. Fixed: only a
+    folder being opened takes the layout from disk.

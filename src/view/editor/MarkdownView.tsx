@@ -22,7 +22,7 @@ import { outline, type OutlineItem } from "../../shared/outline";
 import { canonical, documents, focusEditor, openFile, revealSignal, setState, state } from "../state";
 import { chooseFromMenu } from "../panels/RowMenu";
 
-export function MarkdownView(props: { path: string }) {
+export function MarkdownView(props: { path: string; /** The editor group the page is shown in. */ group?: number }) {
 	const model = documents.get(props.path)?.model;
 	const [text, setText] = createSignal(model?.getValue() ?? "");
 	const listener = model?.onDidChangeContent(() => setText(model.getValue()));
@@ -128,7 +128,9 @@ export function MarkdownView(props: { path: string }) {
 		else if (picked === COPY_LINK) await copyText(link?.getAttribute("href") ?? "", "Copied the link.");
 		else if (picked === EDIT) {
 			setState("mdText", props.path, true);
-			// The page that had the keyboard is gone: the text takes it.
+			// The page that had the keyboard is gone: the text takes it, in this page's own group. The keyboard may have
+			// come here by Tab, which does not make a group the one at hand.
+			if (props.group !== undefined) setState("activeGroup", props.group);
 			setTimeout(focusEditor, 0);
 		}
 		else if (picked === SHOW) (await import("../panels/Explorer")).showInExplorer(props.path);

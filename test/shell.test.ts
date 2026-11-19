@@ -3,7 +3,7 @@
 import { describe, expect, test } from "bun:test";
 import { headingAnchor } from "../src/shared/docTables";
 import { tabLabels } from "../src/view/editor/tabs";
-import { dockedView, fitPanels } from "../src/view/layout";
+import { crowdedSides, dockedView, fitPanels } from "../src/view/layout";
 import { DEFAULT_SETTINGS, defaultLayout } from "../src/shared/protocol";
 
 describe("tab labels", () => {
@@ -107,5 +107,19 @@ describe("the panel a side shows", () => {
 
 	test("is none when no panel is docked on the side", () => {
 		expect(dockedView("agent", [])).toBeNull();
+	});
+});
+
+describe("the sides the window has no room for", () => {
+	test("a side that is open and was given no width is crowded out; one that is shut is not", () => {
+		expect(crowdedSides({ left: true, right: true }, fitPanels(700, 260, 360))).toEqual({ left: false, right: true });
+		expect(crowdedSides({ left: true, right: false }, { left: 260, right: 0 })).toEqual({ left: false, right: false });
+	});
+
+	test("with room for neither, both are crowded out: neither is taken for showing", () => {
+		// Too narrow for either panel beside the editors.
+		const fit = fitPanels(500, 260, 360);
+		expect(fit).toEqual({ left: 0, right: 0 });
+		expect(crowdedSides({ left: true, right: true }, fit)).toEqual({ left: true, right: true });
 	});
 });

@@ -49,3 +49,15 @@ Under [ADR 0007](0007-design-is-held-to-a-standard-that-serves-starlims-work.md)
   opens the tools by their own key.
 - Seen in the browser preview only. Whether the desktop window's web view
   would have shown its own menu was not seen; with this it cannot.
+
+## Changes to this draft
+
+A decision is superseded, not rewritten. This one has not been accepted,
+and was changed while it was a draft; what changed is kept here.
+
+- 2026-11-19, with the fixes of the review of `3905b68`: added "A text
+  box's menu leaves the keyboard in the box"; "Letters stay letters" now
+  says a symbol that is a control's whole face is an icon; the
+  consequence about Paste now tells a web view that cannot read the
+  clipboard from one that refuses.
+- 2026-11-19, with the fixes of the review of `defb4df`: this section.

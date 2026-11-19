@@ -60,6 +60,23 @@ export function RowMenu() {
 				/** The entry the arrow keys or the pointer have marked, in a menu that does not hold the keyboard. */
 				const [marked, setMarked] = createSignal(-1);
 				const id = createUniqueId();
+				/**
+				 * Where the pointer last was over the menu. A web view also reports a move when a menu opens under a pointer
+				 * at rest (one kept inside the window's edge does): that marks nothing, or Enter would take an entry nobody chose.
+				 */
+				let pointerAt: string | null = null;
+				const pointerMoved = (e: MouseEvent) => {
+					const at = `${e.screenX},${e.screenY}`;
+					const moved = pointerAt !== null && pointerAt !== at;
+					pointerAt = at;
+					return moved;
+				};
+				/** What the hidden line says. Filled a moment after it is on the page: a line that arrives already filled is not always read out. */
+				const [said, setSaid] = createSignal("");
+				if (menu.keep) {
+					const saying = setTimeout(() => setSaid(`${menu.label}: ${menu.items.join(", ")}. Up and Down choose, Enter takes one, Escape closes.`), 60);
+					onCleanup(() => clearTimeout(saying));
+				}
 				if (menu.keep) {
 					const onWindowKey = (e: KeyboardEvent) => {
 						const used = () => (e.preventDefault(), e.stopPropagation());
@@ -77,9 +94,22 @@ export function RowMenu() {
 					// The box lost the keyboard some other way (another window came forward): its menu goes too. A box taken
 					// off the page may say nothing; the menu then stays until a key or a click, and acts on nothing.
 					const onLeave = () => finish(null);
-					// The box says which entry is marked, to what reads the screen aloud: the keyboard never leaves it.
-					const had = menu.opener?.getAttribute("aria-activedescendant") ?? null;
-					createEffect(() => (marked() >= 0 ? menu.opener?.setAttribute("aria-activedescendant", `${id}-${marked()}`) : menu.opener?.removeAttribute("aria-activedescendant")));
+					// The box says which entry is marked, to what reads the screen aloud: the keyboard never leaves it. A box
+					// that names something of its own there (a list's chosen row) names it again whenever no entry is marked,
+					// and what it names is read afresh each time: its owner may have changed it while the menu was open.
+					const ATTR = "aria-activedescendant";
+					const ours = (value: string | null) => Boolean(value?.startsWith(`${id}-`));
+					let own: string | null = menu.opener?.getAttribute(ATTR) ?? null;
+					const name = (at: number) => {
+						const box = menu.opener;
+						if (!box) return;
+						const now = box.getAttribute(ATTR);
+						if (!ours(now)) own = now;
+						if (at >= 0) box.setAttribute(ATTR, `${id}-${at}`);
+						else if (own === null) box.removeAttribute(ATTR);
+						else box.setAttribute(ATTR, own);
+					};
+					createEffect(() => name(marked()));
 					onMount(() => {
 						window.addEventListener("keydown", onWindowKey, true);
 						menu.opener?.addEventListener("blur", onLeave);
@@ -87,8 +117,7 @@ export function RowMenu() {
 					onCleanup(() => {
 						window.removeEventListener("keydown", onWindowKey, true);
 						menu.opener?.removeEventListener("blur", onLeave);
-						if (had === null) menu.opener?.removeAttribute("aria-activedescendant");
-						else menu.opener?.setAttribute("aria-activedescendant", had);
+						name(-1);
 					});
 				}
 				const onKeyDown = (e: KeyboardEvent & { currentTarget: HTMLDivElement }) => {
@@ -138,20 +167,20 @@ export function RowMenu() {
 										role="menuitem"
 										tabindex={-1}
 										// The pointer and the arrow keys move the one mark.
-										onMouseMove={() => menu.keep && marked() !== at() && setMarked(at())}
+										onMouseMove={(e) => menu.keep && pointerMoved(e) && marked() !== at() && setMarked(at())}
 										onClick={() => finish(item)}
 									>
 										{item}
 									</button>
 								)}
 							</For>
-							{/* The keyboard is not in the menu, so nothing reads it out by itself: this says it has opened, and how it is worked. */}
-							<Show when={menu.keep}>
-								<div class="visually-hidden" role="status">
-									{menu.label}: {menu.items.join(", ")}. Up and Down choose, Enter takes one, Escape closes.
-								</div>
-							</Show>
 						</div>
+						{/* The keyboard is not in the menu, so nothing reads it out by itself: this says it has opened, and how it is worked. Beside the menu, not in it: a menu holds entries only. */}
+						<Show when={menu.keep}>
+							<div class="visually-hidden" role="status">
+								{said()}
+							</div>
+						</Show>
 					</Portal>
 				);
 			}}

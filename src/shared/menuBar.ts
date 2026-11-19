@@ -206,6 +206,15 @@ export function boxMenu(box: { selected: boolean; editable: boolean; filled: boo
 	return [...(box.selected && box.editable ? (["cut"] as const) : []), ...(box.selected ? (["copy"] as const) : []), ...(box.editable && box.canPaste ? (["paste"] as const) : []), ...(box.filled ? (["selectAll"] as const) : [])];
 }
 
+/**
+ * Whether a menu was asked for by its key (the menu key, Shift+F10) and not
+ * by the pointer: the key was pressed after the last press of a pointer, and
+ * a moment ago. The web view's own event does not say: some give a menu
+ * asked for by key the right button and a place, as if it were a click.
+ * Times are the events' own, in milliseconds; 0 for one that never happened.
+ */
+export const askedByKey = (keyAt: number, pressAt: number, now: number, within = 1000): boolean => keyAt > 0 && keyAt >= pressAt && now - keyAt <= within;
+
 /** The menu Alt and a letter opens: its place in the bar, or -1. */
 export const menuForLetter = (letter: string, menus: readonly BarMenu[] = MENU_BAR) => menus.findIndex((menu) => menu.letter === letter.toLowerCase());
 

@@ -48,3 +48,10 @@ export function fitPanels(window: number, left: number, right: number, prefer: "
  * shows a panel that is docked on the other one.
  */
 export const dockedView = <T extends string>(shown: T, docked: readonly T[]): T | null => (docked.includes(shown) ? shown : (docked[0] ?? null));
+
+/**
+ * The sides that are open and were given no room in the window. Each is
+ * said for itself: with room for neither, both are crowded out, and
+ * neither is taken for showing.
+ */
+export const crowdedSides = (open: { left: boolean; right: boolean }, fit: { left: number; right: number }): { left: boolean; right: boolean } => ({ left: open.left && !fit.left, right: open.right && !fit.right });

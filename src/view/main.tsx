@@ -32,7 +32,7 @@ function uncaught(reason: unknown) {
 
 async function start() {
 	await connect();
-	await Promise.all([loadGrammar(), loadLanguageConfiguration(), loadSettings()]);
+	await Promise.all([loadGrammar(), loadLanguageConfiguration(), loadSettings(true)]);
 	applyTheme(resolveTheme(state.settings.theme, state.themes));
 	shapeEditorMenus();
 	registerProviders();
@@ -54,7 +54,7 @@ async function start() {
 	if (workspace) {
 		setState("workspace", workspace);
 		setState("lsp", await backend.lspState());
-		await Promise.all([loadSettings(), loadProject()]);
+		await Promise.all([loadSettings(true), loadProject()]);
 		void session.start(workspace.root);
 	}
 	render(() => <App />, document.getElementById("app")!);

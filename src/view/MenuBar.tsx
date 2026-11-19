@@ -129,8 +129,8 @@ function LayoutControls() {
 	const folder = () => Boolean(state.workspace);
 	const layout = () => state.settings.layout;
 	// A side that is open but has no room in the window is not showing: its button brings it back.
-	const left = () => folder() && layout().left && crowdedOut() !== "left";
-	const right = () => folder() && layout().right && crowdedOut() !== "right";
+	const left = () => folder() && layout().left && !crowdedOut("left");
+	const right = () => folder() && layout().right && !crowdedOut("right");
 	const bottom = () => folder() && layout().bottom;
 	const keys = (id: string) => (keysFor(id) ? ` (${keysFor(id)})` : "");
 	const undocked = (side: "left" | "right") => folder() && !panelOn(side);

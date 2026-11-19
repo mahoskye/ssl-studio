@@ -498,7 +498,7 @@ export function EditorGroup(props: { index: number }) {
 				{(path) => <PlanView path={path} group={props.index} />}
 			</Show>
 			<Show when={showRendered() && group().active} keyed>
-				{(path) => <MarkdownView path={path} />}
+				{(path) => <MarkdownView path={path} group={props.index} />}
 			</Show>
 			<Show when={showFile() && group().active} keyed>
 				{(path) => <FileView path={path} />}

@@ -567,8 +567,10 @@ work. Thirteen were fixed, one was fixed in part, and one was fixed with
 a part left on purpose. The reviewer then read those fixes before they
 were committed and found eight more things in them, which were fixed
 too. Two sessions had made those fixes at once in one folder, so the
-commit that took both was read once more: eleven findings, eight fixed
-and three left with their reasons.
+commit that took both was read once more, by a reviewer for each
+session. One found eleven things, eight fixed and three left with their
+reasons. The other found eleven, four of them the same; the rest are
+fixed but one, a pushed commit's message, which is not rewritten.
 
 ## Why not an extension
 

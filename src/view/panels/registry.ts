@@ -27,10 +27,12 @@ export const isOpen = (id: PanelId) => state.settings.layout[sideOf(id)] && stat
 /** The side whose panel was asked for last: in a window with room for one side panel, that one is shown. */
 const [lastShown, setLastShown] = createSignal<Side>("left");
 /** A side that is open but has no room in the window as it is (set by the app's layout). */
-const [crowdedOut, setCrowdedOut] = createSignal<Side | null>(null);
-export { crowdedOut, lastShown, setCrowdedOut };
+const [crowded, setCrowded] = createSignal<{ left: boolean; right: boolean }>({ left: false, right: false }, { equals: (a, b) => a.left === b.left && a.right === b.right });
+export { lastShown, setCrowded };
+/** Whether a side is open but has no room: said of each side by itself, since in a narrow window it can be both. */
+export const crowdedOut = (side: Side) => crowded()[side];
 /** Open, and on screen: a panel the window has no room for is neither pressed nor closed by its button. */
-export const isShown = (id: PanelId) => isOpen(id) && crowdedOut() !== sideOf(id);
+export const isShown = (id: PanelId) => isOpen(id) && !crowdedOut(sideOf(id));
 
 export function showPanel(id: PanelId) {
 	const side = sideOf(id);
@@ -73,7 +75,7 @@ export const panelOn = (side: Side): PanelId | null =>
  * went: then it goes to the editor. A side that is open but has no room is brought back, not shut.
  */
 export function toggleSide(side: Side) {
-	if (state.settings.layout[side] && crowdedOut() !== side) {
+	if (state.settings.layout[side] && !crowdedOut(side)) {
 		setState("settings", "layout", side, false);
 		queueMicrotask(() => (!document.activeElement || document.activeElement === document.body) && focusEditor());
 		return;

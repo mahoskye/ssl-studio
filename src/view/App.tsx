@@ -31,9 +31,9 @@ import { useNavigation } from "./navigation";
 import { StatusBar } from "./StatusBar";
 import { applyTheme, resolveTheme } from "./themes/themes";
 import { dismiss, focusRequest, openFolder, rememberTabs, rememberViews, setState, state, unsavedPaths, type PanelId } from "./state";
-import { focusPanel, isShown, lastShown, movePanel, panelOn, PANELS, setCrowdedOut, sideOf, togglePanel } from "./panels/registry";
+import { focusPanel, isShown, lastShown, movePanel, panelOn, PANELS, setCrowded, sideOf, togglePanel } from "./panels/registry";
 import { Welcome } from "./Welcome";
-import { ACTIVITY, fitPanels } from "./layout";
+import { ACTIVITY, crowdedSides, fitPanels } from "./layout";
 
 
 
@@ -203,7 +203,7 @@ export function App() {
 	// The activity bar grows with the interface size; the panels' widths are the user's own pixels.
 	const fit = () => fitPanels(size().width - ACTIVITY * (scale() - 1), layout().left && state.workspace ? layout().leftWidth : 0, layout().right && state.workspace ? layout().rightWidth : 0, lastShown());
 	// A side that is open and got no room: its button is not pressed, and pressing it brings the panel back.
-	createEffect(() => setCrowdedOut(!state.workspace ? null : layout().left && !fit().left ? "left" : layout().right && !fit().right ? "right" : null));
+	createEffect(() => setCrowded(state.workspace ? crowdedSides({ left: layout().left, right: layout().right }, fit()) : { left: false, right: false }));
 	const bottom = () => (layout().bottom ? Math.min(layout().bottomHeight, Math.max(80, size().height - 200)) : 0);
 	// The interface's size scales the type and spacing scales in style.css; the code's size is its own setting.
 	createEffect(() => {
