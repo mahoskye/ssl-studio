@@ -15,6 +15,8 @@ import { isMarkdown } from "../project";
 import { MarkdownView } from "./MarkdownView";
 import { Start } from "../Start";
 import { FileMark } from "../FileMark";
+import { getPath, SERVER_DEFAULTS } from "../../shared/styleProfile";
+import { RULER_MARGIN, rulerColumns } from "../../shared/houseStyle";
 
 const viewStates = new Map<string, monaco.editor.ICodeEditorViewState | null>();
 export const editors: monaco.editor.IStandaloneCodeEditor[] = [];
@@ -36,6 +38,13 @@ export function EditorGroup(props: { index: number }) {
 	const isDoc = () => isMarkdown(group().active);
 	const showRendered = () => isDoc() && !state.mdText[group().active!];
 
+	/** The ruler at the style's line length, and the fainter ones the chosen number of columns to each side of it. */
+	const rulers = () =>
+		rulerColumns(state.settings.rulers !== false, Number(getPath(state.settings.ssl, "format.maxLineLength") ?? SERVER_DEFAULTS.format.maxLineLength), state.settings.rulerMargin ?? RULER_MARGIN).map((ruler) => ({
+			column: ruler.column,
+			color: ruler.main ? "color-mix(in srgb, var(--fg) 40%, transparent)" : "color-mix(in srgb, var(--fg) 18%, transparent)",
+		}));
+
 	onMount(() => {
 		editor = monaco.editor.create(host, {
 			model: null,
@@ -48,6 +57,7 @@ export function EditorGroup(props: { index: number }) {
 			inlayHints: { enabled: state.settings.inlayHints === false ? "off" : "on" },
 			fixedOverflowWidgets: true,
 			scrollBeyondLastLine: false,
+			rulers: rulers(),
 		});
 		editors[props.index] = editor;
 		editor.onDidFocusEditorText(() => setState("activeGroup", props.index));
@@ -103,6 +113,7 @@ export function EditorGroup(props: { index: number }) {
 			fontSize: state.settings.fontSize,
 			minimap: { enabled: state.settings.minimap },
 			inlayHints: { enabled: state.settings.inlayHints === false ? "off" : "on" },
+			rulers: rulers(),
 		}),
 	);
 
@@ -274,8 +285,7 @@ export function EditorGroup(props: { index: number }) {
 				{(path) => <MarkdownView path={path} />}
 			</Show>
 			<div class="editor-row" classList={{ hidden: showBlocks() || showChart() || showRendered() }}>
-				<div class="editor-host" ref={host} />
-				{/* An overview of the whole file, top to bottom, like the minimap it sits beside: not marks on the lines in view. */}
+				{/* An overview of the whole file, top to bottom, to the left of the line numbers: not marks on the lines in view. */}
 				<Show when={group().active && group().active === activePath() && lineCount() > 0 && flatRegions(symbols()).length}>
 					<nav class="region-strip" aria-label="Regions in this file, top to bottom" onKeyDown={onStripKey}>
 						<For each={flatRegions(symbols())}>
@@ -297,6 +307,7 @@ export function EditorGroup(props: { index: number }) {
 						</For>
 					</nav>
 				</Show>
+				<div class="editor-host" ref={host} />
 			</div>
 			<Show when={!group().active}>
 				<div class="empty-group">

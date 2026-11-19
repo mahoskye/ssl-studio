@@ -278,6 +278,26 @@ call at once, in lines with sharp corners.
   they show as an SVG file in the workspace, whole and at full size, with
   its styles written into it. A file already there is replaced only on a yes.
 
+## From using it (2026-11-18)
+
+What the user found in a first look at the round above, and what was done.
+
+- **"Follow the system" follows the system.** The desktop app asks the
+  system for its light or dark preference (the settings portal, on Linux): a
+  GTK web view answers from GTK's own settings, which a desktop may leave on
+  light while it prefers dark. In a browser the browser's answer stands.
+- **The editor's right-click menu has its background.** It is drawn in a
+  tree of its own outside the editor, where the theme's colours did not
+  reach; they are now given to the element that holds it.
+- **The editor's minimap is the editor's again.** The graph's corner map had
+  the same style name, so the editor's minimap took its floating frame and
+  sat over the code. The map has a name of its own, and both are quiet until
+  pointed at.
+- **The region tabs are to the left of the line numbers.**
+- **Rulers:** one at the style profile's line length and a fainter one a set
+  number of columns to each side (10 to start, 0 for none), with a setting
+  for each.
+
 ## On hold
 
 - **Forms, client scripts and code-behind (2026-11-17).** Wanted eventually, in

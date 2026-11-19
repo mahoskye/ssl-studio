@@ -55,7 +55,7 @@ export type ToolStatus = {
 	message?: string;
 };
 
-export type Info = { app: string; lsp: ToolStatus; opencode: ToolStatus; host: "app" | "browser"; selftest: boolean; selftestCycle?: boolean; selftestClose?: boolean };
+export type Info = { /** Whether the system prefers dark, where the backend could ask it (Linux); otherwise the web view's own answer stands. */ systemDark?: boolean; app: string; lsp: ToolStatus; opencode: ToolStatus; host: "app" | "browser"; selftest: boolean; selftestCycle?: boolean; selftestClose?: boolean };
 
 export type ThemeFile = { id: string; name: string; json: string };
 
@@ -68,6 +68,10 @@ export type Settings = {
 	minimap: boolean;
 	/** Parameter names shown beside the arguments of a call. On unless set to false. */
 	inlayHints?: boolean;
+	/** A ruler at the style's line length. On unless set to false. */
+	rulers?: boolean;
+	/** How many columns to each side of that ruler the fainter rulers stand; 0 for none. 10 unless set. */
+	rulerMargin?: number;
 	/** The size of the whole interface: 1 is as designed, from 0.8 to 1.6. */
 	uiScale?: number;
 	/** Overrides discovery of the starlims-lsp binary. */

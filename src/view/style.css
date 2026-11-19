@@ -327,7 +327,7 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .crumb:hover { color: var(--fg); }
 .sep { opacity: .6; }
 .editor-row { flex: 1; min-height: 0; min-width: 0; display: flex; }
-.region-strip { width: 12px; position: relative; flex: none; background: var(--tab-bg); border-left: 1px solid var(--border); }
+.region-strip { width: 12px; position: relative; flex: none; background: var(--tab-bg); border-right: 1px solid var(--border); }
 .region-band { position: absolute; width: 5px; padding: 0; border-radius: var(--radius-sm); opacity: .85; cursor: pointer; min-height: 3px; }
 .region-band:hover, .region-band:focus-visible { opacity: 1; width: 9px; }
 .health section { padding: 0 var(--space-5) var(--space-5); }
@@ -525,12 +525,19 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 /* The picture and, over its corner, the map of it. */
 .graph-stage { flex: 1; min-height: 0; position: relative; display: flex; }
 .graph-canvas { flex: 1; min-height: 0; width: 100%; cursor: grab; user-select: none; }
-/* The whole picture, small: frames faint, nodes plain, the selection in the accent, and the part in view outlined. */
-.minimap { position: absolute; right: var(--space-4); bottom: var(--space-4); background: var(--side-bg); border: 1px solid var(--input-border); border-radius: var(--radius-md); box-shadow: var(--shadow); cursor: pointer; }
-.minimap .mm-frame { fill: color-mix(in srgb, var(--fg) 6%, transparent); stroke: none; }
-.minimap .mm-node { fill: color-mix(in srgb, var(--fg) 38%, transparent); stroke: none; }
-.minimap .mm-mark { fill: var(--accent); stroke: none; }
-.minimap .mm-view { fill: color-mix(in srgb, var(--accent) 10%, transparent); stroke: var(--accent); }
+/* The whole picture, small: frames faint, nodes plain, the selection in the accent, and the part in view outlined.
+   Its name is its own: the text editor has a "minimap" too, and a rule for one must not reach the other. It is
+   quiet over the picture until it is pointed at. */
+.picture-map { opacity: .6; transition: opacity .15s; position: absolute; right: var(--space-4); bottom: var(--space-4); background: var(--side-bg); border: 1px solid var(--input-border); border-radius: var(--radius-md); box-shadow: var(--shadow); cursor: pointer; }
+.picture-map .mm-frame { fill: color-mix(in srgb, var(--fg) 6%, transparent); stroke: none; }
+.picture-map .mm-node { fill: color-mix(in srgb, var(--fg) 38%, transparent); stroke: none; }
+.picture-map .mm-mark { fill: var(--accent); stroke: none; }
+.picture-map:hover { opacity: 1; }
+/* The text editor's outline of the file: quiet too, until it is pointed at or dragged. */
+.monaco-editor .minimap { opacity: .5; transition: opacity .15s; }
+.monaco-editor .minimap:hover, .monaco-editor .minimap:active { opacity: 1; }
+@media (prefers-reduced-motion: reduce) { .picture-map, .monaco-editor .minimap { transition: none; } }
+.picture-map .mm-view { fill: color-mix(in srgb, var(--accent) 10%, transparent); stroke: var(--accent); }
 .graph-canvas text { font: 13px system-ui, sans-serif; fill: var(--fg); }
 /* A folder: the lightest frame, with its path once for every script in it. */
 .g-folder rect { fill: color-mix(in srgb, var(--fg) 2.5%, transparent); stroke: var(--border); stroke-dasharray: none; }

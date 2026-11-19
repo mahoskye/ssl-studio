@@ -52,6 +52,26 @@ const CSS_VARS: [string, string][] = [
 const isDark = (theme: VsTheme) => theme.type !== "light" && theme.type !== "hcLight";
 const validColor = (value: unknown): value is string => typeof value === "string" && /^#([0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(value);
 
+/**
+ * The editor draws its right-click menu in a tree of its own, attached to the
+ * page outside the editor, and declares the theme's colours on the editor: so
+ * the menu found none of them and had no background. A tree inherits the
+ * variables of the element that holds it, so the same declarations are given
+ * to that element.
+ */
+function carryMenuColours() {
+	const declared = [...document.querySelectorAll("style.monaco-colors")].map((style) => style.textContent ?? "").join("\n");
+	const block = /\{([^{}]*--vscode-menu-background[^{}]*)\}/.exec(declared)?.[1];
+	if (!block) return;
+	let style = document.getElementById("studio-menu-colours");
+	if (!style) {
+		style = document.createElement("style");
+		style.id = "studio-menu-colours";
+		document.head.append(style);
+	}
+	style.textContent = `.shadow-root-host { ${block} }`;
+}
+
 export function applyTheme(theme: VsTheme) {
 	const base = isDark(theme) ? builtIn.dark! : builtIn.light!;
 	const colors = { ...base.colors, ...theme.colors };
@@ -70,6 +90,9 @@ export function applyTheme(theme: VsTheme) {
 		colors: Object.fromEntries(Object.entries(colors).filter(([, v]) => validColor(v))),
 	});
 	monaco.editor.setTheme("studio");
+	carryMenuColours();
+	// The editor may write its colours a moment after the theme is set: carried again then.
+	requestAnimationFrame(carryMenuColours);
 	refreshSemanticTokens();
 	const root = document.documentElement;
 	for (const [cssVar, key] of CSS_VARS) {
@@ -80,8 +103,12 @@ export function applyTheme(theme: VsTheme) {
 	root.style.colorScheme = isDark(theme) ? "dark" : "light";
 }
 
-/** Resolves a settings value ("system", "dark", "light", "custom:<id>"). */
-export function resolveTheme(choice: string, custom: { id: string; json: string }[]): VsTheme {
+/**
+ * Resolves a settings value ("system", "dark", "light", "custom:<id>").
+ * `systemDark` is the system's own answer where the app could ask it; without
+ * one, "system" is what the web view says it prefers.
+ */
+export function resolveTheme(choice: string, custom: { id: string; json: string }[], systemDark?: boolean): VsTheme {
 	if (choice.startsWith("custom:")) {
 		const file = custom.find((t) => t.id === choice);
 		if (file) {
@@ -93,5 +120,6 @@ export function resolveTheme(choice: string, custom: { id: string; json: string 
 		}
 	}
 	if (choice === "dark" || choice === "light") return builtIn[choice]!;
+	if (systemDark !== undefined) return systemDark ? builtIn.dark! : builtIn.light!;
 	return matchMedia("(prefers-color-scheme: light)").matches ? builtIn.light! : builtIn.dark!;
 }

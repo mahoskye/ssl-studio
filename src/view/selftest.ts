@@ -32,6 +32,10 @@ async function pictureParses(svg: SVGSVGElement): Promise<number> {
 
 export async function selftest() {
 	const report: Record<string, unknown> = { host: state.info?.host, userAgent: navigator.userAgent, lspPath: state.info?.lsp.path, lspVersion: state.info?.lsp.version };
+	// Which theme "follow the system" came to in this window, and what the window says the system prefers.
+	report.systemPrefersDark = matchMedia("(prefers-color-scheme: dark)").matches;
+	report.themeSetting = state.settings.theme;
+	report.themeShown = document.documentElement.dataset.theme;
 	const timings: Record<string, number> = {};
 	const timed = async <T>(name: string, work: () => Promise<T>) => {
 		const start = performance.now();

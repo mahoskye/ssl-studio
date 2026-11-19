@@ -77,8 +77,10 @@ const shortcut = (id: string) => (keysFor(id) ? ` (${keysFor(id)})` : "");
 
 function useTheme() {
 	const media = matchMedia("(prefers-color-scheme: light)");
-	const apply = () => applyTheme(resolveTheme(state.settings.theme, state.themes));
-	createEffect(on([() => state.settings.theme, () => state.themes], apply));
+	// In the desktop app the system is asked for its preference; in a browser the browser's answer is the system's.
+	const system = () => (state.info?.host === "app" ? state.info.systemDark : undefined);
+	const apply = () => applyTheme(resolveTheme(state.settings.theme, state.themes, system()));
+	createEffect(on([() => state.settings.theme, () => state.themes, system], apply));
 	media.addEventListener("change", apply);
 	onCleanup(() => media.removeEventListener("change", apply));
 }

@@ -37,7 +37,7 @@ export function Minimap(props: { content: Size; boxes: readonly MapBox[]; view: 
 	return (
 		<Show when={box().width > 0 && props.content.width > 0 && outOfSight(props.content, props.view, box())}>
 			<svg
-				class="minimap"
+				class="picture-map"
 				aria-hidden="true"
 				width={Math.ceil(props.content.width * k())}
 				height={Math.ceil(props.content.height * k())}

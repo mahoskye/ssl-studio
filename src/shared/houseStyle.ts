@@ -132,3 +132,18 @@ export const TEMPLATES: Template[] = [
 	{ id: "doproc", label: "DoProc", detail: "Call a procedure", group: "Data", body: () => '${1:vResult} := DoProc("${2:Procedure}", {${3}});\n' },
 	{ id: "execfunction", label: "ExecFunction", detail: "Call another script's procedure", group: "Data", body: () => '${1:vResult} := ExecFunction("${2:Category.Script.Procedure}", {${3}});\n' },
 ];
+
+/** How many columns to each side of the line length the fainter rulers stand, unless a setting says otherwise. */
+export const RULER_MARGIN = 10;
+
+/**
+ * The columns the editor rules: the style's line length, and a fainter ruler
+ * `margin` columns before it and after it. A margin of 0 gives the one ruler;
+ * a ruler that would fall at or before the first column is left out.
+ */
+export function rulerColumns(on: boolean, lineLength: number, margin: number): { column: number; main: boolean }[] {
+	if (!on || !(lineLength > 0)) return [];
+	const side = Math.max(0, Math.round(margin) || 0);
+	const columns = side ? [lineLength - side, lineLength, lineLength + side] : [lineLength];
+	return columns.filter((column) => column > 1).map((column) => ({ column, main: column === lineLength }));
+}

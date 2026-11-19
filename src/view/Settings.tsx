@@ -1,5 +1,6 @@
 // Settings: appearance, the editor, the language server and the keyboard,
 // each saying where it is saved.
+import { RULER_MARGIN } from "../shared/houseStyle";
 import { createSignal, createUniqueId, For, Show, type JSX } from "solid-js";
 import type { Settings } from "../shared/protocol";
 import { backend } from "./backend";
@@ -156,12 +157,14 @@ export function SettingsDialog() {
 		formatOnSave: ["Format changed lines on save", "Only the lines changed since the last save"],
 		minimap: ["Minimap", "The outline of the file at the editor's edge"],
 		inlayHints: ["Parameter name hints", "Names shown beside the arguments of a call"],
+		rulers: ["Ruler at the line length", "A line down the editor at the style profile's line length"],
+		rulerMargin: ["Rulers beside it", "Fainter rulers this many columns before and after; 0 for none"],
 		lspPath: ["Language server program", "Leave empty to have it found"],
 	} as const;
 	const anyShown = (group: Group, ...rows: (keyof typeof ROWS)[]) => rows.some((r) => shown(group, ...ROWS[r]));
 	const groups = {
 		appearance: () => anyShown("Appearance", "theme", "uiScale", "fontSize"),
-		editor: () => anyShown("Editor", "formatOnSave", "minimap", "inlayHints"),
+		editor: () => anyShown("Editor", "formatOnSave", "minimap", "inlayHints", "rulers", "rulerMargin"),
 		server: () => anyShown("Language server", "lspPath"),
 		keyboard: () => keyRows().length > 0,
 	};
@@ -245,6 +248,23 @@ export function SettingsDialog() {
 						</Row>
 						<Row group="Editor" label={ROWS.inlayHints[0]} hint={ROWS.inlayHints[1]} setting="inlayHints">
 							{(ids) => <input id={ids.control} aria-describedby={ids.hint} type="checkbox" checked={state.settings.inlayHints !== false} onChange={(e) => void save("inlayHints", e.currentTarget.checked)} />}
+						</Row>
+						<Row group="Editor" label={ROWS.rulers[0]} hint={ROWS.rulers[1]} setting="rulers">
+							{(ids) => <input id={ids.control} aria-describedby={ids.hint} type="checkbox" checked={state.settings.rulers !== false} onChange={(e) => void save("rulers", e.currentTarget.checked)} />}
+						</Row>
+						<Row group="Editor" label={ROWS.rulerMargin[0]} hint={ROWS.rulerMargin[1]} setting="rulerMargin">
+							{(ids) => (
+								<input
+									id={ids.control}
+									aria-describedby={ids.hint}
+									type="number"
+									min="0"
+									max="60"
+									disabled={state.settings.rulers === false}
+									value={state.settings.rulerMargin ?? RULER_MARGIN}
+									onChange={(e) => void save("rulerMargin", Math.min(60, Math.max(0, Math.round(Number(e.currentTarget.value)) || 0)))}
+								/>
+							)}
 						</Row>
 					</Section>
 					<Section title="Language server" when={groups.server()}>
