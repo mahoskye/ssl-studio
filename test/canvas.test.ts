@@ -121,3 +121,88 @@ test("a choice is remembered where there is storage, and does no harm where ther
 	expect([null, "open"]).toContain(recall("test.choice"));
 	expect(recall("test.never-set")).toBeNull();
 });
+
+import { roundedPath, splinePath } from "../src/view/graph/canvas";
+
+describe("lines as they are drawn", () => {
+	test("a corner is rounded, by no more than half of its shorter stretch", () => {
+		expect(roundedPath([{ x: 0, y: 0 }, { x: 40, y: 0 }, { x: 40, y: 40 }], 8)).toBe("M0,0 L32,0 Q40,0 40,8 L40,40");
+		// A stretch of 6 leaves room for a corner of 3.
+		expect(roundedPath([{ x: 0, y: 0 }, { x: 40, y: 0 }, { x: 40, y: 6 }], 8)).toBe("M0,0 L37,0 Q40,0 40,3 L40,6");
+	});
+
+	test("a straight line, and no line, are left as they are", () => {
+		expect(roundedPath([{ x: 0, y: 0 }, { x: 10, y: 20 }])).toBe("M0,0 L10,20");
+		expect(roundedPath([{ x: 5, y: 5 }])).toBe("");
+		// Two points on the same spot leave no room for a corner.
+		expect(roundedPath([{ x: 0, y: 0 }, { x: 0, y: 0 }, { x: 9, y: 0 }])).toBe("M0,0 L0,0 L9,0");
+	});
+
+	test("a spline's control points come in threes after its start", () => {
+		const p = (x: number, y: number) => ({ x, y });
+		expect(splinePath([p(0, 0), p(10, 0), p(20, 10), p(30, 10)])).toBe("M0,0 C10,0 20,10 30,10");
+		expect(splinePath([p(0, 0), p(1, 1), p(2, 2), p(3, 3), p(4, 4), p(5, 5), p(6, 6)])).toBe("M0,0 C1,1 2,2 3,3 C4,4 5,5 6,6");
+		// What does not come in threes is joined straight.
+		expect(splinePath([p(0, 0), p(9, 9)])).toBe("M0,0 L9,9");
+		expect(splinePath([p(0, 0), p(1, 1), p(2, 2), p(3, 3), p(4, 4)])).toBe("M0,0 C1,1 2,2 3,3 L4,4");
+	});
+});
+
+import { splinePoint } from "../src/view/graph/canvas";
+
+test("a point a given length along a spline, and its end when it is shorter", () => {
+	const p = (x: number, y: number) => ({ x, y });
+	// Handles on the line itself: the curve is the straight line from 0 to 30.
+	const straight = [p(0, 0), p(10, 0), p(20, 0), p(30, 0)];
+	expect(splinePoint(straight, 12).x).toBeCloseTo(12, 5);
+	expect(splinePoint(straight, 12).y).toBeCloseTo(0, 5);
+	expect(splinePoint(straight, 99)).toEqual(p(30, 0));
+	expect(splinePoint([p(0, 0), p(0, 40)], 10)).toEqual(p(0, 10));
+	expect(splinePoint([], 10)).toEqual(p(0, 0));
+	// A curve: the point is on it, the asked length from the start as the curve runs.
+	const curve = [p(0, 0), p(40, 0), p(40, 40), p(80, 40)];
+	const at = splinePoint(curve, 30, 64);
+	expect(at.x).toBeGreaterThan(20);
+	expect(at.y).toBeGreaterThan(0);
+	expect(at.y).toBeLessThan(20);
+});
+
+import { centredOn, mapScale, outOfSight, seen } from "../src/view/graph/canvas";
+
+describe("the map of a picture larger than its view", () => {
+	const box = { width: 400, height: 300 };
+	test("the part in view is the view turned inside out", () => {
+		expect(seen({ x: 20, y: 20, scale: 1 }, box)).toEqual({ x: -20, y: -20, width: 400, height: 300 });
+		expect(seen({ x: -200, y: -100, scale: 0.5 }, box)).toEqual({ x: 400, y: 200, width: 800, height: 600 });
+	});
+	test("a point is brought to the middle at the scale the view has", () => {
+		const view = centredOn({ x: 0, y: 0, scale: 0.5 }, { x: 1000, y: 800 }, box);
+		expect(view).toEqual({ x: -300, y: -250, scale: 0.5 });
+		const part = seen(view, box);
+		expect([part.x + part.width / 2, part.y + part.height / 2]).toEqual([1000, 800]);
+	});
+	test("a map is worth its room only while some of the picture is out of sight", () => {
+		const content = { width: 300, height: 200 };
+		expect(outOfSight(content, { x: 20, y: 20, scale: 1 }, box)).toBe(false);
+		expect(outOfSight(content, { x: -50, y: 20, scale: 1 }, box)).toBe(true);
+		expect(outOfSight({ width: 900, height: 200 }, { x: 20, y: 20, scale: 1 }, box)).toBe(true);
+		expect(outOfSight(content, { x: 20, y: 20, scale: 2 }, box)).toBe(true);
+	});
+	test("the map's scale fits the picture into its largest size", () => {
+		expect(mapScale({ width: 2000, height: 700 }, { width: 200, height: 140 })).toBe(0.1);
+		expect(mapScale({ width: 400, height: 1400 }, { width: 200, height: 140 })).toBe(0.1);
+		expect(mapScale({ width: 0, height: 0 }, { width: 200, height: 140 })).toBe(140);
+	});
+});
+
+import { fitShare } from "../src/view/graph/canvas";
+
+test("how much of a picture a fitted view shows", () => {
+	const box = { width: 1040, height: 540 };
+	expect(fitShare({ width: 500, height: 300 }, box)).toBe(1);
+	expect(fitShare({ width: 2000, height: 300 }, box)).toBe(0.5);
+	expect(fitShare({ width: 500, height: 1000 }, box)).toBe(0.5);
+	// Wide and short against narrower and taller: the second shows more of itself.
+	expect(fitShare({ width: 1100, height: 700 }, box)).toBeGreaterThan(fitShare({ width: 1900, height: 560 }, box));
+	expect(fitShare({ width: 0, height: 0 }, box)).toBe(1);
+});

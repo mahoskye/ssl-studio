@@ -6,8 +6,9 @@ import { createEffect, createMemo, createSignal, createUniqueId, For, on, onClea
 import { ask } from "../dialogs";
 import { editors } from "../editor/EditorGroup";
 import { monaco } from "../editor/monaco";
+import { Minimap, type MapBox } from "../graph/Minimap";
 import { regionColor } from "../editor/regions";
-import { canvasMeasure, fitView, legibleScale, nearest, recall, remember, reveal, zoomAt, type Measure, type Point } from "../graph/canvas";
+import { canvasMeasure, fitView, legibleScale, nearest, recall, remember, reveal, roundedPath, zoomAt, type Measure, type Point } from "../graph/canvas";
 import { diagnostics } from "../lsp/session";
 import { documents, notify, setState, state, applyText } from "../state";
 import { nodeStatuses } from "./build";
@@ -21,7 +22,7 @@ import { planHash, previewPlan } from "./assist";
 import { addAfter, addBranch, addCall, connect, nodeAtLine, nodeLines, parsePlan, printPlan, PROCEDURE_DRAG, removeEdge, removeNode, setDecision, setEdgeLabel, setGroup, setText, type Edit, type Plan, type PlanNode } from "./model";
 
 type Box = { id: string; x: number; y: number; width: number; height: number; node?: PlanNode; lines: string[]; group?: string };
-type Line = { id: string; from: string; to: string; label?: string; shown: string; labelWidth: number; points: Point[]; at: Point; missing: boolean; pending: boolean; removing: boolean };
+type Line = { id: string; from: string; to: string; label?: string; shown: string; labelWidth: number; points: Point[]; at: Point; missing: boolean; pending: boolean; removing: boolean; /** It closes a loop: it runs back up to a step already passed. */ back: boolean };
 type Layout = { boxes: Box[]; lines: Line[]; width: number; height: number };
 
 const elk = new ELK();
@@ -93,12 +94,13 @@ async function layoutPlan(plan: Plan, measure: { node: Measure; label: Measure }
 		const missing = Boolean(diamond(edge.from)) && !edge.label?.trim();
 		const shown = edge.label?.trim() || (missing ? "label?" : "");
 		const labelWidth = shown ? Math.ceil(measure.label(shown)) + 12 : 0;
-		return { id: e.id, from: edge.from, to: edge.to, label: edge.label, shown, labelWidth, points, at: labelPoint(points, labelWidth), missing, pending: Boolean(edge.pending), removing: Boolean(edge.removing) };
+		return { id: e.id, from: edge.from, to: edge.to, label: edge.label, shown, labelWidth, points, at: labelPoint(points, labelWidth), missing, pending: Boolean(edge.pending), removing: Boolean(edge.removing), back: reversed.has(index) };
 	});
 	return { boxes, lines, width: result.width, height: result.height };
 }
 
-const pathOf = (points: Point[]) => (points.length ? `M${points.map((p) => `${p.x},${p.y}`).join(" L")}` : "");
+/** A way out as it is drawn: its corners rounded, so that it reads as one line through each turn. */
+const pathOf = (points: Point[]) => roundedPath(points, 10);
 
 /** The glyph of a node's mark, drawn about its centre: a tick, a bang, a triangle and so on, so state does not rest on colour. */
 const MARK_PATHS: Record<Mark, string> = {
@@ -125,6 +127,8 @@ export function PlanView(props: { path: string; group: number }) {
 	const [view, setView] = createSignal({ x: 20, y: 20, scale: 1 });
 	const [edge, setEdge] = createSignal<{ from: string; to: string } | null>(null);
 	const [linking, setLinking] = createSignal<string | null>(null);
+	/** The node the pointer is on: its ways in and out are lit. */
+	const [pointed, setPointed] = createSignal<string | null>(null);
 	const [keysOpen, setKeysOpen] = createSignal(false);
 	/** Too narrow for the chart and the assistant side by side. */
 	const [narrow, setNarrow] = createSignal(false);
@@ -597,9 +601,13 @@ export function PlanView(props: { path: string; group: number }) {
 						refocus();
 					}}>
 						<defs>
-							<marker id="plan-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-								<path d="M0,0 L10,5 L0,10 z" class="arrow" />
-							</marker>
+							<For each={["plain", "back", "near", "on"]}>
+								{(kind) => (
+									<marker id={`plan-arrow-${kind}`} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+										<path d="M0,1 L10,5 L0,9 z" class={`arrow plan-${kind}`} />
+									</marker>
+								)}
+							</For>
 						</defs>
 						{/* Measure a node's words and an edge's label in the fonts they are drawn in. */}
 						<g class="plan-probe" aria-hidden="true">
@@ -612,7 +620,7 @@ export function PlanView(props: { path: string; group: number }) {
 									<For each={l().boxes.filter((b) => b.group)}>
 										{(b) => (
 											<g class="g-region plan-group">
-												<rect x={b.x} y={b.y} width={b.width} height={b.height} rx="6" style={{ stroke: regionColor(b.group!), fill: `color-mix(in srgb, ${regionColor(b.group!)} 8%, transparent)` }} />
+												<rect x={b.x} y={b.y} width={b.width} height={b.height} rx="8" style={{ stroke: `color-mix(in srgb, ${regionColor(b.group!)} 55%, transparent)`, fill: `color-mix(in srgb, ${regionColor(b.group!)} 7%, transparent)` }} />
 												<text x={b.x + 10} y={b.y + 19}>
 													{b.group}
 												</text>
@@ -622,11 +630,16 @@ export function PlanView(props: { path: string; group: number }) {
 									<For each={l().lines}>
 										{(line) => {
 											const on = () => edge()?.from === line.from && edge()?.to === line.to;
+											// The ways in and out of the node the selection or the pointer is on stand out from the rest.
+											const near = () => {
+												const at = pointed() ?? selected();
+												return at !== null && (line.from === at || line.to === at);
+											};
 											const choose = (e: MouseEvent) => (e.stopPropagation(), setEdge({ from: line.from, to: line.to }), refocus());
 											return (
-												<g class="plan-edge" classList={{ on: on(), pending: line.pending, removing: line.removing }} role="img" aria-label={plan() ? describeEdge(plan()!, line) : undefined}>
+												<g class="plan-edge" classList={{ on: on(), near: near(), back: line.back, pending: line.pending, removing: line.removing }} role="img" aria-label={plan() ? describeEdge(plan()!, line) : undefined}>
 													<path d={pathOf(line.points)} class="plan-edge-hit" onClick={choose} />
-													<path d={pathOf(line.points)} class="g-edge" marker-end="url(#plan-arrow)" />
+													<path d={pathOf(line.points)} class="g-edge" marker-end={`url(#plan-arrow-${on() ? "on" : near() ? "near" : line.back ? "back" : "plain"})`} />
 													<Show when={line.shown}>
 														<g class="plan-label" classList={{ missing: line.missing }} onClick={choose} onDblClick={(e) => (e.stopPropagation(), setEditing({ from: line.from, to: line.to }))}>
 															<rect x={line.at.x - line.labelWidth / 2} y={line.at.y - 10} width={line.labelWidth} height="20" rx="4" />
@@ -655,6 +668,8 @@ export function PlanView(props: { path: string; group: number }) {
 													role="img"
 													aria-label={describeNode(n, stateOf(n))}
 													onMouseDown={(e) => e.stopPropagation()}
+													onMouseEnter={() => setPointed(n.id)}
+													onMouseLeave={() => setPointed(null)}
 													onClick={(e) => {
 														e.stopPropagation();
 														if (n.pending) return;
@@ -702,6 +717,17 @@ export function PlanView(props: { path: string; group: number }) {
 							)}
 						</Show>
 					</svg>
+					<Show when={layout()}>
+						{(l) => (
+							<Minimap
+								content={l()}
+								boxes={l().boxes.map((b): MapBox => ({ x: b.x, y: b.y, width: b.width, height: b.height, kind: b.group ? "frame" : b.node?.id === selected() ? "mark" : "node" }))}
+								view={view()}
+								host={() => canvas}
+								onMove={setView}
+							/>
+						)}
+					</Show>
 					<Show when={editBox()}>
 						{(box) => (
 							<input

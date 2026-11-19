@@ -181,3 +181,77 @@ export function fromCallGraph(input: CallGraphIn, toPath: (uri: string) => strin
 	}
 	return { scripts: [...scriptsByPath.values()].sort((a, b) => a.path.localeCompare(b.path)), nodes, edges: [...edges.values()], topLevel: [...topLevel] };
 }
+
+// --- Scripts folded to one node ------------------------------------------------
+//
+// A workspace's every procedure and call at once is a picture nobody can
+// follow. A folded script is drawn as one node: the calls into and out of it
+// end at the script, those between the same two scripts become one line, and
+// the calls wholly inside it are counted, not drawn.
+
+/** The id a folded script's node has. No procedure's id can be it: theirs start with the path. */
+export const foldId = (path: string) => `fold:${path}`;
+export const isFold = (id: string) => id.startsWith("fold:");
+/** The script (or the box of unresolved targets) a node is in, from its id. */
+export const scriptOf = (id: string) => (isFold(id) ? id.slice(5) : id.slice(0, id.lastIndexOf("#")));
+
+/** The id a folded folder's node has: every script in the folder drawn as one node. */
+export const dirId = (folder: string) => `dir:${folder}`;
+export const isDir = (id: string) => id.startsWith("dir:");
+
+/** What a folded node stands for: how many scripts (a folder only), procedures, and lines that run inside it. */
+export type Inside = { scripts: number; procedures: number; calls: number };
+export type Folded = {
+	nodes: Set<string>;
+	edges: GraphEdge[];
+	/** Per folded node that is drawn, by the script's path or the folder's id. */
+	inside: Map<string, Inside>;
+};
+/** The folders that are folded, and the folder each script is in ("" for one in no folder). */
+export type FoldedDirs = { folded: ReadonlySet<string>; of: (path: string) => string };
+
+/**
+ * What is drawn of the shown nodes and edges when the scripts in `folded` are
+ * each one node, and every script of a folded folder is one node together.
+ */
+export function fold(shown: { nodes: ReadonlySet<string>; edges: readonly GraphEdge[] }, folded: ReadonlySet<string>, dirs?: FoldedDirs): Folded {
+	const dirOf = (path: string) => {
+		const folder = dirs?.of(path);
+		return folder && dirs!.folded.has(folder) ? dirId(folder) : null;
+	};
+	const end = (id: string) => dirOf(scriptOf(id)) ?? (folded.has(scriptOf(id)) ? foldId(scriptOf(id)) : id);
+	const inside = new Map<string, Inside>();
+	const count = (key: string) => inside.get(key) ?? inside.set(key, { scripts: 0, procedures: 0, calls: 0 }).get(key)!;
+	const scripts = new Map<string, Set<string>>();
+	const nodes = new Set<string>();
+	for (const id of shown.nodes) {
+		const to = end(id);
+		nodes.add(to);
+		if (to === id) continue;
+		const key = isDir(to) ? to : scriptOf(id);
+		// The script's own top level is not one of its procedures.
+		if (!id.endsWith("#")) count(key).procedures++;
+		else count(key);
+		if (isDir(to)) scripts.set(to, (scripts.get(to) ?? new Set()).add(scriptOf(id)));
+	}
+	for (const [dir, paths] of scripts) count(dir).scripts = paths.size;
+	const edges = new Map<string, GraphEdge>();
+	for (const e of shown.edges) {
+		const [from, to] = [end(e.from), end(e.to)];
+		if (from === to) {
+			if (isDir(from)) count(from).calls++;
+			else if (isFold(from)) count(scriptOf(from)).calls++;
+			continue;
+		}
+		const key = `${from}→${to}→${relationOf(e.kind)}`;
+		const known = edges.get(key);
+		if (known) known.sites.push(...e.sites);
+		else edges.set(key, { ...e, from, to, sites: [...e.sites], crossScript: isDir(from) || isDir(to) || scriptOf(from) !== scriptOf(to) });
+	}
+	return { nodes, edges: [...edges.values()], inside };
+}
+
+/** More procedures than this, and the graph opens with its scripts folded: the picture is of the scripts first. */
+export const FOLD_ABOVE = 40;
+/** More scripts than this, in more than one folder, and it opens with its folders folded too: the picture is of the folders first. */
+export const FOLD_DIRS_ABOVE = 24;

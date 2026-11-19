@@ -59,6 +59,17 @@
 	font: var(--text-base)/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
+/* Scroll bars in the theme's own colours, thin and without arrow buttons: the browser's own are a pale bar on a dark window. */
+/* Where the bar's parts can be styled they are (every webview the app runs in); the standard properties, which keep the arrows, are for the rest. */
+@supports not selector(::-webkit-scrollbar) {
+	* { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--fg) 30%, transparent) transparent; }
+}
+::-webkit-scrollbar-button { display: none; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--fg) 30%, transparent); background-clip: content-box; border: 2px solid transparent; border-radius: 5px; }
+::-webkit-scrollbar-thumb:hover { background-color: color-mix(in srgb, var(--fg) 48%, transparent); }
+
 * { box-sizing: border-box; }
 html, body, #app { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--fg); }
 button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; padding: var(--space-1) var(--space-3); border-radius: var(--radius-sm); }
@@ -117,12 +128,36 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .tree-row .label { overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
 .tree-row .meta { color: var(--muted); font-size: var(--text-sm); }
 .tree-row .twisty { width: 10px; color: var(--muted); }
+/* A file's mark: a glyph in its kind's colour. The colour only repeats what the glyph and the name already say. */
+.file-mark { flex: none; width: calc(16px * var(--ui-scale)); font: normal calc(14px * var(--ui-scale))/1 codicon; text-align: center; color: var(--muted); }
+.file-mark.fm-folder { color: color-mix(in srgb, var(--warning) 60%, var(--muted)); }
+.file-mark.fm-script { color: var(--accent); }
+.file-mark.fm-data { color: var(--info); }
+.file-mark.fm-plan { color: var(--ok); }
+.file-mark.fm-doc { color: color-mix(in srgb, var(--fg) 70%, var(--muted)); }
+.tab .file-mark { margin-right: var(--space-2); }
 .tree-row .icon { width: 14px; text-align: center; color: var(--muted); }
 .tree-row.kind-2 .icon, .tree-row.kind-2 .label { color: var(--accent); font-weight: 600; }
 .tree-row.kind-11 .icon, .tree-row.kind-12 .icon { color: var(--warning); }
 .tree-row.file-head { font-weight: 600; }
 /* A wash light enough to read the text through, and an underline so the match does not rest on colour. */
-.tree-row mark { background: color-mix(in srgb, var(--warning) 20%, transparent); color: inherit; text-decoration: underline; text-decoration-color: var(--warning); text-underline-offset: 2px; }
+/* What a search found, in a line: tinted, and underlined so that it does not rest on the tint. */
+.tree-row mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: inherit; border-radius: 2px; box-shadow: inset 0 -1px 0 var(--accent); }
+/* A found line is code: in the code's face, so its columns line up down the list. */
+.tree-row.hit .label { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; font-size: var(--text-md); }
+/* How many findings of each severity a file has, in the head of its group. */
+.tree-row .meta.tally { display: inline-flex; gap: var(--space-4); font-variant-numeric: tabular-nums; }
+/* The Agent panel before anything is asked: questions to start from. */
+.agent-starters { list-style: none; margin: var(--space-4) 0 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+.agent-starters button { width: 100%; min-height: var(--target); padding: var(--space-3) var(--space-4); text-align: left; white-space: normal; border: 1px solid var(--border); border-radius: var(--radius-md); color: var(--fg); background: var(--panel-bg); }
+.agent-starters button:hover { border-color: var(--accent); background: var(--hover); }
+/* A snapshot in Local history: a point on the file's line of saves. */
+.tree-row .snap-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid var(--muted); }
+.tree-row.selected .snap-dot, .tree-row:hover .snap-dot { border-color: var(--accent); background: var(--accent); }
+/* Where the editor's cursor is, in the list of the file's objects. */
+.tree-row.here .label { color: var(--accent); }
+.tree-row .here-mark { flex: none; color: var(--accent); font-size: var(--text-sm); }
+.visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 /* Panel rows (panels/Rows.tsx). A heading over rows, or a place inside a file, is not itself a row. */
 .tree-row.file-head, .tree-row.place { cursor: default; }
 .tree-row.file-head:hover, .tree-row.place:hover { background: none; }
@@ -147,7 +182,9 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 
 .group { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; border-left: 1px solid var(--border); }
 .group:first-child { border-left: 0; }
-.tabs { display: flex; overflow-x: auto; background: var(--tab-bg); min-height: var(--tab-height); scrollbar-width: thin; }
+.tabs { display: flex; overflow-x: auto; background: var(--tab-bg); min-height: var(--tab-height); }
+/* The strip of tabs scrolls under a bar thin enough not to push the editor down. */
+.tabs::-webkit-scrollbar { height: 6px; }
 .tab { display: flex; align-items: center; gap: var(--space-2); padding: 0 var(--space-3) 0 var(--space-5); height: var(--tab-height); color: var(--tab-fg); border-right: 1px solid var(--border); cursor: pointer; white-space: nowrap; }
 .tab.active { background: var(--tab-active-bg); color: var(--tab-active-fg); }
 .group.active .tab.active { box-shadow: inset 0 1px 0 var(--accent); }
@@ -174,7 +211,17 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .menu-keys { color: var(--muted); font-size: var(--text-sm); }
 .menu-sep { height: 1px; margin: var(--space-2) 0; background: var(--border); }
 .editor-host { flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
-.empty-group { position: absolute; inset: var(--tab-height) 0 0 0; display: grid; place-items: center; color: var(--muted); pointer-events: none; }
+.empty-group { position: absolute; inset: var(--tab-height) 0 0 0; display: grid; place-items: center; overflow: auto; color: var(--muted); }
+/* No file open: the project by name, and the ways into it with their keys. */
+.start { width: min(460px, 100%); padding: var(--space-6); box-sizing: border-box; }
+.start h2 { margin: 0 0 var(--space-2); font-size: var(--text-xl, 20px); font-weight: 500; color: var(--fg); overflow-wrap: anywhere; }
+.start > .hint { margin: 0 0 var(--space-6); overflow-wrap: anywhere; }
+.start-ways { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+.start-ways button { width: 100%; min-height: var(--target); display: flex; align-items: baseline; gap: var(--space-4); padding: var(--space-3) var(--space-4); border-radius: var(--radius-md); text-align: left; }
+.start-ways .start-label { color: var(--fg); white-space: nowrap; }
+.start-ways .hint { flex: 1; min-width: 0; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.start-ways kbd { margin-left: auto; flex: none; font: inherit; font-size: var(--text-sm); color: var(--muted); padding: 0 var(--space-3); border: 1px solid var(--input-border); border-radius: var(--radius-sm); background: var(--input-bg); white-space: nowrap; }
+.start .start-foot { margin: var(--space-5) 0 0 var(--space-4); }
 
 .diff { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .diff-bar { display: flex; align-items: center; gap: var(--space-4); padding: var(--space-2) var(--space-5); background: var(--tab-bg); }
@@ -251,6 +298,12 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .rightbar { grid-row: 1; grid-column: 6; width: var(--right); min-width: 0; background: var(--side-bg); color: var(--side-fg); overflow: hidden; display: flex; flex-direction: column; }
 .group-head { padding: var(--space-4) var(--space-5) var(--space-1); font-size: var(--text-sm); text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
 .palette-item .label { flex: none; max-width: 55%; }
+/* What the template under the keyboard or the pointer would insert. */
+.palette-preview { flex: none; height: 36%; overflow: auto; margin: var(--space-3) var(--space-4) var(--space-4); padding: var(--space-4); background: var(--panel-bg); border: 1px solid var(--border); border-radius: var(--radius-md); }
+.palette-preview-head { display: flex; align-items: baseline; gap: var(--space-4); margin-bottom: var(--space-3); }
+.palette-preview-head .hint { margin: 0; }
+.palette-preview > .hint { margin: 0; }
+.palette-preview pre { margin: 0; font: var(--text-md)/1.5 ui-monospace, "Cascadia Code", Menlo, monospace; white-space: pre; tab-size: 4; color: var(--fg); }
 .palette-item .meta { flex: 1; min-width: 0; text-align: right; overflow: hidden; text-overflow: ellipsis; }
 .swatch { width: 12px; height: 12px; padding: 0; border-radius: var(--radius-sm); flex: none; position: relative; }
 /* Twelve pixels to look at, twenty-four to hit. */
@@ -276,12 +329,24 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .meter-row.compact .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .meter-row .bar { grid-column: 1 / -1; height: 4px; background: var(--selected); border-radius: var(--radius-sm); overflow: hidden; }
 .meter-row .fill { height: 100%; background: var(--ok); }
+/* A procedure's row: its name and length, and under them a bar of its length against the longest. */
+.meter-row.sized { margin-bottom: var(--space-2); padding: var(--space-1) 0; border-radius: var(--radius-sm); }
+.meter-row.sized .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.meter-row.sized .bar { display: block; height: 3px; }
+.meter-row .fill.plain { display: block; background: color-mix(in srgb, var(--accent) 55%, var(--muted)); }
 .meter-row .fill.near { background: var(--warning); }
 .meter-row .fill.over { background: var(--error); }
 .meter-row .near { color: var(--warning); }
 .meter-row .over { color: var(--error); font-weight: 600; }
 .reference-detail { margin: 0 var(--space-4) var(--space-4); padding: var(--space-4); background: var(--panel-bg); border: 1px solid var(--border); border-radius: var(--radius-md); max-height: 45%; overflow: auto; }
 .reference-head { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-2); }
+/* An entry's description in the Reference panel: the rendered Markdown, at the panel's size and without a page's margins. */
+.md.reference-doc { max-width: none; margin: 0; padding: 0; font-size: var(--text-md); line-height: 1.5; }
+.md.reference-doc p, .md.reference-doc ul, .md.reference-doc pre { margin: 0 0 var(--space-3); }
+.md.reference-doc ul { padding-left: var(--space-6); }
+.md.reference-doc pre { padding: var(--space-3) var(--space-4); white-space: pre-wrap; }
+.md.reference-doc code { font-size: var(--text-md); }
+.md.reference-doc > :last-child { margin-bottom: 0; }
 .markdown p { margin: var(--space-2) 0; white-space: pre-wrap; font-size: var(--text-md); }
 .markdown pre { margin: var(--space-2) 0; padding: var(--space-3); background: var(--input-bg); border-radius: var(--radius-sm); white-space: pre-wrap; font-size: var(--text-md); }
 .dialog.profile { width: min(760px, 94vw); max-width: 94vw; max-height: 86vh; }
@@ -432,32 +497,87 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .graph-list li .hint { margin: 0 0 0 var(--space-3); }
 .graph-list-focus { margin-left: var(--space-3); color: var(--muted); font-size: var(--text-sm); }
 .graph-list-focus[aria-pressed="true"] { color: var(--accent); }
+/* The picture and, over its corner, the map of it. */
+.graph-stage { flex: 1; min-height: 0; position: relative; display: flex; }
 .graph-canvas { flex: 1; min-height: 0; width: 100%; cursor: grab; user-select: none; }
-.graph-canvas text { font: 12px system-ui, sans-serif; fill: var(--fg); }
-.g-script rect { fill: color-mix(in srgb, var(--side-bg) 80%, transparent); stroke: var(--border); }
-.g-script text { fill: var(--muted); font-weight: 600; cursor: pointer; }
+/* The whole picture, small: frames faint, nodes plain, the selection in the accent, and the part in view outlined. */
+.minimap { position: absolute; right: var(--space-4); bottom: var(--space-4); background: var(--side-bg); border: 1px solid var(--input-border); border-radius: var(--radius-md); box-shadow: var(--shadow); cursor: pointer; }
+.minimap .mm-frame { fill: color-mix(in srgb, var(--fg) 6%, transparent); stroke: none; }
+.minimap .mm-node { fill: color-mix(in srgb, var(--fg) 38%, transparent); stroke: none; }
+.minimap .mm-mark { fill: var(--accent); stroke: none; }
+.minimap .mm-view { fill: color-mix(in srgb, var(--accent) 10%, transparent); stroke: var(--accent); }
+.graph-canvas text { font: 13px system-ui, sans-serif; fill: var(--fg); }
+/* A folder: the lightest frame, with its path once for every script in it. */
+.g-folder rect { fill: color-mix(in srgb, var(--fg) 2.5%, transparent); stroke: var(--border); stroke-dasharray: none; }
+.g-folder text { fill: var(--muted); font-weight: 600; font-size: 13px; letter-spacing: .01em; }
+/* A script: a panel with its name on a heading line. */
+.g-script rect { fill: color-mix(in srgb, var(--side-bg) 82%, transparent); stroke: var(--border); }
+.g-script text { fill: var(--fg); font-weight: 600; cursor: pointer; }
+.g-script text:hover { fill: var(--accent); }
+.g-script .g-size { fill: var(--muted); font-weight: 400; }
 .g-script.near rect { stroke: var(--warning); stroke-width: 2; }
 .g-script.over rect { stroke: var(--error); stroke-width: 2.5; }
-.g-region rect { stroke-dasharray: 4 3; }
+/* The mark that folds a script: a chevron, down while it is open and to the right while it is folded. */
+.g-toggle { cursor: pointer; }
+.g-script .g-toggle rect { fill: transparent; stroke: none; }
+.g-script .g-toggle:hover rect { fill: var(--hover); }
+.g-toggle path, .g-chevron { fill: none; stroke: var(--muted); stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; pointer-events: none; }
+.g-toggle:hover path, .g-fold:hover .g-chevron { stroke: var(--accent); }
+/* A region: tinted with its own colour, and outlined in it. */
+.g-region text { fill: var(--muted); font-weight: 600; }
 .g-proc rect, .g-top rect { fill: var(--input-bg); stroke: var(--input-border); cursor: pointer; }
-.g-proc:hover rect { stroke: var(--accent); }
-.g-proc.focus rect { stroke: var(--accent); stroke-width: 2; fill: var(--selected); }
+.g-proc:hover rect, .g-top:hover rect, .g-fold:hover rect { stroke: var(--accent); }
+.g-proc.focus rect, .g-fold.focus rect { stroke: var(--accent); stroke-width: 2; fill: var(--selected); }
 .g-top rect { stroke-dasharray: 3 3; }
-.g-edge { fill: none; stroke: var(--muted); }
-.g-edge.cross { stroke: var(--accent); opacity: .9; }
+/* A script folded to one node: its name, and under it what is inside. */
+.g-fold rect { fill: var(--input-bg); stroke: var(--input-border); stroke-width: 1.2; cursor: pointer; }
+/* A folder folded to one node: the same, heavier, on the side panel's ground. */
+.g-fold.g-dir rect { fill: var(--side-bg); stroke: color-mix(in srgb, var(--fg) 34%, var(--input-border)); stroke-width: 1.6; }
+.g-fold .g-fold-name { font-weight: 600; }
+.g-fold .g-fold-note { fill: var(--muted); font-size: 12px; }
+.g-fold.near rect { stroke: var(--warning); stroke-width: 2; }
+.g-fold.over rect { stroke: var(--error); stroke-width: 2.5; }
+/* A line is as thick as the number of places it stands for; --w is set on each. */
+.g-edge { fill: none; stroke: var(--muted); stroke-width: var(--w, 1px); transition: opacity .12s; }
+.g-edge.thick { stroke-width: 3px; }
+/* Between scripts: the accent, softened, so that a picture of nothing but scripts is not all one loud colour. */
+.g-edge.cross { stroke: color-mix(in srgb, var(--accent) 62%, var(--muted)); }
+/* How many places a line stands for, written on it. */
+.g-count rect { fill: var(--bg); stroke: var(--border); }
+.g-count text { font-size: 10.5px; fill: var(--muted); font-variant-numeric: tabular-nums; }
+.g-root.lit .g-count { opacity: .25; }
+.g-root.lit .g-count.hot { opacity: 1; }
+.g-root.lit .g-count.hot rect { stroke: var(--accent); }
+.g-root.lit .g-count.hot text { fill: var(--fg); }
 /* Not a call: one class inherits another. Dashed, so it is told apart without colour. */
 .g-edge.inherits { stroke: var(--info); stroke-dasharray: 6 4; }
 /* Creating an object is dotted, a method call dash and dot: each line says what it is by its shape. */
 .g-edge.creates { stroke: var(--info); stroke-dasharray: 2 3; }
 .g-edge.method { stroke: var(--info); stroke-dasharray: 9 3 2 3; }
+/* A wide unseen stroke under each line, so that it can be pointed at. */
+.g-edge-hit { fill: none; stroke: transparent; stroke-width: 10px; pointer-events: stroke; }
+/* While a node or a line is pointed at, its lines stand out and the others step back. */
+.g-root.lit .g-edge { opacity: .16; }
+.g-root.lit .g-edge.hot { opacity: 1; stroke: var(--accent); stroke-width: calc(var(--w, 1px) + 1px); }
+.g-proc.lit rect, .g-top.lit rect, .g-fold.lit rect { stroke: var(--accent); stroke-width: 2; }
+.g-proc.beside rect, .g-top.beside rect, .g-fold.beside rect { stroke: var(--accent); }
 .arrow { fill: var(--muted); }
+.arrow.cross { fill: color-mix(in srgb, var(--accent) 62%, var(--muted)); }
+.arrow.hot { fill: var(--accent); }
+.arrow.class { fill: var(--info); }
+@media (prefers-reduced-motion: reduce) { .g-edge { transition: none; } }
 .tree-row.place .label { color: var(--accent); font-size: var(--text-md); }
 .shortcuts { font-size: var(--text-md); }
 .shortcut-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: var(--space-4); align-items: center; padding: var(--space-1) 0; }
 .dialog.settings { width: min(560px, 94vw); }
 .settings-body { overflow: auto; display: flex; flex-direction: column; gap: var(--space-6); padding-right: var(--space-2); }
 .settings-group { display: flex; flex-direction: column; gap: var(--space-4); }
-.settings-group h3 { margin: 0; padding-bottom: var(--space-2); border-bottom: 1px solid var(--border); font-size: var(--text-md); font-weight: 600; color: var(--muted); }
+/* A section's name stays at the top while its rows scroll under it, so the place in a long list is always named. */
+.settings-group h3 { position: sticky; top: 0; z-index: 1; margin: 0; padding: var(--space-2) 0; border-bottom: 1px solid var(--border); background: var(--side-bg); font-size: var(--text-md); font-weight: 600; color: var(--muted); }
+/* The sections by name, above the list. */
+.settings-nav { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.settings-nav button { min-height: var(--target); padding: 0 var(--space-4); border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: var(--text-md); }
+.settings-nav button:hover { color: var(--fg); border-color: var(--input-border); }
 .settings-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-5); }
 .settings-text { flex: 1 1 calc(var(--target) * 9); min-width: 0; display: flex; flex-direction: column; }
 .settings-hint { margin: 0; color: var(--muted); font-size: var(--text-md); overflow-wrap: break-word; min-width: 0; }
@@ -476,21 +596,25 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .g-proc.datasource rect { fill: color-mix(in srgb, var(--info) 18%, var(--input-bg)); stroke: var(--info); }
 .g-proc.unresolved rect { stroke: var(--error); stroke-dasharray: 4 2; }
 /* Where the keyboard is in the graph: heavier than a hover, and not the accent that marks the focus. */
-.g-proc:focus, .g-top:focus { outline: none; }
-.g-proc:focus-visible rect, .g-top:focus-visible rect { stroke: var(--fg); stroke-width: 2.5; }
+.g-proc:focus, .g-top:focus, .g-fold:focus { outline: none; }
+.g-proc:focus-visible rect, .g-top:focus-visible rect, .g-fold:focus-visible rect { stroke: var(--fg); stroke-width: 2.5; }
 
 /* Planning mode: a plan's chart */
 .plan { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; background: var(--bg); }
 .plan-bar { flex-wrap: wrap; }
-.plan-bar button.on { color: var(--accent); box-shadow: inset 0 -1px 0 var(--accent); }
+.plan-bar button.on, .graph-bar > button.on { color: var(--accent); box-shadow: inset 0 -1px 0 var(--accent); }
 .plan-canvas { flex: 1; min-height: 0; position: relative; display: flex; outline: none; overflow: hidden; }
 .plan-canvas:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); }
 .plan-canvas.linking .plan-node { cursor: crosshair; }
 .plan-node { cursor: pointer; }
-.plan-node rect, .plan-node polygon { fill: var(--input-bg); stroke: var(--input-border); stroke-width: 1; }
+/* A node lifts a little off the canvas, so the chart reads as shapes joined by lines and not as outlines among outlines. */
+.plan-node { filter: drop-shadow(0 1px 1.5px rgb(0 0 0 / .28)); }
+.plan-node rect, .plan-node polygon { fill: var(--input-bg); stroke: color-mix(in srgb, var(--fg) 26%, var(--input-border)); stroke-width: 1.2; }
 .plan-node line { stroke: var(--input-border); }
 .plan-node text { font: 13px system-ui, sans-serif; fill: var(--fg); pointer-events: none; }
-.plan-node.start rect, .plan-node.end rect { fill: var(--selected); }
+/* Where the chart starts and ends: filled, and written a little heavier. */
+.plan-node.start rect, .plan-node.end rect { fill: var(--selected); stroke: color-mix(in srgb, var(--fg) 45%, var(--input-border)); }
+.plan-node.start text, .plan-node.end text { font-weight: 600; }
 .plan-node.decision polygon { fill: color-mix(in srgb, var(--accent) 12%, var(--input-bg)); stroke: var(--accent); }
 .plan-node.call rect { fill: color-mix(in srgb, var(--info) 12%, var(--input-bg)); stroke: var(--info); }
 .plan-node.call line { stroke: var(--info); }
@@ -505,11 +629,18 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .plan-mark.changed, .plan-mark.skipped { color: var(--warning); }
 .plan-mark.running { color: var(--accent); }
 .plan-group text { font: 600 12px system-ui, sans-serif; }
-.plan-edge .g-edge { opacity: 1; }
+/* A way out: plain enough to stay behind the shapes, strong enough to follow. A loop's way back is the accent's. */
+.plan-edge .g-edge { opacity: 1; stroke: color-mix(in srgb, var(--fg) 55%, var(--muted)); stroke-width: 1.5px; }
+.plan-edge.back .g-edge { stroke: color-mix(in srgb, var(--accent) 70%, var(--muted)); }
+.plan-edge.near .g-edge { stroke: var(--fg); stroke-width: 2.2px; }
+.arrow.plan-plain { fill: color-mix(in srgb, var(--fg) 55%, var(--muted)); }
+.arrow.plan-back { fill: color-mix(in srgb, var(--accent) 70%, var(--muted)); }
+.arrow.plan-near { fill: var(--fg); }
+.arrow.plan-on { fill: var(--accent); }
 .plan-edge-hit { fill: none; stroke: transparent; stroke-width: 12; cursor: pointer; }
-.plan-edge.on .g-edge { stroke: var(--accent); stroke-width: 2.5; }
+.plan-edge.on .g-edge { stroke: var(--accent); stroke-width: 2.5px; }
 .plan-label { cursor: pointer; }
-.plan-label rect { fill: var(--bg); stroke: var(--border); }
+.plan-label rect { fill: var(--bg); stroke: color-mix(in srgb, var(--fg) 26%, var(--border)); }
 .plan-label text { font: 12px system-ui, sans-serif; fill: var(--fg); pointer-events: none; }
 .plan-label.missing rect { stroke: var(--warning); stroke-dasharray: 3 2; }
 .plan-label.missing text { fill: var(--warning); }
