@@ -38,3 +38,24 @@ export function unpackTabs(text: string | null | undefined): TabSession | null {
 	const wanted = Number.isInteger(raw.activeGroup) ? raw.activeGroup : 0;
 	return { groups: kept, activeGroup: Math.min(Math.max(0, wanted), kept.length - 1) };
 }
+
+// --- the panels a folder was left with ----------------------------------------------------
+
+/** Which side panel and which bottom panel were showing. */
+export type ViewSession = { left?: string; bottom?: string };
+
+/** Where a folder's panels are kept, among the choices a view remembers. */
+export const viewsKey = (root: string) => `views:${root}`;
+
+export const packViews = (left: string, bottom: string): string => JSON.stringify({ left, bottom });
+
+/** What was kept, read with suspicion: only a panel that is one of those there are comes back. */
+export function unpackViews(text: string | null | undefined, lefts: readonly string[], bottoms: readonly string[]): ViewSession {
+	if (!text) return {};
+	try {
+		const raw = JSON.parse(text);
+		return { ...(lefts.includes(raw?.left) ? { left: raw.left } : {}), ...(bottoms.includes(raw?.bottom) ? { bottom: raw.bottom } : {}) };
+	} catch {
+		return {};
+	}
+}

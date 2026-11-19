@@ -417,6 +417,13 @@ From a second look:
   with where the chart starts and ends, at a size that reads; a name that
   would lie over another waits for a closer look. A click on a stage there
   brings the view in on it.
+- **The workspace's procedures are listed by script.** Beside a plan, the
+  Objects panel lists every procedure to drag into the chart; each row had
+  its script's whole path after the name, and a long path left no room for
+  the name at all. The path is said once, over the script's procedures,
+  and a row is a name.
+- **A folder opens with the panels it was left with:** the side panel and
+  the bottom panel that were showing, as its tabs already did.
 - **A procedure found from the list is fitted in the graph.** Finding one
   while the list was showing laid out two pictures, and the view was fitted
   to the wrong one: the focus came up small, cut off at the top, with a

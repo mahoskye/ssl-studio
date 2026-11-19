@@ -7,8 +7,8 @@ import { session } from "../lsp/session";
 import { activeDoc, activePath, openFile, state } from "../state";
 import { cycleRegionColor, isRegion, regionColor, symbolPath } from "../editor/regions";
 import { isPlanPath, PROCEDURE_DRAG } from "../plan/model";
-import { relativeTo } from "../../shared/paths";
-import { focusRowsBelow, Row, Rows } from "./Rows";
+import { baseName, dirName, relativeTo } from "../../shared/paths";
+import { focusRowsBelow, Row, RowGroup, Rows } from "./Rows";
 import { serverDown } from "./server";
 
 type Sym = monaco.languages.DocumentSymbol;
@@ -74,28 +74,51 @@ function Procedures(props: { filter: string }) {
 		if (!procedures().length) return "The language server found no procedures in the workspace.";
 		return `No procedure matches “${props.filter}”. Clear the filter to see them all.`;
 	};
+	/** The procedures under the script each is in: the path is said once, and a row is a name. */
+	const scripts = () => {
+		const groups = new Map<string, ReturnType<typeof list>>();
+		for (const s of list()) groups.set(fileOf(s.location.uri), [...(groups.get(fileOf(s.location.uri)) ?? []), s]);
+		return [...groups].sort(([a], [b]) => a.localeCompare(b)).map(([file, items]) => ({ file, items: [...items].sort((a, b) => a.location.range.start.line - b.location.range.start.line) }));
+	};
 	return (
 		<Show when={list().length} fallback={<p class="hint">{empty()}</p>}>
 			<p class="hint">Drag a procedure into the chart to call it. Enter opens it.</p>
-			<Rows role="listbox" label="Procedures in the workspace">
-				<For each={list()}>
-					{(s) => (
-						<Row
-							key={`${s.location.uri}#${s.name}`}
-							draggable={true}
-							title={`${s.name} in ${fileOf(s.location.uri)}`}
-							onDragStart={(e) => {
-								e.dataTransfer?.setData(PROCEDURE_DRAG, s.name);
-								if (e.dataTransfer) e.dataTransfer.effectAllowed = "copy";
-							}}
-							onActivate={() => void openFile(monaco.Uri.parse(s.location.uri).fsPath, { reveal: { line: s.location.range.start.line + 1, column: s.location.range.start.character + 1 } })}
+			<Rows label="Procedures in the workspace, by script">
+				<For each={scripts()}>
+					{(script) => (
+						<RowGroup
+							title={script.file}
+							headClass="group-head proc-script"
+							head={
+								<>
+									<span class="proc-script-name">{baseName(script.file)}</span>
+									{/* A long folder keeps its end, the part that tells two scripts of one name apart. */}
+									<span class="meta">
+										<bdi>{dirName(script.file)}</bdi>
+									</span>
+								</>
+							}
 						>
-							<span class="icon" aria-hidden="true">
-								ƒ
-							</span>
-							<span class="label">{s.name}</span>
-							<span class="meta">{fileOf(s.location.uri)}</span>
-						</Row>
+							<For each={script.items}>
+								{(s) => (
+									<Row
+										key={`${s.location.uri}#${s.name}`}
+										draggable={true}
+										title={`${s.name} in ${script.file}`}
+										onDragStart={(e) => {
+											e.dataTransfer?.setData(PROCEDURE_DRAG, s.name);
+											if (e.dataTransfer) e.dataTransfer.effectAllowed = "copy";
+										}}
+										onActivate={() => void openFile(monaco.Uri.parse(s.location.uri).fsPath, { reveal: { line: s.location.range.start.line + 1, column: s.location.range.start.character + 1 } })}
+									>
+										<span class="icon" aria-hidden="true">
+											ƒ
+										</span>
+										<span class="label">{s.name}</span>
+									</Row>
+								)}
+							</For>
+						</RowGroup>
 					)}
 				</For>
 			</Rows>

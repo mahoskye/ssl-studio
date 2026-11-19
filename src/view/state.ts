@@ -15,7 +15,7 @@ import { isPlanPath } from "./plan/model";
 import { recheckPlans, trackPlan } from "./plan/check";
 import { trackDoc } from "./docCheck";
 import { recall, remember } from "./graph/canvas";
-import { packTabs, tabsKey, unpackTabs } from "./editor/sessionTabs";
+import { packTabs, packViews, tabsKey, unpackTabs, unpackViews, viewsKey } from "./editor/sessionTabs";
 
 export type Group = { tabs: string[]; active: string | null; mode?: "text" | "blocks" };
 export type PanelId = "explorer" | "objects" | "palette" | "reference" | "search" | "history" | "health" | "agent" | "docs";
@@ -168,6 +168,16 @@ export function rememberTabs() {
 	if (root && tabsReady) remember(tabsKey(root), packTabs(state.groups, state.activeGroup));
 }
 
+/** The side panels there are, and the bottom ones: what a kept choice must be one of. */
+const LEFT_VIEWS: readonly PanelId[] = ["explorer", "objects", "palette", "reference", "search", "history", "health", "agent", "docs"];
+const BOTTOM_VIEWS: readonly BottomView[] = ["problems", "output"];
+
+/** Keeps which side panel and which bottom panel are showing in this folder, for the next time it is opened. */
+export function rememberViews() {
+	const root = state.workspace?.root;
+	if (root && tabsReady) remember(viewsKey(root), packViews(state.leftView, state.bottomView));
+}
+
 /**
  * Opens again what was open in this folder last time. A file that has gone
  * since, or is no longer inside the folder, is passed over without a word.
@@ -177,6 +187,10 @@ export async function restoreTabs() {
 	// A self-test starts from nothing open, and leaves nothing behind for the next run.
 	if (state.info?.selftest || state.info?.selftestClose) return;
 	try {
+		// The panels first: they are there at once, and the files take a moment to read.
+		const views = root ? unpackViews(recall(viewsKey(root)), LEFT_VIEWS, BOTTOM_VIEWS) : {};
+		if (views.left) setState("leftView", views.left as PanelId);
+		if (views.bottom) setState("bottomView", views.bottom as BottomView);
 		const saved = root ? unpackTabs(recall(tabsKey(root))) : null;
 		if (!root || !saved) return;
 		for (const [index, group] of saved.groups.entries()) {
@@ -204,6 +218,7 @@ export async function restoreTabs() {
 	} finally {
 		tabsReady = true;
 		rememberTabs();
+		rememberViews();
 	}
 }
 
