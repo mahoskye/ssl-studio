@@ -194,9 +194,16 @@ export async function importTickets() {
 		try {
 			read = ticketsFromJson(JSON.parse(text));
 		} catch (e: any) {
-			return notify(`${typed} is not JSON that can be read: ${e?.message ?? e}`, "error");
+			// What JSON itself could not read, and what the reader of tickets fell over, are two things to say.
+			return notify(e instanceof SyntaxError ? `${typed} is not JSON that can be read: ${e.message}` : `${typed} could not be read as tickets: ${e?.message ?? e}`, "error");
 		}
-	} else read = ticketsFromTable(parseCsv(text));
+	} else {
+		try {
+			read = ticketsFromTable(parseCsv(text));
+		} catch (e: any) {
+			return notify(`${typed} could not be read as a table of tickets: ${e?.message ?? e}`, "error");
+		}
+	}
 	if (read.problem) return notify(`${typed}: ${read.problem}`, "error");
 	if (!read.tickets.length) return notify(importSummary({ made: 0, updated: 0, same: 0, skipped: read.skipped, pulls: read.pulls }));
 	// A ticket that is in the export twice is one ticket: the last of its rows is the one that stands.

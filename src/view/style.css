@@ -945,6 +945,8 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .table-view td .table-use { margin-left: var(--space-4); font: var(--text-sm) system-ui, sans-serif; }
 .table-view td span.table-use { text-decoration: none; opacity: 1; color: var(--warning); border-color: color-mix(in srgb, var(--warning) 45%, transparent); }
 .table-view td button.table-use { min-height: 0; padding: 0; color: var(--muted); }
+/* The ticket the rows are narrowed to: pressed, and pressing it shows every row again. */
+.table-bar .doc-status.table-for { min-height: 0; line-height: 1.6; background: color-mix(in srgb, var(--accent) 14%, transparent); }
 /* A ticket's key in a registry's row: a way to the ticket, in the cell's own type. */
 .table-view td button.table-ticket { min-height: 0; padding: 0; font: inherit; }
 .table-tally button { min-height: 0; padding: 0 var(--space-3); line-height: 1.6; }

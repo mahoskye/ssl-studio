@@ -9,7 +9,7 @@ import { checksNames, nameQuery, namesOf, NAMES_CHECKED, outsideDocuments, usesS
 import { backend } from "../backend";
 import { searchFor } from "../panels/Search";
 import { docs } from "../project";
-import { ticketColumn } from "../../shared/registryTickets";
+import { keyOf, keysIn, ticketColumn } from "../../shared/registryTickets";
 import { rowsAsked, rowsShown } from "./tableRows";
 import { canonical, documents, notify, openFile, state } from "../state";
 
@@ -42,12 +42,20 @@ export function TableView(props: { path: string }) {
 	/** The cell being changed: its row in the file and its column. */
 	const [editing, setEditing] = createSignal<{ row: number; column: number } | null>(null);
 	const statusAt = () => columnOf(table(), "status");
-	// Rows asked for from a ticket's page: the filter is set to the ticket's key, and can be cleared like any other.
+	/** The ticket the rows are narrowed to: those whose ticket column names it, and no row that merely holds the same letters. */
+	const [onlyTicket, setOnlyTicket] = createSignal<string | null>(null);
+	// Rows asked for from a ticket's page.
 	createEffect(() => {
 		const asked = rowsAsked();
 		if (!asked || canonical(asked.path) !== canonical(props.path)) return;
-		setFilter(asked.filter);
+		setOnlyTicket(asked.ticket);
 		rowsShown();
+	});
+	const namesTicket = (cells: Cell[], key: string) => keysIn(cells[ticketAt()]?.text ?? "").some((named) => named.toLowerCase() === key.toLowerCase());
+	// A ticket no row names any more (the last was changed), or a table with no such column, has nothing to narrow to.
+	createEffect(() => {
+		const wanted = onlyTicket();
+		if (wanted !== null && (ticketAt() < 0 || !table().rows.some((cells) => namesTicket(cells, wanted)))) setOnlyTicket(null);
 	});
 	/** Where the rows name the ticket that carries them, and the project's tickets by key: a key there is a way to its ticket. */
 	const ticketAt = () => ticketColumn(table());
@@ -74,7 +82,7 @@ export function TableView(props: { path: string }) {
 	const ticketCell = (value: string) => (
 		<For each={value.split(/([\s,;]+)/)}>
 			{(part) => {
-				const ticket = tickets().get(part.toLowerCase());
+				const ticket = tickets().get(keyOf(part).toLowerCase());
 				return ticket ? (
 					<button class="link table-ticket" title={`${ticket.ticket}: ${ticket.title ?? ""}${ticket.status ? ` (${ticket.status})` : ""}. Open the ticket.`} onClick={(e) => (e.stopPropagation(), void openFile(ticket.path))} onDblClick={(e) => e.stopPropagation()}>
 						{part}
@@ -117,6 +125,8 @@ export function TableView(props: { path: string }) {
 		if (onlyMissing() && uses()) list = list.filter(({ cells }) => usesOf(cells) === 0);
 		const wanted = onlyStatus();
 		if (wanted !== null && statusAt() >= 0) list = list.filter(({ cells }) => (cells[statusAt()]?.text ?? "").trim().toLowerCase() === wanted);
+		const forTicket = onlyTicket();
+		if (forTicket !== null && ticketAt() >= 0) list = list.filter(({ cells }) => namesTicket(cells, forTicket));
 		if (words.length) list = list.filter(({ cells }) => words.every((word) => cells.some((cell) => cell.text.toLowerCase().includes(word))));
 		const by = order();
 		if (by) {
@@ -219,6 +229,11 @@ export function TableView(props: { path: string }) {
 				<span class="hint">
 					{rows().length === table().rows.length ? `${table().rows.length} ${table().rows.length === 1 ? "row" : "rows"}` : `${rows().length} of ${table().rows.length} rows`}
 				</span>
+				<Show when={onlyTicket()}>
+					<button class="doc-status tone-active table-for" aria-pressed="true" title="Show every row again" onClick={() => setOnlyTicket(null)}>
+						for {onlyTicket()} ×
+					</button>
+				</Show>
 				<Show when={counted()}>
 					<span class="table-tally" aria-label="Rows by status">
 						<For each={counted()!.by}>

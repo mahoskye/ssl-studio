@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { parseCsv } from "../src/shared/csv";
 import { docChecks } from "../src/shared/docChecks";
 import type { DocFile } from "../src/shared/protocol";
-import { keysIn, rowsByTicket, rowsLine, ticketColumn } from "../src/shared/registryTickets";
+import { keyOf, keysIn, rowsByTicket, rowsLine, ticketColumn } from "../src/shared/registryTickets";
 import { ticketAtHand, ticketWork } from "../src/shared/workContext";
 import { listDocs, readProject } from "../src/bun/project";
 import { WorkspaceFiles } from "../src/bun/workspace";
@@ -62,5 +62,24 @@ describe("the demo project's settings say which ticket carries each", () => {
 		]);
 		expect(docChecks(list).filter((check) => check.level === "warn")).toEqual([]);
 		expect(list.filter((file) => file.catalog?.stale)).toEqual([]);
+	});
+});
+
+// A fourth review (2026-11-19).
+describe("only what is written as a key is a ticket", () => {
+	test("the words a person writes where there is no ticket are passed over", () => {
+		const rows = rowsByTicket(parseCsv("name,ticket\nA,n/a\nB,-\nC,TBD\nD,DEMO-1 (partly)\nE,\"#12, 13\"\nF,see DEMO-2\n"));
+		expect(rows).toEqual([
+			{ key: "DEMO-1", rows: 1 },
+			{ key: "12", rows: 1 },
+			{ key: "13", rows: 1 },
+			{ key: "DEMO-2", rows: 1 },
+		]);
+	});
+	test("a number with its mark is the ticket of that number", () => {
+		expect(keyOf("#12")).toBe("12");
+		expect(keyOf("12")).toBe("12");
+		expect(keyOf("DEMO-12")).toBe("DEMO-12");
+		for (const word of ["n/a", "-", "TBD", "(partly)", "DEMO", "12a", ""]) expect(keyOf(word)).toBe("");
 	});
 });

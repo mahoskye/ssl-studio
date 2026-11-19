@@ -15,6 +15,28 @@ const ticks = (text: string, least: number) => "`".repeat(Math.max(least, ...[..
 /** All the words under a node, as they are: what a block of code holds. */
 const words = (node: Node): string => (typeof node.text === "string" ? node.text : node.type === "hardBreak" ? "\n" : kids(node).map(words).join(""));
 
+/**
+ * Words as Markdown reads them back: a character that would be taken for a
+ * mark ("*", "`", a "_" at a word's edge, a "<" that opens a tag) is written
+ * as itself. An underscore inside a word is left: it is not a mark there.
+ */
+function literal(text: string): string {
+	const word = (ch: string | undefined) => ch !== undefined && /[A-Za-z0-9]/.test(ch);
+	let out = "";
+	for (let at = 0; at < text.length; at++) {
+		const ch = text[at]!;
+		const next = text[at + 1];
+		if (ch === "\\" && next !== undefined && /[!-/:-@[-`{-~]/.test(next)) out += "\\\\";
+		else if (ch === "*" || ch === "`") out += `\\${ch}`;
+		else if (ch === "_" && !(word(text[at - 1]) && word(next))) out += "\\_";
+		else if (ch === "<" && next !== undefined && /[A-Za-z/!?]/.test(next)) out += "\\<";
+		else if (ch === "]" && (next === "(" || next === "[")) out += "\\]";
+		else if (ch === "~" && next === "~") out += "\\~";
+		else out += ch;
+	}
+	return out;
+}
+
 /** Text with the marks it carries: code, bold, italic, struck through, a link. */
 function marked(node: Node): string {
 	const text = node.text ?? "";
@@ -28,7 +50,7 @@ function marked(node: Node): string {
 	// A mark sits against the words, with the space around them outside it.
 	const [, lead, body, trail] = /^(\s*)([\s\S]*?)(\s*)$/.exec(text)!;
 	if (!body) return text;
-	let out = body;
+	let out = literal(body);
 	if (marks.includes("strike")) out = `~~${out}~~`;
 	if (marks.includes("em")) out = `*${out}*`;
 	if (marks.includes("strong")) out = `**${out}**`;
@@ -37,6 +59,9 @@ function marked(node: Node): string {
 	if (href) out = `[${out}](${href.replace(/[()\s]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`)})`;
 	return `${lead}${out}${trail}`;
 }
+
+/** A card for a page: the page's address. One that holds its page as data and not as an address is said to have been there. */
+const card = (node: Node) => (said(node.attrs?.url) ? `<${said(node.attrs!.url)}>` : node.attrs?.data ? "*(a linked page, not brought across)*" : "");
 
 /** The nodes of a line, side by side. */
 function inline(nodes: Node[]): string {
@@ -50,11 +75,12 @@ function inline(nodes: Node[]): string {
 				case "mention":
 				case "emoji":
 				case "status":
-					return said(node.attrs?.text) || said(node.attrs?.shortName);
+					// By what it shows; failing that, by whatever it has that names it.
+					return literal(said(node.attrs?.text) || said(node.attrs?.shortName) || said(node.attrs?.displayName) || said(node.attrs?.id));
 				case "inlineCard":
 				case "blockCard":
 				case "embedCard":
-					return said(node.attrs?.url) ? `<${said(node.attrs!.url)}>` : "";
+					return card(node);
 				case "date": {
 					const when = Number(said(node.attrs?.timestamp));
 					return Number.isFinite(when) && when > 0 ? new Date(when).toISOString().slice(0, 10) : "";
@@ -64,7 +90,7 @@ function inline(nodes: Node[]): string {
 					// What was attached stays in the ticket system: the words say something was there.
 					return "*(an attachment, not brought across)*";
 				default:
-					return typeof node.text === "string" ? node.text : inline(kids(node));
+					return typeof node.text === "string" ? literal(node.text) : kids(node).length ? inline(kids(node)) : literal(said(node.attrs?.text)) || card(node);
 			}
 		})
 		.join("")
@@ -72,8 +98,21 @@ function inline(nodes: Node[]): string {
 		.replace(/\n/g, "  \n");
 }
 
-/** A line that would read as a heading, a list or a quotation, and is none: its first mark is written as itself. */
-const plain = (text: string) => text.replace(/^(\s*)(#{1,6}(?=\s)|>|[-+*](?=\s)|\d+[.)](?=\s))/, "$1\\$2");
+/**
+ * Lines that would read as a heading, a list, a quotation or a rule, and are
+ * none: the mark each begins with is written as itself. Every line of a
+ * paragraph, since a line break inside one starts a line too.
+ */
+const plain = (text: string) =>
+	text
+		.split("\n")
+		.map((line) =>
+			line
+				.replace(/^(\s*)(#{1,6}(?=\s|$)|>|[-+](?=\s|$))/, "$1\\$2")
+				.replace(/^(\s*\d+)([.)])(?=\s|$)/, "$1\\$2")
+				.replace(/^(\s*)((?:-{3,}|={1,}|_{3,})\s*)$/, "$1\\$2"),
+		)
+		.join("\n");
 const indented = (text: string, by: string) =>
 	text
 		.split("\n")
@@ -111,9 +150,10 @@ function block(node: Node): string {
 		}
 		case "blockquote":
 		case "panel":
+			// A line keeps what it ends with: two spaces there are a line break.
 			return blocks(kids(node))
 				.split("\n")
-				.map((line) => `> ${line}`.trimEnd())
+				.map((line) => (line ? `> ${line}` : ">"))
 				.join("\n");
 		case "rule":
 			return "---";
@@ -125,8 +165,19 @@ function block(node: Node): string {
 			return [line(rows[0]!), line(Array.from({ length: width }, () => "---")), ...rows.slice(1).map(line)].join("\n");
 		}
 		case "mediaSingle":
-		case "mediaGroup":
-			return "*(an attachment, not brought across)*";
+		case "mediaGroup": {
+			// What was attached stays in the ticket system; what is written under it is words, and comes across.
+			const caption = kids(node)
+				.filter((kid) => kid.type === "caption")
+				.map((kid) => inline(kids(kid)))
+				.filter(Boolean)
+				.join(" ");
+			return `*(an attachment, not brought across)*${caption ? `\n\n${plain(caption)}` : ""}`;
+		}
+		case "blockCard":
+		case "embedCard":
+		case "inlineCard":
+			return card(node);
 		case "expand":
 		case "nestedExpand":
 			return [said(node.attrs?.title) ? `**${said(node.attrs!.title)}**` : "", blocks(kids(node))].filter(Boolean).join("\n\n");
@@ -151,6 +202,5 @@ export const isAdf = (value: unknown): boolean => isNode(value) && (value.type =
 /** A document tree as Markdown. "" for what is not one. */
 export function adfToMarkdown(value: unknown): string {
 	if (!isNode(value)) return "";
-	// A list's items sit on following lines, not a blank line apart: a list read back is one list.
-	return (value.type === "doc" || !value.type ? blocks(kids(value)) : block(value)).replace(/\n{3,}/g, "\n\n").trim();
+	return (value.type === "doc" || !value.type ? blocks(kids(value)) : block(value)).trim();
 }

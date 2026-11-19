@@ -94,37 +94,6 @@ export function trackToml(model: monaco.editor.ITextModel) {
 	void run();
 }
 
-const YAML_OWNER = "yaml";
-
-/**
- * A YAML document that cannot be read says about where. The reading is the
- * backend's, with the runtime's reader; the last answer asked for is the
- * one shown.
- */
-export function trackYaml(model: monaco.editor.ITextModel) {
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	let asked = 0;
-	const run = async () => {
-		if (model.isDisposed()) return;
-		const mine = ++asked;
-		const problem = await backend.yamlProblem(model.getValue()).catch(() => null);
-		if (mine !== asked || model.isDisposed()) return;
-		if (!problem) return publishFindings(model, YAML_OWNER, []);
-		const line = Math.min(Math.max(problem.line, 1), model.getLineCount());
-		publishFindings(model, YAML_OWNER, [{ line, column: model.getLineFirstNonWhitespaceColumn(line) || 1, endLine: line, endColumn: Math.max(model.getLineMaxColumn(line), 2), severity: 1, message: problem.message, code: "yaml", source: "docs" }]);
-	};
-	const changes = model.onDidChangeContent(() => {
-		clearTimeout(timer);
-		timer = setTimeout(() => void run(), 500);
-	});
-	model.onWillDispose(() => {
-		clearTimeout(timer);
-		changes.dispose();
-		publishFindings(model, YAML_OWNER, null);
-	});
-	void run();
-}
-
 const XML_OWNER = "xml";
 /** An XML document larger than this is not read for whether it is well formed. */
 const XML_CHARS = 2_000_000;

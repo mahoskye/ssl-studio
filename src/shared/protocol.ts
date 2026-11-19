@@ -197,8 +197,6 @@ export interface BackendApi {
 	manifest(): Promise<ManifestFile[]>;
 	/** The first thing that keeps a text from being TOML, and where (from 1); null when it reads. */
 	tomlProblem(text: string): Promise<{ message: string; line: number; column: number } | null>;
-	/** What keeps a text from being YAML, and about where; null when it reads. */
-	yamlProblem(text: string): Promise<{ message: string; line: number } | null>;
 	/** The links in the workspace's Markdown documents that lead to this file, or into this folder. */
 	linksTo(path: string): Promise<LinkTo[]>;
 	settings(): Promise<{ effective: Settings; user: Partial<Settings>; workspace: Partial<Settings> }>;

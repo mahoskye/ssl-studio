@@ -494,10 +494,12 @@ the work comes from ([ADR 0012](adr/0012-a-projects-work-is-written-down.md)).
 - **The selected row of the editor's suggest list is readable in the light
   theme.** It was white on pale blue, for SSL completion as well: the
   theme set the row's background and not its text.
-- **YAML and XML say where they break.** XML is read by the browser's own
-  reader, which gives the line and column. The runtime's YAML reader says
-  only that it gave up, so the place is the line after the longest start
-  of the document that still reads, and the note says "at or near".
+- **XML says where it breaks.** XML is read by the browser's own reader,
+  which gives the line and column. A check for YAML went in with it and
+  came out again the same day: the runtime's YAML reader takes a list or
+  a mapping in brackets that spans lines for a fault, so the check marked
+  documents that are right. No check is better than one that is wrong;
+  YAML waits for a reader that can be trusted.
 - **The import was checked against what a real Jira gives out.** A public
   Jira server's "all fields" CSV export and its search API were read for
   their column names and structure, and invented tickets in those shapes
@@ -507,6 +509,36 @@ the work comes from ([ADR 0012](adr/0012-a-projects-work-is-written-down.md)).
   when the row has a parent column that is empty; and the description,
   which is in Jira's wiki markup and read as headings and stray braces. A
   ticket read from the API also keeps the address a person opens for it.
+- **A fourth review, of the fixes and of the import.** A second agent was
+  given the six commits and no conclusions, and confirmed what it found by
+  running it. What it found and what was done:
+  - The import threw on a wiki heading written inside a quotation, and
+    nothing came across. A heading's level is now kept within bounds, and
+    a table that cannot be read says so.
+  - A link's place was confirmed one link at a time, with a limit on the
+    tries: one missed guess used the limit up, and a long document's
+    later links had no place. Every place that writes a link's target is
+    now asked about in one reading, and each document's links are kept
+    until its text changes.
+  - The YAML check marked documents that are right, and came out.
+  - Words were dropped from a Jira Cloud description (a card on a line of
+    its own, a caption) and from a wiki one (a block's title). They are
+    kept.
+  - Words that look like marks were read as marks: a line beginning
+    "1.", a "*" or a "_" in a sentence, a word in angle brackets. Each is
+    written as itself. Wiki bold is bold, a wiki rule is a rule, and words
+    after a quotation are not part of it.
+  - Blank lines inside a block of code were closed up. They are kept.
+  - In a registry's ticket column, "n/a" and "TBD" were taken for
+    tickets. Only what is written as a key is one, and "#12" is ticket 12.
+  - A registry opened from a ticket's page showed every row that held the
+    key's letters. It shows the rows whose ticket column names it.
+  - A heading written with a line under it was not moved under the
+    ticket's sections; a line in a block of HTML was. A state such as "QA"
+    was written small. A moved document was offered an edit that changed
+    nothing.
+  - A file in UTF-16 was written back as UTF-8. It keeps its encoding, and
+    one with its high byte first is now read as text at all.
 - **An export is read from where it was downloaded.** The import asked
   for a path inside the project, so a download had to be copied in first.
   In the app it now asks with the system's own file dialog; a whole path

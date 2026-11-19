@@ -165,18 +165,39 @@ describe("wiki markup as Markdown", () => {
 		expect(wikiToMarkdown("h3. Why\nh4. More\n{code}\nh1. not a heading\n{code}")).toBe("### Why\n#### More\n\n```\nh1. not a heading\n```");
 	});
 	test("code is fenced and left as written, whatever marks it holds", () => {
-		expect(wikiToMarkdown("Before {{x}}.\n{code:title=Query|language=sql}\nSELECT '{{not this}}' -- h1. nor this\n{code}\nAfter.")).toBe("Before `x`.\n\n```sql\nSELECT '{{not this}}' -- h1. nor this\n```\n\nAfter.");
+		expect(wikiToMarkdown("Before {{x}}.\n{code:title=Query|language=sql}\nSELECT '{{not this}}' -- h1. nor this\n{code}\nAfter.")).toBe("Before `x`.\n\n**Query**\n\n```sql\nSELECT '{{not this}}' -- h1. nor this\n```\n\nAfter.");
 		expect(wikiToMarkdown("{noformat}\n# kept\n{noformat}")).toBe("```\n# kept\n```");
 		expect(wikiToMarkdown("{code}\nuses ``` inside\n{code}")).toBe("````\nuses ``` inside\n````");
 	});
 	test("links, quotations, a table's heading row and colour", () => {
 		expect(wikiToMarkdown("[the spec|https://example.test/spec|a tip] and [https://example.test]")).toBe("[the spec](https://example.test/spec) and <https://example.test>");
-		expect(wikiToMarkdown("bq. one line\n{quote}\nsaid\nmore\n{quote}\nafter")).toBe("> one line\n> said\n> more\nafter");
+		expect(wikiToMarkdown("bq. one line\n{quote}\nsaid\nmore\n{quote}\nafter")).toBe("> one line\n> said\n> more\n\nafter");
 		expect(wikiToMarkdown("||name||value||\n|a|1|")).toBe("| name | value |\n| --- | --- |\n|a|1|");
 		expect(wikiToMarkdown("{color:red}urgent{color} words")).toBe("urgent words");
 	});
 	test("what it does not know, and every word, is left as it was", () => {
-		expect(wikiToMarkdown("A plain sentence, with *stars* and _lines_ and {a brace}.")).toBe("A plain sentence, with *stars* and _lines_ and {a brace}.");
+		expect(wikiToMarkdown("A plain sentence, with _lines_ and {a brace} and 2 * 3 * 4.")).toBe("A plain sentence, with _lines_ and {a brace} and 2 * 3 * 4.");
+	});
+	// A fourth review (2026-11-19).
+	test("a heading inside a quotation is a heading, and nothing is thrown", () => {
+		expect(wikiToMarkdown("{quote}h1. Heading{quote}")).toBe("> ### Heading");
+		expect(wikiToMarkdown("{quote}h2. Heading\ntext\n{quote}\nh3. Lower")).toBe("> ### Heading\n> text\n\n#### Lower");
+		expect(wikiToMarkdown("no headings at all")).toBe("no headings at all");
+	});
+	test("words after a quotation are not part of it", () => {
+		expect(wikiToMarkdown("{quote}\nsaid\n{quote}\nOur answer.")).toBe("> said\n\nOur answer.");
+		expect(wikiToMarkdown("bq. said\nOur answer.")).toBe("> said\n\nOur answer.");
+	});
+	test("a rule does not make a heading of the line above it", () => {
+		expect(wikiToMarkdown("text\n----\nmore")).toBe("text\n\n---\n\nmore");
+	});
+	test("bold there is bold here, and a word in angle brackets stays a word", () => {
+		expect(wikiToMarkdown("*bold* text and (*this too*), not 2*3*4.")).toBe("**bold** text and (**this too**), not 2*3*4.");
+		expect(wikiToMarkdown("Open <ReportName> and {{<Tag>}} then [https://example.test]")).toBe("Open \\<ReportName> and `<Tag>` then <https://example.test>");
+	});
+	test("a block's title is kept, and every blank line of its code", () => {
+		expect(wikiToMarkdown("{code:title=Foo.java}\nclass A {}\n\n\nclass B {}\n{code}")).toBe("**Foo.java**\n\n```\nclass A {}\n\n\nclass B {}\n```");
+		expect(wikiToMarkdown("{code:java|title=Foo.java}\nx\n{code}")).toBe("**Foo.java**\n\n```java\nx\n```");
 	});
 });
 
@@ -193,5 +214,29 @@ describe("an export read from where it was downloaded", () => {
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
+	});
+});
+
+// A fourth review (2026-11-19).
+describe("more of what the review found in the import", () => {
+	test("a heading written with a line under it goes under the ticket's sections too, its words as they were", () => {
+		const api = ticketsFromJson([{ number: 1, title: "T", body: "Title\n=====\n\nWords.\n\nLower\n-----\n\n- item\n---\n\nA paragraph\nof two lines\n---" }]);
+		expect(api.tickets[0]!.description).toBe("### Title\n\nWords.\n\n#### Lower\n\n- item\n---\n\nA paragraph\nof two lines\n---");
+	});
+	test("a line in a block of HTML that keeps its lines is not a heading", () => {
+		const api = ticketsFromJson([{ number: 1, title: "T", body: "# Real\n\n<pre>\n# not a heading\n</pre>\n\n<!--\n# nor this\n-->\n\n## Lower" }]);
+		expect(api.tickets[0]!.description).toBe("### Real\n\n<pre>\n# not a heading\n</pre>\n\n<!--\n# nor this\n-->\n\n#### Lower");
+	});
+	test("a state that is a name in capitals is left as it was written", () => {
+		const table = ticketsFromTable(parseCsv("Key,Summary,Status\nA-1,One,QA\nA-2,Two,UAT\nA-3,Three,ON HOLD\nA-4,Four,NOT_PLANNED\nA-5,Five,OPEN\n"));
+		expect(table.tickets.map((t) => t.status)).toEqual(["QA", "UAT", "ON HOLD", "not planned", "open"]);
+	});
+	test("every blank line of a body is kept, in code and out of it", () => {
+		const api = ticketsFromJson([{ number: 1, title: "T", body: "Before.\n\n\n```\na\n\n\nb\n```" }]);
+		expect(api.tickets[0]!.description).toBe("Before.\n\n\n```\na\n\n\nb\n```");
+	});
+	test("a description that throws nothing: a heading inside a quotation, in a table's row", () => {
+		const table = ticketsFromTable(parseCsv('Issue key,Summary,Description\nLAB-1,One,"{quote}h1. Heading{quote}"\n'));
+		expect(table.tickets[0]!.description).toBe("> ### Heading");
 	});
 });

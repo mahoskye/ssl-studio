@@ -220,7 +220,7 @@ export function selftestWork(): Promise<Steps> {
 		await step("ticketPageShowsRows", () => until(() => [...document.querySelectorAll(".md-work li")].some((li) => li.textContent?.includes("Application settings") && li.textContent.includes("2 rows, 1 done"))));
 		await step("registryOpensAtRows", async () => {
 			[...document.querySelectorAll<HTMLButtonElement>(".md-work li button")].find((button) => button.textContent?.trim() === "Application settings")?.click();
-			return until(() => document.querySelector<HTMLInputElement>(".table-view input.filter")?.value === "SELF-1" && document.querySelectorAll(".table-view button.table-ticket").length === 2);
+			return until(() => document.querySelector(".table-view .table-for")?.textContent?.includes("SELF-1") && document.querySelectorAll(".table-view button.table-ticket").length === 2);
 		});
 		// A state set from the document's page is the file's one line and the catalog's, both.
 		await step("statusSetFromPage", async () => {
@@ -284,17 +284,12 @@ export function selftestWork(): Promise<Steps> {
 			if (!(await until(() => !checks().some((text) => text.includes("../../specs/Moved.md"))))) return false;
 			return (await backend.read(moved)).text.includes("](../../specs/kept/Moved.md#checks)");
 		});
-		// A document that is not SSL says where it cannot be read: XML by the view's own reader, YAML by the backend's.
+		// A document that is not SSL says where it cannot be read: XML by the view's own reader.
 		const marked = (path: string, code: string) => monaco.editor.getModelMarkers({ resource: monaco.Uri.file(path) }).find((marker) => (typeof marker.code === "string" ? marker.code : marker.code?.value) === code);
 		await step("xmlSaysWhere", async () => {
 			const path = await write(["reference.xml"], '<?xml version="1.0"?>\n<settings>\n  <setting name="a">1</settng>\n</settings>\n');
 			await openFile(path);
 			return until(() => marked(path, "xml")?.startLineNumber === 3);
-		});
-		await step("yamlSaysWhere", async () => {
-			const path = await write(["reference.yaml"], "name: self-test\nitems: [1,\n  2]\n bad: 1\n");
-			await openFile(path);
-			return until(() => marked(path, "yaml")?.startLineNumber === 4);
 		});
 
 		// A file that is renamed takes the links that led to it along, on the person's word.

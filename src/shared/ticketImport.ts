@@ -78,21 +78,54 @@ const described = (text: string, wiki: boolean) => (text && wiki ? wikiToMarkdow
  */
 function underSections(text: string): string {
 	const closed = fenced(text);
-	const lines = text.split("\n");
-	const heads: { at: number; level: number }[] = [];
+	const lines: (string | null)[] = text.split("\n");
+	/** A heading: its line, its level, and the line under it when it is written with one ("Title" over "====="). */
+	const heads: { at: number; level: number; under?: number }[] = [];
 	let offset = 0;
+	// A block of HTML that keeps its lines as written (pre, script, style, a comment) holds no headings.
+	let html = "";
 	lines.forEach((line, at) => {
-		const found = /^ {0,3}(#{1,6})(?=\s|$)/.exec(line);
-		if (found && !closed.some(([from, to]) => offset >= from && offset < to)) heads.push({ at, level: found[1]!.length });
-		offset += line.length + 1;
+		const here = offset;
+		offset += line!.length + 1;
+		if (closed.some(([from, to]) => here >= from && here < to)) return;
+		if (html) {
+			if (line!.toLowerCase().includes(html)) html = "";
+			return;
+		}
+		const opens = /^ {0,3}<(pre|script|style|!--)/i.exec(line!);
+		if (opens) {
+			const closes = opens[1] === "!--" ? "-->" : `</${opens[1]!.toLowerCase()}>`;
+			if (!line!.toLowerCase().includes(closes)) html = closes;
+			return;
+		}
+		const marked = /^ {0,3}(#{1,6})(?=\s|$)/.exec(line!);
+		if (marked) return void heads.push({ at, level: marked[1]!.length });
+		// A line of "=" or "-" under one line of words makes those words a heading of the first or second level.
+		const under = /^ {0,3}(=+|-+)\s*$/.exec(line!);
+		const above = at > 0 ? lines[at - 1]! : "";
+		const alone = at < 2 || !lines[at - 2]!.trim();
+		if (under && above.trim() && alone && !/^\s*([-*+>#|]|\d+[.)]\s)/.test(above) && !heads.some((head) => head.at === at - 1)) heads.push({ at: at - 1, level: under[1]![0] === "=" ? 1 : 2, under: at });
 	});
 	const down = 3 - Math.min(3, ...heads.map((head) => head.level));
 	if (!down) return text;
-	for (const head of heads) lines[head.at] = lines[head.at]!.replace(/#+/, "#".repeat(Math.min(6, head.level + down)));
-	return lines.join("\n");
+	for (const head of heads) {
+		const marks = "#".repeat(Math.min(6, head.level + down));
+		if (head.under === undefined) lines[head.at] = lines[head.at]!.replace(/#+/, marks);
+		else {
+			// Written with a line under it, a heading has two levels only: it is written the other way, its words as they were.
+			lines[head.at] = `${marks} ${lines[head.at]!.trim()}`;
+			lines[head.under] = null;
+		}
+	}
+	return lines.filter((line) => line !== null).join("\n");
 }
-/** A state as a person writes it: a system's own word in capitals ("OPEN", "NOT_PLANNED") is the word. */
-const stated = (status: string) => (/^[A-Z][A-Z_]*$/.test(status) ? status.toLowerCase().replace(/_/g, " ") : status);
+/**
+ * A state as a person writes it: one of a system's own words in capitals
+ * ("OPEN", "NOT_PLANNED") is the word. Any other is left as it was written:
+ * "QA" and "UAT" are names, not shouting.
+ */
+const SHOUTED = new Set(["OPEN", "CLOSED", "REOPENED", "MERGED", "COMPLETED", "NOT_PLANNED", "DUPLICATE", "DRAFT"]);
+const stated = (status: string) => (SHOUTED.has(status) ? status.toLowerCase().replace(/_/g, " ") : status);
 
 /** The tickets in a table: one for each row that has a key and a title. */
 export function ticketsFromTable(table: Table): Imported {
@@ -211,7 +244,7 @@ export function ticketsFromJson(value: unknown): Imported {
 			related: unique(likeOwn(own, [...links, ...subtasks, ...related].filter(Boolean).map(ticketKey)), [own, above]),
 			// An API of the Jira kind gives the fields under "fields", and a description that is text in its wiki markup.
 			// What was asked is under one name or another: "description", or an issue's "body".
-			description: described(clean(flat(fields.description ?? fields.body ?? fields.details)).replace(/\n{3,}/g, "\n\n"), typeof fields.description === "string" && fields !== issue),
+			description: described(clean(flat(fields.description ?? fields.body ?? fields.details)), typeof fields.description === "string" && fields !== issue),
 		});
 	}
 	return { tickets, skipped, ...(pulls ? { pulls } : {}) };

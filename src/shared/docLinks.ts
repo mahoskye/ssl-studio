@@ -87,11 +87,9 @@ function targets(plain: string): string[] | null {
 
 /** A place in the body: a line, from 0, and a stretch of it. */
 type Spot = { line: number; at: number; length: number };
-const keyOf = (spot: Spot) => `${spot.line}:${spot.at}`;
-/** A name no document writes, put where a link's target is thought to be, to ask the renderer whether it is. */
+/** A name no document writes, put where a link's target may be, to ask the renderer which link's it is. */
 const marker = (n: number) => `ssl-studio-place-${n}.x`;
-/** How many more times a document is read to place the links the first reading could not. */
-const RETRIES = 60;
+const MARKER = /^ssl-studio-place-(\d+)\.x$/;
 
 /** The lines with each of these places written over. */
 function written(lines: readonly string[], over: readonly [Spot, string][]): string {
@@ -101,15 +99,41 @@ function written(lines: readonly string[], over: readonly [Spot, string][]): str
 }
 
 /**
+ * Everywhere the text writes one of these targets as a whole word of its
+ * own: after "(", "<" or a space, and before ")", ">", a space or the line's
+ * end, which is how a link's target is always written. Where two overlap,
+ * the longer stands.
+ */
+function candidates(lines: readonly string[], targets: readonly string[]): Spot[] {
+	const found: Spot[] = [];
+	const longest = [...new Set(targets)].sort((a, b) => b.length - a.length);
+	lines.forEach((line, at) => {
+		const taken: [number, number][] = [];
+		for (const target of longest) {
+			for (let column = line.indexOf(target); column >= 0; column = line.indexOf(target, column + 1)) {
+				const before = line[column - 1];
+				const after = line[column + target.length];
+				if (!(before === undefined || /[\s(<]/.test(before)) || !(after === undefined || /[\s)>]/.test(after))) continue;
+				if (taken.some(([from, to]) => column < to && column + target.length > from)) continue;
+				taken.push([column, column + target.length]);
+				found.push({ line: at, at: column, length: target.length });
+			}
+		}
+	});
+	return found;
+}
+
+/**
  * The links and images of a Markdown document that name a file, each once,
  * in the order they are written.
  *
- * Where each is in the text is first guessed, and then asked of the renderer:
- * the guessed place is written over with a name of our own, and the place
- * is the link's only if the renderer then reads that name as the link's
- * target. The same words in code, in a comment or after a backslash are an
- * example of a link, and an edit must never land there; nothing here has to
- * know what code or a comment looks like to be sure of it.
+ * Where each is in the text is asked of the renderer, in one reading: every
+ * place that writes one of the targets is written over with a name of its
+ * own, the links are read again, and a link's place is the one whose name
+ * the renderer now reads as its target. The same words in code, in a
+ * comment or after a backslash are an example of a link, and no link reads
+ * their name: an edit never lands there, and nothing here has to know what
+ * code or a comment looks like to be sure of it.
  */
 export function fileLinks(text: string): DocLink[] {
 	const start = bodyOffset(text);
@@ -119,87 +143,37 @@ export function fileLinks(text: string): DocLink[] {
 	const found = targets(lines.join("\n"));
 	if (!found?.length) return [];
 
-	// A guess: the next place that writes it as a link's own target; failing that, where a reference is defined.
-	const fences = fenced(lines.join("\n"));
-	const starts: number[] = [];
-	let offset = 0;
-	for (const line of lines) {
-		starts.push(offset);
-		offset += line.length + 1;
+	const spots = candidates(lines, found);
+	let read = targets(written(lines, spots.map((spot, n) => [spot, marker(n)])));
+	let asked = spots;
+	if (!read || read.length !== found.length) {
+		// Writing over a place that is no link changed what the renderer takes for links. Asked again of the places
+		// outside fenced code only, which is where such a place most often is.
+		const fences = fenced(lines.join("\n"));
+		const starts: number[] = [];
+		let offset = 0;
+		for (const line of lines) {
+			starts.push(offset);
+			offset += line.length + 1;
+		}
+		asked = spots.filter((spot) => !fences.some(([from, to]) => starts[spot.line]! >= from && starts[spot.line]! < to));
+		read = targets(written(lines, asked.map((spot, n) => [spot, marker(n)])));
 	}
-	const inFence = (index: number) => fences.some(([from, to]) => starts[index]! >= from && starts[index]! < to);
-	const guess = (index: number, href: string, column: number, lead: RegExp): Spot | null => {
-		if (inFence(index)) return null;
-		const line = lines[index]!;
-		for (let at = line.indexOf(href, column); at >= 0; at = line.indexOf(href, at + 1)) {
-			const before = line.slice(0, at);
-			const after = line[at + href.length];
-			const whole = after === undefined || /[\s)>]/.test(after);
-			const inSpan = (before.match(/`/g)?.length ?? 0) % 2 === 1;
-			if (whole && !inSpan && lead.test(before)) return { line: index, at, length: href.length };
-		}
-		return null;
-	};
-	const INLINE = /\]\(\s*<?$/;
-	const DEFINED = /^\s{0,3}(?:>\s*)*\[[^\]]+\]:\s*<?$/;
-	let from = 0;
-	let column = 0;
-	const spots: (Spot | null)[] = found.map((href) => {
-		for (let index = from; index < lines.length; index++) {
-			const here = guess(index, href, index === from ? column : 0, INLINE);
-			if (!here) continue;
-			from = index;
-			column = here.at + here.length;
-			return here;
-		}
-		for (let index = 0; index < lines.length; index++) {
-			const here = guess(index, href, 0, DEFINED);
-			if (here) return here;
-		}
-		return null;
-	});
-
-	// The renderer is asked about every guess at once: each place is written over, and the links are read again.
-	const distinct = [...new Map(spots.flatMap((spot) => (spot ? [[keyOf(spot), spot] as const] : []))).values()];
-	const names = new Map(distinct.map((spot, n) => [keyOf(spot), marker(n)]));
-	const read = targets(written(lines, distinct.map((spot) => [spot, names.get(keyOf(spot))!])));
-	const sure = spots.map((spot, index) => Boolean(spot && read && read.length === found.length && read[index] === names.get(keyOf(spot))));
-
-	// What that did not settle is tried a place at a time: wherever the words are written, until the renderer says yes.
-	let tries = RETRIES;
-	const ask = (index: number, spot: Spot) => {
-		if (tries-- <= 0) return false;
-		const again = targets(written(lines, [[spot, marker(0)]]));
-		return Boolean(again && again.length === found.length && again[index] === marker(0));
-	};
-	found.forEach((href, index) => {
-		if (sure[index]) return;
-		spots[index] = null;
-		const taken = new Set(spots.flatMap((spot, other) => (spot && sure[other] ? [keyOf(spot)] : [])));
-		const places: Spot[] = [];
-		lines.forEach((line, at) => {
-			for (let column = line.indexOf(href); column >= 0; column = line.indexOf(href, column + 1)) places.push({ line: at, at: column, length: href.length });
-		});
-		// A place that is already another link's is tried last: two uses of one reference share where it is defined.
-		for (const place of [...places.filter((p) => !taken.has(keyOf(p))), ...places.filter((p) => taken.has(keyOf(p)))]) {
-			if (tries <= 0) break;
-			if (!ask(index, place)) continue;
-			spots[index] = place;
-			sure[index] = true;
-			break;
-		}
-	});
+	const sure = read && read.length === found.length;
 
 	// Each place once, in the order its first link is written; a link with no place is listed, and never edited.
 	const before = text.slice(0, start).split("\n").length - 1;
 	const seen = new Set<string>();
 	const links: DocLink[] = [];
 	found.forEach((href, index) => {
-		const spot = sure[index] ? spots[index] : null;
-		const key = spot ? keyOf(spot) : `none:${href}`;
+		const named = sure ? MARKER.exec(read![index]!) : null;
+		const spot = named ? asked[Number(named[1])] : undefined;
+		// The place must hold this link's own target: a name read back for another's is not an answer.
+		const placed = spot && lines[spot.line]!.startsWith(href, spot.at) && spot.length === href.length ? spot : undefined;
+		const key = placed ? `${placed.line}:${placed.at}` : `none:${href}`;
 		if (seen.has(key)) return;
 		seen.add(key);
-		links.push({ href, file: linkFile(href), line: spot ? before + spot.line + 1 : 0, column: spot ? spot.at : 0 });
+		links.push({ href, file: linkFile(href), line: placed ? before + placed.line + 1 : 0, column: placed ? placed.at : 0 });
 	});
 	return links;
 }
@@ -262,7 +236,9 @@ export function ownLinkEdits(text: string, from: string, to: string): LinkEdit[]
 		const target = resolvePath(was, link.file);
 		// A link to itself follows it.
 		const instead = relativePath(now, target === from ? to : target);
-		return instead === link.file ? [] : [{ line: link.line, column: link.column, href: link.href, instead }];
+		// What would be written is compared with what is: a folder written with its slash reads the same without it.
+		const asWritten = link.href.replace(/[?#].*$/, "");
+		return instead === link.file || linkWritten(instead, asWritten) === asWritten ? [] : [{ line: link.line, column: link.column, href: link.href, instead }];
 	});
 }
 

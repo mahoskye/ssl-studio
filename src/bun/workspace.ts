@@ -40,7 +40,10 @@ export class WorkspaceFiles {
 
 	async read(path: string) {
 		const full = this.inside(path);
-		return { path: full, text: await Bun.file(full).text(), mtime: statSync(full).mtimeMs };
+		// UTF-16 with its high byte first is not read by the runtime as text: read here, so that the editor shows
+		// words and a save writes back what it was given.
+		const text = (await markOf(full)) === "utf-16be" ? Buffer.from(await Bun.file(full).arrayBuffer()).swap16().toString("utf16le").replace(/^\uFEFF/, "") : await Bun.file(full).text();
+		return { path: full, text, mtime: statSync(full).mtimeMs };
 	}
 
 	/** Writes through a temporary file, so a crash never leaves half a script. */
@@ -49,9 +52,14 @@ export class WorkspaceFiles {
 		mkdirSync(dirname(full), { recursive: true });
 		const temp = join(dirname(full), `.${basename(full)}.ssl-studio-tmp`);
 		this.ownWrites.set(full, Date.now());
-		// A file that opens with a byte-order mark keeps it: reading takes it off, and whoever wrote it wanted it there.
-		if (!text.startsWith("\uFEFF") && (await startsWithMark(full))) text = `\uFEFF${text}`;
-		await Bun.write(temp, text);
+		// A file keeps the encoding it has, and the byte-order mark that says which: reading takes the mark off and
+		// gives the text, and whoever wrote the file, or whatever reads it next, wants it as it was.
+		const mark = await markOf(full);
+		const bare = text.replace(/^\uFEFF/, "");
+		if (mark === "utf-16le" || mark === "utf-16be") {
+			const bytes = Buffer.from(`\uFEFF${bare}`, "utf16le");
+			await Bun.write(temp, mark === "utf-16be" ? bytes.swap16() : bytes);
+		} else await Bun.write(temp, mark === "utf-8" && !text.startsWith("\uFEFF") ? `\uFEFF${text}` : text);
 		renameSync(temp, full);
 		return { mtime: statSync(full).mtimeMs };
 	}
@@ -126,12 +134,15 @@ export class WorkspaceFiles {
 	}
 }
 
-/** Whether the file there now opens with a UTF-8 byte-order mark. False when there is no such file. */
-async function startsWithMark(path: string): Promise<boolean> {
+/** The byte-order mark the file there now opens with, by the encoding it says; "" when it has none or there is no such file. */
+async function markOf(path: string): Promise<"utf-8" | "utf-16le" | "utf-16be" | ""> {
 	try {
 		const head = new Uint8Array(await Bun.file(path).slice(0, 3).arrayBuffer());
-		return head.length === 3 && head[0] === 0xef && head[1] === 0xbb && head[2] === 0xbf;
+		if (head.length >= 3 && head[0] === 0xef && head[1] === 0xbb && head[2] === 0xbf) return "utf-8";
+		if (head.length >= 2 && head[0] === 0xff && head[1] === 0xfe) return "utf-16le";
+		if (head.length >= 2 && head[0] === 0xfe && head[1] === 0xff) return "utf-16be";
+		return "";
 	} catch {
-		return false;
+		return "";
 	}
 }

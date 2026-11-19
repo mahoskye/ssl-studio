@@ -14,8 +14,15 @@ export function ticketColumn(table: Pick<Table, "header">): number {
 	return one >= 0 ? one : columnOf(table, "tickets");
 }
 
-/** The keys a cell names: one, or several apart by spaces, commas or semicolons. */
-export const keysIn = (cell: string) => cell.split(/[\s,;]+/).filter(Boolean);
+/**
+ * A word as a ticket's key, when it is written as one: "DEMO-12", or a
+ * number, with or without its mark ("#12" is ticket 12). "" for any other
+ * word: "n/a", "TBD" and "-" are what a person writes where there is none.
+ */
+export const keyOf = (word: string) => (/^[A-Za-z][A-Za-z0-9_]*-\d+$/.test(word) ? word : /^#?\d+$/.test(word) ? word.replace(/^#/, "") : "");
+
+/** The keys a cell names: one, or several apart by spaces, commas or semicolons. Words that are not keys are passed over. */
+export const keysIn = (cell: string) => cell.split(/[\s,;]+/).map(keyOf).filter(Boolean);
 
 /** The tickets a registry's rows name, in the order they first appear, each with its rows. A key is the same key in any case. */
 export function rowsByTicket(table: Table): RowsFor[] {

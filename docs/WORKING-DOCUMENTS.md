@@ -105,7 +105,8 @@ column says how far each row has come.
   page then lists the registry under "To carry across", with how many rows
   and how many are done, and opens the table at those rows. In the table,
   the key is a link to the ticket. A key that is no ticket of the project
-  is said in Health.
+  is said in Health. Only what is written as a key counts ("DEMO-12",
+  "#12"): "n/a" or "TBD" in the column is left as words.
 
 ## Health
 
@@ -160,7 +161,7 @@ decisions that stand.
 | TOML, INI | Colours it, outlines its tables; TOML says where it breaks |
 | SQL | Colours it, outlines its statements |
 | CSV, TSV | Colours each column; opens as a table |
-| YAML | Colours it, outlines its top keys, says about where it breaks |
+| YAML | Colours it, outlines its top keys |
 | XML | Colours it, says where it is not well formed |
 
 SSL is not on this list: its outline, findings and formatting are the

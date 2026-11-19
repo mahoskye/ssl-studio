@@ -432,3 +432,64 @@ describe("writing a file as it was", () => {
 		}
 	});
 });
+
+// A fourth review (2026-11-19): one missed guess made every link after it need a reading of its own, and a document
+// with many links ran out of readings.
+describe("a long document's links are all placed, in one more reading", () => {
+	test("a span of code that wraps before the first link does not cost the hundred after it their places", () => {
+		const text = ["Use `code that", "wraps` and [x](a.md)", "", ...Array.from({ length: 100 }, (_, n) => `- [item ${n}](docs/n${n}.md)`), "", "Back to [x](a.md)"].join("\n");
+		const links = fileLinks(text);
+		expect(links.length).toBe(102);
+		expect(links.filter((link) => !link.line)).toEqual([]);
+		expect(links[0]).toEqual({ href: "a.md", file: "a.md", line: 2, column: 15 });
+		expect(links[101]).toMatchObject({ href: "a.md", line: 105 });
+	});
+	test("seventy images that are links are each placed, the picture and where it leads", () => {
+		const text = Array.from({ length: 70 }, () => "[![b](img.png)](t.md)").join("\n\n");
+		const links = fileLinks(text);
+		expect(links.length).toBe(140);
+		expect(links.filter((link) => !link.line)).toEqual([]);
+		expect(new Set(links.map((link) => `${link.line}:${link.column}`)).size).toBe(140);
+	});
+	test("a target that is the end of a longer one, or the start of one, is not taken for it", () => {
+		const text = "[a](sub/notes.md) [b](notes.md) [c](notes.md.old) `[d](notes.md)`\n";
+		expect(fileLinks(text).map((link) => [link.href, link.column])).toEqual([
+			["sub/notes.md", 4],
+			["notes.md", 22],
+			["notes.md.old", 36],
+		]);
+	});
+	test("a document that writes the marker's own name is read all the same", () => {
+		const text = "See [x](ssl-studio-place-0.x) and [y](a.md) and `ssl-studio-place-1.x`.\n";
+		expect(fileLinks(text).map((link) => [link.href, link.line, link.column])).toEqual([
+			["ssl-studio-place-0.x", 1, 8],
+			["a.md", 1, 38],
+		]);
+	});
+});
+
+// A fourth review (2026-11-19).
+describe("more of what the review found in writing files and links", () => {
+	test("a link that would be written as it is already is not an edit", () => {
+		expect(ownLinkEdits("[up](../specs/) and [b](B.md)\n", "/p/docs/a/A.md", "/p/docs/b/A.md")).toEqual([{ line: 1, column: 24, href: "B.md", instead: "../a/B.md" }]);
+	});
+	test("a file in UTF-16 is written back in UTF-16, with its mark, either way round", async () => {
+		const root = mkdtempSync(join(tmpdir(), "ssl-studio-utf16-"));
+		try {
+			const files = new WorkspaceFiles(root);
+			const little = Buffer.from("\uFEFFSELECT 1; -- é\n", "utf16le");
+			writeFileSync(join(root, "little.sql"), little);
+			writeFileSync(join(root, "big.sql"), Buffer.from(little).swap16());
+			for (const name of ["little.sql", "big.sql"]) {
+				const read = (await files.read(join(root, name))).text;
+				expect(read.replace(/^\uFEFF/, "")).toBe("SELECT 1; -- é\n");
+				await files.write(join(root, name), read.replace(/^\uFEFF/, "").replace("1", "2"));
+			}
+			const after = Buffer.from("\uFEFFSELECT 2; -- é\n", "utf16le");
+			expect(readFileSync(join(root, "little.sql")).equals(after)).toBe(true);
+			expect(readFileSync(join(root, "big.sql")).equals(Buffer.from(after).swap16())).toBe(true);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+});

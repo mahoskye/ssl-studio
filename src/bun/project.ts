@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, readdirSync, rmdirSync, unlinkSync } from "node:
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { CATALOG_FILE, catalogStale } from "../shared/catalog";
 import { parseCsv, tally } from "../shared/csv";
-import { fileLinks, frontPaths } from "../shared/docLinks";
+import { fileLinks, frontPaths, type DocLink } from "../shared/docLinks";
 import { frontMatter, many, one, summaryOf, titleOf } from "../shared/frontMatter";
 import { catalogItems, DOC_FOLDERS, isCatalog, isPrompt, STATE_FILE, type DocArea } from "../shared/projectDocs";
 import { rowsByTicket } from "../shared/registryTickets";
@@ -92,22 +92,54 @@ const planTicket = async (path: string) => (await planSays(path)).ticket;
 /** A summary, unless it is a line a template wrote and nobody has replaced. */
 const said = (summary: string | undefined) => (summary && !isPrompt(summary) ? summary : undefined);
 
+/** How many of a text's tasks are ticked, read once for a text and kept: it is a pass of the renderer over the document. */
+const talliesRead = new Map<number | bigint, ReturnType<typeof taskTally>>();
+function tallyOf(text: string): ReturnType<typeof taskTally> {
+	if (!/\[[ xX]\]/.test(text)) return null;
+	const hash = Bun.hash(text);
+	if (talliesRead.has(hash)) return talliesRead.get(hash)!;
+	const tally = taskTally(text);
+	if (talliesRead.size >= 1000) talliesRead.delete(talliesRead.keys().next().value!);
+	talliesRead.set(hash, tally);
+	return tally;
+}
+
 /** What a Markdown document says of itself, for the panel and the catalogs. */
 function described(text: string): Pick<DocFile, "title" | "status" | "summary" | "tickets" | "untouched" | "tasks"> {
 	const { values } = frontMatter(text);
 	const tickets = [...many(values.ticket), ...many(values.tickets)];
-	return { title: titleOf(text) || undefined, status: one(values.status) || undefined, summary: said(summaryOf(text)), ...(tickets.length ? { tickets } : {}), ...(isPrompt(summaryOf(text)) ? { untouched: true } : {}), ...(taskTally(text) ? { tasks: taskTally(text)! } : {}) };
+	const tasks = tallyOf(text);
+	return { title: titleOf(text) || undefined, status: one(values.status) || undefined, summary: said(summaryOf(text)), ...(tickets.length ? { tickets } : {}), ...(isPrompt(summaryOf(text)) ? { untouched: true } : {}), ...(tasks ? { tasks } : {}) };
 }
 
 /**
  * The links of a Markdown document that lead to a file of the project that is
  * not there: a document moved or renamed since the link was written.
  */
+/**
+ * A document's links, read once for a text and kept: reading them is two
+ * passes of the renderer over the document, and the listing is asked for
+ * again whenever anything in the folder changes.
+ */
+const linksRead = new Map<string, { hash: number | bigint; links: DocLink[] }>();
+const LINKS_KEPT = 1000;
+function linksIn(path: string, text: string): DocLink[] {
+	const hash = Bun.hash(text);
+	const kept = linksRead.get(path);
+	if (kept && kept.hash === hash) return kept.links;
+	const links = fileLinks(text);
+	// The oldest goes when there are too many: a Map keeps the order things were put in.
+	if (linksRead.size >= LINKS_KEPT) linksRead.delete(linksRead.keys().next().value!);
+	linksRead.delete(path);
+	linksRead.set(path, { hash, links });
+	return links;
+}
+
 /** The file a link in a document leads to. A path from the top is from the project's top, as a repository's page reads it. */
 const linkTarget = (root: string, path: string, file: string) => (file.startsWith("/") ? join(root, file) : resolve(dirname(path), file));
 
 function brokenLinks(root: string, path: string, text: string, named?: (name: string) => string[]): Pick<DocFile, "broken"> {
-	const broken = fileLinks(text)
+	const broken = linksIn(path, text)
 		.filter((link) => {
 			const target = linkTarget(root, path, link.file);
 			// What is outside the project is not this project's to say: it may well be there on another machine.
@@ -160,7 +192,7 @@ export async function linksTo(files: WorkspaceFiles, target: string): Promise<Li
 			if (leadsThere(leads)) found.push({ path, line: named.line, column: named.column, href: named.value, rest: leads.slice(resolve(target).length), from: "root" });
 		}
 		if (!text.includes("](") && !text.includes("]:")) continue;
-		for (const link of fileLinks(text)) {
+		for (const link of linksIn(path, text)) {
 			if (!link.line) continue;
 			const leads = linkTarget(root, path, link.file);
 			if (leadsThere(leads)) found.push({ path, line: link.line, column: link.column, href: link.href, rest: leads.slice(resolve(target).length), from: link.file.startsWith("/") ? "top" : "doc" });
@@ -489,49 +521,6 @@ export function tomlProblem(text: string): { message: string; line: number; colu
 		const line = Math.min(Math.max(Number(first?.position?.line ?? e?.line ?? 1), 1), lines);
 		return { message: worded ? worded[1](worded[0]!) : said, line, column: Math.max(Number(first?.position?.column ?? 1), 1) };
 	}
-}
-
-/** What the YAML reader says, in a sentence a person can act on. */
-const YAML_WORDS: [RegExp, string][] = [
-	[/^Unexpected token/i, "Something here is not where YAML expects it: check the indentation, and that brackets and quotes are closed."],
-	[/^Unexpected character/i, "A character here cannot be read: a quote that is not closed, most often."],
-	[/^Unresolved alias/i, "An alias (*name) names an anchor that is not there."],
-	[/^Multiline implicit key/i, "A key has no colon after it."],
-];
-/** A YAML document longer than this is said to be unreadable, without looking for where. */
-const YAML_LINES = 1000;
-
-/**
- * What keeps a text from being YAML, and about where; null when it can be
- * read, or when the runtime has no YAML reader. The reader says only that
- * it gave up, not where: the place is the line after the longest start of
- * the document that still reads, which is at or just before the fault.
- */
-export function yamlProblem(text: string): { message: string; line: number } | null {
-	const read = (Bun as unknown as { YAML?: { parse(text: string): unknown } }).YAML;
-	if (!read || !text.trim()) return null;
-	const fails = (part: string): string | null => {
-		try {
-			read.parse(part);
-			return null;
-		} catch (e: any) {
-			return String(e?.message ?? e).replace(/^YAML Parse error:\s*/i, "");
-		}
-	};
-	const said = fails(text);
-	if (said === null) return null;
-	const lines = text.split(/\r?\n/);
-	let line = 1;
-	if (lines.length <= YAML_LINES) {
-		for (let count = lines.length - 1; count > 0; count--) {
-			if (fails(lines.slice(0, count).join("\n")) !== null) continue;
-			line = count + 1;
-			break;
-		}
-	}
-	// Past the last line with anything on it, the fault is that line's: a document cannot break on nothing.
-	while (line > 1 && !lines[line - 1]?.trim()) line--;
-	return { message: `${YAML_WORDS.find(([pattern]) => pattern.test(said))?.[1] ?? `${said}.`} The reader stopped at or near this line.`, line };
 }
 
 /** The kinds of file a ticket system exports, as a file dialog takes them. */

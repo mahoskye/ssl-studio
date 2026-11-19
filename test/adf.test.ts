@@ -119,3 +119,26 @@ describe("an issue as Jira Cloud's search gives it", () => {
 		expect(description).toContain("\\# is the sample's number, not a heading");
 	});
 });
+
+// A fourth review (2026-11-19).
+describe("words that look like marks, and nodes that hold their words elsewhere", () => {
+	const md = (...content: unknown[]) => adfToMarkdown({ type: "doc", version: 1, content });
+	test("a card on a line of its own keeps its address, and a caption its words", () => {
+		expect(md(para(text("See:")), { type: "blockCard", attrs: { url: "https://example.test/browse/LAB-9" } })).toBe("See:\n\n<https://example.test/browse/LAB-9>");
+		expect(md({ type: "mediaSingle", attrs: { layout: "center" }, content: [{ type: "media", attrs: { id: "m1", type: "file" } }, { type: "caption", content: [text("The report, with the late row twice")] }] })).toBe("*(an attachment, not brought across)*\n\nThe report, with the late row twice");
+		expect(md(para({ type: "mention", attrs: { id: "the-lab-lead" } }, text(" and "), { type: "inlineCard", attrs: { data: { name: "A page" } } }))).toBe("the-lab-lead and *(a linked page, not brought across)*");
+	});
+	test("a line that begins like a list, a heading, a quotation or a rule is written as words", () => {
+		expect(md(para(text("1. Open the form")))).toBe("1\\. Open the form");
+		expect(md(para(text("Steps:"), { type: "hardBreak" }, text("# first"), { type: "hardBreak" }, text("> second"), { type: "hardBreak" }, text("- third")))).toBe("Steps:  \n\\# first  \n\\> second  \n\\- third");
+		expect(md(para(text("Title"), { type: "hardBreak" }, text("---")))).toBe("Title  \n\\---");
+	});
+	test("a character that would be a mark is written as itself; an underscore inside a word is left", () => {
+		expect(md(para(text("a*b*c and __init__ and snake_case and <ReportName> and `tick` and x[0](y) and ~~no~~ and C:\\dir")))).toBe("a\\*b\\*c and \\_\\_init\\_\\_ and snake_case and \\<ReportName> and \\`tick\\` and x[0\\](y) and \\~~no\\~~ and C:\\dir");
+		expect(md(para(text("5 < 6 and a_b"), text(" *kept as code* ", "code")))).toBe("5 < 6 and a_b` *kept as code* `");
+	});
+	test("a line break inside a quotation is kept, and every blank line of a block of code", () => {
+		expect(md({ type: "blockquote", content: [para(text("one"), { type: "hardBreak" }, text("two"))] })).toBe("> one  \n> two");
+		expect(md({ type: "codeBlock", attrs: { language: "java" }, content: [text("class A {}\n\n\nclass B {}")] })).toBe("```java\nclass A {}\n\n\nclass B {}\n```");
+	});
+});

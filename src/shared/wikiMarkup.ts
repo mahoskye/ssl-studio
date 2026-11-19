@@ -4,18 +4,54 @@
 // braces. This turns the common marks into Markdown's, a line at a time, and
 // leaves every word as it was. What it does not know it leaves alone.
 
-/** The language a block of code names: "{code:sql}", "{code:title=Query|language=sql}". */
-const languageOf = (said: string) => {
-	const named = /(?:^|[|:])(?:language=)?([a-z][a-z0-9+#-]*)$/i.exec(said.split("|").find((part) => !part.includes("=") || /^language=/i.test(part)) ?? "");
-	return named ? named[1]!.toLowerCase() : "";
-};
+/** What a block of code says of itself: "{code:sql}", "{code:title=Query.sql|language=sql}". */
+function codeSays(said: string): { language: string; title: string } {
+	const parts = said.split("|").map((part) => part.trim());
+	const value = (name: string) => parts.find((part) => part.toLowerCase().startsWith(`${name}=`))?.slice(name.length + 1) ?? "";
+	const bare = parts.find((part) => part && !part.includes("=")) ?? "";
+	const language = (value("language") || bare).toLowerCase();
+	return { language: /^[a-z][a-z0-9+#-]*$/.test(language) ? language : "", title: value("title") };
+}
+
+/** A run of backticks longer than any the text holds, and never fewer than `least`. */
+const ticks = (text: string, least: number) => "`".repeat(Math.max(least, ...[...text.matchAll(/`+/g)].map((run) => run[0].length + 1)));
+
+/** The marks inside a stretch of a line that is not code. */
+function prose(text: string): string {
+	return (
+		text
+			// A word in angle brackets is a word: left as it is, a page would take it for a tag and show nothing.
+			.replace(/<(?=[A-Za-z/!?])/g, "\\<")
+			.replace(/\[([^\]|\n]+)\|([a-z][a-z0-9+.-]*:[^\]|\s]+)(?:\|[^\]\n]*)?\]/gi, "[$1]($2)")
+			.replace(/\[(https?:\/\/[^\]|\s]+)\]/gi, "<$1>")
+			// "*bold*" is bold there, and italic in Markdown: written as Markdown's bold.
+			.replace(/(^|[\s([{>|])\*(\S(?:[^*\n]*\S)?)\*(?=$|[\s)\]}.,;:!?|])/g, "$1**$2**")
+			.replace(/\{color(?::[^}\n]*)?\}/gi, "")
+			.replace(/\{anchor:[^}\n]*\}/gi, "")
+	);
+}
+
+/** The marks inside a line: "{{code}}" is code, left as written; the rest is prose. */
+function inline(text: string): string {
+	return text
+		.split(/(\{\{[^}\n]+\}\})/)
+		.map((part, at) => {
+			if (at % 2 === 0) return prose(part);
+			const code = part.slice(2, -2);
+			const fence = ticks(code, 1);
+			return `${fence}${/^`|`$/.test(code) ? ` ${code} ` : code}${fence}`;
+		})
+		.join("");
+}
 
 /** One line that is not code, its marks turned into Markdown's. `top` is the largest heading the text uses. */
 function line(text: string, top: number): string {
 	const heading = /^h([1-6])\.\s+(.*)$/.exec(text);
 	// Under a ticket's own headings: the largest heading a description uses is the document's third level, and the
 	// others keep their distance from it.
-	if (heading) return `${"#".repeat(Math.min(6, 3 + Number(heading[1]) - top))} ${inline(heading[2]!)}`;
+	if (heading) return `${"#".repeat(Math.min(6, Math.max(3, 3 + Number(heading[1]) - top)))} ${inline(heading[2]!)}`;
+	// A rule is four dashes there; with a line of words above it, three would make that line a heading.
+	if (/^-{4,}\s*$/.test(text)) return "\n---\n";
 	const numbered = /^(#+)\s+(.*)$/.exec(text);
 	if (numbered) return `${"   ".repeat(numbered[1]!.length - 1)}1. ${inline(numbered[2]!)}`;
 	const bullet = /^(\*+|-{2,})\s+(.*)$/.exec(text);
@@ -31,19 +67,19 @@ function line(text: string, top: number): string {
 	return inline(text);
 }
 
-/** The marks inside a line. */
-function inline(text: string): string {
-	return text
-		.replace(/\{\{([^}\n]+)\}\}/g, "`$1`")
-		.replace(/\[([^\]|\n]+)\|([a-z][a-z0-9+.-]*:[^\]|\s]+)(?:\|[^\]\n]*)?\]/gi, "[$1]($2)")
-		.replace(/\[(https?:\/\/[^\]|\s]+)\]/gi, "<$1>")
-		.replace(/\{color(?::[^}\n]*)?\}/gi, "")
-		.replace(/\{anchor:[^}\n]*\}/gi, "");
-}
-
 /** A text in wiki markup as Markdown: its blocks of code fenced and left as written, its other lines' marks changed. */
 export function wikiToMarkdown(text: string): string {
 	const out: string[] = [];
+	/** A line is put down. Words straight after a quotation would be read as more of it: a blank line ends it. */
+	const put = (said: string) => {
+		const last = out[out.length - 1];
+		if (last?.startsWith(">") && said && !said.startsWith(">")) out.push("");
+		out.push(said);
+	};
+	/** A blank line, where the last line is not one already. */
+	const gap = () => {
+		if (out.length && out[out.length - 1] !== "") out.push("");
+	};
 	let quoting = false;
 	const plain = (part: string) => {
 		for (const raw of part.split("\n")) {
@@ -53,26 +89,37 @@ export function wikiToMarkdown(text: string): string {
 				if (index > 0) quoting = !quoting;
 				if (pieces.length > 1 && !piece.trim()) return;
 				const said = line(piece, top);
-				out.push(quoting ? said.split("\n").map((each) => `> ${each}`.trimEnd()).join("\n") : said);
+				put(
+					quoting
+						? said
+								.split("\n")
+								.map((each) => (each ? `> ${each}` : ">"))
+								.join("\n")
+						: said,
+				);
 			});
 		}
 	};
 	const source = text.replace(/\r\n/g, "\n");
 	const block = /\{(code|noformat)(?::([^}\n]*))?\}([\s\S]*?)\{\1\}/gi;
-	// The largest heading used outside code: 1 when there is none.
-	const top = Math.min(6, ...[...source.replace(block, "").matchAll(/^h([1-6])\.\s/gm)].map((found) => Number(found[1])));
+	// The largest heading used outside code, wherever a line of it starts: 6 when there is none, and nothing is a heading.
+	const top = Math.min(6, ...[...source.replace(block, "").matchAll(/(?:^|\{quote\})h([1-6])\.\s/gim)].map((found) => Number(found[1])));
 	block.lastIndex = 0;
 	let at = 0;
 	for (let found = block.exec(source); found; found = block.exec(source)) {
-		const before = source.slice(at, found.index);
-		if (before.replace(/\n+$/, "")) plain(before.replace(/\n+$/, ""));
+		const before = source.slice(at, found.index).replace(/\n+$/, "");
+		if (before) plain(before);
+		// What is between the marks is code, every line and every blank line of it.
 		const body = found[3]!.replace(/^\n+|\n+$/g, "");
-		// A fence longer than any run of backticks the code holds.
-		const fence = "`".repeat(Math.max(3, ...[...body.matchAll(/`+/g)].map((run) => run[0].length + 1)));
-		out.push("", `${fence}${found[1]!.toLowerCase() === "code" ? languageOf(found[2] ?? "") : ""}`, body, fence, "");
+		const says = found[1]!.toLowerCase() === "code" ? codeSays(found[2] ?? "") : { language: "", title: "" };
+		const fence = ticks(body, 3);
+		gap();
+		// A block's title is words of the ticket's: kept, above the block.
+		if (says.title) out.push(`**${says.title}**`, "");
+		out.push(`${fence}${says.language}`, body, fence, "");
 		at = found.index + found[0].length;
 	}
-	const rest = source.slice(at).replace(/^\n+/, at ? "" : "$&");
+	const rest = at ? source.slice(at).replace(/^\n+/, "") : source;
 	if (rest) plain(rest);
-	return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+	return out.join("\n").trim();
 }
