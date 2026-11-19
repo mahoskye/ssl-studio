@@ -324,3 +324,27 @@ test("a proposed change says how large it is", () => {
 	// Not worked out yet.
 	expect(changeSize(null)).toBe("");
 });
+
+import { groupModels } from "../src/view/agent/logic";
+
+describe("the models to choose from, under headings", () => {
+	const model = (providerID: string, name: string, local = false) => ({ providerID, id: name.toLowerCase(), name, local });
+
+	test("those on this machine come first, under one heading whichever provider serves them", () => {
+		const groups = groupModels([model("zeta", "Big"), model("ollama", "qwen3:14b", true), model("local", "granite", true), model("alpha", "Small")]);
+		expect(groups.map((g) => g.label)).toEqual(["On this machine", "alpha: may cost money", "zeta: may cost money"]);
+		expect(groups[0]!.models.map((m) => m.name)).toEqual(["granite", "qwen3:14b"]);
+		expect(groups[0]!.local).toBe(true);
+	});
+
+	test("a provider's models are by name, numbers in their order", () => {
+		const groups = groupModels([model("p", "GPT-10"), model("p", "GPT-9"), model("p", "claude")]);
+		expect(groups[0]!.models.map((m) => m.name)).toEqual(["claude", "GPT-9", "GPT-10"]);
+	});
+
+	test("with no local model there is no heading for them, and with no model no heading at all", () => {
+		expect(groupModels([model("p", "A")]).map((g) => g.label)).toEqual(["p: may cost money"]);
+		expect(groupModels([])).toEqual([]);
+	});
+});
+

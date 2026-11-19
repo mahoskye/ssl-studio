@@ -5,7 +5,7 @@ import { activeEditor } from "../editor/EditorGroup";
 import { review } from "../editor/Review";
 import { activeDoc, activePath, state } from "../state";
 import { addEntry, agent, ask, chooseModel, currentModel, interrupt, resume, safely, setAgent, start, stop, type Entry } from "./store";
-import { composerSend, modelRef, stepAction } from "./logic";
+import { groupModels, composerSend, modelRef, stepAction } from "./logic";
 import { followReplyLink, renderReply } from "./markdown";
 import { notePath, proposalOf, runStep, showReview, startTidy, STEPS, tidy } from "./tidy";
 import { relativeTo } from "../../shared/paths";
@@ -148,12 +148,18 @@ export function AgentPanel() {
 								{currentModel() ? `${currentModel()} (not in the list below)` : "No model chosen"}
 							</option>
 						</Show>
-						<For each={usable()}>
-							{(m) => (
-								<option value={modelRef(m)} selected={modelRef(m) === currentModel()}>
-									{m.local ? "" : "$ "}
-									{m.name} · {m.providerID}
-								</option>
+						{/* Under headings: a provider may offer hundreds, and the ones on this machine come first. */}
+						<For each={groupModels(usable())}>
+							{(group) => (
+								<optgroup label={group.label}>
+									<For each={group.models}>
+										{(m) => (
+											<option value={modelRef(m)} selected={modelRef(m) === currentModel()}>
+												{m.local ? `${m.name} · ${m.providerID}` : `$ ${m.name}`}
+											</option>
+										)}
+									</For>
+								</optgroup>
 							)}
 						</For>
 					</select>

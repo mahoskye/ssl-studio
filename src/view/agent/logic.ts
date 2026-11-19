@@ -75,6 +75,24 @@ export const MINE = "It runs on my own machine";
 type ModelLike = { providerID: string; id: string; name: string; local: boolean };
 export const modelRef = (m: { providerID: string; id: string }) => `${m.providerID}/${m.id}`;
 
+/** The models of one heading in the list to choose from. */
+export type ModelGroup<M> = { label: string; local: boolean; models: M[] };
+
+/**
+ * The models under headings, for a list that may be hundreds long: those on
+ * this machine first, under one heading whichever provider serves them, then
+ * each other provider by name with its own. Within a heading, by name.
+ */
+export function groupModels<M extends ModelLike>(models: readonly M[]): ModelGroup<M>[] {
+	const byName = (a: M, b: M) => a.name.localeCompare(b.name, undefined, { sensitivity: "base", numeric: true });
+	const local = models.filter((m) => m.local).sort(byName);
+	const providers = [...new Set(models.filter((m) => !m.local).map((m) => m.providerID))].sort((a, b) => a.localeCompare(b));
+	return [
+		...(local.length ? [{ label: "On this machine", local: true, models: local }] : []),
+		...providers.map((id) => ({ label: `${id}: may cost money`, local: false, models: models.filter((m) => !m.local && m.providerID === id).sort(byName) })),
+	];
+}
+
 /**
  * What choosing a model comes to: the model to save, or null when the user
  * backed out of a paid one, in which case nothing is saved and the list must

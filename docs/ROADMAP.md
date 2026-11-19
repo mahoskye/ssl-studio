@@ -424,6 +424,10 @@ From a second look:
   and a row is a name.
 - **A folder opens with the panels it was left with:** the side panel and
   the bottom panel that were showing, as its tabs already did.
+- **The agent's models are under headings.** A provider may offer hundreds,
+  and they were one flat list: the models on this machine now come first
+  under their own heading, then each other provider under its name, which
+  says that its models may cost money.
 - **A procedure found from the list is fitted in the graph.** Finding one
   while the list was showing laid out two pictures, and the view was fitted
   to the wrong one: the focus came up small, cut off at the top, with a
