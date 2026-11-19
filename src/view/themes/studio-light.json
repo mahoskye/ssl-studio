@@ -67,6 +67,16 @@
 		{ "scope": "variable.parameter", "settings": { "foreground": "#be123c" } },
 		{ "scope": "variable.language", "settings": { "foreground": "#cf226f" } },
 		{ "scope": "variable.other.property", "settings": { "foreground": "#475569" } },
+		{ "scope": "markup.heading", "settings": { "foreground": "#7c3aed", "fontStyle": "bold" } },
+		{ "scope": "markup.bold", "settings": { "fontStyle": "bold" } },
+		{ "scope": "markup.italic", "settings": { "fontStyle": "italic" } },
+		{ "scope": "markup.inline.raw", "settings": { "foreground": "#0f766e" } },
+		{ "scope": "markup.underline.link", "settings": { "foreground": "#1d4ed8", "fontStyle": "underline" } },
+		{ "scope": "entity.name.tag", "settings": { "foreground": "#be123c" } },
+		{ "scope": "entity.other.attribute-name", "settings": { "foreground": "#9d6007" } },
+		{ "scope": "support.type.property-name", "settings": { "foreground": "#1d4ed8" } },
+		{ "scope": "entity.name.section", "settings": { "foreground": "#9d6007", "fontStyle": "bold" } },
+		{ "scope": "constant.character.escape", "settings": { "foreground": "#0e7490" } },
 		{ "scope": "invalid", "settings": { "foreground": "#d02c47", "fontStyle": "underline" } }
 	]
 }

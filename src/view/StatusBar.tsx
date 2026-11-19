@@ -9,6 +9,7 @@ import { counts } from "./panels/Problems";
 import { showPanel } from "./panels/registry";
 import { monaco } from "./editor/monaco";
 import { symbolPath } from "./editor/regions";
+import { languageName } from "./editor/languages";
 import { activeDoc, activePath, notify, setState, state } from "./state";
 
 const [size, setSize] = createSignal<SizeReport | null>(null);
@@ -140,7 +141,7 @@ export function StatusBar() {
 				<button class="item" title="Go to a line (Ctrl+G in the editor)" aria-label={`Line ${state.cursor.line}, column ${state.cursor.column}. Go to a line.`} onClick={() => void goToLine()}>
 					Ln {state.cursor.line}, Col {state.cursor.column}
 				</button>
-				<span class="item">{activeDoc()?.model.getLanguageId().toUpperCase()}</span>
+				<span class="item">{languageName(activeDoc()?.model.getLanguageId())}</span>
 			</Show>
 		</footer>
 	);
