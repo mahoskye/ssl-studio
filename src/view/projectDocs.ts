@@ -10,7 +10,7 @@ import { parseCsv } from "../shared/csv";
 import { frontMatter, one, withFrontMatter } from "../shared/frontMatter";
 import { importSummary, ticketsFromJson, ticketsFromTable, type Imported, type ImportedTicket } from "../shared/ticketImport";
 import { manifestSummary, mergeManifest } from "../shared/manifest";
-import { baseName, dirName, isInside, joinPath, relativePath, relativeTo } from "../shared/paths";
+import { baseName, dirName, isInside, joinPath, relativePath, relativeTo, resolvePath } from "../shared/paths";
 import { activeEditor } from "./editor/EditorGroup";
 import {
 	catalogItems,
@@ -181,13 +181,16 @@ export async function importTickets() {
 	} else {
 		typed = (await ask("The exported file (CSV or JSON): its path in this folder, or its whole path anywhere", inFolder))?.trim() ?? "";
 		if (!typed) return;
-		const whole = /^([A-Za-z]:[\\/]|\/)/.test(typed);
-		from = whole ? typed : joinPath(root(), ...typed.split(/[\\/]/));
-		// In the folder it is read as the editor has it; anywhere else, from the disk.
-		text = !whole || isInside(root(), from) ? await current(from) : await backend.readExport(from).catch((e: any) => (notify(String(e?.message ?? e), "error"), null));
-		if (text === null) return whole && !isInside(root(), from) ? undefined : notify(`${typed} could not be read.`, "error");
+		// As a person writes a path: in quotes when it was copied, from "~" for their own folder, or up and out of this one.
+		const said = typed.replace(/^(["'])(.*)\1$/, "$2");
+		const whole = /^([A-Za-z]:[\\/]|\/|~[\\/])/.test(said);
+		from = whole ? said : resolvePath(root(), said);
+		const inside = !said.startsWith("~") && isInside(root(), from);
+		// In the folder it is read as the editor has it; anywhere else, from the disk, and the backend says why not.
+		text = inside ? await current(from) : await backend.readExport(from).catch((e: any) => (notify(String(e?.message ?? e), "error"), null));
+		if (text === null) return inside ? notify(`${typed} could not be read: there is no such file in this folder.`, "error") : undefined;
 		// From outside the folder it is called by its name: the way there is long, and not the point.
-		if (whole && !isInside(root(), from)) typed = baseName(from);
+		if (!inside) typed = baseName(from);
 	}
 	let read: Imported;
 	if (/\.json$/i.test(from)) {

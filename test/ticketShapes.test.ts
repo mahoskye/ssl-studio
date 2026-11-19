@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { marked } from "marked";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -176,7 +177,7 @@ describe("wiki markup as Markdown", () => {
 		expect(wikiToMarkdown("{color:red}urgent{color} words")).toBe("urgent words");
 	});
 	test("what it does not know, and every word, is left as it was", () => {
-		expect(wikiToMarkdown("A plain sentence, with _lines_ and {a brace} and 2 * 3 * 4.")).toBe("A plain sentence, with _lines_ and {a brace} and 2 * 3 * 4.");
+		expect(wikiToMarkdown("A plain sentence, with _lines_ and {a brace} and 2 * 3 * 4.")).toBe("A plain sentence, with _lines_ and {a brace} and 2 \\* 3 \\* 4.");
 	});
 	// A fourth review (2026-11-19).
 	test("a heading inside a quotation is a heading, and nothing is thrown", () => {
@@ -192,8 +193,8 @@ describe("wiki markup as Markdown", () => {
 		expect(wikiToMarkdown("text\n----\nmore")).toBe("text\n\n---\n\nmore");
 	});
 	test("bold there is bold here, and a word in angle brackets stays a word", () => {
-		expect(wikiToMarkdown("*bold* text and (*this too*), not 2*3*4.")).toBe("**bold** text and (**this too**), not 2*3*4.");
-		expect(wikiToMarkdown("Open <ReportName> and {{<Tag>}} then [https://example.test]")).toBe("Open \\<ReportName> and `<Tag>` then <https://example.test>");
+		expect(wikiToMarkdown("*bold* text and (*this too*), not 2*3*4.")).toBe("**bold** text and (**this too**), not 2\\*3\\*4.");
+		expect(wikiToMarkdown("Open <ReportName> and {{<Tag>}} then [https://example.test]")).toBe("Open &lt;ReportName> and `<Tag>` then <https://example.test>");
 	});
 	test("a block's title is kept, and every blank line of its code", () => {
 		expect(wikiToMarkdown("{code:title=Foo.java}\nclass A {}\n\n\nclass B {}\n{code}")).toBe("**Foo.java**\n\n```\nclass A {}\n\n\nclass B {}\n```");
@@ -221,7 +222,7 @@ describe("an export read from where it was downloaded", () => {
 describe("more of what the review found in the import", () => {
 	test("a heading written with a line under it goes under the ticket's sections too, its words as they were", () => {
 		const api = ticketsFromJson([{ number: 1, title: "T", body: "Title\n=====\n\nWords.\n\nLower\n-----\n\n- item\n---\n\nA paragraph\nof two lines\n---" }]);
-		expect(api.tickets[0]!.description).toBe("### Title\n\nWords.\n\n#### Lower\n\n- item\n---\n\nA paragraph\nof two lines\n---");
+		expect(api.tickets[0]!.description).toBe("### Title\n\nWords.\n\n#### Lower\n\n- item\n---\n\n#### A paragraph of two lines");
 	});
 	test("a line in a block of HTML that keeps its lines is not a heading", () => {
 		const api = ticketsFromJson([{ number: 1, title: "T", body: "# Real\n\n<pre>\n# not a heading\n</pre>\n\n<!--\n# nor this\n-->\n\n## Lower" }]);
@@ -238,5 +239,50 @@ describe("more of what the review found in the import", () => {
 	test("a description that throws nothing: a heading inside a quotation, in a table's row", () => {
 		const table = ticketsFromTable(parseCsv('Issue key,Summary,Description\nLAB-1,One,"{quote}h1. Heading{quote}"\n'));
 		expect(table.tickets[0]!.description).toBe("> ### Heading");
+	});
+});
+
+// A fifth review (2026-11-19): a line of dashes under something that is not a heading's words was taken for one.
+describe("only what the renderer reads as a heading is moved", () => {
+	const moved = (body: string) => ticketsFromJson([{ number: 1, title: "T", body }]).tickets[0]!.description;
+	test("a line of dashes under code, under a list item's words, or under a tag is a rule, and stays", () => {
+		expect(moved("# H\n\n    log line\n---")).toBe("### H\n\n    log line\n---");
+		expect(moved("# H\n\n- item\n\n  para\n---")).toBe("### H\n\n- item\n\n  para\n---");
+		expect(moved('## Steps\n\n<img src="a.png">\n---')).toBe('### Steps\n\n<img src="a.png">\n---');
+	});
+	test("a line in a block of HTML is not a heading", () => {
+		expect(moved("# Real\n\n<div>\n# x\n</div>")).toBe("### Real\n\n<div>\n# x\n</div>");
+	});
+	test("a heading with a line under it is one wherever the renderer reads one", () => {
+		expect(moved("## A\nSub\n---")).toBe("### A\n### Sub");
+		expect(moved("```\ncode\n```\nResult\n======")).toBe("```\ncode\n```\n### Result");
+	});
+});
+
+/** What a reader sees of Markdown: the page the renderer makes of it, without its tags. */
+function shown(markdown: string): string {
+	return (marked.parse(markdown, { gfm: true, async: false }) as string)
+		.replace(/<br\s*\/?>/g, "\n")
+		.replace(/<[^>]+>/g, "")
+		.replace(/&lt;/g, "<")
+		.replace(/&gt;/g, ">")
+		.replace(/&quot;/g, '"')
+		.replace(/&#39;/g, "'")
+		.replace(/&amp;/g, "&")
+		.replace(/\n+$/, "");
+}
+
+// A fifth review (2026-11-19): what the page shows is the test.
+describe("the page shows the words a wiki description had", () => {
+	test("stars, tildes, backslashes and angle brackets that are words", () => {
+		for (const said of ["see *.srvscr,*.ssl files", "price*qty and tax*rate", "C:\\Users\\<name>\\AppData", "H~2~O and ~about~", "see http://localhost/<app>/api now", "a * b * c"]) expect(shown(wikiToMarkdown(said))).toBe(said);
+	});
+	test("a line of dashes or of = under a line of words stays a line", () => {
+		expect(shown(wikiToMarkdown("Regards\n--\nBob"))).toBe("Regards\n--\nBob");
+		expect(shown(wikiToMarkdown("text\n---"))).toBe("text\n---");
+		expect(shown(wikiToMarkdown("text\n===="))).toBe("text\n====");
+	});
+	test("bold inside colour is bold", () => {
+		expect(wikiToMarkdown("{color:red}*IMPORTANT*{color} and *this*.")).toBe("**IMPORTANT** and **this**.");
 	});
 });

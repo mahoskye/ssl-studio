@@ -51,7 +51,7 @@ export function TableView(props: { path: string }) {
 		setOnlyTicket(asked.ticket);
 		rowsShown();
 	});
-	const namesTicket = (cells: Cell[], key: string) => keysIn(cells[ticketAt()]?.text ?? "").some((named) => named.toLowerCase() === key.toLowerCase());
+	const namesTicket = (cells: Cell[], key: string) => keysIn(cells[ticketAt()]?.text ?? "", known()).some((named) => named.toLowerCase() === key.toLowerCase());
 	// A ticket no row names any more (the last was changed), or a table with no such column, has nothing to narrow to.
 	createEffect(() => {
 		const wanted = onlyTicket();
@@ -60,6 +60,8 @@ export function TableView(props: { path: string }) {
 	/** Where the rows name the ticket that carries them, and the project's tickets by key: a key there is a way to its ticket. */
 	const ticketAt = () => ticketColumn(table());
 	const tickets = createMemo(() => new Map(docs().flatMap((d) => (d.group === "tickets" && d.exists && d.ticket ? [[d.ticket.toLowerCase(), d] as const] : []))));
+	/** The project's own keys: a word that is one of them names a ticket, however it is written. */
+	const known = createMemo(() => new Set(tickets().keys()));
 	const counted = createMemo(() => tally(table()));
 
 	/** The statuses to offer when one is typed: those the table uses, then the usual ones. */
@@ -82,7 +84,7 @@ export function TableView(props: { path: string }) {
 	const ticketCell = (value: string) => (
 		<For each={value.split(/([\s,;]+)/)}>
 			{(part) => {
-				const ticket = tickets().get(keyOf(part).toLowerCase());
+				const ticket = tickets().get(keyOf(part, known()).toLowerCase());
 				return ticket ? (
 					<button class="link table-ticket" title={`${ticket.ticket}: ${ticket.title ?? ""}${ticket.status ? ` (${ticket.status})` : ""}. Open the ticket.`} onClick={(e) => (e.stopPropagation(), void openFile(ticket.path))} onDblClick={(e) => e.stopPropagation()}>
 						{part}

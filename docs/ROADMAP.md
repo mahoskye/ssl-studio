@@ -509,6 +509,31 @@ the work comes from ([ADR 0012](adr/0012-a-projects-work-is-written-down.md)).
   when the row has a parent column that is empty; and the description,
   which is in Jira's wiki markup and read as headings and stray braces. A
   ticket read from the API also keeps the address a person opens for it.
+- **A fifth review, of the fourth's fixes.** The same again: a second
+  agent, the two commits, no conclusions. What it found and what was done:
+  - A line of two dashes in a Jira Cloud description was taken for the
+    mark of a heading and deleted. Which lines are headings is now the
+    renderer's to say, as it is for links: only what its lexer reads as a
+    heading is moved, and a line of dashes or of "=" that is words is
+    written as words.
+  - A registry's ticket column lost keys that are not written like
+    "DEMO-12" ("REL-2024-07", "LOGIN-REWORK"). A key the project's tickets
+    have is a key however it is written.
+  - Words still came across changed: a struck "~2 hours" opened a block
+    of code, a path with a backslash before a bold word lost its marks, a
+    line "[1]: …" vanished as a link's definition. Both readers of a
+    description are now tested by what the page shows: the Markdown is
+    rendered and its words compared with the ticket's.
+  - A label that held another link's target as a word cost every link in
+    the document its place. A place is now only where a target is
+    written, after "](" or "]:", and the answer is asked a second time.
+  - A file in UTF-16 with a byte left over could not be opened, and one
+    in the one-byte Windows encoding was damaged by being saved. A file is
+    read as what it is and written back as it was
+    ([ADR 0019](adr/0019-a-file-is-written-back-in-what-it-was-written-in.md)).
+  - An export in the one-byte Windows encoding, as a spreadsheet saves it,
+    came across with marks for letters. A path typed in quotes, from "~",
+    or up and out of the folder is read.
 - **A fourth review, of the fixes and of the import.** A second agent was
   given the six commits and no conclusions, and confirmed what it found by
   running it. What it found and what was done:

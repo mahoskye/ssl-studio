@@ -17,21 +17,21 @@ const words = (node: Node): string => (typeof node.text === "string" ? node.text
 
 /**
  * Words as Markdown reads them back: a character that would be taken for a
- * mark ("*", "`", a "_" at a word's edge, a "<" that opens a tag) is written
- * as itself. An underscore inside a word is left: it is not a mark there.
+ * mark is written as itself. A backslash, a star, a backtick, a tilde and
+ * an opening bracket always; an underscore at a word's edge (inside a word
+ * it is not a mark); a "<" that would open a tag, and an "&" that would
+ * open a named character, as the characters they are.
  */
 function literal(text: string): string {
-	const word = (ch: string | undefined) => ch !== undefined && /[A-Za-z0-9]/.test(ch);
+	const word = (ch: string | undefined) => ch !== undefined && /[\p{L}\p{N}]/u.test(ch);
 	let out = "";
 	for (let at = 0; at < text.length; at++) {
 		const ch = text[at]!;
 		const next = text[at + 1];
-		if (ch === "\\" && next !== undefined && /[!-/:-@[-`{-~]/.test(next)) out += "\\\\";
-		else if (ch === "*" || ch === "`") out += `\\${ch}`;
+		if (ch === "\\" || ch === "*" || ch === "`" || ch === "~" || ch === "[") out += `\\${ch}`;
 		else if (ch === "_" && !(word(text[at - 1]) && word(next))) out += "\\_";
-		else if (ch === "<" && next !== undefined && /[A-Za-z/!?]/.test(next)) out += "\\<";
-		else if (ch === "]" && (next === "(" || next === "[")) out += "\\]";
-		else if (ch === "~" && next === "~") out += "\\~";
+		else if (ch === "<" && next !== undefined && /[A-Za-z/!?]/.test(next)) out += "&lt;";
+		else if (ch === "&" && /^&(?:#\d+|#[xX][0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]*);/.test(text.slice(at, at + 40))) out += "&amp;";
 		else out += ch;
 	}
 	return out;
@@ -41,22 +41,26 @@ function literal(text: string): string {
 function marked(node: Node): string {
 	const text = node.text ?? "";
 	const marks = (node.marks ?? []).map((mark) => mark.type);
+	const link = (node.marks ?? []).find((mark) => mark.type === "link");
+	const href = said(link?.attrs?.href).replace(/[()\s<>]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`);
 	if (marks.includes("code")) {
 		const fence = ticks(text, 1);
 		// A backtick at either end needs room to be told from the fence.
-		const padded = /^`|`$/.test(text) ? ` ${text} ` : text;
-		return `${fence}${padded}${fence}`;
+		const code = `${fence}${/^`|`$/.test(text) ? ` ${text} ` : text}${fence}`;
+		return href ? `[${code}](${href})` : code;
 	}
 	// A mark sits against the words, with the space around them outside it.
 	const [, lead, body, trail] = /^(\s*)([\s\S]*?)(\s*)$/.exec(text)!;
 	if (!body) return text;
 	let out = literal(body);
-	if (marks.includes("strike")) out = `~~${out}~~`;
-	if (marks.includes("em")) out = `*${out}*`;
-	if (marks.includes("strong")) out = `**${out}**`;
-	const link = (node.marks ?? []).find((mark) => mark.type === "link");
-	const href = said(link?.attrs?.href);
-	if (href) out = `[${out}](${href.replace(/[()\s]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`)})`;
+	// Stars and tildes mark words only where a word meets them: around words that begin or end with a mark of
+	// their own ("Note:", "~2 hours"), the same is said with a tag, which holds wherever it stands.
+	const edges = /^[\p{L}\p{N}]/u.test(body) && /[\p{L}\p{N}]$/u.test(body);
+	const wrap = (star: string, tag: string) => (out = edges ? `${star}${out}${star}` : `<${tag}>${out}</${tag}>`);
+	if (marks.includes("strike")) wrap("~~", "del");
+	if (marks.includes("em")) wrap("*", "em");
+	if (marks.includes("strong")) wrap("**", "strong");
+	if (href) out = `[${out}](${href})`;
 	return `${lead}${out}${trail}`;
 }
 
@@ -110,7 +114,8 @@ const plain = (text: string) =>
 			line
 				.replace(/^(\s*)(#{1,6}(?=\s|$)|>|[-+](?=\s|$))/, "$1\\$2")
 				.replace(/^(\s*\d+)([.)])(?=\s|$)/, "$1\\$2")
-				.replace(/^(\s*)((?:-{3,}|={1,}|_{3,})\s*)$/, "$1\\$2"),
+				// A line of dashes or of "=" alone would make a heading of the line above it, however few they are.
+				.replace(/^(\s*)((?:-+|=+|_{3,})\s*)$/, "$1\\$2"),
 		)
 		.join("\n");
 const indented = (text: string, by: string) =>
@@ -125,7 +130,10 @@ function block(node: Node): string {
 		case "paragraph":
 			return plain(inline(kids(node)));
 		case "heading":
-			return `${"#".repeat(Math.min(6, Math.max(1, Number(node.attrs?.level) || 1)))} ${inline(kids(node)).replace(/\s*\n\s*/g, " ")}`;
+			// A "#" that ends a heading would be taken for the heading's own closing mark.
+			return `${"#".repeat(Math.min(6, Math.max(1, Number(node.attrs?.level) || 1)))} ${inline(kids(node))
+				.replace(/\s*\n\s*/g, " ")
+				.replace(/#+\s*$/, (end) => end.replace(/#/g, "\\#"))}`;
 		case "bulletList":
 			return kids(node)
 				.map((item) => `- ${indented(blocks(kids(item)), "  ")}`)
@@ -158,7 +166,24 @@ function block(node: Node): string {
 		case "rule":
 			return "---";
 		case "table": {
-			const rows = kids(node).map((row) => kids(row).map((cell) => blocks(kids(cell)).replace(/\s*\n+\s*/g, " ").replace(/\|/g, "\\|")));
+			// A cell is one line: what is on several lines in it is written with a break between, code a line at a time.
+			const inCell = (kid: Node) =>
+				kid.type === "codeBlock"
+					? words(kid)
+							.replace(/\n+$/, "")
+							.split("\n")
+							.map((line) => (line ? `${ticks(line, 1)}${/^`|`$/.test(line) ? ` ${line} ` : line}${ticks(line, 1)}` : ""))
+							.join("<br>")
+					: block(kid).replace(/\s*\n+\s*/g, "<br>");
+			const rows = kids(node).map((row) =>
+				kids(row).map((cell) =>
+					kids(cell)
+						.map(inCell)
+						.filter(Boolean)
+						.join("<br>")
+						.replace(/\|/g, "\\|"),
+				),
+			);
 			if (!rows.length) return "";
 			const width = Math.max(...rows.map((row) => row.length));
 			const line = (cells: string[]) => `| ${Array.from({ length: width }, (_, at) => cells[at] ?? "").join(" | ")} |`;

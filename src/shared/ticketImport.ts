@@ -1,6 +1,6 @@
 import type { Table } from "./csv";
+import { marked, type Token, type Tokens } from "marked";
 import { adfToMarkdown, isAdf } from "./adf";
-import { fenced } from "./catalog";
 import { ticketKey } from "./projectDocs";
 import { wikiToMarkdown } from "./wikiMarkup";
 
@@ -73,52 +73,52 @@ const described = (text: string, wiki: boolean) => (text && wiki ? wikiToMarkdow
 /**
  * Markdown that goes under a ticket's own "What is asked": its headings are
  * moved down together, so that the largest of them is the document's third
- * level and the ticket keeps the one title it has. Only the marks before a
- * heading change; code is left as written.
+ * level and the ticket keeps the one title it has.
+ *
+ * Which lines are headings is the renderer's to say: a line of dashes under
+ * a list item, under code or under a tag is not one, and looks just like
+ * one. So the headings are those the renderer's own lexer gives, at the top
+ * of the document. Only the marks of a heading change; one written with a
+ * line under it is written with marks before it, its words as they were.
  */
 function underSections(text: string): string {
-	const closed = fenced(text);
-	const lines: (string | null)[] = text.split("\n");
-	/** A heading: its line, its level, and the line under it when it is written with one ("Title" over "====="). */
-	const heads: { at: number; level: number; under?: number }[] = [];
-	let offset = 0;
-	// A block of HTML that keeps its lines as written (pre, script, style, a comment) holds no headings.
-	let html = "";
-	lines.forEach((line, at) => {
-		const here = offset;
-		offset += line!.length + 1;
-		if (closed.some(([from, to]) => here >= from && here < to)) return;
-		if (html) {
-			if (line!.toLowerCase().includes(html)) html = "";
-			return;
-		}
-		const opens = /^ {0,3}<(pre|script|style|!--)/i.exec(line!);
-		if (opens) {
-			const closes = opens[1] === "!--" ? "-->" : `</${opens[1]!.toLowerCase()}>`;
-			if (!line!.toLowerCase().includes(closes)) html = closes;
-			return;
-		}
-		const marked = /^ {0,3}(#{1,6})(?=\s|$)/.exec(line!);
-		if (marked) return void heads.push({ at, level: marked[1]!.length });
-		// A line of "=" or "-" under one line of words makes those words a heading of the first or second level.
-		const under = /^ {0,3}(=+|-+)\s*$/.exec(line!);
-		const above = at > 0 ? lines[at - 1]! : "";
-		const alone = at < 2 || !lines[at - 2]!.trim();
-		if (under && above.trim() && alone && !/^\s*([-*+>#|]|\d+[.)]\s)/.test(above) && !heads.some((head) => head.at === at - 1)) heads.push({ at: at - 1, level: under[1]![0] === "=" ? 1 : 2, under: at });
-	});
-	const down = 3 - Math.min(3, ...heads.map((head) => head.level));
-	if (!down) return text;
-	for (const head of heads) {
-		const marks = "#".repeat(Math.min(6, head.level + down));
-		if (head.under === undefined) lines[head.at] = lines[head.at]!.replace(/#+/, marks);
-		else {
-			// Written with a line under it, a heading has two levels only: it is written the other way, its words as they were.
-			lines[head.at] = `${marks} ${lines[head.at]!.trim()}`;
-			lines[head.under] = null;
-		}
+	if (!/^ {0,3}#|^ {0,3}(=+|-+)[ \t]*$/m.test(text)) return text;
+	let tokens: Token[];
+	try {
+		tokens = marked.lexer(text, { gfm: true });
+	} catch {
+		return text;
 	}
-	return lines.filter((line) => line !== null).join("\n");
+	const heads: { from: number; raw: string; depth: number }[] = [];
+	let at = 0;
+	for (const token of tokens) {
+		const from = text.indexOf(token.raw, at);
+		// The renderer read the text another way than it is written (a tab, a line end): nothing is changed.
+		if (from < 0) return text;
+		if (token.type === "heading") heads.push({ from, raw: token.raw, depth: (token as Tokens.Heading).depth });
+		at = from + token.raw.length;
+	}
+	const down = 3 - Math.min(3, ...heads.map((head) => head.depth));
+	if (!down) return text;
+	for (const head of heads.reverse()) {
+		const marks = "#".repeat(Math.min(6, head.depth + down));
+		const marked = /^( {0,3})#{1,6}/.exec(head.raw);
+		let anew: string;
+		if (marked) anew = `${marked[1]}${marks}${head.raw.slice(marked[0].length)}`;
+		else {
+			// Words over a line of "=" or "-": the words, each line of them, with the marks before.
+			const ends = /\n*$/.exec(head.raw)![0];
+			const lines = head.raw.slice(0, head.raw.length - ends.length).split("\n");
+			anew = `${marks} ${lines
+				.slice(0, -1)
+				.map((line) => line.trim())
+				.join(" ")}${ends}`;
+		}
+		text = `${text.slice(0, head.from)}${anew}${text.slice(head.from + head.raw.length)}`;
+	}
+	return text;
 }
+
 /**
  * A state as a person writes it: one of a system's own words in capitals
  * ("OPEN", "NOT_PLANNED") is the word. Any other is left as it was written:

@@ -3,6 +3,7 @@
 import { mkdirSync, readdirSync, renameSync, statSync, watch, existsSync, type FSWatcher } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type { Entry, SearchHit } from "../shared/protocol";
+import { decode, encode, encodingOf, type Encoding } from "./encoding";
 
 const SKIP = new Set([".git", "node_modules", ".ssl-studio", ".hutch", "dist", "build"]);
 const SEARCH_LIMIT = 2000;
@@ -38,28 +39,39 @@ export class WorkspaceFiles {
 			.sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name, undefined, { sensitivity: "base" }) : a.kind === "dir" ? -1 : 1));
 	}
 
+	/** A file's text, read as what the file is written in. */
 	async read(path: string) {
 		const full = this.inside(path);
-		// UTF-16 with its high byte first is not read by the runtime as text: read here, so that the editor shows
-		// words and a save writes back what it was given.
-		const text = (await markOf(full)) === "utf-16be" ? Buffer.from(await Bun.file(full).arrayBuffer()).swap16().toString("utf16le").replace(/^\uFEFF/, "") : await Bun.file(full).text();
-		return { path: full, text, mtime: statSync(full).mtimeMs };
+		try {
+			return { path: full, text: decode(new Uint8Array(await Bun.file(full).arrayBuffer())).text, mtime: statSync(full).mtimeMs };
+		} catch (e: any) {
+			// What the file system says is left as it says it; what the reading found names the file.
+			throw e instanceof Error && !("code" in e) ? new Error(`${relative(this.root, full)}: ${e.message}`) : e;
+		}
 	}
 
-	/** Writes through a temporary file, so a crash never leaves half a script. */
+	/**
+	 * Writes through a temporary file, so a crash never leaves half a script. A file is written in what it is
+	 * written in now, mark and all; a new file in UTF-8.
+	 */
 	async write(path: string, text: string) {
 		const full = this.inside(path);
 		mkdirSync(dirname(full), { recursive: true });
 		const temp = join(dirname(full), `.${basename(full)}.ssl-studio-tmp`);
+		let encoding: Encoding = "utf-8";
+		try {
+			if (existsSync(full)) encoding = encodingOf(new Uint8Array(await Bun.file(full).arrayBuffer()));
+		} catch {
+			// A file that cannot be read now is written as a new one would be.
+		}
+		let bytes: Uint8Array;
+		try {
+			bytes = encode(text, encoding);
+		} catch (e: any) {
+			throw new Error(`${relative(this.root, full)}: ${e?.message ?? e}`);
+		}
 		this.ownWrites.set(full, Date.now());
-		// A file keeps the encoding it has, and the byte-order mark that says which: reading takes the mark off and
-		// gives the text, and whoever wrote the file, or whatever reads it next, wants it as it was.
-		const mark = await markOf(full);
-		const bare = text.replace(/^\uFEFF/, "");
-		if (mark === "utf-16le" || mark === "utf-16be") {
-			const bytes = Buffer.from(`\uFEFF${bare}`, "utf16le");
-			await Bun.write(temp, mark === "utf-16be" ? bytes.swap16() : bytes);
-		} else await Bun.write(temp, mark === "utf-8" && !text.startsWith("\uFEFF") ? `\uFEFF${text}` : text);
+		await Bun.write(temp, bytes);
 		renameSync(temp, full);
 		return { mtime: statSync(full).mtimeMs };
 	}
@@ -131,18 +143,5 @@ export class WorkspaceFiles {
 
 	close() {
 		this.watcher?.close();
-	}
-}
-
-/** The byte-order mark the file there now opens with, by the encoding it says; "" when it has none or there is no such file. */
-async function markOf(path: string): Promise<"utf-8" | "utf-16le" | "utf-16be" | ""> {
-	try {
-		const head = new Uint8Array(await Bun.file(path).slice(0, 3).arrayBuffer());
-		if (head.length >= 3 && head[0] === 0xef && head[1] === 0xbb && head[2] === 0xbf) return "utf-8";
-		if (head.length >= 2 && head[0] === 0xff && head[1] === 0xfe) return "utf-16le";
-		if (head.length >= 2 && head[0] === 0xfe && head[1] === 0xff) return "utf-16be";
-		return "";
-	} catch {
-		return "";
 	}
 }

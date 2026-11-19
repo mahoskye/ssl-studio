@@ -3,6 +3,8 @@
 // the templates below, and after that only reads them: project.toml is edited
 // as text, so its comments survive.
 import { existsSync, mkdirSync, readdirSync, rmdirSync, unlinkSync } from "node:fs";
+import { homedir } from "node:os";
+import { decode } from "./encoding";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { CATALOG_FILE, catalogStale } from "../shared/catalog";
 import { parseCsv, tally } from "../shared/csv";
@@ -296,7 +298,7 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 		}
 		const table = parseCsv(await file.text());
 		// A row can say which ticket carries it: the ticket's page lists what it has to bring across.
-		const forTickets = rowsByTicket(table);
+		const forTickets = rowsByTicket(table, new Set(list.flatMap((file) => (file.group === "tickets" && file.ticket ? [file.ticket.toLowerCase()] : []))));
 		list.push({ path, name, group: "registries", exists: true, rows: table.rows.length, tally: tally(table) ?? undefined, problems: table.problems.length ? table.problems : undefined, ...(forTickets.length ? { tickets: forTickets.map((rows) => rows.key), forTickets } : {}) });
 	}
 	// Everything else in the docs folder.
@@ -534,11 +536,15 @@ const EXPORT_BYTES = 20 * 1024 * 1024;
  * Only a table or JSON, and only of a size worth reading.
  */
 export async function readExport(path: string): Promise<string> {
+	// As a person writes a path: in quotes when it was copied from a file manager, from "~" for their own folder.
+	path = path.trim().replace(/^(["'])(.*)\1$/, "$2");
+	if (/^~[\\/]/.test(path)) path = join(homedir(), path.slice(2));
 	if (!/\.(csv|tsv|json)$/i.test(path)) throw new Error("An export is a .csv, .tsv or .json file.");
 	if (!isAbsolute(path)) throw new Error(`${path} is not a whole path.`);
 	const file = Bun.file(path);
 	if (!(await file.exists())) throw new Error(`${path} is not there.`);
 	if (file.size > EXPORT_BYTES) throw new Error(`${path} is too large to read here: more than 20 MB.`);
-	return (await file.text()).replace(/^\uFEFF/, "");
+	// Read as what it is written in: a table saved from a spreadsheet on Windows is seldom UTF-8.
+	return decode(new Uint8Array(await file.arrayBuffer())).text;
 }
 

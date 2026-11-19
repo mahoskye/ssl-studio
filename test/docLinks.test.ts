@@ -493,3 +493,30 @@ describe("more of what the review found in writing files and links", () => {
 		}
 	});
 });
+
+// A fifth review (2026-11-19), of the fourth's fixes.
+describe("a link's place is where a target is written, and nowhere a word is", () => {
+	test("a label that holds another link's target as a word does not cost every link its place", () => {
+		const text = "See [the a.md file] and [link](a.md).\n\n[the a.md file]: b.md\n";
+		expect(fileLinks(text).map((link) => [link.href, link.line, link.column])).toEqual([
+			["b.md", 3, 17],
+			["a.md", 1, 31],
+		]);
+	});
+	test("a reference written with no space after its colon is placed", () => {
+		expect(fileLinks("See [it][r].\n\n[r]:x.md\n")).toEqual([{ href: "x.md", file: "x.md", line: 3, column: 4 }]);
+	});
+	test("the same words as a link inside a block of HTML are not the link's place", () => {
+		const text = "<main>\n[a](main)\n</main>\n\n[ main ]\n\n[ main ]: main\n";
+		const links = fileLinks(text);
+		expect(links.length).toBe(1);
+		// Its place is where it is defined, or it has none: never the line in the block.
+		expect(links[0]!.line === 7 || links[0]!.line === 0).toBe(true);
+	});
+	test("a target that is a word written thousands of times on one line is still quick to place", () => {
+		const text = `[a](x) ${"x ".repeat(32_000)}\n`;
+		const began = performance.now();
+		expect(fileLinks(text)).toEqual([{ href: "x", file: "x", line: 1, column: 4 }]);
+		expect(performance.now() - began).toBeLessThan(1500);
+	});
+});

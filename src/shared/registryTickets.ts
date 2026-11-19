@@ -15,25 +15,36 @@ export function ticketColumn(table: Pick<Table, "header">): number {
 }
 
 /**
- * A word as a ticket's key, when it is written as one: "DEMO-12", or a
- * number, with or without its mark ("#12" is ticket 12). "" for any other
- * word: "n/a", "TBD" and "-" are what a person writes where there is none.
+ * A word as a ticket's key: the key of a ticket the project has, however it
+ * is written ("LOGIN-REWORK"), or a word written as a key is, with a number
+ * in it ("DEMO-12", "REL-2024-07", "T12") or all number, with or without its
+ * mark ("#12" is ticket 12). "" for any other word: "n/a", "TBD" and "-" are
+ * what a person writes where there is none.
  */
-export const keyOf = (word: string) => (/^[A-Za-z][A-Za-z0-9_]*-\d+$/.test(word) ? word : /^#?\d+$/.test(word) ? word.replace(/^#/, "") : "");
+export function keyOf(word: string, known?: ReadonlySet<string>): string {
+	const bare = /^#\d+$/.test(word) ? word.slice(1) : word;
+	if (known?.has(bare.toLowerCase())) return bare;
+	if (/^\d+$/.test(bare)) return bare;
+	return /^[A-Za-z][A-Za-z0-9_.-]*$/.test(bare) && /\d/.test(bare) && /[A-Za-z0-9]$/.test(bare) ? bare : "";
+}
 
-/** The keys a cell names: one, or several apart by spaces, commas or semicolons. Words that are not keys are passed over. */
-export const keysIn = (cell: string) => cell.split(/[\s,;]+/).map(keyOf).filter(Boolean);
+/** The keys a cell names: one, or several apart by spaces, commas or semicolons. Words that are not keys are passed over. `known` is the project's tickets, in small letters. */
+export const keysIn = (cell: string, known?: ReadonlySet<string>) =>
+	cell
+		.split(/[\s,;]+/)
+		.map((word) => keyOf(word, known))
+		.filter(Boolean);
 
 /** The tickets a registry's rows name, in the order they first appear, each with its rows. A key is the same key in any case. */
-export function rowsByTicket(table: Table): RowsFor[] {
+export function rowsByTicket(table: Table, known?: ReadonlySet<string>): RowsFor[] {
 	const at = ticketColumn(table);
 	if (at < 0) return [];
 	const status = columnOf(table, "status");
 	const found = new Map<string, RowsFor>();
 	for (const row of table.rows) {
 		const done = status >= 0 && toneOf(row[status]?.text) === "done";
-		for (const key of new Set(keysIn(row[at]?.text ?? "").map((key) => key.toLowerCase()))) {
-			const written = keysIn(row[at]!.text).find((word) => word.toLowerCase() === key)!;
+		for (const key of new Set(keysIn(row[at]?.text ?? "", known).map((key) => key.toLowerCase()))) {
+			const written = keysIn(row[at]!.text, known).find((word) => word.toLowerCase() === key)!;
 			const entry = found.get(key) ?? { key: written, rows: 0, ...(status >= 0 ? { done: 0 } : {}) };
 			entry.rows++;
 			if (done) entry.done = (entry.done ?? 0) + 1;

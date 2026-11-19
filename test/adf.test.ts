@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { adfToMarkdown, isAdf } from "../src/shared/adf";
+import { marked } from "marked";
 import { ticketsFromJson } from "../src/shared/ticketImport";
 
 // The shape is the one a public Jira Cloud site gives out for a description
@@ -134,11 +135,70 @@ describe("words that look like marks, and nodes that hold their words elsewhere"
 		expect(md(para(text("Title"), { type: "hardBreak" }, text("---")))).toBe("Title  \n\\---");
 	});
 	test("a character that would be a mark is written as itself; an underscore inside a word is left", () => {
-		expect(md(para(text("a*b*c and __init__ and snake_case and <ReportName> and `tick` and x[0](y) and ~~no~~ and C:\\dir")))).toBe("a\\*b\\*c and \\_\\_init\\_\\_ and snake_case and \\<ReportName> and \\`tick\\` and x[0\\](y) and \\~~no\\~~ and C:\\dir");
+		const said = "a*b*c and __init__ and snake_case and <ReportName> and `tick` and x[0](y) and ~~no~~ and C:\\dir";
+		const markdown = md(para(text(said)));
+		expect(shown(markdown)).toBe(said);
+		expect(markdown).toContain("snake_case");
 		expect(md(para(text("5 < 6 and a_b"), text(" *kept as code* ", "code")))).toBe("5 < 6 and a_b` *kept as code* `");
 	});
 	test("a line break inside a quotation is kept, and every blank line of a block of code", () => {
 		expect(md({ type: "blockquote", content: [para(text("one"), { type: "hardBreak" }, text("two"))] })).toBe("> one  \n> two");
 		expect(md({ type: "codeBlock", attrs: { language: "java" }, content: [text("class A {}\n\n\nclass B {}")] })).toBe("```java\nclass A {}\n\n\nclass B {}\n```");
+	});
+});
+
+/** What a reader sees of Markdown: the page the renderer makes of it, without its tags. */
+function shown(markdown: string): string {
+	return (marked.parse(markdown, { gfm: true, async: false }) as string)
+		.replace(/<br\s*\/?>/g, "\n")
+		.replace(/<[^>]+>/g, "")
+		.replace(/&lt;/g, "<")
+		.replace(/&gt;/g, ">")
+		.replace(/&quot;/g, '"')
+		.replace(/&#39;/g, "'")
+		.replace(/&amp;/g, "&")
+		.replace(/\n+$/, "");
+}
+
+// A fifth review (2026-11-19): what the page shows is the test, not what the Markdown looks like.
+describe("the page shows the words the ticket had", () => {
+	const md = (...content: unknown[]) => adfToMarkdown({ type: "doc", version: 1, content });
+	const same = (...content: unknown[]) => shown(md(...content));
+	test("words that hold marks of their own, in a sentence", () => {
+		for (const said of [
+			"see http://localhost/<app>/api now",
+			"[1]: https://example.com/spec",
+			"5 &lt; 6 &amp; so on",
+			"a~b~c and ~~x~~ and H~2~O",
+			"price*qty and tax*rate",
+			"C:\\Users\\<name>\\AppData",
+			"an [x] in brackets and [link](not.md)",
+			"_edge_ and __dunder__ and snake_case_name",
+		])
+			expect(same(para(text(said)))).toBe(said);
+	});
+	test("marked words that begin or end with a mark of their own", () => {
+		expect(same(para(text("~2 hours", "strike"), text(" later")))).toBe("~2 hours later");
+		expect(same(para(text("Note:", "strong"), text("text")))).toBe("Note:text");
+		expect(same(para(text("C:\\Temp\\"), text("now", "strong")))).toBe("C:\\Temp\\now");
+		expect(same(para(text("before "), text("<name>.log", "code")))).toBe("before <name>.log");
+		expect(md(para(text("plain", "strong"), text(" and "), text("words", "em")))).toBe("**plain** and *words*");
+	});
+	test("a line of a paragraph that is only dashes stays a line of dashes", () => {
+		const markdown = md(para(text("Thanks,"), { type: "hardBreak" }, text("--"), { type: "hardBreak" }, text("Bob")));
+		expect(shown(markdown)).toBe("Thanks,\n--\nBob");
+		// And through the import, where the headings are moved: nothing is taken for a heading.
+		const imported = ticketsFromJson({ issues: [{ key: "LAB-1", fields: { summary: "T", description: { type: "doc", content: [para(text("Thanks,"), { type: "hardBreak" }, text("--"), { type: "hardBreak" }, text("Bob"))] } } }] });
+		expect(shown(imported.tickets[0]!.description)).toBe("Thanks,\n--\nBob");
+	});
+	test("a heading that ends with its own mark, and a bullet that looks like a task", () => {
+		expect(shown(md({ type: "heading", attrs: { level: 2 }, content: [text("Sample #")] }))).toBe("Sample #");
+		const bullet = md({ type: "bulletList", content: [item(para(text("[x] done")))] });
+		expect(shown(bullet).trim()).toBe("[x] done");
+		expect((marked.parse(bullet, { gfm: true, async: false }) as string).includes("checkbox")).toBe(false);
+	});
+	test("code in a table's cell keeps its lines", () => {
+		const table = md({ type: "table", content: [{ type: "tableRow", content: [{ type: "tableHeader", content: [para(text("Query"))] }] }, { type: "tableRow", content: [{ type: "tableCell", content: [{ type: "codeBlock", content: [text("SELECT 1\nFROM x")] }] }] }] });
+		expect(table).toBe("| Query |\n| --- |\n| `SELECT 1`<br>`FROM x` |");
 	});
 });

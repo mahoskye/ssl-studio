@@ -20,14 +20,21 @@ const ticks = (text: string, least: number) => "`".repeat(Math.max(least, ...[..
 function prose(text: string): string {
 	return (
 		text
-			// A word in angle brackets is a word: left as it is, a page would take it for a tag and show nothing.
-			.replace(/<(?=[A-Za-z/!?])/g, "\\<")
-			.replace(/\[([^\]|\n]+)\|([a-z][a-z0-9+.-]*:[^\]|\s]+)(?:\|[^\]\n]*)?\]/gi, "[$1]($2)")
-			.replace(/\[(https?:\/\/[^\]|\s]+)\]/gi, "<$1>")
-			// "*bold*" is bold there, and italic in Markdown: written as Markdown's bold.
-			.replace(/(^|[\s([{>|])\*(\S(?:[^*\n]*\S)?)\*(?=$|[\s)\]}.,;:!?|])/g, "$1**$2**")
+			// Colour has no words: taken off first, so that what it wraps is read for what it is.
 			.replace(/\{color(?::[^}\n]*)?\}/gi, "")
 			.replace(/\{anchor:[^}\n]*\}/gi, "")
+			// A backslash before a mark would hide the mark, and be hidden with it.
+			.replace(/\\(?=[!-/:-@[-`{-~])/g, "\\\\")
+			// A word in angle brackets is a word: left as it is, a page would take it for a tag and show nothing.
+			.replace(/<(?=[A-Za-z/!?])/g, "&lt;")
+			.replace(/\[([^\]|\n]+)\|([a-z][a-z0-9+.-]*:[^\]|\s]+)(?:\|[^\]\n]*)?\]/gi, "[$1]($2)")
+			.replace(/\[(https?:\/\/[^\]|\s]+)\]/gi, "<$1>")
+			// "*bold*" is bold there, and italic in Markdown: written as Markdown's bold. Only where it stands as a
+			// word of its own; "*.sql,*.ssl" and "a * b" are stars.
+			.replace(/(^|[\s([{>|])\*([^\s*](?:[^*\n]*[^\s*])?)\*(?=$|[\s)\]}|]|[.,;:!?](?:\s|$))/g, "$1\uE000$2\uE000")
+			// Every other star and tilde is itself: Markdown would take a pair of them for italics or a strike.
+			.replace(/[*~]/g, "\\$&")
+			.replace(/\uE000/g, "**")
 	);
 }
 
@@ -52,6 +59,8 @@ function line(text: string, top: number): string {
 	if (heading) return `${"#".repeat(Math.min(6, Math.max(3, 3 + Number(heading[1]) - top)))} ${inline(heading[2]!)}`;
 	// A rule is four dashes there; with a line of words above it, three would make that line a heading.
 	if (/^-{4,}\s*$/.test(text)) return "\n---\n";
+	// Fewer dashes, or a line of "=", are words there, and under a line of words Markdown would make a heading of it.
+	if (/^(?:-{1,3}|=+)\s*$/.test(text)) return `\\${text}`;
 	const numbered = /^(#+)\s+(.*)$/.exec(text);
 	if (numbered) return `${"   ".repeat(numbered[1]!.length - 1)}1. ${inline(numbered[2]!)}`;
 	const bullet = /^(\*+|-{2,})\s+(.*)$/.exec(text);

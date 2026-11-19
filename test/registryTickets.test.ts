@@ -83,3 +83,26 @@ describe("only what is written as a key is a ticket", () => {
 		for (const word of ["n/a", "-", "TBD", "(partly)", "DEMO", "12a", ""]) expect(keyOf(word)).toBe("");
 	});
 });
+
+// A fifth review (2026-11-19): a key the project's tickets have is a key, however it is written.
+describe("a project's own ticket keys in a registry", () => {
+	const known = new Set(["rel-2024-07", "login-rework", "t12", "lims-123a"]);
+	test("are found whatever their shape, and words that are no ticket's are still passed over", () => {
+		const rows = rowsByTicket(parseCsv("name,ticket\nA,REL-2024-07\nB,LOGIN-REWORK\nC,T12\nD,LIMS-123A\nE,TBD\nF,n/a\nG,login-rework\n"), known);
+		expect(rows).toEqual([
+			{ key: "REL-2024-07", rows: 1 },
+			{ key: "LOGIN-REWORK", rows: 2 },
+			{ key: "T12", rows: 1 },
+			{ key: "LIMS-123A", rows: 1 },
+		]);
+	});
+	test("a word with a number in it is written as a key is, known or not; one with none is a key only when known", () => {
+		expect(keyOf("REL-2024-07")).toBe("REL-2024-07");
+		expect(keyOf("T12")).toBe("T12");
+		expect(keyOf("LIMS-123A")).toBe("LIMS-123A");
+		expect(keyOf("LOGIN-REWORK")).toBe("");
+		expect(keyOf("LOGIN-REWORK", known)).toBe("LOGIN-REWORK");
+		expect(keyOf("2026-11-19")).toBe("");
+		expect(keyOf("DEMO-1.")).toBe("");
+	});
+});

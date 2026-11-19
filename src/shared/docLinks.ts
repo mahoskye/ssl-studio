@@ -91,29 +91,53 @@ type Spot = { line: number; at: number; length: number };
 const marker = (n: number) => `ssl-studio-place-${n}.x`;
 const MARKER = /^ssl-studio-place-(\d+)\.x$/;
 
-/** The lines with each of these places written over. */
+/** The lines with each of these places written over: each line once, however many places it holds. */
 function written(lines: readonly string[], over: readonly [Spot, string][]): string {
-	const copy = [...lines];
-	for (const [spot, text] of [...over].sort((a, b) => b[0].line - a[0].line || b[0].at - a[0].at)) copy[spot.line] = `${copy[spot.line]!.slice(0, spot.at)}${text}${copy[spot.line]!.slice(spot.at + spot.length)}`;
-	return copy.join("\n");
+	const byLine = new Map<number, [Spot, string][]>();
+	for (const entry of over) byLine.set(entry[0].line, [...(byLine.get(entry[0].line) ?? []), entry]);
+	return lines
+		.map((line, at) => {
+			const here = byLine.get(at);
+			if (!here) return line;
+			const parts: string[] = [];
+			let from = 0;
+			for (const [spot, text] of here.sort((a, b) => a[0].at - b[0].at)) {
+				parts.push(line.slice(from, spot.at), text);
+				from = spot.at + spot.length;
+			}
+			parts.push(line.slice(from));
+			return parts.join("");
+		})
+		.join("\n");
 }
 
 /**
- * Everywhere the text writes one of these targets as a whole word of its
- * own: after "(", "<" or a space, and before ")", ">", a space or the line's
- * end, which is how a link's target is always written. Where two overlap,
- * the longer stands.
+ * Whether what stands before a place is what stands before a link's target:
+ * "](" or "]:", then spaces if any, then "<" if any. A target is never
+ * written anywhere else, so the same words in a sentence are not a place.
+ */
+function afterOpening(line: string, column: number): boolean {
+	let at = column - 1;
+	if (line[at] === "<") at--;
+	while (at >= 0 && (line[at] === " " || line[at] === "\t")) at--;
+	return (line[at] === "(" || line[at] === ":") && line[at - 1] === "]";
+}
+
+/**
+ * Everywhere the text writes one of these targets where a link's target is
+ * written: after "](" or "]:", and before ")", ">", a space or the line's
+ * end. Where two overlap, the longer stands.
  */
 function candidates(lines: readonly string[], targets: readonly string[]): Spot[] {
 	const found: Spot[] = [];
 	const longest = [...new Set(targets)].sort((a, b) => b.length - a.length);
 	lines.forEach((line, at) => {
+		if (!line.includes("]")) return;
 		const taken: [number, number][] = [];
 		for (const target of longest) {
 			for (let column = line.indexOf(target); column >= 0; column = line.indexOf(target, column + 1)) {
-				const before = line[column - 1];
 				const after = line[column + target.length];
-				if (!(before === undefined || /[\s(<]/.test(before)) || !(after === undefined || /[\s)>]/.test(after))) continue;
+				if (!(after === undefined || /[\s)>]/.test(after)) || !afterOpening(line, column)) continue;
 				if (taken.some(([from, to]) => column < to && column + target.length > from)) continue;
 				taken.push([column, column + target.length]);
 				found.push({ line: at, at: column, length: target.length });
@@ -127,10 +151,12 @@ function candidates(lines: readonly string[], targets: readonly string[]): Spot[
  * The links and images of a Markdown document that name a file, each once,
  * in the order they are written.
  *
- * Where each is in the text is asked of the renderer, in one reading: every
- * place that writes one of the targets is written over with a name of its
+ * Where each is in the text is asked of the renderer. Every place that
+ * writes one of the targets as a target is written over with a name of its
  * own, the links are read again, and a link's place is the one whose name
- * the renderer now reads as its target. The same words in code, in a
+ * the renderer now reads as its target. The answer is then asked once more,
+ * with only the places it gave written over: a place is kept only if the
+ * renderer still reads its name for that link. The same words in code, in a
  * comment or after a backslash are an example of a link, and no link reads
  * their name: an edit never lands there, and nothing here has to know what
  * code or a comment looks like to be sure of it.
@@ -143,12 +169,22 @@ export function fileLinks(text: string): DocLink[] {
 	const found = targets(lines.join("\n"));
 	if (!found?.length) return [];
 
-	const spots = candidates(lines, found);
-	let read = targets(written(lines, spots.map((spot, n) => [spot, marker(n)])));
-	let asked = spots;
-	if (!read || read.length !== found.length) {
-		// Writing over a place that is no link changed what the renderer takes for links. Asked again of the places
-		// outside fenced code only, which is where such a place most often is.
+	/** For each link, the place whose name the renderer reads as its target when these places are written over. */
+	const ask = (spots: readonly Spot[]): (Spot | undefined)[] | null => {
+		const read = targets(written(lines, spots.map((spot, n) => [spot, marker(n)])));
+		if (!read || read.length !== found.length) return null;
+		return found.map((href, index) => {
+			const named = MARKER.exec(read[index]!);
+			const spot = named ? spots[Number(named[1])] : undefined;
+			// The place must hold this link's own target: a name read back for another's is not an answer.
+			return spot && spot.length === href.length && lines[spot.line]!.startsWith(href, spot.at) ? spot : undefined;
+		});
+	};
+	const all = candidates(lines, found);
+	let places = ask(all);
+	if (!places) {
+		// Writing over a place that is no link changed what the renderer takes for links: asked again without the
+		// places in fenced code, which is where an example of a link most often is.
 		const fences = fenced(lines.join("\n"));
 		const starts: number[] = [];
 		let offset = 0;
@@ -156,20 +192,19 @@ export function fileLinks(text: string): DocLink[] {
 			starts.push(offset);
 			offset += line.length + 1;
 		}
-		asked = spots.filter((spot) => !fences.some(([from, to]) => starts[spot.line]! >= from && starts[spot.line]! < to));
-		read = targets(written(lines, asked.map((spot, n) => [spot, marker(n)])));
+		places = ask(all.filter((spot) => !fences.some(([from, to]) => starts[spot.line]! >= from && starts[spot.line]! < to)));
 	}
-	const sure = read && read.length === found.length;
+	// Asked once more, of the answers alone: what was read with every place written over must hold with only these.
+	const chosen = [...new Map((places ?? []).flatMap((spot) => (spot ? [[`${spot.line}:${spot.at}`, spot] as const] : []))).values()];
+	const again = chosen.length ? ask(chosen) : null;
+	const same = (a: Spot | undefined, b: Spot | undefined) => Boolean(a && b && a.line === b.line && a.at === b.at);
 
 	// Each place once, in the order its first link is written; a link with no place is listed, and never edited.
 	const before = text.slice(0, start).split("\n").length - 1;
 	const seen = new Set<string>();
 	const links: DocLink[] = [];
 	found.forEach((href, index) => {
-		const named = sure ? MARKER.exec(read![index]!) : null;
-		const spot = named ? asked[Number(named[1])] : undefined;
-		// The place must hold this link's own target: a name read back for another's is not an answer.
-		const placed = spot && lines[spot.line]!.startsWith(href, spot.at) && spot.length === href.length ? spot : undefined;
+		const placed = places && again && same(places[index], again[index]) ? places[index] : undefined;
 		const key = placed ? `${placed.line}:${placed.at}` : `none:${href}`;
 		if (seen.has(key)) return;
 		seen.add(key);

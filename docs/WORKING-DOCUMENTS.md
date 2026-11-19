@@ -6,8 +6,9 @@
 [0014](adr/0014-tickets-come-in-from-an-export.md),
 [0015](adr/0015-what-is-not-ssl-is-read-here.md),
 [0016](adr/0016-an-export-is-read-where-it-lies-and-comes-across-as-markdown.md),
-[0017](adr/0017-documents-link-to-each-other-and-the-links-are-kept-true.md)
-and [0018](adr/0018-a-check-is-not-built-on-a-reader-that-is-wrong.md), each
+[0017](adr/0017-documents-link-to-each-other-and-the-links-are-kept-true.md),
+[0018](adr/0018-a-check-is-not-built-on-a-reader-that-is-wrong.md) and
+[0019](adr/0019-a-file-is-written-back-in-what-it-was-written-in.md), each
 drafted from the user's request and not yet reviewed by them point by
 point.
 
@@ -125,8 +126,9 @@ column says how far each row has come.
   page then lists the registry under "To carry across", with how many rows
   and how many are done, and opens the table at those rows. In the table,
   the key is a link to the ticket. A key that is no ticket of the project
-  is said in Health. Only what is written as a key counts ("DEMO-12",
-  "#12"): "n/a" or "TBD" in the column is left as words.
+  is said in Health. A key is one of the project's tickets, or a word
+  written as a key is ("DEMO-12", "#12"): "n/a" or "TBD" in the column is
+  left as words.
 
 ## Health
 
@@ -187,6 +189,10 @@ decisions that stand.
 | CSV, TSV | Colours each column; opens as a table |
 | YAML | Colours it, outlines its top keys |
 | XML | Colours it, says where it is not well formed |
+
+A file is read as what it is written in and saved back the same: UTF-8,
+UTF-16, or the one-byte Windows encoding older tools write
+([ADR 0019](adr/0019-a-file-is-written-back-in-what-it-was-written-in.md)).
 
 SSL is not on this list: its outline, findings and formatting are the
 language server's ([ADR 0015](adr/0015-what-is-not-ssl-is-read-here.md)).
