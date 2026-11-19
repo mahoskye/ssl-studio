@@ -530,6 +530,8 @@ the work comes from ([ADR 0012](adr/0012-a-projects-work-is-written-down.md)).
   document's headings, a TOML or INI file's tables and keys, a JSON
   document's keys, a SQL file's statements, a YAML file's top keys. A
   heading chosen while a document is being read scrolls the page to it.
+  Where reading in the IDE stops, against the language server's ownership
+  of SSL, is [ADR 0015](adr/0015-what-is-not-ssl-is-read-here.md).
 - **TOML that cannot be read says where,** by the reader project.toml is
   loaded with, in plain words: a key set twice, a string not closed.
 - **A document's state is changed where it is read.** On a ticket's, a
@@ -569,6 +571,41 @@ the work comes from ([ADR 0012](adr/0012-a-projects-work-is-written-down.md)).
   listed as its summary; a date is the day it is here, not in UTC; and a
   catalog open in the editor is saved with the list the IDE writes to it,
   unless it holds unsaved work.
+
+**From a review of this code (2026-11-19).** An independent read of the
+working-documents code, for defects only, found these; each has a test now
+(`test/docsReview.test.ts`):
+
+- A name with underscores lost them in titles, summaries, catalogs and the
+  agent's prompt: `DUE_SOON_AT` read as `DUESOONAT`. A heading ending in a
+  sharp lost it.
+- A catalog could lose a person's words: with its end marker gone a second
+  list was added and the next update deleted what lay between; a marker
+  named in a sentence was taken for one. A marker now counts only on a line
+  of its own, and a list with no end marker is replaced where it stands.
+- A title with a quote or a backslash read back with its escapes showing.
+- A schema written for SQL Server or Oracle gave one object: batches ended
+  by `GO` or a slash were not statements, and `CREATE OR ALTER`, `FORCE`,
+  `MATERIALIZED` and `EDITIONABLE` were not passed over.
+- On Windows the link from a question to its code was wrong, because one
+  path had its drive's letter lowered.
+- `docs = "./docs"` in project.toml made every catalog read as out of
+  date.
+- A file renamed only in the case of its letters lost its status and note
+  in the manifest; a manifest with Windows line ends was rewritten whole.
+- In a table: the row Delete row takes out could be another after an undo;
+  a status chip matched its word in any cell, and "no status" showed
+  everything; a row added to a table of over 500 rows was not drawn.
+- An export with the same ticket twice stopped the import midway. A ticket
+  system that numbers its tickets had them passed over.
+- Tickets under a ring of tickets that name each other as parent were
+  flattened. A document set to a new state beside its plan did not get its
+  catalog rewritten. A folder of over 500 tickets could crowd the other
+  documents out of the list.
+
+Left as they are: a ticket file whose name differs only in case from an
+imported key on a file system that ignores case, and a catalog written
+while its document has unsaved changes, which Health then reports.
 
 Not done, and worth doing next:
 

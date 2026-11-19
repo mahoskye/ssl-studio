@@ -46,7 +46,9 @@ export function relativeTo(root: string | undefined | null, path: string): strin
 export function relativePath(fromDir: string, to: string): string {
 	const split = (path: string) => path.split(/[\\/]/).filter(Boolean);
 	const [from, target] = [split(fromDir), split(to)];
+	// A drive's letter is the same drive in either case: one side may have come through a URI, which lowers it.
+	const alike = (a: string, b: string) => a === b || (/^[A-Za-z]:$/.test(a) && a.toLowerCase() === b.toLowerCase());
 	let same = 0;
-	while (same < from.length && same < target.length && from[same] === target[same]) same++;
+	while (same < from.length && same < target.length && alike(from[same]!, target[same]!)) same++;
 	return [...from.slice(same).map(() => ".."), ...target.slice(same)].join("/");
 }

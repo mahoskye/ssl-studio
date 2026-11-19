@@ -5,7 +5,7 @@ import DOMPurify from "dompurify";
 import { marked } from "marked";
 import { headingAnchor } from "../../shared/docTables";
 import { finishMarkdown, outlineOf } from "./markdownHtml";
-import { frontMatter } from "../../shared/frontMatter";
+import { frontMatter, plainMarkdown } from "../../shared/frontMatter";
 import { dirName, isInside, joinPath, resolvePath } from "../../shared/paths";
 import { DOC_FOLDERS, linkedLines, statusChoices, toneOf } from "../../shared/projectDocs";
 import { Menu } from "../Menu";
@@ -94,7 +94,12 @@ export function MarkdownView(props: { path: string }) {
 		queueMicrotask(() => {
 			const all = flat(outline("markdown", text()));
 			const at = all.findLastIndex((item) => item.line <= state.cursor.line);
-			if (at >= 0) view.querySelectorAll<HTMLElement>(".md h1, .md h2, .md h3, .md h4, .md h5, .md h6")[at]?.scrollIntoView({ block: "start" });
+			if (at < 0) return;
+			// By its words, and which of that name it is: the page may have headings the outline does not count.
+			const name = all[at]!.name;
+			const which = all.slice(0, at).filter((item) => item.name === name).length;
+			const same = [...view.querySelectorAll<HTMLElement>(".md h1, .md h2, .md h3, .md h4, .md h5, .md h6")].filter((h) => plainMarkdown(h.textContent ?? "") === name);
+			(same[which] ?? same[0])?.scrollIntoView({ block: "start" });
 		});
 	});
 	onCleanup(stopReveal);

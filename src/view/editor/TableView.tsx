@@ -10,6 +10,9 @@ import { backend } from "../backend";
 import { searchFor } from "../panels/Search";
 import { documents, notify, state } from "../state";
 
+/** As many hits as a workspace search returns before it stops (src/bun/workspace.ts). */
+const SEARCH_GIVES_UP_AT = 2000;
+
 /** The words a status is most often one of in a registry, offered beside those the table already uses. */
 const USUAL_STATUSES = ["found", "migrated", "verified", "not needed", "blocked"];
 
@@ -19,10 +22,18 @@ const ROWS_SHOWN = 500;
 export function TableView(props: { path: string }) {
 	const model = documents.get(props.path)?.model;
 	const [text, setText] = createSignal(model?.getValue() ?? "");
-	const listener = model?.onDidChangeContent(() => setText(model.getValue()));
+	const listener = model?.onDidChangeContent(() => {
+		setText(model.getValue());
+		// The rows have moved: the row that was pointed at by its place in the file may be another now.
+		setCurrent(null);
+	});
 	onCleanup(() => listener?.dispose());
 	const table = createMemo(() => parseCsv(text()));
 	const [filter, setFilter] = createSignal("");
+	/** The status the rows are narrowed to, exactly as the column has it ("" is a row with none); null when they are not. */
+	const [onlyStatus, setOnlyStatus] = createSignal<string | null>(null);
+	/** The row the keyboard or the pointer was last in, by its place in the file: the one Delete row takes out. */
+	const [current, setCurrent] = createSignal<number | null>(null);
 	/** The column the rows are ordered by here, and which way; the file's own order is not changed. */
 	const [order, setOrder] = createSignal<{ column: number; down: boolean } | null>(null);
 	/** The cell being changed: its row in the file and its column. */
@@ -52,7 +63,10 @@ export function TableView(props: { path: string }) {
 			for (const [at, name] of names.entries()) {
 				setChecking(`Looking for ${at + 1} of ${names.length}…`);
 				const hits = await backend.search(nameQuery(name), { regex: true, caseSensitive: false });
-				found.set(name.toLowerCase(), hits.filter((hit) => outsideDocuments(relativeTo(root, hit.path).split("\\").join("/"), apart)).length);
+				const outside = hits.filter((hit) => outsideDocuments(relativeTo(root, hit.path).split("\\").join("/"), apart)).length;
+				// A search gives up after so many hits: when it did, and none of those it gave were outside the documents, it is not known.
+				if (outside === 0 && hits.length >= SEARCH_GIVES_UP_AT) continue;
+				found.set(name.toLowerCase(), outside);
 			}
 			setUses(found);
 			notify(usesSummary(found));
@@ -68,6 +82,8 @@ export function TableView(props: { path: string }) {
 		const words = filter().trim().toLowerCase().split(/\s+/).filter(Boolean);
 		let list = table().rows.map((cells, index) => ({ cells, index }));
 		if (onlyMissing() && uses()) list = list.filter(({ cells }) => usesOf(cells) === 0);
+		const wanted = onlyStatus();
+		if (wanted !== null && statusAt() >= 0) list = list.filter(({ cells }) => (cells[statusAt()]?.text ?? "").trim().toLowerCase() === wanted);
 		if (words.length) list = list.filter(({ cells }) => words.every((word) => cells.some((cell) => cell.text.toLowerCase().includes(word))));
 		const by = order();
 		if (by) {
@@ -75,6 +91,14 @@ export function TableView(props: { path: string }) {
 			list = [...list].sort((a, b) => value(a.cells).localeCompare(value(b.cells), undefined, { numeric: true, sensitivity: "base" }) * (by.down ? -1 : 1));
 		}
 		return list;
+	});
+
+	/** The rows drawn: the first of them, and the row being typed in when it is beyond those, so that a row added to a long table is there to type in. */
+	const drawn = createMemo(() => {
+		const first = rows().slice(0, ROWS_SHOWN);
+		const typing = editing();
+		const beyond = typing && !first.some((row) => row.index === typing.row) ? rows().find((row) => row.index === typing.row) : undefined;
+		return beyond ? [...first, beyond] : first;
 	});
 
 	/** Changes one cell: that part of the text, written as a cell must be. A row short of the column gets the cells between. */
@@ -107,11 +131,11 @@ export function TableView(props: { path: string }) {
 		model.pushStackElement();
 		setFilter("");
 		setOrder(null);
+		setOnlyStatus(null);
+		setOnlyMissing(false);
 		queueMicrotask(() => setEditing({ row: table().rows.length - 1, column: 0 }));
 	};
 
-	/** The row the keyboard or the pointer was last in, by its place in the file: the one Delete row takes out. */
-	const [current, setCurrent] = createSignal<number | null>(null);
 	const deleteRow = () => {
 		const row = current();
 		if (!model || row === null) return;
@@ -166,7 +190,7 @@ export function TableView(props: { path: string }) {
 					<span class="table-tally" aria-label="Rows by status">
 						<For each={counted()!.by}>
 							{([status, count]) => (
-								<button class={`doc-status tone-${toneOf(status)}`} title={`Show only the rows whose status is ${status || "empty"}`} onClick={() => setFilter(status)}>
+								<button class={`doc-status tone-${toneOf(status)}`} aria-pressed={onlyStatus() === status} title={onlyStatus() === status ? "Show every row again" : `Show only the rows whose status is ${status || "empty"}`} onClick={() => setOnlyStatus(onlyStatus() === status ? null : status)}>
 									{status || "no status"} {count}
 								</button>
 							)}
@@ -225,7 +249,7 @@ export function TableView(props: { path: string }) {
 						</tr>
 					</thead>
 					<tbody ref={body}>
-						<For each={rows().slice(0, ROWS_SHOWN)}>
+						<For each={drawn()}>
 							{({ cells, index }) => (
 								<tr>
 									<For each={table().header}>

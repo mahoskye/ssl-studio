@@ -23,14 +23,22 @@ export function mergeManifest(existing: string | null | undefined, files: readon
 	const at = (name: string) => columnOf({ header: header.map((text) => ({ text, start: 0, end: 0 })) }, name);
 	const [path, kind, bytes, lines, sha, status] = ["path", "kind", "bytes", "lines", "sha256", "status"].map(at) as [number, number, number, number, number, number];
 	const now = new Map(files.map((file) => [file.path, file]));
+	// A file renamed only in the case of its letters is the same file where the file system says so: it keeps its row.
+	const byLower = new Map<string, ManifestFile>();
+	for (const file of files) if (!byLower.has(file.path.toLowerCase())) byLower.set(file.path.toLowerCase(), file);
+	const listed = new Set(table.rows.map((cells) => (cells[path]?.text ?? "").trim()));
+	const eol = (existing ?? "").includes("\r\n") ? "\r\n" : "\n";
 	const seen = new Set<string>();
 	const counts = { added: 0, changed: 0, gone: 0, same: 0 };
 	const out: string[][] = [];
 	for (const cells of table.rows) {
-		const row = header.map((_, i) => cells[i]?.text ?? "");
+		// A row with more cells than there are columns keeps them: what a person wrote is not dropped for being out of place.
+		const row = [...header.map((_, i) => cells[i]?.text ?? ""), ...cells.slice(header.length).map((cell) => cell.text)];
 		const name = row[path]!.trim();
-		const file = now.get(name);
-		seen.add(name);
+		const renamed = now.has(name) ? undefined : byLower.get(name.toLowerCase());
+		const file = now.get(name) ?? (renamed && !listed.has(renamed.path) ? renamed : undefined);
+		if (file && file.path !== name) row[path] = file.path;
+		seen.add(file?.path ?? name);
 		if (!file) {
 			if (row[status]!.trim().toLowerCase() !== GONE) counts.gone++;
 			row[status] = GONE;
@@ -50,7 +58,7 @@ export function mergeManifest(existing: string | null | undefined, files: readon
 		out.push(row);
 		counts.added++;
 	}
-	return { text: `${[header, ...out].map((row) => csvRow(row, delimiter)).join("\n")}\n`, ...counts };
+	return { text: `${[header, ...out].map((row) => csvRow(row, delimiter)).join(eol)}${eol}`, ...counts };
 }
 
 /** What a manifest's update came to, in a sentence. */

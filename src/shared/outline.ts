@@ -3,6 +3,7 @@
 // keys, a JSON document's keys, a SQL file's statements, a YAML file's top
 // keys. SSL's own outline comes from the language server and is not read here
 // (ADR 0003).
+import { HEADING, plainMarkdown } from "./frontMatter";
 
 export type OutlineItem = {
 	name: string;
@@ -58,17 +59,18 @@ function markdown(lines: string[]): OutlineItem[] {
 	}
 	for (; at < lines.length; at++) {
 		const line = lines[at]!;
-		const fenced = /^\s{0,3}(`{3,}|~{3,})/.exec(line);
+		const fenced = /^\s{0,3}(`{3,}|~{3,})(.*)$/.exec(line);
 		if (fenced) {
-			if (!fence) fence = fenced[1]![0]!.repeat(fenced[1]!.length);
-			else if (fenced[1]!.startsWith(fence)) fence = "";
+			// A fence is closed by one of its own marks, at least as long, with nothing after it: "```python" inside a block opens nothing and closes nothing.
+			if (!fence) fence = fenced[1]!;
+			else if (fenced[1]![0] === fence[0] && fenced[1]!.length >= fence.length && !fenced[2]!.trim()) fence = "";
 			continue;
 		}
 		if (fence) continue;
-		const heading = /^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line);
+		const heading = HEADING.exec(line);
 		if (!heading) continue;
 		const level = heading[1]!.length;
-		const name = heading[2]!.replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/[*_`~]+/g, "").trim();
+		const name = plainMarkdown(heading[2]!);
 		if (!name) continue;
 		// A heading ends where the next of its level, or of a higher one, begins.
 		while (open.length && open[open.length - 1]!.level >= level) open.pop()!.item.endLine = at;
@@ -112,8 +114,9 @@ function tables(lines: string[], toml: boolean): OutlineItem[] {
 		const into = table ? table.children : top;
 		if (into.length < MOST) into.push({ name: pair[1]!.replace(/^["']|["']$/g, ""), kind: "key", line: at + 1, endLine: at + 1, children: [] });
 		if (!toml) continue;
-		const triple = /("""|''')/.exec(value);
-		if (triple && value.indexOf(triple[1]!, triple.index + 3) < 0) inside = triple[1]!;
+		// A string of several lines opens the value: three quotes in a comment after it open nothing.
+		const triple = /^("""|''')/.exec(value);
+		if (triple && value.indexOf(triple[1]!, 3) < 0) inside = triple[1]!;
 		else depth = Math.max(0, brackets(value));
 	}
 	return top;
@@ -178,7 +181,8 @@ const SQL_NAME = String.raw`((?:\[[^\]]+\]|"[^"]+"|[\w$#@]+)(?:\.(?:\[[^\]]+\]|"
 function statementName(sql: string): { name: string; detail?: string } {
 	const flat = sql.replace(/\s+/g, " ").trim();
 	const first = (pattern: string) => new RegExp(pattern, "i").exec(flat);
-	const made = first(`^(create|alter|drop)\\s+(?:or\\s+replace\\s+)?(?:unique\\s+|temporary\\s+|temp\\s+|global\\s+)*(\\w+)\\s+(?:if\\s+(?:not\\s+)?exists\\s+)?${SQL_NAME}`);
+	// The words between the verb and the kind of thing say how it is made, not what it is: OR ALTER, FORCE, MATERIALIZED.
+	const made = first(`^(create|alter|drop)\\s+(?:or\\s+(?:replace|alter)\\s+)?(?:(?:unique|temporary|temp|global|no\\s+force|force|editionable|noneditionable|materialized|clustered|nonclustered|public|bitmap)\\s+)*(\\w+)\\s+(?:if\\s+(?:not\\s+)?exists\\s+)?${SQL_NAME}`);
 	if (made) return { name: `${made[1]!.toUpperCase()} ${made[2]!.toUpperCase()} ${made[3]}` };
 	const into = first(`^insert\\s+(?:into\\s+)?${SQL_NAME}`);
 	if (into) return { name: `INSERT INTO ${into[1]}` };
@@ -212,6 +216,12 @@ function sql(text: string): OutlineItem[] {
 		if (c === "\n") {
 			line++;
 			if (start >= 0) body += " ";
+			continue;
+		}
+		// A line that is only GO, or only a slash, ends a batch where a script has no semicolons (SQL Server, Oracle).
+		if ((i === 0 || text[i - 1] === "\n") && /^(?:go|\/)[ \t]*\r?(?:\n|$)/i.test(text.slice(i, i + 12))) {
+			end(Math.max(startLine, line - 1));
+			while (i < text.length && text[i + 1] !== "\n") i++;
 			continue;
 		}
 		if (c === "-" && text[i + 1] === "-") {

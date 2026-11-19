@@ -117,6 +117,8 @@ export function jsonProblem(text: string): JsonProblem | null {
 		return null;
 	} catch (e) {
 		if (e instanceof Wrong) return { offset: e.offset, length: e.length, message: e.message };
+		// Nested deeper than this reader can follow: whether it reads is not for it to say.
+		if (e instanceof RangeError) return null;
 		throw e;
 	}
 }

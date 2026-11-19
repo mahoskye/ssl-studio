@@ -31,6 +31,7 @@ import {
 	ticketTemplate,
 	toneOf,
 	frontValue,
+	isCatalog,
 	type DocArea,
 	type KnowledgeKind,
 } from "../shared/projectDocs";
@@ -80,7 +81,8 @@ async function put(path: string, text: string, existed: boolean) {
 
 /** Writes an area's catalog afresh from its documents; makes the catalog where there is none. True when it changed. */
 async function writeCatalog(area: DocArea, files: readonly DocFile[]): Promise<boolean> {
-	const path = joinPath(areaFolder(area), CATALOG_FILE);
+	// The catalog the folder already has, however its name is cased: a second one is not made beside it.
+	const path = files.find((file) => file.group === area && file.exists && isCatalog(file) && !file.name.includes("/") && !file.name.includes("\\"))?.path ?? joinPath(areaFolder(area), CATALOG_FILE);
 	const items = catalogItems(area, files, docsFolder());
 	const before = await current(path);
 	if (before === null && !items.length) return false;
@@ -157,7 +159,8 @@ export async function importTickets() {
 	if (!ready()) return;
 	const exported = /\.(csv|tsv|json)$/i;
 	const open = activePath();
-	const inFolder = open && exported.test(open) && !open.startsWith(areaFolder("registries")) ? relativeTo(root(), open) : "";
+	// Both spelled the one way the editor spells a path: a drive's letter is lowered there.
+	const inFolder = open && exported.test(open) && !canonical(open).startsWith(canonical(areaFolder("registries"))) ? relativeTo(root(), open) : "";
 	const typed = (await ask("The exported file (CSV or JSON): its path in this folder", inFolder))?.trim();
 	if (!typed) return;
 	const from = /^([A-Za-z]:[\\/]|\/)/.test(typed) ? typed : joinPath(root(), ...typed.split(/[\\/]/));
@@ -173,6 +176,9 @@ export async function importTickets() {
 	} else read = ticketsFromTable(parseCsv(text));
 	if (read.problem) return notify(`${typed}: ${read.problem}`, "error");
 	if (!read.tickets.length) return notify(importSummary({ made: 0, updated: 0, same: 0, skipped: read.skipped }));
+	// A ticket that is in the export twice is one ticket: the last of its rows is the one that stands.
+	const once = new Map(read.tickets.map((ticket) => [ticket.key.toLowerCase(), ticket]));
+	read = { ...read, tickets: [...once.values()] };
 	const path = (ticket: ImportedTicket) => joinPath(areaFolder("tickets"), `${ticket.key}.md`);
 	const before = await Promise.all(read.tickets.map((ticket) => current(path(ticket))));
 	const here = before.filter((was) => was !== null).length;
@@ -230,7 +236,7 @@ function codeAtHand(): { path: string; from: number; to: number; text: string; l
 	const model = editor?.getModel();
 	const selection = editor?.getSelection();
 	if (!path || !editor || !model || !selection || selection.isEmpty()) return null;
-	if (isMarkdown(path) || path.startsWith(docsFolder())) return null;
+	if (isMarkdown(path) || canonical(path).startsWith(canonical(docsFolder()))) return null;
 	// Whole lines: a selection that stops at a line's start does not take that line.
 	const to = selection.endColumn === 1 && selection.endLineNumber > selection.startLineNumber ? selection.endLineNumber - 1 : selection.endLineNumber;
 	const language = model.getLanguageId();
@@ -318,8 +324,11 @@ export async function setStatus(path: string, status: string) {
 	if (after === before) return;
 	try {
 		await put(path, after, true);
-		const area = (Object.keys(DOC_FOLDERS) as DocArea[]).find((name) => canonical(path).startsWith(canonical(areaFolder(name))));
-		if (area) await writeCatalog(area, await backend.docs());
+		// The catalog that lists it: a spec the planner wrote is beside its plan, and is listed with the specs.
+		const listing = await backend.docs();
+		const group = listing.find((d) => canonical(d.path) === canonical(path))?.group;
+		const area = (Object.keys(DOC_FOLDERS) as DocArea[]).find((name) => name === group);
+		if (area) await writeCatalog(area, listing);
 		setState("treeVersion", (v) => v + 1);
 	} catch (e: any) {
 		notify(String(e?.message ?? e), "error");

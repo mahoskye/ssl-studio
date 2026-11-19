@@ -38,10 +38,11 @@ export function workList(files: readonly DocFile[], root: string | undefined | n
 	const plansOf = (ticket: DocFile) => plans.filter((plan) => plan.tickets?.some((key) => same(key, ticket.ticket)));
 	// A ticket is under its parent when the parent is in the folder, and is not its own ancestor.
 	const parentOf = (ticket: DocFile) => tickets.find((other) => other !== ticket && same(other.ticket, ticket.parent));
+	/** Whether a ticket is its own ancestor: one of a ring of tickets that name each other. A ticket under such a ring is not. */
 	const loops = (ticket: DocFile) => {
-		const seen = new Set<DocFile>([ticket]);
-		for (let up = parentOf(ticket); up; up = parentOf(up)) {
-			if (seen.has(up)) return true;
+		const seen = new Set<DocFile>();
+		for (let up = parentOf(ticket); up && !seen.has(up); up = parentOf(up)) {
+			if (up === ticket) return true;
 			seen.add(up);
 		}
 		return false;

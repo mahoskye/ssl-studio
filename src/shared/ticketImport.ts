@@ -99,7 +99,14 @@ function flat(node: unknown): string {
 	return inner.join("");
 }
 const named = (value: unknown) => (typeof value === "string" ? value : value && typeof value === "object" && typeof (value as { name?: unknown }).name === "string" ? (value as { name: string }).name : "");
-const keyOf = (value: unknown) => (typeof value === "string" ? value : value && typeof value === "object" && typeof (value as { key?: unknown }).key === "string" ? (value as { key: string }).key : "");
+/** A ticket's key from what stands for one: the key itself, a number (a system that numbers its tickets), or an object that holds one. */
+const keyOf = (value: unknown): string => {
+	if (typeof value === "string") return value;
+	if (typeof value === "number" && Number.isFinite(value)) return String(value);
+	if (!value || typeof value !== "object") return "";
+	const held = value as { key?: unknown; number?: unknown; id?: unknown };
+	return typeof held.key === "string" ? held.key : typeof held.number === "number" ? String(held.number) : typeof held.id === "number" ? String(held.id) : "";
+};
 
 /**
  * The tickets in what a ticket system's API returns: one issue, a list of
@@ -114,7 +121,7 @@ export function ticketsFromJson(value: unknown): Imported {
 	for (const entry of list) {
 		const issue = (entry && typeof entry === "object" ? entry : {}) as Record<string, unknown>;
 		const fields = (issue.fields && typeof issue.fields === "object" ? issue.fields : issue) as Record<string, unknown>;
-		const own = ticketKey(keyOf(issue.key ?? issue.id ?? ""));
+		const own = ticketKey(keyOf(issue.key ?? issue.number ?? issue.id ?? ""));
 		const title = clean(named(fields.summary ?? fields.title)).replace(/\s+/g, " ");
 		if (!own || !title) {
 			skipped++;

@@ -175,7 +175,8 @@ ${PROMPTS.reference}
 
 /** A snippet starts with a comment that says what it is for: the catalog reads its first line as the title. */
 export const snippetTemplate = (snippet: { title: string; language: "sql" | "ssl" }) =>
-	snippet.language === "sql" ? `-- ${snippet.title}\n-- ${PROMPTS.sql}\n\nSELECT 1;\n` : `/* ${snippet.title}\n   ${PROMPTS.ssl}\n;\n`;
+	// An SSL comment runs to its first semicolon: one in the title would end it early.
+	snippet.language === "sql" ? `-- ${snippet.title}\n-- ${PROMPTS.sql}\n\nSELECT 1;\n` : `/* ${snippet.title.replace(/;/g, ",")}\n   ${PROMPTS.ssl}\n;\n`;
 
 export const stateTemplate = (name: string, date: string) => `# Where ${name} stands
 
@@ -248,6 +249,8 @@ export function catalogItems(area: DocArea, files: readonly DocFile[], docsFolde
 			const path = relativePath(folder, file.path);
 			const named = file.title || baseName(file.name).replace(/\.(md|markdown|csv|tsv)$/i, "");
 			if (area === "tickets") return { path, title: file.ticket && !named.startsWith(file.ticket) ? `${file.ticket}: ${named}` : named, status: file.status, summary: file.summary };
+			// A note kept beside the registries is a document, not a table of none.
+			if (area === "registries" && file.rows === undefined && !file.problems) return { path, title: named, status: file.status, summary: file.summary };
 			if (area === "registries") return { path, title: registryTitle(file.name), status: progress(file) };
 			if (area === "knowledge") return { path, title: named, status: file.status, summary: file.summary, section: KNOWLEDGE.find((k) => k.id === file.kind)?.name ?? "Other" };
 			return { path, title: named, status: file.status, summary: file.tickets?.length ? `For ${file.tickets.join(", ")}.${file.summary ? ` ${file.summary}` : ""}` : file.summary };

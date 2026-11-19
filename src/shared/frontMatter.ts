@@ -11,9 +11,19 @@ export type FrontMatter = {
 	body: string;
 };
 
+/** A value as it was meant: a double-quoted one with its escapes undone (it is written as JSON writes a string), a single-quoted one with a doubled quote as one. */
 const unquote = (value: string) => {
 	const v = value.trim();
-	return v.length >= 2 && ((v[0] === '"' && v.at(-1) === '"') || (v[0] === "'" && v.at(-1) === "'")) ? v.slice(1, -1) : v;
+	if (v.length >= 2 && v[0] === '"' && v.at(-1) === '"') {
+		try {
+			const read: unknown = JSON.parse(v);
+			if (typeof read === "string") return read;
+		} catch {
+			// Not written as JSON writes it: what is between the quotes, as it stands.
+		}
+		return v.slice(1, -1);
+	}
+	return v.length >= 2 && v[0] === "'" && v.at(-1) === "'" ? v.slice(1, -1).replace(/''/g, "'") : v;
 };
 
 /** A list written on one line, `[a, "b, c", d]`: split at the commas outside quotes. */
@@ -73,18 +83,30 @@ export const one = (value: string | string[] | undefined) => (Array.isArray(valu
 /** A value as a list: one value is a list of one, and "a, b" is two. */
 export const many = (value: string | string[] | undefined) => (Array.isArray(value) ? value : (value ?? "").split(",")).map((v) => v.trim()).filter(Boolean);
 
-const plain = (markdown: string) =>
+/**
+ * Markdown as the words it says: a link as its text, emphasis without its
+ * marks. An underscore or an asterisk inside a word is part of the word:
+ * `DUE_SOON_AT` is a name, not emphasis.
+ */
+export const plainMarkdown = (markdown: string) =>
 	markdown
 		.replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
-		.replace(/[*_`~]+/g, "")
+		.replace(/`+([^`]*)`+/g, "$1")
+		.replace(/~~(?=\S)(.+?)(?<=\S)~~/g, "$1")
+		.replace(/(^|[^\w*])(\*\*|\*)(?=\S)(.+?)(?<=\S)\2(?![\w*])/g, "$1$3")
+		.replace(/(^|[^\w])(__|_)(?=\S)(.+?)(?<=\S)\2(?![\w])/g, "$1$3")
 		.replace(/\s+/g, " ")
 		.trim();
+const plain = plainMarkdown;
+
+/** A heading line: its level and its words. Closing hashes are a mark only after a space: "Using C#" ends in a sharp. */
+export const HEADING = /^\s{0,3}(#{1,6})\s+(.+?)(?:\s+#+)?\s*$/;
 
 /** A document's title: what its front matter says, or its first heading. */
 export function titleOf(text: string): string {
 	const { values, body } = frontMatter(text);
-	const heading = /^#{1,6}\s+(.+?)\s*#*\s*$/m.exec(body);
-	return one(values.title) || (heading ? plain(heading[1]!) : "");
+	const heading = body.split(/\r?\n/).map((line) => HEADING.exec(line)).find(Boolean);
+	return one(values.title) || (heading ? plain(heading[2]!) : "");
 }
 
 /** The longest a one-line summary is. */
@@ -102,7 +124,10 @@ export function summaryOf(text: string): string {
 	if (!paragraph) return "";
 	const flat = plain(paragraph);
 	const sentence = /^(.*?[.!?])(\s|$)/.exec(flat)?.[1] ?? flat;
-	return sentence.length <= SUMMARY_MAX ? sentence : `${sentence.slice(0, sentence.lastIndexOf(" ", SUMMARY_MAX - 1))}…`;
+	if (sentence.length <= SUMMARY_MAX) return sentence;
+	// Cut at a word's end where there is one; a single long word is cut where the room ends.
+	const space = sentence.lastIndexOf(" ", SUMMARY_MAX - 1);
+	return `${sentence.slice(0, space > 0 ? space : SUMMARY_MAX - 1)}…`;
 }
 
 /**

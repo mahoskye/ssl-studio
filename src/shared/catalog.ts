@@ -40,10 +40,18 @@ export function catalogList(items: readonly CatalogItem[]): string {
 		.join("\n\n");
 }
 
-/** Where the list is in a catalog's text: from the start marker to the end of the end marker. Null when there are no markers. */
+/** Where a marker stands on a line of its own, from `from` on: a marker named in a sentence, or in a code span, is not one. -1 when there is none. */
+function markerAt(text: string, marker: string, from = 0): number {
+	const pattern = new RegExp(`^[ \\t]*${marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[ \\t]*\\r?$`, "gm");
+	pattern.lastIndex = from;
+	const found = pattern.exec(text);
+	return found ? found.index + found[0].indexOf(marker) : -1;
+}
+
+/** Where the list is in a catalog's text: from the start marker to the end of the end marker. Null when there is no such pair. */
 export function catalogBlock(text: string): { start: number; end: number; inner: string } | null {
-	const start = text.indexOf(CATALOG_START);
-	const close = start < 0 ? -1 : text.indexOf(CATALOG_END, start + CATALOG_START.length);
+	const start = markerAt(text, CATALOG_START);
+	const close = start < 0 ? -1 : markerAt(text, CATALOG_END, start + CATALOG_START.length);
 	if (start < 0 || close < 0) return null;
 	// The list is compared and shown with plain line ends, whichever the file is written with.
 	return { start, end: close + CATALOG_END.length, inner: text.slice(start + CATALOG_START.length, close).replace(/\r\n/g, "\n").trim() };
@@ -56,6 +64,15 @@ export function withCatalog(text: string, items: readonly CatalogItem[]): string
 	const eol = (written: string) => (text.includes("\r\n") ? written.replace(/\n/g, "\r\n") : written);
 	const at = catalogBlock(text);
 	if (at) return text.slice(0, at.start) + eol(block(items)) + text.slice(at.end);
+	// A start marker whose end marker has gone: the list after it is the old list, as far as it runs. It is replaced,
+	// and what a person wrote after it stays. A second list is never added beside the first.
+	const open = markerAt(text, CATALOG_START);
+	if (open >= 0) {
+		const rest = text.slice(open + CATALOG_START.length);
+		const listed = /^(?:[ \t]*\r?\n|[ \t]*[-*+] .*\r?\n?|#{2,6} .*\r?\n?|Nothing here yet\.[ \t]*\r?\n?)*/.exec(rest)![0];
+		const after = rest.slice(listed.length);
+		return text.slice(0, open) + eol(block(items)) + (after ? eol("\n\n") + after : eol("\n"));
+	}
 	const body = text.replace(/\s+$/, "");
 	return `${body}${eol(`${body ? "\n\n" : ""}${block(items)}\n`)}`;
 }

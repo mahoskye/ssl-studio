@@ -24,8 +24,12 @@ const PLACEHOLDER: Record<string, string> = {
 const text = (value: unknown) => (typeof value === "string" && value.trim() ? value.trim() : undefined);
 /** A folder inside the project: relative, and never climbing out of it. */
 const folder = (value: unknown, fallback: string) => {
-	const name = text(value)?.replace(/[\\/]+$/, "");
-	return name && !isAbsolute(name) && !name.split(/[\\/]/).includes("..") ? name : fallback;
+	const said = text(value);
+	if (!said || isAbsolute(said)) return fallback;
+	// "./docs" and "docs/" are "docs": one spelling, so that a path made from it is the path the files have.
+	const parts = said.split(/[\\/]+/).filter((part) => part && part !== ".");
+	if (parts.includes("..")) return fallback;
+	return parts.length ? parts.join("/") : ".";
 };
 
 export async function readProject(root: string): Promise<Project> {
@@ -118,10 +122,11 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 	if (state) list.push({ path: join(docs, state), name: state, group: "project", exists: true, ...described(await head(join(docs, state))) });
 
 	/** The files under a folder that match, by name, up to the limit. */
-	const under = (full: string, pattern: RegExp) => {
+	const under = (full: string, pattern: RegExp, skip?: (path: string) => boolean) => {
 		if (!existsSync(full)) return [];
 		const paths: string[] = [];
-		for (const path of files.files(full)) if (pattern.test(path) && paths.push(path) >= DOC_LIMIT) break;
+		// What is skipped does not count towards the limit: a folder of tickets must not crowd out the documents beside it.
+		for (const path of files.files(full)) if (pattern.test(path) && !skip?.(path) && paths.push(path) >= DOC_LIMIT) break;
 		return paths.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base", numeric: true }));
 	};
 	const area = (name: DocArea) => join(docs, DOC_FOLDERS[name]);
@@ -174,8 +179,8 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 		list.push({ path, name, group: "registries", exists: true, rows: table.rows.length, tally: tally(table) ?? undefined, problems: table.problems.length ? table.problems : undefined });
 	}
 	// Everything else in the docs folder.
-	for (const path of under(docs, MARKDOWN)) {
-		if (inArea(path) || (state && path === join(docs, state))) continue;
+	for (const path of under(docs, MARKDOWN, inArea)) {
+		if (state && path === join(docs, state)) continue;
 		list.push({ path, name: relative(docs, path), group: "docs", exists: true });
 	}
 	for (const path of under(join(root, project.schema), /\.(md|markdown|sql)$/i)) list.push({ path, name: relative(join(root, project.schema), path), group: "schema", exists: true });
