@@ -95,8 +95,8 @@ export function createBackend(host: Host, initial?: string) {
 			}
 			return out;
 		},
-		write: async (path, text) => {
-			const result = await need().write(path, text);
+		write: async (path, text, asText) => {
+			const result = await need().write(path, text, asText);
 			await history!.record(need().inside(path), text);
 			return result;
 		},

@@ -90,10 +90,10 @@ of the text editor, and nothing of its own.
 | Drag tabs | Yes | Bring | Built: along the row and to the other group; Ctrl+Shift+PageUp and PageDown too |
 | Split editor | Yes | Have | Side by side, Ctrl+\ |
 | Unsaved mark | Yes | Have | And closing asks first |
-| Tab overflow | Yes | Have | A button lists the tabs that do not fit |
+| Tab overflow | Partly | Later | The row scrolls, and the open tab is brought into view; no list of the tabs that do not fit |
 | Preview tabs | No | Later | One click opens a tab that the next click replaces |
 | Grid layouts | No | Later | Two by two, three columns |
-| Breadcrumbs | Partly | Later | Markdown shows its headings; SSL does not show where the cursor is |
+| Breadcrumbs | Yes | Have | Above the text, from the language server's symbols; Markdown shows its headings |
 | Compare two files | Partly | Later | Review shows a diff for the agent's edits, not for any two files |
 
 ## Editing
@@ -213,7 +213,7 @@ Nothing in the app runs git. Every row was seen as missing.
 | Line ends kept | Yes | Have | A file with Windows line ends was saved with them |
 | Encoding kept | Yes | Have | A file in the one-byte Windows encoding read right (ADR 0019) |
 | Images | Yes | Bring | Built: PNG, JPEG, GIF, WebP, BMP and ICO are shown, with their pixels and size |
-| Binary files | Yes | Bring | Built: it says it is not text and how large; it is never in an editor |
+| Binary files | Yes | Bring | Built: a file with a zero byte near its start says it is not text, and how large |
 | Encoding shown | Yes | Bring | Built: in the status bar, for the open file |
 | Line ends shown | Yes | Bring | Built: LF or CRLF in the status bar; a click changes them all |
 | YAML | Partly | Later | No check: ADR 0018 |
@@ -334,7 +334,9 @@ window), and the dark theme at 720 wide.
 | Back and forward | Medium | Yes | Alt+Left and Alt+Right through where the cursor has been |
 
 A place is kept when the cursor lands in another file, or ten lines or
-more from where it was; nearer than that, the place moves with it. On a
+more from where it was; nearer than that, the place moves with it. Going
+back to a file that is open in the other group goes to that group; a
+place in a file that can no longer be opened is passed over. On a
 Mac the two keys are left to the text, where Alt and an arrow move by a
 word: the commands are there to be given keys. The mouse's back and
 forward buttons are not wired: they could not be tried here. Ctrl+G and
@@ -355,14 +357,19 @@ clipboard: a file on the system's clipboard is only its path as text. A
 cut row is dimmed until it is pasted. A paste asks nothing (it was asked
 for twice); a drop asks, because a drop is easily a slip of the hand. A
 move is a rename, so open tabs, the places to go back to and the links in
-the working documents follow it. Nothing is written over: a move onto a
-name that is taken is refused, and a copy takes the name "… copy". A copy
-is of the file on disk, and says so when the file has unsaved changes.
+the working documents follow it, and the language server is told which
+scripts moved. Nothing is written over: a move onto a name that is taken
+is refused, and a copy takes the name "… copy". A copy is of the file on
+disk, and says so when the file has unsaved changes. A move to a path
+that a tab is still open on (a file that was removed, kept for its
+unsaved edits) is refused until that tab is closed.
 
 A dragged tab lands where the mark is: the pinned stay first, so a tab
 dropped among them stands after them. Dropped in the other group it
-leaves this one; a group left with no tabs closes. The keyboard does the
-same along a row with Ctrl+Shift+PageUp and Ctrl+Shift+PageDown.
+leaves this one, with its cursor where it was; a group left with no tabs
+closes. The keyboard does the same along a row with Ctrl+Shift+PageUp and
+Ctrl+Shift+PageDown, and to the other group with the command "Move tab to
+the other group", which has no key of its own.
 
 Not built: dragging a file in from outside the app, a folder that opens
 when a drag rests on it, and a drop onto the editor to open a file there.
@@ -381,15 +388,20 @@ dragged by events given to the page, not by the pointer.
 | Line ends shown | Small | Yes | In the status bar; a click changes them |
 
 A file is a picture by the end of its name, and other bytes by a zero
-byte near its start, which no text has. Neither is read as text, so
-neither is put in an editor; and the backend refuses to write text over
-either, whatever asks it to. An SVG is text and is edited as text. A
-picture larger than 20 MB is not shown.
+byte in its first 8000, which no text has. Neither is read as text, so
+neither is put in an editor, and the backend refuses to write text over
+either. A file whose first zero byte comes later than that still opens
+as text, as it did before. Two things are let through: UTF-16 without its
+mark (letters with a zero byte beside each) opens as it always did, to be
+saved back byte for byte; and an editor may save the text it opened, even
+after a zero byte was typed into it. An SVG is text and is edited as
+text. A picture larger than 20 MB is not shown.
 
 The encoding is what the file was read as, and it is saved as that
 ([ADR 0019](adr/0019-a-file-is-written-back-in-what-it-was-written-in.md)).
 Changing it is still done outside the IDE. Changing the line ends is an
-edit like any other: it can be undone, and it is kept by saving. A file
+edit like any other: it can be undone, and it is kept by saving; "Revert"
+puts the file's own line ends back with its text. A file
 with both kinds of line end is shown as the kind it has most of, and
 saving it writes that kind throughout: the editor's own way, from before
 this step.

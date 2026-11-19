@@ -1,6 +1,7 @@
 // Files inside one workspace folder. Every path the UI sends is absolute
 // and must stay inside the root.
-import { cpSync, mkdirSync, readdirSync, renameSync, statSync, watch, existsSync, type FSWatcher } from "node:fs";
+import { mkdirSync, readdirSync, renameSync, statSync, watch, existsSync, type FSWatcher } from "node:fs";
+import { cp, rm } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type { Entry, FileText, SearchHit } from "../shared/protocol";
 import { replaceIn, searchPattern, type SearchOptions } from "../shared/searchPattern";
@@ -67,7 +68,7 @@ export class WorkspaceFiles {
 	 * Writes through a temporary file, so a crash never leaves half a script. A file is written in what it is
 	 * written in now, mark and all; a new file in UTF-8.
 	 */
-	async write(path: string, text: string) {
+	async write(path: string, text: string, asText = false) {
 		const full = this.inside(path);
 		mkdirSync(dirname(full), { recursive: true });
 		const temp = join(dirname(full), `.${basename(full)}.ssl-studio-tmp`);
@@ -79,7 +80,9 @@ export class WorkspaceFiles {
 			// A file that cannot be read now is written as a new one would be.
 		}
 		// What is read as bytes has no text here, and text written over it would be the end of it.
-		if (bytesNow && (imageType(full) || looksBinary(bytesNow))) throw new Error(`${relative(this.root, full)} is not text: it is not written over from here.`);
+		// A picture by its name is never text. Other bytes are let be, unless what is written is known to be the
+		// file's own text (a zero byte typed into it, and saved, makes it look like bytes from then on).
+		if (bytesNow && (imageType(full) || (looksBinary(bytesNow) && !asText))) throw new Error(`${relative(this.root, full)} is not text: it is not written over from here.`);
 		if (bytesNow) encoding = encodingOf(bytesNow);
 		let bytes: Uint8Array;
 		try {
@@ -121,15 +124,23 @@ export class WorkspaceFiles {
 		return { type, base64: Buffer.from(await Bun.file(full).arrayBuffer()).toString("base64") };
 	}
 
-	/** A copy of a file, or of a folder and everything in it, under a name nothing has yet. */
-	copy(from: string, to: string) {
+	/**
+	 * A copy of a file, or of a folder and everything in it, under a name nothing has yet. A copy that fails part
+	 * of the way is taken away again: nothing was there before it, so nothing is lost by that.
+	 */
+	async copy(from: string, to: string) {
 		const source = this.inside(from);
 		const target = this.inside(to);
 		if (existsSync(target)) throw new Error(`already exists: ${relative(this.root, target)}`);
 		// A folder copied into itself would be copied into its own copy, without end.
 		if (target === source || target.startsWith(source + sep)) throw new Error(`${relative(this.root, source)} cannot be copied into itself`);
 		mkdirSync(dirname(target), { recursive: true });
-		cpSync(source, target, { recursive: true, errorOnExist: true, force: false });
+		try {
+			await cp(source, target, { recursive: true, errorOnExist: true, force: false });
+		} catch (e) {
+			await rm(target, { recursive: true, force: true });
+			throw e;
+		}
 	}
 
 	*files(dir = this.root): Generator<string> {

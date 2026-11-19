@@ -20,6 +20,11 @@ describe("the name of a copy", () => {
 		expect(copyName("DueDates.spec.md", none)).toBe("DueDates copy.spec.md");
 	});
 
+	test("a folder's name is whole, dots and all: the word goes last", () => {
+		expect(copyName("v1.2 notes", none, "dir")).toBe("v1.2 notes copy");
+		expect(copyName("src", taken("src copy"), "dir")).toBe("src copy 2");
+	});
+
 	test("a name that begins with a dot keeps it", () => {
 		expect(copyName(".env", none)).toBe(".env copy");
 		expect(copyName(".editorconfig.bak", none)).toBe(".editorconfig copy.bak");

@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFrameReader, frame } from "../src/bun/frames";
@@ -60,27 +60,31 @@ describe("copying in the workspace", () => {
 	const files = new WorkspaceFiles(root);
 
 	test("a file is copied, and the original stays", async () => {
-		files.copy(join(root, "src", "a.ssl"), join(root, "src", "a copy.ssl"));
+		await files.copy(join(root, "src", "a.ssl"), join(root, "src", "a copy.ssl"));
 		expect((await files.read(join(root, "src", "a copy.ssl"))).text).toBe(":RETURN 1;\n");
 		expect((await files.read(join(root, "src", "a.ssl"))).text).toBe(":RETURN 1;\n");
 	});
 	test("a folder is copied with everything in it", async () => {
-		files.copy(join(root, "src"), join(root, "src copy"));
+		await files.copy(join(root, "src"), join(root, "src copy"));
 		expect((await files.read(join(root, "src copy", "deep", "b.ssl"))).text).toBe(":RETURN 2;\n");
 	});
 	test("a copy into a folder that is not there yet makes the folder", async () => {
-		files.copy(join(root, "src", "a.ssl"), join(root, "new", "a.ssl"));
+		await files.copy(join(root, "src", "a.ssl"), join(root, "new", "a.ssl"));
 		expect((await files.read(join(root, "new", "a.ssl"))).text).toBe(":RETURN 1;\n");
 	});
-	test("nothing is written over", () => {
-		expect(() => files.copy(join(root, "src", "a.ssl"), join(root, "src", "deep", "b.ssl"))).toThrow(/already exists/);
+	test("nothing is written over", async () => {
+		await expect(files.copy(join(root, "src", "a.ssl"), join(root, "src", "deep", "b.ssl"))).rejects.toThrow(/already exists/);
 	});
-	test("a folder is not copied into itself", () => {
-		expect(() => files.copy(join(root, "src"), join(root, "src", "deep", "src"))).toThrow(/into itself/);
+	test("a folder is not copied into itself", async () => {
+		await expect(files.copy(join(root, "src"), join(root, "src", "deep", "src"))).rejects.toThrow(/into itself/);
 	});
-	test("nothing is copied from or to outside the workspace", () => {
-		expect(() => files.copy(join(root, "..", "ws", "b.ssl"), join(root, "b.ssl"))).toThrow(/outside/);
-		expect(() => files.copy(join(root, "src", "a.ssl"), join(root, "..", "a.ssl"))).toThrow(/outside/);
+	test("nothing is copied from or to outside the workspace", async () => {
+		await expect(files.copy(join(root, "..", "ws", "b.ssl"), join(root, "b.ssl"))).rejects.toThrow(/outside/);
+		await expect(files.copy(join(root, "src", "a.ssl"), join(root, "..", "a.ssl"))).rejects.toThrow(/outside/);
+	});
+	test("a copy of something that is not there leaves nothing behind", async () => {
+		await expect(files.copy(join(root, "src", "nothing.ssl"), join(root, "made", "nothing.ssl"))).rejects.toThrow();
+		expect(existsSync(join(root, "made", "nothing.ssl"))).toBe(false);
 	});
 });
 
@@ -117,6 +121,16 @@ describe("files that are not text", () => {
 		await expect(files.image(join(root, "a.ssl"))).rejects.toThrow(/not a picture/);
 		await expect(files.image(join(root, "blob.bin"))).rejects.toThrow(/not a picture/);
 		expect(() => files.inside(join(root, "..", "dot.png"))).toThrow(/outside/);
+	});
+	test("a text file with a zero byte typed into it can still be saved by the editor that holds it", async () => {
+		const file = join(root, "typed.ssl");
+		writeFileSync(file, "a := 1;\n");
+		await files.write(file, "a := \u0000 1;\n", true);
+		// Read from now on as bytes, it is still the editor's own text to save.
+		await files.write(file, "a := 2;\n", true);
+		expect((await files.read(file)).text).toBe("a := 2;\n");
+		// A picture is a picture whoever asks.
+		await expect(files.write(join(root, "dot.png"), "text", true)).rejects.toThrow(/not text/);
 	});
 	test("text is never written over a file that is not text", async () => {
 		await expect(files.write(join(root, "dot.png"), "")).rejects.toThrow(/not text/);

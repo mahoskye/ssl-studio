@@ -182,7 +182,11 @@ export interface BackendApi {
 	/** Sizes in bytes of workspace files (missing ones are left out). */
 	sizes(paths: string[]): Promise<Record<string, number>>;
 	read(path: string): Promise<FileText>;
-	write(path: string, text: string): Promise<{ mtime: number }>;
+	/**
+	 * Writes a file's text, in the encoding it has. Text is not written over a file that is not text, unless
+	 * `asText` says the text is the file's own, read as text and edited: an editor saving what it opened.
+	 */
+	write(path: string, text: string, asText?: boolean): Promise<{ mtime: number }>;
 	create(path: string, kind: "file" | "dir"): Promise<void>;
 	rename(from: string, to: string): Promise<void>;
 	/** A picture's bytes, for showing it: its kind ("image/png") and the bytes in base64. */

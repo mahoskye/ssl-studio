@@ -3,7 +3,7 @@
 import { tabShown } from "../recentTabs";
 import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { monaco } from "./monaco";
-import { activePath, closeAllTabs, closeOtherTabs, closeTab, closeTabsToRight, documents, focusRequest, moveTab, openFile, revealSignal, revert, save, saveAll, setState, split, state, takeReveal, togglePin } from "../state";
+import { activePath, closeAllTabs, closeOtherTabs, closeTab, closeTabsToRight, documents, focusRequest, moveTab, openFile, revealSignal, revert, save, saveAll, setState, split, state, tabLeaving, takeReveal, togglePin } from "../state";
 import { landsBefore } from "../../shared/tabOrder";
 import { othersOf, rightOf } from "../../shared/tabOrder";
 import { chooseFromMenu } from "../panels/RowMenu";
@@ -26,7 +26,12 @@ import { getPath, SERVER_DEFAULTS } from "../../shared/styleProfile";
 import { RULER_MARGIN, rulerColumns } from "../../shared/houseStyle";
 import { noteCursor } from "../navigation";
 
+/** Where the cursor and the scroll were in each file a group showed, by the group's own number and the file's path. */
 const viewStates = new Map<string, monaco.editor.ICodeEditorViewState | null>();
+/** The same by the file alone, as it was last left in any group: what a tab moved to another group opens with. */
+const lastViews = new Map<string, monaco.editor.ICodeEditorViewState | null>();
+/** Each group as it is made gets a number of its own, for life: its place in the row changes when a group before it closes. */
+let groupsMade = 0;
 /** The editor width, in pixels, from which the minimap is shown: under it, code at the line length would run beneath the map. */
 const MINIMAP_FROM = 640;
 export const editors: monaco.editor.IStandaloneCodeEditor[] = [];
@@ -41,16 +46,17 @@ export function EditorGroup(props: { index: number }) {
 	let host!: HTMLDivElement;
 	let editor: monaco.editor.IStandaloneCodeEditor;
 	const group = () => state.groups[props.index]!;
+	const mine = ++groupsMade;
 	let shown: string | null = null;
 	const [lineCount, setLineCount] = createSignal(0);
 	// A picture, or other bytes: shown for what it is, never as text, and never as what its name would make it.
-	const showFile = () => Boolean(group().active && documents.get(group().active!)?.binary);
+	const showFile = () => Boolean(state.kindVersion >= 0 && group().active && documents.get(group().active!)?.binary);
 	const isPlan = () => isPlanPath(group().active) && !showFile();
 	const showChart = () => isPlan() && !state.planText[group().active!];
 	const isSsl = () => Boolean(group().active && documents.get(group().active!)?.model.getLanguageId() === "ssl");
 	// Blocks are a view of SSL only. The group remembers the choice, so the next
 	// script opens as blocks again, but a Markdown or SQL file never does.
-	const showBlocks = () => group().mode === "blocks" && isSsl() && !isPlan();
+	const showBlocks = () => group().mode === "blocks" && isSsl() && !isPlan() && !showFile();
 	const isDoc = () => isMarkdown(group().active) && !showFile();
 	const showRendered = () => isDoc() && !state.mdText[group().active!];
 	// A table of values opens as a table, with the same switch to its text as a document has.
@@ -84,7 +90,13 @@ export function EditorGroup(props: { index: number }) {
 			scrollBeyondLastLine: false,
 			rulers: rulers(),
 		});
-		editors[props.index] = editor;
+		// The editor is filed under the group's place in the row, and filed again when that place changes (the group
+		// before it closed): "the active editor" is looked up by place.
+		createEffect(() => {
+			const at = props.index;
+			editors[at] = editor;
+			onCleanup(() => editors[at] === editor && delete editors[at]);
+		});
 		// The app's own commands for the code at hand, on the editor's right-click menu beside the editor's own.
 		for (const [order, [id, label]] of (
 			[
@@ -121,11 +133,21 @@ export function EditorGroup(props: { index: number }) {
 		onCleanup(() => {
 			stop();
 			stopFocus();
-			if (shown) viewStates.set(`${props.index}:${shown}`, editor.saveViewState());
+			if (shown) keepView(shown);
 			editor.dispose();
-			delete editors[props.index];
 		});
 	});
+
+	/** Keeps where the cursor and the scroll are in the file that is showing, before it stops showing. */
+	function keepView(path: string) {
+		const view = editor.saveViewState();
+		viewStates.set(`${mine}:${path}`, view);
+		lastViews.set(path, view);
+	}
+	// A tab about to leave for another group: where it was is kept now, since the group it goes to may ask first.
+	const leaving = (index: number, path: string) => index === props.index && path === shown && editor && keepView(path);
+	tabLeaving.add(leaving);
+	onCleanup(() => tabLeaving.delete(leaving));
 
 	function reveal(path: string) {
 		const r = takeReveal(path);
@@ -139,12 +161,13 @@ export function EditorGroup(props: { index: number }) {
 	createEffect(() => {
 		const path = group().active;
 		if (!editor || path === shown) return;
-		if (shown) viewStates.set(`${props.index}:${shown}`, editor.saveViewState());
+		if (shown) keepView(shown);
 		const doc = path ? documents.get(path) : undefined;
 		editor.setModel(doc?.model ?? null);
 		shown = doc ? path : null;
 		if (doc) {
-			const view = viewStates.get(`${props.index}:${path}`);
+			// As this group left it; failing that, as any group last left it (a tab that came from the other group).
+			const view = viewStates.get(`${mine}:${path}`) ?? lastViews.get(path!);
 			if (view) editor.restoreViewState(view);
 			reveal(path!);
 			if (state.activeGroup === props.index) editor.focus();
@@ -399,7 +422,7 @@ export function EditorGroup(props: { index: number }) {
 						<span aria-hidden="true">⋯</span>
 					</Menu>
 				</Show>
-				<Show when={isSsl() && !isPlan()}>
+				<Show when={isSsl() && !isPlan() && !showFile()}>
 					<div class="mode-switch" role="group" aria-label="View of this script">
 						<button classList={{ on: group().mode !== "blocks" }} aria-pressed={group().mode !== "blocks"} onClick={() => setState("groups", props.index, "mode", "text")}>
 							Text

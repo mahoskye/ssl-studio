@@ -2,7 +2,7 @@
 // kept, and what back and forward mean, is src/shared/navHistory.ts; this
 // hears where the cursor comes to rest and takes it back there.
 import { createEffect, on, onCleanup } from "solid-js";
-import { canGoBack, canGoForward, NO_TRAIL, stepTrail, trailRenamed, trailWithout, visited, type Place, type Trail } from "../shared/navHistory";
+import { canGoBack, canGoForward, NO_TRAIL, stepTrail, TRAIL_LENGTH, trailRenamed, trailWithout, visited, type Place, type Trail } from "../shared/navHistory";
 import { activeEditor } from "./editor/EditorGroup";
 import { activeDoc, activePath, notify, openFile, pathChanges, state } from "./state";
 
@@ -47,23 +47,28 @@ export function useNavigation() {
 
 export const canGo = (by: 1 | -1) => (by < 0 ? canGoBack(trail) : canGoForward(trail));
 
-/** One place back, or forward again. A place in a file that is gone is passed over. */
+/** One place back, or forward again. A place in a file that can no longer be opened is passed over, for the one beyond it. */
 export async function goAlong(by: 1 | -1): Promise<void> {
 	// Where the cursor is now is the place to come back to, even if it has not moved far enough to be one by itself.
 	const now = here();
 	if (now) noteCursor(now);
-	const next = stepTrail(trail, by);
-	if (!next) return notify(by < 0 ? "There is nowhere to go back to." : "There is nowhere to go forward to.");
-	stepping++;
-	trail = next.trail;
-	try {
-		await openFile(next.place.path, { reveal: { line: next.place.line, column: next.place.column } });
-	} finally {
-		// The editor says where the cursor went as it gets there; a moment later it is the user's again.
-		setTimeout(() => stepping--, 0);
-	}
-	if (activePath() !== next.place.path) {
-		// It could not be opened (and the app has said why): its places are no use.
-		trail = trailWithout(trail, (path) => path === next.place.path);
+	for (let tries = 0; tries <= TRAIL_LENGTH; tries++) {
+		const from = trail;
+		const next = stepTrail(trail, by);
+		if (!next) return notify(by < 0 ? "There is nowhere to go back to." : "There is nowhere to go forward to.");
+		stepping++;
+		trail = next.trail;
+		try {
+			// In the group that has the file open, this one first: a place in the other group is gone to there, not
+			// opened a second time here.
+			const here = state.groups[state.activeGroup]?.tabs.includes(next.place.path) ? state.activeGroup : state.groups.findIndex((group) => group.tabs.includes(next.place.path));
+			await openFile(next.place.path, { reveal: { line: next.place.line, column: next.place.column }, ...(here >= 0 ? { group: here } : {}) });
+		} finally {
+			// The editor says where the cursor went as it gets there; a moment later it is the user's again.
+			setTimeout(() => stepping--, 0);
+		}
+		if (activePath() === next.place.path) return;
+		// It could not be opened (and the app has said why): its places are no use, and the cursor is where it was.
+		trail = trailWithout(from, (path) => path === next.place.path);
 	}
 }

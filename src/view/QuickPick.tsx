@@ -65,7 +65,7 @@ function Picker(props: { mode: QuickMode }) {
 			return [{ label: "A file's name", detail: "Go to a file; with :12 after the name, to that line of it", stay: true, run: () => setText("") }, ...QUICK_PREFIXES.filter((each) => each.mode !== "help").map((each) => ({ label: each.prefix, detail: each.says, stay: true, run: () => setText(each.prefix) }))];
 		}
 		if (mode() === "line") {
-			const path = activePath();
+			const path = activeDoc()?.binary ? null : activePath();
 			const at = path ? lineAsked(query(), activeDoc()?.model.getLineCount() ?? 1) : null;
 			return path && at ? [{ label: `Go to line ${at.line}${at.column > 1 ? `, column ${at.column}` : ""}`, detail: rel(path), run: () => void openFile(path, { reveal: at }) }] : [];
 		}
@@ -121,7 +121,7 @@ function Picker(props: { mode: QuickMode }) {
 		if (mode() === "files") return !state.workspace ? "Open a folder to go to its files." : query().trim() ? "No files match." : "This folder has no files.";
 		if (mode() === "symbols") return state.lsp.state !== "running" ? "The language server is not running." : query().trim() ? "No symbols match." : "Type a name to find it in the workspace.";
 		if (mode() === "outline") return !activePath() ? "Open a file to go to its symbols." : query().trim() ? "No symbols match." : state.lsp.state !== "running" ? "The language server is not running." : "This file has no symbols.";
-		if (mode() === "line") return !activePath() ? "Open a file to go to a line of it." : `Type a line number, 1 to ${activeDoc()?.model.getLineCount() ?? 1}; 12:5 is line 12, column 5.`;
+		if (mode() === "line") return !activePath() ? "Open a file to go to a line of it." : activeDoc()?.binary ? "The open file is not text: it has no lines to go to." : `Type a line number, 1 to ${activeDoc()?.model.getLineCount() ?? 1}; 12:5 is line 12, column 5.`;
 		return "No commands match.";
 	};
 	const move = (by: number) => setSelected((i) => Math.max(0, Math.min(i + by, items().length - 1)));
@@ -155,7 +155,8 @@ function Picker(props: { mode: QuickMode }) {
 				spellcheck={false}
 				placeholder="A file's name, or ? for what else can be typed"
 				value={text()}
-				onInput={(e) => (setText(e.currentTarget.value), setSelected(0))}
+				// What is typed after Enter was pressed is a new question: the Enter that was waiting for the list is let go.
+				onInput={(e) => (setText(e.currentTarget.value), setSelected(0), setPendingEnter(false))}
 				onKeyDown={(e) => {
 					if (e.key === "ArrowDown") (e.preventDefault(), move(1));
 					else if (e.key === "ArrowUp") (e.preventDefault(), move(-1));

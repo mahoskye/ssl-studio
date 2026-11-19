@@ -40,7 +40,9 @@ export function lineAsked(query: string, lines: number): LineAsked | null {
  * colon inside a name, or a drive's, is part of the name.
  */
 export function fileAndLine(query: string): { query: string; at: LineAsked | null } {
-	const found = /^(.*?[^:\s]):(\d+)(?::(\d+))?\s*$/.exec(query);
+	const found = /^(.*?[^:\s]):(\d*)(?::(\d*))?\s*$/.exec(query);
 	if (!found) return { query, at: null };
-	return { query: found[1]!, at: { line: Math.max(1, Number(found[2])), column: Math.max(1, Number(found[3] ?? 1)) } };
+	// "DueRules:" with the number still to come is the file, and no line yet.
+	if (!found[2]) return { query: found[1]!, at: null };
+	return { query: found[1]!, at: { line: Math.max(1, Number(found[2])), column: Math.max(1, Number(found[3] || 1)) } };
 }

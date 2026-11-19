@@ -30,7 +30,8 @@ function has(): Has {
 	const group = state.groups[state.activeGroup];
 	// A plan opens as its chart, a document as its page, a script perhaps as blocks: none of them is the text.
 	const asText = (file: string) => (isPlanPath(file) ? Boolean(state.planText[file]) : isMarkdown(file) || isTable(file) ? Boolean(state.mdText[file]) : !(group?.mode === "blocks" && documents.get(file)?.model.getLanguageId() === "ssl"));
-	return { folder: Boolean(state.workspace), file: Boolean(path), text: Boolean(path) && inFront() && asText(path!) };
+	// A picture, or other bytes, has no text at all.
+	return { folder: Boolean(state.workspace), file: Boolean(path), text: Boolean(path) && inFront() && !documents.get(path!)?.binary && asText(path!) };
 }
 
 type KeyService = { lookupKeybinding(id: string): { getLabel(): string | null } | undefined };

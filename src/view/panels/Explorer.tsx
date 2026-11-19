@@ -10,7 +10,7 @@ import type { Entry } from "../../shared/protocol";
 import { level } from "../../shared/houseStyle";
 import { backend } from "../backend";
 import { ask, choose } from "../dialogs";
-import { activePath, canonical, fileRemoved, fileRenamed, notify, openFile, setState, state } from "../state";
+import { activePath, canonical, fileRemoved, fileRenamed, notify, openAt, openFile, scriptsCameTo, setState, state } from "../state";
 import { baseName, dirName, isInside, joinPath } from "../../shared/paths";
 import { COPY, COPY_PATH, COPY_RELATIVE, CUT, folderFor, holdsRoot, menuFor, nameProblem, NEW_FILE, NEW_FOLDER, openFolders, PASTE, RENAME, retarget, TRASH, without } from "./explorerMenu";
 import { copyName, copyProblem, folderOf, moveProblem, type Clip } from "./explorerMoves";
@@ -94,6 +94,7 @@ function EntryRow(props: { entry: Entry; depth: number }) {
 	const selected = () => activePath() === canonical(props.entry.path);
 	const size = () => level(props.entry.size, state.settings.limits.bytes);
 	const entry = (): Entry => ({ ...props.entry });
+	const isCut = () => clip()?.cut === true && clip()?.path === props.entry.path;
 	return (
 		<>
 			<Row
@@ -102,7 +103,7 @@ function EntryRow(props: { entry: Entry; depth: number }) {
 				level={props.depth + 1}
 				expanded={isDir() ? open() : undefined}
 				selected={selected()}
-				classList={{ selected: selected(), cut: clip()?.cut === true && clip()?.path === props.entry.path, drop: isDir() && dropInto() === props.entry.path }}
+				classList={{ selected: selected(), cut: isCut(), "drop-into": isDir() && dropInto() === props.entry.path }}
 				style={indent(props.depth)}
 				title={props.entry.path}
 				draggable={true}
@@ -125,7 +126,8 @@ function EntryRow(props: { entry: Entry; depth: number }) {
 					void dropOn(e, folderOf(props.entry));
 				}}
 				onChord={(e) => {
-					const action = ({ x: CUT, c: COPY, v: PASTE } as Record<string, string>)[e.key.toLowerCase()];
+					// By the key's place as well as its letter: on a keyboard that writes other letters, Ctrl+C is still that key.
+					const action = ({ x: CUT, c: COPY, v: PASTE } as Record<string, string>)[e.key.toLowerCase()] ?? ({ KeyX: CUT, KeyC: COPY, KeyV: PASTE } as Record<string, string>)[e.code];
 					if (!action) return false;
 					void act(action, entry(), { home: props.entry.path, follow: true });
 					return true;
@@ -145,6 +147,9 @@ function EntryRow(props: { entry: Entry; depth: number }) {
 				</span>
 				<FileMark name={props.entry.name} folder={isDir() ? { open: open() } : undefined} />
 				<span class="label">{props.entry.name}</span>
+				<Show when={isCut()}>
+					<span class="visually-hidden"> (cut, waiting to be pasted)</span>
+				</Show>
 				<Show when={read() && listing.error}>
 					<span class="meta warn" title={listing.error}>
 						not readable
@@ -189,10 +194,13 @@ async function rename(entry: Entry): Promise<string | null> {
 	const problem = nameProblem(name);
 	if (problem) return notify(problem, "error"), null;
 	const to = joinPath(dirName(entry.path), name);
+	if (staleAt(to)) return null;
 	await backend.rename(entry.path, to);
 	// Open tabs follow the file, so saving one does not bring the old name back.
 	fileRenamed(entry.path, to);
 	setExpanded((set) => new Set(retarget(set, entry.path, to)));
+	setClip((held) => held && { ...held, path: retarget([held.path], entry.path, to)[0]! });
+	void scriptsCameTo(to, entry.path);
 	refresh();
 	// Documents that link to the old name are offered the new one. Not waited for: the row is renamed either way.
 	void followRename(entry.path, to);
@@ -205,10 +213,22 @@ async function trash(entry: Entry): Promise<string | null> {
 	if ((await choose(`Move ${what} to the trash?`, [TRASH], { danger: TRASH })) !== TRASH) return null;
 	await backend.trash(entry.path);
 	fileRemoved(entry.path);
+	// What was cut or copied and is now in the trash is no longer there to paste.
+	setClip((held) => (held && without([held.path], entry.path).length ? held : null));
 	setExpanded((set) => new Set(without(set, entry.path)));
 	refresh();
 	// Its row is going: the keyboard lands on the row that takes its place.
 	return "";
+}
+
+/**
+ * A path nothing is at on disk may still have a tab on it: a file that was removed, kept open for its unsaved
+ * edits. Something moved there would take that tab's text for its own. Says so, and says true, when there is one.
+ */
+function staleAt(to: string): boolean {
+	if (!openAt(to)) return false;
+	notify(`${baseName(to)} is still open in a tab from before it was removed. Close that tab first, then try again.`, "error");
+	return true;
 }
 
 /** Moves a file or folder into another folder, under its own name. Returns where it is now. */
@@ -221,9 +241,11 @@ async function moveInto(from: { path: string; kind: "file" | "dir" }, into: stri
 	// A drop is easily made by a slip of the hand: it asks. A paste was asked for twice already.
 	if (options.ask && (await choose(`Move ${from.kind === "dir" ? `the folder ${name} and everything in it` : name} into ${baseName(into)}?`, ["Move"])) !== "Move") return null;
 	const to = joinPath(into, name);
+	if (staleAt(to)) return null;
 	await backend.rename(from.path, to);
 	fileRenamed(from.path, to);
 	setExpanded((set) => new Set([...retarget(set, from.path, to), into]));
+	void scriptsCameTo(to, from.path);
 	refresh();
 	void followRename(from.path, to);
 	return to;
@@ -239,9 +261,11 @@ async function copyInto(from: { path: string; kind: "file" | "dir" }, into: stri
 	const there = new Set((await backend.list(into)).map((entry) => entry.name.toLowerCase()));
 	const taken = (name: string) => there.has(name.toLowerCase());
 	const name = baseName(from.path);
-	const to = joinPath(into, taken(name) ? copyName(name, taken) : name);
+	const to = joinPath(into, taken(name) ? copyName(name, taken, from.kind) : name);
+	if (staleAt(to)) return null;
 	await backend.copy(from.path, to);
 	setExpanded((set) => new Set(set).add(into));
+	void scriptsCameTo(to);
 	refresh();
 	// The copy is of the file on disk: edits nobody saved are not in it, and that is said.
 	const unsaved = Object.keys(state.dirty).filter((path) => state.dirty[path] && (path === canonical(from.path) || isInside(from.path, path)));
@@ -260,8 +284,13 @@ async function paste(onto: Entry): Promise<string | null> {
 		if (to) setClip(null);
 		return to;
 	} catch (e) {
-		// What was cut is no longer where it was: it is let go, not offered again.
-		setClip(null);
+		// What was cut is let go only when it is no longer where it was; a move refused for another reason (the
+		// name is taken there) leaves it cut, to be pasted somewhere else.
+		const still = await backend.list(dirName(held.path)).then(
+			(entries) => entries.some((entry) => entry.path === held.path),
+			() => false,
+		);
+		if (!still) setClip(null);
 		throw e;
 	}
 }
@@ -281,7 +310,11 @@ async function act(action: string | null, entry: Entry, where: { home?: string; 
 		else if (action === TRASH) back = await trash(entry);
 		else if (action === CUT || action === COPY) {
 			if (state.workspace && holdsRoot(state.workspace.root, entry.path)) notify(`The workspace folder itself cannot be ${action === CUT ? "cut" : "copied"} from here.`);
-			else setClip({ path: entry.path, kind: entry.kind, cut: action === CUT });
+			else {
+				setClip({ path: entry.path, kind: entry.kind, cut: action === CUT });
+				// Said, since nothing on screen shows a copy, and a cut row is only dimmed.
+				notify(action === CUT ? `${entry.name} is cut: paste it into a folder to move it there.` : `${entry.name} is copied: paste it into a folder.`);
+			}
 			back = entry.path;
 		} else if (action === PASTE) back = await paste(entry);
 		else if (action === COPY_PATH || action === COPY_RELATIVE) {

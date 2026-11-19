@@ -73,7 +73,8 @@ describe("a file with a line after its name", () => {
 	test("a colon that is not followed by a number to the end is part of the name", () => {
 		expect(fileAndLine("C:\\work\\a.ssl").at).toBeNull();
 		expect(fileAndLine("a:b").at).toBeNull();
-		expect(fileAndLine("a.ssl:").at).toBeNull();
+		expect(fileAndLine("a.ssl:")).toEqual({ query: "a.ssl", at: null });
+		expect(fileAndLine("a.ssl:12:")).toEqual({ query: "a.ssl", at: { line: 12, column: 1 } });
 		expect(fileAndLine("C:\\work\\a.ssl:7")).toEqual({ query: "C:\\work\\a.ssl", at: { line: 7, column: 1 } });
 	});
 

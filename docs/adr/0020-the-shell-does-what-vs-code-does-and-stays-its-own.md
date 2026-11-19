@@ -38,8 +38,8 @@ Under [ADR 0007](0007-design-is-held-to-a-standard-that-serves-starlims-work.md)
   it, and the menu says why it cannot run.
 - **Alt and a menu's first letter opens that menu,** unless the user has
   given that key to a command: their shortcut wins.
-- **A pinned tab is closed only once it is unpinned.** Ctrl+W, "close
-  others" and "close all" leave it, and the app says why; its own menu
+- **A pinned tab is closed only once it is unpinned.** Ctrl+W leaves it
+  and says why; "close others" and "close all" leave it; its own menu
   offers "Unpin" where another tab's offers "Close". A file that goes to
   the trash closes its tab, pinned or not.
 - **Ctrl+Tab goes to the tab used before,** not to the next one along.

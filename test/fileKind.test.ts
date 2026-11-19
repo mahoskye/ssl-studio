@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { encodingName, eolName, imageType, looksBinary, sizeText, SNIFF_BYTES } from "../src/shared/fileKind";
+import { encodingName, eolName, imageType, lineEnds, looksBinary, sizeText, SNIFF_BYTES } from "../src/shared/fileKind";
 
 const bytes = (...values: number[]) => new Uint8Array(values);
 const text = (value: string) => new TextEncoder().encode(value);
@@ -38,8 +38,15 @@ describe("bytes that are not text", () => {
 	test("UTF-16 with its mark is text, though half of it is zero bytes", () => {
 		expect(looksBinary(bytes(0xff, 0xfe, 0x41, 0x00, 0x42, 0x00))).toBe(false);
 		expect(looksBinary(bytes(0xfe, 0xff, 0x00, 0x41, 0x00, 0x42))).toBe(false);
-		// Without the mark there is nothing to say it is text.
-		expect(looksBinary(bytes(0x41, 0x00, 0x42, 0x00))).toBe(true);
+	});
+
+	test("UTF-16 without its mark is still text: letters, each beside a zero byte, the zeros all on one side", () => {
+		expect(looksBinary(new Uint8Array(Buffer.from("SELECT 1 FROM x", "utf16le")))).toBe(false);
+		expect(looksBinary(new Uint8Array(Buffer.from("SELECT 1 FROM x", "utf16le").swap16()))).toBe(false);
+		// Zero bytes on both sides, or only a few of them, are bytes.
+		expect(looksBinary(bytes(0x41, 0x00, 0x00, 0x42, 0x43, 0x00))).toBe(true);
+		expect(looksBinary(new Uint8Array([...text("a long line of plain text with one "), 0, ...text("zero byte in it")]))).toBe(true);
+		expect(looksBinary(bytes(0x41, 0x00))).toBe(true);
 	});
 
 	test("only the start is looked at", () => {
@@ -74,5 +81,15 @@ describe("what a file is, in words", () => {
 	test("which line ends it has", () => {
 		expect(eolName("\n")).toBe("LF");
 		expect(eolName("\r\n")).toBe("CRLF");
+	});
+
+	test("the line ends of a text are the kind it has most of", () => {
+		expect(lineEnds("a\nb\n")).toBe("\n");
+		expect(lineEnds("a\r\nb\r\n")).toBe("\r\n");
+		expect(lineEnds("a\r\nb\r\nc\n")).toBe("\r\n");
+		expect(lineEnds("a\r\nb\nc\n")).toBe("\n");
+		expect(lineEnds("a\r\nb\n")).toBe("\n");
+		expect(lineEnds("no line end")).toBe("\n");
+		expect(lineEnds("")).toBe("\n");
 	});
 });

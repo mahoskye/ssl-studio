@@ -12,6 +12,7 @@ import { changedRanges, minimalReplace } from "./lsp/edits";
 import { choose } from "./dialogs";
 import { openReview } from "./editor/Review";
 import { baseName, isInside, plainFileError } from "../shared/paths";
+import { lineEnds } from "../shared/fileKind";
 import { isPlanPath } from "./plan/model";
 import { recheckPlans, trackPlan } from "./plan/check";
 import { trackDoc, trackJson, trackToml, trackXml } from "./docCheck";
@@ -70,6 +71,8 @@ export const [state, setState] = createStore({
 	/** Bumped when the tree should reload a folder. */
 	treeVersion: 0,
 	quickPick: null as null | "files" | "commands" | "symbols",
+	/** Counts up when an open file turns out to be text where it was not, or the other way round, or a picture changed on disk: what shows it looks again. */
+	kindVersion: 0,
 });
 
 const docs = new Map<string, Doc>();
@@ -429,12 +432,25 @@ export async function closeAllTabs(only?: number) {
 	}
 }
 
+/** Told when a tab is about to leave its group for another: the group keeps where the cursor was in it, to hand on. */
+export const tabLeaving = new Set<(group: number, path: string) => void>();
+
+/** Moves the open tab to the other group, making one when there is only one. The keyboard's way to do what a drag does. */
+export function sendTabAcross() {
+	const path = activePath();
+	if (!path) return;
+	const from = state.activeGroup;
+	if (state.groups.length === 1) setState("groups", (groups) => [...groups, { tabs: [], active: null }]);
+	moveTab(path, from, from === 0 ? 1 : 0, null);
+}
+
 /**
  * A tab moved by hand: along its row, or to another group's row, to stand
  * before `before` (last, with null). The file stays open as it is, edits and
  * all; a group left with no tabs closes.
  */
 export function moveTab(path: string, from: number, to: number, before: string | null) {
+	if (from !== to) tabLeaving.forEach((told) => told(from, path));
 	const next = movedAcross(state.groups as Group[], path, from, to, before);
 	const fields = (g: Group) => ({ tabs: g.tabs, active: g.active, ...(g.pinned ? { pinned: g.pinned } : {}) });
 	batch(() => {
@@ -525,6 +541,26 @@ export function fileRenamed(oldPath: string, newPath: string) {
 	}
 }
 
+const isScript = (path: string) => /\.(srvscr|ssl|ds)(\.txt)?$/i.test(path);
+
+/**
+ * Tells the language server of scripts that have come to be at a path, or under it, without being written by a
+ * save: after a move (`from` is where they were, which it is told are gone) or a copy. It hears of files only as
+ * they are named to it, and a folder's move names none of the scripts in it.
+ */
+export async function scriptsCameTo(to: string, from?: string) {
+	to = canonical(to);
+	const here = (await backend.files().catch(() => [] as string[])).map(canonical).filter((path) => (path === to || isInside(to, path)) && isScript(path));
+	for (const path of here) {
+		if (from) session.fileChanged(canonical(from) + path.slice(to.length), false);
+		session.fileChanged(path, true);
+	}
+	if (here.length) recheckPlans();
+}
+
+/** Whether a tab is still open on a path, or under it: a file that is gone from disk and kept for its unsaved edits. */
+export const openAt = (path: string) => [...docs.keys()].some((open) => open === canonical(path) || isInside(canonical(path), open));
+
 /** A file or folder went to the trash: its tabs close, except those holding edits nobody saved. */
 export function fileRemoved(removed: string) {
 	removed = canonical(removed);
@@ -594,7 +630,8 @@ export async function save(path = activePath(), options: { /** False to leave th
 		await formatChanged(doc);
 	}
 	const text = doc.model.getValue();
-	const result = await guarded(() => backend.write(path, text));
+	// "It was read as text": a file that holds a zero byte the user typed is still theirs to save.
+	const result = await guarded(() => backend.write(path, text, true));
 	if (!result) return false;
 	doc.savedText = text;
 	doc.savedVersion = doc.model.getAlternativeVersionId();
@@ -689,6 +726,9 @@ export async function revert(path: string) {
 	if (!file) return;
 	doc.encoding = file.encoding;
 	doc.binary = file.binary;
+	// The line ends go back to the file's too: put in as an edit, the text would take on whichever kind the editor
+	// has now, and a change of line ends would survive the revert unseen.
+	doc.model.setEOL(lineEnds(file.text) === "\r\n" ? monaco.editor.EndOfLineSequence.CRLF : monaco.editor.EndOfLineSequence.LF);
 	doc.model.pushEditOperations([], [{ range: doc.model.getFullModelRange(), text: file.text }], () => null);
 	doc.savedText = file.text;
 	doc.savedVersion = doc.model.getAlternativeVersionId();
@@ -696,6 +736,7 @@ export async function revert(path: string) {
 	batch(() => {
 		setState("dirty", path, false);
 		setState("conflicts", path, undefined!);
+		setState("kindVersion", (v) => v + 1);
 	});
 }
 
@@ -707,7 +748,7 @@ export async function fileChangedOnDisk(changed: string) {
 	setState("treeVersion", (v) => v + 1);
 	const doc = docs.get(path);
 	// The kinds of file the server asks to be told about.
-	const script = /\.(srvscr|ssl|ds)(\.txt)?$/i.test(path);
+	const script = isScript(path);
 	if (!doc && !script) return;
 	const told = (exists: boolean) => {
 		if (!script) return;
@@ -723,7 +764,21 @@ export async function fileChangedOnDisk(changed: string) {
 	}
 	told(true);
 	if (!doc) return;
+	// A picture, or other bytes, has no text to compare: a later date on it is the change.
+	if (doc.binary && file.binary) {
+		if (file.mtime !== doc.mtime) {
+			doc.mtime = file.mtime;
+			doc.binary = file.binary;
+			setState("kindVersion", (v) => v + 1);
+		}
+		return;
+	}
 	if (file.text === doc.model.getValue()) return;
+	// The file is as these edits found it (it was only moved, or touched): nothing on disk has changed under them.
+	if (file.text === doc.savedText) {
+		doc.mtime = file.mtime;
+		return;
+	}
 	if (state.dirty[path]) {
 		if (!state.conflicts[path]) notify(`${baseName(path)} changed on disk while you have unsaved edits. Saving will ask which to keep.`, "error");
 		setState("conflicts", path, true);

@@ -32,8 +32,15 @@ export function looksBinary(bytes: Uint8Array): boolean {
 	const utf16 = bytes.length >= 2 && ((bytes[0] === 0xff && bytes[1] === 0xfe) || (bytes[0] === 0xfe && bytes[1] === 0xff));
 	if (utf16) return false;
 	const end = Math.min(bytes.length, SNIFF_BYTES);
-	for (let at = 0; at < end; at++) if (bytes[at] === 0) return true;
-	return false;
+	// Zero bytes, counted by whether they stand first or second of each pair.
+	const zeros = [0, 0];
+	for (let at = 0; at < end; at++) if (bytes[at] === 0) zeros[at % 2]!++;
+	if (!zeros[0] && !zeros[1]) return false;
+	// UTF-16 without its mark: plain letters, each beside a zero byte, the zeros all on one side. It is text, and
+	// it opens as it did before bytes were told from text here (its letters with marks between), to be saved back
+	// byte for byte.
+	const oneSide = (zeros[0] === 0) !== (zeros[1] === 0);
+	return !(oneSide && end >= 4 && zeros[0]! + zeros[1]! >= end * 0.4);
 }
 
 /** What a file is written in, as it is said to a person. */
@@ -46,6 +53,20 @@ export function sizeText(bytes: number): string {
 	if (bytes < 1024) return `${bytes} ${bytes === 1 ? "byte" : "bytes"}`;
 	if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
 	return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * The line ends a text has: the kind it has most of, as an editor takes a text with both. "\n" for a text with
+ * none.
+ */
+export function lineEnds(text: string): "\n" | "\r\n" {
+	let both = 0;
+	let all = 0;
+	for (let at = text.indexOf("\n"); at >= 0; at = text.indexOf("\n", at + 1)) {
+		all++;
+		if (text[at - 1] === "\r") both++;
+	}
+	return both > all / 2 ? "\r\n" : "\n";
 }
 
 /** Line ends as they are named: the two a file can have here. */
