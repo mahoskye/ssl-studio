@@ -10,6 +10,7 @@ import { monaco } from "../editor/monaco";
 import { session } from "../lsp/session";
 import { describeElement } from "../panels/Reference";
 import { applyText, documents, notify, setState, state } from "../state";
+import { workPrompt } from "../projectDocs";
 import { joinPath, relativeTo } from "../../shared/paths";
 import { addQuestions, answerQuestion, applySuggestion, formatSurvey, looksCut, nounsOf, openQuestions, overLimit, parseContext, parseQuestions, parseSpec, parseSuggestions, planHash, printSpec, readBlocks, refinePrompt, specHash, specPrompt, unaccounted, type ContextRequest, type Suggestion, type Survey } from "./assist";
 import type { BuildRun } from "./build";
@@ -185,6 +186,16 @@ export const begin = (path: string, running: AssistState["running"], work: () =>
 		});
 };
 
+/** The ticket a plan is for, with what bears on it, for the prompt: the agent is about to write the spec, so the specs are left out. */
+async function workOf(path: string, plan: Plan): Promise<string | undefined> {
+	const ticket = typeof plan.ticket === "string" ? plan.ticket.trim() : "";
+	if (!ticket) return undefined;
+	const work = await workPrompt(ticket, { specs: false });
+	if (!work) warn(path, `This plan is for ${ticket}, which is not among the project's tickets, so the agent is not told what the ticket asks.`);
+	return work?.text;
+}
+const together = (...parts: (string | undefined | null)[]) => parts.filter(Boolean).join("\n\n") || undefined;
+
 /** Stage 2: the agent finds what the chart leaves undecided. */
 export function refine(path: string) {
 	return begin(path, "refine", async () => {
@@ -193,10 +204,11 @@ export function refine(path: string) {
 		update(path, { progress: "Surveying the workspace…" });
 		const found = await survey(plan);
 		const skills = await planningSkills(path);
+		const work = await workOf(path, plan);
 		let extra: string | undefined;
 		let blocks: Record<string, string> = {};
 		for (let round = 0; round < 4; round++) {
-			const text = await askAgent(path, "Refine the plan", refinePrompt(plan, found, extra), skills);
+			const text = await askAgent(path, "Refine the plan", refinePrompt(plan, found, together(work, extra)), skills);
 			if (text === null) return;
 			blocks = readBlocks(text);
 			const wanted = round < 3 ? parseContext(blocks.CONTEXT) : [];
@@ -239,12 +251,13 @@ export function writeSpec(path: string) {
 		);
 		// With code already built, this revises the spec, and only what changed needs saying.
 		const revision = revisionText(plan, original ? original.split("\n## Units")[0]!.trim() : null);
-		let text = await askAgent(path, "Write the spec", specPrompt(plan, found, limits, revision), skills);
+		const work = await workOf(path, plan);
+		let text = await askAgent(path, "Write the spec", specPrompt(plan, found, limits, together(work, revision)), skills);
 		if (text === null) return;
 		let parsed = parseSpec(text);
 		const lacking = () => [!parsed.spec && "SPEC", !revision && !parsed.units.length && "UNITS", !revision && !parsed.map.length && "MAP"].filter(Boolean);
 		if (lacking().length) {
-			text = await askAgent(path, "Write the spec", specPrompt(plan, found, limits, [revision, `Your last reply lacked these blocks, or they did not parse as JSON: ${lacking().join(", ")}. Reply again with every block.`].filter(Boolean).join("\n\n")), skills);
+			text = await askAgent(path, "Write the spec", specPrompt(plan, found, limits, [work, revision, `Your last reply lacked these blocks, or they did not parse as JSON: ${lacking().join(", ")}. Reply again with every block.`].filter(Boolean).join("\n\n")), skills);
 			if (text === null) return;
 			parsed = parseSpec(text);
 		}

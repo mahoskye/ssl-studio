@@ -107,6 +107,17 @@ export async function decideModel(ref: string, models: ModelLike[], choose: (tit
 	return { model: ref, own: answer === MINE };
 }
 
+/**
+ * A question as it is sent: the work it is for, then the question, then the
+ * code it is about. The agent has no file tools here, and is told so.
+ */
+export function composeQuestion(question: string, code?: { file: string; label: string; code: string } | null, work?: string): string {
+	const parts = [...(work ? [work, "", "THE QUESTION:"] : []), question];
+	if (code) parts.push("", `About this code from ${code.file}, ${code.label}:`, "```ssl", code.code, "```");
+	if (code || work) parts.push("", `You cannot read files in this session; answer from ${code && work ? "the code and the documents above" : code ? "the code above" : "the documents above"}.`);
+	return parts.join("\n");
+}
+
 export const NOT_SENT = "Not sent: the agent is still working on the last request. Your question is kept here. Send it when the reply ends, or stop the reply.";
 
 /** What Send does with the draft. The draft is cleared only when it goes out. */

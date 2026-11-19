@@ -11,6 +11,7 @@ import { Finder } from "../graph/Finder";
 import { Menu, type MenuItem } from "../Menu";
 import { pictureName, savePicture } from "../graph/picture";
 import { dirName, joinPath, relativeTo } from "../../shared/paths";
+import { ticketKey } from "../../shared/projectDocs";
 import { regionColor } from "../editor/regions";
 import { canvasMeasure, centredOn, clearLabels, clearOf, fitView, legibleScale, mapArea, nearest, outOfSight, recall, remember, reveal, roundedPath, zoomAt, type Measure, type Point } from "../graph/canvas";
 import { diagnostics } from "../lsp/session";
@@ -621,7 +622,7 @@ export function PlanView(props: { path: string; group: number }) {
 		} else if (value !== (p.edges.find((e) => e.from === target.from && e.to === target.to)?.label ?? "")) apply(setEdgeLabel(p, target.from, target.to, value.trim()));
 	};
 
-	const setPlanField = (field: "title" | "goal", value: string) => {
+	const setPlanField = (field: "title" | "goal" | "ticket", value: string) => {
 		const p = plan();
 		if (!p) return;
 		const { [field]: _old, ...rest } = p;
@@ -1055,6 +1056,9 @@ export function PlanView(props: { path: string; group: number }) {
 								</label>
 								<label class="grow">
 									Goal <input value={typeof plan()!.goal === "string" ? (plan()!.goal as string) : ""} placeholder="What this should achieve" onChange={(e) => setPlanField("goal", e.currentTarget.value)} />
+								</label>
+								<label title="The ticket this plan is for. The agent is told what it asks, the open questions and the decisions already made when it refines the plan or writes the spec.">
+									Ticket <input class="short" value={typeof plan()!.ticket === "string" ? (plan()!.ticket as string) : ""} placeholder="LIMS-123" onChange={(e) => setPlanField("ticket", ticketKey(e.currentTarget.value))} />
 								</label>
 								<label class="grow">
 									Scripts <input value={Array.isArray(plan()!.targets) ? (plan()!.targets as string[]).join(", ") : ""} placeholder="Sample/Release.ssl" onChange={(e) => setTargets(e.currentTarget.value)} />

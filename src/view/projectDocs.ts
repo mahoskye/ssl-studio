@@ -31,7 +31,9 @@ import {
 import type { DocFile } from "../shared/protocol";
 import { backend } from "./backend";
 import { ask, choose } from "./dialogs";
-import { isMarkdown } from "./project";
+import { parsePlan, isPlanPath } from "./plan/model";
+import { docs, isMarkdown } from "./project";
+import { ticketAtHand as listedTicketAtHand, workFor, workLabel, workText } from "../shared/workContext";
 import { activeDoc, activePath, applyText, canonical, documents, notify, openFile, save, setState, state } from "./state";
 
 const today = () => localDay();
@@ -98,13 +100,32 @@ async function start(path: string, text: string, area?: DocArea) {
 	await openFile(path);
 }
 
-/** The ticket the open document is, or is for: what a new spec or decision is most likely about. */
-function ticketAtHand(): string {
+/** The ticket the open document is, or is for, as it stands in the editor: a document's front matter, or a plan's own. */
+function ticketOfOpen(): string {
 	const path = activePath();
 	const doc = activeDoc();
-	if (!path || !doc || !isMarkdown(path)) return "";
+	if (!path || !doc) return "";
+	if (isPlanPath(path)) {
+		const ticket = parsePlan(doc.model.getValue()).plan?.ticket;
+		return typeof ticket === "string" ? ticket.trim() : "";
+	}
+	if (!isMarkdown(path)) return "";
 	const { values } = frontMatter(doc.model.getValue());
 	return one(values.ticket).split(",")[0]?.trim() ?? "";
+}
+
+/** The ticket at hand: the open document's, or else the one ticket that is under way. "" when it cannot be told. */
+export const ticketAtHand = (): string => ticketOfOpen() || listedTicketAtHand(docs(), activePath());
+
+/**
+ * The work a ticket is, as text for an agent that cannot read the folder, and
+ * what that text holds in a few words. Null when the ticket is not among the
+ * project's tickets.
+ */
+export async function workPrompt(key: string, options: { specs?: boolean } = {}): Promise<{ text: string; label: string } | null> {
+	const work = key ? workFor(docs(), key) : null;
+	if (!work) return null;
+	return { text: await workText(work, current, options), label: workLabel(work, options) };
 }
 
 /** A ticket: the work as it was asked for. Its key names its file. */
@@ -140,7 +161,8 @@ export async function newKnowledge(kind: KnowledgeKind["id"]) {
 		return start(joinPath(folder, `${slug(title)}.${language.toLowerCase()}`), snippetTemplate({ title, language: language === "SQL" ? "sql" : "ssl" }), "knowledge");
 	}
 	if (kind === "reference") return start(joinPath(folder, `${slug(title)}.md`), referenceTemplate({ title }), "knowledge");
-	const ticket = ticketAtHand() || undefined;
+	// Only what the open document says: a decision is not put to a ticket on a guess.
+	const ticket = ticketOfOpen() || undefined;
 	if (kind === "questions") return start(joinPath(folder, `${slug(title)}.md`), questionTemplate({ title, date: today(), ticket }), "knowledge");
 	// Decisions are numbered, so that one can be named by its number and they list in the order they were made.
 	const taken = (await backend.docs()).filter((d) => d.group === "knowledge" && d.kind === "decisions").map((d) => Number(/^(\d+)/.exec(baseName(d.name))?.[1] ?? 0));

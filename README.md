@@ -42,8 +42,11 @@ the source of truth.
   and database objects a migration must carry across. Each folder has a
   catalog the IDE keeps, the Docs panel shows each ticket with its specs
   and each registry with how far it is, and Health says what is out of
-  date, not written yet, or named and not there
-  ([ADR 0012](docs/adr/0012-a-projects-work-is-written-down.md)).
+  date, not written yet, or named and not there. A plan names its ticket,
+  and the agent is told what the ticket asks, the open questions and the
+  decisions already made
+  ([ADR 0012](docs/adr/0012-a-projects-work-is-written-down.md),
+  [ADR 0013](docs/adr/0013-the-agent-is-told-the-work-a-question-is-for.md)).
 - **Documents as what they are:** Markdown, SQL, JSON, TOML, CSV, YAML, XML
   and INI are coloured by the same themes as SSL. A CSV opens as a table
   whose cells are edited in place; Markdown opens rendered, with what its

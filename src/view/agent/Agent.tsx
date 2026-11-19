@@ -1,14 +1,16 @@
 // The Agent panel: opencode status and model, the tidy sequence for the
 // current file, and a conversation that can include the selection.
-import { createEffect, createMemo, createSignal, For, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { activeEditor } from "../editor/EditorGroup";
 import { review } from "../editor/Review";
 import { activeDoc, activePath, state } from "../state";
 import { addEntry, agent, ask, chooseModel, currentModel, interrupt, resume, safely, setAgent, start, stop, type Entry } from "./store";
-import { groupModels, composerSend, modelRef, stepAction } from "./logic";
+import { groupModels, composeQuestion, composerSend, modelRef, stepAction } from "./logic";
 import { followReplyLink, renderReply } from "./markdown";
 import { notePath, proposalOf, runStep, showReview, startTidy, STEPS, tidy } from "./tidy";
 import { relativeTo } from "../../shared/paths";
+import { ticketAtHand, workPrompt } from "../projectDocs";
+import { recall, remember } from "../graph/canvas";
 
 const ICON: Record<string, string> = { pending: "○", running: "◌", review: "◐", accepted: "●", rejected: "✗", unchanged: "–", failed: "!" };
 const NEW_CONVERSATION = "New conversation: the next question starts fresh. The agent will not see the earlier ones.";
@@ -25,15 +27,22 @@ export function selectionContext(): { label: string; code: string } | null {
 	return null;
 }
 
-export async function askAbout(question: string, includeSelection: boolean) {
+/** The ticket whose work the conversation in flight was last told of: it is said once, not with every question. */
+let toldOf: { session: string | null; ticket: string } | null = null;
+
+export async function askAbout(question: string, includeSelection: boolean, includeWork = false) {
 	const path = activePath();
 	const context = includeSelection ? selectionContext() : null;
 	const file = path ? relativeTo(state.workspace?.root, path) : "";
-	const text = context
-		? `${question}\n\nAbout this code from ${file}, ${context.label}:\n\`\`\`ssl\n${context.code}\n\`\`\`\n\nYou cannot read files in this session; answer from the code above.`
-		: question;
-	const reply = await ask(text, { title: "SSL Studio chat", keep: true, sessionID: agent.chatSession ?? undefined, show: context ? `${question}  (with ${file} ${context.label})` : question });
+	// The ticket and what bears on it: the agent cannot read the folder, so it is sent, once in a conversation.
+	const ticket = includeWork ? ticketAtHand() : "";
+	const told = toldOf && toldOf.session === agent.chatSession && toldOf.ticket === ticket && agent.chatSession !== null;
+	const work = ticket && !told ? await workPrompt(ticket) : null;
+	const text = composeQuestion(question, context && { ...context, file }, work?.text);
+	const withWhat = [context ? `${file} ${context.label}` : "", work ? work.label : ""].filter(Boolean).join("; ");
+	const reply = await ask(text, { title: "SSL Studio chat", keep: true, sessionID: agent.chatSession ?? undefined, show: withWhat ? `${question}  (with ${withWhat})` : question });
 	if (reply) setAgent("chatSession", reply.sessionID);
+	if (reply && work) toldOf = { session: reply.sessionID, ticket };
 }
 
 /** One entry of the conversation. A reply is Markdown; the user's words and the notes are shown as written. */
@@ -58,6 +67,15 @@ export function AgentPanel() {
 	let box: HTMLTextAreaElement | undefined;
 	const [notSent, setNotSent] = createSignal("");
 	const [withSelection, setWithSelection] = createSignal(true);
+	/** Whether the ticket at hand goes with the first question of a conversation. Kept, since it costs tokens. */
+	const [withWork, setWithWork] = createSignal(recall("agent.withWork") !== "no");
+	// The ticket at hand is read from the open document's text, which says nothing when it changes: this does.
+	const [edited, setEdited] = createSignal(0);
+	createEffect(() => {
+		const listener = activeDoc()?.model.onDidChangeContent(() => setEdited((n) => n + 1));
+		onCleanup(() => listener?.dispose());
+	});
+	const ticket = createMemo(() => (edited(), ticketAtHand()));
 	const modelOf = (ref: string) => agent.models.find((m) => modelRef(m) === ref);
 	const usable = () => agent.models.filter((m) => m.tools);
 
@@ -83,7 +101,7 @@ export function AgentPanel() {
 		setNotSent(result.why ?? "");
 		if (result.send === null) return;
 		toEnd();
-		void safely("The question was not sent", () => askAbout(result.send!, withSelection()));
+		void safely("The question was not sent", () => askAbout(result.send!, withSelection(), withWork()));
 	};
 	const pickModel = async (select: HTMLSelectElement) => {
 		const saved = await safely("The model was not changed", () => chooseModel(select.value));
@@ -124,11 +142,12 @@ export function AgentPanel() {
 			<div class="agent-status">
 				<span class={`dot ${agent.status.state}`} aria-hidden="true" />
 				<span>
-					{agent.status.state === "ready" ? `opencode ${agent.status.version}` : agent.status.state === "starting" ? "Starting opencode…" : agent.status.state === "failed" ? "opencode failed" : state.info?.opencode.ok ? "opencode is not running" : "opencode not found"}
+					{agent.status.state === "ready" ? `opencode ${agent.status.version}` : agent.status.state === "starting" ? "Starting opencode…" : agent.status.state === "failed" ? "opencode failed" : state.info?.opencode.ok ? "opencode is not running" : state.info?.opencode.version ? `opencode ${state.info.opencode.version} cannot be used` : "opencode not found"}
 				</span>
 			</div>
-			<Show when={agent.status.message}>
-				<p class="agent-note warn">{agent.status.message}</p>
+			{/* Why it is off, when it is there and cannot be used: a version outside the range the adapter was written for. */}
+			<Show when={agent.status.message || (state.info && !state.info.opencode.ok && state.info.opencode.message)}>
+				<p class="agent-note warn">{agent.status.message || state.info?.opencode.message}</p>
 			</Show>
 			<Show
 				when={usable().length}
@@ -254,6 +273,11 @@ export function AgentPanel() {
 				<label class="check">
 					<input type="checkbox" checked={withSelection()} onChange={(e) => setWithSelection(e.currentTarget.checked)} /> include the selection
 				</label>
+				<Show when={ticket()}>
+					<label class="check" title={`Sends ${ticket()} with the first question of a conversation: what it asks, the tickets it is related to, the open questions and the decisions already made. The agent cannot read the folder itself.`}>
+						<input type="checkbox" checked={withWork()} onChange={(e) => (setWithWork(e.currentTarget.checked), remember("agent.withWork", e.currentTarget.checked ? "yes" : "no"))} /> include the ticket, {ticket()}
+					</label>
+				</Show>
 				<div class="composer-bar">
 					<button type="button" aria-label="Start a new conversation" disabled={agent.busy} title={agent.busy ? "Wait for this reply, or stop it, before starting a new conversation." : "Start a new conversation: the agent will not see the earlier questions"} onClick={newConversation}>
 						New

@@ -18,7 +18,7 @@ import { startTidy } from "./agent/tidy";
 import { joinPath } from "../shared/paths";
 import { isPlanPath, newPlan, printPlan } from "./plan/model";
 import { isMarkdown, isTable, newDoc, setUpProject, undoSetUp } from "./project";
-import { newKnowledge, newRegistry, newSpec, newState, newTicket, updateCatalogs, updateManifest } from "./projectDocs";
+import { newKnowledge, newRegistry, newSpec, newState, newTicket, ticketAtHand, updateCatalogs, updateManifest } from "./projectDocs";
 import { displayKey, effectiveKeys, isModifierKey, keyNames, keysOf } from "./keys";
 import { modalOpen, setFocusFallback } from "./modal";
 import { noteUsed } from "./quickRank";
@@ -192,7 +192,9 @@ async function newPlanCommand() {
 		() => false,
 	);
 	if (!exists) {
-		await backend.write(path, printPlan(newPlan(name)));
+		// A plan started from a ticket, or from a document that is for one, is for that ticket.
+		const ticket = ticketAtHand();
+		await backend.write(path, printPlan(ticket ? { ...newPlan(name), ticket } : newPlan(name)));
 		setState("treeVersion", (v) => v + 1);
 	}
 	await openFile(path);

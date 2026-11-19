@@ -6,7 +6,7 @@ The list between the two markers is written by SSL Studio from the files here (D
 
 <!-- catalog -->
 
-- [Set sample due dates](../../design/SetSampleDueDates.spec.md): The spec for src/DueDates/SetSampleDueDates.ssl, src/DueDates/SaveDueDates.ssl and src/DueDates/DueDateSummary.ssl, as they were built.
+- [Set sample due dates](../../design/SetSampleDueDates.spec.md): For DEMO-101. The spec for src/DueDates/SetSampleDueDates.ssl, src/DueDates/SaveDueDates.ssl and src/DueDates/DueDateSummary.ssl, as they were built.
 - [The report of samples due soon](Due-soon-report.md): in progress. For DEMO-103. What the morning list of samples shows, and what it leaves out.
 
 <!-- /catalog -->

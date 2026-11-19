@@ -70,6 +70,16 @@ async function head(path: string): Promise<string> {
 	}
 }
 
+/** The ticket a plan says it is for; "" when it names none, or cannot be read. */
+async function planTicket(path: string): Promise<string> {
+	try {
+		const ticket = (await Bun.file(path).json())?.ticket;
+		return typeof ticket === "string" ? ticket.trim() : "";
+	} catch {
+		return "";
+	}
+}
+
 /** A summary, unless it is a line a template wrote and nobody has replaced. */
 const said = (summary: string | undefined) => (summary && !isPrompt(summary) ? summary : undefined);
 
@@ -129,7 +139,11 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 	// The specs: those written by hand, and those the planner writes beside a plan.
 	for (const path of [...under(area("specs"), MARKDOWN), ...under(join(root, project.plans), /\.spec\.md$/i)]) {
 		const fromPlan = !path.startsWith(area("specs") + sep);
-		list.push({ path, name: fromPlan ? `${project.plans}/${relative(join(root, project.plans), path)}` : relative(area("specs"), path), group: "specs", exists: true, ...described(await head(path)) });
+		const said = described(await head(path));
+		// A spec the planner wrote is for the ticket its plan names.
+		const planned = fromPlan ? await planTicket(path.replace(/\.spec\.md$/i, ".plan.json")) : "";
+		const tickets = planned && !said.tickets?.some((key) => key.toLowerCase() === planned.toLowerCase()) ? [...(said.tickets ?? []), planned] : said.tickets;
+		list.push({ path, name: fromPlan ? `${project.plans}/${relative(join(root, project.plans), path)}` : relative(area("specs"), path), group: "specs", exists: true, ...said, ...(tickets?.length ? { tickets } : {}) });
 	}
 	// The knowledge base: decisions, questions, snippets and notes, each kind in its folder.
 	for (const path of under(area("knowledge"), /\.(md|markdown|sql|ssl|srvscr|ds|txt|json|toml|csv)$/i)) {

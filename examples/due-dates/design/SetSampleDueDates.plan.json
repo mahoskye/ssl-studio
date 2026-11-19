@@ -2,6 +2,7 @@
   "version": 1,
   "title": "Set sample due dates",
   "goal": "Give every sample that has no due date one, counting only days the lab is working and the sample's instrument is available.",
+  "ticket": "DEMO-101",
   "targets": ["src/DueDates/SetSampleDueDates.ssl","src/DueDates/SaveDueDates.ssl","src/DueDates/DueDateSummary.ssl"],
   "groups": [
     { "id": "g1", "name": "Loading" },

@@ -348,3 +348,22 @@ describe("the models to choose from, under headings", () => {
 	});
 });
 
+
+import { composeQuestion } from "../src/view/agent/logic";
+
+describe("a question as it is sent", () => {
+	test("on its own, it is the question and nothing else", () => {
+		expect(composeQuestion("Why?")).toBe("Why?");
+	});
+
+	test("with code, the code follows it, and the agent is told it cannot read files", () => {
+		const text = composeQuestion("Why?", { file: "src/A.ssl", label: "lines 3-9", code: ":RETURN 1;" });
+		expect(text).toBe("Why?\n\nAbout this code from src/A.ssl, lines 3-9:\n```ssl\n:RETURN 1;\n```\n\nYou cannot read files in this session; answer from the code above.");
+	});
+
+	test("with the work it is for, the work comes first and the question is marked", () => {
+		const text = composeQuestion("Which cases?", null, "THE WORK THIS IS FOR:\nTICKET A-1: First");
+		expect(text).toBe("THE WORK THIS IS FOR:\nTICKET A-1: First\n\nTHE QUESTION:\nWhich cases?\n\nYou cannot read files in this session; answer from the documents above.");
+		expect(composeQuestion("Q", { file: "a.ssl", label: "lines 1-2", code: "x" }, "WORK")).toEndWith("answer from the code and the documents above.");
+	});
+});

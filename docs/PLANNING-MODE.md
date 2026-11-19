@@ -83,6 +83,10 @@ A plan is one file, kept with the project in `design/` beside the tidy notes:
   back to an earlier node.
 - **Groups become regions.** A group in the chart is a comment region in the
   code, with the same colour in the chart, blocks and graph.
+- **A plan can name its ticket:** `"ticket": "LIMS-123"`, set in the plan's
+  details. The agent is then told what the ticket asks, the open questions
+  and the decisions that stand when it refines the plan or writes the spec
+  ([ADR 0013](adr/0013-the-agent-is-told-the-work-a-question-is-for.md)).
 - **No positions are stored.** ELK lays the chart out, as in graph mode. Diffs
   stay small, and there is nothing to tidy by hand. Keyboard first: Enter adds
   the next step, B adds a branch, double-click edits the words. Tab is left

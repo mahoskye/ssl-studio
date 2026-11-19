@@ -471,6 +471,12 @@ the work comes from ([ADR 0012](adr/0012-a-projects-work-is-written-down.md)).
   and not there, a finished ticket whose spec is not, the open questions: to
   know. A catalog is written afresh, and a named ticket started, from the
   row that says so.
+- **The agent is told the work.** A plan names its ticket; the planner is
+  sent what the ticket asks, the tickets around it, the open questions and
+  the decisions that stand when it refines the plan or writes the spec; a
+  chat is sent the same once in a conversation, on a tick box that says
+  which ticket ([ADR 0013](adr/0013-the-agent-is-told-the-work-a-question-is-for.md)).
+  Checked by tests of the text that is sent; not yet tried with a model.
 - **From looking at it:** in a narrow Docs panel a state is a dot in its
   tone, so the title has the room; a new document's opening prompt is not
   listed as its summary; a date is the day it is here, not in UTC; and a
@@ -483,8 +489,6 @@ Not done, and worth doing next:
 - Checking a registry's rows against the code: a setting nothing reads, a
   table no data source uses. The second needs the language server to say
   which tables a script uses.
-- Giving the agent the ticket and the open questions when it plans or
-  writes a spec.
 - A question or a decision started from the line of code it is about.
 
 ## On hold

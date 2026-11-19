@@ -220,6 +220,7 @@ import { join } from "node:path";
 import { fileManifest, listDocs, readProject } from "../src/bun/project";
 import { WorkspaceFiles } from "../src/bun/workspace";
 import { catalogItems } from "../src/shared/projectDocs";
+import { ticketAtHand, workFor, workLabel, workText } from "../src/shared/workContext";
 
 describe("the demo project's working documents", () => {
 	const root = join(import.meta.dir, "..", "examples", "due-dates");
@@ -263,6 +264,43 @@ describe("the demo project's working documents", () => {
 		const checks = docChecks(await listed());
 		expect(checks.map((check) => [check.level, check.text])).toEqual([["note", "1 question is open: Which holidays does each site keep?"]]);
 		expect(checksSummary(checks)).toBe("1 to know");
+	});
+
+	test("the work a ticket is: its spec, the tickets around it, what is not known and what was decided", async () => {
+		const docs = await listed();
+		const work = workFor(docs, "demo-103")!;
+		expect(workLabel(work)).toBe("DEMO-103, 1 spec, 1 related ticket, 1 open question, 2 decisions");
+		expect(workLabel(work, { specs: false })).toBe("DEMO-103, 1 related ticket, 1 open question, 2 decisions");
+		const text = await workText(work, (path) => Bun.file(path).text());
+		expect(text).toStartWith("THE WORK THIS IS FOR, from the project's own documents:\nTICKET DEMO-103: A report of the samples due soon (in progress)\n");
+		expect(text).toContain("## What done looks like");
+		expect(text).not.toContain("ticket: DEMO-103");
+		expect(text).toContain("RELATED TICKETS:\n- DEMO-101: Give every waiting sample a due date (done).");
+		expect(text).toContain("SPEC The report of samples due soon (in progress):");
+		expect(text).toContain("QUESTIONS NOBODY HAS ANSWERED YET (do not guess the answer; say what depends on it):\n- Which holidays does each site keep? (open).");
+		expect(text).toContain("DECISIONS ALREADY MADE (keep to them):\n- A walk looks at most 730 days ahead (accepted).");
+		expect(await workText(work, (path) => Bun.file(path).text(), { specs: false })).not.toContain("SPEC ");
+		// A question that was answered for the ticket comes with its answer.
+		const rush = await workText(workFor(docs, "DEMO-102")!, (path) => Bun.file(path).text());
+		expect(rush).toMatch(/QUESTIONS THAT WERE ANSWERED:\n- Does rush work count Sunday\? Answer: \S/);
+		expect(workFor(docs, "DEMO-999")).toBeNull();
+	});
+
+	test("a spec the planner wrote is for the ticket its plan names", async () => {
+		expect((await listed()).find((d) => d.name.endsWith("SetSampleDueDates.spec.md"))?.tickets).toEqual(["DEMO-101"]);
+	});
+
+	test("the ticket at hand is the open document's, or the one ticket under way", async () => {
+		const docs = await listed();
+		const at = (name: string) => docs.find((d) => d.name.endsWith(name))!.path;
+		expect(ticketAtHand(docs, at("DEMO-102.md"))).toBe("DEMO-102");
+		expect(ticketAtHand(docs, at("Does-rush-work-count-Sunday.md"))).toBe("DEMO-102");
+		expect(ticketAtHand(docs, at("SetSampleDueDates.spec.md"))).toBe("DEMO-101");
+		// A script says nothing of a ticket: the one that is under way.
+		expect(ticketAtHand(docs, join(root, "src", "DueDates", "DueRule.ssl"))).toBe("DEMO-103");
+		expect(ticketAtHand(docs)).toBe("DEMO-103");
+		expect(ticketAtHand(docs.map((d) => (d.ticket === "DEMO-102" ? { ...d, status: "in progress" } : d)))).toBe("");
+		expect(ticketAtHand([])).toBe("");
 	});
 
 	test("the file manifest is of the project's work, not of the documents about it", async () => {
@@ -343,5 +381,23 @@ describe("a new document's own words", () => {
 	test("a day is the day it is here, not in UTC", () => {
 		expect(localDay(new Date(2026, 10, 18, 23, 52))).toBe("2026-11-18");
 		expect(localDay(new Date(2026, 0, 5, 0, 1))).toBe("2026-01-05");
+	});
+});
+
+import { newPlan, parsePlan, printPlan } from "../src/view/plan/model";
+import { planHash, refinePrompt } from "../src/view/plan/assist";
+
+describe("a plan's ticket", () => {
+	test("is written with its title, read back, and does not make the plan a different plan", () => {
+		const plain = newPlan("Release a sample");
+		const plan = { ...plain, ticket: "LIMS-7" };
+		const text = printPlan(plan);
+		expect(text.indexOf('"ticket": "LIMS-7"')).toBeLessThan(text.indexOf('"nodes"'));
+		expect(parsePlan(text).plan?.ticket).toBe("LIMS-7");
+		expect(planHash(plan)).toBe(planHash(plain));
+	});
+
+	test("the work it is for goes to the planner with what else it is told", () => {
+		expect(refinePrompt(newPlan("x"), "SURVEY", "THE WORK THIS IS FOR:\nTICKET LIMS-7")).toEndWith("SURVEY\n\nTHE WORK THIS IS FOR:\nTICKET LIMS-7");
 	});
 });

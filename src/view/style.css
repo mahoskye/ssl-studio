@@ -775,6 +775,7 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .plan-details label { display: flex; align-items: center; gap: var(--space-3); color: var(--muted); }
 .plan-details label.grow { flex: 1; min-width: 150px; }
 .plan-details label.grow input { flex: 1; min-width: 0; }
+.plan-details input.short { width: 11ch; }
 .plan-kind { color: var(--muted); font-weight: 600; text-transform: capitalize; }
 /* Read out by a screen reader, not seen: what is selected in the chart. */
 .plan-live { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
