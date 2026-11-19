@@ -134,7 +134,7 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 		const specs = many(values.specs);
 		const related = [...many(values.related), ...many(values.blocks), ...many(values["blocked-by"]), ...many(values.parent)];
 		const missing = specs.filter((spec) => !existsSync(join(root, spec)));
-		list.push({ path, name, group: "tickets", exists: true, ...described(text), ...(isCatalog({ name }) ? {} : { ticket: key, tickets: related.length ? related : undefined, specs: specs.length ? specs : undefined, missing: missing.length ? missing : undefined }) });
+		list.push({ path, name, group: "tickets", exists: true, ...described(text), ...(isCatalog({ name }) ? {} : { ticket: key, parent: one(values.parent) || undefined, tickets: related.length ? related : undefined, specs: specs.length ? specs : undefined, missing: missing.length ? missing : undefined }) });
 	}
 	// The specs: those written by hand, and those the planner writes beside a plan.
 	for (const path of [...under(area("specs"), MARKDOWN), ...under(join(root, project.plans), /\.spec\.md$/i)]) {

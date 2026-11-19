@@ -525,6 +525,11 @@ the work comes from ([ADR 0012](adr/0012-a-projects-work-is-written-down.md)).
   number opens Search on it. It is a search for a name, not a reading of
   SSL (ADR 0003).
 - **A status is typed from the ones the table uses,** and the usual ones.
+- **The Work list is in the order of the work.** What is under way comes
+  first, then what waits, then what is finished. A ticket that is part of
+  another (an epic's story, a task's sub-task) is listed under it, and a
+  parent with something under way counts as under way. Finished tickets
+  beyond three fold away behind a count.
 - **Tried in the app with the local model, on opencode 2.3.2:** the chat's
   ticket box, Refine on a plan started from a ticket, a tidy step with its
   skill, and Write spec, which came back with the model's questions. Not

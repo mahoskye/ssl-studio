@@ -141,6 +141,10 @@ Parameters and Returns parts, for the vision's "doc block as a form".
 connects a script's SQL to them: the agent is not given the tables a script
 uses, and a column that does not exist is not reported.
 
+A registry of database objects waits on this too (2026-11-19). The IDE can
+look for a row's name in the project's files, which is a search and reads no
+SSL; it cannot say which tables the scripts use that no row lists.
+
 **Needs:**
 
 - A request that lists, for a document, the tables and columns its SQL

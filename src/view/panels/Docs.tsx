@@ -2,13 +2,13 @@
 // whether or not they exist yet, then the Markdown in the docs folder and the
 // plans. Which folders those are comes from .ssl-studio/project.toml.
 import { FileMark } from "../FileMark";
-import { createResource, For, Show } from "solid-js";
+import { createMemo, createResource, createSignal, For, Show } from "solid-js";
 import type { DocFile } from "../../shared/protocol";
 import { backend } from "../backend";
-import { relativeTo } from "../../shared/paths";
 import { DOC_FOLDERS, isCatalog, KNOWLEDGE, progress, registryTitle, toneOf } from "../../shared/projectDocs";
 import { docs, newDoc, setUpProject } from "../project";
 import { importTickets, newKnowledge, newRegistry, newSpec, newState, newTicket, updateCatalogs, updateManifest } from "../projectDocs";
+import { workList } from "../../shared/workList";
 import { activePath, canonical, openFile, setState, state } from "../state";
 import { IconButton, Row, RowGroup, Rows } from "./Rows";
 import { Menu } from "../Menu";
@@ -102,28 +102,36 @@ const Head = (props: { title: string; folder?: string }) => (
 	</>
 );
 
-/** The work: each ticket, and under it the specs written for it. Specs for no ticket here follow. */
+/**
+ * The work: each ticket with what was planned and spec'd for it under it, a ticket that is part of another under its
+ * parent, what is under way first. Finished tickets beyond a few fold away behind a count. Specs for no ticket here follow.
+ */
 function Work(props: { files: DocFile[]; empty?: string }) {
-	const tickets = () => props.files.filter((d) => d.group === "tickets" && !isCatalog(d));
-	const specs = () => props.files.filter((d) => d.group === "specs" && !isCatalog(d));
-	const rel = (path: string) => relativeTo(state.workspace?.root, path).split("\\").join("/");
-	const specsOf = (ticket: DocFile) => specs().filter((spec) => spec.tickets?.some((key) => key.toLowerCase() === ticket.ticket?.toLowerCase()) || ticket.specs?.some((path) => path === rel(spec.path)));
-	const loose = () => specs().filter((spec) => !tickets().some((ticket) => specsOf(ticket).includes(spec)));
-	/** The plans drawn for a ticket: a plan names its ticket (ADR 0013). */
-	const plansOf = (ticket: DocFile) => props.files.filter((d) => d.group === "plans" && d.tickets?.some((key) => key.toLowerCase() === ticket.ticket?.toLowerCase()));
+	const [all, setAll] = createSignal(false);
+	const list = createMemo(() => workList(props.files, state.workspace?.root, { all: all() }));
+	/** How many finished tickets fold away, whether or not they are shown now. */
+	const everything = createMemo(() => workList(props.files, state.workspace?.root).folded);
 	const catalogs = () => props.files.filter((d) => (d.group === "tickets" || d.group === "specs") && isCatalog(d));
 	return (
 		<RowGroup head={<Head title="Work" folder={`${state.project?.docs}/${DOC_FOLDERS.tickets}`} />} rows={props.files.some((d) => d.group === "tickets" || d.group === "specs")} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
-			<For each={tickets()}>
-				{(ticket) => (
-					<>
-						<ItemRow file={ticket} lead={ticket.ticket} />
-						<For each={plansOf(ticket)}>{(plan) => <ItemRow file={{ ...plan, title: plan.name.replace(/\.plan\.json$/i, "") }} depth={1} note="plan" />}</For>
-						<For each={specsOf(ticket)}>{(spec) => <ItemRow file={spec} depth={1} note="spec" />}</For>
-					</>
-				)}
+			<For each={list().rows}>
+				{(row) =>
+					row.kind === "ticket" ? (
+						<ItemRow file={row.file} depth={row.depth} lead={row.file.ticket} />
+					) : row.kind === "plan" ? (
+						<ItemRow file={{ ...row.file, title: row.file.name.replace(/\.plan\.json$/i, "") }} depth={row.depth} note="plan" />
+					) : (
+						<ItemRow file={row.file} depth={row.depth} note="spec" />
+					)
+				}
 			</For>
-			<For each={loose()}>{(spec) => <ItemRow file={spec} note={spec.tickets?.length ? `for ${spec.tickets.join(", ")}` : "spec, no ticket"} />}</For>
+			{/* What is done or set aside is not what the list is opened for: beyond a few, it waits behind its count. */}
+			<Show when={everything()}>
+				<Row class="tree-row doc-row doc-more" key="finished-tickets" title={all() ? "Leave out the tickets that are done or set aside" : "Show the tickets that are done or set aside"} onActivate={() => setAll(!all())}>
+					<span class="label">{all() ? "Hide" : "Show"} the {everything()} finished</span>
+				</Row>
+			</Show>
+			<For each={list().loose}>{(spec) => <ItemRow file={spec} note={spec.tickets?.length ? `for ${spec.tickets.join(", ")}` : "spec, no ticket"} />}</For>
 			<For each={catalogs()}>{(catalog) => <ItemRow file={catalog} note={catalog.group} />}</For>
 		</RowGroup>
 	);

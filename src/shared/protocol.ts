@@ -51,6 +51,8 @@ export type DocFile = {
 	ticket?: string;
 	/** The tickets a spec, a decision or a question is for; for a ticket, the tickets it is related to. */
 	tickets?: string[];
+	/** A ticket: the ticket it is part of (an epic, a parent task). */
+	parent?: string;
 	/** A ticket: the specs it names, as paths from the project's root. */
 	specs?: string[];
 	/** A ticket: those of the specs it names that are not there. */

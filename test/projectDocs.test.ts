@@ -657,3 +657,53 @@ describe("a registry's names against the project's files", () => {
 		expect(usesSummary(new Map([["a", 0], ["b", 0], ["c", 1]]))).toBe("2 of 3 are named nowhere outside the documents.");
 	});
 });
+
+import { FINISHED_SHOWN, workList } from "../src/shared/workList";
+
+describe("the Work list", () => {
+	const ticket = (key: string, status: string, more: Partial<DocFile> = {}): DocFile => ({ path: `/p/docs/tickets/${key}.md`, name: `${key}.md`, group: "tickets", exists: true, ticket: key, status, ...more });
+	const shown = (files: DocFile[], all = false) => workList(files, "/p", { all }).rows.map((row) => `${"  ".repeat(row.depth)}${row.kind === "ticket" ? row.file.ticket : `${row.kind}:${row.file.name}`}`);
+
+	test("what is under way comes first, then what waits, then what is finished, each in the folder's own order", () => {
+		expect(shown([ticket("A-1", "Done"), ticket("A-2", "To Do"), ticket("A-3", "In Progress"), ticket("A-4", "open"), ticket("A-5", "Won't Do"), ticket("A-6", "in review")])).toEqual(["A-3", "A-6", "A-2", "A-4", "A-1", "A-5"]);
+	});
+
+	test("a ticket is under its parent, with its plans and specs under it, and a parent with work under way counts as under way", () => {
+		const files: DocFile[] = [
+			ticket("A-1", "open"),
+			ticket("A-2", "open", { specs: ["design/Two.spec.md"] }),
+			ticket("A-3", "in progress", { parent: "a-2" }),
+			ticket("A-4", "done", { parent: "A-2" }),
+			ticket("A-5", "open", { parent: "A-99" }),
+			{ path: "/p/design/Two.spec.md", name: "design/Two.spec.md", group: "specs", exists: true },
+			{ path: "/p/docs/specs/Three.md", name: "Three.md", group: "specs", exists: true, tickets: ["A-3"] },
+			{ path: "/p/design/Three.plan.json", name: "Three.plan.json", group: "plans", exists: true, tickets: ["A-3"] },
+			{ path: "/p/docs/specs/Alone.md", name: "Alone.md", group: "specs", exists: true },
+			{ path: "/p/docs/tickets/INDEX.md", name: "INDEX.md", group: "tickets", exists: true },
+		];
+		expect(shown(files)).toEqual(["A-2", "  spec:design/Two.spec.md", "  A-3", "    plan:Three.plan.json", "    spec:Three.md", "  A-4", "A-1", "A-5"]);
+		expect(workList(files, "/p").loose.map((spec) => spec.name)).toEqual(["Alone.md"]);
+	});
+
+	test("finished tickets beyond a few fold away behind a count, with what is under them, until they are asked for", () => {
+		const done = Array.from({ length: FINISHED_SHOWN + 2 }, (_, i) => ticket(`D-${i + 1}`, "done"));
+		const files = [ticket("A-1", "open"), ...done, ticket("D-9", "closed", { parent: "D-1" })];
+		expect(shown(files)).toEqual(["A-1"]);
+		expect(workList(files, "/p").folded).toBe(FINISHED_SHOWN + 2);
+		expect(shown(files, true)).toEqual(["A-1", "D-1", "  D-9", "D-2", "D-3", "D-4", "D-5"]);
+		expect(workList(files, "/p", { all: true }).folded).toBe(0);
+		// A few finished tickets are just listed.
+		expect(shown([ticket("A-1", "open"), ...done.slice(0, FINISHED_SHOWN)])).toEqual(["A-1", "D-1", "D-2", "D-3"]);
+	});
+
+	test("tickets that name each other as parent are both listed, once", () => {
+		expect(shown([ticket("A-1", "open", { parent: "A-2" }), ticket("A-2", "open", { parent: "A-1" })]).sort()).toEqual(["A-1", "A-2"]);
+	});
+
+	test("the demo's tickets list as they did: the one under way first", async () => {
+		const root = join(import.meta.dir, "..", "examples", "due-dates");
+		const docs = await listDocs(new WorkspaceFiles(root), await readProject(root));
+		expect(workList(docs, root).rows.filter((row) => row.kind === "ticket").map((row) => row.file.ticket)).toEqual(["DEMO-103", "DEMO-101", "DEMO-102"]);
+		expect(workList(docs, root).folded).toBe(0);
+	});
+});

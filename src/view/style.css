@@ -874,6 +874,7 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .doc-row .doc-status.tone-active { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
 .doc-row .doc-status.tone-off { text-decoration: line-through; opacity: .75; }
 .doc-row.catalog .label { color: var(--muted); font-style: italic; }
+.doc-row.doc-more .label { color: var(--muted); }
 /* In a narrow panel the title has the room: a state is a dot in its tone (the word is in the row's tooltip), and a note that only repeats where the row sits is left out. */
 [data-panel="docs"] { container: docs / inline-size; }
 @container docs (max-width: 380px) {
