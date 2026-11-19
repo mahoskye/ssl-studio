@@ -206,10 +206,17 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .badge { font-size: var(--text-xs); border-radius: var(--radius-lg); padding: 0 var(--space-3); }
 .badge.near, .meter .near { color: var(--warning); }
 .badge.over, .meter .over { color: var(--error); font-weight: 600; }
-.search-form { display: flex; gap: var(--space-1); margin: 0 var(--space-4); }
+.search-form { display: flex; flex-direction: column; gap: var(--space-2); margin: 0 var(--space-4) 0 var(--space-1); }
+.search-row { display: flex; align-items: center; gap: var(--space-1); }
 .search-form input { flex: 1; min-width: 0; }
 .search-form button { color: var(--muted); font-family: monospace; }
 .search-form button.on { color: var(--fg); background: var(--selected); }
+/* The fold that opens the replace row, and the same width left empty in the rows under it, so that the boxes line up. */
+.search-form .search-fold { flex: none; width: calc(20px * var(--ui-scale)); padding: var(--space-1) 0; text-align: center; font-family: inherit; }
+.search-form .search-replace { flex: none; font-family: inherit; color: var(--fg); border: 1px solid var(--input-border); padding: var(--space-1) var(--space-4); white-space: nowrap; }
+/* What a replace would take out and put in: said by a line through and an underline too, not by colour alone. */
+.tree-row.hit del { background: color-mix(in srgb, var(--error) 22%, transparent); text-decoration: line-through; border-radius: 2px; }
+.tree-row.hit ins { background: color-mix(in srgb, var(--ok) 26%, transparent); text-decoration: underline; border-radius: 2px; }
 
 .group { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; border-left: 1px solid var(--border); }
 .group:first-child { border-left: 0; }

@@ -3,7 +3,8 @@
 import { cpSync, mkdirSync, readdirSync, renameSync, statSync, watch, existsSync, type FSWatcher } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type { Entry, FileText, SearchHit } from "../shared/protocol";
-import { searchPattern, type SearchOptions } from "../shared/searchPattern";
+import { replaceIn, searchPattern, type SearchOptions } from "../shared/searchPattern";
+import { fileChosen } from "../shared/fileGlob";
 import { decode, encode, encodingOf, textOf, type Encoding } from "./encoding";
 import { imageType, looksBinary, sizeText } from "../shared/fileKind";
 
@@ -145,6 +146,7 @@ export class WorkspaceFiles {
 		const pattern = searchPattern(query, options);
 		const hits: SearchHit[] = [];
 		for (const path of this.files()) {
+			if (!fileChosen(relative(this.root, path), options.include, options.exclude)) continue;
 			if (statSync(path).size > SEARCH_MAX_BYTES) continue;
 			const text = await textOf(path);
 			if (text.includes("\u0000")) continue;
@@ -160,6 +162,19 @@ export class WorkspaceFiles {
 			}
 		}
 		return hits;
+	}
+
+	/**
+	 * One file as it would be with every match replaced: its text before and after, and how many matches. Null
+	 * when it has none, or is a file the search does not look in (too large, or not text).
+	 */
+	async replaced(path: string, query: string, replacement: string, options: SearchOptions): Promise<{ before: string; after: string; count: number } | null> {
+		const full = this.inside(path);
+		if (!query || statSync(full).size > SEARCH_MAX_BYTES) return null;
+		const file = await this.read(full);
+		if (file.binary || file.text.includes("\u0000")) return null;
+		const done = replaceIn(file.text, query, replacement, options);
+		return done.count ? { before: file.text, after: done.text, count: done.count } : null;
 	}
 
 	watch(onChange: (path: string) => void) {

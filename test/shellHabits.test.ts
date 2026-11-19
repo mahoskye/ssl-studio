@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { searchPattern } from "../src/shared/searchPattern";
+import { matchesOn, replaceIn, replacementFor, searchPattern } from "../src/shared/searchPattern";
 import { landsBefore, movedAcross, ofOpen, othersOf, placed, rightOf, stepped, used, walkHolds, withPin } from "../src/shared/tabOrder";
 
 const found = (text: string, pattern: RegExp) => [...text.matchAll(pattern)].map((match) => match[0]);
@@ -192,5 +192,78 @@ describe("where a dragged tab would land", () => {
 		expect(landsBefore(["a", "b"], ["a"], "x", null)).toBeNull();
 		// Pinned where it came from, by the same name: still not pinned here.
 		expect(landsBefore(["a", "b"], ["a", "x"], "x", "a")).toBe("b");
+	});
+});
+
+// --- replacing what a search found --------------------------------------------------------------
+
+describe("what a match becomes", () => {
+	const first = (text: string, source: string, flags = "g") => new RegExp(source, flags).exec(text)!;
+
+	test("words as typed become the replacement as typed, dollars and all", () => {
+		expect(replacementFor(first("Due", "Due"), "$1 costs $&", false)).toBe("$1 costs $&");
+	});
+
+	test("a regular expression fills in its groups, the whole match and a dollar", () => {
+		const match = first("DueDate", "(Due)(Date)");
+		expect(replacementFor(match, "$2$1", true)).toBe("DateDue");
+		expect(replacementFor(match, "[$&]", true)).toBe("[DueDate]");
+		expect(replacementFor(match, "$$1", true)).toBe("$1");
+	});
+
+	test("a named group by its name", () => {
+		expect(replacementFor(first("n := 5", "(?<name>\\w+) := (?<value>\\d+)"), "$<value> -> $<name>", true)).toBe("5 -> n");
+	});
+
+	test("a group the expression does not have is left as written", () => {
+		const match = first("Due", "(Due)");
+		expect(replacementFor(match, "$3", true)).toBe("$3");
+		expect(replacementFor(match, "$<none>", true)).toBe("$<none>");
+		// "$12" with one group is group 1 and a "2".
+		expect(replacementFor(match, "$12", true)).toBe("Due2");
+		expect(replacementFor(match, "$0", true)).toBe("$0");
+	});
+});
+
+describe("replacing in a text", () => {
+	test("every match is replaced and counted", () => {
+		expect(replaceIn("a Due b Due\nDue", "Due", "Late")).toEqual({ text: "a Late b Late\nLate", count: 3 });
+	});
+
+	test("the line ends stay as they are, each as it was", () => {
+		expect(replaceIn("Due\r\nDue\nDue\r\n", "Due", "x").text).toBe("x\r\nx\nx\r\n");
+	});
+
+	test("nothing found changes nothing", () => {
+		expect(replaceIn("a\r\nb", "Due", "x")).toEqual({ text: "a\r\nb", count: 0 });
+		expect(replaceIn("", "Due", "x")).toEqual({ text: "", count: 0 });
+	});
+
+	test("the switches are the search's own: case, whole word, a regular expression", () => {
+		expect(replaceIn("due Due", "Due", "x", { caseSensitive: true }).text).toBe("due x");
+		expect(replaceIn("Due DueDate", "Due", "x", { wholeWord: true }).text).toBe("x DueDate");
+		expect(replaceIn("nDays := 1;", "(\\w+) := (\\d+)", "$1 := $2 + 1", { regex: true }).text).toBe("nDays := 1 + 1;");
+	});
+
+	test("words as typed are put in as typed", () => {
+		expect(replaceIn("cost", "cost", "$& and $1").text).toBe("$& and $1");
+		expect(replaceIn("a.b axb", "a.b", "c").text).toBe("c axb");
+	});
+
+	test("a match of nothing puts the replacement there: a mark before every line", () => {
+		expect(replaceIn("a\nb", "^", "> ", { regex: true })).toEqual({ text: "> a\n> b", count: 2 });
+	});
+
+	test("replacing with nothing takes the matches out", () => {
+		expect(replaceIn("a  b", " ", "").text).toBe("ab");
+	});
+
+	test("what is replaced is what a search finds, match for match", () => {
+		const text = "aaa\nDue Due\n";
+		for (const [query, options] of [["aa", {}], ["a*", { regex: true }], ["Due", { wholeWord: true }]] as const) {
+			const pattern = searchPattern(query, options);
+			const found = text.split(/\r?\n/).flatMap((line) => matchesOn(line, pattern, "", Boolean((options as { regex?: boolean }).regex)));
+			expect(replaceIn(text, query, "", options).count).toBe(found.length);
+		}
 	});
 });

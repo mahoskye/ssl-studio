@@ -66,6 +66,7 @@ export const MENU_BAR: BarMenu[] = [
 			text("Find", "actions.find"),
 			text("Replace", "editor.action.startFindReplaceAction"),
 			forFolder("Find in files", "search"),
+			forFolder("Replace in files…", "replace-in-files"),
 			"separator",
 			text("Toggle line comment", "editor.action.commentLine"),
 			text("Toggle block comment", "editor.action.blockComment"),

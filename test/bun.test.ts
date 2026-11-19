@@ -126,6 +126,46 @@ describe("files that are not text", () => {
 	});
 });
 
+describe("searching some files, and replacing", () => {
+	const root = join(dir, "replace-ws");
+	mkdirSync(join(root, "src"), { recursive: true });
+	mkdirSync(join(root, "tests"), { recursive: true });
+	writeFileSync(join(root, "src", "a.ssl"), "nDue := 1;\r\nnDue := nDue + 1;\r\n");
+	writeFileSync(join(root, "src", "notes.md"), "nDue is the count\n");
+	writeFileSync(join(root, "tests", "a.ssl"), "nDue := 0;\n");
+	writeFileSync(join(root, "blob.bin"), Buffer.from([0x6e, 0x44, 0x75, 0x65, 0, 1]));
+	// "café nDue" in the one-byte Windows encoding.
+	writeFileSync(join(root, "ansi.sql"), Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x20, 0x6e, 0x44, 0x75, 0x65]));
+	const files = new WorkspaceFiles(root);
+	const names = async (options: object) => [...new Set((await files.search("nDue", options)).map((hit) => hit.path.slice(root.length + 1).split("\\").join("/")))].sort();
+
+	test("a search looks in every text file, with nothing said", async () => {
+		expect(await names({})).toEqual(["ansi.sql", "src/a.ssl", "src/notes.md", "tests/a.ssl"]);
+	});
+	test("only in the files included, and never in those excluded", async () => {
+		expect(await names({ include: "*.ssl" })).toEqual(["src/a.ssl", "tests/a.ssl"]);
+		expect(await names({ include: "*.ssl", exclude: "tests" })).toEqual(["src/a.ssl"]);
+		expect(await names({ exclude: "src, *.sql" })).toEqual(["tests/a.ssl"]);
+		expect(await names({ include: "src/*.md" })).toEqual(["src/notes.md"]);
+	});
+	test("a file as it would be, with its line ends as they are", async () => {
+		expect(await files.replaced(join(root, "src", "a.ssl"), "nDue", "nLate", {})).toEqual({ before: "nDue := 1;\r\nnDue := nDue + 1;\r\n", after: "nLate := 1;\r\nnLate := nLate + 1;\r\n", count: 3 });
+	});
+	test("a file with no match, or that is not text, is not changed", async () => {
+		expect(await files.replaced(join(root, "src", "a.ssl"), "nothing", "x", {})).toBeNull();
+		expect(await files.replaced(join(root, "blob.bin"), "nDue", "x", {})).toBeNull();
+	});
+	test("a file in a one-byte encoding is replaced in that encoding", async () => {
+		const change = (await files.replaced(join(root, "ansi.sql"), "nDue", "nLate", {}))!;
+		expect(change.after).toBe("café nLate");
+		await files.write(join(root, "ansi.sql"), change.after);
+		expect([...new Uint8Array(await Bun.file(join(root, "ansi.sql")).arrayBuffer())]).toEqual([0x63, 0x61, 0x66, 0xe9, 0x20, 0x6e, 0x4c, 0x61, 0x74, 0x65]);
+	});
+	test("nothing outside the workspace is replaced", async () => {
+		await expect(files.replaced(join(root, "..", "ws", "b.ssl"), "x", "y", {})).rejects.toThrow(/outside/);
+	});
+});
+
 describe("local history", () => {
 	test("records changed saves only, newest first", async () => {
 		const history = new History(join(dir, "ws"), join(dir, "history"));

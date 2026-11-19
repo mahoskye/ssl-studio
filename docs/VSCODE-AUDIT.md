@@ -153,8 +153,8 @@ of the text editor, and nothing of its own.
 | --- | --- | --- | --- |
 | Across files | Yes | Have | With match case and regular expressions |
 | Whole word | Yes | Bring | Built: the third switch, "ab" |
-| Include and exclude | No | Bring | One box, no way to say which files |
-| Replace across files | No | Bring | With a preview before anything is written |
+| Include and exclude | Yes | Bring | Built: two boxes of patterns under the "…" switch: `*.ssl`, `src`, `docs/**/*.md` |
+| Replace across files | Yes | Bring | Built: each match shown struck out beside what replaces it; written after asking |
 | Results as a tree | Partly | Later | By file; not collapsible |
 | Search history | No | Later | Up and down through what was searched |
 | Search editor | No | Leave | The panel is enough |
@@ -402,8 +402,31 @@ changed to LF and back by undo.
 
 | Feature | Size | Done | What it takes |
 | --- | --- | --- | --- |
-| Include and exclude | Medium | No | Which files to search, by pattern |
-| Replace across files | Large | No | A preview of every change; nothing written until it is confirmed |
+| Include and exclude | Medium | Yes | Which files to search, by pattern |
+| Replace across files | Large | Yes | A preview of every change; nothing written until it is confirmed |
+
+A pattern with no slash names a file or a folder wherever it is (`*.ssl`,
+`tests`); one with a slash is read from the workspace's folder
+(`src/DueDates`). The patterns narrow a search only while their boxes are
+showing, so that nothing out of sight hides results.
+
+The search, the preview and the replace find their matches with the one
+expression, a line at a time, so what is replaced is what was listed. A
+file that is open is changed in the editor, where undo takes it back: it
+is saved straight away when it had nothing unsaved, and left unsaved when
+it had. A file that is not open is changed on disk, in the encoding and
+with the line ends it has, and the file as it was goes into its local
+history first. With 2000 results or more only the first are listed, and
+the replace is refused until the search is narrowed. In a regular
+expression the replacement may name groups: `$1`, `$<name>`, `$&`.
+
+Not built: leaving single results or files out of a replace, and
+replacing one result at a time. A match of nothing (`^`, to put a mark
+before every line) is replaced but has no mark in the preview.
+
+Looked at: the dark theme at 1440 wide and the light theme at 720 wide.
+In a copy of the demo, 26 matches in 4 files were replaced and replaced
+back, the second time with one of the files holding unsaved changes.
 
 ### Step 8: source control
 

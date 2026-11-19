@@ -106,6 +106,26 @@ export function createBackend(host: Host, initial?: string) {
 		image: (path) => need().image(path),
 		trash: async (path) => host.trash(need().inside(path)),
 		search: (query, options) => need().search(query, options),
+		replace: async (query, replacement, options, paths) => {
+			const done: { path: string; count: number; error?: string }[] = [];
+			for (const path of paths) {
+				// One file that cannot be written (its encoding has no way to write the replacement, say) does not
+				// stop the others: it is left as it was, and says why.
+				try {
+					const full = need().inside(path);
+					const change = await need().replaced(full, query, replacement, options);
+					if (!change) continue;
+					// The file as it was goes into local history first, so that there is a way back.
+					await history!.record(full, change.before);
+					await need().write(full, change.after);
+					await history!.record(full, change.after);
+					done.push({ path: full, count: change.count });
+				} catch (e: any) {
+					done.push({ path, count: 0, error: String(e?.message ?? e) });
+				}
+			}
+			return done;
+		},
 		history: async (path) => history?.list(need().inside(path)) ?? [],
 		snapshot: (path, id) => history!.read(need().inside(path), id),
 		project: async () => readProject(need().root),

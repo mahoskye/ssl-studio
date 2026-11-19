@@ -583,14 +583,14 @@ async function settleConflict(doc: Doc): Promise<boolean> {
 }
 
 /** Says whether the file is on disk as it is in the editor. */
-export async function save(path = activePath()): Promise<Saved> {
+export async function save(path = activePath(), options: { /** False to leave the lines as they are, whatever the setting says. */ format?: boolean } = {}): Promise<Saved> {
 	if (!path) return false;
 	const doc = docs.get(path);
 	if (!doc) return false;
 	// A picture, or other bytes: there is no text of it here to save.
 	if (doc.binary) return notify(`${baseName(path)} is not text: there is nothing of it to save here.`), false;
 	if (!(await settleConflict(doc))) return false;
-	if (state.settings.formatOnSave && doc.model.getLanguageId() === "ssl" && state.lsp.state === "running") {
+	if (options.format !== false && state.settings.formatOnSave && doc.model.getLanguageId() === "ssl" && state.lsp.state === "running") {
 		await formatChanged(doc);
 	}
 	const text = doc.model.getValue();
@@ -699,7 +699,10 @@ export async function revert(path: string) {
 	});
 }
 
-on("fileChanged", async ({ path: changed }) => {
+on("fileChanged", ({ path }) => fileChangedOnDisk(path));
+
+/** A file was changed on disk by something other than a save here: the tree, the language server and an open copy follow. */
+export async function fileChangedOnDisk(changed: string) {
 	const path = canonical(changed);
 	setState("treeVersion", (v) => v + 1);
 	const doc = docs.get(path);
@@ -728,7 +731,7 @@ on("fileChanged", async ({ path: changed }) => {
 		await revert(path);
 		log(`reloaded ${path} after an external change`);
 	}
-});
+}
 
 // The desktop window was asked to close with edits that are not on disk.
 on("closeRequested", async () => {

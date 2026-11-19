@@ -46,3 +46,22 @@ export function segments(line: LineHit, before = 30, after = 80): Segment[] {
 	} else if (start > 0) out.unshift({ text: "…", match: false });
 	return out;
 }
+
+/**
+ * The columns of the matches that `segments` marks, in the order it marks
+ * them: a match inside the one before it, or of nothing, has no mark and no
+ * column here. For telling which mark is which match.
+ */
+export function markedColumns(line: LineHit): number[] {
+	const out: number[] = [];
+	const first = line.matches[0];
+	if (!first) return out;
+	let at = 0;
+	for (const m of line.matches) {
+		const from = m.column - 1;
+		if (from < at || m.length <= 0) continue;
+		out.push(m.column);
+		at = from + m.length;
+	}
+	return out;
+}

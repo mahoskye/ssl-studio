@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { moveIndex, restoreIndex, ringStep, stopIndex, treeStep, typeAhead, isMoveKey, type TreeRow } from "../src/view/panels/rowMoves";
 import { COPY, COPY_PATH, COPY_RELATIVE, CUT, folderFor, holdsRoot, menuFor, nameProblem, NEW_FILE, NEW_FOLDER, PASTE, RENAME, retarget, TRASH, without } from "../src/view/panels/explorerMenu";
-import { byLine, segments } from "../src/view/panels/searchLines";
+import { byLine, markedColumns, segments } from "../src/view/panels/searchLines";
 import { snippetAsText, TEMPLATES } from "../src/shared/houseStyle";
 import { patternsFrom } from "../src/view/plan/build";
 
@@ -287,4 +287,17 @@ test("the Explorer's open folders are read with suspicion", () => {
 	expect(openFolders(null, "/w")).toEqual([]);
 	expect(openFolders("not json", "/w")).toEqual([]);
 	expect(openFolders('{"a":1}', "/w")).toEqual([]);
+});
+
+test("each mark on a line is one match, and says which by its column", () => {
+	const line = { path: "p", line: 1, text: "nDays := nDays + 1;", matches: [{ column: 1, length: 5 }, { column: 10, length: 5 }] };
+	expect(markedColumns(line)).toEqual([1, 10]);
+	expect(segments(line).filter((part) => part.match).length).toBe(markedColumns(line).length);
+});
+
+test("a match inside the one before it, or of nothing, has no mark and no column", () => {
+	const line = { path: "p", line: 1, text: "aaaa b", matches: [{ column: 1, length: 3 }, { column: 2, length: 3 }, { column: 5, length: 0 }, { column: 6, length: 1 }] };
+	expect(markedColumns(line)).toEqual([1, 6]);
+	expect(segments(line).filter((part) => part.match).map((part) => part.text)).toEqual(["aaa", "b"]);
+	expect(markedColumns({ path: "p", line: 1, text: "x", matches: [] })).toEqual([]);
 });

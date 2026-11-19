@@ -3,7 +3,15 @@
 // or as a whole word. The search across files and the replace across files
 // find the same places because they are given the same expression.
 
-export type SearchOptions = { regex?: boolean; caseSensitive?: boolean; wholeWord?: boolean };
+export type SearchOptions = {
+	regex?: boolean;
+	caseSensitive?: boolean;
+	wholeWord?: boolean;
+	/** The files to look in, as a list of patterns (src/shared/fileGlob.ts); every file, when empty. */
+	include?: string;
+	/** The files to leave out, as a list of patterns. */
+	exclude?: string;
+};
 
 const literal = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -41,4 +49,63 @@ export function searchPattern(query: string, options: SearchOptions = {}): RegEx
 		new RegExp(source, flags);
 		return new RegExp(`${PLAIN_STARTS}(?:${source})${PLAIN_ENDS}`, flags);
 	}
+}
+
+/**
+ * What one match becomes. For words as typed, the replacement as typed. For
+ * a regular expression, the replacement with its marks filled in from the
+ * match: "$1" to "$99" the groups, "$<name>" a named group, "$&" the whole
+ * match, "$$" a dollar. A group the expression does not have is left as it
+ * was written.
+ */
+export function replacementFor(match: RegExpExecArray, replacement: string, regex: boolean): string {
+	if (!regex) return replacement;
+	return replacement.replace(/\$(?:(\$)|(&)|<([^>]+)>|(\d{1,2}))/g, (written, dollar, whole, name, digits: string | undefined) => {
+		if (dollar) return "$";
+		if (whole) return match[0];
+		if (name !== undefined) return match.groups && name in match.groups ? (match.groups[name] ?? "") : written;
+		// "$12" is group 12 where there is one, else group 1 and a "2".
+		const two = Number(digits);
+		if (two >= 1 && two < match.length) return match[two] ?? "";
+		const one = Number(digits![0]);
+		return digits!.length === 2 && one >= 1 && one < match.length ? (match[one] ?? "") + digits![1] : written;
+	});
+}
+
+/** Every match on one line, left to right, with what it becomes. The same walk a search makes. */
+export function matchesOn(line: string, pattern: RegExp, replacement: string, regex: boolean): { column: number; length: number; becomes: string }[] {
+	const out: { column: number; length: number; becomes: string }[] = [];
+	pattern.lastIndex = 0;
+	let match: RegExpExecArray | null;
+	while ((match = pattern.exec(line))) {
+		out.push({ column: match.index + 1, length: match[0].length, becomes: replacementFor(match, replacement, regex) });
+		if (!match[0].length) pattern.lastIndex++;
+	}
+	return out;
+}
+
+/**
+ * A text with every match replaced, and how many there were. Matches are
+ * looked for a line at a time, as the search looks for them, so what is
+ * replaced is what was found; the line ends stay as they are.
+ */
+export function replaceIn(text: string, query: string, replacement: string, options: SearchOptions = {}): { text: string; count: number } {
+	const pattern = searchPattern(query, options);
+	let count = 0;
+	// The lines and what ends each of them, turn about: only the lines are searched.
+	const parts = text.split(/(\r?\n)/);
+	for (let at = 0; at < parts.length; at += 2) {
+		const line = parts[at]!;
+		const found = matchesOn(line, pattern, replacement, Boolean(options.regex));
+		if (!found.length) continue;
+		count += found.length;
+		let out = "";
+		let from = 0;
+		for (const each of found) {
+			out += line.slice(from, each.column - 1) + each.becomes;
+			from = each.column - 1 + each.length;
+		}
+		parts[at] = out + line.slice(from);
+	}
+	return { text: parts.join(""), count };
 }
