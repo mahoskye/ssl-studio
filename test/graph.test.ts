@@ -245,3 +245,48 @@ test("the targets that did not resolve can be put aside, with the lines to them"
 	expect([...left.nodes]).toEqual(["a", "b"]);
 	expect(left.edges.map((e) => [e.from, e.to])).toEqual([["a", "b"]]);
 });
+
+import { folderEnd, gather, type GraphEdge } from "../src/view/graph/model";
+
+describe("lines gathered at a folder's edge", () => {
+	const edge = (from: string, to: string, kind?: string): GraphEdge => ({ from, to, crossScript: true, sites: [{ path: from, line: 1 }], ...(kind ? { kind } : {}) });
+	// Nodes are named folder/name; a name with no folder is drawn outside every folder.
+	const folderOf = (id: string) => (id.includes("/") ? id.slice(0, id.indexOf("/")) : undefined);
+
+	test("a node's calls to several nodes of one folder are one line to the folder", () => {
+		const out = gather([edge("tests", "app/a"), edge("tests", "app/b"), edge("tests", "app/c"), edge("app/a", "app/b")], folderOf);
+		expect(out.map((e) => `${e.from}>${e.to}`)).toEqual([`tests>${folderEnd("app")}`, "app/a>app/b"]);
+		expect(out[0]!.tos).toEqual(["app/a", "app/b", "app/c"]);
+		expect(out[0]!.sites.length).toBe(3);
+	});
+
+	test("fewer than the number that gathers stay as they are, and so do lines inside a folder", () => {
+		const edges = [edge("tests", "app/a"), edge("tests", "app/b"), edge("app/a", "app/b"), edge("app/a", "app/c"), edge("app/a", "app/d")];
+		expect(gather(edges, folderOf)).toEqual(edges);
+	});
+
+	test("several nodes of a folder that go to one node outside are one line from the folder", () => {
+		const out = gather([edge("app/a", "log"), edge("app/b", "log"), edge("app/c", "log")], folderOf);
+		expect(out.map((e) => `${e.from}>${e.to}`)).toEqual([`${folderEnd("app")}>log`]);
+		expect(out[0]!.froms).toEqual(["app/a", "app/b", "app/c"]);
+	});
+
+	test("a call is not gathered with an inheritance", () => {
+		const edges = [edge("tests", "app/a"), edge("tests", "app/b"), edge("tests", "app/c", "Inherit")];
+		expect(gather(edges, folderOf)).toEqual(edges);
+	});
+
+	test("between two folders, lines gathered at one end are gathered at the other", () => {
+		const edges = ["x", "y", "z"].flatMap((from) => ["a", "b", "c"].map((to) => edge(`lib/${from}`, `app/${to}`)));
+		const out = gather(edges, folderOf);
+		expect(out.map((e) => `${e.from}>${e.to}`)).toEqual([`${folderEnd("lib")}>${folderEnd("app")}`]);
+		expect(out[0]!.froms).toEqual(["lib/x", "lib/y", "lib/z"]);
+		expect(out[0]!.tos).toEqual(["app/a", "app/b", "app/c"]);
+		expect(out[0]!.sites.length).toBe(9);
+	});
+
+	test("with no folder drawn open, nothing is gathered", () => {
+		const edges = [edge("tests", "app/a"), edge("tests", "app/b"), edge("tests", "app/c")];
+		expect(gather(edges, () => undefined)).toEqual(edges);
+	});
+});

@@ -322,6 +322,18 @@ From a second look:
   same background, border, highlight, corners and type.
 - **A narrow editor has no minimap:** under 640 pixels the map would lie
   over the code it is a map of.
+- **Calls gather at a folder's edge.** A node that calls three or more
+  nodes of another folder, a folder of tests above all, sent a line to each
+  across everything on the way, and the picture could not be followed. They
+  are one line to the folder's edge now, with the number of places, and so
+  are the lines of several nodes of a folder to one node outside it. Point
+  at the line or at either end and the nodes it stands for stay lit while
+  the rest step back. The menu draws each call again; around a focus every
+  call is always drawn.
+- **Whatever is pointed at, the rest steps back:** nodes with no line to the
+  one pointed at fade, as the other lines already did.
+- **In a narrow graph the key is one row** that scrolls sideways, with the
+  counts under it; stacked, it took the room of the picture.
 
 ## On hold
 

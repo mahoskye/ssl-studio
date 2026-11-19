@@ -496,6 +496,13 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .graph-under { display: flex; align-items: flex-start; gap: var(--space-5); padding-right: var(--space-5); }
 .graph-under .graph-legend { flex: 1; min-width: 0; }
 .graph-under .graph-tally { flex: none; margin: 0; white-space: nowrap; font-size: var(--text-sm); }
+/* In a narrow graph the key is one row that scrolls sideways, and the counts go under it: stacked, it took the picture's room. */
+.graph-under { container-type: inline-size; flex-wrap: wrap; }
+@container (max-width: 720px) {
+	.graph-under .graph-legend { flex: 1 1 100%; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: thin; margin-bottom: 0; padding-bottom: var(--space-1); mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent); }
+	.graph-under .graph-legend li { flex: none; white-space: nowrap; }
+	.graph-under .graph-tally { padding: 0 var(--space-5) var(--space-1); }
+}
 /* What is shown names the focus, and a long name is cut short before the bar wraps. */
 .graph-bar .graph-show { max-width: 190px; text-overflow: ellipsis; }
 /* The bar's menu of what is used now and then. */
@@ -601,6 +608,10 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .g-root.lit .g-edge.hot { opacity: 1; stroke: var(--accent); stroke-width: calc(var(--w, 1px) + 1px); }
 .g-proc.lit rect, .g-top.lit rect, .g-fold.lit rect { stroke: var(--accent); stroke-width: 2; }
 .g-proc.beside rect, .g-top.beside rect, .g-fold.beside rect { stroke: var(--accent); }
+/* While something is lit, what it has no line to steps back: the ends of a line gathered at a folder's edge are found by what stays. */
+.g-proc, .g-top, .g-fold { transition: opacity .12s; }
+.g-root.lit :is(.g-proc, .g-top, .g-fold):not(.lit, .beside) { opacity: .4; }
+@media (prefers-reduced-motion: reduce) { .g-proc, .g-top, .g-fold { transition: none; } }
 .arrow { fill: var(--muted); }
 .arrow.cross { fill: color-mix(in srgb, var(--accent) 62%, var(--muted)); }
 .arrow.hot { fill: var(--accent); }

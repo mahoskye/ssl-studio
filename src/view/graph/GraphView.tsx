@@ -18,7 +18,7 @@ import { Finder } from "./Finder";
 import { Menu, type MenuItem } from "../Menu";
 import { savePicture } from "./picture";
 import { session } from "../lsp/session";
-import { callList, choices, dirId, keptFolds, withoutUnresolved, fold, FOLD_ABOVE, FOLD_DIRS_ABOVE, foldId, isDir, isFold, RELATION_WORDS, scriptOf, topLabel, UNRESOLVED, visible, type Direction, type Filter, type Graph, type ListedProc, relationOf, type Relation } from "./model";
+import { callList, choices, dirId, keptFolds, withoutUnresolved, fold, gather, isFolderEnd, FOLD_ABOVE, FOLD_DIRS_ABOVE, foldId, isDir, isFold, RELATION_WORDS, scriptOf, topLabel, UNRESOLVED, visible, type Direction, type DrawnEdge, type Filter, type Graph, type ListedProc, relationOf, type Relation } from "./model";
 import { baseName, dirName, relativeTo } from "../../shared/paths";
 
 type Box = {
@@ -42,7 +42,7 @@ type Box = {
 	/** A folded script's second line: what is inside it. */
 	note?: string;
 };
-type Line = { id: string; d: string; from: string; to: string; cross: boolean; count: number; relation: Relation; title: string; /** Where the number of places is written, when it is more than one. */ badge?: { x: number; y: number; width: number; height: number } };
+type Line = { id: string; d: string; from: string; to: string; cross: boolean; count: number; relation: Relation; title: string; /** The nodes a line gathered at a folder's edge stands for, at each end. */ froms?: string[]; tos?: string[]; /** Where the number of places is written, when it is more than one. */ badge?: { x: number; y: number; width: number; height: number } };
 type Mode = "graph" | "list";
 
 const elk = new ELK();
@@ -58,6 +58,7 @@ const MAX_ZOOM = 3;
 const MODE_KEY = "graph.view";
 const FOLDS_KEY = "graph.folds";
 const UNRESOLVED_KEY = "graph.unresolved";
+const GATHER_KEY = "graph.gather";
 /** A folded script's node: room for its name and, under it, what is inside. */
 const FOLD_HEIGHT = 46;
 /** A line's width for the number of places it stands for: each doubling adds the same, up to a limit that stays a line. */
@@ -147,6 +148,8 @@ export function GraphView() {
 
 	/** Whether the targets the server could not resolve are drawn: a choice the view remembers. */
 	const [unresolved, setUnresolved] = createSignal(recall(UNRESOLVED_KEY) !== "hidden");
+	/** Whether calls into and out of an open folder are gathered at its edge: a choice the view remembers. */
+	const [gathered, setGathered] = createSignal(recall(GATHER_KEY) !== "spread");
 	const unresolvedCount = () => graph()?.nodes.filter((n) => n.kind === "unresolved").length ?? 0;
 	const shown = createMemo(() => {
 		const g = graph();
@@ -183,15 +186,25 @@ export function GraphView() {
 	/** A node's name in a sentence about a line: a procedure by its name, a script by its path. */
 	const nameOf = (g: Graph, id: string) => {
 		if (isDir(id)) return id.slice(4);
-		if (isFold(id)) return rel(scriptOf(id));
+		if (isFolderEnd(id)) return id.slice(7);
+		if (isFold(id)) return scriptOf(id) === UNRESOLVED ? "a target that did not resolve" : rel(scriptOf(id));
 		const node = g.nodes.find((n) => n.id === id);
 		if (node) return node.name;
 		const script = g.scripts.find((s) => s.path === scriptOf(id));
 		return `${topLabel(script)} of ${rel(scriptOf(id))}`;
 	};
 
+	/** A line in words. A gathered line says how many of the folder it stands for. */
+	const lineWords = (g: Graph, e: DrawnEdge, words: string) => {
+		const some = (ids: string[], folder: string) => `${ids.length} in ${folder.slice(7)}`;
+		if (e.froms && e.tos) return `${some(e.froms, e.from)}: each ${words} several of ${some(e.tos, e.to)}`;
+		if (e.tos) return `${nameOf(g, e.from)} ${words} ${some(e.tos, e.to)}`;
+		if (e.froms) return `${some(e.froms, e.from)}: each ${words} ${nameOf(g, e.to)}`;
+		return `${nameOf(g, e.from)} ${words} ${nameOf(g, e.to)}`;
+	};
+
 	createEffect(
-		on([graph, drawn, mode], async ([g, keep, as]) => {
+		on([graph, drawn, mode, gathered], async ([g, keep, as, gathering]) => {
 			// The list needs no layout, and a large one takes a while.
 			if (!g || !keep || as !== "graph") return;
 			const sized = (label: string, bold = false) => ({ "elk.nodeSize.constraints": "MINIMUM_SIZE", "elk.nodeSize.minimum": `(${Math.ceil((bold ? measureBold : measure)(label)) + 44},30)` });
@@ -251,7 +264,10 @@ export function GraphView() {
 					return { id, width: Math.ceil(Math.max(measureBold(id.slice(4)), measure(note))) + 46, height: FOLD_HEIGHT, labels: [{ text: id.slice(4) }] };
 				}),
 			];
-			const edges = keep.edges.map((e, i) => ({ id: `e${i}`, sources: [e.from], targets: [e.to] }));
+			// Around a focus every call is drawn: there are few, and each is what was asked for.
+			const openFolder = (id: string) => (isDir(id) ? undefined : folders.find((f) => f === folderOf(scriptOf(id))));
+			const drawnEdges = gathering && folding() ? gather(keep.edges, openFolder) : keep.edges;
+			const edges = drawnEdges.map((e, i) => ({ id: `e${i}`, sources: [e.from], targets: [e.to] }));
 			try {
 				const lay = (direction: "RIGHT" | "DOWN"): Promise<any> =>
 					elk.layout({
@@ -317,7 +333,7 @@ export function GraphView() {
 				};
 				walk(result, 0, 0);
 				const lines: Line[] = (result.edges ?? []).map((e: any) => {
-					const edge = keep.edges[Number(String(e.id).slice(1))]!;
+					const edge: DrawnEdge = drawnEdges[Number(String(e.id).slice(1))]!;
 					const section = e.sections?.[0];
 					const relation = relationOf(edge.kind);
 					const count = Math.max(1, edge.sites.length);
@@ -334,7 +350,9 @@ export function GraphView() {
 						cross: edge.crossScript,
 						count,
 						relation,
-						title: `${nameOf(g, edge.from)} ${RELATION_WORDS[relation]} ${nameOf(g, edge.to)}${count > 1 ? `, from ${count} places` : ""}`,
+						froms: edge.froms,
+						tos: edge.tos,
+						title: `${lineWords(g, edge, RELATION_WORDS[relation])}${count > 1 ? `, from ${count} places` : ""}${edge.froms || edge.tos ? ". Point at it to see which." : ""}`,
 					};
 				});
 				// The nodes are drawn afresh: the one the keyboard was on takes the focus again.
@@ -416,14 +434,16 @@ export function GraphView() {
 		const on = lit();
 		const line = pointedLine();
 		const ids = new Set<string>();
+		// A gathered line's ends are the nodes it stands for, not the folder it is drawn to.
 		for (const e of l?.lines ?? []) {
-			if (e.id === line) ids.add(e.from).add(e.to);
-			else if (on && e.from === on) ids.add(e.to);
-			else if (on && e.to === on) ids.add(e.from);
+			const [froms, tos] = [e.froms ?? [e.from], e.tos ?? [e.to]];
+			if (e.id === line) for (const id of [...froms, ...tos]) ids.add(id);
+			else if (on && froms.includes(on)) for (const id of tos) ids.add(id);
+			else if (on && tos.includes(on)) for (const id of froms) ids.add(id);
 		}
 		return ids;
 	});
-	const isHot = (e: Line) => e.id === pointedLine() || (lit() !== null && (e.from === lit() || e.to === lit()));
+	const isHot = (e: Line) => e.id === pointedLine() || (lit() !== null && ((e.froms ?? [e.from]).includes(lit()!) || (e.tos ?? [e.to]).includes(lit()!)));
 	const arrowOf = (e: Line) => `url(#arrow-${isHot(e) ? "hot" : e.relation !== "call" ? "class" : e.cross ? "cross" : "plain"})`;
 	/** Where the keyboard is: the node last focused if it is still shown, or else the focus, or the first. */
 	const cursor = createMemo(() => {
@@ -517,6 +537,17 @@ export function GraphView() {
 				disabled: !unresolvedCount(),
 				why: "Every target resolved",
 			},
+			{
+				label: gathered() ? "Draw each call across a folder's edge" : "Gather calls at a folder's edge",
+				run: () => {
+					const next = !gathered();
+					fittedFor = "";
+					setGathered(next);
+					remember(GATHER_KEY, next ? "gathered" : "spread");
+				},
+				disabled: !inGraph || !folding(),
+				why: "Around a focus, and in the list, every call is shown",
+			},
 			{ label: keysOpen() ? "Hide the keys" : "Keys and what the pointer does", keys: "?", run: () => setKeysOpen((open) => !open), disabled: !inGraph, why: "The keys are the graph's" },
 			"separator",
 			{ label: "Save picture…", run: () => void savePicture(svg, layout(), "docs/call-graph.svg"), disabled: !inGraph || !layout(), why: "There is no picture in the list" },
@@ -541,6 +572,7 @@ export function GraphView() {
 			[line((e) => e.relation === "call" && !e.cross), "line", "g-edge", "Call within a script"],
 			[line((e) => e.relation === "call" && e.cross), "line", "g-edge cross", "Call between scripts"],
 			[line((e) => e.count > 1), "line", "g-edge thick", "Thicker, with a number: called from that many places"],
+			[line((e) => Boolean(e.froms || e.tos)), "line", "g-edge cross gathered", "At a folder's edge: stands for several inside it"],
 			[line((e) => e.relation === "inherits"), "line", "g-edge inherits", "Dashed: a class inherits another"],
 			[line((e) => e.relation === "creates"), "line", "g-edge creates", "Dotted: creates an object of a class"],
 			[line((e) => e.relation === "method"), "line", "g-edge method", "Dash and dot: calls a method"],

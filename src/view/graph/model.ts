@@ -254,6 +254,62 @@ export function fold(shown: { nodes: ReadonlySet<string>; edges: readonly GraphE
 	return { nodes, edges: [...edges.values()], inside };
 }
 
+// --- Lines gathered at a folder's edge ------------------------------------------
+
+/** A folder drawn open, as the end of a line gathered at its edge. */
+export const folderEnd = (folder: string) => `folder:${folder}`;
+export const isFolderEnd = (id: string) => id.startsWith("folder:");
+/** This many lines between one node and the nodes of one folder, and they are drawn as one line to the folder's edge. */
+export const GATHER_FROM = 3;
+/** A line as it is drawn: one edge, or several gathered. `froms` and `tos` are the nodes a gathered end stands for. */
+export type DrawnEdge = GraphEdge & { froms?: string[]; tos?: string[] };
+
+/**
+ * Gathers lines at the edges of the folders that are drawn open. A node that
+ * calls several nodes of another folder is the usual reason a picture cannot
+ * be followed: its lines cross everything on the way in. Those are drawn as
+ * one line to the folder's edge, and so are the lines of several nodes of a
+ * folder that all go to one node outside it. Nothing is lost: each gathered
+ * line keeps the nodes it stands for and every place it was called from.
+ * `folderOf` gives the open folder a node is drawn in, if it is in one.
+ */
+export function gather(edges: readonly GraphEdge[], folderOf: (id: string) => string | undefined, atLeast = GATHER_FROM): DrawnEdge[] {
+	const home = (id: string) => (isFolderEnd(id) ? id.slice(7) : folderOf(id));
+	const pass = (list: DrawnEdge[], into: boolean): DrawnEdge[] => {
+		// The near end stays a node; the far end is the one that may be gathered into its folder.
+		const ends = (e: DrawnEdge) => (into ? ([e.from, e.to] as const) : ([e.to, e.from] as const));
+		const keyOf = (e: DrawnEdge) => {
+			const [near, far] = ends(e);
+			const folder = isFolderEnd(far) ? undefined : folderOf(far);
+			return folder && folder !== home(near) ? `${near}→${folder}→${relationOf(e.kind)}` : null;
+		};
+		const groups = new Map<string, DrawnEdge[]>();
+		for (const e of list) {
+			const key = keyOf(e);
+			if (key) groups.set(key, [...(groups.get(key) ?? []), e]);
+		}
+		const done = new Set<string>();
+		const out: DrawnEdge[] = [];
+		for (const e of list) {
+			const key = keyOf(e);
+			const group = key ? groups.get(key)! : [];
+			if (!key || group.length < atLeast) out.push(e);
+			else if (!done.has(key)) {
+				done.add(key);
+				const [near, far] = ends(e);
+				const folder = folderEnd(folderOf(far)!);
+				const inside = group.map((g) => ends(g)[1]);
+				// What the near end already stands for, when it was gathered on the first pass.
+				const kept = [...new Set(group.flatMap((g) => (into ? (g.froms ?? []) : (g.tos ?? []))))];
+				const sites = group.flatMap((g) => g.sites);
+				out.push(into ? { ...e, from: near, to: folder, sites, crossScript: true, tos: inside, ...(kept.length ? { froms: kept } : {}) } : { ...e, from: folder, to: near, sites, crossScript: true, froms: inside, ...(kept.length ? { tos: kept } : {}) });
+			}
+		}
+		return out;
+	};
+	return pass(pass([...edges], true), false);
+}
+
 /** More procedures than this, and the graph opens with its scripts folded: the picture is of the scripts first. */
 export const FOLD_ABOVE = 40;
 /** More scripts than this, in more than one folder, and it opens with its folders folded too: the picture is of the folders first. */
