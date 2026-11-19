@@ -191,6 +191,60 @@ from the keyboard, and says what it is).
   answers used to show "failed" and nothing else. It now shows opencode's
   reason and what to check, in the panel and in Output.
 
+## Pictures that can be followed (2026-11-18)
+
+The call graph and a plan's chart were hard to follow: every procedure and
+call at once, in lines with sharp corners.
+
+- **The graph opens on the scripts.** A workspace of more than 40 procedures
+  opens with every script folded to one node, in its folder, with its
+  procedures and inner calls counted on it. A click, Enter or X unfolds one;
+  "Fold all" and "Unfold all" do the rest.
+- **Lines are curves, and say how many.** A line that stands for several
+  places carries the number, and is a little thicker.
+- **Pointing lights a node's calls.** The pointer, or the arrow keys, light
+  the lines in and out of a node and the nodes at their other ends; the rest
+  step back. A line can be pointed at too, and says what it joins.
+- **The key shows what is on screen,** no more.
+- **A plan's chart:** lines turn in rounded corners, a loop's way back is in
+  the accent, the ways in and out of the selected node stand out, and nodes
+  lift off the canvas a little.
+- **A map of the picture** sits in the corner of both while some of it is out
+  of sight: the part in view is outlined, and a click or a drag moves it.
+- **No file open:** the editor area shows the project by name and the ways
+  into it, each with its keys.
+- **The graph's first picture fits a screen.** A workspace of more than 24
+  scripts in several folders opens with its folders folded too: the demo is
+  four nodes and five lines, and unfolds a folder, then a script, at a time.
+- **A folder opens as it was left:** the files that were open, in their
+  groups, with the same one in front, and the Explorer's folders open as
+  they were. Unsaved text is not kept; closing already asks about it.
+- **Files have marks.** In the Explorer, the Docs panel and the tabs, a
+  script, a data source, a plan, a document and a settings file each have
+  their own glyph.
+- **Reference shows the whole entry:** the signature, each parameter, what
+  it returns, the errors it raises and its caveats, as the language server
+  has them; and operators and predefined names are listed too.
+- **Scroll bars are the theme's,** thin and without arrow buttons.
+- **Health's procedures** are rows that go to the procedure, each with a bar
+  of its length against the longest.
+- **The graph is laid out the way that fits.** A picture of up to 150 nodes
+  is laid out across and down, and the one the view shows more of is kept.
+- **Objects** marks the region or procedure the cursor is in.
+- **Search** results carry file marks, are set in the code's face, and mark
+  a match with a tint and an underline.
+- **Palette** shows what the template under the pointer or the keys inserts.
+- **Problems** heads each file with its mark and a count per severity.
+- **Local history** no longer draws an empty, focused list.
+- **Agent** offers questions to start from before anything is asked.
+- **The graph's text is 13px,** so a fitted picture can shrink further and
+  stay readable, and its instructions moved into a Keys list: the demo's
+  source folder, open, fits one screen whole.
+- **Blocks** says the line each region and procedure starts on.
+- **Settings** names its sections above the list; a name goes to its
+  section, and a section's heading stays in view while its rows scroll.
+- **Search** keeps a match in sight in a narrow panel.
+
 ## On hold
 
 - **Forms, client scripts and code-behind (2026-11-17).** Wanted eventually, in
