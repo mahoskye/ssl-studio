@@ -16,27 +16,36 @@ const escaped = (word: string) => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const distinct = (key: string) => /[A-Za-z]/.test(key) && (/\d/.test(key) || /[-_./]/.test(key));
 
 /**
- * The places a text names one of the project's tickets. A key made of
- * digits alone ("12") is one only as "#12": a number in a sentence is a
- * number. A key that is part of a longer word, a path or a longer key is not
- * a mention.
+ * A reader of the places a text names one of the project's tickets, made
+ * once for the keys and used on each piece of text. A key made of digits
+ * alone ("12") is one only as "#12": a number in a sentence is a number. A
+ * key that is part of a longer word, a path or a longer key is not a
+ * mention.
  */
-export function ticketMentions(text: string, keys: readonly string[]): Mention[] {
+export function ticketMatcher(keys: readonly string[]): (text: string) => Mention[] {
 	const words = keys.filter(distinct);
 	const numbers = keys.filter((key) => /^\d+$/.test(key));
-	if (!words.length && !numbers.length) return [];
+	if (!words.length && !numbers.length) return () => [];
 	// The longest first: of "DEMO-10" and "DEMO-101", the one that is written.
 	const either = [...words.map(escaped), ...numbers.map((key) => `#${key}`)].sort((a, b) => b.length - a.length).join("|");
 	const pattern = new RegExp(`(^|[^\\w./\\\\#-])(${either})(?![\\w-]|[./\\\\]\\w)`, "gi");
 	const known = new Map(keys.map((key) => [key.toLowerCase(), key]));
-	const found: Mention[] = [];
-	for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
-		const written = match[2]!;
-		const from = match.index + match[1]!.length;
-		const key = known.get(written.replace(/^#/, "").toLowerCase()) ?? known.get(written.toLowerCase());
-		if (key) found.push({ from, to: from + written.length, key });
-		// The character after a mention may open the next one.
-		pattern.lastIndex = from + written.length;
-	}
-	return found;
+	return (text) => {
+		const found: Mention[] = [];
+		pattern.lastIndex = 0;
+		for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
+			const written = match[2]!;
+			const from = match.index + match[1]!.length;
+			const key = known.get(written.replace(/^#/, "").toLowerCase()) ?? known.get(written.toLowerCase());
+			if (key) found.push({ from, to: from + written.length, key });
+			// The character after a mention may open the next one.
+			pattern.lastIndex = from + written.length;
+		}
+		return found;
+	};
+}
+
+/** The places a text names one of the project's tickets. */
+export function ticketMentions(text: string, keys: readonly string[]): Mention[] {
+	return ticketMatcher(keys)(text);
 }

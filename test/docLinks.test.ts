@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { linksTo, listDocs, readProject } from "../src/bun/project";
 import { WorkspaceFiles } from "../src/bun/workspace";
 import { docChecks } from "../src/shared/docChecks";
-import { fileLinks, frontPaths, linkBeingWritten, linkChoices, linkFile, withLinkFile, withLinkFiles } from "../src/shared/docLinks";
+import { fileLinks, frontPaths, linkBeingWritten, linkChoices, linkFile, linkWritten, ownLinkEdits, withLinkFile, withLinkFiles } from "../src/shared/docLinks";
 import type { DocFile } from "../src/shared/protocol";
 
 describe("the file a link names", () => {
@@ -110,9 +110,11 @@ describe("a link pointed at another file", () => {
 	test("has its file part rewritten on that line, and keeps what follows the mark", () => {
 		expect(withLinkFile(text, 3, "../specs/Notes.md#columns", "../specs/reports/Notes.md")).toBe(text.replace("../specs/Notes.md#columns", "../specs/reports/Notes.md#columns"));
 	});
-	test("only the one link is changed, and a space is written as an escape", () => {
+	test("only the one link is changed, and the part of the path that is the same is written as it was", () => {
 		const after = withLinkFile(text, 5, "../specs/My notes.md", "../kept/My notes.md");
-		expect(after).toBe(text.replace("<../specs/My notes.md>", "<../kept/My%20notes.md>"));
+		expect(after).toBe(text.replace("<../specs/My notes.md>", "<../kept/My notes.md>"));
+		// A part that is new is written with its escapes.
+		expect(withLinkFile(text, 5, "../specs/My notes.md", "../specs/Our notes.md")).toBe(text.replace("<../specs/My notes.md>", "<../specs/Our%20notes.md>"));
 	});
 	test("is not made when the link is no longer on that line", () => {
 		expect(withLinkFile(text, 1, "../specs/Notes.md", "x.md")).toBeNull();
@@ -294,5 +296,139 @@ describe("the documents offered while a link is written", () => {
 		expect(linkBeingWritten("See [the spec](a.md) and then")).toBeNull();
 		expect(linkBeingWritten("A call(")).toBeNull();
 		expect(linkBeingWritten("In code: `[a](")).toBeNull();
+	});
+});
+
+// A third review (2026-11-19), of the commits that read and rewrite links.
+describe("a rename's edit lands on the link, never on an example of it", () => {
+	/** The text after every link to a.md is pointed at b.md. */
+	const renamed = (text: string, from = "a.md", to = "b.md") =>
+		withLinkFiles(
+			text,
+			fileLinks(text)
+				.filter((link) => link.line && link.file === from)
+				.map((link) => ({ line: link.line, column: link.column, href: link.href, instead: to })),
+		);
+	const real = "see [y](a.md)\n";
+	const cases: [string, string][] = [
+		["a fence in a list item", "1. step\n\n    ```\n    [x](a.md)\n    ```\n\n"],
+		["a fence in a quotation", "> ```\n> [x](a.md)\n> ```\n\n"],
+		["indented code in a list item", "- item\n\n      [x](a.md)\n\n"],
+		["a span of code over two lines", "`code\n[x](a.md)` and\n\n"],
+		["a comment", "<!-- [old](a.md) -->\n\n"],
+		["a block of HTML", "<div>\n[x](a.md)\n</div>\n\n"],
+		["a bracket written with a backslash", "\\[x](a.md) is how one is written\n\n"],
+		["code indented with a tab", "para\n\n\t[z](a.md)\n\n"],
+		["two blocks indented with tabs", "\tcode [x](a.md)\n\npara\n\n\t[z](a.md)\n\n"],
+	];
+	for (const [name, example] of cases) {
+		test(name, () => {
+			const { text, done } = renamed(`${example}${real}`);
+			expect(done).toBe(1);
+			expect(text).toBe(`${example}see [y](b.md)\n`);
+		});
+	}
+	test("a link whose target only begins the same is another link", () => {
+		expect(renamed("[a][r] then [x](a.md.old) then [y](a.md)\n\n[r]: y.md\n").text).toBe("[a][r] then [x](a.md.old) then [y](b.md)\n\n[r]: y.md\n");
+	});
+	test("after a reference, two links to one file are two places", () => {
+		const text = "[a][r] and [b](x.md) and [c](x.md)\n\n[r]: y.md\n";
+		expect(fileLinks(text).map((link) => [link.file, link.line, link.column])).toEqual([
+			["y.md", 3, 5],
+			["x.md", 1, 15],
+			["x.md", 1, 29],
+		]);
+		expect(renamed(text, "x.md", "z.md")).toEqual({ text: "[a][r] and [b](z.md) and [c](z.md)\n\n[r]: y.md\n", done: 2 });
+	});
+	test("a reference used twice is one place, changed once though the new name begins with the old", () => {
+		const text = "[a][r] and [b][r]\n\n[r]: notes\n";
+		expect(fileLinks(text)).toEqual([{ href: "notes", file: "notes", line: 3, column: 5 }]);
+		expect(renamed(text, "notes", "notes.md")).toEqual({ text: "[a][r] and [b][r]\n\n[r]: notes.md\n", done: 1 });
+	});
+	test("the same edit said twice is made once", () => {
+		const edit = { line: 1, column: 4, href: "notes", instead: "notes.md" };
+		expect(withLinkFiles("[a](notes)\n", [edit, { ...edit }])).toEqual({ text: "[a](notes.md)\n", done: 1 });
+	});
+});
+
+describe("a path as a link writes it", () => {
+	test("a mark that would end the path is written as its escape, and reads back as the path", () => {
+		for (const path of ["../new/C#.md", "Issue #12.md", "What now?.md", "a (copy).md", "50%.md", "plain.md", "../café/notes.md"]) expect(linkFile(linkWritten(path))).toBe(path);
+		expect(linkWritten("Issue #12.md")).toBe("Issue%20%2312.md");
+	});
+	test("a name with a colon near its start does not read as an address", () => {
+		expect(linkWritten("Re: plan.md")).toBe("./Re:%20plan.md");
+		expect(linkFile(linkWritten("Re: plan.md"))).toBe("./Re: plan.md");
+	});
+	test("a rename writes anew only the part that was renamed", () => {
+		expect(linkWritten("../new/C#.md", "../old/C%23.md")).toBe("../new/C%23.md");
+		expect(linkWritten("../new/café.md", "../old/caf%C3%A9.md")).toBe("../new/caf%C3%A9.md");
+		expect(linkWritten("docs/My specs/Due.md", "docs/My%20specs/Late.md")).toBe("docs/My%20specs/Due.md");
+	});
+	test("the document's own folder has a name, and a folder written with its slash keeps it", () => {
+		expect(linkWritten("", "../specs/")).toBe("./");
+		expect(linkWritten("../new", "../old/")).toBe("../new/");
+		expect(linkWritten("")).toBe(".");
+	});
+	test("a link through a renamed folder still reads as the file", () => {
+		const text = "[x](../old/C%23.md)\n";
+		const [link] = fileLinks(text);
+		const after = withLinkFile(text, link!.line, link!.href, "../new/C#.md", link!.column)!;
+		expect(after).toBe("[x](../new/C%23.md)\n");
+		expect(fileLinks(after)[0]!.file).toBe("../new/C#.md");
+	});
+	test("a path in front matter is written whole, with no tail kept", () => {
+		const text = "---\nspecs: [docs/old/C#.md]\n---\n";
+		const [named] = frontPaths(text);
+		expect(withLinkFile(text, named!.line, named!.value, "docs/new/C#.md", named!.column, true)).toBe("---\nspecs: [docs/new/C#.md]\n---\n");
+	});
+	test("a document offered for a link is written so that it reads back", () => {
+		const files: DocFile[] = [{ path: "/p/docs/Issue #12.md", name: "Issue #12.md", group: "docs", exists: true }];
+		const [choice] = linkChoices(files, "/p/docs/x.md", "/p");
+		expect(linkFile(choice!.insert)).toBe("Issue #12.md");
+	});
+});
+
+describe("a document moved to another folder", () => {
+	const text = "# A\n\n[b](B.md), [up](../README.md#top), [self](A.md), [top](/docs/B.md), [web](https://example.com/B.md), [deep](sub/C.md)\n";
+	test("has its own links written from where it is now", () => {
+		const edits = ownLinkEdits(text, "/p/docs/A.md", "/p/docs/sub/A.md");
+		expect(withLinkFiles(text, edits)).toEqual({ text: "# A\n\n[b](../B.md), [up](../../README.md#top), [self](A.md), [top](/docs/B.md), [web](https://example.com/B.md), [deep](C.md)\n", done: 3 });
+	});
+	test("renamed where it is, they are left: nothing has moved", () => {
+		expect(ownLinkEdits(text, "/p/docs/A.md", "/p/docs/Z.md")).toEqual([]);
+	});
+});
+
+describe("writing a file as it was", () => {
+	test("a byte-order mark the file opens with is kept, and one is not added where there was none", async () => {
+		const root = mkdtempSync(join(tmpdir(), "ssl-studio-mark-"));
+		try {
+			writeFileSync(join(root, "marked.md"), "\uFEFF# Marked\n\n[a](a.md)\n");
+			writeFileSync(join(root, "plain.md"), "# Plain\n");
+			const files = new WorkspaceFiles(root);
+			const read = (await files.read(join(root, "marked.md"))).text;
+			await files.write(join(root, "marked.md"), read.replace(/^\uFEFF/, "").replace("a.md", "b.md"));
+			await files.write(join(root, "plain.md"), "# Plain, changed\n");
+			await files.write(join(root, "new.md"), "# New\n");
+			expect([...readFileSync(join(root, "marked.md")).subarray(0, 3)]).toEqual([0xef, 0xbb, 0xbf]);
+			expect(readFileSync(join(root, "marked.md"), "utf8").replace(/^\uFEFF/, "")).toBe("# Marked\n\n[a](b.md)\n");
+			expect(readFileSync(join(root, "marked.md"), "utf8").split("\uFEFF").length).toBe(2);
+			expect(readFileSync(join(root, "plain.md"), "utf8")).toBe("# Plain, changed\n");
+			expect(readFileSync(join(root, "new.md"), "utf8")).toBe("# New\n");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+	test("a rename to a name with a folder in it makes the folder", () => {
+		const root = mkdtempSync(join(tmpdir(), "ssl-studio-move-"));
+		try {
+			writeFileSync(join(root, "a.md"), "# A\n");
+			new WorkspaceFiles(root).rename(join(root, "a.md"), join(root, "kept", "deep", "a.md"));
+			expect(existsSync(join(root, "kept", "deep", "a.md"))).toBe(true);
+			expect(existsSync(join(root, "a.md"))).toBe(false);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 });

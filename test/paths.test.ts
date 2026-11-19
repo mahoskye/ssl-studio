@@ -44,6 +44,20 @@ describe("what the file system said, in plain words", () => {
 		expect(plainFileError("EISDIR: illegal operation on a directory, read '/work/demo/docs'", "/work/demo")).toBe("docs is a folder, not a file.");
 		expect(plainFileError("EACCES: permission denied, open '/work/demo/locked.md'", "/work/demo")).toBe("locked.md cannot be opened: permission was refused.");
 	});
+	test("a path with an apostrophe is said whole", () => {
+		expect(plainFileError("ENOENT: no such file or directory, open '/home/x/Ben's project/docs/a.md'", "/home/x/Ben's project")).toBe("docs/a.md is not there.");
+	});
+	test("a message that says more than that sentence is left as it was said", () => {
+		for (const said of [
+			"The server said ENOENT and couldn't read 'x'",
+			"The picture was not saved: EACCES: permission denied, open '/work/demo/a.png'",
+			"ENOENT: no such file or directory, rename '/r/a.md' -> '/r/nofolder/a.md'",
+			"EACCES: permission denied, mkdir '/work/demo/new'",
+			"ENOENT: no such file or directory, unlink '/work/demo/a.md'",
+			"ENOENT: no such file or directory, open '/work/demo/a.md'\n    at open (node:fs)",
+		])
+			expect(plainFileError(said, "/work/demo")).toBe(said);
+	});
 	test("anything else is left as it was said", () => {
 		expect(plainFileError("The language server stopped.", "/work/demo")).toBe("The language server stopped.");
 	});

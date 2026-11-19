@@ -49,6 +49,8 @@ export class WorkspaceFiles {
 		mkdirSync(dirname(full), { recursive: true });
 		const temp = join(dirname(full), `.${basename(full)}.ssl-studio-tmp`);
 		this.ownWrites.set(full, Date.now());
+		// A file that opens with a byte-order mark keeps it: reading takes it off, and whoever wrote it wanted it there.
+		if (!text.startsWith("\uFEFF") && (await startsWithMark(full))) text = `\uFEFF${text}`;
 		await Bun.write(temp, text);
 		renameSync(temp, full);
 		return { mtime: statSync(full).mtimeMs };
@@ -67,6 +69,8 @@ export class WorkspaceFiles {
 	rename(from: string, to: string) {
 		const target = this.inside(to);
 		if (existsSync(target)) throw new Error(`already exists: ${relative(this.root, target)}`);
+		// A name with a folder in it moves the file there, and the folder is made if it is not there yet.
+		mkdirSync(dirname(target), { recursive: true });
 		renameSync(this.inside(from), target);
 	}
 
@@ -119,5 +123,15 @@ export class WorkspaceFiles {
 
 	close() {
 		this.watcher?.close();
+	}
+}
+
+/** Whether the file there now opens with a UTF-8 byte-order mark. False when there is no such file. */
+async function startsWithMark(path: string): Promise<boolean> {
+	try {
+		const head = new Uint8Array(await Bun.file(path).slice(0, 3).arrayBuffer());
+		return head.length === 3 && head[0] === 0xef && head[1] === 0xbb && head[2] === 0xbf;
+	} catch {
+		return false;
 	}
 }

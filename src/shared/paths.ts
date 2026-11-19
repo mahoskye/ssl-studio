@@ -43,17 +43,20 @@ export function relativeTo(root: string | undefined | null, path: string): strin
 }
 
 /**
- * What the file system said, in plain words, with the path as the project
- * names it: "docs/specs/Notes.md is not there." Anything else is returned as
+ * What the file system said of opening or reading a file, in plain words,
+ * with the path as the project names it: "docs/specs/Notes.md is not there."
+ * Only that sentence, whole and alone, is reworded: a message that says
+ * more, or is about making, moving or removing something, is returned as
  * it was.
  */
 export function plainFileError(message: string, root?: string | null): string {
-	const found = /\b(ENOENT|EACCES|EPERM|EISDIR)\b[^']*'([^']+)'/.exec(message);
-	if (!found) return message;
-	const path = relativeTo(root, found[2]!);
+	const found = /^(?:Error: )?(ENOENT|EACCES|EPERM|EISDIR): [^,\n]+, (open|read|stat|lstat|scandir) '(.+)'$/.exec(message.trim());
+	// "rename 'a' -> 'b'" names two paths, and which of them is missing is not ours to guess.
+	if (!found || found[3]!.includes("' -> '")) return message;
+	const path = relativeTo(root, found[3]!);
 	if (found[1] === "ENOENT") return `${path} is not there.`;
 	if (found[1] === "EISDIR") return `${path} is a folder, not a file.`;
-	return `${path} cannot be opened: permission was refused.`;
+	return `${path} cannot be ${found[2] === "scandir" ? "listed" : "opened"}: permission was refused.`;
 }
 
 /** The way from one folder to a file, with forward slashes: "../design/A.spec.md". Both are whole paths. */

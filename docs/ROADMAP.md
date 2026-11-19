@@ -498,6 +498,31 @@ the work comes from ([ADR 0012](adr/0012-a-projects-work-is-written-down.md)).
   reader, which gives the line and column. The runtime's YAML reader says
   only that it gave up, so the place is the line after the longest start
   of the document that still reads, and the note says "at or near".
+- **A third review, of the commits that read and rewrite links.** A second
+  agent was given the diff and no conclusions, and confirmed its findings
+  by running them. What it found and what was done:
+  - A link's place was found by looking for its words, so an edit could
+    land in an example of the link: a fence inside a list or a quotation,
+    a comment, a bracket after a backslash, code indented with a tab. The
+    place is now asked of the renderer: it is written over with a name of
+    our own, and is the link's only if the renderer then reads that name
+    as the link's target.
+  - Two links to one file after a reference were taken for one place, and
+    a reference used twice was edited twice. Each place is now listed once.
+  - A path was written back with only its spaces escaped, so `C%23.md`
+    became `C#.md` and stopped being a link to the file. A path is written
+    with every mark a link cannot hold as its escape, and a rename writes
+    anew only the part that was renamed.
+  - A path in front matter kept a "#" tail it does not have.
+  - A link to the document's own folder was written as nothing.
+  - The plain wording of a missing file was applied to any message that
+    held the words. It is now only the file system's own sentence, whole.
+  - A file's byte-order mark was lost when the IDE wrote it. It is kept.
+  - A rename that moves a document left its own links written from where
+    it was. They are offered with the rest, and the folder is made.
+  - Choosing a document inside a link's target left the target's tail; the
+    list was offered inside a block of code; the reader of ticket keys was
+    made again for every piece of text.
 - **A ticket's key in the prose is a link.** Only the keys of tickets the
   project has; not in code, not in a link someone wrote, not the page's
   own ticket. A key of digits alone is one only as "#12".

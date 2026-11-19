@@ -1,7 +1,7 @@
 // What is done to Markdown's HTML after it is cleaned, wherever it is shown:
 // a document in the reading view, a reply in the Agent panel.
 import { MAX_SHORT, headingAnchor } from "../../shared/docTables";
-import { ticketMentions } from "../../shared/ticketRefs";
+import { ticketMatcher } from "../../shared/ticketRefs";
 
 /** A ticket of the project, as a document's page links to it: where it is from that document, and what it is in a line. */
 export type TicketRef = { key: string; href: string; about: string };
@@ -11,15 +11,18 @@ export type TicketRef = { key: string; href: string; about: string };
  * what the ticket is in its tooltip. Text that is already a link, and code,
  * are left as written.
  */
+/** Where a ticket's key is left as written: what is a link already, code, and elements that hold text and no markup. */
+const UNLINKED = "a, code, pre, textarea, option, select, button, script, style";
+
 function linkTickets(holder: HTMLTemplateElement, tickets: readonly TicketRef[]) {
 	const by = new Map(tickets.map((ticket) => [ticket.key, ticket]));
-	const keys = [...by.keys()];
+	const mentionsIn = ticketMatcher([...by.keys()]);
 	const walker = document.createTreeWalker(holder.content, NodeFilter.SHOW_TEXT);
 	const nodes: Text[] = [];
-	for (let node = walker.nextNode(); node; node = walker.nextNode()) if (!node.parentElement?.closest("a, code, pre")) nodes.push(node as Text);
+	for (let node = walker.nextNode(); node; node = walker.nextNode()) if (!node.parentElement?.closest(UNLINKED)) nodes.push(node as Text);
 	for (const node of nodes) {
 		const text = node.data;
-		const mentions = ticketMentions(text, keys);
+		const mentions = mentionsIn(text);
 		if (!mentions.length) continue;
 		const parts = document.createDocumentFragment();
 		let at = 0;

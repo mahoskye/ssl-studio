@@ -41,7 +41,7 @@ import { ask, choose } from "./dialogs";
 import { createdObjects } from "../shared/outline";
 import { toggleTask } from "../shared/tasks";
 import type { LinkMend } from "../shared/docChecks";
-import { withLinkFiles, type LinkEdit } from "../shared/docLinks";
+import { ownLinkEdits, withLinkFiles, type LinkEdit } from "../shared/docLinks";
 import { parsePlan, isPlanPath } from "./plan/model";
 import { docs, isMarkdown } from "./project";
 import { ticketAtHand as listedTicketAtHand, workFor, workLabel, workText } from "../shared/workContext";
@@ -391,26 +391,40 @@ export async function followRename(from: string, to: string) {
 	} catch {
 		return;
 	}
-	if (!links.length) return;
+	// A document moved to another folder has links of its own to write from where it is now. What it says of the
+	// old name is among them, so its own places are not counted twice.
+	const moved = dirName(canonical(from)) !== dirName(canonical(to)) && isMarkdown(to) ? ((await current(to)) ?? "") : "";
+	const own = moved ? ownLinkEdits(moved, canonical(from), canonical(to)) : [];
+	if (moved) links = links.filter((link) => canonical(link.path) !== canonical(to));
+	if (!links.length && !own.length) return;
+
+	const edits = new Map<string, LinkEdit[]>();
+	for (const link of links) {
+		const target = `${to}${link.rest}`;
+		// What is written from the project's top stays written from the top; a path in front matter is written as it is.
+		const fromTop = relativeTo(root(), target);
+		const instead = link.from === "root" ? fromTop : link.from === "top" ? `/${fromTop}` : relativePath(dirName(link.path), target);
+		edits.set(link.path, [...(edits.get(link.path) ?? []), { line: link.line, column: link.column, href: link.href, instead, plain: link.from === "root" }]);
+	}
+	if (own.length) edits.set(to, own);
+
+	const total = links.length + own.length;
 	const holders = [...new Set(links.map((link) => link.path))];
-	const one = links.length === 1;
 	const where = holders.length === 1 ? relativeTo(root(), holders[0]!) : `${holders.length} documents`;
-	const go = one ? "Write the new name there" : "Write the new name in each";
 	// A ticket's "specs:" line is counted with the links: it names the file as a link does.
-	if ((await choose(`${one ? "One place" : `${links.length} places`} in ${where} still ${one ? "says" : "say"} the old name, ${baseName(from)}.`, [go])) !== go) return;
+	const said = [
+		links.length ? `${links.length === 1 ? "One place" : `${links.length} places`} in ${where} still ${links.length === 1 ? "says" : "say"} the old name, ${baseName(from)}.` : "",
+		own.length ? `${own.length === 1 ? "One link" : `${own.length} links`} in ${baseName(to)} ${own.length === 1 ? "is" : "are"} written from where it was.` : "",
+	]
+		.filter(Boolean)
+		.join(" ");
+	const go = total === 1 ? "Update it" : "Update them";
+	if ((await choose(said, [go])) !== go) return;
 	let done = 0;
-	for (const path of holders) {
+	for (const [path, changes] of edits) {
 		const before = await current(path);
 		if (before === null) continue;
-		const edits: LinkEdit[] = links
-			.filter((link) => link.path === path)
-			.map((link) => {
-				const target = `${to}${link.rest}`;
-				// What is written from the project's top stays written from the top; a path in front matter is written as it is.
-				const fromTop = relativeTo(root(), target);
-				return { line: link.line, column: link.column, href: link.href, instead: link.from === "root" ? fromTop : link.from === "top" ? `/${fromTop}` : relativePath(dirName(path), target), plain: link.from === "root" };
-			});
-		const changed = withLinkFiles(before, edits);
+		const changed = withLinkFiles(before, changes);
 		if (!changed.done) continue;
 		try {
 			await put(path, changed.text, true);
@@ -420,8 +434,9 @@ export async function followRename(from: string, to: string) {
 		}
 	}
 	setState("treeVersion", (v) => v + 1);
-	if (done) notify(`${done} ${done === 1 ? "place now says" : "places now say"} ${baseName(to)}.`);
-	if (done < links.length) notify(`${links.length - done} of them ${links.length - done === 1 ? "is" : "are"} not where ${links.length - done === 1 ? "it was" : "they were"}: the document has changed since. Mend ${links.length - done === 1 ? "it" : "them"} in the text.`, "error");
+	if (done) notify(`${done} ${done === 1 ? "place was" : "places were"} written anew for ${baseName(to)}.`);
+	const left = total - done;
+	if (left > 0) notify(`${left} of them ${left === 1 ? "is" : "are"} not where ${left === 1 ? "it was" : "they were"}: the document has changed since. Mend ${left === 1 ? "it" : "them"} in the text.`, "error");
 }
 
 /** Where the project stands, in plain words. */

@@ -3,7 +3,7 @@
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
-import { linkFile } from "../../shared/docLinks";
+import { linkFile, linkWritten } from "../../shared/docLinks";
 import { headingAnchor } from "../../shared/docTables";
 import { finishMarkdown, outlineOf, type TicketRef } from "./markdownHtml";
 import { frontMatter, plainMarkdown } from "../../shared/frontMatter";
@@ -37,7 +37,7 @@ export function MarkdownView(props: { path: string }) {
 				.map((d) => {
 					const title = d.title ?? "";
 					const named = title.toLowerCase().startsWith(d.ticket!.toLowerCase()) ? title : [d.ticket, title].filter(Boolean).join(": ");
-					return { key: d.ticket!, href: encodeURI(relativePath(dirName(props.path), d.path)), about: `${named}${d.status ? ` (${d.status})` : ""}` };
+					return { key: d.ticket!, href: linkWritten(relativePath(dirName(props.path), d.path)), about: `${named}${d.status ? ` (${d.status})` : ""}` };
 				}),
 		[],
 		{ equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) },

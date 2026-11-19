@@ -297,7 +297,7 @@ export function selftestWork(): Promise<Steps> {
 			const to = canonical(joinPath(root, ...folder, "specs", "kept", "Moved-again.md"));
 			await backend.rename(from, to);
 			const asked = followRename(from, to);
-			const go = await until(() => [...document.querySelectorAll<HTMLButtonElement>(".dialog button")].find((button) => button.textContent?.trim() === "Write the new name there"));
+			const go = await until(() => [...document.querySelectorAll<HTMLButtonElement>(".dialog button")].find((button) => button.textContent?.trim() === "Update it"));
 			go?.click();
 			await asked;
 			return (await backend.read(moved)).text.includes("](../../specs/kept/Moved-again.md#checks)");

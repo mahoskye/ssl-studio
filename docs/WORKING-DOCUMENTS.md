@@ -117,7 +117,9 @@ row offers "Mend": the link is pointed there, and Ctrl+Z undoes it.
 A file or a folder renamed in the Explorer takes what names it along: the
 IDE says how many places, in how many documents, still say the old name,
 and on your word writes the new one in each. A link is one such place; a
-ticket's `specs:` line and a spec's `plan:` line are the others.
+ticket's `specs:` line and a spec's `plan:` line are the others. A name
+typed with a folder in it ("archive/Old.md") moves the file there, and the
+links the moved document holds are written from where it is now.
 
 Writing a link, the project's documents are offered once `](` is typed:
 tickets first, each by its key and title. Typing narrows the list by title,

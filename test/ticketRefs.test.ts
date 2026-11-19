@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ticketMentions } from "../src/shared/ticketRefs";
+import { ticketMatcher, ticketMentions } from "../src/shared/ticketRefs";
 
 const said = (text: string, keys: string[]) => ticketMentions(text, keys).map((m) => [text.slice(m.from, m.to), m.key]);
 
@@ -38,5 +38,11 @@ describe("a ticket's key written in prose", () => {
 	});
 	test("no keys, no mentions", () => {
 		expect(ticketMentions("DEMO-101", [])).toEqual([]);
+	});
+	test("a reader made once reads each text from its start", () => {
+		const read = ticketMatcher(["DEMO-101"]);
+		expect(read("first DEMO-101").length).toBe(1);
+		expect(read("DEMO-101 again, and DEMO-101").length).toBe(2);
+		expect(read("none here")).toEqual([]);
 	});
 });
