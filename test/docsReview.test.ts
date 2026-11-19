@@ -136,3 +136,15 @@ describe("tickets that name each other as parent", () => {
 		expect(rows).toEqual(["A", "  C", "    D", "B"]);
 	});
 });
+
+import { progress, progressShort } from "../src/shared/projectDocs";
+
+describe("how far a registry is, in the room there is", () => {
+	test("in words, and in as few characters as say the same", () => {
+		const counted = { rows: 11, tally: { total: 11, by: [["migrated", 4], ["found", 3], ["verified", 3], ["", 1]] as [string, number][] } };
+		expect(progress(counted)).toBe("7 of 11 done");
+		expect(progressShort(counted)).toBe("7/11");
+		expect(progress({ rows: 12 })).toBe("12 rows");
+		expect(progressShort({ rows: 12 })).toBe("12");
+	});
+});

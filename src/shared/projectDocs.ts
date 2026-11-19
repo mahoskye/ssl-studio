@@ -228,6 +228,13 @@ export function progress(file: Pick<DocFile, "rows" | "tally">): string {
 	return `${done} of ${file.tally.total} done`;
 }
 
+/** The same in as little room as it can be said: "8/12", or "12" for a table with no status. */
+export function progressShort(file: Pick<DocFile, "rows" | "tally">): string {
+	if (!file.tally) return String(file.rows ?? 0);
+	const done = file.tally.by.filter(([status]) => toneOf(status) === "done").reduce((n, [, count]) => n + count, 0);
+	return `${done}/${file.tally.total}`;
+}
+
 /** Whether a file is its folder's catalog. */
 export const isCatalog = (file: Pick<DocFile, "name">) => baseName(file.name).toLowerCase() === CATALOG_FILE.toLowerCase();
 

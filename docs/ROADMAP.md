@@ -603,6 +603,19 @@ working-documents code, for defects only, found these; each has a test now
   catalog rewritten. A folder of over 500 tickets could crowd the other
   documents out of the list.
 
+**From walking it with the keyboard (2026-11-19, ADR 0010).**
+
+- A working document's row has a menu (right-click, the menu key,
+  Shift+F10): open it, set its state, update the catalogs or the manifest.
+  A Health check's row has one too, with what puts it right; its button is
+  for the pointer.
+- The menu of a row was drawn only while the Explorer was showing, so one
+  asked for from another panel never appeared. It is part of the window
+  now.
+- In a narrow Docs panel a state under way has a ring round its dot: done
+  and under way were told apart by colour alone. A registry's progress is
+  "7/11" there and a warning is its mark, so the title keeps the room.
+
 Left as they are: a ticket file whose name differs only in case from an
 imported key on a file system that ignores case, and a catalog written
 while its document has unsaved changes, which Health then reports.

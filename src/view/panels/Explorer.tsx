@@ -12,7 +12,7 @@ import { ask, choose } from "../dialogs";
 import { activePath, canonical, fileRemoved, fileRenamed, notify, openFile, setState, state } from "../state";
 import { baseName, dirName, isInside, joinPath } from "../../shared/paths";
 import { folderFor, holdsRoot, menuFor, nameProblem, NEW_FILE, NEW_FOLDER, openFolders, RENAME, retarget, TRASH, without } from "./explorerMenu";
-import { chooseFromMenu, RowMenu } from "./RowMenu";
+import { chooseFromMenu } from "./RowMenu";
 import { IconButton, Row, Rows, type Point, type RowsApi } from "./Rows";
 import { recall, remember } from "../graph/canvas";
 
@@ -297,7 +297,6 @@ export function Explorer() {
 			>
 				<Listed listing={root} path={state.workspace?.root ?? ""} depth={0} />
 			</Rows>
-			<RowMenu />
 		</div>
 	);
 }

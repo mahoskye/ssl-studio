@@ -22,7 +22,7 @@ function finish(item: string | null, refocus = true) {
 
 /**
  * Shows the menu and resolves with the item chosen, or null when it was
- * closed (Escape, Tab, a click elsewhere). Needs <RowMenu /> on screen.
+ * closed (Escape, Tab, a click elsewhere). <RowMenu /> is on screen for the whole app (App.tsx).
  */
 export function chooseFromMenu(label: string, items: string[], at: Point): Promise<string | null> {
 	finish(null);

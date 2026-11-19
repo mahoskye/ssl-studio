@@ -5,12 +5,13 @@ import { FileMark } from "../FileMark";
 import { createMemo, createResource, createSignal, For, Show } from "solid-js";
 import type { DocFile } from "../../shared/protocol";
 import { backend } from "../backend";
-import { docMatches, DOC_FOLDERS, isCatalog, KNOWLEDGE, progress, registryTitle, toneOf } from "../../shared/projectDocs";
+import { docMatches, DOC_FOLDERS, isCatalog, KNOWLEDGE, progress, progressShort, registryTitle, statusChoices, toneOf } from "../../shared/projectDocs";
 import { docs, newDoc, setUpProject } from "../project";
-import { importTickets, newKnowledge, newRegistry, newSpec, newState, newTicket, updateCatalogs, updateManifest } from "../projectDocs";
+import { importTickets, newKnowledge, newRegistry, newSpec, newState, newTicket, setStatus, updateCatalogs, updateManifest } from "../projectDocs";
 import { workList } from "../../shared/workList";
 import { activePath, canonical, openFile, setState, state } from "../state";
-import { focusRowsBelow, IconButton, Row, RowGroup, Rows } from "./Rows";
+import { focusRowsBelow, IconButton, Row, RowGroup, Rows, type Point } from "./Rows";
+import { chooseFromMenu } from "./RowMenu";
 import { Menu } from "../Menu";
 
 function DocRow(props: { file: DocFile }) {
@@ -48,8 +49,27 @@ function Status(props: { status?: string }) {
 	);
 }
 
+const OPEN = "Open";
+const STATE = "Set to ";
+/**
+ * What can be done to a working document from its row, without opening it:
+ * a ticket, a spec, a decision or a question is set to a state; a catalog is
+ * written afresh; the file manifest is updated. Right-click, the menu key or
+ * Shift+F10 (ADR 0010).
+ */
+async function rowMenu(file: DocFile, at: Point) {
+	const catalog = isCatalog(file);
+	const manifest = file.group === "registries" && /(^|[\\/])files\.csv$/i.test(file.name);
+	const states = !catalog && ["tickets", "specs", "knowledge"].includes(file.group) && (file.status || file.group !== "knowledge" || file.kind === "decisions" || file.kind === "questions") ? statusChoices(file).filter((status) => status.toLowerCase() !== (file.status ?? "").toLowerCase()) : [];
+	const UPDATE = catalog ? "Update catalogs" : "Update file manifest";
+	const picked = await chooseFromMenu(`Actions for ${file.ticket ?? file.title ?? file.name}`, [OPEN, ...states.map((status) => `${STATE}${status}`), ...(catalog || manifest ? [UPDATE] : [])], at);
+	if (picked === OPEN) await openFile(file.path);
+	else if (picked === UPDATE) await (catalog ? updateCatalogs() : updateManifest());
+	else if (picked?.startsWith(STATE)) await setStatus(file.path, picked.slice(STATE.length));
+}
+
 /** A row for one of the working documents: its title where it has one, and its state. */
-function ItemRow(props: { file: DocFile; depth?: number; lead?: string; note?: string; aside?: boolean }) {
+function ItemRow(props: { file: DocFile; depth?: number; lead?: string; note?: string; aside?: boolean; short?: string }) {
 	const selected = () => activePath() === canonical(props.file.path);
 	const stale = () => props.file.catalog?.stale;
 	return (
@@ -59,8 +79,9 @@ function ItemRow(props: { file: DocFile; depth?: number; lead?: string; note?: s
 			selected={selected()}
 			classList={{ selected: selected(), catalog: isCatalog(props.file) }}
 			style={{ "padding-left": `${8 + (props.depth ?? 0) * 14}px` }}
-			title={[props.file.path, props.file.status ? `Status: ${props.file.status}` : "", props.file.summary, props.file.tickets?.length ? `${props.file.group === "tickets" ? "Related to" : "For"} ${props.file.tickets.join(", ")}` : "", ...(props.file.problems ?? [])].filter(Boolean).join("\n")}
+			title={[props.file.path, props.file.status ? `Status: ${props.file.status}` : "", "Right-click, or the menu key, for what can be done to it.", props.file.summary, props.file.tickets?.length ? `${props.file.group === "tickets" ? "Related to" : "For"} ${props.file.tickets.join(", ")}` : "", ...(props.file.problems ?? [])].filter(Boolean).join("\n")}
 			onActivate={() => void openFile(props.file.path)}
+			onMenu={(at) => void rowMenu(props.file, at)}
 		>
 			<FileMark name={props.file.name} />
 			<span class="label">
@@ -70,7 +91,15 @@ function ItemRow(props: { file: DocFile; depth?: number; lead?: string; note?: s
 				{isCatalog(props.file) ? "Catalog" : props.file.title || props.file.name}
 			</span>
 			<Show when={props.note}>
-				<span class="meta" classList={{ aside: props.aside }}>{props.note}</span>
+				{/* In a narrow panel a note that has a shorter way of saying itself says it that way, and the title keeps the room. */}
+				<span class="meta" classList={{ aside: props.aside, shortens: Boolean(props.short) }} title={props.short ? props.note : undefined}>
+					<span class="long">{props.note}</span>
+					<Show when={props.short}>
+						<span class="short" aria-hidden="true">
+							{props.short}
+						</span>
+					</Show>
+				</span>
 			</Show>
 			<Show when={stale()}>
 				<span class="meta warn" title="The list in this catalog no longer says what the folder holds. ＋, Update catalogs, writes it afresh.">
@@ -164,7 +193,7 @@ function Registries(props: { files: DocFile[]; empty?: string }) {
 	const files = () => props.files.filter((d) => d.group === "registries");
 	return (
 		<RowGroup head={<Head title="Registries" folder={`${state.project?.docs}/${DOC_FOLDERS.registries}`} />} rows={files().length > 0} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
-			<For each={files().filter((d) => !isCatalog(d))}>{(file) => <ItemRow file={{ ...file, title: registryTitle(file.name) }} note={progress(file)} />}</For>
+			<For each={files().filter((d) => !isCatalog(d))}>{(file) => <ItemRow file={{ ...file, title: registryTitle(file.name) }} note={progress(file)} short={progressShort(file)} />}</For>
 			<For each={files().filter(isCatalog)}>{(catalog) => <ItemRow file={catalog} />}</For>
 		</RowGroup>
 	);

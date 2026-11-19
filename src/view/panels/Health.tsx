@@ -9,7 +9,8 @@ import { size } from "../StatusBar";
 import { activeDoc, activePath, openFile, setState, state } from "../state";
 import { symbols } from "./Objects";
 import { SeverityMark, SEVERITY } from "./Problems";
-import { IconButton, Row, Rows } from "./Rows";
+import { IconButton, Row, Rows, type Point } from "./Rows";
+import { chooseFromMenu } from "./RowMenu";
 import { serverDown } from "./server";
 import { openStyleProfile } from "../StyleProfile";
 import { docs, setUpProject } from "../project";
@@ -77,6 +78,14 @@ export function Health() {
 	const fixLabel = (check: DocCheck) => (check.fix?.kind === "catalogs" ? "Update" : "Start it");
 	const fixTitle = (check: DocCheck) => (check.fix?.kind === "catalogs" ? "Write every catalog afresh from the documents in its folder" : check.fix?.kind === "ticket" ? `Start ${check.fix.key} as a ticket of its own` : "");
 	const fix = (check: DocCheck) => (check.fix?.kind === "catalogs" ? void updateCatalogs() : check.fix?.kind === "ticket" ? void newTicket(check.fix.key, check.fix.related) : undefined);
+	/** A check's menu: open its document, or put it right where the IDE can. */
+	const checkMenu = async (check: DocCheck, at: Point) => {
+		const open = "Open the document";
+		const put = check.fix?.kind === "catalogs" ? "Update the catalogs" : check.fix?.kind === "ticket" ? `Start ${check.fix.key} as a ticket` : "";
+		const picked = await chooseFromMenu("What to do about it", [open, ...(put ? [put] : [])], at);
+		if (picked === open) await openFile(check.path);
+		else if (picked && picked === put) fix(check);
+	};
 	const fileState = (file: { exists: boolean; untouched?: boolean }) => (!file.exists ? "missing" : file.untouched ? "still the template text" : "written");
 	return (
 		<div class="panel-body health" data-panel="health">
@@ -113,13 +122,21 @@ export function Health() {
 						<Rows class="health-rows" role="listbox" label="What the working documents need">
 							<For each={checks()}>
 								{(check) => (
-									<Row class="check-row clickable" key={check.text} label={check.text} title={`${check.text}\nClick it, or press Enter on it, to open the document.`} onActivate={() => void openFile(check.path)}>
+									<Row
+										class="check-row clickable"
+										key={check.text}
+										label={check.text}
+										title={`${check.text}\nClick it, or press Enter on it, to open the document.${check.fix ? ` The menu key, or a right-click, offers: ${fixTitle(check).toLowerCase()}.` : ""}`}
+										onActivate={() => void openFile(check.path)}
+										onMenu={(at) => void checkMenu(check, at)}
+									>
 										<span class={`check-mark ${check.level}`} aria-hidden="true">
 											{check.level === "warn" ? "⚠" : "•"}
 										</span>
 										<span class="label">{check.text}</span>
 										<Show when={check.fix}>
-											<button class="link" title={fixTitle(check)} onClick={(e) => (e.stopPropagation(), fix(check))}>
+											{/* For the pointer. From the keyboard the row's menu has it: a control inside a row is not a stop of its own (ADR 0010). */}
+											<button class="link" tabindex={-1} title={fixTitle(check)} onClick={(e) => (e.stopPropagation(), fix(check))}>
 												{fixLabel(check)}
 											</button>
 										</Show>

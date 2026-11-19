@@ -2,6 +2,7 @@
 import { createEffect, createSignal, For, Match, on, onCleanup, Show, Switch } from "solid-js";
 import { backend } from "./backend";
 import { Dialogs } from "./dialogs";
+import { RowMenu } from "./panels/RowMenu";
 import { review, ReviewView } from "./editor/Review";
 import { EditorGroup } from "./editor/EditorGroup";
 import { commands, keysFor } from "./commands";
@@ -335,6 +336,8 @@ export function App() {
 				</For>
 			</div>
 			<QuickPick />
+			{/* One menu for every list's rows, whichever panel is showing: the Explorer's files, the working documents, Health's checks. */}
+			<RowMenu />
 			<SettingsDialog />
 			<StyleProfile />
 			<Dialogs />
