@@ -36,7 +36,7 @@ whether it is built.
 
 | Feature | Here | Verdict | Note |
 | --- | --- | --- | --- |
-| Menu bar | No | Bring | No bar at all: a command is found in the palette or not at all |
+| Menu bar | Yes | Bring | Built: six menus across the top, by pointer, Alt and a letter, or F10; it can be hidden |
 | Command palette | Yes | Have | Ctrl+Shift+P; what was used last comes first |
 | Activity bar | Yes | Have | Nine panels, each movable to the other side |
 | Status bar | Yes | Have | Project, server, agent, problems, cursor, language |
@@ -49,21 +49,23 @@ whether it is built.
 
 ## The menu bar, menu by menu
 
-There is no menu bar. This says what each of VS Code's menus holds, and
-how much of it the app already does by a command or a key.
+The bar holds VS Code's six menus that an editor needs (not Run and not
+Terminal: see below). A menu holds what is already a command of the app or
+of the text editor, and nothing of its own.
 
 | Feature | Here | Verdict | Note |
 | --- | --- | --- | --- |
-| File menu | Partly | Bring | New, open folder, save, save all, revert, close are commands; no menu |
-| Edit menu | Partly | Bring | Undo, cut, copy, paste, find, replace are keys in the editor; no menu |
-| Selection menu | Partly | Bring | Cursors and lines move by key; no menu to find them in |
-| View menu | Partly | Bring | Every panel has a command; no menu |
-| Go menu | Partly | Bring | File, symbol, line, definition are keys; back and forward are missing |
-| Help menu | No | Bring | Nothing says the version, the keys, or where the guide is |
+| File menu | Yes | Bring | Built: new, open folder, save, revert, rename, trash, copy path, close, settings |
+| Edit menu | Yes | Bring | Built: undo, redo, cut, copy, paste, find, replace, find in files, comment, format |
+| Selection menu | Yes | Bring | Built: select all, grow and shrink, copy and move lines, cursors, occurrences |
+| View menu | Yes | Bring | Built: commands, every panel, the bars, split, blocks, word wrap, zoom |
+| Go menu | Yes | Bring | Built: file, symbol, line, definition, references, bracket, problems, tabs |
+| Help menu | Yes | Bring | Built: all commands, keyboard shortcuts, the editor's commands, the versions |
 | Save as | No | Later | Paste in the Explorer makes a copy under another name |
 | Auto save | No | Later | Format on save and local history are here; saving is by hand |
 | Untitled files | No | Leave | A file is made where it will live |
-| Open recent | Partly | Later | On the Welcome page only; the File menu links to it |
+| Open recent | Partly | Later | On the Welcome page only; the File menu would list the folders |
+| A guide in Help | No | Later | No guide for users is written yet; Help would open it |
 
 ## Right-click menus
 
@@ -278,13 +280,24 @@ says it is pinned. The tab's menu also opens by the menu key and Shift+F10.
 
 | Feature | Size | Done | What it takes |
 | --- | --- | --- | --- |
-| Menu bar | Medium | No | A bar of menus, by pointer and by Alt and the arrow keys |
-| File menu | Small | No | New, open folder, save, save all, revert, close, settings |
-| Edit menu | Small | No | Undo, redo, cut, copy, paste, find, replace, comment |
-| Selection menu | Small | No | Select all, cursors above and below, next match, move lines |
-| View menu | Small | No | Palette, each panel, side bar, bottom panel, word wrap, zoom |
-| Go menu | Small | No | File, symbol, line, definition, back, forward, next problem |
-| Help menu | Small | No | Welcome, keyboard shortcuts, the guide, the version |
+| Menu bar | Medium | Yes | A bar of menus, by pointer and by Alt and the arrow keys |
+| File menu | Small | Yes | New, open folder, save, save all, revert, close, settings |
+| Edit menu | Small | Yes | Undo, redo, cut, copy, paste, find, replace, comment |
+| Selection menu | Small | Yes | Select all, cursors above and below, next match, move lines |
+| View menu | Small | Yes | Palette, each panel, side bar, bottom panel, word wrap, zoom |
+| Go menu | Small | Yes | File, symbol, line, definition, next problem; back and forward come with step 4 |
+| Help menu | Small | Yes | Keyboard shortcuts, every command, the versions; there is no guide to open yet |
+
+The bar is drawn in the window, not handed to the system, so that it is
+the same in the app and in a browser
+([ADR 0020](adr/0020-the-shell-does-what-vs-code-does-and-stays-its-own.md)).
+An entry that cannot run now is grey and says why: "Open a file first",
+"For a file shown as text". The keys beside the text editor's own commands
+are read from the editor, since they differ from system to system. Paste
+from the menu needs a web view that lets a page read the clipboard; where
+it does not, the entry is grey and the key still pastes. Cut, copy and
+paste from the menu were not tried: a test of them writes over whatever
+the person at the machine has copied.
 
 ### Step 4: finding one's way
 

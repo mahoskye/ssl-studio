@@ -1,4 +1,4 @@
-// The window: activity bar, side bar, editor groups, bottom panel, status bar.
+// The window: menu bar, activity bar, side bar, editor groups, bottom panel, status bar.
 import { createEffect, createSignal, For, Match, on, onCleanup, Show, Switch } from "solid-js";
 import { backend } from "./backend";
 import { Dialogs } from "./dialogs";
@@ -23,6 +23,7 @@ import { GraphView } from "./graph/GraphView";
 import { session } from "./lsp/session";
 import { QuickPick } from "./QuickPick";
 import { SettingsDialog } from "./Settings";
+import { MenuBar } from "./MenuBar";
 import { StatusBar } from "./StatusBar";
 import { applyTheme, resolveTheme } from "./themes/themes";
 import { dismiss, focusRequest, openFolder, rememberTabs, rememberViews, setState, state, unsavedPaths, type PanelId } from "./state";
@@ -201,6 +202,9 @@ export function App() {
 	);
 	return (
 		<div class="app" style={{ "--left": `${fit().left}px`, "--right": `${fit().right}px`, "--bottom": `${bottom()}px` }}>
+			<Show when={state.settings.menuBar !== false}>
+				<MenuBar />
+			</Show>
 			<nav class="activity" aria-label="Views">
 				<For each={PANELS.filter((p) => sideOf(p.id) === "left")}>{(p) => <PanelButton id={p.id} />}</For>
 				<button

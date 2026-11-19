@@ -16,6 +16,7 @@ import { TEMPLATES } from "../shared/houseStyle";
 import { askAbout } from "./agent/Agent";
 import { startTidy } from "./agent/tidy";
 import { joinPath, relativeTo } from "../shared/paths";
+import { menuForLetter } from "../shared/menuBar";
 import { installRecentTabs, stepRecent } from "./recentTabs";
 import { isPlanPath, newPlan, printPlan } from "./plan/model";
 import { isMarkdown, isTable, newDoc, setUpProject, undoSetUp } from "./project";
@@ -139,6 +140,8 @@ export const commands: Command[] = [
 	{ id: "graph", label: "Show Call graph", detail: "Again to go back to the editors", run: () => setState("centerView", state.centerView === "graph" ? "editors" : "graph") },
 	{ id: "toggle-sidebar", label: "Toggle side bar", run: () => toggle("left") },
 	{ id: "toggle-panel", label: "Toggle bottom panel", run: () => toggle("bottom") },
+	{ id: "menu-bar", label: "Focus the menu bar", detail: "Then the arrow keys. Alt and a menu's first letter opens that menu", run: () => void (openMenu() || notify(MENU_HIDDEN)) },
+	{ id: "toggle-menu-bar", label: "Toggle menu bar", detail: "File, Edit, Selection, View, Go and Help across the top of the window", run: () => void toggleMenuBar() },
 	{ id: "move-panel", label: "Move left panel to the right", detail: "The one that is open", run: () => state.settings.layout.left && movePanel(state.leftView) },
 	{ id: "move-panel-back", label: "Move right panel to the left", detail: "The one that is open", run: () => state.settings.layout.right && movePanel(state.rightView) },
 	// The agent
@@ -165,9 +168,27 @@ export function runCommand(id: string, options: { remember?: boolean } = {}) {
 	command.run();
 }
 
-let settingsOpener: () => void = () => {};
-export const onOpenSettings = (open: () => void) => (settingsOpener = open);
-export const openSettings = () => settingsOpener();
+let settingsOpener: (query?: string) => void = () => {};
+export const onOpenSettings = (open: (query?: string) => void) => (settingsOpener = open);
+/** Opens Settings; with `query`, showing only what matches it ("keyboard" for the shortcuts). */
+export const openSettings = (query?: string) => settingsOpener(query);
+
+const MENU_HIDDEN = "The menu bar is hidden. “Toggle menu bar” in the command list brings it back.";
+let menuOpener: ((index?: number) => void) | null = null;
+/** The menu bar says how it is given the keyboard; null when it is taken off the window. */
+export const onOpenMenu = (open: ((index?: number) => void) | null) => (menuOpener = open);
+/** Gives the menu bar the keyboard, or opens one of its menus. False when the bar is hidden. */
+export function openMenu(index?: number): boolean {
+	menuOpener?.(index);
+	return menuOpener !== null;
+}
+
+async function toggleMenuBar() {
+	const hide = state.settings.menuBar !== false;
+	await saveSetting({ menuBar: !hide });
+	// What was hidden says how it is brought back: the menu that hid it is gone with it.
+	if (hide) notify(MENU_HIDDEN);
+}
 
 /** Puts the selected lines inside a new comment region (a frame in blocks mode). */
 async function wrapInRegion() {
@@ -307,6 +328,7 @@ export const DEFAULT_KEYS: Record<string, string> = {
 	"ctrl+-": "zoom-out",
 	"ctrl+shift+0": "zoom-reset",
 	f1: "editor-commands",
+	f10: "menu-bar",
 };
 
 /** The default shortcuts with the user's overrides ("" unbinds). */
@@ -331,10 +353,13 @@ export function installKeys() {
 			const id = keyNames(e)
 				.map((name) => map[name])
 				.find(Boolean);
-			if (!id) return;
+			// Alt and a menu's first letter opens that menu, where no shortcut has the key. Not with Ctrl or Shift, and not
+			// where Alt and a letter types a character: the key is then that character, not the letter.
+			const menu = !id && e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.key.length === 1 ? menuForLetter(e.key) : -1;
+			if (!id && (menu < 0 || !openMenu(menu))) return;
 			e.preventDefault();
 			e.stopPropagation();
-			runCommand(id);
+			if (id) runCommand(id);
 		},
 		true,
 	);

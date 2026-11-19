@@ -266,8 +266,8 @@ export function Explorer() {
 	const root = useListing(() => state.workspace && ([state.workspace.root, state.treeVersion] as const));
 	const read = () => root.path === state.workspace?.root;
 	const rootMenu = (at: Point) => state.workspace && void entryMenu({ name: state.workspace.name, path: state.workspace.root, kind: "dir", size: 0 }, at);
-	// A row stays "the focused row" while a dialog, the palette or its own menu has the keyboard, and no longer.
-	const forget = (e: FocusEvent) => !(e.target as Element | null)?.closest?.(".explorer, .overlay, .quickpick, .row-menu") && setFocused(null);
+	// A row stays "the focused row" while a dialog, the palette, its own menu or the menu bar has the keyboard, and no longer.
+	const forget = (e: FocusEvent) => !(e.target as Element | null)?.closest?.(".explorer, .overlay, .quickpick, .row-menu, .menubar") && setFocused(null);
 	onMount(() => document.addEventListener("focusin", forget));
 	// The folders that were open in this workspace are open again next time. A self-test starts from a closed tree.
 	const keeps = () => !state.info?.selftest && !state.info?.selftestClose;

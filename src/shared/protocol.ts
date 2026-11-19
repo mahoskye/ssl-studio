@@ -116,6 +116,8 @@ export type Settings = {
 	minimap: boolean;
 	/** Long lines are wrapped at the editor's edge. Off unless set. */
 	wordWrap?: boolean;
+	/** The menu bar across the top of the window. Shown unless set to false. */
+	menuBar?: boolean;
 	/** Parameter names shown beside the arguments of a call. On unless set to false. */
 	inlayHints?: boolean;
 	/** A ruler at the style's line length. On unless set to false. */

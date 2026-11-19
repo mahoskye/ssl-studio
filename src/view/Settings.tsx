@@ -32,8 +32,8 @@ export function SettingsDialog() {
 			(s) => setLayers({ user: s.user, workspace: s.workspace }),
 			() => {},
 		);
-	onOpenSettings(() => {
-		setQuery("");
+	onOpenSettings((query = "") => {
+		setQuery(query);
 		setRefused("");
 		setOpen(true);
 		void loadLayers();
@@ -153,6 +153,7 @@ export function SettingsDialog() {
 	const ROWS = {
 		theme: ["Theme", "Colours of the whole window; import a VS Code theme"],
 		uiScale: ["Interface size", "The whole window, from 80% to 160%"],
+		menuBar: ["Menu bar", "File, Edit, Selection, View, Go and Help across the top; F10 goes to it"],
 		fontSize: ["Font size", "The editor, Blocks, diffs and rendered documents"],
 		formatOnSave: ["Format changed lines on save", "Only the lines changed since the last save"],
 		minimap: ["Minimap", "The outline of the file at the editor's edge; a narrow editor goes without"],
@@ -164,7 +165,7 @@ export function SettingsDialog() {
 	} as const;
 	const anyShown = (group: Group, ...rows: (keyof typeof ROWS)[]) => rows.some((r) => shown(group, ...ROWS[r]));
 	const groups = {
-		appearance: () => anyShown("Appearance", "theme", "uiScale", "fontSize"),
+		appearance: () => anyShown("Appearance", "theme", "uiScale", "fontSize", "menuBar"),
 		editor: () => anyShown("Editor", "formatOnSave", "minimap", "wordWrap", "inlayHints", "rulers", "rulerMargin"),
 		server: () => anyShown("Language server", "lspPath"),
 		keyboard: () => keyRows().length > 0,
@@ -238,6 +239,9 @@ export function SettingsDialog() {
 									onChange={(e) => void save("fontSize", Math.min(FONT.max, Math.max(FONT.min, Math.round(Number(e.currentTarget.value)) || FONT.normal)))}
 								/>
 							)}
+						</Row>
+						<Row group="Appearance" label={ROWS.menuBar[0]} hint={ROWS.menuBar[1]} setting="menuBar">
+							{(ids) => <input id={ids.control} aria-describedby={ids.hint} type="checkbox" checked={state.settings.menuBar !== false} onChange={(e) => void save("menuBar", e.currentTarget.checked)} />}
 						</Row>
 					</Section>
 					<Section title="Editor" when={groups.editor()}>

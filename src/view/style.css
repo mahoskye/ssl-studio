@@ -47,6 +47,7 @@
 	/* The fixed bars of the window, which grow with the interface size too. */
 	--tab-height: calc(33px * var(--ui-scale));
 	--status-height: calc(24px * var(--ui-scale));
+	--menubar-height: calc(28px * var(--ui-scale));
 	--activity-width: calc(44px * var(--ui-scale));
 	/* What dims the window behind a dialog, and the shadow under anything that floats. */
 	--overlay: rgb(0 0 0 / .45);
@@ -91,23 +92,32 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .app {
 	display: grid;
 	grid-template-columns: var(--activity-width) auto auto 1fr;
-	grid-template-rows: minmax(0, 1fr) var(--status-height);
+	/* The menu bar's row is as tall as the bar, and nothing when the bar is hidden. */
+	grid-template-rows: auto minmax(0, 1fr) var(--status-height);
 	height: 100vh;
 }
-.activity { grid-row: 1; grid-column: 1; display: flex; flex-direction: column; align-items: center; overflow-y: auto; scrollbar-width: none; gap: var(--space-1); padding: var(--space-3) 0; background: var(--status-bg); border-right: 1px solid var(--border); }
+/* The menu bar: the menus by name across the top, each opening under its own name. */
+.menubar { grid-row: 1; grid-column: 1 / -1; display: flex; align-items: center; min-width: 0; height: var(--menubar-height); padding: 0 var(--space-2); background: var(--status-bg); color: var(--status-fg); border-bottom: 1px solid var(--border); font-size: var(--text-md); }
+.menubar-name { padding: var(--space-1) var(--space-4); }
+.menubar-name.open { background: var(--selected); }
+.menubar .menu-pop { left: 0; right: auto; max-height: calc(100vh - var(--menubar-height) - var(--status-height)); overflow-y: auto; font-size: var(--text-base); }
+/* One entry is at hand, whether the pointer or the arrow keys put it there. */
+.menubar .menu-item:hover { background: none; }
+.menubar .menu-item:focus { background: var(--selected); }
+.activity { grid-row: 2; grid-column: 1; display: flex; flex-direction: column; align-items: center; overflow-y: auto; scrollbar-width: none; gap: var(--space-1); padding: var(--space-3) 0; background: var(--status-bg); border-right: 1px solid var(--border); }
 .activity button { width: calc(36px * var(--ui-scale)); height: calc(36px * var(--ui-scale)); font-size: var(--text-xl); color: var(--muted); }
 .activity button.active { color: var(--fg); box-shadow: inset 2px 0 0 var(--accent); }
 .activity button:disabled { opacity: .4; }
 .activity .codicon-glyph { font: normal var(--text-xl)/1 codicon; }
-.sidebar { grid-row: 1; grid-column: 2; width: var(--left); min-width: 0; background: var(--side-bg); color: var(--side-fg); overflow: hidden; display: flex; flex-direction: column; }
+.sidebar { grid-row: 2; grid-column: 2; width: var(--left); min-width: 0; background: var(--side-bg); color: var(--side-fg); overflow: hidden; display: flex; flex-direction: column; }
 .splitter { position: relative; z-index: 1; }
-.splitter.x { grid-row: 1; grid-column: 3; width: 4px; cursor: col-resize; background: var(--border); }
+.splitter.x { grid-row: 2; grid-column: 3; width: 4px; cursor: col-resize; background: var(--border); }
 /* The bar is 4px; what the pointer can catch is 12px. */
 .splitter::after { content: ""; position: absolute; }
 .splitter.x::after { inset: 0 -4px; }
 .splitter.y::after { inset: -4px 0; }
 .splitter.x:hover, .splitter.y:hover, .splitter:focus-visible { background: var(--accent); outline: none; }
-.center { grid-row: 1; grid-column: 4; min-width: 0; display: flex; flex-direction: column; }
+.center { grid-row: 2; grid-column: 4; min-width: 0; display: flex; flex-direction: column; }
 .editors { flex: 1; min-height: 0; display: flex; }
 .splitter.y { height: 4px; cursor: row-resize; background: var(--border); }
 .bottom { height: var(--bottom); background: var(--panel-bg); display: flex; flex-direction: column; min-height: 0; }
@@ -260,7 +270,7 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .sev.info, .sev.hint { color: var(--info); }
 .code { color: var(--muted); font-size: var(--text-sm); }
 
-.statusbar { grid-row: 2; grid-column: 1 / -1; display: flex; align-items: center; gap: var(--space-1); background: var(--status-bg); color: var(--status-fg); font-size: var(--text-md); padding: 0 var(--space-3); border-top: 1px solid var(--border); min-width: 0; overflow: hidden; }
+.statusbar { grid-row: 3; grid-column: 1 / -1; display: flex; align-items: center; gap: var(--space-1); background: var(--status-bg); color: var(--status-fg); font-size: var(--text-md); padding: 0 var(--space-3); border-top: 1px solid var(--border); min-width: 0; overflow: hidden; }
 .statusbar .item { padding: 0 var(--space-4); height: calc(var(--status-height) - 2px); display: inline-flex; align-items: center; gap: var(--space-5); border-radius: 0; white-space: nowrap; min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
 .statusbar .item.meter { flex-shrink: 4; }
 /* Where the cursor is: it gives way before the counts do, and keeps its end, the procedure. */
@@ -335,7 +345,7 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 
 /* M2: panels and house style */
 .app { grid-template-columns: var(--activity-width) auto auto 1fr auto auto; }
-.rightbar { grid-row: 1; grid-column: 6; width: var(--right); min-width: 0; background: var(--side-bg); color: var(--side-fg); overflow: hidden; display: flex; flex-direction: column; }
+.rightbar { grid-row: 2; grid-column: 6; width: var(--right); min-width: 0; background: var(--side-bg); color: var(--side-fg); overflow: hidden; display: flex; flex-direction: column; }
 .group-head { padding: var(--space-4) var(--space-5) var(--space-1); font-size: var(--text-sm); text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
 .palette-item .label { flex: none; max-width: 55%; }
 /* What the template under the keyboard or the pointer would insert. */
