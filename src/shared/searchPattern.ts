@@ -3,6 +3,9 @@
 // or as a whole word. The search across files and the replace across files
 // find the same places because they are given the same expression.
 
+/** As many results as a search gives back. With this many there may be more, and a replace would not know of them. */
+export const SEARCH_LIMIT = 2000;
+
 export type SearchOptions = {
 	regex?: boolean;
 	caseSensitive?: boolean;
@@ -79,7 +82,9 @@ export function matchesOn(line: string, pattern: RegExp, replacement: string, re
 	let match: RegExpExecArray | null;
 	while ((match = pattern.exec(line))) {
 		out.push({ column: match.index + 1, length: match[0].length, becomes: replacementFor(match, replacement, regex) });
-		if (!match[0].length) pattern.lastIndex++;
+		// After a match of nothing the walk steps on by a whole character. A character outside the first plane is
+		// two units of the string: one step would land between its halves, to split it in two or never get past it.
+		if (!match[0].length) pattern.lastIndex = match.index + ((line.codePointAt(match.index) ?? 0) > 0xffff ? 2 : 1);
 	}
 	return out;
 }

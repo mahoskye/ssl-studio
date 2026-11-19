@@ -88,7 +88,7 @@ export async function discard(file: GitFile): Promise<void> {
 	const DISCARD = untracked ? "Move to trash" : "Discard changes";
 	const what = untracked
 		? `${name} is new, and git has nothing of it to go back to. Move it to the trash?`
-		: `Discard the changes to ${name} that are not staged? The file goes back to what git has of it${unsaved ? ", and the unsaved changes in the editor go with them" : ""}. The file as it is now is kept in its local history.`;
+		: `Discard the changes to ${name} that are not staged? The file goes back to what git has of it${unsaved ? ", and the unsaved changes in the editor go with them" : ""}. Where it is text, the file as it is now on disk is kept in its local history.`;
 	if ((await choose(what, [DISCARD], { danger: DISCARD })) !== DISCARD) return;
 	try {
 		await backend.gitDiscard(file.path);

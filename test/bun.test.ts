@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFrameReader, frame } from "../src/bun/frames";
@@ -131,6 +131,13 @@ describe("files that are not text", () => {
 		expect((await files.read(file)).text).toBe("a := 2;\n");
 		// A picture is a picture whoever asks.
 		await expect(files.write(join(root, "dot.png"), "text", true)).rejects.toThrow(/not text/);
+	});
+	test.skipIf(process.platform === "win32")("a file written again keeps whether it may be run", async () => {
+		const script = join(root, "run.sh");
+		writeFileSync(script, "echo one\n", { mode: 0o755 });
+		chmodSync(script, 0o755);
+		await files.write(script, "echo two\n");
+		expect(statSync(script).mode & 0o777).toBe(0o755);
 	});
 	test("text is never written over a file that is not text", async () => {
 		await expect(files.write(join(root, "dot.png"), "")).rejects.toThrow(/not text/);

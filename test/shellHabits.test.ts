@@ -267,3 +267,17 @@ describe("replacing in a text", () => {
 		}
 	});
 });
+
+describe("a match of nothing beside a character of two units", () => {
+	test("the walk steps past the whole character: it is neither split nor stood still on", () => {
+		const line = 's := "😀";';
+		for (const options of [{ regex: true }, { regex: true, wholeWord: true }]) {
+			const found = matchesOn(line, searchPattern("x*", options), "-", true);
+			// One place before each character, and one at the end; none between the two halves of the face.
+			expect(found.length).toBeLessThanOrEqual([...line].length + 1);
+			expect(found.every((match) => match.column - 1 !== line.indexOf("😀") + 1)).toBe(true);
+			expect(replaceIn(line, "x*", "", options).text).toBe(line);
+			expect(replaceIn(line, "x*", "-", options).text).toContain("😀");
+		}
+	});
+});

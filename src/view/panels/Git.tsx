@@ -14,11 +14,15 @@ import { IconButton, Row, RowGroup, Rows, type Point } from "./Rows";
 
 const { show: SHOW, open: OPEN, stage: STAGE, unstage: UNSTAGE, discard: DISCARD, trash: TRASH } = GIT_ACTIONS;
 
+/** What the next commit is to say. Kept while the panel is away: a message half written is not lost to a look at another panel. */
+const [message, setMessage] = createSignal("");
+const [busy, setBusy] = createSignal(false);
+
 export function GitPanel() {
-	const [message, setMessage] = createSignal("");
-	const [busy, setBusy] = createSignal(false);
 	const staged = () => (gitStatus() ? stagedOf(gitStatus()!) : []);
 	const changes = () => (gitStatus() ? unstagedOf(gitStatus()!) : []);
+	/** Files staged above the workspace's folder: not listed, and in the commit all the same. */
+	const above = () => gitStatus()?.stagedOutside ?? 0;
 	const problem = () => (busy() ? "The commit is being made" : commitProblem(gitStatus() ?? null, message()));
 	const folder = (path: string) => {
 		const dir = relativeTo(state.workspace?.root, dirName(path));
@@ -100,12 +104,17 @@ export function GitPanel() {
 						onKeyDown={(e) => e.key === "Enter" && (e.ctrlKey || e.metaKey) && (e.preventDefault(), void make())}
 					/>
 					{/* Not the button's own "disabled": it keeps the keyboard, and says why it does nothing. */}
-					<button type="submit" class="primary" aria-disabled={problem() ? "true" : undefined} title={problem() || `Commit the ${staged().length} staged ${staged().length === 1 ? "file" : "files"}`}>
+					<button type="submit" class="primary" aria-disabled={problem() ? "true" : undefined} title={problem() || `Commit the ${staged().length + above()} staged ${staged().length + above() === 1 ? "file" : "files"}`}>
 						Commit
 					</button>
 				</form>
+				<Show when={above()}>
+					<p class="hint warn" role="status">
+						{above()} more staged {above() === 1 ? "file is" : "files are"} above this folder in the repository, and not listed here. A commit takes {above() === 1 ? "it" : "them"} too.
+					</p>
+				</Show>
 				<Show when={!gitStatus()!.files.length}>
-					<p class="hint">Nothing has changed since the last commit.</p>
+					<p class="hint">Nothing has changed in this folder since the last commit.</p>
 				</Show>
 				<Show when={gitStatus()!.files.length}>
 					<Rows label="Changed files">

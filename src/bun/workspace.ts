@@ -1,16 +1,15 @@
 // Files inside one workspace folder. Every path the UI sends is absolute
 // and must stay inside the root.
-import { mkdirSync, readdirSync, renameSync, statSync, watch, existsSync, type FSWatcher } from "node:fs";
+import { chmodSync, mkdirSync, readdirSync, renameSync, statSync, watch, existsSync, type FSWatcher } from "node:fs";
 import { cp, rm } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type { Entry, FileText, SearchHit } from "../shared/protocol";
-import { replaceIn, searchPattern, type SearchOptions } from "../shared/searchPattern";
+import { matchesOn, replaceIn, SEARCH_LIMIT, searchPattern, type SearchOptions } from "../shared/searchPattern";
 import { fileChosen } from "../shared/fileGlob";
 import { decode, encode, encodingOf, textOf, type Encoding } from "./encoding";
 import { imageType, looksBinary, sizeText } from "../shared/fileKind";
 
 const SKIP = new Set([".git", "node_modules", ".ssl-studio", ".hutch", "dist", "build"]);
-const SEARCH_LIMIT = 2000;
 const SEARCH_MAX_BYTES = 4 * 1024 * 1024;
 /** The largest picture that is sent to the window to be shown. */
 const IMAGE_MAX_BYTES = 20 * 1024 * 1024;
@@ -92,6 +91,14 @@ export class WorkspaceFiles {
 		}
 		this.ownWrites.set(full, Date.now());
 		await Bun.write(temp, bytes);
+		// The file that takes its place has what the file had: who may read it, and whether it may be run.
+		if (bytesNow) {
+			try {
+				chmodSync(temp, statSync(full).mode);
+			} catch {
+				// A system that keeps no such thing has nothing to carry over.
+			}
+		}
 		renameSync(temp, full);
 		return { mtime: statSync(full).mtimeMs };
 	}
@@ -163,12 +170,10 @@ export class WorkspaceFiles {
 			if (text.includes("\u0000")) continue;
 			const lines = text.split(/\r?\n/);
 			for (let i = 0; i < lines.length; i++) {
-				pattern.lastIndex = 0;
-				let match: RegExpExecArray | null;
-				while ((match = pattern.exec(lines[i]!))) {
-					hits.push({ path, line: i + 1, column: match.index + 1, length: match[0].length, text: lines[i]!.slice(0, 400) });
+				// The same walk a replace makes over the line: what is listed is what would be replaced.
+				for (const match of matchesOn(lines[i]!, pattern, "", false)) {
+					hits.push({ path, line: i + 1, column: match.column, length: match.length, text: lines[i]!.slice(0, 400) });
 					if (hits.length >= SEARCH_LIMIT) return hits;
-					if (!match[0].length) pattern.lastIndex++;
 				}
 			}
 		}

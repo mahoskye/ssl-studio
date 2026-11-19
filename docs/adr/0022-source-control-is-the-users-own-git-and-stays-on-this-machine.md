@@ -24,7 +24,15 @@ Under [ADR 0009](0009-nothing-is-lost-or-destroyed-without-a-say.md) and
   rest of the IDE is as it was.
 - **Only what stays on this machine.** The IDE asks what has changed,
   reads a file as it was, stages, unstages, commits and discards. It does
-  not fetch, pull or push, and it never asks for a password.
+  not fetch, pull or push. Git is given no keyboard and told not to ask
+  at the terminal; what the user's own git is set up to do besides (sign
+  a commit, run a filter) is theirs.
+- **A file's name is a name.** Git is told to read every name as written,
+  not as a pattern, and is asked from the workspace's folder for the file
+  in it. A question git could not answer is an error, never a "no".
+- **A workspace inside a larger repository sees its own folder.** A
+  commit is the repository's and takes what is staged above the folder
+  too; the panel says how many such files there are.
 - **A commit is git's own.** It is made with the user's name as their git
   has it, and runs the checks their repository runs. When git refuses,
   the IDE shows git's words and changes nothing.

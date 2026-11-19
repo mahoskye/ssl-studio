@@ -36,9 +36,13 @@ export function useGitMarks(editor: monaco.editor.IStandaloneCodeEditor, active:
 
 	// The file shown, and what git has of it, either of which may change.
 	createEffect(
-		on([active, gitVersion, () => Boolean(gitStatus())], ([path, , repository]) => {
-			base = null;
-			marks.clear();
+		on([active, gitVersion, () => Boolean(gitStatus())], ([path, , repository], before) => {
+			// Another file has other marks. The same file keeps the ones it has until git has answered again: asked
+			// on every save, an answer that says the same would otherwise make them blink.
+			if (path !== before?.[0] || !repository) {
+				base = null;
+				marks.clear();
+			}
 			if (!path || !repository || documents.get(path)?.binary) return;
 			let stale = false;
 			onCleanup(() => (stale = true));

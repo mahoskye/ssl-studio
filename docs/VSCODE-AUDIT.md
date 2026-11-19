@@ -38,7 +38,7 @@ whether it is built.
 | --- | --- | --- | --- |
 | Menu bar | Yes | Bring | Built: six menus across the top, by pointer, Alt and a letter, or F10; it can be hidden |
 | Command palette | Yes | Have | Ctrl+Shift+P; what was used last comes first |
-| Activity bar | Yes | Have | Nine panels, each movable to the other side |
+| Activity bar | Yes | Have | Ten panels, each movable to the other side |
 | Status bar | Yes | Have | Project, server, agent, problems, cursor, language |
 | Bottom panel | Yes | Have | Problems, Output, Call graph |
 | Welcome page | Yes | Have | With the folders opened lately |
@@ -426,18 +426,22 @@ A pattern with no slash names a file or a folder wherever it is (`*.ssl`,
 showing, so that nothing out of sight hides results.
 
 The search, the preview and the replace find their matches with the one
-expression, a line at a time, so what is replaced is what was listed. A
-file that is open is changed in the editor, where undo takes it back: it
-is saved straight away when it had nothing unsaved, and left unsaved when
-it had. A file that is not open is changed on disk, in the encoding and
-with the line ends it has, and the file as it was goes into its local
-history first. With 2000 results or more only the first are listed, and
-the replace is refused until the search is narrowed. In a regular
-expression the replacement may name groups: `$1`, `$<name>`, `$&`.
+expression, a line at a time. What is replaced is what is in the file
+when the replace runs: that is what was listed, unless the file changed
+since the search or holds unsaved changes (the search reads what is
+saved), and the app says so when the two counts differ. A file with a tab
+is changed in the editor, where undo takes it back: it is saved straight
+away when it had nothing unsaved, and left unsaved when it had. A file
+with no tab is changed on disk, in the encoding and with the line ends it
+has. Every file that is written goes into its local history first, as it
+was. With 2000 results or more only the first are listed, and the replace
+is refused until the search is narrowed. In a regular expression the
+replacement may name groups: `$1`, `$<name>`, `$&`.
 
 Not built: leaving single results or files out of a replace, and
 replacing one result at a time. A match of nothing (`^`, to put a mark
-before every line) is replaced but has no mark in the preview.
+before every line) is replaced but has no mark in the preview; nor has a
+match on a line longer than 400 characters, which the list cuts short.
 
 Looked at: the dark theme at 1440 wide and the light theme at 720 wide.
 In a copy of the demo, 26 matches in 4 files were replaced and replaced
@@ -449,9 +453,9 @@ back, the second time with one of the files holding unsaved changes.
 | --- | --- | --- | --- |
 | Branch in status bar | Small | Yes | The branch, and how many files have changed |
 | Changes list | Large | Yes | A panel: changed, new and removed files, staged and not |
-| Diff a change | Medium | Yes | A file against its last commit, in the Review view |
+| Diff a change | Medium | Yes | A file against what git has of it, in the Review view |
 | Stage and commit | Medium | Yes | Stage, unstage, a message, commit |
-| Discard a change | Small | Yes | Back to the last commit, after asking |
+| Discard a change | Small | Yes | Back to what is staged of it, or the last commit, after asking |
 | Gutter marks | Medium | Yes | Added, changed and removed lines in the editor's margin |
 
 The backend runs the git that is on the machine; no library was added.
@@ -463,8 +467,15 @@ is not heard of otherwise).
 
 Discarding lets go only what is not staged. A file git follows goes back
 to what git has of it; a file git does not follow has nothing to go back
-to, and goes to the trash. Either way the file as it was is kept in its
-local history first, and the question's safe answer is the default.
+to, and goes to the trash. Where the file is text, it is kept as it was
+in its local history first; the question's safe answer is the default.
+
+A workspace may be a folder inside a larger repository. The panel lists
+that folder's changes only, and each step acts on the file asked for. A
+commit is the repository's, though, and takes whatever is staged above
+the folder too: the panel says how many such files there are. A file's
+name is only ever a name to git here: `report[1].ssl` is that file, not a
+pattern.
 
 The margin compares the text in the editor with what is staged, so
 staging a change clears its marks. A new line is a solid bar, a changed
@@ -481,8 +492,9 @@ Looked at: the dark theme at 1440 wide and the light theme at 720 wide,
 in a copy of the demo made a repository for the purpose: seven changes
 listed, one compared, one staged from its row's menu, a commit made, one
 change discarded, and the margin marks before and after. Not seen: the
-panel in the app's own window, a repository whose top folder is above
-the workspace's (tested in the backend only), and git on Windows.
+panel in the app's own window, and a workspace inside a larger
+repository (the backend's tests stage, unstage and discard in one; CI
+runs them on Windows and macOS too).
 
 ## Why not an extension
 

@@ -27,12 +27,14 @@ import { getPath, SERVER_DEFAULTS } from "../../shared/styleProfile";
 import { RULER_MARGIN, rulerColumns } from "../../shared/houseStyle";
 import { noteCursor } from "../navigation";
 
-/** Where the cursor and the scroll were in each file a group showed, by the group's own number and the file's path. */
+/**
+ * Where the cursor and the scroll were in each file a group showed, by the group's place in the row and the file's
+ * path. By place, since the groups are made again each time a review or a comparison closes, and are the same
+ * groups to the user.
+ */
 const viewStates = new Map<string, monaco.editor.ICodeEditorViewState | null>();
 /** The same by the file alone, as it was last left in any group: what a tab moved to another group opens with. */
 const lastViews = new Map<string, monaco.editor.ICodeEditorViewState | null>();
-/** Each group as it is made gets a number of its own, for life: its place in the row changes when a group before it closes. */
-let groupsMade = 0;
 /** The editor width, in pixels, from which the minimap is shown: under it, code at the line length would run beneath the map. */
 const MINIMAP_FROM = 640;
 export const editors: monaco.editor.IStandaloneCodeEditor[] = [];
@@ -47,7 +49,6 @@ export function EditorGroup(props: { index: number }) {
 	let host!: HTMLDivElement;
 	let editor: monaco.editor.IStandaloneCodeEditor;
 	const group = () => state.groups[props.index]!;
-	const mine = ++groupsMade;
 	let shown: string | null = null;
 	const [lineCount, setLineCount] = createSignal(0);
 	// A picture, or other bytes: shown for what it is, never as text, and never as what its name would make it.
@@ -143,7 +144,7 @@ export function EditorGroup(props: { index: number }) {
 	/** Keeps where the cursor and the scroll are in the file that is showing, before it stops showing. */
 	function keepView(path: string) {
 		const view = editor.saveViewState();
-		viewStates.set(`${mine}:${path}`, view);
+		viewStates.set(`${props.index}:${path}`, view);
 		lastViews.set(path, view);
 	}
 	// A tab about to leave for another group: where it was is kept now, since the group it goes to may ask first.
@@ -169,7 +170,7 @@ export function EditorGroup(props: { index: number }) {
 		shown = doc ? path : null;
 		if (doc) {
 			// As this group left it; failing that, as any group last left it (a tab that came from the other group).
-			const view = viewStates.get(`${mine}:${path}`) ?? lastViews.get(path!);
+			const view = viewStates.get(`${props.index}:${path}`) ?? lastViews.get(path!);
 			if (view) editor.restoreViewState(view);
 			reveal(path!);
 			if (state.activeGroup === props.index) editor.focus();

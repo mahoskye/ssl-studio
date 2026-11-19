@@ -37,22 +37,24 @@ Under [ADR 0009](0009-nothing-is-lost-or-destroyed-without-a-say.md),
 - **Changing line ends is an edit.** It can be undone, it is kept only by
   saving, and "Revert" takes it back with the rest.
 - **A replace across files shows every change before it makes any,** and
-  makes none until it is confirmed. It replaces what the search listed:
-  the two find their matches with one expression. A search that ran into
-  its limit refuses the replace.
-- **A replaced file has a way back.** An open file is changed in the
-  editor, where undo takes it back. A closed file is changed on disk, and
-  the file as it was goes into its local history first.
+  makes none until it is confirmed. The two find their matches with one
+  expression; what is replaced is what is in the file when the replace
+  runs, and the app says so when that is not what was listed. A search
+  that ran into its limit refuses the replace.
+- **A replaced file has a way back.** Every file that is written goes
+  into its local history first, as it was. A file with a tab is changed in
+  the editor, where undo takes it back as well.
 - **A file with unsaved changes is never saved by the way.** A replace
   changes it in the editor and leaves it unsaved, and says so.
 
 ## Consequences
 
-- A file with a zero byte in its first 8000 bytes cannot be edited here,
-  even when it is text in an encoding this does not know.
+- A file with a zero byte in its first 8000 bytes cannot be opened as
+  text here, even when it is text in an encoding this does not know.
+  UTF-16 without its mark is the one exception: it opens as it did.
 - A replace cannot leave single results out: the search is narrowed
   first, by words or by which files it looks in.
-- Local history grows by one snapshot for each closed file a replace
-  changes.
+- Local history grows by a snapshot or two for each file a replace
+  writes.
 - Copying a file between two workspaces, or in from the system's file
   manager, is not done by cut and paste here.

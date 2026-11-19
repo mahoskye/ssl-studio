@@ -42,6 +42,13 @@ export function createBackend(host: Host, initial?: string) {
 		if (!files) throw new Error("no workspace open");
 		return files;
 	};
+	/** git for the open workspace: one for as long as the folder is open, so that what it learned of the repository is asked once. */
+	let asked: { root: string; git: Git } | null = null;
+	const git = () => {
+		const root = need().root;
+		if (asked?.root !== root) asked = { root, git: new Git(root) };
+		return asked.git;
+	};
 	/** How many open files have edits that are not on disk, as the view last said. */
 	let unsaved = 0;
 
@@ -105,14 +112,18 @@ export function createBackend(host: Host, initial?: string) {
 		rename: async (from, to) => need().rename(from, to),
 		copy: async (from, to) => need().copy(from, to),
 		image: (path) => need().image(path),
-		gitStatus: async () => (files ? new Git(files.root).status() : null),
-		gitBase: (path, from) => new Git(need().root).base(need().inside(path), from),
-		gitStage: (paths) => new Git(need().root).stage(paths.map((path) => need().inside(path))),
-		gitUnstage: (paths) => new Git(need().root).unstage(paths.map((path) => need().inside(path))),
-		gitCommit: (message) => new Git(need().root).commit(message),
+		historyKeep: async (path) => {
+			const full = need().inside(path);
+			const now = await need().read(full);
+			if (!now.binary) await history!.record(full, now.text);
+		},
+		gitStatus: async () => (files ? git().status() : null),
+		gitBase: (path, from) => git().base(need().inside(path), from),
+		gitStage: (paths) => git().stage(paths.map((path) => need().inside(path))),
+		gitUnstage: (paths) => git().unstage(paths.map((path) => need().inside(path))),
+		gitCommit: (message) => git().commit(message),
 		gitDiscard: async (path) => {
 			const full = need().inside(path);
-			const git = new Git(need().root);
 			// What is about to go is kept first, where it is text: a discard by mistake has a way back.
 			try {
 				const now = await need().read(full);
@@ -121,7 +132,7 @@ export function createBackend(host: Host, initial?: string) {
 				// Not there to read (it was removed): there is nothing of it to keep.
 			}
 			// A file git does not follow has nothing to go back to: it goes to the trash, not out of existence.
-			if (await git.follows(full)) await git.discard(full);
+			if (await git().follows(full)) await git().discard(full);
 			else await host.trash(full);
 		},
 		trash: async (path) => host.trash(need().inside(path)),

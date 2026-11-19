@@ -559,8 +559,14 @@ export async function scriptsCameTo(to: string, from?: string) {
 	if (here.length) recheckPlans();
 }
 
-/** Whether a tab is still open on a path, or under it: a file that is gone from disk and kept for its unsaved edits. */
-export const openAt = (path: string) => [...docs.keys()].some((open) => open === canonical(path) || isInside(canonical(path), open));
+/**
+ * Whether a tab is still open on a path, or under it: a file that is gone from disk and kept for its unsaved
+ * edits. A file that was only read (for a search's results, a definition) has no tab, and does not count.
+ */
+export function openAt(path: string): boolean {
+	const at = canonical(path);
+	return state.groups.some((group) => group.tabs.some((tab) => tab === at || isInside(at, tab)));
+}
 
 /** A file or folder went to the trash: its tabs close, except those holding edits nobody saved. */
 export function fileRemoved(removed: string) {
@@ -574,6 +580,12 @@ export function fileRemoved(removed: string) {
 			continue;
 		}
 		state.groups.forEach((g, i) => g.tabs.includes(path) && void closeTab(path, i, { discard: true, pinned: true }));
+		// A file that was read without a tab (a search's results, a definition) is let go here: nothing else would.
+		if (!state.groups.some((g) => g.tabs.includes(path))) {
+			const doc = docs.get(path);
+			docs.delete(path);
+			doc?.model.dispose();
+		}
 	}
 }
 
@@ -595,7 +607,10 @@ async function settleConflict(doc: Doc): Promise<boolean> {
 	} catch {
 		return true; // Deleted or moved on disk: saving puts it back.
 	}
-	if (disk.mtime === doc.mtime || disk.text === doc.savedText || disk.text === doc.model.getValue()) return true;
+	if (disk.mtime === doc.mtime) return true;
+	// Bytes where there was text have no text to compare: they are a change, whatever the empty text of them equals.
+	const turnedBytes = Boolean(disk.binary) && !doc.binary;
+	if (!turnedBytes && (disk.text === doc.savedText || disk.text === doc.model.getValue())) return true;
 	const name = baseName(doc.path);
 	const answer = await choose(`${name} changed on disk after you opened it. Saving would replace what is there.`, ["Compare", "Overwrite the file on disk", "Reload from disk"], { danger: "Overwrite the file on disk" });
 	if (answer === "Overwrite the file on disk") return true;
@@ -774,9 +789,11 @@ export async function fileChangedOnDisk(changed: string) {
 		}
 		return;
 	}
-	if (file.text === doc.model.getValue()) return;
+	// Text that turned into bytes, or bytes into text, is a change whatever the two texts are (bytes have none).
+	const turned = Boolean(file.binary) !== Boolean(doc.binary);
+	if (!turned && file.text === doc.model.getValue()) return;
 	// The file is as these edits found it (it was only moved, or touched): nothing on disk has changed under them.
-	if (file.text === doc.savedText) {
+	if (!turned && file.text === doc.savedText) {
 		doc.mtime = file.mtime;
 		return;
 	}

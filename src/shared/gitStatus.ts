@@ -30,6 +30,8 @@ export type GitStatus = {
 	ahead: number;
 	behind: number;
 	files: GitFile[];
+	/** Files staged above the workspace's folder, which are not listed here: a commit takes them too. */
+	stagedOutside?: number;
 };
 
 const LETTERS: Record<string, Change> = { M: "modified", T: "modified", A: "added", D: "deleted", R: "renamed", C: "added", U: "conflict" };
@@ -89,7 +91,7 @@ export function branchLabel(status: GitStatus): string {
 export function commitProblem(status: GitStatus | null, message: string): string {
 	if (!status) return "This folder is not in a git repository";
 	if (status.files.some((file) => file.unstaged === "conflict")) return "A file is in conflict: settle it first";
-	if (!stagedOf(status).length) return "Nothing is staged: stage the changes to commit";
+	if (!stagedOf(status).length && !status.stagedOutside) return "Nothing is staged: stage the changes to commit";
 	if (!message.trim()) return "Say what the commit does first";
 	return "";
 }

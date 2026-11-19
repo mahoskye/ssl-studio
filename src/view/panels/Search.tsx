@@ -11,9 +11,9 @@ import { session } from "../lsp/session";
 import type { SearchHit } from "../../shared/protocol";
 import { backend } from "../backend";
 import { choose } from "../dialogs";
-import { canonical, documents, fileChangedOnDisk, notify, openFile, save, setState, state } from "../state";
+import { canonical, documents, fileChangedOnDisk, notify, openFile, save, saveAll, setState, state } from "../state";
 import { baseName, relativeTo } from "../../shared/paths";
-import { matchesOn, searchPattern, type SearchOptions } from "../../shared/searchPattern";
+import { matchesOn, SEARCH_LIMIT, searchPattern, type SearchOptions } from "../../shared/searchPattern";
 import { focusRowsBelow, IconButton, Row, RowGroup, Rows } from "./Rows";
 import { showPanel } from "./registry";
 import { byLine, markedColumns, segments, type LineHit } from "./searchLines";
@@ -22,9 +22,6 @@ const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? on
 
 /** How much of a line is shown before its first match. */
 const LEAD = 12;
-
-/** As many results as a search gives back: with this many there may be more, and a replace would not know of them. */
-const SEARCH_LIMIT = 2000;
 
 /** The row for replacing is open. Kept while the panel is away, as what was typed in it is. */
 const [replacing, setReplacing] = createSignal(false);
@@ -171,7 +168,7 @@ export function Search() {
 		if (!found) return;
 		const paths = groups().map(([path]) => path);
 		const total = hits().length;
-		const answer = await choose(`Replace ${count(total, "match", "matches")} in ${count(paths.length, "file")} with ${with_ ? `“${with_}”` : "nothing"}? Each file as it was is kept in its local history.`, ["Replace"]);
+		const answer = await choose(`Replace ${count(total, "match", "matches")} in ${count(paths.length, "file")} with ${with_ ? `“${with_}”` : "nothing"}? Each file that is written is first kept as it was in its local history.`, ["Replace"]);
 		if (answer !== "Replace") return;
 		setStatus("busy");
 		let done = 0;
@@ -179,36 +176,47 @@ export function Search() {
 		const unsaved: string[] = [];
 		const failed: string[] = [];
 		const onDisk: string[] = [];
-		for (const path of paths) {
-			// A file that is open is changed in the editor, where it can be undone: saved straight away when it had
-			// nothing unsaved, and left unsaved when it had.
-			const doc = documents.get(canonical(path));
-			if (!doc || doc.binary) {
-				onDisk.push(path);
-				continue;
-			}
-			const wasUnsaved = Boolean(state.dirty[canonical(path)]);
-			const changed = replaceInModel(doc.model, found, with_, Boolean(options.regex));
-			if (!changed) continue;
-			done += changed;
-			files++;
-			if (wasUnsaved) unsaved.push(path);
-			else if (!(await save(canonical(path), { format: false }))) failed.push(`${baseName(path)}: it is changed in the editor, and could not be saved`);
-		}
 		try {
+			for (const path of paths) {
+				const at = canonical(path);
+				// A file with a tab is changed in the editor, where undo takes it back: saved straight away when it had
+				// nothing unsaved, and left unsaved when it had. A file that was only read to show where its results are
+				// has no tab and nothing to undo in: it is changed on disk like any file that is not open.
+				const doc = documents.get(at);
+				const tabbed = state.groups.some((group) => group.tabs.includes(at));
+				if (!doc || doc.binary || (!tabbed && !state.dirty[at])) {
+					onDisk.push(path);
+					continue;
+				}
+				const wasUnsaved = Boolean(state.dirty[at]);
+				// The file as it is on disk goes into its local history before the save that follows writes over it.
+				if (!wasUnsaved) await backend.historyKeep(at).catch(() => {});
+				const changed = replaceInModel(doc.model, found, with_, Boolean(options.regex));
+				if (!changed) continue;
+				done += changed;
+				files++;
+				if (wasUnsaved) unsaved.push(path);
+				else if (!(await save(at, { format: false }))) failed.push(`${baseName(path)}: it is changed in the editor, and could not be saved`);
+			}
 			for (const result of onDisk.length ? await backend.replace(query, with_, options, onDisk) : []) {
 				if (result.error) failed.push(`${baseName(result.path)}: ${result.error}`);
 				if (!result.count) continue;
 				done += result.count;
 				files++;
-				// The language server and the tree are told, as for any file changed outside the editor.
+				// The language server and the tree are told, and a copy that was read without a tab follows the disk.
 				await fileChangedOnDisk(result.path);
 			}
 		} catch (e: any) {
 			failed.push(String(e?.message ?? e));
 		}
 		setState("treeVersion", (v) => v + 1);
-		notify(`Replaced ${count(done, "match", "matches")} in ${count(files, "file")}.${unsaved.length ? ` ${unsaved.length === 1 ? `${baseName(unsaved[0]!)} had unsaved changes: it is changed in the editor and not saved.` : `${unsaved.length} files had unsaved changes: they are changed in the editor and not saved.`} A search reads what is saved, so it finds the old words there until then.` : ""}`);
+		// What was replaced is what is there now, which is what was listed unless a file changed since the search.
+		const differs = done !== total && !failed.length ? ` ${count(total, "match", "matches")} were listed: a file has changed since the search, or holds unsaved changes.` : "";
+		const note = `Replaced ${count(done, "match", "matches")} in ${count(files, "file")}.${differs}`;
+		if (unsaved.length) {
+			// The one thing left to do: it stays long enough to do it, and offers it.
+			notify(`${note} ${unsaved.length === 1 ? `${baseName(unsaved[0]!)} had unsaved changes: it is changed in the editor and not saved.` : `${unsaved.length} files had unsaved changes: they are changed in the editor and not saved.`} A search reads what is saved, so it finds the old words there until then.`, "info", { label: "Save all", run: () => void saveAll() });
+		} else notify(note);
 		if (failed.length) notify(`Not replaced: ${failed.join("; ")}`, "error");
 		// What is left to find is searched for again: nothing, unless the replacement itself is a match.
 		await run();
@@ -228,7 +236,8 @@ export function Search() {
 			let mark = 0;
 			return segments(props.line, LEAD).map((part) => ({ ...part, column: part.match ? columns[mark++] : undefined }));
 		};
-		const after = createMemo(() => (replacing() ? becomes(props.line) : null));
+		// A line cut short for the list cannot say what a match near its cut would become: it is only marked.
+		const after = createMemo(() => (replacing() && props.line.text.length < 400 ? becomes(props.line) : null));
 		return (
 			<Row
 				class="tree-row hit"
@@ -249,7 +258,9 @@ export function Search() {
 								// What is there now, struck out, and what would stand in its place.
 								<>
 									<del>{part.text}</del>
+									<span class="visually-hidden"> becomes </span>
 									<ins>{after()!.get(part.column!)}</ins>
+									<span class="visually-hidden"> </span>
 								</>
 							) : (
 								<mark>{part.text}</mark>

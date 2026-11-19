@@ -190,6 +190,8 @@ export interface BackendApi {
 	write(path: string, text: string, asText?: boolean): Promise<{ mtime: number }>;
 	create(path: string, kind: "file" | "dir"): Promise<void>;
 	rename(from: string, to: string): Promise<void>;
+	/** Keeps a file as it is on disk now in its local history, where it is text: before something is about to write over it. */
+	historyKeep(path: string): Promise<void>;
 	/** What git says has changed in the workspace, each file by its whole path. Null when it is not in a repository, or there is no git. */
 	gitStatus(): Promise<GitStatus | null>;
 	/** A file's text in the last commit ("head") or as it is staged ("index"); null when it was not there, or was not text. */

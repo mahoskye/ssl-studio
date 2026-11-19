@@ -17,13 +17,16 @@ export class Git {
 
 	constructor(private readonly root: string) {}
 
-	/** Runs git in the workspace. It never asks for a password, and never waits for the keyboard. */
+	/**
+	 * Runs git in the workspace's folder. It is given no keyboard, and told not to ask at the terminal. A file's
+	 * name is only ever a name: "report[1].ssl" is that file, not a pattern that is also "report1.ssl".
+	 */
 	private async run(args: string[]): Promise<Ran> {
-		const proc = Bun.spawn(["git", "--no-optional-locks", "-C", this.root, ...args], {
+		const proc = Bun.spawn(["git", "--no-optional-locks", "--literal-pathspecs", "-C", this.root, ...args], {
 			stdin: "ignore",
 			stdout: "pipe",
 			stderr: "pipe",
-			env: { ...process.env, GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" },
+			env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
 		});
 		const [out, err, code] = await Promise.all([new Response(proc.stdout).arrayBuffer(), new Response(proc.stderr).text(), proc.exited]);
 		return { code, out: new Uint8Array(out), err };
@@ -51,13 +54,18 @@ export class Git {
 	}
 
 	/**
-	 * A path as git names it: from the repository's top folder, with forward slashes. Worked out from the
-	 * workspace's own folder, not from the top folder as git spells it: the two may be the same place by different
-	 * names (a link, a drive letter's case).
+	 * A path as git is given it to act on: from the workspace's folder, where git is run, with forward slashes.
+	 * Worked out from the workspace's own folder, not from the top folder as git spells it: the two may be the
+	 * same place by different names (a link, a drive letter's case).
 	 */
-	private async named(path: string): Promise<string> {
+	private async here(path: string): Promise<string> {
 		if (!(await this.repository())) throw new Error("This folder is not in a git repository.");
-		return this.prefix + relative(this.root, resolve(path)).split(sep).join("/");
+		return relative(this.root, resolve(path)).split(sep).join("/");
+	}
+
+	/** A path as git names it inside a commit: from the repository's top folder, which may be above the workspace's. */
+	private async named(path: string): Promise<string> {
+		return this.prefix + (await this.here(path));
 	}
 
 	/** What has changed in the workspace's folder, each file by its whole path. Null outside a repository. */
@@ -69,7 +77,10 @@ export class Git {
 		const status = parseStatus(text(ran.out));
 		// Each file by its path under the workspace's folder, as the workspace spells it.
 		const whole = (path: string) => (path.startsWith(this.prefix) ? join(this.root, ...path.slice(this.prefix.length).split("/")) : join(top, ...path.split("/")));
-		return { ...status, files: status.files.map((file) => ({ ...file, path: whole(file.path), ...(file.from ? { from: whole(file.from) } : {}) })) };
+		// A commit takes everything that is staged, also above the workspace's folder, where this list does not look.
+		const staged = this.prefix ? text((await this.run(["diff", "--cached", "--name-only", "-z"])).out).split("\0").filter(Boolean) : [];
+		const stagedOutside = staged.filter((path) => !path.startsWith(this.prefix)).length;
+		return { ...status, ...(stagedOutside ? { stagedOutside } : {}), files: status.files.map((file) => ({ ...file, path: whole(file.path), ...(file.from ? { from: whole(file.from) } : {}) })) };
 	}
 
 	/**
@@ -92,13 +103,13 @@ export class Git {
 
 	/** Puts files into the next commit as they are now: changed, new or gone. */
 	async stage(paths: string[]): Promise<void> {
-		if (paths.length) await this.done(["add", "-A", "--", ...(await Promise.all(paths.map((path) => this.named(path))))]);
+		if (paths.length) await this.done(["add", "-A", "--", ...(await Promise.all(paths.map((path) => this.here(path))))]);
 	}
 
 	/** Takes files out of the next commit. Their text in the folder stays as it is. */
 	async unstage(paths: string[]): Promise<void> {
 		if (!paths.length) return;
-		const names = await Promise.all(paths.map((path) => this.named(path)));
+		const names = await Promise.all(paths.map((path) => this.here(path)));
 		// Before the first commit there is nothing to put the staged file back to: it is only taken out.
 		await this.done((await this.hasCommit()) ? ["restore", "--staged", "--", ...names] : ["rm", "--cached", "-r", "-q", "--", ...names]);
 	}
@@ -109,9 +120,12 @@ export class Git {
 		return (await this.done(["commit", "-m", message])).split("\n")[0] ?? "";
 	}
 
-	/** Whether git follows a file, or it is only in the folder. */
+	/**
+	 * Whether git follows a file, or it is only in the folder. A failure to ask is a failure, and is thrown: it is
+	 * not taken for "not followed", on which a file would be sent to the trash.
+	 */
 	async follows(path: string): Promise<boolean> {
-		return (await this.run(["ls-files", "--error-unmatch", "--", await this.named(path)])).code === 0;
+		return (await this.done(["ls-files", "-z", "--", await this.here(path)])).length > 0;
 	}
 
 	/**
@@ -119,6 +133,6 @@ export class Git {
 	 * in the folder that are not staged are gone. A file removed from the folder comes back.
 	 */
 	async discard(path: string): Promise<void> {
-		await this.done(["restore", "--worktree", "--", await this.named(path)]);
+		await this.done(["restore", "--worktree", "--", await this.here(path)]);
 	}
 }

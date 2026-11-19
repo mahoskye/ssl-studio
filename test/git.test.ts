@@ -135,6 +135,84 @@ describe.skipIf(!hasGit)("git, asked about a workspace", () => {
 		rmSync(root, { recursive: true, force: true });
 	});
 
+	test("in a workspace that is a folder inside the repository, each step acts on the file asked for", async () => {
+		const root = repository();
+		const app = join(root, "app");
+		// A twin of the workspace's own name inside it: the path git would land on, were it given the path from the top.
+		mkdirSync(join(app, "app"), { recursive: true });
+		const file = join(app, "x.ssl");
+		const twin = join(app, "app", "x.ssl");
+		writeFileSync(file, "one\n");
+		writeFileSync(twin, "twin one\n");
+		writeFileSync(join(root, "outside.md"), "o\n");
+		const top = new Git(root);
+		await top.stage([file, twin, join(root, "outside.md")]);
+		await top.commit("one");
+		const git = new Git(app);
+		writeFileSync(file, "two\n");
+		writeFileSync(twin, "twin two\n");
+		expect(await git.follows(file)).toBe(true);
+		await git.stage([file]);
+		expect((await git.status())!.files).toEqual([
+			{ path: twin, staged: null, unstaged: "modified" },
+			{ path: file, staged: "modified", unstaged: null },
+		]);
+		await git.unstage([file]);
+		expect((await git.status())!.files.find((each) => each.path === file)).toEqual({ path: file, staged: null, unstaged: "modified" });
+		await git.discard(file);
+		expect(await Bun.file(file).text()).toBe("one\n");
+		// The twin was not asked for, and is as it was left.
+		expect(await Bun.file(twin).text()).toBe("twin two\n");
+		expect(await git.base(file, "head")).toBe("one\n");
+		rmSync(root, { recursive: true, force: true });
+	});
+
+	test("what is staged above the workspace's folder is counted, since a commit takes it", async () => {
+		const root = repository();
+		mkdirSync(join(root, "app"));
+		writeFileSync(join(root, "app", "a.ssl"), "a\n");
+		writeFileSync(join(root, "outside.md"), "o\n");
+		await new Git(root).stage([join(root, "outside.md")]);
+		const status = (await new Git(join(root, "app")).status())!;
+		expect(status.stagedOutside).toBe(1);
+		expect((await new Git(root).status())!.stagedOutside).toBeUndefined();
+		rmSync(root, { recursive: true, force: true });
+	});
+
+	test("a file's name is only a name: marks that mean a pattern to git are part of it", async () => {
+		const root = repository();
+		const odd = join(root, "report[1].ssl");
+		const plain = join(root, "report1.ssl");
+		const star = join(root, "star*.ssl");
+		const starred = join(root, "starA.ssl");
+		// A star cannot be in a name on Windows: the brackets are tried everywhere, the star where it can be.
+		const stars = process.platform !== "win32";
+		for (const file of [odd, plain, ...(stars ? [star, starred] : [])]) writeFileSync(file, "one\n");
+		const git = new Git(root);
+		await git.stage([odd, plain, ...(stars ? [star, starred] : [])]);
+		await git.commit("one");
+		for (const file of [odd, plain, ...(stars ? [star, starred] : [])]) writeFileSync(file, "two\n");
+		expect(await git.follows(odd)).toBe(true);
+		await git.stage([odd, ...(stars ? [star] : [])]);
+		expect(names(root, (await git.status())!.files.filter((file) => file.staged).map((file) => file.path))).toEqual(stars ? ["report[1].ssl", "star*.ssl"] : ["report[1].ssl"]);
+		await git.unstage([odd]);
+		await git.discard(odd);
+		expect(await Bun.file(odd).text()).toBe("one\n");
+		expect(await Bun.file(plain).text()).toBe("two\n");
+		rmSync(root, { recursive: true, force: true });
+	});
+
+	test("a file that is not followed is told from a question that failed", async () => {
+		const root = repository();
+		writeFileSync(join(root, "new.ssl"), "n\n");
+		expect(await new Git(root).follows(join(root, "new.ssl"))).toBe(false);
+		const plain = mkdtempSync(join(tmpdir(), "ssl-studio-plain-"));
+		writeFileSync(join(plain, "a.ssl"), "a\n");
+		await expect(new Git(plain).follows(join(plain, "a.ssl"))).rejects.toThrow();
+		rmSync(root, { recursive: true, force: true });
+		rmSync(plain, { recursive: true, force: true });
+	});
+
 	test("only the workspace's own folder is reported, when it is a folder inside the repository", async () => {
 		const root = repository();
 		mkdirSync(join(root, "app", "src"), { recursive: true });
