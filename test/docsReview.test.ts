@@ -148,3 +148,128 @@ describe("how far a registry is, in the room there is", () => {
 		expect(progressShort({ rows: 12 })).toBe("12");
 	});
 });
+
+// A second review (2026-11-19), of the fixes above and of what was added after them.
+import { marked } from "marked";
+import { docChecks } from "../src/shared/docChecks";
+import { withFrontMatter, plainMarkdown } from "../src/shared/frontMatter";
+import { frontValue } from "../src/shared/projectDocs";
+import { taskTally, tasks, toggleTask } from "../src/shared/tasks";
+
+describe("second review: a catalog never takes a person's words", () => {
+	test("with its end marker gone, a heading and bullets of the person's own are not taken for the list", () => {
+		const text = "# Tickets\n\n<!-- catalog -->\n\n## Conventions\n\n- one ticket to a file\n- keys in capitals\n\nWritten by hand.\n";
+		const after = withCatalog(text, []);
+		for (const kept of ["## Conventions", "- one ticket to a file", "- keys in capitals", "Written by hand."]) expect(after).toContain(kept);
+		expect(after.split(CATALOG_START).length).toBe(2);
+		expect(withCatalog(after, [])).toBe(after);
+	});
+
+	test("markers shown as an example in a code fence are not the catalog's", () => {
+		const text = `# Tickets\n\nIt looks like this:\n\n\`\`\`\n${CATALOG_START}\n- x\n${CATALOG_END}\n\`\`\`\n\n${CATALOG_START}\n\n- [Old](Old.md)\n\n${CATALOG_END}\n`;
+		const after = withCatalog(text, [{ path: "A.md", title: "A" }]);
+		expect(after).toContain(`\`\`\`\n${CATALOG_START}\n- x\n${CATALOG_END}\n\`\`\``);
+		expect(after).toContain(`${CATALOG_START}\n\n- [A](A.md)\n\n${CATALOG_END}\n`);
+		expect(after).not.toContain("[Old](Old.md)");
+		expect(catalogStale(after, [{ path: "A.md", title: "A" }])).toBe(false);
+	});
+
+	test("the folder's own catalog is the one checked, not one a person keeps deeper in", () => {
+		const file = (name: string, stale: boolean): DocFile => ({ path: `/p/docs/knowledge/${name}`, name, group: "knowledge", exists: true, catalog: { stale } });
+		expect(docChecks([file("decisions/INDEX.md", false), file("INDEX.md", true)]).map((check) => check.text)).toEqual(["The catalog of knowledge/ is out of date."]);
+	});
+});
+
+describe("second review: the boxes on the page are the items in the text", () => {
+	const boxes = (text: string) => (marked.parse(frontMatter(text).body, { async: false, gfm: true }) as string).match(/<input[^>]*>/g)?.length ?? 0;
+	const documents = [
+		"<!--\n- [ ] dropped: prints in colour\n-->\n\n- [ ] the list has every sample\n- - [x] the count is right\n",
+		"- [ ] \n  the list has every sample\n- [ ] second\n",
+		"- [x] a\n\n<!--\n- [ ] dropped\n-->\n",
+		"```sql``` is the tag.\n\n- [x] a\n- [ ] b\n",
+		"- [ ] one\r\n  - [x] child\r\n> - [ ] quoted\r\n1. [X] numbered\r\n",
+		"    - [ ] indented code\n\n- [ ] real\n",
+		"- [ ] same\n\n```\n- [ ] same\n```\n\n- [ ] same\n",
+		"---\ntitle: T\nnote: - [ ] not one\n---\n\n# T\n\n- [ ] first\n- [ ]\n- plain\n",
+		"> ```\n> - [ ] in a quoted fence\n> ```\n\n- [x] after\n",
+	];
+
+	test("there are as many items as boxes, in every case", () => {
+		for (const text of documents) expect([text, tasks(text).length]).toEqual([text, boxes(text)]);
+	});
+
+	test("ticking the first box changes the first item shown, never a line the page does not show", () => {
+		const hidden = documents[0]!;
+		expect(tasks(hidden).map((task) => task.text)).toEqual(["the list has every sample", "the count is right"]);
+		expect(toggleTask(hidden, 0)).toBe(hidden.replace("- [ ] the list has every sample", "- [x] the list has every sample"));
+		expect(toggleTask(hidden, 1)).toBe(hidden.replace("- - [x] the count", "- - [ ] the count"));
+		expect(taskTally(documents[2]!)).toEqual({ done: 1, total: 1 });
+		const twice = documents[6]!;
+		expect(toggleTask(twice, 1)).toBe("- [ ] same\n\n```\n- [ ] same\n```\n\n- [x] same\n");
+		const dos = documents[4]!;
+		expect(toggleTask(dos, 2)).toBe(dos.replace("> - [ ] quoted", "> - [x] quoted"));
+	});
+});
+
+describe("second review: front matter is written where it is read", () => {
+	test("only the one line changes, so mixed line ends stay as they were", () => {
+		expect(withFrontMatter("---\nstatus: open\n---\nline1\r\nline2\n", "status", "done")).toBe("---\nstatus: done\n---\nline1\r\nline2\n");
+		expect(withFrontMatter("---\r\nticket: A-1\r\n---\r\nbody\n", "status", "open")).toBe("---\r\nticket: A-1\r\nstatus: open\r\n---\r\nbody\n");
+	});
+
+	test("a key written twice is set where it is read: at its last line", () => {
+		const after = withFrontMatter("---\nstatus: a\nstatus: b\n---\n", "status", "done")!;
+		expect(after).toBe("---\nstatus: a\nstatus: done\n---\n");
+		expect(frontMatter(after).values.status).toBe("done");
+	});
+
+	test("a value with a line end in it is written on its one line", () => {
+		expect(frontValue("In\nProgress")).toBe("In Progress");
+		expect(frontMatter(ticketTemplate({ key: "A-1", title: "T", status: "In\r\nProgress" })).values.status).toBe("In Progress");
+	});
+
+	test("a character written with a backslash is itself, and bold inside italic comes off whole", () => {
+		expect(plainMarkdown("\\*literal\\* and \\_this\\_")).toBe("*literal* and _this_");
+		expect(plainMarkdown("***both*** and __*nested*__")).toBe("both and nested");
+		expect(plainMarkdown("call(*args, **kwargs) and a * b * c")).toBe("call(*args, **kwargs) and a * b * c");
+	});
+
+	test("a summary is not cut through the middle of a character", () => {
+		const summary = summaryOf(`# T\n\n${"x".repeat(138)}😀😀 y`);
+		expect(/[\uD800-\uDBFF]…$/.test(summary)).toBe(false);
+		expect(summary.endsWith("…")).toBe(true);
+	});
+});
+
+describe("second review: batches, fences and strings", () => {
+	test("GO ends a batch alone, with a count, or with a comment; a word that starts with it does not", () => {
+		expect(createdObjects("CREATE TABLE a (x int)\nGO 5\nCREATE TABLE b (y int)\n  go -- next\nCREATE TABLE c (z int)\nGO\n").map((made) => made.object)).toEqual(["a", "b", "c"]);
+		expect(outline("sql", "SELECT x FROM t WHERE\nGO          then more text\n = 1;").length).toBe(1);
+	});
+
+	test("a slash alone divides inside a statement and ends a batch between statements", () => {
+		expect(outline("sql", "SELECT total\n/\ncount FROM t;").length).toBe(1);
+		expect(outline("sql", "CREATE TABLE a (x int);\n/\nCREATE TABLE b (y int);\n/\n").map((item) => item.name)).toEqual(["CREATE TABLE a", "CREATE TABLE b"]);
+	});
+
+	test("a span of code that opens a line is not a fence, and escaped quotes do not end a TOML string", () => {
+		expect(outline("markdown", "```sql``` is a tag\n\n# Real heading\n").map((item) => item.name)).toEqual(["Real heading"]);
+		expect(outline("toml", 'a = """\n\\"""\nstill = 1\n"""\nb = 2\n').map((item) => item.name)).toEqual(["a", "b"]);
+	});
+});
+
+describe("second review: the manifest and the import", () => {
+	test("two rows that differ only in case do not both become the one file", () => {
+		const before = "path,kind,bytes,lines,sha256,status,note\nsrc/A.ssl,script,1,1,aa,migrated,first\nsrc/a.SSL,script,1,1,aa,found,second\n";
+		const change = mergeManifest(before, [{ path: "src/a.ssl", kind: "script", bytes: 1, lines: 1, sha256: "aa" }]);
+		const paths = change.text.trim().split("\n").slice(1).map((line) => line.split(",")[0]);
+		expect(paths.filter((path) => path === "src/a.ssl").length).toBe(1);
+		expect(change.text).toContain("src/a.ssl,script,1,1,aa,migrated,first");
+		expect(change.text).toContain("gone,second");
+	});
+
+	test("the ticket system's own numbers are not taken for tickets in what an API returns either", () => {
+		const [ticket] = ticketsFromJson({ key: "DEMO-103", fields: { summary: "S", parent: { id: 10002 }, issuelinks: [{ outwardIssue: { id: 10005 } }, { inwardIssue: { key: "DEMO-101" } }] } }).tickets;
+		expect([ticket!.parent, ticket!.related]).toEqual([undefined, ["DEMO-101"]]);
+	});
+});

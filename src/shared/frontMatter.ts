@@ -88,15 +88,22 @@ export const many = (value: string | string[] | undefined) => (Array.isArray(val
  * marks. An underscore or an asterisk inside a word is part of the word:
  * `DUE_SOON_AT` is a name, not emphasis.
  */
-export const plainMarkdown = (markdown: string) =>
-	markdown
-		.replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
-		.replace(/`+([^`]*)`+/g, "$1")
-		.replace(/~~(?=\S)(.+?)(?<=\S)~~/g, "$1")
-		.replace(/(^|[^\w*])(\*\*|\*)(?=\S)(.+?)(?<=\S)\2(?![\w*])/g, "$1$3")
-		.replace(/(^|[^\w])(__|_)(?=\S)(.+?)(?<=\S)\2(?![\w])/g, "$1$3")
+export function plainMarkdown(markdown: string): string {
+	// A character written with a backslash before it is that character, and no mark: it is set aside while the marks are taken off.
+	const kept: string[] = [];
+	let text = markdown.replace(/\\([\\`*_{}[\]()#+\-.!~|>])/g, (_, character: string) => `\uE000${kept.push(character) - 1}\uE001`);
+	text = text.replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/`+([^`]*)`+/g, "$1").replace(/~~(?=\S)(.+?)(?<=\S)~~/g, "$1");
+	// Bold inside italic, or the other way round, takes two passes.
+	for (let pass = 0; pass < 3; pass++) {
+		const before = text;
+		text = text.replace(/(^|[^\w*])(\*\*|\*)(?=\S)(.+?)(?<=\S)\2(?![\w*])/g, "$1$3").replace(/(^|[^\w])(__|_)(?=\S)(.+?)(?<=\S)\2(?![\w])/g, "$1$3");
+		if (text === before) break;
+	}
+	return text
+		.replace(/\uE000(\d+)\uE001/g, (_, index: string) => kept[Number(index)] ?? "")
 		.replace(/\s+/g, " ")
 		.trim();
+}
 const plain = plainMarkdown;
 
 /** A heading line: its level and its words. Closing hashes are a mark only after a space: "Using C#" ends in a sharp. */
@@ -127,7 +134,8 @@ export function summaryOf(text: string): string {
 	if (sentence.length <= SUMMARY_MAX) return sentence;
 	// Cut at a word's end where there is one; a single long word is cut where the room ends.
 	const space = sentence.lastIndexOf(" ", SUMMARY_MAX - 1);
-	return `${sentence.slice(0, space > 0 ? space : SUMMARY_MAX - 1)}…`;
+	// Not through the middle of a character that takes two units: half of one is no character.
+	return `${sentence.slice(0, space > 0 ? space : SUMMARY_MAX - 1).replace(/[\uD800-\uDBFF]$/, "")}…`;
 }
 
 /**
@@ -139,16 +147,22 @@ export function summaryOf(text: string): string {
  */
 export function withFrontMatter(text: string, key: string, value: string): string | null {
 	const eol = text.includes("\r\n") ? "\r\n" : "\n";
-	const lines = text.split(/\r?\n/);
-	const fenced = lines[0]?.replace(/^﻿/, "").trim() === "---";
-	const end = fenced ? lines.findIndex((line, i) => i > 0 && /^(---|\.\.\.)\s*$/.test(line)) : -1;
-	if (end < 0) return `---${eol}${key}: ${value}${eol}---${eol}${eol}${text}`;
-	const at = lines.findIndex((line, i) => i > 0 && i < end && new RegExp(`^${key}\\s*:`, "i").test(line));
-	if (at < 0) lines.splice(end, 0, `${key}: ${value}`);
-	else {
-		// A list written as dashes under the key is the person's layout: not rewritten here.
-		if (/:\s*$/.test(lines[at]!) && /^\s*-\s+/.test(lines[at + 1] ?? "")) return null;
-		lines[at] = `${lines[at]!.slice(0, lines[at]!.indexOf(":"))}: ${value}`;
+	// Each line with where it is in the text: only the one line is rewritten, so every other line keeps its own end.
+	const lines: { text: string; start: number; end: number }[] = [];
+	for (let at = 0; at <= text.length; ) {
+		const stop = text.indexOf("\n", at);
+		const end = stop < 0 ? text.length : stop;
+		lines.push({ text: text.slice(at, end).replace(/\r$/, ""), start: at, end: text[end - 1] === "\r" ? end - 1 : end });
+		if (stop < 0) break;
+		at = stop + 1;
 	}
-	return lines.join(eol);
+	const fenced = lines[0]?.text.replace(/^﻿/, "").trim() === "---";
+	const close = fenced ? lines.findIndex((line, i) => i > 0 && /^(---|\.\.\.)\s*$/.test(line.text)) : -1;
+	if (close < 0) return `---${eol}${key}: ${value}${eol}---${eol}${eol}${text}`;
+	// The last line that sets the key is the one that is read, so it is the one that is written.
+	const at = lines.findLastIndex((line, i) => i > 0 && i < close && new RegExp(`^${key}\\s*:`, "i").test(line.text));
+	if (at < 0) return `${text.slice(0, lines[close]!.start)}${key}: ${value}${eol}${text.slice(lines[close]!.start)}`;
+	// A list written as dashes under the key is the person's layout: not rewritten here.
+	if (/:\s*$/.test(lines[at]!.text) && /^\s*-\s+/.test(lines[at + 1]?.text ?? "")) return null;
+	return `${text.slice(0, lines[at]!.start)}${lines[at]!.text.slice(0, lines[at]!.text.indexOf(":"))}: ${value}${text.slice(lines[at]!.end)}`;
 }

@@ -62,9 +62,11 @@ function markdown(lines: string[]): OutlineItem[] {
 		const fenced = /^\s{0,3}(`{3,}|~{3,})(.*)$/.exec(line);
 		if (fenced) {
 			// A fence is closed by one of its own marks, at least as long, with nothing after it: "```python" inside a block opens nothing and closes nothing.
-			if (!fence) fence = fenced[1]!;
-			else if (fenced[1]![0] === fence[0] && fenced[1]!.length >= fence.length && !fenced[2]!.trim()) fence = "";
-			continue;
+			// A backtick fence's opening line holds no further backtick: "```sql``` is a tag" is a span of code in a sentence.
+			const span = !fence && fenced[1]![0] === "`" && fenced[2]!.includes("`");
+			if (!fence && !span) fence = fenced[1]!;
+			else if (fence && fenced[1]![0] === fence[0] && fenced[1]!.length >= fence.length && !fenced[2]!.trim()) fence = "";
+			if (!span) continue;
 		}
 		if (fence) continue;
 		const heading = HEADING.exec(line);
@@ -92,7 +94,8 @@ function tables(lines: string[], toml: boolean): OutlineItem[] {
 	for (let at = 0; at < lines.length; at++) {
 		const line = lines[at]!;
 		if (inside) {
-			if (line.includes(inside)) inside = "";
+			// Three quotes with a backslash before them are part of the string, not its end.
+			if (inside === '"""' ? /(?<!\\)"""/.test(line) : line.includes(inside)) inside = "";
 			continue;
 		}
 		if (depth > 0) {
@@ -218,11 +221,16 @@ function sql(text: string): OutlineItem[] {
 			if (start >= 0) body += " ";
 			continue;
 		}
-		// A line that is only GO, or only a slash, ends a batch where a script has no semicolons (SQL Server, Oracle).
-		if ((i === 0 || text[i - 1] === "\n") && /^(?:go|\/)[ \t]*\r?(?:\n|$)/i.test(text.slice(i, i + 12))) {
-			end(Math.max(startLine, line - 1));
-			while (i < text.length && text[i + 1] !== "\n") i++;
-			continue;
+		// A line that is only GO ends a batch where a script has no semicolons (SQL Server): alone, with a count, or with
+		// a comment after it. A line that is only a slash does the same between statements (Oracle); inside one it divides.
+		if (i === 0 || text[i - 1] === "\n") {
+			const stop = text.indexOf("\n", i);
+			const whole = text.slice(i, stop < 0 ? text.length : stop).replace(/\r$/, "");
+			if (/^[ \t]*go(?:[ \t]+\d+)?[ \t]*(?:--.*)?$/i.test(whole) || (start < 0 && /^[ \t]*\/[ \t]*$/.test(whole))) {
+				end(Math.max(startLine, line - 1));
+				i += whole.length - 1;
+				continue;
+			}
 		}
 		if (c === "-" && text[i + 1] === "-") {
 			while (i < text.length && text[i + 1] !== "\n") i++;

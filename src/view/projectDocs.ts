@@ -47,7 +47,8 @@ import { activeDoc, activePath, applyText, canonical, documents, notify, openFil
 
 const today = () => localDay();
 const root = () => state.workspace?.root ?? "";
-const docsFolder = () => joinPath(root(), ...(state.project?.docs ?? "docs").split(/[\\/]/));
+// "." is the project's own folder: no part of a path, or the same file would have two spellings.
+const docsFolder = () => joinPath(root(), ...(state.project?.docs ?? "docs").split(/[\\/]/).filter((part) => part && part !== "."));
 const areaFolder = (area: DocArea) => joinPath(docsFolder(), DOC_FOLDERS[area]);
 const ready = () => (state.workspace && state.project ? true : (notify("Open a folder first."), false));
 
@@ -315,6 +316,8 @@ export async function newRegistry() {
  * since it says each document's state.
  */
 export async function setStatus(path: string, status: string) {
+	// Front matter is a Markdown document's: a query or a table kept in the same folder has none to set.
+	if (!isMarkdown(path)) return notify("Only a Markdown document has a status to set.", "error");
 	const before = await current(path);
 	if (before === null) return;
 	let after = withFrontMatter(before, "status", frontValue(status));

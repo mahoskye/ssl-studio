@@ -43,9 +43,38 @@ export function catalogList(items: readonly CatalogItem[]): string {
 /** Where a marker stands on a line of its own, from `from` on: a marker named in a sentence, or in a code span, is not one. -1 when there is none. */
 function markerAt(text: string, marker: string, from = 0): number {
 	const pattern = new RegExp(`^[ \\t]*${marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[ \\t]*\\r?$`, "gm");
+	const shown = fenced(text);
 	pattern.lastIndex = from;
-	const found = pattern.exec(text);
-	return found ? found.index + found[0].indexOf(marker) : -1;
+	// A marker shown as an example, inside a code fence, is not one either.
+	for (let found = pattern.exec(text); found; found = pattern.exec(text)) {
+		const at = found.index + found[0].indexOf(marker);
+		if (!shown.some(([start, end]) => at >= start && at < end)) return at;
+	}
+	return -1;
+}
+
+/** The stretches of a Markdown text that are inside a code fence, each from its opening line to the end of its closing one. */
+function fenced(text: string): [number, number][] {
+	const ranges: [number, number][] = [];
+	let open = "";
+	let from = 0;
+	let offset = 0;
+	for (const raw of text.split("\n")) {
+		const mark = /^\s{0,3}(`{3,}|~{3,})(.*)$/.exec(raw.replace(/\r$/, ""));
+		if (mark && !open) {
+			// A backtick fence's opening line holds no further backtick: "```sql``` is a tag" is a span of code, not a fence.
+			if (!(mark[1]![0] === "`" && mark[2]!.includes("`"))) {
+				open = mark[1]!;
+				from = offset;
+			}
+		} else if (mark && mark[1]![0] === open[0] && mark[1]!.length >= open.length && !mark[2]!.trim()) {
+			ranges.push([from, offset + raw.length]);
+			open = "";
+		}
+		offset += raw.length + 1;
+	}
+	if (open) ranges.push([from, text.length]);
+	return ranges;
 }
 
 /** Where the list is in a catalog's text: from the start marker to the end of the end marker. Null when there is no such pair. */
@@ -69,7 +98,9 @@ export function withCatalog(text: string, items: readonly CatalogItem[]): string
 	const open = markerAt(text, CATALOG_START);
 	if (open >= 0) {
 		const rest = text.slice(open + CATALOG_START.length);
-		const listed = /^(?:[ \t]*\r?\n|[ \t]*[-*+] .*\r?\n?|#{2,6} .*\r?\n?|Nothing here yet\.[ \t]*\r?\n?)*/.exec(rest)![0];
+		// Only what a catalog's list is made of: a line that links to a document, a section's heading as the list writes
+		// it, the words for an empty list, and the blank lines between. A heading or a bullet of the person's own ends it.
+		const listed = /^(?:[ \t]*\r?\n|- \[[^\]\n]*\]\([^)\n]*\).*\r?\n?|### .*\r?\n?|Nothing here yet\.[ \t]*\r?\n?)*/.exec(rest)![0];
 		const after = rest.slice(listed.length);
 		return text.slice(0, open) + eol(block(items)) + (after ? eol("\n\n") + after : eol("\n"));
 	}

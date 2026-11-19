@@ -1,7 +1,7 @@
 // A table of values (CSV or TSV), as a table. It is a view of the text in the
 // editor (ADR 0002): a cell changed here is that cell's part of the text
 // changed, and nothing else; the Text switch shows the same file as written.
-import { createMemo, createSignal, createUniqueId, For, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, createUniqueId, For, onCleanup, Show } from "solid-js";
 import { columnOf, csvCell, csvRow, parseCsv, rowSpan, tally, type Cell } from "../../shared/csv";
 import { relativeTo } from "../../shared/paths";
 import { toneOf } from "../../shared/projectDocs";
@@ -42,6 +42,11 @@ export function TableView(props: { path: string }) {
 	const counted = createMemo(() => tally(table()));
 
 	/** The statuses to offer when one is typed: those the table uses, then the usual ones. */
+	// A status the rows are narrowed to that no row has any more (the last was changed) has no chip left to clear it by.
+	createEffect(() => {
+		const wanted = onlyStatus();
+		if (wanted !== null && !counted()?.by.some(([status]) => status === wanted)) setOnlyStatus(null);
+	});
 	const statuses = createMemo(() => [...new Set([...(counted()?.by.map(([status]) => status).filter(Boolean) ?? []), ...USUAL_STATUSES])]);
 	const statusList = createUniqueId();
 

@@ -127,7 +127,7 @@ export function ticketsFromJson(value: unknown): Imported {
 			skipped++;
 			continue;
 		}
-		const above = ticketKey(keyOf(fields.parent));
+		const above = likeOwn(own, [ticketKey(keyOf(fields.parent))].filter(Boolean))[0] ?? "";
 		const links = Array.isArray(fields.issuelinks) ? fields.issuelinks.flatMap((link) => [keyOf((link as Record<string, unknown>)?.outwardIssue), keyOf((link as Record<string, unknown>)?.inwardIssue)]) : [];
 		// Under one name or the other, and as a key or as a link to one.
 		const under = [fields.subtasks, fields["sub-tasks"]].flatMap((list) => (Array.isArray(list) ? list : []));
@@ -140,7 +140,7 @@ export function ticketsFromJson(value: unknown): Imported {
 			type: named(fields.issuetype ?? fields.type) || undefined,
 			source: typeof issue.url === "string" && /^https?:\/\//i.test(issue.url) ? issue.url : undefined,
 			parent: above && above.toLowerCase() !== own.toLowerCase() ? above : undefined,
-			related: unique([...links, ...subtasks, ...related].filter(Boolean).map(ticketKey), [own, above]),
+			related: unique(likeOwn(own, [...links, ...subtasks, ...related].filter(Boolean).map(ticketKey)), [own, above]),
 			description: clean(flat(fields.description)).replace(/\n{3,}/g, "\n\n"),
 		});
 	}

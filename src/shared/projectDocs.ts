@@ -81,7 +81,11 @@ export const PROMPTS = {
 export const isPrompt = (line: string | undefined) => Object.values(PROMPTS).some((prompt) => prompt === (line ?? "").trim());
 
 const fence = (pairs: [string, string | undefined][]) => `---\n${pairs.filter(([, v]) => v !== undefined).map(([k, v]) => `${k}: ${v}`).join("\n")}\n---\n`;
-const quoted = (text: string) => (/[:#\[\]{}"',]|^\s|\s$/.test(text) ? JSON.stringify(text) : text);
+/** A value on its one line: a line end inside it is a space, and it is quoted when it holds what would be read as something else. */
+const quoted = (value: string) => {
+	const text = value.replace(/\s*[\r\n]+\s*/g, " ").trim();
+	return /[:#\[\]{}"',]|^\s|\s$/.test(text) ? JSON.stringify(text) : text;
+};
 /** A value as it is written in front matter: quoted when it holds what would be read as something else. */
 export const frontValue = quoted;
 

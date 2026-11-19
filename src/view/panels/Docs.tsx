@@ -60,7 +60,9 @@ const STATE = "Set to ";
 async function rowMenu(file: DocFile, at: Point) {
 	const catalog = isCatalog(file);
 	const manifest = file.group === "registries" && /(^|[\\/])files\.csv$/i.test(file.name);
-	const states = !catalog && ["tickets", "specs", "knowledge"].includes(file.group) && (file.status || file.group !== "knowledge" || file.kind === "decisions" || file.kind === "questions") ? statusChoices(file).filter((status) => status.toLowerCase() !== (file.status ?? "").toLowerCase()) : [];
+	// A state is a Markdown document's front matter: a query or a table kept in the knowledge base has none.
+	const markdown = /\.(md|markdown)$/i.test(file.name);
+	const states = markdown && !catalog && ["tickets", "specs", "knowledge"].includes(file.group) && (file.status || file.group !== "knowledge" || file.kind === "decisions" || file.kind === "questions") ? statusChoices(file).filter((status) => status.toLowerCase() !== (file.status ?? "").toLowerCase()) : [];
 	const UPDATE = catalog ? "Update catalogs" : "Update file manifest";
 	const picked = await chooseFromMenu(`Actions for ${file.ticket ?? file.title ?? file.name}`, [OPEN, ...states.map((status) => `${STATE}${status}`), ...(catalog || manifest ? [UPDATE] : [])], at);
 	if (picked === OPEN) await openFile(file.path);
@@ -293,7 +295,8 @@ export function Docs() {
 					The documents could not be listed: {failure()}. Press ⟳ to try again.
 				</p>
 			</Show>
-			<Show when={docs().filter((d) => d.exists).length > 6}>
+			{/* Shown for a list long enough to need it, and for as long as it is narrowing the list: it is the way to clear itself. */}
+			<Show when={filtering() || docs().filter((d) => d.exists).length > 6}>
 				<input
 					class="filter"
 					type="search"

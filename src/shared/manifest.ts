@@ -36,7 +36,8 @@ export function mergeManifest(existing: string | null | undefined, files: readon
 		const row = [...header.map((_, i) => cells[i]?.text ?? ""), ...cells.slice(header.length).map((cell) => cell.text)];
 		const name = row[path]!.trim();
 		const renamed = now.has(name) ? undefined : byLower.get(name.toLowerCase());
-		const file = now.get(name) ?? (renamed && !listed.has(renamed.path) ? renamed : undefined);
+		// One row to a file: where two rows differ only in case, the first takes the renamed file and the other has gone.
+		const file = now.get(name) ?? (renamed && !listed.has(renamed.path) && !seen.has(renamed.path) ? renamed : undefined);
 		if (file && file.path !== name) row[path] = file.path;
 		seen.add(file?.path ?? name);
 		if (!file) {

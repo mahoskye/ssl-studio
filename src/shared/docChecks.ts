@@ -46,7 +46,7 @@ export function docChecks(files: readonly DocFile[]): DocCheck[] {
 	const without: DocFile[] = [];
 	for (const area of AREAS) {
 		const all = inGroup(area);
-		const catalog = all.find(isCatalog);
+		const catalog = all.find((file) => isCatalog(file) && !/[\\/]/.test(file.name));
 		if (catalog?.catalog?.stale) stale.push(catalog);
 		else if (!catalog && all.length && !(area === "specs" && all.every((file) => file.name.includes(".spec.")))) without.push(all[0]!);
 	}

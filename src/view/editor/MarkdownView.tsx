@@ -100,7 +100,8 @@ export function MarkdownView(props: { path: string }) {
 			const name = all[at]!.name;
 			const which = all.slice(0, at).filter((item) => item.name === name).length;
 			const same = [...view.querySelectorAll<HTMLElement>(".md h1, .md h2, .md h3, .md h4, .md h5, .md h6")].filter((h) => plainMarkdown(h.textContent ?? "") === name);
-			(same[which] ?? same[0])?.scrollIntoView({ block: "start" });
+			// Failing that (a heading written with escapes or an image), the heading of that place in the page.
+			(same[which] ?? same[0] ?? view.querySelectorAll<HTMLElement>(".md h1, .md h2, .md h3, .md h4, .md h5, .md h6")[at])?.scrollIntoView({ block: "start" });
 		});
 	});
 	onCleanup(stopReveal);
@@ -116,8 +117,10 @@ export function MarkdownView(props: { path: string }) {
 				// text do not count the same items, the boxes stay as the renderer made them, for reading only.
 				const boxes = [...article.querySelectorAll<HTMLInputElement>('li > input[type="checkbox"], li > p > input[type="checkbox"]')];
 				const items = tasks(text());
-				if (boxes.length !== items.length) return;
+				// Each box must be an item that has a place in the text, and the page must not have been wired already.
+				if (boxes.length !== items.length || items.some((item) => item.offset < 0) || boxes.some((box) => box.dataset.task)) return;
 				boxes.forEach((box, index) => {
+					box.dataset.task = String(index);
 					box.disabled = false;
 					box.setAttribute("aria-label", `${items[index]!.done ? "Done" : "Not done"}: ${items[index]!.text}`);
 					box.addEventListener("change", () => void tickTask(props.path, index));

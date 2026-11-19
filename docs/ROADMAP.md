@@ -608,6 +608,33 @@ working-documents code, for defects only, found these; each has a test now
   catalog rewritten. A folder of over 500 tickets could crowd the other
   documents out of the list.
 
+**From a second review (2026-11-19),** of those fixes and of what was
+added after them; each has a test in the same file:
+
+- A catalog with its end marker gone still took a heading and bullets of
+  the person's own for its list. Only what a catalog writes is taken now.
+  Markers shown as an example in a code fence were taken for the real ones.
+- A box on a page could be a different item than the one in the text: an
+  item in an HTML comment was counted, one written as a bullet in a bullet
+  was not. The items are now read with the renderer's own reading, so the
+  page and the text cannot differ; one that cannot be placed in the text is
+  counted and not ticked.
+- A line opening with a span of code in three backticks was taken for a
+  fence, and hid every heading and item after it.
+- `GO 5`, `GO -- note` and an indented `GO` did not end a batch; a slash
+  alone on a line cut a statement that divides across lines.
+- Setting a value in front matter rewrote every line end in a file with
+  mixed ones, and changed the first of a key written twice where the last
+  is the one read. A value with a line end in it was written on two lines.
+- A query or a table kept among the decisions was offered a status, which
+  would have written front matter into it.
+- Two manifest rows differing only in case both became the one file. The
+  ticket system's own numbers were still taken for tickets in an API's
+  JSON.
+- A table narrowed to a status stayed narrowed, with no chip to clear it,
+  after the last such row was changed; the Docs filter could stay set with
+  its box hidden.
+
 **From walking it with the keyboard (2026-11-19, ADR 0010).**
 
 - A working document's row has a menu (right-click, the menu key,
