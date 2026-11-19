@@ -110,3 +110,20 @@ export function tally(table: Table, column = "status"): { total: number; by: [st
 	}
 	return { total: table.rows.length, by: [...by].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])) };
 }
+
+/**
+ * Where one row is in the text, its line end with it, so that taking those
+ * characters out leaves a table with one row fewer and nothing else changed.
+ * The last row of a file that does not end with a line end takes the line end
+ * before it instead. Null when there is no such row.
+ */
+export function rowSpan(text: string, table: Table, row: number): { start: number; end: number } | null {
+	const cells = table.rows[row];
+	if (!cells?.length) return null;
+	let start = cells[0]!.start;
+	let end = cells[cells.length - 1]!.end;
+	if (text[end] === "\r" && text[end + 1] === "\n") end += 2;
+	else if (text[end] === "\n" || text[end] === "\r") end += 1;
+	else if (text[start - 1] === "\n") start -= text[start - 2] === "\r" ? 2 : 1;
+	return { start, end };
+}

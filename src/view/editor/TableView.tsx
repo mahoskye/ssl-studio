@@ -2,7 +2,7 @@
 // editor (ADR 0002): a cell changed here is that cell's part of the text
 // changed, and nothing else; the Text switch shows the same file as written.
 import { createMemo, createSignal, createUniqueId, For, onCleanup, Show } from "solid-js";
-import { columnOf, csvCell, csvRow, parseCsv, tally, type Cell } from "../../shared/csv";
+import { columnOf, csvCell, csvRow, parseCsv, rowSpan, tally, type Cell } from "../../shared/csv";
 import { relativeTo } from "../../shared/paths";
 import { toneOf } from "../../shared/projectDocs";
 import { checksNames, nameQuery, namesOf, NAMES_CHECKED, outsideDocuments, usesSummary } from "../../shared/registryCheck";
@@ -110,6 +110,27 @@ export function TableView(props: { path: string }) {
 		queueMicrotask(() => setEditing({ row: table().rows.length - 1, column: 0 }));
 	};
 
+	/** The row the keyboard or the pointer was last in, by its place in the file: the one Delete row takes out. */
+	const [current, setCurrent] = createSignal<number | null>(null);
+	const deleteRow = () => {
+		const row = current();
+		if (!model || row === null) return;
+		const span = rowSpan(model.getValue(), table(), row);
+		if (!span) return;
+		const from = model.getPositionAt(span.start);
+		const to = model.getPositionAt(span.end);
+		model.pushStackElement();
+		model.pushEditOperations([], [{ range: { startLineNumber: from.lineNumber, startColumn: from.column, endLineNumber: to.lineNumber, endColumn: to.column }, text: "" }], () => null);
+		model.pushStackElement();
+		setCurrent(null);
+		setEditing(null);
+	};
+	/** What the row is known by, for the button to say which it would take out. */
+	const currentName = () => {
+		const row = current();
+		return row === null ? "" : (table().rows[row]?.[0]?.text.trim() ?? "");
+	};
+
 	let body: HTMLTableSectionElement | undefined;
 	/** The arrow keys move between cells; Enter or F2 changes the one the keys are on. */
 	const onKey = (e: KeyboardEvent, row: number, column: number) => {
@@ -126,7 +147,16 @@ export function TableView(props: { path: string }) {
 	const sortBy = (column: number) => setOrder((by) => (by?.column !== column ? { column, down: false } : by.down ? null : { column, down: true }));
 
 	return (
-		<div class="table-view">
+		<div
+			class="table-view"
+			onKeyDown={(e) => {
+				// The table is a view of the text, and its changes are the text's: they are undone as the text's are.
+				if (!model || !(e.ctrlKey || e.metaKey) || e.altKey || (e.target as HTMLElement).tagName === "INPUT") return;
+				const key = e.key.toLowerCase();
+				if (key === "z" && !e.shiftKey) (e.preventDefault(), void model.undo());
+				else if (key === "y" || (key === "z" && e.shiftKey)) (e.preventDefault(), void model.redo());
+			}}
+		>
 			<div class="table-bar">
 				<input class="filter" type="search" placeholder="Filter rows" aria-label="Filter the rows by what they hold" value={filter()} onInput={(e) => setFilter(e.currentTarget.value)} />
 				<span class="hint">
@@ -158,6 +188,13 @@ export function TableView(props: { path: string }) {
 						{checking() || (uses() ? "Check again" : "Check against code")}
 					</button>
 				</Show>
+				<button
+					title={current() === null || !table().rows[current()!] ? "Click a row, or move to it with the arrow keys, to choose the row to take out" : `Takes out the row${currentName() ? ` ${currentName()}` : ` ${current()! + 1}`}: its line of the file. Ctrl+Z brings it back.`}
+					onClick={deleteRow}
+					disabled={current() === null || !table().rows[current()!]}
+				>
+					Delete row
+				</button>
 				<button title="A new row at the end of the file" onClick={addRow} disabled={!table().header.length}>
 					Add row
 				</button>
@@ -196,7 +233,7 @@ export function TableView(props: { path: string }) {
 											const value = () => cells[column()]?.text ?? "";
 											const open = () => editing()?.row === index && editing()?.column === column();
 											return (
-												<td tabindex={0} classList={{ number: /^-?\d[\d.,]*$/.test(value().trim()) }} title="Enter, F2 or a double-click changes this cell" onDblClick={() => setEditing({ row: index, column: column() })} onKeyDown={(e) => onKey(e, index, column())}>
+												<td tabindex={0} classList={{ number: /^-?\d[\d.,]*$/.test(value().trim()) }} title="Enter, F2 or a double-click changes this cell" onFocus={() => setCurrent(index)} onDblClick={() => setEditing({ row: index, column: column() })} onKeyDown={(e) => onKey(e, index, column())}>
 													<Show
 														when={open()}
 														fallback={

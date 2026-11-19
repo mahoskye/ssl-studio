@@ -5,12 +5,12 @@ import { FileMark } from "../FileMark";
 import { createMemo, createResource, createSignal, For, Show } from "solid-js";
 import type { DocFile } from "../../shared/protocol";
 import { backend } from "../backend";
-import { DOC_FOLDERS, isCatalog, KNOWLEDGE, progress, registryTitle, toneOf } from "../../shared/projectDocs";
+import { docMatches, DOC_FOLDERS, isCatalog, KNOWLEDGE, progress, registryTitle, toneOf } from "../../shared/projectDocs";
 import { docs, newDoc, setUpProject } from "../project";
 import { importTickets, newKnowledge, newRegistry, newSpec, newState, newTicket, updateCatalogs, updateManifest } from "../projectDocs";
 import { workList } from "../../shared/workList";
 import { activePath, canonical, openFile, setState, state } from "../state";
-import { IconButton, Row, RowGroup, Rows } from "./Rows";
+import { focusRowsBelow, IconButton, Row, RowGroup, Rows } from "./Rows";
 import { Menu } from "../Menu";
 
 function DocRow(props: { file: DocFile }) {
@@ -106,11 +106,12 @@ const Head = (props: { title: string; folder?: string }) => (
  * The work: each ticket with what was planned and spec'd for it under it, a ticket that is part of another under its
  * parent, what is under way first. Finished tickets beyond a few fold away behind a count. Specs for no ticket here follow.
  */
-function Work(props: { files: DocFile[]; empty?: string }) {
+function Work(props: { files: DocFile[]; empty?: string; filtered?: boolean }) {
 	const [all, setAll] = createSignal(false);
-	const list = createMemo(() => workList(props.files, state.workspace?.root, { all: all() }));
+	// What a filter found is shown, finished or not.
+	const list = createMemo(() => workList(props.files, state.workspace?.root, { all: all() || props.filtered }));
 	/** How many finished tickets fold away, whether or not they are shown now. */
-	const everything = createMemo(() => workList(props.files, state.workspace?.root).folded);
+	const everything = createMemo(() => (props.filtered ? 0 : workList(props.files, state.workspace?.root).folded));
 	const catalogs = () => props.files.filter((d) => (d.group === "tickets" || d.group === "specs") && isCatalog(d));
 	return (
 		<RowGroup head={<Head title="Work" folder={`${state.project?.docs}/${DOC_FOLDERS.tickets}`} />} rows={props.files.some((d) => d.group === "tickets" || d.group === "specs")} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
@@ -169,8 +170,8 @@ function Registries(props: { files: DocFile[]; empty?: string }) {
 	);
 }
 
-function Group(props: { title: string; folder?: string; group: DocFile["group"]; empty?: string }) {
-	const files = () => docs().filter((d) => d.group === props.group);
+function Group(props: { title: string; folder?: string; group: DocFile["group"]; empty?: string; filter?: string }) {
+	const files = () => docs().filter((d) => d.group === props.group && docMatches(d, props.filter ?? ""));
 	return (
 		<RowGroup
 			head={
@@ -202,6 +203,13 @@ export function Docs() {
 	);
 	const reading = () => failure.loading && !docs().length;
 	const settled = () => !reading() && !failure();
+	/** Narrows every list in the panel to the documents the words typed are in. */
+	const [filter, setFilter] = createSignal("");
+	const filtering = () => Boolean(filter().trim());
+	// A registry is known by what it is called, not by its file's name.
+	const shown = createMemo(() => (filtering() ? docs().filter((d) => !isCatalog(d) && docMatches(d.group === "registries" ? { ...d, title: registryTitle(d.name) } : d, filter())) : docs()));
+	/** Whether a list has anything to show: while filtering, one that has nothing is left out, heading and all. */
+	const has = (...groups: DocFile["group"][]) => !filtering() || shown().some((d) => groups.includes(d.group));
 	return (
 		<div class="panel-body" data-panel="docs">
 			<div class="panel-title">
@@ -250,16 +258,44 @@ export function Docs() {
 					The documents could not be listed: {failure()}. Press ⟳ to try again.
 				</p>
 			</Show>
+			<Show when={docs().filter((d) => d.exists).length > 6}>
+				<input
+					class="filter"
+					type="search"
+					aria-label="Filter the project's documents by title, key, state or what they are about"
+					placeholder="Filter"
+					value={filter()}
+					onInput={(e) => setFilter(e.currentTarget.value)}
+					onKeyDown={(e) => e.key === "ArrowDown" && focusRowsBelow(e.currentTarget) && e.preventDefault()}
+				/>
+			</Show>
 			<Rows label="The project's documents">
-				<Group title="Project" group="project" />
-				<Show when={state.project?.configured || docs().some((d) => d.group === "tickets" || d.group === "specs" || d.group === "knowledge" || d.group === "registries")}>
-					<Work files={docs()} empty={settled() ? "No tickets yet. Use ＋ to add the ticket this work comes from." : undefined} />
-					<Knowledge files={docs()} empty={settled() ? "Nothing kept yet. Use ＋ to write down a decision, a question or a snippet." : undefined} />
-					<Registries files={docs()} empty={settled() ? "No registries yet. Use ＋ to start one: settings, files, database objects." : undefined} />
+				<Show when={filtering() && !shown().length}>
+					<p class="hint">No document matches “{filter().trim()}”. Clear the filter to see them all.</p>
 				</Show>
-				<Group title="Docs" folder={state.project?.docs} group="docs" empty={settled() ? "No Markdown files here yet. Use ＋ to add one." : undefined} />
-				<Group title="Schema" folder={state.project?.schema} group="schema" empty={settled() ? "No tables described yet. Add a Markdown file to this folder for each table." : undefined} />
-				<Group title="Plans" folder={state.project?.plans} group="plans" empty={settled() ? "No plans yet. Use ＋ to draw one." : undefined} />
+				<Show when={has("project")}>
+					<Group title="Project" group="project" filter={filter()} />
+				</Show>
+				<Show when={state.project?.configured || docs().some((d) => d.group === "tickets" || d.group === "specs" || d.group === "knowledge" || d.group === "registries")}>
+					<Show when={has("tickets", "specs")}>
+						<Work files={shown()} filtered={filtering()} empty={settled() ? "No tickets yet. Use ＋ to add the ticket this work comes from." : undefined} />
+					</Show>
+					<Show when={has("knowledge")}>
+						<Knowledge files={shown()} empty={settled() ? "Nothing kept yet. Use ＋ to write down a decision, a question or a snippet." : undefined} />
+					</Show>
+					<Show when={has("registries")}>
+						<Registries files={shown()} empty={settled() ? "No registries yet. Use ＋ to start one: settings, files, database objects." : undefined} />
+					</Show>
+				</Show>
+				<Show when={has("docs")}>
+					<Group title="Docs" folder={state.project?.docs} group="docs" filter={filter()} empty={settled() ? "No Markdown files here yet. Use ＋ to add one." : undefined} />
+				</Show>
+				<Show when={has("schema")}>
+					<Group title="Schema" folder={state.project?.schema} group="schema" filter={filter()} empty={settled() ? "No tables described yet. Add a Markdown file to this folder for each table." : undefined} />
+				</Show>
+				<Show when={has("plans")}>
+					<Group title="Plans" folder={state.project?.plans} group="plans" filter={filter()} empty={settled() ? "No plans yet. Use ＋ to draw one." : undefined} />
+				</Show>
 			</Rows>
 		</div>
 	);

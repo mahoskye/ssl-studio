@@ -707,3 +707,24 @@ describe("the Work list", () => {
 		expect(workList(docs, root).folded).toBe(0);
 	});
 });
+
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+
+describe("a spec the planner wrote", () => {
+	test("is called what its plan is called when it has no heading of its own, and is for its plan's ticket", async () => {
+		const root = mkdtempSync(join(tmpdir(), "ssl-studio-spec-"));
+		try {
+			mkdirSync(join(root, "design"));
+			writeFileSync(join(root, "design", "Mark late.plan.json"), JSON.stringify({ version: 1, title: "Mark late", ticket: "LIMS-7", groups: [], nodes: [], edges: [] }));
+			writeFileSync(join(root, "design", "Mark late.spec.md"), "**Prior art:** none.\n\n## Units\n\n```json\n[]\n```\n");
+			writeFileSync(join(root, "design", "Named.plan.json"), JSON.stringify({ version: 1, title: "A plan", groups: [], nodes: [], edges: [] }));
+			writeFileSync(join(root, "design", "Named.spec.md"), "# Its own name\n\n## Units\n");
+			const docs = await listDocs(new WorkspaceFiles(root), await readProject(root));
+			const specs = docs.filter((d) => d.group === "specs");
+			expect(specs.map((d) => [d.title, d.tickets])).toEqual([["Mark late", ["LIMS-7"]], ["Its own name", undefined]]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+});

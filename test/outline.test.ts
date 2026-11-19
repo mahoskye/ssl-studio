@@ -142,3 +142,45 @@ describe("the states a document is chosen to be in", () => {
 		expect(statusChoices(undefined)).toEqual(["draft", "in progress", "done"]);
 	});
 });
+
+import { parseCsv, rowSpan } from "../src/shared/csv";
+import { docMatches } from "../src/shared/projectDocs";
+
+describe("taking a row out of a table", () => {
+	const without = (text: string, row: number) => {
+		const span = rowSpan(text, parseCsv(text), row)!;
+		return text.slice(0, span.start) + text.slice(span.end);
+	};
+
+	test("its line goes, and nothing else changes", () => {
+		const text = "name,status\na,found\nb,done\nc,found\n";
+		expect(without(text, 0)).toBe("name,status\nb,done\nc,found\n");
+		expect(without(text, 1)).toBe("name,status\na,found\nc,found\n");
+		expect(without(text, 2)).toBe("name,status\na,found\nb,done\n");
+	});
+
+	test("the last row of a file with no line end at its end takes the line end before it", () => {
+		expect(without("name,status\na,found\nb,done", 1)).toBe("name,status\na,found");
+		expect(without("name,status\r\na,found\r\nb,done", 1)).toBe("name,status\r\na,found");
+		expect(without("name,status\r\na,found\r\nb,done\r\n", 0)).toBe("name,status\r\nb,done\r\n");
+	});
+
+	test("a row whose cell runs over several lines goes whole, and a row that is not there is nothing", () => {
+		expect(without('name,note\na,"one\ntwo"\nb,x\n', 0)).toBe("name,note\nb,x\n");
+		expect(rowSpan("name\na\n", parseCsv("name\na\n"), 5)).toBeNull();
+	});
+});
+
+describe("a document a filter is looking for", () => {
+	const file = { name: "Which-holidays.md", title: "Which holidays does each site keep?", status: "open", summary: "The holidays table has no site.", tickets: ["DEMO-101"], kind: "questions" };
+
+	test("has every word typed, in its title, state, key, kind or what it is about", () => {
+		expect(docMatches(file, "")).toBe(true);
+		expect(docMatches(file, "  ")).toBe(true);
+		expect(docMatches(file, "holiday")).toBe(true);
+		expect(docMatches(file, "OPEN holiday")).toBe(true);
+		expect(docMatches(file, "demo-101 question")).toBe(true);
+		expect(docMatches(file, "open rush")).toBe(false);
+		expect(docMatches({ name: "DEMO-103.md", ticket: "DEMO-103", title: "A report" }, "103")).toBe(true);
+	});
+});

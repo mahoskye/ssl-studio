@@ -542,6 +542,15 @@ the work comes from ([ADR 0012](adr/0012-a-projects-work-is-written-down.md)).
 - **A registry of database objects starts from the schema.** Each table,
   view, procedure and sequence the schema folder's SQL creates is a row,
   marked found, with the file it came from.
+- **The Docs panel has a filter.** Words typed narrow every list to the
+  documents they are in: a title, a key, a state, what a document is
+  about. A list with nothing to show is left out while filtering.
+- **A row is taken out of a table** with Delete row, and Ctrl+Z in the
+  table brings it back: the table's changes are the text's.
+- **A question that is answered says when:** setting its status to
+  answered writes the day beside it.
+- **A spec the planner wrote is called what its plan is called.** It has no
+  heading of its own, and was listed by its first section, "Units".
 - **The Work list is in the order of the work.** What is under way comes
   first, then what waits, then what is finished. A ticket that is part of
   another (an epic's story, a task's sub-task) is listed under it, and a

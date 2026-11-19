@@ -70,15 +70,17 @@ async function head(path: string): Promise<string> {
 	}
 }
 
-/** The ticket a plan says it is for; "" when it names none, or cannot be read. */
-async function planTicket(path: string): Promise<string> {
+/** What a plan says of itself: the ticket it is for and its title; "" for what it does not say, or when it cannot be read. */
+async function planSays(path: string): Promise<{ ticket: string; title: string }> {
 	try {
-		const ticket = (await Bun.file(path).json())?.ticket;
-		return typeof ticket === "string" ? ticket.trim() : "";
+		const plan = await Bun.file(path).json();
+		const word = (value: unknown) => (typeof value === "string" ? value.trim() : "");
+		return { ticket: word(plan?.ticket), title: word(plan?.title) };
 	} catch {
-		return "";
+		return { ticket: "", title: "" };
 	}
 }
+const planTicket = async (path: string) => (await planSays(path)).ticket;
 
 /** A summary, unless it is a line a template wrote and nobody has replaced. */
 const said = (summary: string | undefined) => (summary && !isPrompt(summary) ? summary : undefined);
@@ -139,9 +141,13 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 	// The specs: those written by hand, and those the planner writes beside a plan.
 	for (const path of [...under(area("specs"), MARKDOWN), ...under(join(root, project.plans), /\.spec\.md$/i)]) {
 		const fromPlan = !path.startsWith(area("specs") + sep);
-		const said = described(await head(path));
-		// A spec the planner wrote is for the ticket its plan names.
-		const planned = fromPlan ? await planTicket(path.replace(/\.spec\.md$/i, ".plan.json")) : "";
+		const text = await head(path);
+		const said = described(text);
+		// A spec the planner wrote is for the ticket its plan names, and is called what its plan is: it has no
+		// heading of its own to be called by, and its first section is not its name.
+		const plan = fromPlan ? await planSays(path.replace(/\.spec\.md$/i, ".plan.json")) : { ticket: "", title: "" };
+		const planned = plan.ticket;
+		if (fromPlan && plan.title && !one(frontMatter(text).values.title) && !/^#\s+\S/m.test(frontMatter(text).body)) said.title = plan.title;
 		const tickets = planned && !said.tickets?.some((key) => key.toLowerCase() === planned.toLowerCase()) ? [...(said.tickets ?? []), planned] : said.tickets;
 		list.push({ path, name: fromPlan ? `${project.plans}/${relative(join(root, project.plans), path)}` : relative(area("specs"), path), group: "specs", exists: true, ...said, ...(tickets?.length ? { tickets } : {}) });
 	}

@@ -293,3 +293,15 @@ export function statusChoices(file: { group?: string; kind?: string } | undefine
 	if (file?.group === "knowledge" && file.kind === "questions") return ["open", "answered"];
 	return ["draft", "in progress", "done"];
 }
+
+/**
+ * Whether a document is one a filter is looking for: every word typed is in
+ * its title, its name, its ticket's key, its state, what it is about, or the
+ * tickets it is for. "open holiday" finds the open question about holidays.
+ */
+export function docMatches(file: Pick<DocFile, "name" | "title" | "ticket" | "status" | "summary" | "tickets" | "kind">, filter: string): boolean {
+	const words = filter.toLowerCase().split(/\s+/).filter(Boolean);
+	if (!words.length) return true;
+	const said = [file.title, file.name, file.ticket, file.status, file.summary, file.kind, ...(file.tickets ?? [])].filter(Boolean).join("\n").toLowerCase();
+	return words.every((word) => said.includes(word));
+}

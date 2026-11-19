@@ -29,6 +29,7 @@ import {
 	stateTemplate,
 	ticketKey,
 	ticketTemplate,
+	toneOf,
 	frontValue,
 	type DocArea,
 	type KnowledgeKind,
@@ -309,8 +310,11 @@ export async function newRegistry() {
 export async function setStatus(path: string, status: string) {
 	const before = await current(path);
 	if (before === null) return;
-	const after = withFrontMatter(before, "status", frontValue(status));
+	let after = withFrontMatter(before, "status", frontValue(status));
 	if (after === null) return notify("The status could not be set here: it is written as a list. Change it in the text.", "error");
+	// A question that is answered says when, once: the day is part of the answer.
+	const question = docs().some((d) => d.group === "knowledge" && d.kind === "questions" && canonical(d.path) === canonical(path));
+	if (question && toneOf(status) === "done" && !one(frontMatter(after).values.answered)) after = withFrontMatter(after, "answered", today()) ?? after;
 	if (after === before) return;
 	try {
 		await put(path, after, true);
