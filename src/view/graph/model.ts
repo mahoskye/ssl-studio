@@ -94,10 +94,11 @@ export const topLabel = (script?: ScriptIn) => (script?.isClass ? CLASS_ITSELF :
 /** The box that holds every target the server could not resolve: not a file, so nothing opens from it. */
 export const UNRESOLVED = "(unresolved)";
 
-export function callList(graph: Graph, edges: GraphEdge[]): ListedScript[] {
+/** A node as a list names it, for any id an edge can end at. */
+function lister(graph: Pick<Graph, "nodes" | "scripts">): (id: string) => ListedProc {
 	const byId = new Map(graph.nodes.map((n) => [n.id, n]));
 	const byPath = new Map(graph.scripts.map((s) => [s.path, s]));
-	const proc = (id: string): ListedProc => {
+	return (id) => {
 		const node = byId.get(id);
 		if (node) return { id, name: node.name, path: node.path, line: node.line, kind: node.kind ?? "procedure" };
 		const at = id.lastIndexOf("#");
@@ -107,6 +108,31 @@ export function callList(graph: Graph, edges: GraphEdge[]): ListedScript[] {
 		// In a sentence a class goes by its name: "creates an object of DueDates.DueRule".
 		return { id, name: script?.isClass ? (script.name ?? CLASS_ITSELF) : TOP_LEVEL, path: id.slice(0, at), line: 0, kind: script?.isClass ? "class" : "top" };
 	};
+}
+
+/** One line into or out of a focus: the node at the other end, the focus's own end (a script has several), and how it is related. */
+export type FocusLink = { other: ListedProc; own: ListedProc; count: number; relation: Relation };
+export type Around = { callers: FocusLink[]; callees: FocusLink[] };
+
+/**
+ * What calls a focus and what it calls, one step out: the answer the focus was
+ * asked for, before the rest of what is shown. A focus on a script (`path#`)
+ * is on every procedure of it, and the lines inside it are neither.
+ */
+export function aroundFocus(graph: Pick<Graph, "nodes" | "scripts">, edges: readonly GraphEdge[], focus: string): Around {
+	const proc = lister(graph);
+	const whole = focus.endsWith("#");
+	const inFocus = (id: string) => (whole ? scriptOf(id) === focus.slice(0, -1) : id === focus);
+	const link = (e: GraphEdge, other: string, own: string): FocusLink => ({ other: proc(other), own: proc(own), count: Math.max(1, e.sites.length), relation: relationOf(e.kind) });
+	const order = (a: FocusLink, b: FocusLink) => a.other.path.localeCompare(b.other.path) || a.other.name.localeCompare(b.other.name) || a.own.name.localeCompare(b.own.name) || a.relation.localeCompare(b.relation);
+	return {
+		callers: edges.filter((e) => inFocus(e.to) && !inFocus(e.from)).map((e) => link(e, e.from, e.to)).sort(order),
+		callees: edges.filter((e) => inFocus(e.from) && !inFocus(e.to)).map((e) => link(e, e.to, e.from)).sort(order),
+	};
+}
+
+export function callList(graph: Graph, edges: GraphEdge[]): ListedScript[] {
+	const proc = lister(graph);
 	const scripts = new Map<string, Map<string, ListedCaller>>();
 	for (const e of edges) {
 		const from = proc(e.from);

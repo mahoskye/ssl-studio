@@ -290,3 +290,28 @@ describe("lines gathered at a folder's edge", () => {
 		expect(gather(edges, () => undefined)).toEqual(edges);
 	});
 });
+
+import { aroundFocus } from "../src/view/graph/model";
+
+describe("what calls a focus, and what it calls", () => {
+	const edge = (from: string, to: string, sites = 1, kind?: string): GraphEdge => ({ from, to, crossScript: true, sites: Array.from({ length: sites }, (_, line) => ({ path: from, line })), ...(kind ? { kind } : {}) });
+	const node = (path: string, name: string) => ({ id: `${path}#${name}`, name, path, line: 0 });
+	const graph = { scripts: [{ path: "/w/A.ssl", bytes: 0, procedures: [] }, { path: "/w/B.ssl", bytes: 0, procedures: [] }], nodes: [node("/w/A.ssl", "a1"), node("/w/A.ssl", "a2"), node("/w/B.ssl", "b1"), node("/w/B.ssl", "b2")] };
+	const edges = [edge("/w/A.ssl#a1", "/w/B.ssl#b1", 3), edge("/w/A.ssl#a2", "/w/B.ssl#b1"), edge("/w/B.ssl#b1", "/w/B.ssl#b2"), edge("/w/B.ssl#b2", "/w/A.ssl#a1", 1, "Method")];
+
+	test("a procedure's callers and callees, each with its places and how it is related", () => {
+		const { callers, callees } = aroundFocus(graph, edges, "/w/B.ssl#b1");
+		expect(callers.map((c) => [c.other.name, c.count])).toEqual([["a1", 3], ["a2", 1]]);
+		expect(callees.map((c) => [c.other.name, c.relation])).toEqual([["b2", "call"]]);
+	});
+
+	test("a script's are what comes into it and goes out of it, not what stays inside", () => {
+		const { callers, callees } = aroundFocus(graph, edges, "/w/B.ssl#");
+		expect(callers.map((c) => `${c.other.name}>${c.own.name}`)).toEqual(["a1>b1", "a2>b1"]);
+		expect(callees.map((c) => `${c.own.name}>${c.other.name} ${c.relation}`)).toEqual(["b2>a1 method"]);
+	});
+
+	test("a focus nothing calls has no callers", () => {
+		expect(aroundFocus(graph, edges, "/w/A.ssl#a2").callers).toEqual([]);
+	});
+});

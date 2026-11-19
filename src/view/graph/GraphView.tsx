@@ -6,7 +6,7 @@
 // double-click it, or press Enter, to open it. The same calls can be read as
 // a plain list.
 import ELK from "elkjs/lib/elk.bundled.js";
-import { createEffect, createMemo, createSignal, createUniqueId, For, on, Show } from "solid-js";
+import { batch, createEffect, createMemo, createSignal, createUniqueId, For, on, Show } from "solid-js";
 import { level } from "../../shared/houseStyle";
 import { backend } from "../backend";
 import { regionColor } from "../editor/regions";
@@ -18,7 +18,7 @@ import { Finder } from "./Finder";
 import { Menu, type MenuItem } from "../Menu";
 import { savePicture } from "./picture";
 import { session } from "../lsp/session";
-import { callList, choices, dirId, keptFolds, withoutUnresolved, fold, gather, isFolderEnd, FOLD_ABOVE, FOLD_DIRS_ABOVE, foldId, isDir, isFold, RELATION_WORDS, scriptOf, topLabel, UNRESOLVED, visible, type Direction, type DrawnEdge, type Filter, type Graph, type ListedProc, relationOf, type Relation } from "./model";
+import { aroundFocus, callList, choices, dirId, keptFolds, withoutUnresolved, fold, gather, isFolderEnd, FOLD_ABOVE, FOLD_DIRS_ABOVE, foldId, isDir, isFold, RELATION_WORDS, scriptOf, topLabel, UNRESOLVED, visible, type Direction, type DrawnEdge, type Filter, type FocusLink, type Graph, type ListedProc, relationOf, type Relation } from "./model";
 import { baseName, dirName, relativeTo } from "../../shared/paths";
 
 type Box = {
@@ -96,6 +96,7 @@ export function GraphView() {
 	const nodeEls = new Map<string, SVGGElement>();
 	let svg: SVGSVGElement | undefined;
 	let fittedFor = "";
+	let layoutRun = 0;
 	/** The scripts drawn as one node each, by path. */
 	const [folded, setFolded] = createSignal<ReadonlySet<string>>(new Set());
 	/** The folders drawn as one node each. */
@@ -111,11 +112,13 @@ export function GraphView() {
 	const [pointedLine, setPointedLine] = createSignal<string | null>(null);
 	/** What the finder offers. */
 	const findable = createMemo(() => (graph() ? choices(graph()!, rel) : []));
-	const find = (id: string) => {
-		setCurrent(id);
-		setMode("graph");
-		focus(id);
-	};
+	// One change, so one picture is laid out: not the old one in the graph and then the new.
+	const find = (id: string) =>
+		batch(() => {
+			setCurrent(id);
+			setMode("graph");
+			focus(id);
+		});
 	/** Whether the list of the graph's keys is showing. */
 	const [keysOpen, setKeysOpen] = createSignal(false);
 	const keysId = createUniqueId();
@@ -207,6 +210,8 @@ export function GraphView() {
 		on([graph, drawn, mode, gathered], async ([g, keep, as, gathering]) => {
 			// The list needs no layout, and a large one takes a while.
 			if (!g || !keep || as !== "graph") return;
+			// A layout takes a while, and a later one may finish first: only the last one asked for is drawn.
+			const run = ++layoutRun;
 			const sized = (label: string, bold = false) => ({ "elk.nodeSize.constraints": "MINIMUM_SIZE", "elk.nodeSize.minimum": `(${Math.ceil((bold ? measureBold : measure)(label)) + 44},30)` });
 			const notes = new Map<string, string>();
 			// Scripts are drawn in their folders when there is more than one folder: the folder's box
@@ -297,8 +302,10 @@ export function GraphView() {
 				// bottom, and that is kept when the view shows clearly more of it: wide nodes in few
 				// layers stack lower than they spread.
 				let result = await lay("RIGHT");
+				if (run !== layoutRun) return;
 				if (keep.nodes.size <= BOTH_WAYS_UP_TO) {
 					const down = await lay("DOWN");
+					if (run !== layoutRun) return;
 					if (fitShare(down, size()) > fitShare(result, size()) * 1.1) result = down;
 				}
 				const boxes: Box[] = [];
@@ -601,6 +608,19 @@ export function GraphView() {
 		const keep = shown();
 		return g && keep ? callList(g, keep.edges) : [];
 	});
+	/** Around a focus, the list starts with the answer: what calls it, and what it calls. */
+	const around = createMemo(() => {
+		const g = graph();
+		const keep = shown();
+		const f = filter();
+		return g && keep && f.mode === "around" && f.focus ? aroundFocus(g, keep.edges, f.focus) : null;
+	});
+	/** What a line of that answer says after the name: how it is related, which procedure of a script, where, and from how many places. */
+	const linkNote = (link: FocusLink) => {
+		const focus = filter().focus ?? "";
+		const elsewhere = link.other.path !== UNRESOLVED && link.other.path !== scriptOf(focus);
+		return [link.relation === "call" ? "" : RELATION_WORDS[link.relation], focus.endsWith("#") ? `${link.own.name}` : "", elsewhere ? `in ${rel(link.other.path)}` : "", link.count > 1 ? `from ${link.count} places` : ""].filter(Boolean).join(", ");
+	};
 	/** Why there is nothing to see, and what to do about it. */
 	const idle = (): { text: string; hint?: string; restart?: boolean } | null => {
 		if (!state.workspace) return { text: "Open a folder to see the calls between its procedures." };
@@ -915,9 +935,47 @@ export function GraphView() {
 				</Show>
 				<Show when={mode() === "list"}>
 					<div class="graph-list">
-						<p class="hint">Each script, its callers, and what each calls, creates or inherits. A name opens the code; Focus shows only that procedure's callers and callees.</p>
+						<p class="hint">{around() ? "What calls the focus, and what it calls. A name opens the code; Focus moves the focus to that procedure." : "Each script, its callers, and what each calls, creates or inherits. A name opens the code; Focus shows only that procedure's callers and callees."}</p>
+						<Show when={around()}>
+							{(a) => (
+								<div class="graph-around">
+									<h3>
+										{focusName()}
+										<span class="hint">{rel(scriptOf(filter().focus ?? ""))}</span>
+									</h3>
+									<div class="graph-around-cols">
+										<For each={[["Called by", a().callers, "callees", "Nothing shown here calls it."], ["Calls", a().callees, "callers", "It calls nothing shown here."]] as const}>
+											{([title, links, hiddenBy, none]) => (
+												<Show when={filter().direction !== hiddenBy}>
+													<section>
+														<h4>
+															{title} <span class="count">{links.length}</span>
+														</h4>
+														<Show when={links.length} fallback={<p class="hint">{none}</p>}>
+															<ul>
+																<For each={links}>
+																	{(link) => (
+																		<li>
+																			<Proc proc={link.other} />
+																			<span class="hint">{linkNote(link)}</span>
+																		</li>
+																	)}
+																</For>
+															</ul>
+														</Show>
+													</section>
+												</Show>
+											)}
+										</For>
+									</div>
+									<Show when={filter().depth > 1}>
+										<h3 class="graph-around-rest">Every call within {filter().depth} steps</h3>
+									</Show>
+								</div>
+							)}
+						</Show>
 						<Show when={list().length} fallback={<p>No calls to show. Choose "Every call" above to see them all.</p>}>
-							<For each={list()}>
+							<For each={filter().mode === "around" && filter().depth <= 1 ? [] : list()}>
 								{(script) => (
 									<section>
 										<h3>

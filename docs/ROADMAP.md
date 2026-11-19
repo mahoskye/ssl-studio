@@ -352,6 +352,14 @@ From a second look:
   notice of it was shown as "Something went wrong".
 - **A step found by its words is put in the middle of the view,** with what
   leads to it and from it, where it used to be brought just inside the edge.
+- **Around a focus, the list answers first:** what calls it and what it
+  calls, side by side with their counts, each with where it is and from how
+  many places. With a depth of more than one, every call within that many
+  steps follows.
+- **A procedure found from the list is fitted in the graph.** Finding one
+  while the list was showing laid out two pictures, and the view was fitted
+  to the wrong one: the focus came up small, cut off at the top, with a
+  corner map it did not need. Only the last layout asked for is drawn now.
 
 ## On hold
 
