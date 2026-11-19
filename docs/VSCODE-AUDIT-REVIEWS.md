@@ -292,5 +292,9 @@ confirmed and fixed, in the commit after it.
    Fixed: it goes with the document.
 5. **Two narrow races.** A file removed while the tabs were being read at
    the start got a tab with nothing behind it; the call graph read a
-   script whose model had gone. Fixed: both look again first. Not seen:
-   neither can be timed by hand.
+   script whose model had gone. Fixed: both look again first. The first
+   was provoked: with 61 tabs to restore, a small program removed the
+   first tab's file the moment the app opened it. The app came up with
+   the other 60 tabs, none for that file, and nothing said or broken.
+   The second was not seen: that way of reading scripts is used only
+   with a language server that has no call graph of its own.

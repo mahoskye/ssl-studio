@@ -500,11 +500,10 @@ runs them on Windows and macOS too).
 
 ## What the reviews found
 
-Three reviews were made by a reader who was given the commits and not
-the author's conclusions: after step 3 (of steps 1 to 3), after step 6
-(of steps 4 to 6), and after step 8 (of steps 7 and 8). So a review came
-after every three, three and two steps, and none came between the steps
-of a group. What each confirmed was fixed before the next step; the
+A review was made after every two or three steps, by a reader who was
+given the commits and not the author's conclusions: after step 3 (of
+steps 1 to 3), after step 6 (of steps 4 to 6), and after step 8 (of
+steps 7 and 8). What each confirmed was fixed before the next step; the
 fixes are the commits named "defects found by a review".
 
 Every finding of the reviews, with what was done about it and in
@@ -582,3 +581,8 @@ tree and an open tab then show the old state, and the language server
 does not learn of a script that came back, until the folder is opened
 again. The row is now Partly, for later: it needs a check that does not
 rest on the runtime's watching alone.
+
+Also found and not fixed: a folder left with some six hundred tabs open
+does not come back usable. The window stopped answering while they were
+restored; with sixty it came up at once. Nobody keeps six hundred tabs,
+and the row for many tabs (Tab overflow) is already for later.
