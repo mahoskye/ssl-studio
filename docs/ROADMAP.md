@@ -539,8 +539,12 @@ the work comes from ([ADR 0012](adr/0012-a-projects-work-is-written-down.md)).
   beyond three fold away behind a count.
 - **Tried in the app with the local model, on opencode 2.3.2:** the chat's
   ticket box, Refine on a plan started from a ticket, a tidy step with its
-  skill, and Write spec, which came back with the model's questions. Not
-  tried: a build and the test script, which need an approved spec.
+  skill, Write spec (a spec approved for a plan of four nodes), and a
+  build of it. The build ran its three tries; the judge sent each back for
+  parameter names against the house style, and nothing was written. Every
+  build prompt was cut at Ollama's default 4096 tokens, and both the
+  conversation and the planner said so. Not tried: the test script, which
+  needs a build that passes.
 - **From looking at it:** in a narrow Docs panel a state is a dot in its
   tone, so the title has the room; a new document's opening prompt is not
   listed as its summary; a date is the day it is here, not in UTC; and a
