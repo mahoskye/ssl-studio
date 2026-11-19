@@ -4,6 +4,8 @@
 // every word as it was. A node it does not know is written as the words it
 // holds, never dropped.
 
+import { withAddresses } from "./markdownText";
+
 type Node = { type?: string; text?: string; attrs?: Record<string, unknown>; marks?: { type?: string; attrs?: Record<string, unknown> }[]; content?: Node[] };
 
 const isNode = (value: unknown): value is Node => Boolean(value) && typeof value === "object";
@@ -28,7 +30,7 @@ function literal(text: string): string {
 	for (let at = 0; at < text.length; at++) {
 		const ch = text[at]!;
 		const next = text[at + 1];
-		if (ch === "\\" || ch === "*" || ch === "`" || ch === "~" || ch === "[") out += `\\${ch}`;
+		if (ch === "\\" || ch === "*" || ch === "`" || ch === "~" || ch === "[" || ch === "]") out += `\\${ch}`;
 		else if (ch === "_" && !(word(text[at - 1]) && word(next))) out += "\\_";
 		else if (ch === "<" && next !== undefined && /[A-Za-z/!?]/.test(next)) out += "&lt;";
 		else if (ch === "&" && /^&(?:#\d+|#[xX][0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]*);/.test(text.slice(at, at + 40))) out += "&amp;";
@@ -36,6 +38,15 @@ function literal(text: string): string {
 	}
 	return out;
 }
+
+/** Whether these words are in a table's cell, where a pipe ends the cell wherever it stands. */
+let inCell = false;
+/**
+ * Code written with a tag: for a table's cell, where Markdown's own code
+ * cannot hold a pipe. What is between the tags is still read as Markdown,
+ * so its marks are written as themselves, and a pipe as the character it is.
+ */
+const codeTag = (text: string) => `<code>${literal(text).replace(/\|/g, "&#124;")}</code>`;
 
 /** Text with the marks it carries: code, bold, italic, struck through, a link. */
 function marked(node: Node): string {
@@ -46,22 +57,37 @@ function marked(node: Node): string {
 	if (marks.includes("code")) {
 		const fence = ticks(text, 1);
 		// A backtick at either end needs room to be told from the fence.
-		const code = `${fence}${/^`|`$/.test(text) ? ` ${text} ` : text}${fence}`;
+		const code = inCell ? codeTag(text) : `${fence}${/^`|`$/.test(text) ? ` ${text} ` : text}${fence}`;
 		return href ? `[${code}](${href})` : code;
 	}
 	// A mark sits against the words, with the space around them outside it.
 	const [, lead, body, trail] = /^(\s*)([\s\S]*?)(\s*)$/.exec(text)!;
 	if (!body) return text;
-	let out = literal(body);
-	// Stars and tildes mark words only where a word meets them: around words that begin or end with a mark of
-	// their own ("Note:", "~2 hours"), the same is said with a tag, which holds wherever it stands.
-	const edges = /^[\p{L}\p{N}]/u.test(body) && /[\p{L}\p{N}]$/u.test(body);
-	const wrap = (star: string, tag: string) => (out = edges ? `${star}${out}${star}` : `<${tag}>${out}</${tag}>`);
-	if (marks.includes("strike")) wrap("~~", "del");
-	if (marks.includes("em")) wrap("*", "em");
-	if (marks.includes("strong")) wrap("**", "strong");
+	// An address is written as one; inside a link's own words it is words, since a link cannot hold a link.
+	let out = href ? literal(body) : withAddresses(body, literal);
+	// Stars and tildes mark words only where a word meets them, and not through each other: around words that
+	// begin or end with a mark of their own ("Note:", "~2 hours"), or under more than one mark, the same is said
+	// with a tag, which holds wherever it stands.
+	const styles = (["strike", "em", "strong"] as const).filter((style) => marks.includes(style));
+	const stars = styles.length === 1 && /^[\p{L}\p{N}]/u.test(body) && /[\p{L}\p{N}]$/u.test(body);
+	for (const style of styles) {
+		const [star, tag] = style === "strike" ? ["~~", "del"] : style === "em" ? ["*", "em"] : ["**", "strong"];
+		out = stars ? `${star}${out}${star}` : `<${tag}>${out}</${tag}>`;
+	}
 	if (href) out = `[${out}](${href})`;
 	return `${lead}${out}${trail}`;
+}
+
+/** The same words under the same marks, written as two nodes: one run of words. Two runs side by side would end and begin with the same mark. */
+function joined(nodes: Node[]): Node[] {
+	const same = (a: Node, b: Node) => a.type === "text" && b.type === "text" && JSON.stringify(a.marks ?? []) === JSON.stringify(b.marks ?? []);
+	const out: Node[] = [];
+	for (const node of nodes) {
+		const last = out[out.length - 1];
+		if (last && same(last, node)) out[out.length - 1] = { ...last, text: `${last.text ?? ""}${node.text ?? ""}` };
+		else out.push(node);
+	}
+	return out;
 }
 
 /** A card for a page: the page's address. One that holds its page as data and not as an address is said to have been there. */
@@ -69,7 +95,7 @@ const card = (node: Node) => (said(node.attrs?.url) ? `<${said(node.attrs!.url)}
 
 /** The nodes of a line, side by side. */
 function inline(nodes: Node[]): string {
-	return nodes
+	return joined(nodes)
 		.map((node) => {
 			switch (node.type) {
 				case "text":
@@ -128,7 +154,8 @@ const indented = (text: string, by: string) =>
 function block(node: Node): string {
 	switch (node.type) {
 		case "paragraph":
-			return plain(inline(kids(node)));
+			// Space before a paragraph's first word is nothing on a page; four of them here would make it code.
+			return plain(inline(kids(node)).replace(/^[ \t]+/, ""));
 		case "heading":
 			// A "#" that ends a heading would be taken for the heading's own closing mark.
 			return `${"#".repeat(Math.min(6, Math.max(1, Number(node.attrs?.level) || 1)))} ${inline(kids(node))
@@ -166,19 +193,26 @@ function block(node: Node): string {
 		case "rule":
 			return "---";
 		case "table": {
-			// A cell is one line: what is on several lines in it is written with a break between, code a line at a time.
-			const inCell = (kid: Node) =>
-				kid.type === "codeBlock"
-					? words(kid)
-							.replace(/\n+$/, "")
-							.split("\n")
-							.map((line) => (line ? `${ticks(line, 1)}${/^`|`$/.test(line) ? ` ${line} ` : line}${ticks(line, 1)}` : ""))
-							.join("<br>")
-					: block(kid).replace(/\s*\n+\s*/g, "<br>");
+			// A cell is one line: what is on several lines in it is written with a break between, code a line at a
+			// time. Code there is written as a tag: Markdown's own code cannot hold a pipe in a cell.
+			const inCells = (kid: Node) => {
+				inCell = true;
+				try {
+					return kid.type === "codeBlock"
+						? words(kid)
+								.replace(/\n+$/, "")
+								.split("\n")
+								.map((line) => (line ? codeTag(line) : ""))
+								.join("<br>")
+						: block(kid).replace(/\s*\n+\s*/g, "<br>");
+				} finally {
+					inCell = false;
+				}
+			};
 			const rows = kids(node).map((row) =>
 				kids(row).map((cell) =>
 					kids(cell)
-						.map(inCell)
+						.map(inCells)
 						.filter(Boolean)
 						.join("<br>")
 						.replace(/\|/g, "\\|"),

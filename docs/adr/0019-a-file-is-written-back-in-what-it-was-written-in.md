@@ -42,3 +42,7 @@ Under [ADR 0002](0002-text-is-the-source-of-truth.md) and
   saves back byte for byte.
 - The listing, the search and the catalogs still read files as UTF-8 to
   show them; only opening and saving go through this.
+
+**Later the same day:** the listing, the search and the catalogs read a
+file the same way. A review showed a title in the one-byte encoding listed
+with a mark for a letter, and that mark then written into a catalog.

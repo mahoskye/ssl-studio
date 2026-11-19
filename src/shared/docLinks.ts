@@ -116,11 +116,13 @@ function written(lines: readonly string[], over: readonly [Spot, string][]): str
  * "](" or "]:", then spaces if any, then "<" if any. A target is never
  * written anywhere else, so the same words in a sentence are not a place.
  */
-function afterOpening(line: string, column: number): boolean {
+function afterOpening(line: string, column: number, above = ""): boolean {
 	let at = column - 1;
 	if (line[at] === "<") at--;
-	while (at >= 0 && (line[at] === " " || line[at] === "\t")) at--;
-	return (line[at] === "(" || line[at] === ":") && line[at - 1] === "]";
+	while (at >= 0 && (line[at] === " " || line[at] === "\t" || line[at] === ">")) at--;
+	if (at >= 0) return (line[at] === "(" || line[at] === ":") && line[at - 1] === "]";
+	// Nothing before it on its own line: the opening may end the line above.
+	return /\](?:\(|:)[ \t]*$/.test(above);
 }
 
 /**
@@ -132,12 +134,12 @@ function candidates(lines: readonly string[], targets: readonly string[]): Spot[
 	const found: Spot[] = [];
 	const longest = [...new Set(targets)].sort((a, b) => b.length - a.length);
 	lines.forEach((line, at) => {
-		if (!line.includes("]")) return;
+		if (!line.includes("]") && !/\](?:\(|:)[ \t]*$/.test(lines[at - 1] ?? "")) return;
 		const taken: [number, number][] = [];
 		for (const target of longest) {
 			for (let column = line.indexOf(target); column >= 0; column = line.indexOf(target, column + 1)) {
 				const after = line[column + target.length];
-				if (!(after === undefined || /[\s)>]/.test(after)) || !afterOpening(line, column)) continue;
+				if (!(after === undefined || /[\s)>]/.test(after)) || !afterOpening(line, column, lines[at - 1])) continue;
 				if (taken.some(([from, to]) => column < to && column + target.length > from)) continue;
 				taken.push([column, column + target.length]);
 				found.push({ line: at, at: column, length: target.length });

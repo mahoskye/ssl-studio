@@ -4,7 +4,7 @@
 // as text, so its comments survive.
 import { existsSync, mkdirSync, readdirSync, rmdirSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
-import { decode } from "./encoding";
+import { decode, decodePart, textOf } from "./encoding";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { CATALOG_FILE, catalogStale } from "../shared/catalog";
 import { parseCsv, tally } from "../shared/csv";
@@ -73,7 +73,8 @@ const MARKDOWN = /\.(md|markdown)$/i;
 
 async function head(path: string): Promise<string> {
 	try {
-		return await Bun.file(path).slice(0, HEAD_BYTES).text();
+		const file = Bun.file(path);
+		return decodePart(new Uint8Array(await file.slice(0, HEAD_BYTES).arrayBuffer()), file.size > HEAD_BYTES);
 	} catch {
 		return "";
 	}
@@ -183,7 +184,7 @@ export async function linksTo(files: WorkspaceFiles, target: string): Promise<Li
 		if (file.size > LINKED_BYTES) continue;
 		let text = "";
 		try {
-			text = await file.text();
+			text = decode(new Uint8Array(await file.arrayBuffer())).text;
 		} catch {
 			continue;
 		}
@@ -229,7 +230,7 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 	for (const name of Object.keys(PLACEHOLDER)) {
 		const actual = found(root, name);
 		const path = join(root, actual ?? name);
-		const text = actual ? await Bun.file(path).text() : "";
+		const text = actual ? await textOf(path) : "";
 		const untouched = actual ? text.includes(PLACEHOLDER[name]!) : undefined;
 		list.push({ path, name: actual ?? name, group: "project", exists: Boolean(actual), untouched, ...brokenLinks(root, path, text, named) });
 	}
@@ -296,7 +297,7 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 			list.push({ path, name, group: "registries", exists: true, problems: ["It is too large to read here."] });
 			continue;
 		}
-		const table = parseCsv(await file.text());
+		const table = parseCsv(await textOf(path));
 		// A row can say which ticket carries it: the ticket's page lists what it has to bring across.
 		const forTickets = rowsByTicket(table, new Set(list.flatMap((file) => (file.group === "tickets" && file.ticket ? [file.ticket.toLowerCase()] : []))));
 		list.push({ path, name, group: "registries", exists: true, rows: table.rows.length, tally: tally(table) ?? undefined, problems: table.problems.length ? table.problems : undefined, ...(forTickets.length ? { tickets: forTickets.map((rows) => rows.key), forTickets } : {}) });
@@ -317,7 +318,7 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 	for (const name of Object.keys(DOC_FOLDERS) as DocArea[]) {
 		if (!existsSync(area(name))) continue;
 		const catalog = list.find((file) => file.path === join(area(name), found(area(name), CATALOG_FILE) ?? CATALOG_FILE));
-		if (catalog) catalog.catalog = { stale: catalogStale(await Bun.file(catalog.path).text(), catalogItems(name, list, docs)) };
+		if (catalog) catalog.catalog = { stale: catalogStale(await textOf(catalog.path), catalogItems(name, list, docs)) };
 	}
 	return list;
 }

@@ -222,7 +222,7 @@ describe("an export read from where it was downloaded", () => {
 describe("more of what the review found in the import", () => {
 	test("a heading written with a line under it goes under the ticket's sections too, its words as they were", () => {
 		const api = ticketsFromJson([{ number: 1, title: "T", body: "Title\n=====\n\nWords.\n\nLower\n-----\n\n- item\n---\n\nA paragraph\nof two lines\n---" }]);
-		expect(api.tickets[0]!.description).toBe("### Title\n\nWords.\n\n#### Lower\n\n- item\n---\n\n#### A paragraph of two lines");
+		expect(api.tickets[0]!.description).toBe("### Title\n\nWords.\n\n#### Lower\n\n- item\n---\n\nA paragraph\nof two lines\n---");
 	});
 	test("a line in a block of HTML that keeps its lines is not a heading", () => {
 		const api = ticketsFromJson([{ number: 1, title: "T", body: "# Real\n\n<pre>\n# not a heading\n</pre>\n\n<!--\n# nor this\n-->\n\n## Lower" }]);
@@ -268,6 +268,7 @@ function shown(markdown: string): string {
 		.replace(/&gt;/g, ">")
 		.replace(/&quot;/g, '"')
 		.replace(/&#39;/g, "'")
+		.replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
 		.replace(/&amp;/g, "&")
 		.replace(/\n+$/, "");
 }
@@ -284,5 +285,27 @@ describe("the page shows the words a wiki description had", () => {
 	});
 	test("bold inside colour is bold", () => {
 		expect(wikiToMarkdown("{color:red}*IMPORTANT*{color} and *this*.")).toBe("**IMPORTANT** and **this**.");
+	});
+});
+
+// A sixth review (2026-11-19).
+describe("more of a wiki description that the page must show as written", () => {
+	test("a character written with a backslash is itself, as it is there", () => {
+		expect(shown(wikiToMarkdown("\\_x\\_ and \\*y\\* and \\[z\\]"))).toBe("_x_ and *y* and [z]");
+	});
+	test("text in backticks is left as it is", () => {
+		expect(shown(wikiToMarkdown("run `SELECT * FROM t` then"))).toBe("run SELECT * FROM t then");
+	});
+	test("an address keeps its marks, in brackets or in the sentence", () => {
+		expect(wikiToMarkdown("[http://x.test/~u]")).toBe("<http://x.test/~u>");
+		expect(shown(wikiToMarkdown("see http://x.test/~u/a*b_c. and more"))).toBe("see http://x.test/~u/a*b_c. and more");
+		expect(wikiToMarkdown("[the ~wiki|https://example.test/a*b]")).toBe("[the \\~wiki](https://example.test/a*b)");
+	});
+	test("a tab in code does not stop the headings being moved, and a heading over a line keeps a # that ends it", () => {
+		const moved = (body: string) => ticketsFromJson([{ number: 1, title: "T", body }]).tickets[0]!.description;
+		expect(moved("# Steps\n\n```\nif x:\n\treturn\n```\n")).toBe("### Steps\n\n```\nif x:\n\treturn\n```");
+		expect(moved("- a\n\t- b\n\n# After")).toBe("- a\n\t- b\n\n### After");
+		expect(shown(moved("Title ##\n----"))).toBe("Title ##");
+		expect(moved("Line one  \nline two\n---")).toBe("Line one  \nline two\n---");
 	});
 });

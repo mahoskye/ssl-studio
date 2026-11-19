@@ -156,6 +156,7 @@ function shown(markdown: string): string {
 		.replace(/&gt;/g, ">")
 		.replace(/&quot;/g, '"')
 		.replace(/&#39;/g, "'")
+		.replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
 		.replace(/&amp;/g, "&")
 		.replace(/\n+$/, "");
 }
@@ -199,6 +200,39 @@ describe("the page shows the words the ticket had", () => {
 	});
 	test("code in a table's cell keeps its lines", () => {
 		const table = md({ type: "table", content: [{ type: "tableRow", content: [{ type: "tableHeader", content: [para(text("Query"))] }] }, { type: "tableRow", content: [{ type: "tableCell", content: [{ type: "codeBlock", content: [text("SELECT 1\nFROM x")] }] }] }] });
-		expect(table).toBe("| Query |\n| --- |\n| `SELECT 1`<br>`FROM x` |");
+		expect(table).toBe("| Query |\n| --- |\n| <code>SELECT 1</code><br><code>FROM x</code> |");
+	});
+});
+
+// A sixth review (2026-11-19).
+describe("more words that the page must show as the ticket had them", () => {
+	const md = (...content: unknown[]) => adfToMarkdown({ type: "doc", version: 1, content });
+	const same = (...content: unknown[]) => shown(md(...content));
+	const linked = (words: string, href: string) => ({ type: "text", text: words, marks: [{ type: "link", attrs: { href } }] });
+	test("an address in a sentence is an address, whatever marks it holds", () => {
+		for (const said of ["see http://x.test/~user and http://x.test/a[1] too", "(at http://x.test/a_b*c).", "http://x.test/wiki/Page_(disambiguation) ends it"]) {
+			expect(same(para(text(said)))).toBe(said);
+		}
+		const html = marked.parse(md(para(text("see http://x.test/~user."))), { gfm: true, async: false }) as string;
+		expect(html).toContain('href="http://x.test/~user"');
+	});
+	test("a link whose words hold brackets is still a link", () => {
+		const html = marked.parse(md(para(linked("see [1] here", "https://example.test/spec"))), { gfm: true, async: false }) as string;
+		expect(html).toContain('<a href="https://example.test/spec">see [1] here</a>');
+	});
+	test("code with a backslash and a pipe in a table's cell keeps the rest of the cell", () => {
+		const table = md({ type: "table", content: [{ type: "tableRow", content: [{ type: "tableHeader", content: [para(text("How"))] }] }, { type: "tableRow", content: [{ type: "tableCell", content: [para(text("grep "), text("a\\|b", "code"), text(" then more words"))] }] }] });
+		expect(shown(table)).toContain("grep a\\|b then more words");
+	});
+	test("words under two marks, and two runs under one mark side by side", () => {
+		expect(same(para(text("un"), { type: "text", text: "a", marks: [{ type: "em" }, { type: "strike" }] }, text("ble")))).toBe("unable");
+		expect(same(para(text("a", "strong"), text("b", "strong")))).toBe("ab");
+		expect(md(para(text("a", "strong"), text("b", "strong")))).toBe("**ab**");
+		expect(same(para(text("x", "code"), text("y", "code")))).toBe("xy");
+	});
+	test("a paragraph that begins with spaces is a paragraph, not code", () => {
+		const two = md(para(text("first")), para(text("    "), text("second", "strong")));
+		expect((marked.parse(two, { gfm: true, async: false }) as string).includes("<pre>")).toBe(false);
+		expect(shown(two)).toBe("first\nsecond");
 	});
 });

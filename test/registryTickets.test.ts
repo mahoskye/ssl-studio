@@ -12,7 +12,7 @@ const table = parseCsv("name,status,ticket,note\nA,migrated,T-1,\nB,found,T-1,\n
 describe("the tickets a registry's rows name", () => {
 	test("are read from its ticket column, each with its rows and how many are done", () => {
 		expect(ticketColumn(table)).toBe(2);
-		expect(rowsByTicket(table)).toEqual([
+		expect(rowsByTicket(table, new Set(["t-1", "t-2"]))).toEqual([
 			{ key: "T-1", rows: 3, done: 2 },
 			{ key: "T-2", rows: 1, done: 1 },
 		]);
@@ -98,11 +98,18 @@ describe("a project's own ticket keys in a registry", () => {
 	});
 	test("a word with a number in it is written as a key is, known or not; one with none is a key only when known", () => {
 		expect(keyOf("REL-2024-07")).toBe("REL-2024-07");
-		expect(keyOf("T12")).toBe("T12");
+		expect(keyOf("T12")).toBe("");
+		expect(keyOf("T12", known)).toBe("T12");
 		expect(keyOf("LIMS-123A")).toBe("LIMS-123A");
 		expect(keyOf("LOGIN-REWORK")).toBe("");
 		expect(keyOf("LOGIN-REWORK", known)).toBe("LOGIN-REWORK");
 		expect(keyOf("2026-11-19")).toBe("");
-		expect(keyOf("DEMO-1.")).toBe("");
+		expect(keyOf("DEMO-1.")).toBe("DEMO-1");
+	});
+	// A sixth review (2026-11-19).
+	test("words that only look a little like keys are words, and the marks round a key are not part of it", () => {
+		for (const word of ["v2.1", "utf-8", "x86", "H2O", "n/a", "TBD", "-"]) expect(keyOf(word)).toBe("");
+		for (const word of ["DEMO-12.", "(DEMO-12)", "#DEMO-12", "DEMO-12,"]) expect(keyOf(word)).toBe("DEMO-12");
+		expect(keysIn("DEMO-12/DEMO-13 (and #14)")).toEqual(["DEMO-12", "DEMO-13", "14"]);
 	});
 });

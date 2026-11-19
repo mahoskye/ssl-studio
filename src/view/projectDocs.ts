@@ -76,7 +76,8 @@ async function put(path: string, text: string, existed: boolean) {
 	if (documents.get(open)) {
 		const clean = !state.dirty[open];
 		applyText(open, text);
-		if (clean) await save(open);
+		// A save that fails has said why; whoever asked for the write is told it was not made.
+		if (clean && !(await save(open))) throw new Error(`${relativeTo(root(), path)} was changed in the editor and could not be saved.`);
 		return;
 	}
 	if (!existed) await backend.create(path, "file");
@@ -183,9 +184,11 @@ export async function importTickets() {
 		if (!typed) return;
 		// As a person writes a path: in quotes when it was copied, from "~" for their own folder, or up and out of this one.
 		const said = typed.replace(/^(["'])(.*)\1$/, "$2");
-		const whole = /^([A-Za-z]:[\\/]|\/|~[\\/])/.test(said);
-		from = whole ? said : resolvePath(root(), said);
-		const inside = !said.startsWith("~") && isInside(root(), from);
+		const home = /^~[\\/]/.test(said);
+		const whole = home || /^([A-Za-z]:[\\/]|\/)/.test(said);
+		// "." and ".." are taken out before asking where it is: "/project/../Downloads" is not in the project.
+		from = home ? said : whole ? resolvePath(said, ".") : resolvePath(root(), said);
+		const inside = !home && isInside(root(), from);
 		// In the folder it is read as the editor has it; anywhere else, from the disk, and the backend says why not.
 		text = inside ? await current(from) : await backend.readExport(from).catch((e: any) => (notify(String(e?.message ?? e), "error"), null));
 		if (text === null) return inside ? notify(`${typed} could not be read: there is no such file in this folder.`, "error") : undefined;

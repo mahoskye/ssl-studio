@@ -509,6 +509,28 @@ the work comes from ([ADR 0012](adr/0012-a-projects-work-is-written-down.md)).
   when the row has a parent column that is empty; and the description,
   which is in Jira's wiki markup and read as headings and stray braces. A
   ticket read from the API also keeps the address a person opens for it.
+- **A sixth review, of the fifth's fixes.** What it found and what was
+  done:
+  - A tab that begins a line stopped a description's headings being
+    moved under the ticket's sections. What the renderer read is now found
+    in the text, a tab for its four spaces.
+  - A file with a mark for UTF-8 over bytes that are not UTF-8 was changed
+    by a save. It is read by the byte.
+  - The listing, the catalogs and the search still read files as UTF-8: a
+    title in the one-byte encoding was listed, and written into a catalog,
+    with a mark for a letter. They read as the editor does.
+  - An address in a sentence got a backslash before its "~". An address
+    is now written as an address. A link whose words hold brackets was no
+    longer a link.
+  - The wiki's own backslash before a mark was doubled, and text in
+    backticks had its stars escaped.
+  - A link's target written on the line after its opening lost its place.
+  - Words under two marks showed their stars; two runs under one mark
+    side by side did too. Code with a pipe in a table's cell lost the rest
+    of the cell.
+  - A registry's ticket column took "utf-8" and "v2.1" for tickets, and
+    missed a key with a bracket or a full stop against it.
+  - A save that failed during an import was counted as made.
 - **A fifth review, of the fourth's fixes.** The same again: a second
   agent, the two commits, no conclusions. What it found and what was done:
   - A line of two dashes in a Jira Cloud description was taken for the

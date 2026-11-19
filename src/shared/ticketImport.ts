@@ -71,6 +71,25 @@ const linkColumns = (table: Table) => table.header.map((cell, at) => (/issue lin
 const described = (text: string, wiki: boolean) => (text && wiki ? wikiToMarkdown(text) : underSections(text));
 
 /**
+ * Where what the renderer read ends in the text, starting at `at`: the same
+ * characters, a tab in the text standing for the four spaces the renderer
+ * makes of it. -1 when the text does not read that way.
+ */
+function readAs(text: string, at: number, raw: string): number {
+	let from = at;
+	for (let i = 0; i < raw.length; ) {
+		if (text[from] === raw[i]) {
+			from++;
+			i++;
+		} else if (text[from] === "\t" && raw.startsWith("    ", i)) {
+			from++;
+			i += 4;
+		} else return -1;
+	}
+	return from;
+}
+
+/**
  * Markdown that goes under a ticket's own "What is asked": its headings are
  * moved down together, so that the largest of them is the document's third
  * level and the ticket keeps the one title it has.
@@ -92,11 +111,12 @@ function underSections(text: string): string {
 	const heads: { from: number; raw: string; depth: number }[] = [];
 	let at = 0;
 	for (const token of tokens) {
-		const from = text.indexOf(token.raw, at);
-		// The renderer read the text another way than it is written (a tab, a line end): nothing is changed.
-		if (from < 0) return text;
-		if (token.type === "heading") heads.push({ from, raw: token.raw, depth: (token as Tokens.Heading).depth });
-		at = from + token.raw.length;
+		// The renderer reads a tab that begins a line as four spaces: what it read is found in the text all the same.
+		const end = readAs(text, at, token.raw);
+		// It read the text some other way than it is written: nothing is changed.
+		if (end < 0) return text;
+		if (token.type === "heading") heads.push({ from: at, raw: text.slice(at, end), depth: (token as Tokens.Heading).depth });
+		at = end;
 	}
 	const down = 3 - Math.min(3, ...heads.map((head) => head.depth));
 	if (!down) return text;
@@ -106,13 +126,13 @@ function underSections(text: string): string {
 		let anew: string;
 		if (marked) anew = `${marked[1]}${marks}${head.raw.slice(marked[0].length)}`;
 		else {
-			// Words over a line of "=" or "-": the words, each line of them, with the marks before.
+			// Words over a line of "=" or "-": the words, with the marks before. Over several lines the words have
+			// line breaks of their own that marks before them would lose: such a heading is left as it is written.
 			const ends = /\n*$/.exec(head.raw)![0];
 			const lines = head.raw.slice(0, head.raw.length - ends.length).split("\n");
-			anew = `${marks} ${lines
-				.slice(0, -1)
-				.map((line) => line.trim())
-				.join(" ")}${ends}`;
+			if (lines.length !== 2) continue;
+			// A "#" that ends the words would be taken for the heading's own closing mark.
+			anew = `${marks} ${lines[0]!.trim().replace(/#+$/, (end) => end.replace(/#/g, "\\#"))}${ends}`;
 		}
 		text = `${text.slice(0, head.from)}${anew}${text.slice(head.from + head.raw.length)}`;
 	}

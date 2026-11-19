@@ -4,7 +4,7 @@ import { mkdirSync, readdirSync, renameSync, statSync, watch, existsSync, type F
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type { Entry, SearchHit } from "../shared/protocol";
 import { searchPattern, type SearchOptions } from "../shared/searchPattern";
-import { decode, encode, encodingOf, type Encoding } from "./encoding";
+import { decode, encode, encodingOf, textOf, type Encoding } from "./encoding";
 
 const SKIP = new Set([".git", "node_modules", ".ssl-studio", ".hutch", "dist", "build"]);
 const SEARCH_LIMIT = 2000;
@@ -110,7 +110,7 @@ export class WorkspaceFiles {
 		const hits: SearchHit[] = [];
 		for (const path of this.files()) {
 			if (statSync(path).size > SEARCH_MAX_BYTES) continue;
-			const text = await Bun.file(path).text();
+			const text = await textOf(path);
 			if (text.includes("\u0000")) continue;
 			const lines = text.split(/\r?\n/);
 			for (let i = 0; i < lines.length; i++) {

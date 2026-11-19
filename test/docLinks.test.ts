@@ -520,3 +520,15 @@ describe("a link's place is where a target is written, and nowhere a word is", (
 		expect(performance.now() - began).toBeLessThan(1500);
 	});
 });
+
+// A sixth review (2026-11-19).
+describe("a target written on the line after its opening is placed", () => {
+	test("a reference, an inline link, and a reference inside a list", () => {
+		expect(fileLinks("See [it][l].\n\n[l]:\nx.md\n")).toEqual([{ href: "x.md", file: "x.md", line: 4, column: 0 }]);
+		expect(fileLinks("See [a](\nx.md) now.\n")).toEqual([{ href: "x.md", file: "x.md", line: 2, column: 0 }]);
+		expect(fileLinks("- see [it][l]\n\n  [l]:\n  x.md\n").map((link) => [link.line, link.column])).toEqual([[4, 2]]);
+	});
+	test("the same words at the start of a line that follows no opening are not a place", () => {
+		expect(fileLinks("x.md\nis linked [here](x.md)\n")).toEqual([{ href: "x.md", file: "x.md", line: 2, column: 17 }]);
+	});
+});

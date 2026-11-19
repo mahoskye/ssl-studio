@@ -4,6 +4,8 @@
 // braces. This turns the common marks into Markdown's, a line at a time, and
 // leaves every word as it was. What it does not know it leaves alone.
 
+import { addressAndRest } from "./markdownText";
+
 /** What a block of code says of itself: "{code:sql}", "{code:title=Query.sql|language=sql}". */
 function codeSays(said: string): { language: string; title: string } {
 	const parts = said.split("|").map((part) => part.trim());
@@ -16,19 +18,15 @@ function codeSays(said: string): { language: string; title: string } {
 /** A run of backticks longer than any the text holds, and never fewer than `least`. */
 const ticks = (text: string, least: number) => "`".repeat(Math.max(least, ...[...text.matchAll(/`+/g)].map((run) => run[0].length + 1)));
 
-/** The marks inside a stretch of a line that is not code. */
-function prose(text: string): string {
+/** Words between the things a line holds whole: their marks turned into Markdown's. */
+function words(text: string): string {
 	return (
 		text
-			// Colour has no words: taken off first, so that what it wraps is read for what it is.
-			.replace(/\{color(?::[^}\n]*)?\}/gi, "")
-			.replace(/\{anchor:[^}\n]*\}/gi, "")
-			// A backslash before a mark would hide the mark, and be hidden with it.
+			// A backslash that is a backslash (in a path, before a mark the wiki does not escape) would hide the mark
+			// after it in Markdown, and be hidden with it.
 			.replace(/\\(?=[!-/:-@[-`{-~])/g, "\\\\")
 			// A word in angle brackets is a word: left as it is, a page would take it for a tag and show nothing.
 			.replace(/<(?=[A-Za-z/!?])/g, "&lt;")
-			.replace(/\[([^\]|\n]+)\|([a-z][a-z0-9+.-]*:[^\]|\s]+)(?:\|[^\]\n]*)?\]/gi, "[$1]($2)")
-			.replace(/\[(https?:\/\/[^\]|\s]+)\]/gi, "<$1>")
 			// "*bold*" is bold there, and italic in Markdown: written as Markdown's bold. Only where it stands as a
 			// word of its own; "*.sql,*.ssl" and "a * b" are stars.
 			.replace(/(^|[\s([{>|])\*([^\s*](?:[^*\n]*[^\s*])?)\*(?=$|[\s)\]}|]|[.,;:!?](?:\s|$))/g, "$1\uE000$2\uE000")
@@ -36,6 +34,34 @@ function prose(text: string): string {
 			.replace(/[*~]/g, "\\$&")
 			.replace(/\uE000/g, "**")
 	);
+}
+
+/**
+ * What a line holds whole, and is written as it is or as Markdown's own
+ * form of it: text in backticks, one of the wiki's own marks written with a
+ * backslash (which says "this is itself" there as it does in Markdown), a link with
+ * its words, an address in brackets, and an address in the sentence.
+ */
+const WHOLE = /(`[^`\n]+`)|(\\[*_\-+^~?{}[\]|!#\\])|\[([^\]|\n]+)\|([a-z][a-z0-9+.-]*:[^\]|\s]+)(?:\|[^\]\n]*)?\]|\[(https?:\/\/[^\]|\s]+)\]|(https?:\/\/[^\s<>]+)/gi;
+
+/** The marks inside a stretch of a line that is not code. */
+function prose(text: string): string {
+	// Colour has no words: taken off first, so that what it wraps is read for what it is.
+	const plain = text.replace(/\{color(?::[^}\n]*)?\}/gi, "").replace(/\{anchor:[^}\n]*\}/gi, "");
+	let out = "";
+	let at = 0;
+	for (const found of plain.matchAll(WHOLE)) {
+		out += words(plain.slice(at, found.index));
+		if (found[1] ?? found[2]) out += found[1] ?? found[2];
+		else if (found[3]) out += `[${words(found[3])}](${found[4]})`;
+		else if (found[5]) out += `<${found[5]}>`;
+		else {
+			const [address, rest] = addressAndRest(found[6]!);
+			out += `<${address}>${words(rest)}`;
+		}
+		at = found.index + found[0].length;
+	}
+	return out + words(plain.slice(at));
 }
 
 /** The marks inside a line: "{{code}}" is code, left as written; the rest is prose. */

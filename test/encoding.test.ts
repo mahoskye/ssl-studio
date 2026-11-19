@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { decode, encode, encodingOf } from "../src/bun/encoding";
-import { readExport } from "../src/bun/project";
+import { decode, decodePart, encode, encodingOf } from "../src/bun/encoding";
+import { listDocs, readExport, readProject } from "../src/bun/project";
 import { WorkspaceFiles } from "../src/bun/workspace";
 
 // A fifth review (2026-11-19): a file is written back in what it was written in.
@@ -87,6 +87,44 @@ describe("an export as a spreadsheet on Windows saves it", () => {
 			await expect(readExport("~/no-such-folder-ssl-studio/x.csv")).rejects.toThrow("is not there.");
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+// A sixth review (2026-11-19).
+describe("a file read for a listing is read as the editor reads it", () => {
+	test("a mark for UTF-8 over bytes that are not UTF-8 saves back as it was", async () => {
+		const root = mkdtempSync(join(tmpdir(), "ssl-studio-bom-"));
+		try {
+			const bytes = [0xef, 0xbb, 0xbf, 0x2f, 0x2a, 0x20, 0xe9, 0x20, 0x2a, 0x2f];
+			writeFileSync(join(root, "odd.ssl"), Buffer.from(bytes));
+			expect(encodingOf(Buffer.from(bytes))).toBe("windows-1252");
+			const files = new WorkspaceFiles(root);
+			await files.write(join(root, "odd.ssl"), (await files.read(join(root, "odd.ssl"))).text);
+			expect([...readFileSync(join(root, "odd.ssl"))]).toEqual(bytes);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+	test("the start of a file may end in the middle of a character", () => {
+		const whole = Buffer.from("# Café au lait");
+		expect(decodePart(whole.subarray(0, 6))).toBe("# Caf");
+		expect(decodePart(whole)).toBe("# Café au lait");
+		// A whole file that ends on such a byte is in the one-byte encoding, and the byte is its last letter.
+		expect(decodePart(Buffer.from([0x23, 0x20, 0x43, 0x61, 0x66, 0xe9]), false)).toBe("# Café");
+		expect(decodePart(encode("# Café", "utf-16be"), false)).toBe("# Café");
+	});
+	test("a ticket in the one-byte Windows encoding is listed and found by its own letters", async () => {
+		const root = mkdtempSync(join(tmpdir(), "ssl-studio-listing-"));
+		try {
+			mkdirSync(join(root, "docs", "tickets"), { recursive: true });
+			writeFileSync(join(root, "docs", "tickets", "T-1.md"), Buffer.from([...Buffer.from("# Caf"), 0xe9, ...Buffer.from(" hours\n\nOpen at eight.\n")]));
+			const files = new WorkspaceFiles(root);
+			const list = await listDocs(files, await readProject(root));
+			expect(list.find((file) => file.name === "T-1.md")?.title).toBe("Café hours");
+			expect((await files.search("café", {})).map((hit) => hit.text)).toEqual(["# Café hours"]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
 		}
 	});
 });
