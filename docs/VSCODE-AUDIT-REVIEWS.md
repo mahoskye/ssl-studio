@@ -1,10 +1,10 @@
 # What the reviews found, finding by finding
 
-Six reviews of the work on [the audit](VSCODE-AUDIT.md) were made by a
+Seven reviews of the work on [the audit](VSCODE-AUDIT.md) were made by a
 reader who was given the commits and not the author's conclusions: three
-of the build's steps, and three of the fixes the last pass made, each of
-the fixes that came of the one before. The last found nothing that
-loses work. This
+of the build's steps, three of the fixes the last pass made, each of
+the fixes that came of the one before, and one of what the user's first
+use asked for. The last two found nothing that loses work. This
 lists every finding, what was done about it, and the commit that did it.
 "Left" means not changed, with the reason.
 
@@ -353,3 +353,115 @@ reviewer before they were committed, who found nothing in them.
 4. **A file is read twice** when a closed tab is reopened or a
    definition is gone to. Left: the second reading is the one that keeps
    the tab true, and it costs one read.
+
+## The seventh review: what the first use asked for
+
+The commit that built [step 9](VSCODE-AUDIT.md#step-9-what-the-first-use-asked-for)
+(`3905b68`) was reviewed before anything was built on it. Fifteen
+findings, none that loses work. Each fix was then tried in the running
+app, or is held by a test, as said.
+
+1. **A text box's menu took the keyboard from the box.** A table's
+   cell, a block's text and a plan's node save or shut when the keyboard
+   leaves them, so a right-click in one ended the edit and Paste had
+   nowhere to go. Fixed: the menu leaves the keyboard in the box, and the
+   window gives it Up and Down, Enter for a marked entry, and Escape.
+   Seen: in a cell being edited, the menu opened, Down marked an entry,
+   Escape shut the menu and the cell was still being edited.
+2. **"Reset the layout" left the left side on a panel docked right.**
+   Fixed: each side shows a panel docked on it, whatever moved the
+   panel. Seen: with the Agent moved left, the reset put the Explorer on
+   the left and the Agent back on the right. A test holds the choice.
+3. **"Show the side panel" hid it in a narrow window.** The entry and
+   Ctrl+B flipped a switch that a crowded-out side ignores. Fixed: both
+   now bring that side back, as its button does. Seen at 720 wide.
+4. **The bar that resizes lay over the side panel's scroll bar.** Fixed:
+   it reaches 2 pixels onto that panel, the scroll bar's clear edge.
+   Seen by asking what is under the pointer, pixel by pixel.
+5. **"Edit the text" dropped the keyboard.** Fixed: the text takes it.
+   Seen.
+6. **A review's checks, and Health's ticks, no longer said pass or fail
+   to a screen reader.** Fixed: the words are there, hidden from the
+   eye. Not heard: no reader was run.
+7. **"Hide the menu bar" from the Layout menu dropped the keyboard.**
+   Fixed: it goes to the file in front. Seen.
+8. **The right side came back on the first panel docked there**, not
+   the one that was showing. Fixed: it is kept with the other two. Seen,
+   with Source control and the Agent both docked right.
+9. **An outer region could not be caught where an inner one overlapped
+   it**, and a region five deep was cut away. Fixed: a band is caught
+   from its own left edge rightward, and the steps in stop at three.
+   Seen, pixel by pixel.
+10. **Folded groups were kept through a self-test.** Fixed: a self-test
+    starts with every group open and keeps nothing. Left: a group
+    folded in one project is folded in every project. That is meant: it
+    is the panel that is arranged, not the project.
+11. **The icon test did not hold a cross, a minus or an arrow.** Fixed
+    in part: a second test fails on the forms such a face has been
+    written in (alone on a line, alone in an element, alone in quotes),
+    and the first says what it holds. A symbol built some other way
+    would pass. The last such face, on a search switch, is an icon now.
+12. **A style rule named a class nothing has**, so a review's marks were
+    too large. Fixed.
+13. **"Copy" for selected words opened beside them**, not only on them.
+    Fixed: the pointer has to be on the words.
+14. **Paste did nothing, silently, where the web view refused the
+    clipboard.** Fixed: it says so; the ADR says both cases.
+15. **The documents had fallen behind**: the command count, the Explorer
+    menu, and new rows marked as if they had always been there. Fixed:
+    the rows are Bring and Built, in a step of their own.
+
+The reviewer also noted that a menu opened from a button does not shut
+when a shortcut takes the keyboard elsewhere. That is older than this
+work, and is left.
+
+The fixes were read by a second reviewer before they were committed. It
+found each of the fifteen fixed as said above, and five small things in
+the fixes themselves, all put right in the same commit:
+
+1. **A dialog's Tab went untrapped for one press** while a text box's
+   menu was open over it. Fixed: the dialog stands down only for the
+   keys the menu uses.
+2. **The menu that leaves the keyboard in its box said nothing to a
+   screen reader.** Fixed: what opened, and the entry marked, are said.
+   Not heard: no reader was run.
+3. **"Copy" still opened beside the words** in a selection over several
+   paragraphs. Fixed: the boxes asked about are those of the text.
+4. **The icon test missed a symbol written as an expression.** Fixed.
+5. **The deepest band in the strip of regions was cut by a pixel.**
+   Fixed.
+
+It also noted, as a change and not a fault, that showing a side from
+the layout buttons or Ctrl+B leaves the keyboard where it is. That is
+meant: a panel's own button and shortcut still take the keyboard to it.
+
+### The fixes, read before they went in
+
+The same reviewer read the fixes above before they were committed, and
+found eight things in them, none that loses work. All were fixed.
+
+1. **Enter in a text box's menu, with nothing marked, went on to the
+   dialog under it** and ran what was chosen there; Tab left the dialog.
+   Fixed: Enter then does nothing, and Tab shuts the menu only. Seen in
+   the command list.
+2. **That menu was silent to a screen reader**, since the keyboard is
+   not in it. Fixed: the box names the marked entry, and a line says
+   the menu has opened. Not heard: no reader was run.
+3. **"Reset the layout" with the menu bar hidden reset nothing.** Saving
+   the bar's setting brought the older layout back from disk. This was
+   in the first commit. Fixed for every setting: what comes back from a
+   save leaves the layout on screen alone. Seen.
+4. **The menu was tied to what had the keyboard**, not the box it was
+   for. Fixed: it is given the box.
+5. **"Copy" for selected words might not open from the menu key.**
+   Fixed: a right-click is told by its button, not by having a place.
+6. **The icon test still passed a symbol written in quotes.** Fixed, as
+   far as finding 11 above says.
+7. **Three sentences said more than the code did**: the strip caught
+   "across all 18 pixels", Enter "works the menu", and a comment. Fixed.
+8. **Small things**: a second, shorter list of modifier keys; a marked
+   entry and a hovered one both lit; a line's indentation. Fixed.
+
+After these the marked entry, the search switch's new icon and the menus
+were looked at again at 720 and 1440 wide, in the light and the dark
+theme.

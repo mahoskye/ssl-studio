@@ -88,7 +88,7 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 /* A graphic from the icon font (Icon.tsx, icons.ts): one family for every small picture in the window. */
 .codicon-glyph { display: inline-block; flex: none; font: normal calc(16px * var(--ui-scale))/1 codicon; text-align: center; vertical-align: text-bottom; text-transform: none; letter-spacing: 0; -webkit-font-smoothing: antialiased; }
 /* Beside small words it is their size, not a button's. */
-.statusbar .codicon-glyph, .meta .codicon-glyph, .here-mark .codicon-glyph, .doc-status .codicon-glyph, .md-status .codicon-glyph, .table-view th .codicon-glyph, .plan-stage-mark .codicon-glyph, .review li > .codicon-glyph, .check-mark .codicon-glyph, .sev .codicon-glyph, .twisty .codicon-glyph, .codicon-glyph.twisty { font-size: calc(13px * var(--ui-scale)); }
+.statusbar .codicon-glyph, .meta .codicon-glyph, .here-mark .codicon-glyph, .doc-status .codicon-glyph, .md-status .codicon-glyph, .table-view th .codicon-glyph, .plan-stage-mark .codicon-glyph, .checks li > .codicon-glyph, .check-mark .codicon-glyph, .sev .codicon-glyph, .twisty .codicon-glyph, .codicon-glyph.twisty { font-size: calc(13px * var(--ui-scale)); }
 .hint { color: var(--muted); font-size: var(--text-md); margin: var(--space-3) var(--space-5); }
 .warn { color: var(--warning); }
 .spacer { flex: 1; }
@@ -125,12 +125,14 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .sidebar { grid-row: 2; grid-column: 2; width: var(--left); min-width: 0; background: var(--side-bg); color: var(--side-fg); overflow: hidden; display: flex; flex-direction: column; }
 .splitter { position: relative; z-index: 1; }
 .splitter.x { grid-row: 2; grid-column: 3; width: 4px; cursor: col-resize; background: var(--border); }
-/* The bar is 4px; what the pointer can catch is 10px, and the 6px more are on the panel's side of it, never the */
-/* editors': what stands at the editors' edge (the strip of regions, the scroll bars) is not taken from the pointer. */
+/* The bar is 4px. What the pointer can catch reaches a little past it on the panel's side, never the editors': what */
+/* stands at the editors' edge (the strip of regions, the scroll bars) is not taken from the pointer. On the side */
+/* panel's side it reaches 2px, the clear edge of that panel's own scroll bar and no more; on the right panel's and */
+/* the bottom panel's, where nothing is dragged at the edge, 6px and 4px. */
 .splitter::after { content: ""; position: absolute; }
-.splitter.x::after { inset: 0 0 0 -6px; }
+.splitter.x::after { inset: 0 0 0 -2px; }
 .splitter.x.after-editors::after { inset: 0 -6px 0 0; }
-.splitter.y::after { inset: 0 0 -6px 0; }
+.splitter.y::after { inset: 0 0 -4px 0; }
 .splitter.x:hover, .splitter.y:hover, .splitter:focus-visible { background: var(--accent); outline: none; }
 .center { grid-row: 2; grid-column: 4; min-width: 0; display: flex; flex-direction: column; }
 .editors { flex: 1; min-height: 0; display: flex; }
@@ -298,6 +300,10 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .menu-pop { position: absolute; right: 0; top: 100%; z-index: 50; min-width: 240px; padding: var(--space-2); background: var(--side-bg); color: var(--side-fg); border: 1px solid var(--input-border); border-radius: var(--radius-lg); box-shadow: var(--shadow); display: flex; flex-direction: column; }
 .menu-item { display: flex; align-items: center; gap: var(--space-6); padding: var(--space-2) var(--space-4); text-align: left; white-space: nowrap; border-radius: var(--radius-sm); }
 .menu-item:focus-visible { background: var(--selected); outline-offset: -2px; }
+/* The entry the arrow keys or the pointer are on, in a menu that left the keyboard in its text box: one mark, not a mark and a hover. */
+.menu-item.marked { background: var(--selected); }
+.row-menu.kept .menu-item:hover { background: none; }
+.row-menu.kept .menu-item.marked:hover { background: var(--selected); }
 .menu-label { flex: 1; }
 .menu-keys { color: var(--muted); font-size: var(--text-sm); }
 .menu-sep { height: 1px; margin: var(--space-2) 0; background: var(--border); }
@@ -441,11 +447,12 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .crumb:hover { color: var(--fg); }
 .sep { opacity: .6; }
 .editor-row { flex: 1; min-height: 0; min-width: 0; display: flex; }
-/* Wide enough to point at: a band is caught anywhere across the strip at its height, not only on its own few pixels. */
+/* Wide enough to point at: a band is caught from its own left edge to the strip's right edge, not only on its own few pixels. */
 .region-strip { width: 18px; position: relative; flex: none; overflow: hidden; background: var(--tab-bg); border-right: 1px solid var(--border); }
-.region-band { position: absolute; width: 6px; margin-left: 3px; padding: 0; border-radius: var(--radius-sm); opacity: .85; cursor: pointer; min-height: 3px; }
-.region-band::after { content: ""; position: absolute; inset: 0 -18px; }
-.region-band:hover, .region-band:focus-visible { opacity: 1; width: 10px; }
+.region-band { position: absolute; width: 6px; margin-left: 2px; padding: 0; border-radius: var(--radius-sm); opacity: .85; cursor: pointer; min-height: 3px; }
+/* Caught from its own left edge to the strip's right edge. To its left are the regions it is inside, each still caught on its own first pixels. */
+.region-band::after { content: ""; position: absolute; inset: 0 -18px 0 0; }
+.region-band:hover, .region-band:focus-visible { opacity: 1; width: 8px; }
 .health section { padding: 0 var(--space-5) var(--space-5); }
 .health h3 { font-size: var(--text-md); font-weight: 600; margin: var(--space-4) 0 var(--space-3); }
 .meter-row { display: grid; grid-template-columns: 1fr auto; gap: var(--space-1) var(--space-4); margin-bottom: var(--space-4); font-size: var(--text-md); align-items: center; }

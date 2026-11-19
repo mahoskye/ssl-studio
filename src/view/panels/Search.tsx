@@ -309,7 +309,7 @@ export function Search() {
 					<IconButton
 						label="Choose which files to search"
 						title="Which files: to include, to exclude"
-						glyph="…"
+						icon="ellipsis"
 						pressed={choosing()}
 						onClick={() => {
 							setChoosing(!choosing());

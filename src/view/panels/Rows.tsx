@@ -4,6 +4,7 @@
 // open in a tree, letters jump to a row, and the menu key or Shift+F10 opens a
 // row's menu. The arithmetic is in rowMoves.ts; this file applies it to the DOM.
 import { Icon, type IconName } from "../Icon";
+import { state } from "../state";
 import { createSignal, createUniqueId, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { foldedFrom, isMoveKey, moveIndex, restoreIndex, stopIndex, treeStep, typeAhead, withFold, type TreeRow } from "./rowMoves";
 
@@ -31,8 +32,11 @@ const kept = (): Storage | null => {
 };
 /** The headed groups that are folded shut, by the names they fold under. */
 const [folded, setFolded] = createSignal(foldedFrom(kept()?.getItem(FOLDED) ?? null));
-export const isFolded = (name: string) => folded().includes(name);
+// A self-test starts with every group open, and leaves nothing folded behind for the next run or for the user.
+const tested = () => Boolean(state.info?.selftest || state.info?.selftestClose);
+export const isFolded = (name: string) => !tested() && folded().includes(name);
 export function setFold(name: string, shut: boolean) {
+	if (tested()) return;
 	setFolded(withFold(folded(), name, shut));
 	try {
 		kept()?.setItem(FOLDED, JSON.stringify(folded()));

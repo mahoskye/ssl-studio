@@ -117,6 +117,7 @@ export function Health() {
 									</span>}>
 									<span class="meta">
 										<Icon name="check" />
+										<span class="visually-hidden">written</span>
 									</span>
 								</Show>
 							</Row>

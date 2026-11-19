@@ -48,7 +48,7 @@ whether it is built.
 | Zen and full screen | No | Later | A command each |
 | Several windows | No | Later | One folder to a window |
 | Custom title bar | No | Leave | The system's own is enough |
-| Layout controls | Yes | Have | Asked for in use: side, bottom and right panel buttons in the menu bar, and a Layout menu |
+| Layout controls | Yes | Bring | Built, asked for in use: side, bottom and right panel buttons in the menu bar, and a Layout menu |
 
 ## The menu bar, menu by menu
 
@@ -81,8 +81,8 @@ of the text editor, and nothing of its own.
 | Health row menu | Yes | Have | Open, and what puts the row right |
 | Search row menu | No | Later | Copy the line or its path |
 | Problems row menu | No | Later | Copy the message |
-| Page menu | Yes | Have | Asked for in use: a rendered document's own (copy, link, edit the text, paths, name) |
-| Text box menu | Yes | Have | The app's own cut, copy, paste and select all; the web view's menu never opens (ADR 0023) |
+| Page menu | Yes | Bring | Built, asked for in use: a rendered document's own (copy, link, edit the text, paths, name) |
+| Text box menu | Yes | Bring | Built: the app's own cut, copy, paste and select all; the web view's menu never opens (ADR 0023) |
 
 ## Tabs and groups
 
@@ -121,7 +121,7 @@ of the text editor, and nothing of its own.
 | Indent settings | Partly | Later | The editor converts tabs and spaces; nothing shows which a file uses |
 | Sticky scroll | Yes | Have | The enclosing regions and procedure stay at the top; the audit had missed it |
 | Emmet | No | Leave | For HTML; forms are on hold |
-| Scroll past the end | Yes | Have | Asked for in use: the last line can be brought to the top of the view |
+| Scroll past the end | Yes | Bring | Built, asked for in use: the last line can be brought to the top of the view |
 
 ## Go and the palette
 
@@ -146,7 +146,7 @@ of the text editor, and nothing of its own.
 | Follows the editor | Yes | Have | The open file's row is marked |
 | File watching | Partly | Later | Misses a file git puts back and later changes to a new file; needs a check of its own |
 | Copy path | Yes | Bring | Built: whole (Alt+Shift+C), from the project's folder, and the name alone, as commands |
-| Sections fold | Yes | Have | Asked for in use: each group in the Docs panel folds, and stays folded |
+| Sections fold | Yes | Bring | Built, asked for in use: each group in the Docs panel folds, and stays folded |
 | Copy, cut, paste | Yes | Bring | Built: Ctrl+C, Ctrl+X, Ctrl+V and the row's menu; a copy beside itself is "… copy" |
 | Drag to move | Yes | Bring | Built: a row onto a folder, or onto the tree for the workspace folder; it asks first |
 | Reveal in system | No | Later | Open the folder in the file manager |
@@ -503,6 +503,31 @@ panel in the app's own window, and a workspace inside a larger
 repository (the backend's tests stage, unstage and discard in one; CI
 runs them on Windows and macOS too).
 
+### Step 9: what the first use asked for
+
+Added after the eight steps, from what the user saw and asked for when
+trying the app.
+
+| Feature | Size | Done | What it takes |
+| --- | --- | --- | --- |
+| Layout controls | Medium | Yes | Three buttons and a menu in the menu bar; two new commands |
+| Page menu | Small | Yes | A menu on a rendered document, by right-click or the menu key |
+| Text box menu | Medium | Yes | One handler for the window; a menu that leaves the keyboard in the box |
+| Sections fold | Medium | Yes | A heading that is a row to the keyboard; what is shut is kept |
+| Scroll past the end | Small | Yes | One option of the editor |
+| Copy file name | Small | Yes | A command, and an entry on three menus |
+
+Two things were put right with these, not new features: every small
+graphic is now from the editor's icon font or drawn by a style rule (the
+unsaved mark was an oval), and the strip of regions is wider and is not
+taken from the pointer by the bar that resizes the side panel. The rules
+are in [ADR 0023](adr/0023-the-windows-graphics-and-menus-are-its-own.md).
+Copy file name is part of the Copy path row.
+
+Looked at: 720 and 1440 wide, each in the light and the dark theme,
+before the commit. A seventh review was made of the commit; what it
+found is in [the list](VSCODE-AUDIT-REVIEWS.md#the-seventh-review-what-the-first-use-asked-for).
+
 ## What the reviews found
 
 A review was made after every two or three steps, by a reader who was
@@ -533,8 +558,14 @@ of bytes". The first of those fixes changed code after the last review,
 so a fourth review was made of it alone, a fifth of the fixes that came
 of the fourth, and a sixth of those that came of the fifth. They
 confirmed five, six and four findings. All were fixed but two small ones
-of the last, which are left with their reasons; the last review found
+of the last, which are left with their reasons; the sixth review found
 nothing that loses work.
+
+A seventh review was made of step 9's commit (`3905b68`), before
+anything else was built on it. It had fifteen findings, none that loses
+work. Thirteen were fixed and two were fixed in part, with what was left
+and why. The reviewer then read those fixes before they were committed
+and found eight more things in them, which were fixed too.
 
 ## Why not an extension
 

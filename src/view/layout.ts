@@ -41,3 +41,10 @@ export function fitPanels(window: number, left: number, right: number, prefer: "
 		(prefer === "right" ? (rightAlone() ?? leftAlone()) : (leftAlone() ?? rightAlone())) ?? { left: 0, right: 0 }
 	);
 }
+
+/**
+ * The panel a side shows: the one it was showing, for as long as that is
+ * docked there; else the first that is; null when none is. A side never
+ * shows a panel that is docked on the other one.
+ */
+export const dockedView = <T extends string>(shown: T, docked: readonly T[]): T | null => (docked.includes(shown) ? shown : (docked[0] ?? null));

@@ -171,7 +171,9 @@ export function ReviewView() {
 							<For each={r.checks}>
 								{(c) => (
 									<li class={c.ok === null ? "unknown" : c.ok ? "pass" : "fail"} title={c.detail}>
-										{c.ok === null ? "?" : <Icon name={c.ok ? "check" : "close"} />} {c.label}
+										{c.ok === null ? "?" : <Icon name={c.ok ? "check" : "close"} />}
+										{/* The mark is for the eye: what it says is said in words too. */}
+										<span class="visually-hidden">{c.ok === null ? "Not known:" : c.ok ? "Passed:" : "Failed:"}</span> {c.label}
 										<Show when={c.detail}>
 											<span class="hint"> {c.detail}</span>
 										</Show>

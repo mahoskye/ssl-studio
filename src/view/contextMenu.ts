@@ -43,6 +43,26 @@ function placeOf(e: MouseEvent, on: Element | null): Point {
 	return { x: at.left + 8, y: at.bottom };
 }
 
+/**
+ * Where the selected words themselves are drawn. Asked of each run of text, not of the selection whole: that also
+ * gives the full box of every paragraph inside it, and the empty space beside a short line is not the words.
+ */
+function wordBoxes(range: Range): DOMRect[] {
+	const root = range.commonAncestorContainer;
+	if (root.nodeType === Node.TEXT_NODE) return [...range.getClientRects()];
+	const boxes: DOMRect[] = [];
+	const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+	for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+		if (!range.intersectsNode(node)) continue;
+		const part = document.createRange();
+		part.selectNodeContents(node);
+		if (node === range.startContainer) part.setStart(node, range.startOffset);
+		if (node === range.endContainer) part.setEnd(node, range.endOffset);
+		boxes.push(...part.getClientRects());
+	}
+	return boxes;
+}
+
 export function installContextMenu() {
 	window.addEventListener("contextmenu", (e) => {
 		// The app's own menu for this place is open already.
@@ -54,16 +74,23 @@ export function installContextMenu() {
 		if (box) {
 			const items = boxMenu({ ...stateOf(box), canPaste: Boolean(navigator.clipboard?.readText) });
 			if (!items.length) return;
-			void chooseFromMenu("Actions for this text box", items.map((item) => NAMES[item]), at).then((picked) => {
+			// The keyboard stays in the box: one that saves or shuts when it loses the keyboard is not to do so for its menu.
+			void chooseFromMenu("Actions for this text box", items.map((item) => NAMES[item]), at, { box }).then((picked) => {
 				const name = items.find((item) => NAMES[item] === picked);
 				if (name && box.isConnected) void runInBox(box, name);
 			});
 			return;
 		}
-		// Words selected on the page (a message, a line of output), when the click was on them.
+		// Words selected on the page (a message, a line of output), when the click was on them: on one of the boxes the
+		// selection is drawn in, not merely somewhere in what holds it. From the keyboard, the selection only has to be
+		// in what holds the keyboard.
 		const selection = window.getSelection();
 		const words = selection?.toString() ?? "";
-		if (!on || !selection || selection.isCollapsed || !words.trim() || !selection.containsNode(on, true)) return;
+		if (!on || !selection || selection.isCollapsed || !selection.rangeCount || !words.trim()) return;
+		// A right-click is the right button; the menu key and Shift+F10 are not, whatever place the web view gives them.
+		const pointed = e.button === 2;
+		const onWords = pointed ? wordBoxes(selection.getRangeAt(0)).some((box) => e.clientX >= box.left && e.clientX <= box.right && e.clientY >= box.top && e.clientY <= box.bottom) : selection.containsNode(on, true);
+		if (!onWords) return;
 		void chooseFromMenu("Actions for the selected text", [NAMES.copy], at).then((picked) => picked === NAMES.copy && void copyText(words, "Copied the selected text."));
 	});
 }

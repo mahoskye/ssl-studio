@@ -520,7 +520,8 @@ export function EditorGroup(props: { index: number }) {
 									style={{
 										top: `${((symbol.range.startLineNumber - 1) / lineCount()) * 100}%`,
 										height: `${Math.max(0.5, ((symbol.range.endLineNumber - symbol.range.startLineNumber + 1) / lineCount()) * 100)}%`,
-										left: `${depth * 3}px`,
+										// A step in for each region it is inside, up to what the strip has room for.
+										left: `${Math.min(depth, 3) * 3}px`,
 										background: regionColor(symbol.name),
 									}}
 									onClick={() => void openFile(group().active!, { reveal: { line: symbol.selectionRange.startLineNumber, column: 1 } })}

@@ -31,7 +31,7 @@ import { useNavigation } from "./navigation";
 import { StatusBar } from "./StatusBar";
 import { applyTheme, resolveTheme } from "./themes/themes";
 import { dismiss, focusRequest, openFolder, rememberTabs, rememberViews, setState, state, unsavedPaths, type PanelId } from "./state";
-import { focusPanel, isShown, lastShown, movePanel, PANELS, setCrowdedOut, sideOf, togglePanel } from "./panels/registry";
+import { focusPanel, isShown, lastShown, movePanel, panelOn, PANELS, setCrowdedOut, sideOf, togglePanel } from "./panels/registry";
 import { Welcome } from "./Welcome";
 import { ACTIVITY, fitPanels } from "./layout";
 
@@ -174,18 +174,20 @@ export function App() {
 	useNavigation();
 	useGit();
 	useLayoutPersistence();
+	// Each side shows a panel that is docked on it. One that was moved away, or put back by "Reset the layout", or
+	// was never chosen (the app has only just started) gives way to one that is docked there; with none, the side closes.
 	createEffect(() => {
-		if (!state.settings.layout.right || sideOf(state.rightView) === "right") return;
-		// The right side is open on a panel that is not docked there (it was moved away, or the app has only just
-		// started): it shows one that is, and closes when there is none. Left open at the last close, it opens again.
-		const docked = PANELS.find((panel) => sideOf(panel.id) === "right");
-		if (docked) setState("rightView", docked.id);
-		else setState("settings", "layout", "right", false);
+		for (const side of ["left", "right"] as const) {
+			const key = side === "left" ? "leftView" : "rightView";
+			const view = panelOn(side);
+			if (view === null) state.settings.layout[side] && setState("settings", "layout", side, false);
+			else if (view !== state[key]) setState(key, view);
+		}
 	});
 	// Which files are open is kept with the folder, so that it opens next time as it was left.
 	createEffect(on(() => JSON.stringify([state.groups.map((g) => [g.tabs, g.active]), state.activeGroup]), rememberTabs));
 	// And so are the side panel and the bottom panel that were showing.
-	createEffect(on(() => [state.leftView, state.bottomView], rememberViews));
+	createEffect(on(() => [state.leftView, state.bottomView, state.rightView], rememberViews));
 	// The app is told how much is unsaved, so that it can refuse to close its window until the user has been asked.
 	createEffect(() => void backend.unsavedChanged(unsavedPaths().length).catch(() => undefined));
 	// A review takes the editors' place: one opened while the call graph is showing must not open behind it.

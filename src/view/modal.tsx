@@ -4,6 +4,7 @@
 // on the overlay, and makes the rest of the app inert meanwhile.
 import { createSignal, onCleanup, onMount, type JSX } from "solid-js";
 import { Dynamic } from "solid-js/web";
+import { rowMenuOpen } from "./panels/RowMenu";
 
 type Open = {
 	dialog: () => HTMLElement | undefined;
@@ -53,7 +54,8 @@ if (typeof window !== "undefined") {
 			if (!top) return;
 			// A menu opened over the dialog (a right-click in one of its boxes) has the keys while it is open: Escape shuts
 			// the menu, not the dialog under it.
-			if (e.target instanceof Element && e.target.closest(".row-menu")) return;
+			// Only the keys the menu uses: Tab still goes round inside the dialog, and the menu shuts as it does.
+			if (rowMenuOpen() && ((e.target instanceof Element && e.target.closest(".row-menu")) || ["Escape", "ArrowDown", "ArrowUp", "Enter"].includes(e.key))) return;
 			if (top.key(e)) return;
 			if (e.key === "Escape") {
 				e.preventDefault();

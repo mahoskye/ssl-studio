@@ -9,7 +9,7 @@ import { session } from "./lsp/session";
 import { symbols } from "./panels/Objects";
 import { symbolPath } from "./editor/regions";
 import { openStyleProfile } from "./StyleProfile";
-import { movePanel, PANELS, showPanel, sideOf, togglePanel } from "./panels/registry";
+import { movePanel, panelOn, showPanel, toggleSide } from "./panels/registry";
 import { explorerDelete, explorerNewFile, explorerRename } from "./panels/Explorer";
 import { insertTemplate } from "./panels/Palette";
 import { TEMPLATES } from "../shared/houseStyle";
@@ -56,16 +56,18 @@ import {
 /** `label` is a verb phrase; `detail` is the quieter second line that explains it. */
 export type Command = { id: string; label: string; detail?: string; run: () => void };
 
-const toggle = (key: "left" | "bottom" | "right") => setState("settings", "layout", key, (v) => !v);
-/** The panels docked on the right side, which is empty when every one was moved to the left. */
-export const rightPanel = () => (sideOf(state.rightView) === "right" ? state.rightView : PANELS.find((panel) => sideOf(panel.id) === "right")?.id);
-function toggleRight() {
-	const panel = rightPanel();
+const toggle = (key: "bottom") => setState("settings", "layout", key, (v) => !v);
+/** Shows or hides a side of the window. A side no panel is docked on has nothing to show, and says so. */
+function toggleSideOf(side: "left" | "right") {
 	if (!state.workspace) return;
-	if (!panel) return notify("No panel is docked on the right. Right-click a panel's button to move it there.");
-	togglePanel(panel);
+	if (!panelOn(side)) return notify(`No panel is docked on the ${side}. Right-click a panel's button to move it there.`);
+	toggleSide(side);
 }
-/** The layout as a folder first opens with: what was moved goes home, what was resized is its first size. The menu bar is shown. */
+/**
+ * The layout as a folder first opens with: what was moved goes home, what was resized is its first size. The menu
+ * bar is shown. A side that was showing a panel now docked on the other one shows one of its own (App.tsx).
+ * Showing the bar saves a setting; what comes back from a save leaves the layout on screen alone (state.ts).
+ */
 function resetLayout() {
 	setState("settings", "layout", { ...defaultLayout(), dock: {} });
 	if (state.settings.menuBar === false) void switchSetting("menuBar", true, () => state.settings.menuBar !== false);
@@ -183,9 +185,9 @@ export const commands: Command[] = [
 	{ id: "problems", label: "Show Problems", run: () => showBottom("problems") },
 	{ id: "output", label: "Show Output", run: () => showBottom("output") },
 	{ id: "graph", label: "Show Call graph", detail: "Again to go back to the editors", run: () => setState("centerView", state.centerView === "graph" ? "editors" : "graph") },
-	{ id: "toggle-sidebar", label: "Toggle side bar", run: () => toggle("left") },
+	{ id: "toggle-sidebar", label: "Toggle side bar", run: () => toggleSideOf("left") },
 	{ id: "toggle-panel", label: "Toggle bottom panel", run: () => toggle("bottom") },
-	{ id: "toggle-right-panel", label: "Toggle right panel", detail: "The panel docked on the right: the Agent, unless another was moved there", run: toggleRight },
+	{ id: "toggle-right-panel", label: "Toggle right panel", detail: "The panel docked on the right: the Agent, unless another was moved there", run: () => toggleSideOf("right") },
 	{ id: "reset-layout", label: "Reset the layout", detail: "Every panel back on its own side and at its first size", run: resetLayout },
 	{ id: "menu-bar", label: "Focus the menu bar", detail: "Then the arrow keys. Alt and a menu's first letter opens that menu", run: () => void (openMenu() || notify(MENU_HIDDEN)) },
 	{ id: "toggle-menu-bar", label: "Toggle menu bar", detail: "File, Edit, Selection, View, Go and Help across the top of the window", run: () => void toggleMenuBar() },
@@ -237,6 +239,8 @@ async function toggleMenuBar() {
 	const done = await switchSetting("menuBar", !hide, () => state.settings.menuBar !== false);
 	// What was hidden says how it is brought back: the menu that hid it is gone with it.
 	if (hide && done) notify(MENU_HIDDEN);
+	// And so is whatever in the bar had the keyboard: it goes to the editor.
+	if (hide && done && (!document.activeElement || document.activeElement === document.body)) focusEditor();
 }
 
 /** Puts the selected lines inside a new comment region (a frame in blocks mode). */

@@ -19,7 +19,7 @@ import { colourCode } from "./markdownCode";
 import { ticketWork } from "../../shared/workContext";
 import { docs } from "../project";
 import { outline, type OutlineItem } from "../../shared/outline";
-import { canonical, documents, openFile, revealSignal, setState, state } from "../state";
+import { canonical, documents, focusEditor, openFile, revealSignal, setState, state } from "../state";
 import { chooseFromMenu } from "../panels/RowMenu";
 
 export function MarkdownView(props: { path: string }) {
@@ -126,7 +126,11 @@ export function MarkdownView(props: { path: string }) {
 		if (picked === COPY) await copyText(words, "Copied the selected text.");
 		else if (picked === OPEN) link?.click();
 		else if (picked === COPY_LINK) await copyText(link?.getAttribute("href") ?? "", "Copied the link.");
-		else if (picked === EDIT) setState("mdText", props.path, true);
+		else if (picked === EDIT) {
+			setState("mdText", props.path, true);
+			// The page that had the keyboard is gone: the text takes it.
+			setTimeout(focusEditor, 0);
+		}
 		else if (picked === SHOW) (await import("../panels/Explorer")).showInExplorer(props.path);
 		else await copyPath(picked === PATH ? "whole" : picked === NAME ? "name" : "relative", props.path);
 	};

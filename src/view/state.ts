@@ -194,7 +194,7 @@ const BOTTOM_VIEWS: readonly BottomView[] = ["problems", "output"];
 /** Keeps which side panel and which bottom panel are showing in this folder, for the next time it is opened. */
 export function rememberViews() {
 	const root = state.workspace?.root;
-	if (root && tabsReady) remember(viewsKey(root), packViews(state.leftView, state.bottomView));
+	if (root && tabsReady) remember(viewsKey(root), packViews(state.leftView, state.bottomView, state.rightView));
 }
 
 /**
@@ -210,6 +210,8 @@ export async function restoreTabs() {
 		const views = root ? unpackViews(recall(viewsKey(root)), LEFT_VIEWS, BOTTOM_VIEWS) : {};
 		if (views.left) setState("leftView", views.left as PanelId);
 		if (views.bottom) setState("bottomView", views.bottom as BottomView);
+		// Where it is no longer docked on the right, the window's layout shows another that is (App.tsx).
+		if (views.right) setState("rightView", views.right as PanelId);
 		const saved = root ? unpackTabs(recall(tabsKey(root))) : null;
 		if (!root || !saved) return;
 		for (const [index, group] of saved.groups.entries()) {
@@ -261,7 +263,11 @@ export async function loadSettings() {
 
 export async function saveSetting(patch: SettingsPatch, scope: "user" | "workspace" = "user") {
 	const effective = await guarded(() => backend.saveSettings(scope, patch));
-	if (effective) setState("settings", effective);
+	if (!effective) return;
+	// What comes back is the settings as they are on disk. The layout is the view's own, and is saved a moment after
+	// it changes (App.tsx): the one on disk may be older, and must not come back over the one on screen.
+	const { layout: onDisk, ...rest } = effective;
+	setState("settings", "layout" in patch ? effective : rest);
 }
 
 // --- documents ---------------------------------------------------------------

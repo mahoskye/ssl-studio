@@ -43,6 +43,13 @@ describe("the panels a folder was left with", () => {
 		expect(viewsKey("/w")).toBe("views:/w");
 	});
 
+	test("the right side's panel is kept too, and may be any side panel", () => {
+		expect(unpackViews(packViews("objects", "output", "search"), lefts, bottoms)).toEqual({ left: "objects", bottom: "output", right: "search" });
+		expect(unpackViews(packViews("objects", "output", "gone"), lefts, bottoms)).toEqual({ left: "objects", bottom: "output" });
+		// What was kept before the right side was: nothing for it, and nothing lost.
+		expect(unpackViews(JSON.stringify({ left: "objects", bottom: "output" }), lefts, bottoms)).toEqual({ left: "objects", bottom: "output" });
+	});
+
 	test("a panel there is no longer, or never was, does not come back", () => {
 		expect(unpackViews(packViews("gone", "output"), lefts, bottoms)).toEqual({ bottom: "output" });
 		expect(unpackViews(JSON.stringify({ left: 3, bottom: null }), lefts, bottoms)).toEqual({});

@@ -28,15 +28,23 @@ Under [ADR 0007](0007-design-is-held-to-a-standard-that-serves-starlims-work.md)
   has a menu opens that menu. In a text box it opens the app's menu for a
   text box (cut, copy, paste, select all). On selected words it offers
   Copy. Anywhere else it opens nothing.
+- **A text box's menu leaves the keyboard in the box.** A box that saves
+  or shuts when the keyboard leaves it (a table's cell, a block's text)
+  does neither because its menu opened. Up and Down mark an entry, Enter
+  takes the marked one and does nothing with none marked, Escape and Tab
+  shut the menu; any other key shuts it and is typed. The box names the
+  marked entry to assistive tech.
 - **Letters stay letters.** "Aa", "ab" and ".*" on the search switches
-  are text, and so are the punctuation marks in prose.
+  are text, and so are a cross, a minus or an arrow inside a sentence. As
+  a control's whole face they are icons.
 
 ## Consequences
 
 - No dependency is added: the font is the editor's.
 - Paste from the text box menu needs the web view to let the page read
-  the clipboard. Where it does not, the menu has no Paste and the key
-  still works.
+  the clipboard. Where the web view has no way to, the menu has no
+  Paste. Where it has one and refuses, Paste says so. The key still
+  works in both.
 - The web view's "Inspect" is no longer one right-click away. A developer
   opens the tools by their own key.
 - Seen in the browser preview only. Whether the desktop window's web view

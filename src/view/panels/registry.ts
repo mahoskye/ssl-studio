@@ -2,7 +2,8 @@
 // move any of them to the other side, and the choice is saved with the
 // workspace's layout.
 import { createSignal } from "solid-js";
-import { setState, state, type PanelId } from "../state";
+import { dockedView } from "../layout";
+import { focusEditor, setState, state, type PanelId } from "../state";
 
 export type Side = "left" | "right";
 export const PANELS: { id: PanelId; icon: string; title: string; home: Side }[] = [
@@ -58,6 +59,27 @@ export function focusPanel(id: PanelId) {
 	if (!target) return;
 	target.focus();
 	if (target instanceof HTMLInputElement) target.select();
+}
+
+/** The panel a side shows, or would show: null when no panel is docked on it. */
+export const panelOn = (side: Side): PanelId | null =>
+	dockedView(
+		state[viewKey(side)],
+		PANELS.filter((panel) => sideOf(panel.id) === side).map((panel) => panel.id),
+	);
+
+/**
+ * Shows or hides a side as a part of the window. The keyboard stays where it is, unless it was in the side that
+ * went: then it goes to the editor. A side that is open but has no room is brought back, not shut.
+ */
+export function toggleSide(side: Side) {
+	if (state.settings.layout[side] && crowdedOut() !== side) {
+		setState("settings", "layout", side, false);
+		queueMicrotask(() => (!document.activeElement || document.activeElement === document.body) && focusEditor());
+		return;
+	}
+	setLastShown(side);
+	setState("settings", "layout", side, true);
 }
 
 export function togglePanel(id: PanelId) {

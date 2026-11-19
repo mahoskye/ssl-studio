@@ -3,12 +3,21 @@
 // Nothing in it is marked when it opens, so Enter alone does nothing: an
 // action runs only when the user moved to it or clicked it. It wears the
 // classes of the app's other menu (Menu.tsx), so the two look alike.
-import { createSignal, For, onCleanup, Show } from "solid-js";
+//
+// A menu for a text box (`box`) leaves the keyboard in the box: a box that
+// saves or shuts when the keyboard leaves it (a table's cell, a block's text)
+// must not do so because its own menu opened. The keys then come to the menu
+// from the window: Up and Down mark an entry, Enter takes the marked one (and
+// does nothing with none marked, here as above), Escape and Tab shut the
+// menu, and any other key shuts it and is typed in the box. The box names the
+// marked entry to assistive tech, and a line says the menu has opened.
+import { createEffect, createSignal, createUniqueId, For, onCleanup, onMount, Show } from "solid-js";
 import { Portal } from "solid-js/web";
+import { isModifierKey } from "../keys";
 import { isMoveKey, moveIndex, typeAhead } from "./rowMoves";
 import type { Point } from "./Rows";
 
-type Open = { label: string; items: string[]; at: Point; opener: Element | null; resolve: (item: string | null) => void };
+type Open = { label: string; items: string[]; at: Point; opener: Element | null; keep: boolean; resolve: (item: string | null) => void };
 const [open, setOpen] = createSignal<Open | null>(null);
 
 function finish(item: string | null, refocus = true) {
@@ -16,7 +25,8 @@ function finish(item: string | null, refocus = true) {
 	if (!menu) return;
 	setOpen(null);
 	// Focus goes back to where it was; a dialog that follows takes it from there, and gives it back.
-	if (refocus && menu.opener instanceof HTMLElement && menu.opener.isConnected) menu.opener.focus();
+	// A menu that left the keyboard where it was has nothing to give back.
+	if (refocus && !menu.keep && menu.opener instanceof HTMLElement && menu.opener.isConnected) menu.opener.focus();
 	menu.resolve(item);
 }
 
@@ -24,10 +34,17 @@ function finish(item: string | null, refocus = true) {
  * Shows the menu and resolves with the item chosen, or null when it was
  * closed (Escape, Tab, a click elsewhere). <RowMenu /> is on screen for the whole app (App.tsx).
  */
-export function chooseFromMenu(label: string, items: string[], at: Point): Promise<string | null> {
+export function chooseFromMenu(label: string, items: string[], at: Point, options: { /** The text box the menu is for: the keyboard is put in it, and stays in it. */ box?: HTMLElement } = {}): Promise<string | null> {
 	finish(null);
-	return new Promise((resolve) => setOpen({ label, items, at, opener: document.activeElement, resolve }));
+	// The menu is tied to the box it was asked for, which is not always what has the keyboard (a right-click on one
+	// box while another's menu was open does not move it).
+	options.box?.focus();
+	return new Promise((resolve) => setOpen({ label, items, at, opener: options.box ?? document.activeElement, keep: Boolean(options.box), resolve }));
 }
+
+/** True while a row's menu is open: a dialog under it leaves the keys to it. */
+export const rowMenuOpen = () => open() !== null;
+
 
 export function RowMenu() {
 	onCleanup(() => finish(null));
@@ -39,8 +56,39 @@ export function RowMenu() {
 					const box = el.getBoundingClientRect();
 					el.style.left = `${Math.max(0, Math.min(menu.at.x, window.innerWidth - box.width))}px`;
 					el.style.top = `${Math.max(0, Math.min(menu.at.y, window.innerHeight - box.height))}px`;
-					el.focus();
+					if (!menu.keep) el.focus();
 				};
+				/** The entry the arrow keys or the pointer have marked, in a menu that does not hold the keyboard. */
+				const [marked, setMarked] = createSignal(-1);
+				const id = createUniqueId();
+				if (menu.keep) {
+					const onWindowKey = (e: KeyboardEvent) => {
+						const used = () => (e.preventDefault(), e.stopPropagation());
+						if (e.key === "Escape") (used(), finish(null));
+						else if (e.key === "ArrowDown" || e.key === "ArrowUp") (used(), setMarked(moveIndex(menu.items.length, marked(), e.key, { wrap: true })));
+						// Enter alone takes nothing, and does not go on to the box or the dialog under the menu.
+						else if (e.key === "Enter") (used(), marked() >= 0 && finish(menu.items[marked()]!));
+						// Tab shuts the menu and goes nowhere: the keyboard stays in the box.
+						else if (e.key === "Tab") (used(), finish(null));
+						// Anything else is for the box: the menu goes, and the key is typed.
+						else if (!isModifierKey(e.key)) finish(null);
+					};
+					// The box lost the keyboard some other way (it was closed, another window came forward): its menu goes too.
+					const onLeave = () => finish(null);
+					// The box says which entry is marked, to what reads the screen aloud: the keyboard never leaves it.
+					const had = menu.opener?.getAttribute("aria-activedescendant") ?? null;
+					createEffect(() => (marked() >= 0 ? menu.opener?.setAttribute("aria-activedescendant", `${id}-${marked()}`) : menu.opener?.removeAttribute("aria-activedescendant")));
+					onMount(() => {
+						window.addEventListener("keydown", onWindowKey, true);
+						menu.opener?.addEventListener("blur", onLeave);
+					});
+					onCleanup(() => {
+						window.removeEventListener("keydown", onWindowKey, true);
+						menu.opener?.removeEventListener("blur", onLeave);
+						if (had === null) menu.opener?.removeAttribute("aria-activedescendant");
+						else menu.opener?.setAttribute("aria-activedescendant", had);
+					});
+				}
 				const onKeyDown = (e: KeyboardEvent & { currentTarget: HTMLDivElement }) => {
 					const items = [...e.currentTarget.querySelectorAll<HTMLElement>("[role=menuitem]")];
 					const at = items.indexOf(document.activeElement as HTMLElement);
@@ -58,15 +106,24 @@ export function RowMenu() {
 				};
 				return (
 					<Portal>
-						<div class="row-menu-shade" onMouseDown={() => finish(null)} onContextMenu={(e) => (e.preventDefault(), finish(null))} />
+						{/* A press beside a menu that left the keyboard in its box shuts the menu and leaves the keyboard there still. */}
+						<div class="row-menu-shade" onMouseDown={(e) => (menu.keep && e.preventDefault(), finish(null))} onContextMenu={(e) => (e.preventDefault(), finish(null))} />
+						{/* A menu that does not hold the keyboard is not read out by itself: what opened, and the entry marked, are said. */}
+						<Show when={menu.keep}>
+							<span class="visually-hidden" role="status">
+								{marked() >= 0 ? menu.items[marked()] : `Menu: ${menu.items.join(", ")}. Up and Down choose, Enter takes, Escape closes.`}
+							</span>
+						</Show>
 						<div
 							ref={(el) => queueMicrotask(() => place(el))}
 							class="menu-pop row-menu"
+							classList={{ kept: menu.keep }}
 							role="menu"
 							aria-label={menu.label}
 							tabindex={-1}
 							style={{ left: `${menu.at.x}px`, top: `${menu.at.y}px` }}
 							onKeyDown={onKeyDown}
+							onMouseDown={(e) => menu.keep && e.preventDefault()}
 							onFocusOut={(e) => {
 								// Something else took the keyboard (the command palette, say): the menu goes, and does not take it back.
 								const to = e.relatedTarget as Node | null;
@@ -74,12 +131,28 @@ export function RowMenu() {
 							}}
 						>
 							<For each={menu.items}>
-								{(item) => (
-									<button type="button" class="menu-item" role="menuitem" tabindex={-1} onClick={() => finish(item)}>
+								{(item, at) => (
+									<button
+										type="button"
+										class="menu-item"
+										classList={{ marked: marked() === at() }}
+										id={`${id}-${at()}`}
+										role="menuitem"
+										tabindex={-1}
+										// The pointer and the arrow keys move the one mark.
+										onMouseMove={() => menu.keep && marked() !== at() && setMarked(at())}
+										onClick={() => finish(item)}
+									>
 										{item}
 									</button>
 								)}
 							</For>
+							{/* The keyboard is not in the menu, so nothing reads it out by itself: this says it has opened, and how it is worked. */}
+							<Show when={menu.keep}>
+								<div class="visually-hidden" role="status">
+									{menu.label}: {menu.items.join(", ")}. Up and Down choose, Enter takes one, Escape closes.
+								</div>
+							</Show>
 						</div>
 					</Portal>
 				);

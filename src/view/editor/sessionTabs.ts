@@ -42,20 +42,21 @@ export function unpackTabs(text: string | null | undefined): TabSession | null {
 
 // --- the panels a folder was left with ----------------------------------------------------
 
-/** Which side panel and which bottom panel were showing. */
-export type ViewSession = { left?: string; bottom?: string };
+/** Which side panel, which bottom panel and which right panel were showing. */
+export type ViewSession = { left?: string; bottom?: string; right?: string };
 
 /** Where a folder's panels are kept, among the choices a view remembers. */
 export const viewsKey = (root: string) => `views:${root}`;
 
-export const packViews = (left: string, bottom: string): string => JSON.stringify({ left, bottom });
+export const packViews = (left: string, bottom: string, right?: string): string => JSON.stringify({ left, bottom, ...(right ? { right } : {}) });
 
 /** What was kept, read with suspicion: only a panel that is one of those there are comes back. */
 export function unpackViews(text: string | null | undefined, lefts: readonly string[], bottoms: readonly string[]): ViewSession {
 	if (!text) return {};
 	try {
 		const raw = JSON.parse(text);
-		return { ...(lefts.includes(raw?.left) ? { left: raw.left } : {}), ...(bottoms.includes(raw?.bottom) ? { bottom: raw.bottom } : {}) };
+		// Any side panel may be docked on the right: the same names count there.
+		return { ...(lefts.includes(raw?.left) ? { left: raw.left } : {}), ...(bottoms.includes(raw?.bottom) ? { bottom: raw.bottom } : {}), ...(lefts.includes(raw?.right) ? { right: raw.right } : {}) };
 	} catch {
 		return {};
 	}

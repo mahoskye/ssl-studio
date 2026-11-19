@@ -3,7 +3,7 @@
 import { describe, expect, test } from "bun:test";
 import { headingAnchor } from "../src/shared/docTables";
 import { tabLabels } from "../src/view/editor/tabs";
-import { fitPanels } from "../src/view/layout";
+import { dockedView, fitPanels } from "../src/view/layout";
 import { DEFAULT_SETTINGS, defaultLayout } from "../src/shared/protocol";
 
 describe("tab labels", () => {
@@ -90,5 +90,22 @@ describe("the layout a folder first opens with", () => {
 		first.leftWidth = 500;
 		expect(defaultLayout()).toEqual({ left: true, right: false, bottom: true, leftWidth: 260, rightWidth: 360, bottomHeight: 200 });
 		expect(defaultLayout()).not.toBe(defaultLayout());
+	});
+});
+
+describe("the panel a side shows", () => {
+	test("is the one it was showing, while that is docked there", () => {
+		expect(dockedView("search", ["explorer", "search", "git"])).toBe("search");
+	});
+
+	test("gives way to the first docked there when it was moved to the other side", () => {
+		// The Agent was moved left and shown there; "Reset the layout" sent it home to the right.
+		expect(dockedView("agent", ["explorer", "docs", "git"])).toBe("explorer");
+		// The right side starts on a panel whose home is the left.
+		expect(dockedView("health", ["agent"])).toBe("agent");
+	});
+
+	test("is none when no panel is docked on the side", () => {
+		expect(dockedView("agent", [])).toBeNull();
 	});
 });

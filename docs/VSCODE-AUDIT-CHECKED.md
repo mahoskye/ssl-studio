@@ -223,7 +223,9 @@ and a conflict made for it.
 
 Asked for by the user after trying the app (2026-11-19), and seen in the
 same kind of instance, at 720 and 1440 wide, each in the light and the
-dark theme.
+dark theme. The rows above say what was seen before these: the command
+list has since grown from 84 to 87, the copy-path commands from two to
+three, and a file's menu in the Explorer has "Copy name" as well.
 
 | Row | Seen |
 | --- | --- |
@@ -235,4 +237,4 @@ dark theme.
 | Copy name | In the tab's menu, the Explorer's and the page's; not run, since it writes the clipboard |
 | Sections fold | Work shut by a click and Decisions by Left; both were still shut after a restart |
 | Unsaved mark | A drawn dot, round in both themes; it was an oval from whatever font the system found |
-| Region strip | Across all 18 pixels of the strip the pointer was on a region, not on the bar that resizes |
+| Region strip | From a band's left edge to the strip's right edge the pointer was on that region, not the resize bar |

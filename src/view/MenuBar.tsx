@@ -16,16 +16,16 @@
 // menu for the rest of the layout.
 import { createSignal, createUniqueId, For, onCleanup, onMount, Show } from "solid-js";
 import { FIELD_COMMANDS, letterItem, MENU_BAR, missing, stepMenu, type BarEntry, type Has } from "../shared/menuBar";
-import { keysFor, onOpenMenu, rightPanel, runCommand } from "./commands";
+import { keysFor, onOpenMenu, runCommand } from "./commands";
 import { Icon } from "./Icon";
-import { crowdedOut, togglePanel } from "./panels/registry";
+import { crowdedOut, panelOn } from "./panels/registry";
 import { activeEditor } from "./editor/EditorGroup";
 import { review } from "./editor/Review";
 import { Menu, nextItem, type MenuItem } from "./Menu";
 import { canGo } from "./navigation";
 import { isPlanPath } from "./plan/model";
 import { isMarkdown, isTable } from "./project";
-import { activeDoc, activePath, documents, focusEditor, state } from "./state";
+import { activeDoc, activePath, documents, focusEditor, notify, state } from "./state";
 
 /** A file is in front, not the call graph or a review of changes. */
 const inFront = () => state.centerView === "editors" && !review();
@@ -75,7 +75,8 @@ export async function runInBox(box: HTMLElement, name: (typeof FIELD_COMMANDS)[s
 	if (name !== "paste") return void document.execCommand(name);
 	// A page may not paste by itself; it may read the clipboard where the web view allows, and type what it read.
 	const text = await navigator.clipboard.readText().catch(() => null);
-	if (text === null) return;
+	// Refused: said, since a menu entry that does nothing looks broken. The key still pastes.
+	if (text === null) return notify("This window was not allowed to read the clipboard. Paste with the keyboard.");
 	box.focus();
 	document.execCommand("insertText", false, text);
 }
@@ -132,14 +133,16 @@ function LayoutControls() {
 	const right = () => folder() && layout().right && crowdedOut() !== "right";
 	const bottom = () => folder() && layout().bottom;
 	const keys = (id: string) => (keysFor(id) ? ` (${keysFor(id)})` : "");
-	const tip = (shown: boolean, what: string, id: string) => (folder() ? `${shown ? "Hide" : "Show"} the ${what}${keys(id)}` : `The ${what}: open a folder first`);
+	const undocked = (side: "left" | "right") => folder() && !panelOn(side);
+	const tip = (shown: boolean, what: string, id: string, side?: "left" | "right") =>
+		!folder() ? `The ${what}: open a folder first` : side && undocked(side) ? `The ${what}: no panel is docked there. Right-click a panel's button to move it.` : `${shown ? "Hide" : "Show"} the ${what}${keys(id)}`;
 	const items = (): MenuItem[] => {
 		const none = "Open a folder first";
 		const entry = (label: string, id: string, why = ""): MenuItem => ({ label, keys: keysFor(id) || undefined, run: () => runCommand(id), disabled: !folder() || Boolean(why), why: folder() ? why : none });
 		return [
-			entry(`${left() ? "Hide" : "Show"} the side panel`, "toggle-sidebar"),
+			entry(`${left() ? "Hide" : "Show"} the side panel`, "toggle-sidebar", panelOn("left") ? "" : "No panel is docked on the left"),
 			entry(`${bottom() ? "Hide" : "Show"} the bottom panel`, "toggle-panel"),
-			entry(`${right() ? "Hide" : "Show"} the right panel`, "toggle-right-panel", rightPanel() ? "" : "No panel is docked on the right"),
+			entry(`${right() ? "Hide" : "Show"} the right panel`, "toggle-right-panel", panelOn("right") ? "" : "No panel is docked on the right"),
 			{ label: "Hide the menu bar", keys: keysFor("toggle-menu-bar") || undefined, run: () => runCommand("toggle-menu-bar") },
 			"separator",
 			entry("Move the side panel to the right", "move-panel", left() ? "" : "The side panel is not showing"),
@@ -150,17 +153,17 @@ function LayoutControls() {
 	};
 	return (
 		<div class="layout-controls" role="group" aria-label="Layout">
-			<button title={tip(left(), "side panel", "toggle-sidebar")} aria-label="Side panel" aria-pressed={left()} disabled={!folder()} onClick={() => togglePanel(state.leftView)}>
+			<button title={tip(left(), "side panel", "toggle-sidebar", "left")} aria-label="Side panel" aria-pressed={left()} disabled={!folder() || undocked("left")} onClick={() => runCommand("toggle-sidebar")}>
 				<Icon name={left() ? "layout-sidebar-left" : "layout-sidebar-left-off"} />
 			</button>
 			<button title={tip(bottom(), "bottom panel", "toggle-panel")} aria-label="Bottom panel" aria-pressed={bottom()} disabled={!folder()} onClick={() => runCommand("toggle-panel")}>
 				<Icon name={bottom() ? "layout-panel" : "layout-panel-off"} />
 			</button>
 			<button
-				title={folder() && !rightPanel() ? "The right panel: no panel is docked there. Right-click a panel's button to move it." : tip(right(), "right panel", "toggle-right-panel")}
+				title={tip(right(), "right panel", "toggle-right-panel", "right")}
 				aria-label="Right panel"
 				aria-pressed={right()}
-				disabled={!folder() || !rightPanel()}
+				disabled={!folder() || undocked("right")}
 				onClick={() => runCommand("toggle-right-panel")}
 			>
 				<Icon name={right() ? "layout-sidebar-right" : "layout-sidebar-right-off"} />
