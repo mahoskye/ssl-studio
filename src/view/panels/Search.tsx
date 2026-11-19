@@ -95,11 +95,13 @@ export function Search() {
 	};
 	const rel = (path: string) => relativeTo(state.workspace?.root, path);
 	const matchesIn = (list: LineHit[]) => list.reduce((n, line) => n + line.matches.length, 0);
+	/** The switches that narrow a search, by the names on their buttons: what to try without when nothing is found. */
+	const switchesOn = () => [caseSensitive() ? "Aa" : "", wholeWord() ? "ab" : "", regex() ? ".*" : ""].filter(Boolean);
 	const summary = () => {
 		if (status() === "busy") return "Searching…";
 		if (status() === "failed") return `The search for “${asked()}” failed: ${failure()}${regex() ? " Check the regular expression, or switch .* off." : ""}`;
-		if (status() === "idle") return "Type what to find and press Enter. Aa matches upper and lower case exactly; .* reads it as a regular expression.";
-		if (!hits().length) return `Nothing found for “${asked()}”. Check the spelling${caseSensitive() || regex() ? ", or switch Aa and .* off" : ""}.`;
+		if (status() === "idle") return "Type what to find and press Enter. Aa matches upper and lower case exactly; ab finds whole words only; .* reads it as a regular expression.";
+		if (!hits().length) return `Nothing found for “${asked()}”. Check the spelling${switchesOn().length ? `, or switch ${switchesOn().join(" and ")} off` : ""}.`;
 		return `${count(hits().length, "result")} in ${count(groups().length, "file")} for “${asked()}”`;
 	};
 	const HitRow = (props: { line: LineHit }) => {

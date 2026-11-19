@@ -217,7 +217,9 @@ export async function restoreTabs() {
 				const next = groups.map((g) => ({ ...g }));
 				while (next.length <= index) next.push({ tabs: [], active: null });
 				const pinned = (group.pinned ?? []).map(canonical).filter((path) => tabs.includes(path));
-				next[index] = { ...next[index]!, tabs: [...new Set([...next[index]!.tabs, ...tabs])], active: next[index]!.active ?? active, ...(pinned.length ? { pinned } : {}) };
+				// The pinned stand first, also before a tab that was opened while these were being read.
+				const all = [...new Set([...next[index]!.tabs, ...tabs])];
+				next[index] = { ...next[index]!, tabs: [...pinned, ...all.filter((tab) => !pinned.includes(tab))], active: next[index]!.active ?? active, ...(pinned.length ? { pinned } : {}) };
 				return next;
 			});
 		}
@@ -404,9 +406,9 @@ export async function closeTabsToRight(path = activePath(), group = state.active
 	for (const other of rightOf(g.tabs, g.pinned ?? [], path)) if (!(await closeTab(other, group))) return;
 }
 
-/** Closes every tab that is not pinned. */
-export async function closeAllTabs() {
-	for (let group = state.groups.length - 1; group >= 0; group--) {
+/** Closes every tab that is not pinned: of one group, or of them all. */
+export async function closeAllTabs(only?: number) {
+	for (let group = only ?? state.groups.length - 1; group >= (only ?? 0); group--) {
 		const g = state.groups[group];
 		for (const path of othersOf(g?.tabs ?? [], g?.pinned ?? [], null)) if (!(await closeTab(path, group))) return;
 	}

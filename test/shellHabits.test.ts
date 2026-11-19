@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { searchPattern } from "../src/shared/searchPattern";
-import { ofOpen, othersOf, rightOf, stepped, used, withPin } from "../src/shared/tabOrder";
+import { ofOpen, othersOf, rightOf, stepped, used, walkHolds, withPin } from "../src/shared/tabOrder";
 
 const found = (text: string, pattern: RegExp) => [...text.matchAll(pattern)].map((match) => match[0]);
 
@@ -59,5 +59,37 @@ describe("pinned tabs", () => {
 		expect(rightOf(["a", "b", "p", "c"], ["p"], "a")).toEqual(["b", "c"]);
 		expect(rightOf(["a", "b"], [], "b")).toEqual([]);
 		expect(rightOf(["a", "b"], [], "x")).toEqual([]);
+	});
+});
+
+describe("whole words in a regular expression", () => {
+	test("an expression that reads only the older way is still searched, by plain letters", () => {
+		for (const source of ["a\\-b", "a\\_b", "\\:x", "a{", "a]"]) expect(() => searchPattern(source, { regex: true, wholeWord: true })).not.toThrow();
+		expect(found("a-b xa-b a-bx", searchPattern("a\\-b", { regex: true, wholeWord: true }))).toEqual(["a-b"]);
+	});
+
+	test("an expression that reads either way knows every alphabet's letters", () => {
+		expect(found("Übung Übungen", searchPattern("Übung", { regex: true, wholeWord: true }))).toEqual(["Übung"]);
+		expect(found("Due DueDate", searchPattern("D[a-z]+", { regex: true, wholeWord: true, caseSensitive: true }))).toEqual(["Due"]);
+	});
+
+	test("an expression that cannot be read at all says so, as it does without whole words", () => {
+		expect(() => searchPattern("a(", { regex: true, wholeWord: true })).toThrow();
+		expect(() => searchPattern("a(", { regex: true })).toThrow();
+	});
+});
+
+describe("a walk through the tabs with Ctrl held", () => {
+	test("stands while its tabs are open and the one it stopped at is showing", () => {
+		expect(walkHolds(["a", "b", "c"], 1, ["c", "b", "a"], "b")).toBe(true);
+	});
+
+	test("is over when a tab of it was closed", () => {
+		expect(walkHolds(["a", "b", "c"], 2, ["a", "c"], "c")).toBe(false);
+	});
+
+	test("is over when another tab was shown some other way", () => {
+		expect(walkHolds(["a", "b", "c"], 1, ["a", "b", "c"], "c")).toBe(false);
+		expect(walkHolds(["a", "b", "c"], 1, ["a", "b", "c"], null)).toBe(false);
 	});
 });

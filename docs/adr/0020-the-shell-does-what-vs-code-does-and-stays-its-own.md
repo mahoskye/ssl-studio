@@ -32,11 +32,16 @@ Under [ADR 0007](0007-design-is-held-to-a-standard-that-serves-starlims-work.md)
   between the two. It can be hidden; the command list brings it back.
 - **A menu holds no command of its own.** Every entry is a command of the
   app or of the text editor, so that the command list, the keys and the
-  menus never disagree about what there is.
+  menus never disagree about what there is. What only a menu had (the
+  versions, the list of keys) became a command first.
+- **An entry that cannot run is still an entry.** The keyboard lands on
+  it, and the menu says why it cannot run.
 - **Alt and a menu's first letter opens that menu,** unless the user has
   given that key to a command: their shortcut wins.
-- **A pinned tab is closed only by unpinning it, or from its own menu.**
-  Ctrl+W and "close others" leave it, and the app says why.
+- **A pinned tab is closed only once it is unpinned.** Ctrl+W, "close
+  others" and "close all" leave it, and the app says why; its own menu
+  offers "Unpin" where another tab's offers "Close". A file that goes to
+  the trash closes its tab, pinned or not.
 - **Ctrl+Tab goes to the tab used before,** not to the next one along.
   Ctrl+PageDown and Ctrl+PageUp go along the row.
 - **What needs to know SSL stays with the language server.** A habit that

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { letterItem, MENU_BAR, menuForLetter, missing, stepMenu, type BarEntry } from "../src/shared/menuBar";
+import { FIELD_COMMANDS, letterItem, MENU_BAR, menuForLetter, missing, stepMenu, type BarEntry } from "../src/shared/menuBar";
 
 const entries = (name: string) => MENU_BAR.find((menu) => menu.name === name)!.entries;
 const named = (name: string, label: string) => entries(name).find((entry) => entry !== "separator" && entry.label === label) as Exclude<BarEntry, "separator">;
@@ -23,6 +23,16 @@ describe("the menu bar's menus", () => {
 		expect(ids.size).toBeGreaterThan(50);
 		const asked = MENU_BAR.flatMap((menu) => menu.entries).flatMap((entry) => (entry !== "separator" && "command" in entry ? [entry.command] : []));
 		expect(asked.filter((id) => !ids.has(id))).toEqual([]);
+	});
+
+	test("a menu holds no command of its own: every entry is the app's or the text editor's", () => {
+		for (const menu of MENU_BAR) for (const entry of menu.entries) expect(entry === "separator" || "command" in entry || "editor" in entry).toBe(true);
+	});
+
+	test("the commands a text box has of its own are entries of the Edit and Selection menus", () => {
+		const ids = MENU_BAR.flatMap((menu) => menu.entries).flatMap((entry) => (entry !== "separator" && "editor" in entry ? [entry.editor] : []));
+		for (const id of Object.keys(FIELD_COMMANDS)) expect(ids).toContain(id);
+		expect(Object.values(FIELD_COMMANDS).sort()).toEqual(["copy", "cut", "paste", "redo", "selectAll", "undo"]);
 	});
 
 	test("no menu starts or ends with a line, or has two together", () => {
@@ -117,7 +127,7 @@ describe("the keyboard in the bar", () => {
 		expect(letterItem([], "s", -1)).toBe(-1);
 	});
 
-	test("a letter never lands on an entry that cannot be chosen", () => {
+	test("a letter never lands on a line between entries", () => {
 		expect(letterItem([null, "Cut", null], "c", 1)).toBe(1);
 		expect(letterItem([null, null], "c", -1)).toBe(-1);
 	});

@@ -12,6 +12,10 @@ const WORD = "[\\p{L}\\p{N}_]";
 const STARTS = `(?:(?<!${WORD})(?=${WORD})|(?!${WORD}))`;
 /** Where a whole word may end: after a letter that has none after it, or after a mark. */
 const ENDS = `(?:(?<=${WORD})(?!${WORD})|(?<!${WORD}))`;
+/** The same two places with the plain letters only, for an expression that cannot be read the Unicode way. */
+const PLAIN = "[A-Za-z0-9_]";
+const PLAIN_STARTS = `(?:(?<!${PLAIN})(?=${PLAIN})|(?!${PLAIN}))`;
+const PLAIN_ENDS = `(?:(?<=${PLAIN})(?!${PLAIN})|(?<!${PLAIN}))`;
 
 /**
  * The expression for a search. A whole word is one with no letter, digit or
@@ -19,9 +23,22 @@ const ENDS = `(?:(?<=${WORD})(?!${WORD})|(?<!${WORD}))`;
  * "DueDate" nor in "Is_Due". What begins or ends with a mark (":RETURN") is
  * whole on that side wherever it stands. Throws what the expression's own
  * reader throws when it cannot be read.
+ *
+ * Knowing every alphabet's letters needs the stricter, Unicode way of
+ * reading an expression, which refuses some that are otherwise fine ("a\-b",
+ * "a{"). Such an expression is not refused for asking for whole words: it is
+ * read the way it reads without, and a word's edge is then a plain letter's.
  */
 export function searchPattern(query: string, options: SearchOptions = {}): RegExp {
 	const source = options.regex ? query : literal(query);
-	const whole = options.wholeWord ? `${STARTS}(?:${source})${ENDS}` : source;
-	return new RegExp(whole, `g${options.caseSensitive ? "" : "i"}${options.wholeWord ? "u" : ""}`);
+	const flags = `g${options.caseSensitive ? "" : "i"}`;
+	if (!options.wholeWord) return new RegExp(source, flags);
+	try {
+		return new RegExp(`${STARTS}(?:${source})${ENDS}`, `${flags}u`);
+	} catch (strict) {
+		if (!options.regex) throw strict;
+		// What cannot be read either way is the expression's own fault, and says so as it would without whole words.
+		new RegExp(source, flags);
+		return new RegExp(`${PLAIN_STARTS}(?:${source})${PLAIN_ENDS}`, flags);
+	}
 }

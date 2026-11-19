@@ -55,7 +55,6 @@ export type Command = { id: string; label: string; detail?: string; run: () => v
 
 const toggle = (key: "left" | "bottom" | "right") => setState("settings", "layout", key, (v) => !v);
 const showBottom = (view: "problems" | "output") => (setState("bottomView", view), setState("settings", "layout", "bottom", true));
-/** The `uiScale` setting, one step up or down, or back to 1. */
 /** Puts text on the clipboard: by the app's own way where there is one, by the web view's otherwise. */
 export async function copyText(text: string, said: string) {
 	const copied = (await backend.clipboard(text).catch(() => false)) || (await navigator.clipboard?.writeText(text).then(() => true, () => false));
@@ -67,10 +66,30 @@ export async function copyText(text: string, said: string) {
 export async function copyPath(kind: "whole" | "relative", path = activePath()) {
 	if (!path) return notify("No file is open to copy the path of.");
 	const root = state.workspace?.root;
-	const text = kind === "relative" && root ? relativeTo(root, path) : path;
+	// The path from the folder is kept with forward slashes; where the folder's own are the other kind, so are these.
+	const backward = Boolean(root && root.includes("\\") && !root.includes("/"));
+	const text = kind === "relative" && root ? (backward ? relativeTo(root, path).replace(/\//g, "\\") : relativeTo(root, path)) : path;
 	await copyText(text, `Copied ${text}`);
 }
 
+/**
+ * Switches a setting that is on or off. Where the project's own settings hold it, yours would not be seen while
+ * the project's is in the way: it is switched there. Says whether it is now as asked.
+ */
+async function switchSetting(key: "wordWrap" | "menuBar", to: boolean, now: () => boolean): Promise<boolean> {
+	await saveSetting({ [key]: to });
+	if (now() !== to && state.workspace) await saveSetting({ [key]: to }, "workspace");
+	return now() === to;
+}
+
+/** What this is, and what it found to work with: for a report of a fault, and to know which version is running. */
+function about() {
+	const tool = (name: string, status?: { ok: boolean; version?: string }) => `${name} ${status?.ok ? (status.version ?? "found") : "not found"}`;
+	const text = [`SSL Studio ${state.info?.app ?? ""}`.trim(), tool("language server", state.info?.lsp), tool("opencode", state.info?.opencode)].join(" · ");
+	notify(text, "info", { label: "Copy", run: () => void copyText(text, "Copied what this is.") });
+}
+
+/** The `uiScale` setting, one step up or down, or back to 1. */
 const zoom = (by: 1 | -1 | 0) => void saveSetting({ uiScale: by ? stepScale(state.settings.uiScale, by) : UI_SCALE.normal });
 
 export const commands: Command[] = [
@@ -100,7 +119,7 @@ export const commands: Command[] = [
 	{ id: "split", label: "Split editor", run: split },
 	{ id: "copy-path", label: "Copy path", detail: "The open file's whole path", run: () => void copyPath("whole") },
 	{ id: "copy-relative-path", label: "Copy path in the project", detail: "The open file's path from the project's folder", run: () => void copyPath("relative") },
-	{ id: "word-wrap", label: "Toggle word wrap", detail: "Long lines wrapped at the editor's edge, or not", run: () => void saveSetting({ wordWrap: !state.settings.wordWrap }) },
+	{ id: "word-wrap", label: "Toggle word wrap", detail: "Long lines wrapped at the editor's edge, or not", run: () => void switchSetting("wordWrap", !state.settings.wordWrap, () => Boolean(state.settings.wordWrap)) },
 	{ id: "focus-editor", label: "Focus editor", run: focusEditor },
 	{ id: "focus-side-panel", label: "Focus side panel", run: focusSidePanel },
 	// The code
@@ -157,6 +176,8 @@ export const commands: Command[] = [
 	{ id: "zoom-out", label: "Zoom out", detail: "A smaller interface", run: () => zoom(-1) },
 	{ id: "zoom-reset", label: "Reset zoom", run: () => zoom(0) },
 	{ id: "settings", label: "Open settings…", run: () => openSettings() },
+	{ id: "keyboard-shortcuts", label: "Show keyboard shortcuts…", detail: "Every command's keys, to look up and to change", run: () => openSettings("keyboard") },
+	{ id: "about", label: "About SSL Studio", detail: "Its version, and the language server's and the agent's", run: about },
 ];
 
 /** The commands run from the command list this session, newest first (ten are kept). */
@@ -188,9 +209,9 @@ export function openMenu(index?: number): boolean {
 
 async function toggleMenuBar() {
 	const hide = state.settings.menuBar !== false;
-	await saveSetting({ menuBar: !hide });
+	const done = await switchSetting("menuBar", !hide, () => state.settings.menuBar !== false);
 	// What was hidden says how it is brought back: the menu that hid it is gone with it.
-	if (hide) notify(MENU_HIDDEN);
+	if (hide && done) notify(MENU_HIDDEN);
 }
 
 /** Puts the selected lines inside a new comment region (a frame in blocks mode). */

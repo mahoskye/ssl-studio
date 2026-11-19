@@ -111,7 +111,7 @@ of the text editor, and nothing of its own.
 | Completion and hover | Yes | Have | From the language server |
 | Snippets | Yes | Have | The Palette panel, and kept snippets |
 | Word wrap toggle | Yes | Bring | Built: Alt+Z, a command, and a setting that is kept |
-| Toggle comment | Yes | Bring | Built: Ctrl+/ in SQL, YAML, INI, XML, Markdown; SSL as the editor wraps it |
+| Toggle comment | Yes | Have | Ctrl+/ is the editor's own, with each kind's marks; SSL is wrapped in `/*` and `;` |
 | User snippets | Partly | Later | Kept in the knowledge base, not by prefix and Tab |
 | Indent settings | Partly | Later | The editor converts tabs and spaces; nothing shows which a file uses |
 | Sticky scroll | No | Later | The enclosing procedure stays at the top |
@@ -247,21 +247,33 @@ Nothing in the app runs git. Every row was seen as missing.
 The Bring rows, in the order they are built: smallest and most used
 first, source control as a step of its own. "Done" is Yes when a row is
 built, looked at in the running app and tested; Skipped says why below.
+Where a part of a row could not be tried, the text under its table says
+which part and why. Each step says what was looked at.
 
 ### Step 1: small habits
 
 | Feature | Size | Done | What it takes |
 | --- | --- | --- | --- |
 | Word wrap toggle | Small | Yes | Alt+Z, a command, kept as a setting |
-| Toggle comment | Small | Yes | Ctrl+/ comments lines in SQL and the other document kinds; SSL keeps the editor's way |
+| Toggle comment | Small | Yes | Nothing: it was there. The first check was wrong: the key had not reached the editor |
 | Whole word | Small | Yes | A third switch in Search |
-| Switch by Ctrl+Tab | Small | Yes | To the tab used before this one, and back; the key itself was not pressed in the preview |
+| Switch by Ctrl+Tab | Small | Yes | To the tab used before this one, and on through the order while Ctrl is held |
 | Copy path | Small | Yes | Whole and from the project's folder; a command each |
 
 In SSL a comment runs from `/*` to the next `;`, so the editor wraps a line
 in both and a statement's own `;` leaves a second one until the comment is
 taken off again. Doing better needs to know where a statement ends, which
-is the language server's to say (ADR 0003).
+is the language server's to say (ADR 0003). In an INI file the editor
+writes `#`, not `;`: its own choice, left as it is.
+
+A browser keeps Ctrl+Tab for its own tabs, so in the preview the key was
+given to the page by a script, not pressed: held, it went through three
+tabs, and let go and pressed again it went between the last two. In the
+app's own window the key was not pressed. A tab closed, or shown some
+other way, while Ctrl is held ends the walk; the next press starts again
+from what is showing.
+
+Looked at: the light theme at 720 wide and the dark theme at 1440 wide.
 
 ### Step 2: right-click menus
 
@@ -273,8 +285,14 @@ is the language server's to say (ADR 0003).
 | Explorer menu | Small | Partly | Copy path is in; cut, copy and paste are step 5's |
 | Editor menu | Small | Yes | Ask the agent, new question, new decision, copy for Designer, wrap in region |
 
-A pinned tab is not closed by Ctrl+W or its cross, as in VS Code: the app
-says it is pinned. The tab's menu also opens by the menu key and Shift+F10.
+A pinned tab is not closed by Ctrl+W, as in VS Code: the app says it is
+pinned. It has a pin where the others have a cross, and its menu has
+"Unpin" where theirs has "Close". Its unsaved changes show as a dot beside
+the pin. The tab's menu also opens by the menu key and Shift+F10. "Close
+all" on a tab's menu closes that group's tabs; the command "Close all
+tabs" closes every group's.
+
+Looked at: the light theme at 720 wide and the dark theme at 1440 wide.
 
 ### Step 3: the menu bar
 
@@ -291,13 +309,22 @@ says it is pinned. The tab's menu also opens by the menu key and Shift+F10.
 The bar is drawn in the window, not handed to the system, so that it is
 the same in the app and in a browser
 ([ADR 0020](adr/0020-the-shell-does-what-vs-code-does-and-stays-its-own.md)).
-An entry that cannot run now is grey and says why: "Open a file first",
-"For a file shown as text". The keys beside the text editor's own commands
-are read from the editor, since they differ from system to system. Paste
-from the menu needs a web view that lets a page read the clipboard; where
-it does not, the entry is grey and the key still pastes. Cut, copy and
-paste from the menu were not tried: a test of them writes over whatever
-the person at the machine has copied.
+An entry that cannot run now is grey, and the keyboard still lands on it:
+the menu's last line then says why ("Open a file first", "For a file shown
+as text"). The keys beside the text editor's own commands are read from
+the editor, since they differ from system to system. With the keyboard in
+a text box (a search, the agent's prompt), undo, redo, cut, copy, paste
+and select all work on the box, and the entries that are for the code say
+so. Paste from the menu needs a web view that lets a page read the
+clipboard; where it does not, the entry is grey and the key still pastes.
+
+Not tried: cut, copy and paste from the menu, because a test of them
+writes over whatever the person at the machine has copied. Not seen: the
+bar in the app's own window, and on a Mac.
+
+Looked at: the dark theme at 1440 wide (every menu open), the light theme
+at 720 and at 380 wide (a menu at the right edge is moved back inside the
+window), and the dark theme at 720 wide.
 
 ### Step 4: finding one's way
 
@@ -312,6 +339,8 @@ Mac the two keys are left to the text, where Alt and an arrow move by a
 word: the commands are there to be given keys. The mouse's back and
 forward buttons are not wired: they could not be tried here. Ctrl+G and
 Ctrl+Shift+O still open the text editor's own boxes.
+
+Looked at: the dark theme at 1440 wide and the light theme at 720 wide.
 
 ### Step 5: files by hand
 

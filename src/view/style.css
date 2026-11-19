@@ -104,6 +104,9 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 /* One entry is at hand, whether the pointer or the arrow keys put it there. */
 .menubar .menu-item:hover { background: none; }
 .menubar .menu-item:focus { background: var(--selected); }
+/* Why the entry at hand cannot run: the menu's last line, there only while there is something to say. */
+.menu-why { display: none; margin-top: var(--space-2); padding: var(--space-2) var(--space-4) var(--space-1); border-top: 1px solid var(--border); color: var(--muted); font-size: var(--text-md); white-space: normal; }
+.menu-why.shown { display: block; }
 .activity { grid-row: 2; grid-column: 1; display: flex; flex-direction: column; align-items: center; overflow-y: auto; scrollbar-width: none; gap: var(--space-1); padding: var(--space-3) 0; background: var(--status-bg); border-right: 1px solid var(--border); }
 .activity button { width: calc(36px * var(--ui-scale)); height: calc(36px * var(--ui-scale)); font-size: var(--text-xl); color: var(--muted); }
 .activity button.active { color: var(--fg); box-shadow: inset 2px 0 0 var(--accent); }
@@ -211,6 +214,7 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .tab .pin { width: var(--target); height: var(--target); padding: 0; line-height: var(--target); text-align: center; color: var(--accent); }
 .tab .pin-mark::before { font-family: codicon; content: "\eba0"; font-size: 14px; vertical-align: middle; }
 .tab.pinned .close { display: none; }
+.tab .pinned-dot { width: var(--target); text-align: center; line-height: var(--target); }
 .tab.dirty .close .dot { display: inline; }
 .tab.dirty .close .x { display: none; }
 .tab.dirty .close:hover .dot { display: none; }

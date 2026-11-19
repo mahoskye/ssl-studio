@@ -7,17 +7,22 @@
 // Up and Down through a menu, a letter to the next entry that starts with it,
 // Enter runs, Escape closes the menu and then leaves the bar. Leaving puts the
 // keyboard back where it was.
-import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { letterItem, MENU_BAR, missing, stepMenu, type BarEntry, type Has } from "../shared/menuBar";
-import type { ToolStatus } from "../shared/protocol";
-import { copyText, keysFor, onOpenMenu, openSettings, runCommand } from "./commands";
+//
+// An entry that cannot run now is still an entry: the keyboard lands on it,
+// and the menu's last line says why it cannot.
+import { createSignal, createUniqueId, For, onCleanup, onMount, Show } from "solid-js";
+import { FIELD_COMMANDS, letterItem, MENU_BAR, missing, stepMenu, type BarEntry, type Has } from "../shared/menuBar";
+import { keysFor, onOpenMenu, runCommand } from "./commands";
 import { activeEditor } from "./editor/EditorGroup";
 import { review } from "./editor/Review";
 import { nextItem, type MenuItem } from "./Menu";
 import { canGo } from "./navigation";
 import { isPlanPath } from "./plan/model";
 import { isMarkdown, isTable } from "./project";
-import { activeDoc, activePath, documents, focusEditor, notify, state } from "./state";
+import { activeDoc, activePath, documents, focusEditor, state } from "./state";
+
+/** A file is in front, not the call graph or a review of changes. */
+const inFront = () => state.centerView === "editors" && !review();
 
 /** What the window has now, for the entries that need something before they can run. */
 function has(): Has {
@@ -25,7 +30,7 @@ function has(): Has {
 	const group = state.groups[state.activeGroup];
 	// A plan opens as its chart, a document as its page, a script perhaps as blocks: none of them is the text.
 	const asText = (file: string) => (isPlanPath(file) ? Boolean(state.planText[file]) : isMarkdown(file) || isTable(file) ? Boolean(state.mdText[file]) : !(group?.mode === "blocks" && documents.get(file)?.model.getLanguageId() === "ssl"));
-	return { folder: Boolean(state.workspace), file: Boolean(path), text: Boolean(path) && state.centerView === "editors" && !review() && asText(path!) };
+	return { folder: Boolean(state.workspace), file: Boolean(path), text: Boolean(path) && inFront() && asText(path!) };
 }
 
 type KeyService = { lookupKeybinding(id: string): { getLabel(): string | null } | undefined };
@@ -51,30 +56,44 @@ function runEditor(id: string, shown: boolean) {
 	editor.trigger("menu", id, null);
 }
 
-function about() {
-	const tool = (name: string, status?: ToolStatus) => `${name} ${status?.ok ? (status.version ?? "found") : "not found"}`;
-	const text = [`SSL Studio ${state.info?.app ?? ""}`.trim(), tool("language server", state.info?.lsp), tool("opencode", state.info?.opencode)].join(" · ");
-	notify(text, "info", { label: "Copy", run: () => void copyText(text, "Copied what this is.") });
+/** A box that text is typed into, other than the code editor: a search, a filter, the agent's prompt. */
+function textBox(el: Element | null): HTMLElement | null {
+	if (!(el instanceof HTMLElement) || el.closest(".monaco-editor")) return null;
+	return el.matches("input:not([type=checkbox]):not([type=radio]):not([type=button]), textarea, [contenteditable=''], [contenteditable=true]") ? el : null;
+}
+
+/** One of a text box's own six commands, run in the box. */
+async function runInBox(box: HTMLElement, name: (typeof FIELD_COMMANDS)[string]) {
+	box.focus();
+	if (name !== "paste") return void document.execCommand(name);
+	// A page may not paste by itself; it may read the clipboard where the web view allows, and type what it read.
+	const text = await navigator.clipboard.readText().catch(() => null);
+	if (text === null) return;
+	box.focus();
+	document.execCommand("insertText", false, text);
 }
 
 const PASTE = "editor.action.clipboardPasteAction";
+const NO_PASTE = "This window cannot read the clipboard: paste with the keyboard";
 
-/** A menu's entries as they are now: with the keys they have, and those that cannot run saying why. */
-function itemsOf(entries: readonly BarEntry[]): MenuItem[] {
+/** A menu's entries as they are now, with the keys they have. One that cannot run says why. `box` is the text box the keyboard was in. */
+function itemsOf(entries: readonly BarEntry[], box: HTMLElement | null): MenuItem[] {
 	const now = has();
 	return entries.map((entry): MenuItem => {
 		if (entry === "separator") return "separator";
-		// A web view that may not read the clipboard cannot paste from a menu; the key still does.
-		const why = missing(entry, now) || ("editor" in entry && entry.editor === PASTE && !navigator.clipboard?.readText ? "This window cannot read the clipboard: paste with the keyboard" : "");
-		const can = { disabled: Boolean(why), why };
-		// Back and forward have somewhere to go, or they do not.
 		if ("command" in entry) {
 			const way = ({ "go-back": -1, "go-forward": 1 } as Record<string, 1 | -1>)[entry.command];
-			const nowhere = way && !why && !canGo(way) ? (way < 0 ? "Nowhere to go back to yet" : "Nowhere to go forward to") : "";
-			return { label: entry.label, keys: keysFor(entry.command), run: () => runCommand(entry.command), disabled: Boolean(why || nowhere), why: why || nowhere };
+			const nowhere = way && !canGo(way) ? (way < 0 ? "Nowhere to go back to yet" : "Nowhere to go forward to") : "";
+			return { label: entry.label, keys: keysFor(entry.command), run: () => runCommand(entry.command), why: missing(entry, now) || nowhere };
 		}
-		if ("editor" in entry) return { label: entry.label, keys: editorKeys(entry.editor), run: () => runEditor(entry.editor, now.text), ...can };
-		return { label: entry.label, run: entry.does === "about" ? about : () => openSettings("keyboard"), ...can };
+		// A web view that may not read the clipboard cannot paste from a menu; the key still does.
+		const noPaste = entry.editor === PASTE && !navigator.clipboard?.readText ? NO_PASTE : "";
+		const inBox = FIELD_COMMANDS[entry.editor];
+		// With the keyboard in a text box, the box's own commands work on the box, and the code's are not for it.
+		if (box) return inBox ? { label: entry.label, keys: editorKeys(entry.editor), run: () => void runInBox(box, inBox), why: noPaste } : { label: entry.label, keys: editorKeys(entry.editor), run: () => {}, why: "For the code: the keyboard is in a text box" };
+		// Undo and redo reach text that is not shown as text (blocks, a page), but not a file that is behind something else.
+		const behind = !now.text && now.file && !inFront() ? "The file is not in front" : "";
+		return { label: entry.label, keys: editorKeys(entry.editor), run: () => runEditor(entry.editor, now.text), why: missing(entry, now) || behind || noPaste };
 	});
 }
 
@@ -96,27 +115,41 @@ export function MenuBar() {
 	/** The menu that is open, by its place in the bar. */
 	const [open, setOpen] = createSignal<number | null>(null);
 	const [items, setItems] = createSignal<MenuItem[]>([]);
+	/** The entry the keyboard is on, for the line that says why it cannot run. */
+	const [onItem, setOnItem] = createSignal(-1);
 	/** The one name Tab stops on: the bar is one stop, and the arrow keys go along it. */
 	const [stop, setStop] = createSignal(0);
+	const whyId = createUniqueId();
 	let bar!: HTMLDivElement;
 	let list: HTMLDivElement | undefined;
 	/** What had the keyboard before the bar took it. */
 	let before: HTMLElement | null = null;
+	/** The bar is moving the keyboard itself: what it hears of that is not the user leaving. */
+	let moving = false;
 
 	const names = () => [...bar.querySelectorAll<HTMLElement>(".menubar-name")];
 	const rows = () => (open() === null ? [] : [...(list?.querySelectorAll<HTMLElement>("[data-item]") ?? [])]);
+	const why = () => {
+		const item = items()[onItem()];
+		return open() !== null && item && item !== "separator" ? (item.why ?? "") : "";
+	};
 	const outside = (e: MouseEvent) => {
 		if (!bar.contains(e.target as Node)) shut("nowhere");
 	};
 
 	/** Opens a menu. From the keyboard the first entry has the keyboard; from the mouse the menu's name keeps it. */
 	const show = (index: number, keyboard: boolean) => {
-		const loaded = itemsOf(MENU_BAR[index]!.entries);
+		// What has the keyboard now, when it is not the bar already: a text box there has the Edit menu to itself.
+		const from = bar.contains(document.activeElement) ? before : (document.activeElement as HTMLElement | null);
+		const loaded = itemsOf(MENU_BAR[index]!.entries, textBox(from));
+		moving = true;
 		setItems(loaded);
+		setOnItem(-1);
 		setOpen(index);
 		setStop(index);
 		document.addEventListener("mousedown", outside, true);
 		names()[index]?.focus();
+		moving = false;
 		if (keyboard) queueMicrotask(() => rows()[nextItem(loaded, -1, 1)]?.focus());
 	};
 	/** The keyboard goes back to what had it; to the editor when that is gone. */
@@ -128,10 +161,14 @@ export function MenuBar() {
 	};
 	const shut = (to: "before" | "name" | "nowhere") => {
 		const at = open();
+		// Taking the menu away takes the entry that had the keyboard with it: that is not the keyboard leaving the bar.
+		moving = true;
 		setOpen(null);
 		document.removeEventListener("mousedown", outside, true);
 		if (to === "name" && at !== null) names()[at]?.focus();
-		else if (to === "before") leave();
+		moving = false;
+		if (to === "before") leave();
+		else if (to === "nowhere") before = null;
 	};
 	onMount(() => {
 		onOpenMenu((index) => (index === undefined ? names()[stop()]?.focus() : show(index, true)));
@@ -150,6 +187,12 @@ export function MenuBar() {
 			const over = el.getBoundingClientRect().right - document.documentElement.clientWidth;
 			if (over > 0) el.style.left = `${-over}px`;
 		});
+	};
+	const pick = (item: Exclude<MenuItem, "separator">) => {
+		// One that cannot run stays where it is, saying why.
+		if (item.why) return;
+		shut("before");
+		item.run();
 	};
 
 	const onKey = (e: KeyboardEvent) => {
@@ -181,7 +224,7 @@ export function MenuBar() {
 		else if (e.key === "Tab" && at !== null) shut("before");
 		else if (e.key.length === 1 && e.key !== " " && at !== null) {
 			const found = letterItem(
-				all.map((item) => (item === "separator" || item.disabled ? null : item.label)),
+				all.map((item) => (item === "separator" ? null : item.label)),
 				e.key,
 				on,
 			);
@@ -203,10 +246,10 @@ export function MenuBar() {
 				if (from && !bar.contains(from)) before = from;
 			}}
 			onFocusOut={(e) => {
+				if (moving || bar.contains(e.relatedTarget as Node | null)) return;
 				// The keyboard went somewhere else: an open menu does not stay behind.
-				if (bar.contains(e.relatedTarget as Node | null)) return;
 				if (open() !== null) shut("nowhere");
-				before = null;
+				else before = null;
 			}}
 		>
 			<For each={MENU_BAR}>
@@ -232,10 +275,10 @@ export function MenuBar() {
 							{menu.name}
 						</button>
 						<Show when={open() === index()}>
-							{/* A press on the menu's own ground, or on an entry that cannot run, leaves the keyboard where it is and the menu open. */}
+							{/* A press on the menu's own ground leaves the keyboard where it is and the menu open. */}
 							<div class="menu-pop" role="menu" aria-label={menu.name} ref={place} onMouseDown={(e) => e.preventDefault()}>
 								<For each={items()}>
-									{(item) =>
+									{(item, at) =>
 										item === "separator" ? (
 											<div class="menu-sep" role="separator" data-item />
 										) : (
@@ -244,14 +287,14 @@ export function MenuBar() {
 												role="menuitem"
 												data-item
 												tabindex={-1}
-												disabled={item.disabled}
-												title={item.disabled ? item.why : undefined}
+												// Not the button's own "disabled": the keyboard must be able to land on it to hear why.
+												aria-disabled={item.why ? "true" : undefined}
+												aria-describedby={item.why ? whyId : undefined}
+												title={item.why || undefined}
+												onFocus={() => setOnItem(at())}
 												// The pointer and the arrow keys move the same mark: there is one entry at hand, not two.
 												onMouseMove={(e) => pointed && document.activeElement !== e.currentTarget && e.currentTarget.focus({ preventScroll: true })}
-												onClick={() => {
-													shut("before");
-													item.run();
-												}}
+												onClick={() => pick(item)}
 											>
 												<span class="menu-label">{item.label}</span>
 												<Show when={item.keys}>
@@ -261,6 +304,10 @@ export function MenuBar() {
 										)
 									}
 								</For>
+								{/* Why the entry at hand cannot run. Always there, so that what reads the screen aloud hears it change. */}
+								<div class="menu-why" id={whyId} role="status" classList={{ shown: Boolean(why()) }}>
+									{why()}
+								</div>
 							</div>
 						</Show>
 					</span>

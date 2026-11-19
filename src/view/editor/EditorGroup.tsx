@@ -223,14 +223,19 @@ export function EditorGroup(props: { index: number }) {
 		if (picked === CLOSE) await closeTab(path, props.index);
 		else if (picked === OTHERS) await closeOtherTabs(path, props.index);
 		else if (picked === RIGHT) await closeTabsToRight(path, props.index);
-		else if (picked === ALL) await closeAllTabs();
+		// This row's tabs, as its neighbours in the menu are: the command "Close all tabs" closes every group's.
+		else if (picked === ALL) await closeAllTabs(props.index);
 		else if (picked === PIN) togglePin(path, props.index);
 		else if (picked === PATH || picked === RELATIVE) await (await import("../commands")).copyPath(picked === PATH ? "whole" : "relative", path);
 		else if (picked === SHOW) (await import("../panels/Explorer")).showInExplorer(path);
 		else if (picked === SIDE) {
+			// This group is the one at hand, even when the keyboard came to its tabs without a click.
+			setState("activeGroup", props.index);
 			activate(path);
 			split();
 		}
+		// The tab the menu was opened on may be gone, and the keyboard with it: it goes to what is showing now.
+		if (picked === CLOSE || picked === OTHERS || picked === RIGHT || picked === ALL) queueMicrotask(() => (!document.activeElement || document.activeElement === document.body) && focusRequest.fire("editor"));
 	};
 	const onStripKey = (e: KeyboardEvent) => {
 		if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
@@ -264,7 +269,7 @@ export function EditorGroup(props: { index: number }) {
 			"separator",
 			{ label: "Split editor", keys: keysFor("split") || undefined, run: split, disabled: !path, why: none },
 			{ label: "Close other tabs", run: () => void closeOtherTabs(), disabled: group().tabs.length < 2, why: "No other tabs" },
-			{ label: "Close all tabs", run: () => void closeAllTabs(), disabled: !group().tabs.length, why: "No tabs" },
+			{ label: "Close all tabs", run: () => void closeAllTabs(props.index), disabled: !group().tabs.length, why: "No tabs" },
 		];
 	};
 
@@ -280,6 +285,7 @@ export function EditorGroup(props: { index: number }) {
 								ref={(el) => (tabs.set(path, el), onCleanup(() => tabs.delete(path)))}
 								title={`${path}${state.conflicts[path] ? "\nChanged on disk since you opened it" : state.dirty[path] ? "\nUnsaved changes" : ""}`}
 								tabindex={group().active === path ? 0 : -1}
+								aria-label={`${labels().get(path) ?? base(path)}${group().pinned?.includes(path) ? ", pinned" : ""}${state.conflicts[path] ? ", changed on disk" : state.dirty[path] ? ", unsaved changes" : ""}`}
 								aria-selected={group().active === path}
 								classList={{ active: group().active === path, dirty: Boolean(state.dirty[path]), conflict: Boolean(state.conflicts[path]), pinned: Boolean(group().pinned?.includes(path)) }}
 								aria-haspopup="menu"
@@ -300,6 +306,12 @@ export function EditorGroup(props: { index: number }) {
 								<Show when={state.conflicts[path]}>
 									<span class="conflict-mark" aria-label="changed on disk">
 										!
+									</span>
+								</Show>
+								<Show when={group().pinned?.includes(path) && state.dirty[path]}>
+									{/* The cross that turns into a dot is not on a pinned tab: its unsaved changes have a dot of their own. */}
+									<span class="pinned-dot" aria-hidden="true">
+										●
 									</span>
 								</Show>
 								<Show when={group().pinned?.includes(path)}>

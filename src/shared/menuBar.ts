@@ -17,9 +17,7 @@ export type BarEntry =
 	/** One of the app's commands, by its id. */
 	| { label: string; command: string; needs?: Needs }
 	/** One of the text editor's own commands, by its id there. */
-	| { label: string; editor: string; needs: "file" | "text" }
-	/** Something only the bar does. */
-	| { label: string; does: "shortcuts" | "about" };
+	| { label: string; editor: string; needs: "file" | "text" };
 
 /** A menu: its name, the letter Alt opens it with, and its entries. */
 export type BarMenu = { name: string; letter: string; entries: BarEntry[] };
@@ -157,10 +155,10 @@ export const MENU_BAR: BarMenu[] = [
 		letter: "h",
 		entries: [
 			{ label: "All commands…", command: "command-palette" },
-			{ label: "Keyboard shortcuts…", does: "shortcuts" },
+			{ label: "Keyboard shortcuts…", command: "keyboard-shortcuts" },
 			{ label: "The text editor's commands…", command: "editor-commands", needs: "text" },
 			"separator",
-			{ label: "About SSL Studio", does: "about" },
+			{ label: "About SSL Studio", command: "about" },
 		],
 	},
 ];
@@ -179,6 +177,20 @@ export function missing(entry: BarEntry, has: Has): string {
 	return has[entry.needs] ? "" : WHY[entry.needs];
 }
 
+/**
+ * What the text editor's commands are called in a text box: the six a box
+ * has of its own. With the keyboard in a box (a search, the agent's prompt),
+ * the Edit menu works on the box, not on the code behind it.
+ */
+export const FIELD_COMMANDS: Readonly<Record<string, "undo" | "redo" | "cut" | "copy" | "paste" | "selectAll">> = {
+	undo: "undo",
+	redo: "redo",
+	"editor.action.clipboardCutAction": "cut",
+	"editor.action.clipboardCopyAction": "copy",
+	"editor.action.clipboardPasteAction": "paste",
+	"editor.action.selectAll": "selectAll",
+};
+
 /** The menu Alt and a letter opens: its place in the bar, or -1. */
 export const menuForLetter = (letter: string, menus: readonly BarMenu[] = MENU_BAR) => menus.findIndex((menu) => menu.letter === letter.toLowerCase());
 
@@ -188,8 +200,8 @@ export const stepMenu = (at: number, by: 1 | -1, count = MENU_BAR.length) => (((
 /**
  * The entry a typed letter goes to: the next one after `from` whose name
  * starts with it, going round; `from` itself when it is the only one, and -1
- * when none does. An entry the keyboard cannot land on (a separator, one that
- * cannot run now) is given as null.
+ * when none does. What the keyboard cannot land on (a separator) is given as
+ * null.
  */
 export function letterItem(labels: readonly (string | null)[], letter: string, from: number): number {
 	const wanted = letter.toLowerCase();

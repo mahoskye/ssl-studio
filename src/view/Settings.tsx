@@ -153,7 +153,7 @@ export function SettingsDialog() {
 	const ROWS = {
 		theme: ["Theme", "Colours of the whole window; import a VS Code theme"],
 		uiScale: ["Interface size", "The whole window, from 80% to 160%"],
-		menuBar: ["Menu bar", "File, Edit, Selection, View, Go and Help across the top; F10 goes to it"],
+		menuBar: ["Menu bar", "File, Edit, Selection, View, Go and Help across the top of the window"],
 		fontSize: ["Font size", "The editor, Blocks, diffs and rendered documents"],
 		formatOnSave: ["Format changed lines on save", "Only the lines changed since the last save"],
 		minimap: ["Minimap", "The outline of the file at the editor's edge; a narrow editor goes without"],
