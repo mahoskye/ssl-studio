@@ -8,7 +8,11 @@ export type Entry = { name: string; path: string; kind: "file" | "dir"; size: nu
 
 export type Workspace = { root: string; name: string };
 
-export type FileText = { path: string; text: string; mtime: number };
+/**
+ * A file as it was read. `encoding` is what its text is written in. A file that is not text (`binary`) has no text
+ * here: how large it is, and what kind of picture it is when it is one.
+ */
+export type FileText = { path: string; text: string; mtime: number; encoding?: string; binary?: { size: number; image?: string } };
 
 /** What `.ssl-studio/project.toml` says, with defaults for what it leaves out. */
 export type Project = {
@@ -181,6 +185,8 @@ export interface BackendApi {
 	write(path: string, text: string): Promise<{ mtime: number }>;
 	create(path: string, kind: "file" | "dir"): Promise<void>;
 	rename(from: string, to: string): Promise<void>;
+	/** A picture's bytes, for showing it: its kind ("image/png") and the bytes in base64. */
+	image(path: string): Promise<{ type: string; base64: string }>;
 	/** Copies a file, or a folder and everything in it, to a path nothing is at yet. */
 	copy(from: string, to: string): Promise<void>;
 	trash(path: string): Promise<void>;

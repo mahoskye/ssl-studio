@@ -2,13 +2,16 @@
 // and must stay inside the root.
 import { cpSync, mkdirSync, readdirSync, renameSync, statSync, watch, existsSync, type FSWatcher } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
-import type { Entry, SearchHit } from "../shared/protocol";
+import type { Entry, FileText, SearchHit } from "../shared/protocol";
 import { searchPattern, type SearchOptions } from "../shared/searchPattern";
 import { decode, encode, encodingOf, textOf, type Encoding } from "./encoding";
+import { imageType, looksBinary, sizeText } from "../shared/fileKind";
 
 const SKIP = new Set([".git", "node_modules", ".ssl-studio", ".hutch", "dist", "build"]);
 const SEARCH_LIMIT = 2000;
 const SEARCH_MAX_BYTES = 4 * 1024 * 1024;
+/** The largest picture that is sent to the window to be shown. */
+const IMAGE_MAX_BYTES = 20 * 1024 * 1024;
 
 export class WorkspaceFiles {
 	readonly root: string;
@@ -40,11 +43,19 @@ export class WorkspaceFiles {
 			.sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name, undefined, { sensitivity: "base" }) : a.kind === "dir" ? -1 : 1));
 	}
 
-	/** A file's text, read as what the file is written in. */
-	async read(path: string) {
+	/**
+	 * A file's text, read as what the file is written in. A picture, or other bytes that are not text, is not read
+	 * as text: it comes back with no text, and says what it is.
+	 */
+	async read(path: string): Promise<FileText> {
 		const full = this.inside(path);
 		try {
-			return { path: full, text: decode(new Uint8Array(await Bun.file(full).arrayBuffer())).text, mtime: statSync(full).mtimeMs };
+			const bytes = new Uint8Array(await Bun.file(full).arrayBuffer());
+			const mtime = statSync(full).mtimeMs;
+			const image = imageType(full);
+			if (image || looksBinary(bytes)) return { path: full, text: "", mtime, binary: { size: bytes.length, ...(image ? { image } : {}) } };
+			const { text, encoding } = decode(bytes);
+			return { path: full, text, mtime, encoding };
 		} catch (e: any) {
 			// What the file system says is left as it says it; what the reading found names the file.
 			throw e instanceof Error && !("code" in e) ? new Error(`${relative(this.root, full)}: ${e.message}`) : e;
@@ -60,11 +71,15 @@ export class WorkspaceFiles {
 		mkdirSync(dirname(full), { recursive: true });
 		const temp = join(dirname(full), `.${basename(full)}.ssl-studio-tmp`);
 		let encoding: Encoding = "utf-8";
+		let bytesNow: Uint8Array | null = null;
 		try {
-			if (existsSync(full)) encoding = encodingOf(new Uint8Array(await Bun.file(full).arrayBuffer()));
+			if (existsSync(full)) bytesNow = new Uint8Array(await Bun.file(full).arrayBuffer());
 		} catch {
 			// A file that cannot be read now is written as a new one would be.
 		}
+		// What is read as bytes has no text here, and text written over it would be the end of it.
+		if (bytesNow && (imageType(full) || looksBinary(bytesNow))) throw new Error(`${relative(this.root, full)} is not text: it is not written over from here.`);
+		if (bytesNow) encoding = encodingOf(bytesNow);
 		let bytes: Uint8Array;
 		try {
 			bytes = encode(text, encoding);
@@ -93,6 +108,16 @@ export class WorkspaceFiles {
 		// A name with a folder in it moves the file there, and the folder is made if it is not there yet.
 		mkdirSync(dirname(target), { recursive: true });
 		renameSync(this.inside(from), target);
+	}
+
+	/** A picture's bytes, to be shown. Only what is a picture by its name, and not one too large to send. */
+	async image(path: string) {
+		const full = this.inside(path);
+		const type = imageType(full);
+		if (!type) throw new Error(`${relative(this.root, full)} is not a picture this can show.`);
+		const size = statSync(full).size;
+		if (size > IMAGE_MAX_BYTES) throw new Error(`${relative(this.root, full)} is ${sizeText(size)}: too large to show here (the most is ${sizeText(IMAGE_MAX_BYTES)}).`);
+		return { type, base64: Buffer.from(await Bun.file(full).arrayBuffer()).toString("base64") };
 	}
 
 	/** A copy of a file, or of a folder and everything in it, under a name nothing has yet. */

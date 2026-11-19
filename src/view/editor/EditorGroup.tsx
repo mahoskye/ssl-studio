@@ -19,6 +19,7 @@ import { Menu, type MenuItem } from "../Menu";
 import { isMarkdown, isTable } from "../project";
 import { MarkdownView } from "./MarkdownView";
 import { TableView } from "./TableView";
+import { FileView } from "./FileView";
 import { Start } from "../Start";
 import { FileMark } from "../FileMark";
 import { getPath, SERVER_DEFAULTS } from "../../shared/styleProfile";
@@ -42,16 +43,18 @@ export function EditorGroup(props: { index: number }) {
 	const group = () => state.groups[props.index]!;
 	let shown: string | null = null;
 	const [lineCount, setLineCount] = createSignal(0);
-	const isPlan = () => isPlanPath(group().active);
+	// A picture, or other bytes: shown for what it is, never as text, and never as what its name would make it.
+	const showFile = () => Boolean(group().active && documents.get(group().active!)?.binary);
+	const isPlan = () => isPlanPath(group().active) && !showFile();
 	const showChart = () => isPlan() && !state.planText[group().active!];
 	const isSsl = () => Boolean(group().active && documents.get(group().active!)?.model.getLanguageId() === "ssl");
 	// Blocks are a view of SSL only. The group remembers the choice, so the next
 	// script opens as blocks again, but a Markdown or SQL file never does.
 	const showBlocks = () => group().mode === "blocks" && isSsl() && !isPlan();
-	const isDoc = () => isMarkdown(group().active);
+	const isDoc = () => isMarkdown(group().active) && !showFile();
 	const showRendered = () => isDoc() && !state.mdText[group().active!];
 	// A table of values opens as a table, with the same switch to its text as a document has.
-	const isTabular = () => isTable(group().active);
+	const isTabular = () => isTable(group().active) && !showFile();
 	const showTable = () => isTabular() && !state.mdText[group().active!];
 
 	/** The ruler at the style's line length, and the fainter ones the chosen number of columns to each side of it. */
@@ -112,8 +115,8 @@ export function EditorGroup(props: { index: number }) {
 		// "Focus editor": the text editor, or whichever view of the file is showing in its place.
 		const stopFocus = focusRequest.listen((target) => {
 			if (target !== "editor" || state.activeGroup !== props.index) return;
-			if (!showBlocks() && !showChart() && !showRendered() && !showTable()) return editor.focus();
-			section.querySelector<HTMLElement>(".blocks-scroll, .plan [tabindex], .md-view, .table-view input")?.focus();
+			if (!showBlocks() && !showChart() && !showRendered() && !showTable() && !showFile()) return editor.focus();
+			section.querySelector<HTMLElement>(".blocks-scroll, .plan [tabindex], .md-view, .table-view input, .file-view")?.focus();
 		});
 		onCleanup(() => {
 			stop();
@@ -464,10 +467,13 @@ export function EditorGroup(props: { index: number }) {
 			<Show when={showRendered() && group().active} keyed>
 				{(path) => <MarkdownView path={path} />}
 			</Show>
+			<Show when={showFile() && group().active} keyed>
+				{(path) => <FileView path={path} />}
+			</Show>
 			<Show when={showTable() && group().active} keyed>
 				{(path) => <TableView path={path} />}
 			</Show>
-			<div class="editor-row" classList={{ hidden: showBlocks() || showChart() || showRendered() || showTable() }}>
+			<div class="editor-row" classList={{ hidden: showBlocks() || showChart() || showRendered() || showTable() || showFile() }}>
 				{/* An overview of the whole file, top to bottom, to the left of the line numbers: not marks on the lines in view. */}
 				<Show when={group().active && group().active === activePath() && lineCount() > 0 && flatRegions(symbols()).length}>
 					<nav class="region-strip" aria-label="Regions in this file, top to bottom" onKeyDown={onStripKey}>

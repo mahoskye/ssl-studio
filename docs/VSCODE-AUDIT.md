@@ -212,10 +212,10 @@ Nothing in the app runs git. Every row was seen as missing.
 | JSON, TOML, XML | Yes | Have | Coloured, outlined, checked |
 | Line ends kept | Yes | Have | A file with Windows line ends was saved with them |
 | Encoding kept | Yes | Have | A file in the one-byte Windows encoding read right (ADR 0019) |
-| Images | No | Bring | A PNG opened as lines of unreadable text, in an editor that can save |
-| Binary files | No | Bring | A file of bytes opened the same way |
-| Encoding shown | No | Bring | Nothing says what a file is written in |
-| Line ends shown | No | Bring | Nothing says which line ends a file has, or changes them |
+| Images | Yes | Bring | Built: PNG, JPEG, GIF, WebP, BMP and ICO are shown, with their pixels and size |
+| Binary files | Yes | Bring | Built: it says it is not text and how large; it is never in an editor |
+| Encoding shown | Yes | Bring | Built: in the status bar, for the open file |
+| Line ends shown | Yes | Bring | Built: LF or CRLF in the status bar; a click changes them all |
 | YAML | Partly | Later | No check: ADR 0018 |
 | SQL | Partly | Later | Coloured and outlined; no formatting |
 | Language picker | No | Later | The status bar says the language; it cannot be changed |
@@ -375,10 +375,28 @@ dragged by events given to the page, not by the pointer.
 
 | Feature | Size | Done | What it takes |
 | --- | --- | --- | --- |
-| Binary files | Small | No | Say what it is and how large; never an editor |
-| Images | Small | No | Shown as a picture, with its size |
-| Encoding shown | Small | No | In the status bar, for the open file |
-| Line ends shown | Small | No | In the status bar; a click changes them |
+| Binary files | Small | Yes | Say what it is and how large; never an editor |
+| Images | Small | Yes | Shown as a picture, with its size |
+| Encoding shown | Small | Yes | In the status bar, for the open file |
+| Line ends shown | Small | Yes | In the status bar; a click changes them |
+
+A file is a picture by the end of its name, and other bytes by a zero
+byte near its start, which no text has. Neither is read as text, so
+neither is put in an editor; and the backend refuses to write text over
+either, whatever asks it to. An SVG is text and is edited as text. A
+picture larger than 20 MB is not shown.
+
+The encoding is what the file was read as, and it is saved as that
+([ADR 0019](adr/0019-a-file-is-written-back-in-what-it-was-written-in.md)).
+Changing it is still done outside the IDE. Changing the line ends is an
+edit like any other: it can be undone, and it is kept by saving. A file
+with both kinds of line end is shown as the kind it has most of, and
+saving it writes that kind throughout: the editor's own way, from before
+this step.
+
+Looked at: the dark theme at 1440 wide and the light theme at 720 wide;
+a picture, a file of bytes, a file in Windows-1252, and a file with CRLF
+changed to LF and back by undo.
 
 ### Step 7: search and replace
 

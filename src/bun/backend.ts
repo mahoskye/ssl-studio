@@ -103,6 +103,7 @@ export function createBackend(host: Host, initial?: string) {
 		create: (path, kind) => need().create(path, kind),
 		rename: async (from, to) => need().rename(from, to),
 		copy: async (from, to) => need().copy(from, to),
+		image: (path) => need().image(path),
 		trash: async (path) => host.trash(need().inside(path)),
 		search: (query, options) => need().search(query, options),
 		history: async (path) => history?.list(need().inside(path)) ?? [],

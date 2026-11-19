@@ -84,6 +84,48 @@ describe("copying in the workspace", () => {
 	});
 });
 
+describe("files that are not text", () => {
+	const root = join(dir, "kinds-ws");
+	mkdirSync(root, { recursive: true });
+	// The smallest picture there is: one clear pixel.
+	const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
+	writeFileSync(join(root, "dot.png"), png);
+	writeFileSync(join(root, "blob.bin"), Buffer.from([1, 2, 0, 3, 4]));
+	writeFileSync(join(root, "a.ssl"), ":RETURN 1;\r\n");
+	writeFileSync(join(root, "wide.sql"), Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from("SELECT 1", "utf16le")]));
+	const files = new WorkspaceFiles(root);
+
+	test("text says what it is written in", async () => {
+		expect(await files.read(join(root, "a.ssl"))).toMatchObject({ text: ":RETURN 1;\r\n", encoding: "utf-8" });
+		expect(await files.read(join(root, "wide.sql"))).toMatchObject({ text: "SELECT 1", encoding: "utf-16le" });
+		expect((await files.read(join(root, "a.ssl"))).binary).toBeUndefined();
+	});
+	test("a picture is not read as text, and says it is a picture", async () => {
+		const read = await files.read(join(root, "dot.png"));
+		expect(read.text).toBe("");
+		expect(read.binary).toEqual({ size: png.length, image: "image/png" });
+	});
+	test("other bytes are not read as text either", async () => {
+		const read = await files.read(join(root, "blob.bin"));
+		expect(read.text).toBe("");
+		expect(read.binary).toEqual({ size: 5 });
+	});
+	test("a picture's bytes are given to be shown", async () => {
+		expect(await files.image(join(root, "dot.png"))).toEqual({ type: "image/png", base64: png.toString("base64") });
+	});
+	test("only a picture is given that way, and only from inside the workspace", async () => {
+		await expect(files.image(join(root, "a.ssl"))).rejects.toThrow(/not a picture/);
+		await expect(files.image(join(root, "blob.bin"))).rejects.toThrow(/not a picture/);
+		expect(() => files.inside(join(root, "..", "dot.png"))).toThrow(/outside/);
+	});
+	test("text is never written over a file that is not text", async () => {
+		await expect(files.write(join(root, "dot.png"), "")).rejects.toThrow(/not text/);
+		await expect(files.write(join(root, "blob.bin"), "oops")).rejects.toThrow(/not text/);
+		expect(new Uint8Array(await Bun.file(join(root, "blob.bin")).arrayBuffer())).toEqual(new Uint8Array([1, 2, 0, 3, 4]));
+		expect(Buffer.from(await Bun.file(join(root, "dot.png")).arrayBuffer()).equals(png)).toBe(true);
+	});
+});
+
 describe("local history", () => {
 	test("records changed saves only, newest first", async () => {
 		const history = new History(join(dir, "ws"), join(dir, "history"));

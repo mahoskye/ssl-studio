@@ -10,6 +10,9 @@ import { showPanel } from "./panels/registry";
 import { monaco } from "./editor/monaco";
 import { symbolPath } from "./editor/regions";
 import { languageName } from "./editor/languages";
+import { encodingName, eolName } from "../shared/fileKind";
+import { baseName } from "../shared/paths";
+import { chooseFromMenu } from "./panels/RowMenu";
 import { activeDoc, activePath, notify, setState, state } from "./state";
 
 const [size, setSize] = createSignal<SizeReport | null>(null);
@@ -46,8 +49,40 @@ async function goToLine() {
 	await editor.getAction("editor.action.gotoLine")?.run();
 }
 
+/** The open file's line ends, as the editor has them now: they change with the text, and by hand. */
+const [eol, setEol] = createSignal("");
+function useLineEnds() {
+	createEffect(
+		on(activePath, () => {
+			const doc = activeDoc();
+			setEol(doc && !doc.binary ? doc.model.getEOL() : "");
+			if (!doc || doc.binary) return;
+			const sub = doc.model.onDidChangeContent(() => setEol(doc.model.getEOL()));
+			onCleanup(() => sub.dispose());
+		}),
+	);
+}
+
+const LF = "LF: one character, as on Linux and macOS";
+const CRLF = "CRLF: two characters, as on Windows";
+
+/** Changes every line end of the open file to the other kind. It is an edit: it can be undone, and is kept by saving. */
+async function chooseLineEnds(at: { x: number; y: number }) {
+	const doc = activeDoc();
+	if (!doc || doc.binary) return;
+	const now = eolName(doc.model.getEOL());
+	const picked = await chooseFromMenu(`Line ends of this file, now ${now}`, [LF, CRLF], at);
+	const want = picked === LF ? "LF" : picked === CRLF ? "CRLF" : null;
+	if (!want || want === now) return;
+	doc.model.pushStackElement();
+	doc.model.pushEOL(want === "LF" ? monaco.editor.EndOfLineSequence.LF : monaco.editor.EndOfLineSequence.CRLF);
+	doc.model.pushStackElement();
+	notify(`Every line of ${baseName(activePath()!)} now ends in ${want}. Save to keep it; undo takes it back.`);
+}
+
 export function StatusBar() {
 	useSizeMeter();
+	useLineEnds();
 	const limits = () => state.settings.limits;
 	const lspLabel = () => {
 		const s = state.lsp.state;
@@ -140,10 +175,33 @@ export function StatusBar() {
 			</Show>
 			<Show when={activePath()}>
 				{/* Where the cursor is, and the way to another line: the editor's own "go to line". */}
-				<button class="item" title="Go to a line (Ctrl+G in the editor)" aria-label={`Line ${state.cursor.line}, column ${state.cursor.column}. Go to a line.`} onClick={() => void goToLine()}>
-					Ln {state.cursor.line}, Col {state.cursor.column}
-				</button>
-				<span class="item">{languageName(activeDoc()?.model.getLanguageId())}</span>
+				<Show when={!activeDoc()?.binary}>
+					<button class="item" title="Go to a line (Ctrl+G in the editor)" aria-label={`Line ${state.cursor.line}, column ${state.cursor.column}. Go to a line.`} onClick={() => void goToLine()}>
+						Ln {state.cursor.line}, Col {state.cursor.column}
+					</button>
+				</Show>
+				<Show when={!activeDoc()?.binary && activeDoc()?.encoding}>
+					{(encoding) => (
+						<span class="item" title={`This file is written in ${encodingName(encoding())}, and is saved in it.`}>
+							{encodingName(encoding())}
+						</span>
+					)}
+				</Show>
+				<Show when={eol()}>
+					<button
+						class="item"
+						aria-haspopup="menu"
+						title={`Lines end in ${eolName(eol())}. Click to change them all.`}
+						aria-label={`Line ends: ${eolName(eol())}. Change them.`}
+						onClick={(e) => {
+							const box = e.currentTarget.getBoundingClientRect();
+							void chooseLineEnds({ x: box.left, y: box.top - 70 });
+						}}
+					>
+						{eolName(eol())}
+					</button>
+				</Show>
+				<span class="item">{activeDoc()?.binary ? (activeDoc()!.binary!.image ? "Picture" : "Not text") : languageName(activeDoc()?.model.getLanguageId())}</span>
 			</Show>
 		</footer>
 	);

@@ -29,7 +29,17 @@ export type Message = { id: number; kind: "info" | "error"; text: string; action
 /** What "Save" was able to do: a caller that goes on to close or discard must check it. */
 export type Saved = boolean;
 
-type Doc = { path: string; model: monaco.editor.ITextModel; savedVersion: number; savedText: string; mtime: number };
+type Doc = {
+	path: string;
+	model: monaco.editor.ITextModel;
+	savedVersion: number;
+	savedText: string;
+	mtime: number;
+	/** What the file's text is written in, as the backend read it. */
+	encoding?: string;
+	/** The file is not text: a picture, or other bytes. Its model is empty, is never shown and is never saved. */
+	binary?: { size: number; image?: string };
+};
 
 export const [state, setState] = createStore({
 	workspace: null as Workspace | null,
@@ -277,7 +287,12 @@ async function loadDoc(path: string): Promise<Doc> {
 	if (existing) return existing;
 	const file = await backend.read(path);
 	// Two callers may have asked for the same file while it was being read.
-	return docs.get(path) ?? attach(path, file.text, file);
+	const known = docs.get(path);
+	if (known) return known;
+	const doc = attach(path, file.text, file);
+	doc.encoding = file.encoding;
+	doc.binary = file.binary;
+	return doc;
 }
 
 session.sslSettings = () => JSON.parse(JSON.stringify(state.settings.ssl ?? {}));
@@ -487,6 +502,8 @@ export function fileRenamed(oldPath: string, newPath: string) {
 		const text = doc.model.getValue();
 		docs.delete(path);
 		const moved = attach(target, text, { text: doc.savedText, mtime: doc.mtime });
+		moved.encoding = doc.encoding;
+		moved.binary = doc.binary;
 		batch(() => {
 			setState(
 				"groups",
@@ -570,6 +587,8 @@ export async function save(path = activePath()): Promise<Saved> {
 	if (!path) return false;
 	const doc = docs.get(path);
 	if (!doc) return false;
+	// A picture, or other bytes: there is no text of it here to save.
+	if (doc.binary) return notify(`${baseName(path)} is not text: there is nothing of it to save here.`), false;
 	if (!(await settleConflict(doc))) return false;
 	if (state.settings.formatOnSave && doc.model.getLanguageId() === "ssl" && state.lsp.state === "running") {
 		await formatChanged(doc);
@@ -668,6 +687,8 @@ export async function revert(path: string) {
 	if (!doc) return;
 	const file = await guarded(() => backend.read(path));
 	if (!file) return;
+	doc.encoding = file.encoding;
+	doc.binary = file.binary;
 	doc.model.pushEditOperations([], [{ range: doc.model.getFullModelRange(), text: file.text }], () => null);
 	doc.savedText = file.text;
 	doc.savedVersion = doc.model.getAlternativeVersionId();
