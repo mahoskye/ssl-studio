@@ -428,6 +428,12 @@ From a second look:
   and they were one flat list: the models on this machine now come first
   under their own heading, then each other provider under its name, which
   says that its models may cost money.
+- **The graph says what the pointer is on,** at once, at the foot of the
+  picture: a line by its two ends and how many places, a node by what it
+  is and how many lines come in and go out. The tooltip said the same after
+  a wait, and a line is followed by moving along it.
+- **A question to start the agent from wraps** in a narrow panel, where
+  it ran past the edge and brought a sideways scroll bar.
 - **A procedure found from the list is fitted in the graph.** Finding one
   while the list was showing laid out two pictures, and the view was fitted
   to the wrong one: the focus came up small, cut off at the top, with a

@@ -488,6 +488,23 @@ export function GraphView() {
 	});
 	const isHot = (e: Line) => e.id === pointedLine() || (lit() !== null && ((e.froms ?? [e.from]).includes(lit()!) || (e.tos ?? [e.to]).includes(lit()!)));
 	const arrowOf = (e: Line) => `url(#arrow-${isHot(e) ? "hot" : e.relation !== "call" ? "class" : e.cross ? "cross" : "plain"})`;
+	/**
+	 * What the pointer or the keys are on, in words, said at once under the picture: a line by its
+	 * two ends, a node by how many lines come in to it and go out. A tooltip says the same, but
+	 * only after a wait, and following a line is done by moving along it.
+	 */
+	const said = createMemo(() => {
+		const l = layout();
+		if (!l) return "";
+		const line = pointedLine();
+		if (line) return (l.lines.find((e) => e.id === line)?.title ?? "").replace(/\. Point at it to see which\.$/, "");
+		const on = lit();
+		const box = on ? l.boxes.find((b) => b.id === on) : undefined;
+		if (!box) return "";
+		const ins = l.lines.filter((e) => (e.tos ?? [e.to]).includes(box.id)).length;
+		const outs = l.lines.filter((e) => (e.froms ?? [e.from]).includes(box.id)).length;
+		return `${titleOf(box)}. ${plural(ins, "line")} in, ${outs} out.`;
+	});
 	/** Where the keyboard is: the node last focused if it is still shown, or else the focus, or the first. */
 	const cursor = createMemo(() => {
 		const list = procs();
@@ -1061,6 +1078,12 @@ export function GraphView() {
 								</For>
 							</dl>
 						</div>
+					</Show>
+					{/* Not read out: each node and line says the same of itself to a screen reader. */}
+					<Show when={said()}>
+						<p class="graph-said" aria-hidden="true">
+							{said()}
+						</p>
 					</Show>
 					<Show when={layout()}>
 						{(l) => (

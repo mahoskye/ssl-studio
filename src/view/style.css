@@ -153,7 +153,8 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .tree-row .meta.tally { display: inline-flex; gap: var(--space-4); font-variant-numeric: tabular-nums; }
 /* The Agent panel before anything is asked: questions to start from. */
 .agent-starters { list-style: none; margin: var(--space-4) 0 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
-.agent-starters button { width: 100%; min-height: var(--target); padding: var(--space-3) var(--space-4); text-align: left; white-space: normal; border: 1px solid var(--border); border-radius: var(--radius-md); color: var(--fg); background: var(--panel-bg); }
+/* Named with the panel, to come before its rule that a button's words stay on one line: a question wraps. */
+.agent .agent-starters button { width: 100%; min-height: var(--target); padding: var(--space-3) var(--space-4); text-align: left; white-space: normal; border: 1px solid var(--border); border-radius: var(--radius-md); color: var(--fg); background: var(--panel-bg); }
 .agent-starters button:hover { border-color: var(--accent); background: var(--hover); }
 /* A snapshot in Local history: a point on the file's line of saves. */
 .tree-row .snap-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid var(--muted); }
@@ -577,6 +578,8 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .picture-map .mm-node { fill: color-mix(in srgb, var(--fg) 38%, transparent); stroke: none; }
 .picture-map .mm-mark { fill: var(--accent); stroke: none; }
 .picture-map:hover { opacity: 1; }
+/* What the pointer is on, in words, at the foot of the picture and clear of its corner map. */
+.graph-said { position: absolute; left: var(--space-4); bottom: var(--space-4); max-width: calc(100% - 250px); margin: 0; padding: var(--space-1) var(--space-4); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: none; font-size: var(--text-sm); color: var(--fg); background: color-mix(in srgb, var(--side-bg) 92%, transparent); border: 1px solid var(--input-border); border-radius: var(--radius-md); box-shadow: var(--shadow); }
 /* The text editor's outline of the file: quiet too, until it is pointed at or dragged. */
 .monaco-editor .minimap { opacity: .5; transition: opacity .15s; }
 .monaco-editor .minimap:hover, .monaco-editor .minimap:active { opacity: 1; }
