@@ -563,9 +563,12 @@ nothing that loses work.
 
 A seventh review was made of step 9's commit (`3905b68`), before
 anything else was built on it. It had fifteen findings, none that loses
-work. Thirteen were fixed and two were fixed in part, with what was left
-and why. The reviewer then read those fixes before they were committed
-and found eight more things in them, which were fixed too.
+work. Thirteen were fixed, one was fixed in part, and one was fixed with
+a part left on purpose. The reviewer then read those fixes before they
+were committed and found eight more things in them, which were fixed
+too. Two sessions had made those fixes at once in one folder, so the
+commit that took both was read once more: eleven findings, eight fixed
+and three left with their reasons.
 
 ## Why not an extension
 

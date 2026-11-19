@@ -415,26 +415,6 @@ The reviewer also noted that a menu opened from a button does not shut
 when a shortcut takes the keyboard elsewhere. That is older than this
 work, and is left.
 
-The fixes were read by a second reviewer before they were committed. It
-found each of the fifteen fixed as said above, and five small things in
-the fixes themselves, all put right in the same commit:
-
-1. **A dialog's Tab went untrapped for one press** while a text box's
-   menu was open over it. Fixed: the dialog stands down only for the
-   keys the menu uses.
-2. **The menu that leaves the keyboard in its box said nothing to a
-   screen reader.** Fixed: what opened, and the entry marked, are said.
-   Not heard: no reader was run.
-3. **"Copy" still opened beside the words** in a selection over several
-   paragraphs. Fixed: the boxes asked about are those of the text.
-4. **The icon test missed a symbol written as an expression.** Fixed.
-5. **The deepest band in the strip of regions was cut by a pixel.**
-   Fixed.
-
-It also noted, as a change and not a fault, that showing a side from
-the layout buttons or Ctrl+B leaves the keyboard where it is. That is
-meant: a panel's own button and shortcut still take the keyboard to it.
-
 ### The fixes, read before they went in
 
 The same reviewer read the fixes above before they were committed, and
@@ -465,3 +445,37 @@ found eight things in them, none that loses work. All were fixed.
 After these the marked entry, the search switch's new icon and the menus
 were looked at again at 720 and 1440 wide, in the light and the dark
 theme.
+
+### The commit as it went in, read once more
+
+Two sessions were fixing the same findings in the same folder at once,
+and one commit (`defb4df`) took both sets of edits. So that commit was
+read again, by a reviewer told only that two authors had overlapped.
+Eleven findings, none that loses work or traps the user.
+
+1. **Tab in a dialog had two answers**: the dialog moved the keyboard at
+   its first and last box, the menu held it still. Fixed: one answer.
+   Tab shuts the menu and moves nothing; Shift+Tab does the same.
+2. **This document told the pre-commit reading twice**, as five things
+   and as eight. Fixed: the one account above.
+3. **The count of fixes was said three ways.** Fixed: thirteen fixed,
+   one fixed in part (11) and one fixed with a part left on purpose
+   (10), here and in the audit.
+4. **The marked entry was said to a screen reader twice.** Fixed: the
+   box names it, and one line says the menu has opened.
+5. **The pointer marked an entry, and Enter in the box then took it.**
+   Fixed: the mark goes when the pointer leaves the menu.
+6. **Keys with Ctrl, Alt or Shift were taken as the menu's.** Fixed:
+   they shut the menu and do what they do in the box.
+7. **A branch in saving a setting that nothing reaches.** Left: it is
+   the guard for a caller that saves the layout that way.
+8. **Moving a panel still picks the side's next panel itself**, as the
+   window's layout now does for every cause. Left: harmless, and it
+   says what a move does where a move is written.
+9. **Six comments said what the code no longer does.** Fixed.
+10. **A right-click is told from the menu key by its button.** Left,
+    and not checked in the desktop window: if its web view reports the
+    menu key as the right button, Copy for selected words will not open
+    from the keyboard there.
+11. **The deepest band grew past the strip under the pointer.** Fixed:
+    it brightens, and does not widen.

@@ -191,7 +191,7 @@ export function rememberTabs() {
 const LEFT_VIEWS: readonly PanelId[] = ["explorer", "objects", "palette", "reference", "search", "history", "health", "agent", "docs", "git"];
 const BOTTOM_VIEWS: readonly BottomView[] = ["problems", "output"];
 
-/** Keeps which side panel and which bottom panel are showing in this folder, for the next time it is opened. */
+/** Keeps which side panel, bottom panel and right panel are showing in this folder, for the next time it is opened. */
 export function rememberViews() {
 	const root = state.workspace?.root;
 	if (root && tabsReady) remember(viewsKey(root), packViews(state.leftView, state.bottomView, state.rightView));

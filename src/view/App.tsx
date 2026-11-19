@@ -186,7 +186,7 @@ export function App() {
 	});
 	// Which files are open is kept with the folder, so that it opens next time as it was left.
 	createEffect(on(() => JSON.stringify([state.groups.map((g) => [g.tabs, g.active]), state.activeGroup]), rememberTabs));
-	// And so are the side panel and the bottom panel that were showing.
+	// And so are the side panel, the bottom panel and the right panel that were showing.
 	createEffect(on(() => [state.leftView, state.bottomView, state.rightView], rememberViews));
 	// The app is told how much is unsaved, so that it can refuse to close its window until the user has been asked.
 	createEffect(() => void backend.unsavedChanged(unsavedPaths().length).catch(() => undefined));

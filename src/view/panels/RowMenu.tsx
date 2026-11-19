@@ -42,9 +42,8 @@ export function chooseFromMenu(label: string, items: string[], at: Point, option
 	return new Promise((resolve) => setOpen({ label, items, at, opener: options.box ?? document.activeElement, keep: Boolean(options.box), resolve }));
 }
 
-/** True while a row's menu is open: a dialog under it leaves the keys to it. */
+/** True while a row's menu is open: a dialog under it leaves the menu's own keys to it. */
 export const rowMenuOpen = () => open() !== null;
-
 
 export function RowMenu() {
 	onCleanup(() => finish(null));
@@ -64,6 +63,8 @@ export function RowMenu() {
 				if (menu.keep) {
 					const onWindowKey = (e: KeyboardEvent) => {
 						const used = () => (e.preventDefault(), e.stopPropagation());
+						// A key with Ctrl, Alt or Shift is not the menu's: it shuts the menu and does what it does in the box.
+						if (e.ctrlKey || e.metaKey || e.altKey || (e.shiftKey && e.key !== "Tab")) return void (isModifierKey(e.key) || finish(null));
 						if (e.key === "Escape") (used(), finish(null));
 						else if (e.key === "ArrowDown" || e.key === "ArrowUp") (used(), setMarked(moveIndex(menu.items.length, marked(), e.key, { wrap: true })));
 						// Enter alone takes nothing, and does not go on to the box or the dialog under the menu.
@@ -73,7 +74,8 @@ export function RowMenu() {
 						// Anything else is for the box: the menu goes, and the key is typed.
 						else if (!isModifierKey(e.key)) finish(null);
 					};
-					// The box lost the keyboard some other way (it was closed, another window came forward): its menu goes too.
+					// The box lost the keyboard some other way (another window came forward): its menu goes too. A box taken
+					// off the page may say nothing; the menu then stays until a key or a click, and acts on nothing.
 					const onLeave = () => finish(null);
 					// The box says which entry is marked, to what reads the screen aloud: the keyboard never leaves it.
 					const had = menu.opener?.getAttribute("aria-activedescendant") ?? null;
@@ -108,12 +110,6 @@ export function RowMenu() {
 					<Portal>
 						{/* A press beside a menu that left the keyboard in its box shuts the menu and leaves the keyboard there still. */}
 						<div class="row-menu-shade" onMouseDown={(e) => (menu.keep && e.preventDefault(), finish(null))} onContextMenu={(e) => (e.preventDefault(), finish(null))} />
-						{/* The entry the arrow keys have marked is said: the keyboard is not on it, so nothing else reads it out. */}
-						<Show when={menu.keep && marked() >= 0}>
-							<span class="visually-hidden" role="status">
-								{menu.items[marked()]}
-							</span>
-						</Show>
 						<div
 							ref={(el) => queueMicrotask(() => place(el))}
 							class="menu-pop row-menu"
@@ -124,6 +120,8 @@ export function RowMenu() {
 							style={{ left: `${menu.at.x}px`, top: `${menu.at.y}px` }}
 							onKeyDown={onKeyDown}
 							onMouseDown={(e) => menu.keep && e.preventDefault()}
+							// The pointer's mark goes with the pointer: Enter typed in the box must not take an entry it only passed over.
+							onMouseLeave={() => menu.keep && setMarked(-1)}
 							onFocusOut={(e) => {
 								// Something else took the keyboard (the command palette, say): the menu goes, and does not take it back.
 								const to = e.relatedTarget as Node | null;

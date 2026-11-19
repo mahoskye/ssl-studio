@@ -54,8 +54,8 @@ if (typeof window !== "undefined") {
 			if (!top) return;
 			// A menu opened over the dialog (a right-click in one of its boxes) has the keys while it is open: Escape shuts
 			// the menu, not the dialog under it.
-			// Only the keys the menu uses: Tab still goes round inside the dialog, and the menu shuts as it does.
-			if (rowMenuOpen() && ((e.target instanceof Element && e.target.closest(".row-menu")) || ["Escape", "ArrowDown", "ArrowUp", "Enter"].includes(e.key))) return;
+			// Only the keys the menu uses. Tab is one of them: it shuts the menu and moves nothing, in a dialog as elsewhere.
+			if (rowMenuOpen() && ((e.target instanceof Element && e.target.closest(".row-menu")) || ["Escape", "ArrowDown", "ArrowUp", "Enter", "Tab"].includes(e.key))) return;
 			if (top.key(e)) return;
 			if (e.key === "Escape") {
 				e.preventDefault();

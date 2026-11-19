@@ -452,7 +452,8 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .region-band { position: absolute; width: 6px; margin-left: 2px; padding: 0; border-radius: var(--radius-sm); opacity: .85; cursor: pointer; min-height: 3px; }
 /* Caught from its own left edge to the strip's right edge. To its left are the regions it is inside, each still caught on its own first pixels. */
 .region-band::after { content: ""; position: absolute; inset: 0 -18px 0 0; }
-.region-band:hover, .region-band:focus-visible { opacity: 1; width: 8px; }
+/* Brighter under the pointer, and no wider: the deepest band already ends at the strip's edge. */
+.region-band:hover, .region-band:focus-visible { opacity: 1; filter: brightness(1.15) saturate(1.2); }
 .health section { padding: 0 var(--space-5) var(--space-5); }
 .health h3 { font-size: var(--text-md); font-weight: 600; margin: var(--space-4) 0 var(--space-3); }
 .meter-row { display: grid; grid-template-columns: 1fr auto; gap: var(--space-1) var(--space-4); margin-bottom: var(--space-4); font-size: var(--text-md); align-items: center; }

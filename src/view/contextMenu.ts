@@ -89,7 +89,7 @@ export function installContextMenu() {
 		if (!on || !selection || selection.isCollapsed || !selection.rangeCount || !words.trim()) return;
 		// A right-click is the right button; the menu key and Shift+F10 are not, whatever place the web view gives them.
 		const pointed = e.button === 2;
-		const onWords = pointed ? wordBoxes(selection.getRangeAt(0)).some((box) => e.clientX >= box.left && e.clientX <= box.right && e.clientY >= box.top && e.clientY <= box.bottom) : selection.containsNode(on, true);
+		const onWords = pointed ? wordBoxes(selection.getRangeAt(0)).some((rect) => e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom) : selection.containsNode(on, true);
 		if (!onWords) return;
 		void chooseFromMenu("Actions for the selected text", [NAMES.copy], at).then((picked) => picked === NAMES.copy && void copyText(words, "Copied the selected text."));
 	});
