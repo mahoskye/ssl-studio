@@ -547,18 +547,18 @@ outside it, or text become unreadable.
 | 2, menus | The editor's menu with the app's five entries; a pinned tab's menu, in the pass before |
 | 3, the menu bar | The File menu open from Alt+F, inside the window, over the Explorer |
 | 4, finding | The quick pick's list of what can be typed, from "?" |
-| 5, files by hand | A cut row in the Explorer, its label saying it is cut and waiting to be pasted |
+| 5, files by hand | A cut row; a file dragged over a folder, which is outlined; the line where a dragged tab would land |
 | 6, not text | A picture with its size; the status bar saying Picture, or UTF-8 and LF for a text |
-| 7, replace | Old and new words in each result, the count of results, "Replace all" |
+| 7, replace | Old and new words in each result; the two file boxes, narrowing a search to the files chosen |
 | 8, source control | The panel with its rows' buttons, a comparison, the margin's marks |
 
 At 720 wide a comparison is one column, the old lines above the new; at
 1440 it is two. In the pictures at 1440 the cut row lay under the open
 File menu, and was read from the page; it was seen by eye in all four in
 the passes before. The menu bar was also seen with no folder open, where
-each entry says what it needs. A drop mark between tabs and the search's
-file boxes were seen as their steps were built and in the second look,
-not in this last one.
+each entry says what it needs. The two drop marks were held still for
+the look by drag events made by script, since a drag by hand cannot be;
+the drop itself was made by script when step 5 was built.
 
 Not checked:
 

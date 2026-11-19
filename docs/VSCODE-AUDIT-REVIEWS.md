@@ -207,8 +207,10 @@ copy of the demo project, or by its test where the app cannot show it.
   of bytes.
 - **A5a.** Staging a file with unsaved edits said "has unsaved changes:
   what is staged is what is saved".
-- **A5c, A5d.** In the code: a hundred paths to a command, 500 rows to a
-  list. Not run with that many files.
+- **A5c, A5d.** With 600 new files the panel said "1 staged, 608 not
+  staged", listed 500 and said "And 108 more, not listed". "Stage all"
+  then staged 607, as git itself counted, and "Unstage all" took them
+  out again.
 - **A5f.** Enter on a changed file of bytes said "is not text in git:
   there is nothing of it to compare"; on a conflict, that there is no one
   earlier text to show.
@@ -282,8 +284,10 @@ confirmed and fixed, in the commit after it.
    program, then opened: its tab showed the file as it is on disk.
 3. **A trashed file kept its tab in a second group** when the first was
    left empty. Older than this work, in the function the fix touched.
-   Fixed: the groups are gone through from the last back. Not seen: the
-   preview cannot move a file to the trash ("only available in the app").
+   Fixed: the groups are gone through from the last back. Seen by the
+   other way a file is removed, since the preview cannot move one to the
+   trash: a project was set up, one of its files opened in two groups
+   that held nothing else, and the set up undone. Both tabs closed.
 4. **A "changed on disk" mark could outlive a document that was let go.**
    Fixed: it goes with the document.
 5. **Two narrow races.** A file removed while the tabs were being read at
