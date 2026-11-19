@@ -369,7 +369,10 @@ export function BlocksView(props: { path: string; group: number }) {
 								onBlur={(e) => commitCondition(n, e.currentTarget.value)}
 							/>
 						</Show>
-						<Code text={(parts().after + parts().rest).trim()} />
+						{/* What closes the line stands against the condition, as it does in the text: "DueRule;", not "DueRule ;". */}
+						<span classList={{ "b-tight": /^[;),]/.test((parts().after + parts().rest).trim()) }}>
+							<Code text={(parts().after + parts().rest).trim()} />
+						</span>
 					</span>
 				)}
 			</Show>

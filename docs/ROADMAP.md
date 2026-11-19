@@ -356,6 +356,15 @@ From a second look:
   calls, side by side with their counts, each with where it is and from how
   many places. With a depth of more than one, every call within that many
   steps follows.
+- **The graph's bar is shorter.** Its title is gone (the switch beside it
+  says "Graph"), closing it is a cross, and in a narrow graph the zoom
+  buttons are in the menu: one row for the whole picture and two around a
+  focus, where there were three.
+- **A picture nobody has moved stays fitted** when the window or a panel
+  changes its room, in the graph and in a chart. Once it is panned or
+  zoomed it is left where it was put.
+- **In Blocks, what closes a line stands against it:** `:CLASS DueRule;`,
+  where a gap made it `DueRule ;`.
 - **A procedure found from the list is fitted in the graph.** Finding one
   while the list was showing laid out two pictures, and the view was fitted
   to the wrong one: the focus came up small, cut off at the top, with a

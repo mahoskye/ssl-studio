@@ -6,7 +6,7 @@
 // double-click it, or press Enter, to open it. The same calls can be read as
 // a plain list.
 import ELK from "elkjs/lib/elk.bundled.js";
-import { batch, createEffect, createMemo, createSignal, createUniqueId, For, on, Show } from "solid-js";
+import { batch, createEffect, createMemo, createSignal, createUniqueId, For, on, onCleanup, Show } from "solid-js";
 import { level } from "../../shared/houseStyle";
 import { backend } from "../backend";
 import { regionColor } from "../editor/regions";
@@ -76,6 +76,8 @@ const GRAPH_KEYS: readonly (readonly [keys: string, what: string])[] = [
 ];
 /** A picture of up to this many nodes is laid out both across and down, to keep the one that fits the view better. */
 const BOTH_WAYS_UP_TO = 150;
+/** A graph narrower than this keeps its zoom buttons in the menu: in the bar they cost it a third row. */
+const NARROW_UNDER = 600;
 /** How far along a line its number of places is written. */
 const BADGE_AT = 30;
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
@@ -97,6 +99,8 @@ export function GraphView() {
 	let svg: SVGSVGElement | undefined;
 	let fittedFor = "";
 	let layoutRun = 0;
+	/** The view as the last fit left it: while it is still that, a change of the graph's size fits it again. */
+	let fittedView: { x: number; y: number; scale: number } | null = null;
 	/** The scripts drawn as one node each, by path. */
 	const [folded, setFolded] = createSignal<ReadonlySet<string>>(new Set());
 	/** The folders drawn as one node each. */
@@ -465,7 +469,8 @@ export function GraphView() {
 		const l = layout();
 		if (!l || !svg) return;
 		const here = procs().find((b) => b.id === cursor());
-		setView(fitView(l, size(), { floor: FIT_FLOOR, anchor: current() || filter().focus ? here && centreOf(here) : undefined }));
+		fittedView = fitView(l, size(), { floor: FIT_FLOOR, anchor: current() || filter().focus ? here && centreOf(here) : undefined });
+		setView(fittedView);
 	};
 	/** Zooms about a point of the canvas: the pointer, or its middle for the buttons and keys. */
 	const zoomBy = (factor: number, at?: Point) => {
@@ -555,6 +560,14 @@ export function GraphView() {
 				disabled: !inGraph || !folding(),
 				why: "Around a focus, and in the list, every call is shown",
 			},
+			...(narrow() && inGraph
+				? ([
+						{ label: "Zoom in", keys: "+", run: () => zoomBy(1.2) },
+						{ label: "Zoom out", keys: "−", run: () => zoomBy(1 / 1.2) },
+						{ label: `Zoom to 100% (now ${Math.round(view().scale * 100)}%)`, run: () => zoomBy(1 / view().scale) },
+						"separator",
+					] satisfies MenuItem[])
+				: []),
 			{ label: keysOpen() ? "Hide the keys" : "Keys and what the pointer does", keys: "?", run: () => setKeysOpen((open) => !open), disabled: !inGraph, why: "The keys are the graph's" },
 			"separator",
 			{ label: "Save picture…", run: () => void savePicture(svg, layout(), "docs/call-graph.svg"), disabled: !inGraph || !layout(), why: "There is no picture in the list" },
@@ -649,12 +662,30 @@ export function GraphView() {
 		</>
 	);
 	let dragging: { x: number; y: number } | null = null;
+	/** Too narrow for every button of the bar: the zoom buttons go to the menu. */
+	const [narrow, setNarrow] = createSignal(false);
+	const watchWidth = (el: HTMLDivElement) => {
+		if (typeof ResizeObserver === "undefined") return;
+		// The bar's height follows from this, and so the picture's: it waits for the next frame.
+		let frame = 0;
+		const observer = new ResizeObserver((entries) => {
+			const width = entries[0]?.contentRect.width ?? Infinity;
+			cancelAnimationFrame(frame);
+			frame = requestAnimationFrame(() => {
+				setNarrow(width < NARROW_UNDER);
+				// A picture nobody has moved since it was fitted stays fitted when the window or a panel changes its room.
+				if (view() === fittedView) queueMicrotask(fit);
+			});
+		});
+		observer.observe(el);
+		onCleanup(() => (cancelAnimationFrame(frame), observer.disconnect()));
+	};
 
 	return (
-		<div class="graph">
-			<div class="graph-bar">
-				<strong>Graph</strong>
-				<div class="mode-switch" role="group" aria-label="Show the calls as">
+		<div class="graph" ref={watchWidth}>
+			<div class="graph-bar" classList={{ narrow: narrow(), around: filter().mode === "around" }}>
+				{/* No title: the switch's first word is the view's name, and the bar needs the room. */}
+				<div class="mode-switch" role="group" aria-label="Call graph: show the calls as">
 					<button classList={{ on: mode() === "graph" }} aria-pressed={mode() === "graph"} onClick={() => choose("graph")}>
 						Graph
 					</button>
@@ -699,7 +730,7 @@ export function GraphView() {
 						{progress() || tally()}
 					</span>
 				</Show>
-				<Show when={mode() === "graph"}>
+				<Show when={mode() === "graph" && !narrow()}>
 					<div class="graph-zoom" role="group" aria-label="Zoom">
 						<button title="Zoom out (−)" aria-label="Zoom out" onClick={() => zoomBy(1 / 1.2)}>
 							−
@@ -711,6 +742,8 @@ export function GraphView() {
 							+
 						</button>
 					</div>
+				</Show>
+				<Show when={mode() === "graph"}>
 					<button title="The whole graph, or as much as stays legible (0)" onClick={fit}>
 						Fit
 					</button>
@@ -719,7 +752,9 @@ export function GraphView() {
 				<Menu label="More for the graph" title="More: fold, unresolved targets, keys, save picture, refresh" class="graph-more" items={more}>
 					<span aria-hidden="true">⋯</span>
 				</Menu>
-				<button onClick={() => setState("centerView", "editors")}>Close</button>
+				<button class="graph-close" title="Close the graph and go back to the editors" aria-label="Close the graph" onClick={() => setState("centerView", "editors")}>
+					<span aria-hidden="true">×</span>
+				</button>
 			</div>
 			<Show when={idle()}>
 				{(why) => (

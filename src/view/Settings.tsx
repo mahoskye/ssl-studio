@@ -155,7 +155,7 @@ export function SettingsDialog() {
 		uiScale: ["Interface size", "The whole window, from 80% to 160%"],
 		fontSize: ["Font size", "The editor, Blocks, diffs and rendered documents"],
 		formatOnSave: ["Format changed lines on save", "Only the lines changed since the last save"],
-		minimap: ["Minimap", "The outline of the file at the editor's edge"],
+		minimap: ["Minimap", "The outline of the file at the editor's edge; a narrow editor goes without"],
 		inlayHints: ["Parameter name hints", "Names shown beside the arguments of a call"],
 		rulers: ["Ruler at the line length", "A line down the editor at the style profile's line length"],
 		rulerMargin: ["Rulers beside it", "Fainter rulers this many columns before and after; 0 for none"],

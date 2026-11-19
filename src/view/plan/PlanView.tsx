@@ -183,6 +183,8 @@ export function PlanView(props: { path: string; group: number }) {
 	let nodeProbe: SVGTextElement | undefined;
 	let labelProbe: SVGTextElement | undefined;
 	let fitted = false;
+	/** The view as the last fit left it: while it is still that, a change of the chart's size fits it again. */
+	let fittedView: { x: number; y: number; scale: number } | null = null;
 	let seen = 0;
 	const measure = {
 		node: probeMeasure(() => nodeProbe, canvasMeasure(`${NODE_FONT_PX}px system-ui, sans-serif`, NODE_FONT_PX)),
@@ -207,6 +209,8 @@ export function PlanView(props: { path: string; group: number }) {
 			frame = requestAnimationFrame(() => {
 				setNarrow(width < ASSIST_WIDTH + MIN_CHART_WIDTH);
 				setCompact(width < BAR_FITS_FROM);
+				// A chart nobody has moved since it was fitted stays fitted when the window or a panel changes its room.
+				if (view() === fittedView) queueMicrotask(fit);
 			});
 		});
 		observer.observe(el);
@@ -274,7 +278,8 @@ export function PlanView(props: { path: string; group: number }) {
 		const l = layout();
 		if (!l || !canvas) return;
 		const here = l.boxes.find((b) => b.node && b.id === selected()) ?? l.boxes.find((b) => b.node?.kind === "start");
-		setView(fitView(l, canvas.getBoundingClientRect(), { floor: FIT_FLOOR, anchor: here && { x: here.x + here.width / 2, y: here.y + here.height / 2 } }));
+		fittedView = fitView(l, canvas.getBoundingClientRect(), { floor: FIT_FLOOR, anchor: here && { x: here.x + here.width / 2, y: here.y + here.height / 2 } });
+		setView(fittedView);
 	};
 	/** Zooms about a point of the canvas: the pointer, or its middle for the keys. */
 	const zoomBy = (factor: number, at?: Point) => {
