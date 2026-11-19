@@ -11,9 +11,13 @@ the source of truth.
 - **Blocks mode:** the same file as nested blocks. Procedures are cards,
   control flow is nested, and comment regions are coloured frames that group
   the code inside them.
-- **Graph mode:** a whole workspace as procedures and data sources
-  joined by their `DoProc`, `ExecFunction`, `RunDS` and `:INCLUDE` calls,
-  grouped by region.
+- **Graph mode:** a whole workspace as its folders, scripts, procedures and
+  data sources, joined by their `DoProc`, `ExecFunction`, `RunDS` and
+  `:INCLUDE` calls and by what its classes inherit, create and call. It
+  opens folded, a picture of folders or scripts to unfold from; calls into
+  a folder are gathered at its edge; a focus shows one procedure's callers
+  and callees; and zoomed far out it names its scripts as a map does. The
+  same calls are there as a list.
 - **Planning:** a process or script as a flow chart in plain words, kept as
   `design/<name>.plan.json`, with a Chart and Text view and a check that needs
   no model. An agent then asks what the chart leaves undecided, suggests changes

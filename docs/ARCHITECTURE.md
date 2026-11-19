@@ -84,7 +84,25 @@ milestone M0.
 ## Graph mode
 
 - Built from the call graph request, laid out with ELK (`elkjs`), drawn as
-  SVG with pan and zoom. Regions and scripts become ELK compound nodes.
+  SVG with pan and zoom. Folders, scripts and regions become ELK compound
+  nodes.
+- **What is drawn is chosen before it is laid out**
+  ([ADR 0011](adr/0011-a-picture-is-of-what-can-be-followed.md)), by pure functions in
+  `src/view/graph/model.ts`: `visible` (every call, calls between scripts,
+  or around a focus), `fold` (a script or a folder as one node), `gather`
+  (several lines across a folder's edge as one line to the edge), and
+  `sameStep` (scripts a layered layout would put in one line, set out as a
+  block instead).
+- **The layout is tried across and down** for a picture of up to 250 nodes,
+  and the one the view shows more of is kept.
+- **The view's own arithmetic** is in `src/view/graph/canvas.ts`, shared
+  with the plan chart: fitting, revealing, the corner map's area, and
+  `clearLabels`, which places the names of the far picture so that none
+  lies over another.
+- A plan's chart is laid out by the same ELK with right-angled routes
+  (`src/view/plan/chart.ts`). A decision's ways meet it at its points, and
+  where a loop can be drawn more than one way each is laid out and the
+  chart with the fewest crossings is kept.
 
 ## Agents: the opencode adapter (ADR 0004)
 

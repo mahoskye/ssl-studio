@@ -434,6 +434,10 @@ From a second look:
   a wait, and a line is followed by moving along it.
 - **A question to start the agent from wraps** in a narrow panel, where
   it ran past the edge and brought a sideways scroll bar.
+- **The rules this work came to follow are written down** as
+  [ADR 0011](adr/0011-a-picture-is-of-what-can-be-followed.md) (a picture is
+  of what can be followed), and the README and the architecture notes say
+  what the graph and the chart now do.
 - **A procedure found from the list is fitted in the graph.** Finding one
   while the list was showing laid out two pictures, and the view was fitted
   to the wrong one: the focus came up small, cut off at the top, with a

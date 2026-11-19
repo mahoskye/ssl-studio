@@ -57,7 +57,9 @@ A sample with no instrument is never held up by an outage.
 - **`SetSampleDueDates.ssl`:** regions as frames in Blocks, the size meter, the Objects outline.
 - **`DueSoonReport.ssl`:** `:BEGINCASE` arms, a text `:REGION`, nested regions, a `RunDS` call.
 - **`DueRule.ssl` and `RushDueRule.ssl`:** a class and the one that inherits it.
-- **The call graph:** scripts joined by their calls, the data sources and the include.
+- **The call graph:** the folders and scripts joined by their calls, the data sources, the
+  include, and the class that inherits another. Unfold `src/DueDates` and the tests'
+  many calls into it are gathered at its edge.
 - **`SetSampleDueDates.plan.json`:** a plan with its spec and build record, so its steps link to the code.
 - **`OldDueDateCheck.ssl`:** findings in Problems and Health, and something to run Tidy on.
 - **The Docs panel:** these documents rendered, and the schema.
