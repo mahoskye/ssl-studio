@@ -58,7 +58,9 @@ export function StatusBar() {
 	};
 	const lspWaits = () => !state.workspace && state.lsp.state === "stopped" && !state.info?.lsp.message;
 	/** The regions and the procedure the cursor is in, outermost first: where one is, in a long script. */
-	const where = () => (state.centerView === "editors" ? symbolPath(symbols(), state.cursor.line).filter((s) => s.kind !== monaco.languages.SymbolKind.Variable) : []);
+	/** A Markdown document being read, not edited: it has no cursor line to say a place by. */
+	const rendered = () => Boolean(activePath() && /\.(md|markdown)$/i.test(activePath()!) && !state.mdText[activePath()!]);
+	const where = () => (state.centerView === "editors" && !rendered() ? symbolPath(symbols(), state.cursor.line).filter((s) => s.kind !== monaco.languages.SymbolKind.Variable) : []);
 	/** The same in a sentence, innermost first: "DueDate, in Counting days". */
 	const whereWords = () => [...where()].reverse().map((s) => s.name).join(", in ");
 	const lspNote = () => state.lsp.message ?? state.info?.lsp.message;

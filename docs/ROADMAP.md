@@ -525,6 +525,13 @@ the work comes from ([ADR 0012](adr/0012-a-projects-work-is-written-down.md)).
   number opens Search on it. It is a search for a name, not a reading of
   SSL (ADR 0003).
 - **A status is typed from the ones the table uses,** and the usual ones.
+- **A document has an outline.** The Objects panel, the breadcrumbs and
+  the status bar say where one is in a file that is not SSL: a Markdown
+  document's headings, a TOML or INI file's tables and keys, a JSON
+  document's keys, a SQL file's statements, a YAML file's top keys. A
+  heading chosen while a document is being read scrolls the page to it.
+- **TOML that cannot be read says where,** by the reader project.toml is
+  loaded with, in plain words: a key set twice, a string not closed.
 - **The Work list is in the order of the work.** What is under way comes
   first, then what waits, then what is finished. A ticket that is part of
   another (an epic's story, a task's sub-task) is listed under it, and a

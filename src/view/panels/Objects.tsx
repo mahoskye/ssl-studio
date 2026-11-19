@@ -1,19 +1,38 @@
 // The current file's objects from the language server's document symbols:
 // comment regions (Namespace symbols) with their procedures inside, and each
-// procedure's parameters under it.
+// procedure's parameters under it. A file that is not SSL has an outline of
+// its own kind (shared/outline.ts): a document's headings, a settings file's
+// tables and keys, a SQL file's statements.
 import { createEffect, createResource, createSignal, For, on, onCleanup, Show } from "solid-js";
 import { monaco } from "../editor/monaco";
 import { session } from "../lsp/session";
 import { activeDoc, activePath, openFile, state } from "../state";
 import { cycleRegionColor, isRegion, regionColor, symbolPath } from "../editor/regions";
 import { isPlanPath, PROCEDURE_DRAG } from "../plan/model";
+import { hasOutline, outline, outlineOf, type OutlineItem } from "../../shared/outline";
 import { baseName, dirName, relativeTo } from "../../shared/paths";
 import { focusRowsBelow, Row, RowGroup, Rows } from "./Rows";
 import { serverDown } from "./server";
 
 type Sym = monaco.languages.DocumentSymbol;
 // By Monaco's SymbolKind: Module, Namespace (a region), Class, Method, Function, Variable, Constant, String.
-const ICONS: Record<number, string> = { 1: "▣", 2: "▣", 4: "◆", 5: "◆", 11: "ƒ", 12: "•", 13: "·", 14: "π" };
+const ICONS: Record<number, string> = { 1: "▣", 2: "▣", 3: "§", 4: "◆", 5: "◆", 11: "ƒ", 12: "•", 13: "·", 14: "π", 18: "▣", 19: "·", 22: "▤" };
+/** An outline's kinds as the symbols the panel draws: a heading, a table or section, a key, a statement. */
+const OUTLINE_KIND: Record<OutlineItem["kind"], number> = { heading: monaco.languages.SymbolKind.Package, section: monaco.languages.SymbolKind.Object, key: monaco.languages.SymbolKind.Key, statement: monaco.languages.SymbolKind.Struct };
+const OUTLINE_KINDS = new Set(Object.values(OUTLINE_KIND));
+const asSymbol = (item: OutlineItem, model: monaco.editor.ITextModel): Sym => {
+	const line = Math.min(item.line, model.getLineCount());
+	const endLine = Math.min(Math.max(item.endLine, line), model.getLineCount());
+	return {
+		name: item.name,
+		detail: item.kind === "section" && model.getLanguageId() === "toml" ? "table" : item.kind,
+		kind: OUTLINE_KIND[item.kind],
+		tags: [],
+		range: { startLineNumber: line, startColumn: 1, endLineNumber: endLine, endColumn: model.getLineMaxColumn(endLine) },
+		selectionRange: { startLineNumber: line, startColumn: 1, endLineNumber: line, endColumn: model.getLineMaxColumn(line) },
+		children: item.children.map((child) => asSymbol(child, model)),
+	};
+};
 /** The server's own word for a procedure's parameter, in the symbol's detail. */
 const isParameter = (s: Sym) => s.detail === "parameter";
 /** A name on one line (a parameter, a public variable): it has no length worth showing. */
@@ -34,7 +53,20 @@ export function useSymbols() {
 			const doc = activeDoc();
 			setSymbols([]);
 			setReading("idle");
-			if (!doc || doc.model.getLanguageId() !== "ssl") return;
+			if (!doc) return;
+			// A document that is not SSL is outlined here, from its own text: nothing is asked of the language server.
+			// A plan is JSON, and is read as its chart: the panel lists the workspace's procedures for it instead.
+			if (hasOutline(doc.model.getLanguageId()) && !isPlanPath(activePath())) {
+				const read = () => (setSymbols(outline(doc.model.getLanguageId(), doc.model.getValue()).map((item) => asSymbol(item, doc.model))), setReading("read"));
+				read();
+				const sub = doc.model.onDidChangeContent(() => {
+					clearTimeout(timer);
+					timer = setTimeout(read, 300);
+				});
+				onCleanup(() => (clearTimeout(timer), sub.dispose()));
+				return;
+			}
+			if (doc.model.getLanguageId() !== "ssl") return;
 			let current = true;
 			const load = () =>
 				session.documentSymbols(doc.model).then(
@@ -214,7 +246,7 @@ export function Objects() {
 							<span class="visually-hidden">The cursor is in here</span>
 						</span>
 					</Show>
-					<Show when={!isVariable(props.symbol)}>
+					<Show when={!isVariable(props.symbol) && !(OUTLINE_KINDS.has(props.symbol.kind) && lines(props.symbol) === 1)}>
 						<span class="meta">{lines(props.symbol)}</span>
 					</Show>
 				</Row>
@@ -230,7 +262,10 @@ export function Objects() {
 	const empty = () => {
 		const doc = activeDoc();
 		if (!activePath()) return "No file open. Open an SSL file to see its regions and procedures.";
-		if (!doc || doc.model.getLanguageId() !== "ssl") return "Objects are listed for SSL files, and this is not one.";
+		const language = doc?.model.getLanguageId();
+		if (doc && hasOutline(language) && !filter()) return `This file has no ${outlineOf[language!] ?? "outline"} yet.`;
+		if (doc && hasOutline(language)) return `Nothing here matches “${filter()}”. Clear the filter to see everything.`;
+		if (!doc || language !== "ssl") return "This kind of file has no outline: SSL, Markdown, TOML, INI, JSON, SQL and YAML files do.";
 		if (serverDown()) return `${serverDown()} This file's objects come from it.`;
 		if (reading() === "failed") return `The language server could not list this file's objects: ${failure()}`;
 		if (reading() !== "read") return "Reading this file's objects…";

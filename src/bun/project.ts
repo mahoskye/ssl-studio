@@ -361,3 +361,32 @@ ${PLACEHOLDER["AGENTS.md"]}
 - \`${project.tests}/\`: test scripts and what they need.
 - \`${project.plans}/\`: plans and tidy notes.
 `;
+
+/** What a TOML reader's own words come to, where they are a parser's and not a person's. */
+const TOML_WORDS: [RegExp, (found: RegExpExecArray) => string][] = [
+	[/^Expected t_equal\b/i, () => "A key is followed by = and a value, one to a line."],
+	[/^Unexpected end of file/i, () => "The file ends in the middle of a value: something is not finished or not closed."],
+	[/^Unterminated .*string/i, () => "This string is not closed."],
+	[/^Cannot redefine key '(.+)'/i, (found) => `${found[1]} is set twice.`],
+	[/^Expected (?:t_)?(\w+) but found (?:t_)?(.+)$/i, (found) => `${found[1]!.replace(/_/g, " ")} was expected here, not ${found[2]!.replace(/_/g, " ")}.`],
+];
+
+/**
+ * The first thing that keeps a text from being TOML, and where; null when it
+ * can be read. Read by the runtime's own TOML reader, the one project.toml is
+ * read with, so what is marked is what would not load.
+ */
+export function tomlProblem(text: string): { message: string; line: number; column: number } | null {
+	if (!text.trim()) return null;
+	try {
+		Bun.TOML.parse(text);
+		return null;
+	} catch (e: any) {
+		const first = e?.errors?.[0] ?? e;
+		const said = String(first?.message ?? e?.message ?? e);
+		const worded = TOML_WORDS.map(([pattern, words]) => [pattern.exec(said), words] as const).find(([found]) => found);
+		const lines = text.split(/\r?\n/).length;
+		const line = Math.min(Math.max(Number(first?.position?.line ?? e?.line ?? 1), 1), lines);
+		return { message: worded ? worded[1](worded[0]!) : said, line, column: Math.max(Number(first?.position?.column ?? 1), 1) };
+	}
+}

@@ -11,7 +11,8 @@ import { DOC_FOLDERS, linkedLines, toneOf } from "../../shared/projectDocs";
 import { colourCode } from "./markdownCode";
 import { ticketWork } from "../../shared/workContext";
 import { docs } from "../project";
-import { canonical, documents, openFile, state } from "../state";
+import { outline, type OutlineItem } from "../../shared/outline";
+import { canonical, documents, openFile, revealSignal, state } from "../state";
 
 export function MarkdownView(props: { path: string }) {
 	const model = documents.get(props.path)?.model;
@@ -79,6 +80,20 @@ export function MarkdownView(props: { path: string }) {
 		}
 		setAt(last || (headings()[0]?.id ?? ""));
 	};
+	/**
+	 * A place in the text asked for from elsewhere (a heading in the Objects panel, a link to a line) is shown here as
+	 * the heading that line is under: the editor behind this view has taken the cursor there.
+	 */
+	const flat = (items: OutlineItem[]): OutlineItem[] => items.flatMap((item) => [item, ...flat(item.children)]);
+	const stopReveal = revealSignal.listen((path) => {
+		if (path !== props.path) return;
+		queueMicrotask(() => {
+			const all = flat(outline("markdown", text()));
+			const at = all.findLastIndex((item) => item.line <= state.cursor.line);
+			if (at >= 0) view.querySelectorAll<HTMLElement>(".md h1, .md h2, .md h3, .md h4, .md h5, .md h6")[at]?.scrollIntoView({ block: "start" });
+		});
+	});
+	onCleanup(stopReveal);
 	const goTo = (id: string) => [...view.querySelectorAll<HTMLElement>(".md h1, .md h2, .md h3")].find((h) => h.id === id)?.scrollIntoView({ block: "start" });
 	// Code in the document is coloured as the editor colours it, each block in its own language.
 	let article!: HTMLElement;

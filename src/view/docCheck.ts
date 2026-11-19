@@ -4,6 +4,7 @@
 // came from somewhere else is not this project's to fix.
 import { checkTables } from "../shared/docTables";
 import { jsonProblem } from "../shared/jsonCheck";
+import { backend } from "./backend";
 import { monaco } from "./editor/monaco";
 import { publishFindings } from "./lsp/session";
 
@@ -58,4 +59,36 @@ export function trackJson(model: monaco.editor.ITextModel) {
 		publishFindings(model, JSON_OWNER, null);
 	});
 	run();
+}
+
+const TOML_OWNER = "toml";
+
+/**
+ * A TOML document that cannot be read says where: a project's settings, a
+ * configuration file. The reading is the backend's, with the reader
+ * project.toml is loaded with; the last answer asked for is the one shown.
+ */
+export function trackToml(model: monaco.editor.ITextModel) {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	let asked = 0;
+	const run = async () => {
+		if (model.isDisposed()) return;
+		const mine = ++asked;
+		const problem = await backend.tomlProblem(model.getValue()).catch(() => null);
+		if (mine !== asked || model.isDisposed()) return;
+		if (!problem) return publishFindings(model, TOML_OWNER, []);
+		const line = Math.min(problem.line, model.getLineCount());
+		// The whole line: the reader says where it gave up, which is often the line's end.
+		publishFindings(model, TOML_OWNER, [{ line, column: model.getLineFirstNonWhitespaceColumn(line) || 1, endLine: line, endColumn: Math.max(model.getLineMaxColumn(line), 2), severity: 1, message: problem.message, code: "toml", source: "docs" }]);
+	};
+	const changes = model.onDidChangeContent(() => {
+		clearTimeout(timer);
+		timer = setTimeout(() => void run(), 500);
+	});
+	model.onWillDispose(() => {
+		clearTimeout(timer);
+		changes.dispose();
+		publishFindings(model, TOML_OWNER, null);
+	});
+	void run();
 }

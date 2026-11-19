@@ -176,6 +176,8 @@ export interface BackendApi {
 	docs(): Promise<DocFile[]>;
 	/** Every file of the project with its size and a checksum, for the file manifest. */
 	manifest(): Promise<ManifestFile[]>;
+	/** The first thing that keeps a text from being TOML, and where (from 1); null when it reads. */
+	tomlProblem(text: string): Promise<{ message: string; line: number; column: number } | null>;
 	settings(): Promise<{ effective: Settings; user: Partial<Settings>; workspace: Partial<Settings> }>;
 	saveSettings(scope: SettingsScope, patch: SettingsPatch): Promise<Settings>;
 	themes(): Promise<ThemeFile[]>;

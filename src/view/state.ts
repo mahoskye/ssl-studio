@@ -14,7 +14,7 @@ import { openReview } from "./editor/Review";
 import { baseName, isInside } from "../shared/paths";
 import { isPlanPath } from "./plan/model";
 import { recheckPlans, trackPlan } from "./plan/check";
-import { trackDoc, trackJson } from "./docCheck";
+import { trackDoc, trackJson, trackToml } from "./docCheck";
 import { recall, remember } from "./graph/canvas";
 import { packTabs, packViews, tabsKey, unpackTabs, unpackViews, viewsKey } from "./editor/sessionTabs";
 
@@ -258,6 +258,7 @@ function attach(path: string, text: string, saved: { text: string; mtime: number
 	if (/\.(md|markdown)$/i.test(path)) trackDoc(model);
 	// A plan's own check says where it cannot be read (plan/check.ts): one source of findings to a document.
 	else if (/\.json$/i.test(path) && !isPlanPath(path)) trackJson(model);
+	else if (/\.toml$/i.test(path)) trackToml(model);
 	return doc;
 }
 

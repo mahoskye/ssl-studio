@@ -281,7 +281,8 @@ export function EditorGroup(props: { index: number }) {
 					</div>
 				</Show>
 			</div>
-			<Show when={group().active && group().active === activePath() && symbols().length}>
+			{/* Where the cursor is in the text: not shown over a view of the file that has no cursor line. */}
+			<Show when={group().active && group().active === activePath() && symbols().length && !showRendered() && !showTable() && !showChart()}>
 				<nav class="breadcrumbs" aria-label="Breadcrumbs">
 					<For each={symbolPath(symbols(), state.cursor.line)}>
 						{(s, i) => (
