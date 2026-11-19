@@ -656,6 +656,12 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .plan-keys dt { font-weight: 600; white-space: nowrap; }
 .plan-keys dd { margin: 0; color: var(--muted); }
 .plan-keys .hint { margin: var(--space-4) 0 0; }
+.plan-keys h4 { margin: var(--space-5) 0 var(--space-3); font-size: var(--text-md); font-weight: 600; color: var(--side-fg); }
+/* The key of the chart's shapes: each drawn small by the rules that draw it large. */
+.plan-shapes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-3); color: var(--muted); }
+.plan-shapes li { display: flex; align-items: center; gap: var(--space-4); }
+.plan-shapes svg { flex: none; width: 34px; height: 18px; }
+.plan-shapes .plan-node { filter: none; cursor: default; }
 .plan-error { padding: var(--space-7); }
 .plan-details { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-5); padding: var(--space-3) var(--space-5); background: var(--tab-bg); border-top: 1px solid var(--border); font-size: var(--text-md); min-height: 34px; box-sizing: border-box; }
 .plan-details label { display: flex; align-items: center; gap: var(--space-3); color: var(--muted); }

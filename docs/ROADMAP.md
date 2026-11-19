@@ -244,6 +244,8 @@ call at once, in lines with sharp corners.
 - **Settings** names its sections above the list; a name goes to its
   section, and a section's heading stays in view while its rows scroll.
 - **Search** keeps a match in sight in a narrow panel.
+- **A plan's chart has a key:** its Keys list also shows what each shape and
+  line means, drawn by the chart's own rules.
 
 ## On hold
 

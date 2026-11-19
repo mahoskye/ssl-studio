@@ -772,6 +772,62 @@ export function PlanView(props: { path: string; group: number }) {
 								</For>
 							</dl>
 							<p class="hint">Tab moves on to the details and the assistant.</p>
+							{/* What the chart's shapes and lines mean, drawn by the chart's own rules. */}
+							<h4>Shapes and lines</h4>
+							<ul class="plan-shapes">
+								<li>
+									<svg viewBox="0 0 34 18" aria-hidden="true">
+										<g class="plan-node start">
+											<rect x="1" y="2" width="32" height="14" rx="7" />
+										</g>
+									</svg>
+									Where it starts, and where it ends
+								</li>
+								<li>
+									<svg viewBox="0 0 34 18" aria-hidden="true">
+										<g class="plan-node step">
+											<rect x="1" y="2" width="32" height="14" rx="3" />
+										</g>
+									</svg>
+									A step
+								</li>
+								<li>
+									<svg viewBox="0 0 34 18" aria-hidden="true">
+										<g class="plan-node call">
+											<rect x="1" y="2" width="32" height="14" rx="3" />
+											<line x1="6" y1="2" x2="6" y2="16" />
+											<line x1="28" y1="2" x2="28" y2="16" />
+										</g>
+									</svg>
+									A call to another procedure or script
+								</li>
+								<li>
+									<svg viewBox="0 0 34 18" aria-hidden="true">
+										<g class="plan-node decision">
+											<polygon points="17,1 33,9 17,17 1,9" />
+										</g>
+									</svg>
+									A decision: each way out has a label
+								</li>
+								<li>
+									<svg viewBox="0 0 34 18" aria-hidden="true">
+										<g class="plan-edge back">
+											<path class="g-edge" d="M2,9 L32,9" />
+										</g>
+									</svg>
+									A loop's way back, in the accent
+								</li>
+								<li>
+									<svg viewBox="0 0 34 18" aria-hidden="true">
+										<g class="plan-node step">
+											<rect x="1" y="2" width="32" height="14" rx="3" />
+											<rect class="plan-built" x="4" y="10" width="5" height="5" />
+										</g>
+									</svg>
+									A green square: the step has code
+								</li>
+							</ul>
+							<p class="hint">A mark at a node's corner is its state in a build, or against its code: point at the node to read it.</p>
 						</div>
 					</Show>
 				</div>
