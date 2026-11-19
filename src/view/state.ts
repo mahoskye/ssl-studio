@@ -11,7 +11,7 @@ import { session } from "./lsp/session";
 import { changedRanges, minimalReplace } from "./lsp/edits";
 import { choose } from "./dialogs";
 import { openReview } from "./editor/Review";
-import { baseName, isInside } from "../shared/paths";
+import { baseName, isInside, plainFileError } from "../shared/paths";
 import { isPlanPath } from "./plan/model";
 import { recheckPlans, trackPlan } from "./plan/check";
 import { trackDoc, trackJson, trackToml } from "./docCheck";
@@ -71,10 +71,14 @@ let nextMessage = 1;
  */
 export function notify(text: string, kind: Message["kind"] = "info", action?: Message["action"]) {
 	const id = nextMessage++;
+	// The log keeps what was said; the note says it as a person would, with the path as the project names it.
+	if (kind === "error") {
+		log(`error: ${text}`);
+		text = plainFileError(text, state.workspace?.root);
+	}
 	setState("messages", (list) => [...list.filter((m) => m.text !== text).slice(-4), { id, kind, text, action }]);
-	if (kind === "error") log(`error: ${text}`);
 	// A note that offers something to do stays long enough to do it.
-	else setTimeout(() => dismiss(id), action ? 20000 : 4000);
+	if (kind !== "error") setTimeout(() => dismiss(id), action ? 20000 : 4000);
 }
 
 export const dismiss = (id: number) => setState("messages", (list) => list.filter((m) => m.id !== id));

@@ -1,4 +1,5 @@
 import { CATALOG_FILE } from "./catalog";
+import { linkFile } from "./docLinks";
 import { DOC_FOLDERS, isCatalog, registryTitle, toneOf, type DocArea } from "./projectDocs";
 import type { DocFile } from "./protocol";
 
@@ -14,11 +15,15 @@ export type DocCheck = {
 	text: string;
 	/** The document to open. */
 	path: string;
+	/** The line of it to go to, where the check is about one place. */
+	line?: number;
 	/** What would put it right, where the IDE can: write the catalogs afresh, or start the ticket of this key. */
 	fix?: { kind: "catalogs" } | { kind: "ticket"; key: string; related?: string };
 };
 
 const AREAS = Object.keys(DOC_FOLDERS) as DocArea[];
+/** How many of a document's broken links a check names before it counts the rest. */
+const LINKS_NAMED = 2;
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 /** A document in a few words: a ticket by its key, anything else by its title. */
 const called = (file: DocFile) => file.ticket || file.title || file.name;
@@ -53,6 +58,21 @@ export function docChecks(files: readonly DocFile[]): DocCheck[] {
 	const folders = (of: DocFile[]) => listed(of.map((file) => `${DOC_FOLDERS[file.group as DocArea]}/`));
 	if (stale.length) checks.push({ level: "warn", text: stale.length === 1 ? `The catalog of ${folders(stale)} is out of date.` : `The catalogs of ${folders(stale)} are out of date.`, path: stale[0]!.path, fix: { kind: "catalogs" } });
 	if (without.length) checks.push({ level: "note", text: `${folders(without)} ${without.length === 1 ? "has" : "have"} no catalog (${CATALOG_FILE}).`, path: without[0]!.path, fix: { kind: "catalogs" } });
+
+	// A link to a file that is not there: the document it led to was moved, renamed or never written. A catalog
+	// that is out of date is said above, and writing it afresh mends its list.
+	for (const file of files) {
+		if (!file.exists || !file.broken?.length || stale.includes(file)) continue;
+		const names = [...new Set(file.broken.map((link) => linkFile(link.href)))];
+		const shown = names.slice(0, LINKS_NAMED);
+		const more = names.length - shown.length;
+		checks.push({
+			level: "warn",
+			text: names.length === 1 ? `${called(file)} links to a file that is not there: ${names[0]}` : `${called(file)} links to ${names.length} files that are not there: ${shown.join(", ")}${more ? ` and ${more} more` : ""}`,
+			path: file.path,
+			...(file.broken[0]!.line ? { line: file.broken[0]!.line } : {}),
+		});
+	}
 
 	// A document still as its template left it.
 	for (const file of files) if (file.exists && file.untouched && file.group !== "project") checks.push({ level: "note", text: `Not written yet: ${file.ticket ? `${file.ticket} ` : ""}${file.title || file.name}`, path: file.path });

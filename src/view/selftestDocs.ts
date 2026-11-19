@@ -251,5 +251,18 @@ export function selftestWork(): Promise<Steps> {
 			await openFile(question);
 			return until(() => [...document.querySelectorAll('[data-panel="objects"] [data-row]')].some((r) => r.textContent?.includes("Why it matters")));
 		});
+
+		// A link to a file that is not there is said in Health, and marked on the page before anyone clicks it.
+		const linked = await write(["knowledge", "reference", "Links.md"], "# Where things are\n\nThe ticket is [SELF-1](../../tickets/SELF-1.md). The first notes were in [a file since removed](../../specs/Removed.md#notes).\n");
+		setState("treeVersion", (v) => v + 1);
+		showPanel("health");
+		await step("brokenLinkSaid", () => until(() => checks().some((text) => text.includes("links to a file that is not there: ../../specs/Removed.md"))));
+		await step("brokenLinkMarked", async () => {
+			await openFile(linked);
+			return until(() => {
+				const links = [...document.querySelectorAll<HTMLAnchorElement>(".md a")];
+				return links.length === 2 && links.filter((link) => link.classList.contains("broken")).map((link) => link.textContent).join() === "a file since removed";
+			});
+		});
 	});
 }

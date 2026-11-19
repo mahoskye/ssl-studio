@@ -3,6 +3,7 @@
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
+import { linkFile } from "../../shared/docLinks";
 import { headingAnchor } from "../../shared/docTables";
 import { finishMarkdown, outlineOf } from "./markdownHtml";
 import { frontMatter, plainMarkdown } from "../../shared/frontMatter";
@@ -64,8 +65,10 @@ export function MarkdownView(props: { path: string }) {
 			heading?.scrollIntoView({ block: "start" });
 			return;
 		}
-		if (!href || /^[a-z][a-z0-9+.-]*:/i.test(href)) return;
-		const target = resolvePath(dirName(props.path), decodeURIComponent(href.split(/[?#]/)[0]!));
+		const file = linkFile(href);
+		if (!file) return;
+		// A path from the top is from the project's top, as a repository's page reads it.
+		const target = file.startsWith("/") && state.workspace ? joinPath(state.workspace.root, ...file.split("/").filter(Boolean)) : resolvePath(dirName(props.path), file);
 		// A link to lines of a file opens the file at them: "#L12", "#L12-L18".
 		const lines = linkedLines(href);
 		if (state.workspace && isInside(state.workspace.root, target)) void openFile(target, lines ? { reveal: lines } : {});
@@ -108,11 +111,27 @@ export function MarkdownView(props: { path: string }) {
 	const goTo = (id: string) => [...view.querySelectorAll<HTMLElement>(".md h1, .md h2, .md h3")].find((h) => h.id === id)?.scrollIntoView({ block: "start" });
 	// Code in the document is coloured as the editor colours it, each block in its own language.
 	let article!: HTMLElement;
+	/** The links of this document that lead to a file that is not there, as the project's listing has them. */
+	const broken = createMemo(() => new Set((docs().find((d) => canonical(d.path) === props.path)?.broken ?? []).map((link) => linkFile(link.href))));
+	/** Each such link says so on the page, before it is clicked. */
+	const markBroken = () => {
+		if (!article) return;
+		for (const link of article.querySelectorAll<HTMLAnchorElement>("a[href]")) {
+			const file = linkFile(link.getAttribute("href") ?? "");
+			const gone = Boolean(file) && broken().has(file);
+			link.classList.toggle("broken", gone);
+			if (gone) link.title = `Nothing is there: ${file}`;
+			else if (link.title.startsWith("Nothing is there: ")) link.removeAttribute("title");
+		}
+	};
+	// The listing is read again after a save or a change in the folder: the marks follow it.
+	createEffect(on(broken, markBroken, { defer: true }));
 	createEffect(
 		on(html, () =>
 			queueMicrotask(() => {
 				if (!article) return;
 				void colourCode(article);
+				markBroken();
 				// A task list's boxes can be ticked here: each is the item of that place in the text. Where the page and the
 				// text do not count the same items, the boxes stay as the renderer made them, for reading only.
 				const boxes = [...article.querySelectorAll<HTMLInputElement>('li > input[type="checkbox"], li > p > input[type="checkbox"]')];

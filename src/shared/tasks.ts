@@ -1,5 +1,5 @@
 import { marked, type Token, type Tokens } from "marked";
-import { frontMatter } from "./frontMatter";
+import { bodyOffset } from "./frontMatter";
 
 // The items of a Markdown task list: "- [ ] the list has every sample". A
 // ticket's "what done looks like" and a spec's "how it is checked" are lists
@@ -24,20 +24,9 @@ export type Task = {
 /** A line that may be a task item, read loosely: the renderer decides which of these are. */
 const ITEM = /^(\s*(?:>\s*)*(?:(?:[-*+]|\d+[.)])\s+)+\[)([ xX])\](?:[ \t]+(.*))?$/;
 
-/** Where the body starts in the text: after the front matter's lines. */
-function bodyStart(text: string): number {
-	let at = 0;
-	for (let line = frontMatter(text).lines; line > 0; line--) {
-		const end = text.indexOf("\n", at);
-		if (end < 0) return text.length;
-		at = end + 1;
-	}
-	return at;
-}
-
 /** The task items in a document, in the order the rendered page shows their boxes. */
 export function tasks(text: string): Task[] {
-	const start = bodyStart(text);
+	const start = bodyOffset(text);
 	const body = text.slice(start);
 	if (!/\[[ xX]\]/.test(body)) return [];
 	// The lexer reads line ends as plain ones: the text is read that way too, and each place is taken back to the original.

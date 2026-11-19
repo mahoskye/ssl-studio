@@ -471,6 +471,11 @@ the work comes from ([ADR 0012](adr/0012-a-projects-work-is-written-down.md)).
   and not there, a finished ticket whose spec is not, the open questions: to
   know. A catalog is written afresh, and a named ticket started, from the
   row that says so.
+- **A link to a file that is not there is said.** Health names the file and
+  opens the document at the link; the page marks the link before it is
+  clicked. A file that is not there is said in plain words wherever one is
+  opened, with its path as the project names it: the note used to be the
+  file system's own ("ENOENT: no such file or directory, open …").
 - **The agent is told the work.** A plan names its ticket; the planner is
   sent what the ticket asks, the tickets around it, the open questions and
   the decisions that stand when it refines the plan or writes the spec; a

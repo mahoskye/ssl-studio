@@ -976,6 +976,8 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .md li { margin: .2em 0; }
 .md a { color: var(--accent); text-decoration: none; cursor: pointer; }
 .md a:hover { text-decoration: underline; }
+/* A link to a file that is not there says so before it is clicked: by its line, not by colour alone. */
+.md a.broken { color: var(--warning); text-decoration: underline dashed; text-underline-offset: 2px; }
 .md code { font: calc(var(--code-size) - .5px)/1.5 ui-monospace, "Cascadia Code", Menlo, monospace; background: var(--input-bg); padding: 1px var(--space-2); border-radius: var(--radius-sm); }
 .md pre { background: var(--input-bg); padding: var(--space-5) var(--space-5); border-radius: var(--radius-md); overflow: auto; }
 .md pre code { background: none; padding: 0; }

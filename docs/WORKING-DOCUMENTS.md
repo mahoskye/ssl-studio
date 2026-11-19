@@ -105,6 +105,12 @@ Health's Work section says what the working documents need.
 A row's menu puts right what the IDE can: the catalogs are written afresh,
 a named ticket is started. The Registries section shows a bar for each.
 
+A link to a file that is not there is one to fix: the document it led to
+was moved, renamed or never written. Health names the file and opens the
+document at the link; the document's page marks the link before anyone
+clicks it. Links to the web, and to files outside the project, are not
+checked.
+
 ## The agent
 
 The agent cannot read the folder, so the IDE sends what bears on the work:

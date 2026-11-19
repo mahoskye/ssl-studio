@@ -1,5 +1,5 @@
-import { expect, test } from "bun:test";
-import { baseName, dirName, isInside, joinPath, relativeTo, resolvePath } from "../src/shared/paths";
+import { describe, expect, test } from "bun:test";
+import { baseName, dirName, isInside, joinPath, plainFileError, relativeTo, resolvePath } from "../src/shared/paths";
 
 test("POSIX paths", () => {
 	expect(baseName("/w/Sample/Orders.ssl")).toBe("Orders.ssl");
@@ -29,4 +29,22 @@ test("resolvePath applies . and .. with the folder's own separator", () => {
 	expect(resolvePath("/w/docs/", "./adr/0001.md")).toBe("/w/docs/adr/0001.md");
 	expect(resolvePath("C:\\w\\docs", "..\\AGENTS.md")).toBe("C:\\w\\AGENTS.md");
 	expect(resolvePath("C:\\w", "docs/a.md")).toBe("C:\\w\\docs\\a.md");
+});
+
+describe("what the file system said, in plain words", () => {
+	test("a file that is not there is named as the project names it", () => {
+		expect(plainFileError("ENOENT: no such file or directory, open '/work/demo/docs/specs/Notes.md'", "/work/demo")).toBe("docs/specs/Notes.md is not there.");
+		expect(plainFileError("ENOENT: no such file or directory, open 'C:\\work\\demo\\docs\\Notes.md'", "C:\\work\\demo")).toBe("docs/Notes.md is not there.");
+	});
+	test("outside the project, or with no project, the whole path is said", () => {
+		expect(plainFileError("ENOENT: no such file or directory, open '/elsewhere/Notes.md'", "/work/demo")).toBe("/elsewhere/Notes.md is not there.");
+		expect(plainFileError("ENOENT: no such file or directory, open '/elsewhere/Notes.md'")).toBe("/elsewhere/Notes.md is not there.");
+	});
+	test("a folder and a refusal are said as what they are", () => {
+		expect(plainFileError("EISDIR: illegal operation on a directory, read '/work/demo/docs'", "/work/demo")).toBe("docs is a folder, not a file.");
+		expect(plainFileError("EACCES: permission denied, open '/work/demo/locked.md'", "/work/demo")).toBe("locked.md cannot be opened: permission was refused.");
+	});
+	test("anything else is left as it was said", () => {
+		expect(plainFileError("The language server stopped.", "/work/demo")).toBe("The language server stopped.");
+	});
 });

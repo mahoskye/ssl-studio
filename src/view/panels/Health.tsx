@@ -78,12 +78,14 @@ export function Health() {
 	const fixLabel = (check: DocCheck) => (check.fix?.kind === "catalogs" ? "Update" : "Start it");
 	const fixTitle = (check: DocCheck) => (check.fix?.kind === "catalogs" ? "Write every catalog afresh from the documents in its folder" : check.fix?.kind === "ticket" ? `Start ${check.fix.key} as a ticket of its own` : "");
 	const fix = (check: DocCheck) => (check.fix?.kind === "catalogs" ? void updateCatalogs() : check.fix?.kind === "ticket" ? void newTicket(check.fix.key, check.fix.related) : undefined);
+	/** A check's document, at the place the check is about where it is about one. */
+	const openCheck = (check: DocCheck) => openFile(check.path, check.line ? { reveal: { line: check.line } } : {});
 	/** A check's menu: open its document, or put it right where the IDE can. */
 	const checkMenu = async (check: DocCheck, at: Point) => {
 		const open = "Open the document";
 		const put = check.fix?.kind === "catalogs" ? "Update the catalogs" : check.fix?.kind === "ticket" ? `Start ${check.fix.key} as a ticket` : "";
 		const picked = await chooseFromMenu("What to do about it", [open, ...(put ? [put] : [])], at);
-		if (picked === open) await openFile(check.path);
+		if (picked === open) await openCheck(check);
 		else if (picked && picked === put) fix(check);
 	};
 	const fileState = (file: { exists: boolean; untouched?: boolean }) => (!file.exists ? "missing" : file.untouched ? "still the template text" : "written");
@@ -127,7 +129,7 @@ export function Health() {
 										key={check.text}
 										label={check.text}
 										title={`${check.text}\nClick it, or press Enter on it, to open the document.${check.fix ? ` The menu key, or a right-click, offers: ${fixTitle(check).toLowerCase()}.` : ""}`}
-										onActivate={() => void openFile(check.path)}
+										onActivate={() => void openCheck(check)}
 										onMenu={(at) => void checkMenu(check, at)}
 									>
 										<span class={`check-mark ${check.level}`} aria-hidden="true">

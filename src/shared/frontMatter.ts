@@ -166,3 +166,14 @@ export function withFrontMatter(text: string, key: string, value: string): strin
 	if (/:\s*$/.test(lines[at]!.text) && /^\s*-\s+/.test(lines[at + 1]?.text ?? "")) return null;
 	return `${text.slice(0, lines[at]!.start)}${lines[at]!.text.slice(0, lines[at]!.text.indexOf(":"))}: ${value}${text.slice(lines[at]!.end)}`;
 }
+
+/** Where the body starts in the text: after the front matter's lines. */
+export function bodyOffset(text: string): number {
+	let at = 0;
+	for (let line = frontMatter(text).lines; line > 0; line--) {
+		const end = text.indexOf("\n", at);
+		if (end < 0) return text.length;
+		at = end + 1;
+	}
+	return at;
+}

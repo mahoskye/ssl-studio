@@ -3,9 +3,10 @@
 // the templates below, and after that only reads them: project.toml is edited
 // as text, so its comments survive.
 import { existsSync, mkdirSync, readdirSync, rmdirSync, unlinkSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { CATALOG_FILE, catalogStale } from "../shared/catalog";
 import { parseCsv, tally } from "../shared/csv";
+import { fileLinks } from "../shared/docLinks";
 import { frontMatter, many, one, summaryOf, titleOf } from "../shared/frontMatter";
 import { catalogItems, DOC_FOLDERS, isCatalog, isPrompt, STATE_FILE, type DocArea } from "../shared/projectDocs";
 import { taskTally } from "../shared/tasks";
@@ -97,6 +98,23 @@ function described(text: string): Pick<DocFile, "title" | "status" | "summary" |
 	return { title: titleOf(text) || undefined, status: one(values.status) || undefined, summary: said(summaryOf(text)), ...(tickets.length ? { tickets } : {}), ...(isPrompt(summaryOf(text)) ? { untouched: true } : {}), ...(taskTally(text) ? { tasks: taskTally(text)! } : {}) };
 }
 
+/**
+ * The links of a Markdown document that lead to a file of the project that is
+ * not there: a document moved or renamed since the link was written.
+ */
+function brokenLinks(root: string, path: string, text: string): Pick<DocFile, "broken"> {
+	const broken = fileLinks(text)
+		.filter((link) => {
+			// A path from the top is from the project's top, as a repository's page reads it.
+			const target = link.file.startsWith("/") ? join(root, link.file) : resolve(dirname(path), link.file);
+			// What is outside the project is not this project's to say: it may well be there on another machine.
+			const from = relative(root, target);
+			return !from.startsWith("..") && !isAbsolute(from) && !existsSync(target);
+		})
+		.map(({ href, line }) => ({ href, line }));
+	return broken.length ? { broken } : {};
+}
+
 /** A snippet's title and what it is for: the first two lines of the comment it opens with. */
 function snippet(text: string): Pick<DocFile, "title" | "summary" | "untouched"> {
 	const words = (line: string | undefined) => /^\s*(?:--+|\/\*+|#+|\/\/+|\*)?\s*(.+?)\s*(?:\*\/|;)?\s*$/.exec(line ?? "")?.[1];
@@ -114,13 +132,17 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 	for (const name of Object.keys(PLACEHOLDER)) {
 		const actual = found(root, name);
 		const path = join(root, actual ?? name);
-		const untouched = actual ? (await Bun.file(path).text()).includes(PLACEHOLDER[name]!) : undefined;
-		list.push({ path, name: actual ?? name, group: "project", exists: Boolean(actual), untouched });
+		const text = actual ? await Bun.file(path).text() : "";
+		const untouched = actual ? text.includes(PLACEHOLDER[name]!) : undefined;
+		list.push({ path, name: actual ?? name, group: "project", exists: Boolean(actual), untouched, ...brokenLinks(root, path, text) });
 	}
 	list.push({ path: project.path, name: PROJECT_FILE, group: "project", exists: project.configured });
 	const docs = join(root, project.docs);
 	const state = existsSync(docs) ? found(docs, STATE_FILE) : undefined;
-	if (state) list.push({ path: join(docs, state), name: state, group: "project", exists: true, ...described(await head(join(docs, state))) });
+	if (state) {
+		const text = await head(join(docs, state));
+		list.push({ path: join(docs, state), name: state, group: "project", exists: true, ...described(text), ...brokenLinks(root, join(docs, state), text) });
+	}
 
 	/** The files under a folder that match, by name, up to the limit. */
 	const under = (full: string, pattern: RegExp, skip?: (path: string) => boolean) => {
@@ -142,7 +164,7 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 		const specs = many(values.specs);
 		const related = [...many(values.related), ...many(values.blocks), ...many(values["blocked-by"]), ...many(values.parent)];
 		const missing = specs.filter((spec) => !existsSync(join(root, spec)));
-		list.push({ path, name, group: "tickets", exists: true, ...described(text), ...(isCatalog({ name }) ? {} : { ticket: key, parent: one(values.parent) || undefined, tickets: related.length ? related : undefined, specs: specs.length ? specs : undefined, missing: missing.length ? missing : undefined }) });
+		list.push({ path, name, group: "tickets", exists: true, ...described(text), ...brokenLinks(root, path, text), ...(isCatalog({ name }) ? {} : { ticket: key, parent: one(values.parent) || undefined, tickets: related.length ? related : undefined, specs: specs.length ? specs : undefined, missing: missing.length ? missing : undefined }) });
 	}
 	// The specs: those written by hand, and those the planner writes beside a plan.
 	for (const path of [...under(area("specs"), MARKDOWN), ...under(join(root, project.plans), /\.spec\.md$/i)]) {
@@ -155,20 +177,21 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 		const planned = plan.ticket;
 		if (fromPlan && plan.title && !one(frontMatter(text).values.title) && !/^#\s+\S/m.test(frontMatter(text).body)) said.title = plan.title;
 		const tickets = planned && !said.tickets?.some((key) => key.toLowerCase() === planned.toLowerCase()) ? [...(said.tickets ?? []), planned] : said.tickets;
-		list.push({ path, name: fromPlan ? `${project.plans}/${relative(join(root, project.plans), path)}` : relative(area("specs"), path), group: "specs", exists: true, ...said, ...(tickets?.length ? { tickets } : {}) });
+		list.push({ path, name: fromPlan ? `${project.plans}/${relative(join(root, project.plans), path)}` : relative(area("specs"), path), group: "specs", exists: true, ...said, ...brokenLinks(root, path, text), ...(tickets?.length ? { tickets } : {}) });
 	}
 	// The knowledge base: decisions, questions, snippets and notes, each kind in its folder.
 	for (const path of under(area("knowledge"), /\.(md|markdown|sql|ssl|srvscr|ds|txt|json|toml|csv)$/i)) {
 		const name = relative(area("knowledge"), path);
 		const kind = name.includes(sep) ? name.split(sep)[0]! : "";
 		const text = await head(path);
-		list.push({ path, name, group: "knowledge", exists: true, kind, ...(MARKDOWN.test(path) ? described(text) : snippet(text)) });
+		list.push({ path, name, group: "knowledge", exists: true, kind, ...(MARKDOWN.test(path) ? { ...described(text), ...brokenLinks(root, path, text) } : snippet(text)) });
 	}
 	// The registries: tables of values, each row with how far it has come.
 	for (const path of under(area("registries"), /\.(md|markdown|csv|tsv)$/i)) {
 		const name = relative(area("registries"), path);
 		if (MARKDOWN.test(path)) {
-			list.push({ path, name, group: "registries", exists: true, ...described(await head(path)) });
+			const text = await head(path);
+			list.push({ path, name, group: "registries", exists: true, ...described(text), ...brokenLinks(root, path, text) });
 			continue;
 		}
 		const file = Bun.file(path);
@@ -182,14 +205,14 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 	// Everything else in the docs folder.
 	for (const path of under(docs, MARKDOWN, inArea)) {
 		if (state && path === join(docs, state)) continue;
-		list.push({ path, name: relative(docs, path), group: "docs", exists: true });
+		list.push({ path, name: relative(docs, path), group: "docs", exists: true, ...brokenLinks(root, path, await head(path)) });
 	}
-	for (const path of under(join(root, project.schema), /\.(md|markdown|sql)$/i)) list.push({ path, name: relative(join(root, project.schema), path), group: "schema", exists: true });
+	for (const path of under(join(root, project.schema), /\.(md|markdown|sql)$/i)) list.push({ path, name: relative(join(root, project.schema), path), group: "schema", exists: true, ...(MARKDOWN.test(path) ? brokenLinks(root, path, await head(path)) : {}) });
 	for (const path of under(join(root, project.plans), /\.(plan\.json|md)$/i)) {
 		if (/\.spec\.md$/i.test(path)) continue;
 		// A plan says which ticket it is for (ADR 0013): the Docs panel shows it under that ticket.
 		const ticket = /\.plan\.json$/i.test(path) ? await planTicket(path) : "";
-		list.push({ path, name: relative(join(root, project.plans), path), group: "plans", exists: true, ...(ticket ? { tickets: [ticket] } : {}) });
+		list.push({ path, name: relative(join(root, project.plans), path), group: "plans", exists: true, ...(ticket ? { tickets: [ticket] } : {}), ...(MARKDOWN.test(path) ? brokenLinks(root, path, await head(path)) : {}) });
 	}
 	// Each catalog says whether its list is still what the documents are.
 	for (const name of Object.keys(DOC_FOLDERS) as DocArea[]) {

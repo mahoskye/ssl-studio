@@ -42,6 +42,20 @@ export function relativeTo(root: string | undefined | null, path: string): strin
 	return path.replace(/\\/g, "/").slice(root.replace(/[\\/]+$/, "").length + 1);
 }
 
+/**
+ * What the file system said, in plain words, with the path as the project
+ * names it: "docs/specs/Notes.md is not there." Anything else is returned as
+ * it was.
+ */
+export function plainFileError(message: string, root?: string | null): string {
+	const found = /\b(ENOENT|EACCES|EPERM|EISDIR)\b[^']*'([^']+)'/.exec(message);
+	if (!found) return message;
+	const path = relativeTo(root, found[2]!);
+	if (found[1] === "ENOENT") return `${path} is not there.`;
+	if (found[1] === "EISDIR") return `${path} is a folder, not a file.`;
+	return `${path} cannot be opened: permission was refused.`;
+}
+
 /** The way from one folder to a file, with forward slashes: "../design/A.spec.md". Both are whole paths. */
 export function relativePath(fromDir: string, to: string): string {
 	const split = (path: string) => path.split(/[\\/]/).filter(Boolean);
