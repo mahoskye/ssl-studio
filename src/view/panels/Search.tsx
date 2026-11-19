@@ -1,6 +1,6 @@
 // Workspace search, results grouped by file.
 import { FileMark } from "../FileMark";
-import { createResource, createSignal, For, Show } from "solid-js";
+import { createEffect, createResource, createSignal, For, Show } from "solid-js";
 import { monaco } from "../editor/monaco";
 import { symbolPath } from "../editor/regions";
 import { session } from "../lsp/session";
@@ -9,12 +9,20 @@ import { backend } from "../backend";
 import { openFile, state } from "../state";
 import { relativeTo } from "../../shared/paths";
 import { focusRowsBelow, IconButton, Row, RowGroup, Rows } from "./Rows";
+import { showPanel } from "./registry";
 import { byLine, segments, type LineHit } from "./searchLines";
 
 const count = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
 
 /** How much of a line is shown before its first match. */
 const LEAD = 12;
+
+const [request, setRequest] = createSignal<{ query: string; regex: boolean } | null>(null);
+/** Shows the Search panel with this searched for: a registry's row asks where its name is in the code. */
+export function searchFor(query: string, options: { regex?: boolean } = {}) {
+	setRequest({ query, regex: Boolean(options.regex) });
+	showPanel("search");
+}
 
 export function Search() {
 	let input!: HTMLInputElement;
@@ -48,6 +56,15 @@ export function Search() {
 			setStatus("failed");
 		}
 	};
+	// A search asked for from elsewhere is put in the box and run, as if it had been typed.
+	createEffect(() => {
+		const wanted = request();
+		if (!wanted || !input) return;
+		setRequest(null);
+		input.value = wanted.query;
+		setRegex(wanted.regex);
+		void run();
+	});
 	// A switch changes what the results on screen mean, so they are fetched again.
 	const flip = (set: (v: boolean) => void, now: boolean) => {
 		set(!now);

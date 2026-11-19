@@ -53,7 +53,8 @@ the source of truth.
 - **Documents as what they are:** Markdown, SQL, JSON, TOML, CSV, YAML, XML
   and INI are coloured by the same themes as SSL. JSON that cannot be read
   says where. The snippets a project keeps are in the Palette, to insert.
-  A CSV opens as a table whose cells are edited in place; Markdown opens
+  A CSV opens as a table whose cells are edited in place, and a registry's
+  names can be checked against the code; Markdown opens
   rendered, with what its front matter says shown above it and its code
   coloured.
 - **House style:** the team's Designer header, procedure doc block, spacing

@@ -925,6 +925,11 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .table-bar .filter { width: clamp(140px, 24vw, 280px); margin: 0; }
 .table-bar .hint { margin: 0; white-space: nowrap; }
 .table-tally { display: inline-flex; flex-wrap: wrap; gap: var(--space-2); }
+.table-bar .doc-status.table-missing { min-height: 0; line-height: 1.6; text-decoration: none; opacity: 1; color: var(--warning); border-color: color-mix(in srgb, var(--warning) 45%, transparent); }
+.table-bar .doc-status.table-missing[aria-pressed="true"] { background: color-mix(in srgb, var(--warning) 16%, transparent); }
+.table-view td .table-use { margin-left: var(--space-4); font: var(--text-sm) system-ui, sans-serif; }
+.table-view td span.table-use { text-decoration: none; opacity: 1; color: var(--warning); border-color: color-mix(in srgb, var(--warning) 45%, transparent); }
+.table-view td button.table-use { min-height: 0; padding: 0; color: var(--muted); }
 .table-tally button { min-height: 0; padding: 0 var(--space-3); line-height: 1.6; }
 .table-problems { margin: 0; padding: var(--space-3) var(--space-5); }
 .table-scroll { flex: 1; min-height: 0; overflow: auto; }

@@ -1,10 +1,17 @@
 // A table of values (CSV or TSV), as a table. It is a view of the text in the
 // editor (ADR 0002): a cell changed here is that cell's part of the text
 // changed, and nothing else; the Text switch shows the same file as written.
-import { createMemo, createSignal, For, onCleanup, Show } from "solid-js";
+import { createMemo, createSignal, createUniqueId, For, onCleanup, Show } from "solid-js";
 import { columnOf, csvCell, csvRow, parseCsv, tally, type Cell } from "../../shared/csv";
+import { relativeTo } from "../../shared/paths";
 import { toneOf } from "../../shared/projectDocs";
-import { documents } from "../state";
+import { checksNames, nameQuery, namesOf, NAMES_CHECKED, outsideDocuments, usesSummary } from "../../shared/registryCheck";
+import { backend } from "../backend";
+import { searchFor } from "../panels/Search";
+import { documents, notify, state } from "../state";
+
+/** The words a status is most often one of in a registry, offered beside those the table already uses. */
+const USUAL_STATUSES = ["found", "migrated", "verified", "not needed", "blocked"];
 
 /** As many rows as are drawn at once. A longer table is narrowed with the filter. */
 const ROWS_SHOWN = 500;
@@ -23,9 +30,44 @@ export function TableView(props: { path: string }) {
 	const statusAt = () => columnOf(table(), "status");
 	const counted = createMemo(() => tally(table()));
 
+	/** The statuses to offer when one is typed: those the table uses, then the usual ones. */
+	const statuses = createMemo(() => [...new Set([...(counted()?.by.map(([status]) => status).filter(Boolean) ?? []), ...USUAL_STATUSES])]);
+	const statusList = createUniqueId();
+
+	/**
+	 * How often each row's name is found outside the project's documents, once it has been asked: by name, so that it
+	 * holds while the table is edited. A registry lists what a migration must carry; a name found nowhere is a row to question.
+	 */
+	const [uses, setUses] = createSignal<Map<string, number> | null>(null);
+	const [checking, setChecking] = createSignal("");
+	const [onlyMissing, setOnlyMissing] = createSignal(false);
+	const usesOf = (cells: Cell[]) => uses()?.get((cells[0]?.text ?? "").trim().toLowerCase());
+	const checkNames = async () => {
+		const root = state.workspace?.root;
+		if (!root || checking()) return;
+		const names = namesOf(table()).slice(0, NAMES_CHECKED);
+		const apart = [state.project?.docs ?? "docs", state.project?.plans ?? "design", ".ssl-studio"].map((folder) => folder.split("\\").join("/"));
+		const found = new Map<string, number>();
+		try {
+			for (const [at, name] of names.entries()) {
+				setChecking(`Looking for ${at + 1} of ${names.length}…`);
+				const hits = await backend.search(nameQuery(name), { regex: true, caseSensitive: false });
+				found.set(name.toLowerCase(), hits.filter((hit) => outsideDocuments(relativeTo(root, hit.path).split("\\").join("/"), apart)).length);
+			}
+			setUses(found);
+			notify(usesSummary(found));
+		} catch (e: any) {
+			notify(`The names could not be looked for: ${e?.message ?? e}`, "error");
+		} finally {
+			setChecking("");
+		}
+	};
+	const missing = () => [...(uses()?.values() ?? [])].filter((count) => count === 0).length;
+
 	const rows = createMemo(() => {
 		const words = filter().trim().toLowerCase().split(/\s+/).filter(Boolean);
 		let list = table().rows.map((cells, index) => ({ cells, index }));
+		if (onlyMissing() && uses()) list = list.filter(({ cells }) => usesOf(cells) === 0);
 		if (words.length) list = list.filter(({ cells }) => words.every((word) => cells.some((cell) => cell.text.toLowerCase().includes(word))));
 		const by = order();
 		if (by) {
@@ -101,7 +143,21 @@ export function TableView(props: { path: string }) {
 						</For>
 					</span>
 				</Show>
+				<Show when={uses() && missing()}>
+					<button class="doc-status tone-off table-missing" aria-pressed={onlyMissing()} title="Show only the rows whose name is found nowhere outside the project's documents" onClick={() => setOnlyMissing(!onlyMissing())}>
+						not in code {missing()}
+					</button>
+				</Show>
 				<span class="spacer" />
+				<Show when={checksNames(table())}>
+					<button
+						title={`Looks for each row's ${table().header[0]?.text.trim() || "name"} in the project's files, outside its documents: a row whose name is found nowhere is one to question. A search for the name, as a whole word.`}
+						onClick={() => void checkNames()}
+						disabled={Boolean(checking())}
+					>
+						{checking() || (uses() ? "Check again" : "Check against code")}
+					</button>
+				</Show>
 				<button title="A new row at the end of the file" onClick={addRow} disabled={!table().header.length}>
 					Add row
 				</button>
@@ -111,6 +167,10 @@ export function TableView(props: { path: string }) {
 					{table().problems.join(" ")} The Text view shows the file as written.
 				</p>
 			</Show>
+			{/* What a status is typed from: the ones this table uses, and the usual ones. */}
+			<datalist id={statusList}>
+				<For each={statuses()}>{(status) => <option value={status} />}</For>
+			</datalist>
 			<div class="table-scroll">
 				<table>
 					<thead>
@@ -140,12 +200,30 @@ export function TableView(props: { path: string }) {
 													<Show
 														when={open()}
 														fallback={
-															<Show when={column() === statusAt() && value().trim()} fallback={value()}>
-																<span class={`doc-status tone-${toneOf(value())}`}>{value()}</span>
-															</Show>
+															<>
+																<Show when={column() === statusAt() && value().trim()} fallback={value()}>
+																	<span class={`doc-status tone-${toneOf(value())}`}>{value()}</span>
+																</Show>
+																{/* Once the names have been looked for: how often this row's is found, as the way to where; or that it is not. */}
+																<Show when={column() === 0 && usesOf(cells) !== undefined}>
+																	<Show
+																		when={usesOf(cells)}
+																		fallback={
+																			<span class="doc-status tone-off table-use" title="Found nowhere outside the project's documents">
+																				not in code
+																			</span>
+																		}
+																	>
+																		<button class="link table-use" title={`Found ${usesOf(cells)} ${usesOf(cells) === 1 ? "time" : "times"} outside the documents. Show where.`} onClick={(e) => (e.stopPropagation(), searchFor(nameQuery(value().trim()), { regex: true }))}>
+																			{usesOf(cells)}×
+																		</button>
+																	</Show>
+																</Show>
+															</>
 														}
 													>
 														<input
+															list={column() === statusAt() ? statusList : undefined}
 															value={value()}
 															aria-label={`${table().header[column()]?.text.trim() || "Cell"}, row ${index + 1}`}
 															ref={(el) => queueMicrotask(() => (el.focus(), el.select()))}

@@ -621,3 +621,39 @@ describe("a ticket's own page", () => {
 		expect(ticketWork(docs, "DEMO-999")).toEqual([]);
 	});
 });
+
+import { checksNames, nameQuery, namesOf, outsideDocuments, usesSummary } from "../src/shared/registryCheck";
+
+describe("a registry's names against the project's files", () => {
+	test("the names are what the rows have in their first column, once each, the short ones left out", () => {
+		expect(namesOf(parseCsv("name,value\nMaxWalkDays,730\n ab ,1\nmaxwalkdays,again\nDUE_SOON,x\n,empty\n"))).toEqual(["MaxWalkDays", "DUE_SOON"]);
+	});
+
+	test("a name is looked for as a whole word, and what would mean something else to a search is taken as written", () => {
+		expect(new RegExp(nameQuery("DUE_SOON"), "i").test("x := DUE_SOON;")).toBe(true);
+		expect(new RegExp(nameQuery("DUE_SOON"), "i").test("x := DUE_SOON_AT;")).toBe(false);
+		expect(new RegExp(nameQuery("DueDates.Holidays"), "i").test('RunDS("duedates.holidays")')).toBe(true);
+		expect(new RegExp(nameQuery("DueDates.Holidays"), "i").test("DueDatesXHolidays")).toBe(false);
+		expect(new RegExp(nameQuery("a+b (c)"), "i").test("is a+b (c) here")).toBe(true);
+	});
+
+	test("a file counts when it is outside the documents, the plans and the IDE's own folder", () => {
+		const apart = ["docs", "design", ".ssl-studio"];
+		expect(outsideDocuments("src/DueDates/DueRule.ssl", apart)).toBe(true);
+		expect(outsideDocuments("docs/registries/settings.csv", apart)).toBe(false);
+		expect(outsideDocuments("Docs/knowledge/snippets/a.sql", apart)).toBe(false);
+		expect(outsideDocuments("design/A.spec.md", apart)).toBe(false);
+		expect(outsideDocuments("docsite/index.md", apart)).toBe(true);
+		expect(outsideDocuments("src/a.ssl", [".", ""])).toBe(true);
+	});
+
+	test("a list of files is not checked by name, and a check is said in a sentence", () => {
+		expect(checksNames(parseCsv("path,kind\nsrc/a.ssl,script\n"))).toBe(false);
+		expect(checksNames(parseCsv("name,value\nA,1\n"))).toBe(true);
+		expect(checksNames(parseCsv("name,value\n"))).toBe(false);
+		expect(usesSummary(new Map())).toBe("No names to look for.");
+		expect(usesSummary(new Map([["a", 2], ["b", 1]]))).toBe("All 2 are named outside the documents.");
+		expect(usesSummary(new Map([["a", 2], ["b", 0]]))).toBe("1 of 2 is named nowhere outside the documents.");
+		expect(usesSummary(new Map([["a", 0], ["b", 0], ["c", 1]]))).toBe("2 of 3 are named nowhere outside the documents.");
+	});
+});
