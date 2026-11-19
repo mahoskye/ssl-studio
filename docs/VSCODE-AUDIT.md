@@ -501,14 +501,21 @@ runs them on Windows and macOS too).
 ## What the reviews found
 
 A review was made after every two or three steps, by a reader who was
-given the commits and not the author's conclusions: after step 3 (of
-steps 1 to 3), after step 6 (of steps 4 to 6), and after step 8 (of
-steps 7 and 8). What each confirmed was fixed before the next step; the
+given the commits and not the author's conclusions: of steps 1 to 3, of
+steps 4 to 6, and of steps 7 and 8. The first two were read while the
+next step was being built, so their fixes went in one step late: those
+for steps 1 to 3 after step 4 and before step 5, those for steps 4 to 6
+after step 7 and before step 8. The third's went in after step 8. The
 fixes are the commits named "defects found by a review".
+
+Each step was looked at before its commit at a narrow and a wide
+layout, in the light and the dark theme: light at 720 wide and dark at
+1440 wide, as the step's commit or its section here says. All four
+pairings were looked at when the building was done.
 
 Every finding of the reviews, with what was done about it and in
 which commit, is in [a list of its own](VSCODE-AUDIT-REVIEWS.md). In
-short: of the last review's 42 findings, 33 were fixed, 5 were fixed in
+short: of the third review's 42 findings, 33 were fixed, 5 were fixed in
 part and say what was left, and 4 were left, each with its reason.
 
 When the building was done, each fix was shown working by itself: in the
