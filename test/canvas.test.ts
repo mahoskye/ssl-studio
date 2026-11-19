@@ -245,3 +245,33 @@ describe("keeping something clear of the map", () => {
 		expect(low.width).toBe(1000);
 	});
 });
+
+import { clearLabels } from "../src/view/graph/canvas";
+
+describe("names over a picture seen from far off", () => {
+	const label = (item: string, x: number, y: number, weight: number, width = 100, height = 20) => ({ item, x, y, width, height, weight });
+
+	test("names that are clear of each other are all shown", () => {
+		expect(clearLabels([label("a", 0, 0, 1), label("b", 200, 0, 1), label("c", 0, 50, 1)]).map((l) => l.item)).toEqual(["a", "b", "c"]);
+	});
+
+	test("of two that would lie over each other, the weightier is shown", () => {
+		expect(clearLabels([label("small", 50, 5, 1), label("large", 0, 0, 9)]).map((l) => l.item)).toEqual(["large"]);
+	});
+
+	test("a name that only the hidden one was in the way of is shown", () => {
+		// b overlaps a and c; a and c are clear of each other.
+		expect(clearLabels([label("a", 0, 0, 3), label("b", 90, 0, 1), label("c", 180, 0, 2)]).map((l) => l.item).sort()).toEqual(["a", "c"]);
+	});
+
+	test("the gap asked for is kept between names", () => {
+		const pair = [label("a", 0, 0, 2), label("b", 104, 0, 1)];
+		expect(clearLabels(pair).length).toBe(2);
+		expect(clearLabels(pair, 8).map((l) => l.item)).toEqual(["a"]);
+	});
+
+	test("equals keep the order they were given in", () => {
+		expect(clearLabels([label("first", 0, 0, 1), label("second", 10, 0, 1)]).map((l) => l.item)).toEqual(["first"]);
+	});
+});
+

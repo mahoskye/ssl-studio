@@ -406,6 +406,12 @@ From a second look:
 - **With no folder, the language server is not a warning.** The status bar
   said "Language server stopped" in the warning colour; it says that the
   server starts with a folder.
+- **Far out, every name shown can be read.** A script's name was shrunk to
+  fit its box, and in a narrow box nobody could read it. Names are now all
+  one size on screen, and one that would lie over another waits for a
+  closer look, the larger script's kept before the smaller's, as a map
+  shows its names. The whole of the unfolded demo, at 10%, names 24 of its
+  33 scripts and folders.
 - **A procedure found from the list is fitted in the graph.** Finding one
   while the list was showing laid out two pictures, and the view was fitted
   to the wrong one: the focus came up small, cut off at the top, with a

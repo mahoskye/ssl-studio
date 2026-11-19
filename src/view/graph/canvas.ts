@@ -272,3 +272,21 @@ export function clearOf(view: View, rect: Rect, avoid: Rect, margin = 12): View 
 	if (left - across >= margin) return { ...view, x: view.x - across };
 	return view;
 }
+
+// --- names over a picture seen from far off ------------------------------------------------
+
+/** A name to put over a picture: the room it would take, how much it matters, and what it names. */
+export type Label<T> = Rect & { weight: number; item: T };
+
+/**
+ * The labels that can all be shown with none lying over another, as a map
+ * shows its names: the weightiest first, each kept if it is clear, by `gap`,
+ * of every one kept before it. The rest wait for a closer look.
+ */
+export function clearLabels<T>(labels: readonly Label<T>[], gap = 0): Label<T>[] {
+	const kept: Label<T>[] = [];
+	const apart = (a: Rect, b: Rect) => a.x + a.width + gap <= b.x || b.x + b.width + gap <= a.x || a.y + a.height + gap <= b.y || b.y + b.height + gap <= a.y;
+	// A sort that keeps the order given between equals, so the same picture always shows the same names.
+	for (const label of [...labels].sort((a, b) => b.weight - a.weight)) if (kept.every((other) => apart(label, other))) kept.push(label);
+	return kept;
+}

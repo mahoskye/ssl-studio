@@ -11,7 +11,7 @@ import { level } from "../../shared/houseStyle";
 import { backend } from "../backend";
 import { regionColor } from "../editor/regions";
 import { openFile, setState, state } from "../state";
-import { canvasMeasure, clearOf, fitShare, fitView, legibleScale, mapArea, outOfSight, nearest, recall, remember, reveal, splinePath, splinePoint, zoomAt, type Point } from "./canvas";
+import { canvasMeasure, clearLabels, clearOf, fitShare, fitView, legibleScale, mapArea, outOfSight, nearest, recall, remember, reveal, splinePath, splinePoint, zoomAt, type Point } from "./canvas";
 import { loadGraph } from "./load";
 import { Minimap, type MapBox } from "./Minimap";
 import { Finder } from "./Finder";
@@ -56,6 +56,10 @@ const FIT_FLOOR = legibleScale(FONT_PX);
 const MIN_ZOOM = 0.05;
 /** Zoomed out past this, a procedure's name cannot be read: the picture is of scripts and folders, named at a size that can. */
 const FAR_UNDER = 0.6;
+/** The size, on screen, of a name in that far picture. */
+const FAR_NAME_PX = 11;
+/** Added to a folder's weight there: a folder is named before any script, and a larger folder before a smaller. */
+const FOLDER_FIRST = 1e15;
 const MAX_ZOOM = 3;
 const MODE_KEY = "graph.view";
 const FOLDS_KEY = "graph.folds";
@@ -516,14 +520,32 @@ export function GraphView() {
 	};
 	/** Zoomed far out: the words of the nodes give way to the names of scripts and folders, drawn to be read. */
 	const far = () => view().scale < FAR_UNDER;
-	/** A name's size in that far picture: what reads at this zoom, as far as its box has room for it. */
-	const farSize = (b: Box, room = b.width - 16, height = b.height * 0.7) => {
-		const natural = measureBold(b.label) || 1;
-		const fits = Math.min((room / natural) * FONT_PX, height);
-		// A long name in a narrow box may run a little past its sides, rather than be too small to read.
-		const least = Math.min(9 / view().scale, ((1.8 * b.width) / natural) * FONT_PX, height);
-		return Math.max(FONT_PX, Math.min(11 / view().scale, Math.max(fits, least)));
-	};
+	/** The zoom of the far picture, or 0 while the view is nearer: moving the picture changes nothing a name depends on. */
+	const farScale = createMemo(() => (far() ? view().scale : 0));
+	/**
+	 * The names of the far picture, as a map shows its names: every one shown is large enough to
+	 * read, a folder's above it and a script's across its middle, and a name that would lie over
+	 * another waits for a closer look, the larger script's kept before the smaller's.
+	 */
+	const farNames = createMemo(() => {
+		const scale = farScale();
+		const l = layout();
+		if (!scale || !l) return [];
+		const size = FAR_NAME_PX / scale;
+		const wide = (b: Box) => (measureBold(b.label) * size) / FONT_PX;
+		return clearLabels(
+			l.boxes
+				.filter((b) => b.kind === "script" || b.kind === "fold" || b.kind === "dir" || b.kind === "folder")
+				.map((b) =>
+					b.kind === "folder"
+						? { item: b, x: b.x, y: b.y - size * 1.25, width: wide(b), height: size * 1.2, weight: FOLDER_FIRST + b.width * b.height }
+						: { item: b, x: b.x + b.width / 2 - wide(b) / 2, y: b.y + b.height / 2 - size * 0.6, width: wide(b), height: size * 1.2, weight: b.width * b.height },
+				)
+				// A name stays inside the picture: one that ran past its edge would be cut off by the view's.
+				.map((name) => ({ ...name, x: Math.max(0, Math.min(name.x, l.width - name.width)), y: Math.max(0, Math.min(name.y, l.height - name.height)) })),
+			size * 0.3,
+		).map((name) => ({ ...name, size }));
+	});
 	/** Far out, a click goes to what is clicked: the view comes in on that script or folder, as large as fits and its words can be read. */
 	const comeIn = (b: Box) => {
 		const own = b.kind === "proc" || b.kind === "top" ? layout()?.boxes.find((s) => s.kind === "script" && s.path === b.path) : undefined;
@@ -1007,21 +1029,18 @@ export function GraphView() {
 									{/* Far out, the names of scripts and folders over the picture, at a size that reads: in a script's middle, and above a folder. */}
 									<Show when={far()}>
 										<g class="g-far" aria-hidden="true">
-											<For each={l().boxes.filter((b) => b.kind === "script" || b.kind === "fold" || b.kind === "dir" || b.kind === "folder")}>
-												{(b) => {
-													const size = () => (b.kind === "folder" ? farSize(b, b.width, Infinity) : farSize(b));
-													return (
-														<text
-															classList={{ folder: b.kind === "folder" }}
-															x={b.kind === "folder" ? b.x : b.x + b.width / 2}
-															y={b.kind === "folder" ? b.y - size() * 0.3 : b.y + b.height / 2 + size() * 0.35}
-															text-anchor={b.kind === "folder" ? "start" : "middle"}
-															style={{ "font-size": `${size()}px`, "stroke-width": `${size() * 0.28}px` }}
-														>
-															{b.label}
-														</text>
-													);
-												}}
+											<For each={farNames()}>
+												{(name) => (
+													<text
+														classList={{ folder: name.item.kind === "folder" }}
+														x={name.item.kind === "folder" ? name.x : name.x + name.width / 2}
+														y={name.y + name.size * 0.95}
+														text-anchor={name.item.kind === "folder" ? "start" : "middle"}
+														style={{ "font-size": `${name.size}px`, "stroke-width": `${name.size * 0.28}px` }}
+													>
+														{name.item.label}
+													</text>
+												)}
 											</For>
 										</g>
 									</Show>
