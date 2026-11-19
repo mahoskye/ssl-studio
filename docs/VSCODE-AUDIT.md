@@ -14,7 +14,9 @@ or by opening a file made for it (an image, a file of bytes, a file with
 Windows line ends, a file in the one-byte Windows encoding). Where a
 feature was plainly not there (no menu bar, nothing that runs git), that
 is what was seen. The VS Code side is from knowledge of the product.
-[What could not be checked](#not-checked) is listed at the end.
+[What could not be checked](#not-checked) is listed at the end, and
+[what was seen for each row](VSCODE-AUDIT-CHECKED.md) is a list of its
+own: every row was tried again when the building was done.
 
 | Here | Means |
 | --- | --- |
@@ -39,8 +41,8 @@ whether it is built.
 | Menu bar | Yes | Bring | Built: six menus across the top, by pointer, Alt and a letter, or F10; it can be hidden |
 | Command palette | Yes | Have | Ctrl+Shift+P; what was used last comes first |
 | Activity bar | Yes | Have | Ten panels, each movable to the other side |
-| Status bar | Yes | Have | Project, server, agent, problems, cursor, language |
-| Bottom panel | Yes | Have | Problems, Output, Call graph |
+| Status bar | Yes | Have | Folder, server, branch, agent, problems, place, cursor, encoding, line ends, language |
+| Bottom panel | Yes | Have | Problems and Output; Ctrl+J shows and hides it. The call graph is a view of its own |
 | Welcome page | Yes | Have | With the folders opened lately |
 | Notifications | Yes | Have | An error stays until it is dismissed |
 | Zen and full screen | No | Later | A command each |
@@ -94,7 +96,7 @@ of the text editor, and nothing of its own.
 | Preview tabs | No | Later | One click opens a tab that the next click replaces |
 | Grid layouts | No | Later | Two by two, three columns |
 | Breadcrumbs | Yes | Have | Above the text, from the language server's symbols; Markdown shows its headings |
-| Compare two files | Partly | Later | Review shows a diff for the agent's edits, not for any two files |
+| Compare two files | Partly | Later | A file compares with git's, a snapshot with the editor; not any two files |
 
 ## Editing
 
@@ -125,7 +127,7 @@ of the text editor, and nothing of its own.
 | Go to symbol | Yes | Have | In the file: Ctrl+Shift+O, the editor's own |
 | Workspace symbols | Yes | Have | Ctrl+T, from the language server; the draft had this as missing |
 | Go to line | Yes | Have | Ctrl+G went to line 40 |
-| Go to definition | Yes | Have | From the language server |
+| Go to definition | Yes | Have | From the language server; in the Go menu and on the right-click menu |
 | Peek, references | Yes | Have | From the language server |
 | Rename symbol | Yes | Have | From the language server |
 | Next problem | Yes | Have | F8, the editor's own |
@@ -201,7 +203,7 @@ fetches, pulls or pushes
 | Shortcut list | Yes | Have | The search box narrows it by a command's name; the draft had Partly |
 | Themes | Yes | Have | Dark, light, imported |
 | Zoom | Yes | Have | In, out, reset |
-| Search by key | No | Later | Find the command a key runs |
+| Search by key | Yes | Have | Typing a key in Settings' search finds its command; the first check missed it |
 | Chords | Partly | Later | The editor's own (Ctrl+K Ctrl+0) work; the app's keys are single |
 | Profiles | No | Leave | One person, one setup |
 | Settings sync | No | Leave | Needs an account |
@@ -503,30 +505,10 @@ the author's conclusions: after steps 1 to 3, after steps 4 to 6, and
 after steps 7 and 8. What each confirmed was fixed before the next step;
 the fixes are the commits named "defects found by a review".
 
-What the last review found, and what was done about each:
-
-- **Fixed.** Git steps in a workspace inside a larger repository; names
-  read as patterns; a failed question taken for "not followed"; what is
-  staged above the workspace's folder; a copy in local history of every
-  file a replace writes; a replace in a file with no tab; a match of
-  nothing beside a wide character; a file's mode on write; "still open
-  in a tab" for a file with no tab; text that turns into bytes on disk;
-  the cursor kept across a comparison; the commit's message kept across
-  panels; the margin's marks blinking; the search kept across panels;
-  the steps of a row shown for the pointer; the spoken status; the
-  settings the git tests left behind; and every line of this document
-  and of ADRs 0021 and 0022 that said what the code did not do.
-- **Fixed in part, and said.** A replace acts on what is in the file
-  when it runs. The app says when that is not what was listed, and a
-  line too long for the list shows no replacement; it does not refuse.
-- **Left, with the reason.** Git is given no time limit: a repository's
-  own checks may rightly take long. Unstaging a renamed file leaves the
-  old name removed and the new one unfollowed: that is git's own answer.
-  A very large file with changes at both ends is marked changed
-  throughout: comparing it line by line is too slow to do on every key.
-  A copy that fails leaves the empty folder it made. Local history, the
-  discard and the replace as the backend runs them have no test of
-  their own: a test would write into the user's own settings folder.
+Every finding of the three reviews, with what was done about it and in
+which commit, is in [a list of its own](VSCODE-AUDIT-REVIEWS.md). In
+short: of the last review's 42 findings, 33 were fixed, 5 were fixed in
+part and say what was left, and 4 were left, each with its reason.
 
 ## Why not an extension
 
@@ -549,7 +531,8 @@ run, the quick pick's list of what can be typed, a pinned tab and its
 menu, a cut row and a drop mark in the Explorer, a picture, the status
 bar's encoding and line ends, the replace preview with its file boxes,
 the Source control panel with a row's own steps, a comparison, and the
-margin's marks.
+margin's marks. A pinned tab's menu was seen in all four. The menu bar
+was also seen with no folder open, where each entry says what it needs.
 
 - A screen reader was not run against the app.
 - The desktop app's own window (its title bar, its system file dialog)
