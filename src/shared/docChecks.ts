@@ -32,7 +32,7 @@ const AREAS = Object.keys(DOC_FOLDERS) as DocArea[];
 const LINKS_NAMED = 2;
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 /** A document in a few words: a ticket by its key, anything else by its title. */
-const called = (file: DocFile) => file.ticket || file.title || file.name;
+const called = (file: DocFile) => file.ticket || file.title || (file.group === "registries" ? registryTitle(file.name) : file.name);
 /** "a", "a and b", "a, b and c". */
 const listed = (words: string[]) => (words.length < 2 ? words.join("") : `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]}`);
 const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
@@ -105,7 +105,7 @@ export function docChecks(files: readonly DocFile[]): DocCheck[] {
 	// A ticket named by another, or by a spec, a decision or a question, that is not among the tickets.
 	const named = new Map<string, DocFile>();
 	for (const file of files) {
-		if (!file.exists || isCatalog(file) || !["tickets", "specs", "knowledge", "plans"].includes(file.group)) continue;
+		if (!file.exists || isCatalog(file) || !["tickets", "specs", "knowledge", "plans", "registries"].includes(file.group)) continue;
 		for (const key of file.tickets ?? []) if (!here(key) && ![...named.keys()].some((seen) => same(seen, key))) named.set(key, file);
 	}
 	for (const [key, by] of named) checks.push({ level: "note", text: `${key} is not among the tickets; ${called(by)} names it.`, path: by.path, fix: { kind: "ticket", key, ...(by.ticket ? { related: by.ticket } : {}) } });

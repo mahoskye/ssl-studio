@@ -9,6 +9,7 @@ import { parseCsv, tally } from "../shared/csv";
 import { fileLinks, frontPaths } from "../shared/docLinks";
 import { frontMatter, many, one, summaryOf, titleOf } from "../shared/frontMatter";
 import { catalogItems, DOC_FOLDERS, isCatalog, isPrompt, STATE_FILE, type DocArea } from "../shared/projectDocs";
+import { rowsByTicket } from "../shared/registryTickets";
 import { taskTally } from "../shared/tasks";
 import type { DocFile, LinkTo, ManifestFile, Project, Settings } from "../shared/protocol";
 import { workspaceDir } from "./paths";
@@ -262,7 +263,9 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 			continue;
 		}
 		const table = parseCsv(await file.text());
-		list.push({ path, name, group: "registries", exists: true, rows: table.rows.length, tally: tally(table) ?? undefined, problems: table.problems.length ? table.problems : undefined });
+		// A row can say which ticket carries it: the ticket's page lists what it has to bring across.
+		const forTickets = rowsByTicket(table);
+		list.push({ path, name, group: "registries", exists: true, rows: table.rows.length, tally: tally(table) ?? undefined, problems: table.problems.length ? table.problems : undefined, ...(forTickets.length ? { tickets: forTickets.map((rows) => rows.key), forTickets } : {}) });
 	}
 	// Everything else in the docs folder.
 	for (const path of under(docs, MARKDOWN, inArea)) {

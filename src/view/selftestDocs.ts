@@ -182,7 +182,7 @@ export function selftestWork(): Promise<Steps> {
 		await write(["tickets", "SELF-2.md"], ticketTemplate({ key: "SELF-2", title: "Its part", parent: "SELF-1", status: "in progress", description: "Part of the first." }));
 		await write(["specs", "Self-spec.md"], specTemplate({ title: "Self spec", ticket: "SELF-1" }));
 		const question = await write(["knowledge", "questions", "Is-it-read.md"], questionTemplate({ title: "Is it read?", date: "2026-01-01", ticket: "SELF-1" }));
-		const registry = await write(["registries", "settings.csv"], "name,value,status\nAlpha,1,found\nBeta,2,verified\n");
+		const registry = await write(["registries", "settings.csv"], "name,value,status,ticket\nAlpha,1,found,SELF-1\nBeta,2,verified,SELF-1\n");
 		setState("treeVersion", (v) => v + 1);
 
 		showPanel("docs");
@@ -215,6 +215,12 @@ export function selftestWork(): Promise<Steps> {
 		await step("ticketPageShowsWork", async () => {
 			await openFile(ticket);
 			return until(() => document.querySelector(".md-front") && [...document.querySelectorAll(".md-work li")].some((li) => li.textContent?.includes("Self spec")));
+		});
+		// A registry's rows say which ticket carries them: the ticket's page lists them, and leads to the table at those rows.
+		await step("ticketPageShowsRows", () => until(() => [...document.querySelectorAll(".md-work li")].some((li) => li.textContent?.includes("Application settings") && li.textContent.includes("2 rows, 1 done"))));
+		await step("registryOpensAtRows", async () => {
+			[...document.querySelectorAll<HTMLButtonElement>(".md-work li button")].find((button) => button.textContent?.trim() === "Application settings")?.click();
+			return until(() => document.querySelector<HTMLInputElement>(".table-view input.filter")?.value === "SELF-1" && document.querySelectorAll(".table-view button.table-ticket").length === 2);
 		});
 		// A state set from the document's page is the file's one line and the catalog's, both.
 		await step("statusSetFromPage", async () => {

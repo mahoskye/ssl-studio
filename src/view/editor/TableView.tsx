@@ -8,7 +8,10 @@ import { toneOf } from "../../shared/projectDocs";
 import { checksNames, nameQuery, namesOf, NAMES_CHECKED, outsideDocuments, usesSummary } from "../../shared/registryCheck";
 import { backend } from "../backend";
 import { searchFor } from "../panels/Search";
-import { documents, notify, state } from "../state";
+import { docs } from "../project";
+import { ticketColumn } from "../../shared/registryTickets";
+import { rowsAsked, rowsShown } from "./tableRows";
+import { canonical, documents, notify, openFile, state } from "../state";
 
 /** As many hits as a workspace search returns before it stops (src/bun/workspace.ts). */
 const SEARCH_GIVES_UP_AT = 2000;
@@ -39,6 +42,16 @@ export function TableView(props: { path: string }) {
 	/** The cell being changed: its row in the file and its column. */
 	const [editing, setEditing] = createSignal<{ row: number; column: number } | null>(null);
 	const statusAt = () => columnOf(table(), "status");
+	// Rows asked for from a ticket's page: the filter is set to the ticket's key, and can be cleared like any other.
+	createEffect(() => {
+		const asked = rowsAsked();
+		if (!asked || canonical(asked.path) !== canonical(props.path)) return;
+		setFilter(asked.filter);
+		rowsShown();
+	});
+	/** Where the rows name the ticket that carries them, and the project's tickets by key: a key there is a way to its ticket. */
+	const ticketAt = () => ticketColumn(table());
+	const tickets = createMemo(() => new Map(docs().flatMap((d) => (d.group === "tickets" && d.exists && d.ticket ? [[d.ticket.toLowerCase(), d] as const] : []))));
 	const counted = createMemo(() => tally(table()));
 
 	/** The statuses to offer when one is typed: those the table uses, then the usual ones. */
@@ -57,6 +70,21 @@ export function TableView(props: { path: string }) {
 	const [uses, setUses] = createSignal<Map<string, number> | null>(null);
 	const [checking, setChecking] = createSignal("");
 	const [onlyMissing, setOnlyMissing] = createSignal(false);
+	/** A cell of the ticket column as it is written, each key of a ticket the project has as a way to that ticket. */
+	const ticketCell = (value: string) => (
+		<For each={value.split(/([\s,;]+)/)}>
+			{(part) => {
+				const ticket = tickets().get(part.toLowerCase());
+				return ticket ? (
+					<button class="link table-ticket" title={`${ticket.ticket}: ${ticket.title ?? ""}${ticket.status ? ` (${ticket.status})` : ""}. Open the ticket.`} onClick={(e) => (e.stopPropagation(), void openFile(ticket.path))} onDblClick={(e) => e.stopPropagation()}>
+						{part}
+					</button>
+				) : (
+					part
+				);
+			}}
+		</For>
+	);
 	const usesOf = (cells: Cell[]) => uses()?.get((cells[0]?.text ?? "").trim().toLowerCase());
 	const checkNames = async () => {
 		const root = state.workspace?.root;
@@ -267,7 +295,7 @@ export function TableView(props: { path: string }) {
 														when={open()}
 														fallback={
 															<>
-																<Show when={column() === statusAt() && value().trim()} fallback={value()}>
+																<Show when={column() === statusAt() && value().trim()} fallback={<Show when={column() === ticketAt() && value().trim()} fallback={value()}>{ticketCell(value())}</Show>}>
 																	<span class={`doc-status tone-${toneOf(value())}`}>{value()}</span>
 																</Show>
 																{/* Once the names have been looked for: how often this row's is found, as the way to where; or that it is not. */}

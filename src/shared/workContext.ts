@@ -58,7 +58,8 @@ export function ticketAtHand(files: readonly DocFile[], path?: string | null): s
 	const real = files.filter((file) => file.exists && !isCatalog(file));
 	const here = path ? real.find((file) => slashes(file.path).toLowerCase() === slashes(path).toLowerCase()) : undefined;
 	if (here?.group === "tickets" && here.ticket) return here.ticket;
-	if (here?.tickets?.length && here.group !== "tickets") return here.tickets[0]!;
+	// A registry names the ticket of each row: it is not about the first of them.
+	if (here?.tickets?.length && here.group !== "tickets" && here.group !== "registries") return here.tickets[0]!;
 	const underWay = real.filter((file) => file.group === "tickets" && file.ticket && file.status && toneOf(file.status) === "active");
 	return underWay.length === 1 ? underWay[0]!.ticket! : "";
 }
@@ -125,7 +126,7 @@ export async function workText(work: Work, readFile: (path: string) => Promise<s
 }
 
 /** One kind of thing tied to a ticket, with the documents of that kind. */
-export type WorkGroup = { kind: "plan" | "spec" | "ticket" | "question" | "answer" | "decision"; name: string; files: DocFile[] };
+export type WorkGroup = { kind: "plan" | "spec" | "ticket" | "question" | "answer" | "decision" | "registry"; name: string; files: DocFile[] };
 
 /**
  * Everything in the folder that is tied to a ticket, for the ticket's own
@@ -147,6 +148,8 @@ export function ticketWork(files: readonly DocFile[], key: string): WorkGroup[] 
 		{ kind: "question", name: "Open questions", files: work.open.filter(forIt) },
 		{ kind: "answer", name: "Answered", files: work.answered },
 		{ kind: "decision", name: "Decisions", files: work.decisions.filter(forIt) },
+		// What the ticket has to bring across: the registries with rows that name it.
+		{ kind: "registry", name: "To carry across", files: files.filter((file) => file.exists && file.group === "registries" && forIt(file)) },
 	];
 	return groups.filter((group) => group.files.length);
 }

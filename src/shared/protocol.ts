@@ -71,6 +71,8 @@ export type DocFile = {
 	 * where the file was moved to, most likely.
 	 */
 	broken?: { href: string; line: number; column: number; instead?: string }[];
+	/** A registry with a "ticket" column: each ticket its rows name, with how many rows it has and how many of them are done. */
+	forTickets?: { key: string; rows: number; done?: number }[];
 	/** A catalog (INDEX.md): whether its list no longer says what the documents do. */
 	catalog?: { stale: boolean };
 };

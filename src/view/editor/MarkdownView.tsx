@@ -8,7 +8,9 @@ import { headingAnchor } from "../../shared/docTables";
 import { finishMarkdown, outlineOf, type TicketRef } from "./markdownHtml";
 import { frontMatter, plainMarkdown } from "../../shared/frontMatter";
 import { dirName, isInside, joinPath, relativePath, resolvePath } from "../../shared/paths";
-import { DOC_FOLDERS, linkedLines, statusChoices, toneOf } from "../../shared/projectDocs";
+import { DOC_FOLDERS, linkedLines, registryTitle, statusChoices, toneOf } from "../../shared/projectDocs";
+import { rowsLine } from "../../shared/registryTickets";
+import { askRows } from "./tableRows";
 import { Menu } from "../Menu";
 import { setStatus, tickTask } from "../projectDocs";
 import { tasks } from "../../shared/tasks";
@@ -219,10 +221,19 @@ export function MarkdownView(props: { path: string }) {
 											<For each={group.files}>
 												{(file) => (
 													<li>
-														<button class="link" title={[file.path, file.summary].filter(Boolean).join("\n")} onClick={() => void openFile(file.path)}>
+														<button
+															class="link"
+															title={[file.path, file.summary, group.kind === "registry" ? `Opens the table at the rows for ${ticket()}.` : ""].filter(Boolean).join("\n")}
+															onClick={() => {
+																// A registry opens at this ticket's rows, not at the whole table.
+																if (group.kind === "registry") askRows(file.path, ticket());
+																void openFile(file.path);
+															}}
+														>
 															{file.ticket && !file.title?.startsWith(file.ticket) ? `${file.ticket}: ` : ""}
-															{file.title || file.name.replace(/\.plan\.json$/i, "")}
+															{group.kind === "registry" ? registryTitle(file.name) : file.title || file.name.replace(/\.plan\.json$/i, "")}
 														</button>
+														<Show when={group.kind === "registry" && file.forTickets?.find((rows) => rows.key.toLowerCase() === ticket().toLowerCase())}>{(rows) => <span class="md-work-note">{rowsLine(rows())}</span>}</Show>
 														<Show when={file.status}>
 															<span class={`doc-status tone-${toneOf(file.status)}`}>{file.status}</span>
 														</Show>

@@ -94,6 +94,11 @@ column says how far each row has come.
   schema folder's SQL creates.
 - **"Check against code"** looks for each row's name in the project's
   files. A row found nowhere is one to question.
+- **A `ticket` column says which ticket carries each row.** The ticket's
+  page then lists the registry under "To carry across", with how many rows
+  and how many are done, and opens the table at those rows. In the table,
+  the key is a link to the ticket. A key that is no ticket of the project
+  is said in Health.
 
 ## Health
 

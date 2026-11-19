@@ -498,6 +498,11 @@ the work comes from ([ADR 0012](adr/0012-a-projects-work-is-written-down.md)).
   reader, which gives the line and column. The runtime's YAML reader says
   only that it gave up, so the place is the line after the longest start
   of the document that still reads, and the note says "at or near".
+- **A registry's rows say which ticket carries them.** A `ticket` column
+  in a registry ties each row to a ticket: the ticket's page lists what it
+  has to carry across and how much of it has come, the table's key leads
+  to the ticket, and a key that is no ticket is said in Health. The demo's
+  settings registry has the column.
 - **A third review, of the commits that read and rewrite links.** A second
   agent was given the diff and no conclusions, and confirmed its findings
   by running them. What it found and what was done:

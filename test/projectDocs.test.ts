@@ -614,9 +614,11 @@ describe("a ticket's own page", () => {
 			["Related tickets", ["Rush samples count Saturday as a working day", "A report of the samples due soon"]],
 			["Open questions", ["Which holidays does each site keep?"]],
 			["Decisions", ["A walk looks at most 730 days ahead", "Planning and saving are two scripts"]],
+			// The settings registry says which ticket carries each row.
+			["To carry across", ["settings.csv"]],
 		]);
 		// A decision made for another ticket stands, and is not this ticket's work.
-		expect(ticketWork(docs, "DEMO-103").map((group) => group.name)).toEqual(["Specs", "Related tickets"]);
+		expect(ticketWork(docs, "DEMO-103").map((group) => group.name)).toEqual(["Specs", "Related tickets", "To carry across"]);
 		expect(ticketWork(docs, "DEMO-102").map((group) => group.name)).toContain("Answered");
 		expect(ticketWork(docs, "DEMO-999")).toEqual([]);
 	});
