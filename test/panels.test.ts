@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { moveIndex, restoreIndex, ringStep, stopIndex, treeStep, typeAhead, isMoveKey, type TreeRow } from "../src/view/panels/rowMoves";
-import { folderFor, holdsRoot, menuFor, nameProblem, NEW_FILE, NEW_FOLDER, RENAME, retarget, TRASH, without } from "../src/view/panels/explorerMenu";
+import { COPY_PATH, COPY_RELATIVE, folderFor, holdsRoot, menuFor, nameProblem, NEW_FILE, NEW_FOLDER, RENAME, retarget, TRASH, without } from "../src/view/panels/explorerMenu";
 import { byLine, segments } from "../src/view/panels/searchLines";
 import { snippetAsText, TEMPLATES } from "../src/shared/houseStyle";
 import { patternsFrom } from "../src/view/plan/build";
@@ -131,17 +131,17 @@ test("a ring steps both ways and takes a stranger in at its ends", () => {
 
 // --- the Explorer's menu ---------------------------------------------------------
 
-test("the workspace folder is offered only what adds to it", () => {
-	expect(menuFor("dir", "/w", "/w")).toEqual([NEW_FILE, NEW_FOLDER]);
-	expect(menuFor("dir", "/w/", "/w")).toEqual([NEW_FILE, NEW_FOLDER]);
+test("the workspace folder is offered what adds to it and its path, never a rename or the trash", () => {
+	expect(menuFor("dir", "/w", "/w")).toEqual([NEW_FILE, NEW_FOLDER, COPY_PATH]);
+	expect(menuFor("dir", "/w/", "/w")).toEqual([NEW_FILE, NEW_FOLDER, COPY_PATH]);
 	// Nor a folder that holds the workspace.
 	expect(menuFor("dir", "/", "/w")).not.toContain(TRASH);
-	expect(menuFor("dir", "C:\\Work", "c:/work")).toEqual([NEW_FILE, NEW_FOLDER]);
+	expect(menuFor("dir", "C:\\Work", "c:/work")).toEqual([NEW_FILE, NEW_FOLDER, COPY_PATH]);
 });
 
 test("a folder and a file get their menus, with one wording for the trash", () => {
-	expect(menuFor("dir", "/w/Sample", "/w")).toEqual([NEW_FILE, NEW_FOLDER, RENAME, TRASH]);
-	expect(menuFor("file", "/w/Sample/Orders.ssl", "/w")).toEqual([RENAME, TRASH]);
+	expect(menuFor("dir", "/w/Sample", "/w")).toEqual([NEW_FILE, NEW_FOLDER, COPY_PATH, COPY_RELATIVE, RENAME, TRASH]);
+	expect(menuFor("file", "/w/Sample/Orders.ssl", "/w")).toEqual([COPY_PATH, COPY_RELATIVE, RENAME, TRASH]);
 	expect(TRASH).toBe("Move to trash");
 	for (const kind of ["file", "dir"] as const) expect(menuFor(kind, "/w/x", "/w")).not.toContain("Delete");
 });

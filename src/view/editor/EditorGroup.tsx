@@ -3,13 +3,16 @@
 import { tabShown } from "../recentTabs";
 import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { monaco } from "./monaco";
-import { activePath, closeAllTabs, closeOtherTabs, closeTab, documents, focusRequest, openFile, revealSignal, revert, save, saveAll, setState, split, state, takeReveal } from "../state";
+import { activePath, closeAllTabs, closeOtherTabs, closeTab, closeTabsToRight, documents, focusRequest, openFile, revealSignal, revert, save, saveAll, setState, split, state, takeReveal, togglePin } from "../state";
+import { othersOf, rightOf } from "../../shared/tabOrder";
+import { chooseFromMenu } from "../panels/RowMenu";
+import type { Point } from "../panels/Rows";
 import { symbols } from "../panels/Objects";
 import { flatRegions, regionColor, symbolPath } from "./regions";
 import { BlocksView } from "../blocks/BlocksView";
 import { isPlanPath } from "../plan/model";
 import { PlanView } from "../plan/PlanView";
-import { baseName } from "../../shared/paths";
+import { baseName, isInside } from "../../shared/paths";
 import { tabLabels } from "./tabs";
 import { Menu, type MenuItem } from "../Menu";
 import { isMarkdown, isTable } from "../project";
@@ -73,6 +76,18 @@ export function EditorGroup(props: { index: number }) {
 			rulers: rulers(),
 		});
 		editors[props.index] = editor;
+		// The app's own commands for the code at hand, on the editor's right-click menu beside the editor's own.
+		for (const [order, [id, label]] of (
+			[
+				["agent-ask", "Ask the Agent About This…"],
+				["new-question", "New Question About This Code…"],
+				["new-decision", "New Decision About This Code…"],
+				["copy-designer", "Copy for Designer"],
+				["wrap-region", "Wrap in Region…"],
+			] as const
+		).entries()) {
+			editor.addAction({ id: `app.${id}`, label, contextMenuGroupId: "9_app", contextMenuOrder: order, run: () => void import("../commands").then((all) => all.runCommand(id)) });
+		}
 		setRoomy(editor.getLayoutInfo().width >= MINIMAP_FROM);
 		editor.onDidLayoutChange((layout) => setRoomy(layout.width >= MINIMAP_FROM));
 		editor.onDidFocusEditorText(() => setState("activeGroup", props.index));
@@ -143,7 +158,9 @@ export function EditorGroup(props: { index: number }) {
 	const tabs = new Map<string, HTMLElement>();
 	createEffect(() => {
 		const path = group().active;
-		if (path) tabs.get(path)?.scrollIntoView({ block: "nearest", inline: "nearest" });
+		// Where it stands in the row matters too: a tab that is pinned moves to the front.
+		const at = path ? group().tabs.indexOf(path) : -1;
+		if (path && at >= 0) queueMicrotask(() => tabs.get(path)?.scrollIntoView({ block: "nearest", inline: "nearest" }));
 	});
 	const labels = () => tabLabels(group().tabs, state.workspace?.root);
 	const activate = (path: string, focus = false) => {
@@ -165,6 +182,49 @@ export function EditorGroup(props: { index: number }) {
 		} else if (e.key === "Delete") {
 			e.preventDefault();
 			void closeTab(path, props.index);
+		} else if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
+			// The menu key, or Shift+F10: the tab's menu, under the tab.
+			e.preventDefault();
+			const box = (e.currentTarget as HTMLElement).getBoundingClientRect();
+			void tabMenu(path, { x: box.left + 8, y: box.bottom });
+		}
+	};
+	/** A tab's own menu: what a right-click on it offers. */
+	const tabMenu = async (path: string, at: Point) => {
+		const pinned = () => Boolean(group().pinned?.includes(path));
+		const g = group();
+		const CLOSE = "Close";
+		const OTHERS = "Close others";
+		const RIGHT = "Close to the right";
+		const ALL = "Close all";
+		const PIN = pinned() ? "Unpin" : "Pin";
+		const PATH = "Copy path";
+		const RELATIVE = "Copy path in the project";
+		const SHOW = "Show in the Explorer";
+		const SIDE = "Open to the side";
+		const inFolder = Boolean(state.workspace && isInside(state.workspace.root, path));
+		// Only what would do something: a tab with nothing to its right has no "close to the right".
+		const items = [
+			...(pinned() ? [] : [CLOSE]),
+			...(othersOf(g.tabs, g.pinned ?? [], path).length ? [OTHERS] : []),
+			...(rightOf(g.tabs, g.pinned ?? [], path).length ? [RIGHT] : []),
+			ALL,
+			PIN,
+			PATH,
+			...(inFolder ? [RELATIVE, SHOW] : []),
+			SIDE,
+		];
+		const picked = await chooseFromMenu(`Actions for the tab ${base(path)}`, items, at);
+		if (picked === CLOSE) await closeTab(path, props.index);
+		else if (picked === OTHERS) await closeOtherTabs(path, props.index);
+		else if (picked === RIGHT) await closeTabsToRight(path, props.index);
+		else if (picked === ALL) await closeAllTabs();
+		else if (picked === PIN) togglePin(path, props.index);
+		else if (picked === PATH || picked === RELATIVE) await (await import("../commands")).copyPath(picked === PATH ? "whole" : "relative", path);
+		else if (picked === SHOW) (await import("../panels/Explorer")).showInExplorer(path);
+		else if (picked === SIDE) {
+			activate(path);
+			split();
 		}
 	};
 	const onStripKey = (e: KeyboardEvent) => {
@@ -216,8 +276,13 @@ export function EditorGroup(props: { index: number }) {
 								title={`${path}${state.conflicts[path] ? "\nChanged on disk since you opened it" : state.dirty[path] ? "\nUnsaved changes" : ""}`}
 								tabindex={group().active === path ? 0 : -1}
 								aria-selected={group().active === path}
-								classList={{ active: group().active === path, dirty: Boolean(state.dirty[path]), conflict: Boolean(state.conflicts[path]) }}
+								classList={{ active: group().active === path, dirty: Boolean(state.dirty[path]), conflict: Boolean(state.conflicts[path]), pinned: Boolean(group().pinned?.includes(path)) }}
+								aria-haspopup="menu"
 								onKeyDown={(e) => e.target === e.currentTarget && onTabKey(e, path)}
+								onContextMenu={(e) => {
+									e.preventDefault();
+									void tabMenu(path, { x: e.clientX, y: e.clientY });
+								}}
 								onMouseDown={(e) => {
 									if (e.button === 1) {
 										e.preventDefault();
@@ -231,6 +296,12 @@ export function EditorGroup(props: { index: number }) {
 									<span class="conflict-mark" aria-label="changed on disk">
 										!
 									</span>
+								</Show>
+								<Show when={group().pinned?.includes(path)}>
+									{/* A pinned tab has a pin where the others have a cross: pressing it lets the tab go. */}
+									<button class="pin" tabindex={-1} title="Pinned. Unpin" aria-label={`Unpin ${base(path)}${state.dirty[path] ? " (unsaved changes)" : ""}`} onMouseDown={(e) => e.stopPropagation()} onClick={() => togglePin(path, props.index)}>
+										<span class="pin-mark" aria-hidden="true" />
+									</button>
 								</Show>
 								<button class="close" tabindex={-1} title="Close (Ctrl+W)" aria-label={`Close ${base(path)}${state.dirty[path] ? " (unsaved changes)" : ""}`} onMouseDown={(e) => e.stopPropagation()} onClick={() => void closeTab(path, props.index)}>
 									<span class="dot" aria-hidden="true">

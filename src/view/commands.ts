@@ -29,6 +29,7 @@ import {
 	closeAllTabs,
 	closeOtherTabs,
 	closeTab,
+	closeTabsToRight,
 	focusEditor,
 	focusSidePanel,
 	nextTab,
@@ -44,6 +45,7 @@ import {
 	setState,
 	split,
 	state,
+	togglePin,
 } from "./state";
 
 /** `label` is a verb phrase; `detail` is the quieter second line that explains it. */
@@ -82,8 +84,10 @@ export const commands: Command[] = [
 	{ id: "save-all", label: "Save all", run: () => void saveAll() },
 	{ id: "revert", label: "Revert file", detail: "Back to what is on disk", run: () => activePath() && void revert(activePath()!) },
 	{ id: "close", label: "Close tab", run: () => activePath() && void closeTab(activePath()!) },
-	{ id: "close-others", label: "Close other tabs", run: () => void closeOtherTabs() },
-	{ id: "close-all", label: "Close all tabs", run: () => void closeAllTabs() },
+	{ id: "close-others", label: "Close other tabs", detail: "The pinned ones stay", run: () => void closeOtherTabs() },
+	{ id: "close-right", label: "Close tabs to the right", run: () => void closeTabsToRight() },
+	{ id: "close-all", label: "Close all tabs", detail: "The pinned ones stay", run: () => void closeAllTabs() },
+	{ id: "pin-tab", label: "Pin or unpin tab", detail: "A pinned tab stays first, and is not closed with the others", run: () => togglePin() },
 	{ id: "reopen-tab", label: "Reopen closed tab", run: () => void reopenClosedTab() },
 	{ id: "recent-tab", label: "Go to the tab used before", detail: "And with Ctrl held, on through the ones before that", run: () => stepRecent(1) },
 	{ id: "recent-tab-back", label: "Go back through the tabs used", run: () => stepRecent(-1) },

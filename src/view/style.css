@@ -197,6 +197,10 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .tab .name { overflow: hidden; text-overflow: ellipsis; max-width: 32ch; }
 .tab .close { width: var(--target); height: var(--target); padding: 0; line-height: var(--target); text-align: center; }
 .tab .close .dot { display: none; }
+/* A pinned tab: a pin where the cross is, and no cross. The glyph is the editor's own icon font's. */
+.tab .pin { width: var(--target); height: var(--target); padding: 0; line-height: var(--target); text-align: center; color: var(--accent); }
+.tab .pin-mark::before { font-family: codicon; content: "\eba0"; font-size: 14px; vertical-align: middle; }
+.tab.pinned .close { display: none; }
 .tab.dirty .close .dot { display: inline; }
 .tab.dirty .close .x { display: none; }
 .tab.dirty .close:hover .dot { display: none; }

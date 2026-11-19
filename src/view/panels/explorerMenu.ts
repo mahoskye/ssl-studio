@@ -7,15 +7,17 @@ export const NEW_FOLDER = "New folder";
 export const RENAME = "Rename";
 /** One wording for the menu, the confirmation and its button. */
 export const TRASH = "Move to trash";
-export type Action = typeof NEW_FILE | typeof NEW_FOLDER | typeof RENAME | typeof TRASH;
+export const COPY_PATH = "Copy path";
+export const COPY_RELATIVE = "Copy path in the project";
+export type Action = typeof NEW_FILE | typeof NEW_FOLDER | typeof RENAME | typeof TRASH | typeof COPY_PATH | typeof COPY_RELATIVE;
 
 /** True for the workspace folder and for anything that holds it: never renamed or trashed from here. */
 export const holdsRoot = (root: string, path: string) => isInside(path, root);
 
 /** The menu for an entry. The workspace folder gets only the two that add to it. */
 export function menuFor(kind: "file" | "dir", path: string, root: string): Action[] {
-	if (holdsRoot(root, path)) return [NEW_FILE, NEW_FOLDER];
-	return kind === "dir" ? [NEW_FILE, NEW_FOLDER, RENAME, TRASH] : [RENAME, TRASH];
+	if (holdsRoot(root, path)) return [NEW_FILE, NEW_FOLDER, COPY_PATH];
+	return kind === "dir" ? [NEW_FILE, NEW_FOLDER, COPY_PATH, COPY_RELATIVE, RENAME, TRASH] : [COPY_PATH, COPY_RELATIVE, RENAME, TRASH];
 }
 
 /** Why a typed name cannot be used, or "" when it can. */

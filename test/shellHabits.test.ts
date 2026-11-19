@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { searchPattern } from "../src/shared/searchPattern";
-import { ofOpen, stepped, used } from "../src/shared/tabOrder";
+import { ofOpen, othersOf, rightOf, stepped, used, withPin } from "../src/shared/tabOrder";
 
 const found = (text: string, pattern: RegExp) => [...text.matchAll(pattern)].map((match) => match[0]);
 
@@ -38,5 +38,26 @@ describe("the order tabs were used in", () => {
 		expect(stepped(order, 2, 1)).toEqual({ path: "now", at: 0 });
 		expect(stepped(order, 0, -1)).toEqual({ path: "earlier", at: 2 });
 		expect(stepped(["only"], 0, 1)).toBeNull();
+	});
+});
+
+describe("pinned tabs", () => {
+	test("a pinned tab stands first, after those pinned before it", () => {
+		expect(withPin(["a", "b", "c", "d"], [], "c", true)).toEqual({ tabs: ["c", "a", "b", "d"], pinned: ["c"] });
+		expect(withPin(["c", "a", "b", "d"], ["c"], "d", true)).toEqual({ tabs: ["c", "d", "a", "b"], pinned: ["c", "d"] });
+	});
+	test("a tab let go stands first among the others", () => {
+		expect(withPin(["c", "d", "a", "b"], ["c", "d"], "c", false)).toEqual({ tabs: ["d", "c", "a", "b"], pinned: ["d"] });
+	});
+	test("pinning a tab that is pinned, or one that is not open, changes nothing but what is stale", () => {
+		expect(withPin(["c", "a"], ["c"], "c", true)).toEqual({ tabs: ["c", "a"], pinned: ["c"] });
+		expect(withPin(["a", "b"], ["gone"], "x", true)).toEqual({ tabs: ["a", "b"], pinned: [] });
+	});
+	test("close others and close to the right leave the pinned alone", () => {
+		expect(othersOf(["p", "a", "b", "c"], ["p"], "b")).toEqual(["a", "c"]);
+		expect(othersOf(["p", "a"], ["p"], null)).toEqual(["a"]);
+		expect(rightOf(["a", "b", "p", "c"], ["p"], "a")).toEqual(["b", "c"]);
+		expect(rightOf(["a", "b"], [], "b")).toEqual([]);
+		expect(rightOf(["a", "b"], [], "x")).toEqual([]);
 	});
 });

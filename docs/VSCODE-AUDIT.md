@@ -69,9 +69,9 @@ how much of it the app already does by a command or a key.
 
 | Feature | Here | Verdict | Note |
 | --- | --- | --- | --- |
-| Editor menu | Partly | Bring | Definition, references, peek, rename, format, cut, copy, paste; none of the app's own |
-| Tab menu | No | Bring | A right-click on a tab does nothing |
-| Explorer menu | Partly | Bring | New file, new folder, rename, trash; no copy path, cut, copy, paste |
+| Editor menu | Yes | Bring | Built: the app's own five (ask the agent, new question, new decision, Designer, region) |
+| Tab menu | Yes | Bring | Built: close, others, to the right, all, pin, copy path, show in Explorer, to the side |
+| Explorer menu | Partly | Bring | Copy path is built; cut, copy and paste come with step 5 |
 | Docs row menu | Yes | Have | Open, set a state, update; by the menu key too |
 | Health row menu | Yes | Have | Open, and what puts the row right |
 | Search row menu | No | Later | Copy the line or its path |
@@ -82,8 +82,8 @@ how much of it the app already does by a command or a key.
 | Feature | Here | Verdict | Note |
 | --- | --- | --- | --- |
 | Close, close others | Yes | Have | Commands: close, close others, close all, reopen closed |
-| Close to the right | No | Bring | Goes on the tab menu |
-| Pin a tab | No | Bring | A pinned tab stays first and is not closed with the others |
+| Close to the right | Yes | Bring | Built: on the tab menu and as a command |
+| Pin a tab | Yes | Bring | Built: stays first, kept across sessions, not closed until it is unpinned |
 | Switch by Ctrl+Tab | Yes | Bring | Built: to the tab used before, and on through the order with Ctrl held |
 | Drag tabs | No | Bring | A tab cannot be dragged: not along the row, not to the other group |
 | Split editor | Yes | Have | Side by side, Ctrl+\ |
@@ -265,11 +265,14 @@ is the language server's to say (ADR 0003).
 
 | Feature | Size | Done | What it takes |
 | --- | --- | --- | --- |
-| Tab menu | Small | No | Close, close others, close to the right, close all, pin, copy path, show in Explorer |
-| Close to the right | Small | No | On the tab menu and as a command |
-| Pin a tab | Small | No | Pinned tabs stay first and survive "close others" |
-| Explorer menu | Small | No | Copy path, and what step 5 adds |
-| Editor menu | Small | No | Ask the agent, new question, copy for Designer, wrap in region |
+| Tab menu | Small | Yes | Close, close others, close to the right, close all, pin, copy path, show in Explorer |
+| Close to the right | Small | Yes | On the tab menu and as a command |
+| Pin a tab | Small | Yes | Pinned tabs stay first and survive "close others" |
+| Explorer menu | Small | Partly | Copy path is in; cut, copy and paste are step 5's |
+| Editor menu | Small | Yes | Ask the agent, new question, new decision, copy for Designer, wrap in region |
+
+A pinned tab is not closed by Ctrl+W or its cross, as in VS Code: the app
+says it is pinned. The tab's menu also opens by the menu key and Shift+F10.
 
 ### Step 3: the menu bar
 

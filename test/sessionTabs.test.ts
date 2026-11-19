@@ -55,3 +55,11 @@ describe("the panels a folder was left with", () => {
 	});
 });
 
+
+test("pinned tabs are kept with the tabs, and a pin on a tab that is not there is dropped", () => {
+	const kept = unpackTabs(packTabs([{ tabs: ["/w/a.ssl", "/w/b.ssl"], active: "/w/b.ssl", pinned: ["/w/a.ssl"] }], 0));
+	expect(kept?.groups[0]).toEqual({ tabs: ["/w/a.ssl", "/w/b.ssl"], active: "/w/b.ssl", pinned: ["/w/a.ssl"] });
+	const stale = unpackTabs(JSON.stringify({ groups: [{ tabs: ["/w/a.ssl"], active: "/w/a.ssl", pinned: ["/w/gone.ssl", 7, "/w/a.ssl", "/w/a.ssl"] }], activeGroup: 0 }));
+	expect(stale?.groups[0]?.pinned).toEqual(["/w/a.ssl"]);
+	expect(unpackTabs(packTabs([{ tabs: ["/w/a.ssl"], active: "/w/a.ssl" }], 0))?.groups[0]).toEqual({ tabs: ["/w/a.ssl"], active: "/w/a.ssl" });
+});

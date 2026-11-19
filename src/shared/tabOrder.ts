@@ -21,3 +21,27 @@ export function stepped(order: readonly string[], at: number, step: number): { p
 	const next = (((at + step) % order.length) + order.length) % order.length;
 	return { path: order[next]!, at: next };
 }
+
+// --- pinned tabs, and closing many at once ---------------------------------------------------
+
+/**
+ * A group's tabs with one pinned or let go. Pinned tabs stand first, in the
+ * order they were pinned; a tab let go stands first among the others.
+ */
+export function withPin(tabs: readonly string[], pinned: readonly string[], path: string, pin: boolean): { tabs: string[]; pinned: string[] } {
+	if (!tabs.includes(path)) return { tabs: [...tabs], pinned: pinned.filter((p) => tabs.includes(p)) };
+	const pins = pin ? [...pinned.filter((p) => p !== path && tabs.includes(p)), path] : pinned.filter((p) => p !== path && tabs.includes(p));
+	const rest = tabs.filter((tab) => !pins.includes(tab) && tab !== path);
+	return { tabs: pin ? [...pins, ...rest] : [...pins, path, ...rest], pinned: pins };
+}
+
+/** The tabs "close others" closes: every one but the tab kept and the pinned. */
+export function othersOf(tabs: readonly string[], pinned: readonly string[], keep: string | null): string[] {
+	return tabs.filter((tab) => tab !== keep && !pinned.includes(tab));
+}
+
+/** The tabs "close to the right" closes: those after the tab, the pinned left alone. */
+export function rightOf(tabs: readonly string[], pinned: readonly string[], path: string): string[] {
+	const at = tabs.indexOf(path);
+	return at < 0 ? [] : tabs.slice(at + 1).filter((tab) => !pinned.includes(tab));
+}

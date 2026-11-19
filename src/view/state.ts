@@ -17,8 +17,9 @@ import { recheckPlans, trackPlan } from "./plan/check";
 import { trackDoc, trackJson, trackToml, trackXml } from "./docCheck";
 import { recall, remember } from "./graph/canvas";
 import { packTabs, packViews, tabsKey, unpackTabs, unpackViews, viewsKey } from "./editor/sessionTabs";
+import { othersOf, rightOf, withPin } from "../shared/tabOrder";
 
-export type Group = { tabs: string[]; active: string | null; mode?: "text" | "blocks" };
+export type Group = { tabs: string[]; active: string | null; mode?: "text" | "blocks"; /** The tabs that stay: first in the row, and not closed with the others. */ pinned?: string[] };
 export type PanelId = "explorer" | "objects" | "palette" | "reference" | "search" | "history" | "health" | "agent" | "docs";
 /** @deprecated names kept for readers: both sides hold any panel. */
 export type LeftView = PanelId;
@@ -215,7 +216,8 @@ export async function restoreTabs() {
 			setState("groups", (groups) => {
 				const next = groups.map((g) => ({ ...g }));
 				while (next.length <= index) next.push({ tabs: [], active: null });
-				next[index] = { ...next[index]!, tabs: [...new Set([...next[index]!.tabs, ...tabs])], active: next[index]!.active ?? active };
+				const pinned = (group.pinned ?? []).map(canonical).filter((path) => tabs.includes(path));
+				next[index] = { ...next[index]!, tabs: [...new Set([...next[index]!.tabs, ...tabs])], active: next[index]!.active ?? active, ...(pinned.length ? { pinned } : {}) };
 				return next;
 			});
 		}
@@ -332,8 +334,13 @@ export const revealSignal = (() => {
 const closedTabs: string[] = [];
 
 /** Says whether the tab closed: a refused or failed save keeps it open. */
-export async function closeTab(path: string, group = state.activeGroup, options: { discard?: boolean } = {}): Promise<boolean> {
+export async function closeTab(path: string, group = state.activeGroup, options: { discard?: boolean; pinned?: boolean } = {}): Promise<boolean> {
 	if (!state.groups[group]?.tabs.includes(path)) return true;
+	// A pinned tab stays until it is let go: a close by key or by pointer says so and leaves it.
+	if (state.groups[group]!.pinned?.includes(path) && !options.pinned) {
+		notify(`${baseName(path)} is pinned. Unpin it to close it: right-click its tab.`);
+		return false;
+	}
 	const lastView = state.groups.filter((g) => g.tabs.includes(path)).length === 1;
 	if (state.dirty[path] && lastView && !options.discard) {
 		const answer = await choose(`${baseName(path)} has unsaved changes.`, ["Save", "Discard changes"], { danger: "Discard changes" });
@@ -349,6 +356,7 @@ export async function closeTab(path: string, group = state.activeGroup, options:
 			produce((g: Group) => {
 				const index = g.tabs.indexOf(path);
 				g.tabs.splice(index, 1);
+				if (g.pinned) g.pinned = g.pinned.filter((p) => p !== path);
 				if (g.active === path) g.active = g.tabs[Math.min(index, g.tabs.length - 1)] ?? null;
 			}),
 		);
@@ -383,16 +391,37 @@ function stepTab(by: number) {
 export const nextTab = () => stepTab(1);
 export const previousTab = () => stepTab(-1);
 
-export async function closeOtherTabs() {
-	const group = state.activeGroup;
-	const keep = activePath();
-	for (const path of [...(state.groups[group]?.tabs ?? [])]) if (path !== keep && !(await closeTab(path, group))) return;
+/** Closes every tab of a group but one and the pinned. */
+export async function closeOtherTabs(keep = activePath(), group = state.activeGroup) {
+	const g = state.groups[group];
+	for (const path of othersOf(g?.tabs ?? [], g?.pinned ?? [], keep)) if (!(await closeTab(path, group))) return;
 }
 
+/** Closes the tabs after one in its row, the pinned left alone. */
+export async function closeTabsToRight(path = activePath(), group = state.activeGroup) {
+	const g = state.groups[group];
+	if (!path || !g) return;
+	for (const other of rightOf(g.tabs, g.pinned ?? [], path)) if (!(await closeTab(other, group))) return;
+}
+
+/** Closes every tab that is not pinned. */
 export async function closeAllTabs() {
 	for (let group = state.groups.length - 1; group >= 0; group--) {
-		for (const path of [...(state.groups[group]?.tabs ?? [])]) if (!(await closeTab(path, group))) return;
+		const g = state.groups[group];
+		for (const path of othersOf(g?.tabs ?? [], g?.pinned ?? [], null)) if (!(await closeTab(path, group))) return;
 	}
+}
+
+/** Pins a tab, or lets a pinned one go. */
+export function togglePin(path = activePath(), group = state.activeGroup) {
+	const g = state.groups[group];
+	if (!path || !g?.tabs.includes(path)) return;
+	const next = withPin(g.tabs, g.pinned ?? [], path, !g.pinned?.includes(path));
+	batch(() => {
+		setState("groups", group, "tabs", next.tabs);
+		setState("groups", group, "pinned", next.pinned);
+	});
+	rememberTabs();
 }
 
 export async function reopenClosedTab() {
@@ -425,6 +454,7 @@ export function fileRenamed(oldPath: string, newPath: string) {
 				produce((groups: Group[]) => {
 					for (const g of groups) {
 						g.tabs = g.tabs.map((tab) => (tab === path ? target : tab));
+						if (g.pinned) g.pinned = g.pinned.map((tab) => (tab === path ? target : tab));
 						if (g.active === path) g.active = target;
 					}
 				}),
@@ -448,7 +478,7 @@ export function fileRemoved(removed: string) {
 			notify(`${baseName(path)} was moved to the trash. Its unsaved edits are still open: save to put the file back.`, "error");
 			continue;
 		}
-		state.groups.forEach((g, i) => g.tabs.includes(path) && void closeTab(path, i, { discard: true }));
+		state.groups.forEach((g, i) => g.tabs.includes(path) && void closeTab(path, i, { discard: true, pinned: true }));
 	}
 }
 

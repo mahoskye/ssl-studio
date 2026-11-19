@@ -11,8 +11,9 @@ import { backend } from "../backend";
 import { ask, choose } from "../dialogs";
 import { activePath, canonical, fileRemoved, fileRenamed, notify, openFile, setState, state } from "../state";
 import { baseName, dirName, isInside, joinPath } from "../../shared/paths";
-import { folderFor, holdsRoot, menuFor, nameProblem, NEW_FILE, NEW_FOLDER, openFolders, RENAME, retarget, TRASH, without } from "./explorerMenu";
+import { COPY_PATH, COPY_RELATIVE, folderFor, holdsRoot, menuFor, nameProblem, NEW_FILE, NEW_FOLDER, openFolders, RENAME, retarget, TRASH, without } from "./explorerMenu";
 import { chooseFromMenu } from "./RowMenu";
+import { showPanel } from "./registry";
 import { followRename } from "../projectDocs";
 import { IconButton, Row, Rows, type Point, type RowsApi } from "./Rows";
 import { recall, remember } from "../graph/canvas";
@@ -190,7 +191,11 @@ async function act(action: string | null, entry: Entry, where: { home?: string; 
 		else if (action === NEW_FOLDER) back = await create(parent, "dir");
 		else if (action === RENAME) back = await rename(entry);
 		else if (action === TRASH) back = await trash(entry);
-		else return;
+		else if (action === COPY_PATH || action === COPY_RELATIVE) {
+			// The commands are loaded when asked for, because commands.ts imports this file.
+			await (await import("../commands")).copyPath(action === COPY_PATH ? "whole" : "relative", entry.path);
+			back = entry.path;
+		} else return;
 	} catch (e) {
 		notify(errorText(e), "error");
 	}
@@ -217,6 +222,23 @@ function target(verb: string): { entry: Entry; where: { home?: string; follow: b
 	else if (path && isInside(root, path)) return { entry: { name: baseName(path), path, kind: "file", size: 0 }, where: { follow: false } };
 	else notify(`Nothing to ${verb}: put the keyboard on a row in the Explorer, or open a file from this folder.`);
 	return null;
+}
+
+/** Shows a file's row in the Explorer, the folders above it opened, and puts the keyboard on it. */
+export function showInExplorer(path: string) {
+	const root = state.workspace?.root;
+	if (!root || !isInside(root, path)) return notify("That file is not in this folder.");
+	const above: string[] = [];
+	for (let dir = dirName(path); dir !== root && isInside(root, dir); dir = dirName(dir)) above.push(dir);
+	setExpanded((set) => new Set([...set, ...above]));
+	showPanel("explorer");
+	// The rows above it are read from the disk as they open: the row is looked for until it is there.
+	let tries = 0;
+	const look = () => {
+		if (document.querySelector(`[data-panel="explorer"] [data-row="${CSS.escape(path)}"]`) || tries++ > 20) return void tree?.focus(path);
+		setTimeout(look, 100);
+	};
+	look();
 }
 
 /** Command palette: a new file beside the focused row (inside it, for a folder), else beside the active file. */
