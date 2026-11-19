@@ -10,7 +10,7 @@ import { fileLinks } from "../shared/docLinks";
 import { frontMatter, many, one, summaryOf, titleOf } from "../shared/frontMatter";
 import { catalogItems, DOC_FOLDERS, isCatalog, isPrompt, STATE_FILE, type DocArea } from "../shared/projectDocs";
 import { taskTally } from "../shared/tasks";
-import type { DocFile, ManifestFile, Project, Settings } from "../shared/protocol";
+import type { DocFile, LinkTo, ManifestFile, Project, Settings } from "../shared/protocol";
 import { workspaceDir } from "./paths";
 import { WorkspaceFiles } from "./workspace";
 
@@ -102,23 +102,64 @@ function described(text: string): Pick<DocFile, "title" | "status" | "summary" |
  * The links of a Markdown document that lead to a file of the project that is
  * not there: a document moved or renamed since the link was written.
  */
+/** The file a link in a document leads to. A path from the top is from the project's top, as a repository's page reads it. */
+const linkTarget = (root: string, path: string, file: string) => (file.startsWith("/") ? join(root, file) : resolve(dirname(path), file));
+
 function brokenLinks(root: string, path: string, text: string, named?: (name: string) => string[]): Pick<DocFile, "broken"> {
 	const broken = fileLinks(text)
 		.filter((link) => {
-			// A path from the top is from the project's top, as a repository's page reads it.
-			const target = link.file.startsWith("/") ? join(root, link.file) : resolve(dirname(path), link.file);
+			const target = linkTarget(root, path, link.file);
 			// What is outside the project is not this project's to say: it may well be there on another machine.
 			const from = relative(root, target);
 			return !from.startsWith("..") && !isAbsolute(from) && !existsSync(target);
 		})
-		.map(({ href, file, line }) => {
+		.map(({ href, file, line, column }) => {
 			// One file of that name elsewhere in the project is where it went, most likely. Two, and it is not ours to pick.
 			// The document itself is not where its own link was meant to lead.
 			const moved = (named?.(basename(file)) ?? []).filter((candidate) => candidate !== path);
 			const instead = moved.length === 1 ? relative(dirname(path), moved[0]!).split(sep).join("/") : "";
-			return { href, line, ...(instead ? { instead } : {}) };
+			return { href, line, column, ...(instead ? { instead } : {}) };
 		});
 	return broken.length ? { broken } : {};
+}
+
+/** A Markdown document larger than this is not read for the links it holds. */
+const LINKED_BYTES = 1024 * 1024;
+/** No more Markdown documents than this are read when asked what links to a file. */
+const LINKING_DOCS = 2000;
+
+/**
+ * The links, in the workspace's Markdown documents, that lead to a file or
+ * to something in a folder: what a rename leaves pointing at the old name.
+ * It asks only where each link leads, not whether anything is there, so it
+ * is as true after the rename as before it.
+ */
+export async function linksTo(files: WorkspaceFiles, target: string): Promise<LinkTo[]> {
+	const root = files.root;
+	// A file system that does not tell case apart names one file either way.
+	const fold = (path: string) => (process.platform === "linux" ? path : path.toLowerCase());
+	const wanted = fold(resolve(target));
+	const found: LinkTo[] = [];
+	let read = 0;
+	for (const path of files.files()) {
+		if (!MARKDOWN.test(path)) continue;
+		if (++read > LINKING_DOCS) break;
+		const file = Bun.file(path);
+		if (file.size > LINKED_BYTES) continue;
+		let text = "";
+		try {
+			text = await file.text();
+		} catch {
+			continue;
+		}
+		if (!text.includes("](") && !text.includes("]:")) continue;
+		for (const link of fileLinks(text)) {
+			if (!link.line) continue;
+			const leads = linkTarget(root, path, link.file);
+			if (fold(leads) === wanted || fold(leads).startsWith(wanted + sep)) found.push({ path, line: link.line, column: link.column, href: link.href, rest: leads.slice(resolve(target).length), fromTop: link.file.startsWith("/") });
+		}
+	}
+	return found;
 }
 
 /** A snippet's title and what it is for: the first two lines of the comment it opens with. */

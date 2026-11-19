@@ -480,6 +480,11 @@ the work comes from ([ADR 0012](adr/0012-a-projects-work-is-written-down.md)).
   link's name is elsewhere in the project, the row offers to point the link
   there: the link's file part is rewritten on its line, and what follows
   "#" is kept.
+- **A rename takes its links along.** Renaming a file or a folder in the
+  Explorer finds the links, in the workspace's Markdown documents, that led
+  to the old name, and offers to point them at the new one. A link is
+  placed only where it is written as a link: the same words in a block or
+  a span of code are an example, and are never edited.
 - **A ticket's key in the prose is a link.** Only the keys of tickets the
   project has; not in code, not in a link someone wrote, not the page's
   own ticket. A key of digits alone is one only as "#12".

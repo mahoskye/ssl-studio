@@ -10,7 +10,7 @@ import { parseCsv } from "../shared/csv";
 import { frontMatter, one, withFrontMatter } from "../shared/frontMatter";
 import { importSummary, ticketsFromJson, ticketsFromTable, type Imported, type ImportedTicket } from "../shared/ticketImport";
 import { manifestSummary, mergeManifest } from "../shared/manifest";
-import { baseName, joinPath, relativePath, relativeTo } from "../shared/paths";
+import { baseName, dirName, joinPath, relativePath, relativeTo } from "../shared/paths";
 import { activeEditor } from "./editor/EditorGroup";
 import {
 	catalogItems,
@@ -35,13 +35,13 @@ import {
 	type DocArea,
 	type KnowledgeKind,
 } from "../shared/projectDocs";
-import type { DocFile } from "../shared/protocol";
+import type { DocFile, LinkTo } from "../shared/protocol";
 import { backend } from "./backend";
 import { ask, choose } from "./dialogs";
 import { createdObjects } from "../shared/outline";
 import { toggleTask } from "../shared/tasks";
 import type { LinkMend } from "../shared/docChecks";
-import { withLinkFile } from "../shared/docLinks";
+import { withLinkFiles, type LinkEdit } from "../shared/docLinks";
 import { parsePlan, isPlanPath } from "./plan/model";
 import { docs, isMarkdown } from "./project";
 import { ticketAtHand as listedTicketAtHand, workFor, workLabel, workText } from "../shared/workContext";
@@ -365,23 +365,61 @@ export async function tickTask(path: string, index: number) {
 export async function mendLinks(path: string, mends: readonly LinkMend[]) {
 	const before = await current(path);
 	if (before === null) return;
-	let after = before;
-	const mended: string[] = [];
-	for (const mend of mends) {
-		const next = withLinkFile(after, mend.line, mend.href, mend.instead);
-		if (next === null) continue;
-		after = next;
-		mended.push(mend.instead);
-	}
+	const { text: after, done } = withLinkFiles(before, mends);
 	// The listing may be older than the text: a link that is no longer where it was is left to the person.
-	if (!mended.length) return notify("The link is not where it was: the document has changed since. Mend it in the text.", "error");
+	if (!done) return notify("The link is not where it was: the document has changed since. Mend it in the text.", "error");
 	try {
 		await put(path, after, true);
 		setState("treeVersion", (v) => v + 1);
-		notify(mended.length === 1 ? `The link now leads to ${mended[0]}.` : `${mended.length} links now lead to where their files are.`);
+		notify(done === 1 && mends.length === 1 ? `The link now leads to ${mends[0]!.instead}.` : `${done} ${done === 1 ? "link now leads" : "links now lead"} to where ${done === 1 ? "its file is" : "their files are"}.`);
 	} catch (e: any) {
 		notify(String(e?.message ?? e), "error");
 	}
+}
+
+/**
+ * After a file or a folder is renamed: the links that led to the old name
+ * are found, and on the person's word pointed at the new one. Each is the
+ * link's file part on its line, through the editor where the document is
+ * open, so it can be undone there.
+ */
+export async function followRename(from: string, to: string) {
+	if (!state.workspace) return;
+	let links: LinkTo[];
+	try {
+		links = await backend.linksTo(from);
+	} catch {
+		return;
+	}
+	if (!links.length) return;
+	const holders = [...new Set(links.map((link) => link.path))];
+	const one = links.length === 1;
+	const where = holders.length === 1 ? relativeTo(root(), holders[0]!) : `${holders.length} documents`;
+	const go = one ? "Point it at the new name" : "Point them at the new name";
+	if ((await choose(`${one ? "A link" : `${links.length} links`} in ${where} ${one ? "leads" : "lead"} to the old name, ${baseName(from)}.`, [go])) !== go) return;
+	let done = 0;
+	for (const path of holders) {
+		const before = await current(path);
+		if (before === null) continue;
+		const edits: LinkEdit[] = links
+			.filter((link) => link.path === path)
+			.map((link) => {
+				const target = `${to}${link.rest}`;
+				// A link written from the project's top stays written from the top.
+				return { line: link.line, column: link.column, href: link.href, instead: link.fromTop ? `/${relativeTo(root(), target)}` : relativePath(dirName(path), target) };
+			});
+		const changed = withLinkFiles(before, edits);
+		if (!changed.done) continue;
+		try {
+			await put(path, changed.text, true);
+			done += changed.done;
+		} catch (e: any) {
+			notify(String(e?.message ?? e), "error");
+		}
+	}
+	setState("treeVersion", (v) => v + 1);
+	if (done) notify(`${done} ${done === 1 ? "link now leads" : "links now lead"} to ${baseName(to)}.`);
+	if (done < links.length) notify(`${links.length - done} of the links ${links.length - done === 1 ? "is" : "are"} not where ${links.length - done === 1 ? "it was" : "they were"}: the document has changed since. Mend ${links.length - done === 1 ? "it" : "them"} in the text.`, "error");
 }
 
 /** Where the project stands, in plain words. */

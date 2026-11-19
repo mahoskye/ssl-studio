@@ -114,6 +114,12 @@ clicks it. Links to the web, and to files outside the project, are not
 checked. Where the project has one file of that name somewhere else, the
 row offers "Mend": the link is pointed there, and Ctrl+Z undoes it.
 
+A file or a folder renamed in the Explorer takes its links along: the IDE
+says how many links, in how many documents, lead to the old name, and on
+your word points them at the new one. A ticket's `specs:` line is not a
+link and is not rewritten; Health says when a spec is not where its ticket
+says.
+
 ## The agent
 
 The agent cannot read the folder, so the IDE sends what bears on the work:

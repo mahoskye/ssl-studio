@@ -7,7 +7,7 @@ import { questionTemplate, specTemplate, ticketTemplate } from "../shared/projec
 import { backend } from "./backend";
 import { showPanel } from "./panels/registry";
 import { docs } from "./project";
-import { setStatus, updateCatalogs } from "./projectDocs";
+import { followRename, setStatus, updateCatalogs } from "./projectDocs";
 import { activePath, canonical, openFile, setState, state } from "./state";
 
 type Steps = Record<string, boolean | string>;
@@ -276,6 +276,17 @@ export function selftestWork(): Promise<Steps> {
 			row?.querySelector<HTMLButtonElement>("button.link")?.click();
 			if (!(await until(() => !checks().some((text) => text.includes("../../specs/Moved.md"))))) return false;
 			return (await backend.read(moved)).text.includes("](../../specs/kept/Moved.md#checks)");
+		});
+		// A file that is renamed takes the links that led to it along, on the person's word.
+		await step("linksFollowRename", async () => {
+			const from = canonical(joinPath(root, ...folder, "specs", "kept", "Moved.md"));
+			const to = canonical(joinPath(root, ...folder, "specs", "kept", "Moved-again.md"));
+			await backend.rename(from, to);
+			const asked = followRename(from, to);
+			const go = await until(() => [...document.querySelectorAll<HTMLButtonElement>(".dialog button")].find((button) => button.textContent?.trim() === "Point it at the new name"));
+			go?.click();
+			await asked;
+			return (await backend.read(moved)).text.includes("](../../specs/kept/Moved-again.md#checks)");
 		});
 		await step("ticketKeyLinked", async () => {
 			await openFile(moved);

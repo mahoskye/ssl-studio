@@ -13,6 +13,7 @@ import { activePath, canonical, fileRemoved, fileRenamed, notify, openFile, setS
 import { baseName, dirName, isInside, joinPath } from "../../shared/paths";
 import { folderFor, holdsRoot, menuFor, nameProblem, NEW_FILE, NEW_FOLDER, openFolders, RENAME, retarget, TRASH, without } from "./explorerMenu";
 import { chooseFromMenu } from "./RowMenu";
+import { followRename } from "../projectDocs";
 import { IconButton, Row, Rows, type Point, type RowsApi } from "./Rows";
 import { recall, remember } from "../graph/canvas";
 
@@ -159,6 +160,8 @@ async function rename(entry: Entry): Promise<string | null> {
 	fileRenamed(entry.path, to);
 	setExpanded((set) => new Set(retarget(set, entry.path, to)));
 	refresh();
+	// Documents that link to the old name are offered the new one. Not waited for: the row is renamed either way.
+	void followRename(entry.path, to);
 	return to;
 }
 

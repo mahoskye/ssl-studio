@@ -1,5 +1,5 @@
 import { CATALOG_FILE } from "./catalog";
-import { linkFile } from "./docLinks";
+import { linkFile, type LinkEdit } from "./docLinks";
 import { DOC_FOLDERS, isCatalog, registryTitle, toneOf, type DocArea } from "./projectDocs";
 import type { DocFile } from "./protocol";
 
@@ -24,9 +24,8 @@ export type DocCheck = {
 	fix?: { kind: "catalogs" } | { kind: "ticket"; key: string; related?: string } | { kind: "links"; mends: LinkMend[] };
 };
 
-/** A link to rewrite: the link as written on that line, and the file to name in its place. */
-export type LinkMend = { line: number; href: string; instead: string;
-};
+/** A link to rewrite: where it is, as written, and the file to name in its place. */
+export type LinkMend = LinkEdit;
 
 const AREAS = Object.keys(DOC_FOLDERS) as DocArea[];
 /** How many of a document's broken links a check names before it counts the rest. */
@@ -74,7 +73,7 @@ export function docChecks(files: readonly DocFile[]): DocCheck[] {
 		const shown = names.slice(0, LINKS_NAMED);
 		const more = names.length - shown.length;
 		// A file of the same name elsewhere in the project is where it went: the link can be pointed there.
-		const mends = file.broken.flatMap((link) => (link.instead && link.line ? [{ line: link.line, href: link.href, instead: link.instead }] : []));
+		const mends = file.broken.flatMap((link) => (link.instead && link.line ? [{ line: link.line, column: link.column, href: link.href, instead: link.instead }] : []));
 		checks.push({
 			level: "warn",
 			text: names.length === 1 ? `${called(file)} links to a file that is not there: ${names[0]}` : `${called(file)} links to ${names.length} files that are not there: ${shown.join(", ")}${more ? ` and ${more} more` : ""}`,

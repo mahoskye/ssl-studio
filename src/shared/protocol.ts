@@ -70,10 +70,17 @@ export type DocFile = {
 	 * `instead` is the one file of that name elsewhere in the project, as a link from this document would name it:
 	 * where the file was moved to, most likely.
 	 */
-	broken?: { href: string; line: number; instead?: string }[];
+	broken?: { href: string; line: number; column: number; instead?: string }[];
 	/** A catalog (INDEX.md): whether its list no longer says what the documents do. */
 	catalog?: { stale: boolean };
 };
+/**
+ * A link in a Markdown document that leads to a file, or into a folder: the
+ * document, the link's line, the link as written, what follows the file or
+ * folder asked about in the path it leads to ("" for the file itself), and
+ * whether it is written from the project's top ("/docs/…").
+ */
+export type LinkTo = { path: string; line: number; column: number; href: string; rest: string; fromTop: boolean };
 /** One file of the project, for the file manifest. */
 export type ManifestFile = { path: string; kind: string; bytes: number; lines: number; sha256: string };
 
@@ -186,6 +193,8 @@ export interface BackendApi {
 	manifest(): Promise<ManifestFile[]>;
 	/** The first thing that keeps a text from being TOML, and where (from 1); null when it reads. */
 	tomlProblem(text: string): Promise<{ message: string; line: number; column: number } | null>;
+	/** The links in the workspace's Markdown documents that lead to this file, or into this folder. */
+	linksTo(path: string): Promise<LinkTo[]>;
 	settings(): Promise<{ effective: Settings; user: Partial<Settings>; workspace: Partial<Settings> }>;
 	saveSettings(scope: SettingsScope, patch: SettingsPatch): Promise<Settings>;
 	themes(): Promise<ThemeFile[]>;

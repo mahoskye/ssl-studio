@@ -54,7 +54,7 @@ function markerAt(text: string, marker: string, from = 0): number {
 }
 
 /** The stretches of a Markdown text that are inside a code fence, each from its opening line to the end of its closing one. */
-function fenced(text: string): [number, number][] {
+export function fenced(text: string): [number, number][] {
 	const ranges: [number, number][] = [];
 	let open = "";
 	let from = 0;
