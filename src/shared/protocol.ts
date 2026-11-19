@@ -3,6 +3,7 @@
 // in the browser host (src/bun/web.ts); src/bun/backend.ts implements it.
 
 import type { SearchOptions } from "./searchPattern";
+import type { GitStatus } from "./gitStatus";
 
 export type Entry = { name: string; path: string; kind: "file" | "dir"; size: number };
 
@@ -189,6 +190,20 @@ export interface BackendApi {
 	write(path: string, text: string, asText?: boolean): Promise<{ mtime: number }>;
 	create(path: string, kind: "file" | "dir"): Promise<void>;
 	rename(from: string, to: string): Promise<void>;
+	/** What git says has changed in the workspace, each file by its whole path. Null when it is not in a repository, or there is no git. */
+	gitStatus(): Promise<GitStatus | null>;
+	/** A file's text in the last commit ("head") or as it is staged ("index"); null when it was not there, or was not text. */
+	gitBase(path: string, from: "head" | "index"): Promise<string | null>;
+	/** Puts files into the next commit as they are now; takes them out of it again. */
+	gitStage(paths: string[]): Promise<void>;
+	gitUnstage(paths: string[]): Promise<void>;
+	/** Commits what is staged. Says what git said of it, in a line. */
+	gitCommit(message: string): Promise<string>;
+	/**
+	 * Lets a file's changes that are not staged go: a followed file goes back to what git has of it, and a file git
+	 * does not follow goes to the trash. The file as it was is kept in its local history first.
+	 */
+	gitDiscard(path: string): Promise<void>;
 	/** A picture's bytes, for showing it: its kind ("image/png") and the bytes in base64. */
 	image(path: string): Promise<{ type: string; base64: string }>;
 	/** Copies a file, or a folder and everything in it, to a path nothing is at yet. */

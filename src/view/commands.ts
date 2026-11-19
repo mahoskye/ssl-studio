@@ -160,6 +160,7 @@ export const commands: Command[] = [
 	{ id: "reference", label: "Show Reference", detail: "Built-in functions, classes and keywords", run: () => showPanel("reference") },
 	{ id: "search", label: "Show Search", run: () => showPanel("search") },
 	{ id: "replace-in-files", label: "Replace in files…", detail: "In Search: what would change is shown first, and nothing is written until it is confirmed", run: () => void import("./panels/Search").then((search) => search.showReplace()) },
+	{ id: "git", label: "Show Source control", detail: "What has changed since the last commit, and the next commit", run: () => showPanel("git") },
 	{ id: "history", label: "Show Local history", run: () => showPanel("history") },
 	{ id: "health", label: "Show Health", detail: "The script against the house style", run: () => showPanel("health") },
 	{ id: "agent", label: "Show Agent", run: () => showPanel("agent") },

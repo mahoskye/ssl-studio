@@ -9,6 +9,7 @@ import { EXPORT_TYPES, fileManifest, linksTo, listDocs, readExport, readProject,
 import { recent, SettingsStore } from "./settings";
 import { findLsp, findOpencode } from "./tools";
 import { WorkspaceFiles } from "./workspace";
+import { Git } from "./git";
 import { Agent } from "./agent";
 
 export type Host = {
@@ -104,6 +105,25 @@ export function createBackend(host: Host, initial?: string) {
 		rename: async (from, to) => need().rename(from, to),
 		copy: async (from, to) => need().copy(from, to),
 		image: (path) => need().image(path),
+		gitStatus: async () => (files ? new Git(files.root).status() : null),
+		gitBase: (path, from) => new Git(need().root).base(need().inside(path), from),
+		gitStage: (paths) => new Git(need().root).stage(paths.map((path) => need().inside(path))),
+		gitUnstage: (paths) => new Git(need().root).unstage(paths.map((path) => need().inside(path))),
+		gitCommit: (message) => new Git(need().root).commit(message),
+		gitDiscard: async (path) => {
+			const full = need().inside(path);
+			const git = new Git(need().root);
+			// What is about to go is kept first, where it is text: a discard by mistake has a way back.
+			try {
+				const now = await need().read(full);
+				if (!now.binary) await history!.record(full, now.text);
+			} catch {
+				// Not there to read (it was removed): there is nothing of it to keep.
+			}
+			// A file git does not follow has nothing to go back to: it goes to the trash, not out of existence.
+			if (await git.follows(full)) await git.discard(full);
+			else await host.trash(full);
+		},
 		trash: async (path) => host.trash(need().inside(path)),
 		search: (query, options) => need().search(query, options),
 		replace: async (query, replacement, options, paths) => {

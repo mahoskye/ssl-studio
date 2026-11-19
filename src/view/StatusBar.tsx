@@ -13,6 +13,7 @@ import { languageName } from "./editor/languages";
 import { encodingName, eolName } from "../shared/fileKind";
 import { baseName } from "../shared/paths";
 import { chooseFromMenu } from "./panels/RowMenu";
+import { branchText, changedCount, gitStatus } from "./git";
 import { activeDoc, activePath, notify, setState, state } from "./state";
 
 const [size, setSize] = createSignal<SizeReport | null>(null);
@@ -127,6 +128,22 @@ export function StatusBar() {
 					{" ⟳"}
 				</span>
 			</button>
+			<Show when={gitStatus()}>
+				<button
+					class="item git-item"
+					title={`On the branch ${branchText()}${changedCount() ? `; ${changedCount()} ${changedCount() === 1 ? "file has" : "files have"} changed since the last commit` : "; nothing has changed since the last commit"}. Show Source control.`}
+					aria-label={`Branch ${branchText()}, ${changedCount()} changed ${changedCount() === 1 ? "file" : "files"}. Show Source control.`}
+					onClick={() => showPanel("git")}
+				>
+					<span class="codicon-glyph" aria-hidden="true">
+						{"\uec6f"}
+					</span>
+					{branchText()}
+					<Show when={changedCount()}>
+						<span class="git-count">{changedCount()}</span>
+					</Show>
+				</button>
+			</Show>
 			<Show
 				when={opencode()?.ok}
 				fallback={

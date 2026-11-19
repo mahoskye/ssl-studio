@@ -28,6 +28,11 @@ export type Review = {
 	effect?: string;
 	/** Why this cannot be accepted as it stands: a check it must pass has failed. */
 	blocked?: string;
+	/**
+	 * Two texts to look at side by side, with nothing to accept: a file against what git has of it. The names of the
+	 * two sides. Neither side can be edited, and the one button closes.
+	 */
+	compare?: { left: string; right: string };
 	/** May fail: the review then stays open and shows the error. */
 	onAccept: (text: string) => void | Promise<void>;
 	onReject?: () => void | Promise<void>;
@@ -49,8 +54,14 @@ const flow = reviewFlow<Review>({
  * rejects the open one (its `onReject` runs). Resolves false when the user kept
  * the open one, so this one was not shown.
  */
-export const openReview = (r: Review): Promise<boolean> => flow.open(r);
+export const openReview = (r: Review): Promise<boolean> => {
+	// A comparison holds nothing that could be lost: the next thing to look at takes its place without a question.
+	if (untrack(review)?.compare) setReview(null);
+	return flow.open(r);
+};
 export const closeReview = () => setReview(null);
+/** A comparison gives way to a file that is opened: it holds nothing to lose, and would otherwise stand in front of the file. */
+export const closeComparison = () => void (untrack(review)?.compare && setReview(null));
 
 export function ReviewView() {
 	let root!: HTMLDivElement;
@@ -70,7 +81,7 @@ export function ReviewView() {
 	onMount(() => {
 		const original = monaco.editor.createModel(r.original, r.language);
 		const proposed = (proposedModel = monaco.editor.createModel(r.proposed, r.language));
-		const diff = (editor = monaco.editor.createDiffEditor(host, { automaticLayout: true, renderSideBySide: true, originalEditable: false, readOnly: false, fontSize: state.settings.fontSize }));
+		const diff = (editor = monaco.editor.createDiffEditor(host, { automaticLayout: true, renderSideBySide: true, originalEditable: false, readOnly: Boolean(r.compare), fontSize: state.settings.fontSize }));
 		diff.setModel({ original, modified: proposed });
 		// How large the change is, kept up to date as the right side is edited.
 		const sized = diff.onDidUpdateDiff(() => setSize(changeSize(diff.getLineChanges())));
@@ -124,17 +135,24 @@ export function ReviewView() {
 							</span>
 						</Show>
 					</div>
-					<p class="review-effect">
-						{effect} Reject (Esc) changes nothing.
-					</p>
+					<p class="review-effect">{r.compare ? (r.effect ?? "The two are shown side by side. Nothing here changes either.") : `${effect} Reject (Esc) changes nothing.`}</p>
 				</div>
 				<div class="review-actions">
-					<button class="primary" disabled={Boolean(r.blocked) || busy()} title={r.blocked ?? (busy() ? "Accepting…" : effect)} onClick={() => void accept()}>
-						{label}
-					</button>
-					<button disabled={busy()} title={busy() ? "Wait for the accept to finish." : "Reject: close this review and change nothing (Esc)"} onClick={reject}>
-						Reject
-					</button>
+					<Show
+						when={!r.compare}
+						fallback={
+							<button class="primary" title="Close this comparison (Esc)" onClick={reject}>
+								Close
+							</button>
+						}
+					>
+						<button class="primary" disabled={Boolean(r.blocked) || busy()} title={r.blocked ?? (busy() ? "Accepting…" : effect)} onClick={() => void accept()}>
+							{label}
+						</button>
+						<button disabled={busy()} title={busy() ? "Wait for the accept to finish." : "Reject: close this review and change nothing (Esc)"} onClick={reject}>
+							Reject
+						</button>
+					</Show>
 				</div>
 			</div>
 			<Show when={error()}>
@@ -168,9 +186,9 @@ export function ReviewView() {
 			</Show>
 			{/* What each side is, over it: the two halves are the diff's own. */}
 			<div class="diff-sides" aria-hidden="true">
-				<span>Now</span>
+				<span>{r.compare?.left ?? "Now"}</span>
 				<span>
-					Proposed <span class="hint">you can edit this side</span>
+					{r.compare?.right ?? "Proposed"} <Show when={!r.compare}><span class="hint">you can edit this side</span></Show>
 					<span class="diff-size">{size()}</span>
 				</span>
 			</div>

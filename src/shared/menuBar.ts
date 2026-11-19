@@ -106,6 +106,7 @@ export const MENU_BAR: BarMenu[] = [
 			forFolder("Objects", "objects"),
 			forFolder("Palette", "palette"),
 			forFolder("Reference", "reference"),
+			forFolder("Source control", "git"),
 			forFolder("Local history", "history"),
 			forFolder("Health", "health"),
 			forFolder("Agent", "agent"),

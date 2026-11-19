@@ -9,6 +9,8 @@ import { commands, keysFor } from "./commands";
 import { clampScale } from "./uiScale";
 import { Explorer } from "./panels/Explorer";
 import { History } from "./panels/History";
+import { GitPanel } from "./panels/Git";
+import { useGit } from "./git";
 import { Objects, useSymbols } from "./panels/Objects";
 import { Output, Problems, counts } from "./panels/Problems";
 import { Search } from "./panels/Search";
@@ -125,6 +127,9 @@ function Panel(props: { id: PanelId }) {
 			<Match when={props.id === "search"}>
 				<Search />
 			</Match>
+			<Match when={props.id === "git"}>
+				<GitPanel />
+			</Match>
 			<Match when={props.id === "history"}>
 				<History />
 			</Match>
@@ -166,6 +171,7 @@ export function App() {
 	useSymbols();
 	useProject();
 	useNavigation();
+	useGit();
 	useLayoutPersistence();
 	createEffect(() => {
 		if (state.settings.layout.right && sideOf(state.rightView) === "left") setState("settings", "layout", "right", false);

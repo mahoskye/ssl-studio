@@ -161,16 +161,19 @@ of the text editor, and nothing of its own.
 
 ## Source control
 
-Nothing in the app runs git. Every row was seen as missing.
+The app asks the user's own git, for what stays on this machine: what has
+changed, a file as it was, and the steps of a commit. Nothing here
+fetches, pulls or pushes
+([ADR 0022](adr/0022-source-control-is-the-users-own-git-and-stays-on-this-machine.md)).
 
 | Feature | Here | Verdict | Note |
 | --- | --- | --- | --- |
-| Branch in status bar | No | Bring | Which branch, and whether anything has changed |
-| Changes list | No | Bring | What is changed, new and removed since the last commit |
-| Diff a change | No | Bring | The Review view can show it |
-| Stage and commit | No | Bring | With a message box |
-| Discard a change | No | Bring | It asks first: the work is lost |
-| Gutter marks | No | Bring | Added, changed and removed lines beside the code |
+| Branch in status bar | Yes | Bring | Built: the branch, how far it is from the one it follows, and how many files changed |
+| Changes list | Yes | Bring | Built: a panel of what is staged and what is not, each with a letter for how it changed |
+| Diff a change | Yes | Bring | Built: a row opens the file beside what git has of it, to look at and not to edit |
+| Stage and commit | Yes | Bring | Built: stage and unstage one file or all, a message box, Commit (Ctrl+Enter) |
+| Discard a change | Yes | Bring | Built: it asks first, and the file as it was goes into local history |
+| Gutter marks | Yes | Bring | Built: new, changed and removed lines in the margin, against what is staged |
 | Explorer colours | No | Later | Changed and new files tinted; cheap once the list exists |
 | Switch branch | No | Later | After commit works well |
 | Push and pull | No | Later | They reach a remote; after commit works well |
@@ -444,12 +447,42 @@ back, the second time with one of the files holding unsaved changes.
 
 | Feature | Size | Done | What it takes |
 | --- | --- | --- | --- |
-| Branch in status bar | Small | No | The branch, and how many files have changed |
-| Changes list | Large | No | A panel: changed, new and removed files, staged and not |
-| Diff a change | Medium | No | A file against its last commit, in the Review view |
-| Stage and commit | Medium | No | Stage, unstage, a message, commit |
-| Discard a change | Small | No | Back to the last commit, after asking |
-| Gutter marks | Medium | No | Added, changed and removed lines in the editor's margin |
+| Branch in status bar | Small | Yes | The branch, and how many files have changed |
+| Changes list | Large | Yes | A panel: changed, new and removed files, staged and not |
+| Diff a change | Medium | Yes | A file against its last commit, in the Review view |
+| Stage and commit | Medium | Yes | Stage, unstage, a message, commit |
+| Discard a change | Small | Yes | Back to the last commit, after asking |
+| Gutter marks | Medium | Yes | Added, changed and removed lines in the editor's margin |
+
+The backend runs the git that is on the machine; no library was added.
+A commit is made by git itself, so it carries the user's own name and
+runs whatever checks their repository runs; when git refuses, its words
+are shown. The status is asked again when a file is saved or changes on
+disk, and when the window is come back to (a commit made in a terminal
+is not heard of otherwise).
+
+Discarding lets go only what is not staged. A file git follows goes back
+to what git has of it; a file git does not follow has nothing to go back
+to, and goes to the trash. Either way the file as it was is kept in its
+local history first, and the question's safe answer is the default.
+
+The margin compares the text in the editor with what is staged, so
+staging a change clears its marks. A new line is a solid bar, a changed
+line a broken one, and a place where lines went a short stroke: the kinds
+differ by shape, not by colour alone.
+
+Not built, and listed above as Later: switching branches, push and pull,
+colours in the Explorer, blame. Not built at all: starting a repository,
+amending a commit, staging part of a file, stashes, and settling a
+conflict (a file in conflict is listed, and a commit is refused until it
+is settled elsewhere).
+
+Looked at: the dark theme at 1440 wide and the light theme at 720 wide,
+in a copy of the demo made a repository for the purpose: seven changes
+listed, one compared, one staged from its row's menu, a commit made, one
+change discarded, and the margin marks before and after. Not seen: the
+panel in the app's own window, a repository whose top folder is above
+the workspace's (tested in the backend only), and git on Windows.
 
 ## Why not an extension
 

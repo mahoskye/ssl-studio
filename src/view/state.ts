@@ -10,7 +10,7 @@ import { languageFor } from "./editor/languages";
 import { session } from "./lsp/session";
 import { changedRanges, minimalReplace } from "./lsp/edits";
 import { choose } from "./dialogs";
-import { openReview } from "./editor/Review";
+import { closeComparison, openReview } from "./editor/Review";
 import { baseName, isInside, plainFileError } from "../shared/paths";
 import { lineEnds } from "../shared/fileKind";
 import { isPlanPath } from "./plan/model";
@@ -21,7 +21,7 @@ import { packTabs, packViews, tabsKey, unpackTabs, unpackViews, viewsKey } from 
 import { movedAcross, othersOf, placed, rightOf, withPin } from "../shared/tabOrder";
 
 export type Group = { tabs: string[]; active: string | null; mode?: "text" | "blocks"; /** The tabs that stay: first in the row, and not closed with the others. */ pinned?: string[] };
-export type PanelId = "explorer" | "objects" | "palette" | "reference" | "search" | "history" | "health" | "agent" | "docs";
+export type PanelId = "explorer" | "objects" | "palette" | "reference" | "search" | "history" | "health" | "agent" | "docs" | "git";
 /** @deprecated names kept for readers: both sides hold any panel. */
 export type LeftView = PanelId;
 export type RightView = PanelId;
@@ -188,7 +188,7 @@ export function rememberTabs() {
 }
 
 /** The side panels there are, and the bottom ones: what a kept choice must be one of. */
-const LEFT_VIEWS: readonly PanelId[] = ["explorer", "objects", "palette", "reference", "search", "history", "health", "agent", "docs"];
+const LEFT_VIEWS: readonly PanelId[] = ["explorer", "objects", "palette", "reference", "search", "history", "health", "agent", "docs", "git"];
 const BOTTOM_VIEWS: readonly BottomView[] = ["problems", "output"];
 
 /** Keeps which side panel and which bottom panel are showing in this folder, for the next time it is opened. */
@@ -325,6 +325,7 @@ export async function openFile(path: string, options: { group?: number; reveal?:
 	if (!doc) return;
 	const group = options.group ?? state.activeGroup;
 	if (options.reveal) pendingReveal.set(path, options.reveal);
+	closeComparison();
 	batch(() => {
 		setState(
 			"groups",

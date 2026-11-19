@@ -129,6 +129,31 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .bottom-tabs button.active { color: var(--fg); box-shadow: inset 0 -1px 0 var(--accent); }
 .count { background: var(--selected); border-radius: var(--radius-lg); padding: 0 var(--space-3); margin-left: var(--space-2); }
 
+/* In the editor's margin: lines that differ from what git has. New is a solid bar, changed a broken one (not colour alone), and a place where lines went a short stroke at the edge they went from. */
+.monaco-editor .git-mark { width: 3px !important; margin-left: 4px; }
+.monaco-editor .git-mark.added { background: var(--ok); }
+.monaco-editor .git-mark.modified { background: repeating-linear-gradient(to bottom, var(--info) 0 4px, transparent 4px 6px); }
+.monaco-editor .git-mark.removed { width: 7px !important; box-shadow: inset 0 -3px 0 var(--error); }
+.monaco-editor .git-mark.removed-above { width: 7px !important; box-shadow: inset 0 3px 0 var(--error); }
+
+/* Source control: the commit's box, and each changed file with a letter for how it changed. */
+.git-branch { margin-bottom: var(--space-3); }
+.git-commit { display: flex; flex-direction: column; gap: var(--space-3); margin: 0 var(--space-4) var(--space-4); }
+.git-commit textarea { font: inherit; resize: vertical; min-height: calc(56px * var(--ui-scale)); background: var(--input-bg); color: var(--input-fg); border: 1px solid var(--input-border); border-radius: var(--radius-sm); padding: var(--space-2) var(--space-3); }
+.git-commit button { align-self: flex-start; }
+.git-head { display: flex; align-items: center; gap: var(--space-3); }
+.git-head .label { flex: 1; }
+.git-row .git-folder { margin-left: var(--space-4); color: var(--muted); font-size: var(--text-sm); }
+.git-row .label.gone { text-decoration: line-through; }
+/* The letter says how the file changed; its colour only repeats it. */
+.git-letter { flex: none; width: calc(16px * var(--ui-scale)); text-align: center; font-family: ui-monospace, Menlo, monospace; font-size: var(--text-md); color: var(--muted); }
+.git-letter.modified, .git-letter.renamed { color: var(--info); }
+.git-letter.added, .git-letter.untracked { color: var(--ok); }
+.git-letter.deleted, .git-letter.conflict { color: var(--error); }
+.statusbar .git-item { display: inline-flex; align-items: center; gap: var(--space-2); }
+.statusbar .git-item .codicon-glyph { font: normal var(--text-md)/1 codicon; }
+.statusbar .git-count { background: var(--selected); border-radius: var(--radius-lg); padding: 0 var(--space-3); }
+
 /* A file that is not text, where the editor would be: a picture on a ground that shows what of it is clear, or a note. */
 .file-view { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--space-5); padding: var(--space-7); overflow: auto; background: var(--editor-bg, var(--bg)); }
 .file-view:focus-visible { outline-offset: -2px; }

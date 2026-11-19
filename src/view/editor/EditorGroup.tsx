@@ -20,6 +20,7 @@ import { isMarkdown, isTable } from "../project";
 import { MarkdownView } from "./MarkdownView";
 import { TableView } from "./TableView";
 import { FileView } from "./FileView";
+import { useGitMarks } from "./gitMarks";
 import { Start } from "../Start";
 import { FileMark } from "../FileMark";
 import { getPath, SERVER_DEFAULTS } from "../../shared/styleProfile";
@@ -109,6 +110,7 @@ export function EditorGroup(props: { index: number }) {
 		).entries()) {
 			editor.addAction({ id: `app.${id}`, label, contextMenuGroupId: "9_app", contextMenuOrder: order, run: () => void import("../commands").then((all) => all.runCommand(id)) });
 		}
+		useGitMarks(editor, () => group().active);
 		setRoomy(editor.getLayoutInfo().width >= MINIMAP_FROM);
 		editor.onDidLayoutChange((layout) => setRoomy(layout.width >= MINIMAP_FROM));
 		editor.onDidFocusEditorText(() => setState("activeGroup", props.index));
