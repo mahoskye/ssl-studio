@@ -16,9 +16,10 @@ export function ask(title: string, value = ""): Promise<string | null> {
 /**
  * Asks for one of `buttons`; "Cancel" is always offered too and gives null.
  * Enter presses the first button, unless it is the one named in `danger`:
- * a choice that cannot be undone is never the default, and Cancel is.
+ * a choice that cannot be undone is never the default, and Cancel is. With
+ * `details`, a line saying what each button is, the buttons are a list.
  */
-export function choose(title: string, buttons: string[], options: { danger?: string } = {}): Promise<string | null> {
+export function choose(title: string, buttons: string[], options: { danger?: string; details?: Record<string, string> } = {}): Promise<string | null> {
 	return queue.choose(title, buttons, options);
 }
 
@@ -52,7 +53,7 @@ function Dialog(props: { request: Request }) {
 					<input id={inputId} ref={input} value={request.value ?? ""} data-autofocus="select" autocomplete="off" spellcheck={false} />
 				</label>
 			</Show>
-			<div class="buttons">
+			<div class="buttons" classList={{ list: Boolean(request.details) }}>
 				<For each={request.buttons}>
 					{(button) => (
 						<button
@@ -62,6 +63,9 @@ function Dialog(props: { request: Request }) {
 							onClick={() => button !== enter && finish(button)}
 						>
 							{button}
+							<Show when={request.details?.[button]}>
+								<span class="detail">{request.details![button]}</span>
+							</Show>
 						</button>
 					)}
 				</For>

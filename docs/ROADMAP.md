@@ -483,6 +483,19 @@ the work comes from ([ADR 0012](adr/0012-a-projects-work-is-written-down.md)).
   else. People are left out
   ([ADR 0014](adr/0014-tickets-come-in-from-an-export.md)). Tried with
   invented exports; not with one from a real ticket system.
+- **Kept snippets are in the Palette,** under "Kept in this project": one
+  is inserted at the cursor as it is written, copied, or opened to change.
+- **A ticket shows its plans** as well as its specs, since a plan names its
+  ticket.
+- **Health shows how far each registry is,** a bar for each. Four more
+  registries are offered beside settings, files and database objects:
+  interfaces, scheduled jobs, reports and labels, roles and access. The
+  list to choose from says what each is.
+- **JSON that cannot be read says where,** in Problems and under the place:
+  a trailing comma, a missing colon, a comment. A plan that cannot be read
+  is marked at the place, not at its first line.
+- **CSV columns keep their colour down the file.** They drifted from line to
+  line: a line's end did not give the turn back to the first column.
 - **From looking at it:** in a narrow Docs panel a state is a dot in its
   tone, so the title has the room; a new document's opening prompt is not
   listed as its summary; a date is the day it is here, not in UTC; and a

@@ -109,6 +109,8 @@ function Work(props: { files: DocFile[]; empty?: string }) {
 	const rel = (path: string) => relativeTo(state.workspace?.root, path).split("\\").join("/");
 	const specsOf = (ticket: DocFile) => specs().filter((spec) => spec.tickets?.some((key) => key.toLowerCase() === ticket.ticket?.toLowerCase()) || ticket.specs?.some((path) => path === rel(spec.path)));
 	const loose = () => specs().filter((spec) => !tickets().some((ticket) => specsOf(ticket).includes(spec)));
+	/** The plans drawn for a ticket: a plan names its ticket (ADR 0013). */
+	const plansOf = (ticket: DocFile) => props.files.filter((d) => d.group === "plans" && d.tickets?.some((key) => key.toLowerCase() === ticket.ticket?.toLowerCase()));
 	const catalogs = () => props.files.filter((d) => (d.group === "tickets" || d.group === "specs") && isCatalog(d));
 	return (
 		<RowGroup head={<Head title="Work" folder={`${state.project?.docs}/${DOC_FOLDERS.tickets}`} />} rows={props.files.some((d) => d.group === "tickets" || d.group === "specs")} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
@@ -116,7 +118,8 @@ function Work(props: { files: DocFile[]; empty?: string }) {
 				{(ticket) => (
 					<>
 						<ItemRow file={ticket} lead={ticket.ticket} />
-						<For each={specsOf(ticket)}>{(spec) => <ItemRow file={spec} depth={1} note="spec" aside />}</For>
+						<For each={plansOf(ticket)}>{(plan) => <ItemRow file={{ ...plan, title: plan.name.replace(/\.plan\.json$/i, "") }} depth={1} note="plan" />}</For>
+						<For each={specsOf(ticket)}>{(spec) => <ItemRow file={spec} depth={1} note="spec" />}</For>
 					</>
 				)}
 			</For>

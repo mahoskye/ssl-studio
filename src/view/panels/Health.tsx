@@ -14,6 +14,7 @@ import { serverDown } from "./server";
 import { openStyleProfile } from "../StyleProfile";
 import { docs, setUpProject } from "../project";
 import { checksSummary, docChecks, type DocCheck } from "../../shared/docChecks";
+import { isCatalog, registryTitle, toneOf } from "../../shared/projectDocs";
 import { newTicket, updateCatalogs } from "../projectDocs";
 
 const PROCEDURE = new Set([monaco.languages.SymbolKind.Function, monaco.languages.SymbolKind.Method]);
@@ -63,6 +64,16 @@ export function Health() {
 	/** What the tickets, specs, knowledge base and registries need from someone. */
 	const checks = () => docChecks(docs());
 	const hasWork = () => docs().some((d) => d.exists && (d.group === "tickets" || d.group === "specs" || d.group === "knowledge" || d.group === "registries"));
+	/** Each registry with how many of its rows are done: how far a migration has come, list by list. */
+	const registries = () =>
+		docs()
+			.filter((d) => d.exists && d.group === "registries" && !isCatalog(d) && d.rows !== undefined)
+			.map((d) => {
+				const total = d.tally?.total ?? d.rows ?? 0;
+				const done = d.tally ? d.tally.by.filter(([status]) => toneOf(status) === "done").reduce((n, [, count]) => n + count, 0) : 0;
+				const left = d.tally ? d.tally.by.filter(([status]) => toneOf(status) !== "done").map(([status, count]) => `${count} ${status || "with no status"}`) : [];
+				return { file: d, title: registryTitle(d.name), total, done, counted: Boolean(d.tally), left };
+			});
 	const fixLabel = (check: DocCheck) => (check.fix?.kind === "catalogs" ? "Update" : "Start it");
 	const fixTitle = (check: DocCheck) => (check.fix?.kind === "catalogs" ? "Write every catalog afresh from the documents in its folder" : check.fix?.kind === "ticket" ? `Start ${check.fix.key} as a ticket of its own` : "");
 	const fix = (check: DocCheck) => (check.fix?.kind === "catalogs" ? void updateCatalogs() : check.fix?.kind === "ticket" ? void newTicket(check.fix.key, check.fix.related) : undefined);
@@ -117,6 +128,32 @@ export function Health() {
 							</For>
 						</Rows>
 					</Show>
+				</section>
+			</Show>
+			<Show when={registries().length}>
+				<section>
+					<h3 title="Each registry under the docs folder, with how many of its rows are done: verified, migrated, or another word that comes to finished">Registries</h3>
+					<Rows class="health-rows" role="listbox" label="How far each registry has come">
+						<For each={registries()}>
+							{(r) => (
+								<Row
+									class="meter-row sized clickable"
+									key={r.file.path}
+									label={r.title}
+									title={r.counted ? `${r.title}: ${r.done} of ${r.total} done.${r.left.length ? ` Left: ${r.left.join(", ")}.` : ""} Click it, or press Enter on it, to open it.` : `${r.title}: ${count(r.total, "row")}. It has no status column, so how far it is cannot be told.`}
+									onActivate={() => void openFile(r.file.path)}
+								>
+									<span class="label">{r.title}</span>
+									<span class="meta">{r.counted ? `${r.done} of ${r.total}` : count(r.total, "row")}</span>
+									<Show when={r.counted}>
+										<span class="bar" aria-hidden="true">
+											<span class="fill" style={{ display: "block", width: `${r.total ? Math.round((r.done / r.total) * 100) : 0}%` }} />
+										</span>
+									</Show>
+								</Row>
+							)}
+						</For>
+					</Rows>
 				</section>
 			</Show>
 			<Show when={activePath() && size()} fallback={<p class="hint">Open an SSL file to see its size, procedures and findings.</p>}>

@@ -3,6 +3,7 @@
 // answers whether a call node's target exists; if it cannot be asked, that one
 // check waits rather than reporting everything as missing. Once built, the drift
 // between chart and code is reported the same way, and re-read as scripts change.
+import { jsonProblem } from "../../shared/jsonCheck";
 import { monaco } from "../editor/monaco";
 import { publishFindings, session } from "../lsp/session";
 import { builtOf, driftFindings } from "./built";
@@ -42,7 +43,11 @@ export function trackPlan(model: monaco.editor.ITextModel) {
 		const text = model.getValue();
 		const parsed = parsePlan(text);
 		if (parsed.error !== undefined) {
-			publishFindings(model, OWNER, [{ line: 1, column: 1, endLine: 1, endColumn: 2, severity: 1, message: parsed.error, code: "plan-unreadable", source: "plan" }]);
+			// Where the text stops being JSON, when that is what is wrong: the place itself is marked, not the first line.
+			const json = jsonProblem(text);
+			const from = json ? model.getPositionAt(json.offset) : { lineNumber: 1, column: 1 };
+			const to = json ? model.getPositionAt(json.offset + json.length) : { lineNumber: 1, column: 2 };
+			publishFindings(model, OWNER, [{ line: from.lineNumber, column: from.column, endLine: to.lineNumber, endColumn: to.column, severity: 1, message: json ? `This plan cannot be read. ${json.message}` : parsed.error, code: "plan-unreadable", source: "plan" }]);
 			return;
 		}
 		const plan = parsed.plan;

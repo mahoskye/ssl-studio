@@ -492,3 +492,67 @@ describe("tickets from a ticket system's export", () => {
 		expect(importSummary({ made: 0, updated: 0, same: 0, skipped: 0 })).toBe("No tickets there.");
 	});
 });
+
+import { jsonProblem } from "../src/shared/jsonCheck";
+
+describe("a JSON document that cannot be read", () => {
+	const at = (text: string) => {
+		const problem = jsonProblem(text);
+		return problem && [text.slice(problem.offset, problem.offset + problem.length), problem.message];
+	};
+
+	test("what JSON.parse reads has nothing wrong with it, and an empty document is not yet a problem", () => {
+		for (const text of ['{"a": [1, -2.5e3, true, null, "x\\n\\u00e9"], "b": {}}', "[]", ' "alone" ', "0", '{"a":{"b":[{"c":[]}]}}']) {
+			expect(() => JSON.parse(text)).not.toThrow();
+			expect(jsonProblem(text)).toBeNull();
+		}
+		expect(jsonProblem("")).toBeNull();
+		expect(jsonProblem("  \n")).toBeNull();
+	});
+
+	test("the first thing wrong is said, where it is", () => {
+		expect(at('{"a": 1,}')).toEqual(["}", "A comma is followed by another name, not by }."]);
+		expect(at("[1, 2,]")).toEqual(["]", "A comma is followed by another value, not by ]."]);
+		expect(at('{"a" 1}')).toEqual(["1", "A colon is expected after the name."]);
+		expect(at('{"a": 1 "b": 2}')).toEqual(['"', "A comma or } is expected here."]);
+		expect(at("{a: 1}")).toEqual(["a", "A name in double quotes is expected here."]);
+		expect(at("{'a': 1}")).toEqual(["'", "A name is written in double quotes."]);
+		expect(at('{"a": yes}')).toEqual(["yes", "yes is not a value: a string is in double quotes, and the only bare words are true, false and null."]);
+		expect(at('{"a": 01}')).toEqual(["01", "01 is not a number as JSON writes one."]);
+		expect(at('{"a": "x\ny"}')?.[1]).toBe("This string is not closed before the line ends.");
+		expect(at('// note\n{"a": 1}')).toEqual(["//", "JSON has no comments."]);
+		expect(at('{"a": [1, 2')).toEqual(["[", "This [ is never closed."]);
+		expect(at('{"a": 1} {"b": 2}')?.[1]).toBe("The document ends here: there is more after its one value.");
+		expect(at('{"a": "\\q"}')).toEqual(["\\q", "\\q is not an escape JSON knows."]);
+	});
+
+	test("it agrees with JSON.parse on whether a document can be read", () => {
+		for (const text of ['{"a":}', "[,]", '{"a":1,,"b":2}', "nul", '"', "{", "]", '{"a":1}}', "1 2", "-", "1.", '{"\\u12G4":1}', "\t1\t", '["a\tb"]']) {
+			let reads = true;
+			try {
+				JSON.parse(text);
+			} catch {
+				reads = false;
+			}
+			expect([text, jsonProblem(text) === null]).toEqual([text, reads]);
+		}
+	});
+});
+
+import { REGISTRIES } from "../src/shared/projectDocs";
+
+describe("the registries a project is offered", () => {
+	test("each has a file of its own, columns, and a status to say how far a row has come", () => {
+		expect(new Set(REGISTRIES.map((r) => r.file)).size).toBe(REGISTRIES.length);
+		expect(REGISTRIES.map((r) => r.id)).toEqual(["settings", "files", "database", "interfaces", "jobs", "reports", "roles"]);
+		for (const registry of REGISTRIES) {
+			expect(registry.columns).toContain("status");
+			expect(registry.about.length).toBeGreaterThan(20);
+		}
+	});
+
+	test("a plan that names a ticket not in the folder is said, like a spec that does", () => {
+		const checks = docChecks([{ path: "/p/design/A.plan.json", name: "A.plan.json", group: "plans", exists: true, tickets: ["LIMS-9"] }]);
+		expect(checks.map((check) => check.text)).toEqual(["LIMS-9 is not among the tickets; A.plan.json names it."]);
+	});
+});

@@ -124,11 +124,15 @@ const CSV_GRAMMAR: monaco.languages.IMonarchLanguage = {
 		Array.from({ length: CSV_COLOURS }, (_, column) => [
 			column ? `c${column}` : "root",
 			[
+				// What ends the line gives the turn back to the first column. A rule that matches nothing at a
+				// line's end is never tried, so each of these takes the line's last cell, or its last separator.
+				[/"(?:[^"]|"")*"?$/, { token: `column${column}`, switchTo: "@root" }],
+				[/[^,\t"]+$/, { token: `column${column}`, switchTo: "@root" }],
+				[/[,\t]$/, { token: "delimiter", switchTo: "@root" }],
 				[/"(?:[^"]|"")*"?/, `column${column}`],
 				[/[^,\t"]+/, `column${column}`],
-				// The next column; and the line's end, where the turn goes back to the first.
+				// The next column.
 				[/[,\t]/, { token: "delimiter", switchTo: column + 1 < CSV_COLOURS ? `@c${column + 1}` : "@root" }],
-				...(column ? ([[/$/, { token: "", switchTo: "@root" }]] as monaco.languages.IMonarchLanguageRule[]) : []),
 			] as monaco.languages.IMonarchLanguageRule[],
 		]),
 	),

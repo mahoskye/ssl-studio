@@ -51,9 +51,11 @@ the source of truth.
   ([ADR 0012](docs/adr/0012-a-projects-work-is-written-down.md),
   [ADR 0013](docs/adr/0013-the-agent-is-told-the-work-a-question-is-for.md)).
 - **Documents as what they are:** Markdown, SQL, JSON, TOML, CSV, YAML, XML
-  and INI are coloured by the same themes as SSL. A CSV opens as a table
-  whose cells are edited in place; Markdown opens rendered, with what its
-  front matter says shown above it and its code coloured.
+  and INI are coloured by the same themes as SSL. JSON that cannot be read
+  says where. The snippets a project keeps are in the Palette, to insert.
+  A CSV opens as a table whose cells are edited in place; Markdown opens
+  rendered, with what its front matter says shown above it and its code
+  coloured.
 - **House style:** the team's Designer header, procedure doc block, spacing
   and script size limit built into templates, the formatter and a size meter.
 

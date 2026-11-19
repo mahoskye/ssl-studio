@@ -69,7 +69,7 @@ export function docChecks(files: readonly DocFile[]): DocCheck[] {
 	// A ticket named by another, or by a spec, a decision or a question, that is not among the tickets.
 	const named = new Map<string, DocFile>();
 	for (const file of files) {
-		if (!file.exists || isCatalog(file) || !["tickets", "specs", "knowledge"].includes(file.group)) continue;
+		if (!file.exists || isCatalog(file) || !["tickets", "specs", "knowledge", "plans"].includes(file.group)) continue;
 		for (const key of file.tickets ?? []) if (!here(key) && ![...named.keys()].some((seen) => same(seen, key))) named.set(key, file);
 	}
 	for (const [key, by] of named) checks.push({ level: "note", text: `${key} is not among the tickets; ${called(by)} names it.`, path: by.path, fix: { kind: "ticket", key, ...(by.ticket ? { related: by.ticket } : {}) } });

@@ -14,6 +14,8 @@ export type Request = {
 	buttons: string[];
 	/** The button that cannot be undone: never the Enter default. */
 	danger?: string;
+	/** What each button is, in a line under it. With these the buttons are a list, one under another: for more choices than fit in a row. */
+	details?: Record<string, string>;
 	resolve: (answer: Answer | null) => void;
 };
 
@@ -48,8 +50,8 @@ export class DialogQueue {
 	}
 
 	/** A choice: the button pressed, or null when cancelled. */
-	choose(title: string, buttons: string[], options: { danger?: string } = {}): Promise<string | null> {
-		return new Promise((resolve) => this.push({ title, buttons, input: false, danger: options.danger, resolve: (a) => resolve(a?.button ?? null) }));
+	choose(title: string, buttons: string[], options: { danger?: string; details?: Record<string, string> } = {}): Promise<string | null> {
+		return new Promise((resolve) => this.push({ title, buttons, input: false, danger: options.danger, details: options.details, resolve: (a) => resolve(a?.button ?? null) }));
 	}
 
 	/** Answers the open dialog (null cancels it) and shows the next. A request that is not the open one is ignored. */

@@ -241,7 +241,7 @@ export async function newKnowledge(kind: KnowledgeKind["id"]) {
 export async function newRegistry() {
 	if (!ready()) return;
 	const other = "Another…";
-	const picked = await choose("A registry of what?", [...REGISTRIES.map((r) => r.title), other]);
+	const picked = await choose("A registry of what?", [...REGISTRIES.map((r) => r.title), other], { details: { ...Object.fromEntries(REGISTRIES.map((r) => [r.title, r.about])), [other]: "A table of your own: you name its columns." } });
 	if (!picked) return;
 	const kind = REGISTRIES.find((r) => r.title === picked);
 	if (kind?.id === "files") return updateManifest();

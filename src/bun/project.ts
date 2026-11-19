@@ -175,7 +175,9 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 	for (const path of under(join(root, project.schema), /\.(md|markdown|sql)$/i)) list.push({ path, name: relative(join(root, project.schema), path), group: "schema", exists: true });
 	for (const path of under(join(root, project.plans), /\.(plan\.json|md)$/i)) {
 		if (/\.spec\.md$/i.test(path)) continue;
-		list.push({ path, name: relative(join(root, project.plans), path), group: "plans", exists: true });
+		// A plan says which ticket it is for (ADR 0013): the Docs panel shows it under that ticket.
+		const ticket = /\.plan\.json$/i.test(path) ? await planTicket(path) : "";
+		list.push({ path, name: relative(join(root, project.plans), path), group: "plans", exists: true, ...(ticket ? { tickets: [ticket] } : {}) });
 	}
 	// Each catalog says whether its list is still what the documents are.
 	for (const name of Object.keys(DOC_FOLDERS) as DocArea[]) {

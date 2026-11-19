@@ -296,6 +296,11 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .dialog label { display: flex; flex-direction: column; gap: var(--space-2); }
 .dialog label.check { flex-direction: row; align-items: center; gap: var(--space-4); }
 .dialog .buttons { display: flex; justify-content: flex-end; gap: var(--space-4); }
+/* More choices than fit in a row: one under another, each with a line saying what it is. */
+.dialog .buttons.list { flex-direction: column; align-items: stretch; gap: var(--space-2); }
+.dialog .buttons.list button { display: flex; flex-direction: column; gap: var(--space-1); text-align: left; padding: var(--space-3) var(--space-5); }
+.dialog .buttons.list button .detail { font-size: var(--text-sm); opacity: .8; font-weight: 400; white-space: normal; }
+.dialog .buttons.list button:last-child { align-self: flex-end; }
 .dialog .hint { margin: 0; }
 .dialog:focus-visible, .quickpick:focus-visible { outline: none; }
 /* A question may list what it is about, a line each. */
@@ -331,11 +336,14 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .palette-item .label { flex: none; max-width: 55%; }
 /* What the template under the keyboard or the pointer would insert. */
 .palette-preview { flex: none; height: 36%; overflow: auto; margin: var(--space-3) var(--space-4) var(--space-4); padding: var(--space-4); background: var(--panel-bg); border: 1px solid var(--border); border-radius: var(--radius-md); }
-.palette-preview-head { display: flex; align-items: baseline; gap: var(--space-4); margin-bottom: var(--space-3); }
+.palette-preview-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2) var(--space-4); margin-bottom: var(--space-3); }
 .palette-preview-head .hint { margin: 0; }
 .palette-preview > .hint { margin: 0; }
 .palette-preview pre { margin: 0; font: var(--text-md)/1.5 ui-monospace, "Cascadia Code", Menlo, monospace; white-space: pre; tab-size: 4; color: var(--fg); }
 .palette-item .meta { flex: 1; min-width: 0; text-align: right; overflow: hidden; text-overflow: ellipsis; }
+/* A kept snippet is known by its title: the title has the row, and the language its few letters. */
+.palette-item.kept .label { flex: 1; max-width: none; min-width: 0; }
+.palette-item.kept .meta { flex: none; }
 .swatch { width: 12px; height: 12px; padding: 0; border-radius: var(--radius-sm); flex: none; position: relative; }
 /* Twelve pixels to look at, twenty-four to hit. */
 .swatch::after { content: ""; position: absolute; inset: -6px; }
