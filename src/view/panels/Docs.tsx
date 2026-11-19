@@ -49,7 +49,7 @@ function Status(props: { status?: string }) {
 }
 
 /** A row for one of the working documents: its title where it has one, and its state. */
-function ItemRow(props: { file: DocFile; depth?: number; lead?: string; note?: string }) {
+function ItemRow(props: { file: DocFile; depth?: number; lead?: string; note?: string; aside?: boolean }) {
 	const selected = () => activePath() === canonical(props.file.path);
 	const stale = () => props.file.catalog?.stale;
 	return (
@@ -59,7 +59,7 @@ function ItemRow(props: { file: DocFile; depth?: number; lead?: string; note?: s
 			selected={selected()}
 			classList={{ selected: selected(), catalog: isCatalog(props.file) }}
 			style={{ "padding-left": `${8 + (props.depth ?? 0) * 14}px` }}
-			title={[props.file.path, props.file.summary, props.file.tickets?.length ? `${props.file.group === "tickets" ? "Related to" : "For"} ${props.file.tickets.join(", ")}` : "", ...(props.file.problems ?? [])].filter(Boolean).join("\n")}
+			title={[props.file.path, props.file.status ? `Status: ${props.file.status}` : "", props.file.summary, props.file.tickets?.length ? `${props.file.group === "tickets" ? "Related to" : "For"} ${props.file.tickets.join(", ")}` : "", ...(props.file.problems ?? [])].filter(Boolean).join("\n")}
 			onActivate={() => void openFile(props.file.path)}
 		>
 			<FileMark name={props.file.name} />
@@ -70,11 +70,16 @@ function ItemRow(props: { file: DocFile; depth?: number; lead?: string; note?: s
 				{isCatalog(props.file) ? "Catalog" : props.file.title || props.file.name}
 			</span>
 			<Show when={props.note}>
-				<span class="meta">{props.note}</span>
+				<span class="meta" classList={{ aside: props.aside }}>{props.note}</span>
 			</Show>
 			<Show when={stale()}>
 				<span class="meta warn" title="The list in this catalog no longer says what the folder holds. ＋, Update catalogs, writes it afresh.">
 					out of date
+				</span>
+			</Show>
+			<Show when={props.file.untouched}>
+				<span class="meta warn" title="Still the text it started with: not written yet.">
+					template
 				</span>
 			</Show>
 			<Show when={props.file.problems?.length}>
@@ -111,7 +116,7 @@ function Work(props: { files: DocFile[]; empty?: string }) {
 				{(ticket) => (
 					<>
 						<ItemRow file={ticket} lead={ticket.ticket} />
-						<For each={specsOf(ticket)}>{(spec) => <ItemRow file={spec} depth={1} note="spec" />}</For>
+						<For each={specsOf(ticket)}>{(spec) => <ItemRow file={spec} depth={1} note="spec" aside />}</For>
 					</>
 				)}
 			</For>

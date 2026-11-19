@@ -40,8 +40,9 @@ the source of truth.
   work, the specs written from them, a knowledge base (decisions, questions,
   snippets, reference notes) and registries: tables of the settings, files
   and database objects a migration must carry across. Each folder has a
-  catalog the IDE keeps, and the Docs panel shows each ticket with its
-  specs, each registry with how far it is
+  catalog the IDE keeps, the Docs panel shows each ticket with its specs
+  and each registry with how far it is, and Health says what is out of
+  date, not written yet, or named and not there
   ([ADR 0012](docs/adr/0012-a-projects-work-is-written-down.md)).
 - **Documents as what they are:** Markdown, SQL, JSON, TOML, CSV, YAML, XML
   and INI are coloured by the same themes as SSL. A CSV opens as a table

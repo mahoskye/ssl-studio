@@ -259,9 +259,89 @@ describe("the demo project's working documents", () => {
 		expect(catalogItems("tickets", docs, join(root, "docs")).map((item) => item.title)[0]).toBe("DEMO-101: Give every waiting sample a due date");
 	});
 
+	test("what its documents need from someone is one open question, and nothing is wrong", async () => {
+		const checks = docChecks(await listed());
+		expect(checks.map((check) => [check.level, check.text])).toEqual([["note", "1 question is open: Which holidays does each site keep?"]]);
+		expect(checksSummary(checks)).toBe("1 to know");
+	});
+
 	test("the file manifest is of the project's work, not of the documents about it", async () => {
 		const files = await fileManifest(new WorkspaceFiles(root), await readProject(root));
 		expect(files.some((f) => f.path === "src/DueDates/DueRule.ssl" && f.kind === "script" && f.sha256.length === 64)).toBe(true);
 		expect(files.some((f) => f.path.startsWith("docs/") || f.path.startsWith("design/") || f.path.startsWith(".ssl-studio/") || !f.path.includes("/"))).toBe(false);
+	});
+});
+
+import { checksSummary, docChecks } from "../src/shared/docChecks";
+import { localDay } from "../src/shared/dates";
+import { isPrompt, PROMPTS, snippetTemplate } from "../src/shared/projectDocs";
+import type { DocFile } from "../src/shared/protocol";
+
+describe("what the working documents need", () => {
+	const file = (group: DocFile["group"], name: string, more: Partial<DocFile> = {}): DocFile => ({ path: `/p/docs/${group}/${name}`, name, group, exists: true, ...more });
+	const texts = (files: DocFile[]) => docChecks(files).map((check) => check.text);
+
+	test("nothing, when there is nothing amiss", () => {
+		expect(docChecks([])).toEqual([]);
+		expect(checksSummary([])).toBe("");
+		expect(texts([file("tickets", "A-1.md", { ticket: "A-1", status: "open" }), file("tickets", "INDEX.md", { catalog: { stale: false } })])).toEqual([]);
+	});
+
+	test("a catalog out of date, and a folder with documents and no catalog, can both be put right", () => {
+		const checks = docChecks([file("tickets", "A-1.md", { ticket: "A-1" }), file("tickets", "INDEX.md", { catalog: { stale: true } }), file("knowledge", "decisions/0001-x.md", { kind: "decisions" })]);
+		expect(checks.map((check) => [check.level, check.text, check.fix?.kind])).toEqual([
+			["warn", "The catalog of tickets/ is out of date.", "catalogs"],
+			["note", "knowledge/ has no catalog (INDEX.md).", "catalogs"],
+		]);
+		// One update writes every catalog, so several are one thing to do.
+		expect(texts([file("tickets", "INDEX.md", { catalog: { stale: true } }), file("specs", "INDEX.md", { catalog: { stale: true } }), file("registries", "INDEX.md", { catalog: { stale: true } })])).toEqual(["The catalogs of tickets/, specs/ and registries/ are out of date."]);
+		// The planner's specs are beside their plans: with no specs folder there is no catalog to miss.
+		expect(texts([file("specs", "design/A.spec.md")])).toEqual([]);
+	});
+
+	test("a registry that does not read as a table, and a spec that is not where its ticket says, are wrong", () => {
+		const checks = docChecks([file("registries", "settings.csv", { problems: ["Row 3 has 4 cells, and the first row names 5."] }), file("tickets", "A-1.md", { ticket: "A-1", missing: ["design/Gone.spec.md"] }), file("tickets", "INDEX.md", { catalog: { stale: false } }), file("registries", "INDEX.md", { catalog: { stale: false } })]);
+		expect(checks.map((check) => check.level)).toEqual(["warn", "warn"]);
+		expect(checks.map((check) => check.text)).toEqual(["Application settings: Row 3 has 4 cells, and the first row names 5.", "A-1 names a spec that is not there: design/Gone.spec.md"]);
+		expect(checksSummary(checks)).toBe("2 to fix");
+	});
+
+	test("a ticket that is named and not there can be started, and is said once", () => {
+		const catalog = file("tickets", "INDEX.md", { catalog: { stale: false } });
+		const checks = docChecks([catalog, file("tickets", "A-1.md", { ticket: "A-1", title: "First", tickets: ["A-2", "a-1"] }), file("specs", "S.md", { tickets: ["a-2", "A-1"] }), file("specs", "INDEX.md", { catalog: { stale: false } })]);
+		expect(checks).toEqual([{ level: "note", text: "A-2 is not among the tickets; A-1 names it.", path: "/p/docs/tickets/A-1.md", fix: { kind: "ticket", key: "A-2", related: "A-1" } }]);
+		expect(frontMatter(ticketTemplate({ key: "A-2", title: "Second", related: ["A-1"] })).values.related).toEqual(["A-1"]);
+	});
+
+	test("a finished ticket whose spec is not, a document still its template, and the open questions are worth knowing", () => {
+		const catalogs = [file("tickets", "INDEX.md", { catalog: { stale: false } }), file("specs", "INDEX.md", { catalog: { stale: false } }), file("knowledge", "INDEX.md", { catalog: { stale: false } })];
+		const got = texts([
+			...catalogs,
+			file("tickets", "A-1.md", { ticket: "A-1", status: "Done" }),
+			file("specs", "S.md", { title: "The thing", status: "draft", tickets: ["A-1"] }),
+			file("specs", "T.md", { title: "Another", status: "done", tickets: ["A-1"] }),
+			file("knowledge", "decisions/0001-x.md", { kind: "decisions", title: "Use CSV", untouched: true }),
+			file("knowledge", "questions/a.md", { kind: "questions", title: "Who owns it?", status: "open" }),
+			file("knowledge", "questions/b.md", { kind: "questions", title: "When?", status: "open" }),
+			file("knowledge", "questions/c.md", { kind: "questions", title: "Why?", status: "answered" }),
+		]);
+		expect(got).toEqual(["Not written yet: Use CSV", "A-1 is Done; its spec is draft: The thing", "2 questions are open."]);
+	});
+});
+
+describe("a new document's own words", () => {
+	test("the line a template starts with is known for what it is", () => {
+		expect(isPrompt(summaryOf(ticketTemplate({ key: "A-1", title: "T" })))).toBe(true);
+		expect(isPrompt(summaryOf(specTemplate({ title: "T" })))).toBe(true);
+		expect(isPrompt(summaryOf(decisionTemplate({ title: "T", date: "2026-11-18" })))).toBe(true);
+		expect(isPrompt(summaryOf(questionTemplate({ title: "T", date: "2026-11-18" })))).toBe(true);
+		expect(snippetTemplate({ title: "T", language: "sql" })).toContain(`-- ${PROMPTS.sql}`);
+		expect(isPrompt("The rule in words.")).toBe(false);
+		expect(isPrompt(undefined)).toBe(false);
+	});
+
+	test("a day is the day it is here, not in UTC", () => {
+		expect(localDay(new Date(2026, 10, 18, 23, 52))).toBe("2026-11-18");
+		expect(localDay(new Date(2026, 0, 5, 0, 1))).toBe("2026-01-05");
 	});
 });

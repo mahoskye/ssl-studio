@@ -53,6 +53,8 @@ export type DocFile = {
 	tickets?: string[];
 	/** A ticket: the specs it names, as paths from the project's root. */
 	specs?: string[];
+	/** A ticket: those of the specs it names that are not there. */
+	missing?: string[];
 	/** Knowledge: the folder it is in under the knowledge base ("decisions", "snippets"); "" at its top. */
 	kind?: string;
 	/** A registry: how many rows, how many in each status (when it has that column), and what is wrong with it as a table. */

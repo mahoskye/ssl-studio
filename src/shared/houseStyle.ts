@@ -2,6 +2,8 @@
 // and 0006). Conventions of the team, not facts about SSL: the language
 // itself stays with the language server (ADR 0003).
 
+import { localDay } from "./dates";
+
 export const HISTORY_MARKER = /^\s*Modification\.*\s*:/;
 
 /** Modification blocks in the file banner, given the banner's lines. */
@@ -19,7 +21,7 @@ export function level(value: number, limit: number, nearShare = 0.9): Level {
 }
 
 export function bannerTemplate(date = new Date()) {
-	const day = date.toISOString().slice(0, 10);
+	const day = localDay(date);
 	const stars = "*".repeat(80);
 	const rule = "_".repeat(79);
 	return [

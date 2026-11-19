@@ -5,6 +5,7 @@
 // be undone, and a file that exists is never written over.
 import { CATALOG_FILE, catalogStale, withCatalog } from "../shared/catalog";
 import { csvRow } from "../shared/csv";
+import { localDay } from "../shared/dates";
 import { frontMatter, one } from "../shared/frontMatter";
 import { manifestSummary, mergeManifest } from "../shared/manifest";
 import { baseName, joinPath, relativeTo } from "../shared/paths";
@@ -31,9 +32,9 @@ import type { DocFile } from "../shared/protocol";
 import { backend } from "./backend";
 import { ask, choose } from "./dialogs";
 import { isMarkdown } from "./project";
-import { activeDoc, activePath, applyText, canonical, documents, notify, openFile, setState, state } from "./state";
+import { activeDoc, activePath, applyText, canonical, documents, notify, openFile, save, setState, state } from "./state";
 
-const today = () => new Date().toISOString().slice(0, 10);
+const today = () => localDay();
 const root = () => state.workspace?.root ?? "";
 const docsFolder = () => joinPath(root(), ...(state.project?.docs ?? "docs").split(/[\\/]/));
 const areaFolder = (area: DocArea) => joinPath(docsFolder(), DOC_FOLDERS[area]);
@@ -50,9 +51,20 @@ async function current(path: string): Promise<string | null> {
 	}
 }
 
-/** Writes a file's text: through the editor when it is open there, where the change can be undone. */
+/**
+ * Writes a file's text: through the editor when it is open there, where the
+ * change can be undone. An open file that had nothing unsaved is saved with
+ * the change, so what the folder says and what the editor shows stay the
+ * same; one with unsaved work of the person's is left for them to save.
+ */
 async function put(path: string, text: string, existed: boolean) {
-	if (documents.get(canonical(path))) return applyText(canonical(path), text);
+	const open = canonical(path);
+	if (documents.get(open)) {
+		const clean = !state.dirty[open];
+		applyText(open, text);
+		if (clean) await save(open);
+		return;
+	}
 	if (!existed) await backend.create(path, "file");
 	await backend.write(path, text);
 }
@@ -96,14 +108,14 @@ function ticketAtHand(): string {
 }
 
 /** A ticket: the work as it was asked for. Its key names its file. */
-export async function newTicket() {
+export async function newTicket(known?: string, related?: string) {
 	if (!ready()) return;
-	const key = ticketKey((await ask("The ticket's key, as in LIMS-123")) ?? "");
+	const key = ticketKey(known ?? (await ask("The ticket's key, as in LIMS-123")) ?? "");
 	if (!key) return;
 	const title = (await ask(`${key}: its title, as the ticket has it`))?.trim();
 	if (!title) return;
 	const source = (await ask(`${key}: a link to the ticket (leave empty for none)`))?.trim();
-	await start(joinPath(areaFolder("tickets"), `${key}.md`), ticketTemplate({ key, title, source: source || undefined }), "tickets");
+	await start(joinPath(areaFolder("tickets"), `${key}.md`), ticketTemplate({ key, title, source: source || undefined, related: related ? [related] : undefined }), "tickets");
 }
 
 /** A spec: what is to be built, written from a ticket. */

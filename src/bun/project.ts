@@ -7,7 +7,7 @@ import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { CATALOG_FILE, catalogStale } from "../shared/catalog";
 import { parseCsv, tally } from "../shared/csv";
 import { frontMatter, many, one, summaryOf, titleOf } from "../shared/frontMatter";
-import { catalogItems, DOC_FOLDERS, isCatalog, STATE_FILE, type DocArea } from "../shared/projectDocs";
+import { catalogItems, DOC_FOLDERS, isCatalog, isPrompt, STATE_FILE, type DocArea } from "../shared/projectDocs";
 import type { DocFile, ManifestFile, Project, Settings } from "../shared/protocol";
 import { workspaceDir } from "./paths";
 import { WorkspaceFiles } from "./workspace";
@@ -70,22 +70,25 @@ async function head(path: string): Promise<string> {
 	}
 }
 
+/** A summary, unless it is a line a template wrote and nobody has replaced. */
+const said = (summary: string | undefined) => (summary && !isPrompt(summary) ? summary : undefined);
+
 /** What a Markdown document says of itself, for the panel and the catalogs. */
-function described(text: string): Pick<DocFile, "title" | "status" | "summary" | "tickets"> {
+function described(text: string): Pick<DocFile, "title" | "status" | "summary" | "tickets" | "untouched"> {
 	const { values } = frontMatter(text);
 	const tickets = [...many(values.ticket), ...many(values.tickets)];
-	return { title: titleOf(text) || undefined, status: one(values.status) || undefined, summary: summaryOf(text) || undefined, ...(tickets.length ? { tickets } : {}) };
+	return { title: titleOf(text) || undefined, status: one(values.status) || undefined, summary: said(summaryOf(text)), ...(tickets.length ? { tickets } : {}), ...(isPrompt(summaryOf(text)) ? { untouched: true } : {}) };
 }
 
 /** A snippet's title and what it is for: the first two lines of the comment it opens with. */
-function snippet(text: string): Pick<DocFile, "title" | "summary"> {
-	const said = (line: string | undefined) => /^\s*(?:--+|\/\*+|#+|\/\/+|\*)?\s*(.+?)\s*(?:\*\/|;)?\s*$/.exec(line ?? "")?.[1];
+function snippet(text: string): Pick<DocFile, "title" | "summary" | "untouched"> {
+	const words = (line: string | undefined) => /^\s*(?:--+|\/\*+|#+|\/\/+|\*)?\s*(.+?)\s*(?:\*\/|;)?\s*$/.exec(line ?? "")?.[1];
 	const lines = text.split(/\r?\n/).filter((line) => line.trim());
 	const commented = (line: string | undefined) => /^\s*(--|\/\*|#|\/\/)/.test(line ?? "");
 	if (!commented(lines[0])) return {};
 	// The second line is part of the comment when it is marked as one, or the comment is a block still open.
-	const second = commented(lines[1]) || (/^\s*\/\*/.test(lines[0]!) && !/(\*\/|;)\s*$/.test(lines[0]!)) ? said(lines[1]) : undefined;
-	return { title: said(lines[0]), summary: second };
+	const second = commented(lines[1]) || (/^\s*\/\*/.test(lines[0]!) && !/(\*\/|;)\s*$/.test(lines[0]!)) ? words(lines[1]) : undefined;
+	return { title: words(lines[0]), summary: said(second), ...(isPrompt(second) ? { untouched: true } : {}) };
 }
 
 export async function listDocs(files: WorkspaceFiles, project: Project): Promise<DocFile[]> {
@@ -120,7 +123,8 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 		const key = one(values.ticket) || basename(path).replace(MARKDOWN, "");
 		const specs = many(values.specs);
 		const related = [...many(values.related), ...many(values.blocks), ...many(values["blocked-by"]), ...many(values.parent)];
-		list.push({ path, name, group: "tickets", exists: true, ...described(text), ...(isCatalog({ name }) ? {} : { ticket: key, tickets: related.length ? related : undefined, specs: specs.length ? specs : undefined }) });
+		const missing = specs.filter((spec) => !existsSync(join(root, spec)));
+		list.push({ path, name, group: "tickets", exists: true, ...described(text), ...(isCatalog({ name }) ? {} : { ticket: key, tickets: related.length ? related : undefined, specs: specs.length ? specs : undefined, missing: missing.length ? missing : undefined }) });
 	}
 	// The specs: those written by hand, and those the planner writes beside a plan.
 	for (const path of [...under(area("specs"), MARKDOWN), ...under(join(root, project.plans), /\.spec\.md$/i)]) {

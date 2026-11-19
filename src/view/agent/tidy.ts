@@ -7,6 +7,7 @@
 // runner did: no new findings, procedures and parameters unchanged, and the
 // comments step changing comments only.
 import { createStore } from "solid-js/store";
+import { localDay } from "../../shared/dates";
 import { backend } from "../backend";
 import { openReview, type Check, type Review } from "../editor/Review";
 import { monaco } from "../editor/monaco";
@@ -163,7 +164,7 @@ async function checks(before: string, after: string, commentsOnly: boolean): Pro
 
 async function appendToNote(path: string, heading: string, entry: string) {
 	const note = (await readNote(path)) ?? `# Tidy notes: ${rel(path)}\n`;
-	await backend.write(notePath(path), `${note.replace(/\s*$/, "")}\n\n## ${heading} (${new Date().toISOString().slice(0, 10)})\n\n${entry.trim()}\n`);
+	await backend.write(notePath(path), `${note.replace(/\s*$/, "")}\n\n## ${heading} (${localDay()})\n\n${entry.trim()}\n`);
 }
 
 /** Runs one step. Whatever goes wrong, the step ends in a state it can be run again from. */
@@ -202,7 +203,7 @@ export async function runStep(index: number) {
 
 			if (step.kind === "note" || step.kind === "report") {
 				const current = note ?? "";
-				const proposed = step.kind === "note" ? markdown : `${current.replace(/\s*$/, "")}\n\n## Verify (${new Date().toISOString().slice(0, 10)})\n\n${markdown}\n`;
+				const proposed = step.kind === "note" ? markdown : `${current.replace(/\s*$/, "")}\n\n## Verify (${localDay()})\n\n${markdown}\n`;
 				return propose({
 					title: `Tidy ${index + 1}/6 ${step.title}`,
 					path: notePath(path),

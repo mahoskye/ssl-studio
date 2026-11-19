@@ -60,21 +60,37 @@ export const slug = (title: string) =>
 /** A ticket's key as a file name: "LIMS-123", whatever case and spaces it was typed with. */
 export const ticketKey = (typed: string) => typed.trim().toUpperCase().replace(/\s+/g, "-").replace(/[^A-Z0-9_-]/g, "");
 
+/**
+ * The lines a new document starts with, where its own words go. One still
+ * there says nothing about the document: it is not its summary.
+ */
+export const PROMPTS = {
+	ticket: "Paste the ticket's description here, in its own words.",
+	spec: "One sentence on what this builds, and for whom.",
+	decision: "What made a decision necessary.",
+	question: "What cannot be done, or decided, until this is known.",
+	reference: "One sentence on what this explains.",
+	sql: "What it is for, and what to change before running it.",
+	ssl: "What it is for, and what to change before using it.",
+} as const;
+/** Whether a line is one a template wrote, not yet replaced. */
+export const isPrompt = (line: string | undefined) => Object.values(PROMPTS).some((prompt) => prompt === (line ?? "").trim());
+
 const fence = (pairs: [string, string | undefined][]) => `---\n${pairs.filter(([, v]) => v !== undefined).map(([k, v]) => `${k}: ${v}`).join("\n")}\n---\n`;
 const quoted = (text: string) => (/[:#\[\]{}"',]|^\s|\s$/.test(text) ? JSON.stringify(text) : text);
 
-export const ticketTemplate = (ticket: { key: string; title: string; source?: string }) => `${fence([
+export const ticketTemplate = (ticket: { key: string; title: string; source?: string; related?: readonly string[] }) => `${fence([
 	["ticket", ticket.key],
 	["title", quoted(ticket.title)],
 	["source", ticket.source || undefined],
 	["status", "open"],
-	["related", "[]"],
+	["related", `[${(ticket.related ?? []).join(", ")}]`],
 ])}
 # ${ticket.key}: ${ticket.title}
 
 ## What is asked
 
-Paste the ticket's description here, in its own words.
+${PROMPTS.ticket}
 
 ## What done looks like
 
@@ -91,7 +107,7 @@ export const specTemplate = (spec: { title: string; ticket?: string }) => `${fen
 ])}
 # ${spec.title}
 
-One sentence on what this builds, and for whom.
+${PROMPTS.spec}
 
 ## What it does
 
@@ -116,7 +132,7 @@ export const decisionTemplate = (decision: { title: string; date: string; ticket
 
 ## Context
 
-What made a decision necessary.
+${PROMPTS.decision}
 
 ## Decision
 
@@ -137,7 +153,7 @@ export const questionTemplate = (question: { title: string; date: string; ticket
 
 ## Why it matters
 
-What cannot be done, or decided, until this is known.
+${PROMPTS.question}
 
 ## Answer
 
@@ -146,12 +162,12 @@ Not answered yet. When it is: the answer, who gave it and when, and set the stat
 
 export const referenceTemplate = (note: { title: string }) => `# ${note.title}
 
-One sentence on what this explains.
+${PROMPTS.reference}
 `;
 
 /** A snippet starts with a comment that says what it is for: the catalog reads its first line as the title. */
 export const snippetTemplate = (snippet: { title: string; language: "sql" | "ssl" }) =>
-	snippet.language === "sql" ? `-- ${snippet.title}\n-- What it is for, and what to change before running it.\n\nSELECT 1;\n` : `/* ${snippet.title}\n   What it is for, and what to change before using it.\n;\n`;
+	snippet.language === "sql" ? `-- ${snippet.title}\n-- ${PROMPTS.sql}\n\nSELECT 1;\n` : `/* ${snippet.title}\n   ${PROMPTS.ssl}\n;\n`;
 
 export const stateTemplate = (name: string, date: string) => `# Where ${name} stands
 

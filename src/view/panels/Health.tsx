@@ -1,5 +1,6 @@
-// The project's documents, and the current script against the house style:
-// size, procedures, findings.
+// The project's documents and what the documents of the work need from
+// someone, and the current script against the house style: size, procedures,
+// findings.
 import { For, Show } from "solid-js";
 import { level } from "../../shared/houseStyle";
 import { monaco } from "../editor/monaco";
@@ -12,6 +13,8 @@ import { IconButton, Row, Rows } from "./Rows";
 import { serverDown } from "./server";
 import { openStyleProfile } from "../StyleProfile";
 import { docs, setUpProject } from "../project";
+import { checksSummary, docChecks, type DocCheck } from "../../shared/docChecks";
+import { newTicket, updateCatalogs } from "../projectDocs";
 
 const PROCEDURE = new Set([monaco.languages.SymbolKind.Function, monaco.languages.SymbolKind.Method]);
 
@@ -57,6 +60,12 @@ export function Health() {
 			</div>
 		</div>
 	);
+	/** What the tickets, specs, knowledge base and registries need from someone. */
+	const checks = () => docChecks(docs());
+	const hasWork = () => docs().some((d) => d.exists && (d.group === "tickets" || d.group === "specs" || d.group === "knowledge" || d.group === "registries"));
+	const fixLabel = (check: DocCheck) => (check.fix?.kind === "catalogs" ? "Update" : "Start it");
+	const fixTitle = (check: DocCheck) => (check.fix?.kind === "catalogs" ? "Write every catalog afresh from the documents in its folder" : check.fix?.kind === "ticket" ? `Start ${check.fix.key} as a ticket of its own` : "");
+	const fix = (check: DocCheck) => (check.fix?.kind === "catalogs" ? void updateCatalogs() : check.fix?.kind === "ticket" ? void newTicket(check.fix.key, check.fix.related) : undefined);
 	const fileState = (file: { exists: boolean; untouched?: boolean }) => (!file.exists ? "missing" : file.untouched ? "still the template text" : "written");
 	return (
 		<div class="panel-body health" data-panel="health">
@@ -84,6 +93,32 @@ export function Health() {
 					</For>
 				</Rows>
 			</section>
+			<Show when={hasWork()}>
+				<section>
+					<h3 title="The tickets, specs, knowledge base and registries under the docs folder: what is out of date, not written, or named and not there">
+						Work <span class="meta">{checksSummary(checks()) || "in order"}</span>
+					</h3>
+					<Show when={checks().length} fallback={<p class="hint">Every catalog says what its folder holds, every registry reads as a table, and nothing is named that is not there.</p>}>
+						<Rows class="health-rows" role="listbox" label="What the working documents need">
+							<For each={checks()}>
+								{(check) => (
+									<Row class="check-row clickable" key={check.text} label={check.text} title={`${check.text}\nClick it, or press Enter on it, to open the document.`} onActivate={() => void openFile(check.path)}>
+										<span class={`check-mark ${check.level}`} aria-hidden="true">
+											{check.level === "warn" ? "⚠" : "•"}
+										</span>
+										<span class="label">{check.text}</span>
+										<Show when={check.fix}>
+											<button class="link" title={fixTitle(check)} onClick={(e) => (e.stopPropagation(), fix(check))}>
+												{fixLabel(check)}
+											</button>
+										</Show>
+									</Row>
+								)}
+							</For>
+						</Rows>
+					</Show>
+				</section>
+			</Show>
 			<Show when={activePath() && size()} fallback={<p class="hint">Open an SSL file to see its size, procedures and findings.</p>}>
 				<section>
 					<h3 title="The house limits for one script (program decision 0006)">Size limits</h3>

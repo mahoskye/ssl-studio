@@ -446,7 +446,7 @@ From a second look:
   to the wrong one: the focus came up small, cut off at the top, with a
   corner map it did not need. Only the last layout asked for is drawn now.
 
-## The work, written down (2026-11-19)
+## The work, written down (2026-11-18)
 
 Asked for by the user: the docs side of a project, driven by the tickets
 the work comes from ([ADR 0012](adr/0012-a-projects-work-is-written-down.md)).
@@ -465,6 +465,17 @@ the work comes from ([ADR 0012](adr/0012-a-projects-work-is-written-down.md)).
 - **A document shows what it says of itself:** its front matter above it,
   a ticket or a file as a link, and its code coloured.
 - **The demo project has one of each,** invented for it.
+- **Health says what the working documents need.** A catalog out of date, a
+  registry that does not read as a table, a spec that is not where its
+  ticket says: to fix. A document still its template, a ticket that is named
+  and not there, a finished ticket whose spec is not, the open questions: to
+  know. A catalog is written afresh, and a named ticket started, from the
+  row that says so.
+- **From looking at it:** in a narrow Docs panel a state is a dot in its
+  tone, so the title has the room; a new document's opening prompt is not
+  listed as its summary; a date is the day it is here, not in UTC; and a
+  catalog open in the editor is saved with the list the IDE writes to it,
+  unless it holds unsaved work.
 
 Not done, and worth doing next:
 

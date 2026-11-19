@@ -1,11 +1,11 @@
 # ADR 0012: A project's work is written down where the project is
 
 **Status:** Accepted
-**Date:** 2026-11-19
+**Date:** 2026-11-18
 **Decided by:** the user asked for the docs side of a project to carry the
 tickets that drive the work, the work as it is spec'd out, a knowledge base
 with catalogs, and registries for a migration, and for TOML, Markdown, SQL,
-JSON and other documents to be handled (2026-11-19). The folder names, the
+JSON and other documents to be handled (2026-11-18). The folder names, the
 file formats and the catalog's form are drafted here from that; the user has
 not reviewed them one by one.
 
