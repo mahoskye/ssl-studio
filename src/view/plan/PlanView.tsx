@@ -7,6 +7,7 @@ import { ask } from "../dialogs";
 import { editors } from "../editor/EditorGroup";
 import { monaco } from "../editor/monaco";
 import { Minimap, type MapBox } from "../graph/Minimap";
+import { Finder } from "../graph/Finder";
 import { pictureName, savePicture } from "../graph/picture";
 import { dirName, joinPath, relativeTo } from "../../shared/paths";
 import { regionColor } from "../editor/regions";
@@ -550,6 +551,15 @@ export function PlanView(props: { path: string; group: number }) {
 					<button title="Delete the selection (Delete); undo brings it back" onClick={(e) => (remove(), after(e))}>
 						Delete
 					</button>
+					{/* A step by its words: it is selected, and the chart moves to show it. */}
+					<Finder
+						choices={plan()!.nodes.map((n) => ({ id: n.id, name: n.text.trim() || "(no words yet)", where: n.kind === "call" && n.ref ? `call to ${n.ref}` : n.kind }))}
+						label="Find a step by its words and select it"
+						title="Type some of a step's words: the one you choose is selected and brought into view"
+						placeholder="Find a step…"
+						none={(typed) => `No step has “${typed}” in its words.`}
+						onChoose={(id) => (select(id), refocus())}
+					/>
 					<span class="spacer" />
 					<button title="The chart's keys (?)" classList={{ on: keysOpen() }} aria-expanded={keysOpen()} aria-controls={keysId} onClick={() => setKeysOpen((open) => !open)} onKeyDown={(e) => e.key === "Escape" && setKeysOpen(false)}>
 						Keys

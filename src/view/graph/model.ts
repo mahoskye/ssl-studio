@@ -48,7 +48,9 @@ export function assemble(scripts: ScriptIn[], calls: CallIn[]): Graph {
 	return { scripts, nodes, edges: [...edges.values()], topLevel: [...topLevel] };
 }
 
-export type Filter = { mode: "all" | "cross" | "around"; focus?: string; depth: number };
+/** Around a focus: what it calls, what calls it, or both (when nothing is said). */
+export type Direction = "both" | "callers" | "callees";
+export type Filter = { mode: "all" | "cross" | "around"; focus?: string; depth: number; direction?: Direction };
 
 /** The ids a filter keeps: everything, cross-script calls only, or a focus and its neighbourhood. */
 export function visible(graph: Graph, filter: Filter): { nodes: Set<string>; edges: GraphEdge[] } {
@@ -63,8 +65,9 @@ export function visible(graph: Graph, filter: Filter): { nodes: Set<string>; edg
 		const next: string[] = [];
 		for (const e of graph.edges) {
 			const focusIsScript = (id: string) => frontier.some((f) => (f.endsWith("#") ? id.startsWith(f) : id === f));
-			if (focusIsScript(e.from) && !keep.has(e.to)) (keep.add(e.to), next.push(e.to));
-			if (focusIsScript(e.to) && !keep.has(e.from)) (keep.add(e.from), next.push(e.from));
+			// Outwards along a line is to what is called; back along it is to what calls.
+			if (filter.direction !== "callers" && focusIsScript(e.from) && !keep.has(e.to)) (keep.add(e.to), next.push(e.to));
+			if (filter.direction !== "callees" && focusIsScript(e.to) && !keep.has(e.from)) (keep.add(e.from), next.push(e.from));
 		}
 		frontier = next;
 	}
@@ -258,28 +261,30 @@ export const FOLD_DIRS_ABOVE = 24;
 
 // --- Finding a node by name ----------------------------------------------------
 
-export type Choice = { label: string; id: string };
+/** Something a finder can go to: its name, where it is, and the id to go to it by. */
+export type Choice = { id: string; name: string; where: string };
 
 /**
- * The procedures and data sources a graph can be asked to show, each under a
- * label that says it and no other: its name, and the script it is in. Targets
- * the server could not resolve are left out; there is nothing of them to go to.
+ * The procedures and data sources a graph can be asked to show, each with the
+ * script it is in. Targets the server could not resolve are left out; there
+ * is nothing of them to go to.
  */
 export function choices(graph: Pick<Graph, "nodes">, rel: (path: string) => string): Choice[] {
 	return graph.nodes
 		.filter((n) => n.kind !== "unresolved")
-		.map((n) => ({ label: `${n.name}  ·  ${rel(n.path)}`, id: n.id }))
-		.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: "base" }));
+		.map((n) => ({ id: n.id, name: n.name, where: rel(n.path) }))
+		.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }) || a.where.localeCompare(b.where));
 }
 
-/** The choice typed: its label exactly, or failing that the one name that matches whatever its case. */
-export function chosen(list: readonly Choice[], typed: string): Choice | undefined {
-	const text = typed.trim();
-	if (!text) return undefined;
-	const exact = list.find((c) => c.label === text);
-	if (exact) return exact;
-	const named = list.filter((c) => c.label.split("  ·  ")[0]!.toLowerCase() === text.toLowerCase());
-	return named.length === 1 ? named[0] : undefined;
+/** The first few choices whose name has the typed text in it, whatever its case: names that start with it come first. */
+export function matching<T extends { name: string }>(list: readonly T[], typed: string, limit = 8): T[] {
+	const text = typed.trim().toLowerCase();
+	if (!text) return [];
+	const starts = (c: T) => c.name.toLowerCase().startsWith(text);
+	return list
+		.filter((c) => c.name.toLowerCase().includes(text))
+		.sort((a, b) => Number(starts(b)) - Number(starts(a)))
+		.slice(0, limit);
 }
 
 /** What was kept of the folded scripts and folders, read with suspicion; null when there is nothing usable. */

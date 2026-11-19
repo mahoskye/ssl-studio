@@ -185,7 +185,7 @@ describe("scripts folded to one node", () => {
 	});
 });
 
-import { choices, chosen } from "../src/view/graph/model";
+import { choices, matching } from "../src/view/graph/model";
 
 describe("finding a node by name", () => {
 	const node = (name: string, path: string, kind?: "procedure" | "datasource" | "unresolved") => ({ id: `${path}#${name}`, name, path, line: 0, kind });
@@ -193,17 +193,36 @@ describe("finding a node by name", () => {
 	const list = choices(graph, (path) => path.replace("/w/", ""));
 
 	test("each procedure and data source is listed once, by name then script; what did not resolve is not", () => {
-		expect(list.map((c) => c.label)).toEqual(["calc  ·  A.ssl", "Run  ·  A.ssl", "Run  ·  B.ssl", "Samples  ·  Samples.ds"]);
+		expect(list.map((c) => `${c.name} in ${c.where}`)).toEqual(["calc in A.ssl", "Run in A.ssl", "Run in B.ssl", "Samples in Samples.ds"]);
 		expect(list[1]!.id).toBe("/w/A.ssl#Run");
 	});
 
-	test("a label is chosen as it stands, and a bare name when one node has it", () => {
-		expect(chosen(list, "Run  ·  B.ssl")?.id).toBe("/w/B.ssl#Run");
-		expect(chosen(list, " CALC ")?.id).toBe("/w/A.ssl#calc");
-		// Two procedures are called Run: the name alone does not say which.
-		expect(chosen(list, "Run")).toBeUndefined();
-		expect(chosen(list, "")).toBeUndefined();
-		expect(chosen(list, "Nothing")).toBeUndefined();
+	test("the matches are the names with the typed text in them, those that start with it first", () => {
+		const names = [{ name: "PlanDueDate" }, { name: "DueDate" }, { name: "Due" }, { name: "Other" }];
+		expect(matching(names, "due").map((c) => c.name)).toEqual(["DueDate", "Due", "PlanDueDate"]);
+		expect(matching(names, " DUE ", 2).map((c) => c.name)).toEqual(["DueDate", "Due"]);
+		expect(matching(names, "")).toEqual([]);
+		expect(matching(names, "zzz")).toEqual([]);
+	});
+});
+
+describe("around a focus", () => {
+	const edge = (from: string, to: string) => ({ from, to, crossScript: false, sites: [] });
+	const node = (id: string) => ({ id, name: id, path: "/w/A.ssl", line: 0 });
+	// a calls b, b calls c: around b, both ways, or one.
+	const graph = { scripts: [], nodes: [node("a"), node("b"), node("c")], edges: [edge("a", "b"), edge("b", "c")], topLevel: [] };
+	const around = (direction?: "both" | "callers" | "callees") => [...visible(graph, { mode: "around", focus: "b", depth: 1, direction }).nodes].sort();
+
+	test("what it calls, what calls it, or both", () => {
+		expect(around()).toEqual(["a", "b", "c"]);
+		expect(around("both")).toEqual(["a", "b", "c"]);
+		expect(around("callees")).toEqual(["b", "c"]);
+		expect(around("callers")).toEqual(["a", "b"]);
+	});
+
+	test("the direction holds at every step of the depth", () => {
+		const far = { ...graph, nodes: [...graph.nodes, node("d")], edges: [...graph.edges, edge("c", "d"), edge("d", "a")] };
+		expect([...visible(far, { mode: "around", focus: "b", depth: 2, direction: "callees" }).nodes].sort()).toEqual(["b", "c", "d"]);
 	});
 });
 

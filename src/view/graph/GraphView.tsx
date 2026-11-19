@@ -14,9 +14,10 @@ import { openFile, setState, state } from "../state";
 import { canvasMeasure, fitShare, fitView, legibleScale, nearest, recall, remember, reveal, splinePath, splinePoint, zoomAt, type Point } from "./canvas";
 import { loadGraph } from "./load";
 import { Minimap, type MapBox } from "./Minimap";
+import { Finder } from "./Finder";
 import { savePicture } from "./picture";
 import { session } from "../lsp/session";
-import { callList, choices, chosen, dirId, keptFolds, withoutUnresolved, fold, FOLD_ABOVE, FOLD_DIRS_ABOVE, foldId, isDir, isFold, RELATION_WORDS, scriptOf, topLabel, UNRESOLVED, visible, type Filter, type Graph, type ListedProc, relationOf, type Relation } from "./model";
+import { callList, choices, dirId, keptFolds, withoutUnresolved, fold, FOLD_ABOVE, FOLD_DIRS_ABOVE, foldId, isDir, isFold, RELATION_WORDS, scriptOf, topLabel, UNRESOLVED, visible, type Direction, type Filter, type Graph, type ListedProc, relationOf, type Relation } from "./model";
 import { baseName, dirName, relativeTo } from "../../shared/paths";
 
 type Box = {
@@ -56,8 +57,6 @@ const MAX_ZOOM = 3;
 const MODE_KEY = "graph.view";
 const FOLDS_KEY = "graph.folds";
 const UNRESOLVED_KEY = "graph.unresolved";
-/** How many matches the finder lists: enough to choose from, few enough to read. */
-const FIND_SHOWS = 8;
 /** A folded script's node: room for its name and, under it, what is inside. */
 const FOLD_HEIGHT = 46;
 /** A line's width for the number of places it stands for: each doubling adds the same, up to a limit that stays a line. */
@@ -108,23 +107,9 @@ export function GraphView() {
 	const [pointed, setPointed] = createSignal<string | null>(null);
 	const [walked, setWalked] = createSignal<string | null>(null);
 	const [pointedLine, setPointedLine] = createSignal<string | null>(null);
-	/** The finder: what it offers, what has been typed, and which of the matches the keys are on. */
-	const findId = createUniqueId();
+	/** What the finder offers. */
 	const findable = createMemo(() => (graph() ? choices(graph()!, rel) : []));
-	const [findText, setFindText] = createSignal("");
-	const [findAt, setFindAt] = createSignal(0);
-	/** The first few whose name has the typed text in it: names that start with it come first. */
-	const found = createMemo(() => {
-		const text = findText().trim().toLowerCase();
-		if (!text) return [];
-		const name = (label: string) => label.split("  ·  ")[0]!.toLowerCase();
-		return findable()
-			.filter((c) => name(c.label).includes(text))
-			.sort((a, b) => Number(name(b.label).startsWith(text)) - Number(name(a.label).startsWith(text)))
-			.slice(0, FIND_SHOWS);
-	});
 	const find = (id: string) => {
-		setFindText("");
 		setCurrent(id);
 		setMode("graph");
 		focus(id);
@@ -374,7 +359,7 @@ export function GraphView() {
 		}),
 	);
 
-	const focus = (id: string) => setFilter({ mode: "around", focus: id, depth: filter().depth });
+	const focus = (id: string) => setFilter({ mode: "around", focus: id, depth: filter().depth, direction: filter().direction });
 	const open = (at: { path?: string; line?: number }) => {
 		if (!at.path || at.path === UNRESOLVED) return;
 		setState("centerView", "editors");
@@ -600,56 +585,23 @@ export function GraphView() {
 					<label>
 						Depth <input type="number" min="1" max="6" value={filter().depth} onChange={(e) => setFilter({ ...filter(), depth: Number(e.currentTarget.value) || 1 })} />
 					</label>
+					<select aria-label="Which way from the focus" title="What the focus calls, what calls it, or both" value={filter().direction ?? "both"} onChange={(e) => setFilter({ ...filter(), direction: e.currentTarget.value as Direction })}>
+						<option value="both">Callers and callees</option>
+						<option value="callees">What it calls</option>
+						<option value="callers">What calls it</option>
+					</select>
 					<span class="hint">{filter().focus ? baseName(filter().focus!) : ""}</span>
 				</Show>
 				<Show when={graph()?.nodes.length}>
 					{/* A procedure by name: the picture then shows it with what calls it and what it calls. */}
-					<span class="graph-find-box">
-						<input
-							class="graph-find"
-							type="search"
-							role="combobox"
-							aria-label="Find a procedure and show its callers and callees"
-							aria-expanded={found().length > 0}
-							aria-controls={findId}
-							aria-autocomplete="list"
-							aria-activedescendant={found().length ? `${findId}-${Math.min(findAt(), found().length - 1)}` : undefined}
-							title="Type a procedure's name: the graph shows the one you choose with what calls it and what it calls"
-							placeholder="Find a procedure…"
-							autocomplete="off"
-							spellcheck={false}
-							value={findText()}
-							onInput={(e) => (setFindText(e.currentTarget.value), setFindAt(0))}
-							onBlur={() => setFindText("")}
-							onKeyDown={(e) => {
-								const list = found();
-								if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-									e.preventDefault();
-									if (list.length) setFindAt((at) => (at + (e.key === "ArrowDown" ? 1 : list.length - 1)) % list.length);
-								} else if (e.key === "Enter") {
-									e.preventDefault();
-									const pick = list[Math.min(findAt(), list.length - 1)] ?? chosen(findable(), findText());
-									if (pick) find(pick.id);
-								} else if (e.key === "Escape" && findText()) {
-									e.stopPropagation();
-									setFindText("");
-								}
-							}}
-						/>
-						<Show when={findText().trim()}>
-							<ul class="graph-find-list" id={findId} role="listbox" aria-label="Procedures that match">
-								<For each={found()} fallback={<li class="none">No procedure's name has “{findText().trim()}” in it.</li>}>
-									{(c, i) => (
-										// The pointer chooses on its way down, before the box loses the keyboard and the list goes.
-										<li id={`${findId}-${i()}`} role="option" aria-selected={i() === Math.min(findAt(), found().length - 1)} classList={{ on: i() === Math.min(findAt(), found().length - 1) }} onMouseDown={(e) => (e.preventDefault(), find(c.id))} onMouseEnter={() => setFindAt(i())}>
-											<span class="label">{c.label.split("  ·  ")[0]}</span>
-											<span class="hint">{c.label.split("  ·  ")[1]}</span>
-										</li>
-									)}
-								</For>
-							</ul>
-						</Show>
-					</span>
+					<Finder
+						choices={findable()}
+						label="Find a procedure and show its callers and callees"
+						title="Type a procedure's name: the graph shows the one you choose with what calls it and what it calls"
+						placeholder="Find a procedure…"
+						none={(typed) => `No procedure's name has “${typed}” in it.`}
+						onChoose={find}
+					/>
 				</Show>
 				<span class="spacer" />
 				<span class="hint" role="status">

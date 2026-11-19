@@ -298,6 +298,12 @@ What the user found in a first look at the round above, and what was done.
   number of columns to each side (10 to start, 0 for none), with a setting
   for each.
 
+- **Around a focus, one way or both:** the graph's focus view shows what the
+  focus calls, what calls it, or both.
+- **A step is found by its words** in a plan's chart: the one chosen is
+  selected and brought into view. The graph and the chart share the find
+  box.
+
 ## On hold
 
 - **Forms, client scripts and code-behind (2026-11-17).** Wanted eventually, in
