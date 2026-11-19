@@ -52,6 +52,38 @@ describe("workspace files", () => {
 	});
 });
 
+describe("copying in the workspace", () => {
+	const root = join(dir, "copy-ws");
+	mkdirSync(join(root, "src", "deep"), { recursive: true });
+	writeFileSync(join(root, "src", "a.ssl"), ":RETURN 1;\n");
+	writeFileSync(join(root, "src", "deep", "b.ssl"), ":RETURN 2;\n");
+	const files = new WorkspaceFiles(root);
+
+	test("a file is copied, and the original stays", async () => {
+		files.copy(join(root, "src", "a.ssl"), join(root, "src", "a copy.ssl"));
+		expect((await files.read(join(root, "src", "a copy.ssl"))).text).toBe(":RETURN 1;\n");
+		expect((await files.read(join(root, "src", "a.ssl"))).text).toBe(":RETURN 1;\n");
+	});
+	test("a folder is copied with everything in it", async () => {
+		files.copy(join(root, "src"), join(root, "src copy"));
+		expect((await files.read(join(root, "src copy", "deep", "b.ssl"))).text).toBe(":RETURN 2;\n");
+	});
+	test("a copy into a folder that is not there yet makes the folder", async () => {
+		files.copy(join(root, "src", "a.ssl"), join(root, "new", "a.ssl"));
+		expect((await files.read(join(root, "new", "a.ssl"))).text).toBe(":RETURN 1;\n");
+	});
+	test("nothing is written over", () => {
+		expect(() => files.copy(join(root, "src", "a.ssl"), join(root, "src", "deep", "b.ssl"))).toThrow(/already exists/);
+	});
+	test("a folder is not copied into itself", () => {
+		expect(() => files.copy(join(root, "src"), join(root, "src", "deep", "src"))).toThrow(/into itself/);
+	});
+	test("nothing is copied from or to outside the workspace", () => {
+		expect(() => files.copy(join(root, "..", "ws", "b.ssl"), join(root, "b.ssl"))).toThrow(/outside/);
+		expect(() => files.copy(join(root, "src", "a.ssl"), join(root, "..", "a.ssl"))).toThrow(/outside/);
+	});
+});
+
 describe("local history", () => {
 	test("records changed saves only, newest first", async () => {
 		const history = new History(join(dir, "ws"), join(dir, "history"));

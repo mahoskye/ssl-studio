@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { moveIndex, restoreIndex, ringStep, stopIndex, treeStep, typeAhead, isMoveKey, type TreeRow } from "../src/view/panels/rowMoves";
-import { COPY_PATH, COPY_RELATIVE, folderFor, holdsRoot, menuFor, nameProblem, NEW_FILE, NEW_FOLDER, RENAME, retarget, TRASH, without } from "../src/view/panels/explorerMenu";
+import { COPY, COPY_PATH, COPY_RELATIVE, CUT, folderFor, holdsRoot, menuFor, nameProblem, NEW_FILE, NEW_FOLDER, PASTE, RENAME, retarget, TRASH, without } from "../src/view/panels/explorerMenu";
 import { byLine, segments } from "../src/view/panels/searchLines";
 import { snippetAsText, TEMPLATES } from "../src/shared/houseStyle";
 import { patternsFrom } from "../src/view/plan/build";
@@ -140,10 +140,20 @@ test("the workspace folder is offered what adds to it and its path, never a rena
 });
 
 test("a folder and a file get their menus, with one wording for the trash", () => {
-	expect(menuFor("dir", "/w/Sample", "/w")).toEqual([NEW_FILE, NEW_FOLDER, COPY_PATH, COPY_RELATIVE, RENAME, TRASH]);
-	expect(menuFor("file", "/w/Sample/Orders.ssl", "/w")).toEqual([COPY_PATH, COPY_RELATIVE, RENAME, TRASH]);
+	expect(menuFor("dir", "/w/Sample", "/w")).toEqual([NEW_FILE, NEW_FOLDER, CUT, COPY, COPY_PATH, COPY_RELATIVE, RENAME, TRASH]);
+	expect(menuFor("file", "/w/Sample/Orders.ssl", "/w")).toEqual([CUT, COPY, COPY_PATH, COPY_RELATIVE, RENAME, TRASH]);
 	expect(TRASH).toBe("Move to trash");
 	for (const kind of ["file", "dir"] as const) expect(menuFor(kind, "/w/x", "/w")).not.toContain("Delete");
+});
+
+test("paste is offered once something was cut or copied, and into the workspace folder too", () => {
+	expect(menuFor("file", "/w/a.ssl", "/w")).not.toContain(PASTE);
+	expect(menuFor("file", "/w/a.ssl", "/w", true)).toEqual([CUT, COPY, PASTE, COPY_PATH, COPY_RELATIVE, RENAME, TRASH]);
+	expect(menuFor("dir", "/w/Sample", "/w", true)).toEqual([NEW_FILE, NEW_FOLDER, CUT, COPY, PASTE, COPY_PATH, COPY_RELATIVE, RENAME, TRASH]);
+	expect(menuFor("dir", "/w", "/w", true)).toEqual([NEW_FILE, NEW_FOLDER, PASTE, COPY_PATH]);
+	// The workspace folder itself is never cut or copied.
+	expect(menuFor("dir", "/w", "/w", true)).not.toContain(CUT);
+	expect(menuFor("dir", "/w", "/w", true)).not.toContain(COPY);
 });
 
 test("the workspace folder is refused, and what is in it is not", () => {

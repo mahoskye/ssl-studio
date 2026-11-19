@@ -1,6 +1,6 @@
 // Files inside one workspace folder. Every path the UI sends is absolute
 // and must stay inside the root.
-import { mkdirSync, readdirSync, renameSync, statSync, watch, existsSync, type FSWatcher } from "node:fs";
+import { cpSync, mkdirSync, readdirSync, renameSync, statSync, watch, existsSync, type FSWatcher } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type { Entry, SearchHit } from "../shared/protocol";
 import { searchPattern, type SearchOptions } from "../shared/searchPattern";
@@ -93,6 +93,17 @@ export class WorkspaceFiles {
 		// A name with a folder in it moves the file there, and the folder is made if it is not there yet.
 		mkdirSync(dirname(target), { recursive: true });
 		renameSync(this.inside(from), target);
+	}
+
+	/** A copy of a file, or of a folder and everything in it, under a name nothing has yet. */
+	copy(from: string, to: string) {
+		const source = this.inside(from);
+		const target = this.inside(to);
+		if (existsSync(target)) throw new Error(`already exists: ${relative(this.root, target)}`);
+		// A folder copied into itself would be copied into its own copy, without end.
+		if (target === source || target.startsWith(source + sep)) throw new Error(`${relative(this.root, source)} cannot be copied into itself`);
+		mkdirSync(dirname(target), { recursive: true });
+		cpSync(source, target, { recursive: true, errorOnExist: true, force: false });
 	}
 
 	*files(dir = this.root): Generator<string> {

@@ -55,3 +55,58 @@ export function rightOf(tabs: readonly string[], pinned: readonly string[], path
 	const at = tabs.indexOf(path);
 	return at < 0 ? [] : tabs.slice(at + 1).filter((tab) => !pinned.includes(tab));
 }
+
+// --- tabs moved by hand --------------------------------------------------------------------
+
+/**
+ * A group's tabs with one put before another, or last when `before` is null
+ * or is not there. The pinned stay first: a pinned tab dropped among the
+ * others stands last of the pinned, and another dropped among the pinned
+ * stands first of the others.
+ */
+export function placed(tabs: readonly string[], pinned: readonly string[], path: string, before: string | null): string[] {
+	const rest = tabs.filter((tab) => tab !== path);
+	const pins = rest.filter((tab) => pinned.includes(tab)).length;
+	const asked = before !== null && before !== path && rest.includes(before) ? rest.indexOf(before) : before === path ? tabs.indexOf(path) : rest.length;
+	const at = pinned.includes(path) ? Math.min(asked, pins) : Math.max(asked, pins);
+	return [...rest.slice(0, at), path, ...rest.slice(at)];
+}
+
+/**
+ * The tab a dragged one would stand before if it were let go now, null for
+ * last: where the mark is drawn, which is where it lands and not always
+ * where the pointer is (the pinned stay first). `path` need not be in the
+ * row yet: a tab from another group comes in not pinned.
+ */
+export function landsBefore(tabs: readonly string[], pinned: readonly string[], path: string, before: string | null): string | null {
+	const row = placed(tabs.includes(path) ? tabs : [...tabs, path], tabs.includes(path) ? pinned : pinned.filter((tab) => tab !== path), path, before);
+	return row[row.indexOf(path) + 1] ?? null;
+}
+
+/** A row of tabs: what a group of editors keeps. */
+export type TabRow = { tabs: string[]; active: string | null; pinned?: string[] };
+
+/**
+ * The groups after a tab was dragged from one to another, to stand before
+ * `before` there (last, with null). In the group it came to it is the tab
+ * shown, and not pinned; the group it left shows the tab that was beside it.
+ * A group left with no tabs goes, unless it is the only one. `active` is
+ * where the group it came to now is.
+ */
+export function movedAcross<G extends TabRow>(groups: readonly G[], path: string, from: number, to: number, before: string | null): { groups: G[]; active: number } {
+	const source = groups[from];
+	const target = groups[to];
+	if (!source || !target || !source.tabs.includes(path)) return { groups: [...groups], active: Math.min(Math.max(from, 0), Math.max(groups.length - 1, 0)) };
+	if (from === to) return { groups: groups.map((g, i) => (i === from ? { ...g, tabs: placed(g.tabs, g.pinned ?? [], path, before) } : g)), active: from };
+	const at = source.tabs.indexOf(path);
+	const left = source.tabs.filter((tab) => tab !== path);
+	const pins = (source.pinned ?? []).filter((tab) => tab !== path);
+	const next = groups.map((g, i): G => {
+		if (i === from) return { ...g, tabs: left, active: g.active === path ? (left[Math.min(at, left.length - 1)] ?? null) : g.active, ...(g.pinned ? { pinned: pins } : {}) };
+		// A file the group already shows is not shown twice: its tab there comes to the front where it stands.
+		if (i === to) return { ...g, tabs: g.tabs.includes(path) ? [...g.tabs] : placed([...g.tabs, path], g.pinned ?? [], path, before), active: path };
+		return g;
+	});
+	if (left.length || next.length < 2) return { groups: next, active: to };
+	return { groups: next.filter((_, i) => i !== from), active: to > from ? to - 1 : to };
+}

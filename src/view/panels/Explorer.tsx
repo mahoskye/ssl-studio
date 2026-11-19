@@ -1,7 +1,8 @@
 // The workspace tree, loaded a folder at a time, with a size badge on files
 // near or over the house size limit. What can be done to a file or a folder
 // is on its menu (right-click, the menu key, Shift+F10), on F2 and Delete,
-// and in the command palette.
+// on Ctrl+X, Ctrl+C and Ctrl+V, and in the command palette. A row dragged
+// onto a folder is moved there, after asking.
 import { FileMark } from "../FileMark";
 import { batch, createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
@@ -11,7 +12,8 @@ import { backend } from "../backend";
 import { ask, choose } from "../dialogs";
 import { activePath, canonical, fileRemoved, fileRenamed, notify, openFile, setState, state } from "../state";
 import { baseName, dirName, isInside, joinPath } from "../../shared/paths";
-import { COPY_PATH, COPY_RELATIVE, folderFor, holdsRoot, menuFor, nameProblem, NEW_FILE, NEW_FOLDER, openFolders, RENAME, retarget, TRASH, without } from "./explorerMenu";
+import { COPY, COPY_PATH, COPY_RELATIVE, CUT, folderFor, holdsRoot, menuFor, nameProblem, NEW_FILE, NEW_FOLDER, openFolders, PASTE, RENAME, retarget, TRASH, without } from "./explorerMenu";
+import { copyName, copyProblem, folderOf, moveProblem, type Clip } from "./explorerMoves";
 import { chooseFromMenu } from "./RowMenu";
 import { showPanel } from "./registry";
 import { followRename } from "../projectDocs";
@@ -29,6 +31,12 @@ const toggle = (path: string) =>
 const [focused, setFocused] = createSignal<Entry | null>(null);
 /** The tree on screen, to put the keyboard back in after a dialog. */
 let tree: RowsApi | undefined;
+/** What was cut or copied in the tree, until something else is, or a cut is pasted. */
+const [clip, setClip] = createSignal<Clip | null>(null);
+/** The row being dragged. */
+let dragging: Entry | null = null;
+/** The folder a drag would move it into, were it let go now. */
+const [dropInto, setDropInto] = createSignal<string | null>(null);
 
 const kb = (bytes: number) => `${Math.round(bytes / 1024)} KB`;
 const indent = (depth: number) => ({ "padding-left": `${8 + depth * 14}px` });
@@ -94,9 +102,34 @@ function EntryRow(props: { entry: Entry; depth: number }) {
 				level={props.depth + 1}
 				expanded={isDir() ? open() : undefined}
 				selected={selected()}
-				classList={{ selected: selected() }}
+				classList={{ selected: selected(), cut: clip()?.cut === true && clip()?.path === props.entry.path, drop: isDir() && dropInto() === props.entry.path }}
 				style={indent(props.depth)}
 				title={props.entry.path}
+				draggable={true}
+				onDragStart={(e) => {
+					dragging = entry();
+					// Its own kind of thing: dropped on the text, or outside the app, it is nothing.
+					e.dataTransfer?.setData("application/x-ssl-studio-file", props.entry.path);
+					if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+				}}
+				onDragEnd={() => {
+					dragging = null;
+					setDropInto(null);
+				}}
+				onDragOver={(e) => {
+					e.stopPropagation();
+					dragOver(e, folderOf(props.entry));
+				}}
+				onDrop={(e) => {
+					e.stopPropagation();
+					void dropOn(e, folderOf(props.entry));
+				}}
+				onChord={(e) => {
+					const action = ({ x: CUT, c: COPY, v: PASTE } as Record<string, string>)[e.key.toLowerCase()];
+					if (!action) return false;
+					void act(action, entry(), { home: props.entry.path, follow: true });
+					return true;
+				}}
 				onActivate={() => (isDir() ? toggle(props.entry.path) : void openFile(props.entry.path))}
 				onToggle={() => toggle(props.entry.path)}
 				onFocus={() => setFocused(entry())}
@@ -178,6 +211,61 @@ async function trash(entry: Entry): Promise<string | null> {
 	return "";
 }
 
+/** Moves a file or folder into another folder, under its own name. Returns where it is now. */
+async function moveInto(from: { path: string; kind: "file" | "dir" }, into: string, options: { ask: boolean }): Promise<string | null> {
+	const root = state.workspace?.root;
+	if (!root) return null;
+	const problem = moveProblem(from.path, into, root);
+	if (problem) return notify(problem), null;
+	const name = baseName(from.path);
+	// A drop is easily made by a slip of the hand: it asks. A paste was asked for twice already.
+	if (options.ask && (await choose(`Move ${from.kind === "dir" ? `the folder ${name} and everything in it` : name} into ${baseName(into)}?`, ["Move"])) !== "Move") return null;
+	const to = joinPath(into, name);
+	await backend.rename(from.path, to);
+	fileRenamed(from.path, to);
+	setExpanded((set) => new Set([...retarget(set, from.path, to), into]));
+	refresh();
+	void followRename(from.path, to);
+	return to;
+}
+
+/** Copies a file or folder into a folder: under its own name, or as "… copy" where that name is taken. */
+async function copyInto(from: { path: string; kind: "file" | "dir" }, into: string): Promise<string | null> {
+	const root = state.workspace?.root;
+	if (!root) return null;
+	const problem = copyProblem(from.path, into, root);
+	if (problem) return notify(problem), null;
+	// Names are compared without case: on Windows and on a Mac, two that differ only by case are one file.
+	const there = new Set((await backend.list(into)).map((entry) => entry.name.toLowerCase()));
+	const taken = (name: string) => there.has(name.toLowerCase());
+	const name = baseName(from.path);
+	const to = joinPath(into, taken(name) ? copyName(name, taken) : name);
+	await backend.copy(from.path, to);
+	setExpanded((set) => new Set(set).add(into));
+	refresh();
+	// The copy is of the file on disk: edits nobody saved are not in it, and that is said.
+	const unsaved = Object.keys(state.dirty).filter((path) => state.dirty[path] && (path === canonical(from.path) || isInside(from.path, path)));
+	if (unsaved.length) notify(`The copy is of what is saved: the unsaved changes in ${unsaved.length === 1 ? baseName(unsaved[0]!) : `${unsaved.length} files`} are not in it.`);
+	return to;
+}
+
+/** Puts what was cut or copied into the row's folder (the row itself, when it is one). */
+async function paste(onto: Entry): Promise<string | null> {
+	const held = clip();
+	if (!held) return notify("Nothing was cut or copied in the Explorer."), null;
+	const into = folderOf(onto);
+	if (!held.cut) return copyInto(held, into);
+	try {
+		const to = await moveInto(held, into, { ask: false });
+		if (to) setClip(null);
+		return to;
+	} catch (e) {
+		// What was cut is no longer where it was: it is let go, not offered again.
+		setClip(null);
+		throw e;
+	}
+}
+
 /**
  * One action on one entry. Afterwards the keyboard goes to what the action
  * made or renamed (`follow`), or back to the row it came from (`home`) when
@@ -191,6 +279,11 @@ async function act(action: string | null, entry: Entry, where: { home?: string; 
 		else if (action === NEW_FOLDER) back = await create(parent, "dir");
 		else if (action === RENAME) back = await rename(entry);
 		else if (action === TRASH) back = await trash(entry);
+		else if (action === CUT || action === COPY) {
+			if (state.workspace && holdsRoot(state.workspace.root, entry.path)) notify(`The workspace folder itself cannot be ${action === CUT ? "cut" : "copied"} from here.`);
+			else setClip({ path: entry.path, kind: entry.kind, cut: action === CUT });
+			back = entry.path;
+		} else if (action === PASTE) back = await paste(entry);
 		else if (action === COPY_PATH || action === COPY_RELATIVE) {
 			// The commands are loaded when asked for, because commands.ts imports this file.
 			await (await import("../commands")).copyPath(action === COPY_PATH ? "whole" : "relative", entry.path);
@@ -204,11 +297,34 @@ async function act(action: string | null, entry: Entry, where: { home?: string; 
 	if (to !== undefined) tree?.focus(to);
 }
 
+/** A row is dragged over a folder: it may be let go there when it could be moved there. */
+function dragOver(e: DragEvent, into: string) {
+	const root = state.workspace?.root;
+	if (!dragging || !root || moveProblem(dragging.path, into, root)) return setDropInto(null);
+	e.preventDefault();
+	if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+	setDropInto(into);
+}
+
+async function dropOn(e: DragEvent, into: string) {
+	const from = dragging;
+	dragging = null;
+	setDropInto(null);
+	if (!from) return;
+	e.preventDefault();
+	try {
+		const to = await moveInto(from, into, { ask: true });
+		tree?.focus(to ?? from.path);
+	} catch (error) {
+		notify(errorText(error), "error");
+	}
+}
+
 async function entryMenu(entry: Entry, at: Point) {
 	const root = state.workspace?.root;
 	if (!root) return;
 	const isRoot = holdsRoot(root, entry.path);
-	const action = await chooseFromMenu(isRoot ? "New in the workspace folder" : `Actions for ${entry.name}`, menuFor(entry.kind, entry.path, root), at);
+	const action = await chooseFromMenu(isRoot ? "New in the workspace folder" : `Actions for ${entry.name}`, menuFor(entry.kind, entry.path, root, clip() !== null), at);
 	await act(action, entry, { home: isRoot ? undefined : entry.path, follow: true });
 }
 
@@ -291,7 +407,15 @@ export function Explorer() {
 		tree = undefined;
 	});
 	return (
-		<div class="panel-body explorer" data-panel="explorer">
+		<div
+			class="panel-body explorer"
+			data-panel="explorer"
+			classList={{ "drop-root": dropInto() !== null && dropInto() === state.workspace?.root }}
+			// Below the rows, or between them: the workspace folder itself.
+			onDragOver={(e) => state.workspace && dragOver(e, state.workspace.root)}
+			onDragLeave={(e) => !e.currentTarget.contains(e.relatedTarget as Node | null) && setDropInto(null)}
+			onDrop={(e) => state.workspace && void dropOn(e, state.workspace.root)}
+		>
 			<div class="panel-title">
 				<span>{state.workspace?.name}</span>
 				<IconButton

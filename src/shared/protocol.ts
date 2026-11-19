@@ -181,6 +181,8 @@ export interface BackendApi {
 	write(path: string, text: string): Promise<{ mtime: number }>;
 	create(path: string, kind: "file" | "dir"): Promise<void>;
 	rename(from: string, to: string): Promise<void>;
+	/** Copies a file, or a folder and everything in it, to a path nothing is at yet. */
+	copy(from: string, to: string): Promise<void>;
 	trash(path: string): Promise<void>;
 	search(query: string, options: SearchOptions): Promise<SearchHit[]>;
 	history(path: string): Promise<Snapshot[]>;

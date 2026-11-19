@@ -73,7 +73,7 @@ of the text editor, and nothing of its own.
 | --- | --- | --- | --- |
 | Editor menu | Yes | Bring | Built: the app's own five (ask the agent, new question, new decision, Designer, region) |
 | Tab menu | Yes | Bring | Built: close, others, to the right, all, pin, copy path, show in Explorer, to the side |
-| Explorer menu | Partly | Bring | Copy path is built; cut, copy and paste come with step 5 |
+| Explorer menu | Yes | Bring | Built: new, cut, copy, paste, copy path, rename, move to trash |
 | Docs row menu | Yes | Have | Open, set a state, update; by the menu key too |
 | Health row menu | Yes | Have | Open, and what puts the row right |
 | Search row menu | No | Later | Copy the line or its path |
@@ -87,7 +87,7 @@ of the text editor, and nothing of its own.
 | Close to the right | Yes | Bring | Built: on the tab menu and as a command |
 | Pin a tab | Yes | Bring | Built: stays first, kept across sessions, not closed until it is unpinned |
 | Switch by Ctrl+Tab | Yes | Bring | Built: to the tab used before, and on through the order with Ctrl held |
-| Drag tabs | No | Bring | A tab cannot be dragged: not along the row, not to the other group |
+| Drag tabs | Yes | Bring | Built: along the row and to the other group; Ctrl+Shift+PageUp and PageDown too |
 | Split editor | Yes | Have | Side by side, Ctrl+\ |
 | Unsaved mark | Yes | Have | And closing asks first |
 | Tab overflow | Yes | Have | A button lists the tabs that do not fit |
@@ -140,8 +140,8 @@ of the text editor, and nothing of its own.
 | Follows the editor | Yes | Have | The open file's row is marked |
 | File watching | Yes | Have | The tree follows the disk |
 | Copy path | Yes | Bring | Built: whole (Alt+Shift+C) and from the project's folder, as commands |
-| Copy, cut, paste | No | Bring | Files and folders in the tree |
-| Drag to move | No | Bring | A row cannot be dragged; moving is a rename with a folder in the name |
+| Copy, cut, paste | Yes | Bring | Built: Ctrl+C, Ctrl+X, Ctrl+V and the row's menu; a copy beside itself is "… copy" |
+| Drag to move | Yes | Bring | Built: a row onto a folder, or onto the tree for the workspace folder; it asks first |
 | Reveal in system | No | Later | Open the folder in the file manager |
 | Open editors list | No | Later | The tabs serve |
 | Compare with saved | No | Later | Local history has snapshots; a diff against one is close |
@@ -282,7 +282,7 @@ Looked at: the light theme at 720 wide and the dark theme at 1440 wide.
 | Tab menu | Small | Yes | Close, close others, close to the right, close all, pin, copy path, show in Explorer |
 | Close to the right | Small | Yes | On the tab menu and as a command |
 | Pin a tab | Small | Yes | Pinned tabs stay first and survive "close others" |
-| Explorer menu | Small | Partly | Copy path is in; cut, copy and paste are step 5's |
+| Explorer menu | Small | Yes | Copy path came first; cut, copy and paste with step 5 |
 | Editor menu | Small | Yes | Ask the agent, new question, new decision, copy for Designer, wrap in region |
 
 A pinned tab is not closed by Ctrl+W, as in VS Code: the app says it is
@@ -346,9 +346,30 @@ Looked at: the dark theme at 1440 wide and the light theme at 720 wide.
 
 | Feature | Size | Done | What it takes |
 | --- | --- | --- | --- |
-| Copy, cut, paste | Medium | No | In the tree; a paste beside the original is a copy with a new name |
-| Drag to move | Medium | No | A row onto a folder; it asks before it moves |
-| Drag tabs | Medium | No | Along the row, and onto the other group |
+| Copy, cut, paste | Medium | Yes | In the tree; a paste beside the original is a copy with a new name |
+| Drag to move | Medium | Yes | A row onto a folder; it asks before it moves |
+| Drag tabs | Medium | Yes | Along the row, and onto the other group |
+
+What is cut or copied in the tree is the app's own, not the system's
+clipboard: a file on the system's clipboard is only its path as text. A
+cut row is dimmed until it is pasted. A paste asks nothing (it was asked
+for twice); a drop asks, because a drop is easily a slip of the hand. A
+move is a rename, so open tabs, the places to go back to and the links in
+the working documents follow it. Nothing is written over: a move onto a
+name that is taken is refused, and a copy takes the name "… copy". A copy
+is of the file on disk, and says so when the file has unsaved changes.
+
+A dragged tab lands where the mark is: the pinned stay first, so a tab
+dropped among them stands after them. Dropped in the other group it
+leaves this one; a group left with no tabs closes. The keyboard does the
+same along a row with Ctrl+Shift+PageUp and Ctrl+Shift+PageDown.
+
+Not built: dragging a file in from outside the app, a folder that opens
+when a drag rests on it, and a drop onto the editor to open a file there.
+
+Looked at: the dark theme at 1440 wide and the light theme at 720 wide.
+A row was dragged with the pointer and the move confirmed; the tabs were
+dragged by events given to the page, not by the pointer.
 
 ### Step 6: files that are not text
 

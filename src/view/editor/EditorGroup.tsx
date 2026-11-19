@@ -3,7 +3,8 @@
 import { tabShown } from "../recentTabs";
 import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { monaco } from "./monaco";
-import { activePath, closeAllTabs, closeOtherTabs, closeTab, closeTabsToRight, documents, focusRequest, openFile, revealSignal, revert, save, saveAll, setState, split, state, takeReveal, togglePin } from "../state";
+import { activePath, closeAllTabs, closeOtherTabs, closeTab, closeTabsToRight, documents, focusRequest, moveTab, openFile, revealSignal, revert, save, saveAll, setState, split, state, takeReveal, togglePin } from "../state";
+import { landsBefore } from "../../shared/tabOrder";
 import { othersOf, rightOf } from "../../shared/tabOrder";
 import { chooseFromMenu } from "../panels/RowMenu";
 import type { Point } from "../panels/Rows";
@@ -28,6 +29,10 @@ const viewStates = new Map<string, monaco.editor.ICodeEditorViewState | null>();
 /** The editor width, in pixels, from which the minimap is shown: under it, code at the line length would run beneath the map. */
 const MINIMAP_FROM = 640;
 export const editors: monaco.editor.IStandaloneCodeEditor[] = [];
+/** The tab being dragged, and the group it is in. One at a time, whichever group it is over. */
+let dragged: { path: string; group: number } | null = null;
+/** Where it would land: in which group, and before which tab (last, with null). */
+const [dropAt, setDropAt] = createSignal<{ group: number; before: string | null } | null>(null);
 
 const base = baseName;
 
@@ -244,6 +249,25 @@ export function EditorGroup(props: { index: number }) {
 		bands[(bands.indexOf(document.activeElement as HTMLElement) + (e.key === "ArrowDown" ? 1 : -1) + bands.length) % bands.length]?.focus();
 	};
 	let section!: HTMLElement;
+	/** Where the dragged tab would land in this group if it were let go over `before`. */
+	const markDrop = (index: number, before: string | null) => {
+		if (!dragged) return;
+		const g = state.groups[index]!;
+		const lands = landsBefore(g.tabs, g.pinned ?? [], dragged.path, before);
+		// Let go where it already stands, it would not move: no mark.
+		const stays = dragged.group === index && lands === (g.tabs[g.tabs.indexOf(dragged.path) + 1] ?? null);
+		setDropAt(stays ? null : { group: index, before: lands });
+	};
+	const drop = (e: DragEvent) => {
+		const tab = dragged;
+		if (!tab) return;
+		e.preventDefault();
+		e.stopPropagation();
+		const at = dropAt();
+		dragged = null;
+		setDropAt(null);
+		if (at) moveTab(tab.path, tab.group, at.group, at.before);
+	};
 	/**
 	 * What can be done with the file in front: until now these were only in the
 	 * command palette. The commands are loaded when the menu opens, because
@@ -276,18 +300,53 @@ export function EditorGroup(props: { index: number }) {
 	return (
 		<section ref={section} class="group" classList={{ active: state.activeGroup === props.index }} onMouseDown={() => setState("activeGroup", props.index)}>
 			<div class="tabs-row">
-				<div class="tabs" role="tablist" aria-label="Open files">
+				<div
+					class="tabs"
+					role="tablist"
+					aria-label="Open files"
+					classList={{ "drop-end": dropAt()?.group === props.index && dropAt()?.before === null }}
+					// Past the last tab: the dragged one would stand last.
+					onDragOver={(e) => dragged && (e.preventDefault(), markDrop(props.index, null))}
+					onDragLeave={(e) => !e.currentTarget.contains(e.relatedTarget as Node | null) && setDropAt(null)}
+					onDrop={drop}
+				>
 					<For each={group().tabs}>
 						{(path) => (
 							<div
 								class="tab"
 								role="tab"
+								draggable={true}
+								onDragStart={(e) => {
+									dragged = { path, group: props.index };
+									// The tab's own kind of thing: dropped on the text, or outside the app, it is nothing.
+									e.dataTransfer?.setData("application/x-ssl-studio-tab", path);
+									if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+								}}
+								onDragEnd={() => {
+									dragged = null;
+									setDropAt(null);
+								}}
+								onDragOver={(e) => {
+									if (!dragged) return;
+									e.preventDefault();
+									e.stopPropagation();
+									// Over a tab's first half it would stand before that tab, over its second half after it.
+									const box = e.currentTarget.getBoundingClientRect();
+									const row = group().tabs;
+									markDrop(props.index, e.clientX > box.left + box.width / 2 ? (row[row.indexOf(path) + 1] ?? null) : path);
+								}}
 								ref={(el) => (tabs.set(path, el), onCleanup(() => tabs.delete(path)))}
 								title={`${path}${state.conflicts[path] ? "\nChanged on disk since you opened it" : state.dirty[path] ? "\nUnsaved changes" : ""}`}
 								tabindex={group().active === path ? 0 : -1}
 								aria-label={`${labels().get(path) ?? base(path)}${group().pinned?.includes(path) ? ", pinned" : ""}${state.conflicts[path] ? ", changed on disk" : state.dirty[path] ? ", unsaved changes" : ""}`}
 								aria-selected={group().active === path}
-								classList={{ active: group().active === path, dirty: Boolean(state.dirty[path]), conflict: Boolean(state.conflicts[path]), pinned: Boolean(group().pinned?.includes(path)) }}
+								classList={{
+									active: group().active === path,
+									dirty: Boolean(state.dirty[path]),
+									conflict: Boolean(state.conflicts[path]),
+									pinned: Boolean(group().pinned?.includes(path)),
+									"drop-before": dropAt()?.group === props.index && dropAt()?.before === path,
+								}}
 								aria-haspopup="menu"
 								onKeyDown={(e) => e.target === e.currentTarget && onTabKey(e, path)}
 								onContextMenu={(e) => {

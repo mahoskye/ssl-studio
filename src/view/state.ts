@@ -17,7 +17,7 @@ import { recheckPlans, trackPlan } from "./plan/check";
 import { trackDoc, trackJson, trackToml, trackXml } from "./docCheck";
 import { recall, remember } from "./graph/canvas";
 import { packTabs, packViews, tabsKey, unpackTabs, unpackViews, viewsKey } from "./editor/sessionTabs";
-import { othersOf, rightOf, withPin } from "../shared/tabOrder";
+import { movedAcross, othersOf, placed, rightOf, withPin } from "../shared/tabOrder";
 
 export type Group = { tabs: string[]; active: string | null; mode?: "text" | "blocks"; /** The tabs that stay: first in the row, and not closed with the others. */ pinned?: string[] };
 export type PanelId = "explorer" | "objects" | "palette" | "reference" | "search" | "history" | "health" | "agent" | "docs";
@@ -412,6 +412,36 @@ export async function closeAllTabs(only?: number) {
 		const g = state.groups[group];
 		for (const path of othersOf(g?.tabs ?? [], g?.pinned ?? [], null)) if (!(await closeTab(path, group))) return;
 	}
+}
+
+/**
+ * A tab moved by hand: along its row, or to another group's row, to stand
+ * before `before` (last, with null). The file stays open as it is, edits and
+ * all; a group left with no tabs closes.
+ */
+export function moveTab(path: string, from: number, to: number, before: string | null) {
+	const next = movedAcross(state.groups as Group[], path, from, to, before);
+	const fields = (g: Group) => ({ tabs: g.tabs, active: g.active, ...(g.pinned ? { pinned: g.pinned } : {}) });
+	batch(() => {
+		if (next.groups.length < state.groups.length) {
+			// The group it left is gone: the one it came to is changed where it stands, so that its editor stays.
+			setState("groups", to, fields(next.groups[next.active]!));
+			setState("groups", (groups) => groups.filter((_, i) => i !== from));
+		} else next.groups.forEach((g, i) => (i === from || i === to) && setState("groups", i, fields(g)));
+		setState("activeGroup", next.active);
+	});
+	if (from !== to) revealSignal.fire(path);
+	focusEditor();
+}
+
+/** The open tab one place along its row, left or right, among the pinned or among the others. */
+export function shiftTab(by: 1 | -1, group = state.activeGroup) {
+	const g = state.groups[group];
+	const path = g?.active;
+	if (!g || !path) return;
+	const at = g.tabs.indexOf(path);
+	const before = by < 0 ? (g.tabs[at - 1] ?? path) : (g.tabs[at + 2] ?? null);
+	setState("groups", group, "tabs", placed(g.tabs, g.pinned ?? [], path, before));
 }
 
 /** Pins a tab, or lets a pinned one go. */

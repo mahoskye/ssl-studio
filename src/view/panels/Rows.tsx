@@ -7,7 +7,7 @@ import { createUniqueId, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { isMoveKey, moveIndex, restoreIndex, stopIndex, treeStep, typeAhead, type TreeRow } from "./rowMoves";
 
 export type Point = { x: number; y: number };
-type Handlers = { activate(e: KeyboardEvent): void; toggle(): void; key(e: KeyboardEvent): boolean | void; menu?: (at: Point) => void };
+type Handlers = { activate(e: KeyboardEvent): void; toggle(): void; key(e: KeyboardEvent): boolean | void; chord(e: KeyboardEvent): boolean | void; menu?: (at: Point) => void };
 const handlers = new WeakMap<Element, Handlers>();
 
 const rowsIn = (list: Element) => [...list.querySelectorAll<HTMLElement>("[data-row]")];
@@ -75,9 +75,14 @@ export function Rows(props: {
 		const key = wanted.key;
 		const row = key ? list.find((r) => keyOf(r) === key) : undefined;
 		if (row) focusRow(row, list);
-		// Not there, and the row the keyboard was on has gone: the row now in its place.
-		else if (last && !last.row.isConnected) restore(list);
-		else if (key || last) return;
+		// Not there, and the row the keyboard was on has gone: the row now in its place, until the one asked for
+		// comes (a file moved to another folder leaves its old place before it is listed in the new one).
+		else if (last && !last.row.isConnected) {
+			const still = wanted;
+			restore(list);
+			wanted = key ? still : null;
+			return;
+		} else if (key || last) return;
 		else restore(list);
 		wanted = null;
 	};
@@ -143,6 +148,8 @@ export function Rows(props: {
 			row.menu({ x: box.left + box.height, y: box.bottom });
 			return;
 		}
+		// A key with Ctrl is the row's own only where the row says so (cut, copy, paste); the rest are the app's.
+		if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && row?.chord(e) === true) return void e.preventDefault();
 		if (e.ctrlKey || e.metaKey || e.altKey) return;
 		if (isMoveKey(e.key)) {
 			e.preventDefault();
@@ -223,11 +230,17 @@ export function Row(props: {
 	style?: JSX.CSSProperties;
 	draggable?: boolean;
 	onDragStart?: (e: DragEvent) => void;
+	onDragEnd?: (e: DragEvent) => void;
+	/** Something is dragged over the row, and let go on it. To take it, the row prevents the event's default. */
+	onDragOver?: (e: DragEvent) => void;
+	onDrop?: (e: DragEvent) => void;
 	onActivate?: () => void;
 	/** Opens or closes the row: Left and Right in a tree. */
 	onToggle?: () => void;
 	/** Other keys on the row (F2, Delete). Return true for a key that was used. */
 	onKey?: (e: KeyboardEvent) => boolean | void;
+	/** Keys pressed with Ctrl (Ctrl+C, Ctrl+V). Return true for a key that was used; the others stay the app's. */
+	onChord?: (e: KeyboardEvent) => boolean | void;
 	/** The row's menu: right-click, the menu key, Shift+F10. */
 	onMenu?: (at: Point) => void;
 	onFocus?: () => void;
@@ -242,6 +255,7 @@ export function Row(props: {
 					activate: () => props.onActivate?.(),
 					toggle: () => props.onToggle?.(),
 					key: (e) => props.onKey?.(e),
+					chord: (e) => props.onChord?.(e),
 					menu: props.onMenu && ((at) => props.onMenu?.(at)),
 				})
 			}
@@ -257,6 +271,9 @@ export function Row(props: {
 			style={props.style}
 			draggable={props.draggable}
 			onDragStart={(e) => props.onDragStart?.(e)}
+			onDragEnd={(e) => props.onDragEnd?.(e)}
+			onDragOver={(e) => props.onDragOver?.(e)}
+			onDrop={(e) => props.onDrop?.(e)}
 			onClick={() => props.onActivate?.()}
 			onFocus={() => props.onFocus?.()}
 			onMouseEnter={() => props.onPoint?.()}
