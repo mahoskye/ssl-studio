@@ -72,8 +72,10 @@ describe("the demo project", () => {
 	test.skipIf(!server)("the formatter leaves every clean file as it is", async () => {
 		const changed: string[] = [];
 		for (const file of files.filter((f) => !ROUGH.test(f))) {
+			// A Windows checkout may hold CRLF where the repository holds LF: the line ends are git's, not the formatter's.
+			const lf = (text: string) => text.replace(/\r\n/g, "\n");
 			const formatted = Bun.spawnSync([server!, "--format", join(project, file)]).stdout.toString();
-			if (formatted !== (await Bun.file(join(project, file)).text())) changed.push(file);
+			if (lf(formatted) !== lf(await Bun.file(join(project, file)).text())) changed.push(file);
 		}
 		expect(changed).toEqual([]);
 	});

@@ -9,7 +9,11 @@ import type { Project } from "../src/shared/protocol";
 
 const root = join(import.meta.dir, "..");
 const SKIP = /^(node_modules|dist|build|artifacts|vendor|third-party|\.hutch|\.selftest|\.cottontail-tmp|\.git)\//;
-const files = [...new Bun.Glob("**/*.{md,markdown}").scanSync({ cwd: root, dot: true })].filter((f) => !SKIP.test(f) && !f.includes("/node_modules/")).sort();
+// Windows lists a path with backslashes: every test below reads it with forward ones.
+const files = [...new Bun.Glob("**/*.{md,markdown}").scanSync({ cwd: root, dot: true })]
+	.map((f) => f.split("\\").join("/"))
+	.filter((f) => !SKIP.test(f) && !f.includes("/node_modules/"))
+	.sort();
 /** Written under the rule, so held to all of it. A document joins this list when it is next edited. */
 const governed = (file: string) => file.startsWith("examples/") || file.startsWith("docs/adr/0007") || file.startsWith("docs/adr/0008");
 const said = (file: string, text: string) => checkTables(text).map((f) => `${file}:${f.line} ${f.message}`);
