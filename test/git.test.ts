@@ -1,13 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
-import { devNull, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Git } from "../src/bun/git";
 
 // A repository made for the test, with the test's own name on its commits: nothing of the machine's git is used
 // but the program.
 const hasGit = Bun.spawnSync(["git", "--version"]).exitCode === 0;
-const identity = { GIT_AUTHOR_NAME: "Test", GIT_AUTHOR_EMAIL: "test@example.test", GIT_COMMITTER_NAME: "Test", GIT_COMMITTER_EMAIL: "test@example.test", GIT_CONFIG_GLOBAL: devNull, GIT_CONFIG_NOSYSTEM: "1" };
+// The user's own settings are kept out by an empty file of settings: the null device is no file to git on Windows.
+const settings = join(mkdtempSync(join(tmpdir(), "ssl-studio-gitconfig-")), "config");
+writeFileSync(settings, "");
+const identity = { GIT_AUTHOR_NAME: "Test", GIT_AUTHOR_EMAIL: "test@example.test", GIT_COMMITTER_NAME: "Test", GIT_COMMITTER_EMAIL: "test@example.test", GIT_CONFIG_GLOBAL: settings, GIT_CONFIG_NOSYSTEM: "1" };
 Object.assign(process.env, identity);
 
 function repository(): string {
