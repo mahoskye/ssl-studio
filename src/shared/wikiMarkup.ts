@@ -4,11 +4,6 @@
 // braces. This turns the common marks into Markdown's, a line at a time, and
 // leaves every word as it was. What it does not know it leaves alone.
 
-/** Marks only the wiki markup has: a text with one of them is written in it. */
-export function looksLikeWiki(text: string): boolean {
-	return /\{\{[^}\n]+\}\}|\{code(?::[^}\n]*)?\}|\{noformat\}|\{quote\}|^h[1-6]\.\s|^bq\.\s|^\|\||\[[^\]|\n]+\|[a-z][a-z0-9+.-]*:[^\]\n]+\]/im.test(text);
-}
-
 /** The language a block of code names: "{code:sql}", "{code:title=Query|language=sql}". */
 const languageOf = (said: string) => {
 	const named = /(?:^|[|:])(?:language=)?([a-z][a-z0-9+#-]*)$/i.exec(said.split("|").find((part) => !part.includes("=") || /^language=/i.test(part)) ?? "");

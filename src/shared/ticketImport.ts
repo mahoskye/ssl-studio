@@ -1,6 +1,7 @@
 import type { Table } from "./csv";
+import { fenced } from "./catalog";
 import { ticketKey } from "./projectDocs";
-import { looksLikeWiki, wikiToMarkdown } from "./wikiMarkup";
+import { wikiToMarkdown } from "./wikiMarkup";
 
 // Tickets as a ticket system gives them out: a table exported from it (Jira's
 // CSV, a work-item list), or the JSON its API returns. Read here into what a
@@ -26,7 +27,15 @@ export type ImportedTicket = {
 	description: string;
 };
 
-export type Imported = { tickets: ImportedTicket[]; /** Rows or entries with no key or no title: not tickets. */ skipped: number; /** Why nothing could be read, when nothing could. */ problem?: string };
+export type Imported = {
+	tickets: ImportedTicket[];
+	/** Rows or entries with no key or no title: not tickets. */
+	skipped: number;
+	/** Entries that are pull requests: a system that lists them among its issues gives them out together. */
+	pulls?: number;
+	/** Why nothing could be read, when nothing could. */
+	problem?: string;
+};
 
 const KEY_LIKE = /^[A-Za-z][A-Za-z0-9_]*-\d+$|^\d+$/;
 const clean = (text: string | undefined) => (text ?? "").replace(/\r\n/g, "\n").trim();
@@ -52,8 +61,37 @@ const likeOwn = (own: string, keys: string[]) => (/^\d+$/.test(own) ? keys : key
 /** Every column whose name says it ties one ticket to another: a system writes one for each kind of link, and one for each link. */
 const linkColumns = (table: Table) => table.header.map((cell, at) => (/issue link|linked issue|related|relates|blocks|blocked|depends|duplicat|sub-?tasks?$/i.test(cell.text) ? at : -1)).filter((at) => at >= 0);
 
-/** A description as Markdown: one written in a ticket system's wiki markup is turned into it. `wiki` says it surely is. */
-const described = (text: string, wiki: boolean) => (text && (wiki || looksLikeWiki(text)) ? wikiToMarkdown(text) : text);
+/**
+ * A description as Markdown. One from a system of the Jira kind is in that
+ * system's wiki markup, and is turned into Markdown; any other is taken as
+ * it is. It is not guessed from the text: Markdown that holds "{{ }}" for a
+ * template of its own is not wiki markup.
+ */
+const described = (text: string, wiki: boolean) => (text && wiki ? wikiToMarkdown(text) : underSections(text));
+
+/**
+ * Markdown that goes under a ticket's own "What is asked": its headings are
+ * moved down together, so that the largest of them is the document's third
+ * level and the ticket keeps the one title it has. Only the marks before a
+ * heading change; code is left as written.
+ */
+function underSections(text: string): string {
+	const closed = fenced(text);
+	const lines = text.split("\n");
+	const heads: { at: number; level: number }[] = [];
+	let offset = 0;
+	lines.forEach((line, at) => {
+		const found = /^ {0,3}(#{1,6})(?=\s|$)/.exec(line);
+		if (found && !closed.some(([from, to]) => offset >= from && offset < to)) heads.push({ at, level: found[1]!.length });
+		offset += line.length + 1;
+	});
+	const down = 3 - Math.min(3, ...heads.map((head) => head.level));
+	if (!down) return text;
+	for (const head of heads) lines[head.at] = lines[head.at]!.replace(/#+/, "#".repeat(Math.min(6, head.level + down)));
+	return lines.join("\n");
+}
+/** A state as a person writes it: a system's own word in capitals ("OPEN", "NOT_PLANNED") is the word. */
+const stated = (status: string) => (/^[A-Z][A-Z_]*$/.test(status) ? status.toLowerCase().replace(/_/g, " ") : status);
 
 /** The tickets in a table: one for each row that has a key and a title. */
 export function ticketsFromTable(table: Table): Imported {
@@ -88,7 +126,7 @@ export function ticketsFromTable(table: Table): Imported {
 		tickets.push({
 			key: own,
 			title: at(title).replace(/\s+/g, " "),
-			status: at(status) || undefined,
+			status: stated(at(status)) || undefined,
 			type: at(type) || undefined,
 			source: /^https?:\/\//i.test(at(source)) ? at(source) : undefined,
 			parent: above && above.toLowerCase() !== own.toLowerCase() ? above : undefined,
@@ -121,6 +159,20 @@ const keyOf = (value: unknown): string => {
 	return typeof held.key === "string" ? held.key : typeof held.number === "number" ? String(held.number) : typeof held.id === "number" ? String(held.id) : "";
 };
 
+/**
+ * The page a person opens for an issue: the one named as such ("html_url"),
+ * or its "url" when that is a page and not the API's own address for it.
+ */
+const pageOf = (issue: Record<string, unknown>) => {
+	const page = [issue.html_url, issue.url].find((value): value is string => typeof value === "string" && /^https?:\/\//i.test(value) && !/^https?:\/\/api\.|\/rest\/api\/|\/api\/v\d/i.test(value));
+	return page;
+};
+/** A closed issue that says why it was closed without being done is that, not "closed": not planned, a duplicate. */
+const closedAs = (fields: Record<string, unknown>) => {
+	const why = named(fields.state_reason ?? fields.stateReason).toLowerCase().replace(/_/g, " ");
+	return why === "not planned" || why === "duplicate" ? why : "";
+};
+
 /** The page a person opens for a ticket, from the address the API gives for it: ".../rest/api/2/issue/10011" is ".../browse/KEY". */
 const browseLink = (self: unknown, key: string) => {
 	const found = typeof self === "string" ? /^(https?:\/\/.+?)\/rest\/api\/[^/]+\/issue\/[^/]+$/i.exec(self) : null;
@@ -137,8 +189,14 @@ export function ticketsFromJson(value: unknown): Imported {
 	if (!list.length) return { tickets: [], skipped: 0, problem: "It holds no issues: neither a list, nor an object with a key or a list named issues." };
 	const tickets: ImportedTicket[] = [];
 	let skipped = 0;
+	let pulls = 0;
 	for (const entry of list) {
 		const issue = (entry && typeof entry === "object" ? entry : {}) as Record<string, unknown>;
+		// A pull request listed among the issues is a change, not something asked for.
+		if (issue.pull_request && typeof issue.pull_request === "object") {
+			pulls++;
+			continue;
+		}
 		const fields = (issue.fields && typeof issue.fields === "object" ? issue.fields : issue) as Record<string, unknown>;
 		const own = ticketKey(keyOf(issue.key ?? issue.number ?? issue.id ?? ""));
 		const title = clean(named(fields.summary ?? fields.title)).replace(/\s+/g, " ");
@@ -155,23 +213,25 @@ export function ticketsFromJson(value: unknown): Imported {
 		tickets.push({
 			key: own,
 			title,
-			status: named(fields.status ?? fields.state) || undefined,
+			status: closedAs(fields) || stated(named(fields.status ?? fields.state)) || undefined,
 			type: named(fields.issuetype ?? fields.type) || undefined,
-			source: typeof issue.url === "string" && /^https?:\/\//i.test(issue.url) ? issue.url : browseLink(issue.self, own),
+			source: pageOf(issue) ?? browseLink(issue.self, own),
 			parent: above && above.toLowerCase() !== own.toLowerCase() ? above : undefined,
 			related: unique(likeOwn(own, [...links, ...subtasks, ...related].filter(Boolean).map(ticketKey)), [own, above]),
 			// An API of the Jira kind gives the fields under "fields", and a description that is text in its wiki markup.
-			description: described(clean(flat(fields.description)).replace(/\n{3,}/g, "\n\n"), typeof fields.description === "string" && fields !== issue),
+			// What was asked is under one name or another: "description", or an issue's "body".
+			description: described(clean(flat(fields.description ?? fields.body ?? fields.details)).replace(/\n{3,}/g, "\n\n"), typeof fields.description === "string" && fields !== issue),
 		});
 	}
-	return { tickets, skipped };
+	return { tickets, skipped, ...(pulls ? { pulls } : {}) };
 }
 
 /** What an import came to, in a sentence. */
-export function importSummary(counts: { made: number; updated: number; same: number; skipped: number }): string {
+export function importSummary(counts: { made: number; updated: number; same: number; skipped: number; pulls?: number }): string {
 	const n = (count: number, what: string) => (count ? `${count} ${what}` : "");
 	const parts = [n(counts.made, "new"), n(counts.updated, "updated"), n(counts.same, "as they were")].filter(Boolean);
 	const total = counts.made + counts.updated + counts.same;
-	if (!total) return counts.skipped ? `No tickets: ${counts.skipped} ${counts.skipped === 1 ? "row has" : "rows have"} no key or no title.` : "No tickets there.";
-	return `${total} ${total === 1 ? "ticket" : "tickets"}: ${parts.join(", ")}.${counts.skipped ? ` ${counts.skipped} without a key or a title ${counts.skipped === 1 ? "was" : "were"} passed over.` : ""}`;
+	const pulls = counts.pulls ? ` ${counts.pulls} pull ${counts.pulls === 1 ? "request was" : "requests were"} passed over: a change is not a ticket.` : "";
+	if (!total) return `${counts.skipped ? `No tickets: ${counts.skipped} ${counts.skipped === 1 ? "row has" : "rows have"} no key or no title.` : "No tickets there."}${pulls}`;
+	return `${total} ${total === 1 ? "ticket" : "tickets"}: ${parts.join(", ")}.${counts.skipped ? ` ${counts.skipped} without a key or a title ${counts.skipped === 1 ? "was" : "were"} passed over.` : ""}${pulls}`;
 }

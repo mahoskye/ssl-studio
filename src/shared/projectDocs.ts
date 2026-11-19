@@ -41,7 +41,7 @@ const TONES: Record<string, readonly string[]> = {
 	done: ["done", "accepted", "answered", "verified", "migrated", "closed", "resolved", "complete", "completed", "approved", "built"],
 	active: ["in progress", "doing", "started", "under way", "building", "review", "in review", "testing"],
 	waiting: ["open", "to do", "todo", "planned", "ready", "draft", "proposed", "new", "found", "pending", ""],
-	off: ["dropped", "superseded", "rejected", "blocked", "gone", "not needed", "won't do", "wontfix", "cancelled", "canceled"],
+	off: ["dropped", "superseded", "rejected", "blocked", "gone", "not needed", "not planned", "duplicate", "won't do", "wontfix", "cancelled", "canceled"],
 };
 export type Tone = "done" | "active" | "waiting" | "off";
 /** What a status comes to. A word that is none of those known is taken as under way. */

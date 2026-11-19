@@ -507,6 +507,17 @@ the work comes from ([ADR 0012](adr/0012-a-projects-work-is-written-down.md)).
   when the row has a parent column that is empty; and the description,
   which is in Jira's wiki markup and read as headings and stray braces. A
   ticket read from the API also keeps the address a person opens for it.
+- **And against what GitHub gives out.** Its own command's JSON (`gh
+  issue list --json`) and its issues API were read for their field names,
+  and invented issues in those shapes run through the reader. What was
+  asked was not read at all: an issue keeps it under "body", and the
+  reader looked under "description" only. Also: the state came across in
+  capitals ("OPEN"); the link kept was the API's address, not the page; a
+  pull request listed among the issues became a ticket; and an issue
+  closed as not planned read as done. A description's headings now go
+  under the ticket's own sections, so a ticket keeps the one title it has.
+  Wiki markup is no longer guessed from the text: Markdown that holds
+  "{{ }}" for a template of its own was at risk of being rewritten.
 - **A registry's rows say which ticket carries them.** A `ticket` column
   in a registry ties each row to a ticket: the ticket's page lists what it
   has to carry across and how much of it has come, the table's key leads

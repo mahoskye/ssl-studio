@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { parseCsv } from "../src/shared/csv";
-import { ticketsFromJson, ticketsFromTable } from "../src/shared/ticketImport";
-import { looksLikeWiki, wikiToMarkdown } from "../src/shared/wikiMarkup";
+import { importSummary, ticketsFromJson, ticketsFromTable } from "../src/shared/ticketImport";
+import { toneOf } from "../src/shared/projectDocs";
+import { wikiToMarkdown } from "../src/shared/wikiMarkup";
 
 // The shapes are those a public Jira server gives out (its "all fields" CSV
 // export and its search API), read on 2026-11-19 for their column names and
@@ -101,16 +102,55 @@ describe("what a Jira server's search returns", () => {
 	});
 });
 
-describe("a description from somewhere else", () => {
-	test("Markdown from a system that writes Markdown is left as it is", () => {
-		const table = ticketsFromTable(parseCsv('ID,Title,Body\n12,A title,"# A heading\n\n* a bullet\n\n1. one"\n'));
-		expect(table.tickets[0]!.description).toBe("# A heading\n\n* a bullet\n\n1. one");
-		const api = ticketsFromJson([{ number: 12, title: "A title", body: "# A heading", state: "open" }]);
-		expect(api.tickets[0]).toMatchObject({ key: "12", title: "A title", status: "open" });
+// The shapes are those GitHub gives out: its own command's ("gh issue list
+// --json") and its API's, read on 2026-11-19 for their field names only.
+// Every issue here is invented.
+describe("issues as GitHub gives them out", () => {
+	const cli = [
+		{ body: "# Steps\n\n1. Open the report\n\nUses `${{ secrets.X }}` and {{ a template }}.", closed: false, labels: [{ id: "LA_1", name: "bug", description: "", color: "d73a4a" }], milestone: null, number: 12, state: "OPEN", title: "The report shows late samples twice", url: "https://github.com/example/lab/issues/12" },
+		{ body: "", closed: true, labels: [], milestone: { number: 1, title: "First", description: "", dueOn: null }, number: 13, state: "CLOSED", title: "Holidays table", url: "https://github.com/example/lab/issues/13" },
+	];
+	const rest = [
+		{ url: "https://api.github.com/repos/example/lab/issues/14", html_url: "https://github.com/example/lab/pull/14", id: 6400000001, node_id: "PR_x", number: 14, title: "Fix the report", user: { login: "someone", id: 1 }, labels: [], state: "closed", type: null, draft: false, pull_request: { url: "https://api.github.com/repos/example/lab/pulls/14", html_url: "https://github.com/example/lab/pull/14", merged_at: null }, body: "Closes #12", state_reason: null },
+		{ url: "https://api.github.com/repos/example/lab/issues/12", html_url: "https://github.com/example/lab/issues/12", id: 6400000002, number: 12, title: "The report shows late samples twice", user: { login: "someone", id: 1 }, labels: [{ id: 1, name: "bug", color: "d73a4a", default: true, description: "" }], state: "closed", state_reason: "not_planned", type: { id: 5, name: "Bug", description: "", color: "red" }, sub_issues_summary: { total: 0, completed: 0, percent_completed: 0 }, body: "## Steps\n\n1. Open the report" },
+		{ url: "https://api.github.com/repos/example/lab/issues/15", html_url: "https://github.com/example/lab/issues/15", id: 6400000003, number: 15, title: "Done one", labels: [], state: "closed", state_reason: "completed", type: null, body: null },
+	];
+	test("its own command's: the body is what was asked, the state is a word, the page is the issue's", () => {
+		const read = ticketsFromJson(cli);
+		expect(read.tickets.map((t) => [t.key, t.status, t.source])).toEqual([
+			["12", "open", "https://github.com/example/lab/issues/12"],
+			["13", "closed", "https://github.com/example/lab/issues/13"],
+		]);
+		// Markdown is left as Markdown, its own "{{ }}" included; its headings go under the ticket's sections.
+		expect(read.tickets[0]!.description).toBe("### Steps\n\n1. Open the report\n\nUses `${{ secrets.X }}` and {{ a template }}.");
+		expect(read.tickets[1]!.description).toBe("");
 	});
-	test("wiki markup is known by marks only it has", () => {
-		for (const text of ["Use {{RunSQL}} here", "{code}\nx\n{code}", "h2. Why", "[the wiki|https://example.test]", "||a||b||", "bq. said", "{quote}\nsaid\n{quote}"]) expect(looksLikeWiki(text)).toBe(true);
-		for (const text of ["# A heading", "* a bullet", "[a link](https://example.test)", "a | b", "1. one", "x := {1, 2};"]) expect(looksLikeWiki(text)).toBe(false);
+	test("its API's: a pull request is passed over, the page is the one a person opens, and why it was closed is said", () => {
+		const read = ticketsFromJson(rest);
+		expect(read.pulls).toBe(1);
+		expect(read.tickets.map((t) => [t.key, t.status, t.type, t.source, t.description])).toEqual([
+			["12", "not planned", "Bug", "https://github.com/example/lab/issues/12", "### Steps\n\n1. Open the report"],
+			["15", "closed", undefined, "https://github.com/example/lab/issues/15", ""],
+		]);
+		expect(importSummary({ made: 2, updated: 0, same: 0, skipped: 0, pulls: 1 })).toBe("2 tickets: 2 new. 1 pull request was passed over: a change is not a ticket.");
+		expect(importSummary({ made: 0, updated: 0, same: 0, skipped: 0, pulls: 2 })).toBe("No tickets there. 2 pull requests were passed over: a change is not a ticket.");
+	});
+	test("an issue that was not planned is set aside, not done", () => {
+		expect(toneOf("not planned")).toBe("off");
+		expect(toneOf("duplicate")).toBe("off");
+		expect(toneOf("closed")).toBe("done");
+	});
+});
+
+describe("a description from somewhere else", () => {
+	test("Markdown from a system that writes Markdown keeps its marks, with its headings under the ticket's own", () => {
+		const table = ticketsFromTable(parseCsv('ID,Title,Body,State\n12,A title,"# A heading\n\n## A lower one\n\n* a bullet\n\n```\n# not a heading\n```\n\nUse {{x}} as it is.",OPEN\n'));
+		expect(table.tickets[0]!.description).toBe("### A heading\n\n#### A lower one\n\n* a bullet\n\n```\n# not a heading\n```\n\nUse {{x}} as it is.");
+		expect(table.tickets[0]!.status).toBe("open");
+	});
+	test("headings that are already low enough, and a text with none, are left as they are", () => {
+		const api = ticketsFromJson([{ number: 12, title: "A title", body: "### Low\n\n#### Lower\n\n#hashtag and # alone", state: "open" }, { number: 13, title: "Plain", body: "No headings here." }]);
+		expect(api.tickets.map((t) => t.description)).toEqual(["### Low\n\n#### Lower\n\n#hashtag and # alone", "No headings here."]);
 	});
 });
 

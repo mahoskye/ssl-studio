@@ -179,7 +179,7 @@ export async function importTickets() {
 		}
 	} else read = ticketsFromTable(parseCsv(text));
 	if (read.problem) return notify(`${typed}: ${read.problem}`, "error");
-	if (!read.tickets.length) return notify(importSummary({ made: 0, updated: 0, same: 0, skipped: read.skipped }));
+	if (!read.tickets.length) return notify(importSummary({ made: 0, updated: 0, same: 0, skipped: read.skipped, pulls: read.pulls }));
 	// A ticket that is in the export twice is one ticket: the last of its rows is the one that stands.
 	const once = new Map(read.tickets.map((ticket) => [ticket.key.toLowerCase(), ticket]));
 	read = { ...read, tickets: [...once.values()] };
@@ -189,7 +189,7 @@ export async function importTickets() {
 	const go = "Import";
 	const said = `${read.tickets.length} ${read.tickets.length === 1 ? "ticket" : "tickets"} in ${typed}: ${read.tickets.length - here} new, ${here} already here. Those here keep what was written in them; their state, title and kind are brought up to date.`;
 	if ((await choose(said, [go])) !== go) return;
-	const counts = { made: 0, updated: 0, same: 0, skipped: read.skipped };
+	const counts = { made: 0, updated: 0, same: 0, skipped: read.skipped, pulls: read.pulls };
 	try {
 		for (const [at, ticket] of read.tickets.entries()) {
 			const was = before[at]!;
