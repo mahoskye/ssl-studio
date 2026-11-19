@@ -1,5 +1,6 @@
 // One editor group: a tab strip over one Monaco editor that shows the
 // group's active document. Two groups side by side make a split.
+import { tabShown } from "../recentTabs";
 import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { monaco } from "./monaco";
 import { activePath, closeAllTabs, closeOtherTabs, closeTab, documents, focusRequest, openFile, revealSignal, revert, save, saveAll, setState, split, state, takeReveal } from "../state";
@@ -63,6 +64,7 @@ export function EditorGroup(props: { index: number }) {
 			automaticLayout: true,
 			fontSize: state.settings.fontSize,
 			minimap: { enabled: minimap() },
+			wordWrap: state.settings.wordWrap ? "on" : "off",
 			renderWhitespace: "selection",
 			"semanticHighlighting.enabled": true,
 			inlayHints: { enabled: state.settings.inlayHints === false ? "off" : "on" },
@@ -125,10 +127,17 @@ export function EditorGroup(props: { index: number }) {
 		editor?.updateOptions({
 			fontSize: state.settings.fontSize,
 			minimap: { enabled: minimap() },
+			wordWrap: state.settings.wordWrap ? "on" : "off",
 			inlayHints: { enabled: state.settings.inlayHints === false ? "off" : "on" },
 			rulers: rulers(),
 		}),
 	);
+
+	// The order tabs were used in: what Ctrl+Tab goes back through.
+	createEffect(() => {
+		const path = group().active;
+		if (path) tabShown(props.index, path);
+	});
 
 	// The active tab is always in view, however many are open.
 	const tabs = new Map<string, HTMLElement>();

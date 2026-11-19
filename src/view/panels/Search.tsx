@@ -29,6 +29,7 @@ export function Search() {
 	const [hits, setHits] = createSignal<SearchHit[]>([]);
 	const [regex, setRegex] = createSignal(false);
 	const [caseSensitive, setCaseSensitive] = createSignal(false);
+	const [wholeWord, setWholeWord] = createSignal(false);
 	/** Where the panel stands: nothing asked yet, searching, the last search answered or failed. */
 	const [status, setStatus] = createSignal<"idle" | "busy" | "done" | "failed">("idle");
 	const [asked, setAsked] = createSignal("");
@@ -45,7 +46,7 @@ export function Search() {
 		setStatus("busy");
 		setAsked(query);
 		try {
-			const found = await backend.search(query, { regex: regex(), caseSensitive: caseSensitive() });
+			const found = await backend.search(query, { regex: regex(), caseSensitive: caseSensitive(), wholeWord: wholeWord() });
 			if (mine !== latest) return;
 			setHits(found);
 			setStatus("done");
@@ -135,6 +136,7 @@ export function Search() {
 					onKeyDown={(e) => e.key === "ArrowDown" && focusRowsBelow(e.currentTarget) && e.preventDefault()}
 				/>
 				<IconButton label="Match case" glyph="Aa" pressed={caseSensitive()} onClick={() => flip(setCaseSensitive, caseSensitive())} />
+				<IconButton label="Match whole word" title="Whole word" glyph="ab" pressed={wholeWord()} onClick={() => flip(setWholeWord, wholeWord())} />
 				<IconButton label="Use a regular expression" title="Regular expression" glyph=".*" pressed={regex()} onClick={() => flip(setRegex, regex())} />
 			</form>
 			<p class="hint" classList={{ warn: status() === "failed" }} role="status">

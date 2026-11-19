@@ -2,6 +2,8 @@
 // The same API travels over Electrobun's RPC in the app and over a WebSocket
 // in the browser host (src/bun/web.ts); src/bun/backend.ts implements it.
 
+import type { SearchOptions } from "./searchPattern";
+
 export type Entry = { name: string; path: string; kind: "file" | "dir"; size: number };
 
 export type Workspace = { root: string; name: string };
@@ -112,6 +114,8 @@ export type Settings = {
 	fontSize: number;
 	formatOnSave: boolean;
 	minimap: boolean;
+	/** Long lines are wrapped at the editor's edge. Off unless set. */
+	wordWrap?: boolean;
 	/** Parameter names shown beside the arguments of a call. On unless set to false. */
 	inlayHints?: boolean;
 	/** A ruler at the style's line length. On unless set to false. */
@@ -176,7 +180,7 @@ export interface BackendApi {
 	create(path: string, kind: "file" | "dir"): Promise<void>;
 	rename(from: string, to: string): Promise<void>;
 	trash(path: string): Promise<void>;
-	search(query: string, options: { regex?: boolean; caseSensitive?: boolean }): Promise<SearchHit[]>;
+	search(query: string, options: SearchOptions): Promise<SearchHit[]>;
 	history(path: string): Promise<Snapshot[]>;
 	snapshot(path: string, id: string): Promise<string>;
 	/** The open folder's project settings (defaults when it has no project.toml). */

@@ -15,7 +15,8 @@ import { insertTemplate } from "./panels/Palette";
 import { TEMPLATES } from "../shared/houseStyle";
 import { askAbout } from "./agent/Agent";
 import { startTidy } from "./agent/tidy";
-import { joinPath } from "../shared/paths";
+import { joinPath, relativeTo } from "../shared/paths";
+import { installRecentTabs, stepRecent } from "./recentTabs";
 import { isPlanPath, newPlan, printPlan } from "./plan/model";
 import { isMarkdown, isTable, newDoc, setUpProject, undoSetUp } from "./project";
 import { importTickets, newKnowledge, newRegistry, newSpec, newState, newTicket, ticketAtHand, updateCatalogs, updateManifest } from "./projectDocs";
@@ -51,6 +52,21 @@ export type Command = { id: string; label: string; detail?: string; run: () => v
 const toggle = (key: "left" | "bottom" | "right") => setState("settings", "layout", key, (v) => !v);
 const showBottom = (view: "problems" | "output") => (setState("bottomView", view), setState("settings", "layout", "bottom", true));
 /** The `uiScale` setting, one step up or down, or back to 1. */
+/** Puts text on the clipboard: by the app's own way where there is one, by the web view's otherwise. */
+export async function copyText(text: string, said: string) {
+	const copied = (await backend.clipboard(text).catch(() => false)) || (await navigator.clipboard?.writeText(text).then(() => true, () => false));
+	// What could not be copied is shown, so that it can be copied by hand.
+	notify(copied ? said : `Could not reach the clipboard. It was: ${text.length > 300 ? `${text.slice(0, 300)}…` : text}`, copied ? "info" : "error");
+}
+
+/** A file's path, whole or from the project's folder, with the slashes the system writes. */
+export async function copyPath(kind: "whole" | "relative", path = activePath()) {
+	if (!path) return notify("No file is open to copy the path of.");
+	const root = state.workspace?.root;
+	const text = kind === "relative" && root ? relativeTo(root, path) : path;
+	await copyText(text, `Copied ${text}`);
+}
+
 const zoom = (by: 1 | -1 | 0) => void saveSetting({ uiScale: by ? stepScale(state.settings.uiScale, by) : UI_SCALE.normal });
 
 export const commands: Command[] = [
@@ -69,9 +85,14 @@ export const commands: Command[] = [
 	{ id: "close-others", label: "Close other tabs", run: () => void closeOtherTabs() },
 	{ id: "close-all", label: "Close all tabs", run: () => void closeAllTabs() },
 	{ id: "reopen-tab", label: "Reopen closed tab", run: () => void reopenClosedTab() },
+	{ id: "recent-tab", label: "Go to the tab used before", detail: "And with Ctrl held, on through the ones before that", run: () => stepRecent(1) },
+	{ id: "recent-tab-back", label: "Go back through the tabs used", run: () => stepRecent(-1) },
 	{ id: "next-tab", label: "Next tab", run: nextTab },
 	{ id: "previous-tab", label: "Previous tab", run: previousTab },
 	{ id: "split", label: "Split editor", run: split },
+	{ id: "copy-path", label: "Copy path", detail: "The open file's whole path", run: () => void copyPath("whole") },
+	{ id: "copy-relative-path", label: "Copy path in the project", detail: "The open file's path from the project's folder", run: () => void copyPath("relative") },
+	{ id: "word-wrap", label: "Toggle word wrap", detail: "Long lines wrapped at the editor's edge, or not", run: () => void saveSetting({ wordWrap: !state.settings.wordWrap }) },
 	{ id: "focus-editor", label: "Focus editor", run: focusEditor },
 	{ id: "focus-side-panel", label: "Focus side panel", run: focusSidePanel },
 	// The code
@@ -253,6 +274,10 @@ export const DEFAULT_KEYS: Record<string, string> = {
 	"ctrl+alt+s": "save-all",
 	"ctrl+w": "close",
 	"ctrl+shift+t": "reopen-tab",
+	"ctrl+tab": "recent-tab",
+	"ctrl+shift+tab": "recent-tab-back",
+	"alt+z": "word-wrap",
+	"alt+shift+c": "copy-path",
 	"ctrl+pagedown": "next-tab",
 	"ctrl+pageup": "previous-tab",
 	"ctrl+\\": "split",
@@ -290,6 +315,7 @@ export const keysFor = (id: string) => keysOf(id, keymap()).map(displayKey).join
 
 export function installKeys() {
 	setFocusFallback(focusEditor);
+	installRecentTabs();
 	window.addEventListener(
 		"keydown",
 		(e) => {

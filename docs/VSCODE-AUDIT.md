@@ -84,7 +84,7 @@ how much of it the app already does by a command or a key.
 | Close, close others | Yes | Have | Commands: close, close others, close all, reopen closed |
 | Close to the right | No | Bring | Goes on the tab menu |
 | Pin a tab | No | Bring | A pinned tab stays first and is not closed with the others |
-| Switch by Ctrl+Tab | No | Bring | Ctrl+PageDown goes along the row; nothing goes to the last one used |
+| Switch by Ctrl+Tab | Yes | Bring | Built: to the tab used before, and on through the order with Ctrl held |
 | Drag tabs | No | Bring | A tab cannot be dragged: not along the row, not to the other group |
 | Split editor | Yes | Have | Side by side, Ctrl+\ |
 | Unsaved mark | Yes | Have | And closing asks first |
@@ -108,8 +108,8 @@ how much of it the app already does by a command or a key.
 | Format on save | Yes | Have | A setting |
 | Completion and hover | Yes | Have | From the language server |
 | Snippets | Yes | Have | The Palette panel, and kept snippets |
-| Word wrap toggle | No | Bring | Alt+Z did nothing, and the editor's list has no such command |
-| Toggle comment | Partly | Bring | Block comment is in the list; Ctrl+/ changed nothing in a SQL file |
+| Word wrap toggle | Yes | Bring | Built: Alt+Z, a command, and a setting that is kept |
+| Toggle comment | Yes | Bring | Built: Ctrl+/ in SQL, YAML, INI, XML, Markdown; SSL as the editor wraps it |
 | User snippets | Partly | Later | Kept in the knowledge base, not by prefix and Tab |
 | Indent settings | Partly | Later | The editor converts tabs and spaces; nothing shows which a file uses |
 | Sticky scroll | No | Later | The enclosing procedure stays at the top |
@@ -137,7 +137,7 @@ how much of it the app already does by a command or a key.
 | Tree, new, rename | Yes | Have | And move to trash; F2 and Delete work on a row |
 | Follows the editor | Yes | Have | The open file's row is marked |
 | File watching | Yes | Have | The tree follows the disk |
-| Copy path | No | Bring | Whole, and from the project's folder |
+| Copy path | Yes | Bring | Built: whole (Alt+Shift+C) and from the project's folder, as commands |
 | Copy, cut, paste | No | Bring | Files and folders in the tree |
 | Drag to move | No | Bring | A row cannot be dragged; moving is a rename with a folder in the name |
 | Reveal in system | No | Later | Open the folder in the file manager |
@@ -150,7 +150,7 @@ how much of it the app already does by a command or a key.
 | Feature | Here | Verdict | Note |
 | --- | --- | --- | --- |
 | Across files | Yes | Have | With match case and regular expressions |
-| Whole word | No | Bring | The third of the usual three switches |
+| Whole word | Yes | Bring | Built: the third switch, "ab" |
 | Include and exclude | No | Bring | One box, no way to say which files |
 | Replace across files | No | Bring | With a preview before anything is written |
 | Results as a tree | Partly | Later | By file; not collapsible |
@@ -250,11 +250,16 @@ built, looked at in the running app and tested; Skipped says why below.
 
 | Feature | Size | Done | What it takes |
 | --- | --- | --- | --- |
-| Word wrap toggle | Small | No | Alt+Z, a command, kept as a setting |
-| Toggle comment | Small | No | Ctrl+/ comments lines in SSL, SQL and the other document kinds |
-| Whole word | Small | No | A third switch in Search |
-| Switch by Ctrl+Tab | Small | No | To the tab used before this one, and back |
-| Copy path | Small | No | Whole and from the project's folder; a command each |
+| Word wrap toggle | Small | Yes | Alt+Z, a command, kept as a setting |
+| Toggle comment | Small | Yes | Ctrl+/ comments lines in SQL and the other document kinds; SSL keeps the editor's way |
+| Whole word | Small | Yes | A third switch in Search |
+| Switch by Ctrl+Tab | Small | Yes | To the tab used before this one, and back; the key itself was not pressed in the preview |
+| Copy path | Small | Yes | Whole and from the project's folder; a command each |
+
+In SSL a comment runs from `/*` to the next `;`, so the editor wraps a line
+in both and a statement's own `;` leaves a second one until the comment is
+taken off again. Doing better needs to know where a statement ends, which
+is the language server's to say (ADR 0003).
 
 ### Step 2: right-click menus
 

@@ -3,6 +3,7 @@
 import { mkdirSync, readdirSync, renameSync, statSync, watch, existsSync, type FSWatcher } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type { Entry, SearchHit } from "../shared/protocol";
+import { searchPattern, type SearchOptions } from "../shared/searchPattern";
 import { decode, encode, encodingOf, type Encoding } from "./encoding";
 
 const SKIP = new Set([".git", "node_modules", ".ssl-studio", ".hutch", "dist", "build"]);
@@ -103,10 +104,9 @@ export class WorkspaceFiles {
 		}
 	}
 
-	async search(query: string, options: { regex?: boolean; caseSensitive?: boolean }): Promise<SearchHit[]> {
+	async search(query: string, options: SearchOptions): Promise<SearchHit[]> {
 		if (!query) return [];
-		const flags = options.caseSensitive ? "g" : "gi";
-		const pattern = new RegExp(options.regex ? query : query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), flags);
+		const pattern = searchPattern(query, options);
 		const hits: SearchHit[] = [];
 		for (const path of this.files()) {
 			if (statSync(path).size > SEARCH_MAX_BYTES) continue;

@@ -208,3 +208,16 @@ monaco.languages.registerDocumentFormattingEditProvider("json", {
 		return formatted === null || formatted === model.getValue() ? [] : [{ range: model.getFullModelRange(), text: formatted }];
 	},
 });
+
+// How a line is commented out in each kind of document: what Ctrl+/ writes. The grammars for these come with the
+// editor; their comment marks are said here, so the key works whether or not the grammar has been asked for yet.
+for (const [id, comments] of [
+	["sql", { lineComment: "--", blockComment: ["/*", "*/"] }],
+	["yaml", { lineComment: "#" }],
+	["ini", { lineComment: ";" }],
+	["xml", { blockComment: ["<!--", "-->"] }],
+	["markdown", { blockComment: ["<!--", "-->"] }],
+] as const) {
+	monaco.languages.setLanguageConfiguration(id, { comments: comments as monaco.languages.CommentRule });
+}
+

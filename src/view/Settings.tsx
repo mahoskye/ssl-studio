@@ -156,6 +156,7 @@ export function SettingsDialog() {
 		fontSize: ["Font size", "The editor, Blocks, diffs and rendered documents"],
 		formatOnSave: ["Format changed lines on save", "Only the lines changed since the last save"],
 		minimap: ["Minimap", "The outline of the file at the editor's edge; a narrow editor goes without"],
+		wordWrap: ["Word wrap", "Long lines wrapped at the editor's edge, not scrolled to; Alt+Z switches it"],
 		inlayHints: ["Parameter name hints", "Names shown beside the arguments of a call"],
 		rulers: ["Ruler at the line length", "A line down the editor at the style profile's line length"],
 		rulerMargin: ["Rulers beside it", "Fainter rulers this many columns before and after; 0 for none"],
@@ -164,7 +165,7 @@ export function SettingsDialog() {
 	const anyShown = (group: Group, ...rows: (keyof typeof ROWS)[]) => rows.some((r) => shown(group, ...ROWS[r]));
 	const groups = {
 		appearance: () => anyShown("Appearance", "theme", "uiScale", "fontSize"),
-		editor: () => anyShown("Editor", "formatOnSave", "minimap", "inlayHints", "rulers", "rulerMargin"),
+		editor: () => anyShown("Editor", "formatOnSave", "minimap", "wordWrap", "inlayHints", "rulers", "rulerMargin"),
 		server: () => anyShown("Language server", "lspPath"),
 		keyboard: () => keyRows().length > 0,
 	};
@@ -245,6 +246,9 @@ export function SettingsDialog() {
 						</Row>
 						<Row group="Editor" label={ROWS.minimap[0]} hint={ROWS.minimap[1]} setting="minimap">
 							{(ids) => <input id={ids.control} aria-describedby={ids.hint} type="checkbox" checked={state.settings.minimap} onChange={(e) => void save("minimap", e.currentTarget.checked)} />}
+						</Row>
+						<Row group="Editor" label={ROWS.wordWrap[0]} hint={ROWS.wordWrap[1]} setting="wordWrap">
+							{(ids) => <input id={ids.control} aria-describedby={ids.hint} type="checkbox" checked={Boolean(state.settings.wordWrap)} onChange={(e) => void save("wordWrap", e.currentTarget.checked)} />}
 						</Row>
 						<Row group="Editor" label={ROWS.inlayHints[0]} hint={ROWS.inlayHints[1]} setting="inlayHints">
 							{(ids) => <input id={ids.control} aria-describedby={ids.hint} type="checkbox" checked={state.settings.inlayHints !== false} onChange={(e) => void save("inlayHints", e.currentTarget.checked)} />}
