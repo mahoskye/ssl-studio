@@ -11,7 +11,7 @@ import { Finder } from "../graph/Finder";
 import { pictureName, savePicture } from "../graph/picture";
 import { dirName, joinPath, relativeTo } from "../../shared/paths";
 import { regionColor } from "../editor/regions";
-import { canvasMeasure, fitView, legibleScale, nearest, recall, remember, reveal, roundedPath, zoomAt, type Measure, type Point } from "../graph/canvas";
+import { canvasMeasure, clearOf, fitView, legibleScale, mapArea, nearest, outOfSight, recall, remember, reveal, roundedPath, zoomAt, type Measure, type Point } from "../graph/canvas";
 import { diagnostics } from "../lsp/session";
 import { documents, notify, setState, state, applyText } from "../state";
 import { nodeStatuses } from "./build";
@@ -249,7 +249,10 @@ export function PlanView(props: { path: string; group: number }) {
 		const box = line ? { x: line.at.x - 30, y: line.at.y - 12, width: 60, height: 24 } : l.boxes.find((b) => b.id === id);
 		if (!box) return;
 		const v = untrack(view);
-		const next = reveal(v, box, canvas.getBoundingClientRect());
+		const size = canvas.getBoundingClientRect();
+		// In sight, and not under the map of the chart in the corner.
+		const shown = reveal(v, box, size);
+		const next = outOfSight(l, shown, size) ? clearOf(shown, box, mapArea(l, size)) : shown;
 		if (next !== v) setView(next);
 	});
 

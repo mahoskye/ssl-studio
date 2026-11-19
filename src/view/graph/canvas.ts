@@ -238,3 +238,37 @@ export function fitShare(content: Size, box: Size, margin = 20): number {
 
 /** A name for a picture's file, from what the picture is of: letters, digits, dots and hyphens, and ".svg". */
 export const pictureName = (of: string) => `${of.trim().replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "picture"}.svg`;
+
+/** The map's largest size, and the share of the view it may take: in a narrow view it is smaller, not in the way. */
+const MAP_MAX: Size = { width: 200, height: 140 };
+const MAP_SHARE = { width: 0.24, height: 0.3 };
+/** How far the map stands from the view's corner. */
+export const MAP_INSET = 8;
+
+/** The scale the map draws the picture at, in a view of this size. */
+export const mapScaleIn = (content: Size, box: Size) => mapScale(content, { width: Math.min(MAP_MAX.width, box.width * MAP_SHARE.width), height: Math.min(MAP_MAX.height, box.height * MAP_SHARE.height) });
+
+/** Where the map sits in the view, in the view's own pixels: its bottom right corner. */
+export function mapArea(content: Size, box: Size): Rect {
+	const k = mapScaleIn(content, box);
+	const [width, height] = [Math.ceil(content.width * k), Math.ceil(content.height * k)];
+	return { x: box.width - MAP_INSET - width, y: box.height - MAP_INSET - height, width, height };
+}
+
+/**
+ * The view moved, as little as it takes, so that a rectangle of the content is
+ * not under `avoid` (a part of the view something else is drawn over). It is
+ * moved up if that keeps its top in sight, or else to the left if that keeps
+ * its left edge in sight; when neither does, the view is left as it is.
+ */
+export function clearOf(view: View, rect: Rect, avoid: Rect, margin = 12): View {
+	const left = rect.x * view.scale + view.x;
+	const top = rect.y * view.scale + view.y;
+	const [right, bottom] = [left + rect.width * view.scale, top + rect.height * view.scale];
+	if (right <= avoid.x || left >= avoid.x + avoid.width || bottom <= avoid.y || top >= avoid.y + avoid.height) return view;
+	const up = bottom - avoid.y + margin;
+	if (top - up >= margin) return { ...view, y: view.y - up };
+	const across = right - avoid.x + margin;
+	if (left - across >= margin) return { ...view, x: view.x - across };
+	return view;
+}

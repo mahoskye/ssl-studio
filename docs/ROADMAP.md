@@ -304,6 +304,13 @@ What the user found in a first look at the round above, and what was done.
   selected and brought into view. The graph and the chart share the find
   box.
 
+- **The graph's bar is one row** for the whole picture: what is used now and
+  then (fold, unresolved targets, keys, save picture, refresh) is in a menu,
+  the counts are beside the key, and the focus is named in the choice of
+  what is shown.
+- **What is found or selected stays clear of the corner map,** in the graph
+  and in a chart.
+
 ## On hold
 
 - **Forms, client scripts and code-behind (2026-11-17).** Wanted eventually, in

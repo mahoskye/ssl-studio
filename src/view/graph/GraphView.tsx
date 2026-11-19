@@ -11,10 +11,11 @@ import { level } from "../../shared/houseStyle";
 import { backend } from "../backend";
 import { regionColor } from "../editor/regions";
 import { openFile, setState, state } from "../state";
-import { canvasMeasure, fitShare, fitView, legibleScale, nearest, recall, remember, reveal, splinePath, splinePoint, zoomAt, type Point } from "./canvas";
+import { canvasMeasure, clearOf, fitShare, fitView, legibleScale, mapArea, outOfSight, nearest, recall, remember, reveal, splinePath, splinePoint, zoomAt, type Point } from "./canvas";
 import { loadGraph } from "./load";
 import { Minimap, type MapBox } from "./Minimap";
 import { Finder } from "./Finder";
+import { Menu, type MenuItem } from "../Menu";
 import { savePicture } from "./picture";
 import { session } from "../lsp/session";
 import { callList, choices, dirId, keptFolds, withoutUnresolved, fold, FOLD_ABOVE, FOLD_DIRS_ABOVE, foldId, isDir, isFold, RELATION_WORDS, scriptOf, topLabel, UNRESOLVED, visible, type Direction, type Filter, type Graph, type ListedProc, relationOf, type Relation } from "./model";
@@ -449,7 +450,12 @@ export function GraphView() {
 		setCurrent(b.id);
 		setWalked(b.id);
 		nodeEls.get(b.id)?.focus();
-		setView((v) => reveal(v, b, size()));
+		// In sight, and not under the map of the picture in the corner.
+		setView((v) => {
+			const l = layout();
+			const shown = reveal(v, b, size());
+			return l && outOfSight(l, shown, size()) ? clearOf(shown, b, mapArea(l, size())) : shown;
+		});
 	};
 	const onKey = (e: KeyboardEvent) => {
 		if (e.ctrlKey || e.metaKey || e.altKey) return;
@@ -492,6 +498,32 @@ export function GraphView() {
 		return `${b.label}: ${where}${filter().focus === b.id ? ", the focus" : ""}`;
 	};
 
+	/** The bar's menu: what is not needed at every look. */
+	const more = (): MenuItem[] => {
+		const inGraph = mode() === "graph";
+		const none = "Nothing to fold in the list, or around a focus";
+		return [
+			{ label: "Fold all", run: () => foldAll(true), disabled: !inGraph || !folding() || allFolded(), why: allFolded() ? "Everything is folded" : none },
+			{ label: "Unfold all", run: () => foldAll(false), disabled: !inGraph || !folding() || (folded().size === 0 && foldedDirs().size === 0), why: inGraph && folding() ? "Nothing is folded" : none },
+			"separator",
+			{
+				label: `${unresolved() ? "Hide" : "Show"} unresolved targets (${unresolvedCount()})`,
+				run: () => {
+					const next = !unresolved();
+					fittedFor = "";
+					setUnresolved(next);
+					remember(UNRESOLVED_KEY, next ? "shown" : "hidden");
+				},
+				disabled: !unresolvedCount(),
+				why: "Every target resolved",
+			},
+			{ label: keysOpen() ? "Hide the keys" : "Keys and what the pointer does", keys: "?", run: () => setKeysOpen((open) => !open), disabled: !inGraph, why: "The keys are the graph's" },
+			"separator",
+			{ label: "Save picture…", run: () => void savePicture(svg, layout(), "docs/call-graph.svg"), disabled: !inGraph || !layout(), why: "There is no picture in the list" },
+			{ label: "Refresh", run: () => void refresh(), disabled: state.lsp.state !== "running", why: "Needs the language server" },
+		];
+	};
+
 	/** The key explains only what can be seen: each entry is there while the picture has one of it. */
 	const legend = createMemo(() => {
 		const l = layout();
@@ -524,6 +556,13 @@ export function GraphView() {
 		const classes = edges.filter((e) => ["creates", "inherits"].includes(relationOf(e.kind))).length;
 		return `${edges.length - classes} calls${classes ? `, ${classes} class relations` : ""}`;
 	};
+
+	/** The focus as the bar names it: a procedure by its name, a script by its file. */
+	const focusName = () => {
+		const id = filter().focus ?? "";
+		return id.endsWith("#") ? baseName(id.slice(0, -1)) : id.slice(id.lastIndexOf("#") + 1);
+	};
+	const tally = () => (graph() ? `${graph()!.nodes.length} procedures, ${counted()}${graph()!.truncated ? " (incomplete: refresh when indexing ends)" : ""}` : "");
 
 	const list = createMemo(() => {
 		const g = graph();
@@ -571,16 +610,15 @@ export function GraphView() {
 						List
 					</button>
 				</div>
-				<label>
-					Show
-					<select value={filter().mode} onChange={(e) => setFilter({ ...filter(), mode: e.currentTarget.value as Filter["mode"] })}>
+				{/* What is shown: the choice says so itself, so it needs no word beside it. */}
+					<select class="graph-show" aria-label="Show" title={filter().focus && filter().mode === "around" ? `Around ${filter().focus}` : undefined} value={filter().mode} onChange={(e) => setFilter({ ...filter(), mode: e.currentTarget.value as Filter["mode"] })}>
 						<option value="all">Every call</option>
 						<option value="cross">Calls between scripts</option>
+						{/* The focus goes by its name here, so the bar needs no second place to say it. */}
 						<option value="around" disabled={!filter().focus}>
-							Around the focus
+							{filter().focus ? `Around ${focusName()}` : "Around the focus"}
 						</option>
 					</select>
-				</label>
 				<Show when={filter().mode === "around"}>
 					<label>
 						Depth <input type="number" min="1" max="6" value={filter().depth} onChange={(e) => setFilter({ ...filter(), depth: Number(e.currentTarget.value) || 1 })} />
@@ -590,7 +628,6 @@ export function GraphView() {
 						<option value="callees">What it calls</option>
 						<option value="callers">What calls it</option>
 					</select>
-					<span class="hint">{filter().focus ? baseName(filter().focus!) : ""}</span>
 				</Show>
 				<Show when={graph()?.nodes.length}>
 					{/* A procedure by name: the picture then shows it with what calls it and what it calls. */}
@@ -604,38 +641,13 @@ export function GraphView() {
 					/>
 				</Show>
 				<span class="spacer" />
-				<span class="hint" role="status">
-					{progress() || (graph() ? `${graph()!.nodes.length} procedures, ${counted()}${graph()!.truncated ? " (incomplete: refresh when indexing ends)" : ""}` : "")}
-				</span>
-				<Show when={unresolvedCount()}>
-					<button
-						classList={{ on: unresolved() }}
-						aria-pressed={unresolved()}
-						title={`${unresolved() ? "Hide" : "Show"} the ${unresolvedCount()} targets the language server could not resolve, and the lines to them`}
-						onClick={() => {
-							const next = !unresolved();
-							fittedFor = "";
-							setUnresolved(next);
-							remember(UNRESOLVED_KEY, next ? "shown" : "hidden");
-						}}
-					>
-						Unresolved
-					</button>
-				</Show>
-				<Show when={mode() === "graph" && folding() && graph()?.nodes.length}>
-					<div class="mode-switch" role="group" aria-label="Scripts">
-						<button title="Draw every folder, or every script where there is one folder, as one node" disabled={allFolded()} onClick={() => foldAll(true)}>
-							Fold all
-						</button>
-						<button title="Draw every script's procedures" disabled={folded().size === 0 && foldedDirs().size === 0} onClick={() => foldAll(false)}>
-							Unfold all
-						</button>
-					</div>
+				{/* How much there is: in the bar while it is being read or listed, beside the key under the picture otherwise. */}
+				<Show when={progress() || mode() === "list" || !graph()?.nodes.length}>
+					<span class="hint" role="status">
+						{progress() || tally()}
+					</span>
 				</Show>
 				<Show when={mode() === "graph"}>
-					<button title="The graph's keys and what the pointer does (?)" classList={{ on: keysOpen() }} aria-expanded={keysOpen()} aria-controls={keysId} onClick={() => setKeysOpen((open) => !open)}>
-						Keys
-					</button>
 					<div class="graph-zoom" role="group" aria-label="Zoom">
 						<button title="Zoom out (−)" aria-label="Zoom out" onClick={() => zoomBy(1 / 1.2)}>
 							−
@@ -650,13 +662,11 @@ export function GraphView() {
 					<button title="The whole graph, or as much as stays legible (0)" onClick={fit}>
 						Fit
 					</button>
-					<button title="Save this picture as an SVG file in the workspace, for a document" disabled={!layout()} onClick={() => void savePicture(svg, layout(), "docs/call-graph.svg")}>
-						Save picture…
-					</button>
 				</Show>
-				<button disabled={state.lsp.state !== "running"} title={state.lsp.state === "running" ? "Read the calls again" : "Needs the language server"} onClick={() => void refresh()}>
-					Refresh
-				</button>
+				{/* What is used now and then goes in a menu, so that the bar stays one row: folding, the key, the picture, reading again. */}
+				<Menu label="More for the graph" title="More: fold, unresolved targets, keys, save picture, refresh" class="graph-more" items={more}>
+					<span aria-hidden="true">⋯</span>
+				</Menu>
 				<button onClick={() => setState("centerView", "editors")}>Close</button>
 			</div>
 			<Show when={idle()}>
@@ -679,6 +689,7 @@ export function GraphView() {
 					<Show when={!session.supports("ssl/callGraph")}>
 						<p class="hint graph-help">Data sources and :INCLUDEs appear once the server offers its call graph.</p>
 					</Show>
+					<div class="graph-under">
 					<ul class="graph-legend" aria-label="What the graph's shapes and lines mean">
 						<For each={legend()}>
 							{(entry) => (
@@ -695,6 +706,12 @@ export function GraphView() {
 							)}
 						</For>
 					</ul>
+						<Show when={!progress()}>
+							<span class="hint graph-tally" role="status">
+								{tally()}
+							</span>
+						</Show>
+					</div>
 					<div class="graph-stage">
 					<svg
 						class="graph-canvas"

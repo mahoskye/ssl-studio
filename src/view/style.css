@@ -492,7 +492,15 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .graph-bar { display: flex; align-items: center; gap: var(--space-4); padding: var(--space-2) var(--space-5); background: var(--tab-bg); border-bottom: 1px solid var(--border); }
 .graph-bar .hint { margin: 0; }
 .graph-bar input { width: 52px; }
-.graph-bar input.graph-find { width: clamp(130px, 16vw, 190px); }
+/* Under the bar: the key of what is on screen, and at its end how much there is. */
+.graph-under { display: flex; align-items: flex-start; gap: var(--space-5); padding-right: var(--space-5); }
+.graph-under .graph-legend { flex: 1; min-width: 0; }
+.graph-under .graph-tally { flex: none; margin: 0; white-space: nowrap; font-size: var(--text-sm); }
+/* What is shown names the focus, and a long name is cut short before the bar wraps. */
+.graph-bar .graph-show { max-width: 190px; text-overflow: ellipsis; }
+/* The bar's menu of what is used now and then. */
+.graph-more > button { min-width: var(--target); min-height: var(--target); padding: 0 var(--space-3); }
+.graph-bar input.graph-find { width: clamp(120px, 13vw, 170px); }
 /* The finder and, under it while something is typed, the procedures that match. */
 .graph-find-box { position: relative; display: inline-flex; }
 .graph-find-list { position: absolute; top: calc(100% + var(--space-1)); left: 0; z-index: 40; min-width: 280px; max-width: min(460px, 80vw); margin: 0; padding: var(--space-2); list-style: none; background: var(--side-bg); color: var(--side-fg); border: 1px solid var(--input-border); border-radius: var(--radius-lg); box-shadow: var(--shadow); }

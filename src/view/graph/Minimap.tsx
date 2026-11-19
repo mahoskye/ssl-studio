@@ -4,11 +4,9 @@
 // convenience and is hidden from a screen reader: the arrow keys already move
 // through the picture node by node.
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { centredOn, mapScale, outOfSight, seen, type Rect, type Size, type View } from "./canvas";
+import { centredOn, mapScaleIn, outOfSight, seen, type Rect, type Size, type View } from "./canvas";
 
-/** The map's largest size, and the share of the view it may take: in a narrow view it is smaller, not in the way. */
-const MAX: Size = { width: 200, height: 140 };
-const SHARE = { width: 0.24, height: 0.3 };
+// How large the map is and where it sits is canvas.ts's (mapScaleIn, mapArea): what moves the view clear of it reads the same.
 
 export type MapBox = Rect & { /** What it is, for its shade: a frame around others, or a node. */ kind: "frame" | "node" | "mark" };
 
@@ -27,7 +25,7 @@ export function Minimap(props: { content: Size; boxes: readonly MapBox[]; view: 
 		observer.observe(host);
 		onCleanup(() => observer.disconnect());
 	});
-	const k = () => mapScale(props.content, { width: Math.min(MAX.width, box().width * SHARE.width), height: Math.min(MAX.height, box().height * SHARE.height) });
+	const k = () => mapScaleIn(props.content, box());
 	const part = () => seen(props.view, box());
 	let dragging = false;
 	const moveTo = (e: MouseEvent & { currentTarget: SVGSVGElement }) => {

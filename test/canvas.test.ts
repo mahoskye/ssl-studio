@@ -215,3 +215,33 @@ test("a picture's file is named for what it is of", () => {
 	expect(pictureName("???")).toBe("picture.svg");
 	expect(pictureName("")).toBe("picture.svg");
 });
+
+import { clearOf, mapArea, MAP_INSET } from "../src/view/graph/canvas";
+
+describe("keeping something clear of the map", () => {
+	const box = { width: 1000, height: 600 };
+	test("the map sits in the bottom right corner, at the size it is drawn", () => {
+		// 2000 by 700 fits 200 by 140 at one tenth.
+		expect(mapArea({ width: 2000, height: 700 }, box)).toEqual({ x: 1000 - MAP_INSET - 200, y: 600 - MAP_INSET - 70, width: 200, height: 70 });
+	});
+	const avoid = { x: 800, y: 500, width: 192, height: 92 };
+	const view = { x: 0, y: 0, scale: 1 };
+	test("what is not under it is left where it is", () => {
+		expect(clearOf(view, { x: 100, y: 100, width: 150, height: 40 }, avoid)).toBe(view);
+		expect(clearOf(view, { x: 600, y: 520, width: 150, height: 40 }, avoid)).toBe(view);
+	});
+	test("what is under it is moved up, just clear", () => {
+		const moved = clearOf(view, { x: 820, y: 520, width: 150, height: 40 }, avoid);
+		expect(moved).toEqual({ x: 0, y: -(560 - 500 + 12), scale: 1 });
+		// Its bottom is now the margin above the map.
+		expect(520 + 40 + moved.y).toBe(500 - 12);
+	});
+	test("when up would put its top out of sight it goes left, and failing that stays", () => {
+		const low = { x: 0, y: 0, width: 1000, height: 60 };
+		// The view is only as tall as the map's top allows: a tall node cannot go up.
+		const tall = { x: 820, y: 10, width: 150, height: 560 };
+		expect(clearOf(view, tall, avoid)).toEqual({ x: -(970 - 800 + 12), y: 0, scale: 1 });
+		expect(clearOf(view, { x: 0, y: 10, width: 990, height: 560 }, avoid)).toBe(view);
+		expect(low.width).toBe(1000);
+	});
+});
