@@ -108,10 +108,10 @@ export function RowMenu() {
 					<Portal>
 						{/* A press beside a menu that left the keyboard in its box shuts the menu and leaves the keyboard there still. */}
 						<div class="row-menu-shade" onMouseDown={(e) => (menu.keep && e.preventDefault(), finish(null))} onContextMenu={(e) => (e.preventDefault(), finish(null))} />
-						{/* A menu that does not hold the keyboard is not read out by itself: what opened, and the entry marked, are said. */}
-						<Show when={menu.keep}>
+						{/* The entry the arrow keys have marked is said: the keyboard is not on it, so nothing else reads it out. */}
+						<Show when={menu.keep && marked() >= 0}>
 							<span class="visually-hidden" role="status">
-								{marked() >= 0 ? menu.items[marked()] : `Menu: ${menu.items.join(", ")}. Up and Down choose, Enter takes, Escape closes.`}
+								{menu.items[marked()]}
 							</span>
 						</Show>
 						<div
