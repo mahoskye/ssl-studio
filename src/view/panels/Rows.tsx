@@ -231,6 +231,8 @@ export function Row(props: {
 	/** The row's menu: right-click, the menu key, Shift+F10. */
 	onMenu?: (at: Point) => void;
 	onFocus?: () => void;
+	/** The pointer has come onto the row. */
+	onPoint?: () => void;
 	children: JSX.Element;
 }) {
 	return (
@@ -257,6 +259,7 @@ export function Row(props: {
 			onDragStart={(e) => props.onDragStart?.(e)}
 			onClick={() => props.onActivate?.()}
 			onFocus={() => props.onFocus?.()}
+			onMouseEnter={() => props.onPoint?.()}
 			onContextMenu={(e) => {
 				if (!props.onMenu) return;
 				e.preventDefault();

@@ -139,9 +139,11 @@ export function SettingsDialog() {
 			</Show>
 		);
 	};
+	/** Each section on screen, for the row of names above that jumps to it. */
+	const sections = new Map<Group, HTMLElement>();
 	const Section = (p: { title: Group; when: boolean; children: JSX.Element }) => (
 		<Show when={p.when}>
-			<section class="settings-group" aria-label={p.title}>
+			<section class="settings-group" aria-label={p.title} ref={(el) => sections.set(p.title, el)}>
 				<h3>{p.title}</h3>
 				{p.children}
 			</section>
@@ -164,11 +166,28 @@ export function SettingsDialog() {
 		keyboard: () => keyRows().length > 0,
 	};
 
+	const SECTIONS: [title: Group, key: keyof typeof groups][] = [
+		["Appearance", "appearance"],
+		["Editor", "editor"],
+		["Language server", "server"],
+		["Keyboard", "keyboard"],
+	];
+
 	return (
 		<Show when={open()}>
 			<Modal class="dialog settings" labelledBy={titleId} onClose={close} onKey={onKey}>
 				<h2 id={titleId}>Settings</h2>
 				<input class="settings-search" data-autofocus aria-label="Search settings" placeholder="Search settings" autocomplete="off" spellcheck={false} value={query()} onInput={(e) => setQuery(e.currentTarget.value)} onMouseDown={() => setCapturing(null)} />
+				{/* The sections by name: the list is long, and a name goes straight to its part of it. */}
+				<nav class="settings-nav" aria-label="Sections">
+					<For each={SECTIONS.filter(([, key]) => groups[key]())}>
+						{([title]) => (
+							<button title={`Go to ${title}`} onClick={() => sections.get(title)?.scrollIntoView({ block: "start" })}>
+								{title}
+							</button>
+						)}
+					</For>
+				</nav>
 				{/* A click anywhere stops a recording; the click on "Set" then starts its own. */}
 				<div class="settings-body" onMouseDown={() => setCapturing(null)}>
 					<Section title="Appearance" when={groups.appearance()}>

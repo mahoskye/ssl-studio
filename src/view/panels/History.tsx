@@ -55,16 +55,20 @@ export function History() {
 				<Show when={!history()?.error && !snapshots().length}>
 					<p class="hint">{history.loading ? "Reading the snapshots…" : `No snapshots of ${baseName(activePath()!)} yet. The first is kept when you save a change to it.`}</p>
 				</Show>
-				<Rows role="listbox" label={`Snapshots of ${baseName(activePath()!)}`}>
-					<For each={snapshots()}>
-						{(snap) => (
-							<Row key={snap.id} title={`Snapshot of ${when(snap.time)}, ${size(snap.size)}. Click, or press Enter, to compare it with the editor.`} onActivate={() => void show(snap.id, snap.time)}>
-								<span class="label">{when(snap.time)}</span>
-								<span class="meta">{size(snap.size)}</span>
-							</Row>
-						)}
-					</For>
-				</Rows>
+				{/* A list with nothing in it is not drawn: it would take the keyboard and show an empty frame. */}
+				<Show when={snapshots().length}>
+					<Rows role="listbox" label={`Snapshots of ${baseName(activePath()!)}`}>
+						<For each={snapshots()}>
+							{(snap) => (
+								<Row key={snap.id} title={`Snapshot of ${when(snap.time)}, ${size(snap.size)}. Click, or press Enter, to compare it with the editor.`} onActivate={() => void show(snap.id, snap.time)}>
+									<span class="snap-dot" aria-hidden="true" />
+									<span class="label">{when(snap.time)}</span>
+									<span class="meta">{size(snap.size)}</span>
+								</Row>
+							)}
+						</For>
+					</Rows>
+				</Show>
 			</Show>
 		</div>
 	);

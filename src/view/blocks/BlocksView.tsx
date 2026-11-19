@@ -404,11 +404,13 @@ export function BlocksView(props: { path: string; group: number }) {
 			</div>
 		);
 		const size = `${n.end - n.start + 1} lines`;
+		// Where it starts in the text, so that a block here and a line number in Problems or a diff are the same place.
+		const from = `line ${n.start}`;
 		return (
 			<Switch>
 				<Match when={n.kind === "region"}>
 					<section class="b-region" classList={{ selected: selectedKey() === n.key }} style={{ "--region": regionColor(n.name!) }}>
-						{header(<strong>{n.name}</strong>, `${size} · ${n.children.filter((c) => c.kind === "procedure").length} procedures`)}
+						{header(<strong>{n.name}</strong>, `${from} · ${size} · ${n.children.filter((c) => c.kind === "procedure").length} procedures`)}
 						<Show when={!isCollapsed(n)}>
 							<div class="block-body">
 								<Children node={n} />
@@ -423,7 +425,7 @@ export function BlocksView(props: { path: string; group: number }) {
 								<span class="proc-icon">ƒ</span> <strong>{n.name}</strong>
 								<span class="params">({n.params?.join(", ")})</span>
 							</>,
-							size,
+							`${from} · ${size}`,
 						)}
 						<Show when={!isCollapsed(n)}>
 							<div class="block-body">

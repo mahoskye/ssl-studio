@@ -2,6 +2,7 @@
 // near or over the house size limit. What can be done to a file or a folder
 // is on its menu (right-click, the menu key, Shift+F10), on F2 and Delete,
 // and in the command palette.
+import { FileMark } from "../FileMark";
 import { batch, createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import type { Entry } from "../../shared/protocol";
@@ -10,9 +11,10 @@ import { backend } from "../backend";
 import { ask, choose } from "../dialogs";
 import { activePath, canonical, fileRemoved, fileRenamed, notify, openFile, setState, state } from "../state";
 import { baseName, dirName, isInside, joinPath } from "../../shared/paths";
-import { folderFor, holdsRoot, menuFor, nameProblem, NEW_FILE, NEW_FOLDER, RENAME, retarget, TRASH, without } from "./explorerMenu";
+import { folderFor, holdsRoot, menuFor, nameProblem, NEW_FILE, NEW_FOLDER, openFolders, RENAME, retarget, TRASH, without } from "./explorerMenu";
 import { chooseFromMenu, RowMenu } from "./RowMenu";
 import { IconButton, Row, Rows, type Point, type RowsApi } from "./Rows";
+import { recall, remember } from "../graph/canvas";
 
 const [expanded, setExpanded] = createSignal<Set<string>>(new Set());
 const toggle = (path: string) =>
@@ -106,6 +108,7 @@ function EntryRow(props: { entry: Entry; depth: number }) {
 				<span class="twisty" aria-hidden="true">
 					{isDir() ? (open() ? "▾" : "▸") : ""}
 				</span>
+				<FileMark name={props.entry.name} folder={isDir() ? { open: open() } : undefined} />
 				<span class="label">{props.entry.name}</span>
 				<Show when={read() && listing.error}>
 					<span class="meta warn" title={listing.error}>
@@ -241,6 +244,22 @@ export function Explorer() {
 	// A row stays "the focused row" while a dialog, the palette or its own menu has the keyboard, and no longer.
 	const forget = (e: FocusEvent) => !(e.target as Element | null)?.closest?.(".explorer, .overlay, .quickpick, .row-menu") && setFocused(null);
 	onMount(() => document.addEventListener("focusin", forget));
+	// The folders that were open in this workspace are open again next time. A self-test starts from a closed tree.
+	const keeps = () => !state.info?.selftest && !state.info?.selftestClose;
+	createEffect(
+		on(
+			() => state.workspace?.root,
+			(root) => {
+				if (!root || !keeps()) return;
+				setExpanded(new Set(openFolders(recall(`tree:${root}`), root)));
+			},
+		),
+	);
+	createEffect(() => {
+		const root = state.workspace?.root;
+		const open = [...expanded()];
+		if (root && keeps()) remember(`tree:${root}`, JSON.stringify(open));
+	});
 	onCleanup(() => {
 		document.removeEventListener("focusin", forget);
 		setFocused(null);

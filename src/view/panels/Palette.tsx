@@ -1,5 +1,5 @@
 // Templates from the style profile, inserted at the cursor as snippets.
-import { For } from "solid-js";
+import { createSignal, For, Show } from "solid-js";
 import { snippetAsText, TEMPLATES, type Template } from "../../shared/houseStyle";
 import { activeEditor } from "../editor/EditorGroup";
 import { notify } from "../state";
@@ -19,6 +19,8 @@ export function insertTemplate(template: Template) {
 
 export function Palette() {
 	const groups = () => [...new Set(TEMPLATES.map((t) => t.group))];
+	/** The template the keyboard or the pointer is on: what it would insert is shown under the list. */
+	const [shown, setShown] = createSignal<Template | null>(null);
 	return (
 		<div class="panel-body" data-panel="palette">
 			<div class="panel-title">
@@ -37,6 +39,8 @@ export function Palette() {
 										draggable={true}
 										onDragStart={(e) => e.dataTransfer?.setData("text/plain", snippetAsText(t.body()))}
 										onActivate={() => insertTemplate(t)}
+										onFocus={() => void setShown(t)}
+										onPoint={() => void setShown(t)}
 										title={`${t.label}: ${t.detail}${t.note ? ` (${t.note})` : ""}`}
 									>
 										<span class="label">{t.label}</span>
@@ -48,6 +52,22 @@ export function Palette() {
 					)}
 				</For>
 			</Rows>
+			{/* Always there, at one size: a preview that came and went would move the rows under the pointer. */}
+			<div class="palette-preview" role="region" aria-label="What the template inserts">
+				<Show when={shown()} fallback={<p class="hint">Point at a template, or move to it with the arrow keys, to see here what it inserts.</p>}>
+					{(t) => (
+						<>
+							<div class="palette-preview-head">
+								<strong>{t().label}</strong>
+								<Show when={t().note}>
+									<span class="hint">{t().note}</span>
+								</Show>
+							</div>
+							<pre>{snippetAsText(t().body())}</pre>
+						</>
+					)}
+				</Show>
+			</div>
 		</div>
 	);
 }

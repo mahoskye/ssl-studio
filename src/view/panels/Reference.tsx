@@ -6,10 +6,21 @@ import { activeEditor } from "../editor/EditorGroup";
 import { session } from "../lsp/session";
 import { notify, state } from "../state";
 import { focusRowsBelow, IconButton, Row, RowGroup, Rows } from "./Rows";
+import { renderReply } from "../agent/markdown";
 import { serverDown } from "./server";
 
 type Entry = { label: string; kind: number; detail?: string; doc?: string };
-const KINDS: Record<number, string> = { 3: "Functions", 2: "Methods", 7: "Classes", 14: "Keywords", 21: "Constants" };
+/** The kinds of entry the server sends, in the order they are listed. Snippets (15) are the Palette's, not reference. */
+const KINDS: [kind: number, title: string][] = [
+	[3, "Functions"],
+	[2, "Methods"],
+	[7, "Classes"],
+	[14, "Keywords"],
+	[24, "Operators"],
+	[6, "Predefined names"],
+	[21, "Literals and status words"],
+];
+const LISTED = new Set(KINDS.map(([kind]) => kind));
 
 async function loadReference(root: string): Promise<Entry[]> {
 	const uri = monaco.Uri.file(`${root}/.ssl-studio/reference-scratch.ssl`).toString();
@@ -18,7 +29,7 @@ async function loadReference(root: string): Promise<Entry[]> {
 		const result = await session.request("textDocument/completion", { textDocument: { uri }, position: { line: 0, character: 0 } });
 		const items = (result?.items ?? result ?? []) as any[];
 		return items
-			.filter((i) => KINDS[i.kind])
+			.filter((i) => LISTED.has(i.kind))
 			.map((i) => ({ label: i.label, kind: i.kind, detail: i.detail, doc: typeof i.documentation === "string" ? i.documentation : i.documentation?.value }))
 			.sort((a, b) => a.label.localeCompare(b.label));
 	} finally {
@@ -26,16 +37,22 @@ async function loadReference(root: string): Promise<Entry[]> {
 	}
 }
 
+/**
+ * The server's full words on an entry: its hover, which has the signature, each
+ * parameter, what it returns, the errors it raises and its caveats. The line
+ * the list came with stands in when the hover has nothing.
+ */
 async function describe(entry: Entry, root: string): Promise<string> {
-	if (entry.doc) return entry.doc;
+	const short = () => [entry.detail ? `\`${entry.detail}\`` : "", entry.doc ?? ""].filter(Boolean).join("\n\n");
 	const uri = monaco.Uri.file(`${root}/.ssl-studio/reference-scratch.ssl`).toString();
 	session.client.notify("textDocument/didOpen", { textDocument: { uri, languageId: "ssl", version: 1, text: entry.label } });
 	try {
 		const hover = await session.request("textDocument/hover", { textDocument: { uri }, position: { line: 0, character: 1 } });
 		const contents = hover?.contents;
-		return (Array.isArray(contents) ? contents : [contents]).map((c: any) => (typeof c === "string" ? c : c?.value ?? "")).join("\n\n");
+		const full = (Array.isArray(contents) ? contents : [contents]).map((c: any) => (typeof c === "string" ? c : c?.value ?? "")).join("\n\n");
+		return full.trim() ? full : short();
 	} catch {
-		return entry.detail ?? "";
+		return short();
 	} finally {
 		session.client.notify("textDocument/didClose", { textDocument: { uri } });
 	}
@@ -43,16 +60,6 @@ async function describe(entry: Entry, root: string): Promise<string> {
 
 /** The server's words on a built-in, for an agent that asked. */
 export const describeElement = (name: string, root: string) => describe({ label: name, kind: 3 }, root);
-
-/** Plain rendering of the server's markdown: code fences and bold kept readable. */
-function Markdown(props: { text: string }) {
-	const parts = () => props.text.split(/```(?:\w+)?\n?/);
-	return (
-		<div class="markdown">
-			<For each={parts()}>{(part, i) => (i() % 2 ? <pre>{part.trim()}</pre> : <p>{part.replace(/\*\*([^*]+)\*\*/g, "$1").replace(/`([^`]+)`/g, "$1").trim()}</p>)}</For>
-		</div>
-	);
-}
 
 export function Reference() {
 	const [filter, setFilter] = createSignal("");
@@ -108,7 +115,8 @@ export function Reference() {
 						</div>
 						<Show when={!details.loading} fallback={<p class="hint">Loading the description…</p>}>
 							<Show when={details()?.trim()} fallback={<p class="hint">The language server has no description of {entry().label}.</p>}>
-								<Markdown text={details()!} />
+								{/* The server's own Markdown, cleaned like any other: lists of parameters and errors read as lists. */}
+								<div class="md reference-doc" innerHTML={renderReply(details()!)} />
 							</Show>
 						</Show>
 					</div>
@@ -128,11 +136,11 @@ export function Reference() {
 				}
 			>
 				<Rows label="Reference entries">
-					<For each={Object.entries(KINDS)}>
+					<For each={KINDS}>
 						{([kind, title]) => (
-							<Show when={shown().some((e) => e.kind === Number(kind))}>
+							<Show when={shown().some((e) => e.kind === kind)}>
 								<RowGroup head={title}>
-									<For each={shown().filter((e) => e.kind === Number(kind)).slice(0, 400)}>
+									<For each={shown().filter((e) => e.kind === kind).slice(0, 400)}>
 										{(e) => (
 											<Row
 												key={`${kind}:${e.label}`}

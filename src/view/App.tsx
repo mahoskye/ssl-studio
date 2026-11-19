@@ -24,7 +24,7 @@ import { QuickPick } from "./QuickPick";
 import { SettingsDialog } from "./Settings";
 import { StatusBar } from "./StatusBar";
 import { applyTheme, resolveTheme } from "./themes/themes";
-import { dismiss, focusRequest, openFolder, setState, state, unsavedPaths, type PanelId } from "./state";
+import { dismiss, focusRequest, openFolder, rememberTabs, setState, state, unsavedPaths, type PanelId } from "./state";
 import { focusPanel, isShown, lastShown, movePanel, PANELS, setCrowdedOut, sideOf, togglePanel } from "./panels/registry";
 import { Welcome } from "./Welcome";
 import { ACTIVITY, fitPanels } from "./layout";
@@ -164,6 +164,8 @@ export function App() {
 	createEffect(() => {
 		if (state.settings.layout.right && sideOf(state.rightView) === "left") setState("settings", "layout", "right", false);
 	});
+	// Which files are open is kept with the folder, so that it opens next time as it was left.
+	createEffect(on(() => JSON.stringify([state.groups.map((g) => [g.tabs, g.active]), state.activeGroup]), rememberTabs));
 	// The app is told how much is unsaved, so that it can refuse to close its window until the user has been asked.
 	createEffect(() => void backend.unsavedChanged(unsavedPaths().length).catch(() => undefined));
 	// A review takes the editors' place: one opened while the call graph is showing must not open behind it.

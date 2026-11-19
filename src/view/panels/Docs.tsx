@@ -1,6 +1,7 @@
 // The project's documents in one place: README.md and AGENTS.md first,
 // whether or not they exist yet, then the Markdown in the docs folder and the
 // plans. Which folders those are comes from .ssl-studio/project.toml.
+import { FileMark } from "../FileMark";
 import { createResource, For, Show } from "solid-js";
 import type { DocFile } from "../../shared/protocol";
 import { backend } from "../backend";
@@ -21,6 +22,7 @@ function DocRow(props: { file: DocFile }) {
 			title={props.file.exists ? props.file.path : `${props.file.name} is missing. Click it, or press Enter on it, to create it.`}
 			onActivate={open}
 		>
+			<FileMark name={props.file.name} />
 			<span class="label">{props.file.name}</span>
 			<Show when={!props.file.exists}>
 				<span class="meta warn">missing</span>

@@ -5,7 +5,7 @@ import { createEffect, createResource, createSignal, For, on, onCleanup, Show } 
 import { monaco } from "../editor/monaco";
 import { session } from "../lsp/session";
 import { activeDoc, activePath, openFile, state } from "../state";
-import { cycleRegionColor, isRegion, regionColor } from "../editor/regions";
+import { cycleRegionColor, isRegion, regionColor, symbolPath } from "../editor/regions";
 import { isPlanPath, PROCEDURE_DRAG } from "../plan/model";
 import { relativeTo } from "../../shared/paths";
 import { focusRowsBelow, Row, Rows } from "./Rows";
@@ -116,6 +116,11 @@ export function Objects() {
 			return next;
 		});
 	const matches = (s: Sym): boolean => !filter() || s.name.toLowerCase().includes(filter().toLowerCase()) || (s.children ?? []).some(matches);
+	/** The innermost region or procedure the editor's cursor is in: its row says "you are here". */
+	const here = () => {
+		const path = symbolPath(symbols(), state.cursor.line).filter((s) => !isVariable(s));
+		return path[path.length - 1];
+	};
 	const TreeRow = (props: { symbol: Sym; depth: number; parent: string }) => {
 		const key = () => `${props.parent}/${props.symbol.name}`;
 		const parameter = () => isParameter(props.symbol);
@@ -134,7 +139,7 @@ export function Objects() {
 					role="treeitem"
 					key={key()}
 					class={`tree-row kind-${props.symbol.kind}`}
-					classList={{ param: parameter() }}
+					classList={{ param: parameter(), here: here() === props.symbol }}
 					level={props.depth + 1}
 					expanded={children().length ? open() : undefined}
 					style={{ "padding-left": `${8 + props.depth * 14}px` }}
@@ -180,6 +185,12 @@ export function Objects() {
 						/>
 					</Show>
 					<span class="label">{props.symbol.name}</span>
+					<Show when={here() === props.symbol}>
+						<span class="here-mark" title="The cursor is in here">
+							<span aria-hidden="true">◂</span>
+							<span class="visually-hidden">The cursor is in here</span>
+						</span>
+					</Show>
 					<Show when={!isVariable(props.symbol)}>
 						<span class="meta">{lines(props.symbol)}</span>
 					</Show>

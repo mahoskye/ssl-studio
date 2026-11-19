@@ -48,9 +48,14 @@ function EntryView(props: { entry: Entry }) {
 	);
 }
 
+/** Questions someone reading SSL they did not write tends to have. Each is sent with the selection, like any other. */
+const STARTERS = ["Explain what this does, step by step.", "What could go wrong here, and with which input?", "Which cases should a test of this cover?", "Is anything here against the house style?"];
+
 export function AgentPanel() {
 	onMount(() => void resume());
 	const [draft, setDraft] = createSignal("");
+	/** The box the question is typed in, for a starter to hand the keyboard to. */
+	let box: HTMLTextAreaElement | undefined;
 	const [notSent, setNotSent] = createSignal("");
 	const [withSelection, setWithSelection] = createSignal(true);
 	const modelOf = (ref: string) => agent.models.find((m) => modelRef(m) === ref);
@@ -200,7 +205,26 @@ export function AgentPanel() {
 			</section>
 
 			<div class="conversation" ref={scroller} role="log" aria-live="polite" aria-label="Conversation with the agent" onScroll={() => (pinned = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < NEAR_END)}>
-				<For each={agent.entries} fallback={<p class="agent-note">Ask about the selection, or run a tidy step. Shell, web and files outside the workspace are denied to the agent.</p>}>
+				<For
+					each={agent.entries}
+					fallback={
+						<div class="agent-start">
+							<p class="agent-note">Ask about the selection, or run a tidy step. Shell, web and files outside the workspace are denied to the agent.</p>
+							{/* Questions to start from: one puts its words in the box, to send as they are or to change first. */}
+							<ul class="agent-starters" aria-label="Questions to start from">
+								<For each={STARTERS}>
+									{(text) => (
+										<li>
+											<button title="Put this in the box below" onClick={() => (setDraft(text), setNotSent(""), box?.focus())}>
+												{text}
+											</button>
+										</li>
+									)}
+								</For>
+							</ul>
+						</div>
+					}
+				>
 					{(e) => <EntryView entry={e} />}
 				</For>
 				<Show when={agent.busy && !agent.entries.some((e) => e.streaming)}>
@@ -209,6 +233,7 @@ export function AgentPanel() {
 			</div>
 			<form class="composer" onSubmit={(e) => (e.preventDefault(), send())}>
 				<textarea
+					ref={box}
 					aria-label="Question for the agent"
 					placeholder="Ask about this code (Ctrl+Enter)"
 					value={draft()}

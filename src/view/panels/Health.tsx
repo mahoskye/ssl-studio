@@ -40,7 +40,12 @@ export function Health() {
 		}
 		return [...map].sort((a, b) => a[1].severity - b[1].severity || b[1].count - a[1].count);
 	};
-	const procs = () => procedures().map((p) => ({ name: p.name, lines: p.range.endLineNumber - p.range.startLineNumber + 1 })).sort((a, b) => b.lines - a.lines);
+	const procs = () =>
+		procedures()
+			.map((p) => ({ name: p.name, line: p.selectionRange.startLineNumber, lines: p.range.endLineNumber - p.range.startLineNumber + 1 }))
+			.sort((a, b) => b.lines - a.lines);
+	/** Each procedure's length against the longest: the bars show where the script's weight is. */
+	const share = (lines: number) => `${Math.max(3, Math.round((lines / Math.max(1, procs()[0]?.lines ?? 1)) * 100))}%`;
 	const Meter = (props: { label: string; title?: string; value: number; limit: number; unit?: string; near?: number }) => (
 		<div class="meter-row" title={props.title}>
 			<span>{props.label}</span>
@@ -99,14 +104,25 @@ export function Health() {
 					<Show when={procs().length > LONGEST}>
 						<p class="hint">The {LONGEST} longest:</p>
 					</Show>
-					<For each={procs().slice(0, LONGEST)}>
-						{(p) => (
-							<div class="meter-row compact" title={`${p.name}: ${count(p.lines, "line")}`}>
-								<span>{p.name}</span>
-								<span class="meta">{count(p.lines, "line")}</span>
-							</div>
-						)}
-					</For>
+					<Rows class="health-rows" role="listbox" label="The longest procedures">
+						<For each={procs().slice(0, LONGEST)}>
+							{(p) => (
+								<Row
+									class="meter-row sized clickable"
+									key={p.name}
+									label={`${p.name}, ${count(p.lines, "line")}`}
+									title={`${p.name}: ${count(p.lines, "line")}. Click it, or press Enter on it, to go to it.`}
+									onActivate={() => activePath() && void openFile(activePath()!, { reveal: { line: p.line } })}
+								>
+									<span class="label">{p.name}</span>
+									<span class="meta">{count(p.lines, "line")}</span>
+									<span class="bar" aria-hidden="true">
+										<span class="fill plain" style={{ width: share(p.lines) }} />
+									</span>
+								</Row>
+							)}
+						</For>
+					</Rows>
 				</section>
 				<section>
 					<h3>

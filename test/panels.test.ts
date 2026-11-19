@@ -269,3 +269,12 @@ test("the file templates do not join the patterns given to a model", () => {
 	expect(patterns).not.toContain(":CLASS");
 	expect(patterns).not.toContain("DATA SOURCE");
 });
+
+import { openFolders } from "../src/view/panels/explorerMenu";
+
+test("the Explorer's open folders are read with suspicion", () => {
+	expect(openFolders(JSON.stringify(["/w/src", "/w/src/DueDates", "/elsewhere", 7]), "/w")).toEqual(["/w/src", "/w/src/DueDates"]);
+	expect(openFolders(null, "/w")).toEqual([]);
+	expect(openFolders("not json", "/w")).toEqual([]);
+	expect(openFolders('{"a":1}', "/w")).toEqual([]);
+});

@@ -13,6 +13,8 @@ import { tabLabels } from "./tabs";
 import { Menu, type MenuItem } from "../Menu";
 import { isMarkdown } from "../project";
 import { MarkdownView } from "./MarkdownView";
+import { Start } from "../Start";
+import { FileMark } from "../FileMark";
 
 const viewStates = new Map<string, monaco.editor.ICodeEditorViewState | null>();
 export const editors: monaco.editor.IStandaloneCodeEditor[] = [];
@@ -190,6 +192,7 @@ export function EditorGroup(props: { index: number }) {
 									} else activate(path);
 								}}
 							>
+								<FileMark name={base(path)} />
 								<span class="name">{labels().get(path) ?? base(path)}</span>
 								<Show when={state.conflicts[path]}>
 									<span class="conflict-mark" aria-label="changed on disk">
@@ -297,7 +300,7 @@ export function EditorGroup(props: { index: number }) {
 			</div>
 			<Show when={!group().active}>
 				<div class="empty-group">
-					<p>Open a file from the Explorer, or press Ctrl+P.</p>
+					<Start />
 				</div>
 			</Show>
 		</section>

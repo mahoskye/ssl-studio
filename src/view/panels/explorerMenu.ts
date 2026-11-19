@@ -41,3 +41,13 @@ export function retarget(paths: Iterable<string>, from: string, to: string): str
 export function without(paths: Iterable<string>, removed: string): string[] {
 	return [...paths].filter((path) => !isInside(removed, path));
 }
+
+/** The open folders as they were kept, read with suspicion: only paths inside the workspace count. */
+export function openFolders(kept: string | null, root: string): string[] {
+	try {
+		const list: unknown = JSON.parse(kept ?? "[]");
+		return Array.isArray(list) ? list.filter((p): p is string => typeof p === "string" && isInside(root, p)) : [];
+	} catch {
+		return [];
+	}
+}

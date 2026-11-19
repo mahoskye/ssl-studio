@@ -1,4 +1,5 @@
 // Workspace search, results grouped by file.
+import { FileMark } from "../FileMark";
 import { createResource, createSignal, For, Show } from "solid-js";
 import { monaco } from "../editor/monaco";
 import { symbolPath } from "../editor/regions";
@@ -11,6 +12,9 @@ import { focusRowsBelow, IconButton, Row, RowGroup, Rows } from "./Rows";
 import { byLine, segments, type LineHit } from "./searchLines";
 
 const count = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
+
+/** How much of a line is shown before its first match. */
+const LEAD = 12;
 
 export function Search() {
 	let input!: HTMLInputElement;
@@ -93,7 +97,8 @@ export function Search() {
 			>
 				<span class="meta">{props.line.line}</span>
 				<span class="label">
-					<For each={segments(props.line)}>{(part) => (part.match ? <mark>{part.text}</mark> : part.text)}</For>
+					{/* A dozen characters of what comes before: in a side panel's width, more would push the match itself out of sight. */}
+					<For each={segments(props.line, LEAD)}>{(part) => (part.match ? <mark>{part.text}</mark> : part.text)}</For>
 				</span>
 			</Row>
 		);
@@ -126,6 +131,7 @@ export function Search() {
 							title={path}
 							head={
 								<>
+									<FileMark name={path} />
 									<span class="label">{rel(path)}</span>
 									<span class="meta" title={count(matchesIn(list), "match") + " in this file"}>
 										{matchesIn(list)}

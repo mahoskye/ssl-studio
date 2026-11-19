@@ -7,6 +7,7 @@ import { openFile, state } from "../state";
 import { relativeTo } from "../../shared/paths";
 import { Row, RowGroup, Rows } from "./Rows";
 import { serverDown } from "./server";
+import { FileMark } from "../FileMark";
 
 const ICON = ["", "✖", "⚠", "ℹ", "·"];
 const CLASS = ["", "error", "warning", "info", "hint"];
@@ -47,8 +48,18 @@ export function Problems() {
 							title={monaco.Uri.parse(uri).fsPath}
 							head={
 								<>
+									<FileMark name={rel(uri)} />
 									<span class="label">{rel(uri)}</span>
-									<span class="meta">{list.length}</span>
+									{/* How many of each: a file with one error among twenty notes says so at a glance. */}
+									<span class="meta tally">
+										<For each={[1, 2, 3, 4].filter((severity) => list.some((d) => d.severity === severity))}>
+											{(severity) => (
+												<span title={`${list.filter((d) => d.severity === severity).length} × ${SEVERITY[severity]!.toLowerCase()}`}>
+													<SeverityMark severity={severity} /> {list.filter((d) => d.severity === severity).length}
+												</span>
+											)}
+										</For>
+									</span>
 								</>
 							}
 						>

@@ -14,6 +14,8 @@ import { baseName, isInside } from "../shared/paths";
 import { isPlanPath } from "./plan/model";
 import { recheckPlans, trackPlan } from "./plan/check";
 import { trackDoc } from "./docCheck";
+import { recall, remember } from "./graph/canvas";
+import { packTabs, tabsKey, unpackTabs } from "./editor/sessionTabs";
 
 export type Group = { tabs: string[]; active: string | null; mode?: "text" | "blocks" };
 export type PanelId = "explorer" | "objects" | "palette" | "reference" | "search" | "history" | "health" | "agent" | "docs";
@@ -131,6 +133,7 @@ export async function openFolder(path?: string) {
 	if (!(await settleUnsaved("Opening another folder closes them."))) return;
 	const workspace = await guarded(() => backend.openFolder(path));
 	if (!workspace) return;
+	tabsReady = false;
 	for (const doc of docs.values()) doc.model.dispose();
 	docs.clear();
 	batch(() => {
@@ -151,6 +154,57 @@ export async function openFolder(path?: string) {
 	setState("lsp", await backend.lspState());
 	void session.start(workspace.root);
 	log(`opened ${workspace.root}`);
+	await restoreTabs();
+}
+
+// --- the tabs a folder was left with ---------------------------------------------
+
+/** False while a folder is being opened: its tabs are not yet the ones to remember. */
+let tabsReady = false;
+
+/** Keeps which files are open in this folder, for the next time it is opened. */
+export function rememberTabs() {
+	const root = state.workspace?.root;
+	if (root && tabsReady) remember(tabsKey(root), packTabs(state.groups, state.activeGroup));
+}
+
+/**
+ * Opens again what was open in this folder last time. A file that has gone
+ * since, or is no longer inside the folder, is passed over without a word.
+ */
+export async function restoreTabs() {
+	const root = state.workspace?.root;
+	// A self-test starts from nothing open, and leaves nothing behind for the next run.
+	if (state.info?.selftest || state.info?.selftestClose) return;
+	try {
+		const saved = root ? unpackTabs(recall(tabsKey(root))) : null;
+		if (!root || !saved) return;
+		for (const [index, group] of saved.groups.entries()) {
+			const tabs: string[] = [];
+			for (const path of group.tabs) {
+				if (!isInside(root, path)) continue;
+				try {
+					tabs.push((await loadDoc(path)).path);
+				} catch {
+					// Gone, or not readable any more.
+				}
+			}
+			// The folder may have been changed for another while these were read.
+			if (state.workspace?.root !== root) return;
+			if (!tabs.length && index > 0) continue;
+			const active = group.active && tabs.includes(canonical(group.active)) ? canonical(group.active) : (tabs[tabs.length - 1] ?? null);
+			setState("groups", (groups) => {
+				const next = groups.map((g) => ({ ...g }));
+				while (next.length <= index) next.push({ tabs: [], active: null });
+				next[index] = { ...next[index]!, tabs: [...new Set([...next[index]!.tabs, ...tabs])], active: next[index]!.active ?? active };
+				return next;
+			});
+		}
+		setState("activeGroup", Math.min(saved.activeGroup, state.groups.length - 1));
+	} finally {
+		tabsReady = true;
+		rememberTabs();
+	}
 }
 
 export async function loadProject() {
