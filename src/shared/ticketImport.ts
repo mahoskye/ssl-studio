@@ -1,4 +1,5 @@
 import type { Table } from "./csv";
+import { adfToMarkdown, isAdf } from "./adf";
 import { fenced } from "./catalog";
 import { ticketKey } from "./projectDocs";
 import { wikiToMarkdown } from "./wikiMarkup";
@@ -137,18 +138,8 @@ export function ticketsFromTable(table: Table): Imported {
 	return { tickets, skipped };
 }
 
-/** The words of a description that is a tree of nodes (a rich-text document): its text, a paragraph to a line. */
-function flat(node: unknown): string {
-	if (typeof node === "string") return node;
-	if (!node || typeof node !== "object") return "";
-	const { type, text, content } = node as { type?: string; text?: unknown; content?: unknown };
-	if (typeof text === "string") return text;
-	const inner = Array.isArray(content) ? content.map(flat) : [];
-	if (type === "hardBreak") return "\n";
-	if (type === "listItem") return `- ${inner.join("").trim()}\n`;
-	if (type === "paragraph" || type === "heading" || type === "codeBlock" || type === "blockquote") return `${inner.join("")}\n\n`;
-	return inner.join("");
-}
+/** A description as text: text as it is, a tree of nodes (a rich-text document) written as Markdown. */
+const flat = (value: unknown): string => (typeof value === "string" ? value : isAdf(value) ? adfToMarkdown(value) : "");
 const named = (value: unknown) => (typeof value === "string" ? value : value && typeof value === "object" && typeof (value as { name?: unknown }).name === "string" ? (value as { name: string }).name : "");
 /** A ticket's key from what stands for one: the key itself, a number (a system that numbers its tickets), or an object that holds one. */
 const keyOf = (value: unknown): string => {

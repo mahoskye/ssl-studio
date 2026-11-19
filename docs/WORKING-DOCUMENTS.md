@@ -32,7 +32,8 @@ demo project (`examples/due-dates`) has one of everything, invented for it.
    export from the ticket system: a CSV table, or the JSON its API returns.
    "New ticket…" makes one by hand. Reporter and assignee are not read. A
    sub-task is put under its parent and a story under its epic; a
-   description in Jira's wiki markup comes across as Markdown. From
+   description in Jira's wiki markup, or as Jira Cloud's tree of nodes,
+   comes across as Markdown. From
    GitHub, an issue's body is what was asked, and pull requests listed
    among the issues are passed over.
 2. **Read the ticket's page.** It shows what the ticket says of itself, and
@@ -168,10 +169,12 @@ Kept snippets are in the Palette, to insert at the cursor.
 
 - Reading tickets from a ticket system itself, without an export.
 - An export from your own ticket system has not been tried. The reader was
-  checked against the names and the structure two systems give out, with
-  invented tickets: a public Jira server (its "all fields" CSV export and
-  its search API) and GitHub (`gh issue list --json` and its issues API).
-  Jira Cloud's exports, and other systems', have not been read.
+  checked against the names and the structure three sources give out,
+  with invented tickets: a public Jira server (its "all fields" CSV export
+  and its search API), a public Jira Cloud site (its search API, where a
+  description is a tree of nodes) and GitHub (`gh issue list --json` and
+  its issues API). Jira Cloud's CSV export, and other systems, have not
+  been read.
 - A table a script uses that no registry lists. It needs the language
   server to say which tables a script uses
   ([LSP-REQUESTS.md](LSP-REQUESTS.md), L6).

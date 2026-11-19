@@ -507,6 +507,14 @@ the work comes from ([ADR 0012](adr/0012-a-projects-work-is-written-down.md)).
   when the row has a parent column that is empty; and the description,
   which is in Jira's wiki markup and read as headings and stray braces. A
   ticket read from the API also keeps the address a person opens for it.
+- **And against what Jira Cloud gives out.** A public Jira Cloud site's
+  search API was read for the kinds of node a description holds there: it
+  is a tree, not text. The reader took its words and dropped its shape:
+  a heading was a line, code had no fence, a mark of code or bold was
+  gone. The tree is now written as Markdown: headings, lists and task
+  lists, code with its language, quotations, tables, links and marks. An
+  attachment is said to have been there; a node of a kind not known is
+  written as the words it holds.
 - **And against what GitHub gives out.** Its own command's JSON (`gh
   issue list --json`) and its issues API were read for their field names,
   and invented issues in those shapes run through the reader. What was
