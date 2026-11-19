@@ -653,6 +653,13 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 /* Planning mode: a plan's chart */
 .plan { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; background: var(--bg); }
 .plan-bar { flex-wrap: wrap; }
+/* The Edit menu is at the bar's start: it opens to the right, over the chart it edits. */
+.plan-edit-menu .menu-pop { left: 0; right: auto; }
+/* In a narrow chart the finder is shorter, so the bar stays one row. */
+.plan-bar.narrow .graph-find-box { flex: 0 0 112px; }
+.plan-bar.narrow input.graph-find { width: 100%; min-width: 0; }
+/* A long title is cut short before it pushes the bar onto a second row. */
+.plan-bar > strong { flex: 0 1 auto; min-width: 60px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .plan-bar button.on, .graph-bar > button.on { color: var(--accent); box-shadow: inset 0 -1px 0 var(--accent); }
 .plan-canvas { flex: 1; min-height: 0; position: relative; display: flex; outline: none; overflow: hidden; }
 .plan-canvas:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); }

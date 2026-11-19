@@ -186,6 +186,8 @@ export function chartGraph(plan: Plan, sizes: ReadonlyMap<string, Size>, loopTip
 				"elk.direction": "DOWN",
 				"elk.hierarchyHandling": "INCLUDE_CHILDREN",
 				"elk.edgeRouting": "ORTHOGONAL",
+				// More tries at the order within each row: a chart is small, and each crossing saved is one less to read past.
+				"elk.layered.thoroughness": "40",
 				...SPACING,
 				"elk.json.edgeCoords": "ROOT",
 			},
@@ -247,6 +249,13 @@ export function crossings(routes: readonly (readonly Point[])[]): number {
 		for (let j = i + 1; j < routes.length; j++)
 			for (let p = 1; p < routes[i]!.length; p++) for (let q = 1; q < routes[j]!.length; q++) if (cross(routes[i]![p - 1]!, routes[i]![p]!, routes[j]![q - 1]!, routes[j]![q]!)) count++;
 	return count;
+}
+
+/** How far the routes run in all: of two charts with as many crossings, the one with less line is the plainer. */
+export function routeLength(routes: readonly (readonly Point[])[]): number {
+	let length = 0;
+	for (const route of routes) for (let i = 1; i < route.length; i++) length += Math.abs(route[i]!.x - route[i - 1]!.x) + Math.abs(route[i]!.y - route[i - 1]!.y);
+	return length;
 }
 
 /**

@@ -16,11 +16,13 @@ export const errors: string[] = [];
  * An error nobody caught. It is kept for the self-test, written to Output and
  * shown: a failure that only reaches the console is one the user never hears of.
  * A cancelled request is not a failure (Monaco rejects with "Canceled" when a
- * newer request replaces an older one).
+ * newer request replaces an older one), and neither is the browser's notice
+ * that a size it watches changed again within one frame: that change is only
+ * delivered a frame later.
  */
 function uncaught(reason: unknown) {
 	const text = String((reason as any)?.message ?? reason ?? "");
-	if (!text || /^cancel{1,2}ed$/i.test(text) || (reason as any)?.name === "Canceled") return;
+	if (!text || /^cancel{1,2}ed$/i.test(text) || (reason as any)?.name === "Canceled" || /^ResizeObserver loop/.test(text)) return;
 	errors.push(text);
 	log(`uncaught: ${text}${(reason as any)?.stack ? `\n${(reason as any).stack}` : ""}`);
 	notify(`Something went wrong: ${text}`, "error");

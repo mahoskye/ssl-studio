@@ -12,12 +12,12 @@ import { Menu, type MenuItem } from "../Menu";
 import { pictureName, savePicture } from "../graph/picture";
 import { dirName, joinPath, relativeTo } from "../../shared/paths";
 import { regionColor } from "../editor/regions";
-import { canvasMeasure, clearOf, fitView, legibleScale, mapArea, nearest, outOfSight, recall, remember, reveal, roundedPath, zoomAt, type Measure, type Point } from "../graph/canvas";
+import { canvasMeasure, centredOn, clearOf, fitView, legibleScale, mapArea, nearest, outOfSight, recall, remember, reveal, roundedPath, zoomAt, type Measure, type Point } from "../graph/canvas";
 import { diagnostics } from "../lsp/session";
 import { documents, notify, setState, state, applyText } from "../state";
 import { nodeStatuses } from "./build";
 import { builtOf, chartChanges, unitsOfNode } from "./built";
-import { chartGraph, crossings, cycleEdge, describeEdge, describeNode, KEYS, labelPoint, LINE, MARK_WORDS, routeOf, sizeNode, statusMark, type ChartGraph, type Mark, type NodeState, type Sized } from "./chart";
+import { chartGraph, crossings, routeLength, cycleEdge, describeEdge, describeNode, KEYS, labelPoint, LINE, MARK_WORDS, routeOf, sizeNode, statusMark, type ChartGraph, type Mark, type NodeState, type Sized } from "./chart";
 import { recheckPlan } from "./check";
 import { driftFor, openProcedure } from "./drift";
 import { assistOf } from "./run";
@@ -41,6 +41,8 @@ const MAX_ZOOM = 2.5;
 /** The assistant's width (.plan-assist), and the least the chart keeps beside it before the assistant goes below. */
 const ASSIST_WIDTH = 280;
 const MIN_CHART_WIDTH = 360;
+/** Narrower than this, the bar's six editing buttons are one menu: side by side they take a second row, and a third. */
+const BAR_FITS_FROM = 1030;
 
 /** Whether the assistant shows, as last chosen in any plan; null until it has been chosen. */
 const ASSISTANT_KEY = "plan.assistant";
@@ -79,12 +81,13 @@ async function layoutPlan(plan: Plan, measure: { node: Measure; label: Measure }
 	const east = await layoutWith(chartGraph(plan, sized), sized, measure);
 	if (!east.sided) return east.layout;
 	// A loop closed from a decision can leave by either side, and which is clearer depends on
-	// where the layout puts the rest: both are laid out, and the one with fewer crossings is kept.
+	// where the layout puts the rest: both are laid out, and the one with fewer crossings is kept,
+	// or of two with as many, the one with less line.
 	const west = await layoutWith(chartGraph(plan, sized, "WEST"), sized, measure);
-	return west.crossings < east.crossings ? west.layout : east.layout;
+	return west.crossings < east.crossings || (west.crossings === east.crossings && west.length < east.length) ? west.layout : east.layout;
 }
 
-async function layoutWith({ graph, nodes, edges, groups, reversed, sided }: ChartGraph, sized: ReadonlyMap<string, Sized>, measure: { node: Measure; label: Measure }): Promise<{ layout: Layout; crossings: number; sided: boolean }> {
+async function layoutWith({ graph, nodes, edges, groups, reversed, sided }: ChartGraph, sized: ReadonlyMap<string, Sized>, measure: { node: Measure; label: Measure }): Promise<{ layout: Layout; crossings: number; length: number; sided: boolean }> {
 	const result: any = await elk.layout(graph as any);
 	const boxes: Box[] = [];
 	const walk = (n: any, ox: number, oy: number) => {
@@ -108,7 +111,7 @@ async function layoutWith({ graph, nodes, edges, groups, reversed, sided }: Char
 		const labelWidth = shown ? Math.ceil(measure.label(shown)) + 12 : 0;
 		return { id: e.id, from: edge.from, to: edge.to, label: edge.label, shown, labelWidth, points, at: labelPoint(points, labelWidth), missing, pending: Boolean(edge.pending), removing: Boolean(edge.removing), back: reversed.has(index) };
 	});
-	return { layout: { boxes, lines, width: result.width, height: result.height }, crossings: crossings(lines.map((l) => l.points)), sided };
+	return { layout: { boxes, lines, width: result.width, height: result.height }, crossings: crossings(lines.map((l) => l.points)), length: routeLength(lines.map((l) => l.points)), sided };
 }
 
 /** A way out as it is drawn: its corners rounded, so that it reads as one line through each turn. */
@@ -150,10 +153,22 @@ export function PlanView(props: { path: string; group: number }) {
 	const [keysOpen, setKeysOpen] = createSignal(false);
 	/** Too narrow for the chart and the assistant side by side. */
 	const [narrow, setNarrow] = createSignal(false);
+	/** Too narrow for every button of the bar in one row. */
+	const [compact, setCompact] = createSignal(false);
 	/** What the small text box is editing, over the chart. */
 	const [editing, setEditing] = createSignal<{ node: string } | { from: string; to: string } | null>(null);
 	const assistantId = createUniqueId();
 	const keysId = createUniqueId();
+	/** The bar's editing buttons as a menu, for a chart too narrow to show them side by side. */
+	const editItems = (): MenuItem[] => [
+		{ label: "Add step", keys: "Enter", run: () => (addNext(), refocus()) },
+		{ label: "Add branch", keys: "B", run: () => (addOther(), refocus()) },
+		{ label: "Add call…", run: () => void addCallAsk() },
+		{ label: "Step or decision", keys: "D", run: () => (toggleDecision(), refocus()) },
+		{ label: linking() ? "Stop connecting" : "Connect to another", keys: "C", run: () => (linking() ? setLinking(null) : beginLink(), refocus()) },
+		"separator",
+		{ label: "Delete the selection", keys: "Delete", run: () => (remove(), refocus()) },
+	];
 	/** The bar's menu: what is not needed at every look. */
 	const more = (): MenuItem[] => [
 		{ label: keysOpen() ? "Hide the keys" : "Keys, and what the shapes mean", keys: "?", run: () => setKeysOpen((open) => !open) },
@@ -183,9 +198,19 @@ export function PlanView(props: { path: string; group: number }) {
 	};
 	const watchWidth = (el: HTMLDivElement) => {
 		if (typeof ResizeObserver === "undefined") return;
-		const observer = new ResizeObserver((entries) => setNarrow((entries[0]?.contentRect.width ?? Infinity) < ASSIST_WIDTH + MIN_CHART_WIDTH));
+		// What follows from the width changes the bar's height, and so this element's: it waits for
+		// the next frame, where the browser does not count it against the one being laid out.
+		let frame = 0;
+		const observer = new ResizeObserver((entries) => {
+			const width = entries[0]?.contentRect.width ?? Infinity;
+			cancelAnimationFrame(frame);
+			frame = requestAnimationFrame(() => {
+				setNarrow(width < ASSIST_WIDTH + MIN_CHART_WIDTH);
+				setCompact(width < BAR_FITS_FROM);
+			});
+		});
 		observer.observe(el);
-		onCleanup(() => observer.disconnect());
+		onCleanup(() => (cancelAnimationFrame(frame), observer.disconnect()));
 	};
 
 	/** The keys go to the chart, unless the words of a node are being edited. */
@@ -274,6 +299,14 @@ export function PlanView(props: { path: string; group: number }) {
 		const next = outOfSight(l, shown, size) ? clearOf(shown, box, mapArea(l, size)) : shown;
 		if (next !== v) setView(next);
 	});
+
+	/** A step asked for by its words: it is selected, and put in the middle of the view, where what leads to it and from it shows too. */
+	const goTo = (id: string) => {
+		select(id);
+		const box = layout()?.boxes.find((b) => b.id === id);
+		if (box && canvas) setView((v) => centredOn(v, { x: box.x + box.width / 2, y: box.y + box.height / 2 }, canvas.getBoundingClientRect()));
+		refocus();
+	};
 
 	/** Findings on each node, from what Problems shows, so the two cannot disagree. */
 	const issues = createMemo(() => {
@@ -376,10 +409,10 @@ export function PlanView(props: { path: string; group: number }) {
 		const at = selected();
 		if (at) applyEdit(removeNode(p, at));
 	};
-	const addCallAsk = async (e: MouseEvent) => {
+	const addCallAsk = async (e?: MouseEvent) => {
 		const p = plan();
 		if (!p) return;
-		const button = e.detail > 0 ? null : (e.currentTarget as HTMLElement);
+		const button = !e || e.detail > 0 ? null : (e.currentTarget as HTMLElement);
 		const ref = (await ask("Procedure, script or data source this calls"))?.trim();
 		if (ref) applyEdit(addCall(p, ref, selected() ?? undefined));
 		// The dialog took the focus: it goes back to where it came from.
@@ -553,26 +586,39 @@ export function PlanView(props: { path: string; group: number }) {
 					</div>
 				}
 			>
-				<div class="graph-bar plan-bar">
-					<strong>{plan()!.title || "Plan"}</strong>
-					<button title="The next step (Enter)" onClick={(e) => (addNext(), after(e))}>
-						Add step
-					</button>
-					<button title="Another way out (B)" onClick={(e) => (addOther(), after(e))}>
-						Add branch
-					</button>
-					<button title="Something that already exists" onClick={(e) => void addCallAsk(e)}>
-						Add call
-					</button>
-					<button title="Step or decision (D)" onClick={(e) => (toggleDecision(), after(e))}>
-						Decision
-					</button>
-					<button title="Connect the selected node to another (C)" classList={{ on: Boolean(linking()) }} aria-pressed={Boolean(linking())} onClick={(e) => (linking() ? (setLinking(null), after(e)) : (beginLink(), refocus()))}>
-						Connect
-					</button>
-					<button title="Delete the selection (Delete); undo brings it back" onClick={(e) => (remove(), after(e))}>
-						Delete
-					</button>
+				<div class="graph-bar plan-bar" classList={{ narrow: narrow() }}>
+					{/* The tab and the Title field say it too: a narrow bar gives its room to the buttons. */}
+					<Show when={!narrow()}>
+						<strong>{plan()!.title || "Plan"}</strong>
+					</Show>
+					{/* In a narrow chart the six are one menu, so the bar stays short and the chart keeps its room. */}
+					<Show
+						when={!compact()}
+						fallback={
+							<Menu label="Edit the chart" title="Edit: add a step, a branch or a call; make a decision; connect; delete" class="plan-edit-menu" items={editItems}>
+								Edit
+							</Menu>
+						}
+					>
+						<button title="The next step (Enter)" onClick={(e) => (addNext(), after(e))}>
+							Add step
+						</button>
+						<button title="Another way out (B)" onClick={(e) => (addOther(), after(e))}>
+							Add branch
+						</button>
+						<button title="Something that already exists" onClick={(e) => void addCallAsk(e)}>
+							Add call
+						</button>
+						<button title="Step or decision (D)" onClick={(e) => (toggleDecision(), after(e))}>
+							Decision
+						</button>
+						<button title="Connect the selected node to another (C)" classList={{ on: Boolean(linking()) }} aria-pressed={Boolean(linking())} onClick={(e) => (linking() ? (setLinking(null), after(e)) : (beginLink(), refocus()))}>
+							Connect
+						</button>
+						<button title="Delete the selection (Delete); undo brings it back" onClick={(e) => (remove(), after(e))}>
+							Delete
+						</button>
+					</Show>
 					{/* A step by its words: it is selected, and the chart moves to show it. */}
 					<Finder
 						choices={plan()!.nodes.map((n) => ({ id: n.id, name: n.text.trim() || "(no words yet)", where: n.kind === "call" && n.ref ? `call to ${n.ref}` : n.kind }))}
@@ -580,15 +626,17 @@ export function PlanView(props: { path: string; group: number }) {
 						title="Type some of a step's words: the one you choose is selected and brought into view"
 						placeholder="Find a step…"
 						none={(typed) => `No step has “${typed}” in its words.`}
-						onChoose={(id) => (select(id), refocus())}
+						onChoose={goTo}
 					/>
 					<span class="spacer" />
 					<button title="The agent's questions, suggestions and spec" classList={{ on: assistantOpen() }} aria-expanded={assistantOpen()} aria-controls={assistantId} onClick={toggleAssistant}>
 						Assistant
 					</button>
-					<button class="link" title="Show the findings in Problems" onClick={() => (setState("bottomView", "problems"), setState("settings", "layout", "bottom", true))}>
-						{findingCount() ? `${findingCount()} ${findingCount() === 1 ? "finding" : "findings"}` : "No findings"}
-					</button>
+					<Show when={findingCount() || !narrow()}>
+						<button class="link" title="Show the findings in Problems" onClick={() => (setState("bottomView", "problems"), setState("settings", "layout", "bottom", true))}>
+							{findingCount() ? `${findingCount()} ${findingCount() === 1 ? "finding" : "findings"}` : "No findings"}
+						</button>
+					</Show>
 					{/* The same three as the call graph has: out, the scale (which resets it), in. */}
 					<div class="graph-zoom" role="group" aria-label="Zoom">
 						<button title="Zoom out (−)" aria-label="Zoom out" onClick={(e) => (zoomBy(1 / 1.2), after(e))}>

@@ -341,8 +341,17 @@ From a second look:
   and the chart with fewer crossings is kept.
 - **The steps of a stage stand as far apart as the rest:** inside a stage
   they stood closer, and a way's label lay on the step under it.
-- **The chart's bar is one row** at the usual width: its keys and Save
-  picture are in a menu, as the graph's are.
+- **The chart's bar is one row** at every width looked at: its keys and Save
+  picture are in a menu, as the graph's are, and in a chart too narrow for
+  the six editing buttons they are one Edit menu. A narrow bar leaves out
+  the title, which the tab and the Title field say too.
+- **A chart is laid out with more tries,** and of two charts with as many
+  crossings the one with less line is kept: in the demo's plan the way back
+  from "Was the sample's row changed?" no longer crosses the way on.
+- **A size that changes twice in one frame is not an error.** The browser's
+  notice of it was shown as "Something went wrong".
+- **A step found by its words is put in the middle of the view,** with what
+  leads to it and from it, where it used to be brought just inside the edge.
 
 ## On hold
 

@@ -327,7 +327,7 @@ describe("the chart's keys", () => {
 	});
 });
 
-import { crossings } from "../src/view/plan/chart";
+import { crossings, routeLength } from "../src/view/plan/chart";
 
 describe("ways that cross", () => {
 	test("two ways that pass through each other cross once", () => {
@@ -337,6 +337,10 @@ describe("ways that cross", () => {
 		const down = [{ x: 0, y: 0 }, { x: 0, y: 10 }];
 		expect(crossings([down, [{ x: -5, y: 10 }, { x: 0, y: 10 }]])).toBe(0);
 		expect(crossings([down, [{ x: 4, y: 0 }, { x: 4, y: 10 }]])).toBe(0);
+	});
+	test("the line in a chart is the length of every way, corner to corner", () => {
+		expect(routeLength([[{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 5 }], [{ x: 0, y: 0 }, { x: 0, y: 7 }]])).toBe(22);
+		expect(routeLength([])).toBe(0);
 	});
 	test("a way does not cross itself, and each crossing of two ways counts", () => {
 		const zigzag = [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }, { x: 0, y: 10 }];
