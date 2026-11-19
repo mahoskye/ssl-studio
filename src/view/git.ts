@@ -9,7 +9,7 @@ import { backend } from "./backend";
 import { choose } from "./dialogs";
 import { openReview } from "./editor/Review";
 import { languageFor } from "./editor/languages";
-import { canonical, documents, fileChangedOnDisk, fileRemoved, notify, setState, state } from "./state";
+import { canonical, changingOnDisk, documents, fileChangedOnDisk, fileRemoved, notify, setState, state } from "./state";
 
 /** What git says: null outside a repository (or with no git), undefined before it was first asked. */
 const [status, setStatus] = createSignal<GitStatus | null | undefined>(undefined);
@@ -61,7 +61,12 @@ export const changedCount = () => status()?.files.length ?? 0;
 
 const failed = (what: string) => (e: any) => notify(`${what}: ${String(e?.message ?? e)}`, "error");
 
-export const stage = (files: GitFile[]) => backend.gitStage(files.map((file) => file.path)).then(refreshGit, failed("Not staged"));
+export async function stage(files: GitFile[]): Promise<void> {
+	await backend.gitStage(files.map((file) => file.path)).then(refreshGit, failed("Not staged"));
+	// git stages what is on disk: edits that are only in the editor are not in it, and that is said.
+	const unsaved = files.filter((file) => state.dirty[canonical(file.path)]);
+	if (unsaved.length) notify(`${unsaved.length === 1 ? `${baseName(unsaved[0]!.path)} has` : `${unsaved.length} of these files have`} unsaved changes: what is staged is what is saved.`);
+}
 export const unstage = (files: GitFile[]) => backend.gitUnstage(files.map((file) => file.path)).then(refreshGit, failed("Not unstaged"));
 
 /** Commits what is staged. True when it was made. */
@@ -91,7 +96,8 @@ export async function discard(file: GitFile): Promise<void> {
 		: `Discard the changes to ${name} that are not staged? The file goes back to what git has of it${unsaved ? ", and the unsaved changes in the editor go with them" : ""}. Where it is text, the file as it is now on disk is kept in its local history.`;
 	if ((await choose(what, [DISCARD], { danger: DISCARD })) !== DISCARD) return;
 	try {
-		await backend.gitDiscard(file.path);
+		// The file changes under the editor's copy on purpose: no "changed on disk" is raised while it does.
+		await changingOnDisk(file.path, () => backend.gitDiscard(file.path));
 	} catch (e) {
 		return failed("Not discarded")(e);
 	}
@@ -111,10 +117,16 @@ export async function showChange(file: GitFile, staged: boolean): Promise<void> 
 	const name = relativeTo(root, file.path);
 	const kind = staged ? file.staged : file.unstaged;
 	try {
+		// A file in conflict has three texts in git, not one: which to show beside it is settled with git's own tools.
+		if (kind === "conflict") return notify(`${baseName(file.path)} is in conflict: there is no one earlier text to show beside it. Open the file to see git's marks in it.`);
 		// Staged: the last commit against what is staged. Not staged: what is staged against the folder.
-		const before = kind === "untracked" || kind === "added" ? "" : ((await backend.gitBase(file.from && staged ? file.from : file.path, staged ? "head" : "index")) ?? "");
+		const was = kind === "untracked" || kind === "added" ? "" : await backend.gitBase(file.from && staged ? file.from : file.path, staged ? "head" : "index");
+		const staging = staged && file.staged !== "deleted" ? await backend.gitBase(file.path, "index") : "";
+		// git has it, and not as text: bytes are not shown side by side.
+		if (was === null || staging === null) return notify(`${baseName(file.path)} is not text in git: there is nothing of it to compare.`);
+		const before = was;
 		let after = "";
-		if (staged) after = file.staged === "deleted" ? "" : ((await backend.gitBase(file.path, "index")) ?? "");
+		if (staged) after = staging;
 		else if (file.unstaged !== "deleted") {
 			const open = documents.get(canonical(file.path));
 			const read = open ? null : await backend.read(file.path);

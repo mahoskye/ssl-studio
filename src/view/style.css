@@ -145,6 +145,11 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .git-head .label { flex: 1; }
 .git-row .git-folder { margin-left: var(--space-4); color: var(--muted); font-size: var(--text-sm); }
 .git-row .label.gone { text-decoration: line-through; }
+/* A row's own steps: there when the row is pointed at or has the keyboard, so that a list of rows is not a wall of buttons. */
+.git-row .git-acts { flex: none; display: none; gap: var(--space-1); }
+.git-row:hover .git-acts, .git-row:focus .git-acts, .git-row:focus-within .git-acts { display: inline-flex; }
+.git-row .git-acts button { padding: 0 var(--space-2); color: var(--muted); }
+.git-row .git-acts button:hover { color: var(--fg); }
 /* The letter says how the file changed; its colour only repeats it. */
 .git-letter { flex: none; width: calc(16px * var(--ui-scale)); text-align: center; font-family: ui-monospace, Menlo, monospace; font-size: var(--text-md); color: var(--muted); }
 .git-letter.modified, .git-letter.renamed { color: var(--info); }
@@ -299,7 +304,8 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 /* What each side of a comparison is, over it, and how large the change is. */
 .diff-sides { display: grid; grid-template-columns: 1fr 1fr; padding: var(--space-2) var(--space-5); background: var(--panel-bg); border-bottom: 1px solid var(--border); font-size: var(--text-md); font-weight: 600; color: var(--muted); }
 .diff-sides .hint { margin: 0 0 0 var(--space-3); font-weight: 400; }
-.diff-sides > span:last-child { display: flex; align-items: baseline; }
+/* In a narrow window the side's name stays whole, and how much differs goes under it. */
+.diff-sides > span:last-child { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: var(--space-4); white-space: nowrap; }
 .diff-sides .diff-size { margin-left: auto; font-weight: 400; font-variant-numeric: tabular-nums; }
 .diff-host { flex: 1; min-height: 0; }
 /* A review's header: what is under review, which file, and what accepting will do. It wraps; nothing is cut. */

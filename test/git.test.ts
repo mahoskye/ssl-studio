@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,7 +11,15 @@ const hasGit = Bun.spawnSync(["git", "--version"]).exitCode === 0;
 const settings = join(mkdtempSync(join(tmpdir(), "ssl-studio-gitconfig-")), "config");
 writeFileSync(settings, "");
 const identity = { GIT_AUTHOR_NAME: "Test", GIT_AUTHOR_EMAIL: "test@example.test", GIT_COMMITTER_NAME: "Test", GIT_COMMITTER_EMAIL: "test@example.test", GIT_CONFIG_GLOBAL: settings, GIT_CONFIG_NOSYSTEM: "1" };
-Object.assign(process.env, identity);
+// For these tests only: the app's own git is run with the process's settings, so they are set here and put back after.
+const before = Object.fromEntries(Object.keys(identity).map((name) => [name, process.env[name]]));
+beforeAll(() => void Object.assign(process.env, identity));
+afterAll(() => {
+	for (const [name, value] of Object.entries(before)) {
+		if (value === undefined) delete process.env[name];
+		else process.env[name] = value;
+	}
+});
 
 function repository(): string {
 	const root = mkdtempSync(join(tmpdir(), "ssl-studio-git-"));

@@ -8,12 +8,16 @@ import { parseStatus, type GitStatus } from "../shared/gitStatus";
 import { decode } from "./encoding";
 
 type Ran = { code: number; out: Uint8Array; err: string };
+/** As many paths as one git command is given. */
+const BATCH = 100;
 const text = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
 
 export class Git {
 	private top: string | null | undefined;
 	/** Where the workspace's folder is inside the repository, as git says it: "" at its top, "app/" below it. */
 	private prefix = "";
+	/** The question git is answering now, or answered last: the next one waits for it. */
+	private last: Promise<unknown> = Promise.resolve();
 
 	constructor(private readonly root: string) {}
 
@@ -21,7 +25,17 @@ export class Git {
 	 * Runs git in the workspace's folder. It is given no keyboard, and told not to ask at the terminal. A file's
 	 * name is only ever a name: "report[1].ssl" is that file, not a pattern that is also "report1.ssl".
 	 */
-	private async run(args: string[]): Promise<Ran> {
+	private run(args: string[]): Promise<Ran> {
+		// One question at a time: two steps at once would meet at git's own lock on the repository, and one would fail.
+		const next = this.last.then(
+			() => this.spawn(args),
+			() => this.spawn(args),
+		);
+		this.last = next;
+		return next;
+	}
+
+	private async spawn(args: string[]): Promise<Ran> {
 		const proc = Bun.spawn(["git", "--no-optional-locks", "--literal-pathspecs", "-C", this.root, ...args], {
 			stdin: "ignore",
 			stdout: "pipe",
@@ -97,21 +111,29 @@ export class Git {
 		}
 	}
 
+	/** Paths as git is given them, a hundred to a command: a command line is only so long, on Windows shortest of all. */
+	private async batches(paths: string[]): Promise<string[][]> {
+		const names = await Promise.all(paths.map((path) => this.here(path)));
+		const out: string[][] = [];
+		for (let at = 0; at < names.length; at += BATCH) out.push(names.slice(at, at + BATCH));
+		return out;
+	}
+
 	private async hasCommit(): Promise<boolean> {
 		return (await this.run(["rev-parse", "--verify", "-q", "HEAD"])).code === 0;
 	}
 
 	/** Puts files into the next commit as they are now: changed, new or gone. */
 	async stage(paths: string[]): Promise<void> {
-		if (paths.length) await this.done(["add", "-A", "--", ...(await Promise.all(paths.map((path) => this.here(path))))]);
+		for (const some of await this.batches(paths)) await this.done(["add", "-A", "--", ...some]);
 	}
 
 	/** Takes files out of the next commit. Their text in the folder stays as it is. */
 	async unstage(paths: string[]): Promise<void> {
 		if (!paths.length) return;
-		const names = await Promise.all(paths.map((path) => this.here(path)));
 		// Before the first commit there is nothing to put the staged file back to: it is only taken out.
-		await this.done((await this.hasCommit()) ? ["restore", "--staged", "--", ...names] : ["rm", "--cached", "-r", "-q", "--", ...names]);
+		const how = (await this.hasCommit()) ? ["restore", "--staged", "--"] : ["rm", "--cached", "-r", "-q", "--"];
+		for (const some of await this.batches(paths)) await this.done([...how, ...some]);
 	}
 
 	/** Makes a commit of what is staged, with the user's own name and any checks their repository runs. Says what git said. */

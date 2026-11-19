@@ -200,7 +200,7 @@ async function rename(entry: Entry): Promise<string | null> {
 	fileRenamed(entry.path, to);
 	setExpanded((set) => new Set(retarget(set, entry.path, to)));
 	setClip((held) => held && { ...held, path: retarget([held.path], entry.path, to)[0]! });
-	void scriptsCameTo(to, entry.path);
+	void scriptsCameTo(to, entry.path, entry.kind);
 	refresh();
 	// Documents that link to the old name are offered the new one. Not waited for: the row is renamed either way.
 	void followRename(entry.path, to);
@@ -245,7 +245,7 @@ async function moveInto(from: { path: string; kind: "file" | "dir" }, into: stri
 	await backend.rename(from.path, to);
 	fileRenamed(from.path, to);
 	setExpanded((set) => new Set([...retarget(set, from.path, to), into]));
-	void scriptsCameTo(to, from.path);
+	void scriptsCameTo(to, from.path, from.kind);
 	refresh();
 	void followRename(from.path, to);
 	return to;
@@ -265,7 +265,7 @@ async function copyInto(from: { path: string; kind: "file" | "dir" }, into: stri
 	if (staleAt(to)) return null;
 	await backend.copy(from.path, to);
 	setExpanded((set) => new Set(set).add(into));
-	void scriptsCameTo(to);
+	void scriptsCameTo(to, undefined, from.kind);
 	refresh();
 	// The copy is of the file on disk: edits nobody saved are not in it, and that is said.
 	const unsaved = Object.keys(state.dirty).filter((path) => state.dirty[path] && (path === canonical(from.path) || isInside(from.path, path)));

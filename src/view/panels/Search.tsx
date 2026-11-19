@@ -57,19 +57,23 @@ export function searchFor(query: string, options: { regex?: boolean } = {}) {
 	showPanel("search");
 }
 
+// What was searched for, how, and what was found: kept while the panel is away, with the replacement and the file
+// patterns, so that coming back to it is coming back to the same search.
+const [typed, setTyped] = createSignal("");
+const [hits, setHits] = createSignal<SearchHit[]>([]);
+const [regex, setRegex] = createSignal(false);
+const [caseSensitive, setCaseSensitive] = createSignal(false);
+const [wholeWord, setWholeWord] = createSignal(false);
+/** Where the panel stands: nothing asked yet, searching, the last search answered or failed. */
+const [status, setStatus] = createSignal<"idle" | "busy" | "done" | "failed">("idle");
+const [asked, setAsked] = createSignal("");
+/** The switches and the files the results on screen were found with: a replace uses these, not what has been changed since. */
+const [searched, setSearched] = createSignal<SearchOptions>({});
+const [failure, setFailure] = createSignal("");
+let latest = 0;
+
 export function Search() {
 	let input!: HTMLInputElement;
-	const [hits, setHits] = createSignal<SearchHit[]>([]);
-	const [regex, setRegex] = createSignal(false);
-	const [caseSensitive, setCaseSensitive] = createSignal(false);
-	const [wholeWord, setWholeWord] = createSignal(false);
-	/** Where the panel stands: nothing asked yet, searching, the last search answered or failed. */
-	const [status, setStatus] = createSignal<"idle" | "busy" | "done" | "failed">("idle");
-	const [asked, setAsked] = createSignal("");
-	/** The switches and the files the results on screen were found with: a replace uses these, not what has been changed since. */
-	const [searched, setSearched] = createSignal<SearchOptions>({});
-	const [failure, setFailure] = createSignal("");
-	let latest = 0;
 	const run = async () => {
 		const query = input.value;
 		const mine = ++latest;
@@ -101,6 +105,7 @@ export function Search() {
 		if (!wanted || !input) return;
 		setRequest(null);
 		input.value = wanted.query;
+		setTyped(wanted.query);
 		setRegex(wanted.regex);
 		void run();
 	});
@@ -289,6 +294,8 @@ export function Search() {
 					</button>
 					<input
 						ref={(el) => ((input = el), queueMicrotask(() => el.focus()))}
+						value={typed()}
+						onInput={(e) => setTyped(e.currentTarget.value)}
 						id="search-input"
 						data-autofocus=""
 						aria-label="Search the workspace"

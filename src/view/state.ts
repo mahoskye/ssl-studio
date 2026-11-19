@@ -549,9 +549,11 @@ const isScript = (path: string) => /\.(srvscr|ssl|ds)(\.txt)?$/i.test(path);
  * save: after a move (`from` is where they were, which it is told are gone) or a copy. It hears of files only as
  * they are named to it, and a folder's move names none of the scripts in it.
  */
-export async function scriptsCameTo(to: string, from?: string) {
+export async function scriptsCameTo(to: string, from?: string, kind: "file" | "dir" = "dir") {
 	to = canonical(to);
-	const here = (await backend.files().catch(() => [] as string[])).map(canonical).filter((path) => (path === to || isInside(to, path)) && isScript(path));
+	// One file is itself, a script or not: only a folder's scripts have to be looked for.
+	const found = kind === "file" ? [to] : (await backend.files().catch(() => [] as string[])).map(canonical);
+	const here = found.filter((path) => (path === to || isInside(to, path)) && isScript(path));
 	for (const path of here) {
 		if (from) session.fileChanged(canonical(from) + path.slice(to.length), false);
 		session.fileChanged(path, true);
@@ -744,7 +746,8 @@ export async function revert(path: string) {
 	doc.binary = file.binary;
 	// The line ends go back to the file's too: put in as an edit, the text would take on whichever kind the editor
 	// has now, and a change of line ends would survive the revert unseen.
-	doc.model.setEOL(lineEnds(file.text) === "\r\n" ? monaco.editor.EndOfLineSequence.CRLF : monaco.editor.EndOfLineSequence.LF);
+	// A text of one line has no line end to go back to: the editor keeps the kind it gave it when it was opened.
+	if (file.text.includes("\n")) doc.model.setEOL(lineEnds(file.text) === "\r\n" ? monaco.editor.EndOfLineSequence.CRLF : monaco.editor.EndOfLineSequence.LF);
 	doc.model.pushEditOperations([], [{ range: doc.model.getFullModelRange(), text: file.text }], () => null);
 	doc.savedText = file.text;
 	doc.savedVersion = doc.model.getAlternativeVersionId();
@@ -758,9 +761,23 @@ export async function revert(path: string) {
 
 on("fileChanged", ({ path }) => fileChangedOnDisk(path));
 
+/** Files the app itself is about to change on disk, and will see to afterwards: what the watcher says of them meanwhile is not news. */
+const awaited = new Set<string>();
+/** Brackets a change the app makes to a file on disk by some way other than a save (a discard): no alarm is raised for it. */
+export async function changingOnDisk<T>(path: string, change: () => Promise<T>): Promise<T> {
+	const at = canonical(path);
+	awaited.add(at);
+	try {
+		return await change();
+	} finally {
+		awaited.delete(at);
+	}
+}
+
 /** A file was changed on disk by something other than a save here: the tree, the language server and an open copy follow. */
 export async function fileChangedOnDisk(changed: string) {
 	const path = canonical(changed);
+	if (awaited.has(path)) return;
 	setState("treeVersion", (v) => v + 1);
 	const doc = docs.get(path);
 	// The kinds of file the server asks to be told about.

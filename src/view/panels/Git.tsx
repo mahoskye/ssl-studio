@@ -18,6 +18,16 @@ const { show: SHOW, open: OPEN, stage: STAGE, unstage: UNSTAGE, discard: DISCARD
 const [message, setMessage] = createSignal("");
 const [busy, setBusy] = createSignal(false);
 
+/** As many files as a list shows: a folder of thousands that git was never told to ignore must not become thousands of rows. */
+const ROWS_SHOWN = 500;
+const More = (props: { count: number }) => (
+	<Show when={props.count > 0}>
+		<p class="hint">
+			And {props.count} more, not listed. "Stage all" and "Unstage all" act on every one of them.
+		</p>
+	</Show>
+);
+
 export function GitPanel() {
 	const staged = () => (gitStatus() ? stagedOf(gitStatus()!) : []);
 	const changes = () => (gitStatus() ? unstagedOf(gitStatus()!) : []);
@@ -66,6 +76,17 @@ export function GitPanel() {
 						<span class="git-folder">{folder(props.file.path)}</span>
 					</Show>
 				</span>
+				{/* The same steps as the row's menu, for the pointer: out of the keyboard's way, which has the menu key. */}
+				<span class="git-acts" onClick={(e) => e.stopPropagation()}>
+					<Show when={!props.staged && kind() !== "conflict"}>
+						<button type="button" tabindex={-1} title={kind() === "untracked" ? "Move to trash…" : "Discard changes…"} aria-label={`${kind() === "untracked" ? "Move to trash" : "Discard the changes to"} ${name()}`} onClick={() => void discard(props.file)}>
+							<span aria-hidden="true">↶</span>
+						</button>
+					</Show>
+					<button type="button" tabindex={-1} title={props.staged ? "Unstage" : "Stage"} aria-label={`${props.staged ? "Unstage" : "Stage"} ${name()}`} onClick={() => void (props.staged ? unstage([props.file]) : stage([props.file]))}>
+						<span aria-hidden="true">{props.staged ? "−" : "＋"}</span>
+					</button>
+				</span>
 				<span class={`git-letter ${kind()}`} aria-label={changeWord(kind())}>
 					{changeLetter(kind())}
 				</span>
@@ -84,8 +105,14 @@ export function GitPanel() {
 				</p>
 			</Show>
 			<Show when={gitStatus() === undefined && !gitFailure()}>
-				<p class="hint">Asking git…</p>
+				<p class="hint" role="status">
+					Asking git…
+				</p>
 			</Show>
+			{/* What changed after a step, for whoever cannot see the lists move. */}
+			<p class="visually-hidden" role="status">
+				{gitStatus() ? `${staged().length} staged, ${changes().length} not staged` : ""}
+			</p>
 			<Show when={gitStatus() === null}>
 				<p class="hint">This folder is not in a git repository, or git is not installed. Once it is, what has changed since the last commit is listed here.</p>
 			</Show>
@@ -129,8 +156,9 @@ export function GitPanel() {
 									</>
 								}
 							>
-								<For each={staged()}>{(file) => <FileRow file={file} staged={true} />}</For>
+								<For each={staged().slice(0, ROWS_SHOWN)}>{(file) => <FileRow file={file} staged={true} />}</For>
 							</RowGroup>
+							<More count={staged().length - ROWS_SHOWN} />
 						</Show>
 						<Show when={changes().length}>
 							<RowGroup
@@ -143,8 +171,9 @@ export function GitPanel() {
 									</>
 								}
 							>
-								<For each={changes()}>{(file) => <FileRow file={file} staged={false} />}</For>
+								<For each={changes().slice(0, ROWS_SHOWN)}>{(file) => <FileRow file={file} staged={false} />}</For>
 							</RowGroup>
+							<More count={changes().length - ROWS_SHOWN} />
 						</Show>
 					</Rows>
 				</Show>

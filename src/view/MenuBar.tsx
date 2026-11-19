@@ -93,7 +93,9 @@ function itemsOf(entries: readonly BarEntry[], box: HTMLElement | null): MenuIte
 		// With the keyboard in a text box, the box's own commands work on the box, and the code's are not for it.
 		if (box) return inBox ? { label: entry.label, keys: editorKeys(entry.editor), run: () => void runInBox(box, inBox), why: noPaste } : { label: entry.label, keys: editorKeys(entry.editor), run: () => {}, why: "For the code: the keyboard is in a text box" };
 		// Undo and redo reach text that is not shown as text (blocks, a page), but not a file that is behind something else.
-		const behind = !now.text && now.file && !inFront() ? "The file is not in front" : "";
+		// A picture, or other bytes, has no text to undo anything in.
+		const bytes = now.file && documents.get(activePath()!)?.binary ? "The open file is not text" : "";
+		const behind = bytes || (!now.text && now.file && !inFront() ? "The file is not in front" : "");
 		return { label: entry.label, keys: editorKeys(entry.editor), run: () => runEditor(entry.editor, now.text), why: missing(entry, now) || behind || noPaste };
 	});
 }

@@ -496,6 +496,38 @@ panel in the app's own window, and a workspace inside a larger
 repository (the backend's tests stage, unstage and discard in one; CI
 runs them on Windows and macOS too).
 
+## What the reviews found
+
+Three reviews were made by a reader who was given the commits and not
+the author's conclusions: after steps 1 to 3, after steps 4 to 6, and
+after steps 7 and 8. What each confirmed was fixed before the next step;
+the fixes are the commits named "defects found by a review".
+
+What the last review found, and what was done about each:
+
+- **Fixed.** Git steps in a workspace inside a larger repository; names
+  read as patterns; a failed question taken for "not followed"; what is
+  staged above the workspace's folder; a copy in local history of every
+  file a replace writes; a replace in a file with no tab; a match of
+  nothing beside a wide character; a file's mode on write; "still open
+  in a tab" for a file with no tab; text that turns into bytes on disk;
+  the cursor kept across a comparison; the commit's message kept across
+  panels; the margin's marks blinking; the search kept across panels;
+  the steps of a row shown for the pointer; the spoken status; the
+  settings the git tests left behind; and every line of this document
+  and of ADRs 0021 and 0022 that said what the code did not do.
+- **Fixed in part, and said.** A replace acts on what is in the file
+  when it runs. The app says when that is not what was listed, and a
+  line too long for the list shows no replacement; it does not refuse.
+- **Left, with the reason.** Git is given no time limit: a repository's
+  own checks may rightly take long. Unstaging a renamed file leaves the
+  old name removed and the new one unfollowed: that is git's own answer.
+  A very large file with changes at both ends is marked changed
+  throughout: comparing it line by line is too slow to do on every key.
+  A copy that fails leaves the empty folder it made. Local history, the
+  discard and the replace as the backend runs them have no test of
+  their own: a test would write into the user's own settings folder.
+
 ## Why not an extension
 
 The other way to get all of this is to build SSL Studio as a VS Code
@@ -508,6 +540,16 @@ One rule keeps that door open at no cost: nothing in `src/shared` depends
 on the shell. It holds today.
 
 ## Not checked
+
+Each step was looked at in the light theme at 720 wide and the dark theme
+at 1440 wide as it was built. At the end, everything the steps added was
+looked at again the other way round, in the dark theme at 720 wide and
+the light theme at 1440 wide: the menu bar with an entry that cannot
+run, the quick pick's list of what can be typed, a pinned tab and its
+menu, a cut row and a drop mark in the Explorer, a picture, the status
+bar's encoding and line ends, the replace preview with its file boxes,
+the Source control panel with a row's own steps, a comparison, and the
+margin's marks.
 
 - A screen reader was not run against the app.
 - The desktop app's own window (its title bar, its system file dialog)
