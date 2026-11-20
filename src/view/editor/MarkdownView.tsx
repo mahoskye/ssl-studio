@@ -6,7 +6,8 @@ import DOMPurify from "dompurify";
 import { marked } from "marked";
 import { linkFile, linkLeads, linkWritten } from "../../shared/docLinks";
 import { headingAnchor } from "../../shared/docTables";
-import { finishMarkdown, outlineOf, type TicketRef } from "./markdownHtml";
+import { docByName } from "../../shared/namedLinks";
+import { finishMarkdown, outlineOf, type NameResolver, type TicketRef } from "./markdownHtml";
 import { frontMatter, plainMarkdown } from "../../shared/frontMatter";
 import { dirName, isInside, joinPath, relativePath } from "../../shared/paths";
 import { DOC_FOLDERS, registryTitle, statusChoices, toneOf } from "../../shared/projectDocs";
@@ -46,7 +47,14 @@ export function MarkdownView(props: { path: string; /** The editor group the pag
 		[],
 		{ equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) },
 	);
-	const html = createMemo(() => finishMarkdown(DOMPurify.sanitize(marked.parse(front().body, { async: false, gfm: true }) as string), { anchors: true, tickets: mentioned() }));
+	/** Where a link by name leads from this document: to the document the name means, by its path from here. */
+	const named: NameResolver = (name) => {
+		const found = docByName(name, docs(), state.workspace?.root);
+		if (!found) return null;
+		const title = found.title ?? "";
+		return { href: linkWritten(relativePath(dirName(props.path), found.path)), about: [found.ticket && !title.toLowerCase().startsWith(found.ticket.toLowerCase()) ? found.ticket : "", title || found.name].filter(Boolean).join(": ") };
+	};
+	const html = createMemo(() => finishMarkdown(DOMPurify.sanitize(marked.parse(front().body, { async: false, gfm: true }) as string), { anchors: true, tickets: mentioned(), named }));
 	/** The front matter as it is shown: each key with its values, a ticket or a file as a link to it. */
 	const facts = createMemo(() =>
 		Object.entries(front().values)

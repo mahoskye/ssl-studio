@@ -352,6 +352,9 @@ export function frontPaths(text: string): { value: string; line: number; column:
 	return found;
 }
 
+/** The kinds of document in the order links offer them, the work first: a link in a working document is most often to a ticket, a spec or something learned. */
+export const DOC_ORDER = ["tickets", "specs", "knowledge", "registries", "plans", "docs", "schema", "project"] as const;
+
 /** A document to link to, as it is offered while a link is written: what it is called, where it is, and what to write. */
 export type LinkChoice = { label: string; detail: string; insert: string };
 
@@ -363,8 +366,7 @@ export type LinkChoice = { label: string; detail: string; insert: string };
  */
 export function linkChoices(files: readonly DocFile[], path: string, root: string): LinkChoice[] {
 	const dir = dirName(path);
-	// The work first: a link in a working document is most often to a ticket, a spec or something learned.
-	const order = ["tickets", "specs", "knowledge", "registries", "plans", "docs", "schema", "project"];
+	const order: readonly string[] = DOC_ORDER;
 	return files
 		.filter((file) => file.exists && file.path !== path)
 		.map((file, index) => ({ file, index }))

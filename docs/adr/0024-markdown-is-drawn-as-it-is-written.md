@@ -100,3 +100,8 @@ and [ADR 0020](0020-the-shell-does-what-vs-code-does-and-stays-its-own.md).
   edit of the text at the cursor. Links between double brackets are
   still only drawn: the project's documents link by path, and whether
   they should also link by name is the user's to say.
+- 2026-11-19, with [ADR 0025](0025-documents-link-by-name-as-well-as-by-path.md):
+  links between double brackets now lead to the document they name, and
+  the documents are offered when `[[` is typed. Backlinks are still not
+  listed.
+

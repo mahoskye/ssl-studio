@@ -1095,6 +1095,8 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 /* A ticket named in the prose: a way to it, quieter than a link someone wrote, so a paragraph of keys still reads. */
 .md a.ticket-ref { color: inherit; text-decoration: underline dotted var(--accent); text-underline-offset: 3px; }
 .md a.ticket-ref:hover { color: var(--accent); text-decoration: underline; }
+/* A link by name that names no document: as written, and plainly not a link. */
+.md .named-missing { color: var(--muted); text-decoration: underline dotted var(--warning); text-underline-offset: 3px; }
 /* A link to a file that is not there says so before it is clicked: by its line, not by colour alone. */
 .md a.broken { color: var(--warning); text-decoration: underline dashed; text-underline-offset: 2px; }
 .md code { font: calc(var(--code-size) - .5px)/1.5 ui-monospace, "Cascadia Code", Menlo, monospace; background: var(--input-bg); padding: 1px var(--space-2); border-radius: var(--radius-sm); }

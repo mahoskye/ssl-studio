@@ -838,3 +838,42 @@ script, in a file that cannot be written, and under a list of
 suggestions; the hold moves nothing with no file in the editor, at a
 change of file, or behind the Read view.
 
+## The eleventh review: links by name
+
+Read while staged. Five findings, two to stop for.
+
+1. **The list offered on `[[` wrote a name that led to another
+   document** for five of the example project's 32: every catalog
+   called INDEX but the first, and a README below the top one. Fixed:
+   the name written is one that means that document and no other, the
+   path from the project's folder where the short name is taken; an
+   exact path is matched before a bare file name; and where two answer
+   alike, the order is the one links are offered in. With tests.
+2. **Choosing a document could delete the rest of the line**, where the
+   brackets were not yet closed. Fixed: what follows the cursor is taken
+   for the rest of a name only in a link that is closed.
+3. **A file whose name holds a hash or a bar cannot be named.** It is
+   no longer offered. Left, and said in ADR 0025.
+4. **The text works its links by name out again only when the text
+   changes.** Left, and said in ADR 0025.
+5. **The page and the text read a few shapes differently.** Left, and
+   said in ADR 0025; the sentence about tables is corrected.
+
+### The second reading
+
+Of the fixes. One finding to stop for, two to name.
+
+1. **The names were worked out over a list that left out the document
+   being written in**, so in the top README the README of docs/ was
+   still offered as `[[README]]`, which is the top one itself. Fixed:
+   names are worked out among all the project's documents. With a test.
+2. **Working the names out takes time that grows with the square of
+   the number of documents.** Nothing at some thirty; left.
+3. **A file with no ending and a dot in its name is offered by the part
+   before the dot.** No such file is among a project's documents; left.
+
+The fix to the first was read a third time, with the reviewer's script
+run as the editor calls it, each of the example's 33 documents in turn
+as the one being written in: of 1,056 names offered, none led anywhere
+but the document offered. Nothing to hold the commit.
+

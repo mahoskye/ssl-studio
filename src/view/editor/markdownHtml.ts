@@ -1,6 +1,7 @@
 // What is done to Markdown's HTML after it is cleaned, wherever it is shown:
 // a document in the reading view, a reply in the Agent panel.
 import { MAX_SHORT, headingAnchor } from "../../shared/docTables";
+import { namedLinksIn } from "../../shared/namedLinks";
 import { ticketMatcher } from "../../shared/ticketRefs";
 
 /** A ticket of the project, as a document's page links to it: where it is from that document, and what it is in a line. */
@@ -42,6 +43,50 @@ function linkTickets(holder: HTMLTemplateElement, tickets: readonly TicketRef[])
 	}
 }
 
+/** Where a link by name leads from the document being shown, and what the document it names is in a line. Null when no document answers to the name. */
+export type NameResolver = (name: string) => { href: string; about: string } | null;
+
+/**
+ * A link by name written in the prose ([[name]], [[name|words]]) becomes a
+ * link to the document the name means, showing the words or the name. One
+ * that names no document stays as written, marked, with why in its tooltip.
+ * Done before a ticket's key is linked, so that a key between the brackets is
+ * one link and not a link inside brackets.
+ */
+function linkNames(holder: HTMLTemplateElement, resolve: NameResolver) {
+	const walker = document.createTreeWalker(holder.content, NodeFilter.SHOW_TEXT);
+	const nodes: Text[] = [];
+	for (let node = walker.nextNode(); node; node = walker.nextNode()) if (node.nodeValue?.includes("[[") && !node.parentElement?.closest(UNLINKED)) nodes.push(node as Text);
+	for (const node of nodes) {
+		const text = node.data;
+		const found = namedLinksIn(text);
+		if (!found.length) continue;
+		const parts = document.createDocumentFragment();
+		let at = 0;
+		for (const { from, to, link } of found) {
+			parts.append(text.slice(at, from));
+			const leads = resolve(link.name);
+			if (leads) {
+				const anchor = document.createElement("a");
+				anchor.className = "named-ref";
+				anchor.setAttribute("href", link.heading ? `${leads.href}#${headingAnchor(link.heading)}` : leads.href);
+				anchor.title = leads.about;
+				anchor.textContent = link.words ?? (link.heading ? `${link.name} › ${link.heading}` : link.name);
+				parts.append(anchor);
+			} else {
+				const missing = document.createElement("span");
+				missing.className = "named-missing";
+				missing.title = `No document of the project is called “${link.name}”.`;
+				missing.textContent = text.slice(from, to);
+				parts.append(missing);
+			}
+			at = to;
+		}
+		parts.append(text.slice(at));
+		node.replaceWith(parts);
+	}
+}
+
 /** Gives each heading the anchor a link in the same document can point at. */
 function anchorHeadings(holder: HTMLTemplateElement) {
 	const used = new Map<string, number>();
@@ -70,11 +115,13 @@ function markShortColumns(holder: HTMLTemplateElement) {
 }
 
 /** `html` must already be sanitised. Anchors are for a document; a reply has no links into itself. */
-export function finishMarkdown(html: string, options: { anchors?: boolean; tickets?: readonly TicketRef[] } = {}): string {
-	if (!options.anchors && !options.tickets?.length && !html.includes("<table")) return html;
+export function finishMarkdown(html: string, options: { anchors?: boolean; tickets?: readonly TicketRef[]; named?: NameResolver } = {}): string {
+	const names = options.named && html.includes("[[") ? options.named : undefined;
+	if (!options.anchors && !options.tickets?.length && !names && !html.includes("<table")) return html;
 	const holder = document.createElement("template");
 	holder.innerHTML = html;
 	if (options.anchors) anchorHeadings(holder);
+	if (names) linkNames(holder, names);
 	if (options.tickets?.length) linkTickets(holder, options.tickets);
 	markShortColumns(holder);
 	return holder.innerHTML;

@@ -290,6 +290,21 @@ made for it. The command list now has 90.
 | By keyboard | "Open the link at the cursor" opened the link whose words the cursor was in |
 | Double brackets | A link between double brackets was drawn as before, and not followed |
 
+### Links by name
+
+Seen at 680 and 1100 wide, in the light and the dark theme, on a page
+made for it.
+
+| Row | Seen |
+| --- | --- |
+| On the page | `[[DEMO-103]]` was a link to the ticket, its tooltip the ticket's title |
+| Words and heading | `[[DEMO-102\|the rush ticket]]` showed its words; a name with a heading showed both |
+| By file name | `[[Worked-examples]]` led to docs/Worked-examples.md |
+| No such name | A name no document answers to stayed as written, dotted under, with why in its tooltip |
+| In code | `[[DEMO-103]]` in a code span stayed as code |
+| Followed | A click on the page, and Ctrl+click in the text, opened the ticket |
+| Offered | `[[` listed the documents, tickets first; "worked" narrowed it; Enter wrote the name |
+
 ## The second pass
 
 Every row of the audit was tried once more (2026-11-19), after the

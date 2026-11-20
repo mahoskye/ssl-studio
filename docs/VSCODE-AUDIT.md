@@ -220,6 +220,7 @@ fetches, pulls or pushes
 | Markdown preview | Yes | Have | With front matter and task boxes |
 | Markdown as written | Yes | Bring | Built, asked for in use: the text drawn as it is written; markup hidden off the cursor's line |
 | Markdown writing | Yes | Bring | Built, asked for in use: Enter starts a list's next item; a link is followed from the text |
+| Links by name | Yes | Bring | Built, asked for in use: `[[name]]` leads to the document the name means, and names are offered |
 | CSV as a table | Yes | Have | Beyond VS Code's own |
 | JSON, TOML, XML | Yes | Have | Coloured, outlined, checked |
 | Line ends kept | Yes | Have | A file with Windows line ends was saved with them |
@@ -521,6 +522,7 @@ trying the app.
 | Preview tabs | Medium | Yes | A tab opened for a look; a double click, an edit or a pin keeps it |
 | Markdown as written | Large | Yes | The text read into marks; drawn by the editor's own decorations |
 | Markdown writing | Small | Yes | A rule for Enter in a list; the editor's own link following, told where each link leads |
+| Links by name | Medium | Yes | One rule for which document a name means; the page, the text and the list offered all ask it |
 
 Two things were put right with these, not new features: every small
 graphic is now from the editor's icon font or drawn by a style rule (the
@@ -534,12 +536,12 @@ before the commit. A seventh review was made of the commit; what it
 found is in [the list](VSCODE-AUDIT-REVIEWS.md#the-seventh-review-what-the-first-use-asked-for).
 
 Markdown writing was added after Markdown as written, toward the same
-request ("behave like Obsidian"). Not built from that request, and
-waiting on the user's word: links between double brackets that lead
-somewhere, backlinks, a form for a document's properties, Tab to set an
-item in, and a table kept tidy as it is typed. The first of these is a
-decision about how the project's documents link to each other, which
-are plain Markdown links today.
+request ("behave like Obsidian"), and links by name after the user
+answered that links between double brackets should lead to documents by
+name ([ADR 0025](adr/0025-documents-link-by-name-as-well-as-by-path.md)).
+Not built from that request, and waiting on the user's word: backlinks,
+links by name that follow a rename, a form for a document's properties,
+Tab to set an item in, and a table kept tidy as it is typed.
 
 ## What the reviews found
 
@@ -598,6 +600,9 @@ two of which would have broken Enter in a split view and the following
 of a link; those and four more are fixed, the rest left and named.
 The commit as made was then read once more, with the last fixes in it:
 nothing to fix.
+An eleventh was made of links by name while staged: five findings, two
+of which would have written a link to the wrong document or deleted
+words from a line; both fixed, the rest left and named.
 
 ## Why not an extension
 
