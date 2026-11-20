@@ -1,0 +1,199 @@
+/********************************************************************************
+Description.. : Reports the samples due soon, with how close each one is and what its
+                instrument is doing before then.
+Parameters... : nDays   - how many days ahead to look, 0 up to the day limit. 3 when left out
+                dAsOf   - the day the report is for. Today when left out
+                sSource - the data source that picks the samples, as Category.Name, with the
+                          parameters and columns of DueDates.SamplesDueSoon, the default
+Returns...... : Success: {.T., {sHeading, aRows}}, each row {sSampleId, sStatus, nDaysLeft, sLine}
+                Failure: {.F., {sCode, sMessage}}
+Author....... :
+Date......... : 2026-11-18
+********************************************************************************
+_______________________________________________________________________________
+Modification. : sSource lets a caller report on another choice of samples, and
+                the constants are read as procedures of the include.
+Author....... :
+Date......... : 2026-11-18
+_______________________________________________________________________________
+********************************************************************************/;
+
+:PARAMETERS nDays, dAsOf, sSource;
+:DEFAULT nDays, 3;
+:DEFAULT sSource, "DueDates.SamplesDueSoon";
+:INCLUDE DueDates.DueDateConstants;
+
+:DECLARE aDays, aHolidays, aInvalid, aOutages, aRows, aSamples, nIndex, sHeading;
+:DECLARE oErr;
+
+aInvalid := {.F., {"INVALID_WINDOW", "The days or the day of the report are not valid."}};
+
+:IF Empty(dAsOf);
+	dAsOf := Today();
+:ENDIF;
+
+/* The types are tested before the values, so a text is never compared with 0;
+:IF LimsTypeEx(nDays) != "NUMERIC" .OR. LimsTypeEx(dAsOf) != "DATE";
+	:RETURN aInvalid;
+:ENDIF;
+
+:IF nDays < 0 .OR. nDays > DoProc("MaxWalkDays");
+	:RETURN aInvalid;
+:ENDIF;
+
+/* The report works in whole days: the day is rebuilt from its year, month and
+   day as an invariant date at midnight, whatever time or kind the caller gave;
+dAsOf := DateFromNumbers(Year(dAsOf), Month(dAsOf), Day(dAsOf),,,,, .T.);
+
+:TRY;
+	/* A source that cannot be read, or has other columns, ends in the :CATCH below;
+	aSamples := RunDS(sSource, {nDays, dAsOf});
+	aHolidays := RunDS("DueDates.Holidays");
+	aOutages := RunDS("DueDates.Outages");
+	aRows := {};
+
+	:FOR nIndex := 1 :TO ALen(aSamples);
+		AAdd(aRows, DoProc("SampleRow", {aSamples[nIndex], dAsOf, aHolidays, aOutages}));
+	:NEXT;
+
+	aDays := {DoProc("DayText", {dAsOf}), DoProc("DayText", {dAsOf + nDays})};
+	sHeading := GetRegion("DueSoonHeading", {"{FROM}", "{TO}"}, aDays);
+:CATCH;
+	/* The error text goes to the server log only. The caller gets a fixed code;
+	oErr := GetLastSSLError();
+	ErrorMes("[ERROR] DueSoonReport", Left(oErr:Description, 2000));
+	ClearLastSSLError();
+
+	:RETURN {.F., {"REPORT_NOT_BUILT", "The report could not be built."}};
+:ENDTRY;
+
+:RETURN {.T., {sHeading, aRows}};
+
+/* region Report;
+
+/* region Wording;
+
+/* The text of the report, kept as text and read with GetRegion. A word in braces
+   is replaced when a line is built;
+:REGION DueSoonHeading;
+Samples due from {FROM} through {TO}
+:ENDREGION;
+
+:REGION DueSoonLine;
+{SAMPLE} is {STATUS}: due {DUE}, working days left {LEFT}. {RULE}
+:ENDREGION;
+
+:REGION DueSoonInstrument;
+{LINE}. {INSTRUMENT}: next available {NEXT}, days out up to the due date {OUT}
+:ENDREGION;
+
+/*
+ * Procedure: DayText
+ * Description: Writes a day the same way everywhere in the report.
+ * Parameters:
+ *   dDate - the day
+ * Returns: the day as yyyy-MM-dd, or "no day" for an empty date
+;
+/*@private;
+:PROCEDURE DayText;
+	:PARAMETERS dDate;
+
+	:IF Empty(dDate);
+		:RETURN "no day";
+	:ENDIF;
+
+	:RETURN DateToString(dDate, "yyyy-MM-dd");
+:ENDPROC;
+
+/* endregion;
+
+/* region One sample;
+
+/*
+ * Procedure: SampleRow
+ * Description: Works out how close one sample's due date is and writes its line.
+ * Parameters:
+ *   aSample   - {sSampleId, sPriority, sInstrumentId, dReceived, dDue, nTurnaroundDays}, a row of the source
+ *   dAsOf     - the day the report is for
+ *   aHolidays - the holidays, an array of dates
+ *   aOutages  - the outages, each row {sInstrumentId, dFrom, dTo}
+ * Returns: {sSampleId, sStatus, nDaysLeft, sLine}, sStatus being the code of a Status constant
+;
+/*@private;
+:PROCEDURE SampleRow;
+	:PARAMETERS aSample, dAsOf, aHolidays, aOutages;
+
+	:DECLARE dDue, nTurnaround, sInstrumentId, sPriority, sSampleId;
+	:DECLARE aArgs, aStatus, bSaturday, dNext, nLeft, nOut, oRule;
+	:DECLARE aTokens, aValues, sLine;
+
+	/* One name for each column that is read, in the order the source selects;
+	sSampleId := aSample[1];
+	sPriority := aSample[2];
+	sInstrumentId := AllTrim(aSample[3]);
+	dDue := aSample[5];
+	nTurnaround := aSample[6];
+
+	/* The rule says whether Saturday counts. The priority is not tested here;
+	aArgs := {sPriority, nTurnaround, aHolidays};
+	oRule := ExecFunction("DueDates.DueRules.RuleFor", aArgs);
+	bSaturday := oRule:CountsSaturday();
+
+	aArgs := {dAsOf, 1, aHolidays, bSaturday};
+	dNext := ExecFunction("DueDates.WorkCalendar.AddWorkingDays", aArgs);
+	aStatus := DoProc("DueStatus", {dDue, dAsOf, dNext});
+	aArgs := {dAsOf, dDue, aHolidays, bSaturday};
+	nLeft := ExecFunction("DueDates.WorkCalendar.WorkingDaysUntil", aArgs);
+
+	aTokens := {"{SAMPLE}", "{STATUS}", "{DUE}", "{LEFT}", "{RULE}"};
+	aValues := {sSampleId, aStatus[2], DoProc("DayText", {dDue}), nLeft};
+	AAdd(aValues, oRule:Describe());
+	sLine := GetRegion("DueSoonLine", aTokens, aValues);
+
+	:IF .NOT. Empty(sInstrumentId);
+		aArgs := {sInstrumentId, dAsOf, aOutages};
+		dNext := ExecFunction("DueDates.Availability.NextAvailableDay", aArgs);
+		aArgs := {sInstrumentId, dAsOf, dDue, aOutages};
+		nOut := ExecFunction("DueDates.Availability.OutageDays", aArgs);
+
+		aTokens := {"{LINE}", "{INSTRUMENT}", "{NEXT}", "{OUT}"};
+		aValues := {sLine, sInstrumentId, DoProc("DayText", {dNext}), nOut};
+		sLine := GetRegion("DueSoonInstrument", aTokens, aValues);
+	:ENDIF;
+
+	:RETURN {sSampleId, aStatus[1], nLeft, sLine};
+:ENDPROC;
+
+/*
+ * Procedure: DueStatus
+ * Description: Says how close a due date is.
+ * Parameters:
+ *   dDue         - the due date, on or after dAsOf
+ *   dAsOf        - the day the report is for
+ *   dNextWorking - the first working day after dAsOf, or empty when there is none in reach
+ * Returns: one of the Status constants of DueDateConstants, a {sCode, sText} pair
+;
+/*@private;
+:PROCEDURE DueStatus;
+	:PARAMETERS dDue, dAsOf, dNextWorking;
+
+	:DECLARE aStatus;
+
+	:BEGINCASE;
+	:CASE dDue == dAsOf;
+		aStatus := DoProc("StatusDueToday");
+		:EXITCASE;
+	:CASE .NOT. Empty(dNextWorking) .AND. dDue <= dNextWorking;
+		aStatus := DoProc("StatusDueNextDay");
+		:EXITCASE;
+	:OTHERWISE;
+		aStatus := DoProc("StatusDueSoon");
+		:EXITCASE;
+	:ENDCASE;
+
+	:RETURN aStatus;
+:ENDPROC;
+
+/* endregion;
+
+/* endregion;

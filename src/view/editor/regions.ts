@@ -9,8 +9,10 @@ const hash = (s: string) => [...s].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >
 
 export const regionColor = (name: string) => state.settings.regionColors[name] ?? REGION_PALETTE[hash(name) % REGION_PALETTE.length]!;
 
-export function cycleRegionColor(name: string) {
-	const next = REGION_PALETTE[(REGION_PALETTE.indexOf(regionColor(name)) + 1) % REGION_PALETTE.length]!;
+/** The region's colour moves one step through the palette: forwards, or back to the one before. */
+export function cycleRegionColor(name: string, step: 1 | -1 = 1) {
+	const size = REGION_PALETTE.length;
+	const next = REGION_PALETTE[(REGION_PALETTE.indexOf(regionColor(name)) + step + size) % size]!;
 	void saveSetting({ regionColors: { ...state.settings.regionColors, [name]: next } }, state.workspace ? "workspace" : "user");
 }
 

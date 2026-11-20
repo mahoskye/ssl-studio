@@ -1,0 +1,127 @@
+/********************************************************************************
+Description.. : Unit tests for DueDates.Availability.OutageDays. No database is read or
+                written.
+                Run DueDatesTests.OutageDaysTests.RunTests. It returns the tally.
+Parameters... : -
+Returns...... : -
+Author....... :
+Date......... : 2026-11-18
+********************************************************************************
+_______________________________________________________________________________
+Modification. :
+Author....... :
+Date......... :
+_______________________________________________________________________________
+********************************************************************************/;
+
+:INCLUDE DueDates.DueDateConstants;
+
+/*
+ * Procedure: RunTests
+ * Description: Runs every test of this script, each on its own.
+ * Returns: {nPassed, nTotal, aResults}, each result {sLabel, bPassed}
+;
+:PROCEDURE RunTests;
+	:DECLARE aArgs, aTests;
+
+	aTests := {
+		"TestOutageDaysInSpan", "TestOutageDaysOverlapOnce", "TestOutageDaysNoInstrument",
+		"TestOutageDaysReversedSpan", "TestOutageDaysEmptyFrom", "TestOutageDaysEmptyTo",
+		"TestOutageDaysLongSpan"
+	};
+	aArgs := {"DueDatesTests.OutageDaysTests", aTests};
+
+	:RETURN ExecFunction("DueDatesTests.TestSupport.RunAll", aArgs);
+:ENDPROC;
+
+/* region Counting;
+
+:PROCEDURE TestOutageDaysInSpan;
+	/* In the week from Monday 16 to Sunday 22, BAL-01 is out on 18 and 19;
+	:DECLARE aArgs, nActual;
+
+	aArgs := {"BAL-01", DateFromNumbers(2026, 11, 16), DateFromNumbers(2026, 11, 22)};
+	AAdd(aArgs, ExecFunction("DueDatesTests.TestSupport.DemoOutages"));
+	nActual := ExecFunction("DueDates.Availability.OutageDays", aArgs);
+
+	:RETURN {"The days out in a span are counted", 2, nActual};
+:ENDPROC;
+
+:PROCEDURE TestOutageDaysOverlapOnce;
+	/* A second outage, 19 to 20, overlaps the first. In the same week BAL-01 is
+	   out on 18, 19 and 20, and the 19th is counted once;
+	:DECLARE aArgs, aOutages, dFrom, nActual;
+
+	dFrom := DateFromNumbers(2026, 11, 16);
+	aOutages := ExecFunction("DueDatesTests.TestSupport.DemoOutages");
+	AAdd(aOutages, {"BAL-01", dFrom + 3, dFrom + 4});
+	aArgs := {"BAL-01", dFrom, dFrom + 6, aOutages};
+	nActual := ExecFunction("DueDates.Availability.OutageDays", aArgs);
+
+	:RETURN {"Overlapping outages count a day once", 3, nActual};
+:ENDPROC;
+
+:PROCEDURE TestOutageDaysNoInstrument;
+	/* Empty case: work that needs no instrument has no days out, whatever the outages;
+	:DECLARE aArgs, nActual;
+
+	aArgs := {"", DateFromNumbers(2026, 11, 16), DateFromNumbers(2026, 11, 22)};
+	AAdd(aArgs, ExecFunction("DueDatesTests.TestSupport.DemoOutages"));
+	nActual := ExecFunction("DueDates.Availability.OutageDays", aArgs);
+
+	:RETURN {"No instrument, no days out", 0, nActual};
+:ENDPROC;
+
+/* endregion;
+
+/* region Spans with nothing to count;
+
+:PROCEDURE TestOutageDaysReversedSpan;
+	/* Empty case: a span that ends before it starts has no days in it;
+	:DECLARE aArgs, dFrom, nActual;
+
+	dFrom := DateFromNumbers(2026, 11, 19);
+	aArgs := {"BAL-01", dFrom, dFrom - 3};
+	AAdd(aArgs, ExecFunction("DueDatesTests.TestSupport.DemoOutages"));
+	nActual := ExecFunction("DueDates.Availability.OutageDays", aArgs);
+
+	:RETURN {"A reversed span has no outage days", 0, nActual};
+:ENDPROC;
+
+:PROCEDURE TestOutageDaysEmptyFrom;
+	/* Empty case: a span with no first day is not walked, and has no days out;
+	:DECLARE aArgs, nActual;
+
+	aArgs := {"BAL-01", CToD(""), DateFromNumbers(2026, 11, 22)};
+	AAdd(aArgs, ExecFunction("DueDatesTests.TestSupport.DemoOutages"));
+	nActual := ExecFunction("DueDates.Availability.OutageDays", aArgs);
+
+	:RETURN {"No first day, no outage days", 0, nActual};
+:ENDPROC;
+
+:PROCEDURE TestOutageDaysEmptyTo;
+	/* Empty case: a span with no last day is not walked either;
+	:DECLARE aArgs, nActual;
+
+	aArgs := {"BAL-01", DateFromNumbers(2026, 11, 16), CToD("")};
+	AAdd(aArgs, ExecFunction("DueDatesTests.TestSupport.DemoOutages"));
+	nActual := ExecFunction("DueDates.Availability.OutageDays", aArgs);
+
+	:RETURN {"No last day, no outage days", 0, nActual};
+:ENDPROC;
+
+:PROCEDURE TestOutageDaysLongSpan;
+	/* A span of ten years, out all the way, is counted up to the day limit: the
+	   first day and the 730 after it, which is 731 days;
+	:DECLARE aArgs, dFrom, dTo, nActual, nExpected;
+
+	dFrom := DateFromNumbers(2026, 11, 18);
+	dTo := DateFromNumbers(2036, 11, 18);
+	nExpected := DoProc("MaxWalkDays") + 1;
+	aArgs := {"GC-07", dFrom, dTo, {{"GC-07", dFrom, dTo}}};
+	nActual := ExecFunction("DueDates.Availability.OutageDays", aArgs);
+
+	:RETURN {"A long span is counted up to the limit", nExpected, nActual};
+:ENDPROC;
+
+/* endregion;

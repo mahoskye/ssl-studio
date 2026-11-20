@@ -10,6 +10,7 @@ import { openReview, type Check } from "../editor/Review";
 import { monaco } from "../editor/monaco";
 import { measure } from "../editor/textmate";
 import { session } from "../lsp/session";
+import { catalogsKeptFor } from "../projectDocs";
 import { applyText, canonical, documents, notify, openFile, setState, state } from "../state";
 import { baseName, joinPath } from "../../shared/paths";
 import { bannerTemplate, TEMPLATES } from "../../shared/houseStyle";
@@ -27,9 +28,18 @@ const TOOL_LIMIT = 2;
 const runFile = (path: string) => joinPath(state.workspace!.root, ".ssl-studio", "plans", `${baseName(path).replace(/\.plan\.json$/i, "")}.run.json`);
 const plain = <T>(value: T): T => JSON.parse(JSON.stringify(value));
 
+/** The save of each run's file that is under way: the next one waits for it. */
+const saving = new Map<string, Promise<unknown>>();
+
 function publish(path: string, run: BuildRun | null) {
 	updateAssist(path, { run: run && plain(run) });
-	void backend.write(runFile(path), JSON.stringify(run, null, 1)).catch(() => notify("Could not save the build's progress.", "error"));
+	// One save of a file at a time, in the order they were asked for. A build says where it stands several times in
+	// a moment, and two writes of one file at once got in each other's way: one of them failed, and the file could
+	// be left holding an older state than the last, or one that does not read, which loses the build's progress.
+	const file = runFile(path);
+	const text = JSON.stringify(run, null, 1);
+	const next = (saving.get(file) ?? Promise.resolve()).then(() => backend.write(file, text)).catch(() => notify("Could not save the build's progress.", "error"));
+	saving.set(file, next);
 }
 
 /** Picks a run back up when its plan opens. A unit caught mid-turn goes back to waiting. */
@@ -77,7 +87,9 @@ type Reading = { findings: { code?: string; severity: number; message: string; l
 
 /** What the language server makes of text that exists nowhere yet. */
 export async function read(text: string): Promise<Reading> {
-	const { diagnostics, symbols } = await session.analyze(text);
+	const { diagnostics, symbols, timedOut } = await session.analyze(text);
+	// No answer is not a clean answer: said as a finding, so "no errors" cannot be read from silence.
+	if (timedOut) diagnostics.push({ code: "server-timeout", severity: 1, message: "The language server did not answer, so this text was not checked. Try again.", line: 1 });
 	const procedures: Reading["symbols"] = [];
 	const walk = (list: monaco.languages.DocumentSymbol[]) =>
 		list.forEach((s) => (s.kind === monaco.languages.SymbolKind.Function || s.kind === monaco.languages.SymbolKind.Method ? procedures.push({ name: s.name, parameters: (s.children ?? []).map((c) => c.name) }) : walk(s.children ?? [])));
@@ -341,6 +353,7 @@ export async function reviewBuild(path: string) {
 			if (existing === null) {
 				await backend.write(full, final);
 				setState("treeVersion", (v) => v + 1);
+				void catalogsKeptFor([full]);
 				await openFile(full);
 			} else {
 				await openFile(full);

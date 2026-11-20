@@ -1,0 +1,180 @@
+/********************************************************************************
+Description.. : Unit tests for DueDates.DueDateSummary: what a run reports from the skips
+                found while planning and the answer of DueDates.SaveDueDates.
+                No database is read or written: each test hands Combine its values.
+                Run DueDatesTests.DueDateSummaryTests.RunTests. It returns the tally.
+Parameters... : -
+Returns...... : -
+Author....... :
+Date......... : 2026-11-18
+********************************************************************************
+_______________________________________________________________________________
+Modification. :
+Author....... :
+Date......... :
+_______________________________________________________________________________
+********************************************************************************/;
+
+/*
+ * Procedure: RunTests
+ * Description: Runs every test of this script, each on its own.
+ * Returns: {nPassed, nTotal, aResults}, each result {sLabel, bPassed}
+;
+:PROCEDURE RunTests;
+	:DECLARE aArgs, aTests;
+
+	aTests := {
+		"TestJoinsPlanThenSaveSkips", "TestNothingSkipped", "TestFailureEnvelope",
+		"TestNotAnArray", "TestEnvelopeOfOne", "TestFirstNotLogical",
+		"TestPayloadNotAnArray", "TestPayloadTooShort", "TestCountNotANumber",
+		"TestSkipsNotAList", "TestPlanSkipsNotAList"
+	};
+	aArgs := {"DueDatesTests.DueDateSummaryTests", aTests};
+
+	:RETURN ExecFunction("DueDatesTests.TestSupport.RunAll", aArgs);
+:ENDPROC;
+
+/* region A save that succeeded;
+
+:PROCEDURE TestJoinsPlanThenSaveSkips;
+	/* Success path: two samples were skipped while planning, three dates were
+	   saved, and one sample stopped waiting before its date was written. The
+	   planning skips come first, in their order, and the count is of both. The
+	   list that was handed over still has its two rows;
+	:DECLARE aCombined, aPlanSkips, aSaved, aSkipped, aValues, sActual, sExpected, sFmt;
+
+	sFmt := "";
+	aPlanSkips := {{"S-1004", "NO_DATE", ""}, {"S-1005", "NO_DAYS", ""}};
+	aSaved := {.T., {3, 1, {{"S-1001", "NOT_WAITING", ""}}}};
+	aCombined := ExecFunction("DueDates.DueDateSummary.Combine", {aPlanSkips, aSaved});
+	aSkipped := aCombined[2][3];
+	aValues := {aCombined[1], aCombined[2][1], aCombined[2][2], aSkipped[1][1]};
+	AAdd(aValues, aSkipped[2][1]);
+	AAdd(aValues, aSkipped[3][2]);
+	AAdd(aValues, ALen(aPlanSkips));
+	sActual := sFmt:Format("[{0}] set {1}, skipped {2}: {3} {4} {5}. Given {6}", aValues);
+	sExpected := "[] set 3, skipped 3: S-1004 S-1005 NOT_WAITING. Given 2";
+
+	:RETURN {"Planning skips, then saving skips", sExpected, sActual};
+:ENDPROC;
+
+:PROCEDURE TestNothingSkipped;
+	/* Empty case: nothing skipped anywhere is a summary with no skips, not a problem;
+	:DECLARE aCombined, aSaved, aValues, sActual, sFmt;
+
+	sFmt := "";
+	aSaved := {.T., {2, 0, {}}};
+	aCombined := ExecFunction("DueDates.DueDateSummary.Combine", {{}, aSaved});
+	aValues := {aCombined[1], aCombined[2][1], aCombined[2][2], ALen(aCombined[2][3])};
+	sActual := sFmt:Format("[{0}] set {1}, skipped {2}, {3} in the list", aValues);
+
+	:RETURN {"Nothing skipped anywhere", "[] set 2, skipped 0, 0 in the list", sActual};
+:ENDPROC;
+
+/* endregion;
+
+/* region An answer that is not a success;
+
+:PROCEDURE TestFailureEnvelope;
+	/* Failure path: the failure envelope of SaveDueDates is a problem, and the
+	   summary that comes with a problem is empty;
+	:DECLARE aCombined, aSaved, sActual, sExpected, sFmt;
+
+	sFmt := "";
+	aSaved := {.F., {"DUE_DATES_NOT_SAVED", "No due dates were saved."}};
+	aCombined := ExecFunction("DueDates.DueDateSummary.Combine", {{}, aSaved});
+	sActual := sFmt:Format("{0}. Summary of {1}", {aCombined[1], ALen(aCombined[2])});
+	sExpected := "DueDates.SaveDueDates saved no due dates. Summary of 0";
+
+	:RETURN {"A save that failed", sExpected, sActual};
+:ENDPROC;
+
+:PROCEDURE TestNotAnArray;
+	/* Text is not an envelope. It is not indexed;
+	:DECLARE aCombined, sExpected;
+
+	aCombined := ExecFunction("DueDates.DueDateSummary.Combine", {{}, "saved"});
+	sExpected := "DueDates.SaveDueDates did not answer with its envelope";
+
+	:RETURN {"An answer that is text", sExpected, aCombined[1]};
+:ENDPROC;
+
+:PROCEDURE TestEnvelopeOfOne;
+	/* An envelope has two parts. One that stops after .T. has no summary to read;
+	:DECLARE aCombined, sExpected;
+
+	aCombined := ExecFunction("DueDates.DueDateSummary.Combine", {{}, {.T.}});
+	sExpected := "DueDates.SaveDueDates did not answer with its envelope";
+
+	:RETURN {"An answer of one part", sExpected, aCombined[1]};
+:ENDPROC;
+
+:PROCEDURE TestFirstNotLogical;
+	/* "T" is text, not .T., and is not read as a success;
+	:DECLARE aCombined, aSaved, sExpected;
+
+	aSaved := {"T", {1, 0, {}}};
+	aCombined := ExecFunction("DueDates.DueDateSummary.Combine", {{}, aSaved});
+	sExpected := "DueDates.SaveDueDates did not say whether it saved";
+
+	:RETURN {"A first part that is text", sExpected, aCombined[1]};
+:ENDPROC;
+
+/* endregion;
+
+/* region A success with a summary that cannot be read;
+
+:PROCEDURE TestPayloadNotAnArray;
+	/* .T. followed by text: there is no {nSet, nSkipped, aSkipped} to read;
+	:DECLARE aCombined, sExpected;
+
+	aCombined := ExecFunction("DueDates.DueDateSummary.Combine", {{}, {.T., "saved"}});
+	sExpected := "DueDates.SaveDueDates answered success without its summary";
+
+	:RETURN {"A summary that is text", sExpected, aCombined[1]};
+:ENDPROC;
+
+:PROCEDURE TestPayloadTooShort;
+	/* The list of skips is the third part. A summary of two has none;
+	:DECLARE aCombined, sExpected;
+
+	aCombined := ExecFunction("DueDates.DueDateSummary.Combine", {{}, {.T., {1, 0}}});
+	sExpected := "DueDates.SaveDueDates answered success without its summary";
+
+	:RETURN {"A summary of two parts", sExpected, aCombined[1]};
+:ENDPROC;
+
+:PROCEDURE TestCountNotANumber;
+	/* "1" is text. It is not handed on as the number of dates set;
+	:DECLARE aCombined, aSaved, sExpected;
+
+	aSaved := {.T., {"1", 0, {}}};
+	aCombined := ExecFunction("DueDates.DueDateSummary.Combine", {{}, aSaved});
+	sExpected := "The summary of DueDates.SaveDueDates is not a count and its skips";
+
+	:RETURN {"A count that is text", sExpected, aCombined[1]};
+:ENDPROC;
+
+:PROCEDURE TestSkipsNotAList;
+	/* Skips that are text cannot be counted or joined;
+	:DECLARE aCombined, aSaved, sExpected;
+
+	aSaved := {.T., {1, 0, "none"}};
+	aCombined := ExecFunction("DueDates.DueDateSummary.Combine", {{}, aSaved});
+	sExpected := "The summary of DueDates.SaveDueDates is not a count and its skips";
+
+	:RETURN {"Skips that are text", sExpected, aCombined[1]};
+:ENDPROC;
+
+:PROCEDURE TestPlanSkipsNotAList;
+	/* The planning skips are checked too, before a good answer is read;
+	:DECLARE aCombined, aSaved, sExpected;
+
+	aSaved := {.T., {1, 0, {}}};
+	aCombined := ExecFunction("DueDates.DueDateSummary.Combine", {"none", aSaved});
+	sExpected := "The skips found while planning are not a list";
+
+	:RETURN {"Planning skips that are text", sExpected, aCombined[1]};
+:ENDPROC;
+
+/* endregion;

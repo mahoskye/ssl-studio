@@ -1,0 +1,23 @@
+/* =============================================================================;
+/* DATA SOURCE: Holidays (SSL);
+/* PURPOSE:     The days the lab is closed, other than weekends, earliest first;
+/* PARAMS:      none;
+/* RETURNS:     an array of dates, the form DueDates.WorkCalendar takes. Empty
+                when DEMO_HOLIDAYS has no rows;
+/* =============================================================================;
+:DECLARE aDays, aRows, nIndex;
+
+/* HOLIDAY_ON is a whole day, so it is read without timezone conversion;
+aRows := SQLExecute("
+    SELECT HOLIDAY_ON
+    FROM DEMO_HOLIDAYS
+    ORDER BY HOLIDAY_ON
+",,, .T., {"HOLIDAY_ON"});
+
+aDays := {};
+
+:FOR nIndex := 1 :TO ALen(aRows);
+	AAdd(aDays, aRows[nIndex][1]);
+:NEXT;
+
+:RETURN aDays;

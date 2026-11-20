@@ -1,23 +1,28 @@
 // The agent's side of a plan, beside the chart: its questions, its suggestions,
 // and the spec. Answers and accepted suggestions are text edits on the plan, so
 // undo covers them too.
-import { createResource, For, onMount, Show } from "solid-js";
+import { Icon } from "../Icon";
+import { createEffect, createResource, createSignal, createUniqueId, For, onCleanup, onMount, Show } from "solid-js";
 import { agent, currentModel } from "../agent/store";
+import { choose } from "../dialogs";
 import { showPanel } from "../panels/registry";
 import { documents, openFile, state } from "../state";
 import { joinPath } from "../../shared/paths";
 import { decisionsOf, describeSuggestion, openQuestions, planHash } from "./assist";
 import type { Plan } from "./model";
-import { unbuiltNodes } from "./build";
+import { scriptOf, unbuiltNodes } from "./build";
 import { anyChanges, builtOf, chartChanges, planPaths } from "./built";
 import { recheckPlan } from "./check";
 import { driftFor, openProcedure } from "./drift";
 import { writeTests } from "./testScript";
 import { answerUnit, discardRun, loadRun, retryUnit, reviewBuild, scriptsToReview, startBuild, stopBuild } from "./buildRun";
-import { acceptAll, acceptSuggestion, answer, assistOf, declineSuggestion, dismissWarning, refine, specPath, specState, writeSpec } from "./run";
+import { acceptAll, acceptSuggestion, answer, assistOf, declineSuggestion, dismissWarning, refine, specPath, specState, stopAssist, writeSpec } from "./run";
 
-export function PlanAssistant(props: { path: string; plan: Plan; text: string; onSelect: (node: string) => void }) {
+/** Mounted while its plan shows, and hidden when collapsed: a build under way is not lost from sight for good. */
+export function PlanAssistant(props: { path: string; plan: Plan; text: string; onSelect: (node: string) => void; /** A path to light on the chart, as its nodes in order; null for none. */ onPath?: (nodes: string[] | null) => void; id?: string; hidden?: boolean }) {
 	const a = () => assistOf(props.path);
+	/** The path being shown on the chart, by its place among the paths; null for none. */
+	const [shownPath, setShownPath] = createSignal<number | null>(null);
 	onMount(() => void loadRun(props.path));
 	const run = () => a().run;
 	const STATUS = { pending: "Waiting", running: "Building", passed: "Passed", stuck: "Stuck", skipped: "Waiting on a stuck unit", kept: "Untouched" } as const;
@@ -35,6 +40,17 @@ export function PlanAssistant(props: { path: string; plan: Plan; text: string; o
 		() => [props.path, props.text, a().specVersion] as const,
 		([path]) => specState(path),
 	);
+	const DISCARD = "Discard the build";
+	/** A build is paid for in tokens, and discarding it cannot be undone: ask first, say what goes, and let Enter mean Cancel (ADR 0009). */
+	const discard = async () => {
+		const r = run();
+		if (!r) return;
+		const done = r.units.filter((u) => u.status === "passed" && !r.accepted.includes(scriptOf(u, props.plan))).length;
+		const spent = `${r.tokens.toLocaleString()} tokens${r.cost ? `, cost ${r.cost.toFixed(2)}` : ""}`;
+		const what = done ? `${done} built ${done === 1 ? "unit" : "units"} not yet accepted (${spent})` : `its progress (${spent})`;
+		if ((await choose(`Discard this build? It throws away ${what}, and that cannot be brought back. Code already accepted stays.`, [DISCARD], { danger: DISCARD })) === DISCARD) discardRun(props.path);
+	};
+	const specHint = createUniqueId();
 	const isLocal = () => {
 		const model = agent.models.find((m) => `${m.providerID}/${m.id}` === currentModel());
 		return model ? model.local : true;
@@ -46,16 +62,49 @@ export function PlanAssistant(props: { path: string; plan: Plan; text: string; o
 			</button>
 		</Show>
 	);
+	const stepPath = (by: 1 | -1) => {
+		const count = paths().paths.length;
+		if (!count) return;
+		setShownPath((at) => (at === null ? (by > 0 ? 0 : count - 1) : (at + by + count) % count));
+	};
+	// The chart is told which path to light; a chart that has changed may no longer have that many.
+	createEffect(() => {
+		const at = shownPath();
+		const path = at === null ? undefined : paths().paths[at];
+		if (at !== null && !path) return void setShownPath(null);
+		props.onPath?.(path ? path.steps.map((step) => step.id) : null);
+	});
+	onCleanup(() => props.onPath?.(null));
+	/** The three things a plan goes through, each with how it stands now. */
+	const stages = (): { name: string; state: "done" | "warn" | "todo"; words: string }[] => {
+		const hasCode = Boolean(built()?.units.length);
+		const changed = anyChanges(changes());
+		return [
+			{ name: "Spec", state: spec() === "current" ? "done" : spec() === "stale" ? "warn" : "todo", words: spec() === "current" ? "approved" : spec() === "stale" ? "out of date" : "not written" },
+			{ name: "Build", state: hasCode ? (changed ? "warn" : "done") : "todo", words: hasCode ? (changed ? "chart changed since" : "built") : "not built" },
+			{ name: "Code", state: !drift().checked ? "todo" : drift().items.length ? "warn" : "done", words: !drift().checked ? "not compared" : drift().items.length ? "differs from the chart" : "agrees with the chart" },
+		];
+	};
 	return (
-		<aside class="plan-assist" aria-label="Plan assistant">
+		<aside class="plan-assist" id={props.id} hidden={props.hidden} aria-label="Plan assistant">
 			<div class="plan-assist-actions">
 				<button class="primary" disabled={Boolean(a().running)} title="The agent looks for what the chart leaves undecided" onClick={() => void refine(props.path)}>
 					Refine
 				</button>
-				<button disabled={Boolean(a().running)} title={open().length ? "Answer the open questions first" : "The agent writes the spec, for you to review"} onClick={() => void writeSpec(props.path)}>
+				<button disabled={Boolean(a().running) || open().length > 0} title="The agent writes the spec, for you to review" aria-describedby={open().length ? specHint : undefined} onClick={() => void writeSpec(props.path)}>
 					Write spec
 				</button>
+				<Show when={a().running && a().running !== "build"}>
+					<button title="Stop the agent; nothing is changed" onClick={() => stopAssist(props.path)}>
+						Stop
+					</button>
+				</Show>
 			</div>
+			<Show when={open().length}>
+				<p class="hint plan-assist-why" id={specHint}>
+					Write spec waits for your {open().length === 1 ? "answer to the open question" : `answers to the ${open().length} open questions`}.
+				</p>
+			</Show>
 			<p class="hint plan-assist-model">
 				<button class="link" title="Choose the model in the Agent panel" onClick={() => showPanel("agent")}>
 					{currentModel() || "The model is chosen in the Agent panel"}
@@ -67,6 +116,20 @@ export function PlanAssistant(props: { path: string; plan: Plan; text: string; o
 					<Show when={a().cost}>, cost {a().cost.toFixed(2)}</Show>
 				</Show>
 			</p>
+			{/* Where the plan stands, at a glance: each stage with a mark and a word, and its section below says the rest. */}
+			<ol class="plan-stages" aria-label="Where the plan stands">
+				<For each={stages()}>
+					{(stage) => (
+						<li class={stage.state} title={stage.words}>
+							<span class="plan-stage-mark" aria-hidden="true">
+								{stage.state === "done" ? <Icon name="check" /> : stage.state === "warn" ? "!" : "·"}
+							</span>
+							<span class="plan-stage-name">{stage.name}</span>
+							<span class="plan-stage-words">{stage.words}</span>
+						</li>
+					)}
+				</For>
+			</ol>
 			<Show when={a().progress}>
 				<p class="plan-assist-progress">{a().progress}</p>
 			</Show>
@@ -242,7 +305,7 @@ export function PlanAssistant(props: { path: string; plan: Plan; text: string; o
 							</p>
 						</Show>
 						<Show when={!a().running}>
-							<button class="link" onClick={() => discardRun(props.path)}>
+							<button class="link" onClick={() => void discard()}>
 								Discard this build
 							</button>
 						</Show>
@@ -252,8 +315,8 @@ export function PlanAssistant(props: { path: string; plan: Plan; text: string; o
 			<Show when={built()?.units.length}>
 				<h4 class="plan-assist-head">
 					<span>Chart and code</span>
-					<button title="Compare them again" onClick={() => recheckPlan(uri() ?? "")}>
-						Check
+					<button title="Compare the chart with the code again" onClick={() => recheckPlan(uri() ?? "")}>
+						Refresh
 					</button>
 				</h4>
 				<Show when={drift().items.length} fallback={<p class="hint">{drift().checked ? "They agree on procedures and calls. That says nothing about what the code does." : "Not compared yet: the language server is still reading the workspace."}</p>}>
@@ -277,6 +340,39 @@ export function PlanAssistant(props: { path: string; plan: Plan; text: string; o
 					Each path through the chart is a case: {paths().paths.length}
 					{paths().truncated ? " or more" : ""}. SSL Studio cannot run SSL, so you run them in STARLIMS.
 				</p>
+				{/* One path at a time, lit on the chart: what a test of that case walks through. */}
+				<Show when={paths().paths.length}>
+					<div class="plan-paths" role="group" aria-label="Paths through the chart">
+						<button title="The path before" aria-label="The path before" onClick={() => stepPath(-1)}>
+							<Icon name="chevron-left" />
+						</button>
+						<span role="status">{shownPath() === null ? "Show a path on the chart" : `Path ${shownPath()! + 1} of ${paths().paths.length}`}</span>
+						<button title="The next path" aria-label="The next path" onClick={() => stepPath(1)}>
+							<Icon name="chevron-right" />
+						</button>
+						<Show when={shownPath() !== null}>
+							<button title="Stop showing a path" onClick={() => setShownPath(null)}>
+								Hide
+							</button>
+						</Show>
+					</div>
+					<Show when={shownPath() !== null && paths().paths[shownPath()!]}>
+						{(path) => (
+							<ol class="plan-path-steps">
+								<For each={path().steps}>
+									{(step) => (
+										<li>
+											<Show when={step.label}>
+												<span class="plan-path-label">{step.label}</span>{" "}
+											</Show>
+											<Node id={step.id} />
+										</li>
+									)}
+								</For>
+							</ol>
+						)}
+					</Show>
+				</Show>
 				<button disabled={Boolean(a().running)} title="The agent writes an SSL test script, for you to review" onClick={() => void writeTests(props.path)}>
 					Write the test script
 				</button>

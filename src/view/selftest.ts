@@ -8,7 +8,7 @@ import { errors } from "./main";
 import { session, diagnostics } from "./lsp/session";
 import { procedureSpans } from "./plan/build";
 import { isPlanPath } from "./plan/model";
-import { activeDoc, openFile, state } from "./state";
+import { activeDoc, openFile, setState, state } from "./state";
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function until<T>(get: () => T | undefined | null | false, ms = 8000): Promise<T | null> {
@@ -21,8 +21,21 @@ async function until<T>(get: () => T | undefined | null | false, ms = 8000): Pro
 	return null;
 }
 
+/** Whether the picture of what an SVG shows is written out as a file another program can read: its size, or 0. */
+async function pictureParses(svg: SVGSVGElement): Promise<number> {
+	const { pictureOf } = await import("./graph/picture");
+	const box = svg.querySelector<SVGGElement>(":scope > g[transform]")?.getBBox();
+	const text = pictureOf(svg, { width: box?.width ?? 0, height: box?.height ?? 0 });
+	const parsed = new DOMParser().parseFromString(text, "image/svg+xml");
+	return text && !parsed.querySelector("parsererror") && parsed.documentElement.nodeName === "svg" ? text.length : 0;
+}
+
 export async function selftest() {
 	const report: Record<string, unknown> = { host: state.info?.host, userAgent: navigator.userAgent, lspPath: state.info?.lsp.path, lspVersion: state.info?.lsp.version };
+	// Which theme "follow the system" came to in this window, and what the window says the system prefers.
+	report.systemPrefersDark = matchMedia("(prefers-color-scheme: dark)").matches;
+	report.themeSetting = state.settings.theme;
+	report.themeShown = document.documentElement.dataset.theme;
 	const timings: Record<string, number> = {};
 	const timed = async <T>(name: string, work: () => Promise<T>) => {
 		const start = performance.now();
@@ -40,6 +53,7 @@ export async function selftest() {
 			await timed("open", () => openFile(file));
 			const doc = await until(() => activeDoc());
 			const editor = await until(() => activeEditor()?.getModel() && activeEditor());
+			editor!.revealLineInCenter(doc!.model.getLineCount());
 			await wait(800);
 			report.tokenClasses = new Set([...document.querySelectorAll(".view-lines span span[class*='mtk']")].map((e) => e.className)).size;
 			report.symbols = (await timed("documentSymbols", () => session.documentSymbols(doc!.model))).length;
@@ -100,8 +114,52 @@ export async function selftest() {
 	} catch (e: any) {
 		errors.push(String(e?.stack ?? e));
 	}
+	try {
+		// The chart's lines are drawn with rounded corners, and its picture can be written out, in this webview.
+		const chart = document.querySelector<SVGSVGElement>(".plan svg.graph-canvas");
+		if (chart) {
+			report.planCurvedEdges = [...chart.querySelectorAll(".plan-edge .g-edge")].filter((e) => /^M[^Z]*[LQ]/.test(e.getAttribute("d") ?? "")).length;
+			report.planArrows = chart.querySelectorAll("defs marker").length;
+			report.planPicture = await pictureParses(chart);
+		}
+	} catch (e: any) {
+		errors.push(String(e?.stack ?? e));
+	}
+	try {
+		// The call graph, in this webview: laid out and drawn, with its key, and its picture written out.
+		if (session.supports("ssl/callGraph")) {
+			setState("centerView", "graph");
+			const graph = await until(() => {
+				const svg = document.querySelector<SVGSVGElement>(".graph svg.graph-canvas");
+				return svg && svg.querySelectorAll(".g-proc, .g-top, .g-fold").length > 0 && svg;
+			}, 15000);
+			if (graph) {
+				report.graphNodes = graph.querySelectorAll(".g-proc, .g-top, .g-fold").length;
+				report.graphLines = [...graph.querySelectorAll(".g-edge")].filter((e) => (e.getAttribute("d") ?? "").startsWith("M")).length;
+				report.graphKey = document.querySelectorAll(".graph-legend li").length;
+				const box = graph.querySelector<SVGGElement>(".g-root")?.getBBox();
+				report.graphDrawn = Boolean(box && box.width > 0 && box.height > 0);
+				report.graphPicture = await pictureParses(graph);
+			} else report.graphNodes = 0;
+			setState("centerView", "editors");
+		}
+	} catch (e: any) {
+		errors.push(String(e?.stack ?? e));
+	}
+	const docs = await import("./selftestDocs");
+	try {
+		report.docs = await docs.selftestDocs();
+	} catch (e: any) {
+		errors.push(String(e?.stack ?? e));
+	}
 	const plan = state.info?.selftestCycle ? (await backend.files()).find(isPlanPath) : undefined;
 	if (plan) report.cycle = await import("./selftestCycle").then((m) => m.selftestCycle(plan));
+	// Setting a project up writes files, so only on the cycle run’s copy of the workspace.
+	if (state.info?.selftestCycle) report.docsSetup = await docs.selftestDocsSetup();
+	// The working documents are written too, so on the same copy, once it is a project.
+	if (state.info?.selftestCycle && !(report.docsSetup as any)?.failed) report.work = await docs.selftestWork();
+	// Writing a document, once the working documents are there: the ticket it links to is one of them.
+	if (state.info?.selftestCycle && report.work && !(report.work as any).failed) report.writing = await docs.selftestWriting();
 	report.timingsMs = timings;
 	// Monaco cancels work when a diff or an editor closes before it finishes, as an accepted review does.
 	report.errors = errors.filter((e) => !/^(Canceled|no diff result available)/.test(e));
@@ -115,9 +173,13 @@ export async function selftest() {
 		(report.syntaxTreeNodes === undefined || Number(report.syntaxTreeNodes) > 0) &&
 		(report.semanticTokens === undefined || Number(report.semanticTokens) > 0) &&
 		(report.planNodes === undefined || Number(report.planNodes) > 0) &&
+		(report.planPicture === undefined || (Number(report.planPicture) > 0 && Number(report.planArrows) > 0)) &&
+		// A server that gives a call graph must end in a picture of it: nodes, lines, a key, and a file of it.
+		(report.graphNodes === undefined || (Number(report.graphNodes) > 0 && report.graphDrawn === true && Number(report.graphKey) > 0 && Number(report.graphPicture) > 0)) &&
 		(report.callGraph === undefined || report.callGraphResolvesExecFunction === true) &&
 		(report.scriptCalls === undefined || (Number((report.scriptCalls as any).procedures) > 0 && Number((report.scriptCalls as any).edges) > 0)) &&
 		(report.procedureSpans === undefined || (report.procedureSpans as any[])[0]?.startLine === 0) &&
-		(!state.info?.selftestCycle || Boolean(report.cycle && !(report.cycle as any).failed));
+		Boolean(report.docs && !(report.docs as any).failed) &&
+		(!state.info?.selftestCycle || Boolean(report.cycle && !(report.cycle as any).failed && report.docsSetup && !(report.docsSetup as any).failed && report.work && !(report.work as any).failed && report.writing && !(report.writing as any).failed));
 	await backend.selftestDone(report);
 }

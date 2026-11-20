@@ -1,0 +1,162 @@
+/********************************************************************************
+Description.. : Unit tests for DueDates.WorkCalendar.AddWorkingDays. No database is read or
+                written. The two limit tests walk 730 days and take a moment.
+                Run DueDatesTests.AddWorkingDaysTests.RunTests. It returns the tally.
+Parameters... : -
+Returns...... : -
+Author....... :
+Date......... : 2026-11-18
+********************************************************************************
+_______________________________________________________________________________
+Modification. :
+Author....... :
+Date......... :
+_______________________________________________________________________________
+********************************************************************************/;
+
+:INCLUDE DueDates.DueDateConstants;
+
+/*
+ * Procedure: RunTests
+ * Description: Runs every test of this script, each on its own.
+ * Returns: {nPassed, nTotal, aResults}, each result {sLabel, bPassed}
+;
+:PROCEDURE RunTests;
+	:DECLARE aArgs, aTests;
+
+	aTests := {
+		"TestAddDaysCrossesWeekend", "TestAddDaysSkipsHoliday", "TestAddDaysMonthEnd",
+		"TestAddDaysRushSaturday", "TestAddDaysZero", "TestAddDaysNegative",
+		"TestAddDaysEmptyStart", "TestAddDaysLastDayInReach", "TestAddDaysOutOfReach"
+	};
+	aArgs := {"DueDatesTests.AddWorkingDaysTests", aTests};
+
+	:RETURN ExecFunction("DueDatesTests.TestSupport.RunAll", aArgs);
+:ENDPROC;
+
+/* region Counting;
+
+:PROCEDURE TestAddDaysCrossesWeekend;
+	/* Thursday 12 plus 3 working days: Friday 13, Monday 16, Tuesday 17;
+	:DECLARE aArgs, dActual;
+
+	aArgs := {DateFromNumbers(2026, 11, 12), 3};
+	dActual := ExecFunction("DueDates.WorkCalendar.AddWorkingDays", aArgs);
+
+	:RETURN {"A weekend is not counted", "20261117", dActual};
+:ENDPROC;
+
+:PROCEDURE TestAddDaysSkipsHoliday;
+	/* Monday 16 plus 2, with Wednesday 18 a holiday: Tuesday 17, Thursday 19;
+	:DECLARE aArgs, dActual;
+
+	aArgs := {DateFromNumbers(2026, 11, 16), 2, {DateFromNumbers(2026, 11, 18)}};
+	dActual := ExecFunction("DueDates.WorkCalendar.AddWorkingDays", aArgs);
+
+	:RETURN {"A holiday is not counted", "20261119", dActual};
+:ENDPROC;
+
+:PROCEDURE TestAddDaysMonthEnd;
+	/* Friday 27 November plus 2: Monday 30 November, Tuesday 1 December;
+	:DECLARE aArgs, dActual;
+
+	aArgs := {DateFromNumbers(2026, 11, 27), 2};
+	dActual := ExecFunction("DueDates.WorkCalendar.AddWorkingDays", aArgs);
+
+	:RETURN {"The count passes a month end", "20261201", dActual};
+:ENDPROC;
+
+:PROCEDURE TestAddDaysRushSaturday;
+	/* Friday 13 plus 2 with Saturdays counted: Saturday 14, Monday 16;
+	:DECLARE aArgs, dActual;
+
+	aArgs := {DateFromNumbers(2026, 11, 13), 2, {}, .T.};
+	dActual := ExecFunction("DueDates.WorkCalendar.AddWorkingDays", aArgs);
+
+	:RETURN {"Rush work counts Saturday", "20261116", dActual};
+:ENDPROC;
+
+/* endregion;
+
+/* region Nothing to count;
+
+:PROCEDURE TestAddDaysZero;
+	/* Empty case: zero days gives the start back, even when it is a Saturday;
+	:DECLARE aArgs, dActual;
+
+	aArgs := {DateFromNumbers(2026, 11, 14), 0};
+	dActual := ExecFunction("DueDates.WorkCalendar.AddWorkingDays", aArgs);
+
+	:RETURN {"Zero days returns the start", "20261114", dActual};
+:ENDPROC;
+
+:PROCEDURE TestAddDaysNegative;
+	/* Empty case: the count never goes backward, so -3 days gives the start back;
+	:DECLARE aArgs, dActual;
+
+	aArgs := {DateFromNumbers(2026, 11, 14), -3};
+	dActual := ExecFunction("DueDates.WorkCalendar.AddWorkingDays", aArgs);
+
+	:RETURN {"Negative days return the start", "20261114", dActual};
+:ENDPROC;
+
+:PROCEDURE TestAddDaysEmptyStart;
+	/* Empty case: no date to count from gives an empty date back, and no walk;
+	:DECLARE dActual;
+
+	dActual := ExecFunction("DueDates.WorkCalendar.AddWorkingDays", {CToD(""), 2});
+
+	:RETURN {"No start, nothing added", "", dActual};
+:ENDPROC;
+
+/* endregion;
+
+/* region The day limit;
+
+:PROCEDURE TestAddDaysLastDayInReach;
+	/* From Monday 16 November 2026 with the next 729 days holidays, the first
+	   working day is the 730th: Wednesday 15 November 2028, the last day in reach;
+	:DECLARE aArgs, dActual, dStart;
+
+	dStart := DateFromNumbers(2026, 11, 16);
+	aArgs := {dStart, 1, DoProc("HolidaysAfter", {dStart, DoProc("MaxWalkDays") - 1})};
+	dActual := ExecFunction("DueDates.WorkCalendar.AddWorkingDays", aArgs);
+
+	:RETURN {"The last day in reach is found", "20281115", dActual};
+:ENDPROC;
+
+:PROCEDURE TestAddDaysOutOfReach;
+	/* Failure path: with all 730 days holidays there is no working day in reach,
+	   and the answer is an empty date, not a walk that goes on;
+	:DECLARE aArgs, dActual, dStart;
+
+	dStart := DateFromNumbers(2026, 11, 16);
+	aArgs := {dStart, 1, DoProc("HolidaysAfter", {dStart, DoProc("MaxWalkDays")})};
+	dActual := ExecFunction("DueDates.WorkCalendar.AddWorkingDays", aArgs);
+
+	:RETURN {"No working day within the limit", "", dActual};
+:ENDPROC;
+
+/*
+ * Procedure: HolidaysAfter
+ * Description: Builds a run of holidays, one for each day after a start date.
+ * Parameters:
+ *   dStart - the day before the first holiday
+ *   nCount - how many holidays
+ * Returns: an array of nCount dates
+;
+:PROCEDURE HolidaysAfter;
+	:PARAMETERS dStart, nCount;
+
+	:DECLARE aHolidays, nIndex;
+
+	aHolidays := {};
+
+	:FOR nIndex := 1 :TO nCount;
+		AAdd(aHolidays, dStart + nIndex);
+	:NEXT;
+
+	:RETURN aHolidays;
+:ENDPROC;
+
+/* endregion;

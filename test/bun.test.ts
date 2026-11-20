@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFrameReader, frame } from "../src/bun/frames";
@@ -49,6 +49,141 @@ describe("workspace files", () => {
 		const hits = await files.search("FIND", {});
 		expect(hits).toEqual([{ path: join(root, "b.ssl"), line: 2, column: 1, length: 4, text: "find me" }]);
 		expect(await files.search("FIND", { caseSensitive: true })).toEqual([]);
+	});
+});
+
+describe("copying in the workspace", () => {
+	const root = join(dir, "copy-ws");
+	mkdirSync(join(root, "src", "deep"), { recursive: true });
+	writeFileSync(join(root, "src", "a.ssl"), ":RETURN 1;\n");
+	writeFileSync(join(root, "src", "deep", "b.ssl"), ":RETURN 2;\n");
+	const files = new WorkspaceFiles(root);
+
+	test("a file is copied, and the original stays", async () => {
+		await files.copy(join(root, "src", "a.ssl"), join(root, "src", "a copy.ssl"));
+		expect((await files.read(join(root, "src", "a copy.ssl"))).text).toBe(":RETURN 1;\n");
+		expect((await files.read(join(root, "src", "a.ssl"))).text).toBe(":RETURN 1;\n");
+	});
+	test("a folder is copied with everything in it", async () => {
+		await files.copy(join(root, "src"), join(root, "src copy"));
+		expect((await files.read(join(root, "src copy", "deep", "b.ssl"))).text).toBe(":RETURN 2;\n");
+	});
+	test("a copy into a folder that is not there yet makes the folder", async () => {
+		await files.copy(join(root, "src", "a.ssl"), join(root, "new", "a.ssl"));
+		expect((await files.read(join(root, "new", "a.ssl"))).text).toBe(":RETURN 1;\n");
+	});
+	test("nothing is written over", async () => {
+		await expect(files.copy(join(root, "src", "a.ssl"), join(root, "src", "deep", "b.ssl"))).rejects.toThrow(/already exists/);
+	});
+	test("a folder is not copied into itself", async () => {
+		await expect(files.copy(join(root, "src"), join(root, "src", "deep", "src"))).rejects.toThrow(/into itself/);
+	});
+	test("nothing is copied from or to outside the workspace", async () => {
+		await expect(files.copy(join(root, "..", "ws", "b.ssl"), join(root, "b.ssl"))).rejects.toThrow(/outside/);
+		await expect(files.copy(join(root, "src", "a.ssl"), join(root, "..", "a.ssl"))).rejects.toThrow(/outside/);
+	});
+	test("a copy of something that is not there leaves nothing behind", async () => {
+		await expect(files.copy(join(root, "src", "nothing.ssl"), join(root, "made", "nothing.ssl"))).rejects.toThrow();
+		expect(existsSync(join(root, "made", "nothing.ssl"))).toBe(false);
+	});
+});
+
+describe("files that are not text", () => {
+	const root = join(dir, "kinds-ws");
+	mkdirSync(root, { recursive: true });
+	// The smallest picture there is: one clear pixel.
+	const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
+	writeFileSync(join(root, "dot.png"), png);
+	writeFileSync(join(root, "blob.bin"), Buffer.from([1, 2, 0, 3, 4]));
+	writeFileSync(join(root, "a.ssl"), ":RETURN 1;\r\n");
+	writeFileSync(join(root, "wide.sql"), Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from("SELECT 1", "utf16le")]));
+	const files = new WorkspaceFiles(root);
+
+	test("text says what it is written in", async () => {
+		expect(await files.read(join(root, "a.ssl"))).toMatchObject({ text: ":RETURN 1;\r\n", encoding: "utf-8" });
+		expect(await files.read(join(root, "wide.sql"))).toMatchObject({ text: "SELECT 1", encoding: "utf-16le" });
+		expect((await files.read(join(root, "a.ssl"))).binary).toBeUndefined();
+	});
+	test("a picture is not read as text, and says it is a picture", async () => {
+		const read = await files.read(join(root, "dot.png"));
+		expect(read.text).toBe("");
+		expect(read.binary).toEqual({ size: png.length, image: "image/png" });
+	});
+	test("other bytes are not read as text either", async () => {
+		const read = await files.read(join(root, "blob.bin"));
+		expect(read.text).toBe("");
+		expect(read.binary).toEqual({ size: 5 });
+	});
+	test("a picture's bytes are given to be shown", async () => {
+		expect(await files.image(join(root, "dot.png"))).toEqual({ type: "image/png", base64: png.toString("base64") });
+	});
+	test("only a picture is given that way, and only from inside the workspace", async () => {
+		await expect(files.image(join(root, "a.ssl"))).rejects.toThrow(/not a picture/);
+		await expect(files.image(join(root, "blob.bin"))).rejects.toThrow(/not a picture/);
+		expect(() => files.inside(join(root, "..", "dot.png"))).toThrow(/outside/);
+	});
+	test("a text file with a zero byte typed into it can still be saved by the editor that holds it", async () => {
+		const file = join(root, "typed.ssl");
+		writeFileSync(file, "a := 1;\n");
+		await files.write(file, "a := \u0000 1;\n", true);
+		// Read from now on as bytes, it is still the editor's own text to save.
+		await files.write(file, "a := 2;\n", true);
+		expect((await files.read(file)).text).toBe("a := 2;\n");
+		// A picture is a picture whoever asks.
+		await expect(files.write(join(root, "dot.png"), "text", true)).rejects.toThrow(/not text/);
+	});
+	test.skipIf(process.platform === "win32")("a file written again keeps whether it may be run", async () => {
+		const script = join(root, "run.sh");
+		writeFileSync(script, "echo one\n", { mode: 0o755 });
+		chmodSync(script, 0o755);
+		await files.write(script, "echo two\n");
+		expect(statSync(script).mode & 0o777).toBe(0o755);
+	});
+	test("text is never written over a file that is not text", async () => {
+		await expect(files.write(join(root, "dot.png"), "")).rejects.toThrow(/not text/);
+		await expect(files.write(join(root, "blob.bin"), "oops")).rejects.toThrow(/not text/);
+		expect(new Uint8Array(await Bun.file(join(root, "blob.bin")).arrayBuffer())).toEqual(new Uint8Array([1, 2, 0, 3, 4]));
+		expect(Buffer.from(await Bun.file(join(root, "dot.png")).arrayBuffer()).equals(png)).toBe(true);
+	});
+});
+
+describe("searching some files, and replacing", () => {
+	const root = join(dir, "replace-ws");
+	mkdirSync(join(root, "src"), { recursive: true });
+	mkdirSync(join(root, "tests"), { recursive: true });
+	writeFileSync(join(root, "src", "a.ssl"), "nDue := 1;\r\nnDue := nDue + 1;\r\n");
+	writeFileSync(join(root, "src", "notes.md"), "nDue is the count\n");
+	writeFileSync(join(root, "tests", "a.ssl"), "nDue := 0;\n");
+	writeFileSync(join(root, "blob.bin"), Buffer.from([0x6e, 0x44, 0x75, 0x65, 0, 1]));
+	// "café nDue" in the one-byte Windows encoding.
+	writeFileSync(join(root, "ansi.sql"), Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x20, 0x6e, 0x44, 0x75, 0x65]));
+	const files = new WorkspaceFiles(root);
+	const names = async (options: object) => [...new Set((await files.search("nDue", options)).map((hit) => hit.path.slice(root.length + 1).split("\\").join("/")))].sort();
+
+	test("a search looks in every text file, with nothing said", async () => {
+		expect(await names({})).toEqual(["ansi.sql", "src/a.ssl", "src/notes.md", "tests/a.ssl"]);
+	});
+	test("only in the files included, and never in those excluded", async () => {
+		expect(await names({ include: "*.ssl" })).toEqual(["src/a.ssl", "tests/a.ssl"]);
+		expect(await names({ include: "*.ssl", exclude: "tests" })).toEqual(["src/a.ssl"]);
+		expect(await names({ exclude: "src, *.sql" })).toEqual(["tests/a.ssl"]);
+		expect(await names({ include: "src/*.md" })).toEqual(["src/notes.md"]);
+	});
+	test("a file as it would be, with its line ends as they are", async () => {
+		expect(await files.replaced(join(root, "src", "a.ssl"), "nDue", "nLate", {})).toEqual({ before: "nDue := 1;\r\nnDue := nDue + 1;\r\n", after: "nLate := 1;\r\nnLate := nLate + 1;\r\n", count: 3 });
+	});
+	test("a file with no match, or that is not text, is not changed", async () => {
+		expect(await files.replaced(join(root, "src", "a.ssl"), "nothing", "x", {})).toBeNull();
+		expect(await files.replaced(join(root, "blob.bin"), "nDue", "x", {})).toBeNull();
+	});
+	test("a file in a one-byte encoding is replaced in that encoding", async () => {
+		const change = (await files.replaced(join(root, "ansi.sql"), "nDue", "nLate", {}))!;
+		expect(change.after).toBe("café nLate");
+		await files.write(join(root, "ansi.sql"), change.after);
+		expect([...new Uint8Array(await Bun.file(join(root, "ansi.sql")).arrayBuffer())]).toEqual([0x63, 0x61, 0x66, 0xe9, 0x20, 0x6e, 0x4c, 0x61, 0x74, 0x65]);
+	});
+	test("nothing outside the workspace is replaced", async () => {
+		await expect(files.replaced(join(root, "..", "ws", "b.ssl"), "x", "y", {})).rejects.toThrow(/outside/);
 	});
 });
 

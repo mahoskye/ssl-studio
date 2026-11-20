@@ -23,4 +23,3 @@ export async function loadLanguageConfiguration() {
 }
 
 export { monaco };
-export const languageFor = (path: string) => (/\.(ssl|srvscr|ds)$/i.test(path) ? "ssl" : /\.json$/i.test(path) ? "json" : "plaintext");

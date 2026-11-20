@@ -24,3 +24,21 @@ test("style profile paths", () => {
 	expect(setPath(s, "format.sql", undefined)).toEqual({ format: {} });
 	expect(getPath(HOUSE_STYLE, "format.indentStyle")).toBe("tab");
 });
+
+import { RULER_MARGIN, rulerColumns } from "../src/shared/houseStyle";
+
+test("the editor rules the line length, and a fainter line to each side of it", () => {
+	expect(rulerColumns(true, 90, RULER_MARGIN)).toEqual([
+		{ column: 80, main: false },
+		{ column: 90, main: true },
+		{ column: 100, main: false },
+	]);
+	// No margin is the one ruler; off is none.
+	expect(rulerColumns(true, 90, 0)).toEqual([{ column: 90, main: true }]);
+	expect(rulerColumns(false, 90, 10)).toEqual([]);
+	// A ruler that would fall at the first column or before it is left out.
+	expect(rulerColumns(true, 40, 60).map((r) => r.column)).toEqual([40, 100]);
+	// What is not a number of columns is no margin; no line length is no ruler.
+	expect(rulerColumns(true, 90, Number.NaN)).toEqual([{ column: 90, main: true }]);
+	expect(rulerColumns(true, 0, 10)).toEqual([]);
+});

@@ -66,8 +66,8 @@ function printBuilt(built: Record<string, unknown>) {
 
 /** One node or edge a line, in a stable order, so a change shows as a small diff. */
 export function printPlan(plan: Plan): string {
-	const { version, title, goal, targets, groups, nodes, edges, built, ...rest } = plan;
-	const head = { version, title, goal, targets };
+	const { version, title, goal, ticket, targets, groups, nodes, edges, built, ...rest } = plan;
+	const head = { version, title, goal, ticket, targets };
 	const lines = [
 		...Object.entries(head)
 			.filter(([, v]) => v !== undefined)

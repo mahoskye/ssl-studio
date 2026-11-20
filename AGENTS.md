@@ -29,6 +29,20 @@
 - Code the parser cannot read stays visible and editable as a raw text block.
   No view may drop or rewrite code it does not understand.
 
+## Design serves the work
+
+- Design is held to a standard, and the standard is enforced: excellent and
+  beautiful, judged by whether it helps someone develop functionality for
+  STARLIMS (ADR 0007). A design defect is a defect.
+- Look at a visible change in the running app before calling it done, at a
+  narrow layout and a wide one, in the light and the dark theme, and say what
+  you looked at.
+- A table in documentation has at most four columns, short values (20
+  characters) in every column but the last, and one fact in a cell. When the
+  information does not fit, drop a column, split the table, or give each row
+  its own section; never add a fifth column (ADR 0008). The limits and the
+  check are in `src/shared/docTables.ts`.
+
 ## Models cost money
 
 - Do not run opencode against a paid provider (Copilot, OpenAI, OpenRouter)

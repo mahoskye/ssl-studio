@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "title": "Set sample due dates",
+  "goal": "Give every sample that has no due date one, counting only days the lab is working and the sample's instrument is available.",
+  "targets": ["src/DueDates/SetSampleDueDates.ssl"],
+  "groups": [
+    { "id": "g1", "name": "Loading" },
+    { "id": "g2", "name": "One sample" }
+  ],
+  "nodes": [
+    { "id": "n1", "kind": "start", "text": "Run, with no parameters" },
+    { "id": "n2", "kind": "call", "text": "Read the holidays", "ref": "LoadHolidays", "group": "g1" },
+    { "id": "n3", "kind": "call", "text": "Read the outages", "ref": "LoadOutages", "group": "g1" },
+    { "id": "n4", "kind": "step", "text": "Begin a transaction", "notes": "Any error after this rolls every update back and returns DUE_DATES_NOT_SAVED." },
+    { "id": "n5", "kind": "step", "text": "Read the samples that have no due date" },
+    { "id": "n6", "kind": "decision", "text": "Is there another sample?" },
+    { "id": "n7", "kind": "decision", "text": "Has it a received date and a turnaround?", "group": "g2" },
+    { "id": "n8", "kind": "call", "text": "Pick the rule for its priority", "ref": "RuleFor", "group": "g2", "notes": "RUSH gets the rule that counts Saturdays." },
+    { "id": "n9", "kind": "call", "text": "Work out the due date", "ref": "DueDates.DueRule.DueDate", "group": "g2", "notes": "A day counts when it is a working day and the instrument is available." },
+    { "id": "n10", "kind": "step", "text": "Write the due date, if the sample still has none", "group": "g2" },
+    { "id": "n11", "kind": "decision", "text": "Was the sample's row changed?", "group": "g2" },
+    { "id": "n12", "kind": "step", "text": "Note the sample as skipped, with the reason", "group": "g2" },
+    { "id": "n13", "kind": "step", "text": "Commit the transaction" },
+    { "id": "n14", "kind": "end", "text": "Return how many were set, and which were skipped and why" }
+  ],
+  "edges": [
+    { "from": "n1", "to": "n2" },
+    { "from": "n2", "to": "n3" },
+    { "from": "n3", "to": "n4" },
+    { "from": "n4", "to": "n5" },
+    { "from": "n5", "to": "n6" },
+    { "from": "n6", "to": "n7", "label": "yes" },
+    { "from": "n6", "to": "n13", "label": "no" },
+    { "from": "n7", "to": "n8", "label": "yes" },
+    { "from": "n7", "to": "n12", "label": "no" },
+    { "from": "n8", "to": "n9" },
+    { "from": "n9", "to": "n10" },
+    { "from": "n10", "to": "n11" },
+    { "from": "n11", "to": "n6", "label": "yes" },
+    { "from": "n11", "to": "n12", "label": "no" },
+    { "from": "n12", "to": "n6" },
+    { "from": "n13", "to": "n14" }
+  ]
+}

@@ -1,0 +1,162 @@
+/********************************************************************************
+Description.. : What the test scripts share: the runner, the comparison and the calendar
+                of schema/database/demo.sql. No database is read or written here.
+Parameters... : -
+Returns...... : -
+Author....... :
+Date......... : 2026-11-18
+********************************************************************************
+_______________________________________________________________________________
+Modification. : RunAll hands CheckEqual its arguments as an array written in
+                place. The script did not compile with a variable there.
+Author....... :
+Date......... : 2026-11-18
+_______________________________________________________________________________
+********************************************************************************/;
+
+/* region Running tests;
+
+/*
+ * Procedure: RunAll
+ * Description: Runs the tests of one script, each on its own, and tallies them.
+ * Parameters:
+ *   sScript   - the test script, as Category.Script
+ *   aTests    - the names of its test procedures. Each returns {sLabel, vExpected, vActual}
+ *   bRollBack - .T. to run each test inside a transaction that is rolled back
+ * Returns: {nPassed, nTotal, aResults}, each result {sLabel, bPassed}. A test that raises is a failed result
+;
+:PROCEDURE RunAll;
+	:PARAMETERS sScript, aTests, bRollBack;
+	:DEFAULT aTests, {};
+	:DEFAULT bRollBack, .F.;
+
+	:DECLARE aCheck, aResults, aRun, nIndex, nPassed, sFmt, sTarget, sText;
+	:DECLARE oErr, sDiag;
+
+	aResults := {};
+	nPassed := 0;
+	sFmt := "";
+
+	:FOR nIndex := 1 :TO ALen(aTests);
+		/* The names come from the test script's own list, not from a request;
+		sTarget := sFmt:Format("{0}.{1}", {sScript, aTests[nIndex]});
+		aRun := {sTarget};
+
+		/* One :TRY for each test: a test that raises is recorded as failed, and
+		   the tests after it still run;
+		:TRY;
+			:IF bRollBack;
+				aCheck := ExecFunction("DueDatesTests.DbTestSupport.RolledBack", aRun);
+			:ELSE;
+				aCheck := ExecFunction(sTarget);
+			:ENDIF;
+
+			/* The three values are written out: the arguments of a DoProc to a
+			   procedure of this script have to be an array written in place,
+			   and the compiler refuses a variable there;
+			AAdd(aResults, DoProc("CheckEqual", {aCheck[1], aCheck[2], aCheck[3]}));
+		:CATCH;
+			oErr := GetLastSSLError();
+			sDiag := Left(oErr:Description, 500);
+			sText := sFmt:Format("{0} raised: {1}", {sTarget, sDiag});
+			ErrorMes("[ERROR] DueDatesTests", sText);
+			ClearLastSSLError();
+			AAdd(aResults, {sText, .F.});
+		:ENDTRY;
+
+		:IF aResults[nIndex][2];
+			nPassed += 1;
+		:ENDIF;
+	:NEXT;
+
+	/* The log line is a convenience. The tally is what this returns;
+	sText := sFmt:Format("{0}: {1} of {2} passed", {sScript, nPassed, ALen(aResults)});
+	InfoMes("[INFO] DueDatesTests", sText);
+
+	:RETURN {nPassed, ALen(aResults), aResults};
+:ENDPROC;
+
+/*
+ * Procedure: CheckEqual
+ * Description: Compares what a test got with what it expected, and logs a mismatch.
+ * Parameters:
+ *   sLabel    - what the test checks
+ *   vExpected - the value expected. For a date its yyyyMMdd text, "" for an empty date
+ *   vActual   - the value the code under test returned
+ * Returns: {sLabel, bPassed}
+;
+:PROCEDURE CheckEqual;
+	:PARAMETERS sLabel, vExpected, vActual;
+
+	:DECLARE bPassed, sFmt, sText, vShown;
+
+	sFmt := "";
+	vShown := vActual;
+
+	/* DToS gives eight spaces for an empty date, which AllTrim makes "";
+	:IF LimsTypeEx(vActual) == "DATE";
+		vShown := AllTrim(DToS(vActual));
+	:ENDIF;
+
+	/* The types are compared first because == does not convert one to the other.
+	   == and not = for the values: = would pass a string on a matching prefix;
+	bPassed := LimsTypeEx(vExpected) == LimsTypeEx(vShown) .AND. vExpected == vShown;
+
+	:IF .NOT. bPassed;
+		sText := sFmt:Format("{0}: expected [{1}] got [{2}]",
+		                     {sLabel, LimsString(vExpected), LimsString(vShown)});
+		ErrorMes("[ERROR] DueDatesTests", sText);
+	:ENDIF;
+
+	:RETURN {sLabel, bPassed};
+:ENDPROC;
+
+/* endregion;
+
+/* region Fixtures;
+
+/*
+ * Procedure: DemoHolidays
+ * Description: Builds the holidays of schema/database/demo.sql.
+ * Returns: 26 November and 25 December 2026, as an array of dates
+;
+:PROCEDURE DemoHolidays;
+	:RETURN {DateFromNumbers(2026, 11, 26), DateFromNumbers(2026, 12, 25)};
+:ENDPROC;
+
+/*
+ * Procedure: DemoOutages
+ * Description: Builds the outages of schema/database/demo.sql.
+ * Returns: BAL-01 out 18 and 19 November 2026, HPLC-02 out 1 to 3 December 2026
+;
+:PROCEDURE DemoOutages;
+	:RETURN {
+		{"BAL-01", DateFromNumbers(2026, 11, 18), DateFromNumbers(2026, 11, 19)},
+		{"HPLC-02", DateFromNumbers(2026, 12, 1), DateFromNumbers(2026, 12, 3)}
+	};
+:ENDPROC;
+
+/*
+ * Procedure: NewRule
+ * Description: Builds a rule on the holidays and outages of schema/database/demo.sql.
+ * Parameters:
+ *   nDays - the turnaround in days
+ *   bRush - .T. for a RushDueRule, otherwise a DueRule
+ * Returns: the rule object
+;
+:PROCEDURE NewRule;
+	:PARAMETERS nDays, bRush;
+	:DEFAULT bRush, .F.;
+
+	:DECLARE aArgs;
+
+	aArgs := {nDays, DoProc("DemoHolidays"), DoProc("DemoOutages")};
+
+	:IF bRush;
+		:RETURN CreateUdObject("DueDates.RushDueRule", aArgs);
+	:ENDIF;
+
+	:RETURN CreateUdObject("DueDates.DueRule", aArgs);
+:ENDPROC;
+
+/* endregion;

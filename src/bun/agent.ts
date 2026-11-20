@@ -11,7 +11,26 @@ import type { Subprocess } from "bun";
 import type { AgentModel, AgentReply, AgentStatus } from "../shared/protocol";
 import { compareVersions, OPENCODE_RANGE, opencodeCommand } from "./tools";
 
-const DENY = ["shell", "webfetch", "websearch", "external_directory", "question", "edit"];
+/**
+ * opencode 2.2.5 gave a model no tools of its own, only code mode; 2.3 gives
+ * it `read`, `glob`, `grep`, `subagent` and `skill`. The IDE puts what a turn
+ * needs in its prompt and says so there (ADR 0004). Tried on 2.3.2 with a
+ * local model: left the file tools, it searched the folder for what it had
+ * already been sent and filled its context; left only `skill`, it loaded a
+ * skill that had nothing to do with the question. Denied, 2.3 falls back to
+ * the code mode of 2.2.5 and a turn is what its prompt says it is. A skill
+ * attached to a prompt still arrives: that is not the `skill` tool.
+ */
+const NO_TOOLS_OF_ITS_OWN = ["read", "glob", "grep", "subagent", "skill"];
+
+/**
+ * What every session is denied. From `browser` on, added for opencode 2.3:
+ * its image tool calls a connected provider's image model, which may bill and
+ * writes a file; its MCP resource tools read from whatever servers the user
+ * has connected, which is outside the workspace; `browser` is the web by
+ * another name. A rule for an action a server does not have denies nothing.
+ */
+const DENY = ["shell", "webfetch", "websearch", "external_directory", "question", "edit", "browser", "experimental_image_generate", "opencode_list_mcp_resources", "opencode_read_mcp_resource", "opencode_watch_mcp_event", ...NO_TOOLS_OF_ITS_OWN];
 /** Providers that run on the user's own machines. Anything else may bill. */
 const LOCAL_PROVIDERS = new Set(["ollama", "lmstudio", "llama.cpp", "llamacpp", "local"]);
 const TURN_TIMEOUT_MS = 15 * 60_000;
@@ -26,8 +45,31 @@ const SKILLS_STEADY_MS = 2_000;
 export const UNGUARDED_TOOLS = ["worktree_create", "session_move"];
 const UNGUARDED = new RegExp(`\\b(${UNGUARDED_TOOLS.join("|")})\\b`);
 
-type Options = { serverConfig?: string; serverUrl?: string; model?: string };
-type Waiter = { resolve: (outcome: AgentReply["outcome"]) => void; blocked?: string; tools: number; toolLimit?: number; overLimit?: boolean };
+type Options = { serverConfig?: string; serverUrl?: string; model?: string; ownModels?: string[] };
+type Waiter = { resolve: (outcome: AgentReply["outcome"]) => void; blocked?: string; tools: number; toolLimit?: number; overLimit?: boolean; /** Why the turn failed, when opencode says so on the event and not on a message. */ failure?: string };
+
+/**
+ * The reason on a failed turn's event, in words. opencode puts it in different
+ * places for different failures (a model that is not there, a provider that
+ * does not answer); only short text is taken, never a whole object, which may
+ * hold a provider's settings.
+ */
+export function failureText(data: any): string | undefined {
+	for (const value of [data?.error?.message, data?.error?.data?.message, data?.error?.name, data?.error, data?.message, data?.reason]) {
+		if (typeof value !== "string" || !value.trim()) continue;
+		const text = value.trim().replace(/:$/, "").slice(0, 400);
+		const hint = HINTS[String(data?.error?.type)];
+		return hint ? `${text}. ${hint}` : text;
+	}
+	return undefined;
+}
+
+const NO_REASON = "opencode gave no reason. The model may not be installed, or its provider may not be reachable: choose another model.";
+
+/** What to do about a failure opencode names by type, where its own words do not say. */
+const HINTS: Record<string, string> = {
+	"provider.no-route": "opencode cannot reach this model's provider: check the provider's entry in opencode's configuration (its package and address), or choose another model.",
+};
 
 export class Agent {
 	private proc?: Subprocess<"pipe", "pipe", "pipe">;
@@ -183,7 +225,10 @@ export class Agent {
 				// Aborted or dropped; a dropped stream fails the waiting turns below.
 			}
 			if (!controller.signal.aborted) {
-				for (const waiter of this.waiters.values()) waiter.resolve("failed");
+				for (const waiter of this.waiters.values()) {
+					waiter.failure = "Lost opencode's event stream before the turn ended.";
+					waiter.resolve("failed");
+				}
 				this.waiters.clear();
 				const alive = this.options.serverUrl || (this.proc && this.proc.exitCode === null);
 				if (alive && attempt < 3) setTimeout(() => this.events === controller && this.subscribe(attempt + 1), 1000);
@@ -199,7 +244,9 @@ export class Agent {
 		this.guard(sessionID, event);
 		const end = /^session\.execution\.(succeeded|failed|interrupted)$/.exec(event.type);
 		if (end) {
-			this.waiters.get(sessionID)?.resolve(end[1] as AgentReply["outcome"]);
+			const waiting = this.waiters.get(sessionID);
+			if (waiting && end[1] === "failed") waiting.failure = failureText(event.data);
+			waiting?.resolve(end[1] as AgentReply["outcome"]);
 			this.waiters.delete(sessionID);
 		}
 		// A form would hold the turn forever (M0); `question` is denied, so cancel any other.
@@ -227,12 +274,14 @@ export class Agent {
 	async models(): Promise<AgentModel[]> {
 		await this.ensure();
 		const list = ((await this.api("GET", "/api/model"))?.data ?? []) as any[];
+		// Models the user says run on their own machines, whatever the provider.
+		const own = new Set(this.options.ownModels ?? []);
 		return list
 			.map((m) => ({
 				providerID: m.providerID,
 				id: m.modelID ?? m.id,
 				name: m.name ?? m.modelID ?? m.id,
-				local: LOCAL_PROVIDERS.has(String(m.providerID).toLowerCase()),
+				local: LOCAL_PROVIDERS.has(String(m.providerID).toLowerCase()) || own.has(`${m.providerID}/${m.modelID ?? m.id}`),
 				tools: Boolean(m.capabilities?.tools),
 				variants: (m.variants ?? []).map((v: any) => v.id),
 			}))
@@ -318,7 +367,9 @@ export class Agent {
 			? { message: `Stopped: the agent tried ${waiter.blocked}, which opencode runs without a permission check.` }
 			: waiter.overLimit
 				? { message: `Stopped: the agent kept calling tools (more than ${waiter.toolLimit}), which can only waste the turn here.` }
-				: assistant.map((m) => m.error).find(Boolean);
+				: (assistant.map((m) => m.error).find(Boolean) ??
+					// A turn can fail before the model says anything: the model is not there, or its provider does not answer.
+					(outcome === "failed" ? { message: waiter.failure ?? NO_REASON } : undefined));
 		if (!input.keep) {
 			this.sessions.delete(sessionID);
 			void this.api("DELETE", `/api/session/${sessionID}`).catch(() => {});

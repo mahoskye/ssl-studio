@@ -1,0 +1,142 @@
+/********************************************************************************
+Description.. : Saves due dates that were worked out, all of them or none. A sample
+                that got a due date in the meantime keeps it and is reported as a skip.
+Parameters... : aPlanned - the due dates to save, each row {sSampleId, dDue}
+Returns...... : Success: {.T., {nSet, nSkipped, aSkipped}}, each skip {sSampleId, sCode, sText}
+                Failure: {.F., {sCode, sMessage}}, with every write of the call rolled back
+Author....... :
+Date......... : 2026-11-18
+********************************************************************************
+_______________________________________________________________________________
+Modification. :
+Author....... :
+Date......... :
+_______________________________________________________________________________
+********************************************************************************/;
+
+:PARAMETERS aPlanned;
+:DEFAULT aPlanned, {};
+:INCLUDE DueDates.DueDateConstants;
+
+:DECLARE aNotSaved, aSummary;
+:DECLARE oErr;
+
+aNotSaved := {.F., {"DUE_DATES_NOT_SAVED", "No due dates were saved."}};
+
+/* Something that is not a list of rows was never a plan. Nothing is written;
+:IF LimsTypeEx(aPlanned) != "ARRAY";
+	:RETURN aNotSaved;
+:ENDIF;
+
+:TRY;
+	aSummary := DoProc("WriteDueDates", {aPlanned});
+:CATCH;
+	/* The error text goes to the server log only. The caller gets a fixed code;
+	oErr := GetLastSSLError();
+	ErrorMes("[ERROR] SaveDueDates", Left(oErr:Description, 2000));
+	ClearLastSSLError();
+
+	:RETURN aNotSaved;
+:ENDTRY;
+
+:RETURN {.T., aSummary};
+
+/*
+ * Procedure: WriteDueDates
+ * Description: Writes every planned due date in one transaction.
+ * Parameters:
+ *   aPlanned - the due dates to save, each row {sSampleId, dDue}
+ * Returns: {nSet, nSkipped, aSkipped}, each skip {sSampleId, sCode, sText}. Raises on any failure, after rolling back
+;
+/*@private;
+:PROCEDURE WriteDueDates;
+	:PARAMETERS aPlanned;
+
+	:DECLARE aRow, aSkip, aSkipped, nIndex, nSet, sFmt, sText;
+	:DECLARE bCommit, bStarted;
+
+	aSkip := DoProc("SkipNotWaiting");
+	aSkipped := {};
+	nSet := 0;
+	sFmt := "";
+	bStarted := .F.;
+	bCommit := .F.;
+
+	:TRY;
+		bStarted := BeginLimsTransaction();
+
+		:FOR nIndex := 1 :TO ALen(aPlanned);
+			aRow := aPlanned[nIndex];
+
+			/* A row is checked when it is reached, in the pass that writes. One
+			   that is not a sample and a day is raised and not skipped: leaving
+			   it out would save part of a plan, and the rollback takes back the
+			   rows written before it;
+			:IF .NOT. DoProc("IsPlannedRow", {aRow});
+				sText := sFmt:Format("Row {0} is not a sample and a day", {nIndex});
+				RaiseError(sText);
+			:ENDIF;
+
+			:IF DoProc("SaveDueDate", {aRow[1], aRow[2]});
+				nSet += 1;
+			:ELSE;
+				AAdd(aSkipped, {aRow[1], aSkip[1], aSkip[2]});
+			:ENDIF;
+		:NEXT;
+
+		/* Reached only when every write above went through;
+		bCommit := .T.;
+	:FINALLY;
+		/* Always runs. After an error bCommit is still .F., so this rolls back;
+		:IF bStarted;
+			EndLimsTransaction(, bCommit);
+		:ENDIF;
+	:ENDTRY;
+
+	:RETURN {nSet, ALen(aSkipped), aSkipped};
+:ENDPROC;
+
+/*
+ * Procedure: IsPlannedRow
+ * Description: Tells whether a value is a row this script can save.
+ * Parameters:
+ *   vRow - the value to test
+ * Returns: .T. for an array that starts with a sample id and a day, neither empty. .F. for anything else
+;
+:PROCEDURE IsPlannedRow;
+	:PARAMETERS vRow;
+
+	/* The types are tested before the values, so nothing is indexed or compared
+	   that cannot be. An empty day is refused: it must never be written as a due date;
+	:IF LimsTypeEx(vRow) != "ARRAY" .OR. ALen(vRow) < 2;
+		:RETURN .F.;
+	:ENDIF;
+
+	:IF LimsTypeEx(vRow[1]) != "STRING" .OR. LimsTypeEx(vRow[2]) != "DATE";
+		:RETURN .F.;
+	:ENDIF;
+
+	:RETURN .NOT. Empty(vRow[1]) .AND. .NOT. Empty(vRow[2]);
+:ENDPROC;
+
+/*
+ * Procedure: SaveDueDate
+ * Description: Writes the due date of one sample, if the sample still has none.
+ * Parameters:
+ *   sSampleId - the sample
+ *   dDue      - its due date
+ * Returns: .T. when the row was changed, .F. when the sample got a due date or was removed after it was read. Raises on failure
+;
+/*@private;
+:PROCEDURE SaveDueDate;
+	:PARAMETERS sSampleId, dDue;
+
+	RunSQL("
+	    UPDATE DEMO_SAMPLES SET
+	        DUE_ON = ?
+	    WHERE SAMPLE_ID = ?
+	      AND DUE_ON IS NULL
+	",, {dDue, sSampleId});
+
+	:RETURN LimsRecordsAffected() == 1;
+:ENDPROC;

@@ -4,12 +4,13 @@
 // needs arrives in the prompt, and what it returns is applied after you agree.
 import { createStore } from "solid-js/store";
 import { backend } from "../backend";
-import { ask, agent, currentModel, start } from "../agent/store";
+import { ask, agent, currentModel, interrupt, start } from "../agent/store";
 import { openReview, type Check } from "../editor/Review";
 import { monaco } from "../editor/monaco";
 import { session } from "../lsp/session";
 import { describeElement } from "../panels/Reference";
-import { applyText, documents, notify, setState, state } from "../state";
+import { applyText, documents, keepTab, notify, setState, state } from "../state";
+import { workPrompt } from "../projectDocs";
 import { joinPath, relativeTo } from "../../shared/paths";
 import { addQuestions, answerQuestion, applySuggestion, formatSurvey, looksCut, nounsOf, openQuestions, overLimit, parseContext, parseQuestions, parseSpec, parseSuggestions, planHash, printSpec, readBlocks, refinePrompt, specHash, specPrompt, unaccounted, type ContextRequest, type Suggestion, type Survey } from "./assist";
 import type { BuildRun } from "./build";
@@ -134,13 +135,36 @@ function warn(path: string, text: string) {
 
 const CUT = "This prompt looks cut off: the model reported fewer tokens than it was sent, so it may have missed part of it. With Ollama, set a larger context (docs/INSTALL.md).";
 
+/** Plans whose refine, spec or test script was told to stop. A build has its own, in `buildRun.ts`. */
+const stopped = new Set<string>();
+class Stopped extends Error {}
+
+/**
+ * Stops a refine, a spec or a test script. The turn in flight is interrupted,
+ * whether or not it has begun to answer (the agent store follows a turn from
+ * the moment it is asked), and its reply is dropped. Nothing more is asked, and
+ * what the turn cost stays in the totals.
+ */
+export function stopAssist(path: string) {
+	const running = assistOf(path).running;
+	if (!running || running === "build") return;
+	stopped.add(path);
+	update(path, { progress: "Stopping…" });
+	void interrupt();
+}
+
 export async function askAgent(path: string, stage: string, text: string, skills: string[], toolLimit?: number): Promise<string | null> {
+	if (stopped.has(path)) throw new Stopped();
 	update(path, { progress: `${stage}: waiting for ${currentModel() || "the agent"}…` });
 	const reply = await ask(text, { title: `${stage}: ${rel(path)}`, skills, show: `${stage}: ${rel(path)}`, toolLimit });
-	if (!reply) return null;
+	if (!reply) {
+		if (stopped.has(path)) throw new Stopped();
+		return null;
+	}
 	const soFar = assistOf(path);
 	const input = reply.tokens?.input ?? 0;
 	update(path, { tokens: soFar.tokens + input + (reply.tokens?.output ?? 0), cost: soFar.cost + (reply.cost ?? 0) });
+	if (stopped.has(path)) throw new Stopped();
 	if (reply.outcome !== "succeeded") {
 		notify(`The agent did not finish: ${reply.error ?? reply.outcome}`, "error");
 		return null;
@@ -152,11 +176,27 @@ export async function askAgent(path: string, stage: string, text: string, skills
 export const begin = (path: string, running: AssistState["running"], work: () => Promise<void>) => {
 	if (assistOf(path).running) return Promise.resolve();
 	if (!state.workspace) return Promise.resolve(notify("Open a folder first."));
+	stopped.delete(path);
+	// What the run finds is written into this document: its tab is not one to give up to the next file clicked.
+	keepTab(path);
 	update(path, { running, warnings: [], progress: "" });
 	return work()
-		.catch((e: any) => notify(`${e?.message ?? e}`, "error"))
-		.finally(() => update(path, { running: "", progress: "" }));
+		.catch((e: any) => (e instanceof Stopped ? notify("Stopped. Nothing was changed.") : notify(`${e?.message ?? e}`, "error")))
+		.finally(() => {
+			stopped.delete(path);
+			update(path, { running: "", progress: "" });
+		});
 };
+
+/** The ticket a plan is for, with what bears on it, for the prompt: the agent is about to write the spec, so the specs are left out. */
+async function workOf(path: string, plan: Plan): Promise<string | undefined> {
+	const ticket = typeof plan.ticket === "string" ? plan.ticket.trim() : "";
+	if (!ticket) return undefined;
+	const work = await workPrompt(ticket, { specs: false });
+	if (!work) warn(path, `This plan is for ${ticket}, which is not among the project's tickets, so the agent is not told what the ticket asks.`);
+	return work?.text;
+}
+const together = (...parts: (string | undefined | null)[]) => parts.filter(Boolean).join("\n\n") || undefined;
 
 /** Stage 2: the agent finds what the chart leaves undecided. */
 export function refine(path: string) {
@@ -166,10 +206,11 @@ export function refine(path: string) {
 		update(path, { progress: "Surveying the workspace…" });
 		const found = await survey(plan);
 		const skills = await planningSkills(path);
+		const work = await workOf(path, plan);
 		let extra: string | undefined;
 		let blocks: Record<string, string> = {};
 		for (let round = 0; round < 4; round++) {
-			const text = await askAgent(path, "Refine the plan", refinePrompt(plan, found, extra), skills);
+			const text = await askAgent(path, "Refine the plan", refinePrompt(plan, found, together(work, extra)), skills);
 			if (text === null) return;
 			blocks = readBlocks(text);
 			const wanted = round < 3 ? parseContext(blocks.CONTEXT) : [];
@@ -212,12 +253,13 @@ export function writeSpec(path: string) {
 		);
 		// With code already built, this revises the spec, and only what changed needs saying.
 		const revision = revisionText(plan, original ? original.split("\n## Units")[0]!.trim() : null);
-		let text = await askAgent(path, "Write the spec", specPrompt(plan, found, limits, revision), skills);
+		const work = await workOf(path, plan);
+		let text = await askAgent(path, "Write the spec", specPrompt(plan, found, limits, together(work, revision)), skills);
 		if (text === null) return;
 		let parsed = parseSpec(text);
 		const lacking = () => [!parsed.spec && "SPEC", !revision && !parsed.units.length && "UNITS", !revision && !parsed.map.length && "MAP"].filter(Boolean);
 		if (lacking().length) {
-			text = await askAgent(path, "Write the spec", specPrompt(plan, found, limits, [revision, `Your last reply lacked these blocks, or they did not parse as JSON: ${lacking().join(", ")}. Reply again with every block.`].filter(Boolean).join("\n\n")), skills);
+			text = await askAgent(path, "Write the spec", specPrompt(plan, found, limits, [work, revision, `Your last reply lacked these blocks, or they did not parse as JSON: ${lacking().join(", ")}. Reply again with every block.`].filter(Boolean).join("\n\n")), skills);
 			if (text === null) return;
 			parsed = parseSpec(text);
 		}

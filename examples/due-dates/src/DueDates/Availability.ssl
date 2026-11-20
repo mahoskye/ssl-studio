@@ -1,0 +1,133 @@
+/********************************************************************************
+Description.. : Instrument availability for due dates: which days an outage takes away.
+Parameters... : -
+Returns...... : -
+Author....... :
+Date......... : 2026-11-17
+********************************************************************************
+_______________________________________________________________________________
+Modification. : Instrument ids match trimmed and in any case, an empty date is
+                handled on purpose, a walk stops at the day limit, and the limit
+                is read as a procedure of the include.
+Author....... :
+Date......... : 2026-11-18
+_______________________________________________________________________________
+********************************************************************************/;
+
+:INCLUDE DueDates.DueDateConstants;
+
+/*
+ * Procedure: IsAvailable
+ * Description: Tells whether an instrument can be used on a date.
+ * Parameters:
+ *   sInstrumentId - the instrument, or empty when the work needs none
+ *   dDate         - the date to test
+ *   aOutages      - the outages, each row {sInstrumentId, dFrom, dTo} with dTo included
+ * Returns: .F. when an outage of that instrument covers the date, .T. otherwise
+;
+:PROCEDURE IsAvailable;
+	:PARAMETERS sInstrumentId, dDate, aOutages;
+	:DEFAULT sInstrumentId, "";
+	:DEFAULT aOutages, {};
+
+	:DECLARE aOutage, dFrom, dTo, nIndex, sOutageOf, sWanted;
+
+	/* Ids are typed by people in two tables, so both sides are compared trimmed
+	   and in upper case: "bal-01 " in a row is still BAL-01;
+	sWanted := Upper(AllTrim(sInstrumentId));
+
+	/* Work that needs no instrument is never held up by an outage;
+	:IF Empty(sWanted);
+		:RETURN .T.;
+	:ENDIF;
+
+	:FOR nIndex := 1 :TO ALen(aOutages);
+		aOutage := aOutages[nIndex];
+		sOutageOf := Upper(AllTrim(aOutage[1]));
+		dFrom := aOutage[2];
+		dTo := aOutage[3];
+
+		/* == and not = here: = matches a string on its prefix, so the outages of
+		   instrument HPLC-10 would also be taken for HPLC-1;
+		:IF sOutageOf == sWanted .AND. dDate >= dFrom .AND. dDate <= dTo;
+			:RETURN .F.;
+		:ENDIF;
+	:NEXT;
+
+	:RETURN .T.;
+:ENDPROC;
+
+/*
+ * Procedure: NextAvailableDay
+ * Description: Finds the first day on or after a date when an instrument can be used.
+ * Parameters:
+ *   sInstrumentId - the instrument, or empty when the work needs none
+ *   dDate         - the date to start from
+ *   aOutages      - the outages, each row {sInstrumentId, dFrom, dTo} with dTo included
+ * Returns: dDate when the instrument is available, otherwise the next day it is. An empty date for an empty dDate, or when no day is found within the day limit
+;
+:PROCEDURE NextAvailableDay;
+	:PARAMETERS sInstrumentId, dDate, aOutages;
+	:DEFAULT sInstrumentId, "";
+	:DEFAULT aOutages, {};
+
+	:DECLARE dDay, dLast;
+
+	/* An empty date stays empty when a day is added, so it is never walked;
+	:IF Empty(dDate);
+		:RETURN dDate;
+	:ENDIF;
+
+	dDay := dDate;
+	dLast := dDate + DoProc("MaxWalkDays");
+
+	:WHILE dDay <= dLast;
+		:IF DoProc("IsAvailable", {sInstrumentId, dDay, aOutages});
+			:RETURN dDay;
+		:ENDIF;
+
+		dDay := dDay + 1;
+	:ENDWHILE;
+
+	/* Out for longer than the limit, as an outage with no known end is recorded;
+	:RETURN CToD("");
+:ENDPROC;
+
+/*
+ * Procedure: OutageDays
+ * Description: Counts the days in a span on which an instrument is out.
+ * Parameters:
+ *   sInstrumentId - the instrument, or empty when the work needs none
+ *   dFrom         - the first day of the span
+ *   dTo           - the last day of the span, included
+ *   aOutages      - the outages, each row {sInstrumentId, dFrom, dTo} with dTo included
+ * Returns: the number of days out, each day once. 0 for an empty or reversed span. A span longer than the day limit is counted up to the limit
+;
+:PROCEDURE OutageDays;
+	:PARAMETERS sInstrumentId, dFrom, dTo, aOutages;
+	:DEFAULT sInstrumentId, "";
+	:DEFAULT aOutages, {};
+
+	:DECLARE dDay, dLast, nOut;
+
+	nOut := 0;
+
+	/* An empty date stays empty when a day is added, so it is never walked;
+	:IF Empty(dFrom) .OR. Empty(dTo);
+		:RETURN nOut;
+	:ENDIF;
+
+	dDay := dFrom;
+	dLast := Min(dTo, dFrom + DoProc("MaxWalkDays"));
+
+	/* Day by day, not outage by outage, so overlapping outages count a day once;
+	:WHILE dDay <= dLast;
+		:IF .NOT. DoProc("IsAvailable", {sInstrumentId, dDay, aOutages});
+			nOut += 1;
+		:ENDIF;
+
+		dDay := dDay + 1;
+	:ENDWHILE;
+
+	:RETURN nOut;
+:ENDPROC;

@@ -73,7 +73,7 @@ procedures it holds.
 | Reference | Built-in functions, classes and keywords from the language server's bundled reference: signature, summary, link to the reference site |
 | Problems | Diagnostics for the file or workspace, grouped by rule |
 | Agent | The opencode session for this workspace: chat, the tidy sequence, diffs to review |
-| Health | The current script against the house style: size, code lines, history entries, procedures without doc blocks, diagnostics by severity |
+| Health | The current script against the house style: size, code lines, changes listed in the banner, procedures without doc blocks, diagnostics by severity |
 
 Panels dock left, right or bottom, and can be hidden. The layout is saved per
 workspace.
@@ -87,7 +87,7 @@ program's decisions:
   block, the fixed blank-line rule. New scripts and procedures come from
   these templates; Author is left empty unless the user sets one.
 - **Size (decision 0006):** a meter in the status bar for bytes against
-  50 KB, code lines against about 400, and history entries against three.
+  50 KB, code lines against about 400, and the changes listed in the banner against three.
   It warns as a script nears a limit; it never blocks a save.
 - **Clarity (decision 0002):** the language server's style-guide
   diagnostics, with their tiers chosen in the profile.

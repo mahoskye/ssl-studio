@@ -1,0 +1,179 @@
+/********************************************************************************
+Description.. : Tests for DueDates.DueSoonReport against the database.
+                NEEDS THE ROWS OF schema/database/demo.sql, loaded fresh: no sample has a due
+                date yet. Each test runs inside a transaction that is rolled back,
+                so the rows are left as they were.
+                Run DueDatesTests.DueSoonReportTests.RunTests. It returns the tally.
+Parameters... : -
+Returns...... : -
+Author....... :
+Date......... : 2026-11-18
+********************************************************************************
+_______________________________________________________________________________
+Modification. :
+Author....... :
+Date......... :
+_______________________________________________________________________________
+********************************************************************************/;
+
+/*
+ * Procedure: RunTests
+ * Description: Runs every test of this script, each on its own and rolled back.
+ * Returns: {nPassed, nTotal, aResults}, each result {sLabel, bPassed}
+;
+:PROCEDURE RunTests;
+	:DECLARE aArgs, aTests;
+
+	aTests := {
+		"TestHeading", "TestDueTodayAndDueSoon", "TestDueNextWorkingDay",
+		"TestLineWithoutInstrument", "TestLineWithInstrument", "TestNothingDue",
+		"TestInvalidWindow", "TestSourceNotThere"
+	};
+	aArgs := {"DueDatesTests.DueSoonReportTests", aTests, .T.};
+
+	:RETURN ExecFunction("DueDatesTests.TestSupport.RunAll", aArgs);
+:ENDPROC;
+
+/* region What the report says;
+
+:PROCEDURE TestHeading;
+	/* Success path: {.T., {sHeading, aRows}}. Three days from Friday 20 end on Monday 23;
+	:DECLARE aResult, sExpected;
+
+	aResult := DoProc("Report", {3, DateFromNumbers(2026, 11, 20)});
+	sExpected := "Samples due from 2026-11-20 through 2026-11-23";
+
+	:RETURN {"The heading names the window", sExpected, aResult[2][1]};
+:ENDPROC;
+
+:PROCEDURE TestDueTodayAndDueSoon;
+	/* From Thursday 19: S-1001 is due that day. For the others the next working
+	   day is Friday 20, before their due date, so they are due soon. Left for
+	   S-1004, rush: Friday 20 and Saturday 21. For the routine two: Friday 20, Monday 23;
+	:DECLARE aResult, sExpected;
+
+	aResult := DoProc("Report", {4, DateFromNumbers(2026, 11, 19)});
+	sExpected := "S-1001=DUE_TODAY/0 S-1004=DUE_SOON/2 ";
+	sExpected += "S-1002=DUE_SOON/2 S-1003=DUE_SOON/2";
+
+	:RETURN {"Due today and due soon", sExpected, DoProc("Statuses", {aResult[2][2]})};
+:ENDPROC;
+
+:PROCEDURE TestDueNextWorkingDay;
+	/* From Friday 20: the next working day is Saturday 21 for rush S-1004 and
+	   Monday 23 for the routine two. Each is due on that day, one working day left;
+	:DECLARE aResult, sExpected;
+
+	aResult := DoProc("Report", {3, DateFromNumbers(2026, 11, 20)});
+	sExpected := "S-1004=DUE_NEXT_DAY/1 S-1002=DUE_NEXT_DAY/1 S-1003=DUE_NEXT_DAY/1";
+
+	:RETURN {"Due the next working day", sExpected, DoProc("Statuses", {aResult[2][2]})};
+:ENDPROC;
+
+:PROCEDURE TestLineWithoutInstrument;
+	/* S-1001 needs no instrument, so its line ends with its rule;
+	:DECLARE aResult, sExpected;
+
+	aResult := DoProc("Report", {4, DateFromNumbers(2026, 11, 19)});
+	sExpected := "S-1001 is due today: due 2026-11-19, working days left 0. ";
+	sExpected += "Routine: 3 working days";
+
+	:RETURN {"A line without an instrument", sExpected, aResult[2][2][1][4]};
+:ENDPROC;
+
+:PROCEDURE TestLineWithInstrument;
+	/* From Wednesday 18, S-1002 is the third row. Left: Thursday 19, Friday 20,
+	   Monday 23. BAL-01 is out on 18 and 19: next available on Friday 20, and 2
+	   days out up to the due date;
+	:DECLARE aResult, sExpected;
+
+	aResult := DoProc("Report", {5, DateFromNumbers(2026, 11, 18)});
+	sExpected := "S-1002 is due soon: due 2026-11-23, working days left 3. ";
+	sExpected += "Routine: 3 working days. ";
+	sExpected += "BAL-01: next available 2026-11-20, days out up to the due date 2";
+
+	:RETURN {"A line with an instrument", sExpected, aResult[2][2][3][4]};
+:ENDPROC;
+
+/* endregion;
+
+/* region Nothing to report;
+
+:PROCEDURE TestNothingDue;
+	/* Empty case: nothing is due in the first days of March 2027. Success, no rows;
+	:DECLARE aResult;
+
+	aResult := DoProc("Report", {3, DateFromNumbers(2027, 3, 1)});
+
+	:RETURN {"No sample due, no rows", 0, ALen(aResult[2][2])};
+:ENDPROC;
+
+:PROCEDURE TestInvalidWindow;
+	/* Failure path: {.F., {sCode, sMessage}} for negative days, for more days
+	   than the day limit, and for a day that is not a date;
+	:DECLARE aLong, aNegative, aText, sActual, sExpected, sFmt;
+
+	sFmt := "";
+	aNegative := ExecFunction("DueDates.DueSoonReport", {-1});
+	aLong := ExecFunction("DueDates.DueSoonReport", {731});
+	aText := ExecFunction("DueDates.DueSoonReport", {3, "tomorrow"});
+	sActual := sFmt:Format("{0} {1} {2}", {aNegative[2][1], aLong[2][1], aText[2][1]});
+	sExpected := "INVALID_WINDOW INVALID_WINDOW INVALID_WINDOW";
+
+	:RETURN {"A window that is not one", sExpected, sActual};
+:ENDPROC;
+
+:PROCEDURE TestSourceNotThere;
+	/* Failure path: the report is asked to read a data source that does not exist.
+	   It fails with its own fixed code, and the error text stays in the server log;
+	:DECLARE aArgs, aResult, sActual, sFmt, sOutcome;
+
+	sFmt := "";
+	aArgs := {3, DateFromNumbers(2026, 11, 20), "DueDates.NoSuchSource"};
+	aResult := ExecFunction("DueDates.DueSoonReport", aArgs);
+	sOutcome := IIf(aResult[1], "ok", "failed");
+	sActual := sFmt:Format("{0}, {1}", {sOutcome, aResult[2][1]});
+
+	:RETURN {"A source that cannot be read", "failed, REPORT_NOT_BUILT", sActual};
+:ENDPROC;
+
+/*
+ * Procedure: Report
+ * Description: Sets the due dates of the demo rows, then runs the report.
+ * Parameters:
+ *   nDays - how many days ahead the report looks
+ *   dAsOf - the day the report is for
+ * Returns: what DueSoonReport returned
+;
+:PROCEDURE Report;
+	:PARAMETERS nDays, dAsOf;
+
+	ExecFunction("DueDates.SetSampleDueDates");
+
+	:RETURN ExecFunction("DueDates.DueSoonReport", {nDays, dAsOf});
+:ENDPROC;
+
+/*
+ * Procedure: Statuses
+ * Description: Lists the sample, status and working days left of report rows.
+ * Parameters:
+ *   aRows - rows {sSampleId, sStatus, nDaysLeft, sLine}
+ * Returns: a text such as "S-1001=DUE_TODAY/0 S-1004=DUE_SOON/2", "" for no rows
+;
+:PROCEDURE Statuses;
+	:PARAMETERS aRows;
+
+	:DECLARE aRow, nIndex, sFmt, sText;
+
+	sFmt := "";
+	sText := "";
+
+	:FOR nIndex := 1 :TO ALen(aRows);
+		aRow := aRows[nIndex];
+		sText += sFmt:Format("{0}={1}/{2} ", {AllTrim(aRow[1]), aRow[2], aRow[3]});
+	:NEXT;
+
+	:RETURN AllTrim(sText);
+:ENDPROC;
+
+/* endregion;

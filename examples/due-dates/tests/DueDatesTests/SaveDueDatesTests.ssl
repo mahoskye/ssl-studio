@@ -1,0 +1,148 @@
+/********************************************************************************
+Description.. : Tests for DueDates.SaveDueDates against the database.
+                NEEDS THE ROWS OF schema/database/demo.sql, loaded fresh: no sample has a due
+                date yet. Each test writes inside a transaction that is rolled back,
+                so the rows are left as they were. What a failed batch leaves behind
+                is tested in DueDatesTests.RollbackTests.
+                Run DueDatesTests.SaveDueDatesTests.RunTests. It returns the tally.
+Parameters... : -
+Returns...... : -
+Author....... :
+Date......... : 2026-11-18
+********************************************************************************
+_______________________________________________________________________________
+Modification. :
+Author....... :
+Date......... :
+_______________________________________________________________________________
+********************************************************************************/;
+
+/*
+ * Procedure: RunTests
+ * Description: Runs every test of this script, each on its own and rolled back.
+ * Returns: {nPassed, nTotal, aResults}, each result {sLabel, bPassed}
+;
+:PROCEDURE RunTests;
+	:DECLARE aArgs, aTests;
+
+	aTests := {
+		"TestSavesPlannedDates", "TestSkipsNotWaiting", "TestSkipsRemovedSample",
+		"TestNothingToSave", "TestNotAPlan"
+	};
+	aArgs := {"DueDatesTests.SaveDueDatesTests", aTests, .T.};
+
+	:RETURN ExecFunction("DueDatesTests.TestSupport.RunAll", aArgs);
+:ENDPROC;
+
+/* region Saving;
+
+:PROCEDURE TestSavesPlannedDates;
+	/* Success path: {.T., {nSet, nSkipped, aSkipped}}. Two waiting samples get the
+	   days they were planned for, and nothing is skipped;
+	:DECLARE aPlanned, aResult, aValues, sActual, sFmt;
+
+	sFmt := "";
+	aPlanned := {DoProc("Planned", {"S-1001", 19}), DoProc("Planned", {"S-1002", 23})};
+	aResult := ExecFunction("DueDates.SaveDueDates", {aPlanned});
+	aValues := {aResult[2][1], aResult[2][2], DoProc("Due", {"S-1001"})};
+	AAdd(aValues, DoProc("Due", {"S-1002"}));
+	sActual := sFmt:Format("set {0}, skipped {1}, {2} {3}", aValues);
+
+	:RETURN {"Planned dates are saved", "set 2, skipped 0, 20261119 20261123", sActual};
+:ENDPROC;
+
+:PROCEDURE TestSkipsNotWaiting;
+	/* S-1001 gets a due date after it was planned and before its own is written:
+	   here another call saves Thursday 19 first. The date planned for it, Monday
+	   30, is not written over the one it has. It is skipped as NOT_WAITING, and
+	   S-1002 in the same batch is still saved;
+	:DECLARE aPlanned, aResult, aValues, sActual, sCode, sExpected, sFmt;
+
+	sFmt := "";
+	ExecFunction("DueDates.SaveDueDates", {{DoProc("Planned", {"S-1001", 19})}});
+	aPlanned := {DoProc("Planned", {"S-1001", 30}), DoProc("Planned", {"S-1002", 23})};
+	aResult := ExecFunction("DueDates.SaveDueDates", {aPlanned});
+	sCode := ExecFunction("DueDatesTests.DbTestSupport.SkipCode", {aResult, "S-1001"});
+	aValues := {aResult[2][1], sCode, DoProc("Due", {"S-1001"})};
+	sActual := sFmt:Format("set {0}, S-1001 {1}, still due {2}", aValues);
+	sExpected := "set 1, S-1001 NOT_WAITING, still due 20261119";
+
+	:RETURN {"A sample that got a date is skipped", sExpected, sActual};
+:ENDPROC;
+
+:PROCEDURE TestSkipsRemovedSample;
+	/* A sample removed after it was planned is in no row any more. It is skipped
+	   with the same code, and that is not a failure;
+	:DECLARE aPlanned, aResult, sActual, sCode, sFmt, sOutcome;
+
+	sFmt := "";
+	aPlanned := {DoProc("Planned", {"T-9005", 19})};
+	aResult := ExecFunction("DueDates.SaveDueDates", {aPlanned});
+	sOutcome := IIf(aResult[1], "ok", "failed");
+	sCode := ExecFunction("DueDatesTests.DbTestSupport.SkipCode", {aResult, "T-9005"});
+	sActual := sFmt:Format("{0}, {1}", {sOutcome, sCode});
+
+	:RETURN {"A sample that is gone is skipped", "ok, NOT_WAITING", sActual};
+:ENDPROC;
+
+/* endregion;
+
+/* region Nothing to save;
+
+:PROCEDURE TestNothingToSave;
+	/* Empty case: no planned rows is a success that sets and skips nothing;
+	:DECLARE aResult, aValues, sActual, sFmt, sOutcome;
+
+	sFmt := "";
+	aResult := ExecFunction("DueDates.SaveDueDates", {{}});
+	sOutcome := IIf(aResult[1], "ok", "failed");
+	aValues := {sOutcome, aResult[2][1], aResult[2][2]};
+	sActual := sFmt:Format("{0}, set {1}, skipped {2}", aValues);
+
+	:RETURN {"No rows, nothing saved", "ok, set 0, skipped 0", sActual};
+:ENDPROC;
+
+:PROCEDURE TestNotAPlan;
+	/* Failure path: {.F., {sCode, sMessage}} for a plan that is not a list of rows;
+	:DECLARE aResult, sActual, sFmt, sOutcome;
+
+	sFmt := "";
+	aResult := ExecFunction("DueDates.SaveDueDates", {"S-1001"});
+	sOutcome := IIf(aResult[1], "ok", "failed");
+	sActual := sFmt:Format("{0}, {1}", {sOutcome, aResult[2][1]});
+
+	:RETURN {"A plan that is not rows", "failed, DUE_DATES_NOT_SAVED", sActual};
+:ENDPROC;
+
+/*
+ * Procedure: Planned
+ * Description: Builds a row for SaveDueDates, due on a day of November 2026.
+ * Parameters:
+ *   sSampleId - the sample
+ *   nDay      - the day of November 2026
+ * Returns: {sSampleId, dDue}
+;
+:PROCEDURE Planned;
+	:PARAMETERS sSampleId, nDay;
+
+	:RETURN ExecFunction("DueDatesTests.DbTestSupport.PlannedRow", {sSampleId, nDay});
+:ENDPROC;
+
+/*
+ * Procedure: Due
+ * Description: Reads the due date of a sample as text.
+ * Parameters:
+ *   sSampleId - the sample, which must exist
+ * Returns: its DUE_ON as yyyyMMdd, "" when it has none
+;
+:PROCEDURE Due;
+	:PARAMETERS sSampleId;
+
+	:DECLARE dDue;
+
+	dDue := ExecFunction("DueDatesTests.DbTestSupport.DueOn", {sSampleId});
+
+	:RETURN AllTrim(DToS(dDue));
+:ENDPROC;
+
+/* endregion;

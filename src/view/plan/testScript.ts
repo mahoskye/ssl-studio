@@ -7,6 +7,7 @@ import { fenced } from "../agent/tidy";
 import { openReview, type Check } from "../editor/Review";
 import { monaco } from "../editor/monaco";
 import { session } from "../lsp/session";
+import { catalogsKeptFor } from "../projectDocs";
 import { applyText, notify, openFile, setState, state } from "../state";
 import { baseName, joinPath } from "../../shared/paths";
 import { TEMPLATES } from "../../shared/houseStyle";
@@ -113,6 +114,7 @@ export function writeTests(path: string) {
 				if (existing === null) {
 					await backend.write(full, final);
 					setState("treeVersion", (v) => v + 1);
+					void catalogsKeptFor([full]);
 					await openFile(full);
 				} else {
 					await openFile(full);

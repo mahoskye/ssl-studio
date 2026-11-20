@@ -1,4 +1,6 @@
-// App commands: the command palette lists them, the keyboard runs them.
+// App commands: the command list shows them, the keyboard runs them.
+// A command's keys are in DEFAULT_KEYS and nowhere else; the user's own are
+// in the `keys` setting.
 import { ask } from "./dialogs";
 import { activeEditor } from "./editor/EditorGroup";
 import { backend, inApp } from "./backend";
@@ -7,61 +9,256 @@ import { session } from "./lsp/session";
 import { symbols } from "./panels/Objects";
 import { symbolPath } from "./editor/regions";
 import { openStyleProfile } from "./StyleProfile";
-import { movePanel, showPanel } from "./panels/registry";
+import { movePanel, panelOn, showPanel, toggleSide } from "./panels/registry";
+import { explorerDelete, explorerNewFile, explorerRename } from "./panels/Explorer";
 import { insertTemplate } from "./panels/Palette";
 import { TEMPLATES } from "../shared/houseStyle";
 import { askAbout } from "./agent/Agent";
 import { startTidy } from "./agent/tidy";
-import { joinPath } from "../shared/paths";
+import { baseName, joinPath, relativeTo } from "../shared/paths";
+import { defaultLayout, type Settings } from "../shared/protocol";
+import { menuForLetter } from "../shared/menuBar";
+import { installRecentTabs, stepRecent } from "./recentTabs";
+import { goAlong } from "./navigation";
 import { isPlanPath, newPlan, printPlan } from "./plan/model";
-import { activePath, closeTab, notify, openFile, openFolder, revert, save, saveAll, setState, split, state } from "./state";
+import { isMarkdown, isTable, newDoc, setUpProject, undoSetUp } from "./project";
+import { importTickets, newKnowledge, newRegistry, newSchema, newSpec, newState, newTicket, startFolderCatalogs, ticketAtHand, updateCatalogs, updateManifest } from "./projectDocs";
+import { displayKey, effectiveKeys, isModifierKey, keyNames, keysOf } from "./keys";
+import { modalOpen, setFocusFallback } from "./modal";
+import { noteUsed } from "./quickRank";
+import { stepScale, UI_SCALE } from "./uiScale";
+import {
+	activePath,
+	closeAllTabs,
+	closeOtherTabs,
+	closeTab,
+	closeTabsToRight,
+	focusEditor,
+	focusSidePanel,
+	keepTab,
+	nextTab,
+	notify,
+	openFile,
+	openFolder,
+	previousTab,
+	reopenClosedTab,
+	revert,
+	sendTabAcross,
+	shiftTab,
+	save,
+	saveAll,
+	saveSetting,
+	setState,
+	split,
+	state,
+	togglePin,
+} from "./state";
 
-export type Command = { id: string; label: string; keys?: string; run: () => void };
+/** `label` is a verb phrase; `detail` is the quieter second line that explains it. */
+export type Command = { id: string; label: string; detail?: string; run: () => void };
 
-const toggle = (key: "left" | "bottom" | "right") => setState("settings", "layout", key, (v) => !v);
+const toggle = (key: "bottom") => setState("settings", "layout", key, (v) => !v);
+/** Shows or hides a side of the window. A side no panel is docked on has nothing to show, and says so. */
+function toggleSideOf(side: "left" | "right") {
+	if (!state.workspace) return;
+	if (!panelOn(side)) return notify(`No panel is docked on the ${side}. Right-click a panel's button to move it there.`);
+	toggleSide(side);
+}
+/**
+ * The layout as a folder first opens with: what was moved goes home, what was resized is its first size. The menu
+ * bar is shown. A side that was showing a panel now docked on the other one shows one of its own (App.tsx).
+ * Showing the bar saves a setting; what comes back from a save leaves the layout on screen alone (state.ts).
+ */
+function resetLayout() {
+	setState("settings", "layout", { ...defaultLayout(), dock: {} });
+	if (state.settings.menuBar === false) void switchSetting("menuBar", true, (settings) => settings.menuBar !== false);
+}
+const showBottom = (view: "problems" | "output") => (setState("bottomView", view), setState("settings", "layout", "bottom", true));
+/** Puts text on the clipboard: by the app's own way where there is one, by the web view's otherwise. */
+export async function copyText(text: string, said: string) {
+	const copied = (await backend.clipboard(text).catch(() => false)) || (await navigator.clipboard?.writeText(text).then(() => true, () => false));
+	// What could not be copied is shown, so that it can be copied by hand.
+	notify(copied ? said : `Could not reach the clipboard. It was: ${text.length > 300 ? `${text.slice(0, 300)}…` : text}`, copied ? "info" : "error");
+}
+
+/** A file's path, whole or from the project's folder, with the slashes the system writes; or its name alone. */
+export async function copyPath(kind: "whole" | "relative" | "name", path = activePath()) {
+	if (!path) return notify("No file is open to copy the path of.");
+	if (kind === "name") return copyText(baseName(path), `Copied ${baseName(path)}`);
+	const root = state.workspace?.root;
+	// The path from the folder is kept with forward slashes; where the folder's own are the other kind, so are these.
+	const backward = Boolean(root && root.includes("\\") && !root.includes("/"));
+	const text = kind === "relative" && root ? (backward ? relativeTo(root, path).replace(/\//g, "\\") : relativeTo(root, path)) : path;
+	await copyText(text, `Copied ${text}`);
+}
+
+/** Follows the link the text cursor is in. Only where the text is what is showing: not from behind a page, a table or a chart. */
+function openLinkAtCursor() {
+	const editor = activeEditor();
+	if (editor?.getDomNode()?.offsetParent) void editor.getAction("editor.action.openLink")?.run();
+}
+
+/**
+ * Switches a setting that is on or off. Where the project's own settings hold it, yours would not be seen while
+ * the project's is in the way: it is switched there. Says whether it is now as asked.
+ */
+async function switchSetting(key: "wordWrap" | "menuBar" | "livePreview", to: boolean, now: (settings: Settings) => boolean): Promise<boolean> {
+	// Asked of what each save left, not of what is on screen: the screen may by then show a later save's settings,
+	// and a save that was refused has left nothing to ask.
+	let left = await saveSetting({ [key]: to });
+	if (left && now(left) !== to && state.workspace) left = await saveSetting({ [key]: to }, "workspace");
+	return Boolean(left) && now(left!) === to;
+}
+
+/** What this is, and what it found to work with: for a report of a fault, and to know which version is running. */
+function about() {
+	const tool = (name: string, status?: { ok: boolean; version?: string }) => `${name} ${status?.ok ? (status.version ?? "found") : "not found"}`;
+	const text = [`SSL Studio ${state.info?.app ?? ""}`.trim(), tool("language server", state.info?.lsp), tool("opencode", state.info?.opencode)].join(" · ");
+	notify(text, "info", { label: "Copy", run: () => void copyText(text, "Copied what this is.") });
+}
+
+/** The `uiScale` setting, one step up or down, or back to 1. */
+const zoom = (by: 1 | -1 | 0) => void saveSetting({ uiScale: by ? stepScale(state.settings.uiScale, by) : UI_SCALE.normal });
 
 export const commands: Command[] = [
-	{ id: "open-folder", label: "Open folder…", keys: "Ctrl+O", run: () => void openFolderCommand() },
-	{ id: "quick-open", label: "Go to file…", keys: "Ctrl+P", run: () => setState("quickPick", "files") },
-	{ id: "symbols", label: "Go to symbol in workspace…", keys: "Ctrl+T", run: () => setState("quickPick", "symbols") },
-	{ id: "save", label: "Save", keys: "Ctrl+S", run: () => void save() },
-	{ id: "save-all", label: "Save all", keys: "Ctrl+Alt+S", run: () => void saveAll() },
-	{ id: "revert", label: "Revert file to disk", run: () => activePath() && void revert(activePath()!) },
-	{ id: "close", label: "Close editor", keys: "Ctrl+W", run: () => activePath() && void closeTab(activePath()!) },
-	{ id: "split", label: "Split editor", keys: "Ctrl+\\", run: split },
-	{ id: "blocks", label: "Toggle blocks view (a plan: its chart)", keys: "Ctrl+Shift+B", run: toggleVisual },
+	// Files and tabs
+	{ id: "open-folder", label: "Open folder…", run: () => void openFolderCommand() },
+	{ id: "quick-open", label: "Go to file…", run: () => setState("quickPick", "files") },
+	{ id: "symbols", label: "Go to symbol…", detail: "Anywhere in the workspace", run: () => setState("quickPick", "symbols") },
+	{ id: "command-palette", label: "Show all commands", run: () => setState("quickPick", "commands") },
+	{ id: "new-file", label: "New file or folder…", detail: "In the Explorer's folder, or beside the open file", run: () => void explorerNewFile() },
+	{ id: "rename-file", label: "Rename…", detail: "The Explorer's file, or the open one", run: () => void explorerRename() },
+	{ id: "trash-file", label: "Move to trash…", detail: "The Explorer's file, or the open one", run: () => void explorerDelete() },
+	{ id: "save", label: "Save", run: () => void save() },
+	{ id: "save-all", label: "Save all", run: () => void saveAll() },
+	{ id: "revert", label: "Revert file", detail: "Back to what is on disk", run: () => activePath() && void revert(activePath()!) },
+	{ id: "close", label: "Close tab", run: () => activePath() && void closeTab(activePath()!) },
+	{ id: "close-others", label: "Close other tabs", detail: "The pinned ones stay", run: () => void closeOtherTabs() },
+	{ id: "close-right", label: "Close tabs to the right", run: () => void closeTabsToRight() },
+	{ id: "close-all", label: "Close all tabs", detail: "The pinned ones stay", run: () => void closeAllTabs() },
+	{ id: "keep-tab", label: "Keep tab open", detail: "A tab opened for a look by one click, in italics: it stays when the next file is clicked", run: () => activePath() && keepTab(activePath()!, state.activeGroup) },
+	{ id: "pin-tab", label: "Pin or unpin tab", detail: "A pinned tab stays first, and is not closed with the others", run: () => togglePin() },
+	{ id: "reopen-tab", label: "Reopen closed tab", run: () => void reopenClosedTab() },
+	{ id: "recent-tab", label: "Go to the tab used before", detail: "And with Ctrl held, on through the ones before that", run: () => stepRecent(1) },
+	{ id: "recent-tab-back", label: "Go back through the tabs used", run: () => stepRecent(-1) },
+	{ id: "go-back", label: "Go back", detail: "To where the cursor was before: another file, or far off in this one", run: () => void goAlong(-1) },
+	{ id: "go-forward", label: "Go forward", detail: "Again to where “Go back” came from", run: () => void goAlong(1) },
+	{ id: "next-tab", label: "Next tab", run: nextTab },
+	{ id: "previous-tab", label: "Previous tab", run: previousTab },
+	{ id: "move-tab-left", label: "Move tab left", detail: "One place along its row; the pinned stay first", run: () => shiftTab(-1) },
+	{ id: "move-tab-right", label: "Move tab right", run: () => shiftTab(1) },
+	{ id: "move-tab-across", label: "Move tab to the other group", detail: "Out of this group and into the one beside it, which is made if there is none", run: sendTabAcross },
+	{ id: "split", label: "Split editor", run: split },
+	{ id: "copy-path", label: "Copy path", detail: "The open file's whole path", run: () => void copyPath("whole") },
+	{ id: "copy-relative-path", label: "Copy path in the project", detail: "The open file's path from the project's folder", run: () => void copyPath("relative") },
+	{ id: "copy-file-name", label: "Copy file name", detail: "The open file's name, without its folder", run: () => void copyPath("name") },
+	{ id: "word-wrap", label: "Toggle word wrap", detail: "Long lines wrapped at the editor's edge, or not", run: () => void switchSetting("wordWrap", !state.settings.wordWrap, (settings) => Boolean(settings.wordWrap)) },
+	{ id: "live-preview", label: "Toggle Markdown live preview", detail: "A document drawn as it is written, or as its plain text", run: () => void switchSetting("livePreview", state.settings.livePreview === false, (settings) => settings.livePreview !== false) },
+	{ id: "open-link", label: "Open the link at the cursor", detail: "In a document's text: the file, heading or page its link leads to", run: openLinkAtCursor },
+	{ id: "focus-editor", label: "Focus editor", run: focusEditor },
+	{ id: "focus-side-panel", label: "Focus side panel", run: focusSidePanel },
+	// The code
+	{ id: "blocks", label: "Toggle blocks view", detail: "A plan shows its chart; Markdown shows rendered", run: toggleVisual },
+	{ id: "format", label: "Format document", run: () => void activeEditor()?.getAction("editor.action.formatDocument")?.run() },
+	{ id: "copy-designer", label: "Copy for Designer", detail: "Selection, procedure or file, formatted", run: () => void copyForDesigner() },
+	{ id: "wrap-region", label: "Wrap in region…", detail: "The selected lines", run: () => void wrapInRegion() },
+	{ id: "insert-banner", label: "Insert file banner", run: () => insertTemplate(TEMPLATES.find((t) => t.id === "banner")!) },
+	{ id: "insert-procedure", label: "Insert procedure", run: () => insertTemplate(TEMPLATES.find((t) => t.id === "procedure")!) },
+	{ id: "editor-commands", label: "Show editor commands…", detail: "The text editor's own list", run: () => activeEditor()?.trigger("app", "editor.action.quickCommand", null) },
+	// The project
+	{ id: "setup-project", label: "Set up project", detail: "Settings, README, AGENTS", run: () => void setUpProject() },
+	{ id: "undo-setup-project", label: "Undo set up project", detail: "Removes what it created and nobody has changed since", run: () => void undoSetUp() },
+	{ id: "project-settings", label: "Open project settings", detail: "project.toml", run: () => void openProjectSettings() },
+	{ id: "new-doc", label: "New document…", run: () => void newDoc() },
 	{ id: "new-plan", label: "New plan…", run: () => void newPlanCommand() },
-	{ id: "copy-designer", label: "Copy for Designer (selection, procedure or file, formatted)", keys: "Ctrl+Shift+C", run: () => void copyForDesigner() },
-	{ id: "wrap-region", label: "Wrap the selected lines in a region…", run: () => void wrapInRegion() },
-	{ id: "graph", label: "Show the call graph", keys: "Ctrl+Shift+G", run: () => setState("centerView", state.centerView === "graph" ? "editors" : "graph") },
-	{ id: "format", label: "Format document", keys: "Ctrl+Shift+I", run: () => void activeEditor()?.getAction("editor.action.formatDocument")?.run() },
-	{ id: "search", label: "Search the workspace", keys: "Ctrl+Shift+F", run: () => showPanel("search") },
-	{ id: "explorer", label: "Show Explorer", keys: "Ctrl+Shift+E", run: () => showPanel("explorer") },
+	{ id: "new-ticket", label: "New ticket…", detail: "The work as it was asked for", run: () => void newTicket() },
+	{ id: "import-tickets", label: "Import tickets…", detail: "From a ticket system's export: a CSV table or its API's JSON", run: () => void importTickets() },
+	{ id: "new-spec", label: "New spec…", detail: "What is to be built, for a ticket", run: () => void newSpec() },
+	{ id: "new-decision", label: "New decision…", detail: "In the knowledge base; about the selected code, when there is some", run: () => void newKnowledge("decisions") },
+	{ id: "new-question", label: "New question…", detail: "In the knowledge base; about the selected code, when there is some", run: () => void newKnowledge("questions") },
+	{ id: "new-snippet", label: "New snippet…", detail: "SQL or SSL kept for use", run: () => void newKnowledge("snippets") },
+	{ id: "new-prompt", label: "New prompt…", detail: "A question or an instruction for the agent, kept to be put to it again", run: () => void newKnowledge("prompts") },
+	{ id: "new-reference", label: "New reference note…", detail: "How something works", run: () => void newKnowledge("reference") },
+	{ id: "new-registry", label: "New registry…", detail: "Settings, files, database objects", run: () => void newRegistry() },
+	{ id: "new-table", label: "New table…", detail: "A table the project reads or writes, described in the schema folder", run: () => void newSchema("database") },
+	{ id: "new-message", label: "New interface message…", detail: "What is exchanged with an instrument or another system, described in the schema folder", run: () => void newSchema("interfaces") },
+	{ id: "new-layout", label: "New file layout…", detail: "A file the project reads or writes, described in the schema folder", run: () => void newSchema("files") },
+	{ id: "project-state", label: "Project state…", detail: "Where the project stands, in plain words", run: () => void newState() },
+	{ id: "update-catalogs", label: "Update catalogs", detail: "Write each INDEX.md's list afresh", run: () => void updateCatalogs() },
+	{ id: "start-catalogs", label: "Start folder catalogs", detail: "An INDEX.md for the docs, code and tests folders, where one has none", run: () => void startFolderCatalogs() },
+	{ id: "update-manifest", label: "Update file manifest", detail: "Sizes and checksums of the project's files", run: () => void updateManifest() },
+	// Panels: one form, "Show" and the panel's name
+	{ id: "explorer", label: "Show Explorer", run: () => showPanel("explorer") },
+	{ id: "docs", label: "Show Docs", run: () => showPanel("docs") },
 	{ id: "objects", label: "Show Objects", run: () => showPanel("objects") },
-	{ id: "history", label: "Show local history", run: () => showPanel("history") },
-	{ id: "toggle-sidebar", label: "Toggle side bar", keys: "Ctrl+B", run: () => toggle("left") },
-	{ id: "toggle-panel", label: "Toggle bottom panel", keys: "Ctrl+J", run: () => toggle("bottom") },
-	{ id: "problems", label: "Show problems", keys: "Ctrl+Shift+M", run: () => (setState("bottomView", "problems"), setState("settings", "layout", "bottom", true)) },
-	{ id: "output", label: "Show output", run: () => (setState("bottomView", "output"), setState("settings", "layout", "bottom", true)) },
-	{ id: "style-profile", label: "Style profile…", run: () => openStyleProfile() },
-	{ id: "palette", label: "Show the template palette", run: () => showPanel("palette") },
-	{ id: "reference", label: "Show the SSL reference", run: () => showPanel("reference") },
-	{ id: "health", label: "Show script health", run: () => showPanel("health") },
-	{ id: "insert-banner", label: "Insert the file banner", run: () => insertTemplate(TEMPLATES.find((t) => t.id === "banner")!) },
-	{ id: "insert-procedure", label: "Insert a procedure", run: () => insertTemplate(TEMPLATES.find((t) => t.id === "procedure")!) },
-	{ id: "agent", label: "Show the agent", run: () => showPanel("agent") },
-	{ id: "agent-ask", label: "Ask the agent about the selection…", keys: "Ctrl+Shift+A", run: () => void askCommand() },
-	{ id: "tidy", label: "Tidy this file with the agent", run: () => (startTidy(), showPanel("agent")) },
-	{ id: "move-panel", label: "Move the open left panel to the right", run: () => state.settings.layout.left && movePanel(state.leftView) },
-	{ id: "move-panel-back", label: "Move the open right panel to the left", run: () => state.settings.layout.right && movePanel(state.rightView) },
-	{ id: "lsp-restart", label: "Restart the language server", run: () => void backend.lspRestart() },
-	{ id: "settings", label: "Settings…", keys: "Ctrl+,", run: () => openSettings() },
-	{ id: "editor-commands", label: "Editor commands…", keys: "F1", run: () => activeEditor()?.trigger("app", "editor.action.quickCommand", null) },
+	{ id: "palette", label: "Show Palette", detail: "Templates to insert", run: () => showPanel("palette") },
+	{ id: "reference", label: "Show Reference", detail: "Built-in functions, classes and keywords", run: () => showPanel("reference") },
+	{ id: "search", label: "Show Search", run: () => showPanel("search") },
+	{ id: "replace-in-files", label: "Replace in files…", detail: "In Search: what would change is shown first, and nothing is written until it is confirmed", run: () => void import("./panels/Search").then((search) => search.showReplace()) },
+	{ id: "git", label: "Show Source control", detail: "What has changed since the last commit, and the next commit", run: () => showPanel("git") },
+	{ id: "history", label: "Show Local history", run: () => showPanel("history") },
+	{ id: "health", label: "Show Health", detail: "The script against the house style", run: () => showPanel("health") },
+	{ id: "agent", label: "Show Agent", run: () => showPanel("agent") },
+	{ id: "problems", label: "Show Problems", run: () => showBottom("problems") },
+	{ id: "output", label: "Show Output", run: () => showBottom("output") },
+	{ id: "graph", label: "Show Call graph", detail: "Again to go back to the editors", run: () => setState("centerView", state.centerView === "graph" ? "editors" : "graph") },
+	{ id: "toggle-sidebar", label: "Toggle side bar", run: () => toggleSideOf("left") },
+	{ id: "toggle-panel", label: "Toggle bottom panel", run: () => toggle("bottom") },
+	{ id: "toggle-right-panel", label: "Toggle right panel", detail: "The panel docked on the right: the Agent, unless another was moved there", run: () => toggleSideOf("right") },
+	{ id: "reset-layout", label: "Reset the layout", detail: "Every panel back on its own side and at its first size", run: resetLayout },
+	{ id: "menu-bar", label: "Focus the menu bar", detail: "Then the arrow keys. Alt and a menu's first letter opens that menu", run: () => void (openMenu() || notify(MENU_HIDDEN)) },
+	{ id: "toggle-menu-bar", label: "Toggle menu bar", detail: "File, Edit, Selection, View, Go and Help across the top of the window", run: () => void toggleMenuBar() },
+	{ id: "move-panel", label: "Move left panel to the right", detail: "The one that is open", run: () => state.settings.layout.left && movePanel(state.leftView) },
+	{ id: "move-panel-back", label: "Move right panel to the left", detail: "The one that is open", run: () => state.settings.layout.right && movePanel(state.rightView) },
+	// The agent
+	{ id: "agent-ask", label: "Ask the agent…", detail: "About the selection", run: () => void askCommand() },
+	{ id: "tidy", label: "Tidy file with the agent", run: () => (startTidy(), showPanel("agent")) },
+	// The IDE
+	{ id: "style-profile", label: "Edit style profile…", detail: "How the language server formats and checks", run: () => openStyleProfile() },
+	{ id: "lsp-restart", label: "Restart language server", run: () => void backend.lspRestart() },
+	{ id: "zoom-in", label: "Zoom in", detail: "A larger interface", run: () => zoom(1) },
+	{ id: "zoom-out", label: "Zoom out", detail: "A smaller interface", run: () => zoom(-1) },
+	{ id: "zoom-reset", label: "Reset zoom", run: () => zoom(0) },
+	{ id: "settings", label: "Open settings…", run: () => openSettings() },
+	{ id: "keyboard-shortcuts", label: "Show keyboard shortcuts…", detail: "Every command's keys, to look up and to change", run: () => openSettings("keyboard") },
+	{ id: "about", label: "About SSL Studio", detail: "Its version, and the language server's and the agent's", run: about },
 ];
 
-let settingsOpener: () => void = () => {};
-export const onOpenSettings = (open: () => void) => (settingsOpener = open);
-const openSettings = () => settingsOpener();
+/** The commands run from the command list this session, newest first (ten are kept). */
+let recent: string[] = [];
+export const recentCommands = () => recent;
+
+/** Runs a command by id. `remember` puts it among the recently used, for the command list. */
+export function runCommand(id: string, options: { remember?: boolean } = {}) {
+	const command = commands.find((c) => c.id === id);
+	if (!command) return;
+	if (options.remember) recent = noteUsed(recent, id);
+	command.run();
+}
+
+let settingsOpener: (query?: string) => void = () => {};
+export const onOpenSettings = (open: (query?: string) => void) => (settingsOpener = open);
+/** Opens Settings; with `query`, showing only what matches it ("keyboard" for the shortcuts). */
+export const openSettings = (query?: string) => settingsOpener(query);
+
+const MENU_HIDDEN = "The menu bar is hidden. “Toggle menu bar” in the command list brings it back.";
+let menuOpener: ((index?: number) => void) | null = null;
+/** The menu bar says how it is given the keyboard; null when it is taken off the window. */
+export const onOpenMenu = (open: ((index?: number) => void) | null) => (menuOpener = open);
+/** Gives the menu bar the keyboard, or opens one of its menus. False when the bar is hidden. */
+export function openMenu(index?: number): boolean {
+	menuOpener?.(index);
+	return menuOpener !== null;
+}
+
+async function toggleMenuBar() {
+	const hide = state.settings.menuBar !== false;
+	const done = await switchSetting("menuBar", !hide, (settings) => settings.menuBar !== false);
+	// What was hidden says how it is brought back: the menu that hid it is gone with it.
+	if (hide && done) notify(MENU_HIDDEN);
+	// And so is whatever in the bar had the keyboard: it goes to the editor.
+	if (hide && done && (!document.activeElement || document.activeElement === document.body)) focusEditor();
+}
 
 /** Puts the selected lines inside a new comment region (a frame in blocks mode). */
 async function wrapInRegion() {
@@ -87,11 +284,18 @@ async function wrapInRegion() {
 	editor.focus();
 }
 
-/** The selection, else the procedure at the cursor, else the file: formatted, then copied. */
+/** Blocks for a script; for a plan its chart, for Markdown the rendered page. */
 function toggleVisual() {
 	const path = activePath();
 	if (isPlanPath(path)) setState("planText", path!, (text) => !text);
+	else if (isMarkdown(path) || isTable(path)) setState("mdText", path!, (text) => !text);
 	else setState("groups", state.activeGroup, "mode", (m) => (m === "blocks" ? "text" : "blocks"));
+}
+
+async function openProjectSettings() {
+	if (!state.project) return notify("Open a folder first.");
+	if (!state.project.configured) return setUpProject();
+	await openFile(state.project.path);
 }
 
 /** A new plan in `design/`, beside the tidy notes, opened as its chart (ADR 0005). */
@@ -105,12 +309,15 @@ async function newPlanCommand() {
 		() => false,
 	);
 	if (!exists) {
-		await backend.write(path, printPlan(newPlan(name)));
+		// A plan started from a ticket, or from a document that is for one, is for that ticket.
+		const ticket = ticketAtHand();
+		await backend.write(path, printPlan(ticket ? { ...newPlan(name), ticket } : newPlan(name)));
 		setState("treeVersion", (v) => v + 1);
 	}
 	await openFile(path);
 }
 
+/** The selection, else the procedure at the cursor, else the file: formatted, then copied. */
 async function copyForDesigner() {
 	const editor = activeEditor();
 	const model = editor?.getModel();
@@ -149,55 +356,90 @@ async function openFolderCommand() {
 	if (path) await openFolder(path);
 }
 
-export const DEFAULT_KEYS: Record<string, string> = {
+/**
+ * Every default shortcut: the one place a command's keys are written down.
+ * A command may have more than one (a key that differs between layouts).
+ */
+const KEYS: Record<string, string> = {
 	"ctrl+o": "open-folder",
 	"ctrl+p": "quick-open",
 	"ctrl+t": "symbols",
-	"ctrl+shift+p": "palette",
+	"ctrl+shift+p": "command-palette",
 	"ctrl+s": "save",
 	"ctrl+alt+s": "save-all",
 	"ctrl+w": "close",
+	"ctrl+shift+t": "reopen-tab",
+	"ctrl+tab": "recent-tab",
+	"ctrl+shift+tab": "recent-tab-back",
+	"alt+arrowleft": "go-back",
+	"alt+arrowright": "go-forward",
+	"alt+z": "word-wrap",
+	"alt+shift+c": "copy-path",
+	"ctrl+pagedown": "next-tab",
+	"ctrl+pageup": "previous-tab",
+	"ctrl+shift+pagedown": "move-tab-right",
+	"ctrl+shift+pageup": "move-tab-left",
 	"ctrl+\\": "split",
+	// Where the backslash needs AltGr, Ctrl with it arrives as Ctrl+Alt.
+	"ctrl+alt+\\": "split",
+	"ctrl+1": "focus-editor",
+	"ctrl+0": "focus-side-panel",
 	"ctrl+shift+f": "search",
 	"ctrl+shift+e": "explorer",
 	"ctrl+b": "toggle-sidebar",
+	"ctrl+alt+b": "toggle-right-panel",
 	"ctrl+j": "toggle-panel",
 	"ctrl+shift+m": "problems",
 	"ctrl+,": "settings",
-	"ctrl+shift+a": "agent-ask",
+	// Not Ctrl+Shift+A: that is the editor's block comment on Linux.
+	"ctrl+shift+h": "agent-ask",
 	"ctrl+shift+b": "blocks",
 	"ctrl+shift+g": "graph",
 	"ctrl+shift+c": "copy-designer",
 	"ctrl+shift+i": "format",
+	"ctrl+=": "zoom-in",
+	// The plus key itself, where it needs no Shift, and the number pad's.
+	"ctrl++": "zoom-in",
+	"ctrl+-": "zoom-out",
+	"ctrl+shift+0": "zoom-reset",
+	f1: "editor-commands",
+	f10: "menu-bar",
 };
+
+/** On a Mac, Alt with an arrow moves the cursor by a word, in the editor and in every box: those keys stay the text's. */
+const NOT_ON_A_MAC = new Set(["alt+arrowleft", "alt+arrowright"]);
+const onMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform ?? "");
+export const DEFAULT_KEYS: Record<string, string> = onMac ? Object.fromEntries(Object.entries(KEYS).filter(([key]) => !NOT_ON_A_MAC.has(key))) : KEYS;
 
 /** The default shortcuts with the user's overrides ("" unbinds). */
 export function keymap(): Record<string, string> {
-	const map: Record<string, string> = { ...DEFAULT_KEYS };
-	for (const [key, id] of Object.entries(state.settings.keys ?? {})) {
-		if (id) map[key.toLowerCase()] = id;
-		else delete map[key.toLowerCase()];
-	}
-	return map;
+	return effectiveKeys(DEFAULT_KEYS, state.settings.keys ?? {});
 }
 
-export const keysFor = (id: string) =>
-	Object.entries(keymap())
-		.filter(([, c]) => c === id)
-		.map(([k]) => k.replace(/\b\w/g, (c) => c.toUpperCase()))
-		.join(", ");
+/** A command's shortcuts as they are shown: "Ctrl+Shift+P", several joined by ", ". */
+export const keysFor = (id: string) => keysOf(id, keymap()).map(displayKey).join(", ");
 
 export function installKeys() {
+	setFocusFallback(focusEditor);
+	installRecentTabs();
 	window.addEventListener(
 		"keydown",
 		(e) => {
-			const key = `${e.ctrlKey || e.metaKey ? "ctrl+" : ""}${e.altKey ? "alt+" : ""}${e.shiftKey ? "shift+" : ""}${e.key.toLowerCase()}`;
-			const id = keymap()[key];
-			if (!id) return;
+			// A modal has the keyboard: only its own keys work, and a shortcut
+			// being recorded in Settings runs nothing.
+			// AltGr is typing a character (a backslash on many layouts), never a shortcut.
+			if (modalOpen() || isModifierKey(e.key) || e.getModifierState("AltGraph")) return;
+			const map = keymap();
+			const id = keyNames(e)
+				.map((name) => map[name])
+				.find(Boolean);
+			// Alt and a menu's first letter opens that menu, where no shortcut has the key. Not with Ctrl or Shift, and not
+			// where Alt and a letter types a character: the key is then that character, not the letter.
+			const menu = !id && e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.key.length === 1 ? menuForLetter(e.key) : -1;
+			if (!id && (menu < 0 || !openMenu(menu))) return;
 			e.preventDefault();
 			e.stopPropagation();
-			if (id === "palette") setState("quickPick", "commands");
-			else commands.find((c) => c.id === id)?.run();
+			if (id) runCommand(id);
 		},
 		true,
 	);

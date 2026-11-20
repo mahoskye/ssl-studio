@@ -12,3 +12,7 @@ selftest.json
 .selftest/
 vendor/
 src/view/public/THIRD-PARTY-NOTICES.md
+# The IDE rewrites this on every layout change.
+examples/*/.ssl-studio/settings.json
+# scripts/demo-sandbox.ts copies the demo project here to run it.
+.sandbox/

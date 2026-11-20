@@ -23,6 +23,7 @@ export async function loadGraph(progress: (done: number, total: number) => void)
 		const toPath = (uri: string) => monaco.Uri.parse(uri).fsPath;
 		const scriptPaths = (result?.nodes ?? []).filter((n: any) => n.kind === "script" && n.location?.uri).map((n: any) => toPath(n.location.uri));
 		const sizes = new Map(Object.entries(await backend.sizes(scriptPaths).catch(() => ({}))));
+		// Calls and class relations alike are the server's (L2, L4): nothing of a file is read here.
 		const graph = fromCallGraph({ nodes: result?.nodes ?? [], edges: result?.edges ?? [] }, toPath, sizes);
 		// While the server is still indexing, calls into unindexed files show as unresolved.
 		return { ...graph, truncated: Boolean(result?.indexing) };
@@ -45,7 +46,10 @@ export async function loadGraph(progress: (done: number, total: number) => void)
 				} else walk(s.children ?? [], region);
 			}
 		};
-		walk(await session.documentSymbols(model).catch(() => []));
+		const symbols = await session.documentSymbols(model).catch(() => []);
+		// The file may have gone while the server was asked, and its model with it.
+		if (model.isDisposed()) return;
+		walk(symbols);
 		scripts.push({ path, bytes: new TextEncoder().encode(model.getValue()).length, procedures });
 	});
 	const truncated = targets.length > MAX_PROCEDURES;

@@ -16,7 +16,7 @@ milestone M0.
 │           └──── typed RPC (Electrobun) ────┘                   │
 └───────────────────────────────┼────────────────────────────────┘
                                 ▼
-                  opencode background service (v2.2.5)
+                  opencode background service (2.2.5 to 2.3)
                   SSL agents + ssl-tidy-* skills (user level)
                   model: a local one, or a chosen provider
 ```
@@ -84,7 +84,25 @@ milestone M0.
 ## Graph mode
 
 - Built from the call graph request, laid out with ELK (`elkjs`), drawn as
-  SVG with pan and zoom. Regions and scripts become ELK compound nodes.
+  SVG with pan and zoom. Folders, scripts and regions become ELK compound
+  nodes.
+- **What is drawn is chosen before it is laid out**
+  ([ADR 0011](adr/0011-a-picture-is-of-what-can-be-followed.md)), by pure functions in
+  `src/view/graph/model.ts`: `visible` (every call, calls between scripts,
+  or around a focus), `fold` (a script or a folder as one node), `gather`
+  (several lines across a folder's edge as one line to the edge), and
+  `sameStep` (scripts a layered layout would put in one line, set out as a
+  block instead).
+- **The layout is tried across and down** for a picture of up to 250 nodes,
+  and the one the view shows more of is kept.
+- **The view's own arithmetic** is in `src/view/graph/canvas.ts`, shared
+  with the plan chart: fitting, revealing, the corner map's area, and
+  `clearLabels`, which places the names of the far picture so that none
+  lies over another.
+- A plan's chart is laid out by the same ELK with right-angled routes
+  (`src/view/plan/chart.ts`). A decision's ways meet it at its points, and
+  where a loop can be drawn more than one way each is laid out and the
+  chart with the fewest crossings is kept.
 
 ## Agents: the opencode adapter (ADR 0004)
 
@@ -120,13 +138,49 @@ findings after, `:PARAMETERS` compared, and for the comments step the code
 with comments stripped compared. Each step runs in a fresh session and hands
 over through the context note, as the skills expect.
 
+## The working documents (ADR 0012)
+
+What a project writes down about its work: tickets, specs, a knowledge
+base, registries, and a catalog for each folder. The guide is
+[WORKING-DOCUMENTS.md](WORKING-DOCUMENTS.md).
+
+- **The logic is pure and shared,** in `src/shared/`, and tested without a
+  window: `frontMatter.ts` (what a document says of itself), `catalog.ts`
+  (the list between two markers), `csv.ts` (a table with each cell's place
+  in the text), `manifest.ts` (the file manifest, merged), `projectDocs.ts`
+  (folders, templates, states), `workList.ts` (the Work list's order and
+  nesting), `docChecks.ts` (what Health says), `workContext.ts` (what the
+  agent is sent), `ticketImport.ts` (tickets from an export),
+  `registryCheck.ts` (a name looked for in the files).
+- **The Bun side lists and reads** (`src/bun/project.ts`): `listDocs`
+  gives every working document with its title, state and what it is tied
+  to; `fileManifest` gives the files with their checksums; `tomlProblem`
+  reads TOML with the reader `project.toml` is loaded with.
+- **The view writes through the editor** (`src/view/projectDocs.ts`): a
+  document that is open is changed by an edit, so it can be undone, and one
+  that is not is written to disk. A file that exists is never replaced.
+- **A table is a view of the text** (`src/view/editor/TableView.tsx`): a
+  cell changed is that cell's characters changed (ADR 0002).
+- **Files that are not SSL are read here**
+  ([ADR 0015](adr/0015-what-is-not-ssl-is-read-here.md)): `outline.ts`,
+  `jsonCheck.ts` and `jsonFormat.ts` in `src/shared/`, and the grammars in
+  `src/view/editor/languages.ts`. SSL stays with the language server.
+- **The self-test's cycle run** writes a ticket, a spec, a question and a
+  registry into its copy of the workspace and checks them in the window
+  (`src/view/selftestDocs.ts`).
+
 ## Settings and state
 
 | What | Where |
 | --- | --- |
 | User settings, style profile, themes | `~/.config/ssl-studio/` |
-| Workspace settings: region colours, panel layout, profile overrides | `<workspace>/.ssl-studio/` (the user decides whether to commit it) |
+| Project settings: name, description, folders, agent model, style preset | `<workspace>/.ssl-studio/project.toml`, written once by "Set up project" and then edited by hand ([ADR 0006](adr/0006-a-project-has-settings-a-readme-and-an-agents-file.md)) |
+| Workspace settings the IDE writes: region colours, panel layout, profile overrides | `<workspace>/.ssl-studio/settings.json` (the user decides whether to commit it) |
+| The project's documents | `README.md` and `AGENTS.md` at the root, Markdown under `docs/`, the data's shape under `schema/` (or the folders `project.toml` names), plans under `design/` |
 | Local history snapshots | `~/.local/share/ssl-studio/history/`, keyed by workspace |
+
+Settings layer in this order, each later one winning: the user's, the
+project's (`project.toml`), what the IDE saved for the workspace.
 
 ## Testing
 

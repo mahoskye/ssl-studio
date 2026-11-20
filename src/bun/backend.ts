@@ -1,18 +1,21 @@
 // The BackendApi (src/shared/protocol.ts), whichever host carries it.
+import { systemPrefersDark } from "./system";
 import { basename } from "node:path";
 import { statSync } from "node:fs";
 import type { BackendApi, BackendEvents, Info, LspState, Workspace } from "../shared/protocol";
 import { History } from "./history";
 import { LspProcess } from "./lsp";
+import { catalogFilesOf, EXPORT_TYPES, fileManifest, linksTo, listDocs, namesIn, readExport, readProject, setupProject, tomlProblem, undoSetup } from "./project";
 import { recent, SettingsStore } from "./settings";
 import { findLsp, findOpencode } from "./tools";
 import { WorkspaceFiles } from "./workspace";
+import { Git } from "./git";
 import { Agent } from "./agent";
 
 export type Host = {
 	emit<K extends keyof BackendEvents>(event: K, payload: BackendEvents[K]): void;
 	/** A native folder or file dialog; null when cancelled or unavailable. */
-	pick(kind: "folder" | "file"): Promise<string | null>;
+	pick(kind: "folder" | "file", types?: string): Promise<string | null>;
 	trash(path: string): Promise<void>;
 	clipboard?(text: string): void;
 	app: string;
@@ -39,11 +42,20 @@ export function createBackend(host: Host, initial?: string) {
 		if (!files) throw new Error("no workspace open");
 		return files;
 	};
+	/** git for the open workspace: one for as long as the folder is open, so that what it learned of the repository is asked once. */
+	let asked: { root: string; git: Git } | null = null;
+	const git = () => {
+		const root = need().root;
+		if (asked?.root !== root) asked = { root, git: new Git(root) };
+		return asked.git;
+	};
+	/** How many open files have edits that are not on disk, as the view last said. */
+	let unsaved = 0;
 
 	async function loadInfo(): Promise<Info> {
 		const { effective } = await settings.load();
-		const [lspStatus, opencode] = await Promise.all([findLsp(effective.lspPath), findOpencode()]);
-		info = { app: host.app, lsp: lspStatus, opencode, host: host.kind, selftest: Boolean(process.env.SSL_STUDIO_SELFTEST), selftestCycle: Boolean(process.env.SSL_STUDIO_SELFTEST_CYCLE) };
+		const [lspStatus, opencode, systemDark] = await Promise.all([findLsp(effective.lspPath), findOpencode(), systemPrefersDark()]);
+		info = { systemDark, app: host.app, lsp: lspStatus, opencode, host: host.kind, selftest: Boolean(process.env.SSL_STUDIO_SELFTEST), selftestCycle: Boolean(process.env.SSL_STUDIO_SELFTEST_CYCLE), selftestClose: Boolean(process.env.SSL_STUDIO_SELFTEST_CLOSE) };
 		return info;
 	}
 
@@ -91,17 +103,91 @@ export function createBackend(host: Host, initial?: string) {
 			}
 			return out;
 		},
-		write: async (path, text) => {
-			const result = await need().write(path, text);
+		write: async (path, text, asText) => {
+			const result = await need().write(path, text, asText);
 			await history!.record(need().inside(path), text);
 			return result;
 		},
 		create: (path, kind) => need().create(path, kind),
 		rename: async (from, to) => need().rename(from, to),
-		trash: async (path) => host.trash(need().inside(path)),
+		copy: async (from, to) => need().copy(from, to),
+		image: (path) => need().image(path),
+		historyKeep: async (path) => {
+			const full = need().inside(path);
+			const now = await need().read(full);
+			if (!now.binary) await history!.record(full, now.text);
+		},
+		gitStatus: async () => (files ? git().status() : null),
+		gitBase: (path, from) => git().base(need().inside(path), from),
+		gitStage: (paths) => git().stage(paths.map((path) => need().inside(path))),
+		gitUnstage: (paths) => git().unstage(paths.map((path) => need().inside(path))),
+		gitCommit: (message) => git().commit(message),
+		// A discard and a trash wait for a save of the file that is under way, and the saves asked for after them
+		// wait in turn: thrown away in the middle of a save, the file would have come back.
+		gitDiscard: async (path) => {
+			const full = need().inside(path);
+			await need().alone(full, async () => {
+				// What is about to go is kept first, where it is text: a discard by mistake has a way back.
+				try {
+					const now = await need().read(full);
+					if (!now.binary) await history!.record(full, now.text);
+				} catch {
+					// Not there to read (it was removed): there is nothing of it to keep.
+				}
+				// A file git does not follow has nothing to go back to: it goes to the trash, not out of existence.
+				if (await git().follows(full)) await git().discard(full);
+				else await host.trash(full);
+			});
+		},
+		trash: async (path) => {
+			const full = need().inside(path);
+			await need().alone(full, () => host.trash(full));
+		},
 		search: (query, options) => need().search(query, options),
+		replace: async (query, replacement, options, paths) => {
+			const done: { path: string; count: number; error?: string }[] = [];
+			for (const path of paths) {
+				// One file that cannot be written (its encoding has no way to write the replacement, say) does not
+				// stop the others: it is left as it was, and says why.
+				try {
+					const full = need().inside(path);
+					// Read and written as one step: a save of the file that landed between the two would have been
+					// written away by text worked out from the file as it was before it.
+					const count = await need().alone(full, async (write) => {
+						const change = await need().replaced(full, query, replacement, options);
+						if (!change) return 0;
+						// The file as it was goes into local history first, so that there is a way back.
+						await history!.record(full, change.before);
+						await write(change.after);
+						await history!.record(full, change.after);
+						return change.count;
+					});
+					if (count) done.push({ path: full, count });
+				} catch (e: any) {
+					done.push({ path, count: 0, error: String(e?.message ?? e) });
+				}
+			}
+			return done;
+		},
 		history: async (path) => history?.list(need().inside(path)) ?? [],
 		snapshot: (path, id) => history!.read(need().inside(path), id),
+		project: async () => readProject(need().root),
+		setupProject: async () => setupProject(need().root),
+		setupPreview: async () => setupProject(need().root, true),
+		setupUndo: async () => undoSetup(need().root),
+		unsavedChanged: async (count) => {
+			unsaved = Math.max(0, Number(count) || 0);
+		},
+		closeWindow: async () => {
+			unsaved = 0;
+			setTimeout(() => host.quit(), 50);
+		},
+		docs: async () => listDocs(need(), await readProject(need().root)),
+		manifest: async () => fileManifest(need(), await readProject(need().root)),
+		catalogFiles: async (area) => catalogFilesOf(need(), await readProject(need().root), area),
+		tomlProblem: async (text) => tomlProblem(text),
+		linksTo: async (path) => linksTo(need(), path),
+		namesIn: async () => namesIn(need()),
 		settings: () => settings.load(),
 		saveSettings: (scope, patch) => settings.save(scope, patch),
 		themes: () => settings.themes(),
@@ -109,6 +195,12 @@ export function createBackend(host: Host, initial?: string) {
 			const path = await host.pick("file");
 			return path ? settings.importTheme(path) : null;
 		},
+		// An export is read from where the person says it is: a download is not in the project's folder.
+		pickExport: async () => {
+			const path = await host.pick("file", EXPORT_TYPES);
+			return path ? { path, text: await readExport(path) } : null;
+		},
+		readExport: async (path) => readExport(path),
 		lspSend: async (message) => lsp?.send(message),
 		lspRestart: async () => {
 			if (lsp) lsp.restart();
@@ -117,13 +209,17 @@ export function createBackend(host: Host, initial?: string) {
 		lspState: async () => lspState,
 		agent: async (method, args) => {
 			const { effective } = await settings.load();
-			agent.configure({ serverConfig: effective.agentServerConfig, serverUrl: effective.agentServerUrl, model: effective.agentModel });
+			agent.configure({ serverConfig: effective.agentServerConfig, serverUrl: effective.agentServerUrl, model: effective.agentModel, ownModels: effective.agentOwnModels });
 			return agent.call(method, args);
 		},
 		clipboard: async (text) => {
 			if (!host.clipboard) return false;
 			host.clipboard(text);
 			return true;
+		},
+		selftestNote: async (report) => {
+			const path = process.env.SSL_STUDIO_SELFTEST;
+			if (path) await Bun.write(path, JSON.stringify(report, null, 2) + "\n");
 		},
 		selftestDone: async (report) => {
 			const path = process.env.SSL_STUDIO_SELFTEST;
@@ -137,6 +233,16 @@ export function createBackend(host: Host, initial?: string) {
 	return {
 		api,
 		ready,
+		/**
+		 * Asked when the window is about to close. With unsaved edits the answer is
+		 * no, and the view is told to ask the user; it closes the app itself once
+		 * they have saved or chosen to discard (ADR 0009).
+		 */
+		mayClose: () => {
+			if (!unsaved) return true;
+			host.emit("closeRequested", {});
+			return false;
+		},
 		dispose: () => {
 			files?.close();
 			lsp?.stop();

@@ -45,14 +45,71 @@ const CSS_VARS: [string, string][] = [
 	["--error", "editorError.foreground"],
 	["--warning", "editorWarning.foreground"],
 	["--info", "editorInfo.foreground"],
+	// "Passed", "ready", "within the limit": VS Code's own key for a passed test.
+	["--ok", "testing.iconPassed"],
 ];
 
 const isDark = (theme: VsTheme) => theme.type !== "light" && theme.type !== "hcLight";
 const validColor = (value: unknown): value is string => typeof value === "string" && /^#([0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(value);
 
+/**
+ * The editor draws its right-click menu in a tree of its own, attached to the
+ * page outside the editor, and declares the theme's colours on the editor: so
+ * the menu found none of them and had no background. A tree inherits the
+ * variables of the element that holds it, so the same declarations are given
+ * to that element.
+ */
+/** The shape of the app's own menus (style.css, .menu-pop and .menu-item), for the editor's menu in its own tree. */
+const MENU_SHAPE = `
+.monaco-menu-container { border-radius: var(--radius-lg) !important; box-shadow: var(--shadow) !important; overflow: hidden; }
+.monaco-menu { font: var(--text-base)/1.4 system-ui, -apple-system, "Segoe UI", sans-serif !important; }
+.monaco-menu .monaco-action-bar.vertical { padding: var(--space-2) !important; }
+.monaco-menu .monaco-action-bar.vertical .action-item { border-radius: var(--radius-sm); }
+.monaco-menu .monaco-action-bar.vertical .keybinding { color: var(--muted) !important; opacity: 1 !important; font-size: var(--text-sm) !important; }
+`;
+
+/** Gives each of the editor's menus, as it is made, the shape of the app's own. */
+export function shapeEditorMenus() {
+	const shape = (host: Element) => {
+		const root = host.shadowRoot;
+		if (!root || root.querySelector("style[data-studio]")) return;
+		const style = document.createElement("style");
+		style.dataset.studio = "";
+		style.textContent = MENU_SHAPE;
+		root.append(style);
+	};
+	new MutationObserver((changes) => {
+		for (const change of changes) for (const node of change.addedNodes) if (node instanceof Element && node.classList.contains("shadow-root-host")) shape(node);
+	}).observe(document.body, { childList: true, subtree: true });
+}
+
+function carryMenuColours() {
+	const declared = [...document.querySelectorAll("style.monaco-colors")].map((style) => style.textContent ?? "").join("\n");
+	const block = /\{([^{}]*--vscode-menu-background[^{}]*)\}/.exec(declared)?.[1];
+	if (!block) return;
+	let style = document.getElementById("studio-menu-colours");
+	if (!style) {
+		style = document.createElement("style");
+		style.id = "studio-menu-colours";
+		document.head.append(style);
+	}
+	style.textContent = `.shadow-root-host { ${block} }`;
+}
+
 export function applyTheme(theme: VsTheme) {
 	const base = isDark(theme) ? builtIn.dark! : builtIn.light!;
-	const colors = { ...base.colors, ...theme.colors };
+	const themed: Record<string, string> = { ...base.colors, ...theme.colors };
+	// The editor's right-click menu takes the colours the app's own menus are drawn in, whatever the theme says of
+	// "menu.*": those keys are for a window's menu bar, which this app does not have.
+	const colors: Record<string, string> = {
+		...themed,
+		"menu.background": themed["sideBar.background"],
+		"menu.foreground": themed["sideBar.foreground"],
+		"menu.selectionBackground": themed["list.hoverBackground"],
+		"menu.selectionForeground": themed["sideBar.foreground"],
+		"menu.separatorBackground": themed["sideBar.border"],
+		"menu.border": themed["input.border"],
+	};
 	const raw: IRawTheme = {
 		name: theme.name,
 		settings: [
@@ -68,6 +125,9 @@ export function applyTheme(theme: VsTheme) {
 		colors: Object.fromEntries(Object.entries(colors).filter(([, v]) => validColor(v))),
 	});
 	monaco.editor.setTheme("studio");
+	carryMenuColours();
+	// The editor may write its colours a moment after the theme is set: carried again then.
+	requestAnimationFrame(carryMenuColours);
 	refreshSemanticTokens();
 	const root = document.documentElement;
 	for (const [cssVar, key] of CSS_VARS) {
@@ -78,8 +138,12 @@ export function applyTheme(theme: VsTheme) {
 	root.style.colorScheme = isDark(theme) ? "dark" : "light";
 }
 
-/** Resolves a settings value ("system", "dark", "light", "custom:<id>"). */
-export function resolveTheme(choice: string, custom: { id: string; json: string }[]): VsTheme {
+/**
+ * Resolves a settings value ("system", "dark", "light", "custom:<id>").
+ * `systemDark` is the system's own answer where the app could ask it; without
+ * one, "system" is what the web view says it prefers.
+ */
+export function resolveTheme(choice: string, custom: { id: string; json: string }[], systemDark?: boolean): VsTheme {
 	if (choice.startsWith("custom:")) {
 		const file = custom.find((t) => t.id === choice);
 		if (file) {
@@ -91,5 +155,6 @@ export function resolveTheme(choice: string, custom: { id: string; json: string 
 		}
 	}
 	if (choice === "dark" || choice === "light") return builtIn[choice]!;
+	if (systemDark !== undefined) return systemDark ? builtIn.dark! : builtIn.light!;
 	return matchMedia("(prefers-color-scheme: light)").matches ? builtIn.light! : builtIn.dark!;
 }
