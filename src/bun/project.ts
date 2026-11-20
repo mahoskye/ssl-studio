@@ -11,7 +11,7 @@ import { parseCsv, tally } from "../shared/csv";
 import { fileLinks, frontPaths, type DocLink } from "../shared/docLinks";
 import { frontMatter, many, one, summaryOf, titleOf } from "../shared/frontMatter";
 import { namePlaces } from "../shared/namedLinks";
-import { catalogItems, DOC_FOLDERS, isCatalog, isPrompt, STATE_FILE, type DocArea } from "../shared/projectDocs";
+import { catalogItems, DOC_FOLDERS, isCatalog, isPrompt, SCHEMAS, STATE_FILE, type DocArea } from "../shared/projectDocs";
 import { rowsByTicket } from "../shared/registryTickets";
 import { taskTally } from "../shared/tasks";
 import type { DocFile, LinkTo, ManifestFile, NameIn, Project, Settings } from "../shared/protocol";
@@ -332,7 +332,17 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 		if (state && path === join(docs, state)) continue;
 		list.push({ path, name: relative(docs, path), group: "docs", exists: true, ...brokenLinks(root, path, await head(path), named) });
 	}
-	for (const path of under(join(root, project.schema), /\.(md|markdown|sql)$/i)) list.push({ path, name: relative(join(root, project.schema), path), group: "schema", exists: true, ...(MARKDOWN.test(path) ? brokenLinks(root, path, await head(path), named) : {}) });
+	// What the project's data looks like, each kind in its folder: descriptions in Markdown, and beside them the SQL
+	// that makes the tables, a message's own schema, a sample of a file.
+	for (const path of under(join(root, project.schema), /\.(md|markdown|sql|json|xml|xsd|wsdl|yaml|yml|hl7|csv|tsv|txt)$/i)) {
+		const name = relative(join(root, project.schema), path);
+		const folder = name.includes(sep) ? name.split(sep)[0]! : "";
+		// A folder that is one of the known kinds in other capitals is that kind: on a disk that does not tell them
+		// apart it is the same folder, and nowhere is it a second kind beside it.
+		const kind = SCHEMAS.find((known) => known.id === folder.toLowerCase())?.id ?? folder;
+		const text = MARKDOWN.test(path) ? await head(path) : "";
+		list.push({ path, name, group: "schema", exists: true, kind, ...(MARKDOWN.test(path) ? { ...described(text), ...brokenLinks(root, path, text, named) } : {}) });
+	}
 	for (const path of under(join(root, project.plans), /\.(plan\.json|md)$/i)) {
 		if (/\.spec\.md$/i.test(path)) continue;
 		// A plan says which ticket it is for (ADR 0013): the Docs panel shows it under that ticket.
@@ -405,7 +415,11 @@ export async function setupProject(root: string, dryRun = false): Promise<string
 		if (!existsSync(join(root, dir))) await put(join(root, dir, "README.md"), `# ${title}\n\n${about}\n`);
 	};
 	await start(project.docs, "Docs", "Notes and decisions about this project. Every Markdown file here shows in the Docs panel.");
-	await start(project.schema, "Schema", "The tables this project reads and writes: one Markdown file for each table or area, with its columns, types and keys, and a line on what it is for. `.sql` files are listed too.");
+	// The schema folder with a folder for each kind of thing it describes, each saying what goes in it.
+	if (!existsSync(join(root, project.schema))) {
+		await put(join(root, project.schema, "README.md"), `# Schema\n\nWhat this project's data looks like, each kind in its own folder. Another folder made here is a kind of the project's own.\n\n${SCHEMAS.map((kind) => `- [${kind.name}](${kind.id}/README.md): ${kind.about.split(":")[0]!.toLowerCase()}.`).join("\n")}\n`);
+		for (const kind of SCHEMAS) await put(join(root, project.schema, kind.id, "README.md"), `# ${kind.name}\n\n${kind.about}\n`);
+	}
 	await start(project.tests, "Tests", "Test scripts, and the sample requests and data they need.");
 	// A folder for the code only where there is none yet: an export brings its own layout.
 	let scripts = false;
@@ -455,7 +469,7 @@ description = ""
 # Where things are, relative to this project. Plans and tidy notes are always
 # in design/.
 docs = "docs"      # notes and decisions; the Docs panel lists the Markdown here
-schema = "schema"  # the tables the project uses; also in the Docs panel
+schema = "schema"  # what the data looks like: tables, messages, file layouts
 tests = "tests"    # test scripts and what they need
 code = "src"       # the scripts and data sources ("." when they are at the root)
 
@@ -479,7 +493,7 @@ ${PLACEHOLDER["README.md"]}
 | --- | --- |
 | \`${project.code}/\` | Scripts and data sources |
 | \`${project.docs}/\` | Notes, tickets, specs, the knowledge base, registries |
-| \`${project.schema}/\` | The tables the project reads and writes |
+| \`${project.schema}/\` | What the data looks like: tables, messages, file layouts |
 | \`${project.tests}/\` | Test scripts and what they need |
 | \`${project.plans}/\` | Plans (\`*.plan.json\`) and tidy notes |
 
@@ -514,10 +528,10 @@ ${PLACEHOLDER["AGENTS.md"]}
 - \`${project.docs}/\`: notes and decisions.
 - \`${project.docs}/tickets/\`: the tickets that drive the work, one file each. Read the ticket before starting on it.
 - \`${project.docs}/specs/\`: what is to be built, written from the tickets.
-- \`${project.docs}/knowledge/\`: decisions, questions, snippets and notes. Look here before deciding again; write a question here when something is not known.
+- \`${project.docs}/knowledge/\`: decisions, questions, snippets, prompts and notes. Look here before deciding again; write a question here when something is not known.
 - \`${project.docs}/registries/\`: tables of the settings, files and database objects a migration must carry across.
 - Each of those four folders has an \`INDEX.md\`: its catalog. Find a document there, and do not edit the list between its markers.
-- \`${project.schema}/\`: the tables the project reads and writes. Check a table here before writing SQL for it.
+- \`${project.schema}/\`: what the project's data looks like: the tables it reads and writes (under \`database/\`, where the folder is kept by kind), the messages it exchanges with other systems (\`interfaces/\`) and the files it reads or writes (\`files/\`). Check a table there before writing SQL for it.
 - \`${project.tests}/\`: test scripts and what they need.
 - \`${project.plans}/\`: plans and tidy notes.
 `;

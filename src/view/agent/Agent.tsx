@@ -4,12 +4,16 @@ import { Icon, type IconName } from "../Icon";
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { activeEditor } from "../editor/EditorGroup";
 import { review } from "../editor/Review";
-import { activeDoc, activePath, state } from "../state";
+import { activeDoc, activePath, canonical, documents, notify, state } from "../state";
 import { addEntry, agent, ask, chooseModel, currentModel, interrupt, resume, safely, setAgent, start, stop, type Entry } from "./store";
 import { groupModels, composeQuestion, composerSend, modelRef, stepAction } from "./logic";
 import { followReplyLink, renderReply } from "./markdown";
 import { notePath, proposalOf, runStep, showReview, startTidy, STEPS, tidy } from "./tidy";
 import { relativeTo } from "../../shared/paths";
+import { isCatalog, promptText } from "../../shared/projectDocs";
+import type { DocFile } from "../../shared/protocol";
+import { backend } from "../backend";
+import { docs } from "../project";
 import { ticketAtHand, workPrompt } from "../projectDocs";
 import { recall, remember } from "../graph/canvas";
 
@@ -57,6 +61,18 @@ function EntryView(props: { entry: Entry }) {
 			</Show>
 		</div>
 	);
+}
+
+/**
+ * The prompts the project keeps in its knowledge base (ADR 0026): what its own people ask the agent again and again.
+ * One still as its template has no words to offer.
+ */
+export const keptPrompts = (): DocFile[] => docs().filter((d) => d.exists && d.group === "knowledge" && d.kind === "prompts" && !isCatalog(d) && !d.untouched && /\.(md|markdown)$/i.test(d.name) && !/(^|[\\/])readme\.(md|markdown)$/i.test(d.name));
+
+/** A kept prompt's words as they stand: in the editor if it is open there, on disk otherwise. */
+async function wordsOf(file: DocFile): Promise<string> {
+	const open = documents.get(canonical(file.path));
+	return promptText(open ? open.model.getValue() : (await backend.read(file.path)).text);
 }
 
 /** Questions someone reading SSL they did not write tends to have. Each is sent with the selection, like any other. */
@@ -247,6 +263,29 @@ export function AgentPanel() {
 									)}
 								</For>
 							</ul>
+							{/* The project's own: what it keeps under its knowledge base's prompts. Put in the box like the others, never sent from here. */}
+							<Show when={keptPrompts().length}>
+								<p class="agent-kept">Kept in this project</p>
+								<ul class="agent-starters" aria-label="Prompts kept in this project">
+									<For each={keptPrompts()}>
+										{(file) => (
+											<li>
+												<button
+													title={`Put this prompt in the box below${file.summary ? `: ${file.summary}` : ""}`}
+													onClick={() =>
+														void wordsOf(file).then(
+															(words) => (words ? (setDraft(words), setNotSent(""), box?.focus()) : notify(`${file.title || file.name} has no words in it yet.`)),
+															(e) => notify(String(e?.message ?? e), "error"),
+														)
+													}
+												>
+													{file.title || file.name}
+												</button>
+											</li>
+										)}
+									</For>
+								</ul>
+							</Show>
 						</div>
 					}
 				>

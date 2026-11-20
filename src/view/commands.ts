@@ -22,7 +22,7 @@ import { installRecentTabs, stepRecent } from "./recentTabs";
 import { goAlong } from "./navigation";
 import { isPlanPath, newPlan, printPlan } from "./plan/model";
 import { isMarkdown, isTable, newDoc, setUpProject, undoSetUp } from "./project";
-import { importTickets, newKnowledge, newRegistry, newSpec, newState, newTicket, ticketAtHand, updateCatalogs, updateManifest } from "./projectDocs";
+import { importTickets, newKnowledge, newRegistry, newSchema, newSpec, newState, newTicket, ticketAtHand, updateCatalogs, updateManifest } from "./projectDocs";
 import { displayKey, effectiveKeys, isModifierKey, keyNames, keysOf } from "./keys";
 import { modalOpen, setFocusFallback } from "./modal";
 import { noteUsed } from "./quickRank";
@@ -177,8 +177,12 @@ export const commands: Command[] = [
 	{ id: "new-decision", label: "New decision…", detail: "In the knowledge base; about the selected code, when there is some", run: () => void newKnowledge("decisions") },
 	{ id: "new-question", label: "New question…", detail: "In the knowledge base; about the selected code, when there is some", run: () => void newKnowledge("questions") },
 	{ id: "new-snippet", label: "New snippet…", detail: "SQL or SSL kept for use", run: () => void newKnowledge("snippets") },
+	{ id: "new-prompt", label: "New prompt…", detail: "A question or an instruction for the agent, kept to be put to it again", run: () => void newKnowledge("prompts") },
 	{ id: "new-reference", label: "New reference note…", detail: "How something works", run: () => void newKnowledge("reference") },
 	{ id: "new-registry", label: "New registry…", detail: "Settings, files, database objects", run: () => void newRegistry() },
+	{ id: "new-table", label: "New table…", detail: "A table the project reads or writes, described in the schema folder", run: () => void newSchema("database") },
+	{ id: "new-message", label: "New interface message…", detail: "What is exchanged with an instrument or another system, described in the schema folder", run: () => void newSchema("interfaces") },
+	{ id: "new-layout", label: "New file layout…", detail: "A file the project reads or writes, described in the schema folder", run: () => void newSchema("files") },
 	{ id: "project-state", label: "Project state…", detail: "Where the project stands, in plain words", run: () => void newState() },
 	{ id: "update-catalogs", label: "Update catalogs", detail: "Write each INDEX.md's list afresh", run: () => void updateCatalogs() },
 	{ id: "update-manifest", label: "Update file manifest", detail: "Sizes and checksums of the project's files", run: () => void updateManifest() },

@@ -15,7 +15,7 @@ From the repository root, with the runner beside this repository:
 bun scripts/demo-sandbox.ts
 ```
 
-It runs each script on a fresh copy of [demo.sql](../schema/demo.sql), and
+It runs each script on a fresh copy of [demo.sql](../schema/database/demo.sql), and
 fails if a script leaves the database changed. In STARLIMS, with the scripts
 under the `DueDates` and `DueDatesTests` categories:
 

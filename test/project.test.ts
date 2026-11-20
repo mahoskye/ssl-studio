@@ -27,7 +27,8 @@ test("setup writes the three files once and never overwrites", async () => {
 	writeFileSync(join(root, "Server Scripts", "Orders.srvscr"), "");
 	// docs/ is already there and there is code already: neither gets a README or a folder.
 	expect((await setupProject(root)).sort()).toEqual(
-		[join(".ssl-studio", "project.toml"), "AGENTS.md", join("schema", "README.md"), join("tests", "README.md")].sort(),
+		// The schema folder comes with a folder for each kind of thing it describes.
+		[join(".ssl-studio", "project.toml"), "AGENTS.md", join("schema", "README.md"), join("schema", "database", "README.md"), join("schema", "interfaces", "README.md"), join("schema", "files", "README.md"), join("tests", "README.md")].sort(),
 	);
 	expect(existsSync(join(root, "src"))).toBe(false);
 	expect(await Bun.file(join(root, "readme.md")).text()).toBe("# Mine\n");
@@ -81,6 +82,9 @@ test("the document list puts README and AGENTS first, missing or not, and says w
 		["project", "project.toml", true, undefined],
 		["docs", join("adr", "0001-first.md"), true, undefined],
 		["docs", "README.md", true, undefined],
+		["schema", join("database", "README.md"), true, undefined],
+		["schema", join("files", "README.md"), true, undefined],
+		["schema", join("interfaces", "README.md"), true, undefined],
 		["schema", "ORDERS.sql", true, undefined],
 		["schema", "README.md", true, undefined],
 		["plans", "Orders.plan.json", true, undefined],
@@ -90,7 +94,7 @@ test("the document list puts README and AGENTS first, missing or not, and says w
 test("the preview says what setup would create and writes nothing", async () => {
 	const root = fresh("preview");
 	const planned = await setupProject(root, true);
-	expect(planned.sort()).toEqual([join(".ssl-studio", "project.toml"), "AGENTS.md", "README.md", join("docs", "README.md"), join("schema", "README.md"), join("src", "README.md"), join("tests", "README.md")].sort());
+	expect(planned.sort()).toEqual([join(".ssl-studio", "project.toml"), "AGENTS.md", "README.md", join("docs", "README.md"), join("schema", "README.md"), join("schema", "database", "README.md"), join("schema", "interfaces", "README.md"), join("schema", "files", "README.md"), join("src", "README.md"), join("tests", "README.md")].sort());
 	expect(readdirSync(root)).toEqual([]);
 	// What was previewed is what gets written.
 	expect((await setupProject(root)).sort()).toEqual(planned.sort());
@@ -101,7 +105,7 @@ test("undoing a setup removes what it wrote, with the folders it left empty", as
 	writeFileSync(join(root, "Notes.txt"), "mine\n");
 	await setupProject(root);
 	const { removed, kept } = await undoSetup(root);
-	expect(removed.length).toBe(7);
+	expect(removed.length).toBe(10);
 	expect(kept).toEqual([]);
 	expect(readdirSync(root)).toEqual(["Notes.txt"]);
 });

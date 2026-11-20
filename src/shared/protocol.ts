@@ -23,7 +23,7 @@ export type Project = {
 	path: string;
 	name: string;
 	description: string;
-	/** Folders relative to the root. The Docs panel lists the Markdown in `docs` and `schema`. */
+	/** Folders relative to the root. The Docs panel lists the Markdown in `docs`, and what `schema` holds by its kinds. */
 	docs: string;
 	/** What the tables the project uses are. */
 	schema: string;
@@ -66,7 +66,10 @@ export type DocFile = {
 	specs?: string[];
 	/** A ticket: those of the specs it names that are not there. */
 	missing?: string[];
-	/** Knowledge: the folder it is in under the knowledge base ("decisions", "snippets"); "" at its top. */
+	/**
+	 * Knowledge: the folder it is in under the knowledge base ("decisions", "snippets"); "" at its top. Schema: the
+	 * folder it is in under the schema folder ("database", "interfaces", "files", or one of the project's own).
+	 */
 	kind?: string;
 	/** A registry: how many rows, how many in each status (when it has that column), and what is wrong with it as a table. */
 	rows?: number;

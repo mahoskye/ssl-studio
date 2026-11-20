@@ -1270,3 +1270,77 @@ saved was refused in 200 of 200; a folder renamed with six saves
 inside came back in none of 200. One figure in this record was out
 of date after the last change, and is corrected above.
 
+## The sixteenth review: the schema by kind, and prompts kept
+
+A fresh reviewer read the change as staged, before its commit: the
+schema folder kept by kind, prompts as a kind of the knowledge base
+offered in the Agent panel, the demo project's tables moved, and the
+record. It was told what each part is for and not what was thought of
+it, and ran what it could. Nothing held the commit. Five findings,
+each small, all fixed before it:
+
+1. **A folder that is a known kind in other capitals** (`Database/`)
+   **was a second kind beside it**: two headings, the known one empty,
+   and on a disk that does not tell capitals apart a new table went
+   into a folder the known heading never listed. Fixed: such a folder
+   is that kind.
+2. **A folder called `other` folded together with what lies at the
+   top of the schema folder**, and looked the same. Fixed: the top's
+   own list has a name no folder can have.
+3. **A table called `BUILD` or `dist` was refused** as a folder the
+   app leaves out of its lists. Fixed: a table's name is a file's.
+4. **A prompt whose heading has no words lost the words after it.**
+   Fixed.
+5. **Nine comments in the demo's tests still named `schema/demo.sql`.**
+   Fixed, and the file manifest brought up to date after.
+
+Smaller, and dealt with: the generated `AGENTS.md` sent a reader to a
+`database/` folder that a project with a schema folder already may
+not have (it now says where the tables are when the folder is kept by
+kind); the demo's two new pages stated rules as fact where no script
+reads them yet (each now says so itself, and says what a script is to
+do); one cell of a table in ARCHITECTURE had grown (it is shorter than
+it was); a README in the prompts folder would have been offered as a
+prompt (it is not); "New message…" read like a message to the agent
+(it is "New interface message…", and the three schema commands follow
+the registry's in the palette); two more places in the working
+documents' guide now name prompts; and YAML, WSDL and HL7 files are
+listed beside a message.
+
+Left, each with its reason: a project whose schema folder is set to
+its own folder (`schema = "."`) has every folder at its top listed as
+a kind, as it had every Markdown and SQL file listed before, since
+the setting says the whole folder is schema; a kept prompt is offered
+only before the first question and takes the place of what was typed,
+as the app's own four questions do; and a folder whose name holds a
+backslash is read as two folders, as every folder named in the
+project's settings is (that reason is the author's, not the
+reviewer's). The reviewer also named `.xlsx` and `.dat` files as not
+listed beside a description: they are not text the app reads.
+
+### The second reading
+
+The same reviewer read the fixes as staged and ran them: nothing to
+hold the commit, and none of its five findings open. With `Database/`,
+`database/` and `DATABASE/` together on a disk that tells them apart,
+every file came back as the database's, each once; the top's list
+could not share a name with any folder; `BUILD` and `dist` were taken
+as tables; the nine changed lines of the demo's tests were all inside
+comments; all 43 rows of the manifest matched their files.
+
+Three small things it then named were dealt with before the commit:
+with only `Database/` there, the heading's menu spoke of a
+`database/` folder that was not there and would have made one beside
+it (what is made or shown from a kind's heading now goes to the
+folder as the project has it); what lies at the top of the schema
+folder was headed "Other", as a folder called `other` also reads
+(it is headed "At the top"); and one line of the demo still named
+two formats where the app's own text names three.
+
+A last reading of those three found each as asked, and one case more
+of the first: "New table…" from the Schema heading itself, from the
+panel's New menu and from the palette still made a lowercase folder
+beside a `Database/` that was there. Fixed before the commit: asked
+for with no folder named, a description goes where the project
+already keeps that kind.
+

@@ -27,7 +27,7 @@ A sample with no instrument is never held up by an outage.
 | `src/DueDates/` | The scripts, the two classes, the include and the data sources |
 | `src/Legacy/` | One script left rough on purpose, for the IDE to tidy |
 | `docs/` | Notes and decisions |
-| `schema/` | The three tables the project reads and writes |
+| `schema/` | What the data looks like: tables, a message, a file layout |
 | `tests/DueDatesTests/` | Test scripts, and the two scripts they share |
 | `design/` | The plan for `SetSampleDueDates`: its chart and its spec |
 

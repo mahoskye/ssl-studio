@@ -1,6 +1,6 @@
 /********************************************************************************
 Description.. : What the test scripts share: the runner, the comparison and the calendar
-                of schema/demo.sql. No database is read or written here.
+                of schema/database/demo.sql. No database is read or written here.
 Parameters... : -
 Returns...... : -
 Author....... :
@@ -117,7 +117,7 @@ _______________________________________________________________________________
 
 /*
  * Procedure: DemoHolidays
- * Description: Builds the holidays of schema/demo.sql.
+ * Description: Builds the holidays of schema/database/demo.sql.
  * Returns: 26 November and 25 December 2026, as an array of dates
 ;
 :PROCEDURE DemoHolidays;
@@ -126,7 +126,7 @@ _______________________________________________________________________________
 
 /*
  * Procedure: DemoOutages
- * Description: Builds the outages of schema/demo.sql.
+ * Description: Builds the outages of schema/database/demo.sql.
  * Returns: BAL-01 out 18 and 19 November 2026, HPLC-02 out 1 to 3 December 2026
 ;
 :PROCEDURE DemoOutages;
@@ -138,7 +138,7 @@ _______________________________________________________________________________
 
 /*
  * Procedure: NewRule
- * Description: Builds a rule on the holidays and outages of schema/demo.sql.
+ * Description: Builds a rule on the holidays and outages of schema/database/demo.sql.
  * Parameters:
  *   nDays - the turnaround in days
  *   bRush - .T. for a RushDueRule, otherwise a DueRule

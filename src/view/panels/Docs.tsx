@@ -6,10 +6,10 @@ import { FileMark } from "../FileMark";
 import { createMemo, createResource, createSignal, For, Show } from "solid-js";
 import type { DocFile } from "../../shared/protocol";
 import { backend } from "../backend";
-import { docMatches, isCatalog, KNOWLEDGE, progress, progressShort, registryTitle, statusChoices, toneOf } from "../../shared/projectDocs";
+import { docMatches, isCatalog, KNOWLEDGE, progress, progressShort, registryTitle, SCHEMAS, statusChoices, toneOf } from "../../shared/projectDocs";
 import { docs, newDoc, newDocIn, newFolderIn, setUpProject } from "../project";
-import { importTickets, newKnowledge, newRegistry, newSpec, newState, newTicket, setStatus, updateCatalogs, updateManifest } from "../projectDocs";
-import { folderParts, folderSaid, IMPORT_TICKETS, kindOf, NEW_DOCUMENT, NEW_FOLDER, NEW_PLAN, NEW_REGISTRY, NEW_SPEC, NEW_TICKET, newOfKind, plainSection, sectionFolder, sectionMenu, SHOW_FOLDER, type DocSection } from "../../shared/docSections";
+import { importTickets, newKnowledge, newRegistry, newSchema, newSpec, newState, newTicket, setStatus, updateCatalogs, updateManifest } from "../projectDocs";
+import { folderParts, folderSaid, IMPORT_TICKETS, kindOf, NEW_DOCUMENT, NEW_FOLDER, NEW_PLAN, NEW_REGISTRY, NEW_SPEC, NEW_TICKET, newOfKind, plainSection, schemaFolderOf, schemaOf, sectionFolder, sectionMenu, SHOW_FOLDER, type DocSection } from "../../shared/docSections";
 import { joinPath } from "../../shared/paths";
 import { shownRows, workList } from "../../shared/workList";
 import { activePath, canonical, notify, openFile, openToSide, setState, state } from "../state";
@@ -199,12 +199,17 @@ function ItemRow(props: {
 const LOCKED = "Shown open while the filter is narrowing the list";
 /** A row with nothing under it, in a list where others have: it leaves a twisty's room and has none. */
 const NO_FOLD = { parent: false, shut: false, toggle: () => {} };
+/** The name what lies at the top of the schema folder folds under: one no folder there can have, whatever it is called. */
+const SCHEMA_TOP = "docs:schema:/";
 /** The name a ticket folds under: what is under it (its plans, its specs, the tickets that are part of it) is shut away with it. */
 const ticketFold = (file: DocFile) => `docs:ticket:${file.path}`;
 /** Every name the panel folds under: its groups, the kinds of the knowledge base, and each ticket. */
 const allFolds = () => [
 	...(["project", "work", "knowledge", "registries", "docs", "schema", "plans"] as const).map((group) => `docs:${group}`),
 	...KNOWLEDGE.map((kind) => `docs:knowledge:${kind.id}`),
+	SCHEMA_TOP,
+	// The kinds of schema: those the app knows, and the folders the project has made beside them.
+	...new Set([...SCHEMAS.map((kind) => kind.id), ...docs().flatMap((file) => (file.group === "schema" && file.kind ? [file.kind] : []))].map((kind) => `docs:schema:${kind}`)),
 	"docs:knowledge:other",
 	...docs()
 		.filter((file) => file.group === "tickets")
@@ -225,6 +230,8 @@ async function headMenu(section: DocSection, title: string, at: Point) {
 	const picked = await chooseFromMenu(`Actions for ${title}, in ${folderSaid(folder)}`, sectionMenu(section), at);
 	if (!picked) return;
 	const kind = kindOf(section) ?? KNOWLEDGE.find((known) => picked === newOfKind(known));
+	// From the schema's own heading, the kind is the one whose entry was picked; from a kind's heading, that kind.
+	const schema = schemaOf(section) ?? (section === "schema" ? SCHEMAS.find((known) => picked === newOfKind(known)) : undefined);
 	if (picked === NEW_FOLDER) await newFolderIn(folder, plainSection(section));
 	else if (picked === SHOW_FOLDER) {
 		const path = joinPath(root, ...folderParts(folder));
@@ -241,6 +248,7 @@ async function headMenu(section: DocSection, title: string, at: Point) {
 	else if (picked === NEW_SPEC) await newSpec();
 	else if (picked === NEW_REGISTRY) await newRegistry();
 	else if (picked === NEW_PLAN) (await import("../commands")).runCommand("new-plan");
+	else if (schema) await newSchema(schema.id, schemaFolderOf(section));
 	else if (kind) await newKnowledge(kind.id);
 }
 
@@ -323,6 +331,44 @@ function Knowledge(props: { files: DocFile[]; empty?: string; filtered?: boolean
 	);
 }
 
+/**
+ * What the project's data looks like, each kind together: the tables, the messages, the file layouts, then any folder
+ * of the project's own under its own name, then what lies at the top of the schema folder ("At the top": not
+ * "Other", which a folder there may be called). A kind the app knows is
+ * shown once the project is set up, empty or not: it is where the first of its kind goes.
+ */
+function Schema(props: { files: DocFile[]; empty?: string; filtered?: boolean }) {
+	const files = () => props.files.filter((d) => d.group === "schema");
+	const kinds = () => {
+		const own = [...new Set(files().flatMap((d) => (d.kind && !SCHEMAS.some((known) => known.id === d.kind) ? [d.kind] : [])))].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+		return [...SCHEMAS.map((known) => ({ id: known.id as string, name: known.name, known: true })), ...own.map((name) => ({ id: name, name, known: false })), { id: "", name: "At the top", known: false }]
+			.map((kind) => ({ ...kind, files: files().filter((d) => (d.kind ?? "") === kind.id) }))
+			// The folder as the project has it: a known kind's may be written in other capitals ("Database"), and what
+			// is made or shown from its heading goes there, not into a second folder beside it.
+			.map((kind) => ({ ...kind, folder: kind.files[0]?.name.split(/[\\/]/)[0] ?? kind.id }))
+			.filter((kind) => kind.files.length || (kind.known && !props.filtered && state.project?.configured));
+	};
+	/**
+	 * A file by its name in its kind's folder, where it has no title of its own (the SQL, a sample, a schema), and a
+	 * folder's README by its file's name too: titled as its folder is, it would repeat the heading it stands under.
+	 */
+	const named = (file: DocFile, kind: string) => {
+		const inKind = kind ? file.name.split(/[\\/]/).slice(1).join("/") : file.name;
+		return { ...file, title: /(^|[\\/])readme\.(md|markdown)$/i.test(file.name) ? inKind : file.title || inKind };
+	};
+	return (
+		<RowGroup fold="docs:schema" label="Schema" onMenu={(at) => void headMenu("schema", "Schema", at)} open={props.filtered} count={files().length} role="group" head={<Head title="Schema" folder={folderOf("schema")} />} rows={kinds().length > 0} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
+			<For each={kinds()}>
+				{(kind) => (
+					<RowGroup fold={kind.id ? `docs:schema:${kind.id}` : SCHEMA_TOP} label={kind.name} onMenu={kind.id ? (at) => void headMenu(`schema:${kind.folder}`, kind.name, at) : undefined} open={props.filtered} count={kind.files.length} headClass="doc-kind" head={kind.name}>
+						<For each={kind.files}>{(file) => <ItemRow file={named(file, kind.id)} depth={1} />}</For>
+					</RowGroup>
+				)}
+			</For>
+		</RowGroup>
+	);
+}
+
 /** The registries: each with how far it is. */
 function Registries(props: { files: DocFile[]; empty?: string; filtered?: boolean }) {
 	const files = () => props.files.filter((d) => d.group === "registries");
@@ -341,7 +387,7 @@ function Group(props: { title: string; folder?: string; group: DocFile["group"];
 			fold={`docs:${props.group}`}
 			label={props.title}
 			// The lists that are a folder of the project's: "Project" is the files at its top, and has no menu.
-			onMenu={props.group === "docs" || props.group === "schema" || props.group === "plans" ? (at) => void headMenu(props.group as DocSection, props.title, at) : undefined}
+			onMenu={props.group === "docs" || props.group === "plans" ? (at) => void headMenu(props.group as DocSection, props.title, at) : undefined}
 			open={Boolean(props.filter?.trim())}
 			count={files().length}
 			head={<Head title={props.title} folder={props.folder} />}
@@ -377,7 +423,7 @@ export function Docs() {
 		<div class="panel-body" data-panel="docs">
 			<div class="panel-title">
 				<span>Docs</span>
-				<Menu floating label="New document, or update the catalogs" title="New…: a ticket, spec, decision, question, snippet, registry, document or plan. Also: import tickets, update the catalogs" items={() => [
+				<Menu floating label="New document, or update the catalogs" title="New…: a ticket, spec, plan, decision, question, snippet, prompt, registry, table, interface message, file layout or document. Also: import tickets, update the catalogs" items={() => [
 					{ label: "New ticket…", run: () => void newTicket() },
 					{ label: "Import tickets…", run: () => void importTickets() },
 					{ label: "New spec…", run: () => void newSpec() },
@@ -386,11 +432,14 @@ export function Docs() {
 					{ label: "New decision…", run: () => void newKnowledge("decisions") },
 					{ label: "New question…", run: () => void newKnowledge("questions") },
 					{ label: "New snippet…", run: () => void newKnowledge("snippets") },
+					{ label: "New prompt…", run: () => void newKnowledge("prompts") },
 					{ label: "New reference note…", run: () => void newKnowledge("reference") },
 					"separator",
 					{ label: "New registry…", run: () => void newRegistry() },
 					{ label: "Update file manifest", run: () => void updateManifest() },
 					"separator",
+					...SCHEMAS.map((kind) => ({ label: newOfKind(kind), run: () => void newSchema(kind.id) })),
+					"separator" as const,
 					{ label: "New document…", run: () => void newDoc() },
 					{ label: "Project state…", run: () => void newState() },
 					{ label: "Update catalogs", run: () => void updateCatalogs() },
@@ -457,7 +506,7 @@ export function Docs() {
 					<Group title="Docs" folder={folderOf("docs")} group="docs" filter={filter()} empty={settled() ? "No Markdown files here yet. Use New, above, to add one." : undefined} />
 				</Show>
 				<Show when={has("schema")}>
-					<Group title="Schema" folder={folderOf("schema")} group="schema" filter={filter()} empty={settled() ? "No tables described yet. Add a Markdown file to this folder for each table." : undefined} />
+					<Schema files={shown()} filtered={filtering()} empty={settled() ? "Nothing described yet. Use New, above, to describe a table, a message or a file layout." : undefined} />
 				</Show>
 				<Show when={has("plans")}>
 					<Group title="Plans" folder={folderOf("plans")} group="plans" filter={filter()} empty={settled() ? "No plans yet. Use New, above, to draw one." : undefined} />

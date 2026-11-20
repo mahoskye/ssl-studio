@@ -50,7 +50,7 @@ describe("a document's outline", () => {
 		const demo = join(import.meta.dir, "..", "examples", "due-dates");
 		const names = async (language: string, ...path: string[]) => outline(language, await Bun.file(join(demo, ...path)).text()).map((item) => item.name);
 		expect(await names("toml", ".ssl-studio", "project.toml")).toContain("project");
-		expect((await names("sql", "schema", "demo.sql")).some((name) => name.startsWith("CREATE TABLE DEMO_"))).toBe(true);
+		expect((await names("sql", "schema", "database", "demo.sql")).some((name) => name.startsWith("CREATE TABLE DEMO_"))).toBe(true);
 		expect(await names("markdown", "docs", "tickets", "DEMO-103.md")).toEqual(["DEMO-103: A report of the samples due soon"]);
 		expect(await names("json", "design", "SetSampleDueDates.plan.json")).toContain("nodes");
 		expect(hasOutline("ssl")).toBe(false);
@@ -100,7 +100,7 @@ describe("the database objects a schema's SQL creates", () => {
 	});
 
 	test("the demo's schema gives its three tables", async () => {
-		const text = await Bun.file(join(import.meta.dir, "..", "examples", "due-dates", "schema", "demo.sql")).text();
+		const text = await Bun.file(join(import.meta.dir, "..", "examples", "due-dates", "schema", "database", "demo.sql")).text();
 		expect(createdObjects(text)).toEqual([
 			{ object: "DEMO_SAMPLES", kind: "table" },
 			{ object: "DEMO_HOLIDAYS", kind: "table" },

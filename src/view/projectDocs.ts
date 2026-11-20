@@ -20,9 +20,12 @@ import {
 	decisionTemplate,
 	DOC_FOLDERS,
 	KNOWLEDGE,
+	promptTemplate,
 	questionTemplate,
 	referenceTemplate,
 	REGISTRIES,
+	SCHEMAS,
+	schemaTemplate,
 	slug,
 	snippetTemplate,
 	specTemplate,
@@ -35,7 +38,9 @@ import {
 	isCatalog,
 	type DocArea,
 	type KnowledgeKind,
+	type SchemaKind,
 } from "../shared/projectDocs";
+import { folderParts, typedParts } from "../shared/docSections";
 import type { DocFile, LinkTo, NameIn } from "../shared/protocol";
 import { backend } from "./backend";
 import { ask, choose } from "./dialogs";
@@ -288,7 +293,7 @@ export async function newKnowledge(kind: KnowledgeKind["id"]) {
 	// Read before anything is asked: a dialog takes the keyboard, and the selection with it.
 	const code = kind === "questions" || kind === "decisions" ? codeAtHand() : null;
 	const aboutCode = code ? ` (about ${code.from === code.to ? `line ${code.from}` : `lines ${code.from} to ${code.to}`} of ${baseName(code.path)})` : "";
-	const title = (await ask(kind === "questions" ? `The question, as you would ask it${aboutCode}` : kind === "snippets" ? "What the snippet is for, in a few words" : `The ${what.one}, in a few words${aboutCode}`))?.trim();
+	const title = (await ask(kind === "questions" ? `The question, as you would ask it${aboutCode}` : kind === "snippets" ? "What the snippet is for, in a few words" : kind === "prompts" ? "What the prompt is for, in a few words" : `The ${what.one}, in a few words${aboutCode}`))?.trim();
 	if (!title || !slug(title)) return;
 	if (kind === "snippets") {
 		const language = await choose("A snippet of what?", ["SQL", "SSL"]);
@@ -296,6 +301,7 @@ export async function newKnowledge(kind: KnowledgeKind["id"]) {
 		return start(joinPath(folder, `${slug(title)}.${language.toLowerCase()}`), snippetTemplate({ title, language: language === "SQL" ? "sql" : "ssl" }), "knowledge");
 	}
 	if (kind === "reference") return start(joinPath(folder, `${slug(title)}.md`), referenceTemplate({ title }), "knowledge");
+	if (kind === "prompts") return start(joinPath(folder, `${slug(title)}.md`), promptTemplate({ title }), "knowledge");
 	// Only what the open document says: a decision is not put to a ticket on a guess.
 	const ticket = ticketOfOpen() || undefined;
 	// Started with code selected, it is about that code: it says where, and keeps the lines as they were.
@@ -305,6 +311,27 @@ export async function newKnowledge(kind: KnowledgeKind["id"]) {
 	const taken = (await backend.docs()).filter((d) => d.group === "knowledge" && d.kind === "decisions").map((d) => Number(/^(\d+)/.exec(baseName(d.name))?.[1] ?? 0));
 	const number = String(Math.max(0, ...taken) + 1).padStart(4, "0");
 	await start(joinPath(folder, `${number}-${slug(title)}.md`), decisionTemplate({ title, date: today(), ticket }) + about, "knowledge");
+}
+
+/**
+ * A description of one table, one message or one file layout, in its kind's folder under the schema folder. A table
+ * is called what it is called in the database; a message and a layout are named in a few words. It goes in the
+ * kind's folder as the project has it, which may be written in other capitals ("Database"): no second folder is made
+ * beside it.
+ */
+export async function newSchema(id: SchemaKind["id"], inFolder?: string) {
+	if (!ready()) return;
+	const kind = SCHEMAS.find((known) => known.id === id)!;
+	const title = (await ask(id === "database" ? "The table's name, as the database has it" : `The ${kind.one}, in a few words`))?.trim();
+	if (!title) return;
+	// A file, so a table called BUILD is described: only a folder of that name is left out of the app's lists.
+	const named = typedParts(id === "database" ? title : slug(title), "file");
+	if ("problem" in named || named.parts.length !== 1) return notify("problem" in named ? named.problem : `“${title}” is not one name: a table is described in the ${kind.name.toLowerCase()} folder itself.`, "error");
+	// Asked for with no folder named (the Schema heading, the New menu, the palette), it goes where the project
+	// already keeps that kind, whatever capitals the folder is written in; only a project with none gets a new one.
+	const kept = docs().find((file) => file.group === "schema" && file.kind === id)?.name.split(/[\\/]/)[0];
+	const folder = joinPath(root(), ...folderParts(state.project!.schema), inFolder ?? kept ?? id);
+	await start(joinPath(folder, `${named.parts[0]}.md`), schemaTemplate(kind, title));
 }
 
 /** A row for each object the schema folder's SQL creates: object, kind, used by (empty), status, and where it was found. */

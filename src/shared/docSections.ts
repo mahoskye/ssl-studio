@@ -4,10 +4,13 @@
 // Explorer. Pure, so it can be tested: which folder a list is, what its menu
 // holds, and where a typed name puts a new document or folder.
 import { UNLISTED } from "./paths";
-import { DOC_FOLDERS, KNOWLEDGE, type KnowledgeKind } from "./projectDocs";
+import { DOC_FOLDERS, KNOWLEDGE, SCHEMAS, type KnowledgeKind, type SchemaKind } from "./projectDocs";
 
-/** A list of the Docs panel that has a folder of its own. "Project" has none: its files are at the top of the folder. */
-export type DocSection = "work" | "knowledge" | `knowledge:${KnowledgeKind["id"]}` | "registries" | "docs" | "schema" | "plans";
+/**
+ * A list of the Docs panel that has a folder of its own. "Project" has none: its files are at the top of the folder.
+ * "schema:database" is a folder under the schema folder: one of the kinds the app knows, or one of the project's own.
+ */
+export type DocSection = "work" | "knowledge" | `knowledge:${KnowledgeKind["id"]}` | "registries" | "docs" | "schema" | `schema:${string}` | "plans";
 
 /** The folders the project's settings name, each from the top of the workspace. */
 export type SectionFolders = { docs: string; schema: string; plans: string };
@@ -20,11 +23,19 @@ export const NEW_REGISTRY = "New registry…";
 export const NEW_DOCUMENT = "New document…";
 export const NEW_FOLDER = "New folder…";
 export const SHOW_FOLDER = "Show in the Explorer";
-/** "New decision…", "New reference note…": what the panel's own New menu calls it. */
-export const newOfKind = (kind: KnowledgeKind) => `New ${kind.one}…`;
+/** "New decision…", "New reference note…", "New table…": what the panel's own New menu calls it. */
+export const newOfKind = (kind: { one: string }) => `New ${kind.one}…`;
 
 /** The kind of the knowledge base a section is, when it is one. */
 export const kindOf = (section: DocSection): KnowledgeKind | undefined => KNOWLEDGE.find((kind) => section === `knowledge:${kind.id}`);
+
+/** The folder under the schema folder a section is, when it is one: "database", or a name of the project's own. */
+export const schemaFolderOf = (section: DocSection): string | undefined => (section.startsWith("schema:") ? section.slice("schema:".length) : undefined);
+/**
+ * The kind of schema a section is, when it is one the app knows: whatever the capitals its folder is written in,
+ * since a folder "Database" is the database's (and on some disks is the folder "database").
+ */
+export const schemaOf = (section: DocSection): SchemaKind | undefined => SCHEMAS.find((kind) => section.toLowerCase() === `schema:${kind.id}`);
 
 /**
  * The folder a section's documents are in, from the top of the workspace, with "/" between its parts: "" for the top
@@ -33,9 +44,12 @@ export const kindOf = (section: DocSection): KnowledgeKind | undefined => KNOWLE
  */
 export function sectionFolder(section: DocSection, folders: SectionFolders): string {
 	const kind = kindOf(section);
+	const under = schemaFolderOf(section);
 	const said = kind
 		? `${folders.docs}/${DOC_FOLDERS.knowledge}/${kind.id}`
-		: section === "work"
+		: under !== undefined
+			? `${folders.schema}/${under}`
+			: section === "work"
 			? `${folders.docs}/${DOC_FOLDERS.tickets}`
 			: section === "knowledge"
 				? `${folders.docs}/${DOC_FOLDERS.knowledge}`
@@ -56,7 +70,7 @@ export const folderParts = (folder: string) => folder.split(/[\\/]+/).filter((pa
 export const folderSaid = (folder: string) => (folderParts(folder).length ? `${folderParts(folder).join("/")}/` : "the project's folder");
 
 /** True for a section whose documents are plain Markdown, named by whoever writes them: a new one can go in a folder of its own. */
-export const plainSection = (section: DocSection) => section === "docs" || section === "schema";
+export const plainSection = (section: DocSection) => section === "docs" || section === "schema" || section.startsWith("schema:");
 
 /**
  * The menu of a section's heading: first what the section keeps, by the names
@@ -64,10 +78,12 @@ export const plainSection = (section: DocSection) => section === "docs" || secti
  * then the folder in the Explorer (which is where an empty folder shows).
  */
 export function sectionMenu(section: DocSection): string[] {
-	const kind = kindOf(section);
+	const kind = kindOf(section) ?? schemaOf(section);
 	const own = kind
 		? [newOfKind(kind)]
-		: section === "work"
+		: section === "schema"
+			? SCHEMAS.map(newOfKind)
+			: section === "work"
 			? [NEW_TICKET, IMPORT_TICKETS, NEW_SPEC]
 			: section === "knowledge"
 				? KNOWLEDGE.map(newOfKind)

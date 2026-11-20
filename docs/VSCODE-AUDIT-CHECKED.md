@@ -654,3 +654,60 @@ light theme: each wraps inside its box in all four. Seen with it: while
 the settings file does not read, the app shows the settings it would
 have with no such file, as it did before; the three cleared shortcuts
 showed as set again until the file was mended.
+
+## The schema by kind, and prompts kept
+
+Asked for in use, after the audit's work: the schema folder split into
+a folder for each kind of thing it describes, the database's tables
+in a folder of their own, and a place like the snippets' for prompts.
+Asked which other kinds to offer, the user chose interfaces and files.
+The decision is
+[ADR 0026](adr/0026-schema-is-kept-by-kind-and-prompts-are-kept.md),
+a draft.
+
+| Now | Where |
+| --- | --- |
+| Tables | `schema/database/`, listed under Database |
+| Messages | `schema/interfaces/`, listed under Interfaces |
+| File layouts | `schema/files/`, listed under Files |
+| A kind of one's own | Any other folder under the schema folder, under its own name |
+| What lies at the top | Still listed, under "At the top" |
+| Prompts | `docs/knowledge/prompts/`, listed under Prompts beside Snippets |
+
+Looked at in my own instance, on a scratch copy of the demo, at 1400
+and 720 wide in the dark and the light theme, a kind's menu open in
+each: nothing ran off the panel in any.
+
+| Done | Seen |
+| --- | --- |
+| The Schema list | Database, Interfaces, Files and "At the top", each with its count |
+| New table… | Asked the table's name; `DEMO_ORDERS.md` in `database/`, from its template |
+| Interface message | New interface message…: `Result-from-the-analyser.md` in `interfaces/`, with a table of fields |
+| New file layout… | `Sample-export.md` in `files/` |
+| Each of the three | Marked "template" in the list until written |
+| New folder… there | "labels", then its first document: listed under a heading "labels" |
+| A kind's README | Shown by its file's name, not by a title that repeats the heading |
+| New prompt… | `Find-what-a-change-touches.md` under Prompts, marked "template" |
+| The Agent panel | "Kept in this project": the two written prompts, and not the template |
+| A kept prompt chosen | Its words in the question box, the keyboard in it; nothing sent |
+
+The Agent panel is not shown at 720 wide (the right panel gives way),
+so its list was looked at at 1400 only, dark and light. No question
+was sent to the agent: the instance can reach paid models.
+
+The demo project's tables were moved into `schema/database/` with the
+links to them, its file manifest and two catalogs were brought up to
+date with the app's own steps, and it was given one message, one file
+layout and two prompts, written for this repository. Nothing in the
+demo's scripts reads the message or the file yet, and their pages say
+so.
+
+Looked at once more after the review's findings were fixed, on a
+scratch copy with the interfaces folder written `Interfaces/`, a
+folder `Labels/` and a folder `other/`, at 1400 and 720 wide in the
+dark and the light theme: the headings read Database, Interfaces,
+Files, Labels, other and "At the top", each once. From the Interfaces
+heading, "New interface message…" put `Order-feed.md` in
+`schema/Interfaces/`, where it was then listed, and "Show in the
+Explorer" put the keyboard on `schema/Interfaces`.
+

@@ -137,7 +137,8 @@ Parameters and Returns parts, for the vision's "doc block as a form".
 
 ### L6: the tables a script reads and writes
 
-**Why:** a project keeps its tables under `schema/` (ADR 0006). Nothing
+**Why:** a project keeps its tables under `schema/database/` (ADRs 0006
+and 0026). Nothing
 connects a script's SQL to them: the agent is not given the tables a script
 uses, and a column that does not exist is not reported.
 

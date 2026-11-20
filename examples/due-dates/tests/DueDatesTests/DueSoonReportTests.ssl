@@ -1,6 +1,6 @@
 /********************************************************************************
 Description.. : Tests for DueDates.DueSoonReport against the database.
-                NEEDS THE ROWS OF schema/demo.sql, loaded fresh: no sample has a due
+                NEEDS THE ROWS OF schema/database/demo.sql, loaded fresh: no sample has a due
                 date yet. Each test runs inside a transaction that is rolled back,
                 so the rows are left as they were.
                 Run DueDatesTests.DueSoonReportTests.RunTests. It returns the tally.

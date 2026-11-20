@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { catalogBlock, catalogLine, catalogList, catalogStale, withCatalog, CATALOG_END, CATALOG_START } from "../src/shared/catalog";
 import { columnOf, csvCell, csvRow, parseCsv, tally } from "../src/shared/csv";
 import { frontMatter, many, one, summaryOf, titleOf } from "../src/shared/frontMatter";
-import { catalogTemplate, decisionTemplate, questionTemplate, slug, specTemplate, ticketKey, ticketTemplate, toneOf } from "../src/shared/projectDocs";
+import { catalogTemplate, decisionTemplate, KNOWLEDGE, promptTemplate, promptText, questionTemplate, SCHEMAS, schemaTemplate, slug, specTemplate, ticketKey, ticketTemplate, toneOf } from "../src/shared/projectDocs";
 
 describe("front matter", () => {
 	test("values, a list on one line and a list as dashes are read", () => {
@@ -186,6 +186,70 @@ describe("what a project's documents start as", () => {
 
 import { FOUND, GONE, manifestSummary, mergeManifest } from "../src/shared/manifest";
 
+describe("a prompt kept for the agent", () => {
+	test("is a kind of the knowledge base, beside the snippets", () => {
+		expect(KNOWLEDGE.map((kind) => kind.id)).toEqual(["decisions", "questions", "snippets", "prompts", "reference"]);
+		expect(KNOWLEDGE.find((kind) => kind.id === "prompts")).toMatchObject({ name: "Prompts", one: "prompt" });
+	});
+
+	test("starts as its name and a line that says what goes there, and has no words until that line is replaced", () => {
+		const text = promptTemplate({ title: "Check a rule" });
+		expect(text.startsWith("# Check a rule\n\n")).toBe(true);
+		expect(isPrompt(summaryOf(text))).toBe(true);
+		expect(promptText(text)).toBe("");
+	});
+
+	test("its words are the document without its name: what is put in the agent's box", () => {
+		expect(promptText("# Check a rule\n\nRead the selected rule.\nSay what it skips.\n")).toBe("Read the selected rule.\nSay what it skips.");
+		// The lines a document opens with are not part of what is asked, and neither is its heading.
+		expect(promptText("---\nstatus: kept\n---\n# Check a rule\n\nRead the selected rule.\n")).toBe("Read the selected rule.");
+		// A heading further down is part of the words.
+		expect(promptText("# Name\n\nFirst.\n\n## Then\n\nSecond.\n")).toBe("First.\n\n## Then\n\nSecond.");
+		// With no heading at all, everything is the words.
+		expect(promptText("Just the words.\n")).toBe("Just the words.");
+		expect(promptText("# Only a name\n")).toBe("");
+		// A heading with no words in it is still the heading: what follows it is the words.
+		expect(promptText("#\n\nThe words.\n")).toBe("The words.");
+		expect(promptText("# \n\nThe words.\n")).toBe("The words.");
+		expect(promptText("#\r\n\r\nThe words.\r\n")).toBe("The words.");
+		// A second-level heading first is not the document's name: it is part of the words.
+		expect(promptText("## Steps\n\nFirst.\n")).toBe("## Steps\n\nFirst.");
+		// "#tag" is not a heading.
+		expect(promptText("#tag first\n\nThen.\n")).toBe("#tag first\n\nThen.");
+		expect(promptText("")).toBe("");
+		expect(promptText("# Name\r\n\r\nWith Windows line ends.\r\n")).toBe("With Windows line ends.");
+	});
+});
+
+describe("a description in the schema folder", () => {
+	test("is of one of three kinds, each in its own folder", () => {
+		expect(SCHEMAS.map((kind) => [kind.id, kind.name, kind.one])).toEqual([
+			["database", "Database", "table"],
+			["interfaces", "Interfaces", "interface message"],
+			["files", "Files", "file layout"],
+		]);
+	});
+
+	test("starts as its name, a line that says what goes there, and a table of its columns or fields", () => {
+		for (const kind of SCHEMAS) {
+			const text = schemaTemplate(kind, "DEMO_ORDERS");
+			const lines = text.split("\n");
+			expect(lines[0]).toBe("# DEMO_ORDERS");
+			expect(isPrompt(summaryOf(text))).toBe(true);
+			expect(lines[4]).toBe(`| ${kind.columns.join(" | ")} |`);
+			expect(lines[5]).toBe("| --- | --- | --- | --- |");
+			// The table rule: four columns at most, and short headings.
+			expect(kind.columns.length).toBeLessThanOrEqual(4);
+			expect(kind.columns.every((column) => column.length <= 16)).toBe(true);
+		}
+	});
+
+	test("the three say different things of themselves, so one still as its template is told from one written", () => {
+		const lines = SCHEMAS.map((kind) => summaryOf(schemaTemplate(kind, "X")));
+		expect(new Set(lines).size).toBe(3);
+	});
+});
+
 describe("a file manifest", () => {
 	const file = (path: string, sha256: string, bytes = 10) => ({ path, kind: "script", bytes, lines: 2, sha256 });
 
@@ -252,8 +316,59 @@ describe("the demo project's working documents", () => {
 
 	test("the knowledge base says what kind each thing is, and a snippet is titled by its first comment", async () => {
 		const knowledge = (await listed()).filter((d) => d.group === "knowledge" && !d.catalog);
-		expect([...new Set(knowledge.map((d) => d.kind))]).toEqual(["decisions", "questions", "reference", "snippets"]);
+		expect([...new Set(knowledge.map((d) => d.kind))]).toEqual(["decisions", "prompts", "questions", "reference", "snippets"]);
 		expect(knowledge.find((d) => d.name.endsWith("Samples-with-no-due-date.sql"))).toMatchObject({ title: "Samples with no due date", summary: "The samples the due-date job will look at next. Read only." });
+	});
+
+	test("a kept prompt is listed by its name, and says what it asks in its first words", async () => {
+		const prompts = (await listed()).filter((d) => d.group === "knowledge" && d.kind === "prompts");
+		expect(prompts.map((d) => d.title)).toEqual(["Cases a rule needs", "Walk through a due date"]);
+		expect(prompts.every((d) => !d.untouched && Boolean(d.summary))).toBe(true);
+	});
+
+	test("the schema folder is listed by its kinds: the tables, the messages, the file layouts, and what lies at its top", async () => {
+		const schema = (await listed()).filter((d) => d.group === "schema");
+		const of = (kind: string) => schema.filter((d) => d.kind === kind).map((d) => d.name.split("\\").join("/"));
+		expect(of("database")).toEqual(["database/DEMO_HOLIDAYS.md", "database/DEMO_OUTAGES.md", "database/DEMO_SAMPLES.md", "database/demo.sql", "database/README.md"]);
+		expect(of("interfaces")).toEqual(["interfaces/outage-notice.json", "interfaces/Outage-notice.md", "interfaces/README.md"]);
+		expect(of("files")).toEqual(["files/Holiday-calendar.md", "files/holidays-2026.csv", "files/README.md"]);
+		expect(of("")).toEqual(["README.md"]);
+		// A description says what it is called; a sample beside it is known by its file's name.
+		expect(schema.find((d) => d.name.endsWith("Outage-notice.md"))?.title).toBe("Outage notice");
+		expect(schema.find((d) => d.name.endsWith("outage-notice.json"))?.title).toBeUndefined();
+		expect(schema.flatMap((d) => d.problems ?? [])).toEqual([]);
+	});
+
+	test("a folder of the project's own under the schema folder is a kind by its name", async () => {
+		const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+		const { tmpdir } = await import("node:os");
+		const root = mkdtempSync(join(tmpdir(), "ssl-studio-schema-"));
+		try {
+			mkdirSync(join(root, "schema", "labels"), { recursive: true });
+			mkdirSync(join(root, "schema", "database"), { recursive: true });
+			writeFileSync(join(root, "schema", "labels", "Sample-label.md"), "# Sample label\n\nWhat is printed on a sample.\n");
+			writeFileSync(join(root, "schema", "database", "ORDERS.md"), "# ORDERS\n\nOne row for each order.\n");
+			writeFileSync(join(root, "schema", "Old-notes.md"), "# Old notes\n");
+			writeFileSync(join(root, "schema", "labels", "label.zpl"), "^XA^XZ");
+			// A known kind in other capitals is that kind, not a second one beside it; "other" is a folder like any.
+			mkdirSync(join(root, "schema", "Interfaces"));
+			mkdirSync(join(root, "schema", "other"));
+			writeFileSync(join(root, "schema", "Interfaces", "Order-feed.md"), "# Order feed\n\nOrders as they come in.\n");
+			writeFileSync(join(root, "schema", "Interfaces", "order-feed.yaml"), "openapi: 3.1.0\n");
+			writeFileSync(join(root, "schema", "other", "Misc.md"), "# Misc\n");
+			const docs = (await listDocs(new WorkspaceFiles(root), await readProject(root))).filter((d) => d.group === "schema");
+			// What is not a description, SQL or a sample the app reads is not listed: a printer's own file is not.
+			expect(docs.map((d) => [d.kind, d.name.split("\\").join("/"), d.title])).toEqual([
+				["database", "database/ORDERS.md", "ORDERS"],
+				["interfaces", "Interfaces/Order-feed.md", "Order feed"],
+				["interfaces", "Interfaces/order-feed.yaml", undefined],
+				["labels", "labels/Sample-label.md", "Sample label"],
+				["", "Old-notes.md", "Old notes"],
+				["other", "other/Misc.md", "Misc"],
+			]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 
 	test("a registry says how many rows it has and how far they are", async () => {

@@ -34,11 +34,13 @@ the source of truth.
 - **Projects and docs:** "Set up project" gives a folder its settings
   (`.ssl-studio/project.toml`), a `README.md`, an `AGENTS.md`, and folders
   for docs, schema, tests and code. The Docs panel lists the two files with
-  the Markdown under `docs/` and `schema/`, rendered for reading, and
-  Health says which are missing or still the template.
+  the Markdown under `docs/`, rendered for reading, and what `schema/`
+  holds by its kinds (the database's tables, the messages exchanged with
+  other systems, the files read or written); Health says which are
+  missing or still the template.
 - **The work, written down:** under `docs/`, the tickets that drive the
   work, the specs written from them, a knowledge base (decisions, questions,
-  snippets, reference notes) and registries: tables of the settings, files
+  snippets, prompts kept for the agent, reference notes) and registries: tables of the settings, files
   and database objects a migration must carry across. Each folder has a
   catalog the IDE keeps, the Docs panel shows each ticket with its specs
   and each registry with how far it is, and Health says what is out of

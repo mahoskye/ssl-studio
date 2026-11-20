@@ -7,7 +7,7 @@ The list between the two markers is written by SSL Studio from the files here (D
 <!-- catalog -->
 
 - [Database objects](database.csv): 5 of 6 done.
-- [File manifest](files.csv): 0 of 36 done.
+- [File manifest](files.csv): 0 of 43 done.
 - [Application settings](settings.csv): 7 of 10 done.
 
 <!-- /catalog -->

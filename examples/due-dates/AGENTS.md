@@ -49,10 +49,10 @@ Nobody runs it in production; it has to stay small, readable and correct.
 - `docs/`: notes and decisions.
 - `docs/tickets/`: the tickets the work comes from, one file each. Read the ticket before starting on it.
 - `docs/specs/`: what is to be built, written from the tickets.
-- `docs/knowledge/`: decisions, questions, snippets and notes. Look here before deciding again.
+- `docs/knowledge/`: decisions, questions, snippets, prompts and notes. Look here before deciding again.
 - `docs/registries/`: the settings, files and database objects, as tables.
 - Each of those four has an `INDEX.md`, its catalog. Do not edit the list between its markers.
-- `schema/`: the tables the project reads and writes. Check a table here before writing SQL for it.
+- `schema/`: what the project's data looks like, each kind in its folder. `database/` is the tables it reads and writes: check a table there before writing SQL for it. `interfaces/` is the messages it exchanges with other systems, and `files/` the files it reads or writes.
 - `tests/DueDatesTests/`: test scripts and what they need. `TestSupport` runs
   them; `DbTestSupport` is for the ones that need the database.
 - `design/`: the plan for `SetSampleDueDates` (chart, spec, build record),

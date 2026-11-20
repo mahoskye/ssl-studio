@@ -25,7 +25,7 @@ with a catalog the IDE keeps:
 | --- | --- | --- |
 | `tickets/` | What was asked | Markdown, named by the ticket's key |
 | `specs/` | What will be built | Markdown, for a ticket |
-| `knowledge/` | What was learned | A decision, a question, a snippet, a note |
+| `knowledge/` | What was learned | A decision, a question, a snippet, a prompt, a note |
 | `registries/` | What must carry | A CSV table, a row for each thing a migration must carry across |
 
 `STATE.md` beside them says where the project stands, in plain words. The
@@ -44,8 +44,8 @@ demo project (`examples/due-dates`) has one of everything, invented for it.
 3. **Spec it out.** "New spec…" writes a spec for the ticket. A plan
    (`design/*.plan.json`) names its ticket too, and the spec the planner
    writes from it is listed with the ticket.
-4. **Write down what comes up.** A decision, a question, a snippet or a
-   reference note goes in the knowledge base. Started with code selected, a
+4. **Write down what comes up.** A decision, a question, a snippet, a
+   prompt or a reference note goes in the knowledge base. Started with code selected, a
    question or a decision keeps a link to those lines and the lines as they
    were.
 5. **Tick what is done.** A ticket's "What done looks like" and a spec's
@@ -86,9 +86,16 @@ the JSON its API returns
 - **Work:** each ticket with its plans and specs under it. A ticket that is
   part of another is under its parent. What is under way comes first;
   finished tickets beyond three fold away behind a count.
-- **Knowledge base:** decisions, questions, snippets and reference notes,
-  each kind together, with a count.
+- **Knowledge base:** decisions, questions, snippets, prompts and
+  reference notes, each kind together, with a count.
 - **Registries:** each with how far it is.
+- **Schema:** what the project's data looks like, each kind together:
+  the database's tables, the messages exchanged with other systems
+  (interfaces), and the files read or written. Each kind is a folder
+  under the schema folder; any other folder there is listed under its
+  own name ([ADR 0026](adr/0026-schema-is-kept-by-kind-and-prompts-are-kept.md)).
+- **A heading's menu** (right-click, or the menu key on it) adds what
+  that list keeps, or a folder in its folder.
 - **A filter** narrows every list to the documents the words typed are in.
 
 ## Catalogs
@@ -198,7 +205,9 @@ SSL is not on this list: its outline, findings and formatting are the
 language server's ([ADR 0015](adr/0015-what-is-not-ssl-is-read-here.md)).
 YAML has no check: the reader it would be built on marks right documents
 as wrong ([ADR 0018](adr/0018-a-check-is-not-built-on-a-reader-that-is-wrong.md)).
-Kept snippets are in the Palette, to insert at the cursor.
+Kept snippets are in the Palette, to insert at the cursor. Kept prompts
+are in the Agent panel, under its own questions: one puts its words in
+the question box, to send as they are or to change first.
 
 ## Not done
 

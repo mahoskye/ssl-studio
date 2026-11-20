@@ -1,6 +1,6 @@
 /********************************************************************************
 Description.. : Tests for what a rollback leaves in the database: nothing.
-                NEEDS THE ROWS OF schema/demo.sql, loaded fresh: no sample has a due
+                NEEDS THE ROWS OF schema/database/demo.sql, loaded fresh: no sample has a due
                 date yet. These tests are NOT run inside a transaction of the runner:
                 each has to own the outermost one, because a rollback made inside
                 another transaction is carried out only when the outer one ends. A

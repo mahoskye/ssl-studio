@@ -1,4 +1,5 @@
 import { CATALOG_FILE, type CatalogItem } from "./catalog";
+import { frontMatter } from "./frontMatter";
 import { baseName, joinPath, relativePath } from "./paths";
 import type { DocFile, DocGroup } from "./protocol";
 
@@ -15,13 +16,26 @@ export type DocArea = keyof typeof DOC_FOLDERS;
 /** The project's state, in plain words: at the top of the docs folder. */
 export const STATE_FILE = "STATE.md";
 
-export type KnowledgeKind = { id: "decisions" | "questions" | "snippets" | "reference"; name: string; one: string; about: string };
+export type KnowledgeKind = { id: "decisions" | "questions" | "snippets" | "prompts" | "reference"; name: string; one: string; about: string };
 /** The kinds of thing the knowledge base keeps, each in its own folder. */
 export const KNOWLEDGE: readonly KnowledgeKind[] = [
 	{ id: "decisions", name: "Decisions", one: "decision", about: "What was decided, and why: one decision in a file." },
 	{ id: "questions", name: "Questions", one: "question", about: "What is not yet known, and what was answered: one question in a file." },
 	{ id: "snippets", name: "Snippets", one: "snippet", about: "SQL queries and pieces of SSL kept for use." },
+	{ id: "prompts", name: "Prompts", one: "prompt", about: "Questions and instructions for the agent, kept to be put to it again." },
 	{ id: "reference", name: "Reference", one: "reference note", about: "How something works: one subject in a file." },
+];
+
+export type SchemaKind = { id: "database" | "interfaces" | "files"; name: string; one: string; about: string; columns: readonly string[] };
+/**
+ * What the project's data looks like, each kind in its own folder under the schema folder: the tables it reads and
+ * writes, the messages it exchanges with instruments and other systems, and the files it reads or writes. Any other
+ * folder there is a kind of the project's own, listed under its own name.
+ */
+export const SCHEMAS: readonly SchemaKind[] = [
+	{ id: "database", name: "Database", one: "table", about: "The tables the project reads and writes: one Markdown file for each table or area, with its columns, types and keys, and a line on what it is for. `.sql` files are listed too.", columns: ["Column", "Type", "Null", "What it holds"] },
+	{ id: "interfaces", name: "Interfaces", one: "interface message", about: "What the project exchanges with instruments and other systems: one Markdown file for each message, with its fields. A sample of the message, or its own schema (JSON, XML, YAML), can lie beside it.", columns: ["Field", "Type", "Needed", "What it holds"] },
+	{ id: "files", name: "Files", one: "file layout", about: "The files the project reads or writes: one Markdown file for each layout, with its columns. A sample file can lie beside it.", columns: ["Column", "Type", "Example", "What it holds"] },
 ];
 
 export type RegistryKind = { id: string; file: string; title: string; about: string; columns: readonly string[] };
@@ -76,6 +90,10 @@ export const PROMPTS = {
 	reference: "One sentence on what this explains.",
 	sql: "What it is for, and what to change before running it.",
 	ssl: "What it is for, and what to change before using it.",
+	prompt: "The words to put to the agent, as they are to be sent.",
+	database: "What the table holds, and what writes it.",
+	interfaces: "Who sends it, who receives it, and when.",
+	files: "What the file is, who writes it and who reads it.",
 } as const;
 /** Whether a line is one a template wrote, not yet replaced. */
 export const isPrompt = (line: string | undefined) => Object.values(PROMPTS).some((prompt) => prompt === (line ?? "").trim());
@@ -177,6 +195,33 @@ export const referenceTemplate = (note: { title: string }) => `# ${note.title}
 ${PROMPTS.reference}
 `;
 
+/** A prompt kept for the agent: its name, then the words that are put to it. */
+export const promptTemplate = (prompt: { title: string }) => `# ${prompt.title}
+
+${PROMPTS.prompt}
+`;
+
+/**
+ * The words of a kept prompt, as they go into the agent's box: the document without the lines it opens with and
+ * without its heading, which is its name and not part of what is asked. Nothing for a prompt still as its template.
+ */
+export function promptText(text: string): string {
+	const body = frontMatter(text)
+		.body.replace(/^\s*#(?:[ \t]+[^\r\n]*)?[ \t]*(\r?\n|$)/, "")
+		.trim();
+	return isPrompt(body.split(/\r?\n/)[0]) ? "" : body;
+}
+
+/** A description of one table, one message or one file layout: what it is, then its columns or fields as a table. */
+export const schemaTemplate = (kind: SchemaKind, title: string) => `# ${title}
+
+${PROMPTS[kind.id]}
+
+| ${kind.columns.join(" | ")} |
+| ${kind.columns.map(() => "---").join(" | ")} |
+| ${kind.columns.map(() => " ").join(" | ")} |
+`;
+
 /** A snippet starts with a comment that says what it is for: the catalog reads its first line as the title. */
 export const snippetTemplate = (snippet: { title: string; language: "sql" | "ssl" }) =>
 	// An SSL comment runs to its first semicolon: one in the title would end it early.
@@ -215,7 +260,7 @@ export const catalogTemplate = (area: DocArea) => {
 	const head: Record<DocArea, [string, string]> = {
 		tickets: ["Tickets", "The tickets that drive the work: one file for each, with what was asked, its state and the tickets it is related to."],
 		specs: ["Specs", "What is to be built, written from the tickets: one spec in a file, with its state. Specs the planner writes beside a plan are listed here too."],
-		knowledge: ["Knowledge base", "What the project has learned: decisions, questions, snippets kept for use, and notes on how things work."],
+		knowledge: ["Knowledge base", "What the project has learned: decisions, questions, snippets and prompts kept for use, and notes on how things work."],
 		registries: ["Registries", "What a migration is checked against: tables of the application's settings, its files and its database objects, each row with how far it has come."],
 	};
 	return `# ${head[area][0]}\n\n${head[area][1]}\n\n${CATALOG_NOTE}\n\n<!-- catalog -->\n\nNothing here yet.\n\n<!-- /catalog -->\n`;

@@ -1,13 +1,23 @@
 import { describe, expect, test } from "bun:test";
-import { folderParts, folderSaid, IMPORT_TICKETS, kindOf, NEW_DOCUMENT, NEW_FOLDER, NEW_PLAN, NEW_REGISTRY, NEW_SPEC, NEW_TICKET, plainSection, sectionFolder, sectionMenu, SHOW_FOLDER, typedDocument, typedParts, type DocSection } from "../src/shared/docSections";
+import { folderParts, folderSaid, IMPORT_TICKETS, kindOf, NEW_DOCUMENT, NEW_FOLDER, NEW_PLAN, NEW_REGISTRY, NEW_SPEC, NEW_TICKET, plainSection, schemaFolderOf, schemaOf, sectionFolder, sectionMenu, SHOW_FOLDER, typedDocument, typedParts, type DocSection } from "../src/shared/docSections";
 
 const folders = { docs: "docs", schema: "db/schema", plans: "design" };
-const sections: DocSection[] = ["work", "knowledge", "knowledge:decisions", "knowledge:questions", "knowledge:snippets", "knowledge:reference", "registries", "docs", "schema", "plans"];
+const sections: DocSection[] = ["work", "knowledge", "knowledge:decisions", "knowledge:questions", "knowledge:snippets", "knowledge:prompts", "knowledge:reference", "registries", "docs", "schema", "schema:database", "schema:interfaces", "schema:files", "schema:labels", "plans"];
 
 describe("the folder of a list in the Docs panel", () => {
 	test("is the one the project's settings name, or the one under the docs folder that the list keeps", () => {
 		expect(sectionFolder("docs", folders)).toBe("docs");
 		expect(sectionFolder("schema", folders)).toBe("db/schema");
+		expect(sectionFolder("schema:database", folders)).toBe("db/schema/database");
+		expect(sectionFolder("schema:labels", folders)).toBe("db/schema/labels");
+		expect(schemaOf("schema:interfaces")?.one).toBe("interface message");
+		expect(schemaOf("schema:labels")).toBeUndefined();
+		// A known kind's folder written in other capitals is that kind, and what is made there goes in that folder.
+		expect(schemaOf("schema:Database")?.id).toBe("database");
+		expect(sectionFolder("schema:Database", folders)).toBe("db/schema/Database");
+		expect(sectionMenu("schema:Database")).toEqual(["New table…", NEW_FOLDER, SHOW_FOLDER]);
+		expect(schemaFolderOf("schema:labels")).toBe("labels");
+		expect(schemaFolderOf("schema")).toBeUndefined();
 		expect(sectionFolder("plans", folders)).toBe("design");
 		expect(sectionFolder("work", folders)).toBe("docs/tickets");
 		expect(sectionFolder("knowledge", folders)).toBe("docs/knowledge");
@@ -48,11 +58,18 @@ describe("the menu of a list's heading", () => {
 
 	test("opens with what the list keeps", () => {
 		expect(sectionMenu("docs")).toEqual([NEW_DOCUMENT, NEW_FOLDER, SHOW_FOLDER]);
-		expect(sectionMenu("schema")).toEqual([NEW_DOCUMENT, NEW_FOLDER, SHOW_FOLDER]);
+		// The schema's own heading offers each kind it knows; a kind's heading offers its own.
+		expect(sectionMenu("schema")).toEqual(["New table…", "New interface message…", "New file layout…", NEW_FOLDER, SHOW_FOLDER]);
+		expect(sectionMenu("schema:database")).toEqual(["New table…", NEW_FOLDER, SHOW_FOLDER]);
+		expect(sectionMenu("schema:interfaces")).toEqual(["New interface message…", NEW_FOLDER, SHOW_FOLDER]);
+		expect(sectionMenu("schema:files")).toEqual(["New file layout…", NEW_FOLDER, SHOW_FOLDER]);
+		// A folder of the project's own under the schema folder holds documents named by whoever writes them.
+		expect(sectionMenu("schema:labels")).toEqual([NEW_DOCUMENT, NEW_FOLDER, SHOW_FOLDER]);
+		expect(sectionMenu("knowledge:prompts")).toEqual(["New prompt…", NEW_FOLDER, SHOW_FOLDER]);
 		expect(sectionMenu("plans")[0]).toBe(NEW_PLAN);
 		expect(sectionMenu("registries")[0]).toBe(NEW_REGISTRY);
 		expect(sectionMenu("work").slice(0, 3)).toEqual([NEW_TICKET, IMPORT_TICKETS, NEW_SPEC]);
-		expect(sectionMenu("knowledge").slice(0, 4)).toEqual(["New decision…", "New question…", "New snippet…", "New reference note…"]);
+		expect(sectionMenu("knowledge").slice(0, 5)).toEqual(["New decision…", "New question…", "New snippet…", "New prompt…", "New reference note…"]);
 		expect(sectionMenu("knowledge:questions")).toEqual(["New question…", NEW_FOLDER, SHOW_FOLDER]);
 	});
 
@@ -61,7 +78,7 @@ describe("the menu of a list's heading", () => {
 	});
 
 	test("a plain document can be named straight into a new folder only where documents are plain", () => {
-		expect(sections.filter(plainSection)).toEqual(["docs", "schema"]);
+		expect(sections.filter(plainSection)).toEqual(["docs", "schema", "schema:database", "schema:interfaces", "schema:files", "schema:labels"]);
 	});
 });
 
@@ -102,6 +119,10 @@ describe("where a typed name puts a new folder", () => {
 		expect(typedDocument("Dist/notes")).toEqual({ problem: "“Dist” is the folder “dist” on a disk that does not tell capitals apart, and the app leaves that one out of every list." });
 		// A document is a file: called as one of them, with its ending, it is listed.
 		expect(typedDocument("Build")).toEqual({ folders: [], file: "Build.md", title: "Build" });
+		// So is a table described under its own name: BUILD and dist are tables like any other.
+		expect(typedParts("BUILD", "file")).toEqual({ parts: ["BUILD"] });
+		expect(typedParts("dist", "file")).toEqual({ parts: ["dist"] });
+		expect(typedParts("build/ORDERS", "file")).toEqual({ problem: "“build” is a folder the app leaves out of every list: nothing made there would be shown." });
 	});
 
 	test("a name that only opens with a dot is a name", () => {

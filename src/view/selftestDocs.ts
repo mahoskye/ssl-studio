@@ -301,6 +301,33 @@ export function selftestWork(): Promise<Steps> {
 			return true;
 		});
 
+		// What the data looks like is listed by its kinds, each with a heading of its own; a table is described from
+		// its kind's heading, in that kind's folder, and is marked as still its template.
+		await step("schemaKindsListed", async () => {
+			showPanel("docs");
+			return until(() => ["database", "interfaces", "files"].every((kind) => document.querySelector(`[data-panel="docs"] [data-row="head:docs:schema:${kind}"]`)));
+		});
+		await step("tableDescribedFromHead", async () => {
+			const head = document.querySelector<HTMLElement>('[data-panel="docs"] [data-row="head:docs:schema:database"]');
+			if (!head) return false;
+			const box = head.getBoundingClientRect();
+			head.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: box.left + 8, clientY: box.top + 4 }));
+			const entry = await until(() => entries().find((item) => item.textContent?.trim() === "New table…"));
+			entry?.click();
+			const name = await until(() => document.querySelector<HTMLInputElement>(".dialog input"));
+			if (!name?.form) return false;
+			name.value = "SELF_TABLE";
+			name.form.requestSubmit();
+			return until(() => docs().some((d) => d.group === "schema" && d.kind === "database" && /(^|[\\/])SELF_TABLE\.md$/.test(d.name) && d.title === "SELF_TABLE" && d.untouched));
+		});
+		// A prompt kept in the knowledge base is offered in the Agent panel, by its name.
+		await step("promptKeptAndOffered", async () => {
+			await write(["knowledge", "prompts", "Self-prompt.md"], "# Self prompt\n\nSay what the selected code does.\n");
+			setState("treeVersion", (v) => v + 1);
+			const { keptPrompts } = await import("./agent/Agent");
+			return until(() => keptPrompts().some((prompt) => prompt.title === "Self prompt" && prompt.kind === "prompts"));
+		});
+
 		// A document that is not SSL has an outline of its own.
 		showPanel("objects");
 		await step("documentOutlined", async () => {
