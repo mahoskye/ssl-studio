@@ -1,11 +1,12 @@
 # What the reviews found, finding by finding
 
-Eight reviews of the work on [the audit](VSCODE-AUDIT.md) were made by a
+Nine reviews of the work on [the audit](VSCODE-AUDIT.md) were made by a
 reader who was given the commits and not the author's conclusions: three
 of the build's steps, three of the fixes the last pass made, each of
 the fixes that came of the one before, one of what the user's first use
-asked for, and one of what the second asked for. The last three found
-nothing that loses work on disk. This
+asked for, one of what the second asked for, and one of Markdown drawn
+as it is written. The last four found nothing that loses work on disk.
+This
 lists every finding, what was done about it, and the commit that did it.
 "Left" means not changed, with the reason.
 
@@ -562,7 +563,183 @@ before they went in.
    Fixed: it says it in hidden words; the attribute is a tree's only.
 10. **A tooltip advised what cannot work.** Fixed: it says to widen the
     window, for one side open as for both.
-11. **Rows in the Work group did not line up.** Fixed: every row there
-    leaves a twisty's room.
+11. **Rows in the Work group did not line up.** Fixed: every document's
+    row there leaves a twisty's room.
 12. **Two counts were wrong** in the list of what was seen. Fixed.
 13. **A comment sat over the wrong function.** Fixed.
+
+### The fixes, read before they went in
+
+A second fresh reviewer read the staged change, fixes and all, before
+it was committed (`2fb0ad3`), and held nothing back. It found seven
+small things, fixed in the commit after.
+
+1. **"Open to the side" with no tab open left an empty group beside the
+   file.** Fixed: with nothing open it opens where a file would.
+2. **Rename and trash were offered on the row of the project's own
+   settings file**, and nothing read the project again after. Fixed:
+   that row does not offer them.
+3. **"Open the file" on a Source control row did not keep a preview
+   tab.** Fixed.
+4. **A double click in the twisty's room of a row with nothing under it
+   did not keep the tab.** Fixed.
+5. **A comparison kept a preview tab**, though it writes nothing. Fixed:
+   only a review that can be accepted keeps it.
+6. **With the filter on, nothing told the keyboard why a ticket would
+   not shut.** Fixed: the row's hidden words say it.
+7. **A sentence said "every row"** where one row has no icon to line
+   up. Fixed above.
+
+## The ninth review: Markdown drawn as it is written
+
+The live preview was read by a fresh reviewer while it was staged, and
+read again after each round of fixes, before any commit. The first
+reading had eleven findings, three of which would have hidden characters
+the user wrote. The second, of the fixes, had eight, the third six, the
+fourth six, of which one was to stop for, and the fifth three, of which
+one was.
+
+### The first reading
+
+1. **Code that was not seen as code had its stars and underscores
+   hidden**: a fence under a bullet or in a quote, code set in from the
+   edge, a block of HTML. Fixed in two steps; see the second reading.
+2. **A link or a picture with no words vanished.** Fixed: with nothing
+   to show it stays as written.
+3. **Stars and underscores were paired where the renderer pairs
+   nothing**: across table cells, in `f(*args, **kwargs)`, in `*.ssl`,
+   in an address. Fixed: runs are paired by the renderer's own rules,
+   the nearest opener first; each cell is read by itself; an address is
+   not looked into.
+4. **A find match inside hidden markup could not be seen.** Fixed: the
+   line of the match shows its markup while the find box has the
+   keyboard. Seen.
+5. **A long heading ran past the right edge**, since wrapping is worked
+   out at the text's size. Seen, as the reviewer suspected. Fixed: a
+   heading is drawn at the largest of its sizes that its line has room
+   for. Left: a long line of code or a wide table row, in the wider
+   face, can still run past the edge and is scrolled to.
+6. **One line with thousands of marks that open nothing held the window
+   up.** Fixed: the words of a line over 5,000 characters are not read,
+   a closing mark looks back a set distance, and no pattern backtracks
+   over a line's spaces. A test holds the time.
+7. **Every move of the cursor drew every decoration again.** Fixed: the
+   markup is drawn apart from the rest, and only it follows the cursor.
+8. **A task's box took clicks beside it, a middle click and a double
+   click.** Fixed: one click of the main button, on the box itself.
+9. **An address stopped at its first round bracket, and three ticks
+   with text after them opened a block.** Fixed.
+10. **Four sentences said what the code does not do.** Fixed.
+11. **Tests**: invariants and the cases above were missing. Added. The
+    part that draws, and the box's click, are still untested: they
+    need the editor. Left.
+
+### The second reading, of the fixes
+
+The reviewer ran the fixed reading against the renderer on this
+repository's documents and some 170 packages' READMEs.
+
+1. **A comment or a tag on the line above a fence swallowed the fence**,
+   and code was then read as prose and prose drawn as code. Found in a
+   real file. Fixed: which lines are a block of code, of HTML or a table
+   is now asked of the renderer's own lexer, so the two agree on them.
+2. **Code set in from the edge was still read** under a heading with no
+   blank line, under a bullet's words, and after a list had ended.
+   Fixed by the same change, and by a rule for code under a bullet.
+3. **Tables with no bar at the row's start, in a quote, or under a
+   bullet were read across cells.** Fixed, but for one shape: a table
+   with no bar at the row's start that is itself inside a list or a
+   quote. Left.
+4. **Round brackets holding spaces were taken for a link's address**:
+   `handlers[name](event, data)`. Fixed: an address has no space in it.
+5. **A change of the text's size did not redraw the headings.** Fixed.
+6. **One pattern was still slow on a line of many thousand spaces.**
+   Fixed: a fence is found without a pattern.
+7. **Sentences now said more than the code did.** Fixed: the decision
+   says where the two readings can still differ.
+8. **No test covered these.** Added.
+
+Left from this reading, as a suspicion the reviewer could not confirm:
+a heading brought down to the text's size is still a little bolder than
+the measure.
+
+### The third reading
+
+Six findings. The first three were held to be worth stopping for.
+
+1. **The renderer's reading was dropped for any document with a link
+   written by name, or a line starting with a tab**, since its pieces
+   were then not the length of the text; 23 of 175 real files. The
+   rules of a list were used for the whole text, and they hid code set
+   in from the edge again. Fixed: each piece is placed where it is found
+   in the text, with tabs counted as the renderer counts them. Tests
+   hold both.
+2. **The lexer is slow in the engine the app's window runs**, which the
+   browser preview does not show: a tenth of a second at 35,000
+   characters, a second or two near 60,000. Fixed: a text over 8,000
+   characters is read in a worker, aside from the window, when the
+   typing pauses. Seen in the preview that the worker reads a long
+   page; its speed in the app's window was not seen.
+3. **Between a change and the next reading, a move of the cursor drew
+   the markup from marks of the text as it was**, a line off after
+   Enter. Fixed: where each piece of markup is now is asked of the
+   editor, which carries it along with every edit; a task's box is
+   found in the line as it is. Seen: after Enter nothing moved.
+4. **Shapes still read differently inside a list or a quote**: a table
+   with no bar, a block of HTML, code set in after a quote's mark.
+   Left, as the reviewer would: rare shapes.
+5. **Five sentences behind the code.** Fixed.
+6. **No test had a link written by name or a tab.** Added. The lexer's
+   own time is not held by a test: it differs too much between engines
+   to assert.
+
+### The fourth reading
+
+Six findings; one to stop for.
+
+1. **A long document was drawn after its place had been put back**, so
+   coming back to its tab, or going to a line in it, would land some
+   lines off, by the height its headings gain. Fixed in two parts. A
+   document drawn before is drawn at once with what it was drawn with,
+   and whenever a reading is drawn the line at the top of the view is
+   held where it is. That alone was not enough: checking it showed the
+   page still slipping some twenty-five lines on every second return. The
+   editor was set for prose (its face, its size, its wrapping) by one
+   step, drawn by another and put back by a third, in whichever order
+   they came, so the place was sometimes put back while the lines were
+   still laid out as code. A file coming to the front is now one step
+   in one order: its place kept, the editor set while it holds no file,
+   the file taken up and drawn, then put where it was. Seen: a long
+   page scrolled to its middle came back to the same line, at the same
+   height, on eight returns in a row, wide and dark, then narrow and
+   light.
+2. **A reading has no time limit**, and a document waits for the one
+   before it: the drawing can be seconds late on shapes built to be
+   slow. The window is not held. Left.
+3. **Two rare shapes still put the renderer's reading aside**: a line
+   set in by tab, space, tab; and a paragraph followed by a line set in
+   four and a rule. Left.
+4. **A piece can be found inside a link's named address** and marks
+   nothing there. Harmless. Left.
+5. **The order in which readings are asked for and drawn has no test.**
+   Left: it needs the editor.
+6. **A comment said "well under a frame".** Fixed.
+
+### The fifth reading
+
+Three findings, of the fix to the fourth reading's first; one to stop
+for.
+
+1. **Taking the drawing off did not hold the place; putting it on
+   did.** A document going from Edit to Read and back, or live preview
+   switched off and on, would come back lower by the height its headings
+   gain, and further on each round. Fixed: both hold the line at the
+   top of the view. Seen: a long page scrolled to its middle showed the
+   same line at the same height after four rounds of Edit, Read, Edit,
+   and after live preview was switched off and on twice. This fix was
+   not read again; it is what the reviewer proposed, and it was seen.
+2. **A long document changed while it was not in front is drawn from
+   its old reading** until the new one is in. Left, and now said in
+   ADR 0024.
+3. **The record was one reading behind**, and "four or five parts"
+   named no unit. Fixed.

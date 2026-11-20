@@ -218,6 +218,7 @@ fetches, pulls or pushes
 | Feature | Here | Verdict | Note |
 | --- | --- | --- | --- |
 | Markdown preview | Yes | Have | With front matter and task boxes |
+| Markdown as written | Yes | Bring | Built, asked for in use: the text drawn as it is written; markup hidden off the cursor's line |
 | CSV as a table | Yes | Have | Beyond VS Code's own |
 | JSON, TOML, XML | Yes | Have | Coloured, outlined, checked |
 | Line ends kept | Yes | Have | A file with Windows line ends was saved with them |
@@ -517,6 +518,7 @@ trying the app.
 | Scroll past the end | Small | Yes | One option of the editor |
 | Copy file name | Small | Yes | A command, and an entry on three menus |
 | Preview tabs | Medium | Yes | A tab opened for a look; a double click, an edit or a pin keeps it |
+| Markdown as written | Large | Yes | The marks found line by line; drawn by the editor's own decorations |
 
 Two things were put right with these, not new features: every small
 graphic is now from the editor's icon font or drawn by a style rule (the
@@ -577,7 +579,10 @@ are fixed.
 
 An eighth review was made of what was asked for next (the Docs panel's
 menus and folding, preview tabs) while it was staged: thirteen findings,
-all fixed before the commit.
+all fixed before the commit. A ninth was made of Markdown drawn as it
+is written, and repeated on each round of fixes: eleven findings, three
+of which would have hidden what the user wrote, then eight, six, six
+and three. All are fixed but a few small ones, which are left and named.
 
 ## Why not an extension
 

@@ -251,3 +251,22 @@ Asked for after the rows above, and seen the same way.
 | File actions | A project file's row listed eight entries; a ticket's listed those and the states it can be set to |
 | Hover | A ticket's row said its path, its status and what it is related to, and nothing else |
 | Preview tabs | One click gave an italic tab; the next click took it; a double click or an edit kept it |
+
+### Markdown as it is written
+
+Asked for with the rows above ("behave like Obsidian"), and seen at 720
+and 1440 wide, each in the light and the dark theme, on a page made for
+it. Settings now has twelve rows and the command list 89.
+
+| Row | Seen |
+| --- | --- |
+| Headings | Larger than the text, the #s gone until the cursor came; a long one drawn smaller, so it fits |
+| Words | Strong, emphasised, struck and code words each drawn so, their marks hidden off the cursor's line |
+| Left as written | Stars in a call, a file pattern, a table cell and code under a numbered step all stayed in sight |
+| Find | A match inside a link's hidden address showed that line's markup, with the match marked |
+| Links | A link and a link between double brackets showed their words only, underlined |
+| The line written | With the cursor on it a line showed its markup, dimmed; typed markup was drawn on leaving |
+| Tasks | A click on a box ticked it and struck its words; a second click and undo took it back |
+| Code, tables | A block of code kept the code's face and its colours; a table kept its columns |
+| Other files | A script opened after it had its line numbers, its face and its map back |
+| Switched off | The command showed the page as plain text with line numbers, and on again as written |

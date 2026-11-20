@@ -121,6 +121,8 @@ export type Settings = {
 	minimap: boolean;
 	/** Long lines are wrapped at the editor's edge. Off unless set. */
 	wordWrap?: boolean;
+	/** Markdown drawn as it is written, in the text view: headings larger, the markup out of the way. On unless set to false. */
+	livePreview?: boolean;
 	/** The menu bar across the top of the window. Shown unless set to false. */
 	menuBar?: boolean;
 	/** Parameter names shown beside the arguments of a call. On unless set to false. */

@@ -1,0 +1,37 @@
+/* A Markdown text drawn as it is written (editor/markdownLive.ts). These rules are what is seen. The sizes, weights */
+/* and faces here are also said to the editor, in the decorations' options, and the two must agree. */
+/* The same sizes as HEADING_SIZES in src/shared/markdownLive.ts, as multiples of the editor's own size, which the */
+/* editor keeps in a variable. A heading is given the largest step its line has room for. */
+.monaco-editor .md-live-heading { color: var(--tab-active-fg); font-weight: 600; }
+.monaco-editor .md-live-size-1 { font-size: calc(var(--editor-font-size) * 1.8); }
+.monaco-editor .md-live-size-2 { font-size: calc(var(--editor-font-size) * 1.5); }
+.monaco-editor .md-live-size-3 { font-size: calc(var(--editor-font-size) * 1.25); }
+.monaco-editor .md-live-size-4 { font-size: calc(var(--editor-font-size) * 1.1); }
+.monaco-editor .md-live-strong { color: var(--tab-active-fg); font-weight: 700; }
+.monaco-editor .md-live-em { font-style: italic; }
+/* What must keep its columns (code, a table, a task's box) is in the code's own face, which the editor had before prose. */
+.monaco-editor .md-live-mono { font-family: var(--md-live-mono); }
+/* Markup on a line the cursor is not on: it takes no room. */
+.monaco-editor .md-live-hidden { font-size: 0; }
+.monaco-editor .md-live-strike { text-decoration: line-through; }
+.monaco-editor .md-live-code { color: var(--accent); background: color-mix(in srgb, var(--fg) 8%, transparent); border-radius: var(--radius-sm); }
+/* A link's words: underlined as well as coloured, so that it does not rest on the colour. */
+.monaco-editor .md-live-link { color: var(--info); text-decoration: underline; text-underline-offset: 2px; }
+.monaco-editor .md-live-bullet { color: var(--accent); }
+/* A task's box: it is pressed like a button. */
+.monaco-editor .md-live-box { color: var(--accent); cursor: pointer; }
+.monaco-editor .md-live-done { color: var(--muted); text-decoration: line-through; }
+.monaco-editor .md-live-quoted { color: var(--muted); }
+.monaco-editor .md-live-faint { color: var(--muted); }
+/* Markup on the line being written: there, and quiet. */
+.monaco-editor .md-live-syntax { color: var(--muted); opacity: .7; }
+/* Whole lines: a quote's bar, a block of code's ground, a rule drawn through its own dashes. */
+.monaco-editor .md-live-quote { box-shadow: inset 3px 0 0 color-mix(in srgb, var(--accent) 55%, transparent); background: color-mix(in srgb, var(--fg) 3%, transparent); }
+.monaco-editor .md-live-codeblock { background: color-mix(in srgb, var(--fg) 6%, transparent); }
+.monaco-editor .md-live-rule { background: linear-gradient(to bottom, transparent calc(50% - .5px), var(--border) calc(50% - .5px), var(--border) calc(50% + .5px), transparent calc(50% + .5px)); }
+/* The editor colours Markdown by a reading of its own, and makes words bold and slanted by it. In a text drawn as it */
+/* is written this reading says which words are which: the editor's bold, slant and underline are set aside, and the */
+/* rules above put back what is strong, emphasised or a link. Colours stay, which is what a block of code is read by. */
+.md-live-on .monaco-editor .view-line .mtkb:not(.md-live-strong):not(.md-live-heading) { font-weight: inherit; }
+.md-live-on .monaco-editor .view-line .mtki:not(.md-live-em) { font-style: normal; }
+.md-live-on .monaco-editor .view-line .mtku:not(.md-live-link) { text-decoration: none; }

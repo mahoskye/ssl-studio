@@ -40,7 +40,7 @@ export function GitPanel() {
 		return dir === dirName(path) || !dir ? "" : dir;
 	};
 	const act = async (action: string | null, file: GitFile) => {
-		if (action === OPEN) await openFile(file.path);
+		if (action === OPEN) await openFile(file.path, { keep: true });
 		else if (action === SHOW) await showChange(file, false);
 		else if (action === STAGE) await stage([file]);
 		else if (action === UNSTAGE) await unstage([file]);

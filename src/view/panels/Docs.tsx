@@ -79,7 +79,10 @@ async function rowMenu(file: DocFile, at: Point) {
 	const states = markdown && !catalog && ["tickets", "specs", "knowledge"].includes(file.group) && (file.status || file.group !== "knowledge" || file.kind === "decisions" || file.kind === "questions") ? statusChoices(file).filter((status) => status.toLowerCase() !== (file.status ?? "").toLowerCase()) : [];
 	const UPDATE = catalog ? "Update catalogs" : "Update file manifest";
 	// A file that is not there yet has one thing that can be done to it.
-	const items = file.exists ? [OPEN, SIDE, ...states.map((status) => `${STATE}${status}`), ...(catalog || manifest ? [UPDATE] : []), PATH, RELATIVE, NAME, SHOW, RENAME, TRASH] : [CREATE];
+	// The project's own settings file is what makes the folder a project: it is not renamed or thrown away from its
+	// row here, where nothing would read the project again after it.
+	const own = Boolean(state.project && canonical(file.path) === canonical(state.project.path));
+	const items = file.exists ? [OPEN, SIDE, ...states.map((status) => `${STATE}${status}`), ...(catalog || manifest ? [UPDATE] : []), PATH, RELATIVE, NAME, SHOW, ...(own ? [] : [RENAME, TRASH])] : [CREATE];
 	const picked = await chooseFromMenu(`Actions for ${file.ticket ?? file.title ?? file.name}`, items, at);
 	if (!picked) return;
 	if (picked === OPEN) await openFile(file.path, { keep: true });
@@ -133,7 +136,8 @@ function ItemRow(props: {
 						title={fold().parent ? (fold().locked ?? (fold().shut ? "Show what is under it" : "Hide what is under it")) : undefined}
 						// The twisty shuts and opens; the rest of the row opens the document.
 						onClick={(e) => fold().parent && (e.stopPropagation(), !fold().locked && fold().toggle())}
-						onDblClick={(e) => e.stopPropagation()}
+						// On a row with nothing under it the twisty's room is the row's: a double click there keeps the tab.
+						onDblClick={(e) => fold().parent && e.stopPropagation()}
 					>
 						<Show when={fold().parent}>
 							<Icon name={fold().shut ? "chevron-right" : "chevron-down"} />
@@ -144,7 +148,7 @@ function ItemRow(props: {
 			<FileMark name={props.file.name} />
 			{/* Open or shut, in words, for what reads the screen aloud: a list's row has no state for it. */}
 			<Show when={props.fold?.parent}>
-				<span class="visually-hidden">{props.fold!.shut ? "Shut: what is under it is hidden." : "Open."} </span>
+				<span class="visually-hidden">{props.fold!.locked ? `${props.fold!.locked}.` : props.fold!.shut ? "Shut: what is under it is hidden." : "Open."} </span>
 			</Show>
 			<span class="label">
 				<Show when={props.lead}>

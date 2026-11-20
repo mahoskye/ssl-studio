@@ -694,6 +694,8 @@ export function fileRemoved(removed: string) {
 
 /** Opens a file in the group beside the one at hand, which is made if there is none. */
 export async function openToSide(path: string) {
+	// With nothing open there is no side to open it to: it opens where a file would.
+	if (state.groups.length === 1 && !state.groups[0]!.tabs.length) return openFile(path, { keep: true });
 	const made = state.groups.length === 1;
 	if (made) setState("groups", (groups) => [...groups, { tabs: [], active: null }]);
 	await openFile(path, { group: state.activeGroup === 0 ? 1 : 0, keep: true });

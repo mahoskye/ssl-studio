@@ -1,5 +1,6 @@
 // One editor group: a tab strip over one Monaco editor that shows the
 // group's active document. Two groups side by side make a split.
+import { drawMarkdownLive, PROSE_FONT } from "./markdownLive";
 import { Icon } from "../Icon";
 import { tabShown } from "../recentTabs";
 import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
@@ -62,6 +63,8 @@ export function EditorGroup(props: { index: number }) {
 	const showBlocks = () => group().mode === "blocks" && isSsl() && !isPlan() && !showFile();
 	const isDoc = () => isMarkdown(group().active) && !showFile();
 	const showRendered = () => isDoc() && !state.mdText[group().active!];
+	/** A document shown as text is drawn as it is written, unless that has been switched off in Settings. */
+	const live = () => isDoc() && !showRendered() && state.settings.livePreview !== false;
 	// A table of values opens as a table, with the same switch to its text as a document has.
 	const isTabular = () => isTable(group().active) && !showFile();
 	const showTable = () => isTabular() && !state.mdText[group().active!];
@@ -93,6 +96,11 @@ export function EditorGroup(props: { index: number }) {
 			// The last lines can be brought up to the top of the view, to be read there and not at the window's foot.
 			scrollBeyondLastLine: true,
 			rulers: rulers(),
+			// A document drawn as it is written has headings larger than its text and code in another face: the editor
+			// is told that a line may be taller than its neighbours, and a stretch of it in another size or face.
+			allowVariableLineHeights: true,
+			allowVariableFonts: true,
+			allowVariableFontsInAccessibilityMode: true,
 		});
 		// The editor is filed under the group's place in the row, and filed again when that place changes (the group
 		// before it closed): "the active editor" is looked up by place.
@@ -114,6 +122,10 @@ export function EditorGroup(props: { index: number }) {
 			editor.addAction({ id: `app.${id}`, label, contextMenuGroupId: "9_app", contextMenuOrder: order, run: () => void import("../commands").then((all) => all.runCommand(id)) });
 		}
 		useGitMarks(editor, () => group().active);
+		// The code's own face, read before a document's prose takes the editor over for a while.
+		codeFont = editor.getOption(monaco.editor.EditorOption.fontFamily);
+		liveView = drawMarkdownLive(editor, live);
+		onCleanup(liveView.stop);
 		setRoomy(editor.getLayoutInfo().width >= MINIMAP_FROM);
 		editor.onDidLayoutChange((layout) => setRoomy(layout.width >= MINIMAP_FROM));
 		editor.onDidFocusEditorText(() => setState("activeGroup", props.index));
@@ -169,11 +181,52 @@ export function EditorGroup(props: { index: number }) {
 		editor.focus();
 	}
 
+	/** The code's own font, as the editor had it when it was made. */
+	let codeFont = "";
+	/** A document drawn as it is written: see markdownLive.ts. */
+	let liveView: ReturnType<typeof drawMarkdownLive> | undefined;
+	/**
+	 * The file that is showing, and how the editor is set for it. One step, in this order, because each part of it
+	 * moves the lines: the file's place is kept, the editor is set for the next file while it holds none, the file is
+	 * taken up and drawn, and only then is it put where it was left. Done as separate steps in whichever order they
+	 * came, a long document was put back before its lines had their heights, and came back some lines off.
+	 */
 	createEffect(() => {
 		const path = group().active;
-		if (!editor || path === shown) return;
+		// A document being written is prose, not code: the app's own face, lines wrapped at the edge, and none of what
+		// is for code (line numbers, the map, the rulers, the guides, words offered from the file). One editor shows
+		// every file of its group, so each of these is said both ways.
+		const prose = live();
+		const options: monaco.editor.IEditorOptions & monaco.editor.IGlobalEditorOptions = {
+			fontSize: state.settings.fontSize + (prose ? 1 : 0),
+			fontFamily: prose ? PROSE_FONT : codeFont || undefined,
+			minimap: { enabled: !prose && minimap() },
+			wordWrap: prose || state.settings.wordWrap ? "on" : "off",
+			inlayHints: { enabled: state.settings.inlayHints === false ? "off" : "on" },
+			rulers: prose ? [] : rulers(),
+			lineNumbers: prose ? "off" : "on",
+			lineDecorationsWidth: prose ? 28 : 10,
+			renderLineHighlight: prose ? "none" : "line",
+			guides: { indentation: !prose },
+			wordBasedSuggestions: prose ? "off" : "matchingDocuments",
+			// Prose is not set in a face where every character is as wide as the next: where a line breaks is measured.
+			wrappingStrategy: prose ? "advanced" : "simple",
+			padding: { top: prose ? 12 : 0, bottom: prose ? 12 : 0 },
+		};
+		if (!editor) return;
+		if (path === shown) {
+			// The same file: a setting changed, or a document went between being written and being read. Drawn again,
+			// since a heading's size is the largest its line has room for at the text's size.
+			editor.updateOptions(options);
+			liveView?.redraw();
+			return;
+		}
 		if (shown) keepView(shown);
 		const doc = path ? documents.get(path) : undefined;
+		// Emptied first, so that the editor is set with no text in it: neither file is laid out as the other is set.
+		editor.setModel(null);
+		editor.updateOptions(options);
+		// Taking the file up draws it: markdownLive.ts hears of it.
 		editor.setModel(doc?.model ?? null);
 		shown = doc ? path : null;
 		if (doc) {
@@ -184,16 +237,6 @@ export function EditorGroup(props: { index: number }) {
 			if (state.activeGroup === props.index) editor.focus();
 		}
 	});
-
-	createEffect(() =>
-		editor?.updateOptions({
-			fontSize: state.settings.fontSize,
-			minimap: { enabled: minimap() },
-			wordWrap: state.settings.wordWrap ? "on" : "off",
-			inlayHints: { enabled: state.settings.inlayHints === false ? "off" : "on" },
-			rulers: rulers(),
-		}),
-	);
 
 	// The order tabs were used in: what Ctrl+Tab goes back through.
 	createEffect(() => {
@@ -473,10 +516,10 @@ export function EditorGroup(props: { index: number }) {
 				</Show>
 				<Show when={isDoc()}>
 					<div class="mode-switch" role="group" aria-label="View of this document">
-						<button classList={{ on: !showRendered() }} aria-pressed={!showRendered()} onClick={() => setState("mdText", group().active!, true)}>
-							Text
+						<button classList={{ on: !showRendered() }} aria-pressed={!showRendered()} title="The document's text, to write in. With live preview it is drawn as it is written; “Toggle Markdown live preview” shows it plain." onClick={() => setState("mdText", group().active!, true)}>
+							Edit
 						</button>
-						<button classList={{ on: showRendered() }} aria-pressed={showRendered()} onClick={() => setState("mdText", group().active!, false)}>
+						<button classList={{ on: showRendered() }} aria-pressed={showRendered()} title="The document as a finished page" onClick={() => setState("mdText", group().active!, false)}>
 							Read
 						</button>
 					</div>

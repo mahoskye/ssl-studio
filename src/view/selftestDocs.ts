@@ -57,7 +57,7 @@ const LINKS = `# Links
 <img src="missing.png" onerror="window.selftestScriptRan = true">
 `;
 
-const switchTo = (view: "Text" | "Read") => [...document.querySelectorAll<HTMLButtonElement>(".mode-switch button")].find((b) => b.innerText.trim() === view)?.click();
+const switchTo = (view: "Edit" | "Read") => [...document.querySelectorAll<HTMLButtonElement>(".mode-switch button")].find((b) => b.innerText.trim() === view)?.click();
 
 /** Runs each step in turn, and stops at the first that fails: the later ones build on it. */
 async function run(steps: Steps, work: (step: (name: string, check: () => Promise<unknown>) => Promise<void>) => Promise<void>) {
@@ -104,7 +104,7 @@ export function selftestDocsSetup(): Promise<Steps> {
 		await step("readmeOpensRendered", () => until(() => baseName(activePath() ?? "") === "README.md" && rendered()?.querySelector("h1")?.textContent === state.project!.name));
 		await step("tableRendered", async () => rendered()?.querySelector("table td"));
 		await step("textSwitch", async () => {
-			switchTo("Text");
+			switchTo("Edit");
 			const text = await until(() => !rendered());
 			switchTo("Read");
 			return text && (await until(rendered));
