@@ -87,6 +87,9 @@ export function ReviewView() {
 		const proposed = (proposedModel = monaco.editor.createModel(r.proposed, r.language));
 		const diff = (editor = monaco.editor.createDiffEditor(host, { automaticLayout: true, renderSideBySide: true, originalEditable: false, readOnly: Boolean(r.compare), fontSize: state.settings.fontSize }));
 		diff.setModel({ original, modified: proposed });
+		// Ctrl+F12 goes to the definition here as it does in the editor: each side is told it is in a web view,
+		// which is where the editor keeps that key (see EditorGroup.tsx).
+		for (const side of [diff.getOriginalEditor(), diff.getModifiedEditor()]) side.createContextKey("isWeb", true);
 		// How large the change is, kept up to date as the right side is edited.
 		const sized = diff.onDidUpdateDiff(() => setSize(changeSize(diff.getLineChanges())));
 		onCleanup(() => sized.dispose());

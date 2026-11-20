@@ -285,6 +285,22 @@ export function selftestWork(): Promise<Steps> {
 			return false;
 		});
 
+		// The same menu by key, from the heading the keyboard is on; Escape gives the keyboard back to the heading.
+		await step("headMenuByKey", async () => {
+			showPanel("docs");
+			const head = await until(() => document.querySelector<HTMLElement>('[data-panel="docs"] [data-row="head:docs:knowledge"]'));
+			if (!head) return false;
+			head.focus();
+			// Shift+F10, then the menu's own key: each opens it, and Escape gives the keyboard back to the heading each time.
+			for (const key of [{ key: "F10", shiftKey: true }, { key: "ContextMenu" }]) {
+				head.dispatchEvent(new KeyboardEvent("keydown", { ...key, bubbles: true, cancelable: true }));
+				if (!(await until(() => entries().some((item) => item.textContent?.trim() === "New decision…")))) return false;
+				(document.activeElement ?? document.body).dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+				if (!(await until(() => !document.querySelector(".menu-pop.row-menu") && document.activeElement === head))) return false;
+			}
+			return true;
+		});
+
 		// A document that is not SSL has an outline of its own.
 		showPanel("objects");
 		await step("documentOutlined", async () => {

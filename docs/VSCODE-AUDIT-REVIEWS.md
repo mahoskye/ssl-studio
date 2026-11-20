@@ -1017,11 +1017,12 @@ is also the editor's own key for "Go to implementations": nothing
 gives the editor implementations today, and if something ever does,
 the definition would have the key first.
 
-Left, and said: the comparison shown for a review is another editor
-and was not told, so Ctrl+F12 still does nothing there; the heading
-does not say in its tooltip that it has a menu, as rows do not; the
-self-test opens the menu the way a right-click does and not by key
-(the key was tried by hand).
+Left at first, and said: the comparison shown for a review is another
+editor and was not told, so Ctrl+F12 still did nothing there; the
+heading does not say in its tooltip that it has a menu, as rows do
+not; the self-test opened the menu the way a right-click does and not
+by key. The first and the last of these were done after the second
+reading, below.
 
 ### The second reading
 
@@ -1030,17 +1031,63 @@ files they added included: each of the four findings dealt with, the
 listing reading the same six names as before, no name that leads out
 of its folder got through the full stops a document's name may now
 end in ("guides/..", "a/b/..md", "a/.. ./b" and others were run), and
-nothing left to hold the commit. Three small things it found in the
-fixes are left, and said here:
+nothing left to hold the commit. It found three small things in the
+fixes: the third it had run, the first two it suspected from reading.
+They were recorded as left, and the commit went in with them; that
+was wrong, since what a review finds is to be dealt with, and all
+three were dealt with in the commit after it:
 
-1. With the docs folder set to the top of the folder, "Show in the
-   Explorer" on the Docs heading opens the Explorer and puts the
-   keyboard on no row, since the top has no row of its own.
-2. The names left out of every list are told as they are written, as
-   the listing tells them: on a disk that does not tell capitals apart,
-   a folder typed as "Build" would be the hidden `build`.
-3. "Intro.md." makes `Intro.md.md`, and "e.g." makes `e.g.md`.
+1. **With the docs folder set to the project's own folder, "Show in
+   the Explorer" on the Docs heading looked for a row that folder
+   does not have.** The reviewer suspected the keyboard then reached
+   no row; that was not seen, and on its third reading it thought the
+   keyboard had most likely reached a row straight away all the same,
+   while two seconds of looking for the missing row ran beside it.
+   Changed either way: the Explorer is shown, and once its first row
+   is listed the keyboard goes where it last was among its rows, or
+   on the first; no row that is not there is looked for.
+2. **The names left out of every list were told as written**: on a
+   disk that does not tell capitals apart, a folder typed as "Build"
+   would be the hidden `build`. Fixed: refused whatever its capitals,
+   in words that say why. The price is known: where capitals are told
+   apart, a listed folder "Build" cannot be named here either.
+3. **"Intro.md." made `Intro.md.md`**. Fixed: an ending that is typed
+   is taken off even with a full stop after it, so the file is
+   `Intro.md`, headed "Intro.". The reviewer named "e.g." beside it,
+   which makes `e.g.md`: that is the name "e.g" with its ending, as
+   any name gets, and is kept and tested as such.
 
-It also asked that the record say whether the reworded question and
-the refusals were seen in the app. They were, after its first report,
-and the record of what was looked at now says which and where.
+Done with them, from the first reading's list: the comparison's two
+sides are told what the editor is told, and Ctrl+F12 there now does
+what F12 does there, which is to look for the definition and say "No
+definition found", since the text compared is not a file the language
+server has; and the self-test opens a heading's menu by Shift+F10 and
+checks that Escape gives the keyboard back to the heading. One thing
+is still left from that list: a heading's tooltip does not say it has
+a menu, as no row's does.
+
+Seen on the way, in a scratch project whose docs folder is the
+project's own, and fixed: the headings read "Work ./tickets/" and
+"Docs ./". They read "Work tickets/" and "Docs" now, as the menu
+names the folder.
+
+### The third reading
+
+The same reviewer read the changes above as staged, before their
+commit: each sound, nothing left to hold the commit, and none of its
+earlier findings left not dealt with. It ran some forty names against
+the name check, and none led out of its folder or doubled an ending
+that was not typed twice. What it pointed at was dealt with before the
+commit: this record said its first suspicion as fact (corrected
+above); a name that is only endings (".md .md", ".md.md.md") made a
+file called by them, and is now refused; the self-test's step by key pressed
+Shift+F10 only, and now presses the menu's own key too; and two cells
+of a table in the record of what was looked at held two facts each.
+
+A fourth reading, of only what the third had brought about, found
+nothing to hold the commit and four small things, each dealt with
+before it: a key pressed once too often in the self-test's new step;
+a name of three endings (".md.md.md") that still got through, now
+refused with any number of them; and two places where this record
+put the reviewer's words less exactly than it had said them, about
+when the keyboard reached a row, both corrected above.

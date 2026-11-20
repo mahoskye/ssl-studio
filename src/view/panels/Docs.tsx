@@ -6,7 +6,7 @@ import { FileMark } from "../FileMark";
 import { createMemo, createResource, createSignal, For, Show } from "solid-js";
 import type { DocFile } from "../../shared/protocol";
 import { backend } from "../backend";
-import { docMatches, DOC_FOLDERS, isCatalog, KNOWLEDGE, progress, progressShort, registryTitle, statusChoices, toneOf } from "../../shared/projectDocs";
+import { docMatches, isCatalog, KNOWLEDGE, progress, progressShort, registryTitle, statusChoices, toneOf } from "../../shared/projectDocs";
 import { docs, newDoc, newDocIn, newFolderIn, setUpProject } from "../project";
 import { importTickets, newKnowledge, newRegistry, newSpec, newState, newTicket, setStatus, updateCatalogs, updateManifest } from "../projectDocs";
 import { folderParts, folderSaid, IMPORT_TICKETS, kindOf, NEW_DOCUMENT, NEW_FOLDER, NEW_PLAN, NEW_REGISTRY, NEW_SPEC, NEW_TICKET, newOfKind, plainSection, sectionFolder, sectionMenu, SHOW_FOLDER, type DocSection } from "../../shared/docSections";
@@ -244,6 +244,12 @@ async function headMenu(section: DocSection, title: string, at: Point) {
 	else if (kind) await newKnowledge(kind.id);
 }
 
+/**
+ * The folder a list is, as its heading and its menu say it: with no "." in it, and nothing for the project's own
+ * folder, which a docs folder set to "." is.
+ */
+const folderOf = (section: DocSection) => (state.project ? sectionFolder(section, state.project) : undefined);
+
 /** A group's heading, with the folder it is in. */
 const Head = (props: { title: string; folder?: string }) => (
 	<>
@@ -269,7 +275,7 @@ function Work(props: { files: DocFile[]; empty?: string; filtered?: boolean }) {
 	const rows = createMemo(() => shownRows(list().rows, (row) => !props.filtered && isFolded(ticketFold(row.file))));
 	const fold = (row: ReturnType<typeof rows>[number]) => ({ parent: row.parent, shut: row.shut, locked: props.filtered ? LOCKED : undefined, toggle: () => setFold(ticketFold(row.file), !row.shut) });
 	return (
-		<RowGroup fold="docs:work" label="Work" onMenu={(at) => void headMenu("work", "Work", at)} open={props.filtered} count={props.files.filter((d) => (d.group === "tickets" || d.group === "specs") && !isCatalog(d)).length} head={<Head title="Work" folder={`${state.project?.docs}/${DOC_FOLDERS.tickets}`} />} rows={props.files.some((d) => d.group === "tickets" || d.group === "specs")} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
+		<RowGroup fold="docs:work" label="Work" onMenu={(at) => void headMenu("work", "Work", at)} open={props.filtered} count={props.files.filter((d) => (d.group === "tickets" || d.group === "specs") && !isCatalog(d)).length} head={<Head title="Work" folder={folderOf("work")} />} rows={props.files.some((d) => d.group === "tickets" || d.group === "specs")} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
 			<For each={rows()}>
 				{(row) =>
 					row.kind === "ticket" ? (
@@ -299,7 +305,7 @@ function Knowledge(props: { files: DocFile[]; empty?: string; filtered?: boolean
 	const files = () => props.files.filter((d) => d.group === "knowledge");
 	const kinds = () => [...KNOWLEDGE.map((k) => ({ id: k.id as string, name: k.name })), { id: "", name: "Other" }].map((kind) => ({ ...kind, files: files().filter((d) => !isCatalog(d) && (kind.id ? d.kind === kind.id : !KNOWLEDGE.some((k) => k.id === d.kind))) })).filter((kind) => kind.files.length);
 	return (
-		<RowGroup fold="docs:knowledge" label="Knowledge base" onMenu={(at) => void headMenu("knowledge", "Knowledge base", at)} open={props.filtered} count={files().filter((d) => !isCatalog(d)).length} role="group" head={<Head title="Knowledge base" folder={`${state.project?.docs}/${DOC_FOLDERS.knowledge}`} />} rows={files().length > 0} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
+		<RowGroup fold="docs:knowledge" label="Knowledge base" onMenu={(at) => void headMenu("knowledge", "Knowledge base", at)} open={props.filtered} count={files().filter((d) => !isCatalog(d)).length} role="group" head={<Head title="Knowledge base" folder={folderOf("knowledge")} />} rows={files().length > 0} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
 			{/* Each kind is a group of its own inside: it folds by itself. */}
 			<For each={kinds()}>
 				{(kind) => (
@@ -321,7 +327,7 @@ function Knowledge(props: { files: DocFile[]; empty?: string; filtered?: boolean
 function Registries(props: { files: DocFile[]; empty?: string; filtered?: boolean }) {
 	const files = () => props.files.filter((d) => d.group === "registries");
 	return (
-		<RowGroup fold="docs:registries" label="Registries" onMenu={(at) => void headMenu("registries", "Registries", at)} open={props.filtered} count={files().filter((d) => !isCatalog(d)).length} head={<Head title="Registries" folder={`${state.project?.docs}/${DOC_FOLDERS.registries}`} />} rows={files().length > 0} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
+		<RowGroup fold="docs:registries" label="Registries" onMenu={(at) => void headMenu("registries", "Registries", at)} open={props.filtered} count={files().filter((d) => !isCatalog(d)).length} head={<Head title="Registries" folder={folderOf("registries")} />} rows={files().length > 0} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
 			<For each={files().filter((d) => !isCatalog(d))}>{(file) => <ItemRow file={{ ...file, title: registryTitle(file.name) }} note={progress(file)} short={progressShort(file)} />}</For>
 			<For each={files().filter(isCatalog)}>{(catalog) => <ItemRow file={catalog} />}</For>
 		</RowGroup>
@@ -448,13 +454,13 @@ export function Docs() {
 					</Show>
 				</Show>
 				<Show when={has("docs")}>
-					<Group title="Docs" folder={state.project?.docs} group="docs" filter={filter()} empty={settled() ? "No Markdown files here yet. Use New, above, to add one." : undefined} />
+					<Group title="Docs" folder={folderOf("docs")} group="docs" filter={filter()} empty={settled() ? "No Markdown files here yet. Use New, above, to add one." : undefined} />
 				</Show>
 				<Show when={has("schema")}>
-					<Group title="Schema" folder={state.project?.schema} group="schema" filter={filter()} empty={settled() ? "No tables described yet. Add a Markdown file to this folder for each table." : undefined} />
+					<Group title="Schema" folder={folderOf("schema")} group="schema" filter={filter()} empty={settled() ? "No tables described yet. Add a Markdown file to this folder for each table." : undefined} />
 				</Show>
 				<Show when={has("plans")}>
-					<Group title="Plans" folder={state.project?.plans} group="plans" filter={filter()} empty={settled() ? "No plans yet. Use New, above, to draw one." : undefined} />
+					<Group title="Plans" folder={folderOf("plans")} group="plans" filter={filter()} empty={settled() ? "No plans yet. Use New, above, to draw one." : undefined} />
 				</Show>
 			</Rows>
 		</div>

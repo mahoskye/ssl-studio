@@ -376,18 +376,20 @@ export const renameFile = (path: string) => act(RENAME, { path, name: baseName(p
 /** Moves a file named from elsewhere to the trash, after asking. */
 export const trashFile = (path: string) => act(TRASH, { path, name: baseName(path), kind: "file", size: 0 }, { follow: false });
 
-/** Shows a file's row in the Explorer, the folders above it opened, and puts the keyboard on it. */
+/** Shows a file's or a folder's row in the Explorer, the folders above it opened, and puts the keyboard on it. */
 export function showInExplorer(path: string) {
 	const root = state.workspace?.root;
 	if (!root || !isInside(root, path)) return notify("That file is not in this folder.");
+	// The folder itself has no row of its own: its rows are shown, and the keyboard goes where it last was among them.
+	const top = isInside(path, root);
 	const above: string[] = [];
-	for (let dir = dirName(path); dir !== root && isInside(root, dir); dir = dirName(dir)) above.push(dir);
+	for (let dir = dirName(path); !top && dir !== root && isInside(root, dir); dir = dirName(dir)) above.push(dir);
 	setExpanded((set) => new Set([...set, ...above]));
 	showPanel("explorer");
 	// The rows above it are read from the disk as they open: the row is looked for until it is there.
 	let tries = 0;
 	const look = () => {
-		if (document.querySelector(`[data-panel="explorer"] [data-row="${CSS.escape(path)}"]`) || tries++ > 20) return void tree?.focus(path);
+		if (document.querySelector(`[data-panel="explorer"] [data-row${top ? "" : `="${CSS.escape(path)}"`}]`) || tries++ > 20) return void tree?.focus(top ? undefined : path);
 		setTimeout(look, 100);
 	};
 	look();

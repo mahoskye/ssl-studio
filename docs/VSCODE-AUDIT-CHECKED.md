@@ -538,7 +538,7 @@ refused in words); a folder under Work (the notice). The self-test
 opens the Work heading's menu and makes a folder from it. Not seen:
 "Show in the Explorer" for a list whose folder is not there yet, since
 every list of the demo has its folder; the notice for it was only read
-in the code.
+in the code then, and was seen later (below).
 
 Found on the way and fixed, older than this: "Show in the Explorer"
 opened the Explorer on its first row for anything inside a folder,
@@ -558,7 +558,26 @@ Looked at again after its findings were fixed, in my own instance: the
 question for a new document, which now says a folder may come first,
 at 720 and 1400 wide in the dark and the light theme (it fits on one
 line in all four); and the refusals of `build/notes`, `node_modules`
-and `CON`, each as a notice in words, at 1400 in the light theme. Not
-seen in the app: the wording for a project whose docs folder is the
-top of the folder ("the top of the folder"), since the demo's is
-`docs`; it is covered by the unit tests only.
+and `CON`, each as a notice in words, at 1400 in the light theme.
+
+What the reviewer's second reading found was fixed in the commit
+after, and looked at in my own instance on two scratch folders.
+
+| Looked at | Seen |
+| --- | --- |
+| Ctrl+F12, comparison | "No definition found for 'RuleFor'", as F12 says there |
+| Headings at the top | They read "Work tickets/" and "Docs", with no "./" |
+| The menu at the top | The Docs heading's says "in the project's folder" |
+| Show in the Explorer | The Explorer shown, the keyboard on its first row |
+| A list, no folder | "tickets/ is not there yet: the first document or folder made here makes it." |
+| A folder under Work | Made as `tickets/2026/`, with the notice that says so |
+| Work, shown after | The Explorer shown, the keyboard on the row `tickets` |
+| "Intro.md." named | `Intro.md`, opened, listed under Docs |
+| "Build", a folder | Refused: it is `build` on a disk that does not tell capitals apart |
+
+The comparison was a change to a script in my scratch copy of the
+demo, opened from Source control; the rest was a scratch project with
+`docs = "."`. Its headings and a different heading's menu were looked
+at at 1400 and 720 wide, in the dark and the light theme. The
+self-test now also opens a heading's menu by Shift+F10 and by the
+menu's own key.

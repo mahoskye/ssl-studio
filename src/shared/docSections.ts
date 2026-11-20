@@ -52,8 +52,8 @@ export function sectionFolder(section: DocSection, folders: SectionFolders): str
 /** The parts of a folder said from the top of the workspace: nothing for the top itself. */
 export const folderParts = (folder: string) => folder.split(/[\\/]+/).filter((part) => part && part !== ".");
 
-/** A folder as it is said in a question or a notice: "docs/guides/", or the top of the folder by name. */
-export const folderSaid = (folder: string) => (folderParts(folder).length ? `${folderParts(folder).join("/")}/` : "the top of the folder");
+/** A folder as it is said in a question or a notice: "docs/guides/", or the project's own folder in words. */
+export const folderSaid = (folder: string) => (folderParts(folder).length ? `${folderParts(folder).join("/")}/` : "the project's folder");
 
 /** True for a section whose documents are plain Markdown, named by whoever writes them: a new one can go in a folder of its own. */
 export const plainSection = (section: DocSection) => section === "docs" || section === "schema";
@@ -99,9 +99,12 @@ export function typedParts(typed: string, last: "folder" | "file" = "folder"): {
 	if (!name) return { problem: NEEDED };
 	const parts = name.split(/[\\/]/).map((part) => part.replace(UNSAFE, "-").trim());
 	if (parts.some((part) => !part || part.endsWith(".") || DEVICE.test(part))) return { problem: unusable(name) };
-	// Told by the name as it is written, as the listing tells it. A file is listed whatever folder's name it has before its ending.
-	const unlisted = (last === "file" ? parts.slice(0, -1) : parts).find((part) => (UNLISTED as readonly string[]).includes(part));
-	if (unlisted) return { problem: `“${unlisted}” is a folder the app leaves out of every list: nothing made there would be shown.` };
+	// Whatever its capitals: on a disk that does not tell them apart, "Build" is the folder "build". Chosen knowingly:
+	// on a disk that does tell them apart, a folder "Build" that is there and listed cannot be named here either, so
+	// that a name means the same on every system. A file is listed whatever folder's name it has before its ending.
+	const unlisted = (last === "file" ? parts.slice(0, -1) : parts).find((part) => (UNLISTED as readonly string[]).includes(part.toLowerCase()));
+	if (unlisted && (UNLISTED as readonly string[]).includes(unlisted)) return { problem: `“${unlisted}” is a folder the app leaves out of every list: nothing made there would be shown.` };
+	if (unlisted) return { problem: `“${unlisted}” is the folder “${unlisted.toLowerCase()}” on a disk that does not tell capitals apart, and the app leaves that one out of every list.` };
 	return { parts };
 }
 
@@ -112,16 +115,22 @@ const unusable = (name: string) => `“${name}” is not a name that can be used
  * A new Markdown document from the name typed for it: the folders it goes
  * in, its file, and the heading it opens with (the last part of the name as
  * it was typed, which may hold what a file's name cannot, and may end in a
- * full stop, which the file's name leaves off).
+ * full stop, which the file's name leaves off). A full stop inside the name
+ * stays in it: "e.g." is the file `e.g.md`, the name "e.g" with its ending.
  */
 export function typedDocument(typed: string): { folders: string[]; file: string; title: string } | { problem: string } {
-	const name = typed.trim().replace(/\.(md|markdown)$/i, "");
+	const whole = typed.trim();
+	// The ending may be typed, and a sentence's full stop may follow it: "Intro.md." is Intro.md, headed "Intro.".
+	const ending = /\.(md|markdown)(?=[.\s]*$)/i;
+	const name = whole.replace(ending, "");
 	const title = name.split(/[\\/]/).pop()!.trim();
 	// What the file is called: the name without the full stops a sentence ends in.
 	const called = name.replace(/[.\s]+$/, "");
-	if (!called) return { problem: name ? unusable(typed.trim()) : NEEDED };
+	if (!called) return { problem: name.replace(/\s+/g, "") ? unusable(whole) : NEEDED };
+	// What is left is itself only endings (".md .md", ".md.md.md"): no name was typed before them.
+	if (/(^|[\\/])(\s*\.(md|markdown))+$/i.test(called)) return { problem: unusable(whole) };
 	const placed = typedParts(called, "file");
 	// A name refused for what it is, is refused in the words that were typed, ".md" and all.
-	if ("problem" in placed) return { problem: placed.problem === unusable(called) ? unusable(typed.trim()) : placed.problem };
+	if ("problem" in placed) return { problem: placed.problem === unusable(called) ? unusable(whole) : placed.problem };
 	return { folders: placed.parts.slice(0, -1), file: `${placed.parts.at(-1)}.md`, title };
 }

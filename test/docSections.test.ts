@@ -34,8 +34,8 @@ describe("a folder the project's settings put at the top", () => {
 	});
 
 	test("is said by name in a question, and any other folder with a slash after it", () => {
-		expect(folderSaid("")).toBe("the top of the folder");
-		expect(folderSaid(".")).toBe("the top of the folder");
+		expect(folderSaid("")).toBe("the project's folder");
+		expect(folderSaid(".")).toBe("the project's folder");
 		expect(folderSaid("docs/guides")).toBe("docs/guides/");
 		expect(folderSaid("docs/guides/")).toBe("docs/guides/");
 	});
@@ -93,9 +93,15 @@ describe("where a typed name puts a new folder", () => {
 			expect(typedParts(hidden)).toEqual({ problem: `“${hidden}” is a folder the app leaves out of every list: nothing made there would be shown.` });
 			expect(typedParts(`notes/${hidden}/more`)).toEqual({ problem: `“${hidden}” is a folder the app leaves out of every list: nothing made there would be shown.` });
 		}
-		// Told by the name as it is written, as the listing tells it.
-		expect(typedParts("Build")).toEqual({ parts: ["Build"] });
 		expect(typedParts("builds")).toEqual({ parts: ["builds"] });
+	});
+
+	test("so is one that differs from it only in its capitals, which some disks do not tell apart", () => {
+		expect(typedParts("Build")).toEqual({ problem: "“Build” is the folder “build” on a disk that does not tell capitals apart, and the app leaves that one out of every list." });
+		expect(typedParts("notes/NODE_MODULES")).toEqual({ problem: "“NODE_MODULES” is the folder “node_modules” on a disk that does not tell capitals apart, and the app leaves that one out of every list." });
+		expect(typedDocument("Dist/notes")).toEqual({ problem: "“Dist” is the folder “dist” on a disk that does not tell capitals apart, and the app leaves that one out of every list." });
+		// A document is a file: called as one of them, with its ending, it is listed.
+		expect(typedDocument("Build")).toEqual({ folders: [], file: "Build.md", title: "Build" });
 	});
 
 	test("a name that only opens with a dot is a name", () => {
@@ -123,6 +129,28 @@ describe("where a typed name puts a new document", () => {
 		expect(typedDocument("What next.")).toEqual({ folders: [], file: "What next.md", title: "What next." });
 		expect(typedDocument("guides/Wait...")).toEqual({ folders: ["guides"], file: "Wait.md", title: "Wait..." });
 		expect(typedDocument("...")).toEqual({ problem: "“...” is not a name that can be used here." });
+	});
+
+	test("a full stop typed after the ending is the heading's too: the ending is not written twice", () => {
+		expect(typedDocument("Intro.md.")).toEqual({ folders: [], file: "Intro.md", title: "Intro." });
+		expect(typedDocument("guides/Intro.markdown... ")).toEqual({ folders: ["guides"], file: "Intro.md", title: "Intro..." });
+		expect(typedDocument(".md.")).toEqual({ problem: "“.md.” is not a name that can be used here." });
+		expect(typedDocument("a/..md.")).toEqual({ problem: "“a/..md.” is not a name that can be used here." });
+	});
+
+	test("an ending with no name before it is no name, however often it is typed", () => {
+		expect(typedDocument(".md .md")).toEqual({ problem: "“.md .md” is not a name that can be used here." });
+		expect(typedDocument("guides/.markdown.md")).toEqual({ problem: "“guides/.markdown.md” is not a name that can be used here." });
+		expect(typedDocument(".md.md.md")).toEqual({ problem: "“.md.md.md” is not a name that can be used here." });
+		expect(typedDocument(".md .markdown .md.")).toEqual({ problem: "“.md .markdown .md.” is not a name that can be used here." });
+		// A name with an ending typed twice keeps the one that is part of it.
+		expect(typedDocument("x.md.md")).toEqual({ folders: [], file: "x.md.md", title: "x.md" });
+	});
+
+	test("a full stop inside the name stays in it, and the ending follows", () => {
+		// "e.g." is the name "e.g", headed as typed: the file is the name with ".md" after it, as any other is.
+		expect(typedDocument("e.g.")).toEqual({ folders: [], file: "e.g.md", title: "e.g." });
+		expect(typedDocument("v1.2 notes")).toEqual({ folders: [], file: "v1.2 notes.md", title: "v1.2 notes" });
 	});
 
 	test("a folder on the way that no listing shows is refused; a document called as one is a file, and is not", () => {
