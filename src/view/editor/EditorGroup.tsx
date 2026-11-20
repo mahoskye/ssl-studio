@@ -6,7 +6,7 @@ import { Icon } from "../Icon";
 import { tabShown } from "../recentTabs";
 import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { monaco } from "./monaco";
-import { activePath, closeAllTabs, closeOtherTabs, closeTab, closeTabsToRight, documents, focusRequest, keepTab, moveTab, openFile, revealSignal, revert, save, saveAll, setState, split, state, tabLeaving, takeReveal, togglePin } from "../state";
+import { activePath, closeAllTabs, closeOtherTabs, closeTab, closeTabsToRight, documents, focusRequest, keepTab, moveTab, openFile, revealSignal, revert, save, saveAll, setState, split, state, tabLeaving, takeReveal, togglePin, openedForALook } from "../state";
 import { landsBefore } from "../../shared/tabOrder";
 import { othersOf, rightOf } from "../../shared/tabOrder";
 import { chooseFromMenu } from "../panels/RowMenu";
@@ -237,7 +237,9 @@ export function EditorGroup(props: { index: number }) {
 			const view = viewStates.get(`${props.index}:${path}`) ?? lastViews.get(path!);
 			if (view) editor.restoreViewState(view);
 			reveal(path!);
-			if (state.activeGroup === props.index) editor.focus();
+			// A file opened for a look leaves the keyboard where it is: on the row that was clicked, so that the keys
+			// that follow (Delete, F2, copy, the arrows) are still the list's. Opened to stay, it takes the keyboard.
+			if (state.activeGroup === props.index && !openedForALook(path!)) editor.focus();
 		}
 	});
 

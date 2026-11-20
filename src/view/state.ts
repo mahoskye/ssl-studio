@@ -344,6 +344,15 @@ let looks = 0;
 /** A document that is not to be given up without a question: it has unsaved changes, or differs from its file on disk. */
 const heldOpen = (path: string) => Boolean(state.dirty[path] || state.conflicts[path]);
 
+/** The file being brought to the front for a look, while it is: a click on its row in a list, whether or not it had a tab. */
+let lookedAt: string | null = null;
+/**
+ * Whether a file is coming to the front only to be looked at. Such a file leaves the keyboard where it is, on the
+ * row that was clicked, so that the keys that follow (Delete, F2, copy, the arrows) are still the list's. (A look
+ * that goes to a place in the file, as a search result's does, still puts the keyboard at that place.)
+ */
+export const openedForALook = (path: string) => lookedAt === path;
+
 /**
  * Opens a file in a tab and brings it to the front. With `preview` it is opened for a look, as one click in a list
  * does: it takes the place of the tab last opened that way, and its own tab is given up to the next. With `keep` a
@@ -367,6 +376,8 @@ export async function openFile(path: string, options: { group?: number; reveal?:
 	closeComparison();
 	/** The tab that gave its place to this one: it was only looked at. */
 	let replaced: string | null = null as string | null;
+	// Said for as long as the editors hear of the change, which is within this batch.
+	lookedAt = options.preview ? path : null;
 	batch(() => {
 		setState(
 			"groups",
@@ -389,9 +400,13 @@ export async function openFile(path: string, options: { group?: number; reveal?:
 		// The call graph covers the editors: a file opened behind it would look like nothing happened.
 		setState("centerView", "editors");
 	});
+	lookedAt = null;
 	// What was only looked at and has no tab left is let go. It has no unsaved changes: a tab that shows some never gives way.
 	if (replaced && !state.groups.some((g) => g.tabs.includes(replaced!))) letGoIfOnlyRead(replaced);
 	revealSignal.fire(path);
+	// Opened to stay (a double click, Enter in a list of files): the keyboard goes to it, also when it was already
+	// showing for a look and the editor had no change of file to hear of.
+	if (options.keep) focusEditor();
 }
 
 /** Keeps a tab that was opened for a look: in one group, or in every group that has it so. */

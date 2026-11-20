@@ -280,7 +280,8 @@ export function Row(props: {
 	onDrop?: (e: DragEvent) => void;
 	onActivate?: () => void;
 	/** A double click: what a single one opened for a look is opened to stay. */
-	onKeep?: () => void;
+	/** A double click, or Enter: open to stay. False when the row has nothing to keep, and Enter is then one click. */
+	onKeep?: () => boolean | void;
 	/** Opens or closes the row: Left and Right in a tree, and on any row that says whether it is open. */
 	onToggle?: () => void;
 	/** Other keys on the row (F2, Delete). Return true for a key that was used. */
@@ -298,7 +299,12 @@ export function Row(props: {
 		<div
 			ref={(el) =>
 				handlers.set(el, {
-					activate: () => props.onActivate?.(),
+					// Enter opens what the row is to stay, where the row has such a thing (a file); Space, and Enter on a row
+					// that has none (a folder, a file not yet made), does what one click does.
+					activate: (e) => {
+						if (e.key === "Enter" && props.onKeep && props.onKeep() !== false) return;
+						props.onActivate?.();
+					},
 					toggle: () => props.onToggle?.(),
 					key: (e) => props.onKey?.(e),
 					chord: (e) => props.onChord?.(e),

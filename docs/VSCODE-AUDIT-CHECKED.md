@@ -289,3 +289,50 @@ made for it. The command list now has 90.
 | Two groups | Enter in each of two groups began the next item there, and still did after one was closed |
 | By keyboard | "Open the link at the cursor" opened the link whose words the cursor was in |
 | Double brackets | A link between double brackets was drawn as before, and not followed |
+
+## The second pass
+
+Every row of the audit was tried once more (2026-11-19), after the
+Markdown work, in the same kind of instance on the same scratch copy:
+the menus read entry by entry, the command list and the editor's own
+list read again, each right-click menu opened, and each behaviour run.
+What was seen agreed with the rows above but for what is listed here.
+One defect was found and fixed, in the last row.
+
+| Row | Seen this time |
+| --- | --- |
+| Command palette | 90 commands; "Show Health", just run, came first |
+| A guide in Help | Help has four entries, not five; none opens a guide |
+| Tab menu | Ten entries on a tab that is not pinned: "Copy file name" and "Open to the side" are new |
+| Explorer menu | Seven entries: "Copy name" is new |
+| Docs row menu | Thirteen entries: the file's own are below the ones that set its state |
+| Drag tabs | Dragged along the row by the pointer itself this time |
+| Three keys | Ctrl+\, Ctrl+/ and Ctrl+F12 could not be pressed by the tool; each ran from its menu |
+| Move to trash | It asked, Cancel the default; on yes the preview said it is only in the app |
+| Replace in files | It asked "Replace 85 matches in 10 files…?"; cancelled, not run again |
+| Stage and commit | A file made outside was staged from its row and committed by Ctrl+Enter |
+| Merge editor | A conflict made again: "!", no discard, "A file is in conflict: settle it first." |
+| Settings view | Twelve settings; the keyboard list has 90 rows |
+| CSV as a table | jira-export.csv showed 25 headed columns and three rows |
+| Agent edits as diff | A snapshot opened as a comparison with Reject; no agent was run |
+| Minimap | Drawn at 1280 wide with no right panel; not drawn with the Agent docked there |
+| Explorer keys | A click on a row moved the keyboard to the editor: fixed, see below |
+
+Found: a click on a file's row, in the Explorer or in Docs, brought the
+file to the front and a moment later gave the keyboard to the editor.
+The keys that followed (Delete, F2, Ctrl+C, the arrows) then went to
+the file's text or to the row, by how fast the file was read. A file
+brought to the front for a look (one click, or Space) now leaves the
+keyboard on its row; a double click, or Enter on the row, opens it to
+stay and gives the keyboard to the editor. Seen after the fix: the row
+kept the keyboard for a file with a tab and for one without, the Down
+arrow moved to the next row, Ctrl+C and Ctrl+V made a copy, Ctrl+X
+dimmed it, and a double click put the keyboard in the text. Enter on a
+row was changed after a reviewer read the fix, and has not been seen.
+Left as they were: a click on a search result still goes to its place
+in the text with the keyboard, and a look that closes a comparison
+still gives the keyboard to the editor.
+
+Not tried again: a screen reader, the app's own window, the copy
+commands (they write the clipboard), and an agent's edit.
+
