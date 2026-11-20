@@ -219,6 +219,7 @@ fetches, pulls or pushes
 | --- | --- | --- | --- |
 | Markdown preview | Yes | Have | With front matter and task boxes |
 | Markdown as written | Yes | Bring | Built, asked for in use: the text drawn as it is written; markup hidden off the cursor's line |
+| Markdown writing | Yes | Bring | Built, asked for in use: Enter starts a list's next item; a link is followed from the text |
 | CSV as a table | Yes | Have | Beyond VS Code's own |
 | JSON, TOML, XML | Yes | Have | Coloured, outlined, checked |
 | Line ends kept | Yes | Have | A file with Windows line ends was saved with them |
@@ -518,7 +519,8 @@ trying the app.
 | Scroll past the end | Small | Yes | One option of the editor |
 | Copy file name | Small | Yes | A command, and an entry on three menus |
 | Preview tabs | Medium | Yes | A tab opened for a look; a double click, an edit or a pin keeps it |
-| Markdown as written | Large | Yes | The marks found line by line; drawn by the editor's own decorations |
+| Markdown as written | Large | Yes | The text read into marks; drawn by the editor's own decorations |
+| Markdown writing | Small | Yes | A rule for Enter in a list; the editor's own link following, told where each link leads |
 
 Two things were put right with these, not new features: every small
 graphic is now from the editor's icon font or drawn by a style rule (the
@@ -530,6 +532,14 @@ Copy file name is part of the Copy path row.
 Looked at: 720 and 1440 wide, each in the light and the dark theme,
 before the commit. A seventh review was made of the commit; what it
 found is in [the list](VSCODE-AUDIT-REVIEWS.md#the-seventh-review-what-the-first-use-asked-for).
+
+Markdown writing was added after Markdown as written, toward the same
+request ("behave like Obsidian"). Not built from that request, and
+waiting on the user's word: links between double brackets that lead
+somewhere, backlinks, a form for a document's properties, Tab to set an
+item in, and a table kept tidy as it is typed. The first of these is a
+decision about how the project's documents link to each other, which
+are plain Markdown links today.
 
 ## What the reviews found
 
@@ -583,6 +593,9 @@ all fixed before the commit. A ninth was made of Markdown drawn as it
 is written, and repeated on each round of fixes: eleven findings, three
 of which would have hidden what the user wrote, then eight, six, six
 and three. All are fixed but a few small ones, which are left and named.
+A tenth was made of Markdown writing while it was staged: nine findings,
+two of which would have broken Enter in a split view and the following
+of a link; those and four more are fixed, the rest left and named.
 
 ## Why not an extension
 

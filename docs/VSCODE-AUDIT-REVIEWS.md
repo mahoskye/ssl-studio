@@ -743,3 +743,80 @@ for.
    ADR 0024.
 3. **The record was one reading behind**, and "four or five parts"
    named no unit. Fixed.
+
+## The tenth review: Markdown writing
+
+Enter in a list and links followed from the text were read by a fresh
+reviewer while staged. Nine findings, two to stop for.
+
+1. **Enter was bound for every editor at once**, and the last editor
+   made answered for all: in a split, Enter in the left group edited
+   the right; after a split was closed, or in a review, Enter in a
+   Markdown text did nothing. Fixed: the key is an action of its own
+   editor, let go of with it. Seen: with a page in two groups Enter in
+   each began the next item in that group, and still did in the one
+   left after the other was closed.
+2. **The hold on a line's markup during a Ctrl+click was dropped at
+   once when the editor did not have the keyboard**: the blur of
+   whatever had it was heard as the click called off. So was a drawing
+   made during the click. Fixed: only the window's own blur ends the
+   hold, and while it lasts the lines being written are those they
+   were, whoever asks. Seen: with the keyboard in the Docs filter box,
+   Ctrl+click on the second link of a line opened its file.
+3. **A link to a heading, followed in one of two groups showing the
+   page, moved the other group.** Fixed: a place in the same document
+   is gone to in the editor the link was followed in.
+4. **"Open the link at the cursor" worked only with the cursor in the
+   link's words.** Fixed: the link is its words and its address, from
+   bracket to bracket; and the command does nothing from behind a page
+   or a table. A link just typed is not yet followed for about a
+   second, until the editor has asked for the links again. Left.
+5. **Some addresses led to the wrong place**: one in angle brackets
+   with a space in it, and one with a backslash before a bracket.
+   Fixed, with tests. A link to a folder still asks for a file that is
+   a folder, as it does from the page. Left. A text that is no file
+   (a proposal under review) has none of these links.
+6. **A link to a heading was not matched as the page matches it.** A
+   second heading of the same words is now reached by "-1", as on the
+   page. A heading with markup in its words, or inside a quote, and a
+   link written by reference are still not followed from the text.
+   Left, and the ADR's note now says so.
+7. **Enter, small cases.** A task's box at the very end of a line now
+   counts as a box with no words; the space between the cursor and the
+   words that go to the new item is dropped. Left: a number repeats
+   when an item is added mid-list; code set in four or in a quote is
+   not known to be code; an empty nested item ends the list instead of
+   moving out one level.
+8. **The editor's own underline on a followed link sat lower than the
+   drawing's**, and ran under the markup. Fixed by two style rules;
+   seen in the dark theme. With live preview off a followed link is
+   underlined by the editor. Left.
+9. **On macOS Ctrl+click is the menu**, and the hold may last until the
+   next button comes up. Left; not seen, there being no Mac to see it
+   on.
+
+### The second reading
+
+Of the fixes. Six findings, none in the code to stop for.
+
+1. **The record said "see below" and nothing was below.** This section.
+2. **The Enter action was listed among the editor's own commands for
+   every file.** Fixed: it is there for a Markdown text that can be
+   written, and nowhere else.
+3. **The underline rules did not cover a link while Ctrl is held over
+   it.** Fixed by naming that state too. Not seen: the rules were seen
+   at rest, in the dark theme.
+4. **A file already loaded, opened by following a link, may be drawn
+   for an instant with the lines of the page it was followed from
+   taken as the lines being written.** Left; not seen.
+5. **"Open the link at the cursor", run from the menu bar or the
+   command button, has no editor with the keyboard**, so a heading link
+   in the second of two groups showing the page still moves the first.
+   Left. A link to lines of its own document, from one line to another,
+   lost its selection: fixed, it is shown as any file's lines are.
+6. **Wording**, and a branch that could not be reached. Fixed.
+
+These last fixes were not read again: each is what the reviewer
+proposed. The type check, the tests and the self-tests were run on
+them.
+

@@ -35,3 +35,11 @@
 .md-live-on .monaco-editor .view-line .mtkb:not(.md-live-strong):not(.md-live-heading) { font-weight: inherit; }
 .md-live-on .monaco-editor .view-line .mtki:not(.md-live-em) { font-style: normal; }
 .md-live-on .monaco-editor .view-line .mtku:not(.md-live-link) { text-decoration: none; }
+/* A link the editor follows is underlined by the editor too. One underline, where this drawing puts it; none under the
+   markup either side of the link's words. */
+.md-live-on .monaco-editor .detected-link,
+.md-live-on .monaco-editor .detected-link-active { text-underline-position: auto; }
+.md-live-on .monaco-editor .detected-link.md-live-syntax,
+.md-live-on .monaco-editor .detected-link.md-live-hidden,
+.md-live-on .monaco-editor .detected-link-active.md-live-syntax,
+.md-live-on .monaco-editor .detected-link-active.md-live-hidden { text-decoration: none; }

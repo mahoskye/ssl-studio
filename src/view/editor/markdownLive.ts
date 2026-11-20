@@ -66,6 +66,17 @@ function readAside(text: string): Promise<LiveMark[] | null> {
 	});
 }
 
+/**
+ * The marks of a document's text as it is now, for whoever else needs to know what its text is made of: what was
+ * last read when the text has not changed since, read otherwise (aside from the window when it is long).
+ */
+export async function marksFor(model: monaco.editor.ITextModel): Promise<LiveMark[]> {
+	const had = kept.get(model);
+	if (had?.version === model.getVersionId()) return had.marks;
+	const text = model.getValue();
+	return text.length <= READ_HERE ? liveMarks(text) : ((await readAside(text)) ?? liveMarks(text));
+}
+
 /** The face prose is set in: the app's own, not the code's. */
 export const PROSE_FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';
 
@@ -196,11 +207,19 @@ export function drawMarkdownLive(editor: monaco.editor.IStandaloneCodeEditor, on
 	const own = (is: boolean) => editor.getContainerDomNode().classList.toggle("md-live-on", is);
 
 	/**
+	 * A click with the key held that follows a link is under way. The cursor goes to the line as the button goes
+	 * down, and the link is followed where the pointer is as it comes up: were the line's markup brought out in
+	 * between, the link would have moved from under the pointer. So until the button is up the lines being written
+	 * are taken to be those they were (`writtenThen`), whoever asks.
+	 */
+	let pointing = false;
+	let writtenThen: ReadonlySet<number> = new Set<number>();
+	/**
 	 * The lines being written: those the cursor or a selection is on, while the keyboard is in the editor or in one of
 	 * its own boxes. The find box is one: the match it goes to is selected, and its line shows its markup, so that a
 	 * match inside markup can be seen.
 	 */
-	const written = () => (editor.hasWidgetFocus() ? linesOf(editor.getSelections()) : new Set<number>());
+	const written = () => (pointing ? writtenThen : (writtenThen = editor.hasWidgetFocus() ? linesOf(editor.getSelections()) : new Set<number>()));
 	/** What the text was last drawn from: the reading, the text's size and the width. From the same, it would be drawn the same. */
 	let drawnFrom: { marks: LiveMark[]; size: number; width: number } | undefined;
 	/**
@@ -282,6 +301,28 @@ export function drawMarkdownLive(editor: monaco.editor.IStandaloneCodeEditor, on
 		if ((editor.getModel()?.getValueLength() ?? 0) <= READ_HERE) waitingFrame = requestAnimationFrame(read);
 		else timer = setTimeout(read, PAUSE);
 	};
+	/** The button is up, or the click was called off, or the window was left: the markup follows the cursor again. */
+	const pointed = () => {
+		window.removeEventListener("mouseup", pointed, true);
+		window.removeEventListener("pointercancel", pointed, true);
+		window.removeEventListener("blur", pointed);
+		// After the editor has heard of the button coming up, which it does in this same turn.
+		setTimeout(() => {
+			pointing = false;
+			if (!stopped) moved();
+		}, 0);
+	};
+	/** Heard on the way down to the editor, which moves the cursor before it tells anyone of the click. */
+	const pointerDown = (e: PointerEvent) => {
+		if (pointing || !on() || e.button !== 0 || !(e.ctrlKey || e.metaKey)) return;
+		pointing = true;
+		// Heard on the window: the button may come up outside the editor. The window's own blur only (it is not heard
+		// on the way down): the editor taking the keyboard from a button or a panel is not the click called off.
+		window.addEventListener("mouseup", pointed, true);
+		window.addEventListener("pointercancel", pointed, true);
+		window.addEventListener("blur", pointed);
+	};
+	editor.getContainerDomNode().addEventListener("pointerdown", pointerDown, true);
 	/**
 	 * After the cursor moved, or the keyboard came or went: the markup of the lines now being written is shown, and
 	 * of the rest hidden. Where each piece of markup is now is asked of the editor, which has carried it along with
@@ -354,6 +395,10 @@ export function drawMarkdownLive(editor: monaco.editor.IStandaloneCodeEditor, on
 		redraw: read,
 		stop: () => {
 			stopped = true;
+			editor.getContainerDomNode().removeEventListener("pointerdown", pointerDown, true);
+			window.removeEventListener("mouseup", pointed, true);
+			window.removeEventListener("pointercancel", pointed, true);
+			window.removeEventListener("blur", pointed);
 			cancelAnimationFrame(waitingFrame);
 			clearTimeout(timer);
 			listeners.forEach((listener) => listener.dispose());

@@ -1,5 +1,6 @@
 // One editor group: a tab strip over one Monaco editor that shows the
 // group's active document. Two groups side by side make a split.
+import { continueLists } from "./markdownKeys";
 import { drawMarkdownLive, PROSE_FONT } from "./markdownLive";
 import { Icon } from "../Icon";
 import { tabShown } from "../recentTabs";
@@ -125,6 +126,8 @@ export function EditorGroup(props: { index: number }) {
 		// The code's own face, read before a document's prose takes the editor over for a while.
 		codeFont = editor.getOption(monaco.editor.EditorOption.fontFamily);
 		liveView = drawMarkdownLive(editor, live);
+		const listKeys = continueLists(editor);
+		onCleanup(() => listKeys.dispose());
 		onCleanup(liveView.stop);
 		setRoomy(editor.getLayoutInfo().width >= MINIMAP_FROM);
 		editor.onDidLayoutChange((layout) => setRoomy(layout.width >= MINIMAP_FROM));

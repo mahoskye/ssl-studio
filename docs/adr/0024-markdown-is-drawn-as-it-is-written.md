@@ -85,3 +85,18 @@ and [ADR 0020](0020-the-shell-does-what-vs-code-does-and-stays-its-own.md).
 - Links between double brackets are drawn, and are not yet followed,
   completed or listed as backlinks.
 - Seen in the browser preview only.
+
+## Changes to this draft
+
+- 2026-11-19, with Markdown writing: a link written as Markdown writes
+  it is followed from the text, by Ctrl+click or "Open the link at the
+  cursor": to a file where the Read view would take it; to a heading
+  named by its words as they are written, so one with markup in its
+  words, one inside a quote, and a link written by reference are not
+  followed from the text. While that click is
+  under way the line's markup stays hidden until the button is up, so
+  the link does not move from under the pointer. Enter in a list starts
+  the next item, and on an item with no words ends the list; it is one
+  edit of the text at the cursor. Links between double brackets are
+  still only drawn: the project's documents link by path, and whether
+  they should also link by name is the user's to say.

@@ -4,12 +4,12 @@ import { Icon } from "../Icon";
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
-import { linkFile, linkWritten } from "../../shared/docLinks";
+import { linkFile, linkLeads, linkWritten } from "../../shared/docLinks";
 import { headingAnchor } from "../../shared/docTables";
 import { finishMarkdown, outlineOf, type TicketRef } from "./markdownHtml";
 import { frontMatter, plainMarkdown } from "../../shared/frontMatter";
-import { dirName, isInside, joinPath, relativePath, resolvePath } from "../../shared/paths";
-import { DOC_FOLDERS, linkedLines, registryTitle, statusChoices, toneOf } from "../../shared/projectDocs";
+import { dirName, isInside, joinPath, relativePath } from "../../shared/paths";
+import { DOC_FOLDERS, registryTitle, statusChoices, toneOf } from "../../shared/projectDocs";
 import { rowsLine } from "../../shared/registryTickets";
 import { askRows } from "./tableRows";
 import { Menu } from "../Menu";
@@ -76,22 +76,17 @@ export function MarkdownView(props: { path: string; /** The editor group the pag
 		const link = (e.target as HTMLElement).closest("a");
 		if (!link) return;
 		e.preventDefault();
-		const href = link.getAttribute("href") ?? "";
-		if (/^https?:/i.test(href)) return void window.open(href, "_blank", "noopener");
+		const leads = linkLeads(link.getAttribute("href") ?? "", props.path, state.workspace?.root);
+		if (!leads) return;
+		if ("web" in leads) return void window.open(leads.web, "_blank", "noopener");
 		// A link to a heading in this document goes there.
-		if (href.startsWith("#")) {
-			const target = decodeURIComponent(href.slice(1));
-			const heading = [...view.querySelectorAll<HTMLElement>("h1, h2, h3, h4, h5, h6")].find((h) => h.id === target || h.id === headingAnchor(target));
+		if ("heading" in leads) {
+			const heading = [...view.querySelectorAll<HTMLElement>("h1, h2, h3, h4, h5, h6")].find((h) => h.id === leads.heading || h.id === headingAnchor(leads.heading));
 			heading?.scrollIntoView({ block: "start" });
 			return;
 		}
-		const file = linkFile(href);
-		if (!file) return;
-		// A path from the top is from the project's top, as a repository's page reads it.
-		const target = file.startsWith("/") && state.workspace ? joinPath(state.workspace.root, ...file.split("/").filter(Boolean)) : resolvePath(dirName(props.path), file);
 		// A link to lines of a file opens the file at them: "#L12", "#L12-L18".
-		const lines = linkedLines(href);
-		if (state.workspace && isInside(state.workspace.root, target)) void openFile(target, lines ? { reveal: lines } : {});
+		void openFile(leads.file, leads.lines ? { reveal: leads.lines } : {});
 	};
 
 	let view!: HTMLDivElement;

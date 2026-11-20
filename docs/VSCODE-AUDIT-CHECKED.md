@@ -270,3 +270,22 @@ it. Settings now has twelve rows and the command list 89.
 | Code, tables | A block of code kept the code's face and its colours; a table kept its columns |
 | Other files | A script opened after it had its line numbers, its face and its map back |
 | Switched off | The command showed the page as plain text with line numbers, and on again as written |
+
+### Markdown writing
+
+Seen at 640 and 1000 wide, in the light and the dark theme, on a page
+made for it. The command list now has 90.
+
+| Row | Seen |
+| --- | --- |
+| Next item | Enter after an item's words began the next: a dash, the next number, an empty task box |
+| Mid-item | Enter inside an item's words took the rest of them to the new item |
+| List ended | Enter on an item with no words left an empty line, and the next words were plain text |
+| In code | Enter on a line of code that began with a dash gave a plain new line |
+| Link to a file | Ctrl+click on a link's words opened the document; one to a script's lines opened it at them |
+| Link to a heading | Ctrl+click put the cursor on that heading of the same page |
+| Same words twice | A link ending "-1" reached the second of two headings with the same words |
+| Second on a line | A link further along a line was followed too, also with the keyboard in a panel's box |
+| Two groups | Enter in each of two groups began the next item there, and still did after one was closed |
+| By keyboard | "Open the link at the cursor" opened the link whose words the cursor was in |
+| Double brackets | A link between double brackets was drawn as before, and not followed |

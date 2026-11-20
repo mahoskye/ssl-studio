@@ -1,7 +1,8 @@
 import { marked, type Token } from "marked";
 import { fenced } from "./catalog";
 import { bodyOffset, frontMatter } from "./frontMatter";
-import { baseName, dirName, relativePath, relativeTo, resolvePath } from "./paths";
+import { baseName, dirName, isInside, joinPath, relativePath, relativeTo, resolvePath } from "./paths";
+import { linkedLines } from "./projectDocs";
 import type { DocFile } from "./protocol";
 
 // The links of a Markdown document that lead to a file: a catalog's line for
@@ -37,6 +38,46 @@ export function linkFile(href: string): string {
 		// A "%" that is not an escape is part of the name.
 		return file;
 	}
+}
+
+/**
+ * A link's address as a renderer reads it, from how it stands in the text
+ * between the link's round brackets: without the angle brackets that let it
+ * hold a space, and with a backslash before a mark of punctuation taken as
+ * the mark alone.
+ */
+export const hrefWritten = (raw: string) =>
+	raw
+		.trim()
+		.replace(/^<(.*)>$/, "$1")
+		.replace(/\\([!-/:-@[-`{-~])/g, "$1");
+
+/** Where a link leads: out to the web, to a heading of its own document, or to a file of the project (at lines, when it names them). */
+export type LinkLeads = { web: string } | { heading: string } | { file: string; lines?: { line: number; endLine?: number } };
+
+/**
+ * Where a link written in the document at `from` leads, for following it.
+ * A path from the top is from the project's top, as a repository's page
+ * reads it; any other is from the document's own folder. Null for a link
+ * that leads nowhere the app goes: mail, another host's files, or a file
+ * outside the project.
+ */
+export function linkLeads(href: string, from: string, root: string | null | undefined): LinkLeads | null {
+	const written = href.trim();
+	if (/^https?:/i.test(written)) return { web: written };
+	if (written.startsWith("#")) {
+		try {
+			return { heading: decodeURIComponent(written.slice(1)) };
+		} catch {
+			return { heading: written.slice(1) };
+		}
+	}
+	const file = linkFile(written);
+	if (!file || !root) return null;
+	const target = file.startsWith("/") ? joinPath(root, ...file.split("/").filter(Boolean)) : resolvePath(dirName(from), file);
+	if (!isInside(root, target)) return null;
+	const lines = linkedLines(written);
+	return { file: target, ...(lines ? { lines } : {}) };
 }
 
 /** A character of a file's name that a link cannot hold as it is: written as its escape. */

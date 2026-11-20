@@ -92,6 +92,12 @@ export async function copyPath(kind: "whole" | "relative" | "name", path = activ
 	await copyText(text, `Copied ${text}`);
 }
 
+/** Follows the link the text cursor is in. Only where the text is what is showing: not from behind a page, a table or a chart. */
+function openLinkAtCursor() {
+	const editor = activeEditor();
+	if (editor?.getDomNode()?.offsetParent) void editor.getAction("editor.action.openLink")?.run();
+}
+
 /**
  * Switches a setting that is on or off. Where the project's own settings hold it, yours would not be seen while
  * the project's is in the way: it is switched there. Says whether it is now as asked.
@@ -146,6 +152,7 @@ export const commands: Command[] = [
 	{ id: "copy-file-name", label: "Copy file name", detail: "The open file's name, without its folder", run: () => void copyPath("name") },
 	{ id: "word-wrap", label: "Toggle word wrap", detail: "Long lines wrapped at the editor's edge, or not", run: () => void switchSetting("wordWrap", !state.settings.wordWrap, () => Boolean(state.settings.wordWrap)) },
 	{ id: "live-preview", label: "Toggle Markdown live preview", detail: "A document drawn as it is written, or as its plain text", run: () => void switchSetting("livePreview", state.settings.livePreview === false, () => state.settings.livePreview !== false) },
+	{ id: "open-link", label: "Open the link at the cursor", detail: "In a document's text: the file, heading or page its link leads to", run: openLinkAtCursor },
 	{ id: "focus-editor", label: "Focus editor", run: focusEditor },
 	{ id: "focus-side-panel", label: "Focus side panel", run: focusSidePanel },
 	// The code

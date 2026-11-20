@@ -451,7 +451,9 @@ function inline(line: string, from: number, to: number, n: number, out: LiveMark
 				// A link with no words (a picture with no description) stays as written: there would be nothing to see.
 				if (line.slice(open + 1, shut).trim()) {
 					push(i, open + 1, "syntax");
-					push(open + 1, shut, "link", line.slice(shut + 2, paren).trim().split(/\s+/)[0] ?? "");
+					// The address as written: one in angle brackets may hold a space, and ends at its bracket.
+					const inside = line.slice(shut + 2, paren).trim();
+					push(open + 1, shut, "link", inside.startsWith("<") ? inside.slice(0, inside.indexOf(">") + 1) : (inside.split(/\s+/)[0] ?? ""));
 					inline(line, open + 1, shut, n, out);
 					push(shut, paren + 1, "syntax");
 				}
