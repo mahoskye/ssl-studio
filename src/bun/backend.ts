@@ -5,7 +5,7 @@ import { statSync } from "node:fs";
 import type { BackendApi, BackendEvents, Info, LspState, Workspace } from "../shared/protocol";
 import { History } from "./history";
 import { LspProcess } from "./lsp";
-import { EXPORT_TYPES, fileManifest, linksTo, listDocs, readExport, readProject, setupProject, tomlProblem, undoSetup } from "./project";
+import { EXPORT_TYPES, fileManifest, linksTo, listDocs, namesIn, readExport, readProject, setupProject, tomlProblem, undoSetup } from "./project";
 import { recent, SettingsStore } from "./settings";
 import { findLsp, findOpencode } from "./tools";
 import { WorkspaceFiles } from "./workspace";
@@ -174,6 +174,7 @@ export function createBackend(host: Host, initial?: string) {
 		manifest: async () => fileManifest(need(), await readProject(need().root)),
 		tomlProblem: async (text) => tomlProblem(text),
 		linksTo: async (path) => linksTo(need(), path),
+		namesIn: async () => namesIn(need()),
 		settings: () => settings.load(),
 		saveSettings: (scope, patch) => settings.save(scope, patch),
 		themes: () => settings.themes(),

@@ -251,7 +251,8 @@ export function Search() {
 				style={{ "padding-left": "22px" }}
 				label={props.line.text.trim()}
 				title={`Line ${props.line.line}${props.line.matches.length > 1 ? `, ${props.line.matches.length} matches` : ""}: ${props.line.text.trim()}`}
-				onKeep={() => void openFile(props.line.path, { keep: true })}
+				// To stay or for a look, a result opens at its match.
+				onKeep={() => void openFile(props.line.path, { keep: true, reveal: { line: props.line.line, column: first().column, endLine: props.line.line, endColumn: first().column + first().length } })}
 				onActivate={() => void openFile(props.line.path, { preview: true, reveal: { line: props.line.line, column: first().column, endLine: props.line.line, endColumn: first().column + first().length } })}
 			>
 				<span class="meta">{props.line.line}</span>

@@ -1,6 +1,6 @@
 // One mechanism for every list and tree in the panels. The list is a single
 // Tab stop that moves with the keyboard (a roving tabindex): Up, Down, Home,
-// End and the page keys move, Enter and Space act, Left and Right close and
+// End and the page keys move, Space acts as a click and Enter opens to stay, Left and Right close and
 // open in a tree, letters jump to a row, and the menu key or Shift+F10 opens a
 // row's menu. The arithmetic is in rowMoves.ts; this file applies it to the DOM.
 import { Icon, type IconName } from "../Icon";
@@ -252,7 +252,7 @@ export function Rows(props: {
 	);
 }
 
-/** One row of a list or a tree. Clicking it and pressing Enter or Space on it do the same thing. */
+/** One row of a list or a tree. Clicking it and pressing Space on it do the same thing; Enter does what a double click does, where the row has such a thing. */
 export function Row(props: {
 	/** The same for as long as the row stands for the same thing, so focus follows it through a redraw. */
 	key: string;
@@ -279,7 +279,6 @@ export function Row(props: {
 	onDragOver?: (e: DragEvent) => void;
 	onDrop?: (e: DragEvent) => void;
 	onActivate?: () => void;
-	/** A double click: what a single one opened for a look is opened to stay. */
 	/** A double click, or Enter: open to stay. False when the row has nothing to keep, and Enter is then one click. */
 	onKeep?: () => boolean | void;
 	/** Opens or closes the row: Left and Right in a tree, and on any row that says whether it is open. */

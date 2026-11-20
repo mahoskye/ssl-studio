@@ -843,7 +843,7 @@ change of file, or behind the Read view.
 Read while staged. Five findings, two to stop for.
 
 1. **The list offered on `[[` wrote a name that led to another
-   document** for five of the example project's 32: every catalog
+   document** for five of the example project's 33: every catalog
    called INDEX but the first, and a README below the top one. Fixed:
    the name written is one that means that document and no other, the
    path from the project's folder where the short name is taken; an
@@ -876,4 +876,104 @@ The fix to the first was read a third time, with the reviewer's script
 run as the editor calls it, each of the example's 33 documents in turn
 as the one being written in: of 1,056 names offered, none led anywhere
 but the document offered. Nothing to hold the commit.
+
+## The twelfth review: the keyboard fix and links by name, as committed
+
+`b86ccbb` and `e47142b` were read as committed by a reviewer that had
+seen none of the work. Six findings, three to fix now.
+
+1. **Enter on a search result no longer went to its match**: Enter now
+   opens to stay, and a result opened to stay was opened without its
+   place. Fixed: it opens at the match either way.
+2. **Choosing a document on `[[` still deleted words** where a bar or a
+   hash came later on the line with no closing brackets, as in a table
+   row. Fixed: a link is taken as closed only where the two brackets
+   follow, at once or after a bar's words or a hash's heading.
+3. **A click for a look on a plan's file still took the keyboard**, to
+   the chart, where Delete removes a step. Fixed: a plan brought to the
+   front for a look leaves the keyboard on the row.
+4. **A file opened to stay that is slow to read can take the keyboard
+   after a later look.** Left; it needs a slow read.
+5. **Comments in the rows' file still said Enter and Space do the
+   same.** Fixed.
+6. **The record said 32 documents in one place and 33 in another.** It
+   is 33. `linkNames` has no test, the tests having no page to build
+   one in. Left.
+
+Seen after the three fixes, at 1280 wide in the dark theme: Enter on a
+search result opened the file to stay with the cursor on the match,
+line 129; one click on a plan's row left the keyboard on the row, and
+the Down arrow went to the next row with nothing changed in the plan;
+`[[` typed before a word in a table's row, and before a word on a line
+with a hash later in it, wrote the name and its two brackets and kept
+every word of the line.
+
+## The thirteenth review: backlinks, and a rename followed by name
+
+Read while staged, with the twelfth review's three fixes, by a reviewer
+that had seen none of it. Ten findings, one to stop for.
+
+1. **A ticket named by its file's name was not followed** when the list
+   of documents in hand was still of before the rename: the list of
+   after was made from it, and still called the ticket by its old key.
+   Fixed: the documents as they are after the rename are asked for
+   afresh. With a test on a folder made for it, both ways.
+2. **A rename could make a link to a document that did not move mean
+   the renamed one**, and nothing was asked. Fixed: a link is followed
+   when it no longer means what it meant, whichever document moved.
+3. **The ADR said a link by what a document calls itself goes on
+   working**; it does not when the file leaves a folder whose titles
+   are read. With the second fix such a link is offered a new name, and
+   the sentence is corrected.
+4. **Where links by name stand was read differently from the page** in
+   a table's row with the bar after a backslash, and after a lone
+   backtick. Fixed, in the text's links too. Code set in by four spaces
+   is still read as prose: left, and said.
+5. **A name was written over without looking at what followed it**, so
+   "Late" could be written into "Later". Fixed, with a test.
+6. **A document moved out of the project's documents was offered a
+   name that meant nothing.** Gone with the first fix: it is left.
+7. **"Linked from" reads every document again on every save.** Left;
+   the cost, as the reviewer measured it, is in ADR 0025.
+8. **A link typed and not saved is neither listed nor followed.** Left,
+   and said.
+9. **A new name that cannot be written is dropped without a word.**
+   Left, and said.
+10. **Nothing tested the reading of a folder's links by name.** A test
+    now does.
+
+Seen after these fixes, at 1280 wide in the light theme: a ticket with
+no key written, named by its file's name in three places of another
+document (one of them in a table's row, its bar after a backslash), was
+listed under "Linked from" with "3 places"; renamed, the app asked
+about three links by name that no longer meant what they meant, and on
+yes wrote all three with the new name, the backslash and the words
+kept.
+
+### The second reading
+
+Of the fixes, over 33 renames made in folders of the reviewer's own.
+Six findings, one to stop for.
+
+1. **With the path links' question asked first, the list of documents
+   had already been made anew**, and a link by what a moved document
+   used to call itself was missed. Fixed: the list is taken as the
+   rename is made, before any question.
+2. **A file moved in from outside the project's documents** may take a
+   name a link meant another document by, with nothing asked. Left, and
+   said in ADR 0025.
+3. **The question said "now that X is X" for a move**, which keeps the
+   name. Fixed: it says where the file now is.
+4. **A span of code that runs over the line's end** is read as prose on
+   its first line. Left, and said.
+5. **Choosing an offered document in the middle of a table's link drops
+   the backslash.** Left, and said.
+6. **Two comments still described the first version.** Fixed.
+
+The reviewer's check of the earlier ten: all as the record says, and no
+link was written wrongly in any of the 33 renames; 7,106 names in
+300,000 texts made at random were each written back as the same link
+with only the name changed. The fix to the first finding here was read
+by the reviewer who proposed it, with the 33 renames run again on it:
+nothing left to hold the commit.
 

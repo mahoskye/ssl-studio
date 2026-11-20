@@ -92,6 +92,8 @@ export type DocFile = {
  * which is from the project's top with no mark ("root").
  */
 export type LinkTo = { path: string; line: number; column: number; href: string; rest: string; from: "doc" | "top" | "root" };
+/** A link by name in one of the workspace's Markdown documents: the document, the line (from 1), the column its name starts at (from 0), and the name as written. */
+export type NameIn = { path: string; line: number; column: number; name: string };
 /** One file of the project, for the file manifest. */
 export type ManifestFile = { path: string; kind: string; bytes: number; lines: number; sha256: string };
 
@@ -241,6 +243,8 @@ export interface BackendApi {
 	tomlProblem(text: string): Promise<{ message: string; line: number; column: number } | null>;
 	/** The links in the workspace's Markdown documents that lead to this file, or into this folder. */
 	linksTo(path: string): Promise<LinkTo[]>;
+	/** The links by name ([[name]]) in the workspace's Markdown documents, as they stand on disk. */
+	namesIn(): Promise<NameIn[]>;
 	settings(): Promise<{ effective: Settings; user: Partial<Settings>; workspace: Partial<Settings> }>;
 	saveSettings(scope: SettingsScope, patch: SettingsPatch): Promise<Settings>;
 	themes(): Promise<ThemeFile[]>;

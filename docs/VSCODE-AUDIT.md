@@ -221,6 +221,7 @@ fetches, pulls or pushes
 | Markdown as written | Yes | Bring | Built, asked for in use: the text drawn as it is written; markup hidden off the cursor's line |
 | Markdown writing | Yes | Bring | Built, asked for in use: Enter starts a list's next item; a link is followed from the text |
 | Links by name | Yes | Bring | Built, asked for in use: `[[name]]` leads to the document the name means, and names are offered |
+| Backlinks | Yes | Bring | Built, asked for in use: a page lists what links to it; a rename is followed by name too |
 | CSV as a table | Yes | Have | Beyond VS Code's own |
 | JSON, TOML, XML | Yes | Have | Coloured, outlined, checked |
 | Line ends kept | Yes | Have | A file with Windows line ends was saved with them |
@@ -523,6 +524,7 @@ trying the app.
 | Markdown as written | Large | Yes | The text read into marks; drawn by the editor's own decorations |
 | Markdown writing | Small | Yes | A rule for Enter in a list; the editor's own link following, told where each link leads |
 | Links by name | Medium | Yes | One rule for which document a name means; the page, the text and the list offered all ask it |
+| Backlinks | Medium | Yes | One reading of every document's links by name; the page's list and the rename's question both use it |
 
 Two things were put right with these, not new features: every small
 graphic is now from the editor's icon font or drawn by a style rule (the
@@ -539,9 +541,10 @@ Markdown writing was added after Markdown as written, toward the same
 request ("behave like Obsidian"), and links by name after the user
 answered that links between double brackets should lead to documents by
 name ([ADR 0025](adr/0025-documents-link-by-name-as-well-as-by-path.md)).
-Not built from that request, and waiting on the user's word: backlinks,
-links by name that follow a rename, a form for a document's properties,
-Tab to set an item in, and a table kept tidy as it is typed.
+Backlinks, and links by name that follow a rename, were added when the
+user asked for both. Not built from that request, and waiting on the
+user's word: a form for a document's properties, Tab to set an item in,
+and a table kept tidy as it is typed.
 
 ## What the reviews found
 
@@ -603,6 +606,11 @@ nothing to fix.
 An eleventh was made of links by name while staged: five findings, two
 of which would have written a link to the wrong document or deleted
 words from a line; both fixed, the rest left and named.
+A twelfth, by a reviewer new to the work, read the last two commits as
+made: three findings fixed (Enter on a search result, a plan's file
+clicked for a look, and words still deleted in a table's row). A
+thirteenth read backlinks and the rename's follow-up while staged: ten
+findings, one to stop for; five fixed, the rest left and named.
 
 ## Why not an extension
 

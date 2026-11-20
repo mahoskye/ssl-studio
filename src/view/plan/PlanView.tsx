@@ -16,7 +16,7 @@ import { ticketKey } from "../../shared/projectDocs";
 import { regionColor } from "../editor/regions";
 import { canvasMeasure, centredOn, clearLabels, clearOf, fitView, legibleScale, mapArea, nearest, outOfSight, recall, remember, reveal, roundedPath, zoomAt, type Measure, type Point } from "../graph/canvas";
 import { diagnostics } from "../lsp/session";
-import { documents, notify, setState, state, applyText } from "../state";
+import { documents, notify, setState, state, applyText, openedForALook } from "../state";
 import { nodeStatuses } from "./build";
 import { builtOf, chartChanges, unitsOfNode } from "./built";
 import { chartGraph, crossings, routeLength, cycleEdge, describeEdge, describeNode, KEYS, labelPoint, LINE, MARK_WORDS, routeOf, sizeNode, statusMark, type ChartGraph, type Mark, type NodeState, type Sized } from "./chart";
@@ -248,8 +248,11 @@ export function PlanView(props: { path: string; group: number }) {
 		onCleanup(() => sub.dispose());
 		// A file may have gone or changed on disk while this was not showing.
 		recheckPlan(model.uri.toString());
-		// A plan opens ready for the keyboard, as a script does, but not out from under someone typing or a dialog.
-		queueMicrotask(() => !typingElsewhere() && !document.querySelector(".overlay") && canvas?.focus());
+		// A plan opens ready for the keyboard, as a script does, but not out from under someone typing or a dialog, and
+		// not when it is only brought to the front for a look: the keyboard stays on the row that was clicked, where
+		// Delete and the arrows are the list's and not the chart's. Asked now: it is no longer said a moment later.
+		const look = openedForALook(props.path);
+		queueMicrotask(() => !look && !typingElsewhere() && !document.querySelector(".overlay") && canvas?.focus());
 	});
 
 	let layoutRun = 0;

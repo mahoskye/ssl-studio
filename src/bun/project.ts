@@ -10,10 +10,11 @@ import { CATALOG_FILE, catalogStale } from "../shared/catalog";
 import { parseCsv, tally } from "../shared/csv";
 import { fileLinks, frontPaths, type DocLink } from "../shared/docLinks";
 import { frontMatter, many, one, summaryOf, titleOf } from "../shared/frontMatter";
+import { namePlaces } from "../shared/namedLinks";
 import { catalogItems, DOC_FOLDERS, isCatalog, isPrompt, STATE_FILE, type DocArea } from "../shared/projectDocs";
 import { rowsByTicket } from "../shared/registryTickets";
 import { taskTally } from "../shared/tasks";
-import type { DocFile, LinkTo, ManifestFile, Project, Settings } from "../shared/protocol";
+import type { DocFile, LinkTo, ManifestFile, NameIn, Project, Settings } from "../shared/protocol";
 import { workspaceDir } from "./paths";
 import { WorkspaceFiles } from "./workspace";
 
@@ -200,6 +201,30 @@ export async function linksTo(files: WorkspaceFiles, target: string): Promise<Li
 			const leads = linkTarget(root, path, link.file);
 			if (leadsThere(leads)) found.push({ path, line: link.line, column: link.column, href: link.href, rest: leads.slice(resolve(target).length), from: link.file.startsWith("/") ? "top" : "doc" });
 		}
+	}
+	return found;
+}
+
+/**
+ * The links by name in the workspace's Markdown documents, as they stand on
+ * disk: what a document is linked from by name, and what a rename may leave
+ * meaning nothing. Which document each name means is not asked here.
+ */
+export async function namesIn(files: WorkspaceFiles): Promise<NameIn[]> {
+	const found: NameIn[] = [];
+	let read = 0;
+	for (const path of files.files()) {
+		if (!MARKDOWN.test(path)) continue;
+		if (++read > LINKING_DOCS) break;
+		const file = Bun.file(path);
+		if (file.size > LINKED_BYTES) continue;
+		let text = "";
+		try {
+			text = decode(new Uint8Array(await file.arrayBuffer())).text;
+		} catch {
+			continue;
+		}
+		for (const place of namePlaces(text)) found.push({ path, ...place });
 	}
 	return found;
 }

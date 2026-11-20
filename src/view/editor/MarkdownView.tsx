@@ -1,15 +1,15 @@
 // A Markdown document, rendered. It is a reading view of the text in the
 // editor (ADR 0002): the Text switch edits it, and this follows.
 import { Icon } from "../Icon";
-import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, Show } from "solid-js";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
 import { linkFile, linkLeads, linkWritten } from "../../shared/docLinks";
 import { headingAnchor } from "../../shared/docTables";
-import { docByName } from "../../shared/namedLinks";
+import { docByName, linkedFrom } from "../../shared/namedLinks";
 import { finishMarkdown, outlineOf, type NameResolver, type TicketRef } from "./markdownHtml";
 import { frontMatter, plainMarkdown } from "../../shared/frontMatter";
-import { dirName, isInside, joinPath, relativePath } from "../../shared/paths";
+import { dirName, isInside, joinPath, relativePath, relativeTo } from "../../shared/paths";
 import { DOC_FOLDERS, registryTitle, statusChoices, toneOf } from "../../shared/projectDocs";
 import { rowsLine } from "../../shared/registryTickets";
 import { askRows } from "./tableRows";
@@ -18,6 +18,7 @@ import { setStatus, tickTask } from "../projectDocs";
 import { tasks } from "../../shared/tasks";
 import { colourCode } from "./markdownCode";
 import { ticketWork } from "../../shared/workContext";
+import { backend } from "../backend";
 import { docs } from "../project";
 import { outline, type OutlineItem } from "../../shared/outline";
 import { canonical, documents, focusEditor, openFile, revealSignal, setState, state } from "../state";
@@ -53,6 +54,35 @@ export function MarkdownView(props: { path: string; /** The editor group the pag
 		if (!found) return null;
 		const title = found.title ?? "";
 		return { href: linkWritten(relativePath(dirName(props.path), found.path)), about: [found.ticket && !title.toLowerCase().startsWith(found.ticket.toLowerCase()) ? found.ticket : "", title || found.name].filter(Boolean).join(": ") };
+	};
+	/**
+	 * The documents this one is linked from, by path or by a name that means it: asked of the files as they are on
+	 * disk, again whenever the project's documents change. What is typed and not yet saved is not counted.
+	 */
+	const [linked] = createResource(
+		() => ({ path: props.path, files: docs(), root: state.workspace?.root }),
+		async ({ path, files, root }) => {
+			if (!root) return [];
+			try {
+				const [byPath, byName] = await Promise.all([backend.linksTo(path), backend.namesIn()]);
+				return linkedFrom(
+					canonical(path),
+					byPath.map((link) => ({ path: canonical(link.path), line: link.line })),
+					byName.map((place) => ({ ...place, path: canonical(place.path) })),
+					files.map((file) => ({ ...file, path: canonical(file.path) })),
+					root,
+				);
+			} catch {
+				return [];
+			}
+		},
+	);
+	/** What a document that links here is called in that list: a ticket by its key and title, another by its title or its name. */
+	const called = (path: string) => {
+		const file = docs().find((d) => canonical(d.path) === path);
+		if (!file) return relativeTo(state.workspace?.root, path);
+		const title = file.title || file.name;
+		return file.ticket && !title.toLowerCase().startsWith(file.ticket.toLowerCase()) ? `${file.ticket}: ${title}` : title;
 	};
 	const html = createMemo(() => finishMarkdown(DOMPurify.sanitize(marked.parse(front().body, { async: false, gfm: true }) as string), { anchors: true, tickets: mentioned(), named }));
 	/** The front matter as it is shown: each key with its values, a ticket or a file as a link to it. */
@@ -293,6 +323,26 @@ export function MarkdownView(props: { path: string; /** The editor group the pag
 						</section>
 					</Show>
 					<article class="md" ref={article} innerHTML={html()} onClick={follow} />
+					{/* What links here, by path or by name: the way back from a document to those that speak of it. */}
+					<Show when={linked()?.length}>
+						<section class="md-linked" aria-label="Linked from">
+							<h2>Linked from</h2>
+							<ul>
+								<For each={linked()}>
+									{(from) => (
+										<li>
+											<button class="link" title={relativeTo(state.workspace?.root, from.path)} onClick={() => void openFile(from.path, { reveal: { line: from.line } })}>
+												{called(from.path)}
+											</button>
+											<Show when={from.places > 1}>
+												<span class="md-work-note">{from.places} places</span>
+											</Show>
+										</li>
+									)}
+								</For>
+							</ul>
+						</section>
+					</Show>
 				</div>
 				{/* A document with a few headings gets a list of them beside it, where the view is wide enough. */}
 				<Show when={headings().length >= 3}>

@@ -305,6 +305,23 @@ made for it.
 | Followed | A click on the page, and Ctrl+click in the text, opened the ticket |
 | Offered | `[[` listed the documents, tickets first; "worked" narrowed it; Enter wrote the name |
 
+### Backlinks and a rename followed by name
+
+Seen at 720 and 1440 wide, each in the light and the dark theme, on a
+page made for it that linked to another three times by name and once by
+path. Links by name were seen again in the same four, on the page and
+in the text, with the list offered inside the window in each.
+
+| Row | Seen |
+| --- | --- |
+| Linked from | Under the page's text: four documents, the scratch page with "4 places" |
+| Its entries | Each showed the document's title or its ticket's key, and its path in the tooltip |
+| Rename asked | After the path links' question, a second: three links by name in docs/names.md |
+| Rename done | The three names were written anew; the words after a bar and the heading stayed |
+| Left alone | A ticket's key, a name that meant nothing, and the same name in a code span |
+| Enter on a row | Enter on a folder opened and shut it; on a file it kept the tab and typing went to the text |
+| Space on a row | Space showed the file for a look, and the keyboard stayed on the row |
+
 ## The second pass
 
 Every row of the audit was tried once more (2026-11-19), after the
@@ -343,7 +360,8 @@ stay and gives the keyboard to the editor. Seen after the fix: the row
 kept the keyboard for a file with a tab and for one without, the Down
 arrow moved to the next row, Ctrl+C and Ctrl+V made a copy, Ctrl+X
 dimmed it, and a double click put the keyboard in the text. Enter on a
-row was changed after a reviewer read the fix, and has not been seen.
+row was changed after a reviewer read the fix, and was seen afterwards:
+it is in the table above this section.
 Left as they were: a click on a search result still goes to its place
 in the text with the keyboard, and a look that closes a comparison
 still gives the keyboard to the editor.

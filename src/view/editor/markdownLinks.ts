@@ -35,7 +35,8 @@ export function registerMarkdownLinks() {
 				// it of a name; the brackets are closed if they are not.
 				const after = line.slice(position.column - 1);
 				const rest = /^[^[\]|#]*/.exec(after)![0].length;
-				const closed = after.slice(rest).startsWith("]]") || after.slice(rest).startsWith("|") || after.slice(rest).startsWith("#");
+				// Closed: the two brackets come next, or after a bar's words or a hash's heading with no other bracket between.
+				const closed = /^(?:[|#][^[\]]*)?\]\]/.test(after.slice(rest));
 				// What follows the cursor is the rest of a name only where the link is closed after it: in an open one
 				// it is the line's own words, and they stay.
 				const range = new monaco.Range(position.lineNumber, position.column - name.length, position.lineNumber, position.column + (closed ? rest : 0));
@@ -121,7 +122,8 @@ export function registerMarkdownLinks() {
 				const range = new monaco.Range(mark.line, before?.start ?? mark.start, mark.line, after?.end ?? mark.end);
 				if (closes === "]]") {
 					// A link by name leads to the document the name means; one that names none is drawn and leads nowhere.
-					const named = namedLink(mark.href);
+					// In a table's row the bar is written after a backslash, which is no part of the name.
+					const named = namedLink(mark.href.replace(/\\$/, ""));
 					const found = named && docByName(named.name, docs(), root);
 					if (found) links.push({ range, url: address({ file: canonical(found.path) }), tooltip: `Open ${relativeTo(root, found.path)}` });
 					continue;

@@ -1040,6 +1040,12 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .md-work-note { color: var(--muted); font-size: var(--text-sm); }
 .md-work + .md { padding-top: var(--space-6); }
 @container (max-width: 520px) { .md-work-group { grid-template-columns: 1fr; gap: var(--space-1); } }
+/* What links to the document, under its text. */
+.md-linked { margin: var(--space-6) var(--space-7) var(--space-7); padding-top: var(--space-4); border-top: 1px solid var(--border); font-size: var(--text-md); }
+.md-linked h2 { margin: 0 0 var(--space-3); font-size: var(--text-sm); font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.md-linked ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
+.md-linked li { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2) var(--space-4); min-width: 0; }
+.md-linked li button { text-align: left; overflow-wrap: anywhere; }
 .doc-status { padding: 0 var(--space-3); border-radius: 999px; border: 1px solid var(--border); white-space: nowrap; font-size: var(--text-sm); }
 .doc-status.tone-done { color: var(--ok, var(--fg)); border-color: color-mix(in srgb, var(--ok, var(--fg)) 45%, transparent); }
 .doc-status.tone-active { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }

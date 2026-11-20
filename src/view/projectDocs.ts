@@ -10,6 +10,7 @@ import { parseCsv } from "../shared/csv";
 import { frontMatter, one, withFrontMatter } from "../shared/frontMatter";
 import { importSummary, ticketsFromJson, ticketsFromTable, type Imported, type ImportedTicket } from "../shared/ticketImport";
 import { manifestSummary, mergeManifest } from "../shared/manifest";
+import { namesToFollow, withNames } from "../shared/namedLinks";
 import { baseName, dirName, isInside, joinPath, relativePath, relativeTo, resolvePath } from "../shared/paths";
 import { activeEditor } from "./editor/EditorGroup";
 import {
@@ -35,7 +36,7 @@ import {
 	type DocArea,
 	type KnowledgeKind,
 } from "../shared/projectDocs";
-import type { DocFile, LinkTo } from "../shared/protocol";
+import type { DocFile, LinkTo, NameIn } from "../shared/protocol";
 import { backend } from "./backend";
 import { ask, choose } from "./dialogs";
 import { createdObjects } from "../shared/outline";
@@ -415,7 +416,7 @@ export async function mendLinks(path: string, mends: readonly LinkMend[]) {
  * link's file part on its line, through the editor where the document is
  * open, so it can be undone there.
  */
-export async function followRename(from: string, to: string) {
+async function followPaths(from: string, to: string) {
 	if (!state.workspace) return;
 	let links: LinkTo[];
 	try {
@@ -468,6 +469,80 @@ export async function followRename(from: string, to: string) {
 	setState("treeVersion", (v) => v + 1);
 	if (done) notify(`${done} ${done === 1 ? "place was" : "places were"} written anew for ${baseName(to)}.`);
 	const left = total - done;
+	if (left > 0) notify(`${left} of them ${left === 1 ? "is" : "are"} not where ${left === 1 ? "it was" : "they were"}: the document has changed since. Mend ${left === 1 ? "it" : "them"} in the text.`, "error");
+}
+
+/**
+ * After a file or a folder is renamed: first the links by path that led to
+ * the old name, then the links by name that no longer mean what they
+ * meant. Each is asked about once, and written on the person's word.
+ */
+export async function followRename(from: string, to: string) {
+	// The documents as they were, taken now: the list is made anew a moment after a rename, and the first question
+	// may stand open for longer than that.
+	const listed = docs().map((file) => ({ ...file, path: canonical(file.path) }));
+	await followPaths(from, to);
+	await followNames(from, to, listed);
+}
+
+/**
+ * The links by name ([[name]]) a rename leaves behind: those that no longer
+ * mean the document they meant, whether they named it by its file's name,
+ * its path or what it called itself, and those whose name the renamed file
+ * took. A name that still means its document is left alone. Only the name
+ * is written anew, through the editor where the document is open. `listed`
+ * is the project's documents as they were in hand when the rename was made.
+ */
+async function followNames(from: string, to: string, listed: DocFile[]) {
+	if (!state.workspace) return;
+	const was = canonical(from);
+	const is = canonical(to);
+	const under = (path: string, base: string) => path === base || (isInside(base, path) && path.length > base.length);
+	const moved = (path: string) => (under(path, was) ? is + path.slice(was.length) : path);
+	// The documents as they are now are asked for: what a document is called, and whether it is still one of the
+	// project's, can change with where it is. As they were is the list that was in hand, where that is of before
+	// the rename; where it was already of after, it is the new one with the moved paths put back, which knows the
+	// documents only by what they are called now.
+	let after: DocFile[];
+	try {
+		after = (await backend.docs()).map((file) => ({ ...file, path: canonical(file.path) }));
+	} catch {
+		return;
+	}
+	const before = listed.some((file) => under(file.path, was)) ? listed : after.map((file) => (under(file.path, is) ? { ...file, path: was + file.path.slice(is.length) } : file));
+	if (!before.some((file) => under(file.path, was))) return;
+	let places: NameIn[];
+	try {
+		places = (await backend.namesIn()).map((place) => ({ ...place, path: canonical(place.path) }));
+	} catch {
+		return;
+	}
+	const follow = namesToFollow(places, before, after, moved, root());
+	if (!follow.length) return;
+	const holders = [...new Set(follow.map((place) => place.path))];
+	const where = holders.length === 1 ? relativeTo(root(), holders[0]!) : `${holders.length} documents`;
+	const said = `${follow.length === 1 ? "One link by name" : `${follow.length} links by name`} in ${where} no longer ${follow.length === 1 ? "means what it" : "mean what they"} meant, now that ${baseName(from)} is ${baseName(from) === baseName(to) ? `in ${relativeTo(root(), dirName(to)) || "the project's folder"}` : baseName(to)}.`;
+	const go = follow.length === 1 ? "Update it" : "Update them";
+	if ((await choose(said, [go])) !== go) return;
+	let done = 0;
+	for (const path of holders) {
+		const text = await current(path);
+		if (text === null) continue;
+		const changed = withNames(
+			text,
+			follow.filter((place) => place.path === path),
+		);
+		if (!changed.done) continue;
+		try {
+			await put(path, changed.text, true);
+			done += changed.done;
+		} catch (e: any) {
+			notify(String(e?.message ?? e), "error");
+		}
+	}
+	setState("treeVersion", (v) => v + 1);
+	if (done) notify(`${done} ${done === 1 ? "link by name was" : "links by name were"} written anew for ${baseName(to)}.`);
+	const left = follow.length - done;
 	if (left > 0) notify(`${left} of them ${left === 1 ? "is" : "are"} not where ${left === 1 ? "it was" : "they were"}: the document has changed since. Mend ${left === 1 ? "it" : "them"} in the text.`, "error");
 }
 

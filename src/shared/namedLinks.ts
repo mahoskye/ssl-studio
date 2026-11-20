@@ -4,7 +4,9 @@
 // folder, or what the document calls itself. Which document a name means is
 // worked out here, in one place, for the text, the page and the list offered
 // while a link is written (ADR 0025).
+import { fenced } from "./catalog";
 import { DOC_ORDER, linkChoices } from "./docLinks";
+import { frontMatter } from "./frontMatter";
 import { baseName, relativeTo } from "./paths";
 import type { DocFile } from "./protocol";
 
@@ -119,3 +121,128 @@ export function nameChoices(files: readonly DocFile[], path: string, root: strin
 		return name ? [{ label: choice.label, detail: choice.detail, name }] : [];
 	});
 }
+
+/** A link by name as it stands in a document's text: its line (from 1), the column its name starts at (from 0), and the name as written. */
+export type NamePlace = { line: number; column: number; name: string };
+
+/**
+ * Where the links by name of a Markdown text stand, in order. What a
+ * document opens with between its two rules is not prose, and neither is a
+ * fenced block of code or a span of code on the line: the same brackets
+ * there are left alone. A bar after a backslash is the bar, as a table's
+ * row has to write it. (Code set in by four spaces, and a fence inside a
+ * list or a quote, are not known to be code here.)
+ */
+export function namePlaces(text: string): NamePlace[] {
+	if (!text.includes("[[")) return [];
+	const lines = text.split(/\r?\n/);
+	const fences = fenced(text);
+	const opening = frontMatter(text).lines;
+	const found: NamePlace[] = [];
+	let offset = 0;
+	for (let index = 0; index < lines.length; index++) {
+		const line = lines[index]!;
+		const start = offset;
+		// The line's end is one character or two: found in the text, not assumed.
+		offset += line.length + (text[start + line.length] === "\r" ? 2 : 1);
+		if (index < opening || !line.includes("[[")) continue;
+		if (fences.some(([from, to]) => start >= from && start < to)) continue;
+		for (const match of line.matchAll(/\[\[([^[\]\n]+)\]\]/g)) {
+			// In a span of code: an odd count of backticks before it, and one after it to close the span.
+			if ((line.slice(0, match.index).match(/`/g)?.length ?? 0) % 2 === 1 && line.includes("`", match.index + match[0].length)) continue;
+			const link = namedLink(match[1]!.replace(/\\\|/g, "|"));
+			if (link) found.push({ line: index + 1, column: match.index + 2 + match[1]!.indexOf(link.name), name: link.name });
+		}
+	}
+	return found;
+}
+
+/** A name to write in place of another, where a link by name stands: the place, the name there now, and the name instead. */
+export type NameEdit = NamePlace & { instead: string };
+
+/**
+ * The text with each of these names written anew, and how many were: a
+ * name is written over only where it still stands as it was read, so an
+ * edit never lands in a text that has changed since. Only the name is
+ * touched: the brackets, a heading after "#" and the words after "|" stay
+ * as they are (ADR 0002).
+ */
+export function withNames(text: string, edits: readonly NameEdit[]): { text: string; done: number } {
+	const parts = text.split(/(\r?\n)/);
+	let done = 0;
+	// From the line's end back, so that an edit does not move the place of the one before it.
+	for (const edit of [...edits].sort((a, b) => b.line - a.line || b.column - a.column)) {
+		const at = (edit.line - 1) * 2;
+		const line = parts[at];
+		// The name must stand there whole: the two brackets before it, and after it the end of the link, a bar or a hash.
+		if (line === undefined || !line.startsWith(edit.name, edit.column) || !/\[\[\s*$/.test(line.slice(0, edit.column)) || !/^\s*(?:\]\]|#|\\?\|)/.test(line.slice(edit.column + edit.name.length))) continue;
+		parts[at] = line.slice(0, edit.column) + edit.instead + line.slice(edit.column + edit.name.length);
+		done++;
+	}
+	return { text: parts.join(""), done };
+}
+
+/**
+ * After files were moved or renamed: the links by name that no longer mean
+ * the document they meant, each with a name to write instead. `before` and
+ * `after` are the project's documents as they were and as they are, and
+ * `moved` says where a path went. A name that still means its document (a
+ * ticket's key, what it calls itself) is left as it is. One that now means
+ * another document is among them, whether its own document moved or the
+ * renamed file took its name. A document that is no longer among the
+ * project's documents, or that no name can be written for, is left.
+ */
+export function namesToFollow<Place extends NamePlace>(places: readonly Place[], before: readonly DocFile[], after: readonly DocFile[], moved: (path: string) => string, root?: string | null): (Place & { instead: string })[] {
+	const follow: (Place & { instead: string })[] = [];
+	// Each name is asked once, however many places write it.
+	const instead = new Map<string, string | null>();
+	for (const place of places) {
+		if (!instead.has(place.name)) {
+			const was = docByName(place.name, before, root);
+			const went = was ? moved(was.path) : "";
+			const target = was ? after.find((file) => file.path === went) : undefined;
+			const name = target && docByName(place.name, after, root) !== target ? nameFor(target, after, root) : null;
+			instead.set(place.name, name && name !== place.name ? name : null);
+		}
+		const name = instead.get(place.name);
+		if (name) follow.push({ ...place, instead: name });
+	}
+	return follow;
+}
+
+/** A document that links to another: its path, the line of its first link there, and how many places link. */
+export type LinkedFrom = { path: string; line: number; places: number };
+
+/**
+ * The documents a document is linked from: by path (`byPath`, the links
+ * that lead to it) and by name (`byName`, every link by name there is, of
+ * which those that mean this document count). Its own links to itself are
+ * left out. In the order links are offered in, then by path.
+ */
+export function linkedFrom(here: string, byPath: readonly { path: string; line: number }[], byName: readonly (NamePlace & { path: string })[], files: readonly DocFile[], root?: string | null): LinkedFrom[] {
+	const holders = new Map<string, LinkedFrom>();
+	const add = (path: string, line: number) => {
+		if (path === here) return;
+		const had = holders.get(path);
+		if (had) {
+			had.places++;
+			had.line = Math.min(had.line, line);
+		} else holders.set(path, { path, line, places: 1 });
+	};
+	for (const link of byPath) add(link.path, link.line);
+	const me = files.find((file) => file.path === here);
+	// Each name is asked once, however many places write it.
+	const meant = new Map<string, DocFile | null>();
+	for (const place of byName) {
+		if (!meant.has(place.name)) meant.set(place.name, docByName(place.name, files, root));
+		if (me && meant.get(place.name) === me) add(place.path, place.line);
+	}
+	const order: readonly string[] = DOC_ORDER;
+	const rank = (path: string) => {
+		const group = files.find((file) => file.path === path)?.group;
+		const at = group ? order.indexOf(group) : -1;
+		return at < 0 ? order.length : at;
+	};
+	return [...holders.values()].sort((a, b) => rank(a.path) - rank(b.path) || a.path.localeCompare(b.path));
+}
+
