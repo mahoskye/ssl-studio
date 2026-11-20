@@ -761,3 +761,57 @@ heading still takes the ground of the row under the pointer when the
 pointer is on it. Looked at at 1400 and 720 wide, in the dark and the
 light theme: the bands set the headings apart in all four, and no
 document's row has one.
+
+## Catalogs for the docs, tests and code folders
+
+Asked whether the READMEs "Set up project" writes for the docs, tests
+and code folders should give way to generated catalogs as the
+schema's had, the user answered "Yes, those too". The agent had
+advised leaving the tests' and the code's (a list of files says what
+the Explorer says); the user's word stands. Appended to
+[ADR 0026](adr/0026-schema-is-kept-by-kind-and-prompts-are-kept.md).
+
+| Folder | Shown | What it lists |
+| --- | --- | --- |
+| docs | Last in Docs | Its plain documents, then the way to the four catalogs under it |
+| tests | With the project's | Its files as they lie, under the folder each is in |
+| code | With the project's | The same |
+
+Looked at in my own instance, on a scratch copy of the demo, at 1400
+and 720 wide in the dark and the light theme: nothing ran off the
+panel in any.
+
+| Done | Seen |
+| --- | --- |
+| The Docs list | Decisions, Worked examples, then Catalog; no README |
+| The Project list | README, AGENTS, project.toml, STATE, then the tests' and the code's `INDEX.md` |
+| A file, by Explorer | `LateSamples.ssl` made in `src/DueDates/`: in the code's catalog at once |
+| Two from outside | A script and a note written by another program, then Refresh |
+| The rows then | "out of date" on the Docs list's Catalog and on `src/INDEX.md` |
+| Health then | "The catalogs of the docs folder and the code folder are out of date." |
+| Update, in Health | "Updated docs/INDEX.md, src/INDEX.md."; both marks gone |
+
+(The tests' catalog came before the code's when this was looked at;
+the code's comes first since the review.)
+
+The demo's three folder READMEs became catalogs: what they said stays
+around the list the app keeps, and the links to them follow. Not
+looked at in the app: "Set up project" on an empty folder, which is
+covered by the unit tests (it writes the four catalogs and no README
+but the project's own).
+
+Looked at again after the review's findings were fixed, on a scratch
+copy whose tests folder holds a hand-written `INDEX.md` with no place
+for a list.
+
+| Done | Seen |
+| --- | --- |
+| The Project list | `src/INDEX.md` only: the hand-written tests one is not taken for a catalog |
+| A script renamed | In the Explorer: no question about the catalog's own line, no error notice |
+| The code's catalog | Names the script by its new name; the hand-written file is as it was |
+| New document… | "Release notes": listed, and the Docs list's Catalog not out of date |
+| Update catalogs | "Every catalog already says what its folder holds." |
+| Start catalogs | "Start folder catalogs", in the New menu and the palette: here it found nothing to start |
+
+The New menu, one entry longer, was looked at at 1400 and 720 wide in
+the dark and the light theme: all eighteen entries fit in each.

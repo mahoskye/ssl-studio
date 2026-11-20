@@ -421,9 +421,20 @@ describe("the demo project's working documents", () => {
 
 	test("every catalog says what its folder holds, and the documents outside those folders are still Docs", async () => {
 		const docs = await listed();
-		// The four folders of working documents, and the schema folder: each has its catalog, and each is up to date.
-		expect(docs.filter((d) => d.catalog).map((d) => [d.group, d.catalog!.stale])).toEqual([["tickets", false], ["specs", false], ["knowledge", false], ["registries", false], ["schema", false]]);
-		expect(docs.filter((d) => d.group === "docs").map((d) => d.name)).toEqual(["Decisions.md", "README.md", "Worked-examples.md"]);
+		// The four folders of working documents, the docs and the schema folders, the tests and the code: each has its
+		// catalog, and each is up to date. The tests' and the code's are listed with the project's own files.
+		expect(docs.filter((d) => d.catalog).map((d) => [d.group, d.catalog!.area, d.catalog!.stale])).toEqual([
+			["tickets", "tickets", false],
+			["specs", "specs", false],
+			["knowledge", "knowledge", false],
+			["registries", "registries", false],
+			["docs", "docs", false],
+			["schema", "schema", false],
+			["project", "code", false],
+			["project", "tests", false],
+		]);
+		expect(docs.filter((d) => d.catalog && d.group === "project").map((d) => d.name)).toEqual(["src/INDEX.md", "tests/INDEX.md"]);
+		expect(docs.filter((d) => d.group === "docs").map((d) => d.name)).toEqual(["Decisions.md", "INDEX.md", "Worked-examples.md"]);
 		expect(docs.find((d) => d.name === "STATE.md")?.group).toBe("project");
 		expect(catalogItems("tickets", docs, join(root, "docs")).map((item) => item.title)[0]).toBe("DEMO-101: Give every waiting sample a due date");
 	});

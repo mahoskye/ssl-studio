@@ -10,6 +10,7 @@ import { openReview, type Check } from "../editor/Review";
 import { monaco } from "../editor/monaco";
 import { measure } from "../editor/textmate";
 import { session } from "../lsp/session";
+import { catalogsKeptFor } from "../projectDocs";
 import { applyText, canonical, documents, notify, openFile, setState, state } from "../state";
 import { baseName, joinPath } from "../../shared/paths";
 import { bannerTemplate, TEMPLATES } from "../../shared/houseStyle";
@@ -352,6 +353,7 @@ export async function reviewBuild(path: string) {
 			if (existing === null) {
 				await backend.write(full, final);
 				setState("treeVersion", (v) => v + 1);
+				void catalogsKeptFor([full]);
 				await openFile(full);
 			} else {
 				await openFile(full);

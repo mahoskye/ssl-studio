@@ -1409,3 +1409,96 @@ its top is still shown as a catalog, as any file of that name is, and
 "Update catalogs" does nothing for it; such a project has no schema
 catalog, and the setting itself says the whole folder is schema.
 
+## The eighteenth review: catalogs for the docs, tests and code folders
+
+A fresh reviewer read the change as staged, before its commit, told
+what each part is for and not what was thought of it; it ran what it
+could and read the view. It asked that the commit be held for its
+first three findings, none of which loses anything. Ten findings, all
+fixed before the commit:
+
+1. **Renaming or moving a script raised a question about the
+   catalog's own line for it, and then an error**: links to the old
+   name were looked for while the catalog was being written afresh.
+   Fixed: the catalog is written first.
+2. **A document made with "New document…", and a script a build
+   writes, left the catalog out of date at once.** Fixed: each is
+   listed when it is made.
+3. **A file a person keeps as `docs/index.md` was taken for the
+   catalog**: marked out of date, and a list written into it at the
+   next change in the folder. Fixed: in the three folders that may do
+   without a catalog, only a file with the list's place is one.
+4. **With the docs and the schema folder both the project's own
+   folder, a catalog there was out of date for ever**: the app's two
+   sides disagreed on whose it was. Fixed.
+5. **Health said nothing of a catalog in a project with no working
+   documents.** Fixed: a kept catalog is enough for Health to look.
+6. **A name in two pairs of brackets could come to mean another
+   document**, since plain documents were given their headings as
+   names. Fixed: the heading is for the catalog's line only, and a
+   plain document is found by its file's name, as before.
+7. **With the schema folder inside the docs folder, the docs'
+   catalog listed the schema's descriptions**, and went out of date
+   with each new one. Fixed: they are the schema's to list.
+8. **The generated `AGENTS.md` said each folder has a catalog**,
+   which is false for a project that keeps none. Fixed: it says so
+   only "where the project keeps one".
+9. **A link in the code's or the tests' catalog that leads nowhere
+   was not said**, as it is for every other listed document. Fixed.
+10. **"Update catalogs" started catalogs for the docs, tests and code
+    folders in every project**, and called it "Updated". Fixed: it
+    keeps the ones that are there; "Start folder catalogs" starts
+    one, when asked.
+
+Smaller, and dealt with: files a system keeps for itself (`.DS_Store`)
+were listed; a code or tests setting that names a file made the
+listing fail; where the tests are kept in the code's own folder the
+catalog was headed "Tests" (the code now comes first); a notice said
+"/INDEX.md" for a folder that is the project's own; a round bracket in
+a file's name ended its link; a folder called "Working documents"
+shared a heading with the catalogs'; and the demo's Decisions page was
+listed as "Newest first." (it opens by saying what it is).
+
+Left, each with its reason: a folder with more than a thousand files
+keeps whatever list it had and is not said to be out of date, since
+it is not catalogued; a file whose whole name is in doubled
+underscores reads as bold in its line, which changes no link; and
+the demo's docs catalog no longer has the old README's own words for
+each link, since the list is now the documents' own first lines.
+
+### The second reading
+
+The same reviewer read the fixes as staged and ran them: nothing to
+hold the commit, and each of the ten findings dealt with. A name in
+two pairs of brackets meant the schema's description again; a marker
+inside a fence of code did not make a hand-written file a catalog;
+the demo's eight catalogs were up to date and its manifest unchanged;
+a link with a round bracket in it still led to its file (read back
+and found, not opened in the app).
+
+Seven small things it named after, all dealt with before the commit:
+"Set up project" still headed a folder shared by the code and the
+tests "Tests" (the code's is made first now); "Update catalogs" did
+not name the docs' catalog when it was written on the way (it is
+written in its turn, and named); a comment still said the three
+catalogs come with "Update catalogs"; a table in the record had the
+tests' catalog before the code's; with a catalog open and not saved,
+a rename could still ask about its own line, since the file had the
+old one (the list of a catalog just written afresh is not asked
+about: narrowed in the last reading, below); a
+catalog could be started beside a hand-written `index.md` written in
+small letters (none is started where a file of that name is there,
+in whatever capitals); and "Start folder catalogs" said a folder had
+a catalog when it had a document of the person's own (it says so).
+
+A last reading found each of the seven as asked, the lines of a
+catalog's list counted rightly with either kind of line end, and
+three small things more, dealt with before the commit: a catalog's
+list was passed over by its name and markers alone (it is passed over
+only where the list, as it now stands, no longer names the old file,
+so one a person keeps, one too large to be kept, and one whose
+writing failed are still asked about); a folder shared by the code
+and the tests could still be headed "Tests" where scripts lie
+elsewhere (it is the code's whichever makes it); and this record said
+a link "still opened" where the reviewer had read it back and not
+opened it.

@@ -3,7 +3,7 @@
 // catalog each of those folders is found by (ADR 0012). What these write is
 // text like any other: an open file is changed through the editor, so it can
 // be undone, and a file that exists is never written over.
-import { CATALOG_FILE, catalogStale, withCatalog } from "../shared/catalog";
+import { CATALOG_FILE, catalogBlock, catalogStale, hasCatalogPlace, withCatalog, type CatalogItem } from "../shared/catalog";
 import { csvRow } from "../shared/csv";
 import { localDay } from "../shared/dates";
 import { parseCsv } from "../shared/csv";
@@ -38,6 +38,10 @@ import {
 	isCatalog,
 	areaPath,
 	CATALOG_AREAS,
+	fileItems,
+	isFileArea,
+	OPTIONAL_CATALOGS,
+	type AreaFolders,
 	type CatalogArea,
 	type KnowledgeKind,
 	type SchemaKind,
@@ -60,11 +64,23 @@ const root = () => state.workspace?.root ?? "";
 // "." is the project's own folder: no part of a path, or the same file would have two spellings.
 const docsFolder = () => joinPath(root(), ...(state.project?.docs ?? "docs").split(/[\\/]/).filter((part) => part && part !== "."));
 // "." is the project's own folder here too.
-const schemaFolder = () => joinPath(root(), ...folderParts(state.project?.schema ?? "schema"));
-const catalogFolders = () => ({ docs: docsFolder(), schema: schemaFolder() });
+const projectFolder = (said: string | undefined, usual: string) => joinPath(root(), ...folderParts(said ?? usual));
+const schemaFolder = () => projectFolder(state.project?.schema, "schema");
+const catalogFolders = (): AreaFolders => ({ docs: docsFolder(), schema: schemaFolder(), tests: projectFolder(state.project?.tests, "tests"), code: projectFolder(state.project?.code, "src") });
 const areaFolder = (area: CatalogArea) => areaPath(area, catalogFolders());
-/** An area's folder as it is said: "tickets", or the schema folder by the name the project gives it. */
-const areaSaid = (area: CatalogArea) => (area === "schema" ? relativeTo(root(), schemaFolder()).split("\\").join("/") || "the project's folder" : DOC_FOLDERS[area]);
+/** An area's folder as it is said: "tickets", or one of the project's own folders by the name the project gives it. */
+const areaSaid = (area: CatalogArea) => (area === "schema" || area === "docs" || isFileArea(area) ? relativeTo(root(), areaFolder(area)).split("\\").join("/") : DOC_FOLDERS[area]);
+/**
+ * Whether a folder is one to catalogue as this area. The schema, tests and code folders are not when they are the
+ * project's own folder, nor is a folder an area before it already is (as the backend has it, bun/project.ts).
+ */
+function catalogued(area: CatalogArea): boolean {
+	const folder = canonical(areaFolder(area));
+	if ((area === "schema" || isFileArea(area)) && folder === canonical(root())) return false;
+	// Only an area before it that is itself catalogued has the folder: one that is not (a schema folder that is the
+	// project's own) leaves it to this one.
+	return !CATALOG_AREAS.slice(0, CATALOG_AREAS.indexOf(area)).some((before) => canonical(areaFolder(before)) === folder && catalogued(before));
+}
 const ready = () => (state.workspace && state.project ? true : (notify("Open a folder first."), false));
 
 /** A file's text as it stands: in the editor if it is open there, on disk otherwise, null when there is no such file. */
@@ -98,17 +114,59 @@ async function put(path: string, text: string, existed: boolean) {
 }
 
 /** Writes an area's catalog afresh from its documents; makes the catalog where there is none. True when it changed. */
-async function writeCatalog(area: CatalogArea, files: readonly DocFile[]): Promise<boolean> {
-	// A schema folder that is the project's own folder is no folder of descriptions to be catalogued.
-	if (area === "schema" && !folderParts(state.project?.schema ?? "schema").length) return false;
+async function writeCatalog(
+	area: CatalogArea,
+	files: readonly DocFile[],
+	options: {
+		/** Only where the folder has a catalog already: none is started. */
+		kept?: boolean;
+		/** Start one in a folder that may do without (the docs, code and tests folders): only when asked for. */
+		start?: boolean;
+		/** The docs folder's catalog is written by the caller in its own turn: not from here. */
+		alone?: boolean;
+	} = {},
+): Promise<boolean> {
+	if (!catalogued(area)) return false;
 	// The catalog the folder already has, however its name is cased: a second one is not made beside it.
-	const path = files.find((file) => file.group === area && file.exists && isCatalog(file) && !file.name.includes("/") && !file.name.includes("\\"))?.path ?? joinPath(areaFolder(area), CATALOG_FILE);
-	const items = catalogItems(area, files, catalogFolders());
+	const folder = canonical(areaFolder(area));
+	const has = files.find((file) => file.exists && isCatalog(file) && canonical(dirName(file.path)) === folder && (file.catalog?.area ?? file.group) === area);
+	const path = has?.path ?? joinPath(areaFolder(area), CATALOG_FILE);
+	let items: CatalogItem[];
+	if (isFileArea(area)) {
+		// The tests' and the code's list their files as they lie. A folder with more than a catalog lists has none kept.
+		const paths = await backend.catalogFiles(area);
+		if (!paths) return false;
+		items = fileItems(paths);
+	} else items = catalogItems(area, files, catalogFolders());
 	const before = await current(path);
-	if (before === null && !items.length) return false;
+	const optional = OPTIONAL_CATALOGS.includes(area);
+	if (before === null && (!items.length || options.kept || (optional && !options.start))) return false;
+	// In a folder that may do without a catalog, a file of that name with no place for the list is a person's own.
+	if (before !== null && optional && !hasCatalogPlace(before)) return false;
 	if (before !== null && !catalogStale(before, items)) return false;
 	await put(path, withCatalog(before ?? catalogTemplate(area), items), before !== null);
+	// The docs folder's catalog names the catalogs of the folders under it: one of those just started is one more for
+	// it to name, where it is kept.
+	if (before === null && area in DOC_FOLDERS && !options.alone) await writeCatalog("docs", await backend.docs(), { kept: true });
 	return true;
+}
+
+/**
+ * Writes afresh the catalogs of the folders these files are in, where those folders have one: after a file was
+ * made, renamed, moved or thrown away from the Explorer. A catalog is not started by this.
+ */
+export async function catalogsKeptFor(paths: readonly string[]) {
+	if (!state.workspace || !state.project) return;
+	try {
+		const touched = CATALOG_AREAS.filter((area) => catalogued(area) && paths.some((path) => isInside(areaFolder(area), path)));
+		if (!touched.length) return;
+		const files = await backend.docs();
+		let wrote = false;
+		for (const area of touched) wrote = (await writeCatalog(area, files, { kept: true })) || wrote;
+		if (wrote) setState("treeVersion", (v) => v + 1);
+	} catch (e: any) {
+		notify(String(e?.message ?? e), "error");
+	}
 }
 
 /** Makes a document from its template, lists it in its folder's catalog, and opens it as text. A file already there is opened, not replaced. */
@@ -322,6 +380,40 @@ export async function newKnowledge(kind: KnowledgeKind["id"]) {
 	await start(joinPath(folder, `${number}-${slug(title)}.md`), decisionTemplate({ title, date: today(), ticket }) + about, "knowledge");
 }
 
+/** A folder's catalog as a notice names it: "docs/INDEX.md", or the file alone for a folder that is the project's own. */
+const catalogSaid = (area: CatalogArea) => [areaSaid(area), CATALOG_FILE].filter(Boolean).join("/");
+
+/**
+ * Starts a catalog for the docs, code and tests folders, where the folder holds something and has none: the three
+ * a project may do without, which "Update catalogs" keeps and does not start.
+ */
+export async function startFolderCatalogs() {
+	if (!ready()) return;
+	try {
+		const started: string[] = [];
+		const theirs: string[] = [];
+		for (const area of OPTIONAL_CATALOGS) {
+			if (!catalogued(area)) continue;
+			// A file of the catalog's name that is there already, in whatever capitals: the app's own catalog, which
+			// needs no starting, or a person's own document, which is left alone and has no second one made beside it.
+			const there = await backend.list(areaFolder(area)).then(
+				(entries) => entries.find((entry) => entry.kind === "file" && isCatalog(entry)),
+				() => undefined,
+			);
+			if (there) {
+				if (!hasCatalogPlace((await current(there.path)) ?? "")) theirs.push([areaSaid(area), there.name].filter(Boolean).join("/"));
+				continue;
+			}
+			if (await writeCatalog(area, await backend.docs(), { start: true })) started.push(catalogSaid(area));
+		}
+		setState("treeVersion", (v) => v + 1);
+		const own = theirs.length ? ` ${theirs.join(", ")} ${theirs.length === 1 ? "is a document of your own and is" : "are documents of your own and are"} left as ${theirs.length === 1 ? "it is" : "they are"}.` : "";
+		notify(started.length ? `Started ${started.join(", ")}.${own}` : `Nothing to start: the docs, code and tests folders have their catalogs, or hold nothing to list.${own}`);
+	} catch (e: any) {
+		notify(String(e?.message ?? e), "error");
+	}
+}
+
 /** Writes the schema folder's catalog afresh where it no longer says what the folder holds: after a document made there by another step. */
 export async function schemaCatalogKept() {
 	if (!ready()) return;
@@ -426,7 +518,7 @@ export async function setStatus(path: string, status: string) {
 		// The catalog that lists it: a spec the planner wrote is beside its plan, and is listed with the specs.
 		const listing = await backend.docs();
 		// A file may be listed in two groups (a schema folder inside the docs folder): the one that has a catalog.
-		const groups = listing.filter((d) => canonical(d.path) === canonical(path)).map((d) => d.group);
+		const groups: string[] = listing.filter((d) => canonical(d.path) === canonical(path)).map((d) => d.group);
 		const area = CATALOG_AREAS.find((name) => groups.includes(name));
 		if (area) await writeCatalog(area, listing);
 		setState("treeVersion", (v) => v + 1);
@@ -477,6 +569,31 @@ export async function mendLinks(path: string, mends: readonly LinkMend[]) {
  * link's file part on its line, through the editor where the document is
  * open, so it can be undone there.
  */
+/**
+ * The links that are not in the list of a catalog the app has just written afresh. Such a list no longer names the
+ * old file as it now stands (in the editor, where the catalog is open with edits not saved, though the file on disk
+ * still does): its lines are not asked about. A list that still names it is asked about like any other text: one a
+ * person keeps deeper in, one of a folder too large to be catalogued, one whose writing failed.
+ */
+async function withoutCatalogLists(links: LinkTo[]): Promise<LinkTo[]> {
+	const lists = new Map<string, { from: number; to: number; now: string }>();
+	for (const path of new Set(links.map((link) => link.path))) {
+		if (!isCatalog({ name: path })) continue;
+		try {
+			const text = (await backend.read(path)).text;
+			const at = catalogBlock(text);
+			const now = catalogBlock((await current(path)) ?? "");
+			if (at && now) lists.set(path, { from: text.slice(0, at.start).split("\n").length, to: text.slice(0, at.end).split("\n").length, now: now.inner });
+		} catch {
+			// Not there to read: nothing of it is asked about either way.
+		}
+	}
+	return links.filter((link) => {
+		const list = lists.get(link.path);
+		return !list || link.line < list.from || link.line > list.to || list.now.includes(`(${link.href})`);
+	});
+}
+
 async function followPaths(from: string, to: string) {
 	if (!state.workspace) return;
 	let links: LinkTo[];
@@ -485,6 +602,9 @@ async function followPaths(from: string, to: string) {
 	} catch {
 		return;
 	}
+	// A catalog's list is the app's to write afresh, and has been (in the editor only, where the catalog is open with
+	// edits not saved, so the file still names the old one): its lines are not asked about.
+	links = await withoutCatalogLists(links);
 	// A document moved to another folder has links of its own to write from where it is now. What it says of the
 	// old name is among them, so its own places are not counted twice.
 	const moved = dirName(canonical(from)) !== dirName(canonical(to)) && isMarkdown(to) ? ((await current(to)) ?? "") : "";
@@ -619,7 +739,10 @@ export async function updateCatalogs() {
 	try {
 		const files = await backend.docs();
 		const changed: string[] = [];
-		for (const area of CATALOG_AREAS) if (await writeCatalog(area, files)) changed.push(`${areaSaid(area)}/${CATALOG_FILE}`);
+		for (const area of CATALOG_AREAS) {
+			// The docs folder's names the catalogs under it, which this pass may have just started: listed afresh for it.
+			if (await writeCatalog(area, area === "docs" ? await backend.docs() : files, { alone: true })) changed.push(catalogSaid(area));
+		}
 		setState("treeVersion", (v) => v + 1);
 		notify(changed.length ? `Updated ${changed.join(", ")}.` : "Every catalog already says what its folder holds.");
 	} catch (e: any) {

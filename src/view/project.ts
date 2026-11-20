@@ -112,6 +112,9 @@ export async function newDocIn(folder?: string): Promise<boolean> {
 	}
 	setState("treeVersion", (v) => v + 1);
 	setState("mdText", path, true);
+	// Listed in the catalog of the folder it is in, where that folder keeps one. Loaded when asked for: the working
+	// documents' steps are built on this file.
+	void import("./projectDocs").then((m) => m.catalogsKeptFor([path]));
 	await openFile(path);
 	return true;
 }

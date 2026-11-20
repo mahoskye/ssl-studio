@@ -33,7 +33,8 @@ the source of truth.
   language server before you accept it.
 - **Projects and docs:** "Set up project" gives a folder its settings
   (`.ssl-studio/project.toml`), a `README.md`, an `AGENTS.md`, and folders
-  for docs, schema, tests and code. The Docs panel lists the two files with
+  for docs, schema, tests and code, each with a catalog (`INDEX.md`) that
+  says what it is for and lists what it holds. The Docs panel lists the two files with
   the Markdown under `docs/`, rendered for reading, and what `schema/`
   holds by its kinds (the database's tables, the messages exchanged with
   other systems and what was agreed with them, the files read or

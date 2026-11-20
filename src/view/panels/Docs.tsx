@@ -8,7 +8,7 @@ import type { DocFile } from "../../shared/protocol";
 import { backend } from "../backend";
 import { docMatches, isCatalog, KNOWLEDGE, progress, progressShort, registryTitle, SCHEMAS, statusChoices, toneOf } from "../../shared/projectDocs";
 import { docs, newDoc, newDocIn, newFolderIn, setUpProject } from "../project";
-import { importTickets, newKnowledge, newRegistry, newSchema, newSpec, schemaCatalogKept, newState, newTicket, setStatus, updateCatalogs, updateManifest } from "../projectDocs";
+import { importTickets, newKnowledge, newRegistry, newSchema, newSpec, schemaCatalogKept, startFolderCatalogs, newState, newTicket, setStatus, updateCatalogs, updateManifest } from "../projectDocs";
 import { folderParts, folderSaid, IMPORT_TICKETS, kindOf, NEW_DOCUMENT, NEW_FOLDER, NEW_PLAN, NEW_REGISTRY, NEW_SPEC, NEW_TICKET, newOfKind, plainSection, schemaFolderOf, schemaOf, sectionFolder, sectionMenu, SHOW_FOLDER, type DocSection } from "../../shared/docSections";
 import { joinPath } from "../../shared/paths";
 import { schemaList, schemaRowTitle } from "../../shared/schemaList";
@@ -41,6 +41,12 @@ function DocRow(props: { file: DocFile }) {
 			<Show when={props.file.untouched}>
 				<span class="meta warn" title="Still the template text: not written yet.">
 					template
+				</span>
+			</Show>
+			{/* The tests' and the code's catalogs are listed here, with the project's own files. */}
+			<Show when={props.file.catalog?.stale}>
+				<span class="meta warn" title="The list in this catalog no longer says what the folder holds. “Update catalogs”, under New above, writes it afresh.">
+					out of date
 				</span>
 			</Show>
 		</Row>
@@ -404,6 +410,8 @@ function Registries(props: { files: DocFile[]; empty?: string; filtered?: boolea
 
 function Group(props: { title: string; folder?: string; group: DocFile["group"]; empty?: string; filter?: string }) {
 	const files = () => docs().filter((d) => d.group === props.group && docMatches(d, props.filter ?? ""));
+	/** The catalog of this list's own folder: the one the app keeps, which says so of itself. */
+	const own = (file: DocFile) => isCatalog(file) && file.catalog?.area === props.group;
 	return (
 		<RowGroup
 			fold={`docs:${props.group}`}
@@ -411,7 +419,7 @@ function Group(props: { title: string; folder?: string; group: DocFile["group"];
 			// The lists that are a folder of the project's: "Project" is the files at its top, and has no menu.
 			onMenu={props.group === "docs" || props.group === "plans" ? (at) => void headMenu(props.group as DocSection, props.title, at) : undefined}
 			open={Boolean(props.filter?.trim())}
-			count={files().length}
+			count={files().filter((file) => !own(file)).length}
 			head={<Head title={props.title} folder={props.folder} />}
 			rows={files().length > 0}
 			empty={
@@ -420,7 +428,9 @@ function Group(props: { title: string; folder?: string; group: DocFile["group"];
 				</Show>
 			}
 		>
-			<For each={files()}>{(file) => <DocRow file={file} />}</For>
+			<For each={files().filter((file) => !own(file))}>{(file) => <DocRow file={file} />}</For>
+			{/* The folder's own catalog last and apart, as the other lists have theirs. */}
+			<For each={files().filter(own)}>{(catalog) => <ItemRow file={catalog} />}</For>
 		</RowGroup>
 	);
 }
@@ -465,6 +475,7 @@ export function Docs() {
 					{ label: "New document…", run: () => void newDoc() },
 					{ label: "Project state…", run: () => void newState() },
 					{ label: "Update catalogs", run: () => void updateCatalogs() },
+					{ label: "Start folder catalogs", run: () => void startFolderCatalogs() },
 				]}>
 					<Icon name="add" />
 				</Menu>

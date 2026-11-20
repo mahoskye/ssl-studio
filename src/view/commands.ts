@@ -22,7 +22,7 @@ import { installRecentTabs, stepRecent } from "./recentTabs";
 import { goAlong } from "./navigation";
 import { isPlanPath, newPlan, printPlan } from "./plan/model";
 import { isMarkdown, isTable, newDoc, setUpProject, undoSetUp } from "./project";
-import { importTickets, newKnowledge, newRegistry, newSchema, newSpec, newState, newTicket, ticketAtHand, updateCatalogs, updateManifest } from "./projectDocs";
+import { importTickets, newKnowledge, newRegistry, newSchema, newSpec, newState, newTicket, startFolderCatalogs, ticketAtHand, updateCatalogs, updateManifest } from "./projectDocs";
 import { displayKey, effectiveKeys, isModifierKey, keyNames, keysOf } from "./keys";
 import { modalOpen, setFocusFallback } from "./modal";
 import { noteUsed } from "./quickRank";
@@ -185,6 +185,7 @@ export const commands: Command[] = [
 	{ id: "new-layout", label: "New file layout…", detail: "A file the project reads or writes, described in the schema folder", run: () => void newSchema("files") },
 	{ id: "project-state", label: "Project state…", detail: "Where the project stands, in plain words", run: () => void newState() },
 	{ id: "update-catalogs", label: "Update catalogs", detail: "Write each INDEX.md's list afresh", run: () => void updateCatalogs() },
+	{ id: "start-catalogs", label: "Start folder catalogs", detail: "An INDEX.md for the docs, code and tests folders, where one has none", run: () => void startFolderCatalogs() },
 	{ id: "update-manifest", label: "Update file manifest", detail: "Sizes and checksums of the project's files", run: () => void updateManifest() },
 	// Panels: one form, "Show" and the panel's name
 	{ id: "explorer", label: "Show Explorer", run: () => showPanel("explorer") },

@@ -4,6 +4,32 @@ The project's scripts, classes and data sources. `DueDates/` is the script
 category, so a call from another script reads
 `ExecFunction("DueDates.WorkCalendar.AddWorkingDays", {...})`.
 
+The list between the two markers is written by SSL Studio from the files here (Docs panel, Update catalogs). Write anything else you like around it.
+
+<!-- catalog -->
+
+### DueDates
+
+- [Availability.ssl](DueDates/Availability.ssl)
+- [DueDateConstants.ssl](DueDates/DueDateConstants.ssl)
+- [DueDateSummary.ssl](DueDates/DueDateSummary.ssl)
+- [DueRule.ssl](DueDates/DueRule.ssl)
+- [DueRules.ssl](DueDates/DueRules.ssl)
+- [DueSoonReport.ssl](DueDates/DueSoonReport.ssl)
+- [Holidays.ds](DueDates/Holidays.ds)
+- [Outages.ds](DueDates/Outages.ds)
+- [RushDueRule.ssl](DueDates/RushDueRule.ssl)
+- [SamplesDueSoon.ds](DueDates/SamplesDueSoon.ds)
+- [SaveDueDates.ssl](DueDates/SaveDueDates.ssl)
+- [SetSampleDueDates.ssl](DueDates/SetSampleDueDates.ssl)
+- [WorkCalendar.ssl](DueDates/WorkCalendar.ssl)
+
+### Legacy
+
+- [OldDueDateCheck.ssl](Legacy/OldDueDateCheck.ssl)
+
+<!-- /catalog -->
+
 ## How the scripts call each other
 
 - **`SetSampleDueDates`** reads the calendar through the `Holidays` and
@@ -53,7 +79,7 @@ Nothing calls it, and it is not an example to follow.
 ## What running it settled
 
 The tests run in the SSL sandbox runner
-([tests/README.md](../tests/README.md)). These were in the language
+([tests/INDEX.md](../tests/INDEX.md)). These were in the language
 reference but had not been seen working; the run exercises each:
 
 - A base class method reaches a child's override through `Me:`.

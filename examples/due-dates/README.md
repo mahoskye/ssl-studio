@@ -50,7 +50,7 @@ A sample with no instrument is never held up by an outage.
 | `Outages` | data source | The days each instrument is out |
 | `OldDueDateCheck` | rough on purpose | Flags overdue samples the old way; nothing calls it |
 
-[src/README.md](src/README.md) says how the scripts call each other.
+[src/INDEX.md](src/INDEX.md) says how the scripts call each other.
 
 ## What it shows in SSL Studio
 
@@ -81,7 +81,7 @@ repository root).
 - **Run:** all 104 tests pass in the SSL sandbox runner
   (`bun scripts/demo-sandbox.ts`, 2026-11-18). The runner is a compatibility
   runtime on SQLite, not STARLIMS: nothing here has run in STARLIMS itself.
-  [tests/README.md](tests/README.md) says what the run does and does not show.
+  [tests/INDEX.md](tests/INDEX.md) says what the run does and does not show.
 - **Expected in Problems:** an information row for each `/*@private;` marker
   in `SetSampleDueDates`, `SaveDueDates` and `DueSoonReport`. The markers are
   required ([decision 7](docs/Decisions.md)).

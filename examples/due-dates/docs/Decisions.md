@@ -1,6 +1,6 @@
 # Decisions
 
-Newest first. A decision is replaced by a new entry, not rewritten.
+What was decided and why, newest first. A decision is replaced by a new entry, not rewritten.
 
 ## 10. Planning and saving are two scripts (2026-11-18)
 

@@ -91,7 +91,7 @@ describe("the Schema list", () => {
 
 describe("the schema folder's catalog", () => {
 	test("is one of the catalogued folders, and lies in the schema folder wherever the project keeps it", () => {
-		expect(CATALOG_AREAS).toEqual(["tickets", "specs", "knowledge", "registries", "schema"]);
+		expect(CATALOG_AREAS).toEqual(["tickets", "specs", "knowledge", "registries", "schema", "docs", "code", "tests"]);
 		expect(areaPath("schema", { docs: "/p/docs", schema: "/p/db/schema" })).toBe("/p/db/schema");
 		expect(areaPath("tickets", { docs: "/p/docs", schema: "/p/db/schema" })).toBe("/p/docs/tickets");
 	});
@@ -158,7 +158,7 @@ describe("a project's schema folder on disk", () => {
 		const docs = await listDocs(new WorkspaceFiles(root), await readProject(root));
 		const catalog = docs.find((d) => d.group === "schema" && isCatalog(d));
 		// Nothing is described yet, and the catalog says so: it is up to date.
-		expect(catalog?.catalog).toEqual({ stale: false });
+		expect(catalog?.catalog).toEqual({ stale: false, area: "schema" });
 		expect(schemaList(docs, { configured: true }).kinds.map((kind) => [kind.id, kind.count])).toEqual([["database", 0], ["interfaces", 0], ["files", 0]]);
 	});
 
@@ -168,7 +168,7 @@ describe("a project's schema folder on disk", () => {
 		mkdirSync(join(root, "schema", "database"), { recursive: true });
 		writeFileSync(join(root, "schema", "database", "ORDERS.md"), "# ORDERS\n\nOne row for each order.\n");
 		const docs = await listDocs(new WorkspaceFiles(root), await readProject(root));
-		expect(docs.find((d) => d.group === "schema" && isCatalog(d))?.catalog).toEqual({ stale: true });
+		expect(docs.find((d) => d.group === "schema" && isCatalog(d))?.catalog).toEqual({ stale: true, area: "schema" });
 		expect(docChecks(docs).map((check) => check.text)).toContain("The catalog of the schema folder is out of date.");
 	});
 
@@ -199,7 +199,7 @@ describe("a project's schema folder on disk", () => {
 		const listed = docs.filter((d) => d.path === join(root, "docs", "schema", "INDEX.md"));
 		// Listed with the documents and with the schema: the one that is the schema's says it is out of date.
 		expect(listed.map((d) => d.group).sort()).toEqual(["docs", "schema"]);
-		expect(listed.find((d) => d.group === "schema")?.catalog).toEqual({ stale: true });
+		expect(listed.find((d) => d.group === "schema")?.catalog).toEqual({ stale: true, area: "schema" });
 		expect(listed.find((d) => d.group === "docs")?.catalog).toBeUndefined();
 		expect(docChecks(docs).map((check) => check.text)).toContain("The catalog of the schema folder is out of date.");
 	});

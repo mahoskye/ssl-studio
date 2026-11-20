@@ -68,7 +68,8 @@ export function Health() {
 	// A schema folder that is the project's own folder is no folder of descriptions: it has no catalog to ask for.
 	const areas = () => CATALOG_AREAS.filter((area) => area !== "schema" || folderParts(state.project?.schema ?? "schema").length > 0);
 	const checks = () => docChecks(docs(), areas());
-	const hasWork = () => docs().some((d) => d.exists && (d.group === "tickets" || d.group === "specs" || d.group === "knowledge" || d.group === "registries"));
+	// The working documents, or a catalog the app keeps: a project with scripts and a code catalog has that to check.
+	const hasWork = () => docs().some((d) => d.exists && (d.group === "tickets" || d.group === "specs" || d.group === "knowledge" || d.group === "registries" || Boolean(d.catalog)));
 	/** Each registry with how many of its rows are done: how far a migration has come, list by list. */
 	const registries = () =>
 		docs()

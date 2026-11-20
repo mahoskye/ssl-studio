@@ -28,7 +28,7 @@ test("setup writes the three files once and never overwrites", async () => {
 	// docs/ is already there and there is code already: neither gets a README or a folder.
 	expect((await setupProject(root)).sort()).toEqual(
 		// The schema folder starts as its catalog, as the folders of working documents have theirs.
-		[join(".ssl-studio", "project.toml"), "AGENTS.md", join("schema", "INDEX.md"), join("tests", "README.md")].sort(),
+		[join(".ssl-studio", "project.toml"), "AGENTS.md", join("schema", "INDEX.md"), join("tests", "INDEX.md")].sort(),
 	);
 	expect(existsSync(join(root, "src"))).toBe(false);
 	expect(await Bun.file(join(root, "readme.md")).text()).toBe("# Mine\n");
@@ -67,7 +67,8 @@ test("the document list puts README and AGENTS first, missing or not, and says w
 	const root = fresh("docs");
 	let docs = await listDocs(new WorkspaceFiles(root), await readProject(root));
 	expect(docs.map((d) => [d.name, d.exists])).toEqual([["README.md", false], ["AGENTS.md", false], ["project.toml", false]]);
-	expect(await setupProject(root)).toContain(join("src", "README.md"));
+	// A new folder starts as its catalog, not as a README: for the code too, where there are no scripts yet.
+	expect(await setupProject(root)).toContain(join("src", "INDEX.md"));
 	mkdirSync(join(root, "docs", "adr"), { recursive: true });
 	writeFileSync(join(root, "schema", "ORDERS.sql"), "");
 	mkdirSync(join(root, "design"));
@@ -81,17 +82,23 @@ test("the document list puts README and AGENTS first, missing or not, and says w
 		["project", "AGENTS.md", true, false],
 		["project", "project.toml", true, undefined],
 		["docs", join("adr", "0001-first.md"), true, undefined],
-		["docs", "README.md", true, undefined],
+		["docs", "INDEX.md", true, undefined],
 		["schema", "INDEX.md", true, undefined],
 		["schema", "ORDERS.sql", true, undefined],
 		["plans", "Orders.plan.json", true, undefined],
+		// The tests' and the code's catalogs are listed with the project's own files: those folders have no list here.
+		["project", "src/INDEX.md", true, undefined],
+		["project", "tests/INDEX.md", true, undefined],
 	]);
+	// Each catalog says whose it is, and whether it still says what its folder holds: the docs' and the schema's
+	// have had a file put beside them since they were written.
+	expect(docs.filter((d) => d.catalog).map((d) => [d.catalog!.area, d.catalog!.stale])).toEqual([["docs", true], ["schema", true], ["code", false], ["tests", false]]);
 });
 
 test("the preview says what setup would create and writes nothing", async () => {
 	const root = fresh("preview");
 	const planned = await setupProject(root, true);
-	expect(planned.sort()).toEqual([join(".ssl-studio", "project.toml"), "AGENTS.md", "README.md", join("docs", "README.md"), join("schema", "INDEX.md"), join("src", "README.md"), join("tests", "README.md")].sort());
+	expect(planned.sort()).toEqual([join(".ssl-studio", "project.toml"), "AGENTS.md", "README.md", join("docs", "INDEX.md"), join("schema", "INDEX.md"), join("src", "INDEX.md"), join("tests", "INDEX.md")].sort());
 	expect(readdirSync(root)).toEqual([]);
 	// What was previewed is what gets written.
 	expect((await setupProject(root)).sort()).toEqual(planned.sort());
@@ -114,7 +121,7 @@ test("undoing a setup keeps a file that was changed since, and a folder that now
 	writeFileSync(join(root, "docs", "Decisions.md"), "# Decisions\n");
 	const { removed, kept } = await undoSetup(root);
 	expect(kept).toEqual(["README.md"]);
-	expect(removed).toContain(join("docs", "README.md"));
+	expect(removed).toContain(join("docs", "INDEX.md"));
 	expect(readdirSync(root).sort()).toEqual(["README.md", "docs"]);
 	expect(readdirSync(join(root, "docs"))).toEqual(["Decisions.md"]);
 });

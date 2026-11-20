@@ -18,7 +18,12 @@ export type CatalogItem = {
 };
 
 const escapeLink = (text: string) => text.replace(/([\[\]])/g, "\\$1");
-const linkPath = (path: string) => path.split("/").map(encodeURIComponent).join("/");
+/** A path as a link's target: each part written so that nothing in a name ends the link, a round bracket included. */
+const linkPath = (path: string) =>
+	path
+		.split("/")
+		.map((part) => encodeURIComponent(part).replace(/[()]/g, (bracket) => `%${bracket.charCodeAt(0).toString(16).toUpperCase()}`))
+		.join("/");
 
 /** One item's line: its title as a link, then its status and what it is about. */
 export function catalogLine(item: CatalogItem): string {
@@ -78,6 +83,9 @@ export function fenced(text: string): [number, number][] {
 }
 
 /** Where the list is in a catalog's text: from the start marker to the end of the end marker. Null when there is no such pair. */
+/** Whether a text has the place a catalog's list goes: the marker it opens with. One without is a person's own document. */
+export const hasCatalogPlace = (text: string) => markerAt(text, CATALOG_START) >= 0;
+
 export function catalogBlock(text: string): { start: number; end: number; inner: string } | null {
 	const start = markerAt(text, CATALOG_START);
 	const close = start < 0 ? -1 : markerAt(text, CATALOG_END, start + CATALOG_START.length);

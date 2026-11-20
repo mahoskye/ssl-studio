@@ -83,8 +83,16 @@ export type DocFile = {
 	broken?: { href: string; line: number; column: number; instead?: string }[];
 	/** A registry with a "ticket" column: each ticket its rows name, with how many rows it has and how many of them are done. */
 	forTickets?: { key: string; rows: number; done?: number }[];
-	/** A catalog (INDEX.md): whether its list no longer says what the documents do. */
-	catalog?: { stale: boolean };
+	/**
+	 * What a plain document in the docs folder calls itself: for its line in that folder's catalog. Not `title`: a
+	 * plain document is linked by its file's name, as it always was, and not by a heading it happens to have.
+	 */
+	heading?: string;
+	/**
+	 * A catalog (INDEX.md): whether its list no longer says what the documents do, and which folder's it is, where
+	 * that is not told by its group (the tests' and the code's, which are listed with the project's own files).
+	 */
+	catalog?: { stale: boolean; area?: "tickets" | "specs" | "knowledge" | "registries" | "schema" | "docs" | "tests" | "code" };
 };
 /**
  * A place in a Markdown document that leads to a file, or into a folder: the
@@ -242,6 +250,12 @@ export interface BackendApi {
 	docs(): Promise<DocFile[]>;
 	/** Every file of the project with its size and a checksum, for the file manifest. */
 	manifest(): Promise<ManifestFile[]>;
+	/**
+	 * The files of the tests or the code folder as they lie, from that folder, with "/" between their parts: what
+	 * its catalog lists. Null where the folder is not one to catalogue: it is not there, it is the project's own
+	 * folder, or it holds more files than a catalog lists.
+	 */
+	catalogFiles(area: "tests" | "code"): Promise<string[] | null>;
 	/** The first thing that keeps a text from being TOML, and where (from 1); null when it reads. */
 	tomlProblem(text: string): Promise<{ message: string; line: number; column: number } | null>;
 	/** The links in the workspace's Markdown documents that lead to this file, or into this folder. */

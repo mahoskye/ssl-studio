@@ -2,16 +2,16 @@
 // README.md and an AGENTS.md at its root. The IDE writes all three once, from
 // the templates below, and after that only reads them: project.toml is edited
 // as text, so its comments survive.
-import { existsSync, mkdirSync, readdirSync, rmdirSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmdirSync, statSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { decode, decodePart, textOf } from "./encoding";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { CATALOG_FILE, catalogStale } from "../shared/catalog";
+import { CATALOG_FILE, catalogStale, hasCatalogPlace } from "../shared/catalog";
 import { parseCsv, tally } from "../shared/csv";
 import { fileLinks, frontPaths, type DocLink } from "../shared/docLinks";
 import { frontMatter, many, one, summaryOf, titleOf } from "../shared/frontMatter";
 import { namePlaces } from "../shared/namedLinks";
-import { areaPath, CATALOG_AREAS, catalogItems, catalogTemplate, DOC_FOLDERS, isCatalog, isPrompt, SCHEMAS, STATE_FILE, type DocArea } from "../shared/projectDocs";
+import { areaPath, CATALOG_AREAS, CATALOG_FILES_MAX, catalogItems, catalogTemplate, DOC_FOLDERS, fileItems, isCatalog, isFileArea, isPrompt, OPTIONAL_CATALOGS, SCHEMAS, STATE_FILE, type AreaFolders, type DocArea, type FileArea } from "../shared/projectDocs";
 import { rowsByTicket } from "../shared/registryTickets";
 import { taskTally } from "../shared/tasks";
 import type { DocFile, LinkTo, ManifestFile, NameIn, Project, Settings } from "../shared/protocol";
@@ -330,7 +330,11 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 	// Everything else in the docs folder.
 	for (const path of under(docs, MARKDOWN, inArea)) {
 		if (state && path === join(docs, state)) continue;
-		list.push({ path, name: relative(docs, path), group: "docs", exists: true, ...brokenLinks(root, path, await head(path), named) });
+		// What it calls itself and what it is about: its line in the docs folder's catalog.
+		const text = await head(path);
+		const said = described(text);
+		// Its heading is not a name it is linked by: a plain document is linked by its file's name, as it always was.
+		list.push({ path, name: relative(docs, path), group: "docs", exists: true, ...(said.title ? { heading: said.title } : {}), ...(said.summary ? { summary: said.summary } : {}), ...brokenLinks(root, path, text, named) });
 	}
 	// What the project's data looks like, each kind in its folder: descriptions in Markdown, and beside them the SQL
 	// that makes the tables, a message's own schema, a sample of a file.
@@ -350,16 +354,83 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 		list.push({ path, name: relative(join(root, project.plans), path), group: "plans", exists: true, ...(ticket ? { tickets: [ticket] } : {}), ...(MARKDOWN.test(path) ? brokenLinks(root, path, await head(path), named) : {}) });
 	}
 	// Each catalog says whether its list is still what the documents are.
-	const folders = { docs, schema: join(root, project.schema) };
+	const folders = projectFolders(root, project);
+	const seen: string[] = [];
 	for (const name of CATALOG_AREAS) {
 		const folder = areaPath(name, folders);
-		// A schema folder that is the project's own folder is no folder of descriptions to be catalogued.
-		if (!existsSync(folder) || (name === "schema" && resolve(folder) === resolve(root))) continue;
+		if (!isFolder(folder) || !catalogued(name, folder, root, seen)) continue;
+		seen.push(resolve(folder));
+		const file = join(folder, found(folder, CATALOG_FILE) ?? CATALOG_FILE);
+		if (!existsSync(file)) continue;
+		const text = await textOf(file);
+		// In a folder that may do without a catalog, a file of that name with no place for the list is a person's own
+		// document: it is not marked, and nothing is written into it.
+		if (OPTIONAL_CATALOGS.includes(name) && !hasCatalogPlace(text)) continue;
+		if (isFileArea(name)) {
+			// The code's and the tests' catalogs are listed with the project's own files: those folders have no list of
+			// their own in the panel. A folder with more files than a catalog lists is not said to be out of date.
+			const paths = catalogFiles(files, folder);
+			list.push({ path: file, name: relative(root, file).split(sep).join("/"), group: "project", exists: true, ...brokenLinks(root, file, text, named), catalog: { stale: paths ? catalogStale(text, fileItems(paths)) : false, area: name } });
+			continue;
+		}
 		// The entry of this area's group: a schema folder inside the docs folder is listed with the documents too.
-		const catalog = list.find((file) => file.group === name && file.path === join(folder, found(folder, CATALOG_FILE) ?? CATALOG_FILE));
-		if (catalog) catalog.catalog = { stale: catalogStale(await textOf(catalog.path), catalogItems(name, list, folders)) };
+		const catalog = list.find((entry) => entry.group === name && entry.path === file);
+		if (catalog) catalog.catalog = { stale: catalogStale(text, catalogItems(name, list, folders)), area: name };
 	}
 	return list;
+}
+
+/** The project's folders that have catalogs, as whole paths. */
+export const projectFolders = (root: string, project: Project): AreaFolders => ({ docs: join(root, project.docs), schema: join(root, project.schema), tests: join(root, project.tests), code: join(root, project.code) });
+
+/** True for a folder that is there: a setting that names a file is no folder to list. */
+const isFolder = (path: string) => {
+	try {
+		return statSync(path).isDirectory();
+	} catch {
+		return false;
+	}
+};
+
+/**
+ * Whether a folder is one to catalogue as this area: the schema, code and tests folders are not when they are the
+ * project's own folder (a list of everything in the project is no catalog), nor is a folder that an area before it
+ * already is (where the tests are kept in the code's own folder, that folder has the code's catalog).
+ */
+function catalogued(area: (typeof CATALOG_AREAS)[number], folder: string, root: string, seen: readonly string[]): boolean {
+	if ((area === "schema" || isFileArea(area)) && resolve(folder) === resolve(root)) return false;
+	return !seen.includes(resolve(folder));
+}
+
+/**
+ * The files of a tests or code folder, from that folder, with "/" between their parts. Null when there are more
+ * than a catalog lists. Not among them: its own catalog, what a save leaves for a moment, and what a system or a
+ * tool keeps for itself (a name or a folder that opens with a dot).
+ */
+export function catalogFiles(files: WorkspaceFiles, folder: string): string[] | null {
+	const paths: string[] = [];
+	for (const path of files.files(folder)) {
+		const name = relative(folder, path).split(sep).join("/");
+		if (name.toLowerCase() === CATALOG_FILE.toLowerCase() || name.endsWith(".ssl-studio-tmp") || name.split("/").some((part) => part.startsWith("."))) continue;
+		if (paths.push(name) > CATALOG_FILES_MAX) return null;
+	}
+	return paths;
+}
+
+/** The same for the backend's answer: null too where the folder is not one to catalogue. */
+export function catalogFilesOf(files: WorkspaceFiles, project: Project, area: FileArea): string[] | null {
+	const folders = projectFolders(files.root, project);
+	const seen: string[] = [];
+	for (const name of CATALOG_AREAS) {
+		const folder = areaPath(name, folders);
+		if (!isFolder(folder) || !catalogued(name, folder, files.root, seen)) {
+			if (name === area) return null;
+			continue;
+		}
+		if (name === area) return catalogFiles(files, folder);
+		seen.push(resolve(folder));
+	}
+	return null;
 }
 
 /** What kind of file one is, for the manifest: by what its name ends with. */
@@ -419,20 +490,21 @@ export async function setupProject(root: string, dryRun = false): Promise<string
 	await put(project.path, projectToml(project.name));
 	if (!found(root, "README.md")) await put(join(root, "README.md"), readme(project));
 	if (!found(root, "AGENTS.md")) await put(join(root, "AGENTS.md"), agents(project));
-	// A folder that is already there is left as it is: no README is added to it.
-	const start = async (dir: string, title: string, about: string) => {
-		if (!existsSync(join(root, dir))) await put(join(root, dir, "README.md"), `# ${title}\n\n${about}\n`);
+	// A folder that is already there is left as it is. A new one starts as its catalog, which says what the folder is
+	// for and lists what comes to be in it: nothing is written once and left to go stale.
+	const start = async (dir: string, area: "docs" | "tests" | "code") => {
+		if (!existsSync(join(root, dir))) await put(join(root, dir, CATALOG_FILE), catalogTemplate(area));
 	};
-	await start(project.docs, "Docs", "Notes and decisions about this project. Every Markdown file here shows in the Docs panel.");
-	// The schema folder starts as its catalog, as the folders of working documents have theirs: it says what the
-	// folder is for and what its kinds are, and lists what is described as it comes. A kind's folder is made with the
-	// first thing described in it.
+	await start(project.docs, "docs");
+	// The schema folder's names the kinds it can hold; a kind's folder is made with the first thing described in it.
 	if (!existsSync(join(root, project.schema))) await put(join(root, project.schema, CATALOG_FILE), withKinds(catalogTemplate("schema")));
-	await start(project.tests, "Tests", "Test scripts, and the sample requests and data they need.");
-	// A folder for the code only where there is none yet: an export brings its own layout.
+	// A folder for the code only where there is none yet: an export brings its own layout. The code before the tests:
+	// where a project keeps both in one folder, that folder is its code, and its catalog says so.
 	let scripts = false;
 	for (const path of new WorkspaceFiles(root).files()) if ((scripts = SCRIPT.test(path))) break;
-	if (!scripts) await start(project.code, "Code", "The project's scripts and data sources.");
+	if (!scripts) await start(project.code, "code");
+	// Tests kept in the code's own folder: the folder is the code's, whichever of the two makes it.
+	await start(project.tests, resolve(root, project.tests) === resolve(root, project.code) ? "code" : "tests");
 	if (!dryRun) lastSetup.set(root, wrote);
 	return made;
 }
@@ -538,7 +610,7 @@ ${PLACEHOLDER["AGENTS.md"]}
 - \`${project.docs}/specs/\`: what is to be built, written from the tickets.
 - \`${project.docs}/knowledge/\`: decisions, questions, snippets, prompts and notes. Look here before deciding again; write a question here when something is not known.
 - \`${project.docs}/registries/\`: tables of the settings, files and database objects a migration must carry across.
-- Each of those four folders has an \`INDEX.md\`: its catalog. Find a document there, and do not edit the list between its markers.
+- Each of those four folders has an \`INDEX.md\`: its catalog. The docs, schema, code and tests folders have one too, where the project keeps one. Find a document or a file there, and do not edit the list between its markers.
 - \`${project.schema}/\`: what the project's data looks like: the tables it reads and writes (under \`database/\`, where the folder is kept by kind), the messages it exchanges with other systems and what was agreed with them (\`interfaces/\`, a folder for each system) and the files it reads or writes (\`files/\`). Its \`INDEX.md\` is its catalog, kept like the others. Check a table there before writing SQL for it.
 - \`${project.tests}/\`: test scripts and what they need.
 - \`${project.plans}/\`: plans and tidy notes.

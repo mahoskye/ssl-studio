@@ -1,6 +1,6 @@
 import { CATALOG_FILE, type CatalogItem } from "./catalog";
 import { frontMatter } from "./frontMatter";
-import { baseName, joinPath, relativePath } from "./paths";
+import { baseName, isInside, joinPath, relativePath } from "./paths";
 import type { DocFile, DocGroup } from "./protocol";
 
 // What a project's documents are, beyond its README: the tickets that drive
@@ -13,13 +13,27 @@ import type { DocFile, DocGroup } from "./protocol";
 export const DOC_FOLDERS = { tickets: "tickets", specs: "specs", knowledge: "knowledge", registries: "registries" } as const;
 export type DocArea = keyof typeof DOC_FOLDERS;
 /**
- * A folder with a catalog: the four under the docs folder, and the schema folder, which is the project's own and
- * may lie anywhere in it (ADR 0026).
+ * A folder with a catalog. The four under the docs folder hold the working documents; the schema folder, the docs
+ * folder itself, and the tests and code folders are the project's own and may lie anywhere in it (ADR 0026). Each
+ * says what it is for and lists what it holds, in place of a README written once and left.
  */
-export type CatalogArea = DocArea | "schema";
-export const CATALOG_AREAS: readonly CatalogArea[] = ["tickets", "specs", "knowledge", "registries", "schema"];
-/** Where an area's folder is: under the docs folder, or the schema folder itself. Both are whole paths. */
-export const areaPath = (area: CatalogArea, folders: { docs: string; schema: string }) => (area === "schema" ? folders.schema : joinPath(folders.docs, DOC_FOLDERS[area]));
+export type CatalogArea = DocArea | "schema" | "docs" | "tests" | "code";
+// The code before the tests: where a project keeps both in one folder, that folder is its code.
+export const CATALOG_AREAS: readonly CatalogArea[] = ["tickets", "specs", "knowledge", "registries", "schema", "docs", "code", "tests"];
+/**
+ * The folders whose catalog a project may do without: it comes with "Set up project", or is started when asked
+ * for, and is never started by a step that only keeps catalogs up to date. A file called INDEX.md there that has no
+ * place for the list is a person's own, and is left alone.
+ */
+export const OPTIONAL_CATALOGS: readonly CatalogArea[] = ["docs", "code", "tests"];
+/** The folders whose catalog lists files as they lie: what they hold is scripts and what scripts need, not documents. */
+export type FileArea = "tests" | "code";
+export const isFileArea = (area: CatalogArea): area is FileArea => area === "tests" || area === "code";
+/** The project's folders, as whole paths. The tests and code folders are needed only for their own catalogs. */
+export type AreaFolders = { docs: string; schema: string; tests?: string; code?: string };
+/** Where an area's folder is: under the docs folder, or one of the project's own folders. */
+export const areaPath = (area: CatalogArea, folders: AreaFolders): string =>
+	area === "schema" ? folders.schema : area === "docs" ? folders.docs : area === "tests" ? (folders.tests ?? "") : area === "code" ? (folders.code ?? "") : joinPath(folders.docs, DOC_FOLDERS[area]);
 
 /** The project's state, in plain words: at the top of the docs folder. */
 export const STATE_FILE = "STATE.md";
@@ -278,16 +292,18 @@ One paragraph.
 const CATALOG_NOTE = "The list between the two markers is written by SSL Studio from the files here (Docs panel, Update catalogs). Write anything else you like around it.";
 
 /** A catalog as it starts: what the folder is for, and an empty list between its markers. */
-export const catalogTemplate = (area: CatalogArea) => {
-	const head: Record<CatalogArea, [string, string]> = {
+/** What each catalogued folder is called, and what it is for: what its catalog opens with. */
+export const CATALOG_HEADS: Record<CatalogArea, [string, string]> = {
+	docs: ["Docs", "Notes and decisions about this project, and the working documents the work is written down in: the tickets, the specs, the knowledge base and the registries, each in its own folder with its own catalog."],
+	tests: ["Tests", "Test scripts, and the sample requests and data they need."],
+	code: ["Code", "The project's scripts and data sources."],
 		schema: ["Schema", "What the project's data looks like, each kind in its own folder: the database's tables, the messages exchanged with other systems and what was agreed with them, and the files read or written. Another folder made here is a kind of the project's own."],
 		tickets: ["Tickets", "The tickets that drive the work: one file for each, with what was asked, its state and the tickets it is related to."],
 		specs: ["Specs", "What is to be built, written from the tickets: one spec in a file, with its state. Specs the planner writes beside a plan are listed here too."],
 		knowledge: ["Knowledge base", "What the project has learned: decisions, questions, snippets and prompts kept for use, and notes on how things work."],
 		registries: ["Registries", "What a migration is checked against: tables of the application's settings, its files and its database objects, each row with how far it has come."],
-	};
-	return `# ${head[area][0]}\n\n${head[area][1]}\n\n${CATALOG_NOTE}\n\n<!-- catalog -->\n\nNothing here yet.\n\n<!-- /catalog -->\n`;
 };
+export const catalogTemplate = (area: CatalogArea) => `# ${CATALOG_HEADS[area][0]}\n\n${CATALOG_HEADS[area][1]}\n\n${CATALOG_NOTE}\n\n<!-- catalog -->\n\nNothing here yet.\n\n<!-- /catalog -->\n`;
 
 /** A registry's name: what it is called when it is one of those offered, its file's name otherwise. */
 export const registryTitle = (file: string) => REGISTRIES.find((r) => r.file.toLowerCase() === baseName(file).toLowerCase())?.title ?? baseName(file).replace(/\.[^.]+$/, "");
@@ -310,7 +326,25 @@ export function progressShort(file: Pick<DocFile, "rows" | "tally">): string {
 /** Whether a file is its folder's catalog. */
 export const isCatalog = (file: Pick<DocFile, "name">) => baseName(file.name).toLowerCase() === CATALOG_FILE.toLowerCase();
 
-const AREA_GROUP: Record<CatalogArea, DocGroup> = { tickets: "tickets", specs: "specs", knowledge: "knowledge", registries: "registries", schema: "schema" };
+const AREA_GROUP: Record<Exclude<CatalogArea, FileArea>, DocGroup> = { tickets: "tickets", specs: "specs", knowledge: "knowledge", registries: "registries", schema: "schema", docs: "docs" };
+
+/** The most files a tests or code folder's catalog lists: a folder with more is found by the Explorer and by search. */
+export const CATALOG_FILES_MAX = 1000;
+
+/**
+ * What the catalog of a tests or code folder lists: its files as they lie, each by its name, under the folder it is
+ * in. Nothing is read from a file: what a script is for is the language server's to say, not this list's.
+ * `paths` are from the catalog's folder, with "/" between their parts; the catalog itself is not among them.
+ */
+export function fileItems(paths: readonly string[]): CatalogItem[] {
+	const byName = (a: string, b: string) => a.localeCompare(b, undefined, { sensitivity: "base", numeric: true });
+	const folder = (path: string) => path.split("/").slice(0, -1).join("/");
+	return [...paths]
+		.filter((path) => path.toLowerCase() !== CATALOG_FILE.toLowerCase())
+		// What lies in the folder itself first, then each folder inside it by its name.
+		.sort((a, b) => byName(folder(a), folder(b)) || byName(a, b))
+		.map((path) => ({ path, title: baseName(path), ...(folder(path) ? { section: folder(path) } : {}) }));
+}
 
 /**
  * What an area's catalog lists: each of its documents, with the way to it
@@ -322,9 +356,9 @@ const AREA_GROUP: Record<CatalogArea, DocGroup> = { tickets: "tickets", specs: "
  * `where` is the docs folder, or the docs folder and the schema folder: the
  * schema's catalog needs the second.
  */
-export function catalogItems(area: DocArea, files: readonly DocFile[], where: string | { docs: string; schema: string }): CatalogItem[];
-export function catalogItems(area: CatalogArea, files: readonly DocFile[], where: { docs: string; schema: string }): CatalogItem[];
-export function catalogItems(area: CatalogArea, files: readonly DocFile[], where: string | { docs: string; schema: string }): CatalogItem[] {
+export function catalogItems(area: DocArea | "docs", files: readonly DocFile[], where: string | AreaFolders): CatalogItem[];
+export function catalogItems(area: Exclude<CatalogArea, FileArea>, files: readonly DocFile[], where: AreaFolders): CatalogItem[];
+export function catalogItems(area: Exclude<CatalogArea, FileArea>, files: readonly DocFile[], where: string | AreaFolders): CatalogItem[] {
 	const folders = typeof where === "string" ? { docs: where, schema: "" } : where;
 	const folder = areaPath(area, folders);
 	// The knowledge base and the schema list their kinds in their own order, whatever the files' names.
@@ -343,10 +377,24 @@ export function catalogItems(area: CatalogArea, files: readonly DocFile[], where
 	const byName = (a: string, b: string) => a.localeCompare(b, undefined, { sensitivity: "base", numeric: true });
 	const part = (file: DocFile) => (file.kind && file.name.split(/[\\/]/).length > 2 ? file.name.split(/[\\/]/)[1]! : "");
 	const schemaBefore = (a: DocFile, b: DocFile) => byName(a.kind ?? "", b.kind ?? "") || Number(Boolean(part(a))) - Number(Boolean(part(b))) || byName(part(a), part(b));
-	return files
-		.filter((file) => file.group === AREA_GROUP[area] && file.exists && !isCatalog(file))
+	// The heading the working documents' catalogs are named under: kept apart from a folder a project calls the same.
+	const working = files.some((file) => file.group === "docs" && file.name.split(/[\\/]/)[0]?.toLowerCase() === "working documents" && /[\\/]/.test(file.name)) ? "The working documents' catalogs" : "Working documents";
+	// The docs folder's catalog is the way in to the others under it: each of those that is there is named first.
+	const others: CatalogItem[] =
+		area === "docs"
+			? (Object.keys(DOC_FOLDERS) as DocArea[]).flatMap((name) => {
+					const catalog = files.find((file) => file.group === AREA_GROUP[name] && file.exists && isCatalog(file) && !/[\\/]/.test(file.name));
+					return catalog ? [{ path: relativePath(folder, catalog.path), title: CATALOG_HEADS[name][0], section: working }] : [];
+				})
+			: [];
+	/** In the docs folder, a document in a folder of its own is listed under that folder; one at the top under none. */
+	const docsSection = (file: DocFile) => file.name.split(/[\\/]/).slice(0, -1).join("/");
+	/** What lies under the schema folder, where that is inside the docs folder, is the schema's to list, not the docs'. */
+	const schemas = (file: DocFile) => area === "docs" && Boolean(folders.schema) && folders.schema !== folder && isInside(folders.schema, file.path);
+	const listed = files
+		.filter((file) => file.group === AREA_GROUP[area] && file.exists && !isCatalog(file) && !schemas(file))
 		.map((file, at) => ({ file, at }))
-		.sort((a, b) => order(a.file) - order(b.file) || (area === "schema" ? schemaBefore(a.file, b.file) : 0) || a.at - b.at)
+		.sort((a, b) => order(a.file) - order(b.file) || (area === "schema" ? schemaBefore(a.file, b.file) : area === "docs" ? byName(docsSection(a.file), docsSection(b.file)) : 0) || a.at - b.at)
 		.map(({ file }): CatalogItem => {
 			const path = relativePath(folder, file.path);
 			const named = file.title || baseName(file.name).replace(/\.(md|markdown|csv|tsv)$/i, "");
@@ -357,8 +405,12 @@ export function catalogItems(area: CatalogArea, files: readonly DocFile[], where
 			if (area === "knowledge") return { path, title: named, status: file.status, summary: file.summary, section: KNOWLEDGE.find((k) => k.id === file.kind)?.name ?? "Other" };
 			// A description by what it calls itself; what lies beside it (the SQL, a sample, a schema) by its file's name.
 			if (area === "schema") return { path, title: file.title || baseName(file.name), status: file.status, summary: file.summary, section: schemaSection(file) };
+			// A plain document under the folder it is in, where it is in one.
+			if (area === "docs") return { path, title: file.heading || named, status: file.status, summary: file.summary, ...(docsSection(file) ? { section: docsSection(file) } : {}) };
 			return { path, title: named, status: file.status, summary: file.tickets?.length ? `For ${file.tickets.join(", ")}.${file.summary ? ` ${file.summary}` : ""}` : file.summary };
 		});
+	// The documents first (those at the top, then each folder's), then the way to the working documents' own catalogs.
+	return [...listed, ...others];
 }
 
 /** The most lines of code a question or a decision takes with it: enough to say what it is about, not a copy of the file. */

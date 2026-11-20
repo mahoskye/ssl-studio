@@ -7,6 +7,30 @@ All 104 pass in the SSL sandbox runner (2026-11-18). The runner is a
 compatibility runtime for SSL on SQLite; it is a separate, private project,
 and it is not STARLIMS. Nothing here has run in STARLIMS itself.
 
+The list between the two markers is written by SSL Studio from the files here (Docs panel, Update catalogs). Write anything else you like around it.
+
+<!-- catalog -->
+
+### DueDatesTests
+
+- [AddWorkingDaysTests.ssl](DueDatesTests/AddWorkingDaysTests.ssl)
+- [AvailabilityTests.ssl](DueDatesTests/AvailabilityTests.ssl)
+- [DbTestSupport.ssl](DueDatesTests/DbTestSupport.ssl)
+- [DueDateSummaryTests.ssl](DueDatesTests/DueDateSummaryTests.ssl)
+- [DueRuleEdgeTests.ssl](DueDatesTests/DueRuleEdgeTests.ssl)
+- [DueRulesTests.ssl](DueDatesTests/DueRulesTests.ssl)
+- [DueRuleTests.ssl](DueDatesTests/DueRuleTests.ssl)
+- [DueSoonReportTests.ssl](DueDatesTests/DueSoonReportTests.ssl)
+- [OutageDaysTests.ssl](DueDatesTests/OutageDaysTests.ssl)
+- [RollbackTests.ssl](DueDatesTests/RollbackTests.ssl)
+- [SamplesDueSoonTests.ssl](DueDatesTests/SamplesDueSoonTests.ssl)
+- [SaveDueDatesTests.ssl](DueDatesTests/SaveDueDatesTests.ssl)
+- [SetSampleDueDatesTests.ssl](DueDatesTests/SetSampleDueDatesTests.ssl)
+- [TestSupport.ssl](DueDatesTests/TestSupport.ssl)
+- [WorkCalendarTests.ssl](DueDatesTests/WorkCalendarTests.ssl)
+
+<!-- /catalog -->
+
 ## Running them
 
 From the repository root, with the runner beside this repository:
@@ -81,4 +105,4 @@ first run found three things validation had not:
   `SetSampleDueDates` itself get a failed save. Changing the condition to
   never raise leaves all 104 tests passing.
 - `/*@private;`, and anything on SQL Server or Oracle
-  ([src/README.md](../src/README.md)).
+  ([src/INDEX.md](../src/INDEX.md)).

@@ -111,10 +111,12 @@ export function selftestDocsSetup(): Promise<Steps> {
 			switchTo("Read");
 			return text && (await until(rendered));
 		});
-		// The new docs folder starts with a README of its own; its row opens it.
-		await step("docsFolderListed", () => until(() => rows().filter((r) => label(r) === "README.md").length > 1));
+		// The new docs folder starts as its catalog, listed last in the Docs list as the other catalogs are; its row
+		// opens it.
+		const docsCatalog = () => rows().find((r) => canonical(r.dataset.row ?? "") === canonical(joinPath(state.workspace!.root, ...state.project!.docs.split(/[\\/]/), "INDEX.md")));
+		await step("docsFolderListed", () => until(() => docsCatalog() && label(docsCatalog()!).trim() === "Catalog"));
 		await step("rowOpensDocument", async () => {
-			rows().filter((r) => label(r) === "README.md")[1]!.click();
+			docsCatalog()!.click();
 			return until(() => rendered()?.querySelector("h1")?.textContent === "Docs");
 		});
 		await step("openRowSelected", async () => document.querySelector(".doc-row.selected"));

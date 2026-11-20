@@ -109,7 +109,12 @@ its title, its state and what it is about. The IDE writes the list between
 two marker lines and leaves everything else in the file alone. It writes it
 when it makes or changes a document; "Update catalogs" writes them all.
 The schema folder has one too, under its kinds and, among the interfaces,
-the system each message is exchanged with.
+the system each message is exchanged with. So have the docs folder itself
+(its plain documents, and the way to the four catalogs under it), and the
+tests and code folders, which list their files as they lie: "Set up
+project" writes these where it used to write a README. A project may do
+without them: "Update catalogs" keeps the ones that are there, and "Start
+folder catalogs" starts one for a folder that has none.
 
 ## Registries
 

@@ -1,6 +1,6 @@
 import { CATALOG_FILE } from "./catalog";
 import { linkFile, type LinkEdit } from "./docLinks";
-import { CATALOG_AREAS, DOC_FOLDERS, isCatalog, registryTitle, toneOf, type CatalogArea } from "./projectDocs";
+import { CATALOG_AREAS, DOC_FOLDERS, isCatalog, isFileArea, registryTitle, toneOf, type CatalogArea } from "./projectDocs";
 import type { DocFile } from "./protocol";
 
 // What the documents of the work need from someone (ADR 0012): a catalog
@@ -28,7 +28,9 @@ export type DocCheck = {
 export type LinkMend = LinkEdit;
 
 /** A catalogued folder as a check names it: the schema folder is the project's own, wherever it lies. */
-const FOLDER_SAID: Record<CatalogArea, string> = { tickets: `${DOC_FOLDERS.tickets}/`, specs: `${DOC_FOLDERS.specs}/`, knowledge: `${DOC_FOLDERS.knowledge}/`, registries: `${DOC_FOLDERS.registries}/`, schema: "the schema folder" };
+const FOLDER_SAID: Record<CatalogArea, string> = { tickets: `${DOC_FOLDERS.tickets}/`, specs: `${DOC_FOLDERS.specs}/`, knowledge: `${DOC_FOLDERS.knowledge}/`, registries: `${DOC_FOLDERS.registries}/`, schema: "the schema folder", docs: "the docs folder", tests: "the tests folder", code: "the code folder" };
+/** The folders a catalog is asked for when they hold documents and have none. The docs, code and tests folders are not asked: theirs comes with "Set up project" or "Start folder catalogs", and a project may do without. */
+const ASKED_FOR: readonly CatalogArea[] = ["tickets", "specs", "knowledge", "registries", "schema"];
 /** A sentence's first letter, where it opens with words and not with a folder's name. */
 const opening = (text: string) => (text.startsWith("the ") ? `T${text.slice(1)}` : text);
 /** How many of a document's broken links a check names before it counts the rest. */
@@ -46,7 +48,7 @@ const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? on
  */
 export function docChecks(files: readonly DocFile[], areas: readonly CatalogArea[] = CATALOG_AREAS): DocCheck[] {
 	const checks: DocCheck[] = [];
-	const inGroup = (area: CatalogArea) => files.filter((file) => file.group === area && file.exists);
+	const inGroup = (area: CatalogArea) => files.filter((file) => (file.group as string) === area && file.exists);
 	const tickets = inGroup("tickets").filter((file) => !isCatalog(file));
 	const specs = inGroup("specs").filter((file) => !isCatalog(file));
 	const here = (key: string) => tickets.some((ticket) => ticket.ticket && same(ticket.ticket, key));
@@ -61,13 +63,17 @@ export function docChecks(files: readonly DocFile[], areas: readonly CatalogArea
 	// One update writes them all, so they are said together.
 	const stale: DocFile[] = [];
 	const without: DocFile[] = [];
+	/** The folder a catalog is of: said by the catalog where its group does not say (the tests' and the code's). */
+	const areaOf = (file: DocFile) => (file.catalog?.area ?? file.group) as CatalogArea;
 	for (const area of areas) {
-		const all = inGroup(area);
-		const catalog = all.find((file) => isCatalog(file) && !/[\\/]/.test(file.name));
+		// The tests' and the code's catalogs are listed with the project's files and say which folder's they are; any
+		// other folder's is the one at the top of its own list, not one a person keeps deeper in.
+		const all = isFileArea(area) ? [] : inGroup(area);
+		const catalog = isFileArea(area) ? files.find((file) => file.exists && isCatalog(file) && file.catalog?.area === area) : all.find((file) => isCatalog(file) && !/[\\/]/.test(file.name));
 		if (catalog?.catalog?.stale) stale.push(catalog);
-		else if (!catalog && all.length && !(area === "specs" && all.every((file) => file.name.includes(".spec.")))) without.push(all[0]!);
+		else if (!catalog && ASKED_FOR.includes(area) && all.length && !(area === "specs" && all.every((file) => file.name.includes(".spec.")))) without.push(all[0]!);
 	}
-	const folders = (of: DocFile[]) => listed(of.map((file) => FOLDER_SAID[file.group as CatalogArea]));
+	const folders = (of: DocFile[]) => listed(of.map((file) => FOLDER_SAID[areaOf(file)]));
 	if (stale.length) checks.push({ level: "warn", text: stale.length === 1 ? `The catalog of ${folders(stale)} is out of date.` : `The catalogs of ${folders(stale)} are out of date.`, path: stale[0]!.path, fix: { kind: "catalogs" } });
 	if (without.length) checks.push({ level: "note", text: `${opening(folders(without))} ${without.length === 1 ? "has" : "have"} no catalog (${CATALOG_FILE}).`, path: without[0]!.path, fix: { kind: "catalogs" } });
 

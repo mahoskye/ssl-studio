@@ -116,3 +116,42 @@ things above no longer stand as written:
 Not decided by this: whether the READMEs that "Set up project" writes
 for the docs, tests and code folders should give way to something
 generated too. They are as they were.
+
+**2026-11-20, later the same day, on the user's word.** Asked whether
+the READMEs that "Set up project" writes for the docs, tests and code
+folders should become generated catalogs too, with the agent's own
+advice against it for the tests and the code (a list of files says
+what the Explorer says), the user answered "Yes, those too". So:
+
+- **The docs, tests and code folders have catalogs too**, each an
+  `INDEX.md` that says what the folder is for and lists what it
+  holds. "Set up project" writes those in place of the READMEs. The
+  project's own `README.md` and `AGENTS.md` are still written: they
+  are the project's, not a folder's.
+- **The docs folder's catalog** lists the plain documents there, those
+  in a folder under that folder's name, and then the way to the
+  catalogs of the tickets, specs, knowledge base and registries.
+- **The tests' and the code's catalogs** list their files as they
+  lie, each by its name, under the folder it is in. Nothing is read
+  from a script: what a script is for is the language server's to
+  say (ADR 0003).
+- **They are kept as the others are**: written afresh when the app
+  makes, renames, moves or throws away a file in the folder, by
+  "Update catalogs", and marked out of date when the folder has
+  changed by another hand. Health says so.
+- **A project may do without them.** A docs, tests or code folder
+  with no catalog is not asked for one, and "Update catalogs" does
+  not start one: "Start folder catalogs" does, when asked. A file of
+  the catalog's name that a person keeps there, with no place for the
+  list, is theirs: it is not marked and nothing is written into it.
+- **A plain document is linked as it was.** Its heading is in its
+  line of the docs folder's catalog and is not a name `[[...]]` finds
+  it by: a name goes on meaning what it meant.
+- **Not catalogued**: a tests or code folder that is the project's
+  own folder (a list of everything in the project is no catalog), a
+  folder another of these already is (tests kept in the code's own
+  folder have the code's), and one with more than a thousand files,
+  which the Explorer and search are the way into.
+- **Where they show**: the docs' as the Catalog row at the end of the
+  Docs list; the tests' and the code's with the project's own files,
+  since those folders have no list of their own in the panel.

@@ -17,7 +17,7 @@ import { COPY, COPY_NAME, COPY_PATH, COPY_RELATIVE, CUT, folderFor, holdsRoot, m
 import { copyName, copyProblem, folderOf, moveProblem, type Clip } from "./explorerMoves";
 import { chooseFromMenu } from "./RowMenu";
 import { showPanel } from "./registry";
-import { followRename } from "../projectDocs";
+import { catalogsKeptFor, followRename } from "../projectDocs";
 import { IconButton, Row, Rows, type Point, type RowsApi } from "./Rows";
 import { recall, remember } from "../graph/canvas";
 
@@ -44,6 +44,14 @@ const [dropInto, setDropInto] = createSignal<string | null>(null);
 const kb = (bytes: number) => `${Math.round(bytes / 1024)} KB`;
 const indent = (depth: number) => ({ "padding-left": `${8 + depth * 14}px` });
 const refresh = () => setState("treeVersion", (v) => v + 1);
+/**
+ * The tree has changed by the app's own hand: it is read again, and the catalog of a folder that has one and holds
+ * one of these files is written afresh, so that it goes on saying what the folder holds.
+ */
+const changed = (...paths: string[]): Promise<void> => {
+	refresh();
+	return catalogsKeptFor(paths);
+};
 const errorText = (e: any) => String(e?.message ?? e);
 
 type Listing = { path: string; error: string; entries: Entry[] };
@@ -190,7 +198,7 @@ async function create(parent: string, kind: "file" | "dir"): Promise<string | nu
 	if (await heldFromBefore(path)) return null;
 	await backend.create(path, kind);
 	setExpanded((set) => new Set(set).add(parent));
-	refresh();
+	void changed(path);
 	if (kind === "file") void openFile(path);
 	return path;
 }
@@ -209,9 +217,9 @@ async function rename(entry: Entry): Promise<string | null> {
 	setExpanded((set) => new Set(retarget(set, entry.path, to)));
 	setClip((held) => held && { ...held, path: retarget([held.path], entry.path, to)[0]! });
 	void scriptsCameTo(to, entry.path, entry.kind);
-	refresh();
+	const listed = changed(entry.path, to);
 	// Documents that link to the old name are offered the new one. Not waited for: the row is renamed either way.
-	void followRename(entry.path, to);
+	void listed.then(() => followRename(entry.path, to));
 	return to;
 }
 
@@ -224,7 +232,7 @@ async function trash(entry: Entry): Promise<string | null> {
 	// What was cut or copied and is now in the trash is no longer there to paste.
 	setClip((held) => (held && without([held.path], entry.path).length ? held : null));
 	setExpanded((set) => new Set(without(set, entry.path)));
-	refresh();
+	void changed(entry.path);
 	// Its row is going: the keyboard lands on the row that takes its place.
 	return "";
 }
@@ -244,8 +252,8 @@ async function moveInto(from: { path: string; kind: "file" | "dir" }, into: stri
 	fileRenamed(from.path, to);
 	setExpanded((set) => new Set([...retarget(set, from.path, to), into]));
 	void scriptsCameTo(to, from.path, from.kind);
-	refresh();
-	void followRename(from.path, to);
+	// The catalog first, as in a rename: its own line for the file is written afresh, not asked about.
+	void changed(from.path, to).then(() => followRename(from.path, to));
 	return to;
 }
 
@@ -264,7 +272,7 @@ async function copyInto(from: { path: string; kind: "file" | "dir" }, into: stri
 	await backend.copy(from.path, to);
 	setExpanded((set) => new Set(set).add(into));
 	void scriptsCameTo(to, undefined, from.kind);
-	refresh();
+	void changed(to);
 	// The copy is of the file on disk: edits nobody saved are not in it, and that is said.
 	const unsaved = Object.keys(state.dirty).filter((path) => state.dirty[path] && (path === canonical(from.path) || isInside(from.path, path)));
 	if (unsaved.length) notify(`The copy is of what is saved: the unsaved changes in ${unsaved.length === 1 ? baseName(unsaved[0]!) : `${unsaved.length} files`} are not in it.`);
