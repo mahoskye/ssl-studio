@@ -369,3 +369,32 @@ still gives the keyboard to the editor.
 Not tried again: a screen reader, the app's own window, the copy
 commands (they write the clipboard), and an agent's edit.
 
+## The third pass: steps 1 to 8 in the four layouts again
+
+After the last of the building (2026-11-19), each of the plan's first
+eight steps was looked at once more at 720 and 1440 wide, each in the
+light and the dark theme, with the Agent docked on the right. The same
+was read in all four; nothing ran off the window in any.
+
+| Step | Seen in all four |
+| --- | --- |
+| 1, small habits | The search's three switches, each inside its panel |
+| 2, menus | A tab's menu of ten entries and a file's of seven, both inside the window |
+| 3, the menu bar | Six menus of 16, 14, 11, 25, 14 and 4 entries, each inside the window |
+| 4, finding | "?" in the quick pick listed its five kinds, inside the window |
+| 5, files by hand | A file's row and a tab can both be dragged; the row fits its panel |
+| 6, not text | A picture drawn inside its view, the status bar saying Picture; a text's UTF-8 and CRLF |
+| 7, replace | The four boxes: what to find, what to write, files to include and to leave out |
+| 8, source control | Eight changes listed, the message box inside the panel, a comparison in one column |
+
+The comparison is one column here at 1440 too: with the Agent docked on
+the right the editors have some 770 across. A change's two buttons take
+no room until the pointer is on its row. In the status bar one piece
+has no width at 720 (the place in the file, which has no words there);
+the rest lie between 6 and 714 of the 720.
+
+Two of the three keys the tool could not press were tried as key
+events sent to the page: Ctrl+/ made a comment of an SSL line, and
+Ctrl+\ made a second group. Ctrl+F12 sent the same way did nothing;
+"Go to definition" ran from the Go menu, as before.
+
