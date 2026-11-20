@@ -20,11 +20,13 @@ export const errors: string[] = [];
  * A cancelled request is not a failure (Monaco rejects with "Canceled" when a
  * newer request replaces an older one), and neither is the browser's notice
  * that a size it watches changed again within one frame: that change is only
- * delivered a frame later.
+ * delivered a frame later. Nor is a comparison's word that it was closed
+ * before it had worked its lines out, as it is when a review is accepted: it
+ * used to raise "Something went wrong" over work that had gone right.
  */
 function uncaught(reason: unknown) {
 	const text = String((reason as any)?.message ?? reason ?? "");
-	if (!text || /^cancel{1,2}ed$/i.test(text) || (reason as any)?.name === "Canceled" || /^ResizeObserver loop/.test(text)) return;
+	if (!text || /^cancel{1,2}ed$/i.test(text) || (reason as any)?.name === "Canceled" || /^ResizeObserver loop/.test(text) || /^no diff result available/i.test(text)) return;
 	errors.push(text);
 	log(`uncaught: ${text}${(reason as any)?.stack ? `\n${(reason as any).stack}` : ""}`);
 	notify(`Something went wrong: ${text}`, "error");

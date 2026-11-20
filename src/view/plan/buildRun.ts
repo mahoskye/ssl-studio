@@ -27,9 +27,18 @@ const TOOL_LIMIT = 2;
 const runFile = (path: string) => joinPath(state.workspace!.root, ".ssl-studio", "plans", `${baseName(path).replace(/\.plan\.json$/i, "")}.run.json`);
 const plain = <T>(value: T): T => JSON.parse(JSON.stringify(value));
 
+/** The save of each run's file that is under way: the next one waits for it. */
+const saving = new Map<string, Promise<unknown>>();
+
 function publish(path: string, run: BuildRun | null) {
 	updateAssist(path, { run: run && plain(run) });
-	void backend.write(runFile(path), JSON.stringify(run, null, 1)).catch(() => notify("Could not save the build's progress.", "error"));
+	// One save of a file at a time, in the order they were asked for. A build says where it stands several times in
+	// a moment, and two writes of one file at once got in each other's way: one of them failed, and the file could
+	// be left holding an older state than the last, or one that does not read, which loses the build's progress.
+	const file = runFile(path);
+	const text = JSON.stringify(run, null, 1);
+	const next = (saving.get(file) ?? Promise.resolve()).then(() => backend.write(file, text)).catch(() => notify("Could not save the build's progress.", "error"));
+	saving.set(file, next);
 }
 
 /** Picks a run back up when its plan opens. A unit caught mid-turn goes back to waiting. */

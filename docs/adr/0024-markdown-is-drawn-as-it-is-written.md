@@ -113,4 +113,8 @@ and [ADR 0020](0020-the-shell-does-what-vs-code-does-and-stays-its-own.md).
   1.4 seconds on this machine, in two runs, from asking for the file.
   The steps run the actions and not the keys, and the self-test is not
   run by CI. How it looks there has still not been seen by eye.
+- 2026-11-20, later: seen by eye in the app's own window, in pictures
+  of that window taken while the self-test ran, at 1400 and 720 wide in
+  the dark and the light theme: a long page drawn as written, and the
+  moment of plain text before its reading comes.
 

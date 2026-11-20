@@ -416,6 +416,34 @@ all passed on their first run there.
 | longPageDrawn | A page of 28,587 characters is drawn, and the worker answered for it: 1.3 and 1.4 seconds |
 | renameFollowedByName | A rename asks about two links by name and writes both |
 
-Still not seen by eye there: how any of it looks. The window cannot be
-looked at from outside by the tools at hand.
+The window was then seen by eye as well (2026-11-20). It cannot be
+driven from outside without taking the keyboard from whoever is at the
+machine, so the cycle self-test was run four times and the window
+alone was captured four times a second while the self-test pressed
+things in it: at 1400 and at 720 wide, each in the dark and the light
+theme. The self-test passed in all four.
+
+| Layout | Seen |
+| --- | --- |
+| 1400, dark | A plan's chart, a review's comparison, a ticket's page, and the long page drawn as written |
+| 720, dark | The long page as plain text for the moment before its reading came, then drawn; nothing ran off |
+| 1400, light | The same pages; headings sized, strong words strong, code in its face, the Agent docked right |
+| 720, light | The same; the right panel gives way, the tabs and the Edit and Read switch fit |
+
+Found in those pictures and fixed, both older than this work: accepting
+a review raised "Something went wrong: no diff result available", which
+is the comparison saying it was closed before it had worked its lines
+out, and is no longer shown; and a build raised "Could not save the
+build's progress", because it wrote its progress several times at once
+and the writes got in each other's way: they now go one after another.
+A reviewer made the second happen on its own: of 400 rounds of two to
+four writes at once, some 185 had a write fail and some 160 left an
+older state on disk, 19 of them a file that does not read; chained,
+200 writes all landed. A fifth run was captured after the fixes, and
+neither notice came. Found by the same reviewer and not fixed: two
+saves of one file at once (Ctrl+S twice) would collide the same way,
+and two saves of the settings at once can lose one of them without a
+word. Not seen by eye there: a page's links by name and "Linked from"
+(the self-test passes them in under a quarter of a second), and
+anything that needs a key pressed from outside.
 
