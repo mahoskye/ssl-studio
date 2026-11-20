@@ -30,7 +30,7 @@ import { MenuBar } from "./MenuBar";
 import { useNavigation } from "./navigation";
 import { StatusBar } from "./StatusBar";
 import { applyTheme, resolveTheme } from "./themes/themes";
-import { dismiss, focusRequest, openFolder, rememberTabs, rememberViews, setState, state, unsavedPaths, type PanelId } from "./state";
+import { dismiss, focusRequest, notify, openFolder, rememberTabs, rememberViews, setState, state, unsavedPaths, type PanelId } from "./state";
 import { focusPanel, isShown, lastShown, movePanel, panelOn, PANELS, setCrowded, sideOf, togglePanel } from "./panels/registry";
 import { Welcome } from "./Welcome";
 import { ACTIVITY, crowdedSides, fitPanels } from "./layout";
@@ -93,6 +93,8 @@ function useTheme() {
 
 function useLayoutPersistence() {
 	let timer: ReturnType<typeof setTimeout> | undefined;
+	/** The folder whose layout was last refused a save, which has been said: said again for another folder. */
+	let layoutRefused: string | null = null;
 	createEffect(
 		on(
 			() => JSON.stringify(state.settings.layout),
@@ -100,7 +102,20 @@ function useLayoutPersistence() {
 				// The self-test opens the fixture itself, not a copy: it leaves no trace in it.
 				if (previous === undefined || !state.workspace || state.info?.selftest) return;
 				clearTimeout(timer);
-				timer = setTimeout(() => void backend.saveSettings("workspace", { layout: JSON.parse(layout) }), 600);
+				timer = setTimeout(
+					() =>
+						void backend.saveSettings("workspace", { layout: JSON.parse(layout) }).then(
+							() => (layoutRefused = null),
+							(e) => {
+								// The folder's settings file cannot be written (it does not read as settings, say). Said once
+								// for a folder, not at every move of a panel; said again after a save has gone through.
+								const root = state.workspace?.root ?? "";
+								if (layoutRefused !== root) notify(`The window's layout is not being kept for this folder: ${String(e?.message ?? e)}`, "error");
+								layoutRefused = root;
+							},
+						),
+					600,
+				);
 			},
 		),
 	);

@@ -16,7 +16,7 @@ import { TEMPLATES } from "../shared/houseStyle";
 import { askAbout } from "./agent/Agent";
 import { startTidy } from "./agent/tidy";
 import { baseName, joinPath, relativeTo } from "../shared/paths";
-import { defaultLayout } from "../shared/protocol";
+import { defaultLayout, type Settings } from "../shared/protocol";
 import { menuForLetter } from "../shared/menuBar";
 import { installRecentTabs, stepRecent } from "./recentTabs";
 import { goAlong } from "./navigation";
@@ -71,7 +71,7 @@ function toggleSideOf(side: "left" | "right") {
  */
 function resetLayout() {
 	setState("settings", "layout", { ...defaultLayout(), dock: {} });
-	if (state.settings.menuBar === false) void switchSetting("menuBar", true, () => state.settings.menuBar !== false);
+	if (state.settings.menuBar === false) void switchSetting("menuBar", true, (settings) => settings.menuBar !== false);
 }
 const showBottom = (view: "problems" | "output") => (setState("bottomView", view), setState("settings", "layout", "bottom", true));
 /** Puts text on the clipboard: by the app's own way where there is one, by the web view's otherwise. */
@@ -102,10 +102,12 @@ function openLinkAtCursor() {
  * Switches a setting that is on or off. Where the project's own settings hold it, yours would not be seen while
  * the project's is in the way: it is switched there. Says whether it is now as asked.
  */
-async function switchSetting(key: "wordWrap" | "menuBar" | "livePreview", to: boolean, now: () => boolean): Promise<boolean> {
-	await saveSetting({ [key]: to });
-	if (now() !== to && state.workspace) await saveSetting({ [key]: to }, "workspace");
-	return now() === to;
+async function switchSetting(key: "wordWrap" | "menuBar" | "livePreview", to: boolean, now: (settings: Settings) => boolean): Promise<boolean> {
+	// Asked of what each save left, not of what is on screen: the screen may by then show a later save's settings,
+	// and a save that was refused has left nothing to ask.
+	let left = await saveSetting({ [key]: to });
+	if (left && now(left) !== to && state.workspace) left = await saveSetting({ [key]: to }, "workspace");
+	return Boolean(left) && now(left!) === to;
 }
 
 /** What this is, and what it found to work with: for a report of a fault, and to know which version is running. */
@@ -150,8 +152,8 @@ export const commands: Command[] = [
 	{ id: "copy-path", label: "Copy path", detail: "The open file's whole path", run: () => void copyPath("whole") },
 	{ id: "copy-relative-path", label: "Copy path in the project", detail: "The open file's path from the project's folder", run: () => void copyPath("relative") },
 	{ id: "copy-file-name", label: "Copy file name", detail: "The open file's name, without its folder", run: () => void copyPath("name") },
-	{ id: "word-wrap", label: "Toggle word wrap", detail: "Long lines wrapped at the editor's edge, or not", run: () => void switchSetting("wordWrap", !state.settings.wordWrap, () => Boolean(state.settings.wordWrap)) },
-	{ id: "live-preview", label: "Toggle Markdown live preview", detail: "A document drawn as it is written, or as its plain text", run: () => void switchSetting("livePreview", state.settings.livePreview === false, () => state.settings.livePreview !== false) },
+	{ id: "word-wrap", label: "Toggle word wrap", detail: "Long lines wrapped at the editor's edge, or not", run: () => void switchSetting("wordWrap", !state.settings.wordWrap, (settings) => Boolean(settings.wordWrap)) },
+	{ id: "live-preview", label: "Toggle Markdown live preview", detail: "A document drawn as it is written, or as its plain text", run: () => void switchSetting("livePreview", state.settings.livePreview === false, (settings) => settings.livePreview !== false) },
 	{ id: "open-link", label: "Open the link at the cursor", detail: "In a document's text: the file, heading or page its link leads to", run: openLinkAtCursor },
 	{ id: "focus-editor", label: "Focus editor", run: focusEditor },
 	{ id: "focus-side-panel", label: "Focus side panel", run: focusSidePanel },
@@ -246,7 +248,7 @@ export function openMenu(index?: number): boolean {
 
 async function toggleMenuBar() {
 	const hide = state.settings.menuBar !== false;
-	const done = await switchSetting("menuBar", !hide, () => state.settings.menuBar !== false);
+	const done = await switchSetting("menuBar", !hide, (settings) => settings.menuBar !== false);
 	// What was hidden says how it is brought back: the menu that hid it is gone with it.
 	if (hide && done) notify(MENU_HIDDEN);
 	// And so is whatever in the bar had the keyboard: it goes to the editor.

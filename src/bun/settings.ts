@@ -1,12 +1,13 @@
 // User settings in ~/.config/ssl-studio, then the project's own
 // (.ssl-studio/project.toml), then what the IDE saved for this workspace
 // (.ssl-studio/settings.json): each later one wins.
-import { mkdirSync, readdirSync, existsSync } from "node:fs";
+import { mkdirSync, readdirSync, existsSync, renameSync } from "node:fs";
 import { basename, join } from "node:path";
 import { DEFAULT_SETTINGS, type Settings, type SettingsPatch, type SettingsScope, type ThemeFile } from "../shared/protocol";
 import { HOUSE_STYLE } from "../shared/styleProfile";
 import { dirs, workspaceDir } from "./paths";
 import { projectSettings, readProject } from "./project";
+import { Serial } from "./serial";
 
 async function readJson<T>(path: string, fallback: T): Promise<T> {
 	try {
@@ -38,6 +39,9 @@ function deepMerge(base: any, over: any): any {
 export class SettingsStore {
 	constructor(private root: () => string | null) {}
 
+	/** The saves of the settings, one after another. */
+	private saves = new Serial();
+
 	private path(scope: SettingsScope) {
 		const root = this.root();
 		if (scope === "workspace" && !root) throw new Error("no workspace open");
@@ -52,16 +56,46 @@ export class SettingsStore {
 		return { effective: merge(user, project, workspace), user, workspace };
 	}
 
+	/**
+	 * Saves of the settings go one after another, whichever file they are for. Each reads its file, changes it and
+	 * writes it: asked for at once, two used to read it before either had written, and the later one wrote the
+	 * earlier one's change away. One after another for both files, so that what a save answers with (the settings
+	 * as they now are, read from both) is never read while the other file is being written, and the answers come
+	 * in the order the saves were asked for.
+	 *
+	 * The file is written beside itself and moved into place, so that it is never half there. A file that is there
+	 * and does not read as settings is not written over: a patch alone would have taken its place, and with it
+	 * everything the file held.
+	 */
 	async save(scope: SettingsScope, patch: SettingsPatch) {
 		const path = this.path(scope);
-		const current = await readJson<Partial<Settings>>(path, {});
-		mkdirSync(join(path, ".."), { recursive: true });
-		// A value of null takes the setting out of this file, so the layer below shows through.
-		// (undefined cannot say it: it does not survive the trip from the view.)
-		const next: Record<string, unknown> = { ...current, ...patch };
-		for (const [key, value] of Object.entries(next)) if (value === null) delete next[key];
-		await Bun.write(path, JSON.stringify(next, null, 2) + "\n");
-		return (await this.load()).effective;
+		return this.saves.run("settings", async () => {
+			const current = await this.held(path);
+			mkdirSync(join(path, ".."), { recursive: true });
+			// A value of null takes the setting out of this file, so the layer below shows through.
+			// (undefined cannot say it: it does not survive the trip from the view.)
+			const next: Record<string, unknown> = { ...current, ...patch };
+			for (const [key, value] of Object.entries(next)) if (value === null) delete next[key];
+			const temp = `${path}.ssl-studio-tmp`;
+			await Bun.write(temp, JSON.stringify(next, null, 2) + "\n");
+			renameSync(temp, path);
+			return (await this.load()).effective;
+		});
+	}
+
+	/** What a settings file holds, to be changed and written back: nothing when it is not there or is empty. */
+	private async held(path: string): Promise<Partial<Settings>> {
+		if (!existsSync(path)) return {};
+		const text = await Bun.file(path).text();
+		if (!text.trim()) return {};
+		let read: unknown;
+		try {
+			read = JSON.parse(text);
+		} catch (e: any) {
+			throw new Error(`${path} does not read as settings (${e?.message ?? e}), so it is not written over. Mend it by hand, or remove it, and change the setting again.`);
+		}
+		if (!read || typeof read !== "object" || Array.isArray(read)) throw new Error(`${path} does not hold settings (it is not a list of names and values), so it is not written over. Mend it by hand, or remove it, and change the setting again.`);
+		return read as Partial<Settings>;
 	}
 
 	async themes(): Promise<ThemeFile[]> {

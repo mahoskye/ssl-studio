@@ -267,13 +267,58 @@ export async function loadSettings(fresh = false) {
 	});
 }
 
-export async function saveSetting(patch: SettingsPatch, scope: "user" | "workspace" = "user") {
+/**
+ * The settings whose whole value is worked out here from the one on screen and saved whole: the shortcuts, the
+ * regions' colours, the models marked as the user's own. Two such changes in one moment (two shortcuts cleared by
+ * one gesture) would each be worked out from the value before either, and the later would write the earlier away,
+ * however orderly the saving. So the new value is on screen at once, where the next change is worked out from it.
+ */
+const WORKED_OUT_HERE = ["keys", "regionColors", "agentOwnModels"] as const;
+/** How many saves of settings have been asked for: tells the answer to the last from the answers before it. */
+let settingsAsked = 0;
+/** How many of them have not answered yet, and whether one of those that have, failed. */
+let settingsOut = 0;
+let settingFailed = false;
+
+/**
+ * Saves a setting, and answers with the settings as the save left them (nothing when it failed, which has been
+ * said): what to ask whether the setting took, since what is on screen may by then be a later save's.
+ */
+export async function saveSetting(patch: SettingsPatch, scope: "user" | "workspace" = "user"): Promise<Settings | undefined> {
+	const mine = ++settingsAsked;
+	settingsOut++;
+	const atOnce: Record<string, unknown> = {};
+	for (const key of WORKED_OUT_HERE) if (patch[key] !== undefined && patch[key] !== null) atOnce[key] = patch[key];
+	if (Object.keys(atOnce).length) setState("settings", atOnce as Partial<Settings>);
 	const effective = await guarded(() => backend.saveSettings(scope, patch));
-	if (!effective) return;
-	// What comes back is the settings as they are on disk. The layout is the view's own, and is saved a moment after
-	// it changes (App.tsx): the one on disk may be older, and must not come back over the one on screen.
-	const { layout: onDisk, ...rest } = effective;
-	setState("settings", "layout" in patch ? effective : rest);
+	settingsOut--;
+	if (!effective) settingFailed = true;
+	// Saves land, and answer, in the order they were asked for, and each answer is the settings as they then are:
+	// the answer to a save asked for after this one holds this one's change too, and this older answer is not put
+	// over what has been shown since.
+	if (effective && mine === settingsAsked) {
+		// What comes back is the settings as they are on disk. The layout is the view's own, and is saved a moment
+		// after it changes (App.tsx): the one on disk may be older, and must not come back over the one on screen.
+		const { layout: onDisk, ...rest } = effective;
+		setState("settings", "layout" in patch ? effective : rest);
+	}
+	// A save that failed has said so. What is on screen may then hold a value shown at once that was never saved,
+	// or lack one from an answer passed over above: it is put back to what is on disk, once every save asked for
+	// has answered (sooner, and a save still on its way would land after the reading and be passed over). Not if
+	// another save is asked for while the disk is read: its own answer is the newer.
+	if (!settingsOut && settingFailed) {
+		settingFailed = false;
+		const asked = settingsAsked;
+		const disk = await backend.settings().then(
+			(read) => read.effective,
+			() => undefined,
+		);
+		if (disk && asked === settingsAsked) {
+			const { layout: onDisk, ...rest } = disk;
+			setState("settings", rest);
+		}
+	}
+	return effective;
 }
 
 // --- documents ---------------------------------------------------------------

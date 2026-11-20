@@ -1091,3 +1091,182 @@ a name of three endings (".md.md.md") that still got through, now
 refused with any number of them; and two places where this record
 put the reviewer's words less exactly than it had said them, about
 when the keyboard reached a row, both corrected above.
+
+## The fifteenth review: saves asked for at once
+
+Two things an earlier reviewer had made happen (two saves of one file
+at once, two saves of the settings at once) were recorded as found and
+not fixed. They were fixed, and a fresh reviewer read the fix as
+staged, before its commit, without being told what was thought of it.
+It ran what it could instead of reading only.
+
+Made to happen by the reviewer on the code as it was: of 1,500 rounds
+of two to six saves of one file at once, 573 left the older text; of
+800 rounds of settings saved at once, all 800 lost a change. On the
+fix, the same rounds twice over: none failed, none left older text,
+no temporary file was left, and no setting was lost. The tests fail on
+the code as it was (three of them) and pass on the fix.
+
+No defect in the code held the commit; the reviewer asked that the
+first two findings be fixed before it. Seven findings and five smaller
+points, all dealt with in the same commit:
+
+1. **A test did not test what it was called.** "A save that fails
+   does not hold up the one after it" had no save that failed. Fixed:
+   a file kept in Windows-1252 is saved with a character it cannot
+   hold, and then again without.
+2. **The record said the fix held for every writer.** It holds for
+   what goes through the write. Fixed: the record says so, and the
+   writers in the next finding were brought in.
+3. **A rename while a save was under way left both names**, in 300
+   rounds of 300: older than the fix. Fixed: a rename, a copy, a
+   discard and a move to the trash take their turn with the file's
+   saves.
+4. **One file by two names had two queues**: through a link to its
+   folder, 8 rounds of 400 left older text. Fixed: a file is known by
+   its one real name, and in one way of writing it where the disk does
+   not tell capitals apart. A folder opened twice shares the queue.
+5. **A replace across files read the file, then wrote it**, and a save
+   between the two would have been written away. Fixed: read and
+   written as one step.
+6. **The settings file was written in place**, and could be read half
+   written: seen with a file of 1.8 MB (1,401 of 7,074 readings), and
+   in none of 2,255 at a size settings have. Fixed: written beside
+   itself and moved into place; and saves of the user's and the
+   folder's settings go through one queue, so that neither is read
+   while the other is written.
+7. **A settings file that does not read was replaced by the one
+   setting saved**: a file with a comment in it became that setting
+   alone. Older than the fix. Fixed: refused, in words that name the
+   file.
+
+And: three settings are saved whole from the value on screen, so two
+changes in one moment still lost one, however orderly the saving;
+the new value is now on screen at once, and an answer to an older save
+is not put over a newer one. Work that asks for its own file again
+would wait for itself; none does, and the code says so and gives such
+work the write itself. Two tests did not wait for what they expected
+to fail, and now do; one test's name spoke of a failure it did not
+have; one line of the record was too wide.
+
+### The second reading
+
+The same reviewer read what was done about its findings, as staged,
+and ran it: all seven findings and the five smaller points dealt
+with, none still open. It asked that the commit be held for the first
+of five new things, three of them brought in by the fixes themselves.
+All five were dealt with before the commit:
+
+1. **A copy that was refused took away a file it had not made**: the
+   name was looked at before the copy's turn came and cleared after
+   it, so a file saved under that name meanwhile was removed, in 200
+   rounds of 200 (14 of 200 before the fix). Fixed: the copy holds
+   the name it is to take as well as its source, asks whether it is
+   taken when its turn comes, and clears only what it put there.
+2. **A switch command asked the screen whether its setting took**,
+   after the save; with a later save's answer passed over, the screen
+   could be behind, and the switch was then written into the folder's
+   settings too. Fixed: a save answers with the settings it left, and
+   the command asks those.
+3. **A layout that could not be saved would raise "Something went
+   wrong" at every move of a panel**, once a settings file that does
+   not read was refused instead of replaced: read in the code by the
+   reviewer, not run. Fixed: caught, and said once for a folder.
+4. **A rename onto a name being saved for the first time went
+   through, and the save then wrote the renamed file away**, in 200
+   rounds of 200: older than the fix. Fixed: a rename holds both
+   names, taken in one order so that two renames that cross do not
+   wait for each other.
+5. **A folder renamed while a file in it was being saved came back**
+   with that file in it, in 100 rounds of 100: older than the fix.
+   Fixed: work on a folder waits until nothing in it is being saved.
+
+Smaller, and dealt with: a file in a folder not yet made was known by
+another name once the folder was there (it is now known by the nearest
+folder that is there); a save that failed before its turn could have
+the settings read back before an older save had landed (they are read
+back once every save asked for has answered); a table cell in the
+record held three facts; this record said "nothing held the commit"
+where the reviewer had asked for two fixes first, and gave no figures
+for the settings file read half written.
+
+### The third reading
+
+The same reviewer read those changes as staged and ran them: nothing
+to hold the commit, all five and its first seven findings dealt with,
+and no defect found. Its figures: a save into the folder a copy was
+about to make left the copy refused and nothing removed, in 100
+rounds of 100; eight renames, copies and saves of three files that
+cross, 200 rounds, none stuck; a folder renamed with six saves under
+way inside it came back in none of 200.
+
+It left six small points. All were dealt with before the commit:
+
+1. **A folder was waited for before its files were taken, and not
+   again after.** A save asked for one to three turns after an
+   earlier one answered slipped through, and the old folder came
+   back, 40 times of 40 at each distance. Fixed: the folder is looked
+   at again once the files are held, in the same turn the work
+   starts. Measured after: at none, one, two and three turns the late
+   save went with the folder 40 times of 40. A few turns later (from
+   four as it then was, from six after the fourth reading's change)
+   the rename has been done by the time the save is asked for: it is
+   then a save of its own, to the old name, and lands there whole.
+2. **The wait for a folder had no end**: one file saved over and over
+   without a pause kept a rename waiting for as long as it was let.
+   Fixed: after ten seconds the folder is said to be busy and nothing
+   is done to it.
+3. **The notice that a layout is not kept was not said again for
+   another folder.** Fixed: it is said once for each folder.
+4. **When settings were read back after a failed save, a good answer
+   from a later save could be left off the screen** if that reading
+   failed, and a save asked for during it could be shown and then
+   briefly taken back. Fixed: the newest answer is shown first, and
+   what is read back is not shown over a save asked for meanwhile.
+5. **The record gave a finding the reviewer had read as one it had
+   run.** Corrected above.
+6. **One line of the record was wrapped short.** Reflowed.
+
+In making the first of these, work and saves of one file were for a
+moment not kept in the order asked for (a wait had come before the
+file was taken); a test of the read-and-write step caught it before
+the reviewer saw it, and it was put right.
+
+### The fourth reading
+
+The same reviewer read those six changes as staged and ran them: each
+as it had asked, the late save measured again by it (40 of 40 at
+none to three turns; from four turns on a save of its own under the
+old name, which it agreed is what happens and is acceptable), and
+every finding of its three earlier readings dealt with. It asked that
+the commit be held for one new thing, brought in by the last change,
+and named two small ones. All three were dealt with before the
+commit:
+
+1. **Two folders moved into each other at once waited for each other
+   for good**: the limit on the wait was only looked at between
+   waits, and each was waiting for a file the other held. What was
+   asked for after them hung too. Fixed: the wait ends when the time
+   is up whatever it is waiting for, the folder is said to be busy,
+   and what was held is let go.
+2. **A save, a rename and a save of one file asked for in one turn
+   came out differently by how the names sort**, both ways whole.
+   Fixed: a place is taken in every file's line in the turn the work
+   is asked for, so the order asked is the order done whatever the
+   names: the first save goes with the file, and the second is a file
+   of its own under the old name.
+3. **A comment stood above the wrong line.** Moved.
+
+A last reading, of those three changes, by the same reviewer, which
+ran its earlier probes again: nothing to hold the commit, and no
+finding of any of its readings left open. Its figures: of two folders
+moved into each other at once, one was refused as busy after 205
+milliseconds (with the limit set to 200) and the other went through,
+and what was asked for after them answered; ten renames, copies,
+saves and failing work on four files that cross, 300 rounds, none
+stuck, and every name free after each; a copy whose target was saved
+meanwhile removed nothing in 200 of 200; a rename onto a name being
+saved was refused in 200 of 200; a folder renamed with six saves
+inside came back in none of 200. One figure in this record was out
+of date after the last change, and is corrected above.
+

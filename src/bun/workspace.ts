@@ -1,6 +1,6 @@
 // Files inside one workspace folder. Every path the UI sends is absolute
 // and must stay inside the root.
-import { chmodSync, mkdirSync, readdirSync, renameSync, statSync, watch, existsSync, type FSWatcher } from "node:fs";
+import { chmodSync, mkdirSync, readdirSync, realpathSync, renameSync, statSync, watch, existsSync, type FSWatcher } from "node:fs";
 import { cp, rm } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type { Entry, FileText, SearchHit } from "../shared/protocol";
@@ -9,8 +9,46 @@ import { fileChosen } from "../shared/fileGlob";
 import { decode, encode, encodingOf, textOf, type Encoding } from "./encoding";
 import { imageType, looksBinary, sizeText } from "../shared/fileKind";
 import { UNLISTED } from "../shared/paths";
+import { Serial } from "./serial";
 
 const SKIP = new Set<string>(UNLISTED);
+/**
+ * The work on each file, one after another. One for the whole process, not for each open folder: a folder opened
+ * again is the same files.
+ */
+const writes = new Serial();
+
+/**
+ * One name for a file however it was reached: through a link to its folder, through a link to itself, or in other
+ * capitals where the disk does not tell them apart. Two saves of it by two names wait on each other as two by one do.
+ */
+export function fileKey(full: string): string {
+	// The nearest part of the path that is there has a real name; what is not there yet keeps the name it was given.
+	// So a file in a folder still to be made is known by one name before the folder is made and after.
+	const rest: string[] = [];
+	let there = resolve(full);
+	while (!existsSync(there) && dirname(there) !== there) {
+		rest.unshift(basename(there));
+		there = dirname(there);
+	}
+	let key = full;
+	try {
+		key = join(realpathSync.native(there), ...rest);
+	} catch {
+		// A link that leads nowhere has no other name to be reached by.
+	}
+	return process.platform === "win32" || process.platform === "darwin" ? key.toLowerCase() : key;
+}
+
+/** True for a folder that is there. */
+const isFolder = (full: string) => {
+	try {
+		return statSync(full).isDirectory();
+	} catch {
+		return false;
+	}
+};
+
 const SEARCH_MAX_BYTES = 4 * 1024 * 1024;
 /** The largest picture that is sent to the window to be shown. */
 const IMAGE_MAX_BYTES = 20 * 1024 * 1024;
@@ -18,6 +56,8 @@ const IMAGE_MAX_BYTES = 20 * 1024 * 1024;
 export class WorkspaceFiles {
 	readonly root: string;
 	private watcher?: FSWatcher;
+	/** How long work on a folder waits for the saves inside it to stop coming, in milliseconds. */
+	static quietMs = 10_000;
 	/** Paths this process wrote recently; their watch events are not external changes. */
 	private ownWrites = new Map<string, number>();
 
@@ -66,10 +106,76 @@ export class WorkspaceFiles {
 
 	/**
 	 * Writes through a temporary file, so a crash never leaves half a script. A file is written in what it is
-	 * written in now, mark and all; a new file in UTF-8.
+	 * written in now, mark and all; a new file in UTF-8. Writes of one file go one after another, in the order
+	 * they were asked for: asked for at once (Ctrl+S twice), they used to share the temporary file, and one failed
+	 * or the file was left with the older text.
 	 */
 	async write(path: string, text: string, asText = false) {
 		const full = this.inside(path);
+		return writes.run(fileKey(full), () => this.writeNow(full, text, asText));
+	}
+
+	/**
+	 * Work on one file that no save of it runs beside, and that the saves asked for after it wait for: reading it
+	 * and writing it as one step (a replace across files), renaming it, throwing it away. The work is given the
+	 * write itself: `write` here would wait for the work it is part of.
+	 */
+	async alone<T>(path: string, work: (write: (text: string, asText?: boolean) => Promise<{ mtime: number }>) => Promise<T> | T): Promise<T> {
+		const full = this.inside(path);
+		return this.held([full], () => work((text, asText = false) => this.writeNow(full, text, asText)));
+	}
+
+	/**
+	 * Work that has each of these files to itself: no save of any of them runs beside it, and the saves asked for
+	 * after it wait. Taken in one order whatever order they are named in, so that two such pieces of work on the
+	 * same two files never each wait for the other. A folder among them is waited for first: nothing in it is being
+	 * saved when the work starts (moved or thrown away in the middle of a save inside it, the folder would have come
+	 * back with that one file in it).
+	 */
+	private async held<T>(paths: string[], work: () => Promise<T> | T): Promise<T> {
+		const folders = paths.filter(isFolder);
+		const keys = [...new Set(paths.map(fileKey))];
+		// A folder is waited for before the files are taken, so that work on it does not hold its own name while it
+		// waits; and looked at once more when they are held, for a save asked for in between.
+		if (folders.length) await this.quiet(folders, keys, () => undefined);
+		// A place is taken in every file's line in this one turn (with no folder among them, the turn the work was
+		// asked for): work and saves of one file keep the order they were asked in, whatever the files are called,
+		// and two pieces of work on the same files stand in the same order in every line, so neither waits for the
+		// other without end. Each place is kept until the work is done.
+		let letGo!: () => void;
+		const done = new Promise<void>((resolve) => (letGo = resolve));
+		const taken = keys.map((key) => new Promise<void>((got) => void writes.run(key, () => (got(), done))));
+		try {
+			await Promise.all(taken);
+			return await (folders.length ? this.quiet(folders, keys, work) : work());
+		} finally {
+			letGo();
+		}
+	}
+
+	/**
+	 * Waits until nothing in these folders is being saved or waiting to be (the files this work holds itself
+	 * apart), and then does the work in the same turn as that last look: nothing can be asked for between the two.
+	 * Not for ever: a folder saved into without a pause for this long, or held by work that is itself waiting for
+	 * this (two folders moved into each other at once), is said to be busy, and the work is not done.
+	 */
+	private async quiet<T>(folders: string[], own: string[], work: () => Promise<T> | T): Promise<T> {
+		const inside = folders.map((folder) => fileKey(folder) + sep);
+		const until = Date.now() + WorkspaceFiles.quietMs;
+		for (;;) {
+			const pending = writes.pending((other) => !own.includes(other) && inside.some((folder) => other.startsWith(folder)));
+			if (!pending.length) return work();
+			const left = until - Date.now();
+			if (left <= 0) throw new Error(`${folders.map((folder) => relative(this.root, folder) || basename(folder)).join(", ")} is being saved into without a pause, so nothing was done to it. Try again in a moment.`);
+			// Until what is under way has ended, or the time is up, whichever comes first: what is waited for may
+			// itself be waiting for this.
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			await Promise.race([Promise.all(pending), new Promise<void>((resolve) => (timer = setTimeout(resolve, left)))]);
+			clearTimeout(timer);
+		}
+	}
+
+	private async writeNow(full: string, text: string, asText: boolean) {
 		mkdirSync(dirname(full), { recursive: true });
 		const temp = join(dirname(full), `.${basename(full)}.ssl-studio-tmp`);
 		let encoding: Encoding = "utf-8";
@@ -114,12 +220,20 @@ export class WorkspaceFiles {
 		}
 	}
 
-	rename(from: string, to: string) {
+	/**
+	 * After any save that is under way of the file, or of what has the name it is to take: renamed in the middle of
+	 * a save of it, the save would have put the old name back beside the new; renamed onto a name being saved for
+	 * the first time, the save would have written the renamed file away.
+	 */
+	async rename(from: string, to: string) {
+		const source = this.inside(from);
 		const target = this.inside(to);
-		if (existsSync(target)) throw new Error(`already exists: ${relative(this.root, target)}`);
-		// A name with a folder in it moves the file there, and the folder is made if it is not there yet.
-		mkdirSync(dirname(target), { recursive: true });
-		renameSync(this.inside(from), target);
+		await this.held([source, target], () => {
+			if (existsSync(target)) throw new Error(`already exists: ${relative(this.root, target)}`);
+			// A name with a folder in it moves the file there, and the folder is made if it is not there yet.
+			mkdirSync(dirname(target), { recursive: true });
+			renameSync(source, target);
+		});
 	}
 
 	/** A picture's bytes, to be shown. Only what is a picture by its name, and not one too large to send. */
@@ -139,16 +253,21 @@ export class WorkspaceFiles {
 	async copy(from: string, to: string) {
 		const source = this.inside(from);
 		const target = this.inside(to);
-		if (existsSync(target)) throw new Error(`already exists: ${relative(this.root, target)}`);
 		// A folder copied into itself would be copied into its own copy, without end.
 		if (target === source || target.startsWith(source + sep)) throw new Error(`${relative(this.root, source)} cannot be copied into itself`);
-		mkdirSync(dirname(target), { recursive: true });
-		try {
-			await cp(source, target, { recursive: true, errorOnExist: true, force: false });
-		} catch (e) {
-			await rm(target, { recursive: true, force: true });
-			throw e;
-		}
+		// After a save of the file that is under way, so that the copy is of what was saved; and with the name the
+		// copy is to take held too, so that whether it is taken is asked when the copy is made, and what is taken
+		// away when a copy fails is only ever what the copy itself put there.
+		await this.held([source, target], async () => {
+			if (existsSync(target)) throw new Error(`already exists: ${relative(this.root, target)}`);
+			mkdirSync(dirname(target), { recursive: true });
+			try {
+				await cp(source, target, { recursive: true, errorOnExist: true, force: false });
+			} catch (e) {
+				await rm(target, { recursive: true, force: true });
+				throw e;
+			}
+		});
 	}
 
 	*files(dir = this.root): Generator<string> {

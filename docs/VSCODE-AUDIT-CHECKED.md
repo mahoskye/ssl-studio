@@ -430,22 +430,23 @@ theme. The self-test passed in all four.
 | 1400, light | The same pages; headings sized, strong words strong, code in its face, the Agent docked right |
 | 720, light | The same; the right panel gives way, the tabs and the Edit and Read switch fit |
 
-Found in those pictures and fixed, both older than this work: accepting
-a review raised "Something went wrong: no diff result available", which
-is the comparison saying it was closed before it had worked its lines
-out, and is no longer shown; and a build raised "Could not save the
-build's progress", because it wrote its progress several times at once
-and the writes got in each other's way: they now go one after another.
-A reviewer made the second happen on its own: of 400 rounds of two to
-four writes at once, some 185 had a write fail and some 160 left an
-older state on disk, 19 of them a file that does not read; chained,
-200 writes all landed. A fifth run was captured after the fixes, and
-neither notice came. Found by the same reviewer and not fixed: two
-saves of one file at once (Ctrl+S twice) would collide the same way,
-and two saves of the settings at once can lose one of them without a
-word. Not seen by eye there: a page's links by name and "Linked from"
-(the self-test passes them in under a quarter of a second), and
-anything that needs a key pressed from outside.
+Found in those pictures and fixed, both older than this work:
+accepting a review raised "Something went wrong: no diff result
+available", which is the comparison saying it was closed before it had
+worked its lines out, and is no longer shown; and a build raised
+"Could not save the build's progress", because it wrote its progress
+several times at once and the writes got in each other's way: they now
+go one after another. A reviewer made the second happen on its own: of
+400 rounds of two to four writes at once, some 185 had a write fail
+and some 160 left an older state on disk, 19 of them a file that does
+not read; chained, 200 writes all landed. A fifth run was captured
+after the fixes, and neither notice came. Found by the same reviewer
+and not fixed then: two saves of one file at once (Ctrl+S twice) would
+collide the same way, and two saves of the settings at once can lose
+one of them without a word. Both are fixed since: see "Saves asked for
+at once", at the end. Not seen by eye there: a page's links by name
+and "Linked from" (the self-test passes them in under a quarter of a
+second), and anything that needs a key pressed from outside.
 
 ## What the report could not verify, tried again
 
@@ -581,3 +582,75 @@ demo, opened from Source control; the rest was a scratch project with
 at at 1400 and 720 wide, in the dark and the light theme. The
 self-test now also opens a heading's menu by Shift+F10 and by the
 menu's own key.
+
+## Saves asked for at once
+
+Two things a reviewer had found and made happen were recorded as not
+fixed, and should not have been left: what a review confirms is to be
+fixed. Both are fixed.
+
+- **One file saved twice at once.** The two shared a temporary file:
+  one failed, or the older text was left. Saves of one file now go one
+  after another, in the order they were asked for.
+- **The settings saved twice at once.** Each read the file before the
+  other had written it, and one change was lost. Saves of one settings
+  file now go one after another, so each reads what the last wrote.
+
+The fix is in the part of the app that writes files, so it holds for
+everything that goes through its write: a save, Save all, a document
+the app writes. A save that fails is told to whoever asked for it and
+does not hold up the next; saves of different files do not wait on
+each other.
+
+Made to happen first, in tests written before the fix: of sixty rounds
+of four saves of one file at once, the first round already had a save
+fail; and three settings saved at once left one of the three in the
+file. With the fix, all sixty rounds land every save and leave the
+text asked for last, with no temporary file left beside it; forty
+rounds of three settings at once keep all three; and a setting taken
+out at the same time as another is set comes out right.
+
+A reviewer read the fix before its commit and made the same things
+happen (the fifteenth review in
+[VSCODE-AUDIT-REVIEWS.md](VSCODE-AUDIT-REVIEWS.md)). What it found
+around the fix was dealt with in the same commit:
+
+- **Other work on a file being saved.** A rename, a copy, a discard,
+  a move to the trash and a replace across files did not wait for a
+  save of the file. They now take their turn with its saves; a rename
+  and a copy hold the name they are to take as well; and work on a
+  folder waits until nothing in it is being saved, for ten seconds at
+  most, after which it says the folder is busy and does nothing.
+- **One file by two names.** Reached through a link to its folder, by
+  a folder opened a second time, or in other capitals on a disk that
+  does not tell them apart, a file is one file to the saving.
+- **The settings file.** It is written beside itself and moved into
+  place, so it is never half there. One that does not read as settings
+  (a comment written into it by hand) is no longer replaced by the one
+  setting being saved: the save is refused, in words that name the
+  file.
+- **Settings worked out on screen.** The shortcuts, the regions'
+  colours and the models marked as one's own are each saved whole from
+  the value on screen. Two changes in one moment were both worked out
+  from the value before either. The new value is now on screen at
+  once.
+
+Looked at in my own instance, with its own settings folder:
+
+| Done | Seen |
+| --- | --- |
+| Ctrl+S three times | No notice came, and the tab lost its unsaved mark |
+| The file on disk | It held the words typed, with its Windows line ends kept |
+| Beside the file | No temporary file left |
+| Three keys cleared | Three shortcuts in one moment: all three cleared on screen and in the settings file |
+| A comment in it | The next change refused in a notice that names the file and says why |
+| The file after | The same, byte for byte, after four refused changes |
+| Word wrap switched | From the View menu: it landed in my own settings, and not in the folder's |
+| Four panel moves | With the folder's settings file unreadable: one notice that the layout is not kept |
+| That file after | The same, byte for byte |
+
+Both notices were looked at at 1400 and 720 wide, in the dark and the
+light theme: each wraps inside its box in all four. Seen with it: while
+the settings file does not read, the app shows the settings it would
+have with no such file, as it did before; the three cleared shortcuts
+showed as set again until the file was mended.

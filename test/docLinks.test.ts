@@ -420,11 +420,11 @@ describe("writing a file as it was", () => {
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
-	test("a rename to a name with a folder in it makes the folder", () => {
+	test("a rename to a name with a folder in it makes the folder", async () => {
 		const root = mkdtempSync(join(tmpdir(), "ssl-studio-move-"));
 		try {
 			writeFileSync(join(root, "a.md"), "# A\n");
-			new WorkspaceFiles(root).rename(join(root, "a.md"), join(root, "kept", "deep", "a.md"));
+			await new WorkspaceFiles(root).rename(join(root, "a.md"), join(root, "kept", "deep", "a.md"));
 			expect(existsSync(join(root, "kept", "deep", "a.md"))).toBe(true);
 			expect(existsSync(join(root, "a.md"))).toBe(false);
 		} finally {

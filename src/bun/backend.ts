@@ -122,20 +122,27 @@ export function createBackend(host: Host, initial?: string) {
 		gitStage: (paths) => git().stage(paths.map((path) => need().inside(path))),
 		gitUnstage: (paths) => git().unstage(paths.map((path) => need().inside(path))),
 		gitCommit: (message) => git().commit(message),
+		// A discard and a trash wait for a save of the file that is under way, and the saves asked for after them
+		// wait in turn: thrown away in the middle of a save, the file would have come back.
 		gitDiscard: async (path) => {
 			const full = need().inside(path);
-			// What is about to go is kept first, where it is text: a discard by mistake has a way back.
-			try {
-				const now = await need().read(full);
-				if (!now.binary) await history!.record(full, now.text);
-			} catch {
-				// Not there to read (it was removed): there is nothing of it to keep.
-			}
-			// A file git does not follow has nothing to go back to: it goes to the trash, not out of existence.
-			if (await git().follows(full)) await git().discard(full);
-			else await host.trash(full);
+			await need().alone(full, async () => {
+				// What is about to go is kept first, where it is text: a discard by mistake has a way back.
+				try {
+					const now = await need().read(full);
+					if (!now.binary) await history!.record(full, now.text);
+				} catch {
+					// Not there to read (it was removed): there is nothing of it to keep.
+				}
+				// A file git does not follow has nothing to go back to: it goes to the trash, not out of existence.
+				if (await git().follows(full)) await git().discard(full);
+				else await host.trash(full);
+			});
 		},
-		trash: async (path) => host.trash(need().inside(path)),
+		trash: async (path) => {
+			const full = need().inside(path);
+			await need().alone(full, () => host.trash(full));
+		},
 		search: (query, options) => need().search(query, options),
 		replace: async (query, replacement, options, paths) => {
 			const done: { path: string; count: number; error?: string }[] = [];
@@ -144,13 +151,18 @@ export function createBackend(host: Host, initial?: string) {
 				// stop the others: it is left as it was, and says why.
 				try {
 					const full = need().inside(path);
-					const change = await need().replaced(full, query, replacement, options);
-					if (!change) continue;
-					// The file as it was goes into local history first, so that there is a way back.
-					await history!.record(full, change.before);
-					await need().write(full, change.after);
-					await history!.record(full, change.after);
-					done.push({ path: full, count: change.count });
+					// Read and written as one step: a save of the file that landed between the two would have been
+					// written away by text worked out from the file as it was before it.
+					const count = await need().alone(full, async (write) => {
+						const change = await need().replaced(full, query, replacement, options);
+						if (!change) return 0;
+						// The file as it was goes into local history first, so that there is a way back.
+						await history!.record(full, change.before);
+						await write(change.after);
+						await history!.record(full, change.after);
+						return change.count;
+					});
+					if (count) done.push({ path: full, count });
 				} catch (e: any) {
 					done.push({ path, count: 0, error: String(e?.message ?? e) });
 				}
