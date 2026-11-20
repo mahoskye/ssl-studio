@@ -113,4 +113,9 @@ and was changed while it was a draft; what changed is kept here.
     name that cannot stand between the brackets, is left with its links
     meaning nothing, and nothing is said; code set in by four spaces is
     read as prose, so a link by name in it is listed and followed.
+- 2026-11-20: no longer seen in the browser preview only. The cycle
+  self-test, in the app's own window, checks a link by name on the
+  page, that it opens its document, that the document's page lists the
+  note under "Linked from" with its two places, and that a rename asks
+  about the links by name and writes them.
 

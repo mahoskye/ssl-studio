@@ -104,4 +104,13 @@ and [ADR 0020](0020-the-shell-does-what-vs-code-does-and-stays-its-own.md).
   links between double brackets now lead to the document they name, and
   the documents are offered when `[[` is typed. Backlinks are still not
   listed.
+- 2026-11-20: no longer seen in the browser preview only. The cycle
+  self-test, which runs in the app's own window, now opens a document
+  as text and checks that it is drawn (a heading sized, markup hidden, a
+  link marked), that the action Enter runs starts a list's next item,
+  that a link is followed from the text, and that a page of 28,587
+  characters is drawn with the worker having answered for it: 1.3 and
+  1.4 seconds on this machine, in two runs, from asking for the file.
+  The steps run the actions and not the keys, and the self-test is not
+  run by CI. How it looks there has still not been seen by eye.
 

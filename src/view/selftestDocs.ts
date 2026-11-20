@@ -6,6 +6,8 @@ import { monaco } from "./editor/monaco";
 import { baseName, joinPath } from "../shared/paths";
 import { questionTemplate, specTemplate, ticketTemplate } from "../shared/projectDocs";
 import { backend } from "./backend";
+import { activeEditor } from "./editor/EditorGroup";
+import { readingsAnsweredAside } from "./editor/markdownLive";
 import { ICON } from "./icons";
 import { showPanel } from "./panels/registry";
 import { docs } from "./project";
@@ -310,3 +312,98 @@ export function selftestWork(): Promise<Steps> {
 		});
 	});
 }
+
+/**
+ * Writing a document, in the real window: the page's links by name and what links to it, the text drawn as it is
+ * written (a long one too, which is read aside from the window), a list going on with Enter, a link followed from
+ * the text, and a rename that takes the links by name along. On the cycle run's copy, after the working documents.
+ */
+export function selftestWriting(): Promise<Steps> {
+	const steps: Steps = {};
+	return run(steps, async (step) => {
+		const root = state.workspace!.root;
+		const folder = state.project!.docs.split(/[\\/]/);
+		const write = async (parts: string[], text: string) => {
+			const path = canonical(joinPath(root, ...folder, ...parts));
+			await backend.create(path, "file");
+			await backend.write(path, text);
+			return path;
+		};
+		const listed = (path: string) => until(() => docs().some((d) => canonical(d.path) === path));
+		const inText = (selector: string) => document.querySelector(`.editor-row:not(.hidden) .monaco-editor ${selector}`);
+		const own = (id: string) => activeEditor()?.getSupportedActions().find((action) => action.id.endsWith(id));
+
+		const note = await write(["Writing.md"], "# Writing\n\nSee [[SELF-1]] and [[SELF-1|the ticket]]. None: [[no such note]].\n\n- first\n");
+		setState("treeVersion", (v) => v + 1);
+		await listed(note);
+		await step("namedLinkOnPage", async () => {
+			await openFile(note);
+			return until(() => {
+				const links = [...document.querySelectorAll<HTMLAnchorElement>(".md a.named-ref")];
+				return links.length === 2 && links[1]!.textContent === "the ticket" && document.querySelectorAll(".md .named-missing").length === 1;
+			});
+		});
+		await step("namedLinkOpens", async () => {
+			document.querySelector<HTMLAnchorElement>(".md a.named-ref")?.click();
+			return until(() => baseName(activePath() ?? "") === "SELF-1.md");
+		});
+		// The ticket's page says the note links to it, from two places.
+		await step("linkedFromListed", () => until(() => [...document.querySelectorAll(".md-linked li")].some((item) => item.textContent?.includes("Writing") && item.textContent.includes("2 places"))));
+		await step("drawnAsWritten", async () => {
+			await openFile(note);
+			switchTo("Edit");
+			return until(() => document.querySelector(".md-live-on") && inText('[class*="md-live-size"]') && inText(".md-live-hidden") && inText(".md-live-link"));
+		});
+		await step("listContinues", async () => {
+			const editor = activeEditor();
+			const model = editor?.getModel();
+			if (!editor || !model) return false;
+			editor.setPosition({ lineNumber: 5, column: 8 });
+			editor.focus();
+			await own("app.markdown-enter")?.run();
+			const went = model.getLineContent(6) === "- ";
+			editor.trigger("selftest", "undo", null);
+			return went && model.getLineCount() === 6;
+		});
+		// The editor asks for the links a moment after the text settles.
+		await step("linkFollowedInText", async () => {
+			if (!(await until(() => inText(".detected-link")))) return false;
+			const editor = activeEditor();
+			editor?.setPosition({ lineNumber: 3, column: 8 });
+			editor?.focus();
+			await editor?.getAction("editor.action.openLink")?.run();
+			return until(() => baseName(activePath() ?? "") === "SELF-1.md");
+		});
+		// A long page is read by the worker, and must be: the window would read it on the spot if the worker gave no
+		// answer, and draw the same. How long it took to be drawn is kept with the report.
+		await step("longPageDrawn", async () => {
+			const answeredBefore = readingsAnsweredAside();
+			const long = `# Long\n\n${Array.from({ length: 400 }, (_, n) => `## Part ${n}\n\nA paragraph with **strong** words and \`code\`, number ${n}.\n`).join("\n")}`;
+			const path = await write(["Long.md"], long);
+			setState("treeVersion", (v) => v + 1);
+			const from = performance.now();
+			await openFile(path);
+			switchTo("Edit");
+			const done = await until(() => document.querySelector(".md-live-on") && inText('[class*="md-live-size"]') && inText(".md-live-strong"));
+			steps.longPageMs = String(Math.round(performance.now() - from));
+			steps.longPageChars = String(long.length);
+			steps.longPageReadAside = readingsAnsweredAside() > answeredBefore;
+			return done && steps.longPageReadAside;
+		});
+		// A file that is renamed takes the links that named it along, on the person's word.
+		await step("renameFollowedByName", async () => {
+			const target = await write(["Named.md"], "# A page to be renamed\n");
+			const pointer = await write(["Pointer.md"], "# Pointer\n\nSee [[Named]] and [[Named|it]].\n");
+			setState("treeVersion", (v) => v + 1);
+			await listed(target);
+			const to = canonical(joinPath(root, ...folder, "Renamed.md"));
+			await backend.rename(target, to);
+			const asked = followRename(target, to);
+			const go = await until(() => [...document.querySelectorAll<HTMLButtonElement>(".dialog button")].find((button) => button.textContent?.trim() === "Update them"));
+			go?.click();
+			await asked;
+			return (await backend.read(pointer)).text === "# Pointer\n\nSee [[Renamed]] and [[Renamed|it]].\n";
+		});
+	});
+}
+

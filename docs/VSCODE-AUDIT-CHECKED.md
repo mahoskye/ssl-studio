@@ -398,3 +398,24 @@ events sent to the page: Ctrl+/ made a comment of an SSL line, and
 Ctrl+\ made a second group. Ctrl+F12 sent the same way did nothing;
 "Go to definition" ran from the Go menu, as before.
 
+## In the app's own window
+
+The Markdown work had been seen in the browser preview only. The cycle
+self-test runs in the desktop window itself and presses the same
+things from inside it; eight steps were added to it (2026-11-20), and
+all passed on their first run there.
+
+| Step | Checked |
+| --- | --- |
+| namedLinkOnPage | Two links by name are links on the page; a name that means nothing is marked |
+| namedLinkOpens | A click on one opens the ticket it names |
+| linkedFromListed | The ticket's page lists the note under "Linked from", with "2 places" |
+| drawnAsWritten | As text: a heading sized, markup hidden, a link marked |
+| listContinues | Enter's action after an item's words starts the next item; undo takes it back |
+| linkFollowedInText | The editor's open-link action on a link by name opens its ticket |
+| longPageDrawn | A page of 28,587 characters is drawn, and the worker answered for it: 1.3 and 1.4 seconds |
+| renameFollowedByName | A rename asks about two links by name and writes both |
+
+Still not seen by eye there: how any of it looks. The window cannot be
+looked at from outside by the tools at hand.
+

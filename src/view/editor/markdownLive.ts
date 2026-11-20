@@ -34,6 +34,9 @@ const kept = new WeakMap<monaco.editor.ITextModel, { version: number; marks: Liv
 
 let aside: Worker | null | undefined;
 let asked = 0;
+/** How many readings the reader aside has answered: for the self-test, which must know it was the reader and not the window. */
+let answered = 0;
+export const readingsAnsweredAside = () => answered;
 const waiting = new Map<number, (marks: LiveMark[] | null) => void>();
 /**
  * Reads a text aside from the window, and gives its marks when they are ready; null when no reading aside could be
@@ -44,6 +47,7 @@ function readAside(text: string): Promise<LiveMark[] | null> {
 		try {
 			aside = new LiveWorker();
 			aside.onmessage = (e: MessageEvent<{ id: number; marks: LiveMark[] }>) => {
+				answered++;
 				waiting.get(e.data.id)?.(e.data.marks);
 				waiting.delete(e.data.id);
 			};

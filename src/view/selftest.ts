@@ -158,6 +158,8 @@ export async function selftest() {
 	if (state.info?.selftestCycle) report.docsSetup = await docs.selftestDocsSetup();
 	// The working documents are written too, so on the same copy, once it is a project.
 	if (state.info?.selftestCycle && !(report.docsSetup as any)?.failed) report.work = await docs.selftestWork();
+	// Writing a document, once the working documents are there: the ticket it links to is one of them.
+	if (state.info?.selftestCycle && report.work && !(report.work as any).failed) report.writing = await docs.selftestWriting();
 	report.timingsMs = timings;
 	// Monaco cancels work when a diff or an editor closes before it finishes, as an accepted review does.
 	report.errors = errors.filter((e) => !/^(Canceled|no diff result available)/.test(e));
@@ -178,6 +180,6 @@ export async function selftest() {
 		(report.scriptCalls === undefined || (Number((report.scriptCalls as any).procedures) > 0 && Number((report.scriptCalls as any).edges) > 0)) &&
 		(report.procedureSpans === undefined || (report.procedureSpans as any[])[0]?.startLine === 0) &&
 		Boolean(report.docs && !(report.docs as any).failed) &&
-		(!state.info?.selftestCycle || Boolean(report.cycle && !(report.cycle as any).failed && report.docsSetup && !(report.docsSetup as any).failed && report.work && !(report.work as any).failed));
+		(!state.info?.selftestCycle || Boolean(report.cycle && !(report.cycle as any).failed && report.docsSetup && !(report.docsSetup as any).failed && report.work && !(report.work as any).failed && report.writing && !(report.writing as any).failed));
 	await backend.selftestDone(report);
 }
