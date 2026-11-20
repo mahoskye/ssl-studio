@@ -77,7 +77,7 @@ of the text editor, and nothing of its own.
 | Editor menu | Yes | Bring | Built: the app's own five (ask the agent, new question, new decision, Designer, region) |
 | Tab menu | Yes | Bring | Built: close, others, to the right, all, pin, copy path, show in Explorer, to the side |
 | Explorer menu | Yes | Bring | Built: new, cut, copy, paste, copy path, rename, move to trash |
-| Docs row menu | Yes | Have | Open, set a state, update; by the menu key too |
+| Docs row menu | Yes | Have | Open, set a state, update, and a file's own (paths, name, rename, trash) on every row |
 | Health row menu | Yes | Have | Open, and what puts the row right |
 | Search row menu | No | Later | Copy the line or its path |
 | Problems row menu | No | Later | Copy the message |
@@ -96,7 +96,7 @@ of the text editor, and nothing of its own.
 | Split editor | Yes | Have | Side by side, Ctrl+\ |
 | Unsaved mark | Yes | Have | And closing asks first |
 | Tab overflow | Partly | Later | The row scrolls, and the open tab is brought into view; no list of the tabs that do not fit |
-| Preview tabs | No | Later | One click opens a tab that the next click replaces |
+| Preview tabs | Yes | Bring | Built, asked for in use: one click opens a tab, in italics, that the next click replaces |
 | Grid layouts | No | Later | Two by two, three columns |
 | Breadcrumbs | Yes | Have | Above the text, from the language server's symbols; Markdown shows its headings |
 | Compare two files | Partly | Later | A file compares with git's, a snapshot with the editor; not any two files |
@@ -146,7 +146,7 @@ of the text editor, and nothing of its own.
 | Follows the editor | Yes | Have | The open file's row is marked |
 | File watching | Partly | Later | Misses a file git puts back and later changes to a new file; needs a check of its own |
 | Copy path | Yes | Bring | Built: whole (Alt+Shift+C), from the project's folder, and the name alone, as commands |
-| Sections fold | Yes | Bring | Built, asked for in use: each group in the Docs panel folds, and stays folded |
+| Sections fold | Yes | Bring | Built, asked for in use: Docs groups and tickets fold and stay folded; collapse all, expand all |
 | Copy, cut, paste | Yes | Bring | Built: Ctrl+C, Ctrl+X, Ctrl+V and the row's menu; a copy beside itself is "… copy" |
 | Drag to move | Yes | Bring | Built: a row onto a folder, or onto the tree for the workspace folder; it asks first |
 | Reveal in system | No | Later | Open the folder in the file manager |
@@ -516,6 +516,7 @@ trying the app.
 | Sections fold | Medium | Yes | A heading that is a row to the keyboard; what is shut is kept |
 | Scroll past the end | Small | Yes | One option of the editor |
 | Copy file name | Small | Yes | A command, and an entry on three menus |
+| Preview tabs | Medium | Yes | A tab opened for a look; a double click, an edit or a pin keeps it |
 
 Two things were put right with these, not new features: every small
 graphic is now from the editor's icon font or drawn by a style rule (the
@@ -569,8 +570,14 @@ were committed and found eight more things in them, which were fixed
 too. Two sessions had made those fixes at once in one folder, so the
 commit that took both was read once more, by a reviewer for each
 session. One found eleven things, eight fixed and three left with their
-reasons. The other found eleven, four of them the same; the rest are
-fixed but one, a pushed commit's message, which is not rewritten.
+reasons. The other found eleven: two of them the first had fixed, in
+whole or in part; one is left (a pushed commit's message is not
+rewritten), one is left in part, one is answered by a note; the rest
+are fixed.
+
+An eighth review was made of what was asked for next (the Docs panel's
+menus and folding, preview tabs) while it was staged: thirteen findings,
+all fixed before the commit.
 
 ## Why not an extension
 

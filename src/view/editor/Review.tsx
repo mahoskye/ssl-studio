@@ -5,8 +5,8 @@
 import { Icon } from "../Icon";
 import { createEffect, createSignal, For, onCleanup, onMount, Show, untrack } from "solid-js";
 import { choose } from "../dialogs";
-import { state, notify } from "../state";
-import { relativeTo } from "../../shared/paths";
+import { canonical, keepTab, state, notify } from "../state";
+import { isInside, joinPath, relativeTo } from "../../shared/paths";
 import { monaco } from "./monaco";
 import { changeSize, reviewFlow } from "./reviewFlow";
 
@@ -58,6 +58,9 @@ const flow = reviewFlow<Review>({
 export const openReview = (r: Review): Promise<boolean> => {
 	// A comparison holds nothing that could be lost: the next thing to look at takes its place without a question.
 	if (untrack(review)?.compare) setReview(null);
+	// What is accepted here is written into the file's document: a tab it has for a look is kept, so that the next
+	// file clicked does not take the document away under the review.
+	if (r.path && state.workspace) keepTab(canonical(isInside(state.workspace.root, r.path) ? r.path : joinPath(state.workspace.root, ...r.path.split(/[\\/]/))));
 	return flow.open(r);
 };
 export const closeReview = () => setReview(null);

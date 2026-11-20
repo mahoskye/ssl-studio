@@ -66,3 +66,26 @@ export function workList(files: readonly DocFile[], root: string | undefined | n
 	for (const entry of ordered) if (!fold || entry.rank < ORDER.done) add(entry.ticket, 0);
 	return { rows, folded: fold ? finished.length : 0, loose: specs.filter((spec) => !tickets.some((ticket) => specsOf(ticket).includes(spec))) };
 }
+
+/** A row of the Work list as it is drawn: whether anything is under it, and whether that is shut away. */
+export type ShownRow = WorkRow & { parent: boolean; shut: boolean };
+
+/**
+ * The rows as they are shown when some tickets are shut: what is under a
+ * shut ticket, at any depth, is left out. Each row says whether it has
+ * anything under it, so that it can offer to shut or open.
+ */
+export function shownRows(rows: readonly WorkRow[], shut: (row: WorkRow) => boolean): ShownRow[] {
+	const out: ShownRow[] = [];
+	/** The depth of the shut row whose rows are being passed over. */
+	let under = Number.POSITIVE_INFINITY;
+	rows.forEach((row, at) => {
+		if (row.depth > under) return;
+		under = Number.POSITIVE_INFINITY;
+		const parent = (rows[at + 1]?.depth ?? 0) > row.depth;
+		const isShut = parent && shut(row);
+		if (isShut) under = row.depth;
+		out.push({ ...row, parent, shut: isShut });
+	});
+	return out;
+}

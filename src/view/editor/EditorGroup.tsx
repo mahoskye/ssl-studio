@@ -4,7 +4,7 @@ import { Icon } from "../Icon";
 import { tabShown } from "../recentTabs";
 import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { monaco } from "./monaco";
-import { activePath, closeAllTabs, closeOtherTabs, closeTab, closeTabsToRight, documents, focusRequest, moveTab, openFile, revealSignal, revert, save, saveAll, setState, split, state, tabLeaving, takeReveal, togglePin } from "../state";
+import { activePath, closeAllTabs, closeOtherTabs, closeTab, closeTabsToRight, documents, focusRequest, keepTab, moveTab, openFile, revealSignal, revert, save, saveAll, setState, split, state, tabLeaving, takeReveal, togglePin } from "../state";
 import { landsBefore } from "../../shared/tabOrder";
 import { othersOf, rightOf } from "../../shared/tabOrder";
 import { chooseFromMenu } from "../panels/RowMenu";
@@ -224,6 +224,8 @@ export function EditorGroup(props: { index: number }) {
 			activate(list[(to + list.length) % list.length]!, true);
 		} else if (e.key === "Enter" || e.key === " ") {
 			e.preventDefault();
+			// Enter on a tab opened for a look keeps it, as a double click does.
+			keepTab(path, props.index);
 			activate(path);
 			editor.focus();
 		} else if (e.key === "Delete") {
@@ -245,6 +247,7 @@ export function EditorGroup(props: { index: number }) {
 		const RIGHT = "Close to the right";
 		const ALL = "Close all";
 		const PIN = pinned() ? "Unpin" : "Pin";
+		const KEEP = "Keep open";
 		const PATH = "Copy path";
 		const RELATIVE = "Copy path in the project";
 		const NAME = "Copy file name";
@@ -253,6 +256,8 @@ export function EditorGroup(props: { index: number }) {
 		const inFolder = Boolean(state.workspace && isInside(state.workspace.root, path));
 		// Only what would do something: a tab with nothing to its right has no "close to the right".
 		const items = [
+			// A tab opened for a look: the way to keep it that needs no pointer.
+			...(g.preview === path ? [KEEP] : []),
 			...(pinned() ? [] : [CLOSE]),
 			...(othersOf(g.tabs, g.pinned ?? [], path).length ? [OTHERS] : []),
 			...(rightOf(g.tabs, g.pinned ?? [], path).length ? [RIGHT] : []),
@@ -266,6 +271,7 @@ export function EditorGroup(props: { index: number }) {
 		];
 		const picked = await chooseFromMenu(`Actions for the tab ${base(path)}`, items, at);
 		if (picked === CLOSE) await closeTab(path, props.index);
+		else if (picked === KEEP) keepTab(path, props.index);
 		else if (picked === OTHERS) await closeOtherTabs(path, props.index);
 		else if (picked === RIGHT) await closeTabsToRight(path, props.index);
 		// This row's tabs, as its neighbours in the menu are: the command "Close all tabs" closes every group's.
@@ -376,19 +382,22 @@ export function EditorGroup(props: { index: number }) {
 									markDrop(props.index, e.clientX > box.left + box.width / 2 ? (row[row.indexOf(path) + 1] ?? null) : path);
 								}}
 								ref={(el) => (tabs.set(path, el), onCleanup(() => tabs.delete(path)))}
-								title={`${path}${state.conflicts[path] ? "\nChanged on disk since you opened it" : state.dirty[path] ? "\nUnsaved changes" : ""}`}
+								title={`${path}${state.conflicts[path] ? "\nChanged on disk since you opened it" : state.dirty[path] ? "\nUnsaved changes" : ""}${group().preview === path ? "\nOpened for a look: the next file clicked takes this tab. Double-click the tab, or press Enter on it, to keep it." : ""}`}
 								tabindex={group().active === path ? 0 : -1}
-								aria-label={`${labels().get(path) ?? base(path)}${group().pinned?.includes(path) ? ", pinned" : ""}${state.conflicts[path] ? ", changed on disk" : state.dirty[path] ? ", unsaved changes" : ""}`}
+								aria-label={`${labels().get(path) ?? base(path)}${group().preview === path ? ", opened for a look" : ""}${group().pinned?.includes(path) ? ", pinned" : ""}${state.conflicts[path] ? ", changed on disk" : state.dirty[path] ? ", unsaved changes" : ""}`}
 								aria-selected={group().active === path}
 								classList={{
 									active: group().active === path,
 									dirty: Boolean(state.dirty[path]),
 									conflict: Boolean(state.conflicts[path]),
 									pinned: Boolean(group().pinned?.includes(path)),
+									// Opened for a look by one click in a list: its name is in italics until it is kept.
+									preview: group().preview === path,
 									"drop-before": dropAt()?.group === props.index && dropAt()?.before === path,
 								}}
 								aria-haspopup="menu"
 								onKeyDown={(e) => e.target === e.currentTarget && onTabKey(e, path)}
+								onDblClick={() => keepTab(path, props.index)}
 								onContextMenu={(e) => {
 									e.preventDefault();
 									void tabMenu(path, { x: e.clientX, y: e.clientY });

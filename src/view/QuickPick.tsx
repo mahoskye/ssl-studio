@@ -59,7 +59,7 @@ function Picker(props: { mode: QuickMode }) {
 			// "DueRules:20" is the file and the line to open it at.
 			const asked = fileAndLine(query());
 			const found = (files() ?? []).map((path) => ({ path, rel: rel(path) }));
-			return rankFiles(asked.query, found, (f) => f.rel).map((f) => ({ label: baseName(f.path), detail: f.rel, file: baseName(f.path), run: () => void openFile(f.path, asked.at ? { reveal: asked.at } : {}) }));
+			return rankFiles(asked.query, found, (f) => f.rel).map((f) => ({ label: baseName(f.path), detail: f.rel, file: baseName(f.path), run: () => void openFile(f.path, asked.at ? { reveal: asked.at, keep: true } : { keep: true }) }));
 		}
 		if (mode() === "help") {
 			return [{ label: "A file's name", detail: "Go to a file; with :12 after the name, to that line of it", stay: true, run: () => setText("") }, ...QUICK_PREFIXES.filter((each) => each.mode !== "help").map((each) => ({ label: each.prefix, detail: each.says, stay: true, run: () => setText(each.prefix) }))];

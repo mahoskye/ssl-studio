@@ -133,7 +133,9 @@ function EntryRow(props: { entry: Entry; depth: number }) {
 					void act(action, entry(), { home: props.entry.path, follow: true });
 					return true;
 				}}
-				onActivate={() => (isDir() ? toggle(props.entry.path) : void openFile(props.entry.path))}
+				// One click opens a file for a look: the next file clicked takes its tab. A double click keeps it.
+				onActivate={() => (isDir() ? toggle(props.entry.path) : void openFile(props.entry.path, { preview: true }))}
+				onKeep={() => !isDir() && void openFile(props.entry.path, { keep: true })}
 				onToggle={() => toggle(props.entry.path)}
 				onFocus={() => setFocused(entry())}
 				onMenu={(at) => void entryMenu(entry(), at)}
@@ -366,6 +368,11 @@ function target(verb: string): { entry: Entry; where: { home?: string; follow: b
 	else notify(`Nothing to ${verb}: put the keyboard on a row in the Explorer, or open a file from this folder.`);
 	return null;
 }
+
+/** Renames a file named from elsewhere (a row of the Docs panel): the tree's own steps, asking and all. */
+export const renameFile = (path: string) => act(RENAME, { path, name: baseName(path), kind: "file", size: 0 }, { follow: false });
+/** Moves a file named from elsewhere to the trash, after asking. */
+export const trashFile = (path: string) => act(TRASH, { path, name: baseName(path), kind: "file", size: 0 }, { follow: false });
 
 /** Shows a file's row in the Explorer, the folders above it opened, and puts the keyboard on it. */
 export function showInExplorer(path: string) {

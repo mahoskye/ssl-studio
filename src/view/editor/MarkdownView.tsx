@@ -266,7 +266,7 @@ export function MarkdownView(props: { path: string; /** The editor group the pag
 													<li>
 														<button
 															class="link"
-															title={[file.path, file.summary, group.kind === "registry" ? `Opens the table at the rows for ${ticket()}.` : ""].filter(Boolean).join("\n")}
+															title={[file.path, group.kind === "registry" ? `Opens the table at the rows for ${ticket()}.` : ""].filter(Boolean).join("\n")}
 															onClick={() => {
 																// A registry opens at this ticket's rows, not at the whole table.
 																if (group.kind === "registry") askRows(file.path, ticket());

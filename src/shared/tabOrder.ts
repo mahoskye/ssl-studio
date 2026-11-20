@@ -56,6 +56,24 @@ export function rightOf(tabs: readonly string[], pinned: readonly string[], path
 	return at < 0 ? [] : tabs.slice(at + 1).filter((tab) => !pinned.includes(tab));
 }
 
+// --- a tab opened for a look -----------------------------------------------------------------
+
+/**
+ * A group's tabs with a file opened for a look (one click on it in a list):
+ * it takes the place of the tab that was last opened that way, so that
+ * clicking down a list leaves one tab and not a row of them. A file that has
+ * a tab already keeps it; with no such tab to replace, or with that tab
+ * pinned or held (`held`: it has unsaved changes, or differs from its file
+ * on disk), the file gets a tab of its own at the end. `replaced` is the tab
+ * that gave way, to be let go of.
+ */
+export function previewed(tabs: readonly string[], pinned: readonly string[], preview: string | null | undefined, path: string, held: (tab: string) => boolean = () => false): { tabs: string[]; replaced: string | null } {
+	if (tabs.includes(path)) return { tabs: [...tabs], replaced: null };
+	const at = preview ? tabs.indexOf(preview) : -1;
+	if (at < 0 || pinned.includes(preview!) || held(preview!)) return { tabs: [...tabs, path], replaced: null };
+	return { tabs: tabs.map((tab, index) => (index === at ? path : tab)), replaced: preview! };
+}
+
 // --- tabs moved by hand --------------------------------------------------------------------
 
 /**

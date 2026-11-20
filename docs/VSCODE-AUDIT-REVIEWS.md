@@ -1,10 +1,11 @@
 # What the reviews found, finding by finding
 
-Seven reviews of the work on [the audit](VSCODE-AUDIT.md) were made by a
+Eight reviews of the work on [the audit](VSCODE-AUDIT.md) were made by a
 reader who was given the commits and not the author's conclusions: three
 of the build's steps, three of the fixes the last pass made, each of
-the fixes that came of the one before, and one of what the user's first
-use asked for. The last two found nothing that loses work. This
+the fixes that came of the one before, one of what the user's first use
+asked for, and one of what the second asked for. The last three found
+nothing that loses work on disk. This
 lists every finding, what was done about it, and the commit that did it.
 "Left" means not changed, with the reason.
 
@@ -483,16 +484,20 @@ Eleven findings, none that loses work or traps the user.
 
 Each of the two sessions had asked for a review of `defb4df`. This is
 the other one's: eleven findings, none that loses work or traps the
-user. Four were answered by the fixes above; the rest were fixed after
-them by one session, the other having stopped. The reviewer read these
-fixes before they were committed.
+user. One was answered by the fixes above (6) and one in part (5). One
+is left (7), one is left in part (8), and one is answered by a note and
+not by a change of course (10). The rest were fixed after them by one
+session, the other having stopped. The reviewer read these fixes before
+they were committed, and found nothing in the code to change; three
+sentences it found loose are put right here.
 
 1. **The menu's opening was said twice, and the line that says it was
    inside the menu**, where only entries belong. Fixed: one line,
    beside the menu, filled a moment after it is on the page.
 2. **"Copy" for selected words would probably not open from the menu
-   key in the desktop window**: its web view gives that key's menu the
-   right button and a place beside the words. Fixed: a click is told
+   key in the desktop window**: its web view may give that key's menu
+   the right button and a place beside the words (from the reviewer's
+   memory of the web view's source, not run). Fixed: a click is told
    from the key by which was pressed last. A test holds the rule. Not
    seen in the desktop window.
 3. **With room for neither side, the right side's button shut it.**
@@ -522,3 +527,42 @@ fixes before they were committed.
 11. **Reading the settings again brought an older layout back** over
     the one on screen, within a moment of a change. Fixed: only a
     folder being opened takes the layout from disk.
+
+## The eighth review: the Docs panel and preview tabs
+
+What the user asked for after trying the Docs panel (file actions on
+every row, folding, collapse and expand, the New menu, preview tabs)
+was read by a fresh reviewer while it was staged, before any commit.
+Thirteen findings. All were fixed, and the reviewer read the fixes
+before they went in.
+
+1. **A preview tab could be taken while a run or a review was using its
+   document**, and what the run found was dropped without a word. Fixed:
+   a plan's run, a tidy and a review each keep the tab of the file they
+   work on.
+2. **A tab showing unsaved changes could be replaced without asking.**
+   Fixed: a file with unsaved changes, or one changed on disk, never
+   opens as the tab for a look and never gives way as one. A test holds
+   the rule.
+3. **With a filter on, a ticket's twisty and "Collapse all" changed what
+   was kept and nothing on screen.** Fixed: both are off while
+   filtering, and say why.
+4. **"Open to the side" on a file that cannot be read left an empty
+   group.** Fixed: the group made for it is taken away again.
+5. **A reload from disk kept a preview tab.** Fixed: whether the file is
+   being written in is asked a moment after the change.
+6. **Going to a place in a file looked at kept its tab.** Fixed: only
+   opening it to stay keeps it (a double click, "Open" on a menu, Go to
+   file); a symbol, a problem, back and forward do not.
+7. **Two quick clicks could leave the first file showing.** Fixed: a
+   look still being read gives way to the one asked for after it.
+8. **Keeping a tab had no keyboard path.** Fixed: Enter on the tab,
+   "Keep open" on its menu, and a command.
+9. **A list's row said open or shut by a state its role does not have.**
+   Fixed: it says it in hidden words; the attribute is a tree's only.
+10. **A tooltip advised what cannot work.** Fixed: it says to widen the
+    window, for one side open as for both.
+11. **Rows in the Work group did not line up.** Fixed: every row there
+    leaves a twisty's room.
+12. **Two counts were wrong** in the list of what was seen. Fixed.
+13. **A comment sat over the wrong function.** Fixed.

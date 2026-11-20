@@ -224,7 +224,7 @@ and a conflict made for it.
 Asked for by the user after trying the app (2026-11-19), and seen in the
 same kind of instance, at 720 and 1440 wide, each in the light and the
 dark theme. The rows above say what was seen before these: the command
-list has since grown from 84 to 87, the copy-path commands from two to
+list has since grown from 84 to 88, the copy-path commands from two to
 three, and a file's menu in the Explorer has "Copy name" as well.
 
 | Row | Seen |
@@ -238,3 +238,16 @@ three, and a file's menu in the Explorer has "Copy name" as well.
 | Sections fold | Work shut by a click and Decisions by Left; both were still shut after a restart |
 | Unsaved mark | A drawn dot, round in both themes; it was an oval from whatever font the system found |
 | Region strip | From a band's left edge to the strip's right edge the pointer was on that region, not the resize bar |
+
+### The Docs panel and preview tabs
+
+Asked for after the rows above, and seen the same way.
+
+| Row | Seen |
+| --- | --- |
+| New menu | It had opened cut off, as an empty box; now it lists its thirteen entries inside the window |
+| Collapse, expand | Collapse all shut every group; Expand all opened them, and the tickets under Work |
+| A ticket folds | A ticket's twisty hid its plans and specs; Left and Right did the same from the keyboard |
+| File actions | A project file's row listed eight entries; a ticket's listed those and the states it can be set to |
+| Hover | A ticket's row said its path, its status and what it is related to, and nothing else |
+| Preview tabs | One click gave an italic tab; the next click took it; a double click or an edit kept it |

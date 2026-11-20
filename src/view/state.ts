@@ -18,9 +18,9 @@ import { recheckPlans, trackPlan } from "./plan/check";
 import { trackDoc, trackJson, trackToml, trackXml } from "./docCheck";
 import { recall, remember } from "./graph/canvas";
 import { packTabs, packViews, tabsKey, unpackTabs, unpackViews, viewsKey } from "./editor/sessionTabs";
-import { movedAcross, othersOf, placed, rightOf, withPin } from "../shared/tabOrder";
+import { movedAcross, othersOf, placed, previewed, rightOf, withPin } from "../shared/tabOrder";
 
-export type Group = { tabs: string[]; active: string | null; mode?: "text" | "blocks"; /** The tabs that stay: first in the row, and not closed with the others. */ pinned?: string[] };
+export type Group = { tabs: string[]; active: string | null; mode?: "text" | "blocks"; /** The tabs that stay: first in the row, and not closed with the others. */ pinned?: string[]; /** The tab opened for a look (one click in a list): the next such file takes its place. Shown in italics. */ preview?: string | null };
 export type PanelId = "explorer" | "objects" | "palette" | "reference" | "search" | "history" | "health" | "agent" | "docs" | "git";
 /** @deprecated names kept for readers: both sides hold any panel. */
 export type LeftView = PanelId;
@@ -287,7 +287,13 @@ function attach(path: string, text: string, saved: { text: string; mtime: number
 	const model = monaco.editor.getModel(uri) ?? monaco.editor.createModel(text, languageFor(path), uri);
 	const doc: Doc = { path, model, savedVersion: text === saved.text ? model.getAlternativeVersionId() : -1, savedText: saved.text, mtime: saved.mtime };
 	docs.set(path, doc);
-	model.onDidChangeContent(() => setState("dirty", path, model.getAlternativeVersionId() !== doc.savedVersion));
+	model.onDidChangeContent(() => {
+		const dirty = model.getAlternativeVersionId() !== doc.savedVersion;
+		setState("dirty", path, dirty);
+		// A file that is being written in is not one that was only looked at: its tab stays. Asked a moment later: a
+		// reload from disk is an edit too, and says the file is unchanged once it is done.
+		if (dirty) queueMicrotask(() => state.dirty[path] && keepTab(path));
+	});
 	session.track(model);
 	if (isPlanPath(path)) trackPlan(model);
 	if (/\.(md|markdown)$/i.test(path)) trackDoc(model);
@@ -333,22 +339,49 @@ export const takeReveal = (path: string) => {
 	return reveal;
 };
 
-export async function openFile(path: string, options: { group?: number; reveal?: Reveal } = {}) {
+/** Each look asked for, counted: one that is still being read when a later one is asked for gives way to it. */
+let looks = 0;
+/** A document that is not to be given up without a question: it has unsaved changes, or differs from its file on disk. */
+const heldOpen = (path: string) => Boolean(state.dirty[path] || state.conflicts[path]);
+
+/**
+ * Opens a file in a tab and brings it to the front. With `preview` it is opened for a look, as one click in a list
+ * does: it takes the place of the tab last opened that way, and its own tab is given up to the next. With `keep` a
+ * tab it has for a look becomes one that stays (a double click, "Open" on a menu). With neither, a file that has no
+ * tab gets one that stays, and one that has a tab keeps it as it is: going to a place in a file looked at (a symbol,
+ * a problem, back and forward) is still looking at it. Editing a tab, pinning it or moving it keeps it too.
+ */
+export async function openFile(path: string, options: { group?: number; reveal?: Reveal; preview?: boolean; keep?: boolean } = {}) {
 	path = canonical(path);
+	const look = options.preview ? ++looks : 0;
 	// What was only read (a definition peeked at) had no tab to keep it true, and the file may have changed, gone, or
 	// been made anew since. It is let go, and the file is read as it is now: nothing of the old reading is left to undo.
 	letGoIfOnlyRead(path);
 	const doc = await guarded(() => loadDoc(path));
 	if (!doc) return;
+	// Another file was clicked for a look while this one was being read: that one is what is wanted now. Without this
+	// the slower read would land last and take the tab of the file clicked last.
+	if (look && look !== looks) return letGoIfOnlyRead(path);
 	const group = options.group ?? state.activeGroup;
 	if (options.reveal) pendingReveal.set(path, options.reveal);
 	closeComparison();
+	/** The tab that gave its place to this one: it was only looked at. */
+	let replaced: string | null = null as string | null;
 	batch(() => {
 		setState(
 			"groups",
 			group,
 			produce((g: Group) => {
-				if (!g.tabs.includes(path)) g.tabs.push(path);
+				if (g.tabs.includes(path)) {
+					// A tab opened for a look, and now opened to stay, is kept.
+					if (options.keep && g.preview === path) g.preview = null;
+				} else if (options.preview && !heldOpen(path)) {
+					// A tab that shows unsaved changes, or a file changed on disk, is never the one that gives way.
+					const next = previewed(g.tabs, g.pinned ?? [], g.preview, path, heldOpen);
+					g.tabs = next.tabs;
+					g.preview = path;
+					replaced = next.replaced;
+				} else g.tabs.push(path);
 				g.active = path;
 			}),
 		);
@@ -356,7 +389,14 @@ export async function openFile(path: string, options: { group?: number; reveal?:
 		// The call graph covers the editors: a file opened behind it would look like nothing happened.
 		setState("centerView", "editors");
 	});
+	// What was only looked at and has no tab left is let go. It has no unsaved changes: a tab that shows some never gives way.
+	if (replaced && !state.groups.some((g) => g.tabs.includes(replaced!))) letGoIfOnlyRead(replaced);
 	revealSignal.fire(path);
+}
+
+/** Keeps a tab that was opened for a look: in one group, or in every group that has it so. */
+export function keepTab(path: string, group?: number) {
+	state.groups.forEach((g, index) => (group === undefined || group === index) && g.preview === path && setState("groups", index, "preview", null));
 }
 
 /** Lets an already-visible editor scroll to a new reveal. */
@@ -395,6 +435,7 @@ export async function closeTab(path: string, group = state.activeGroup, options:
 				const index = g.tabs.indexOf(path);
 				g.tabs.splice(index, 1);
 				if (g.pinned) g.pinned = g.pinned.filter((p) => p !== path);
+				if (g.preview === path) g.preview = null;
 				if (g.active === path) g.active = g.tabs[Math.min(index, g.tabs.length - 1)] ?? null;
 			}),
 		);
@@ -468,6 +509,8 @@ export function sendTabAcross() {
  * all; a group left with no tabs closes.
  */
 export function moveTab(path: string, from: number, to: number, before: string | null) {
+	// A tab that is put somewhere by hand is one to keep.
+	keepTab(path);
 	if (from !== to) tabLeaving.forEach((told) => told(from, path));
 	const next = movedAcross(state.groups as Group[], path, from, to, before);
 	const fields = (g: Group) => ({ tabs: g.tabs, active: g.active, ...(g.pinned ? { pinned: g.pinned } : {}) });
@@ -490,6 +533,7 @@ export function shiftTab(by: 1 | -1, group = state.activeGroup) {
 	if (!g || !path) return;
 	const at = g.tabs.indexOf(path);
 	const before = by < 0 ? (g.tabs[at - 1] ?? path) : (g.tabs[at + 2] ?? null);
+	keepTab(path, group);
 	setState("groups", group, "tabs", placed(g.tabs, g.pinned ?? [], path, before));
 }
 
@@ -497,6 +541,7 @@ export function shiftTab(by: 1 | -1, group = state.activeGroup) {
 export function togglePin(path = activePath(), group = state.activeGroup) {
 	const g = state.groups[group];
 	if (!path || !g?.tabs.includes(path)) return;
+	keepTab(path, group);
 	const next = withPin(g.tabs, g.pinned ?? [], path, !g.pinned?.includes(path));
 	batch(() => {
 		setState("groups", group, "tabs", next.tabs);
@@ -560,6 +605,7 @@ export function fileRenamed(oldPath: string, newPath: string) {
 					for (const g of groups) {
 						g.tabs = g.tabs.map((tab) => (tab === path ? target : tab));
 						if (g.pinned) g.pinned = g.pinned.map((tab) => (tab === path ? target : tab));
+						if (g.preview === path) g.preview = target;
 						if (g.active === path) g.active = target;
 					}
 				}),
@@ -646,11 +692,23 @@ export function fileRemoved(removed: string) {
 	}
 }
 
+/** Opens a file in the group beside the one at hand, which is made if there is none. */
+export async function openToSide(path: string) {
+	const made = state.groups.length === 1;
+	if (made) setState("groups", (groups) => [...groups, { tabs: [], active: null }]);
+	await openFile(path, { group: state.activeGroup === 0 ? 1 : 0, keep: true });
+	// A file that could not be read opened nothing: the group made for it is not left standing empty.
+	if (made && state.groups.length === 2 && !state.groups[1]!.tabs.length) {
+		batch(() => {
+			setState("groups", (groups) => groups.slice(0, 1));
+			setState("activeGroup", 0);
+		});
+	}
+}
+
 export function split() {
 	const path = activePath();
-	if (!path) return;
-	if (state.groups.length === 1) setState("groups", (groups) => [...groups, { tabs: [], active: null }]);
-	void openFile(path, { group: state.activeGroup === 0 ? 1 : 0 });
+	if (path) void openToSide(path);
 }
 
 /**

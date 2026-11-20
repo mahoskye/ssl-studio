@@ -35,6 +35,16 @@ const [folded, setFolded] = createSignal(foldedFrom(kept()?.getItem(FOLDED) ?? n
 // A self-test starts with every group open, and leaves nothing folded behind for the next run or for the user.
 const tested = () => Boolean(state.info?.selftest || state.info?.selftestClose);
 export const isFolded = (name: string) => !tested() && folded().includes(name);
+/** Shuts or opens many at once: "collapse all", "expand all". */
+export function setFolds(names: readonly string[], shut: boolean) {
+	if (tested()) return;
+	setFolded(names.reduce((list, name) => withFold(list, name, shut), folded()));
+	try {
+		kept()?.setItem(FOLDED, JSON.stringify(folded()));
+	} catch {
+		// Not kept: folded for this session all the same.
+	}
+}
 export function setFold(name: string, shut: boolean) {
 	if (tested()) return;
 	setFolded(withFold(folded(), name, shut));
@@ -183,10 +193,11 @@ export function Rows(props: {
 			const page = Math.floor(el.clientHeight / Math.max(1, target.offsetHeight)) - 1;
 			focusRow(list[moveIndex(list.length, index, e.key, { page })], list);
 		} else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
-			// A group's heading that folds: Left shuts it, Right opens it, as in a tree.
-			if (target.hasAttribute("data-head")) {
+			// A group's heading that folds, or a row with rows under it in a list: Left shuts it, Right opens it, as in a tree.
+			if (target.hasAttribute("data-head") || target.hasAttribute("data-fold")) {
 				e.preventDefault();
-				if ((target.getAttribute("aria-expanded") === "true") === (e.key === "ArrowLeft")) row?.toggle();
+				const open = target.getAttribute("aria-expanded") === "true" || target.dataset.fold === "open";
+				if (open === (e.key === "ArrowLeft")) row?.toggle();
 				return;
 			}
 			if (target.getAttribute("role") !== "treeitem") return;
@@ -268,7 +279,9 @@ export function Row(props: {
 	onDragOver?: (e: DragEvent) => void;
 	onDrop?: (e: DragEvent) => void;
 	onActivate?: () => void;
-	/** Opens or closes the row: Left and Right in a tree. */
+	/** A double click: what a single one opened for a look is opened to stay. */
+	onKeep?: () => void;
+	/** Opens or closes the row: Left and Right in a tree, and on any row that says whether it is open. */
 	onToggle?: () => void;
 	/** Other keys on the row (F2, Delete). Return true for a key that was used. */
 	onKey?: (e: KeyboardEvent) => boolean | void;
@@ -299,7 +312,10 @@ export function Row(props: {
 			data-label={props.label}
 			aria-selected={props.selected === undefined ? undefined : props.selected ? "true" : "false"}
 			aria-level={props.level}
-			aria-expanded={props.expanded === undefined ? undefined : props.expanded ? "true" : "false"}
+			// Open or shut is a tree row's own state. A list's row has no such state to give: it says it in its words (the
+			// caller's), and here only for the keyboard's Left and Right.
+			aria-expanded={props.expanded === undefined || (props.role ?? "option") !== "treeitem" ? undefined : props.expanded ? "true" : "false"}
+			data-fold={props.expanded === undefined || (props.role ?? "option") === "treeitem" ? undefined : props.expanded ? "open" : "shut"}
 			title={props.title}
 			style={props.style}
 			draggable={props.draggable}
@@ -308,6 +324,7 @@ export function Row(props: {
 			onDragOver={(e) => props.onDragOver?.(e)}
 			onDrop={(e) => props.onDrop?.(e)}
 			onClick={() => props.onActivate?.()}
+			onDblClick={() => props.onKeep?.()}
 			onFocus={() => props.onFocus?.()}
 			onMouseEnter={() => props.onPoint?.()}
 			onContextMenu={(e) => {
@@ -407,6 +424,8 @@ export function IconButton(props: {
 	pressed?: boolean;
 	/** The button opens a menu. */
 	menu?: boolean;
+	/** Not to be pressed now: the title says why. */
+	disabled?: boolean;
 	onClick: (e: MouseEvent & { currentTarget: HTMLButtonElement }) => void;
 }) {
 	return (
@@ -417,7 +436,9 @@ export function IconButton(props: {
 			aria-label={props.label}
 			aria-pressed={props.pressed === undefined ? undefined : props.pressed ? "true" : "false"}
 			aria-haspopup={props.menu ? "menu" : undefined}
-			onClick={(e) => props.onClick(e)}
+			// Not the button's own "disabled": the keyboard still lands on it, to hear why.
+			aria-disabled={props.disabled ? "true" : undefined}
+			onClick={(e) => !props.disabled && props.onClick(e)}
 		>
 			<Show when={props.icon} fallback={<span aria-hidden="true">{props.glyph}</span>}>
 				{(name) => <Icon name={name()} />}

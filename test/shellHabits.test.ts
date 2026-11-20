@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { matchesOn, replaceIn, replacementFor, searchPattern } from "../src/shared/searchPattern";
-import { landsBefore, movedAcross, ofOpen, othersOf, placed, rightOf, stepped, used, walkHolds, withPin } from "../src/shared/tabOrder";
+import { landsBefore, movedAcross, ofOpen, othersOf, placed, previewed, rightOf, stepped, used, walkHolds, withPin } from "../src/shared/tabOrder";
 
 const found = (text: string, pattern: RegExp) => [...text.matchAll(pattern)].map((match) => match[0]);
 
@@ -279,5 +279,34 @@ describe("a match of nothing beside a character of two units", () => {
 			expect(replaceIn(line, "x*", "", options).text).toBe(line);
 			expect(replaceIn(line, "x*", "-", options).text).toContain("😀");
 		}
+	});
+});
+
+describe("a tab opened for a look", () => {
+	test("takes the place of the one opened that way before it, where that one stood", () => {
+		expect(previewed(["a", "b", "c"], [], "b", "d")).toEqual({ tabs: ["a", "d", "c"], replaced: "b" });
+	});
+
+	test("gets a tab of its own at the end when no tab was opened that way", () => {
+		expect(previewed(["a", "b"], [], null, "c")).toEqual({ tabs: ["a", "b", "c"], replaced: null });
+		expect(previewed([], [], undefined, "a")).toEqual({ tabs: ["a"], replaced: null });
+		// The tab it would have replaced has been closed since.
+		expect(previewed(["a"], [], "gone", "c")).toEqual({ tabs: ["a", "c"], replaced: null });
+	});
+
+	test("a file that has a tab keeps it, and replaces nothing", () => {
+		expect(previewed(["a", "b", "c"], [], "b", "c")).toEqual({ tabs: ["a", "b", "c"], replaced: null });
+		expect(previewed(["a", "b"], [], "b", "b")).toEqual({ tabs: ["a", "b"], replaced: null });
+	});
+
+	test("a pinned tab is never the one that gives way", () => {
+		expect(previewed(["a", "b"], ["a"], "a", "c")).toEqual({ tabs: ["a", "b", "c"], replaced: null });
+	});
+
+	test("neither is a tab that is held: one with unsaved changes, or changed on disk", () => {
+		const held = (tab: string) => tab === "b";
+		expect(previewed(["a", "b"], [], "b", "c", held)).toEqual({ tabs: ["a", "b", "c"], replaced: null });
+		// A tab that is not held still gives way.
+		expect(previewed(["a", "b"], [], "a", "c", held)).toEqual({ tabs: ["c", "b"], replaced: "a" });
 	});
 });

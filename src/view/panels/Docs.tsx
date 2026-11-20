@@ -9,14 +9,15 @@ import { backend } from "../backend";
 import { docMatches, DOC_FOLDERS, isCatalog, KNOWLEDGE, progress, progressShort, registryTitle, statusChoices, toneOf } from "../../shared/projectDocs";
 import { docs, newDoc, setUpProject } from "../project";
 import { importTickets, newKnowledge, newRegistry, newSpec, newState, newTicket, setStatus, updateCatalogs, updateManifest } from "../projectDocs";
-import { workList } from "../../shared/workList";
-import { activePath, canonical, openFile, setState, state } from "../state";
-import { focusRowsBelow, IconButton, Row, RowGroup, Rows, type Point } from "./Rows";
+import { shownRows, workList } from "../../shared/workList";
+import { activePath, canonical, openFile, openToSide, setState, state } from "../state";
+import { focusRowsBelow, IconButton, isFolded, Row, RowGroup, Rows, setFold, setFolds, type Point } from "./Rows";
 import { chooseFromMenu } from "./RowMenu";
 import { Menu } from "../Menu";
 
 function DocRow(props: { file: DocFile }) {
-	const open = () => (props.file.exists ? void openFile(props.file.path) : void setUpProject());
+	// One click opens it for a look, in a tab the next file clicked takes; a double click keeps the tab.
+	const open = () => (props.file.exists ? void openFile(props.file.path, { preview: true }) : void setUpProject());
 	const selected = () => props.file.exists && activePath() === canonical(props.file.path);
 	return (
 		<Row
@@ -26,6 +27,8 @@ function DocRow(props: { file: DocFile }) {
 			classList={{ selected: selected(), missing: !props.file.exists }}
 			title={props.file.exists ? props.file.path : `${props.file.name} is missing. Click it, or press Enter on it, to create it.`}
 			onActivate={open}
+			onKeep={() => props.file.exists && void openFile(props.file.path, { keep: true })}
+			onMenu={(at) => void rowMenu(props.file, at)}
 		>
 			<FileMark name={props.file.name} />
 			<span class="label">{props.file.name}</span>
@@ -51,12 +54,22 @@ function Status(props: { status?: string }) {
 }
 
 const OPEN = "Open";
+const SIDE = "Open to the side";
 const STATE = "Set to ";
+const CREATE = "Create it";
+const PATH = "Copy path";
+const RELATIVE = "Copy path in the project";
+const NAME = "Copy name";
+const SHOW = "Show in the Explorer";
+const RENAME = "Rename…";
+const TRASH = "Move to trash…";
 /**
- * What can be done to a working document from its row, without opening it:
- * a ticket, a spec, a decision or a question is set to a state; a catalog is
- * written afresh; the file manifest is updated. Right-click, the menu key or
- * Shift+F10 (ADR 0010).
+ * What can be done to a document from its row, without opening it. First what
+ * is the document's own: a ticket, a spec, a decision or a question is set to
+ * a state (written into the lines it opens with); a catalog is written
+ * afresh; the file manifest is updated. Then what any file has: its path and
+ * name, its place in the Explorer, a new name, the trash. Right-click, the
+ * menu key or Shift+F10 (ADR 0010).
  */
 async function rowMenu(file: DocFile, at: Point) {
 	const catalog = isCatalog(file);
@@ -65,14 +78,36 @@ async function rowMenu(file: DocFile, at: Point) {
 	const markdown = /\.(md|markdown)$/i.test(file.name);
 	const states = markdown && !catalog && ["tickets", "specs", "knowledge"].includes(file.group) && (file.status || file.group !== "knowledge" || file.kind === "decisions" || file.kind === "questions") ? statusChoices(file).filter((status) => status.toLowerCase() !== (file.status ?? "").toLowerCase()) : [];
 	const UPDATE = catalog ? "Update catalogs" : "Update file manifest";
-	const picked = await chooseFromMenu(`Actions for ${file.ticket ?? file.title ?? file.name}`, [OPEN, ...states.map((status) => `${STATE}${status}`), ...(catalog || manifest ? [UPDATE] : [])], at);
-	if (picked === OPEN) await openFile(file.path);
+	// A file that is not there yet has one thing that can be done to it.
+	const items = file.exists ? [OPEN, SIDE, ...states.map((status) => `${STATE}${status}`), ...(catalog || manifest ? [UPDATE] : []), PATH, RELATIVE, NAME, SHOW, RENAME, TRASH] : [CREATE];
+	const picked = await chooseFromMenu(`Actions for ${file.ticket ?? file.title ?? file.name}`, items, at);
+	if (!picked) return;
+	if (picked === OPEN) await openFile(file.path, { keep: true });
+	else if (picked === SIDE) await openToSide(file.path);
+	else if (picked === CREATE) await setUpProject();
 	else if (picked === UPDATE) await (catalog ? updateCatalogs() : updateManifest());
-	else if (picked?.startsWith(STATE)) await setStatus(file.path, picked.slice(STATE.length));
+	else if (picked.startsWith(STATE)) await setStatus(file.path, picked.slice(STATE.length));
+	else if (picked === PATH || picked === RELATIVE || picked === NAME) await (await import("../commands")).copyPath(picked === PATH ? "whole" : picked === NAME ? "name" : "relative", file.path);
+	// The tree's own steps, asking and all: loaded when asked for, since the Explorer is another panel.
+	else if (picked === SHOW) (await import("./Explorer")).showInExplorer(file.path);
+	else if (picked === RENAME) await (await import("./Explorer")).renameFile(file.path);
+	else if (picked === TRASH) await (await import("./Explorer")).trashFile(file.path);
 }
 
 /** A row for one of the working documents: its title where it has one, and its state. */
-function ItemRow(props: { file: DocFile; depth?: number; lead?: string; note?: string; aside?: boolean; short?: string }) {
+function ItemRow(props: {
+	file: DocFile;
+	depth?: number;
+	lead?: string;
+	note?: string;
+	aside?: boolean;
+	short?: string;
+	/**
+	 * In a list where rows have rows under them: whether this one has, and whether they are shut away. Leaves a
+	 * twisty's room either way. `locked` says why it cannot be shut now (a filter is showing everything it found).
+	 */
+	fold?: { parent: boolean; shut: boolean; locked?: string; toggle: () => void };
+}) {
 	const selected = () => activePath() === canonical(props.file.path);
 	const stale = () => props.file.catalog?.stale;
 	return (
@@ -82,11 +117,35 @@ function ItemRow(props: { file: DocFile; depth?: number; lead?: string; note?: s
 			selected={selected()}
 			classList={{ selected: selected(), catalog: isCatalog(props.file) }}
 			style={{ "padding-left": `${8 + (props.depth ?? 0) * 14}px` }}
-			title={[props.file.path, props.file.status ? `Status: ${props.file.status}` : "", "Right-click, or the menu key, for what can be done to it.", props.file.summary, props.file.tickets?.length ? `${props.file.group === "tickets" ? "Related to" : "For"} ${props.file.tickets.join(", ")}` : "", ...(props.file.problems ?? [])].filter(Boolean).join("\n")}
-			onActivate={() => void openFile(props.file.path)}
+			// Where it is, its state, what it is for, and what is wrong with it: nothing the reader has to keep up by hand.
+			title={[props.file.path, props.file.status ? `Status: ${props.file.status}` : "", props.file.tickets?.length ? `${props.file.group === "tickets" ? "Related to" : "For"} ${props.file.tickets.join(", ")}` : "", ...(props.file.problems ?? [])].filter(Boolean).join("\n")}
+			expanded={props.fold?.parent ? !props.fold.shut : undefined}
+			onToggle={() => props.fold?.parent && !props.fold.locked && props.fold.toggle()}
+			onActivate={() => void openFile(props.file.path, { preview: true })}
+			onKeep={() => void openFile(props.file.path, { keep: true })}
 			onMenu={(at) => void rowMenu(props.file, at)}
 		>
+			<Show when={props.fold}>
+				{(fold) => (
+					<span
+						class="twisty"
+						aria-hidden="true"
+						title={fold().parent ? (fold().locked ?? (fold().shut ? "Show what is under it" : "Hide what is under it")) : undefined}
+						// The twisty shuts and opens; the rest of the row opens the document.
+						onClick={(e) => fold().parent && (e.stopPropagation(), !fold().locked && fold().toggle())}
+						onDblClick={(e) => e.stopPropagation()}
+					>
+						<Show when={fold().parent}>
+							<Icon name={fold().shut ? "chevron-right" : "chevron-down"} />
+						</Show>
+					</span>
+				)}
+			</Show>
 			<FileMark name={props.file.name} />
+			{/* Open or shut, in words, for what reads the screen aloud: a list's row has no state for it. */}
+			<Show when={props.fold?.parent}>
+				<span class="visually-hidden">{props.fold!.shut ? "Shut: what is under it is hidden." : "Open."} </span>
+			</Show>
 			<span class="label">
 				<Show when={props.lead}>
 					<strong class="doc-key">{props.lead}</strong>{" "}
@@ -130,6 +189,22 @@ function ItemRow(props: { file: DocFile; depth?: number; lead?: string; note?: s
 	);
 }
 
+/** Why nothing folds while a filter is on: what it found is shown, shut or not. */
+const LOCKED = "Shown open while the filter is narrowing the list";
+/** A row with nothing under it, in a list where others have: it leaves a twisty's room and has none. */
+const NO_FOLD = { parent: false, shut: false, toggle: () => {} };
+/** The name a ticket folds under: what is under it (its plans, its specs, the tickets that are part of it) is shut away with it. */
+const ticketFold = (file: DocFile) => `docs:ticket:${file.path}`;
+/** Every name the panel folds under: its groups, the kinds of the knowledge base, and each ticket. */
+const allFolds = () => [
+	...(["project", "work", "knowledge", "registries", "docs", "schema", "plans"] as const).map((group) => `docs:${group}`),
+	...KNOWLEDGE.map((kind) => `docs:knowledge:${kind.id}`),
+	"docs:knowledge:other",
+	...docs()
+		.filter((file) => file.group === "tickets")
+		.map(ticketFold),
+];
+
 /** A group's heading, with the folder it is in. */
 const Head = (props: { title: string; folder?: string }) => (
 	<>
@@ -151,16 +226,19 @@ function Work(props: { files: DocFile[]; empty?: string; filtered?: boolean }) {
 	/** How many finished tickets fold away, whether or not they are shown now. */
 	const everything = createMemo(() => (props.filtered ? 0 : workList(props.files, state.workspace?.root).folded));
 	const catalogs = () => props.files.filter((d) => (d.group === "tickets" || d.group === "specs") && isCatalog(d));
+	/** The rows with what is under a shut ticket left out. What a filter found is shown, shut or not. */
+	const rows = createMemo(() => shownRows(list().rows, (row) => !props.filtered && isFolded(ticketFold(row.file))));
+	const fold = (row: ReturnType<typeof rows>[number]) => ({ parent: row.parent, shut: row.shut, locked: props.filtered ? LOCKED : undefined, toggle: () => setFold(ticketFold(row.file), !row.shut) });
 	return (
 		<RowGroup fold="docs:work" label="Work" open={props.filtered} count={props.files.filter((d) => (d.group === "tickets" || d.group === "specs") && !isCatalog(d)).length} head={<Head title="Work" folder={`${state.project?.docs}/${DOC_FOLDERS.tickets}`} />} rows={props.files.some((d) => d.group === "tickets" || d.group === "specs")} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
-			<For each={list().rows}>
+			<For each={rows()}>
 				{(row) =>
 					row.kind === "ticket" ? (
-						<ItemRow file={row.file} depth={row.depth} lead={row.file.ticket} />
+						<ItemRow file={row.file} depth={row.depth} lead={row.file.ticket} fold={fold(row)} />
 					) : row.kind === "plan" ? (
-						<ItemRow file={{ ...row.file, title: row.file.name.replace(/\.plan\.json$/i, "") }} depth={row.depth} note="plan" />
+						<ItemRow file={{ ...row.file, title: row.file.name.replace(/\.plan\.json$/i, "") }} depth={row.depth} note="plan" fold={fold(row)} />
 					) : (
-						<ItemRow file={row.file} depth={row.depth} note="spec" />
+						<ItemRow file={row.file} depth={row.depth} note="spec" fold={fold(row)} />
 					)
 				}
 			</For>
@@ -170,8 +248,9 @@ function Work(props: { files: DocFile[]; empty?: string; filtered?: boolean }) {
 					<span class="label">{all() ? "Hide" : "Show"} the {everything()} finished</span>
 				</Row>
 			</Show>
-			<For each={list().loose}>{(spec) => <ItemRow file={spec} note={spec.tickets?.length ? `for ${spec.tickets.join(", ")}` : "spec, no ticket"} />}</For>
-			<For each={catalogs()}>{(catalog) => <ItemRow file={catalog} note={catalog.group} />}</For>
+			{/* The same room for a twisty as the rows above, so that the marks line up down the list. */}
+			<For each={list().loose}>{(spec) => <ItemRow file={spec} note={spec.tickets?.length ? `for ${spec.tickets.join(", ")}` : "spec, no ticket"} fold={NO_FOLD} />}</For>
+			<For each={catalogs()}>{(catalog) => <ItemRow file={catalog} note={catalog.group} fold={NO_FOLD} />}</For>
 		</RowGroup>
 	);
 }
@@ -251,7 +330,7 @@ export function Docs() {
 		<div class="panel-body" data-panel="docs">
 			<div class="panel-title">
 				<span>Docs</span>
-				<Menu label="New document, or update the catalogs" title="New ticket, spec, decision, question, snippet, registry, document or plan; import tickets; update the catalogs" items={() => [
+				<Menu floating label="New document, or update the catalogs" title="New…: a ticket, spec, decision, question, snippet, registry, document or plan. Also: import tickets, update the catalogs" items={() => [
 					{ label: "New ticket…", run: () => void newTicket() },
 					{ label: "Import tickets…", run: () => void importTickets() },
 					{ label: "New spec…", run: () => void newSpec() },
@@ -271,6 +350,8 @@ export function Docs() {
 				]}>
 					<Icon name="add" />
 				</Menu>
+				<IconButton label="Collapse all" title={filtering() ? `Collapse all: not while filtering. ${LOCKED}.` : "Collapse all: shut every group and ticket"} icon="collapse-all" disabled={filtering()} onClick={() => setFolds(allFolds(), true)} />
+				<IconButton label="Expand all" title={filtering() ? `Expand all: not while filtering. ${LOCKED}.` : "Expand all: open every group and ticket"} icon="expand-all" disabled={filtering()} onClick={() => setFolds(allFolds(), false)} />
 				<IconButton label="Refresh the document list" title="Refresh" icon="refresh" onClick={() => setState("treeVersion", (v) => v + 1)} />
 			</div>
 			<Show when={state.project?.description}>

@@ -74,9 +74,11 @@ Under [ADR 0009](0009-nothing-is-lost-or-destroyed-without-a-say.md),
 A decision is superseded, not rewritten. This one has not been accepted,
 and was changed while it was a draft; what changed is kept here.
 
-- 2026-11-19, with the fixes that followed the reviews of steps 4 to 8
-  and of the fixes after them: rules were added as the reviews found
-  cases the first text did not cover, the last of them "A file's text is
-  never another file's", and the consequence about changes made by other
-  programs. The commits are those that touch this file.
+- 2026-11-19, with the fixes of the review of steps 7 and 8 (`d55c814`):
+  "A replaced file has a way back", the rule about replacing, and two
+  consequences were rewritten.
+- 2026-11-19 (`a8c8fbf`): the rule "A file's text is never another
+  file's" was added, with the consequence about changes made by other
+  programs. Its text was rewritten twice more as reviews found cases it
+  did not cover (`0b5b593`, `ae3e4d2`).
 - 2026-11-19, with the fixes of the review of `defb4df`: this section.

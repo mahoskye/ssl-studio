@@ -15,7 +15,18 @@ export function nextItem(items: MenuItem[], from: number, by: 1 | -1): number {
 	return from;
 }
 
-export function Menu(props: { label: string; title: string; class?: string; items: () => MenuItem[] | Promise<MenuItem[]>; children: any }) {
+export function Menu(props: {
+	label: string;
+	title: string;
+	class?: string;
+	/**
+	 * For a menu inside something that cuts off what runs past its edge (a side panel): the list is placed by the
+	 * window, under its button and inside the window, and is not cut off.
+	 */
+	floating?: boolean;
+	items: () => MenuItem[] | Promise<MenuItem[]>;
+	children: any;
+}) {
 	const [items, setItems] = createSignal<MenuItem[] | null>(null);
 	let button!: HTMLButtonElement;
 	let list: HTMLDivElement | undefined;
@@ -32,7 +43,20 @@ export function Menu(props: { label: string; title: string; class?: string; item
 		const loaded = await props.items();
 		setItems(loaded);
 		document.addEventListener("mousedown", outside, true);
-		queueMicrotask(() => focusAt(nextItem(loaded, -1, 1)));
+		queueMicrotask(() => {
+			if (props.floating && list) {
+				const from = button.getBoundingClientRect();
+				const edge = 8;
+				list.style.position = "fixed";
+				list.style.right = "auto";
+				list.style.top = `${from.bottom}px`;
+				// Under the button, its right edge on the button's where there is room, and inside the window always.
+				list.style.left = `${Math.max(edge, Math.min(from.right - list.offsetWidth, window.innerWidth - list.offsetWidth - edge))}px`;
+				list.style.maxHeight = `${Math.max(120, window.innerHeight - from.bottom - edge)}px`;
+				list.style.overflowY = "auto";
+			}
+			focusAt(nextItem(loaded, -1, 1));
+		});
 	};
 	onCleanup(() => document.removeEventListener("mousedown", outside, true));
 	const onKey = (e: KeyboardEvent) => {

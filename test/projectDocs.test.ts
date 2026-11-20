@@ -661,7 +661,7 @@ describe("a registry's names against the project's files", () => {
 	});
 });
 
-import { FINISHED_SHOWN, workList } from "../src/shared/workList";
+import { FINISHED_SHOWN, shownRows, workList, type WorkRow } from "../src/shared/workList";
 
 describe("the Work list", () => {
 	const ticket = (key: string, status: string, more: Partial<DocFile> = {}): DocFile => ({ path: `/p/docs/tickets/${key}.md`, name: `${key}.md`, group: "tickets", exists: true, ticket: key, status, ...more });
@@ -729,5 +729,29 @@ describe("a spec the planner wrote", () => {
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("the Work list with tickets shut", () => {
+	const row = (name: string, depth: number, kind: WorkRow["kind"] = "ticket"): WorkRow => ({ file: { name, path: `/p/${name}`, group: "tickets", exists: true } as DocFile, kind, depth });
+	const rows = [row("A", 0), row("A.plan", 1, "plan"), row("A1", 1), row("A1.spec", 2, "spec"), row("B", 0), row("C", 0), row("C.spec", 1, "spec")];
+	const names = (shut: string[]) => shownRows(rows, (r) => shut.includes(r.file.name)).map((r) => `${r.file.name}${r.parent ? (r.shut ? "+" : "-") : ""}`);
+
+	test("with nothing shut every row is shown, and each says whether anything is under it", () => {
+		expect(names([])).toEqual(["A-", "A.plan", "A1-", "A1.spec", "B", "C-", "C.spec"]);
+	});
+
+	test("a shut ticket hides all that is under it, however deep, and nothing after it", () => {
+		expect(names(["A"])).toEqual(["A+", "B", "C-", "C.spec"]);
+		expect(names(["A1"])).toEqual(["A-", "A.plan", "A1+", "B", "C-", "C.spec"]);
+	});
+
+	test("a ticket shut inside a shut ticket stays shut when the outer one is opened", () => {
+		expect(names(["A", "A1"])).toEqual(["A+", "B", "C-", "C.spec"]);
+		expect(names(["A1", "C"])).toEqual(["A-", "A.plan", "A1+", "B", "C+"]);
+	});
+
+	test("a row with nothing under it is never shut, whatever is asked", () => {
+		expect(names(["B", "A.plan"])).toEqual(["A-", "A.plan", "A1-", "A1.spec", "B", "C-", "C.spec"]);
 	});
 });

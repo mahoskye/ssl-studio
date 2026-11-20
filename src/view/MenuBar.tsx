@@ -135,7 +135,14 @@ function LayoutControls() {
 	const keys = (id: string) => (keysFor(id) ? ` (${keysFor(id)})` : "");
 	const undocked = (side: "left" | "right") => folder() && !panelOn(side);
 	const tip = (shown: boolean, what: string, id: string, side?: "left" | "right") =>
-		!folder() ? `The ${what}: open a folder first` : side && undocked(side) ? `The ${what}: no panel is docked there. Right-click a panel's button to move it.` : `${shown ? "Hide" : "Show"} the ${what}${keys(id)}`;
+		!folder()
+			? `The ${what}: open a folder first`
+			: side && undocked(side)
+				? `The ${what}: no panel is docked there. Right-click a panel's button to move it.`
+				: side && crowdedOut(side) && (crowdedOut(side === "left" ? "right" : "left") || !layout()[side === "left" ? "right" : "left"])
+					? // Open, in a window with no room for it even alone: a press cannot show it.
+						`The ${what} is open, but the window has no room for it. Widen the window.`
+					: `${shown ? "Hide" : "Show"} the ${what}${keys(id)}`;
 	const items = (): MenuItem[] => {
 		const none = "Open a folder first";
 		const entry = (label: string, id: string, why = ""): MenuItem => ({ label, keys: keysFor(id) || undefined, run: () => runCommand(id), disabled: !folder() || Boolean(why), why: folder() ? why : none });

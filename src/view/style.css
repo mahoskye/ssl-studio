@@ -184,7 +184,9 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 
 .panel-body { display: flex; flex-direction: column; min-height: 0; height: 100%; }
 .panel-title { display: flex; align-items: center; gap: var(--space-1); padding: var(--space-4) var(--space-4) var(--space-3) var(--space-5); font-size: var(--text-sm); text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
-.panel-title > span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The title takes the room; what follows it (buttons, a menu) keeps its own size. A menu's list hangs below its button and is not cut off. */
+.panel-title > span:first-child { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.panel-title .menu-pop { text-transform: none; letter-spacing: 0; font-size: var(--text-base); color: var(--side-fg); }
 .filter { margin: 0 var(--space-4) var(--space-3); }
 .tree { overflow: auto; flex: 1; padding-bottom: var(--space-5); }
 .tree-row { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-1) var(--space-4); cursor: pointer; white-space: nowrap; }
@@ -292,6 +294,8 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 /* A background tab shows its close button when the pointer or the keyboard is on it. */
 .tab:not(.active):not(.dirty):not(:hover):not(:focus-visible) .close { visibility: hidden; }
 .tab.conflict .name { color: var(--error); }
+/* Opened for a look by one click in a list: in italics until it is kept (a double click, an edit, a pin). */
+.tab.preview .name { font-style: italic; }
 /* Changed on disk: said with a mark as well as the colour. */
 .tab .conflict-mark { color: var(--error); font-weight: 700; }
 .tab-menu { display: flex; align-items: center; padding: 0 var(--space-1); position: relative; }

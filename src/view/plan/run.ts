@@ -9,7 +9,7 @@ import { openReview, type Check } from "../editor/Review";
 import { monaco } from "../editor/monaco";
 import { session } from "../lsp/session";
 import { describeElement } from "../panels/Reference";
-import { applyText, documents, notify, setState, state } from "../state";
+import { applyText, documents, keepTab, notify, setState, state } from "../state";
 import { workPrompt } from "../projectDocs";
 import { joinPath, relativeTo } from "../../shared/paths";
 import { addQuestions, answerQuestion, applySuggestion, formatSurvey, looksCut, nounsOf, openQuestions, overLimit, parseContext, parseQuestions, parseSpec, parseSuggestions, planHash, printSpec, readBlocks, refinePrompt, specHash, specPrompt, unaccounted, type ContextRequest, type Suggestion, type Survey } from "./assist";
@@ -177,6 +177,8 @@ export const begin = (path: string, running: AssistState["running"], work: () =>
 	if (assistOf(path).running) return Promise.resolve();
 	if (!state.workspace) return Promise.resolve(notify("Open a folder first."));
 	stopped.delete(path);
+	// What the run finds is written into this document: its tab is not one to give up to the next file clicked.
+	keepTab(path);
 	update(path, { running, warnings: [], progress: "" });
 	return work()
 		.catch((e: any) => (e instanceof Stopped ? notify("Stopped. Nothing was changed.") : notify(`${e?.message ?? e}`, "error")))

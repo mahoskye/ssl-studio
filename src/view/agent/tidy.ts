@@ -13,7 +13,7 @@ import { openReview, type Check, type Review } from "../editor/Review";
 import { monaco } from "../editor/monaco";
 import { codeOnly } from "../editor/textmate";
 import { session } from "../lsp/session";
-import { activePath, applyText, documents, notify, state } from "../state";
+import { activePath, applyText, documents, keepTab, notify, state } from "../state";
 import { addEntry, ask, safely } from "./store";
 import type { StepState } from "./logic";
 import { baseName, joinPath, relativeTo } from "../../shared/paths";
@@ -49,6 +49,8 @@ export function startTidy() {
 	const path = activePath();
 	if (!path || documents.get(path)?.model.getLanguageId() !== "ssl") return notify("Open an SSL file to tidy.");
 	generation++;
+	// The steps are proposed for this file: its tab stays while they are.
+	keepTab(path);
 	proposals.clear();
 	setTidy({ path, steps: STEPS.map(() => "pending"), problems: STEPS.map(() => "") });
 }
