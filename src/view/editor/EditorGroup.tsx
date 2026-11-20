@@ -123,6 +123,10 @@ export function EditorGroup(props: { index: number }) {
 			editor.addAction({ id: `app.${id}`, label, contextMenuGroupId: "9_app", contextMenuOrder: order, run: () => void import("../commands").then((all) => all.runCommand(id)) });
 		}
 		useGitMarks(editor, () => group().active);
+		// The editor keeps Ctrl+F12 for "Go to definition" to where it is told it is in a web view, where F12 alone
+		// may be the browser's. It was never told, so the key the Go menu shows (the last the editor lists) did
+		// nothing. Told here: Ctrl+F12 goes to the definition, and F12 goes on doing so where the window has it.
+		editor.createContextKey("isWeb", true);
 		// The code's own face, read before a document's prose takes the editor over for a while.
 		codeFont = editor.getOption(monaco.editor.EditorOption.fontFamily);
 		liveView = drawMarkdownLive(editor, live);

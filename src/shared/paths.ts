@@ -69,3 +69,6 @@ export function relativePath(fromDir: string, to: string): string {
 	while (same < from.length && same < target.length && alike(from[same]!, target[same]!)) same++;
 	return [...from.slice(same).map(() => ".."), ...target.slice(same)].join("/");
 }
+
+/** The folders no listing of a workspace shows: version control, what is installed or built, and the app's own. */
+export const UNLISTED = [".git", "node_modules", ".ssl-studio", ".hutch", "dist", "build"] as const;

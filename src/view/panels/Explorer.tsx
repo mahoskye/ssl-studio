@@ -28,6 +28,8 @@ const toggle = (path: string) =>
 		next.has(path) ? next.delete(path) : next.add(path);
 		return next;
 	});
+/** The workspace whose open folders were last brought back from what was kept. */
+let recalledFor: string | undefined;
 /** The row the keyboard is on, for the palette's commands. Forgotten once focus goes to work somewhere else. */
 const [focused, setFocused] = createSignal<Entry | null>(null);
 /** The tree on screen, to put the keyboard back in after a dialog. */
@@ -425,8 +427,12 @@ export function Explorer() {
 		on(
 			() => state.workspace?.root,
 			(root) => {
-				if (!root || !keeps()) return;
-				setExpanded(new Set(openFolders(recall(`tree:${root}`), root)));
+				// Once for a workspace, not each time the panel comes back: what was opened while another panel was
+				// showing (the folders above a file another panel asked to be shown here) is not shut again by the
+				// panel's return. Folders opened before the first showing are kept beside the ones remembered.
+				if (!root || !keeps() || recalledFor === root) return;
+				recalledFor = root;
+				setExpanded((set) => new Set([...openFolders(recall(`tree:${root}`), root), ...[...set].filter((path) => isInside(root, path))]));
 			},
 		),
 	);

@@ -3,6 +3,7 @@
 // and Health panels show them.
 import { createEffect, createSignal, on } from "solid-js";
 import type { DocFile } from "../shared/protocol";
+import { folderParts, folderSaid, typedDocument, typedParts } from "../shared/docSections";
 import { joinPath } from "../shared/paths";
 import { backend } from "./backend";
 import { ask, choose } from "./dialogs";
@@ -85,20 +86,56 @@ export async function undoSetUp() {
 }
 
 /** A new Markdown file in the project's docs folder, opened as text. */
-export async function newDoc() {
-	if (!state.workspace || !state.project) return notify("Open a folder first.");
-	const title = (await ask(`Name of the new document in ${state.project.docs}/`))?.trim();
-	if (!title) return;
-	const file = title.replace(/\.md$/i, "").replace(/[\\/:*?"<>|]+/g, "-");
-	const path = joinPath(state.workspace.root, ...state.project.docs.split(/[\\/]/), `${file}.md`);
-	if (await heldFromBefore(path)) return;
+export const newDoc = () => newDocIn();
+
+/**
+ * A new Markdown file in one of the project's folders (the docs folder, when
+ * none is named), opened as text. A name with a folder before it ("guides/Intro")
+ * puts the document in that folder, which is made when it is not there.
+ * Returns whether a document was made.
+ */
+export async function newDocIn(folder?: string): Promise<boolean> {
+	if (!state.workspace || !state.project) return notify("Open a folder first."), false;
+	const into = folderParts(folder ?? state.project.docs);
+	// A slash in the name is a folder, not part of the name: said, since it is not what a title's slash means.
+	const typed = (await ask(`Name of the new document in ${folderSaid(into.join("/"))} (a folder may come first: guides/Intro)`))?.trim();
+	if (!typed) return false;
+	const named = typedDocument(typed);
+	if ("problem" in named) return notify(named.problem, "error"), false;
+	const path = joinPath(state.workspace.root, ...into, ...named.folders, named.file);
+	if (await heldFromBefore(path)) return false;
 	try {
 		await backend.create(path, "file");
-		await backend.write(path, `# ${title.replace(/\.md$/i, "")}\n`);
+		await backend.write(path, `# ${named.title}\n`);
 	} catch (e: any) {
-		return notify(String(e?.message ?? e), "error");
+		return notify(String(e?.message ?? e), "error"), false;
 	}
 	setState("treeVersion", (v) => v + 1);
 	setState("mdText", path, true);
 	await openFile(path);
+	return true;
+}
+
+/**
+ * A new folder in one of the project's folders, asked for from the heading of
+ * its list in the Docs panel. That list shows documents, so an empty folder is
+ * not in it: where a document can be named straight into the folder (`first`),
+ * its name is asked for next, and otherwise a notice says where the folder is.
+ */
+export async function newFolderIn(folder: string, first: boolean) {
+	if (!state.workspace || !state.project) return notify("Open a folder first.");
+	const into = folderParts(folder);
+	const typed = (await ask(`Name of the new folder in ${folderSaid(into.join("/"))}`))?.trim();
+	if (!typed) return;
+	const named = typedParts(typed);
+	if ("problem" in named) return notify(named.problem, "error");
+	const made = [...into, ...named.parts].join("/");
+	try {
+		await backend.create(joinPath(state.workspace.root, ...into, ...named.parts), "dir");
+	} catch (e: any) {
+		return notify(String(e?.message ?? e), "error");
+	}
+	setState("treeVersion", (v) => v + 1);
+	if (first && (await newDocIn(made))) return;
+	notify(`Made the folder ${made}/. It is empty, so this list does not show it yet; the Explorer does.`);
 }

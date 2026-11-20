@@ -7,10 +7,12 @@ import { createMemo, createResource, createSignal, For, Show } from "solid-js";
 import type { DocFile } from "../../shared/protocol";
 import { backend } from "../backend";
 import { docMatches, DOC_FOLDERS, isCatalog, KNOWLEDGE, progress, progressShort, registryTitle, statusChoices, toneOf } from "../../shared/projectDocs";
-import { docs, newDoc, setUpProject } from "../project";
+import { docs, newDoc, newDocIn, newFolderIn, setUpProject } from "../project";
 import { importTickets, newKnowledge, newRegistry, newSpec, newState, newTicket, setStatus, updateCatalogs, updateManifest } from "../projectDocs";
+import { folderParts, folderSaid, IMPORT_TICKETS, kindOf, NEW_DOCUMENT, NEW_FOLDER, NEW_PLAN, NEW_REGISTRY, NEW_SPEC, NEW_TICKET, newOfKind, plainSection, sectionFolder, sectionMenu, SHOW_FOLDER, type DocSection } from "../../shared/docSections";
+import { joinPath } from "../../shared/paths";
 import { shownRows, workList } from "../../shared/workList";
-import { activePath, canonical, openFile, openToSide, setState, state } from "../state";
+import { activePath, canonical, notify, openFile, openToSide, setState, state } from "../state";
 import { focusRowsBelow, IconButton, isFolded, Row, RowGroup, Rows, setFold, setFolds, type Point } from "./Rows";
 import { chooseFromMenu } from "./RowMenu";
 import { Menu } from "../Menu";
@@ -209,6 +211,39 @@ const allFolds = () => [
 		.map(ticketFold),
 ];
 
+/**
+ * What can be done from the heading of a list, to the list rather than to one
+ * of its documents: a new document of the kind it keeps, a new folder in its
+ * folder, and the folder's place in the Explorer. Right-click, the menu key or
+ * Shift+F10 on the heading (ADR 0010).
+ */
+async function headMenu(section: DocSection, title: string, at: Point) {
+	const project = state.project;
+	const root = state.workspace?.root;
+	if (!project || !root) return;
+	const folder = sectionFolder(section, project);
+	const picked = await chooseFromMenu(`Actions for ${title}, in ${folderSaid(folder)}`, sectionMenu(section), at);
+	if (!picked) return;
+	const kind = kindOf(section) ?? KNOWLEDGE.find((known) => picked === newOfKind(known));
+	if (picked === NEW_FOLDER) await newFolderIn(folder, plainSection(section));
+	else if (picked === SHOW_FOLDER) {
+		const path = joinPath(root, ...folderParts(folder));
+		// A list is shown for a folder that is not there yet: its first document or folder makes it.
+		const there = await backend.list(path).then(
+			() => true,
+			() => false,
+		);
+		if (there) (await import("./Explorer")).showInExplorer(path);
+		else notify(`${folderSaid(folder)} is not there yet: the first document or folder made here makes it.`);
+	} else if (picked === NEW_DOCUMENT) await newDocIn(folder);
+	else if (picked === NEW_TICKET) await newTicket();
+	else if (picked === IMPORT_TICKETS) await importTickets();
+	else if (picked === NEW_SPEC) await newSpec();
+	else if (picked === NEW_REGISTRY) await newRegistry();
+	else if (picked === NEW_PLAN) (await import("../commands")).runCommand("new-plan");
+	else if (kind) await newKnowledge(kind.id);
+}
+
 /** A group's heading, with the folder it is in. */
 const Head = (props: { title: string; folder?: string }) => (
 	<>
@@ -234,7 +269,7 @@ function Work(props: { files: DocFile[]; empty?: string; filtered?: boolean }) {
 	const rows = createMemo(() => shownRows(list().rows, (row) => !props.filtered && isFolded(ticketFold(row.file))));
 	const fold = (row: ReturnType<typeof rows>[number]) => ({ parent: row.parent, shut: row.shut, locked: props.filtered ? LOCKED : undefined, toggle: () => setFold(ticketFold(row.file), !row.shut) });
 	return (
-		<RowGroup fold="docs:work" label="Work" open={props.filtered} count={props.files.filter((d) => (d.group === "tickets" || d.group === "specs") && !isCatalog(d)).length} head={<Head title="Work" folder={`${state.project?.docs}/${DOC_FOLDERS.tickets}`} />} rows={props.files.some((d) => d.group === "tickets" || d.group === "specs")} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
+		<RowGroup fold="docs:work" label="Work" onMenu={(at) => void headMenu("work", "Work", at)} open={props.filtered} count={props.files.filter((d) => (d.group === "tickets" || d.group === "specs") && !isCatalog(d)).length} head={<Head title="Work" folder={`${state.project?.docs}/${DOC_FOLDERS.tickets}`} />} rows={props.files.some((d) => d.group === "tickets" || d.group === "specs")} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
 			<For each={rows()}>
 				{(row) =>
 					row.kind === "ticket" ? (
@@ -264,11 +299,11 @@ function Knowledge(props: { files: DocFile[]; empty?: string; filtered?: boolean
 	const files = () => props.files.filter((d) => d.group === "knowledge");
 	const kinds = () => [...KNOWLEDGE.map((k) => ({ id: k.id as string, name: k.name })), { id: "", name: "Other" }].map((kind) => ({ ...kind, files: files().filter((d) => !isCatalog(d) && (kind.id ? d.kind === kind.id : !KNOWLEDGE.some((k) => k.id === d.kind))) })).filter((kind) => kind.files.length);
 	return (
-		<RowGroup fold="docs:knowledge" label="Knowledge base" open={props.filtered} count={files().filter((d) => !isCatalog(d)).length} role="group" head={<Head title="Knowledge base" folder={`${state.project?.docs}/${DOC_FOLDERS.knowledge}`} />} rows={files().length > 0} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
+		<RowGroup fold="docs:knowledge" label="Knowledge base" onMenu={(at) => void headMenu("knowledge", "Knowledge base", at)} open={props.filtered} count={files().filter((d) => !isCatalog(d)).length} role="group" head={<Head title="Knowledge base" folder={`${state.project?.docs}/${DOC_FOLDERS.knowledge}`} />} rows={files().length > 0} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
 			{/* Each kind is a group of its own inside: it folds by itself. */}
 			<For each={kinds()}>
 				{(kind) => (
-					<RowGroup fold={`docs:knowledge:${kind.id || "other"}`} label={kind.name} open={props.filtered} count={kind.files.length} headClass="doc-kind" head={kind.name}>
+					<RowGroup fold={`docs:knowledge:${kind.id || "other"}`} label={kind.name} onMenu={kind.id ? (at) => void headMenu(`knowledge:${kind.id}` as DocSection, kind.name, at) : undefined} open={props.filtered} count={kind.files.length} headClass="doc-kind" head={kind.name}>
 						<For each={kind.files}>{(file) => <ItemRow file={file} depth={1} />}</For>
 					</RowGroup>
 				)}
@@ -286,7 +321,7 @@ function Knowledge(props: { files: DocFile[]; empty?: string; filtered?: boolean
 function Registries(props: { files: DocFile[]; empty?: string; filtered?: boolean }) {
 	const files = () => props.files.filter((d) => d.group === "registries");
 	return (
-		<RowGroup fold="docs:registries" label="Registries" open={props.filtered} count={files().filter((d) => !isCatalog(d)).length} head={<Head title="Registries" folder={`${state.project?.docs}/${DOC_FOLDERS.registries}`} />} rows={files().length > 0} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
+		<RowGroup fold="docs:registries" label="Registries" onMenu={(at) => void headMenu("registries", "Registries", at)} open={props.filtered} count={files().filter((d) => !isCatalog(d)).length} head={<Head title="Registries" folder={`${state.project?.docs}/${DOC_FOLDERS.registries}`} />} rows={files().length > 0} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
 			<For each={files().filter((d) => !isCatalog(d))}>{(file) => <ItemRow file={{ ...file, title: registryTitle(file.name) }} note={progress(file)} short={progressShort(file)} />}</For>
 			<For each={files().filter(isCatalog)}>{(catalog) => <ItemRow file={catalog} />}</For>
 		</RowGroup>
@@ -299,6 +334,8 @@ function Group(props: { title: string; folder?: string; group: DocFile["group"];
 		<RowGroup
 			fold={`docs:${props.group}`}
 			label={props.title}
+			// The lists that are a folder of the project's: "Project" is the files at its top, and has no menu.
+			onMenu={props.group === "docs" || props.group === "schema" || props.group === "plans" ? (at) => void headMenu(props.group as DocSection, props.title, at) : undefined}
 			open={Boolean(props.filter?.trim())}
 			count={files().length}
 			head={<Head title={props.title} folder={props.folder} />}

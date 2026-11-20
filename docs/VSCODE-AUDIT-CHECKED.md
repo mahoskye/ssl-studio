@@ -447,3 +447,118 @@ word. Not seen by eye there: a page's links by name and "Linked from"
 (the self-test passes them in under a quarter of a second), and
 anything that needs a key pressed from outside.
 
+## What the report could not verify, tried again
+
+The report at the end of the work named things it had not verified.
+Three of them were tried, each in a way that touches nothing of the
+person's at the machine.
+
+| Tried | Came of it |
+| --- | --- |
+| The copy commands | With a stand-in clipboard in my own instance, each wrote the right words |
+| Go to definition | With keys sent to the editor in my own instance, Ctrl+F12 did nothing: fixed |
+| What a reader hears | Read off the accessibility bus during a self-test: the window names its parts |
+
+The copy commands write to the real clipboard, which is the person's,
+so they had only been read in the code. With a stand-in clipboard put
+in the page of my own instance, "Copy path in the project" wrote
+`src/DueDates/WorkCalendar.ssl`, "Copy name" wrote `WorkCalendar.ssl`,
+"Copy path" wrote the whole path, and Alt+Shift+C did what the first
+does.
+
+The Go menu shows Ctrl+F12 beside "Go to definition". F12 went to the
+definition; Ctrl+F12 did nothing. The editor keeps that key for where
+it is told it is in a web view (where F12 alone may be the browser's),
+and it was never told. It is told now: from a use on line 42 the key
+took the cursor to line 30, column 14, where the procedure is
+declared, and F12 goes on doing the same.
+
+The app's own window was read off the accessibility bus (AT-SPI, what
+a screen reader reads) while a self-test had it open: 113 parts, in
+one reading taken part of the way through the run.
+
+| Part | Named |
+| --- | --- |
+| The window | "SSL Studio", as a frame and as a document |
+| The menu bar | "Menus": File, Edit, Selection, View, Go, Help |
+| Tabs | "Open files" and "Bottom panel", each tab by its file or its panel |
+| The file tree | "Files in workspace", each row by its name |
+| Panel buttons | Sixteen switches, each by its panel: Explorer, Docs, Search and the rest |
+| Regions | Views, Side panel, Breadcrumbs, Bottom panel, Right panel, Tidy |
+| Text boxes | "Editor content" and "Question for the agent" |
+| Problems | The list by its file and count, each row by its words |
+
+No button, tab, tree row, switch, box or link was without a name. Four
+rows of a list had none of their own, as rows of a plain list do: a
+reader says what is in them. This is what the window offers a reader,
+not a reader heard: none was run, since one would speak on the
+person's machine and take its keys.
+
+## The headings of the Docs panel have a menu
+
+Asked for in use: a right-click on the heading of a list in the Docs
+panel, to add a document or a folder there. Each heading that is a
+folder of the project's now has a menu, by right-click, the menu key
+or Shift+F10. "Project" has none: its files are at the top of the
+folder.
+
+| Heading | Menu opens with |
+| --- | --- |
+| Work | New ticket…, Import tickets…, New spec… |
+| Knowledge base | New decision…, New question…, New snippet…, New reference note… |
+| A kind in it | The one of that kind: "New decision…" on Decisions |
+| Registries | New registry… |
+| Docs, Schema | New document… |
+| Plans | New plan… |
+
+Every one ends with "New folder…" and "Show in the Explorer". A new
+folder is made in the folder the heading names; "a/b" makes both. The
+panel lists documents, so an empty folder is not in it: under Docs and
+Schema, where a document is plain Markdown named by whoever writes it,
+the name of the folder's first document is asked for next, and
+elsewhere (or when no document comes of that question) a notice says
+where the folder is. "New document…" takes a folder before the name
+the same way, and its question says so: "guides/Intro" is `Intro.md`
+in `guides/`. It used to write the slash as a dash. Refused, in words:
+a name that leads out of the folder ("../x"), a folder whose name is
+not the same on every system (it ends in a dot, or is a device's on
+Windows), and a folder the app leaves out of every list (`build`,
+`node_modules`). A document's own name may end in a full stop: the
+heading keeps it and the file's name leaves it off.
+
+Looked at in my own instance at 1400 and 720 wide, in the dark and the
+light theme, a different heading's menu open in each. Used by pointer
+and by keys: the Docs heading's menu by right-click, "New folder…",
+"guides", then "Intro: first steps" (listed as `guides/Intro- first
+steps.md`, opened with its heading as typed, the keyboard in it); the
+Schema heading's by Shift+F10, arrows and Enter, "views/reports", the
+next question cancelled (the notice came, and the keyboard was back on
+the heading); a name already taken and a name leading out (each
+refused in words); a folder under Work (the notice). The self-test
+opens the Work heading's menu and makes a folder from it. Not seen:
+"Show in the Explorer" for a list whose folder is not there yet, since
+every list of the demo has its folder; the notice for it was only read
+in the code.
+
+Found on the way and fixed, older than this: "Show in the Explorer"
+opened the Explorer on its first row for anything inside a folder,
+from a document's row as much as from a heading. The Explorer brought
+its remembered open folders back each time it was shown again, and so
+shut the folders that had just been opened for the row. It brings them
+back once for a folder now. Seen after: a document, a kind's folder
+and the tickets folder each shown with the folders above them open
+and the keyboard on the row.
+
+A reviewer read all of this before its commit; what it found and what
+was done is the fourteenth review in
+[VSCODE-AUDIT-REVIEWS.md](VSCODE-AUDIT-REVIEWS.md); what is left is
+listed there.
+
+Looked at again after its findings were fixed, in my own instance: the
+question for a new document, which now says a folder may come first,
+at 720 and 1400 wide in the dark and the light theme (it fits on one
+line in all four); and the refusals of `build/notes`, `node_modules`
+and `CON`, each as a notice in words, at 1400 in the light theme. Not
+seen in the app: the wording for a project whose docs folder is the
+top of the folder ("the top of the folder"), since the demo's is
+`docs`; it is covered by the unit tests only.

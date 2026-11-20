@@ -255,6 +255,36 @@ export function selftestWork(): Promise<Steps> {
 			return until(() => !document.querySelector(".menu-pop.row-menu"));
 		});
 
+		// A list's heading has a menu of its own: what the list keeps, and a new folder in the list's folder.
+		const entries = () => [...document.querySelectorAll<HTMLElement>(".menu-pop.row-menu [role=menuitem], .menu-pop.row-menu button")];
+		await step("headMenuOpens", async () => {
+			const head = await until(() => document.querySelector<HTMLElement>('[data-panel="docs"] [data-row="head:docs:work"]'));
+			if (!head) return false;
+			const box = head.getBoundingClientRect();
+			head.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: box.left + 8, clientY: box.top + 4 }));
+			return until(() => ["New ticket…", "New folder…", "Show in the Explorer"].every((name) => entries().some((item) => item.textContent?.trim() === name)));
+		});
+		// The folder is made where the heading says the list is, folders on the way to it and all.
+		await step("folderMadeFromHead", async () => {
+			entries()
+				.find((item) => item.textContent?.trim() === "New folder…")
+				?.click();
+			const box = await until(() => document.querySelector<HTMLInputElement>(".dialog input"));
+			if (!box?.form) return false;
+			box.value = "self-made/inner";
+			box.form.requestSubmit();
+			await until(() => !document.querySelector(".dialog"));
+			for (let tries = 0; tries < 40; tries++) {
+				const made = await backend.list(joinPath(root, ...folder, "tickets", "self-made")).then(
+					(found) => found.some((entry) => entry.name === "inner" && entry.kind === "dir"),
+					() => false,
+				);
+				if (made) return true;
+				await wait(100);
+			}
+			return false;
+		});
+
 		// A document that is not SSL has an outline of its own.
 		showPanel("objects");
 		await step("documentOutlined", async () => {

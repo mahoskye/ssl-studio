@@ -131,7 +131,7 @@ of the text editor, and nothing of its own.
 | Go to symbol | Yes | Have | In the file: Ctrl+Shift+O, the editor's own |
 | Workspace symbols | Yes | Have | Ctrl+T, from the language server; the draft had this as missing |
 | Go to line | Yes | Have | Ctrl+G went to line 40 |
-| Go to definition | Yes | Have | From the language server; in the Go menu and on the right-click menu |
+| Go to definition | Yes | Have | From the language server; F12 and Ctrl+F12, the Go menu, the right-click menu |
 | Peek, references | Yes | Have | From the language server |
 | Rename symbol | Yes | Have | From the language server |
 | Next problem | Yes | Have | F8, the editor's own |
@@ -243,7 +243,7 @@ fetches, pulls or pushes
 | Focus is visible | Yes | Have | A ring on what has the keyboard |
 | Reduced motion | Yes | Have | The style honours the system's setting |
 | Zoom | Yes | Have | The whole interface |
-| Screen reader | Partly | Later | Rows and buttons are labelled; not tried with a reader |
+| Screen reader | Partly | Later | The window names its parts on the accessibility bus; not heard with a reader |
 | High contrast | Partly | Later | The editor has its own switch; the shell has no such theme |
 | Tab moves focus | No | Later | A key to let Tab leave the editor |
 

@@ -8,8 +8,9 @@ import { matchesOn, replaceIn, SEARCH_LIMIT, searchPattern, type SearchOptions }
 import { fileChosen } from "../shared/fileGlob";
 import { decode, encode, encodingOf, textOf, type Encoding } from "./encoding";
 import { imageType, looksBinary, sizeText } from "../shared/fileKind";
+import { UNLISTED } from "../shared/paths";
 
-const SKIP = new Set([".git", "node_modules", ".ssl-studio", ".hutch", "dist", "build"]);
+const SKIP = new Set<string>(UNLISTED);
 const SEARCH_MAX_BYTES = 4 * 1024 * 1024;
 /** The largest picture that is sent to the window to be shown. */
 const IMAGE_MAX_BYTES = 20 * 1024 * 1024;

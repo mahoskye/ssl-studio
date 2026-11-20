@@ -371,6 +371,8 @@ export function RowGroup(props: {
 	count?: number;
 	/** "group" for a group that holds groups of its own; its rows are then in theirs. */
 	role?: "listbox" | "group";
+	/** The heading's menu, on a group that folds: right-click, the menu key, Shift+F10. */
+	onMenu?: (at: Point) => void;
 	children: JSX.Element;
 }) {
 	const id = createUniqueId();
@@ -387,7 +389,7 @@ export function RowGroup(props: {
 				}
 			>
 				<div
-					ref={(el) => handlers.set(el, { activate: flip, toggle: flip, key: () => false, chord: () => false })}
+					ref={(el) => handlers.set(el, { activate: flip, toggle: flip, key: () => false, chord: () => false, menu: props.onMenu && ((at) => props.onMenu?.(at)) })}
 					class={`${props.headClass ?? "group-head"} foldable`}
 					id={id}
 					role="button"
@@ -398,6 +400,14 @@ export function RowGroup(props: {
 					aria-expanded={shut() ? "false" : "true"}
 					title={props.title ?? (props.open ? "Shown open while the filter is narrowing the list" : shut() ? "Show these" : "Hide these")}
 					onClick={flip}
+					onContextMenu={(e) => {
+						if (!props.onMenu) return;
+						e.preventDefault();
+						e.stopPropagation();
+						// Opened from the keyboard, the event has no place of its own.
+						const box = e.currentTarget.getBoundingClientRect();
+						props.onMenu(e.clientX || e.clientY ? { x: e.clientX, y: e.clientY } : { x: box.left + box.height, y: box.bottom });
+					}}
 				>
 					<Icon name={shut() ? "chevron-right" : "chevron-down"} class="twisty" />
 					<span class="head-words">{props.head}</span>

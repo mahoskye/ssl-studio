@@ -977,3 +977,70 @@ with only the name changed. The fix to the first finding here was read
 by the reviewer who proposed it, with the 33 renames run again on it:
 nothing left to hold the commit.
 
+## The fourteenth review: the Docs headings' menu, and what was tried again
+
+A fresh reviewer read the change as staged, before its commit: the
+menu on the Docs panel's headings, the new-document and new-folder
+steps, the Explorer's open folders, the editor's Ctrl+F12, the two
+self-test steps and the record. It was told what each part is for and
+not what was thought of it. Nothing held the commit. Four findings
+were fixed, each small.
+
+1. **A slash in a document's name silently became a folder**, and the
+   heading was cut to what followed it: "Input/Output spec" made
+   `Output spec.md` in `Input/`. The question did not say so. Fixed:
+   the question says a folder may come first, with an example.
+2. **The notice said the Explorer shows a folder it never lists**: a
+   folder called `build`, `dist`, `node_modules`, `.git`, `.ssl-studio`
+   or `.hutch` is left out of every listing. Fixed: those names are
+   refused for a new folder, in words that say why; the list of them is
+   now in one place, which the listing reads too.
+3. **A docs folder set to "." broke "Show in the Explorer"**: the path
+   had a dot in it, which no row of the tree is named with. Fixed: a
+   list's folder has no such part, and the top of the folder is said by
+   name.
+4. **Names that are not the same on Windows were taken**: a part that
+   ends in a dot, and a device's name (`CON`, `NUL`, `COM1`). What
+   Windows does with them was read, not run. Fixed: refused. A
+   document's name may still end in a full stop: the heading keeps it
+   and the file's name leaves it off.
+
+Read and found sound: no typed name leads out of the folder it was
+asked for (and the backend refuses one that would); the headings and
+rows of every other panel behave as before, since only Docs gives a
+heading a menu; the Explorer's change was traced through a change of
+folder and back, a change while the panel was hidden, and the
+self-test's closed tree. Of the editor's key: the setting is read in
+two places of the editor, Ctrl+F12 for the definition and Ctrl+K
+Ctrl+F12 for the definition to the side, which is now on too. Ctrl+F12
+is also the editor's own key for "Go to implementations": nothing
+gives the editor implementations today, and if something ever does,
+the definition would have the key first.
+
+Left, and said: the comparison shown for a review is another editor
+and was not told, so Ctrl+F12 still does nothing there; the heading
+does not say in its tooltip that it has a menu, as rows do not; the
+self-test opens the menu the way a right-click does and not by key
+(the key was tried by hand).
+
+### The second reading
+
+The same reviewer read the change again after the fixes, the three
+files they added included: each of the four findings dealt with, the
+listing reading the same six names as before, no name that leads out
+of its folder got through the full stops a document's name may now
+end in ("guides/..", "a/b/..md", "a/.. ./b" and others were run), and
+nothing left to hold the commit. Three small things it found in the
+fixes are left, and said here:
+
+1. With the docs folder set to the top of the folder, "Show in the
+   Explorer" on the Docs heading opens the Explorer and puts the
+   keyboard on no row, since the top has no row of its own.
+2. The names left out of every list are told as they are written, as
+   the listing tells them: on a disk that does not tell capitals apart,
+   a folder typed as "Build" would be the hidden `build`.
+3. "Intro.md." makes `Intro.md.md`, and "e.g." makes `e.g.md`.
+
+It also asked that the record say whether the reworded question and
+the refusals were seen in the app. They were, after its first report,
+and the record of what was looked at now says which and where.
