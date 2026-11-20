@@ -737,7 +737,7 @@ for.
    top of the view. Seen: a long page scrolled to its middle showed the
    same line at the same height after four rounds of Edit, Read, Edit,
    and after live preview was switched off and on twice. This fix was
-   not read again; it is what the reviewer proposed, and it was seen.
+   read with the next commit's, in the tenth review's final reading.
 2. **A long document changed while it was not in front is drawn from
    its old reading** until the new one is in. Left, and now said in
    ADR 0024.
@@ -816,7 +816,25 @@ Of the fixes. Six findings, none in the code to stop for.
    lost its selection: fixed, it is shown as any file's lines are.
 6. **Wording**, and a branch that could not be reached. Fixed.
 
-These last fixes were not read again: each is what the reviewer
-proposed. The type check, the tests and the self-tests were run on
-them.
+### The final reading
+
+Of the commit as it was made (`cfed5c0`), with the fixes of the second
+reading in it, and of the one change in `e1ea695` that no reviewer had
+read: the hold on the top line of the view when the drawing is put on
+or taken off. Nothing to fix; three things named.
+
+1. **A link from one line to another of its own page is shown as any
+   file's lines are**, so with the page in two groups the first group
+   takes it. That is the cost of keeping the lines selected, and the
+   choice was the author's, not the reviewer's proposal. Left.
+2. **The hold cuts short a smooth scroll that is under way when a
+   drawing lands**: a long document's first reading arriving as the
+   wheel is turned. Left; not seen.
+3. **The record said the last fixes had not been read.** They have
+   been now; this section takes that sentence's place.
+
+Checked and found right: Enter falls through to the editor's own in a
+script, in a file that cannot be written, and under a list of
+suggestions; the hold moves nothing with no file in the editor, at a
+change of file, or behind the Read view.
 

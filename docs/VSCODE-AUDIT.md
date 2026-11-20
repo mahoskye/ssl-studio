@@ -596,6 +596,8 @@ and three. All are fixed but a few small ones, which are left and named.
 A tenth was made of Markdown writing while it was staged: nine findings,
 two of which would have broken Enter in a split view and the following
 of a link; those and four more are fixed, the rest left and named.
+The commit as made was then read once more, with the last fixes in it:
+nothing to fix.
 
 ## Why not an extension
 
