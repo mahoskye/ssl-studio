@@ -12,6 +12,14 @@ import type { DocFile, DocGroup } from "./protocol";
 /** The folders under the docs folder, each with its catalog. */
 export const DOC_FOLDERS = { tickets: "tickets", specs: "specs", knowledge: "knowledge", registries: "registries" } as const;
 export type DocArea = keyof typeof DOC_FOLDERS;
+/**
+ * A folder with a catalog: the four under the docs folder, and the schema folder, which is the project's own and
+ * may lie anywhere in it (ADR 0026).
+ */
+export type CatalogArea = DocArea | "schema";
+export const CATALOG_AREAS: readonly CatalogArea[] = ["tickets", "specs", "knowledge", "registries", "schema"];
+/** Where an area's folder is: under the docs folder, or the schema folder itself. Both are whole paths. */
+export const areaPath = (area: CatalogArea, folders: { docs: string; schema: string }) => (area === "schema" ? folders.schema : joinPath(folders.docs, DOC_FOLDERS[area]));
 
 /** The project's state, in plain words: at the top of the docs folder. */
 export const STATE_FILE = "STATE.md";
@@ -34,7 +42,7 @@ export type SchemaKind = { id: "database" | "interfaces" | "files"; name: string
  */
 export const SCHEMAS: readonly SchemaKind[] = [
 	{ id: "database", name: "Database", one: "table", about: "The tables the project reads and writes: one Markdown file for each table or area, with its columns, types and keys, and a line on what it is for. `.sql` files are listed too.", columns: ["Column", "Type", "Null", "What it holds"] },
-	{ id: "interfaces", name: "Interfaces", one: "interface message", about: "What the project exchanges with instruments and other systems: one Markdown file for each message, with its fields. A sample of the message, or its own schema (JSON, XML, YAML), can lie beside it.", columns: ["Field", "Type", "Needed", "What it holds"] },
+	{ id: "interfaces", name: "Interfaces", one: "interface message", about: "What the project exchanges with instruments and other systems, and what was agreed with them: one Markdown file for each message, with its fields, in a folder for each system. The agreed specification itself (OpenAPI, WSDL, XSD) or a sample of the message can lie beside it.", columns: ["Field", "Type", "Needed", "What it holds"] },
 	{ id: "files", name: "Files", one: "file layout", about: "The files the project reads or writes: one Markdown file for each layout, with its columns. A sample file can lie beside it.", columns: ["Column", "Type", "Example", "What it holds"] },
 ];
 
@@ -52,10 +60,10 @@ export const REGISTRIES: readonly RegistryKind[] = [
 
 /** The words a status is usually one of, by what they come to: a row that is finished, under way, waiting, or set aside. */
 const TONES: Record<string, readonly string[]> = {
-	done: ["done", "accepted", "answered", "verified", "migrated", "closed", "resolved", "complete", "completed", "approved", "built"],
+	done: ["done", "accepted", "agreed", "answered", "verified", "migrated", "closed", "resolved", "complete", "completed", "approved", "built"],
 	active: ["in progress", "doing", "started", "under way", "building", "review", "in review", "testing"],
 	waiting: ["open", "to do", "todo", "planned", "ready", "draft", "proposed", "new", "found", "pending", ""],
-	off: ["dropped", "superseded", "rejected", "blocked", "gone", "not needed", "not planned", "duplicate", "won't do", "wontfix", "cancelled", "canceled"],
+	off: ["dropped", "superseded", "retired", "rejected", "blocked", "gone", "not needed", "not planned", "duplicate", "won't do", "wontfix", "cancelled", "canceled"],
 };
 export type Tone = "done" | "active" | "waiting" | "off";
 /** What a status comes to. A word that is none of those known is taken as under way. */
@@ -94,6 +102,7 @@ export const PROMPTS = {
 	database: "What the table holds, and what writes it.",
 	interfaces: "Who sends it, who receives it, and when.",
 	files: "What the file is, who writes it and who reads it.",
+	contract: "Where the agreed specification is kept, and who answers for it on each side.",
 } as const;
 /** Whether a line is one a template wrote, not yet replaced. */
 export const isPrompt = (line: string | undefined) => Object.values(PROMPTS).some((prompt) => prompt === (line ?? "").trim());
@@ -212,11 +221,24 @@ export function promptText(text: string): string {
 	return isPrompt(body.split(/\r?\n/)[0]) ? "" : body;
 }
 
-/** A description of one table, one message or one file layout: what it is, then its columns or fields as a table. */
-export const schemaTemplate = (kind: SchemaKind, title: string) => `# ${title}
+/**
+ * A description of one table, one message or one file layout: what it is, then its columns or fields as a table.
+ * What is exchanged with another system is a contract with it, so a message opens with whom it is exchanged with,
+ * which way it goes, the version agreed and how far the agreement is, and says where the agreed specification is.
+ */
+export const schemaTemplate = (kind: SchemaKind, title: string, about: { with?: string; direction?: "in" | "out" | "both" } = {}) => `${
+	kind.id === "interfaces"
+		? fence([
+				["with", about.with ? quoted(about.with) : undefined],
+				["direction", about.direction ?? "in"],
+				["version", "1"],
+				["status", "draft"],
+			])
+		: ""
+}# ${title}
 
 ${PROMPTS[kind.id]}
-
+${kind.id === "interfaces" ? `\n${PROMPTS.contract}\n` : ""}
 | ${kind.columns.join(" | ")} |
 | ${kind.columns.map(() => "---").join(" | ")} |
 | ${kind.columns.map(() => " ").join(" | ")} |
@@ -256,8 +278,9 @@ One paragraph.
 const CATALOG_NOTE = "The list between the two markers is written by SSL Studio from the files here (Docs panel, Update catalogs). Write anything else you like around it.";
 
 /** A catalog as it starts: what the folder is for, and an empty list between its markers. */
-export const catalogTemplate = (area: DocArea) => {
-	const head: Record<DocArea, [string, string]> = {
+export const catalogTemplate = (area: CatalogArea) => {
+	const head: Record<CatalogArea, [string, string]> = {
+		schema: ["Schema", "What the project's data looks like, each kind in its own folder: the database's tables, the messages exchanged with other systems and what was agreed with them, and the files read or written. Another folder made here is a kind of the project's own."],
 		tickets: ["Tickets", "The tickets that drive the work: one file for each, with what was asked, its state and the tickets it is related to."],
 		specs: ["Specs", "What is to be built, written from the tickets: one spec in a file, with its state. Specs the planner writes beside a plan are listed here too."],
 		knowledge: ["Knowledge base", "What the project has learned: decisions, questions, snippets and prompts kept for use, and notes on how things work."],
@@ -287,21 +310,44 @@ export function progressShort(file: Pick<DocFile, "rows" | "tally">): string {
 /** Whether a file is its folder's catalog. */
 export const isCatalog = (file: Pick<DocFile, "name">) => baseName(file.name).toLowerCase() === CATALOG_FILE.toLowerCase();
 
-const AREA_GROUP: Record<DocArea, DocGroup> = { tickets: "tickets", specs: "specs", knowledge: "knowledge", registries: "registries" };
+const AREA_GROUP: Record<CatalogArea, DocGroup> = { tickets: "tickets", specs: "specs", knowledge: "knowledge", registries: "registries", schema: "schema" };
 
 /**
  * What an area's catalog lists: each of its documents, with the way to it
  * from the catalog's folder. A ticket goes by its key and title, a registry by
- * how far it is, and the knowledge base under the kinds of thing it keeps.
+ * how far it is, the knowledge base under the kinds of thing it keeps, and the
+ * schema folder under its kinds, with a folder inside a kind (a system the
+ * project exchanges messages with) named beside it.
+ *
+ * `where` is the docs folder, or the docs folder and the schema folder: the
+ * schema's catalog needs the second.
  */
-export function catalogItems(area: DocArea, files: readonly DocFile[], docsFolder: string): CatalogItem[] {
-	const folder = joinPath(docsFolder, DOC_FOLDERS[area]);
-	// The knowledge base lists its kinds in their own order, whatever the files' names.
-	const order = (file: DocFile) => (area === "knowledge" ? (KNOWLEDGE.findIndex((k) => k.id === file.kind) + 1 || KNOWLEDGE.length + 1) : 0);
+export function catalogItems(area: DocArea, files: readonly DocFile[], where: string | { docs: string; schema: string }): CatalogItem[];
+export function catalogItems(area: CatalogArea, files: readonly DocFile[], where: { docs: string; schema: string }): CatalogItem[];
+export function catalogItems(area: CatalogArea, files: readonly DocFile[], where: string | { docs: string; schema: string }): CatalogItem[] {
+	const folders = typeof where === "string" ? { docs: where, schema: "" } : where;
+	const folder = areaPath(area, folders);
+	// The knowledge base and the schema list their kinds in their own order, whatever the files' names.
+	const schemaOrder = (file: DocFile) => SCHEMAS.findIndex((k) => k.id === file.kind) + 1 || (file.kind ? SCHEMAS.length + 1 : SCHEMAS.length + 2);
+	const order = (file: DocFile) => (area === "knowledge" ? KNOWLEDGE.findIndex((k) => k.id === file.kind) + 1 || KNOWLEDGE.length + 1 : area === "schema" ? schemaOrder(file) : 0);
+	const schema = files.filter((file) => file.group === "schema");
+	// What lies at the top is headed so that no folder's name is taken for it, whatever a project calls its folders.
+	const atTop = schema.some((file) => file.kind?.toLowerCase() === "at the top") ? "At the top of the folder" : "At the top";
+	/** The heading a schema file is listed under: its kind, and the folder inside the kind where it is in one. */
+	const schemaSection = (file: DocFile) => {
+		const parts = file.name.split(/[\\/]/);
+		const kind = !file.kind ? atTop : (SCHEMAS.find((k) => k.id === file.kind)?.name ?? file.kind);
+		return file.kind && parts.length > 2 ? `${kind}: ${parts[1]}` : kind;
+	};
+	/** Within the schema: by kind, then what lies in the kind's own folder before the folders inside it, each by name. */
+	const byName = (a: string, b: string) => a.localeCompare(b, undefined, { sensitivity: "base", numeric: true });
+	const part = (file: DocFile) => (file.kind && file.name.split(/[\\/]/).length > 2 ? file.name.split(/[\\/]/)[1]! : "");
+	const schemaBefore = (a: DocFile, b: DocFile) => byName(a.kind ?? "", b.kind ?? "") || Number(Boolean(part(a))) - Number(Boolean(part(b))) || byName(part(a), part(b));
 	return files
 		.filter((file) => file.group === AREA_GROUP[area] && file.exists && !isCatalog(file))
-		.sort((a, b) => order(a) - order(b))
-		.map((file): CatalogItem => {
+		.map((file, at) => ({ file, at }))
+		.sort((a, b) => order(a.file) - order(b.file) || (area === "schema" ? schemaBefore(a.file, b.file) : 0) || a.at - b.at)
+		.map(({ file }): CatalogItem => {
 			const path = relativePath(folder, file.path);
 			const named = file.title || baseName(file.name).replace(/\.(md|markdown|csv|tsv)$/i, "");
 			if (area === "tickets") return { path, title: file.ticket && !named.startsWith(file.ticket) ? `${file.ticket}: ${named}` : named, status: file.status, summary: file.summary };
@@ -309,6 +355,8 @@ export function catalogItems(area: DocArea, files: readonly DocFile[], docsFolde
 			if (area === "registries" && file.rows === undefined && !file.problems) return { path, title: named, status: file.status, summary: file.summary };
 			if (area === "registries") return { path, title: registryTitle(file.name), status: progress(file) };
 			if (area === "knowledge") return { path, title: named, status: file.status, summary: file.summary, section: KNOWLEDGE.find((k) => k.id === file.kind)?.name ?? "Other" };
+			// A description by what it calls itself; what lies beside it (the SQL, a sample, a schema) by its file's name.
+			if (area === "schema") return { path, title: file.title || baseName(file.name), status: file.status, summary: file.summary, section: schemaSection(file) };
 			return { path, title: named, status: file.status, summary: file.tickets?.length ? `For ${file.tickets.join(", ")}.${file.summary ? ` ${file.summary}` : ""}` : file.summary };
 		});
 }
@@ -350,6 +398,8 @@ export function statusChoices(file: { group?: string; kind?: string } | undefine
 	if (file?.group === "specs") return ["draft", "ready", "in progress", "done", "superseded"];
 	if (file?.group === "knowledge" && file.kind === "decisions") return ["proposed", "accepted", "superseded", "rejected"];
 	if (file?.group === "knowledge" && file.kind === "questions") return ["open", "answered"];
+	// What is exchanged with another system is a contract with it: proposed, then agreed by both, then no longer used.
+	if (file?.group === "schema" && file.kind === "interfaces") return ["draft", "agreed", "retired"];
 	return ["draft", "in progress", "done"];
 }
 

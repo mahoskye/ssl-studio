@@ -8,9 +8,10 @@ import type { DocFile } from "../../shared/protocol";
 import { backend } from "../backend";
 import { docMatches, isCatalog, KNOWLEDGE, progress, progressShort, registryTitle, SCHEMAS, statusChoices, toneOf } from "../../shared/projectDocs";
 import { docs, newDoc, newDocIn, newFolderIn, setUpProject } from "../project";
-import { importTickets, newKnowledge, newRegistry, newSchema, newSpec, newState, newTicket, setStatus, updateCatalogs, updateManifest } from "../projectDocs";
+import { importTickets, newKnowledge, newRegistry, newSchema, newSpec, schemaCatalogKept, newState, newTicket, setStatus, updateCatalogs, updateManifest } from "../projectDocs";
 import { folderParts, folderSaid, IMPORT_TICKETS, kindOf, NEW_DOCUMENT, NEW_FOLDER, NEW_PLAN, NEW_REGISTRY, NEW_SPEC, NEW_TICKET, newOfKind, plainSection, schemaFolderOf, schemaOf, sectionFolder, sectionMenu, SHOW_FOLDER, type DocSection } from "../../shared/docSections";
 import { joinPath } from "../../shared/paths";
+import { schemaList, schemaRowTitle } from "../../shared/schemaList";
 import { shownRows, workList } from "../../shared/workList";
 import { activePath, canonical, notify, openFile, openToSide, setState, state } from "../state";
 import { focusRowsBelow, IconButton, isFolded, Row, RowGroup, Rows, setFold, setFolds, type Point } from "./Rows";
@@ -78,7 +79,9 @@ async function rowMenu(file: DocFile, at: Point) {
 	const manifest = file.group === "registries" && /(^|[\\/])files\.csv$/i.test(file.name);
 	// A state is a Markdown document's front matter: a query or a table kept in the knowledge base has none.
 	const markdown = /\.(md|markdown)$/i.test(file.name);
-	const states = markdown && !catalog && ["tickets", "specs", "knowledge"].includes(file.group) && (file.status || file.group !== "knowledge" || file.kind === "decisions" || file.kind === "questions") ? statusChoices(file).filter((status) => status.toLowerCase() !== (file.status ?? "").toLowerCase()) : [];
+	// A message exchanged with another system is a contract with it, and has a state too: draft, agreed, retired.
+	const contract = file.group === "schema" && file.kind === "interfaces" && !/(^|[\\/])readme\.(md|markdown)$/i.test(file.name);
+	const states = markdown && !catalog && (contract || (["tickets", "specs", "knowledge"].includes(file.group) && (file.status || file.group !== "knowledge" || file.kind === "decisions" || file.kind === "questions"))) ? statusChoices(file).filter((status) => status.toLowerCase() !== (file.status ?? "").toLowerCase()) : [];
 	const UPDATE = catalog ? "Update catalogs" : "Update file manifest";
 	// A file that is not there yet has one thing that can be done to it.
 	// The project's own settings file is what makes the folder a project: it is not renamed or thrown away from its
@@ -208,8 +211,10 @@ const allFolds = () => [
 	...(["project", "work", "knowledge", "registries", "docs", "schema", "plans"] as const).map((group) => `docs:${group}`),
 	...KNOWLEDGE.map((kind) => `docs:knowledge:${kind.id}`),
 	SCHEMA_TOP,
-	// The kinds of schema: those the app knows, and the folders the project has made beside them.
-	...new Set([...SCHEMAS.map((kind) => kind.id), ...docs().flatMap((file) => (file.group === "schema" && file.kind ? [file.kind] : []))].map((kind) => `docs:schema:${kind}`)),
+	// The kinds of schema (those the app knows, and the folders the project has made beside them), and the folders
+	// inside each.
+	...SCHEMAS.map((kind) => `docs:schema:${kind.id}`),
+	...schemaList(docs()).kinds.flatMap((kind) => [`docs:schema:${kind.id}`, ...kind.parts.map((part) => `docs:schema:${kind.id}/${part.name}`)]),
 	"docs:knowledge:other",
 	...docs()
 		.filter((file) => file.group === "tickets")
@@ -232,7 +237,13 @@ async function headMenu(section: DocSection, title: string, at: Point) {
 	const kind = kindOf(section) ?? KNOWLEDGE.find((known) => picked === newOfKind(known));
 	// From the schema's own heading, the kind is the one whose entry was picked; from a kind's heading, that kind.
 	const schema = schemaOf(section) ?? (section === "schema" ? SCHEMAS.find((known) => picked === newOfKind(known)) : undefined);
-	if (picked === NEW_FOLDER) await newFolderIn(folder, plainSection(section));
+	// A folder made under a kind the app knows is for that kind: its first document is a table, a message or a
+	// layout from its template, in the new folder. Elsewhere it is a plain document, where the list holds those.
+	const known = schemaOf(section);
+	const schemaRoot = sectionFolder("schema", project);
+	// Whether the step made anything: one that was cancelled or refused leaves the folder as it was.
+	let made = false;
+	if (picked === NEW_FOLDER) made = await newFolderIn(folder, known ? (inFolder) => newSchema(known.id, inFolder.slice(schemaRoot ? schemaRoot.length + 1 : 0)) : plainSection(section));
 	else if (picked === SHOW_FOLDER) {
 		const path = joinPath(root, ...folderParts(folder));
 		// A list is shown for a folder that is not there yet: its first document or folder makes it.
@@ -242,7 +253,7 @@ async function headMenu(section: DocSection, title: string, at: Point) {
 		);
 		if (there) (await import("./Explorer")).showInExplorer(path);
 		else notify(`${folderSaid(folder)} is not there yet: the first document or folder made here makes it.`);
-	} else if (picked === NEW_DOCUMENT) await newDocIn(folder);
+	} else if (picked === NEW_DOCUMENT) made = await newDocIn(folder);
 	else if (picked === NEW_TICKET) await newTicket();
 	else if (picked === IMPORT_TICKETS) await importTickets();
 	else if (picked === NEW_SPEC) await newSpec();
@@ -250,6 +261,10 @@ async function headMenu(section: DocSection, title: string, at: Point) {
 	else if (picked === NEW_PLAN) (await import("../commands")).runCommand("new-plan");
 	else if (schema) await newSchema(schema.id, schemaFolderOf(section));
 	else if (kind) await newKnowledge(kind.id);
+	// A plain document made in the schema folder (in a kind of the project's own, or the first in a new folder) is
+	// listed in its catalog like any description: the catalog is written afresh, when something was made. A
+	// description from its template has written it already.
+	if (made && (section === "schema" || section.startsWith("schema:"))) await schemaCatalogKept();
 }
 
 /**
@@ -333,38 +348,45 @@ function Knowledge(props: { files: DocFile[]; empty?: string; filtered?: boolean
 
 /**
  * What the project's data looks like, each kind together: the tables, the messages, the file layouts, then any folder
- * of the project's own under its own name, then what lies at the top of the schema folder ("At the top": not
- * "Other", which a folder there may be called). A kind the app knows is
- * shown once the project is set up, empty or not: it is where the first of its kind goes.
+ * of the project's own under its own name. Inside a kind, a folder is a heading of its own (a system the project
+ * exchanges messages with, an area of the database). What lies at the top of the schema folder comes after, and its
+ * catalog last, as the other folders' catalogs do (shared/schemaList.ts).
  */
 function Schema(props: { files: DocFile[]; empty?: string; filtered?: boolean }) {
-	const files = () => props.files.filter((d) => d.group === "schema");
-	const kinds = () => {
-		const own = [...new Set(files().flatMap((d) => (d.kind && !SCHEMAS.some((known) => known.id === d.kind) ? [d.kind] : [])))].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
-		return [...SCHEMAS.map((known) => ({ id: known.id as string, name: known.name, known: true })), ...own.map((name) => ({ id: name, name, known: false })), { id: "", name: "At the top", known: false }]
-			.map((kind) => ({ ...kind, files: files().filter((d) => (d.kind ?? "") === kind.id) }))
-			// The folder as the project has it: a known kind's may be written in other capitals ("Database"), and what
-			// is made or shown from its heading goes there, not into a second folder beside it.
-			.map((kind) => ({ ...kind, folder: kind.files[0]?.name.split(/[\\/]/)[0] ?? kind.id }))
-			.filter((kind) => kind.files.length || (kind.known && !props.filtered && state.project?.configured));
-	};
-	/**
-	 * A file by its name in its kind's folder, where it has no title of its own (the SQL, a sample, a schema), and a
-	 * folder's README by its file's name too: titled as its folder is, it would repeat the heading it stands under.
-	 */
-	const named = (file: DocFile, kind: string) => {
-		const inKind = kind ? file.name.split(/[\\/]/).slice(1).join("/") : file.name;
-		return { ...file, title: /(^|[\\/])readme\.(md|markdown)$/i.test(file.name) ? inKind : file.title || inKind };
-	};
+	const list = createMemo(() => schemaList(props.files, { configured: state.project?.configured, filtered: props.filtered }));
 	return (
-		<RowGroup fold="docs:schema" label="Schema" onMenu={(at) => void headMenu("schema", "Schema", at)} open={props.filtered} count={files().length} role="group" head={<Head title="Schema" folder={folderOf("schema")} />} rows={kinds().length > 0} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
-			<For each={kinds()}>
+		<RowGroup fold="docs:schema" label="Schema" onMenu={(at) => void headMenu("schema", "Schema", at)} open={props.filtered} count={list().count} role="group" head={<Head title="Schema" folder={folderOf("schema")} />} rows={list().kinds.length + list().top.length > 0 || Boolean(list().catalog)} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
+			<For each={list().kinds}>
 				{(kind) => (
-					<RowGroup fold={kind.id ? `docs:schema:${kind.id}` : SCHEMA_TOP} label={kind.name} onMenu={kind.id ? (at) => void headMenu(`schema:${kind.folder}`, kind.name, at) : undefined} open={props.filtered} count={kind.files.length} headClass="doc-kind" head={kind.name}>
-						<For each={kind.files}>{(file) => <ItemRow file={named(file, kind.id)} depth={1} />}</For>
+					<RowGroup fold={`docs:schema:${kind.id}`} label={kind.name} onMenu={(at) => void headMenu(`schema:${kind.folder}`, kind.name, at)} open={props.filtered} count={kind.count} role={kind.parts.length ? "group" : undefined} headClass="doc-kind" head={kind.name}>
+						<Show when={kind.parts.length} fallback={<For each={kind.files}>{(file) => <ItemRow file={{ ...file, title: schemaRowTitle(file, 1) }} depth={1} />}</For>}>
+							{/* With folders inside it, a kind holds groups: what lies in the kind's own folder is a list beside them. */}
+							<Show when={kind.files.length}>
+								<div role="listbox" aria-label={`${kind.name}, not in a folder of its own`}>
+									<For each={kind.files}>{(file) => <ItemRow file={{ ...file, title: schemaRowTitle(file, 1) }} depth={1} />}</For>
+								</div>
+							</Show>
+							<For each={kind.parts}>
+								{(part) => (
+									<RowGroup fold={`docs:schema:${kind.id}/${part.name}`} label={part.name} onMenu={(at) => void headMenu(`schema:${part.folder}`, part.name, at)} open={props.filtered} count={part.files.length} headClass="doc-kind doc-part" head={part.name}>
+										<For each={part.files}>{(file) => <ItemRow file={{ ...file, title: schemaRowTitle(file, 2) }} depth={2} />}</For>
+									</RowGroup>
+								)}
+							</For>
+						</Show>
 					</RowGroup>
 				)}
 			</For>
+			<Show when={list().top.length}>
+				<RowGroup fold={SCHEMA_TOP} label="At the top" open={props.filtered} count={list().top.length} headClass="doc-kind" head="At the top">
+					<For each={list().top}>{(file) => <ItemRow file={{ ...file, title: schemaRowTitle(file, 0) }} depth={1} />}</For>
+				</RowGroup>
+			</Show>
+			<Show when={list().catalog}>
+				<div role="listbox" aria-label="The schema's catalog">
+					<ItemRow file={list().catalog!} />
+				</div>
+			</Show>
 		</RowGroup>
 	);
 }

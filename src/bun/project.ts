@@ -11,7 +11,7 @@ import { parseCsv, tally } from "../shared/csv";
 import { fileLinks, frontPaths, type DocLink } from "../shared/docLinks";
 import { frontMatter, many, one, summaryOf, titleOf } from "../shared/frontMatter";
 import { namePlaces } from "../shared/namedLinks";
-import { catalogItems, DOC_FOLDERS, isCatalog, isPrompt, SCHEMAS, STATE_FILE, type DocArea } from "../shared/projectDocs";
+import { areaPath, CATALOG_AREAS, catalogItems, catalogTemplate, DOC_FOLDERS, isCatalog, isPrompt, SCHEMAS, STATE_FILE, type DocArea } from "../shared/projectDocs";
 import { rowsByTicket } from "../shared/registryTickets";
 import { taskTally } from "../shared/tasks";
 import type { DocFile, LinkTo, ManifestFile, NameIn, Project, Settings } from "../shared/protocol";
@@ -350,10 +350,14 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 		list.push({ path, name: relative(join(root, project.plans), path), group: "plans", exists: true, ...(ticket ? { tickets: [ticket] } : {}), ...(MARKDOWN.test(path) ? brokenLinks(root, path, await head(path), named) : {}) });
 	}
 	// Each catalog says whether its list is still what the documents are.
-	for (const name of Object.keys(DOC_FOLDERS) as DocArea[]) {
-		if (!existsSync(area(name))) continue;
-		const catalog = list.find((file) => file.path === join(area(name), found(area(name), CATALOG_FILE) ?? CATALOG_FILE));
-		if (catalog) catalog.catalog = { stale: catalogStale(await textOf(catalog.path), catalogItems(name, list, docs)) };
+	const folders = { docs, schema: join(root, project.schema) };
+	for (const name of CATALOG_AREAS) {
+		const folder = areaPath(name, folders);
+		// A schema folder that is the project's own folder is no folder of descriptions to be catalogued.
+		if (!existsSync(folder) || (name === "schema" && resolve(folder) === resolve(root))) continue;
+		// The entry of this area's group: a schema folder inside the docs folder is listed with the documents too.
+		const catalog = list.find((file) => file.group === name && file.path === join(folder, found(folder, CATALOG_FILE) ?? CATALOG_FILE));
+		if (catalog) catalog.catalog = { stale: catalogStale(await textOf(catalog.path), catalogItems(name, list, folders)) };
 	}
 	return list;
 }
@@ -390,6 +394,11 @@ export async function fileManifest(files: WorkspaceFiles, project: Project): Pro
 	return rows.sort((a, b) => a.path.localeCompare(b.path, undefined, { sensitivity: "base", numeric: true }));
 }
 
+/** The schema's catalog as a new project gets it: the kinds it can hold, said above the list. */
+const withKinds = (catalog: string) =>
+	// Under what the folder is for, and before the line that says the list below is the app's: these are not that list.
+	catalog.replace(/\n\n(The list between the two markers)/, `\n\n${SCHEMAS.map((kind) => `- \`${kind.id}/\`: ${kind.about}`).join("\n")}\n\n$1`);
+
 /**
  * Writes what a project needs and does not have. Never overwrites. With
  * `dryRun` nothing is written: the answer is what would be, for the user to
@@ -415,11 +424,10 @@ export async function setupProject(root: string, dryRun = false): Promise<string
 		if (!existsSync(join(root, dir))) await put(join(root, dir, "README.md"), `# ${title}\n\n${about}\n`);
 	};
 	await start(project.docs, "Docs", "Notes and decisions about this project. Every Markdown file here shows in the Docs panel.");
-	// The schema folder with a folder for each kind of thing it describes, each saying what goes in it.
-	if (!existsSync(join(root, project.schema))) {
-		await put(join(root, project.schema, "README.md"), `# Schema\n\nWhat this project's data looks like, each kind in its own folder. Another folder made here is a kind of the project's own.\n\n${SCHEMAS.map((kind) => `- [${kind.name}](${kind.id}/README.md): ${kind.about.split(":")[0]!.toLowerCase()}.`).join("\n")}\n`);
-		for (const kind of SCHEMAS) await put(join(root, project.schema, kind.id, "README.md"), `# ${kind.name}\n\n${kind.about}\n`);
-	}
+	// The schema folder starts as its catalog, as the folders of working documents have theirs: it says what the
+	// folder is for and what its kinds are, and lists what is described as it comes. A kind's folder is made with the
+	// first thing described in it.
+	if (!existsSync(join(root, project.schema))) await put(join(root, project.schema, CATALOG_FILE), withKinds(catalogTemplate("schema")));
 	await start(project.tests, "Tests", "Test scripts, and the sample requests and data they need.");
 	// A folder for the code only where there is none yet: an export brings its own layout.
 	let scripts = false;
@@ -531,7 +539,7 @@ ${PLACEHOLDER["AGENTS.md"]}
 - \`${project.docs}/knowledge/\`: decisions, questions, snippets, prompts and notes. Look here before deciding again; write a question here when something is not known.
 - \`${project.docs}/registries/\`: tables of the settings, files and database objects a migration must carry across.
 - Each of those four folders has an \`INDEX.md\`: its catalog. Find a document there, and do not edit the list between its markers.
-- \`${project.schema}/\`: what the project's data looks like: the tables it reads and writes (under \`database/\`, where the folder is kept by kind), the messages it exchanges with other systems (\`interfaces/\`) and the files it reads or writes (\`files/\`). Check a table there before writing SQL for it.
+- \`${project.schema}/\`: what the project's data looks like: the tables it reads and writes (under \`database/\`, where the folder is kept by kind), the messages it exchanges with other systems and what was agreed with them (\`interfaces/\`, a folder for each system) and the files it reads or writes (\`files/\`). Its \`INDEX.md\` is its catalog, kept like the others. Check a table there before writing SQL for it.
 - \`${project.tests}/\`: test scripts and what they need.
 - \`${project.plans}/\`: plans and tidy notes.
 `;

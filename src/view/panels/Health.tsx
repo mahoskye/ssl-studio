@@ -16,7 +16,8 @@ import { serverDown } from "./server";
 import { openStyleProfile } from "../StyleProfile";
 import { docs, setUpProject } from "../project";
 import { checksSummary, docChecks, type DocCheck, type LinkMend } from "../../shared/docChecks";
-import { isCatalog, registryTitle, toneOf } from "../../shared/projectDocs";
+import { folderParts } from "../../shared/docSections";
+import { CATALOG_AREAS, isCatalog, registryTitle, toneOf } from "../../shared/projectDocs";
 import { mendLinks, newTicket, updateCatalogs } from "../projectDocs";
 
 const PROCEDURE = new Set([monaco.languages.SymbolKind.Function, monaco.languages.SymbolKind.Method]);
@@ -64,7 +65,9 @@ export function Health() {
 		</div>
 	);
 	/** What the tickets, specs, knowledge base and registries need from someone. */
-	const checks = () => docChecks(docs());
+	// A schema folder that is the project's own folder is no folder of descriptions: it has no catalog to ask for.
+	const areas = () => CATALOG_AREAS.filter((area) => area !== "schema" || folderParts(state.project?.schema ?? "schema").length > 0);
+	const checks = () => docChecks(docs(), areas());
 	const hasWork = () => docs().some((d) => d.exists && (d.group === "tickets" || d.group === "specs" || d.group === "knowledge" || d.group === "registries"));
 	/** Each registry with how many of its rows are done: how far a migration has come, list by list. */
 	const registries = () =>

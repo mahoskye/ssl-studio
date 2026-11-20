@@ -1344,3 +1344,68 @@ beside a `Database/` that was there. Fixed before the commit: asked
 for with no folder named, a description goes where the project
 already keeps that kind.
 
+## The seventeenth review: the schema's catalog, and interfaces as contracts
+
+A fresh reviewer read the change as staged, before its commit: the
+schema folder's catalog in place of its READMEs, a folder inside a
+kind as a heading of its own, a message as a contract with its system,
+the headings' faint ground, the demo and the record. It was told what
+each part is for and not what was thought of it, and ran what it
+could; the app itself it did not run. Nothing held the commit. Four
+findings, all fixed before it:
+
+1. **With the schema folder inside the docs folder, the catalog was
+   listed twice and the wrong one was marked out of date**, so Health
+   and the Schema list never said so, and a state set from a row did
+   not write the catalog afresh. Fixed: the mark goes on the schema's
+   own entry, and the step finds the folder that has a catalog.
+2. **A plain document or a folder made from a heading in the schema
+   folder left its catalog out of date**, though the guide says a
+   catalog is written when a document is made. Fixed: the schema's
+   catalog is written afresh after such a step.
+3. **Health said "schema/" whatever the folder is called**, and asked
+   a project whose schema folder is its own folder for a catalog of
+   everything in it. Fixed: it says "the schema folder", and such a
+   project has no schema catalog: none is marked, asked for or written.
+4. **The catalog a new project gets ran its list of kinds into the
+   line about the app's own list.** Fixed: the kinds come first, with
+   a blank line either side.
+
+Smaller, and dealt with: the schema's catalog could be asked for with
+the docs folder alone, which gave wrong paths (it is a type error
+now); its headings were ordered by their words, so a folder inside a
+kind could fall between two kinds (they are ordered by kind, then
+what lies in the kind's own folder, then the folders inside it); a
+folder a project happened to call "At the top" shared a heading with
+what lies at the top (the top's heading then says "of the folder");
+a description called "Index" would have been taken for a catalog (it
+is refused, in words); the way a message goes was asked before
+finding that the message was already there (it is opened first); and
+a blank line at the end of the decision record.
+
+Left, each with its reason: an existing status of "agreed" or
+"retired" in a registry now counts as done or set aside, where it
+counted as under way, since that is what the words mean; a system's
+name that is a bare number or "yes" is written without quotes, which
+the app's own reader takes as text; and in the knowledge base, as
+before, a document called "Index" is taken for a catalog.
+
+### The second reading
+
+The same reviewer read the fixes as staged and ran them: nothing to
+hold the commit, each of the four findings dealt with, and none open.
+With the schema folder inside the docs folder, the schema's entry was
+marked and the mark cleared once the list was written; with the schema
+folder the project's own, nothing was marked, asked for or written;
+the sentences read right with one, two and three folders named; the
+demo's five catalogs were up to date and its 40 manifest rows matched.
+
+Two small things it named after. The first was dealt with before the
+commit: the schema's catalog was written afresh after a step from a
+heading even when the step had been cancelled (it is written only
+when something was made). The second is left, with its reason: in a
+project whose schema folder is its own folder, a file `INDEX.md` at
+its top is still shown as a catalog, as any file of that name is, and
+"Update catalogs" does nothing for it; such a project has no schema
+catalog, and the setting itself says the whole folder is schema.
+

@@ -711,3 +711,53 @@ heading, "New interface message…" put `Order-feed.md` in
 `schema/Interfaces/`, where it was then listed, and "Show in the
 Explorer" put the keyboard on `schema/Interfaces`.
 
+## The schema's catalog, and interfaces as contracts
+
+Asked for in use, the day the schema was split by kind. The user asked
+what "Schema" at the top of the list was (the folder's own README),
+and then for the folder to be found as the others are: "instead of
+serving a readme, maybe we use the index approach. I prefer approaches
+be consistent wherever possible." And asked whether what is agreed
+with an outside system belongs under interfaces, the answer given was
+yes, and the user agreed to both changes. They are appended to
+[ADR 0026](adr/0026-schema-is-kept-by-kind-and-prompts-are-kept.md).
+
+| Now | How |
+| --- | --- |
+| The schema's catalog | `schema/INDEX.md`, written and kept as the other four are |
+| READMEs there | None made: "Set up project" writes the catalog, which names the kinds |
+| "At the top" | Shown only when something other than the catalog lies there |
+| A folder in a kind | A heading of its own: a system among the interfaces |
+| A message | Opens with whom, which way, the version and how far it is agreed |
+| Its states | draft, agreed, retired: set from its row's menu |
+
+Looked at in my own instance, on a scratch copy of the demo, at 1400
+and 720 wide in the dark and the light theme: nothing ran off the
+panel in any.
+
+| Done | Seen |
+| --- | --- |
+| The Schema list | Database, Interfaces with Maintenance under it, Files, then Catalog |
+| What is gone | No README and no "At the top" in the list; the count is of what is described |
+| A system's message | Asked "with Maintenance", then which way it goes: In, Out or Both |
+| What it opened as | `with: Maintenance`, `direction: in`, `version: 1`, `status: draft` |
+| New folder… there | On Interfaces: "ERP", then a message with ERP, going out, listed under ERP |
+| The row's menu | "Set to agreed" and "Set to retired"; chosen, the row read "agreed" |
+| The catalog after | Not marked out of date: written with each new description |
+
+The demo's four schema READMEs gave way to one catalog, with what they
+said that the list does not say written under it; its one message
+moved into a folder for its system and opens with the contract's
+lines. Its manifest and catalogs were brought up to date with the
+app's own steps.
+
+Asked for with it: "the headers for the sub directories in docs should
+also have a faint background to them to help separate them from
+working documents". The heading of each kind in the knowledge base and
+in the schema has a faint ground now (three parts in a hundred of the
+text's colour, against five for the heading of the list itself, which
+has a border too), and a folder inside a kind a fainter one (two). A
+heading still takes the ground of the row under the pointer when the
+pointer is on it. Looked at at 1400 and 720 wide, in the dark and the
+light theme: the bands set the headings apart in all four, and no
+document's row has one.

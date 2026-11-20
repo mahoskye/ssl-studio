@@ -36,8 +36,9 @@ the source of truth.
   for docs, schema, tests and code. The Docs panel lists the two files with
   the Markdown under `docs/`, rendered for reading, and what `schema/`
   holds by its kinds (the database's tables, the messages exchanged with
-  other systems, the files read or written); Health says which are
-  missing or still the template.
+  other systems and what was agreed with them, the files read or
+  written), with a catalog like the working documents'; Health says
+  which are missing or still the template.
 - **The work, written down:** under `docs/`, the tickets that drive the
   work, the specs written from them, a knowledge base (decisions, questions,
   snippets, prompts kept for the agent, reference notes) and registries: tables of the settings, files

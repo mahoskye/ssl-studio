@@ -81,3 +81,38 @@ and [ADR 0012](0012-a-projects-work-is-written-down.md).
   or be put to the agent from the editor's menu.
 - Forms and their layouts are not a kind here: front-end work is on
   hold.
+
+## Changes to this draft
+
+**2026-11-20, the same day, on the user's word after using it.** Three
+things above no longer stand as written:
+
+- **The schema folder has a catalog, not READMEs.** The user: "At the
+  top feels out of place since we seem to use the automatically
+  generated catalog", and "instead of serving a readme, maybe we use
+  the index approach. I prefer approaches be consistent wherever
+  possible." The schema folder's `INDEX.md` is its catalog, written
+  and kept as those of the tickets, specs, knowledge base and
+  registries are: a list between two markers, under the kinds, with
+  anything written around it left alone. "Set up project" makes that
+  one file, which names the kinds; a kind's folder comes with the
+  first thing described in it. No README is made for the folder or
+  for a kind. The Docs panel shows the catalog last in the Schema
+  list, and Health says when it is out of date or missing.
+- **What lies at the top of the schema folder** is listed under "At
+  the top" only when something other than the catalog lies there.
+- **Interfaces are contracts too.** Asked whether what is agreed with
+  an outside system belongs under interfaces or somewhere of its own,
+  the agent's answer was interfaces, and the user agreed. A folder
+  inside a kind's folder is a heading of its own in the list: for
+  interfaces, a folder for each system. A message opens with whom it
+  is exchanged with, which way it goes, the version agreed and how
+  far the agreement is (`draft`, `agreed`, `retired`), and says where
+  the agreed specification is kept. The agreed specification itself
+  (OpenAPI, WSDL, XSD) lies beside the description. What is not the
+  shape of data (obligations, service levels, who signs off a change)
+  is prose, and belongs in the docs folder or the knowledge base.
+
+Not decided by this: whether the READMEs that "Set up project" writes
+for the docs, tests and code folders should give way to something
+generated too. They are as they were.

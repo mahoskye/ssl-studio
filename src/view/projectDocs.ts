@@ -36,7 +36,9 @@ import {
 	toneOf,
 	frontValue,
 	isCatalog,
-	type DocArea,
+	areaPath,
+	CATALOG_AREAS,
+	type CatalogArea,
 	type KnowledgeKind,
 	type SchemaKind,
 } from "../shared/projectDocs";
@@ -57,7 +59,12 @@ const today = () => localDay();
 const root = () => state.workspace?.root ?? "";
 // "." is the project's own folder: no part of a path, or the same file would have two spellings.
 const docsFolder = () => joinPath(root(), ...(state.project?.docs ?? "docs").split(/[\\/]/).filter((part) => part && part !== "."));
-const areaFolder = (area: DocArea) => joinPath(docsFolder(), DOC_FOLDERS[area]);
+// "." is the project's own folder here too.
+const schemaFolder = () => joinPath(root(), ...folderParts(state.project?.schema ?? "schema"));
+const catalogFolders = () => ({ docs: docsFolder(), schema: schemaFolder() });
+const areaFolder = (area: CatalogArea) => areaPath(area, catalogFolders());
+/** An area's folder as it is said: "tickets", or the schema folder by the name the project gives it. */
+const areaSaid = (area: CatalogArea) => (area === "schema" ? relativeTo(root(), schemaFolder()).split("\\").join("/") || "the project's folder" : DOC_FOLDERS[area]);
 const ready = () => (state.workspace && state.project ? true : (notify("Open a folder first."), false));
 
 /** A file's text as it stands: in the editor if it is open there, on disk otherwise, null when there is no such file. */
@@ -91,10 +98,12 @@ async function put(path: string, text: string, existed: boolean) {
 }
 
 /** Writes an area's catalog afresh from its documents; makes the catalog where there is none. True when it changed. */
-async function writeCatalog(area: DocArea, files: readonly DocFile[]): Promise<boolean> {
+async function writeCatalog(area: CatalogArea, files: readonly DocFile[]): Promise<boolean> {
+	// A schema folder that is the project's own folder is no folder of descriptions to be catalogued.
+	if (area === "schema" && !folderParts(state.project?.schema ?? "schema").length) return false;
 	// The catalog the folder already has, however its name is cased: a second one is not made beside it.
 	const path = files.find((file) => file.group === area && file.exists && isCatalog(file) && !file.name.includes("/") && !file.name.includes("\\"))?.path ?? joinPath(areaFolder(area), CATALOG_FILE);
-	const items = catalogItems(area, files, docsFolder());
+	const items = catalogItems(area, files, catalogFolders());
 	const before = await current(path);
 	if (before === null && !items.length) return false;
 	if (before !== null && !catalogStale(before, items)) return false;
@@ -103,7 +112,7 @@ async function writeCatalog(area: DocArea, files: readonly DocFile[]): Promise<b
 }
 
 /** Makes a document from its template, lists it in its folder's catalog, and opens it as text. A file already there is opened, not replaced. */
-async function start(path: string, text: string, area?: DocArea) {
+async function start(path: string, text: string, area?: CatalogArea) {
 	if ((await current(path)) !== null) {
 		notify(`${relativeTo(root(), path)} is already there: opened.`);
 		return openFile(path);
@@ -313,26 +322,50 @@ export async function newKnowledge(kind: KnowledgeKind["id"]) {
 	await start(joinPath(folder, `${number}-${slug(title)}.md`), decisionTemplate({ title, date: today(), ticket }) + about, "knowledge");
 }
 
+/** Writes the schema folder's catalog afresh where it no longer says what the folder holds: after a document made there by another step. */
+export async function schemaCatalogKept() {
+	if (!ready()) return;
+	try {
+		if (await writeCatalog("schema", await backend.docs())) setState("treeVersion", (v) => v + 1);
+	} catch (e: any) {
+		notify(String(e?.message ?? e), "error");
+	}
+}
+
 /**
  * A description of one table, one message or one file layout, in its kind's folder under the schema folder. A table
  * is called what it is called in the database; a message and a layout are named in a few words. It goes in the
  * kind's folder as the project has it, which may be written in other capitals ("Database"): no second folder is made
  * beside it.
  */
-export async function newSchema(id: SchemaKind["id"], inFolder?: string) {
-	if (!ready()) return;
+export async function newSchema(id: SchemaKind["id"], inFolder?: string): Promise<boolean> {
+	if (!ready()) return false;
 	const kind = SCHEMAS.find((known) => known.id === id)!;
-	const title = (await ask(id === "database" ? "The table's name, as the database has it" : `The ${kind.one}, in a few words`))?.trim();
-	if (!title) return;
-	// A file, so a table called BUILD is described: only a folder of that name is left out of the app's lists.
-	const named = typedParts(id === "database" ? title : slug(title), "file");
-	if ("problem" in named || named.parts.length !== 1) return notify("problem" in named ? named.problem : `“${title}” is not one name: a table is described in the ${kind.name.toLowerCase()} folder itself.`, "error");
 	// Asked for with no folder named (the Schema heading, the New menu, the palette), it goes where the project
 	// already keeps that kind, whatever capitals the folder is written in; only a project with none gets a new one.
 	const kept = docs().find((file) => file.group === "schema" && file.kind === id)?.name.split(/[\\/]/)[0];
-	const folder = joinPath(root(), ...folderParts(state.project!.schema), inFolder ?? kept ?? id);
-	await start(joinPath(folder, `${named.parts[0]}.md`), schemaTemplate(kind, title));
+	const into = folderParts(inFolder ?? kept ?? id);
+	// A folder inside the interfaces' is a system the project exchanges messages with: the message is with it.
+	const system = id === "interfaces" ? into[1] : undefined;
+	const title = (await ask(id === "database" ? "The table's name, as the database has it" : `The ${kind.one}${system ? ` with ${system}` : ""}, in a few words`))?.trim();
+	if (!title) return false;
+	// A file, so a table called BUILD is described: only a folder of that name is left out of the app's lists.
+	const named = typedParts(id === "database" ? title : slug(title), "file");
+	if ("problem" in named || named.parts.length !== 1) return notify("problem" in named ? named.problem : `“${title}” is not one name: a table is described in the ${kind.name.toLowerCase()} folder itself.`, "error"), false;
+	const path = joinPath(root(), ...folderParts(state.project!.schema), ...into, `${named.parts[0]}.md`);
+	// "Index" is what a folder's catalog is called: a description by that name would be taken for one.
+	if (isCatalog({ name: `${named.parts[0]}.md` })) return notify(`“${title}” would be the file ${CATALOG_FILE}, which is a folder's catalog. Call the ${kind.one} something else.`, "error"), false;
+	// One already there is opened, before anything more is asked about a new one.
+	if ((await current(path)) !== null) return await start(path, "", "schema"), false;
+	// Which way a message goes is part of what was agreed: asked, since a wrong guess would stand as if it were known.
+	const way = id === "interfaces" ? await choose(`Which way does “${title}” go?`, Object.keys(WAYS), { details: WAYS }) : undefined;
+	if (id === "interfaces" && !way) return false;
+	await start(path, schemaTemplate(kind, title, { with: system, direction: way ? (way.toLowerCase() as "in" | "out" | "both") : undefined }), "schema");
+	return (await current(path)) !== null;
 }
+
+/** Which way a message goes, as it is asked: the word that is written, and what it means. */
+const WAYS: Record<string, string> = { In: "The project receives it", Out: "The project sends it", Both: "It goes each way" };
 
 /** A row for each object the schema folder's SQL creates: object, kind, used by (empty), status, and where it was found. */
 async function schemaRows(): Promise<string> {
@@ -392,8 +425,9 @@ export async function setStatus(path: string, status: string) {
 		await put(path, after, true);
 		// The catalog that lists it: a spec the planner wrote is beside its plan, and is listed with the specs.
 		const listing = await backend.docs();
-		const group = listing.find((d) => canonical(d.path) === canonical(path))?.group;
-		const area = (Object.keys(DOC_FOLDERS) as DocArea[]).find((name) => name === group);
+		// A file may be listed in two groups (a schema folder inside the docs folder): the one that has a catalog.
+		const groups = listing.filter((d) => canonical(d.path) === canonical(path)).map((d) => d.group);
+		const area = CATALOG_AREAS.find((name) => groups.includes(name));
 		if (area) await writeCatalog(area, listing);
 		setState("treeVersion", (v) => v + 1);
 	} catch (e: any) {
@@ -585,7 +619,7 @@ export async function updateCatalogs() {
 	try {
 		const files = await backend.docs();
 		const changed: string[] = [];
-		for (const area of Object.keys(DOC_FOLDERS) as DocArea[]) if (await writeCatalog(area, files)) changed.push(`${DOC_FOLDERS[area]}/${CATALOG_FILE}`);
+		for (const area of CATALOG_AREAS) if (await writeCatalog(area, files)) changed.push(`${areaSaid(area)}/${CATALOG_FILE}`);
 		setState("treeVersion", (v) => v + 1);
 		notify(changed.length ? `Updated ${changed.join(", ")}.` : "Every catalog already says what its folder holds.");
 	} catch (e: any) {

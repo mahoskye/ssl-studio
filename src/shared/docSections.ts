@@ -35,7 +35,11 @@ export const schemaFolderOf = (section: DocSection): string | undefined => (sect
  * The kind of schema a section is, when it is one the app knows: whatever the capitals its folder is written in,
  * since a folder "Database" is the database's (and on some disks is the folder "database").
  */
-export const schemaOf = (section: DocSection): SchemaKind | undefined => SCHEMAS.find((kind) => section.toLowerCase() === `schema:${kind.id}`);
+export const schemaOf = (section: DocSection): SchemaKind | undefined => {
+	// A folder inside a kind's folder ("schema:interfaces/ERP") is of that kind.
+	const first = schemaFolderOf(section)?.split("/")[0]?.toLowerCase();
+	return SCHEMAS.find((kind) => kind.id === first);
+};
 
 /**
  * The folder a section's documents are in, from the top of the workspace, with "/" between its parts: "" for the top

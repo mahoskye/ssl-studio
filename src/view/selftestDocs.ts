@@ -4,7 +4,7 @@
 // says the same about the root files, and is checked beside it.
 import { monaco } from "./editor/monaco";
 import { baseName, joinPath } from "../shared/paths";
-import { questionTemplate, specTemplate, ticketTemplate } from "../shared/projectDocs";
+import { isCatalog, questionTemplate, specTemplate, ticketTemplate } from "../shared/projectDocs";
 import { backend } from "./backend";
 import { activeEditor } from "./editor/EditorGroup";
 import { readingsAnsweredAside } from "./editor/markdownLive";
@@ -203,8 +203,10 @@ export function selftestWork(): Promise<Steps> {
 		await step("catalogsWritten", async () => {
 			await updateCatalogs();
 			return until(() => {
+				// The four folders of working documents, and the schema folder where it has a catalog: each up to date.
 				const catalogs = docs().filter((d) => d.catalog);
-				return catalogs.length === 4 && catalogs.every((d) => !d.catalog!.stale);
+				const groups = new Set<string>(catalogs.map((d) => d.group));
+				return ["tickets", "specs", "knowledge", "registries"].every((group) => groups.has(group)) && catalogs.every((d) => !d.catalog!.stale);
 			});
 		});
 		showPanel("health");
@@ -320,6 +322,8 @@ export function selftestWork(): Promise<Steps> {
 			name.form.requestSubmit();
 			return until(() => docs().some((d) => d.group === "schema" && d.kind === "database" && /(^|[\\/])SELF_TABLE\.md$/.test(d.name) && d.title === "SELF_TABLE" && d.untouched));
 		});
+		// The schema folder has a catalog like the other folders: written with the first description, and up to date.
+		await step("schemaCatalogKept", () => until(() => docs().some((d) => d.group === "schema" && !d.kind && isCatalog(d) && d.catalog && !d.catalog.stale)));
 		// A prompt kept in the knowledge base is offered in the Agent panel, by its name.
 		await step("promptKeptAndOffered", async () => {
 			await write(["knowledge", "prompts", "Self-prompt.md"], "# Self prompt\n\nSay what the selected code does.\n");

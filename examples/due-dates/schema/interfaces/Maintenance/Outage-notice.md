@@ -1,6 +1,14 @@
+---
+with: Maintenance
+direction: in
+version: 1
+status: draft
+---
 # Outage notice
 
-The maintenance system is to send one when an instrument is booked out, and again if the booking changes. Each notice is to become a row of [DEMO_OUTAGES](../database/DEMO_OUTAGES.md). A sample is in [outage-notice.json](outage-notice.json).
+The maintenance system is to send one when an instrument is booked out, and again if the booking changes. Each notice is to become a row of [DEMO_OUTAGES](../../database/DEMO_OUTAGES.md). A sample is in [outage-notice.json](outage-notice.json).
+
+Nothing is agreed yet: this page is the proposal. When it is, the agreed specification is to lie beside it, and the maintenance team answers for it on their side.
 
 | Field | Type | Needed | What it holds |
 | --- | --- | --- | --- |

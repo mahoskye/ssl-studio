@@ -93,7 +93,11 @@ the JSON its API returns
   the database's tables, the messages exchanged with other systems
   (interfaces), and the files read or written. Each kind is a folder
   under the schema folder; any other folder there is listed under its
-  own name ([ADR 0026](adr/0026-schema-is-kept-by-kind-and-prompts-are-kept.md)).
+  own name, and a folder inside a kind is a heading of its own: a
+  system among the interfaces. A message is a contract with its
+  system: it says which way it goes, the version agreed and how far
+  the agreement is. The folder's catalog is listed last, as the
+  others' are ([ADR 0026](adr/0026-schema-is-kept-by-kind-and-prompts-are-kept.md)).
 - **A heading's menu** (right-click, or the menu key on it) adds what
   that list keeps, or a folder in its folder.
 - **A filter** narrows every list to the documents the words typed are in.
@@ -104,6 +108,8 @@ Each folder's `INDEX.md` is its catalog: one line for each document, with
 its title, its state and what it is about. The IDE writes the list between
 two marker lines and leaves everything else in the file alone. It writes it
 when it makes or changes a document; "Update catalogs" writes them all.
+The schema folder has one too, under its kinds and, among the interfaces,
+the system each message is exchanged with.
 
 ## Registries
 

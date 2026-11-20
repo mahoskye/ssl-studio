@@ -52,7 +52,7 @@ Nobody runs it in production; it has to stay small, readable and correct.
 - `docs/knowledge/`: decisions, questions, snippets, prompts and notes. Look here before deciding again.
 - `docs/registries/`: the settings, files and database objects, as tables.
 - Each of those four has an `INDEX.md`, its catalog. Do not edit the list between its markers.
-- `schema/`: what the project's data looks like, each kind in its folder. `database/` is the tables it reads and writes: check a table there before writing SQL for it. `interfaces/` is the messages it exchanges with other systems, and `files/` the files it reads or writes.
+- `schema/`: what the project's data looks like, each kind in its folder. `database/` is the tables it reads and writes: check a table there before writing SQL for it. `interfaces/` is the messages it exchanges with other systems and what was agreed with them, a folder for each system, and `files/` the files it reads or writes. Its `INDEX.md` is its catalog, kept like the others.
 - `tests/DueDatesTests/`: test scripts and what they need. `TestSupport` runs
   them; `DbTestSupport` is for the ones that need the database.
 - `design/`: the plan for `SetSampleDueDates` (chart, spec, build record),

@@ -120,22 +120,25 @@ export async function newDocIn(folder?: string): Promise<boolean> {
  * A new folder in one of the project's folders, asked for from the heading of
  * its list in the Docs panel. That list shows documents, so an empty folder is
  * not in it: where a document can be named straight into the folder (`first`),
- * its name is asked for next, and otherwise a notice says where the folder is.
+ * its name is asked for next (a plain document, or what `first` itself starts:
+ * a list's own kind of document), and otherwise a notice says where the folder is.
+ * Answers whether a folder was made.
  */
-export async function newFolderIn(folder: string, first: boolean) {
-	if (!state.workspace || !state.project) return notify("Open a folder first.");
+export async function newFolderIn(folder: string, first: boolean | ((made: string) => Promise<boolean>)): Promise<boolean> {
+	if (!state.workspace || !state.project) return notify("Open a folder first."), false;
 	const into = folderParts(folder);
 	const typed = (await ask(`Name of the new folder in ${folderSaid(into.join("/"))}`))?.trim();
-	if (!typed) return;
+	if (!typed) return false;
 	const named = typedParts(typed);
-	if ("problem" in named) return notify(named.problem, "error");
+	if ("problem" in named) return notify(named.problem, "error"), false;
 	const made = [...into, ...named.parts].join("/");
 	try {
 		await backend.create(joinPath(state.workspace.root, ...into, ...named.parts), "dir");
 	} catch (e: any) {
-		return notify(String(e?.message ?? e), "error");
+		return notify(String(e?.message ?? e), "error"), false;
 	}
 	setState("treeVersion", (v) => v + 1);
-	if (first && (await newDocIn(made))) return;
+	if (first && (await (typeof first === "function" ? first(made) : newDocIn(made)))) return true;
 	notify(`Made the folder ${made}/. It is empty, so this list does not show it yet; the Explorer does.`);
+	return true;
 }

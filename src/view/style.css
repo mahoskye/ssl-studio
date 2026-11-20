@@ -1011,6 +1011,14 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .doc-row .meta .short { display: none; }
 /* A kind inside the knowledge base: a heading one step in, quieter than the group's own. */
 .doc-kind { padding: var(--space-2) var(--space-4) var(--space-1) var(--space-5); font-size: var(--text-sm); font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+/* A kind's heading stands apart from the documents under it by a faint ground: fainter than its list's own heading,
+   which has a border too. Named with .foldable so as to come after that class's rule, and with its own hover, which
+   that rule would otherwise lose to the ground set here. */
+.doc-kind.foldable { padding-bottom: var(--space-2); background: color-mix(in srgb, var(--fg) 3%, transparent); }
+/* A folder inside a kind (a system among the interfaces): a heading one step in, and quieter than its kind's. */
+.doc-kind.doc-part { padding-left: calc(var(--space-5) + 14px); font-weight: 500; text-transform: none; letter-spacing: 0; }
+.doc-kind.doc-part.foldable { background: color-mix(in srgb, var(--fg) 2%, transparent); }
+.doc-kind.foldable:hover, .doc-kind.foldable:focus-visible { background: var(--hover); }
 .doc-row { padding-left: var(--space-6); }
 .doc-row.missing .label { color: var(--muted); font-style: italic; }
 .doc-row .meta.warn, .health .meta.warn { color: var(--warning); }

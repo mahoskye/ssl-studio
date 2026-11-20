@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { catalogBlock, catalogLine, catalogList, catalogStale, withCatalog, CATALOG_END, CATALOG_START } from "../src/shared/catalog";
 import { columnOf, csvCell, csvRow, parseCsv, tally } from "../src/shared/csv";
 import { frontMatter, many, one, summaryOf, titleOf } from "../src/shared/frontMatter";
-import { catalogTemplate, decisionTemplate, KNOWLEDGE, promptTemplate, promptText, questionTemplate, SCHEMAS, schemaTemplate, slug, specTemplate, ticketKey, ticketTemplate, toneOf } from "../src/shared/projectDocs";
+import { catalogTemplate, decisionTemplate, KNOWLEDGE, promptTemplate, promptText, questionTemplate, SCHEMAS, schemaTemplate, slug, specTemplate, statusChoices, ticketKey, ticketTemplate, toneOf } from "../src/shared/projectDocs";
 
 describe("front matter", () => {
 	test("values, a list on one line and a list as dashes are read", () => {
@@ -233,15 +233,38 @@ describe("a description in the schema folder", () => {
 	test("starts as its name, a line that says what goes there, and a table of its columns or fields", () => {
 		for (const kind of SCHEMAS) {
 			const text = schemaTemplate(kind, "DEMO_ORDERS");
-			const lines = text.split("\n");
+			// A message opens with the lines that say what was agreed; the others open with their name.
+			const lines = frontMatter(text).body.split("\n");
 			expect(lines[0]).toBe("# DEMO_ORDERS");
 			expect(isPrompt(summaryOf(text))).toBe(true);
-			expect(lines[4]).toBe(`| ${kind.columns.join(" | ")} |`);
-			expect(lines[5]).toBe("| --- | --- | --- | --- |");
+			const table = lines.indexOf(`| ${kind.columns.join(" | ")} |`);
+			expect(table).toBeGreaterThan(1);
+			expect(lines[table + 1]).toBe("| --- | --- | --- | --- |");
 			// The table rule: four columns at most, and short headings.
 			expect(kind.columns.length).toBeLessThanOrEqual(4);
 			expect(kind.columns.every((column) => column.length <= 16)).toBe(true);
 		}
+	});
+
+	test("a message is a contract with another system: it opens with whom, which way, the version and how far it is agreed", () => {
+		const interfaces = SCHEMAS.find((kind) => kind.id === "interfaces")!;
+		const text = schemaTemplate(interfaces, "Order feed", { with: "ERP", direction: "out" });
+		expect(frontMatter(text).values).toEqual({ with: "ERP", direction: "out", version: "1", status: "draft" });
+		// Where the agreed specification is kept is asked for in the page, under what the message is.
+		expect(frontMatter(text).body).toContain("\n\nWhere the agreed specification is kept, and who answers for it on each side.\n\n| Field |");
+		// With no system named (a message not yet in a system's folder), no system is written; it is taken to come in.
+		expect(frontMatter(schemaTemplate(interfaces, "Order feed")).values).toEqual({ direction: "in", version: "1", status: "draft" });
+		// A system's name that would be read as something else is quoted.
+		expect(schemaTemplate(interfaces, "X", { with: "Lab: north" })).toContain('with: "Lab: north"');
+		// A table and a file layout open with no such lines.
+		for (const kind of SCHEMAS.filter((known) => known.id !== "interfaces")) expect(schemaTemplate(kind, "X", { with: "ERP" }).startsWith("# X\n")).toBe(true);
+	});
+
+	test("a message's state is one of a contract's, and reads as done once agreed and as set aside once retired", () => {
+		expect(statusChoices({ group: "schema", kind: "interfaces" })).toEqual(["draft", "agreed", "retired"]);
+		expect([toneOf("draft"), toneOf("agreed"), toneOf("retired")]).toEqual(["waiting", "done", "off"]);
+		// A table has no such states of its own.
+		expect(statusChoices({ group: "schema", kind: "database" })).toEqual(["draft", "in progress", "done"]);
 	});
 
 	test("the three say different things of themselves, so one still as its template is told from one written", () => {
@@ -295,6 +318,7 @@ import { join } from "node:path";
 import { fileManifest, listDocs, readProject } from "../src/bun/project";
 import { WorkspaceFiles } from "../src/bun/workspace";
 import { catalogItems } from "../src/shared/projectDocs";
+import { schemaList } from "../src/shared/schemaList";
 import { ticketAtHand, workFor, workLabel, workText } from "../src/shared/workContext";
 
 describe("the demo project's working documents", () => {
@@ -326,17 +350,34 @@ describe("the demo project's working documents", () => {
 		expect(prompts.every((d) => !d.untouched && Boolean(d.summary))).toBe(true);
 	});
 
-	test("the schema folder is listed by its kinds: the tables, the messages, the file layouts, and what lies at its top", async () => {
-		const schema = (await listed()).filter((d) => d.group === "schema");
+	test("the schema folder is listed by its kinds, a message under its system, and has a catalog like the other folders", async () => {
+		const docs = await listed();
+		const schema = docs.filter((d) => d.group === "schema");
 		const of = (kind: string) => schema.filter((d) => d.kind === kind).map((d) => d.name.split("\\").join("/"));
-		expect(of("database")).toEqual(["database/DEMO_HOLIDAYS.md", "database/DEMO_OUTAGES.md", "database/DEMO_SAMPLES.md", "database/demo.sql", "database/README.md"]);
-		expect(of("interfaces")).toEqual(["interfaces/outage-notice.json", "interfaces/Outage-notice.md", "interfaces/README.md"]);
-		expect(of("files")).toEqual(["files/Holiday-calendar.md", "files/holidays-2026.csv", "files/README.md"]);
-		expect(of("")).toEqual(["README.md"]);
+		expect(of("database")).toEqual(["database/DEMO_HOLIDAYS.md", "database/DEMO_OUTAGES.md", "database/DEMO_SAMPLES.md", "database/demo.sql"]);
+		expect(of("interfaces")).toEqual(["interfaces/Maintenance/outage-notice.json", "interfaces/Maintenance/Outage-notice.md"]);
+		expect(of("files")).toEqual(["files/Holiday-calendar.md", "files/holidays-2026.csv"]);
+		// At its top lies its catalog and nothing else: no README says what the list already says.
+		expect(of("")).toEqual(["INDEX.md"]);
 		// A description says what it is called; a sample beside it is known by its file's name.
-		expect(schema.find((d) => d.name.endsWith("Outage-notice.md"))?.title).toBe("Outage notice");
+		expect(schema.find((d) => d.name.endsWith("Outage-notice.md"))).toMatchObject({ title: "Outage notice", status: "draft" });
 		expect(schema.find((d) => d.name.endsWith("outage-notice.json"))?.title).toBeUndefined();
 		expect(schema.flatMap((d) => d.problems ?? [])).toEqual([]);
+
+		const list = schemaList(docs, { configured: true });
+		expect(list.catalog?.name).toBe("INDEX.md");
+		expect(list.top).toEqual([]);
+		expect(list.count).toBe(8);
+		expect(list.kinds.map((kind) => [kind.name, kind.count, kind.files.length, kind.parts.map((part) => [part.name, part.folder, part.files.length])])).toEqual([
+			["Database", 4, 4, []],
+			["Interfaces", 2, 0, [["Maintenance", "interfaces/Maintenance", 2]]],
+			["Files", 2, 2, []],
+		]);
+		// What the catalog lists, under the kinds and the system.
+		const items = catalogItems("schema", docs, { docs: join(root, "docs"), schema: join(root, "schema") });
+		expect([...new Set(items.map((item) => item.section))]).toEqual(["Database", "Interfaces: Maintenance", "Files"]);
+		expect(items.find((item) => item.title === "Outage notice")).toMatchObject({ path: "interfaces/Maintenance/Outage-notice.md", status: "draft" });
+		expect(items.find((item) => item.path === "database/demo.sql")?.title).toBe("demo.sql");
 	});
 
 	test("a folder of the project's own under the schema folder is a kind by its name", async () => {
@@ -380,7 +421,8 @@ describe("the demo project's working documents", () => {
 
 	test("every catalog says what its folder holds, and the documents outside those folders are still Docs", async () => {
 		const docs = await listed();
-		expect(docs.filter((d) => d.catalog).map((d) => [d.group, d.catalog!.stale])).toEqual([["tickets", false], ["specs", false], ["knowledge", false], ["registries", false]]);
+		// The four folders of working documents, and the schema folder: each has its catalog, and each is up to date.
+		expect(docs.filter((d) => d.catalog).map((d) => [d.group, d.catalog!.stale])).toEqual([["tickets", false], ["specs", false], ["knowledge", false], ["registries", false], ["schema", false]]);
 		expect(docs.filter((d) => d.group === "docs").map((d) => d.name)).toEqual(["Decisions.md", "README.md", "Worked-examples.md"]);
 		expect(docs.find((d) => d.name === "STATE.md")?.group).toBe("project");
 		expect(catalogItems("tickets", docs, join(root, "docs")).map((item) => item.title)[0]).toBe("DEMO-101: Give every waiting sample a due date");
