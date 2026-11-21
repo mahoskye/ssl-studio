@@ -11,14 +11,19 @@ import type { Entry } from "../../shared/protocol";
 import { level } from "../../shared/houseStyle";
 import { backend } from "../backend";
 import { ask, choose } from "../dialogs";
-import { activePath, canonical, fileRemoved, fileRenamed, heldFromBefore, notify, openFile, scriptsCameTo, setState, state } from "../state";
-import { baseName, dirName, isInside, joinPath } from "../../shared/paths";
-import { COPY, COPY_NAME, COPY_PATH, COPY_RELATIVE, CUT, folderFor, holdsRoot, menuFor, nameProblem, NEW_FILE, NEW_FOLDER, openFolders, PASTE, RENAME, retarget, TRASH, without } from "./explorerMenu";
+import { activePath, canonical, closeAllTabs, closeTab, fileRemoved, fileRenamed, heldFromBefore, isUntitled, notify, openFile, openToSide, saveAll, scriptsCameTo, setState, state } from "../state";
+import { closeComparison } from "../editor/Review";
+import { baseName, dirName, isInside, joinPath, relativeTo } from "../../shared/paths";
+import { COPY, COPY_NAME, COPY_PATH, COPY_RELATIVE, CUT, FIND_IN_FOLDER, folderFor, holdsRoot, menuEntriesFor, nameProblem, NEW_FILE, NEW_FOLDER, OPEN, OPEN_SIDE, openFolders, PASTE, RENAME, retarget, TRASH, without } from "./explorerMenu";
 import { copyName, copyProblem, folderOf, moveProblem, type Clip } from "./explorerMoves";
 import { chooseFromMenu } from "./RowMenu";
 import { showPanel } from "./registry";
+import { findInFolder } from "./Search";
 import { catalogsKeptFor, followRename } from "../projectDocs";
 import { IconButton, Row, Rows, type Point, type RowsApi } from "./Rows";
+import { outlineAnyOpen, outlineHasExpandable, outlineMenuItems, SymbolOutline, toggleOutlineCollapseAll } from "./Objects";
+import { SectionSplitter } from "./SectionSplitter";
+import { Menu } from "../Menu";
 import { recall, remember } from "../graph/canvas";
 
 const [expanded, setExpanded] = createSignal<Set<string>>(new Set());
@@ -310,6 +315,19 @@ async function act(action: string | null, entry: Entry, where: { home?: string; 
 	const parent = entry.kind === "dir" ? entry.path : dirName(entry.path);
 	let back: string | null = null;
 	try {
+		if (action === OPEN) {
+			void openFile(entry.path);
+			return;
+		}
+		if (action === OPEN_SIDE) {
+			void openToSide(entry.path);
+			return;
+		}
+		if (action === FIND_IN_FOLDER) {
+			const rel = state.workspace ? relativeTo(state.workspace.root, entry.kind === "dir" ? entry.path : dirName(entry.path)) : "";
+			findInFolder(rel === "." ? "" : rel);
+			return;
+		}
 		if (action === NEW_FILE) back = await create(parent, "file");
 		else if (action === NEW_FOLDER) back = await create(parent, "dir");
 		else if (action === RENAME) back = await rename(entry);
@@ -363,7 +381,7 @@ async function entryMenu(entry: Entry, at: Point) {
 	const root = state.workspace?.root;
 	if (!root) return;
 	const isRoot = holdsRoot(root, entry.path);
-	const action = await chooseFromMenu(isRoot ? "New in the workspace folder" : `Actions for ${entry.name}`, menuFor(entry.kind, entry.path, root, clip() !== null), at);
+	const action = await chooseFromMenu(isRoot ? "New in the workspace folder" : `Actions for ${entry.name}`, menuEntriesFor(entry.kind, entry.path, root, clip() !== null), at);
 	await act(action, entry, { home: isRoot ? undefined : entry.path, follow: true });
 }
 
@@ -456,6 +474,76 @@ export function Explorer() {
 		setFocused(null);
 		tree = undefined;
 	});
+	const [openEdOpen, setOpenEdOpen] = createSignal(recall("explorer.openEditors") !== "closed");
+	const savedOpenEdH = Number(recall("explorer.openEditors.h"));
+	const [openEdH, setOpenEdH] = createSignal(Number.isFinite(savedOpenEdH) && savedOpenEdH >= 56 ? savedOpenEdH : 120);
+	const toggleOpenEd = () => {
+		const next = !openEdOpen();
+		setOpenEdOpen(next);
+		remember("explorer.openEditors", next ? "open" : "closed");
+	};
+	const resizeOpenEd = (delta: number) => {
+		const next = Math.max(56, Math.min(360, openEdH() + delta));
+		setOpenEdH(next);
+		remember("explorer.openEditors.h", String(Math.round(next)));
+	};
+	const resetOpenEd = () => {
+		setOpenEdH(120);
+		remember("explorer.openEditors.h", "120");
+	};
+
+	const [wsOpen, setWsOpen] = createSignal(recall("explorer.workspace") !== "closed");
+	const toggleWs = () => {
+		const next = !wsOpen();
+		setWsOpen(next);
+		remember("explorer.workspace", next ? "open" : "closed");
+	};
+
+	const [outlineOpen, setOutlineOpen] = createSignal(recall("explorer.outline") !== "closed");
+	const savedOutlineH = Number(recall("explorer.outline.h"));
+	const [outlineH, setOutlineH] = createSignal(Number.isFinite(savedOutlineH) && savedOutlineH >= 80 ? savedOutlineH : 210);
+	const toggleOutline = () => {
+		const next = !outlineOpen();
+		setOutlineOpen(next);
+		remember("explorer.outline", next ? "open" : "closed");
+	};
+	const resizeOutline = (delta: number) => {
+		const next = Math.max(80, Math.min(480, outlineH() - delta));
+		setOutlineH(next);
+		remember("explorer.outline.h", String(Math.round(next)));
+	};
+	const resetOutline = () => {
+		setOutlineH(210);
+		remember("explorer.outline.h", "210");
+	};
+
+	const openEditorRows = () =>
+		state.groups.flatMap((g, groupIndex) =>
+			g.tabs.map((path) => ({
+				path,
+				groupIndex,
+				active: state.activeGroup === groupIndex && g.active === path && state.centerView === "editors",
+				dirty: Boolean(state.dirty[path]),
+				name: path.startsWith("untitled:") ? path.slice("untitled:".length) : baseName(path),
+				folder: path.startsWith("untitled:") ? "" : (() => {
+					const rel = state.workspace ? relativeTo(state.workspace.root, dirName(path)) : "";
+					return rel === "." ? "" : rel;
+				})(),
+			})),
+		);
+	const anyDirty = () => Object.values(state.dirty).some(Boolean);
+	const anyOpen = () => expanded().size > 0;
+	const toggleAllFolders = () => {
+		if (anyOpen()) setExpanded(new Set<string>());
+		else setExpanded(new Set(root.entries.filter((e) => e.kind === "dir").map((e) => e.path)));
+	};
+	const newInTarget = (kind: "file" | "dir") => {
+		const wsRoot = state.workspace?.root;
+		if (!wsRoot) return;
+		const folder = folderFor(focused(), activePath(), wsRoot);
+		setWsOpen(true);
+		void act(kind === "file" ? NEW_FILE : NEW_FOLDER, { name: baseName(folder), path: folder, kind: "dir", size: 0 }, { home: focused()?.path, follow: false });
+	};
 	return (
 		<div
 			class="panel-body explorer"
@@ -467,35 +555,160 @@ export function Explorer() {
 			onDrop={(e) => state.workspace && void dropOn(e, state.workspace.root)}
 		>
 			<div class="panel-title">
-				<span>{state.workspace?.name}</span>
-				<IconButton
-					label="New file or folder"
-					icon="add"
-					menu
-					onClick={(e) => {
-						const box = e.currentTarget.getBoundingClientRect();
-						rootMenu({ x: box.left, y: box.bottom });
-					}}
-				/>
-				<IconButton label="Refresh the file list" title="Refresh" icon="refresh" onClick={refresh} />
+				<span>Explorer</span>
 			</div>
-			<Show when={!read()}>
-				<p class="hint">Reading the folder…</p>
+
+			{/* VS Code-style Open Editors accordion section */}
+			<section class="explorer-section explorer-open-editors" classList={{ open: openEdOpen() }} aria-label="Open editors">
+				<div class="explorer-section-head">
+					<button class="explorer-section-toggle" aria-expanded={openEdOpen()} onClick={toggleOpenEd}>
+						<Icon name={openEdOpen() ? "chevron-down" : "chevron-right"} class="twisty" />
+						<span class="explorer-section-title">Open editors</span>
+					</button>
+					<div class="explorer-section-actions">
+						<Show when={anyDirty()}>
+							<IconButton label="Save all" title="Save all unsaved files" icon="save-all" onClick={() => void saveAll()} />
+						</Show>
+						<Show when={openEditorRows().length}>
+							<IconButton label="Close all editors" title="Close all open editors" icon="close-all" onClick={() => void closeAllTabs()} />
+						</Show>
+					</div>
+				</div>
+				<Show when={openEdOpen()}>
+					<div class="explorer-section-body" style={{ height: `${Math.min(openEdH(), Math.max(44, openEditorRows().length * 26 + 16))}px` }}>
+						<Show when={openEditorRows().length} fallback={<p class="hint explorer-empty-hint">No open editors.</p>}>
+							<div class="tree explorer-open-list" role="list" aria-label="Open editors">
+								<For each={openEditorRows()}>
+									{(item) => (
+										<div
+											class="tree-row open-editor-row"
+											role="listitem"
+											classList={{ selected: item.active, dirty: item.dirty }}
+											title={isUntitled(item.path) ? `${item.name} (unsaved buffer)` : item.path}
+											onClick={() => {
+												closeComparison();
+												setState("centerView", "editors");
+												setState("activeGroup", item.groupIndex);
+												setState("groups", item.groupIndex, "active", item.path);
+											}}
+										>
+											<button
+												class="open-editor-close"
+												title={`Close ${item.name}`}
+												aria-label={`Close ${item.name}`}
+												onClick={(e) => {
+													e.stopPropagation();
+													void closeTab(item.path, item.groupIndex);
+												}}
+											>
+												<Show when={item.dirty} fallback={<Icon name="close" />}>
+													<span class="open-editor-dot" aria-hidden="true" />
+													<Icon name="close" class="open-editor-x" />
+												</Show>
+											</button>
+											<FileMark name={item.name} />
+											<span class="label">{item.name}</span>
+											<Show when={item.folder}>
+												<span class="meta open-editor-folder">{item.folder}</span>
+											</Show>
+										</div>
+									)}
+								</For>
+							</div>
+						</Show>
+					</div>
+				</Show>
+			</section>
+			<Show when={openEdOpen() && openEditorRows().length > 0}>
+				<SectionSplitter
+					label="Height of Open editors"
+					value={openEdH()}
+					min={56}
+					max={360}
+					onDrag={resizeOpenEd}
+					onReset={resetOpenEd}
+				/>
 			</Show>
-			<Show when={read() && !root.error && !root.entries.length}>
-				<p class="hint">This folder is empty. Use New, above, to add a file or a folder.</p>
+
+			{/* Collapsible Workspace root section (architected for future multi-root workspace support) */}
+			<section class="explorer-section explorer-workspace" classList={{ open: wsOpen() }} aria-label={`Workspace ${state.workspace?.name ?? ""}`}>
+				<div class="explorer-section-head">
+					<button class="explorer-section-toggle" aria-expanded={wsOpen()} onClick={toggleWs}>
+						<Icon name={wsOpen() ? "chevron-down" : "chevron-right"} class="twisty" />
+						<span class="explorer-section-title">{state.workspace?.name}</span>
+					</button>
+					<div class="explorer-section-actions">
+						<IconButton label="New file" title="New file…" icon="new-file" onClick={() => newInTarget("file")} />
+						<IconButton label="New folder" title="New folder…" icon="new-folder" onClick={() => newInTarget("dir")} />
+						<IconButton label="Refresh explorer" title="Refresh" icon="refresh" onClick={refresh} />
+						<IconButton
+							label={anyOpen() ? "Collapse all folders" : "Expand top-level folders"}
+							title={anyOpen() ? "Collapse all folders" : "Expand top-level folders"}
+							icon={anyOpen() ? "collapse-all" : "expand-all"}
+							onClick={toggleAllFolders}
+						/>
+					</div>
+				</div>
+				<Show when={wsOpen()}>
+					<div class="explorer-workspace-body">
+						<Show when={!read()}>
+							<p class="hint">Reading the folder…</p>
+						</Show>
+						<Show when={read() && !root.error && !root.entries.length}>
+							<p class="hint">This folder is empty. Use New file above to add one.</p>
+						</Show>
+						<Rows
+							role="tree"
+							label={`Files in ${state.workspace?.name ?? "the workspace"}`}
+							api={(rows) => (tree = rows)}
+							onContextMenu={(e) => {
+								e.preventDefault();
+								rootMenu({ x: e.clientX, y: e.clientY });
+							}}
+						>
+							<Listed listing={root} path={state.workspace?.root ?? ""} depth={0} />
+						</Rows>
+					</div>
+				</Show>
+			</section>
+
+			{/* Resizable & collapsible Outline section with VS Code-style options menu + collapse/expand toggle */}
+			<Show when={outlineOpen()}>
+				<SectionSplitter
+					label="Height of Outline"
+					value={outlineH()}
+					min={80}
+					max={480}
+					onDrag={resizeOutline}
+					onReset={resetOutline}
+				/>
 			</Show>
-			<Rows
-				role="tree"
-				label={`Files in ${state.workspace?.name ?? "the workspace"}`}
-				api={(rows) => (tree = rows)}
-				onContextMenu={(e) => {
-					e.preventDefault();
-					rootMenu({ x: e.clientX, y: e.clientY });
-				}}
-			>
-				<Listed listing={root} path={state.workspace?.root ?? ""} depth={0} />
-			</Rows>
+			<section class="explorer-section explorer-outline" classList={{ open: outlineOpen() }} aria-label="Outline">
+				<div class="explorer-section-head">
+					<button class="explorer-section-toggle" aria-expanded={outlineOpen()} onClick={toggleOutline}>
+						<Icon name={outlineOpen() ? "chevron-down" : "chevron-right"} class="twisty" />
+						<span class="explorer-section-title">Outline</span>
+					</button>
+					<div class="explorer-section-actions">
+						<Menu floating label="Outline options" title="Outline options: follow cursor, sort order" class="outline-more" items={outlineMenuItems}>
+							<Icon name="ellipsis" />
+						</Menu>
+						<Show when={outlineHasExpandable()}>
+							<IconButton
+								label={outlineAnyOpen() ? "Collapse all outline items" : "Expand all outline items"}
+								title={outlineAnyOpen() ? "Collapse all" : "Expand all"}
+								icon={outlineAnyOpen() ? "collapse-all" : "expand-all"}
+								onClick={toggleOutlineCollapseAll}
+							/>
+						</Show>
+					</div>
+				</div>
+				<Show when={outlineOpen()}>
+					<div class="explorer-outline-body" style={{ height: `${outlineH()}px` }}>
+						<SymbolOutline compact label="Outline of the open file" />
+					</div>
+				</Show>
+			</section>
 		</div>
 	);
 }

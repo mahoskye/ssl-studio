@@ -845,6 +845,40 @@ Not done, and worth doing next:
   no registry lists. It needs the language server to say which tables a
   script uses.
 
+## Folio Bento shell and OKLCH themes (2026-11-21)
+
+Overhauled the shell, colour system, and mode ergonomics from a verified live
+walkthrough of the baseline UI ([UI-DESIGN.md](UI-DESIGN.md),
+[ADR 0027](adr/0027-folio-bento-shell-and-oklch-themes.md)):
+
+- **OKLCH Warm Material themes (`5 Tones × 5 Materials`):** `Paper`, `Stone`,
+  `Split Warm` (dark chrome with warm light editor), `Slate Dusk`, and
+  `Obsidian` across `Walnut`, `Moss`, `Clay`, `Steel`, and `Veridian`, with
+  decoupled chrome and `--editor-*` tokens, WCAG AA–verified `peekView.*` and
+  `editorStickyScroll.*` styling across all 25 combinations, configurable
+  `--ui-font` / `--code-font` / `--read-font` slots, Classic presets, and
+  VS Code `.json` theme import.
+- **Folio Bento shell:** Framed `7px` islands on a recessed tray (`5px`
+  gutters collapsing to `0px` at `<= 780px`), hover-illuminated hidden
+  splitters, Tucked Folio tabs kept visible in Call Graph and Diff Review,
+  scroll-collapsing Folio header, responsive 3-tier status bar, continuous
+  ADR 0010 git gutter marks, `18px` Problems icon grid, per-mode bottom panel
+  memory, narrow right-in-left panel hosting, quick Projects switcher, and a
+  flush empty start pane with no card box or tab gap.
+- **VS Code-aligned panels & modes (Phase 1.5, C1–C13):** Explorer accordion
+  (`Open editors`, collapsible workspace with `New file`, `New folder`,
+  `Refresh`, dynamic `Collapse/Expand`, grouped right-click context menu with
+  shortcuts, resizable `Outline` with `•••` options), reusable drag+keyboard
+  `<SectionSplitter />` across Explorer/Palette/Reference, scrollable Health
+  panel, unified right-docked `Document outline`, context-gated Activity Bar
+  (`Document outline` & `Palette`), Call Graph & Plan Palettes, Obsidian-style
+  `Source | Live | Read` Markdown switching with sticky scroll disabled in
+  prose and elevated file-actions menu, floating `Untitled-N` buffers
+  (`Ctrl+N` or double-click empty tab strip), horizontal tab-strip wheel
+  scroll with `<`/`>` chevrons, zero-jump hover in collapsed Blocks mode,
+  sticky first column in Table View, and explicit `Side-by-Side | Inline`
+  layout switching in Diff Review.
+
 ## On hold
 
 - **Forms, client scripts and code-behind (2026-11-17).** Wanted eventually, in

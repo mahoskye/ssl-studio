@@ -57,18 +57,18 @@ the source of truth.
   [ADR 0013](docs/adr/0013-the-agent-is-told-the-work-a-question-is-for.md)).
 - **Documents as what they are:** Markdown, SQL, JSON, TOML, CSV, YAML, XML
   and INI are coloured by the same themes as SSL. JSON and TOML that
-  cannot be read say where, and the Objects panel outlines a document: its
-  headings, tables, keys or statements. The snippets a project keeps are in
-  the Palette, to insert. A CSV opens as a table whose cells are edited in
-  place, and a registry's names can be checked against the code; Markdown
-  opens rendered, with what its front matter says shown above it and its
-  code coloured.
+  cannot be read say where, and Document outline (plus Explorer's Outline
+  drawer) outlines a document: its headings, tables, keys or statements. The
+  snippets a project keeps are in the Palette, to insert. A CSV opens as a
+  table whose cells are edited in place, and a registry's names can be
+  checked against the code; Markdown opens rendered (`Source | Live | Read`),
+  with what its front matter says shown above it and its code coloured.
 - **House style:** the team's Designer header, procedure doc block, spacing
   and script size limit built into templates, the formatter and a size meter.
 
 Status: M1 to M6 done in a first version, and tested on Linux and Windows
 (see the roadmap). Install and build: [docs/INSTALL.md](docs/INSTALL.md). See [docs/VISION.md](docs/VISION.md),
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/UI-DESIGN.md](docs/UI-DESIGN.md) and
 [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Running it
@@ -130,6 +130,7 @@ edits the file in the editor, and you save it.
 
 | Key | Does |
 | --- | --- |
+| Ctrl+N | New untitled file |
 | Ctrl+O | Open folder |
 | Ctrl+P, Ctrl+T | Go to file, go to symbol |
 | Ctrl+Shift+P | All commands |

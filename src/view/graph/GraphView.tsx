@@ -6,6 +6,7 @@
 // double-click it, or press Enter, to open it. The same calls can be read as
 // a plain list.
 import { Icon } from "../Icon";
+import { CenterTabStrip } from "../editor/CenterTabStrip";
 import ELK from "elkjs/lib/elk.bundled.js";
 import { batch, createEffect, createMemo, createSignal, createUniqueId, For, on, onCleanup, Show } from "solid-js";
 import { level } from "../../shared/houseStyle";
@@ -18,6 +19,7 @@ import { Minimap, type MapBox } from "./Minimap";
 import { Finder } from "./Finder";
 import { Menu, type MenuItem } from "../Menu";
 import { savePicture } from "./picture";
+import { registerGraphBridge } from "./graphBridge";
 import { session } from "../lsp/session";
 import { aroundFocus, callList, choices, sameStep, dirId, keptFolds, withoutUnresolved, fold, gather, isFolderEnd, FOLD_ABOVE, FOLD_DIRS_ABOVE, foldId, isDir, isFold, RELATION_WORDS, scriptOf, topLabel, UNRESOLVED, visible, type Direction, type DrawnEdge, type Filter, type FocusLink, type Graph, type ListedProc, relationOf, type Relation } from "./model";
 import { baseName, dirName, relativeTo } from "../../shared/paths";
@@ -85,8 +87,8 @@ const GRAPH_KEYS: readonly (readonly [keys: string, what: string])[] = [
 const BOTH_WAYS_UP_TO = 250;
 /** This many scripts of one folder with no line between them, and they are set out as a block, not in one line. */
 const BLOCK_FROM = 6;
-/** A graph narrower than this keeps its zoom buttons in the menu: in the bar they cost it a third row. */
-const NARROW_UNDER = 600;
+/** A graph narrower than this keeps its zoom buttons in the menu: in the bar they cost it a second row. */
+const NARROW_UNDER = 740;
 /** How far along a line its number of places is written. */
 const BADGE_AT = 30;
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
@@ -134,9 +136,21 @@ export function GraphView() {
 			setMode("graph");
 			focus(id);
 		});
-	/** Whether the list of the graph's keys is showing. */
+	/** Whether the list of the graph's keys or the shape/edge legend popover is showing. */
 	const [keysOpen, setKeysOpen] = createSignal(false);
+	const [legendOpen, setLegendOpen] = createSignal(false);
 	const keysId = createUniqueId();
+	const legendId = createUniqueId();
+	const toggleKeys = () => {
+		const next = !keysOpen();
+		setKeysOpen(next);
+		if (next) setLegendOpen(false);
+	};
+	const toggleLegend = () => {
+		const next = !legendOpen();
+		setLegendOpen(next);
+		if (next) setKeysOpen(false);
+	};
 	/** A script to bring into sight once the picture is laid out again: the one just folded or unfolded. */
 	let showNext: string | null = null;
 
@@ -609,8 +623,11 @@ export function GraphView() {
 			"=": () => zoomBy(1.2),
 			"-": () => zoomBy(1 / 1.2),
 			"0": fitOrWhole,
-			"?": () => setKeysOpen((open) => !open),
-			Escape: () => setKeysOpen(false),
+			"?": toggleKeys,
+			Escape: () => {
+				setKeysOpen(false);
+				setLegendOpen(false);
+			},
 		};
 		const action = actions[key];
 		if (action) {
@@ -668,7 +685,8 @@ export function GraphView() {
 						"separator",
 					] satisfies MenuItem[])
 				: []),
-			{ label: keysOpen() ? "Hide the keys" : "Keys and what the pointer does", keys: "?", run: () => setKeysOpen((open) => !open), disabled: !inGraph, why: "The keys are the graph's" },
+			{ label: legendOpen() ? "Hide legend" : "Show legend", run: toggleLegend, disabled: !inGraph || !legend().length, why: "The legend is for the graph" },
+			{ label: keysOpen() ? "Hide the keys" : "Keys and what the pointer does", keys: "?", run: toggleKeys, disabled: !inGraph, why: "The keys are the graph's" },
 			"separator",
 			{ label: "Save picture…", run: () => void savePicture(svg, layout(), "docs/call-graph.svg"), disabled: !inGraph || !layout(), why: "There is no picture in the list" },
 			{ label: "Refresh", run: () => void refresh(), disabled: state.lsp.state !== "running", why: "Needs the language server" },
@@ -715,6 +733,53 @@ export function GraphView() {
 		return id.endsWith("#") ? baseName(id.slice(0, -1)) : id.slice(id.lastIndexOf("#") + 1);
 	};
 	const tally = () => (graph() ? `${graph()!.nodes.length} procedures, ${counted()}${graph()!.truncated ? " (incomplete: refresh when indexing ends)" : ""}` : "");
+
+	// Expose Call Graph controls, targets, and legend to the context-coupled Palette panel.
+	createEffect(() => {
+		if (state.centerView !== "graph") return;
+		const unregister = registerGraphBridge({
+			mode,
+			setMode: choose,
+			filterMode: () => filter().mode,
+			setFilterMode: (next) => setFilter({ ...filter(), mode: next }),
+			folding,
+			allFolded,
+			anyFolded: () => folded().size > 0 || foldedDirs().size > 0,
+			foldAll,
+			gathered,
+			toggleGathered: () => {
+				const next = !gathered();
+				fittedFor = "";
+				setGathered(next);
+				remember(GATHER_KEY, next ? "gathered" : "spread");
+			},
+			unresolved,
+			unresolvedCount,
+			toggleUnresolved: () => {
+				const next = !unresolved();
+				fittedFor = "";
+				setUnresolved(next);
+				remember(UNRESOLVED_KEY, next ? "shown" : "hidden");
+			},
+			fit: fitOrWhole,
+			refresh: () => void refresh(),
+			tally,
+			legend,
+			targets: () => {
+				const g = graph();
+				if (!g) return [];
+				return g.scripts
+					.filter((s) => s.path !== UNRESOLVED)
+					.map((s) => {
+						const procs = g.nodes.filter((n) => n.path === s.path).length;
+						return { id: `${s.path}#`, label: rel(s.path), meta: `${procs}` };
+					})
+					.sort((a, b) => a.label.localeCompare(b.label));
+			},
+			focusTarget: (id) => focus(id),
+		});
+		onCleanup(unregister);
+	});
 
 	const list = createMemo(() => {
 		const g = graph();
@@ -784,8 +849,9 @@ export function GraphView() {
 	};
 
 	return (
-		<div class="graph" ref={watchWidth}>
-			<div class="graph-bar" classList={{ narrow: narrow(), around: filter().mode === "around" }}>
+		<CenterTabStrip title="Call graph" icon="references" onClose={() => setState("centerView", "editors")}>
+			<div class="graph" ref={watchWidth}>
+				<div class="graph-bar" classList={{ narrow: narrow(), around: filter().mode === "around" }}>
 				{/* No title: the switch's first word is the view's name, and the bar needs the room. */}
 				<div class="mode-switch" role="group" aria-label="Call graph: show the calls as">
 					<button classList={{ on: mode() === "graph" }} aria-pressed={mode() === "graph"} onClick={() => choose("graph")}>
@@ -845,6 +911,21 @@ export function GraphView() {
 						</button>
 					</div>
 				</Show>
+				<Show when={mode() === "graph" && legend().length}>
+					<button
+						class="graph-legend-btn"
+						classList={{ on: legendOpen() }}
+						aria-expanded={legendOpen()}
+						aria-controls={legendId}
+						title="What the graph's shapes and lines mean"
+						onClick={toggleLegend}
+					>
+						<Icon name="info" />
+						<Show when={!narrow()}>
+							<span>Legend</span>
+						</Show>
+					</button>
+				</Show>
 				<Show when={mode() === "graph"}>
 					<button title="As much of the graph as stays legible; again for the whole of it, however small (0)" onClick={fitOrWhole}>
 						Fit
@@ -854,9 +935,6 @@ export function GraphView() {
 				<Menu label="More for the graph" title="More: fold, unresolved targets, keys, save picture, refresh" class="graph-more" items={more}>
 					<Icon name="ellipsis" />
 				</Menu>
-				<button class="graph-close" title="Close the graph and go back to the editors" aria-label="Close the graph" onClick={() => setState("centerView", "editors")}>
-					<Icon name="close" />
-				</button>
 			</div>
 			<Show when={idle()}>
 				{(why) => (
@@ -878,29 +956,6 @@ export function GraphView() {
 					<Show when={!session.supports("ssl/callGraph")}>
 						<p class="hint graph-help">Data sources and :INCLUDEs appear once the server offers its call graph.</p>
 					</Show>
-					<div class="graph-under">
-					<ul class="graph-legend" aria-label="What the graph's shapes and lines mean">
-						<For each={legend()}>
-							{(entry) => (
-								<li>
-									<svg class="graph-key" viewBox="0 0 26 14" aria-hidden="true">
-										<Show when={entry.shape === "box"} fallback={<path class={entry.cls} d="M1,7 L25,7" />}>
-											<g class={entry.cls}>
-												<rect x="1.5" y="1.5" width="23" height="11" rx="3" />
-											</g>
-										</Show>
-									</svg>
-									{entry.words}
-								</li>
-							)}
-						</For>
-					</ul>
-						<Show when={!progress()}>
-							<span class="hint graph-tally" role="status">
-								{tally()}
-							</span>
-						</Show>
-					</div>
 					<div class="graph-stage">
 					<svg
 						class="graph-canvas"
@@ -1066,6 +1121,33 @@ export function GraphView() {
 							)}
 						</Show>
 					</svg>
+					<div class="plan-keys graph-legend-pop" id={legendId} role="group" aria-label="What the graph's shapes and lines mean" hidden={!legendOpen()}>
+						<div class="graph-legend-head">
+							<strong>Legend</strong>
+							<Show when={!progress() && tally()}>
+								<span class="hint">{tally()}</span>
+							</Show>
+							<button class="graph-legend-close" aria-label="Close legend" onClick={() => setLegendOpen(false)}>
+								<Icon name="close" />
+							</button>
+						</div>
+						<ul class="graph-legend">
+							<For each={legend()}>
+								{(entry) => (
+									<li>
+										<svg class="graph-key" viewBox="0 0 26 14" aria-hidden="true">
+											<Show when={entry.shape === "box"} fallback={<path class={entry.cls} d="M1,7 L25,7" />}>
+												<g class={entry.cls}>
+													<rect x="1.5" y="1.5" width="23" height="11" rx="3" />
+												</g>
+											</Show>
+										</svg>
+										<span>{entry.words}</span>
+									</li>
+								)}
+							</For>
+						</ul>
+					</div>
 					<Show when={keysOpen()}>
 						<div class="plan-keys" id={keysId} role="group" aria-label="The graph's keys">
 							<dl>
@@ -1081,7 +1163,16 @@ export function GraphView() {
 						</div>
 					</Show>
 					{/* Not read out: each node and line says the same of itself to a screen reader. */}
-					<Show when={said()}>
+					<Show
+						when={said()}
+						fallback={
+							<Show when={!progress() && tally()}>
+								<p class="graph-said graph-tally-badge" role="status">
+									{tally()}
+								</p>
+							</Show>
+						}
+					>
 						<p class="graph-said" aria-hidden="true">
 							{said()}
 						</p>
@@ -1179,6 +1270,7 @@ export function GraphView() {
 					</div>
 				</Show>
 			</Show>
-		</div>
+			</div>
+		</CenterTabStrip>
 	);
 }

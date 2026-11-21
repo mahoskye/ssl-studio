@@ -12,10 +12,10 @@ import { monaco } from "./editor/monaco";
 import { symbolPath } from "./editor/regions";
 import { languageName } from "./editor/languages";
 import { encodingName, eolName } from "../shared/fileKind";
-import { baseName } from "../shared/paths";
 import { chooseFromMenu } from "./panels/RowMenu";
 import { branchText, changedCount, gitStatus } from "./git";
-import { activeDoc, activePath, notify, setState, state } from "./state";
+import { activeDoc, activePath, displayName, notify, setState, state } from "./state";
+import { review } from "./editor/Review";
 
 const [size, setSize] = createSignal<SizeReport | null>(null);
 export { size };
@@ -79,7 +79,7 @@ async function chooseLineEnds(at: { x: number; y: number }) {
 	doc.model.pushStackElement();
 	doc.model.pushEOL(want === "LF" ? monaco.editor.EndOfLineSequence.LF : monaco.editor.EndOfLineSequence.CRLF);
 	doc.model.pushStackElement();
-	notify(`Every line of ${baseName(activePath()!)} now ends in ${want}. Save to keep it; undo takes it back.`);
+	notify(`Every line of ${displayName(activePath()!)} now ends in ${want}. Save to keep it; undo takes it back.`);
 }
 
 export function StatusBar() {
@@ -103,28 +103,32 @@ export function StatusBar() {
 	const lspNote = () => state.lsp.message ?? state.info?.lsp.message;
 	const opencode = () => state.info?.opencode;
 	// "near" and "over" are also said in words, for anyone who cannot tell them by colour.
-	const part = (value: number, limit: number, text: string, near?: number) => {
+	const part = (value: number, limit: number, text: string, near?: number, narrowHide = false) => {
 		const at = level(value, limit, near);
 		return (
-			<span class={at} title={at === "ok" ? undefined : `${at === "over" ? "Over" : "Near"} the limit of ${limit}`}>
+			<span class={`${at}${narrowHide && at === "ok" ? " tier-3" : ""}`} title={at === "ok" ? undefined : `${at === "over" ? "Over" : "Near"} the limit of ${limit}`}>
 				{text}
 				{at === "over" ? " (over)" : at === "near" ? " (near)" : ""}
 			</span>
 		);
 	};
+	const lspVersion = () => (state.info?.lsp.version ? ` ${state.info.lsp.version}` : "");
 	return (
 		<footer class="statusbar">
-			<span class="item" title={state.workspace?.root}>
+			<span class="item tier-3" title={state.workspace?.root}>
 				{state.workspace?.name ?? "No folder"}
 			</span>
 			<button
-				class="item"
+				class="item lsp-item"
 				classList={{ warn: !lspWaits() && (state.lsp.state !== "running" || Boolean(state.info?.lsp.message)) }}
 				title={`${lspNote() ? `${lspNote()}\n` : ""}Click to restart the language server.`}
 				aria-label={`${lspLabel()}${lspNote() ? `: ${lspNote()}` : ""}. Restart the language server.`}
 				onClick={() => (notify("Restarting the language server."), void backend.lspRestart())}
 			>
-				{lspLabel()}
+				<span class="lsp-full">{lspLabel()}</span>
+				<span class="lsp-short" aria-hidden="true">
+					{state.lsp.state === "running" ? `LSP${lspVersion()}` : `LSP ${state.lsp.state}`}
+				</span>
 				<Icon name="refresh" class="restart" />
 			</button>
 			<Show when={gitStatus()}>
@@ -146,12 +150,12 @@ export function StatusBar() {
 			<Show
 				when={opencode()?.ok}
 				fallback={
-					<button class="item warn" title="Show why opencode is not available" onClick={() => notify(opencode()?.message ?? "opencode was not found. The Agent panel needs opencode 2.2.5 or 2.3.x on PATH.", "error")}>
+					<button class="item warn tier-2" title="Show why opencode is not available" onClick={() => notify(opencode()?.message ?? "opencode was not found. The Agent panel needs opencode 2.2.5 or 2.3.x on PATH.", "error")}>
 						opencode not available
 					</button>
 				}
 			>
-				<span class="item" title="opencode powers the Agent panel">
+				<span class="item tier-2" title="opencode powers the Agent panel">
 					opencode {opencode()!.version}
 				</span>
 			</Show>
@@ -170,9 +174,9 @@ export function StatusBar() {
 			</button>
 			<Show when={where().length}>
 				<button
-					class="item where"
-					title={`The cursor is in ${whereWords()}. Show it in Objects.`}
-					aria-label={`The cursor is in ${whereWords()}. Show Objects.`}
+					class="item where tier-2"
+					title={`The cursor is in ${whereWords()}. Show it in Document outline.`}
+					aria-label={`The cursor is in ${whereWords()}. Show Document outline.`}
 					onClick={() => showPanel("objects")}
 				>
 					{/* Cut short from the front: the end is the procedure, the part that matters most. */}
@@ -180,16 +184,29 @@ export function StatusBar() {
 				</button>
 			</Show>
 			<span class="spacer" />
-			<Show when={size()}>
-				{(s) => (
-					<span class="item meter" title={`This script against the house size limits: ${limits().bytes / 1024} KB, ${limits().codeLines} lines of code, ${limits().historyEntries} entries in the banner's change list (program decision 0006)`}>
-						{part(s().bytes, limits().bytes, `${(s().bytes / 1024).toFixed(1)} KB`)}
-						{part(s().codeLines, limits().codeLines, `${s().codeLines} code lines`)}
-						{part(s().historyEntries, limits().historyEntries, `${s().historyEntries} banner ${s().historyEntries === 1 ? "change" : "changes"}`, 1)}
-					</span>
-				)}
+			<Show when={state.centerView === "editors" && !review() && size()}>
+				{(s) => {
+					const anyAlert = () =>
+						level(s().bytes, limits().bytes) !== "ok" ||
+						level(s().codeLines, limits().codeLines) !== "ok" ||
+						level(s().historyEntries, limits().historyEntries, 1) !== "ok";
+					return (
+						<span
+							class="item meter"
+							classList={{ "tier-3": !anyAlert() }}
+							title={`This script against the house size limits: ${limits().bytes / 1024} KB, ${limits().codeLines} lines of code, ${limits().historyEntries} entries in the banner's change list (program decision 0006)`}
+						>
+							{part(s().bytes, limits().bytes, `${(s().bytes / 1024).toFixed(1)} KB`, undefined, true)}
+							{part(s().codeLines, limits().codeLines, `${s().codeLines} code lines`, undefined, true)}
+							{part(s().historyEntries, limits().historyEntries, `${s().historyEntries} banner ${s().historyEntries === 1 ? "change" : "changes"}`, 1, true)}
+						</span>
+					);
+				}}
 			</Show>
-			<Show when={activePath()}>
+			<Show when={state.centerView === "editors" && review()}>
+				{(r) => <span class="item">{languageName(r().language)}</span>}
+			</Show>
+			<Show when={activePath() && state.centerView === "editors" && !review()}>
 				{/* Where the cursor is, and the way to another line: the editor's own "go to line". */}
 				<Show when={!activeDoc()?.binary}>
 					<button class="item" title="Go to a line (Ctrl+G in the editor)" aria-label={`Line ${state.cursor.line}, column ${state.cursor.column}. Go to a line.`} onClick={() => void goToLine()}>
@@ -198,14 +215,14 @@ export function StatusBar() {
 				</Show>
 				<Show when={!activeDoc()?.binary && activeDoc()?.encoding}>
 					{(encoding) => (
-						<span class="item" title={`This file is written in ${encodingName(encoding())}, and is saved in it.`}>
+						<span class="item tier-3" title={`This file is written in ${encodingName(encoding())}, and is saved in it.`}>
 							{encodingName(encoding())}
 						</span>
 					)}
 				</Show>
 				<Show when={eol()}>
 					<button
-						class="item"
+						class="item tier-3"
 						aria-haspopup="menu"
 						title={`Lines end in ${eolName(eol())}. Click to change them all.`}
 						aria-label={`Line ends: ${eolName(eol())}. Change them.`}

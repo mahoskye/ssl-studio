@@ -29,8 +29,8 @@ function toSymbols(list: monaco.languages.DocumentSymbol[]): SymbolIn[] {
 function Code(props: { text: string }) {
 	// One string for the source: text that reads the same is not coloured again, however often it is asked for.
 	const [html] = createResource(
-		() => `${state.settings.theme}\u0000${props.text}`,
-		(source) => monaco.editor.colorize(source.slice(source.indexOf("\u0000") + 1), "ssl", { tabSize: 4 }),
+		() => `${state.settings.theme}\u0000${state.settings.themeMaterial ?? ""}\u0000${props.text}`,
+		(source) => monaco.editor.colorize(source.slice(source.indexOf("\u0000", source.indexOf("\u0000") + 1) + 1), "ssl", { tabSize: 4 }),
 	);
 	return <code class="block-code" innerHTML={html() ?? ""} />;
 }
@@ -529,7 +529,6 @@ export function BlocksView(props: { path: string; group: number }) {
 				<span class="hint" title="Up and Down move between blocks. Left and Right fold and unfold. Enter edits. Alt+Up and Alt+Down move a block. Delete removes it. Ctrl+Z undoes.">
 					Blocks: a view of the text. Arrows move, Enter edits, Ctrl+Z undoes here and in Text.
 				</span>
-				<span class="spacer" />
 				<button onClick={() => collapseAll(true)}>Collapse to signatures</button>
 				<button onClick={() => collapseAll(false)}>Expand all</button>
 			</div>

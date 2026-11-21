@@ -6,6 +6,8 @@ import { activeEditor } from "../editor/EditorGroup";
 import { session } from "../lsp/session";
 import { notify, state } from "../state";
 import { focusRowsBelow, IconButton, Row, RowGroup, Rows } from "./Rows";
+import { SectionSplitter } from "./SectionSplitter";
+import { recall, remember } from "../graph/canvas";
 import { renderReply } from "../agent/markdown";
 import { serverDown } from "./server";
 
@@ -64,6 +66,17 @@ export const describeElement = (name: string, root: string) => describe({ label:
 export function Reference() {
 	const [filter, setFilter] = createSignal("");
 	const [open, setOpen] = createSignal<Entry | null>(null);
+	const savedDetailH = Number(recall("reference.detail.h"));
+	const [detailH, setDetailH] = createSignal(Number.isFinite(savedDetailH) && savedDetailH >= 100 ? savedDetailH : 220);
+	const resizeDetail = (delta: number) => {
+		const next = Math.max(100, Math.min(520, detailH() + delta));
+		setDetailH(next);
+		remember("reference.detail.h", String(Math.round(next)));
+	};
+	const resetDetail = () => {
+		setDetailH(220);
+		remember("reference.detail.h", "220");
+	};
 	const [reference, { refetch }] = createResource(
 		() => state.lsp.state === "running" && state.workspace?.root,
 		(root) => loadReference(root as string).then((entries) => ({ entries, error: "" }), (e) => ({ entries: [] as Entry[], error: String(e?.message ?? e) })),
@@ -104,22 +117,32 @@ export function Reference() {
 			/>
 			<Show when={open()}>
 				{(entry) => (
-					<div class="reference-detail" role="region" aria-label={`About ${entry().label}`}>
-						<div class="reference-head">
-							<strong>{entry().label}</strong>
-							<span class="spacer" />
-							<button title="Insert the name at the cursor" onClick={() => insert(entry().label)}>
-								Insert
-							</button>
-							<IconButton label="Close the description" icon="close" onClick={() => setOpen(null)} />
-						</div>
-						<Show when={!details.loading} fallback={<p class="hint">Loading the description…</p>}>
-							<Show when={details()?.trim()} fallback={<p class="hint">The language server has no description of {entry().label}.</p>}>
-								{/* The server's own Markdown, cleaned like any other: lists of parameters and errors read as lists. */}
-								<div class="md reference-doc" innerHTML={renderReply(details()!)} />
+					<>
+						<div class="reference-detail" role="region" aria-label={`About ${entry().label}`} style={{ height: `${detailH()}px` }}>
+							<div class="reference-head">
+								<strong>{entry().label}</strong>
+								<span class="spacer" />
+								<button title="Insert the name at the cursor" onClick={() => insert(entry().label)}>
+									Insert
+								</button>
+								<IconButton label="Close the description" icon="close" onClick={() => setOpen(null)} />
+							</div>
+							<Show when={!details.loading} fallback={<p class="hint">Loading the description…</p>}>
+								<Show when={details()?.trim()} fallback={<p class="hint">The language server has no description of {entry().label}.</p>}>
+									{/* The server's own Markdown, cleaned like any other: lists of parameters and errors read as lists. */}
+									<div class="md reference-doc" innerHTML={renderReply(details()!)} />
+								</Show>
 							</Show>
-						</Show>
-					</div>
+						</div>
+						<SectionSplitter
+							label="Height of the reference description"
+							value={detailH()}
+							min={100}
+							max={520}
+							onDrag={resizeDetail}
+							onReset={resetDetail}
+						/>
+					</>
 				)}
 			</Show>
 			<Show

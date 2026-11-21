@@ -22,6 +22,13 @@ describe("tab labels", () => {
 		const labels = tabLabels([`${root}/a/b/c/X.ssl`, `${root}/d/X.ssl`], root);
 		expect(labels.get(`${root}/a/b/c/X.ssl`)).toBe("X.ssl · b/c");
 	});
+
+	test("floating untitled buffers display their bare name without a path prefix", () => {
+		const labels = tabLabels(["untitled:Untitled-1", `${root}/src/A.ssl`, "untitled:Untitled-2"], root);
+		expect(labels.get("untitled:Untitled-1")).toBe("Untitled-1");
+		expect(labels.get("untitled:Untitled-2")).toBe("Untitled-2");
+		expect(labels.get(`${root}/src/A.ssl`)).toBe("A.ssl");
+	});
 });
 
 describe("side panels fit the window", () => {

@@ -126,8 +126,16 @@ export type Info = { /** Whether the system prefers dark, where the backend coul
 export type ThemeFile = { id: string; name: string; json: string };
 
 export type Settings = {
-	/** "system", "dark", "light" or an imported theme's id. */
+	/** "system", "oklch:<tone>:<material>", "dark", "light" or an imported theme's id. */
 	theme: string;
+	/** Material hue used when theme is "system" (defaults to "walnut"). */
+	themeMaterial?: string;
+	/** Interface chrome font family; empty uses system-ui. */
+	uiFont?: string;
+	/** Code, Blocks, Tables and Output font family; empty uses ui-monospace. */
+	codeFont?: string;
+	/** Optional reading font family for Markdown Read view; empty inherits uiFont. */
+	readFont?: string;
 	/** The size of code and documents: the editor, Blocks, diffs and rendered Markdown. */
 	fontSize: number;
 	formatOnSave: boolean;

@@ -18,14 +18,14 @@ import { createSignal, createUniqueId, For, onCleanup, onMount, Show } from "sol
 import { FIELD_COMMANDS, letterItem, MENU_BAR, missing, stepMenu, type BarEntry, type Has } from "../shared/menuBar";
 import { keysFor, onOpenMenu, runCommand } from "./commands";
 import { Icon } from "./Icon";
-import { crowdedOut, panelOn } from "./panels/registry";
+import { crowdedOut, narrowHosted, narrowPanels, panelOn } from "./panels/registry";
 import { activeEditor } from "./editor/EditorGroup";
 import { review } from "./editor/Review";
 import { Menu, nextItem, type MenuItem } from "./Menu";
 import { canGo } from "./navigation";
 import { isPlanPath } from "./plan/model";
 import { isMarkdown, isTable } from "./project";
-import { activeDoc, activePath, documents, focusEditor, notify, state } from "./state";
+import { activeDoc, activePath, documents, focusEditor, notify, setState, state } from "./state";
 
 /** A file is in front, not the call graph or a review of changes. */
 const inFront = () => state.centerView === "editors" && !review();
@@ -129,8 +129,8 @@ function LayoutControls() {
 	const folder = () => Boolean(state.workspace);
 	const layout = () => state.settings.layout;
 	// A side that is open but has no room in the window is not showing: its button brings it back.
-	const left = () => folder() && layout().left && !crowdedOut("left");
-	const right = () => folder() && layout().right && !crowdedOut("right");
+	const left = () => folder() && layout().left && !crowdedOut("left") && !(narrowPanels() && narrowHosted());
+	const right = () => (narrowPanels() ? folder() && Boolean(narrowHosted()) && layout().left && !crowdedOut("left") : folder() && layout().right && !crowdedOut("right"));
 	const bottom = () => folder() && layout().bottom;
 	const keys = (id: string) => (keysFor(id) ? ` (${keysFor(id)})` : "");
 	const undocked = (side: "left" | "right") => folder() && !panelOn(side);
@@ -307,6 +307,18 @@ export function MenuBar() {
 
 	return (
 		<div class="menubar">
+			<Show when={state.workspace}>
+				<button
+					class="menubar-home"
+					classList={{ active: state.centerView === "welcome" }}
+					aria-label="Projects: switch workspace or view recent folders"
+					aria-pressed={state.centerView === "welcome"}
+					title={state.centerView === "welcome" ? `Return to ${state.workspace!.name}` : "Projects: switch folder or open a recent workspace"}
+					onClick={() => setState("centerView", state.centerView === "welcome" ? "editors" : "welcome")}
+				>
+					<Icon name="home" />
+				</button>
+			</Show>
 			<div
 				class="menubar-menus"
 				role="menubar"
@@ -386,6 +398,21 @@ export function MenuBar() {
 					)}
 				</For>
 			</div>
+			<span class="spacer" />
+			<Show when={state.workspace}>
+				<button
+					class="cmd-center"
+					title={`Go to file…${keysFor("quick-open") ? ` (${keysFor("quick-open")})` : ""}`}
+					aria-label={`Go to file in ${state.workspace!.name}${keysFor("quick-open") ? ` (${keysFor("quick-open")})` : ""}`}
+					onClick={() => runCommand("quick-open")}
+				>
+					<Icon name="search" />
+					<span class="cmd-center-name">{state.workspace!.name}</span>
+					<Show when={keysFor("quick-open")}>
+						<span class="cmd-center-keys">{keysFor("quick-open")}</span>
+					</Show>
+				</button>
+			</Show>
 			<span class="spacer" />
 			<LayoutControls />
 		</div>

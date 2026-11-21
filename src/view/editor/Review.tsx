@@ -2,11 +2,14 @@
 // and every agent step go through here. Nothing changes until Accept, and
 // Accept is an undoable edit, not a save (ADR 0002). The review stays open
 // until the accept has worked, so a failed write loses nothing.
+import { DEFAULT_CODE_FONT, resolveFontStack } from "../../shared/fonts";
 import { Icon } from "../Icon";
 import { createEffect, createSignal, For, onCleanup, onMount, Show, untrack } from "solid-js";
 import { choose } from "../dialogs";
 import { canonical, keepTab, state, notify } from "../state";
-import { isInside, joinPath, relativeTo } from "../../shared/paths";
+import { baseName, isInside, joinPath, relativeTo } from "../../shared/paths";
+import { recall, remember } from "../graph/canvas";
+import { CenterTabStrip } from "./CenterTabStrip";
 import { monaco } from "./monaco";
 import { changeSize, reviewFlow } from "./reviewFlow";
 
@@ -78,14 +81,28 @@ export function ReviewView() {
 	const [error, setError] = createSignal("");
 	/** The lines the proposal adds and takes away, once the diff has been worked out. */
 	const [size, setSize] = createSignal("");
+	/** Explicit diff layout (ADR 0027): never silently flips behind the column headers. */
+	const [diffLayout, setDiffLayout] = createSignal<"split" | "inline">(recall("review.layout") === "inline" ? "inline" : "split");
+	const chooseLayout = (next: "split" | "inline") => {
+		setDiffLayout(next);
+		remember("review.layout", next);
+	};
 	const label = r.acceptLabel ?? "Accept";
 	const file = r.path ? relativeTo(state.workspace?.root, r.path) : "";
+	const tabTitle = r.path ? (r.compare ? `${baseName(r.path)} (diff)` : `Review: ${baseName(r.path)}`) : r.title;
 	const effect = r.effect ?? `"${label}" applies the right side.`;
 
 	onMount(() => {
 		const original = monaco.editor.createModel(r.original, r.language);
 		const proposed = (proposedModel = monaco.editor.createModel(r.proposed, r.language));
-		const diff = (editor = monaco.editor.createDiffEditor(host, { automaticLayout: true, renderSideBySide: true, originalEditable: false, readOnly: Boolean(r.compare), fontSize: state.settings.fontSize }));
+		const diff = (editor = monaco.editor.createDiffEditor(host, {
+			automaticLayout: true,
+			renderSideBySide: diffLayout() === "split",
+			useInlineViewWhenSpaceIsLimited: false,
+			originalEditable: false,
+			readOnly: Boolean(r.compare),
+			fontSize: state.settings.fontSize,
+		}));
 		diff.setModel({ original, modified: proposed });
 		// Ctrl+F12 goes to the definition here as it does in the editor: each side is told it is in a web view,
 		// which is where the editor keeps that key (see EditorGroup.tsx).
@@ -104,10 +121,17 @@ export function ReviewView() {
 			proposed.dispose();
 		});
 	});
-	// Both sides follow the Font size setting, as the editors do.
+	// Both sides follow the Font size, Code font, and explicit Side-by-Side / Inline layout choice.
 	createEffect(() => {
 		const fontSize = state.settings.fontSize;
-		editor?.updateOptions({ fontSize });
+		const fontFamily = state.settings.codeFont?.trim() ? resolveFontStack(state.settings.codeFont, DEFAULT_CODE_FONT) : undefined;
+		const sideBySide = diffLayout() === "split";
+		editor?.updateOptions({
+			fontSize,
+			renderSideBySide: sideBySide,
+			useInlineViewWhenSpaceIsLimited: false,
+			...(fontFamily ? { fontFamily } : {}),
+		});
 	});
 
 	// Undoing every edit counts as not edited: the version id goes back with the text.
@@ -131,80 +155,111 @@ export function ReviewView() {
 	};
 
 	return (
-		<div class="diff" ref={root} onKeyDown={onKey}>
-			<div class="diff-bar review-bar">
-				<div class="review-head">
-					<div class="review-what">
-						<strong>{r.title}</strong>
-						<Show when={file}>
-							<span class="review-path" title={r.path}>
-								{file}
-							</span>
+		<CenterTabStrip title={tabTitle} tooltip={r.path ?? r.title} icon="split-horizontal" onClose={reject}>
+			<div class="diff" ref={root} onKeyDown={onKey}>
+				<div class="diff-bar review-bar">
+					<div class="review-head">
+						<div class="review-what">
+							<strong>{r.title}</strong>
+							<Show when={file}>
+								<span class="review-path" title={r.path}>
+									{file}
+								</span>
+							</Show>
+						</div>
+						<p class="review-effect">
+							{r.compare
+								? (r.effect ?? (diffLayout() === "split" ? "The two are shown side by side. Nothing here changes either." : "Shown inline. Nothing here changes either."))
+								: `${effect} Reject (Esc) changes nothing.`}
+						</p>
+					</div>
+					<div class="review-actions">
+						<div class="mode-switch diff-layout-switch" role="group" aria-label="Diff layout">
+							<button classList={{ on: diffLayout() === "split" }} aria-pressed={diffLayout() === "split"} title="Show original and proposed side by side" onClick={() => chooseLayout("split")}>
+								Side-by-Side
+							</button>
+							<button classList={{ on: diffLayout() === "inline" }} aria-pressed={diffLayout() === "inline"} title="Show changes inline in one column" onClick={() => chooseLayout("inline")}>
+								Inline
+							</button>
+						</div>
+						<Show
+							when={!r.compare}
+							fallback={
+								<button class="primary" title="Close this comparison (Esc)" onClick={reject}>
+									Close
+								</button>
+							}
+						>
+							<button class="primary" disabled={Boolean(r.blocked) || busy()} title={r.blocked ?? (busy() ? "Accepting…" : effect)} onClick={() => void accept()}>
+								{label}
+							</button>
+							<button disabled={busy()} title={busy() ? "Wait for the accept to finish." : "Reject: close this review and change nothing (Esc)"} onClick={reject}>
+								Reject
+							</button>
 						</Show>
 					</div>
-					<p class="review-effect">{r.compare ? (r.effect ?? "The two are shown side by side. Nothing here changes either.") : `${effect} Reject (Esc) changes nothing.`}</p>
 				</div>
-				<div class="review-actions">
-					<Show
-						when={!r.compare}
-						fallback={
-							<button class="primary" title="Close this comparison (Esc)" onClick={reject}>
-								Close
-							</button>
-						}
-					>
-						<button class="primary" disabled={Boolean(r.blocked) || busy()} title={r.blocked ?? (busy() ? "Accepting…" : effect)} onClick={() => void accept()}>
-							{label}
-						</button>
-						<button disabled={busy()} title={busy() ? "Wait for the accept to finish." : "Reject: close this review and change nothing (Esc)"} onClick={reject}>
-							Reject
-						</button>
-					</Show>
-				</div>
-			</div>
-			<Show when={error()}>
-				<p class="review-error" role="alert">
-					Not accepted: {error().replace(/\.$/, "")}. Nothing was lost: the proposed text is still here. Try again, or reject.
+				<Show when={error()}>
+					<p class="review-error" role="alert">
+						Not accepted: {error().replace(/\.$/, "")}. Nothing was lost: the proposed text is still here. Try again, or reject.
+					</p>
+				</Show>
+				<Show when={r.checks?.length || r.note || r.blocked}>
+					<div class="review-info">
+						<Show when={r.blocked}>
+							<p class="review-blocked">{r.blocked}</p>
+						</Show>
+						<Show when={r.checks?.length}>
+							<ul class="checks">
+								<For each={r.checks}>
+									{(c) => (
+										<li class={c.ok === null ? "unknown" : c.ok ? "pass" : "fail"} title={c.detail}>
+											{c.ok === null ? "?" : <Icon name={c.ok ? "check" : "close"} />}
+											{/* The mark is for the eye: what it says is said in words too. */}
+											<span class="visually-hidden">{c.ok === null ? "Not known:" : c.ok ? "Passed:" : "Failed:"}</span> {c.label}
+											<Show when={c.detail}>
+												<span class="hint"> {c.detail}</span>
+											</Show>
+										</li>
+									)}
+								</For>
+							</ul>
+						</Show>
+						<Show when={r.note}>
+							<pre class="review-note">{r.note}</pre>
+						</Show>
+					</div>
+				</Show>
+				{/* Column headers bound strictly to the active diff layout (Defect B11 fix). */}
+				<Show
+					when={diffLayout() === "split"}
+					fallback={
+						<div class="diff-sides inline" aria-hidden="true">
+							<span class="diff-inline-label">
+								{r.compare?.left ?? "Now"}
+								<Icon name="arrow-right" class="diff-inline-sep" />
+								{r.compare?.right ?? "Proposed"}
+								<Show when={!r.compare}>
+									<span class="hint">you can edit the proposed lines</span>
+								</Show>
+							</span>
+							<span class="diff-size">{size()}</span>
+						</div>
+					}
+				>
+					<div class="diff-sides" aria-hidden="true">
+						<span>{r.compare?.left ?? "Now"}</span>
+						<span>
+							{r.compare?.right ?? "Proposed"} <Show when={!r.compare}><span class="hint">you can edit this side</span></Show>
+							<span class="diff-size">{size()}</span>
+						</span>
+					</div>
+				</Show>
+				<p class="visually-hidden" role="status">
+					{size()}
 				</p>
-			</Show>
-			<Show when={r.checks?.length || r.note || r.blocked}>
-				<div class="review-info">
-					<Show when={r.blocked}>
-						<p class="review-blocked">{r.blocked}</p>
-					</Show>
-					<Show when={r.checks?.length}>
-						<ul class="checks">
-							<For each={r.checks}>
-								{(c) => (
-									<li class={c.ok === null ? "unknown" : c.ok ? "pass" : "fail"} title={c.detail}>
-										{c.ok === null ? "?" : <Icon name={c.ok ? "check" : "close"} />}
-										{/* The mark is for the eye: what it says is said in words too. */}
-										<span class="visually-hidden">{c.ok === null ? "Not known:" : c.ok ? "Passed:" : "Failed:"}</span> {c.label}
-										<Show when={c.detail}>
-											<span class="hint"> {c.detail}</span>
-										</Show>
-									</li>
-								)}
-							</For>
-						</ul>
-					</Show>
-					<Show when={r.note}>
-						<pre class="review-note">{r.note}</pre>
-					</Show>
-				</div>
-			</Show>
-			{/* What each side is, over it: the two halves are the diff's own. */}
-			<div class="diff-sides" aria-hidden="true">
-				<span>{r.compare?.left ?? "Now"}</span>
-				<span>
-					{r.compare?.right ?? "Proposed"} <Show when={!r.compare}><span class="hint">you can edit this side</span></Show>
-					<span class="diff-size">{size()}</span>
-				</span>
+				<div class="diff-host" ref={host} />
 			</div>
-			<p class="visually-hidden" role="status">
-				{size()}
-			</p>
-			<div class="diff-host" ref={host} />
-		</div>
+		</CenterTabStrip>
 	);
 }

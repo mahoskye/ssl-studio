@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { foldedFrom, moveIndex, restoreIndex, ringStep, stopIndex, treeStep, typeAhead, isMoveKey, withFold, type TreeRow } from "../src/view/panels/rowMoves";
-import { COPY, COPY_NAME, COPY_PATH, COPY_RELATIVE, CUT, folderFor, holdsRoot, menuFor, nameProblem, NEW_FILE, NEW_FOLDER, PASTE, RENAME, retarget, TRASH, without } from "../src/view/panels/explorerMenu";
+import { COPY, COPY_NAME, COPY_PATH, COPY_RELATIVE, CUT, FIND_IN_FOLDER, folderFor, holdsRoot, menuEntriesFor, menuFor, nameProblem, NEW_FILE, NEW_FOLDER, OPEN, OPEN_SIDE, PASTE, RENAME, retarget, TRASH, without } from "../src/view/panels/explorerMenu";
 import { byLine, markedColumns, segments } from "../src/view/panels/searchLines";
 import { snippetAsText, TEMPLATES } from "../src/shared/houseStyle";
 import { patternsFrom } from "../src/view/plan/build";
@@ -154,6 +154,27 @@ test("paste is offered once something was cut or copied, and into the workspace 
 	// The workspace folder itself is never cut or copied.
 	expect(menuFor("dir", "/w", "/w", true)).not.toContain(CUT);
 	expect(menuFor("dir", "/w", "/w", true)).not.toContain(COPY);
+});
+
+test("VS Code-grouped Explorer context menus include open, find in folder, separators, and shortcuts", () => {
+	const fileMenu = menuEntriesFor("file", "/w/Sample/Orders.ssl", "/w", false);
+	expect(fileMenu).toContain("separator");
+	const fileLabels = fileMenu.map((e) => (typeof e === "string" ? e : e.label));
+	expect(fileLabels).toContain(OPEN);
+	expect(fileLabels).toContain(OPEN_SIDE);
+	expect(fileLabels).not.toContain(FIND_IN_FOLDER);
+	const renameEntry = fileMenu.find((e) => typeof e !== "string" && e.label === RENAME);
+	expect(typeof renameEntry !== "string" && renameEntry?.keys).toBe("F2");
+	const trashEntry = fileMenu.find((e) => typeof e !== "string" && e.label === TRASH);
+	expect(typeof trashEntry !== "string" && trashEntry?.keys).toBe("Delete");
+
+	const dirMenu = menuEntriesFor("dir", "/w/Sample", "/w", true);
+	const dirValues = dirMenu.map((e) => (typeof e === "string" ? e : (e.value ?? e.label)));
+	expect(dirValues).toContain(NEW_FILE);
+	expect(dirValues).toContain(NEW_FOLDER);
+	expect(dirValues).toContain(FIND_IN_FOLDER);
+	expect(dirValues).toContain(PASTE);
+	expect(dirValues).not.toContain(OPEN);
 });
 
 test("the workspace folder is refused, and what is in it is not", () => {

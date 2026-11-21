@@ -260,7 +260,7 @@ export function TableView(props: { path: string }) {
 						onClick={() => void checkNames()}
 						disabled={Boolean(checking())}
 					>
-						{checking() || (uses() ? "Check again" : "Check against code")}
+						{checking() || (uses() ? "Recheck" : "Check code")}
 					</button>
 				</Show>
 				<button
@@ -268,7 +268,7 @@ export function TableView(props: { path: string }) {
 					onClick={deleteRow}
 					disabled={current() === null || !table().rows[current()!]}
 				>
-					Delete row
+					Delete
 				</button>
 				<button title="A new row at the end of the file" onClick={addRow} disabled={!table().header.length}>
 					Add row

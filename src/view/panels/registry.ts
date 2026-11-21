@@ -2,16 +2,45 @@
 // move any of them to the other side, and the choice is saved with the
 // workspace's layout.
 import { createSignal } from "solid-js";
+import { hasOutline } from "../../shared/outline";
 import { dockedView } from "../layout";
-import { focusEditor, setState, state, type PanelId } from "../state";
+import { isPlanPath } from "../plan/model";
+import { activeDoc, activePath, focusEditor, setState, state, type PanelId } from "../state";
 
 export type Side = "left" | "right";
-export const PANELS: { id: PanelId; icon: string; title: string; home: Side }[] = [
+export const PANELS: { id: PanelId; icon: string; title: string; home: Side; when?: () => boolean }[] = [
 	// Every icon is a Codicon, from the font Monaco already ships: one family, drawn the same on every system.
 	{ id: "explorer", icon: "\ueaf0", title: "Explorer", home: "left" },
 	{ id: "docs", icon: "\ueb9c", title: "Docs: README, AGENTS and the project's documents", home: "left" },
-	{ id: "objects", icon: "\ueb17", title: "Objects: the regions and procedures of the open file", home: "left" },
-	{ id: "palette", icon: "\ueb5c", title: "Palette: templates to insert", home: "left" },
+	{
+		id: "objects",
+		icon: "\ueb86",
+		title: "Document outline: headings, regions and procedures of the open file",
+		home: "right",
+		when: () => {
+			if (state.centerView !== "editors") return false;
+			const path = activePath();
+			if (!path) return false;
+			const doc = activeDoc();
+			if (!doc || doc.binary) return false;
+			return isPlanPath(path) || doc.model.getLanguageId() === "ssl" || hasOutline(doc.model.getLanguageId());
+		},
+	},
+	{
+		id: "palette",
+		icon: "\ueb5c",
+		title: "Palette: SSL templates, plan shapes, or call graph controls",
+		home: "left",
+		when: () => {
+			if (state.centerView === "graph") return true;
+			if (state.centerView !== "editors") return false;
+			const path = activePath();
+			if (!path) return false;
+			const doc = activeDoc();
+			if (!doc || doc.binary) return false;
+			return isPlanPath(path) || doc.model.getLanguageId() === "ssl";
+		},
+	},
 	{ id: "reference", icon: "\ueaa4", title: "Reference: built-in functions, classes and keywords", home: "left" },
 	{ id: "search", icon: "\uea6d", title: "Search", home: "left" },
 	{ id: "git", icon: "\uea68", title: "Source control: what has changed, and the next commit", home: "left" },
@@ -19,6 +48,12 @@ export const PANELS: { id: PanelId; icon: string; title: string; home: Side }[] 
 	{ id: "agent", icon: "\uec10", title: "Agent", home: "right" },
 	{ id: "health", icon: "\ueb31", title: "Health: the open script against the house style", home: "left" },
 ];
+
+/** Whether a panel is relevant to the current document/view context (shown in the rail). */
+export const isPanelAvailable = (id: PanelId): boolean => {
+	const panel = PANELS.find((p) => p.id === id);
+	return panel?.when ? panel.when() : true;
+};
 
 export const sideOf = (id: PanelId): Side => state.settings.layout.dock?.[id] ?? PANELS.find((p) => p.id === id)!.home;
 const viewKey = (side: Side) => (side === "left" ? "leftView" : "rightView");
@@ -28,14 +63,32 @@ export const isOpen = (id: PanelId) => state.settings.layout[sideOf(id)] && stat
 const [lastShown, setLastShown] = createSignal<Side>("left");
 /** A side that is open but has no room in the window as it is (set by the app's layout). */
 const [crowded, setCrowded] = createSignal<{ left: boolean; right: boolean }>({ left: false, right: false }, { equals: (a, b) => a.left === b.left && a.right === b.right });
-export { lastShown, setCrowded };
+/** True when the window cannot fit both left and right panels beside the editor (narrow layout). */
+const [narrowPanels, setNarrowPanels] = createSignal(false);
+/** A right-docked panel temporarily hosted inside the left island slot during narrow layout (ADR 0027). */
+const [narrowHosted, setNarrowHosted] = createSignal<PanelId | null>(null);
+export { lastShown, narrowHosted, narrowPanels, setCrowded, setNarrowHosted, setNarrowPanels };
 /** Whether a side is open but has no room: said of each side by itself, since in a narrow window it can be both. */
 export const crowdedOut = (side: Side) => crowded()[side];
 /** Open, and on screen: a panel the window has no room for is neither pressed nor closed by its button. */
-export const isShown = (id: PanelId) => isOpen(id) && !crowdedOut(sideOf(id));
+export const isShown = (id: PanelId) => {
+	const hosted = narrowHosted();
+	if (narrowPanels() && hosted) return hosted === id && state.settings.layout.left && !crowdedOut("left");
+	return isOpen(id) && !crowdedOut(sideOf(id));
+};
 
 export function showPanel(id: PanelId) {
 	const side = sideOf(id);
+	// In narrow layout, right-docked panels open cleanly inside the left island slot without mutating dock settings.
+	if (side === "right" && narrowPanels()) {
+		setNarrowHosted(id);
+		setLastShown("left");
+		setState("rightView", id);
+		setState("settings", "layout", "left", true);
+		setTimeout(() => focusPanel(id), 0);
+		return;
+	}
+	setNarrowHosted(null);
 	setLastShown(side);
 	setState(viewKey(side), id);
 	setState("settings", "layout", side, true);
@@ -75,6 +128,21 @@ export const panelOn = (side: Side): PanelId | null =>
  * went: then it goes to the editor. A side that is open but has no room is brought back, not shut.
  */
 export function toggleSide(side: Side) {
+	if (side === "right" && narrowPanels()) {
+		if (narrowHosted() && state.settings.layout.left && !crowdedOut("left")) {
+			setNarrowHosted(null);
+			setState("settings", "layout", "left", false);
+			queueMicrotask(() => (!document.activeElement || document.activeElement === document.body) && focusEditor());
+			return;
+		}
+		const target = panelOn("right");
+		if (target) showPanel(target);
+		return;
+	}
+	if (side === "left" && narrowPanels() && narrowHosted() && state.settings.layout.left && !crowdedOut("left")) {
+		setNarrowHosted(null);
+		return;
+	}
 	if (state.settings.layout[side] && !crowdedOut(side)) {
 		setState("settings", "layout", side, false);
 		queueMicrotask(() => (!document.activeElement || document.activeElement === document.body) && focusEditor());
@@ -85,11 +153,20 @@ export function toggleSide(side: Side) {
 }
 
 export function togglePanel(id: PanelId) {
-	if (isShown(id)) setState("settings", "layout", sideOf(id), false);
-	else showPanel(id);
+	if (isShown(id)) {
+		if (narrowPanels() && narrowHosted() === id) {
+			setNarrowHosted(null);
+			setState("settings", "layout", "left", false);
+		} else {
+			setState("settings", "layout", sideOf(id), false);
+		}
+	} else {
+		showPanel(id);
+	}
 }
 
 export function movePanel(id: PanelId) {
+	if (narrowHosted() === id) setNarrowHosted(null);
 	const from = sideOf(id);
 	const to: Side = from === "left" ? "right" : "left";
 	const wasShown = state[viewKey(from)] === id;

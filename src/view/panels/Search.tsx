@@ -32,6 +32,14 @@ const [replacement, setReplacement] = createSignal("");
 const [include, setInclude] = createSignal("");
 const [exclude, setExclude] = createSignal("");
 
+/** Shows the Search panel scoped to a specific folder (relative to workspace root). */
+export function findInFolder(relFolder: string) {
+	const cleaned = relFolder.replace(/^[./\\]+|[\\/]+$/g, "").replace(/\\/g, "/");
+	setInclude(cleaned ? `${cleaned}/**` : "");
+	setChoosing(true);
+	showPanel("search");
+}
+
 /** Shows the Search panel with its row for replacing open. */
 export function showReplace() {
 	setReplacing(true);

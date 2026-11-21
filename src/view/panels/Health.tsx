@@ -104,7 +104,8 @@ export function Health() {
 				<span>Health</span>
 				<IconButton label="Style profile" title="Open the style profile" icon="gear" onClick={() => openStyleProfile()} />
 			</div>
-			<section>
+			<div class="health-scroll">
+				<section>
 				<h3>Project</h3>
 				<Rows class="health-rows" role="listbox" label="The project's files">
 					<For each={docs().filter((d) => d.group === "project")}>
@@ -254,6 +255,7 @@ export function Health() {
 					</Show>
 				</section>
 			</Show>
+			</div>
 		</div>
 	);
 }

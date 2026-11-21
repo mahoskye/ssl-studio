@@ -2,7 +2,7 @@
 import { createResource, For, Show } from "solid-js";
 import { backend, inApp } from "./backend";
 import { ask } from "./dialogs";
-import { openFolder, state } from "./state";
+import { canonical, openFolder, setState, state } from "./state";
 import { baseName } from "../shared/paths";
 import { FileMark } from "./FileMark";
 
@@ -37,6 +37,11 @@ export function Welcome() {
 				<button class="primary" onClick={() => void open()}>
 					Open folder…
 				</button>
+				<Show when={state.workspace}>
+					<button onClick={() => setState("centerView", "editors")}>
+						Return to {state.workspace!.name}
+					</button>
+				</Show>
 				<Show when={keys("open-folder")}>
 					<kbd>{keys("open-folder")}</kbd>
 				</Show>
@@ -45,18 +50,27 @@ export function Welcome() {
 				<h2>Recent</h2>
 				<ul class="recent">
 					<For each={recent()}>
-						{(path) => (
-							<li>
-								<button title={`Open ${path}`} onClick={() => void openFolder(path)}>
-									<FileMark name={path} folder={{ open: false }} />
-									<span class="recent-name">{baseName(path)}</span>
-									{/* A long path keeps its end, which is the part that tells two folders apart. */}
-									<span class="hint">
-										<bdi>{path}</bdi>
-									</span>
-								</button>
-							</li>
-						)}
+						{(path) => {
+							const current = () => Boolean(state.workspace && canonical(state.workspace.root) === canonical(path));
+							return (
+								<li>
+									<button
+										title={current() ? `Return to ${path}` : `Open ${path}`}
+										onClick={() => (current() ? setState("centerView", "editors") : void openFolder(path))}
+									>
+										<FileMark name={path} folder={{ open: current() }} />
+										<span class="recent-name">{baseName(path)}</span>
+										<Show when={current()}>
+											<span class="recent-current">Open now</span>
+										</Show>
+										{/* A long path keeps its end, which is the part that tells two folders apart. */}
+										<span class="hint">
+											<bdi>{path}</bdi>
+										</span>
+									</button>
+								</li>
+							);
+						}}
 					</For>
 				</ul>
 			</Show>

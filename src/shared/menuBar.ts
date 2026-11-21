@@ -31,6 +31,7 @@ export const MENU_BAR: BarMenu[] = [
 		name: "File",
 		letter: "f",
 		entries: [
+			forFolder("New untitled file", "new-untitled"),
 			forFolder("New file or folder…", "new-file"),
 			{ label: "Open folder…", command: "open-folder" },
 			"separator",
@@ -104,7 +105,7 @@ export const MENU_BAR: BarMenu[] = [
 			forFolder("Explorer", "explorer"),
 			forFolder("Search", "search"),
 			forFolder("Docs", "docs"),
-			forFolder("Objects", "objects"),
+			forFolder("Document outline", "objects"),
 			forFolder("Palette", "palette"),
 			forFolder("Reference", "reference"),
 			forFolder("Source control", "git"),

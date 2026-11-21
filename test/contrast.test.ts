@@ -1,7 +1,10 @@
-// ADR 0007: legible first. Both built-in themes are held to WCAG 2 contrast:
-// 4.5 for text against everything it is drawn on, 3 for the edge of a control.
+// ADR 0007 & ADR 0027: legible first. Classic themes and all 25 generated OKLCH
+// Warm Material themes are held to WCAG 2 contrast: 4.5 for text against every
+// surface it is drawn on, 3 for the edge of a control.
 import { describe, expect, test } from "bun:test";
 import { BOUNDARY, TEXT, contrast } from "../src/shared/contrast";
+import { allOklchThemes, type GeneratedTheme } from "../src/shared/oklchTheme";
+import { resolveFontStack, DEFAULT_UI_FONT, DEFAULT_CODE_FONT } from "../src/shared/fonts";
 import dark from "../src/view/themes/studio-dark.json";
 import light from "../src/view/themes/studio-light.json";
 
@@ -42,6 +45,12 @@ const failing = (theme: Theme, pairs: [string, string][], needs: number) =>
 		.filter((p) => !(p.ratio >= needs))
 		.map((p) => `${p.front} on ${p.back}: ${p.ratio.toFixed(2)}, needs ${needs}`);
 
+const failingValues = (pairs: [label: string, front: string, back: string][], needs: number) =>
+	pairs
+		.map(([label, front, back]) => ({ label, ratio: contrast(front, back) }))
+		.filter((p) => !(p.ratio >= needs))
+		.map((p) => `${p.label}: ${p.ratio.toFixed(2)}, needs ${needs}`);
+
 describe("contrast", () => {
 	test("the ratio is the WCAG one", () => {
 		expect(contrast("#000000", "#ffffff")).toBeCloseTo(21, 5);
@@ -50,9 +59,18 @@ describe("contrast", () => {
 	});
 });
 
+describe("font stack normalization", () => {
+	test("defaults cleanly and quotes multi-word font names safely", () => {
+		expect(resolveFontStack("", DEFAULT_UI_FONT)).toBe(DEFAULT_UI_FONT);
+		expect(resolveFontStack("IBM Plex Sans", DEFAULT_UI_FONT)).toBe(`"IBM Plex Sans", ${DEFAULT_UI_FONT}`);
+		expect(resolveFontStack("JetBrains Mono; color: red", DEFAULT_CODE_FONT)).toBe(`"JetBrains Mono color: red", ${DEFAULT_CODE_FONT}`);
+		expect(resolveFontStack("Inter", DEFAULT_UI_FONT)).toBe(`Inter, ${DEFAULT_UI_FONT}`);
+	});
+});
+
 for (const [name, theme] of [
-	["dark", dark as Theme],
-	["light", light as Theme],
+	["classic dark", dark as Theme],
+	["classic light", light as Theme],
 ] as const) {
 	describe(`the ${name} theme`, () => {
 		test("has every colour the window reads", () => {
@@ -89,3 +107,114 @@ for (const [name, theme] of [
 		});
 	});
 }
+
+describe("all 25 OKLCH Warm Material themes", () => {
+	const themes: GeneratedTheme[] = allOklchThemes();
+
+	test("generates all 5 tones × 5 materials with valid 6-digit hex tokens", () => {
+		expect(themes.length).toBe(25);
+		for (const theme of themes) {
+			const badColors = Object.entries(theme.colors).filter(([, v]) => !/^#[0-9a-f]{6}$/i.test(v));
+			const badStudio = Object.entries(theme.studio).filter(([, v]) => !/^#[0-9a-f]{6}$/i.test(v));
+			expect(badColors).toEqual([]);
+			expect(badStudio).toEqual([]);
+		}
+	});
+
+	for (const theme of themes) {
+		describe(theme.name, () => {
+			const s = theme.studio;
+			const chromeSurfaces: [string, string][] = [
+				["trayBg", s.trayBg],
+				["sideBg", s.sideBg],
+				["panelBg", s.panelBg],
+				["hover", s.hover],
+				["selected", s.selected],
+			];
+			const editorSurfaces: [string, string][] = [
+				["editorBg", s.editorBg],
+				["editorLineHl", s.editorLineHl],
+			];
+
+			test("text in its home surface passes WCAG AA", () => {
+				expect(failing(theme, TEXT_ON, TEXT)).toEqual([]);
+				expect(
+					failingValues(
+						[
+							["strongFg on sideBg", s.strongFg, s.sideBg],
+							["strongFg on selected", s.strongFg, s.selected],
+							["editorStrong on editorBg", s.editorStrong, s.editorBg],
+							["editorFg on editorLineHl", s.editorFg, s.editorLineHl],
+							["buttonFg on buttonBg", s.buttonFg, s.buttonBg],
+							["peekViewTitleLabel on peekViewTitle", theme.colors["peekViewTitleLabel.foreground"]!, theme.colors["peekViewTitle.background"]!],
+							["peekViewTitleDescription on peekViewTitle", theme.colors["peekViewTitleDescription.foreground"]!, theme.colors["peekViewTitle.background"]!],
+							["peekViewResult.file on peekViewResult", theme.colors["peekViewResult.fileForeground"]!, theme.colors["peekViewResult.background"]!],
+							["peekViewResult.line on peekViewResult", theme.colors["peekViewResult.lineForeground"]!, theme.colors["peekViewResult.background"]!],
+							["peekViewResult.selection on selectionBg", theme.colors["peekViewResult.selectionForeground"]!, theme.colors["peekViewResult.selectionBackground"]!],
+						],
+						TEXT,
+					),
+				).toEqual([]);
+			});
+
+			test("chrome muted, accent and semantic colours read on every chrome surface", () => {
+				const chromeFg: [string, string][] = [
+					["muted", s.muted],
+					["accent", s.accent],
+					["ok", s.ok],
+					["warning", s.warning],
+					["error", s.error],
+					["info", s.info],
+				];
+				const pairs = chromeFg.flatMap(([fName, fHex]) =>
+					chromeSurfaces.map(([bName, bHex]): [string, string, string] => [`${fName} on ${bName}`, fHex, bHex]),
+				);
+				expect(failingValues(pairs, TEXT)).toEqual([]);
+			});
+
+			test("editor muted, accent and semantic colours read on editor surfaces", () => {
+				const editorFg: [string, string][] = [
+					["editorMuted", s.editorMuted],
+					["editorAccent", s.editorAccent],
+					["editorOk", s.editorOk],
+					["editorWarning", s.editorWarning],
+					["editorError", s.editorError],
+					["editorInfo", s.editorInfo],
+				];
+				const pairs = editorFg.flatMap(([fName, fHex]) =>
+					editorSurfaces.map(([bName, bHex]): [string, string, string] => [`${fName} on ${bName}`, fHex, bHex]),
+				);
+				expect(failingValues(pairs, TEXT)).toEqual([]);
+			});
+
+			test("control borders and focus rings pass WCAG boundary contrast", () => {
+				expect(
+					failingValues(
+						[
+							["inputBorder on sideBg", s.inputBorder, s.sideBg],
+							["inputBorder on inputBg", s.inputBorder, s.inputBg],
+							["accent on sideBg", s.accent, s.sideBg],
+							["accent on inputBg", s.accent, s.inputBg],
+							["editorAccent on editorBg", s.editorAccent, s.editorBg],
+						],
+						BOUNDARY,
+					),
+				).toEqual([]);
+			});
+
+			test("every TextMate and semantic syntax colour reads on editor and active line", () => {
+				const tokenPairs: [string, string, string][] = [];
+				for (const t of theme.tokenColors) {
+					if (!t.settings.foreground) continue;
+					for (const [bName, bHex] of editorSurfaces) tokenPairs.push([`${String(t.scope)} on ${bName}`, t.settings.foreground, bHex]);
+				}
+				for (const [sel, val] of Object.entries(theme.semanticTokenColors)) {
+					const fg = typeof val === "string" ? val : val.foreground;
+					if (!fg) continue;
+					for (const [bName, bHex] of editorSurfaces) tokenPairs.push([`semantic:${sel} on ${bName}`, fg, bHex]);
+				}
+				expect(failingValues(tokenPairs, TEXT)).toEqual([]);
+			});
+		});
+	}
+});

@@ -9,9 +9,9 @@ import { monaco } from "./editor/monaco";
 import { languageFor } from "./editor/languages";
 import { session } from "./lsp/session";
 import { changedRanges, minimalReplace } from "./lsp/edits";
-import { choose } from "./dialogs";
+import { ask, choose } from "./dialogs";
 import { closeComparison, openReview } from "./editor/Review";
-import { baseName, isInside, plainFileError } from "../shared/paths";
+import { baseName, isInside, joinPath, plainFileError } from "../shared/paths";
 import { lineEnds } from "../shared/fileKind";
 import { isPlanPath } from "./plan/model";
 import { recheckPlans, trackPlan } from "./plan/check";
@@ -60,11 +60,13 @@ export const [state, setState] = createStore({
 	leftView: "explorer" as LeftView,
 	bottomView: "problems" as BottomView,
 	rightView: "health" as RightView,
-	centerView: "editors" as "editors" | "graph",
+	centerView: "editors" as "editors" | "graph" | "welcome",
 	/** Plans shown as text; a plan opens as its chart. */
 	planText: {} as Record<string, boolean>,
 	/** Markdown shown as text; a Markdown file opens rendered. */
 	mdText: {} as Record<string, boolean>,
+	/** Obsidian-style Markdown view mode per file: Source (raw), Live (formatted edit), Read (rendered page). */
+	mdMode: {} as Record<string, "source" | "live" | "read">,
 	messages: [] as Message[],
 	output: [] as string[],
 	cursor: { line: 1, column: 1 },
@@ -184,7 +186,13 @@ let tabsReady = false;
 /** Keeps which files are open in this folder, for the next time it is opened. */
 export function rememberTabs() {
 	const root = state.workspace?.root;
-	if (root && tabsReady) remember(tabsKey(root), packTabs(state.groups, state.activeGroup));
+	if (!root || !tabsReady) return;
+	// Floating untitled buffers are not persisted across workspace sessions.
+	const savedGroups = state.groups.map((g) => {
+		const tabs = g.tabs.filter((p) => !isUntitled(p));
+		return { ...g, tabs, active: g.active && !isUntitled(g.active) ? g.active : (tabs[0] ?? null) };
+	});
+	remember(tabsKey(root), packTabs(savedGroups, state.activeGroup));
 }
 
 /** The side panels there are, and the bottom ones: what a kept choice must be one of. */
@@ -323,8 +331,56 @@ export async function saveSetting(patch: SettingsPatch, scope: "user" | "workspa
 
 // --- documents ---------------------------------------------------------------
 
-/** One spelling per file: Monaco's (on Windows it lowercases the drive letter). */
-export const canonical = (path: string) => monaco.Uri.file(path).fsPath;
+/** True for floating untitled buffers that have not been saved to disk yet. */
+export const isUntitled = (path: string | null | undefined): path is string => Boolean(path && path.startsWith("untitled:"));
+export const displayName = (path: string) => (isUntitled(path) ? path.slice("untitled:".length) : baseName(path));
+
+/** Obsidian-style Markdown mode per file (Source | Live | Read). */
+export function markdownMode(path: string): "source" | "live" | "read" {
+	const explicit = state.mdMode[path];
+	if (explicit) return explicit;
+	if (state.mdText[path]) return state.settings.livePreview === false ? "source" : "live";
+	return "read";
+}
+export function setMarkdownMode(path: string, mode: "source" | "live" | "read") {
+	batch(() => {
+		setState("mdMode", path, mode);
+		setState("mdText", path, mode !== "read");
+	});
+}
+
+/** One spelling per file: Monaco's (on Windows it lowercases the drive letter). Untitled paths stay as-is. */
+export const canonical = (path: string) => (isUntitled(path) ? path : monaco.Uri.file(path).fsPath);
+
+/** Opens a floating untitled buffer (Untitled-1, Untitled-2, ...) that stays in memory until saved. */
+export function newUntitled(group = state.activeGroup, language = "plaintext"): string {
+	let n = 1;
+	while (docs.has(`untitled:Untitled-${n}`)) n++;
+	const path = `untitled:Untitled-${n}`;
+	const uri = monaco.Uri.parse(path);
+	const model = monaco.editor.getModel(uri) ?? monaco.editor.createModel("", language, uri);
+	const doc: Doc = { path, model, savedVersion: model.getAlternativeVersionId(), savedText: "", mtime: 0 };
+	docs.set(path, doc);
+	model.onDidChangeContent(() => {
+		const dirty = model.getAlternativeVersionId() !== doc.savedVersion;
+		setState("dirty", path, dirty);
+	});
+	closeComparison();
+	batch(() => {
+		setState(
+			"groups",
+			group,
+			produce((g: Group) => {
+				if (!g.tabs.includes(path)) g.tabs.push(path);
+				g.active = path;
+			}),
+		);
+		setState("activeGroup", group);
+		setState("centerView", "editors");
+	});
+	focusEditor();
+	return path;
+}
 
 /** Makes a model the open document for a path, and follows its edits. */
 function attach(path: string, text: string, saved: { text: string; mtime: number }): Doc {
@@ -481,12 +537,12 @@ export async function closeTab(path: string, group = state.activeGroup, options:
 	}
 	const lastView = state.groups.filter((g) => g.tabs.includes(path)).length === 1;
 	if (state.dirty[path] && lastView && !options.discard) {
-		const answer = await choose(`${baseName(path)} has unsaved changes.`, ["Save", "Discard changes"], { danger: "Discard changes" });
+		const answer = await choose(`${displayName(path)} has unsaved changes.`, ["Save", "Discard changes"], { danger: "Discard changes" });
 		if (!answer) return false;
 		// A save that failed has already said why: the tab stays, with the edits in it.
 		if (answer === "Save" && !(await save(path))) return false;
 	}
-	if (lastView) closedTabs.push(path);
+	if (lastView && !isUntitled(path)) closedTabs.push(path);
 	batch(() => {
 		setState(
 			"groups",
@@ -636,7 +692,7 @@ export const pathChanges = {
  */
 function letGoIfOnlyRead(path: string) {
 	const doc = docs.get(path);
-	if (!doc || state.dirty[path] || state.groups.some((g) => g.tabs.includes(path))) return;
+	if (!doc || isUntitled(path) || state.dirty[path] || state.groups.some((g) => g.tabs.includes(path))) return;
 	docs.delete(path);
 	doc.model.dispose();
 	if (state.conflicts[path]) setState("conflicts", path, undefined!);
@@ -675,6 +731,7 @@ export function fileRenamed(oldPath: string, newPath: string) {
 			setState("dirty", target, dirty || moved.savedVersion === -1);
 			if (state.planText[path]) setState("planText", target, true);
 			if (state.mdText[path]) setState("mdText", target, true);
+			if (state.mdMode[path]) setState("mdMode", target, state.mdMode[path]!);
 		});
 		doc.model.dispose();
 	}
@@ -816,6 +873,50 @@ export async function save(path = activePath(), options: { /** False to leave th
 	if (!path) return false;
 	const doc = docs.get(path);
 	if (!doc) return false;
+	// First save of a floating untitled buffer: ask for a path, write to disk, and promote the tab.
+	if (isUntitled(path)) {
+		const root = state.workspace?.root;
+		const suggested = `${displayName(path)}.ssl`;
+		const entered = (await ask(root ? "Save file as (relative to workspace, or absolute path)" : "Save file as (absolute path)", suggested))?.trim();
+		if (!entered) return false;
+		const isAbs = entered.startsWith("/") || /^[A-Za-z]:[\\/]/.test(entered);
+		if (!isAbs && !root) return notify("Open a folder or enter an absolute file path to save.", "error"), false;
+		const target = canonical(isAbs ? entered : joinPath(root!, ...entered.split(/[\\/]/).filter(Boolean)));
+		const text = doc.model.getValue();
+		const created = await guarded(async () => {
+			await backend.create(target, "file").catch(() => undefined);
+			return backend.write(target, text, true);
+		});
+		if (!created) return false;
+		const realDoc = attach(target, text, { text, mtime: created.mtime });
+		realDoc.encoding = "utf-8";
+		batch(() => {
+			for (let gi = 0; gi < state.groups.length; gi++) {
+				setState(
+					"groups",
+					gi,
+					produce((g: Group) => {
+						const idx = g.tabs.indexOf(path);
+						if (idx >= 0) {
+							if (g.tabs.includes(target)) g.tabs.splice(idx, 1);
+							else g.tabs[idx] = target;
+						}
+						if (g.active === path) g.active = target;
+						if (g.pinned) g.pinned = g.pinned.map((p) => (p === path ? target : p));
+						if (g.preview === path) g.preview = null;
+					}),
+				);
+			}
+			setState("dirty", path, undefined!);
+			setState("dirty", target, false);
+			setState("treeVersion", (v) => v + 1);
+		});
+		docs.delete(path);
+		doc.model.dispose();
+		session.saved(realDoc.model);
+		historyChanged.fire(target);
+		return true;
+	}
 	// A picture, or other bytes: there is no text of it here to save.
 	if (doc.binary) return notify(`${baseName(path)} is not text: there is nothing of it to save here.`), false;
 	if (!(await settleConflict(doc))) return false;

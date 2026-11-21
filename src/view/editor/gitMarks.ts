@@ -7,7 +7,7 @@ import { createEffect, on, onCleanup } from "solid-js";
 import { lineChanges } from "../../shared/lineDiff";
 import { backend } from "../backend";
 import { gitStatus, gitVersion } from "../git";
-import { documents } from "../state";
+import { documents, isUntitled } from "../state";
 import { monaco } from "./monaco";
 
 /** How long after the last key the marks are worked out again. */
@@ -24,14 +24,29 @@ export function useGitMarks(editor: monaco.editor.IStandaloneCodeEditor, active:
 		const model = editor.getModel();
 		if (!model || !base) return marks.clear();
 		const last = model.getLineCount();
-		marks.set(
-			lineChanges(base, model.getLinesContent()).map((change) => {
-				// Lines taken out leave no line to mark: the mark is on the line before, or above the first.
-				const line = Math.min(Math.max(change.line, 1), last);
-				const kind = change.kind === "removed" ? (change.line < 1 ? "removed-above" : "removed") : change.kind;
-				return { range: new monaco.Range(line, 1, Math.min(Math.max(change.endLine, line), last), 1), options: { isWholeLine: true, linesDecorationsClassName: `git-mark ${kind}` } };
-			}),
-		);
+		const out: monaco.editor.IModelDeltaDecoration[] = [];
+		for (const change of lineChanges(base, model.getLinesContent())) {
+			// Lines taken out leave no line to mark: the mark is on the line before, or above the first.
+			const start = Math.min(Math.max(change.line, 1), last);
+			const end = Math.min(Math.max(change.endLine, start), last);
+			if (change.kind === "removed") {
+				const kind = change.line < 1 ? "removed-above" : "removed";
+				out.push({ range: new monaco.Range(start, 1, start, 1), options: { isWholeLine: true, linesDecorationsClassName: `git-mark ${kind}` } });
+				continue;
+			}
+			// Mark hunk endpoints so consecutive lines join seamlessly into one unbroken vertical bar
+			// (solid filled for added; continuous hollow/framed rail for modified, per ADR 0010 & ADR 0027).
+			if (start === end) {
+				out.push({ range: new monaco.Range(start, 1, start, 1), options: { isWholeLine: true, linesDecorationsClassName: `git-mark ${change.kind} hunk-single` } });
+			} else {
+				out.push({ range: new monaco.Range(start, 1, start, 1), options: { isWholeLine: true, linesDecorationsClassName: `git-mark ${change.kind} hunk-start` } });
+				if (end - start > 1) {
+					out.push({ range: new monaco.Range(start + 1, 1, end - 1, 1), options: { isWholeLine: true, linesDecorationsClassName: `git-mark ${change.kind} hunk-mid` } });
+				}
+				out.push({ range: new monaco.Range(end, 1, end, 1), options: { isWholeLine: true, linesDecorationsClassName: `git-mark ${change.kind} hunk-end` } });
+			}
+		}
+		marks.set(out);
 	};
 
 	// The file shown, and what git has of it, either of which may change.
@@ -43,7 +58,7 @@ export function useGitMarks(editor: monaco.editor.IStandaloneCodeEditor, active:
 				base = null;
 				marks.clear();
 			}
-			if (!path || !repository || documents.get(path)?.binary) return;
+			if (!path || !repository || isUntitled(path) || documents.get(path)?.binary) return;
 			let stale = false;
 			onCleanup(() => (stale = true));
 			backend.gitBase(path, "index").then(

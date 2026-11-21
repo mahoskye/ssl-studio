@@ -5,6 +5,7 @@ import { backend } from "./backend";
 import { Dialogs } from "./dialogs";
 import { RowMenu } from "./panels/RowMenu";
 import { review, ReviewView } from "./editor/Review";
+import { CenterTabStrip } from "./editor/CenterTabStrip";
 import { EditorGroup } from "./editor/EditorGroup";
 import { commands, keysFor } from "./commands";
 import { clampScale } from "./uiScale";
@@ -29,11 +30,13 @@ import { SettingsDialog } from "./Settings";
 import { MenuBar } from "./MenuBar";
 import { useNavigation } from "./navigation";
 import { StatusBar } from "./StatusBar";
-import { applyTheme, resolveTheme } from "./themes/themes";
-import { dismiss, focusRequest, notify, openFolder, rememberTabs, rememberViews, setState, state, unsavedPaths, type PanelId } from "./state";
-import { focusPanel, isShown, lastShown, movePanel, panelOn, PANELS, setCrowded, sideOf, togglePanel } from "./panels/registry";
+import { applyFonts, applyTheme, resolveTheme } from "./themes/themes";
+import { activePath, dismiss, focusRequest, notify, openFolder, rememberTabs, rememberViews, setState, state, unsavedPaths, type PanelId } from "./state";
+import { focusPanel, isPanelAvailable, isShown, lastShown, movePanel, narrowHosted, narrowPanels, panelOn, PANELS, setCrowded, setNarrowHosted, setNarrowPanels, sideOf, togglePanel } from "./panels/registry";
+import { isPlanPath } from "./plan/model";
+import { isMarkdown, isTable } from "./project";
 import { Welcome } from "./Welcome";
-import { ACTIVITY, crowdedSides, fitPanels } from "./layout";
+import { ACTIVITY, CENTER_MIN, crowdedSides, fitPanels, LEFT_MIN, RIGHT_MIN } from "./layout";
 
 
 
@@ -85,10 +88,11 @@ function useTheme() {
 	const media = matchMedia("(prefers-color-scheme: light)");
 	// In the desktop app the system is asked for its preference; in a browser the browser's answer is the system's.
 	const system = () => (state.info?.host === "app" ? state.info.systemDark : undefined);
-	const apply = () => applyTheme(resolveTheme(state.settings.theme, state.themes, system()));
-	createEffect(on([() => state.settings.theme, () => state.themes, system], apply));
+	const apply = () => applyTheme(resolveTheme(state.settings.theme, state.themes, system(), state.settings.themeMaterial));
+	createEffect(on([() => state.settings.theme, () => state.settings.themeMaterial, () => state.themes, system], apply));
 	media.addEventListener("change", apply);
 	onCleanup(() => media.removeEventListener("change", apply));
+	createEffect(() => applyFonts({ uiFont: state.settings.uiFont, codeFont: state.settings.codeFont, readFont: state.settings.readFont }));
 }
 
 function useLayoutPersistence() {
@@ -199,6 +203,22 @@ export function App() {
 			else if (view !== state[key]) setState(key, view);
 		}
 	});
+	// When a context-gated panel (Document outline, Palette) becomes irrelevant to the open file/view,
+	// switch its side cleanly to the first available panel docked on that side (skipped during selftest).
+	createEffect(() => {
+		if (!state.workspace || state.info?.selftest) return;
+		for (const side of ["left", "right"] as const) {
+			const key = side === "left" ? "leftView" : "rightView";
+			const current = state[key];
+			if (!isPanelAvailable(current)) {
+				const fallback = PANELS.find((p) => sideOf(p.id) === side && isPanelAvailable(p.id));
+				if (fallback) setState(key, fallback.id);
+				else if (state.settings.layout[side]) setState("settings", "layout", side, false);
+			}
+		}
+		const hosted = narrowHosted();
+		if (hosted && !isPanelAvailable(hosted)) setNarrowHosted(null);
+	});
 	// Which files are open is kept with the folder, so that it opens next time as it was left.
 	createEffect(on(() => JSON.stringify([state.groups.map((g) => [g.tabs, g.active]), state.activeGroup]), rememberTabs));
 	// And so are the side panel, the bottom panel and the right panel that were showing.
@@ -216,9 +236,72 @@ export function App() {
 	onCleanup(() => window.removeEventListener("resize", resized));
 	const scale = () => clampScale(state.settings.uiScale);
 	// The activity bar grows with the interface size; the panels' widths are the user's own pixels.
-	const fit = () => fitPanels(size().width - ACTIVITY * (scale() - 1), layout().left && state.workspace ? layout().leftWidth : 0, layout().right && state.workspace ? layout().rightWidth : 0, lastShown());
+	const availWidth = () => size().width - ACTIVITY * (scale() - 1);
+	const isNarrowPair = () => availWidth() < ACTIVITY + CENTER_MIN + LEFT_MIN + RIGHT_MIN;
+	createEffect(() => {
+		const narrow = isNarrowPair();
+		setNarrowPanels(narrow);
+		if (narrow) {
+			if (state.workspace && layout().right && !narrowHosted() && (lastShown() === "right" || !layout().left)) {
+				setNarrowHosted(state.rightView);
+				setState("settings", "layout", "left", true);
+			}
+		} else {
+			const hosted = narrowHosted();
+			if (hosted) {
+				setNarrowHosted(null);
+				if (sideOf(hosted) === "right") {
+					setState("rightView", hosted);
+					setState("settings", "layout", "right", true);
+				}
+			}
+		}
+	});
+	// In narrow layout, right-docked panels are hosted in the left slot so the right column never crowds or overflows.
+	const rightW = () => (layout().right && state.workspace && !narrowPanels() ? layout().rightWidth : 0);
+	const fit = () => fitPanels(availWidth(), layout().left && state.workspace ? layout().leftWidth : 0, rightW(), lastShown());
 	// A side that is open and got no room: its button is not pressed, and pressing it brings the panel back.
-	createEffect(() => setCrowded(state.workspace ? crowdedSides({ left: layout().left, right: layout().right }, fit()) : { left: false, right: false }));
+	createEffect(() => setCrowded(state.workspace ? crowdedSides({ left: layout().left, right: layout().right && !narrowPanels() }, fit()) : { left: false, right: false }));
+
+	// Per-mode bottom panel memory (ADR 0027): default open in Code, hidden in Graph/Plan/Docs/Table/Review/Welcome.
+	type ModeKey = "code" | "plan" | "graph" | "doc" | "table" | "review" | "welcome";
+	const activeMode = (): ModeKey => {
+		if (state.centerView === "graph") return "graph";
+		if (state.centerView === "welcome") return "welcome";
+		if (review()) return "review";
+		const path = activePath();
+		if (path) {
+			if (isPlanPath(path) && !state.planText[path]) return "plan";
+			if (isMarkdown(path) && !state.mdText[path]) return "doc";
+			if (isTable(path) && !state.mdText[path]) return "table";
+		}
+		return "code";
+	};
+	const bottomByMode: Record<ModeKey, boolean> = { code: true, plan: false, graph: false, doc: false, table: false, review: false, welcome: false };
+	let syncingBottomMode = false;
+	createEffect(
+		on(activeMode, (mode, prev) => {
+			if (!state.workspace) return;
+			if (prev === undefined) {
+				bottomByMode[mode] = state.settings.layout.bottom;
+				return;
+			}
+			const want = bottomByMode[mode];
+			if (state.settings.layout.bottom !== want) {
+				syncingBottomMode = true;
+				setState("settings", "layout", "bottom", want);
+				queueMicrotask(() => (syncingBottomMode = false));
+			}
+		}),
+	);
+	createEffect(
+		on(
+			() => state.settings.layout.bottom,
+			(open) => {
+				if (!syncingBottomMode && state.workspace) bottomByMode[activeMode()] = open;
+			},
+		),
+	);
 	const bottom = () => (layout().bottom ? Math.min(layout().bottomHeight, Math.max(80, size().height - 200)) : 0);
 	// The interface's size scales the type and spacing scales in style.css; the code's size is its own setting.
 	createEffect(() => {
@@ -237,7 +320,7 @@ export function App() {
 				<MenuBar />
 			</Show>
 			<nav class="activity" aria-label="Views">
-				<For each={PANELS.filter((p) => sideOf(p.id) === "left")}>{(p) => <PanelButton id={p.id} />}</For>
+				<For each={PANELS.filter((p) => sideOf(p.id) === "left" && isPanelAvailable(p.id))}>{(p) => <PanelButton id={p.id} />}</For>
 				<button
 					title={state.workspace ? `Call graph${shortcut("graph")}` : "Call graph: open a folder first"}
 					aria-label="Call graph"
@@ -251,7 +334,10 @@ export function App() {
 					</span>
 				</button>
 				<span class="spacer" />
-				<For each={PANELS.filter((p) => sideOf(p.id) === "right")}>{(p) => <PanelButton id={p.id} />}</For>
+				<Show when={PANELS.some((p) => sideOf(p.id) === "right" && isPanelAvailable(p.id))}>
+					<span class="activity-divider" aria-hidden="true" />
+				</Show>
+				<For each={PANELS.filter((p) => sideOf(p.id) === "right" && isPanelAvailable(p.id))}>{(p) => <PanelButton id={p.id} />}</For>
 				<button title={`All commands${shortcut("command-palette")}`} aria-label="All commands" onClick={() => setState("quickPick", "commands")}>
 					<span class="codicon-glyph" aria-hidden="true">
 						{"\ueb94"}
@@ -263,9 +349,33 @@ export function App() {
 					</span>
 				</button>
 			</nav>
-			<Show when={layout().left && state.workspace}>
+			<Show when={fit().left > 0 && state.workspace}>
 				<aside class="sidebar" aria-label="Side panel">
-					<Panel id={state.leftView} />
+					<Show when={narrowPanels() && narrowHosted()}>
+						{(hostedId) => (
+							<div class="narrow-dock-bar">
+								<span class="narrow-dock-pill" title="Normally docked in the right panel; shown here while the window is narrow.">
+									Right
+								</span>
+								<span class="spacer" />
+								<button
+									class="link narrow-dock-back"
+									title="Back to left panel"
+									onClick={() => setNarrowHosted(null)}
+								>
+									Back
+								</button>
+								<button
+									class="narrow-dock-move"
+									title="Dock this panel permanently on the left"
+									onClick={() => movePanel(hostedId())}
+								>
+									Dock left
+								</button>
+							</div>
+						)}
+					</Show>
+					<Panel id={(narrowPanels() && narrowHosted()) || state.leftView} />
 				</aside>
 				<Splitter
 					axis="x"
@@ -292,6 +402,11 @@ export function App() {
 					<Show when={state.workspace} fallback={<Welcome />}>
 						<Show when={state.centerView === "graph"}>
 							<GraphView />
+						</Show>
+						<Show when={state.centerView === "welcome"}>
+							<CenterTabStrip title="Projects" tooltip="Switch workspace or open a recent folder" icon="home" onClose={() => setState("centerView", "editors")}>
+								<Welcome />
+							</CenterTabStrip>
 						</Show>
 						<Show when={state.centerView === "editors"}>
 							<Show when={review()} keyed fallback={<For each={state.groups}>{(_, i) => <EditorGroup index={i()} />}</For>}>
@@ -334,7 +449,7 @@ export function App() {
 					</section>
 				</Show>
 			</main>
-			<Show when={layout().right && state.workspace}>
+			<Show when={fit().right > 0 && state.workspace}>
 				<Splitter
 					axis="x"
 					column={5}

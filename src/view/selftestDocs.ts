@@ -59,7 +59,8 @@ const LINKS = `# Links
 <img src="missing.png" onerror="window.selftestScriptRan = true">
 `;
 
-const switchTo = (view: "Edit" | "Read") => [...document.querySelectorAll<HTMLButtonElement>(".mode-switch button")].find((b) => b.innerText.trim() === view)?.click();
+const switchTo = (view: "Edit" | "Read") =>
+	[...document.querySelectorAll<HTMLButtonElement>(".mode-switch button")].find((b) => b.innerText.trim() === (view === "Edit" ? "Live" : view) || b.innerText.trim() === view)?.click();
 
 /** Runs each step in turn, and stops at the first that fails: the later ones build on it. */
 async function run(steps: Steps, work: (step: (name: string, check: () => Promise<unknown>) => Promise<void>) => Promise<void>) {

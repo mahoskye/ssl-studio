@@ -17,8 +17,13 @@ import { isModifierKey } from "../keys";
 import { isMoveKey, moveIndex, typeAhead } from "./rowMoves";
 import type { Point } from "./Rows";
 
-type Open = { label: string; items: string[]; at: Point; opener: Element | null; keep: boolean; resolve: (item: string | null) => void };
+export type RowMenuEntry = string | "separator" | { label: string; value?: string; keys?: string };
+type ResolvedEntry = "separator" | { label: string; value: string; keys?: string };
+type Open = { label: string; items: ResolvedEntry[]; at: Point; opener: Element | null; keep: boolean; resolve: (item: string | null) => void };
 const [open, setOpen] = createSignal<Open | null>(null);
+
+const normalizeEntry = (entry: RowMenuEntry): ResolvedEntry =>
+	entry === "separator" ? "separator" : typeof entry === "string" ? { label: entry, value: entry } : { label: entry.label, value: entry.value ?? entry.label, keys: entry.keys };
 
 function finish(item: string | null, refocus = true) {
 	const menu = open();
@@ -34,12 +39,12 @@ function finish(item: string | null, refocus = true) {
  * Shows the menu and resolves with the item chosen, or null when it was
  * closed (Escape, Tab, a click elsewhere). <RowMenu /> is on screen for the whole app (App.tsx).
  */
-export function chooseFromMenu(label: string, items: string[], at: Point, options: { /** The text box the menu is for: the keyboard is put in it, and stays in it. */ box?: HTMLElement } = {}): Promise<string | null> {
+export function chooseFromMenu(label: string, items: RowMenuEntry[], at: Point, options: { /** The text box the menu is for: the keyboard is put in it, and stays in it. */ box?: HTMLElement } = {}): Promise<string | null> {
 	finish(null);
 	// The menu is tied to the box it was asked for, which is not always what has the keyboard (a right-click on one
 	// box while another's menu was open does not move it).
 	options.box?.focus();
-	return new Promise((resolve) => setOpen({ label, items, at, opener: options.box ?? document.activeElement, keep: Boolean(options.box), resolve }));
+	return new Promise((resolve) => setOpen({ label, items: items.map(normalizeEntry), at, opener: options.box ?? document.activeElement, keep: Boolean(options.box), resolve }));
 }
 
 /** True while a row's menu is open: a dialog under it leaves the menu's own keys to it. */
@@ -71,10 +76,11 @@ export function RowMenu() {
 					pointerAt = at;
 					return moved;
 				};
+				const actionable = menu.items.filter((entry): entry is Exclude<ResolvedEntry, "separator"> => entry !== "separator");
 				/** What the hidden line says. Filled a moment after it is on the page: a line that arrives already filled is not always read out. */
 				const [said, setSaid] = createSignal("");
 				if (menu.keep) {
-					const saying = setTimeout(() => setSaid(`${menu.label}: ${menu.items.join(", ")}. Up and Down choose, Enter takes one, Escape closes.`), 60);
+					const saying = setTimeout(() => setSaid(`${menu.label}: ${actionable.map((e) => e.label).join(", ")}. Up and Down choose, Enter takes one, Escape closes.`), 60);
 					onCleanup(() => clearTimeout(saying));
 				}
 				if (menu.keep) {
@@ -83,9 +89,9 @@ export function RowMenu() {
 						// A key with Ctrl, Alt or Shift is not the menu's: it shuts the menu and does what it does in the box.
 						if (e.ctrlKey || e.metaKey || e.altKey || (e.shiftKey && e.key !== "Tab")) return void (isModifierKey(e.key) || finish(null));
 						if (e.key === "Escape") (used(), finish(null));
-						else if (e.key === "ArrowDown" || e.key === "ArrowUp") (used(), setMarked(moveIndex(menu.items.length, marked(), e.key, { wrap: true })));
+						else if (e.key === "ArrowDown" || e.key === "ArrowUp") (used(), setMarked(moveIndex(actionable.length, marked(), e.key, { wrap: true })));
 						// Enter alone takes nothing, and does not go on to the box or the dialog under the menu.
-						else if (e.key === "Enter") (used(), marked() >= 0 && finish(menu.items[marked()]!));
+						else if (e.key === "Enter") (used(), marked() >= 0 && finish(actionable[marked()]!.value));
 						// Tab shuts the menu and goes nowhere: the keyboard stays in the box.
 						else if (e.key === "Tab") (used(), finish(null));
 						// Anything else is for the box: the menu goes, and the key is typed.
@@ -158,21 +164,28 @@ export function RowMenu() {
 							}}
 						>
 							<For each={menu.items}>
-								{(item, at) => (
-									<button
-										type="button"
-										class="menu-item"
-										classList={{ marked: marked() === at() }}
-										id={`${id}-${at()}`}
-										role="menuitem"
-										tabindex={-1}
-										// The pointer and the arrow keys move the one mark.
-										onMouseMove={(e) => menu.keep && pointerMoved(e) && marked() !== at() && setMarked(at())}
-										onClick={() => finish(item)}
-									>
-										{item}
-									</button>
-								)}
+								{(entry) => {
+									if (entry === "separator") return <div class="menu-sep" role="separator" />;
+									const idx = actionable.indexOf(entry);
+									return (
+										<button
+											type="button"
+											class="menu-item"
+											classList={{ marked: marked() === idx }}
+											id={`${id}-${idx}`}
+											role="menuitem"
+											tabindex={-1}
+											// The pointer and the arrow keys move the one mark.
+											onMouseMove={(e) => menu.keep && pointerMoved(e) && marked() !== idx && setMarked(idx)}
+											onClick={() => finish(entry.value)}
+										>
+											<span class="menu-label">{entry.label}</span>
+											<Show when={entry.keys}>
+												<span class="menu-keys">{entry.keys}</span>
+											</Show>
+										</button>
+									);
+								}}
 							</For>
 						</div>
 						{/* The keyboard is not in the menu, so nothing reads it out by itself: this says it has opened, and how it is worked. Beside the menu, not in it: a menu holds entries only. */}

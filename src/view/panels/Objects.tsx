@@ -1,18 +1,22 @@
-// The current file's objects from the language server's document symbols:
-// comment regions (Namespace symbols) with their procedures inside, and each
-// procedure's parameters under it. A file that is not SSL has an outline of
-// its own kind (shared/outline.ts): a document's headings, a settings file's
-// tables and keys, a SQL file's statements.
+// Unified Document outline panel (internal id "objects"): shows the open
+// file's structure — SSL comment regions & procedures from starlims-lsp, live
+// scrollspy headings for rendered Markdown Read view, outlines for Markdown
+// text / TOML / INI / JSON / SQL / YAML (shared/outline.ts), and workspace
+// procedures when editing a Plan chart.
 import { Icon, type IconName } from "../Icon";
 import { createEffect, createResource, createSignal, For, on, onCleanup, Show } from "solid-js";
 import { monaco } from "../editor/monaco";
+import { mdOutline } from "../editor/MarkdownView";
 import { session } from "../lsp/session";
 import { activeDoc, activePath, openFile, state } from "../state";
 import { cycleRegionColor, isRegion, regionColor, symbolPath } from "../editor/regions";
 import { isPlanPath, PROCEDURE_DRAG } from "../plan/model";
+import { isMarkdown } from "../project";
 import { hasOutline, outline, outlineOf, type OutlineItem } from "../../shared/outline";
 import { baseName, dirName, relativeTo } from "../../shared/paths";
-import { focusRowsBelow, Row, RowGroup, Rows } from "./Rows";
+import { recall, remember } from "../graph/canvas";
+import { Menu, type MenuItem } from "../Menu";
+import { focusRowsBelow, IconButton, Row, RowGroup, Rows } from "./Rows";
 import { serverDown } from "./server";
 
 type Sym = monaco.languages.DocumentSymbol;
@@ -162,54 +166,127 @@ function Procedures(props: { filter: string }) {
 
 const stepRegionColor = cycleRegionColor;
 
-export function Objects() {
-	const [filter, setFilter] = createSignal("");
-	/** Rows closed by the user, by their place in the tree. */
-	const [closed, setClosed] = createSignal<Set<string>>(new Set());
+export type OutlineSort = "position" | "name" | "kind";
+const savedSort = recall("outline.sort");
+const [outlineSort, setOutlineSortSignal] = createSignal<OutlineSort>(savedSort === "name" || savedSort === "kind" ? savedSort : "position");
+const [outlineFollow, setOutlineFollowSignal] = createSignal<boolean>(recall("outline.follow") !== "off");
+const [outlineClosed, setOutlineClosed] = createSignal<Set<string>>(new Set());
+
+export const setOutlineSort = (next: OutlineSort) => {
+	setOutlineSortSignal(next);
+	remember("outline.sort", next);
+};
+export const setOutlineFollow = (next: boolean) => {
+	setOutlineFollowSignal(next);
+	remember("outline.follow", next ? "on" : "off");
+};
+
+const collectExpandableKeys = (list: Sym[], parent = ""): string[] => {
+	const keys: string[] = [];
+	for (const s of list) {
+		const key = `${parent}/${s.name}`;
+		if (s.children?.length) {
+			keys.push(key);
+			keys.push(...collectExpandableKeys(s.children, key));
+		}
+	}
+	return keys;
+};
+
+export const outlineHasExpandable = () => collectExpandableKeys(symbols()).length > 0;
+export const outlineAnyOpen = () => {
+	const all = collectExpandableKeys(symbols());
+	return all.some((k) => !outlineClosed().has(k));
+};
+export const toggleOutlineCollapseAll = () => {
+	const all = collectExpandableKeys(symbols());
+	if (!all.length) return;
+	if (outlineAnyOpen()) setOutlineClosed(new Set(all));
+	else setOutlineClosed(new Set<string>());
+};
+
+/** VS Code-style outline options shared by Explorer's Outline drawer and the Document outline panel. */
+export const outlineMenuItems = (): MenuItem[] => [
+	{
+		label: "Follow cursor",
+		checked: outlineFollow(),
+		run: () => setOutlineFollow(!outlineFollow()),
+	},
+	"separator",
+	{
+		label: "Sort by: Position",
+		checked: outlineSort() === "position",
+		run: () => setOutlineSort("position"),
+	},
+	{
+		label: "Sort by: Name",
+		checked: outlineSort() === "name",
+		run: () => setOutlineSort("name"),
+	},
+	{
+		label: "Sort by: Type",
+		checked: outlineSort() === "kind",
+		run: () => setOutlineSort("kind"),
+	},
+];
+
+const sortSymbols = (list: Sym[], mode: OutlineSort): Sym[] => {
+	if (mode === "position") return list;
+	return [...list].sort((a, b) =>
+		mode === "name"
+			? a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" })
+			: a.kind - b.kind || a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }),
+	);
+};
+
+/** Shared symbol tree used by both the Document outline panel and Explorer's collapsible Outline drawer. */
+export function SymbolOutline(props: { filter?: string; compact?: boolean; label?: string }) {
+	const filter = () => props.filter ?? "";
 	const toggle = (key: string) =>
-		setClosed((set) => {
+		setOutlineClosed((set) => {
 			const next = new Set(set);
 			next.has(key) ? next.delete(key) : next.add(key);
 			return next;
 		});
 	const matches = (s: Sym): boolean => !filter() || s.name.toLowerCase().includes(filter().toLowerCase()) || (s.children ?? []).some(matches);
-	/** The innermost region or procedure the editor's cursor is in: its row says "you are here". */
+	/** The innermost region or procedure the editor's cursor is in: its row says "you are here" when Follow cursor is on. */
 	const here = () => {
+		if (!outlineFollow()) return undefined;
 		const path = symbolPath(symbols(), state.cursor.line).filter((s) => !isVariable(s));
 		return path[path.length - 1];
 	};
-	const TreeRow = (props: { symbol: Sym; depth: number; parent: string }) => {
-		const key = () => `${props.parent}/${props.symbol.name}`;
-		const parameter = () => isParameter(props.symbol);
-		const children = () => (props.symbol.children ?? []).filter(matches);
+	const TreeRow = (rowProps: { symbol: Sym; depth: number; parent: string }) => {
+		const key = () => `${rowProps.parent}/${rowProps.symbol.name}`;
+		const parameter = () => isParameter(rowProps.symbol);
+		const children = () => sortSymbols((rowProps.symbol.children ?? []).filter(matches), outlineSort());
 		// A filter shows what it found, whatever was closed.
-		const open = () => Boolean(filter()) || !closed().has(key());
+		const open = () => Boolean(filter()) || !outlineClosed().has(key());
 		// The server's word for the symbol ("region", "parameter", "public variable"); a procedure's detail is its parameter list.
-		const what = () => (props.symbol.detail ?? "").replace(/^\(.*\)$/, "");
+		const what = () => (rowProps.symbol.detail ?? "").replace(/^\(.*\)$/, "");
 		const title = () => {
-			const name = `${props.symbol.name}${what() ? `: a ${what()}` : ""}`;
-			return isVariable(props.symbol) ? `${name}, line ${props.symbol.range.startLineNumber}` : `${name}, ${count(lines(props.symbol), "line")} from line ${props.symbol.range.startLineNumber}`;
+			const name = `${rowProps.symbol.name}${what() ? `: a ${what()}` : ""}`;
+			return isVariable(rowProps.symbol) ? `${name}, line ${rowProps.symbol.range.startLineNumber}` : `${name}, ${count(lines(rowProps.symbol), "line")} from line ${rowProps.symbol.range.startLineNumber}`;
 		};
 		return (
-			<Show when={matches(props.symbol)}>
+			<Show when={matches(rowProps.symbol)}>
 				<Row
 					role="treeitem"
 					key={key()}
-					class={`tree-row kind-${props.symbol.kind}`}
-					classList={{ param: parameter(), here: here() === props.symbol }}
-					level={props.depth + 1}
+					class={`tree-row kind-${rowProps.symbol.kind}`}
+					classList={{ param: parameter(), here: here() === rowProps.symbol }}
+					level={rowProps.depth + 1}
 					expanded={children().length ? open() : undefined}
-					style={{ "padding-left": `${8 + props.depth * 14}px` }}
+					style={{ "padding-left": `${8 + rowProps.depth * 14}px` }}
 					title={title()}
 					onActivate={() => {
 						const path = activePath();
-						const r = props.symbol.selectionRange;
+						const r = rowProps.symbol.selectionRange;
 						if (path) void openFile(path, { reveal: { line: r.startLineNumber, column: r.startColumn, endLine: r.endLineNumber, endColumn: r.endColumn } });
 					}}
 					onToggle={() => toggle(key())}
 					onKey={(e) => {
-						if (!isRegion(props.symbol) || (e.key !== "]" && e.key !== "[")) return false;
-						stepRegionColor(props.symbol.name, e.key === "]" ? 1 : -1);
+						if (!isRegion(rowProps.symbol) || (e.key !== "]" && e.key !== "[")) return false;
+						stepRegionColor(rowProps.symbol.name, e.key === "]" ? 1 : -1);
 						return true;
 					}}
 				>
@@ -227,34 +304,34 @@ export function Objects() {
 						</Show>
 					</span>
 					<Show
-						when={isRegion(props.symbol)}
+						when={isRegion(rowProps.symbol)}
 						fallback={
-							<Icon name={parameter() ? "circle-small-filled" : (ICONS[props.symbol.kind] ?? "circle-small-filled")} class="icon" />
+							<Icon name={parameter() ? "circle-small-filled" : (ICONS[rowProps.symbol.kind] ?? "circle-small-filled")} class="icon" />
 						}
 					>
 						<button
 							class="swatch"
 							tabindex={-1}
-							aria-label={`Colour of the region ${props.symbol.name}: change it`}
+							aria-label={`Colour of the region ${rowProps.symbol.name}: change it`}
 							title="Region colour. Click for the next one, Shift+click for the one before. From the keyboard, on the row: ] and [. Kept in the workspace's settings."
-							style={{ background: regionColor(props.symbol.name) }}
-							onClick={(e) => (e.stopPropagation(), stepRegionColor(props.symbol.name, e.shiftKey ? -1 : 1))}
+							style={{ background: regionColor(rowProps.symbol.name) }}
+							onClick={(e) => (e.stopPropagation(), stepRegionColor(rowProps.symbol.name, e.shiftKey ? -1 : 1))}
 						/>
 					</Show>
-					<span class="label">{props.symbol.name}</span>
-					<Show when={here() === props.symbol}>
+					<span class="label">{rowProps.symbol.name}</span>
+					<Show when={here() === rowProps.symbol}>
 						<span class="here-mark" title="The cursor is in here">
 							<Icon name="arrow-left" />
 							<span class="visually-hidden">The cursor is in here</span>
 						</span>
 					</Show>
-					<Show when={!isVariable(props.symbol) && !(OUTLINE_KINDS.has(props.symbol.kind) && lines(props.symbol) === 1)}>
-						<span class="meta">{lines(props.symbol)}</span>
+					<Show when={!isVariable(rowProps.symbol) && !(OUTLINE_KINDS.has(rowProps.symbol.kind) && lines(rowProps.symbol) === 1)}>
+						<span class="meta">{lines(rowProps.symbol)}</span>
 					</Show>
 				</Row>
 				<Show when={children().length && open()}>
 					<div role="group">
-						<For each={props.symbol.children ?? []}>{(child) => <TreeRow symbol={child} depth={props.depth + 1} parent={key()} />}</For>
+						<For each={children()}>{(child) => <TreeRow symbol={child} depth={rowProps.depth + 1} parent={key()} />}</For>
 					</div>
 				</Show>
 			</Show>
@@ -263,36 +340,118 @@ export function Objects() {
 	/** Why the list is empty, and what to do next. */
 	const empty = () => {
 		const doc = activeDoc();
-		if (!activePath()) return "No file open. Open an SSL file to see its regions and procedures.";
+		if (!activePath()) return props.compact ? "No file open." : "No file open. Open a script or document to see its outline.";
 		const language = doc?.model.getLanguageId();
 		if (doc && hasOutline(language) && !filter()) return `This file has no ${outlineOf[language!] ?? "outline"} yet.`;
 		if (doc && hasOutline(language)) return `Nothing here matches “${filter()}”. Clear the filter to see everything.`;
-		if (!doc || language !== "ssl") return "This kind of file has no outline: SSL, Markdown, TOML, INI, JSON, SQL and YAML files do.";
-		if (serverDown()) return `${serverDown()} This file's objects come from it.`;
-		if (reading() === "failed") return `The language server could not list this file's objects: ${failure()}`;
-		if (reading() !== "read") return "Reading this file's objects…";
-		if (!symbols().length) return "This file has no regions, procedures or public variables yet.";
+		if (!doc || language !== "ssl") return props.compact ? "No outline for this file." : "This kind of file has no outline: SSL, Markdown, TOML, INI, JSON, SQL and YAML files do.";
+		if (serverDown()) return `${serverDown()} This file's outline comes from it.`;
+		if (reading() === "failed") return `The language server could not list this file's outline: ${failure()}`;
+		if (reading() !== "read") return "Reading this file's outline…";
+		if (!symbols().length) return props.compact ? "No regions or procedures yet." : "This file has no regions, procedures or public variables yet.";
 		return `Nothing here matches “${filter()}”. Clear the filter to see everything.`;
 	};
+	const top = () => sortSymbols(symbols().filter(matches), outlineSort());
 	return (
-		<div class="panel-body" data-panel="objects">
+		<Show when={top().length} fallback={<p class="hint">{empty()}</p>}>
+			<Rows role="tree" label={props.label ?? "Outline of this file"}>
+				<For each={top()}>{(s) => <TreeRow symbol={s} depth={0} parent="" />}</For>
+			</Rows>
+		</Show>
+	);
+}
+
+/** Unified Document outline panel (replaces separate Objects + Document outline panels). */
+export function Objects() {
+	const [filter, setFilter] = createSignal("");
+	const currentMdRead = () => {
+		const path = activePath();
+		if (!path || !isMarkdown(path) || state.mdText[path]) return null;
+		const info = mdOutline();
+		return info && info.path === path ? info : null;
+	};
+	const filteredHeadings = () => {
+		const md = currentMdRead();
+		if (!md) return [];
+		const q = filter().trim().toLowerCase();
+		return q ? md.headings.filter((h) => h.text.toLowerCase().includes(q)) : md.headings;
+	};
+	return (
+		<div class="panel-body doc-outline-panel" data-panel="objects">
 			<div class="panel-title">
-				<span>Objects</span>
+				<span>Document outline</span>
+				<Show when={!currentMdRead() && !isPlanPath(activePath())}>
+					<Menu floating label="Outline options" title="Outline options: follow cursor, sort order" class="outline-more" items={outlineMenuItems}>
+						<Icon name="ellipsis" />
+					</Menu>
+					<Show when={outlineHasExpandable()}>
+						<IconButton
+							label={outlineAnyOpen() ? "Collapse all outline items" : "Expand all outline items"}
+							title={outlineAnyOpen() ? "Collapse all" : "Expand all"}
+							icon={outlineAnyOpen() ? "collapse-all" : "expand-all"}
+							onClick={toggleOutlineCollapseAll}
+						/>
+					</Show>
+				</Show>
 			</div>
 			<input
 				class="filter"
 				data-autofocus=""
-				aria-label={isPlanPath(activePath()) ? "Filter the workspace's procedures" : "Filter this file's objects"}
+				aria-label={isPlanPath(activePath()) ? "Filter the workspace's procedures" : "Filter this document's outline"}
 				placeholder="Filter"
 				value={filter()}
 				onInput={(e) => setFilter(e.currentTarget.value)}
 				onKeyDown={(e) => e.key === "ArrowDown" && focusRowsBelow(e.currentTarget) && e.preventDefault()}
 			/>
-			<Show when={!isPlanPath(activePath())} fallback={<Procedures filter={filter()} />}>
-				<Show when={symbols().some(matches)} fallback={<p class="hint">{empty()}</p>}>
-					<Rows role="tree" label="Objects in this file">
-						<For each={symbols()}>{(s) => <TreeRow symbol={s} depth={0} parent="" />}</For>
-					</Rows>
+			<Show
+				when={!isPlanPath(activePath())}
+				fallback={<Procedures filter={filter()} />}
+			>
+				<Show
+					when={currentMdRead()}
+					fallback={<SymbolOutline filter={filter()} />}
+				>
+					{(md) => (
+						<Show
+							when={filteredHeadings().length}
+							fallback={<p class="hint">{filter() ? `No heading matches “${filter()}”.` : "This document has no headings yet."}</p>}
+						>
+							<nav
+								class="doc-outline-nav"
+								aria-label="On this page"
+								onKeyDown={(e) => {
+									if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "Home" && e.key !== "End") return;
+									const items = [...e.currentTarget.querySelectorAll<HTMLButtonElement>("button[data-row]")];
+									if (!items.length) return;
+									const at = items.indexOf(document.activeElement as HTMLButtonElement);
+									const next = e.key === "Home" ? 0 : e.key === "End" ? items.length - 1 : Math.max(0, Math.min(items.length - 1, at + (e.key === "ArrowDown" ? 1 : -1)));
+									e.preventDefault();
+									items[next]?.focus();
+								}}
+							>
+								<ul>
+									<For each={filteredHeadings()}>
+										{(h) => {
+											const active = () => (md().activeId || md().headings[0]?.id) === h.id;
+											return (
+												<li class={`level-${h.level}`}>
+													<button
+														data-row={h.id}
+														classList={{ on: active() }}
+														aria-current={active() ? "location" : undefined}
+														title={h.text}
+														onClick={() => md().goTo(h.id)}
+													>
+														{h.text}
+													</button>
+												</li>
+											);
+										}}
+									</For>
+								</ul>
+							</nav>
+						</Show>
+					)}
 				</Show>
 			</Show>
 		</div>

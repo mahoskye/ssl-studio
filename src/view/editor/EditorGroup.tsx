@@ -1,12 +1,13 @@
 // One editor group: a tab strip over one Monaco editor that shows the
 // group's active document. Two groups side by side make a split.
+import { DEFAULT_CODE_FONT, DEFAULT_UI_FONT, resolveFontStack } from "../../shared/fonts";
 import { continueLists } from "./markdownKeys";
 import { drawMarkdownLive, PROSE_FONT } from "./markdownLive";
 import { Icon } from "../Icon";
 import { tabShown } from "../recentTabs";
 import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { monaco } from "./monaco";
-import { activePath, closeAllTabs, closeOtherTabs, closeTab, closeTabsToRight, documents, focusRequest, keepTab, moveTab, openFile, revealSignal, revert, save, saveAll, setState, split, state, tabLeaving, takeReveal, togglePin, openedForALook } from "../state";
+import { activePath, closeAllTabs, closeOtherTabs, closeTab, closeTabsToRight, displayName, documents, focusRequest, isUntitled, keepTab, markdownMode, moveTab, newUntitled, openFile, revealSignal, revert, save, saveAll, setMarkdownMode, setState, split, state, tabLeaving, takeReveal, togglePin, openedForALook } from "../state";
 import { landsBefore } from "../../shared/tabOrder";
 import { othersOf, rightOf } from "../../shared/tabOrder";
 import { chooseFromMenu } from "../panels/RowMenu";
@@ -16,7 +17,7 @@ import { flatRegions, regionColor, symbolPath } from "./regions";
 import { BlocksView } from "../blocks/BlocksView";
 import { isPlanPath } from "../plan/model";
 import { PlanView } from "../plan/PlanView";
-import { baseName, isInside } from "../../shared/paths";
+import { dirName, isInside, relativeTo } from "../../shared/paths";
 import { tabLabels } from "./tabs";
 import { Menu, type MenuItem } from "../Menu";
 import { isMarkdown, isTable } from "../project";
@@ -26,8 +27,9 @@ import { FileView } from "./FileView";
 import { useGitMarks } from "./gitMarks";
 import { Start } from "../Start";
 import { FileMark } from "../FileMark";
+import { size as scriptSize } from "../StatusBar";
 import { getPath, SERVER_DEFAULTS } from "../../shared/styleProfile";
-import { RULER_MARGIN, rulerColumns } from "../../shared/houseStyle";
+import { level, RULER_MARGIN, rulerColumns } from "../../shared/houseStyle";
 import { noteCursor } from "../navigation";
 
 /**
@@ -46,7 +48,7 @@ let dragged: { path: string; group: number } | null = null;
 /** Where it would land: in which group, and before which tab (last, with null). */
 const [dropAt, setDropAt] = createSignal<{ group: number; before: string | null } | null>(null);
 
-const base = baseName;
+const base = displayName;
 
 export function EditorGroup(props: { index: number }) {
 	let host!: HTMLDivElement;
@@ -63,12 +65,48 @@ export function EditorGroup(props: { index: number }) {
 	// script opens as blocks again, but a Markdown or SQL file never does.
 	const showBlocks = () => group().mode === "blocks" && isSsl() && !isPlan() && !showFile();
 	const isDoc = () => isMarkdown(group().active) && !showFile();
-	const showRendered = () => isDoc() && !state.mdText[group().active!];
-	/** A document shown as text is drawn as it is written, unless that has been switched off in Settings. */
-	const live = () => isDoc() && !showRendered() && state.settings.livePreview !== false;
+	const mdViewMode = () => (group().active && isDoc() ? markdownMode(group().active!) : "read");
+	const showRendered = () => isDoc() && mdViewMode() === "read";
+	/** Obsidian-style Live Preview editing when the Markdown file is in Live mode. */
+	const live = () => isDoc() && mdViewMode() === "live";
 	// A table of values opens as a table, with the same switch to its text as a document has.
 	const isTabular = () => isTable(group().active) && !showFile();
 	const showTable = () => isTabular() && !state.mdText[group().active!];
+
+	// Horizontal tab-strip overflow detection + wheel scrolling (C9).
+	let tabsHost: HTMLDivElement | undefined;
+	const [canScrollLeft, setCanScrollLeft] = createSignal(false);
+	const [canScrollRight, setCanScrollRight] = createSignal(false);
+	const updateTabOverflow = () => {
+		const el = tabsHost;
+		if (!el) return (setCanScrollLeft(false), setCanScrollRight(false));
+		setCanScrollLeft(el.scrollLeft > 2);
+		setCanScrollRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 2);
+	};
+	const scrollTabsBy = (delta: number) => {
+		if (!tabsHost) return;
+		tabsHost.scrollBy({ left: delta, behavior: "smooth" });
+		setTimeout(updateTabOverflow, 180);
+	};
+	const bindTabsHost = (el: HTMLDivElement) => {
+		tabsHost = el;
+		const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(() => updateTabOverflow()) : null;
+		ro?.observe(el);
+		queueMicrotask(updateTabOverflow);
+		onCleanup(() => {
+			ro?.disconnect();
+			if (tabsHost === el) tabsHost = undefined;
+		});
+	};
+	createEffect(() => {
+		// Re-check overflow & keep the active tab scrolled into view whenever tabs or selection change.
+		const active = group().active;
+		void group().tabs.length;
+		queueMicrotask(() => {
+			if (active) tabs.get(active)?.scrollIntoView({ inline: "nearest", block: "nearest" });
+			updateTabOverflow();
+		});
+	});
 
 	/** The ruler at the style's line length, and the fainter ones the chosen number of columns to each side of it. */
 	const rulers = () =>
@@ -81,6 +119,33 @@ export function EditorGroup(props: { index: number }) {
 	// A narrow editor has no room to give: the map would lie over the code it is a map of.
 	const [roomy, setRoomy] = createSignal(true);
 	const minimap = () => state.settings.minimap && roomy();
+	// Scroll-collapsing Folio header state with hysteresis (ADR 0027): >22px compacts, <6px expands.
+	const [scrolled, setScrolled] = createSignal(false);
+	const [shortWindow, setShortWindow] = createSignal(window.innerHeight <= 760);
+	const onWinResize = () => setShortWindow(window.innerHeight <= 760);
+	window.addEventListener("resize", onWinResize);
+	onCleanup(() => window.removeEventListener("resize", onWinResize));
+	const folioCompact = () => scrolled() || shortWindow() || state.groups.length > 1 || showBlocks();
+	const folioFolder = () => {
+		const path = group().active;
+		if (!path || isUntitled(path)) return "";
+		const rel = relativeTo(state.workspace?.root, dirName(path));
+		return rel === "." ? "" : rel;
+	};
+	const folioCrumbs = () => (group().active && group().active === activePath() && symbols().length ? symbolPath(symbols(), state.cursor.line) : []);
+	const folioAlert = (): { kind: "near" | "over"; text: string } | null => {
+		const path = group().active;
+		if (!path) return null;
+		if (state.conflicts[path]) return { kind: "over", text: "Changed on disk" };
+		if (path !== activePath() || !isSsl()) return null;
+		const s = scriptSize();
+		if (!s) return null;
+		const limits = state.settings.limits;
+		const levels = [level(s.bytes, limits.bytes), level(s.codeLines, limits.codeLines), level(s.historyEntries, limits.historyEntries, 1)];
+		if (levels.includes("over")) return { kind: "over", text: "Over size limit" };
+		if (levels.includes("near")) return { kind: "near", text: "Near size limit" };
+		return null;
+	};
 
 	onMount(() => {
 		editor = monaco.editor.create(host, {
@@ -136,9 +201,15 @@ export function EditorGroup(props: { index: number }) {
 		setRoomy(editor.getLayoutInfo().width >= MINIMAP_FROM);
 		editor.onDidLayoutChange((layout) => setRoomy(layout.width >= MINIMAP_FROM));
 		editor.onDidFocusEditorText(() => setState("activeGroup", props.index));
+		editor.onDidScrollChange((e) => {
+			if (!e.scrollTopChanged) return;
+			if (e.scrollTop > 22 && !scrolled()) setScrolled(true);
+			else if (e.scrollTop < 6 && scrolled()) setScrolled(false);
+		});
 		editor.onDidChangeModelContent(() => setLineCount(editor.getModel()?.getLineCount() ?? 0));
 		editor.onDidChangeModel(() => {
 			setLineCount(editor.getModel()?.getLineCount() ?? 0);
+			setScrolled(editor.getScrollTop() > 22);
 			// A file taken up with the cursor where the editor already had it moves no cursor: without this the status bar
 			// would go on saying the last file's line.
 			const at = editor.getPosition();
@@ -204,9 +275,11 @@ export function EditorGroup(props: { index: number }) {
 		// is for code (line numbers, the map, the rulers, the guides, words offered from the file). One editor shows
 		// every file of its group, so each of these is said both ways.
 		const prose = live();
+		const activeCodeFont = state.settings.codeFont?.trim() ? resolveFontStack(state.settings.codeFont, DEFAULT_CODE_FONT) : codeFont || undefined;
+		const activeProseFont = state.settings.uiFont?.trim() ? resolveFontStack(state.settings.uiFont, DEFAULT_UI_FONT) : PROSE_FONT;
 		const options: monaco.editor.IEditorOptions & monaco.editor.IGlobalEditorOptions = {
 			fontSize: state.settings.fontSize + (prose ? 1 : 0),
-			fontFamily: prose ? PROSE_FONT : codeFont || undefined,
+			fontFamily: prose ? activeProseFont : activeCodeFont,
 			minimap: { enabled: !prose && minimap() },
 			wordWrap: prose || state.settings.wordWrap ? "on" : "off",
 			inlayHints: { enabled: state.settings.inlayHints === false ? "off" : "on" },
@@ -216,6 +289,7 @@ export function EditorGroup(props: { index: number }) {
 			renderLineHighlight: prose ? "none" : "line",
 			guides: { indentation: !prose },
 			wordBasedSuggestions: prose ? "off" : "matchingDocuments",
+			stickyScroll: { enabled: !prose },
 			// Prose is not set in a face where every character is as wide as the next: where a line breaks is measured.
 			wrappingStrategy: prose ? "advanced" : "simple",
 			padding: { top: prose ? 12 : 0, bottom: prose ? 12 : 0 },
@@ -305,7 +379,8 @@ export function EditorGroup(props: { index: number }) {
 		const NAME = "Copy file name";
 		const SHOW = "Show in the Explorer";
 		const SIDE = "Open to the side";
-		const inFolder = Boolean(state.workspace && isInside(state.workspace.root, path));
+		const untitled = isUntitled(path);
+		const inFolder = !untitled && Boolean(state.workspace && isInside(state.workspace.root, path));
 		// Only what would do something: a tab with nothing to its right has no "close to the right".
 		const items = [
 			// A tab opened for a look: the way to keep it that needs no pointer.
@@ -315,7 +390,7 @@ export function EditorGroup(props: { index: number }) {
 			...(rightOf(g.tabs, g.pinned ?? [], path).length ? [RIGHT] : []),
 			ALL,
 			PIN,
-			PATH,
+			...(untitled ? [] : [PATH]),
 			...(inFolder ? [RELATIVE] : []),
 			NAME,
 			...(inFolder ? [SHOW] : []),
@@ -379,10 +454,11 @@ export function EditorGroup(props: { index: number }) {
 			const found = commands.find((c) => c.id === id);
 			return { label, keys: keysFor(id) || undefined, run: () => found?.run(), disabled: !found || !path, why: found ? none : "Not available" };
 		};
+		const untitled = isUntitled(path);
 		return [
-			{ label: "Save", keys: keysFor("save") || undefined, run: () => void save(path), disabled: !path || !state.dirty[path], why: path ? "Nothing to save" : none },
+			{ label: "Save", keys: keysFor("save") || undefined, run: () => void save(path), disabled: !path || (!state.dirty[path] && !untitled), why: path ? "Nothing to save" : none },
 			{ label: "Save all", keys: keysFor("save-all") || undefined, run: () => void saveAll(), disabled: !Object.values(state.dirty).some(Boolean), why: "Nothing to save" },
-			{ label: "Revert to the file on disk", run: () => path && void revert(path), disabled: !path || !state.dirty[path], why: path ? "No unsaved changes" : none },
+			{ label: "Revert to the file on disk", run: () => path && void revert(path), disabled: !path || untitled || !state.dirty[path], why: !path ? none : untitled ? "Not saved on disk yet" : "No unsaved changes" },
 			"separator",
 			command("format", "Format document"),
 			command("copy-designer", "Copy for Designer"),
@@ -396,18 +472,54 @@ export function EditorGroup(props: { index: number }) {
 	};
 
 	return (
-		<section ref={section} class="group" classList={{ active: state.activeGroup === props.index }} onMouseDown={() => setState("activeGroup", props.index)}>
-			<div class="tabs-row">
-				<div
-					class="tabs"
-					role="tablist"
-					aria-label="Open files"
-					classList={{ "drop-end": dropAt()?.group === props.index && dropAt()?.before === null }}
-					// Past the last tab: the dragged one would stand last.
-					onDragOver={(e) => dragged && (e.preventDefault(), markDrop(props.index, null))}
-					onDragLeave={(e) => !e.currentTarget.contains(e.relatedTarget as Node | null) && setDropAt(null)}
-					onDrop={drop}
-				>
+		<section
+			ref={section}
+			class="group"
+			classList={{
+				active: state.activeGroup === props.index,
+				empty: !group().active,
+				"first-tab-active": Boolean(group().tabs.length && group().tabs[0] === group().active),
+			}}
+			onMouseDown={() => setState("activeGroup", props.index)}
+		>
+			<Show when={group().tabs.length > 0}>
+				<div class="tabs-row">
+					<Show when={canScrollLeft() || canScrollRight()}>
+						<button
+							class="tabs-scroll-btn"
+							disabled={!canScrollLeft()}
+							title="Scroll tabs left"
+							aria-label="Scroll tabs left"
+							onClick={() => scrollTabsBy(-180)}
+						>
+							<Icon name="chevron-left" />
+						</button>
+					</Show>
+					<div class="tabs-scroll-wrap" classList={{ "can-left": canScrollLeft(), "can-right": canScrollRight() }}>
+						<div
+							ref={bindTabsHost}
+							class="tabs"
+							role="tablist"
+							aria-label="Open files"
+							classList={{ "drop-end": dropAt()?.group === props.index && dropAt()?.before === null }}
+							title="Double-click empty space to open a new untitled file"
+							onScroll={updateTabOverflow}
+							onWheel={(e) => {
+								if (!tabsHost || tabsHost.scrollWidth <= tabsHost.clientWidth) return;
+								if (Math.abs(e.deltaY) >= Math.abs(e.deltaX)) {
+									e.preventDefault();
+									tabsHost.scrollLeft += e.deltaY;
+									updateTabOverflow();
+								}
+							}}
+							onDblClick={(e) => {
+								if (e.target === e.currentTarget) void newUntitled(props.index);
+							}}
+							// Past the last tab: the dragged one would stand last.
+							onDragOver={(e) => dragged && (e.preventDefault(), markDrop(props.index, null))}
+							onDragLeave={(e) => !e.currentTarget.contains(e.relatedTarget as Node | null) && setDropAt(null)}
+							onDrop={drop}
+						>
 					<For each={group().tabs}>
 						{(path) => (
 							<div
@@ -434,7 +546,7 @@ export function EditorGroup(props: { index: number }) {
 									markDrop(props.index, e.clientX > box.left + box.width / 2 ? (row[row.indexOf(path) + 1] ?? null) : path);
 								}}
 								ref={(el) => (tabs.set(path, el), onCleanup(() => tabs.delete(path)))}
-								title={`${path}${state.conflicts[path] ? "\nChanged on disk since you opened it" : state.dirty[path] ? "\nUnsaved changes" : ""}${group().preview === path ? "\nOpened for a look: the next file clicked takes this tab. Double-click the tab, or press Enter on it, to keep it." : ""}`}
+								title={`${isUntitled(path) ? `${base(path)} (unsaved buffer)` : path}${state.conflicts[path] ? "\nChanged on disk since you opened it" : state.dirty[path] ? "\nUnsaved changes" : ""}${group().preview === path ? "\nOpened for a look: the next file clicked takes this tab. Double-click the tab, or press Enter on it, to keep it." : ""}`}
 								tabindex={group().active === path ? 0 : -1}
 								aria-label={`${labels().get(path) ?? base(path)}${group().preview === path ? ", opened for a look" : ""}${group().pinned?.includes(path) ? ", pinned" : ""}${state.conflicts[path] ? ", changed on disk" : state.dirty[path] ? ", unsaved changes" : ""}`}
 								aria-selected={group().active === path}
@@ -487,7 +599,19 @@ export function EditorGroup(props: { index: number }) {
 							</div>
 						)}
 					</For>
-				</div>
+						</div>
+					</div>
+					<Show when={canScrollLeft() || canScrollRight()}>
+						<button
+							class="tabs-scroll-btn"
+							disabled={!canScrollRight()}
+							title="Scroll tabs right"
+							aria-label="Scroll tabs right"
+							onClick={() => scrollTabsBy(180)}
+						>
+							<Icon name="chevron-right" />
+						</button>
+					</Show>
 				<Show when={group().active}>
 					<Menu label="File actions" title="File actions: save, format, split, close…" class="tab-menu" items={fileActions}>
 						<Icon name="ellipsis" />
@@ -525,79 +649,140 @@ export function EditorGroup(props: { index: number }) {
 				</Show>
 				<Show when={isDoc()}>
 					<div class="mode-switch" role="group" aria-label="View of this document">
-						<button classList={{ on: !showRendered() }} aria-pressed={!showRendered()} title="The document's text, to write in. With live preview it is drawn as it is written; “Toggle Markdown live preview” shows it plain." onClick={() => setState("mdText", group().active!, true)}>
-							Edit
+						<button
+							classList={{ on: mdViewMode() === "source" }}
+							aria-pressed={mdViewMode() === "source"}
+							title="Raw unformatted Markdown text"
+							onClick={() => setMarkdownMode(group().active!, "source")}
+						>
+							Source
 						</button>
-						<button classList={{ on: showRendered() }} aria-pressed={showRendered()} title="The document as a finished page" onClick={() => setState("mdText", group().active!, false)}>
+						<button
+							classList={{ on: mdViewMode() === "live" }}
+							aria-pressed={mdViewMode() === "live"}
+							title="Formatted live preview while editing"
+							onClick={() => setMarkdownMode(group().active!, "live")}
+						>
+							Live
+						</button>
+						<button
+							classList={{ on: mdViewMode() === "read" }}
+							aria-pressed={mdViewMode() === "read"}
+							title="The document as a finished reading page"
+							onClick={() => setMarkdownMode(group().active!, "read")}
+						>
 							Read
 						</button>
 					</div>
 				</Show>
-			</div>
-			{/* Where the cursor is in the text: not shown over a view of the file that has no cursor line. */}
-			<Show when={group().active && group().active === activePath() && symbols().length && !showRendered() && !showTable() && !showChart()}>
-				<nav class="breadcrumbs" aria-label="Breadcrumbs">
-					<For each={symbolPath(symbols(), state.cursor.line)}>
-						{(s, i) => (
-							<>
-								<Show when={i() > 0}>
-									<span class="sep">›</span>
-								</Show>
-								<button class={`crumb kind-${s.kind}`} onClick={() => void openFile(group().active!, { reveal: { line: s.selectionRange.startLineNumber, column: s.selectionRange.startColumn } })}>
-									{s.name}
-								</button>
-							</>
-						)}
-					</For>
-				</nav>
-			</Show>
-			{/* Keyed by the file: a view built for one script is never reused for the next. */}
-			<Show when={showBlocks() && group().active} keyed>
-				{(path) => <BlocksView path={path} group={props.index} />}
-			</Show>
-			<Show when={showChart() && group().active} keyed>
-				{(path) => <PlanView path={path} group={props.index} />}
-			</Show>
-			<Show when={showRendered() && group().active} keyed>
-				{(path) => <MarkdownView path={path} group={props.index} />}
-			</Show>
-			<Show when={showFile() && group().active} keyed>
-				{(path) => <FileView path={path} />}
-			</Show>
-			<Show when={showTable() && group().active} keyed>
-				{(path) => <TableView path={path} />}
-			</Show>
-			<div class="editor-row" classList={{ hidden: showBlocks() || showChart() || showRendered() || showTable() || showFile() }}>
-				{/* An overview of the whole file, top to bottom, to the left of the line numbers: not marks on the lines in view. */}
-				<Show when={group().active && group().active === activePath() && lineCount() > 0 && flatRegions(symbols()).length}>
-					<nav class="region-strip" aria-label="Regions in this file, top to bottom" onKeyDown={onStripKey}>
-						<For each={flatRegions(symbols())}>
-							{({ symbol, depth }, i) => (
-								<button
-									class="region-band"
-									tabindex={i() === 0 ? 0 : -1}
-									title={`Region ${symbol.name}: lines ${symbol.range.startLineNumber} to ${symbol.range.endLineNumber}. Click to go there.`}
-									aria-label={`Go to region ${symbol.name}, lines ${symbol.range.startLineNumber} to ${symbol.range.endLineNumber}`}
-									style={{
-										top: `${((symbol.range.startLineNumber - 1) / lineCount()) * 100}%`,
-										height: `${Math.max(0.5, ((symbol.range.endLineNumber - symbol.range.startLineNumber + 1) / lineCount()) * 100)}%`,
-										// A step in for each region it is inside, up to what the strip has room for.
-										left: `${Math.min(depth, 3) * 3}px`,
-										background: regionColor(symbol.name),
-									}}
-									onClick={() => void openFile(group().active!, { reveal: { line: symbol.selectionRange.startLineNumber, column: 1 } })}
-								/>
-							)}
-						</For>
-					</nav>
-				</Show>
-				<div class="editor-host" ref={host} />
-			</div>
-			<Show when={!group().active}>
-				<div class="empty-group">
-					<Start />
 				</div>
 			</Show>
+			<div class="editor-sheet">
+				{/* Smooth scroll-collapsing Folio header (ADR 0027): one persistent DOM node, pure sans-serif, clickable breadcrumbs. */}
+				<Show when={group().active && !showRendered() && !showTable() && !showChart() && !showFile()}>
+					<nav class="folio-hdr" classList={{ "is-compact": folioCompact() }} aria-label="File header and breadcrumbs">
+						<div class="folio-title-row">
+							<div class="folio-title-left">
+								<Show when={folioFolder()}>
+									<span class="folio-crumb-prefix">
+										<span>{folioFolder()}</span>
+										<span class="sep">›</span>
+									</span>
+								</Show>
+								<span class="folio-filename">{base(group().active!)}</span>
+								<Show when={folioCrumbs().length}>
+									<span class="folio-crumb-suffix">
+										<For each={folioCrumbs()}>
+											{(s) => (
+												<>
+													<span class="sep">›</span>
+													<button class={`crumb kind-${s.kind}`} onClick={() => void openFile(group().active!, { reveal: { line: s.selectionRange.startLineNumber, column: s.selectionRange.startColumn } })}>
+														{s.name}
+													</button>
+												</>
+											)}
+										</For>
+									</span>
+								</Show>
+							</div>
+							<Show when={folioAlert()}>
+								{(alert) => <span class={`folio-alert ${alert().kind}`}>{alert().text}</span>}
+							</Show>
+						</div>
+						<div class="folio-sub-wrap">
+							<div class="folio-sub-inner">
+								<Show when={folioFolder()}>
+									<span class="folio-sub-path">{folioFolder()}</span>
+								</Show>
+								<For each={folioCrumbs()}>
+									{(s, i) => (
+										<>
+											<Show when={folioFolder() || i() > 0}>
+												<span class="sep">›</span>
+											</Show>
+											<button class={`crumb kind-${s.kind}`} onClick={() => void openFile(group().active!, { reveal: { line: s.selectionRange.startLineNumber, column: s.selectionRange.startColumn } })}>
+												{s.name}
+											</button>
+										</>
+									)}
+								</For>
+							</div>
+						</div>
+					</nav>
+				</Show>
+				{/* Keyed by the file: a view built for one script is never reused for the next. */}
+				<Show when={showBlocks() && group().active} keyed>
+					{(path) => <BlocksView path={path} group={props.index} />}
+				</Show>
+				<Show when={showChart() && group().active} keyed>
+					{(path) => <PlanView path={path} group={props.index} />}
+				</Show>
+				<Show when={showRendered() && group().active} keyed>
+					{(path) => <MarkdownView path={path} group={props.index} />}
+				</Show>
+				<Show when={showFile() && group().active} keyed>
+					{(path) => <FileView path={path} />}
+				</Show>
+				<Show when={showTable() && group().active} keyed>
+					{(path) => <TableView path={path} />}
+				</Show>
+				<div class="editor-row" classList={{ hidden: showBlocks() || showChart() || showRendered() || showTable() || showFile() }}>
+					{/* An overview of the whole file, top to bottom, to the left of the line numbers: not marks on the lines in view. */}
+					<Show when={group().active && group().active === activePath() && lineCount() > 0 && flatRegions(symbols()).length}>
+						<nav class="region-strip" aria-label="Regions in this file, top to bottom" onKeyDown={onStripKey}>
+							<For each={flatRegions(symbols())}>
+								{({ symbol, depth }, i) => (
+									<button
+										class="region-band"
+										tabindex={i() === 0 ? 0 : -1}
+										title={`Region ${symbol.name}: lines ${symbol.range.startLineNumber} to ${symbol.range.endLineNumber}. Click to go there.`}
+										aria-label={`Go to region ${symbol.name}, lines ${symbol.range.startLineNumber} to ${symbol.range.endLineNumber}`}
+										style={{
+											top: `${((symbol.range.startLineNumber - 1) / lineCount()) * 100}%`,
+											height: `${Math.max(0.5, ((symbol.range.endLineNumber - symbol.range.startLineNumber + 1) / lineCount()) * 100)}%`,
+											// A step in for each region it is inside, up to what the strip has room for.
+											left: `${Math.min(depth, 3) * 3}px`,
+											background: regionColor(symbol.name),
+										}}
+										onClick={() => void openFile(group().active!, { reveal: { line: symbol.selectionRange.startLineNumber, column: 1 } })}
+									/>
+								)}
+							</For>
+						</nav>
+					</Show>
+					<div class="editor-host" ref={host} />
+				</div>
+				<Show when={!group().active}>
+					<div
+						class="empty-group"
+						onDblClick={(e) => {
+							if (e.target === e.currentTarget) void newUntitled(props.index);
+						}}
+					>
+						<Start />
+					</div>
+				</Show>
+			</div>
 		</section>
 	);
 }

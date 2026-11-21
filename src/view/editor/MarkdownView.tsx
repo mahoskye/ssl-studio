@@ -21,8 +21,18 @@ import { ticketWork } from "../../shared/workContext";
 import { backend } from "../backend";
 import { docs } from "../project";
 import { outline, type OutlineItem } from "../../shared/outline";
-import { canonical, documents, focusEditor, openFile, revealSignal, setState, state } from "../state";
+import { canonical, documents, focusEditor, openFile, revealSignal, setMarkdownMode, setState, state } from "../state";
 import { chooseFromMenu } from "../panels/RowMenu";
+
+export type ActiveMarkdownOutline = {
+	path: string;
+	headings: { id: string; text: string; level: number }[];
+	activeId: string;
+	goTo: (id: string) => void;
+};
+
+const [mdOutline, setMdOutline] = createSignal<ActiveMarkdownOutline | null>(null);
+export { mdOutline };
 
 export function MarkdownView(props: { path: string; /** The editor group the page is shown in. */ group?: number }) {
 	const model = documents.get(props.path)?.model;
@@ -160,7 +170,7 @@ export function MarkdownView(props: { path: string; /** The editor group the pag
 		else if (picked === OPEN) link?.click();
 		else if (picked === COPY_LINK) await copyText(link?.getAttribute("href") ?? "", "Copied the link.");
 		else if (picked === EDIT) {
-			setState("mdText", props.path, true);
+			setMarkdownMode(props.path, "live");
 			// The page that had the keyboard is gone: the text takes it, in this page's own group. The keyboard may have
 			// come here by Tab, which does not make a group the one at hand.
 			if (props.group !== undefined) setState("activeGroup", props.group);
@@ -203,6 +213,16 @@ export function MarkdownView(props: { path: string; /** The editor group the pag
 	});
 	onCleanup(stopReveal);
 	const goTo = (id: string) => [...view.querySelectorAll<HTMLElement>(".md h1, .md h2, .md h3")].find((h) => h.id === id)?.scrollIntoView({ block: "start" });
+	// Publish live headings & scrollspy position to the right-side Document Outline panel (ADR 0027).
+	createEffect(() => {
+		const active = state.groups[state.activeGroup]?.active;
+		if (active !== props.path) return;
+		const list = headings();
+		setMdOutline({ path: props.path, headings: list, activeId: at() || (list[0]?.id ?? ""), goTo });
+	});
+	onCleanup(() => {
+		if (mdOutline()?.path === props.path) setMdOutline(null);
+	});
 	// Code in the document is coloured as the editor colours it, each block in its own language.
 	let article!: HTMLElement;
 	/** The links of this document that lead to a file that is not there, as the project's listing has them. */
@@ -344,23 +364,6 @@ export function MarkdownView(props: { path: string; /** The editor group the pag
 						</section>
 					</Show>
 				</div>
-				{/* A document with a few headings gets a list of them beside it, where the view is wide enough. */}
-				<Show when={headings().length >= 3}>
-					<nav class="md-outline" aria-label="On this page">
-						<h2>On this page</h2>
-						<ul>
-							<For each={headings()}>
-								{(h) => (
-									<li class={`level-${h.level}`}>
-										<button classList={{ on: (at() || headings()[0]!.id) === h.id }} aria-current={(at() || headings()[0]!.id) === h.id ? "location" : undefined} title={h.text} onClick={() => goTo(h.id)}>
-											{h.text}
-										</button>
-									</li>
-								)}
-							</For>
-						</ul>
-					</nav>
-				</Show>
 			</div>
 		</div>
 	);

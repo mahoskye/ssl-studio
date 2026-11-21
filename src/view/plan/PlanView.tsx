@@ -25,6 +25,7 @@ import { driftFor, openProcedure } from "./drift";
 import { assistOf } from "./run";
 import { PlanAssistant } from "./PlanAssistant";
 import { planHash, previewPlan } from "./assist";
+import { registerPlanBridge } from "./planBridge";
 import { addAfter, addBranch, addCall, connect, nodeAtLine, nodeLines, parsePlan, printPlan, PROCEDURE_DRAG, removeEdge, removeNode, setDecision, setEdgeLabel, setGroup, setText, type Edit, type Plan, type PlanNode } from "./model";
 
 type Box = { id: string; x: number; y: number; width: number; height: number; node?: PlanNode; lines: string[]; group?: string };
@@ -460,14 +461,32 @@ export function PlanView(props: { path: string; group: number }) {
 
 	const addNext = () => {
 		const p = plan();
-		const at = selected();
+		const at = selected() ?? p?.nodes.find((n) => n.kind === "start")?.id;
 		if (!p) return;
 		if (!at) return notify("Select a node to add after it.");
 		applyEdit(addAfter(p, at), true);
 	};
-	const addOther = () => {
+	const addDecisionNode = () => {
+		const p = plan();
+		const at = selected() ?? p?.nodes.find((n) => n.kind === "start")?.id;
+		if (!p || !at) return notify("Select a step to add a decision after it.");
+		const added = addAfter(p, at);
+		if (!added?.select) return;
+		const asDecision = setDecision(added.plan, added.select, true);
+		apply(asDecision, added.select);
+		setEditing({ node: added.select });
+	};
+	const addStageGroupAsk = async () => {
 		const p = plan();
 		const at = selected();
+		if (!p || !at) return notify("Select a step to place into a stage group.");
+		const name = (await ask("Stage group name (e.g. Validation, Approval)"))?.trim();
+		if (name) apply(setGroup(p, at, name), at);
+		refocus();
+	};
+	const addOther = () => {
+		const p = plan();
+		const at = selected() ?? p?.nodes.find((n) => n.kind === "decision" || n.kind === "step")?.id;
 		if (!p || !at) return notify("Select a step or decision to branch from.");
 		const result = addBranch(p, at);
 		if (!result) return notify("Only a step or a decision can branch.");
@@ -651,6 +670,35 @@ export function PlanView(props: { path: string; group: number }) {
 		apply({ ...p, nodes });
 	};
 	const groupName = () => plan()?.groups.find((g) => g.id === selectedNode()?.group)?.name ?? "";
+
+	// Expose BA flowchart actions and stages to the left Palette panel while this chart is active.
+	createEffect(() => {
+		const active = state.groups[state.activeGroup]?.active === props.path && !state.planText[props.path];
+		const p = plan();
+		if (!active || !p) return;
+		const unregister = registerPlanBridge({
+			path: props.path,
+			title: p.title || "Plan",
+			selectedId: selected,
+			linking: () => Boolean(linking()),
+			stages: () => {
+				const cur = plan();
+				if (!cur) return [];
+				return cur.groups.map((g) => {
+					const members = cur.nodes.filter((n) => n.group === g.id);
+					return { id: g.id, name: g.name, count: members.length, firstNodeId: members[0]?.id };
+				});
+			},
+			addStep: () => (addNext(), refocus()),
+			addDecision: () => (addDecisionNode(), refocus()),
+			addBranch: () => (addOther(), refocus()),
+			addCall: () => void addCallAsk(),
+			addStageGroup: () => void addStageGroupAsk(),
+			toggleConnect: () => (linking() ? setLinking(null) : beginLink(), refocus()),
+			jumpToNode: goTo,
+		});
+		onCleanup(unregister);
+	});
 
 	let dragging: { x: number; y: number; moved: boolean } | null = null;
 	/** How far the pointer has moved the chart since it was pressed. */
@@ -1049,60 +1097,74 @@ export function PlanView(props: { path: string; group: number }) {
 				<p class="plan-live" role="status" aria-live="polite">
 					{announcement()}
 				</p>
-				<div class="plan-details">
+				<div class="plan-details" classList={{ "node-selected": Boolean(selectedNode()) }}>
 					<Show
 						when={selectedNode()}
 						keyed
 						fallback={
 							<>
-								<label>
-									Title <input value={plan()!.title} onChange={(e) => setPlanField("title", e.currentTarget.value)} />
-								</label>
-								<label class="grow">
-									Goal <input value={typeof plan()!.goal === "string" ? (plan()!.goal as string) : ""} placeholder="What this should achieve" onChange={(e) => setPlanField("goal", e.currentTarget.value)} />
-								</label>
-								<label title="The ticket this plan is for. The agent is told what it asks, the open questions and the decisions already made when it refines the plan or writes the spec.">
-									Ticket <input class="short" value={typeof plan()!.ticket === "string" ? (plan()!.ticket as string) : ""} placeholder="LIMS-123" onChange={(e) => setPlanField("ticket", ticketKey(e.currentTarget.value))} />
-								</label>
-								<label class="grow">
-									Scripts <input value={Array.isArray(plan()!.targets) ? (plan()!.targets as string[]).join(", ") : ""} placeholder="Sample/Release.ssl" onChange={(e) => setTargets(e.currentTarget.value)} />
-								</label>
+								<div class="plan-details-row">
+									<label class="plan-field-title">
+										<span>Title</span>
+										<input value={plan()!.title} onChange={(e) => setPlanField("title", e.currentTarget.value)} />
+									</label>
+									<label class="grow">
+										<span>Goal</span>
+										<input value={typeof plan()!.goal === "string" ? (plan()!.goal as string) : ""} placeholder="What this should achieve" onChange={(e) => setPlanField("goal", e.currentTarget.value)} />
+									</label>
+									<label class="plan-field-ticket" title="The ticket this plan is for. The agent is told what it asks, the open questions and the decisions already made when it refines the plan or writes the spec.">
+										<span>Ticket</span>
+										<input class="short" value={typeof plan()!.ticket === "string" ? (plan()!.ticket as string) : ""} placeholder="LIMS-123" onChange={(e) => setPlanField("ticket", ticketKey(e.currentTarget.value))} />
+									</label>
+								</div>
+								<div class="plan-details-row">
+									<label class="grow">
+										<span>Scripts</span>
+										<input value={Array.isArray(plan()!.targets) ? (plan()!.targets as string[]).join(", ") : ""} placeholder="Sample/Release.ssl" onChange={(e) => setTargets(e.currentTarget.value)} />
+									</label>
+								</div>
 							</>
 						}
 					>
 						{(node) => (
 							<>
-								<span class="plan-kind">{node.kind}</span>
-								<For each={linksOf(node.id)}>
-									{(unit) => (
-										<button class="link" title={`Open this step's code (G)${unit.script ? `: ${unit.script}` : ""}`} onClick={() => void openProcedure(planUri(), unit)}>
-											{unit.name}
-										</button>
-									)}
-								</For>
-								<Show when={node.kind === "call"}>
-									<label>
-										Calls <input value={node.ref ?? ""} onChange={(e) => setNodeField("ref", e.currentTarget.value)} />
+								<div class="plan-details-row">
+									<span class="plan-kind">{node.kind}</span>
+									<For each={linksOf(node.id)}>
+										{(unit) => (
+											<button class="link plan-code-link" title={`Open this step's code (G)${unit.script ? `: ${unit.script}` : ""}`} onClick={() => void openProcedure(planUri(), unit)}>
+												{unit.name}
+											</button>
+										)}
+									</For>
+									<Show when={node.kind === "call"}>
+										<label class="plan-field-calls">
+											<span>Calls</span>
+											<input value={node.ref ?? ""} onChange={(e) => setNodeField("ref", e.currentTarget.value)} />
+										</label>
+									</Show>
+									<label class="plan-field-group">
+										<span>Stage</span>
+										<input
+											value={groupName()}
+											list="plan-groups"
+											placeholder="None (becomes a region)"
+											onChange={(e) => {
+												const p = plan();
+												if (p) apply(setGroup(p, node.id, e.currentTarget.value));
+											}}
+										/>
 									</label>
-								</Show>
-								<label class="grow">
-									Notes <input value={node.notes ?? ""} placeholder="Anything the agent should know" onChange={(e) => setNodeField("notes", e.currentTarget.value)} />
-								</label>
-								<label>
-									Group{" "}
-									<input
-										value={groupName()}
-										list="plan-groups"
-										placeholder="None (becomes a region)"
-										onChange={(e) => {
-											const p = plan();
-											if (p) apply(setGroup(p, node.id, e.currentTarget.value));
-										}}
-									/>
-								</label>
-								<datalist id="plan-groups">
-									<For each={plan()!.groups}>{(g) => <option value={g.name} />}</For>
-								</datalist>
+									<datalist id="plan-groups">
+										<For each={plan()!.groups}>{(g) => <option value={g.name} />}</For>
+									</datalist>
+								</div>
+								<div class="plan-details-row">
+									<label class="grow">
+										<span>Notes</span>
+										<input value={node.notes ?? ""} placeholder="Anything the analyst or agent should know" onChange={(e) => setNodeField("notes", e.currentTarget.value)} />
+									</label>
+								</div>
 							</>
 						)}
 					</Show>

@@ -1,7 +1,21 @@
 // Settings: appearance, the editor, the language server and the keyboard,
 // each saying where it is saved.
 import { Icon } from "./Icon";
+import { CODE_FONT_PRESETS, READ_FONT_PRESETS, UI_FONT_PRESETS, type FontPreset } from "../shared/fonts";
 import { RULER_MARGIN } from "../shared/houseStyle";
+import {
+	DEFAULT_DARK_TONE,
+	DEFAULT_MATERIAL,
+	isThemeMaterial,
+	MATERIAL_INFO,
+	MATERIALS,
+	oklchThemeId,
+	parseOklchThemeId,
+	TONE_INFO,
+	TONES,
+	type ThemeMaterial,
+	type ThemeTone,
+} from "../shared/oklchTheme";
 import { createSignal, createUniqueId, For, Show, type JSX } from "solid-js";
 import type { Settings } from "../shared/protocol";
 import { backend } from "./backend";
@@ -152,10 +166,13 @@ export function SettingsDialog() {
 		</Show>
 	);
 	const ROWS = {
-		theme: ["Theme", "Colours of the whole window; import a VS Code theme"],
+		theme: ["Theme", "Warm Material OKLCH tones, Classic presets, or an imported VS Code theme"],
 		uiScale: ["Interface size", "The whole window, from 80% to 160%"],
 		menuBar: ["Menu bar", "File, Edit, Selection, View, Go and Help across the top of the window"],
 		fontSize: ["Font size", "The editor, Blocks, diffs and rendered documents"],
+		uiFont: ["Interface font", "Chrome, tabs and panels; empty uses the system sans-serif"],
+		codeFont: ["Code font", "Editor, Blocks, Tables and Output; empty uses the system monospace"],
+		readFont: ["Reading font", "Optional face for rendered Markdown Read view; empty matches the interface font"],
 		formatOnSave: ["Format changed lines on save", "Only the lines changed since the last save"],
 		minimap: ["Minimap", "The outline of the file at the editor's edge; a narrow editor goes without"],
 		wordWrap: ["Word wrap", "Long lines wrapped at the editor's edge, not scrolled to; Alt+Z switches it"],
@@ -167,10 +184,69 @@ export function SettingsDialog() {
 	} as const;
 	const anyShown = (group: Group, ...rows: (keyof typeof ROWS)[]) => rows.some((r) => shown(group, ...ROWS[r]));
 	const groups = {
-		appearance: () => anyShown("Appearance", "theme", "uiScale", "fontSize", "menuBar"),
+		appearance: () => anyShown("Appearance", "theme", "uiScale", "fontSize", "uiFont", "codeFont", "readFont", "menuBar"),
 		editor: () => anyShown("Editor", "formatOnSave", "minimap", "wordWrap", "livePreview", "inlayHints", "rulers", "rulerMargin"),
 		server: () => anyShown("Language server", "lspPath"),
 		keyboard: () => keyRows().length > 0,
+	};
+
+	const parsedOklch = () => parseOklchThemeId(state.settings.theme);
+	const isWarmMode = () => state.settings.theme === "system" || parsedOklch() !== null;
+	const activeMaterial = (): ThemeMaterial => {
+		const p = parsedOklch();
+		if (p) return p.material;
+		return isThemeMaterial(state.settings.themeMaterial) ? state.settings.themeMaterial : DEFAULT_MATERIAL;
+	};
+	const pickTone = (tone: "system" | ThemeTone) => {
+		const mat = activeMaterial();
+		if (tone === "system") void saveSetting({ theme: "system", themeMaterial: mat }, scopeOf("theme")).then(loadLayers);
+		else void saveSetting({ theme: oklchThemeId(tone, mat), themeMaterial: mat }, scopeOf("theme")).then(loadLayers);
+	};
+	const pickMaterial = (mat: ThemeMaterial) => {
+		const p = parsedOklch();
+		const nextTheme = state.settings.theme === "system" ? "system" : oklchThemeId(p?.tone ?? DEFAULT_DARK_TONE, mat);
+		void saveSetting({ theme: nextTheme, themeMaterial: mat }, scopeOf("theme")).then(loadLayers);
+	};
+
+	const FontControl = (p: { id: string; hintId: string; setting: "uiFont" | "codeFont" | "readFont"; presets: readonly FontPreset[]; placeholder: string }) => {
+		const current = () => (state.settings[p.setting] ?? "").trim();
+		const isPreset = () => p.presets.some((item) => item.id === current());
+		const [customizing, setCustomizing] = createSignal(false);
+		const showInput = () => customizing() || !isPreset();
+		const selectValue = () => (showInput() ? "__custom__" : current());
+		return (
+			<div class="settings-font-control">
+				<select
+					id={p.id}
+					aria-describedby={p.hintId}
+					value={selectValue()}
+					onChange={(e) => {
+						const val = e.currentTarget.value;
+						if (val === "__custom__") setCustomizing(true);
+						else {
+							setCustomizing(false);
+							void save(p.setting, val);
+						}
+					}}
+				>
+					<For each={p.presets}>{(item) => <option value={item.id}>{item.label}</option>}</For>
+					<option value="__custom__">Custom local font…</option>
+				</select>
+				<Show when={showInput()}>
+					<input
+						type="text"
+						aria-label={`${ROWS[p.setting][0]} family name`}
+						placeholder={p.placeholder}
+						value={current()}
+						onChange={(e) => {
+							const val = e.currentTarget.value.trim();
+							if (!val) setCustomizing(false);
+							void save(p.setting, val);
+						}}
+					/>
+				</Show>
+			</div>
+		);
 	};
 
 	const SECTIONS: [title: Group, key: keyof typeof groups][] = [
@@ -198,17 +274,73 @@ export function SettingsDialog() {
 				{/* A click anywhere stops a recording; the click on "Set" then starts its own. */}
 				<div class="settings-body" onMouseDown={() => setCapturing(null)}>
 					<Section title="Appearance" when={groups.appearance()}>
-						<Row group="Appearance" label={ROWS.theme[0]} hint={ROWS.theme[1]} setting="theme">
+						<Row group="Appearance" label={ROWS.theme[0]} hint={ROWS.theme[1]} setting="theme" wide>
 							{(ids) => (
-								<>
-									<select id={ids.control} aria-describedby={ids.hint} value={state.settings.theme} onChange={(e) => void save("theme", e.currentTarget.value)}>
-										<option value="system">Follow the system</option>
-										<option value="dark">Studio Dark</option>
-										<option value="light">Studio Light</option>
-										<For each={state.themes}>{(t) => <option value={t.id}>{t.name}</option>}</For>
-									</select>
-									<button onClick={() => void importTheme()}>Import…</button>
-								</>
+								<div class="settings-theme">
+									<div class="settings-theme-bar" role="group" aria-label="Surface tone" aria-describedby={ids.hint}>
+										<button
+											type="button"
+											aria-pressed={state.settings.theme === "system"}
+											classList={{ active: state.settings.theme === "system" }}
+											onClick={() => pickTone("system")}
+										>
+											System
+										</button>
+										<For each={TONES}>
+											{(tone) => (
+												<button
+													type="button"
+													aria-pressed={parsedOklch()?.tone === tone}
+													classList={{ active: parsedOklch()?.tone === tone }}
+													onClick={() => pickTone(tone)}
+												>
+													{TONE_INFO[tone].label}
+												</button>
+											)}
+										</For>
+									</div>
+									<div class="settings-theme-materials" role="group" aria-label="Material finish">
+										<For each={MATERIALS}>
+											{(mat) => {
+												const info = MATERIAL_INFO[mat];
+												const active = () => isWarmMode() && activeMaterial() === mat;
+												return (
+													<button
+														type="button"
+														class="settings-swatch"
+														aria-pressed={active()}
+														classList={{ active: active() }}
+														onClick={() => pickMaterial(mat)}
+													>
+														<span class="settings-swatch-dot" style={{ background: info.swatch }} aria-hidden="true" />
+														<span>{info.label}</span>
+													</button>
+												);
+											}}
+										</For>
+									</div>
+									<div class="settings-theme-extra">
+										<select
+											id={ids.control}
+											aria-label="Classic or imported theme"
+											aria-describedby={ids.hint}
+											value={isWarmMode() ? "__warm__" : state.settings.theme}
+											onChange={(e) => {
+												const val = e.currentTarget.value;
+												if (val === "__warm__") pickTone("system");
+												else void save("theme", val);
+											}}
+										>
+											<option value="__warm__">Warm Material (chosen above)</option>
+											<option value="dark">Studio Dark (Classic)</option>
+											<option value="light">Studio Light (Classic)</option>
+											<For each={state.themes}>{(t) => <option value={t.id}>{t.name}</option>}</For>
+										</select>
+										<button type="button" onClick={() => void importTheme()}>
+											Import…
+										</button>
+									</div>
+								</div>
 							)}
 						</Row>
 						<Row group="Appearance" label={ROWS.uiScale[0]} hint={ROWS.uiScale[1]} setting="uiScale">
@@ -241,6 +373,15 @@ export function SettingsDialog() {
 									onChange={(e) => void save("fontSize", Math.min(FONT.max, Math.max(FONT.min, Math.round(Number(e.currentTarget.value)) || FONT.normal)))}
 								/>
 							)}
+						</Row>
+						<Row group="Appearance" label={ROWS.uiFont[0]} hint={ROWS.uiFont[1]} setting="uiFont">
+							{(ids) => <FontControl id={ids.control} hintId={ids.hint} setting="uiFont" presets={UI_FONT_PRESETS} placeholder="e.g. IBM Plex Sans" />}
+						</Row>
+						<Row group="Appearance" label={ROWS.codeFont[0]} hint={ROWS.codeFont[1]} setting="codeFont">
+							{(ids) => <FontControl id={ids.control} hintId={ids.hint} setting="codeFont" presets={CODE_FONT_PRESETS} placeholder="e.g. JetBrains Mono" />}
+						</Row>
+						<Row group="Appearance" label={ROWS.readFont[0]} hint={ROWS.readFont[1]} setting="readFont">
+							{(ids) => <FontControl id={ids.control} hintId={ids.hint} setting="readFont" presets={READ_FONT_PRESETS} placeholder="e.g. Source Serif 4" />}
 						</Row>
 						<Row group="Appearance" label={ROWS.menuBar[0]} hint={ROWS.menuBar[1]} setting="menuBar">
 							{(ids) => <input id={ids.control} aria-describedby={ids.hint} type="checkbox" checked={state.settings.menuBar !== false} onChange={(e) => void save("menuBar", e.currentTarget.checked)} />}

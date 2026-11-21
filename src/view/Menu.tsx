@@ -2,8 +2,9 @@
 // actions that otherwise live only in the command palette, where nobody who
 // does not already know their names will find them.
 import { createSignal, For, onCleanup, Show } from "solid-js";
+import { Icon } from "./Icon";
 
-export type MenuItem = { label: string; keys?: string; run: () => void; disabled?: boolean; why?: string } | "separator";
+export type MenuItem = { label: string; keys?: string; checked?: boolean; run: () => void; disabled?: boolean; why?: string } | "separator";
 
 /** The next item the arrow keys land on: separators and disabled items are stepped over. */
 export function nextItem(items: MenuItem[], from: number, by: 1 | -1): number {
@@ -88,7 +89,8 @@ export function Menu(props: {
 								) : (
 									<button
 										class="menu-item"
-										role="menuitem"
+										role={item.checked !== undefined ? "menuitemcheckbox" : "menuitem"}
+										aria-checked={item.checked !== undefined ? item.checked : undefined}
 										data-item
 										tabindex={-1}
 										disabled={item.disabled}
@@ -98,6 +100,13 @@ export function Menu(props: {
 											item.run();
 										}}
 									>
+										<Show when={item.checked !== undefined}>
+											<span class="menu-check" aria-hidden="true">
+												<Show when={item.checked}>
+													<Icon name="check" />
+												</Show>
+											</span>
+										</Show>
 										<span class="menu-label">{item.label}</span>
 										<Show when={item.keys}>
 											<span class="menu-keys">{item.keys}</span>

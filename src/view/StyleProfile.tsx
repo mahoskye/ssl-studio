@@ -69,7 +69,7 @@ export function StyleProfile() {
 	// What the profile does, shown: the sample is formatted again whenever a setting changes. The wait lets the
 	// change reach the server first (App sends it when the settings change).
 	const [preview] = createResource(
-		() => open() && state.lsp.state === "running" && state.workspace && ([state.workspace.root, JSON.stringify(state.settings.ssl ?? {}), state.settings.theme] as const),
+		() => open() && state.lsp.state === "running" && state.workspace && ([state.workspace.root, JSON.stringify(state.settings.ssl ?? {}), state.settings.theme, state.settings.themeMaterial ?? ""] as const),
 		async ([root]) => {
 			await new Promise((done) => setTimeout(done, 150));
 			try {

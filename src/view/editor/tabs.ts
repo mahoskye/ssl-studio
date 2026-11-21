@@ -8,6 +8,10 @@ import { baseName, dirName, relativeTo } from "../../shared/paths";
 export function tabLabels(tabs: string[], root?: string | null): Map<string, string> {
 	const labels = new Map<string, string>();
 	for (const path of tabs) {
+		if (path.startsWith("untitled:")) {
+			labels.set(path, path.slice("untitled:".length));
+			continue;
+		}
 		if (!tabs.some((other) => other !== path && baseName(other) === baseName(path))) {
 			labels.set(path, baseName(path));
 			continue;

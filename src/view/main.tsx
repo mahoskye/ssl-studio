@@ -10,7 +10,7 @@ import "./editor/opener";
 import { loadGrammar } from "./editor/textmate";
 import { registerProviders, session } from "./lsp/session";
 import { loadProject, loadSettings, log, notify, restoreTabs, setState, state, unsavedPaths } from "./state";
-import { applyTheme, resolveTheme, shapeEditorMenus } from "./themes/themes";
+import { applyFonts, applyTheme, resolveTheme, shapeEditorMenus } from "./themes/themes";
 
 export const errors: string[] = [];
 
@@ -35,7 +35,8 @@ function uncaught(reason: unknown) {
 async function start() {
 	await connect();
 	await Promise.all([loadGrammar(), loadLanguageConfiguration(), loadSettings(true)]);
-	applyTheme(resolveTheme(state.settings.theme, state.themes));
+	applyFonts(state.settings);
+	applyTheme(resolveTheme(state.settings.theme, state.themes, undefined, state.settings.themeMaterial));
 	shapeEditorMenus();
 	registerProviders();
 	registerMarkdownLinks();
