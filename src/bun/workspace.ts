@@ -246,6 +246,22 @@ export class WorkspaceFiles {
 		return { type, base64: Buffer.from(await Bun.file(full).arrayBuffer()).toString("base64") };
 	}
 
+	/** Saves a pasted or dropped picture inside the workspace atomically, refusing non-image extensions or oversized payloads. */
+	async writeImage(path: string, base64: string) {
+		const full = this.inside(path);
+		if (!imageType(full)) throw new Error(`${relative(this.root, full)} is not a supported image format.`);
+		const bytes = Buffer.from(base64, "base64");
+		if (bytes.length > IMAGE_MAX_BYTES) throw new Error(`${relative(this.root, full)} is ${sizeText(bytes.length)}: too large to save (the most is ${sizeText(IMAGE_MAX_BYTES)}).`);
+		return writes.run(fileKey(full), async () => {
+			mkdirSync(dirname(full), { recursive: true });
+			const temp = join(dirname(full), `.${basename(full)}.ssl-studio-tmp`);
+			this.ownWrites.set(full, Date.now());
+			await Bun.write(temp, bytes);
+			renameSync(temp, full);
+			return { path: full, size: bytes.length };
+		});
+	}
+
 	/**
 	 * A copy of a file, or of a folder and everything in it, under a name nothing has yet. A copy that fails part
 	 * of the way is taken away again: nothing was there before it, so nothing is lost by that.

@@ -60,7 +60,7 @@ export const cmStudioTheme = EditorView.theme({
 		fontSize: "12px",
 		userSelect: "none",
 	},
-	".cm-line:hover ~ *, .cm-foldGutter:hover .cm-gutterElement, .cm-foldGutter .cm-gutterElement[data-folded='true']": {
+	".cm-foldGutter:hover .cm-gutterElement, .cm-foldGutter .cm-gutterElement[data-folded='true']": {
 		opacity: "0.75",
 	},
 	".cm-foldGutter .cm-gutterElement:hover": {

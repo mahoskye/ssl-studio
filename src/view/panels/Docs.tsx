@@ -9,6 +9,7 @@ import { backend } from "../backend";
 import { docMatches, isCatalog, KNOWLEDGE, progress, progressShort, registryTitle, SCHEMAS, statusChoices, toneOf } from "../../shared/projectDocs";
 import { docs, newDoc, newDocIn, newFolderIn, setUpProject } from "../project";
 import { importTickets, newKnowledge, newRegistry, newSchema, newSpec, schemaCatalogKept, startFolderCatalogs, newState, newTicket, setStatus, updateCatalogs, updateManifest } from "../projectDocs";
+import { manageTemplates, newNoteFromTemplate } from "../templater";
 import { folderParts, folderSaid, IMPORT_TICKETS, kindOf, NEW_DOCUMENT, NEW_FOLDER, NEW_PLAN, NEW_REGISTRY, NEW_SPEC, NEW_TICKET, newOfKind, plainSection, schemaFolderOf, schemaOf, sectionFolder, sectionMenu, SHOW_FOLDER, type DocSection } from "../../shared/docSections";
 import { joinPath } from "../../shared/paths";
 import { schemaList, schemaRowTitle } from "../../shared/schemaList";
@@ -473,6 +474,8 @@ export function Docs() {
 					...SCHEMAS.map((kind) => ({ label: newOfKind(kind), run: () => void newSchema(kind.id) })),
 					"separator" as const,
 					{ label: "New document…", run: () => void newDoc() },
+					{ label: "New from template…", run: () => void newNoteFromTemplate() },
+					{ label: "Customize templates…", run: () => void manageTemplates() },
 					{ label: "Project state…", run: () => void newState() },
 					{ label: "Update catalogs", run: () => void updateCatalogs() },
 					{ label: "Start folder catalogs", run: () => void startFolderCatalogs() },

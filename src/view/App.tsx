@@ -299,6 +299,7 @@ export function App() {
 	);
 	// Plan Palette ("palette") loads by default when viewing a plan chart and remembers
 	// whether the user left it active or inactive across tab switches and reloads.
+	// Outside plan charts, Palette remains user-openable on SSL, Markdown, and Call Graph views.
 	let syncingPlanPalette = false;
 	createEffect(
 		on(
@@ -306,11 +307,15 @@ export function App() {
 				const side = sideOf("palette");
 				const key = side === "left" ? "leftView" : "rightView";
 				const inPlan = isPlanChartActive();
-				return [state.workspace?.root, isTabsReady(), inPlan, side, narrowPanels(), !inPlan && state[key] === "palette"] as const;
+				const avail = isPanelAvailable("palette");
+				return [state.workspace?.root, isTabsReady(), inPlan, side, narrowPanels(), !avail && state[key] === "palette", avail] as const;
 			},
-			([root, ready, inPlan, side, narrow], prev) => {
+			([root, ready, inPlan, side, narrow, , avail], prev) => {
 				if (root !== prev?.[0]) loadPlanPaletteMemory(root);
 				if (!root || !ready || state.info?.selftest) return;
+				// If Palette is legitimately available outside a plan chart (Markdown, SSL, Call Graph)
+				// and we are not just transitioning away from a plan chart, never evict a user-opened Palette.
+				if (!inPlan && !prev?.[2] && avail) return;
 				const key = side === "left" ? "leftView" : "rightView";
 				const current = { open: state.settings.layout[side], view: state[key] };
 				const fallback = PANELS.find((p) => p.id !== "palette" && sideOf(p.id) === side && isPanelAvailable(p.id))?.id ?? null;

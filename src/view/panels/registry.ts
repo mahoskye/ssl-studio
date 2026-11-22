@@ -40,7 +40,7 @@ export const PANELS: { id: PanelId; icon: string; title: string; home: Side; whe
 	{
 		id: "palette",
 		icon: "\ueb5c",
-		title: "Palette: SSL templates, plan details and shapes, or call graph controls",
+		title: "Palette: templates, callouts, plan shapes, or call graph controls",
 		home: "left",
 		when: () => {
 			if (state.centerView === "graph") return true;
@@ -49,7 +49,8 @@ export const PANELS: { id: PanelId; icon: string; title: string; home: Side; whe
 			if (!path) return false;
 			const doc = activeDoc();
 			if (!doc || doc.binary) return false;
-			return (isPlanPath(path) && !state.planText[path]) || doc.model.getLanguageId() === "ssl";
+			const lang = doc.model.getLanguageId();
+			return (isPlanPath(path) && !state.planText[path]) || lang === "ssl" || lang === "markdown";
 		},
 	},
 	{ id: "reference", icon: "\ueaa4", title: "Reference: built-in functions, classes and keywords", home: "left" },

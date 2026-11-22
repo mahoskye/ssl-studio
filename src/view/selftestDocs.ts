@@ -32,7 +32,8 @@ const label = (row: HTMLElement) => row.querySelector(".label")?.textContent ?? 
 const row = (name: string) => rows().find((r) => label(r) === name);
 const marked = (name: string, mark: string) => [...(row(name)?.querySelectorAll(".meta") ?? [])].some((m) => m.textContent === mark);
 const setupButton = () => document.querySelector<HTMLButtonElement>(".docs-setup button");
-const rendered = () => document.querySelector<HTMLElement>(".md-view .md");
+const rendered = () => document.querySelector<HTMLElement>(".cm-md-host.cm-md-read .cm-content");
+const renderedHeading = () => rendered()?.querySelector<HTMLElement>(".cm-md-h1")?.textContent?.trim();
 /** Health’s Project section: one row for each root file, with its mark. */
 const healthRows = () => {
 	const section = [...document.querySelectorAll("section")].find((s) => s.querySelector("h3")?.textContent === "Project");
@@ -44,7 +45,12 @@ const healthAgrees = () => {
 	const files = docs().filter((d) => d.group === "project");
 	return files.length > 0 && healthRows().length === files.length && files.every((f) => healthMark(f.name).includes(!f.exists ? "missing" : f.untouched ? "template" : ICON.check));
 };
-const link = (text: string) => [...(rendered()?.querySelectorAll("a") ?? [])].find((a) => a.textContent === text);
+const link = (text: string) =>
+	[...(rendered()?.querySelectorAll<HTMLElement>("[data-md-href], [data-md-wiki], a") ?? [])].find((el) => el.textContent?.trim() === text);
+const clickLink = (el: HTMLElement) => {
+	el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 }));
+	el.click();
+};
 const tabs = () => state.groups.reduce((count, group) => count + group.tabs.length, 0);
 
 /** A document written for the links check: each kind of link, and HTML that must not survive. */
@@ -104,7 +110,7 @@ export function selftestDocsSetup(): Promise<Steps> {
 		await step("nothingMissing", () => until(() => rows().length > 0 && !document.querySelector(".doc-row.missing")));
 		// Fresh from the template: said so until someone writes them.
 		await step("templatesMarked", () => until(() => marked("README.md", "template") && marked("AGENTS.md", "template")));
-		await step("readmeOpensRendered", () => until(() => baseName(activePath() ?? "") === "README.md" && rendered()?.querySelector("h1")?.textContent === state.project!.name));
+		await step("readmeOpensRendered", () => until(() => baseName(activePath() ?? "") === "README.md" && renderedHeading() === state.project!.name));
 		await step("tableRendered", async () => rendered()?.querySelector("table td"));
 		await step("textSwitch", async () => {
 			switchTo("Edit");
@@ -118,7 +124,7 @@ export function selftestDocsSetup(): Promise<Steps> {
 		await step("docsFolderListed", () => until(() => docsCatalog() && label(docsCatalog()!).trim() === "Catalog"));
 		await step("rowOpensDocument", async () => {
 			docsCatalog()!.click();
-			return until(() => rendered()?.querySelector("h1")?.textContent === "Docs");
+			return until(() => renderedHeading() === "Docs");
 		});
 		await step("openRowSelected", async () => document.querySelector(".doc-row.selected"));
 
@@ -127,7 +133,7 @@ export function selftestDocsSetup(): Promise<Steps> {
 		await step("healthSaysSetUp", async () => healthMark("project.toml").includes(ICON.check));
 		await step("healthRowOpens", async () => {
 			healthRows()[0]!.click();
-			return until(() => baseName(activePath() ?? "") === "README.md" && rendered()?.querySelector("h1")?.textContent === state.project!.name);
+			return until(() => baseName(activePath() ?? "") === "README.md" && renderedHeading() === state.project!.name);
 		});
 
 		// Links in a rendered document. A web link would open the browser, so window.open is watched instead.
@@ -147,19 +153,19 @@ export function selftestDocsSetup(): Promise<Steps> {
 			await step("linksRender", toDoc);
 			await step("htmlCleaned", async () => !rendered()!.querySelector("script, [onerror]") && !(window as any).selftestScriptRan);
 			await step("workspaceLinkOpens", async () => {
-				link("Orders")!.click();
+				clickLink(link("Orders")!);
 				return until(() => activePath() === canonical(joinPath(root, "Sample", "Orders.ssl")));
 			});
 			await step("otherLinksStay", async () => {
 				await toDoc();
 				const before = tabs();
-				link("Top")!.click();
-				link("Outside")!.click();
+				clickLink(link("Top")!);
+				clickLink(link("Outside")!);
 				await wait(500);
 				return activePath() === path && tabs() === before && !opened.length;
 			});
 			await step("webLinkOpensOutside", async () => {
-				link("Web")!.click();
+				clickLink(link("Web")!);
 				return opened.length === 1 && opened[0] === "https://example.com/" && activePath() === path;
 			});
 		} finally {
@@ -222,7 +228,7 @@ export function selftestWork(): Promise<Steps> {
 		});
 		await step("ticketPageShowsWork", async () => {
 			await openFile(ticket);
-			return until(() => document.querySelector(".md-front") && [...document.querySelectorAll(".md-work li")].some((li) => li.textContent?.includes("Self spec")));
+			return until(() => document.querySelector(".cm-md-props, .md-front") && [...document.querySelectorAll(".md-work li")].some((li) => li.textContent?.includes("Self spec")));
 		});
 		// A registry's rows say which ticket carries them: the ticket's page lists them, and leads to the table at those rows.
 		await step("ticketPageShowsRows", () => until(() => [...document.querySelectorAll(".md-work li")].some((li) => li.textContent?.includes("Application settings") && li.textContent.includes("2 rows, 1 done"))));
@@ -240,10 +246,10 @@ export function selftestWork(): Promise<Steps> {
 		await step("taskTickedFromPage", async () => {
 			await openFile(ticket);
 			const box = await until(() => {
-				const found = document.querySelector<HTMLInputElement>('.md input[type="checkbox"]');
+				const found = document.querySelector<HTMLInputElement>('.cm-md-host input[type="checkbox"]');
 				return found && !found.disabled && found;
 			});
-			box?.click();
+			box?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 }));
 			return until(() => docs().find((d) => canonical(d.path) === ticket)?.tasks?.done === 1);
 		});
 
@@ -350,8 +356,8 @@ export function selftestWork(): Promise<Steps> {
 		await step("brokenLinkMarked", async () => {
 			await openFile(linked);
 			return until(() => {
-				const links = [...document.querySelectorAll<HTMLAnchorElement>(".md a")];
-				return links.length === 2 && links.filter((link) => link.classList.contains("broken")).map((link) => link.textContent).join() === "a file since removed";
+				const links = [...document.querySelectorAll<HTMLElement>(".cm-md-host [data-md-href]")];
+				return links.length === 2 && links.filter((el) => el.classList.contains("cm-md-link-broken")).map((el) => el.textContent).join() === "a file since removed";
 			});
 		});
 
@@ -388,7 +394,7 @@ export function selftestWork(): Promise<Steps> {
 		});
 		await step("ticketKeyLinked", async () => {
 			await openFile(moved);
-			return until(() => [...document.querySelectorAll<HTMLAnchorElement>(".md a.ticket-ref")].some((link) => link.textContent === "SELF-1" && link.title.startsWith("SELF-1")));
+			return until(() => [...document.querySelectorAll<HTMLElement>(".cm-md-host [data-md-ticket]")].some((el) => el.textContent === "SELF-1" && el.title.startsWith("SELF-1")));
 		});
 	});
 }
@@ -419,12 +425,13 @@ export function selftestWriting(): Promise<Steps> {
 			await openFile(note);
 			switchTo("Read");
 			return until(() => {
-				const links = [...document.querySelectorAll<HTMLAnchorElement>(".md a.named-ref")];
-				return links.length === 2 && links[1]!.textContent === "the ticket" && document.querySelectorAll(".md .named-missing").length === 1;
+				const links = [...document.querySelectorAll<HTMLElement>(".cm-md-host.cm-md-read [data-md-wiki].cm-md-link")];
+				return links.length === 2 && links[1]!.textContent === "the ticket" && document.querySelectorAll(".cm-md-host.cm-md-read [data-md-wiki].cm-md-link-missing").length === 1;
 			});
 		});
 		await step("namedLinkOpens", async () => {
-			document.querySelector<HTMLAnchorElement>(".md a.named-ref")?.click();
+			const first = document.querySelector<HTMLElement>(".cm-md-host.cm-md-read [data-md-wiki].cm-md-link");
+			if (first) clickLink(first);
 			return until(() => baseName(activePath() ?? "") === "SELF-1.md");
 		});
 		// The ticket's page says the note links to it, from two places.

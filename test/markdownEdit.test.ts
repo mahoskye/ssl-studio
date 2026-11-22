@@ -1,14 +1,19 @@
 import { describe, expect, test } from "bun:test";
 import {
+	blockquoteEnter,
+	buildCalloutBlock,
 	documentHeadings,
 	findHeadingLine,
 	insertLinkEdit,
 	parseCalloutHeader,
+	parseImageExpression,
 	pasteUrlOverSelection,
+	serializeCalloutBlock,
 	smartListBackspace,
 	smartListIndent,
 	toggleCheckboxLine,
 	toggleInlineWrap,
+	withImageWidth,
 } from "../src/shared/markdownEdit";
 
 const apply = (text: string, edit: ReturnType<typeof toggleInlineWrap>) => ({
@@ -111,10 +116,65 @@ describe("Headings & Callouts", () => {
 		expect(findHeadingLine(doc, "Top")).toBe(4);
 	});
 
-	test("parses Obsidian/GitHub callout headers including custom titles and fold flags", () => {
+	test("parses Obsidian/GitHub callout headers including no-space >[!important], custom titles, and fold flags", () => {
 		expect(parseCalloutHeader("> [!NOTE]")).toMatchObject({ title: "Note", fold: null, spec: { tone: "info" } });
+		expect(parseCalloutHeader(">[!important]")).toMatchObject({ title: "Important", fold: null, spec: { tone: "accent" } });
+		expect(parseCalloutHeader(">[!important] Action required")).toMatchObject({ title: "Action required", fold: null, spec: { tone: "accent" } });
 		expect(parseCalloutHeader("> [!WARNING]- Watch out")).toMatchObject({ title: "Watch out", fold: "-", spec: { tone: "warning" } });
 		expect(parseCalloutHeader("> [!TIP]+ Quick hint")).toMatchObject({ title: "Quick hint", fold: "+", spec: { tone: "ok" } });
 		expect(parseCalloutHeader("> plain blockquote")).toBeNull();
+	});
+
+	test("builds callout blocks and continues/exits callouts cleanly on Enter", () => {
+		expect(buildCalloutBlock("important", "Key deadline")).toEqual({
+			insert: "> [!important] Key deadline\n> ",
+			cursorOffset: "> [!important] Key deadline\n> ".length,
+		});
+		expect(buildCalloutBlock("warning", "", "Line one\nLine two").insert).toBe("> [!warning]\n> Line one\n> Line two");
+		expect(blockquoteEnter(">[!important] Title", 19)).toEqual({ start: "> " });
+		expect(blockquoteEnter("> body line", 11)).toEqual({ start: "> " });
+		expect(blockquoteEnter("> ", 2)).toEqual({ keep: 0 });
+		expect(blockquoteEnter("plain line", 5)).toBeNull();
+
+		// Interactive callout serialization (type, custom/default title, fold flag, multiline body).
+		expect(serializeCalloutBlock("important", "Important", null, "First line\n\n- [ ] Check")).toBe(
+			"> [!important]\n> First line\n>\n> - [ ] Check",
+		);
+		expect(serializeCalloutBlock("warning", "Pre-flight check", "+", "Confirm backups.")).toBe(
+			"> [!warning]+ Pre-flight check\n> Confirm backups.",
+		);
+		expect(serializeCalloutBlock("tip", "Tip", "-", "")).toBe("> [!tip]-");
+		expect(serializeCalloutBlock("tip", "Tip", null, "", true)).toBe("> [!tip]\n> ");
+		// Trims trailing blank lines on blur/close while keeping internal paragraph breaks intact.
+		expect(serializeCalloutBlock("note", "Note", null, "Para 1\n\nPara 2\n\n")).toBe("> [!note]\n> Para 1\n>\n> Para 2");
+		expect(serializeCalloutBlock("note", "Note", null, "Para 1\n", true)).toBe("> [!note]\n> Para 1\n>");
+	});
+
+	test("parses and resizes Markdown and Obsidian image expressions", () => {
+		expect(parseImageExpression("![Flow diagram|420](assets/flow.png)")).toEqual({
+			src: "assets/flow.png",
+			alt: "Flow diagram",
+			width: 420,
+			height: undefined,
+			kind: "md",
+		});
+		expect(parseImageExpression("![[shot.png|Sample grid|320x200]]")).toEqual({
+			src: "shot.png",
+			alt: "Sample grid",
+			width: 320,
+			height: 200,
+			kind: "wiki",
+		});
+		expect(parseImageExpression("![[diagram.png|500]]")).toEqual({
+			src: "diagram.png",
+			alt: "",
+			width: 500,
+			height: undefined,
+			kind: "wiki",
+		});
+		expect(withImageWidth("![Flow diagram](assets/flow.png)", 320)).toBe("![Flow diagram|320](assets/flow.png)");
+		expect(withImageWidth("![Flow diagram|320](assets/flow.png)", null)).toBe("![Flow diagram](assets/flow.png)");
+		expect(withImageWidth("![[shot.png|Caption|520]]", 320)).toBe("![[shot.png|Caption|320]]");
+		expect(withImageWidth("![[shot.png|Caption|520]]", null)).toBe("![[shot.png|Caption]]");
 	});
 });

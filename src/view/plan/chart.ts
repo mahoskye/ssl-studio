@@ -949,10 +949,29 @@ export function cycleEdge(edges: readonly EdgeRef[], node: string, current: Edge
 // --- what a node is called, and the mark for its state -----------------------------------------
 
 /** What is known about a node beyond its words: a build's progress, and the chart against its code. */
-export type NodeState = { unit?: string; changed?: boolean; gone?: boolean; suggested?: boolean; built?: boolean; findings?: number };
+export type NodeState = { unit?: string; changed?: boolean; gone?: boolean; suggested?: boolean; built?: boolean; findings?: number; hasError?: boolean; hasDrift?: boolean };
 export type Mark = "stuck" | "gone" | "running" | "changed" | "skipped" | "passed";
+export type CodeIndicator = "grey" | "blue" | "green" | "yellow" | "red";
 
 const UNIT_WORDS: Record<string, string> = { pending: "waiting to be built", running: "building", passed: "passed", stuck: "stuck", skipped: "waiting on a stuck unit", kept: "untouched" };
+
+/** Five-state code indicator (stoplight + grey + blue) for steps and decisions. */
+export function codeIndicator(state: NodeState): CodeIndicator {
+	if (state.unit === "stuck" || state.gone || state.hasError) return "red";
+	if (state.unit === "running" || state.unit === "pending" || state.suggested) return "blue";
+	if (state.unit === "skipped") return "yellow";
+	if (state.built && (state.changed || state.hasDrift || (state.findings ?? 0) > 0)) return "yellow";
+	if (state.built || state.unit === "passed") return "green";
+	return "grey";
+}
+
+export const CODE_INDICATOR_WORDS: Record<CodeIndicator, { label: string; detail: string }> = {
+	grey: { label: "Not built", detail: "No code is linked to this step yet." },
+	blue: { label: "Building", detail: "Agent build or update is active or queued for this step." },
+	green: { label: "Built", detail: "Linked code exists and agrees with the chart." },
+	yellow: { label: "Needs rebuild", detail: "Changed since the last build, or has a drift or chart warning." },
+	red: { label: "Needs attention", detail: "Implementing procedure is missing, stuck, or has an error." },
+};
 
 /** The one mark a node carries, so its state does not rest on colour: the most pressing wins. */
 export function statusMark(state: NodeState): Mark | null {

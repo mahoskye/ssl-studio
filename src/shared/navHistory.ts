@@ -4,7 +4,7 @@
 // was; moving about within a few lines only moves the place it is at. No DOM
 // and no app state.
 
-export type Place = { path: string; line: number; column: number };
+export type Place = { path: string; line: number; column: number; view?: string };
 
 /** The places in the order they were visited, and which one the cursor is at now (-1 with none). */
 export type Trail = { readonly places: readonly Place[]; readonly at: number };
@@ -16,7 +16,7 @@ export const TRAIL_LENGTH = 50;
 /** Fewer lines than this from the last place is still the same place. */
 export const FAR = 10;
 
-const near = (a: Place, b: Place, far: number) => a.path === b.path && Math.abs(a.line - b.line) < far;
+const near = (a: Place, b: Place, far: number) => a.path === b.path && (a.view ?? "") === (b.view ?? "") && Math.abs(a.line - b.line) < far;
 
 /**
  * The trail after the cursor came to rest at `place`. Near the place it is
@@ -27,7 +27,7 @@ const near = (a: Place, b: Place, far: number) => a.path === b.path && Math.abs(
 export function visited(trail: Trail, place: Place, far = FAR): Trail {
 	const here = trail.places[trail.at];
 	if (here && near(here, place, far)) {
-		if (here.line === place.line && here.column === place.column) return trail;
+		if (here.line === place.line && here.column === place.column && (here.view ?? "") === (place.view ?? "")) return trail;
 		return { places: trail.places.map((each, index) => (index === trail.at ? place : each)), at: trail.at };
 	}
 	const places = [...trail.places.slice(0, trail.at + 1), place].slice(-TRAIL_LENGTH);
@@ -49,7 +49,7 @@ function settled(places: Place[], at: number): Trail {
 	let now = -1;
 	places.forEach((place, index) => {
 		const last = out[out.length - 1];
-		if (!last || last.path !== place.path || last.line !== place.line) out.push(place);
+		if (!last || last.path !== place.path || last.line !== place.line || (last.view ?? "") !== (place.view ?? "")) out.push(place);
 		if (index <= at) now = out.length - 1;
 	});
 	return { places: out, at: now };
@@ -57,7 +57,7 @@ function settled(places: Place[], at: number): Trail {
 
 /** The trail after a file or folder was renamed: its places are in the file under its new name. */
 export function trailRenamed(trail: Trail, rename: (path: string) => string): Trail {
-	return { places: trail.places.map((place) => ({ ...place, path: rename(place.path) })), at: trail.at };
+	return { places: trail.places.map((place) => (place.path ? { ...place, path: rename(place.path) } : place)), at: trail.at };
 }
 
 /** The trail without the places in files that are gone. The cursor stays at the last place before those it lost. */
@@ -65,7 +65,7 @@ export function trailWithout(trail: Trail, gone: (path: string) => boolean): Tra
 	let at = -1;
 	const kept: Place[] = [];
 	trail.places.forEach((place, index) => {
-		if (gone(place.path)) return;
+		if (place.path && gone(place.path)) return;
 		kept.push(place);
 		if (index <= trail.at) at = kept.length - 1;
 	});

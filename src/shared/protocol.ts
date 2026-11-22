@@ -144,6 +144,10 @@ export type Settings = {
 	wordWrap?: boolean;
 	/** Markdown drawn as it is written, in the text view: headings larger, the markup out of the way. On unless set to false. */
 	livePreview?: boolean;
+	/** Folder relative to workspace root for customizable Templater Markdown templates (defaults to `<docs>/templates`). */
+	templatesFolder?: string;
+	/** Folder relative to workspace root for pasted/dropped Markdown image attachments (defaults to `<docs>/attachments`). */
+	attachmentsFolder?: string;
 	/** The menu bar across the top of the window. Shown unless set to false. */
 	menuBar?: boolean;
 	/** Parameter names shown beside the arguments of a call. On unless set to false. */
@@ -231,6 +235,8 @@ export interface BackendApi {
 	gitDiscard(path: string): Promise<void>;
 	/** A picture's bytes, for showing it: its kind ("image/png") and the bytes in base64. */
 	image(path: string): Promise<{ type: string; base64: string }>;
+	/** Saves a binary picture (base64 payload) inside the workspace (e.g. clipboard paste or drag-and-drop into Markdown). */
+	writeImage(path: string, base64: string): Promise<{ path: string; size: number }>;
 	/** Copies a file, or a folder and everything in it, to a path nothing is at yet. */
 	copy(from: string, to: string): Promise<void>;
 	trash(path: string): Promise<void>;

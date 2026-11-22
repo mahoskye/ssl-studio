@@ -7,11 +7,13 @@ import { autocompletion, type Completion, type CompletionContext, type Completio
 import type { Extension } from "@codemirror/state";
 import { fenced } from "../../shared/catalog";
 import { linkBeingWritten, linkChoices } from "../../shared/docLinks";
-import { CALLOUT_SPECS, documentHeadings } from "../../shared/markdownEdit";
+import { CALLOUT_PRESETS, CALLOUT_SPECS, documentHeadings } from "../../shared/markdownEdit";
 import { docByName, nameBeingWritten, nameChoices } from "../../shared/namedLinks";
+import { baseName, relativeTo } from "../../shared/paths";
 import { backend } from "../backend";
 import { docs } from "../project";
 import { canonical, documents, state } from "../state";
+import { listWorkspaceImages } from "./imageResolve";
 
 const headingCache = new Map<string, { at: number; text: string }>();
 
@@ -45,25 +47,53 @@ function markdownCompletionSource(filePath: () => string) {
 		const fullText = context.state.doc.toString();
 		if (fenced(fullText).some(([from, to]) => context.pos >= from && context.pos <= to)) return null;
 
-		// 1. Obsidian callout type completion: `> [!` at start of blockquote line.
+		// 1. Obsidian callout type completion: `> [!` or `>[!` at start of blockquote line.
 		const calloutMatch = /^[ \t]{0,3}>[ \t]*\[!([A-Za-z0-9_-]*)$/.exec(before);
 		if (calloutMatch) {
 			const typed = calloutMatch[1]!;
 			const from = context.pos - typed.length;
 			const rest = /^[A-Za-z0-9_-]*/.exec(after)![0].length;
 			const hasClose = after.slice(rest).startsWith("]");
-			const options: Completion[] = Object.values(CALLOUT_SPECS).map((spec, idx) => ({
-				label: spec.type.toUpperCase(),
-				detail: spec.label,
-				type: "keyword",
-				boost: 100 - idx,
-				apply: hasClose ? spec.type.toUpperCase() : `${spec.type.toUpperCase()}] `,
-			}));
+			const presetMap = new Map(CALLOUT_PRESETS.map((p, idx) => [p.type, { about: p.about, idx }]));
+			const options: Completion[] = Object.values(CALLOUT_SPECS).map((spec, idx) => {
+				const preset = presetMap.get(spec.type);
+				return {
+					label: spec.type.toUpperCase(),
+					detail: preset ? preset.about : spec.label,
+					type: "keyword",
+					boost: preset ? 200 - preset.idx : 100 - idx,
+					apply: hasClose ? spec.type.toUpperCase() : `${spec.type.toUpperCase()}] `,
+				};
+			});
 			return { from, to: context.pos + rest, options, validFor: /^[A-Za-z0-9_-]*$/ };
 		}
 
 		const root = state.workspace?.root;
 		const here = canonical(filePath());
+
+		// 1b. Obsidian image embed completion: `![[name` -> workspace image attachments.
+		const imgEmbedMatch = /!\[\[([^[\]|#\n]*)$/.exec(before);
+		if (imgEmbedMatch && root && !insideBackticks(before.slice(0, imgEmbedMatch.index))) {
+			const typed = imgEmbedMatch[1]!;
+			const images = await listWorkspaceImages();
+			if (images.length) {
+				const from = context.pos - typed.length;
+				const rest = /^[^[\]|#]*/.exec(after)![0].length;
+				const closed = /^(?:\|[^[\]]*)?\]\]/.test(after.slice(rest));
+				const options: Completion[] = images.map((imgPath, idx) => {
+					const name = baseName(imgPath);
+					const rel = relativeTo(root, imgPath);
+					return {
+						label: name,
+						detail: rel,
+						type: "file",
+						boost: 500 - idx,
+						apply: closed ? name : `${name}]]`,
+					};
+				});
+				return { from, to: context.pos + (closed ? rest : 0), options, validFor: /^[^[\]|#\n]*$/ };
+			}
+		}
 
 		// 2. Wikilink heading completion: `[[doc#heading` or `[[#heading`.
 		const headingMatch = /\[\[([^[\]|#\n]*)#([^[\]|#\n]*)$/.exec(before);

@@ -112,6 +112,7 @@ export function createBackend(host: Host, initial?: string) {
 		rename: async (from, to) => need().rename(from, to),
 		copy: async (from, to) => need().copy(from, to),
 		image: (path) => need().image(path),
+		writeImage: (path, base64) => need().writeImage(path, base64),
 		historyKeep: async (path) => {
 			const full = need().inside(path);
 			const now = await need().read(full);

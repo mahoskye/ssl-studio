@@ -108,4 +108,18 @@ describe("when files change under the trail", () => {
 		const early = stepTrail(stepTrail(walk(at("a", 1), at("b", 1), at("c", 1)), -1)!.trail, -1)!.trail;
 		expect(trailWithout(early, (path) => path === "a")).toEqual({ places: [at("b", 1), at("c", 1)], at: 0 });
 	});
+
+	test("panel and screen view switches are distinct stops on the same file", () => {
+		const onPalette: Place = { path: "a", line: 1, column: 1, view: "editors|palette:assistant" };
+		const onAgent: Place = { path: "a", line: 1, column: 1, view: "editors|agent" };
+		const onWelcome: Place = { path: "", line: 1, column: 1, view: "welcome|" };
+		const t = walk(onPalette, onAgent, onWelcome);
+		expect(t.places).toEqual([onPalette, onAgent, onWelcome]);
+		const back1 = stepTrail(t, -1)!;
+		expect(back1.place).toEqual(onAgent);
+		const back2 = stepTrail(back1.trail, -1)!;
+		expect(back2.place).toEqual(onPalette);
+		// File removal does not drop screen-only stops with empty path.
+		expect(trailWithout(t, (p) => p === "a").places).toEqual([onWelcome]);
+	});
 });

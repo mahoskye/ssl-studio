@@ -18,7 +18,7 @@ import { createSignal, createUniqueId, For, onCleanup, onMount, Show } from "sol
 import { FIELD_COMMANDS, letterItem, MENU_BAR, missing, stepMenu, type BarEntry, type Has } from "../shared/menuBar";
 import { keysFor, onOpenMenu, runCommand } from "./commands";
 import { Icon } from "./Icon";
-import { crowdedOut, narrowHosted, narrowPanels, panelOn } from "./panels/registry";
+import { crowdedOut, isPanelAvailable, isShown, narrowHosted, narrowPanels, panelOn, PANELS, showPanel, sideOf } from "./panels/registry";
 import { activeEditor } from "./editor/EditorGroup";
 import { activeLiveEditor } from "./editor/liveBridge";
 import { review } from "./editor/Review";
@@ -168,6 +168,39 @@ function LayoutControls() {
 			entry("Reset the layout", "reset-layout"),
 		];
 	};
+	const rightPanels = () => PANELS.filter((p) => sideOf(p.id) === "right" && isPanelAvailable(p.id));
+	const activeRight = () => {
+		const curId = narrowPanels() ? narrowHosted() : state.rightView;
+		return rightPanels().find((p) => p.id === curId) ?? rightPanels()[0] ?? null;
+	};
+	const rightPanelItems = (): MenuItem[] => {
+		if (!folder()) return [{ label: "Open a folder first", run: () => {}, disabled: true, why: "Open a folder first" }];
+		const list = rightPanels();
+		const panelEntries: MenuItem[] = list.length
+			? list.map((p) => ({
+					label: p.title.split(":")[0]!,
+					keys: keysFor(p.id) || undefined,
+					checked: isShown(p.id),
+					run: () => showPanel(p.id),
+				}))
+			: [{ label: "No panels docked on the right", run: () => {}, disabled: true, why: "Right-click a panel icon to move it to the right" }];
+		return [
+			...panelEntries,
+			"separator",
+			{
+				label: right() ? "Hide right panel" : "Show right panel",
+				keys: keysFor("toggle-right-panel") || undefined,
+				disabled: !panelOn("right"),
+				why: "No panel is docked on the right",
+				run: () => runCommand("toggle-right-panel"),
+			},
+		];
+	};
+	const rightSwitcherTitle = () => {
+		if (!folder()) return "Right panels: open a folder first";
+		const cur = activeRight();
+		return cur ? `Right panels (${cur.title.split(":")[0]}): switch right-side panels` : "Right panels: switch right-side panels";
+	};
 	return (
 		<div class="layout-controls" role="group" aria-label="Layout">
 			<button title={tip(left(), "side panel", "toggle-sidebar", "left")} aria-label="Side panel" aria-pressed={left()} disabled={!folder() || undocked("left")} onClick={() => runCommand("toggle-sidebar")}>
@@ -187,6 +220,13 @@ function LayoutControls() {
 			</button>
 			<Menu label="Layout" title="Layout: what is shown, where the panels are, and back to how it started" class="layout-menu" items={items}>
 				<Icon name="layout" />
+			</Menu>
+			<span class="layout-sep" aria-hidden="true" />
+			<Menu label="Right panels" title={rightSwitcherTitle()} class={`layout-menu right-panel-menu${right() ? " active" : ""}`} items={rightPanelItems}>
+				<Show when={activeRight()} fallback={<Icon name="layout-sidebar-right" />}>
+					{(p) => <span class="codicon-glyph" aria-hidden="true">{p().icon}</span>}
+				</Show>
+				<Icon name="chevron-down" class="right-panel-caret" />
 			</Menu>
 		</div>
 	);

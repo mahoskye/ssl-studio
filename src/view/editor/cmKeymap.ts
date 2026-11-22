@@ -21,11 +21,13 @@ import {
 } from "@codemirror/commands";
 import { foldKeymap } from "@codemirror/language";
 import { gotoLine, openSearchPanel, search, searchKeymap, selectNextOccurrence, selectSelectionMatches } from "@codemirror/search";
-import { EditorSelection, Facet, Prec, type ChangeSpec, type Extension } from "@codemirror/state";
+import { EditorSelection, Prec, type ChangeSpec, type Extension } from "@codemirror/state";
 import { EditorView, keymap, type Command, type KeyBinding } from "@codemirror/view";
 import { fenced } from "../../shared/catalog";
 import {
+	blockquoteEnter,
 	insertLinkEdit,
+	parseCalloutHeader,
 	pasteUrlOverSelection,
 	smartListBackspace,
 	smartListIndent,
@@ -33,17 +35,34 @@ import {
 	toggleInlineWrap,
 	WRAP_PAIRS,
 } from "../../shared/markdownEdit";
+import {
+	createEmptyTable,
+	deleteTableColumn,
+	deleteTableRow,
+	docLineToTableRow,
+	enterTableRow,
+	focusRangeInTableEdit,
+	formatTable,
+	insertTableColumn,
+	insertTableRow,
+	locateTableCell,
+	moveTableColumn,
+	moveTableRow,
+	parseMarkdownTable,
+	setTableAlignment,
+	sortTableByColumn,
+	stepTableCell,
+	type MarkdownTable,
+	type TableEdit,
+} from "../../shared/markdownTables";
 import { listEnter } from "../../shared/markdownText";
 import { backend } from "../backend";
 import { showPanel } from "../panels/registry";
 import { notify } from "../state";
+import { focusLiveWidgetAt, historyFallbackFacet, rawEditBlockField, type HistoryFallback } from "./cmLiveShared";
+import { IMAGE_FILE_RE, saveImageAttachment } from "./imageResolve";
 
-/** Optional fallback undo/redo backed by doc.model so Undo persists seamlessly across Live <-> Read <-> Source switches. */
-export type HistoryFallback = { undo(): boolean; redo(): boolean };
-
-export const historyFallbackFacet = Facet.define<HistoryFallback, HistoryFallback | null>({
-	combine: (values) => values[0] ?? null,
-});
+export { historyFallbackFacet, type HistoryFallback };
 
 export const cmUndo: Command = (view) => {
 	if (undoDepth(view.state) > 0) return undo(view);
@@ -133,29 +152,163 @@ export const cmToggleCheckbox: Command = (view) => {
 	return true;
 };
 
-/** Smart Enter on lists (reuses `listEnter` from `src/shared/markdownText.ts`). */
+/** Active Markdown pipe table at the main cursor, or null if outside a table or inside a fenced code block. */
+export function activeTableAtCursor(view: EditorView): { table: MarkdownTable; row: number; col: number } | null {
+	const main = view.state.selection.main;
+	const docText = view.state.doc.toString();
+	if (fenced(docText).some(([from, to]) => main.head >= from && main.head <= to)) return null;
+	const lines = docText.split("\n");
+	const line = view.state.doc.lineAt(main.head);
+	const lineIdx = line.number - 1;
+	const table = parseMarkdownTable(lines, lineIdx);
+	if (!table) return null;
+	const row = docLineToTableRow(table, lineIdx);
+	const col = locateTableCell(line.text, main.head - line.from, table.alignments.length, table.prefix);
+	return { table, row, col };
+}
+
+function dispatchTableEdit(view: EditorView, edit: TableEdit | null, prefix: string): boolean {
+	if (!edit) return false;
+	const from = view.state.doc.line(edit.startLine + 1).from;
+	const to = view.state.doc.line(edit.endLine + 1).to;
+	const rel = focusRangeInTableEdit(edit, prefix);
+	view.dispatch({
+		changes: { from, to, insert: edit.text },
+		selection: EditorSelection.range(from + rel.from, from + rel.to),
+		scrollIntoView: true,
+		userEvent: "input.table",
+	});
+	return true;
+}
+
+/** Inserts a new 3×2 formatted GFM table at the cursor and focuses the first header cell in place. */
+export const cmInsertTable: Command = (view) => {
+	const main = view.state.selection.main;
+	const line = view.state.doc.lineAt(main.head);
+	const lead = line.text.trim() ? "\n\n" : "";
+	const { text, cursorOffset } = createEmptyTable(3, 2);
+	const insert = `${lead}${text}\n`;
+	const start = lead ? line.to : main.from;
+	const end = lead ? line.to : main.to;
+	const selFrom = start + lead.length + cursorOffset;
+	view.dispatch({
+		changes: { from: start, to: end, insert },
+		selection: EditorSelection.range(selFrom, selFrom + "Column 1".length),
+		scrollIntoView: true,
+		userEvent: "input.table",
+	});
+	if (!focusLiveWidgetAt(view, selFrom, { select: true })) {
+		requestAnimationFrame(() => focusLiveWidgetAt(view, selFrom, { select: true }));
+	}
+	return true;
+};
+
+/** Runs an Advanced Tables operation by action id on the table at the cursor. */
+export function runTableAction(view: EditorView, action: string): boolean {
+	if (action === "md-table-insert") return cmInsertTable(view);
+	const ctx = activeTableAtCursor(view);
+	if (!ctx) return false;
+	const { table, row, col } = ctx;
+	switch (action) {
+		case "md-table-format":
+			return dispatchTableEdit(view, formatTable(table, row, col), table.prefix);
+		case "md-table-row-above":
+			return dispatchTableEdit(view, insertTableRow(table, row, "above"), table.prefix);
+		case "md-table-row-below":
+			return dispatchTableEdit(view, insertTableRow(table, row, "below"), table.prefix);
+		case "md-table-row-del":
+			return dispatchTableEdit(view, deleteTableRow(table, row, col), table.prefix);
+		case "md-table-row-up":
+			return dispatchTableEdit(view, moveTableRow(table, row, col, -1), table.prefix);
+		case "md-table-row-down":
+			return dispatchTableEdit(view, moveTableRow(table, row, col, 1), table.prefix);
+		case "md-table-col-left":
+			return dispatchTableEdit(view, insertTableColumn(table, row, col, "left"), table.prefix);
+		case "md-table-col-right":
+			return dispatchTableEdit(view, insertTableColumn(table, row, col, "right"), table.prefix);
+		case "md-table-col-del":
+			return dispatchTableEdit(view, deleteTableColumn(table, row, col), table.prefix);
+		case "md-table-col-move-left":
+			return dispatchTableEdit(view, moveTableColumn(table, row, col, -1), table.prefix);
+		case "md-table-col-move-right":
+			return dispatchTableEdit(view, moveTableColumn(table, row, col, 1), table.prefix);
+		case "md-table-align-left":
+			return dispatchTableEdit(view, setTableAlignment(table, row, col, "left"), table.prefix);
+		case "md-table-align-center":
+			return dispatchTableEdit(view, setTableAlignment(table, row, col, "center"), table.prefix);
+		case "md-table-align-right":
+			return dispatchTableEdit(view, setTableAlignment(table, row, col, "right"), table.prefix);
+		case "md-table-sort-asc":
+			return dispatchTableEdit(view, sortTableByColumn(table, row, col, "asc"), table.prefix);
+		case "md-table-sort-desc":
+			return dispatchTableEdit(view, sortTableByColumn(table, row, col, "desc"), table.prefix);
+		default:
+			return false;
+	}
+}
+
+/** `Shift+Enter` inside a Markdown table inserts a clean `<br>` line break inside the cell. */
+const cmTableShiftEnter: Command = (view) => {
+	if (view.state.selection.ranges.length !== 1) return false;
+	const ctx = activeTableAtCursor(view);
+	if (!ctx || ctx.row < 0) return false;
+	const r = view.state.selection.main;
+	view.dispatch({
+		changes: { from: r.from, to: r.to, insert: "<br>" },
+		selection: EditorSelection.cursor(r.from + 4),
+		scrollIntoView: true,
+		userEvent: "input.table",
+	});
+	return true;
+};
+
+/** Smart Enter on tables, lists, and callouts/blockquotes. */
 export const cmSmartEnter: Command = (view) => {
 	if (view.state.selection.ranges.length !== 1) return false;
 	const range = view.state.selection.main;
+	// 1. Inside a Markdown pipe table -> format and move to same column in next row (auto-adding row at end).
+	const tbl = activeTableAtCursor(view);
+	if (tbl) {
+		const rawBlock = view.state.field(rawEditBlockField, false);
+		const done = dispatchTableEdit(view, enterTableRow(tbl.table, tbl.row, tbl.col), tbl.table.prefix);
+		if (done && !rawBlock) {
+			const head = view.state.selection.main.head;
+			if (!focusLiveWidgetAt(view, head, { select: true })) {
+				requestAnimationFrame(() => focusLiveWidgetAt(view, head, { select: true }));
+			}
+		}
+		return done;
+	}
+
 	if (!range.empty) return false;
 	const line = view.state.doc.lineAt(range.head);
 	const col = range.head - line.from;
-	const next = listEnter(line.text, col);
-	if (!next) return false;
-	// Never continue Markdown lists inside fenced code blocks.
+	// Never continue Markdown lists/blockquotes inside fenced code blocks.
 	if (fenced(view.state.doc.toString()).some(([from, to]) => range.head >= from && range.head <= to)) return false;
+
+	// 2. List items (`- `, `1. `, `- [ ] `, including inside quotes `> - `).
+	const isCalloutHeader = Boolean(parseCalloutHeader(line.text));
+	const next = listEnter(line.text, col) ?? blockquoteEnter(line.text, col);
+	if (!next) return false;
 	if ("start" in next) {
 		const gap = /^[ \t]*/.exec(line.text.slice(col))![0].length;
 		const insert = `\n${next.start}`;
+		const newHead = range.head + insert.length;
+		const rawBlock = view.state.field(rawEditBlockField, false);
 		view.dispatch({
 			changes: { from: range.head, to: range.head + gap, insert },
-			selection: EditorSelection.cursor(range.head + insert.length),
+			selection: EditorSelection.cursor(newHead),
 			scrollIntoView: true,
 			userEvent: "input.enter",
 		});
+		if (isCalloutHeader && !rawBlock) {
+			if (!focusLiveWidgetAt(view, newHead, { suppressEnter: true })) {
+				queueMicrotask(() => focusLiveWidgetAt(view, newHead, { suppressEnter: true }));
+			}
+		}
 		return true;
 	}
-	// Empty list item: terminate list cleanly.
+	// Empty list / blockquote line: terminate block cleanly.
 	const keepEnd = line.from + next.keep;
 	view.dispatch({
 		changes: { from: keepEnd, to: line.to, insert: "" },
@@ -166,9 +319,13 @@ export const cmSmartEnter: Command = (view) => {
 	return true;
 };
 
-/** Smart Tab / Shift-Tab on list lines from anywhere on the line; falls back to standard indent. */
+/** Smart Tab / Shift-Tab: navigates & auto-formats Markdown tables first, then list lines, then standard indent. */
 function smartTab(direction: "indent" | "outdent"): Command {
 	return (view) => {
+		if (view.state.selection.ranges.length === 1) {
+			const tbl = activeTableAtCursor(view);
+			if (tbl) return dispatchTableEdit(view, stepTableCell(tbl.table, tbl.row, tbl.col, direction === "indent" ? 1 : -1), tbl.table.prefix);
+		}
 		const docText = view.state.doc.toString();
 		const fences = fenced(docText);
 		const lineNums = new Set<number>();
@@ -392,25 +549,95 @@ export const cmAutoWrapExtension: Extension = EditorView.inputHandler.of((view, 
 	return true;
 });
 
-/** Smart URL paste: pasting an `http(s)://` URL over selected text creates `[selected](url)`. */
-export const cmSmartPasteExtension: Extension = EditorView.domEventHandlers({
-	paste(event, view) {
-		const main = view.state.selection.main;
-		if (main.empty || view.state.selection.ranges.length !== 1) return false;
-		const pasted = event.clipboardData?.getData("text/plain") ?? "";
-		const selected = view.state.sliceDoc(main.from, main.to);
-		const wrapped = pasteUrlOverSelection(selected, pasted);
-		if (!wrapped) return false;
-		event.preventDefault();
+/**
+ * Smart paste & drop:
+ * 1. Pasting or dropping an image file saves it to workspace attachments and inserts `![alt](relative/path.png)`.
+ * 2. Pasting an `http(s)://` URL over selected prose creates `[selected](url)`.
+ */
+export function cmSmartPasteExtension(filePath: () => string): Extension {
+	const extractImageFiles = (dt: DataTransfer | null): File[] => {
+		if (!dt) return [];
+		const out: File[] = [];
+		if (dt.items) {
+			for (const item of dt.items) {
+				if (item.kind === "file" && item.type.startsWith("image/")) {
+					const f = item.getAsFile();
+					if (f) out.push(f);
+				}
+			}
+		}
+		if (!out.length && dt.files) {
+			for (const f of dt.files) {
+				if (f.type.startsWith("image/") || IMAGE_FILE_RE.test(f.name)) out.push(f);
+			}
+		}
+		return out;
+	};
+
+	const saveAndInsertImages = async (view: EditorView, files: File[], pos?: number) => {
+		const snippets: string[] = [];
+		for (const file of files) {
+			const saved = await saveImageAttachment(file, filePath());
+			if (saved) snippets.push(saved.markdown);
+		}
+		if (!snippets.length) return;
+		const at = pos ?? view.state.selection.main.from;
+		const to = pos ?? view.state.selection.main.to;
+		const insert = snippets.join("\n");
 		view.dispatch({
-			changes: { from: main.from, to: main.to, insert: wrapped },
-			selection: EditorSelection.cursor(main.from + wrapped.length),
+			changes: { from: at, to, insert },
+			selection: EditorSelection.cursor(at + insert.length),
 			scrollIntoView: true,
 			userEvent: "input.paste",
 		});
-		return true;
-	},
-});
+		view.focus();
+	};
+
+	return EditorView.domEventHandlers({
+		paste(event, view) {
+			if (!view.state.facet(EditorView.editable)) return false;
+			const images = extractImageFiles(event.clipboardData);
+			if (images.length) {
+				event.preventDefault();
+				void saveAndInsertImages(view, images);
+				return true;
+			}
+			const main = view.state.selection.main;
+			if (main.empty || view.state.selection.ranges.length !== 1) return false;
+			const pasted = event.clipboardData?.getData("text/plain") ?? "";
+			const selected = view.state.sliceDoc(main.from, main.to);
+			const wrapped = pasteUrlOverSelection(selected, pasted);
+			if (!wrapped) return false;
+			event.preventDefault();
+			view.dispatch({
+				changes: { from: main.from, to: main.to, insert: wrapped },
+				selection: EditorSelection.cursor(main.from + wrapped.length),
+				scrollIntoView: true,
+				userEvent: "input.paste",
+			});
+			return true;
+		},
+		dragover(event, view) {
+			if (!view.state.facet(EditorView.editable)) return false;
+			const dt = event.dataTransfer;
+			if (!dt) return false;
+			const hasFile = Array.from(dt.types).includes("Files");
+			if (!hasFile) return false;
+			event.preventDefault();
+			dt.dropEffect = "copy";
+			return true;
+		},
+		drop(event, view) {
+			if (!view.state.facet(EditorView.editable)) return false;
+			const images = extractImageFiles(event.dataTransfer);
+			if (!images.length) return false;
+			event.preventDefault();
+			const dropPos = view.posAtCoords({ x: event.clientX, y: event.clientY }) ?? view.state.selection.main.head;
+			void saveAndInsertImages(view, images, dropPos);
+			return true;
+		},
+	});
+}
 
 const markdownBindings: KeyBinding[] = [
 	// Obsidian text formatting (takes precedence over conflicting window chrome shortcuts inside Markdown).
@@ -421,7 +648,8 @@ const markdownBindings: KeyBinding[] = [
 	{ key: "Mod-Alt-h", run: cmToggleHighlight, preventDefault: true },
 	{ key: "Mod-k", run: cmInsertLink, preventDefault: true },
 	{ key: "Mod-l", run: cmToggleCheckbox, preventDefault: true },
-	// Smart Markdown lists & block markers.
+	// Smart Markdown tables, lists, callouts & block markers.
+	{ key: "Shift-Enter", run: cmTableShiftEnter },
 	{ key: "Enter", run: cmSmartEnter },
 	{ key: "Tab", run: smartTab("indent") },
 	{ key: "Shift-Tab", run: smartTab("outdent") },
@@ -527,6 +755,7 @@ export function runCmAction(view: EditorView, id: string): boolean {
 		case "md-checkbox":
 			return cmToggleCheckbox(view);
 		default:
+			if (id.startsWith("md-table-")) return runTableAction(view, id);
 			return false;
 	}
 }

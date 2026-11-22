@@ -8,7 +8,7 @@ import { Icon } from "../Icon";
 import { tabShown } from "../recentTabs";
 import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { monaco } from "./monaco";
-import { activePath, closeAllTabs, closeOtherTabs, closeTab, closeTabsToRight, displayName, documents, focusRequest, isUntitled, keepTab, markdownMode, moveTab, newUntitled, openFile, revealSignal, revert, save, saveAll, setMarkdownMode, setState, split, state, tabLeaving, takeReveal, togglePin, openedForALook } from "../state";
+import { activePath, closeAllTabs, closeOtherTabs, closeTab, closeTabsToRight, displayName, documents, focusRequest, isUntitled, keepTab, markdownMode, moveTab, newUntitled, openFile, planMode, revealSignal, revert, save, saveAll, setMarkdownMode, setPlanMode, setState, split, state, tabLeaving, takeReveal, togglePin, openedForALook } from "../state";
 import { landsBefore } from "../../shared/tabOrder";
 import { othersOf, rightOf } from "../../shared/tabOrder";
 import { chooseFromMenu } from "../panels/RowMenu";
@@ -22,7 +22,6 @@ import { dirName, isInside, relativeTo } from "../../shared/paths";
 import { tabLabels } from "./tabs";
 import { Menu, type MenuItem } from "../Menu";
 import { isMarkdown, isTable } from "../project";
-import { MarkdownView } from "./MarkdownView";
 import { TableView } from "./TableView";
 import { FileView } from "./FileView";
 import { useGitMarks } from "./gitMarks";
@@ -60,7 +59,8 @@ export function EditorGroup(props: { index: number }) {
 	// A picture, or other bytes: shown for what it is, never as text, and never as what its name would make it.
 	const showFile = () => Boolean(state.kindVersion >= 0 && group().active && documents.get(group().active!)?.binary);
 	const isPlan = () => isPlanPath(group().active) && !showFile();
-	const showChart = () => isPlan() && !state.planText[group().active!];
+	const planViewMode = () => (group().active && isPlan() ? planMode(group().active!) : "chart");
+	const showChart = () => isPlan() && planViewMode() !== "source";
 	const isSsl = () => Boolean(group().active && documents.get(group().active!)?.model.getLanguageId() === "ssl");
 	// Blocks are a view of SSL only. The group remembers the choice, so the next
 	// script opens as blocks again, but a Markdown or SQL file never does.
@@ -222,14 +222,14 @@ export function EditorGroup(props: { index: number }) {
 			if (shown && e.source !== "model" && e.source !== "restoreState") noteCursor({ path: shown, line: e.position.lineNumber, column: e.position.column });
 		});
 		const stop = revealSignal.listen((path) => {
-			if (path === group().active && shown === path && !showLive()) reveal(path);
+			if (path === group().active && shown === path && !showLive() && !showRendered()) reveal(path);
 		});
 		// "Focus editor": the text editor, or whichever view of the file is showing in its place.
 		const stopFocus = focusRequest.listen((target) => {
 			if (target !== "editor" || state.activeGroup !== props.index) return;
 			if (showLive()) return void liveEditorAt(props.index)?.focus();
 			if (!showBlocks() && !showChart() && !showRendered() && !showTable() && !showFile()) return editor.focus();
-			section.querySelector<HTMLElement>(".blocks-scroll, .plan [tabindex], .md-view, .table-view input, .file-view")?.focus();
+			section.querySelector<HTMLElement>(".blocks-scroll, .plan [tabindex], .cm-md-host, .md-view, .table-view input, .file-view")?.focus();
 		});
 		onCleanup(() => {
 			stop();
@@ -613,10 +613,31 @@ export function EditorGroup(props: { index: number }) {
 				</Show>
 				<Show when={isPlan()}>
 					<div class="mode-switch" role="group" aria-label="View of this plan">
-						<button classList={{ on: !showChart() }} aria-pressed={!showChart()} onClick={() => setState("planText", group().active!, true)}>
+						<button
+							classList={{ on: planViewMode() === "source" }}
+							aria-pressed={planViewMode() === "source"}
+							title="Raw JSON source of this plan"
+							onClick={() => {
+								setPlanMode(group().active!, "source");
+								queueMicrotask(() => focusRequest.fire("editor"));
+							}}
+						>
+							Source
+						</button>
+						<button
+							classList={{ on: planViewMode() === "text" }}
+							aria-pressed={planViewMode() === "text"}
+							title="Readable structured list and Focus view of the process"
+							onClick={() => setPlanMode(group().active!, "text")}
+						>
 							Text
 						</button>
-						<button classList={{ on: showChart() }} aria-pressed={showChart()} onClick={() => setState("planText", group().active!, false)}>
+						<button
+							classList={{ on: planViewMode() === "chart" }}
+							aria-pressed={planViewMode() === "chart"}
+							title="Visual interactive flowchart"
+							onClick={() => setPlanMode(group().active!, "chart")}
+						>
 							Chart
 						</button>
 					</div>
@@ -725,13 +746,10 @@ export function EditorGroup(props: { index: number }) {
 					{(path) => <BlocksView path={path} group={props.index} />}
 				</Show>
 				<Show when={showChart() && group().active} keyed>
-					{(path) => <PlanView path={path} group={props.index} />}
+					{(path) => <PlanView path={path} group={props.index} mode={planViewMode() === "text" ? "text" : "chart"} />}
 				</Show>
-				<Show when={showRendered() && group().active} keyed>
-					{(path) => <MarkdownView path={path} group={props.index} />}
-				</Show>
-				<Show when={showLive() && group().active} keyed>
-					{(path) => <MarkdownLiveEditor path={path} group={props.index} />}
+				<Show when={(showRendered() || showLive()) && group().active} keyed>
+					{(path) => <MarkdownLiveEditor path={path} group={props.index} mode={showRendered() ? "read" : "live"} />}
 				</Show>
 				<Show when={showFile() && group().active} keyed>
 					{(path) => <FileView path={path} />}

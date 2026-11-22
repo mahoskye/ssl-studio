@@ -15,7 +15,7 @@ const files = [...new Bun.Glob("**/*.{md,markdown}").scanSync({ cwd: root, dot: 
 	.filter((f) => !SKIP.test(f) && !f.includes("/node_modules/"))
 	.sort();
 /** Written under the rule, so held to all of it. A document joins this list when it is next edited. */
-const governed = (file: string) => file.startsWith("examples/") || file.startsWith("docs/adr/0007") || file.startsWith("docs/adr/0008");
+const governed = (file: string) => file.startsWith("examples/") || file.startsWith("docs/adr/0007") || file.startsWith("docs/adr/0008") || file === "docs/AGENT-INTEGRATION.md";
 const said = (file: string, text: string) => checkTables(text).map((f) => `${file}:${f.line} ${f.message}`);
 
 describe("checkTables", () => {

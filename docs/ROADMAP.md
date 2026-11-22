@@ -884,3 +884,8 @@ walkthrough of the baseline UI ([UI-DESIGN.md](UI-DESIGN.md),
 - **Forms, client scripts and code-behind (2026-11-17).** Wanted eventually, in
   the IDE and in the demo project (`examples/due-dates`), which is server side
   only until then. No date: it starts when the user says so, not before.
+- **Tactile / material flowchart theme (2026-11-21).** Explored archival paper,
+  origami, felt-and-stitch, and yarn craft directions for the flowchart canvas;
+  filed away as a future visual polish project so current work stays focused on
+  flowchart ergonomics, testing, and agent integration
+  ([AGENT-INTEGRATION.md](AGENT-INTEGRATION.md)).

@@ -20,6 +20,7 @@
 	box-sizing: border-box;
 	display: flex;
 	flex-direction: column;
+	position: relative;
 }
 
 @container (max-width: 480px) {
@@ -35,6 +36,65 @@
 
 .cm-md-editor-wrap {
 	min-height: 260px;
+	min-width: 0;
+	max-width: 100%;
+}
+
+/* Keep CM6 content strictly within the page column so wide images/tables never clip callouts or cards at narrow widths. */
+.cm-md-host .cm-editor {
+	max-width: 100%;
+	min-width: 0;
+}
+
+.cm-md-host .cm-scroller {
+	max-width: 100%;
+	min-width: 0;
+	overflow-x: auto;
+}
+
+.cm-md-host .cm-content {
+	max-width: 100%;
+	min-width: 0;
+	width: 100%;
+	box-sizing: border-box;
+}
+
+.cm-md-host .cm-line {
+	max-width: 100%;
+	box-sizing: border-box;
+}
+
+/* Read mode shares the exact same CM6 engine with natural reading cursor & footer spacing. */
+.cm-md-host.cm-md-read .cm-content {
+	padding: 8px 0 12vh;
+	cursor: default;
+}
+
+.cm-md-host.cm-md-read .cm-md-callout,
+.cm-md-host.cm-md-read .cm-md-table-wrap,
+.cm-md-host.cm-md-read .cm-md-hr-wrap {
+	cursor: default;
+}
+
+.cm-md-host.cm-md-read .cm-md-image-wrap img {
+	cursor: zoom-in;
+}
+
+/* Unified pointer-Y reading assist across margins, gaps, and widgets (both Live & Read). */
+.cm-md-host .cm-content > *,
+.cm-md-host .cm-md-backlinks {
+	transition: opacity 120ms ease;
+}
+
+.cm-md-host .cm-md-read-below {
+	opacity: 0.68;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.cm-md-host .cm-content > *,
+	.cm-md-host .cm-md-backlinks {
+		transition: none;
+	}
 }
 
 /* Inline Properties header bar inside Live Preview (matching Obsidian Properties). */
@@ -430,18 +490,35 @@
 	overflow: hidden;
 }
 
-/* Rendered Markdown Tables widget in Live Preview. */
+/* Interactive Live Table Grid & Read-mode Table Widget (ADR 0028). */
 .cm-md-table-wrap {
-	margin: 8px 0 12px;
-	overflow-x: auto;
-	cursor: text;
+	margin: 10px 0 6px;
+	max-width: 100%;
 	border-radius: var(--radius-md);
+	box-sizing: border-box;
+	white-space: normal;
+}
+
+.cm-md-table-card.is-read {
+	margin: 10px 0 14px;
+}
+
+.cm-md-table-scroll {
+	max-width: 100%;
+	overflow-x: auto;
+	box-sizing: border-box;
+}
+
+.cm-md-table-grid-row {
+	display: flex;
+	align-items: stretch;
+	width: fit-content;
+	max-width: none;
 }
 
 .cm-md-table-wrap table {
 	border-collapse: collapse;
 	width: auto;
-	max-width: 100%;
 	font-family: var(--read-font, var(--ui-font));
 	font-size: calc(var(--code-size) + 0.5px);
 	line-height: 1.5;
@@ -449,10 +526,18 @@
 
 .cm-md-table-wrap th,
 .cm-md-table-wrap td {
+	position: relative;
 	border: 1px solid var(--editor-border, var(--border));
-	padding: var(--space-2) var(--space-5);
+	padding: 6px 12px;
 	text-align: left;
 	vertical-align: top;
+	box-sizing: border-box;
+}
+
+.cm-md-table-card:not(.is-read) th,
+.cm-md-table-card:not(.is-read) td {
+	min-width: 68px;
+	cursor: text;
 }
 
 .cm-md-table-wrap th {
@@ -466,8 +551,51 @@
 	white-space: nowrap;
 }
 
-.cm-md-table-wrap tbody tr:hover td {
+.cm-md-table-wrap tbody tr:hover td:not(.is-active-cell) {
 	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 3%, transparent);
+}
+
+.cm-md-table-wrap th.is-active-cell,
+.cm-md-table-wrap td.is-active-cell {
+	box-shadow: inset 0 0 0 2px var(--editor-accent, var(--accent));
+	background: color-mix(in srgb, var(--editor-accent, var(--accent)) 6.5%, var(--editor-bg, var(--bg))) !important;
+}
+
+.cm-tbl-cell-view {
+	min-height: 22px;
+	overflow-wrap: break-word;
+	word-break: normal;
+}
+
+.cm-tbl-cell-view.is-empty {
+	user-select: none;
+}
+
+.cm-tbl-cell-input {
+	display: block;
+	width: 100%;
+	min-width: 60px;
+	min-height: 22px;
+	margin: 0;
+	padding: 0;
+	border: 0;
+	outline: none !important;
+	box-shadow: none !important;
+	resize: none;
+	overflow: hidden;
+	background: transparent;
+	color: inherit;
+	font: inherit;
+	line-height: inherit;
+	letter-spacing: inherit;
+	white-space: pre-wrap;
+	box-sizing: border-box;
+}
+
+.cm-tbl-cell-input:focus,
+.cm-tbl-cell-input:focus-visible {
+	outline: none !important;
+	box-shadow: none !important;
 }
 
 .cm-md-table-wrap a {
@@ -476,35 +604,299 @@
 	text-underline-offset: 2px;
 }
 
-/* Obsidian Callouts (shared between Live Preview and Read mode). */
-.cm-md-callout,
-.md .md-callout {
-	margin: 10px 0 12px;
-	border-radius: var(--radius-md);
-	border: 1px solid color-mix(in srgb, var(--callout-tone, var(--info)) 28%, transparent);
-	border-left: 3px solid var(--callout-tone, var(--info));
-	background: color-mix(in srgb, var(--callout-tone, var(--info)) 8%, var(--editor-bg, var(--bg)));
-	overflow: hidden;
-	cursor: text;
+/* Subtle edge `+ Add col` & `+ Add row` controls (revealed smoothly on hover or while editing; hidden in Read mode). */
+.cm-tbl-add-col,
+.cm-tbl-add-row {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 4px;
+	border: 1px dashed color-mix(in srgb, var(--editor-border, var(--border)) 85%, transparent);
+	background: transparent;
+	color: var(--editor-muted, var(--muted));
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+	font-weight: 500;
+	border-radius: var(--radius-sm);
+	cursor: pointer;
+	opacity: 0;
+	transition: opacity 130ms ease, background 120ms ease, color 120ms ease, border-color 120ms ease;
 }
 
-.cm-md-callout.tone-info, .md .md-callout.tone-info { --callout-tone: var(--info); }
-.cm-md-callout.tone-ok, .md .md-callout.tone-ok { --callout-tone: var(--ok); }
-.cm-md-callout.tone-accent, .md .md-callout.tone-accent { --callout-tone: var(--editor-accent, var(--accent)); }
-.cm-md-callout.tone-warning, .md .md-callout.tone-warning { --callout-tone: var(--warning); }
-.cm-md-callout.tone-error, .md .md-callout.tone-error { --callout-tone: var(--error); }
-.cm-md-callout.tone-muted, .md .md-callout.tone-muted { --callout-tone: var(--editor-muted, var(--muted)); }
+.cm-tbl-add-col[hidden],
+.cm-tbl-add-row[hidden] {
+	display: none !important;
+}
+
+.cm-tbl-add-col {
+	width: 22px;
+	margin-left: 5px;
+	flex: none;
+}
+
+.cm-tbl-add-row {
+	margin-top: 4px;
+	height: 22px;
+	padding: 0 10px;
+}
+
+.cm-md-table-card:hover .cm-tbl-add-col,
+.cm-md-table-card:hover .cm-tbl-add-row,
+.cm-md-table-card[data-editing="true"] .cm-tbl-add-col,
+.cm-md-table-card[data-editing="true"] .cm-tbl-add-row,
+.cm-tbl-add-col:focus-visible,
+.cm-tbl-add-row:focus-visible {
+	opacity: 0.9;
+}
+
+.cm-tbl-add-col:hover,
+.cm-tbl-add-row:hover {
+	opacity: 1;
+	color: var(--editor-accent, var(--accent));
+	border-color: color-mix(in srgb, var(--editor-accent, var(--accent)) 55%, transparent);
+	background: color-mix(in srgb, var(--editor-accent, var(--accent)) 10%, transparent);
+}
+
+/* Bottom-docked interactive table controls bar (sits BELOW the table so table rows never shift vertically!). */
+.cm-tbl-bar {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 4px;
+	margin-top: 6px;
+	padding: 4px 8px;
+	max-width: 100%;
+	box-sizing: border-box;
+	border-radius: var(--radius-md);
+	border: 1px solid var(--input-border, var(--border));
+	background: var(--side-bg, var(--panel-bg));
+	color: var(--side-fg, var(--fg));
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+}
+
+.cm-md-table-card[data-editing="false"] .cm-tbl-bar,
+.cm-md-table-card.is-read .cm-tbl-bar {
+	display: none;
+}
+
+/* Raw pipe table editing lines (when user explicitly toggles `Raw`): crisp monospace alignment & subtle pipe dimming. */
+.cm-editor .cm-md-table-line {
+	font-family: var(--code-font);
+	font-size: calc(var(--code-size) - 0.5px);
+	line-height: 1.55;
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 4%, var(--editor-bg, var(--bg)));
+	padding-left: 10px !important;
+	padding-right: 10px !important;
+	border-left: 2px solid color-mix(in srgb, var(--editor-accent, var(--accent)) 45%, transparent);
+	white-space: pre !important;
+}
+
+.cm-editor .cm-md-table-first {
+	border-top-left-radius: var(--radius-sm);
+	border-top-right-radius: var(--radius-sm);
+	padding-top: 5px !important;
+}
+
+.cm-editor .cm-md-table-header {
+	font-weight: 600;
+	color: var(--editor-strong, var(--strong-fg));
+}
+
+.cm-editor .cm-md-table-delim {
+	color: var(--editor-muted, var(--muted));
+	opacity: 0.72;
+}
+
+.cm-editor .cm-md-table-last {
+	border-bottom-left-radius: var(--radius-sm);
+	border-bottom-right-radius: var(--radius-sm);
+	padding-bottom: 5px !important;
+}
+
+.cm-editor .cm-md-table-pipe {
+	color: var(--editor-muted, var(--muted));
+	opacity: 0.62;
+	font-weight: 400;
+}
+
+/* Sticky Contextual Advanced Tables Toolbar (shown only when explicitly editing a table in `Raw` mode). */
+.cm-md-table-toolbar-wrap {
+	position: sticky;
+	top: 0;
+	z-index: 15;
+	width: 100%;
+	box-sizing: border-box;
+	padding: 6px var(--space-5);
+	background: color-mix(in srgb, var(--editor-bg, var(--bg)) 92%, transparent);
+	backdrop-filter: blur(6px);
+	border-bottom: 1px solid var(--editor-border, var(--border));
+}
+
+@container (max-width: 480px) {
+	.cm-md-table-toolbar-wrap {
+		padding: 6px var(--space-3);
+	}
+}
+
+.cm-md-table-toolbar {
+	width: min(820px, 100%);
+	margin: 0 auto;
+	box-sizing: border-box;
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 4px;
+	padding: 4px 8px;
+	border-radius: var(--radius-md);
+	border: 1px solid var(--input-border, var(--border));
+	background: var(--side-bg, var(--panel-bg));
+	color: var(--side-fg, var(--fg));
+	box-shadow: var(--shadow);
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+}
+
+.cm-tbl-pos {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	color: var(--muted);
+	font-weight: 600;
+	padding: 0 4px;
+	white-space: nowrap;
+}
+
+.cm-tbl-sep {
+	width: 1px;
+	height: 15px;
+	background: var(--border);
+	opacity: 0.6;
+	margin: 0 2px;
+}
+
+.cm-tbl-group {
+	display: inline-flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 2px;
+	max-width: 100%;
+}
+
+.cm-md-table-toolbar button,
+.cm-tbl-bar button {
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+	height: 24px;
+	padding: 0 6px;
+	border-radius: var(--radius-sm);
+	border: 1px solid transparent;
+	background: transparent;
+	color: var(--side-fg, var(--fg));
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+	font-weight: 500;
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+.cm-md-table-toolbar button:hover:not(:disabled),
+.cm-tbl-bar button:hover:not(:disabled) {
+	background: var(--hover);
+	color: var(--strong-fg);
+}
+
+.cm-md-table-toolbar button.active,
+.cm-tbl-bar button.active {
+	background: color-mix(in srgb, var(--accent) 18%, transparent);
+	border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+	color: var(--accent);
+	font-weight: 600;
+}
+
+.cm-md-table-toolbar button.danger:hover:not(:disabled),
+.cm-tbl-bar button.danger:hover:not(:disabled) {
+	color: var(--error);
+	background: color-mix(in srgb, var(--error) 12%, transparent);
+}
+
+.cm-md-table-toolbar button:disabled,
+.cm-tbl-bar button:disabled {
+	opacity: 0.35;
+	cursor: default;
+}
+
+/* Obsidian Callouts (interactive in-place cards in Live mode; identical clean cards in Read & Hover views). */
+.cm-md-callout,
+.md .md-callout {
+	margin: 12px 0 14px;
+	max-width: 100%;
+	box-sizing: border-box;
+	border-radius: var(--radius-md);
+	border: 1px solid color-mix(in srgb, var(--callout-tone, var(--info)) 32%, transparent);
+	border-left: 4px solid var(--callout-tone, var(--info));
+	background: color-mix(in srgb, var(--callout-tone, var(--info)) 7.5%, var(--editor-bg, var(--bg)));
+	overflow: hidden;
+	cursor: text;
+	white-space: normal;
+	transition: box-shadow 120ms ease, border-color 120ms ease;
+}
+
+.cm-md-callout:not(.is-read):focus-within,
+.cm-md-callout[data-editing="true"] {
+	border-color: color-mix(in srgb, var(--callout-tone, var(--info)) 58%, transparent);
+	box-shadow: 0 0 0 1px color-mix(in srgb, var(--callout-tone, var(--info)) 35%, transparent);
+}
+
+.cm-md-callout.tone-info, .md .md-callout.tone-info, .cm-editor .cm-md-callout-editing.tone-info, .cm-callout-pick.tone-info { --callout-tone: var(--info); }
+.cm-md-callout.tone-ok, .md .md-callout.tone-ok, .cm-editor .cm-md-callout-editing.tone-ok, .cm-callout-pick.tone-ok { --callout-tone: var(--ok); }
+.cm-md-callout.tone-accent, .md .md-callout.tone-accent, .cm-editor .cm-md-callout-editing.tone-accent, .cm-callout-pick.tone-accent { --callout-tone: var(--editor-accent, var(--accent)); }
+.cm-md-callout.tone-warning, .md .md-callout.tone-warning, .cm-editor .cm-md-callout-editing.tone-warning, .cm-callout-pick.tone-warning { --callout-tone: var(--warning); }
+.cm-md-callout.tone-error, .md .md-callout.tone-error, .cm-editor .cm-md-callout-editing.tone-error, .cm-callout-pick.tone-error { --callout-tone: var(--error); }
+.cm-md-callout.tone-muted, .md .md-callout.tone-muted, .cm-editor .cm-md-callout-editing.tone-muted, .cm-callout-pick.tone-muted { --callout-tone: var(--editor-muted, var(--muted)); }
 
 .cm-md-callout-head,
 .md .md-callout-head {
 	display: flex;
 	align-items: center;
-	gap: var(--space-3);
-	padding: var(--space-3) var(--space-5);
+	gap: var(--space-2);
+	padding: 6px var(--space-4);
+	background: color-mix(in srgb, var(--callout-tone, var(--info)) 11%, transparent);
 	font-family: var(--ui-font);
 	font-weight: 600;
 	font-size: var(--text-base);
 	color: var(--callout-tone, var(--info));
+}
+
+.cm-md-callout.is-folded .cm-md-callout-head {
+	background: transparent;
+}
+
+.cm-callout-type-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 24px;
+	height: 24px;
+	padding: 0;
+	border: 1px solid transparent;
+	border-radius: var(--radius-sm);
+	background: transparent;
+	color: inherit;
+	cursor: pointer;
+	flex: none;
+	transition: background 120ms ease, border-color 120ms ease;
+}
+
+.cm-callout-type-btn:hover:not(:disabled) {
+	background: color-mix(in srgb, var(--callout-tone, var(--info)) 18%, transparent);
+	border-color: color-mix(in srgb, var(--callout-tone, var(--info)) 38%, transparent);
+}
+
+.cm-callout-type-btn:disabled {
+	cursor: default;
+	width: 18px;
 }
 
 .cm-md-callout-icon,
@@ -513,20 +905,186 @@
 	flex: none;
 }
 
-.cm-md-callout-fold {
-	margin-left: auto;
+.cm-md-callout-title {
+	flex: 1;
+	min-width: 0;
+}
+
+.cm-md-callout-title[hidden],
+.cm-callout-title-input[hidden],
+.cm-callout-actions[hidden],
+.cm-md-callout-fold[hidden],
+.cm-callout-type-picker[hidden] {
+	display: none !important;
+}
+
+.cm-callout-title-input {
+	flex: 1;
+	min-width: 0;
+	border: 0;
+	outline: none !important;
+	box-shadow: none !important;
+	margin: -2px 0;
+	padding: 2px 6px;
+	border-radius: var(--radius-sm);
+	background: transparent;
+	color: inherit;
+	font: inherit;
+	box-sizing: border-box;
+	transition: background 120ms ease;
+}
+
+.cm-callout-title-input::placeholder {
+	color: color-mix(in srgb, var(--callout-tone, var(--info)) 60%, transparent);
+}
+
+.cm-callout-title-input:hover {
+	background: color-mix(in srgb, var(--editor-bg, var(--bg)) 38%, transparent);
+}
+
+.cm-callout-title-input:focus,
+.cm-callout-title-input:focus-visible {
+	outline: none !important;
+	box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--callout-tone, var(--info)) 45%, transparent) !important;
+	background: color-mix(in srgb, var(--editor-bg, var(--bg)) 60%, transparent);
+}
+
+.cm-callout-actions {
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+	flex: none;
+	opacity: 0;
+	transition: opacity 120ms ease;
+}
+
+.cm-md-callout:hover .cm-callout-actions,
+.cm-md-callout:focus-within .cm-callout-actions,
+.cm-md-callout[data-editing="true"] .cm-callout-actions {
+	opacity: 1;
+}
+
+.cm-callout-action-btn {
+	height: 20px;
+	padding: 0 7px;
+	border-radius: var(--radius-sm);
+	border: 1px solid transparent;
+	background: transparent;
 	color: var(--editor-muted, var(--muted));
-	padding: 0 4px;
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+	font-weight: 500;
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+.cm-callout-action-btn:hover {
+	color: var(--editor-strong, var(--strong-fg));
+	background: color-mix(in srgb, var(--editor-bg, var(--bg)) 55%, transparent);
+	border-color: color-mix(in srgb, var(--callout-tone, var(--info)) 30%, transparent);
+}
+
+.cm-md-callout-fold {
+	color: var(--editor-muted, var(--muted));
+	padding: 2px 5px;
+	border-radius: var(--radius-sm);
 	cursor: pointer;
 	background: transparent;
 	border: 0;
 	font: normal 14px/1 codicon;
+	flex: none;
+}
+
+.cm-md-callout-fold:hover {
+	color: var(--editor-strong, var(--strong-fg));
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 8%, transparent);
+}
+
+/* Inline callout type chip picker strip. */
+.cm-callout-type-picker {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+	padding: 7px var(--space-4);
+	border-bottom: 1px solid color-mix(in srgb, var(--callout-tone, var(--info)) 22%, transparent);
+	background: color-mix(in srgb, var(--editor-bg, var(--bg)) 72%, transparent);
+}
+
+.cm-callout-pick {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	height: 24px;
+	padding: 0 8px;
+	border-radius: var(--radius-sm);
+	border: 1px solid color-mix(in srgb, var(--callout-tone, var(--info)) 26%, transparent);
+	background: color-mix(in srgb, var(--callout-tone, var(--info)) 8%, transparent);
+	color: var(--callout-tone, var(--info));
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+	font-weight: 500;
+	cursor: pointer;
+}
+
+.cm-callout-pick .cm-md-callout-icon {
+	font-size: 13px;
+}
+
+.cm-callout-pick:hover {
+	background: color-mix(in srgb, var(--callout-tone, var(--info)) 16%, transparent);
+	border-color: color-mix(in srgb, var(--callout-tone, var(--info)) 55%, transparent);
+}
+
+.cm-callout-pick.active {
+	background: color-mix(in srgb, var(--callout-tone, var(--info)) 22%, transparent);
+	border-color: var(--callout-tone, var(--info));
+	font-weight: 600;
 }
 
 .cm-md-callout-body,
 .md .md-callout-body {
-	padding: 0 var(--space-5) var(--space-4);
+	padding: var(--space-3) var(--space-5) var(--space-3);
 	color: var(--editor-fg, var(--fg));
+	line-height: 1.55;
+}
+
+.cm-callout-body-input {
+	display: block;
+	width: 100%;
+	min-height: 26px;
+	margin: 0;
+	padding: 0;
+	border: 0;
+	outline: none !important;
+	box-shadow: none !important;
+	resize: none;
+	overflow: hidden;
+	background: transparent;
+	color: var(--editor-fg, var(--fg));
+	font-family: var(--read-font, var(--ui-font));
+	font-size: inherit;
+	line-height: 1.55;
+	white-space: pre-wrap;
+	box-sizing: border-box;
+}
+
+.cm-callout-body-input:focus,
+.cm-callout-body-input:focus-visible {
+	outline: none !important;
+	box-shadow: none !important;
+}
+
+.cm-callout-body-input::placeholder {
+	color: var(--editor-muted, var(--muted));
+	opacity: 0.7;
+}
+
+.cm-callout-placeholder {
+	color: var(--editor-muted, var(--muted));
+	font-style: italic;
+	opacity: 0.72;
+	font-size: 0.94em;
+	user-select: none;
 }
 
 .cm-md-callout-body > :first-child,
@@ -539,33 +1097,257 @@
 	margin-bottom: 0;
 }
 
-/* Inline Image Widget in Live Preview. */
+.cm-md-callout-body p {
+	margin: 0.35em 0;
+}
+
+.cm-md-callout-body ul,
+.cm-md-callout-body ol {
+	margin: 0.3em 0;
+	padding-left: 1.4em;
+}
+
+.cm-md-callout-body li > p {
+	margin: 0;
+}
+
+.cm-md-callout-body li:has(> input[type="checkbox"]) {
+	list-style: none;
+	margin-left: -1.3em;
+}
+
+.cm-md-callout-body a {
+	color: var(--editor-accent, var(--accent));
+	text-decoration: underline;
+	text-underline-offset: 2px;
+}
+
+.cm-md-callout-body code {
+	font-family: var(--code-font);
+	font-size: 0.88em;
+	padding: 1px 5px;
+	border-radius: var(--radius-sm);
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 8%, transparent);
+}
+
+/* Preserve callout visual identity while editing raw `> [!important]` lines in Live mode. */
+.cm-editor .cm-md-callout-editing {
+	border-left: 4px solid var(--callout-tone, var(--info)) !important;
+	padding-left: 14px !important;
+	background: color-mix(in srgb, var(--callout-tone, var(--info)) 7.5%, var(--editor-bg, var(--bg))) !important;
+	color: var(--editor-fg, var(--fg));
+}
+
+.cm-editor .cm-md-callout-editing-first {
+	border-top-right-radius: var(--radius-md);
+	padding-top: 6px !important;
+	font-weight: 600;
+	color: var(--callout-tone, var(--info));
+}
+
+.cm-editor .cm-md-callout-editing-last {
+	border-bottom-right-radius: var(--radius-md);
+	padding-bottom: 6px !important;
+}
+
+/* Inline & Block Image Widgets in Live Preview & Read mode. */
 .cm-md-image-wrap {
-	margin: 8px 0 12px;
+	margin: 10px 0 14px;
+	max-width: 100%;
+	box-sizing: border-box;
 	cursor: pointer;
+}
+
+.cm-md-image-wrap.is-inline {
+	display: inline-block;
+	margin: 0 3px;
+	vertical-align: middle;
+}
+
+.cm-md-image-frame {
+	position: relative;
+	display: inline-block;
+	max-width: 100%;
+	box-sizing: border-box;
+	line-height: 0;
 }
 
 .cm-md-image-wrap img {
 	display: block;
-	max-width: 100%;
-	max-height: 460px;
+	max-width: 100% !important;
+	max-height: 520px;
+	height: auto;
+	box-sizing: border-box;
+	object-fit: contain;
 	border-radius: var(--radius-md);
 	border: 1px solid var(--editor-border, var(--border));
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 3%, transparent);
+}
+
+.cm-md-image-wrap.is-inline img {
+	display: inline-block;
+	max-height: 220px;
+	vertical-align: middle;
+}
+
+.cm-md-image-tools {
+	position: absolute;
+	top: 8px;
+	right: 8px;
+	display: flex;
+	align-items: center;
+	gap: 3px;
+	padding: 3px 4px;
+	border-radius: var(--radius-md);
+	background: color-mix(in srgb, var(--side-bg, #1c1917) 88%, transparent);
+	border: 1px solid color-mix(in srgb, var(--input-border, var(--border)) 85%, transparent);
+	box-shadow: var(--shadow);
+	opacity: 0;
+	pointer-events: none;
+	transition: opacity 120ms ease;
+	line-height: 1;
+}
+
+.cm-md-image-frame:hover .cm-md-image-tools,
+.cm-md-image-frame:focus-within .cm-md-image-tools {
+	opacity: 1;
+	pointer-events: auto;
+}
+
+.cm-md-img-btn {
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+	font-weight: 500;
+	color: var(--side-fg, var(--fg));
+	background: transparent;
+	border: 1px solid transparent;
+	border-radius: var(--radius-sm);
+	padding: 3px 7px;
+	cursor: pointer;
+}
+
+.cm-md-img-btn:hover {
+	background: var(--hover);
+	color: var(--strong-fg);
+}
+
+.cm-md-img-btn.active {
+	background: color-mix(in srgb, var(--accent) 20%, transparent);
+	border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+	color: var(--accent);
 }
 
 .cm-md-image-caption {
 	font-family: var(--ui-font);
 	font-size: var(--text-sm);
 	color: var(--editor-muted, var(--muted));
-	margin-top: 4px;
+	margin-top: 6px;
 }
 
-/* Hover Page Preview popover (Obsidian-style). */
+.cm-md-image-missing {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 10px;
+	border-radius: var(--radius-md);
+	border: 1px dashed var(--warning);
+	color: var(--warning);
+	background: color-mix(in srgb, var(--warning) 8%, transparent);
+	font-family: var(--ui-font);
+	font-size: var(--text-sm);
+	line-height: 1.4;
+}
+
+/* Image Lightbox Modal. */
+.md-lightbox-backdrop {
+	position: fixed;
+	inset: 0;
+	z-index: 90;
+	display: flex;
+	flex-direction: column;
+	background: rgba(12, 11, 10, 0.86);
+	backdrop-filter: blur(4px);
+}
+
+.md-lightbox-bar {
+	display: flex;
+	align-items: center;
+	gap: var(--space-3);
+	padding: var(--space-3) var(--space-5);
+	background: color-mix(in srgb, var(--side-bg) 92%, transparent);
+	border-bottom: 1px solid var(--border);
+	color: var(--side-fg);
+	font-family: var(--ui-font);
+	font-size: var(--text-md);
+}
+
+.md-lightbox-caption {
+	font-weight: 600;
+	color: var(--strong-fg);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.md-lightbox-path {
+	font-size: var(--text-xs);
+	color: var(--muted);
+	white-space: nowrap;
+}
+
+.md-lightbox-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	padding: 4px 10px;
+	border-radius: var(--radius-sm);
+	border: 1px solid var(--border);
+	background: var(--panel-bg);
+	color: var(--fg);
+	font-family: var(--ui-font);
+	font-size: var(--text-sm);
+	cursor: pointer;
+}
+
+.md-lightbox-btn:hover {
+	background: var(--hover);
+	color: var(--strong-fg);
+}
+
+.md-lightbox-stage {
+	flex: 1;
+	min-height: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	overflow: auto;
+	padding: var(--space-6);
+}
+
+.md-lightbox-stage img {
+	max-width: 100%;
+	max-height: 100%;
+	object-fit: contain;
+	border-radius: var(--radius-md);
+	box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+
+.md-lightbox-stage.is-full {
+	align-items: flex-start;
+	justify-content: flex-start;
+}
+
+.md-lightbox-stage.is-full img {
+	max-width: none;
+	max-height: none;
+}
+
+/* Hover Page Preview popover (Obsidian-style: Markdown, Flowcharts, Registries & Code). */
 .md-hover-card {
 	position: fixed;
 	z-index: 60;
-	width: min(440px, calc(100vw - 32px));
-	max-height: min(360px, calc(100vh - 32px));
+	width: min(460px, calc(100vw - 32px));
+	max-height: min(380px, calc(100vh - 32px));
 	overflow: auto;
 	background: var(--side-bg);
 	color: var(--side-fg);
@@ -581,7 +1363,7 @@
 .md-hover-head {
 	display: flex;
 	align-items: center;
-	gap: var(--space-3);
+	gap: var(--space-2);
 	padding-bottom: var(--space-3);
 	margin-bottom: var(--space-3);
 	border-bottom: 1px solid var(--border);
@@ -594,12 +1376,35 @@
 	text-overflow: ellipsis;
 	white-space: nowrap;
 	flex: 1;
+	text-align: left;
+	background: transparent;
+	border: 0;
+	padding: 0;
+	cursor: pointer;
+	font: inherit;
+}
+
+.md-hover-title:hover {
+	color: var(--accent);
+	text-decoration: underline;
+}
+
+.md-hover-badge {
+	font-size: var(--text-xs);
+	color: var(--muted);
+	background: color-mix(in srgb, var(--fg) 8%, transparent);
+	padding: 1px 7px;
+	border-radius: 999px;
+	white-space: nowrap;
 }
 
 .md-hover-path {
 	font-size: var(--text-xs);
 	color: var(--muted);
 	white-space: nowrap;
+	max-width: 150px;
+	overflow: hidden;
+	text-overflow: ellipsis;
 }
 
 .md-hover-body {
@@ -611,7 +1416,7 @@
 .md-hover-body h1,
 .md-hover-body h2,
 .md-hover-body h3 {
-	font-size: 1.1em;
+	font-size: 1.08em;
 	margin: 0.6em 0 0.3em;
 }
 
@@ -621,6 +1426,121 @@
 
 .md-hover-body p {
 	margin: 0 0 0.55em;
+}
+
+.md-hover-body img {
+	max-width: 100%;
+	max-height: 180px;
+	border-radius: var(--radius-sm);
+}
+
+.md-hover-goal {
+	margin: 0 0 var(--space-3);
+	color: var(--fg);
+}
+
+.md-hover-stats {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	margin-bottom: var(--space-3);
+}
+
+.md-hover-stats span {
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+	color: var(--muted);
+	background: color-mix(in srgb, var(--fg) 7%, transparent);
+	padding: 2px 8px;
+	border-radius: 999px;
+}
+
+.md-hover-plan-list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 5px;
+	font-family: var(--ui-font);
+	font-size: var(--text-sm);
+}
+
+.md-hover-plan-list li {
+	display: flex;
+	align-items: baseline;
+	gap: 7px;
+	line-height: 1.4;
+}
+
+.md-hover-step-kind {
+	flex: none;
+	font-size: 10px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	padding: 1px 5px;
+	border-radius: 4px;
+	background: color-mix(in srgb, var(--fg) 9%, transparent);
+	color: var(--muted);
+}
+
+.md-hover-step-kind.kind-decision {
+	background: color-mix(in srgb, var(--warning) 16%, transparent);
+	color: var(--warning);
+}
+
+.md-hover-step-kind.kind-end {
+	background: color-mix(in srgb, var(--ok) 16%, transparent);
+	color: var(--ok);
+}
+
+.md-hover-step-stage {
+	margin-left: auto;
+	font-size: var(--text-xs);
+	color: var(--muted);
+	white-space: nowrap;
+}
+
+.md-hover-more,
+.md-hover-empty {
+	color: var(--muted);
+	font-size: var(--text-xs);
+	margin: 6px 0 0;
+}
+
+.md-hover-table-wrap {
+	overflow-x: auto;
+}
+
+.md-hover-table-wrap table {
+	border-collapse: collapse;
+	width: 100%;
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+}
+
+.md-hover-table-wrap th,
+.md-hover-table-wrap td {
+	border: 1px solid var(--border);
+	padding: 4px 7px;
+	text-align: left;
+}
+
+.md-hover-table-wrap th {
+	background: color-mix(in srgb, var(--fg) 5%, transparent);
+	font-weight: 600;
+}
+
+.md-hover-code {
+	margin: 0;
+	padding: 8px 10px;
+	border-radius: var(--radius-sm);
+	background: color-mix(in srgb, var(--fg) 5%, transparent);
+	font-family: var(--code-font);
+	font-size: var(--text-xs);
+	line-height: 1.45;
+	overflow-x: auto;
 }
 
 /* Fold gutter chevron visibility on active/hovered lines. */

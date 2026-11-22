@@ -5,6 +5,8 @@ All four stages of the build order are done: the chart, refine and spec, build a
 review, and what follows a build. The [spike](spikes/planning-mode.md) found a local
 model good for refining a plan and for a first draft, not for a working script; this
 design reflects that. Neither a stronger model nor a real STARLIMS run has been tried.
+Ongoing design for agent build triggers, Assistant UX, flowchart testing, and the
+five-state code indicator is tracked in [AGENT-INTEGRATION.md](AGENT-INTEGRATION.md).
 
 **The idea, in the user's words:** "a planning mode where I can use a flow
 chart to design a process or script and then have an agent take over and work

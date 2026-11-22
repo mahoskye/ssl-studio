@@ -62,8 +62,10 @@ export const [state, setState] = createStore({
 	bottomMaximized: false,
 	rightView: "health" as RightView,
 	centerView: "editors" as "editors" | "graph" | "welcome",
-	/** Plans shown as text; a plan opens as its chart. */
+	/** Plans shown as raw JSON source; a plan opens as its chart. */
 	planText: {} as Record<string, boolean>,
+	/** Plan view mode per file: Source (raw JSON), Text (readable outline & focus), Chart (visual flowchart). */
+	planMode: {} as Record<string, "source" | "text" | "chart">,
 	/** Markdown shown as text; a Markdown file opens rendered. */
 	mdText: {} as Record<string, boolean>,
 	/** Obsidian-style Markdown view mode per file: Source (raw), Live (formatted edit), Read (rendered page). */
@@ -336,6 +338,22 @@ export async function saveSetting(patch: SettingsPatch, scope: "user" | "workspa
 /** True for floating untitled buffers that have not been saved to disk yet. */
 export const isUntitled = (path: string | null | undefined): path is string => Boolean(path && path.startsWith("untitled:"));
 export const displayName = (path: string) => (isUntitled(path) ? path.slice("untitled:".length) : baseName(path));
+
+export type PlanViewMode = "source" | "text" | "chart";
+
+/** Plan view mode per file (Source | Text | Chart). Defaults to Chart (or Source if legacy planText is set). */
+export function planMode(path: string): PlanViewMode {
+	const explicit = state.planMode[path];
+	if (explicit) return explicit;
+	return state.planText[path] ? "source" : "chart";
+}
+
+export function setPlanMode(path: string, mode: PlanViewMode) {
+	batch(() => {
+		setState("planMode", path, mode);
+		setState("planText", path, mode === "source");
+	});
+}
 
 /** Obsidian-style Markdown mode per file (Source | Live | Read). Defaults to Live (or Source when livePreview is disabled). */
 export function markdownMode(path: string): "source" | "live" | "read" {
@@ -733,6 +751,7 @@ export function fileRenamed(oldPath: string, newPath: string) {
 			setState("conflicts", path, undefined!);
 			setState("dirty", target, dirty || moved.savedVersion === -1);
 			if (state.planText[path]) setState("planText", target, true);
+			if (state.planMode[path]) setState("planMode", target, state.planMode[path]!);
 			if (state.mdText[path]) setState("mdText", target, true);
 			if (state.mdMode[path]) setState("mdMode", target, state.mdMode[path]!);
 		});

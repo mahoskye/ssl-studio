@@ -6,7 +6,7 @@
 import { Icon, type IconName } from "../Icon";
 import { createEffect, createResource, createSignal, For, on, onCleanup, Show } from "solid-js";
 import { monaco } from "../editor/monaco";
-import { mdOutline } from "../editor/MarkdownView";
+import { mdOutline } from "../editor/mdOutline";
 import { session } from "../lsp/session";
 import { activeDoc, activePath, markdownMode, openFile, state } from "../state";
 import { cycleRegionColor, isRegion, regionColor, symbolPath } from "../editor/regions";
@@ -366,7 +366,7 @@ export function Objects() {
 	const [filter, setFilter] = createSignal("");
 	const currentMdRead = () => {
 		const path = activePath();
-		if (!path || !isMarkdown(path) || markdownMode(path) !== "read") return null;
+		if (!path || !isMarkdown(path) || markdownMode(path) === "source") return null;
 		const info = mdOutline();
 		return info && info.path === path ? info : null;
 	};

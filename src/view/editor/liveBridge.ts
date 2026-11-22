@@ -22,7 +22,7 @@ export type LiveEditorHandle = {
 	reveal(range: { line: number; column?: number; endLine?: number; endColumn?: number }): void;
 	runAction(id: string): boolean;
 	openLinkAtCursor(): boolean;
-	insertText(text: string): void;
+	insertText(text: string, cursorOffset?: number, opts?: { asBlock?: boolean }): void;
 };
 
 const liveEditors: Record<number, LiveEditorHandle | undefined> = {};
@@ -46,7 +46,7 @@ export const liveEditorAt = (group: number): LiveEditorHandle | undefined => liv
 export function isInMarkdownTextEditor(target: EventTarget | null, activeLanguage?: string): boolean {
 	const el = target instanceof Element ? target : document.activeElement;
 	if (!el) return false;
-	if (el.closest(".cm-editor")) return true;
+	if (el.closest(".cm-editor") && !el.closest(".cm-md-read")) return true;
 	if (el.closest(".monaco-editor") && activeLanguage === "markdown") return true;
 	return false;
 }

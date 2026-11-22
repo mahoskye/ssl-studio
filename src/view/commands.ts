@@ -25,6 +25,7 @@ import { goAlong } from "./navigation";
 import { isPlanPath, newPlan, printPlan } from "./plan/model";
 import { isMarkdown, isTable, newDoc, setUpProject, undoSetUp } from "./project";
 import { importTickets, newKnowledge, newRegistry, newSchema, newSpec, newState, newTicket, startFolderCatalogs, ticketAtHand, updateCatalogs, updateManifest } from "./projectDocs";
+import { insertCalloutInteractive, insertImageInteractive, insertMarkdownTemplate, manageTemplates, newNoteFromTemplate } from "./templater";
 import { displayKey, effectiveKeys, isModifierKey, keyNames, keysOf } from "./keys";
 import { modalOpen, setFocusFallback } from "./modal";
 import { noteUsed } from "./quickRank";
@@ -45,11 +46,13 @@ import {
 	notify,
 	openFile,
 	openFolder,
+	planMode,
 	previousTab,
 	reopenClosedTab,
 	revert,
 	sendTabAcross,
 	setMarkdownMode,
+	setPlanMode,
 	shiftTab,
 	save,
 	saveAll,
@@ -206,6 +209,13 @@ export const commands: Command[] = [
 	{ id: "md-highlight", label: "Markdown: Toggle highlight", detail: "Wrap or unwrap selection with == (Ctrl+Alt+H in Markdown)", run: () => runMarkdownEdit("md-highlight") },
 	{ id: "md-link", label: "Markdown: Insert link", detail: "Insert [label](url) at selection (Ctrl+K in Markdown)", run: () => runMarkdownEdit("md-link") },
 	{ id: "md-checkbox", label: "Markdown: Toggle checkbox", detail: "Cycle task checkbox on the current line(s) (Ctrl+L in Markdown)", run: () => runMarkdownEdit("md-checkbox") },
+	{ id: "md-insert-template", label: "Markdown: Insert template…", detail: "Expand a workspace or built-in Templater template at the cursor", run: () => void insertMarkdownTemplate() },
+	{ id: "md-new-from-template", label: "Markdown: New note from template…", detail: "Create a new note from a customizable Templater template", run: () => void newNoteFromTemplate() },
+	{ id: "md-manage-templates", label: "Markdown: Customize or create template…", detail: "Copy a built-in template or create a custom one in docs/templates/", run: () => void manageTemplates() },
+	{ id: "md-insert-callout", label: "Markdown: Insert callout…", detail: "Insert or wrap selection in > [!important], [!note], [!warning], …", run: () => void insertCalloutInteractive() },
+	{ id: "md-insert-table", label: "Markdown: Insert table", detail: "Insert a formatted 3×2 table with Tab/Enter cell navigation", run: () => runMarkdownEdit("md-table-insert") },
+	{ id: "md-format-table", label: "Markdown: Format table", detail: "Align pipes and pad columns on the table at the cursor", run: () => runMarkdownEdit("md-table-format") },
+	{ id: "md-insert-image", label: "Markdown: Insert image…", detail: "Pick a workspace image or enter a URL (or paste/drop directly)", run: () => void insertImageInteractive() },
 	{ id: "open-link", label: "Open the link at the cursor", detail: "In a document's text: the file, heading or page its link leads to", run: openLinkAtCursor },
 	{ id: "focus-editor", label: "Focus editor", run: focusEditor },
 	{ id: "focus-side-panel", label: "Focus side panel", run: focusSidePanel },
@@ -338,10 +348,10 @@ async function wrapInRegion() {
 	editor.focus();
 }
 
-/** Blocks for a script; for a plan its chart, for Markdown toggles Live/Read, for a table toggles Table/Text. */
+/** Blocks for a script; for a plan toggles Chart/Text, for Markdown toggles Live/Read, for a table toggles Table/Text. */
 function toggleVisual() {
 	const path = activePath();
-	if (isPlanPath(path)) setState("planText", path!, (text) => !text);
+	if (isPlanPath(path)) setPlanMode(path!, planMode(path!) === "chart" ? "text" : "chart");
 	else if (isMarkdown(path)) toggleMarkdownMode();
 	else if (isTable(path)) setState("mdText", path!, (text) => !text);
 	else setState("groups", state.activeGroup, "mode", (m) => (m === "blocks" ? "text" : "blocks"));
@@ -443,6 +453,8 @@ const KEYS: Record<string, string> = {
 	"ctrl+shift+f": "search",
 	"ctrl+shift+e": "explorer",
 	"ctrl+e": "toggle-markdown-mode",
+	"ctrl+alt+t": "md-insert-template",
+	"ctrl+alt+n": "md-new-from-template",
 	"ctrl+b": "toggle-sidebar",
 	"ctrl+alt+b": "toggle-right-panel",
 	"ctrl+j": "toggle-panel",

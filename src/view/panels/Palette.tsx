@@ -2,10 +2,12 @@
 // the snippets the project keeps in its knowledge base (ADR 0012), inserted
 // as they are written. When a plan chart is open, Palette switches cleanly to
 // business-analyst process shapes and stage navigation (ADR 0027).
-import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
+import { createEffect, createResource, createSignal, For, onCleanup, Show } from "solid-js";
 import { snippetAsText, TEMPLATES, type Template } from "../../shared/houseStyle";
+import { CALLOUT_PRESETS } from "../../shared/markdownEdit";
 import { isCatalog } from "../../shared/projectDocs";
 import type { DocFile } from "../../shared/protocol";
+import type { MarkdownTemplate } from "../../shared/templater";
 import { backend } from "../backend";
 import { activeEditor } from "../editor/EditorGroup";
 import { activeLiveEditor } from "../editor/liveBridge";
@@ -14,13 +16,16 @@ import { Icon, type IconName } from "../Icon";
 import { activeGraphBridge } from "../graph/graphBridge";
 import { recall, remember } from "../graph/canvas";
 import { openQuestions } from "../plan/assist";
+import { CODE_INDICATOR_WORDS } from "../plan/chart";
 import { SHAPE_DRAG, type NodeKind, type Plan } from "../plan/model";
 import { PlanAssistant } from "../plan/PlanAssistant";
 import { NodeImplementation, PlanImplementation } from "../plan/PlanCodeDrilldown";
-import { activePlanBridge } from "../plan/planBridge";
+import { activePlanBridge, planPaletteTabRequest, setActivePlanTab } from "../plan/planBridge";
+import { NodeTests, PlanTests } from "../plan/PlanTests";
 import { assistOf } from "../plan/run";
-import { docs } from "../project";
-import { activePath, notify, openFile, state } from "../state";
+import { docs, isMarkdown } from "../project";
+import { activePath, notify, openFile, setMarkdownMode, state } from "../state";
+import { insertCalloutInteractive, insertImageInteractive, insertMarkdownTemplate, loadMarkdownTemplates, manageTemplates, newNoteFromTemplate } from "../templater";
 import { IconButton, Row, RowGroup, Rows } from "./Rows";
 import { SectionSplitter } from "./SectionSplitter";
 
@@ -143,6 +148,25 @@ export function Palette() {
 		const bridge = activePlanBridge();
 		return bridge && path && bridge.path === path && !state.planText[path] ? bridge : null;
 	};
+	const activeMdPath = () => {
+		if (state.centerView !== "editors") return null;
+		const path = activePath();
+		return path && isMarkdown(path) ? path : null;
+	};
+	const [mdTemplates] = createResource(
+		() => (activeMdPath() ? ([state.workspace?.root ?? "", state.treeVersion, state.settings.templatesFolder ?? ""] as const) : null),
+		() => loadMarkdownTemplates(),
+	);
+	const [shownMdTpl, setShownMdTpl] = createSignal<MarkdownTemplate | null>(null);
+	const insertTableInMd = async () => {
+		const path = activeMdPath();
+		if (!path) return;
+		if (!activeLiveEditor() && !activeEditor()?.getDomNode()?.offsetParent) {
+			setMarkdownMode(path, "live");
+			await new Promise((r) => setTimeout(r, 40));
+		}
+		activeLiveEditor()?.runAction("md-table-insert");
+	};
 	const savedPreviewH = Number(recall("palette.preview.h"));
 	const [previewH, setPreviewH] = createSignal(Number.isFinite(savedPreviewH) && savedPreviewH >= 80 ? savedPreviewH : 190);
 	const resizePreview = (delta: number) => {
@@ -162,7 +186,17 @@ export function Palette() {
 	const [selectedShapesExpanded, setSelectedShapesExpanded] = createSignal(false);
 	const [nodeImplOpen, setNodeImplOpen] = createSignal(false);
 	const [planImplOpen, setPlanImplOpen] = createSignal(false);
-	const [planTab, setPlanTab] = createSignal<"design" | "assistant">("design");
+	const [nodeTestsOpen, setNodeTestsOpen] = createSignal(false);
+	const [planTestsOpen, setPlanTestsOpen] = createSignal(false);
+	const [planTab, setPlanTabSignal] = createSignal<"design" | "assistant">("design");
+	const setPlanTab = (tab: "design" | "assistant") => {
+		setPlanTabSignal(tab);
+		setActivePlanTab(tab);
+	};
+	createEffect(() => {
+		const req = planPaletteTabRequest();
+		if (req) setPlanTab(req.tab);
+	});
 	const commitOnEnter = (e: KeyboardEvent) => {
 		if (e.key === "Enter" && !e.shiftKey) {
 			e.preventDefault();
@@ -223,73 +257,181 @@ export function Palette() {
 						when={planBridge()}
 						keyed
 						fallback={
-							<>
-								<p class="hint">Click a template or a kept snippet, or press Enter on it, to insert it at the cursor; or drag a template into the editor. Tab then moves between a template's fields.</p>
-								<Rows label="Templates">
-									<For each={groups()}>
-										{(group) => (
-											<RowGroup head={group}>
-												<For each={TEMPLATES.filter((t) => t.group === group)}>
-													{(t) => (
-														<Row
-															class="tree-row palette-item"
-															key={t.id}
-															draggable={true}
-															onDragStart={(e) => e.dataTransfer?.setData("text/plain", snippetAsText(t.body()))}
-															onActivate={() => insertTemplate(t)}
-															onFocus={() => showTemplate(t)}
-															onPoint={() => showTemplate(t)}
-															title={`${t.label}: ${t.detail}${t.note ? ` (${t.note})` : ""}`}
-														>
-															<span class="label">{t.label}</span>
-															<span class="meta">{t.detail}</span>
-														</Row>
-													)}
-												</For>
-											</RowGroup>
-										)}
-									</For>
-									{/* What the project keeps for use: its own queries and pieces of SSL, from the knowledge base. */}
-									<Show when={keptSnippets().length}>
-										<RowGroup head="Kept in this project">
-											<For each={keptSnippets()}>
-												{(file) => (
-													<Row class="tree-row palette-item kept" key={file.path} onActivate={() => void insertSnippet(file)} onFocus={() => showSnippet(file)} onPoint={() => showSnippet(file)} title={[file.title || file.name, file.summary, file.path].filter(Boolean).join("\n")}>
-														<span class="label">{file.title || file.name}</span>
-														<span class="meta">{/\.sql$/i.test(file.name) ? "SQL" : /\.(ssl|srvscr|ds)$/i.test(file.name) ? "SSL" : ""}</span>
+							<Show
+								when={activeMdPath()}
+								fallback={
+									<>
+										<p class="hint">Click a template or a kept snippet, or press Enter on it, to insert it at the cursor; or drag a template into the editor. Tab then moves between a template's fields.</p>
+										<Rows label="Templates">
+											<For each={groups()}>
+												{(group) => (
+													<RowGroup head={group}>
+														<For each={TEMPLATES.filter((t) => t.group === group)}>
+															{(t) => (
+																<Row
+																	class="tree-row palette-item"
+																	key={t.id}
+																	draggable={true}
+																	onDragStart={(e) => e.dataTransfer?.setData("text/plain", snippetAsText(t.body()))}
+																	onActivate={() => insertTemplate(t)}
+																	onFocus={() => showTemplate(t)}
+																	onPoint={() => showTemplate(t)}
+																	title={`${t.label}: ${t.detail}${t.note ? ` (${t.note})` : ""}`}
+																>
+																	<span class="label">{t.label}</span>
+																	<span class="meta">{t.detail}</span>
+																</Row>
+															)}
+														</For>
+													</RowGroup>
+												)}
+											</For>
+											{/* What the project keeps for use: its own queries and pieces of SSL, from the knowledge base. */}
+											<Show when={keptSnippets().length}>
+												<RowGroup head="Kept in this project">
+													<For each={keptSnippets()}>
+														{(file) => (
+															<Row class="tree-row palette-item kept" key={file.path} onActivate={() => void insertSnippet(file)} onFocus={() => showSnippet(file)} onPoint={() => showSnippet(file)} title={[file.title || file.name, file.summary, file.path].filter(Boolean).join("\n")}>
+																<span class="label">{file.title || file.name}</span>
+																<span class="meta">{/\.sql$/i.test(file.name) ? "SQL" : /\.(ssl|srvscr|ds)$/i.test(file.name) ? "SSL" : ""}</span>
+															</Row>
+														)}
+													</For>
+												</RowGroup>
+											</Show>
+										</Rows>
+										<SectionSplitter label="Height of the template preview" value={previewH()} min={80} max={440} onDrag={resizePreview} onReset={resetPreview} />
+										{/* Resizable preview of what the hovered/focused template inserts. */}
+										<div class="palette-preview" role="region" aria-label="What it inserts" style={{ height: `${previewH()}px` }}>
+											<Show when={shown()} keyed fallback={<p class="hint">Point at a template or a snippet, or move to it with the arrow keys, to see here what it inserts.</p>}>
+												{(t) => (
+													<>
+														<div class="palette-preview-head">
+															<strong>{t.label}</strong>
+															<Show when={t.note}>
+																<span class="hint">{t.note}</span>
+															</Show>
+															<Show when={t.path}>
+																<span class="spacer" />
+																<button class="link" title="Copy the snippet" onClick={() => void copy(t.text)}>
+																	Copy
+																</button>
+																<button class="link" title="Open the snippet's file, to change it" onClick={() => void openFile(t.path!)}>
+																	Open
+																</button>
+															</Show>
+														</div>
+														<pre>{t.text}</pre>
+													</>
+												)}
+											</Show>
+										</div>
+									</>
+								}
+							>
+								<>
+									<p class="hint">Click a template, callout, or block to insert it at the cursor. Project templates live in docs/templates/.</p>
+									<Rows label="Markdown templates and blocks">
+										<RowGroup head="Templater templates">
+											<For each={mdTemplates() ?? []}>
+												{(tpl) => (
+													<Row
+														class="tree-row palette-item"
+														key={`mdtpl:${tpl.id}`}
+														onActivate={() => void insertMarkdownTemplate(tpl)}
+														onFocus={() => setShownMdTpl(tpl)}
+														onPoint={() => setShownMdTpl(tpl)}
+														title={`${tpl.name}: ${tpl.description}`}
+													>
+														<Icon name="notebook-template" class="icon" />
+														<span class="label">{tpl.name}</span>
+														<span class="meta">{tpl.source === "workspace" ? "Custom" : tpl.group}</span>
+													</Row>
+												)}
+											</For>
+											<Row
+												class="tree-row palette-item"
+												key="mdtpl:new-note"
+												onActivate={() => void newNoteFromTemplate()}
+												title="Create a new document from any workspace or built-in template (Ctrl+Alt+N)"
+											>
+												<Icon name="new-file" class="icon" />
+												<span class="label">New note from template…</span>
+											</Row>
+											<Row
+												class="tree-row palette-item"
+												key="mdtpl:manage"
+												onActivate={() => void manageTemplates()}
+												title="Create a custom template or copy a built-in one into docs/templates/"
+											>
+												<Icon name="edit" class="icon" />
+												<span class="label">Customize / create template…</span>
+											</Row>
+										</RowGroup>
+										<RowGroup head="Callouts">
+											<For each={CALLOUT_PRESETS.slice(0, 8)}>
+												{(preset) => (
+													<Row
+														class="tree-row palette-item"
+														key={`callout:${preset.type}`}
+														onActivate={() => void insertCalloutInteractive(preset.type)}
+														title={preset.about}
+													>
+														<Icon name={preset.type === "important" ? "megaphone" : preset.type === "warning" ? "warning" : preset.type === "caution" ? "report" : preset.type === "tip" ? "lightbulb" : preset.type === "question" ? "question" : preset.type === "todo" ? "checklist" : "note"} class="icon" />
+														<span class="label">{preset.label}</span>
+														<span class="meta">{"[!" + preset.type + "]"}</span>
 													</Row>
 												)}
 											</For>
 										</RowGroup>
-									</Show>
-								</Rows>
-								<SectionSplitter label="Height of the template preview" value={previewH()} min={80} max={440} onDrag={resizePreview} onReset={resetPreview} />
-								{/* Resizable preview of what the hovered/focused template inserts. */}
-								<div class="palette-preview" role="region" aria-label="What it inserts" style={{ height: `${previewH()}px` }}>
-									<Show when={shown()} keyed fallback={<p class="hint">Point at a template or a snippet, or move to it with the arrow keys, to see here what it inserts.</p>}>
-										{(t) => (
-											<>
-												<div class="palette-preview-head">
-													<strong>{t.label}</strong>
-													<Show when={t.note}>
-														<span class="hint">{t.note}</span>
-													</Show>
-													<Show when={t.path}>
+										<RowGroup head="Insert blocks">
+											<Row class="tree-row palette-item" key="md:table" onActivate={() => void insertTableInMd()} title="Insert a 3×2 table with Tab/Enter navigation and floating table toolbar">
+												<Icon name="table" class="icon" />
+												<span class="label">Table (3 × 2)</span>
+												<span class="meta">Tab / Enter</span>
+											</Row>
+											<Row class="tree-row palette-item" key="md:image" onActivate={() => void insertImageInteractive()} title="Insert a workspace image or URL (or paste/drop directly into Live view)">
+												<Icon name="file-media" class="icon" />
+												<span class="label">Image…</span>
+												<span class="meta">Paste / drop</span>
+											</Row>
+										</RowGroup>
+									</Rows>
+									<SectionSplitter label="Height of the template preview" value={previewH()} min={80} max={440} onDrag={resizePreview} onReset={resetPreview} />
+									<div class="palette-preview" role="region" aria-label="Template preview" style={{ height: `${previewH()}px` }}>
+										<Show
+											when={shownMdTpl()}
+											keyed
+											fallback={<p class="hint">Point at a template above to preview its Templater tags, create a new note from it, or customize it in docs/templates/.</p>}
+										>
+											{(tpl) => (
+												<>
+													<div class="palette-preview-head">
+														<strong>{tpl.name}</strong>
 														<span class="spacer" />
-														<button class="link" title="Copy the snippet" onClick={() => void copy(t.text)}>
-															Copy
+														<button class="link" title="Create a new file from this template" onClick={() => void newNoteFromTemplate(tpl)}>
+															New note
 														</button>
-														<button class="link" title="Open the snippet's file, to change it" onClick={() => void openFile(t.path!)}>
-															Open
-														</button>
-													</Show>
-												</div>
-												<pre>{t.text}</pre>
-											</>
-										)}
-									</Show>
-								</div>
-							</>
+														<Show
+															when={tpl.path}
+															fallback={
+																<button class="link" title="Save an editable copy into docs/templates/" onClick={() => void manageTemplates(tpl)}>
+																	Customize
+																</button>
+															}
+														>
+															<button class="link" title="Open this custom template to edit it" onClick={() => void openFile(tpl.path!)}>
+																Edit
+															</button>
+														</Show>
+													</div>
+													<pre>{tpl.content}</pre>
+												</>
+											)}
+										</Show>
+									</div>
+								</>
+							</Show>
 						}
 					>
 						{(plan) => {
@@ -361,6 +503,8 @@ export function Palette() {
 												shapesCollapsed();
 												nodeImplOpen();
 												planImplOpen();
+												nodeTestsOpen();
+												planTestsOpen();
 												queueMicrotask(syncDock);
 											});
 											const startShapeDrag = (e: DragEvent, shape: PlanShapeItem) => {
@@ -556,6 +700,46 @@ export function Palette() {
 																				</section>
 																			</Show>
 
+																			<div class="plan-build-bar">
+																				<button
+																					type="button"
+																					class="plan-sched-btn"
+																					title="Scheduled — trigger a build for this plan (see docs/AGENT-INTEGRATION.md)"
+																					onClick={() => plan.triggerScheduledBuild({ kind: "plan", label: curPlan.title || "this plan" })}
+																				>
+																					<Icon name="tools" />
+																					<span>Build plan</span>
+																					<span class="plan-sched-pill">Soon</span>
+																				</button>
+																				<button
+																					type="button"
+																					class="plan-assist-jump"
+																					title="Open the Assistant tab"
+																					onClick={() => setPlanTab("assistant")}
+																				>
+																					<Icon name="sparkle" />
+																					<span>Assistant</span>
+																				</button>
+																			</div>
+
+																			<PlanTests
+																				plan={curPlan}
+																				allPaths={plan.allPaths()}
+																				activePathIndex={plan.activePathIndex()}
+																				open={planTestsOpen()}
+																				onToggle={() => setPlanTestsOpen((o) => !o)}
+																				onHighlightPath={(idx) => plan.setActivePathIndex(idx)}
+																				onStepPath={(by) => plan.stepActivePath(by)}
+																				onJumpToNode={(id) => plan.jumpToNode(id)}
+																				onPeekNode={(id, opts) => plan.peekNode(id, opts)}
+																				onOpenTextBuilder={(opts) => plan.openTextTestBuilder(opts)}
+																				onOpenScript={(script) => plan.openScript(script)}
+																				onAddTestCase={(input) => plan.addTestCase(input)}
+																				onUpdateTestCase={(id, patch) => plan.updateTestCase(id, patch)}
+																				onRemoveTestCase={(id) => plan.removeTestCase(id)}
+																				onTriggerScheduled={(scope) => plan.triggerScheduledBuild(scope)}
+																			/>
+
 																			<PlanImplementation
 																				plan={curPlan}
 																				builtUnits={plan.builtUnits()}
@@ -582,6 +766,8 @@ export function Palette() {
 																		: displayKind === "end"
 																			? "pass-filled"
 																			: "play";
+																const codeState = () => plan.codeStateOf(node.id);
+																const actionable = node.kind !== "start" && node.kind !== "end";
 																return (
 																	<div class="plan-inspector">
 																		<section class="plan-prop-section plan-step-section" aria-label={heading}>
@@ -591,7 +777,33 @@ export function Palette() {
 																				<span class="spacer" />
 																				<IconButton label={`Close ${heading.toLowerCase()}`} title="Back to plan details (Esc)" icon="close" onClick={() => plan.clearSelection()} />
 																			</div>
-																			<Show when={node.kind !== "start" && node.kind !== "end"}>
+																			<Show when={actionable}>
+																				<div class="plan-step-status-row">
+																					<span
+																						class={`plan-code-badge ${codeState()}`}
+																						title={CODE_INDICATOR_WORDS[codeState()].detail}
+																					>
+																						<span class={`plan-status-dot ${codeState()}`} aria-hidden="true" />
+																						<span>{CODE_INDICATOR_WORDS[codeState()].label}</span>
+																					</span>
+																					<span class="spacer" />
+																					<button
+																						type="button"
+																						class="plan-sched-btn compact"
+																						title="Scheduled — build or rebuild code for this step (see docs/AGENT-INTEGRATION.md)"
+																						onClick={() =>
+																							plan.triggerScheduledBuild({
+																								kind: "node",
+																								id: node.id,
+																								label: node.text.trim() || node.id,
+																							})
+																						}
+																					>
+																						<Icon name="tools" />
+																						<span>{codeState() === "grey" ? "Build step" : "Rebuild"}</span>
+																						<span class="plan-sched-pill">Soon</span>
+																					</button>
+																				</div>
 																				<div class="plan-dir-switch plan-kind-switch" role="group" aria-label="Shape kind">
 																					<For each={(["step", "decision"] as NodeKind[])}>
 																						{(k) => (
@@ -644,16 +856,35 @@ export function Palette() {
 																			</div>
 																			<Show when={p()} keyed>
 																				{(curPlan) => (
-																					<NodeImplementation
-																						plan={curPlan}
-																						planUri={plan.planUri()}
-																						node={node}
-																						open={nodeImplOpen()}
-																						onToggle={() => setNodeImplOpen((o) => !o)}
-																						onOpenUnit={(unit) => plan.openCodeUnit(unit)}
-																						onOpenRef={(ref) => plan.openReference(ref)}
-																						onOpenScript={(script, line) => plan.openScript(script, line)}
-																					/>
+																					<>
+																						<NodeTests
+																							plan={curPlan}
+																							node={node}
+																							allPaths={plan.allPaths()}
+																							activePathIndex={plan.activePathIndex()}
+																							open={nodeTestsOpen()}
+																							onToggle={() => setNodeTestsOpen((o) => !o)}
+																							onHighlightPath={(idx) => plan.setActivePathIndex(idx)}
+																							onJumpToNode={(id) => plan.jumpToNode(id)}
+																							onPeekNode={(id, opts) => plan.peekNode(id, opts)}
+																							onOpenTextBuilder={(opts) => plan.openTextTestBuilder(opts)}
+																							onOpenScript={(script) => plan.openScript(script)}
+																							onAddTestCase={(input) => plan.addTestCase(input)}
+																							onUpdateTestCase={(id, patch) => plan.updateTestCase(id, patch)}
+																							onRemoveTestCase={(id) => plan.removeTestCase(id)}
+																							onTriggerScheduled={(scope) => plan.triggerScheduledBuild(scope)}
+																						/>
+																						<NodeImplementation
+																							plan={curPlan}
+																							planUri={plan.planUri()}
+																							node={node}
+																							open={nodeImplOpen()}
+																							onToggle={() => setNodeImplOpen((o) => !o)}
+																							onOpenUnit={(unit) => plan.openCodeUnit(unit)}
+																							onOpenRef={(ref) => plan.openReference(ref)}
+																							onOpenScript={(script, line) => plan.openScript(script, line)}
+																						/>
+																					</>
 																				)}
 																			</Show>
 																		</section>
@@ -677,6 +908,18 @@ export function Palette() {
 											text={plan.text()}
 											onSelect={(id) => plan.selectNode(id)}
 											onPath={(nodes) => plan.setWalkedPath(nodes)}
+											allPaths={plan.allPaths()}
+											activePathIndex={plan.activePathIndex()}
+											onSetActivePathIndex={(idx) => plan.setActivePathIndex(idx)}
+											onStepActivePath={(by) => plan.stepActivePath(by)}
+											codeCounts={plan.codeStatusCounts()}
+											nodesByCodeState={(kind) => plan.nodesByCodeState(kind)}
+											scheduledNotice={plan.scheduledNotice()}
+											onClearScheduledNotice={() => plan.clearScheduledNotice()}
+											onTriggerScheduled={(scope) => plan.triggerScheduledBuild(scope)}
+											onAddTestCase={(input) => plan.addTestCase(input)}
+											onUpdateTestCase={(id, patch) => plan.updateTestCase(id, patch)}
+											onRemoveTestCase={(id) => plan.removeTestCase(id)}
 										/>
 									</Show>
 								</>

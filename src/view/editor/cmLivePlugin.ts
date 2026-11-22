@@ -6,68 +6,85 @@
 //   mentions, fenced code headers, bullets, clickable task checkboxes, and blockquotes.
 // - FoldService (`markdownFoldService`): heading section & nested list folding.
 import { foldGutter, foldService, syntaxTree } from "@codemirror/language";
-import { EditorSelection, Facet, StateEffect, StateField, type EditorState, type Extension, type Range } from "@codemirror/state";
+import { EditorSelection, StateField, type EditorState, type Extension, type Range } from "@codemirror/state";
 import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, type ViewUpdate } from "@codemirror/view";
-import DOMPurify from "dompurify";
-import { marked } from "marked";
 import { fenced } from "../../shared/catalog";
-import { hrefWritten, linkFile, linkLeads, linkWritten } from "../../shared/docLinks";
+import { hrefWritten, linkFile, linkLeads } from "../../shared/docLinks";
+import { headingAnchor } from "../../shared/docTables";
 import { frontMatter } from "../../shared/frontMatter";
-import { parseCalloutHeader, type ParsedCallout } from "../../shared/markdownEdit";
+import { parseCalloutHeader, parseImageExpression, type ParsedImageSpec } from "../../shared/markdownEdit";
+import { parseMarkdownTable } from "../../shared/markdownTables";
 import { docByName, namedLink } from "../../shared/namedLinks";
-import { dirName, isInside, joinPath, relativePath, relativeTo, resolvePath } from "../../shared/paths";
+import { relativeTo } from "../../shared/paths";
 import { ticketMatcher } from "../../shared/ticketRefs";
-import { backend } from "../backend";
 import { docs } from "../project";
 import { canonical, state as appState } from "../state";
-import { finishMarkdown, type NameResolver, type TicketRef } from "./markdownHtml";
+import { CalloutWidget } from "./cmLiveCallout";
+import {
+	editYamlField,
+	liveCallbacksFacet,
+	rawEditBlockField,
+	readOnlyModeFacet,
+	refreshLiveEffect,
+	setEditYamlEffect,
+	setRawEditBlockEffect,
+	type HoverTarget,
+	type ImageLightboxInfo,
+	type LiveCallbacks,
+} from "./cmLiveShared";
+import { TableWidget } from "./cmLiveTable";
+import { IMAGE_FILE_RE, loadImageUrl } from "./imageResolve";
 
-export type HoverTarget =
-	| { kind: "href"; href: string; anchor: HTMLElement }
-	| { kind: "wiki"; inner: string; anchor: HTMLElement }
-	| { kind: "ticket"; key: string; anchor: HTMLElement };
-
-export type LiveCallbacks = {
-	filePath: () => string;
-	onFollowLink: (href: string) => void;
-	onFollowWiki: (inner: string) => void;
-	onFollowTicket: (key: string) => void;
-	onTagClick: (tag: string) => void;
-	onHoverLink: (target: HoverTarget) => void;
-	onHoverLeave: () => void;
-	onCopyCode: (code: string) => void;
+export {
+	editYamlField,
+	liveCallbacksFacet,
+	rawEditBlockField,
+	readOnlyModeFacet,
+	refreshLiveEffect,
+	setEditYamlEffect,
+	setRawEditBlockEffect,
+	type HoverTarget,
+	type ImageLightboxInfo,
+	type LiveCallbacks,
 };
-
-export const liveCallbacksFacet = Facet.define<LiveCallbacks, LiveCallbacks | null>({
-	combine: (values) => values[0] ?? null,
-});
-
-/** Effect dispatched whenever workspace `docs()` or broken-link status changes. */
-export const refreshLiveEffect = StateEffect.define<number>();
-/** Effect toggling raw YAML frontmatter visibility inside the editor. */
-export const setEditYamlEffect = StateEffect.define<boolean>();
-
-export const editYamlField = StateField.define<boolean>({
-	create: () => false,
-	update(value, tr) {
-		for (const e of tr.effects) if (e.is(setEditYamlEffect)) return e.value;
-		return value;
-	},
-});
 
 const RULE_RE = /^[ \t]*([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
 const TASK_RE = /^((?:[ \t]*>[ \t]?)*[ \t]*)([-*+]|\d{1,9}[.)])([ \t]+)\[([ xX])\]([ \t]?)/;
 const BULLET_RE = /^((?:[ \t]*>[ \t]?)*[ \t]*)([-*+])([ \t]+)/;
 const QUOTE_RE = /^([ \t]*>[ \t]?)/;
-const IMG_MD_RE = /^[ \t]*!\[([^\]]*)\]\(([^)\n]+)\)[ \t]*$/;
-const IMG_WIKI_RE = /^[ \t]*!\[\[([^[\]\n]+)\]\][ \t]*$/;
-const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif)$/i;
 
-/** True when any selection cursor or range touches `[from, to]`. */
+/** True when in Live mode and any selection cursor or range touches `[from, to]`. Always false in Read mode. */
 function selectionTouches(state: EditorState, from: number, to: number): boolean {
+	if (state.facet(readOnlyModeFacet)) return false;
 	for (const r of state.selection.ranges) {
 		if (r.from <= to && r.to >= from) return true;
 	}
+	return false;
+}
+
+/** True when the user explicitly clicked `Raw` on a table or callout overlapping `[from, to]`. */
+function isRawEditing(state: EditorState, from: number, to: number): boolean {
+	if (state.facet(readOnlyModeFacet)) return false;
+	const raw = state.field(rawEditBlockField, false);
+	return Boolean(raw && from <= raw.to && to >= raw.from);
+}
+
+/** Tables stay interactive widgets in Live mode unless explicitly in `Raw` mode (or mid-typing a brand-new 2-line delimiter row). */
+function tableShouldStayRaw(state: EditorState, from: number, to: number, startLine: number, endLine: number): boolean {
+	if (state.facet(readOnlyModeFacet)) return false;
+	if (isRawEditing(state, from, to)) return true;
+	if (endLine === startLine + 1 && endLine <= state.doc.lines) {
+		const delim = state.doc.line(endLine);
+		if (selectionTouches(state, delim.from, delim.to)) return true;
+	}
+	return false;
+}
+
+/** Callouts stay interactive cards in Live mode unless explicitly in `Raw` mode (or mid-typing a brand-new 1-line `> [!` header). */
+function calloutShouldStayRaw(state: EditorState, from: number, to: number, startLine: number, endLine: number): boolean {
+	if (state.facet(readOnlyModeFacet)) return false;
+	if (isRawEditing(state, from, to)) return true;
+	if (startLine === endLine && selectionTouches(state, from, to)) return true;
 	return false;
 }
 
@@ -91,31 +108,6 @@ function frontmatterRange(state: EditorState): { lines: number; from: number; to
 	if (!fm.lines || fm.lines > state.doc.lines) return null;
 	const endLine = state.doc.line(fm.lines);
 	return { lines: fm.lines, from: 0, to: endLine.to };
-}
-
-/** Builds `finishMarkdown` options for nested HTML widgets (tables, callouts). */
-function renderInlineHtml(markdown: string, filePath: string): string {
-	const root = appState.workspace?.root;
-	const all = docs();
-	const here = canonical(filePath);
-	const tickets: TicketRef[] = all
-		.filter((d) => d.group === "tickets" && d.exists && d.ticket && canonical(d.path) !== here)
-		.map((d) => {
-			const title = d.title ?? "";
-			const named = title.toLowerCase().startsWith(d.ticket!.toLowerCase()) ? title : [d.ticket, title].filter(Boolean).join(": ");
-			return { key: d.ticket!, href: linkWritten(relativePath(dirName(here), d.path)), about: `${named}${d.status ? ` (${d.status})` : ""}` };
-		});
-	const named: NameResolver = (name) => {
-		const found = docByName(name, all, root);
-		if (!found) return null;
-		const title = found.title ?? "";
-		return {
-			href: linkWritten(relativePath(dirName(here), found.path)),
-			about: [found.ticket && !title.toLowerCase().startsWith(found.ticket.toLowerCase()) ? found.ticket : "", title || found.name].filter(Boolean).join(": "),
-		};
-	};
-	const raw = DOMPurify.sanitize(marked.parse(markdown, { async: false, gfm: true }) as string);
-	return finishMarkdown(raw, { tickets, named });
 }
 
 // --- Widgets -----------------------------------------------------------------
@@ -146,6 +138,7 @@ class HrWidget extends WidgetType {
 		hr.className = "cm-md-hr";
 		wrap.appendChild(hr);
 		wrap.addEventListener("mousedown", (e) => {
+			if (view.state.facet(readOnlyModeFacet)) return;
 			e.preventDefault();
 			view.focus();
 			view.dispatch({ selection: EditorSelection.cursor(Math.min(this.pos, view.state.doc.length)) });
@@ -157,228 +150,121 @@ class HrWidget extends WidgetType {
 	}
 }
 
-class TableWidget extends WidgetType {
-	constructor(
-		private readonly raw: string,
-		private readonly startLine: number,
-		private readonly filePath: string,
-	) {
-		super();
-	}
-	eq(other: TableWidget) {
-		return other.raw === this.raw && other.startLine === this.startLine && other.filePath === this.filePath;
-	}
-	toDOM(view: EditorView) {
-		const wrap = document.createElement("div");
-		wrap.className = "cm-md-table-wrap";
-		wrap.innerHTML = renderInlineHtml(this.raw, this.filePath);
-		const cb = view.state.facet(liveCallbacksFacet);
-		wrap.addEventListener("mousedown", (e) => {
-			const target = e.target as HTMLElement | null;
-			const anchor = target?.closest<HTMLAnchorElement>("a[href]");
-			const tag = target?.closest<HTMLElement>(".md-tag");
-			if (anchor && !e.altKey) {
-				e.preventDefault();
-				e.stopPropagation();
-				cb?.onFollowLink(anchor.getAttribute("href") ?? "");
-				return;
-			}
-			if (tag && !e.altKey) {
-				e.preventDefault();
-				e.stopPropagation();
-				const label = tag.dataset.tag ?? tag.textContent?.trim() ?? "";
-				if (label) cb?.onTagClick(label);
-				return;
-			}
-			// Jump straight to the exact Markdown line of the clicked table row.
-			e.preventDefault();
-			const tr = target?.closest("tr");
-			const rows = [...wrap.querySelectorAll("tr")];
-			const rowIdx = tr ? rows.indexOf(tr) : 0;
-			// Row 0 is header (startLine); row 1+ is body (skipping separator line at startLine + 1).
-			const lineNum = Math.min(view.state.doc.lines, this.startLine + (rowIdx <= 0 ? 0 : rowIdx + 1));
-			const line = view.state.doc.line(lineNum);
-			view.focus();
-			view.dispatch({ selection: EditorSelection.cursor(line.from), scrollIntoView: true });
-		});
-		wrap.addEventListener("mouseover", (e) => {
-			const anchor = (e.target as HTMLElement | null)?.closest<HTMLAnchorElement>("a[href]");
-			if (anchor) cb?.onHoverLink({ kind: "href", href: anchor.getAttribute("href") ?? "", anchor });
-		});
-		wrap.addEventListener("mouseout", (e) => {
-			const anchor = (e.target as HTMLElement | null)?.closest<HTMLAnchorElement>("a[href]");
-			if (anchor) cb?.onHoverLeave();
-		});
-		return wrap;
-	}
-	ignoreEvent() {
-		return true;
-	}
-}
-
-class CalloutWidget extends WidgetType {
-	constructor(
-		private readonly parsed: ParsedCallout,
-		private readonly bodyMarkdown: string,
-		private readonly startLine: number,
-		private readonly filePath: string,
-	) {
-		super();
-	}
-	eq(other: CalloutWidget) {
-		return (
-			other.parsed.spec.type === this.parsed.spec.type &&
-			other.parsed.title === this.parsed.title &&
-			other.parsed.fold === this.parsed.fold &&
-			other.bodyMarkdown === this.bodyMarkdown &&
-			other.startLine === this.startLine &&
-			other.filePath === this.filePath
-		);
-	}
-	toDOM(view: EditorView) {
-		const card = document.createElement("div");
-		card.className = `cm-md-callout tone-${this.parsed.spec.tone}`;
-		const head = document.createElement("div");
-		head.className = "cm-md-callout-head";
-
-		const icon = document.createElement("span");
-		icon.className = "cm-md-callout-icon";
-		icon.setAttribute("aria-hidden", "true");
-		icon.textContent = this.parsed.spec.icon;
-		head.appendChild(icon);
-
-		const title = document.createElement("span");
-		title.textContent = this.parsed.title;
-		head.appendChild(title);
-
-		let folded = this.parsed.fold === "-";
-		let foldBtn: HTMLButtonElement | null = null;
-		const body = document.createElement("div");
-		body.className = "cm-md-callout-body";
-		if (this.bodyMarkdown.trim()) body.innerHTML = renderInlineHtml(this.bodyMarkdown, this.filePath);
-		if (folded) body.style.display = "none";
-
-		if (this.parsed.fold) {
-			foldBtn = document.createElement("button");
-			foldBtn.type = "button";
-			foldBtn.className = "cm-md-callout-fold";
-			foldBtn.setAttribute("aria-label", folded ? "Expand callout" : "Collapse callout");
-			foldBtn.textContent = folded ? "\ueab6" : "\ueab4";
-			foldBtn.addEventListener("mousedown", (e) => {
-				e.preventDefault();
-				e.stopPropagation();
-				folded = !folded;
-				body.style.display = folded ? "none" : "";
-				foldBtn!.textContent = folded ? "\ueab6" : "\ueab4";
-				foldBtn!.setAttribute("aria-label", folded ? "Expand callout" : "Collapse callout");
-			});
-			head.appendChild(foldBtn);
-		}
-
-		card.appendChild(head);
-		if (this.bodyMarkdown.trim()) card.appendChild(body);
-
-		const cb = view.state.facet(liveCallbacksFacet);
-		card.addEventListener("mousedown", (e) => {
-			const target = e.target as HTMLElement | null;
-			if (target?.closest(".cm-md-callout-fold")) return;
-			const anchor = target?.closest<HTMLAnchorElement>("a[href]");
-			const tag = target?.closest<HTMLElement>(".md-tag");
-			if (anchor && !e.altKey) {
-				e.preventDefault();
-				e.stopPropagation();
-				cb?.onFollowLink(anchor.getAttribute("href") ?? "");
-				return;
-			}
-			if (tag && !e.altKey) {
-				e.preventDefault();
-				e.stopPropagation();
-				const label = tag.dataset.tag ?? tag.textContent?.trim() ?? "";
-				if (label) cb?.onTagClick(label);
-				return;
-			}
-			e.preventDefault();
-			const targetLine = Math.min(view.state.doc.lines, target?.closest(".cm-md-callout-body") ? this.startLine + 1 : this.startLine);
-			const line = view.state.doc.line(targetLine);
-			view.focus();
-			view.dispatch({ selection: EditorSelection.cursor(line.to), scrollIntoView: true });
-		});
-		card.addEventListener("mouseover", (e) => {
-			const anchor = (e.target as HTMLElement | null)?.closest<HTMLAnchorElement>("a[href]");
-			if (anchor) cb?.onHoverLink({ kind: "href", href: anchor.getAttribute("href") ?? "", anchor });
-		});
-		card.addEventListener("mouseout", (e) => {
-			const anchor = (e.target as HTMLElement | null)?.closest<HTMLAnchorElement>("a[href]");
-			if (anchor) cb?.onHoverLeave();
-		});
-		return card;
-	}
-	ignoreEvent() {
-		return true;
-	}
-}
-
-const imageUrlCache = new Map<string, string>();
-
 class ImageWidget extends WidgetType {
 	constructor(
-		private readonly src: string,
-		private readonly alt: string,
-		private readonly pos: number,
+		private readonly spec: ParsedImageSpec,
+		private readonly from: number,
+		private readonly to: number,
 		private readonly filePath: string,
+		private readonly readMode: boolean,
+		private readonly inline = false,
 	) {
 		super();
 	}
 	eq(other: ImageWidget) {
-		return other.src === this.src && other.alt === this.alt && other.pos === this.pos && other.filePath === this.filePath;
+		return (
+			other.spec.src === this.spec.src &&
+			other.spec.alt === this.spec.alt &&
+			other.spec.width === this.spec.width &&
+			other.spec.height === this.spec.height &&
+			other.from === this.from &&
+			other.to === this.to &&
+			other.filePath === this.filePath &&
+			other.readMode === this.readMode &&
+			other.inline === this.inline
+		);
 	}
 	toDOM(view: EditorView) {
-		const wrap = document.createElement("div");
-		wrap.className = "cm-md-image-wrap";
+		const isRead = view.state.facet(readOnlyModeFacet);
+		const cb = view.state.facet(liveCallbacksFacet);
+		const wrap = document.createElement(this.inline ? "span" : "div");
+		wrap.className = this.inline ? "cm-md-image-wrap is-inline" : "cm-md-image-wrap";
+
+		const frame = document.createElement(this.inline ? "span" : "div");
+		frame.className = "cm-md-image-frame";
+
 		const img = document.createElement("img");
-		img.alt = this.alt || this.src;
-		wrap.appendChild(img);
-		if (this.alt) {
+		img.alt = this.spec.alt || this.spec.src;
+		img.loading = "lazy";
+		if (this.spec.width) img.style.width = `${this.spec.width}px`;
+		if (this.spec.height) img.style.height = `${this.spec.height}px`;
+		frame.appendChild(img);
+
+		let resolvedUrl = "";
+		let resolvedPath: string | undefined;
+
+		// Subtle hover pill bar (Zoom always; Resize + Edit in Live mode).
+		if (!this.inline) {
+			const tools = document.createElement("div");
+			tools.className = "cm-md-image-tools";
+
+			const makeBtn = (label: string, title: string, active: boolean, onClick: () => void) => {
+				const btn = document.createElement("button");
+				btn.type = "button";
+				btn.className = active ? "cm-md-img-btn active" : "cm-md-img-btn";
+				btn.textContent = label;
+				btn.title = title;
+				btn.addEventListener("mousedown", (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					onClick();
+				});
+				return btn;
+			};
+
+			tools.appendChild(
+				makeBtn("Zoom", "View full size", false, () => {
+					if (resolvedUrl) cb?.onOpenImageLightbox({ src: resolvedUrl, alt: this.spec.alt || this.spec.src, filePath: resolvedPath });
+				}),
+			);
+
+			if (!isRead) {
+				tools.appendChild(makeBtn("320", "Resize image width to 320px", this.spec.width === 320, () => cb?.onResizeImage(this.from, this.to, 320)));
+				tools.appendChild(makeBtn("520", "Resize image width to 520px", this.spec.width === 520, () => cb?.onResizeImage(this.from, this.to, 520)));
+				tools.appendChild(makeBtn("Full", "Use natural full width", !this.spec.width, () => cb?.onResizeImage(this.from, this.to, null)));
+				tools.appendChild(
+					makeBtn("Edit", "Edit Markdown image syntax", false, () => {
+						view.focus();
+						view.dispatch({ selection: EditorSelection.cursor(Math.min(this.from, view.state.doc.length)), scrollIntoView: true });
+					}),
+				);
+			}
+			frame.appendChild(tools);
+		}
+
+		wrap.appendChild(frame);
+
+		if (!this.inline && this.spec.alt) {
 			const cap = document.createElement("div");
 			cap.className = "cm-md-image-caption";
-			cap.textContent = this.alt;
+			cap.textContent = this.spec.alt;
 			wrap.appendChild(cap);
 		}
-		if (/^https?:\/\//i.test(this.src) || /^data:image\//i.test(this.src)) {
-			img.src = this.src;
-		} else {
-			const root = appState.workspace?.root;
-			const target = root
-				? this.src.startsWith("/")
-					? joinPath(root, ...this.src.split("/").filter(Boolean))
-					: resolvePath(dirName(this.filePath), this.src)
-				: "";
-			if (target && root && isInside(root, target)) {
-				const cached = imageUrlCache.get(target);
-				if (cached) {
-					img.src = cached;
-				} else {
-					void backend
-						.image(target)
-						.then(({ type, base64 }) => {
-							const dataUrl = `data:${type};base64,${base64}`;
-							imageUrlCache.set(target, dataUrl);
-							img.src = dataUrl;
-						})
-						.catch(() => {
-							img.remove();
-							const err = document.createElement("div");
-							err.className = "cm-md-image-caption";
-							err.textContent = `Image not found: ${this.src}`;
-							wrap.prepend(err);
-						});
-				}
+
+		void loadImageUrl(this.spec.src, this.filePath).then((loaded) => {
+			if (!wrap.isConnected) return;
+			if (loaded) {
+				resolvedUrl = loaded.url;
+				resolvedPath = loaded.filePath;
+				img.src = loaded.url;
+			} else {
+				img.remove();
+				const err = document.createElement(this.inline ? "span" : "div");
+				err.className = "cm-md-image-missing";
+				err.textContent = `Image not found: ${this.spec.src}`;
+				frame.prepend(err);
 			}
-		}
+		});
+
 		wrap.addEventListener("mousedown", (e) => {
+			if ((e.target as HTMLElement | null)?.closest(".cm-md-image-tools")) return;
 			e.preventDefault();
+			if (isRead) {
+				if (resolvedUrl) cb?.onOpenImageLightbox({ src: resolvedUrl, alt: this.spec.alt || this.spec.src, filePath: resolvedPath });
+				return;
+			}
 			view.focus();
-			view.dispatch({ selection: EditorSelection.cursor(Math.min(this.pos, view.state.doc.length)), scrollIntoView: true });
+			view.dispatch({ selection: EditorSelection.cursor(Math.min(this.from, view.state.doc.length)), scrollIntoView: true });
 		});
 		return wrap;
 	}
@@ -418,6 +304,11 @@ class CheckboxWidget extends WidgetType {
 		input.addEventListener("mousedown", (e) => {
 			e.preventDefault();
 			e.stopPropagation();
+			const cb = view.state.facet(liveCallbacksFacet);
+			if (cb) {
+				cb.onToggleCheckbox(this.bracketPos);
+				return;
+			}
 			const pos = this.bracketPos;
 			if (pos + 2 > view.state.doc.length) return;
 			const ch = view.state.sliceDoc(pos + 1, pos + 2);
@@ -426,6 +317,10 @@ class CheckboxWidget extends WidgetType {
 				changes: { from: pos + 1, to: pos + 2, insert: next },
 				userEvent: "input.checkbox",
 			});
+		});
+		input.addEventListener("click", (e) => {
+			e.preventDefault();
+			e.stopPropagation();
 		});
 		return input;
 	}
@@ -467,6 +362,7 @@ class CodeHeaderWidget extends WidgetType {
 		});
 		bar.addEventListener("mousedown", (e) => {
 			if ((e.target as HTMLElement | null)?.closest("button")) return;
+			if (view.state.facet(readOnlyModeFacet)) return;
 			e.preventDefault();
 			view.focus();
 			view.dispatch({ selection: EditorSelection.cursor(Math.min(this.linePos, view.state.doc.length)) });
@@ -499,9 +395,10 @@ function buildBlockDecorations(state: EditorState): DecorationSet {
 	const cb = state.facet(liveCallbacksFacet);
 	const filePath = cb?.filePath() ?? "";
 	const fm = frontmatterRange(state);
-	const editYaml = state.field(editYamlField, false) ?? false;
+	const isRead = state.facet(readOnlyModeFacet);
+	const editYaml = !isRead && (state.field(editYamlField, false) ?? false);
 
-	// 1. YAML Frontmatter: hidden into zero-height block widget unless editing YAML or cursor enters it.
+	// 1. YAML Frontmatter: hidden into zero-height block widget unless editing YAML or cursor enters it in Live mode.
 	if (fm) {
 		const cursorInFm = selectionTouches(state, fm.from, fm.to);
 		if (!editYaml && !cursorInFm) {
@@ -519,19 +416,41 @@ function buildBlockDecorations(state: EditorState): DecorationSet {
 	const docText = state.doc.toString();
 	const fences = fenced(docText);
 	const inFence = (pos: number) => fences.some(([a, b]) => pos >= a && pos < b);
+	const linesArray = docText.split("\n");
 
 	// 2. Walk syntax tree for multi-line Table, Callout (Blockquote), and HorizontalRule nodes.
 	const tree = syntaxTree(state);
+	const handledTables = new Set<number>();
+	const handledCallouts = new Set<number>();
 	tree.iterate({
 		enter(node) {
-			if (node.from <= fmEnd) return false;
+			// Skip nodes wholly inside frontmatter; allow container nodes like `Document` (from === 0) to descend!
+			if (node.to <= fmEnd) return false;
 			if (node.name === "FencedCode") return false;
+			if (node.from <= fmEnd) return;
 
 			if (node.name === "Table") {
-				if (!selectionTouches(state, node.from, node.to) && guard.canAdd(node.from, node.to)) {
+				const startLine = state.doc.lineAt(node.from).number;
+				const endLine = state.doc.lineAt(node.to).number;
+				for (let n = startLine; n <= endLine; n++) handledTables.add(n);
+				if (!tableShouldStayRaw(state, node.from, node.to, startLine, endLine) && guard.canAdd(node.from, node.to)) {
 					const raw = state.sliceDoc(node.from, node.to);
-					const startLine = state.doc.lineAt(node.from).number;
-					decos.push(Decoration.replace({ widget: new TableWidget(raw, startLine, filePath), block: true }).range(node.from, node.to));
+					decos.push(
+						Decoration.replace({
+							widget: new TableWidget(raw, node.from, node.to, startLine, filePath, isRead),
+							block: true,
+						}).range(node.from, node.to),
+					);
+				} else {
+					// Raw pipe table editing mode: crisp monospace alignment & subtle highlight.
+					for (let n = startLine; n <= endLine; n++) {
+						const ln = state.doc.line(n);
+						const cls = ["cm-md-table-line"];
+						if (n === startLine) cls.push("cm-md-table-first", "cm-md-table-header");
+						if (n === startLine + 1) cls.push("cm-md-table-delim");
+						if (n === endLine) cls.push("cm-md-table-last");
+						decos.push(Decoration.line({ class: cls.join(" ") }).range(ln.from));
+					}
 				}
 				return false;
 			}
@@ -540,18 +459,33 @@ function buildBlockDecorations(state: EditorState): DecorationSet {
 				const firstLine = state.doc.lineAt(node.from);
 				const parsed = parseCalloutHeader(firstLine.text);
 				if (!parsed) return;
-				if (!selectionTouches(state, node.from, node.to) && guard.canAdd(node.from, node.to)) {
-					const endLine = state.doc.lineAt(node.to);
+				let endLine = state.doc.lineAt(node.to);
+				// Never swallow non-quoted lines (CommonMark lazy continuation) into a callout widget!
+				while (endLine.number > firstLine.number && !/^[ \t]{0,3}>/.test(endLine.text)) {
+					endLine = state.doc.line(endLine.number - 1);
+				}
+				const blockTo = endLine.to;
+				for (let n = firstLine.number; n <= endLine.number; n++) handledCallouts.add(n);
+				if (!calloutShouldStayRaw(state, node.from, blockTo, firstLine.number, endLine.number) && guard.canAdd(node.from, blockTo)) {
 					const bodyLines: string[] = [];
 					for (let n = firstLine.number + 1; n <= endLine.number; n++) {
 						bodyLines.push(state.doc.line(n).text.replace(/^[ \t]{0,3}>[ \t]?/, ""));
 					}
 					decos.push(
 						Decoration.replace({
-							widget: new CalloutWidget(parsed, bodyLines.join("\n"), firstLine.number, filePath),
+							widget: new CalloutWidget(parsed, bodyLines.join("\n"), node.from, blockTo, firstLine.number, endLine.number, filePath, isRead),
 							block: true,
-						}).range(node.from, node.to),
+						}).range(node.from, blockTo),
 					);
+				} else {
+					// Raw callout editing mode: preserve colored left bar and soft tint!
+					for (let n = firstLine.number; n <= endLine.number; n++) {
+						const ln = state.doc.line(n);
+						const cls = ["cm-md-callout-editing", `tone-${parsed.spec.tone}`];
+						if (n === firstLine.number) cls.push("cm-md-callout-editing-first");
+						if (n === endLine.number) cls.push("cm-md-callout-editing-last");
+						decos.push(Decoration.line({ class: cls.join(" ") }).range(ln.from));
+					}
 				}
 				return false;
 			}
@@ -565,31 +499,94 @@ function buildBlockDecorations(state: EditorState): DecorationSet {
 		},
 	});
 
-	// 3. Standalone image lines (`![alt](src)` or `![[image.png]]`).
+	// 2b. Line-based fallback for any callouts (`>[!important]`) or GFM tables not yet classified by Lezer's tree.
 	const startLineNum = fm ? fm.lines + 1 : 1;
+	for (let n = startLineNum; n <= state.doc.lines; n++) {
+		const line = state.doc.line(n);
+		if (inFence(line.from)) continue;
+		// Callout fallback (e.g. immediately following a list or before incremental tree finishes parsing)
+		if (!handledCallouts.has(n) && line.text.includes("[!")) {
+			const parsed = parseCalloutHeader(line.text);
+			if (parsed) {
+				let endLineNum = n;
+				while (endLineNum + 1 <= state.doc.lines && /^[ \t]{0,3}>/.test(state.doc.line(endLineNum + 1).text)) {
+					endLineNum++;
+				}
+				const from = line.from;
+				const to = state.doc.line(endLineNum).to;
+				for (let k = n; k <= endLineNum; k++) handledCallouts.add(k);
+				if (!calloutShouldStayRaw(state, from, to, n, endLineNum) && guard.canAdd(from, to)) {
+					const bodyLines: string[] = [];
+					for (let k = n + 1; k <= endLineNum; k++) {
+						bodyLines.push(state.doc.line(k).text.replace(/^[ \t]{0,3}>[ \t]?/, ""));
+					}
+					decos.push(
+						Decoration.replace({
+							widget: new CalloutWidget(parsed, bodyLines.join("\n"), from, to, n, endLineNum, filePath, isRead),
+							block: true,
+						}).range(from, to),
+					);
+				} else {
+					for (let k = n; k <= endLineNum; k++) {
+						const ln = state.doc.line(k);
+						const cls = ["cm-md-callout-editing", `tone-${parsed.spec.tone}`];
+						if (k === n) cls.push("cm-md-callout-editing-first");
+						if (k === endLineNum) cls.push("cm-md-callout-editing-last");
+						decos.push(Decoration.line({ class: cls.join(" ") }).range(ln.from));
+					}
+				}
+				n = endLineNum;
+				continue;
+			}
+		}
+		// GFM table fallback
+		if (!handledTables.has(n) && !handledCallouts.has(n) && line.text.includes("|")) {
+			const tbl = parseMarkdownTable(linesArray, n - 1);
+			if (tbl && tbl.startLine + 1 === n) {
+				const endLineNum = tbl.endLine + 1;
+				const from = line.from;
+				const to = state.doc.line(endLineNum).to;
+				for (let k = n; k <= endLineNum; k++) handledTables.add(k);
+				if (!tableShouldStayRaw(state, from, to, n, endLineNum) && guard.canAdd(from, to)) {
+					const raw = state.sliceDoc(from, to);
+					decos.push(
+						Decoration.replace({
+							widget: new TableWidget(raw, from, to, n, filePath, isRead),
+							block: true,
+						}).range(from, to),
+					);
+				} else {
+					for (let k = n; k <= endLineNum; k++) {
+						const ln = state.doc.line(k);
+						const cls = ["cm-md-table-line"];
+						if (k === n) cls.push("cm-md-table-first", "cm-md-table-header");
+						if (k === n + 1) cls.push("cm-md-table-delim");
+						if (k === endLineNum) cls.push("cm-md-table-last");
+						decos.push(Decoration.line({ class: cls.join(" ") }).range(ln.from));
+					}
+				}
+				n = endLineNum;
+				continue;
+			}
+		}
+	}
+
+	// 3. Standalone image lines (`![alt|400](src)` or `![[image.png|Caption|300]]`).
 	for (let n = startLineNum; n <= state.doc.lines; n++) {
 		const line = state.doc.line(n);
 		if (!line.text.includes("![")) continue;
 		if (inFence(line.from) || selectionTouches(state, line.from, line.to)) continue;
-		let src = "";
-		let alt = "";
-		const md = IMG_MD_RE.exec(line.text);
-		if (md) {
-			alt = md[1]!.trim();
-			src = hrefWritten(md[2]!);
-		} else {
-			const wiki = IMG_WIKI_RE.exec(line.text);
-			if (wiki) {
-				const parts = wiki[1]!.split("|");
-				const target = parts[0]!.trim();
-				if (IMAGE_EXT_RE.test(target)) {
-					src = target;
-					alt = parts[1]?.trim() ?? "";
-				}
-			}
-		}
-		if (src && guard.canAdd(line.from, line.to)) {
-			decos.push(Decoration.replace({ widget: new ImageWidget(src, alt, line.from, filePath), block: true }).range(line.from, line.to));
+		const parsed = parseImageExpression(line.text);
+		if (!parsed) continue;
+		if (parsed.kind === "wiki" && !IMAGE_FILE_RE.test(parsed.src)) continue;
+		const cleanSpec: ParsedImageSpec = parsed.kind === "md" ? { ...parsed, src: hrefWritten(parsed.src) } : parsed;
+		if (cleanSpec.src && guard.canAdd(line.from, line.to)) {
+			decos.push(
+				Decoration.replace({
+					widget: new ImageWidget(cleanSpec, line.from, line.to, filePath, isRead, false),
+					block: true,
+				}).range(line.from, line.to),
+			);
 		}
 	}
 
@@ -601,8 +598,9 @@ export const liveBlockField = StateField.define<DecorationSet>({
 		return buildBlockDecorations(state);
 	},
 	update(value, tr) {
-		const refreshed = tr.effects.some((e) => e.is(refreshLiveEffect) || e.is(setEditYamlEffect));
-		if (tr.docChanged || tr.selection || refreshed || syntaxTree(tr.startState) !== syntaxTree(tr.state)) {
+		const refreshed = tr.effects.some((e) => e.is(refreshLiveEffect) || e.is(setEditYamlEffect) || e.is(setRawEditBlockEffect));
+		const rawChanged = tr.startState.field(rawEditBlockField, false) !== tr.state.field(rawEditBlockField, false);
+		if (tr.docChanged || tr.selection || tr.reconfigured || refreshed || rawChanged || syntaxTree(tr.startState) !== syntaxTree(tr.state)) {
 			return buildBlockDecorations(tr.state);
 		}
 		return value;
@@ -637,10 +635,20 @@ function buildInlineDecorations(view: EditorView): DecorationSet {
 	}
 	const matchTickets = ticketMap.size ? ticketMatcher([...ticketMap.keys()]) : null;
 
-	// Track code-block and callout ranges so inline regex passes skip them.
-	const skipRanges: [number, number][] = [];
-	if (fm) skipRanges.push([0, fm.to + 1]);
-	const isSkipped = (from: number, to: number) => skipRanges.some(([a, b]) => from < b && to > a);
+	// Separate whole-block skips (frontmatter, block widgets, fenced code) from inline-span skips
+	// (`InlineCode`, `Link`) so a link or inline code span on a bullet/task line never suppresses the whole line!
+	const blockSkipRanges: [number, number][] = [];
+	const inlineSkipRanges: [number, number][] = [];
+	if (fm) blockSkipRanges.push([0, fm.to + 1]);
+	const blockDecos = state.field(liveBlockField, false);
+	if (blockDecos) {
+		blockDecos.between(0, state.doc.length, (bFrom, bTo, deco) => {
+			if (deco.spec.widget && bFrom < bTo) blockSkipRanges.push([bFrom, bTo]);
+		});
+	}
+	const isBlockSkipped = (from: number, to: number) => blockSkipRanges.some(([a, b]) => from < b && to > a);
+	const isSkipped = (from: number, to: number) =>
+		isBlockSkipped(from, to) || inlineSkipRanges.some(([a, b]) => from < b && to > a);
 
 	const syntaxMark = Decoration.mark({ class: "cm-md-syntax" });
 	const hideOrDim = (from: number, to: number, revealed: boolean) => {
@@ -662,15 +670,43 @@ function buildInlineDecorations(view: EditorView): DecorationSet {
 				if (node.to <= fmEnd) return false;
 
 				if (node.name === "Table") {
-					if (!selectionTouches(state, node.from, node.to)) {
-						skipRanges.push([node.from, node.to]);
+					const sLine = state.doc.lineAt(node.from).number;
+					const eLine = state.doc.lineAt(node.to).number;
+					if (!tableShouldStayRaw(state, node.from, node.to, sLine, eLine)) {
+						blockSkipRanges.push([node.from, node.to]);
 						return false;
+					}
+					// Dim pipe separators when editing a table in Raw mode for calm readability.
+					const pipeMark = Decoration.mark({ class: "cm-md-table-pipe" });
+					for (let n = sLine; n <= eLine; n++) {
+						const ln = state.doc.line(n);
+						for (let i = 0; i < ln.text.length; i++) {
+							if (ln.text[i] === "|" && ln.text[i - 1] !== "\\") {
+								decos.push(pipeMark.range(ln.from + i, ln.from + i + 1));
+							}
+						}
+					}
+					return;
+				}
+
+				if (node.name === "Blockquote") {
+					const firstLine = state.doc.lineAt(node.from);
+					if (!parseCalloutHeader(firstLine.text)) return;
+					let endLine = state.doc.lineAt(node.to);
+					while (endLine.number > firstLine.number && !/^[ \t]{0,3}>/.test(endLine.text)) {
+						endLine = state.doc.line(endLine.number - 1);
+					}
+					const blockTo = endLine.to;
+					if (!calloutShouldStayRaw(state, node.from, blockTo, firstLine.number, endLine.number)) {
+						blockSkipRanges.push([node.from, blockTo]);
+						// Only skip descending into children when the whole Blockquote node belongs to the callout.
+						if (blockTo === node.to) return false;
 					}
 					return;
 				}
 
 				if (node.name === "FencedCode") {
-					skipRanges.push([node.from, node.to]);
+					blockSkipRanges.push([node.from, node.to]);
 					const startLine = state.doc.lineAt(node.from);
 					const endLine = state.doc.lineAt(node.to);
 					const openText = startLine.text;
@@ -700,7 +736,7 @@ function buildInlineDecorations(view: EditorView): DecorationSet {
 				}
 
 				if (node.name === "InlineCode") {
-					skipRanges.push([node.from, node.to]);
+					inlineSkipRanges.push([node.from, node.to]);
 					const revealed = selectionTouches(state, node.from, node.to);
 					const marks: [number, number][] = [];
 					for (let child = node.node.firstChild; child; child = child.nextSibling) {
@@ -715,12 +751,22 @@ function buildInlineDecorations(view: EditorView): DecorationSet {
 					return false;
 				}
 
-				// ATX Headings H1..H6
+				// ATX Headings H1..H6 (tag with heading anchor id for Document Outline scrollspy)
 				const hMatch = /^ATXHeading([1-6])$/.exec(node.name);
 				if (hMatch) {
 					const level = Number(hMatch[1]);
 					const line = state.doc.lineAt(node.from);
-					decos.push(Decoration.line({ class: `cm-md-h${level}` }).range(line.from));
+					const cleanHeading = line.text.replace(/^[ \t]{0,3}#{1,6}[ \t]+/, "").replace(/[ \t]*#*[ \t]*$/, "").trim();
+					const anchor = headingAnchor(cleanHeading);
+					decos.push(
+						Decoration.line({
+							class: `cm-md-h${level}`,
+							attributes: {
+								"data-md-heading-line": String(line.number),
+								...(anchor ? { "data-md-heading-id": anchor } : {}),
+							},
+						}).range(line.from),
+					);
 					const revealed = selectionTouches(state, line.from, line.to);
 					for (let child = node.node.firstChild; child; child = child.nextSibling) {
 						if (child.name === "HeaderMark") {
@@ -786,7 +832,7 @@ function buildInlineDecorations(view: EditorView): DecorationSet {
 					const openBracket = marks.find((m) => m.text === "[");
 					const closeBracket = marks.find((m) => m.text === "]");
 					if (!openBracket || !closeBracket || !urlNode) return;
-					skipRanges.push([node.from, node.to]);
+					inlineSkipRanges.push([node.from, node.to]);
 					const href = hrefWritten(state.sliceDoc(urlNode.from, urlNode.to));
 					const file = linkFile(href);
 					const isBroken = Boolean(file) && brokenFiles.has(file);
@@ -832,7 +878,7 @@ function buildInlineDecorations(view: EditorView): DecorationSet {
 			if (seenLines.has(lineNum)) continue;
 			seenLines.add(lineNum);
 			const line = state.doc.line(lineNum);
-			if (line.from <= fmEnd || isSkipped(line.from, line.to)) continue;
+			if (line.from <= fmEnd || isBlockSkipped(line.from, line.to)) continue;
 			const text = line.text;
 
 			// Blockquotes (excluding callouts handled as blocks)
@@ -869,7 +915,9 @@ function buildInlineDecorations(view: EditorView): DecorationSet {
 					const lead = bMatch[1]!;
 					const bulletFrom = line.from + lead.length;
 					const bulletTo = bulletFrom + bMatch[2]!.length;
-					if (!selectionTouches(state, bulletFrom, bulletTo + 1) && guard.canAdd(bulletFrom, bulletTo)) {
+					if (selectionTouches(state, bulletFrom, bulletTo + 1)) {
+						decos.push(syntaxMark.range(bulletFrom, bulletTo));
+					} else if (guard.canAdd(bulletFrom, bulletTo)) {
 						decos.push(Decoration.replace({ widget: new BulletWidget() }).range(bulletFrom, bulletTo));
 					}
 				}
@@ -877,6 +925,27 @@ function buildInlineDecorations(view: EditorView): DecorationSet {
 
 			// Skip inline scans on heading syntax prefix
 			const lineSkips: [number, number][] = [];
+
+			// Inline images inside prose paragraphs (`![alt|120](src)` or `![[img.png|120]]`)
+			if (text.includes("![") && !parseImageExpression(text)) {
+				for (const m of text.matchAll(/!\[([^\]]*)\]\(([^)\n]+)\)|!\[\[([^[\]\n]+)\]\]/g)) {
+					const mFrom = line.from + m.index;
+					const mTo = mFrom + m[0].length;
+					if (isSkipped(mFrom, mTo)) continue;
+					const parsed = parseImageExpression(m[0]);
+					if (!parsed) continue;
+					if (parsed.kind === "wiki" && !IMAGE_FILE_RE.test(parsed.src)) continue;
+					lineSkips.push([mFrom, mTo]);
+					const cleanSpec: ParsedImageSpec = parsed.kind === "md" ? { ...parsed, src: hrefWritten(parsed.src) } : parsed;
+					if (!selectionTouches(state, mFrom, mTo) && guard.canAdd(mFrom, mTo)) {
+						decos.push(
+							Decoration.replace({
+								widget: new ImageWidget(cleanSpec, mFrom, mTo, filePath, state.facet(readOnlyModeFacet), true),
+							}).range(mFrom, mTo),
+						);
+					}
+				}
+			}
 
 			// ==highlight==
 			if (text.includes("==")) {
@@ -891,9 +960,10 @@ function buildInlineDecorations(view: EditorView): DecorationSet {
 				}
 			}
 
-			// [[wikilinks]] including [[doc#heading]], [[#heading]], and [[target|alias]]
+			// [[wikilinks]] including [[doc#heading]], [[#heading]], and [[target|alias]] (skip ![[embeds]])
 			if (text.includes("[[")) {
 				for (const m of text.matchAll(/\[\[([^[\]\n]+)\]\]/g)) {
+					if (m.index > 0 && text[m.index - 1] === "!") continue;
 					const mFrom = line.from + m.index;
 					const mTo = mFrom + m[0].length;
 					if (isSkipped(mFrom, mTo)) continue;
@@ -986,12 +1056,16 @@ export const liveInlinePlugin = ViewPlugin.fromClass(
 			this.decorations = buildInlineDecorations(view);
 		}
 		update(update: ViewUpdate) {
-			const refreshed = update.transactions.some((tr) => tr.effects.some((e) => e.is(refreshLiveEffect) || e.is(setEditYamlEffect)));
+			const refreshed = update.transactions.some(
+				(tr) => tr.reconfigured || tr.effects.some((e) => e.is(refreshLiveEffect) || e.is(setEditYamlEffect) || e.is(setRawEditBlockEffect)),
+			);
+			const rawChanged = update.startState.field(rawEditBlockField, false) !== update.state.field(rawEditBlockField, false);
 			if (
 				update.docChanged ||
 				update.selectionSet ||
 				update.viewportChanged ||
 				refreshed ||
+				rawChanged ||
 				syntaxTree(update.startState) !== syntaxTree(update.state)
 			) {
 				this.decorations = buildInlineDecorations(update.view);

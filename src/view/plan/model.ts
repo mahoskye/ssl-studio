@@ -9,8 +9,23 @@ export type PlanNode = { id: string; kind: NodeKind; text: string; ref?: string;
 export type RouteOffsets = Record<string, number>;
 export type PlanEdge = { from: string; to: string; label?: string; route?: RouteOffsets; [key: string]: unknown };
 export type PlanGroup = { id: string; name: string; offset?: PlanOffset; [key: string]: unknown };
+/** A plain-English business test case written by an analyst or developer on a step or across the plan. */
+export type PlanTestCase = {
+	id: string;
+	title: string;
+	node?: string;
+	/** Optional 1-based flowchart journey number this test case covers. */
+	journey?: number;
+	given?: string;
+	expect?: string;
+	/** Additional details, sample data, edge cases, or verification notes. */
+	notes?: string;
+	[key: string]: unknown;
+};
+export type PlanTestInput = { title: string; node?: string; journey?: number; given?: string; expect?: string; notes?: string };
+export type PlanTestPatch = { title?: string; node?: string; journey?: number | null; given?: string; expect?: string; notes?: string };
 /** Fields this version does not know are kept as they are. */
-export type Plan = { version: number; title: string; groups: PlanGroup[]; nodes: PlanNode[]; edges: PlanEdge[]; [key: string]: unknown };
+export type Plan = { version: number; title: string; groups: PlanGroup[]; nodes: PlanNode[]; edges: PlanEdge[]; tests?: PlanTestCase[]; [key: string]: unknown };
 
 const KINDS = new Set<string>(["start", "end", "step", "decision", "call"]);
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
@@ -70,8 +85,9 @@ function printBuilt(built: Record<string, unknown>) {
 
 /** One node or edge a line, in a stable order, so a change shows as a small diff. */
 export function printPlan(plan: Plan): string {
-	const { version, title, goal, ticket, targets, groups, nodes, edges, built, ...rest } = plan;
+	const { version, title, goal, ticket, targets, groups, nodes, edges, tests, built, ...rest } = plan;
 	const head = { version, title, goal, ticket, targets };
+	const cleanTests = Array.isArray(tests) ? tests : [];
 	const lines = [
 		...Object.entries(head)
 			.filter(([, v]) => v !== undefined)
@@ -79,6 +95,7 @@ export function printPlan(plan: Plan): string {
 		rows("groups", groups, ["id", "name", "offset"]),
 		rows("nodes", nodes, ["id", "kind", "text", "ref", "group", "notes", "offset"]),
 		rows("edges", edges, ["from", "to", "label", "route"]),
+		...(cleanTests.length ? [rows("tests", cleanTests, ["id", "title", "node", "journey", "given", "expect", "notes"])] : []),
 		...Object.entries(rest).map(([k, v]) => JSON.stringify({ [k]: v }, null, 2).split("\n").slice(1, -1).join("\n")),
 		...(isObject(built) ? [printBuilt(built)] : built === undefined ? [] : [`  "built": ${JSON.stringify(built)}`]),
 	];
@@ -157,7 +174,90 @@ export function removeNode(plan: Plan, id: string): Edit {
 	const outs = outOf(plan, id).filter((e) => e.to !== id);
 	const edges = plan.edges.filter((e) => e.from !== id && e.to !== id);
 	if (ins.length === 1 && outs.length === 1 && !edges.some((e) => e.from === ins[0]!.from && e.to === outs[0]!.to)) edges.push({ ...ins[0]!, to: outs[0]!.to });
-	return { plan: pruneGroups({ ...plan, nodes: plan.nodes.filter((n) => n.id !== id), edges }), select: ins[0]?.from ?? outs[0]?.to };
+	// Keep any business test cases attached to the removed node as plan-level tests (ADR 0009: nothing lost silently).
+	const existingTests = planTestsOf(plan);
+	const nextTests = existingTests.length
+		? existingTests.map((t) => {
+				if (t.node !== id) return t;
+				const { node: _dropped, ...rest } = t;
+				return rest as PlanTestCase;
+			})
+		: undefined;
+	return {
+		plan: pruneGroups({ ...plan, nodes: plan.nodes.filter((n) => n.id !== id), edges, ...(nextTests ? { tests: nextTests } : {}) }),
+		select: ins[0]?.from ?? outs[0]?.to,
+	};
+}
+
+/** Valid plain-English business test cases saved in this plan. */
+export function planTestsOf(plan: Plan): PlanTestCase[] {
+	if (!Array.isArray(plan.tests)) return [];
+	return plan.tests.filter((t): t is PlanTestCase => isObject(t) && typeof t.id === "string" && typeof t.title === "string");
+}
+
+function nextTestId(tests: PlanTestCase[]): string {
+	const used = tests.map((t) => /^t(\d+)$/.exec(t.id)?.[1]).filter(Boolean).map(Number);
+	return `t${Math.max(0, ...used) + 1}`;
+}
+
+export function addPlanTest(plan: Plan, input: PlanTestInput): Plan {
+	const title = input.title.trim();
+	if (!title) return plan;
+	const current = planTestsOf(plan);
+	const journey = typeof input.journey === "number" && Number.isInteger(input.journey) && input.journey > 0 ? input.journey : undefined;
+	const entry: PlanTestCase = {
+		id: nextTestId(current),
+		title,
+		...(input.node?.trim() ? { node: input.node.trim() } : {}),
+		...(journey !== undefined ? { journey } : {}),
+		...(input.given?.trim() ? { given: input.given.trim() } : {}),
+		...(input.expect?.trim() ? { expect: input.expect.trim() } : {}),
+		...(input.notes?.trim() ? { notes: input.notes.trim() } : {}),
+	};
+	return { ...plan, tests: [...current, entry] };
+}
+
+export function updatePlanTest(plan: Plan, id: string, patch: PlanTestPatch): Plan {
+	const current = planTestsOf(plan);
+	if (!current.some((t) => t.id === id)) return plan;
+	const next = current.map((t) => {
+		if (t.id !== id) return t;
+		const title = patch.title !== undefined ? patch.title.trim() || t.title : t.title;
+		const node = patch.node !== undefined ? patch.node.trim() : t.node;
+		const journey =
+			patch.journey === null
+				? undefined
+				: patch.journey !== undefined
+					? Number.isInteger(patch.journey) && patch.journey > 0
+						? patch.journey
+						: undefined
+					: t.journey;
+		const given = patch.given !== undefined ? patch.given.trim() : t.given;
+		const expect = patch.expect !== undefined ? patch.expect.trim() : t.expect;
+		const notes = patch.notes !== undefined ? patch.notes.trim() : t.notes;
+		const { node: _n, journey: _j, given: _g, expect: _e, notes: _no, ...rest } = t;
+		return {
+			...rest,
+			title,
+			...(node ? { node } : {}),
+			...(journey !== undefined ? { journey } : {}),
+			...(given ? { given } : {}),
+			...(expect ? { expect } : {}),
+			...(notes ? { notes } : {}),
+		} as PlanTestCase;
+	});
+	return { ...plan, tests: next };
+}
+
+export function removePlanTest(plan: Plan, id: string): Plan {
+	const current = planTestsOf(plan);
+	const next = current.filter((t) => t.id !== id);
+	if (next.length === current.length) return plan;
+	if (!next.length) {
+		const { tests: _empty, ...rest } = plan;
+		return rest as Plan;
+	}
+	return { ...plan, tests: next };
 }
 
 export const setText = (plan: Plan, id: string, text: string): Plan => ({ ...plan, nodes: plan.nodes.map((n) => (n.id === id ? { ...n, text } : n)) });

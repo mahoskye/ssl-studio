@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { estimateWidth } from "../src/view/graph/canvas";
-import { applyRouteOffsets, backEdges, chartGraph, compactRoutes, cycleEdge, describeEdge, describeNode, edgeHandles, edgeMidpoint, fitRegionBounds, KEYS, labelPoint, LINE, NO_WORDS, offsetFor, onDiamond, orthogonalRoute, placeEdgeLabel, REGION_PADDING, rerouteMovedEdge, routeOf, sizeNode, statusMark, statusWords, wrapText } from "../src/view/plan/chart";
+import { applyRouteOffsets, backEdges, chartGraph, codeIndicator, compactRoutes, cycleEdge, describeEdge, describeNode, edgeHandles, edgeMidpoint, fitRegionBounds, KEYS, labelPoint, LINE, NO_WORDS, offsetFor, onDiamond, orthogonalRoute, placeEdgeLabel, REGION_PADDING, rerouteMovedEdge, routeOf, sizeNode, statusMark, statusWords, wrapText } from "../src/view/plan/chart";
 import { parsePlan, type NodeKind, type Plan } from "../src/view/plan/model";
 
 const read = (path: string) => parsePlan(readFileSync(join(import.meta.dir, "..", path), "utf8")).plan!;
@@ -342,6 +342,27 @@ describe("a node's state in words and as a mark", () => {
 		expect(describeEdge(dueDates, { from: "n1", to: "n2" })).toBe('Way out of "Run, with no parameters" to "Read the holidays", no label');
 		const unlabelled = { ...dueDates, edges: dueDates.edges.map((e) => (e.from === "n6" && e.to === "n13" ? { from: e.from, to: e.to } : e)) };
 		expect(describeEdge(unlabelled, { from: "n6", to: "n13" })).toContain("a decision's branch needs one");
+	});
+	test("five-state code indicator maps stoplight + grey + blue cleanly by precedence", () => {
+		// Newly added / unbuilt step -> grey (even if chart findings haven't been cleared yet).
+		expect(codeIndicator({})).toBe("grey");
+		expect(codeIndicator({ findings: 1 })).toBe("grey");
+		// Building / pending / agent suggestion -> blue.
+		expect(codeIndicator({ unit: "running", built: true })).toBe("blue");
+		expect(codeIndicator({ unit: "pending" })).toBe("blue");
+		expect(codeIndicator({ suggested: true })).toBe("blue");
+		// Built & clean -> green.
+		expect(codeIndicator({ built: true })).toBe("green");
+		expect(codeIndicator({ unit: "passed" })).toBe("green");
+		// Built & changed / drift / warning / skipped -> yellow.
+		expect(codeIndicator({ built: true, changed: true })).toBe("yellow");
+		expect(codeIndicator({ built: true, hasDrift: true })).toBe("yellow");
+		expect(codeIndicator({ built: true, findings: 1 })).toBe("yellow");
+		expect(codeIndicator({ unit: "skipped" })).toBe("yellow");
+		// Blocking issue (stuck / gone / error) -> red wins over everything else.
+		expect(codeIndicator({ unit: "stuck", built: true, changed: true })).toBe("red");
+		expect(codeIndicator({ gone: true, built: true })).toBe("red");
+		expect(codeIndicator({ hasError: true })).toBe("red");
 	});
 });
 

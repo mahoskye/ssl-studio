@@ -97,7 +97,7 @@
 
 /* Split Warm (dark chrome framing a warm light paper editor): re-scope editor-interior surfaces
    and the tucked active tab to editor-calibrated tokens so every view keeps full WCAG AA contrast. */
-:root[data-theme="dark"][data-editor-theme="light"] :is(.tab.active, .folio-hdr, .editor-row, .breadcrumbs, .blocks, .plan, .graph, .md-view, .table-view, .file-view, .diff, .welcome) {
+:root[data-theme="dark"][data-editor-theme="light"] :is(.tab.active, .folio-hdr, .editor-row, .breadcrumbs, .blocks, .plan, .graph, .md-view, .cm-md-host, .table-view, .file-view, .diff, .welcome) {
 	--bg: var(--editor-bg);
 	--fg: var(--editor-fg);
 	--strong-fg: var(--editor-strong);
@@ -187,6 +187,10 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .layout-controls > button, .layout-controls > .menu > button { display: inline-flex; align-items: center; justify-content: center; width: var(--target); height: var(--target); padding: 0; color: var(--muted); border-radius: var(--radius-md); }
 .layout-controls > button[aria-pressed="true"], .layout-controls > button:hover:not(:disabled), .layout-controls > .menu > button:hover, .layout-controls > .menu > button[aria-expanded="true"] { color: var(--strong-fg); }
 .layout-controls > button[aria-pressed="true"] { background: color-mix(in srgb, var(--hover) 70%, transparent); }
+.layout-sep { width: 1px; height: 14px; background: var(--border); margin: 0 2px; flex: none; }
+.layout-controls > .right-panel-menu > button { width: auto; padding: 0 5px; gap: 2px; }
+.layout-controls > .right-panel-menu.active > button { color: var(--strong-fg); background: color-mix(in srgb, var(--hover) 70%, transparent); }
+.layout-controls .right-panel-caret { font-size: calc(11px * var(--ui-scale)); opacity: 0.78; }
 .layout-controls .menu-pop { font-size: var(--text-base); }
 /* Why the entry at hand cannot run: the menu's last line, there only while there is something to say. */
 .menu-why { display: none; margin-top: var(--space-2); padding: var(--space-2) var(--space-4) var(--space-1); border-top: 1px solid var(--border); color: var(--muted); font-size: var(--text-md); white-space: normal; }
@@ -1096,7 +1100,7 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .plan-canvas.pathing .plan-node:not(.on-path) { opacity: .38; }
 .plan-canvas.pathing .plan-edge:not(.on-path) .g-edge, .plan-canvas.pathing .plan-label:not(.on-path) { opacity: .25; }
 .plan-canvas.pathing .plan-edge.on-path .g-edge { stroke: var(--accent); stroke-width: 2.5px; }
-.plan-canvas.pathing .plan-node.on-path rect:not(.plan-built), .plan-canvas.pathing .plan-node.on-path polygon { stroke: var(--accent); stroke-width: 2; }
+.plan-canvas.pathing .plan-node.on-path rect.node-shape, .plan-canvas.pathing .plan-node.on-path polygon.node-shape { stroke: var(--accent); stroke-width: 2; }
 /* The stepper through the paths, and the steps of the one shown. */
 .plan-paths { display: flex; align-items: center; gap: var(--space-3); margin: var(--space-3) 0; }
 .plan-paths span { flex: 1; min-width: 0; color: var(--side-fg); font-variant-numeric: tabular-nums; }
@@ -1121,16 +1125,16 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .review-info:has(.review-blocked) { flex-wrap: wrap; }
 
 /* Planning mode: a build's progress, on the chart and beside it */
-.plan-node.unit-passed rect, .plan-node.unit-passed polygon { stroke: var(--ok); stroke-width: 2; }
-.plan-node.unit-running rect, .plan-node.unit-running polygon { stroke: var(--accent); stroke-width: 2.5; stroke-dasharray: 6 3; }
-.plan-node.unit-stuck rect, .plan-node.unit-stuck polygon { stroke: var(--error); stroke-width: 2.5; }
-.plan-node.unit-skipped rect, .plan-node.unit-skipped polygon { stroke: var(--warning); stroke-dasharray: 3 3; }
-.plan-node.changed rect, .plan-node.changed polygon { stroke: var(--warning); stroke-width: 2; }
-.plan-node.gone rect, .plan-node.gone polygon { stroke: var(--error); stroke-dasharray: 3 3; }
+.plan-node.unit-passed rect.node-shape, .plan-node.unit-passed polygon.node-shape { stroke: var(--ok); stroke-width: 2; }
+.plan-node.unit-running rect.node-shape, .plan-node.unit-running polygon.node-shape { stroke: var(--accent); stroke-width: 2.5; stroke-dasharray: 6 3; }
+.plan-node.unit-stuck rect.node-shape, .plan-node.unit-stuck polygon.node-shape { stroke: var(--error); stroke-width: 2.5; }
+.plan-node.unit-skipped rect.node-shape, .plan-node.unit-skipped polygon.node-shape { stroke: var(--warning); stroke-dasharray: 3 3; }
+.plan-node.changed rect.node-shape, .plan-node.changed polygon.node-shape { stroke: var(--warning); stroke-width: 2; }
+.plan-node.gone rect.node-shape, .plan-node.gone polygon.node-shape { stroke: var(--error); stroke-dasharray: 3 3; }
 .plan-node rect.plan-built { fill: var(--ok); stroke: none; }
 /* The selection shows whatever a node's state, which its mark carries; and where a connection being made starts. */
-.plan-node.selected rect:not(.plan-built), .plan-node.selected polygon { stroke: var(--accent); stroke-width: 2.5; }
-.plan-node.origin rect:not(.plan-built), .plan-node.origin polygon { stroke: var(--accent); stroke-width: 2.5; stroke-dasharray: 2 3; }
+.plan-node.selected rect.node-shape, .plan-node.selected polygon.node-shape { stroke: var(--accent); stroke-width: 2.5; }
+.plan-node.origin rect.node-shape, .plan-node.origin polygon.node-shape { stroke: var(--accent); stroke-width: 2.5; stroke-dasharray: 2 3; }
 .plan-change { margin: 0 0 var(--space-2); }
 .plan-drift { margin: 0 0 var(--space-3); }
 .plan-drift.warning { color: var(--warning); }
@@ -1213,6 +1217,10 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .md-page > .md { flex: 0 1 820px; min-width: 0; margin: 0; }
 .md-column { flex: 0 1 820px; min-width: 0; }
 .md-column > .md { margin: 0; }
+/* Reading assist in Read mode: content stays crisp down to the pointer's reading line across margins and gaps, matching Live mode. */
+.md-view .md > *, .md-view .md li, .md-view .md tr, .md-view .md-linked { transition: opacity 120ms ease; }
+.md-view .md-read-below { opacity: 0.68; }
+@media (prefers-reduced-motion: reduce) { .md-view .md > *, .md-view .md li, .md-view .md tr, .md-view .md-linked { transition: none; } }
 /* What a document says of itself in its first lines: who it is for, what state it is in. Each a small label and its values. */
 .md-front { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-6); margin: var(--space-7) var(--space-7) 0; padding: var(--space-4) var(--space-5); border: 1px solid var(--border); border-radius: var(--radius-lg); background: color-mix(in srgb, var(--side-bg) 55%, transparent); font-size: var(--text-md); }
 .md-front > div { display: flex; align-items: baseline; gap: var(--space-3); min-width: 0; }

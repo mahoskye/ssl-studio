@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { addAfter, addBranch, addCall, checkPlan, checkRefs, connect, duplicateNode, findingLine, hasManualLayout, insertOnEdge, isPlanPath, newPlan, nodeAtLine, nodeLines, parsePlan, printPlan, removeEdge, removeNode, renameGroup, resetPlanLayout, reverseEdge, setDecision, setEdgeLabel, setEdgeRoute, setGroup, setGroupOffset, setKind, setNodeOffset, setText, type Plan } from "../src/view/plan/model";
+import { addAfter, addBranch, addCall, addPlanTest, checkPlan, checkRefs, connect, duplicateNode, findingLine, hasManualLayout, insertOnEdge, isPlanPath, newPlan, nodeAtLine, nodeLines, parsePlan, planTestsOf, printPlan, removeEdge, removeNode, removePlanTest, renameGroup, resetPlanLayout, reverseEdge, setDecision, setEdgeLabel, setEdgeRoute, setGroup, setGroupOffset, setKind, setNodeOffset, setText, updatePlanTest, type Plan } from "../src/view/plan/model";
 
 const sample = readFileSync(join(import.meta.dir, "../fixtures/workspace/design/Release.plan.json"), "utf8");
 const parsed = (text: string) => parsePlan(text).plan!;
@@ -348,5 +348,63 @@ describe("direct canvas authoring primitives", () => {
 		expect(clean.nodes.every((n) => n.offset === undefined)).toBe(true);
 		expect(clean.groups.every((g) => g.offset === undefined)).toBe(true);
 		expect(clean.edges.every((e) => e.route === undefined)).toBe(true);
+	});
+
+	test("business test cases can be added, edited, round-tripped, preserved on node delete, and removed", () => {
+		let p = parsed(sample);
+		p = addPlanTest(p, {
+			title: "Rush sample on a holiday",
+			node: "n4",
+			journey: 2,
+			given: "Friday 4pm",
+			expect: "Moves to Monday",
+			notes: "Sample S-1001, lab calendar holiday Mon",
+		});
+		expect(planTestsOf(p)).toEqual([
+			{
+				id: "t1",
+				title: "Rush sample on a holiday",
+				node: "n4",
+				journey: 2,
+				given: "Friday 4pm",
+				expect: "Moves to Monday",
+				notes: "Sample S-1001, lab calendar holiday Mon",
+			},
+		]);
+
+		// Round-trips cleanly through printPlan / parsePlan.
+		const reprinted = printPlan(p);
+		expect(reprinted).toContain('"tests": [');
+		expect(reprinted).toContain('"journey": 2');
+		expect(reprinted).toContain('"notes": "Sample S-1001, lab calendar holiday Mon"');
+		expect(planTestsOf(parsed(reprinted))).toEqual(planTestsOf(p));
+
+		// Update fields cleanly, including clearing linked journey via null and updating notes.
+		p = updatePlanTest(p, "t1", { expect: "Moves to next working day", journey: null, notes: "Updated sample data" });
+		expect(planTestsOf(p)[0]).toEqual({
+			id: "t1",
+			title: "Rush sample on a holiday",
+			node: "n4",
+			given: "Friday 4pm",
+			expect: "Moves to next working day",
+			notes: "Updated sample data",
+		});
+
+		// Removing the linked node detaches the node id rather than silently losing the analyst's test case.
+		const afterDel = removeNode(p, "n4").plan;
+		expect(planTestsOf(afterDel)).toEqual([
+			{
+				id: "t1",
+				title: "Rush sample on a holiday",
+				given: "Friday 4pm",
+				expect: "Moves to next working day",
+				notes: "Updated sample data",
+			},
+		]);
+
+		// Removing the last test case removes the empty tests key cleanly.
+		const cleared = removePlanTest(afterDel, "t1");
+		expect(planTestsOf(cleared)).toEqual([]);
+		expect(printPlan(cleared)).not.toContain('"tests"');
 	});
 });

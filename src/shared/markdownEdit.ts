@@ -274,24 +274,50 @@ export type CalloutSpec = {
 };
 
 export const CALLOUT_SPECS: Record<string, CalloutSpec> = {
-	note: { type: "note", label: "Note", tone: "info", icon: "\uea74" },
+	note: { type: "note", label: "Note", tone: "info", icon: "\ueb26" },
 	info: { type: "info", label: "Info", tone: "info", icon: "\uea74" },
-	todo: { type: "todo", label: "Todo", tone: "info", icon: "\ueab2" },
+	todo: { type: "todo", label: "Todo", tone: "info", icon: "\ueab3" },
 	tip: { type: "tip", label: "Tip", tone: "ok", icon: "\uea61" },
 	hint: { type: "hint", label: "Hint", tone: "ok", icon: "\uea61" },
-	success: { type: "success", label: "Success", tone: "ok", icon: "\ueab2" },
-	important: { type: "important", label: "Important", tone: "accent", icon: "\ueb32" },
-	abstract: { type: "abstract", label: "Summary", tone: "accent", icon: "\ueb26" },
+	success: { type: "success", label: "Success", tone: "ok", icon: "\ueba4" },
+	check: { type: "check", label: "Check", tone: "ok", icon: "\ueab2" },
+	done: { type: "done", label: "Done", tone: "ok", icon: "\ueba4" },
+	important: { type: "important", label: "Important", tone: "accent", icon: "\ueb1e" },
+	action: { type: "action", label: "Action", tone: "accent", icon: "\ueb1e" },
+	cta: { type: "cta", label: "Call to action", tone: "accent", icon: "\ueb1e" },
+	abstract: { type: "abstract", label: "Abstract", tone: "accent", icon: "\ueb26" },
 	summary: { type: "summary", label: "Summary", tone: "accent", icon: "\ueb26" },
-	example: { type: "example", label: "Example", tone: "accent", icon: "\ueb84" },
+	tldr: { type: "tldr", label: "TL;DR", tone: "accent", icon: "\ueb26" },
+	example: { type: "example", label: "Example", tone: "accent", icon: "\uea79" },
 	question: { type: "question", label: "Question", tone: "warning", icon: "\ueb32" },
+	help: { type: "help", label: "Help", tone: "warning", icon: "\ueb32" },
+	faq: { type: "faq", label: "FAQ", tone: "warning", icon: "\ueb32" },
 	warning: { type: "warning", label: "Warning", tone: "warning", icon: "\uea6c" },
-	caution: { type: "caution", label: "Caution", tone: "error", icon: "\uea87" },
-	danger: { type: "danger", label: "Danger", tone: "error", icon: "\uea87" },
+	attention: { type: "attention", label: "Attention", tone: "warning", icon: "\uea6c" },
+	caution: { type: "caution", label: "Caution", tone: "error", icon: "\ueb42" },
+	danger: { type: "danger", label: "Danger", tone: "error", icon: "\ueaf2" },
+	error: { type: "error", label: "Error", tone: "error", icon: "\uea87" },
 	failure: { type: "failure", label: "Failure", tone: "error", icon: "\uea87" },
-	bug: { type: "bug", label: "Bug", tone: "error", icon: "\uea87" },
-	quote: { type: "quote", label: "Quote", tone: "muted", icon: "\ueb26" },
+	fail: { type: "fail", label: "Fail", tone: "error", icon: "\uea87" },
+	bug: { type: "bug", label: "Bug", tone: "error", icon: "\ueaaf" },
+	quote: { type: "quote", label: "Quote", tone: "muted", icon: "\ueb33" },
+	cite: { type: "cite", label: "Cite", tone: "muted", icon: "\ueb33" },
 };
+
+/** Curated presets offered in Insert Callout menus and Palette. */
+export const CALLOUT_PRESETS: readonly { type: string; label: string; about: string }[] = [
+	{ type: "important", label: "Important", about: "Highlight critical decisions, requirements, or calls to action" },
+	{ type: "note", label: "Note", about: "Add helpful background context or clarification" },
+	{ type: "tip", label: "Tip", about: "Share a shortcut, best practice, or recommendation" },
+	{ type: "warning", label: "Warning", about: "Flag a gotcha, edge case, or pre-flight check" },
+	{ type: "caution", label: "Caution", about: "Warn about destructive changes, risks, or rollback needs" },
+	{ type: "question", label: "Question", about: "Track an open question or stakeholder decision needed" },
+	{ type: "todo", label: "Todo", about: "Call out a checklist of follow-up actions" },
+	{ type: "summary", label: "Summary", about: "Summarize a long section or spec at a glance" },
+	{ type: "bug", label: "Bug", about: "Document a defect symptom or reproduction note" },
+	{ type: "example", label: "Example", about: "Show a concrete worked example" },
+	{ type: "quote", label: "Quote", about: "Quote a requirement, email, or specification" },
+];
 
 export type ParsedCallout = {
 	spec: CalloutSpec;
@@ -299,7 +325,7 @@ export type ParsedCallout = {
 	fold: "+" | "-" | null;
 };
 
-/** Parses the first line of an Obsidian / GitHub callout (`> [!NOTE] Custom title` or `> [!TIP]- Folded`). */
+/** Parses the first line of an Obsidian / GitHub callout (`> [!NOTE] Custom title`, `>[!important]`, or `> [!TIP]- Folded`). */
 export function parseCalloutHeader(line: string): ParsedCallout | null {
 	const m = /^[ \t]{0,3}>[ \t]*\[!([A-Za-z0-9_-]+)\]([+-])?(?:[ \t]+(.*))?$/.exec(line);
 	if (!m) return null;
@@ -308,4 +334,140 @@ export function parseCalloutHeader(line: string): ParsedCallout | null {
 	const fold = (m[2] as "+" | "-" | undefined) ?? null;
 	const title = m[3]?.trim() || spec.label;
 	return { spec, title, fold };
+}
+
+/**
+ * Serializes a callout's type, title, fold flag, and unprefixed body back into standard
+ * Obsidian/GitHub `> [!type]` Markdown lines (keeping blank lines prefixed with `>` so
+ * multi-paragraph callouts stay one contiguous blockquote).
+ */
+export function serializeCalloutBlock(
+	type: string,
+	title: string,
+	fold: "+" | "-" | null,
+	bodyText: string,
+	keepEmptyBodyLine = false,
+): string {
+	const cleanType = type.trim().toLowerCase() || "note";
+	const spec = CALLOUT_SPECS[cleanType];
+	const trimmedTitle = title.trim();
+	const defaultLabel = spec?.label ?? cleanType.slice(0, 1).toUpperCase() + cleanType.slice(1);
+	const titlePart = trimmedTitle && trimmedTitle.toLowerCase() !== defaultLabel.toLowerCase() ? ` ${trimmedTitle}` : "";
+	const head = `> [!${cleanType}]${fold ?? ""}${titlePart}`;
+	let normalizedBody = bodyText.replace(/\r\n/g, "\n");
+	if (!keepEmptyBodyLine) normalizedBody = normalizedBody.replace(/(?:\n[ \t]*)+$/, "");
+	if (!normalizedBody) return keepEmptyBodyLine ? `${head}\n> ` : head;
+	const bodyLines = normalizedBody.split("\n").map((line) => (line.length ? `> ${line}` : ">"));
+	return `${head}\n${bodyLines.join("\n")}`;
+}
+
+/**
+ * Wraps `selectedText` (or inserts a fresh callout block) with `> [!type] title`.
+ * Returns the inserted text and relative cursor offset ready for typing the body.
+ */
+export function buildCalloutBlock(type: string, title?: string, selectedText = ""): { insert: string; cursorOffset: number } {
+	const spec = CALLOUT_SPECS[type.toLowerCase()];
+	const head = title?.trim() ? `> [!${type.toLowerCase()}] ${title.trim()}` : `> [!${type.toLowerCase()}]${spec ? "" : ""}`;
+	const clean = selectedText.replace(/\r\n/g, "\n").trimEnd();
+	if (clean) {
+		const body = clean
+			.split("\n")
+			.map((l) => (l ? `> ${l}` : ">"))
+			.join("\n");
+		const insert = `${head}\n${body}`;
+		return { insert, cursorOffset: insert.length };
+	}
+	const insert = `${head}\n> `;
+	return { insert, cursorOffset: insert.length };
+}
+
+/**
+ * Smart Enter inside a callout or blockquote (`> [!important] Title` or `> text`):
+ * - After non-empty blockquote / callout line → continues `> ` on next line.
+ * - On an empty `> ` line → removes the `> ` prefix to exit the callout cleanly.
+ */
+export function blockquoteEnter(line: string, cursor: number): { start: string } | { keep: number } | null {
+	const m = /^([ \t]{0,3}>[ \t]?)(.*)$/.exec(line);
+	if (!m) return null;
+	const prefix = m[1]!;
+	const rest = m[2]!;
+	if (cursor < prefix.length) return null;
+	if (!rest.trim()) return { keep: 0 };
+	const normalized = prefix.endsWith(" ") || prefix.endsWith("\t") ? prefix : `${prefix} `;
+	return { start: normalized };
+}
+
+export type ParsedImageSpec = {
+	src: string;
+	alt: string;
+	width?: number;
+	height?: number;
+	kind: "md" | "wiki";
+};
+
+const DIM_RE = /^(\d{2,4})(?:x(\d{2,4}))?$/i;
+
+/**
+ * Parses Obsidian / Markdown image alt+size notation:
+ * - `"Caption|400"` → `{ alt: "Caption", width: 400 }`
+ * - `"400x250"` → `{ alt: "", width: 400, height: 250 }`
+ * - `"Caption|320x200"` → `{ alt: "Caption", width: 320, height: 200 }`
+ */
+export function parseImageAltSize(rawAlt: string): { alt: string; width?: number; height?: number } {
+	const parts = rawAlt.split("|").map((p) => p.trim());
+	if (parts.length >= 2) {
+		const last = parts[parts.length - 1]!;
+		const dim = DIM_RE.exec(last);
+		if (dim) {
+			return {
+				alt: parts.slice(0, -1).join(" | ").trim(),
+				width: Number(dim[1]),
+				...(dim[2] ? { height: Number(dim[2]) } : {}),
+			};
+		}
+	}
+	const sole = DIM_RE.exec(rawAlt.trim());
+	if (sole) {
+		return { alt: "", width: Number(sole[1]), ...(sole[2] ? { height: Number(sole[2]) } : {}) };
+	}
+	return { alt: rawAlt.trim() };
+}
+
+/** Parses a standalone Markdown `![alt|300](src)` or Obsidian `![[img.png|Caption|300]]` image expression. */
+export function parseImageExpression(raw: string): ParsedImageSpec | null {
+	const trimmed = raw.trim();
+	const md = /^!\[([^\]]*)\]\(([^)\n]+)\)$/.exec(trimmed);
+	if (md) {
+		const { alt, width, height } = parseImageAltSize(md[1]!);
+		// Strip optional Markdown title `"..."` and angle brackets `<...>` from URL.
+		const urlPart = md[2]!.trim().replace(/^<([^>]+)>$/, "$1").replace(/\s+["'][^"']*["']\s*$/, "").trim();
+		if (!urlPart) return null;
+		return { src: urlPart, alt, width, height, kind: "md" };
+	}
+	const wiki = /^!\[\[([^[\]\n]+)\]\]$/.exec(trimmed);
+	if (wiki) {
+		const parts = wiki[1]!.split("|").map((p) => p.trim());
+		const target = parts[0]!;
+		if (!target) return null;
+		const rest = parts.slice(1).join("|");
+		const { alt, width, height } = rest ? parseImageAltSize(rest) : { alt: "" };
+		return { src: target, alt, width, height, kind: "wiki" };
+	}
+	return null;
+}
+
+/** Updates (or removes when `width` is null) the explicit width specifier on an image Markdown/wikilink expression. */
+export function withImageWidth(raw: string, width: number | null): string {
+	const parsed = parseImageExpression(raw);
+	if (!parsed) return raw;
+	const lead = /^[ \t]*/.exec(raw)![0];
+	const trail = /[ \t]*$/.exec(raw)![0];
+	if (parsed.kind === "wiki") {
+		const segments = [parsed.src];
+		if (parsed.alt) segments.push(parsed.alt);
+		if (width !== null) segments.push(String(width));
+		return `${lead}![[${segments.join("|")}]]${trail}`;
+	}
+	const altPart = [parsed.alt, width !== null ? String(width) : ""].filter(Boolean).join("|");
+	return `${lead}![${altPart}](${parsed.src})${trail}`;
 }

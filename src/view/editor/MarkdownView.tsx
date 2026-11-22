@@ -25,16 +25,9 @@ import { docs } from "../project";
 import { outline, type OutlineItem } from "../../shared/outline";
 import { canonical, documents, focusEditor, openFile, revealSignal, setMarkdownMode, setState, state } from "../state";
 import { chooseFromMenu } from "../panels/RowMenu";
+import { mdOutline, setMdOutline, type ActiveMarkdownOutline } from "./mdOutline";
 
-export type ActiveMarkdownOutline = {
-	path: string;
-	headings: { id: string; text: string; level: number }[];
-	activeId: string;
-	goTo: (id: string) => void;
-};
-
-const [mdOutline, setMdOutline] = createSignal<ActiveMarkdownOutline | null>(null);
-export { mdOutline };
+export { mdOutline, type ActiveMarkdownOutline };
 
 export function MarkdownView(props: { path: string; /** The editor group the page is shown in. */ group?: number }) {
 	const model = documents.get(props.path)?.model;
@@ -207,6 +200,86 @@ export function MarkdownView(props: { path: string; /** The editor group the pag
 	const headings = createMemo(() => outlineOf(html()));
 	/** The heading the reader is at or past: the last one above the top of the view. */
 	const [at, setAt] = createSignal("");
+	// Reading-assist guide: tracks pointer vertical position across margins and gaps between blocks
+	// so content stays crisp down to the reading line and gently dims below without flashing on whitespace.
+	let pointerY: number | null = null;
+	let assistFrame = 0;
+	let dimmed = new Set<HTMLElement>();
+	const readableUnits = (): HTMLElement[] => {
+		if (!article) return [];
+		const out: HTMLElement[] = [];
+		const walk = (el: HTMLElement) => {
+			const tag = el.tagName;
+			if (tag === "UL" || tag === "OL") {
+				for (const child of el.children) if (child instanceof HTMLElement) walk(child);
+				return;
+			}
+			if (tag === "LI") {
+				out.push(el);
+				for (const child of el.children) {
+					if (child instanceof HTMLElement && (child.tagName === "UL" || child.tagName === "OL")) walk(child);
+				}
+				return;
+			}
+			if (tag === "TABLE" || el.classList.contains("md-table-wrap")) {
+				const rows = el.querySelectorAll<HTMLElement>("thead > tr, tbody > tr");
+				if (rows.length) {
+					for (const r of rows) out.push(r);
+					return;
+				}
+			}
+			out.push(el);
+		};
+		for (const child of article.children) if (child instanceof HTMLElement) walk(child);
+		const linkedSection = view?.querySelector<HTMLElement>(".md-linked");
+		if (linkedSection) out.push(linkedSection);
+		return out;
+	};
+	const clearReadAssist = () => {
+		if (assistFrame) {
+			cancelAnimationFrame(assistFrame);
+			assistFrame = 0;
+		}
+		for (const el of dimmed) el.classList.remove("md-read-below");
+		dimmed.clear();
+	};
+	const applyReadAssist = () => {
+		assistFrame = 0;
+		if (pointerY === null || !article) return clearReadAssist();
+		const articleTop = article.getBoundingClientRect().top;
+		if (pointerY < articleTop - 8) return clearReadAssist();
+		const units = readableUnits();
+		if (!units.length) return clearReadAssist();
+		let active = -1;
+		for (let i = 0; i < units.length; i++) {
+			const r = units[i]!.getBoundingClientRect();
+			if (r.height === 0) continue;
+			if (r.top <= pointerY) active = i;
+			else break;
+		}
+		if (active < 0) active = 0;
+		const activeEl = units[active]!;
+		const nextDimmed = new Set<HTMLElement>();
+		for (let i = active + 1; i < units.length; i++) {
+			const el = units[i]!;
+			if (el.contains(activeEl) || activeEl.contains(el)) continue;
+			let insideDimmed = false;
+			for (const d of nextDimmed) {
+				if (d.contains(el)) {
+					insideDimmed = true;
+					break;
+				}
+			}
+			if (!insideDimmed) nextDimmed.add(el);
+		}
+		for (const el of dimmed) if (!nextDimmed.has(el)) el.classList.remove("md-read-below");
+		for (const el of nextDimmed) if (!dimmed.has(el)) el.classList.add("md-read-below");
+		dimmed = nextDimmed;
+	};
+	const scheduleReadAssist = () => {
+		if (!assistFrame) assistFrame = requestAnimationFrame(applyReadAssist);
+	};
+	onCleanup(clearReadAssist);
 	const follows = () => {
 		const top = view.getBoundingClientRect().top + 24;
 		let last = "";
@@ -215,6 +288,7 @@ export function MarkdownView(props: { path: string; /** The editor group the pag
 			last = h.id;
 		}
 		setAt(last || (headings()[0]?.id ?? ""));
+		if (pointerY !== null) scheduleReadAssist();
 	};
 	/**
 	 * A place in the text asked for from elsewhere (a heading in the Objects panel, a link to a line) is shown here as
@@ -270,6 +344,7 @@ export function MarkdownView(props: { path: string; /** The editor group the pag
 				if (!article) return;
 				void colourCode(article);
 				markBroken();
+				if (pointerY !== null) scheduleReadAssist();
 				// A task list's boxes can be ticked here: each is the item of that place in the text. Where the page and the
 				// text do not count the same items, the boxes stay as the renderer made them, for reading only.
 				const boxes = [...article.querySelectorAll<HTMLInputElement>('li > input[type="checkbox"], li > p > input[type="checkbox"]')];
@@ -286,7 +361,23 @@ export function MarkdownView(props: { path: string; /** The editor group the pag
 		),
 	);
 	return (
-		<div class="md-view" ref={view} tabindex={0} aria-label={`${props.path.split(/[\\/]/).pop()}, rendered`} aria-haspopup="menu" onScroll={follows} onContextMenu={(e) => void pageMenu(e)}>
+		<div
+			class="md-view"
+			ref={view}
+			tabindex={0}
+			aria-label={`${props.path.split(/[\\/]/).pop()}, rendered`}
+			aria-haspopup="menu"
+			onScroll={follows}
+			onMouseMove={(e) => {
+				pointerY = e.clientY;
+				scheduleReadAssist();
+			}}
+			onMouseLeave={() => {
+				pointerY = null;
+				clearReadAssist();
+			}}
+			onContextMenu={(e) => void pageMenu(e)}
+		>
 			<div class="md-page">
 				<div class="md-column">
 					<Show when={facts().length}>

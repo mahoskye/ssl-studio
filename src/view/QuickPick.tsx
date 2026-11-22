@@ -100,9 +100,14 @@ function Picker(props: { mode: QuickMode }) {
 	});
 	const pick = (item?: Item) => {
 		if (!item) return;
-		if (!item.stay) close();
-		item.run();
-		if (item.stay) setSelected(0);
+		if (!item.stay) {
+			close();
+			// Defer running after the current Enter keydown/keypress cycle settles so focus-shifting commands never leak a stray newline into CM6.
+			setTimeout(() => item.run(), 0);
+		} else {
+			item.run();
+			setSelected(0);
+		}
 	};
 	// Enter pressed before the list arrived picks once it does.
 	const [pendingEnter, setPendingEnter] = createSignal(false);
@@ -162,7 +167,7 @@ function Picker(props: { mode: QuickMode }) {
 					else if (e.key === "ArrowUp") (e.preventDefault(), move(-1));
 					else if (e.key === "PageDown") (e.preventDefault(), move(PAGE));
 					else if (e.key === "PageUp") (e.preventDefault(), move(-PAGE));
-					else if (e.key === "Enter") (e.preventDefault(), loading() ? setPendingEnter(true) : pick(items()[selected()]));
+					else if (e.key === "Enter") (e.preventDefault(), e.stopPropagation(), loading() ? setPendingEnter(true) : pick(items()[selected()]));
 				}}
 			/>
 			<div class="items" role="listbox" id={listId} aria-label={TITLES[mode()]} ref={list}>
