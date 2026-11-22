@@ -167,6 +167,21 @@ export function withFrontMatter(text: string, key: string, value: string): strin
 	return `${text.slice(0, lines[at]!.start)}${lines[at]!.text.slice(0, lines[at]!.text.indexOf(":"))}: ${value}${text.slice(lines[at]!.end)}`;
 }
 
+/**
+ * Adds `item` to a front matter list key (e.g. `specs: [a, b]`, `plans: [...]`, `related: [...]`).
+ * If `item` is already present (case-insensitive), returns `text` unchanged.
+ * Returns `null` if the key is written as a multi-line YAML bullet list that cannot be updated inline.
+ */
+export function addToFrontMatterList(text: string, key: string, item: string): string | null {
+	const wanted = item.trim();
+	if (!wanted) return text;
+	const existing = many(frontMatter(text).values[key.toLowerCase()]);
+	if (existing.some((v) => v.toLowerCase() === wanted.toLowerCase())) return text;
+	const quote = (v: string) => (/[:#[\]{},&*?|>!'"%@`]|^\s|\s$/.test(v) ? JSON.stringify(v) : v);
+	const formatted = `[${[...existing, wanted].map(quote).join(", ")}]`;
+	return withFrontMatter(text, key, formatted);
+}
+
 /** Where the body starts in the text: after the front matter's lines. */
 export function bodyOffset(text: string): number {
 	let at = 0;

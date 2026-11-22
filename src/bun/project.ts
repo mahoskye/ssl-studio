@@ -285,9 +285,10 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 		const name = relative(area("tickets"), path);
 		const key = one(values.ticket) || basename(path).replace(MARKDOWN, "");
 		const specs = many(values.specs);
+		const plans = many(values.plans);
 		const related = [...many(values.related), ...many(values.blocks), ...many(values["blocked-by"]), ...many(values.parent)];
-		const missing = specs.filter((spec) => !existsSync(join(root, spec)));
-		list.push({ path, name, group: "tickets", exists: true, ...described(text), ...brokenLinks(root, path, text, named), ...(isCatalog({ name }) ? {} : { ticket: key, parent: one(values.parent) || undefined, tickets: related.length ? related : undefined, specs: specs.length ? specs : undefined, missing: missing.length ? missing : undefined }) });
+		const missing = [...specs, ...plans].filter((ref) => !existsSync(join(root, ref)));
+		list.push({ path, name, group: "tickets", exists: true, ...described(text), ...brokenLinks(root, path, text, named), ...(isCatalog({ name }) ? {} : { ticket: key, parent: one(values.parent) || undefined, tickets: related.length ? related : undefined, specs: specs.length ? specs : undefined, plans: plans.length ? plans : undefined, missing: missing.length ? missing : undefined }) });
 	}
 	// The specs: those written by hand, and those the planner writes beside a plan.
 	for (const path of [...under(area("specs"), MARKDOWN), ...under(join(root, project.plans), /\.spec\.md$/i)]) {
@@ -296,11 +297,14 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 		const said = described(text);
 		// A spec the planner wrote is for the ticket its plan names, and is called what its plan is: it has no
 		// heading of its own to be called by, and its first section is not its name.
-		const plan = fromPlan ? await planSays(path.replace(/\.spec\.md$/i, ".plan.json")) : { ticket: "", title: "" };
+		const planPath = path.replace(/\.spec\.md$/i, ".plan.json");
+		const plan = fromPlan ? await planSays(planPath) : { ticket: "", title: "" };
 		const planned = plan.ticket;
 		if (fromPlan && plan.title && !one(frontMatter(text).values.title) && !/^#\s+\S/m.test(frontMatter(text).body)) said.title = plan.title;
+		const ownTickets = said.tickets?.length ? [...said.tickets] : undefined;
+		const pairedPlan = fromPlan && existsSync(planPath) ? { name: basename(planPath), ...(planned ? { ticket: planned } : {}) } : undefined;
 		const tickets = planned && !said.tickets?.some((key) => key.toLowerCase() === planned.toLowerCase()) ? [...(said.tickets ?? []), planned] : said.tickets;
-		list.push({ path, name: fromPlan ? `${project.plans}/${relative(join(root, project.plans), path)}` : relative(area("specs"), path), group: "specs", exists: true, ...said, ...brokenLinks(root, path, text, named), ...(tickets?.length ? { tickets } : {}) });
+		list.push({ path, name: fromPlan ? `${project.plans}/${relative(join(root, project.plans), path)}` : relative(area("specs"), path), group: "specs", exists: true, ...said, ...brokenLinks(root, path, text, named), ...(tickets?.length ? { tickets } : {}), ...(ownTickets ? { ownTickets } : {}), ...(pairedPlan ? { pairedPlan } : {}) });
 	}
 	// The knowledge base: decisions, questions, snippets and notes, each kind in its folder.
 	for (const path of under(area("knowledge"), /\.(md|markdown|sql|ssl|srvscr|ds|txt|json|toml|csv)$/i)) {

@@ -15,7 +15,7 @@ import { docByName, linkedFrom, namedLink } from "../../shared/namedLinks";
 import { baseName, dirName, isInside, joinPath, relativeTo } from "../../shared/paths";
 import { DOC_FOLDERS, registryTitle, statusChoices, toneOf } from "../../shared/projectDocs";
 import { rowsLine } from "../../shared/registryTickets";
-import { ticketWork } from "../../shared/workContext";
+import { docLinkedTickets, ticketWork } from "../../shared/workContext";
 import { backend } from "../backend";
 import { choose } from "../dialogs";
 import { Icon } from "../Icon";
@@ -24,7 +24,7 @@ import { noteCursor } from "../navigation";
 import { chooseFromMenu } from "../panels/RowMenu";
 import { searchFor } from "../panels/Search";
 import { docs } from "../project";
-import { setStatus } from "../projectDocs";
+import { linkDocumentToTicket, newSpec, setStatus } from "../projectDocs";
 import {
 	canonical,
 	documents,
@@ -119,6 +119,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 	const [text, setText] = createSignal(model?.getValue() ?? "");
 	const [propsOpen, setPropsOpen] = createSignal(true);
 	const [editYaml, setEditYaml] = createSignal(false);
+	const [workGuideOpen, setWorkGuideOpen] = createSignal(false);
 	const [backlinksOpen, setBacklinksOpen] = createSignal(true);
 	const [hoverCard, setHoverCard] = createSignal<HoverCardState | null>(null);
 	const [tableHud, setTableHud] = createSignal<ActiveTableHud | null>(null);
@@ -178,6 +179,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		return file?.ticket ?? "";
 	});
 	const work = createMemo(() => (ticket() ? ticketWork(docs(), ticket()) : []));
+	const linkedTickets = createMemo(() => (!ticket() ? docLinkedTickets(docs(), props.path) : []));
 	const listed = createMemo(() => docs().find((d) => ["tickets", "specs", "knowledge"].includes(d.group) && canonical(d.path) === props.path));
 
 	const [linked] = createResource(
@@ -1291,48 +1293,177 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 					</section>
 				</Show>
 
-				{/* Ticket work summary (specs, plans, registries, decisions, questions tied to this ticket — with rich hover previews). */}
-				<Show when={work().length > 0}>
+				{/* Ticket work summary (specs, plans, registries, decisions, questions tied to this ticket — with link origins, quick-link actions, and hover previews). */}
+				<Show when={ticket()}>
 					<section class="md-work" aria-label={`The work for ${ticket()}`}>
-						<h2>The work for {ticket()}</h2>
-						<For each={work()}>
-							{(group) => (
-								<div class="md-work-group">
-									<h3>{group.name}</h3>
-									<ul>
-										<For each={group.files}>
-											{(file) => (
-												<li>
-													<button
-														class="link"
-														title={[file.path, group.kind === "registry" ? `Opens the table at the rows for ${ticket()}.` : ""].filter(Boolean).join("\n")}
-														onClick={() => {
-															if (group.kind === "registry") askRows(file.path, ticket());
-															void openFile(file.path);
-														}}
-														onMouseEnter={(e) =>
-															hoverFileButton(file.path, e.currentTarget, {
-																ticket: group.kind === "registry" ? ticket() : undefined,
-															})
-														}
-														onMouseLeave={scheduleHideHover}
-													>
-														{file.ticket && !file.title?.startsWith(file.ticket) ? `${file.ticket}: ` : ""}
-														{group.kind === "registry" ? registryTitle(file.name) : file.title || file.name.replace(/\.plan\.json$/i, "")}
-													</button>
-													<Show when={group.kind === "registry" && file.forTickets?.find((rows) => rows.key.toLowerCase() === ticket().toLowerCase())}>
-														{(rows) => <span class="md-work-note">{rowsLine(rows())}</span>}
-													</Show>
-													<Show when={file.status}>
-														<span class={`doc-status tone-${toneOf(file.status)}`}>{file.status}</span>
-													</Show>
-												</li>
-											)}
-										</For>
-									</ul>
-								</div>
-							)}
-						</For>
+						<div class="md-work-head">
+							<h2>The work for {ticket()}</h2>
+							<div class="md-work-actions">
+								<button
+									type="button"
+									class="md-work-btn"
+									title={`Create a new spec for ${ticket()}`}
+									onClick={() => void newSpec()}
+								>
+									<Icon name="add" />
+									<span>Spec</span>
+								</button>
+								<button
+									type="button"
+									class="md-work-btn"
+									title={`Create a new plan for ${ticket()}`}
+									onClick={() => void import("../commands").then((m) => m.runCommand("new-plan"))}
+								>
+									<Icon name="add" />
+									<span>Plan</span>
+								</button>
+								<button
+									type="button"
+									class="md-work-btn"
+									title={`Link an existing spec, plan, ticket, decision, or question to ${ticket()}`}
+									onClick={() => void linkDocumentToTicket(props.path, ticket())}
+								>
+									<Icon name="references" />
+									<span>Link…</span>
+								</button>
+								<button
+									type="button"
+									class="md-work-btn md-work-guide-btn"
+									classList={{ active: workGuideOpen() }}
+									aria-expanded={workGuideOpen()}
+									title="Show how documents and plans associate with a ticket"
+									onClick={() => setWorkGuideOpen((v) => !v)}
+								>
+									<Icon name="question" />
+									<span>How links work</span>
+								</button>
+							</div>
+						</div>
+						<Show when={workGuideOpen()}>
+							<div class="md-work-guide">
+								<p class="md-work-guide-intro">
+									Everything under <strong>{ticket()}</strong> in the Work list and here comes straight from the files — no hidden metadata:
+								</p>
+								<dl class="md-work-guide-list">
+									<div>
+										<dt>Specs</dt>
+										<dd>
+											Add <code>specs: [path/to/spec.md]</code> on this ticket, add <code>ticket: {ticket()}</code> in the spec&apos;s frontmatter, or place a <code>.spec.md</code> beside a linked <code>.plan.json</code>.
+										</dd>
+									</div>
+									<div>
+										<dt>Plans</dt>
+										<dd>
+											Set <code>&quot;ticket&quot;: &quot;{ticket()}&quot;</code> in the plan (via the Plan panel&apos;s Ticket field) or add <code>plans: [design/Name.plan.json]</code> on this ticket.
+										</dd>
+									</div>
+									<div>
+										<dt>Decisions &amp; Questions</dt>
+										<dd>
+											Add <code>ticket: {ticket()}</code> (or <code>tickets: [{ticket()}, …]</code>) in that document&apos;s YAML frontmatter.
+										</dd>
+									</div>
+									<div>
+										<dt>Tickets</dt>
+										<dd>
+											Use <code>parent: {ticket()}</code> on another ticket to nest it under {ticket()} in Work, or <code>related: [OTHER-1]</code> on either ticket.
+										</dd>
+									</div>
+									<div>
+										<dt>Registries</dt>
+										<dd>
+											Any CSV row whose <code>Ticket</code> column lists <code>{ticket()}</code> appears under <em>To carry across</em>.
+										</dd>
+									</div>
+								</dl>
+							</div>
+						</Show>
+						<Show
+							when={work().length > 0}
+							fallback={
+								<p class="md-work-empty">
+									No specs, plans, or notes linked yet. Use <strong>Spec</strong>, <strong>Plan</strong>, or <strong>Link…</strong> above, or open <strong>How links work</strong> to wire them in YAML.
+								</p>
+							}
+						>
+							<For each={work()}>
+								{(group) => (
+									<div class="md-work-group">
+										<h3>{group.name}</h3>
+										<ul>
+											<For each={group.items}>
+												{(item) => {
+													const file = item.file;
+													return (
+														<li>
+															<button
+																class="link"
+																title={[file.path, `Linked via: ${item.detail}`, group.kind === "registry" ? `Opens the table at the rows for ${ticket()}.` : ""].filter(Boolean).join("\n")}
+																onClick={() => {
+																	if (group.kind === "registry") askRows(file.path, ticket());
+																	void openFile(file.path);
+																}}
+																onMouseEnter={(e) =>
+																	hoverFileButton(file.path, e.currentTarget, {
+																		ticket: group.kind === "registry" ? ticket() : undefined,
+																	})
+																}
+																onMouseLeave={scheduleHideHover}
+															>
+																{file.ticket && !file.title?.startsWith(file.ticket) ? `${file.ticket}: ` : ""}
+																{group.kind === "registry" ? registryTitle(file.name) : file.title || file.name.replace(/\.plan\.json$/i, "")}
+															</button>
+															<Show when={group.kind === "registry" && file.forTickets?.find((rows) => rows.key.toLowerCase() === ticket().toLowerCase())}>
+																{(rows) => <span class="md-work-note">{rowsLine(rows())}</span>}
+															</Show>
+															<Show when={file.status}>
+																<span class={`doc-status tone-${toneOf(file.status)}`}>{file.status}</span>
+															</Show>
+															<span class="md-work-via" title={item.detail}>
+																{item.reason}
+															</span>
+														</li>
+													);
+												}}
+											</For>
+										</ul>
+									</div>
+								)}
+							</For>
+						</Show>
+					</section>
+				</Show>
+
+				{/* Non-ticket linked documents (e.g. companion .spec.md with no YAML frontmatter): show which tickets reference this doc and why. */}
+				<Show when={linkedTickets().length > 0}>
+					<section class="md-linked-tickets" aria-label="Linked tickets">
+						<h2>Linked tickets</h2>
+						<ul>
+							<For each={linkedTickets()}>
+								{(entry) => (
+									<li>
+										<button
+											class="link"
+											title={[entry.ticket.path, `Linked via: ${entry.detail}`].join("\n")}
+											onClick={() => void openFile(entry.ticket.path)}
+											onMouseEnter={(e) => hoverFileButton(entry.ticket.path, e.currentTarget)}
+											onMouseLeave={scheduleHideHover}
+										>
+											<strong>{entry.key}</strong>
+											<Show when={entry.ticket.title && !entry.ticket.title.toLowerCase().startsWith(entry.key.toLowerCase())}>
+												{`: ${entry.ticket.title}`}
+											</Show>
+										</button>
+										<Show when={entry.ticket.status}>
+											<span class={`doc-status tone-${toneOf(entry.ticket.status)}`}>{entry.ticket.status}</span>
+										</Show>
+										<span class="md-work-via" title={entry.detail}>
+											{entry.reason}
+										</span>
+									</li>
+								)}
+							</For>
+						</ul>
 					</section>
 				</Show>
 

@@ -64,7 +64,13 @@ export type DocFile = {
 	parent?: string;
 	/** A ticket: the specs it names, as paths from the project's root. */
 	specs?: string[];
-	/** A ticket: those of the specs it names that are not there. */
+	/** A ticket: the plans it names, as paths from the project's root. */
+	plans?: string[];
+	/** A spec: the tickets declared in its own front matter (before merging a paired plan's ticket). */
+	ownTickets?: string[];
+	/** A spec written beside a `.plan.json`: the paired plan's name and ticket, when it names one. */
+	pairedPlan?: { name: string; ticket?: string };
+	/** A ticket: those of the specs or plans it names that are not there. */
 	missing?: string[];
 	/**
 	 * Knowledge: the folder it is in under the knowledge base ("decisions", "snippets"); "" at its top. Schema: the

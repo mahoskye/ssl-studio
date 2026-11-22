@@ -7,7 +7,7 @@ import { CATALOG_FILE, catalogBlock, catalogStale, hasCatalogPlace, withCatalog,
 import { csvRow } from "../shared/csv";
 import { localDay } from "../shared/dates";
 import { parseCsv } from "../shared/csv";
-import { frontMatter, one, withFrontMatter } from "../shared/frontMatter";
+import { addToFrontMatterList, frontMatter, many, one, withFrontMatter } from "../shared/frontMatter";
 import { importSummary, ticketsFromJson, ticketsFromTable, type Imported, type ImportedTicket } from "../shared/ticketImport";
 import { manifestSummary, mergeManifest } from "../shared/manifest";
 import { namesToFollow, withNames } from "../shared/namedLinks";
@@ -56,7 +56,7 @@ import type { LinkMend } from "../shared/docChecks";
 import { ownLinkEdits, withLinkFiles, type LinkEdit } from "../shared/docLinks";
 import { parsePlan, isPlanPath } from "./plan/model";
 import { docs, isMarkdown } from "./project";
-import { ticketAtHand as listedTicketAtHand, workFor, workLabel, workText } from "../shared/workContext";
+import { ticketAtHand as listedTicketAtHand, ticketWork, workFor, workLabel, workText } from "../shared/workContext";
 import { activeDoc, activePath, applyText, canonical, documents, notify, openFile, save, setState, state } from "./state";
 
 const today = () => localDay();
@@ -764,6 +764,112 @@ export async function updateManifest() {
 		setState("treeVersion", (v) => v + 1);
 		notify(manifestSummary(change));
 		await openFile(path);
+	} catch (e: any) {
+		notify(String(e?.message ?? e), "error");
+	}
+}
+
+/**
+ * Lets the user link an existing spec, plan, ticket, decision, or question directly from a ticket file,
+ * writing the exact standard YAML frontmatter field so the association shows up in both the ticket and Work list.
+ */
+export async function linkDocumentToTicket(ticketPath: string, key: string): Promise<void> {
+	if (!ready()) return;
+	const all = docs();
+	const linkedPaths = new Set(
+		ticketWork(all, key).flatMap((group) => group.files.map((f) => canonical(f.path))),
+	);
+	linkedPaths.add(canonical(ticketPath));
+
+	const rel = (p: string) => relativeTo(root(), p).split("\\").join("/");
+	const candidates = all.filter((f) => {
+		if (!f.exists || isCatalog(f)) return false;
+		if (linkedPaths.has(canonical(f.path))) return false;
+		if (f.group === "specs" || f.group === "plans") return true;
+		if (f.group === "tickets" && f.ticket) return true;
+		if (f.group === "knowledge" && /\.(md|markdown)$/i.test(f.name) && (f.kind === "decisions" || f.kind === "questions")) return true;
+		return false;
+	});
+
+	if (!candidates.length) {
+		notify(`Every spec, plan, ticket, decision, and question in this project is already linked to ${key}.`);
+		return;
+	}
+
+	const kindTag = (f: DocFile) =>
+		f.group === "plans"
+			? "Plan"
+			: f.group === "specs"
+				? "Spec"
+				: f.group === "tickets"
+					? "Ticket"
+					: f.kind === "decisions"
+						? "Decision"
+						: "Question";
+
+	const labels: string[] = [];
+	const details: Record<string, string> = {};
+	const byLabel = new Map<string, DocFile>();
+
+	for (const f of candidates) {
+		const title =
+			f.group === "plans"
+				? f.name.replace(/\.plan\.json$/i, "")
+				: f.group === "tickets" && f.ticket
+					? `${f.ticket}: ${f.title || f.name}`
+					: f.title || f.name;
+		const label = `${kindTag(f)}: ${title}`;
+		const relPath = rel(f.path);
+		const actionDetail =
+			f.group === "specs"
+				? `Adds ${relPath} to specs: in ${baseName(ticketPath)}`
+				: f.group === "plans"
+					? `Adds ${relPath} to plans: in ${baseName(ticketPath)}`
+					: f.group === "tickets"
+						? `Adds ${f.ticket} to related: in ${baseName(ticketPath)}`
+						: `Adds ${key} to ticket: in ${relPath}'s frontmatter`;
+		labels.push(label);
+		details[label] = actionDetail;
+		byLabel.set(label, f);
+	}
+
+	const picked = await choose(`Link an existing document to ${key}`, labels, { details });
+	if (!picked) return;
+	const target = byLabel.get(picked);
+	if (!target) return;
+
+	try {
+		if (target.group === "specs" || target.group === "plans" || target.group === "tickets") {
+			const before = await current(ticketPath);
+			if (before === null) return;
+			const field = target.group === "specs" ? "specs" : target.group === "plans" ? "plans" : "related";
+			const entry = target.group === "tickets" ? (target.ticket ?? target.name) : rel(target.path);
+			const next = addToFrontMatterList(before, field, entry);
+			if (next === null) {
+				notify(`Could not update ${field}: automatically because it uses a multi-line list in ${baseName(ticketPath)} — add ${entry} directly in YAML.`, "error");
+				return;
+			}
+			if (next !== before) await put(ticketPath, next, true);
+			setState("treeVersion", (v) => v + 1);
+			notify(`Linked ${baseName(target.path)} — added to ${field}: in ${baseName(ticketPath)}.`);
+			return;
+		}
+
+		// Knowledge doc (decision / question): write ticket: or tickets: in the target document's frontmatter.
+		const before = await current(target.path);
+		if (before === null) return;
+		const fm = frontMatter(before);
+		const existing = [...many(fm.values.ticket), ...many(fm.values.tickets)];
+		const next = existing.length
+			? addToFrontMatterList(before, "tickets", key)
+			: withFrontMatter(before, "ticket", key);
+		if (next === null) {
+			notify(`Could not update ticket: automatically in ${baseName(target.path)} — add ticket: ${key} directly in its frontmatter.`, "error");
+			return;
+		}
+		if (next !== before) await put(target.path, next, true);
+		setState("treeVersion", (v) => v + 1);
+		notify(`Linked ${baseName(target.path)} — set ticket: ${key} in its frontmatter.`);
 	} catch (e: any) {
 		notify(String(e?.message ?? e), "error");
 	}

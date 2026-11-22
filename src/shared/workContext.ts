@@ -125,8 +125,128 @@ export async function workText(work: Work, readFile: (path: string) => Promise<s
 	return parts.join("\n");
 }
 
+/** Explains how a document or related ticket is associated with a ticket. */
+export type WorkLink = {
+	/** Short inline label shown on the ticket page (e.g. `ticket specs:`, `plan "ticket": "DEMO-101"`). */
+	reason: string;
+	/** Plain-English hover explanation showing the exact file/field so the pattern can be replicated. */
+	detail: string;
+};
+
+/** One document linked to a ticket, paired with how it got associated. */
+export type WorkItem = { file: DocFile; reason: string; detail: string };
+
 /** One kind of thing tied to a ticket, with the documents of that kind. */
-export type WorkGroup = { kind: "plan" | "spec" | "ticket" | "question" | "answer" | "decision" | "registry"; name: string; files: DocFile[] };
+export type WorkGroup = {
+	kind: "plan" | "spec" | "ticket" | "question" | "answer" | "decision" | "registry";
+	name: string;
+	files: DocFile[];
+	items: WorkItem[];
+};
+
+const pathMatchesRef = (filePath: string, ref: string) => {
+	const full = slashes(filePath).toLowerCase();
+	const clean = slashes(ref).replace(/^\.\//, "").toLowerCase();
+	return full === clean || full.endsWith(`/${clean}`);
+};
+
+/** Explains how `file` is associated with `ticket`, directly from the project's document metadata. */
+export function workLinkOf(ticket: DocFile, file: DocFile, kind: WorkGroup["kind"]): WorkLink {
+	const key = ticket.ticket ?? ticket.name;
+	if (kind === "plan") {
+		const inPlanJson = Boolean(file.tickets?.some((named) => same(named, key)));
+		const inTicketPlans = Boolean(ticket.plans?.some((ref) => pathMatchesRef(file.path, ref)));
+		if (inPlanJson && inTicketPlans) {
+			return {
+				reason: `plan "ticket" · ticket plans:`,
+				detail: `Linked both by "ticket": "${key}" inside ${file.name} and by plans: in ${ticket.name}.`,
+			};
+		}
+		if (inTicketPlans) {
+			return {
+				reason: "ticket plans:",
+				detail: `Listed under plans: in ${ticket.name}'s YAML frontmatter.`,
+			};
+		}
+		return {
+			reason: `plan "ticket": "${key}"`,
+			detail: `Linked by "ticket": "${key}" inside ${file.name} (editable in the Plan panel's Ticket field, or via plans: on this ticket).`,
+		};
+	}
+
+	if (kind === "spec") {
+		const inTicketSpecs = Boolean(ticket.specs?.some((ref) => pathMatchesRef(file.path, ref)));
+		const own = file.ownTickets ?? (file.pairedPlan ? [] : (file.tickets ?? []));
+		const inSpecFm = own.some((named) => same(named, key));
+		const viaPlan = Boolean(file.pairedPlan && same(file.pairedPlan.ticket, key));
+		const reasons: string[] = [];
+		const details: string[] = [];
+		if (inTicketSpecs) {
+			reasons.push("ticket specs:");
+			details.push(`Listed under specs: in ${ticket.name}'s YAML frontmatter`);
+		}
+		if (inSpecFm) {
+			reasons.push(`spec ticket: ${key}`);
+			details.push(`Declares ticket: ${key} in ${file.name}'s YAML frontmatter`);
+		}
+		if (viaPlan && file.pairedPlan) {
+			const planStem = file.pairedPlan.name.replace(/\.plan\.json$/i, "");
+			reasons.push(`paired with ${planStem}`);
+			details.push(`Companion .spec.md beside ${file.pairedPlan.name} ("ticket": "${key}")`);
+		}
+		if (!reasons.length) {
+			reasons.push(`ticket: ${key}`);
+			details.push(`Associated with ${key}.`);
+		}
+		return { reason: reasons.join(" · "), detail: `${details.join("; ")}.` };
+	}
+
+	if (kind === "ticket") {
+		const otherKey = file.ticket ?? file.name;
+		if (same(file.parent, key)) {
+			return {
+				reason: `sub-ticket (parent: ${key})`,
+				detail: `${otherKey} declares parent: ${key} in its frontmatter, nesting it under ${key} in the Work list.`,
+			};
+		}
+		if (same(ticket.parent, otherKey)) {
+			return {
+				reason: `parent ticket`,
+				detail: `${key} declares parent: ${otherKey} in its frontmatter.`,
+			};
+		}
+		const thisNamesOther = Boolean(ticket.tickets?.some((named) => same(named, otherKey)));
+		const otherNamesThis = Boolean(file.tickets?.some((named) => same(named, key)));
+		if (thisNamesOther && otherNamesThis) {
+			return {
+				reason: "related: (both)",
+				detail: `${key} and ${otherKey} both name each other in their frontmatter.`,
+			};
+		}
+		if (thisNamesOther) {
+			return {
+				reason: "ticket related:",
+				detail: `Listed under related: / blocks: in ${ticket.name}'s YAML frontmatter.`,
+			};
+		}
+		return {
+			reason: `${otherKey} names ${key}`,
+			detail: `${otherKey} lists ${key} in its related: / blocks: frontmatter.`,
+		};
+	}
+
+	if (kind === "registry") {
+		return {
+			reason: "Ticket column",
+			detail: `Rows in ${file.name} list ${key} in their Ticket column.`,
+		};
+	}
+
+	return {
+		reason: `doc ticket: ${key}`,
+		detail: `${file.name} declares ticket: ${key} (or tickets: [${key}, ...]) in its YAML frontmatter.`,
+	};
+}
 
 /**
  * Everything in the folder that is tied to a ticket, for the ticket's own
@@ -140,16 +260,70 @@ export function ticketWork(files: readonly DocFile[], key: string): WorkGroup[] 
 	const work = workFor(files, key);
 	if (!work) return [];
 	const forIt = (file: DocFile) => Boolean(file.tickets?.some((named) => same(named, key)));
-	const plans = files.filter((file) => file.exists && file.group === "plans" && forIt(file));
+	const plans = files.filter(
+		(file) =>
+			file.exists &&
+			file.group === "plans" &&
+			(forIt(file) || Boolean(work.ticket.plans?.some((ref) => pathMatchesRef(file.path, ref)))),
+	);
+	const make = (kind: WorkGroup["kind"], name: string, groupFiles: DocFile[]): WorkGroup => ({
+		kind,
+		name,
+		files: groupFiles,
+		items: groupFiles.map((file) => ({ file, ...workLinkOf(work.ticket, file, kind) })),
+	});
 	const groups: WorkGroup[] = [
-		{ kind: "plan", name: "Plans", files: plans },
-		{ kind: "spec", name: "Specs", files: work.specs },
-		{ kind: "ticket", name: "Related tickets", files: work.related },
-		{ kind: "question", name: "Open questions", files: work.open.filter(forIt) },
-		{ kind: "answer", name: "Answered", files: work.answered },
-		{ kind: "decision", name: "Decisions", files: work.decisions.filter(forIt) },
+		make("plan", "Plans", plans),
+		make("spec", "Specs", work.specs),
+		make("ticket", "Related tickets", work.related),
+		make("question", "Open questions", work.open.filter(forIt)),
+		make("answer", "Answered", work.answered),
+		make("decision", "Decisions", work.decisions.filter(forIt)),
 		// What the ticket has to bring across: the registries with rows that name it.
-		{ kind: "registry", name: "To carry across", files: files.filter((file) => file.exists && file.group === "registries" && forIt(file)) },
+		make(
+			"registry",
+			"To carry across",
+			files.filter((file) => file.exists && file.group === "registries" && forIt(file)),
+		),
 	];
 	return groups.filter((group) => group.files.length);
+}
+
+/** For a non-ticket document (spec, plan, decision, question), returns every ticket linked to it and why. */
+export function docLinkedTickets(
+	files: readonly DocFile[],
+	docPath: string,
+): { ticket: DocFile; key: string; reason: string; detail: string }[] {
+	const clean = slashes(docPath).toLowerCase();
+	const real = files.filter((file) => file.exists && !isCatalog(file));
+	const doc = real.find((file) => slashes(file.path).toLowerCase() === clean);
+	if (!doc || doc.group === "tickets") return [];
+	const kind: WorkGroup["kind"] | null =
+		doc.group === "plans"
+			? "plan"
+			: doc.group === "specs"
+				? "spec"
+				: doc.group === "registries"
+					? "registry"
+					: doc.group === "knowledge"
+						? doc.kind === "decisions"
+							? "decision"
+							: "question"
+						: null;
+	if (!kind) return [];
+	const tickets = real.filter((file) => file.group === "tickets" && file.ticket);
+	const out: { ticket: DocFile; key: string; reason: string; detail: string }[] = [];
+	for (const t of tickets) {
+		const key = t.ticket!;
+		const linked =
+			kind === "spec"
+				? Boolean(doc.tickets?.some((k) => same(k, key)) || t.specs?.some((ref) => pathMatchesRef(doc.path, ref)))
+				: kind === "plan"
+					? Boolean(doc.tickets?.some((k) => same(k, key)) || t.plans?.some((ref) => pathMatchesRef(doc.path, ref)))
+					: Boolean(doc.tickets?.some((k) => same(k, key)));
+		if (linked) {
+			out.push({ ticket: t, key, ...workLinkOf(t, doc, kind) });
+		}
+	}
+	return out;
 }

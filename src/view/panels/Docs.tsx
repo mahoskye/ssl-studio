@@ -117,6 +117,7 @@ function ItemRow(props: {
 	note?: string;
 	aside?: boolean;
 	short?: string;
+	linkDetail?: string;
 	/**
 	 * In a list where rows have rows under them: whether this one has, and whether they are shut away. Leaves a
 	 * twisty's room either way. `locked` says why it cannot be shut now (a filter is showing everything it found).
@@ -132,8 +133,8 @@ function ItemRow(props: {
 			selected={selected()}
 			classList={{ selected: selected(), catalog: isCatalog(props.file) }}
 			style={{ "padding-left": `${8 + (props.depth ?? 0) * 14}px` }}
-			// Where it is, its state, what it is for, and what is wrong with it: nothing the reader has to keep up by hand.
-			title={[props.file.path, props.file.status ? `Status: ${props.file.status}` : "", props.file.tickets?.length ? `${props.file.group === "tickets" ? "Related to" : "For"} ${props.file.tickets.join(", ")}` : "", ...(props.file.problems ?? [])].filter(Boolean).join("\n")}
+			// Where it is, its state, what it is for, how it is linked, and what is wrong with it: nothing the reader has to keep up by hand.
+			title={[props.file.path, props.file.status ? `Status: ${props.file.status}` : "", props.file.tickets?.length ? `${props.file.group === "tickets" ? "Related to" : "For"} ${props.file.tickets.join(", ")}` : "", props.linkDetail ? `Linked via: ${props.linkDetail}` : "", ...(props.file.problems ?? [])].filter(Boolean).join("\n")}
 			expanded={props.fold?.parent ? !props.fold.shut : undefined}
 			onToggle={() => props.fold?.parent && !props.fold.locked && props.fold.toggle()}
 			onActivate={() => void openFile(props.file.path, { preview: true })}
@@ -309,11 +310,11 @@ function Work(props: { files: DocFile[]; empty?: string; filtered?: boolean }) {
 			<For each={rows()}>
 				{(row) =>
 					row.kind === "ticket" ? (
-						<ItemRow file={row.file} depth={row.depth} lead={row.file.ticket} fold={fold(row)} />
+						<ItemRow file={row.file} depth={row.depth} lead={row.file.ticket} linkDetail={row.link?.detail} fold={fold(row)} />
 					) : row.kind === "plan" ? (
-						<ItemRow file={{ ...row.file, title: row.file.name.replace(/\.plan\.json$/i, "") }} depth={row.depth} note="plan" fold={fold(row)} />
+						<ItemRow file={{ ...row.file, title: row.file.name.replace(/\.plan\.json$/i, "") }} depth={row.depth} note="plan" linkDetail={row.link?.detail} fold={fold(row)} />
 					) : (
-						<ItemRow file={row.file} depth={row.depth} note="spec" fold={fold(row)} />
+						<ItemRow file={row.file} depth={row.depth} note="spec" linkDetail={row.link?.detail} fold={fold(row)} />
 					)
 				}
 			</For>

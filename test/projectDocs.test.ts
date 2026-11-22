@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { catalogBlock, catalogLine, catalogList, catalogStale, withCatalog, CATALOG_END, CATALOG_START } from "../src/shared/catalog";
 import { columnOf, csvCell, csvRow, parseCsv, tally } from "../src/shared/csv";
-import { frontMatter, many, one, summaryOf, titleOf } from "../src/shared/frontMatter";
+import { addToFrontMatterList, frontMatter, many, one, summaryOf, titleOf } from "../src/shared/frontMatter";
 import { catalogTemplate, decisionTemplate, KNOWLEDGE, promptTemplate, promptText, questionTemplate, SCHEMAS, schemaTemplate, slug, specTemplate, statusChoices, ticketKey, ticketTemplate, toneOf } from "../src/shared/projectDocs";
 
 describe("front matter", () => {
@@ -737,7 +737,7 @@ describe("the registries a project is offered", () => {
 });
 
 import { CODE_LINES_KEPT, codeSection, linkedLines } from "../src/shared/projectDocs";
-import { ticketWork } from "../src/shared/workContext";
+import { docLinkedTickets, ticketWork } from "../src/shared/workContext";
 
 describe("a question or a decision about code", () => {
 	const code = { file: "src/Due Dates/DueRule.ssl", link: "../../../src/Due Dates/DueRule.ssl", from: 12, to: 14, text: ":IF nDays > 730;\r\n\t:RETURN NIL;\r\n:ENDIF;\r\n", language: "ssl", date: "2026-11-18" };
@@ -790,6 +790,77 @@ describe("a ticket's own page", () => {
 		expect(ticketWork(docs, "DEMO-103").map((group) => group.name)).toEqual(["Specs", "Related tickets", "To carry across"]);
 		expect(ticketWork(docs, "DEMO-102").map((group) => group.name)).toContain("Answered");
 		expect(ticketWork(docs, "DEMO-999")).toEqual([]);
+	});
+
+	test("explains how each linked plan, spec, ticket, decision, and registry is associated", async () => {
+		const docs = await listed();
+		const byGroup = (key: string) => Object.fromEntries(ticketWork(docs, key).map((g) => [g.name, g.items.map((item) => item.reason)]));
+
+		expect(byGroup("DEMO-101")).toEqual({
+			Plans: ['plan "ticket": "DEMO-101"'],
+			Specs: ["ticket specs: · paired with SetSampleDueDates"],
+			"Related tickets": ["related: (both)", "related: (both)"],
+			"Open questions": ["doc ticket: DEMO-101"],
+			Decisions: ["doc ticket: DEMO-101", "doc ticket: DEMO-101"],
+			"To carry across": ["Ticket column"],
+		});
+		expect(byGroup("DEMO-102").Specs).toEqual(["ticket specs:"]);
+		expect(byGroup("DEMO-103").Specs).toEqual(["spec ticket: DEMO-103"]);
+
+		const specPath = docs.find((d) => d.group === "specs" && d.name.endsWith("SetSampleDueDates.spec.md"))!.path;
+		expect(docLinkedTickets(docs, specPath).map((entry) => [entry.key, entry.reason])).toEqual([
+			["DEMO-101", "ticket specs: · paired with SetSampleDueDates"],
+			["DEMO-102", "ticket specs:"],
+		]);
+		const reportSpecPath = docs.find((d) => d.group === "specs" && d.name.endsWith("Due-soon-report.md"))!.path;
+		expect(docLinkedTickets(docs, reportSpecPath).map((entry) => [entry.key, entry.reason])).toEqual([
+			["DEMO-103", "spec ticket: DEMO-103"],
+		]);
+	});
+
+	test("links plans declared via ticket plans: frontmatter in both ticketWork and workList", () => {
+		const syntheticDocs = [
+			{
+				path: "/p/docs/tickets/T-1.md",
+				name: "T-1.md",
+				group: "tickets" as const,
+				exists: true,
+				ticket: "T-1",
+				title: "Sample ticket",
+				status: "in progress",
+				plans: ["design/Flow.plan.json"],
+			},
+			{
+				path: "/p/design/Flow.plan.json",
+				name: "Flow.plan.json",
+				group: "plans" as const,
+				exists: true,
+			},
+		];
+		const groups = ticketWork(syntheticDocs, "T-1");
+		expect(groups.map((g) => g.name)).toEqual(["Plans"]);
+		expect(groups[0]!.items[0]!.reason).toBe("ticket plans:");
+
+		const list = workList(syntheticDocs, "/p");
+		expect(list.rows.map((r) => [r.kind, r.file.name, r.link?.reason])).toEqual([
+			["ticket", "T-1.md", undefined],
+			["plan", "Flow.plan.json", "ticket plans:"],
+		]);
+		expect(docLinkedTickets(syntheticDocs, "/p/design/Flow.plan.json").map((e) => [e.key, e.reason])).toEqual([["T-1", "ticket plans:"]]);
+	});
+
+	test("addToFrontMatterList appends, creates, deduplicates, and leaves multi-line lists untouched", () => {
+		const base = "---\nticket: T-1\nspecs: [design/A.spec.md]\n---\n# T-1\n";
+		expect(addToFrontMatterList(base, "specs", "docs/specs/B.md")).toBe("---\nticket: T-1\nspecs: [design/A.spec.md, docs/specs/B.md]\n---\n# T-1\n");
+		// Case-insensitive deduplication
+		expect(addToFrontMatterList(base, "specs", "design/a.spec.md")).toBe(base);
+		// Missing key gets inserted cleanly before closing fence
+		expect(addToFrontMatterList(base, "plans", "design/Flow.plan.json")).toBe(
+			"---\nticket: T-1\nspecs: [design/A.spec.md]\nplans: [design/Flow.plan.json]\n---\n# T-1\n",
+		);
+		// Multi-line YAML list returns null so caller doesn't clobber custom formatting
+		const multiline = "---\nticket: T-1\nspecs:\n  - design/A.spec.md\n---\n# T-1\n";
+		expect(addToFrontMatterList(multiline, "specs", "docs/specs/B.md")).toBeNull();
 	});
 });
 

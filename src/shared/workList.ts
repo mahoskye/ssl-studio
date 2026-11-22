@@ -1,13 +1,14 @@
 import { relativeTo } from "./paths";
 import { isCatalog, toneOf, type Tone } from "./projectDocs";
 import type { DocFile } from "./protocol";
+import { workLinkOf, type WorkLink } from "./workContext";
 
 // The Work list of the Docs panel (ADR 0012): the tickets with what was
 // planned and spec'd for each under it, a ticket that is part of another
 // under its parent, the work under way first and what is finished last. Read
 // from the listing alone; the panel draws the rows.
 
-export type WorkRow = { file: DocFile; kind: "ticket" | "plan" | "spec"; depth: number };
+export type WorkRow = { file: DocFile; kind: "ticket" | "plan" | "spec"; depth: number; link?: WorkLink };
 export type WorkList = {
 	rows: WorkRow[];
 	/** Tickets at the top of the list, with all under them, that are finished or set aside and were left out. */
@@ -34,8 +35,9 @@ export function workList(files: readonly DocFile[], root: string | undefined | n
 	const specs = real.filter((file) => file.group === "specs");
 	const plans = real.filter((file) => file.group === "plans");
 	const rel = (path: string) => relativeTo(root, path).split("\\").join("/");
-	const specsOf = (ticket: DocFile) => specs.filter((spec) => spec.tickets?.some((key) => same(key, ticket.ticket)) || ticket.specs?.some((path) => path === rel(spec.path)));
-	const plansOf = (ticket: DocFile) => plans.filter((plan) => plan.tickets?.some((key) => same(key, ticket.ticket)));
+	const matchesRef = (filePath: string, ref: string) => rel(filePath).toLowerCase() === ref.split("\\").join("/").replace(/^\.\//, "").toLowerCase();
+	const specsOf = (ticket: DocFile) => specs.filter((spec) => spec.tickets?.some((key) => same(key, ticket.ticket)) || ticket.specs?.some((path) => matchesRef(spec.path, path)));
+	const plansOf = (ticket: DocFile) => plans.filter((plan) => plan.tickets?.some((key) => same(key, ticket.ticket)) || ticket.plans?.some((path) => matchesRef(plan.path, path)));
 	// A ticket is under its parent when the parent is in the folder, and is not its own ancestor.
 	const parentOf = (ticket: DocFile) => tickets.find((other) => other !== ticket && same(other.ticket, ticket.parent));
 	/** Whether a ticket is its own ancestor: one of a ring of tickets that name each other. A ticket under such a ring is not. */
@@ -54,11 +56,11 @@ export function workList(files: readonly DocFile[], root: string | undefined | n
 	const byRank = (list: DocFile[]) => list.map((ticket, at) => ({ ticket, at, rank: rank(ticket) })).sort((a, b) => a.rank - b.rank || a.at - b.at);
 
 	const rows: WorkRow[] = [];
-	const add = (ticket: DocFile, depth: number) => {
-		rows.push({ file: ticket, kind: "ticket", depth });
-		for (const plan of plansOf(ticket)) rows.push({ file: plan, kind: "plan", depth: depth + 1 });
-		for (const spec of specsOf(ticket)) rows.push({ file: spec, kind: "spec", depth: depth + 1 });
-		if (depth < 8) for (const { ticket: child } of byRank(childrenOf(ticket))) add(child, depth + 1);
+	const add = (ticket: DocFile, depth: number, parentTicket?: DocFile) => {
+		rows.push({ file: ticket, kind: "ticket", depth, ...(parentTicket ? { link: workLinkOf(parentTicket, ticket, "ticket") } : {}) });
+		for (const plan of plansOf(ticket)) rows.push({ file: plan, kind: "plan", depth: depth + 1, link: workLinkOf(ticket, plan, "plan") });
+		for (const spec of specsOf(ticket)) rows.push({ file: spec, kind: "spec", depth: depth + 1, link: workLinkOf(ticket, spec, "spec") });
+		if (depth < 8) for (const { ticket: child } of byRank(childrenOf(ticket))) add(child, depth + 1, ticket);
 	};
 	const ordered = byRank(top);
 	const finished = ordered.filter((entry) => entry.rank >= ORDER.done);
