@@ -3,6 +3,7 @@
 import { createResource, createSignal, For, Show } from "solid-js";
 import { monaco } from "../editor/monaco";
 import { activeEditor } from "../editor/EditorGroup";
+import { activeLiveEditor } from "../editor/liveBridge";
 import { session } from "../lsp/session";
 import { notify, state } from "../state";
 import { focusRowsBelow, IconButton, Row, RowGroup, Rows } from "./Rows";
@@ -88,6 +89,8 @@ export function Reference() {
 	);
 	const shown = () => entries().filter((e) => !filter() || e.label.toLowerCase().includes(filter().toLowerCase()));
 	const insert = (label: string) => {
+		const live = activeLiveEditor();
+		if (live) return live.insertText(label);
 		const editor = activeEditor();
 		if (!editor?.getModel()) return notify(`Open a file to insert ${label}.`);
 		editor.focus();

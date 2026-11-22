@@ -1,7 +1,7 @@
 // App state: the workspace, open documents, editor groups and panels.
 // Documents are Monaco models; the text in them is the source of truth
 // (ADR 0002).
-import { batch } from "solid-js";
+import { batch, createSignal } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 import { DEFAULT_SETTINGS, type Info, type LspState, type Project, type Settings, type SettingsPatch, type ThemeFile, type Workspace } from "../shared/protocol";
 import { backend, on } from "./backend";
@@ -59,6 +59,7 @@ export const [state, setState] = createStore({
 	conflicts: {} as Record<string, boolean>,
 	leftView: "explorer" as LeftView,
 	bottomView: "problems" as BottomView,
+	bottomMaximized: false,
 	rightView: "health" as RightView,
 	centerView: "editors" as "editors" | "graph" | "welcome",
 	/** Plans shown as text; a plan opens as its chart. */
@@ -154,7 +155,7 @@ export async function openFolder(path?: string) {
 	if (!(await settleUnsaved("Opening another folder closes them."))) return;
 	const workspace = await guarded(() => backend.openFolder(path));
 	if (!workspace) return;
-	tabsReady = false;
+	setTabsReady(false);
 	for (const doc of docs.values()) doc.model.dispose();
 	docs.clear();
 	batch(() => {
@@ -181,12 +182,13 @@ export async function openFolder(path?: string) {
 // --- the tabs a folder was left with ---------------------------------------------
 
 /** False while a folder is being opened: its tabs are not yet the ones to remember. */
-let tabsReady = false;
+const [tabsReady, setTabsReady] = createSignal(false);
+export const isTabsReady = tabsReady;
 
 /** Keeps which files are open in this folder, for the next time it is opened. */
 export function rememberTabs() {
 	const root = state.workspace?.root;
-	if (!root || !tabsReady) return;
+	if (!root || !tabsReady()) return;
 	// Floating untitled buffers are not persisted across workspace sessions.
 	const savedGroups = state.groups.map((g) => {
 		const tabs = g.tabs.filter((p) => !isUntitled(p));
@@ -202,7 +204,7 @@ const BOTTOM_VIEWS: readonly BottomView[] = ["problems", "output"];
 /** Keeps which side panel, bottom panel and right panel are showing in this folder, for the next time it is opened. */
 export function rememberViews() {
 	const root = state.workspace?.root;
-	if (root && tabsReady) remember(viewsKey(root), packViews(state.leftView, state.bottomView, state.rightView));
+	if (root && tabsReady()) remember(viewsKey(root), packViews(state.leftView, state.bottomView, state.rightView));
 }
 
 /**
@@ -250,7 +252,7 @@ export async function restoreTabs() {
 		}
 		setState("activeGroup", Math.min(saved.activeGroup, state.groups.length - 1));
 	} finally {
-		tabsReady = true;
+		setTabsReady(true);
 		rememberTabs();
 		rememberViews();
 	}
@@ -335,12 +337,11 @@ export async function saveSetting(patch: SettingsPatch, scope: "user" | "workspa
 export const isUntitled = (path: string | null | undefined): path is string => Boolean(path && path.startsWith("untitled:"));
 export const displayName = (path: string) => (isUntitled(path) ? path.slice("untitled:".length) : baseName(path));
 
-/** Obsidian-style Markdown mode per file (Source | Live | Read). */
+/** Obsidian-style Markdown mode per file (Source | Live | Read). Defaults to Live (or Source when livePreview is disabled). */
 export function markdownMode(path: string): "source" | "live" | "read" {
 	const explicit = state.mdMode[path];
 	if (explicit) return explicit;
-	if (state.mdText[path]) return state.settings.livePreview === false ? "source" : "live";
-	return "read";
+	return state.settings.livePreview === false ? "source" : "live";
 }
 export function setMarkdownMode(path: string, mode: "source" | "live" | "read") {
 	batch(() => {
@@ -362,7 +363,7 @@ export function newUntitled(group = state.activeGroup, language = "plaintext"): 
 	const doc: Doc = { path, model, savedVersion: model.getAlternativeVersionId(), savedText: "", mtime: 0 };
 	docs.set(path, doc);
 	model.onDidChangeContent(() => {
-		const dirty = model.getAlternativeVersionId() !== doc.savedVersion;
+		const dirty = model.getAlternativeVersionId() !== doc.savedVersion && model.getValue() !== doc.savedText;
 		setState("dirty", path, dirty);
 	});
 	closeComparison();
@@ -389,7 +390,7 @@ function attach(path: string, text: string, saved: { text: string; mtime: number
 	const doc: Doc = { path, model, savedVersion: text === saved.text ? model.getAlternativeVersionId() : -1, savedText: saved.text, mtime: saved.mtime };
 	docs.set(path, doc);
 	model.onDidChangeContent(() => {
-		const dirty = model.getAlternativeVersionId() !== doc.savedVersion;
+		const dirty = model.getAlternativeVersionId() !== doc.savedVersion && model.getValue() !== doc.savedText;
 		setState("dirty", path, dirty);
 		// A file that is being written in is not one that was only looked at: its tab stays. Asked a moment later: a
 		// reload from disk is an edit too, and says the file is unchanged once it is done.
@@ -500,6 +501,8 @@ export async function openFile(path: string, options: { group?: number; reveal?:
 		setState("activeGroup", group);
 		// The call graph covers the editors: a file opened behind it would look like nothing happened.
 		setState("centerView", "editors");
+		// A maximized bottom panel covers the editors too: opening a file restores it so the file is visible.
+		if (state.bottomMaximized) setState("bottomMaximized", false);
 	});
 	lookedAt = null;
 	// What was only looked at and has no tab left is let go. It has no unsaved changes: a tab that shows some never gives way.

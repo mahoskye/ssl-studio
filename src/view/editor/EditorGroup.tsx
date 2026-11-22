@@ -1,8 +1,9 @@
 // One editor group: a tab strip over one Monaco editor that shows the
 // group's active document. Two groups side by side make a split.
-import { DEFAULT_CODE_FONT, DEFAULT_UI_FONT, resolveFontStack } from "../../shared/fonts";
+import { DEFAULT_CODE_FONT, resolveFontStack } from "../../shared/fonts";
 import { continueLists } from "./markdownKeys";
-import { drawMarkdownLive, PROSE_FONT } from "./markdownLive";
+import { liveEditorAt } from "./liveBridge";
+import { MarkdownLiveEditor } from "./MarkdownLiveEditor";
 import { Icon } from "../Icon";
 import { tabShown } from "../recentTabs";
 import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
@@ -67,8 +68,8 @@ export function EditorGroup(props: { index: number }) {
 	const isDoc = () => isMarkdown(group().active) && !showFile();
 	const mdViewMode = () => (group().active && isDoc() ? markdownMode(group().active!) : "read");
 	const showRendered = () => isDoc() && mdViewMode() === "read";
-	/** Obsidian-style Live Preview editing when the Markdown file is in Live mode. */
-	const live = () => isDoc() && mdViewMode() === "live";
+	/** Obsidian-grade CodeMirror 6 Live Preview when the Markdown file is in Live mode. */
+	const showLive = () => isDoc() && mdViewMode() === "live";
 	// A table of values opens as a table, with the same switch to its text as a document has.
 	const isTabular = () => isTable(group().active) && !showFile();
 	const showTable = () => isTabular() && !state.mdText[group().active!];
@@ -192,12 +193,10 @@ export function EditorGroup(props: { index: number }) {
 		// may be the browser's. It was never told, so the key the Go menu shows (the last the editor lists) did
 		// nothing. Told here: Ctrl+F12 goes to the definition, and F12 goes on doing so where the window has it.
 		editor.createContextKey("isWeb", true);
-		// The code's own face, read before a document's prose takes the editor over for a while.
+		// The code's own face, read before any custom font overrides.
 		codeFont = editor.getOption(monaco.editor.EditorOption.fontFamily);
-		liveView = drawMarkdownLive(editor, live);
 		const listKeys = continueLists(editor);
 		onCleanup(() => listKeys.dispose());
-		onCleanup(liveView.stop);
 		setRoomy(editor.getLayoutInfo().width >= MINIMAP_FROM);
 		editor.onDidLayoutChange((layout) => setRoomy(layout.width >= MINIMAP_FROM));
 		editor.onDidFocusEditorText(() => setState("activeGroup", props.index));
@@ -223,11 +222,12 @@ export function EditorGroup(props: { index: number }) {
 			if (shown && e.source !== "model" && e.source !== "restoreState") noteCursor({ path: shown, line: e.position.lineNumber, column: e.position.column });
 		});
 		const stop = revealSignal.listen((path) => {
-			if (path === group().active && shown === path) reveal(path);
+			if (path === group().active && shown === path && !showLive()) reveal(path);
 		});
 		// "Focus editor": the text editor, or whichever view of the file is showing in its place.
 		const stopFocus = focusRequest.listen((target) => {
 			if (target !== "editor" || state.activeGroup !== props.index) return;
+			if (showLive()) return void liveEditorAt(props.index)?.focus();
 			if (!showBlocks() && !showChart() && !showRendered() && !showTable() && !showFile()) return editor.focus();
 			section.querySelector<HTMLElement>(".blocks-scroll, .plan [tabindex], .md-view, .table-view input, .file-view")?.focus();
 		});
@@ -261,63 +261,46 @@ export function EditorGroup(props: { index: number }) {
 
 	/** The code's own font, as the editor had it when it was made. */
 	let codeFont = "";
-	/** A document drawn as it is written: see markdownLive.ts. */
-	let liveView: ReturnType<typeof drawMarkdownLive> | undefined;
 	/**
-	 * The file that is showing, and how the editor is set for it. One step, in this order, because each part of it
-	 * moves the lines: the file's place is kept, the editor is set for the next file while it holds none, the file is
-	 * taken up and drawn, and only then is it put where it was left. Done as separate steps in whichever order they
-	 * came, a long document was put back before its lines had their heights, and came back some lines off.
+	 * The file that is showing, and how the Monaco editor is configured for it (all code files
+	 * plus Markdown in raw Source mode; Markdown Live Preview renders in CodeMirror 6).
 	 */
 	createEffect(() => {
 		const path = group().active;
-		// A document being written is prose, not code: the app's own face, lines wrapped at the edge, and none of what
-		// is for code (line numbers, the map, the rulers, the guides, words offered from the file). One editor shows
-		// every file of its group, so each of these is said both ways.
-		const prose = live();
+		const inLive = showLive();
 		const activeCodeFont = state.settings.codeFont?.trim() ? resolveFontStack(state.settings.codeFont, DEFAULT_CODE_FONT) : codeFont || undefined;
-		const activeProseFont = state.settings.uiFont?.trim() ? resolveFontStack(state.settings.uiFont, DEFAULT_UI_FONT) : PROSE_FONT;
 		const options: monaco.editor.IEditorOptions & monaco.editor.IGlobalEditorOptions = {
-			fontSize: state.settings.fontSize + (prose ? 1 : 0),
-			fontFamily: prose ? activeProseFont : activeCodeFont,
-			minimap: { enabled: !prose && minimap() },
-			wordWrap: prose || state.settings.wordWrap ? "on" : "off",
+			fontSize: state.settings.fontSize,
+			fontFamily: activeCodeFont,
+			minimap: { enabled: minimap() },
+			wordWrap: state.settings.wordWrap ? "on" : "off",
 			inlayHints: { enabled: state.settings.inlayHints === false ? "off" : "on" },
-			rulers: prose ? [] : rulers(),
-			lineNumbers: prose ? "off" : "on",
-			lineDecorationsWidth: prose ? 28 : 10,
-			renderLineHighlight: prose ? "none" : "line",
-			guides: { indentation: !prose },
-			wordBasedSuggestions: prose ? "off" : "matchingDocuments",
-			stickyScroll: { enabled: !prose },
-			// Prose is not set in a face where every character is as wide as the next: where a line breaks is measured.
-			wrappingStrategy: prose ? "advanced" : "simple",
-			padding: { top: prose ? 12 : 0, bottom: prose ? 12 : 0 },
+			rulers: rulers(),
+			lineNumbers: "on",
+			lineDecorationsWidth: 10,
+			renderLineHighlight: "line",
+			guides: { indentation: true },
+			wordBasedSuggestions: "matchingDocuments",
+			stickyScroll: { enabled: true },
+			wrappingStrategy: "simple",
+			padding: { top: 0, bottom: 0 },
 		};
 		if (!editor) return;
 		if (path === shown) {
-			// The same file: a setting changed, or a document went between being written and being read. Drawn again,
-			// since a heading's size is the largest its line has room for at the text's size.
 			editor.updateOptions(options);
-			liveView?.redraw();
 			return;
 		}
 		if (shown) keepView(shown);
 		const doc = path ? documents.get(path) : undefined;
-		// Emptied first, so that the editor is set with no text in it: neither file is laid out as the other is set.
 		editor.setModel(null);
 		editor.updateOptions(options);
-		// Taking the file up draws it: markdownLive.ts hears of it.
 		editor.setModel(doc?.model ?? null);
 		shown = doc ? path : null;
 		if (doc) {
-			// As this group left it; failing that, as any group last left it (a tab that came from the other group).
 			const view = viewStates.get(`${props.index}:${path}`) ?? lastViews.get(path!);
 			if (view) editor.restoreViewState(view);
-			reveal(path!);
-			// A file opened for a look leaves the keyboard where it is: on the row that was clicked, so that the keys
-			// that follow (Delete, F2, copy, the arrows) are still the list's. Opened to stay, it takes the keyboard.
-			if (state.activeGroup === props.index && !openedForALook(path!)) editor.focus();
+			if (!inLive) reveal(path!);
+			if (state.activeGroup === props.index && !openedForALook(path!) && !inLive && !showRendered()) editor.focus();
 		}
 	});
 
@@ -353,7 +336,8 @@ export function EditorGroup(props: { index: number }) {
 			// Enter on a tab opened for a look keeps it, as a double click does.
 			keepTab(path, props.index);
 			activate(path);
-			editor.focus();
+			if (showLive()) liveEditorAt(props.index)?.focus();
+			else editor.focus();
 		} else if (e.key === "Delete") {
 			e.preventDefault();
 			void closeTab(path, props.index);
@@ -653,22 +637,28 @@ export function EditorGroup(props: { index: number }) {
 							classList={{ on: mdViewMode() === "source" }}
 							aria-pressed={mdViewMode() === "source"}
 							title="Raw unformatted Markdown text"
-							onClick={() => setMarkdownMode(group().active!, "source")}
+							onClick={() => {
+								setMarkdownMode(group().active!, "source");
+								queueMicrotask(() => focusRequest.fire("editor"));
+							}}
 						>
 							Source
 						</button>
 						<button
 							classList={{ on: mdViewMode() === "live" }}
 							aria-pressed={mdViewMode() === "live"}
-							title="Formatted live preview while editing"
-							onClick={() => setMarkdownMode(group().active!, "live")}
+							title="Live Preview while editing (Ctrl+E toggles Live and Read)"
+							onClick={() => {
+								setMarkdownMode(group().active!, "live");
+								queueMicrotask(() => focusRequest.fire("editor"));
+							}}
 						>
 							Live
 						</button>
 						<button
 							classList={{ on: mdViewMode() === "read" }}
 							aria-pressed={mdViewMode() === "read"}
-							title="The document as a finished reading page"
+							title="Finished reading view (Ctrl+E toggles Live and Read)"
 							onClick={() => setMarkdownMode(group().active!, "read")}
 						>
 							Read
@@ -679,7 +669,7 @@ export function EditorGroup(props: { index: number }) {
 			</Show>
 			<div class="editor-sheet">
 				{/* Smooth scroll-collapsing Folio header (ADR 0027): one persistent DOM node, pure sans-serif, clickable breadcrumbs. */}
-				<Show when={group().active && !showRendered() && !showTable() && !showChart() && !showFile()}>
+				<Show when={group().active && !showRendered() && !showLive() && !showTable() && !showChart() && !showFile()}>
 					<nav class="folio-hdr" classList={{ "is-compact": folioCompact() }} aria-label="File header and breadcrumbs">
 						<div class="folio-title-row">
 							<div class="folio-title-left">
@@ -740,13 +730,16 @@ export function EditorGroup(props: { index: number }) {
 				<Show when={showRendered() && group().active} keyed>
 					{(path) => <MarkdownView path={path} group={props.index} />}
 				</Show>
+				<Show when={showLive() && group().active} keyed>
+					{(path) => <MarkdownLiveEditor path={path} group={props.index} />}
+				</Show>
 				<Show when={showFile() && group().active} keyed>
 					{(path) => <FileView path={path} />}
 				</Show>
 				<Show when={showTable() && group().active} keyed>
 					{(path) => <TableView path={path} />}
 				</Show>
-				<div class="editor-row" classList={{ hidden: showBlocks() || showChart() || showRendered() || showTable() || showFile() }}>
+				<div class="editor-row" classList={{ hidden: showBlocks() || showChart() || showRendered() || showLive() || showTable() || showFile() }}>
 					{/* An overview of the whole file, top to bottom, to the left of the line numbers: not marks on the lines in view. */}
 					<Show when={group().active && group().active === activePath() && lineCount() > 0 && flatRegions(symbols()).length}>
 						<nav class="region-strip" aria-label="Regions in this file, top to bottom" onKeyDown={onStripKey}>

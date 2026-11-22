@@ -32,12 +32,14 @@ export function lspCandidates(configured?: string): string[] {
 	const arch = process.arch === "arm64" ? "arm64" : "amd64";
 	const platform = process.platform === "win32" ? "windows" : process.platform;
 	const suffix = process.platform === "win32" ? ".exe" : "";
-	// A build may carry its own copy (scripts/bundle-lsp.ts): app/bin, beside app/bun.
+	// A build may carry its own copy (scripts/bundle-lsp.ts): app/bin, beside app/bun, or vendor/ in dev.
 	const bundled = resolve(import.meta.dir, "..", "bin", `starlims-lsp${suffix}`);
+	const vendored = resolve(import.meta.dir, "..", "..", "vendor", `starlims-lsp${suffix}`);
 	return [
 		configured,
 		process.env.STARLIMS_LSP,
 		bundled,
+		vendored,
 		...(process.env.PATH ?? "").split(delimiter).filter(Boolean).map((dir) => join(dir, `starlims-lsp${suffix}`)),
 		`${home}/dev/starlims-projects/starlims-lsp/starlims-lsp-${platform}-${arch}${suffix}`,
 		`${home}/dev/starlims-projects/ssl-style-guide/ssl-mcp-server/bin/lsp/starlims-lsp-${platform}-${arch}${suffix}`,

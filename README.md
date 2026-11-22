@@ -156,7 +156,7 @@ keys; Tab moves between them ([ADR 0010](docs/adr/0010-everything-works-from-the
 SSL Studio is MIT licensed ([LICENSE](LICENSE)). Every build carries
 `THIRD-PARTY-NOTICES.md` with the licenses of what it ships:
 
-- Monaco, Solid, vscode-textmate and vscode-oniguruma (MIT), elkjs (EPL-2.0,
+- Monaco, CodeMirror 6, Lezer, Solid, vscode-textmate and vscode-oniguruma (MIT), elkjs (EPL-2.0,
   unmodified) and the Codicons font (CC BY 4.0);
 - the desktop runtime: Bun and Electrobun (MIT) with the libraries they
   link, and on Windows Microsoft's WebView2 loader.

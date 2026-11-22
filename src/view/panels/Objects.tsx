@@ -8,7 +8,7 @@ import { createEffect, createResource, createSignal, For, on, onCleanup, Show } 
 import { monaco } from "../editor/monaco";
 import { mdOutline } from "../editor/MarkdownView";
 import { session } from "../lsp/session";
-import { activeDoc, activePath, openFile, state } from "../state";
+import { activeDoc, activePath, markdownMode, openFile, state } from "../state";
 import { cycleRegionColor, isRegion, regionColor, symbolPath } from "../editor/regions";
 import { isPlanPath, PROCEDURE_DRAG } from "../plan/model";
 import { isMarkdown } from "../project";
@@ -366,7 +366,7 @@ export function Objects() {
 	const [filter, setFilter] = createSignal("");
 	const currentMdRead = () => {
 		const path = activePath();
-		if (!path || !isMarkdown(path) || state.mdText[path]) return null;
+		if (!path || !isMarkdown(path) || markdownMode(path) !== "read") return null;
 		const info = mdOutline();
 		return info && info.path === path ? info : null;
 	};

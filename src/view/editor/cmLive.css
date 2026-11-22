@@ -1,0 +1,633 @@
+/* Obsidian-grade CodeMirror 6 Live Preview styles (ADR 0028).
+   All colors inherit SSL Studio's decoupled --editor-* and chrome OKLCH tokens. */
+
+.cm-md-host {
+	flex: 1;
+	min-height: 0;
+	min-width: 0;
+	overflow-y: auto;
+	overflow-x: hidden;
+	background: var(--editor-bg, var(--bg));
+	color: var(--editor-fg, var(--fg));
+	position: relative;
+	container-type: inline-size;
+}
+
+.cm-md-page {
+	width: min(820px, 100%);
+	margin: 0 auto;
+	padding: var(--space-7) var(--space-7) 0;
+	box-sizing: border-box;
+	display: flex;
+	flex-direction: column;
+}
+
+@container (max-width: 480px) {
+	.cm-md-page {
+		padding: var(--space-5) var(--space-4) 0;
+	}
+}
+
+.cm-md-page.full-width {
+	width: 100%;
+	max-width: none;
+}
+
+.cm-md-editor-wrap {
+	min-height: 260px;
+}
+
+/* Inline Properties header bar inside Live Preview (matching Obsidian Properties). */
+.cm-md-props {
+	margin: 0 0 var(--space-5);
+	border: 1px solid var(--editor-border, var(--border));
+	border-radius: var(--radius-lg);
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 3.5%, var(--editor-bg, var(--bg)));
+	font-family: var(--ui-font);
+	font-size: var(--text-md);
+}
+
+.cm-md-props-head {
+	display: flex;
+	align-items: center;
+	gap: var(--space-2);
+	padding: var(--space-2) var(--space-4);
+}
+
+.cm-md-props-toggle {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--space-2);
+	padding: var(--space-1) 0;
+	color: var(--editor-muted, var(--muted));
+	font-size: var(--text-sm);
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: .06em;
+}
+
+.cm-md-props-toggle:hover {
+	color: var(--editor-strong, var(--strong-fg));
+}
+
+.cm-md-props-edit {
+	margin-left: auto;
+	font-size: var(--text-sm);
+	color: var(--editor-muted, var(--muted));
+	padding: 2px var(--space-3);
+	border-radius: var(--radius-sm);
+}
+
+.cm-md-props-edit:hover {
+	color: var(--editor-strong, var(--strong-fg));
+	background: var(--hover);
+}
+
+.cm-md-props-list {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--space-2) var(--space-6);
+	margin: 0;
+	padding: var(--space-2) var(--space-5) var(--space-4);
+	border-top: 1px solid color-mix(in srgb, var(--editor-border, var(--border)) 70%, transparent);
+}
+
+.cm-md-props-list > div {
+	display: flex;
+	align-items: baseline;
+	gap: var(--space-3);
+	min-width: 0;
+}
+
+.cm-md-props-list dt {
+	color: var(--editor-muted, var(--muted));
+	font-size: var(--text-sm);
+	text-transform: uppercase;
+	letter-spacing: .04em;
+}
+
+.cm-md-props-list dd {
+	margin: 0;
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--space-2) var(--space-4);
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+
+/* Ticket work & Backlinks panels inside Live Preview, keeping margins aligned with prose. */
+.cm-md-page .md-work {
+	margin: 0 0 var(--space-5);
+}
+
+.cm-md-backlinks {
+	margin: var(--space-7) 0 var(--space-10);
+	padding-top: var(--space-4);
+	border-top: 1px solid var(--editor-border, var(--border));
+	font-family: var(--ui-font);
+	font-size: var(--text-md);
+}
+
+.cm-md-backlinks-toggle {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--space-2);
+	padding: var(--space-1) 0;
+	color: var(--editor-muted, var(--muted));
+	font-size: var(--text-sm);
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: .05em;
+}
+
+.cm-md-backlinks-toggle:hover {
+	color: var(--editor-strong, var(--strong-fg));
+}
+
+.cm-md-backlinks ul {
+	margin: var(--space-3) 0 0;
+	padding: 0;
+	list-style: none;
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-2);
+}
+
+.cm-md-backlinks li {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: var(--space-2) var(--space-4);
+}
+
+/* --- Live Preview Typography & Token Styles ------------------------------------ */
+
+.cm-editor .cm-md-h1 {
+	font-size: 1.72em;
+	font-weight: 600;
+	line-height: 1.28;
+	color: var(--editor-strong, var(--strong-fg));
+	padding-top: 0.35em;
+	padding-bottom: 0.25em;
+	border-bottom: 1px solid color-mix(in srgb, var(--editor-border, var(--border)) 75%, transparent);
+	margin-bottom: 0.15em;
+}
+
+.cm-editor .cm-md-h2 {
+	font-size: 1.38em;
+	font-weight: 600;
+	line-height: 1.3;
+	color: var(--editor-strong, var(--strong-fg));
+	padding-top: 0.45em;
+	padding-bottom: 0.2em;
+	border-bottom: 1px solid color-mix(in srgb, var(--editor-border, var(--border)) 55%, transparent);
+	margin-bottom: 0.1em;
+}
+
+.cm-editor .cm-md-h3 {
+	font-size: 1.18em;
+	font-weight: 600;
+	line-height: 1.35;
+	color: var(--editor-strong, var(--strong-fg));
+	padding-top: 0.35em;
+}
+
+.cm-editor .cm-md-h4,
+.cm-editor .cm-md-h5,
+.cm-editor .cm-md-h6 {
+	font-size: 1.04em;
+	font-weight: 600;
+	line-height: 1.4;
+	color: var(--editor-strong, var(--strong-fg));
+	padding-top: 0.25em;
+}
+
+.cm-editor .cm-md-syntax {
+	color: var(--editor-muted, var(--muted));
+	opacity: 0.58;
+	font-family: var(--code-font);
+	font-size: 0.88em;
+	font-weight: 400;
+}
+
+.cm-editor .cm-md-strong {
+	font-weight: 700;
+	color: var(--editor-strong, var(--strong-fg));
+}
+
+.cm-editor .cm-md-em {
+	font-style: italic;
+}
+
+.cm-editor .cm-md-strike {
+	text-decoration: line-through;
+	opacity: 0.72;
+}
+
+.cm-editor .cm-md-code {
+	font-family: var(--code-font);
+	font-size: 0.88em;
+	padding: 1px 5px;
+	border-radius: var(--radius-sm);
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 8%, transparent);
+	color: var(--editor-accent, var(--accent));
+}
+
+.cm-editor .cm-md-highlight,
+.md mark.md-highlight {
+	background: color-mix(in srgb, var(--warning) 28%, transparent);
+	color: inherit;
+	padding: 0 3px;
+	border-radius: 3px;
+}
+
+.cm-editor .cm-md-tag,
+.md .md-tag {
+	display: inline;
+	font-family: var(--ui-font);
+	font-size: 0.84em;
+	font-weight: 500;
+	color: var(--editor-accent, var(--accent));
+	background: color-mix(in srgb, var(--editor-accent, var(--accent)) 13%, transparent);
+	border-radius: 999px;
+	padding: 1px 7px;
+	cursor: pointer;
+	text-decoration: none;
+}
+
+.cm-editor .cm-md-tag:hover,
+.md .md-tag:hover {
+	background: color-mix(in srgb, var(--editor-accent, var(--accent)) 22%, transparent);
+}
+
+.cm-editor .cm-md-link {
+	color: var(--editor-accent, var(--accent));
+	text-decoration: underline;
+	text-underline-offset: 3px;
+	text-decoration-color: color-mix(in srgb, var(--editor-accent, var(--accent)) 55%, transparent);
+	cursor: pointer;
+}
+
+.cm-editor .cm-md-link:hover {
+	text-decoration-color: currentColor;
+}
+
+.cm-editor .cm-md-link-missing {
+	color: var(--editor-muted, var(--muted));
+	text-decoration: underline dotted var(--warning);
+	text-underline-offset: 3px;
+	cursor: pointer;
+}
+
+.cm-editor .cm-md-link-broken {
+	color: var(--warning);
+	text-decoration: underline dashed;
+	text-underline-offset: 3px;
+	cursor: pointer;
+}
+
+.cm-editor .cm-md-ticket {
+	color: inherit;
+	text-decoration: underline dotted var(--editor-accent, var(--accent));
+	text-underline-offset: 3px;
+	cursor: pointer;
+}
+
+.cm-editor .cm-md-ticket:hover {
+	color: var(--editor-accent, var(--accent));
+	text-decoration: underline;
+}
+
+/* Clean visual bullets and real interactive task checkboxes (drawn via CSS dot, ADR 0023). */
+.cm-md-bullet {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 1.15em;
+	height: 1em;
+	vertical-align: middle;
+	color: var(--editor-accent, var(--accent));
+	user-select: none;
+}
+
+.cm-md-bullet::before {
+	content: "";
+	width: 5px;
+	height: 5px;
+	border-radius: 50%;
+	background: currentColor;
+}
+
+.cm-md-checkbox {
+	width: 1.05em;
+	height: 1.05em;
+	margin: 0 0.45em 0 0;
+	vertical-align: -0.15em;
+	cursor: pointer;
+	accent-color: var(--editor-accent, var(--accent));
+}
+
+.cm-editor .cm-md-task-done {
+	color: var(--editor-muted, var(--muted));
+	text-decoration: line-through;
+	opacity: 0.78;
+}
+
+/* Blockquotes & Horizontal rules. */
+.cm-editor .cm-md-quote-line {
+	border-left: 3px solid color-mix(in srgb, var(--editor-accent, var(--accent)) 55%, transparent);
+	padding-left: 14px !important;
+	color: var(--editor-muted, var(--muted));
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 2.5%, transparent);
+}
+
+.cm-md-hr-wrap {
+	padding: 10px 0;
+	cursor: pointer;
+}
+
+.cm-md-hr {
+	border: 0;
+	border-top: 1px solid var(--editor-border, var(--border));
+	margin: 0;
+}
+
+/* Fenced code blocks inside Live Preview. */
+.cm-editor .cm-md-codeblock-line {
+	font-family: var(--code-font);
+	font-size: calc(var(--code-size) - 0.5px);
+	line-height: 1.5;
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 5.5%, var(--editor-bg, var(--bg)));
+	padding-left: 14px !important;
+	padding-right: 14px !important;
+}
+
+.cm-editor .cm-md-codeblock-first {
+	border-top-left-radius: var(--radius-md);
+	border-top-right-radius: var(--radius-md);
+	padding-top: 6px !important;
+}
+
+.cm-editor .cm-md-codeblock-last {
+	border-bottom-left-radius: var(--radius-md);
+	border-bottom-right-radius: var(--radius-md);
+	padding-bottom: 8px !important;
+}
+
+.cm-md-code-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+	color: var(--editor-muted, var(--muted));
+	user-select: none;
+	padding-bottom: 4px;
+	border-bottom: 1px solid color-mix(in srgb, var(--editor-border, var(--border)) 55%, transparent);
+	margin-bottom: 4px;
+}
+
+.cm-md-code-lang {
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	font-weight: 600;
+}
+
+.cm-md-code-copy {
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+	color: var(--editor-muted, var(--muted));
+	padding: 1px 7px;
+	border-radius: var(--radius-sm);
+	border: 1px solid transparent;
+	background: transparent;
+	cursor: pointer;
+}
+
+.cm-md-code-copy:hover {
+	color: var(--editor-strong, var(--strong-fg));
+	background: var(--hover);
+	border-color: var(--editor-border, var(--border));
+}
+
+.cm-md-fence-hidden {
+	display: inline-block;
+	height: 2px;
+	width: 100%;
+}
+
+/* Raw YAML frontmatter lines when expanded for direct editing. */
+.cm-editor .cm-md-frontmatter-line {
+	font-family: var(--code-font);
+	font-size: calc(var(--code-size) - 1px);
+	color: var(--editor-muted, var(--muted));
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 3.5%, var(--editor-bg, var(--bg)));
+	padding-left: 12px !important;
+}
+
+.cm-md-fm-hidden {
+	height: 0;
+	overflow: hidden;
+}
+
+/* Rendered Markdown Tables widget in Live Preview. */
+.cm-md-table-wrap {
+	margin: 8px 0 12px;
+	overflow-x: auto;
+	cursor: text;
+	border-radius: var(--radius-md);
+}
+
+.cm-md-table-wrap table {
+	border-collapse: collapse;
+	width: auto;
+	max-width: 100%;
+	font-family: var(--read-font, var(--ui-font));
+	font-size: calc(var(--code-size) + 0.5px);
+	line-height: 1.5;
+}
+
+.cm-md-table-wrap th,
+.cm-md-table-wrap td {
+	border: 1px solid var(--editor-border, var(--border));
+	padding: var(--space-2) var(--space-5);
+	text-align: left;
+	vertical-align: top;
+}
+
+.cm-md-table-wrap th {
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 5%, var(--editor-bg, var(--bg)));
+	color: var(--editor-strong, var(--strong-fg));
+	font-weight: 600;
+}
+
+.cm-md-table-wrap td.short,
+.cm-md-table-wrap th.short {
+	white-space: nowrap;
+}
+
+.cm-md-table-wrap tbody tr:hover td {
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 3%, transparent);
+}
+
+.cm-md-table-wrap a {
+	color: var(--editor-accent, var(--accent));
+	text-decoration: underline;
+	text-underline-offset: 2px;
+}
+
+/* Obsidian Callouts (shared between Live Preview and Read mode). */
+.cm-md-callout,
+.md .md-callout {
+	margin: 10px 0 12px;
+	border-radius: var(--radius-md);
+	border: 1px solid color-mix(in srgb, var(--callout-tone, var(--info)) 28%, transparent);
+	border-left: 3px solid var(--callout-tone, var(--info));
+	background: color-mix(in srgb, var(--callout-tone, var(--info)) 8%, var(--editor-bg, var(--bg)));
+	overflow: hidden;
+	cursor: text;
+}
+
+.cm-md-callout.tone-info, .md .md-callout.tone-info { --callout-tone: var(--info); }
+.cm-md-callout.tone-ok, .md .md-callout.tone-ok { --callout-tone: var(--ok); }
+.cm-md-callout.tone-accent, .md .md-callout.tone-accent { --callout-tone: var(--editor-accent, var(--accent)); }
+.cm-md-callout.tone-warning, .md .md-callout.tone-warning { --callout-tone: var(--warning); }
+.cm-md-callout.tone-error, .md .md-callout.tone-error { --callout-tone: var(--error); }
+.cm-md-callout.tone-muted, .md .md-callout.tone-muted { --callout-tone: var(--editor-muted, var(--muted)); }
+
+.cm-md-callout-head,
+.md .md-callout-head {
+	display: flex;
+	align-items: center;
+	gap: var(--space-3);
+	padding: var(--space-3) var(--space-5);
+	font-family: var(--ui-font);
+	font-weight: 600;
+	font-size: var(--text-base);
+	color: var(--callout-tone, var(--info));
+}
+
+.cm-md-callout-icon,
+.md .md-callout-icon {
+	font: normal 15px/1 codicon;
+	flex: none;
+}
+
+.cm-md-callout-fold {
+	margin-left: auto;
+	color: var(--editor-muted, var(--muted));
+	padding: 0 4px;
+	cursor: pointer;
+	background: transparent;
+	border: 0;
+	font: normal 14px/1 codicon;
+}
+
+.cm-md-callout-body,
+.md .md-callout-body {
+	padding: 0 var(--space-5) var(--space-4);
+	color: var(--editor-fg, var(--fg));
+}
+
+.cm-md-callout-body > :first-child,
+.md .md-callout-body > :first-child {
+	margin-top: 0;
+}
+
+.cm-md-callout-body > :last-child,
+.md .md-callout-body > :last-child {
+	margin-bottom: 0;
+}
+
+/* Inline Image Widget in Live Preview. */
+.cm-md-image-wrap {
+	margin: 8px 0 12px;
+	cursor: pointer;
+}
+
+.cm-md-image-wrap img {
+	display: block;
+	max-width: 100%;
+	max-height: 460px;
+	border-radius: var(--radius-md);
+	border: 1px solid var(--editor-border, var(--border));
+}
+
+.cm-md-image-caption {
+	font-family: var(--ui-font);
+	font-size: var(--text-sm);
+	color: var(--editor-muted, var(--muted));
+	margin-top: 4px;
+}
+
+/* Hover Page Preview popover (Obsidian-style). */
+.md-hover-card {
+	position: fixed;
+	z-index: 60;
+	width: min(440px, calc(100vw - 32px));
+	max-height: min(360px, calc(100vh - 32px));
+	overflow: auto;
+	background: var(--side-bg);
+	color: var(--side-fg);
+	border: 1px solid var(--input-border);
+	border-radius: var(--radius-lg);
+	box-shadow: var(--shadow);
+	padding: var(--space-4) var(--space-5);
+	font-family: var(--ui-font);
+	font-size: var(--text-md);
+	pointer-events: auto;
+}
+
+.md-hover-head {
+	display: flex;
+	align-items: center;
+	gap: var(--space-3);
+	padding-bottom: var(--space-3);
+	margin-bottom: var(--space-3);
+	border-bottom: 1px solid var(--border);
+}
+
+.md-hover-title {
+	font-weight: 600;
+	color: var(--strong-fg);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	flex: 1;
+}
+
+.md-hover-path {
+	font-size: var(--text-xs);
+	color: var(--muted);
+	white-space: nowrap;
+}
+
+.md-hover-body {
+	font-family: var(--read-font, var(--ui-font));
+	font-size: var(--text-md);
+	line-height: 1.55;
+}
+
+.md-hover-body h1,
+.md-hover-body h2,
+.md-hover-body h3 {
+	font-size: 1.1em;
+	margin: 0.6em 0 0.3em;
+}
+
+.md-hover-body h1:first-child {
+	margin-top: 0;
+}
+
+.md-hover-body p {
+	margin: 0 0 0.55em;
+}
+
+/* Fold gutter chevron visibility on active/hovered lines. */
+.cm-editor .cm-foldGutter .cm-gutterElement {
+	min-width: 14px;
+}
+
+.cm-editor:hover .cm-foldGutter .cm-gutterElement {
+	opacity: 0.5;
+}

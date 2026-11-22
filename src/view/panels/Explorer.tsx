@@ -482,8 +482,10 @@ export function Explorer() {
 		setOpenEdOpen(next);
 		remember("explorer.openEditors", next ? "open" : "closed");
 	};
+	const openEdCap = () => Math.max(44, openEditorRows().length * 26 + 16);
 	const resizeOpenEd = (delta: number) => {
-		const next = Math.max(56, Math.min(360, openEdH() + delta));
+		const base = Math.min(openEdH(), openEdCap());
+		const next = Math.max(44, Math.min(360, base + delta));
 		setOpenEdH(next);
 		remember("explorer.openEditors.h", String(Math.round(next)));
 	};
@@ -575,7 +577,7 @@ export function Explorer() {
 					</div>
 				</div>
 				<Show when={openEdOpen()}>
-					<div class="explorer-section-body" style={{ height: `${Math.min(openEdH(), Math.max(44, openEditorRows().length * 26 + 16))}px` }}>
+					<div class="explorer-section-body" style={{ height: `${Math.min(openEdH(), openEdCap())}px` }}>
 						<Show when={openEditorRows().length} fallback={<p class="hint explorer-empty-hint">No open editors.</p>}>
 							<div class="tree explorer-open-list" role="list" aria-label="Open editors">
 								<For each={openEditorRows()}>

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { estimateWidth } from "../src/view/graph/canvas";
-import { backEdges, chartGraph, cycleEdge, describeEdge, describeNode, KEYS, labelPoint, LINE, NO_WORDS, onDiamond, routeOf, sizeNode, statusMark, statusWords, wrapText } from "../src/view/plan/chart";
+import { applyRouteOffsets, backEdges, chartGraph, compactRoutes, cycleEdge, describeEdge, describeNode, edgeHandles, edgeMidpoint, fitRegionBounds, KEYS, labelPoint, LINE, NO_WORDS, offsetFor, onDiamond, orthogonalRoute, placeEdgeLabel, REGION_PADDING, rerouteMovedEdge, routeOf, sizeNode, statusMark, statusWords, wrapText } from "../src/view/plan/chart";
 import { parsePlan, type NodeKind, type Plan } from "../src/view/plan/model";
 
 const read = (path: string) => parsePlan(readFileSync(join(import.meta.dir, "..", path), "utf8")).plan!;
@@ -249,6 +249,22 @@ describe("an edge as drawn", () => {
 		expect(routeOf(elk, false, box, undefined)[0]).toEqual({ x: 250, y: 120 });
 		expect(routeOf([], true, box, box)).toEqual([]);
 	});
+	test("routeOf removes duplicate vertices and 180-degree backtrack hooks at shared merge ports", () => {
+		const hooked = [
+			{ x: 545.1, y: 1344 },
+			{ x: 521.1, y: 1344 },
+			{ x: 521.1, y: 842 },
+			{ x: 510.1, y: 842 },
+			{ x: 510.1, y: 842 },
+			{ x: 545.1, y: 842 },
+		];
+		expect(routeOf(hooked, false, undefined, undefined)).toEqual([
+			{ x: 545.1, y: 1344 },
+			{ x: 521.1, y: 1344 },
+			{ x: 521.1, y: 842 },
+			{ x: 545.1, y: 842 },
+		]);
+	});
 	test("a label sits on the first stretch with room for it, by the node the edge leaves", () => {
 		const route = [{ x: 219, y: 571 }, { x: 219, y: 597 }, { x: 414, y: 597 }, { x: 414, y: 668 }];
 		expect(labelPoint(route, 30)).toEqual({ x: 316.5, y: 597 });
@@ -363,5 +379,218 @@ describe("ways that cross", () => {
 		const zigzag = [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }, { x: 0, y: 10 }];
 		expect(crossings([zigzag])).toBe(0);
 		expect(crossings([zigzag, [{ x: 5, y: -5 }, { x: 5, y: 15 }]])).toBe(2);
+	});
+});
+
+describe("horizontal layout direction and edge midpoint", () => {
+	test("horizontal RIGHT layout rotates ELK direction and decision ports cleanly", () => {
+		const p = plan([["a", "start"], ["d", "decision"], ["x"], ["y"]], [["a", "d"], ["d", "x"], ["d", "y"]]);
+		const sizes = new Map(p.nodes.map((n) => [n.id, sizeNode(n.kind, n.text, seven)]));
+		const { graph } = chartGraph(p, sizes, "EAST", "NORTH", "RIGHT");
+		expect(graph.layoutOptions?.["elk.direction"]).toBe("RIGHT");
+		const dNode = graph.children!.find((c) => c.id === "d")!;
+		const portSides = dNode.ports!.map((pt) => pt.layoutOptions?.["elk.port.side"]);
+		expect(portSides).toContain("WEST");
+		expect(portSides).toContain("EAST");
+		expect(portSides).toContain("SOUTH");
+	});
+
+	test("edgeMidpoint returns the geometric halfway point along any polyline", () => {
+		expect(edgeMidpoint([{ x: 0, y: 0 }, { x: 0, y: 100 }])).toEqual({ x: 0, y: 50 });
+		expect(edgeMidpoint([{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 100 }])).toEqual({ x: 100, y: 0 });
+		expect(edgeMidpoint([])).toEqual({ x: 0, y: 0 });
+	});
+});
+
+describe("loop route compaction and manual wire segment handles", () => {
+	test("compactRoutes pulls back oversized U-turns past a tall sibling stage and aligns sibling loops onto one shared bus", () => {
+		const obstacles = [
+			{ x: 22, y: 1230, width: 190, height: 54 }, // n10: bottom 1284
+			{ x: 250, y: 1230, width: 190, height: 71 }, // n11: bottom 1301
+			{ x: 478, y: 1230, width: 590, height: 873 }, // g3: tall sibling stage on the right
+		];
+		const routes = [
+			{ to: "n5", points: [{ x: 117, y: 1284 }, { x: 117, y: 2118 }, { x: 12, y: 2118 }, { x: 12, y: 517 }, { x: 127, y: 517 }] },
+			{ to: "n5", points: [{ x: 345, y: 1301 }, { x: 345, y: 2118 }, { x: 12, y: 2118 }, { x: 12, y: 517 }, { x: 127, y: 517 }] },
+		];
+		const [r10, r11] = compactRoutes(routes, obstacles, 24);
+		// Both loops tighten from y=2118 up to y=1325 (24px below n11's bottom 1301) on one shared return rail.
+		expect(r10![1]!.y).toBe(1325);
+		expect(r10![2]!.y).toBe(1325);
+		expect(r11![1]!.y).toBe(1325);
+		expect(r11![2]!.y).toBe(1325);
+	});
+
+	test("compactRoutes stays clear of any obstacle sitting underneath the U-turn span", () => {
+		const obstacles = [
+			{ x: 22, y: 1230, width: 190, height: 54 }, // n10
+			{ x: 40, y: 1400, width: 120, height: 60 }, // obstacle directly underneath (bottom 1460)
+		];
+		const [r] = compactRoutes(
+			[{ to: "n5", points: [{ x: 117, y: 1284 }, { x: 117, y: 2118 }, { x: 12, y: 2118 }, { x: 12, y: 517 }] }],
+			obstacles,
+			24,
+		);
+		expect(r![1]!.y).toBe(1484);
+		expect(r![2]!.y).toBe(1484);
+	});
+
+	test("compactRoutes also tightens oversized horizontal-mode right U-turns", () => {
+		const obstacles = [
+			{ x: 2387, y: 22, width: 190, height: 54 }, // n10: right 2577
+			{ x: 2387, y: 150, width: 190, height: 71 }, // n11: right 2577
+			{ x: 2405, y: 310, width: 1800, height: 320 }, // g3: wide sibling stage below
+		];
+		const [r] = compactRoutes(
+			[{ to: "n5", points: [{ x: 2577, y: 49 }, { x: 4220, y: 49 }, { x: 4220, y: 12 }, { x: 1121, y: 12 }, { x: 1121, y: 77 }] }],
+			obstacles,
+			24,
+		);
+		expect(r![1]!.x).toBe(2601);
+		expect(r![2]!.x).toBe(2601);
+	});
+
+	test("applyRouteOffsets slides interior segments and bows 2/3-point segments cleanly", () => {
+		const loop = [{ x: 117, y: 1284 }, { x: 117, y: 1325 }, { x: 12, y: 1325 }, { x: 12, y: 517 }, { x: 127, y: 517 }];
+		const moved = applyRouteOffsets(loop, { "1h": 24, "2v": -8 });
+		expect(moved).toEqual([{ x: 117, y: 1284 }, { x: 117, y: 1349 }, { x: 4, y: 1349 }, { x: 4, y: 517 }, { x: 127, y: 517 }]);
+
+		const straight = [{ x: 100, y: 0 }, { x: 100, y: 200 }];
+		const jogged = applyRouteOffsets(straight, { "0v": 30 });
+		expect(jogged.length).toBe(6);
+		expect(jogged[0]).toEqual({ x: 100, y: 0 });
+		expect(jogged[jogged.length - 1]).toEqual({ x: 100, y: 200 });
+		expect(jogged[2]!.x).toBe(130);
+		expect(jogged[3]!.x).toBe(130);
+	});
+
+	test("edgeHandles exposes horizontal and vertical drag grips clear of labels and insert ports", () => {
+		const loop = [{ x: 117, y: 1284 }, { x: 117, y: 1325 }, { x: 12, y: 1325 }, { x: 12, y: 517 }, { x: 127, y: 517 }];
+		const handles = edgeHandles(loop, loop, undefined, [{ x: 12, y: 921 }]);
+		expect(handles.map((h) => h.key)).toEqual(["1h", "2v"]);
+		const vHandle = handles.find((h) => h.key === "2v")!;
+		expect(Math.hypot(vHandle.x - 12, vHandle.y - 921)).toBeGreaterThanOrEqual(28);
+	});
+
+	test("offsetFor respects layout orientation and rerouteMovedEdge translates rigid moves vs re-routing moved endpoints", () => {
+		expect(offsetFor({ x: 24, y: -48 }, "DOWN")).toEqual({ x: 24, y: -48 });
+		expect(offsetFor({ x: 24, y: -48 }, "RIGHT")).toEqual({ x: 0, y: 0 });
+		expect(offsetFor({ x: 36, y: 12, dir: "RIGHT" }, "RIGHT")).toEqual({ x: 36, y: 12 });
+
+		const base = [{ x: 100, y: 50 }, { x: 100, y: 120 }];
+		const from = { x: 10, y: 10, width: 180, height: 40 };
+		const to = { x: 10, y: 120, width: 180, height: 40 };
+		// Moving both ends rigidly (e.g. dragging an entire stage) preserves ELK's exact route translated by (dx, dy).
+		expect(rerouteMovedEdge(base, { ...from, x: 50, y: 30 }, { ...to, x: 50, y: 140 }, { x: 40, y: 20 }, { x: 40, y: 20 }, "step", "step", "DOWN", false)).toEqual([
+			{ x: 140, y: 70 },
+			{ x: 140, y: 140 },
+		]);
+		// Moving only the target sideways re-routes orthogonally between SOUTH and NORTH ports.
+		const shifted = orthogonalRoute(from, { x: 260, y: 140, width: 180, height: 40 }, "step", "step", "DOWN", false);
+		expect(shifted[0]).toEqual({ x: 100, y: 50 });
+		expect(shifted[shifted.length - 1]).toEqual({ x: 350, y: 140 });
+		expect(shifted.length).toBe(4);
+		// Dragging a decision's side branch downward keeps it attached cleanly to the decision's EAST tip.
+		const sideBranch = orthogonalRoute({ x: 517, y: 767, width: 230, height: 98 }, { x: 917, y: 954, width: 190, height: 37 }, "decision", "step", "DOWN", false);
+		expect(sideBranch[0]).toEqual({ x: 747, y: 816 });
+		expect(sideBranch[sideBranch.length - 1]).toEqual({ x: 1012, y: 954 });
+	});
+
+	test("placeEdgeLabel anchors long return/bypass labels near their source decision and stays clear of unrelated diamonds and other labels", () => {
+		// Return wire from Was the sample's row changed? (n19) running up past Is it? (n16).
+		const route = [
+			{ x: 545, y: 1344 },
+			{ x: 521, y: 1344 },
+			{ x: 521, y: 842 },
+			{ x: 545, y: 842 },
+		];
+		const isItDiamond = { x: 545, y: 1049, width: 230, height: 71, shape: "diamond" as const };
+		const sourceDiamond = { x: 545, y: 1295, width: 230, height: 98, shape: "diamond" as const };
+		const pt = placeEdgeLabel(route, 36, [isItDiamond, sourceDiamond]);
+		// Anchors near n19 (~1306), nowhere near Is it? (~1085).
+		expect(pt.x).toBe(521);
+		expect(pt.y).toBeGreaterThan(1260);
+		expect(pt.y).toBeLessThan(1344);
+
+		// Even on a straight line passing an obstacle diamond right at its midpoint, it moves clear of the diamond.
+		const bypass = [{ x: 510, y: 900 }, { x: 510, y: 1300 }];
+		const obstacle = { x: 517, y: 1065, width: 230, height: 70, shape: "diamond" as const };
+		const clearPt = placeEdgeLabel(bypass, 36, [obstacle]);
+		// Must not sit right next to obstacle's tip at y=1100.
+		expect(Math.abs(clearPt.y - 1100)).toBeGreaterThan(25);
+	});
+});
+
+describe("region bounds and minimum padding", () => {
+	test("chartGraph configures every group with the global REGION_PADDING", () => {
+		const sized = new Map(dueDates.nodes.map((n) => [n.id, sizeNode(n.kind, n.text, seven)]));
+		const { graph } = chartGraph(dueDates, sized);
+		const g = graph.children!.find((c) => c.id === "g2")!;
+		expect(g.layoutOptions?.["elk.padding"]).toBe(
+			`[top=${REGION_PADDING.top},left=${REGION_PADDING.left},bottom=${REGION_PADDING.bottom},right=${REGION_PADDING.right}]`,
+		);
+	});
+
+	test("fitRegionBounds encloses member nodes, contained lines, and contained labels with at least REGION_PADDING on every side", () => {
+		const members = [
+			{ x: 545, y: 793, width: 230, height: 98 },
+			{ x: 545, y: 1295, width: 230, height: 98 },
+			{ x: 565, y: 1445, width: 190, height: 54 },
+		];
+		const contained = [
+			{
+				// Left-side loop return rail + 'yes' label pill extending past the nodes on the left.
+				points: [
+					{ x: 545, y: 1344 },
+					{ x: 510, y: 1344 },
+					{ x: 510, y: 842 },
+					{ x: 545, y: 842 },
+				],
+				labelBox: { x: 492, y: 1280, width: 36, height: 21 },
+			},
+			{
+				// Bottom loop return rail extending below the lowest member node.
+				points: [
+					{ x: 660, y: 1499 },
+					{ x: 660, y: 1535 },
+					{ x: 510, y: 1535 },
+					{ x: 510, y: 842 },
+					{ x: 545, y: 842 },
+				],
+			},
+		];
+		const box = fitRegionBounds(members, contained, { minWidth: 200 })!;
+		expect(box.x).toBe(492 - REGION_PADDING.left);
+		expect(box.y).toBe(793 - REGION_PADDING.top);
+		expect(box.x + box.width).toBe(775 + REGION_PADDING.right);
+		expect(box.y + box.height).toBe(1535 + REGION_PADDING.bottom);
+		// Every node, wire vertex, and label pill satisfies the global minimum padding.
+		for (const m of members) {
+			expect(m.x - box.x).toBeGreaterThanOrEqual(REGION_PADDING.left);
+			expect(m.y - box.y).toBeGreaterThanOrEqual(REGION_PADDING.top);
+			expect(box.x + box.width - (m.x + m.width)).toBeGreaterThanOrEqual(REGION_PADDING.right);
+			expect(box.y + box.height - (m.y + m.height)).toBeGreaterThanOrEqual(REGION_PADDING.bottom);
+		}
+		for (const e of contained) {
+			for (const p of e.points) {
+				expect(p.x - box.x).toBeGreaterThanOrEqual(REGION_PADDING.left);
+				expect(p.y - box.y).toBeGreaterThanOrEqual(REGION_PADDING.top);
+				expect(box.x + box.width - p.x).toBeGreaterThanOrEqual(REGION_PADDING.right);
+				expect(box.y + box.height - p.y).toBeGreaterThanOrEqual(REGION_PADDING.bottom);
+			}
+		}
+		expect(contained[0]!.labelBox!.x - box.x).toBeGreaterThanOrEqual(REGION_PADDING.left);
+	});
+
+	test("fitRegionBounds respects floor when preserving auto-layout channels and enforces minWidth for the header pill", () => {
+		const member = { x: 200, y: 200, width: 100, height: 50 };
+		const floor = { x: 170, y: 150, width: 190, height: 130 };
+		// With floor: keeps ELK's right channel (360) while still expanding leftward when a wire pushes past floor.
+		const expanded = fitRegionBounds([member], [{ points: [{ x: 160, y: 225 }, { x: 200, y: 225 }] }], { floor })!;
+		expect(expanded.x).toBe(160 - REGION_PADDING.left);
+		expect(expanded.x + expanded.width).toBe(360);
+		// Without floor: honors minWidth for wide stage pills.
+		const minW = fitRegionBounds([member], [], { minWidth: 260 })!;
+		expect(minW.width).toBe(260);
 	});
 });

@@ -4,6 +4,7 @@
 import { createEffect, on, onCleanup } from "solid-js";
 import { canGoBack, canGoForward, NO_TRAIL, stepTrail, TRAIL_LENGTH, trailRenamed, trailWithout, visited, type Place, type Trail } from "../shared/navHistory";
 import { activeEditor } from "./editor/EditorGroup";
+import { activeLiveEditor } from "./editor/liveBridge";
 import { activeDoc, activePath, notify, openFile, pathChanges, state } from "./state";
 
 let trail: Trail = NO_TRAIL;
@@ -19,6 +20,11 @@ export function noteCursor(place: Place) {
 function here(): Place | null {
 	const path = activePath();
 	if (!path) return null;
+	const live = activeLiveEditor();
+	if (live && live.path === path) {
+		const at = live.getPosition();
+		return { path, line: at.lineNumber, column: at.column };
+	}
 	const editor = activeEditor();
 	const at = editor && editor.getModel() === activeDoc()?.model ? editor.getPosition() : null;
 	return { path, line: at?.lineNumber ?? 1, column: at?.column ?? 1 };

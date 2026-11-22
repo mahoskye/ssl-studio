@@ -3,13 +3,15 @@
 // in the `keys` setting.
 import { ask } from "./dialogs";
 import { activeEditor } from "./editor/EditorGroup";
+import { activeLiveEditor, isInMarkdownTextEditor } from "./editor/liveBridge";
+import { runMonacoMarkdownAction } from "./editor/markdownKeys";
 import { backend, inApp } from "./backend";
 import { monaco } from "./editor/monaco";
 import { session } from "./lsp/session";
 import { symbols } from "./panels/Objects";
 import { symbolPath } from "./editor/regions";
 import { openStyleProfile } from "./StyleProfile";
-import { movePanel, panelOn, showPanel, toggleSide } from "./panels/registry";
+import { movePanel, panelOn, resetOutlineActive, resetPlanPaletteActive, showPanel, toggleSide } from "./panels/registry";
 import { explorerDelete, explorerNewFile, explorerRename } from "./panels/Explorer";
 import { insertTemplate } from "./panels/Palette";
 import { TEMPLATES } from "../shared/houseStyle";
@@ -28,6 +30,7 @@ import { modalOpen, setFocusFallback } from "./modal";
 import { noteUsed } from "./quickRank";
 import { stepScale, UI_SCALE } from "./uiScale";
 import {
+	activeDoc,
 	activePath,
 	closeAllTabs,
 	closeOtherTabs,
@@ -37,6 +40,7 @@ import {
 	focusEditor,
 	focusSidePanel,
 	keepTab,
+	markdownMode,
 	nextTab,
 	notify,
 	openFile,
@@ -45,6 +49,7 @@ import {
 	reopenClosedTab,
 	revert,
 	sendTabAcross,
+	setMarkdownMode,
 	shiftTab,
 	save,
 	saveAll,
@@ -71,8 +76,20 @@ function toggleSideOf(side: "left" | "right") {
  * Showing the bar saves a setting; what comes back from a save leaves the layout on screen alone (state.ts).
  */
 function resetLayout() {
+	setState("bottomMaximized", false);
+	resetOutlineActive();
+	resetPlanPaletteActive();
 	setState("settings", "layout", { ...defaultLayout(), dock: {} });
 	if (state.settings.menuBar === false) void switchSetting("menuBar", true, (settings) => settings.menuBar !== false);
+}
+function toggleMaximizeBottom() {
+	if (!state.workspace) return;
+	if (!state.settings.layout.bottom) {
+		setState("settings", "layout", "bottom", true);
+		setState("bottomMaximized", true);
+		return;
+	}
+	setState("bottomMaximized", (m) => !m);
 }
 const showBottom = (view: "problems" | "output") => (setState("bottomView", view), setState("settings", "layout", "bottom", true));
 /** Puts text on the clipboard: by the app's own way where there is one, by the web view's otherwise. */
@@ -93,10 +110,35 @@ export async function copyPath(kind: "whole" | "relative" | "name", path = activ
 	await copyText(text, `Copied ${text}`);
 }
 
-/** Follows the link the text cursor is in. Only where the text is what is showing: not from behind a page, a table or a chart. */
+/** Follows the link the text cursor is in. Works in both CodeMirror 6 Live Preview and Monaco Source mode. */
 function openLinkAtCursor() {
+	const live = activeLiveEditor();
+	if (live) {
+		live.openLinkAtCursor();
+		return;
+	}
 	const editor = activeEditor();
 	if (editor?.getDomNode()?.offsetParent) void editor.getAction("editor.action.openLink")?.run();
+}
+
+/** Runs an Obsidian Markdown formatting action in whichever text engine (CodeMirror Live or Monaco Source) is active. */
+function runMarkdownEdit(id: string) {
+	const live = activeLiveEditor();
+	if (live) {
+		live.runAction(id);
+		return;
+	}
+	const editor = activeEditor();
+	if (editor?.getDomNode()?.offsetParent) runMonacoMarkdownAction(editor, id);
+}
+
+/** Obsidian Ctrl+E: toggles a Markdown document between Live Preview (or Source) and Read view. */
+function toggleMarkdownMode() {
+	const path = activePath();
+	if (!path || !isMarkdown(path)) return;
+	const next = markdownMode(path) === "read" ? (state.settings.livePreview === false ? "source" : "live") : "read";
+	setMarkdownMode(path, next);
+	if (next !== "read") queueMicrotask(focusEditor);
 }
 
 /**
@@ -156,6 +198,14 @@ export const commands: Command[] = [
 	{ id: "copy-file-name", label: "Copy file name", detail: "The open file's name, without its folder", run: () => void copyPath("name") },
 	{ id: "word-wrap", label: "Toggle word wrap", detail: "Long lines wrapped at the editor's edge, or not", run: () => void switchSetting("wordWrap", !state.settings.wordWrap, (settings) => Boolean(settings.wordWrap)) },
 	{ id: "live-preview", label: "Toggle Markdown live preview", detail: "A document drawn as it is written, or as its plain text", run: () => void switchSetting("livePreview", state.settings.livePreview === false, (settings) => settings.livePreview !== false) },
+	{ id: "toggle-markdown-mode", label: "Toggle Markdown Live / Read view", detail: "Switch a Markdown note between Live Preview editing and Reading view", run: toggleMarkdownMode },
+	{ id: "md-bold", label: "Markdown: Toggle bold", detail: "Wrap or unwrap selection with ** (Ctrl+B in Markdown)", run: () => runMarkdownEdit("md-bold") },
+	{ id: "md-italic", label: "Markdown: Toggle italic", detail: "Wrap or unwrap selection with * (Ctrl+I in Markdown)", run: () => runMarkdownEdit("md-italic") },
+	{ id: "md-strike", label: "Markdown: Toggle strikethrough", detail: "Wrap or unwrap selection with ~~ (Ctrl+Shift+X in Markdown)", run: () => runMarkdownEdit("md-strike") },
+	{ id: "md-code", label: "Markdown: Toggle inline code", detail: "Wrap or unwrap selection with ` (Ctrl+` in Markdown)", run: () => runMarkdownEdit("md-code") },
+	{ id: "md-highlight", label: "Markdown: Toggle highlight", detail: "Wrap or unwrap selection with == (Ctrl+Alt+H in Markdown)", run: () => runMarkdownEdit("md-highlight") },
+	{ id: "md-link", label: "Markdown: Insert link", detail: "Insert [label](url) at selection (Ctrl+K in Markdown)", run: () => runMarkdownEdit("md-link") },
+	{ id: "md-checkbox", label: "Markdown: Toggle checkbox", detail: "Cycle task checkbox on the current line(s) (Ctrl+L in Markdown)", run: () => runMarkdownEdit("md-checkbox") },
 	{ id: "open-link", label: "Open the link at the cursor", detail: "In a document's text: the file, heading or page its link leads to", run: openLinkAtCursor },
 	{ id: "focus-editor", label: "Focus editor", run: focusEditor },
 	{ id: "focus-side-panel", label: "Focus side panel", run: focusSidePanel },
@@ -166,7 +216,7 @@ export const commands: Command[] = [
 	{ id: "wrap-region", label: "Wrap in region…", detail: "The selected lines", run: () => void wrapInRegion() },
 	{ id: "insert-banner", label: "Insert file banner", run: () => insertTemplate(TEMPLATES.find((t) => t.id === "banner")!) },
 	{ id: "insert-procedure", label: "Insert procedure", run: () => insertTemplate(TEMPLATES.find((t) => t.id === "procedure")!) },
-	{ id: "editor-commands", label: "Show editor commands…", detail: "The text editor's own list", run: () => activeEditor()?.trigger("app", "editor.action.quickCommand", null) },
+	{ id: "editor-commands", label: "Show editor commands…", detail: "The text editor's own list", run: () => (activeLiveEditor() ? setState("quickPick", "commands") : activeEditor()?.trigger("app", "editor.action.quickCommand", null)) },
 	// The project
 	{ id: "setup-project", label: "Set up project", detail: "Settings, README, AGENTS", run: () => void setUpProject() },
 	{ id: "undo-setup-project", label: "Undo set up project", detail: "Removes what it created and nobody has changed since", run: () => void undoSetUp() },
@@ -207,6 +257,7 @@ export const commands: Command[] = [
 	{ id: "projects", label: "Show Projects", detail: "Switch to another recent folder, or go back to the editors", run: () => setState("centerView", state.centerView === "welcome" ? "editors" : "welcome") },
 	{ id: "toggle-sidebar", label: "Toggle side bar", run: () => toggleSideOf("left") },
 	{ id: "toggle-panel", label: "Toggle bottom panel", run: () => toggle("bottom") },
+	{ id: "toggle-panel-maximize", label: "Toggle maximized panel", detail: "Expand the bottom panel to fill the center pane, or restore its size", run: toggleMaximizeBottom },
 	{ id: "toggle-right-panel", label: "Toggle right panel", detail: "The panel docked on the right: the Agent, unless another was moved there", run: () => toggleSideOf("right") },
 	{ id: "reset-layout", label: "Reset the layout", detail: "Every panel back on its own side and at its first size", run: resetLayout },
 	{ id: "menu-bar", label: "Focus the menu bar", detail: "Then the arrow keys. Alt and a menu's first letter opens that menu", run: () => void (openMenu() || notify(MENU_HIDDEN)) },
@@ -287,11 +338,12 @@ async function wrapInRegion() {
 	editor.focus();
 }
 
-/** Blocks for a script; for a plan its chart, for Markdown the rendered page. */
+/** Blocks for a script; for a plan its chart, for Markdown toggles Live/Read, for a table toggles Table/Text. */
 function toggleVisual() {
 	const path = activePath();
 	if (isPlanPath(path)) setState("planText", path!, (text) => !text);
-	else if (isMarkdown(path) || isTable(path)) setState("mdText", path!, (text) => !text);
+	else if (isMarkdown(path)) toggleMarkdownMode();
+	else if (isTable(path)) setState("mdText", path!, (text) => !text);
 	else setState("groups", state.activeGroup, "mode", (m) => (m === "blocks" ? "text" : "blocks"));
 }
 
@@ -390,6 +442,7 @@ const KEYS: Record<string, string> = {
 	"ctrl+0": "focus-side-panel",
 	"ctrl+shift+f": "search",
 	"ctrl+shift+e": "explorer",
+	"ctrl+e": "toggle-markdown-mode",
 	"ctrl+b": "toggle-sidebar",
 	"ctrl+alt+b": "toggle-right-panel",
 	"ctrl+j": "toggle-panel",
@@ -423,6 +476,21 @@ export function keymap(): Record<string, string> {
 /** A command's shortcuts as they are shown: "Ctrl+Shift+P", several joined by ", ". */
 export const keysFor = (id: string) => keysOf(id, keymap()).map(displayKey).join(", ");
 
+/**
+ * Text-editing shortcuts that take precedence over non-editing window shortcuts
+ * (e.g. Ctrl+B = Bold instead of Toggle side bar) whenever focus is inside a
+ * Markdown text editor (CodeMirror 6 Live Preview or Monaco Source mode).
+ */
+const MARKDOWN_TEXT_KEYS: Record<string, string> = {
+	"ctrl+b": "md-bold",
+	"ctrl+i": "md-italic",
+	"ctrl+shift+x": "md-strike",
+	"ctrl+`": "md-code",
+	"ctrl+alt+h": "md-highlight",
+	"ctrl+k": "md-link",
+	"ctrl+l": "md-checkbox",
+};
+
 export function installKeys() {
 	setFocusFallback(focusEditor);
 	installRecentTabs();
@@ -433,10 +501,20 @@ export function installKeys() {
 			// being recorded in Settings runs nothing.
 			// AltGr is typing a character (a backslash on many layouts), never a shortcut.
 			if (modalOpen() || isModifierKey(e.key) || e.getModifierState("AltGraph")) return;
+			const pressed = keyNames(e);
+			// Text-editing controls supersede conflicting chrome shortcuts inside Markdown editors.
+			if (isInMarkdownTextEditor(e.target, activeDoc()?.model.getLanguageId())) {
+				const mdCmd = pressed.map((name) => MARKDOWN_TEXT_KEYS[name]).find(Boolean);
+				if (mdCmd) {
+					e.preventDefault();
+					e.stopPropagation();
+					runMarkdownEdit(mdCmd);
+					return;
+				}
+			}
 			const map = keymap();
-			const id = keyNames(e)
-				.map((name) => map[name])
-				.find(Boolean);
+			const id = pressed.map((name) => map[name]).find(Boolean);
+			if (id === "toggle-markdown-mode" && !isMarkdown(activePath())) return;
 			// Alt and a menu's first letter opens that menu, where no shortcut has the key. Not with Ctrl or Shift, and not
 			// where Alt and a letter types a character: the key is then that character, not the letter.
 			const menu = !id && e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.key.length === 1 ? menuForLetter(e.key) : -1;

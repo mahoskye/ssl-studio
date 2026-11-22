@@ -14,7 +14,8 @@ import { languageName } from "./editor/languages";
 import { encodingName, eolName } from "../shared/fileKind";
 import { chooseFromMenu } from "./panels/RowMenu";
 import { branchText, changedCount, gitStatus } from "./git";
-import { activeDoc, activePath, displayName, notify, setState, state } from "./state";
+import { activeDoc, activePath, displayName, markdownMode, notify, setState, state } from "./state";
+import { activeLiveEditor } from "./editor/liveBridge";
 import { review } from "./editor/Review";
 
 const [size, setSize] = createSignal<SizeReport | null>(null);
@@ -42,8 +43,13 @@ function useSizeMeter() {
 	);
 }
 
-/** Opens the text editor's "go to line". The editors import the commands, so they are loaded here when they are needed. */
+/** Opens the text editor's "go to line". Works in both CodeMirror Live Preview and Monaco. */
 async function goToLine() {
+	const live = activeLiveEditor();
+	if (live) {
+		live.runAction("editor.action.gotoLine");
+		return;
+	}
 	const { activeEditor } = await import("./editor/EditorGroup");
 	const editor = activeEditor();
 	if (!editor) return;
@@ -95,8 +101,8 @@ export function StatusBar() {
 	};
 	const lspWaits = () => !state.workspace && state.lsp.state === "stopped" && !state.info?.lsp.message;
 	/** The regions and the procedure the cursor is in, outermost first: where one is, in a long script. */
-	/** A Markdown document being read, not edited: it has no cursor line to say a place by. */
-	const rendered = () => Boolean(activePath() && /\.(md|markdown)$/i.test(activePath()!) && !state.mdText[activePath()!]);
+	/** A Markdown document being read (not in Live or Source editing): it has no cursor line to say a place by. */
+	const rendered = () => Boolean(activePath() && /\.(md|markdown)$/i.test(activePath()!) && markdownMode(activePath()!) === "read");
 	const where = () => (state.centerView === "editors" && !rendered() ? symbolPath(symbols(), state.cursor.line).filter((s) => s.kind !== monaco.languages.SymbolKind.Variable) : []);
 	/** The same in a sentence, innermost first: "DueDate, in Counting days". */
 	const whereWords = () => [...where()].reverse().map((s) => s.name).join(", in ");

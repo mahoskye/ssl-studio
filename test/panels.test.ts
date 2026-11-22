@@ -302,6 +302,7 @@ test("the file templates do not join the patterns given to a model", () => {
 });
 
 import { openFolders } from "../src/view/panels/explorerMenu";
+import { formatOutlineActive, observeOutlineState, parseOutlineActive, planPaletteKey, transitionOutlineAvailability, transitionPanelAvailability } from "../src/view/panels/outlineState";
 
 test("the Explorer's open folders are read with suspicion", () => {
 	expect(openFolders(JSON.stringify(["/w/src", "/w/src/DueDates", "/elsewhere", 7]), "/w")).toEqual(["/w/src", "/w/src/DueDates"]);
@@ -342,4 +343,90 @@ test("a file's menu in the Explorer copies its name as well as its paths", () =>
 	expect(menuFor("dir", "/w/Sample", "/w")).toContain(COPY_NAME);
 	// The workspace's own folder is known by its path.
 	expect(menuFor("dir", "/w", "/w")).not.toContain(COPY_NAME);
+});
+
+// --- Document outline right-panel default & remembered active state ----------------
+
+test("Document outline defaults to active when unset and persists on/off cleanly", () => {
+	expect(parseOutlineActive(null)).toBe(true);
+	expect(parseOutlineActive("on")).toBe(true);
+	expect(parseOutlineActive("off")).toBe(false);
+	expect(formatOutlineActive(true)).toBe("on");
+	expect(formatOutlineActive(false)).toBe("off");
+});
+
+test("Document outline auto-opens on the right when available and closes again when unavailable", () => {
+	const alwaysValid = () => true;
+	// Fresh state: right panel closed on agent; opening a doc opens Document outline.
+	const opened = transitionOutlineAvailability(true, { open: false, view: "agent" }, { active: true, before: null }, "agent", alwaysValid, false);
+	expect(opened.apply).toEqual({ open: true, view: "objects" });
+	expect(opened.memory).toEqual({ active: true, before: { open: false, view: "agent" } });
+	// Closing the doc restores right panel closed while keeping active = true.
+	const closed = transitionOutlineAvailability(false, { open: true, view: "objects" }, opened.memory, "agent", alwaysValid, false);
+	expect(closed.apply).toEqual({ open: false, view: "agent" });
+	expect(closed.memory).toEqual({ active: true, before: null });
+	// Opening another doc brings Document outline right back.
+	const reopened = transitionOutlineAvailability(true, { open: false, view: "agent" }, closed.memory, "agent", alwaysValid, false);
+	expect(reopened.apply).toEqual({ open: true, view: "objects" });
+});
+
+test("Document outline restores a previously open right panel (e.g. Health) when no longer available", () => {
+	const opened = transitionOutlineAvailability(true, { open: true, view: "health" }, { active: true, before: null }, "agent", () => true, false);
+	expect(opened.apply).toEqual({ open: true, view: "objects" });
+	expect(opened.memory.before).toEqual({ open: true, view: "health" });
+	const restored = transitionOutlineAvailability(false, { open: true, view: "objects" }, opened.memory, "agent", () => true, false);
+	expect(restored.apply).toEqual({ open: true, view: "health" });
+	expect(restored.memory.active).toBe(true);
+});
+
+test("deactivating Document outline remembers inactive across future documents until reactivated", () => {
+	const afterDismiss = observeOutlineState(false, { active: true, before: { open: false, view: "agent" } });
+	expect(afterDismiss).toEqual({ active: false, before: null });
+	// Opening another doc respects inactive preference and leaves right side untouched.
+	const stayedOff = transitionOutlineAvailability(true, { open: false, view: "agent" }, afterDismiss, "agent", () => true, false);
+	expect(stayedOff.apply).toBeNull();
+	expect(stayedOff.memory.active).toBe(false);
+	// Reactivating remembers active again.
+	const afterEnable = observeOutlineState(true, stayedOff.memory);
+	expect(afterEnable.active).toBe(true);
+});
+
+test("Document outline does not hijack the left slot in narrow mode and closes cleanly when no prior panel existed", () => {
+	const narrow = transitionOutlineAvailability(true, { open: false, view: "agent" }, { active: true, before: null }, "agent", () => true, true);
+	expect(narrow.apply).toBeNull();
+	expect(narrow.memory.active).toBe(true);
+	// Loaded directly on a doc with outline active (before === null), then closed: closes side without popping open fallback.
+	const directClose = transitionOutlineAvailability(false, { open: true, view: "objects" }, { active: true, before: null }, "agent", () => true, false);
+	expect(directClose.apply).toEqual({ open: false, view: "agent" });
+	expect(directClose.memory.active).toBe(true);
+});
+
+// --- Plan Palette auto-load & remembered state --------------------------------------
+
+test("Plan Palette loads by default on a plan chart, snapshots Explorer, and restores Explorer when leaving", () => {
+	expect(planPaletteKey("/w")).toBe("plan.palette.active:/w");
+	const alwaysValid = () => true;
+	const opened = transitionPanelAvailability("palette", true, { open: true, view: "explorer" }, { active: true, before: null }, "explorer", alwaysValid, false, false);
+	expect(opened.apply).toEqual({ open: true, view: "palette" });
+	expect(opened.memory).toEqual({ active: true, before: { open: true, view: "explorer" } });
+	// Leaving the plan chart restores Explorer while keeping Palette active = true for the next plan.
+	const restored = transitionPanelAvailability("palette", false, { open: true, view: "palette" }, opened.memory, "explorer", alwaysValid, false, false);
+	expect(restored.apply).toEqual({ open: true, view: "explorer" });
+	expect(restored.memory).toEqual({ active: true, before: null });
+	// Opening a plan chart again brings Palette right back.
+	const reopened = transitionPanelAvailability("palette", true, { open: true, view: "explorer" }, restored.memory, "explorer", alwaysValid, false, false);
+	expect(reopened.apply).toEqual({ open: true, view: "palette" });
+});
+
+test("Plan Palette remembers user deactivation and falls back cleanly on reload without slamming left sidebar shut", () => {
+	// User switches back to Explorer while viewing a plan -> remembers inactive.
+	const dismissed = observeOutlineState(false, { active: true, before: { open: true, view: "explorer" } });
+	expect(dismissed).toEqual({ active: false, before: null });
+	const stayedOff = transitionPanelAvailability("palette", true, { open: true, view: "explorer" }, dismissed, "explorer", () => true, false, false);
+	expect(stayedOff.apply).toBeNull();
+	expect(stayedOff.memory.active).toBe(false);
+	// Reloaded directly onto a plan (before === null), then switched to a Markdown file -> keeps left sidebar open on Explorer.
+	const directLeave = transitionPanelAvailability("palette", false, { open: true, view: "palette" }, { active: true, before: null }, "explorer", () => true, false, false);
+	expect(directLeave.apply).toEqual({ open: true, view: "explorer" });
+	expect(directLeave.memory.active).toBe(true);
 });

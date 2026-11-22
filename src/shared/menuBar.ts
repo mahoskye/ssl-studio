@@ -119,6 +119,7 @@ export const MENU_BAR: BarMenu[] = [
 			"separator",
 			forFolder("Toggle side bar", "toggle-sidebar"),
 			forFolder("Toggle bottom panel", "toggle-panel"),
+			forFolder("Toggle maximized panel", "toggle-panel-maximize"),
 			forFolder("Toggle right panel", "toggle-right-panel"),
 			{ label: "Hide the menu bar", command: "toggle-menu-bar" },
 			forFolder("Reset the layout", "reset-layout"),

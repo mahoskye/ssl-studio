@@ -6,7 +6,9 @@ import DOMPurify from "dompurify";
 import { marked } from "marked";
 import { linkFile, linkLeads, linkWritten } from "../../shared/docLinks";
 import { headingAnchor } from "../../shared/docTables";
+import { findHeadingLine } from "../../shared/markdownEdit";
 import { docByName, linkedFrom } from "../../shared/namedLinks";
+import { searchFor } from "../panels/Search";
 import { finishMarkdown, outlineOf, type NameResolver, type TicketRef } from "./markdownHtml";
 import { frontMatter, plainMarkdown } from "../../shared/frontMatter";
 import { dirName, isInside, joinPath, relativePath, relativeTo } from "../../shared/paths";
@@ -119,12 +121,21 @@ export function MarkdownView(props: { path: string; /** The editor group the pag
 	const listed = createMemo(() => docs().find((d) => ["tickets", "specs", "knowledge"].includes(d.group) && canonical(d.path) === props.path));
 	const go = (target: { file?: string; web?: string }) => (target.web ? void window.open(target.web, "_blank", "noopener") : target.file ? void openFile(target.file) : undefined);
 
-	/** Links to files in the workspace open as tabs; web links open outside. */
+	/** Links to files in the workspace open as tabs; web links open outside; #tags open workspace Search. */
 	const follow = (e: MouseEvent) => {
-		const link = (e.target as HTMLElement).closest("a");
+		const target = e.target as HTMLElement;
+		const tagEl = target.closest<HTMLElement>(".md-tag");
+		if (tagEl) {
+			e.preventDefault();
+			const tag = tagEl.dataset.tag ?? tagEl.textContent?.trim() ?? "";
+			if (tag) searchFor(tag);
+			return;
+		}
+		const link = target.closest("a");
 		if (!link) return;
 		e.preventDefault();
-		const leads = linkLeads(link.getAttribute("href") ?? "", props.path, state.workspace?.root);
+		const rawHref = link.getAttribute("href") ?? "";
+		const leads = linkLeads(rawHref, props.path, state.workspace?.root);
 		if (!leads) return;
 		if ("web" in leads) return void window.open(leads.web, "_blank", "noopener");
 		// A link to a heading in this document goes there.
@@ -132,6 +143,19 @@ export function MarkdownView(props: { path: string; /** The editor group the pag
 			const heading = [...view.querySelectorAll<HTMLElement>("h1, h2, h3, h4, h5, h6")].find((h) => h.id === leads.heading || h.id === headingAnchor(leads.heading));
 			heading?.scrollIntoView({ block: "start" });
 			return;
+		}
+		// A link to a heading in another document (`other.md#heading`): resolve exact heading line.
+		if (!leads.lines && rawHref.includes("#")) {
+			const hash = decodeURIComponent(rawHref.slice(rawHref.indexOf("#") + 1));
+			if (hash) {
+				const open = documents.get(canonical(leads.file));
+				const loadText = open ? Promise.resolve(open.model.getValue()) : backend.read(leads.file).then((f) => f.text, () => "");
+				void loadText.then((content) => {
+					const line = findHeadingLine(content, hash);
+					return openFile(leads.file, line ? { reveal: { line } } : {});
+				});
+				return;
+			}
 		}
 		// A link to lines of a file opens the file at them: "#L12", "#L12-L18".
 		void openFile(leads.file, leads.lines ? { reveal: leads.lines } : {});

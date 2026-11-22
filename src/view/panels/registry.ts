@@ -3,9 +3,20 @@
 // workspace's layout.
 import { createSignal } from "solid-js";
 import { hasOutline } from "../../shared/outline";
+import { recall, remember } from "../graph/canvas";
 import { dockedView } from "../layout";
 import { isPlanPath } from "../plan/model";
 import { activeDoc, activePath, focusEditor, setState, state, type PanelId } from "../state";
+import { formatOutlineActive, observeOutlineState, outlineKey, parseOutlineActive, planPaletteKey, type OutlineMemory, type SideSnapshot } from "./outlineState";
+
+/** True when the active editor tab is a Plan file shown as its visual chart. */
+export const isPlanChartActive = (): boolean => {
+	if (state.centerView !== "editors") return false;
+	const path = activePath();
+	if (!path || !isPlanPath(path) || state.planText[path]) return false;
+	const doc = activeDoc();
+	return Boolean(doc && !doc.binary);
+};
 
 export type Side = "left" | "right";
 export const PANELS: { id: PanelId; icon: string; title: string; home: Side; when?: () => boolean }[] = [
@@ -20,16 +31,16 @@ export const PANELS: { id: PanelId; icon: string; title: string; home: Side; whe
 		when: () => {
 			if (state.centerView !== "editors") return false;
 			const path = activePath();
-			if (!path) return false;
+			if (!path || isPlanPath(path)) return false;
 			const doc = activeDoc();
 			if (!doc || doc.binary) return false;
-			return isPlanPath(path) || doc.model.getLanguageId() === "ssl" || hasOutline(doc.model.getLanguageId());
+			return doc.model.getLanguageId() === "ssl" || hasOutline(doc.model.getLanguageId());
 		},
 	},
 	{
 		id: "palette",
 		icon: "\ueb5c",
-		title: "Palette: SSL templates, plan shapes, or call graph controls",
+		title: "Palette: SSL templates, plan details and shapes, or call graph controls",
 		home: "left",
 		when: () => {
 			if (state.centerView === "graph") return true;
@@ -38,7 +49,7 @@ export const PANELS: { id: PanelId; icon: string; title: string; home: Side; whe
 			if (!path) return false;
 			const doc = activeDoc();
 			if (!doc || doc.binary) return false;
-			return isPlanPath(path) || doc.model.getLanguageId() === "ssl";
+			return (isPlanPath(path) && !state.planText[path]) || doc.model.getLanguageId() === "ssl";
 		},
 	},
 	{ id: "reference", icon: "\ueaa4", title: "Reference: built-in functions, classes and keywords", home: "left" },
@@ -77,10 +88,46 @@ export const isShown = (id: PanelId) => {
 	return isOpen(id) && !crowdedOut(sideOf(id));
 };
 
+/** Remembered active/inactive preference for Document outline ("objects"), defaulting to active. */
+let outlineMemory: OutlineMemory = { active: true, before: null };
+export const getOutlineMemory = () => outlineMemory;
+export const setOutlineMemory = (next: OutlineMemory) => (outlineMemory = next);
+export function loadOutlineMemory(root: string | undefined) {
+	outlineMemory = { active: parseOutlineActive(root ? recall(outlineKey(root)) : null), before: null };
+}
+export function recordOutlineActive(active: boolean, before?: SideSnapshot | null) {
+	outlineMemory = active ? { active: true, before: before !== undefined ? before : outlineMemory.before } : observeOutlineState(false, outlineMemory);
+	const root = state.workspace?.root;
+	if (root) remember(outlineKey(root), formatOutlineActive(outlineMemory.active));
+}
+export function resetOutlineActive() {
+	recordOutlineActive(true, null);
+}
+
+/** Remembered active/inactive preference for Plan Palette ("palette" when viewing a plan chart), defaulting to active. */
+let planPaletteMemory: OutlineMemory = { active: true, before: null };
+export const getPlanPaletteMemory = () => planPaletteMemory;
+export const setPlanPaletteMemory = (next: OutlineMemory) => (planPaletteMemory = next);
+export function loadPlanPaletteMemory(root: string | undefined) {
+	planPaletteMemory = { active: parseOutlineActive(root ? recall(planPaletteKey(root)) : null), before: null };
+}
+export function recordPlanPaletteActive(active: boolean, before?: SideSnapshot | null) {
+	planPaletteMemory = active ? { active: true, before: before !== undefined ? before : planPaletteMemory.before } : observeOutlineState(false, planPaletteMemory);
+	const root = state.workspace?.root;
+	if (root) remember(planPaletteKey(root), formatOutlineActive(planPaletteMemory.active));
+}
+export function resetPlanPaletteActive() {
+	recordPlanPaletteActive(true, null);
+}
+
 export function showPanel(id: PanelId) {
 	const side = sideOf(id);
 	// In narrow layout, right-docked panels open cleanly inside the left island slot without mutating dock settings.
 	if (side === "right" && narrowPanels()) {
+		if (id === "objects" && isPanelAvailable("objects")) recordOutlineActive(true);
+		else if (narrowHosted() === "objects" && isPanelAvailable("objects")) recordOutlineActive(false, null);
+		if (id === "palette" && isPlanChartActive()) recordPlanPaletteActive(true);
+		else if (narrowHosted() === "palette" && isPlanChartActive()) recordPlanPaletteActive(false, null);
 		setNarrowHosted(id);
 		setLastShown("left");
 		setState("rightView", id);
@@ -155,6 +202,8 @@ export function toggleSide(side: Side) {
 export function togglePanel(id: PanelId) {
 	if (isShown(id)) {
 		if (narrowPanels() && narrowHosted() === id) {
+			if (id === "objects" && isPanelAvailable("objects")) recordOutlineActive(false, null);
+			if (id === "palette" && isPlanChartActive()) recordPlanPaletteActive(false, null);
 			setNarrowHosted(null);
 			setState("settings", "layout", "left", false);
 		} else {

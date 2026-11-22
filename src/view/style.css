@@ -213,17 +213,25 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .splitter.x::after { inset: 0 0 0 -2px; }
 .splitter.x.after-editors::after { inset: 0 -6px 0 0; }
 .splitter.y::after { inset: 0 0 -4px 0; }
-.splitter:hover::before, .splitter:focus-visible::before { background: var(--accent); }
+.splitter.y.at-top { height: 1px; margin-bottom: -1px; z-index: 3; }
+.splitter.y.at-top::before { top: 0; transform: none; }
+.splitter.y.at-top::after { inset: 0 0 -8px 0; }
+.splitter:hover::before, .splitter:focus-visible::before, .splitter.dragging::before { background: var(--accent); }
 .splitter:focus-visible { outline: none; }
+.sidebar.snap-hidden, .rightbar.snap-hidden, .bottom.snap-hidden { display: none; }
 @media (prefers-reduced-motion: reduce) { .splitter::before, .activity button { transition: none; } }
-.center { grid-row: 2; grid-column: 4; min-width: 0; margin-bottom: var(--tray-gap); display: flex; flex-direction: column; }
+.center { grid-row: 2; grid-column: 4; min-width: 0; min-height: 0; overflow: hidden; margin-bottom: var(--tray-gap); display: flex; flex-direction: column; }
 .app:not(:has(.rightbar)) .center { margin-right: var(--tray-gap); }
-.editors { flex: 1; min-height: 0; display: flex; gap: var(--tray-gap); }
-.splitter.y { height: max(4px, var(--tray-gap)); cursor: row-resize; }
-.bottom { height: var(--bottom); background: var(--panel-bg); border: 1px solid var(--border); border-radius: var(--island-radius); overflow: hidden; display: flex; flex-direction: column; min-height: 0; }
-.bottom-tabs { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-1) var(--space-4); border-bottom: 1px solid var(--border); }
-.bottom-tabs button { text-transform: uppercase; font-size: var(--text-sm); letter-spacing: .06em; color: var(--muted); }
+.editors { flex: 1 1 0; min-height: 0; min-width: 0; overflow: hidden; display: flex; gap: var(--tray-gap); }
+.editors.panel-maximized { display: none; }
+.splitter.y { flex: none; height: max(4px, var(--tray-gap)); cursor: row-resize; }
+.bottom { flex: none; height: var(--bottom); background: var(--panel-bg); border: 1px solid var(--border); border-radius: var(--island-radius); overflow: hidden; display: flex; flex-direction: column; min-height: 0; }
+.bottom.maximized { flex: 1 1 0; height: auto; }
+.bottom-tabs { flex: none; display: flex; align-items: center; gap: var(--space-2); padding: var(--space-1) var(--space-4); border-bottom: 1px solid var(--border); }
+.bottom-tabs button { text-transform: uppercase; font-size: var(--text-sm); letter-spacing: .06em; color: var(--muted); white-space: nowrap; }
 .bottom-tabs button.active { color: var(--strong-fg); box-shadow: inset 0 -1.5px 0 var(--accent); }
+.bottom-tabs .bottom-action { display: inline-flex; align-items: center; justify-content: center; width: var(--target); height: var(--target); padding: 0; text-transform: none; letter-spacing: 0; border-radius: var(--radius-md); }
+.bottom-tabs .bottom-action:hover { color: var(--strong-fg); background: var(--hover); }
 .count { background: var(--selected); border-radius: var(--radius-lg); padding: 0 var(--space-3); margin-left: var(--space-2); }
 
 /* Continuous git gutter bars (ADR 0010 & ADR 0027): unbroken vertical connection across consecutive lines.
@@ -264,7 +272,7 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .statusbar .git-count { background: var(--selected); border-radius: var(--radius-lg); padding: 0 var(--space-3); }
 
 /* A file that is not text, where the editor would be: a picture on a ground that shows what of it is clear, or a note. */
-.file-view { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--space-5); padding: var(--space-7); overflow: auto; background: var(--editor-bg, var(--bg)); }
+.file-view { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: safe center; gap: var(--space-5); padding: var(--space-7); overflow: auto; background: var(--editor-bg, var(--bg)); }
 .file-view:focus-visible { outline-offset: -2px; }
 .file-picture { min-height: 0; max-width: 100%; display: flex; background: repeating-conic-gradient(color-mix(in srgb, var(--fg) 10%, transparent) 0% 25%, transparent 0% 50%) 0 0 / 16px 16px; border: 1px solid var(--border); }
 .file-picture img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; }
@@ -342,10 +350,13 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .tree-row.problem .label { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
 .tree-row.problem .code { font-family: var(--code-font); white-space: nowrap; align-self: start; padding-top: 1px; }
 .tree-row.problem .meta { font-family: var(--code-font); font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; min-width: 5ch; align-self: start; padding-top: 1px; }
-/* Reusable vertical section splitter inside side panels (Explorer, Palette, Reference). */
-.section-splitter { flex: none; height: 5px; position: relative; cursor: row-resize; background: transparent; border-top: 1px solid var(--border); }
-.section-splitter::before { content: ""; position: absolute; left: 16%; right: 16%; top: 50%; height: 2px; border-radius: 99px; transform: translateY(-50%); background: transparent; transition: background-color 120ms ease; pointer-events: none; }
-.section-splitter:hover::before, .section-splitter:focus-visible::before { background: var(--accent); }
+/* Reusable vertical section splitter inside side panels (Explorer, Palette, Reference).
+   1px zero-net-flow sash overlaid directly on the divider border so mounting/unmounting
+   never shifts section spacing while staying visible to assistive tools. */
+.section-splitter { flex: none; height: 1px; margin-top: -1px; position: relative; z-index: 2; cursor: row-resize; }
+.section-splitter::after { content: ""; position: absolute; left: 0; right: 0; top: -3px; height: 7px; }
+.section-splitter::before { content: ""; position: absolute; left: 16%; right: 16%; top: 0; height: 2px; border-radius: 99px; background: transparent; transition: background-color 120ms ease; pointer-events: none; }
+.section-splitter:hover::before, .section-splitter:focus-visible::before, .section-splitter.dragging::before { background: var(--accent); }
 .section-splitter:focus-visible { outline: none; }
 @media (prefers-reduced-motion: reduce) { .section-splitter::before { transition: none; } }
 
@@ -375,8 +386,6 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .open-editor-row.dirty .open-editor-close:hover .open-editor-dot { display: none; }
 .open-editor-row.dirty .open-editor-close:hover .open-editor-x { display: inline-block; }
 .open-editor-folder { max-width: 12ch; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left; }
-/* Drop double borders when a section splitter sits right between two sections. */
-.section-splitter + .explorer-section { border-top: 0; }
 /* A row's menu (panels/RowMenu.tsx) looks like every other menu, opens where it was asked for, and closes on a click anywhere else. */
 .row-menu-shade { position: fixed; inset: 0; z-index: 50; }
 .menu-pop.row-menu { position: fixed; right: auto; min-width: 0; }
@@ -395,7 +404,7 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .tree-row.hit del { background: color-mix(in srgb, var(--error) 22%, transparent); text-decoration: line-through; border-radius: 2px; }
 .tree-row.hit ins { background: color-mix(in srgb, var(--ok) 26%, transparent); text-decoration: underline; border-radius: 2px; }
 
-.group { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; }
+.group { flex: 1; min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column; position: relative; }
 .editor-sheet { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; position: relative; z-index: 1; background: var(--editor-bg); border: 1px solid var(--editor-border); border-radius: var(--island-radius); overflow: hidden; box-shadow: var(--sheet-shadow); }
 .group.empty .editor-sheet { background: transparent; border-color: transparent; box-shadow: none; }
 .group.empty .empty-group { background: transparent; }
@@ -460,16 +469,18 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .menu-keys { color: var(--muted); font-size: var(--text-sm); }
 .menu-sep { height: 1px; margin: var(--space-2) 0; background: var(--border); }
 .editor-host { flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
-.empty-group { position: absolute; inset: 0; display: grid; place-items: center; overflow: auto; color: var(--muted); }
+.empty-group { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable; color: var(--muted); container-type: inline-size; }
 /* No file open: the project by name, and the ways into it with their keys. */
-.start { width: min(460px, 100%); padding: var(--space-6); box-sizing: border-box; }
+.start { margin: auto 0; flex: none; width: min(460px, 100%); min-width: 0; padding: var(--space-6); box-sizing: border-box; }
 .start h2 { margin: 0 0 var(--space-2); font-size: var(--text-xl, 20px); font-weight: 500; color: var(--fg); overflow-wrap: anywhere; }
 .start > .hint { margin: 0 0 var(--space-6); overflow-wrap: anywhere; }
 .start-ways { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-1); }
-.start-ways button { width: 100%; min-height: var(--target); display: flex; align-items: baseline; gap: var(--space-4); padding: var(--space-3) var(--space-4); border-radius: var(--radius-md); text-align: left; }
-.start-ways .start-label { color: var(--fg); white-space: nowrap; }
+.start-ways button { width: 100%; min-width: 0; min-height: var(--target); display: flex; align-items: baseline; gap: var(--space-4); padding: var(--space-3) var(--space-4); border-radius: var(--radius-md); text-align: left; }
+.start-ways .start-label { color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .start-ways .hint { flex: 1; min-width: 0; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .start-ways kbd { margin-left: auto; flex: none; font: inherit; font-size: var(--text-sm); color: var(--muted); padding: 0 var(--space-3); border: 1px solid var(--input-border); border-radius: var(--radius-sm); background: var(--input-bg); white-space: nowrap; }
+@container (max-width: 340px) { .start-ways .hint { display: none; } }
+@container (max-width: 240px) { .start-ways kbd { display: none; } }
 .start .start-foot { margin: var(--space-5) 0 0 var(--space-4); }
 
 .diff { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
@@ -588,7 +599,7 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .group-head { padding: var(--space-4) var(--space-5) var(--space-1); font-size: var(--text-sm); text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
 .palette-item .label { flex: none; max-width: 55%; }
 /* Resizable preview of what the hovered/focused template inserts. */
-.palette-preview { flex: none; min-height: 80px; overflow: auto; margin: 0 var(--space-4) var(--space-4); padding: var(--space-4); background: var(--panel-bg); border: 1px solid var(--border); border-radius: var(--radius-md); }
+.palette-preview { flex: none; min-height: 80px; overflow: auto; margin: var(--space-2) var(--space-4) var(--space-4); padding: var(--space-4); background: var(--panel-bg); border: 1px solid var(--border); border-radius: var(--radius-md); }
 .palette-preview-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2) var(--space-4); margin-bottom: var(--space-3); }
 .palette-preview-head .hint { margin: 0; }
 .palette-preview > .hint { margin: 0; }
@@ -601,7 +612,26 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .plan-shape-item .label { flex: 1; max-width: none; min-width: 0; }
 .plan-shape-item .meta { flex: none; }
 .plan-shape-item.active { background: var(--selected); box-shadow: inset 2px 0 0 var(--accent); }
-.plan-palette-note { height: auto; min-height: 68px; max-height: 112px; }
+.plan-palette-scroll { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
+.plan-palette-rows { flex: none !important; overflow: visible !important; }
+.plan-prop-section { padding: var(--space-3) var(--space-4) var(--space-4); border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: var(--space-3); }
+.plan-step-section { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+.plan-prop-toggle { display: flex; align-items: center; gap: var(--space-2); padding: 0; width: 100%; text-align: left; font-size: var(--text-sm); font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.plan-prop-toggle:hover { color: var(--strong-fg); }
+.plan-step-head { display: flex; align-items: center; gap: var(--space-2); min-height: 22px; }
+.plan-step-badge { padding: 1px var(--space-3); border-radius: 999px; font-size: var(--text-xs); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+.plan-prop-title { font-size: var(--text-sm); font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.plan-step-links { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-3); }
+.plan-prop-fields { display: flex; flex-direction: column; gap: var(--space-3); }
+.plan-prop-field { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.plan-prop-field > span { font-size: var(--text-xs); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.plan-prop-field input, .plan-prop-field textarea { width: 100%; box-sizing: border-box; font-family: var(--ui-font); font-size: var(--text-md); background: var(--input-bg); color: var(--input-fg); border: 1px solid var(--input-border); border-radius: var(--radius-sm); padding: var(--space-2) var(--space-3); }
+.plan-prop-field textarea { resize: vertical; min-height: 36px; line-height: 1.45; }
+.plan-prop-field textarea.plan-scripts-input { font-family: var(--code-font); font-size: var(--text-sm); overflow-wrap: anywhere; }
+.plan-prop-field input:focus, .plan-prop-field textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.plan-ticket-row { display: flex; align-items: center; gap: var(--space-2); }
+.plan-ticket-row input { flex: 1; min-width: 0; }
+.plan-palette-note { height: auto; min-height: 54px; max-height: 96px; }
 .swatch { width: 12px; height: 12px; padding: 0; border-radius: var(--radius-sm); flex: none; position: relative; }
 /* Twelve pixels to look at, twenty-four to hit. */
 .swatch::after { content: ""; position: absolute; inset: -6px; }
@@ -666,7 +696,7 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .meter-row .fill.over { background: var(--error); }
 .meter-row .near { color: var(--warning); }
 .meter-row .over { color: var(--error); font-weight: 600; }
-.reference-detail { flex: none; margin: 0 var(--space-4); padding: var(--space-4); background: var(--panel-bg); border: 1px solid var(--border); border-radius: var(--radius-md); overflow: auto; }
+.reference-detail { flex: none; margin: 0 var(--space-4) var(--space-2); padding: var(--space-4); background: var(--panel-bg); border: 1px solid var(--border); border-radius: var(--radius-md); overflow: auto; }
 .reference-head { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-2); }
 /* An entry's description in the Reference panel: the rendered Markdown, at the panel's size and without a page's margins. */
 .md.reference-doc { max-width: none; margin: 0; padding: 0; font-size: var(--text-md); line-height: 1.5; }
@@ -1009,66 +1039,25 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .g-proc:focus, .g-top:focus, .g-fold:focus { outline: none; }
 .g-proc:focus-visible rect, .g-top:focus-visible rect, .g-fold:focus-visible rect { stroke: var(--fg); stroke-width: 2.5; }
 
-/* Planning mode: a plan's chart */
-.plan { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; background: var(--bg); }
-.plan-bar { flex-wrap: wrap; }
-/* The Edit menu is at the bar's start: it opens to the right, over the chart it edits. */
-.plan-edit-menu .menu-pop { left: 0; right: auto; }
-/* In a narrow chart the finder is shorter, so the bar stays one row. */
-.plan-bar.narrow .graph-find-box { flex: 0 0 112px; }
-.plan-bar.narrow input.graph-find { width: 100%; min-width: 0; }
-/* A long title is cut short before it pushes the bar onto a second row. */
-.plan-bar > strong { flex: 0 1 auto; min-width: 60px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.plan-bar button.on, .graph-bar > button.on { color: var(--accent); box-shadow: inset 0 -1px 0 var(--accent); }
-.plan-canvas { flex: 1; min-height: 0; position: relative; display: flex; outline: none; overflow: hidden; }
-.plan-canvas:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); }
-.plan-canvas.linking .plan-node { cursor: crosshair; }
-.plan-node { cursor: pointer; }
-/* A node lifts a little off the canvas, so the chart reads as shapes joined by lines and not as outlines among outlines. */
-.plan-node { filter: drop-shadow(0 1px 1.5px rgb(0 0 0 / .28)); }
-.plan-node rect, .plan-node polygon { fill: var(--input-bg); stroke: color-mix(in srgb, var(--fg) 26%, var(--input-border)); stroke-width: 1.2; }
-.plan-node line { stroke: var(--input-border); }
-.plan-node text { font: 13px system-ui, sans-serif; fill: var(--fg); pointer-events: none; }
-/* Where the chart starts and ends: filled, and written a little heavier. */
-.plan-node.start rect, .plan-node.end rect { fill: var(--selected); stroke: color-mix(in srgb, var(--fg) 45%, var(--input-border)); }
-.plan-node.start text, .plan-node.end text { font-weight: 600; }
-.plan-node.decision polygon { fill: color-mix(in srgb, var(--accent) 12%, var(--input-bg)); stroke: var(--accent); }
-.plan-node.call rect { fill: color-mix(in srgb, var(--info) 12%, var(--input-bg)); stroke: var(--info); }
-.plan-node.call line { stroke: var(--info); }
-.plan-node:hover rect, .plan-node:hover polygon { stroke: var(--accent); }
-.plan-node.selected rect, .plan-node.selected polygon { stroke: var(--accent); stroke-width: 2.5; }
+/* Planning mode: shared arrow fills, status marks, probe, and keyboard legend (canvas visuals live in plan/planCanvas.css) */
+.graph-bar > button.on { color: var(--accent); box-shadow: inset 0 -1px 0 var(--accent); }
 .plan-dot { fill: var(--warning); stroke: var(--bg); stroke-width: 1.5; }
-/* A node's state as a mark at its corner, so it does not rest on the colour of its outline. */
 .plan-mark circle { fill: var(--bg); stroke: currentColor; stroke-width: 1.5; }
 .plan-mark path { fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 .plan-mark.passed { color: var(--ok); }
 .plan-mark.stuck, .plan-mark.gone { color: var(--error); }
 .plan-mark.changed, .plan-mark.skipped { color: var(--warning); }
 .plan-mark.running { color: var(--accent); }
-.plan-group text { font: 600 12px system-ui, sans-serif; }
-/* A way out: plain enough to stay behind the shapes, strong enough to follow. A loop's way back is the accent's. */
-.plan-edge .g-edge { opacity: 1; stroke: color-mix(in srgb, var(--fg) 55%, var(--muted)); stroke-width: 1.5px; }
-.plan-edge.back .g-edge { stroke: color-mix(in srgb, var(--accent) 70%, var(--muted)); }
-.plan-edge.near .g-edge { stroke: var(--fg); stroke-width: 2.2px; }
-.arrow.plan-plain { fill: color-mix(in srgb, var(--fg) 55%, var(--muted)); }
-.arrow.plan-back { fill: color-mix(in srgb, var(--accent) 70%, var(--muted)); }
-.arrow.plan-near { fill: var(--fg); }
+.arrow.plan-plain { fill: color-mix(in srgb, var(--fg) 48%, var(--muted)); }
+.arrow.plan-back { fill: color-mix(in srgb, var(--accent) 72%, var(--muted)); }
+.arrow.plan-near { fill: var(--accent); }
 .arrow.plan-on { fill: var(--accent); }
-.plan-edge-hit { fill: none; stroke: transparent; stroke-width: 12; cursor: pointer; }
-.plan-edge.on .g-edge { stroke: var(--accent); stroke-width: 2.5px; }
-.plan-label { cursor: pointer; }
-.plan-label rect { fill: var(--bg); stroke: color-mix(in srgb, var(--fg) 26%, var(--border)); }
-.plan-label text { font: 12px system-ui, sans-serif; fill: var(--fg); pointer-events: none; }
-.plan-label.missing rect { stroke: var(--warning); stroke-dasharray: 3 2; }
-.plan-label.missing text { fill: var(--warning); }
-/* Hidden text that measures a node's words and an edge's label. Its fonts must stay those of .plan-node text and .plan-label text, in the same units. */
+/* Hidden text that measures a node's words and an edge's label. Its fonts must stay those of .plan-node text.node-text and .plan-label text, in the same units. */
 .plan-probe { visibility: hidden; pointer-events: none; }
-.plan-probe text.plan-probe-node { font: 13px system-ui, sans-serif; }
-.plan-probe text.plan-probe-label { font: 12px system-ui, sans-serif; }
-.plan-edit { position: absolute; font: 13px system-ui, sans-serif; background: var(--input-bg); color: var(--input-fg); border: 1px solid var(--accent); border-radius: var(--radius-sm); padding: var(--space-2) var(--space-3); text-align: center; box-sizing: border-box; }
-.plan-hint { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); background: var(--selected); color: var(--fg); padding: var(--space-2) var(--space-5); border-radius: var(--radius-md); font-size: var(--text-md); }
+.plan-probe text.plan-probe-node { font: 500 13px var(--ui-font); }
+.plan-probe text.plan-probe-label { font: 600 11.5px var(--ui-font); }
 /* The chart's keys, shown from its menu or by the question mark key. */
-.plan-keys { position: absolute; top: var(--space-4); right: var(--space-4); max-width: min(380px, calc(100% - var(--space-6))); max-height: calc(100% - var(--space-6)); overflow: auto; padding: var(--space-4) var(--space-5); background: var(--side-bg); color: var(--side-fg); border: 1px solid var(--border); border-radius: var(--radius-lg); font-size: var(--text-md); cursor: default; }
+.plan-keys { position: absolute; top: var(--space-4); right: var(--space-4); z-index: 10; max-width: min(380px, calc(100% - var(--space-6))); max-height: calc(100% - var(--space-6)); overflow: auto; padding: var(--space-4) var(--space-5); background: var(--side-bg); color: var(--side-fg); border: 1px solid var(--input-border); border-radius: var(--radius-lg); box-shadow: var(--shadow); font-size: var(--text-md); cursor: default; }
 .plan-keys dl { display: grid; grid-template-columns: auto 1fr; gap: var(--space-2) var(--space-5); margin: 0; }
 .plan-keys dt { font-weight: 600; white-space: nowrap; }
 .plan-keys dd { margin: 0; color: var(--muted); }
@@ -1080,22 +1069,7 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .plan-shapes svg { flex: none; width: 34px; height: 18px; }
 .plan-shapes .plan-node { filter: none; cursor: default; }
 .plan-error { padding: var(--space-7); }
-.plan-details { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-2) var(--space-5); background: var(--tab-bg); border-top: 1px solid var(--border); font-size: var(--text-md); box-sizing: border-box; flex: none; }
-.plan-details-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-4); min-width: 0; }
-.plan-details label { display: flex; align-items: center; gap: var(--space-2); color: var(--muted); min-width: 0; }
-.plan-details label > span { flex: none; white-space: nowrap; }
-.plan-details label input { min-width: 0; }
-.plan-details label.grow { flex: 1 1 200px; min-width: 0; }
-.plan-details label.grow input { flex: 1; width: 100%; min-width: 0; }
-.plan-field-title { flex: 0 1 200px; }
-.plan-field-title input { width: 100%; }
-.plan-field-group { flex: 0 1 190px; }
-.plan-field-group input { width: 100%; }
-.plan-field-calls { flex: 0 1 220px; }
-.plan-field-calls input { width: 100%; }
-.plan-details input.short { width: 11ch; }
 .plan-code-link { white-space: nowrap; font-family: var(--code-font); font-size: var(--text-sm); }
-.plan-kind { color: var(--muted); font-weight: 600; text-transform: capitalize; }
 /* Read out by a screen reader, not seen: what is selected in the chart. */
 .plan-live { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
@@ -1120,7 +1094,7 @@ input, select { font: inherit; background: var(--input-bg); color: var(--input-f
 .plan-assist-foot { margin-top: var(--space-6); }
 /* One path through the chart, shown: it keeps its strength and the rest steps back. */
 .plan-canvas.pathing .plan-node:not(.on-path) { opacity: .38; }
-.plan-canvas.pathing .plan-edge:not(.on-path) .g-edge, .plan-canvas.pathing .plan-edge:not(.on-path) .plan-label { opacity: .25; }
+.plan-canvas.pathing .plan-edge:not(.on-path) .g-edge, .plan-canvas.pathing .plan-label:not(.on-path) { opacity: .25; }
 .plan-canvas.pathing .plan-edge.on-path .g-edge { stroke: var(--accent); stroke-width: 2.5px; }
 .plan-canvas.pathing .plan-node.on-path rect:not(.plan-built), .plan-canvas.pathing .plan-node.on-path polygon { stroke: var(--accent); stroke-width: 2; }
 /* The stepper through the paths, and the steps of the one shown. */

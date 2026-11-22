@@ -19,7 +19,7 @@ import { answerUnit, discardRun, loadRun, retryUnit, reviewBuild, scriptsToRevie
 import { acceptAll, acceptSuggestion, answer, assistOf, declineSuggestion, dismissWarning, refine, specPath, specState, stopAssist, writeSpec } from "./run";
 
 /** Mounted while its plan shows, and hidden when collapsed: a build under way is not lost from sight for good. */
-export function PlanAssistant(props: { path: string; plan: Plan; text: string; onSelect: (node: string) => void; /** A path to light on the chart, as its nodes in order; null for none. */ onPath?: (nodes: string[] | null) => void; id?: string; hidden?: boolean }) {
+export function PlanAssistant(props: { path: string; plan: Plan; text: string; onSelect: (node: string) => void; /** A path to light on the chart, as its nodes in order; null for none. */ onPath?: (nodes: string[] | null) => void; id?: string; hidden?: boolean; inPalette?: boolean }) {
 	const a = () => assistOf(props.path);
 	/** The path being shown on the chart, by its place among the paths; null for none. */
 	const [shownPath, setShownPath] = createSignal<number | null>(null);
@@ -86,7 +86,7 @@ export function PlanAssistant(props: { path: string; plan: Plan; text: string; o
 		];
 	};
 	return (
-		<aside class="plan-assist" id={props.id} hidden={props.hidden} aria-label="Plan assistant">
+		<aside class="plan-assist" classList={{ "in-palette": Boolean(props.inPalette) }} id={props.id} hidden={props.hidden} aria-label="Plan assistant">
 			<div class="plan-assist-actions">
 				<button class="primary" disabled={Boolean(a().running)} title="The agent looks for what the chart leaves undecided" onClick={() => void refine(props.path)}>
 					Refine

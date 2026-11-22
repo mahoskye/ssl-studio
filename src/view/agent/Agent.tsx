@@ -3,6 +3,7 @@
 import { Icon, type IconName } from "../Icon";
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { activeEditor } from "../editor/EditorGroup";
+import { activeLiveEditor } from "../editor/liveBridge";
 import { review } from "../editor/Review";
 import { activeDoc, activePath, canonical, documents, notify, state } from "../state";
 import { addEntry, agent, ask, chooseModel, currentModel, interrupt, resume, safely, setAgent, start, stop, type Entry } from "./store";
@@ -25,6 +26,12 @@ const NEAR_END = 24;
 
 /** The selection, or the procedure around the cursor when nothing is selected. */
 export function selectionContext(): { label: string; code: string } | null {
+	const live = activeLiveEditor();
+	if (live) {
+		const sel = live.getSelection();
+		if (!sel.isEmpty()) return { label: `lines ${sel.startLineNumber}-${sel.endLineNumber}`, code: live.getSelectedText() };
+		return null;
+	}
 	const editor = activeEditor();
 	const model = editor?.getModel();
 	if (!editor || !model) return null;

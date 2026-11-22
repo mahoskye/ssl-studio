@@ -178,8 +178,8 @@ class Session {
 
 	/** Calls in text not in any editor, named by the procedure that makes them. The server reads an open document from its buffer. */
 	async scratchCalls(text: string): Promise<{ from: string; target: string; resolved: boolean }[]> {
-		if (!this.supports("ssl/callGraph")) return [];
 		await this.ready();
+		if (!this.supports("ssl/callGraph")) return [];
 		const uri = monaco.Uri.file(`${this.root}/.ssl-studio/calls-${++this.scratchCount}.ssl`).toString();
 		this.client.notify("textDocument/didOpen", { textDocument: { uri, languageId: "ssl", version: 1, text } });
 		try {
@@ -198,8 +198,8 @@ class Session {
 
 	/** The server's syntax tree for text not in any editor. */
 	async scratchTree(text: string): Promise<any[]> {
-		if (!this.supports("ssl/syntaxTree")) return [];
 		await this.ready();
+		if (!this.supports("ssl/syntaxTree")) return [];
 		const uri = monaco.Uri.file(`${this.root}/.ssl-studio/tree-${++this.scratchCount}.ssl`).toString();
 		this.client.notify("textDocument/didOpen", { textDocument: { uri, languageId: "ssl", version: 1, text } });
 		try {
@@ -209,10 +209,31 @@ class Session {
 		}
 	}
 
+	/** Standard LSP document symbols for text not in any editor, without waiting for diagnostics. */
+	async scratchSymbols(text: string): Promise<monaco.languages.DocumentSymbol[]> {
+		await this.ready();
+		const uri = monaco.Uri.file(`${this.root}/.ssl-studio/sym-${++this.scratchCount}.ssl`).toString();
+		this.client.notify("textDocument/didOpen", { textDocument: { uri, languageId: "ssl", version: 1, text } });
+		try {
+			const convert = (s: any): monaco.languages.DocumentSymbol => ({
+				name: s.name,
+				detail: s.detail ?? "",
+				kind: s.kind - 1,
+				tags: [],
+				range: toRange(s.range ?? s.location.range),
+				selectionRange: toRange(s.selectionRange ?? s.range ?? s.location.range),
+				children: (s.children ?? []).map(convert),
+			});
+			return ((await this.client.request("textDocument/documentSymbol", { textDocument: { uri } })) ?? []).map(convert);
+		} finally {
+			this.client.notify("textDocument/didClose", { textDocument: { uri } });
+		}
+	}
+
 	/** One script's procedures and the calls they make: from its buffer if it is open, else the index. Null while it cannot be known. */
 	async scriptCalls(uri: string): Promise<{ name: string; procedures: { name: string; line: number }[]; edges: { from: string; target: string; resolved: boolean }[] } | null> {
-		if (!this.supports("ssl/callGraph")) return null;
 		await this.ready();
+		if (!this.supports("ssl/callGraph")) return null;
 		const graph = await this.client.request("ssl/callGraph", { textDocument: { uri } });
 		if (graph?.indexing) return null;
 		const path = monaco.Uri.parse(uri).fsPath;

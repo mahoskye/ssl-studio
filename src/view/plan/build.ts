@@ -240,6 +240,41 @@ export function procedureText(text: string, spans: ProcedureSpan[], name: string
 	return span ? text.split("\n").slice(span.startLine, span.endLine + 1).join("\n").trim() : null;
 }
 
+/** Exact 0-based `:PROCEDURE ... :ENDPROC;` range (without leading doc comments) for code previewing. */
+export function procedureBodySpan(nodes: any[], name: string): ProcedureSpan | null {
+	const wanted = name.toLowerCase();
+	let found: ProcedureSpan | null = null;
+	const walk = (list: any[]) => {
+		for (const node of list) {
+			if (found) return;
+			if (node.kind === "procedure" && typeof node.name === "string" && node.name.toLowerCase() === wanted && node.range) {
+				found = { name: node.name, startLine: node.range.start.line, endLine: node.range.end.line };
+				return;
+			}
+			if (Array.isArray(node.children) && node.children.length) walk(node.children);
+		}
+	};
+	walk(nodes);
+	return found;
+}
+
+const NON_CODE_KINDS = new Set(["banner", "docBlock", "comment", "blankLines", "blank"]);
+
+/** Exact 0-based range of a script's top-level entry section (after the file banner, before the first procedure/region). */
+export function scriptEntrySpan(nodes: any[]): { startLine: number; endLine: number } | null {
+	const top: any[] = [];
+	for (const node of nodes) {
+		if (node.kind === "procedure" || node.kind === "region") break;
+		top.push(node);
+	}
+	let first = 0;
+	while (first < top.length && NON_CODE_KINDS.has(top[first].kind)) first++;
+	let last = top.length - 1;
+	while (last >= first && NON_CODE_KINDS.has(top[last].kind)) last--;
+	if (first > last || !top[first]?.range || !top[last]?.range) return null;
+	return { startLine: top[first].range.start.line, endLine: top[last].range.end.line };
+}
+
 /**
  * The script a run proposes: what is there now, or a banner for a new one, with changed
  * procedures replaced where they stand and new units after. The lines around them are

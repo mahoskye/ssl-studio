@@ -46,7 +46,11 @@ Bun.serve({
 	},
 	websocket: {
 		open: (ws) => void sockets.add(ws),
-		close: (ws) => void sockets.delete(ws),
+		close: (ws) => {
+			sockets.delete(ws);
+			// Give a reloading browser tab a fresh LSP process so its new `initialize` handshake succeeds.
+			if (sockets.size === 0) void backend.api.lspRestart();
+		},
 		async message(ws, message) {
 			const call = JSON.parse(String(message)) as Call;
 			let reply: Reply;

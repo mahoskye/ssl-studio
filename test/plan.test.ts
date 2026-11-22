@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { addAfter, addBranch, addCall, checkPlan, checkRefs, connect, findingLine, isPlanPath, newPlan, nodeAtLine, nodeLines, parsePlan, printPlan, removeEdge, removeNode, setDecision, setEdgeLabel, setGroup, setText, type Plan } from "../src/view/plan/model";
+import { addAfter, addBranch, addCall, checkPlan, checkRefs, connect, duplicateNode, findingLine, hasManualLayout, insertOnEdge, isPlanPath, newPlan, nodeAtLine, nodeLines, parsePlan, printPlan, removeEdge, removeNode, renameGroup, resetPlanLayout, reverseEdge, setDecision, setEdgeLabel, setEdgeRoute, setGroup, setGroupOffset, setKind, setNodeOffset, setText, type Plan } from "../src/view/plan/model";
 
 const sample = readFileSync(join(import.meta.dir, "../fixtures/workspace/design/Release.plan.json"), "utf8");
 const parsed = (text: string) => parsePlan(text).plan!;
@@ -242,5 +242,111 @@ describe("between the chart and its text", () => {
 		const line = findingLine(sample, plan, { severity: "warning", code: "x", message: "", edge: { from: edge.from, to: edge.to } });
 		expect(sample.split("\n")[line - 1]).toContain(`"from": "${edge.from}"`);
 		expect(findingLine(sample, plan, { severity: "warning", code: "x", message: "" })).toBe(1);
+	});
+});
+
+describe("direct canvas authoring primitives", () => {
+	test("insertOnEdge splits an edge, preserves its branch label, and inherits shared stage group", () => {
+		let p = newPlan("Test");
+		p = addAfter(p, "n1", "decision", "Ready?").plan; // n3
+		p = setGroup(p, "n3", "Checks");
+		p = setGroup(p, "n2", "Checks");
+		p = setEdgeLabel(p, "n3", "n2", "yes");
+		const inserted = insertOnEdge(p, "n3", "n2", "step", "Log ready")!;
+		expect(inserted).not.toBeNull();
+		const created = inserted.plan.nodes.find((n) => n.id === inserted.select)!;
+		expect(created.text).toBe("Log ready");
+		expect(created.group).toBe("g1");
+		expect(inserted.plan.edges).toContainEqual({ from: "n3", to: created.id, label: "yes" });
+		expect(inserted.plan.edges).toContainEqual({ from: created.id, to: "n2" });
+		expect(inserted.plan.edges.some((e) => e.from === "n3" && e.to === "n2")).toBe(false);
+	});
+
+	test("setKind converts between step, decision, and call cleanly", () => {
+		let p = addAfter(newPlan("Test"), "n1", "step", "LoadRules").plan;
+		p = setKind(p, "n3", "call");
+		expect(p.nodes.find((n) => n.id === "n3")).toMatchObject({ kind: "call", ref: "LoadRules" });
+		p = setKind(p, "n3", "decision");
+		expect(p.nodes.find((n) => n.id === "n3")?.kind).toBe("decision");
+		expect(p.nodes.find((n) => n.id === "n3")?.ref).toBeUndefined();
+	});
+
+	test("duplicateNode copies text, kind, notes, and group right after source", () => {
+		let p = addAfter(newPlan("Test"), "n1", "step", "Validate").plan;
+		p = setGroup(p, "n3", "Intake");
+		p = { ...p, nodes: p.nodes.map((n) => (n.id === "n3" ? { ...n, notes: "Check null" } : n)) };
+		const dup = duplicateNode(p, "n3")!;
+		expect(dup).not.toBeNull();
+		const copy = dup.plan.nodes.find((n) => n.id === dup.select)!;
+		expect(copy).toMatchObject({ kind: "step", text: "Validate", group: "g1", notes: "Check null" });
+		expect(dup.plan.edges).toContainEqual({ from: "n3", to: copy.id });
+		expect(duplicateNode(p, "n1")).toBeNull(); // start cannot be duplicated
+	});
+
+	test("reverseEdge flips direction unless opposite edge already exists", () => {
+		const p = newPlan("Test");
+		const flipped = reverseEdge(p, "n1", "n2");
+		expect(flipped.edges).toEqual([{ from: "n2", to: "n1" }]);
+		const both = connect(p, "n2", "n1");
+		expect(reverseEdge(both, "n1", "n2").edges).toEqual(both.edges);
+	});
+
+	test("renameGroup renames in place, merges on collision, and ungroups when blank", () => {
+		let p = addAfter(newPlan("Test"), "n1", "step", "A").plan;
+		p = addAfter(p, "n3", "step", "B").plan;
+		p = setGroup(p, "n3", "Stage 1");
+		p = setGroup(p, "n4", "Stage 2");
+		p = renameGroup(p, "g1", "Validation");
+		expect(p.groups.find((g) => g.id === "g1")?.name).toBe("Validation");
+		p = renameGroup(p, "g2", "validation");
+		expect(p.groups.length).toBe(1);
+		expect(p.nodes.find((n) => n.id === "n4")?.group).toBe("g1");
+		p = renameGroup(p, "g1", "  ");
+		expect(p.groups).toEqual([]);
+		expect(p.nodes.find((n) => n.id === "n3")?.group).toBeUndefined();
+	});
+
+	test("setEdgeRoute stores sparse rounded offsets on one line, prunes zeroes, and clears on reset/reverse/split", () => {
+		let p = newPlan("Test");
+		p = setEdgeRoute(p, "n1", "n2", { "1h": -23.7, "2v": 1 });
+		expect(p.edges[0]?.route).toEqual({ "1h": -24 });
+		const printed = printPlan(p);
+		expect(printed).toContain(`{ "from": "n1", "to": "n2", "route": {"1h":-24} }`);
+		expect(parsePlan(printed).plan?.edges[0]?.route).toEqual({ "1h": -24 });
+
+		// Reversing or inserting a step on the wire clears stale route offsets.
+		expect(reverseEdge(p, "n1", "n2").edges[0]?.route).toBeUndefined();
+		expect(insertOnEdge(p, "n1", "n2")?.plan.edges[0]?.route).toBeUndefined();
+
+		// Resetting removes the route property completely so diffs stay minimal.
+		const reset = setEdgeRoute(p, "n1", "n2", null);
+		expect(reset.edges[0]?.route).toBeUndefined();
+		expect(printPlan(reset)).toContain(`{ "from": "n1", "to": "n2" }`);
+	});
+
+	test("setNodeOffset, setGroupOffset, hasManualLayout, and resetPlanLayout store minimal offsets and cleanly restore auto-layout", () => {
+		let p = addAfter(newPlan("Test"), "n1", "step", "Work").plan;
+		p = setGroup(p, "n3", "Phase 1");
+		expect(hasManualLayout(p, "DOWN")).toBe(false);
+
+		p = setNodeOffset(p, "n3", { x: 24.4, y: -35.8 });
+		p = setGroupOffset(p, "g1", { x: 0, y: -120 });
+		p = setEdgeRoute(p, "n1", "n3", { "0v": 16 });
+		expect(hasManualLayout(p, "DOWN")).toBe(true);
+		expect(p.nodes.find((n) => n.id === "n3")?.offset).toEqual({ x: 24, y: -36 });
+		expect(p.groups.find((g) => g.id === "g1")?.offset).toEqual({ x: 0, y: -120 });
+		const printed = printPlan(p);
+		expect(printed).toContain(`"offset": {"x":24,"y":-36}`);
+		expect(parsePlan(printed).plan?.groups[0]?.offset).toEqual({ x: 0, y: -120 });
+
+		// Small near-zero offsets are stripped automatically.
+		expect(setNodeOffset(p, "n3", { x: 1, y: -1 }).nodes.find((n) => n.id === "n3")?.offset).toBeUndefined();
+
+		// resetPlanLayout clears every node, group, and edge offset in one step.
+		const clean = resetPlanLayout(p);
+		expect(hasManualLayout(clean, "DOWN")).toBe(false);
+		expect(clean.nodes.every((n) => n.offset === undefined)).toBe(true);
+		expect(clean.groups.every((g) => g.offset === undefined)).toBe(true);
+		expect(clean.edges.every((e) => e.route === undefined)).toBe(true);
 	});
 });

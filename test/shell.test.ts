@@ -3,7 +3,7 @@
 import { describe, expect, test } from "bun:test";
 import { headingAnchor } from "../src/shared/docTables";
 import { tabLabels } from "../src/view/editor/tabs";
-import { crowdedSides, dockedView, fitPanels } from "../src/view/layout";
+import { BOTTOM_MIN, canFitBothPanels, CENTER_MIN, crowdedSides, dockedView, dragBottomPanel, dragHorizontalPanel, fitPanels, LEFT_MIN, RIGHT_MIN } from "../src/view/layout";
 import { DEFAULT_SETTINGS, defaultLayout } from "../src/shared/protocol";
 
 describe("tab labels", () => {
@@ -31,50 +31,128 @@ describe("tab labels", () => {
 	});
 });
 
-describe("side panels fit the window", () => {
+describe("side panels fit the window (VS Code SplitView baseline)", () => {
 	const editors = (window: number, fit: { left: number; right: number }) => window - 44 - fit.left - fit.right;
 
-	test("a wide window gives both what they asked for", () => {
+	test("both panels keep their requested widths whenever the editor has at least 220px", () => {
 		expect(fitPanels(1600, 260, 360)).toEqual({ left: 260, right: 360 });
+		// At 1024px (44 activity + 260 left + 360 right = 664 -> 360px editor >= 220): neither sidebar shrinks.
+		expect(fitPanels(1024, 260, 360)).toEqual({ left: 260, right: 360 });
+		// Even at 900px (260 + 360 = 620 -> 236px editor >= 220): both keep full width.
+		expect(fitPanels(900, 260, 360)).toEqual({ left: 260, right: 360 });
 	});
 
-	test("the editors keep their room before the right panel does", () => {
-		// 1100 - 44 (activity bar) - 480 (editors) leaves 576: 260 for the left, 316 for the right.
-		expect(fitPanels(1100, 260, 360)).toEqual({ left: 260, right: 316 });
+	test("expanding one sidebar does not affect the other while the editor stays >= 220px", () => {
+		// At 1280px (usable 1236, room for sidebars 1016): expanding left from 260 to 656 leaves right untouched at 360.
+		expect(fitPanels(1280, 500, 360)).toEqual({ left: 500, right: 360 });
+		expect(fitPanels(1280, 656, 360)).toEqual({ left: 656, right: 360 });
+		// Symmetrically, expanding right leaves left untouched at 260.
+		expect(fitPanels(1280, 260, 756)).toEqual({ left: 260, right: 756 });
 	});
 
-	test("a smaller window takes room from the editors, down to their least, before a panel gets too narrow", () => {
-		// At 900 the wanted 480 would leave the right panel 116. With the editors at 360 it gets 236.
-		expect(fitPanels(900, 260, 360)).toEqual({ left: 260, right: 236 });
-		expect(editors(900, fitPanels(900, 260, 360))).toBe(360);
+	test("no arbitrary 700/800px cap: a single sidebar can grow up to window - chrome - 220px", () => {
+		expect(fitPanels(1920, 1200, 0)).toEqual({ left: 1200, right: 0 });
+		expect(fitPanels(1920, 0, 1400)).toEqual({ left: 0, right: 1400 });
+		expect(fitPanels(1920, 2000, 0)).toEqual({ left: 1920 - 44 - CENTER_MIN, right: 0 });
 	});
 
-	test("then the left panel gives way to the right", () => {
-		expect(fitPanels(800, 260, 360)).toEqual({ left: 176, right: 220 });
+	test("a narrower window trims both sidebars proportionally toward 170px while keeping editor at 220px", () => {
+		// At 800px: room = 800 - 44 - 220 = 536. Requested 260 + 360 = 620 (excess 84).
+		const fit = fitPanels(800, 260, 360);
+		expect(fit.left + fit.right).toBe(536);
+		expect(editors(800, fit)).toBe(CENTER_MIN);
+		expect(fit.left).toBeGreaterThanOrEqual(LEFT_MIN);
+		expect(fit.right).toBeGreaterThanOrEqual(RIGHT_MIN);
+		// Right had more slack above 170 (190 vs 90), so it gave slightly more than left.
+		expect(fit.left).toBeLessThan(260);
+		expect(fit.right).toBeLessThan(360);
 	});
 
 	test("a panel that would be too narrow to use is not shown", () => {
-		expect(fitPanels(700, 260, 360)).toEqual({ left: 260, right: 0 });
-		expect(fitPanels(500, 0, 360)).toEqual({ left: 0, right: 0 });
+		// At 600px: room = 600 - 44 - 220 = 336 < 170 + 170 (340), so only one panel fits.
+		expect(canFitBothPanels(600)).toBe(false);
+		expect(fitPanels(600, 260, 360)).toEqual({ left: 260, right: 0 });
+		expect(fitPanels(400, 0, 360)).toEqual({ left: 0, right: 0 });
 		expect(fitPanels(380, 700, 800)).toEqual({ left: 0, right: 0 });
 	});
 
 	test("with room for one of two, the panel asked for last is the one shown", () => {
-		expect(fitPanels(700, 260, 360, "right")).toEqual({ left: 0, right: 296 });
-		expect(fitPanels(700, 260, 360, "left")).toEqual({ left: 260, right: 0 });
+		expect(fitPanels(600, 260, 360, "right")).toEqual({ left: 0, right: 336 });
+		expect(fitPanels(600, 260, 360, "left")).toEqual({ left: 260, right: 0 });
 		// With room for both, the preference changes nothing.
 		expect(fitPanels(1100, 260, 360, "right")).toEqual(fitPanels(1100, 260, 360, "left"));
-		// The preferred one cannot fit at all: the other still may.
-		expect(fitPanels(610, 180, 800, "right")).toEqual({ left: 180, right: 0 });
 	});
 
-	test("a panel is never narrower than it can be used at, and the editors never below their least", () => {
-		for (let window = 300; window <= 2000; window += 37) {
-			const fit = fitPanels(window, 700, 800);
-			expect(fit.left === 0 || fit.left >= 160).toBe(true);
-			expect(fit.right === 0 || fit.right >= 220).toBe(true);
-			if (fit.left || fit.right) expect(editors(window, fit)).toBeGreaterThanOrEqual(360);
+	test("a panel is never narrower than 170px, and the editors never below 220px", () => {
+		for (let window = 300; window <= 2400; window += 37) {
+			const fit = fitPanels(window, 1100, 900);
+			expect(fit.left === 0 || fit.left >= LEFT_MIN).toBe(true);
+			expect(fit.right === 0 || fit.right >= RIGHT_MIN).toBe(true);
+			if (fit.left || fit.right) expect(editors(window, fit)).toBeGreaterThanOrEqual(CENTER_MIN);
 		}
+	});
+});
+
+describe("sash dragging (VS Code SplitView)", () => {
+	test("expanding left shrinks only the editor and leaves right untouched down to 220px", () => {
+		// usable 1200: left 260, center 580, right 360 -> 360px of editor slack above 220.
+		expect(dragHorizontalPanel("left", 260, 360, 1200, 200)).toEqual({ left: 460, right: 360, collapsed: false });
+		expect(dragHorizontalPanel("left", 260, 360, 1200, 360)).toEqual({ left: 620, right: 360, collapsed: false });
+	});
+
+	test("expanding right shrinks only the editor and leaves left untouched down to 220px", () => {
+		// Negative delta drags right sash left (expands right).
+		expect(dragHorizontalPanel("right", 260, 360, 1200, -200)).toEqual({ left: 260, right: 560, collapsed: false });
+		expect(dragHorizontalPanel("right", 260, 360, 1200, -360)).toEqual({ left: 260, right: 720, collapsed: false });
+	});
+
+	test("dragging past editor 220px stops at editor 220px and never affects the opposite sidebar", () => {
+		// usable 1200: left 260, center 580, right 360 -> 360px editor slack -> left stops at 620, right stays 360.
+		expect(dragHorizontalPanel("left", 260, 360, 1200, 460)).toEqual({ left: 620, right: 360, collapsed: false });
+		expect(dragHorizontalPanel("left", 260, 360, 1200, 999)).toEqual({ left: 620, right: 360, collapsed: false });
+		// Reversing from overshoot does not drift and still leaves right at 360.
+		expect(dragHorizontalPanel("left", 260, 360, 1200, 300)).toEqual({ left: 560, right: 360, collapsed: false });
+		// Symmetrically for right sash: right stops at 720, left stays 260.
+		expect(dragHorizontalPanel("right", 260, 360, 1200, -450)).toEqual({ left: 260, right: 720, collapsed: false });
+		expect(dragHorizontalPanel("right", 260, 360, 1200, -999)).toEqual({ left: 260, right: 720, collapsed: false });
+	});
+
+	test("with opposite sidebar closed, a sidebar expands all the way to usable - 220px", () => {
+		expect(dragHorizontalPanel("left", 260, 0, 1800, 1300)).toEqual({ left: 1560, right: 0, collapsed: false });
+		expect(dragHorizontalPanel("left", 260, 0, 1800, 2000)).toEqual({ left: 1580, right: 0, collapsed: false });
+		expect(dragHorizontalPanel("right", 0, 360, 1800, -2000)).toEqual({ left: 0, right: 1580, collapsed: false });
+	});
+
+	test("shrinking stops at 170px and snaps closed below half minimum on pointer drag, never on keyboard", () => {
+		expect(dragHorizontalPanel("left", 260, 360, 1200, -90)).toEqual({ left: 170, right: 360, collapsed: false });
+		// Between 85 and 170: stays clamped at 170 (dead zone before snap-close).
+		expect(dragHorizontalPanel("left", 260, 360, 1200, -150)).toEqual({ left: 170, right: 360, collapsed: false });
+		// Below 85: snaps closed, preserving start widths.
+		expect(dragHorizontalPanel("left", 260, 360, 1200, -180)).toEqual({ left: 260, right: 360, collapsed: true });
+		// Keyboard step (allowSnap = false) clamps cleanly at 170 without collapsing.
+		expect(dragHorizontalPanel("left", 180, 360, 1200, -120, false)).toEqual({ left: 170, right: 360, collapsed: false });
+		// Same for right sidebar (positive delta shrinks right).
+		expect(dragHorizontalPanel("right", 260, 360, 1200, 280)).toEqual({ left: 260, right: 360, collapsed: true });
+	});
+
+	test("bottom panel expands without a 600px cap, snap-maximizes to fill center, and snaps closed below half minimum", () => {
+		// centerHeight = 1005, splitterHeight = 5 -> fullHeight = 1000, maxNormal = 920.
+		expect(dragBottomPanel(200, 1005, 5, -700)).toEqual({ height: 900, collapsed: false, maximized: false });
+		// Dead zone between 920 and 960 (remaining editor 80..40): holds at 920 before snapping maximized.
+		expect(dragBottomPanel(200, 1005, 5, -750)).toEqual({ height: 920, collapsed: false, maximized: false });
+		// Past remaining editor < 40px: snaps maximized to fill the center pane.
+		expect(dragBottomPanel(200, 1005, 5, -770)).toEqual({ height: 1000, collapsed: false, maximized: true });
+		// Dragging back down from maximized restores cleanly once remaining editor >= 40px.
+		expect(dragBottomPanel(200, 1005, 5, 20, true, true)).toEqual({ height: 1000, collapsed: false, maximized: true });
+		expect(dragBottomPanel(200, 1005, 5, 50, true, true)).toEqual({ height: 920, collapsed: false, maximized: false });
+		expect(dragBottomPanel(200, 1005, 5, 600, true, true)).toEqual({ height: 400, collapsed: false, maximized: false });
+		// Shrinking below half of BOTTOM_MIN snaps closed, preserving saved start height.
+		expect(dragBottomPanel(200, 1005, 5, 140)).toEqual({ height: BOTTOM_MIN, collapsed: false, maximized: false });
+		expect(dragBottomPanel(200, 1005, 5, 170)).toEqual({ height: 200, collapsed: true, maximized: false });
+		// Keyboard steps never snap-close, and stepping up at maxNormal maximizes cleanly.
+		expect(dragBottomPanel(200, 1005, 5, 170, false)).toEqual({ height: BOTTOM_MIN, collapsed: false, maximized: false });
+		expect(dragBottomPanel(920, 1005, 5, -16, false, false)).toEqual({ height: 1000, collapsed: false, maximized: true });
+		expect(dragBottomPanel(200, 1005, 5, 16, false, true)).toEqual({ height: 920, collapsed: false, maximized: false });
 	});
 });
 
@@ -119,13 +197,13 @@ describe("the panel a side shows", () => {
 
 describe("the sides the window has no room for", () => {
 	test("a side that is open and was given no width is crowded out; one that is shut is not", () => {
-		expect(crowdedSides({ left: true, right: true }, fitPanels(700, 260, 360))).toEqual({ left: false, right: true });
+		expect(crowdedSides({ left: true, right: true }, fitPanels(600, 260, 360))).toEqual({ left: false, right: true });
 		expect(crowdedSides({ left: true, right: false }, { left: 260, right: 0 })).toEqual({ left: false, right: false });
 	});
 
 	test("with room for neither, both are crowded out: neither is taken for showing", () => {
-		// Too narrow for either panel beside the editors.
-		const fit = fitPanels(500, 260, 360);
+		// Too narrow for either panel beside the editors (< 44 + 220 + 170 = 434).
+		const fit = fitPanels(400, 260, 360);
 		expect(fit).toEqual({ left: 0, right: 0 });
 		expect(crowdedSides({ left: true, right: true }, fit)).toEqual({ left: true, right: true });
 	});

@@ -17,7 +17,7 @@ const NAMES = { cut: "Cut", copy: "Copy", paste: "Paste", selectAll: "Select all
 /** A box that text is typed into. Not the text editor's own hidden one: the code has the editor's menu. */
 function typedInto(el: Element | null): HTMLInputElement | HTMLTextAreaElement | HTMLElement | null {
 	const box = el?.closest<HTMLElement>("input, textarea, [contenteditable=''], [contenteditable=true]");
-	if (!box || box.matches(".inputarea, .ime-text-area, .native-edit-context, input[type=checkbox], input[type=radio], input[type=button], input[type=range], input[type=color], input[type=file]")) return null;
+	if (!box || box.closest(".cm-editor") || box.matches(".inputarea, .ime-text-area, .native-edit-context, input[type=checkbox], input[type=radio], input[type=button], input[type=range], input[type=color], input[type=file]")) return null;
 	return box;
 }
 

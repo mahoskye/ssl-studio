@@ -4,9 +4,11 @@
 // read or written here (ADR 0003).
 
 export type NodeKind = "start" | "end" | "step" | "decision" | "call";
-export type PlanNode = { id: string; kind: NodeKind; text: string; ref?: string; group?: string; notes?: string; [key: string]: unknown };
-export type PlanEdge = { from: string; to: string; label?: string; [key: string]: unknown };
-export type PlanGroup = { id: string; name: string; [key: string]: unknown };
+export type PlanOffset = { x: number; y: number; dir?: "DOWN" | "RIGHT" };
+export type PlanNode = { id: string; kind: NodeKind; text: string; ref?: string; group?: string; notes?: string; offset?: PlanOffset; [key: string]: unknown };
+export type RouteOffsets = Record<string, number>;
+export type PlanEdge = { from: string; to: string; label?: string; route?: RouteOffsets; [key: string]: unknown };
+export type PlanGroup = { id: string; name: string; offset?: PlanOffset; [key: string]: unknown };
 /** Fields this version does not know are kept as they are. */
 export type Plan = { version: number; title: string; groups: PlanGroup[]; nodes: PlanNode[]; edges: PlanEdge[]; [key: string]: unknown };
 
@@ -15,6 +17,8 @@ const isObject = (value: unknown): value is Record<string, unknown> => typeof va
 
 /** Dragged from the Objects panel to make a call node. */
 export const PROCEDURE_DRAG = "application/x-ssl-procedure";
+/** Dragged from the Palette panel to drop a shape onto a node, edge, or canvas. */
+export const SHAPE_DRAG = "application/x-ssl-plan-shape";
 
 export const isPlanPath = (path: string | null | undefined) => Boolean(path && /\.plan\.json$/i.test(path));
 
@@ -72,9 +76,9 @@ export function printPlan(plan: Plan): string {
 		...Object.entries(head)
 			.filter(([, v]) => v !== undefined)
 			.map(([k, v]) => `  ${JSON.stringify(k)}: ${JSON.stringify(v)}`),
-		rows("groups", groups, ["id", "name"]),
-		rows("nodes", nodes, ["id", "kind", "text", "ref", "group", "notes"]),
-		rows("edges", edges, ["from", "to", "label"]),
+		rows("groups", groups, ["id", "name", "offset"]),
+		rows("nodes", nodes, ["id", "kind", "text", "ref", "group", "notes", "offset"]),
+		rows("edges", edges, ["from", "to", "label", "route"]),
 		...Object.entries(rest).map(([k, v]) => JSON.stringify({ [k]: v }, null, 2).split("\n").slice(1, -1).join("\n")),
 		...(isObject(built) ? [printBuilt(built)] : built === undefined ? [] : [`  "built": ${JSON.stringify(built)}`]),
 	];
@@ -162,6 +166,80 @@ export function setDecision(plan: Plan, id: string, on: boolean): Plan {
 	return { ...plan, nodes: plan.nodes.map((n) => (n.id === id && (n.kind === "step" || n.kind === "decision") ? { ...n, kind: on ? "decision" : "step" } : n)) };
 }
 
+/** Converts a node to any flowchart kind, keeping or clearing `ref` as appropriate. */
+export function setKind(plan: Plan, id: string, kind: NodeKind, ref?: string): Plan {
+	return {
+		...plan,
+		nodes: plan.nodes.map((n) => {
+			if (n.id !== id) return n;
+			const { ref: prevRef, ...rest } = n;
+			if (kind === "call") {
+				const nextRef = ref?.trim() || prevRef || n.text.trim();
+				return { ...rest, kind, ...(nextRef ? { ref: nextRef } : {}) } as PlanNode;
+			}
+			return { ...rest, kind } as PlanNode;
+		}),
+	};
+}
+
+/** Inserts a new node cleanly onto an existing edge `from -> to`, preserving any branch label on the incoming wire. */
+export function insertOnEdge(plan: Plan, from: string, to: string, kind: NodeKind = "step", text = "New step", ref?: string): Edit | null {
+	const index = plan.edges.findIndex((e) => e.from === from && e.to === to);
+	if (index < 0) return null;
+	const existing = plan.edges[index]!;
+	const fromNode = nodeOf(plan, from);
+	const toNode = nodeOf(plan, to);
+	const sharedGroup = fromNode?.group && fromNode.group === toNode?.group ? fromNode : fromNode?.group ? fromNode : toNode;
+	const node = make(plan, kind, text, sharedGroup, ref);
+	const { label, route: _oldRoute, ...restEdge } = existing;
+	const first: PlanEdge = { ...restEdge, from, to: node.id, ...(label ? { label } : {}) };
+	const second: PlanEdge = { from: node.id, to };
+	const edges = [...plan.edges.slice(0, index), first, second, ...plan.edges.slice(index + 1)];
+	return { plan: { ...plan, nodes: [...plan.nodes, node], edges }, select: node.id };
+}
+
+/** Duplicates a node right after itself (preserving kind, text, ref, group, and notes). */
+export function duplicateNode(plan: Plan, id: string): Edit | null {
+	const src = nodeOf(plan, id);
+	if (!src || src.kind === "start" || src.kind === "end") return null;
+	const added = addAfter(plan, id, src.kind, src.text, src.ref);
+	if (!added.select) return null;
+	const nextNodes = added.plan.nodes.map((n) => (n.id === added.select && src.notes ? { ...n, notes: src.notes } : n));
+	return { plan: { ...added.plan, nodes: nextNodes }, select: added.select };
+}
+
+/** Reverses an edge `from -> to` into `to -> from` when the opposite edge does not already exist. */
+export function reverseEdge(plan: Plan, from: string, to: string): Plan {
+	if (plan.edges.some((e) => e.from === to && e.to === from)) return plan;
+	return {
+		...plan,
+		edges: plan.edges.map((e) => {
+			if (e.from !== from || e.to !== to) return e;
+			const { route: _oldRoute, ...rest } = e;
+			return { ...rest, from: to, to: from } as PlanEdge;
+		}),
+	};
+}
+
+/** Renames a stage group in place (merging into an existing group of the same name, or ungrouping if empty). */
+export function renameGroup(plan: Plan, groupId: string, nextName: string): Plan {
+	const wanted = nextName.trim();
+	if (!wanted) {
+		const nodes = plan.nodes.map((n) => {
+			if (n.group !== groupId) return n;
+			const { group: _old, ...rest } = n;
+			return rest as PlanNode;
+		});
+		return pruneGroups({ ...plan, nodes });
+	}
+	const existing = plan.groups.find((g) => g.id !== groupId && g.name.toLowerCase() === wanted.toLowerCase());
+	if (existing) {
+		const nodes = plan.nodes.map((n) => (n.group === groupId ? { ...n, group: existing.id } : n));
+		return pruneGroups({ ...plan, nodes });
+	}
+	return { ...plan, groups: plan.groups.map((g) => (g.id === groupId ? { ...g, name: wanted } : g)) };
+}
+
 export function connect(plan: Plan, from: string, to: string): Plan {
 	if (from === to || plan.edges.some((e) => e.from === from && e.to === to)) return plan;
 	const label = nodeOf(plan, from)?.kind === "decision" ? nextLabel(plan, from) : undefined;
@@ -179,6 +257,91 @@ export function setEdgeLabel(plan: Plan, from: string, to: string, label: string
 			return (label ? { ...rest, label } : rest) as PlanEdge;
 		}),
 	};
+}
+
+/** Stores or clears sparse manual wire-segment offsets on an edge (omitted when zero/empty so diffs stay minimal). */
+export function setEdgeRoute(plan: Plan, from: string, to: string, route: RouteOffsets | null): Plan {
+	const cleaned: RouteOffsets = {};
+	if (route) {
+		for (const [k, v] of Object.entries(route)) {
+			if (typeof v === "number" && Number.isFinite(v) && Math.abs(v) >= 2) cleaned[k] = Math.round(v);
+		}
+	}
+	const hasAny = Object.keys(cleaned).length > 0;
+	return {
+		...plan,
+		edges: plan.edges.map((e) => {
+			if (e.from !== from || e.to !== to) return e;
+			const { route: _old, ...rest } = e;
+			return (hasAny ? { ...rest, route: cleaned } : rest) as PlanEdge;
+		}),
+	};
+}
+
+function cleanOffset(offset: PlanOffset | null): PlanOffset | undefined {
+	if (!offset || !Number.isFinite(offset.x) || !Number.isFinite(offset.y)) return undefined;
+	const x = Math.round(offset.x);
+	const y = Math.round(offset.y);
+	if (Math.abs(x) < 2 && Math.abs(y) < 2) return undefined;
+	return offset.dir === "RIGHT" ? { x, y, dir: "RIGHT" } : { x, y };
+}
+
+/** Stores or clears a sparse manual position offset on a node relative to its auto-layout position. */
+export function setNodeOffset(plan: Plan, id: string, offset: PlanOffset | null): Plan {
+	const next = cleanOffset(offset);
+	return {
+		...plan,
+		nodes: plan.nodes.map((n) => {
+			if (n.id !== id) return n;
+			const { offset: _old, ...rest } = n;
+			return (next ? { ...rest, offset: next } : rest) as PlanNode;
+		}),
+	};
+}
+
+/** Stores or clears a sparse manual position offset on a stage group (moves all its steps together with a 1-line diff). */
+export function setGroupOffset(plan: Plan, groupId: string, offset: PlanOffset | null): Plan {
+	const next = cleanOffset(offset);
+	return {
+		...plan,
+		groups: plan.groups.map((g) => {
+			if (g.id !== groupId) return g;
+			const { offset: _old, ...rest } = g;
+			return (next ? { ...rest, offset: next } : rest) as PlanGroup;
+		}),
+	};
+}
+
+/** Clears all manual node/stage offsets and edge wire tweaks so the chart returns cleanly to pure auto-layout. */
+export function resetPlanLayout(plan: Plan): Plan {
+	return {
+		...plan,
+		groups: plan.groups.map((g) => {
+			if (!g.offset) return g;
+			const { offset: _old, ...rest } = g;
+			return rest as PlanGroup;
+		}),
+		nodes: plan.nodes.map((n) => {
+			if (!n.offset) return n;
+			const { offset: _old, ...rest } = n;
+			return rest as PlanNode;
+		}),
+		edges: plan.edges.map((e) => {
+			if (!e.route) return e;
+			const { route: _old, ...rest } = e;
+			return rest as PlanEdge;
+		}),
+	};
+}
+
+/** Whether any node, stage group, or edge carries manual layout tweaks for the active direction. */
+export function hasManualLayout(plan: Plan, dir: "DOWN" | "RIGHT" = "DOWN"): boolean {
+	const matches = (o?: PlanOffset) => Boolean(o && (o.dir ?? "DOWN") === dir && (Math.abs(o.x) >= 2 || Math.abs(o.y) >= 2));
+	return (
+		plan.nodes.some((n) => matches(n.offset)) ||
+		plan.groups.some((g) => matches(g.offset)) ||
+		plan.edges.some((e) => Boolean(e.route && Object.keys(e.route).length > 0))
+	);
 }
 
 const pruneGroups = (plan: Plan): Plan => ({ ...plan, groups: plan.groups.filter((g) => plan.nodes.some((n) => n.group === g.id)) });

@@ -1,6 +1,7 @@
 // What is done to Markdown's HTML after it is cleaned, wherever it is shown:
 // a document in the reading view, a reply in the Agent panel.
 import { MAX_SHORT, headingAnchor } from "../../shared/docTables";
+import { parseCalloutHeader } from "../../shared/markdownEdit";
 import { namedLinksIn } from "../../shared/namedLinks";
 import { ticketMatcher } from "../../shared/ticketRefs";
 
@@ -114,15 +115,141 @@ function markShortColumns(holder: HTMLTemplateElement) {
 	}
 }
 
+/** Turns Obsidian `==highlight==` markers in prose into `<mark class="md-highlight">`. */
+function renderHighlights(holder: HTMLTemplateElement) {
+	const walker = document.createTreeWalker(holder.content, NodeFilter.SHOW_TEXT);
+	const nodes: Text[] = [];
+	for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+		if (node.nodeValue?.includes("==") && !node.parentElement?.closest("code, pre, script, style")) nodes.push(node as Text);
+	}
+	for (const node of nodes) {
+		const text = node.data;
+		const matches = [...text.matchAll(/==([^\n=](?:[^\n]*?[^\n=])?)==/g)];
+		if (!matches.length) continue;
+		const parts = document.createDocumentFragment();
+		let at = 0;
+		for (const m of matches) {
+			parts.append(text.slice(at, m.index));
+			const mark = document.createElement("mark");
+			mark.className = "md-highlight";
+			mark.textContent = m[1]!;
+			parts.append(mark);
+			at = m.index + m[0].length;
+		}
+		parts.append(text.slice(at));
+		node.replaceWith(parts);
+	}
+}
+
+/** Turns `#tag` mentions in prose (outside code, links, and headings) into clickable `.md-tag` pills. */
+function renderTags(holder: HTMLTemplateElement) {
+	const walker = document.createTreeWalker(holder.content, NodeFilter.SHOW_TEXT);
+	const nodes: Text[] = [];
+	for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+		if (node.nodeValue?.includes("#") && !node.parentElement?.closest(`${UNLINKED}, h1, h2, h3, h4, h5, h6`)) nodes.push(node as Text);
+	}
+	for (const node of nodes) {
+		const text = node.data;
+		const matches = [...text.matchAll(/(^|[\s(])(#[A-Za-z][A-Za-z0-9_/-]*)/g)];
+		if (!matches.length) continue;
+		const parts = document.createDocumentFragment();
+		let at = 0;
+		for (const m of matches) {
+			const leadLen = m[1]!.length;
+			const tagStart = m.index + leadLen;
+			const tag = m[2]!;
+			parts.append(text.slice(at, tagStart));
+			const pill = document.createElement("span");
+			pill.className = "md-tag";
+			pill.dataset.tag = tag;
+			pill.title = `Search workspace for ${tag}`;
+			pill.textContent = tag;
+			parts.append(pill);
+			at = tagStart + tag.length;
+		}
+		parts.append(text.slice(at));
+		node.replaceWith(parts);
+	}
+}
+
+/** Upgrades Obsidian/GitHub callout blockquotes (`> [!NOTE] Title`) into styled `.md-callout` cards. */
+function renderCallouts(holder: HTMLTemplateElement) {
+	for (const quote of [...holder.content.querySelectorAll("blockquote")]) {
+		const firstP = quote.firstElementChild;
+		if (!firstP || firstP.tagName !== "P") continue;
+		const firstText = firstP.textContent ?? "";
+		const newline = firstText.indexOf("\n");
+		const headerLine = newline < 0 ? firstText : firstText.slice(0, newline);
+		const parsed = parseCalloutHeader(`> ${headerLine}`);
+		if (!parsed) continue;
+
+		const card = document.createElement("div");
+		card.className = `md-callout tone-${parsed.spec.tone}`;
+		const head = document.createElement("div");
+		head.className = "md-callout-head";
+		const icon = document.createElement("span");
+		icon.className = "md-callout-icon";
+		icon.setAttribute("aria-hidden", "true");
+		icon.textContent = parsed.spec.icon;
+		const title = document.createElement("span");
+		title.textContent = parsed.title;
+		head.append(icon, title);
+		card.appendChild(head);
+
+		// Remove the `[!TYPE]...` header text from the first paragraph, keeping any lines below it.
+		if (newline < 0) {
+			firstP.remove();
+		} else {
+			// Walk leading text nodes in firstP to strip only up to and including the first newline.
+			let remaining = newline + 1;
+			while (firstP.firstChild && remaining > 0) {
+				const child = firstP.firstChild;
+				if (child.nodeType === Node.TEXT_NODE) {
+					const val = child.nodeValue ?? "";
+					if (val.length <= remaining) {
+						remaining -= val.length;
+						child.remove();
+					} else {
+						child.nodeValue = val.slice(remaining);
+						remaining = 0;
+					}
+				} else if (child.nodeName === "BR") {
+					child.remove();
+					remaining = 0;
+				} else {
+					const len = (child.textContent ?? "").length;
+					if (len <= remaining) {
+						remaining -= len;
+						child.remove();
+					} else {
+						remaining = 0;
+					}
+				}
+			}
+			if (!(firstP.textContent ?? "").trim() && !firstP.children.length) firstP.remove();
+		}
+
+		const body = document.createElement("div");
+		body.className = "md-callout-body";
+		while (quote.firstChild) body.appendChild(quote.firstChild);
+		if (body.childNodes.length) card.appendChild(body);
+		quote.replaceWith(card);
+	}
+}
+
 /** `html` must already be sanitised. Anchors are for a document; a reply has no links into itself. */
 export function finishMarkdown(html: string, options: { anchors?: boolean; tickets?: readonly TicketRef[]; named?: NameResolver } = {}): string {
 	const names = options.named && html.includes("[[") ? options.named : undefined;
-	if (!options.anchors && !options.tickets?.length && !names && !html.includes("<table")) return html;
+	const hasExtra = html.includes("==") || html.includes("#") || html.includes("[!");
+	if (!options.anchors && !options.tickets?.length && !names && !html.includes("<table") && !hasExtra) return html;
 	const holder = document.createElement("template");
 	holder.innerHTML = html;
 	if (options.anchors) anchorHeadings(holder);
+	if (html.includes("[!")) renderCallouts(holder);
 	if (names) linkNames(holder, names);
 	if (options.tickets?.length) linkTickets(holder, options.tickets);
+	if (html.includes("==")) renderHighlights(holder);
+	if (html.includes("#")) renderTags(holder);
 	markShortColumns(holder);
 	return holder.innerHTML;
 }

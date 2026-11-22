@@ -20,12 +20,13 @@ import { keysFor, onOpenMenu, runCommand } from "./commands";
 import { Icon } from "./Icon";
 import { crowdedOut, narrowHosted, narrowPanels, panelOn } from "./panels/registry";
 import { activeEditor } from "./editor/EditorGroup";
+import { activeLiveEditor } from "./editor/liveBridge";
 import { review } from "./editor/Review";
 import { Menu, nextItem, type MenuItem } from "./Menu";
 import { canGo } from "./navigation";
 import { isPlanPath } from "./plan/model";
 import { isMarkdown, isTable } from "./project";
-import { activeDoc, activePath, documents, focusEditor, notify, setState, state } from "./state";
+import { activeDoc, activePath, documents, focusEditor, markdownMode, notify, setState, state } from "./state";
 
 /** A file is in front, not the call graph or a review of changes. */
 const inFront = () => state.centerView === "editors" && !review();
@@ -34,8 +35,15 @@ const inFront = () => state.centerView === "editors" && !review();
 function has(): Has {
 	const path = activePath();
 	const group = state.groups[state.activeGroup];
-	// A plan opens as its chart, a document as its page, a script perhaps as blocks: none of them is the text.
-	const asText = (file: string) => (isPlanPath(file) ? Boolean(state.planText[file]) : isMarkdown(file) || isTable(file) ? Boolean(state.mdText[file]) : !(group?.mode === "blocks" && documents.get(file)?.model.getLanguageId() === "ssl"));
+	// A plan opens as its chart, a read-only document as its page, a script perhaps as blocks: none of them is editable text.
+	const asText = (file: string) =>
+		isPlanPath(file)
+			? Boolean(state.planText[file])
+			: isMarkdown(file)
+				? markdownMode(file) !== "read"
+				: isTable(file)
+					? Boolean(state.mdText[file])
+					: !(group?.mode === "blocks" && documents.get(file)?.model.getLanguageId() === "ssl");
 	// A picture, or other bytes, has no text at all.
 	return { folder: Boolean(state.workspace), file: Boolean(path), text: Boolean(path) && inFront() && !documents.get(path!)?.binary && asText(path!) };
 }
@@ -55,17 +63,19 @@ function editorKeys(id: string): string {
 }
 
 function runEditor(id: string, shown: boolean) {
-	const editor = activeEditor();
-	if (!editor) return;
 	// Behind blocks or a rendered page the text is not on screen, but what was done to it can still be undone.
 	if (!shown) return void (id === "undo" ? activeDoc()?.model.undo() : id === "redo" ? activeDoc()?.model.redo() : undefined);
+	const live = activeLiveEditor();
+	if (live && live.runAction(id)) return;
+	const editor = activeEditor();
+	if (!editor) return;
 	editor.focus();
 	editor.trigger("menu", id, null);
 }
 
-/** A box that text is typed into, other than the code editor: a search, a filter, the agent's prompt. */
+/** A box that text is typed into, other than the code/markdown editors: a search, a filter, the agent's prompt. */
 function textBox(el: Element | null): HTMLElement | null {
-	if (!(el instanceof HTMLElement) || el.closest(".monaco-editor")) return null;
+	if (!(el instanceof HTMLElement) || el.closest(".monaco-editor, .cm-editor")) return null;
 	return el.matches("input:not([type=checkbox]):not([type=radio]):not([type=button]), textarea, [contenteditable=''], [contenteditable=true]") ? el : null;
 }
 

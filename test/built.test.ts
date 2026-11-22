@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { planHash, unaccounted, specPrompt, type SpecUnit } from "../src/view/plan/assist";
-import { assembleScript, newRun, nextUnit, nodeStatuses, procedureSpans, procedureText, reviewPrompt, unbuiltNodes, unitPrompt, type BuildRun, type BuildUnit } from "../src/view/plan/build";
-import { anyChanges, builtOf, changesSince, changeText, chartChanges, classifyUnits, driftFindings, driftOf, nodePrint, pathLine, pathsMissing, planPaths, recordBuilt, recordTests, revisionText, settleBuilt, settledNodes, testsPrompt, unitsOfNode, type Reading } from "../src/view/plan/built";
+import { assembleScript, newRun, nextUnit, nodeStatuses, procedureBodySpan, procedureSpans, procedureText, reviewPrompt, scriptEntrySpan, unbuiltNodes, unitPrompt, type BuildRun, type BuildUnit } from "../src/view/plan/build";
+import { anyChanges, builtOf, changesSince, changeText, chartChanges, classifyUnits, driftFindings, driftOf, nodeCodeDetails, nodePrint, pathLine, pathsMissing, planPaths, recordBuilt, recordTests, revisionText, settleBuilt, settledNodes, testsPrompt, unitsOfNode, type Reading } from "../src/view/plan/built";
 import { checkPlan, parsePlan, printPlan, setText, type Plan } from "../src/view/plan/model";
 
 const plan = (): Plan => ({
@@ -340,5 +340,64 @@ describe("paths through the chart", () => {
 	test("the tests' file is remembered against the chart it was written from", () => {
 		const p = recordTests(built(), "Sample/ReleaseTests.ssl");
 		expect(builtOf(p)!.tests).toEqual({ script: "Sample/ReleaseTests.ssl", hash: planHash(plan()) });
+	});
+});
+
+describe("nodeCodeDetails (developer drill-down)", () => {
+	test("summarizes implementing functions, scripts, shared step count, and deduplicated calls for steps and decisions", () => {
+		const p = built();
+		const decision = p.nodes.find((n) => n.id === "n3")!;
+		const decisionDetails = nodeCodeDetails(p, decision);
+		expect(decisionDetails.units.map((u) => u.name)).toEqual(["Release"]);
+		expect(decisionDetails.scripts).toEqual(["Sample/Release.ssl"]);
+		expect(decisionDetails.primaryRef).toBeNull();
+		expect(decisionDetails.calls).toEqual(["Mark", "Notify"]);
+		expect(decisionDetails.sharedCount).toBeGreaterThanOrEqual(1);
+
+		// A step with a linked ref places its own ref first in calls, deduplicated against unit calls.
+		const refNode = p.nodes.find((n) => n.id === "n2")!;
+		const refDetails = nodeCodeDetails(p, refNode);
+		expect(refDetails.units.map((u) => u.name)).toEqual(["Release"]);
+		expect(refDetails.primaryRef).toBe("Regions.IsUsableId");
+		expect(refDetails.calls[0]).toBe("Regions.IsUsableId");
+		expect(refDetails.calls).toContain("Mark");
+	});
+
+	test("handles unbuilt nodes with or without an explicit linked function ref", () => {
+		const p = plan();
+		const refOnly = nodeCodeDetails(p, p.nodes.find((n) => n.id === "n2")!);
+		expect(refOnly.units).toEqual([]);
+		expect(refOnly.primaryRef).toBe("Regions.IsUsableId");
+		expect(refOnly.calls).toEqual(["Regions.IsUsableId"]);
+
+		const bareStep = nodeCodeDetails(p, p.nodes.find((n) => n.id === "n4")!);
+		expect(bareStep.units).toEqual([]);
+		expect(bareStep.primaryRef).toBeNull();
+		expect(bareStep.calls).toEqual([]);
+		expect(bareStep.sharedCount).toBe(0);
+	});
+
+	test("procedureBodySpan returns exact procedure lines without leading docblock, and scriptEntrySpan skips the file banner", () => {
+		const nodes = [
+			{ kind: "banner", range: { start: { line: 0 }, end: { line: 14 } } },
+			{ kind: "blankLines", range: { start: { line: 15 }, end: { line: 15 } } },
+			{ kind: "parameters", range: { start: { line: 16 }, end: { line: 16 } } },
+			{ kind: "try", range: { start: { line: 30 }, end: { line: 39 } } },
+			{ kind: "statement", range: { start: { line: 41 }, end: { line: 41 } } },
+			{ kind: "blankLines", range: { start: { line: 42 }, end: { line: 42 } } },
+			{ kind: "docBlock", range: { start: { line: 43 }, end: { line: 49 } } },
+			{ kind: "comment", range: { start: { line: 50 }, end: { line: 50 } } },
+			{ kind: "procedure", name: "WriteDueDates", range: { start: { line: 51 }, end: { line: 96 } } },
+			{
+				kind: "region",
+				name: "Helpers",
+				range: { start: { line: 98 }, end: { line: 141 } },
+				children: [{ kind: "procedure", name: "SaveDueDate", range: { start: { line: 130 }, end: { line: 141 } } }],
+			},
+		];
+		expect(procedureBodySpan(nodes, "writeduedates")).toEqual({ name: "WriteDueDates", startLine: 51, endLine: 96 });
+		expect(procedureBodySpan(nodes, "SaveDueDate")).toEqual({ name: "SaveDueDate", startLine: 130, endLine: 141 });
+		expect(procedureBodySpan(nodes, "Missing")).toBeNull();
+		expect(scriptEntrySpan(nodes)).toEqual({ startLine: 16, endLine: 41 });
 	});
 });

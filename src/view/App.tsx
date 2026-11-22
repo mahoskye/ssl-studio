@@ -1,6 +1,6 @@
 // The window: menu bar, activity bar, side bar, editor groups, bottom panel, status bar.
 import { Icon } from "./Icon";
-import { createEffect, createSignal, For, Match, on, onCleanup, Show, Switch } from "solid-js";
+import { batch, createEffect, createSignal, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js";
 import { backend } from "./backend";
 import { Dialogs } from "./dialogs";
 import { RowMenu } from "./panels/RowMenu";
@@ -31,12 +31,13 @@ import { MenuBar } from "./MenuBar";
 import { useNavigation } from "./navigation";
 import { StatusBar } from "./StatusBar";
 import { applyFonts, applyTheme, resolveTheme } from "./themes/themes";
-import { activePath, dismiss, focusRequest, notify, openFolder, rememberTabs, rememberViews, setState, state, unsavedPaths, type PanelId } from "./state";
-import { focusPanel, isPanelAvailable, isShown, lastShown, movePanel, narrowHosted, narrowPanels, panelOn, PANELS, setCrowded, setNarrowHosted, setNarrowPanels, sideOf, togglePanel } from "./panels/registry";
+import { activePath, dismiss, focusEditor, focusRequest, isTabsReady, markdownMode, notify, openFolder, rememberTabs, rememberViews, setState, state, unsavedPaths, type PanelId } from "./state";
+import { focusPanel, getOutlineMemory, getPlanPaletteMemory, isPanelAvailable, isPlanChartActive, isShown, lastShown, loadOutlineMemory, loadPlanPaletteMemory, movePanel, narrowHosted, narrowPanels, panelOn, PANELS, recordOutlineActive, recordPlanPaletteActive, setCrowded, setNarrowHosted, setNarrowPanels, setOutlineMemory, setPlanPaletteMemory, sideOf, togglePanel } from "./panels/registry";
+import { transitionOutlineAvailability, transitionPanelAvailability } from "./panels/outlineState";
 import { isPlanPath } from "./plan/model";
 import { isMarkdown, isTable } from "./project";
 import { Welcome } from "./Welcome";
-import { ACTIVITY, CENTER_MIN, crowdedSides, fitPanels, LEFT_MIN, RIGHT_MIN } from "./layout";
+import { ACTIVITY, BOTTOM_MIN, canFitBothPanels, CENTER_MIN, crowdedSides, dragBottomPanel, dragHorizontalPanel, EDITOR_MIN_HEIGHT, fitPanels, horizontalChrome, LEFT_MIN, RIGHT_MIN } from "./layout";
 
 
 
@@ -45,10 +46,27 @@ import { ACTIVITY, CENTER_MIN, crowdedSides, fitPanels, LEFT_MIN, RIGHT_MIN } fr
  * with the arrow keys when it has the keyboard; a double-click or Home puts
  * it back where it started.
  */
-function Splitter(props: { axis: "x" | "y"; column?: number; label: string; value: number; min: number; max: number; onDrag: (delta: number) => void; onReset: () => void }) {
+function Splitter(props: {
+	axis: "x" | "y";
+	column?: number;
+	extraClass?: string;
+	label: string;
+	value: number;
+	min: number;
+	max: number;
+	onDragStart?: () => void;
+	onDragDelta: (totalDelta: number) => void;
+	onDragEnd?: () => void;
+	onStep: (stepDelta: number) => void;
+	onReset: () => void;
+}) {
+	const [dragging, setDragging] = createSignal(false);
+	let cleanupDrag: (() => void) | null = null;
+	onCleanup(() => cleanupDrag?.());
 	return (
 		<div
-			class={`splitter ${props.axis}${props.column === 5 ? " after-editors" : ""}`}
+			class={`splitter ${props.axis}${props.column === 5 ? " after-editors" : ""}${props.extraClass ? ` ${props.extraClass}` : ""}`}
+			classList={{ dragging: dragging() }}
 			role="separator"
 			tabindex={0}
 			aria-orientation={props.axis === "x" ? "vertical" : "horizontal"}
@@ -61,21 +79,40 @@ function Splitter(props: { axis: "x" | "y"; column?: number; label: string; valu
 			onDblClick={props.onReset}
 			onKeyDown={(e) => {
 				const step = e.shiftKey ? 64 : 16;
-				const delta = ({ ArrowLeft: -step, ArrowUp: -step, ArrowRight: step, ArrowDown: step } as Record<string, number>)[e.key];
-				if (delta !== undefined) (e.preventDefault(), props.onDrag(delta));
+				const map: Record<string, number> = props.axis === "x" ? { ArrowLeft: -step, ArrowRight: step } : { ArrowUp: -step, ArrowDown: step };
+				const delta = map[e.key];
+				if (delta !== undefined) (e.preventDefault(), props.onStep(delta));
 				else if (e.key === "Home") (e.preventDefault(), props.onReset());
 			}}
 			onMouseDown={(start) => {
+				if (start.button !== 0) return;
 				start.preventDefault();
-				let last = props.axis === "x" ? start.clientX : start.clientY;
+				cleanupDrag?.();
+				const origin = props.axis === "x" ? start.clientX : start.clientY;
+				const prevCursor = document.body.style.cursor;
+				const prevSelect = document.body.style.userSelect;
+				document.body.style.cursor = props.axis === "x" ? "col-resize" : "row-resize";
+				document.body.style.userSelect = "none";
+				setDragging(true);
+				props.onDragStart?.();
 				const move = (e: MouseEvent) => {
 					const now = props.axis === "x" ? e.clientX : e.clientY;
-					props.onDrag(now - last);
-					last = now;
+					props.onDragDelta(now - origin);
 				};
-				const up = () => (window.removeEventListener("mousemove", move), window.removeEventListener("mouseup", up));
+				const finish = () => {
+					window.removeEventListener("mousemove", move);
+					window.removeEventListener("mouseup", finish);
+					window.removeEventListener("blur", finish);
+					document.body.style.cursor = prevCursor;
+					document.body.style.userSelect = prevSelect;
+					setDragging(false);
+					cleanupDrag = null;
+					props.onDragEnd?.();
+				};
+				cleanupDrag = finish;
 				window.addEventListener("mousemove", move);
-				window.addEventListener("mouseup", up);
+				window.addEventListener("mouseup", finish);
+				window.addEventListener("blur", finish);
 			}}
 		/>
 	);
@@ -203,13 +240,131 @@ export function App() {
 			else if (view !== state[key]) setState(key, view);
 		}
 	});
-	// When a context-gated panel (Document outline, Palette) becomes irrelevant to the open file/view,
-	// switch its side cleanly to the first available panel docked on that side (skipped during selftest).
+	// Document outline ("objects") defaults to the right side when available and remembers
+	// whether the user left it active or inactive across tab switches and sessions.
+	let syncingOutline = false;
+	createEffect(
+		on(
+			() => {
+				const side = sideOf("objects");
+				const key = side === "left" ? "leftView" : "rightView";
+				const avail = isPanelAvailable("objects");
+				return [state.workspace?.root, isTabsReady(), avail, side, narrowPanels(), !avail && state[key] === "objects"] as const;
+			},
+			([root, ready, avail, side, narrow], prev) => {
+				if (root !== prev?.[0]) loadOutlineMemory(root);
+				if (!root || !ready || state.info?.selftest) return;
+				const key = side === "left" ? "leftView" : "rightView";
+				const current = { open: state.settings.layout[side], view: state[key] };
+				const fallback = PANELS.find((p) => p.id !== "objects" && sideOf(p.id) === side && isPanelAvailable(p.id))?.id ?? null;
+				const res = transitionOutlineAvailability(
+					avail,
+					current,
+					getOutlineMemory(),
+					fallback,
+					(id) => sideOf(id) === side && isPanelAvailable(id),
+					narrow && side === "right",
+				);
+				setOutlineMemory(res.memory);
+				if (!res.apply) return;
+				syncingOutline = true;
+				try {
+					batch(() => {
+						if (res.apply!.view !== undefined) setState(key, res.apply!.view);
+						if (res.apply!.open !== undefined) setState("settings", "layout", side, res.apply!.open);
+					});
+				} finally {
+					syncingOutline = false;
+				}
+			},
+		),
+	);
+	// Record user-driven activation or deactivation of Document outline while it is available.
+	createEffect(
+		on(
+			() => {
+				const side = sideOf("objects");
+				const key = side === "left" ? "leftView" : "rightView";
+				return [state.settings.layout[side], state[key]] as const;
+			},
+			([open, view], prev) => {
+				if (syncingOutline || !state.workspace || !isTabsReady() || state.info?.selftest) return;
+				if (!isPanelAvailable("objects")) return;
+				if (narrowPanels() && sideOf("objects") === "right") return;
+				const nowActive = open && view === "objects";
+				const prevSnap = prev && prev[1] !== "objects" ? { open: prev[0], view: prev[1] } : undefined;
+				recordOutlineActive(nowActive, nowActive ? prevSnap : null);
+			},
+		),
+	);
+	// Plan Palette ("palette") loads by default when viewing a plan chart and remembers
+	// whether the user left it active or inactive across tab switches and reloads.
+	let syncingPlanPalette = false;
+	createEffect(
+		on(
+			() => {
+				const side = sideOf("palette");
+				const key = side === "left" ? "leftView" : "rightView";
+				const inPlan = isPlanChartActive();
+				return [state.workspace?.root, isTabsReady(), inPlan, side, narrowPanels(), !inPlan && state[key] === "palette"] as const;
+			},
+			([root, ready, inPlan, side, narrow], prev) => {
+				if (root !== prev?.[0]) loadPlanPaletteMemory(root);
+				if (!root || !ready || state.info?.selftest) return;
+				const key = side === "left" ? "leftView" : "rightView";
+				const current = { open: state.settings.layout[side], view: state[key] };
+				const fallback = PANELS.find((p) => p.id !== "palette" && sideOf(p.id) === side && isPanelAvailable(p.id))?.id ?? null;
+				const res = transitionPanelAvailability(
+					"palette",
+					inPlan,
+					current,
+					getPlanPaletteMemory(),
+					fallback,
+					(id) => sideOf(id) === side && isPanelAvailable(id),
+					narrow && side === "right",
+					side === "right",
+				);
+				setPlanPaletteMemory(res.memory);
+				if (!res.apply) return;
+				syncingPlanPalette = true;
+				try {
+					batch(() => {
+						if (res.apply!.view !== undefined) setState(key, res.apply!.view);
+						if (res.apply!.open !== undefined) setState("settings", "layout", side, res.apply!.open);
+					});
+				} finally {
+					syncingPlanPalette = false;
+				}
+			},
+		),
+	);
+	// Record user-driven activation or deactivation of Palette while viewing a plan chart.
+	createEffect(
+		on(
+			() => {
+				const side = sideOf("palette");
+				const key = side === "left" ? "leftView" : "rightView";
+				return [state.settings.layout[side], state[key]] as const;
+			},
+			([open, view], prev) => {
+				if (syncingPlanPalette || !state.workspace || !isTabsReady() || state.info?.selftest) return;
+				if (!isPlanChartActive()) return;
+				if (narrowPanels() && sideOf("palette") === "right") return;
+				const nowActive = open && view === "palette";
+				const prevSnap = prev && prev[1] !== "palette" ? { open: prev[0], view: prev[1] } : undefined;
+				recordPlanPaletteActive(nowActive, nowActive ? prevSnap : null);
+			},
+		),
+	);
+	// When other context-gated panels (e.g. Palette outside plan charts) become irrelevant to the open file/view,
+	// switch their side cleanly to the first available panel docked on that side (skipped during selftest).
 	createEffect(() => {
 		if (!state.workspace || state.info?.selftest) return;
 		for (const side of ["left", "right"] as const) {
 			const key = side === "left" ? "leftView" : "rightView";
 			const current = state[key];
+			if (current === "objects") continue;
+			if (current === "palette" && getPlanPaletteMemory().before !== null) continue;
 			if (!isPanelAvailable(current)) {
 				const fallback = PANELS.find((p) => sideOf(p.id) === side && isPanelAvailable(p.id));
 				if (fallback) setState(key, fallback.id);
@@ -235,9 +390,10 @@ export function App() {
 	window.addEventListener("resize", resized);
 	onCleanup(() => window.removeEventListener("resize", resized));
 	const scale = () => clampScale(state.settings.uiScale);
-	// The activity bar grows with the interface size; the panels' widths are the user's own pixels.
-	const availWidth = () => size().width - ACTIVITY * (scale() - 1);
-	const isNarrowPair = () => availWidth() < ACTIVITY + CENTER_MIN + LEFT_MIN + RIGHT_MIN;
+	const gap = () => (size().width <= 780 ? 0 : 5);
+	const splitSize = () => Math.max(4, gap());
+	const chrome = () => ({ activity: ACTIVITY * scale(), gap: gap(), splitter: splitSize() });
+	const isNarrowPair = () => !canFitBothPanels(size().width, chrome());
 	createEffect(() => {
 		const narrow = isNarrowPair();
 		setNarrowPanels(narrow);
@@ -259,7 +415,13 @@ export function App() {
 	});
 	// In narrow layout, right-docked panels are hosted in the left slot so the right column never crowds or overflows.
 	const rightW = () => (layout().right && state.workspace && !narrowPanels() ? layout().rightWidth : 0);
-	const fit = () => fitPanels(availWidth(), layout().left && state.workspace ? layout().leftWidth : 0, rightW(), lastShown());
+	const fit = () => fitPanels(size().width, layout().left && state.workspace ? layout().leftWidth : 0, rightW(), lastShown(), chrome());
+	const usableWidth = () => {
+		const f = fit();
+		return Math.max(0, size().width - horizontalChrome(f.left > 0, f.right > 0, chrome()));
+	};
+	const maxLeft = () => Math.max(LEFT_MIN, Math.floor(usableWidth() - CENTER_MIN - fit().right));
+	const maxRight = () => Math.max(RIGHT_MIN, Math.floor(usableWidth() - CENTER_MIN - fit().left));
 	// A side that is open and got no room: its button is not pressed, and pressing it brings the panel back.
 	createEffect(() => setCrowded(state.workspace ? crowdedSides({ left: layout().left, right: layout().right && !narrowPanels() }, fit()) : { left: false, right: false }));
 
@@ -272,7 +434,7 @@ export function App() {
 		const path = activePath();
 		if (path) {
 			if (isPlanPath(path) && !state.planText[path]) return "plan";
-			if (isMarkdown(path) && !state.mdText[path]) return "doc";
+			if (isMarkdown(path) && markdownMode(path) !== "source") return "doc";
 			if (isTable(path) && !state.mdText[path]) return "table";
 		}
 		return "code";
@@ -302,7 +464,139 @@ export function App() {
 			},
 		),
 	);
-	const bottom = () => (layout().bottom ? Math.min(layout().bottomHeight, Math.max(80, size().height - 200)) : 0);
+	let centerEl: HTMLElement | undefined;
+	const [centerH, setCenterH] = createSignal(0);
+	const measureCenter = () => {
+		if (!centerEl) return;
+		const setup = centerEl.querySelector<HTMLElement>(".setup-bar");
+		setCenterH(Math.max(0, centerEl.clientHeight - (setup?.offsetHeight ?? 0)));
+	};
+	onMount(() => {
+		measureCenter();
+		if (!centerEl || typeof ResizeObserver === "undefined") return;
+		const ro = new ResizeObserver(measureCenter);
+		ro.observe(centerEl);
+		onCleanup(() => ro.disconnect());
+	});
+	createEffect(() => {
+		// Re-measure when the setup bar appears or is dismissed.
+		void (state.project && !state.project.configured && !state.setupDismissed);
+		queueMicrotask(measureCenter);
+	});
+	// Closing the bottom panel clears maximize so reopening shows the editor beside it.
+	createEffect(() => {
+		if (!layout().bottom && state.bottomMaximized) setState("bottomMaximized", false);
+	});
+	const verticalChrome = () => (state.settings.menuBar !== false ? 34 : 0) * scale() + 24 * scale() + gap();
+	const effectiveCenterH = () => centerH() || Math.max(0, size().height - verticalChrome());
+	const maxBottom = () => Math.max(BOTTOM_MIN, Math.floor(effectiveCenterH() - splitSize() - EDITOR_MIN_HEIGHT));
+	const bottom = () => (layout().bottom && state.workspace ? Math.max(BOTTOM_MIN, Math.min(layout().bottomHeight, maxBottom())) : 0);
+
+	// VS Code sash drag state: snapshot at drag start so overshooting never drifts,
+	// dragging below half minimum snap-closes, and dragging the bottom panel past the
+	// editor minimum snaps it to fill the entire center pane.
+	const [snapHide, setSnapHide] = createSignal<"left" | "right" | "bottom" | null>(null);
+	const [snapMaximize, setSnapMaximize] = createSignal<boolean | null>(null);
+	const isBottomMaximized = () => (snapMaximize() !== null ? snapMaximize()! : state.bottomMaximized);
+	let hSnap: { side: "left" | "right"; left: number; right: number; usable: number } | null = null;
+	let bSnap: { savedHeight: number; centerHeight: number; splitterHeight: number; wasMaximized: boolean } | null = null;
+
+	const applyHorizontal = (side: "left" | "right", startL: number, startR: number, usable: number, delta: number, allowSnap: boolean) => {
+		const res = dragHorizontalPanel(side, startL, startR, usable, delta, allowSnap);
+		if (res.collapsed) {
+			if (side === "left" && startR > 0) setState("settings", "layout", "rightWidth", startR);
+			if (side === "right" && startL > 0) setState("settings", "layout", "leftWidth", startL);
+			setSnapHide(side);
+			return;
+		}
+		if (snapHide() === side) setSnapHide(null);
+		if (startL > 0) setState("settings", "layout", "leftWidth", res.left);
+		if (startR > 0) setState("settings", "layout", "rightWidth", res.right);
+	};
+	const startHorizontalDrag = (side: "left" | "right") => {
+		const f = fit();
+		hSnap = { side, left: f.left, right: f.right, usable: Math.max(0, size().width - horizontalChrome(f.left > 0, f.right > 0, chrome())) };
+	};
+	const dragHorizontal = (delta: number) => {
+		if (!hSnap) return;
+		applyHorizontal(hSnap.side, hSnap.left, hSnap.right, hSnap.usable, delta, true);
+	};
+	const endHorizontalDrag = () => {
+		const snap = hSnap;
+		hSnap = null;
+		if (!snap) return;
+		if (snapHide() === snap.side) {
+			setSnapHide(null);
+			// Keep pre-drag width so reopening restores the panel as the user had it.
+			if (snap.side === "left") {
+				setState("settings", "layout", "leftWidth", snap.left);
+				if (narrowPanels() && narrowHosted()) setNarrowHosted(null);
+				setState("settings", "layout", "left", false);
+			} else {
+				setState("settings", "layout", "rightWidth", snap.right);
+				setState("settings", "layout", "right", false);
+			}
+			queueMicrotask(() => (!document.activeElement || document.activeElement === document.body) && focusEditor());
+		}
+	};
+	const stepHorizontal = (side: "left" | "right", delta: number) => {
+		const f = fit();
+		const usable = Math.max(0, size().width - horizontalChrome(f.left > 0, f.right > 0, chrome()));
+		applyHorizontal(side, f.left, f.right, usable, delta, false);
+	};
+
+	const startBottomDrag = () => {
+		bSnap = {
+			savedHeight: bottom(),
+			centerHeight: effectiveCenterH(),
+			splitterHeight: splitSize(),
+			wasMaximized: state.bottomMaximized,
+		};
+	};
+	const dragBottom = (delta: number) => {
+		if (!bSnap) return;
+		const res = dragBottomPanel(bSnap.savedHeight, bSnap.centerHeight, bSnap.splitterHeight, delta, true, bSnap.wasMaximized);
+		if (res.collapsed) {
+			setSnapMaximize(false);
+			setSnapHide("bottom");
+			return;
+		}
+		if (snapHide() === "bottom") setSnapHide(null);
+		if (res.maximized) {
+			setSnapMaximize(true);
+			return;
+		}
+		setSnapMaximize(false);
+		setState("settings", "layout", "bottomHeight", res.height);
+	};
+	const endBottomDrag = () => {
+		const snap = bSnap;
+		const maxNow = snapMaximize();
+		bSnap = null;
+		setSnapMaximize(null);
+		if (!snap) return;
+		if (snapHide() === "bottom") {
+			setSnapHide(null);
+			setState("bottomMaximized", false);
+			setState("settings", "layout", "bottomHeight", snap.savedHeight);
+			setState("settings", "layout", "bottom", false);
+			queueMicrotask(() => (!document.activeElement || document.activeElement === document.body) && focusEditor());
+			return;
+		}
+		if (maxNow === true) {
+			// Keep pre-drag height so Restore brings the panel back where it was.
+			setState("settings", "layout", "bottomHeight", snap.savedHeight);
+			setState("bottomMaximized", true);
+		} else if (maxNow === false) {
+			setState("bottomMaximized", false);
+		}
+	};
+	const stepBottom = (delta: number) => {
+		const res = dragBottomPanel(bottom(), effectiveCenterH(), splitSize(), delta, false, state.bottomMaximized);
+		setState("bottomMaximized", res.maximized);
+		if (!res.maximized) setState("settings", "layout", "bottomHeight", res.height);
+	};
+
 	// The interface's size scales the type and spacing scales in style.css; the code's size is its own setting.
 	createEffect(() => {
 		document.documentElement.style.setProperty("--ui-scale", String(scale()));
@@ -315,7 +609,14 @@ export function App() {
 		}),
 	);
 	return (
-		<div class="app" style={{ "--left": `${fit().left}px`, "--right": `${fit().right}px`, "--bottom": `${bottom()}px` }}>
+		<div
+			class="app"
+			style={{
+				"--left": `${snapHide() === "left" ? 0 : fit().left}px`,
+				"--right": `${snapHide() === "right" ? 0 : fit().right}px`,
+				"--bottom": `${snapHide() === "bottom" ? 0 : bottom()}px`,
+			}}
+		>
 			<Show when={state.settings.menuBar !== false}>
 				<MenuBar />
 			</Show>
@@ -350,7 +651,7 @@ export function App() {
 				</button>
 			</nav>
 			<Show when={fit().left > 0 && state.workspace}>
-				<aside class="sidebar" aria-label="Side panel">
+				<aside class="sidebar" classList={{ "snap-hidden": snapHide() === "left" }} aria-label="Side panel">
 					<Show when={narrowPanels() && narrowHosted()}>
 						{(hostedId) => (
 							<div class="narrow-dock-bar">
@@ -382,13 +683,16 @@ export function App() {
 					column={3}
 					label="Width of the side panel"
 					value={fit().left}
-					min={160}
-					max={700}
-					onDrag={(d) => setState("settings", "layout", "leftWidth", (w) => clamp(Math.min(w, fit().left) + d, 160, 700))}
-					onReset={() => setState("settings", "layout", "leftWidth", 260)}
+					min={LEFT_MIN}
+					max={maxLeft()}
+					onDragStart={() => startHorizontalDrag("left")}
+					onDragDelta={dragHorizontal}
+					onDragEnd={endHorizontalDrag}
+					onStep={(d) => stepHorizontal("left", d)}
+					onReset={() => setState("settings", "layout", "leftWidth", Math.min(260, maxLeft()))}
 				/>
 			</Show>
-			<main class="center">
+			<main class="center" ref={centerEl}>
 				<Show when={state.project && !state.project.configured && !state.setupDismissed && !state.info?.selftest}>
 					<div class="setup-bar" role="status">
 						<span>This folder is not set up as a project. Setting it up adds project settings, a README and an AGENTS file; nothing is overwritten.</span>
@@ -398,7 +702,7 @@ export function App() {
 						<button onClick={() => setState("setupDismissed", true)}>Not now</button>
 					</div>
 				</Show>
-				<div class="editors">
+				<div class="editors" classList={{ "panel-maximized": layout().bottom && Boolean(state.workspace) && isBottomMaximized() }}>
 					<Show when={state.workspace} fallback={<Welcome />}>
 						<Show when={state.centerView === "graph"}>
 							<GraphView />
@@ -418,15 +722,26 @@ export function App() {
 				<Show when={layout().bottom && state.workspace}>
 					<Splitter
 						axis="y"
+						extraClass={isBottomMaximized() ? "at-top" : undefined}
 						label="Height of the bottom panel"
-						value={bottom()}
-						min={80}
-						max={600}
-						onDrag={(d) => setState("settings", "layout", "bottomHeight", (h) => clamp(Math.min(h, bottom()) - d, 80, 600))}
-						onReset={() => setState("settings", "layout", "bottomHeight", 200)}
+						value={isBottomMaximized() ? effectiveCenterH() : bottom()}
+						min={BOTTOM_MIN}
+						max={effectiveCenterH()}
+						onDragStart={startBottomDrag}
+						onDragDelta={dragBottom}
+						onDragEnd={endBottomDrag}
+						onStep={stepBottom}
+						onReset={() => (setState("bottomMaximized", false), setState("settings", "layout", "bottomHeight", 200))}
 					/>
-					<section class="bottom" aria-label="Bottom panel">
-						<div class="bottom-tabs" role="tablist" aria-label="Bottom panel">
+					<section class="bottom" classList={{ "snap-hidden": snapHide() === "bottom", maximized: isBottomMaximized() }} aria-label="Bottom panel">
+						<div
+							class="bottom-tabs"
+							role="tablist"
+							aria-label="Bottom panel"
+							onDblClick={(e) => {
+								if (!(e.target as HTMLElement).closest("button")) setState("bottomMaximized", (m) => !m);
+							}}
+						>
 							<button role="tab" aria-selected={state.bottomView === "problems"} classList={{ active: state.bottomView === "problems" }} onClick={() => setState("bottomView", "problems")}>
 								Problems <span class="count">{counts().errors + counts().warnings + counts().other}</span>
 							</button>
@@ -434,7 +749,16 @@ export function App() {
 								Output
 							</button>
 							<span class="spacer" />
-							<button title={`Close panel${shortcut("toggle-panel")}`} aria-label="Close the bottom panel" onClick={() => setState("settings", "layout", "bottom", false)}>
+							<button
+								class="bottom-action"
+								title={`${isBottomMaximized() ? "Restore panel size" : "Maximize panel size"}${shortcut("toggle-panel-maximize")}`}
+								aria-label={isBottomMaximized() ? "Restore panel size" : "Maximize panel size"}
+								aria-pressed={isBottomMaximized()}
+								onClick={() => setState("bottomMaximized", (m) => !m)}
+							>
+								<Icon name={isBottomMaximized() ? "chevron-down" : "chevron-up"} />
+							</button>
+							<button class="bottom-action" title={`Close panel${shortcut("toggle-panel")}`} aria-label="Close the bottom panel" onClick={() => setState("settings", "layout", "bottom", false)}>
 								<Icon name="close" />
 							</button>
 						</div>
@@ -455,12 +779,15 @@ export function App() {
 					column={5}
 					label="Width of the right panel"
 					value={fit().right}
-					min={220}
-					max={800}
-					onDrag={(d) => setState("settings", "layout", "rightWidth", (w) => clamp(Math.min(w, fit().right) - d, 220, 800))}
-					onReset={() => setState("settings", "layout", "rightWidth", 360)}
+					min={RIGHT_MIN}
+					max={maxRight()}
+					onDragStart={() => startHorizontalDrag("right")}
+					onDragDelta={dragHorizontal}
+					onDragEnd={endHorizontalDrag}
+					onStep={(d) => stepHorizontal("right", d)}
+					onReset={() => setState("settings", "layout", "rightWidth", Math.min(360, maxRight()))}
 				/>
-				<aside class="rightbar" aria-label="Right panel">
+				<aside class="rightbar" classList={{ "snap-hidden": snapHide() === "right" }} aria-label="Right panel">
 					<Panel id={state.rightView} />
 				</aside>
 			</Show>

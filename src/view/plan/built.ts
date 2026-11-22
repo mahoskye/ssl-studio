@@ -126,6 +126,42 @@ export const recordTests = (plan: Plan, script: string): Plan => ({ ...plan, bui
 /** The procedures that carry a node. */
 export const unitsOfNode = (plan: Plan, id: string): BuiltUnit[] => (builtOf(plan)?.units ?? []).filter((u) => u.nodes.includes(id));
 
+export type NodeCodeDetails = {
+	units: BuiltUnit[];
+	scripts: string[];
+	/** Direct reference on the node (e.g. an existing workspace procedure), if distinct from its implementing unit name. */
+	primaryRef: string | null;
+	/** Called / referenced procedures involved with this node (primaryRef first, then implementing unit calls, deduplicated). */
+	calls: string[];
+	/** How many other nodes in the plan share the same implementing procedure(s). */
+	sharedCount: number;
+};
+
+/** Summarizes the scripts, implementing functions, and called functions behind any step or decision node. */
+export function nodeCodeDetails(plan: Plan, node: PlanNode): NodeCodeDetails {
+	const units = unitsOfNode(plan, node.id);
+	const scripts = [...new Set(units.map((u) => u.script).filter(Boolean))];
+	const unitNames = new Set(units.map((u) => lastPart(u.name).toLowerCase()));
+	const rawRef = node.ref?.trim() || "";
+	const primaryRef = rawRef && !unitNames.has(lastPart(rawRef).toLowerCase()) ? rawRef : null;
+	const calls: string[] = [];
+	const seen = new Set<string>();
+	const addCall = (target: string) => {
+		const trimmed = target.trim();
+		if (!trimmed) return;
+		const key = lastPart(trimmed).toLowerCase();
+		if (seen.has(key) || unitNames.has(key)) return;
+		seen.add(key);
+		calls.push(trimmed);
+	};
+	if (primaryRef) addCall(primaryRef);
+	for (const u of units) for (const c of u.calls) addCall(c);
+	const validIds = new Set(plan.nodes.map((n) => n.id));
+	const peers = new Set<string>();
+	for (const u of units) for (const nid of u.nodes) if (nid !== node.id && validIds.has(nid)) peers.add(nid);
+	return { units, scripts, primaryRef, calls, sharedCount: peers.size };
+}
+
 // --- drift: the chart against the code --------------------------------------------------
 
 export type Reading = { name: string; procedures: { name: string; line: number }[]; edges: { from: string; target: string; resolved: boolean }[] };

@@ -1,68 +1,166 @@
-// A plan as a flow chart, laid out by ELK. A view of the plan's text: every
-// action is one undoable text edit on the model the text view shows, and the
-// selected node is the one under the text cursor (ADR 0002, ADR 0005).
-import { Icon } from "../Icon";
+// Modern interactive flow chart view for a plan (`design/<name>.plan.json`,
+// ADR 0005). Every visual action — hover '+' ports, drag-to-connect wires,
+// insert-on-edge, shape drop from Palette, right-click menus, inline edits,
+// and stage renames — produces one undoable text edit on the plan's Monaco
+// model (ADR 0002). Assistant (Refine, Questions, Spec, Build, Tests) lives
+// cleanly in the Palette panel's Assistant tab so the chart stays unobstructed.
 import ELK from "elkjs/lib/elk.bundled.js";
 import { createEffect, createMemo, createSignal, createUniqueId, For, on, onCleanup, onMount, Show, untrack } from "solid-js";
+import { dirName, joinPath, relativeTo } from "../../shared/paths";
+import { ticketKey } from "../../shared/projectDocs";
 import { ask } from "../dialogs";
 import { editors } from "../editor/EditorGroup";
 import { monaco } from "../editor/monaco";
-import { Minimap, type MapBox } from "../graph/Minimap";
+import { cycleRegionColor, regionColor } from "../editor/regions";
+import { canvasMeasure, centredOn, clearLabels, clearOf, fitView, legibleScale, mapArea, nearest, outOfSight, recall, remember, reveal, roundedPath, zoomAt, type Measure, type Point, type Rect } from "../graph/canvas";
 import { Finder } from "../graph/Finder";
-import { Menu, type MenuItem } from "../Menu";
+import { Minimap, type MapBox } from "../graph/Minimap";
 import { pictureName, savePicture } from "../graph/picture";
-import { dirName, joinPath, relativeTo } from "../../shared/paths";
-import { ticketKey } from "../../shared/projectDocs";
-import { regionColor } from "../editor/regions";
-import { canvasMeasure, centredOn, clearLabels, clearOf, fitView, legibleScale, mapArea, nearest, outOfSight, recall, remember, reveal, roundedPath, zoomAt, type Measure, type Point } from "../graph/canvas";
+import { Icon } from "../Icon";
+import { ICON } from "../icons";
 import { diagnostics } from "../lsp/session";
-import { documents, notify, setState, state, applyText, openedForALook } from "../state";
+import { Menu, type MenuItem } from "../Menu";
+import { chooseFromMenu } from "../panels/RowMenu";
+import { applyText, documents, notify, openedForALook, setState, state } from "../state";
+import { planHash, previewPlan } from "./assist";
 import { nodeStatuses } from "./build";
 import { builtOf, chartChanges, unitsOfNode } from "./built";
-import { chartGraph, crossings, routeLength, cycleEdge, describeEdge, describeNode, KEYS, labelPoint, LINE, MARK_WORDS, routeOf, sizeNode, statusMark, type ChartGraph, type Mark, type NodeState, type Sized } from "./chart";
+import {
+	applyRouteOffsets,
+	chartGraph,
+	compactRoutes,
+	crossings,
+	cycleEdge,
+	describeEdge,
+	describeNode,
+	edgeHandles,
+	edgeMidpoint,
+	fitRegionBounds,
+	KEYS,
+	labelPoint,
+	LINE,
+	MARK_WORDS,
+	offsetFor,
+	placeEdgeLabel,
+	rerouteMovedEdge,
+	routeLength,
+	routeOf,
+	sizeNode,
+	statusMark,
+	type ChartGraph,
+	type EdgeHandle,
+	type LabelObstacle,
+	type LayoutDirection,
+	type Mark,
+	type NodeState,
+	type Sized,
+} from "./chart";
 import { recheckPlan } from "./check";
-import { driftFor, openProcedure } from "./drift";
-import { assistOf } from "./run";
-import { PlanAssistant } from "./PlanAssistant";
-import { planHash, previewPlan } from "./assist";
+import { driftFor, openProcedure, openReference, openScript } from "./drift";
+import {
+	addAfter,
+	addBranch,
+	addCall,
+	connect,
+	duplicateNode,
+	hasManualLayout,
+	insertOnEdge,
+	nodeAtLine,
+	nodeLines,
+	parsePlan,
+	printPlan,
+	PROCEDURE_DRAG,
+	removeEdge,
+	removeNode,
+	renameGroup,
+	resetPlanLayout,
+	reverseEdge,
+	setDecision,
+	setEdgeLabel,
+	setEdgeRoute,
+	setGroup,
+	setGroupOffset,
+	setKind,
+	setNodeOffset,
+	setText,
+	SHAPE_DRAG,
+	type Edit,
+	type NodeKind,
+	type Plan,
+	type PlanNode,
+	type PlanOffset,
+	type RouteOffsets,
+} from "./model";
 import { registerPlanBridge } from "./planBridge";
-import { addAfter, addBranch, addCall, connect, nodeAtLine, nodeLines, parsePlan, printPlan, PROCEDURE_DRAG, removeEdge, removeNode, setDecision, setEdgeLabel, setGroup, setText, type Edit, type Plan, type PlanNode } from "./model";
+import "./planCanvas.css";
+import { assistOf } from "./run";
 
-type Box = { id: string; x: number; y: number; width: number; height: number; node?: PlanNode; lines: string[]; group?: string };
-type Line = { id: string; from: string; to: string; label?: string; shown: string; labelWidth: number; points: Point[]; at: Point; missing: boolean; pending: boolean; removing: boolean; /** It closes a loop: it runs back up to a step already passed. */ back: boolean };
+type Box = { id: string; x: number; y: number; width: number; height: number; node?: PlanNode; lines: string[]; group?: string; memberCount?: number; pillWidth?: number };
+type Line = {
+	id: string;
+	from: string;
+	to: string;
+	label?: string;
+	shown: string;
+	labelWidth: number;
+	basePoints: Point[];
+	points: Point[];
+	route?: RouteOffsets;
+	at: Point;
+	mid: Point;
+	missing: boolean;
+	pending: boolean;
+	removing: boolean;
+	back: boolean;
+};
 type Layout = { boxes: Box[]; lines: Line[]; width: number; height: number };
+
+type WireDrag = {
+	fromId: string;
+	startClient: Point;
+	startCanvas: Point;
+	curCanvas: Point;
+	dragged: boolean;
+	kind: "primary" | "branch";
+};
+
+type RouteDrag = {
+	from: string;
+	to: string;
+	key: string;
+	axis: "h" | "v";
+	startClient: Point;
+	startDelta: number;
+	curDelta: number;
+	moved: boolean;
+};
+
+type NodeDrag = {
+	kind: "node" | "group";
+	id: string;
+	startClient: Point;
+	startOffset: Point;
+	curOffset: Point;
+	moved: boolean;
+	guideX?: number;
+	guideY?: number;
+};
 
 const elk = new ELK();
 
-// The sizes the style sheet gives a node's words and an edge's label (.plan-node text, .plan-label text).
 const NODE_FONT_PX = 13;
 const LABEL_FONT_PX = 12;
-/** Fit never draws a node's words smaller than can be read; a larger chart is panned. */
 const FIT_FLOOR = legibleScale(NODE_FONT_PX);
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 2.5;
-/** Zoomed out past this a step's words cannot be read: the chart is of its stages, named at a size that can. */
-const FAR_UNDER = 0.6;
-/** The size, on screen, of a name in that far chart. */
+const FAR_UNDER = 0.56;
 const FAR_NAME_PX = 11;
-/** The first words of a sentence, up to about thirty letters: enough to know a step by, over a chart seen from far off. */
-const shortly = (text: string, most = 30) => (text.length <= most ? text : `${text.slice(0, text.lastIndexOf(" ", most) > 10 ? text.lastIndexOf(" ", most) : most).replace(/[,;:.]$/, "")}…`);
+const DIRECTION_KEY = "plan.direction";
+
+const shortly = (text: string, most = 30) =>
+	text.length <= most ? text : `${text.slice(0, text.lastIndexOf(" ", most) > 10 ? text.lastIndexOf(" ", most) : most).replace(/[,;:.]$/, "")}…`;
 const measureName = canvasMeasure(`600 ${FAR_NAME_PX}px system-ui, sans-serif`, FAR_NAME_PX);
-/** The assistant's width (.plan-assist), and the least the chart keeps beside it before the assistant goes below. */
-const ASSIST_WIDTH = 280;
-const MIN_CHART_WIDTH = 360;
-/** Narrower than this, the bar's six editing buttons are one menu: side by side they take a second row, and a third. */
-const BAR_FITS_FROM = 1030;
 
-/** Whether the assistant shows, as last chosen in any plan; null until it has been chosen. */
-const ASSISTANT_KEY = "plan.assistant";
-const [assistantChoice, setAssistantChoice] = createSignal<boolean | null>(recall(ASSISTANT_KEY) === null ? null : recall(ASSISTANT_KEY) === "open");
-
-/**
- * Measures in the chart's own font, with a hidden <text> the style sheet styles
- * as it does the words drawn. While the chart is not on screen that reads zero,
- * and a canvas measures instead, or failing that an estimate.
- */
 function probeMeasure(probe: () => SVGTextElement | undefined, fallback: Measure): Measure {
 	const seen = new Map<string, number>();
 	return (text) => {
@@ -85,25 +183,25 @@ function probeMeasure(probe: () => SVGTextElement | undefined, fallback: Measure
 	};
 }
 
-async function layoutPlan(plan: Plan, measure: { node: Measure; label: Measure }): Promise<Layout> {
+async function layoutPlan(plan: Plan, measure: { node: Measure; label: Measure; stage: Measure }, direction: LayoutDirection): Promise<Layout> {
 	const sized = new Map<string, Sized>();
 	for (const n of plan.nodes) if (!sized.has(n.id)) sized.set(n.id, sizeNode(n.kind, n.text, measure.node));
-	// Two things can be drawn either way, and which is clearer depends on where the layout puts
-	// the rest: the side a loop closed from a decision leaves by, and whether a loop's way back
-	// arrives at its decision's top or its side. Each way that the plan has a use for is laid out,
-	// and the chart with the fewest crossings is kept, or of those the one with the least line.
-	const first = await layoutWith(chartGraph(plan, sized), sized, measure);
+	const first = await layoutWith(chartGraph(plan, sized, "EAST", "NORTH", direction), sized, measure);
 	let best = first;
 	for (const loopTip of first.sided ? (["EAST", "WEST"] as const) : (["EAST"] as const))
 		for (const returnsAt of first.returning ? (["NORTH", "WEST"] as const) : (["NORTH"] as const)) {
 			if (loopTip === "EAST" && returnsAt === "NORTH") continue;
-			const next = await layoutWith(chartGraph(plan, sized, loopTip, returnsAt), sized, measure);
+			const next = await layoutWith(chartGraph(plan, sized, loopTip, returnsAt, direction), sized, measure);
 			if (next.crossings < best.crossings || (next.crossings === best.crossings && next.length < best.length)) best = next;
 		}
 	return best.layout;
 }
 
-async function layoutWith({ graph, nodes, edges, groups, reversed, sided, returning }: ChartGraph, sized: ReadonlyMap<string, Sized>, measure: { node: Measure; label: Measure }): Promise<{ layout: Layout; crossings: number; length: number; sided: boolean; returning: boolean }> {
+async function layoutWith(
+	{ graph, nodes, edges, groups, reversed, sided, returning }: ChartGraph,
+	sized: ReadonlyMap<string, Sized>,
+	measure: { node: Measure; label: Measure; stage: Measure },
+): Promise<{ layout: Layout; crossings: number; length: number; sided: boolean; returning: boolean }> {
 	const result: any = await elk.layout(graph as any);
 	const boxes: Box[] = [];
 	const walk = (n: any, ox: number, oy: number) => {
@@ -111,29 +209,147 @@ async function layoutWith({ graph, nodes, edges, groups, reversed, sided, return
 		const y = oy + (n.y ?? 0);
 		if (n.id !== "root") {
 			const node = nodes.find((p) => p.id === n.id);
-			boxes.push({ id: n.id, x, y, width: n.width, height: n.height, node, lines: node ? sized.get(node.id)!.lines : [], group: node ? undefined : groups.find((g) => g.id === n.id)?.name });
+			const groupObj = node ? undefined : groups.find((g) => g.id === n.id);
+			const memberCount = groupObj ? nodes.filter((m) => m.group === groupObj.id).length : undefined;
+			const pillWidth = groupObj
+				? Math.max(84, 22 + Math.ceil(measure.stage(groupObj.name)) + 14 + String(memberCount ?? 0).length * 7 + 10)
+				: undefined;
+			boxes.push({
+				id: n.id,
+				x,
+				y,
+				width: n.width,
+				height: n.height,
+				node,
+				lines: node ? sized.get(node.id)!.lines : [],
+				group: groupObj?.name,
+				memberCount,
+				pillWidth,
+			});
 		}
 		for (const c of n.children ?? []) walk(c, x, y);
 	};
 	walk(result, 0, 0);
 	const diamond = (id: string) => boxes.find((b) => b.id === id && b.node?.kind === "decision");
-	const lines: Line[] = (result.edges ?? []).map((e: any) => {
+	const obstacles = labelObstaclesOf(boxes);
+	const placedLabels: { x: number; y: number; width: number; height: number }[] = [];
+	const rawEdges: { e: any; index: number; edge: Plan["edges"][number]; points: Point[] }[] = (result.edges ?? []).map((e: any) => {
 		const index = Number(String(e.id).slice(1));
 		const edge = edges[index]!;
 		const section = e.sections?.[0];
-		const points = routeOf(section ? [section.startPoint, ...(section.bendPoints ?? []), section.endPoint] : [], reversed.has(index), diamond(edge.from), diamond(edge.to));
+		const points = routeOf(
+			section ? [section.startPoint, ...(section.bendPoints ?? []), section.endPoint] : [],
+			reversed.has(index),
+			diamond(edge.from),
+			diamond(edge.to),
+		);
+		return { e, index, edge, points };
+	});
+	const compacted = compactRoutes(
+		rawEdges.map((r) => ({ to: r.edge.to, points: r.points })),
+		boxes,
+	);
+	const lines: Line[] = rawEdges.map(({ e, index, edge }, ri) => {
+		const basePoints = compacted[ri]!;
 		const missing = Boolean(diamond(edge.from)) && !edge.label?.trim();
 		const shown = edge.label?.trim() || (missing ? "label?" : "");
-		const labelWidth = shown ? Math.ceil(measure.label(shown)) + 12 : 0;
-		return { id: e.id, from: edge.from, to: edge.to, label: edge.label, shown, labelWidth, points, at: labelPoint(points, labelWidth), missing, pending: Boolean(edge.pending), removing: Boolean(edge.removing), back: reversed.has(index) };
+		const labelWidth = shown ? Math.ceil(measure.label(shown)) + 16 : 0;
+		const at = shown ? placeEdgeLabel(basePoints, labelWidth, obstacles, placedLabels) : labelPoint(basePoints, 0);
+		if (shown) placedLabels.push({ x: at.x - labelWidth / 2, y: at.y - 10.5, width: labelWidth, height: 21 });
+		const mid = placeMidpoint(basePoints, shown ? at : null, labelWidth);
+		return {
+			id: e.id,
+			from: edge.from,
+			to: edge.to,
+			label: edge.label,
+			shown,
+			labelWidth,
+			basePoints,
+			points: basePoints,
+			at,
+			mid,
+			missing,
+			pending: Boolean(edge.pending),
+			removing: Boolean(edge.removing),
+			back: reversed.has(index),
+		};
 	});
-	return { layout: { boxes, lines, width: result.width, height: result.height }, crossings: crossings(lines.map((l) => l.points)), length: routeLength(lines.map((l) => l.points)), sided, returning };
+	const nodeBoxes = boxes.filter((b) => b.node);
+	const nodeGroup = new Map(nodeBoxes.map((b) => [b.id, b.node?.group]));
+	const fittedBoxes = boxes.map((b) => {
+		if (!b.group) return b;
+		const members = nodeBoxes.filter((m) => m.node?.group === b.id);
+		const contained = lines
+			.filter((l) => nodeGroup.get(l.from) === b.id && nodeGroup.get(l.to) === b.id)
+			.map((l) => ({
+				points: l.points,
+				labelBox: l.shown && l.labelWidth > 0 ? { x: l.at.x - l.labelWidth / 2, y: l.at.y - 10.5, width: l.labelWidth, height: 21 } : undefined,
+			}));
+		const next = fitRegionBounds(members, contained, { minWidth: (b.pillWidth ?? 90) + 20, floor: b });
+		return next ? { ...b, ...next } : b;
+	});
+	const maxX = fittedBoxes.reduce((m, b) => Math.max(m, b.x + b.width), result.width);
+	const maxY = fittedBoxes.reduce((m, b) => Math.max(m, b.y + b.height), result.height);
+	return { layout: { boxes: fittedBoxes, lines, width: maxX, height: maxY }, crossings: crossings(lines.map((l) => l.basePoints)), length: routeLength(lines.map((l) => l.basePoints)), sided, returning };
 }
 
-/** A way out as it is drawn: its corners rounded, so that it reads as one line through each turn. */
-const pathOf = (points: Point[]) => roundedPath(points, 10);
+function labelObstaclesOf(boxes: readonly Box[]): LabelObstacle[] {
+	const out: LabelObstacle[] = [];
+	for (const b of boxes) {
+		if (b.node) {
+			out.push({ x: b.x, y: b.y, width: b.width, height: b.height, shape: b.node.kind === "decision" ? "diamond" : "rect" });
+		} else if (b.group) {
+			// Stage header pill + top border band so branch labels stay cleanly above stage titles.
+			out.push({ x: b.x + 6, y: b.y - 2, width: (b.pillWidth ?? Math.min(b.width - 12, 160)) + 8, height: 34, shape: "rect" });
+		}
+	}
+	return out;
+}
 
-/** The glyph of a node's mark, drawn about its centre: a tick, a bang, a triangle and so on, so state does not rest on colour. */
+function placeMidpoint(points: readonly Point[], labelAt: Point | null, labelWidth: number): Point {
+	let mid = edgeMidpoint(points);
+	if (labelAt && Math.hypot(mid.x - labelAt.x, mid.y - labelAt.y) < Math.max(30, labelWidth / 2 + 12)) {
+		let bestPt = mid;
+		let bestDist = -1;
+		for (let i = 1; i < points.length; i++) {
+			const a = points[i - 1]!;
+			const b = points[i]!;
+			const segMid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+			const dist = Math.hypot(segMid.x - labelAt.x, segMid.y - labelAt.y);
+			if (dist > bestDist) {
+				bestDist = dist;
+				bestPt = segMid;
+			}
+		}
+		mid = bestDist >= 22 ? bestPt : { x: labelAt.x + labelWidth / 2 + 16, y: labelAt.y };
+	}
+	return mid;
+}
+
+const pathOf = (points: Point[]) => roundedPath(points, 12);
+
+/** Smooth cubic Bezier path for live wire-dragging preview. */
+function bezierWire(a: Point, b: Point, dir: LayoutDirection): string {
+	const dx = b.x - a.x;
+	const dy = b.y - a.y;
+	if (dir === "RIGHT") {
+		const c = Math.max(36, Math.abs(dx) * 0.45);
+		return `M${a.x},${a.y} C${a.x + c},${a.y} ${b.x - c},${b.y} ${b.x},${b.y}`;
+	}
+	const c = Math.max(36, Math.abs(dy) * 0.45);
+	return `M${a.x},${a.y} C${a.x},${a.y + c} ${b.x},${b.y - c} ${b.x},${b.y}`;
+}
+
+/** Distance from point P to line segment AB (used for drag-over-edge hit testing). */
+function distToSegment(p: Point, a: Point, b: Point): number {
+	const vx = b.x - a.x;
+	const vy = b.y - a.y;
+	const lenSq = vx * vx + vy * vy;
+	if (lenSq === 0) return Math.hypot(p.x - a.x, p.y - a.y);
+	const t = Math.max(0, Math.min(1, ((p.x - a.x) * vx + (p.y - a.y) * vy) / lenSq));
+	return Math.hypot(p.x - (a.x + t * vx), p.y - (a.y + t * vy));
+}
+
 const MARK_PATHS: Record<Mark, string> = {
 	passed: "M-3.4,0.2 L-1,2.6 L3.4,-2.4",
 	stuck: "M0,-3.6 L0,0.8 M0,3.5 L0,3.6",
@@ -143,7 +359,6 @@ const MARK_PATHS: Record<Mark, string> = {
 	gone: "M-2.8,-2.8 L2.8,2.8 M2.8,-2.8 L-2.8,2.8",
 };
 
-/** A control someone is typing in, outside the code editor: the chart does not take the keys from it. */
 function typingElsewhere() {
 	const el = document.activeElement;
 	return el instanceof HTMLElement && !el.closest(".monaco-editor") && el.matches("input, textarea, select, [contenteditable]:not([contenteditable='false'])");
@@ -154,90 +369,115 @@ export function PlanView(props: { path: string; group: number }) {
 	const [text, setTextSignal] = createSignal(doc()?.model.getValue() ?? "");
 	const parsed = createMemo(() => parsePlan(text()));
 	const plan = () => parsed().plan;
-	const [layout, setLayout] = createSignal<Layout | null>(null);
+	const [baseLayout, setBaseLayout] = createSignal<Layout | null>(null);
 	const [view, setView] = createSignal({ x: 20, y: 20, scale: 1 });
+	const [direction, setDirectionSignal] = createSignal<LayoutDirection>(recall(DIRECTION_KEY) === "RIGHT" ? "RIGHT" : "DOWN");
 	const [edge, setEdge] = createSignal<{ from: string; to: string } | null>(null);
 	const [linking, setLinking] = createSignal<string | null>(null);
-	/** A path through the chart being shown, as its nodes in order: it is lit, and the rest steps back. */
 	const [walked, setWalked] = createSignal<string[] | null>(null);
+	const [pointed, setPointed] = createSignal<string | null>(null);
+	const [keysOpen, setKeysOpen] = createSignal(false);
+	const [compact, setCompact] = createSignal(false);
+	const [tight, setTight] = createSignal(false);
+	const [panning, setPanning] = createSignal(false);
+	const [editing, setEditing] = createSignal<{ node: string } | { from: string; to: string } | null>(null);
+	// Direct authoring drag states: live node/stage dragging, rubber-band wire dragging, segment route dragging, and Palette drop targets.
+	const [nodeDrag, setNodeDrag] = createSignal<NodeDrag | null>(null);
+	const [wireDrag, setWireDrag] = createSignal<WireDrag | null>(null);
+	const [routeDrag, setRouteDrag] = createSignal<RouteDrag | null>(null);
+	const [dropNodeId, setDropNodeId] = createSignal<string | null>(null);
+	const [dropEdgeKey, setDropEdgeKey] = createSignal<string | null>(null);
+
+	const gridId = createUniqueId();
+	const keysId = createUniqueId();
+
 	const onPath = createMemo(() => {
 		const path = walked();
 		return path ? { nodes: new Set(path), ways: new Set(path.slice(1).map((to, i) => `${path[i]}>${to}`)) } : null;
 	});
-	/** The node the pointer is on: its ways in and out are lit. */
-	const [pointed, setPointed] = createSignal<string | null>(null);
-	const [keysOpen, setKeysOpen] = createSignal(false);
-	/** Too narrow for the chart and the assistant side by side. */
-	const [narrow, setNarrow] = createSignal(false);
-	/** Too narrow for every button of the bar in one row. */
-	const [compact, setCompact] = createSignal(false);
-	/** What the small text box is editing, over the chart. */
-	const [editing, setEditing] = createSignal<{ node: string } | { from: string; to: string } | null>(null);
-	const assistantId = createUniqueId();
-	const keysId = createUniqueId();
-	/** The bar's editing buttons as a menu, for a chart too narrow to show them side by side. */
-	const editItems = (): MenuItem[] => [
-		{ label: "Add step", keys: "Enter", run: () => (addNext(), refocus()) },
-		{ label: "Add branch", keys: "B", run: () => (addOther(), refocus()) },
-		{ label: "Add call…", run: () => void addCallAsk() },
-		{ label: "Step or decision", keys: "D", run: () => (toggleDecision(), refocus()) },
-		{ label: linking() ? "Stop connecting" : "Connect to another", keys: "C", run: () => (linking() ? setLinking(null) : beginLink(), refocus()) },
-		"separator",
-		{ label: "Delete the selection", keys: "Delete", run: () => (remove(), refocus()) },
-	];
-	/** The bar's menu: what is not needed at every look. */
-	const more = (): MenuItem[] => [
-		{ label: keysOpen() ? "Hide the keys" : "Keys, and what the shapes mean", keys: "?", run: () => setKeysOpen((open) => !open) },
-		{
-			label: "Save picture…",
-			run: () => void savePicture(canvas.querySelector<SVGSVGElement>("svg.graph-canvas") ?? undefined, layout(), joinPath(relativeTo(state.workspace?.root, dirName(props.path)), pictureName(plan()?.title || "plan"))),
-			disabled: !layout(),
-			why: "The chart is not drawn yet",
-		},
-	];
+
+	const setDirection = (next: LayoutDirection) => {
+		if (next === direction()) return;
+		setDirectionSignal(next);
+		remember(DIRECTION_KEY, next);
+		fitted = false;
+	};
+	const toggleDirection = () => setDirection(direction() === "DOWN" ? "RIGHT" : "DOWN");
+
 	let canvas!: HTMLDivElement;
 	let nodeProbe: SVGTextElement | undefined;
 	let labelProbe: SVGTextElement | undefined;
+	let stageProbe: SVGTextElement | undefined;
 	let fitted = false;
-	/** The view as the last fit left it: while it is still that, a change of the chart's size fits it again. */
 	let fittedView: { x: number; y: number; scale: number } | null = null;
-	/** Whether that fit was of the whole chart, however small, and not of as much as stays legible. */
 	let fittedWhole = false;
 	let seen = 0;
+
 	const measure = {
 		node: probeMeasure(() => nodeProbe, canvasMeasure(`${NODE_FONT_PX}px system-ui, sans-serif`, NODE_FONT_PX)),
 		label: probeMeasure(() => labelProbe, canvasMeasure(`${LABEL_FONT_PX}px system-ui, sans-serif`, LABEL_FONT_PX)),
+		stage: probeMeasure(() => stageProbe, canvasMeasure(`600 12px system-ui, sans-serif`, 12)),
 	};
 
-	// With no choice made, the assistant shows where there is room for it and the chart both.
-	const assistantOpen = () => assistantChoice() ?? !narrow();
-	const toggleAssistant = () => {
-		const next = !assistantOpen();
-		setAssistantChoice(next);
-		remember(ASSISTANT_KEY, next ? "open" : "closed");
+	/** Converts viewport client coordinates into SVG canvas coordinates. */
+	const clientToCanvas = (clientX: number, clientY: number): Point => {
+		const rect = canvas.getBoundingClientRect();
+		const v = view();
+		return { x: (clientX - rect.left - v.x) / v.scale, y: (clientY - rect.top - v.y) / v.scale };
 	};
-	const watchWidth = (el: HTMLDivElement) => {
+
+	const hitNodeAt = (pt: Point, excludeId?: string): string | null => {
+		const l = layout();
+		if (!l) return null;
+		for (const b of l.boxes) {
+			if (!b.node || b.id === excludeId) continue;
+			if (pt.x >= b.x - 6 && pt.x <= b.x + b.width + 6 && pt.y >= b.y - 6 && pt.y <= b.y + b.height + 6) return b.id;
+		}
+		return null;
+	};
+
+	const hitEdgeAt = (pt: Point): Line | null => {
+		const l = layout();
+		if (!l) return null;
+		let best: Line | null = null;
+		let bestDist = 18;
+		for (const line of l.lines) {
+			for (let i = 1; i < line.points.length; i++) {
+				const d = distToSegment(pt, line.points[i - 1]!, line.points[i]!);
+				if (d < bestDist) {
+					bestDist = d;
+					best = line;
+				}
+			}
+		}
+		return best;
+	};
+
+	const watchCanvas = (el: HTMLDivElement) => {
 		if (typeof ResizeObserver === "undefined") return;
-		// What follows from the width changes the bar's height, and so this element's: it waits for
-		// the next frame, where the browser does not count it against the one being laid out.
 		let frame = 0;
 		const observer = new ResizeObserver((entries) => {
-			const width = entries[0]?.contentRect.width ?? Infinity;
+			const rect = entries[0]?.contentRect;
+			const width = rect?.width ?? 0;
+			const height = rect?.height ?? 0;
 			cancelAnimationFrame(frame);
 			frame = requestAnimationFrame(() => {
-				setNarrow(width < ASSIST_WIDTH + MIN_CHART_WIDTH);
-				setCompact(width < BAR_FITS_FROM);
-				// A chart nobody has moved since it was fitted stays fitted when the window or a panel changes its room.
-				if (view() === fittedView) queueMicrotask(fittedWhole ? whole : fit);
+				setCompact(width > 0 && width < 540);
+				setTight(width > 0 && width < 360);
+				if (width > 10 && height > 10) {
+					if (!fitted && layout()) {
+						if (fit()) fitted = true;
+					} else if (view() === fittedView) {
+						queueMicrotask(() => void (fittedWhole ? whole() : fit()));
+					}
+				}
 			});
 		});
 		observer.observe(el);
 		onCleanup(() => (cancelAnimationFrame(frame), observer.disconnect()));
 	};
 
-	/** The keys go to the chart, unless the words of a node are being edited. */
 	const refocus = () => queueMicrotask(() => !editing() && canvas?.focus());
-	/** After a toolbar button: a click hands the keys back to the chart; a button pressed from the keyboard keeps its focus. */
 	const after = (e: MouseEvent) => {
 		if (e.detail > 0) refocus();
 	};
@@ -247,34 +487,159 @@ export function PlanView(props: { path: string; group: number }) {
 		if (!model) return;
 		const sub = model.onDidChangeContent(() => setTextSignal(model.getValue()));
 		onCleanup(() => sub.dispose());
-		// A file may have gone or changed on disk while this was not showing.
 		recheckPlan(model.uri.toString());
-		// A plan opens ready for the keyboard, as a script does, but not out from under someone typing or a dialog, and
-		// not when it is only brought to the front for a look: the keyboard stays on the row that was clicked, where
-		// Delete and the arrows are the list's and not the chart's. Asked now: it is no longer said a moment later.
 		const look = openedForALook(props.path);
 		queueMicrotask(() => !look && !typingElsewhere() && !document.querySelector(".overlay") && canvas?.focus());
 	});
 
+	// Re-run ELK only when chart topology, text, labels, groups, suggestions, or direction change — NOT on manual drag offsets.
+	const topologyKey = createMemo(() => {
+		const p = plan();
+		if (!p) return "";
+		const suggestions = assistOf(props.path).suggestions;
+		const preview = previewPlan(p, suggestions);
+		return JSON.stringify({
+			dir: direction(),
+			g: preview.groups.map((g) => [g.id, g.name]),
+			n: preview.nodes.map((n) => [n.id, n.kind, n.text, n.group ?? "", Boolean(n.pending)]),
+			e: preview.edges.map((e) => [e.from, e.to, e.label ?? "", Boolean(e.pending), Boolean(e.removing)]),
+		});
+	});
+
 	let layoutRun = 0;
 	createEffect(
-		on([parsed, () => assistOf(props.path).suggestions] as const, async ([result, suggestions]) => {
-			if (!result.plan) return;
+		on(topologyKey, async (key) => {
+			const p = plan();
+			if (!key || !p) return;
+			const suggestions = assistOf(props.path).suggestions;
+			const dir = direction();
 			const run = ++layoutRun;
 			try {
-				// What the agent proposes is drawn, marked, until you accept or decline it.
-				const next = await layoutPlan(previewPlan(result.plan, suggestions), measure);
+				const next = await layoutPlan(previewPlan(p, suggestions), measure, dir);
 				if (run !== layoutRun) return;
-				setLayout(next);
-				// New suggestions can grow the chart past the view.
-				if (!fitted || suggestions.length !== seen) fit();
-				fitted = true;
+				setBaseLayout(next);
+				if (!fitted || suggestions.length !== seen) {
+					if (fit()) fitted = true;
+				}
 				seen = suggestions.length;
 			} catch (e: any) {
 				notify(`Could not lay out the chart: ${e?.message ?? e}`, "error");
 			}
 		}),
 	);
+
+	// Pure synchronous 60fps layout projection: overlays saved + live node/stage/wire offsets onto ELK's base layout.
+	const layout = createMemo<Layout | null>(() => {
+		const base = baseLayout();
+		if (!base) return null;
+		const p = plan();
+		const dir = direction();
+		const drag = nodeDrag();
+		const rDrag = routeDrag();
+		const suggestions = assistOf(props.path).suggestions;
+		const livePlan = p ? previewPlan(p, suggestions) : null;
+		const nodeMap = new Map((livePlan?.nodes ?? []).map((n) => [n.id, n]));
+		const groupMap = new Map((livePlan?.groups ?? []).map((g) => [g.id, g]));
+		const edgeMap = new Map((livePlan?.edges ?? []).map((e) => [`${e.from}>${e.to}`, e]));
+
+		const groupDeltaOf = (gid: string | undefined): Point => {
+			if (!gid) return { x: 0, y: 0 };
+			if (drag?.kind === "group" && drag.id === gid && drag.moved) return drag.curOffset;
+			return offsetFor(groupMap.get(gid)?.offset, dir);
+		};
+		const nodeOwnDeltaOf = (nid: string): Point => {
+			if (drag?.kind === "node" && drag.id === nid && drag.moved) return drag.curOffset;
+			return offsetFor(nodeMap.get(nid)?.offset, dir);
+		};
+
+		const nodeBoxes = new Map<string, Box>();
+		const nodeDeltas = new Map<string, Point>();
+		const shiftedNodes: Box[] = [];
+		for (const b of base.boxes) {
+			if (!b.node) continue;
+			const fresh = nodeMap.get(b.id) ?? b.node;
+			const gd = groupDeltaOf(fresh.group);
+			const nd = nodeOwnDeltaOf(b.id);
+			const delta = { x: gd.x + nd.x, y: gd.y + nd.y };
+			const shifted: Box = { ...b, node: fresh, x: b.x + delta.x, y: b.y + delta.y };
+			nodeBoxes.set(b.id, shifted);
+			nodeDeltas.set(b.id, delta);
+			shiftedNodes.push(shifted);
+		}
+
+		const nodeGroup = new Map(shiftedNodes.map((b) => [b.id, b.node?.group]));
+		const routed = base.lines.map((line) => {
+			const key = `${line.from}>${line.to}`;
+			const fromBox = nodeBoxes.get(line.from);
+			const toBox = nodeBoxes.get(line.to);
+			const fromDelta = nodeDeltas.get(line.from) ?? { x: 0, y: 0 };
+			const toDelta = nodeDeltas.get(line.to) ?? { x: 0, y: 0 };
+			const routedBase =
+				fromBox && toBox && fromBox.node && toBox.node
+					? rerouteMovedEdge(line.basePoints, fromBox, toBox, fromDelta, toDelta, fromBox.node.kind, toBox.node.kind, dir, line.back)
+					: line.basePoints;
+			const savedRoute = edgeMap.get(key)?.route;
+			const draggingThis = rDrag && rDrag.from === line.from && rDrag.to === line.to ? rDrag : null;
+			const effectiveRoute = draggingThis ? { ...(savedRoute ?? {}), [draggingThis.key]: draggingThis.curDelta } : savedRoute;
+			const points = applyRouteOffsets(routedBase, effectiveRoute);
+			const hasCustomRoute = Boolean(draggingThis) || Boolean(effectiveRoute && Object.keys(effectiveRoute).length > 0);
+			const moved = fromDelta.x !== 0 || fromDelta.y !== 0 || toDelta.x !== 0 || toDelta.y !== 0 || hasCustomRoute;
+			return { key, line, routedBase, savedRoute, points, hasCustomRoute, moved };
+		});
+
+		// Stage containers always enclose all member nodes, contained lines (both endpoints inside), and their labels with REGION_PADDING.
+		const fitGroups = (labelByKey?: Map<string, Rect>): Box[] => {
+			const out: Box[] = [];
+			for (const g of base.boxes) {
+				if (!g.group) continue;
+				const members = shiftedNodes.filter((n) => n.node?.group === g.id);
+				const gd = groupDeltaOf(g.id);
+				const anyMemberMoved = members.some((m) => {
+					const nd = nodeOwnDeltaOf(m.id);
+					return nd.x !== 0 || nd.y !== 0;
+				});
+				const contained = routed.filter((r) => nodeGroup.get(r.line.from) === g.id && nodeGroup.get(r.line.to) === g.id);
+				const anyContainedRouteCustom = contained.some((r) => r.hasCustomRoute);
+				const floor = !anyMemberMoved && !anyContainedRouteCustom ? { x: g.x + gd.x, y: g.y + gd.y, width: g.width, height: g.height } : undefined;
+				const next = fitRegionBounds(
+					members,
+					contained.map((r) => ({ points: r.points, labelBox: labelByKey?.get(r.key) })),
+					{ minWidth: (g.pillWidth ?? 90) + 20, floor },
+				);
+				out.push(next ? { ...g, ...next } : { ...g, x: g.x + gd.x, y: g.y + gd.y });
+			}
+			return out;
+		};
+
+		const prelimGroups = fitGroups();
+		const obstacles = labelObstaclesOf([...prelimGroups, ...shiftedNodes]);
+		const placedLabels: Rect[] = [];
+		const labelByKey = new Map<string, Rect>();
+		const lines: Line[] = routed.map(({ key, line, routedBase, savedRoute, points, moved }) => {
+			const at = moved ? (line.shown ? placeEdgeLabel(points, line.labelWidth, obstacles, placedLabels) : labelPoint(points, 0)) : line.at;
+			if (line.shown && line.labelWidth > 0) {
+				const rect: Rect = { x: at.x - line.labelWidth / 2, y: at.y - 10.5, width: line.labelWidth, height: 21 };
+				placedLabels.push(rect);
+				labelByKey.set(key, rect);
+			}
+			const mid = moved ? placeMidpoint(points, line.shown ? at : null, line.labelWidth) : line.mid;
+			return { ...line, basePoints: routedBase, points, route: savedRoute, at, mid };
+		});
+
+		const shiftedGroups = fitGroups(labelByKey);
+		const boxes = [...shiftedGroups, ...shiftedNodes];
+		const maxX = boxes.reduce((m, b) => Math.max(m, b.x + b.width), base.width);
+		const maxY = boxes.reduce((m, b) => Math.max(m, b.y + b.height), base.height);
+		return { boxes, lines, width: Math.max(base.width, maxX + 20), height: Math.max(base.height, maxY + 20) };
+	});
+
+	// Stable string keys from ELK's base layout so live 60fps dragging updates SVG attributes in place without remounting DOM nodes (which would swallow clicks/dblclicks).
+	const nodeIds = createMemo(() => (baseLayout()?.boxes.filter((b) => b.node).map((b) => b.id) ?? []));
+	const groupIds = createMemo(() => (baseLayout()?.boxes.filter((b) => b.group).map((b) => b.id) ?? []));
+	const edgeKeys = createMemo(() => (baseLayout()?.lines.map((l) => `${l.from}>${l.to}`) ?? []));
+	const labeledEdgeKeys = createMemo(() => (baseLayout()?.lines.filter((l) => l.shown).map((l) => `${l.from}>${l.to}`) ?? []));
+	const boxById = createMemo(() => new Map((layout()?.boxes ?? []).map((b) => [b.id, b])));
+	const lineByKey = createMemo(() => new Map((layout()?.lines ?? []).map((l) => [`${l.from}>${l.to}`, l])));
 
 	const selected = createMemo(() => {
 		const p = plan();
@@ -294,16 +659,18 @@ export function PlanView(props: { path: string; group: number }) {
 		moveCursor(line ?? 1);
 	};
 
-	/** The whole chart, or as much as stays legible around the selection or the start. */
-	const fit = () => {
+	/** Fits as much of the chart as stays legible; returns true if canvas had real dimensions. */
+	const fit = (): boolean => {
 		const l = layout();
-		if (!l || !canvas) return;
+		if (!l || !canvas) return false;
+		const box = canvas.getBoundingClientRect();
+		if (box.width < 10 || box.height < 10) return false;
 		const here = l.boxes.find((b) => b.node && b.id === selected()) ?? l.boxes.find((b) => b.node?.kind === "start");
-		fittedView = fitView(l, canvas.getBoundingClientRect(), { floor: FIT_FLOOR, anchor: here && { x: here.x + here.width / 2, y: here.y + here.height / 2 } });
+		fittedView = fitView(l, box, { floor: FIT_FLOOR, anchor: here && { x: here.x + here.width / 2, y: here.y + here.height / 2 } });
 		fittedWhole = false;
 		setView(fittedView);
+		return true;
 	};
-	/** Fit, and Fit again: as much as stays legible, then, where that left some out of sight, the whole chart however small. */
 	const fitOrWhole = () => {
 		const l = layout();
 		const box = canvas?.getBoundingClientRect();
@@ -313,19 +680,15 @@ export function PlanView(props: { path: string; group: number }) {
 	const whole = () => {
 		const l = layout();
 		if (!l || !canvas) return;
-		fittedView = fitView(l, canvas.getBoundingClientRect(), { floor: MIN_ZOOM });
+		const box = canvas.getBoundingClientRect();
+		if (box.width < 10 || box.height < 10) return;
+		fittedView = fitView(l, box, { floor: MIN_ZOOM });
 		fittedWhole = true;
 		setView(fittedView);
 	};
-	/** Zoomed far out: the steps' words give way to the names of the stages, drawn to be read. */
+
 	const far = () => view().scale < FAR_UNDER;
-	/** The zoom of the far chart, or 0 while the view is nearer: moving the chart changes nothing a name depends on. */
 	const farScale = createMemo(() => (far() ? view().scale : 0));
-	/**
-	 * The names of the far chart, as a map shows its names: each stage across its middle, and where
-	 * it starts and ends, all large enough to read; one that would lie over another waits for a
-	 * closer look, a stage before a step and the larger before the smaller.
-	 */
 	const farNames = createMemo(() => {
 		const scale = farScale();
 		const l = layout();
@@ -335,7 +698,6 @@ export function PlanView(props: { path: string; group: number }) {
 			l.boxes
 				.filter((b) => b.group || b.node?.kind === "start" || b.node?.kind === "end")
 				.map((b) => {
-					// A stage has a name; where the chart starts and ends has a sentence, which is cut short.
 					const words = b.group ?? shortly(b.node!.text.trim());
 					const width = measureName(words) / scale;
 					const x = Math.max(0, Math.min(b.x + b.width / 2 - width / 2, l.width - width));
@@ -345,7 +707,6 @@ export function PlanView(props: { path: string; group: number }) {
 			size * 0.3,
 		).map((name) => ({ ...name, size }));
 	});
-	/** Far out, a click goes to what is clicked: the view comes in on that stage, or that step, as large as fits and its words can be read. */
 	const comeIn = (at: Point) => {
 		const l = layout();
 		if (!l || !canvas) return false;
@@ -357,31 +718,28 @@ export function PlanView(props: { path: string; group: number }) {
 		setView({ scale, x: box.width / 2 - (to.x + to.width / 2) * scale, y: box.height / 2 - (to.y + to.height / 2) * scale });
 		return true;
 	};
-	/** Zooms about a point of the canvas: the pointer, or its middle for the keys. */
 	const zoomBy = (factor: number, at?: Point) => {
 		if (!canvas) return;
 		const box = canvas.getBoundingClientRect();
 		setView((v) => zoomAt(v, at ?? { x: box.width / 2, y: box.height / 2 }, factor, MIN_ZOOM, MAX_ZOOM));
 	};
 
-	// Keep the selection in sight, as an edit or an arrow key may land off screen.
 	createEffect(() => {
 		const id = selected();
 		const chosen = edge();
 		const l = layout();
 		if (!l || !canvas) return;
+		const size = canvas.getBoundingClientRect();
+		if (size.width < 10 || size.height < 10) return;
 		const line = chosen && l.lines.find((x) => x.from === chosen.from && x.to === chosen.to);
 		const box = line ? { x: line.at.x - 30, y: line.at.y - 12, width: 60, height: 24 } : l.boxes.find((b) => b.id === id);
 		if (!box) return;
 		const v = untrack(view);
-		const size = canvas.getBoundingClientRect();
-		// In sight, and not under the map of the chart in the corner.
 		const shown = reveal(v, box, size);
 		const next = outOfSight(l, shown, size) ? clearOf(shown, box, mapArea(l, size)) : shown;
 		if (next !== v) setView(next);
 	});
 
-	/** A step asked for by its words: it is selected, and put in the middle of the view, where what leads to it and from it shows too. */
 	const goTo = (id: string) => {
 		select(id);
 		const box = layout()?.boxes.find((b) => b.id === id);
@@ -389,13 +747,11 @@ export function PlanView(props: { path: string; group: number }) {
 		refocus();
 	};
 
-	/** Findings on each node, from what Problems shows, so the two cannot disagree. */
 	const issues = createMemo(() => {
 		const map = new Map<string, string[]>();
 		const p = plan();
 		const uri = doc()?.model.uri.toString();
 		if (!p || !uri) return map;
-		// Notes (a call the chart does not show) are for Problems and the assistant, not a badge.
 		for (const d of (diagnostics[uri] ?? []).filter((x) => x.severity <= 2)) {
 			const id = nodeAtLine(text(), p, d.line);
 			if (id) map.set(id, [...(map.get(id) ?? []), d.message]);
@@ -425,11 +781,12 @@ export function PlanView(props: { path: string; group: number }) {
 	};
 	const openCode = (id: string | null | undefined) => {
 		const unit = linksOf(id)[0];
-		if (unit) void openProcedure(planUri(), unit);
-		else if (id) notify("Nothing is built for this step yet.");
+		if (unit) return void openProcedure(planUri(), unit);
+		const ref = id ? plan()?.nodes.find((n) => n.id === id)?.ref?.trim() : "";
+		if (ref) return void openReference(ref);
+		if (id) notify("No code is linked to this step yet.");
 	};
 	const findingCount = () => diagnostics[doc()?.model.uri.toString() ?? ""]?.length ?? 0;
-	/** What is so of a node beyond its words: for its mark, its name and the announcement. */
 	const stateOf = (n: PlanNode): NodeState => ({
 		unit: unitStatuses().get(n.id),
 		changed: changed().has(n.id),
@@ -438,16 +795,16 @@ export function PlanView(props: { path: string; group: number }) {
 		built: linksOf(n.id).length > 0,
 		findings: issues().get(n.id)?.length,
 	});
-	/** Read out when the selection, or what is so of it, changes. */
 	const announcement = createMemo(() => {
 		const p = plan();
 		if (!p) return "";
 		const chosen = edge();
-		// An undo may have taken the chosen edge away.
 		if (chosen && p.edges.some((e) => e.from === chosen.from && e.to === chosen.to)) return describeEdge(p, chosen);
 		const node = selectedNode();
 		return node ? describeNode(node, stateOf(node)) : "";
 	});
+
+	// --- Plan Mutations (each is one undoable text edit on doc.model) ---------
 
 	const apply = (next: Plan, selectId?: string | null) => {
 		applyText(props.path, printPlan(next));
@@ -459,43 +816,70 @@ export function PlanView(props: { path: string; group: number }) {
 		if (edit && result.select) setEditing({ node: result.select });
 	};
 
-	const addNext = () => {
+	const addNextFrom = (id?: string | null, kind: NodeKind = "step", label?: string, ref?: string) => {
 		const p = plan();
-		const at = selected() ?? p?.nodes.find((n) => n.kind === "start")?.id;
+		const at = id ?? selected() ?? p?.nodes.find((n) => n.kind === "start")?.id;
 		if (!p) return;
 		if (!at) return notify("Select a node to add after it.");
-		applyEdit(addAfter(p, at), true);
+		const defaultText = label ?? (kind === "decision" ? "Decision?" : kind === "call" ? (ref || "Call procedure") : "New step");
+		applyEdit(addAfter(p, at, kind, defaultText, ref), true);
 	};
-	const addDecisionNode = () => {
+	const addNext = () => addNextFrom(selected(), "step");
+	const addDecisionNode = () => addNextFrom(selected(), "decision", "Decision?");
+	const addBranchFrom = (id?: string | null) => {
 		const p = plan();
-		const at = selected() ?? p?.nodes.find((n) => n.kind === "start")?.id;
-		if (!p || !at) return notify("Select a step to add a decision after it.");
-		const added = addAfter(p, at);
-		if (!added?.select) return;
-		const asDecision = setDecision(added.plan, added.select, true);
-		apply(asDecision, added.select);
-		setEditing({ node: added.select });
+		const at = id ?? selected() ?? p?.nodes.find((n) => n.kind === "decision" || n.kind === "step" || n.kind === "call")?.id;
+		if (!p || !at) return notify("Select a step or decision to branch from.");
+		const node = p.nodes.find((n) => n.id === at);
+		const prepared = node?.kind === "call" ? setKind(p, at, "step") : p;
+		const result = addBranch(prepared, at);
+		if (!result) return notify("Only a step or a decision can branch.");
+		applyEdit(result, true);
 	};
-	const addStageGroupAsk = async () => {
+	const insertBetween = (from: string, to: string, kind: NodeKind = "step", label?: string, ref?: string) => {
 		const p = plan();
-		const at = selected();
+		if (!p) return;
+		const defaultText = label ?? (kind === "decision" ? "Decision?" : kind === "call" ? (ref || "Call procedure") : "New step");
+		const res = insertOnEdge(p, from, to, kind, defaultText, ref);
+		if (res) {
+			setEdge(null);
+			applyEdit(res, true);
+		}
+	};
+	const toggleDecision = (id?: string) => {
+		const p = plan();
+		const target = id ? p?.nodes.find((n) => n.id === id) : selectedNode();
+		if (!p || !target) return;
+		if (target.kind === "decision") apply(setDecision(p, target.id, false), target.id);
+		else if (target.kind === "step" || target.kind === "call") apply(setKind(p, target.id, "decision"), target.id);
+	};
+	const changeKind = (id: string, kind: NodeKind) => {
+		const p = plan();
+		if (p) apply(setKind(p, id, kind), id);
+	};
+	const duplicateById = (id?: string | null) => {
+		const p = plan();
+		const target = id ?? selected();
+		if (!p || !target) return;
+		const res = duplicateNode(p, target);
+		if (res) applyEdit(res, false);
+		else notify("Start and End nodes cannot be duplicated.");
+	};
+	const addStageGroupAsk = async (id?: string | null) => {
+		const p = plan();
+		const at = id ?? selected();
 		if (!p || !at) return notify("Select a step to place into a stage group.");
 		const name = (await ask("Stage group name (e.g. Validation, Approval)"))?.trim();
 		if (name) apply(setGroup(p, at, name), at);
 		refocus();
 	};
-	const addOther = () => {
+	const renameStageAsk = async (groupId: string) => {
 		const p = plan();
-		const at = selected() ?? p?.nodes.find((n) => n.kind === "decision" || n.kind === "step")?.id;
-		if (!p || !at) return notify("Select a step or decision to branch from.");
-		const result = addBranch(p, at);
-		if (!result) return notify("Only a step or a decision can branch.");
-		applyEdit(result, true);
-	};
-	const toggleDecision = () => {
-		const p = plan();
-		const node = selectedNode();
-		if (p && node && (node.kind === "step" || node.kind === "decision")) apply(setDecision(p, node.id, node.kind === "step"));
+		const g = p?.groups.find((x) => x.id === groupId);
+		if (!p || !g) return;
+		const next = await ask("Rename stage (leave empty to ungroup)", g.name);
+		if (next !== null && next.trim() !== g.name) apply(renameGroup(p, groupId, next));
+		refocus();
 	};
 	const remove = () => {
 		const p = plan();
@@ -508,22 +892,84 @@ export function PlanView(props: { path: string; group: number }) {
 		const at = selected();
 		if (at) applyEdit(removeNode(p, at));
 	};
-	const addCallAsk = async (e?: MouseEvent) => {
+	const reverseSelectedEdge = (target?: { from: string; to: string }) => {
+		const p = plan();
+		const e = target ?? edge();
+		if (!p || !e) return;
+		apply(reverseEdge(p, e.from, e.to));
+		setEdge({ from: e.to, to: e.from });
+	};
+	const resetEdgeRoute = (target?: { from: string; to: string }, onlyKey?: string) => {
+		const p = plan();
+		const e = target ?? edge();
+		if (!p || !e) return;
+		if (onlyKey) {
+			const cur = p.edges.find((x) => x.from === e.from && x.to === e.to)?.route;
+			if (!cur || cur[onlyKey] === undefined) return;
+			const next = { ...cur };
+			delete next[onlyKey];
+			apply(setEdgeRoute(p, e.from, e.to, next));
+		} else {
+			apply(setEdgeRoute(p, e.from, e.to, null));
+		}
+		setEdge({ from: e.from, to: e.to });
+	};
+	const nudgeEdgeRoute = (axis: "h" | "v", delta: number) => {
+		const p = plan();
+		const e = edge();
+		const l = layout();
+		if (!p || !e || !l) return;
+		const line = l.lines.find((x) => x.from === e.from && x.to === e.to);
+		if (!line) return;
+		const handles = edgeHandles(line.basePoints, line.points, line.route, line.shown ? [line.at, line.mid] : [line.mid]);
+		const target = handles.find((h) => h.axis === axis);
+		if (!target) return;
+		const next = { ...(line.route ?? {}), [target.key]: (line.route?.[target.key] ?? 0) + delta };
+		apply(setEdgeRoute(p, e.from, e.to, next));
+		setEdge({ from: e.from, to: e.to });
+	};
+	const resetNodePos = (id?: string | null) => {
+		const p = plan();
+		const target = id ?? selected();
+		if (!p || !target) return;
+		apply(setNodeOffset(p, target, null), target);
+	};
+	const resetGroupPos = (groupId: string) => {
+		const p = plan();
+		if (!p) return;
+		let next = setGroupOffset(p, groupId, null);
+		for (const n of p.nodes) if (n.group === groupId && n.offset) next = setNodeOffset(next, n.id, null);
+		apply(next);
+	};
+	const resetAllLayout = () => {
+		const p = plan();
+		if (!p) return;
+		apply(resetPlanLayout(p));
+		refocus();
+	};
+	const nudgeNode = (dx: number, dy: number) => {
+		const p = plan();
+		const target = selectedNode();
+		if (!p || !target) return;
+		const dir = direction();
+		const cur = offsetFor(target.offset, dir);
+		const nextOffset: PlanOffset = { x: cur.x + dx, y: cur.y + dy, ...(dir === "RIGHT" ? { dir: "RIGHT" } : {}) };
+		apply(setNodeOffset(p, target.id, nextOffset), target.id);
+	};
+	const addCallAsk = async (afterId?: string | null, e?: MouseEvent) => {
 		const p = plan();
 		if (!p) return;
 		const button = !e || e.detail > 0 ? null : (e.currentTarget as HTMLElement);
 		const ref = (await ask("Procedure, script or data source this calls"))?.trim();
-		if (ref) applyEdit(addCall(p, ref, selected() ?? undefined));
-		// The dialog took the focus: it goes back to where it came from.
+		if (ref) applyEdit(addCall(p, ref, afterId ?? selected() ?? undefined));
 		if (button?.isConnected) button.focus();
 		else refocus();
 	};
-	const beginLink = () => {
-		const at = selected();
+	const beginLink = (fromId?: string | null) => {
+		const at = fromId ?? selected();
 		if (at) setLinking(at);
 		else notify("Select the node the connection starts from.");
 	};
-	/** Ends a connection at a node, and selects the new way out, ready for F2 or Delete. */
 	const linkTo = (id: string | null | undefined) => {
 		const from = linking();
 		const p = plan();
@@ -533,7 +979,6 @@ export function PlanView(props: { path: string; group: number }) {
 		apply(connect(p, from, id), from);
 		setEdge({ from, to: id });
 	};
-	/** The next way out of the selected node: the keyboard's way to an edge. */
 	const nextEdge = (step: 1 | -1) => {
 		const p = plan();
 		const at = selected();
@@ -547,9 +992,13 @@ export function PlanView(props: { path: string; group: number }) {
 		if (chosen) setEditing(chosen);
 		else if (selected()) setEditing({ node: selected()! });
 	};
-	const undo = (action: "undo" | "redo") => editors[props.group]?.trigger("plan", action, null);
+	const undo = (action: "undo" | "redo") => {
+		const model = doc()?.model;
+		if (!model) return;
+		if (action === "undo") model.undo();
+		else model.redo();
+	};
 
-	/** The nearest node in a direction, for the arrow keys. */
 	const step = (dx: number, dy: number) => {
 		const l = layout();
 		if (!l) return;
@@ -560,7 +1009,6 @@ export function PlanView(props: { path: string; group: number }) {
 		if (best) select(best.id);
 	};
 
-	// Tab is not here: it moves on to the next control, as it does everywhere else.
 	const onKey = (e: KeyboardEvent) => {
 		if (editing() || e.target !== canvas) return;
 		const mod = e.ctrlKey || e.metaKey;
@@ -574,15 +1022,36 @@ export function PlanView(props: { path: string; group: number }) {
 			return undo("redo");
 		}
 		if (mod || e.altKey) return;
+		if (e.shiftKey && (key === "ArrowUp" || key === "ArrowDown" || key === "ArrowLeft" || key === "ArrowRight")) {
+			if (edge()) {
+				e.preventDefault();
+				const stepPx = 12;
+				if (key === "ArrowUp") nudgeEdgeRoute("h", -stepPx);
+				else if (key === "ArrowDown") nudgeEdgeRoute("h", stepPx);
+				else if (key === "ArrowLeft") nudgeEdgeRoute("v", -stepPx);
+				else nudgeEdgeRoute("v", stepPx);
+				return;
+			}
+			if (selected()) {
+				e.preventDefault();
+				const stepPx = 12;
+				if (key === "ArrowUp") nudgeNode(0, -stepPx);
+				else if (key === "ArrowDown") nudgeNode(0, stepPx);
+				else if (key === "ArrowLeft") nudgeNode(-stepPx, 0);
+				else nudgeNode(stepPx, 0);
+				return;
+			}
+		}
 		const actions: Record<string, () => void> = {
 			Enter: () => (linking() ? linkTo(selected()) : addNext()),
-			b: addOther,
+			b: () => addBranchFrom(selected()),
 			F2: editSelection,
 			Delete: remove,
 			Backspace: remove,
-			d: toggleDecision,
-			c: beginLink,
+			d: () => toggleDecision(),
+			c: () => beginLink(),
 			e: () => nextEdge(e.shiftKey ? -1 : 1),
+			r: () => (edge() ? resetEdgeRoute() : selected() ? resetNodePos() : undefined),
 			g: () => openCode(selected()),
 			"+": () => zoomBy(1.2),
 			"=": () => zoomBy(1.2),
@@ -590,8 +1059,15 @@ export function PlanView(props: { path: string; group: number }) {
 			"0": fitOrWhole,
 			"?": () => setKeysOpen((open) => !open),
 			Escape: () => {
+				if (cancelActiveDrag) {
+					cancelActiveDrag();
+					return;
+				}
 				if (keysOpen()) setKeysOpen(false);
 				else if (linking()) setLinking(null);
+				else if (wireDrag()) setWireDrag(null);
+				else if (routeDrag()) setRouteDrag(null);
+				else if (nodeDrag()) setNodeDrag(null);
 				else if (edge()) setEdge(null);
 				else select(null);
 			},
@@ -613,7 +1089,381 @@ export function PlanView(props: { path: string; group: number }) {
 		refocus();
 	};
 
-	// The small text box over the chart.
+	// --- Direct Port Click / Rubber-Band Wire / Node / Stage Dragging --------
+	// All drags stay local until the pointer crosses a small movement threshold so
+	// plain clicks and double-clicks never trigger reactive drag churn, and every
+	// active drag cleans up reliably on mouseup, buttons===0, window blur, Esc, or unmount.
+
+	let cancelActiveDrag: (() => void) | null = null;
+	onCleanup(() => cancelActiveDrag?.());
+
+	const startPortDrag = (e: MouseEvent, fromId: string, startCanvas: Point, kind: "primary" | "branch") => {
+		if (e.button !== 0) return;
+		e.preventDefault();
+		e.stopPropagation();
+		cancelActiveDrag?.();
+		let cur: WireDrag = {
+			fromId,
+			startClient: { x: e.clientX, y: e.clientY },
+			startCanvas,
+			curCanvas: startCanvas,
+			dragged: false,
+			kind,
+		};
+
+		const cleanup = () => {
+			window.removeEventListener("mousemove", onMove, true);
+			window.removeEventListener("mouseup", onUp, true);
+			window.removeEventListener("blur", onCancel);
+			if (cancelActiveDrag === onCancel) cancelActiveDrag = null;
+		};
+		const onCancel = () => {
+			cleanup();
+			setWireDrag(null);
+			setDropNodeId(null);
+		};
+		const onMove = (ev: MouseEvent) => {
+			if (ev.buttons === 0) return onUp(ev);
+			const moved = cur.dragged || Math.hypot(ev.clientX - cur.startClient.x, ev.clientY - cur.startClient.y) > 5;
+			if (!moved) return;
+			const pt = clientToCanvas(ev.clientX, ev.clientY);
+			cur = { ...cur, curCanvas: pt, dragged: true };
+			setWireDrag(cur);
+			setDropNodeId(hitNodeAt(pt, cur.fromId));
+		};
+		const onUp = (ev: MouseEvent) => {
+			cleanup();
+			setWireDrag(null);
+			setDropNodeId(null);
+			if (cur.dragged) {
+				const target = hitNodeAt(clientToCanvas(ev.clientX, ev.clientY), cur.fromId);
+				const p = plan();
+				if (target && p) {
+					apply(connect(p, cur.fromId, target), cur.fromId);
+					setEdge({ from: cur.fromId, to: target });
+				}
+			} else {
+				// Clean single click on '+' port -> quick-add next step or branch!
+				if (cur.kind === "branch") addBranchFrom(cur.fromId);
+				else addNextFrom(cur.fromId, "step");
+			}
+			refocus();
+		};
+		cancelActiveDrag = onCancel;
+		window.addEventListener("mousemove", onMove, true);
+		window.addEventListener("mouseup", onUp, true);
+		window.addEventListener("blur", onCancel);
+	};
+
+	const startRouteDrag = (e: MouseEvent, line: Line, handle: EdgeHandle) => {
+		if (e.button !== 0) return;
+		e.preventDefault();
+		e.stopPropagation();
+		cancelActiveDrag?.();
+		select(null);
+		setEdge({ from: line.from, to: line.to });
+		const startDelta = line.route?.[handle.key] ?? 0;
+		let cur: RouteDrag = {
+			from: line.from,
+			to: line.to,
+			key: handle.key,
+			axis: handle.axis,
+			startClient: { x: e.clientX, y: e.clientY },
+			startDelta,
+			curDelta: startDelta,
+			moved: false,
+		};
+
+		const cleanup = () => {
+			window.removeEventListener("mousemove", onMove, true);
+			window.removeEventListener("mouseup", onUp, true);
+			window.removeEventListener("blur", onCancel);
+			if (cancelActiveDrag === onCancel) cancelActiveDrag = null;
+		};
+		const onCancel = () => {
+			cleanup();
+			setRouteDrag(null);
+		};
+		const onMove = (ev: MouseEvent) => {
+			if (ev.buttons === 0) return onUp();
+			const scale = view().scale || 1;
+			const rawShift = cur.axis === "h" ? (ev.clientY - cur.startClient.y) / scale : (ev.clientX - cur.startClient.x) / scale;
+			const moved = cur.moved || Math.abs(rawShift) > 2;
+			if (!moved) return;
+			const rawNext = cur.startDelta + rawShift;
+			const snapped = ev.altKey ? Math.round(rawNext) : Math.round(rawNext / 4) * 4;
+			const curDelta = Math.abs(snapped) <= 3 ? 0 : snapped;
+			cur = { ...cur, curDelta, moved: true };
+			setRouteDrag(cur);
+		};
+		const onUp = () => {
+			cleanup();
+			setRouteDrag(null);
+			if (!cur.moved) return refocus();
+			const p = plan();
+			if (!p) return;
+			const existing = p.edges.find((x) => x.from === cur.from && x.to === cur.to)?.route ?? {};
+			const next: RouteOffsets = { ...existing, [cur.key]: cur.curDelta };
+			apply(setEdgeRoute(p, cur.from, cur.to, next));
+			setEdge({ from: cur.from, to: cur.to });
+			refocus();
+		};
+		cancelActiveDrag = onCancel;
+		window.addEventListener("mousemove", onMove, true);
+		window.addEventListener("mouseup", onUp, true);
+		window.addEventListener("blur", onCancel);
+	};
+
+	let justDraggedNodeAt = 0;
+
+	const startNodeDrag = (e: MouseEvent, n: PlanNode) => {
+		if (e.button !== 0 || n.pending || linking()) return;
+		e.stopPropagation();
+		cancelActiveDrag?.();
+		const dir = direction();
+		const startOffset = offsetFor(n.offset, dir);
+		const curLayout = layout();
+		const thisBox = curLayout?.boxes.find((b) => b.id === n.id && b.node);
+		const otherCenters = (curLayout?.boxes ?? [])
+			.filter((b) => b.node && b.id !== n.id)
+			.map((b) => ({ cx: b.x + b.width / 2, cy: b.y + b.height / 2 }));
+		const baseCenter = thisBox ? { cx: thisBox.x + thisBox.width / 2 - startOffset.x, cy: thisBox.y + thisBox.height / 2 - startOffset.y } : null;
+
+		let cur: NodeDrag = { kind: "node", id: n.id, startClient: { x: e.clientX, y: e.clientY }, startOffset, curOffset: startOffset, moved: false };
+
+		const cleanup = () => {
+			window.removeEventListener("mousemove", onMove, true);
+			window.removeEventListener("mouseup", onUp, true);
+			window.removeEventListener("blur", onCancel);
+			if (cancelActiveDrag === onCancel) cancelActiveDrag = null;
+		};
+		const onCancel = () => {
+			cleanup();
+			setNodeDrag(null);
+		};
+		const onMove = (ev: MouseEvent) => {
+			if (ev.buttons === 0) return onUp();
+			const scale = view().scale || 1;
+			const dx = (ev.clientX - cur.startClient.x) / scale;
+			const dy = (ev.clientY - cur.startClient.y) / scale;
+			const moved = cur.moved || Math.hypot(ev.clientX - cur.startClient.x, ev.clientY - cur.startClient.y) > 4;
+			if (!moved) return;
+			let ox = cur.startOffset.x + dx;
+			let oy = cur.startOffset.y + dy;
+			let guideX: number | undefined;
+			let guideY: number | undefined;
+			if (!ev.altKey) {
+				ox = Math.round(ox / 12) * 12;
+				oy = Math.round(oy / 12) * 12;
+				if (baseCenter) {
+					const candCx = baseCenter.cx + ox;
+					const candCy = baseCenter.cy + oy;
+					for (const o of otherCenters) {
+						if (guideX === undefined && Math.abs(candCx - o.cx) <= 6) {
+							ox = Math.round(o.cx - baseCenter.cx);
+							guideX = o.cx;
+						}
+						if (guideY === undefined && Math.abs(candCy - o.cy) <= 6) {
+							oy = Math.round(o.cy - baseCenter.cy);
+							guideY = o.cy;
+						}
+					}
+				}
+				if (Math.abs(ox) <= 4) ox = 0;
+				if (Math.abs(oy) <= 4) oy = 0;
+			} else {
+				ox = Math.round(ox);
+				oy = Math.round(oy);
+			}
+			cur = { ...cur, curOffset: { x: ox, y: oy }, moved: true, guideX, guideY };
+			setNodeDrag(cur);
+		};
+		const onUp = () => {
+			cleanup();
+			setNodeDrag(null);
+			if (!cur.moved) return;
+			justDraggedNodeAt = performance.now();
+			const p = plan();
+			if (!p) return;
+			const nextOffset: PlanOffset = { x: cur.curOffset.x, y: cur.curOffset.y, ...(dir === "RIGHT" ? { dir: "RIGHT" } : {}) };
+			apply(setNodeOffset(p, cur.id, nextOffset), cur.id);
+			refocus();
+		};
+		cancelActiveDrag = onCancel;
+		window.addEventListener("mousemove", onMove, true);
+		window.addEventListener("mouseup", onUp, true);
+		window.addEventListener("blur", onCancel);
+	};
+
+	const startGroupDrag = (e: MouseEvent, groupId: string) => {
+		if (e.button !== 0 || linking()) return;
+		e.stopPropagation();
+		cancelActiveDrag?.();
+		const p = plan();
+		const group = p?.groups.find((g) => g.id === groupId);
+		if (!group) return;
+		const dir = direction();
+		const startOffset = offsetFor(group.offset, dir);
+		let cur: NodeDrag = { kind: "group", id: groupId, startClient: { x: e.clientX, y: e.clientY }, startOffset, curOffset: startOffset, moved: false };
+
+		const cleanup = () => {
+			window.removeEventListener("mousemove", onMove, true);
+			window.removeEventListener("mouseup", onUp, true);
+			window.removeEventListener("blur", onCancel);
+			if (cancelActiveDrag === onCancel) cancelActiveDrag = null;
+		};
+		const onCancel = () => {
+			cleanup();
+			setNodeDrag(null);
+		};
+		const onMove = (ev: MouseEvent) => {
+			if (ev.buttons === 0) return onUp();
+			const scale = view().scale || 1;
+			const dx = (ev.clientX - cur.startClient.x) / scale;
+			const dy = (ev.clientY - cur.startClient.y) / scale;
+			const moved = cur.moved || Math.hypot(ev.clientX - cur.startClient.x, ev.clientY - cur.startClient.y) > 4;
+			if (!moved) return;
+			let ox = cur.startOffset.x + dx;
+			let oy = cur.startOffset.y + dy;
+			if (!ev.altKey) {
+				ox = Math.round(ox / 12) * 12;
+				oy = Math.round(oy / 12) * 12;
+				if (Math.abs(ox) <= 4) ox = 0;
+				if (Math.abs(oy) <= 4) oy = 0;
+			} else {
+				ox = Math.round(ox);
+				oy = Math.round(oy);
+			}
+			cur = { ...cur, curOffset: { x: ox, y: oy }, moved: true };
+			setNodeDrag(cur);
+		};
+		const onUp = () => {
+			cleanup();
+			setNodeDrag(null);
+			if (!cur.moved) return;
+			const latest = plan();
+			if (!latest) return;
+			const nextOffset: PlanOffset = { x: cur.curOffset.x, y: cur.curOffset.y, ...(dir === "RIGHT" ? { dir: "RIGHT" } : {}) };
+			apply(setGroupOffset(latest, cur.id, nextOffset));
+			refocus();
+		};
+		cancelActiveDrag = onCancel;
+		window.addEventListener("mousemove", onMove, true);
+		window.addEventListener("mouseup", onUp, true);
+		window.addEventListener("blur", onCancel);
+	};
+
+	// --- Right-Click Context Menus -------------------------------------------
+
+	const nodeContextMenu = async (e: MouseEvent, n: PlanNode) => {
+		e.preventDefault();
+		e.stopPropagation();
+		select(n.id);
+		const EDIT = "Edit label (F2)";
+		const ADD_STEP = "Add step after (Enter)";
+		const ADD_BRANCH = "Add branch (B)";
+		const CONNECT = "Connect to another… (C)";
+		const TO_STEP = "Convert to Step";
+		const TO_DECISION = "Convert to Decision";
+		const STAGE = "Set stage group…";
+		const DUP = "Duplicate";
+		const RESET_POS = "Reset position (R)";
+		const CODE = "Inspect code (G)";
+		const DEL = "Delete (Del)";
+		const canBranch = n.kind === "step" || n.kind === "call" || n.kind === "decision";
+		const canDup = n.kind !== "start" && n.kind !== "end";
+		const hasCode = linksOf(n.id).length > 0 || Boolean(n.ref?.trim());
+		const off = offsetFor(n.offset, direction());
+		const hasOffset = off.x !== 0 || off.y !== 0;
+		const items = [
+			EDIT,
+			...(n.kind !== "end" ? [ADD_STEP] : []),
+			...(canBranch ? [ADD_BRANCH] : []),
+			...(n.kind !== "end" ? [CONNECT] : []),
+			...(n.kind === "decision" ? [TO_STEP] : []),
+			...(n.kind !== "decision" && canDup ? [TO_DECISION] : []),
+			STAGE,
+			...(canDup ? [DUP] : []),
+			...(hasOffset ? [RESET_POS] : []),
+			...(hasCode ? [CODE] : []),
+			DEL,
+		];
+		const picked = await chooseFromMenu(`Actions for ${n.text || n.kind}`, items, { x: e.clientX, y: e.clientY });
+		if (!picked) return refocus();
+		if (picked === EDIT) setEditing({ node: n.id });
+		else if (picked === ADD_STEP) addNextFrom(n.id, "step");
+		else if (picked === ADD_BRANCH) addBranchFrom(n.id);
+		else if (picked === CONNECT) beginLink(n.id);
+		else if (picked === TO_STEP) changeKind(n.id, "step");
+		else if (picked === TO_DECISION) changeKind(n.id, "decision");
+		else if (picked === STAGE) void addStageGroupAsk(n.id);
+		else if (picked === DUP) duplicateById(n.id);
+		else if (picked === RESET_POS) resetNodePos(n.id);
+		else if (picked === CODE) openCode(n.id);
+		else if (picked === DEL) remove();
+	};
+
+	const edgeContextMenu = async (e: MouseEvent, line: Line) => {
+		e.preventDefault();
+		e.stopPropagation();
+		setEdge({ from: line.from, to: line.to });
+		const LABEL = "Edit label (F2)";
+		const INSERT = "Insert step on wire";
+		const REVERSE = "Reverse direction";
+		const RESET = "Reset wire route (R)";
+		const DEL = "Delete connection (Del)";
+		const hasCustomRoute = Boolean(line.route && Object.keys(line.route).length > 0);
+		const picked = await chooseFromMenu("Actions for connection", [LABEL, INSERT, REVERSE, ...(hasCustomRoute ? [RESET] : []), DEL], { x: e.clientX, y: e.clientY });
+		if (!picked) return refocus();
+		if (picked === LABEL) setEditing({ from: line.from, to: line.to });
+		else if (picked === INSERT) insertBetween(line.from, line.to);
+		else if (picked === REVERSE) reverseSelectedEdge({ from: line.from, to: line.to });
+		else if (picked === RESET) resetEdgeRoute({ from: line.from, to: line.to });
+		else if (picked === DEL) remove();
+	};
+
+	const groupContextMenu = async (e: MouseEvent, groupId: string, groupName: string) => {
+		e.preventDefault();
+		e.stopPropagation();
+		const RENAME = "Rename stage…";
+		const COLOR = "Next stage colour";
+		const RESET_STAGE = "Reset stage position";
+		const p = plan();
+		const dir = direction();
+		const gOff = offsetFor(p?.groups.find((g) => g.id === groupId)?.offset, dir);
+		const movedStage = gOff.x !== 0 || gOff.y !== 0 || Boolean(p?.nodes.some((n) => n.group === groupId && (offsetFor(n.offset, dir).x !== 0 || offsetFor(n.offset, dir).y !== 0)));
+		const picked = await chooseFromMenu(`Stage ${groupName}`, [RENAME, COLOR, ...(movedStage ? [RESET_STAGE] : [])], { x: e.clientX, y: e.clientY });
+		if (picked === RENAME) void renameStageAsk(groupId);
+		else if (picked === COLOR) cycleRegionColor(groupName, 1);
+		else if (picked === RESET_STAGE) resetGroupPos(groupId);
+	};
+
+	const canvasContextMenu = async (e: MouseEvent) => {
+		e.preventDefault();
+		const ADD_STEP = "Add step";
+		const ADD_DECISION = "Add decision";
+		const FLIP = direction() === "DOWN" ? "Switch to Horizontal layout" : "Switch to Vertical layout";
+		const AUTO = "Auto-layout (reset manual positions)";
+		const FIT = "Fit chart to view (0)";
+		const SAVE = "Save picture…";
+		const p = plan();
+		const manual = Boolean(p && hasManualLayout(p, direction()));
+		const picked = await chooseFromMenu("Flowchart actions", [ADD_STEP, ADD_DECISION, FLIP, ...(manual ? [AUTO] : []), FIT, SAVE], { x: e.clientX, y: e.clientY });
+		if (picked === ADD_STEP) addNext();
+		else if (picked === ADD_DECISION) addDecisionNode();
+		else if (picked === FLIP) toggleDirection();
+		else if (picked === AUTO) resetAllLayout();
+		else if (picked === FIT) fitOrWhole();
+		else if (picked === SAVE)
+			void savePicture(
+				canvas.querySelector<SVGSVGElement>("svg.graph-canvas") ?? undefined,
+				layout(),
+				joinPath(relativeTo(state.workspace?.root, dirName(props.path)), pictureName(plan()?.title || "plan")),
+			);
+	};
+
+	// --- Inline Text Editor Overlay ------------------------------------------
+
 	const editBox = () => {
 		const target = editing();
 		const l = layout();
@@ -621,10 +1471,10 @@ export function PlanView(props: { path: string; group: number }) {
 		if (!target || !l) return null;
 		if ("node" in target) {
 			const b = l.boxes.find((x) => x.id === target.node);
-			return b ? { left: b.x * v.scale + v.x, top: (b.y + b.height / 2 - 13) * v.scale + v.y, width: Math.max(150, b.width * v.scale) } : null;
+			return b ? { left: b.x * v.scale + v.x, top: (b.y + b.height / 2 - 15) * v.scale + v.y, width: Math.max(170, b.width * v.scale) } : null;
 		}
 		const line = l.lines.find((x) => x.from === target.from && x.to === target.to);
-		return line ? { left: line.at.x * v.scale + v.x - 50, top: line.at.y * v.scale + v.y - 13, width: 100 } : null;
+		return line ? { left: line.at.x * v.scale + v.x - 60, top: line.at.y * v.scale + v.y - 15, width: 120 } : null;
 	};
 	const editValue = () => {
 		const target = editing();
@@ -633,7 +1483,6 @@ export function PlanView(props: { path: string; group: number }) {
 		if ("node" in target) return p.nodes.find((n) => n.id === target.node)?.text ?? "";
 		return p.edges.find((e) => e.from === target.from && e.to === target.to)?.label ?? "";
 	};
-	/** `back` returns the keys to the chart; a commit made by clicking elsewhere leaves the focus where the click put it. */
 	const commitEdit = (value: string, back = true) => {
 		const target = editing();
 		const p = plan();
@@ -642,8 +1491,53 @@ export function PlanView(props: { path: string; group: number }) {
 		if (!target || !p) return;
 		if ("node" in target) {
 			if (value.trim() && value !== p.nodes.find((n) => n.id === target.node)?.text) apply(setText(p, target.node, value.trim()));
-		} else if (value !== (p.edges.find((e) => e.from === target.from && e.to === target.to)?.label ?? "")) apply(setEdgeLabel(p, target.from, target.to, value.trim()));
+		} else if (value !== (p.edges.find((e) => e.from === target.from && e.to === target.to)?.label ?? "")) {
+			apply(setEdgeLabel(p, target.from, target.to, value.trim()));
+		}
 	};
+
+	// --- Floating Contextual Action Bar Coordinates --------------------------
+
+	const floatBarPos = createMemo(() => {
+		if (editing() || far() || panning() || wireDrag() || routeDrag() || nodeDrag()?.moved) return null;
+		const l = layout();
+		if (!l || !canvas) return null;
+		const rect = canvas.getBoundingClientRect();
+		if (rect.width < 160) return null;
+		const v = view();
+		const half = Math.min(rect.width / 2 - 8, tight() ? 76 : 130);
+		const chosenEdge = edge();
+		if (chosenEdge) {
+			const line = l.lines.find((x) => x.from === chosenEdge.from && x.to === chosenEdge.to);
+			if (!line) return null;
+			const left = Math.max(half, Math.min(rect.width - half, line.at.x * v.scale + v.x));
+			const aboveTop = line.at.y * v.scale + v.y - 46;
+			const belowTop = line.at.y * v.scale + v.y + 20;
+			// Prefer above the wire unless it would sit off-screen or cover the source/target node card.
+			const coversNode = (topY: number) =>
+				l.boxes.some((b) => {
+					if (!b.node) return false;
+					const bx1 = b.x * v.scale + v.x;
+					const by1 = b.y * v.scale + v.y;
+					const bx2 = (b.x + b.width) * v.scale + v.x;
+					const by2 = (b.y + b.height) * v.scale + v.y;
+					return left + half > bx1 && left - half < bx2 && topY + 34 > by1 && topY < by2;
+				});
+			const preferBelow = (aboveTop < 10 || coversNode(aboveTop)) && belowTop <= rect.height - 46 && !coversNode(belowTop);
+			const top = Math.max(10, Math.min(rect.height - 46, preferBelow ? belowTop : aboveTop < 10 ? belowTop : aboveTop));
+			return { kind: "edge" as const, edge: line, left, top };
+		}
+		const selId = selected();
+		if (!selId) return null;
+		const b = l.boxes.find((x) => x.id === selId && x.node);
+		if (!b?.node) return null;
+		const left = Math.max(half, Math.min(rect.width - half, (b.x + b.width / 2) * v.scale + v.x));
+		const rawTop = b.y * v.scale + v.y - 42;
+		const top = rawTop < 10 ? (b.y + b.height) * v.scale + v.y + 14 : Math.min(rect.height - 46, rawTop);
+		return { kind: "node" as const, node: b.node, left, top };
+	});
+
+	// --- Plan & Node Field Mutators (shared with Palette via planBridge) -----
 
 	const setPlanField = (field: "title" | "goal" | "ticket", value: string) => {
 		const p = plan();
@@ -655,7 +1549,10 @@ export function PlanView(props: { path: string; group: number }) {
 		const p = plan();
 		if (!p) return;
 		const { targets: _old, ...rest } = p;
-		const list = value.split(",").map((t) => t.trim()).filter(Boolean);
+		const list = value
+			.split(",")
+			.map((t) => t.trim())
+			.filter(Boolean);
 		apply((list.length ? { ...rest, targets: list } : rest) as Plan);
 	};
 	const setNodeField = (field: "notes" | "ref", value: string) => {
@@ -669,18 +1566,40 @@ export function PlanView(props: { path: string; group: number }) {
 		});
 		apply({ ...p, nodes });
 	};
+	const setNodeRef = (value: string) => {
+		const p = plan();
+		const node = selectedNode();
+		if (!p || !node) return;
+		const trimmed = value.trim();
+		if (node.kind === "step" || node.kind === "call") {
+			if (trimmed) apply(setKind(p, node.id, "call", trimmed), node.id);
+			else apply(setKind(p, node.id, "step"), node.id);
+			return;
+		}
+		setNodeField("ref", trimmed);
+	};
 	const groupName = () => plan()?.groups.find((g) => g.id === selectedNode()?.group)?.name ?? "";
 
-	// Expose BA flowchart actions and stages to the left Palette panel while this chart is active.
+	// Expose reactive plan state, editing actions, and Assistant callbacks to the Palette panel.
 	createEffect(() => {
 		const active = state.groups[state.activeGroup]?.active === props.path && !state.planText[props.path];
-		const p = plan();
-		if (!active || !p) return;
+		const hasPlan = Boolean(plan());
+		if (!active || !hasPlan) return;
 		const unregister = registerPlanBridge({
 			path: props.path,
-			title: p.title || "Plan",
+			planUri,
+			plan,
+			text,
 			selectedId: selected,
+			selectedNode,
+			selectedLinks: () => linksOf(selected()),
+			builtUnits: () => {
+				const cur = plan();
+				return cur ? (builtOf(cur)?.units ?? []) : [];
+			},
+			groupName,
 			linking: () => Boolean(linking()),
+			layoutDir: direction,
 			stages: () => {
 				const cur = plan();
 				if (!cur) return [];
@@ -689,23 +1608,74 @@ export function PlanView(props: { path: string; group: number }) {
 					return { id: g.id, name: g.name, count: members.length, firstNodeId: members[0]?.id };
 				});
 			},
+			setPlanField: (field, value) => setPlanField(field, field === "ticket" ? ticketKey(value) : value),
+			setTargets,
+			setNodeText: (value) => {
+				const p = plan();
+				const node = selectedNode();
+				if (p && node && value.trim() && value.trim() !== node.text) apply(setText(p, node.id, value.trim()));
+			},
+			setNodeKind: (kind) => {
+				const node = selectedNode();
+				if (!node) return;
+				if (kind === "step" && node.kind === "call") return;
+				changeKind(node.id, kind);
+			},
+			setNodeField,
+			setNodeRef,
+			setNodeGroup: (name) => {
+				const p = plan();
+				const node = selectedNode();
+				if (p && node) apply(setGroup(p, node.id, name));
+			},
+			renameStage: (groupId) => void renameStageAsk(groupId),
+			openCodeUnit: (unit) => void openProcedure(planUri(), unit),
+			openReference: (ref) => void openReference(ref),
+			openScript: (script, line) => void openScript(script, line),
+			selectNode: (id) => goTo(id),
+			clearSelection: () => (select(null), refocus()),
+			setWalkedPath: (nodes) => setWalked(nodes),
 			addStep: () => (addNext(), refocus()),
 			addDecision: () => (addDecisionNode(), refocus()),
-			addBranch: () => (addOther(), refocus()),
+			addBranch: () => (addBranchFrom(selected()), refocus()),
 			addCall: () => void addCallAsk(),
 			addStageGroup: () => void addStageGroupAsk(),
 			toggleConnect: () => (linking() ? setLinking(null) : beginLink(), refocus()),
+			toggleLayoutDir: toggleDirection,
 			jumpToNode: goTo,
 		});
 		onCleanup(unregister);
 	});
 
+	const more = (): MenuItem[] => {
+		const p = plan();
+		const manual = Boolean(p && hasManualLayout(p, direction()));
+		return [
+			{ label: direction() === "DOWN" ? "Switch to Horizontal layout" : "Switch to Vertical layout", run: toggleDirection },
+			...(manual ? [{ label: "Auto-layout (reset manual positions)", run: resetAllLayout }] : []),
+			{ label: keysOpen() ? "Hide keyboard shortcuts" : "Keyboard shortcuts & legend", keys: "?", run: () => setKeysOpen((open) => !open) },
+			"separator",
+			{
+				label: "Save picture…",
+				run: () =>
+					void savePicture(
+						canvas.querySelector<SVGSVGElement>("svg.graph-canvas") ?? undefined,
+						layout(),
+						joinPath(relativeTo(state.workspace?.root, dirName(props.path)), pictureName(plan()?.title || "plan")),
+					),
+				disabled: !layout(),
+				why: "The chart is not drawn yet",
+			},
+		];
+	};
+
 	let dragging: { x: number; y: number; moved: boolean } | null = null;
-	/** How far the pointer has moved the chart since it was pressed. */
 	let panned = 0;
 
+	const gridStep = () => Math.max(12, 24 * view().scale);
+
 	return (
-		<div class="plan">
+		<div class="plan" classList={{ compact: compact(), tight: tight() }}>
 			<Show
 				when={plan()}
 				fallback={
@@ -716,257 +1686,737 @@ export function PlanView(props: { path: string; group: number }) {
 					</div>
 				}
 			>
-				<div class="graph-bar plan-bar" classList={{ narrow: narrow() }}>
-					{/* The tab and the Title field say it too: a narrow bar gives its room to the buttons. */}
-					<Show when={!narrow()}>
-						<strong>{plan()!.title || "Plan"}</strong>
-					</Show>
-					{/* In a narrow chart the six are one menu, so the bar stays short and the chart keeps its room. */}
-					<Show
-						when={!compact()}
-						fallback={
-							<Menu label="Edit the chart" title="Edit: add a step, a branch or a call; make a decision; connect; delete" class="plan-edit-menu" items={editItems}>
-								Edit
-							</Menu>
-						}
-					>
-						<button title="The next step (Enter)" onClick={(e) => (addNext(), after(e))}>
-							Add step
-						</button>
-						<button title="Another way out (B)" onClick={(e) => (addOther(), after(e))}>
-							Add branch
-						</button>
-						<button title="Something that already exists" onClick={(e) => void addCallAsk(e)}>
-							Add call
-						</button>
-						<button title="Step or decision (D)" onClick={(e) => (toggleDecision(), after(e))}>
-							Decision
-						</button>
-						<button title="Connect the selected node to another (C)" classList={{ on: Boolean(linking()) }} aria-pressed={Boolean(linking())} onClick={(e) => (linking() ? (setLinking(null), after(e)) : (beginLink(), refocus()))}>
-							Connect
-						</button>
-						<button title="Delete the selection (Delete); undo brings it back" onClick={(e) => (remove(), after(e))}>
-							Delete
-						</button>
-					</Show>
-					{/* A step by its words: it is selected, and the chart moves to show it. */}
+				{/* Slim, calm top bar: title, step finder, layout direction switch, health pill, overflow menu. */}
+				<div class="plan-topbar" classList={{ compact: compact(), tight: tight() }}>
+					<span class="plan-topbar-title" title={plan()!.title || "Plan"}>
+						{plan()!.title || "Plan"}
+					</span>
 					<Finder
-						choices={plan()!.nodes.map((n) => ({ id: n.id, name: n.text.trim() || "(no words yet)", where: n.kind === "call" && n.ref ? `call to ${n.ref}` : n.kind }))}
+						choices={plan()!.nodes.map((n) => ({
+							id: n.id,
+							name: n.text.trim() || "(no words yet)",
+							where: plan()!.groups.find((g) => g.id === n.group)?.name ?? (n.kind === "call" ? "step" : n.kind),
+						}))}
 						label="Find a step by its words and select it"
-						title="Type some of a step's words: the one you choose is selected and brought into view"
+						title="Type part of a step's words to jump right to it"
 						placeholder="Find a step…"
 						none={(typed) => `No step has “${typed}” in its words.`}
 						onChoose={goTo}
 					/>
 					<span class="spacer" />
-					<button title="The agent's questions, suggestions and spec" classList={{ on: assistantOpen() }} aria-expanded={assistantOpen()} aria-controls={assistantId} onClick={toggleAssistant}>
-						Assistant
-					</button>
-					<Show when={findingCount() || !narrow()}>
-						<button class="link" title="Show the findings in Problems" onClick={() => (setState("bottomView", "problems"), setState("settings", "layout", "bottom", true))}>
-							{findingCount() ? `${findingCount()} ${findingCount() === 1 ? "finding" : "findings"}` : "No findings"}
+					<Show when={hasManualLayout(plan()!, direction())}>
+						<button
+							type="button"
+							class="plan-reset-pill"
+							title="Reset all manually moved nodes, stages, and wires back to automatic layout"
+							onClick={(e) => (resetAllLayout(), after(e))}
+						>
+							<Icon name="layout" />
+							<span class="plan-reset-text">Auto-layout</span>
 						</button>
 					</Show>
-					{/* The same three as the call graph has: out, the scale (which resets it), in. */}
-					<div class="graph-zoom" role="group" aria-label="Zoom">
-						<button title="Zoom out (−)" aria-label="Zoom out" onClick={(e) => (zoomBy(1 / 1.2), after(e))}>
-							<Icon name="remove" />
+					<div class="plan-dir-switch" role="group" aria-label="Flowchart layout direction">
+						<button
+							type="button"
+							classList={{ on: direction() === "DOWN" }}
+							aria-pressed={direction() === "DOWN"}
+							title="Top-to-bottom vertical layout"
+							onClick={(e) => (setDirection("DOWN"), after(e))}
+						>
+							<Icon name="arrow-down" />
+							<span class="plan-dir-label">Vertical</span>
 						</button>
-						<button title="Reset the zoom to 100%" aria-label={`Zoom ${Math.round(view().scale * 100)}%. Reset to 100%`} onClick={(e) => (zoomBy(1 / view().scale), after(e))}>
-							{Math.round(view().scale * 100)}%
-						</button>
-						<button title="Zoom in (+)" aria-label="Zoom in" onClick={(e) => (zoomBy(1.2), after(e))}>
-							<Icon name="add" />
+						<button
+							type="button"
+							classList={{ on: direction() === "RIGHT" }}
+							aria-pressed={direction() === "RIGHT"}
+							title="Left-to-right horizontal layout"
+							onClick={(e) => (setDirection("RIGHT"), after(e))}
+						>
+							<Icon name="arrow-right" />
+							<span class="plan-dir-label">Horizontal</span>
 						</button>
 					</div>
-					<button title="As much of the chart as stays legible; again for the whole of it, however small (0)" onClick={(e) => (fitOrWhole(), after(e))}>
-						Fit
+					<button
+						type="button"
+						class="plan-status-pill"
+						classList={{ ok: findingCount() === 0, warn: findingCount() > 0 }}
+						title={findingCount() ? `${findingCount()} ${findingCount() === 1 ? "finding" : "findings"} — show in Problems` : "No findings — show Problems"}
+						onClick={() => (setState("bottomView", "problems"), setState("settings", "layout", "bottom", true))}
+					>
+						<Icon name={findingCount() ? "warning" : "check"} />
+						<span class="plan-status-text">{findingCount() ? `${findingCount()} ${findingCount() === 1 ? "finding" : "findings"}` : "Clean"}</span>
 					</button>
-					{/* What is used now and then, so the bar stays one row. */}
-					<Menu label="More for the chart" title="More: keys, save picture" class="graph-more" items={more}>
+					<Menu label="More for the chart" title="More: layout, keys, save picture" class="graph-more" items={more}>
 						<Icon name="ellipsis" />
 					</Menu>
 				</div>
-				<div class="plan-main" classList={{ stacked: narrow() && assistantOpen() }} ref={watchWidth}>
-				<div
-					class="plan-canvas"
-					ref={canvas}
-					tabIndex={0}
-					role="application"
-					aria-label="Plan chart. The arrow keys move between nodes; the question mark key lists the rest."
-					aria-describedby={keysOpen() ? keysId : undefined}
-					classList={{ linking: Boolean(linking()), pathing: Boolean(onPath()), far: far() }}
-					onKeyDown={onKey}
-					onWheel={(e) => {
-						e.preventDefault();
-						const box = canvas.getBoundingClientRect();
-						zoomBy(e.deltaY < 0 ? 1.1 : 0.9, { x: e.clientX - box.left, y: e.clientY - box.top });
-					}}
-					onMouseDown={(e) => {
-						if (e.target instanceof Element && e.target.closest(".plan-edit, .plan-keys")) return;
-						dragging = { x: e.clientX, y: e.clientY, moved: false };
-						panned = 0;
-					}}
-					onMouseMove={(e) => {
-						if (!dragging) return;
-						const v = view();
-						if (Math.abs(e.clientX - dragging.x) + Math.abs(e.clientY - dragging.y) > 2) dragging.moved = true;
-						panned += Math.abs(e.clientX - dragging.x) + Math.abs(e.clientY - dragging.y);
-						setView({ ...v, x: v.x + e.clientX - dragging.x, y: v.y + e.clientY - dragging.y });
-						dragging = { ...dragging, x: e.clientX, y: e.clientY };
-					}}
-					onMouseUp={() => (dragging = null)}
-					onMouseLeave={() => (dragging = null)}
-					onDragOver={(e) => {
-						if (e.dataTransfer?.types.includes(PROCEDURE_DRAG)) e.preventDefault();
-					}}
-					onDrop={(e) => {
-						const name = e.dataTransfer?.getData(PROCEDURE_DRAG);
-						const p = plan();
-						if (!name || !p) return;
-						e.preventDefault();
-						applyEdit(addCall(p, name, selected() ?? undefined));
-						refocus();
-					}}
-				>
-					<svg
-						class="graph-canvas"
-						ref={(el) =>
-							// Far out, a click comes in on what it is on, before it can select a step nobody could read.
-							el.addEventListener(
-								"click",
-								(e) => {
-									if (!far() || panned > 3 || linking()) return;
-									const box = el.getBoundingClientRect();
-									const v = view();
-									if (comeIn({ x: (e.clientX - box.left - v.x) / v.scale, y: (e.clientY - box.top - v.y) / v.scale })) e.stopPropagation();
-								},
-								true,
-							)
-						}
-						onClick={(e) => {
-						if (e.target === e.currentTarget && !linking()) select(null);
-						refocus();
-					}}>
-						<defs>
-							<For each={["plain", "back", "near", "on"]}>
-								{(kind) => (
-									<marker id={`plan-arrow-${kind}`} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
-										<path d="M0,1 L10,5 L0,9 z" class={`arrow plan-${kind}`} />
-									</marker>
-								)}
-							</For>
-						</defs>
-						{/* Measure a node's words and an edge's label in the fonts they are drawn in. */}
-						<g class="plan-probe" aria-hidden="true">
-							<text class="plan-probe-node" ref={nodeProbe} />
-							<text class="plan-probe-label" ref={labelProbe} />
-						</g>
-						<Show when={layout()}>
-							{(l) => (
+
+				<div class="plan-stage">
+					<div
+						class="plan-canvas"
+						ref={(el) => {
+							canvas = el;
+							watchCanvas(el);
+						}}
+						tabIndex={0}
+						role="application"
+						aria-label="Plan chart. Hover any node or edge to add steps or drag connections; arrow keys navigate."
+						aria-describedby={keysOpen() ? keysId : undefined}
+						classList={{
+							linking: Boolean(linking()),
+							wiring: Boolean(wireDrag()?.dragged),
+							panning: panning() || Boolean(nodeDrag()?.moved),
+							pathing: Boolean(onPath()),
+							far: far(),
+						}}
+						onKeyDown={onKey}
+						onContextMenu={(e) => void canvasContextMenu(e)}
+						onWheel={(e) => {
+							e.preventDefault();
+							const box = canvas.getBoundingClientRect();
+							zoomBy(e.deltaY < 0 ? 1.1 : 0.9, { x: e.clientX - box.left, y: e.clientY - box.top });
+						}}
+						onMouseDown={(e) => {
+							if (e.button !== 0) return;
+							if (e.target instanceof Element && e.target.closest(".plan-edit, .plan-keys, .plan-float-bar, .plan-float-controls, .plan-port, .plan-seg-handle, .plan-group-header")) return;
+							dragging = { x: e.clientX, y: e.clientY, moved: false };
+							panned = 0;
+						}}
+						onMouseMove={(e) => {
+							if (!dragging) return;
+							if (e.buttons === 0) {
+								dragging = null;
+								setPanning(false);
+								return;
+							}
+							const dx = e.clientX - dragging.x;
+							const dy = e.clientY - dragging.y;
+							if (Math.abs(dx) + Math.abs(dy) > 2) {
+								dragging.moved = true;
+								setPanning(true);
+							}
+							panned += Math.abs(dx) + Math.abs(dy);
+							const v = view();
+							setView({ ...v, x: v.x + dx, y: v.y + dy });
+							dragging = { ...dragging, x: e.clientX, y: e.clientY };
+						}}
+						onMouseUp={() => {
+							dragging = null;
+							setPanning(false);
+						}}
+						onMouseLeave={() => {
+							dragging = null;
+							setPanning(false);
+						}}
+						onDragOver={(e) => {
+							const types = e.dataTransfer?.types;
+							if (!types?.includes(PROCEDURE_DRAG) && !types?.includes(SHAPE_DRAG)) return;
+							e.preventDefault();
+							const pt = clientToCanvas(e.clientX, e.clientY);
+							const hitN = hitNodeAt(pt);
+							if (hitN) {
+								setDropNodeId(hitN);
+								setDropEdgeKey(null);
+							} else {
+								const hitE = hitEdgeAt(pt);
+								setDropNodeId(null);
+								setDropEdgeKey(hitE ? `${hitE.from}>${hitE.to}` : null);
+							}
+						}}
+						onDragLeave={(e) => {
+							if (!canvas.contains(e.relatedTarget as Node | null)) {
+								setDropNodeId(null);
+								setDropEdgeKey(null);
+							}
+						}}
+						onDrop={(e) => {
+							const procName = e.dataTransfer?.getData(PROCEDURE_DRAG);
+							const shapeKind = e.dataTransfer?.getData(SHAPE_DRAG);
+							const p = plan();
+							const targetNode = dropNodeId();
+							const targetEdge = dropEdgeKey();
+							setDropNodeId(null);
+							setDropEdgeKey(null);
+							if (!p || (!procName && !shapeKind)) return;
+							e.preventDefault();
+							if (procName) {
+								if (targetEdge) {
+									const [from, to] = targetEdge.split(">");
+									if (from && to) insertBetween(from, to, "call", procName, procName);
+								} else {
+									applyEdit(addCall(p, procName, targetNode ?? selected() ?? undefined));
+								}
+								return refocus();
+							}
+							if (shapeKind === "branch") {
+								addBranchFrom(targetNode ?? selected());
+								return refocus();
+							}
+							if (shapeKind === "call") {
+								void addCallAsk(targetNode ?? selected());
+								return;
+							}
+							const kind: NodeKind = shapeKind === "decision" ? "decision" : shapeKind === "end" ? "end" : "step";
+							if (targetEdge) {
+								const [from, to] = targetEdge.split(">");
+								if (from && to) insertBetween(from, to, kind);
+							} else {
+								addNextFrom(targetNode ?? selected(), kind);
+							}
+							refocus();
+						}}
+					>
+						<svg
+							class="graph-canvas"
+							ref={(el) =>
+								el.addEventListener(
+									"click",
+									(e) => {
+										if (!far() || panned > 3 || linking()) return;
+										const box = el.getBoundingClientRect();
+										const v = view();
+										if (comeIn({ x: (e.clientX - box.left - v.x) / v.scale, y: (e.clientY - box.top - v.y) / v.scale })) e.stopPropagation();
+									},
+									true,
+								)
+							}
+							onClick={(e) => {
+								if (panned > 4) return;
+								if (e.target === e.currentTarget || (e.target instanceof Element && e.target.classList.contains("plan-grid-bg"))) {
+									if (!linking()) {
+										select(null);
+										setEdge(null);
+									}
+									refocus();
+								}
+							}}
+						>
+							<defs>
+								<pattern id={gridId} width={gridStep()} height={gridStep()} x={view().x} y={view().y} patternUnits="userSpaceOnUse">
+									<circle class="plan-grid-dot" cx={1.5} cy={1.5} r={Math.max(0.85, Math.min(1.35, 1.15 * Math.sqrt(view().scale)))} />
+								</pattern>
+								<For each={["plain", "back", "near", "on"]}>
+									{(kind) => (
+										<marker
+											id={`plan-arrow-${kind}`}
+											viewBox="0 0 10 10"
+											refX="8.5"
+											refY="5"
+											markerWidth="9"
+											markerHeight="9"
+											markerUnits="userSpaceOnUse"
+											orient="auto-start-reverse"
+										>
+											<path d="M0,1.2 L9.2,5 L0,8.8 L2.1,5 z" class={`arrow plan-${kind}`} />
+										</marker>
+									)}
+								</For>
+							</defs>
+
+							{/* Interactive scaled dot-grid background. */}
+							<Show when={view().scale >= 0.32}>
+								<rect class="plan-grid-bg" width="100%" height="100%" fill={`url(#${gridId})`} />
+							</Show>
+
+							<g class="plan-probe" aria-hidden="true">
+								<text class="plan-probe-node" ref={nodeProbe} />
+								<text class="plan-probe-label" ref={labelProbe} />
+								<text class="plan-group-name" ref={stageProbe} />
+							</g>
+
+							<Show when={layout()}>
 								<g transform={`translate(${view().x},${view().y}) scale(${view().scale})`}>
-									<For each={l().boxes.filter((b) => b.group)}>
-										{(b) => (
-											<g class="g-region plan-group">
-												<rect x={b.x} y={b.y} width={b.width} height={b.height} rx="8" style={{ stroke: `color-mix(in srgb, ${regionColor(b.group!)} 55%, transparent)`, fill: `color-mix(in srgb, ${regionColor(b.group!)} 7%, transparent)` }} />
-												<text x={b.x + 10} y={b.y + 19}>
-													{b.group}
-												</text>
-											</g>
-										)}
-									</For>
-									<For each={l().lines}>
-										{(line) => {
-											const on = () => edge()?.from === line.from && edge()?.to === line.to;
-											// The ways in and out of the node the selection or the pointer is on stand out from the rest.
-											const near = () => {
-												const at = pointed() ?? selected();
-												return at !== null && (line.from === at || line.to === at);
-											};
-											const choose = (e: MouseEvent) => (e.stopPropagation(), setEdge({ from: line.from, to: line.to }), refocus());
+									{/* Stage group container frames (rendered behind edges). */}
+									<For each={groupIds()}>
+										{(gid) => {
+											const b = () => boxById().get(gid);
+											const col = () => regionColor(b()?.group ?? "");
 											return (
-												<g class="plan-edge" classList={{ on: on(), near: near(), back: line.back, pending: line.pending, removing: line.removing, "on-path": Boolean(onPath()?.ways.has(`${line.from}>${line.to}`)) }} role="img" aria-label={plan() ? describeEdge(plan()!, line) : undefined}>
-													<path d={pathOf(line.points)} class="plan-edge-hit" onClick={choose} />
-													<path d={pathOf(line.points)} class="g-edge" marker-end={`url(#plan-arrow-${on() || onPath()?.ways.has(`${line.from}>${line.to}`) ? "on" : near() ? "near" : line.back ? "back" : "plain"})`} />
-													<Show when={line.shown}>
-														<g class="plan-label" classList={{ missing: line.missing }} onClick={choose} onDblClick={(e) => (e.stopPropagation(), setEditing({ from: line.from, to: line.to }))}>
-															<rect x={line.at.x - line.labelWidth / 2} y={line.at.y - 10} width={line.labelWidth} height="20" rx="4" />
-															<text x={line.at.x} y={line.at.y + 4} text-anchor="middle">
-																{line.shown}
+												<Show when={b()}>
+													<g class="g-region plan-group" onContextMenu={(e) => b()?.group && void groupContextMenu(e, gid, b()!.group!)}>
+														<rect
+															class="plan-group-box"
+															x={b()!.x}
+															y={b()!.y}
+															width={b()!.width}
+															height={b()!.height}
+															rx="12"
+															style={{
+																stroke: `color-mix(in srgb, ${col()} 48%, transparent)`,
+																fill: `color-mix(in srgb, ${col()} 6.5%, transparent)`,
+															}}
+														/>
+													</g>
+												</Show>
+											);
+										}}
+									</For>
+
+									{/* Edges with hover '+' insert-on-wire port and right-click menu. */}
+									<For each={edgeKeys()}>
+										{(ek) => {
+											const line = () => lineByKey().get(ek);
+											const on = () => {
+												const l = line();
+												return Boolean(l && edge()?.from === l.from && edge()?.to === l.to);
+											};
+											const near = () => {
+												const l = line();
+												const at = pointed() ?? selected();
+												return Boolean(l && at !== null && (l.from === at || l.to === at));
+											};
+											const isDrop = () => dropEdgeKey() === ek;
+											const activeDrag = () => {
+												const l = line();
+												const d = routeDrag();
+												return l && d && d.from === l.from && d.to === l.to ? d : null;
+											};
+											const choose = (e: MouseEvent) => {
+												const l = line();
+												if (!l) return;
+												e.stopPropagation();
+												select(null);
+												setEdge({ from: l.from, to: l.to });
+												refocus();
+											};
+											return (
+												<Show when={line()}>
+													<g
+														class="plan-edge"
+														classList={{
+															on: on(),
+															near: near(),
+															back: Boolean(line()?.back),
+															pending: Boolean(line()?.pending),
+															removing: Boolean(line()?.removing),
+															dragging: Boolean(activeDrag()),
+															"drop-target": isDrop(),
+															"on-path": Boolean(onPath()?.ways.has(ek)),
+														}}
+														role="img"
+														aria-label={plan() && line() ? describeEdge(plan()!, line()!) : undefined}
+														onContextMenu={(e) => line() && void edgeContextMenu(e, line()!)}
+													>
+														<path d={pathOf(line()!.points)} class="plan-edge-hit" onClick={choose} />
+														<path
+															d={pathOf(line()!.points)}
+															class="g-edge"
+															marker-end={`url(#plan-arrow-${on() || onPath()?.ways.has(ek) ? "on" : near() ? "near" : line()!.back ? "back" : "plain"})`}
+														/>
+														{/* Hover '+' button on edge midpoint to insert a step directly between two nodes. */}
+														<Show when={!far() && !line()!.pending && !line()!.removing && !activeDrag()}>
+															<g
+																class="plan-port"
+																transform={`translate(${line()!.mid.x},${line()!.mid.y})`}
+																onMouseDown={(e) => e.stopPropagation()}
+																onClick={(e) => {
+																	e.stopPropagation();
+																	const l = line();
+																	if (l) insertBetween(l.from, l.to);
+																}}
+															>
+																<title>Insert a step on this connection</title>
+																<circle class="plan-port-hit" r="14" />
+																<circle class="plan-port-bg" r="9.5" />
+																<path class="plan-port-plus" d="M-4,0 L4,0 M0,-4 L0,4" />
+															</g>
+														</Show>
+													</g>
+												</Show>
+											);
+										}}
+									</For>
+
+									{/* Edge labels in their own layer above ALL lines so no sibling wire can paint over a label pill. */}
+									<g class="plan-labels">
+										<For each={labeledEdgeKeys()}>
+											{(ek) => {
+												const line = () => lineByKey().get(ek);
+												const on = () => {
+													const l = line();
+													return Boolean(l && edge()?.from === l.from && edge()?.to === l.to);
+												};
+												const lowerLabel = () => (line()?.shown ?? "").trim().toLowerCase();
+												const choose = (e: MouseEvent) => {
+													const l = line();
+													if (!l) return;
+													e.stopPropagation();
+													select(null);
+													setEdge({ from: l.from, to: l.to });
+													refocus();
+												};
+												return (
+													<Show when={line()?.shown}>
+														<g
+															class="plan-label"
+															classList={{
+																on: on(),
+																missing: Boolean(line()?.missing),
+																yes: lowerLabel() === "yes" || lowerLabel() === "true",
+																no: lowerLabel() === "no" || lowerLabel() === "false",
+																"on-path": Boolean(onPath()?.ways.has(ek)),
+															}}
+															onMouseDown={(e) => e.stopPropagation()}
+															onClick={choose}
+															onDblClick={(e) => {
+																e.stopPropagation();
+																const l = line();
+																if (l) setEditing({ from: l.from, to: l.to });
+															}}
+															onContextMenu={(e) => line() && void edgeContextMenu(e, line()!)}
+														>
+															<rect x={line()!.at.x - line()!.labelWidth / 2} y={line()!.at.y - 10.5} width={line()!.labelWidth} height="21" rx="10.5" />
+															<text x={line()!.at.x} y={line()!.at.y + 4} text-anchor="middle">
+																{line()!.shown}
 															</text>
 														</g>
 													</Show>
-												</g>
+												);
+											}}
+										</For>
+									</g>
+
+									{/* Stage header pills rendered cleanly inside top padding, layered above edges so arrows never slice through titles. */}
+									<For each={groupIds()}>
+										{(gid) => {
+											const b = () => boxById().get(gid);
+											const col = () => regionColor(b()?.group ?? "");
+											const pillW = () => {
+												const cur = b();
+												return cur ? (cur.pillWidth ?? Math.max(82, Math.min(cur.width - 20, (cur.group?.length ?? 0) * 7 + 44))) : 82;
+											};
+											const pillY = () => (b()?.y ?? 0) + 8;
+											const pillCy = () => pillY() + 11;
+											return (
+												<Show when={b()?.group}>
+													<g
+														class="plan-group-header"
+														classList={{ dragging: nodeDrag()?.kind === "group" && nodeDrag()?.id === gid && Boolean(nodeDrag()?.moved) }}
+														onMouseDown={(e) => startGroupDrag(e, gid)}
+														onContextMenu={(e) => b()?.group && void groupContextMenu(e, gid, b()!.group!)}
+														onDblClick={(e) => {
+															e.stopPropagation();
+															void renameStageAsk(gid);
+														}}
+													>
+														<title>{`Stage "${b()!.group}" (${b()!.memberCount ?? 0} steps). Drag to move stage; double-click to rename; click swatch to cycle colour.`}</title>
+														<rect
+															class="plan-group-pill"
+															x={b()!.x + 10}
+															y={pillY()}
+															width={pillW()}
+															height={22}
+															rx={11}
+															style={{ stroke: `color-mix(in srgb, ${col()} 52%, transparent)` }}
+														/>
+														<circle
+															class="plan-group-swatch"
+															cx={b()!.x + 22}
+															cy={pillCy()}
+															r={4.5}
+															style={{ fill: col() }}
+															onMouseDown={(e) => e.stopPropagation()}
+															onClick={(e) => {
+																e.stopPropagation();
+																if (b()?.group) cycleRegionColor(b()!.group!, e.shiftKey ? -1 : 1);
+															}}
+														/>
+														<text class="plan-group-name" x={b()!.x + 32} y={pillCy() + 4}>
+															{b()!.group}
+														</text>
+														<Show when={b()!.memberCount !== undefined}>
+															<text class="plan-group-count" x={b()!.x + 10 + pillW() - 10} y={pillCy() + 3.5} text-anchor="end">
+																{b()!.memberCount}
+															</text>
+														</Show>
+													</g>
+												</Show>
 											);
 										}}
 									</For>
-									<For each={l().boxes.filter((b) => b.node)}>
-										{(b) => {
-											const n = b.node!;
-											const cx = b.x + b.width / 2;
-											const cy = b.y + b.height / 2;
-											const trouble = () => issues().get(n.id);
-											const mark = () => statusMark(stateOf(n));
-											// A decision's corners are empty: its marks sit on the diamond's upper edges.
-											const corner = n.kind === "decision" ? { x: b.width / 4, y: b.height / 4 } : { x: 2, y: 2 };
+
+									{/* Node shapes with icons, notes badge, built mark, hover '+' quick-add & drag-wire ports. */}
+									<For each={nodeIds()}>
+										{(nid) => {
+											const b = () => boxById().get(nid);
+											const n = () => b()?.node;
+											const cx = () => {
+												const cur = b();
+												return cur ? cur.x + cur.width / 2 : 0;
+											};
+											const cy = () => {
+												const cur = b();
+												return cur ? cur.y + cur.height / 2 : 0;
+											};
+											const textX = () => {
+												const kind = n()?.kind;
+												return kind === "start" || kind === "end" ? cx() + 6 : cx();
+											};
+											const hasBuilt = () => linksOf(nid).length > 0;
+											const hasNotes = () => Boolean(n()?.notes?.trim());
+											const builtPos = () => {
+												const cur = b();
+												if (!cur) return { x: 0, y: 0 };
+												if (n()?.kind === "decision") {
+													const rowY = cur.y + cur.height - 18;
+													const dx = hasNotes() ? 10 : 0;
+													return { x: cx() - dx - 2.75, y: rowY - 2.75 };
+												}
+												const inset = n()?.kind === "start" || n()?.kind === "end" ? 16 : 8;
+												return { x: cur.x + inset, y: cur.y + cur.height - 11 };
+											};
+											const notePos = () => {
+												const cur = b();
+												if (!cur) return { x: 0, y: 0, anchor: "start" as const };
+												if (n()?.kind === "decision") {
+													const rowY = cur.y + cur.height - 18;
+													const dx = hasBuilt() ? 10 : 0;
+													return { x: cx() + dx, y: rowY + 4, anchor: "middle" as const };
+												}
+												const inset = n()?.kind === "start" || n()?.kind === "end" ? 22 : 17;
+												return { x: cur.x + cur.width - inset, y: cur.y + cur.height - 6, anchor: "start" as const };
+											};
+											const trouble = () => issues().get(nid);
+											const mark = () => (n() ? statusMark(stateOf(n()!)) : null);
+											const isSel = () => selected() === nid;
+											const corner = () => {
+												const cur = b();
+												return cur && n()?.kind === "decision" ? { x: cur.width / 4, y: cur.height / 4 } : { x: 4, y: 4 };
+											};
+											const primaryPort = () => {
+												const cur = b();
+												if (!cur) return { x: 0, y: 0 };
+												return direction() === "RIGHT" ? { x: cur.x + cur.width, y: cy() } : { x: cx(), y: cur.y + cur.height };
+											};
+											const branchPort = () => {
+												const cur = b();
+												if (!cur) return { x: 0, y: 0 };
+												return direction() === "RIGHT" ? { x: cx(), y: cur.y + cur.height } : { x: cur.x + cur.width, y: cy() };
+											};
+											const canBranch = () => n()?.kind === "step" || n()?.kind === "call" || n()?.kind === "decision";
+											const visualKind = () => (n()?.kind === "call" ? "step" : (n()?.kind ?? "step"));
+											const shapeRx = () => {
+												const cur = b();
+												const kind = n()?.kind;
+												return cur && (kind === "start" || kind === "end") ? Math.min(cur.height / 2, 26) : 8;
+											};
 											return (
-												<g
-													class={`plan-node ${n.kind} unit-${unitStatuses().get(n.id) ?? "none"}`}
-													classList={{ "on-path": Boolean(onPath()?.nodes.has(n.id)), selected: selected() === n.id, origin: linking() === n.id, trouble: Boolean(trouble()), pending: Boolean(n.pending), changed: changed().has(n.id), gone: gone().has(n.id) }}
-													role="img"
-													aria-label={describeNode(n, stateOf(n))}
-													onMouseDown={(e) => e.stopPropagation()}
-													onMouseEnter={() => setPointed(n.id)}
-													onMouseLeave={() => setPointed(null)}
-													onClick={(e) => {
-														e.stopPropagation();
-														if (n.pending) return;
-														if (e.ctrlKey || e.metaKey) openCode(n.id);
-														else clickNode(n.id);
-													}}
-													onDblClick={(e) => (e.stopPropagation(), !n.pending && setEditing({ node: n.id }))}
-												>
-													<title>
-														{[n.text, n.notes, ...linksOf(n.id).map((u) => `Built as ${u.name} in ${u.script}. Ctrl+click opens it.`), mark() ? MARK_WORDS[mark()!] : "", changed().has(n.id) && mark() !== "changed" ? MARK_WORDS.changed : "", ...(trouble() ?? [])].filter(Boolean).join("\n")}
-													</title>
-													<Show when={n.kind === "decision"} fallback={<rect x={b.x} y={b.y} width={b.width} height={b.height} rx={n.kind === "start" || n.kind === "end" ? Math.min(b.height / 2, 26) : 5} />}>
-														<polygon points={`${cx},${b.y} ${b.x + b.width},${cy} ${cx},${b.y + b.height} ${b.x},${cy}`} />
-													</Show>
-													<Show when={n.kind === "call"}>
-														<line x1={b.x + 10} y1={b.y} x2={b.x + 10} y2={b.y + b.height} />
-														<line x1={b.x + b.width - 10} y1={b.y} x2={b.x + b.width - 10} y2={b.y + b.height} />
-													</Show>
-													<For each={b.lines}>
-														{(words, i) => (
-															<text x={cx} y={cy + (i() - (b.lines.length - 1) / 2) * LINE + 4} text-anchor="middle">
-																{words}
+												<Show when={b() && n()}>
+													<g
+														class={`plan-node ${visualKind()} unit-${unitStatuses().get(nid) ?? "none"}`}
+														classList={{
+															"on-path": Boolean(onPath()?.nodes.has(nid)),
+															selected: isSel(),
+															dragging: nodeDrag()?.kind === "node" && nodeDrag()?.id === nid && Boolean(nodeDrag()?.moved),
+															origin: linking() === nid || wireDrag()?.fromId === nid,
+															"drop-target": dropNodeId() === nid,
+															trouble: Boolean(trouble()),
+															pending: Boolean(n()!.pending),
+															changed: changed().has(nid),
+															gone: gone().has(nid),
+														}}
+														role="img"
+														aria-label={describeNode(n()!, stateOf(n()!))}
+														onMouseDown={(e) => n() && startNodeDrag(e, n()!)}
+														onMouseEnter={() => setPointed(nid)}
+														onMouseLeave={() => setPointed(null)}
+														onClick={(e) => {
+															e.stopPropagation();
+															const node = n();
+															if (!node || node.pending || performance.now() - justDraggedNodeAt < 120) return;
+															if (e.ctrlKey || e.metaKey) openCode(nid);
+															else clickNode(nid);
+														}}
+														onDblClick={(e) => (e.stopPropagation(), !n()?.pending && setEditing({ node: nid }))}
+														onContextMenu={(e) => n() && !n()!.pending && void nodeContextMenu(e, n()!)}
+													>
+														<title>
+															{[
+																n()!.text,
+																n()!.notes,
+																mark() ? MARK_WORDS[mark()!] : "",
+																changed().has(nid) && mark() !== "changed" ? MARK_WORDS.changed : "",
+																...(trouble() ?? []),
+																linksOf(nid).length > 0 || n()!.ref?.trim() ? "Code linked — expand Implementation in Palette or Ctrl+click to inspect." : "",
+															]
+																.filter(Boolean)
+																.join("\n")}
+														</title>
+														{/* Soft selection halo */}
+														<Show when={isSel()}>
+															<Show
+																when={n()!.kind === "decision"}
+																fallback={<rect class="node-halo" x={b()!.x - 1} y={b()!.y - 1} width={b()!.width + 2} height={b()!.height + 2} rx={shapeRx() + 1} />}
+															>
+																<polygon class="node-halo" points={`${cx()},${b()!.y - 2} ${b()!.x + b()!.width + 2},${cy()} ${cx()},${b()!.y + b()!.height + 2} ${b()!.x - 2},${cy()}`} />
+															</Show>
+														</Show>
+														{/* Main shape */}
+														<Show
+															when={n()!.kind === "decision"}
+															fallback={<rect class="node-shape" x={b()!.x} y={b()!.y} width={b()!.width} height={b()!.height} rx={shapeRx()} />}
+														>
+															<polygon class="node-shape" points={`${cx()},${b()!.y} ${b()!.x + b()!.width},${cy()} ${cx()},${b()!.y + b()!.height} ${b()!.x},${cy()}`} />
+														</Show>
+														{/* Start/End subtle left kind icon (clear of shifted text) */}
+														<Show when={n()!.kind === "start" || n()!.kind === "end"}>
+															<text class="node-kind-icon" x={b()!.x + 12} y={cy() + 4.5}>
+																{n()!.kind === "start" ? ICON.play : ICON["pass-filled"]}
 															</text>
-														)}
-													</For>
-													<Show when={linksOf(n.id).length && n.kind !== "decision"}>
-														<rect class="plan-built" x={b.x + 5} y={b.y + b.height - 9} width="5" height="5" />
-													</Show>
-													<Show when={mark()}>
-														{(kind) => (
-															<g class={`plan-mark ${kind()}`} transform={`translate(${b.x + corner.x},${b.y + corner.y})`}>
-																<circle r="7.5" />
-																<path d={MARK_PATHS[kind()]} />
+														</Show>
+														{/* Node label lines */}
+														<For each={b()!.lines}>
+															{(words, i) => (
+																<text class="node-text" x={textX()} y={cy() + (i() - (b()!.lines.length - 1) / 2) * LINE + 4} text-anchor="middle">
+																	{words}
+																</text>
+															)}
+														</For>
+														{/* Built code green dot (consistent across steps and decisions) */}
+														<Show when={hasBuilt()}>
+															<rect class="plan-built" x={builtPos().x} y={builtPos().y} width="5.5" height="5.5" rx="1.5" />
+														</Show>
+														{/* Notes indicator icon when node carries analyst notes (consistent across steps and decisions) */}
+														<Show when={hasNotes()}>
+															<text class="node-note-icon" x={notePos().x} y={notePos().y} text-anchor={notePos().anchor}>
+																{ICON.note}
+															</text>
+														</Show>
+														{/* Build / drift status badge */}
+														<Show when={mark()} keyed>
+															{(kind) => (
+																<g class={`plan-mark ${kind}`} transform={`translate(${b()!.x + corner().x},${b()!.y + corner().y})`}>
+																	<circle r="7.5" />
+																	<path d={MARK_PATHS[kind]} />
+																</g>
+															)}
+														</Show>
+														{/* Finding warning dot */}
+														<Show when={trouble()}>
+															<circle class="plan-dot" cx={b()!.x + b()!.width - corner().x} cy={b()!.y + corner().y} r="5" />
+														</Show>
+
+														{/* Hover '+' Quick-Add & Wire-Drag Ports */}
+														<Show when={!far() && !n()!.pending && n()!.kind !== "end"}>
+															<g
+																class="plan-port"
+																transform={`translate(${primaryPort().x},${primaryPort().y})`}
+																onMouseDown={(e) => startPortDrag(e, nid, primaryPort(), "primary")}
+																onClick={(e) => e.stopPropagation()}
+															>
+																<title>Click to add the next step; drag to another node to connect</title>
+																<circle class="plan-port-hit" r="14" />
+																<circle class="plan-port-bg" r="9.5" />
+																<path class="plan-port-plus" d="M-4,0 L4,0 M0,-4 L0,4" />
+															</g>
+														</Show>
+														<Show when={!far() && !n()!.pending && canBranch()}>
+															<g
+																class="plan-port"
+																transform={`translate(${branchPort().x},${branchPort().y})`}
+																onMouseDown={(e) => startPortDrag(e, nid, branchPort(), "branch")}
+																onClick={(e) => e.stopPropagation()}
+															>
+																<title>Click to add a branch; drag to another node to connect</title>
+																<circle class="plan-port-hit" r="14" />
+																<circle class="plan-port-bg" r="9.5" />
+																<path class="plan-port-plus" d="M-4,0 L4,0 M0,-4 L0,4" />
+															</g>
+														</Show>
+													</g>
+												</Show>
+											);
+										}}
+									</For>
+
+									{/* Magnetic center alignment guides shown while dragging a node */}
+									<Show when={nodeDrag()?.moved && (nodeDrag()?.guideX !== undefined || nodeDrag()?.guideY !== undefined)}>
+										<g class="plan-snap-guides" aria-hidden="true">
+											<Show when={nodeDrag()?.guideX !== undefined}>
+												<line class="plan-snap-guide" x1={nodeDrag()!.guideX!} y1={-400} x2={nodeDrag()!.guideX!} y2={(layout()?.height ?? 2000) + 400} />
+											</Show>
+											<Show when={nodeDrag()?.guideY !== undefined}>
+												<line class="plan-snap-guide" x1={-400} y1={nodeDrag()!.guideY!} x2={(layout()?.width ?? 2000) + 400} y2={nodeDrag()!.guideY!} />
+											</Show>
+										</g>
+									</Show>
+
+									{/* Live rubber-band connector wire while dragging from any port */}
+									<Show when={wireDrag()?.dragged}>
+										<path
+											class="plan-wire-preview"
+											d={bezierWire(wireDrag()!.startCanvas, wireDrag()!.curCanvas, direction())}
+											marker-end="url(#plan-arrow-on)"
+										/>
+									</Show>
+
+									{/* Draggable orthogonal segment handles for the selected edge, layered above all wires and nodes so shared rails never occlude handles. */}
+									<Show when={!far() && edge()}>
+										{(() => {
+											const activeLine = () => {
+												const e = edge();
+												return e ? layout()?.lines.find((x) => x.from === e.from && x.to === e.to && !x.pending && !x.removing) : undefined;
+											};
+											const activeHandles = () => {
+												const line = activeLine();
+												if (!line) return [];
+												const d = routeDrag();
+												const draggingThis = d && d.from === line.from && d.to === line.to ? d : null;
+												const r = draggingThis ? { ...(line.route ?? {}), [draggingThis.key]: draggingThis.curDelta } : line.route;
+												return edgeHandles(line.basePoints, line.points, r, line.shown ? [line.at, line.mid] : [line.mid]).map((h) => ({ line, h, active: draggingThis?.key === h.key }));
+											};
+											return (
+												<g class="plan-edge-handles">
+													<For each={activeHandles()}>
+														{({ line, h, active }) => (
+															<g
+																class={`plan-seg-handle ${h.axis}`}
+																classList={{ active }}
+																transform={`translate(${h.x},${h.y})`}
+																onMouseDown={(e) => startRouteDrag(e, line, h)}
+																onClick={(e) => e.stopPropagation()}
+																onDblClick={(e) => {
+																	e.stopPropagation();
+																	resetEdgeRoute({ from: line.from, to: line.to }, h.key);
+																}}
+															>
+																<title>{h.axis === "h" ? "Drag up or down to move this wire segment (double-click to reset)" : "Drag left or right to move this wire segment (double-click to reset)"}</title>
+																<circle class="plan-seg-hit" r="14" />
+																<Show
+																	when={h.axis === "h"}
+																	fallback={
+																		<>
+																			<rect class="plan-seg-pill" x="-4.5" y="-11" width="9" height="22" rx="4.5" />
+																			<line class="plan-seg-grip" x1="-1.5" y1="-5" x2="-1.5" y2="5" />
+																			<line class="plan-seg-grip" x1="1.5" y1="-5" x2="1.5" y2="5" />
+																		</>
+																	}
+																>
+																	<rect class="plan-seg-pill" x="-11" y="-4.5" width="22" height="9" rx="4.5" />
+																	<line class="plan-seg-grip" x1="-5" y1="-1.5" x2="5" y2="-1.5" />
+																	<line class="plan-seg-grip" x1="-5" y1="1.5" x2="5" y2="1.5" />
+																</Show>
 															</g>
 														)}
-													</Show>
-													<Show when={trouble()}>
-														<circle class="plan-dot" cx={b.x + b.width - corner.x} cy={b.y + corner.y} r="5" />
-													</Show>
+													</For>
 												</g>
 											);
-										}}
-									</For>
-									{/* Far out, the stages' names over the chart, at a size that reads. */}
+										})()}
+									</Show>
+
+									{/* Zoomed-out overview stage labels */}
 									<Show when={far()}>
 										<g class="g-far" aria-hidden="true">
 											<For each={farNames()}>
 												{(name) => (
-													<text classList={{ folder: !name.item.stage }} x={name.x + name.width / 2} y={name.y + name.size * 0.95} text-anchor="middle" style={{ "font-size": `${name.size}px`, "stroke-width": `${name.size * 0.28}px` }}>
+													<text
+														classList={{ folder: !name.item.stage }}
+														x={name.x + name.width / 2}
+														y={name.y + name.size * 0.95}
+														text-anchor="middle"
+														style={{ "font-size": `${name.size}px`, "stroke-width": `${name.size * 0.28}px` }}
+													>
 														{name.item.words}
 													</text>
 												)}
@@ -974,201 +2424,263 @@ export function PlanView(props: { path: string; group: number }) {
 										</g>
 									</Show>
 								</g>
+							</Show>
+						</svg>
+
+						{/* Floating contextual action toolbar above the selected node or edge. */}
+						<Show when={floatBarPos()} keyed>
+							{(bar) => (
+								<div
+									class="plan-float-bar"
+									style={{ left: `${bar.left}px`, top: `${bar.top}px` }}
+									onMouseDown={(e) => e.stopPropagation()}
+									onClick={(e) => e.stopPropagation()}
+								>
+									<Show
+										when={bar.kind === "node"}
+										fallback={
+											(() => {
+												const eb = bar as Extract<NonNullable<ReturnType<typeof floatBarPos>>, { kind: "edge" }>;
+												return (
+													<>
+														<button type="button" title="Edit connection label (F2)" onClick={() => setEditing({ from: eb.edge.from, to: eb.edge.to })}>
+															<Icon name="note" />
+															<span>Label</span>
+														</button>
+														<button type="button" title="Insert a step on this wire" onClick={() => insertBetween(eb.edge.from, eb.edge.to)}>
+															<Icon name="add" />
+															<span>Insert step</span>
+														</button>
+														<button type="button" title="Reverse connection direction" onClick={() => reverseSelectedEdge({ from: eb.edge.from, to: eb.edge.to })}>
+															<Icon name="refresh" />
+														</button>
+														<Show when={eb.edge.route && Object.keys(eb.edge.route).length > 0}>
+															<button type="button" title="Reset manual wire route (R)" onClick={() => resetEdgeRoute({ from: eb.edge.from, to: eb.edge.to })}>
+																<Icon name="discard" />
+																<span>Reset</span>
+															</button>
+														</Show>
+														<span class="plan-float-sep" />
+														<button type="button" class="danger" title="Delete connection (Del)" onClick={remove}>
+															<Icon name="trash" />
+														</button>
+													</>
+												);
+											})()
+										}
+									>
+										{(() => {
+											const n = (bar as Extract<NonNullable<ReturnType<typeof floatBarPos>>, { kind: "node" }>).node;
+											const canBranch = n.kind === "step" || n.kind === "call" || n.kind === "decision";
+											const canDup = n.kind !== "start" && n.kind !== "end";
+											const hasCode = linksOf(n.id).length > 0 || Boolean(n.ref?.trim());
+											return (
+												<>
+													<Show when={n.kind !== "end"}>
+														<button type="button" title="Add next step (Enter)" onClick={() => addNextFrom(n.id, "step")}>
+															<Icon name="add" />
+															<span>Step</span>
+														</button>
+													</Show>
+													<Show when={canBranch}>
+														<button type="button" title="Add branch (B)" onClick={() => addBranchFrom(n.id)}>
+															<Icon name="git-branch" />
+															<span>Branch</span>
+														</button>
+														<button
+															type="button"
+															classList={{ on: n.kind === "decision" }}
+															title="Toggle Step / Decision (D)"
+															onClick={() => toggleDecision(n.id)}
+														>
+															<span>{n.kind === "decision" ? "To Step" : "Decision"}</span>
+														</button>
+													</Show>
+													<Show when={n.kind !== "end"}>
+														<button
+															type="button"
+															classList={{ on: linking() === n.id }}
+															title="Connect to another node (C)"
+															onClick={() => (linking() ? setLinking(null) : beginLink(n.id))}
+														>
+															<Icon name="symbol-event" />
+														</button>
+													</Show>
+													<Show when={canDup}>
+														<button type="button" title="Duplicate step" onClick={() => duplicateById(n.id)}>
+															<Icon name="layers" />
+														</button>
+													</Show>
+													<Show when={offsetFor(n.offset, direction()).x !== 0 || offsetFor(n.offset, direction()).y !== 0}>
+														<button type="button" title="Reset node position (R)" onClick={() => resetNodePos(n.id)}>
+															<Icon name="discard" />
+															<span>Reset</span>
+														</button>
+													</Show>
+													<Show when={hasCode}>
+														<button type="button" title="Inspect linked code (G)" onClick={() => openCode(n.id)}>
+															<Icon name="go-to-file" />
+														</button>
+													</Show>
+													<span class="plan-float-sep" />
+													<button type="button" class="danger" title="Delete step (Del)" onClick={remove}>
+														<Icon name="trash" />
+													</button>
+												</>
+											);
+										})()}
+									</Show>
+								</div>
 							)}
 						</Show>
-					</svg>
-					<Show when={layout()}>
-						{(l) => (
+
+						{/* Floating bottom-left zoom, fit, and keyboard shortcuts pill. */}
+						<div class="plan-float-controls" role="group" aria-label="Canvas controls" onMouseDown={(e) => e.stopPropagation()}>
+							<button type="button" title="Zoom out (−)" aria-label="Zoom out" onClick={(e) => (zoomBy(1 / 1.2), after(e))}>
+								<Icon name="remove" />
+							</button>
+							<button
+								type="button"
+								title="Reset zoom to 100%"
+								aria-label={`Zoom ${Math.round(view().scale * 100)}%. Reset to 100%`}
+								onClick={(e) => (zoomBy(1 / view().scale), after(e))}
+							>
+								{Math.round(view().scale * 100)}%
+							</button>
+							<button type="button" title="Zoom in (+)" aria-label="Zoom in" onClick={(e) => (zoomBy(1.2), after(e))}>
+								<Icon name="add" />
+							</button>
+							<span class="plan-float-sep" />
+							<button type="button" title="Fit legible chart; click again for full overview (0)" onClick={(e) => (fitOrWhole(), after(e))}>
+								Fit
+							</button>
+							<button
+								type="button"
+								classList={{ on: keysOpen() }}
+								aria-pressed={keysOpen()}
+								title="Keyboard shortcuts & shape legend (?)"
+								aria-label="Keyboard shortcuts and legend"
+								onClick={() => setKeysOpen((open) => !open)}
+							>
+								<Icon name="info" />
+							</button>
+						</div>
+
+						<Show when={layout()}>
 							<Minimap
-								content={l()}
-								boxes={l().boxes.map((b): MapBox => ({ x: b.x, y: b.y, width: b.width, height: b.height, kind: b.group ? "frame" : b.node?.id === selected() ? "mark" : "node" }))}
+								content={layout() ?? { width: 0, height: 0 }}
+								boxes={(layout()?.boxes ?? []).map(
+									(b): MapBox => ({
+										x: b.x,
+										y: b.y,
+										width: b.width,
+										height: b.height,
+										kind: b.group ? "frame" : b.node?.id === selected() ? "mark" : "node",
+									}),
+								)}
 								view={view()}
 								host={() => canvas}
 								onMove={setView}
 							/>
-						)}
-					</Show>
-					<Show when={editBox()}>
-						{(box) => (
-							<input
-								class="plan-edit"
-								aria-label={editing() && "node" in editing()! ? "The node's words" : "The label of this way out"}
-								style={{ left: `${box().left}px`, top: `${box().top}px`, width: `${box().width}px` }}
-								ref={(el) => {
-									el.value = editValue();
-									queueMicrotask(() => (el.focus(), el.select()));
-								}}
-								onMouseDown={(e) => e.stopPropagation()}
-								onClick={(e) => e.stopPropagation()}
-								onKeyDown={(e) => {
-									e.stopPropagation();
-									if (e.key === "Enter") commitEdit(e.currentTarget.value);
-									if (e.key === "Escape") {
-										setEditing(null);
-										refocus();
-									}
-								}}
-								onBlur={(e) => {
-									if (editing()) commitEdit(e.currentTarget.value, false);
-								}}
-							/>
-						)}
-					</Show>
-					<Show when={linking()}>
-						<div class="plan-hint" role="status">
-							Move to the node this leads to and press Enter, or click it. Esc cancels.
-						</div>
-					</Show>
-					<Show when={keysOpen()}>
-						<div class="plan-keys" id={keysId} role="group" aria-label="The chart's keys">
-							<dl>
-								<For each={KEYS}>
-									{([keys, what]) => (
-										<>
-											<dt>{keys}</dt>
-											<dd>{what}</dd>
-										</>
-									)}
-								</For>
-							</dl>
-							<p class="hint">Tab moves on to the details and the assistant.</p>
-							{/* What the chart's shapes and lines mean, drawn by the chart's own rules. */}
-							<h4>Shapes and lines</h4>
-							<ul class="plan-shapes">
-								<li>
-									<svg viewBox="0 0 34 18" aria-hidden="true">
-										<g class="plan-node start">
-											<rect x="1" y="2" width="32" height="14" rx="7" />
-										</g>
-									</svg>
-									Where it starts, and where it ends
-								</li>
-								<li>
-									<svg viewBox="0 0 34 18" aria-hidden="true">
-										<g class="plan-node step">
-											<rect x="1" y="2" width="32" height="14" rx="3" />
-										</g>
-									</svg>
-									A step
-								</li>
-								<li>
-									<svg viewBox="0 0 34 18" aria-hidden="true">
-										<g class="plan-node call">
-											<rect x="1" y="2" width="32" height="14" rx="3" />
-											<line x1="6" y1="2" x2="6" y2="16" />
-											<line x1="28" y1="2" x2="28" y2="16" />
-										</g>
-									</svg>
-									A call to another procedure or script
-								</li>
-								<li>
-									<svg viewBox="0 0 34 18" aria-hidden="true">
-										<g class="plan-node decision">
-											<polygon points="17,1 33,9 17,17 1,9" />
-										</g>
-									</svg>
-									A decision: each way out has a label
-								</li>
-								<li>
-									<svg viewBox="0 0 34 18" aria-hidden="true">
-										<g class="plan-edge back">
-											<path class="g-edge" d="M2,9 L32,9" />
-										</g>
-									</svg>
-									A loop's way back, in the accent
-								</li>
-								<li>
-									<svg viewBox="0 0 34 18" aria-hidden="true">
-										<g class="plan-node step">
-											<rect x="1" y="2" width="32" height="14" rx="3" />
-											<rect class="plan-built" x="4" y="10" width="5" height="5" />
-										</g>
-									</svg>
-									A green square: the step has code
-								</li>
-							</ul>
-							<p class="hint">A mark at a node's corner is its state in a build, or against its code: point at the node to read it.</p>
-						</div>
-					</Show>
+						</Show>
+
+						<Show when={editBox()} keyed>
+							{(box) => (
+								<input
+									class="plan-edit"
+									aria-label={editing() && "node" in editing()! ? "The node's words" : "The label of this way out"}
+									style={{ left: `${box.left}px`, top: `${box.top}px`, width: `${box.width}px` }}
+									ref={(el) => {
+										el.value = editValue();
+										queueMicrotask(() => (el.focus(), el.select()));
+									}}
+									onMouseDown={(e) => e.stopPropagation()}
+									onClick={(e) => e.stopPropagation()}
+									onKeyDown={(e) => {
+										e.stopPropagation();
+										if (e.key === "Enter") commitEdit(e.currentTarget.value);
+										if (e.key === "Escape") {
+											setEditing(null);
+											refocus();
+										}
+									}}
+									onBlur={(e) => {
+										if (editing()) commitEdit(e.currentTarget.value, false);
+									}}
+								/>
+							)}
+						</Show>
+
+						<Show when={linking()}>
+							<div class="plan-hint" role="status">
+								Click the target node or navigate with arrows and press Enter. Press Esc to cancel.
+							</div>
+						</Show>
+
+						<Show when={keysOpen()}>
+							<div class="plan-keys" id={keysId} role="group" aria-label="The chart's keys">
+								<dl>
+									<For each={KEYS}>
+										{([keys, what]) => (
+											<>
+												<dt>{keys}</dt>
+												<dd>{what}</dd>
+											</>
+										)}
+									</For>
+								</dl>
+								<p class="hint">Hover any node or wire for quick '+' add and drag-to-connect ports; plan details and Assistant live in Palette.</p>
+								<h4>Shapes and lines</h4>
+								<ul class="plan-shapes">
+									<li>
+										<svg viewBox="0 0 34 18" aria-hidden="true">
+											<g class="plan-node start">
+												<rect class="node-shape" x="1" y="2" width="32" height="14" rx="7" />
+											</g>
+										</svg>
+										Where it starts, and where it ends
+									</li>
+									<li>
+										<svg viewBox="0 0 34 18" aria-hidden="true">
+											<g class="plan-node step">
+												<rect class="node-shape" x="1" y="2" width="32" height="14" rx="4" />
+											</g>
+										</svg>
+										A process step
+									</li>
+									<li>
+										<svg viewBox="0 0 34 18" aria-hidden="true">
+											<g class="plan-node decision">
+												<polygon class="node-shape" points="17,1 33,9 17,17 1,9" />
+											</g>
+										</svg>
+										A decision: each way out has a label
+									</li>
+									<li>
+										<svg viewBox="0 0 34 18" aria-hidden="true">
+											<g class="plan-edge back">
+												<path class="g-edge" d="M2,9 L32,9" />
+											</g>
+										</svg>
+										A loop returning to an earlier step
+									</li>
+									<li>
+										<svg viewBox="0 0 34 18" aria-hidden="true">
+											<g class="plan-node step">
+												<rect class="node-shape" x="1" y="2" width="32" height="14" rx="4" />
+												<rect class="plan-built" x="5" y="10" width="5" height="5" />
+											</g>
+										</svg>
+										A green dot: code is linked behind this step
+									</li>
+								</ul>
+							</div>
+						</Show>
+					</div>
 				</div>
-				<PlanAssistant id={assistantId} hidden={!assistantOpen()} path={props.path} plan={plan()!} text={text()} onSelect={select} onPath={setWalked} />
-				</div>
-				{/* Read out by a screen reader when the selection changes; not seen. */}
 				<p class="plan-live" role="status" aria-live="polite">
 					{announcement()}
 				</p>
-				<div class="plan-details" classList={{ "node-selected": Boolean(selectedNode()) }}>
-					<Show
-						when={selectedNode()}
-						keyed
-						fallback={
-							<>
-								<div class="plan-details-row">
-									<label class="plan-field-title">
-										<span>Title</span>
-										<input value={plan()!.title} onChange={(e) => setPlanField("title", e.currentTarget.value)} />
-									</label>
-									<label class="grow">
-										<span>Goal</span>
-										<input value={typeof plan()!.goal === "string" ? (plan()!.goal as string) : ""} placeholder="What this should achieve" onChange={(e) => setPlanField("goal", e.currentTarget.value)} />
-									</label>
-									<label class="plan-field-ticket" title="The ticket this plan is for. The agent is told what it asks, the open questions and the decisions already made when it refines the plan or writes the spec.">
-										<span>Ticket</span>
-										<input class="short" value={typeof plan()!.ticket === "string" ? (plan()!.ticket as string) : ""} placeholder="LIMS-123" onChange={(e) => setPlanField("ticket", ticketKey(e.currentTarget.value))} />
-									</label>
-								</div>
-								<div class="plan-details-row">
-									<label class="grow">
-										<span>Scripts</span>
-										<input value={Array.isArray(plan()!.targets) ? (plan()!.targets as string[]).join(", ") : ""} placeholder="Sample/Release.ssl" onChange={(e) => setTargets(e.currentTarget.value)} />
-									</label>
-								</div>
-							</>
-						}
-					>
-						{(node) => (
-							<>
-								<div class="plan-details-row">
-									<span class="plan-kind">{node.kind}</span>
-									<For each={linksOf(node.id)}>
-										{(unit) => (
-											<button class="link plan-code-link" title={`Open this step's code (G)${unit.script ? `: ${unit.script}` : ""}`} onClick={() => void openProcedure(planUri(), unit)}>
-												{unit.name}
-											</button>
-										)}
-									</For>
-									<Show when={node.kind === "call"}>
-										<label class="plan-field-calls">
-											<span>Calls</span>
-											<input value={node.ref ?? ""} onChange={(e) => setNodeField("ref", e.currentTarget.value)} />
-										</label>
-									</Show>
-									<label class="plan-field-group">
-										<span>Stage</span>
-										<input
-											value={groupName()}
-											list="plan-groups"
-											placeholder="None (becomes a region)"
-											onChange={(e) => {
-												const p = plan();
-												if (p) apply(setGroup(p, node.id, e.currentTarget.value));
-											}}
-										/>
-									</label>
-									<datalist id="plan-groups">
-										<For each={plan()!.groups}>{(g) => <option value={g.name} />}</For>
-									</datalist>
-								</div>
-								<div class="plan-details-row">
-									<label class="grow">
-										<span>Notes</span>
-										<input value={node.notes ?? ""} placeholder="Anything the analyst or agent should know" onChange={(e) => setNodeField("notes", e.currentTarget.value)} />
-									</label>
-								</div>
-							</>
-						)}
-					</Show>
-				</div>
 			</Show>
 		</div>
 	);
