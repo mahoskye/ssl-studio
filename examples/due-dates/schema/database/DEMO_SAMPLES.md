@@ -1,3 +1,7 @@
+---
+source: schema/database/demo.sql
+---
+
 # DEMO_SAMPLES
 
 One row for each sample. `SetSampleDueDates` plans a due date where `DUE_ON` is empty, and `SaveDueDates` writes it.

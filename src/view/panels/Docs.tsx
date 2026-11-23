@@ -3,12 +3,14 @@
 // plans. Which folders those are comes from .ssl-studio/project.toml.
 import { Icon } from "../Icon";
 import { FileMark } from "../FileMark";
-import { createMemo, createSignal, For, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import type { DocFile } from "../../shared/protocol";
 import { backend } from "../backend";
+import { choose } from "../dialogs";
 import { docChecks } from "../../shared/docChecks";
-import { CATALOG_AREAS, docMatches, isCatalog, KNOWLEDGE, progress, progressShort, registryTitle, SCHEMAS, statusChoices, toneOf } from "../../shared/projectDocs";
-import { workspaceTags } from "../../shared/tags";
+import { CATALOG_AREAS, DOC_FOLDERS, docMatches, isCatalog, KNOWLEDGE, progress, progressShort, registryTitle, SCHEMAS, statusChoices, toneOf } from "../../shared/projectDocs";
+import { tagSearchPattern, workspaceTags } from "../../shared/tags";
+import { descendantTickets, ticketWork } from "../../shared/workContext";
 import { docs, docsError, docsLoading, newDoc, newDocIn, newFolderIn, setUpProject } from "../project";
 import {
 	archiveTicket,
@@ -16,6 +18,7 @@ import {
 	createTicketFolder,
 	exportDeploymentManifest,
 	exportTicketPacket,
+	followRename,
 	generateSchemaDocFromSql,
 	importTickets,
 	isArchivedTicket,
@@ -39,12 +42,13 @@ import {
 import { searchFor } from "./Search";
 import { manageTemplates, newNoteFromTemplate } from "../templater";
 import { folderParts, folderSaid, IMPORT_TICKETS, kindOf, NEW_DOCUMENT, NEW_FOLDER, NEW_PLAN, NEW_REGISTRY, NEW_SPEC, NEW_TICKET, newOfKind, plainSection, schemaFolderOf, schemaOf, sectionFolder, sectionMenu, SHOW_FOLDER, type DocSection } from "../../shared/docSections";
-import { joinPath } from "../../shared/paths";
+import { baseName, dirName, isInside, joinPath, relativeTo } from "../../shared/paths";
 import { schemaList, schemaRowTitle } from "../../shared/schemaList";
-import { shownRows, workList } from "../../shared/workList";
-import { activePath, canonical, notify, openFile, openToSide, setState, state } from "../state";
+import { isArchivedTicket as isArchivedTicketPath, shownRows, workList, type WorkSort } from "../../shared/workList";
+import { activePath, canonical, fileRenamed, notify, openFile, openToSide, save, setState, state } from "../state";
 import { gitStatus } from "../git";
 import { changeLetter } from "../../shared/gitStatus";
+import { recall, remember } from "../graph/canvas";
 import { focusRowsBelow, IconButton, isFolded, Row, RowGroup, Rows, setFold, setFolds, type Point } from "./Rows";
 import { chooseFromMenu } from "./RowMenu";
 import { Menu } from "../Menu";
@@ -69,6 +73,12 @@ function DocRow(props: { file: DocFile }) {
 			selected={selected()}
 			classList={{ selected: selected(), missing: !props.file.exists }}
 			title={props.file.exists ? props.file.path : `${props.file.name} is missing. Click it, or press Enter on it, to create it.`}
+			draggable={props.file.exists}
+			onDragStart={(e) => {
+				if (!props.file.exists) return;
+				e.dataTransfer?.setData("application/x-ssl-studio-file", props.file.path);
+				if (e.dataTransfer) e.dataTransfer.effectAllowed = "copyMove";
+			}}
 			onActivate={open}
 			onKeep={() => props.file.exists && void openFile(props.file.path, { keep: true })}
 			onMenu={(at) => void rowMenu(props.file, at)}
@@ -137,8 +147,137 @@ const CREATE_TICKET_FOLDER = "Create ticket folder…";
 const NEW_TICKET_FILE = "New file in ticket folder…";
 const NEW_SUBTICKET = "New sub-ticket…";
 const ARCHIVE_TICKET = "Archive ticket…";
+const ARCHIVE_ALL_DONE = "Archive all done tickets…";
+const ARCHIVE_RETIRE = "Archive / Retire…";
 const RENAME = "Rename…";
 const TRASH = "Move to trash…";
+
+/** Moves a spec or decision into a local `archive/` subfolder after ADR 0009 confirmation, following links. */
+async function archiveSpecOrDecision(file: DocFile): Promise<void> {
+	const root = state.workspace?.root;
+	if (!root) return;
+	const archiveDir = joinPath(dirName(file.path), "archive");
+	const dest = joinPath(archiveDir, baseName(file.path));
+	const relArchive = relativeTo(root, archiveDir).split("\\").join("/");
+	const existing = await backend.list(archiveDir).catch(() => []);
+	if (existing.some((e) => e.name.toLowerCase() === baseName(dest).toLowerCase())) {
+		notify(`Cannot archive: ${baseName(dest)} already exists in ${relArchive}/.`, "error");
+		return;
+	}
+	const isDecision = file.group === "knowledge" && file.kind === "decisions";
+	const targetStatus = isDecision ? "superseded" : "retired";
+	const needsStatus = toneOf(file.status) !== "off";
+	const ARCHIVE_MARK = `Archive & mark ${targetStatus}`;
+	const ARCHIVE_KEEP = "Archive (keep status)";
+	const picked = await choose(
+		`Move ${file.title || baseName(file.path)} into ${relArchive}/?`,
+		needsStatus ? [ARCHIVE_MARK, ARCHIVE_KEEP] : ["Archive"],
+	);
+	if (!picked) return;
+	const key = canonical(file.path);
+	if (state.dirty[key] && !(await save(key))) {
+		notify("Save unsaved edits before archiving this document.", "error");
+		return;
+	}
+	const beforeDocs = await backend.docs().catch(() => docs().slice());
+	try {
+		if (picked === ARCHIVE_MARK) await setStatus(file.path, targetStatus);
+		await backend.rename(file.path, dest);
+		fileRenamed(file.path, dest);
+		setState("treeVersion", (v) => v + 1);
+		await followRename(file.path, dest, beforeDocs);
+		notify(`Archived ${file.title || baseName(file.path)} to ${relArchive}/.`);
+	} catch (e: any) {
+		setState("treeVersion", (v) => v + 1);
+		notify(String(e?.message ?? e), "error");
+	}
+}
+
+/** Batch-archives all non-archived tickets whose status is done into `<tickets>/archive/` after ADR 0009 confirmation. */
+async function archiveAllDoneTickets(): Promise<void> {
+	const root = state.workspace?.root;
+	const project = state.project;
+	if (!root || !project) return;
+	const doneTickets = docs().filter(
+		(d) => d.exists && d.group === "tickets" && !isCatalog(d) && !isArchivedTicket(d) && !isArchivedTicketPath(d) && toneOf(d.status) === "done",
+	);
+	if (!doneTickets.length) return notify("No done tickets to archive.");
+	const docsParts = folderParts(project.docs ?? "docs");
+	const ticketsRoot = joinPath(root, ...docsParts, DOC_FOLDERS.tickets);
+	const archiveDir = joinPath(ticketsRoot, "archive");
+	const relArchive = relativeTo(root, archiveDir).split("\\").join("/");
+	const preview = doneTickets.slice(0, 4).map((t) => t.ticket || baseName(t.path)).join(", ") + (doneTickets.length > 4 ? ` and ${doneTickets.length - 4} more` : "");
+	const GO = `Archive ${doneTickets.length} done ${doneTickets.length === 1 ? "ticket" : "tickets"}`;
+	if ((await choose(`Move ${doneTickets.length} done ${doneTickets.length === 1 ? "ticket" : "tickets"} (${preview}) into ${relArchive}/?`, [GO])) !== GO) {
+		return;
+	}
+	const { retargetScopedFolder } = await import("./Explorer");
+	let archived = 0;
+	const skipped: string[] = [];
+	for (const file of doneTickets) {
+		const isLayout1 = Boolean(file.ticketFolder && isInside(file.ticketFolder, file.path));
+		const isLayout2 = Boolean(file.ticketFolder && !isLayout1);
+		const fromPrimary = isLayout1 ? file.ticketFolder! : file.path;
+		const toPrimary = joinPath(archiveDir, baseName(fromPrimary));
+		const fromSibling = isLayout2 ? file.ticketFolder! : null;
+		const toSibling = fromSibling ? joinPath(archiveDir, baseName(fromSibling)) : null;
+
+		const archiveEntries = await backend.list(archiveDir).catch(() => []);
+		const existingNames = new Set(archiveEntries.map((e) => e.name.toLowerCase()));
+		if (existingNames.has(baseName(toPrimary).toLowerCase()) || (toSibling && existingNames.has(baseName(toSibling).toLowerCase()))) {
+			skipped.push(file.ticket || baseName(fromPrimary));
+			continue;
+		}
+		// Save any unsaved buffers inside the ticket/folder first.
+		const dirtyTargets = Object.keys(state.dirty).filter(
+			(p) =>
+				state.dirty[p] &&
+				(p === canonical(fromPrimary) ||
+					isInside(fromPrimary, p) ||
+					Boolean(fromSibling && (p === canonical(fromSibling) || isInside(fromSibling, p)))),
+		);
+		let allSaved = true;
+		for (const p of dirtyTargets) {
+			if (!(await save(p))) {
+				allSaved = false;
+				break;
+			}
+		}
+		if (!allSaved) {
+			skipped.push(file.ticket || baseName(fromPrimary));
+			continue;
+		}
+		const beforeDocs = await backend.docs().catch(() => docs().slice());
+		try {
+			await backend.rename(fromPrimary, toPrimary);
+			fileRenamed(fromPrimary, toPrimary);
+			if (fromSibling && toSibling) {
+				try {
+					await backend.rename(fromSibling, toSibling);
+					fileRenamed(fromSibling, toSibling);
+					retargetScopedFolder(fromSibling, toSibling);
+				} catch (err) {
+					await backend.rename(toPrimary, fromPrimary).catch(() => {});
+					fileRenamed(toPrimary, fromPrimary);
+					throw err;
+				}
+			} else if (isLayout1) {
+				retargetScopedFolder(fromPrimary, toPrimary);
+			}
+			const coMoved = fromSibling && toSibling ? [{ from: fromSibling, to: toSibling }] : undefined;
+			await followRename(fromPrimary, toPrimary, beforeDocs, coMoved);
+			archived++;
+		} catch {
+			skipped.push(file.ticket || baseName(fromPrimary));
+		}
+	}
+	setState("treeVersion", (v) => v + 1);
+	if (archived) {
+		notify(`Archived ${archived} done ${archived === 1 ? "ticket" : "tickets"} to ${relArchive}/${skipped.length ? ` (skipped: ${skipped.join(", ")})` : ""}.`);
+	} else if (skipped.length) {
+		notify(`Could not archive: ${skipped.join(", ")} (already in archive/ or unsaved).`, "error");
+	}
+}
 /**
  * What can be done to a document from its row, without opening it. First what
  * is the document's own: a ticket, a spec, a decision or a question is set to
@@ -161,6 +300,10 @@ async function rowMenu(file: DocFile, at: Point) {
 	// row here, where nothing would read the project again after it.
 	const own = Boolean(state.project && canonical(file.path) === canonical(state.project.path));
 	const isTicket = file.group === "tickets" && !catalog;
+	const isArchivableDoc =
+		!catalog &&
+		(file.group === "specs" || (file.group === "knowledge" && file.kind === "decisions")) &&
+		!/[\\/]archive[\\/]/i.test(file.path);
 	const isAnsweredQuestion = file.group === "knowledge" && file.kind === "questions" && !catalog && toneOf(file.status) === "done";
 	const isSchemaItem = file.group === "schema" && !catalog;
 	const isSchemaSql = isSchemaItem && /\.(sql|ddl|pks|pkb)$/i.test(file.name);
@@ -173,7 +316,7 @@ async function rowMenu(file: DocFile, at: Point) {
 	const FIND_IN_CODE = "Find usages in code";
 	const isFocusedTicket = Boolean(file.ticket && state.settings.activeTicket?.toLowerCase() === file.ticket.toLowerCase());
 	const SET_ACTIVE_TICKET = isFocusedTicket ? `Clear active ticket (${file.ticket})` : `Set ${file.ticket} as active ticket`;
-	const archived = isTicket && isArchivedTicket(file);
+	const archived = isTicket && (isArchivedTicket(file) || isArchivedTicketPath(file));
 	const ticketActions = isTicket
 		? [
 				...(file.ticket ? [SET_ACTIVE_TICKET, NEW_SUBTICKET, EXPORT_MANIFEST, EXPORT_PACKET, CLOSEOUT_TICKET] : []),
@@ -182,6 +325,7 @@ async function rowMenu(file: DocFile, at: Point) {
 			]
 		: [];
 	const extraActions = [
+		...(isArchivableDoc ? [ARCHIVE_RETIRE] : []),
 		...(isAnsweredQuestion ? [PROMOTE_DECISION] : []),
 		...(isSchemaSql ? [DOC_FROM_SQL] : []),
 		...(isSchemaItem ? [FIND_IN_CODE] : []),
@@ -200,6 +344,7 @@ async function rowMenu(file: DocFile, at: Point) {
 	else if (picked === EXPORT_MANIFEST && file.ticket) await exportDeploymentManifest(file.path, file.ticket, "markdown");
 	else if (picked === EXPORT_PACKET && file.ticket) await exportTicketPacket(file.path, file.ticket, "html");
 	else if (picked === CLOSEOUT_TICKET && file.ticket) await closeoutTicket(file.path, file.ticket);
+	else if (picked === ARCHIVE_RETIRE) await archiveSpecOrDecision(file);
 	else if (picked === PROMOTE_DECISION) await promoteQuestionToDecision(file.path);
 	else if (picked === DOC_FROM_SQL) await generateSchemaDocFromSql(file.path);
 	else if (picked === FIND_IN_CODE) {
@@ -236,6 +381,7 @@ function ItemRow(props: {
 	aside?: boolean;
 	short?: string;
 	linkDetail?: string;
+	archived?: boolean;
 	/**
 	 * In a list where rows have rows under them: whether this one has, and whether they are shut away. Leaves a
 	 * twisty's room either way. `locked` says why it cannot be shut now (a filter is showing everything it found).
@@ -244,16 +390,25 @@ function ItemRow(props: {
 }) {
 	const selected = () => activePath() === canonical(props.file.path);
 	const stale = () => props.file.catalog?.stale;
+	const isFocusedTicket = () =>
+		Boolean(
+			props.file.group === "tickets" &&
+				props.file.ticket &&
+				state.settings.activeTicket &&
+				state.settings.activeTicket.toLowerCase() === props.file.ticket.toLowerCase(),
+		);
 	return (
 		<Row
 			class="tree-row doc-row"
 			key={props.file.path}
 			selected={selected()}
-			classList={{ selected: selected(), catalog: isCatalog(props.file) }}
+			classList={{ selected: selected(), catalog: isCatalog(props.file), "active-ticket": isFocusedTicket(), "archived-row": Boolean(props.archived) }}
 			style={{ "padding-left": `${8 + (props.depth ?? 0) * 14}px` }}
 			// Where it is, its state, what it is for, how it is linked, and what is wrong with it: nothing the reader has to keep up by hand.
 			title={[
 				props.file.path,
+				isFocusedTicket() ? "Active focused ticket" : "",
+				props.archived ? "Archived ticket" : "",
 				props.file.status ? `Status: ${props.file.status}` : "",
 				props.file.ticketFolder
 					? (() => {
@@ -310,11 +465,21 @@ function ItemRow(props: {
 				<span class="visually-hidden">{props.fold!.locked ? `${props.fold!.locked}.` : props.fold!.shut ? "Shut: what is under it is hidden." : "Open."} </span>
 			</Show>
 			<span class="label">
+				<Show when={isFocusedTicket()}>
+					<span class="doc-active-pin" title="Active focused ticket" aria-label="Active focused ticket">
+						<Icon name="pinned" />
+					</span>
+				</Show>
 				<Show when={props.lead}>
 					<strong class="doc-key">{props.lead}</strong>{" "}
 				</Show>
 				{isCatalog(props.file) ? "Catalog" : props.file.title || props.file.name}
 			</span>
+			<Show when={props.archived}>
+				<span class="meta doc-archived-badge" title="Archived ticket">
+					archived
+				</span>
+			</Show>
 			<Show when={props.note}>
 				{/* In a narrow panel a note that has a shorter way of saying itself says it that way, and the title keeps the room. */}
 				<span class="meta" classList={{ aside: props.aside, shortens: Boolean(props.short) }} title={props.short ? props.note : undefined}>
@@ -416,8 +581,15 @@ async function headMenu(section: DocSection, title: string, at: Point) {
 	const root = state.workspace?.root;
 	if (!project || !root) return;
 	const folder = sectionFolder(section, project);
-	const picked = await chooseFromMenu(`Actions for ${title}, in ${folderSaid(folder)}`, sectionMenu(section), at);
+	const hasDoneTickets =
+		section === "work" &&
+		docs().some(
+			(d) => d.exists && d.group === "tickets" && !isCatalog(d) && !isArchivedTicket(d) && !isArchivedTicketPath(d) && toneOf(d.status) === "done",
+		);
+	const entries = hasDoneTickets ? [...sectionMenu(section), ARCHIVE_ALL_DONE] : sectionMenu(section);
+	const picked = await chooseFromMenu(`Actions for ${title}, in ${folderSaid(folder)}`, entries, at);
 	if (!picked) return;
+	if (picked === ARCHIVE_ALL_DONE) return void archiveAllDoneTickets();
 	const kind = kindOf(section) ?? KNOWLEDGE.find((known) => picked === newOfKind(known));
 	// From the schema's own heading, the kind is the one whose entry was picked; from a kind's heading, that kind.
 	const schema = schemaOf(section) ?? (section === "schema" ? SCHEMAS.find((known) => picked === newOfKind(known)) : undefined);
@@ -464,30 +636,54 @@ const Head = (props: { title: string; folder?: string }) => (
 /**
  * The work: each ticket with what was planned and spec'd for it under it, a ticket that is part of another under its
  * parent, what is under way first. Finished tickets beyond a few fold away behind a count. Specs for no ticket here follow.
+ * Archived tickets (`tickets/archive/...`) stay collapsed in their own subgroup until opened or matched by search.
  */
 function Work(props: { files: DocFile[]; empty?: string; filtered?: boolean }) {
 	const [all, setAll] = createSignal(false);
+	const savedSort = recall("docs.workSort");
+	const [sort, setSort] = createSignal<WorkSort>(savedSort === "key" || savedSort === "title" ? savedSort : "status");
+	const chooseSort = (next: WorkSort) => {
+		setSort(next);
+		remember("docs.workSort", next);
+	};
+	const [archiveOpen, setArchiveOpen] = createSignal(false);
 	// What a filter found is shown, finished or not.
-	const list = createMemo(() => workList(props.files, state.workspace?.root, { all: all() || props.filtered }));
+	const list = createMemo(() => workList(props.files, state.workspace?.root, { all: all() || props.filtered, sort: sort() }));
 	/** How many finished tickets fold away, whether or not they are shown now. */
-	const everything = createMemo(() => (props.filtered ? 0 : workList(props.files, state.workspace?.root).folded));
+	const everything = createMemo(() => (props.filtered || sort() !== "status" ? 0 : workList(props.files, state.workspace?.root, { sort: sort() }).folded));
 	const catalogs = () => props.files.filter((d) => (d.group === "tickets" || d.group === "specs") && isCatalog(d));
 	/** The rows with what is under a shut ticket left out. What a filter found is shown, shut or not. */
 	const rows = createMemo(() => shownRows(list().rows, (row) => !props.filtered && isFolded(ticketFold(row.file))));
+	const archivedRows = createMemo(() => shownRows(list().archived, (row) => !props.filtered && isFolded(ticketFold(row.file))));
+	const archivedTicketCount = createMemo(() => list().archived.filter((r) => r.kind === "ticket").length);
+	const archiveExpanded = () => Boolean(props.filtered) || archiveOpen();
+	const activeTicketCount = createMemo(() => list().rows.filter((r) => r.kind === "ticket").length);
 	const fold = (row: ReturnType<typeof rows>[number]) => ({ parent: row.parent, shut: row.shut, locked: props.filtered ? LOCKED : undefined, toggle: () => setFold(ticketFold(row.file), !row.shut) });
+	const renderWorkRow = (row: ReturnType<typeof rows>[number], isArchived = false) =>
+		row.kind === "ticket" ? (
+			<ItemRow file={row.file} depth={row.depth + (isArchived ? 1 : 0)} lead={row.file.ticket} linkDetail={row.link?.detail} archived={isArchived} fold={fold(row)} />
+		) : row.kind === "plan" ? (
+			<ItemRow file={{ ...row.file, title: row.file.name.replace(/\.plan\.json$/i, "") }} depth={row.depth + (isArchived ? 1 : 0)} note="plan" linkDetail={row.link?.detail} archived={isArchived} fold={fold(row)} />
+		) : (
+			<ItemRow file={row.file} depth={row.depth + (isArchived ? 1 : 0)} note="spec" linkDetail={row.link?.detail} archived={isArchived} fold={fold(row)} />
+		);
 	return (
 		<RowGroup fold="docs:work" label="Work" onMenu={(at) => void headMenu("work", "Work", at)} open={props.filtered} count={props.files.filter((d) => (d.group === "tickets" || d.group === "specs") && !isCatalog(d)).length} head={<Head title="Work" folder={folderOf("work")} />} rows={props.files.some((d) => d.group === "tickets" || d.group === "specs")} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
-			<For each={rows()}>
-				{(row) =>
-					row.kind === "ticket" ? (
-						<ItemRow file={row.file} depth={row.depth} lead={row.file.ticket} linkDetail={row.link?.detail} fold={fold(row)} />
-					) : row.kind === "plan" ? (
-						<ItemRow file={{ ...row.file, title: row.file.name.replace(/\.plan\.json$/i, "") }} depth={row.depth} note="plan" linkDetail={row.link?.detail} fold={fold(row)} />
-					) : (
-						<ItemRow file={row.file} depth={row.depth} note="spec" linkDetail={row.link?.detail} fold={fold(row)} />
-					)
-				}
-			</For>
+			<Show when={activeTicketCount() > 1}>
+				<div class="docs-work-sort" role="group" aria-label="Sort tickets">
+					<span class="docs-sort-label">Sort</span>
+					<button type="button" classList={{ on: sort() === "status" }} onClick={() => chooseSort("status")}>
+						Status
+					</button>
+					<button type="button" classList={{ on: sort() === "key" }} onClick={() => chooseSort("key")}>
+						Key
+					</button>
+					<button type="button" classList={{ on: sort() === "title" }} onClick={() => chooseSort("title")}>
+						Title
+					</button>
+				</div>
+			</Show>
+			<For each={rows()}>{(row) => renderWorkRow(row, false)}</For>
 			{/* What is done or set aside is not what the list is opened for: beyond a few, it waits behind its count. */}
 			<Show when={everything()}>
 				<Row class="tree-row doc-row doc-more" key="finished-tickets" title={all() ? "Leave out the tickets that are done or set aside" : "Show the tickets that are done or set aside"} onActivate={() => setAll(!all())}>
@@ -496,6 +692,23 @@ function Work(props: { files: DocFile[]; empty?: string; filtered?: boolean }) {
 			</Show>
 			{/* The same room for a twisty as the rows above, so that the marks line up down the list. */}
 			<For each={list().loose}>{(spec) => <ItemRow file={spec} note={spec.tickets?.length ? `for ${spec.tickets.join(", ")}` : "spec, no ticket"} fold={NO_FOLD} />}</For>
+			<Show when={archivedTicketCount() > 0}>
+				<Row
+					class="group-head doc-kind foldable docs-archive-head"
+					key="docs:work:archive"
+					label={`Archive (${archivedTicketCount()})`}
+					expanded={archiveExpanded()}
+					title={props.filtered ? LOCKED : archiveExpanded() ? "Hide archived tickets" : "Show archived tickets"}
+					onActivate={() => !props.filtered && setArchiveOpen((v) => !v)}
+					onToggle={() => !props.filtered && setArchiveOpen((v) => !v)}
+				>
+					<Icon name={archiveExpanded() ? "chevron-down" : "chevron-right"} class="twisty" />
+					<span class="head-words">Archive ({archivedTicketCount()})</span>
+				</Row>
+				<Show when={archiveExpanded()}>
+					<For each={archivedRows()}>{(row) => renderWorkRow(row, true)}</For>
+				</Show>
+			</Show>
 			<For each={catalogs()}>{(catalog) => <ItemRow file={catalog} note={catalog.group} fold={NO_FOLD} />}</For>
 		</RowGroup>
 	);
@@ -622,24 +835,47 @@ export function Docs() {
 	};
 	/** Narrows every list in the panel to the documents the words typed are in. */
 	const [filter, setFilter] = createSignal("");
-	const [mode, setMode] = createSignal<"all" | "active" | "problems">("all");
+	const [mode, setMode] = createSignal<"all" | "active" | "ticket" | "problems">("all");
 	const [activeTag, setActiveTag] = createSignal<string | null>(null);
+	const focusedTicket = () => state.settings.activeTicket?.trim() || "";
+	createEffect(() => {
+		if (!focusedTicket() && mode() === "ticket") setMode("all");
+	});
 	const tags = createMemo(() => workspaceTags(docs()));
 	const filtering = () => Boolean(filter().trim()) || mode() !== "all" || Boolean(activeTag());
 	const hasIssue = (d: DocFile) => Boolean(d.broken?.length || d.missing?.length || d.missingSource || d.problems?.length || d.catalog?.stale || d.untouched);
+	const focusedTicketPaths = createMemo(() => {
+		const key = focusedTicket();
+		if (!key) return new Set<string>();
+		const list = docs();
+		const paths = new Set<string>();
+		const keys = [key, ...descendantTickets(list, key).map((t) => t.ticket).filter((k): k is string => Boolean(k))];
+		for (const k of keys) {
+			const tDoc = list.find((d) => d.exists && d.group === "tickets" && d.ticket?.toLowerCase() === k.toLowerCase());
+			if (tDoc) paths.add(canonical(tDoc.path));
+			for (const g of ticketWork(list, k)) {
+				if (g.kind === "ticket") continue;
+				for (const f of g.files) paths.add(canonical(f.path));
+			}
+		}
+		return paths;
+	});
 	// A registry is known by what it is called, not by its file's name.
 	const shown = createMemo(() => {
 		const list = docs();
 		if (!filtering()) return list;
 		const tagLower = activeTag()?.toLowerCase() ?? "";
+		const tPaths = mode() === "ticket" ? focusedTicketPaths() : null;
 		return list.filter((d) => {
 			if (tagLower) {
 				if (isCatalog(d) || !d.tags?.some((t) => t.toLowerCase() === tagLower)) return false;
 			}
 			if (mode() === "problems") {
 				if (!hasIssue(d)) return false;
+			} else if (mode() === "ticket") {
+				if (isCatalog(d) || !tPaths?.has(canonical(d.path))) return false;
 			} else if (mode() === "active") {
-				if (isCatalog(d)) return false;
+				if (isCatalog(d) || isArchivedTicket(d) || isArchivedTicketPath(d)) return false;
 				const t = toneOf(d.status);
 				if (t !== "active" && t !== "waiting") return false;
 			} else if (isCatalog(d)) {
@@ -745,9 +981,19 @@ export function Docs() {
 						<button type="button" classList={{ on: mode() === "all" }} onClick={() => setMode("all")}>
 							All
 						</button>
-						<button type="button" classList={{ on: mode() === "active" }} title="Active and waiting work" onClick={() => setMode("active")}>
+						<button type="button" classList={{ on: mode() === "active" }} title="Active and waiting work (excludes archived tickets)" onClick={() => setMode("active")}>
 							Active
 						</button>
+						<Show when={focusedTicket()}>
+							<button
+								type="button"
+								classList={{ on: mode() === "ticket" }}
+								title={`Show only ${focusedTicket()} and its linked specs, plans, decisions, questions, schemas, and registries`}
+								onClick={() => setMode("ticket")}
+							>
+								This ticket
+							</button>
+						</Show>
 						<button type="button" classList={{ on: mode() === "problems" }} title="Documents with broken links, problems, or stale catalogs" onClick={() => setMode("problems")}>
 							Issues
 						</button>
@@ -776,7 +1022,9 @@ export function Docs() {
 								? `No matching documents tagged #${activeTag()}.`
 								: mode() === "problems"
 									? "No documents with issues right now."
-									: "No active or waiting documents right now."}
+									: mode() === "ticket"
+										? `No documents linked to ${focusedTicket()} right now.`
+										: "No active or waiting documents right now."}
 					</p>
 				</Show>
 				<Show when={has("project")}>
@@ -821,8 +1069,7 @@ export function Docs() {
 											if (!picked) return;
 											if (picked === FILTER) setActiveTag((cur) => (cur?.toLowerCase() === bucket.tag.toLowerCase() ? null : bucket.tag));
 											else if (picked === SEARCH) {
-												const esc = bucket.tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-												searchFor(`(?:#|\\btags?:[^\\n]*\\b|\\-\\s+)${esc}(?![A-Za-z0-9_/-])`, { regex: true, include: "", exclude: "" });
+												searchFor(tagSearchPattern(bucket.tag), { regex: true, include: "", exclude: "" });
 											} else if (picked === RENAME_TAG) {
 												const { renameTagAcrossWorkspace } = await import("../projectDocs");
 												await renameTagAcrossWorkspace(bucket.tag);

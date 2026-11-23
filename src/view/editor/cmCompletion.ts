@@ -6,10 +6,10 @@
 import { autocompletion, type Completion, type CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
 import type { Extension } from "@codemirror/state";
 import { fenced } from "../../shared/catalog";
-import { linkBeingWritten, linkChoices } from "../../shared/docLinks";
+import { linkBeingWritten, linkChoices, linkWritten } from "../../shared/docLinks";
 import { CALLOUT_PRESETS, CALLOUT_SPECS, documentHeadings } from "../../shared/markdownEdit";
 import { docByName, nameBeingWritten, nameChoices } from "../../shared/namedLinks";
-import { baseName, relativeTo } from "../../shared/paths";
+import { baseName, dirName, relativePath, relativeTo } from "../../shared/paths";
 import { extractTags, workspaceTags } from "../../shared/tags";
 import { backend } from "../backend";
 import { docs } from "../project";
@@ -17,6 +17,24 @@ import { canonical, documents, state } from "../state";
 import { listWorkspaceImages } from "./imageResolve";
 
 const headingCache = new Map<string, { at: number; text: string }>();
+const CODE_LINK_EXT_RE = /\.(ssl|ds|sql|xfd)$/i;
+let codeFilesCache: { at: number; treeVer: number; root: string; files: string[] } | null = null;
+
+async function listWorkspaceCodeFiles(root: string): Promise<string[]> {
+	const now = Date.now();
+	const ver = state.treeVersion;
+	if (codeFilesCache && codeFilesCache.root === root && codeFilesCache.treeVer === ver && now - codeFilesCache.at < 5000) {
+		return codeFilesCache.files;
+	}
+	try {
+		const all = await backend.files();
+		const filtered = all.filter((p) => CODE_LINK_EXT_RE.test(p));
+		codeFilesCache = { at: now, treeVer: ver, root, files: filtered };
+		return filtered;
+	} catch {
+		return codeFilesCache?.root === root ? codeFilesCache.files : [];
+	}
+}
 
 async function readTargetText(path: string): Promise<string> {
 	const key = canonical(path);
@@ -203,20 +221,37 @@ function markdownCompletionSource(filePath: () => string) {
 			return { from, to: context.pos + (closed ? rest : 0), options, validFor: /^[^[\]|#\n]*$/ };
 		}
 
-		// 4. Relative Markdown link completion: `](path`.
+		// 4. Relative Markdown link completion: `](path` (docs first, then workspace `.ssl`/`.ds`/`.sql`/`.xfd` code files).
 		const linkTyped = linkBeingWritten(before);
 		if (linkTyped !== null && root) {
 			const from = context.pos - linkTyped.length;
 			const rest = /^[^()<>\s]*/.exec(after)![0].length;
 			const files = docs().filter((f) => canonical(f.path) !== here);
 			const choices = linkChoices(files, here, root);
+			const docPathSet = new Set(files.map((f) => canonical(f.path)));
 			const options: Completion[] = choices.map((choice, idx) => ({
 				label: choice.label,
 				detail: choice.detail,
 				type: "file",
-				boost: 1000 - idx,
+				boost: 1000 - Math.min(idx, 500),
 				apply: choice.insert,
 			}));
+			const codeFiles = await listWorkspaceCodeFiles(root);
+			const hereDir = dirName(here);
+			let codeIdx = 0;
+			for (const cf of codeFiles) {
+				const canonCf = canonical(cf);
+				if (canonCf === here || docPathSet.has(canonCf)) continue;
+				const rel = relativeTo(root, cf).replace(/\\/g, "/");
+				const insert = linkWritten(relativePath(hereDir, cf).replace(/\\/g, "/"));
+				options.push({
+					label: baseName(cf),
+					detail: rel,
+					type: "file",
+					boost: 200 - Math.min(codeIdx++, 200),
+					apply: insert,
+				});
+			}
 			return { from, to: context.pos + rest, options, validFor: /^[^()<>\s]*$/ };
 		}
 

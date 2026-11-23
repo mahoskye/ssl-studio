@@ -1,3 +1,7 @@
+---
+source: schema/database/demo.sql
+---
+
 # DEMO_OUTAGES
 
 The days an instrument is not available: maintenance, calibration, a breakdown. A sample that needs the instrument does not count those days.

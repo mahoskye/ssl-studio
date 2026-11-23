@@ -4,17 +4,23 @@
 // wrote (the status, a note, any column of their own) and says what is new,
 // what has changed and what has gone.
 import { columnOf, csvRow, parseCsv } from "./csv";
+import { toneOf } from "./projectDocs";
 import type { ManifestFile } from "./protocol";
 
 /** The columns the IDE fills, and the one a person does. */
 export const MANIFEST_COLUMNS = ["path", "kind", "bytes", "lines", "sha256", "status", "note"] as const;
-/** A file seen for the first time, and one that is no longer there. */
+/** A file seen for the first time, one that changed after verification, and one that is no longer there. */
 export const FOUND = "found";
+export const CHANGED = "changed";
 export const GONE = "gone";
 
-export type ManifestChange = { text: string; added: number; changed: number; gone: number; same: number };
+export type ManifestChange = { text: string; added: number; changed: number; gone: number; same: number; changedAfterDone: string[] };
 
-export function mergeManifest(existing: string | null | undefined, files: readonly ManifestFile[]): ManifestChange {
+export function mergeManifest(
+	existing: string | null | undefined,
+	files: readonly ManifestFile[],
+	options?: { markChangedAfterDone?: boolean },
+): ManifestChange {
 	const table = parseCsv(existing ?? "");
 	const delimiter = table.delimiter;
 	const header = table.header.map((c) => c.text.trim());
@@ -30,6 +36,7 @@ export function mergeManifest(existing: string | null | undefined, files: readon
 	const eol = (existing ?? "").includes("\r\n") ? "\r\n" : "\n";
 	const seen = new Set<string>();
 	const counts = { added: 0, changed: 0, gone: 0, same: 0 };
+	const changedAfterDone: string[] = [];
 	const out: string[][] = [];
 	for (const cells of table.rows) {
 		// A row with more cells than there are columns keeps them: what a person wrote is not dropped for being out of place.
@@ -44,8 +51,14 @@ export function mergeManifest(existing: string | null | undefined, files: readon
 			if (row[status]!.trim().toLowerCase() !== GONE) counts.gone++;
 			row[status] = GONE;
 		} else {
-			if (row[sha]!.trim() && row[sha]!.trim() !== file.sha256) counts.changed++;
-			else counts.same++;
+			const shaChanged = Boolean(row[sha]!.trim() && row[sha]!.trim() !== file.sha256);
+			if (shaChanged) {
+				counts.changed++;
+				if (toneOf(row[status]!) === "done") {
+					changedAfterDone.push(file.path);
+					if (options?.markChangedAfterDone) row[status] = CHANGED;
+				}
+			} else counts.same++;
 			// A file that had gone and is back is found again; any other status is the person's.
 			if (row[status]!.trim().toLowerCase() === GONE || !row[status]!.trim()) row[status] = FOUND;
 			[row[kind], row[bytes], row[lines], row[sha]] = [file.kind, String(file.bytes), String(file.lines), file.sha256];
@@ -59,7 +72,7 @@ export function mergeManifest(existing: string | null | undefined, files: readon
 		out.push(row);
 		counts.added++;
 	}
-	return { text: `${[header, ...out].map((row) => csvRow(row, delimiter)).join(eol)}${eol}`, ...counts };
+	return { text: `${[header, ...out].map((row) => csvRow(row, delimiter)).join(eol)}${eol}`, ...counts, changedAfterDone };
 }
 
 /** What a manifest's update came to, in a sentence. */

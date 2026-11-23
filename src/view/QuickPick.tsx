@@ -71,15 +71,16 @@ function Picker(props: { mode: QuickMode }) {
 							: doc.ticket || doc.title || doc.heading || ""
 					: "";
 				const relPath = rel(path);
-				const searchText = title ? `${title} ${doc?.status ?? ""} ${relPath}` : relPath;
-				return { path, rel: relPath, title, status: doc?.status, searchText };
+				const tags = doc?.tags ?? [];
+				const tagsText = tags.map((t) => `#${t}`).join(" ");
+				return { path, rel: relPath, title, status: doc?.status, tags, tagsText };
 			});
 			const q = asked.query.trim();
 			const ranked: { item: (typeof found)[number]; tier: number; script: boolean }[] = [];
 			for (const f of found) {
-				// Score path properly via `fileTier` on `f.rel` AND allow multi-word out-of-order matches against title/ticket/path.
+				// Score path properly via `fileTier` on `f.rel` AND allow multi-word out-of-order matches against title/ticket/tags/path.
 				const pathTier = fileTier(q, f.rel);
-				const wordScore = q ? matchWords(q, f.title || baseName(f.path), `${f.status ?? ""} ${f.rel}`) : 1;
+				const wordScore = q ? matchWords(q, f.title || baseName(f.path), `${f.status ?? ""} ${f.tagsText} ${f.rel}`) : 1;
 				let tier: number | null = pathTier;
 				if (wordScore > 0) {
 					const titleTier = wordScore >= 4 ? 1.5 : 2.5;
@@ -96,7 +97,7 @@ function Picker(props: { mode: QuickMode }) {
 			);
 			return ranked.slice(0, 200).map(({ item: f }) => ({
 				label: f.title || baseName(f.path),
-				detail: f.status ? `${f.status} · ${f.rel}` : f.rel,
+				detail: [f.status, f.tags.length ? f.tags.slice(0, 2).map((t) => `#${t}`).join(" ") : "", f.rel].filter(Boolean).join(" · "),
 				file: baseName(f.path),
 				run: () => void openFile(f.path, asked.at ? { reveal: asked.at, keep: true } : { keep: true }),
 			}));

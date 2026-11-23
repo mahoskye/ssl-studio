@@ -8,6 +8,7 @@ import { Annotation, Compartment, EditorSelection, EditorState, RangeSetBuilder,
 import { Decoration, type DecorationSet, drawSelection, dropCursor, EditorView, highlightSpecialChars } from "@codemirror/view";
 import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import { Portal } from "solid-js/web";
+import { localDay } from "../../shared/dates";
 import { evaluateTicketReadiness } from "../../shared/docExport";
 import { linkLeads, withLinkFile } from "../../shared/docLinks";
 import { fenceAtLine, fenceFormatTarget } from "../../shared/fencedFormat";
@@ -16,11 +17,13 @@ import {
 	formatFrontMatterInnerReplacement,
 	frontMatter,
 	frontMatterInnerSpan,
+	one,
 	quoteYamlScalar,
 	removeFromFrontMatterList,
+	stripEmptyFrontMatter,
 	withFrontMatter,
 } from "../../shared/frontMatter";
-import { workspaceTags } from "../../shared/tags";
+import { tagSearchPattern, workspaceTags } from "../../shared/tags";
 import { documentHeadings, findHeadingLine, withImageWidth } from "../../shared/markdownEdit";
 import type { TableAlign } from "../../shared/markdownTables";
 import { docByName, linkedFrom, namedLink } from "../../shared/namedLinks";
@@ -86,7 +89,6 @@ import {
 } from "./cmKeymap";
 import "./cmLive.css";
 import {
-	editYamlField,
 	linkAtOffset,
 	liveBlockField,
 	liveCallbacksFacet,
@@ -96,19 +98,19 @@ import {
 	rawEditBlockField,
 	readOnlyModeFacet,
 	refreshLiveEffect,
-	setEditYamlEffect,
 	setRawEditBlockEffect,
 	type HoverTarget,
 	type ImageLightboxInfo,
 } from "./cmLivePlugin";
 import { applyMarkdownFormatToTextarea, focusLiveWidgetAt, type MermaidLightboxInfo } from "./cmLiveShared";
-import { copyMermaidAsPng, downloadMermaidBlob } from "./cmMermaid";
+import { copyMermaidAsPng, downloadMermaidBlob, renderMermaidSvgForExport } from "./cmMermaid";
 import { cmMarkdownHighlight, cmStudioTheme } from "./cmTheme";
 import { buildHoverPreview, type HoverPreviewData } from "./hoverPreview";
 import { hydrateImagesInElement } from "./imageResolve";
 import { formatCodeFence } from "./languages";
-import { registerLiveEditor, registerReadFind, type LiveEditorHandle } from "./liveBridge";
+import { bumpLiveSelection, registerLiveEditor, registerReadFind, type LiveEditorHandle } from "./liveBridge";
 import { colourCode } from "./markdownCode";
+import { hydrateMathInElement } from "./markdownHtml";
 import { mdOutline, setMdOutline } from "./mdOutline";
 import { monaco } from "./monaco";
 import { askRows } from "./tableRows";
@@ -208,6 +210,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 
 	const modeExtensions = (read: boolean): Extension => [
 		readOnlyModeFacet.of(read),
+		EditorState.readOnly.of(read),
 		EditorView.editable.of(!read),
 		...(read
 			? [
@@ -336,6 +339,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 	};
 
 	const LIST_PROP_KEYS = new Set(["tags", "tickets", "related", "blocks", "blocked-by", "specs", "plans"]);
+	const EDITABLE_LINK_KEYS = new Set(["parent", "ticket", "source", "supersedes", "superseded-by"]);
 
 	const applyDocTextUpdate = (nextText: string) => {
 		if (cmView) {
@@ -367,6 +371,17 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			const choices = statusChoices(listed());
 			return await choose("Choose status", [...choices]);
 		}
+		if (key === "direction") {
+			return await choose("Message direction", ["in", "out", "both"]);
+		}
+		if (key === "type") {
+			const picked = await choose("Ticket type", ["Task", "Story", "Bug", "Epic", "Sub-task", CUSTOM]);
+			if (!picked) return null;
+			return picked === CUSTOM ? (await ask("Custom ticket type:"))?.trim() || null : picked;
+		}
+		if (key === "date" || key === "asked" || key === "answered") {
+			return (await ask(`Value for ${key} (YYYY-MM-DD):`, localDay()))?.trim() || null;
+		}
 		if (["ticket", "tickets", "parent", "related", "blocks", "blocked-by"].includes(key)) {
 			const tks = all.filter((d) => d.group === "tickets" && d.ticket).map((d) => d.ticket!);
 			if (tks.length) {
@@ -375,6 +390,17 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 				if (picked !== CUSTOM) return picked;
 			}
 			return (await ask(`Value for ${key}:`))?.trim() || null;
+		}
+		if (key === "supersedes" || key === "superseded-by") {
+			const decisions = all.filter((d) => d.group === "knowledge" && d.kind === "decisions" && canonical(d.path) !== props.path);
+			if (decisions.length) {
+				const stems = decisions.map((d) => baseName(d.path).replace(/\.(md|markdown)$/i, ""));
+				const details = Object.fromEntries(decisions.map((d, i) => [stems[i]!, d.title || d.name]));
+				const picked = await choose(`Choose decision for ${key}:`, [...stems, CUSTOM], { details });
+				if (!picked) return null;
+				if (picked !== CUSTOM) return picked;
+			}
+			return (await ask(`Decision stem for ${key}:`))?.trim() || null;
 		}
 		if (key === "tags") {
 			const existingTags = workspaceTags(all).map((t) => t.tag);
@@ -394,13 +420,22 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 				if (picked !== CUSTOM) return picked;
 			}
 		}
-		if (key === "source" && root) {
-			const sqls = all.filter((d) => d.group === "schema" && /\.(sql|ddl|pks|pkb|json|xml|xsd)$/i.test(d.name)).map((d) => relativeTo(root, d.path).replace(/\\/g, "/"));
-			if (sqls.length) {
-				const picked = await choose("Choose source schema file", [...sqls, CUSTOM]);
-				if (!picked) return null;
-				if (picked !== CUSTOM) return picked;
+		if (key === "source") {
+			const grp = listed()?.group;
+			if (grp === "tickets") {
+				return (await ask("Ticket URL (https://…):", one(front().values.source) || "https://"))?.trim() || null;
 			}
+			if (grp === "schema" && root) {
+				const sqls = all
+					.filter((d) => d.group === "schema" && /\.(sql|ddl|pks|pkb|json|xml|xsd)$/i.test(d.name))
+					.map((d) => relativeTo(root, d.path).replace(/\\/g, "/"));
+				if (sqls.length) {
+					const picked = await choose("Choose source schema file", [...sqls, CUSTOM]);
+					if (!picked) return null;
+					if (picked !== CUSTOM) return picked;
+				}
+			}
+			return (await ask("Value for source:", one(front().values.source)))?.trim() || null;
 		}
 		return (await ask(`Value for ${key}:`))?.trim() || null;
 	};
@@ -410,7 +445,14 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 	const editScalarPropertyInteractive = async (key: string, currentVal: string) => {
 		if (isRead()) return;
 		const nextVal =
-			key === "status" || key === "parent" || key === "source" || key === "ticket"
+			key === "status" ||
+			key === "parent" ||
+			key === "source" ||
+			key === "ticket" ||
+			key === "supersedes" ||
+			key === "superseded-by" ||
+			key === "direction" ||
+			key === "type"
 				? await pickValueForProperty(key)
 				: (await ask(`Edit ${key}:`, currentVal))?.trim() || null;
 		if (!nextVal || nextVal === currentVal) return;
@@ -419,9 +461,26 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		if (next && next !== cur) applyDocTextUpdate(next);
 	};
 
+	const commonKeysForDoc = (): string[] => {
+		const doc = listed();
+		if (doc?.group === "knowledge" && doc.kind === "decisions") {
+			return ["status", "ticket", "tickets", "supersedes", "superseded-by", "date", "summary", "tags", "Custom property…"];
+		}
+		if (doc?.group === "knowledge" && doc.kind === "questions") {
+			return ["status", "ticket", "tickets", "asked", "answered", "summary", "tags", "Custom property…"];
+		}
+		if (doc?.group === "schema" && doc.kind === "interfaces") {
+			return ["status", "with", "direction", "version", "source", "ticket", "summary", "tags", "Custom property…"];
+		}
+		if (doc?.group === "tickets") {
+			return ["status", "type", "summary", "source", "parent", "blocks", "blocked-by", "related", "specs", "plans", "tags", "Custom property…"];
+		}
+		return ["status", "ticket", "tickets", "parent", "related", "blocks", "blocked-by", "tags", "specs", "plans", "source", "summary", "Custom property…"];
+	};
+
 	const addPropertyValueInteractive = async (explicitKey?: string) => {
 		if (isRead()) return;
-		const COMMON_KEYS = ["status", "ticket", "tickets", "parent", "related", "blocks", "blocked-by", "tags", "specs", "plans", "source", "Custom property…"];
+		const COMMON_KEYS = commonKeysForDoc();
 		let key = explicitKey;
 		if (!key) {
 			const picked = await choose("Add or update YAML property", COMMON_KEYS);
@@ -459,7 +518,9 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		if (totalValues > 1 || isListProperty(key)) {
 			const next = removeFromFrontMatterList(cur, key, value);
 			if (next && next !== cur) {
-				applyDocTextUpdate(next);
+				const cleaned = stripEmptyFrontMatter(next);
+				applyDocTextUpdate(cleaned);
+				if (!frontMatterInnerSpan(cleaned)) setEditYaml(false);
 				return;
 			}
 		}
@@ -473,12 +534,15 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		let endIdx = idx + 1;
 		while (endIdx < lines.length && /^[ \t]*-\s+/.test(lines[endIdx]!)) endIdx++;
 		lines.splice(idx, endIdx - idx);
-		applyYamlInnerEdit(lines.join("\n"));
+		const replacement = formatFrontMatterInnerReplacement(lines.join("\n"), span.eol);
+		const nextDoc = stripEmptyFrontMatter(`${cur.slice(0, span.start)}${replacement}${cur.slice(span.end)}`);
+		applyDocTextUpdate(nextDoc);
+		if (!frontMatterInnerSpan(nextDoc)) setEditYaml(false);
 	};
 	const go = (target: { file?: string; web?: string }) =>
 		target.web ? void window.open(target.web, "_blank", "noopener") : target.file ? void openFile(target.file) : undefined;
 
-	const listed = createMemo(() => docs().find((d) => ["tickets", "specs", "knowledge", "schema"].includes(d.group) && canonical(d.path) === props.path));
+	const listed = createMemo(() => docs().find((d) => canonical(d.path) === props.path));
 	const ticket = createMemo(() => {
 		const file = docs().find((d) => d.group === "tickets" && d.ticket && canonical(d.path) === props.path);
 		return file?.ticket ?? "";
@@ -536,15 +600,18 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		"separator" as const,
 		{ label: "Print / Save as PDF…", run: () => void exportDocAs(props.path, "print") },
 		{ label: "Export standalone HTML…", run: () => void exportDocAs(props.path, "html-download") },
+		{ label: "Export as Word (.docx)…", run: () => void exportDocAs(props.path, "docx") },
 		...(ticket()
 			? [
 					"separator" as const,
 					{ label: `Export ${ticket()} packet (HTML)…`, run: () => void exportTicketPacket(props.path, ticket(), "html") },
+					{ label: `Export ${ticket()} packet (Word .docx)…`, run: () => void exportTicketPacket(props.path, ticket(), "docx") },
 					{ label: `Export ${ticket()} packet (Markdown)…`, run: () => void exportTicketPacket(props.path, ticket(), "markdown") },
 					"separator" as const,
 					{ label: `Deployment manifest (Markdown)…`, run: () => void exportDeploymentManifest(props.path, ticket(), "markdown") },
 					{ label: `Deployment manifest (CSV)…`, run: () => void exportDeploymentManifest(props.path, ticket(), "csv") },
 					{ label: `Deployment manifest (HTML)…`, run: () => void exportDeploymentManifest(props.path, ticket(), "html") },
+					{ label: `Deployment manifest (Word .docx)…`, run: () => void exportDeploymentManifest(props.path, ticket(), "docx") },
 				]
 			: []),
 	];
@@ -983,6 +1050,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			queueMicrotask(() => {
 				if (hoverBodyEl) {
 					hydrateImagesInElement(hoverBodyEl, resolved.path);
+					hydrateMathInElement(hoverBodyEl);
 					void colourCode(hoverBodyEl);
 				}
 			});
@@ -1417,7 +1485,6 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 				markdown({ base: markdownLanguage, addKeymap: false, pasteURLAsLink: false }),
 				cmStudioTheme,
 				cmMarkdownHighlight,
-				editYamlField,
 				rawEditBlockField,
 				gitMarksField,
 				liveCallbacksFacet.of({
@@ -1425,7 +1492,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 					onFollowLink: (href) => void followLink(href),
 					onFollowWiki: (inner) => void followWiki(inner),
 					onFollowTicket: followTicket,
-					onTagClick: (tag) => searchFor(tag),
+					onTagClick: (tag) => searchFor(tagSearchPattern(tag), { regex: true }),
 					onHoverLink: handleHoverLink,
 					onHoverLeave: scheduleHideHover,
 					onCopyCode: (code) => {
@@ -1468,6 +1535,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 					onOpenImageLightbox: (info) => setLightbox({ ...info, zoomFull: false }),
 					onOpenMermaidLightbox: (info) => setMermaidBox({ ...info, scale: 1, x: 0, y: 0 }),
 					onResizeImage: resizeImageAt,
+					isYamlEditorOpen: () => editYaml(),
 				}),
 				liveBlockField,
 				liveInlinePlugin,
@@ -1487,6 +1555,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 					for (const tr of update.transactions) {
 						if (tr.docChanged) pushTransactionToModel(tr);
 					}
+					if (update.selectionSet) bumpLiveSelection();
 					if (update.selectionSet || update.focusChanged || update.docChanged) {
 						const userMoved = update.transactions.some((tr) => tr.isUserEvent("select") || tr.isUserEvent("input") || tr.isUserEvent("delete"));
 						syncCursorState(update.view, userMoved);
@@ -1610,7 +1679,6 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 				if (!cmView) return;
 				if (read && editYaml()) {
 					setEditYaml(false);
-					cmView.dispatch({ effects: setEditYamlEffect.of(false) });
 				}
 				cmView.dispatch({
 					effects: [
@@ -1971,44 +2039,58 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 																	when={target.file || target.web}
 																	fallback={
 																		<Show
-																			when={fact.key === "status" && listed()}
+																			when={fact.key === "tags" || fact.key === "tag"}
 																			fallback={
 																				<Show
-																					when={!isRead() && !isListProperty(fact.key)}
+																					when={fact.key === "status" && listed()}
 																					fallback={
-																						<span classList={{ "doc-status": fact.key === "status", [`tone-${toneOf(value)}`]: fact.key === "status" }}>
-																							{value}
-																						</span>
+																						<Show
+																							when={!isRead() && !isListProperty(fact.key)}
+																							fallback={
+																								<span classList={{ "doc-status": fact.key === "status", [`tone-${toneOf(value)}`]: fact.key === "status" }}>
+																									{value}
+																								</span>
+																							}
+																						>
+																							<button
+																								type="button"
+																								class="cm-md-prop-scalar-btn"
+																								classList={{ "doc-status": fact.key === "status", [`tone-${toneOf(value)}`]: fact.key === "status" }}
+																								title={`Click to edit ${fact.key}`}
+																								onClick={() => void editScalarPropertyInteractive(fact.key, value)}
+																							>
+																								{value}
+																							</button>
+																						</Show>
 																					}
 																				>
-																					<button
-																						type="button"
-																						class="cm-md-prop-scalar-btn"
-																						classList={{ "doc-status": fact.key === "status", [`tone-${toneOf(value)}`]: fact.key === "status" }}
-																						title={`Click to edit ${fact.key}`}
-																						onClick={() => void editScalarPropertyInteractive(fact.key, value)}
+																					<Menu
+																						class="md-status"
+																						label={`Status: ${value}. Change it`}
+																						title="Change the status"
+																						items={() =>
+																							statusChoices(listed()).map((status) => ({
+																								label: status,
+																								disabled: status.toLowerCase() === value.toLowerCase(),
+																								why: "It is this already",
+																								run: () => void setStatus(props.path, status),
+																							}))
+																						}
 																					>
-																						{value}
-																					</button>
+																						<span class={`doc-status tone-${toneOf(value)}`}>{value}</span>
+																						<Icon name="chevron-down" />
+																					</Menu>
 																				</Show>
 																			}
 																		>
-																			<Menu
-																				class="md-status"
-																				label={`Status: ${value}. Change it`}
-																				title="Change the status"
-																				items={() =>
-																					statusChoices(listed()).map((status) => ({
-																						label: status,
-																						disabled: status.toLowerCase() === value.toLowerCase(),
-																						why: "It is this already",
-																						run: () => void setStatus(props.path, status),
-																					}))
-																				}
+																			<button
+																				type="button"
+																				class="cm-md-prop-tag"
+																				title={`Search workspace for #${value.replace(/^#+/, "")}`}
+																				onClick={() => searchFor(tagSearchPattern(value), { regex: true })}
 																			>
-																				<span class={`doc-status tone-${toneOf(value)}`}>{value}</span>
-																				<Icon name="chevron-down" />
-																			</Menu>
+																				#{value.replace(/^#+/, "")}
+																			</button>
 																		</Show>
 																	}
 																>
@@ -2021,8 +2103,25 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 																	>
 																		{target.display ?? value}
 																	</button>
+																	<Show
+																		when={
+																			!isRead() &&
+																			EDITABLE_LINK_KEYS.has(fact.key) &&
+																			!(fact.key === "ticket" && listed()?.group === "tickets")
+																		}
+																	>
+																		<button
+																			type="button"
+																			class="cm-md-prop-edit"
+																			title={`Edit ${fact.key}`}
+																			aria-label={`Edit ${fact.key}`}
+																			onClick={() => void editScalarPropertyInteractive(fact.key, value)}
+																		>
+																			<Icon name="edit" />
+																		</button>
+																	</Show>
 																</Show>
-																<Show when={!isRead() && !(fact.key === "status" && listed()) && fact.key !== "title" && fact.key !== "ticket"}>
+																<Show when={!isRead() && !(fact.key === "status" && listed()) && fact.key !== "title" && !(fact.key === "ticket" && listed()?.group === "tickets")}>
 																	<button
 																		type="button"
 																		class="cm-md-prop-rm"
@@ -2180,7 +2279,9 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 										"separator",
 										{ label: "Export deployment manifest (Markdown)…", run: () => void exportDeploymentManifest(props.path, ticket(), "markdown") },
 										{ label: "Export deployment manifest (CSV)…", run: () => void exportDeploymentManifest(props.path, ticket(), "csv") },
+										{ label: "Export deployment manifest (Word .docx)…", run: () => void exportDeploymentManifest(props.path, ticket(), "docx") },
 										{ label: "Export release packet (HTML)…", run: () => void exportTicketPacket(props.path, ticket(), "html") },
+										{ label: "Export release packet (Word .docx)…", run: () => void exportTicketPacket(props.path, ticket(), "docx") },
 										"separator",
 										{ label: "Close out ticket…", run: () => void closeoutTicket(props.path, ticket()) },
 										...(listed() && isArchivedTicket(listed())
@@ -2673,22 +2774,48 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 				{(box) => (
 					<Portal>
 						<div
+							ref={(el) => queueMicrotask(() => el.focus())}
+							tabIndex={-1}
 							class="md-lightbox-backdrop"
 							role="dialog"
 							aria-modal="true"
 							aria-label="Mermaid diagram zoom viewer"
+							onKeyDown={(e) => {
+								if (e.key === "Escape") {
+									e.preventDefault();
+									e.stopPropagation();
+									setMermaidBox(null);
+									return;
+								}
+								if (e.key === "+" || e.key === "=") {
+									e.preventDefault();
+									setMermaidBox((c) => (c ? { ...c, scale: Math.min(4, +(c.scale + 0.25).toFixed(2)) } : null));
+								} else if (e.key === "-" || e.key === "_") {
+									e.preventDefault();
+									setMermaidBox((c) => (c ? { ...c, scale: Math.max(0.25, +(c.scale - 0.25).toFixed(2)) } : null));
+								} else if (e.key === "0") {
+									e.preventDefault();
+									setMermaidBox((c) => (c ? { ...c, scale: 1, x: 0, y: 0 } : null));
+								} else if (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "ArrowUp" || e.key === "ArrowDown") {
+									e.preventDefault();
+									const step = e.shiftKey ? 120 : 48;
+									const dx = e.key === "ArrowLeft" ? step : e.key === "ArrowRight" ? -step : 0;
+									const dy = e.key === "ArrowUp" ? step : e.key === "ArrowDown" ? -step : 0;
+									setMermaidBox((c) => (c ? { ...c, x: c.x + dx, y: c.y + dy } : null));
+								}
+							}}
 							onClick={(e) => {
 								if (e.target === e.currentTarget) setMermaidBox(null);
 							}}
 						>
 							<div class="md-lightbox-bar">
 								<span class="md-lightbox-caption">Mermaid diagram</span>
-								<span class="md-lightbox-path">{Math.round(box().scale * 100)}% · scroll to zoom, drag to pan</span>
+								<span class="md-lightbox-path">{Math.round(box().scale * 100)}% · scroll or +/- to zoom, drag or arrows to pan, 0 to reset</span>
 								<span class="spacer" />
 								<button
 									type="button"
 									class="md-lightbox-btn"
-									title="Zoom out"
+									title="Zoom out (-)"
 									onClick={() => setMermaidBox((c) => (c ? { ...c, scale: Math.max(0.25, +(c.scale - 0.25).toFixed(2)) } : null))}
 								>
 									<Icon name="zoom-out" />
@@ -2696,7 +2823,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 								<button
 									type="button"
 									class="md-lightbox-btn"
-									title="Zoom in"
+									title="Zoom in (+)"
 									onClick={() => setMermaidBox((c) => (c ? { ...c, scale: Math.min(4, +(c.scale + 0.25).toFixed(2)) } : null))}
 								>
 									<Icon name="zoom-in" />
@@ -2704,7 +2831,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 								<button
 									type="button"
 									class="md-lightbox-btn"
-									title="Reset zoom and pan"
+									title="Reset zoom and pan (0)"
 									onClick={() => setMermaidBox((c) => (c ? { ...c, scale: 1, x: 0, y: 0 } : null))}
 								>
 									<Icon name="refresh" />
@@ -2713,8 +2840,15 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 								<button
 									type="button"
 									class="md-lightbox-btn"
-									title="Copy SVG markup"
-									onClick={() => void import("../commands").then((m) => m.copyText(box().svg, "Copied Mermaid SVG."))}
+									title="Copy standalone SVG markup"
+									onClick={() =>
+										void (async () => {
+											const isDark = document.documentElement.dataset.editorTheme !== "light" && document.documentElement.dataset.theme !== "light";
+											const exportSvg = (await renderMermaidSvgForExport(box().code, isDark ? "dark" : "light")) || box().svg;
+											const { copyText } = await import("../commands");
+											await copyText(exportSvg, "Copied Mermaid SVG.");
+										})()
+									}
 								>
 									<Icon name="copy" />
 									<span>Copy SVG</span>
@@ -2722,12 +2856,16 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 								<button
 									type="button"
 									class="md-lightbox-btn"
-									title="Download SVG file"
-									onClick={() => {
-										const stem = baseName(props.path).replace(/\.(md|markdown)$/i, "");
-										downloadMermaidBlob(new Blob([box().svg], { type: "image/svg+xml;charset=utf-8" }), `${stem}-diagram.svg`);
-										notify(`Saved ${stem}-diagram.svg.`);
-									}}
+									title="Download standalone SVG file"
+									onClick={() =>
+										void (async () => {
+											const stem = baseName(props.path).replace(/\.(md|markdown)$/i, "");
+											const isDark = document.documentElement.dataset.editorTheme !== "light" && document.documentElement.dataset.theme !== "light";
+											const exportSvg = (await renderMermaidSvgForExport(box().code, isDark ? "dark" : "light")) || box().svg;
+											downloadMermaidBlob(new Blob([exportSvg], { type: "image/svg+xml;charset=utf-8" }), `${stem}-diagram.svg`);
+											notify(`Saved ${stem}-diagram.svg.`);
+										})()
+									}
 								>
 									<span>Save SVG</span>
 								</button>
@@ -2736,7 +2874,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 									class="md-lightbox-btn"
 									title="Copy diagram as PNG (falls back to download)"
 									onClick={() =>
-										void copyMermaidAsPng(box().svg).then((res) =>
+										void copyMermaidAsPng(box().svg, box().code).then((res) =>
 											notify(
 												res === "copied"
 													? "Copied diagram PNG to clipboard."

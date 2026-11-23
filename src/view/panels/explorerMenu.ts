@@ -16,6 +16,9 @@ export const PASTE = "Paste";
 export const COPY_PATH = "Copy path";
 export const COPY_RELATIVE = "Copy path in the project";
 export const COPY_NAME = "Copy name";
+export const SCHEMA_FROM_SQL = "Generate / sync schema doc from SQL…";
+export const OPEN_GOVERNING_DOC = "Open governing doc…";
+export const ATTACH_TO_AGENT = "Attach to Agent";
 export type Action =
 	| typeof OPEN
 	| typeof OPEN_SIDE
@@ -29,8 +32,12 @@ export type Action =
 	| typeof TRASH
 	| typeof COPY_PATH
 	| typeof COPY_RELATIVE
-	| typeof COPY_NAME;
+	| typeof COPY_NAME
+	| typeof SCHEMA_FROM_SQL
+	| typeof OPEN_GOVERNING_DOC
+	| typeof ATTACH_TO_AGENT;
 export type MenuEntry = "separator" | { label: string; value: Action; keys?: string };
+export type ExplorerMenuExtra = { sql?: boolean; governingCount?: number; attachable?: boolean };
 
 /** True for the workspace folder and for anything that holds it: never renamed or trashed from here. */
 export const holdsRoot = (root: string, path: string) => isInside(path, root);
@@ -49,7 +56,7 @@ export function menuFor(kind: "file" | "dir", path: string, root: string, canPas
 /**
  * VS Code-grouped Explorer context menu with section dividers and shortcut hints.
  */
-export function menuEntriesFor(kind: "file" | "dir", path: string, root: string, canPaste = false): MenuEntry[] {
+export function menuEntriesFor(kind: "file" | "dir", path: string, root: string, canPaste = false, extra?: ExplorerMenuExtra): MenuEntry[] {
 	const item = (value: Action, label: string = value, keys?: string): MenuEntry => ({ label, value, keys });
 	const paste: MenuEntry[] = canPaste ? [item(PASTE, PASTE, "Ctrl+V")] : [];
 	if (holdsRoot(root, path)) {
@@ -80,9 +87,16 @@ export function menuEntriesFor(kind: "file" | "dir", path: string, root: string,
 			...editGroup,
 		];
 	}
+	const docGroup: MenuEntry[] = [];
+	if (extra?.sql) docGroup.push(item(SCHEMA_FROM_SQL));
+	if ((extra?.governingCount ?? 0) > 0) {
+		docGroup.push(item(OPEN_GOVERNING_DOC, extra!.governingCount === 1 ? "Open governing doc" : `Open governing doc (${extra!.governingCount})…`));
+	}
+	if (extra?.attachable) docGroup.push(item(ATTACH_TO_AGENT));
 	return [
 		item(OPEN),
 		item(OPEN_SIDE),
+		...(docGroup.length ? (["separator", ...docGroup] as MenuEntry[]) : []),
 		"separator",
 		...clipGroup,
 		"separator",

@@ -14,9 +14,11 @@ export const MAX_TEXT = 100;
 
 export type TableFinding = { line: number; message: string };
 
-/** What a cell shows, without its Markdown: `code` and [links](there) count as their text. */
+/** What a cell shows, without its Markdown: `code`, [links](there), and [[Target|Alias]] count as their visible text. */
 export const cellText = (markdown: string) =>
 	markdown
+		.replace(/!?\[\[[^[\]|]+\\?\|([^\]]+)\]\]/g, "$1")
+		.replace(/!?\[\[([^\]]+)\]\]/g, "$1")
 		.replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
 		.replace(/[`*_~]/g, "")
 		.replace(/\s+/g, " ")
@@ -24,14 +26,16 @@ export const cellText = (markdown: string) =>
 
 /** Where each table breaks the rule. Lines are 1-based and point at the table's heading row. */
 export function checkTables(markdown: string): TableFinding[] {
+	// marked.lexer normalizes token.raw to LF, so normalize CRLF before locating line offsets.
+	const plain = markdown.replace(/\r\n/g, "\n");
 	const findings: TableFinding[] = [];
 	let offset = 0;
 	const walk = (tokens: any[]) => {
 		for (const token of tokens) {
 			if (token.type === "table") {
-				const at = markdown.indexOf(token.raw, offset);
+				const at = plain.indexOf(token.raw, offset);
 				if (at >= 0) offset = at;
-				check(token, markdown.slice(0, Math.max(at, 0)).split("\n").length);
+				check(token, plain.slice(0, Math.max(at, 0)).split("\n").length);
 			}
 			if (Array.isArray(token.tokens)) walk(token.tokens);
 			if (Array.isArray(token.items)) walk(token.items);
@@ -51,7 +55,7 @@ export function checkTables(markdown: string): TableFinding[] {
 			if (i === last && longest > MAX_TEXT) say(`"${name}" holds ${longest} characters in one cell; a cell has at most ${MAX_TEXT}.`);
 		});
 	};
-	walk(marked.lexer(markdown));
+	walk(marked.lexer(plain));
 	return findings;
 }
 

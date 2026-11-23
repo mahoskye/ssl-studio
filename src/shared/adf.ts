@@ -184,12 +184,19 @@ function block(node: Node): string {
 			return `${fence}${said(node.attrs?.language).replace(/[^\w+#.-]/g, "")}\n${text}\n${fence}`;
 		}
 		case "blockquote":
-		case "panel":
 			// A line keeps what it ends with: two spaces there are a line break.
 			return blocks(kids(node))
 				.split("\n")
 				.map((line) => (line ? `> ${line}` : ">"))
 				.join("\n");
+		case "panel": {
+			const pt = said(node.attrs?.panelType).toLowerCase();
+			const kind = pt === "warning" ? "warning" : pt === "error" ? "danger" : pt === "success" ? "success" : pt === "info" ? "info" : "note";
+			const bodyLines = blocks(kids(node))
+				.split("\n")
+				.map((line) => (line ? `> ${line}` : ">"));
+			return [`> [!${kind}]`, ...bodyLines].join("\n");
+		}
 		case "rule":
 			return "---";
 		case "table": {

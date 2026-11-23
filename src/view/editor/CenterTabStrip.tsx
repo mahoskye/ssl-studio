@@ -2,6 +2,7 @@
 // Diff Review, Projects switcher) so open document tabs stay one click away
 // inside the same framed Folio Bento island (ADR 0027).
 import { createEffect, createMemo, createSignal, For, onCleanup, Show, type JSX } from "solid-js";
+import { createMiddleCloseTracker } from "../../shared/middleClickGuard";
 import { FileMark } from "../FileMark";
 import { Icon, type IconName } from "../Icon";
 import { closeTab, displayName, newUntitled, notify, setState, state } from "../state";
@@ -19,6 +20,8 @@ export function CenterTabStrip(props: {
 	const labels = createMemo(() => tabLabels(group().tabs, state.workspace?.root));
 
 	let tabsHost: HTMLDivElement | undefined;
+	const middleClose = createMiddleCloseTracker();
+	onCleanup(() => middleClose.dispose());
 	const [canScrollLeft, setCanScrollLeft] = createSignal(false);
 	const [canScrollRight, setCanScrollRight] = createSignal(false);
 	const updateTabOverflow = () => {
@@ -119,10 +122,25 @@ export function CenterTabStrip(props: {
 									onMouseDown={(e) => {
 										if (e.button === 1) {
 											e.preventDefault();
-											void closeTab(path, state.activeGroup);
+											e.stopPropagation();
+											middleClose.press(path);
 										} else {
+											middleClose.cancel();
 											activateFile(path);
 										}
+									}}
+									onMouseLeave={() => middleClose.cancel(path)}
+									onMouseUp={(e) => {
+										if (e.button !== 1) return;
+										e.preventDefault();
+										e.stopPropagation();
+										middleClose.release(path, () => void closeTab(path, state.activeGroup));
+									}}
+									onAuxClick={(e) => {
+										if (e.button !== 1) return;
+										e.preventDefault();
+										e.stopPropagation();
+										middleClose.auxClick(path, () => void closeTab(path, state.activeGroup));
 									}}
 								>
 									<FileMark name={displayName(path)} />
@@ -142,7 +160,7 @@ export function CenterTabStrip(props: {
 										tabindex={-1}
 										title="Close"
 										aria-label={`Close ${displayName(path)}`}
-										onMouseDown={(e) => e.stopPropagation()}
+										onMouseDown={(e) => e.button !== 1 && e.stopPropagation()}
 										onClick={() => void closeTab(path, state.activeGroup)}
 									>
 										<span class="dot" aria-hidden="true" />
@@ -157,6 +175,26 @@ export function CenterTabStrip(props: {
 							aria-selected="true"
 							tabindex={0}
 							title={props.tooltip ?? props.title}
+							onMouseDown={(e) => {
+								if (e.button === 1) {
+									e.preventDefault();
+									e.stopPropagation();
+									middleClose.press("__virtual__");
+								}
+							}}
+							onMouseLeave={() => middleClose.cancel("__virtual__")}
+							onMouseUp={(e) => {
+								if (e.button !== 1) return;
+								e.preventDefault();
+								e.stopPropagation();
+								middleClose.release("__virtual__", () => props.onClose());
+							}}
+							onAuxClick={(e) => {
+								if (e.button !== 1) return;
+								e.preventDefault();
+								e.stopPropagation();
+								middleClose.auxClick("__virtual__", () => props.onClose());
+							}}
 							onKeyDown={(e) => {
 								if (e.key === "Escape") {
 									e.preventDefault();
@@ -171,7 +209,7 @@ export function CenterTabStrip(props: {
 								tabindex={-1}
 								title={`Close ${props.title}`}
 								aria-label={`Close ${props.title}`}
-								onMouseDown={(e) => e.stopPropagation()}
+								onMouseDown={(e) => e.button !== 1 && e.stopPropagation()}
 								onClick={props.onClose}
 							>
 								<Icon name="close" class="x" />

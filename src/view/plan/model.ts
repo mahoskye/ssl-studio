@@ -5,7 +5,7 @@
 
 export type NodeKind = "start" | "end" | "step" | "decision" | "call";
 export type PlanOffset = { x: number; y: number; dir?: "DOWN" | "RIGHT" };
-export type PlanNode = { id: string; kind: NodeKind; text: string; ref?: string; group?: string; notes?: string; offset?: PlanOffset; [key: string]: unknown };
+export type PlanNode = { id: string; kind: NodeKind; text: string; ref?: string; group?: string; notes?: string; docs?: string[]; offset?: PlanOffset; [key: string]: unknown };
 export type RouteOffsets = Record<string, number>;
 export type PlanEdge = { from: string; to: string; label?: string; route?: RouteOffsets; [key: string]: unknown };
 export type PlanGroup = { id: string; name: string; offset?: PlanOffset; [key: string]: unknown };
@@ -93,7 +93,7 @@ export function printPlan(plan: Plan): string {
 			.filter(([, v]) => v !== undefined)
 			.map(([k, v]) => `  ${JSON.stringify(k)}: ${JSON.stringify(v)}`),
 		rows("groups", groups, ["id", "name", "offset"]),
-		rows("nodes", nodes, ["id", "kind", "text", "ref", "group", "notes", "offset"]),
+		rows("nodes", nodes, ["id", "kind", "text", "ref", "group", "notes", "docs", "offset"]),
 		rows("edges", edges, ["from", "to", "label", "route"]),
 		...(cleanTests.length ? [rows("tests", cleanTests, ["id", "title", "node", "journey", "given", "expect", "notes"])] : []),
 		...Object.entries(rest).map(([k, v]) => JSON.stringify({ [k]: v }, null, 2).split("\n").slice(1, -1).join("\n")),
@@ -298,14 +298,75 @@ export function insertOnEdge(plan: Plan, from: string, to: string, kind: NodeKin
 	return { plan: { ...plan, nodes: [...plan.nodes, node], edges }, select: node.id };
 }
 
-/** Duplicates a node right after itself (preserving kind, text, ref, group, and notes). */
+/** Duplicates a node right after itself (preserving kind, text, ref, group, notes, and docs). */
 export function duplicateNode(plan: Plan, id: string): Edit | null {
 	const src = nodeOf(plan, id);
 	if (!src || src.kind === "start" || src.kind === "end") return null;
 	const added = addAfter(plan, id, src.kind, src.text, src.ref);
 	if (!added.select) return null;
-	const nextNodes = added.plan.nodes.map((n) => (n.id === added.select && src.notes ? { ...n, notes: src.notes } : n));
+	const docs = nodeDocsOf(src);
+	const nextNodes = added.plan.nodes.map((n) =>
+		n.id === added.select
+			? { ...n, ...(src.notes ? { notes: src.notes } : {}), ...(docs.length ? { docs } : {}) }
+			: n,
+	);
 	return { plan: { ...added.plan, nodes: nextNodes }, select: added.select };
+}
+
+/** Normalized, deduplicated list of workspace doc paths/references linked to a node. */
+export function nodeDocsOf(node: PlanNode | undefined): string[] {
+	if (!node || !Array.isArray(node.docs)) return [];
+	const seen = new Set<string>();
+	const out: string[] = [];
+	for (const item of node.docs) {
+		if (typeof item !== "string") continue;
+		const trimmed = item.trim();
+		if (!trimmed) continue;
+		const key = trimmed.toLowerCase();
+		if (seen.has(key)) continue;
+		seen.add(key);
+		out.push(trimmed);
+	}
+	return out;
+}
+
+/** Sets or clears linked docs on a node (omitting `docs` when empty so diffs stay clean). */
+export function setNodeDocs(plan: Plan, id: string, docs: readonly string[]): Plan {
+	const seen = new Set<string>();
+	const cleaned: string[] = [];
+	for (const d of docs) {
+		const trimmed = d.trim();
+		if (!trimmed) continue;
+		const key = trimmed.toLowerCase();
+		if (seen.has(key)) continue;
+		seen.add(key);
+		cleaned.push(trimmed);
+	}
+	return {
+		...plan,
+		nodes: plan.nodes.map((n) => {
+			if (n.id !== id) return n;
+			const { docs: _old, ...rest } = n;
+			return (cleaned.length ? { ...rest, docs: cleaned } : rest) as PlanNode;
+		}),
+	};
+}
+
+export function addNodeDoc(plan: Plan, id: string, docRef: string): Plan {
+	const node = nodeOf(plan, id);
+	if (!node || !docRef.trim()) return plan;
+	return setNodeDocs(plan, id, [...nodeDocsOf(node), docRef.trim()]);
+}
+
+export function removeNodeDoc(plan: Plan, id: string, docRef: string): Plan {
+	const node = nodeOf(plan, id);
+	if (!node) return plan;
+	const target = docRef.trim().toLowerCase();
+	return setNodeDocs(
+		plan,
+		id,
+		nodeDocsOf(node).filter((d) => d.toLowerCase() !== target),
+	);
 }
 
 /** Reverses an edge `from -> to` into `to -> from` when the opposite edge does not already exist. */
@@ -461,7 +522,7 @@ export function setGroup(plan: Plan, id: string, name: string): Plan {
 
 // --- the check: no agent, no cost ------------------------------------------------
 
-export type Finding = { severity: "error" | "warning" | "info"; code: string; message: string; node?: string; edge?: { from: string; to: string } };
+export type Finding = { severity: "error" | "warning" | "info"; code: string; message: string; node?: string; edge?: { from: string; to: string }; field?: string };
 
 export function checkPlan(plan: Plan): Finding[] {
 	const out: Finding[] = [];
@@ -543,6 +604,12 @@ export function findingLine(text: string, plan: Plan, finding: Finding): number 
 		const { from, to } = finding.edge;
 		const lines = text.split(/\r?\n/);
 		const at = lines.findIndex((l) => l.includes(`"from": "${from}"`) && l.includes(`"to": "${to}"`));
+		if (at >= 0) return at + 1;
+	}
+	if (finding.field) {
+		const lines = text.split(/\r?\n/);
+		const pattern = new RegExp(`^\\s*${JSON.stringify(finding.field).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*:`);
+		const at = lines.findIndex((l) => pattern.test(l));
 		if (at >= 0) return at + 1;
 	}
 	return 1;

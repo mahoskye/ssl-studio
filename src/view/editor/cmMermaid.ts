@@ -5,7 +5,7 @@ import { EditorView, WidgetType } from "@codemirror/view";
 import { liveCallbacksFacet, setRawEditBlockEffect } from "./cmLiveShared";
 
 let mermaidMod: typeof import("mermaid").default | null = null;
-let lastThemeMode: "dark" | "light" | null = null;
+let lastConfigKey: string | null = null;
 let renderSeq = 0;
 /** Serializes `mermaid.initialize()` + `mermaid.render()` so concurrent Light export and Dark Live renders never collide. */
 let renderQueue: Promise<unknown> = Promise.resolve();
@@ -16,7 +16,7 @@ function runSerialized<T>(fn: () => Promise<T>): Promise<T> {
 	return next;
 }
 
-/** LRU cache of rendered Mermaid SVGs keyed by `${mode}\0${code}` so typing above a diagram never flashes. */
+/** LRU cache of rendered Mermaid SVGs keyed by `${mode}\0${exportFlag}\0${code}` so typing above a diagram never flashes. */
 const SVG_CACHE_MAX = 60;
 const svgCache = new Map<string, string>();
 
@@ -27,6 +27,18 @@ function cacheSvg(key: string, svg: string) {
 		const oldest = svgCache.keys().next().value;
 		if (oldest !== undefined) svgCache.delete(oldest);
 	}
+}
+
+/** Resolves a concrete computed font-family string (never `var(--ui-font)`) so standalone SVG/PNG exports render reliably. */
+function resolvedFontFamily(): string {
+	const fallback = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+	if (typeof document === "undefined" || typeof getComputedStyle === "undefined") return fallback;
+	const target = document.body ?? document.documentElement;
+	const computed = getComputedStyle(target).fontFamily?.trim();
+	if (computed && !computed.includes("var(")) return computed;
+	const uiVar = getComputedStyle(document.documentElement).getPropertyValue("--ui-font").trim();
+	if (uiVar && !uiVar.includes("var(")) return uiVar;
+	return fallback;
 }
 
 function isDarkEditorTheme(): boolean {
@@ -46,10 +58,15 @@ function isDarkEditorTheme(): boolean {
 	return window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? true;
 }
 
-async function renderMermaidSvg(code: string, forceMode?: "dark" | "light"): Promise<{ svg?: string; error?: string }> {
+async function renderMermaidSvg(
+	code: string,
+	forceMode?: "dark" | "light",
+	options?: { forExport?: boolean },
+): Promise<{ svg?: string; error?: string }> {
 	const trimmed = code.trim();
 	const mode = forceMode ?? (isDarkEditorTheme() ? "dark" : "light");
-	const cacheKey = `${mode}\0${trimmed}`;
+	const forExport = Boolean(options?.forExport);
+	const cacheKey = `${mode}\0${forExport ? "export" : "live"}\0${trimmed}`;
 	const hit = svgCache.get(cacheKey);
 	if (hit) {
 		cacheSvg(cacheKey, hit);
@@ -66,15 +83,18 @@ async function renderMermaidSvg(code: string, forceMode?: "dark" | "light"): Pro
 				const imported = await import("mermaid");
 				mermaidMod = imported.default;
 			}
-			if (lastThemeMode !== mode) {
+			const font = resolvedFontFamily();
+			const configKey = `${mode}:${forExport ? "export" : "live"}:${font}`;
+			if (lastConfigKey !== configKey) {
 				mermaidMod.initialize({
 					startOnLoad: false,
 					securityLevel: "strict",
 					suppressErrorRendering: true,
 					theme: mode === "dark" ? "dark" : "default",
-					fontFamily: "var(--ui-font, system-ui, sans-serif)",
+					fontFamily: font,
+					...(forExport ? { htmlLabels: false, flowchart: { htmlLabels: false } } : {}),
 				});
-				lastThemeMode = mode;
+				lastConfigKey = configKey;
 			}
 			const id = `ssl-studio-mermaid-${++renderSeq}`;
 			const { svg } = await mermaidMod.render(id, trimmed);
@@ -86,14 +106,14 @@ async function renderMermaidSvg(code: string, forceMode?: "dark" | "light"): Pro
 	});
 }
 
-/** Renders a light-mode SVG string for standalone HTML / Print / Ticket Release Packet exports. */
-export async function renderMermaidSvgForExport(code: string): Promise<string | null> {
-	const res = await renderMermaidSvg(code, "light");
+/** Renders a light-mode export-safe SVG (no `<foreignObject>` HTML labels, resolved font-family) for HTML / Print / Packet exports. */
+export async function renderMermaidSvgForExport(code: string, mode: "dark" | "light" = "light"): Promise<string | null> {
+	const res = await renderMermaidSvg(code, mode, { forExport: true });
 	return res.svg ?? null;
 }
 
 /** Rasterizes a Mermaid SVG string into a 2x PNG Blob for pasting into Jira/Confluence/Teams or downloading. */
-export async function mermaidSvgToPngBlob(svg: string): Promise<Blob | null> {
+export async function mermaidSvgToPngBlob(svg: string, mode?: "dark" | "light"): Promise<Blob | null> {
 	if (typeof document === "undefined") return null;
 	const holder = document.createElement("div");
 	holder.innerHTML = svg;
@@ -109,6 +129,7 @@ export async function mermaidSvgToPngBlob(svg: string): Promise<Blob | null> {
 	svgEl.setAttribute("height", String(Math.ceil(h)));
 	const xml = new XMLSerializer().serializeToString(svgEl);
 	const svgDataUrl = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(xml)}`;
+	const dark = mode ? mode === "dark" : isDarkEditorTheme();
 	return new Promise<Blob | null>((resolve) => {
 		const img = new Image();
 		img.onload = () => {
@@ -119,7 +140,7 @@ export async function mermaidSvgToPngBlob(svg: string): Promise<Blob | null> {
 				canvas.height = Math.max(1, Math.ceil(h * scale));
 				const ctx = canvas.getContext("2d");
 				if (!ctx) return resolve(null);
-				ctx.fillStyle = isDarkEditorTheme() ? "#1e1e1e" : "#ffffff";
+				ctx.fillStyle = dark ? "#1e1e1e" : "#ffffff";
 				ctx.fillRect(0, 0, canvas.width, canvas.height);
 				ctx.scale(scale, scale);
 				ctx.drawImage(img, 0, 0, w, h);
@@ -145,9 +166,15 @@ export function downloadMermaidBlob(blob: Blob, filename: string) {
 	setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-/** Copies a rendered Mermaid SVG as PNG to clipboard (falling back to downloading `diagram.png`). */
-export async function copyMermaidAsPng(svg: string): Promise<"copied" | "downloaded" | "failed"> {
-	const blob = await mermaidSvgToPngBlob(svg);
+/** Copies a rendered Mermaid diagram as PNG to clipboard (re-rendering with `htmlLabels: false` when `code` is provided to prevent canvas taint). */
+export async function copyMermaidAsPng(svg: string, code?: string): Promise<"copied" | "downloaded" | "failed"> {
+	const mode = isDarkEditorTheme() ? "dark" : "light";
+	let exportSvg = svg;
+	if (code?.trim()) {
+		const rendered = await renderMermaidSvgForExport(code, mode);
+		if (rendered) exportSvg = rendered;
+	}
+	const blob = await mermaidSvgToPngBlob(exportSvg, mode);
 	if (!blob) return "failed";
 	try {
 		if (typeof ClipboardItem !== "undefined" && navigator.clipboard?.write) {
@@ -215,12 +242,17 @@ export class MermaidWidget extends WidgetType {
 		svgBtn.addEventListener("mousedown", (e) => {
 			e.preventDefault();
 			e.stopPropagation();
-			if (!currentSvg) return;
-			view.state.facet(liveCallbacksFacet)?.onCopyCode(currentSvg);
-			svgBtn.textContent = "Copied";
-			setTimeout(() => {
-				if (svgBtn.isConnected) svgBtn.textContent = "SVG";
-			}, 1400);
+			const mode = isDarkEditorTheme() ? "dark" : "light";
+			void renderMermaidSvgForExport(this.code, mode).then((exportSvg) => {
+				const out = exportSvg || currentSvg;
+				if (!out) return;
+				view.state.facet(liveCallbacksFacet)?.onCopyCode(out);
+				if (!svgBtn.isConnected) return;
+				svgBtn.textContent = "Copied";
+				setTimeout(() => {
+					if (svgBtn.isConnected) svgBtn.textContent = "SVG";
+				}, 1400);
+			});
 		});
 		actions.append(svgBtn);
 
@@ -232,8 +264,8 @@ export class MermaidWidget extends WidgetType {
 		pngBtn.addEventListener("mousedown", (e) => {
 			e.preventDefault();
 			e.stopPropagation();
-			if (!currentSvg) return;
-			void copyMermaidAsPng(currentSvg).then((res) => {
+			if (!currentSvg && !this.code.trim()) return;
+			void copyMermaidAsPng(currentSvg, this.code).then((res) => {
 				if (!pngBtn.isConnected) return;
 				pngBtn.textContent = res === "copied" ? "Copied" : res === "downloaded" ? "Saved" : "Failed";
 				setTimeout(() => {
@@ -291,7 +323,7 @@ export class MermaidWidget extends WidgetType {
 		});
 
 		const mode = isDarkEditorTheme() ? "dark" : "light";
-		const cached = svgCache.get(`${mode}\0${this.code.trim()}`);
+		const cached = svgCache.get(`${mode}\0live\0${this.code.trim()}`);
 		if (cached) {
 			currentSvg = cached;
 			stage.innerHTML = cached;

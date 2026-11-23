@@ -2,6 +2,7 @@
 // group's active document. Two groups side by side make a split.
 import { DEFAULT_CODE_FONT, resolveFontStack } from "../../shared/fonts";
 import { canFormatNonSsl, SQL_DIALECTS, sqlDialectInfo } from "../../shared/format";
+import { createMiddleCloseTracker } from "../../shared/middleClickGuard";
 import { continueLists } from "./markdownKeys";
 import { liveEditorAt } from "./liveBridge";
 import { MarkdownLiveEditor } from "./MarkdownLiveEditor";
@@ -25,7 +26,7 @@ import { Menu, type MenuItem } from "../Menu";
 import { backend } from "../backend";
 import { docs, isMarkdown, isTable } from "../project";
 import { registryTitle } from "../../shared/projectDocs";
-import { docsGoverningFile } from "../../shared/workContext";
+import { docsGoverningFile, ticketForFile } from "../../shared/workContext";
 import { TableView } from "./TableView";
 import { FileView } from "./FileView";
 import { useGitMarks } from "./gitMarks";
@@ -51,6 +52,9 @@ export const editors: monaco.editor.IStandaloneCodeEditor[] = [];
 let dragged: { path: string; group: number } | null = null;
 /** Where it would land: in which group, and before which tab (last, with null). */
 const [dropAt, setDropAt] = createSignal<{ group: number; before: string | null } | null>(null);
+/** Most recently active Markdown tab path (used by code-citation commands to compute relative paths cleanly). */
+const [lastMarkdownPath, setLastMarkdownPath] = createSignal<string | null>(null);
+export const lastActiveMarkdownPath = () => lastMarkdownPath();
 
 const base = displayName;
 
@@ -196,6 +200,8 @@ export function EditorGroup(props: { index: number }) {
 			allowVariableLineHeights: true,
 			allowVariableFonts: true,
 			allowVariableFontsInAccessibilityMode: true,
+			// Prevent Linux X11 middle-click primary-selection paste into code/docs.
+			selectionClipboard: false,
 		});
 		// The editor is filed under the group's place in the row, and filed again when that place changes (the group
 		// before it closed): "the active editor" is looked up by place.
@@ -208,6 +214,11 @@ export function EditorGroup(props: { index: number }) {
 		for (const [order, [id, label]] of (
 			[
 				["agent-ask", "Ask the Agent About This…"],
+				["open-schema-at-cursor", "Open Schema Doc for Table at Cursor"],
+				["find-in-docs", "Find References in Docs"],
+				["copy-code-citation", "Copy Markdown Code Citation"],
+				["copy-code-citation-excerpt", "Copy Markdown Code Citation + Excerpt"],
+				["add-selection-to-registry", "Add Selection to Registry…"],
 				["new-question", "New Question About This Code…"],
 				["new-decision", "New Decision About This Code…"],
 				["copy-designer", "Copy for Designer"],
@@ -319,6 +330,7 @@ export function EditorGroup(props: { index: number }) {
 			stickyScroll: { enabled: true },
 			wrappingStrategy: "simple",
 			padding: { top: 0, bottom: 0 },
+			selectionClipboard: false,
 		};
 		if (!editor) return;
 		if (path === shown) {
@@ -339,14 +351,20 @@ export function EditorGroup(props: { index: number }) {
 		}
 	});
 
-	// The order tabs were used in: what Ctrl+Tab goes back through.
+	// The order tabs were used in: what Ctrl+Tab goes back through. Also track the most recent Markdown tab.
 	createEffect(() => {
 		const path = group().active;
-		if (path) tabShown(props.index, path);
+		if (path) {
+			tabShown(props.index, path);
+			if (isMarkdown(path)) setLastMarkdownPath(path);
+		}
 	});
 
 	// The active tab is always in view, however many are open.
 	const tabs = new Map<string, HTMLElement>();
+	/** Closes tabs on middle-button release (`auxclick`/macrotask fallback) instead of mousedown so Linux primary-selection paste cannot leak into the revealed editor. */
+	const middleClose = createMiddleCloseTracker();
+	onCleanup(() => middleClose.dispose());
 	createEffect(() => {
 		const path = group().active;
 		// Where it stands in the row matters too: a tab that is pinned moves to the front.
@@ -544,9 +562,16 @@ export function EditorGroup(props: { index: number }) {
 			run: () => void openFile(g.path, g.line ? { reveal: { line: g.line } } : {}),
 		}));
 		if (items.length) items.push("separator");
+		const codePath = group().active ?? undefined;
+		const codeLine = editor?.getPosition()?.lineNumber;
+		const govTicket =
+			(codePath ? ticketForFile(docs(), codePath, state.workspace?.root, governingLinks() ?? []) : undefined) ??
+			state.settings.activeTicket?.trim() ??
+			undefined;
+		const citeOpts = { ticket: govTicket, codePath, codeLine, allowEmptySelection: true };
 		items.push(
-			{ label: "New decision about this code…", run: () => void import("../projectDocs").then((m) => m.newKnowledge("decisions")) },
-			{ label: "New question about this code…", run: () => void import("../projectDocs").then((m) => m.newKnowledge("questions")) },
+			{ label: "New decision about this code…", run: () => void import("../projectDocs").then((m) => m.newKnowledge("decisions", citeOpts)) },
+			{ label: "New question about this code…", run: () => void import("../projectDocs").then((m) => m.newKnowledge("questions", citeOpts)) },
 		);
 		return items;
 	};
@@ -649,8 +674,25 @@ export function EditorGroup(props: { index: number }) {
 								onMouseDown={(e) => {
 									if (e.button === 1) {
 										e.preventDefault();
-										void closeTab(path, props.index);
-									} else activate(path);
+										e.stopPropagation();
+										middleClose.press(path);
+									} else {
+										middleClose.cancel();
+										activate(path);
+									}
+								}}
+								onMouseLeave={() => middleClose.cancel(path)}
+								onMouseUp={(e) => {
+									if (e.button !== 1) return;
+									e.preventDefault();
+									e.stopPropagation();
+									middleClose.release(path, () => void closeTab(path, props.index));
+								}}
+								onAuxClick={(e) => {
+									if (e.button !== 1) return;
+									e.preventDefault();
+									e.stopPropagation();
+									middleClose.auxClick(path, () => void closeTab(path, props.index));
 								}}
 							>
 								<FileMark name={base(path)} />
@@ -668,11 +710,11 @@ export function EditorGroup(props: { index: number }) {
 								</Show>
 								<Show when={group().pinned?.includes(path)}>
 									{/* A pinned tab has a pin where the others have a cross: pressing it lets the tab go. */}
-									<button class="pin" tabindex={-1} title="Pinned. Unpin" aria-label={`Unpin ${base(path)}${state.dirty[path] ? " (unsaved changes)" : ""}`} onMouseDown={(e) => e.stopPropagation()} onClick={() => togglePin(path, props.index)}>
+									<button class="pin" tabindex={-1} title="Pinned. Unpin" aria-label={`Unpin ${base(path)}${state.dirty[path] ? " (unsaved changes)" : ""}`} onMouseDown={(e) => e.button !== 1 && e.stopPropagation()} onClick={() => togglePin(path, props.index)}>
 										<span class="pin-mark" aria-hidden="true" />
 									</button>
 								</Show>
-								<button class="close" tabindex={-1} title="Close (Ctrl+W)" aria-label={`Close ${base(path)}${state.dirty[path] ? " (unsaved changes)" : ""}`} onMouseDown={(e) => e.stopPropagation()} onClick={() => void closeTab(path, props.index)}>
+								<button class="close" tabindex={-1} title="Close (Ctrl+W)" aria-label={`Close ${base(path)}${state.dirty[path] ? " (unsaved changes)" : ""}`} onMouseDown={(e) => e.button !== 1 && e.stopPropagation()} onClick={() => void closeTab(path, props.index)}>
 									<span class="dot" aria-hidden="true" />
 									<Icon name="close" class="x" />
 								</button>

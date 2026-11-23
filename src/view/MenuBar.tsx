@@ -26,7 +26,7 @@ import { Menu, nextItem, type MenuItem } from "./Menu";
 import { canGo } from "./navigation";
 import { isPlanPath } from "./plan/model";
 import { isMarkdown, isTable } from "./project";
-import { activeDoc, activePath, documents, focusEditor, markdownMode, notify, setState, state } from "./state";
+import { activeDoc, activePath, documents, focusEditor, markdownMode, notify, planMode, setState, state, tableTextMode } from "./state";
 
 /** A file is in front, not the call graph or a review of changes. */
 const inFront = () => state.centerView === "editors" && !review();
@@ -38,11 +38,11 @@ function has(): Has {
 	// A plan opens as its chart, a read-only document as its page, a script perhaps as blocks: none of them is editable text.
 	const asText = (file: string) =>
 		isPlanPath(file)
-			? Boolean(state.planText[file])
+			? planMode(file, state.activeGroup) === "source"
 			: isMarkdown(file)
-				? markdownMode(file) !== "read"
+				? markdownMode(file, state.activeGroup) !== "read"
 				: isTable(file)
-					? Boolean(state.mdText[file])
+					? tableTextMode(file, state.activeGroup)
 					: !(group?.mode === "blocks" && documents.get(file)?.model.getLanguageId() === "ssl");
 	// A picture, or other bytes, has no text at all.
 	return { folder: Boolean(state.workspace), file: Boolean(path), text: Boolean(path) && inFront() && !documents.get(path!)?.binary && asText(path!) };

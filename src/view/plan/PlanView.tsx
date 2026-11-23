@@ -8,6 +8,7 @@ import ELK from "elkjs/lib/elk.bundled.js";
 import { createEffect, createMemo, createSignal, createUniqueId, For, on, onCleanup, onMount, Show, untrack } from "solid-js";
 import { dirName, joinPath, relativeTo } from "../../shared/paths";
 import { ticketKey } from "../../shared/projectDocs";
+import { backend } from "../backend";
 import { ask } from "../dialogs";
 import { editors } from "../editor/EditorGroup";
 import { monaco } from "../editor/monaco";
@@ -22,7 +23,8 @@ import { diagnostics } from "../lsp/session";
 import { Menu, type MenuItem } from "../Menu";
 import { showPanel } from "../panels/registry";
 import { chooseFromMenu } from "../panels/RowMenu";
-import { applyText, documents, notify, openedForALook, setPlanMode, setState, state } from "../state";
+import { docs } from "../project";
+import { applyText, canonical, documents, notify, openedForALook, openFile, setPlanMode, setState, state } from "../state";
 import { PlanTextView, type TextTestBuilderRequest } from "./PlanTextView";
 import { planHash, previewPlan } from "./assist";
 import { nodeStatuses } from "./build";
@@ -101,7 +103,7 @@ import {
 } from "./model";
 import { registerPlanBridge, requestPlanPaletteTab, type ScheduledBuildScope } from "./planBridge";
 import "./planCanvas.css";
-import { assistOf } from "./run";
+import { assistOf, specPath } from "./run";
 
 type Box = { id: string; x: number; y: number; width: number; height: number; node?: PlanNode; lines: string[]; group?: string; memberCount?: number; pillWidth?: number };
 type Line = {
@@ -1628,17 +1630,52 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		const ADD_DECISION = "Add decision";
 		const BUILD_PLAN = "Trigger new build… (scheduled)";
 		const WALK_TESTS = activePathIndex() === null ? "Walk test paths on chart" : "Hide highlighted test path";
+		const OPEN_TICKET = "Open ticket";
+		const OPEN_SPEC = "Open spec";
 		const FLIP = direction() === "DOWN" ? "Switch to Horizontal layout" : "Switch to Vertical layout";
 		const AUTO = "Auto-layout (reset manual positions)";
 		const FIT = "Fit chart to view (0)";
 		const SAVE = "Save picture…";
 		const p = plan();
 		const manual = Boolean(p && hasManualLayout(p, direction()));
-		const picked = await chooseFromMenu("Flowchart actions", [ADD_STEP, ADD_DECISION, BUILD_PLAN, WALK_TESTS, FLIP, ...(manual ? [AUTO] : []), FIT, SAVE], { x: e.clientX, y: e.clientY });
+		const ticketVal = typeof p?.ticket === "string" ? p.ticket.trim() : "";
+		const ticketDoc = ticketVal
+			? docs().find((d) => d.group === "tickets" && d.exists && d.ticket?.toLowerCase() === ticketVal.toLowerCase()) ?? null
+			: null;
+		const specFile = specPath(props.path);
+		const hasSpec =
+			specFile !== props.path &&
+			(documents.has(canonical(specFile)) ||
+				docs().some((d) => d.exists && canonical(d.path) === canonical(specFile)) ||
+				(await backend.read(specFile).then(
+					() => true,
+					() => false,
+				)));
+		const docItems = [
+			...(ticketDoc ? [OPEN_TICKET] : []),
+			...(hasSpec ? [OPEN_SPEC] : []),
+		];
+		const picked = await chooseFromMenu(
+			"Flowchart actions",
+			[
+				ADD_STEP,
+				ADD_DECISION,
+				BUILD_PLAN,
+				WALK_TESTS,
+				...(docItems.length ? (["separator", ...docItems, "separator"] as const) : []),
+				FLIP,
+				...(manual ? [AUTO] : []),
+				FIT,
+				SAVE,
+			],
+			{ x: e.clientX, y: e.clientY },
+		);
 		if (picked === ADD_STEP) addNext();
 		else if (picked === ADD_DECISION) addDecisionNode();
 		else if (picked === BUILD_PLAN) triggerScheduledBuild({ kind: "plan", label: p?.title || "this plan" });
 		else if (picked === WALK_TESTS) setActivePathIndex(activePathIndex() === null ? 0 : null);
+		else if (picked === OPEN_TICKET && ticketDoc) void openFile(ticketDoc.path);
+		else if (picked === OPEN_SPEC && hasSpec) void openFile(specFile);
 		else if (picked === FLIP) toggleDirection();
 		else if (picked === AUTO) resetAllLayout();
 		else if (picked === FIT) fitOrWhole();
@@ -1893,12 +1930,22 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		const p = plan();
 		const manual = Boolean(p && hasManualLayout(p, direction()));
 		const pathCount = allPaths().paths.length;
+		const ticketVal = typeof p?.ticket === "string" ? p.ticket.trim() : "";
+		const ticketDoc = ticketVal
+			? docs().find((d) => d.group === "tickets" && d.exists && d.ticket?.toLowerCase() === ticketVal.toLowerCase()) ?? null
+			: null;
+		const specFile = specPath(props.path);
+		const hasSpec =
+			specFile !== props.path &&
+			(documents.has(canonical(specFile)) || docs().some((d) => d.exists && canonical(d.path) === canonical(specFile)));
 		return [
 			{
 				label: "Trigger new build… (scheduled)",
 				run: () => triggerScheduledBuild({ kind: "plan", label: p?.title || "this plan" }),
 			},
 			{ label: "Open Assistant tab", run: openAssistant },
+			...(ticketDoc ? [{ label: "Open ticket", run: () => void openFile(ticketDoc.path) }] : []),
+			...(hasSpec ? [{ label: "Open spec", run: () => void openFile(specFile) }] : []),
 			{
 				label: activePathIndex() === null ? `Walk test paths (${pathCount})` : "Hide highlighted test path",
 				disabled: pathCount === 0,

@@ -217,7 +217,12 @@ export async function checkCodeCitations(
 		const relFile = cit.file.replace(/^(?:\.\.\/)+/, "");
 
 		if (cit.from > targetLines.length || cit.to > targetLines.length) {
-			const found = snippetLines ? locateSnippet(targetLines, snippetLines) : null;
+			const rawFound = snippetLines ? locateSnippet(targetLines, snippetLines) : null;
+			const origSpan = Math.max(0, cit.to - cit.from);
+			const isTrunc = Boolean(snippetLines && snippetLines.length === CODE_LINES_KEPT && origSpan >= CODE_LINES_KEPT);
+			const found = rawFound
+				? { from: rawFound.from, to: isTrunc ? Math.min(targetLines.length, rawFound.from + origSpan) : rawFound.to }
+				: null;
 			issues.push({
 				docPath,
 				docLine: cit.line,
@@ -241,7 +246,14 @@ export async function checkCodeCitations(
 				(currentSlice.length === snippetLines.length || truncatedExcerpt) &&
 				snippetLines.every((line, idx) => normLine(currentSlice[idx] ?? "") === normLine(line));
 			if (!matchesNow) {
-				const moved = locateSnippet(targetLines, snippetLines);
+				const rawMoved = locateSnippet(targetLines, snippetLines);
+				const origSpan = Math.max(0, cit.to - cit.from);
+				const moved = rawMoved
+					? {
+							from: rawMoved.from,
+							to: truncatedExcerpt ? Math.min(targetLines.length, rawMoved.from + origSpan) : rawMoved.to,
+						}
+					: null;
 				if (moved && (moved.from !== cit.from || moved.to !== cit.to)) {
 					issues.push({
 						docPath,
@@ -287,4 +299,46 @@ export function reanchorCitation(markdown: string, citation: CodeCitation, newFr
 	}
 	parts[idx] = next;
 	return parts.join("");
+}
+
+/**
+ * Replaces the quoted fenced code snippet immediately following a drifted citation
+ * with the live lines (`citation.from..citation.to`, capped at `CODE_LINES_KEPT`)
+ * from `targetText`, preserving surrounding prose and EOLs (ADR 0002).
+ */
+export function refreshCitationExcerpt(markdown: string, citation: CodeCitation, targetText: string): string | null {
+	const eol = markdown.includes("\r\n") ? "\r\n" : "\n";
+	const lines = markdown.split(/\r?\n/);
+	const targetLines = targetText.split(/\r?\n/);
+	if (citation.from < 1 || citation.from > targetLines.length) return null;
+	const endLine = Math.min(citation.to, targetLines.length);
+	const excerpt = targetLines.slice(citation.from - 1, Math.min(endLine, citation.from - 1 + CODE_LINES_KEPT));
+
+	// Locate the immediately following fenced code block (within 3 lines of citation.line).
+	let fenceStart = -1;
+	let fenceChar = "`";
+	let fenceLen = 3;
+	for (let j = citation.line; j < Math.min(lines.length, citation.line + 4); j++) {
+		const trimmed = lines[j]!.trim();
+		if (!trimmed) continue;
+		const open = /^([`~]{3,})([^\s`]*)/.exec(trimmed);
+		if (open) {
+			fenceStart = j;
+			fenceChar = open[1]![0]!;
+			fenceLen = open[1]!.length;
+		}
+		break;
+	}
+	if (fenceStart < 0) return null;
+	let fenceEnd = -1;
+	for (let j = fenceStart + 1; j < lines.length; j++) {
+		const close = new RegExp(`^\\s*${fenceChar === "`" ? "`" : "~"}{${fenceLen},}\\s*$`);
+		if (close.test(lines[j]!)) {
+			fenceEnd = j;
+			break;
+		}
+	}
+	if (fenceEnd < 0) return null;
+	const updated = [...lines.slice(0, fenceStart + 1), ...excerpt, ...lines.slice(fenceEnd)];
+	return updated.join(eol);
 }

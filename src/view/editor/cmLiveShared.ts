@@ -48,6 +48,7 @@ export type LiveCallbacks = {
 	onOpenImageLightbox: (info: ImageLightboxInfo) => void;
 	onOpenMermaidLightbox?: (info: MermaidLightboxInfo) => void;
 	onResizeImage: (from: number, to: number, width: number | null) => void;
+	isYamlEditorOpen?: () => boolean;
 };
 
 export const liveCallbacksFacet = Facet.define<LiveCallbacks, LiveCallbacks | null>({
@@ -68,18 +69,8 @@ export const readOnlyModeFacet = Facet.define<boolean, boolean>({
 
 /** Effect dispatched whenever workspace `docs()` or broken-link status changes. */
 export const refreshLiveEffect = StateEffect.define<number>();
-/** Effect toggling raw YAML frontmatter visibility inside the editor. */
-export const setEditYamlEffect = StateEffect.define<boolean>();
-/** Effect explicitly dropping a single table or callout block into raw Markdown mode. */
+/** Effect explicitly dropping a single table, callout, mermaid, or details block into raw Markdown mode. */
 export const setRawEditBlockEffect = StateEffect.define<{ from: number; to: number } | null>();
-
-export const editYamlField = StateField.define<boolean>({
-	create: () => false,
-	update(value, tr) {
-		for (const e of tr.effects) if (e.is(setEditYamlEffect)) return e.value;
-		return value;
-	},
-});
 
 /**
  * Tracks a block range `[from, to]` that the user explicitly opted to edit as raw Markdown

@@ -8,14 +8,25 @@ import { workLinkOf, type WorkLink } from "./workContext";
 // under its parent, the work under way first and what is finished last. Read
 // from the listing alone; the panel draws the rows.
 
-export type WorkRow = { file: DocFile; kind: "ticket" | "plan" | "spec"; depth: number; link?: WorkLink };
+export type WorkRow = { file: DocFile; kind: "ticket" | "plan" | "spec"; depth: number; link?: WorkLink; archived?: boolean };
+export type WorkSort = "status" | "key" | "title";
 export type WorkList = {
 	rows: WorkRow[];
+	/** Archived ticket rows (`tickets/archive/...`), kept separate from active work. */
+	archived: WorkRow[];
 	/** Tickets at the top of the list, with all under them, that are finished or set aside and were left out. */
 	folded: number;
 	/** Specs for no ticket in the folder. */
 	loose: DocFile[];
 };
+
+/** True when a ticket lives under a `tickets/archive/` folder. */
+export function isArchivedTicket(file: DocFile): boolean {
+	if (file.group !== "tickets") return false;
+	const norm = file.path.replace(/\\/g, "/").toLowerCase();
+	const nameNorm = file.name.replace(/\\/g, "/").toLowerCase();
+	return nameNorm.startsWith("archive/") || norm.includes("/tickets/archive/");
+}
 
 /** As many finished tickets as are listed before the rest fold away behind a count. */
 export const FINISHED_SHOWN = 3;
@@ -27,15 +38,17 @@ const same = (a: string | undefined, b: string | undefined) => Boolean(a && b &&
  * The rows of the Work list. Under way comes first, then what waits, then
  * what is done or set aside; a ticket with something under way beneath it
  * counts as under way. Finished tickets beyond a few are left out unless
- * `all` asks for them, and counted.
+ * `all` asks for them, and counted. Archived tickets live in `archived`.
  */
-export function workList(files: readonly DocFile[], root: string | undefined | null, options: { all?: boolean } = {}): WorkList {
+export function workList(files: readonly DocFile[], root: string | undefined | null, options: { all?: boolean; sort?: WorkSort } = {}): WorkList {
 	const real = files.filter((file) => file.exists && !isCatalog(file));
-	const tickets = real.filter((file) => file.group === "tickets");
+	const allTickets = real.filter((file) => file.group === "tickets");
+	const tickets = allTickets.filter((file) => !isArchivedTicket(file));
+	const archivedTickets = allTickets.filter(isArchivedTicket);
 	const specs = real.filter((file) => file.group === "specs");
 	const plans = real.filter((file) => file.group === "plans");
 	const rel = (path: string) => relativeTo(root, path).split("\\").join("/");
-	const matchesRef = (filePath: string, ref: string) => rel(filePath).toLowerCase() === ref.split("\\").join("/").replace(/^\.\//, "").toLowerCase();
+	const matchesRef = (filePath: string, ref: string) => rel(filePath).toLowerCase() === ref.split("\\").join("/").replace(/^\.?\/+/, "").toLowerCase();
 	const specsOf = (ticket: DocFile) => specs.filter((spec) => spec.tickets?.some((key) => same(key, ticket.ticket)) || ticket.specs?.some((path) => matchesRef(spec.path, path)));
 	const plansOf = (ticket: DocFile) => plans.filter((plan) => plan.tickets?.some((key) => same(key, ticket.ticket)) || ticket.plans?.some((path) => matchesRef(plan.path, path)));
 	// A ticket is under its parent when the parent is in the folder, and is not its own ancestor.
@@ -76,13 +89,13 @@ export function workList(files: readonly DocFile[], root: string | undefined | n
 	const childrenOf = (ticket: DocFile) => childrenMap.get(ticket) ?? [];
 	const specsByTicket = new Map<DocFile, DocFile[]>();
 	const attachedSpecs = new Set<DocFile>();
-	for (const ticket of tickets) {
+	for (const ticket of allTickets) {
 		const list = specsOf(ticket);
 		specsByTicket.set(ticket, list);
 		for (const s of list) attachedSpecs.add(s);
 	}
 	const plansByTicket = new Map<DocFile, DocFile[]>();
-	for (const ticket of tickets) plansByTicket.set(ticket, plansOf(ticket));
+	for (const ticket of allTickets) plansByTicket.set(ticket, plansOf(ticket));
 
 	const rankMemo = new Map<DocFile, number>();
 	/** How far along a ticket is, with what is under it: the least finished of them. */
@@ -99,20 +112,39 @@ export function workList(files: readonly DocFile[], root: string | undefined | n
 		rankMemo.set(ticket, min);
 		return min;
 	};
-	const byRank = (list: DocFile[]) => list.map((ticket, at) => ({ ticket, at, rank: rank(ticket) })).sort((a, b) => a.rank - b.rank || a.at - b.at);
+	const sortMode = options.sort ?? "status";
+	const byOrder = (list: DocFile[]) =>
+		list
+			.map((ticket, at) => ({ ticket, at, rank: rank(ticket) }))
+			.sort((a, b) => {
+				if (sortMode === "key") {
+					return (a.ticket.ticket ?? a.ticket.name).localeCompare(b.ticket.ticket ?? b.ticket.name, undefined, { numeric: true, sensitivity: "base" });
+				}
+				if (sortMode === "title") {
+					return (a.ticket.title || a.ticket.ticket || a.ticket.name).localeCompare(b.ticket.title || b.ticket.ticket || b.ticket.name, undefined, { numeric: true, sensitivity: "base" });
+				}
+				return a.rank - b.rank || a.at - b.at;
+			});
 
 	const rows: WorkRow[] = [];
 	const add = (ticket: DocFile, depth: number, parentTicket?: DocFile) => {
 		rows.push({ file: ticket, kind: "ticket", depth, ...(parentTicket ? { link: workLinkOf(parentTicket, ticket, "ticket") } : {}) });
 		for (const plan of plansByTicket.get(ticket) ?? []) rows.push({ file: plan, kind: "plan", depth: depth + 1, link: workLinkOf(ticket, plan, "plan") });
 		for (const spec of specsByTicket.get(ticket) ?? []) rows.push({ file: spec, kind: "spec", depth: depth + 1, link: workLinkOf(ticket, spec, "spec") });
-		if (depth < 8) for (const { ticket: child } of byRank(childrenOf(ticket))) add(child, depth + 1, ticket);
+		if (depth < 8) for (const { ticket: child } of byOrder(childrenOf(ticket))) add(child, depth + 1, ticket);
 	};
-	const ordered = byRank(top);
+	const ordered = byOrder(top);
 	const finished = ordered.filter((entry) => entry.rank >= ORDER.done);
-	const fold = !options.all && finished.length > FINISHED_SHOWN;
+	const fold = sortMode === "status" && !options.all && finished.length > FINISHED_SHOWN;
 	for (const entry of ordered) if (!fold || entry.rank < ORDER.done) add(entry.ticket, 0);
-	return { rows, folded: fold ? finished.length : 0, loose: specs.filter((spec) => !attachedSpecs.has(spec)) };
+
+	const archived: WorkRow[] = [];
+	for (const ticket of archivedTickets) {
+		archived.push({ file: ticket, kind: "ticket", depth: 0, archived: true });
+		for (const plan of plansByTicket.get(ticket) ?? []) archived.push({ file: plan, kind: "plan", depth: 1, link: workLinkOf(ticket, plan, "plan"), archived: true });
+		for (const spec of specsByTicket.get(ticket) ?? []) archived.push({ file: spec, kind: "spec", depth: 1, link: workLinkOf(ticket, spec, "spec"), archived: true });
+	}
+	return { rows, archived, folded: fold ? finished.length : 0, loose: specs.filter((spec) => !attachedSpecs.has(spec)) };
 }
 
 /** A row of the Work list as it is drawn: whether anything is under it, and whether that is shut away. */

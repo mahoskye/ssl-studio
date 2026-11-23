@@ -340,8 +340,8 @@ export function ownLinkEdits(
 	});
 }
 
-/** The keys of a document's front matter whose values are files, named from the project's top: a ticket's specs, a spec's plan. */
-const PATH_KEYS = new Set(["spec", "specs", "plan", "plans"]);
+/** The keys of a document's front matter whose values are files, named from the project's top: a ticket's specs, a spec's plan, a schema doc's SQL source. */
+const PATH_KEYS = new Set(["spec", "specs", "plan", "plans", "source"]);
 
 /**
  * The files a document's front matter names ("specs: [design/Due.spec.md]"),
@@ -366,7 +366,9 @@ export function frontPaths(text: string): { value: string; line: number; column:
 			for (const match of rest.matchAll(/"([^"]*)"|'([^']*)'|([^\s,[\]"'#][^,[\]]*)/g)) {
 				const quoted = match[1] !== undefined || match[2] !== undefined;
 				const value = (match[1] ?? match[2] ?? match[3] ?? "").trim();
-				if (value) found.push({ value, line: index + 1, column: at + match.index + (quoted ? 1 : 0) });
+				if (value && !/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(value)) {
+					found.push({ value, line: index + 1, column: at + match.index + (quoted ? 1 : 0) });
+				}
 			}
 		});
 	return found;
@@ -405,4 +407,94 @@ export function linkBeingWritten(lineToCursor: string): string | null {
 	// In a span of code the same characters are an example of a link.
 	const lead = lineToCursor.slice(0, found.index);
 	return (lead.match(/`/g)?.length ?? 0) % 2 === 1 ? null : found[1]!;
+}
+
+/**
+ * Rewrites Markdown `#anchor` links (`[text](path#old-anchor)` / `[text](#old-anchor)`)
+ * and wikilink/embed heading fragments (`[[Target#Old Heading]]`, `![[Target#Old Heading|Alias]]`)
+ * in a single document when a heading is renamed (ADR 0002, ADR 0017).
+ * Skips YAML frontmatter and fenced code blocks.
+ */
+export function rewriteHeadingReferences(
+	markdown: string,
+	options: {
+		isSameDoc: boolean;
+		matchesDocHref: (hrefPath: string) => boolean;
+		matchesWikiTarget: (name: string) => boolean;
+		oldHeading: string;
+		oldAnchor: string;
+		newHeading: string;
+		newAnchor: string;
+	},
+): { text: string; count: number } {
+	const fmLines = frontMatter(markdown).lines;
+	const lines = markdown.split(/(\r?\n)/);
+	const oldSlug = options.oldAnchor.toLowerCase();
+	const oldHeadingLower = options.oldHeading.trim().toLowerCase();
+	let count = 0;
+	let fenceChar = "";
+	let fenceLen = 0;
+
+	const matchesAnchor = (rawFragment: string) => {
+		let decoded = rawFragment;
+		try {
+			decoded = decodeURIComponent(rawFragment);
+		} catch {
+			// keep raw
+		}
+		const trimmed = decoded.trim();
+		if (trimmed.toLowerCase() === oldSlug || trimmed.toLowerCase() === oldHeadingLower) return true;
+		const slug = trimmed
+			.toLowerCase()
+			.replace(/[^\p{L}\p{N}\s-]/gu, "")
+			.replace(/\s+/g, "-");
+		return slug === oldSlug;
+	};
+
+	for (let idx = 0; idx < lines.length; idx += 2) {
+		const lineNum = idx / 2;
+		const line = lines[idx]!;
+		if (lineNum < fmLines) continue;
+		const fm = /^[ \t]{0,3}(`{3,}|~{3,})/.exec(line);
+		if (fm) {
+			if (!fenceChar) {
+				fenceChar = fm[1]![0]!;
+				fenceLen = fm[1]!.length;
+			} else if (fm[1]![0] === fenceChar && fm[1]!.length >= fenceLen && /^[ \t]*$/.test(line.slice(fm[0].length))) {
+				fenceChar = "";
+				fenceLen = 0;
+			}
+			continue;
+		}
+		if (fenceChar) continue;
+
+		// Split out inline code spans so we never rewrite examples inside backticks.
+		const segs = line.split(/(`+[^`]*`+)/);
+		let changed = false;
+		for (let s = 0; s < segs.length; s += 2) {
+			let seg = segs[s]!;
+			// 1. Markdown links: `[label](path#anchor)` or `[label](#anchor)`
+			seg = seg.replace(/(\[[^\]]*\]\()([^)\s#]*)#([^)\s]+)(\))/g, (full, open: string, pathPart: string, frag: string, close: string) => {
+				const targetMatch = pathPart === "" ? options.isSameDoc : options.matchesDocHref(pathPart);
+				if (!targetMatch || !matchesAnchor(frag)) return full;
+				count++;
+				changed = true;
+				return `${open}${pathPart}#${options.newAnchor}${close}`;
+			});
+			// 2. Wikilinks / embeds: `[[Target#Heading]]`, `[[#Heading]]`, `![[Target#Heading|Alias]]`
+			seg = seg.replace(/(!?\[\[)([^[\]|#]*)#([^[\]|]+)((?:\\?\|[^[\]]*)?\]\])/g, (full, open: string, target: string, frag: string, rest: string) => {
+				const t = target.trim();
+				const targetMatch = t === "" ? options.isSameDoc : options.matchesWikiTarget(t);
+				if (!targetMatch || !matchesAnchor(frag)) return full;
+				count++;
+				changed = true;
+				const replacement = frag.trim().toLowerCase() === oldSlug && frag.includes("-") && !frag.includes(" ") ? options.newAnchor : options.newHeading;
+				return `${open}${target}#${replacement}${rest}`;
+			});
+			segs[s] = seg;
+		}
+		if (changed) lines[idx] = segs.join("");
+	}
+
+	return { text: count ? lines.join("") : markdown, count };
 }

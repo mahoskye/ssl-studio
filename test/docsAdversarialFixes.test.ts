@@ -332,7 +332,7 @@ describe("Wave A–C adversarial review v2 fixes & features", () => {
 	test("replaceInFrontMatterList updates scalar and list entries in place without mangling other keys", () => {
 		const md = "---\nticket: OLD-1\nrelated: [OLD-1, KEEP-2]\n---\n\n# Body\n";
 		const replaced = replaceInFrontMatterList(md, "related", "OLD-1", "NEW-1");
-		expect(frontMatter(replaced!).values.related).toEqual(["KEEP-2", "NEW-1"]);
+		expect(frontMatter(replaced!).values.related).toEqual(["NEW-1", "KEEP-2"]);
 		expect(frontMatter(replaced!).values.ticket).toBe("OLD-1");
 	});
 

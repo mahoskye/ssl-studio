@@ -3,12 +3,19 @@
 // answers whether a call node's target exists; if it cannot be asked, that one
 // check waits rather than reporting everything as missing. Once built, the drift
 // between chart and code is reported the same way, and re-read as scripts change.
+import { createEffect, createRoot, on } from "solid-js";
 import { jsonProblem } from "../../shared/jsonCheck";
+import { backend } from "../backend";
 import { monaco } from "../editor/monaco";
 import { publishFindings, session } from "../lsp/session";
+import { docs } from "../project";
+import { canonical, documents } from "../state";
+import { planHash, specHash } from "./assist";
 import { builtOf, driftFindings } from "./built";
 import { clearDrift, driftFor, readDrift } from "./drift";
-import { checkPlan, checkRefs, findingLine, parsePlan, type Plan } from "./model";
+import { checkPlan, checkRefs, findingLine, parsePlan, type Finding, type Plan } from "./model";
+
+const specPath = (planPath: string) => planPath.replace(/\.plan\.json$/i, ".spec.md");
 
 const OWNER = "plan";
 const SEVERITY = { error: 1, warning: 2, info: 3 } as const;
@@ -18,6 +25,30 @@ const rechecks = new Map<string, () => void>();
 export const recheckPlan = (uri: string) => rechecks.get(uri)?.();
 /** A file changed on disk: the server takes a moment to read it again. */
 export const recheckPlans = () => rechecks.forEach((_soon, uri) => recheckPlan(uri));
+
+/** Pure doc/spec consistency checks for a plan (missing linked ticket, stale companion spec). */
+export function checkPlanDocs(plan: Plan, options: { tickets?: readonly { ticket?: string }[]; specText?: string | null }): Finding[] {
+	const out: Finding[] = [];
+	const ticket = typeof plan.ticket === "string" ? plan.ticket.trim() : "";
+	const tickets = (options.tickets ?? []).filter((t) => Boolean(t.ticket?.trim()));
+	if (ticket && tickets.length > 0 && !tickets.some((t) => t.ticket!.trim().toLowerCase() === ticket.toLowerCase())) {
+		out.push({
+			severity: "warning",
+			code: "plan-unknown-ticket",
+			message: `Ticket ${ticket} was not found in the project's tickets.`,
+			field: "ticket",
+		});
+	}
+	const recorded = options.specText ? specHash(options.specText) : null;
+	if (recorded !== null && recorded !== planHash(plan)) {
+		out.push({
+			severity: "warning",
+			code: "plan-stale-spec",
+			message: "The companion spec is out of sync with the current plan. Write the spec again before building.",
+		});
+	}
+	return out;
+}
 
 async function knownRefs(plan: Plan): Promise<Set<string> | null> {
 	const refs = [...new Set(plan.nodes.filter((n) => n.kind === "call" && n.ref?.trim()).map((n) => n.ref!))];
@@ -38,6 +69,18 @@ async function knownRefs(plan: Plan): Promise<Set<string> | null> {
 export function trackPlan(model: monaco.editor.ITextModel) {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const uri = model.uri.toString();
+	const planPath = model.uri.scheme === "file" ? model.uri.fsPath : "";
+	const companionSpec = planPath ? specPath(planPath) : "";
+	const companionCanon = companionSpec && companionSpec !== planPath ? canonical(companionSpec) : "";
+	const readSpec = async (): Promise<string | null> => {
+		if (!companionCanon) return null;
+		const open = documents.get(companionCanon);
+		if (open) return open.model.getValue();
+		return backend.read(companionSpec).then(
+			(f) => f.text,
+			() => null,
+		);
+	};
 	const run = async () => {
 		const version = model.getVersionId();
 		const text = model.getValue();
@@ -51,12 +94,17 @@ export function trackPlan(model: monaco.editor.ITextModel) {
 			return;
 		}
 		const plan = parsed.plan;
-		const known = await knownRefs(plan);
-		const drift = await readDrift(uri, plan);
+		const [known, drift, specText] = await Promise.all([knownRefs(plan), readDrift(uri, plan), readSpec()]);
 		if (model.isDisposed() || model.getVersionId() !== version) return;
 		// The server cannot compare while it is still indexing: ask again.
 		if (builtOf(plan) && !driftFor(uri).checked && session.supports("ssl/callGraph")) soon(5000);
-		const findings = [...checkPlan(plan), ...(known ? checkRefs(plan, (ref) => known.has(ref)) : []), ...driftFindings(drift)];
+		const loadedTickets = docs().filter((d) => d.exists && d.group === "tickets" && d.ticket);
+		const findings = [
+			...checkPlan(plan),
+			...(known ? checkRefs(plan, (ref) => known.has(ref)) : []),
+			...driftFindings(drift),
+			...checkPlanDocs(plan, { tickets: loadedTickets, specText }),
+		];
 		publishFindings(
 			model,
 			OWNER,
@@ -71,13 +119,18 @@ export function trackPlan(model: monaco.editor.ITextModel) {
 		timer = setTimeout(() => void run(), ms);
 	};
 	const changes = model.onDidChangeContent(() => soon());
-	// A script's text changes what the chart is compared with.
+	// A script's text or companion spec changes what the chart is compared with.
 	const scripts: monaco.IDisposable[] = [];
 	const watch = (other: monaco.editor.ITextModel) => {
 		if (other.getLanguageId() === "ssl") scripts.push(other.onDidChangeContent(() => soon(1500)));
+		else if (companionCanon && other.uri.scheme === "file" && canonical(other.uri.fsPath) === companionCanon) scripts.push(other.onDidChangeContent(() => soon(400)));
 	};
 	monaco.editor.getModels().forEach(watch);
 	const created = monaco.editor.onDidCreateModel(watch);
+	const disposeDocs = createRoot((dispose) => {
+		createEffect(on(docs, () => soon(300), { defer: true }));
+		return dispose;
+	});
 	rechecks.set(uri, () => soon(1000));
 	void run();
 	// The workspace index may still be filling when a plan opens.
@@ -86,6 +139,7 @@ export function trackPlan(model: monaco.editor.ITextModel) {
 		clearTimeout(timer);
 		changes.dispose();
 		created.dispose();
+		disposeDocs();
 		scripts.forEach((s) => s.dispose());
 		rechecks.delete(uri);
 		clearDrift(uri);

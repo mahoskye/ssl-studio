@@ -6,6 +6,152 @@ import { namedLinksIn } from "../../shared/namedLinks";
 import { isLikelyHexColorTag } from "../../shared/tags";
 import { ticketMatcher } from "../../shared/ticketRefs";
 
+type KatexModule = typeof import("katex").default;
+
+let katexMod: KatexModule | null = null;
+let katexLoading: Promise<KatexModule> | null = null;
+const KATEX_CACHE_MAX = 160;
+const katexCache = new Map<string, string>();
+
+/** Lazy-loads KaTeX + its stylesheet on first math expression (matching cmMermaid.ts's on-demand pattern). */
+export function loadKatex(): Promise<KatexModule> {
+	if (katexMod) return Promise.resolve(katexMod);
+	if (!katexLoading) {
+		const cssImport =
+			// @ts-expect-error Vite bundles the KaTeX CSS dynamically at runtime (no .d.ts shipped for .css).
+			import("katex/dist/katex.min.css");
+		katexLoading = Promise.all([import("katex"), cssImport]).then(([mod]) => {
+			katexMod = mod.default ?? (mod as unknown as KatexModule);
+			return katexMod;
+		});
+	}
+	return katexLoading;
+}
+
+/** Returns cached/rendered KaTeX HTML synchronously when KaTeX is already loaded, or null before first load. */
+export function renderKatexSync(tex: string, displayMode: boolean): string | null {
+	const key = `${displayMode ? "D" : "I"}\0${tex}`;
+	const hit = katexCache.get(key);
+	if (hit !== undefined) {
+		katexCache.delete(key);
+		katexCache.set(key, hit);
+		return hit;
+	}
+	if (!katexMod) return null;
+	try {
+		const html = katexMod.renderToString(tex, {
+			displayMode,
+			throwOnError: false,
+			strict: false,
+			trust: false,
+		});
+		if (katexCache.size >= KATEX_CACHE_MAX) {
+			const oldest = katexCache.keys().next().value;
+			if (oldest !== undefined) katexCache.delete(oldest);
+		}
+		katexCache.set(key, html);
+		return html;
+	} catch {
+		return null;
+	}
+}
+
+/** Asynchronously loads KaTeX on demand and renders a LaTeX expression to HTML. */
+export async function renderKatexHtml(tex: string, displayMode: boolean): Promise<string | null> {
+	const cached = renderKatexSync(tex, displayMode);
+	if (cached !== null) return cached;
+	try {
+		await loadKatex();
+		return renderKatexSync(tex, displayMode);
+	} catch {
+		return null;
+	}
+}
+
+export type InlineMathSpan = { from: number; to: number; tex: string; display: boolean };
+
+/**
+ * Finds inline `$...$` (and single-line `$$...$$`) math spans on one line of prose while
+ * strictly skipping currency like `$100` or `$100 and $200` (requires non-space immediately
+ * inside delimiters and no digit immediately after closing `$`).
+ */
+export function findInlineMathSpans(text: string): InlineMathSpan[] {
+	if (!text.includes("$")) return [];
+	const spans: InlineMathSpan[] = [];
+	const escaped = (idx: number) => {
+		let bs = 0;
+		for (let k = idx - 1; k >= 0 && text[k] === "\\"; k--) bs++;
+		return bs % 2 === 1;
+	};
+	let i = 0;
+	while (i < text.length) {
+		if (text[i] !== "$" || escaped(i)) {
+			i++;
+			continue;
+		}
+		// Inline display math `$$...$$` on a single line
+		if (text[i + 1] === "$") {
+			let j = i + 2;
+			let close = -1;
+			while (j < text.length - 1) {
+				if (text[j] === "$" && text[j + 1] === "$" && !escaped(j)) {
+					close = j;
+					break;
+				}
+				j++;
+			}
+			if (close > i + 2) {
+				const tex = text.slice(i + 2, close).trim();
+				if (tex) {
+					spans.push({ from: i, to: close + 2, tex, display: true });
+					i = close + 2;
+					continue;
+				}
+			}
+			i += 2;
+			continue;
+		}
+		// Single `$`: reject if preceded by a digit or followed immediately by whitespace.
+		const prev = i > 0 ? text[i - 1]! : "";
+		const next = text[i + 1];
+		if ((prev && /\d/.test(prev)) || !next || /\s/.test(next) || next === "$") {
+			i++;
+			continue;
+		}
+		// Search for matching closing `$` on this line.
+		let j = i + 1;
+		let close = -1;
+		while (j < text.length) {
+			if (text[j] === "$" && !escaped(j)) {
+				if (text[j + 1] === "$") {
+					// Double dollar inside cannot close a single `$`
+					break;
+				}
+				const beforeClose = text[j - 1]!;
+				const afterClose = text[j + 1];
+				// Require non-whitespace right before closing `$` AND no digit right after closing `$`.
+				if (!/\s/.test(beforeClose) && (!afterClose || !/\d/.test(afterClose))) {
+					close = j;
+					break;
+				}
+				// Currency-like `$100 and $200` has space before or digit after — abandon this opening `$`.
+				break;
+			}
+			j++;
+		}
+		if (close > i + 1) {
+			const tex = text.slice(i + 1, close);
+			if (tex.trim()) {
+				spans.push({ from: i, to: close + 1, tex, display: false });
+				i = close + 1;
+				continue;
+			}
+		}
+		i++;
+	}
+	return spans;
+}
+
 /** A ticket of the project, as a document's page links to it: where it is from that document, and what it is in a line. */
 export type TicketRef = { key: string; href: string; about: string };
 
@@ -238,10 +384,64 @@ function renderCallouts(holder: HTMLTemplateElement) {
 	}
 }
 
+/** Renders safe `$...$` and `$$...$$` math spans in prose text nodes (skipping code, links, and currency). */
+function renderMath(holder: HTMLTemplateElement) {
+	const walker = document.createTreeWalker(holder.content, NodeFilter.SHOW_TEXT);
+	const nodes: Text[] = [];
+	for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+		if (node.nodeValue?.includes("$") && !node.parentElement?.closest(UNLINKED)) nodes.push(node as Text);
+	}
+	for (const node of nodes) {
+		const text = node.data;
+		const spans = findInlineMathSpans(text);
+		if (!spans.length) continue;
+		const parts = document.createDocumentFragment();
+		let at = 0;
+		for (const span of spans) {
+			parts.append(text.slice(at, span.from));
+			const el = document.createElement(span.display ? "div" : "span");
+			el.className = span.display ? "md-math md-math-display" : "md-math md-math-inline";
+			el.dataset.math = span.tex;
+			el.dataset.display = span.display ? "1" : "0";
+			const rendered = renderKatexSync(span.tex, span.display);
+			if (rendered !== null) {
+				el.innerHTML = rendered;
+			} else {
+				el.textContent = span.tex;
+				void loadKatex();
+			}
+			parts.append(el);
+			at = span.to;
+		}
+		parts.append(text.slice(at));
+		node.replaceWith(parts);
+	}
+}
+
+/** Hydrates any pending `.md-math[data-math]` elements inside a mounted DOM subtree once KaTeX loads. */
+export function hydrateMathInElement(root: HTMLElement): void {
+	const nodes = root.querySelectorAll<HTMLElement>(".md-math[data-math]");
+	if (!nodes.length) return;
+	for (const el of nodes) {
+		if (el.querySelector(".katex")) continue;
+		const tex = el.dataset.math ?? "";
+		if (!tex) continue;
+		const display = el.dataset.display === "1";
+		const cached = renderKatexSync(tex, display);
+		if (cached !== null) {
+			el.innerHTML = cached;
+		} else {
+			void renderKatexHtml(tex, display).then((html) => {
+				if (html && el.isConnected) el.innerHTML = html;
+			});
+		}
+	}
+}
+
 /** `html` must already be sanitised. Anchors are for a document; a reply has no links into itself. */
 export function finishMarkdown(html: string, options: { anchors?: boolean; tickets?: readonly TicketRef[]; named?: NameResolver } = {}): string {
 	const names = options.named && html.includes("[[") ? options.named : undefined;
-	const hasExtra = html.includes("==") || html.includes("#") || html.includes("[!");
+	const hasExtra = html.includes("==") || html.includes("#") || html.includes("[!") || html.includes("$");
 	if (!options.anchors && !options.tickets?.length && !names && !html.includes("<table") && !hasExtra) return html;
 	const holder = document.createElement("template");
 	holder.innerHTML = html;
@@ -249,6 +449,7 @@ export function finishMarkdown(html: string, options: { anchors?: boolean; ticke
 	if (html.includes("[!")) renderCallouts(holder);
 	if (names) linkNames(holder, names);
 	if (options.tickets?.length) linkTickets(holder, options.tickets);
+	if (html.includes("$")) renderMath(holder);
 	if (html.includes("==")) renderHighlights(holder);
 	if (html.includes("#")) renderTags(holder);
 	markShortColumns(holder);

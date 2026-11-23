@@ -5,26 +5,30 @@
 import { createEffect, createResource, createSignal, For, onCleanup, Show } from "solid-js";
 import { snippetAsText, TEMPLATES, type Template } from "../../shared/houseStyle";
 import { CALLOUT_PRESETS } from "../../shared/markdownEdit";
+import { baseName, joinPath, relativeTo } from "../../shared/paths";
 import { isCatalog } from "../../shared/projectDocs";
 import type { DocFile } from "../../shared/protocol";
 import type { MarkdownTemplate } from "../../shared/templater";
 import { backend } from "../backend";
+import { choose } from "../dialogs";
 import { activeEditor } from "../editor/EditorGroup";
 import { activeLiveEditor } from "../editor/liveBridge";
 import { regionColor } from "../editor/regions";
 import { Icon, type IconName } from "../Icon";
 import { activeGraphBridge } from "../graph/graphBridge";
+import { graphHighlightedCount, graphTicketHighlight, setGraphTicketHighlight } from "../graph/GraphView";
 import { recall, remember } from "../graph/canvas";
 import { openQuestions } from "../plan/assist";
 import { CODE_INDICATOR_WORDS } from "../plan/chart";
-import { SHAPE_DRAG, type NodeKind, type Plan } from "../plan/model";
+import { addNodeDoc, nodeDocsOf, printPlan, removeNodeDoc, SHAPE_DRAG, type NodeKind, type Plan } from "../plan/model";
 import { PlanAssistant } from "../plan/PlanAssistant";
 import { NodeImplementation, PlanImplementation } from "../plan/PlanCodeDrilldown";
 import { activePlanBridge, planPaletteTabRequest, setActivePlanTab } from "../plan/planBridge";
+import "../plan/planExtra.css";
 import { NodeTests, PlanTests } from "../plan/PlanTests";
 import { assistOf } from "../plan/run";
 import { docs, isMarkdown } from "../project";
-import { activePath, notify, openFile, setMarkdownMode, state } from "../state";
+import { activePath, applyText, notify, openFile, setMarkdownMode, state } from "../state";
 import { insertCalloutInteractive, insertImageInteractive, insertMarkdownTemplate, loadMarkdownTemplates, manageTemplates, newNoteFromTemplate } from "../templater";
 import { IconButton, Row, RowGroup, Rows } from "./Rows";
 import { SectionSplitter } from "./SectionSplitter";
@@ -205,7 +209,78 @@ export function Palette() {
 	const [planImplOpen, setPlanImplOpen] = createSignal(false);
 	const [nodeTestsOpen, setNodeTestsOpen] = createSignal(false);
 	const [planTestsOpen, setPlanTestsOpen] = createSignal(false);
+	const [docPickerOpen, setDocPickerOpen] = createSignal(false);
+	const [docPickerQuery, setDocPickerQuery] = createSignal("");
+	const [docPickerIdx, setDocPickerIdx] = createSignal(0);
 	const [planTab, setPlanTabSignal] = createSignal<"design" | "assistant">("design");
+
+	const docKindTag = (d: DocFile): string => {
+		if (d.group === "knowledge" && d.kind === "decisions") return "ADR";
+		if (d.group === "specs") return "Spec";
+		if (d.group === "schema") return "Schema";
+		if (d.group === "tickets") return "Ticket";
+		return "Doc";
+	};
+	const docDisplayName = (d: DocFile): string => {
+		if (d.group === "tickets" && d.ticket) {
+			return d.title && !d.title.toLowerCase().startsWith(d.ticket.toLowerCase()) ? `${d.ticket}: ${d.title}` : d.title || d.ticket;
+		}
+		return d.title || d.heading || baseName(d.path);
+	};
+	const docRelPath = (d: DocFile): string => relativeTo(state.workspace?.root, d.path).replace(/\\/g, "/");
+	const resolveLinkedDoc = (ref: string): DocFile | null => {
+		const clean = ref.trim().replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
+		if (!clean) return null;
+		const root = state.workspace?.root;
+		const all = docs().filter((d) => d.exists && !isCatalog(d));
+		return (
+			all.find((d) => relativeTo(root, d.path).replace(/\\/g, "/").toLowerCase() === clean) ??
+			all.find((d) => d.name.replace(/\\/g, "/").toLowerCase() === clean) ??
+			all.find((d) => d.path.replace(/\\/g, "/").toLowerCase().endsWith(`/${clean}`)) ??
+			all.find((d) => d.group === "tickets" && d.ticket?.toLowerCase() === clean) ??
+			null
+		);
+	};
+	const linkableWorkspaceDocs = () =>
+		docs()
+			.filter(
+				(d) =>
+					d.exists &&
+					!isCatalog(d) &&
+					(d.group === "tickets" ||
+						d.group === "specs" ||
+						d.group === "schema" ||
+						(d.group === "knowledge" && d.kind === "decisions")),
+			)
+			.sort((a, b) => {
+				const rank = (d: DocFile) => (d.group === "knowledge" ? 0 : d.group === "schema" ? 1 : d.group === "specs" ? 2 : 3);
+				return rank(a) - rank(b) || docDisplayName(a).localeCompare(docDisplayName(b), undefined, { sensitivity: "base" });
+			});
+	const workspaceTickets = () =>
+		docs()
+			.filter((d) => d.exists && !isCatalog(d) && d.group === "tickets" && d.ticket)
+			.sort((a, b) => a.ticket!.localeCompare(b.ticket!, undefined, { numeric: true, sensitivity: "base" }));
+	const pickGraphTicketOverlay = async () => {
+		const tickets = workspaceTickets();
+		if (!tickets.length) return notify("No tickets found in docs/tickets/ yet.");
+		const CLEAR = "Clear ticket highlight";
+		const details: Record<string, string> = {};
+		const buttons: string[] = [];
+		const currentLit = graphTicketHighlight();
+		if (currentLit) {
+			buttons.push(CLEAR);
+			details[CLEAR] = `Remove ${currentLit} highlight from Call Graph`;
+		}
+		for (const t of tickets) {
+			const key = t.ticket!;
+			buttons.push(key);
+			const desc = [t.title && !t.title.toLowerCase().startsWith(key.toLowerCase()) ? t.title : "", t.status ? `(${t.status})` : ""].filter(Boolean).join(" ");
+			if (desc) details[key] = desc;
+		}
+		const picked = await choose("Highlight Call Graph scripts for which ticket?", buttons, { details });
+		if (!picked) return;
+		setGraphTicketHighlight(picked === CLEAR ? null : picked);
+	};
 	const setPlanTab = (tab: "design" | "assistant") => {
 		setPlanTabSignal(tab);
 		setActivePlanTab(tab);
@@ -536,6 +611,9 @@ export function Palette() {
 											createEffect(() => {
 												plan.selectedId();
 												setSelectedShapesExpanded(false);
+												setDocPickerOpen(false);
+												setDocPickerQuery("");
+												setDocPickerIdx(0);
 												queueMicrotask(syncDock);
 											});
 											createEffect(() => {
@@ -807,6 +885,63 @@ export function Palette() {
 																			: "play";
 																const codeState = () => plan.codeStateOf(node.id);
 																const actionable = node.kind !== "start" && node.kind !== "end";
+																const linkedDocs = () =>
+																	nodeDocsOf(node).map((ref) => {
+																		const doc = resolveLinkedDoc(ref);
+																		const label = doc ? docDisplayName(doc) : baseName(ref) || ref;
+																		const kind = doc ? docKindTag(doc) : "";
+																		const tooltip = doc ? `Open ${kind}: ${docRelPath(doc)}` : `${ref} (not found in workspace)`;
+																		return { ref, doc, label, kind, tooltip };
+																	});
+																const linkedSet = () => {
+																	const set = new Set<string>();
+																	for (const item of linkedDocs()) {
+																		set.add(item.ref.toLowerCase());
+																		if (item.doc) set.add(docRelPath(item.doc).toLowerCase());
+																	}
+																	return set;
+																};
+																const filteredLinkableDocs = () => {
+																	const already = linkedSet();
+																	const q = docPickerQuery().trim().toLowerCase();
+																	return linkableWorkspaceDocs().filter((d) => {
+																		const relPath = docRelPath(d);
+																		if (already.has(relPath.toLowerCase())) return false;
+																		if (!q) return true;
+																		return (
+																			docDisplayName(d).toLowerCase().includes(q) ||
+																			relPath.toLowerCase().includes(q) ||
+																			docKindTag(d).toLowerCase().includes(q) ||
+																			(d.ticket?.toLowerCase().includes(q) ?? false)
+																		);
+																	});
+																};
+																const linkDoc = (d: DocFile) => {
+																	const cur = p();
+																	if (!cur) return;
+																	applyText(plan.path, printPlan(addNodeDoc(cur, node.id, docRelPath(d))));
+																	setDocPickerOpen(false);
+																	setDocPickerQuery("");
+																	setDocPickerIdx(0);
+																};
+																let addDocBtn: HTMLButtonElement | undefined;
+																const unlinkDoc = (ref: string) => {
+																	const cur = p();
+																	if (!cur) return;
+																	applyText(plan.path, printPlan(removeNodeDoc(cur, node.id, ref)));
+																};
+																const openLinkedDoc = (item: { ref: string; doc: DocFile | null }) => {
+																	if (item.doc) return void openFile(item.doc.path);
+																	if (state.workspace?.root) {
+																		const full = joinPath(state.workspace.root, item.ref);
+																		void backend.read(full).then(
+																			() => void openFile(full),
+																			() => notify(`Linked document "${item.ref}" was not found in this workspace.`),
+																		);
+																		return;
+																	}
+																	notify(`Linked document "${item.ref}" was not found.`);
+																};
 																return (
 																	<div class="plan-inspector">
 																		<section class="plan-prop-section plan-step-section" aria-label={heading}>
@@ -892,6 +1027,121 @@ export function Palette() {
 																						onChange={(e) => plan.setNodeField("notes", e.currentTarget.value)}
 																					/>
 																				</label>
+																				<div class="plan-prop-field plan-node-docs">
+																					<div class="plan-node-docs-head">
+																						<span>Linked docs</span>
+																						<button
+																							ref={addDocBtn}
+																							type="button"
+																							class="plan-node-doc-add"
+																							aria-expanded={docPickerOpen()}
+																							title="Link a decision, spec, schema, or ticket to this step"
+																							onClick={() => {
+																								setDocPickerOpen((o) => !o);
+																								setDocPickerQuery("");
+																								setDocPickerIdx(0);
+																							}}
+																						>
+																							+ Link doc…
+																						</button>
+																					</div>
+																					<Show when={linkedDocs().length > 0}>
+																						<div class="plan-node-doc-chips">
+																							<For each={linkedDocs()}>
+																								{(item) => (
+																									<span class="plan-node-doc-chip" classList={{ missing: !item.doc }}>
+																										<button
+																											type="button"
+																											class="plan-node-doc-open"
+																											title={item.tooltip}
+																											onClick={() => openLinkedDoc(item)}
+																										>
+																											<Show when={item.kind}>
+																												<span class="plan-node-doc-kind">{item.kind}</span>
+																											</Show>
+																											<span class="plan-node-doc-label">{item.label}</span>
+																										</button>
+																										<button
+																											type="button"
+																											class="plan-node-doc-remove"
+																											title={`Remove link to ${item.label}`}
+																											aria-label={`Remove ${item.label}`}
+																											onClick={() => unlinkDoc(item.ref)}
+																										>
+																											<Icon name="close" />
+																										</button>
+																									</span>
+																								)}
+																							</For>
+																						</div>
+																					</Show>
+																					<Show when={docPickerOpen()}>
+																						<div class="plan-doc-picker" role="region" aria-label="Link a document">
+																							<input
+																								class="plan-doc-picker-input"
+																								value={docPickerQuery()}
+																								placeholder="Filter decisions, specs, schemas, tickets…"
+																								aria-label="Filter documents to link"
+																								ref={(el) => queueMicrotask(() => el.focus())}
+																								onInput={(e) => {
+																									setDocPickerQuery(e.currentTarget.value);
+																									setDocPickerIdx(0);
+																								}}
+																								onKeyDown={(e) => {
+																									const opts = filteredLinkableDocs();
+																									if (e.key === "Escape") {
+																										e.preventDefault();
+																										e.stopPropagation();
+																										setDocPickerOpen(false);
+																										queueMicrotask(() => addDocBtn?.focus());
+																									} else if (e.key === "ArrowDown") {
+																										e.preventDefault();
+																										if (opts.length) setDocPickerIdx((i) => (i + 1) % opts.length);
+																									} else if (e.key === "ArrowUp") {
+																										e.preventDefault();
+																										if (opts.length) setDocPickerIdx((i) => (i - 1 + opts.length) % opts.length);
+																									} else if (e.key === "Enter") {
+																										e.preventDefault();
+																										const picked = opts[docPickerIdx()];
+																										if (picked) linkDoc(picked);
+																									}
+																								}}
+																							/>
+																							<Show
+																								when={filteredLinkableDocs().length > 0}
+																								fallback={
+																									<p class="hint plan-doc-picker-empty">
+																										{docPickerQuery().trim()
+																											? "No matching documents."
+																											: "No unlinked decisions, specs, schemas, or tickets in this workspace."}
+																									</p>
+																								}
+																							>
+																								<ul class="plan-doc-picker-list" role="listbox" aria-label="Workspace documents">
+																									<For each={filteredLinkableDocs().slice(0, 40)}>
+																										{(doc, i) => (
+																											<li>
+																												<button
+																													type="button"
+																													role="option"
+																													aria-selected={docPickerIdx() === i()}
+																													class="plan-doc-picker-item"
+																													classList={{ active: docPickerIdx() === i() }}
+																													title={docRelPath(doc)}
+																													onMouseEnter={() => setDocPickerIdx(i())}
+																													onClick={() => linkDoc(doc)}
+																												>
+																													<span class="plan-node-doc-kind">{docKindTag(doc)}</span>
+																													<span class="plan-doc-picker-name">{docDisplayName(doc)}</span>
+																												</button>
+																											</li>
+																										)}
+																									</For>
+																								</ul>
+																							</Show>
+																						</div>
+																					</Show>
+																				</div>
 																			</div>
 																			<Show when={p()} keyed>
 																				{(curPlan) => (
@@ -1033,6 +1283,65 @@ export function Palette() {
 									<span class="label">Fit to view</span>
 								</Row>
 							</RowGroup>
+							<Show when={Boolean(state.settings.activeTicket?.trim() || graphTicketHighlight() || workspaceTickets().length > 0)}>
+								{(() => {
+									const activeKey = () => state.settings.activeTicket?.trim() || "";
+									const litKey = () => graphTicketHighlight()?.trim() || "";
+									const litCount = () => graphHighlightedCount();
+									return (
+										<RowGroup head="Ticket overlay">
+											<Show when={activeKey()}>
+												{(key) => {
+													const isOn = () => litKey().toLowerCase() === key().toLowerCase();
+													return (
+														<Row
+															class="tree-row palette-item plan-shape-item"
+															classList={{ active: isOn() }}
+															key="graph:ticket-active"
+															onActivate={() => setGraphTicketHighlight(isOn() ? null : key())}
+															title={
+																isOn()
+																	? `Clear ${key()} highlight in Call Graph`
+																	: `Highlight scripts governed by active ticket ${key()} (includes sub-tickets)`
+															}
+														>
+															<Icon name="tag" class="icon" />
+															<span class="label">Highlight {key()}</span>
+															<span class="meta">
+																{isOn() ? `${litCount()} ${litCount() === 1 ? "script" : "scripts"}` : "Off"}
+															</span>
+														</Row>
+													);
+												}}
+											</Show>
+											<Show when={litKey() && litKey().toLowerCase() !== activeKey().toLowerCase()}>
+												<Row
+													class="tree-row palette-item plan-shape-item active"
+													key="graph:ticket-clear"
+													onActivate={() => setGraphTicketHighlight(null)}
+													title={`Clear ${litKey()} highlight in Call Graph`}
+												>
+													<Icon name="close" class="icon" />
+													<span class="label">Clear {litKey()} highlight</span>
+													<span class="meta">{`${litCount()} ${litCount() === 1 ? "script" : "scripts"}`}</span>
+												</Row>
+											</Show>
+											<Show when={workspaceTickets().length > 0}>
+												<Row
+													class="tree-row palette-item plan-shape-item"
+													key="graph:ticket-pick"
+													onActivate={() => void pickGraphTicketOverlay()}
+													title="Pick any workspace ticket to highlight its scripts in Call Graph (includes sub-tickets)"
+												>
+													<Icon name="filter" class="icon" />
+													<span class="label">{litKey() ? "Switch ticket…" : "Pick ticket…"}</span>
+													<span class="meta">{workspaceTickets().length}</span>
+												</Row>
+											</Show>
+										</RowGroup>
+									);
+								})()}
+							</Show>
 							<Show when={graph.targets().length}>
 								<RowGroup head="Focus a script">
 									<For each={graph.targets()}>

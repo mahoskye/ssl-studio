@@ -5,6 +5,8 @@
 // Zero `eval()` — safe parser for untrusted workspace templates. All tables in built-in
 // templates strictly follow ADR 0008 (<= 4 columns, short cells <= 20 chars except last).
 
+import { quoteYamlScalar } from "./frontMatter";
+
 export type TemplateSource = "workspace" | "builtin";
 
 export type MarkdownTemplate = {
@@ -335,11 +337,21 @@ async function evaluateExpression(
 
 	// Property-style expressions without parentheses
 	if (expr === "tp.file.title") return { value: ctx.title };
+	if (expr === "tp.file.yamlTitle") return { value: quoteYamlScalar(ctx.title) };
 	if (expr === "tp.file.name") return { value: ctx.fileName };
 	if (expr === "tp.file.folder") return { value: ctx.folder };
 	if (expr === "tp.file.selection") return { value: ctx.selection ?? "" };
 	if (expr === "tp.project.name") return { value: ctx.projectName };
 	if (expr === "tp.project.ticket") return { value: ctx.ticket ?? "" };
+	if (expr === "tp.ticket.key") return { value: ctx.ticket ?? "" };
+
+	// Inline YAML scalar quoting helper: `tp.yaml(expr)`
+	const yamlCall = /^tp\.yaml\s*\(([\s\S]*)\)$/.exec(expr);
+	if (yamlCall) {
+		const inner = await evaluateExpression(yamlCall[1]!, ctx, vars, false);
+		if (inner.cancelled) return inner;
+		return { value: quoteYamlScalar(inner.value) };
+	}
 
 	// Method call: `tp.<group>.<method>(args)`
 	const call = /^tp\.([a-zA-Z_]+)\.([a-zA-Z_]+)\s*\(([\s\S]*)\)$/.exec(expr);
@@ -446,19 +458,59 @@ export function parseTemplateFile(raw: string, fallbackName: string, id: string,
  * when inserting into a non-empty note, avoiding wasted interactive prompts inside
  * frontmatter that would be discarded anyway — while preserving any `let`/`const`/`var`
  * tags declared inside frontmatter whose variable is referenced later in the body.
+ * When `existingKeys` is provided (merging into an existing frontmatter block), only
+ * strips keys already present in the target document while keeping missing keys.
  */
-export function stripRawTemplateFrontmatter(raw: string): string {
+export function stripRawTemplateFrontmatter(raw: string, existingKeys?: ReadonlySet<string>): string {
 	const m = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)+/.exec(raw);
 	if (!m) return raw;
 	const fmBlock = m[1]!;
 	const body = raw.slice(m[0].length);
+	const TAG_RE = /<%([-_])?(\*)?([\s\S]*?)([-_])?%>/g;
+	if (existingKeys && existingKeys.size > 0) {
+		const fmLines = fmBlock.split(/\r?\n/);
+		const keptFm: string[] = [];
+		const preserved: string[] = [];
+		let skipList = false;
+		for (const line of fmLines) {
+			const kv = /^([A-Za-z0-9_-]+)\s*:/.exec(line);
+			if (kv) {
+				const k = kv[1]!.toLowerCase();
+				if (existingKeys.has(k)) {
+					skipList = true;
+					for (const tag of line.matchAll(TAG_RE)) {
+						const trimL = tag[1] ?? "";
+						const star = tag[2] ?? "";
+						const inner = tag[3]!.trim();
+						const trimR = tag[4] ?? "";
+						const decls = [...inner.matchAll(/\b(?:let|const|var)\s+([A-Za-z_]\w*)\s*=/g)].map((d) => d[1]!);
+						if (decls.some((name) => new RegExp(`\\b${name}\\b`).test(body))) {
+							preserved.push(`<%${trimL}${star} ${inner} ${trimR}%>`);
+						}
+					}
+					continue;
+				}
+				skipList = false;
+				keptFm.push(line);
+				continue;
+			}
+			if (skipList && /^\s+-\s+/.test(line)) continue;
+			skipList = false;
+			keptFm.push(line);
+		}
+		const eol = raw.includes("\r\n") ? "\r\n" : "\n";
+		if (!keptFm.some((l) => l.trim())) return preserved.length ? `${preserved.join("")}${body}` : body;
+		return `---${eol}${keptFm.join(eol)}${eol}---${eol}${preserved.join("")}${body}`;
+	}
 	const preserved: string[] = [];
-	for (const tag of fmBlock.matchAll(/<%([*_-]?)([\s\S]*?)([_-]?)%>/g)) {
-		const prefix = tag[1] ?? "";
-		const inner = tag[2]!.trim();
+	for (const tag of fmBlock.matchAll(TAG_RE)) {
+		const trimL = tag[1] ?? "";
+		const star = tag[2] ?? "";
+		const inner = tag[3]!.trim();
+		const trimR = tag[4] ?? "";
 		const decls = [...inner.matchAll(/\b(?:let|const|var)\s+([A-Za-z_]\w*)\s*=/g)].map((d) => d[1]!);
 		if (decls.some((name) => new RegExp(`\\b${name}\\b`).test(body))) {
-			preserved.push(`<%${prefix} ${inner} %>`);
+			preserved.push(`<%${trimL}${star} ${inner} ${trimR}%>`);
 		}
 	}
 	return preserved.length ? `${preserved.join("")}${body}` : body;
@@ -561,10 +613,12 @@ export const DEFAULT_TEMPLATES: readonly MarkdownTemplate[] = [
 		description: "Work ticket with acceptance criteria, callout banner, and impacted areas",
 		group: "Work",
 		folder: "docs/tickets",
+		fileName: "<% key %>.md",
 		source: "builtin",
 		content: `---
-ticket: <% tp.system.prompt("Ticket key (e.g. LIMS-123)", "LIMS-100") %>
-title: <% tp.file.title %>
+<%* let key = tp.system.prompt("Ticket key (e.g. LIMS-123)", "LIMS-100") -%>
+ticket: <% key %>
+title: <% tp.file.yamlTitle %>
 type: <% tp.system.suggester(["Feature", "Change request", "Bug fix", "Investigation"], ["feature", "change", "bug", "investigation"], "Ticket type") %>
 status: open
 created: <% tp.date.now("YYYY-MM-DD") %>
@@ -604,7 +658,7 @@ related: []
 		folder: "docs/specs",
 		source: "builtin",
 		content: `---
-title: <% tp.file.title %>
+title: <% tp.file.yamlTitle %>
 ticket: <% tp.system.prompt("Ticket key (leave empty if none)") %>
 status: draft
 created: <% tp.date.now("YYYY-MM-DD") %>
@@ -652,7 +706,7 @@ created: <% tp.date.now("YYYY-MM-DD") %>
 		folder: "docs/knowledge/decisions",
 		source: "builtin",
 		content: `---
-title: <% tp.file.title %>
+title: <% tp.file.yamlTitle %>
 status: proposed
 date: <% tp.date.now("YYYY-MM-DD") %>
 ticket: <% tp.project.ticket %>
@@ -688,7 +742,7 @@ ticket: <% tp.project.ticket %>
 		folder: "docs/knowledge/reference",
 		source: "builtin",
 		content: `---
-title: <% tp.file.title %>
+title: <% tp.file.yamlTitle %>
 ticket: <% tp.project.ticket %>
 status: open
 date: <% tp.date.now("YYYY-MM-DD") %>
@@ -721,7 +775,7 @@ date: <% tp.date.now("YYYY-MM-DD") %>
 		folder: "docs",
 		source: "builtin",
 		content: `---
-title: <% tp.file.title %>
+title: <% tp.file.yamlTitle %>
 date: <% tp.date.now("YYYY-MM-DD") %>
 ticket: <% tp.project.ticket %>
 ---
@@ -752,7 +806,7 @@ ticket: <% tp.project.ticket %>
 		folder: "docs",
 		source: "builtin",
 		content: `---
-title: <% tp.file.title %>
+title: <% tp.file.yamlTitle %>
 date: <% tp.date.now("YYYY-MM-DD") %>
 status: draft
 ticket: <% tp.project.ticket %>

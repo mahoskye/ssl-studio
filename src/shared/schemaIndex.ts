@@ -7,22 +7,98 @@ import { parseCreateTables, sqlTablesToMarkdown } from "./sqlSchema";
 
 const SCHEMA_EXT_RE = /\.(md|markdown|sql|ddl|pks|pkb)$/i;
 
-/** Returns canonical lookup names (table stem, title, qualified/bare name) for one schema DocFile. */
+/** Returns canonical lookup names (table stem, title, qualified/bare names, and multi-table `schemaObjects`) for one schema DocFile. */
 export function schemaDocKeys(file: DocFile): string[] {
 	if (!file.exists || file.group !== "schema" || isCatalog(file)) return [];
 	const keys = new Set<string>();
+	const addIdent = (raw: string) => {
+		const t = raw.trim();
+		if (!t || t.length < 2) return;
+		keys.add(t.toLowerCase());
+		if (t.includes(".")) {
+			const bare = t.split(".").pop()!.trim();
+			if (bare.length >= 2) keys.add(bare.toLowerCase());
+		}
+	};
 	const base = file.name.split(/[\\/]/).pop() ?? file.name;
 	const stem = base.replace(SCHEMA_EXT_RE, "").trim();
 	if (stem && stem.length >= 2) keys.add(stem.toLowerCase());
 	if (file.title?.trim()) {
 		const t = file.title.trim();
 		// Add single-token or SQL-identifier titles (e.g. `DEMO_HOLIDAYS`, `dbo.DEMO_HOLIDAYS`).
-		if (/^[A-Za-z_][\w$.-]{1,64}$/.test(t)) {
-			keys.add(t.toLowerCase());
-			if (t.includes(".")) keys.add(t.split(".").pop()!.toLowerCase());
-		}
+		if (/^[A-Za-z_][\w$.-]{1,64}$/.test(t)) addIdent(t);
 	}
+	for (const obj of file.schemaObjects ?? []) addIdent(obj);
 	return [...keys];
+}
+
+export type SchemaColumnInfo = {
+	table: string;
+	name: string;
+	type: string;
+	constraints: string;
+	notes: string;
+	docPath: string;
+};
+
+/**
+ * Extracts structured column definitions from a schema Markdown doc or SQL DDL file
+ * for column-level hover cards and SQL/SSL editor completion (ADR 0003 compliant).
+ */
+export function extractSchemaColumns(doc: DocFile, content: string): SchemaColumnInfo[] {
+	const out: SchemaColumnInfo[] = [];
+	if (/\.(sql|ddl|pks|pkb)$/i.test(doc.name)) {
+		for (const tbl of parseCreateTables(content, { includeStandaloneAlter: true })) {
+			for (const col of tbl.columns) {
+				out.push({ table: tbl.tableName, name: col.name, type: col.type, constraints: col.constraints, notes: "", docPath: doc.path });
+			}
+		}
+		return out;
+	}
+	const body = frontMatter(content).body.replace(/\r\n/g, "\n");
+	const lines = body.split("\n");
+	const base = (doc.name.split(/[\\/]/).pop() ?? doc.name).replace(SCHEMA_EXT_RE, "");
+	let currentTable = (doc.title && /^[A-Za-z_][\w$.]{1,64}$/.test(doc.title.trim()) ? doc.title.trim() : base) || base;
+	const strip = (s: string) => s.trim().replace(/^`|`$/g, "").trim();
+	const splitCells = (line: string) =>
+		line
+			.trim()
+			.replace(/^\|/, "")
+			.replace(/\|$/, "")
+			.split(/(?<!\\)\|/)
+			.map((c) => c.replace(/\\\|/g, "|").trim());
+
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i]!;
+		const hm = /^#{1,3}\s+`?([A-Za-z_][\w$.]{1,64})`?\s*$/.exec(line.trim());
+		if (hm) {
+			currentTable = hm[1]!;
+			continue;
+		}
+		if (!line.trim().startsWith("|")) continue;
+		const hdr = splitCells(line).map((c) => c.toLowerCase());
+		const colIdx = hdr.findIndex((c) => c === "column" || c === "field" || c === "name");
+		if (colIdx < 0 || i + 1 >= lines.length || !/^\s*\|?\s*:?-{2,}/.test(lines[i + 1]!)) continue;
+		const typeIdx = hdr.findIndex((c) => c.includes("type"));
+		const consIdx = hdr.findIndex((c) => c.includes("constraint") || c.includes("key") || c.includes("null"));
+		const noteIdx = hdr.findIndex((c) => c.includes("note") || c.includes("desc") || c.includes("meaning"));
+		i += 2;
+		for (; i < lines.length && lines[i]!.trim().startsWith("|"); i++) {
+			const cells = splitCells(lines[i]!);
+			const colName = strip(cells[colIdx] ?? "");
+			if (!colName || colName === "…" || colName.startsWith("(")) continue;
+			out.push({
+				table: currentTable,
+				name: colName,
+				type: typeIdx >= 0 ? strip(cells[typeIdx] ?? "") : "",
+				constraints: consIdx >= 0 ? (cells[consIdx] ?? "") : "",
+				notes: noteIdx >= 0 ? (cells[noteIdx] ?? "") : "",
+				docPath: doc.path,
+			});
+		}
+		i--;
+	}
+	return out;
 }
 
 /** Finds the best documented schema file (`schema/database/*.md` preferred over `.sql`) matching SQL/SSL identifier `word`. */

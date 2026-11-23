@@ -10,7 +10,7 @@ import { openReview, type Check } from "../editor/Review";
 import { monaco } from "../editor/monaco";
 import { measure } from "../editor/textmate";
 import { session } from "../lsp/session";
-import { ticketForFile } from "../../shared/workContext";
+import { cut, MAX_WORK_PROMPT_CHARS, ticketForFile } from "../../shared/workContext";
 import { docs } from "../project";
 import { catalogsKeptFor, workPrompt } from "../projectDocs";
 import { applyText, canonical, documents, notify, openFile, setState, state } from "../state";
@@ -170,7 +170,7 @@ async function buildUnit(path: string, plan: Plan, spec: string, run: BuildRun, 
 			return publish(path, run);
 		}
 		if (overBudget(run)) break;
-		prompt = retryPrompt(rawBase, code, problems);
+		prompt = retryPrompt(base, code, problems);
 	}
 	unit.status = "stuck";
 	unit.problems = problems;
@@ -187,7 +187,11 @@ async function secondOpinion(path: string, plan: Plan, spec: string, run: BuildR
 	const before = { tokens: spent.tokens, cost: spent.cost };
 	// Rebuilding part of a chart: the rest is not in front of the reader, so it is not asked about.
 	const partial = run.units.some((u) => u.status === "kept" || u.change);
-	const reply = await askAgent(path, "A second opinion", reviewPrompt(plan, spec, scripts, partial ? passed.flatMap((u) => u.nodes ?? []) : undefined), [], TOOL_LIMIT);
+	const ticketKey = (typeof plan.ticket === "string" && plan.ticket.trim()) || ticketForFile(docs(), path, state.workspace?.root);
+	const work = ticketKey ? await workPrompt(ticketKey, { specs: false }).catch(() => null) : null;
+	const workContext = work?.text ? cut(work.text, MAX_WORK_PROMPT_CHARS) : "";
+	const review = reviewPrompt(plan, spec, scripts, partial ? passed.flatMap((u) => u.nodes ?? []) : undefined);
+	const reply = await askAgent(path, "A second opinion", workContext ? `${review}\n\n${workContext}` : review, [], TOOL_LIMIT);
 	const now = assistOf(path);
 	run.tokens += now.tokens - before.tokens;
 	run.cost += now.cost - before.cost;

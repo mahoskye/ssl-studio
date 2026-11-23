@@ -16,9 +16,57 @@ const CLASS = ["", "error", "warning", "info", "hint"];
 /** What a severity mark means, in a word: read out, and shown on hover. */
 export const SEVERITY = ["", "Error", "Warning", "Note", "Hint"];
 
+function collectMergedProblems(): { uri: string; list: Diagnostic[] }[] {
+	const byPath = new Map<string, { uri: string; list: Diagnostic[] }>();
+	const seenKeys = new Set<string>();
+	for (const [uri, list] of Object.entries(diagnostics)) {
+		if (!list?.length) continue;
+		const fsPath = canonical(monaco.Uri.parse(uri).fsPath);
+		const entry = byPath.get(fsPath) ?? { uri, list: [] };
+		for (const d of list) {
+			entry.list.push(d);
+			seenKeys.add(`${fsPath}:${d.line}:${d.code ?? ""}`);
+		}
+		byPath.set(fsPath, entry);
+	}
+	// Fold workspace-wide doc audit issues (broken #heading anchors, malformed YAML, ADR 0008 tables, code citations)
+	// into Problems under `source: "docs"`, deduplicated against already-open file diagnostics.
+	for (const issue of docAuditData().issues) {
+		const fsPath = canonical(issue.path);
+		const code =
+			issue.kind === "table"
+				? "table-rule"
+				: issue.kind === "anchor"
+					? "broken-anchor"
+					: issue.kind === "citation"
+						? "code-citation"
+						: "yaml-frontmatter";
+		const dedupKey = `${fsPath}:${issue.line}:${code}`;
+		if (seenKeys.has(dedupKey)) continue;
+		seenKeys.add(dedupKey);
+		const uri = monaco.Uri.file(issue.path).toString();
+		const entry = byPath.get(fsPath) ?? { uri, list: [] };
+		entry.list.push({
+			uri,
+			line: issue.line,
+			column: issue.column ?? 1,
+			endLine: issue.line,
+			endColumn: (issue.column ?? 1) + 1,
+			severity: issue.level === "warn" ? 2 : 3,
+			message: issue.message,
+			code,
+			source: "docs",
+		});
+		byPath.set(fsPath, entry);
+	}
+	return [...byPath.values()];
+}
+
 export const counts = () => {
 	const c = { errors: 0, warnings: 0, other: 0 };
-	for (const list of Object.values(diagnostics)) for (const d of list ?? []) d.severity === 1 ? c.errors++ : d.severity === 2 ? c.warnings++ : c.other++;
+	for (const { list } of collectMergedProblems()) {
+		for (const d of list) d.severity === 1 ? c.errors++ : d.severity === 2 ? c.warnings++ : c.other++;
+	}
 	return c;
 };
 
@@ -41,44 +89,7 @@ const isDocDiag = (uri: string, d: Diagnostic): boolean => {
 };
 
 export function Problems() {
-	const mergedFiles = createMemo(() => {
-		const byPath = new Map<string, { uri: string; list: Diagnostic[] }>();
-		const seenKeys = new Set<string>();
-		for (const [uri, list] of Object.entries(diagnostics)) {
-			if (!list?.length) continue;
-			const fsPath = canonical(monaco.Uri.parse(uri).fsPath);
-			const entry = byPath.get(fsPath) ?? { uri, list: [] };
-			for (const d of list) {
-				entry.list.push(d);
-				seenKeys.add(`${fsPath}:${d.line}:${d.code ?? ""}`);
-			}
-			byPath.set(fsPath, entry);
-		}
-		// Fold workspace-wide doc audit issues (broken #heading anchors, malformed YAML, ADR 0008 tables)
-		// into Problems under `source: "docs"`, deduplicated against already-open file diagnostics.
-		for (const issue of docAuditData().issues) {
-			const fsPath = canonical(issue.path);
-			const code = issue.kind === "table" ? "table-rule" : issue.kind === "anchor" ? "broken-anchor" : "yaml-frontmatter";
-			const dedupKey = `${fsPath}:${issue.line}:${code}`;
-			if (seenKeys.has(dedupKey)) continue;
-			seenKeys.add(dedupKey);
-			const uri = monaco.Uri.file(issue.path).toString();
-			const entry = byPath.get(fsPath) ?? { uri, list: [] };
-			entry.list.push({
-				uri,
-				line: issue.line,
-				column: issue.column ?? 1,
-				endLine: issue.line,
-				endColumn: (issue.column ?? 1) + 1,
-				severity: issue.level === "warn" ? 2 : 3,
-				message: issue.message,
-				code,
-				source: "docs",
-			});
-			byPath.set(fsPath, entry);
-		}
-		return [...byPath.values()];
-	});
+	const mergedFiles = createMemo(collectMergedProblems);
 
 	const hasDocIssues = createMemo(() =>
 		mergedFiles().some(({ uri, list }) => list.some((d) => isDocDiag(uri, d))),

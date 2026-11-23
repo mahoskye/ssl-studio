@@ -7,7 +7,7 @@
 // row/cell/column actions live in right-click context menus, a blank final row
 // lets users add entries without writing empty lines until content is entered,
 // and code-usage checks target the exact column, rows, and file globs chosen.
-import { createEffect, createMemo, createSignal, createUniqueId, For, Index, onCleanup, Show, type JSX } from "solid-js";
+import { createEffect, createMemo, createSignal, createUniqueId, For, Index, on, onCleanup, Show, type JSX } from "solid-js";
 import { Portal } from "solid-js/web";
 import {
 	addCsvColumn,
@@ -65,12 +65,13 @@ import {
 	type CodeCheckRowScope,
 	type CodeCheckSpec,
 } from "../../shared/registryCheck";
-import { baseName, isInside, joinPath, relativeTo } from "../../shared/paths";
+import { baseName, isInside, joinPath, relativeTo, resolvePath } from "../../shared/paths";
 import { keyOf, keysIn, ticketColumn } from "../../shared/registryTickets";
+import { findSchemaDocForIdentifier } from "../../shared/schemaIndex";
 import { SEARCH_LIMIT, type SearchOptions } from "../../shared/searchPattern";
 import { extractSqlObjects } from "../../shared/sqlSchema";
 import { backend } from "../backend";
-import { copyText } from "../commands";
+const copyText = (text: string, label: string) => import("../commands").then((m) => m.copyText(text, label));
 import { ask, choose } from "../dialogs";
 import { Icon } from "../Icon";
 import { modalOpen } from "../modal";
@@ -81,9 +82,7 @@ import { canonical, documents, notify, openFile, saveSetting, state } from "../s
 import { CsvCodeCheckDialog } from "./CsvCodeCheckDialog";
 import { CsvFormatDialog } from "./CsvFormatDialog";
 import { rowsAsked, rowsShown } from "./tableRows";
-
-/** As many rows as are drawn at once. A longer table is narrowed with filters. */
-const ROWS_SHOWN = 500;
+import "./tableViewExtra.css";
 
 /** Maximum distinct values rendered in a column filter checklist before asking the user to narrow via search. */
 const FILTER_VALUES_CAP = 250;
@@ -93,6 +92,44 @@ const MIN_COL_WIDTH = 56;
 
 /** Upper cap (px) when double-clicking a column divider to auto-fit long cells. */
 const MAX_AUTOFIT_WIDTH = 960;
+
+/** Column-0 headers that are categorical/descriptive rather than unique keys (suppressed from duplicate-key checks). */
+const NON_KEY_COL0_RE = /^(status|state|note|notes|comment|comments|description|desc|summary|remark|remarks|kind|type|category|group|priority|severity|tag|tags|phase|stage)$/i;
+
+/** Non-ticket placeholder words ignored by Ticket-column inline validation. */
+const TICKET_PLACEHOLDER_RE = /^(?:[-—–]+|n\/a|none|tbd|todo)$/i;
+
+/** Recognizes keyboard context-menu requests (ADR 0010). */
+const isContextMenuKey = (e: KeyboardEvent) => e.key === "ContextMenu" || (e.shiftKey && e.key === "F10");
+
+/** Anchors a keyboard-invoked context menu neatly beneath its focused element. */
+function pointUnder(el: Element): { x: number; y: number } {
+	const rect = el.getBoundingClientRect();
+	return { x: rect.left + 8, y: rect.bottom };
+}
+
+/** Replaces every literal occurrence of `needle` in `source` (never interpreting `$` replacement patterns). */
+function replaceLiteral(source: string, needle: string, replacement: string, caseSensitive: boolean): string {
+	if (!needle) return source;
+	if (caseSensitive) return source.split(needle).join(replacement);
+	const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	return source.replace(new RegExp(escaped, "gi"), () => replacement);
+}
+
+/** Parses plain or thousands-grouped numbers for the footer column sum (`null` when not numeric). */
+function parseNumericValue(raw: string): number | null {
+	const t = raw.trim();
+	if (!t) return null;
+	if (/^-?\d+(?:\.\d+)?$/.test(t)) {
+		const n = Number(t);
+		return Number.isFinite(n) ? n : null;
+	}
+	if (/^-?\d{1,3}(?:,\d{3})+(?:\.\d+)?$/.test(t)) {
+		const n = Number(t.replace(/,/g, ""));
+		return Number.isFinite(n) ? n : null;
+	}
+	return null;
+}
 
 type OpenFilterMenu = {
 	column: number;
@@ -229,13 +266,33 @@ export function TableView(props: { path: string }) {
 		}
 	};
 
-	// Press Escape (when no edit input, popover, menu, modal, or column drag is active) to clear cell selection.
+	/** Filter to rows with duplicate non-empty keys in column 0 (when column 0 is key-like). */
+	const [onlyDupes, setOnlyDupes] = createSignal(false);
+	/** Compact inline Find & Replace bar state (`Ctrl+F` / `Ctrl+H`). */
+	const [findOpen, setFindOpen] = createSignal(false);
+	const [replaceOpen, setReplaceOpen] = createSignal(false);
+	const [findQuery, setFindQuery] = createSignal("");
+	const [replaceText, setReplaceText] = createSignal("");
+	const [findCurrentColOnly, setFindCurrentColOnly] = createSignal(false);
+	const [findCaseSensitive, setFindCaseSensitive] = createSignal(false);
+	const [findMatchIdx, setFindMatchIdx] = createSignal(0);
+	let findInputEl: HTMLInputElement | undefined;
+	let replaceInputEl: HTMLInputElement | undefined;
+
+	// Press Escape (when no edit input, popover, menu, modal, or column drag is active) to close Find or clear cell selection.
 	createEffect(() => {
-		if (!activeCell()) return;
+		if (!activeCell() && !findOpen()) return;
 		const onKeyDown = (e: KeyboardEvent) => {
 			if (e.key !== "Escape" || e.defaultPrevented) return;
 			if (editing() || filterMenu() || colDrag() || modalOpen() || rowMenuOpen()) return;
 			const target = e.target as HTMLElement | null;
+			if (findOpen()) {
+				if (target?.closest(".table-view")) {
+					e.preventDefault();
+					closeFind();
+				}
+				return;
+			}
 			if (target?.closest("input, textarea")) return;
 			e.preventDefault();
 			clearCellSelection();
@@ -247,13 +304,16 @@ export function TableView(props: { path: string }) {
 	/** Selected row indices (0-based in `table().rows`) for bulk operations. */
 	const [selectedRows, setSelectedRows] = createSignal<Set<number>>(new Set());
 	const [lastClickedRow, setLastClickedRow] = createSignal<number | null>(null);
-	/** Current pagination window size (expands via "Show more" / "Show all"). */
-	const [rowLimit, setRowLimit] = createSignal(ROWS_SHOWN);
 	createEffect(() => {
 		props.path;
-		setRowLimit(ROWS_SHOWN);
 		setSelectedRows(new Set<number>());
 		setLastClickedRow(null);
+		setOnlyDupes(false);
+		setFindOpen(false);
+		setReplaceOpen(false);
+		setFindQuery("");
+		setReplaceText("");
+		setFindMatchIdx(0);
 	});
 	// Prune selected row indices when rows are deleted from the file.
 	createEffect(() => {
@@ -586,24 +646,147 @@ export function TableView(props: { path: string }) {
 		searchFor(trimmed, opts);
 	};
 
-	/** A cell of the ticket column as it is written, each key of a ticket the project has as a way to that ticket. */
-	const ticketCell = (value: string) => (
-		<For each={value.split(/([\s,;/]+)/)}>
-			{(part) => {
-				const ticket = tickets().get(keyOf(part, known()).toLowerCase());
-				return ticket ? (
-					<button class="link table-ticket" title={`${ticket.ticket}: ${ticket.title ?? ""}${ticket.status ? ` (${ticket.status})` : ""}. Open the ticket.`} onClick={(e) => (e.stopPropagation(), void openFile(ticket.path))} onDblClick={(e) => e.stopPropagation()}>
-						{part}
-					</button>
-				) : (
-					part
+	const isDatabaseRegistry = createMemo(() => /^database\.(csv|tsv)$/i.test(baseName(props.path)));
+	const isFilesRegistry = createMemo(() => /^files\.(csv|tsv)$/i.test(baseName(props.path)));
+	const isObjectColumn = (col: number) =>
+		isDatabaseRegistry() && ["object", "name", "table"].includes(headerName(col).toLowerCase());
+	const isPathColumn = (col: number) => {
+		const h = headerName(col).toLowerCase();
+		return h === "path" || h === "file" || h === "filepath" || h === "file path" || (isFilesRegistry() && col === 0);
+	};
+	const hasPathColumn = createMemo(() => table().header.some((_, idx) => isPathColumn(idx)));
+
+	// Non-blocking workspace file index used to validate file links in `files.csv`/`files.tsv` and `path`/`file` columns.
+	const [wsFileSet, setWsFileSet] = createSignal<Set<string> | null>(null);
+	{
+		let seq = 0;
+		createEffect(
+			on([() => state.workspace?.root, () => state.treeVersion, hasPathColumn], ([root, , needed]) => {
+				const mySeq = ++seq;
+				if (!root || !needed) {
+					setWsFileSet(null);
+					return;
+				}
+				void backend.files().then(
+					(files) => {
+						if (mySeq !== seq) return;
+						// Cap at backend's 20,000 limit: if saturated, skip missing-file warnings rather than false-positiving.
+						if (files.length >= 20_000) {
+							setWsFileSet(null);
+							return;
+						}
+						setWsFileSet(new Set(files.map(canonical)));
+					},
+					() => {
+						if (mySeq === seq) setWsFileSet(null);
+					},
 				);
-			}}
-		</For>
-	);
+			}),
+		);
+	}
+
+	/** Matching workspace schema doc for a `database.csv`/`database.tsv` object cell, if any. */
+	const schemaDocForCell = (col: number, rawVal: string) => {
+		if (!isObjectColumn(col)) return null;
+		const trimmed = rawVal.trim();
+		if (!trimmed) return null;
+		return findSchemaDocForIdentifier(trimmed, docs());
+	};
+
+	/** Resolves a workspace-relative file path in `files.csv`/`files.tsv` or a `path`/`file` column. */
+	const fileLinkForCell = (col: number, rawVal: string): { path: string; missing: boolean } | null => {
+		if (!isPathColumn(col)) return null;
+		const root = state.workspace?.root;
+		const trimmed = rawVal.trim();
+		if (!root || !trimmed) return null;
+		if (/^(?:https?:|mailto:|ftp:)/i.test(trimmed)) return null;
+		if (/[\r\n<>|*?"]/.test(trimmed) || trimmed === "." || trimmed === "..") return null;
+		const looksLikePath = /[\\/]/.test(trimmed) || /\.[A-Za-z0-9]{1,10}$/.test(trimmed);
+		if (!looksLikePath) return null;
+		const parts = trimmed.split(/[\\/]/).filter((p) => p && p !== ".");
+		if (!parts.length) return null;
+		const resolved = parts.includes("..")
+			? resolvePath(root, trimmed)
+			: isInside(root, trimmed)
+				? trimmed
+				: joinPath(root, ...parts);
+		if (!isInside(root, resolved) || canonical(resolved) === canonical(root)) return null;
+		const knownFiles = wsFileSet();
+		const missing = knownFiles !== null && knownFiles.size > 0 && !knownFiles.has(canonical(resolved));
+		return { path: resolved, missing };
+	};
+
+	/** Flags malformed paths (e.g. traversal outside workspace or illegal characters) in `files.csv`/`files.tsv` `path` columns. */
+	const isMalformedFilePath = (col: number, rawVal: string): boolean => {
+		if (!isFilesRegistry() || !isPathColumn(col)) return false;
+		const trimmed = rawVal.trim();
+		if (!trimmed) return false;
+		if (/^(?:https?:|mailto:|ftp:)/i.test(trimmed)) return false;
+		return fileLinkForCell(col, trimmed) === null;
+	};
+
+	/** Opens the primary link (schema doc, workspace file, or first ticket) for a cell, returning true if one existed. */
+	const openCellLink = (col: number, rawVal: string): boolean => {
+		const schemaDoc = schemaDocForCell(col, rawVal);
+		if (schemaDoc) {
+			void openFile(schemaDoc.path);
+			return true;
+		}
+		const fileLink = fileLinkForCell(col, rawVal);
+		if (fileLink) {
+			void openFile(fileLink.path);
+			return true;
+		}
+		if (col === ticketAt()) {
+			const firstKey = keysIn(rawVal, known())[0];
+			const ticket = firstKey ? tickets().get(firstKey.toLowerCase()) : undefined;
+			if (ticket) {
+				void openFile(ticket.path);
+				return true;
+			}
+		}
+		return false;
+	};
+
+	/** A cell of the ticket column as it is written, each key of a ticket the project has as a way to that ticket. */
+	const ticketCell = (value: string, cellTabIndex: () => number) => {
+		const hasTickets = () => tickets().size > 0;
+		return (
+			<For each={value.split(/([\s,;/]+)/)}>
+				{(part) => {
+					const trimmed = part.trim();
+					if (!trimmed) return part;
+					const matchedKey = keyOf(part, known());
+					const ticket = matchedKey ? tickets().get(matchedKey.toLowerCase()) : undefined;
+					if (ticket) {
+						return (
+							<button
+								type="button"
+								tabindex={cellTabIndex()}
+								class="link table-ticket"
+								title={`${ticket.ticket}: ${ticket.title ?? ""}${ticket.status ? ` (${ticket.status})` : ""}. Open the ticket.`}
+								onClick={(e) => (e.stopPropagation(), void openFile(ticket.path))}
+								onDblClick={(e) => e.stopPropagation()}
+							>
+								{part}
+							</button>
+						);
+					}
+					if (hasTickets() && !TICKET_PLACEHOLDER_RE.test(trimmed)) {
+						return (
+							<span class="table-val-warn" title={`Ticket “${trimmed}” not found in workspace docs`}>
+								{part}
+							</span>
+						);
+					}
+					return part;
+				}}
+			</For>
+		);
+	};
 
 	/** Renders a checked cell's value alongside its targeted code-hit badge(s). */
-	const renderCheckBadge = (term: string, count: number | undefined, opts: SearchOptions) => {
+	const renderCheckBadge = (term: string, count: number | undefined, opts: SearchOptions, tabIndex = -1) => {
 		if (count === undefined) return null;
 		if (count === 0) {
 			return (
@@ -616,6 +799,7 @@ export function TableView(props: { path: string }) {
 		return (
 			<button
 				type="button"
+				tabindex={tabIndex}
 				class="link table-use"
 				title={`Found ${countText} ${count === 1 ? "time" : "times"} in the searched code files. Click to view in Search.`}
 				onClick={(e) => (e.stopPropagation(), searchFor(term, opts))}
@@ -626,12 +810,36 @@ export function TableView(props: { path: string }) {
 		);
 	};
 
-	/** Rows after global/ticket/missing filters, before per-column filters (used for faceted header counts). */
+	/** True when column 0 appears to hold unique identifiers (not status/notes/categorical badges). */
+	const isCol0KeyLike = createMemo(() => {
+		const h0 = headerName(0);
+		if (!h0) return false;
+		if (NON_KEY_COL0_RE.test(h0)) return false;
+		if (columnRule(0)) return false;
+		return true;
+	});
+	const duplicateEntries = createMemo(() => (isCol0KeyLike() ? csvDuplicateKeys(table(), 0) : []));
+	const duplicateRowSet = createMemo(() => {
+		const set = new Set<number>();
+		for (const d of duplicateEntries()) {
+			for (const r of d.rows) set.add(r);
+		}
+		return set;
+	});
+	createEffect(() => {
+		if (onlyDupes() && duplicateRowSet().size === 0) setOnlyDupes(false);
+	});
+
+	/** Rows after global/ticket/missing/dupes filters, before per-column filters (used for faceted header counts). */
 	const baseRows = createMemo(() => {
 		const words = filter().trim().toLowerCase().split(/\s+/).filter(Boolean);
 		const pinned = pinnedRow();
 		const chk = codeCheck();
 		let list = table().rows.map((cells, index) => ({ cells, index }));
+		if (onlyDupes()) {
+			const dupRows = duplicateRowSet();
+			list = list.filter(({ index }) => index === pinned || dupRows.has(index));
+		}
 		if (onlyMissing() && chk) {
 			list = list.filter(({ cells, index }) => index === pinned || cellHasMissingCheck(cells, chk));
 		}
@@ -674,7 +882,7 @@ export function TableView(props: { path: string }) {
 	);
 
 	const hasActiveFilters = createMemo(
-		() => Boolean(filter().trim()) || activeFilterCols().length > 0 || onlyTicket() !== null || onlyMissing(),
+		() => Boolean(filter().trim()) || activeFilterCols().length > 0 || onlyTicket() !== null || onlyMissing() || onlyDupes(),
 	);
 
 	const isColFiltered = (col: number) => isColumnFilterActive(colFilters().get(col));
@@ -695,6 +903,7 @@ export function TableView(props: { path: string }) {
 		setColFilters(new Map());
 		setOnlyTicket(null);
 		setOnlyMissing(false);
+		setOnlyDupes(false);
 	};
 
 	const closeFilterMenu = (restoreFocus = false) => {
@@ -796,6 +1005,32 @@ export function TableView(props: { path: string }) {
 		return beyond ? [...slice, beyond] : slice;
 	});
 
+	/** Roving tabindex target (ADR 0010): exactly one cell in tbody/tfoot gets tabindex=0 so Tab never traps users. */
+	const rovingCell = createMemo<ActiveCell | null>(() => {
+		const cols = visibleColumns();
+		if (!cols.length) return null;
+		const ac = activeCell();
+		const list = drawn();
+		if (ac && cols.includes(ac.column)) {
+			if (ac.ghost) return ac;
+			if (list.some((r) => r.index === ac.row)) return ac;
+		}
+		if (list.length > 0) return { ghost: false, row: list[0]!.index, column: cols[0]! };
+		return { ghost: true, column: cols[0]! };
+	});
+	const isRovingBodyCell = (row: number, col: number) => {
+		const rc = rovingCell();
+		return Boolean(rc && !rc.ghost && rc.row === row && rc.column === col);
+	};
+	const isRovingGhostCell = (col: number) => {
+		const rc = rovingCell();
+		return Boolean(rc && rc.ghost && rc.column === col);
+	};
+	const isRovingRow = (row: number) => {
+		const rc = rovingCell();
+		return Boolean(rc && !rc.ghost && rc.row === row);
+	};
+
 	const allDrawnSelected = createMemo(() => {
 		const list = rows();
 		const sel = selectedRows();
@@ -850,6 +1085,7 @@ export function TableView(props: { path: string }) {
 	let body: HTMLTableSectionElement | undefined;
 	let foot: HTMLTableSectionElement | undefined;
 	let suppressSortClick = false;
+	let lastKeyMenuAt = 0;
 	let cancelActiveDrag: (() => void) | null = null;
 	let cancelActiveResize: (() => void) | null = null;
 	onCleanup(() => {
@@ -905,32 +1141,100 @@ export function TableView(props: { path: string }) {
 		});
 	});
 
+	/** Adjusts `scrollEl.scrollTop` synchronously so row `visIdx` in `rows()` renders inside the virtual window. */
+	const ensureVisRowInWindow = (visIdx: number, align: "nearest" | "center" = "nearest") => {
+		if (!scrollEl || visIdx < 0) return;
+		const win = virtualWindow();
+		if (!win.virtual) return;
+		const vh = scrollEl.clientHeight || viewportH() || 640;
+		const headerH = headRow?.getBoundingClientRect().height ?? 32;
+		const usableH = Math.max(EST_ROW_H * 2, vh - headerH);
+		const estTop = visIdx * EST_ROW_H;
+		const estBottom = estTop + EST_ROW_H;
+		const curTop = scrollEl.scrollTop;
+		let nextTop = curTop;
+		if (align === "center") {
+			nextTop = Math.max(0, estTop - Math.floor(usableH / 2));
+		} else if (estTop < curTop || visIdx < win.start + 2) {
+			nextTop = Math.max(0, estTop - EST_ROW_H);
+		} else if (estBottom > curTop + usableH || visIdx >= win.end - 2) {
+			nextTop = Math.max(0, estBottom - usableH + EST_ROW_H);
+		}
+		if (nextTop !== curTop) {
+			scrollEl.scrollTop = nextTop;
+			setScrollTop(nextTop);
+		}
+	};
+
+	const nudgeCellOutFromHeader = (td: HTMLElement) => {
+		if (!scrollEl) return;
+		const sRect = scrollEl.getBoundingClientRect();
+		const headH = headRow?.getBoundingClientRect().height ?? 0;
+		const tdRect = td.getBoundingClientRect();
+		if (tdRect.top < sRect.top + headH) {
+			scrollEl.scrollTop = Math.max(0, scrollEl.scrollTop - (sRect.top + headH - tdRect.top) - 2);
+			setScrollTop(scrollEl.scrollTop);
+		} else if (tdRect.bottom > sRect.bottom) {
+			scrollEl.scrollTop += tdRect.bottom - sRect.bottom + 2;
+			setScrollTop(scrollEl.scrollTop);
+		}
+	};
+
 	const focusCell = (row: number, column: number) => {
+		const visIdx = rows().findIndex((r) => r.index === row);
+		if (visIdx >= 0) {
+			setPinnedRow(row);
+			ensureVisRowInWindow(visIdx, "nearest");
+		}
+		setActiveCell({ ghost: false, row, column });
 		queueMicrotask(() => {
 			const td = body?.querySelector<HTMLElement>(`tr[data-row="${row}"] > td[data-col="${column}"]`);
 			if (td) {
 				td.focus();
+				nudgeCellOutFromHeader(td);
 				return;
 			}
-			if (virtualWindow().virtual && scrollEl) {
-				const visIdx = rows().findIndex((r) => r.index === row);
-				if (visIdx >= 0) {
-					const targetTop = Math.max(0, visIdx * EST_ROW_H - Math.floor((viewportH() || 600) / 3));
-					scrollEl.scrollTop = targetTop;
-					setScrollTop(targetTop);
-					requestAnimationFrame(() => {
-						body?.querySelector<HTMLElement>(`tr[data-row="${row}"] > td[data-col="${column}"]`)?.focus();
-					});
-				}
+			if (virtualWindow().virtual && scrollEl && visIdx >= 0) {
+				const targetTop = Math.max(0, visIdx * EST_ROW_H - Math.floor((viewportH() || 600) / 3));
+				scrollEl.scrollTop = targetTop;
+				setScrollTop(targetTop);
+				requestAnimationFrame(() => {
+					const retry = body?.querySelector<HTMLElement>(`tr[data-row="${row}"] > td[data-col="${column}"]`);
+					if (retry) {
+						retry.focus();
+						nudgeCellOutFromHeader(retry);
+					}
+				});
 			}
 		});
 	};
 
 	const focusGhostCell = (column: number) => {
+		setActiveCell({ ghost: true, column });
 		queueMicrotask(() => {
 			const td = foot?.querySelector<HTMLElement>(`tr.table-ghost-row > td[data-col="${column}"]`);
-			td?.focus();
+			if (td) {
+				td.focus();
+				td.scrollIntoView({ block: "nearest", inline: "nearest" });
+			}
 		});
+	};
+
+	/** Moves selection/focus (or editing) to visual row `targetVis` in `rows()` cleanly across virtualized windows. */
+	const navigateToVisRow = (targetVis: number, column: number, opts?: { edit?: boolean; align?: "nearest" | "center" }) => {
+		const list = rows();
+		const target = list[targetVis];
+		if (!target) return;
+		const nextRow = target.index;
+		setPinnedRow(nextRow);
+		const freshVis = rows().findIndex((r) => r.index === nextRow);
+		ensureVisRowInWindow(freshVis >= 0 ? freshVis : targetVis, opts?.align ?? "nearest");
+		setActiveCell({ ghost: false, row: nextRow, column });
+		if (opts?.edit) {
+			setEditing({ ghost: false, row: nextRow, column });
+		} else {
+			focusCell(nextRow, column);
+		}
 	};
 
 	/** Changes one cell: that part of the text, written as a cell must be. A row short of the column gets the cells between. */
@@ -961,32 +1265,34 @@ export function TableView(props: { path: string }) {
 		const visCol = cols.indexOf(column);
 		if (move === "next") {
 			if (visCol >= 0 && visCol + 1 < cols.length) {
-				setEditing({ ghost: false, row, column: cols[visCol + 1]! });
+				const nextCol = cols[visCol + 1]!;
+				setActiveCell({ ghost: false, row, column: nextCol });
+				setEditing({ ghost: false, row, column: nextCol });
 				return;
 			}
-			const list = drawn();
+			const list = rows();
 			const vis = list.findIndex((r) => r.index === row);
 			const firstCol = cols[0] ?? 0;
 			if (vis >= 0 && vis + 1 < list.length) {
-				const nextRow = list[vis + 1]!.index;
-				setCurrent(nextRow);
-				setEditing({ ghost: false, row: nextRow, column: firstCol });
+				navigateToVisRow(vis + 1, firstCol, { edit: true });
 			} else {
+				setActiveCell({ ghost: true, column: firstCol });
 				setEditing({ ghost: true, column: firstCol });
+				queueMicrotask(() => foot?.scrollIntoView({ block: "nearest" }));
 			}
 			return;
 		}
 		if (move === "prev") {
 			if (visCol > 0) {
-				setEditing({ ghost: false, row, column: cols[visCol - 1]! });
+				const prevCol = cols[visCol - 1]!;
+				setActiveCell({ ghost: false, row, column: prevCol });
+				setEditing({ ghost: false, row, column: prevCol });
 				return;
 			}
-			const list = drawn();
+			const list = rows();
 			const vis = list.findIndex((r) => r.index === row);
 			if (vis > 0) {
-				const prevRow = list[vis - 1]!.index;
-				setCurrent(prevRow);
-				setEditing({ ghost: false, row: prevRow, column: cols[cols.length - 1] ?? 0 });
+				navigateToVisRow(vis - 1, cols[cols.length - 1] ?? 0, { edit: true });
 				return;
 			}
 		}
@@ -1008,12 +1314,23 @@ export function TableView(props: { path: string }) {
 		}
 		if (value === "") {
 			if (move === "next" && visCol >= 0 && visCol + 1 < cols.length) {
-				setEditing({ ghost: true, column: cols[visCol + 1]! });
+				const nextCol = cols[visCol + 1]!;
+				setActiveCell({ ghost: true, column: nextCol });
+				setEditing({ ghost: true, column: nextCol });
 				return;
 			}
-			if (move === "prev" && visCol > 0) {
-				setEditing({ ghost: true, column: cols[visCol - 1]! });
-				return;
+			if (move === "prev") {
+				if (visCol > 0) {
+					const prevCol = cols[visCol - 1]!;
+					setActiveCell({ ghost: true, column: prevCol });
+					setEditing({ ghost: true, column: prevCol });
+					return;
+				}
+				const list = rows();
+				if (list.length > 0) {
+					navigateToVisRow(list.length - 1, cols[cols.length - 1] ?? 0, { edit: true });
+					return;
+				}
 			}
 			setEditing(null);
 			if (move === "stay") focusGhostCell(column);
@@ -1033,8 +1350,10 @@ export function TableView(props: { path: string }) {
 
 		if (move === "next") {
 			if (visCol >= 0 && visCol + 1 < cols.length) {
+				setActiveCell({ ghost: false, row: newRow, column: cols[visCol + 1]! });
 				setEditing({ ghost: false, row: newRow, column: cols[visCol + 1]! });
 			} else {
+				setActiveCell({ ghost: true, column: cols[0] ?? 0 });
 				setEditing({ ghost: true, column: cols[0] ?? 0 });
 			}
 			return;
@@ -1120,8 +1439,8 @@ export function TableView(props: { path: string }) {
 
 	const duplicateKeyWarning = createMemo(() => {
 		const lower = baseName(props.path).toLowerCase();
-		if (!["database.csv", "settings.csv", "files.csv"].includes(lower)) return "";
-		const dups = csvDuplicateKeys(table(), 0);
+		if (!["database.csv", "database.tsv", "settings.csv", "settings.tsv", "files.csv", "files.tsv"].includes(lower)) return "";
+		const dups = duplicateEntries();
 		if (!dups.length) return "";
 		const preview = dups.slice(0, 3).map((d) => d.key).join(", ");
 		return `${dups.length} duplicate ${dups.length === 1 ? "key" : "keys"} in “${headerName(0) || "column 1"}” (${preview}${dups.length > 3 ? ", …" : ""}).`;
@@ -1342,23 +1661,32 @@ export function TableView(props: { path: string }) {
 	};
 
 	const copySelectedAsCsv = async () => {
-		const selected = visibleSelectedRows();
-		if (!selected.length) return;
+		const sel = selectedRows();
+		const ordered = rows().filter((r) => sel.has(r.index));
+		if (!ordered.length) return;
 		const cols = visibleColumns();
 		const headers = cols.map((c) => headerName(c));
-		const bodyRows = selected
-			.sort((a, b) => a - b)
-			.map((rIdx) => cols.map((c) => table().rows[rIdx]?.[c]?.text ?? ""));
+		const bodyRows = ordered.map((r) => cols.map((c) => r.cells[c]?.text ?? ""));
 		const out = [csvRow(headers, table().delimiter), ...bodyRows.map((r) => csvRow(r, table().delimiter))].join("\n");
 		await copyText(out, `Copied ${bodyRows.length} selected ${bodyRows.length === 1 ? "row" : "rows"} as CSV.`);
 	};
 
-	const isDatabaseRegistry = createMemo(() => baseName(props.path).toLowerCase() === "database.csv");
+	const copySelectedAsTsv = async () => {
+		const sel = selectedRows();
+		const ordered = rows().filter((r) => sel.has(r.index));
+		if (!ordered.length) return;
+		const cols = visibleColumns();
+		const headers = cols.map((c) => headerName(c));
+		const bodyRows = ordered.map((r) => cols.map((c) => r.cells[c]?.text ?? ""));
+		const out = tableToTsv(headers, bodyRows);
+		await copyText(out, `Copied ${bodyRows.length} selected ${bodyRows.length === 1 ? "row" : "rows"} as TSV for Excel/Sheets.`);
+	};
 
-	/** Scans `schema/**\/*.sql` and appends newly discovered SQL objects to `database.csv` without duplicating schema-qualified names or overwriting existing rows. */
+	/** Scans `schema/**\/*.sql` (including ALTER DDL) and reconciles `database.csv`/`database.tsv` with newly discovered and dropped SQL objects (ADR 0009). */
 	const syncDatabaseRegistryFromSchema = async () => {
 		const root = state.workspace?.root;
 		if (!model || !root) return;
+		const fileLabel = baseName(props.path);
 		const schemaRel = state.project?.schema ?? "schema";
 		const schemaDir = joinPath(root, ...schemaRel.split(/[\\/]/).filter((p) => p && p !== "."));
 		try {
@@ -1395,7 +1723,7 @@ export function TableView(props: { path: string }) {
 				const res = await backend.read(file).catch(() => null);
 				if (!res || res.binary) continue;
 				const relFile = relativeTo(root, file).split("\\").join("/");
-				for (const obj of extractSqlObjects(res.text)) {
+				for (const obj of extractSqlObjects(res.text, { includeAlter: true })) {
 					const fullKey = obj.name.toLowerCase();
 					const bareKey = obj.bareName.toLowerCase();
 					allSqlNames.add(fullKey);
@@ -1406,44 +1734,141 @@ export function TableView(props: { path: string }) {
 					discovered.push({ name: obj.name, kind: obj.kind, source: `From ${relFile}` });
 				}
 			}
-			// Also detect objects that were previously imported from schema/ SQL but no longer appear in any SQL file.
+			// Detect previously synced objects that no longer appear in any schema SQL file (skipping rows already marked "gone").
 			const dropped = t.rows
-				.map((r) => ({ name: (r[nameCol]?.text ?? "").trim(), note: noteCol >= 0 ? (r[noteCol]?.text ?? "") : "" }))
-				.filter((r) => r.name && /^From\s+/i.test(r.note) && !allSqlNames.has(r.name.toLowerCase()) && !allSqlNames.has(r.name.split(".").pop()!.toLowerCase()));
-			const droppedMsg = dropped.length ? ` (${dropped.length} listed ${dropped.length === 1 ? "object is" : "objects are"} no longer in schema SQL: ${dropped.slice(0, 3).map((d) => d.name).join(", ")}${dropped.length > 3 ? ", …" : ""})` : "";
+				.map((r, rowIdx) => ({
+					rowIdx,
+					name: (r[nameCol]?.text ?? "").trim(),
+					note: noteCol >= 0 ? (r[noteCol]?.text ?? "") : "",
+					status: statusIdx >= 0 ? (r[statusIdx]?.text ?? "").trim().toLowerCase() : "",
+				}))
+				.filter(
+					(r) =>
+						r.name &&
+						/^From\s+/i.test(r.note) &&
+						r.status !== "gone" &&
+						!allSqlNames.has(r.name.toLowerCase()) &&
+						!allSqlNames.has(r.name.split(".").pop()!.toLowerCase()),
+				);
+			const droppedPreview = `${dropped.slice(0, 5).map((d) => d.name).join(", ")}${dropped.length > 5 ? ", …" : ""}`;
+			const droppedMsg = dropped.length
+				? ` (${dropped.length} listed ${dropped.length === 1 ? "object is" : "objects are"} no longer in schema SQL: ${dropped.slice(0, 3).map((d) => d.name).join(", ")}${dropped.length > 3 ? ", …" : ""})`
+				: "";
 
-			if (!discovered.length) {
-				notify(`database.csv already lists every object found in schema SQL files.${droppedMsg}`);
+			let doAppend = false;
+			let doMarkGone = false;
+
+			if (!discovered.length && !dropped.length) {
+				notify(`${fileLabel} already matches every object found in schema SQL files.`);
 				return;
 			}
-			if (
-				(await choose(
-					`Found ${discovered.length} new SQL ${discovered.length === 1 ? "object" : "objects"} in ${schemaRel}/ (${discovered.slice(0, 5).map((d) => d.name).join(", ")}${discovered.length > 5 ? ", …" : ""}).${droppedMsg} Append rows to database.csv?`,
-					["Append rows", "Cancel"],
-				)) !== "Append rows"
-			) {
-				return;
+			if (!discovered.length && dropped.length > 0) {
+				if (statusIdx < 0) {
+					notify(`${fileLabel} already lists every object found in schema SQL files.${droppedMsg}`);
+					return;
+				}
+				const picked = await choose(
+					`No new SQL objects found in ${schemaRel}/, but ${dropped.length} previously synced ${dropped.length === 1 ? "object is" : "objects are"} no longer in schema SQL (${droppedPreview}). Mark ${dropped.length === 1 ? "it" : "them"} as “gone” in ${fileLabel}?`,
+					["Mark as gone"],
+				);
+				if (picked !== "Mark as gone") return;
+				doMarkGone = true;
+			} else if (discovered.length > 0 && dropped.length > 0 && statusIdx >= 0) {
+				const newPreview = `${discovered.slice(0, 5).map((d) => d.name).join(", ")}${discovered.length > 5 ? ", …" : ""}`;
+				const picked = await choose(
+					`Found ${discovered.length} new SQL ${discovered.length === 1 ? "object" : "objects"} (${newPreview}) and ${dropped.length} previously synced ${dropped.length === 1 ? "object" : "objects"} no longer in ${schemaRel}/ SQL (${droppedPreview}). How would you like to update ${fileLabel}?`,
+					["Append & mark gone", "Append only", "Mark gone only"],
+				);
+				if (!picked) return;
+				doAppend = picked === "Append & mark gone" || picked === "Append only";
+				doMarkGone = picked === "Append & mark gone" || picked === "Mark gone only";
+			} else {
+				const newPreview = `${discovered.slice(0, 5).map((d) => d.name).join(", ")}${discovered.length > 5 ? ", …" : ""}`;
+				const picked = await choose(
+					`Found ${discovered.length} new SQL ${discovered.length === 1 ? "object" : "objects"} in ${schemaRel}/ (${newPreview}).${droppedMsg} Append rows to ${fileLabel}?`,
+					["Append rows"],
+				);
+				if (picked !== "Append rows") return;
+				doAppend = true;
 			}
+
 			const nl = model.getEOL();
 			const textNow = model.getValue();
 			const freshTable = parseCsv(textNow);
-			const lines: string[] = [];
-			for (const obj of discovered) {
-				const vals = freshTable.header.map((_, i) => {
-					if (i === nameCol) return obj.name;
-					if (i === kindCol) return obj.kind;
-					if (i === statusIdx) return "found";
-					if (i === noteCol) return obj.source;
-					return "";
-				});
-				lines.push(csvRow(vals, freshTable.delimiter));
+			const freshStatusIdx = columnOf(freshTable, "status");
+			const rawEdits: { start: number; end: number; text: string }[] = [];
+			let markedCount = 0;
+
+			if (doMarkGone && freshStatusIdx >= 0) {
+				const freshNameCol = (() => {
+					for (const candidate of ["object", "name", "table"]) {
+						const idx = columnOf(freshTable, candidate);
+						if (idx >= 0) return idx;
+					}
+					return 0;
+				})();
+				const freshNoteCol = columnOf(freshTable, "note") >= 0 ? columnOf(freshTable, "note") : columnOf(freshTable, "notes");
+				const droppedNameSet = new Set(dropped.map((d) => d.name.toLowerCase()));
+				for (const r of freshTable.rows) {
+					const name = (r[freshNameCol]?.text ?? "").trim().toLowerCase();
+					const note = freshNoteCol >= 0 ? (r[freshNoteCol]?.text ?? "") : "";
+					if (!name || !/^From\s+/i.test(note) || !droppedNameSet.has(name)) continue;
+					const existingCell = r[freshStatusIdx];
+					if (existingCell && existingCell.text.trim().toLowerCase() === "gone") continue;
+					const last = r[r.length - 1]!;
+					if (existingCell) {
+						rawEdits.push({ start: existingCell.start, end: existingCell.end, text: csvCell("gone", freshTable.delimiter) });
+					} else {
+						rawEdits.push({
+							start: last.end,
+							end: last.end,
+							text: freshTable.delimiter.repeat(freshStatusIdx - r.length + 1) + csvCell("gone", freshTable.delimiter),
+						});
+					}
+					markedCount++;
+				}
 			}
-			const prefix = textNow && !/\r?\n$/.test(textNow) ? nl : "";
-			const pos = model.getPositionAt(textNow.length);
+
+			let appendedText = "";
+			if (doAppend && discovered.length > 0) {
+				const lines: string[] = [];
+				for (const obj of discovered) {
+					const vals = freshTable.header.map((_, i) => {
+						if (i === nameCol) return obj.name;
+						if (i === kindCol) return obj.kind;
+						if (i === freshStatusIdx) return "found";
+						if (i === noteCol) return obj.source;
+						return "";
+					});
+					lines.push(csvRow(vals, freshTable.delimiter));
+				}
+				const prefix = textNow && !/\r?\n$/.test(textNow) ? nl : "";
+				appendedText = `${prefix}${lines.join(nl)}${nl}`;
+			}
+
+			if (appendedText) {
+				const eofTail = rawEdits.find((ed) => ed.start === textNow.length && ed.end === textNow.length);
+				if (eofTail) eofTail.text += appendedText;
+				else rawEdits.push({ start: textNow.length, end: textNow.length, text: appendedText });
+			}
+
+			if (!rawEdits.length) return;
+			const ops = rawEdits
+				.sort((a, b) => b.start - a.start || b.end - a.end)
+				.map((ed) => {
+					const from = model.getPositionAt(ed.start);
+					const to = model.getPositionAt(ed.end);
+					return { range: { startLineNumber: from.lineNumber, startColumn: from.column, endLineNumber: to.lineNumber, endColumn: to.column }, text: ed.text };
+				});
 			model.pushStackElement();
-			model.pushEditOperations([], [{ range: { startLineNumber: pos.lineNumber, startColumn: pos.column, endLineNumber: pos.lineNumber, endColumn: pos.column }, text: `${prefix}${lines.join(nl)}${nl}` }], () => null);
+			model.pushEditOperations([], ops, () => null);
 			model.pushStackElement();
-			notify(`Added ${discovered.length} SQL ${discovered.length === 1 ? "object" : "objects"} to database.csv (Ctrl+Z to undo).${droppedMsg}`);
+
+			const parts: string[] = [];
+			if (doAppend && discovered.length) parts.push(`added ${discovered.length} SQL ${discovered.length === 1 ? "object" : "objects"}`);
+			if (markedCount) parts.push(`marked ${markedCount} as “gone”`);
+			const summary = parts.join(" and ");
+			notify(`${summary.charAt(0).toUpperCase()}${summary.slice(1)} in ${fileLabel} (Ctrl+Z to undo).${!doMarkGone ? droppedMsg : ""}`);
 		} catch (e: any) {
 			notify(`Could not sync schema SQL: ${e?.message ?? e}`, "error");
 		}
@@ -1465,7 +1890,7 @@ export function TableView(props: { path: string }) {
 			return;
 		}
 		if (grid.length > 1 && hasActiveFilters()) {
-			const curList = drawn();
+			const curList = rows();
 			const startVis = ac.ghost ? curList.length : curList.findIndex((r) => r.index === ac.row);
 			const remainingVis = startVis >= 0 ? Math.max(0, curList.length - startVis) : 0;
 			const willUpdate = Math.min(grid.length, remainingVis);
@@ -1476,13 +1901,14 @@ export function TableView(props: { path: string }) {
 			]
 				.filter(Boolean)
 				.join(" and ");
-			const ok = await choose(`Filters are active. Pasting ${grid.length} rows will ${summary}.`, ["Paste here", "Cancel"]);
+			const ok = await choose(`Filters are active. Pasting ${grid.length} rows will ${summary}.`, ["Paste here"]);
 			if (ok !== "Paste here") return;
 		}
 
 		const curText = model.getValue();
 		const t = parseCsv(curText);
-		const list = drawn();
+		// Index the FULL filtered/sorted `rows()` array (not virtualized `drawn()`) so pasting past the viewport updates real rows instead of duplicating at EOF.
+		const list = rows();
 		const startVisRow = ac.ghost ? list.length : list.findIndex((r) => r.index === ac.row);
 		if (startVisRow < 0) return;
 
@@ -1494,8 +1920,10 @@ export function TableView(props: { path: string }) {
 			const targetVis = startVisRow + rOff;
 			if (targetVis < list.length) {
 				const rowIdx = list[targetVis]!.index;
-				const cells = t.rows[rowIdx]!;
+				const cells = t.rows[rowIdx];
+				if (!cells?.length) continue;
 				const maxColNeeded = Math.max(
+					-1,
 					...pasteRow.map((_, cOff) => cols[startVisCol + cOff] ?? -1),
 				);
 				// Handle cells that exist in `cells` individually, and pad any missing trailing cells in one tail edit.
@@ -1532,6 +1960,14 @@ export function TableView(props: { path: string }) {
 			}
 		}
 
+		if (appended.length) {
+			const nl = model.getEOL();
+			const prefix = curText && !/\r?\n$/.test(curText) ? nl : "";
+			const block = prefix + appended.map((vals) => csvRow(vals, t.delimiter)).join(nl) + nl;
+			const eofTail = cellEdits.find((ed) => ed.start === curText.length && ed.end === curText.length);
+			if (eofTail) eofTail.text += block;
+			else cellEdits.push({ start: curText.length, end: curText.length, text: block });
+		}
 		const ops = cellEdits
 			.sort((a, b) => b.start - a.start || b.end - a.end)
 			.map((ed) => {
@@ -1539,13 +1975,6 @@ export function TableView(props: { path: string }) {
 				const to = model.getPositionAt(ed.end);
 				return { range: { startLineNumber: from.lineNumber, startColumn: from.column, endLineNumber: to.lineNumber, endColumn: to.column }, text: ed.text };
 			});
-		if (appended.length) {
-			const nl = model.getEOL();
-			const prefix = curText && !/\r?\n$/.test(curText) ? nl : "";
-			const pos = model.getPositionAt(curText.length);
-			const block = appended.map((vals) => csvRow(vals, t.delimiter)).join(nl) + nl;
-			ops.unshift({ range: { startLineNumber: pos.lineNumber, startColumn: pos.column, endLineNumber: pos.lineNumber, endColumn: pos.column }, text: prefix + block });
-		}
 		if (!ops.length) return;
 		model.pushStackElement();
 		model.pushEditOperations([], ops, () => null);
@@ -1553,6 +1982,203 @@ export function TableView(props: { path: string }) {
 		if (appended.length === 1) setPinnedRow(t.rows.length);
 		notify(`Pasted ${grid.length} × ${Math.max(...grid.map((r) => r.length))} cells (Ctrl+Z to undo).`);
 	};
+
+	// --- In-table Find & Replace (Ctrl+F / Ctrl+H) --------------------------
+
+	const findColumn = createMemo(() => {
+		const ac = activeCell();
+		if (ac && visibleColumns().includes(ac.column)) return ac.column;
+		return visibleColumns()[0] ?? 0;
+	});
+
+	const findMatches = createMemo(() => {
+		if (!findOpen()) return [] as { row: number; visRow: number; column: number }[];
+		const q = findQuery();
+		if (!q) return [];
+		const cs = findCaseSensitive();
+		const needle = cs ? q : q.toLowerCase();
+		const cols = findCurrentColOnly() ? [findColumn()] : visibleColumns();
+		const list = rows();
+		const hits: { row: number; visRow: number; column: number }[] = [];
+		for (let vi = 0; vi < list.length; vi++) {
+			const item = list[vi]!;
+			for (const col of cols) {
+				const val = item.cells[col]?.text ?? "";
+				if ((cs ? val : val.toLowerCase()).includes(needle)) {
+					hits.push({ row: item.index, visRow: vi, column: col });
+				}
+			}
+		}
+		return hits;
+	});
+
+	const findMatchSet = createMemo(() => {
+		const set = new Set<string>();
+		for (const m of findMatches()) set.add(`${m.row}:${m.column}`);
+		return set;
+	});
+
+	const currentMatchIdx = createMemo(() => {
+		const m = findMatches();
+		if (!m.length) return -1;
+		return ((findMatchIdx() % m.length) + m.length) % m.length;
+	});
+
+	const activeFindMatch = createMemo(() => {
+		const i = currentMatchIdx();
+		return i >= 0 ? findMatches()[i]! : null;
+	});
+
+	const revealMatch = (match: { row: number; visRow: number; column: number }) => {
+		setPinnedRow(match.row);
+		ensureVisRowInWindow(match.visRow, "center");
+		setActiveCell({ ghost: false, row: match.row, column: match.column });
+		queueMicrotask(() => {
+			const td = body?.querySelector<HTMLElement>(`tr[data-row="${match.row}"] > td[data-col="${match.column}"]`);
+			if (td) {
+				td.scrollIntoView({ block: "nearest", inline: "nearest" });
+				nudgeCellOutFromHeader(td);
+			}
+		});
+	};
+
+	const openFind = (withReplace: boolean) => {
+		closeFilterMenu(false);
+		setFindOpen(true);
+		if (withReplace) setReplaceOpen(true);
+		queueMicrotask(() => {
+			if (withReplace && findQuery()) {
+				replaceInputEl?.focus();
+				replaceInputEl?.select();
+			} else {
+				findInputEl?.focus();
+				findInputEl?.select();
+			}
+		});
+	};
+
+	const closeFind = () => {
+		setFindOpen(false);
+		const ac = activeCell();
+		if (ac && !ac.ghost) focusCell(ac.row, ac.column);
+		else if (ac?.ghost) focusGhostCell(ac.column);
+		else {
+			const rc = rovingCell();
+			if (rc && !rc.ghost) focusCell(rc.row, rc.column);
+			else if (rc?.ghost) focusGhostCell(rc.column);
+			else rootEl?.focus();
+		}
+	};
+
+	const findStep = (delta: 1 | -1) => {
+		const m = findMatches();
+		if (!m.length) return;
+		const next = (((currentMatchIdx() + delta) % m.length) + m.length) % m.length;
+		setFindMatchIdx(next);
+		revealMatch(m[next]!);
+	};
+
+	const replaceCurrent = () => {
+		const match = activeFindMatch();
+		const query = findQuery();
+		if (!model || !match || !query) return;
+		const cs = findCaseSensitive();
+		const rep = replaceText();
+		const oldVal = table().rows[match.row]?.[match.column]?.text ?? "";
+		const nextVal = replaceLiteral(oldVal, query, rep, cs);
+		if (nextVal !== oldVal) {
+			if (hasActiveFilters()) setPinnedRow(match.row);
+			changeCell(match.row, match.column, nextVal);
+		}
+		// If replacement still matches query (e.g. replacing "a" with "aa"), advance index to avoid sticking on the same cell.
+		const stillMatches = (cs ? nextVal : nextVal.toLowerCase()).includes(cs ? query : query.toLowerCase());
+		const remaining = findMatches();
+		if (!remaining.length) return;
+		const nextIdx = stillMatches
+			? (((currentMatchIdx() + 1) % remaining.length) + remaining.length) % remaining.length
+			: Math.min(currentMatchIdx(), remaining.length - 1);
+		setFindMatchIdx(nextIdx);
+		revealMatch(remaining[nextIdx]!);
+	};
+
+	const replaceAll = () => {
+		const query = findQuery();
+		if (!model || !query) return;
+		const cs = findCaseSensitive();
+		const rep = replaceText();
+		const curText = model.getValue();
+		const t = parseCsv(curText);
+		const matches = findMatches();
+		if (!matches.length) return;
+		const cellEdits: { start: number; end: number; text: string }[] = [];
+		const seen = new Set<string>();
+		for (const m of matches) {
+			const key = `${m.row}:${m.column}`;
+			if (seen.has(key)) continue;
+			seen.add(key);
+			const cell = t.rows[m.row]?.[m.column];
+			if (!cell) continue;
+			const nextVal = replaceLiteral(cell.text, query, rep, cs);
+			if (nextVal !== cell.text) {
+				cellEdits.push({ start: cell.start, end: cell.end, text: csvCell(nextVal, t.delimiter) });
+			}
+		}
+		if (!cellEdits.length) return;
+		const ops = cellEdits
+			.sort((a, b) => b.start - a.start || b.end - a.end)
+			.map((ed) => {
+				const from = model.getPositionAt(ed.start);
+				const to = model.getPositionAt(ed.end);
+				return { range: { startLineNumber: from.lineNumber, startColumn: from.column, endLineNumber: to.lineNumber, endColumn: to.column }, text: ed.text };
+			});
+		model.pushStackElement();
+		model.pushEditOperations([], ops, () => null);
+		model.pushStackElement();
+		setFindMatchIdx(0);
+		notify(`Replaced in ${ops.length} ${ops.length === 1 ? "cell" : "cells"} (Ctrl+Z to undo).`);
+	};
+
+	// --- Compact footer summary strip stats ---------------------------------
+
+	const footerStats = createMemo(() => {
+		const list = rows();
+		const total = table().rows.length;
+		const selected = visibleSelectedRows().length;
+		const cols = visibleColumns();
+		const ac = activeCell();
+		const col = ac && cols.includes(ac.column) ? ac.column : (cols[0] ?? -1);
+		if (col < 0) {
+			return { shown: list.length, total, selected, colName: "", nonEmpty: 0, distinct: 0, sum: null as string | null };
+		}
+		let nonEmpty = 0;
+		const distinct = new Set<string>();
+		let numericCount = 0;
+		let sumVal = 0;
+		for (const item of list) {
+			const trimmed = (item.cells[col]?.text ?? "").trim();
+			if (!trimmed) continue;
+			nonEmpty++;
+			distinct.add(trimmed);
+			const num = parseNumericValue(trimmed);
+			if (num !== null) {
+				numericCount++;
+				sumVal += num;
+			}
+		}
+		const sum =
+			numericCount >= 2
+				? (Math.round(sumVal * 1e6) / 1e6).toLocaleString(undefined, { maximumFractionDigits: 6 })
+				: null;
+		return {
+			shown: list.length,
+			total,
+			selected,
+			colName: headerName(col) || `Column ${col + 1}`,
+			nonEmpty,
+			distinct: distinct.size,
+			sum,
+		};
+	});
 
 	const startNewRowAtEnd = () => {
 		if (!table().header.length) return;
@@ -1902,32 +2528,104 @@ export function TableView(props: { path: string }) {
 		window.addEventListener("keydown", onKey, true);
 	};
 
-	/** Arrow keys move between cells (including seamlessly into the blank final row); Alt+Left/Right moves columns; Enter/F2/type edits; Delete clears. */
+	const pageStepRows = () => {
+		const vh = scrollEl?.clientHeight || viewportH() || 640;
+		const headH = headRow?.getBoundingClientRect().height ?? 32;
+		return Math.max(1, Math.floor((vh - headH) / EST_ROW_H) - 1);
+	};
+
+	/** Arrow / Page / Home / End keys index `rows()` directly across virtualized windows; ContextMenu / Shift+F10 opens cell actions (ADR 0010). */
 	const onCellKey = (e: KeyboardEvent, row: number, column: number) => {
 		if (editing()) return;
+		const targetEl = e.target as HTMLElement | null;
+		const onInnerButton = targetEl !== e.currentTarget && Boolean(targetEl?.closest("button"));
+		if (isContextMenuKey(e)) {
+			e.preventDefault();
+			e.stopPropagation();
+			lastKeyMenuAt = performance.now();
+			void openCellContextMenu(pointUnder(e.currentTarget as HTMLElement), row, column);
+			return;
+		}
 		if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
 			e.preventDefault();
 			moveColumnBy(column, e.key === "ArrowLeft" ? -1 : 1);
 			focusCell(row, column);
 			return;
 		}
-		const cell = e.currentTarget as HTMLElement;
-		const move = (to: Element | null | undefined) => to instanceof HTMLElement && to.matches("td[data-col]") && (e.preventDefault(), to.focus());
+		if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key === "Enter") {
+			if (openCellLink(column, table().rows[row]?.[column]?.text ?? "")) {
+				e.preventDefault();
+				return;
+			}
+		}
+		if (onInnerButton && (e.key === "Enter" || e.key === " ")) return;
+		if (e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && e.key === " ") {
+			e.preventDefault();
+			toggleRowSelect(row, false);
+			return;
+		}
 		if (e.key === "Enter" || e.key === "F2") return e.preventDefault(), setEditing({ ghost: false, row, column });
 		if ((e.key === "Delete" || e.key === "Backspace") && !e.ctrlKey && !e.metaKey && !e.altKey) {
 			e.preventDefault();
 			changeCell(row, column, "");
 			return;
 		}
-		if (e.key === "ArrowRight") return move(cell.nextElementSibling);
-		if (e.key === "ArrowLeft") return move(cell.previousElementSibling);
-		const at = [...cell.parentElement!.children].indexOf(cell);
-		if (e.key === "ArrowDown") {
-			const nextTr = cell.parentElement!.nextElementSibling;
-			if (nextTr) return move(nextTr.children[at]);
-			return move(foot?.querySelector("tr.table-ghost-row")?.children[at]);
+		const cols = visibleColumns();
+		const visCol = cols.indexOf(column);
+		const list = rows();
+		const visRow = list.findIndex((r) => r.index === row);
+
+		if (e.key === "ArrowRight" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+			e.preventDefault();
+			if (visCol >= 0 && visCol + 1 < cols.length) focusCell(row, cols[visCol + 1]!);
+			return;
 		}
-		if (e.key === "ArrowUp") return move(cell.parentElement!.previousElementSibling?.children[at]);
+		if (e.key === "ArrowLeft" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+			e.preventDefault();
+			if (visCol > 0) focusCell(row, cols[visCol - 1]!);
+			return;
+		}
+		if (e.key === "ArrowDown" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+			e.preventDefault();
+			if (visRow >= 0 && visRow + 1 < list.length) {
+				navigateToVisRow(visRow + 1, column);
+			} else {
+				focusGhostCell(column);
+			}
+			return;
+		}
+		if (e.key === "ArrowUp" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+			e.preventDefault();
+			if (visRow > 0) navigateToVisRow(visRow - 1, column);
+			return;
+		}
+		if (e.key === "PageDown" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+			e.preventDefault();
+			if (visRow >= 0 && list.length > 0) {
+				if (visRow >= list.length - 1) focusGhostCell(column);
+				else navigateToVisRow(Math.min(list.length - 1, visRow + pageStepRows()), column);
+			}
+			return;
+		}
+		if (e.key === "PageUp" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+			e.preventDefault();
+			if (visRow > 0) navigateToVisRow(Math.max(0, visRow - pageStepRows()), column);
+			return;
+		}
+		if (e.key === "Home" && !e.altKey) {
+			e.preventDefault();
+			const firstCol = cols[0] ?? column;
+			if ((e.ctrlKey || e.metaKey) && list.length > 0) navigateToVisRow(0, firstCol);
+			else focusCell(row, firstCol);
+			return;
+		}
+		if (e.key === "End" && !e.altKey) {
+			e.preventDefault();
+			const lastCol = cols[cols.length - 1] ?? column;
+			if ((e.ctrlKey || e.metaKey) && list.length > 0) navigateToVisRow(list.length - 1, lastCol);
+			else focusCell(row, lastCol);
+			return;
+		}
 		if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
 			e.preventDefault();
 			setEditing({ ghost: false, row, column, seed: e.key });
@@ -1936,15 +2634,48 @@ export function TableView(props: { path: string }) {
 
 	const onGhostKey = (e: KeyboardEvent, column: number) => {
 		if (editing()) return;
-		const cell = e.currentTarget as HTMLElement;
-		const move = (to: Element | null | undefined) => to instanceof HTMLElement && to.matches("td[data-col]") && (e.preventDefault(), to.focus());
+		if (isContextMenuKey(e)) {
+			e.preventDefault();
+			e.stopPropagation();
+			lastKeyMenuAt = performance.now();
+			void openGhostContextMenu(pointUnder(e.currentTarget as HTMLElement), column);
+			return;
+		}
 		if (e.key === "Enter" || e.key === "F2") return e.preventDefault(), setEditing({ ghost: true, column });
-		if (e.key === "ArrowRight") return move(cell.nextElementSibling);
-		if (e.key === "ArrowLeft") return move(cell.previousElementSibling);
-		if (e.key === "ArrowUp") {
-			const lastTr = body?.lastElementChild;
-			const at = [...cell.parentElement!.children].indexOf(cell);
-			return move(lastTr?.children[at]);
+		const cols = visibleColumns();
+		const visCol = cols.indexOf(column);
+		const list = rows();
+		if (e.key === "ArrowRight" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+			e.preventDefault();
+			if (visCol >= 0 && visCol + 1 < cols.length) focusGhostCell(cols[visCol + 1]!);
+			return;
+		}
+		if (e.key === "ArrowLeft" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+			e.preventDefault();
+			if (visCol > 0) focusGhostCell(cols[visCol - 1]!);
+			return;
+		}
+		if (e.key === "ArrowUp" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+			e.preventDefault();
+			if (list.length > 0) navigateToVisRow(list.length - 1, column);
+			return;
+		}
+		if (e.key === "PageUp" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+			e.preventDefault();
+			if (list.length > 0) navigateToVisRow(Math.max(0, list.length - pageStepRows()), column);
+			return;
+		}
+		if (e.key === "Home" && !e.altKey) {
+			e.preventDefault();
+			const firstCol = cols[0] ?? column;
+			if ((e.ctrlKey || e.metaKey) && list.length > 0) navigateToVisRow(0, firstCol);
+			else focusGhostCell(firstCol);
+			return;
+		}
+		if (e.key === "End" && !e.altKey) {
+			e.preventDefault();
+			focusGhostCell(cols[cols.length - 1] ?? column);
+			return;
 		}
 		if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
 			e.preventDefault();
@@ -1954,25 +2685,24 @@ export function TableView(props: { path: string }) {
 
 	const sortBy = (column: number) => setOrder((by) => (by?.column !== column ? { column, down: false } : by.down ? null : { column, down: true }));
 
-	// --- Right-click Context Menus ------------------------------------------
+	// --- Right-click & Keyboard Context Menus -------------------------------
 
-	const onCellContextMenu = async (e: MouseEvent, row: number, column: number) => {
-		const target = e.target instanceof Element ? e.target : null;
-		if (target?.closest("input, textarea")) return; // Let global text-box menu handle active editor inputs.
-		e.preventDefault();
-		e.stopPropagation();
+	const openCellContextMenu = async (at: { x: number; y: number }, row: number, column: number) => {
 		closeFilterMenu(false);
 		setActiveCell({ ghost: false, row, column });
-		const cellEl = e.currentTarget as HTMLElement;
-		const at = menuPoint(e, cellEl);
 		const cells = table().rows[row];
 		if (!cells) return;
 		const rawVal = (cells[column]?.text ?? "").trim();
 		const col = headerName(column) || `Column ${column + 1}`;
 		const hasRule = Boolean(columnRule(column));
 		const frozenHere = isFrozenCol(column);
+		const schemaDoc = schemaDocForCell(column, rawVal);
+		const fileLink = !schemaDoc ? fileLinkForCell(column, rawVal) : null;
 
 		const items: RowMenuEntry[] = [
+			...(schemaDoc ? [{ label: `Open schema doc “${shortLabel(schemaDoc.name)}”`, value: "open-schema", keys: "Ctrl+Enter" }] : []),
+			...(fileLink ? [{ label: `Open file “${shortLabel(rawVal)}”`, value: "open-file", keys: "Ctrl+Enter" }] : []),
+			...(schemaDoc || fileLink ? ["separator" as const] : []),
 			{ label: "Edit cell", value: "edit", keys: "Enter" },
 			...(rawVal ? [{ label: "Copy cell", value: "copy-cell", keys: "Ctrl+C" }] : []),
 			{ label: "Copy row", value: "copy-row" },
@@ -2001,7 +2731,11 @@ export function TableView(props: { path: string }) {
 
 		const picked = await chooseFromMenu(`Actions for ${col}, row ${row + 1}`, items, at);
 		if (!picked) return;
-		if (picked === "edit") {
+		if (picked === "open-schema" && schemaDoc) {
+			void openFile(schemaDoc.path);
+		} else if (picked === "open-file" && fileLink) {
+			void openFile(fileLink.path);
+		} else if (picked === "edit") {
 			setEditing({ ghost: false, row, column });
 		} else if (picked === "copy-cell") {
 			await copyText(cells[column]?.text ?? "", "Copied cell value.");
@@ -2045,12 +2779,17 @@ export function TableView(props: { path: string }) {
 		}
 	};
 
-	const onHeaderContextMenu = async (e: MouseEvent, column: number) => {
+	const onCellContextMenu = async (e: MouseEvent, row: number, column: number) => {
+		const target = e.target instanceof Element ? e.target : null;
+		if (target?.closest("input, textarea")) return; // Let global text-box menu handle active editor inputs.
 		e.preventDefault();
 		e.stopPropagation();
+		if (!e.clientX && !e.clientY && performance.now() - lastKeyMenuAt < 150) return;
+		await openCellContextMenu(menuPoint(e, e.currentTarget as HTMLElement), row, column);
+	};
+
+	const openHeaderContextMenu = async (at: { x: number; y: number }, thEl: HTMLElement, column: number) => {
 		closeFilterMenu(false);
-		const thEl = e.currentTarget as HTMLElement;
-		const at = menuPoint(e, thEl);
 		const col = headerName(column) || `Column ${column + 1}`;
 		const hasRule = Boolean(columnRule(column));
 		const sortedHere = order()?.column === column;
@@ -2134,14 +2873,17 @@ export function TableView(props: { path: string }) {
 		}
 	};
 
-	const onGhostContextMenu = async (e: MouseEvent, column: number) => {
-		const target = e.target instanceof Element ? e.target : null;
-		if (target?.closest("input, textarea")) return;
+	const onHeaderContextMenu = async (e: MouseEvent, column: number) => {
 		e.preventDefault();
 		e.stopPropagation();
+		if (!e.clientX && !e.clientY && performance.now() - lastKeyMenuAt < 150) return;
+		const thEl = e.currentTarget as HTMLElement;
+		await openHeaderContextMenu(menuPoint(e, thEl), thEl, column);
+	};
+
+	const openGhostContextMenu = async (at: { x: number; y: number }, column: number) => {
 		closeFilterMenu(false);
-		const cellEl = e.currentTarget as HTMLElement;
-		const at = menuPoint(e, cellEl);
+		setActiveCell({ ghost: true, column });
 		const col = headerName(column) || `Column ${column + 1}`;
 		const hasRule = Boolean(columnRule(column));
 
@@ -2156,6 +2898,15 @@ export function TableView(props: { path: string }) {
 		else if (picked === "badges") setFormatDialog({ open: true, initialColumn: headerName(column) });
 	};
 
+	const onGhostContextMenu = async (e: MouseEvent, column: number) => {
+		const target = e.target instanceof Element ? e.target : null;
+		if (target?.closest("input, textarea")) return;
+		e.preventDefault();
+		e.stopPropagation();
+		if (!e.clientX && !e.clientY && performance.now() - lastKeyMenuAt < 150) return;
+		await openGhostContextMenu(menuPoint(e, e.currentTarget as HTMLElement), column);
+	};
+
 	const openTableActionsMenu = async (anchor: HTMLElement) => {
 		closeFilterMenu(false);
 		const rect = anchor.getBoundingClientRect();
@@ -2165,6 +2916,8 @@ export function TableView(props: { path: string }) {
 		const selName = currentName();
 
 		const items: RowMenuEntry[] = [
+			{ label: "Find & replace…", value: "find", keys: "Ctrl+F" },
+			"separator",
 			{ label: "Add column…", value: "add-col" },
 			...(isDatabaseRegistry() ? [{ label: "Sync from schema SQL…", value: "sync-schema" }] : []),
 			...(order() ? [{ label: "Apply sort order to file", value: "sort-apply" }] : []),
@@ -2196,7 +2949,9 @@ export function TableView(props: { path: string }) {
 
 		const picked = await chooseFromMenu("Table actions", items, at);
 		if (!picked) return;
-		if (picked === "add-col") {
+		if (picked === "find") {
+			openFind(false);
+		} else if (picked === "add-col") {
 			void addColumnInteractive();
 		} else if (picked === "sync-schema") {
 			void syncDatabaseRegistryFromSchema();
@@ -2255,14 +3010,29 @@ export function TableView(props: { path: string }) {
 			onKeyDown={(e) => {
 				// The table is a view of the text, and its changes are the text's: they are undone as the text's are.
 				if (!model || !(e.ctrlKey || e.metaKey) || e.altKey) return;
-				const tag = (e.target as HTMLElement).tagName;
-				if (tag === "INPUT" || tag === "TEXTAREA") return;
 				const key = e.key.toLowerCase();
+				if ((key === "f" || key === "h") && !e.shiftKey) {
+					if (editing() || modalOpen()) return;
+					e.preventDefault();
+					e.stopPropagation();
+					openFind(key === "h");
+					return;
+				}
+				const targetEl = e.target as HTMLElement;
+				const isTextInput =
+					targetEl.tagName === "TEXTAREA" ||
+					(targetEl.tagName === "INPUT" && !["checkbox", "radio", "button"].includes((targetEl as HTMLInputElement).type));
+				if (isTextInput) return;
 				if (key === "z" && !e.shiftKey) (e.preventDefault(), void model.undo());
 				else if (key === "y" || (key === "z" && e.shiftKey)) (e.preventDefault(), void model.redo());
 				else if (key === "c" && !e.shiftKey) {
 					const sel = window.getSelection();
 					if (sel && !sel.isCollapsed) return;
+					if (visibleSelectedRows().length > 0) {
+						e.preventDefault();
+						void copySelectedAsTsv();
+						return;
+					}
 					const ac = activeCell();
 					if (ac && !ac.ghost) {
 						const val = table().rows[ac.row]?.[ac.column]?.text ?? "";
@@ -2289,8 +3059,19 @@ export function TableView(props: { path: string }) {
 				<span class="hint">
 					{rows().length === table().rows.length ? `${table().rows.length} ${table().rows.length === 1 ? "row" : "rows"}` : `${rows().length} of ${table().rows.length} rows`}
 				</span>
+				<Show when={duplicateEntries().length > 0}>
+					<button
+						type="button"
+						class="doc-status table-dupes-chip"
+						aria-pressed={onlyDupes()}
+						title={`${duplicateEntries().length} duplicate ${duplicateEntries().length === 1 ? "key" : "keys"} across ${duplicateRowSet().size} rows in “${headerName(0) || "column 1"}” (${duplicateEntries().slice(0, 3).map((d) => d.key).join(", ")}${duplicateEntries().length > 3 ? ", …" : ""}). Click to filter to duplicate rows.`}
+						onClick={() => (setPinnedRow(null), setOnlyDupes(!onlyDupes()))}
+					>
+						<Icon name="warning" /> {duplicateEntries().length} {duplicateEntries().length === 1 ? "dupe" : "dupes"}
+					</button>
+				</Show>
 				<Show when={onlyTicket()}>
-					<button class="doc-status tone-active table-for" aria-pressed="true" title="Show every row again" onClick={() => setOnlyTicket(null)}>
+					<button class="doc-status tone-active table-for" aria-pressed="true" title="Show every row again" onClick={() => (setPinnedRow(null), setOnlyTicket(null))}>
 						for {onlyTicket()} <Icon name="close" />
 					</button>
 				</Show>
@@ -2311,7 +3092,7 @@ export function TableView(props: { path: string }) {
 						);
 					}}
 				</For>
-				<Show when={activeFilterCols().length > 1 || (activeFilterCols().length > 0 && Boolean(filter().trim()))}>
+				<Show when={activeFilterCols().length > 1 || (activeFilterCols().length > 0 && Boolean(filter().trim())) || (onlyDupes() && (activeFilterCols().length > 0 || Boolean(filter().trim()) || onlyMissing() || onlyTicket() !== null))}>
 					<button type="button" class="link table-clear-all" onClick={clearAllFilters}>
 						Clear filters
 					</button>
@@ -2346,7 +3127,7 @@ export function TableView(props: { path: string }) {
 									class="doc-status tone-off table-missing"
 									aria-pressed={onlyMissing()}
 									title={`Show only rows whose “${chk().columnName}” value was not found in the searched code files`}
-									onClick={() => setOnlyMissing(!onlyMissing())}
+									onClick={() => (setPinnedRow(null), setOnlyMissing(!onlyMissing()))}
 								>
 									{chk().columnName}: not in code {missingCount()}
 								</button>
@@ -2418,6 +3199,17 @@ export function TableView(props: { path: string }) {
 				<span class="table-bar-actions">
 					<button
 						type="button"
+						class="icon-btn table-find-open-btn"
+						classList={{ active: findOpen() }}
+						aria-label="Find and replace in table"
+						aria-pressed={findOpen()}
+						title="Find & replace in table (Ctrl+F / Ctrl+H)"
+						onClick={() => (findOpen() ? closeFind() : openFind(false))}
+					>
+						<Icon name="search" />
+					</button>
+					<button
+						type="button"
 						class="table-format-btn"
 						classList={{ active: matchedBadgeCols().length > 0 }}
 						title={
@@ -2463,6 +3255,9 @@ export function TableView(props: { path: string }) {
 					<button type="button" class="table-bulk-btn" onClick={() => void bulkFillAnyColumn()}>
 						Set column…
 					</button>
+					<button type="button" class="table-bulk-btn" title="Copy selected rows as TSV for Excel/Sheets (Ctrl+C)" onClick={() => void copySelectedAsTsv()}>
+						Copy TSV
+					</button>
 					<button type="button" class="table-bulk-btn" onClick={() => void copySelectedAsCsv()}>
 						Copy CSV
 					</button>
@@ -2479,6 +3274,163 @@ export function TableView(props: { path: string }) {
 					</button>
 					<button type="button" class="link table-bulk-clear" onClick={() => setSelectedRows(new Set<number>())}>
 						Clear
+					</button>
+				</div>
+			</Show>
+
+			{/* Compact inline Find & Replace bar (Ctrl+F / Ctrl+H). */}
+			<Show when={findOpen()}>
+				<div class="table-find-bar" role="search" aria-label="Find and replace in table">
+					<div class="table-find-group">
+						<button
+							type="button"
+							class="icon-btn table-find-icon-btn"
+							aria-expanded={replaceOpen()}
+							aria-label={replaceOpen() ? "Hide replace" : "Show replace"}
+							title={replaceOpen() ? "Hide replace" : "Show replace (Ctrl+H)"}
+							onClick={() => setReplaceOpen((v) => !v)}
+						>
+							<Icon name={replaceOpen() ? "chevron-down" : "chevron-right"} />
+						</button>
+						<input
+							ref={findInputEl}
+							type="search"
+							class="table-find-input"
+							placeholder="Find in table…"
+							aria-label="Find in table"
+							value={findQuery()}
+							onInput={(e) => {
+								setFindQuery(e.currentTarget.value);
+								setFindMatchIdx(0);
+								const first = findMatches()[0];
+								if (first) revealMatch(first);
+							}}
+							onKeyDown={(e) => {
+								if (e.key === "Enter") {
+									e.preventDefault();
+									findStep(e.shiftKey ? -1 : 1);
+								} else if (e.key === "Escape") {
+									e.preventDefault();
+									e.stopPropagation();
+									closeFind();
+								}
+							}}
+						/>
+						<span
+							class="table-find-count"
+							classList={{ empty: Boolean(findQuery()) && findMatches().length === 0 }}
+							role="status"
+							aria-live="polite"
+						>
+							{findQuery()
+								? findMatches().length
+									? `${currentMatchIdx() + 1}/${findMatches().length}`
+									: "0/0"
+								: ""}
+						</span>
+						<button
+							type="button"
+							class="icon-btn table-find-icon-btn"
+							disabled={findMatches().length === 0}
+							aria-label="Previous match"
+							title="Previous match (Shift+Enter)"
+							onClick={() => findStep(-1)}
+						>
+							<Icon name="arrow-up" />
+						</button>
+						<button
+							type="button"
+							class="icon-btn table-find-icon-btn"
+							disabled={findMatches().length === 0}
+							aria-label="Next match"
+							title="Next match (Enter)"
+							onClick={() => findStep(1)}
+						>
+							<Icon name="arrow-down" />
+						</button>
+						<button
+							type="button"
+							class="table-find-toggle"
+							aria-pressed={findCaseSensitive()}
+							title="Match case"
+							onClick={() => {
+								setFindCaseSensitive((v) => !v);
+								setFindMatchIdx(0);
+								const first = findMatches()[0];
+								if (first) revealMatch(first);
+							}}
+						>
+							Aa
+						</button>
+						<button
+							type="button"
+							class="table-find-toggle"
+							aria-pressed={findCurrentColOnly()}
+							title={`Search only in “${headerName(findColumn()) || `Column ${findColumn() + 1}`}”`}
+							onClick={() => {
+								setFindCurrentColOnly((v) => !v);
+								setFindMatchIdx(0);
+								const first = findMatches()[0];
+								if (first) revealMatch(first);
+							}}
+						>
+							{findCurrentColOnly()
+								? `Col: ${shortLabel(headerName(findColumn()) || `#${findColumn() + 1}`, 14)}`
+								: "Current column"}
+						</button>
+					</div>
+
+					<Show when={replaceOpen()}>
+						<div class="table-find-group">
+							<input
+								ref={replaceInputEl}
+								type="text"
+								class="table-find-input"
+								placeholder="Replace with…"
+								aria-label="Replace with"
+								value={replaceText()}
+								onInput={(e) => setReplaceText(e.currentTarget.value)}
+								onKeyDown={(e) => {
+									if (e.key === "Enter") {
+										e.preventDefault();
+										if (e.ctrlKey || e.metaKey || e.altKey) replaceAll();
+										else replaceCurrent();
+									} else if (e.key === "Escape") {
+										e.preventDefault();
+										e.stopPropagation();
+										closeFind();
+									}
+								}}
+							/>
+							<button
+								type="button"
+								class="table-find-btn"
+								disabled={!activeFindMatch()}
+								title="Replace current match (Enter)"
+								onClick={replaceCurrent}
+							>
+								Replace
+							</button>
+							<button
+								type="button"
+								class="table-find-btn"
+								disabled={findMatches().length === 0}
+								title="Replace all matches in one undoable edit (Ctrl+Enter)"
+								onClick={replaceAll}
+							>
+								Replace all
+							</button>
+						</div>
+					</Show>
+
+					<button
+						type="button"
+						class="icon-btn table-find-icon-btn table-find-close"
+						aria-label="Close find bar"
+						title="Close (Esc)"
+						onClick={closeFind}
+					>
+						<Icon name="close" />
 					</button>
 				</div>
 			</Show>
@@ -2566,6 +3518,15 @@ export function TableView(props: { path: string }) {
 											aria-sort={order()?.column === col() ? (order()!.down ? "descending" : "ascending") : "none"}
 											onPointerDown={(e) => onHeaderPointerDown(e, col(), visIdx)}
 											onContextMenu={(e) => void onHeaderContextMenu(e, col())}
+											onKeyDown={(e) => {
+												if (isContextMenuKey(e)) {
+													e.preventDefault();
+													e.stopPropagation();
+													lastKeyMenuAt = performance.now();
+													const thEl = e.currentTarget as HTMLElement;
+													void openHeaderContextMenu(pointUnder(thEl), thEl, col());
+												}
+											}}
 										>
 											<div class="table-th-inner">
 												<Show when={isFrozen()}>
@@ -2646,6 +3607,7 @@ export function TableView(props: { path: string }) {
 										<td class="table-sel-col" onClick={(e) => e.stopPropagation()}>
 											<input
 												type="checkbox"
+												tabindex={isRovingRow(index()) ? 0 : -1}
 												checked={selectedRows().has(index())}
 												aria-label={`Select row ${index() + 1}`}
 												onClick={(e) => {
@@ -2671,9 +3633,19 @@ export function TableView(props: { path: string }) {
 												};
 												const isFrozen = () => visIdx < frozenCols().length;
 												const isLastFrozen = () => isFrozen() && visIdx === frozenCols().length - 1;
+												const cellTabIndex = () => (isRovingBodyCell(index(), col()) ? 0 : -1);
+												const isDupeKeyCell = () => col() === 0 && duplicateRowSet().has(index());
+												const isFindMatch = () => findOpen() && findMatchSet().has(`${index()}:${col()}`);
+												const isCurrentMatch = () => {
+													const m = activeFindMatch();
+													return Boolean(findOpen() && m && m.row === index() && m.column === col());
+												};
+												const schemaDoc = () => schemaDocForCell(col(), value());
+												const fileLink = () => (!schemaDoc() ? fileLinkForCell(col(), value()) : null);
+												const malformedPath = () => (!schemaDoc() && !fileLink() ? isMalformedFilePath(col(), value()) : false);
 												return (
 													<td
-														tabindex={0}
+														tabindex={cellTabIndex()}
 														data-col={col()}
 														style={cellStyle(col(), visIdx)}
 														classList={{
@@ -2682,10 +3654,19 @@ export function TableView(props: { path: string }) {
 															"col-frozen-last": isLastFrozen(),
 															"cell-selected": isCellSelected(index(), col()),
 															"cell-editing": open(),
+															"cell-dupe": isDupeKeyCell(),
+															"cell-find-match": isFindMatch(),
+															"cell-find-current": isCurrentMatch(),
 														}}
-														title="Double-click, Enter or F2 to edit; right-click for actions"
+														title="Double-click, Enter or F2 to edit; right-click or Shift+F10 for actions"
 														onMouseDown={() => setActiveCell({ ghost: false, row: index(), column: col() })}
 														onFocus={() => setActiveCell({ ghost: false, row: index(), column: col() })}
+														onClick={(e) => {
+															if ((e.ctrlKey || e.metaKey) && !open() && openCellLink(col(), value())) {
+																e.preventDefault();
+																e.stopPropagation();
+															}
+														}}
 														onDblClick={() => setEditing({ ghost: false, row: index(), column: col() })}
 														onKeyDown={(e) => onCellKey(e, index(), col())}
 														onContextMenu={(e) => void onCellContextMenu(e, index(), col())}
@@ -2700,19 +3681,69 @@ export function TableView(props: { path: string }) {
 																			<Show
 																				when={col() === ticketAt() && value().trim()}
 																				fallback={
-																					<Show when={badgeTone()} fallback={value()}>
-																						{(tone) => <span class={`doc-status tone-${tone()}`}>{value()}</span>}
+																					<Show
+																						when={schemaDoc()}
+																						fallback={
+																							<Show
+																								when={fileLink()}
+																								fallback={
+																									<Show
+																										when={malformedPath()}
+																										fallback={
+																											<Show when={badgeTone()} fallback={value()}>
+																												{(tone) => <span class={`doc-status tone-${tone()}`}>{value()}</span>}
+																											</Show>
+																										}
+																									>
+																										<span class="table-val-warn" title="Path looks malformed or points outside the workspace">
+																											{value()}
+																										</span>
+																									</Show>
+																								}
+																							>
+																								{(fl) => (
+																									<button
+																										type="button"
+																										tabindex={cellTabIndex()}
+																										class="link table-cell-link"
+																										classList={{ "table-val-warn": fl().missing }}
+																										title={
+																											fl().missing
+																												? `${value().trim()} — file not found in workspace`
+																												: `Open ${value().trim()} (Click or Ctrl+Click)`
+																										}
+																										onClick={(e) => (e.stopPropagation(), void openFile(fl().path))}
+																										onDblClick={(e) => e.stopPropagation()}
+																									>
+																										{value()}
+																									</button>
+																								)}
+																							</Show>
+																						}
+																					>
+																						{(doc) => (
+																							<button
+																								type="button"
+																								tabindex={cellTabIndex()}
+																								class="link table-cell-link"
+																								title={`Open schema doc: ${relativeTo(state.workspace?.root, doc().path)} (Click or Ctrl+Click)`}
+																								onClick={(e) => (e.stopPropagation(), void openFile(doc().path))}
+																								onDblClick={(e) => e.stopPropagation()}
+																							>
+																								{value()}
+																							</button>
+																						)}
 																					</Show>
 																				}
 																			>
-																				{ticketCell(value())}
+																				{ticketCell(value(), cellTabIndex)}
 																			</Show>
 																			<Show when={checkedHere()}>
 																				{(chk) => {
 																					const trimmed = value().trim();
 																					if (!trimmed) return null;
 																					const count = chk().counts.get(termLookupKey(trimmed, chk().caseSensitive));
-																					return renderCheckBadge(trimmed, count, chk().options);
+																					return renderCheckBadge(trimmed, count, chk().options, cellTabIndex());
 																				}}
 																			</Show>
 																		</>
@@ -2728,7 +3759,7 @@ export function TableView(props: { path: string }) {
 																			return (
 																				<>
 																					{part}
-																					{renderCheckBadge(trimmed, count, chk.options)}
+																					{renderCheckBadge(trimmed, count, chk.options, cellTabIndex())}
 																				</>
 																			);
 																		}}
@@ -2853,7 +3884,7 @@ export function TableView(props: { path: string }) {
 										const isLastFrozen = () => isFrozen() && visIdx === frozenCols().length - 1;
 										return (
 											<td
-												tabindex={0}
+												tabindex={isRovingGhostCell(col()) ? 0 : -1}
 												data-col={col()}
 												style={cellStyle(col(), visIdx)}
 												classList={{
@@ -2934,19 +3965,6 @@ export function TableView(props: { path: string }) {
 					</Show>
 				</table>
 
-				<Show when={false && rows().length > rowLimit()}>
-					<div class="table-more-rows" role="status">
-						<span class="hint">
-							Showing {rowLimit()} of {rows().length} rows.
-						</span>
-						<button type="button" class="link" onClick={() => setRowLimit((n) => n + ROWS_SHOWN)}>
-							Show {Math.min(ROWS_SHOWN, rows().length - rowLimit())} more
-						</button>
-						<button type="button" class="link" onClick={() => setRowLimit(rows().length)}>
-							Show all ({rows().length})
-						</button>
-					</div>
-				</Show>
 				<Show when={table().rows.length > 0 && rows().length === 0}>
 					<p class="hint">
 						No rows match the active filters.{" "}
@@ -2956,6 +3974,42 @@ export function TableView(props: { path: string }) {
 					</p>
 				</Show>
 			</div>
+
+			{/* Compact footer summary strip: visible/total rows, selection count, and focused column statistics. */}
+			<Show when={table().header.length > 0}>
+				<div class="table-footer" role="status" aria-label="Table summary">
+					<span class="table-footer-left">
+						<span>
+							Showing <strong class="table-footer-val">{footerStats().shown}</strong>/{footerStats().total}{" "}
+							{footerStats().total === 1 ? "row" : "rows"}
+						</span>
+						<span class="table-footer-sep" aria-hidden="true" />
+						<span>
+							Selected <strong class="table-footer-val">{footerStats().selected}</strong>
+						</span>
+					</span>
+					<Show when={footerStats().colName}>
+						<span class="table-footer-right">
+							<span class="table-footer-col" title={footerStats().colName}>
+								{footerStats().colName}
+							</span>
+							<span>
+								Non-empty <strong class="table-footer-val">{footerStats().nonEmpty}</strong>
+							</span>
+							<span class="table-footer-sep" aria-hidden="true" />
+							<span>
+								Distinct <strong class="table-footer-val">{footerStats().distinct}</strong>
+							</span>
+							<Show when={footerStats().sum !== null}>
+								<span class="table-footer-sep" aria-hidden="true" />
+								<span>
+									Sum <strong class="table-footer-val">{footerStats().sum}</strong>
+								</span>
+							</Show>
+						</span>
+					</Show>
+				</div>
+			</Show>
 
 			{/* Portaled per-column header filter popover (never clipped by .table-scroll overflow). */}
 			<Show when={filterMenu()}>

@@ -186,7 +186,7 @@ export function docChecks(files: readonly DocFile[], areas: readonly CatalogArea
 	if (tickets.length) {
 		const linkedSpecPaths = new Set<string>();
 		for (const t of tickets) {
-			for (const ref of t.specs ?? []) linkedSpecPaths.add(ref.split("\\").join("/").replace(/^\.\//, "").toLowerCase());
+			for (const ref of t.specs ?? []) linkedSpecPaths.add(ref.split("\\").join("/").replace(/^\.?\/+/, "").toLowerCase());
 		}
 		for (const spec of specs) {
 			if (spec.tickets?.length || spec.pairedPlan || spec.name.includes(".spec.")) continue;
@@ -308,6 +308,59 @@ export function docChecks(files: readonly DocFile[], areas: readonly CatalogArea
 							text: `${called(dec)} is superseded by ${called(target)} but is still marked "${dec.status}".`,
 							path: dec.path,
 						});
+					}
+				}
+			}
+			if (dec.status?.trim().toLowerCase() === "superseded" && !(dec.supersededBy?.length)) {
+				checks.push({
+					level: "note",
+					text: `${called(dec)} is marked superseded but does not list superseded-by.`,
+					path: dec.path,
+				});
+			}
+		}
+		// Circular `supersedes:` chains among decisions.
+		const supEdges = new Map<DocFile, Set<DocFile>>();
+		const addSupEdge = (from: DocFile, to: DocFile) => {
+			if (from === to) return;
+			let set = supEdges.get(from);
+			if (!set) {
+				set = new Set();
+				supEdges.set(from, set);
+			}
+			set.add(to);
+		};
+		for (const dec of decisions) {
+			for (const ref of dec.supersedes ?? []) {
+				const target = findDec(ref);
+				if (target) addSupEdge(dec, target);
+			}
+			for (const ref of dec.supersededBy ?? []) {
+				const target = findDec(ref);
+				if (target) addSupEdge(target, dec);
+			}
+		}
+		const supReported = new Set<DocFile>();
+		for (const dec of decisions) {
+			if (supReported.has(dec)) continue;
+			const stack: { node: DocFile; trail: DocFile[] }[] = [{ node: dec, trail: [dec] }];
+			const visited = new Set<DocFile>();
+			while (stack.length) {
+				const cur = stack.pop()!;
+				for (const nxt of supEdges.get(cur.node) ?? []) {
+					if (nxt === dec) {
+						for (const member of cur.trail) supReported.add(member);
+						checks.push({
+							level: "warn",
+							text: `${called(dec)} is in a circular supersedes chain (${[...cur.trail, dec].map(called).join(" → ")}).`,
+							path: dec.path,
+						});
+						stack.length = 0;
+						break;
+					}
+					if (!visited.has(nxt)) {
+						visited.add(nxt);
+						stack.push({ node: nxt, trail: [...cur.trail, nxt] });
 					}
 				}
 			}

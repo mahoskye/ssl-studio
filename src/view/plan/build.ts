@@ -4,7 +4,7 @@
 // no code, comments in place of a step, calls to procedures that do not exist. Nothing
 // here parses SSL (ADR 0003): findings, symbols and calls all come from the server.
 import { decisionsOf, readBlocks, type NodeMap, type SpecUnit } from "./assist";
-import type { Plan } from "./model";
+import { nodeDocsOf, type Plan } from "./model";
 
 /** `kept`: already built, and the chart has not touched it. It is never sent to the agent or reprinted. */
 export type UnitStatus = "pending" | "running" | "passed" | "stuck" | "skipped" | "kept";
@@ -319,6 +319,7 @@ export function patternsFrom(templates: { label: string; group: string; body: ()
 
 export function unitPrompt(plan: Plan, spec: string, unit: BuildUnit, built: BuildUnit[], callable: string, patterns = "", changing = ""): string {
 	const nodes = plan.nodes.filter((n) => unit.nodes?.includes(n.id));
+	const refDocs = [...new Set(nodes.flatMap((n) => nodeDocsOf(n)))];
 	const decided = decisionsOf(plan).filter((d) => d.answer?.trim());
 	return [
 		`PLAN STAGE: build ${unit.name}`,
@@ -329,7 +330,17 @@ export function unitPrompt(plan: Plan, spec: string, unit: BuildUnit, built: Bui
 		"THE UNIT:",
 		JSON.stringify({ name: unit.name, script: unit.script, parameters: unit.parameters, calls: unit.calls }),
 		...(changing ? ["", changing] : []),
-		...(nodes.length ? ["", "THE STEPS IT CARRIES OUT, FROM THE CHART:", ...nodes.map((n) => `- ${n.text}${n.notes ? ` (${n.notes})` : ""}`)] : []),
+		...(nodes.length
+			? [
+					"",
+					"THE STEPS IT CARRIES OUT, FROM THE CHART:",
+					...nodes.map((n) => {
+						const stepDocs = nodeDocsOf(n);
+						return `- ${n.text}${n.notes ? ` (${n.notes})` : ""}${stepDocs.length ? ` [docs: ${stepDocs.join(", ")}]` : ""}`;
+					}),
+				]
+			: []),
+		...(refDocs.length ? ["", `Referenced docs: ${refDocs.join(", ")}`] : []),
 		...(decided.length ? ["", "WHAT THE USER DECIDED:", ...decided.map((d) => `- ${d.question} ${d.answer}`)] : []),
 		...(unit.question && unit.answer ? ["", `YOU ASKED: ${unit.question}`, `THE USER SAID: ${unit.answer}`] : []),
 		...(unit.feedback ? ["", `THE USER REJECTED THE LAST VERSION: ${unit.feedback}`] : []),

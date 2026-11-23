@@ -127,3 +127,10 @@ export function workspaceTags(files: readonly DocFile[]): TagBucket[] {
 	}
 	return [...map.values()].sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag, undefined, { sensitivity: "base" }));
 }
+
+/** Unified regex query string matching both inline `#tag` prose AND YAML frontmatter `tags:` list/array entries. */
+export function tagSearchPattern(tag: string): string {
+	const clean = tag.trim().replace(/^#+/, "");
+	const esc = clean.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	return `(?:#|\\btags?:[^\\n]*\\b|\\-\\s+)${esc}(?![A-Za-z0-9_/-])`;
+}

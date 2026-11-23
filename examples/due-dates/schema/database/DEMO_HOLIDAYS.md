@@ -1,3 +1,7 @@
+---
+source: schema/database/demo.sql
+---
+
 # DEMO_HOLIDAYS
 
 The days the lab is closed, other than weekends. No day here counts toward a turnaround, for any priority.

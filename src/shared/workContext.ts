@@ -13,6 +13,8 @@ export type Work = {
 	ticket: DocFile;
 	/** Parent epic/ticket when `ticket.parent` resolves to a ticket in the folder. */
 	parentEpic?: DocFile;
+	/** Plans (`.plan.json`) tied to this ticket. */
+	plans?: DocFile[];
 	/** The specs written for it. */
 	specs: DocFile[];
 	/** The tickets it names, and those that name it, that are in the folder. */
@@ -56,7 +58,10 @@ export function workFor(files: readonly DocFile[], key: string): Work | null {
 	const forIt = (file: DocFile) => Boolean(file.tickets?.some((named) => same(named, key)));
 	const forNone = (file: DocFile) => !file.tickets?.length;
 	const knowledge = (kind: string) => real.filter((file) => file.group === "knowledge" && file.kind === kind);
-	const decided = knowledge("decisions").filter((file) => toneOf(file.status) === "done");
+	const decided = knowledge("decisions").filter(
+		(file) => toneOf(file.status) === "done" || (forIt(file) && toneOf(file.status) !== "off" && !/supersed/i.test(file.status ?? "")),
+	);
+	const plans = real.filter((file) => file.group === "plans" && (forIt(file) || Boolean(ticket.plans?.some((path) => pathMatchesRef(file.path, path)))));
 	const related = tickets.filter(
 		(file) =>
 			file !== ticket &&
@@ -72,6 +77,7 @@ export function workFor(files: readonly DocFile[], key: string): Work | null {
 	return {
 		ticket,
 		parentEpic,
+		plans,
 		specs: real.filter((file) => file.group === "specs" && (forIt(file) || Boolean(ticket.specs?.some((path) => pathMatchesRef(file.path, path))))),
 		related,
 		open: knowledge("questions").filter((file) => toneOf(file.status) === "waiting" && (forIt(file) || forNone(file) || forRelated(file))),
@@ -167,6 +173,43 @@ export async function workText(work: Work, readFile: (path: string) => Promise<s
 			parts.push("", `SPEC ${spec.title || spec.name}${spec.status ? ` (${spec.status})` : ""}:`, text !== null && body(text) ? cut(body(text), SPEC_CHARS) : "(it could not be read)");
 		}
 	}
+	if (work.plans?.length) {
+		const planSummaries: string[] = [];
+		for (const planDoc of work.plans.slice(0, 4)) {
+			const raw = await read(planDoc.path);
+			if (!raw) {
+				planSummaries.push(line(planDoc));
+				continue;
+			}
+			try {
+				const parsed = JSON.parse(raw) as {
+					title?: string;
+					goal?: string;
+					targets?: { script?: string; procedures?: string[] }[];
+					nodes?: { label?: string; kind?: string }[];
+					openQuestions?: string[];
+				};
+				const targets = (parsed.targets ?? [])
+					.map((t) => [t.script, t.procedures?.length ? `(${t.procedures.join(", ")})` : ""].filter(Boolean).join(" "))
+					.filter(Boolean);
+				const steps = (parsed.nodes ?? [])
+					.map((n) => n.label?.trim())
+					.filter((l): l is string => Boolean(l))
+					.slice(0, 12);
+				const bits = [
+					`- PLAN ${parsed.title || planDoc.title || planDoc.name}:`,
+					parsed.goal ? `Goal: ${cut(parsed.goal.replace(/\s+/g, " "), 240)}` : "",
+					targets.length ? `Targets: ${targets.join("; ")}` : "",
+					steps.length ? `Steps: ${steps.join(" → ")}` : "",
+					parsed.openQuestions?.length ? `Open plan questions: ${parsed.openQuestions.slice(0, 4).join("; ")}` : "",
+				].filter(Boolean);
+				planSummaries.push(bits.join(" "));
+			} catch {
+				planSummaries.push(line(planDoc));
+			}
+		}
+		if (planSummaries.length) parts.push("", "PLANS:", ...planSummaries);
+	}
 	if (work.open.length) parts.push("", "QUESTIONS NOBODY HAS ANSWERED YET (do not guess the answer; say what depends on it):", ...work.open.map(line));
 	if (work.answered.length) {
 		parts.push("", "QUESTIONS THAT WERE ANSWERED:");
@@ -176,7 +219,18 @@ export async function workText(work: Work, readFile: (path: string) => Promise<s
 			parts.push(`- ${question.title || question.name}${answer ? ` Answer: ${cut(answer.replace(/\s+/g, " "), ANSWER_CHARS)}` : ""}`);
 		}
 	}
-	if (work.decisions.length) parts.push("", "DECISIONS ALREADY MADE (keep to them):", ...work.decisions.map(line));
+	if (work.decisions.length) {
+		parts.push("", "DECISIONS ALREADY MADE (keep to them):");
+		for (const dec of work.decisions) {
+			const text = await read(dec.path);
+			const decBody = text === null ? "" : section(text, "Decision");
+			if (decBody) {
+				parts.push(`- ${dec.title || dec.name}${dec.status ? ` (${dec.status})` : ""}. ${cut(decBody.replace(/\s+/g, " "), ANSWER_CHARS)}`);
+			} else {
+				parts.push(line(dec));
+			}
+		}
+	}
 	if (options.includeState && work.stateDoc) {
 		const st = await read(work.stateDoc.path);
 		if (st !== null && body(st)) parts.push("", "PROJECT STATE (STATE.md):", cut(body(st), 1500));
@@ -258,7 +312,7 @@ export type WorkGroup = {
 
 const pathMatchesRef = (filePath: string, ref: string) => {
 	const full = slashes(filePath).toLowerCase();
-	const clean = slashes(ref).replace(/^\.\//, "").toLowerCase();
+	const clean = slashes(ref).replace(/^\.?\/+/, "").toLowerCase();
 	return full === clean || full.endsWith(`/${clean}`);
 };
 
@@ -695,11 +749,12 @@ export function docsGoverningFile(
 /**
  * Returns every script/code reference tied to a ticket across its plans, specs,
  * ticket body, linked notes/decisions/questions, and CSV registry rows.
+ * Pass `{ includeDescendants: true }` to roll up sub-tickets for Epics.
  */
-export function scriptsForTicket(files: readonly DocFile[], key: string): string[] {
-	const groups = ticketWork(files, key);
-	const work = workFor(files, key);
-	if (!work) return [];
+export function scriptsForTicket(files: readonly DocFile[], key: string, options?: { includeDescendants?: boolean }): string[] {
+	const keys = options?.includeDescendants
+		? [key, ...descendantTickets(files, key).map((t) => t.ticket).filter((k): k is string => Boolean(k))]
+		: [key];
 	const refs = new Set<string>();
 	const addRefs = (list?: readonly string[]) => {
 		for (const ref of list ?? []) {
@@ -707,14 +762,19 @@ export function scriptsForTicket(files: readonly DocFile[], key: string): string
 			if (clean) refs.add(clean);
 		}
 	};
-	addRefs(work.ticket.codeRefs);
-	for (const group of groups) {
-		if (group.kind === "registry") {
-			for (const reg of group.files) {
-				addRefs(reg.ticketCodeRefs?.[key.toLowerCase()]);
+	for (const k of keys) {
+		const groups = ticketWork(files, k);
+		const work = workFor(files, k);
+		if (!work) continue;
+		addRefs(work.ticket.codeRefs);
+		for (const group of groups) {
+			if (group.kind === "registry") {
+				for (const reg of group.files) {
+					addRefs(reg.ticketCodeRefs?.[k.toLowerCase()]);
+				}
+			} else {
+				for (const doc of group.files) addRefs(doc.codeRefs);
 			}
-		} else {
-			for (const doc of group.files) addRefs(doc.codeRefs);
 		}
 	}
 	return [...refs];

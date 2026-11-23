@@ -5,22 +5,26 @@ import { Menu, type MenuItem } from "../Menu";
 import { showPanel } from "../panels/registry";
 import { createEffect, createMemo, createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { activeEditor } from "../editor/EditorGroup";
-import { activeLiveEditor } from "../editor/liveBridge";
+import { activeLiveEditor, liveSelectionVersion } from "../editor/liveBridge";
 import { review, openReview } from "../editor/Review";
-import { activeDoc, activePath, applyText, canonical, documents, notify, scriptsCameTo, setState, state } from "../state";
+import { activeDoc, activePath, applyText, canonical, documents, notify, openFile, save, scriptsCameTo, setState, state } from "../state";
 import { addEntry, agent, ask, chooseModel, clearEntries, currentModel, interrupt, resume, safely, setAgent, start, stop, type Entry } from "./store";
 import { groupModels, composeQuestion, composerSend, modelRef, stepAction } from "./logic";
 import { followReplyLink, renderReply } from "./markdown";
 import { notePath, proposalOf, runStep, showReview, startTidy, STEPS, tidy } from "./tidy";
 import { parseCsv } from "../../shared/csv";
-import { baseName, isInside, relativeTo, resolvePath } from "../../shared/paths";
+import { withFrontMatter } from "../../shared/frontMatter";
+import { baseName, dirName, isInside, relativeTo, resolvePath } from "../../shared/paths";
 import { isCatalog, promptText, registryTitle } from "../../shared/projectDocs";
 import type { DocFile } from "../../shared/protocol";
 import { keysIn, ticketColumn } from "../../shared/registryTickets";
 import { extractSchemaPreview, referencedSchemaTables } from "../../shared/schemaIndex";
-import { cut, MAX_WORK_PROMPT_CHARS, ticketForFile, type WorkTextOptions } from "../../shared/workContext";
+import { renderTemplate } from "../../shared/templater";
+import { cut, docsGoverningFile, MAX_WORK_PROMPT_CHARS, ticketForFile, ticketWork, type WorkTextOptions } from "../../shared/workContext";
 import { backend } from "../backend";
-import { choose } from "../dialogs";
+import { ask as askDialog, choose } from "../dialogs";
+import { refreshDocAudit } from "../docAudit";
+import { gitStatus } from "../git";
 import { docs } from "../project";
 import { appendNoteToTicket, promoteToKnowledge, saveAsSnippet, staleCatalogSummary, staleCatalogSummaryAsync, ticketAtHand, updateCatalogs, workPrompt } from "../projectDocs";
 import { languageFor } from "../editor/languages";
@@ -34,6 +38,18 @@ let draftSeq = 0;
 export function openAgentWithDraft(text: string, opts?: { cleanContext?: boolean }) {
 	setPendingDraft({ text, cleanContext: opts?.cleanContext, seq: ++draftSeq });
 	showPanel("agent");
+}
+
+/** Attaches a workspace text file to the next Agent turn context and focuses the Agent panel. */
+export function attachFileToAgent(path: string) {
+	ensureAgentWorkspace();
+	const root = state.workspace?.root;
+	if (!root || !isInside(root, path)) return notify("That file is not in this workspace.", "error");
+	const key = canonical(path);
+	const rel = relativeTo(root, path).replace(/\\/g, "/");
+	setAttachedFiles((prev) => (prev.some((f) => canonical(f.path) === key) ? prev : [...prev, { path, rel }]));
+	showPanel("agent");
+	notify(`Attached ${baseName(path)} to Agent context.`);
 }
 
 // Module-level Agent context controls so `Ctrl+Shift+H` (`commands.ts`) and `AgentPanel` share the exact same selections.
@@ -516,11 +532,38 @@ async function reviewProposedEdit(replyText: string, preferredPath?: string) {
 	});
 }
 
+/** Inserts or appends `answerMd` into the `## Answer` section of a question document. */
+function withQuestionAnswer(docText: string, answerMd: string): string {
+	const eol = docText.includes("\r\n") ? "\r\n" : "\n";
+	const cleanAnswer = answerMd.replace(/\r?\n/g, eol).trim();
+	const headingRe = /^(##\s+Answer[^\r\n]*)(\r?\n|$)/im;
+	const match = headingRe.exec(docText);
+	if (!match) {
+		const sep = docText.endsWith("\n") ? eol : `${eol}${eol}`;
+		return `${docText}${sep}## Answer${eol}${eol}${cleanAnswer}${eol}`;
+	}
+	const afterHeading = match.index + match[0].length;
+	const rest = docText.slice(afterHeading);
+	const nextHeading = /^#{1,6}\s+/m.exec(rest);
+	const sectionEnd = nextHeading ? afterHeading + nextHeading.index : docText.length;
+	const existingSection = docText.slice(afterHeading, sectionEnd).trim();
+	const before = docText.slice(0, afterHeading);
+	const tail = docText.slice(sectionEnd);
+	const body = existingSection ? `${existingSection}${eol}${eol}${cleanAnswer}` : cleanAnswer;
+	return `${before}${eol}${body}${eol}${tail ? `${eol}${tail}` : ""}`;
+}
+
 /** One entry of the conversation. A reply is Markdown with 1-click actions to capture it into project docs or diff it in ReviewView. */
 function EntryView(props: { entry: Entry }) {
 	const html = createMemo(() => (props.entry.role === "agent" ? renderReply(props.entry.text) : ""));
 	const entryTicket = () => props.entry.turn?.ticket;
 	const entryCode = () => props.entry.turn?.codePath;
+	const activeTicketForReply = () => entryTicket() || state.settings.activeTicket?.trim() || ticketForFile(docs(), entryCode(), state.workspace?.root) || "";
+	const openQuestionsForTicket = createMemo(() => {
+		const key = activeTicketForReply();
+		if (!key) return [] as DocFile[];
+		return ticketWork(docs(), key).find((g) => g.kind === "question")?.files ?? [];
+	});
 	const hasCatalogDrift = () => {
 		if (!props.entry.turn?.isCatalogPrompt && !/INDEX\.md/i.test(props.entry.text)) return false;
 		const { stale, missing } = staleCatalogSummary();
@@ -543,6 +586,42 @@ function EntryView(props: { entry: Entry }) {
 						return idx >= 0 ? blocks[idx]! : null;
 					})();
 		if (chosen) await saveAsSnippet(chosen.code, chosen.lang);
+	};
+	const answerOpenQuestion = async () => {
+		const questions = openQuestionsForTicket();
+		if (!questions.length) return;
+		let target: DocFile | null = questions[0]!;
+		if (questions.length > 1) {
+			const labels = questions.map((q) => q.title || q.name);
+			const picked = await choose(`Write this reply as the answer to which open question for ${activeTicketForReply()}?`, labels);
+			const idx = picked ? labels.indexOf(picked) : -1;
+			target = idx >= 0 ? questions[idx]! : null;
+		}
+		if (!target) return;
+		const WRITE_MARK = "Write answer & mark answered";
+		const WRITE_ONLY = "Write answer only";
+		const action = await choose(`Write this reply into "## Answer" of ${target.title || target.name}?`, [WRITE_MARK, WRITE_ONLY]);
+		if (!action) return;
+		const key = canonical(target.path);
+		const open = documents.get(key);
+		const cur = open ? open.model.getValue() : await backend.read(target.path).then((r) => (r.binary ? null : r.text), () => null);
+		if (cur === null) return notify("Could not read the question document.", "error");
+		let next = withQuestionAnswer(cur, props.entry.text);
+		if (action === WRITE_MARK) {
+			next = withFrontMatter(next, "status", "answered") ?? next;
+		}
+		if (open) {
+			const clean = !state.dirty[key];
+			applyText(key, next);
+			if (clean) await save(key, { format: false });
+		} else {
+			await backend.historyKeep(target.path).catch(() => {});
+			await backend.write(target.path, next);
+		}
+		setState("treeVersion", (v) => v + 1);
+		refreshDocAudit();
+		await openFile(target.path, { keep: true });
+		notify(`Recorded answer in ${target.title || baseName(target.path)}.`);
 	};
 	return (
 		<div class={`entry ${props.entry.role}`} classList={{ streaming: Boolean(props.entry.streaming) }} aria-busy={props.entry.streaming ? "true" : undefined}>
@@ -569,12 +648,22 @@ function EntryView(props: { entry: Entry }) {
 						<button type="button" class="link" title="Save this reply as a Decision ADR" onClick={() => void promoteToKnowledge("decisions", { body: props.entry.text, ticket: entryTicket(), codePath: entryCode() })}>
 							Save as Decision
 						</button>
-						<button type="button" class="link" title="Save this reply as a Question" onClick={() => void promoteToKnowledge("questions", { body: props.entry.text, ticket: entryTicket() })}>
+						<button type="button" class="link" title="Save this reply as a Question" onClick={() => void promoteToKnowledge("questions", { body: props.entry.text, ticket: entryTicket(), codePath: entryCode() })}>
 							Save as Question
 						</button>
-						<button type="button" class="link" title="Save this reply as a Reference note" onClick={() => void promoteToKnowledge("reference", { body: props.entry.text, ticket: entryTicket() })}>
+						<button type="button" class="link" title="Save this reply as a Reference note" onClick={() => void promoteToKnowledge("reference", { body: props.entry.text, ticket: entryTicket(), codePath: entryCode() })}>
 							Save as Note
 						</button>
+						<Show when={openQuestionsForTicket().length > 0}>
+							<button
+								type="button"
+								class="link"
+								title={`Write this reply into ## Answer for an open question on ${activeTicketForReply()}`}
+								onClick={() => void answerOpenQuestion()}
+							>
+								Answer open question…
+							</button>
+						</Show>
 						<Show when={entryTicket()}>
 							{(key) => (
 								<button type="button" class="link" title={`Append this reply as a dated note on ${key()}`} onClick={() => void appendNoteToTicket(key(), props.entry.text)}>
@@ -668,9 +757,10 @@ export function AgentPanel() {
 	});
 	const detectedRefTables = createMemo(() => {
 		edited();
-		const p = activePath();
-		if (!p || !/\.(ssl|srvscr|ds|sql|ddl|pks|pkb)$/i.test(p)) return [] as DocFile[];
-		const txt = selectionContext()?.code || activeDoc()?.model.getValue() || "";
+		liveSelectionVersion();
+		const doc = activeDoc();
+		if (!doc || doc.binary) return [] as DocFile[];
+		const txt = selectionContext()?.code || doc.model.getValue() || "";
 		return referencedSchemaTables(txt, docs(), 6);
 	});
 	// Real measured next-turn delta size & token budget (approx 1 token ≈ 4 chars), reflecting sent/edited/pending slices.
@@ -689,6 +779,7 @@ export function AgentPanel() {
 				tree: state.treeVersion,
 				sent: sentTick(),
 				ed: edited(),
+				liveSel: liveSelectionVersion(),
 				session: agent.chatSession ?? "",
 			};
 		},
@@ -711,6 +802,7 @@ export function AgentPanel() {
 	);
 	const preSendEstimate = createMemo(() => {
 		edited();
+		liveSelectionVersion();
 		let chars = draft().length;
 		const parts: string[] = [];
 		if (draft().trim()) parts.push(`prompt (~${Math.ceil(draft().length / 4)} tok)`);
@@ -818,10 +910,77 @@ export function AgentPanel() {
 		clearEntries();
 	};
 	const loadKeptPrompt = (file: DocFile) => {
-		void wordsOf(file).then(
-			(words) => (words ? (setDraft(words), setNotSent(""), box?.focus()) : notify(`${file.title || file.name} has no words in it yet.`)),
-			(e) => notify(String(e?.message ?? e), "error"),
-		);
+		void (async () => {
+			try {
+				const words = await wordsOf(file);
+				if (!words) return notify(`${file.title || file.name} has no words in it yet.`);
+				let finalText = words;
+				if (words.includes("<%") || words.includes("{{")) {
+					const root = state.workspace?.root ?? "";
+					const curPath = activePath() ?? "";
+					const relPath = curPath && root ? relativeTo(root, curPath).replace(/\\/g, "/") : "";
+					const fileName = curPath ? baseName(curPath) : "";
+					const curDocMeta = curPath ? docs().find((d) => d.exists && canonical(d.path) === canonical(curPath)) : undefined;
+					const title = curDocMeta?.title || (fileName ? fileName.replace(/\.[^.]+$/, "") : state.project?.name || state.workspace?.name || "Project");
+					const folder = curPath && root ? relativeTo(root, dirName(curPath)).replace(/\\/g, "/") : "";
+					const rendered = await renderTemplate(words, {
+						title,
+						fileName,
+						relativePath: relPath,
+						fullPath: curPath || undefined,
+						folder: folder === "." ? "" : folder,
+						projectName: state.project?.name || state.workspace?.name || "Project",
+						ticket: ticket() || state.settings.activeTicket?.trim() || "",
+						selection: selectionContext()?.code ?? "",
+						prompt: (label, def) => askDialog(label, def),
+						suggest: async (labels, values, placeholder) => {
+							const picked = await choose(placeholder || "Choose an option", labels);
+							if (!picked) return null;
+							const idx = labels.indexOf(picked);
+							return idx >= 0 ? (values[idx] ?? picked) : picked;
+						},
+						clipboard: () => navigator.clipboard?.readText().catch(() => "") ?? "",
+					});
+					if (rendered.cancelled) return;
+					finalText = rendered.text;
+				}
+				setDraft(finalText);
+				setNotSent("");
+				box?.focus();
+			} catch (e: any) {
+				notify(String(e?.message ?? e), "error");
+			}
+		})();
+	};
+	/** Modified code/SQL files in Git that have governing specs, plans, schema docs, or tickets. */
+	const changedCodeWithDocs = createMemo(() => {
+		const st = gitStatus();
+		const root = state.workspace?.root;
+		if (!st || !root) return [] as { rel: string; docs: string[] }[];
+		const allDocs = docs();
+		const out: { rel: string; docs: string[] }[] = [];
+		for (const f of st.files) {
+			if (!/\.(ssl|srvscr|ds|sql|ddl|pks|pkb|xfd|xml|js|ts|css|html)$/i.test(f.path)) continue;
+			const gov = docsGoverningFile(allDocs, f.path, root);
+			if (!gov.length) continue;
+			out.push({
+				rel: relativeTo(root, f.path).replace(/\\/g, "/"),
+				docs: gov.slice(0, 6).map((g) => relativeTo(root, g.file.path).replace(/\\/g, "/")),
+			});
+		}
+		return out;
+	});
+	const docDriftStarterPrompt = () => {
+		const changed = changedCodeWithDocs();
+		if (!changed.length) return "";
+		const lines = changed.slice(0, 10).map((c) => `- \`${c.rel}\` → governed by ${c.docs.map((d) => `\`${d}\``).join(", ")}`);
+		return `Check whether the modified code files below have drifted from their governing project docs (specs, plans, schema docs, or #L code citations) and propose concise updates:\n\n${lines.join("\n")}`;
+	};
+	const releaseNotesStarterPrompt = () => {
+		const key = ticket();
+		if (!key) return "";
+		const title = activeTicketDoc()?.title;
+		return `Draft concise release notes and a dated STATE.md completion update for ${key}${title ? ` (${title})` : ""}, summarizing what changed, impacted STARLIMS objects, verification steps, and any rollback notes.`;
 	};
 	const promptMenuItems = (): MenuItem[] => {
 		const items: MenuItem[] = [];
@@ -830,10 +989,23 @@ export function AgentPanel() {
 			for (const file of kept) items.push({ label: file.title || file.name, run: () => loadKeptPrompt(file) });
 			items.push("separator");
 		}
+		const contextual: MenuItem[] = [];
+		if (changedCodeWithDocs().length) {
+			contextual.push({
+				label: `Check doc drift for ${changedCodeWithDocs().length} changed ${changedCodeWithDocs().length === 1 ? "file" : "files"}`,
+				run: () => (setDraft(docDriftStarterPrompt()), setNotSent(""), box?.focus()),
+			});
+		}
+		if (ticket()) {
+			contextual.push({
+				label: `Draft release notes / STATE.md update (${ticket()})`,
+				run: () => (setDraft(releaseNotesStarterPrompt()), setNotSent(""), box?.focus()),
+			});
+		}
 		const { stale, missing } = staleCatalogSummary();
 		const totalCat = stale.length + missing.length;
 		if (totalCat) {
-			items.push({
+			contextual.push({
 				label: `Reconcile ${totalCat === 1 ? "1 out-of-sync index" : `${totalCat} out-of-sync indexes`}`,
 				run: () =>
 					void staleCatalogSummaryAsync().then(({ prompt }) => {
@@ -844,7 +1016,9 @@ export function AgentPanel() {
 						box?.focus();
 					}),
 			});
-			items.push("separator");
+		}
+		if (contextual.length) {
+			items.push(...contextual, "separator");
 		}
 		for (const text of STARTERS) items.push({ label: text, run: () => (setDraft(text), setNotSent(""), box?.focus()) });
 		return items;
@@ -971,6 +1145,20 @@ export function AgentPanel() {
 							<p class="agent-note">Ask about the selection, or run a tidy step. Shell, web and files outside the workspace are denied to the agent.</p>
 							{/* Questions to start from: one puts its words in the box, to send as they are or to change first. */}
 							<ul class="agent-starters" aria-label="Questions to start from">
+								<Show when={changedCodeWithDocs().length > 0}>
+									<li>
+										<button title="Check governing docs for drift against your modified code files" onClick={() => (setDraft(docDriftStarterPrompt()), setNotSent(""), box?.focus())}>
+											Check doc drift for changed files ({changedCodeWithDocs().length})
+										</button>
+									</li>
+								</Show>
+								<Show when={ticket()}>
+									<li>
+										<button title={`Draft release notes and a STATE.md update for ${ticket()}`} onClick={() => (setDraft(releaseNotesStarterPrompt()), setNotSent(""), box?.focus())}>
+											Draft release notes / STATE.md update ({ticket()})
+										</button>
+									</li>
+								</Show>
 								<For each={STARTERS}>
 									{(text) => (
 										<li>
@@ -990,12 +1178,7 @@ export function AgentPanel() {
 											<li>
 												<button
 													title={`Put this prompt in the box below${file.summary ? `: ${file.summary}` : ""}`}
-													onClick={() =>
-														void wordsOf(file).then(
-															(words) => (words ? (setDraft(words), setNotSent(""), box?.focus()) : notify(`${file.title || file.name} has no words in it yet.`)),
-															(e) => notify(String(e?.message ?? e), "error"),
-														)
-													}
+													onClick={() => loadKeptPrompt(file)}
 												>
 													{file.title || file.name}
 												</button>
@@ -1081,13 +1264,17 @@ export function AgentPanel() {
 				</Show>
 				<Show when={Boolean(state.workspace)}>
 					<div class="agent-ctx-chips" role="group" aria-label="Optional extra project context">
-						<Show when={detectedRefTables().length > 0}>
+						<Show when={detectedRefTables().length > 0 || withRefTables()}>
 							<button
 								type="button"
 								class="agent-ctx-chip"
 								classList={{ active: withRefTables() }}
 								aria-pressed={withRefTables()}
-								title={`Inject exact column definitions for schema tables referenced in this file: ${detectedRefTables().map((d) => d.title || d.name).join(", ")}`}
+								title={
+									detectedRefTables().length
+										? `Inject exact column definitions for schema tables referenced in this file: ${detectedRefTables().map((d) => d.title || d.name).join(", ")}`
+										: "Table schema injection is active (0 tables detected on the current tab). Click to disable."
+								}
 								onClick={() => setWithRefTables((v) => !v)}
 							>
 								+ Tables ({detectedRefTables().length})

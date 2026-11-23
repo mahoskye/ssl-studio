@@ -14,13 +14,14 @@ import { ask, choose } from "../dialogs";
 import { activePath, canonical, closeAllTabs, closeTab, fileRemoved, fileRenamed, heldFromBefore, isUntitled, notify, openFile, openToSide, saveAll, scriptsCameTo, setState, state } from "../state";
 import { closeComparison } from "../editor/Review";
 import { baseName, dirName, isInside, joinPath, relativeTo } from "../../shared/paths";
-import { COPY, COPY_NAME, COPY_PATH, COPY_RELATIVE, CUT, FIND_IN_FOLDER, folderFor, holdsRoot, menuEntriesFor, nameProblem, NEW_FILE, NEW_FOLDER, OPEN, OPEN_SIDE, openFolders, PASTE, RENAME, retarget, TRASH, without } from "./explorerMenu";
+import { ATTACH_TO_AGENT, COPY, COPY_NAME, COPY_PATH, COPY_RELATIVE, CUT, FIND_IN_FOLDER, folderFor, holdsRoot, menuEntriesFor, nameProblem, NEW_FILE, NEW_FOLDER, OPEN, OPEN_GOVERNING_DOC, OPEN_SIDE, openFolders, PASTE, RENAME, retarget, SCHEMA_FROM_SQL, TRASH, without } from "./explorerMenu";
 import { copyName, copyProblem, folderOf, moveProblem, type Clip } from "./explorerMoves";
 import { chooseFromMenu } from "./RowMenu";
 import { showPanel } from "./registry";
 import { findInFolder } from "./Search";
-import { catalogsKeptFor, followRename } from "../projectDocs";
+import { catalogsKeptFor, followRename, generateSchemaDocFromSql, renameTicket, trashTicket } from "../projectDocs";
 import { docs } from "../project";
+import { isCatalog } from "../../shared/projectDocs";
 import { buildDocNameIndex, lookupInIndex } from "../../shared/namedLinks";
 import { docsGoverningFile, ticketWork } from "../../shared/workContext";
 import { gitStatus } from "../git";
@@ -249,8 +250,26 @@ async function create(parent: string, kind: "file" | "dir"): Promise<string | nu
 	return path;
 }
 
+/** Finds a ticket DocFile whose primary file or dedicated bundle folder matches `entry.path`. */
+function ticketDocForEntry(entry: Entry) {
+	const entryCanon = canonical(entry.path);
+	return docs().find(
+		(d) =>
+			d.exists &&
+			d.group === "tickets" &&
+			!isCatalog(d) &&
+			(canonical(d.path) === entryCanon || Boolean(d.ticketFolder && canonical(d.ticketFolder) === entryCanon)),
+	);
+}
+
 async function rename(entry: Entry): Promise<string | null> {
 	if (!state.workspace || holdsRoot(state.workspace.root, entry.path)) return notify("The workspace folder itself cannot be renamed from here.", "error"), null;
+	// Delegate ticket files and bundle folders with a ticket key to bundle-aware `renameTicket` so sibling folders and references stay in sync.
+	const ticketDoc = ticketDocForEntry(entry);
+	if (ticketDoc?.ticket) {
+		await renameTicket(ticketDoc);
+		return null;
+	}
 	const name = (await ask(`Rename ${entry.name}`, entry.name))?.trim();
 	if (!name || name === entry.name) return null;
 	const problem = nameProblem(name);
@@ -273,6 +292,12 @@ async function rename(entry: Entry): Promise<string | null> {
 
 async function trash(entry: Entry): Promise<string | null> {
 	if (!state.workspace || holdsRoot(state.workspace.root, entry.path)) return notify("The workspace folder itself cannot be moved to the trash from here.", "error"), null;
+	// Delegate ticket bundle files/folders to `trashTicket` so Layout 1 & Layout 2 folders are never stranded on disk.
+	const ticketDoc = ticketDocForEntry(entry);
+	if (ticketDoc?.ticketFolder) {
+		await trashTicket(ticketDoc);
+		return "";
+	}
 	const what = entry.kind === "dir" ? `the folder ${entry.name} and everything in it` : entry.name;
 	// Pre-delete impact check: Markdown path links, [[wikilinks]], and unified governing docs (plans/specs/tickets/registries).
 	const entryCanon = canonical(entry.path);
@@ -416,7 +441,37 @@ async function act(action: string | null, entry: Entry, where: { home?: string; 
 			findInFolder(rel === "." ? "" : rel);
 			return;
 		}
-		if (action === NEW_FILE) back = await create(parent, "file");
+		if (action === SCHEMA_FROM_SQL) {
+			await generateSchemaDocFromSql(entry.path);
+			back = entry.path;
+		} else if (action === OPEN_GOVERNING_DOC) {
+			const governing = docsGoverningFile(docs(), entry.path, state.workspace?.root);
+			if (!governing.length) {
+				notify(`No governing documents found for ${entry.name}.`);
+				back = entry.path;
+			} else if (governing.length === 1) {
+				await openFile(governing[0]!.file.path, { keep: true });
+				return;
+			} else {
+				const labels = governing.map((g) => {
+					const title =
+						g.file.ticket && g.file.title && !g.file.title.startsWith(g.file.ticket)
+							? `${g.file.ticket}: ${g.file.title}`
+							: g.file.ticket || g.file.title || g.file.name;
+					return `${title} (${g.reason})`;
+				});
+				const picked = await choose(`Open governing doc for ${entry.name}`, labels);
+				const idx = picked ? labels.indexOf(picked) : -1;
+				if (idx >= 0) {
+					await openFile(governing[idx]!.file.path, { keep: true });
+					return;
+				}
+				back = entry.path;
+			}
+		} else if (action === ATTACH_TO_AGENT) {
+			(await import("../agent/Agent")).attachFileToAgent(entry.path);
+			return;
+		} else if (action === NEW_FILE) back = await create(parent, "file");
 		else if (action === NEW_FOLDER) back = await create(parent, "dir");
 		else if (action === RENAME) back = await rename(entry);
 		else if (action === TRASH) back = await trash(entry);
@@ -465,6 +520,8 @@ async function dropOn(e: DragEvent, into: string) {
 	}
 }
 
+const BINARY_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|ico|pdf|docx?|xlsx?|pptx?|zip|7z|tar|gz|rar|exe|dll|so|dylib|bin|sdp|woff2?|ttf|otf|mp3|mp4|wav|avi|mov)$/i;
+
 async function entryMenu(entry: Entry, at: Point) {
 	const root = state.workspace?.root;
 	if (!root) return;
@@ -472,7 +529,15 @@ async function entryMenu(entry: Entry, at: Point) {
 	const viewRoot = scope?.path ?? root;
 	const isRoot = holdsRoot(viewRoot, entry.path);
 	const title = isRoot ? (scope ? `New in ${baseName(viewRoot)}` : "New in the workspace folder") : `Actions for ${entry.name}`;
-	const action = await chooseFromMenu(title, menuEntriesFor(entry.kind, entry.path, viewRoot, clip() !== null), at);
+	const extra =
+		entry.kind === "file" && !isRoot
+			? {
+					sql: /\.(sql|ddl|pks|pkb)$/i.test(entry.name),
+					governingCount: docsGoverningFile(docs(), entry.path, root).length,
+					attachable: !BINARY_EXT_RE.test(entry.name),
+				}
+			: undefined;
+	const action = await chooseFromMenu(title, menuEntriesFor(entry.kind, entry.path, viewRoot, clip() !== null, extra), at);
 	await act(action, entry, { home: isRoot ? undefined : entry.path, follow: true });
 }
 

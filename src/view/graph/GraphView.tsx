@@ -6,7 +6,8 @@
 // double-click it, or press Enter, to open it. The same calls can be read as
 // a plain list.
 import { docs } from "../project";
-import { codeMatchesRef, scriptsForTicket } from "../../shared/workContext";
+import { codeMatchesRef, docsGoverningFile, scriptsForTicket } from "../../shared/workContext";
+import "./graphExtra.css";
 import { Icon } from "../Icon";
 import { CenterTabStrip } from "../editor/CenterTabStrip";
 import ELK from "elkjs/lib/elk.bundled.js";
@@ -81,6 +82,7 @@ const GRAPH_KEYS: readonly (readonly [keys: string, what: string])[] = [
 	["F", "Show only the node's callers and callees"],
 	["X", "Fold a script to one node, or unfold it"],
 	["Shift+X", "Fold the script's folder to one node, or unfold it"],
+	["Shift+F10", "Open the node's menu (script, focus, governing docs)"],
 	["+, −, 0", "Zoom in, zoom out, fit; 0 again shows the whole picture"],
 	["?", "Show or hide this list"],
 	["Pointer", "Point at a node or a line to light it; click a node to focus on it, double-click to open it; drag to move, the wheel zooms. Far out, a click comes in on that script or folder"],
@@ -96,6 +98,18 @@ const BADGE_AT = 30;
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
 const KIND_WORDS: Record<string, string> = { procedure: "procedure", datasource: "data source", unresolved: "a target the language server could not resolve", top: "code outside any procedure", class: "the class itself" };
+
+const [ticketHighlightKey, setTicketHighlightKeySignal] = createSignal<string | null>(null);
+const [ticketHighlightCount, setTicketHighlightCount] = createSignal(0);
+
+/** Currently highlighted ticket key in Call Graph (shared with Palette's Ticket overlay). */
+export const graphTicketHighlight = ticketHighlightKey;
+/** Number of Call Graph scripts matched by the current ticket highlight. */
+export const graphHighlightedCount = ticketHighlightCount;
+/** Sets or clears the Call Graph ticket overlay highlight. */
+export function setGraphTicketHighlight(key: string | null) {
+	setTicketHighlightKeySignal(key?.trim() || null);
+}
 
 export function GraphView() {
 	const [graph, setGraph] = createSignal<(Graph & { truncated: boolean }) | null>(null);
@@ -141,12 +155,31 @@ export function GraphView() {
 	/** Whether the list of the graph's keys or the shape/edge legend popover is showing. */
 	const [keysOpen, setKeysOpen] = createSignal(false);
 	const [legendOpen, setLegendOpen] = createSignal(false);
-	const [ticketHighlightKey, setTicketHighlightKey] = createSignal<string | null>(null);
+	createEffect(
+		on(
+			() => state.workspace?.root,
+			() => setGraphTicketHighlight(null),
+			{ defer: true },
+		),
+	);
+	createEffect(
+		on(
+			() => state.settings.activeTicket?.trim() || "",
+			(next, prev) => {
+				const cur = ticketHighlightKey()?.trim() || "";
+				if (!cur) return;
+				if (prev && cur.toLowerCase() === prev.toLowerCase()) {
+					setGraphTicketHighlight(next || null);
+				}
+			},
+			{ defer: true },
+		),
+	);
 	const highlightedTicketPaths = createMemo(() => {
-		const key = ticketHighlightKey() || state.settings.activeTicket?.trim() || "";
-		if (!key || !ticketHighlightKey()) return new Set<string>();
+		const key = ticketHighlightKey()?.trim() || "";
+		if (!key) return new Set<string>();
 		const allDocs = docs();
-		const refs = scriptsForTicket(allDocs, key);
+		const refs = scriptsForTicket(allDocs, key, { includeDescendants: true });
 		const root = state.workspace?.root;
 		const matched = new Set<string>();
 		for (const s of graph()?.scripts ?? []) {
@@ -154,6 +187,18 @@ export function GraphView() {
 		}
 		return matched;
 	});
+	const highlightedTicketFolders = createMemo(() => {
+		const folders = new Set<string>();
+		for (const path of highlightedTicketPaths()) {
+			const folder = folderOf(path);
+			if (folder) folders.add(folder);
+		}
+		return folders;
+	});
+	createEffect(() => {
+		setTicketHighlightCount(highlightedTicketPaths().size);
+	});
+	onCleanup(() => setTicketHighlightCount(0));
 	const keysId = createUniqueId();
 	const legendId = createUniqueId();
 	const toggleKeys = () => {
@@ -621,6 +666,23 @@ export function GraphView() {
 	const onKey = (e: KeyboardEvent) => {
 		if (e.ctrlKey || e.metaKey || e.altKey) return;
 		const here = procs().find((b) => b.id === cursor());
+		if ((e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) && here && here.kind !== "dir" && here.path && here.path !== UNRESOLVED) {
+			e.preventDefault();
+			const el = nodeEls.get(here.id);
+			const rect = el?.getBoundingClientRect();
+			const at = rect
+				? { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.bottom + 2) }
+				: (() => {
+						const hostRect = svg?.getBoundingClientRect();
+						const v = view();
+						return {
+							x: Math.round((hostRect?.left ?? 0) + (here.x + here.width / 2) * v.scale + v.x),
+							y: Math.round((hostRect?.top ?? 0) + (here.y + here.height) * v.scale + v.y),
+						};
+					})();
+			openGraphNodeMenu(here, at);
+			return;
+		}
 		const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
 		const step = (dx: number, dy: number) => moveTo(here ? nearest(procs(), here, dx, dy) : procs()[0]);
 		const actions: Record<string, () => void> = {
@@ -655,11 +717,13 @@ export function GraphView() {
 		remember(MODE_KEY, next);
 	};
 	const titleOf = (b: Box) => {
-		if (b.kind === "dir") return `${b.label}: folder, ${b.note}, folded`;
-		if (b.kind === "fold") return `${b.label}: ${b.path === UNRESOLVED ? "what the language server could not resolve" : "script"}, ${b.note}, folded${filter().focus === `${b.path}#` ? ", the focus" : ""}`;
+		const litKey = ticketHighlightKey();
+		if (b.kind === "dir") return `${b.label}: folder, ${b.note}, folded${litKey && b.folder && highlightedTicketFolders().has(b.folder) ? `, contains scripts for ${litKey}` : ""}`;
+		const ticketNote = litKey && b.path && highlightedTicketPaths().has(b.path) ? `, governed by ${litKey}` : "";
+		if (b.kind === "fold") return `${b.label}: ${b.path === UNRESOLVED ? "what the language server could not resolve" : "script"}, ${b.note}, folded${filter().focus === `${b.path}#` ? ", the focus" : ""}${ticketNote}`;
 		const kind = KIND_WORDS[b.kind === "top" ? (graph()?.scripts.find((s) => s.path === b.path)?.isClass ? "class" : "top") : (b.nodeKind ?? "procedure")];
 		const where = b.path && b.path !== UNRESOLVED ? `${kind} in ${rel(b.path)}` : kind;
-		return `${b.label}: ${where}${filter().focus === b.id ? ", the focus" : ""}`;
+		return `${b.label}: ${where}${filter().focus === b.id ? ", the focus" : ""}${ticketNote}`;
 	};
 
 	/** The bar's menu: what is not needed at every look. */
@@ -702,28 +766,30 @@ export function GraphView() {
 				: []),
 			{ label: legendOpen() ? "Hide legend" : "Show legend", run: toggleLegend, disabled: !inGraph || !legend().length, why: "The legend is for the graph" },
 			{ label: keysOpen() ? "Hide the keys" : "Keys and what the pointer does", keys: "?", run: toggleKeys, disabled: !inGraph, why: "The keys are the graph's" },
-			...(state.settings.activeTicket?.trim()
-				? ([
-						{
-							label:
-								ticketHighlightKey()?.toLowerCase() === state.settings.activeTicket.trim().toLowerCase()
-									? `Clear ${state.settings.activeTicket.trim()} highlight`
-									: `Highlight ${state.settings.activeTicket.trim()} scripts`,
-							run: () => {
-								const k = state.settings.activeTicket!.trim();
-								setTicketHighlightKey((cur) => (cur?.toLowerCase() === k.toLowerCase() ? null : k));
-							},
-							disabled: !graph(),
-							why: "Build the call graph first",
-						},
-					] satisfies MenuItem[])
-				: []),
+			...(() => {
+				const activeKey = state.settings.activeTicket?.trim() || "";
+				const litKey = ticketHighlightKey()?.trim() || "";
+				const items: MenuItem[] = [];
+				if (litKey) {
+					items.push({
+						label: `Clear ${litKey} highlight`,
+						run: () => setGraphTicketHighlight(null),
+					});
+				}
+				if (activeKey && activeKey.toLowerCase() !== litKey.toLowerCase()) {
+					items.push({
+						label: `Highlight ${activeKey} scripts`,
+						run: () => setGraphTicketHighlight(activeKey),
+						disabled: !graph(),
+						why: "Build the call graph first",
+					});
+				}
+				return items;
+			})(),
 			{
 				label: "Focus script linked to a ticket…",
 				run: () =>
 					void (async () => {
-						const { docs } = await import("../project");
-						const { codeMatchesRef, scriptsForTicket } = await import("../../shared/workContext");
 						const { choose } = await import("../dialogs");
 						const { notify } = await import("../state");
 						const tickets = docs().filter((d) => d.exists && d.group === "tickets" && d.ticket);
@@ -734,7 +800,7 @@ export function GraphView() {
 						const idx = labels.indexOf(picked);
 						const ticket = idx >= 0 ? tickets[idx] : undefined;
 						if (!ticket?.ticket) return;
-						const refs = scriptsForTicket(docs(), ticket.ticket);
+						const refs = scriptsForTicket(docs(), ticket.ticket, { includeDescendants: true });
 						const root = state.workspace?.root;
 						const matches = (graph()?.scripts ?? []).filter((s) => refs.some((r) => codeMatchesRef(s.path, r, root)));
 						if (!matches.length) {
@@ -760,16 +826,15 @@ export function GraphView() {
 		];
 	};
 
-	/** Shared right-click context menu for unfolded script boxes, procedure/folded nodes, and List view scripts. */
+	/** Shared right-click / keyboard context menu for unfolded script boxes, procedure/folded nodes, and List view scripts. */
 	const openGraphNodeMenu = (target: { kind?: string; path?: string; id?: string; label?: string }, at: { x: number; y: number }) => {
 		const boxPath = target.path;
 		if (target.kind === "dir" || target.kind === "folder" || target.kind === "region" || !boxPath || boxPath === "(unresolved)") return;
+		const opener = document.activeElement instanceof SVGElement ? document.activeElement : null;
 		void (async () => {
-			const { docs } = await import("../project");
-			const { docsGoverningFile } = await import("../../shared/workContext");
 			const { registryTitle } = await import("../../shared/projectDocs");
 			const { chooseFromMenu } = await import("../panels/RowMenu");
-			const { openFile, notify } = await import("../state");
+			const { notify } = await import("../state");
 			const links = await backend.linksTo(boxPath).catch(() => []);
 			const gov = docsGoverningFile(docs(), boxPath, state.workspace?.root, links);
 			const isDs = /\.ds$/i.test(boxPath);
@@ -796,12 +861,16 @@ export function GraphView() {
 				[OPEN_ITEM, FOCUS_NODE, ...docChoices.map((d) => d.label)],
 				at,
 			);
-			if (!picked) return;
+			if (!picked) {
+				if (opener?.isConnected) opener.focus();
+				return;
+			}
 			if (picked === OPEN_ITEM) {
 				if (target.id && target.kind && target.kind !== "script" && target.kind !== "fold") open(target as Box);
 				else void openFile(boxPath, { keep: true });
 			} else if (picked === FOCUS_NODE) {
 				focus(!target.id || target.kind === "script" || target.kind === "fold" ? `${boxPath}#` : target.id);
+				if (opener?.isConnected) queueMicrotask(() => nodeEls.get(cursor() ?? "")?.focus());
 			} else {
 				const hit = docChoices.find((d) => d.label === picked);
 				if (hit) await openFile(hit.doc.path, hit.line ? { reveal: { line: hit.line } } : {});
@@ -833,6 +902,7 @@ export function GraphView() {
 			[line((e) => e.relation === "method"), "line", "g-edge method", "Dash and dot: calls a method"],
 			[box((b) => sizeOf(b) === "near"), "box", "g-script near", "Script near its size limit"],
 			[box((b) => sizeOf(b) === "over"), "box", "g-script over", "Script over its size limit"],
+			[Boolean(ticketHighlightKey()), "box", "g-script ticket-lit", `Governed by ${ticketHighlightKey()}`],
 		];
 		return entries.filter(([shown]) => shown).map(([, shape, cls, words]) => ({ shape, cls, words }));
 	});
@@ -902,6 +972,18 @@ export function GraphView() {
 		const g = graph();
 		const keep = shown();
 		return g && keep ? callList(g, keep.edges) : [];
+	});
+	const governingDocsByScript = createMemo(() => {
+		const map = new Map<string, ReturnType<typeof docsGoverningFile>>();
+		const allDocs = docs();
+		if (mode() !== "list" || !allDocs.length) return map;
+		const root = state.workspace?.root;
+		for (const s of graph()?.scripts ?? []) {
+			if (!s.path || s.path === UNRESOLVED) continue;
+			const gov = docsGoverningFile(allDocs, s.path, root);
+			if (gov.length) map.set(s.path, gov);
+		}
+		return map;
 	});
 	/** Around a focus, the list starts with the answer: what calls it, and what it calls. */
 	const around = createMemo(() => {
@@ -1189,7 +1271,10 @@ export function GraphView() {
 												classList={{
 													focus: filter().focus === b.id || (b.kind === "fold" && filter().focus === `${b.path}#`),
 													lit: lit() === b.id,
-													"ticket-lit": Boolean(b.path && highlightedTicketPaths().has(b.path)),
+													"ticket-lit": Boolean(
+														(b.path && highlightedTicketPaths().has(b.path)) ||
+															(b.kind === "dir" && b.folder && highlightedTicketFolders().has(b.folder)),
+													),
 													beside: beside().has(b.id),
 													class: Boolean(b.isClass),
 													[b.kind === "fold" ? level(b.bytes ?? 0, state.settings.limits.bytes) : ""]: b.kind === "fold",
@@ -1331,12 +1416,60 @@ export function GraphView() {
 					<div class="graph-list">
 						<p class="hint">{around() ? "What calls the focus, and what it calls. A name opens the code; Focus moves the focus to that procedure." : "Each script, its callers, and what each calls, creates or inherits. A name opens the code; Focus shows only that procedure's callers and callees."}</p>
 						<Show when={around()}>
-							{(a) => (
-								<div class="graph-around">
-									<h3>
-										{focusName()}
-										<span class="hint">{rel(scriptOf(filter().focus ?? ""))}</span>
-									</h3>
+							{(a) => {
+								const focusPath = () => scriptOf(filter().focus ?? "");
+								const canMenu = () => Boolean(focusPath() && focusPath() !== UNRESOLVED);
+								const govDocs = () => (canMenu() ? governingDocsByScript().get(focusPath()) : undefined);
+								return (
+									<div class="graph-around">
+										<h3
+											class="graph-list-head"
+											tabindex={canMenu() ? 0 : undefined}
+											onKeyDown={(e) => {
+												if (!canMenu()) return;
+												if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
+													e.preventDefault();
+													e.stopPropagation();
+													const rect = e.currentTarget.getBoundingClientRect();
+													openGraphNodeMenu(
+														{ kind: "script", path: focusPath(), label: rel(focusPath()) },
+														{ x: Math.round(rect.left + 16), y: Math.round(rect.bottom + 2) },
+													);
+												}
+											}}
+											onContextMenu={(e) => {
+												if (!canMenu()) return;
+												e.preventDefault();
+												e.stopPropagation();
+												openGraphNodeMenu({ kind: "script", path: focusPath(), label: rel(focusPath()) }, { x: e.clientX, y: e.clientY });
+											}}
+										>
+											{focusName()}
+											<span class="hint">{rel(focusPath())}</span>
+											<Show when={canMenu() && highlightedTicketPaths().has(focusPath()) && ticketHighlightKey()}>
+												<span class="graph-list-ticket-badge">{ticketHighlightKey()}</span>
+											</Show>
+											<Show when={govDocs()}>
+												{(gov) => (
+													<button
+														type="button"
+														class="graph-list-docs"
+														title={`Open governing docs (${gov().length}) or script actions for ${rel(focusPath())}`}
+														aria-label={`Docs (${gov().length}) for ${rel(focusPath())}`}
+														onClick={(e) => {
+															e.stopPropagation();
+															const rect = e.currentTarget.getBoundingClientRect();
+															openGraphNodeMenu(
+																{ kind: "script", path: focusPath(), label: rel(focusPath()) },
+																{ x: Math.round(rect.left), y: Math.round(rect.bottom + 2) },
+															);
+														}}
+													>
+														Docs ({gov().length})
+													</button>
+												)}
+											</Show>
+										</h3>
 									<div class="graph-around-cols">
 										<For each={[["Called by", a().callers, "callees", "Nothing shown here calls it."], ["Calls", a().callees, "callers", "It calls nothing shown here."]] as const}>
 											{([title, links, hiddenBy, none]) => (
@@ -1366,49 +1499,96 @@ export function GraphView() {
 										<h3 class="graph-around-rest">Every call within {filter().depth} steps</h3>
 									</Show>
 								</div>
-							)}
+								);
+							}}
 						</Show>
 						<Show when={list().length} fallback={<p>No calls to show. Choose "Every call" above to see them all.</p>}>
 							<For each={filter().mode === "around" && filter().depth <= 1 ? [] : list()}>
-								{(script) => (
-									<section>
-										<h3
-											onContextMenu={(e) => {
-												if (!script.path || script.path === "(unresolved)") return;
-												e.preventDefault();
-												e.stopPropagation();
-												openGraphNodeMenu({ kind: "script", path: script.path, label: rel(script.path) }, { x: e.clientX, y: e.clientY });
-											}}
-										>
-											{rel(script.path)}
-											<Show when={graph()!.scripts.find((s) => s.path === script.path)}>{(s) => <span class="hint">{sizeNote(s().bytes)}</span>}</Show>
-											<button class="graph-list-focus" title={`Show only the calls into and out of ${rel(script.path)}`} aria-label={`Focus ${rel(script.path)}`} onClick={() => focus(`${script.path}#`)}>
-												Focus
-											</button>
-										</h3>
-										<ul>
-											<For each={script.callers}>
-												{(caller) => (
-													<li>
-														<Proc proc={caller} />
-														<ul>
-															<For each={caller.calls}>
-																{(call) => (
-																	<li>
-																		<span class="hint">{RELATION_WORDS[call.relation]}</span> <Proc proc={call} />
-																		<span class="hint">
-																			{[call.kind === "procedure" || call.kind === "class" ? "" : KIND_WORDS[call.kind], call.crossScript && call.path !== UNRESOLVED ? `in ${rel(call.path)}` : "", call.count > 1 ? `from ${call.count} places` : ""].filter(Boolean).join(", ")}
-																		</span>
-																	</li>
-																)}
-															</For>
-														</ul>
-													</li>
-												)}
-											</For>
-										</ul>
-									</section>
-								)}
+								{(script) => {
+									const isRealScript = Boolean(script.path && script.path !== UNRESOLVED);
+									const govDocs = () => (isRealScript ? governingDocsByScript().get(script.path) : undefined);
+									return (
+										<section classList={{ "ticket-lit": isRealScript && highlightedTicketPaths().has(script.path) }}>
+											<h3
+												class="graph-list-head"
+												tabindex={isRealScript ? 0 : undefined}
+												aria-label={
+													isRealScript
+														? `${rel(script.path)}${highlightedTicketPaths().has(script.path) && ticketHighlightKey() ? `, governed by ${ticketHighlightKey()}` : ""}. Press Shift+F10 for script and document actions.`
+														: undefined
+												}
+												onKeyDown={(e) => {
+													if (!isRealScript) return;
+													if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
+														e.preventDefault();
+														e.stopPropagation();
+														const rect = e.currentTarget.getBoundingClientRect();
+														openGraphNodeMenu(
+															{ kind: "script", path: script.path, label: rel(script.path) },
+															{ x: Math.round(rect.left + 16), y: Math.round(rect.bottom + 2) },
+														);
+													}
+												}}
+												onContextMenu={(e) => {
+													if (!isRealScript) return;
+													e.preventDefault();
+													e.stopPropagation();
+													openGraphNodeMenu({ kind: "script", path: script.path, label: rel(script.path) }, { x: e.clientX, y: e.clientY });
+												}}
+											>
+												{rel(script.path)}
+												<Show when={graph()!.scripts.find((s) => s.path === script.path)}>{(s) => <span class="hint">{sizeNote(s().bytes)}</span>}</Show>
+												<Show when={isRealScript && highlightedTicketPaths().has(script.path) && ticketHighlightKey()}>
+													<span class="graph-list-ticket-badge">{ticketHighlightKey()}</span>
+												</Show>
+												<button type="button" class="graph-list-focus" title={`Show only the calls into and out of ${rel(script.path)}`} aria-label={`Focus ${rel(script.path)}`} onClick={() => focus(`${script.path}#`)}>
+													Focus
+												</button>
+												<Show when={govDocs()}>
+													{(gov) => (
+														<button
+															type="button"
+															class="graph-list-docs"
+															title={`Open governing docs (${gov().length}) or script actions for ${rel(script.path)}`}
+															aria-label={`Docs (${gov().length}) for ${rel(script.path)}`}
+															onClick={(e) => {
+																e.stopPropagation();
+																const rect = e.currentTarget.getBoundingClientRect();
+																openGraphNodeMenu(
+																	{ kind: "script", path: script.path, label: rel(script.path) },
+																	{ x: Math.round(rect.left), y: Math.round(rect.bottom + 2) },
+																);
+															}}
+														>
+															Docs ({gov().length})
+														</button>
+													)}
+												</Show>
+											</h3>
+											<ul>
+												<For each={script.callers}>
+													{(caller) => (
+														<li>
+															<Proc proc={caller} />
+															<ul>
+																<For each={caller.calls}>
+																	{(call) => (
+																		<li>
+																			<span class="hint">{RELATION_WORDS[call.relation]}</span> <Proc proc={call} />
+																			<span class="hint">
+																				{[call.kind === "procedure" || call.kind === "class" ? "" : KIND_WORDS[call.kind], call.crossScript && call.path !== UNRESOLVED ? `in ${rel(call.path)}` : "", call.count > 1 ? `from ${call.count} places` : ""].filter(Boolean).join(", ")}
+																			</span>
+																		</li>
+																	)}
+																</For>
+															</ul>
+														</li>
+													)}
+												</For>
+											</ul>
+										</section>
+									);
+								}}
 							</For>
 						</Show>
 					</div>

@@ -122,10 +122,11 @@ export function nameBeingWritten(lineToCursor: string): string | null {
 	return (lead.match(/`/g)?.length ?? 0) % 2 === 1 ? null : found[1]!;
 }
 
-/** Each link by name in a piece of plain text, in order: where it starts and ends, and what it holds. */
+/** Each link by name in a piece of plain text, in order: where it starts and ends, and what it holds. Skips `![[embeds]]`. */
 export function namedLinksIn(text: string): { from: number; to: number; link: NamedLink }[] {
 	const found: { from: number; to: number; link: NamedLink }[] = [];
 	for (const match of text.matchAll(/\[\[([^[\]\n]+)\]\]/g)) {
+		if (match.index > 0 && text[match.index - 1] === "!") continue;
 		const link = namedLink(match[1]!);
 		if (link) found.push({ from: match.index, to: match.index + match[0].length, link });
 	}
@@ -152,8 +153,8 @@ export function nameChoices(files: readonly DocFile[], path: string, root: strin
 	});
 }
 
-/** A link by name as it stands in a document's text: its line (from 1), the column its name starts at (from 0), and the name as written. */
-export type NamePlace = { line: number; column: number; name: string };
+/** A link by name as it stands in a document's text: its line (from 1), the column its name starts at (from 0), the name as written, and whether it is a `![[embed]]`. */
+export type NamePlace = { line: number; column: number; name: string; embed?: boolean };
 
 /**
  * Where the links by name of a Markdown text stand, in order. What a
@@ -217,7 +218,8 @@ export function namePlaces(text: string): NamePlace[] {
 		for (const match of line.matchAll(/\[\[([^[\]\n]+)\]\]/g)) {
 			if (codeSpans.some(([from, to]) => match.index >= from && match.index < to)) continue;
 			const link = namedLink(match[1]!.replace(/\\\|/g, "|"));
-			if (link) found.push({ line: index + 1, column: match.index + 2 + match[1]!.indexOf(link.name), name: link.name });
+			const embed = match.index > 0 && line[match.index - 1] === "!";
+			if (link) found.push({ line: index + 1, column: match.index + 2 + match[1]!.indexOf(link.name), name: link.name, ...(embed ? { embed: true } : {}) });
 		}
 	}
 	return found;

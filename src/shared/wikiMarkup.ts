@@ -89,6 +89,12 @@ function line(text: string, top: number): string {
 	if (/^(?:-{1,3}|=+)\s*$/.test(text)) return `\\${text}`;
 	const numbered = /^(#+)\s+(.*)$/.exec(text);
 	if (numbered) return `${"   ".repeat(numbered[1]!.length - 1)}1. ${inline(numbered[2]!)}`;
+	const mixed = /^([*#]{2,})\s+(.*)$/.exec(text);
+	if (mixed && mixed[1]!.includes("*") && mixed[1]!.includes("#")) {
+		const last = mixed[1]![mixed[1]!.length - 1];
+		const indent = "  ".repeat(mixed[1]!.length - 1);
+		return last === "#" ? `${indent}1. ${inline(mixed[2]!)}` : `${indent}- ${inline(mixed[2]!)}`;
+	}
 	const bullet = /^(\*+|-{2,})\s+(.*)$/.exec(text);
 	if (bullet) return `${"  ".repeat(bullet[1]!.length - 1)}- ${inline(bullet[2]!)}`;
 	const quoted = /^bq\.\s+(.*)$/.exec(text);
@@ -136,7 +142,7 @@ export function wikiToMarkdown(text: string): string {
 		}
 	};
 	const source = text.replace(/\r\n/g, "\n");
-	const block = /\{(code|noformat)(?::([^}\n]*))?\}([\s\S]*?)\{\1\}/gi;
+	const block = /\{(code|noformat|panel)(?::([^}\n]*))?\}([\s\S]*?)\{\1\}/gi;
 	// The largest heading used outside code, wherever a line of it starts: 6 when there is none, and nothing is a heading.
 	const top = Math.min(6, ...[...source.replace(block, "").matchAll(/(?:^|\{quote\})h([1-6])\.\s/gim)].map((found) => Number(found[1])));
 	block.lastIndex = 0;
@@ -144,9 +150,23 @@ export function wikiToMarkdown(text: string): string {
 	for (let found = block.exec(source); found; found = block.exec(source)) {
 		const before = source.slice(at, found.index).replace(/\n+$/, "");
 		if (before) plain(before);
-		// What is between the marks is code, every line and every blank line of it.
+		const tag = found[1]!.toLowerCase();
 		const body = found[3]!.replace(/^\n+|\n+$/g, "");
-		const says = found[1]!.toLowerCase() === "code" ? codeSays(found[2] ?? "") : { language: "", title: "" };
+		if (tag === "panel") {
+			const says = codeSays(found[2] ?? "");
+			const heading = says.title ? `> [!note] ${says.title}` : "> [!note]";
+			const inner = wikiToMarkdown(body);
+			gap();
+			out.push(
+				heading,
+				...inner.split("\n").map((l) => (l ? `> ${l}` : ">")),
+				"",
+			);
+			at = found.index + found[0].length;
+			continue;
+		}
+		// What is between the marks is code, every line and every blank line of it.
+		const says = tag === "code" ? codeSays(found[2] ?? "") : { language: "", title: "" };
 		const fence = ticks(body, 3);
 		gap();
 		// A block's title is words of the ticket's: kept, above the block.

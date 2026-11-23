@@ -1,8 +1,9 @@
 // The BackendApi (src/shared/protocol.ts), whichever host carries it.
-import { systemPrefersDark } from "./system";
-import { basename } from "node:path";
-import { statSync } from "node:fs";
+import { openInSystemApp, revealPathInFileManager, systemPrefersDark } from "./system";
+import { basename, dirname } from "node:path";
+import { mkdirSync, statSync } from "node:fs";
 import type { BackendApi, BackendEvents, Info, LspState, Workspace } from "../shared/protocol";
+import { markdownToDocx } from "./docx";
 import { History } from "./history";
 import { LspProcess } from "./lsp";
 import { catalogFilesOf, docAudit, EXPORT_TYPES, fileManifest, linksTo, listDocs, namesIn, readExport, readProject, setupProject, tomlProblem, undoSetup } from "./project";
@@ -122,6 +123,7 @@ export function createBackend(host: Host, initial?: string) {
 		gitStatus: async () => (files ? git().status() : null),
 		gitBase: (path, from) => git().base(need().inside(path), from),
 		gitLog: (path, limit) => (files ? git().log(need().inside(path), limit) : Promise.resolve([])),
+		gitTicketLog: (ticketKey, limit) => (files ? git().ticketLog(ticketKey, limit) : Promise.resolve([])),
 		gitShow: (path, sha, repoPath) => (files ? git().show(need().inside(path), sha, repoPath) : Promise.resolve(null)),
 		gitStage: (paths) => git().stage(paths.map((path) => need().inside(path))),
 		gitUnstage: (paths) => git().unstage(paths.map((path) => need().inside(path))),
@@ -186,8 +188,29 @@ export function createBackend(host: Host, initial?: string) {
 			unsaved = 0;
 			setTimeout(() => host.quit(), 50);
 		},
-		docs: async () => listDocs(need(), await readProject(need().root)),
-		docAudit: async (attachmentsFolder) => docAudit(need(), await readProject(need().root), attachmentsFolder),
+		docs: async (options) => {
+			const effective = options?.templatesFolder !== undefined ? options.templatesFolder : (await settings.load()).effective.templatesFolder;
+			return listDocs(need(), await readProject(need().root), { templatesFolder: effective });
+		},
+		docAudit: async (attachmentsFolder, options) => {
+			const effective = options?.templatesFolder !== undefined ? options.templatesFolder : (await settings.load()).effective.templatesFolder;
+			return docAudit(need(), await readProject(need().root), attachmentsFolder, { ...options, templatesFolder: effective });
+		},
+		openExternal: async (path) => {
+			const full = need().inside(path);
+			await openInSystemApp(full);
+		},
+		revealInFileManager: async (path) => {
+			const full = need().inside(path);
+			await revealPathInFileManager(full);
+		},
+		exportDocx: async (request) => {
+			const full = need().inside(request.path);
+			mkdirSync(dirname(full), { recursive: true });
+			const bytes = markdownToDocx({ title: request.title, subtitle: request.subtitle, markdown: request.markdown });
+			await Bun.write(full, bytes);
+			return { path: full, bytes: bytes.length };
+		},
 		manifest: async () => fileManifest(need(), await readProject(need().root)),
 		catalogFiles: async (area) => catalogFilesOf(need(), await readProject(need().root), area),
 		tomlProblem: async (text) => tomlProblem(text),

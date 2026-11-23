@@ -115,8 +115,12 @@ export function markdownToJira(markdown: string): string {
 			masked += s[ci++];
 		}
 		s = masked;
-		// Wiki image embeds ![[diagram.png|400]] -> !diagram.png!
-		s = s.replace(/!\[\[([^[\]|#]+)(?:[^[\]]*)\]\]/g, (_, target: string) => `!${target.trim()}!`);
+		// Wiki embeds: only image extensions become Jira `!file.png!`; note/heading embeds become readable labels.
+		s = s.replace(/!\[\[([^[\]|#]+)(#[^[\]|]+)?(?:\|([^[\]]+))?\]\]/g, (_, target: string, hash?: string, alias?: string) => {
+			const cleanTarget = target.trim();
+			if (/\.(?:png|jpe?g|gif|webp|svg|bmp|ico|avif)$/i.test(cleanTarget)) return `!${cleanTarget}!`;
+			return (alias?.trim() || `${cleanTarget}${hash ? ` › ${hash.slice(1).trim()}` : ""}`);
+		});
 		// Wikilinks [[Target|Alias]] or [[Target]]
 		s = s.replace(/\[\[([^[\]|]+)(?:\|([^[\]]+))?\]\]/g, (_, target: string, alias?: string) => (alias ? alias.trim() : target.trim()));
 		// Markdown images ![alt](url) -> !url!
@@ -155,7 +159,16 @@ export function markdownToJira(markdown: string): string {
 			const delim = fence[1]![0]!;
 			const len = fence[1]!.length;
 			const lang = fence[2]!.toLowerCase();
-			const jiraLang = lang === "ssl" ? "none" : lang === "tsql" || lang === "plsql" ? "sql" : lang;
+			const jiraLang =
+				lang === "ssl" || lang === "srvscr" || lang === "ds"
+					? "none"
+					: lang === "tsql" || lang === "plsql"
+						? "sql"
+						: lang === "xfd"
+							? "xml"
+							: lang === "jsonc"
+								? "json"
+								: lang;
 			i++;
 			const codeLines: string[] = [];
 			while (i < lines.length) {
@@ -173,39 +186,47 @@ export function markdownToJira(markdown: string): string {
 			continue;
 		}
 
-		// Skip standalone HTML comment lines (e.g. <!-- toc --> / <!-- /catalog -->).
-		if (/^[ \t]*<!--[\s\S]*?-->[ \t]*$/.test(line)) {
+		// Skip single-line AND multi-line HTML comments (e.g. <!-- toc --> / <!-- /catalog --> / multi-line notes).
+		if (/^[ \t]*<!--/.test(line)) {
+			if (/-->[ \t]*$/.test(line)) {
+				i++;
+				continue;
+			}
 			i++;
+			while (i < lines.length && !/-->/.test(lines[i]!)) i++;
+			if (i < lines.length) i++;
 			continue;
 		}
 
-		// Obsidian / GitHub callout block -> {panel:title=...}...{panel}
+		// Obsidian / GitHub callout block -> {panel:title=...}...{panel} (recursively converts nested lists, checklists, code blocks).
 		const callout = /^[ \t]{0,3}>[ \t]*\[!([A-Za-z0-9_-]+)\][+-]?[ \t]*(.*)$/.exec(line);
 		if (callout) {
 			listStack.length = 0;
 			const kind = callout[1]!.toUpperCase();
 			const title = callout[2]!.trim() || kind;
 			i++;
-			const bodyLines: string[] = [];
+			const rawBody: string[] = [];
 			while (i < lines.length && /^[ \t]{0,3}>/.test(lines[i]!)) {
-				bodyLines.push(inline(lines[i]!.replace(/^[ \t]{0,3}>[ \t]?/, "")));
+				rawBody.push(lines[i]!.replace(/^[ \t]{0,3}>[ \t]?/, ""));
 				i++;
 			}
+			const converted = rawBody.length ? markdownToJira(rawBody.join("\n")).trimEnd() : "";
 			out.push(`{panel:title=${title}}`);
-			out.push(...bodyLines);
+			if (converted) out.push(converted);
 			out.push("{panel}");
 			continue;
 		}
 
-		// Standard blockquote
+		// Standard blockquote (recursively converts nested lists/code)
 		if (/^[ \t]{0,3}>[ \t]?/.test(line)) {
 			listStack.length = 0;
-			const bodyLines: string[] = [];
+			const rawBody: string[] = [];
 			while (i < lines.length && /^[ \t]{0,3}>/.test(lines[i]!)) {
-				bodyLines.push(inline(lines[i]!.replace(/^[ \t]{0,3}>[ \t]?/, "")));
+				rawBody.push(lines[i]!.replace(/^[ \t]{0,3}>[ \t]?/, ""));
 				i++;
 			}
-			out.push("{quote}", ...bodyLines, "{quote}");
+			const converted = rawBody.length ? markdownToJira(rawBody.join("\n")).trimEnd() : "";
+			out.push("{quote}", ...(converted ? [converted] : []), "{quote}");
 			continue;
 		}
 
@@ -318,11 +339,16 @@ export function buildPrintableHtml(title: string, bodyHtml: string, subtitle?: s
   .md-callout { margin: 0 0 1em; padding: 10px 14px; border-radius: 6px; border: 1px solid #cbd5e1; border-left: 4px solid #2563eb; background: #eff6ff; break-inside: avoid; page-break-inside: avoid; }
   .md-callout.tone-warning, .md-callout.tone-warn, .md-callout-warning, .md-callout-caution { border-left-color: #d97706; background: #fffbeb; }
   .md-callout.tone-danger, .md-callout.tone-error, .md-callout-danger, .md-callout-failure, .md-callout-bug { border-left-color: #dc2626; background: #fef2f2; }
-  .md-callout.tone-tip, .md-callout.tone-success, .md-callout.tone-done, .md-callout-tip, .md-callout-success, .md-callout-check { border-left-color: #16a34a; background: #f0fdf4; }
+  .md-callout.tone-tip, .md-callout.tone-ok, .md-callout.tone-success, .md-callout.tone-done, .md-callout-tip, .md-callout-success, .md-callout-check { border-left-color: #16a34a; background: #f0fdf4; }
+  .md-callout.tone-accent, .md-callout.tone-important { border-left-color: #7c3aed; background: #f5f3ff; }
   .md-callout.tone-quote, .md-callout.tone-muted, .md-callout-quote { border-left-color: #64748b; background: #f8fafc; }
   .md-callout-head, .md-callout-title { display: flex; align-items: center; gap: 6px; font-weight: 600; margin-bottom: 4px; color: #0f172a; }
   .md-callout-icon { font-style: normal; font-weight: 700; }
   .md-callout > :last-child { margin-bottom: 0; }
+  .md-footnotes { margin-top: 28px; padding-top: 12px; border-top: 1px solid #e4e4e7; font-size: 0.88em; color: #3f3f46; }
+  .md-footnotes ol { padding-left: 1.4em; margin: 0; }
+  .md-footnotes li { margin-bottom: 4px; }
+  sup.md-fn-ref a { text-decoration: none; font-weight: 600; }
   mark, .md-highlight { background: #fef08a; color: #18181b; padding: 0.05em 0.25em; border-radius: 3px; }
   .md-tag { display: inline-block; padding: 1px 6px; border-radius: 999px; font-size: 0.84em; background: #f4f4f5; color: #3f3f46; border: 1px solid #e4e4e7; }
   .md-mermaid-export { text-align: center; padding: 12px; border: 1px solid #e4e4e7; border-radius: 6px; background: #ffffff; break-inside: avoid; page-break-inside: avoid; }
@@ -375,7 +401,6 @@ export function evaluateTicketReadiness(
 ): ReadinessReport | null {
 	const work = workFor(files, key);
 	if (!work) return null;
-	const groups = ticketWork(files, key);
 	const checks: ReadinessCheck[] = [];
 	const ticket = work.ticket;
 
@@ -405,26 +430,54 @@ export function evaluateTicketReadiness(
 		});
 	}
 
-	// 2b. Unresolved blockers (`blocked-by`)
+	// 2b. Unresolved blockers (`blocked-by`) — including external/unimported blocker keys.
 	if (ticket.blockedBy?.length) {
 		const byTicketKey = new Map(files.filter((f) => f.exists && f.group === "tickets" && f.ticket).map((f) => [f.ticket!.toLowerCase(), f]));
-		const unresolved = ticket.blockedBy
-			.map((bk) => byTicketKey.get(bk.toLowerCase()))
-			.filter((b): b is DocFile => Boolean(b) && toneOf(b!.status) !== "done" && toneOf(b!.status) !== "off");
-		if (unresolved.length) {
+		const unresolvedLabels: string[] = [];
+		let firstPath: string | undefined;
+		for (const bk of ticket.blockedBy) {
+			const b = byTicketKey.get(bk.toLowerCase());
+			if (!b) {
+				unresolvedLabels.push(`${bk} (not in workspace)`);
+				if (!firstPath) firstPath = ticket.path;
+			} else if (toneOf(b.status) !== "done" && toneOf(b.status) !== "off") {
+				unresolvedLabels.push(`${b.ticket} (${b.status || "open"})`);
+				if (!firstPath) firstPath = b.path;
+			}
+		}
+		if (unresolvedLabels.length) {
 			checks.push({
 				label: "Blockers",
 				ok: false,
 				level: "warn",
-				detail: `Blocked by ${unresolved.map((u) => `${u.ticket} (${u.status || "open"})`).join(", ")}`,
-				path: unresolved[0]!.path,
+				detail: `Blocked by ${unresolvedLabels.join(", ")}`,
+				path: firstPath,
 			});
 		}
 	}
 
-	// 3. Linked specs status
-	if (work.specs.length) {
-		const open = work.specs.filter((s) => {
+	// Collect scope across the ticket itself AND any active sub-tickets (for Epics).
+	const scopeKeys = [key, ...activeSubtickets.map((s) => s.ticket).filter((k): k is string => Boolean(k))];
+	const scopeKeySet = new Set(scopeKeys.map((k) => k.toLowerCase()));
+	const scopeWorks = scopeKeys.map((k) => workFor(files, k)).filter((w): w is NonNullable<typeof w> => Boolean(w));
+	const scopeGroups = scopeKeys.flatMap((k) => ticketWork(files, k));
+	const dedupeDocs = (list: DocFile[]) => {
+		const seen = new Set<string>();
+		const out: DocFile[] = [];
+		for (const d of list) {
+			const k = d.path.toLowerCase();
+			if (!seen.has(k)) {
+				seen.add(k);
+				out.push(d);
+			}
+		}
+		return out;
+	};
+
+	// 3. Linked specs status (including sub-ticket specs)
+	const allSpecs = dedupeDocs(scopeWorks.flatMap((w) => w.specs));
+	if (allSpecs.length) {
+		const open = allSpecs.filter((s) => {
 			const t = toneOf(s.status);
 			return t === "active" || t === "waiting";
 		});
@@ -432,13 +485,13 @@ export function evaluateTicketReadiness(
 			label: "Specifications",
 			ok: open.length === 0,
 			level: open.length === 0 ? "pass" : "warn",
-			detail: open.length === 0 ? `${work.specs.length} approved / settled` : `${open.length} still ${open[0]!.status} (${open[0]!.title || open[0]!.name})`,
-			path: open[0]?.path ?? work.specs[0]!.path,
+			detail: open.length === 0 ? `${allSpecs.length} approved / settled` : `${open.length} still ${open[0]!.status} (${open[0]!.title || open[0]!.name})`,
+			path: open[0]?.path ?? allSpecs[0]!.path,
 		});
 	}
 
-	// 4. Open questions
-	const openQuestions = groups.find((g) => g.kind === "question")?.files ?? [];
+	// 4. Open questions (across ticket & sub-tickets)
+	const openQuestions = dedupeDocs(scopeGroups.filter((g) => g.kind === "question").flatMap((g) => g.files));
 	checks.push({
 		label: "Open questions",
 		ok: openQuestions.length === 0,
@@ -447,22 +500,34 @@ export function evaluateTicketReadiness(
 		path: openQuestions[0]?.path,
 	});
 
-	// 5. Linked CSV registries (settings, database, interfaces, etc.)
-	const registries = groups.find((g) => g.kind === "registry")?.files ?? [];
+	// 5. Linked CSV registries (settings, database, interfaces, etc., rolled up across sub-tickets)
+	const registries = dedupeDocs(scopeGroups.filter((g) => g.kind === "registry").flatMap((g) => g.files));
 	if (registries.length) {
 		let totalRows = 0;
 		let trackedRows = 0;
 		let doneRows = 0;
 		let firstPending: DocFile | undefined;
+		let brokenReg: DocFile | undefined;
 		for (const reg of registries) {
-			const entry = reg.forTickets?.find((r) => r.key.toLowerCase() === key.toLowerCase());
-			if (!entry) continue;
-			totalRows += entry.rows;
-			if (entry.done !== undefined) {
-				trackedRows += entry.rows;
-				doneRows += entry.done;
-				if (entry.done < entry.rows && !firstPending) firstPending = reg;
+			if (reg.problems?.length && !brokenReg) brokenReg = reg;
+			for (const entry of reg.forTickets ?? []) {
+				if (!scopeKeySet.has(entry.key.toLowerCase())) continue;
+				totalRows += entry.rows;
+				if (entry.done !== undefined) {
+					trackedRows += entry.rows;
+					doneRows += entry.done;
+					if (entry.done < entry.rows && !firstPending) firstPending = reg;
+				}
 			}
+		}
+		if (brokenReg) {
+			checks.push({
+				label: "Registry syntax",
+				ok: false,
+				level: "warn",
+				detail: `${registryTitle(brokenReg.name)} has CSV errors: ${brokenReg.problems![0]}`,
+				path: brokenReg.path,
+			});
 		}
 		if (totalRows > 0) {
 			if (trackedRows === 0) {
@@ -486,26 +551,32 @@ export function evaluateTicketReadiness(
 		}
 	}
 
-	// 6. Broken links / missing refs across ticket + linked docs
-	const scopeDocs = [ticket, ...groups.flatMap((g) => (g.kind === "registry" ? [] : g.files))].filter((d) => !isCatalog(d));
-	const withBroken = scopeDocs.find((d) => (d.broken?.length ?? 0) > 0 || (d.missing?.length ?? 0) > 0);
+	// 6. Broken links / missing refs / missingSource across ticket, sub-tickets & linked docs
+	const scopeDocs = dedupeDocs([ticket, ...activeSubtickets, ...scopeGroups.flatMap((g) => (g.kind === "registry" ? [] : g.files))]).filter((d) => !isCatalog(d));
+	const withBroken = scopeDocs.find((d) => (d.broken?.length ?? 0) > 0 || (d.missing?.length ?? 0) > 0 || Boolean(d.missingSource));
 	checks.push({
 		label: "Document links",
 		ok: !withBroken,
 		level: !withBroken ? "pass" : "warn",
-		detail: !withBroken ? "No broken links or missing refs" : `Broken link or missing ref in ${withBroken.ticket ?? withBroken.title ?? withBroken.name}`,
+		detail: !withBroken
+			? "No broken links or missing refs"
+			: withBroken.missingSource
+				? `Missing source file (${withBroken.missingSource}) in ${withBroken.ticket ?? withBroken.title ?? withBroken.name}`
+				: `Broken link or missing ref in ${withBroken.ticket ?? withBroken.title ?? withBroken.name}`,
 		path: withBroken?.path,
 	});
 
-	// 7. Uncommitted Git changes touching this ticket's scripts/docs (advisory note)
+	// 7. Uncommitted Git changes touching this ticket's (or sub-tickets') scripts/docs (advisory note)
 	if (options?.gitFiles) {
-		const scriptRefs = scriptsForTicket(files, key);
+		const scriptRefs = [...new Set(scopeKeys.flatMap((k) => scriptsForTicket(files, k)))];
 		const scopePaths = new Set(scopeDocs.map((d) => d.path.replace(/\\/g, "/").toLowerCase()));
-		const bundlePrefix = ticket.ticketFolder ? `${ticket.ticketFolder.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase()}/` : "";
+		const bundlePrefixes = [ticket, ...activeSubtickets]
+			.map((t) => (t.ticketFolder ? `${t.ticketFolder.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase()}/` : ""))
+			.filter(Boolean);
 		const dirty = options.gitFiles.filter((gf) => {
 			const norm = gf.path.replace(/\\/g, "/").toLowerCase();
 			if (scopePaths.has(norm)) return true;
-			if (bundlePrefix && norm.startsWith(bundlePrefix)) return true;
+			if (bundlePrefixes.some((bp) => norm.startsWith(bp))) return true;
 			return scriptRefs.some((ref) => codeMatchesRef(gf.path, ref, options.root));
 		});
 		checks.push({
@@ -550,9 +621,169 @@ export type TicketPacketInput = {
 	readiness?: ReadinessReport | null;
 };
 
+/** Demotes ATX headings inside an embedded Markdown body so its highest heading starts at `minLevel` (respecting fenced code blocks). */
+export function demoteMarkdownHeadings(markdown: string, minLevel: number): string {
+	const lines = markdown.replace(/\r\n/g, "\n").split("\n");
+	let fenceChar = "";
+	let fenceLen = 0;
+	let shallowest = 7;
+	for (const line of lines) {
+		const f = /^[ \t]{0,3}(`{3,}|~{3,})/.exec(line);
+		if (f) {
+			if (!fenceChar) {
+				fenceChar = f[1]![0]!;
+				fenceLen = f[1]!.length;
+			} else if (f[1]![0] === fenceChar && f[1]!.length >= fenceLen && /^[ \t]*$/.test(line.slice(f[0].length))) {
+				fenceChar = "";
+				fenceLen = 0;
+			}
+			continue;
+		}
+		if (fenceChar) continue;
+		const h = /^[ \t]{0,3}(#{1,6})[ \t]+/.exec(line);
+		if (h && h[1]!.length < shallowest) shallowest = h[1]!.length;
+	}
+	if (shallowest >= minLevel || shallowest > 6) return markdown;
+	const shift = minLevel - shallowest;
+	fenceChar = "";
+	fenceLen = 0;
+	return lines
+		.map((line) => {
+			const f = /^[ \t]{0,3}(`{3,}|~{3,})/.exec(line);
+			if (f) {
+				if (!fenceChar) {
+					fenceChar = f[1]![0]!;
+					fenceLen = f[1]!.length;
+				} else if (f[1]![0] === fenceChar && f[1]!.length >= fenceLen && /^[ \t]*$/.test(line.slice(f[0].length))) {
+					fenceChar = "";
+					fenceLen = 0;
+				}
+				return line;
+			}
+			if (fenceChar) return line;
+			return line.replace(/^([ \t]{0,3})(#{1,6})([ \t]+)/, (_, indent: string, hashes: string, sp: string) => `${indent}${"#".repeat(Math.min(6, hashes.length + shift))}${sp}`);
+		})
+		.join("\n");
+}
+
+/**
+ * Converts GFM footnotes (`[^id]` references and `[^id]: definition` blocks outside fenced code)
+ * into clean superscript links + a bottom `<section class="md-footnotes">` block for HTML/PDF exports,
+ * or strips/inlines them cleanly for Jira markup.
+ */
+export function transformMarkdownFootnotes(markdown: string, target: "html" | "jira"): string {
+	const lines = markdown.replace(/\r\n/g, "\n").split("\n");
+	const defs = new Map<string, string>();
+	const kept: string[] = [];
+	let fenceChar = "";
+	let fenceLen = 0;
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i]!;
+		const f = /^[ \t]{0,3}(`{3,}|~{3,})/.exec(line);
+		if (f) {
+			if (!fenceChar) {
+				fenceChar = f[1]![0]!;
+				fenceLen = f[1]!.length;
+			} else if (f[1]![0] === fenceChar && f[1]!.length >= fenceLen && /^[ \t]*$/.test(line.slice(f[0].length))) {
+				fenceChar = "";
+				fenceLen = 0;
+			}
+			kept.push(line);
+			continue;
+		}
+		if (fenceChar) {
+			kept.push(line);
+			continue;
+		}
+		const dm = /^\[\^([^\]\s]+)\]:[ \t]*(.*)$/.exec(line);
+		if (dm) {
+			const id = dm[1]!;
+			const parts = [dm[2]!.trim()];
+			while (i + 1 < lines.length && /^(?: {2,}|\t)\S/.test(lines[i + 1]!)) {
+				parts.push(lines[++i]!.trim());
+			}
+			defs.set(id, parts.filter(Boolean).join(" "));
+			continue;
+		}
+		kept.push(line);
+	}
+	if (!defs.size) return markdown;
+
+	const order: string[] = [];
+	const numOf = (id: string) => {
+		let idx = order.indexOf(id);
+		if (idx < 0) {
+			order.push(id);
+			idx = order.length - 1;
+		}
+		return idx + 1;
+	};
+	fenceChar = "";
+	fenceLen = 0;
+	const replaced = kept.map((line) => {
+		const f = /^[ \t]{0,3}(`{3,}|~{3,})/.exec(line);
+		if (f) {
+			if (!fenceChar) {
+				fenceChar = f[1]![0]!;
+				fenceLen = f[1]!.length;
+			} else if (f[1]![0] === fenceChar && f[1]!.length >= fenceLen && /^[ \t]*$/.test(line.slice(f[0].length))) {
+				fenceChar = "";
+				fenceLen = 0;
+			}
+			return line;
+		}
+		if (fenceChar) return line;
+		return line.replace(/\[\^([^\]\s]+)\]/g, (full, id: string) => {
+			if (!defs.has(id)) return full;
+			const n = numOf(id);
+			if (target === "jira") return `^[${n}]^`;
+			return `<sup class="md-fn-ref"><a href="#fn-${encodeURIComponent(id)}" id="fnref-${encodeURIComponent(id)}">${n}</a></sup>`;
+		});
+	});
+	// Also append any defined-but-unreferenced footnotes so nothing is dropped.
+	for (const id of defs.keys()) numOf(id);
+
+	if (target === "jira") {
+		const footLines = order.map((id, idx) => `${idx + 1}. ${defs.get(id) ?? ""}`);
+		return `${replaced.join("\n").trimEnd()}\n\n----\n\n${footLines.join("\n")}\n`;
+	}
+	const items = order
+		.map((id) => `<li id="fn-${escapeHtml(id)}">${escapeHtml(defs.get(id) ?? "")} <a href="#fnref-${escapeHtml(id)}" aria-label="Back to content">↩</a></li>`)
+		.join("");
+	return `${replaced.join("\n").trimEnd()}\n\n<section class="md-footnotes"><ol>${items}</ol></section>\n`;
+}
+
+/**
+ * Adds minimal inline styles to tables, code blocks, and callouts in HTML fragments
+ * copied to the clipboard (`html-copy`) so Word, Outlook, Teams, and Confluence Cloud
+ * preserve borders, shading, and callout accents without a `<style>` tag.
+ */
+export function inlineExportStyles(html: string): string {
+	return html
+		.replace(/<table(?=[ >])/g, '<table style="border-collapse:collapse;width:100%;margin:0 0 12px;font-size:13.5px;"')
+		.replace(/<th(?=[ >])/g, '<th style="border:1px solid #d4d4d8;background:#f4f4f5;padding:6px 10px;text-align:left;font-weight:600;"')
+		.replace(/<td(?=[ >])/g, '<td style="border:1px solid #d4d4d8;padding:6px 10px;text-align:left;vertical-align:top;"')
+		.replace(/<pre(?=[ >])/g, '<pre style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:10px 12px;font-family:Consolas,Menlo,monospace;font-size:12.5px;overflow-x:auto;"')
+		.replace(/<blockquote(?=[ >])/g, '<blockquote style="margin:0 0 12px;padding:8px 14px;border-left:3px solid #94a3b8;background:#f8fafc;color:#334155;"')
+		.replace(/<div class="([^"]*md-callout[^"]*)"/g, (_, cls: string) => {
+			let border = "#2563eb";
+			let bg = "#eff6ff";
+			if (/tone-warn|tone-warning/.test(cls)) (border = "#d97706"), (bg = "#fffbeb");
+			else if (/tone-danger|tone-error/.test(cls)) (border = "#dc2626"), (bg = "#fef2f2");
+			else if (/tone-ok|tone-tip|tone-success|tone-done/.test(cls)) (border = "#16a34a"), (bg = "#f0fdf4");
+			else if (/tone-accent|tone-important/.test(cls)) (border = "#7c3aed"), (bg = "#f5f3ff");
+			else if (/tone-quote|tone-muted/.test(cls)) (border = "#64748b"), (bg = "#f8fafc");
+			return `<div class="${cls}" style="margin:0 0 12px;padding:10px 14px;border:1px solid #cbd5e1;border-left:4px solid ${border};border-radius:6px;background:${bg};"`;
+		});
+}
+
 /** Assembles a complete stakeholder release packet Markdown dossier for a ticket. */
 export function assembleTicketPacketMarkdown(input: TicketPacketInput): string {
 	const escCell = (v: string) => v.replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+	const embedBody = (raw: string, minLevel: number) => {
+		const cleaned = frontMatter(raw).body.replace(/^\s*#\s+.*\r?\n/, "").trim();
+		return cleaned ? demoteMarkdownHeadings(cleaned, minLevel) : "";
+	};
 	const parts: string[] = [
 		`# ${input.ticketKey}: ${input.ticketTitle}`,
 		"",
@@ -582,7 +813,7 @@ export function assembleTicketPacketMarkdown(input: TicketPacketInput): string {
 		parts.push("");
 	}
 
-	const cleanBody = frontMatter(input.ticketBody).body.replace(/^\s*#\s+.*\r?\n/, "").trim();
+	const cleanBody = embedBody(input.ticketBody, 3);
 	if (cleanBody) {
 		parts.push("## Summary & Requirements", "", cleanBody, "");
 	}
@@ -607,7 +838,7 @@ export function assembleTicketPacketMarkdown(input: TicketPacketInput): string {
 		parts.push("## Specifications", "");
 		for (const spec of input.specs) {
 			parts.push(`### ${spec.title}${spec.status ? ` (${spec.status})` : ""}`, "");
-			const b = frontMatter(spec.body).body.replace(/^\s*#\s+.*\r?\n/, "").trim();
+			const b = embedBody(spec.body, 4);
 			if (b) parts.push(b, "");
 		}
 	}
@@ -625,7 +856,7 @@ export function assembleTicketPacketMarkdown(input: TicketPacketInput): string {
 		parts.push("## Decisions", "");
 		for (const d of input.decisions) {
 			parts.push(`### ${d.title}${d.status ? ` (${d.status})` : ""}`, "");
-			const b = frontMatter(d.body).body.replace(/^\s*#\s+.*\r?\n/, "").trim();
+			const b = embedBody(d.body, 4);
 			if (b) parts.push(b, "");
 		}
 	}
@@ -634,7 +865,7 @@ export function assembleTicketPacketMarkdown(input: TicketPacketInput): string {
 		parts.push("## Questions & Answers", "");
 		for (const q of input.questions) {
 			parts.push(`### ${q.title}${q.status ? ` (${q.status})` : ""}`, "");
-			const b = frontMatter(q.body).body.replace(/^\s*#\s+.*\r?\n/, "").trim();
+			const b = embedBody(q.body, 4);
 			if (b) parts.push(b, "");
 		}
 	}
@@ -643,7 +874,7 @@ export function assembleTicketPacketMarkdown(input: TicketPacketInput): string {
 		parts.push("## Reference Notes", "");
 		for (const ref of input.references) {
 			parts.push(`### ${ref.title}${ref.status ? ` (${ref.status})` : ""}`, "");
-			const b = frontMatter(ref.body).body.replace(/^\s*#\s+.*\r?\n/, "").trim();
+			const b = embedBody(ref.body, 4);
 			if (b) parts.push(b, "");
 		}
 	}
@@ -652,7 +883,7 @@ export function assembleTicketPacketMarkdown(input: TicketPacketInput): string {
 		parts.push("## Schema & Data Contracts", "");
 		for (const sc of input.schemas) {
 			parts.push(`### ${sc.title}${sc.status ? ` (${sc.status})` : ""}`, "");
-			const b = frontMatter(sc.body).body.replace(/^\s*#\s+.*\r?\n/, "").trim();
+			const b = embedBody(sc.body, 4);
 			if (b) parts.push(b, "");
 		}
 	}

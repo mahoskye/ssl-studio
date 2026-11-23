@@ -233,8 +233,9 @@
 
 .cm-md-props-head {
 	display: flex;
+	flex-wrap: wrap;
 	align-items: center;
-	gap: var(--space-2);
+	gap: var(--space-1) var(--space-2);
 	padding: var(--space-2) var(--space-4);
 }
 
@@ -2138,6 +2139,7 @@
 }
 
 .cm-md-prop-rm,
+.cm-md-prop-edit,
 .cm-md-prop-add {
 	display: inline-flex;
 	align-items: center;
@@ -2154,7 +2156,9 @@
 }
 
 .cm-md-prop-chip:hover .cm-md-prop-rm,
+.cm-md-prop-chip:hover .cm-md-prop-edit,
 .cm-md-prop-rm:focus-visible,
+.cm-md-prop-edit:focus-visible,
 .cm-md-prop-add:hover,
 .cm-md-prop-add:focus-visible {
 	opacity: 1;
@@ -2163,8 +2167,140 @@
 }
 
 .cm-md-prop-rm .codicon,
-.cm-md-prop-add .codicon {
+.cm-md-prop-edit .codicon,
+.cm-md-prop-add .codicon,
+.cm-md-prop-rm .codicon-glyph,
+.cm-md-prop-edit .codicon-glyph,
+.cm-md-prop-add .codicon-glyph {
 	font-size: 11px;
+}
+
+.cm-md-prop-tag {
+	border: none;
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+	font-weight: 500;
+	color: var(--editor-accent, var(--accent));
+	background: color-mix(in srgb, var(--editor-accent, var(--accent)) 13%, transparent);
+	border-radius: 999px;
+	padding: 1px 7px;
+	cursor: pointer;
+	line-height: 1.45;
+}
+
+.cm-md-prop-tag:hover,
+.cm-md-prop-tag:focus-visible {
+	background: color-mix(in srgb, var(--editor-accent, var(--accent)) 22%, transparent);
+}
+
+/* Collapsible <details>/<summary> blocks in Live & Read modes (Wave 3.7) */
+.cm-md-details-card {
+	margin: var(--space-3) 0;
+	border: 1px solid var(--editor-border, var(--border));
+	border-radius: var(--radius-md);
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 2.5%, var(--editor-bg, var(--bg)));
+	overflow: hidden;
+}
+
+.cm-md-details-summary {
+	display: flex;
+	align-items: center;
+	gap: var(--space-2);
+	padding: 7px var(--space-4);
+	cursor: pointer;
+	user-select: none;
+	font-family: var(--ui-font);
+	font-weight: 600;
+	font-size: var(--text-md);
+	color: var(--editor-strong, var(--strong-fg));
+	list-style: none;
+}
+
+.cm-md-details-summary::-webkit-details-marker {
+	display: none;
+}
+
+.cm-md-details-summary::before {
+	content: "\eab6";
+	font-family: codicon;
+	font-size: 14px;
+	line-height: 1;
+	color: var(--editor-muted, var(--muted));
+	transition: transform 120ms ease;
+	flex: none;
+}
+
+.cm-md-details[open] > .cm-md-details-summary::before {
+	transform: rotate(90deg);
+}
+
+.cm-md-details-summary:hover {
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 4%, transparent);
+}
+
+.cm-md-details-title {
+	flex: 1;
+	min-width: 0;
+}
+
+.cm-md-details-edit {
+	opacity: 0;
+	transition: opacity 120ms ease;
+	margin-left: auto;
+}
+
+.cm-md-details-card:hover .cm-md-details-edit,
+.cm-md-details-edit:focus-visible {
+	opacity: 1;
+}
+
+.cm-md-details-body {
+	padding: var(--space-3) var(--space-4) var(--space-4);
+	border-top: 1px solid color-mix(in srgb, var(--editor-border, var(--border)) 70%, transparent);
+}
+
+.cm-md-details-body > :first-child {
+	margin-top: 0;
+}
+
+.cm-md-details-body > :last-child {
+	margin-bottom: 0;
+}
+
+/* Lazy-loaded KaTeX Math widgets (Wave 3.7) */
+.cm-md-math-block,
+.md-math-display {
+	margin: var(--space-3) 0;
+	padding: var(--space-3) var(--space-4);
+	border-radius: var(--radius-md);
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 2%, transparent);
+	overflow-x: auto;
+	text-align: center;
+	cursor: pointer;
+}
+
+.cm-md-host.cm-md-read .cm-md-math-block,
+.cm-md-host.cm-md-read .cm-md-math-inline {
+	cursor: default;
+}
+
+.cm-md-math-inline {
+	display: inline-block;
+	vertical-align: baseline;
+	padding: 0 2px;
+	border-radius: 3px;
+	cursor: pointer;
+}
+
+.cm-md-live .cm-md-math-block:hover,
+.cm-md-live .cm-md-math-inline:hover {
+	background: color-mix(in srgb, var(--editor-accent, var(--accent)) 10%, transparent);
+}
+
+.cm-md-math-pending {
+	font-family: var(--code-font);
+	font-size: 0.9em;
+	color: var(--editor-muted, var(--muted));
 }
 
 /* Read-only Markdown Find bar: hide Replace inputs/buttons so Ctrl+F stays a crisp Find-only bar. */
@@ -2285,7 +2421,9 @@
 	.cm-callout-actions,
 	.cm-md-mermaid-actions,
 	.cm-md-prop-rm,
+	.cm-md-prop-edit,
 	.cm-md-prop-add,
+	.cm-md-details-edit,
 	.md-readiness,
 	.cm-gutters,
 	.cm-search {

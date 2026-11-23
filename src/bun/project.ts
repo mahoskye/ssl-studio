@@ -7,6 +7,7 @@ import { homedir } from "node:os";
 import { decode, decodePart, textOf } from "./encoding";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { CATALOG_FILE, catalogStale, fenced, hasCatalogPlace } from "../shared/catalog";
+import { checkCodeCitations } from "../shared/codeCitations";
 import { parseCsv, tally, type Table } from "../shared/csv";
 import { fileLinks, frontPaths, type DocLink } from "../shared/docLinks";
 import { checkTables } from "../shared/docTables";
@@ -15,10 +16,11 @@ import { findHeadingLine } from "../shared/markdownEdit";
 import { buildDocNameIndex, lookupInIndex, namePlaces } from "../shared/namedLinks";
 import { areaPath, CATALOG_AREAS, CATALOG_FILES_MAX, catalogItems, catalogTemplate, DOC_FOLDERS, fileItems, isCatalog, isFileArea, isPrompt, OPTIONAL_CATALOGS, SCHEMAS, STATE_FILE, toneOf, type AreaFolders, type DocArea, type FileArea } from "../shared/projectDocs";
 import { keysIn, rowsByTicket, ticketColumn } from "../shared/registryTickets";
+import { extractSqlObjects } from "../shared/sqlSchema";
 import { extractTags } from "../shared/tags";
 import { tasks as tasksIn, taskTally } from "../shared/tasks";
 import { classifyTicketEntries, type ScannedTicketEntry } from "../shared/ticketBundle";
-import type { DocAuditResult, DocFile, LinkTo, ManifestFile, NameIn, OpenTaskItem, Project, Settings, WorkspaceDocIssue } from "../shared/protocol";
+import type { AuditCitationIssue, DocAuditResult, DocFile, LinkTo, ManifestFile, NameIn, OpenTaskItem, Project, Settings, WorkspaceDocIssue } from "../shared/protocol";
 import { workspaceDir } from "./paths";
 import { WorkspaceFiles } from "./workspace";
 
@@ -230,7 +232,7 @@ function described(
 	const source = one(values.source) || undefined;
 	let missingSource: string | undefined;
 	if (source && root && !/^https?:\/\//i.test(source)) {
-		const target = join(root, source);
+		const target = path && /^\.{1,2}[\\/]/.test(source) ? resolve(dirname(path), source) : join(root, source);
 		const rel = relative(root, target);
 		if (!rel.startsWith("..") && !isAbsolute(rel) && !existsSync(target)) missingSource = source;
 	}
@@ -354,10 +356,11 @@ export async function linksTo(files: WorkspaceFiles, target: string): Promise<Li
 			continue;
 		}
 		const leadsThere = (leads: string) => fold(leads) === wanted || fold(leads).startsWith(wanted + sep);
-		// A ticket's "specs:" line names files from the project's top: not links, and left behind by a rename all the same.
+		// A ticket's "specs:"/"plans:" or a schema doc's "source:" line names files: not links, and left behind by a rename all the same.
 		for (const named of frontPaths(text)) {
-			const leads = join(root, named.value);
-			if (leadsThere(leads)) found.push({ path, line: named.line, column: named.column, href: named.value, rest: leads.slice(resolve(target).length), from: "root" });
+			const isRel = /^\.{1,2}[\\/]/.test(named.value);
+			const leads = isRel ? resolve(dirname(path), named.value) : join(root, named.value);
+			if (leadsThere(leads)) found.push({ path, line: named.line, column: named.column, href: named.value, rest: leads.slice(resolve(target).length), from: isRel ? "doc" : "root" });
 		}
 		if (!text.includes("](") && !text.includes("]:")) continue;
 		for (const link of linksIn(path, text, "F")) {
@@ -420,7 +423,7 @@ function snippet(text: string): Pick<DocFile, "title" | "summary" | "untouched">
 	return { title: words(lines[0]), summary: said(second), ...(isPrompt(second) ? { untouched: true } : {}) };
 }
 
-export async function listDocs(files: WorkspaceFiles, project: Project): Promise<DocFile[]> {
+export async function listDocs(files: WorkspaceFiles, project: Project, options?: { templatesFolder?: string }): Promise<DocFile[]> {
 	const root = files.root;
 	const list: DocFile[] = [];
 	// The project's files by name, read once and only when a link leads nowhere.
@@ -467,9 +470,14 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 	};
 	const area = (name: DocArea) => join(docs, DOC_FOLDERS[name]);
 	const templatesDir = join(docs, "templates");
+	const exportsDir = join(docs, "exports");
+	const customTemplatesRel = (options?.templatesFolder ?? "").trim().replace(/\\/g, "/").replace(/^[./]+|\/+$/g, "");
+	const customTemplatesDir = customTemplatesRel ? join(root, customTemplatesRel) : "";
 	const inArea = (path: string) =>
 		(Object.keys(DOC_FOLDERS) as DocArea[]).some((name) => path.startsWith(area(name) + sep)) ||
-		path.startsWith(templatesDir + sep);
+		path.startsWith(templatesDir + sep) ||
+		path.startsWith(exportsDir + sep) ||
+		Boolean(customTemplatesDir && path.startsWith(customTemplatesDir + sep));
 
 	// The tickets that drive the work: flat Markdown files (docs/tickets/LIMS-123.md)
 	// and self-contained ticket bundle folders (docs/tickets/LIMS-123/LIMS-123.md plus
@@ -517,7 +525,10 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 			const specs = [...new Set([...many(values.specs), ...many(values.spec)])];
 			const plans = [...new Set([...many(values.plans), ...many(values.plan)])];
 			const related = [...many(values.related), ...many(values.blocks), ...many(values["blocked-by"]), ...many(values.parent)];
-			const missing = [...specs, ...plans].filter((ref) => !existsSync(join(root, ref)));
+			const missing = [...specs, ...plans].filter((ref) => {
+				const target = /^\.{1,2}[\\/]/.test(ref) ? resolve(dirname(path), ref) : join(root, ref);
+				return !existsSync(target);
+			});
 			// Also detect an empty sibling folder matching this flat ticket's key/stem (O(1) map lookup).
 			let ticketFolder = resolved.folderRel ? join(ticketsDir, resolved.folderRel) : undefined;
 			if (!ticketFolder) {
@@ -642,8 +653,36 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 		// A folder that is one of the known kinds in other capitals is that kind: on a disk that does not tell them
 		// apart it is the same folder, and nowhere is it a second kind beside it.
 		const kind = SCHEMAS.find((known) => known.id === folder.toLowerCase())?.id ?? folder;
-		const text = MARKDOWN.test(path) ? await head(path) : "";
-		list.push({ path, name, group: "schema", exists: true, kind, ...(MARKDOWN.test(path) ? { ...described(text, root, path), ...brokenLinks(root, path, text, named) } : {}) });
+		const isMd = MARKDOWN.test(path);
+		const isSql = /\.(sql|ddl|pks|pkb)$/i.test(path);
+		const text = isMd || isSql ? await head(path) : "";
+		let schemaObjects: string[] | undefined;
+		if (isSql && text) {
+			const objs = extractSqlObjects(text, { includeAlter: true });
+			const set = new Set<string>();
+			for (const o of objs) {
+				if (o.name) set.add(o.name);
+				if (o.bareName) set.add(o.bareName);
+			}
+			if (set.size) schemaObjects = [...set];
+		} else if (isMd && text) {
+			const body = frontMatter(text).body;
+			const set = new Set<string>();
+			for (const line of body.split(/\r?\n/)) {
+				const m = /^#{1,3}\s+`?([A-Za-z_][\w$.]{1,64})`?\s*$/.exec(line.trim());
+				if (m) set.add(m[1]!);
+			}
+			if (set.size) schemaObjects = [...set];
+		}
+		list.push({
+			path,
+			name,
+			group: "schema",
+			exists: true,
+			kind,
+			...(schemaObjects ? { schemaObjects } : {}),
+			...(isMd ? { ...described(text, root, path), ...brokenLinks(root, path, text, named) } : {}),
+		});
 	}
 	for (const path of under(join(root, project.plans), /\.(plan\.json|md)$/i)) {
 		if (/\.spec\.md$/i.test(path)) continue;
@@ -662,9 +701,13 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 			...(mdText ? { ...described(mdText, root, path), ...brokenLinks(root, path, mdText, named) } : {}),
 		});
 	}
-	// Check broken [[wikilinks]] across Markdown docs using a single O(N) pre-built index.
+	// Check broken [[wikilinks]] and ![[embeds]] across Markdown docs using O(N) pre-built indexes.
 	const IMAGE_EMBED_RE = /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif)$/i;
 	const docNameIndex = buildDocNameIndex(list, root);
+	const wsImageNames = new Set<string>();
+	for (const p of files.files()) {
+		if (IMAGE_EMBED_RE.test(p)) wsImageNames.add(basename(p).toLowerCase());
+	}
 	for (const doc of list) {
 		if (!doc.exists || !MARKDOWN.test(doc.path)) continue;
 		try {
@@ -684,10 +727,23 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 			if (!places.length) continue;
 			const brokenWiki: { href: string; line: number; column: number }[] = [];
 			for (const place of places) {
-				if (IMAGE_EMBED_RE.test(place.name)) continue;
-				if (!lookupInIndex(place.name, docNameIndex)) {
-					brokenWiki.push({ href: `[[${place.name}]]`, line: place.line, column: place.column });
+				if (IMAGE_EMBED_RE.test(place.name)) {
+					const direct = linkTarget(root, doc.path, place.name);
+					const fromRoot = join(root, place.name);
+					const hasFile = existsSync(direct) || existsSync(fromRoot) || (!place.name.includes("/") && !place.name.includes("\\") && wsImageNames.has(basename(place.name).toLowerCase()));
+					if (!hasFile) {
+						brokenWiki.push({ href: `${place.embed ? "!" : ""}[[${place.name}]]`, line: place.line, column: place.column });
+					}
+					continue;
 				}
+				if (lookupInIndex(place.name, docNameIndex)) continue;
+				// Valid file transclusions / companion embeds (e.g. `![[samples/query.sql]]`, `![[notes.md]]`, `![[src/Mod/Script.ssl]]`) resolve on disk.
+				if (place.embed || /[\\/]|\.[a-z0-9]{1,8}$/i.test(place.name)) {
+					const relTarget = linkTarget(root, doc.path, place.name);
+					const rootTarget = join(root, place.name);
+					if (existsSync(relTarget) || existsSync(rootTarget)) continue;
+				}
+				brokenWiki.push({ href: `${place.embed ? "!" : ""}[[${place.name}]]`, line: place.line, column: place.column });
 			}
 			if (brokenWiki.length) doc.broken = [...(doc.broken ?? []), ...brokenWiki];
 		} catch {
@@ -778,7 +834,9 @@ export function catalogFilesOf(files: WorkspaceFiles, project: Project, area: Fi
 const KINDS: [RegExp, string][] = [
 	[/\.(ssl|srvscr)$/i, "script"],
 	[/\.ds$/i, "data source"],
-	[/\.sql$/i, "sql"],
+	[/\.xfd$/i, "form"],
+	[/\.(sql|ddl|pks|pkb)$/i, "sql"],
+	[/\.(hl7|astm|edi)$/i, "interface"],
 	[/\.plan\.json$/i, "plan"],
 	[/\.(md|markdown|txt)$/i, "document"],
 	[/\.(json|toml|ya?ml|xml|ini|csv|tsv|config)$/i, "data"],
@@ -793,17 +851,20 @@ const KINDS: [RegExp, string][] = [
  */
 export async function fileManifest(files: WorkspaceFiles, project: Project): Promise<ManifestFile[]> {
 	const rows: ManifestFile[] = [];
-	const apart = [project.docs, project.plans, ".ssl-studio"]
-		.map((folder) => folder.split(/[\\/]/).filter((p) => p && p !== ".").join("/"))
-		.filter(Boolean)
-		.map((folder) => `${folder}/`);
+	const docsNorm = project.docs.split(/[\\/]/).filter((p) => p && p !== ".").join("/");
+	const apartList = [docsNorm, project.plans.split(/[\\/]/).filter((p) => p && p !== ".").join("/"), ".ssl-studio"];
+	// When `project.docs === "."`, explicitly exclude doc sub-areas so tickets/specs/knowledge/registries/exports never enter `files.csv`.
+	if (!docsNorm) {
+		apartList.push(...Object.values(DOC_FOLDERS), "exports", "templates", "attachments");
+	}
+	const apart = apartList.filter(Boolean).map((folder) => `${folder}/`);
 	const codeAtRoot = project.code.trim() === "." || project.code.trim() === "";
 	for (const path of files.files()) {
 		const name = relative(files.root, path).split(sep).join("/");
 		if (apart.some((folder) => name.startsWith(folder))) continue;
 		if (!name.includes("/")) {
 			// Skip root project docs (README.md, AGENTS.md) and non-code root files unless code = ".".
-			if (!codeAtRoot || !/\.(ssl|srvscr|ds|sql)$/i.test(name)) continue;
+			if (!codeAtRoot || !/\.(ssl|srvscr|ds|xfd|sql|ddl|pks|pkb)$/i.test(name)) continue;
 		}
 		const stat = Bun.file(path);
 		if (stat.size > 32 * 1024 * 1024) continue;
@@ -1107,16 +1168,31 @@ function yamlSyntaxIssues(text: string): { line: number; message: string }[] {
 	}
 	const out: { line: number; message: string }[] = [];
 	let inList = false;
+	let inBlockScalar = false;
+	let blockIndent = 0;
 	for (let i = startIdx + 1; i < endIdx; i++) {
 		const line = lines[i]!;
 		const trimmed = line.trim();
-		if (!trimmed || trimmed.startsWith("#")) continue;
+		if (!trimmed) continue;
+		if (inBlockScalar) {
+			const indent = /^([ \t]*)/.exec(line)![1]!.length;
+			if (indent > blockIndent) continue;
+			inBlockScalar = false;
+		}
+		if (trimmed.startsWith("#")) continue;
 		if (/^\s*-\s+/.test(line)) {
 			if (!inList) out.push({ line: i + 1, message: "YAML list item has no preceding key." });
 			continue;
 		}
 		if (/^[A-Za-z0-9_-]+\s*:/.test(line)) {
-			inList = /^[A-Za-z0-9_-]+\s*:\s*$/.test(line);
+			const afterColon = line.slice(line.indexOf(":") + 1).trim();
+			if (/^[|>][+-]?\d*(?:\s+#.*)?$/.test(afterColon)) {
+				inBlockScalar = true;
+				blockIndent = /^([ \t]*)/.exec(line)![1]!.length;
+				inList = false;
+			} else {
+				inList = /^[A-Za-z0-9_-]+\s*:\s*(?:#.*)?$/.test(line);
+			}
 			continue;
 		}
 		// Allow indented scalar continuation lines under a key, flag unindented malformed lines.
@@ -1127,27 +1203,7 @@ function yamlSyntaxIssues(text: string): { line: number; message: string }[] {
 	return out;
 }
 
-async function readAuditEntry(path: string, checkTableRule: boolean): Promise<CachedDocAuditEntry | null> {
-	let stamp = "";
-	try {
-		const st = statSync(path);
-		if (st.size > LINKED_BYTES) return null;
-		stamp = `${st.size}:${st.mtimeMs}:${checkTableRule ? 1 : 0}`;
-	} catch {
-		return null;
-	}
-	const cached = auditFileCache.get(path);
-	if (cached && cached.stamp === stamp) {
-		auditFileCache.delete(path);
-		auditFileCache.set(path, cached);
-		return cached;
-	}
-	let text = "";
-	try {
-		text = decode(new Uint8Array(await Bun.file(path).arrayBuffer())).text;
-	} catch {
-		return null;
-	}
+function buildAuditEntryFromText(path: string, text: string, stamp: string, checkTableRule: boolean): CachedDocAuditEntry {
 	const links = linksIn(path, text, "F");
 	const selfAnchors = extractSelfAnchors(text);
 	const wikis = namePlaces(text);
@@ -1168,7 +1224,34 @@ async function readAuditEntry(path: string, checkTableRule: boolean): Promise<Ca
 		? checkTables(text).map((f) => ({ line: f.line, message: f.message }))
 		: [];
 	const yamlIssues = yamlSyntaxIssues(text);
-	const entry: CachedDocAuditEntry = { stamp, text, links, selfAnchors, wikis, wikiSections, imgRefs, openTasks, tableIssues, yamlIssues };
+	return { stamp, text, links, selfAnchors, wikis, wikiSections, imgRefs, openTasks, tableIssues, yamlIssues };
+}
+
+async function readAuditEntry(path: string, checkTableRule: boolean, overrideText?: string): Promise<CachedDocAuditEntry | null> {
+	if (overrideText !== undefined) {
+		return buildAuditEntryFromText(path, overrideText, "dirty", checkTableRule);
+	}
+	let stamp = "";
+	try {
+		const st = statSync(path);
+		if (st.size > LINKED_BYTES) return null;
+		stamp = `${st.size}:${st.mtimeMs}:${checkTableRule ? 1 : 0}`;
+	} catch {
+		return null;
+	}
+	const cached = auditFileCache.get(path);
+	if (cached && cached.stamp === stamp) {
+		auditFileCache.delete(path);
+		auditFileCache.set(path, cached);
+		return cached;
+	}
+	let text = "";
+	try {
+		text = decode(new Uint8Array(await Bun.file(path).arrayBuffer())).text;
+	} catch {
+		return null;
+	}
+	const entry = buildAuditEntryFromText(path, text, stamp, checkTableRule);
 	if (auditFileCache.size >= AUDIT_CACHE_MAX) auditFileCache.delete(auditFileCache.keys().next().value!);
 	auditFileCache.set(path, entry);
 	return entry;
@@ -1176,12 +1259,17 @@ async function readAuditEntry(path: string, checkTableRule: boolean): Promise<Ca
 
 /**
  * Cached workspace-wide Markdown audit (no 250-file cap):
- * 1. Unused image attachments across `attachmentsFolder` (default `<docs>/attachments`) AND `<tickets>/<KEY>/attachments/` folders,
+ * 1. Unused image attachments across `attachmentsFolder` (default `<docs>/attachments`) AND `<tickets>/<KEY>/attachments/` (including depth-2 & `archive/` bundles),
  *    resolved against actual links, embeds, and HTML `<img>` tags across ALL workspace Markdown files.
  * 2. Open `- [ ]` tasks across active (non-archived, non-catalog, non-done) project documents.
- * 3. Workspace hygiene issues: broken `#heading` anchors, ADR 0008 table-rule findings (non-schema docs), and malformed YAML frontmatter.
+ * 3. Workspace hygiene issues: broken `#heading` anchors, ADR 0008 table-rule findings (non-schema docs), malformed YAML frontmatter, and `#L` code citation drift.
  */
-export async function docAudit(files: WorkspaceFiles, project: Project, attachmentsFolder?: string): Promise<DocAuditResult> {
+export async function docAudit(
+	files: WorkspaceFiles,
+	project: Project,
+	attachmentsFolder?: string,
+	options?: { templatesFolder?: string; dirtyBuffers?: Record<string, string> },
+): Promise<DocAuditResult> {
 	const root = files.root;
 	const docsRel = project.docs.replace(/^[./\\]+|[\\/]+$/g, "");
 	const schemaRel = project.schema.replace(/^[./\\]+|[\\/]+$/g, "");
@@ -1190,7 +1278,8 @@ export async function docAudit(files: WorkspaceFiles, project: Project, attachme
 	const defaultAttachRel = docsRel && docsRel !== "." ? `${docsRel}/attachments` : "attachments";
 	const attachPrefixes = new Set<string>([`${(customAttachRel || defaultAttachRel).toLowerCase()}/`]);
 	const ticketsRel = docsRel && docsRel !== "." ? `${docsRel}/${DOC_FOLDERS.tickets}` : DOC_FOLDERS.tickets;
-	const ticketsAttachRe = new RegExp(`^${ticketsRel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").toLowerCase()}/[^/]+/attachments/`, "i");
+	// Match depth-1 (`tickets/KEY/attachments/`), depth-2 (`tickets/sprint-1/KEY/attachments/`), and archived (`tickets/archive/KEY/attachments/`).
+	const ticketsAttachRe = new RegExp(`^${ticketsRel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").toLowerCase()}/(?:[^/]+/){1,2}attachments/`, "i");
 
 	const allWsFiles = files.files();
 	const candidateImages: string[] = [];
@@ -1207,28 +1296,37 @@ export async function docAudit(files: WorkspaceFiles, project: Project, attachme
 		}
 	}
 
-	const docsList = await listDocs(files, project);
+	const docsList = await listDocs(files, project, { templatesFolder: options?.templatesFolder });
 	const docByPath = new Map<string, DocFile>();
 	const fold = (p: string) => (process.platform === "linux" ? resolve(p) : resolve(p).toLowerCase());
 	for (const d of docsList) docByPath.set(fold(d.path), d);
 	const docNameIndex = buildDocNameIndex(docsList, root);
+
+	const dirtyMap = new Map<string, string>();
+	for (const [k, v] of Object.entries(options?.dirtyBuffers ?? {})) {
+		dirtyMap.set(fold(k), v);
+	}
 
 	const usedImagePaths = new Set<string>();
 	const usedImageNames = new Set<string>();
 	const mdEntries = new Map<string, CachedDocAuditEntry>();
 	const openTasks: OpenTaskItem[] = [];
 	const issues: WorkspaceDocIssue[] = [];
+	const citationIssues: AuditCitationIssue[] = [];
 
 	for (const mdPath of allMdFiles) {
 		const rel = relative(root, mdPath).split(sep).join("/");
 		const relLow = rel.toLowerCase();
 		const inSchema = Boolean(schemaPrefix && relLow.startsWith(schemaPrefix));
-		const entry = await readAuditEntry(mdPath, !inSchema);
+		const foldedMd = fold(mdPath);
+		const entry = await readAuditEntry(mdPath, !inSchema, dirtyMap.get(foldedMd));
 		if (!entry) continue;
-		mdEntries.set(fold(mdPath), entry);
+		mdEntries.set(foldedMd, entry);
 
 		// Collect referenced images from Markdown links/images, HTML <img>, and ![[image]] embeds.
-		const markImageRef = (rawRef: string) => {
+		// Only bare basename embeds (`![[shot.png]]`, no `/` or `\`) populate `usedImageNames`, so an explicit
+		// relative link `attachments/shot.png` never masks an unrelated orphan `shot.png` in another folder.
+		const markImageRef = (rawRef: string, allowBasenameMatch = false) => {
 			let cleaned = rawRef.split(/[?#]/)[0]!.trim();
 			try {
 				cleaned = decodeURIComponent(cleaned);
@@ -1238,16 +1336,18 @@ export async function docAudit(files: WorkspaceFiles, project: Project, attachme
 			if (!cleaned || !IMAGE_ASSET_RE.test(cleaned)) return;
 			const target = linkTarget(root, mdPath, cleaned);
 			usedImagePaths.add(fold(target));
-			usedImageNames.add(basename(cleaned).toLowerCase());
+			if (allowBasenameMatch && !cleaned.includes("/") && !cleaned.includes("\\")) {
+				usedImageNames.add(basename(cleaned).toLowerCase());
+			}
 		};
-		for (const link of entry.links) markImageRef(link.file);
-		for (const ref of entry.imgRefs) markImageRef(ref);
+		for (const link of entry.links) markImageRef(link.file, false);
+		for (const ref of entry.imgRefs) markImageRef(ref, !ref.includes("/") && !ref.includes("\\"));
 		for (const w of entry.wikis) {
-			if (IMAGE_ASSET_RE.test(w.name)) usedImageNames.add(basename(w.name).toLowerCase());
+			if (IMAGE_ASSET_RE.test(w.name)) markImageRef(w.name, true);
 		}
 
 		// Surface YAML & ADR 0008 table-rule issues for project docs (excluding catalogs).
-		const docMeta = docByPath.get(fold(mdPath));
+		const docMeta = docByPath.get(foldedMd);
 		if (docMeta && !isCatalog(docMeta)) {
 			for (const y of entry.yamlIssues) {
 				issues.push({ path: mdPath, line: y.line, kind: "yaml", level: "warn", message: y.message });
@@ -1275,7 +1375,28 @@ export async function docAudit(files: WorkspaceFiles, project: Project, attachme
 		}
 	}
 
-	// Second pass: verify `#heading` fragment anchors on Markdown links and `[[doc#Heading]]` wikilinks.
+	// Second pass: verify `#heading` fragment anchors on Markdown links and `[[doc#Heading]]` wikilinks,
+	// AND verify `#L10-L20` code citations across all workspace project docs (case-insensitive, uncapped).
+	const targetReadCache = new Map<string, string | null>();
+	const readTarget = async (targetPath: string): Promise<string | null> => {
+		const f = fold(targetPath);
+		if (dirtyMap.has(f)) return dirtyMap.get(f)!;
+		if (targetReadCache.has(f)) return targetReadCache.get(f)!;
+		try {
+			const s = statSync(targetPath);
+			if (s.size > LINKED_BYTES) {
+				targetReadCache.set(f, null);
+				return null;
+			}
+			const txt = decode(new Uint8Array(await Bun.file(targetPath).arrayBuffer())).text;
+			targetReadCache.set(f, txt);
+			return txt;
+		} catch {
+			targetReadCache.set(f, null);
+			return null;
+		}
+	};
+
 	for (const mdPath of allMdFiles) {
 		const docMeta = docByPath.get(fold(mdPath));
 		if (!docMeta || isCatalog(docMeta)) continue;
@@ -1299,7 +1420,12 @@ export async function docAudit(files: WorkspaceFiles, project: Project, attachme
 		for (const link of entry.links) {
 			const hashIdx = link.href.indexOf("#");
 			if (hashIdx < 0) continue;
-			const anchor = link.href.slice(hashIdx + 1).trim();
+			let anchor = link.href.slice(hashIdx + 1).trim();
+			try {
+				anchor = decodeURIComponent(anchor);
+			} catch {
+				// keep raw
+			}
 			if (!anchor || /^L\d+(?:-L?\d+)?$/i.test(anchor)) continue;
 			const targetPath = link.file ? linkTarget(root, mdPath, link.file) : mdPath;
 			if (!MARKDOWN.test(targetPath)) continue;
@@ -1335,6 +1461,21 @@ export async function docAudit(files: WorkspaceFiles, project: Project, attachme
 				});
 			}
 		}
+		// `#L10-L20` code citation drift check (case-insensitive pre-filter, uncapped).
+		if (/#l\d+/i.test(entry.text)) {
+			const foundCits = await checkCodeCitations(mdPath, entry.text, root, readTarget);
+			for (const ci of foundCits) {
+				citationIssues.push(ci);
+				issues.push({
+					path: ci.docPath,
+					line: ci.docLine,
+					kind: "citation",
+					level: ci.level,
+					message: ci.text,
+					href: ci.citation.href,
+				});
+			}
+		}
 	}
 
 	const unusedAttachments = candidateImages.filter((imgPath) => {
@@ -1345,6 +1486,6 @@ export async function docAudit(files: WorkspaceFiles, project: Project, attachme
 		return true;
 	});
 
-	return { unusedAttachments, openTasks, issues };
+	return { unusedAttachments, openTasks, issues, citationIssues };
 }
 

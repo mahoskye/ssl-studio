@@ -7,7 +7,7 @@ Author....... :
 Date......... : 2026-11-17
 ********************************************************************************
 _______________________________________________________________________________
-Modification. : The helpers are private and a skip carries a code with its text.
+Modification. : DEMO-101 — The helpers are private and a skip carries a code with its text.
                 Writing is now DueDates.SaveDueDates, which owns the transaction:
                 this script reads, works the dates out and hands them over.
                 Its answer is read by DueDates.DueDateSummary.Combine.

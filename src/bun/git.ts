@@ -5,7 +5,7 @@
 import { join, relative, resolve, sep } from "node:path";
 import { looksBinary } from "../shared/fileKind";
 import { parseStatus, type GitStatus } from "../shared/gitStatus";
-import type { GitCommit } from "../shared/protocol";
+import type { GitCommit, TicketGitCommit } from "../shared/protocol";
 import { decode } from "./encoding";
 
 type Ran = { code: number; out: Uint8Array; err: string };
@@ -150,6 +150,65 @@ export class Git {
 				author: author ?? "",
 				subject: subjectParts.join(" "),
 				path: fileInCommit,
+			});
+		}
+		return commits;
+	}
+
+	/** Local Git commits mentioning `ticketKey`, with changed files and statuses (ADR 0022: local only). */
+	async ticketLog(ticketKey: string, limit = 30): Promise<TicketGitCommit[]> {
+		const cleanKey = ticketKey.trim();
+		if (!cleanKey || !(await this.repository())) return [];
+		const cap = Math.max(1, Math.min(100, Math.round(limit)));
+		const ran = await this.run([
+			"-c",
+			"core.quotePath=false",
+			"log",
+			"-n",
+			String(cap),
+			"-i",
+			"--fixed-strings",
+			`--grep=${cleanKey}`,
+			"--format=%x1e%H%x1f%h%x1f%ct%x1f%an%x1f%s",
+			"--name-status",
+		]);
+		if (ran.code !== 0) return [];
+		const commits: TicketGitCommit[] = [];
+		const wordRe = new RegExp(`(?<![A-Za-z0-9_-])${cleanKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9_-])`, "i");
+		for (const chunk of text(ran.out).split("\x1e")) {
+			const trimmed = chunk.trim();
+			if (!trimmed) continue;
+			const lines = trimmed.split(/\r?\n/);
+			const header = lines[0] ?? "";
+			const [sha, shortSha, ct, author, ...subjectParts] = header.split("\x1f");
+			if (!sha || !shortSha) continue;
+			const subject = subjectParts.join(" ");
+			// Keep commits whose subject/body matched as a whole ticket key (avoiding DEMO-1 matching DEMO-101).
+			if (!wordRe.test(subject) && !lines.some((l) => wordRe.test(l))) {
+				// Git --grep matched the body; keep if subject doesn't obviously match a longer key only.
+				const longerKeyRe = new RegExp(`${cleanKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[0-9]`, "i");
+				if (longerKeyRe.test(subject)) continue;
+			}
+			const files: { status: string; path: string }[] = [];
+			for (const line of lines.slice(1)) {
+				const l = line.trim();
+				if (!l) continue;
+				const parts = l.split("\t");
+				if (parts.length < 2) continue;
+				const status = parts[0]!.trim();
+				const filePath = (parts[2] ?? parts[1]!).trim();
+				if (!filePath) continue;
+				// Convert repo-relative path to workspace-relative path when workspace is inside a subdir.
+				const rel = this.prefix && filePath.startsWith(this.prefix) ? filePath.slice(this.prefix.length) : filePath;
+				files.push({ status, path: rel });
+			}
+			commits.push({
+				sha,
+				shortSha,
+				time: (Number(ct) || 0) * 1000,
+				author: author ?? "",
+				subject,
+				files,
 			});
 		}
 		return commits;

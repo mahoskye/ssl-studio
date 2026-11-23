@@ -210,9 +210,15 @@ export async function insertMarkdownTemplate(explicit?: MarkdownTemplate): Promi
 	const hasBodyContent = existing.trim().length > 0;
 	const tplHasFm = frontMatter(tpl.content).lines > 0;
 
-	// If the target doc already has YAML frontmatter and the template declares frontmatter too,
-	// render the template intact so we can merge any missing YAML properties (e.g. status, ticket, tags) cleanly!
-	const sourceContent = !hasExistingFm && hasBodyContent ? stripRawTemplateFrontmatter(tpl.content) : tpl.content;
+	// If the target doc already has YAML frontmatter, strip keys that are ALREADY present in the target
+	// BEFORE evaluating interactive prompts so users aren't asked for duplicate properties, while still
+	// prompting for and merging any missing template properties (e.g. status, ticket, tags).
+	const existingKeys = hasExistingFm ? new Set(Object.keys(existingFm.values)) : undefined;
+	const sourceContent = hasExistingFm
+		? stripRawTemplateFrontmatter(tpl.content, existingKeys)
+		: hasBodyContent
+			? stripRawTemplateFrontmatter(tpl.content)
+			: tpl.content;
 	const renderedRaw = await renderTemplate(sourceContent, buildContext(path));
 	if (renderedRaw.cancelled) return;
 	if (!activeLiveEditor() && !activeEditor()?.getDomNode()?.offsetParent) {

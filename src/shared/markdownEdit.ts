@@ -236,7 +236,8 @@ export function documentHeadings(text: string): DocHeading[] {
 	for (let i = 0; i < lines.length; i++) {
 		const raw = lines[i]!;
 		const lineStart = offset;
-		offset += raw.length + 1;
+		const eolLen = text[lineStart + raw.length] === "\r" ? 2 : 1;
+		offset += raw.length + eolLen;
 		if (i < fm.lines) continue;
 		if (fences.some(([from, to]) => lineStart >= from && lineStart < to)) continue;
 		const m = /^[ \t]{0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$/.exec(raw);

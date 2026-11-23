@@ -111,6 +111,8 @@ export type DocFile = {
 	ticketCodeRefs?: Record<string, string[]>;
 	/** Code/SQL script paths or module names referenced by this document, plan, schema doc, or CSV registry. */
 	codeRefs?: string[];
+	/** Table / database object names defined inside a schema `.sql` or multi-table Markdown schema doc. */
+	schemaObjects?: string[];
 	/** Tags declared in YAML `tags:` or inline `#tag` prose (without leading `#`). */
 	tags?: string[];
 	/** Source file path declared in YAML `source:` (e.g. schema docs pointing to their DDL `.sql`). */
@@ -150,6 +152,7 @@ export type ManifestFile = { path: string; kind: string; bytes: number; lines: n
 
 export type Snapshot = { id: string; time: number; size: number };
 export type GitCommit = { sha: string; shortSha: string; time: number; author: string; subject: string; path: string };
+export type TicketGitCommit = { sha: string; shortSha: string; time: number; author: string; subject: string; files: { status: string; path: string }[] };
 
 export type SearchHit = { path: string; line: number; column: number; length: number; text: string };
 
@@ -254,16 +257,28 @@ export type WorkspaceDocIssue = {
 	path: string;
 	line: number;
 	column?: number;
-	kind: "anchor" | "table" | "yaml";
+	kind: "anchor" | "table" | "yaml" | "citation";
 	level: "warn" | "note";
 	message: string;
 	href?: string;
+};
+
+export type AuditCitationIssue = {
+	docPath: string;
+	docLine: number;
+	targetPath: string;
+	citation: { line: number; href: string; file: string; from: number; to: number; snippet?: string };
+	kind: "out-of-range" | "shifted" | "drifted";
+	level: "warn" | "note";
+	text: string;
+	reanchor?: { from: number; to: number };
 };
 
 export type DocAuditResult = {
 	unusedAttachments: string[];
 	openTasks: OpenTaskItem[];
 	issues: WorkspaceDocIssue[];
+	citationIssues?: AuditCitationIssue[];
 };
 
 export type SettingsScope = "user" | "workspace";
@@ -299,6 +314,8 @@ export interface BackendApi {
 	gitBase(path: string, from: "head" | "index"): Promise<string | null>;
 	/** Recent Git commits touching `path` (following renames). Empty outside a repository. */
 	gitLog(path: string, limit?: number): Promise<GitCommit[]>;
+	/** Local Git commits whose subject/body mentions `ticketKey`, with changed file paths (ADR 0022). */
+	gitTicketLog(ticketKey: string, limit?: number): Promise<TicketGitCommit[]>;
 	/** A file's text at a specific Git commit SHA (using its path in that commit when renamed). Null when binary or absent. */
 	gitShow(path: string, sha: string, repoPath?: string): Promise<string | null>;
 	/** Puts files into the next commit as they are now; takes them out of it again. */
@@ -339,9 +356,15 @@ export interface BackendApi {
 	/** Closes the app whatever is unsaved: the user has just said what to do with it. */
 	closeWindow(): Promise<void>;
 	/** README.md, AGENTS.md and project.toml, then the Markdown and plans in the project's docs and plans folders. */
-	docs(): Promise<DocFile[]>;
-	/** Cached workspace Markdown audit: unused attachments (configured + ticket bundles), open tasks, broken #anchors, table rule & YAML issues. */
-	docAudit(attachmentsFolder?: string): Promise<DocAuditResult>;
+	docs(options?: { templatesFolder?: string }): Promise<DocFile[]>;
+	/** Cached workspace Markdown audit: unused attachments (configured + ticket bundles), open tasks, broken #anchors, table rule, YAML & code-citation issues. */
+	docAudit(attachmentsFolder?: string, options?: { templatesFolder?: string; dirtyBuffers?: Record<string, string> }): Promise<DocAuditResult>;
+	/** Opens a workspace file with the operating system's default application (validated inside workspace root). */
+	openExternal(path: string): Promise<void>;
+	/** Reveals/highlights a workspace file in the operating system's file manager (validated inside workspace root). */
+	revealInFileManager(path: string): Promise<void>;
+	/** Writes a minimal OpenXML `.docx` document rendered from Markdown inside the workspace (validated inside root). */
+	exportDocx(request: { path: string; title: string; subtitle?: string; markdown: string }): Promise<{ path: string; bytes: number }>;
 	/** Every file of the project with its size and a checksum, for the file manifest. */
 	manifest(): Promise<ManifestFile[]>;
 	/**

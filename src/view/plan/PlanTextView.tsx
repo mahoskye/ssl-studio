@@ -8,9 +8,12 @@ import { regionColor } from "../editor/regions";
 import { Icon } from "../Icon";
 import type { IconName } from "../icons";
 import { IconButton } from "../panels/Rows";
+import { docs } from "../project";
+import { notify, openFile } from "../state";
 import { journeyDraft, pathSummary, shortPhrase, type PlanPath } from "./built";
 import { CODE_INDICATOR_WORDS, type CodeIndicator } from "./chart";
 import { planTestsOf, type Plan, type PlanNode, type PlanTestCase, type PlanTestInput, type PlanTestPatch } from "./model";
+import "./planExtra.css";
 import {
 	choicesFromPath,
 	choicesFromStep,
@@ -352,6 +355,11 @@ export function PlanTextView(props: {
 	});
 
 	const ticketText = () => (typeof props.plan.ticket === "string" ? props.plan.ticket.trim() : "");
+	const ticketDoc = createMemo(() => {
+		const key = ticketText();
+		if (!key) return null;
+		return docs().find((d) => d.group === "tickets" && d.exists && d.ticket?.toLowerCase() === key.toLowerCase()) ?? null;
+	});
 	const goalText = () => (typeof props.plan.goal === "string" ? props.plan.goal.trim() : "");
 	const anchorNodeName = () => {
 		const id = anchorNodeId();
@@ -649,7 +657,24 @@ export function PlanTextView(props: {
 					<div class="plan-text-title-row">
 						<h1>{props.plan.title || "Untitled plan"}</h1>
 						<Show when={ticketText()}>
-							<span class="plan-text-ticket">{ticketText()}</span>
+							<button
+								type="button"
+								class="plan-text-ticket"
+								classList={{ linked: Boolean(ticketDoc()) }}
+								title={
+									ticketDoc()
+										? `Open ticket ${ticketDoc()!.ticket}${ticketDoc()!.title ? `: ${ticketDoc()!.title}` : ""}`
+										: `Ticket ${ticketText()} (not found in docs/tickets/)`
+								}
+								onClick={(e) => {
+									e.stopPropagation();
+									const td = ticketDoc();
+									if (td) void openFile(td.path);
+									else notify(`Ticket ${ticketText()} was not found in docs/tickets/.`);
+								}}
+							>
+								{ticketText()}
+							</button>
 						</Show>
 						<span class="spacer" />
 						<Show

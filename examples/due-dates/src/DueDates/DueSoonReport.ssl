@@ -11,7 +11,7 @@ Author....... :
 Date......... : 2026-11-18
 ********************************************************************************
 _______________________________________________________________________________
-Modification. : sSource lets a caller report on another choice of samples, and
+Modification. : DEMO-103 — sSource lets a caller report on another choice of samples, and
                 the constants are read as procedures of the include.
 Author....... :
 Date......... : 2026-11-18

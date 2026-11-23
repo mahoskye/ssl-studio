@@ -29,6 +29,8 @@ export type ImportedTicket = {
 	blockedBy?: string[];
 	/** What was asked, in the ticket's own words. */
 	description: string;
+	/** Optional acceptance criteria column (e.g. Azure DevOps), rendered under "What done looks like". */
+	acceptanceCriteria?: string;
 };
 
 export type Imported = {
@@ -65,13 +67,77 @@ const likeOwn = (own: string, keys: string[]) => (/^\d+$/.test(own) ? keys : key
 /** Every column whose name says it ties one ticket to another: a system writes one for each kind of link, and one for each link. */
 const linkColumns = (table: Table) => table.header.map((cell, at) => (/issue link|linked issue|related|relates|blocks|blocked|depends|duplicat|sub-?tasks?$/i.test(cell.text) ? at : -1)).filter((at) => at >= 0);
 
+/** Classifies a CSV link column as directional `blocks`, `blockedBy`, or generic `related`. */
+function linkColumnKind(header: string): "blocks" | "blockedBy" | "related" {
+	const h = header.trim().toLowerCase();
+	if (/inward\s+issue\s+link\s*\(\s*blocks\s*\)|\bblocked[\s_-]*by\b|\bdepends\s+on\b/.test(h)) return "blockedBy";
+	if (/outward\s+issue\s+link\s*\(\s*blocks\s*\)|^blocks$|\bblocks\b(?!.*\bby\b)/.test(h)) return "blocks";
+	return "related";
+}
+
+const decodeEntities = (s: string) =>
+	s
+		.replace(/&nbsp;/gi, " ")
+		.replace(/&amp;/gi, "&")
+		.replace(/&lt;/gi, "<")
+		.replace(/&gt;/gi, ">")
+		.replace(/&quot;/gi, '"')
+		.replace(/&#39;|&apos;/gi, "'")
+		.replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
+		.replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)));
+
+/**
+ * Lightweight, safe HTML-to-Markdown conversion for Azure DevOps CSV/JSON descriptions
+ * (which wrap text in `<div>`, `<p>`, `<br>`, `<ul>`, `<li>`, `<b>`, `<a>`, `<pre>`, `<code>`).
+ */
+export function htmlToMarkdown(raw: string): string {
+	let s = raw.replace(/\r\n/g, "\n");
+	// Preserve fenced <pre><code> blocks first so inner tags/whitespace stay verbatim.
+	const blocks: string[] = [];
+	s = s.replace(/<pre\b[^>]*>(?:\s*<code\b[^>]*>)?([\s\S]*?)(?:<\/code>\s*)?<\/pre>/gi, (_, inner: string) => {
+		const code = decodeEntities(inner.replace(/<br\s*\/?>/gi, "\n").replace(/<[^>]+>/g, "")).replace(/^\n+|\n+$/g, "");
+		const idx = blocks.push(`\n\`\`\`\n${code}\n\`\`\`\n`) - 1;
+		return `\uE000BLOCK${idx}\uE001`;
+	});
+	s = s
+		.replace(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi, (_, lvl: string, inner: string) => `\n\n${"#".repeat(Math.min(6, Math.max(3, Number(lvl) + 2)))} ${inner.trim()}\n\n`)
+		.replace(/<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, (_, href: string, inner: string) => {
+			const label = inner.replace(/<[^>]+>/g, "").trim();
+			return label && label !== href ? `[${label}](${href})` : `<${href}>`;
+		})
+		.replace(/<code\b[^>]*>([\s\S]*?)<\/code>/gi, (_, inner: string) => `\`${decodeEntities(inner.replace(/<[^>]+>/g, ""))}\``)
+		.replace(/<(?:strong|b)\b[^>]*>([\s\S]*?)<\/(?:strong|b)>/gi, (_, inner: string) => (inner.trim() ? `**${inner.trim()}**` : ""))
+		.replace(/<(?:em|i)\b[^>]*>([\s\S]*?)<\/(?:em|i)>/gi, (_, inner: string) => (inner.trim() ? `*${inner.trim()}*` : ""))
+		.replace(/<br\s*\/?>/gi, "\n")
+		.replace(/<hr\s*\/?>/gi, "\n\n---\n\n")
+		.replace(/<li\b[^>]*>([\s\S]*?)<\/li>/gi, (_, inner: string) => `\n- ${inner.replace(/\n+/g, " ").trim()}`)
+		.replace(/<\/(?:ul|ol|p|div|tr|blockquote)>/gi, "\n\n")
+		.replace(/<(?:ul|ol|p|div|tr|blockquote|tbody|thead|table|span)\b[^>]*>/gi, "")
+		.replace(/<t[hd]\b[^>]*>([\s\S]*?)<\/t[hd]>/gi, (_, inner: string) => `${inner.trim()} | `)
+		.replace(/<[^>]+>/g, "");
+	s = decodeEntities(s);
+	s = s.replace(/\uE000BLOCK(\d+)\uE001/g, (_, i: string) => blocks[Number(i)] ?? "");
+	return s
+		.split("\n")
+		.map((l) => l.replace(/[ \t]+$/g, ""))
+		.join("\n")
+		.replace(/\n{3,}/g, "\n\n")
+		.trim();
+}
+
+const LOOKS_ADO_HTML_RE = /^\s*<(?:div|p|ul|ol|table|span|br|h[1-6]|strong|b|em|i)\b/i;
+
 /**
  * A description as Markdown. One from a system of the Jira kind is in that
- * system's wiki markup, and is turned into Markdown; any other is taken as
- * it is. It is not guessed from the text: Markdown that holds "{{ }}" for a
- * template of its own is not wiki markup.
+ * system's wiki markup, and is turned into Markdown; Azure DevOps HTML cells
+ * are converted to Markdown; Markdown bodies (including inline HTML blocks) are preserved.
  */
-const described = (text: string, wiki: boolean) => (text && wiki ? wikiToMarkdown(text) : underSections(text));
+const described = (text: string, wiki: boolean, allowHtml = false) => {
+	if (!text) return "";
+	if (wiki) return wikiToMarkdown(text);
+	if (allowHtml && LOOKS_ADO_HTML_RE.test(text) && !/^ {0,3}#{1,6}\s/m.test(text)) return underSections(htmlToMarkdown(text));
+	return underSections(text);
+};
 
 /**
  * Where what the renderer read ends in the text, starting at `at`: the same
@@ -158,11 +224,15 @@ export function ticketsFromTable(table: Table): Imported {
 	const status = column(table, ["status", "state"]);
 	const type = column(table, ["issue type", "work item type", "type"]);
 	const description = column(table, ["description", "details", "body"]);
+	const acceptance = column(table, ["acceptance criteria", "definition of done"]);
 	const source = column(table, ["url", "issue url", "link"]);
 	// What a ticket is part of, the nearest first: its parent, then the larger piece of work it belongs to. An export
 	// has a column for each, most of them empty in any one row.
 	const parents = ["parent key", "parent", "parent id", "parent link", "epic link"].map((name) => column(table, [name])).filter((at) => at >= 0 && at !== key);
 	const links = linkColumns(table).filter((at) => !parents.includes(at) && at !== key);
+	const blocksCols = links.filter((at) => linkColumnKind(table.header[at]!.text) === "blocks");
+	const blockedByCols = links.filter((at) => linkColumnKind(table.header[at]!.text) === "blockedBy");
+	const relatedCols = links.filter((at) => linkColumnKind(table.header[at]!.text) === "related");
 	// An export of the Jira kind gives a parent by the system's own number ("Parent id") and each ticket's number
 	// beside its key ("Issue id"): the parent's key is the key of the row with that number.
 	const number = column(table, ["issue id"]);
@@ -180,6 +250,10 @@ export function ticketsFromTable(table: Table): Imported {
 			continue;
 		}
 		const above = parents.map((index) => keyed(own, keysIn(at(index)))[0]).find(Boolean);
+		const blocks = unique(keyed(own, blocksCols.flatMap((index) => keysIn(at(index)))), [own, above ?? ""]);
+		const blockedBy = unique(keyed(own, blockedByCols.flatMap((index) => keysIn(at(index)))), [own, above ?? ""]);
+		const related = unique(keyed(own, relatedCols.flatMap((index) => keysIn(at(index)))), [own, above ?? "", ...blocks, ...blockedBy]);
+		const ac = described(at(acceptance), wiki, !wiki);
 		tickets.push({
 			key: own,
 			title: at(title).replace(/\s+/g, " "),
@@ -187,8 +261,11 @@ export function ticketsFromTable(table: Table): Imported {
 			type: at(type) || undefined,
 			source: /^https?:\/\//i.test(at(source)) ? at(source) : undefined,
 			parent: above && above.toLowerCase() !== own.toLowerCase() ? above : undefined,
-			related: unique(keyed(own, links.flatMap((index) => keysIn(at(index)))), [own, above ?? ""]),
-			description: described(at(description), wiki),
+			related,
+			...(blocks.length ? { blocks } : {}),
+			...(blockedBy.length ? { blockedBy } : {}),
+			description: described(at(description), wiki, !wiki),
+			...(ac ? { acceptanceCriteria: ac } : {}),
 		});
 	}
 	return { tickets, skipped };
@@ -257,7 +334,9 @@ export function ticketsFromJson(value: unknown): Imported {
 		if (!epicFallback && ownPrefix) {
 			for (const [k, v] of Object.entries(fields)) {
 				if (!/^customfield_\d+$/i.test(k) || typeof v !== "string") continue;
-				const cand = ticketKey(v);
+				const trimmed = v.trim();
+				if (!KEY_LIKE.test(trimmed)) continue;
+				const cand = ticketKey(trimmed);
 				if (cand && cand.toLowerCase().startsWith(`${ownPrefix}-`) && cand.toLowerCase() !== own.toLowerCase()) {
 					epicFallback = cand;
 					break;

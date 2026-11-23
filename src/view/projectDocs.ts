@@ -15,18 +15,33 @@ import {
 	assembleTicketPacketMarkdown,
 	buildPrintableHtml,
 	classifyDeploymentArtifact,
+	demoteMarkdownHeadings,
 	escapeHtml,
 	evaluateTicketReadiness,
+	inlineExportStyles,
 	markdownToJira,
+	transformMarkdownFootnotes,
 } from "../shared/docExport";
-import { addToFrontMatterList, bodyOffset, frontMatter, many, one, removeFromFrontMatterList, replaceInFrontMatterList, withFrontMatter } from "../shared/frontMatter";
+import {
+	addToFrontMatterList,
+	bodyOffset,
+	frontMatter,
+	many,
+	one,
+	quoteYamlScalar,
+	removeFromFrontMatterList,
+	replaceInFrontMatterList,
+	withFrontMatter,
+} from "../shared/frontMatter";
+import { documentHeadings, findHeadingLine, parseImageAltSize, upsertTocBlock } from "../shared/markdownEdit";
 import { keysIn, ticketColumn } from "../shared/registryTickets";
-import { extractSqlObjects, parseCreateTables, sqlTablesToMarkdown } from "../shared/sqlSchema";
+import { extractSqlObjects, mergeSqlTablesIntoMarkdown, parseCreateTables, sqlTablesToMarkdown } from "../shared/sqlSchema";
 import { importSummary, ticketsFromJson, ticketsFromTable, type Imported, type ImportedTicket } from "../shared/ticketImport";
 import { manifestSummary, mergeManifest } from "../shared/manifest";
-import { buildDocNameIndex, docByName, lookupInIndex, namesToFollow, withNames } from "../shared/namedLinks";
+import { buildDocNameIndex, docByName, lookupInIndex, namedLink, namesToFollow, withNames } from "../shared/namedLinks";
 import { baseName, dirName, isInside, joinPath, relativePath, relativeTo, resolvePath } from "../shared/paths";
 import { activeEditor } from "./editor/EditorGroup";
+import { activeLiveEditor } from "./editor/liveBridge";
 import {
 	catalogItems,
 	catalogTemplate,
@@ -34,6 +49,7 @@ import {
 	decisionTemplate,
 	DOC_FOLDERS,
 	KNOWLEDGE,
+	PROMPTS,
 	promptTemplate,
 	questionTemplate,
 	referenceTemplate,
@@ -67,11 +83,22 @@ import { backend } from "./backend";
 import { ask, choose } from "./dialogs";
 import { toggleTask } from "../shared/tasks";
 import type { LinkMend } from "../shared/docChecks";
-import { ownLinkEdits, withLinkFiles, type LinkEdit } from "../shared/docLinks";
-import { parsePlan, isPlanPath } from "./plan/model";
+import { linkFile, linkWritten, ownLinkEdits, rewriteHeadingReferences, withLinkFiles, type LinkEdit } from "../shared/docLinks";
+import { parsePlan, printPlan, isPlanPath } from "./plan/model";
 import { docs, isMarkdown } from "./project";
-import { descendantTickets, ticketAtHand as listedTicketAtHand, scriptsForTicket, ticketWork, workFor, workLabel, workText, type WorkTextOptions } from "../shared/workContext";
-import { finishMarkdown } from "./editor/markdownHtml";
+import {
+	codeMatchesRef,
+	descendantTickets,
+	ticketAtHand as listedTicketAtHand,
+	scriptsForTicket,
+	ticketForFile,
+	ticketWork,
+	workFor,
+	workLabel,
+	workText,
+	type WorkTextOptions,
+} from "../shared/workContext";
+import { finishMarkdown, loadKatex } from "./editor/markdownHtml";
 import { activeDoc, activePath, applyText, canonical, documents, fileRemoved, fileRenamed, notify, openFile, save, saveSetting, setState, state } from "./state";
 
 const today = () => localDay();
@@ -205,8 +232,12 @@ function ticketOfOpen(): string {
 	return many(values.ticket)[0] ?? many(values.tickets)[0] ?? "";
 }
 
-/** The ticket at hand: the open document's, or else the one ticket that is under way. "" when it cannot be told. */
-export const ticketAtHand = (): string => ticketOfOpen() || listedTicketAtHand(docs(), activePath());
+/** The ticket at hand: active workspace ticket, governing ticket for the open file, the open doc's own ticket, or the sole active ticket. "" when it cannot be told. */
+export const ticketAtHand = (): string =>
+	state.settings.activeTicket?.trim() ||
+	ticketForFile(docs(), activePath(), state.workspace?.root) ||
+	ticketOfOpen() ||
+	listedTicketAtHand(docs(), activePath());
 
 /**
  * The work a ticket is, as text for an agent that cannot read the folder, and
@@ -408,7 +439,17 @@ export async function importTickets() {
 			const dest = destPath(ticket);
 			const was = before[at] ?? (await current(dest));
 			if (was === null) {
-				await put(dest, ticketTemplate(ticket), false);
+				let fresh = ticketTemplate(ticket);
+				if (ticket.acceptanceCriteria?.trim()) {
+					const ac = ticket.acceptanceCriteria.trim();
+					const donePlaceholder = /^## What done looks like\r?\n\r?\n- \[ \] What must be true when this is done:[^\r\n]*/m;
+					if (donePlaceholder.test(fresh)) {
+						fresh = fresh.replace(donePlaceholder, () => `## What done looks like\n\n${ac}`);
+					} else {
+						fresh = fresh.replace(/^## What done looks like\r?\n+/m, (m) => `${m}${ac}\n\n`);
+					}
+				}
+				await put(dest, fresh, false);
 				counts.made++;
 				continue;
 			}
@@ -434,6 +475,15 @@ export async function importTickets() {
 			for (const relKey of ticket.related) now = addToFrontMatterList(now, "related", relKey) ?? now;
 			for (const blk of ticket.blocks ?? []) now = addToFrontMatterList(now, "blocks", blk) ?? now;
 			for (const by of ticket.blockedBy ?? []) now = addToFrontMatterList(now, "blocked-by", by) ?? now;
+			// Hydrate untouched stub descriptions only when the template prompt is still verbatim (ADR 0009: never overwrite human-edited descriptions).
+			if (ticket.description?.trim() && now.includes(PROMPTS.ticket)) {
+				const cutAt = bodyOffset(now);
+				const headPart = now.slice(0, cutAt);
+				const bodyPart = now.slice(cutAt);
+				if (bodyPart.includes(PROMPTS.ticket)) {
+					now = headPart + bodyPart.replace(PROMPTS.ticket, () => ticket.description.trim());
+				}
+			}
 			if (now === was) counts.same++;
 			else {
 				await put(dest, now, true);
@@ -461,30 +511,55 @@ export async function newSpec() {
 /**
  * The code a new question or decision is about: what is selected in the
  * editor, when it is in a file that is not one of the project's documents.
- * Null when nothing is selected.
+ * When `allowEmptySelection` is true (e.g. invoked from a code file's Docs menu
+ * or context menu with no selection), falls back to the current file and cursor line.
  */
-function codeAtHand(): { path: string; from: number; to: number; text: string; language: string } | null {
-	const path = activePath();
+function codeAtHand(options?: {
+	allowEmptySelection?: boolean;
+	codePath?: string;
+	codeLine?: number;
+}): { path: string; from: number; to: number; text: string; language: string; hasExcerpt: boolean } | null {
+	const path = options?.codePath ?? activePath();
 	const editor = activeEditor();
 	const model = editor?.getModel();
-	const selection = editor?.getSelection();
-	if (!path || !editor || !model || !selection || selection.isEmpty()) return null;
-	if (isMarkdown(path)) return null;
+	if (!path || isMarkdown(path) || isPlanPath(path)) return null;
 	const df = canonical(docsFolder());
 	if (df !== canonical(root()) && isInside(df, path)) return null;
-	// Whole lines: a selection that stops at a line's start does not take that line.
-	const to = selection.endColumn === 1 && selection.endLineNumber > selection.startLineNumber ? selection.endLineNumber - 1 : selection.endLineNumber;
-	const language = model.getLanguageId();
-	return { path, from: selection.startLineNumber, to, text: model.getValueInRange({ startLineNumber: selection.startLineNumber, startColumn: 1, endLineNumber: to, endColumn: model.getLineMaxColumn(to) }), language: language === "plaintext" ? "" : language };
+	const sameModel = Boolean(editor && model && (!options?.codePath || canonical(options.codePath) === canonical(activePath() ?? "")));
+	const selection = sameModel ? editor?.getSelection() : null;
+	if (sameModel && model && selection && !selection.isEmpty()) {
+		// Whole lines: a selection that stops at a line's start does not take that line.
+		const to = selection.endColumn === 1 && selection.endLineNumber > selection.startLineNumber ? selection.endLineNumber - 1 : selection.endLineNumber;
+		const language = model.getLanguageId();
+		return {
+			path,
+			from: selection.startLineNumber,
+			to,
+			text: model.getValueInRange({ startLineNumber: selection.startLineNumber, startColumn: 1, endLineNumber: to, endColumn: model.getLineMaxColumn(to) }),
+			language: language === "plaintext" ? "" : language,
+			hasExcerpt: true,
+		};
+	}
+	if (!options?.allowEmptySelection) return null;
+	const line = Math.max(1, options.codeLine ?? (sameModel ? editor?.getPosition()?.lineNumber : undefined) ?? 1);
+	const language = sameModel && model ? model.getLanguageId() : "";
+	return { path, from: line, to: line, text: "", language: language === "plaintext" ? "" : language, hasExcerpt: false };
 }
 
 /** Something for the knowledge base: a decision, a question, a snippet or a reference note. */
-export async function newKnowledge(kind: KnowledgeKind["id"], options?: { ticket?: string }) {
+export async function newKnowledge(
+	kind: KnowledgeKind["id"],
+	options?: { ticket?: string; codePath?: string; codeLine?: number; allowEmptySelection?: boolean },
+) {
 	if (!ready()) return;
 	const what = KNOWLEDGE.find((k) => k.id === kind)!;
 	const folder = joinPath(areaFolder("knowledge"), kind);
 	// Read before anything is asked: a dialog takes the keyboard, and the selection with it.
-	const code = kind === "questions" || kind === "decisions" || kind === "snippets" ? codeAtHand() : null;
+	const allowEmpty = kind !== "snippets" && Boolean(options?.allowEmptySelection || options?.codePath || activeEditor()?.hasTextFocus());
+	const code =
+		kind === "questions" || kind === "decisions" || kind === "snippets"
+			? codeAtHand({ allowEmptySelection: allowEmpty, codePath: options?.codePath, codeLine: options?.codeLine })
+			: null;
 	const aboutCode = code ? ` (about ${code.from === code.to ? `line ${code.from}` : `lines ${code.from} to ${code.to}`} of ${baseName(code.path)})` : "";
 	const title = (await ask(kind === "questions" ? `The question, as you would ask it${aboutCode}` : kind === "snippets" ? `What the snippet is for, in a few words${aboutCode}` : kind === "prompts" ? "What the prompt is for, in a few words" : `The ${what.one}, in a few words${aboutCode}`))?.trim();
 	if (!title) return;
@@ -495,14 +570,26 @@ export async function newKnowledge(kind: KnowledgeKind["id"], options?: { ticket
 		if (!language) return;
 		const lang = language === "SQL" ? "sql" : "ssl";
 		const header = snippetTemplate({ title, language: lang });
-		const body = code ? `${header.replace(/\n*$/, "\n\n")}${code.text}\n` : header;
+		const body = code?.hasExcerpt ? `${header.replace(/\n*$/, "\n\n")}${code.text}\n` : header;
 		return start(joinPath(folder, `${slug(title)}.${lang}`), body, "knowledge");
 	}
 	if (kind === "reference") return start(joinPath(folder, `${slug(title)}.md`), referenceTemplate({ title }), "knowledge");
 	if (kind === "prompts") return start(joinPath(folder, `${slug(title)}.md`), promptTemplate({ title }), "knowledge");
-	const ticket = options?.ticket || ticketAtHand() || undefined;
-	// Started with code selected, it is about that code: it says where, and keeps the lines as they were.
-	const about = code ? codeSection({ file: relativeTo(root(), code.path).split("\\").join("/"), link: relativePath(folder, code.path), from: code.from, to: code.to, text: code.text, language: code.language, date: today() }) : "";
+	const ticket = options?.ticket || (code ? ticketForFile(docs(), code.path, root()) : "") || ticketAtHand() || undefined;
+	// Started with code selected (or from a code file), it is about that code: cites the file & line(s), and keeps selected lines verbatim.
+	const about = code
+		? code.hasExcerpt
+			? codeSection({
+					file: relativeTo(root(), code.path).split("\\").join("/"),
+					link: relativePath(folder, code.path),
+					from: code.from,
+					to: code.to,
+					text: code.text,
+					language: code.language,
+					date: today(),
+				})
+			: `\n## In the code\n\n[${relativeTo(root(), code.path).split("\\").join("/")}, line ${code.from}](${relativePath(folder, code.path).split("/").map(encodeURIComponent).join("/")}#L${code.from})\n`
+		: "";
 	if (kind === "questions") return start(joinPath(folder, `${slug(title)}.md`), questionTemplate({ title, date: today(), ticket }) + about, "knowledge");
 	// Decisions are numbered, so that one can be named by its number and they list in the order they were made.
 	const taken = (await backend.docs()).filter((d) => d.group === "knowledge" && d.kind === "decisions").map((d) => Number(/^(\d+)/.exec(baseName(d.name))?.[1] ?? 0));
@@ -586,7 +673,7 @@ export async function newSchema(id: SchemaKind["id"], inFolder?: string): Promis
 /** Which way a message goes, as it is asked: the word that is written, and what it means. */
 const WAYS: Record<string, string> = { In: "The project receives it", Out: "The project sends it", Both: "It goes each way" };
 
-/** A row for each object the schema folder's SQL creates: object, kind, used by (empty), status, and where it was found. */
+/** A row for each object the schema folder's SQL creates or alters: object, kind, used by (empty), ticket (empty), status, and where it was found. */
 async function schemaRows(): Promise<string> {
 	const rows: string[] = [];
 	const seen = new Set<string>();
@@ -594,11 +681,12 @@ async function schemaRows(): Promise<string> {
 		for (const file of (await backend.docs()).filter((d) => d.group === "schema" && d.exists && /\.(sql|ddl|pks|pkb)$/i.test(d.name))) {
 			const text = await current(file.path);
 			if (text === null) continue;
-			for (const made of extractSqlObjects(text)) {
+			const rel = relativeTo(root(), file.path).split("\\").join("/");
+			for (const made of extractSqlObjects(text, { includeAlter: true })) {
 				const key = made.name.toLowerCase();
 				if (seen.has(key)) continue;
 				seen.add(key);
-				rows.push(csvRow([made.name, made.kind, "", "found", `From ${relativeTo(root(), file.path).split("\\").join("/")}`]));
+				rows.push(csvRow([made.name, made.kind, "", "", "found", `From ${rel}`]));
 			}
 		}
 	} catch {
@@ -649,17 +737,53 @@ export async function setStatus(path: string, status: string) {
 		return;
 	}
 
-	// Decision Supersede flow: offer to create a linked superseding ADR and cross-link both frontmatters.
+	// Decision Supersede flow: offer to link an existing ADR OR create a new superseding ADR and cross-link both frontmatters.
 	const decisionDoc = docs().find((d) => d.group === "knowledge" && d.kind === "decisions" && canonical(d.path) === canonical(path));
 	if (decisionDoc && status.toLowerCase() === "superseded" && ready()) {
+		const LINK_EXISTING = "Link existing decision…";
 		const CREATE = "Create superseding decision…";
-		const picked = await choose("Link a new superseding decision to this ADR?", [CREATE, "Skip"], {
+		const picked = await choose("Link a superseding decision to this ADR?", [LINK_EXISTING, CREATE, "Skip"], {
 			details: {
+				[LINK_EXISTING]: "Pick an already-written decision and cross-link supersedes: / superseded-by:",
 				[CREATE]: "Creates the next numbered decision with supersedes: and adds superseded-by: here",
-				Skip: "Keep status as superseded without creating a new file",
+				Skip: "Keep status as superseded without linking a decision",
 			},
 		});
-		if (picked === CREATE) {
+		if (picked === LINK_EXISTING) {
+			const allDocs = await backend.docs().catch(() => docs());
+			const others = allDocs.filter(
+				(d) => d.exists && d.group === "knowledge" && d.kind === "decisions" && !isCatalog(d) && canonical(d.path) !== canonical(path),
+			);
+			if (!others.length) {
+				notify("No other decision documents exist yet.");
+				return;
+			}
+			const labels = others.map((d) => `${baseName(d.path).replace(/\.(md|markdown)$/i, "")}${d.title ? ` — ${d.title}` : ""}`);
+			const chosenLabel = await choose("Which existing decision supersedes this one?", labels);
+			if (!chosenLabel) return;
+			const targetDecision = others[labels.indexOf(chosenLabel)];
+			if (!targetDecision) return;
+			const oldStem = baseName(path).replace(/\.(md|markdown)$/i, "");
+			const newStem = baseName(targetDecision.path).replace(/\.(md|markdown)$/i, "");
+			const oldText = await current(path);
+			if (oldText !== null) {
+				const curBy = many(frontMatter(oldText).values["superseded-by"]);
+				const updatedOld = curBy.length
+					? addToFrontMatterList(oldText, "superseded-by", newStem)
+					: withFrontMatter(oldText, "superseded-by", frontValue(newStem));
+				if (updatedOld && updatedOld !== oldText) await put(path, updatedOld, true);
+			}
+			const targetText = await current(targetDecision.path);
+			if (targetText !== null) {
+				const curSup = many(frontMatter(targetText).values.supersedes);
+				const updatedTarget = curSup.length
+					? addToFrontMatterList(targetText, "supersedes", oldStem)
+					: withFrontMatter(targetText, "supersedes", frontValue(oldStem));
+				if (updatedTarget && updatedTarget !== targetText) await put(targetDecision.path, updatedTarget, true);
+			}
+			setState("treeVersion", (v) => v + 1);
+			notify(`Linked ${newStem} as superseding ${oldStem}.`);
+		} else if (picked === CREATE) {
 			const nextTitle = (await ask(`Title for the decision that supersedes “${decisionDoc.title || baseName(path)}”`))?.trim();
 			if (nextTitle && slug(nextTitle)) {
 				const folder = joinPath(areaFolder("knowledge"), "decisions");
@@ -904,40 +1028,121 @@ async function followNames(from: string, to: string, listed: DocFile[]) {
 		return;
 	}
 	const before = listed.some((file) => under(file.path, was)) ? listed : after.map((file) => (under(file.path, is) ? { ...file, path: was + file.path.slice(is.length) } : file));
-	if (!before.some((file) => under(file.path, was))) return;
 	let places: NameIn[];
 	try {
 		places = (await backend.namesIn()).map((place) => ({ ...place, path: canonical(place.path) }));
 	} catch {
 		return;
 	}
-	const follow = namesToFollow(places, before, after, moved, root());
-	if (!follow.length) return;
-	const holders = [...new Set(follow.map((place) => place.path))];
-	const where = holders.length === 1 ? relativeTo(root(), holders[0]!) : `${holders.length} documents`;
-	const said = `${follow.length === 1 ? "One link by name" : `${follow.length} links by name`} in ${where} no longer ${follow.length === 1 ? "means what it" : "mean what they"} meant, now that ${baseName(from)} is ${baseName(from) === baseName(to) ? `in ${relativeTo(root(), dirName(to)) || "the project's folder"}` : baseName(to)}.`;
-	const go = follow.length === 1 ? "Update it" : "Update them";
-	if ((await choose(said, [go])) !== go) return;
-	let done = 0;
-	for (const path of holders) {
-		const text = await current(path);
-		if (text === null) continue;
-		const changed = withNames(
-			text,
-			follow.filter((place) => place.path === path),
-		);
-		if (!changed.done) continue;
-		try {
-			await put(path, changed.text, true);
-			done += changed.done;
-		} catch (e: any) {
-			notify(String(e?.message ?? e), "error");
+	const follow: (NameIn & { instead: string })[] = before.some((file) => under(file.path, was))
+		? namesToFollow(places, before, after, moved, root())
+		: [];
+
+	// Also rewrite non-doc wikilink/embed references such as `![[old.png]]` or `![[samples/old.sql]]`.
+	const seenFollow = new Set(follow.map((p) => `${p.path}:${p.line}:${p.column}`));
+	const oldBase = baseName(was);
+	const newBase = baseName(is);
+	const wsRoot = root();
+	for (const place of places) {
+		const key = `${place.path}:${place.line}:${place.column}`;
+		if (seenFollow.has(key)) continue;
+		const raw = place.name.replace(/\\/g, "/").trim();
+		if (!raw) continue;
+		let instead: string | null = null;
+		if (raw.includes("/")) {
+			const cleanRaw = raw.replace(/^\.\//, "");
+			const candDoc = canonical(resolvePath(dirName(place.path), cleanRaw));
+			const candRoot = canonical(resolvePath(wsRoot, cleanRaw.replace(/^\/+/, "")));
+			if (under(candDoc, was)) {
+				const destPath = moved(candDoc);
+				const rel = relativePath(dirName(place.path), destPath).split("\\").join("/");
+				instead = raw.startsWith("./") && !rel.startsWith(".") ? `./${rel}` : rel;
+			} else if (under(candRoot, was)) {
+				const destPath = moved(candRoot);
+				const rel = relativeTo(wsRoot, destPath).split("\\").join("/");
+				instead = raw.startsWith("/") ? `/${rel}` : rel;
+			}
+		} else if (raw.toLowerCase() === oldBase.toLowerCase() && ((place as NameIn & { embed?: boolean }).embed || /\.[a-z0-9]{1,8}$/i.test(oldBase))) {
+			if (oldBase.toLowerCase() !== newBase.toLowerCase()) {
+				instead = newBase;
+			} else if (canonical(dirName(was)) === canonical(dirName(place.path)) && canonical(dirName(is)) !== canonical(dirName(place.path))) {
+				instead = relativePath(dirName(place.path), is).split("\\").join("/");
+			}
+		}
+		if (instead && instead !== place.name) {
+			seenFollow.add(key);
+			follow.push({ ...place, instead });
 		}
 	}
-	setState("treeVersion", (v) => v + 1);
-	if (done) notify(`${done} ${done === 1 ? "link by name was" : "links by name were"} written anew for ${baseName(to)}.`);
-	const left = follow.length - done;
-	if (left > 0) notify(`${left} of them ${left === 1 ? "is" : "are"} not where ${left === 1 ? "it was" : "they were"}: the document has changed since. Mend ${left === 1 ? "it" : "them"} in the text.`, "error");
+
+	if (follow.length) {
+		const holders = [...new Set(follow.map((place) => place.path))];
+		const where = holders.length === 1 ? relativeTo(root(), holders[0]!) : `${holders.length} documents`;
+		const said = `${follow.length === 1 ? "One link by name" : `${follow.length} links by name`} in ${where} no longer ${follow.length === 1 ? "means what it" : "mean what they"} meant, now that ${baseName(from)} is ${baseName(from) === baseName(to) ? `in ${relativeTo(root(), dirName(to)) || "the project's folder"}` : baseName(to)}.`;
+		const go = follow.length === 1 ? "Update it" : "Update them";
+		if ((await choose(said, [go])) === go) {
+			let done = 0;
+			for (const path of holders) {
+				const text = await current(path);
+				if (text === null) continue;
+				const changed = withNames(
+					text,
+					follow.filter((place) => place.path === path),
+				);
+				if (!changed.done) continue;
+				try {
+					await put(path, changed.text, true);
+					done += changed.done;
+				} catch (e: any) {
+					notify(String(e?.message ?? e), "error");
+				}
+			}
+			setState("treeVersion", (v) => v + 1);
+			if (done) notify(`${done} ${done === 1 ? "link by name was" : "links by name were"} written anew for ${baseName(to)}.`);
+			const left = follow.length - done;
+			if (left > 0) notify(`${left} of them ${left === 1 ? "is" : "are"} not where ${left === 1 ? "it was" : "they were"}: the document has changed since. Mend ${left === 1 ? "it" : "them"} in the text.`, "error");
+		}
+	}
+
+	// Follow decision `supersedes:` / `superseded-by:` frontmatter stems when renaming a decision file.
+	const movedDecision =
+		before.find((file) => file.path === was && file.group === "knowledge" && file.kind === "decisions") ??
+		after.find((file) => file.path === is && file.group === "knowledge" && file.kind === "decisions");
+	const oldStem = oldBase.replace(/\.(md|markdown)$/i, "");
+	const newStem = newBase.replace(/\.(md|markdown)$/i, "");
+	if (movedDecision && oldStem && newStem && oldStem.toLowerCase() !== newStem.toLowerCase()) {
+		const decisionUpdates: { path: string; next: string }[] = [];
+		for (const doc of after) {
+			if (!doc.exists || doc.group !== "knowledge" || doc.kind !== "decisions" || doc.path === is || isCatalog(doc)) continue;
+			const text = await current(doc.path);
+			if (text === null) continue;
+			let next = text;
+			for (const field of ["supersedes", "superseded-by"]) {
+				next = replaceInFrontMatterList(next, field, oldStem, newStem) ?? next;
+			}
+			if (next !== text) decisionUpdates.push({ path: doc.path, next });
+		}
+		if (decisionUpdates.length) {
+			const count = decisionUpdates.length;
+			const go = count === 1 ? "Update decision link" : `Update ${count} decisions`;
+			const said = `${count === 1 ? "One decision" : `${count} decisions`} still ${count === 1 ? "references" : "reference"} ${oldStem} in supersedes / superseded-by frontmatter.`;
+			if ((await choose(said, [go])) === go) {
+				let updatedCount = 0;
+				for (const item of decisionUpdates) {
+					try {
+						await put(item.path, item.next, true);
+						updatedCount++;
+					} catch (e: any) {
+						notify(String(e?.message ?? e), "error");
+					}
+				}
+				if (updatedCount) {
+					setState("treeVersion", (v) => v + 1);
+					notify(`Updated supersedes / superseded-by in ${updatedCount} ${updatedCount === 1 ? "decision" : "decisions"} for ${newStem}.`);
+				}
+			}
+		}
+	}
 }
 
 /** Where the project stands, in plain words. */
@@ -1056,7 +1261,19 @@ export async function updateManifest() {
 		const own = relativeTo(root(), path).split("\\").join("/");
 		const files = (await backend.manifest()).filter((file) => file.path !== own);
 		const before = await current(path);
-		const change = mergeManifest(before, files);
+		let change = mergeManifest(before, files);
+		if (change.changedAfterDone.length > 0) {
+			const n = change.changedAfterDone.length;
+			const preview = change.changedAfterDone.slice(0, 4).join(", ") + (n > 4 ? `, and ${n - 4} more` : "");
+			const MARK = n === 1 ? "Mark as changed" : `Mark ${n} files as changed`;
+			const KEEP = "Keep existing status";
+			const picked = await choose(
+				`${n === 1 ? "One verified or migrated file" : `${n} verified or migrated files`} changed since its checksum was recorded (${preview}). Mark ${n === 1 ? "it" : "them"} as "changed" for re-verification?`,
+				[MARK, KEEP],
+			);
+			if (!picked) return;
+			if (picked === MARK) change = mergeManifest(before, files, { markChangedAfterDone: true });
+		}
 		if (before !== change.text) await put(path, change.text, before !== null);
 		setState("treeVersion", (v) => v + 1);
 		notify(manifestSummary(change));
@@ -1254,15 +1471,12 @@ export async function unlinkDocumentFromTicket(ticketPath: string, key: string, 
 		const dBefore = await current(target.path);
 		if (dBefore !== null) {
 			if (target.group === "plans" && isPlanPath(target.path)) {
-				try {
-					const parsed = JSON.parse(dBefore);
-					if (typeof parsed?.ticket === "string" && parsed.ticket.toLowerCase() === key.toLowerCase()) {
-						delete parsed.ticket;
-						await put(target.path, `${JSON.stringify(parsed, null, 2)}\n`, true);
-						changed = true;
-					}
-				} catch {
-					// Invalid JSON plan left untouched.
+				const parsed = parsePlan(dBefore);
+				if (parsed.plan && typeof parsed.plan.ticket === "string" && parsed.plan.ticket.toLowerCase() === key.toLowerCase()) {
+					const nextPlan = { ...parsed.plan };
+					delete nextPlan.ticket;
+					await put(target.path, printPlan(nextPlan), true);
+					changed = true;
 				}
 			} else if (isMarkdown(target.path)) {
 				let dNext = dBefore;
@@ -1413,10 +1627,17 @@ function replaceTicketKeyInCsv(text: string, oldKey: string, newKey: string): st
 /** Bundle-aware ticket trash: handles Layout 1 (`KEY/KEY.md`), Layout 2 (`KEY.md` + sibling `KEY/`), and incoming link checks. */
 export async function trashTicket(file: DocFile): Promise<void> {
 	if (!ready()) return;
+	const clearActiveIfMatching = async () => {
+		if (file.ticket && state.settings.activeTicket?.trim().toLowerCase() === file.ticket.toLowerCase()) {
+			await saveSetting({ activeTicket: null }, "workspace");
+		}
+	};
 	const isLayout1 = Boolean(file.ticketFolder && isInside(file.ticketFolder, file.path));
 	const isLayout2 = Boolean(file.ticketFolder && !isLayout1);
 	if (!file.ticketFolder) {
 		await (await import("./panels/Explorer")).trashFile(file.path);
+		const stillExists = await backend.read(file.path).then(() => true, () => false);
+		if (!stillExists) await clearActiveIfMatching();
 		return;
 	}
 	const folder = file.ticketFolder;
@@ -1465,11 +1686,13 @@ export async function trashTicket(file: DocFile): Promise<void> {
 			await backend.trash(folder);
 			fileRemoved(folder);
 			retargetScopedFolder(folder, null);
+			await clearActiveIfMatching();
 			setState("treeVersion", (v) => v + 1);
 			notify(`Moved ${isLayout2 ? `${baseName(file.path)} and ` : ""}${relFolder}/ to the trash.`);
 		} else {
 			await backend.trash(file.path);
 			fileRemoved(file.path);
+			await clearActiveIfMatching();
 			setState("treeVersion", (v) => v + 1);
 			notify(`Moved ${relativeTo(root(), file.path)} to the trash.`);
 		}
@@ -1596,14 +1819,11 @@ export async function renameTicket(file: DocFile): Promise<void> {
 			const text = await current(docPath);
 			if (text === null) continue;
 			if (doc.group === "plans" && isPlanPath(docPath)) {
-				try {
-					const parsed = JSON.parse(text);
-					if (typeof parsed?.ticket === "string" && parsed.ticket.toLowerCase() === oldKey.toLowerCase()) {
-						parsed.ticket = newKey;
-						await put(docPath, `${JSON.stringify(parsed, null, 2)}\n`, true);
-						refactored++;
-					}
-				} catch {}
+				const parsed = parsePlan(text);
+				if (parsed.plan && typeof parsed.plan.ticket === "string" && parsed.plan.ticket.toLowerCase() === oldKey.toLowerCase()) {
+					await put(docPath, printPlan({ ...parsed.plan, ticket: newKey }), true);
+					refactored++;
+				}
 			} else if (doc.group === "registries" && /\.(csv|tsv)$/i.test(doc.name)) {
 				const next = replaceTicketKeyInCsv(text, oldKey, newKey);
 				if (next !== text) {
@@ -1620,6 +1840,9 @@ export async function renameTicket(file: DocFile): Promise<void> {
 					refactored++;
 				}
 			}
+		}
+		if (state.settings.activeTicket?.trim().toLowerCase() === oldKey.toLowerCase()) {
+			await saveSetting({ activeTicket: newKey }, "workspace");
 		}
 		setState("treeVersion", (v) => v + 1);
 		notify(`Renamed ${oldKey} to ${newKey}${refactored ? ` and updated ${refactored} referencing ${refactored === 1 ? "file" : "files"}` : ""}.`);
@@ -1683,6 +1906,9 @@ export async function archiveTicket(file: DocFile): Promise<void> {
 			}
 		} else if (isLayout1) {
 			retargetScopedFolder(fromPrimary, toPrimary);
+		}
+		if (file.ticket && state.settings.activeTicket?.trim().toLowerCase() === file.ticket.toLowerCase()) {
+			await saveSetting({ activeTicket: null }, "workspace");
 		}
 		setState("treeVersion", (v) => v + 1);
 		const coMoved = fromSibling && toSibling ? [{ from: fromSibling, to: toSibling }] : undefined;
@@ -1955,7 +2181,7 @@ export async function appendNoteToTicket(key: string, noteMarkdown: string): Pro
 	}
 }
 
-/** Parses `CREATE TABLE` DDL from a schema SQL file and generates a Markdown table reference doc. */
+/** Parses `CREATE TABLE` / `ALTER TABLE ADD` DDL from a schema SQL file and creates or non-destructively updates a Markdown table reference doc. */
 export async function generateSchemaDocFromSql(sqlPath?: string): Promise<void> {
 	if (!ready()) return;
 	let sourcePath = sqlPath;
@@ -1970,23 +2196,51 @@ export async function generateSchemaDocFromSql(sqlPath?: string): Promise<void> 
 	if (!sourcePath) return;
 	const sqlText = await current(sourcePath);
 	if (sqlText === null) return notify("Could not read the SQL file.", "error");
-	const tables = parseCreateTables(sqlText);
-	if (!tables.length) return notify(`No CREATE TABLE statements were found in ${baseName(sourcePath)}.`);
+	const tables = parseCreateTables(sqlText, { includeStandaloneAlter: true });
+	if (!tables.length) return notify(`No CREATE TABLE or ALTER TABLE ADD statements were found in ${baseName(sourcePath)}.`);
 	const relSql = relativeTo(root(), sourcePath).split("\\").join("/");
+	const schemaEntries = await backend.list(schemaFolder()).catch(() => []);
+	const dbFolderEntry = schemaEntries.find((e) => e.kind === "dir" && e.name.toLowerCase() === "database");
+	const existingDbDoc = docs().find((d) => d.exists && d.group === "schema" && d.kind === "database" && d.name.includes("/"));
+	const dbSubfolder = dbFolderEntry?.name || existingDbDoc?.name.split(/[\\/]/)[0] || "database";
 	const defaultName = tables.length === 1 ? tables[0]!.tableName : baseName(sourcePath).replace(/\.[^.]+$/, "");
-	const name = (await ask("Table document name (saved under schema/database/)", defaultName))?.trim();
+	const name = (await ask(`Table document name (saved under ${state.project!.schema}/${dbSubfolder}/)`, defaultName))?.trim();
 	if (!name) return;
 	const named = typedParts(name, "file");
 	if ("problem" in named || named.parts.length !== 1) return notify("Give a single valid filename.", "error");
-	const dest = joinPath(schemaFolder(), "database", `${named.parts[0]}.md`);
+	const dest = joinPath(schemaFolder(), dbSubfolder, `${named.parts[0]}.md`);
+	const existingMd = await current(dest);
+	if (existingMd !== null) {
+		const merged = mergeSqlTablesIntoMarkdown(existingMd, tables, relSql);
+		let nextText = merged.text;
+		if (!one(frontMatter(nextText).values.source)) {
+			nextText = withFrontMatter(nextText, "source", relSql) ?? nextText;
+		}
+		if (nextText === existingMd) {
+			notify(`${baseName(dest)} is already up to date with ${baseName(sourcePath)}.`);
+			await openFile(dest);
+			return;
+		}
+		await put(dest, nextText, true);
+		setState("treeVersion", (v) => v + 1);
+		const parts = [
+			merged.addedTables ? `${merged.addedTables} ${merged.addedTables === 1 ? "table" : "tables"} added` : "",
+			merged.addedColumns ? `${merged.addedColumns} ${merged.addedColumns === 1 ? "column" : "columns"} added` : "",
+			merged.updatedColumns ? `${merged.updatedColumns} ${merged.updatedColumns === 1 ? "column" : "columns"} updated` : "",
+		].filter(Boolean);
+		notify(`Synced ${baseName(dest)} from ${baseName(sourcePath)}${parts.length ? ` (${parts.join(", ")})` : ""}.`);
+		await openFile(dest);
+		return;
+	}
+	const docTitle = tables.length === 1 ? tables[0]!.tableName : name;
 	const mdBody = [
 		"---",
-		`title: ${tables.length === 1 ? tables[0]!.tableName : name}`,
+		`title: ${quoteYamlScalar(docTitle)}`,
 		`status: draft`,
-		`source: ${relSql}`,
+		`source: ${quoteYamlScalar(relSql)}`,
 		"---",
 		"",
-		`# ${tables.length === 1 ? tables[0]!.tableName : name}`,
+		`# ${docTitle}`,
 		"",
 		sqlTablesToMarkdown(tables, relSql).trimEnd(),
 		"",
@@ -2001,14 +2255,203 @@ function rewriteRelativeImagesForBase(md: string, srcDocPath: string, baseDocPat
 	const baseDir = dirName(baseDocPath);
 	return md.replace(/!\[([^\]]*)\]\(([^)\s]+)(\s+"[^"]*")?\)/g, (full, alt: string, url: string, title?: string) => {
 		if (!url || /^(?:https?:|data:|\/)/i.test(url)) return full;
-		const resolved = resolvePath(srcDir, url);
-		const rel = relativePath(baseDir, resolved).split("\\").join("/");
+		const decoded = linkFile(url);
+		const resolved = resolvePath(srcDir, decoded);
+		const rel = linkWritten(relativePath(baseDir, resolved).split("\\").join("/"), url);
 		return `![${alt}](${rel}${title ?? ""})`;
 	});
 }
 
+const EMBED_IMAGE_RE = /\.(?:png|jpe?g|gif|webp|svg|bmp|ico|avif)$/i;
+
+/** Extracts a single ATX heading section (including subheadings) from a Markdown body. */
+function extractMarkdownSection(body: string, headingQuery: string): string | null {
+	const lineNum = findHeadingLine(body, headingQuery);
+	if (!lineNum) return null;
+	const lines = body.split(/\r?\n/);
+	const startIdx = lineNum - 1;
+	const headMatch = /^[ \t]{0,3}(#{1,6})[ \t]+/.exec(lines[startIdx] ?? "");
+	if (!headMatch) return null;
+	const level = headMatch[1]!.length;
+	const out: string[] = [lines[startIdx]!];
+	let fenceChar = "";
+	let fenceLen = 0;
+	for (let i = startIdx + 1; i < lines.length; i++) {
+		const ln = lines[i]!;
+		const fm = /^[ \t]{0,3}(`{3,}|~{3,})/.exec(ln);
+		if (fm) {
+			if (!fenceChar) {
+				fenceChar = fm[1]![0]!;
+				fenceLen = fm[1]!.length;
+			} else if (fm[1]![0] === fenceChar && fm[1]!.length >= fenceLen && /^[ \t]*$/.test(ln.slice(fm[0].length))) {
+				fenceChar = "";
+				fenceLen = 0;
+			}
+			out.push(ln);
+			continue;
+		}
+		if (!fenceChar) {
+			const hm = /^[ \t]{0,3}(#{1,6})[ \t]+/.exec(ln);
+			if (hm && hm[1]!.length <= level) break;
+		}
+		out.push(ln);
+	}
+	return out.join("\n").trim();
+}
+
+/** Wraps an embedded workspace code/SQL file in a backtick fence safe against inner backticks. */
+function fenceEmbeddedCode(text: string, filePath: string): string {
+	const ext = baseName(filePath).split(".").pop()?.toLowerCase() ?? "";
+	const lang =
+		ext === "sql" || ext === "ddl" || ext === "pks" || ext === "pkb" || ext === "ds"
+			? "sql"
+			: ext === "ssl" || ext === "srvscr"
+				? "ssl"
+				: ext === "xfd" || ext === "xml"
+					? "xml"
+					: ext === "json" || ext === "jsonc"
+						? "json"
+						: ext === "ts" || ext === "tsx"
+							? "ts"
+							: ext === "js" || ext === "jsx"
+								? "js"
+								: ext === "css"
+									? "css"
+									: ext === "html" || ext === "htm"
+										? "html"
+										: ext === "yaml" || ext === "yml"
+											? "yaml"
+											: ext === "toml"
+												? "toml"
+												: ext === "csv" || ext === "tsv"
+													? "csv"
+													: "";
+	const clean = text.replace(/\r\n/g, "\n").replace(/\n+$/, "");
+	let maxTicks = 2;
+	for (const m of clean.matchAll(/`+/g)) {
+		if (m[0].length > maxTicks) maxTicks = m[0].length;
+	}
+	const fence = "`".repeat(maxTicks + 1);
+	return `${fence}${lang}\n${clean}\n${fence}`;
+}
+
+/**
+ * Cycle-guarded pre-export transclusion expander (depth limit 2) resolving
+ * `![[note]]`, `![[note#Heading]]`, and workspace file embeds like `![[path/file.sql]]`
+ * outside fenced code blocks. Image embeds (`![[diagram.png]]`) are preserved as-is.
+ */
+async function expandTransclusionsForExport(
+	markdown: string,
+	docPath: string,
+	depth = 0,
+	visited?: Set<string>,
+): Promise<string> {
+	const MAX_DEPTH = 2;
+	if (depth >= MAX_DEPTH || !markdown.includes("![[")) return markdown;
+	const seen = visited ?? new Set<string>([canonical(docPath)]);
+	const fmCut = bodyOffset(markdown);
+	const head = markdown.slice(0, fmCut);
+	const body = markdown.slice(fmCut).replace(/\r\n/g, "\n");
+	const allDocs = docs();
+	const wsRoot = state.workspace?.root ?? "";
+	const nameIdx = buildDocNameIndex(allDocs, wsRoot);
+	const lines = body.split("\n");
+	const out: string[] = [];
+	let fenceChar = "";
+	let fenceLen = 0;
+	let currentHeadingLevel = 1;
+
+	for (const line of lines) {
+		const fm = /^[ \t]{0,3}(`{3,}|~{3,})/.exec(line);
+		if (fm) {
+			if (!fenceChar) {
+				fenceChar = fm[1]![0]!;
+				fenceLen = fm[1]!.length;
+			} else if (fm[1]![0] === fenceChar && fm[1]!.length >= fenceLen && /^[ \t]*$/.test(line.slice(fm[0].length))) {
+				fenceChar = "";
+				fenceLen = 0;
+			}
+			out.push(line);
+			continue;
+		}
+		if (fenceChar) {
+			out.push(line);
+			continue;
+		}
+		const hm = /^[ \t]{0,3}(#{1,6})[ \t]+/.exec(line);
+		if (hm) currentHeadingLevel = hm[1]!.length;
+
+		const em = /^[ \t]*!\[\[([^[\]\n]+)\]\][ \t]*$/.exec(line);
+		if (!em) {
+			out.push(line);
+			continue;
+		}
+		const parsed = namedLink(em[1]!.replace(/\\\|/g, "|"));
+		if (!parsed || EMBED_IMAGE_RE.test(parsed.name)) {
+			out.push(line);
+			continue;
+		}
+
+		// Resolve target either as a known project doc or as a workspace file path.
+		let targetPath: string | null = null;
+		const docMatch = lookupInIndex(parsed.name, nameIdx);
+		if (docMatch) {
+			targetPath = docMatch.path;
+		} else if (wsRoot) {
+			const cleaned = parsed.name.replace(/\\/g, "/").trim();
+			const candidates = [
+				resolvePath(dirName(docPath), cleaned),
+				resolvePath(wsRoot, cleaned.replace(/^\/+/, "")),
+			];
+			for (const cand of candidates) {
+				if (!isInside(wsRoot, cand)) continue;
+				const probe = await current(cand);
+				if (probe !== null) {
+					targetPath = cand;
+					break;
+				}
+			}
+		}
+		if (!targetPath) {
+			out.push(line);
+			continue;
+		}
+		const canonTarget = canonical(targetPath);
+		if (seen.has(canonTarget)) {
+			// Cycle guard: keep a quiet note instead of recursing infinitely.
+			out.push(line);
+			continue;
+		}
+		const targetText = await current(targetPath);
+		if (targetText === null) {
+			out.push(line);
+			continue;
+		}
+		if (isMarkdown(targetPath)) {
+			const targetBody = frontMatter(targetText).body.replace(/\r\n/g, "\n").trim();
+			const sliced = parsed.heading ? extractMarkdownSection(targetBody, parsed.heading) : targetBody;
+			if (!sliced) {
+				out.push(line);
+				continue;
+			}
+			const nextSeen = new Set(seen);
+			nextSeen.add(canonTarget);
+			const nested = await expandTransclusionsForExport(sliced, targetPath, depth + 1, nextSeen);
+			const rebased = rewriteRelativeImagesForBase(nested, targetPath, docPath);
+			const demoted = demoteMarkdownHeadings(rebased, Math.min(6, Math.max(2, currentHeadingLevel + 1))).trim();
+			out.push(demoted);
+		} else {
+			out.push(fenceEmbeddedCode(targetText, targetPath));
+		}
+	}
+
+	return head + out.join("\n");
+}
+
 async function renderCleanHtmlForExport(markdown: string, docPath: string): Promise<string> {
-	const rawBody = frontMatter(markdown).body.replace(/\r\n/g, "\n");
+	const expanded = await expandTransclusionsForExport(markdown, docPath);
+	const rawBody = transformMarkdownFootnotes(frontMatter(expanded).body.replace(/\r\n/g, "\n"), "html");
+	if (rawBody.includes("$")) await loadKatex().catch(() => {});
 	// 1. Pre-render fenced ```mermaid / ```mmd blocks (respecting outer fence nesting) & convert ![[image.png]] embeds.
 	const { renderMermaidSvgForExport } = await import("./editor/cmMermaid");
 	const mermaidSvgs: string[] = [];
@@ -2054,7 +2497,7 @@ async function renderCleanHtmlForExport(markdown: string, docPath: string): Prom
 		// Convert Obsidian image embeds `![[diagram.png|400]]` into standard Markdown images so marked + base64 inliner render them cleanly.
 		const withWikiImgs = line.replace(
 			/!\[\[([^[\]|#]+\.(?:png|jpe?g|gif|webp|svg|bmp|ico|avif))(?:\|([^[\]]*))?\]\]/gi,
-			(_, imgPath: string, altOrSize?: string) => `![${altOrSize?.trim() || baseName(imgPath)}](${imgPath.trim()})`,
+			(_, imgPath: string, altOrSize?: string) => `![${altOrSize?.trim() || baseName(imgPath)}](${linkWritten(imgPath.trim())})`,
 		);
 		rebuilt.push(withWikiImgs);
 	}
@@ -2077,7 +2520,7 @@ async function renderCleanHtmlForExport(markdown: string, docPath: string): Prom
 	};
 	const finished = finishMarkdown(clean, { tickets, named, anchors: true });
 
-	// 2. Transform DOM in a detached container: normalize callout icons (no PUA tofu boxes), ==highlight==, inline base64 images, and Mermaid SVGs.
+	// 2. Transform DOM in a detached container: normalize callout icons (no PUA tofu boxes), ==highlight==, image sizing, inline base64 images, and Mermaid SVGs.
 	if (typeof document === "undefined") return finished;
 	const box = document.createElement("div");
 	box.innerHTML = finished;
@@ -2089,6 +2532,7 @@ async function renderCleanHtmlForExport(markdown: string, docPath: string): Prom
 		warn: svgIcon('<path d="M7.56 1.97a.5.5 0 0 1 .88 0l6.4 11.78a.5.5 0 0 1-.44.75H1.6a.5.5 0 0 1-.44-.75L7.56 1.97zM7.25 6v4h1.5V6h-1.5zm0 5.25v1.5h1.5v-1.5h-1.5z"/>'),
 		danger: svgIcon('<path d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zm2.6 4.96L9.06 8l1.54 1.54-1.06 1.06L8 9.06 6.46 10.6 5.4 9.54 6.94 8 5.4 6.46 6.46 5.4 8 6.94 9.54 5.4l1.06 1.06z"/>'),
 		done: svgIcon('<path d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zm3.28 5.03-3.9 4.12a.75.75 0 0 1-1.08.02L4.72 9.1l1.06-1.06 1.04 1.04 3.38-3.57 1.08 1.02z"/>'),
+		important: svgIcon('<path d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zm-.75 3h1.5v4.5h-1.5V4.5zm0 6h1.5v1.5h-1.5v-1.5z"/>'),
 		quote: svgIcon('<path d="M3 4h4v4.5c0 2-1.2 3.3-3.2 3.8l-.4-1.3c1.2-.3 1.9-1.1 2-2.2H3V4zm6 0h4v4.5c0 2-1.2 3.3-3.2 3.8l-.4-1.3c1.2-.3 1.9-1.1 2-2.2H9V4z"/>'),
 		info: svgIcon('<path d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zm-.75 3.25h1.5v1.5h-1.5v-1.5zm0 2.75h1.5v4.25h-1.5V7.5z"/>'),
 	};
@@ -2098,7 +2542,8 @@ async function renderCleanHtmlForExport(markdown: string, docPath: string): Prom
 		const cls = callout.className;
 		if (/\btone-(?:warning|warn)\b/.test(cls)) iconEl.innerHTML = CALLOUT_SVG.warn;
 		else if (/\btone-(?:danger|error)\b/.test(cls)) iconEl.innerHTML = CALLOUT_SVG.danger;
-		else if (/\btone-(?:tip|success|done)\b/.test(cls)) iconEl.innerHTML = CALLOUT_SVG.done;
+		else if (/\btone-(?:ok|tip|success|done)\b/.test(cls)) iconEl.innerHTML = CALLOUT_SVG.done;
+		else if (/\btone-(?:accent|important)\b/.test(cls)) iconEl.innerHTML = CALLOUT_SVG.important;
 		else if (/\btone-(?:quote|muted)\b/.test(cls)) iconEl.innerHTML = CALLOUT_SVG.quote;
 		else iconEl.innerHTML = CALLOUT_SVG.info;
 	}
@@ -2112,31 +2557,6 @@ async function renderCleanHtmlForExport(markdown: string, docPath: string): Prom
 		fig.className = "md-mermaid-export";
 		fig.innerHTML = DOMPurify.sanitize(svg, { USE_PROFILES: { svg: true, svgFilters: true, html: true } });
 		holder.replaceWith(fig);
-	}
-
-	// Convert Obsidian callout blockquotes (`> [!kind] Title`) into styled `.md-callout` cards.
-	for (const bq of box.querySelectorAll("blockquote")) {
-		const firstP = bq.firstElementChild;
-		if (!firstP || firstP.tagName !== "P") continue;
-		const firstHtml = firstP.innerHTML;
-		const cm = /^\s*\[!([A-Za-z0-9_-]+)\][+-]?(?:[ \t]+([^\n<]*))?(?:<br\s*\/?>|\n)?([\s\S]*)$/i.exec(firstHtml);
-		if (!cm) continue;
-		const kind = cm[1]!.toLowerCase();
-		const titleText = cm[2]?.trim() || kind[0]!.toUpperCase() + kind.slice(1);
-		const restFirst = cm[3]?.trim() ?? "";
-		const card = document.createElement("div");
-		card.className = `md-callout md-callout-${kind}`;
-		const titleDiv = document.createElement("div");
-		titleDiv.className = "md-callout-title";
-		titleDiv.textContent = titleText;
-		card.append(titleDiv);
-		if (restFirst) {
-			const p = document.createElement("p");
-			p.innerHTML = restFirst;
-			card.append(p);
-		}
-		while (firstP.nextSibling) card.append(firstP.nextSibling);
-		bq.replaceWith(card);
 	}
 
 	// Convert `==highlight==` outside code/pre elements.
@@ -2158,13 +2578,18 @@ async function renderCleanHtmlForExport(markdown: string, docPath: string): Prom
 		tn.replaceWith(...Array.from(span.childNodes));
 	}
 
-	// Inline local workspace images as self-contained data URLs so exported HTML works offline.
+	// Apply Obsidian image sizing (`![alt|400]`, `![alt|400x250]`) & inline local workspace images as data URLs.
 	const { loadImageUrl } = await import("./editor/imageResolve");
 	const imgs = Array.from(box.querySelectorAll<HTMLImageElement>("img"));
 	for (const img of imgs) {
+		const rawAlt = img.getAttribute("alt") ?? "";
+		const parsedAlt = parseImageAltSize(rawAlt);
+		img.setAttribute("alt", parsedAlt.alt);
+		if (parsedAlt.width) img.style.width = `${parsedAlt.width}px`;
+		if (parsedAlt.height) img.style.height = `${parsedAlt.height}px`;
 		const rawSrc = img.getAttribute("src")?.trim() ?? "";
 		if (!rawSrc || /^https?:\/\//i.test(rawSrc) || /^data:/i.test(rawSrc)) continue;
-		const loaded = await loadImageUrl(rawSrc, docPath);
+		const loaded = await loadImageUrl(linkFile(rawSrc), docPath);
 		if (loaded?.url) img.setAttribute("src", loaded.url);
 	}
 
@@ -2184,7 +2609,12 @@ function downloadBlobFile(filename: string, content: string, mime: string) {
 }
 
 /** Saves an exported file into the workspace in desktop Electrobun builds, or downloads via Blob in browser builds. */
-async function saveExportFile(defaultRelPath: string, filename: string, content: string, mime: string): Promise<boolean> {
+async function saveExportFile(
+	defaultRelPath: string,
+	filename: string,
+	content: string | ((destPath: string) => string),
+	mime: string,
+): Promise<boolean> {
 	const { inApp } = await import("./backend");
 	if (inApp && state.workspace?.root) {
 		const picked = (await ask("Save export to (path in workspace)", defaultRelPath))?.trim();
@@ -2205,7 +2635,8 @@ async function saveExportFile(defaultRelPath: string, filename: string, content:
 			} else {
 				await backend.create(dest, "file");
 			}
-			await put(dest, content, true);
+			const payload = typeof content === "function" ? content(dest) : content;
+			await put(dest, payload, true);
 			setState("treeVersion", (v) => v + 1);
 			notify(`Saved export to ${relativeTo(state.workspace.root, dest)}.`);
 			return true;
@@ -2214,9 +2645,47 @@ async function saveExportFile(defaultRelPath: string, filename: string, content:
 			return false;
 		}
 	}
-	downloadBlobFile(filename, content, mime);
+	const fallbackDest = state.workspace?.root ? resolvePath(state.workspace.root, defaultRelPath) : defaultRelPath;
+	const payload = typeof content === "function" ? content(fallbackDest) : content;
+	downloadBlobFile(filename, payload, mime);
 	notify(`Exported ${filename}.`);
 	return true;
+}
+
+/** Saves an OpenXML `.docx` document generated by the backend inside the workspace (under `<docs>/exports/` by default). */
+async function saveDocxExport(defaultRelPath: string, title: string, subtitle: string | undefined, markdown: string): Promise<boolean> {
+	if (!state.workspace?.root) {
+		notify("Open a workspace folder before exporting to Word (.docx).", "error");
+		return false;
+	}
+	const picked = (await ask("Save Word document to (path in workspace)", defaultRelPath))?.trim();
+	if (!picked) return false;
+	const cleanRel = picked.replace(/\\/g, "/").replace(/^\/+/, "");
+	const withExt = /\.docx$/i.test(cleanRel) ? cleanRel : `${cleanRel}.docx`;
+	const dest = resolvePath(state.workspace.root, withExt);
+	if (!isInside(state.workspace.root, dest)) {
+		notify("Export path must stay inside the workspace.", "error");
+		return false;
+	}
+	try {
+		const sizes = await backend.sizes([dest]).catch(() => ({} as Record<string, number>));
+		if (dest in sizes) {
+			const OVERWRITE = "Overwrite file";
+			if ((await choose(`${relativeTo(state.workspace.root, dest)} already exists. Overwrite it?`, [OVERWRITE], { danger: OVERWRITE })) !== OVERWRITE) {
+				return false;
+			}
+		}
+		const res = await backend.exportDocx({ path: dest, title, subtitle, markdown });
+		setState("treeVersion", (v) => v + 1);
+		notify(`Saved Word document to ${relativeTo(state.workspace.root, res.path)}.`, "info", {
+			label: "Open externally",
+			run: () => void backend.openExternal(res.path),
+		});
+		return true;
+	} catch (e: any) {
+		notify(`Could not export Word document: ${e?.message ?? e}`, "error");
+		return false;
+	}
 }
 
 /** Prints standalone HTML cleanly using a hidden iframe (immune to popup blockers and works in Electrobun & Source mode). */
@@ -2255,33 +2724,44 @@ function printHtmlDocument(fullHtml: string) {
 	document.body.appendChild(frame);
 }
 
-/** Copies or exports a Markdown document as rich HTML, Jira/Confluence wiki markup, standalone HTML, or Print/PDF. */
+/** Copies or exports a Markdown document as rich HTML, Jira/Confluence wiki markup, standalone HTML, Print/PDF, or Word (.docx). */
 export async function exportDocAs(
 	path: string,
-	format: "html-copy" | "jira-copy" | "html-download" | "print",
+	format: "html-copy" | "jira-copy" | "html-download" | "print" | "docx",
 ): Promise<void> {
 	const text = await current(path);
 	if (text === null) return notify("Could not read the document.", "error");
 	const fm = frontMatter(text);
 	const title = one(fm.values.title) || baseName(path).replace(/\.(md|markdown)$/i, "");
 	const stem = baseName(path).replace(/\.(md|markdown)$/i, "");
+	const subtitle = state.project?.name ? `${state.project.name} · Exported ${today()}` : `Exported ${today()}`;
 
 	if (format === "jira-copy") {
-		const jira = markdownToJira(text);
+		const expanded = await expandTransclusionsForExport(text, path);
+		const withFootnotes = transformMarkdownFootnotes(frontMatter(expanded).body, "jira");
+		const jira = markdownToJira(withFootnotes);
 		const { copyText } = await import("./commands");
 		await copyText(jira, "Copied Jira / Confluence markup.");
+		return;
+	}
+
+	if (format === "docx") {
+		const expanded = await expandTransclusionsForExport(text, path);
+		const docsRel = (state.project?.docs ?? "docs").replace(/^[./\\]+|[\\/]+$/g, "");
+		await saveDocxExport(`${docsRel}/exports/${stem}.docx`, title, subtitle, expanded);
 		return;
 	}
 
 	const bodyHtml = await renderCleanHtmlForExport(text, path);
 
 	if (format === "html-copy") {
+		const styledHtml = inlineExportStyles(bodyHtml);
 		const plainText = fm.body.trim();
 		try {
 			if (typeof ClipboardItem !== "undefined" && navigator.clipboard?.write) {
 				await navigator.clipboard.write([
 					new ClipboardItem({
-						"text/html": new Blob([bodyHtml], { type: "text/html" }),
+						"text/html": new Blob([styledHtml], { type: "text/html" }),
 						"text/plain": new Blob([plainText], { type: "text/plain" }),
 					}),
 				]);
@@ -2292,11 +2772,10 @@ export async function exportDocAs(
 			// Fall back to plain clipboard write below.
 		}
 		const { copyText } = await import("./commands");
-		await copyText(bodyHtml, "Copied HTML to clipboard.");
+		await copyText(styledHtml, "Copied HTML to clipboard.");
 		return;
 	}
 
-	const subtitle = state.project?.name ? `${state.project.name} · Exported ${today()}` : `Exported ${today()}`;
 	const fullHtml = buildPrintableHtml(title, bodyHtml, subtitle);
 
 	if (format === "html-download") {
@@ -2308,8 +2787,8 @@ export async function exportDocAs(
 	printHtmlDocument(fullHtml);
 }
 
-/** Assembles and exports a complete Ticket Release Packet (HTML or Markdown) bundling all linked work & Readiness Gate. */
-export async function exportTicketPacket(ticketPath: string, key: string, format: "html" | "markdown"): Promise<void> {
+/** Assembles and exports a complete Ticket Release Packet (HTML, Markdown, or Word .docx) bundling all linked work & Readiness Gate. */
+export async function exportTicketPacket(ticketPath: string, key: string, format: "html" | "markdown" | "docx"): Promise<void> {
 	if (!ready()) return;
 	const ticketText = await current(ticketPath);
 	if (ticketText === null) return notify("Could not read the ticket.", "error");
@@ -2322,11 +2801,13 @@ export async function exportTicketPacket(ticketPath: string, key: string, format
 		const out: { title: string; status?: string; body: string }[] = [];
 		for (const f of files) {
 			const rawTxt = (await current(f.path)) ?? "";
-			out.push({ title: f.title || f.name, status: f.status, body: rewriteRelativeImagesForBase(rawTxt, f.path, ticketPath) });
+			const expanded = await expandTransclusionsForExport(rawTxt, f.path);
+			out.push({ title: f.title || f.name, status: f.status, body: rewriteRelativeImagesForBase(expanded, f.path, ticketPath) });
 		}
 		return out;
 	};
 
+	const expandedTicketText = await expandTransclusionsForExport(ticketText, ticketPath);
 	const specs = await readGroup("spec");
 	const decisions = await readGroup("decision");
 	const questions = [...(await readGroup("answer")), ...(await readGroup("question"))];
@@ -2383,7 +2864,7 @@ export async function exportTicketPacket(ticketPath: string, key: string, format
 		ticketTitle: ticketDoc?.title || key,
 		status: ticketDoc?.status,
 		parent: ticketDoc?.parent,
-		ticketBody: ticketText,
+		ticketBody: expandedTicketText,
 		specs,
 		plans,
 		subtickets,
@@ -2404,7 +2885,18 @@ export async function exportTicketPacket(ticketPath: string, key: string, format
 		: `${docsRel}/exports`;
 
 	if (format === "markdown") {
-		await saveExportFile(`${exportDir}/${key}-release-packet.md`, `${key}-release-packet.md`, packetMd, "text/markdown;charset=utf-8");
+		await saveExportFile(
+			`${exportDir}/${key}-release-packet.md`,
+			`${key}-release-packet.md`,
+			(outPath) => rewriteRelativeImagesForBase(packetMd, ticketPath, outPath),
+			"text/markdown;charset=utf-8",
+		);
+		return;
+	}
+
+	if (format === "docx") {
+		const subtitle = state.project?.name ? `${state.project.name} · Generated ${today()}` : `Generated ${today()}`;
+		await saveDocxExport(`${exportDir}/${key}-release-packet.docx`, `${key}: ${ticketDoc?.title || key} — Release Packet`, subtitle, packetMd);
 		return;
 	}
 
@@ -2420,14 +2912,15 @@ function extractRollbackSection(md: string): string {
 }
 
 /**
- * Exports a STARLIMS Deployment / Transport Manifest (Markdown, CSV, or HTML)
+ * Exports a STARLIMS Deployment / Transport Manifest (Markdown, CSV, HTML, or Word .docx)
  * aggregating the ticket + all recursive descendant tickets: SSL scripts & data sources,
- * SQL/DDL artifacts, affected CSV registry rows, readiness gate, rollback notes, and DEV->PROD sign-off.
+ * SQL/DDL artifacts, local Git committed files, affected CSV registry rows, readiness gate,
+ * rollback notes, and DEV->PROD sign-off.
  */
 export async function exportDeploymentManifest(
 	ticketPath: string,
 	key: string,
-	format: "markdown" | "csv" | "html",
+	format: "markdown" | "csv" | "html" | "docx",
 ): Promise<void> {
 	if (!ready()) return;
 	const ticketText = await current(ticketPath);
@@ -2526,20 +3019,69 @@ export async function exportDeploymentManifest(
 		rollbackNotes: rollbackNotes.length ? rollbackNotes : undefined,
 	};
 
+	// 5. Best-effort local Git commits mentioning any ticket in scope (files not already listed above).
+	const wsRoot = state.workspace?.root;
+	const gitCommitted: { status: string; commit: string; path: string; ticket: string }[] = [];
+	const seenGitFiles = new Set<string>();
+	const statusWord = (code: string) => {
+		const c = code.trim().toUpperCase()[0] ?? "";
+		return c === "A" ? "Added" : c === "D" ? "Deleted" : c === "R" ? "Renamed" : c === "C" ? "Copied" : "Modified";
+	};
+	const commitBatches = await Promise.all(scopeKeys.map(async (k) => ({ k, commits: await backend.gitTicketLog(k, 40).catch(() => []) })));
+	for (const { k, commits } of commitBatches) {
+		for (const commit of commits) {
+			for (const gf of commit.files) {
+				const cleanPath = gf.path.replace(/\\/g, "/");
+				const norm = cleanPath.toLowerCase();
+				if (seenGitFiles.has(norm)) continue;
+				const coveredByScripts = scripts.some((s) => codeMatchesRef(cleanPath, s.ref, wsRoot));
+				const coveredBySql = sqlArtifacts.some((s) => codeMatchesRef(cleanPath, s.path, wsRoot));
+				if (coveredByScripts || coveredBySql) continue;
+				seenGitFiles.add(norm);
+				gitCommitted.push({ status: statusWord(gf.status), commit: commit.shortSha, path: cleanPath, ticket: k });
+			}
+		}
+	}
+
 	const docsRel = (state.project?.docs ?? "docs").replace(/^[./\\]+|[\\/]+$/g, "");
 	const exportDir = ticketDoc?.ticketFolder
 		? `${relativeTo(root(), ticketDoc.ticketFolder).split("\\").join("/")}/exports`
 		: `${docsRel}/exports`;
 
 	if (format === "csv") {
-		const csv = assembleDeploymentManifestCsv(manifestInput);
+		let csv = assembleDeploymentManifestCsv(manifestInput);
+		if (gitCommitted.length) {
+			const extra = gitCommitted.map((g) => csvRow(["Git commit (local)", g.path, g.ticket, g.status, `Commit ${g.commit}`], ","));
+			csv = `${csv.trimEnd()}\n${extra.join("\n")}\n`;
+		}
 		await saveExportFile(`${exportDir}/${key}-deployment-manifest.csv`, `${key}-deployment-manifest.csv`, csv, "text/csv;charset=utf-8");
 		return;
 	}
 
-	const manifestMd = assembleDeploymentManifestMarkdown(manifestInput);
+	let manifestMd = assembleDeploymentManifestMarkdown(manifestInput);
+	if (gitCommitted.length) {
+		const escCell = (v: string) => v.replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+		const gitSection = [
+			"## Committed in Git (local)",
+			"",
+			"| Status | Commit | File |",
+			"| --- | --- | --- |",
+			...gitCommitted.map((g) => `| ${escCell(g.status)} | \`${escCell(g.commit)}\` | \`${escCell(g.path)}\` |`),
+			"",
+		].join("\n");
+		const rollbackMarker = "\n## Rollback Plan";
+		const at = manifestMd.indexOf(rollbackMarker);
+		manifestMd = at >= 0 ? `${manifestMd.slice(0, at)}\n${gitSection}${manifestMd.slice(at)}` : `${manifestMd.trimEnd()}\n\n${gitSection}`;
+	}
 	if (format === "markdown") {
 		await saveExportFile(`${exportDir}/${key}-deployment-manifest.md`, `${key}-deployment-manifest.md`, manifestMd, "text/markdown;charset=utf-8");
+		return;
+	}
+
+	if (format === "docx") {
+		const expanded = await expandTransclusionsForExport(manifestMd, ticketPath);
+		const subtitle = state.project?.name ? `${state.project.name} · Generated ${today()}` : `Generated ${today()}`;
+		await saveDocxExport(`${exportDir}/${key}-deployment-manifest.docx`, `${key}: ${ticketDoc?.title || key} — Deployment Manifest`, subtitle, expanded);
 		return;
 	}
 
@@ -2586,9 +3128,12 @@ export async function closeoutTicket(ticketPath: string, key: string): Promise<v
 		await setStatus(ticketPath, "done");
 	}
 
-	// 2. Append dated bullet to `docs/STATE.md` (creating it from template if absent).
+	// 2. Append dated bullet to `docs/STATE.md` (creating it from template if absent, honoring existing casing on Linux).
 	if (picked === DONE_STATE || picked === DONE_STATE_README) {
-		const statePath = joinPath(docsFolder(), STATE_FILE);
+		const stateDoc = allDocs.find(
+			(d) => d.exists && canonical(dirName(d.path)) === canonical(docsFolder()) && baseName(d.path).toLowerCase() === STATE_FILE.toLowerCase(),
+		);
+		const statePath = stateDoc?.path ?? joinPath(docsFolder(), STATE_FILE);
 		const existingState = await current(statePath);
 		const bullet = `- ${today()} — ${summaryLine}`;
 		if (existingState === null) {
@@ -2599,7 +3144,7 @@ export async function closeoutTicket(ticketPath: string, key: string): Promise<v
 			const headingRe = /^(##\s+(?:Completed|Recent(?:ly)?\s+(?:completed|done|milestones)|Done|History)[^\r\n]*\r?\n+)/im;
 			let nextState: string;
 			if (headingRe.test(existingState)) {
-				nextState = existingState.replace(headingRe, `$1${bullet}${eol}`);
+				nextState = existingState.replace(headingRe, (_, head: string) => `${head}${bullet}${eol}`);
 			} else {
 				const sep = existingState.endsWith("\n") ? eol : `${eol}${eol}`;
 				nextState = `${existingState}${sep}## Completed${eol}${eol}${bullet}${eol}`;
@@ -2608,16 +3153,17 @@ export async function closeoutTicket(ticketPath: string, key: string): Promise<v
 		}
 	}
 
-	// 3. Optionally promote completed milestone / capability note into `README.md`.
+	// 3. Optionally promote completed milestone / capability note into `README.md` (honoring existing casing on Linux).
 	if (picked === DONE_STATE_README) {
-		const readmePath = joinPath(root(), "README.md");
+		const readmeDoc = allDocs.find((d) => d.exists && d.group === "project" && baseName(d.path).toLowerCase() === "readme.md");
+		const readmePath = readmeDoc?.path ?? joinPath(root(), "README.md");
 		const existingReadme = await current(readmePath);
 		if (existingReadme !== null) {
 			const eol = existingReadme.includes("\r\n") ? "\r\n" : "\n";
 			const bullet = `- **${key}** (${today()}): ${summaryLine.replace(new RegExp(`^${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[:\\s—-]+`, "i"), "")}`;
 			const secRe = /^(##\s+(?:Completed|Milestones|Capabilities|Delivered|What this does)[^\r\n]*\r?\n+)/im;
 			const nextReadme = secRe.test(existingReadme)
-				? existingReadme.replace(secRe, `$1${bullet}${eol}`)
+				? existingReadme.replace(secRe, (_, head: string) => `${head}${bullet}${eol}`)
 				: `${existingReadme.trimEnd()}${eol}${eol}## Milestones${eol}${eol}${bullet}${eol}`;
 			await put(readmePath, nextReadme, true);
 		}
@@ -2750,4 +3296,142 @@ export async function pickActiveTicket(): Promise<void> {
 	const idx = ticketChoices.indexOf(picked);
 	const chosen = idx >= 0 ? allTickets[idx] : undefined;
 	if (chosen?.ticket) await setActiveTicket(chosen.ticket);
+}
+
+/**
+ * Renames a Markdown heading in the active document and rewrites `#anchor` / `[[Doc#Heading]]`
+ * references across all workspace Markdown docs, confirming impact first (ADR 0009), and
+ * refreshes any existing `<!-- toc -->` block in the source document.
+ */
+export async function renameHeadingAcrossWorkspace(targetPath?: string): Promise<void> {
+	if (!ready()) return;
+	const docPath = targetPath ?? activePath();
+	if (!docPath || !isMarkdown(docPath)) {
+		notify("Open a Markdown document first to rename a heading.");
+		return;
+	}
+	const sourceText = await current(docPath);
+	if (sourceText === null) return notify("Could not read the active Markdown document.", "error");
+	const headings = documentHeadings(sourceText);
+	if (!headings.length) {
+		notify("This document has no headings to rename.");
+		return;
+	}
+
+	// Determine the cursor line (works in both Live CM6 and Source Monaco modes).
+	let cursorLine = 0;
+	const live = activeLiveEditor();
+	if (live && canonical(live.path) === canonical(docPath)) {
+		cursorLine = live.getPosition().lineNumber;
+	} else {
+		const ed = activeEditor();
+		if (ed && ed.getModel() === documents.get(canonical(docPath))?.model) {
+			cursorLine = ed.getPosition()?.lineNumber ?? 0;
+		}
+	}
+
+	let pickedHeading = cursorLine ? headings.find((h) => h.line === cursorLine) : undefined;
+	if (!pickedHeading) {
+		const ordered = [...headings].sort((a, b) => {
+			const aAbove = cursorLine && a.line <= cursorLine ? 0 : 1;
+			const bAbove = cursorLine && b.line <= cursorLine ? 0 : 1;
+			if (aAbove !== bAbove) return aAbove - bAbove;
+			if (aAbove === 0) return b.line - a.line;
+			return a.line - b.line;
+		});
+		const labels = ordered.map((h) => `${"#".repeat(h.level)} ${h.text} (line ${h.line})`);
+		const picked = await choose(`Rename which heading in ${baseName(docPath)}?`, labels);
+		if (!picked) return;
+		pickedHeading = ordered[labels.indexOf(picked)];
+	}
+	if (!pickedHeading) return;
+
+	const typed = (await ask(`Rename heading “${pickedHeading.text}” to`, pickedHeading.text))?.trim();
+	if (!typed || typed === pickedHeading.text) return;
+
+	const lines = sourceText.split(/(\r?\n)/);
+	const lineIdx = (pickedHeading.line - 1) * 2;
+	const rawLine = lines[lineIdx];
+	if (rawLine === undefined) return;
+	const updatedLine = rawLine.replace(/^([ \t]{0,3}#{1,6}[ \t]+).+?([ \t]*#*[ \t]*)$/, (_, prefix: string, suffix: string) => `${prefix}${typed}${suffix}`);
+	if (updatedLine === rawLine) return;
+	lines[lineIdx] = updatedLine;
+	const renamedSource = lines.join("");
+
+	const nextHeading = documentHeadings(renamedSource).find((h) => h.line === pickedHeading.line);
+	if (!nextHeading) return;
+
+	const allDocs = docs();
+	const wsRoot = root();
+	const targetCanon = canonical(docPath);
+	const nameIdx = buildDocNameIndex(allDocs, wsRoot);
+	const scanPaths = new Map<string, string>();
+	scanPaths.set(targetCanon, docPath);
+	for (const d of allDocs) {
+		if (!d.exists || !isMarkdown(d.path) || isCatalog(d)) continue;
+		const c = canonical(d.path);
+		if (!scanPaths.has(c)) scanPaths.set(c, d.path);
+	}
+
+	const edits: { path: string; next: string; refs: number; isSource: boolean }[] = [];
+	let totalRefs = 0;
+	for (const [canon, filePath] of scanPaths) {
+		const isSameDoc = canon === targetCanon;
+		const baseText = isSameDoc ? renamedSource : await current(filePath);
+		if (baseText === null) continue;
+		const res = rewriteHeadingReferences(baseText, {
+			isSameDoc,
+			matchesDocHref: (hrefPath) => {
+				const clean = linkFile(hrefPath);
+				if (!clean) return false;
+				const resolved = clean.startsWith("/") ? resolvePath(wsRoot, clean.slice(1)) : resolvePath(dirName(filePath), clean);
+				return canonical(resolved) === targetCanon;
+			},
+			matchesWikiTarget: (name) => {
+				const found = lookupInIndex(name, nameIdx);
+				return Boolean(found && canonical(found.path) === targetCanon);
+			},
+			oldHeading: pickedHeading.text,
+			oldAnchor: pickedHeading.anchor,
+			newHeading: typed,
+			newAnchor: nextHeading.anchor,
+		});
+		let finalText = res.text;
+		if (isSameDoc && finalText.includes("<!-- toc -->") && finalText.includes("<!-- /toc -->")) {
+			finalText = upsertTocBlock(finalText).text;
+		}
+		if (isSameDoc || res.count > 0) {
+			totalRefs += res.count;
+			edits.push({ path: filePath, next: finalText, refs: res.count, isSource: isSameDoc });
+		}
+	}
+
+	const externalCount = edits.filter((e) => !e.isSource).length;
+	if (totalRefs > 0 || externalCount > 0) {
+		const GO = "Rename heading";
+		const scope =
+			externalCount > 0
+				? `${totalRefs} ${totalRefs === 1 ? "reference" : "references"} across ${edits.length} ${edits.length === 1 ? "file" : "files"}`
+				: `${totalRefs} ${totalRefs === 1 ? "reference" : "references"} in ${baseName(docPath)}`;
+		const ok = await choose(`Rename “${pickedHeading.text}” to “${typed}” and update ${scope}?`, [GO]);
+		if (ok !== GO) return;
+	}
+
+	let written = 0;
+	for (const item of edits) {
+		try {
+			await put(item.path, item.next, true);
+			written++;
+		} catch (e: any) {
+			notify(`Could not update ${baseName(item.path)}: ${e?.message ?? e}`, "error");
+		}
+	}
+	if (written) {
+		setState("treeVersion", (v) => v + 1);
+		notify(
+			totalRefs > 0
+				? `Renamed heading to “${typed}” and updated ${totalRefs} ${totalRefs === 1 ? "reference" : "references"} across ${written} ${written === 1 ? "file" : "files"}.`
+				: `Renamed heading to “${typed}”.`,
+		);
+	}
 }

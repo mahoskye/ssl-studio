@@ -1,0 +1,230 @@
+/* Round 4 TableView enhancements: inline Find & Replace, registry links & validation,
+   duplicate-key chip/indicator, and compact footer summary strip (ADR 0007, ADR 0010). */
+
+/* Clickable schema doc & workspace file links inside table cells (matches .table-ticket). */
+.table-view td button.table-cell-link {
+	min-height: 0;
+	padding: 0;
+	font: inherit;
+	color: var(--accent);
+	text-align: left;
+	max-width: 100%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	vertical-align: bottom;
+}
+.table-view td button.table-cell-link:hover {
+	text-decoration: underline;
+	text-underline-offset: 2px;
+}
+
+/* Inline validation warning highlights (unknown ticket keys, missing/malformed file paths). */
+.table-view td .table-val-warn {
+	text-decoration: underline dotted var(--warning);
+	text-decoration-thickness: 1.5px;
+	text-underline-offset: 3px;
+}
+.table-view td button.table-cell-link.table-val-warn {
+	color: var(--warning);
+	text-decoration: underline dashed var(--warning);
+	text-underline-offset: 3px;
+}
+
+/* Subtle duplicate-key indicator on column 0 cells + toolbar toggle chip. */
+.table-view td.cell-dupe:not(.col-frozen-last) {
+	box-shadow: inset 2px 0 0 color-mix(in srgb, var(--warning) 75%, transparent);
+}
+.table-view td.cell-dupe.col-frozen-last {
+	box-shadow:
+		inset 2px 0 0 color-mix(in srgb, var(--warning) 75%, transparent),
+		2px 0 0 color-mix(in srgb, var(--accent) 42%, var(--border)),
+		6px 0 12px -4px rgb(0 0 0 / .24);
+}
+.table-bar .doc-status.table-dupes-chip {
+	min-height: 0;
+	line-height: 1.6;
+	gap: var(--space-1);
+	color: var(--warning);
+	border-color: color-mix(in srgb, var(--warning) 45%, transparent);
+}
+.table-bar .doc-status.table-dupes-chip:hover {
+	border-color: var(--warning);
+}
+.table-bar .doc-status.table-dupes-chip[aria-pressed="true"] {
+	background: color-mix(in srgb, var(--warning) 18%, transparent);
+	border-color: var(--warning);
+}
+.table-bar .table-find-open-btn {
+	padding: var(--space-1) var(--space-2);
+	min-height: 0;
+	color: var(--muted);
+}
+.table-bar .table-find-open-btn:hover,
+.table-bar .table-find-open-btn.active {
+	color: var(--accent);
+}
+
+/* Compact inline Find & Replace bar (Ctrl+F / Ctrl+H). */
+.table-find-bar {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: var(--space-2);
+	padding: var(--space-1) var(--space-4);
+	border-bottom: 1px solid var(--border);
+	background: var(--tab-bg);
+	font-size: var(--text-sm);
+	flex: none;
+}
+.table-find-group {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--space-1);
+	min-width: 0;
+}
+.table-find-input {
+	width: clamp(120px, 16vw, 210px);
+	min-height: 0;
+	padding: 2px var(--space-2);
+	font-size: var(--text-sm);
+	font-family: var(--ui-font);
+	color: var(--input-fg);
+	background: var(--input-bg);
+	border: 1px solid var(--input-border);
+	border-radius: var(--radius-sm);
+}
+.table-find-input:focus {
+	outline: none;
+	border-color: var(--accent);
+}
+.table-find-count {
+	min-width: 5.5ch;
+	text-align: center;
+	font-size: var(--text-xs);
+	color: var(--muted);
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+}
+.table-find-count.empty {
+	color: var(--warning);
+}
+.table-find-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 3px;
+	min-height: 0;
+	padding: 2px var(--space-2);
+	font-size: var(--text-xs);
+	color: var(--fg);
+	background: var(--side-bg);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-sm);
+	white-space: nowrap;
+}
+.table-find-btn:hover:not(:disabled) {
+	border-color: var(--accent);
+	color: var(--strong-fg);
+}
+.table-find-btn:disabled {
+	opacity: 0.45;
+	cursor: default;
+}
+.table-find-toggle {
+	min-height: 0;
+	padding: 2px var(--space-2);
+	font-size: var(--text-xs);
+	color: var(--muted);
+	background: transparent;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-sm);
+	white-space: nowrap;
+}
+.table-find-toggle:hover {
+	color: var(--strong-fg);
+	border-color: var(--input-border);
+}
+.table-find-toggle[aria-pressed="true"] {
+	color: var(--accent);
+	border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+	background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.table-find-icon-btn {
+	min-height: 0;
+	padding: 2px 4px;
+	color: var(--muted);
+}
+.table-find-icon-btn:hover:not(:disabled) {
+	color: var(--strong-fg);
+}
+.table-find-icon-btn:disabled {
+	opacity: 0.4;
+	cursor: default;
+}
+.table-find-close {
+	margin-left: auto;
+}
+
+/* Find match highlights inside table body cells (keeps frozen cells opaque). */
+.table-view tbody tr td.cell-find-match,
+.table-view tbody tr td.col-frozen.cell-find-match {
+	background: color-mix(in srgb, var(--warning) 18%, var(--bg));
+}
+.table-view tbody tr:hover td.cell-find-match,
+.table-view tbody tr.row-current td.cell-find-match {
+	background: color-mix(in srgb, var(--warning) 24%, var(--bg));
+}
+.table-view tbody tr td.cell-find-current,
+.table-view tbody tr:hover td.cell-find-current,
+.table-view tbody tr.row-current td.cell-find-current,
+.table-view tbody tr.row-current:hover td.cell-find-current,
+.table-view tbody tr td.cell-selected.cell-find-current,
+.table-view tbody tr td.col-frozen.cell-find-current {
+	background: color-mix(in srgb, var(--warning) 30%, var(--bg));
+	color: var(--strong-fg);
+	outline: 2px solid var(--warning);
+	outline-offset: -2px;
+}
+
+/* Compact bottom summary strip: row counts, selection count, focused column stats. */
+.table-footer {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--space-1) var(--space-4);
+	padding: 3px var(--space-4);
+	border-top: 1px solid var(--border);
+	background: var(--tab-bg);
+	font-size: var(--text-xs);
+	color: var(--muted);
+	font-variant-numeric: tabular-nums;
+	flex: none;
+	user-select: none;
+}
+.table-footer-left,
+.table-footer-right {
+	display: inline-flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: var(--space-2);
+	min-width: 0;
+}
+.table-footer-col {
+	color: var(--fg);
+	font-weight: 600;
+	max-width: 24ch;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.table-footer-sep {
+	display: inline-block;
+	width: 1px;
+	height: 10px;
+	background: var(--border);
+	vertical-align: middle;
+}
+.table-footer-val {
+	color: var(--fg);
+}

@@ -7,8 +7,10 @@ import { state } from "./state";
 
 /** The commands offered, in the order someone arriving would want them, each with what it is for. "setup-project" is offered only until it is done. */
 const WAYS_IN: readonly (readonly [id: string, label: string, what: string])[] = [
-	["quick-open", "Go to file…", "By name"],
-	["symbols", "Go to symbol…", "A procedure anywhere in the workspace"],
+	["quick-open", "Go to file…", "By name, ticket key, or #tag"],
+	["symbols", "Go to symbol…", "A procedure, ticket, or doc anywhere in the workspace"],
+	["docs", "Project docs", "Tickets, specs, decisions, schema and registries"],
+	["new-ticket", "New ticket…", "Track work with specs, plans, and linked scripts"],
 	["graph", "Call graph", "The scripts and the calls between them"],
 	["new-plan", "New plan…", "A flow chart of what to build"],
 	["new-doc", "New document…", "In the project's docs"],

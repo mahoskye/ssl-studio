@@ -1,7 +1,13 @@
 // Active CodeMirror 6 Live Preview handle registry: lets the menu bar, command
 // palette, status bar, navigation history, Agent panel, and working-doc actions
 // talk to the Markdown Live view with the exact same ergonomics as Monaco.
+import { createSignal } from "solid-js";
 import { state } from "../state";
+
+const [liveSelectionVersion, setLiveSelectionVersion] = createSignal(0);
+/** Reactive counter bumped when a mounted CM6 Live Preview selection changes. */
+export { liveSelectionVersion };
+export const bumpLiveSelection = () => setLiveSelectionVersion((v) => v + 1);
 
 export type LivePosition = { lineNumber: number; column: number };
 export type LiveSelection = {

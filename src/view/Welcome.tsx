@@ -9,6 +9,7 @@ import { FileMark } from "./FileMark";
 /** What a folder opens to, for someone who has not seen it: each view by its name, and what it is for. */
 const VIEWS: readonly (readonly [name: string, what: string])[] = [
 	["Text and Blocks", "A script as it is written, or as blocks to fold, move and edit. Either one changes the other."],
+	["Docs and Tickets", "Tickets, specs, decisions, schema tables, and registries linked straight to your scripts."],
 	["Call graph", "Which script calls which, folder by folder, down to the procedure."],
 	["Plans", "A flow chart of what to build, checked against the code it becomes."],
 	["Agent", "A model on your own machine by default. Every change is shown before it is kept."],
@@ -32,7 +33,7 @@ export function Welcome() {
 	return (
 		<div class="welcome">
 			<h1>SSL Studio</h1>
-			<p class="hint">An SSL editor: text, blocks, a call graph and plans, all views of one text.</p>
+			<p class="hint">An SSL workspace: code, blocks, docs & tickets, a call graph and plans, all grounded in plain text.</p>
 			<div class="welcome-open">
 				<button class="primary" onClick={() => void open()}>
 					Open folder…

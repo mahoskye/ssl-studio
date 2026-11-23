@@ -14,7 +14,7 @@ import { isFenceClose, parseFenceOpen, stripQuotePrefix } from "../../shared/cod
 import { frontMatter } from "../../shared/frontMatter";
 import { currentThemeVersion, syncCodeTokenStyles } from "../themes/themes";
 import { liveBlockField } from "./cmLivePlugin";
-import { rawEditBlockField, refreshLiveEffect, searchStateSig, setEditYamlEffect, setRawEditBlockEffect } from "./cmLiveShared";
+import { rawEditBlockField, refreshLiveEffect, searchStateSig, setRawEditBlockEffect } from "./cmLiveShared";
 import { getCachedCodeTokens, resolveCodeLanguage, tokenizeCodeBlock } from "./markdownCode";
 
 /** Dispatched once async Monaco tokenization completes for one or more visible code fences. */
@@ -149,7 +149,6 @@ export const liveCodeHighlightPlugin = ViewPlugin.fromClass(
 						(e) =>
 							e.is(refreshLiveEffect) ||
 							e.is(codeHighlightReadyEffect) ||
-							e.is(setEditYamlEffect) ||
 							e.is(setRawEditBlockEffect),
 					),
 			);

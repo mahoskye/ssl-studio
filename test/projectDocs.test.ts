@@ -642,7 +642,7 @@ describe("tickets from a ticket system's export", () => {
 		expect(skipped).toBe(1);
 		expect(tickets).toEqual([
 			{ key: "DEMO-103", title: "A report of the samples due soon", status: "In Progress", type: "Story", source: undefined, parent: "DEMO-100", related: ["DEMO-101", "DEMO-102"], description: 'Each morning the lab wants a list.\n\nIt is sorted, "soonest first".' },
-			{ key: "DEMO-102", title: "Rush samples count Saturday", status: "Done", type: "Bug", source: undefined, parent: undefined, related: ["DEMO-101", "DEMO-103"], description: "" },
+			{ key: "DEMO-102", title: "Rush samples count Saturday", status: "Done", type: "Bug", source: undefined, parent: undefined, related: ["DEMO-101"], blockedBy: ["DEMO-103"], description: "" },
 		]);
 		expect(JSON.stringify(tickets)).not.toContain("Someone");
 	});
@@ -824,8 +824,8 @@ describe("a ticket's own page", () => {
 			["Related tickets", ["Rush samples count Saturday as a working day", "A report of the samples due soon"]],
 			["Open questions", ["Which holidays does each site keep?"]],
 			["Decisions", ["A walk looks at most 730 days ahead", "Planning and saving are two scripts"]],
-			// The settings registry lists rows tagged for this ticket.
-			["Registries", ["settings.csv"]],
+			// The database and settings registries list rows tagged for this ticket.
+			["Registries", ["database.csv", "settings.csv"]],
 		]);
 		// A decision made for another ticket stands, and is not this ticket's work.
 		expect(ticketWork(docs, "DEMO-103").map((group) => group.name)).toEqual(["Specs", "Related tickets", "Registries"]);
@@ -843,7 +843,7 @@ describe("a ticket's own page", () => {
 			"Related tickets": ["related: (both)", "related: (both)"],
 			"Open questions": ["doc ticket: DEMO-101"],
 			Decisions: ["doc ticket: DEMO-101", "doc ticket: DEMO-101"],
-			Registries: ["Ticket column"],
+			Registries: ["Ticket column", "Ticket column"],
 		});
 		expect(byGroup("DEMO-102").Specs).toEqual(["ticket specs:"]);
 		expect(byGroup("DEMO-103").Specs).toEqual(["spec ticket: DEMO-103"]);

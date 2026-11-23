@@ -89,7 +89,7 @@ export function writeTests(path: string) {
 			problems = problemsIn(attemptCode, attemptReading, paths.length);
 			if (attemptCode) (best = attemptCode), (reading = attemptReading);
 			if (!problems.length) break;
-			prompt = retryPrompt(rawBase, attemptCode, problems);
+			prompt = retryPrompt(base, attemptCode, problems);
 		}
 		if (!best || !reading) return notify(`The agent did not write a test script: ${problems[0] ?? "it gave no code."}`, "error");
 		const proposed = await session.formatText(best, { tabSize: 4, insertSpaces: false }).catch(() => best!);

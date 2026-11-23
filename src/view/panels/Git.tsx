@@ -4,15 +4,18 @@
 // or lets its changes go (after asking). Everything stays on this machine:
 // there is no fetch, pull or push here.
 import { Icon } from "../Icon";
-import { createMemo, createSignal, For, Show } from "solid-js";
+import { createMemo, createResource, createSignal, For, Show } from "solid-js";
 import { changeLetter, changeWord, commitProblem, GIT_ACTIONS, rowActions, stagedOf, unstagedOf, type GitFile } from "../../shared/gitStatus";
-import { baseName, dirName, relativeTo } from "../../shared/paths";
-import { ticketsForFile } from "../../shared/workContext";
+import { baseName, dirName, isInside, relativeTo, resolvePath } from "../../shared/paths";
+import type { DocFile } from "../../shared/protocol";
+import { docsGoverningFile, ticketsForFile } from "../../shared/workContext";
+import { backend } from "../backend";
+import { docAuditData } from "../docAudit";
 import { FileMark } from "../FileMark";
-import { branchText, commit, discard, gitFailure, gitStatus, refreshGit, showChange, stage, unstage } from "../git";
+import { branchText, commit, discard, gitFailure, gitStatus, gitVersion, refreshGit, showChange, stage, unstage } from "../git";
 import { docs } from "../project";
-import { ticketAtHand } from "../projectDocs";
-import { activePath, notify, openFile, state } from "../state";
+import { staleCatalogSummary, ticketAtHand, updateCatalogs } from "../projectDocs";
+import { activePath, canonical, notify, openFile, state } from "../state";
 import { chooseFromMenu } from "./RowMenu";
 import { IconButton, Row, RowGroup, Rows, type Point } from "./Rows";
 
@@ -32,11 +35,61 @@ const More = (props: { count: number }) => (
 	</Show>
 );
 
+const CODE_OR_SQL_RE = /\.(ssl|srvscr|ds|sql|ddl|pks|pkb|xfd|xml|js|ts|html|css)$/i;
+
+function formatCommitDate(ms: number): string {
+	const d = new Date(ms);
+	if (Number.isNaN(d.getTime())) return "";
+	return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
 export function GitPanel() {
 	const staged = () => (gitStatus() ? stagedOf(gitStatus()!) : []);
 	const changes = () => (gitStatus() ? unstagedOf(gitStatus()!) : []);
 	/** Files staged above the workspace's folder: not listed, and in the commit all the same. */
 	const above = () => gitStatus()?.stagedOutside ?? 0;
+	const [driftOpen, setDriftOpen] = createSignal(false);
+	const [commitsOpen, setCommitsOpen] = createSignal(false);
+	const activeTicketKey = () => state.settings.activeTicket?.trim() || "";
+
+	// Non-blocking doc-drift advisory for staged code/SQL files: untouched governing docs,
+	// drifted #L code citations pointing into staged files, and out-of-sync INDEX.md catalogs.
+	const docDrift = createMemo(() => {
+		const root = state.workspace?.root;
+		const stFiles = staged();
+		if (!root || !stFiles.length) {
+			return { governing: [] as { file: DocFile; reason: string; unstaged?: GitFile }[], citations: [] as NonNullable<ReturnType<typeof docAuditData>["citationIssues"]>, staleCatalogCount: 0, total: 0 };
+		}
+		const allDocs = docs();
+		const stagedSet = new Set(stFiles.map((f) => canonical(f.path)));
+		const unstagedByPath = new Map(changes().map((f) => [canonical(f.path), f]));
+		const stagedCode = stFiles.filter((f) => CODE_OR_SQL_RE.test(f.path));
+
+		const govMap = new Map<string, { file: DocFile; reason: string; unstaged?: GitFile }>();
+		for (const cf of stagedCode) {
+			for (const g of docsGoverningFile(allDocs, cf.path, root)) {
+				const k = canonical(g.file.path);
+				if (stagedSet.has(k) || govMap.has(k)) continue;
+				govMap.set(k, { file: g.file, reason: g.reason, unstaged: unstagedByPath.get(k) });
+			}
+		}
+		const citations = (docAuditData().citationIssues ?? []).filter((ci) => stagedSet.has(canonical(ci.targetPath)));
+		const catSummary = staleCatalogSummary();
+		const staleCatalogCount = catSummary.stale.length + catSummary.missing.length;
+		const governing = [...govMap.values()];
+		const total = governing.length + citations.length + (staleCatalogCount > 0 ? 1 : 0);
+		return { governing, citations, staleCatalogCount, total };
+	});
+
+	const [ticketCommits] = createResource(
+		() => {
+			const root = state.workspace?.root;
+			const key = activeTicketKey();
+			const hasRepo = Boolean(gitStatus());
+			return root && key && hasRepo ? { key, v: gitVersion() } : null;
+		},
+		async ({ key }) => backend.gitTicketLog(key, 15).catch(() => []),
+	);
 	const problem = () => (busy() ? "The commit is being made" : commitProblem(gitStatus() ?? null, message()));
 	const folder = (path: string) => {
 		const dir = relativeTo(state.workspace?.root, dirName(path));
@@ -161,6 +214,91 @@ export function GitPanel() {
 					On <strong>{branchText()}</strong>
 					{gitStatus()!.initial ? ", with no commit yet" : ""}
 				</p>
+				<Show when={docDrift().total > 0}>
+					<div class="git-drift" role="region" aria-label="Documentation drift advisory">
+						<button
+							type="button"
+							class="git-drift-toggle"
+							aria-expanded={driftOpen()}
+							title="Non-blocking reminder: governing docs, code citations, or folder indexes affected by your staged files"
+							onClick={() => setDriftOpen((v) => !v)}
+						>
+							<Icon name={driftOpen() ? "chevron-down" : "chevron-right"} class="twisty" />
+							<Icon name="note" class="git-drift-icon" />
+							<span class="git-drift-title">
+								Doc drift · {docDrift().total} {docDrift().total === 1 ? "note" : "notes"}
+							</span>
+						</button>
+						<Show when={driftOpen()}>
+							<div class="git-drift-body">
+								<Show when={docDrift().governing.length > 0}>
+									<p class="git-drift-sub">Untouched governing docs</p>
+									<ul class="git-drift-list">
+										<For each={docDrift().governing.slice(0, 8)}>
+											{(item) => (
+												<li>
+													<span class="git-drift-label" title={`${relativeTo(state.workspace?.root, item.file.path)} (${item.reason})`}>
+														{item.file.ticket ? `${item.file.ticket}: ` : ""}
+														{item.file.title || item.file.name}
+														<span class="meta"> · {item.reason}</span>
+													</span>
+													<span class="git-drift-acts">
+														<button type="button" class="link" onClick={() => void openFile(item.file.path, { keep: true })}>
+															Open
+														</button>
+														<Show when={item.unstaged}>
+															{(gf) => (
+																<button type="button" class="link" title="Stage this modified doc for the commit" onClick={() => void stage([gf()])}>
+																	Stage
+																</button>
+															)}
+														</Show>
+													</span>
+												</li>
+											)}
+										</For>
+									</ul>
+								</Show>
+								<Show when={docDrift().citations.length > 0}>
+									<p class="git-drift-sub">Drifted #L citations into staged files</p>
+									<ul class="git-drift-list">
+										<For each={docDrift().citations.slice(0, 6)}>
+											{(ci) => (
+												<li>
+													<span class="git-drift-label" title={ci.text}>
+														{baseName(ci.docPath)}:{ci.docLine} <span class="meta">({ci.kind})</span>
+													</span>
+													<span class="git-drift-acts">
+														<button type="button" class="link" onClick={() => void openFile(ci.docPath, { reveal: { line: ci.docLine }, keep: true })}>
+															Open
+														</button>
+													</span>
+												</li>
+											)}
+										</For>
+									</ul>
+								</Show>
+								<Show when={docDrift().staleCatalogCount > 0}>
+									<div class="git-drift-catalog">
+										<span>
+											{docDrift().staleCatalogCount === 1
+												? "1 INDEX.md catalog out of sync"
+												: `${docDrift().staleCatalogCount} INDEX.md catalogs out of sync`}
+										</span>
+										<button
+											type="button"
+											class="link"
+											title="Manually reconcile out-of-date INDEX.md catalogs (ADR 0031)"
+											onClick={() => void updateCatalogs()}
+										>
+											Update catalogs
+										</button>
+									</div>
+								</Show>
+							</div>
+						</Show>
+					</div>
+				</Show>
 				<form class="git-commit" onSubmit={(e) => (e.preventDefault(), void make())}>
 					<Show when={suggestedTickets().length > 0}>
 						<div class="git-ticket-chips">
@@ -234,6 +372,78 @@ export function GitPanel() {
 							<More count={changes().length - ROWS_SHOWN} />
 						</Show>
 					</Rows>
+				</Show>
+				<Show when={activeTicketKey()}>
+					{(key) => (
+						<section class="git-ticket-log" aria-label={`Commits mentioning ${key()}`}>
+							<button
+								type="button"
+								class="group-head git-head foldable git-ticket-log-head"
+								aria-expanded={commitsOpen()}
+								onClick={() => setCommitsOpen((v) => !v)}
+							>
+								<Icon name={commitsOpen() ? "chevron-down" : "chevron-right"} class="twisty" />
+								<span class="label">Ticket commits · {key()}</span>
+								<span class="count">{ticketCommits.loading ? "…" : (ticketCommits()?.length ?? 0)}</span>
+							</button>
+							<Show when={commitsOpen()}>
+								<div class="git-ticket-log-body">
+									<Show
+										when={!ticketCommits.loading && (ticketCommits()?.length ?? 0) > 0}
+										fallback={
+											<p class="hint">
+												{ticketCommits.loading ? "Loading local commits…" : `No local commits mentioning ${key()} yet.`}
+											</p>
+										}
+									>
+										<ul class="git-commit-list">
+											<For each={ticketCommits()}>
+												{(c) => (
+													<li class="git-commit-item">
+														<div class="git-commit-line" title={`${c.sha}\n${c.author} · ${new Date(c.time).toLocaleString()}\n${c.subject}`}>
+															<code class="git-commit-sha">{c.shortSha}</code>
+															<span class="git-commit-subj">{c.subject}</span>
+															<span class="meta git-commit-date">{formatCommitDate(c.time)}</span>
+														</div>
+														<Show when={c.files.length > 0}>
+															<ul class="git-commit-files">
+																<For each={c.files.slice(0, 8)}>
+																	{(f) => {
+																		const openCommitFile = () => {
+																			const root = state.workspace?.root;
+																			if (!root) return;
+																			const full = resolvePath(root, f.path);
+																			if (isInside(root, full)) void openFile(full, { preview: true });
+																		};
+																		const stClass = f.status.startsWith("A")
+																			? "added"
+																			: f.status.startsWith("D")
+																				? "deleted"
+																				: "modified";
+																		return (
+																			<li>
+																				<button type="button" class="git-commit-file-btn" title={f.path} onClick={openCommitFile}>
+																					<span class={`git-letter ${stClass}`}>{f.status[0] ?? "M"}</span>
+																					<span class="label">{f.path}</span>
+																				</button>
+																			</li>
+																		);
+																	}}
+																</For>
+																<Show when={c.files.length > 8}>
+																	<li class="meta">… and {c.files.length - 8} more</li>
+																</Show>
+															</ul>
+														</Show>
+													</li>
+												)}
+											</For>
+										</ul>
+									</Show>
+								</div>
+							</Show>
+						</section>
+					)}
 				</Show>
 			</Show>
 		</div>

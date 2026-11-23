@@ -7,7 +7,7 @@
 // - FoldService (`markdownFoldService`): heading section & nested list folding.
 import { foldGutter, foldService, syntaxTree } from "@codemirror/language";
 import { getSearchQuery, searchPanelOpen } from "@codemirror/search";
-import { EditorSelection, EditorState, StateField, type Extension, type Range } from "@codemirror/state";
+import { EditorSelection, EditorState, StateField, Transaction, type ChangeSpec, type Extension, type Range } from "@codemirror/state";
 import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, type ViewUpdate } from "@codemirror/view";
 import { fenced } from "../../shared/catalog";
 import { isFenceClose, normalizeFenceLang, parseFenceOpen, stripQuotePrefix } from "../../shared/codeTokens";
@@ -24,21 +24,21 @@ import { isLikelyHexColorTag } from "../../shared/tags";
 import { ticketMatcher } from "../../shared/ticketRefs";
 import { docs } from "../project";
 import { noteCursor } from "../navigation";
-import { canonical, documents, openFile, state as appState } from "../state";
+import { canonical, documents, notify, openFile, state as appState } from "../state";
 import { currentThemeVersion } from "../themes/themes";
 import { CalloutWidget } from "./cmLiveCallout";
 import { MermaidWidget } from "./cmMermaid";
 import { buildHoverPreview } from "./hoverPreview";
 import { colourCode } from "./markdownCode";
+import { findInlineMathSpans, hydrateMathInElement, renderKatexHtml, renderKatexSync } from "./markdownHtml";
 import { hydrateImagesInElement } from "./imageResolve";
 import {
-	editYamlField,
 	liveCallbacksFacet,
 	rawEditBlockField,
 	readOnlyModeFacet,
 	refreshLiveEffect,
+	renderInlineHtml,
 	searchStateSig,
-	setEditYamlEffect,
 	setRawEditBlockEffect,
 	type HoverTarget,
 	type ImageLightboxInfo,
@@ -48,12 +48,10 @@ import { TableWidget } from "./cmLiveTable";
 import { IMAGE_FILE_RE, loadImageUrl } from "./imageResolve";
 
 export {
-	editYamlField,
 	liveCallbacksFacet,
 	rawEditBlockField,
 	readOnlyModeFacet,
 	refreshLiveEffect,
-	setEditYamlEffect,
 	setRawEditBlockEffect,
 	type HoverTarget,
 	type ImageLightboxInfo,
@@ -722,6 +720,7 @@ class TransclusionWidget extends WidgetType {
 				titleBtn.title = `Open ${relativeTo(root, usedPath)}`;
 				body.innerHTML = preview.html;
 				hydrateImagesInElement(body, usedPath);
+				hydrateMathInElement(body);
 				void colourCode(body);
 			})();
 		}
@@ -731,6 +730,213 @@ class TransclusionWidget extends WidgetType {
 	ignoreEvent() {
 		return true;
 	}
+}
+
+/** Remembered open/closed state for `<details>` blocks so toggling survives Live <-> Read & edits elsewhere. */
+const detailsOpenState = new Map<string, boolean>();
+
+/** Collapsible `<details><summary>...</summary>...</details>` block widget for Live & Read modes. */
+class DetailsWidget extends WidgetType {
+	constructor(
+		private readonly summaryMd: string,
+		private readonly bodyMd: string,
+		private readonly defaultOpen: boolean,
+		private readonly from: number,
+		private readonly to: number,
+		private readonly startLine: number,
+		private readonly filePath: string,
+		private readonly readOnly: boolean,
+		private readonly themeVer: number,
+	) {
+		super();
+	}
+
+	eq(other: DetailsWidget): boolean {
+		return (
+			other.summaryMd === this.summaryMd &&
+			other.bodyMd === this.bodyMd &&
+			other.defaultOpen === this.defaultOpen &&
+			other.from === this.from &&
+			other.to === this.to &&
+			other.startLine === this.startLine &&
+			other.filePath === this.filePath &&
+			other.readOnly === this.readOnly &&
+			other.themeVer === this.themeVer
+		);
+	}
+
+	toDOM(view: EditorView): HTMLElement {
+		const card = document.createElement("div");
+		card.className = "cm-md-details-card";
+		card.setAttribute("contenteditable", "false");
+
+		const details = document.createElement("details");
+		details.className = "cm-md-details";
+		const stateKey = `${this.filePath}:${this.startLine}:${this.summaryMd}`;
+		details.open = detailsOpenState.has(stateKey) ? detailsOpenState.get(stateKey)! : this.defaultOpen;
+		details.addEventListener("toggle", () => {
+			detailsOpenState.set(stateKey, details.open);
+		});
+
+		const enterRaw = () => {
+			if (this.readOnly) return;
+			const curFrom = Math.min(this.from, view.state.doc.length);
+			const curTo = Math.min(this.to, view.state.doc.length);
+			view.focus();
+			view.dispatch({
+				selection: EditorSelection.cursor(curFrom),
+				effects: setRawEditBlockEffect.of({ from: curFrom, to: curTo }),
+				scrollIntoView: true,
+			});
+		};
+
+		const summary = document.createElement("summary");
+		summary.className = "cm-md-details-summary";
+		const summaryLabel = document.createElement("span");
+		summaryLabel.className = "cm-md-details-title";
+		summaryLabel.innerHTML = renderInlineHtml(this.summaryMd || "Details", this.filePath, true);
+		hydrateMathInElement(summaryLabel);
+		summary.appendChild(summaryLabel);
+
+		if (!this.readOnly) {
+			const editBtn = document.createElement("button");
+			editBtn.type = "button";
+			editBtn.className = "cm-md-code-btn cm-md-details-edit";
+			editBtn.textContent = "Edit";
+			editBtn.title = "Edit raw <details> Markdown source";
+			editBtn.addEventListener("mousedown", (e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				enterRaw();
+			});
+			editBtn.addEventListener("click", (e) => {
+				e.preventDefault();
+				e.stopPropagation();
+			});
+			summary.appendChild(editBtn);
+		}
+
+		const body = document.createElement("div");
+		body.className = "cm-md-details-body md";
+		if (this.bodyMd.trim()) {
+			body.innerHTML = renderInlineHtml(this.bodyMd, this.filePath, false, false);
+			hydrateImagesInElement(body, this.filePath);
+			hydrateMathInElement(body);
+			void colourCode(body);
+		}
+
+		body.addEventListener("click", (e) => {
+			const target = e.target instanceof Element ? e.target : null;
+			if (!target) return;
+			const cb = view.state.facet(liveCallbacksFacet);
+			const anchor = target.closest<HTMLAnchorElement>("a[href]");
+			if (anchor && !e.altKey) {
+				e.preventDefault();
+				e.stopPropagation();
+				cb?.onFollowLink(anchor.getAttribute("href") ?? "");
+				return;
+			}
+			const tagEl = target.closest<HTMLElement>(".md-tag, [data-tag]");
+			if (tagEl && !e.altKey) {
+				e.preventDefault();
+				e.stopPropagation();
+				const tag = tagEl.dataset.tag ?? tagEl.textContent?.trim() ?? "";
+				if (tag) cb?.onTagClick(tag);
+				return;
+			}
+			if (!this.readOnly) {
+				const sel = window.getSelection();
+				if (sel && !sel.isCollapsed) return;
+				e.preventDefault();
+				e.stopPropagation();
+				enterRaw();
+			}
+		});
+
+		details.append(summary, body);
+		card.appendChild(details);
+		return card;
+	}
+
+	ignoreEvent(): boolean {
+		return true;
+	}
+}
+
+/** Lazy-loaded KaTeX widget for block `$$...$$` and inline `$...$` math expressions. */
+class MathWidget extends WidgetType {
+	constructor(
+		private readonly tex: string,
+		private readonly displayMode: boolean,
+		private readonly pos: number,
+		private readonly readOnly: boolean,
+	) {
+		super();
+	}
+
+	eq(other: MathWidget): boolean {
+		return (
+			other.tex === this.tex &&
+			other.displayMode === this.displayMode &&
+			other.readOnly === this.readOnly
+		);
+	}
+
+	toDOM(view: EditorView): HTMLElement {
+		const el = document.createElement(this.displayMode ? "div" : "span");
+		el.className = this.displayMode ? "cm-md-math-block" : "cm-md-math-inline";
+		el.setAttribute("contenteditable", "false");
+		if (!this.readOnly) el.title = "Click to edit LaTeX math";
+
+		const cached = renderKatexSync(this.tex, this.displayMode);
+		if (cached !== null) {
+			el.innerHTML = cached;
+		} else {
+			const pending = document.createElement("code");
+			pending.className = "cm-md-math-pending";
+			pending.textContent = this.tex;
+			el.appendChild(pending);
+			void renderKatexHtml(this.tex, this.displayMode).then((html) => {
+				if (html && el.isConnected) el.innerHTML = html;
+			});
+		}
+
+		if (!this.readOnly) {
+			el.addEventListener("mousedown", (ev) => {
+				const e = ev as MouseEvent;
+				if (e.button !== 0) return;
+				e.preventDefault();
+				e.stopPropagation();
+				const targetPos = Math.min(this.pos + (this.displayMode ? 2 : 1), view.state.doc.length);
+				view.focus();
+				view.dispatch({
+					selection: EditorSelection.cursor(targetPos),
+					scrollIntoView: true,
+				});
+			});
+		}
+		return el;
+	}
+
+	ignoreEvent(): boolean {
+		return true;
+	}
+}
+
+/** Parses `<details ...><summary>...</summary>...</details>` inner HTML into summary + Markdown body. */
+function parseDetailsBlock(raw: string): { defaultOpen: boolean; summaryMd: string; bodyMd: string } | null {
+	const openMatch = /^[ \t]*<details(\b[^>]*)>/i.exec(raw);
+	const closeIdx = raw.toLowerCase().lastIndexOf("</details>");
+	if (!openMatch || closeIdx < openMatch[0].length) return null;
+	const defaultOpen = /\bopen\b/i.test(openMatch[1] ?? "");
+	let inner = raw.slice(openMatch[0].length, closeIdx);
+	let summaryMd = "Details";
+	const sumMatch = /^\s*<summary\b[^>]*>([\s\S]*?)<\/summary>/i.exec(inner);
+	if (sumMatch) {
+		summaryMd = sumMatch[1]!.replace(/\r?\n/g, " ").trim() || "Details";
+		inner = inner.slice(sumMatch[0].length);
+	}
+	return { defaultOpen, summaryMd, bodyMd: inner.trim() };
 }
 
 // --- Block StateField (multi-line & block widgets) ---------------------------
@@ -983,6 +1189,107 @@ function buildBlockDecorations(state: EditorState): DecorationSet {
 		}
 	}
 
+	// 2c. Collapsible `<details><summary>...</summary>...</details>` and block display math (`$$...$$`).
+	for (let n = startLineNum; n <= state.doc.lines; n++) {
+		const line = state.doc.line(n);
+		if (inFence(line.from) || handledTables.has(n) || handledCallouts.has(n) || handledComments.has(n)) continue;
+		// Collapsible `<details>` block
+		if (/^[ \t]*<details(?:\s[^>]*)?>/i.test(line.text)) {
+			let depth = 0;
+			let endLineNum = -1;
+			let innerFence: { ch: string; len: number } | null = null;
+			for (let k = n; k <= state.doc.lines; k++) {
+				const lnText = state.doc.line(k).text;
+				const fmMatch = /^[ \t]{0,3}(`{3,}|~{3,})(.*)$/.exec(lnText);
+				if (fmMatch) {
+					if (!innerFence) innerFence = { ch: fmMatch[1]![0]!, len: fmMatch[1]!.length };
+					else if (fmMatch[1]![0] === innerFence.ch && fmMatch[1]!.length >= innerFence.len && fmMatch[2]!.trim() === "") innerFence = null;
+					continue;
+				}
+				if (innerFence) continue;
+				const opens = lnText.match(/<details(?:\s[^>]*)?>/gi)?.length ?? 0;
+				const closes = lnText.match(/<\/details>/gi)?.length ?? 0;
+				depth += opens - closes;
+				if (depth <= 0 && closes > 0) {
+					endLineNum = k;
+					break;
+				}
+			}
+			if (endLineNum >= n) {
+				const from = line.from;
+				const to = state.doc.line(endLineNum).to;
+				const parsed = parseDetailsBlock(state.sliceDoc(from, to));
+				if (
+					parsed &&
+					!isRawEditing(state, from, to) &&
+					!selectionTouches(state, from, to) &&
+					!searchMatchesBlock(state, from, to) &&
+					guard.canAdd(from, to)
+				) {
+					decos.push(
+						Decoration.replace({
+							widget: new DetailsWidget(
+								parsed.summaryMd,
+								parsed.bodyMd,
+								parsed.defaultOpen,
+								from,
+								to,
+								n,
+								filePath,
+								isRead,
+								currentThemeVersion(),
+							),
+							block: true,
+						}).range(from, to),
+					);
+				}
+				n = endLineNum;
+				continue;
+			}
+		}
+		// Block display math: single-line `$$...$$` or multi-line `$$\n...\n$$`
+		const singleMath = /^[ \t]*\$\$([^\n$]+?)\$\$[ \t]*$/.exec(line.text);
+		if (singleMath && singleMath[1]!.trim()) {
+			const from = line.from;
+			const to = line.to;
+			if (!selectionTouches(state, from, to) && !isRawEditing(state, from, to) && !searchMatchesBlock(state, from, to) && guard.canAdd(from, to)) {
+				decos.push(
+					Decoration.replace({
+						widget: new MathWidget(singleMath[1]!.trim(), true, from, isRead),
+						block: true,
+					}).range(from, to),
+				);
+			}
+			continue;
+		}
+		if (/^[ \t]*\$\$[ \t]*$/.test(line.text)) {
+			let closeLine = -1;
+			for (let k = n + 1; k <= state.doc.lines; k++) {
+				if (/^[ \t]*\$\$[ \t]*$/.test(state.doc.line(k).text)) {
+					closeLine = k;
+					break;
+				}
+			}
+			if (closeLine > n) {
+				const from = line.from;
+				const to = state.doc.line(closeLine).to;
+				const bodyLines: string[] = [];
+				for (let k = n + 1; k < closeLine; k++) bodyLines.push(state.doc.line(k).text);
+				const tex = bodyLines.join("\n").trim();
+				if (tex && !selectionTouches(state, from, to) && !isRawEditing(state, from, to) && !searchMatchesBlock(state, from, to) && guard.canAdd(from, to)) {
+					decos.push(
+						Decoration.replace({
+							widget: new MathWidget(tex, true, from, isRead),
+							block: true,
+						}).range(from, to),
+					);
+				}
+				n = closeLine;
+				continue;
+			}
+		}
+	}
+
 	// 3. Standalone image lines (`![alt|400](src)` or `![[image.png|Caption|300]]`) & note transclusions (`![[note]]`, `![[note#Heading]]`).
 	const transclusionVer = (rawEmbed: string): number => {
 		const root = appState.workspace?.root;
@@ -1052,7 +1359,7 @@ export const liveBlockField = StateField.define<DecorationSet>({
 		return buildBlockDecorations(state);
 	},
 	update(value, tr) {
-		const refreshed = tr.effects.some((e) => e.is(refreshLiveEffect) || e.is(setEditYamlEffect) || e.is(setRawEditBlockEffect));
+		const refreshed = tr.effects.some((e) => e.is(refreshLiveEffect) || e.is(setRawEditBlockEffect));
 		const rawChanged = tr.startState.field(rawEditBlockField, false) !== tr.state.field(rawEditBlockField, false);
 		const searchChanged = searchStateSig(tr.startState) !== searchStateSig(tr.state);
 		if (tr.docChanged || tr.selection || tr.reconfigured || refreshed || rawChanged || searchChanged || syntaxTree(tr.startState) !== syntaxTree(tr.state)) {
@@ -1464,6 +1771,24 @@ function buildInlineDecorations(view: EditorView): DecorationSet {
 				}
 			}
 
+			// Inline math `$...$` (strictly skipping currency like `$100` / `$100 and $200` and code/links)
+			if (text.includes("$")) {
+				const isReadMode = state.facet(readOnlyModeFacet);
+				for (const span of findInlineMathSpans(text)) {
+					const mFrom = line.from + span.from;
+					const mTo = line.from + span.to;
+					if (isSkipped(mFrom, mTo) || lineSkips.some(([a, b]) => mFrom < b && mTo > a)) continue;
+					lineSkips.push([mFrom, mTo]);
+					if (!selectionTouches(state, mFrom, mTo) && guard.canAdd(mFrom, mTo)) {
+						decos.push(
+							Decoration.replace({
+								widget: new MathWidget(span.tex, span.display, mFrom, isReadMode),
+							}).range(mFrom, mTo),
+						);
+					}
+				}
+			}
+
 			// ==highlight==
 			if (text.includes("==")) {
 				for (const m of text.matchAll(/==([^\n=](?:[^\n]*?[^\n=])?)==/g)) {
@@ -1604,7 +1929,7 @@ export const liveInlinePlugin = ViewPlugin.fromClass(
 		}
 		update(update: ViewUpdate) {
 			const refreshed = update.transactions.some(
-				(tr) => tr.reconfigured || tr.effects.some((e) => e.is(refreshLiveEffect) || e.is(setEditYamlEffect) || e.is(setRawEditBlockEffect)),
+				(tr) => tr.reconfigured || tr.effects.some((e) => e.is(refreshLiveEffect) || e.is(setRawEditBlockEffect)),
 			);
 			const rawChanged = update.startState.field(rawEditBlockField, false) !== update.state.field(rawEditBlockField, false);
 			const searchChanged = searchStateSig(update.startState) !== searchStateSig(update.state);
@@ -1627,8 +1952,36 @@ export const liveInlinePlugin = ViewPlugin.fromClass(
 // --- Interactive click & hover handlers --------------------------------------
 
 export const liveInteractionExtension: Extension = [
-	// Keep user cursor navigation and Backspace cleanly inside the Markdown body below hidden YAML frontmatter.
+	// Keep user cursor navigation, Backspace, and Live-mode Replace / Replace All cleanly outside hidden YAML frontmatter.
 	EditorState.transactionFilter.of((tr) => {
+		if (tr.docChanged && tr.isUserEvent("input.replace")) {
+			const cb = tr.startState.facet(liveCallbacksFacet);
+			const fmStart = frontmatterRange(tr.startState);
+			if (fmStart && !cb?.isYamlEditorOpen?.()) {
+				const kept: ChangeSpec[] = [];
+				let skipped = 0;
+				tr.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
+					if (fromA <= fmStart.to) {
+						skipped++;
+					} else {
+						kept.push({ from: fromA, to: toA, insert: inserted.toString() });
+					}
+				});
+				if (skipped > 0) {
+					queueMicrotask(() =>
+						notify(
+							`Skipped ${skipped} ${skipped === 1 ? "match" : "matches"} in hidden YAML frontmatter (click Edit YAML to modify properties).`,
+						),
+					);
+					if (!kept.length) return [];
+					return {
+						changes: kept,
+						effects: tr.effects,
+						annotations: [Transaction.userEvent.of("input.replace.all")],
+					};
+				}
+			}
+		}
 		if (tr.isUserEvent("delete.backward")) {
 			const fmStart = frontmatterRange(tr.startState);
 			if (fmStart) {

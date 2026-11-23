@@ -83,8 +83,15 @@ const TEMPLATE_HEADER_RE = /^\s*<!--\s*template\b[\s\S]*?-->\s*$/i;
 export function quoteYamlScalar(value: string): string {
 	const v = value.trim();
 	if (!v) return '""';
-	// Already cleanly quoted or an explicit inline list (`[...]`) stays as written.
-	if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) return v;
+	// Already cleanly double-quoted (valid JSON string) or single-quoted (no unescaped internal ') stays as written.
+	if (v.startsWith('"') && v.endsWith('"')) {
+		try {
+			if (typeof JSON.parse(v) === "string") return v;
+		} catch {
+			// Fall through and properly escape embedded quotes.
+		}
+	}
+	if (v.startsWith("'") && v.endsWith("'") && v.length >= 2 && !v.slice(1, -1).replace(/''/g, "").includes("'")) return v;
 	if (v.startsWith("[") && v.endsWith("]") && !v.startsWith("[[")) return v;
 	if (/^[[{!&*?|>'%@`-]|:\s|:$|\s#|^\s|\s$|[\r\n"]/.test(v)) return JSON.stringify(v);
 	return v;
@@ -245,9 +252,10 @@ export function addToFrontMatterList(text: string, key: string, item: string): s
 		if (stop < 0) break;
 		at = stop + 1;
 	}
-	const close = lines.findIndex((line, i) => i > 0 && /^(---|\.\.\.)\s*$/.test(line.text));
+	const openIdx = TEMPLATE_HEADER_RE.test(lines[0]?.text.replace(/^﻿/, "") ?? "") ? 1 : 0;
+	const close = lines.findIndex((line, i) => i > openIdx && /^(---|\.\.\.)\s*$/.test(line.text));
 	if (close < 0) return null;
-	const at = lines.findLastIndex((line, i) => i > 0 && i < close && new RegExp(`^${key}\\s*:`, "i").test(line.text));
+	const at = lines.findLastIndex((line, i) => i > openIdx && i < close && new RegExp(`^${key}\\s*:`, "i").test(line.text));
 	if (at < 0) return null;
 	let lastItem = at;
 	let indent = "  ";
@@ -290,9 +298,10 @@ export function removeFromFrontMatterList(text: string, key: string, item: strin
 		if (stop < 0) break;
 		at = stop + 1;
 	}
-	const close = lines.findIndex((line, i) => i > 0 && /^(---|\.\.\.)\s*$/.test(line.text));
+	const openIdx = TEMPLATE_HEADER_RE.test(lines[0]?.text.replace(/^﻿/, "") ?? "") ? 1 : 0;
+	const close = lines.findIndex((line, i) => i > openIdx && /^(---|\.\.\.)\s*$/.test(line.text));
 	if (close < 0) return null;
-	const at = lines.findLastIndex((line, i) => i > 0 && i < close && new RegExp(`^${key}\\s*:`, "i").test(line.text));
+	const at = lines.findLastIndex((line, i) => i > openIdx && i < close && new RegExp(`^${key}\\s*:`, "i").test(line.text));
 	if (at < 0) return text;
 
 	// Check if multi-line bullet list
@@ -333,7 +342,7 @@ export function removeFromFrontMatterList(text: string, key: string, item: strin
 
 /**
  * Replaces `oldItem` (case-insensitive) with `newItem` inside a scalar, inline list,
- * or multi-line YAML bullet list while preserving all other entries verbatim.
+ * or multi-line YAML bullet list while preserving key position, YAML list style, and all other entries verbatim.
  */
 export function replaceInFrontMatterList(text: string, key: string, oldItem: string, newItem: string): string | null {
 	const target = oldItem.trim().toLowerCase();
@@ -341,14 +350,107 @@ export function replaceInFrontMatterList(text: string, key: string, oldItem: str
 	if (!target || !next) return text;
 	const vals = many(frontMatter(text).values[key.toLowerCase()]);
 	if (!vals.some((v) => v.toLowerCase() === target)) return text;
-	if (vals.length === 1 && !/^\s*-\s+/m.test(text.slice(0, bodyOffset(text)))) {
-		const updated = withFrontMatter(text, key, next);
-		if (updated !== null) return updated;
+
+	// Scan the frontmatter block directly so we can replace in place without reordering keys or flattening 1-item YAML lists.
+	const lines: { text: string; start: number; end: number }[] = [];
+	for (let at = 0; at <= text.length; ) {
+		const stop = text.indexOf("\n", at);
+		const end = stop < 0 ? text.length : stop;
+		lines.push({
+			text: text.slice(at, end).replace(/\r$/, ""),
+			start: at,
+			end: text[end - 1] === "\r" ? end - 1 : end,
+		});
+		if (stop < 0) break;
+		at = stop + 1;
 	}
-	const removed = removeFromFrontMatterList(text, key, oldItem);
-	if (removed === null) return null;
-	if (vals.length <= 1) return withFrontMatter(removed, key, next);
-	return addToFrontMatterList(removed, key, next);
+	const openIdx = TEMPLATE_HEADER_RE.test(lines[0]?.text.replace(/^﻿/, "") ?? "") ? 1 : 0;
+	const close = lines[openIdx]?.text.replace(/^﻿/, "").trim() === "---" ? lines.findIndex((line, i) => i > openIdx && /^(---|\.\.\.)\s*$/.test(line.text)) : -1;
+	if (close < 0) return null;
+	const at = lines.findLastIndex((line, i) => i > openIdx && i < close && new RegExp(`^${key}\\s*:`, "i").test(line.text));
+	if (at < 0) return text;
+
+	const quote = (v: string) => (/[:#[\]{},&*?|>!'"%@`]|^\s|\s$/.test(v) ? JSON.stringify(v) : v);
+
+	// Check multi-line YAML bullet list
+	let isMulti = false;
+	let listEnd = at;
+	if (/:\s*(?:#.*)?$/.test(lines[at]!.text)) {
+		for (let j = at + 1; j < close; j++) {
+			const t = lines[j]!.text.trim();
+			if (!t || t.startsWith("#")) continue;
+			if (/^-\s+/.test(t)) {
+				isMulti = true;
+				listEnd = j;
+			} else break;
+		}
+	}
+	if (isMulti) {
+		const edits: { start: number; end: number; rep: string }[] = [];
+		const alreadyHasNew = vals.some((v) => v.toLowerCase() === next.toLowerCase());
+		for (let j = at + 1; j <= listEnd; j++) {
+			const m = /^(\s*-\s+)(.*)$/.exec(lines[j]!.text);
+			if (m && unquote(stripInlineComment(m[2]!)).toLowerCase() === target) {
+				if (alreadyHasNew) {
+					const nextLineEnd = j + 1 < lines.length ? lines[j + 1]!.start : text.length;
+					edits.push({ start: lines[j]!.start, end: nextLineEnd, rep: "" });
+				} else {
+					edits.push({ start: lines[j]!.start, end: lines[j]!.end, rep: `${m[1]}${quote(next)}` });
+				}
+			}
+		}
+		if (!edits.length) return text;
+		let out = text;
+		for (let k = edits.length - 1; k >= 0; k--) {
+			out = `${out.slice(0, edits[k]!.start)}${edits[k]!.rep}${out.slice(edits[k]!.end)}`;
+		}
+		return out;
+	}
+
+	// Scalar or inline array: preserve inline-array brackets when originally written as `[...]`.
+	const rawVal = lines[at]!.text.slice(lines[at]!.text.indexOf(":") + 1).trim();
+	const deduped: string[] = [];
+	const seen = new Set<string>();
+	for (const v of vals) {
+		const out = v.toLowerCase() === target ? next : v;
+		if (!seen.has(out.toLowerCase())) {
+			seen.add(out.toLowerCase());
+			deduped.push(out);
+		}
+	}
+	const formatted = rawVal.startsWith("[") || deduped.length > 1 ? `[${deduped.map(quote).join(", ")}]` : quoteYamlScalar(deduped[0]!);
+	return `${text.slice(0, lines[at]!.start)}${lines[at]!.text.slice(0, lines[at]!.text.indexOf(":"))}: ${formatted}${text.slice(lines[at]!.end)}`;
+}
+
+/**
+ * Removes an empty YAML front matter block (`---\n---`) left behind when the last
+ * property is deleted, keeping any template header comment and body intact.
+ */
+export function stripEmptyFrontMatter(text: string): string {
+	const lines: { text: string; start: number; lineEnd: number }[] = [];
+	for (let at = 0; at <= text.length; ) {
+		const stop = text.indexOf("\n", at);
+		const end = stop < 0 ? text.length : stop;
+		lines.push({
+			text: text.slice(at, end).replace(/\r$/, ""),
+			start: at,
+			lineEnd: stop < 0 ? text.length : stop + 1,
+		});
+		if (stop < 0) break;
+		at = stop + 1;
+	}
+	const openIdx = TEMPLATE_HEADER_RE.test(lines[0]?.text.replace(/^﻿/, "") ?? "") ? 1 : 0;
+	if (lines[openIdx]?.text.replace(/^﻿/, "").trim() !== "---") return text;
+	const close = lines.findIndex((line, i) => i > openIdx && /^(---|\.\.\.)\s*$/.test(line.text));
+	if (close < 0) return text;
+	for (let j = openIdx + 1; j < close; j++) {
+		if (lines[j]!.text.trim()) return text;
+	}
+	let cutTo = lines[close]!.lineEnd;
+	while (cutTo < text.length && (text[cutTo] === "\r" || text[cutTo] === "\n")) {
+		cutTo += text[cutTo] === "\r" && text[cutTo + 1] === "\n" ? 2 : 1;
+	}
+	return `${text.slice(0, lines[openIdx]!.start)}${text.slice(cutTo)}`;
 }
 
 /** Where the body starts in the text: after the front matter's lines. */

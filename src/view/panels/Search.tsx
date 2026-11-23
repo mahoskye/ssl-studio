@@ -14,10 +14,11 @@ import { backend } from "../backend";
 import { choose } from "../dialogs";
 import { activePath, canonical, documents, fileChangedOnDisk, notify, openFile, save, saveAll, setState, state } from "../state";
 import { baseName, relativeTo } from "../../shared/paths";
-import { DOC_FOLDERS } from "../../shared/projectDocs";
+import { DOC_FOLDERS, isCatalog, toneOf } from "../../shared/projectDocs";
 import { matchesOn, SEARCH_LIMIT, searchPattern, type SearchOptions } from "../../shared/searchPattern";
 import { outline } from "../../shared/outline";
-import { ticketForFile, ticketWork } from "../../shared/workContext";
+import { tagSearchPattern, workspaceTags } from "../../shared/tags";
+import { codeMatchesRef, descendantTickets, scriptsForTicket, ticketForFile, ticketWork } from "../../shared/workContext";
 import { docs } from "../project";
 import { ticketAtHand } from "../projectDocs";
 import { focusRowsBelow, IconButton, Row, RowGroup, Rows } from "./Rows";
@@ -81,28 +82,116 @@ const [wholeWord, setWholeWord] = createSignal(false);
 /** Where the panel stands: nothing asked yet, searching, the last search answered or failed. */
 const [status, setStatus] = createSignal<"idle" | "busy" | "done" | "failed">("idle");
 const [asked, setAsked] = createSignal("");
+const [effectiveAsked, setEffectiveAsked] = createSignal("");
 /** The switches and the files the results on screen were found with: a replace uses these, not what has been changed since. */
 const [searched, setSearched] = createSignal<SearchOptions>({});
 const [failure, setFailure] = createSignal("");
+const [docFilterNote, setDocFilterNote] = createSignal("");
 let latest = 0;
+
+type ParsedDocFilters = { text: string; tags: string[]; statuses: string[] };
+
+/** Extracts `tag:<name>` and `status:<val>` tokens from a search query string (supports quoted values). */
+function parseDocFilterTokens(raw: string): ParsedDocFilters {
+	const tags: string[] = [];
+	const statuses: string[] = [];
+	const rest = raw
+		.replace(/(?:^|\s)(tag|status):(?:"([^"]+)"|'([^']+)'|(\S+))/gi, (full, kind: string, dq?: string, sq?: string, bare?: string) => {
+			const val = (dq ?? sq ?? bare ?? "").trim();
+			if (!val) return full;
+			if (kind.toLowerCase() === "tag") tags.push(val.replace(/^#+/, ""));
+			else statuses.push(val);
+			return " ";
+		})
+		.replace(/\s+/g, " ")
+		.trim();
+	return { text: rest, tags, statuses };
+}
+
+const normStatus = (s?: string) => (s ?? "").toLowerCase().replace(/[-_]+/g, " ").trim();
 
 export function Search() {
 	let input!: HTMLInputElement;
+	const [workspaceFiles] = createResource(
+		() => (state.workspace?.root ? `${state.workspace.root}#${state.treeVersion}` : false),
+		() => backend.files().catch(() => [] as string[]),
+	);
 	const run = async () => {
-		const query = input.value;
+		const rawQuery = input.value;
 		const mine = ++latest;
-		if (!query) {
+		setDocFilterNote("");
+		if (!rawQuery) {
 			setHits([]);
 			setStatus("idle");
 			return;
 		}
 		setStatus("busy");
-		setAsked(query);
-		// The files are narrowed only while their boxes are showing: a pattern out of sight would hide results with no sign of why.
-		const options: SearchOptions = { regex: regex(), caseSensitive: caseSensitive(), wholeWord: wholeWord(), ...(choosing() ? { include: include(), exclude: exclude() } : {}) };
+		setAsked(rawQuery);
+		// Support `tag:<name>` and `status:<val>` filter tokens using indexed `docs()` metadata when not in raw regex mode.
+		const parsed = !regex() ? parseDocFilterTokens(rawQuery) : { text: rawQuery, tags: [], statuses: [] };
+		let effectiveQuery = parsed.text;
+		let effectiveRegex = regex();
+		let effectiveWhole = wholeWord();
+		let effectiveCase = caseSensitive();
+		let effectiveInclude = choosing() ? include() : "";
+		const effectiveExclude = choosing() ? exclude() : "";
+
+		if (parsed.tags.length || parsed.statuses.length) {
+			const root = state.workspace?.root;
+			const matchedDocs = docs().filter((d) => {
+				if (!d.exists || isCatalog(d)) return false;
+				if (parsed.tags.length) {
+					const dTags = (d.tags ?? []).map((t) => t.toLowerCase());
+					if (!parsed.tags.every((wanted) => dTags.includes(wanted.toLowerCase()))) return false;
+				}
+				if (parsed.statuses.length) {
+					const dNorm = normStatus(d.status);
+					const dTone = toneOf(d.status);
+					if (
+						!parsed.statuses.every((wanted) => {
+							const wNorm = normStatus(wanted);
+							return dNorm === wNorm || dTone === wNorm;
+						})
+					) {
+						return false;
+					}
+				}
+				return true;
+			});
+			const filterLabel = [...parsed.tags.map((t) => `tag:${t}`), ...parsed.statuses.map((s) => `status:${s}`)].join(" ");
+			setDocFilterNote(`${filterLabel} (${matchedDocs.length} ${matchedDocs.length === 1 ? "doc" : "docs"})`);
+			if (!matchedDocs.length) {
+				setHits([]);
+				setSearched({ regex: effectiveRegex, caseSensitive: effectiveCase, wholeWord: effectiveWhole });
+				setStatus("done");
+				return;
+			}
+			effectiveInclude = matchedDocs.map((d) => relativeTo(root, d.path).replace(/\\/g, "/")).join(", ");
+			if (!effectiveQuery) {
+				if (parsed.tags.length) {
+					effectiveQuery = tagSearchPattern(parsed.tags[0]!);
+					effectiveRegex = true;
+					effectiveWhole = false;
+				} else {
+					effectiveQuery = "^status\\s*:";
+					effectiveRegex = true;
+					effectiveCase = false;
+					effectiveWhole = false;
+				}
+			}
+		}
+
+		// The files are narrowed only while their boxes are showing, or when tag:/status: metadata filters narrowed them.
+		const options: SearchOptions = {
+			regex: effectiveRegex,
+			caseSensitive: effectiveCase,
+			wholeWord: effectiveWhole,
+			...(effectiveInclude || effectiveExclude ? { include: effectiveInclude, exclude: effectiveExclude } : {}),
+		};
 		setSearched(options);
+		setEffectiveAsked(effectiveQuery);
 		try {
-			const found = await backend.search(query, options);
+			const found = await backend.search(effectiveQuery, options);
 			if (mine !== latest) return;
 			setHits(found);
 			setStatus("done");
@@ -223,19 +312,60 @@ export function Search() {
 		if (!key) return null;
 		const found = allDocs.find((d) => d.exists && d.group === "tickets" && d.ticket?.toLowerCase() === key.toLowerCase());
 		if (!found) return null;
+		const descendants = descendantTickets(allDocs, key);
 		const globs = new Set<string>();
-		globs.add(relativeTo(root, found.path).replace(/\\/g, "/"));
-		if (found.ticketFolder) {
-			globs.add(`${relativeTo(root, found.ticketFolder).replace(/\\/g, "/")}/**`);
-		}
-		for (const group of ticketWork(allDocs, key)) {
-			if (group.kind === "ticket") continue;
-			for (const ref of group.files) {
-				globs.add(relativeTo(root, ref.path).replace(/\\/g, "/"));
+		const addTicketTree = (ticketDoc: typeof found) => {
+			globs.add(relativeTo(root, ticketDoc.path).replace(/\\/g, "/"));
+			if (ticketDoc.ticketFolder) {
+				globs.add(`${relativeTo(root, ticketDoc.ticketFolder).replace(/\\/g, "/")}/**`);
+			}
+			const tKey = ticketDoc.ticket;
+			if (!tKey) return;
+			for (const group of ticketWork(allDocs, tKey)) {
+				if (group.kind === "ticket") continue;
+				for (const ref of group.files) {
+					globs.add(relativeTo(root, ref.path).replace(/\\/g, "/"));
+				}
+			}
+		};
+		addTicketTree(found);
+		for (const desc of descendants) addTicketTree(desc);
+		// Resolve referenced scripts across the ticket & all descendant tickets against real workspace paths.
+		const refs = scriptsForTicket(allDocs, key, { includeDescendants: true });
+		let resolvedScripts = 0;
+		if (refs.length) {
+			const allWs = workspaceFiles() ?? [];
+			for (const filePath of allWs) {
+				if (refs.some((ref) => codeMatchesRef(filePath, ref, root))) {
+					globs.add(relativeTo(root, filePath).replace(/\\/g, "/"));
+					resolvedScripts++;
+				}
 			}
 		}
-		return { key, glob: [...globs].filter(Boolean).join(", "), tip: `Search ${key}, its ticket folder, and all linked specs/plans/decisions` };
+		const extras = [
+			descendants.length ? `${descendants.length} sub-${descendants.length === 1 ? "ticket" : "tickets"}` : "",
+			resolvedScripts ? `${resolvedScripts} ${resolvedScripts === 1 ? "script" : "scripts"}` : "",
+		].filter(Boolean);
+		return {
+			key,
+			glob: [...globs].filter(Boolean).join(", "),
+			tip: `Search ${key}${extras.length ? ` (${extras.join(", ")})` : ""}, its folder, and all linked specs/plans/decisions`,
+		};
 	});
+	const topTags = createMemo(() => workspaceTags(docs()).slice(0, 4));
+	const toggleQueryToken = (token: string) => {
+		const cur = input ? input.value : typed();
+		const esc = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		const re = new RegExp(`(?:^|\\s)${esc}(?=\\s|$)`, "i");
+		const next = re.test(cur) ? cur.replace(re, " ").replace(/\s+/g, " ").trim() : `${token}${cur.trim() ? ` ${cur.trim()}` : ""}`;
+		if (input) input.value = next;
+		setTyped(next);
+		if (next) void run();
+	};
+	const hasQueryToken = (token: string) => {
+		const esc = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		return new RegExp(`(?:^|\\s)${esc}(?=\\s|$)`, "i").test(typed());
+	};
 	const applyScope = (inc: string, exc = "") => {
 		setInclude(inc);
 		setExclude(exc);
@@ -249,7 +379,8 @@ export function Search() {
 	/** The expression the results were found with, for showing what each match would become. Null when it cannot be read. */
 	const pattern = createMemo(() => {
 		try {
-			return asked() ? searchPattern(asked(), searched()) : null;
+			const q = effectiveAsked() || asked();
+			return q ? searchPattern(q, searched()) : null;
 		} catch {
 			return null;
 		}
@@ -268,7 +399,7 @@ export function Search() {
 	};
 	const replaceAll = async () => {
 		if (noReplace()) return;
-		const query = asked();
+		const query = effectiveAsked() || asked();
 		const options = searched();
 		const with_ = replacement();
 		const found = pattern();
@@ -331,9 +462,10 @@ export function Search() {
 	const summary = () => {
 		if (status() === "busy") return "Searching…";
 		if (status() === "failed") return `The search for “${asked()}” failed: ${failure()}${regex() ? " Check the regular expression, or switch .* off." : ""}`;
-		if (status() === "idle") return "Type what to find and press Enter. Aa matches upper and lower case exactly; ab finds whole words only; .* reads it as a regular expression.";
-		if (!hits().length) return `Nothing found for “${asked()}”${narrowed() ? " in the files chosen" : ""}. Check the spelling${switchesOn().length ? `, or switch ${switchesOn().join(" and ")} off` : ""}${narrowed() ? ", or look in more files" : ""}.`;
-		return `${hits().length >= SEARCH_LIMIT ? `The first ${SEARCH_LIMIT} results` : count(hits().length, "result")} in ${count(groups().length, "file")} for “${asked()}”${narrowed() ? ", in the files chosen" : ""}`;
+		if (status() === "idle") return "Type what to find and press Enter. Use tag:<name> or status:<val> to narrow Docs. Aa matches case; ab whole words; .* regex.";
+		const filterTail = docFilterNote() ? ` [${docFilterNote()}]` : "";
+		if (!hits().length) return `Nothing found for “${asked()}”${filterTail}${narrowed() && !docFilterNote() ? " in the files chosen" : ""}. Check the spelling${switchesOn().length ? `, or switch ${switchesOn().join(" and ")} off` : ""}${narrowed() ? ", or look in more files" : ""}.`;
+		return `${hits().length >= SEARCH_LIMIT ? `The first ${SEARCH_LIMIT} results` : count(hits().length, "result")} in ${count(groups().length, "file")} for “${asked()}”${filterTail}${narrowed() && !docFilterNote() ? ", in the files chosen" : ""}`;
 	};
 	const HitRow = (props: { line: LineHit }) => {
 		const first = () => props.line.matches[0]!;
@@ -474,6 +606,40 @@ export function Search() {
 						)}
 					</Show>
 				</div>
+				<Show when={scopeActive(docsIncludeGlob(), "")}>
+					<div class="search-doc-tokens" role="group" aria-label="Document metadata filter chips">
+						<For each={topTags()}>
+							{(bucket) => {
+								const tok = `tag:${bucket.tag}`;
+								return (
+									<button
+										type="button"
+										classList={{ on: hasQueryToken(tok) }}
+										title={`Filter Docs by #${bucket.tag} (${bucket.count})`}
+										onClick={() => toggleQueryToken(tok)}
+									>
+										#{bucket.tag}
+									</button>
+								);
+							}}
+						</For>
+						<For each={["open", "in-progress", "draft", "done"]}>
+							{(st) => {
+								const tok = `status:${st}`;
+								return (
+									<button
+										type="button"
+										classList={{ on: hasQueryToken(tok) }}
+										title={`Filter Docs by status:${st}`}
+										onClick={() => toggleQueryToken(tok)}
+									>
+										{tok}
+									</button>
+								);
+							}}
+						</For>
+					</div>
+				</Show>
 			</form>
 			<p class="hint" classList={{ warn: status() === "failed" }} role="status">
 				{summary()}

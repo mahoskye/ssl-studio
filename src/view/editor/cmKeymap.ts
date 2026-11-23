@@ -1,6 +1,7 @@
 // Obsidian-grade Markdown keymap + full VS Code / Monaco command & menu parity
 // for CodeMirror 6 Live Preview (ADR 0028).
 // Every edit mutates the underlying plain Markdown text directly (ADR 0002).
+import { completionStatus } from "@codemirror/autocomplete";
 import {
 	copyLineDown,
 	copyLineUp,
@@ -25,6 +26,7 @@ import { EditorSelection, Prec, type ChangeSpec, type Extension } from "@codemir
 import { EditorView, keymap, type Command, type KeyBinding } from "@codemirror/view";
 import { fenced } from "../../shared/catalog";
 import { linkWritten } from "../../shared/docLinks";
+import { nameFor } from "../../shared/namedLinks";
 import { baseName, dirName, relativePath } from "../../shared/paths";
 import {
 	blockquoteEnter,
@@ -59,8 +61,9 @@ import {
 } from "../../shared/markdownTables";
 import { listEnter } from "../../shared/markdownText";
 import { backend } from "../backend";
+import { docs } from "../project";
 import { showPanel } from "../panels/registry";
-import { notify } from "../state";
+import { canonical, notify, state as appState } from "../state";
 import { focusLiveWidgetAt, historyFallbackFacet, rawEditBlockField, type HistoryFallback } from "./cmLiveShared";
 import { IMAGE_FILE_RE, saveImageAttachment } from "./imageResolve";
 
@@ -678,7 +681,11 @@ export function cmSmartPasteExtension(filePath: () => string): Extension {
 				if (IMAGE_FILE_RE.test(name)) {
 					snippet = `![${stem}](${rel})`;
 				} else if (/\.(md|markdown)$/i.test(name)) {
-					snippet = event.shiftKey ? `[${stem}](${rel})` : event.altKey ? `![[${stem}]]` : `[[${stem}]]`;
+					const root = appState.workspace?.root;
+					const all = docs();
+					const droppedDoc = all.find((d) => d.exists && canonical(d.path) === canonical(droppedPath));
+					const wikiName = (droppedDoc ? nameFor(droppedDoc, all, root) : null) ?? stem;
+					snippet = event.shiftKey ? `[${stem}](${rel})` : event.altKey ? `![[${wikiName}]]` : `[[${wikiName}]]`;
 				} else {
 					snippet = event.altKey ? `![[${relRaw.replace(/\\/g, "/")}]]` : `[${name}](${rel})`;
 				}
@@ -701,6 +708,35 @@ export function cmSmartPasteExtension(filePath: () => string): Extension {
 	});
 }
 
+/**
+ * Keyboard parity for CM6 Live Preview widgets (Wave 2.4): when pressing ArrowDown or ArrowUp
+ * across the boundary into an adjacent interactive TableWidget or CalloutWidget, focus that widget directly.
+ */
+function cmStepIntoLiveWidget(dir: 1 | -1): Command {
+	return (view) => {
+		if (view.state.readOnly || view.state.selection.ranges.length !== 1) return false;
+		if (completionStatus(view.state) === "active") return false;
+		if (view.state.field(rawEditBlockField, false)) return false;
+		const main = view.state.selection.main;
+		if (!main.empty) return false;
+		const doc = view.state.doc;
+		const curLine = doc.lineAt(main.head);
+		if (dir === 1) {
+			if (curLine.number >= doc.lines) return false;
+			// Only cross into the next line's widget if ArrowDown would actually leave this line (handles wrapped paragraphs).
+			const moved = view.moveVertically(main, true);
+			if (curLine.length > 0 && moved.head <= curLine.to) return false;
+			const nextLine = doc.line(curLine.number + 1);
+			return focusLiveWidgetAt(view, nextLine.from);
+		}
+		if (curLine.number <= 1) return false;
+		const moved = view.moveVertically(main, false);
+		if (curLine.length > 0 && moved.head >= curLine.from) return false;
+		const prevLine = doc.line(curLine.number - 1);
+		return focusLiveWidgetAt(view, prevLine.to);
+	};
+}
+
 const markdownBindings: KeyBinding[] = [
 	// Obsidian text formatting (takes precedence over conflicting window chrome shortcuts inside Markdown).
 	{ key: "Mod-b", run: cmToggleBold, preventDefault: true },
@@ -710,6 +746,9 @@ const markdownBindings: KeyBinding[] = [
 	{ key: "Mod-Alt-h", run: cmToggleHighlight, preventDefault: true },
 	{ key: "Mod-k", run: cmInsertLink, preventDefault: true },
 	{ key: "Mod-l", run: cmToggleCheckbox, preventDefault: true },
+	// Live Table & Callout keyboard entry on vertical boundary navigation.
+	{ key: "ArrowDown", run: cmStepIntoLiveWidget(1) },
+	{ key: "ArrowUp", run: cmStepIntoLiveWidget(-1) },
 	// Smart Markdown tables, lists, callouts & block markers.
 	{ key: "Shift-Enter", run: cmTableShiftEnter },
 	{ key: "Enter", run: cmSmartEnter },

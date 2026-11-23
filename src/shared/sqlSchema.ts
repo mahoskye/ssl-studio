@@ -7,7 +7,9 @@ export type SqlObjectEntry = {
 	name: string;
 	/** Bare object name without schema prefix (`FOLDERS`). */
 	bareName: string;
-	kind: "table" | "view" | "procedure" | "function" | "trigger" | "sequence" | "package" | "index";
+	kind: "table" | "view" | "procedure" | "function" | "trigger" | "sequence" | "package" | "index" | "synonym" | "type";
+	/** Whether the object was extracted from a `CREATE` or standalone `ALTER` statement. */
+	action?: "create" | "alter";
 };
 
 export type SqlColumnDef = {
@@ -105,50 +107,69 @@ function normalizeObjectName(raw: string): { name: string; bareName: string } {
 }
 
 /**
- * Extracts created database object names and kinds from SQL Server (T-SQL) and Oracle (PL/SQL) DDL.
- * Excludes indexes by default (matching `database.csv` conventions), and preserves 2-part schema prefixes.
+ * Extracts created (and optionally altered) database object names and kinds from
+ * SQL Server (T-SQL) and Oracle (PL/SQL) DDL. Excludes indexes by default
+ * (matching `database.csv` conventions), and preserves 2-part schema prefixes.
  */
-export function extractSqlObjects(sql: string, options: { includeIndexes?: boolean } = {}): SqlObjectEntry[] {
+export function extractSqlObjects(sql: string, options: { includeIndexes?: boolean; includeAlter?: boolean } = {}): SqlObjectEntry[] {
 	const cleaned = sanitizeSql(sql, true);
 	const out: SqlObjectEntry[] = [];
 	const seen = new Set<string>();
 	const modifiers =
-		"(?:OR\\s+(?:REPLACE|ALTER)|UNIQUE|CLUSTERED|NONCLUSTERED|BITMAP|COLUMNSTORE|MATERIALIZED|GLOBAL\\s+TEMPORARY|PRIVATE\\s+TEMPORARY|LOCAL\\s+TEMPORARY|TEMPORARY|TEMP|FORCE|NOFORCE|EDITIONABLE|NONEDITIONABLE)";
-	const re = new RegExp(
-		`\\bCREATE\\s+(?:${modifiers}\\s+)*(TABLE|VIEW|PROC(?:EDURE)?|FUNCTION|TRIGGER|SEQUENCE|PACKAGE(?:\\s+BODY)?|INDEX)\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${QUALIFIED_NAME})`,
-		"gi",
-	);
-	for (const m of cleaned.matchAll(re)) {
-		const rawKind = m[1]!.toUpperCase();
-		let kind: SqlObjectEntry["kind"] = "table";
-		if (rawKind.startsWith("VIEW")) kind = "view";
-		else if (rawKind.startsWith("PROC")) kind = "procedure";
-		else if (rawKind.startsWith("FUNC")) kind = "function";
-		else if (rawKind.startsWith("TRIG")) kind = "trigger";
-		else if (rawKind.startsWith("SEQ")) kind = "sequence";
-		else if (rawKind.startsWith("PACK")) kind = "package";
-		else if (rawKind.startsWith("INDEX")) kind = "index";
-		if (kind === "index" && !options.includeIndexes) continue;
-
-		const { name, bareName } = normalizeObjectName(m[2]!);
+		"(?:OR\\s+(?:REPLACE|ALTER)|UNIQUE|CLUSTERED|NONCLUSTERED|BITMAP|COLUMNSTORE|MATERIALIZED|GLOBAL\\s+TEMPORARY|PRIVATE\\s+TEMPORARY|LOCAL\\s+TEMPORARY|TEMPORARY|TEMP|FORCE|NOFORCE|EDITIONABLE|NONEDITIONABLE|PUBLIC)";
+	const kinds = "TABLE|VIEW|PROC(?:EDURE)?|FUNCTION|TRIGGER|SEQUENCE|PACKAGE(?:\\s+BODY)?|SYNONYM|TYPE|INDEX";
+	const classifyKind = (rawKind: string): SqlObjectEntry["kind"] => {
+		const u = rawKind.toUpperCase();
+		if (u.startsWith("VIEW")) return "view";
+		if (u.startsWith("PROC")) return "procedure";
+		if (u.startsWith("FUNC")) return "function";
+		if (u.startsWith("TRIG")) return "trigger";
+		if (u.startsWith("SEQ")) return "sequence";
+		if (u.startsWith("PACK")) return "package";
+		if (u.startsWith("SYN")) return "synonym";
+		if (u.startsWith("TYPE")) return "type";
+		if (u.startsWith("INDEX")) return "index";
+		return "table";
+	};
+	const addMatch = (rawKind: string, rawName: string, action: "create" | "alter") => {
+		const kind = classifyKind(rawKind);
+		if (kind === "index" && !options.includeIndexes) return;
+		const { name, bareName } = normalizeObjectName(rawName);
 		// Skip SQL Server local/global temp tables (`#Temp`, `##Temp`) declared inside procedures/scripts.
-		if (!name || bareName.startsWith("#")) continue;
+		if (!name || bareName.startsWith("#")) return;
 		const key = `${kind}:${name.toLowerCase()}`;
-		if (seen.has(key)) continue;
+		if (seen.has(key)) return;
 		seen.add(key);
-		out.push({ name, bareName, kind });
+		out.push({ name, bareName, kind, ...(action === "alter" ? { action } : {}) });
+	};
+
+	const createRe = new RegExp(`\\bCREATE\\s+(?:${modifiers}\\s+)*(${kinds})\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${QUALIFIED_NAME})`, "gi");
+	for (const m of cleaned.matchAll(createRe)) addMatch(m[1]!, m[2]!, "create");
+
+	if (options.includeAlter) {
+		const alterRe = new RegExp(`\\bALTER\\s+(?:${modifiers}\\s+)*(${kinds})\\s+(?:IF\\s+EXISTS\\s+)?(${QUALIFIED_NAME})`, "gi");
+		for (const m of cleaned.matchAll(alterRe)) addMatch(m[1]!, m[2]!, "alter");
 	}
 	return out;
 }
 
-/** Splits a parenthesized SQL column list on top-level commas (respecting nested parens and quotes). */
+/** Splits a parenthesized SQL column list on top-level commas (respecting nested parens, quotes, and `[bracketed]` identifiers). */
 function splitTopLevelCommas(body: string): string[] {
 	const parts: string[] = [];
 	let cur = "";
 	let depth = 0;
 	let quote: string | null = null;
+	let bracket = false;
 	for (let i = 0; i < body.length; i++) {
 		const ch = body[i]!;
+		if (bracket) {
+			cur += ch;
+			if (ch === "]") {
+				if (body[i + 1] === "]") cur += body[++i]!;
+				else bracket = false;
+			}
+			continue;
+		}
 		if (quote) {
 			cur += ch;
 			if (ch === quote) {
@@ -158,6 +179,11 @@ function splitTopLevelCommas(body: string): string[] {
 					quote = null;
 				}
 			}
+			continue;
+		}
+		if (ch === "[") {
+			bracket = true;
+			cur += ch;
 			continue;
 		}
 		if (ch === "'" || ch === '"') {
@@ -220,7 +246,7 @@ function parseColumnClause(rawClause: string): SqlColumnDef | null {
 }
 
 /** Extracts `CREATE TABLE` definitions (plus any `ALTER TABLE ... ADD` columns) from SQL DDL text. */
-export function parseCreateTables(sql: string): SqlTableDef[] {
+export function parseCreateTables(sql: string, options?: { includeStandaloneAlter?: boolean }): SqlTableDef[] {
 	// `cleaned` preserves string literal values (like `DEFAULT '-- none --'`);
 	// `masked` blanks single-quoted strings at identical character offsets so `EXEC('CREATE TABLE ...')` never matches.
 	const cleaned = sanitizeSql(sql, false);
@@ -240,13 +266,21 @@ export function parseCreateTables(sql: string): SqlTableDef[] {
 		let depth = 1;
 		let i = bodyStart;
 		let quote: string | null = null;
+		let bracket = false;
 		while (i < cleaned.length && depth > 0) {
 			const ch = cleaned[i]!;
-			if (quote) {
+			if (bracket) {
+				if (ch === "]") {
+					if (cleaned[i + 1] === "]") i++;
+					else bracket = false;
+				}
+			} else if (quote) {
 				if (ch === quote) {
 					if (cleaned[i + 1] === quote) i++;
 					else quote = null;
 				}
+			} else if (ch === "[") {
+				bracket = true;
 			} else if (ch === "'" || ch === '"') {
 				quote = ch;
 			} else if (ch === "(") {
@@ -271,11 +305,18 @@ export function parseCreateTables(sql: string): SqlTableDef[] {
 
 	// Enrich matching tables with columns added via `ALTER TABLE <name> ADD (...)` (Oracle balanced parens)
 	// or unparenthesized `ALTER TABLE <name> ADD col type` (T-SQL ending at `;`, standalone `GO`, or next DDL statement).
+	// Also creates a stub SqlTableDef for standalone ALTER-only migration scripts when `options.includeStandaloneAlter` is enabled.
 	const alterHeadRe = new RegExp(`\\bALTER\\s+TABLE\\s+(${QUALIFIED_NAME})\\s+ADD\\s+(?:COLUMN\\s+)?`, "gi");
 	for (const m of masked.matchAll(alterHeadRe)) {
 		const { name, bareName } = normalizeObjectName(m[1]!);
-		const target = byKey.get(name.toLowerCase()) ?? byKey.get(bareName.toLowerCase());
-		if (!target) continue;
+		let target = byKey.get(name.toLowerCase()) ?? byKey.get(bareName.toLowerCase());
+		if (!target) {
+			if (!options?.includeStandaloneAlter || !bareName || bareName.startsWith("#")) continue;
+			target = { tableName: bareName || name, columns: [] };
+			tables.push(target);
+			byKey.set(name.toLowerCase(), target);
+			if (!byKey.has(bareName.toLowerCase())) byKey.set(bareName.toLowerCase(), target);
+		}
 		let pos = (m.index ?? 0) + m[0].length;
 		while (pos < cleaned.length && /\s/.test(cleaned[pos]!)) pos++;
 		let rawSpec = "";
@@ -284,13 +325,21 @@ export function parseCreateTables(sql: string): SqlTableDef[] {
 			let depth = 1;
 			let i = pos + 1;
 			let quote: string | null = null;
+			let bracket = false;
 			while (i < cleaned.length && depth > 0) {
 				const ch = cleaned[i]!;
-				if (quote) {
+				if (bracket) {
+					if (ch === "]") {
+						if (cleaned[i + 1] === "]") i++;
+						else bracket = false;
+					}
+				} else if (quote) {
 					if (ch === quote) {
 						if (cleaned[i + 1] === quote) i++;
 						else quote = null;
 					}
+				} else if (ch === "[") {
+					bracket = true;
 				} else if (ch === "'" || ch === '"') {
 					quote = ch;
 				} else if (ch === "(") {
@@ -336,4 +385,120 @@ export function sqlTablesToMarkdown(tables: readonly SqlTableDef[], sourceLabel?
 		blocks.push(lines.join("\n"));
 	}
 	return blocks.join("\n\n") + "\n";
+}
+
+/**
+ * Non-destructively merges SQL DDL column definitions into an existing Markdown schema doc
+ * while preserving frontmatter, surrounding prose, and hand-written `Notes` cells (ADR 0002).
+ */
+export function mergeSqlTablesIntoMarkdown(
+	existingMarkdown: string,
+	tables: readonly SqlTableDef[],
+	sourceLabel?: string,
+): { text: string; addedColumns: number; updatedColumns: number; addedTables: number } {
+	if (!tables.length) return { text: existingMarkdown, addedColumns: 0, updatedColumns: 0, addedTables: 0 };
+	const eol = existingMarkdown.includes("\r\n") ? "\r\n" : "\n";
+	const lines = existingMarkdown.split(/\r?\n/);
+	let addedColumns = 0;
+	let updatedColumns = 0;
+	let addedTables = 0;
+	const esc = (s: string) => s.replace(/\|/g, "\\|");
+	const stripCell = (s: string) => s.trim().replace(/^`|`$/g, "").trim();
+
+	const splitRow = (line: string): string[] => {
+		const trimmed = line.trim().replace(/^\|/, "").replace(/\|$/, "");
+		const cells: string[] = [];
+		let cur = "";
+		for (let i = 0; i < trimmed.length; i++) {
+			if (trimmed[i] === "\\" && trimmed[i + 1] === "|") {
+				cur += "\\|";
+				i++;
+			} else if (trimmed[i] === "|") {
+				cells.push(cur.trim());
+				cur = "";
+			} else cur += trimmed[i]!;
+		}
+		cells.push(cur.trim());
+		return cells;
+	};
+
+	const findTableBlock = (tableName: string): { headLine: number; tableStart: number; tableEnd: number } | null => {
+		const target = tableName.toLowerCase();
+		let startSearch = 0;
+		let headLine = -1;
+		for (let i = 0; i < lines.length; i++) {
+			const hm = /^#{1,3}\s+`?([A-Za-z_][\w$.]*)`?\s*$/.exec(lines[i]!.trim());
+			if (hm) {
+				const hName = hm[1]!.toLowerCase();
+				const bare = hName.includes(".") ? hName.split(".").pop()! : hName;
+				if (hName === target || bare === target) {
+					headLine = i;
+					startSearch = i + 1;
+					break;
+				}
+			}
+		}
+		if (headLine < 0 && tables.length > 1) return null;
+		for (let i = startSearch; i < lines.length; i++) {
+			if (headLine >= 0 && /^#{1,2}\s+/.test(lines[i]!)) break;
+			if (!lines[i]!.trim().startsWith("|")) continue;
+			const hdr = splitRow(lines[i]!).map((c) => c.toLowerCase());
+			if (!hdr[0]?.includes("column")) continue;
+			if (i + 1 >= lines.length || !/^\s*\|?\s*:?-{2,}/.test(lines[i + 1]!)) continue;
+			let end = i + 2;
+			while (end < lines.length && lines[end]!.trim().startsWith("|")) end++;
+			return { headLine, tableStart: i, tableEnd: end };
+		}
+		return null;
+	};
+
+	for (const tbl of tables) {
+		const block = findTableBlock(tbl.tableName);
+		if (!block) {
+			const rendered = sqlTablesToMarkdown([tbl], sourceLabel).trimEnd().split("\n");
+			if (lines.length && lines[lines.length - 1]!.trim() !== "") lines.push("");
+			lines.push(...rendered);
+			addedTables++;
+			addedColumns += tbl.columns.length;
+			continue;
+		}
+		const hdr = splitRow(lines[block.tableStart]!);
+		const notesCol = Math.max(3, hdr.length - 1);
+		const existingByCol = new Map<string, { cells: string[]; index: number }>();
+		const dataLines = lines.slice(block.tableStart + 2, block.tableEnd);
+		const existingOrder: string[] = [];
+		dataLines.forEach((raw, idx) => {
+			const cells = splitRow(raw);
+			const colKey = stripCell(cells[0] ?? "").toLowerCase();
+			if (colKey) {
+				existingByCol.set(colKey, { cells, index: idx });
+				existingOrder.push(colKey);
+			}
+		});
+
+		const nextRows: string[] = [];
+		const seen = new Set<string>();
+		for (const col of tbl.columns) {
+			const key = col.name.toLowerCase();
+			seen.add(key);
+			const prev = existingByCol.get(key);
+			const note = prev?.cells[notesCol] ?? "";
+			const newType = `\`${esc(col.type)}\``;
+			const newCons = esc(col.constraints || "—");
+			if (!prev) {
+				addedColumns++;
+			} else if (stripCell(prev.cells[1] ?? "") !== col.type || (prev.cells[2] ?? "").trim() !== newCons) {
+				updatedColumns++;
+			}
+			nextRows.push(`| \`${esc(col.name)}\` | ${newType} | ${newCons} | ${note} |`);
+		}
+		for (const key of existingOrder) {
+			if (!seen.has(key)) {
+				const prev = existingByCol.get(key)!;
+				nextRows.push(dataLines[prev.index]!);
+			}
+		}
+		lines.splice(block.tableStart + 2, block.tableEnd - (block.tableStart + 2), ...nextRows);
+	}
+	return { text: lines.join(eol), addedColumns, updatedColumns, addedTables };
 }

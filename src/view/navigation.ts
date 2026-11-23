@@ -4,6 +4,7 @@
 // Pure trail logic lives in src/shared/navHistory.ts; this wires keyboard,
 // menu, and application-wide Mouse 4 / Mouse 5 back/forward navigation.
 import { createEffect, on, onCleanup } from "solid-js";
+import { createMiddleClickGuard, isExplicitPasteKey } from "../shared/middleClickGuard";
 import { canGoBack, canGoForward, NO_TRAIL, stepTrail, TRAIL_LENGTH, trailRenamed, trailWithout, visited, type Place, type Trail } from "../shared/navHistory";
 import { activeEditor } from "./editor/EditorGroup";
 import { activeLiveEditor } from "./editor/liveBridge";
@@ -91,26 +92,72 @@ export function useNavigation() {
 		}),
 	);
 
-	// Application-wide Mouse 4 (Back, button 3) and Mouse 5 (Forward, button 4) navigation, matching VS Code.
-	const blockBrowserNav = (e: MouseEvent) => {
+	// Application-wide Mouse 4/5 (Back/Forward) navigation AND Linux middle-click
+	// primary-selection paste suppression (so middle-clicking tabs to close them,
+	// or middle-clicking in an editor, never dumps clipboard text into documents).
+	const middleGuard = createMiddleClickGuard();
+	const onMouseDownCapture = (e: MouseEvent) => {
 		if (e.button === 3 || e.button === 4) {
 			e.preventDefault();
 			e.stopPropagation();
+			return;
+		}
+		if (e.button === 1) {
+			middleGuard.noteMiddleMouse();
+			e.preventDefault();
 		}
 	};
-	const onMouseUp = (e: MouseEvent) => {
-		if (e.button !== 3 && e.button !== 4) return;
-		e.preventDefault();
-		e.stopPropagation();
-		void goAlong(e.button === 3 ? -1 : 1);
+	const onAuxClickCapture = (e: MouseEvent) => {
+		if (e.button === 3 || e.button === 4) {
+			e.preventDefault();
+			e.stopPropagation();
+			return;
+		}
+		if (e.button === 1) {
+			middleGuard.noteMiddleMouse();
+			e.preventDefault();
+		}
 	};
-	window.addEventListener("mousedown", blockBrowserNav, true);
-	window.addEventListener("auxclick", blockBrowserNav, true);
-	window.addEventListener("mouseup", onMouseUp, true);
+	const onMouseUpCapture = (e: MouseEvent) => {
+		if (e.button === 3 || e.button === 4) {
+			e.preventDefault();
+			e.stopPropagation();
+			void goAlong(e.button === 3 ? -1 : 1);
+			return;
+		}
+		if (e.button === 1) {
+			middleGuard.noteMiddleMouse();
+			e.preventDefault();
+		}
+	};
+	const onKeyDownCapture = (e: KeyboardEvent) => {
+		if (isExplicitPasteKey(e)) middleGuard.noteExplicitPaste();
+	};
+	const onPasteCapture = (e: ClipboardEvent) => {
+		if (middleGuard.shouldBlockPaste()) {
+			e.preventDefault();
+			e.stopImmediatePropagation();
+		}
+	};
+	const onBeforeInputCapture = (e: InputEvent) => {
+		if ((e.inputType === "insertFromPaste" || e.inputType === "insertFromYank") && middleGuard.shouldBlockPaste()) {
+			e.preventDefault();
+			e.stopImmediatePropagation();
+		}
+	};
+	window.addEventListener("mousedown", onMouseDownCapture, true);
+	window.addEventListener("auxclick", onAuxClickCapture, true);
+	window.addEventListener("mouseup", onMouseUpCapture, true);
+	window.addEventListener("keydown", onKeyDownCapture, true);
+	window.addEventListener("paste", onPasteCapture, true);
+	window.addEventListener("beforeinput", onBeforeInputCapture, true);
 	onCleanup(() => {
-		window.removeEventListener("mousedown", blockBrowserNav, true);
-		window.removeEventListener("auxclick", blockBrowserNav, true);
-		window.removeEventListener("mouseup", onMouseUp, true);
+		window.removeEventListener("mousedown", onMouseDownCapture, true);
+		window.removeEventListener("auxclick", onAuxClickCapture, true);
+		window.removeEventListener("mouseup", onMouseUpCapture, true);
+		window.removeEventListener("keydown", onKeyDownCapture, true);
+		window.removeEventListener("paste", onPasteCapture, true);
+		window.removeEventListener("beforeinput", onBeforeInputCapture, true);
 	});
 }
 

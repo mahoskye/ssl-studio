@@ -2,9 +2,10 @@
 // A command's keys are in DEFAULT_KEYS and nowhere else; the user's own are
 // in the `keys` setting.
 import { ask } from "./dialogs";
-import { activeEditor } from "./editor/EditorGroup";
+import { activeEditor, lastActiveMarkdownPath } from "./editor/EditorGroup";
 import { formatFenceInModel, formatNonSslModel, hadRecentFormatError, languageName } from "./editor/languages";
 import { activeLiveEditor, isInMarkdownTextEditor } from "./editor/liveBridge";
+import { linkWritten } from "../shared/docLinks";
 import { canFormatNonSsl } from "../shared/format";
 import { runMonacoMarkdownAction } from "./editor/markdownKeys";
 import { backend, inApp } from "./backend";
@@ -19,7 +20,7 @@ import { insertTemplate } from "./panels/Palette";
 import { TEMPLATES } from "../shared/houseStyle";
 import { askAbout } from "./agent/Agent";
 import { startTidy } from "./agent/tidy";
-import { baseName, joinPath, relativeTo } from "../shared/paths";
+import { baseName, dirName, joinPath, relativePath, relativeTo } from "../shared/paths";
 import { defaultLayout, type Settings } from "../shared/protocol";
 import { menuForLetter } from "../shared/menuBar";
 import { installRecentTabs, stepRecent } from "./recentTabs";
@@ -40,6 +41,7 @@ import {
 	newState,
 	newTicket,
 	pickActiveTicket,
+	renameHeadingAcrossWorkspace,
 	startFolderCatalogs,
 	ticketAtHand,
 	updateCatalogs,
@@ -262,18 +264,9 @@ export const commands: Command[] = [
 	{ id: "md-format-table", label: "Markdown: Format table", detail: "Align pipes and pad columns on the table at the cursor", run: () => runMarkdownEdit("md-table-format") },
 	{ id: "md-format-code-block", label: "Markdown: Format code block", detail: "Format the fenced code block at the cursor (SSL, SQL, JS/TS, XML/XFD, JSON, HTML, CSS, YAML)", run: () => void formatActiveCodeBlock() },
 	{ id: "md-insert-image", label: "Markdown: Insert image…", detail: "Pick a workspace image or enter a URL (or paste/drop directly)", run: () => void insertImageInteractive() },
-	{
-		id: "md-toc",
-		label: "Markdown: Insert / update table of contents",
-		detail: "Insert or refresh a <!-- toc --> section list from the document's headings",
-		run: () => void upsertMarkdownToc(),
-	},
-	{
-		id: "md-copy-heading-link",
-		label: "Markdown: Copy link to current heading",
-		detail: "Copy a [[doc#Heading]] wikilink for the heading at or above the cursor",
-		run: () => void copyCurrentHeadingLink(),
-	},
+	{ id: "md-toc", label: "Markdown: Insert / update table of contents", detail: "Insert or refresh a <!-- toc --> section list from the document's headings", run: () => void upsertMarkdownToc() },
+	{ id: "md-copy-heading-link", label: "Markdown: Copy link to current heading", detail: "Copy a [[doc#Heading]] wikilink for the heading at or above the cursor", run: () => void copyCurrentHeadingLink() },
+	{ id: "rename-heading", label: "Markdown: Rename heading across workspace…", detail: "Rename a heading and rewrite #anchor / [[Doc#Heading]] links across the project", run: () => void renameHeadingAcrossWorkspace() },
 	{ id: "open-link", label: "Open the link at the cursor", detail: "In a document's text: the file, heading or page its link leads to", run: openLinkAtCursor },
 	{ id: "focus-editor", label: "Focus editor", run: focusEditor },
 	{ id: "focus-side-panel", label: "Focus side panel", run: focusSidePanel },
@@ -281,6 +274,9 @@ export const commands: Command[] = [
 	{ id: "blocks", label: "Toggle blocks view", detail: "A plan shows its chart; Markdown shows rendered", run: toggleVisual },
 	{ id: "format", label: "Format document", detail: "SSL via language server; SQL, JS/TS, XML/XFD, HTML, CSS, JSON, YAML & Markdown", run: () => void formatActiveDocument() },
 	{ id: "copy-designer", label: "Copy for Designer", detail: "Selection, procedure or file, formatted", run: () => void copyForDesigner() },
+	{ id: "copy-code-citation", label: "Copy Markdown code citation", detail: "Copy a [file#L10-L25](path#L10-L25) link for the active file and selection", run: () => void copyCodeCitation(false) },
+	{ id: "copy-code-citation-excerpt", label: "Copy Markdown code citation + excerpt", detail: "Copy a Markdown code citation followed by a fenced excerpt of the selected lines", run: () => void copyCodeCitation(true) },
+	{ id: "find-in-docs", label: "Find references in Docs", detail: "Search for the selected text, word at cursor, or file stem across docs/", run: () => void findReferencesInDocs() },
 	{ id: "wrap-region", label: "Wrap in region…", detail: "The selected lines", run: () => void wrapInRegion() },
 	{ id: "insert-banner", label: "Insert file banner", run: () => insertTemplate(TEMPLATES.find((t) => t.id === "banner")!) },
 	{ id: "insert-procedure", label: "Insert procedure", run: () => insertTemplate(TEMPLATES.find((t) => t.id === "procedure")!) },
@@ -304,114 +300,48 @@ export const commands: Command[] = [
 	{ id: "new-message", label: "New interface message…", detail: "What is exchanged with an instrument or another system, described in the schema folder", run: () => void newSchema("interfaces") },
 	{ id: "new-layout", label: "New file layout…", detail: "A file the project reads or writes, described in the schema folder", run: () => void newSchema("files") },
 	{ id: "generate-schema-doc", label: "Generate table doc from SQL…", detail: "Turn CREATE TABLE DDL under schema/ into a Markdown column reference", run: () => void generateSchemaDocFromSql() },
-	{
-		id: "open-schema-at-cursor",
-		label: "Schema: Open schema doc for table at cursor…",
-		detail: "Jump from a table or message name in SSL/SQL to its documented schema/ file",
-		run: () => void import("./editor/schemaHover").then((m) => m.openSchemaAtCursor()),
-	},
-	{
-		id: "add-selection-to-registry",
-		label: "Registry: Add selection to registry for active ticket…",
-		detail: "Append the selected constant, setting, or table name to a CSV registry linked to the active ticket",
-		run: () => void import("./editor/schemaHover").then((m) => m.addSelectionToRegistry()),
-	},
-	{
-		id: "switch-active-ticket",
-		label: "Ticket: Switch active working ticket…",
-		detail: "Set or clear the workspace active ticket coordinating Agent, Git, Search, Docs & Graph",
-		run: () => void pickActiveTicket(),
-	},
-	{
-		id: "open-active-ticket-side",
-		label: "Ticket: Open active ticket to side",
-		detail: "Pin the active working ticket beside your code in a split editor",
-		run: () => void openActiveTicketToSide(),
-	},
+	{ id: "open-schema-at-cursor", label: "Schema: Open schema doc for table at cursor…", detail: "Jump from a table or message name in SSL/SQL to its documented schema/ file", run: () => void import("./editor/schemaHover").then((m) => m.openSchemaAtCursor()) },
+	{ id: "add-selection-to-registry", label: "Registry: Add selection to registry for active ticket…", detail: "Append the selected constant, setting, or table name to a CSV registry linked to the active ticket", run: () => void import("./editor/schemaHover").then((m) => m.addSelectionToRegistry()) },
+	{ id: "switch-active-ticket", label: "Ticket: Switch active working ticket…", detail: "Set or clear the workspace active ticket coordinating Agent, Git, Search, Docs & Graph", run: () => void pickActiveTicket() },
+	{ id: "open-active-ticket-side", label: "Ticket: Open active ticket to side", detail: "Pin the active working ticket beside your code in a split editor", run: () => void openActiveTicketToSide() },
 	{ id: "project-state", label: "Project state…", detail: "Where the project stands, in plain words", run: () => void newState() },
 	{ id: "update-catalogs", label: "Update catalogs", detail: "Write each INDEX.md's list afresh", run: () => void updateCatalogs() },
 	{ id: "start-catalogs", label: "Start folder catalogs", detail: "An INDEX.md for the docs, code and tests folders, where one has none", run: () => void startFolderCatalogs() },
 	{ id: "update-manifest", label: "Update file manifest", detail: "Sizes and checksums of the project's files", run: () => void updateManifest() },
-	{
-		id: "copy-doc-html",
-		label: "Copy document as HTML",
-		detail: "Copy the open Markdown document as clean rich HTML",
-		run: () => {
-			const p = activePath();
-			if (!p || !isMarkdown(p)) return notify("Open a Markdown document first.");
-			void exportDocAs(p, "html-copy");
-		},
-	},
-	{
-		id: "copy-doc-jira",
-		label: "Copy document as Jira / Confluence markup",
-		detail: "Convert the open Markdown document to Jira wiki syntax",
-		run: () => {
-			const p = activePath();
-			if (!p || !isMarkdown(p)) return notify("Open a Markdown document first.");
-			void exportDocAs(p, "jira-copy");
-		},
-	},
-	{
-		id: "export-doc-html",
-		label: "Export document as standalone HTML…",
-		detail: "Download a print-ready HTML version of the open Markdown document",
-		run: () => {
-			const p = activePath();
-			if (!p || !isMarkdown(p)) return notify("Open a Markdown document first.");
-			void exportDocAs(p, "html-download");
-		},
-	},
-	{
-		id: "print-doc",
-		label: "Print / Save document as PDF…",
-		detail: "Open a clean printable version of the active Markdown document",
-		run: () => {
-			const p = activePath();
-			if (!p || !isMarkdown(p)) return notify("Open a Markdown document first.");
-			void exportDocAs(p, "print");
-		},
-	},
-	{
-		id: "export-ticket-packet",
-		label: "Export ticket release packet…",
-		detail: "Bundle the active ticket, specs, plans, decisions, questions, and registry rows as HTML",
-		run: () => {
-			const key = ticketAtHand();
-			if (!key) return notify("Open or activate a ticket first.");
-			const ticketDoc = docs().find((d) => d.exists && d.group === "tickets" && d.ticket?.toLowerCase() === key.toLowerCase());
-			if (!ticketDoc) return notify(`Ticket ${key} was not found.`, "error");
-			void exportTicketPacket(ticketDoc.path, key, "html");
-		},
-	},
-	{
-		id: "export-deployment-manifest",
-		label: "Export deployment / transport manifest…",
-		detail: "Aggregate scripts, SQL/DDL, registry rows, rollback checklist & DEV->PROD sign-off for the active ticket/epic",
-		run: async () => {
-			const key = ticketAtHand();
-			if (!key) return notify("Open or activate a ticket first.");
-			const ticketDoc = docs().find((d) => d.exists && d.group === "tickets" && d.ticket?.toLowerCase() === key.toLowerCase());
-			if (!ticketDoc) return notify(`Ticket ${key} was not found.`, "error");
-			const { choose } = await import("./dialogs");
-			const picked = await choose(`Export deployment manifest for ${key} as:`, ["Markdown (.md)", "CSV (.csv)", "HTML (.html)"]);
-			if (!picked) return;
-			const fmt = picked.startsWith("CSV") ? "csv" : picked.startsWith("HTML") ? "html" : "markdown";
-			await exportDeploymentManifest(ticketDoc.path, key, fmt);
-		},
-	},
-	{
-		id: "closeout-ticket",
-		label: "Ticket: Close out active ticket…",
-		detail: "Review readiness, mark done, record milestone in STATE.md / README.md & check catalogs",
-		run: () => {
-			const key = ticketAtHand();
-			if (!key) return notify("Open or activate a ticket first.");
-			const ticketDoc = docs().find((d) => d.exists && d.group === "tickets" && d.ticket?.toLowerCase() === key.toLowerCase());
-			if (!ticketDoc) return notify(`Ticket ${key} was not found.`, "error");
-			void closeoutTicket(ticketDoc.path, key);
-		},
-	},
+	{ id: "copy-doc-html", label: "Copy document as HTML", detail: "Copy the open Markdown document as clean rich HTML", run: () => { const p = activePath(); if (!p || !isMarkdown(p)) return notify("Open a Markdown document first."); void exportDocAs(p, "html-copy"); } },
+	{ id: "copy-doc-jira", label: "Copy document as Jira / Confluence markup", detail: "Convert the open Markdown document to Jira wiki syntax", run: () => { const p = activePath(); if (!p || !isMarkdown(p)) return notify("Open a Markdown document first."); void exportDocAs(p, "jira-copy"); } },
+	{ id: "export-doc-html", label: "Export document as standalone HTML…", detail: "Download a print-ready HTML version of the open Markdown document", run: () => { const p = activePath(); if (!p || !isMarkdown(p)) return notify("Open a Markdown document first."); void exportDocAs(p, "html-download"); } },
+	{ id: "export-docx", label: "Export as Word (.docx)…", detail: "Save the open Markdown document as a Word (.docx) file", run: () => { const p = activePath(); if (!p || !isMarkdown(p)) return notify("Open a Markdown document first."); void exportDocAs(p, "docx"); } },
+	{ id: "print-doc", label: "Print / Save document as PDF…", detail: "Open a clean printable version of the active Markdown document", run: () => { const p = activePath(); if (!p || !isMarkdown(p)) return notify("Open a Markdown document first."); void exportDocAs(p, "print"); } },
+	{ id: "export-ticket-packet", label: "Export ticket release packet…", detail: "Bundle the active ticket, specs, plans, decisions, questions, and registry rows", run: async () => {
+		const key = ticketAtHand();
+		if (!key) return notify("Open or activate a ticket first.");
+		const ticketDoc = docs().find((d) => d.exists && d.group === "tickets" && d.ticket?.toLowerCase() === key.toLowerCase());
+		if (!ticketDoc) return notify(`Ticket ${key} was not found.`, "error");
+		const { choose } = await import("./dialogs");
+		const picked = await choose(`Export release packet for ${key} as:`, ["HTML (.html)", "Word (.docx)", "Markdown (.md)"]);
+		if (!picked) return;
+		const fmt = picked.startsWith("Word") ? "docx" : picked.startsWith("Markdown") ? "markdown" : "html";
+		await exportTicketPacket(ticketDoc.path, key, fmt);
+	} },
+	{ id: "export-deployment-manifest", label: "Export deployment / transport manifest…", detail: "Aggregate scripts, SQL/DDL, local Git commits, registry rows, rollback checklist & DEV->PROD sign-off", run: async () => {
+		const key = ticketAtHand();
+		if (!key) return notify("Open or activate a ticket first.");
+		const ticketDoc = docs().find((d) => d.exists && d.group === "tickets" && d.ticket?.toLowerCase() === key.toLowerCase());
+		if (!ticketDoc) return notify(`Ticket ${key} was not found.`, "error");
+		const { choose } = await import("./dialogs");
+		const picked = await choose(`Export deployment manifest for ${key} as:`, ["Markdown (.md)", "Word (.docx)", "CSV (.csv)", "HTML (.html)"]);
+		if (!picked) return;
+		const fmt = picked.startsWith("Word") ? "docx" : picked.startsWith("CSV") ? "csv" : picked.startsWith("HTML") ? "html" : "markdown";
+		await exportDeploymentManifest(ticketDoc.path, key, fmt);
+	} },
+	{ id: "closeout-ticket", label: "Ticket: Close out active ticket…", detail: "Review readiness, mark done, record milestone in STATE.md / README.md & check catalogs", run: () => {
+		const key = ticketAtHand();
+		if (!key) return notify("Open or activate a ticket first.");
+		const ticketDoc = docs().find((d) => d.exists && d.group === "tickets" && d.ticket?.toLowerCase() === key.toLowerCase());
+		if (!ticketDoc) return notify(`Ticket ${key} was not found.`, "error");
+		void closeoutTicket(ticketDoc.path, key);
+	} },
 	// Panels: one form, "Show" and the panel's name
 	{ id: "explorer", label: "Show Explorer", run: () => showPanel("explorer") },
 	{ id: "docs", label: "Show Docs", run: () => showPanel("docs") },
@@ -644,6 +574,106 @@ async function copyCurrentHeadingLink() {
 	await copyText(`[[${stem}#${hit.text}]]`, `Copied [[${stem}#${hit.text}]].`);
 }
 
+/** Searches the project's docs folder for the selected text, symbol at cursor, or current file stem. */
+async function findReferencesInDocs() {
+	const path = activePath();
+	let query = "";
+	const live = activeLiveEditor();
+	if (live) {
+		const selected = live.getSelectedText().trim();
+		if (selected) {
+			query = selected;
+		} else {
+			const model = activeDoc()?.model;
+			if (model) query = model.getWordAtPosition(live.getPosition())?.word ?? "";
+		}
+	} else {
+		const editor = activeEditor();
+		const model = editor?.getModel();
+		const sel = editor?.getSelection();
+		if (model && sel && !sel.isEmpty()) {
+			query = model.getValueInRange(sel).trim();
+		} else if (model && editor?.getPosition()) {
+			query = model.getWordAtPosition(editor.getPosition()!)?.word ?? "";
+		}
+	}
+	if (!query && path) {
+		query = baseName(path).replace(/\.[^.]+$/, "");
+	}
+	if (!query) return notify("Open a file or select a symbol to search in Docs.");
+	const docsRel = (state.project?.docs ?? "docs").replace(/^[./\\]+|[\\/]+$/g, "").replace(/\\/g, "/");
+	const include = docsRel && docsRel !== "." ? `${docsRel}/**` : "**/*.md";
+	const { searchFor } = await import("./panels/Search");
+	searchFor(query, { include });
+}
+
+/** Copies a Markdown code citation `[file#L10-L25](path#L10-L25)` (and optional fenced code excerpt) relative to the last active Markdown doc or workspace root. */
+async function copyCodeCitation(withExcerpt: boolean) {
+	const path = activePath();
+	const doc = activeDoc();
+	if (!path || !doc || doc.binary) return notify("Open a text file first to copy a Markdown code citation.");
+	let fromLine = 1;
+	let toLine = 1;
+	const live = activeLiveEditor();
+	if (live) {
+		const sel = live.getSelection();
+		if (!sel.isEmpty()) {
+			fromLine = sel.startLineNumber;
+			toLine = sel.endColumn === 1 && sel.endLineNumber > fromLine ? sel.endLineNumber - 1 : sel.endLineNumber;
+		} else {
+			fromLine = live.getPosition().lineNumber;
+			toLine = fromLine;
+		}
+	} else {
+		const editor = activeEditor();
+		const sel = editor?.getSelection();
+		if (sel && !sel.isEmpty()) {
+			fromLine = sel.startLineNumber;
+			toLine = sel.endColumn === 1 && sel.endLineNumber > fromLine ? sel.endLineNumber - 1 : sel.endLineNumber;
+		} else {
+			fromLine = editor?.getPosition()?.lineNumber ?? state.cursor.line ?? 1;
+			toLine = fromLine;
+		}
+	}
+
+	const wsRoot = state.workspace?.root;
+	const otherMd = state.groups.find((g, idx) => idx !== state.activeGroup && g.active && isMarkdown(g.active))?.active ?? null;
+	const mdBase = otherMd ?? (lastActiveMarkdownPath() && lastActiveMarkdownPath() !== path ? lastActiveMarkdownPath() : null);
+	let relHref: string;
+	if (mdBase) {
+		relHref = relativePath(dirName(mdBase), path).split("\\").join("/");
+	} else if (wsRoot) {
+		relHref = `/${relativeTo(wsRoot, path).split("\\").join("/")}`;
+	} else {
+		relHref = baseName(path);
+	}
+	const lineRef = fromLine === toLine ? `#L${fromLine}` : `#L${fromLine}-L${toLine}`;
+	const label = `${wsRoot ? relativeTo(wsRoot, path).split("\\").join("/") : baseName(path)}${lineRef}`;
+	const citation = `[${label}](${linkWritten(relHref)}${lineRef})`;
+
+	if (!withExcerpt) {
+		await copyText(citation, `Copied citation ${label}.`);
+		return;
+	}
+	const model = doc.model;
+	const clampedFrom = Math.max(1, Math.min(fromLine, model.getLineCount()));
+	const clampedTo = Math.max(clampedFrom, Math.min(toLine, model.getLineCount()));
+	const excerpt = model.getValueInRange({
+		startLineNumber: clampedFrom,
+		startColumn: 1,
+		endLineNumber: clampedTo,
+		endColumn: model.getLineMaxColumn(clampedTo),
+	});
+	const lang = model.getLanguageId();
+	const fenceLang = lang === "plaintext" ? "" : lang;
+	let maxTicks = 2;
+	for (const m of excerpt.matchAll(/`+/g)) {
+		if (m[0].length > maxTicks) maxTicks = m[0].length;
+	}
+	const fence = "`".repeat(maxTicks + 1);
+	await copyText(`${citation}\n\n${fence}${fenceLang}\n${excerpt}\n${fence}\n`, `Copied citation and excerpt for ${label}.`);
+}
+
 async function askCommand() {
 	const question = await ask("Ask the agent about the selection");
 	if (!question) return;
@@ -691,6 +721,12 @@ const KEYS: Record<string, string> = {
 	"ctrl+0": "focus-side-panel",
 	"ctrl+shift+f": "search",
 	"ctrl+shift+e": "explorer",
+	"ctrl+shift+d": "docs",
+	"ctrl+alt+g": "git",
+	"ctrl+alt+k": "switch-active-ticket",
+	"ctrl+alt+o": "open-active-ticket-side",
+	"alt+shift+d": "open-schema-at-cursor",
+	"ctrl+alt+enter": "open-link",
 	"ctrl+e": "toggle-markdown-mode",
 	"ctrl+alt+t": "md-insert-template",
 	"ctrl+alt+n": "md-new-from-template",
