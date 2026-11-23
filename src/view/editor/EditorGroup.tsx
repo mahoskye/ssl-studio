@@ -9,7 +9,7 @@ import { Icon } from "../Icon";
 import { tabShown } from "../recentTabs";
 import { createEffect, createMemo, createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { monaco } from "./monaco";
-import { activePath, closeAllTabs, closeOtherTabs, closeTab, closeTabsToRight, displayName, documents, focusRequest, isUntitled, keepTab, markdownMode, moveTab, newUntitled, notify, openFile, planMode, revealSignal, revert, save, saveAll, saveSetting, setMarkdownMode, setPlanMode, setState, split, state, tabLeaving, takeReveal, togglePin, openedForALook } from "../state";
+import { activePath, closeAllTabs, closeOtherTabs, closeTab, closeTabsToRight, displayName, documents, focusRequest, isUntitled, keepTab, markdownMode, moveTab, newUntitled, notify, openFile, openToSide, planMode, revealSignal, revert, save, saveAll, saveSetting, setMarkdownMode, setPlanMode, setState, setTableTextMode, split, state, tabLeaving, tableTextMode, takeReveal, togglePin, openedForALook } from "../state";
 import { landsBefore } from "../../shared/tabOrder";
 import { othersOf, rightOf } from "../../shared/tabOrder";
 import { chooseFromMenu } from "../panels/RowMenu";
@@ -63,7 +63,7 @@ export function EditorGroup(props: { index: number }) {
 	// A picture, or other bytes: shown for what it is, never as text, and never as what its name would make it.
 	const showFile = () => Boolean(state.kindVersion >= 0 && group().active && documents.get(group().active!)?.binary);
 	const isPlan = () => isPlanPath(group().active) && !showFile();
-	const planViewMode = () => (group().active && isPlan() ? planMode(group().active!) : "chart");
+	const planViewMode = () => (group().active && isPlan() ? planMode(group().active!, props.index) : "chart");
 	const showChart = () => isPlan() && planViewMode() !== "source";
 	const isSsl = () => Boolean(group().active && documents.get(group().active!)?.model.getLanguageId() === "ssl");
 	const activeLang = () => (group().active ? documents.get(group().active!)?.model.getLanguageId() : undefined);
@@ -94,13 +94,13 @@ export function EditorGroup(props: { index: number }) {
 	// script opens as blocks again, but a Markdown or SQL file never does.
 	const showBlocks = () => group().mode === "blocks" && isSsl() && !isPlan() && !showFile();
 	const isDoc = () => isMarkdown(group().active) && !showFile();
-	const mdViewMode = () => (group().active && isDoc() ? markdownMode(group().active!) : "read");
+	const mdViewMode = () => (group().active && isDoc() ? markdownMode(group().active!, props.index) : "read");
 	const showRendered = () => isDoc() && mdViewMode() === "read";
 	/** Obsidian-grade CodeMirror 6 Live Preview when the Markdown file is in Live mode. */
 	const showLive = () => isDoc() && mdViewMode() === "live";
 	// A table of values opens as a table, with the same switch to its text as a document has.
 	const isTabular = () => isTable(group().active) && !showFile();
-	const showTable = () => isTabular() && !state.mdText[group().active!];
+	const showTable = () => isTabular() && !tableTextMode(group().active!, props.index);
 
 	// Horizontal tab-strip overflow detection + wheel scrolling (C9).
 	let tabsHost: HTMLDivElement | undefined;
@@ -257,7 +257,7 @@ export function EditorGroup(props: { index: number }) {
 			if (target !== "editor" || state.activeGroup !== props.index) return;
 			if (showLive()) return void liveEditorAt(props.index)?.focus();
 			if (!showBlocks() && !showChart() && !showRendered() && !showTable() && !showFile()) return editor.focus();
-			section.querySelector<HTMLElement>(".blocks-scroll, .plan [tabindex], .cm-md-host, .md-view, .table-view input, .file-view")?.focus();
+			section.querySelector<HTMLElement>(".blocks-scroll, .plan [tabindex], .cm-md-host, .md-view, .table-view td.cell-selected, .table-view, .file-view")?.focus();
 		});
 		onCleanup(() => {
 			stop();
@@ -281,7 +281,14 @@ export function EditorGroup(props: { index: number }) {
 	function reveal(path: string) {
 		const r = takeReveal(path);
 		if (!r) return;
-		const range = new monaco.Range(r.line, r.column ?? 1, r.endLine ?? r.line, r.endColumn ?? r.column ?? 1);
+		const model = editor.getModel();
+		const endLine = r.endLine ?? r.line;
+		const endCol =
+			r.endColumn ??
+			(r.endLine && r.endLine > r.line && model
+				? model.getLineMaxColumn(Math.min(endLine, model.getLineCount()))
+				: r.column ?? 1);
+		const range = new monaco.Range(r.line, r.column ?? 1, endLine, endCol);
 		editor.setSelection(range);
 		editor.revealRangeInCenterIfOutsideViewport(range, monaco.editor.ScrollType.Immediate);
 		editor.focus();
@@ -391,6 +398,7 @@ export function EditorGroup(props: { index: number }) {
 		const NAME = "Copy file name";
 		const SHOW = "Show in the Explorer";
 		const SIDE = "Open to the side";
+		const SIDE_READ = isMarkdown(path) ? "Open Read preview to the side" : "";
 		const untitled = isUntitled(path);
 		const inFolder = !untitled && Boolean(state.workspace && isInside(state.workspace.root, path));
 		// Only what would do something: a tab with nothing to its right has no "close to the right".
@@ -407,6 +415,7 @@ export function EditorGroup(props: { index: number }) {
 			NAME,
 			...(inFolder ? [SHOW] : []),
 			SIDE,
+			...(SIDE_READ ? [SIDE_READ] : []),
 		];
 		const picked = await chooseFromMenu(`Actions for the tab ${base(path)}`, items, at);
 		if (picked === CLOSE) await closeTab(path, props.index);
@@ -423,6 +432,12 @@ export function EditorGroup(props: { index: number }) {
 			setState("activeGroup", props.index);
 			activate(path);
 			split();
+		} else if (picked === SIDE_READ) {
+			const otherGroup = props.index === 0 ? 1 : 0;
+			setState("activeGroup", props.index);
+			activate(path);
+			await openToSide(path);
+			setMarkdownMode(path, "read", otherGroup);
 		}
 		// The tab the menu was opened on may be gone, and the keyboard with it: it goes to what is showing now.
 		if (picked === CLOSE || picked === OTHERS || picked === RIGHT || picked === ALL) queueMicrotask(() => (!document.activeElement || document.activeElement === document.body) && focusRequest.fire("editor"));
@@ -486,12 +501,16 @@ export function EditorGroup(props: { index: number }) {
 	// Reverse Code -> Docs ("Governed by"): unified lookup combining plans, specs, tickets, decisions,
 	// questions, schema docs (`source:`), CSV registries (`files.csv`, `settings.csv`, `database.csv`),
 	// and incoming Markdown links. Uses a fingerprint of `docs()` so unrelated code saves don't spam `linksTo`.
-	const docsFingerprint = createMemo(() =>
-		docs()
+	const docsFingerprint = createMemo(() => {
+		const list = docs()
 			.filter((d) => d.exists)
-			.map((d) => `${d.path}:${d.codeRefs?.length ?? 0}:${d.tickets?.length ?? 0}`)
-			.join("\0"),
-	);
+			.map(
+				(d) =>
+					`${d.path}|${d.source ?? ""}|${(d.codeRefs ?? []).join(",")}|${(d.tickets ?? []).join(",")}|${(d.specs ?? []).join(",")}|${(d.plans ?? []).join(",")}`,
+			)
+			.join("\0");
+		return `${state.treeVersion}:${list}`;
+	});
 	const isGovernableFile = () => {
 		const p = group().active;
 		return Boolean(p && !isUntitled(p) && !isMarkdown(p) && !isTable(p) && !isPlanPath(p) && state.workspace?.root);
@@ -695,7 +714,7 @@ export function EditorGroup(props: { index: number }) {
 							aria-pressed={planViewMode() === "source"}
 							title="Raw JSON source of this plan"
 							onClick={() => {
-								setPlanMode(group().active!, "source");
+								setPlanMode(group().active!, "source", props.index);
 								queueMicrotask(() => focusRequest.fire("editor"));
 							}}
 						>
@@ -705,7 +724,7 @@ export function EditorGroup(props: { index: number }) {
 							classList={{ on: planViewMode() === "text" }}
 							aria-pressed={planViewMode() === "text"}
 							title="Readable structured list and Focus view of the process"
-							onClick={() => setPlanMode(group().active!, "text")}
+							onClick={() => setPlanMode(group().active!, "text", props.index)}
 						>
 							Text
 						</button>
@@ -713,7 +732,7 @@ export function EditorGroup(props: { index: number }) {
 							classList={{ on: planViewMode() === "chart" }}
 							aria-pressed={planViewMode() === "chart"}
 							title="Visual interactive flowchart"
-							onClick={() => setPlanMode(group().active!, "chart")}
+							onClick={() => setPlanMode(group().active!, "chart", props.index)}
 						>
 							Chart
 						</button>
@@ -721,10 +740,10 @@ export function EditorGroup(props: { index: number }) {
 				</Show>
 				<Show when={isTabular()}>
 					<div class="mode-switch" role="group" aria-label="View of this table">
-						<button classList={{ on: !showTable() }} aria-pressed={!showTable()} onClick={() => setState("mdText", group().active!, true)}>
+						<button classList={{ on: !showTable() }} aria-pressed={!showTable()} onClick={() => setTableTextMode(group().active!, true, props.index)}>
 							Text
 						</button>
-						<button classList={{ on: showTable() }} aria-pressed={showTable()} onClick={() => setState("mdText", group().active!, false)}>
+						<button classList={{ on: showTable() }} aria-pressed={showTable()} onClick={() => setTableTextMode(group().active!, false, props.index)}>
 							Table
 						</button>
 					</div>
@@ -736,7 +755,7 @@ export function EditorGroup(props: { index: number }) {
 							aria-pressed={mdViewMode() === "source"}
 							title="Raw unformatted Markdown text"
 							onClick={() => {
-								setMarkdownMode(group().active!, "source");
+								setMarkdownMode(group().active!, "source", props.index);
 								queueMicrotask(() => focusRequest.fire("editor"));
 							}}
 						>
@@ -747,7 +766,7 @@ export function EditorGroup(props: { index: number }) {
 							aria-pressed={mdViewMode() === "live"}
 							title="Live Preview while editing (Ctrl+E toggles Live and Read)"
 							onClick={() => {
-								setMarkdownMode(group().active!, "live");
+								setMarkdownMode(group().active!, "live", props.index);
 								queueMicrotask(() => focusRequest.fire("editor"));
 							}}
 						>
@@ -757,7 +776,7 @@ export function EditorGroup(props: { index: number }) {
 							classList={{ on: mdViewMode() === "read" }}
 							aria-pressed={mdViewMode() === "read"}
 							title="Finished reading view (Ctrl+E toggles Live and Read)"
-							onClick={() => setMarkdownMode(group().active!, "read")}
+							onClick={() => setMarkdownMode(group().active!, "read", props.index)}
 						>
 							Read
 						</button>

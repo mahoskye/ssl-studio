@@ -235,6 +235,35 @@ export type Settings = {
 	csvTable?: CsvTableConfig;
 	/** SQL dialect used when formatting standalone .sql files (default "tsql" for SQL Server STARLIMS). */
 	sqlDialect?: SqlDialect;
+	/** Active focused ticket key (persisted per workspace) coordinating Agent, Git, Search, Docs, Graph & Explorer. */
+	activeTicket?: string;
+};
+
+export type OpenTaskItem = {
+	path: string;
+	name: string;
+	title?: string;
+	ticket?: string;
+	group: DocFile["group"];
+	line: number;
+	offset: number;
+	text: string;
+};
+
+export type WorkspaceDocIssue = {
+	path: string;
+	line: number;
+	column?: number;
+	kind: "anchor" | "table" | "yaml";
+	level: "warn" | "note";
+	message: string;
+	href?: string;
+};
+
+export type DocAuditResult = {
+	unusedAttachments: string[];
+	openTasks: OpenTaskItem[];
+	issues: WorkspaceDocIssue[];
 };
 
 export type SettingsScope = "user" | "workspace";
@@ -311,6 +340,8 @@ export interface BackendApi {
 	closeWindow(): Promise<void>;
 	/** README.md, AGENTS.md and project.toml, then the Markdown and plans in the project's docs and plans folders. */
 	docs(): Promise<DocFile[]>;
+	/** Cached workspace Markdown audit: unused attachments (configured + ticket bundles), open tasks, broken #anchors, table rule & YAML issues. */
+	docAudit(attachmentsFolder?: string): Promise<DocAuditResult>;
 	/** Every file of the project with its size and a checksum, for the file manifest. */
 	manifest(): Promise<ManifestFile[]>;
 	/**

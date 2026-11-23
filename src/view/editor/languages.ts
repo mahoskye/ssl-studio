@@ -43,7 +43,7 @@ export const LANGUAGES: readonly Language[] = [
 	{ id: "markdown", name: "Markdown", extensions: /\.(md|markdown)$/i },
 	{ id: "json", name: "JSON", extensions: /\.(json|jsonc)$/i },
 	{ id: "toml", name: "TOML", extensions: /\.toml$/i },
-	{ id: "sql", name: "SQL", extensions: /\.sql$/i },
+	{ id: "sql", name: "SQL", extensions: /\.(sql|ddl|pks|pkb)$/i },
 	{ id: "csv", name: "CSV", extensions: /\.(csv|tsv)$/i },
 	{ id: "yaml", name: "YAML", extensions: /\.(ya?ml)$/i },
 	{ id: "xml", name: "XML", extensions: /\.(xml|xfd|xsd|xsl|xslt|wsdl|config|csproj|svg)$/i },
@@ -465,4 +465,7 @@ for (const languageId of FORMATTABLE_NON_SSL_LANGUAGES) {
 		},
 	});
 }
+
+// Secondary schema-table hover provider bridging SSL/SQL identifiers to `schema/` Markdown & DDL docs (ADR 0003).
+void import("./schemaHover").then((m) => m.registerSchemaHoverProviders());
 

@@ -9,14 +9,16 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { CATALOG_FILE, catalogStale, fenced, hasCatalogPlace } from "../shared/catalog";
 import { parseCsv, tally, type Table } from "../shared/csv";
 import { fileLinks, frontPaths, type DocLink } from "../shared/docLinks";
+import { checkTables } from "../shared/docTables";
 import { frontMatter, many, one, summaryOf, titleOf } from "../shared/frontMatter";
+import { findHeadingLine } from "../shared/markdownEdit";
 import { buildDocNameIndex, lookupInIndex, namePlaces } from "../shared/namedLinks";
-import { areaPath, CATALOG_AREAS, CATALOG_FILES_MAX, catalogItems, catalogTemplate, DOC_FOLDERS, fileItems, isFileArea, isPrompt, OPTIONAL_CATALOGS, SCHEMAS, STATE_FILE, type AreaFolders, type DocArea, type FileArea } from "../shared/projectDocs";
+import { areaPath, CATALOG_AREAS, CATALOG_FILES_MAX, catalogItems, catalogTemplate, DOC_FOLDERS, fileItems, isCatalog, isFileArea, isPrompt, OPTIONAL_CATALOGS, SCHEMAS, STATE_FILE, toneOf, type AreaFolders, type DocArea, type FileArea } from "../shared/projectDocs";
 import { keysIn, rowsByTicket, ticketColumn } from "../shared/registryTickets";
 import { extractTags } from "../shared/tags";
-import { taskTally } from "../shared/tasks";
+import { tasks as tasksIn, taskTally } from "../shared/tasks";
 import { classifyTicketEntries, type ScannedTicketEntry } from "../shared/ticketBundle";
-import type { DocFile, LinkTo, ManifestFile, NameIn, Project, Settings } from "../shared/protocol";
+import type { DocAuditResult, DocFile, LinkTo, ManifestFile, NameIn, OpenTaskItem, Project, Settings, WorkspaceDocIssue } from "../shared/protocol";
 import { workspaceDir } from "./paths";
 import { WorkspaceFiles } from "./workspace";
 
@@ -74,10 +76,24 @@ const HEAD_BYTES = 64 * 1024;
 const REGISTRY_BYTES = 4 * 1024 * 1024;
 const MARKDOWN = /\.(md|markdown)$/i;
 
+const headRead = new Map<string, { stamp: string; text: string }>();
+const HEAD_KEPT = 2000;
+
 async function head(path: string): Promise<string> {
 	try {
+		const st = statSync(path);
+		const stamp = `${st.size}:${st.mtimeMs}`;
+		const kept = headRead.get(path);
+		if (kept && kept.stamp === stamp) {
+			headRead.delete(path);
+			headRead.set(path, kept);
+			return kept.text;
+		}
 		const file = Bun.file(path);
-		return decodePart(new Uint8Array(await file.slice(0, HEAD_BYTES).arrayBuffer()), file.size > HEAD_BYTES);
+		const decoded = decodePart(new Uint8Array(await file.slice(0, HEAD_BYTES).arrayBuffer()), file.size > HEAD_BYTES);
+		if (headRead.size >= HEAD_KEPT) headRead.delete(headRead.keys().next().value!);
+		headRead.set(path, { stamp, text: decoded });
+		return decoded;
 	} catch {
 		return "";
 	}
@@ -107,9 +123,9 @@ async function planSays(path: string): Promise<{ ticket: string; title: string; 
 	}
 }
 
-const CODE_FILE_EXT_RE = /\.(ssl|srvscr|ds|sql|ddl|pks|pkb)$/i;
-const INLINE_CODE_FILE_RE = /`([A-Za-z0-9_./\\-]+\.(?:ssl|srvscr|ds|sql|ddl|pks|pkb))`/gi;
-const REGISTRY_CODE_COL_RE = /^(path|file|script|scripts|where|used[\s_-]*by|source)$/i;
+const CODE_FILE_EXT_RE = /\.(ssl|srvscr|ds|sql|ddl|pks|pkb|xfd|xml|hl7|astm)$/i;
+const INLINE_CODE_FILE_RE = /`([A-Za-z0-9_./\\-]+\.(?:ssl|srvscr|ds|sql|ddl|pks|pkb|xfd|xml|hl7|astm))`/gi;
+const REGISTRY_CODE_COL_RE = /^(path|file|script|scripts|where|used[\s_-]*by|source|object)$/i;
 
 /** Extracts workspace-relative code/SQL file references from Markdown links, `source:` frontmatter, and inline code mentions. */
 function markdownCodeRefs(root: string, path: string, text: string): string[] {
@@ -372,7 +388,8 @@ export async function namesIn(files: WorkspaceFiles): Promise<NameIn[]> {
 		} catch {
 			continue;
 		}
-		const kept = namesRead.get(path);
+		const namesKey = `F\0${path}`;
+		const kept = namesRead.get(namesKey);
 		let places: ReturnType<typeof namePlaces>;
 		if (kept && kept.stamp === stamp) {
 			places = kept.places;
@@ -385,7 +402,7 @@ export async function namesIn(files: WorkspaceFiles): Promise<NameIn[]> {
 			}
 			places = namePlaces(text);
 			if (namesRead.size >= NAMES_KEPT) namesRead.delete(namesRead.keys().next().value!);
-			namesRead.set(path, { stamp, places });
+			namesRead.set(namesKey, { stamp, places });
 		}
 		for (const place of places) found.push({ path, ...place });
 	}
@@ -411,7 +428,15 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 	const named = (name: string) => {
 		if (!names) {
 			names = new Map();
-			for (const file of files.files()) names.set(basename(file).toLowerCase(), [...(names.get(basename(file).toLowerCase()) ?? []), file]);
+			for (const file of files.files()) {
+				const k = basename(file).toLowerCase();
+				let bucket = names.get(k);
+				if (!bucket) {
+					bucket = [];
+					names.set(k, bucket);
+				}
+				bucket.push(file);
+			}
 		}
 		return names.get(name.toLowerCase()) ?? [];
 	};
@@ -420,14 +445,16 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 		const path = join(root, actual ?? name);
 		const text = actual ? await textOf(path) : "";
 		const untouched = actual ? text.includes(PLACEHOLDER[name]!) : undefined;
-		list.push({ path, name: actual ?? name, group: "project", exists: Boolean(actual), untouched, ...brokenLinks(root, path, text, named) });
+		const codeRefs = actual ? markdownCodeRefs(root, path, text) : [];
+		list.push({ path, name: actual ?? name, group: "project", exists: Boolean(actual), untouched, ...(codeRefs.length ? { codeRefs } : {}), ...brokenLinks(root, path, text, named) });
 	}
 	list.push({ path: project.path, name: PROJECT_FILE, group: "project", exists: project.configured });
 	const docs = join(root, project.docs);
 	const state = existsSync(docs) ? found(docs, STATE_FILE) : undefined;
 	if (state) {
-		const text = await head(join(docs, state));
-		list.push({ path: join(docs, state), name: state, group: "project", exists: true, ...described(text), ...brokenLinks(root, join(docs, state), text, named) });
+		const statePath = join(docs, state);
+		const text = await head(statePath);
+		list.push({ path: statePath, name: state, group: "project", exists: true, ...described(text, root, statePath), ...brokenLinks(root, statePath, text, named) });
 	}
 
 	/** The files under a folder that match, by name, up to the limit. */
@@ -550,6 +577,7 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 		list.push({ path, name, group: "knowledge", exists: true, kind, ...(MARKDOWN.test(path) ? { ...described(text, root, path), ...brokenLinks(root, path, text, named) } : snippet(text)) });
 	}
 	// The registries: tables of values, each row with how far it has come.
+	const knownTickets = new Set(list.flatMap((file) => (file.group === "tickets" && file.ticket ? [file.ticket.toLowerCase()] : [])));
 	for (const path of under(area("registries"), /\.(md|markdown|csv|tsv)$/i)) {
 		const name = relative(area("registries"), path);
 		if (MARKDOWN.test(path)) {
@@ -572,7 +600,6 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 		}
 		const table = await cachedParseCsv(path, size, mtimeMs);
 		// A row can say which ticket carries it: the ticket's page lists what it has to bring across.
-		const knownTickets = new Set(list.flatMap((file) => (file.group === "tickets" && file.ticket ? [file.ticket.toLowerCase()] : [])));
 		const forTickets = rowsByTicket(table, knownTickets);
 		const regCode = registryCodeInfo(table, knownTickets);
 		list.push({
@@ -644,14 +671,15 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 			const s = statSync(doc.path);
 			if (s.size > LINKED_BYTES) continue;
 			const stamp = `${s.size}:${s.mtimeMs}`;
-			const kept = namesRead.get(doc.path);
+			const namesKey = `H\0${doc.path}`;
+			const kept = namesRead.get(namesKey);
 			let places: ReturnType<typeof namePlaces>;
 			if (kept && kept.stamp === stamp) {
 				places = kept.places;
 			} else {
 				places = namePlaces(await head(doc.path));
 				if (namesRead.size >= NAMES_KEPT) namesRead.delete(namesRead.keys().next().value!);
-				namesRead.set(doc.path, { stamp, places });
+				namesRead.set(namesKey, { stamp, places });
 			}
 			if (!places.length) continue;
 			const brokenWiki: { href: string; line: number; column: number }[] = [];
@@ -989,5 +1017,334 @@ export async function readExport(path: string): Promise<string> {
 	if (file.size > EXPORT_BYTES) throw new Error(`${path} is too large to read here: more than 20 MB.`);
 	// Read as what it is written in: a table saved from a spreadsheet on Windows is seldom UTF-8.
 	return decode(new Uint8Array(await file.arrayBuffer())).text;
+}
+
+const IMAGE_ASSET_RE = /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif)$/i;
+const HTML_IMG_SRC_RE = /<img\b[^>]*\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))/gi;
+const WIKI_EMBED_IMG_RE = /!\[\[([^\]|#]+)(?:\|[^\]]*)?\]\]/g;
+
+type CachedDocAuditEntry = {
+	stamp: string;
+	text: string;
+	links: DocLink[];
+	selfAnchors: { line: number; column: number; anchor: string; href: string }[];
+	wikis: ReturnType<typeof namePlaces>;
+	wikiSections: { line: number; column: number; target: string; section: string }[];
+	imgRefs: string[];
+	openTasks: { line: number; offset: number; text: string }[];
+	tableIssues: { line: number; message: string }[];
+	yamlIssues: { line: number; message: string }[];
+};
+const auditFileCache = new Map<string, CachedDocAuditEntry>();
+const AUDIT_CACHE_MAX = 2000;
+
+function extractSelfAnchors(text: string): { line: number; column: number; anchor: string; href: string }[] {
+	if (!text.includes("](#")) return [];
+	const lines = text.split(/\r?\n/);
+	const fences = fenced(text);
+	const opening = frontMatter(text).lines;
+	const out: { line: number; column: number; anchor: string; href: string }[] = [];
+	let offset = 0;
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i]!;
+		const start = offset;
+		offset += line.length + (text[start + line.length] === "\r" ? 2 : 1);
+		if (i < opening || !line.includes("](#")) continue;
+		if (fences.some(([from, to]) => start >= from && start < to)) continue;
+		for (const m of line.matchAll(/(?<!\!)\[[^\]]+\]\((#[^)\s]+)\)/g)) {
+			const before = line.slice(0, m.index ?? 0);
+			if ((before.match(/`/g)?.length ?? 0) % 2 === 1) continue;
+			const href = m[1]!;
+			let anchor = href.slice(1).trim();
+			try {
+				anchor = decodeURIComponent(anchor);
+			} catch {}
+			if (anchor && !/^L\d+(?:-L?\d+)?$/i.test(anchor)) {
+				out.push({ line: i + 1, column: (m.index ?? 0) + 1, anchor, href });
+			}
+		}
+	}
+	return out;
+}
+
+function extractWikiSections(text: string): { line: number; column: number; target: string; section: string }[] {
+	if (!text.includes("[[") || !text.includes("#")) return [];
+	const lines = text.split(/\r?\n/);
+	const fences = fenced(text);
+	const opening = frontMatter(text).lines;
+	const out: { line: number; column: number; target: string; section: string }[] = [];
+	let offset = 0;
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i]!;
+		const start = offset;
+		offset += line.length + (text[start + line.length] === "\r" ? 2 : 1);
+		if (i < opening || !line.includes("[[") || !line.includes("#")) continue;
+		if (fences.some(([from, to]) => start >= from && start < to)) continue;
+		for (const m of line.matchAll(/\[\[([^[\]\n]+)\]\]/g)) {
+			// Skip if wrapped in backticks on the line.
+			const before = line.slice(0, m.index ?? 0);
+			if ((before.match(/`/g)?.length ?? 0) % 2 === 1) continue;
+			const raw = m[1]!.replace(/\\\|/g, "|").split("|")[0]!.trim();
+			const hash = raw.indexOf("#");
+			if (hash < 0) continue;
+			const target = raw.slice(0, hash).trim();
+			const section = raw.slice(hash + 1).trim();
+			if (section) out.push({ line: i + 1, column: (m.index ?? 0) + 2, target, section });
+		}
+	}
+	return out;
+}
+
+function yamlSyntaxIssues(text: string): { line: number; message: string }[] {
+	const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/);
+	let startIdx = 0;
+	if (/^\s*<!--\s*template\b[\s\S]*?-->\s*$/i.test(lines[0] ?? "")) startIdx = 1;
+	if ((lines[startIdx] ?? "").trim() !== "---") return [];
+	const endIdx = lines.findIndex((l, i) => i > startIdx && /^(---|\.\.\.)\s*$/.test(l));
+	if (endIdx < 0) {
+		const looksLikeYaml = lines.slice(startIdx + 1, startIdx + 7).some((l) => /^[A-Za-z0-9_-]+\s*:/.test(l));
+		return looksLikeYaml ? [{ line: startIdx + 1, message: "Unclosed YAML frontmatter block (missing closing ---)." }] : [];
+	}
+	const out: { line: number; message: string }[] = [];
+	let inList = false;
+	for (let i = startIdx + 1; i < endIdx; i++) {
+		const line = lines[i]!;
+		const trimmed = line.trim();
+		if (!trimmed || trimmed.startsWith("#")) continue;
+		if (/^\s*-\s+/.test(line)) {
+			if (!inList) out.push({ line: i + 1, message: "YAML list item has no preceding key." });
+			continue;
+		}
+		if (/^[A-Za-z0-9_-]+\s*:/.test(line)) {
+			inList = /^[A-Za-z0-9_-]+\s*:\s*$/.test(line);
+			continue;
+		}
+		// Allow indented scalar continuation lines under a key, flag unindented malformed lines.
+		if (!/^\s+/.test(line)) {
+			out.push({ line: i + 1, message: "Malformed YAML frontmatter line (missing ':')." });
+		}
+	}
+	return out;
+}
+
+async function readAuditEntry(path: string, checkTableRule: boolean): Promise<CachedDocAuditEntry | null> {
+	let stamp = "";
+	try {
+		const st = statSync(path);
+		if (st.size > LINKED_BYTES) return null;
+		stamp = `${st.size}:${st.mtimeMs}:${checkTableRule ? 1 : 0}`;
+	} catch {
+		return null;
+	}
+	const cached = auditFileCache.get(path);
+	if (cached && cached.stamp === stamp) {
+		auditFileCache.delete(path);
+		auditFileCache.set(path, cached);
+		return cached;
+	}
+	let text = "";
+	try {
+		text = decode(new Uint8Array(await Bun.file(path).arrayBuffer())).text;
+	} catch {
+		return null;
+	}
+	const links = linksIn(path, text, "F");
+	const selfAnchors = extractSelfAnchors(text);
+	const wikis = namePlaces(text);
+	const wikiSections = extractWikiSections(text);
+	const imgRefs: string[] = [];
+	for (const m of text.matchAll(HTML_IMG_SRC_RE)) {
+		const raw = (m[1] ?? m[2] ?? m[3] ?? "").trim();
+		if (raw && !/^[a-z][a-z0-9+.-]*:/i.test(raw)) imgRefs.push(raw);
+	}
+	for (const m of text.matchAll(WIKI_EMBED_IMG_RE)) {
+		const raw = (m[1] ?? "").trim();
+		if (raw && IMAGE_ASSET_RE.test(raw)) imgRefs.push(raw);
+	}
+	const openTasks = tasksIn(text)
+		.filter((t) => !t.done && t.line > 0)
+		.map((t) => ({ line: t.line, offset: t.offset, text: t.text }));
+	const tableIssues = checkTableRule
+		? checkTables(text).map((f) => ({ line: f.line, message: f.message }))
+		: [];
+	const yamlIssues = yamlSyntaxIssues(text);
+	const entry: CachedDocAuditEntry = { stamp, text, links, selfAnchors, wikis, wikiSections, imgRefs, openTasks, tableIssues, yamlIssues };
+	if (auditFileCache.size >= AUDIT_CACHE_MAX) auditFileCache.delete(auditFileCache.keys().next().value!);
+	auditFileCache.set(path, entry);
+	return entry;
+}
+
+/**
+ * Cached workspace-wide Markdown audit (no 250-file cap):
+ * 1. Unused image attachments across `attachmentsFolder` (default `<docs>/attachments`) AND `<tickets>/<KEY>/attachments/` folders,
+ *    resolved against actual links, embeds, and HTML `<img>` tags across ALL workspace Markdown files.
+ * 2. Open `- [ ]` tasks across active (non-archived, non-catalog, non-done) project documents.
+ * 3. Workspace hygiene issues: broken `#heading` anchors, ADR 0008 table-rule findings (non-schema docs), and malformed YAML frontmatter.
+ */
+export async function docAudit(files: WorkspaceFiles, project: Project, attachmentsFolder?: string): Promise<DocAuditResult> {
+	const root = files.root;
+	const docsRel = project.docs.replace(/^[./\\]+|[\\/]+$/g, "");
+	const schemaRel = project.schema.replace(/^[./\\]+|[\\/]+$/g, "");
+	const schemaPrefix = schemaRel && schemaRel !== "." ? `${schemaRel.toLowerCase()}/` : "";
+	const customAttachRel = (attachmentsFolder ?? "").trim().replace(/\\/g, "/").replace(/^[./]+|\/+$/g, "");
+	const defaultAttachRel = docsRel && docsRel !== "." ? `${docsRel}/attachments` : "attachments";
+	const attachPrefixes = new Set<string>([`${(customAttachRel || defaultAttachRel).toLowerCase()}/`]);
+	const ticketsRel = docsRel && docsRel !== "." ? `${docsRel}/${DOC_FOLDERS.tickets}` : DOC_FOLDERS.tickets;
+	const ticketsAttachRe = new RegExp(`^${ticketsRel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").toLowerCase()}/[^/]+/attachments/`, "i");
+
+	const allWsFiles = files.files();
+	const candidateImages: string[] = [];
+	const allMdFiles: string[] = [];
+	for (const p of allWsFiles) {
+		const rel = relative(root, p).split(sep).join("/");
+		const relLow = rel.toLowerCase();
+		if (MARKDOWN.test(p)) {
+			allMdFiles.push(p);
+		} else if (IMAGE_ASSET_RE.test(p)) {
+			if ([...attachPrefixes].some((pref) => relLow.startsWith(pref)) || ticketsAttachRe.test(relLow)) {
+				candidateImages.push(p);
+			}
+		}
+	}
+
+	const docsList = await listDocs(files, project);
+	const docByPath = new Map<string, DocFile>();
+	const fold = (p: string) => (process.platform === "linux" ? resolve(p) : resolve(p).toLowerCase());
+	for (const d of docsList) docByPath.set(fold(d.path), d);
+	const docNameIndex = buildDocNameIndex(docsList, root);
+
+	const usedImagePaths = new Set<string>();
+	const usedImageNames = new Set<string>();
+	const mdEntries = new Map<string, CachedDocAuditEntry>();
+	const openTasks: OpenTaskItem[] = [];
+	const issues: WorkspaceDocIssue[] = [];
+
+	for (const mdPath of allMdFiles) {
+		const rel = relative(root, mdPath).split(sep).join("/");
+		const relLow = rel.toLowerCase();
+		const inSchema = Boolean(schemaPrefix && relLow.startsWith(schemaPrefix));
+		const entry = await readAuditEntry(mdPath, !inSchema);
+		if (!entry) continue;
+		mdEntries.set(fold(mdPath), entry);
+
+		// Collect referenced images from Markdown links/images, HTML <img>, and ![[image]] embeds.
+		const markImageRef = (rawRef: string) => {
+			let cleaned = rawRef.split(/[?#]/)[0]!.trim();
+			try {
+				cleaned = decodeURIComponent(cleaned);
+			} catch {
+				// Keep raw string if invalid percent sequence.
+			}
+			if (!cleaned || !IMAGE_ASSET_RE.test(cleaned)) return;
+			const target = linkTarget(root, mdPath, cleaned);
+			usedImagePaths.add(fold(target));
+			usedImageNames.add(basename(cleaned).toLowerCase());
+		};
+		for (const link of entry.links) markImageRef(link.file);
+		for (const ref of entry.imgRefs) markImageRef(ref);
+		for (const w of entry.wikis) {
+			if (IMAGE_ASSET_RE.test(w.name)) usedImageNames.add(basename(w.name).toLowerCase());
+		}
+
+		// Surface YAML & ADR 0008 table-rule issues for project docs (excluding catalogs).
+		const docMeta = docByPath.get(fold(mdPath));
+		if (docMeta && !isCatalog(docMeta)) {
+			for (const y of entry.yamlIssues) {
+				issues.push({ path: mdPath, line: y.line, kind: "yaml", level: "warn", message: y.message });
+			}
+			for (const t of entry.tableIssues) {
+				issues.push({ path: mdPath, line: t.line, kind: "table", level: "note", message: t.message });
+			}
+			// Aggregate open `- [ ]` tasks for active (non-archived, non-done/off) docs.
+			const isArchived = /(?:^|\/)archive\//i.test(rel);
+			const tone = docMeta.status ? toneOf(docMeta.status) : "active";
+			if (!isArchived && tone !== "done" && tone !== "off" && entry.openTasks.length) {
+				for (const t of entry.openTasks) {
+					openTasks.push({
+						path: mdPath,
+						name: docMeta.name,
+						...(docMeta.title ? { title: docMeta.title } : {}),
+						...(docMeta.ticket ? { ticket: docMeta.ticket } : {}),
+						group: docMeta.group,
+						line: t.line,
+						offset: t.offset,
+						text: t.text,
+					});
+				}
+			}
+		}
+	}
+
+	// Second pass: verify `#heading` fragment anchors on Markdown links and `[[doc#Heading]]` wikilinks.
+	for (const mdPath of allMdFiles) {
+		const docMeta = docByPath.get(fold(mdPath));
+		if (!docMeta || isCatalog(docMeta)) continue;
+		const entry = mdEntries.get(fold(mdPath));
+		if (!entry) continue;
+		// Same-document Markdown `#anchor` links (`[section](#missing)`).
+		for (const a of entry.selfAnchors) {
+			if (findHeadingLine(entry.text, a.anchor) === null) {
+				issues.push({
+					path: mdPath,
+					line: a.line,
+					column: a.column,
+					kind: "anchor",
+					level: "warn",
+					message: `Heading "#${a.anchor}" was not found in ${basename(mdPath)}.`,
+					href: a.href,
+				});
+			}
+		}
+		// Standard Markdown links with `#anchor` (e.g. `[x](spec.md#bad)`).
+		for (const link of entry.links) {
+			const hashIdx = link.href.indexOf("#");
+			if (hashIdx < 0) continue;
+			const anchor = link.href.slice(hashIdx + 1).trim();
+			if (!anchor || /^L\d+(?:-L?\d+)?$/i.test(anchor)) continue;
+			const targetPath = link.file ? linkTarget(root, mdPath, link.file) : mdPath;
+			if (!MARKDOWN.test(targetPath)) continue;
+			const targetEntry = mdEntries.get(fold(targetPath));
+			if (!targetEntry) continue;
+			if (findHeadingLine(targetEntry.text, anchor) === null) {
+				issues.push({
+					path: mdPath,
+					line: link.line,
+					column: link.column,
+					kind: "anchor",
+					level: "warn",
+					message: `Heading "#${anchor}" was not found in ${link.file || basename(mdPath)}.`,
+					href: link.href,
+				});
+			}
+		}
+		// Wikilinks with `#Heading` (e.g. `[[Spec#Bad]]` or `[[#Bad]]`).
+		for (const w of entry.wikiSections) {
+			const targetDoc = w.target ? lookupInIndex(w.target, docNameIndex) : docMeta;
+			if (!targetDoc || !MARKDOWN.test(targetDoc.path)) continue;
+			const targetEntry = mdEntries.get(fold(targetDoc.path));
+			if (!targetEntry) continue;
+			if (findHeadingLine(targetEntry.text, w.section) === null) {
+				issues.push({
+					path: mdPath,
+					line: w.line,
+					column: w.column,
+					kind: "anchor",
+					level: "warn",
+					message: `Heading "#${w.section}" was not found in ${w.target || basename(mdPath)}.`,
+					href: `[[${w.target}#${w.section}]]`,
+				});
+			}
+		}
+	}
+
+	const unusedAttachments = candidateImages.filter((imgPath) => {
+		const f = fold(imgPath);
+		if (usedImagePaths.has(f)) return false;
+		// Wiki embeds `![[shot.png]]` resolve by basename across attachments folders.
+		if (usedImageNames.has(basename(imgPath).toLowerCase())) return false;
+		return true;
+	});
+
+	return { unusedAttachments, openTasks, issues };
 }
 

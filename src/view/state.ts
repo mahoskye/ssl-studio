@@ -343,30 +343,62 @@ export const displayName = (path: string) => (isUntitled(path) ? path.slice("unt
 
 export type PlanViewMode = "source" | "text" | "chart";
 
-/** Plan view mode per file (Source | Text | Chart). Defaults to Chart (or Source if legacy planText is set). */
-export function planMode(path: string): PlanViewMode {
-	const explicit = state.planMode[path];
+const modeKey = (path: string, group?: number) => (group === undefined ? path : `${group}:${path}`);
+
+/** Plan view mode per group + file (Source | Text | Chart). Defaults to Chart (or Source if legacy planText is set). */
+export function planMode(path: string, group?: number): PlanViewMode {
+	const explicit = (group !== undefined ? state.planMode[modeKey(path, group)] : undefined) ?? state.planMode[path];
 	if (explicit) return explicit;
 	return state.planText[path] ? "source" : "chart";
 }
 
-export function setPlanMode(path: string, mode: PlanViewMode) {
+export function setPlanMode(path: string, mode: PlanViewMode, group?: number) {
 	batch(() => {
-		setState("planMode", path, mode);
-		setState("planText", path, mode === "source");
+		if (group !== undefined) {
+			setState("planMode", modeKey(path, group), mode);
+		} else {
+			setState("planMode", path, mode);
+			setState("planMode", modeKey(path, state.activeGroup), mode);
+			setState("planText", path, mode === "source");
+		}
 	});
 }
 
-/** Obsidian-style Markdown mode per file (Source | Live | Read). Defaults to Live (or Source when livePreview is disabled). */
-export function markdownMode(path: string): "source" | "live" | "read" {
-	const explicit = state.mdMode[path];
+/** Obsidian-style Markdown mode per group + file (Source | Live | Read). Allows Live + Read split side-by-side! */
+export function markdownMode(path: string, group?: number): "source" | "live" | "read" {
+	const explicit = (group !== undefined ? state.mdMode[modeKey(path, group)] : undefined) ?? state.mdMode[path];
 	if (explicit) return explicit;
 	return state.settings.livePreview === false ? "source" : "live";
 }
-export function setMarkdownMode(path: string, mode: "source" | "live" | "read") {
+export function setMarkdownMode(path: string, mode: "source" | "live" | "read", group?: number) {
 	batch(() => {
-		setState("mdMode", path, mode);
-		setState("mdText", path, mode !== "read");
+		if (group !== undefined) {
+			setState("mdMode", modeKey(path, group), mode);
+		} else {
+			setState("mdMode", path, mode);
+			setState("mdMode", modeKey(path, state.activeGroup), mode);
+			setState("mdText", path, mode !== "read");
+		}
+	});
+}
+
+/** Table/CSV view mode per group + file (`true` = plain text, `false` = interactive table). */
+export function tableTextMode(path: string, group?: number): boolean {
+	if (group !== undefined) {
+		const scoped = state.mdText[modeKey(path, group)];
+		if (scoped !== undefined) return scoped;
+	}
+	return Boolean(state.mdText[path]);
+}
+
+export function setTableTextMode(path: string, text: boolean, group?: number) {
+	batch(() => {
+		if (group !== undefined) {
+			setState("mdText", modeKey(path, group), text);
+		} else {
+			setState("mdText", path, text);
+			setState("mdText", modeKey(path, state.activeGroup), text);
+		}
 	});
 }
 
@@ -781,6 +813,13 @@ export function fileRenamed(oldPath: string, newPath: string) {
 			if (state.planMode[path]) setState("planMode", target, state.planMode[path]!);
 			if (state.mdText[path]) setState("mdText", target, true);
 			if (state.mdMode[path]) setState("mdMode", target, state.mdMode[path]!);
+			for (let gi = 0; gi < Math.max(2, state.groups.length); gi++) {
+				const gk = modeKey(path, gi);
+				const tk = modeKey(target, gi);
+				if (state.planMode[gk] !== undefined) setState("planMode", tk, state.planMode[gk]!);
+				if (state.mdText[gk] !== undefined) setState("mdText", tk, state.mdText[gk]!);
+				if (state.mdMode[gk] !== undefined) setState("mdMode", tk, state.mdMode[gk]!);
+			}
 		});
 		doc.model.dispose();
 	}

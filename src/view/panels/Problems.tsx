@@ -1,10 +1,11 @@
 // Diagnostics from the language server for every open file, by file, then
 // by rule.
 import { Icon, type IconName } from "../Icon";
-import { createEffect, For, on, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, on, Show } from "solid-js";
 import { monaco } from "../editor/monaco";
+import { docAuditData } from "../docAudit";
 import { diagnostics, type Diagnostic } from "../lsp/session";
-import { openFile, state } from "../state";
+import { canonical, openFile, state } from "../state";
 import { relativeTo } from "../../shared/paths";
 import { Row, RowGroup, Rows } from "./Rows";
 import { serverDown } from "./server";
@@ -30,18 +31,136 @@ export function SeverityMark(props: { severity: number }) {
 	);
 }
 
+type ProblemsScope = "all" | "code" | "docs";
+const [problemsScope, setProblemsScope] = createSignal<ProblemsScope>("all");
+
+const isDocDiag = (uri: string, d: Diagnostic): boolean => {
+	if (d.source === "docs") return true;
+	const p = monaco.Uri.parse(uri).fsPath;
+	return /\.(md|markdown|json|toml|xml|csv|tsv)$/i.test(p);
+};
+
 export function Problems() {
-	const files = () => Object.entries(diagnostics).filter(([, list]) => list?.length) as [string, Diagnostic[]][];
+	const mergedFiles = createMemo(() => {
+		const byPath = new Map<string, { uri: string; list: Diagnostic[] }>();
+		const seenKeys = new Set<string>();
+		for (const [uri, list] of Object.entries(diagnostics)) {
+			if (!list?.length) continue;
+			const fsPath = canonical(monaco.Uri.parse(uri).fsPath);
+			const entry = byPath.get(fsPath) ?? { uri, list: [] };
+			for (const d of list) {
+				entry.list.push(d);
+				seenKeys.add(`${fsPath}:${d.line}:${d.code ?? ""}`);
+			}
+			byPath.set(fsPath, entry);
+		}
+		// Fold workspace-wide doc audit issues (broken #heading anchors, malformed YAML, ADR 0008 tables)
+		// into Problems under `source: "docs"`, deduplicated against already-open file diagnostics.
+		for (const issue of docAuditData().issues) {
+			const fsPath = canonical(issue.path);
+			const code = issue.kind === "table" ? "table-rule" : issue.kind === "anchor" ? "broken-anchor" : "yaml-frontmatter";
+			const dedupKey = `${fsPath}:${issue.line}:${code}`;
+			if (seenKeys.has(dedupKey)) continue;
+			seenKeys.add(dedupKey);
+			const uri = monaco.Uri.file(issue.path).toString();
+			const entry = byPath.get(fsPath) ?? { uri, list: [] };
+			entry.list.push({
+				uri,
+				line: issue.line,
+				column: issue.column ?? 1,
+				endLine: issue.line,
+				endColumn: (issue.column ?? 1) + 1,
+				severity: issue.level === "warn" ? 2 : 3,
+				message: issue.message,
+				code,
+				source: "docs",
+			});
+			byPath.set(fsPath, entry);
+		}
+		return [...byPath.values()];
+	});
+
+	const hasDocIssues = createMemo(() =>
+		mergedFiles().some(({ uri, list }) => list.some((d) => isDocDiag(uri, d))),
+	);
+	const scopeCounts = createMemo(() => {
+		let code = 0;
+		let docsN = 0;
+		for (const { uri, list } of mergedFiles()) {
+			for (const d of list) {
+				if (isDocDiag(uri, d)) docsN++;
+				else code++;
+			}
+		}
+		return { all: code + docsN, code, docs: docsN };
+	});
+
+	const files = createMemo(() => {
+		const scope = problemsScope();
+		const out: [string, Diagnostic[]][] = [];
+		for (const { uri, list } of mergedFiles()) {
+			const filtered =
+				scope === "all"
+					? list
+					: scope === "docs"
+						? list.filter((d) => isDocDiag(uri, d))
+						: list.filter((d) => !isDocDiag(uri, d));
+			if (filtered.length) out.push([uri, filtered]);
+		}
+		return out;
+	});
 	const rel = (uri: string) => {
 		const path = monaco.Uri.parse(uri).fsPath;
 		return relativeTo(state.workspace?.root, path);
 	};
 	return (
-		<Rows class="problems" label="Problems in open files">
+		<Rows class="problems" label="Problems in workspace">
+			<Show when={hasDocIssues()}>
+				<div class="problems-filter" role="tablist" aria-label="Filter problems by source">
+					<button
+						type="button"
+						role="tab"
+						aria-selected={problemsScope() === "all"}
+						classList={{ active: problemsScope() === "all" }}
+						onClick={() => setProblemsScope("all")}
+					>
+						All <span class="meta">{scopeCounts().all}</span>
+					</button>
+					<button
+						type="button"
+						role="tab"
+						aria-selected={problemsScope() === "code"}
+						classList={{ active: problemsScope() === "code" }}
+						onClick={() => setProblemsScope("code")}
+					>
+						Code <span class="meta">{scopeCounts().code}</span>
+					</button>
+					<button
+						type="button"
+						role="tab"
+						aria-selected={problemsScope() === "docs"}
+						classList={{ active: problemsScope() === "docs" }}
+						onClick={() => setProblemsScope("docs")}
+					>
+						Docs <span class="meta">{scopeCounts().docs}</span>
+					</button>
+				</div>
+			</Show>
 			<Show when={serverDown()}>
 				<p class="hint warn">{serverDown()} Open files are not checked until it runs.</p>
 			</Show>
-			<Show when={files().length} fallback={<p class="hint">No problems in open files.</p>}>
+			<Show
+				when={files().length}
+				fallback={
+					<p class="hint">
+						{problemsScope() === "code"
+							? "No code problems in open files."
+							: problemsScope() === "docs"
+								? "No document problems found."
+								: "No problems in open files or workspace documents."}
+					</p>
+				}
+			>
 				<For each={files()}>
 					{([uri, list]) => (
 						<RowGroup

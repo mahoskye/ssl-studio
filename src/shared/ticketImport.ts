@@ -276,12 +276,12 @@ export function ticketsFromJson(value: unknown): Imported {
 			const outName = String(typeObj.outward ?? typeObj.name ?? "").toLowerCase();
 			const inName = String(typeObj.inward ?? typeObj.name ?? "").toLowerCase();
 			if (outward) {
-				links.push(outward);
 				if (/\bblocks\b/.test(outName)) blocksRaw.push(outward);
+				else links.push(outward);
 			}
 			if (inward) {
-				links.push(inward);
 				if (/\bblocked by\b/.test(inName)) blockedByRaw.push(inward);
+				else links.push(inward);
 			}
 		}
 		// Under one name or the other, and as a key or as a link to one.

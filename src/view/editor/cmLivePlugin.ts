@@ -20,6 +20,7 @@ import { parseCalloutHeader, parseImageExpression, type ParsedImageSpec } from "
 import { parseMarkdownTable } from "../../shared/markdownTables";
 import { docByName, namedLink } from "../../shared/namedLinks";
 import { dirName, isInside, relativeTo, resolvePath } from "../../shared/paths";
+import { isLikelyHexColorTag } from "../../shared/tags";
 import { ticketMatcher } from "../../shared/ticketRefs";
 import { docs } from "../project";
 import { noteCursor } from "../navigation";
@@ -571,6 +572,7 @@ class TransclusionWidget extends WidgetType {
 		const parsed = selfHeading ? null : namedLink(this.inner);
 
 		let targetPath: string | null = null;
+		let fallbackTargetPath: string | null = null;
 		let heading = selfHeading ?? parsed?.heading;
 		let isSelfDoc = false;
 		if (selfHeading) {
@@ -580,10 +582,17 @@ class TransclusionWidget extends WidgetType {
 			if (docFound) {
 				targetPath = docFound.path;
 			} else if (parsed.name.includes("/") || /\.[a-z0-9]{1,8}$/i.test(parsed.name)) {
-				// Allow transcluding relative workspace code/SQL/CSV/fixture files (`![[samples/query.sql]]`).
+				// Allow transcluding relative OR workspace-root code/SQL/CSV/fixture files (`![[samples/query.sql]]`, `![[schema/database/demo.sql]]`).
 				const relCandidate = resolvePath(dirName(this.sourcePath), parsed.name);
-				const rootCandidate = resolvePath(root, parsed.name);
-				targetPath = isInside(root, relCandidate) ? relCandidate : isInside(root, rootCandidate) ? rootCandidate : null;
+				const rootCandidate = resolvePath(root, parsed.name.replace(/^\/+/, ""));
+				if (isInside(root, relCandidate)) {
+					targetPath = relCandidate;
+					if (isInside(root, rootCandidate) && canonical(rootCandidate) !== canonical(relCandidate)) {
+						fallbackTargetPath = rootCandidate;
+					}
+				} else if (isInside(root, rootCandidate)) {
+					targetPath = rootCandidate;
+				}
 			}
 			if (targetPath && !heading && canonical(targetPath) === canonical(this.sourcePath)) {
 				isSelfDoc = true;
@@ -650,10 +659,40 @@ class TransclusionWidget extends WidgetType {
 				void window.open(href, "_blank", "noopener");
 				return;
 			}
-			if (targetPath && root && href && !href.startsWith("#")) {
-				const clean = decodeURIComponent(href.split(/[?#]/)[0] ?? "");
-				const dest = resolvePath(dirName(targetPath), clean);
-				if (isInside(root, dest)) void openFile(dest);
+			if (targetPath && root && href) {
+				if (href.startsWith("#")) {
+					const anc = href.slice(1).trim();
+					if (anc) {
+						void buildHoverPreview(targetPath, { heading: anc, maxLines: 1 }).then((p) => {
+							void openFile(targetPath!, p?.line ? { reveal: { line: p.line } } : {});
+						});
+					}
+					return;
+				}
+				const hashAt = href.indexOf("#");
+				const rawFile = hashAt >= 0 ? href.slice(0, hashAt) : href;
+				const rawHash = hashAt >= 0 ? href.slice(hashAt + 1) : "";
+				let clean = rawFile.split("?")[0] ?? "";
+				try {
+					clean = decodeURIComponent(clean);
+				} catch {
+					// Keep raw path on malformed percent escapes.
+				}
+				const dest = clean.startsWith("/")
+					? resolvePath(root, clean.replace(/^\/+/, ""))
+					: resolvePath(dirName(targetPath), clean);
+				if (isInside(root, dest)) {
+					const lineHash = /^L(\d+)(?:-L?(\d+))?$/i.exec(rawHash.trim());
+					if (lineHash) {
+						void openFile(dest, { reveal: { line: Number(lineHash[1]), ...(lineHash[2] ? { endLine: Number(lineHash[2]) } : {}) } });
+					} else if (rawHash) {
+						void buildHoverPreview(dest, { heading: rawHash, maxLines: 1 }).then((p) => {
+							void openFile(dest, p?.line ? { reveal: { line: p.line } } : {});
+						});
+					} else {
+						void openFile(dest);
+					}
+				}
 			}
 		});
 
@@ -663,19 +702,28 @@ class TransclusionWidget extends WidgetType {
 			setStatusMsg("cm-md-embed-missing", `Embedded note “${this.inner}” was not found. Click the title to create it.`);
 		} else {
 			setStatusMsg("cm-md-embed-loading", "Loading embedded note…");
-			const embedPath = targetPath;
-			void buildHoverPreview(embedPath, { heading, maxLines: 120 }).then((preview) => {
+			const primaryPath = targetPath;
+			const secondaryPath = fallbackTargetPath;
+			void (async () => {
+				let usedPath = primaryPath;
+				let preview = await buildHoverPreview(primaryPath, { heading, maxLines: 120 });
+				if (!preview && secondaryPath) {
+					usedPath = secondaryPath;
+					preview = await buildHoverPreview(secondaryPath, { heading, maxLines: 120 });
+				}
 				if (!body.isConnected) return;
 				if (!preview) {
 					setStatusMsg("cm-md-embed-missing", `Could not read “${this.inner}”.`);
 					return;
 				}
+				targetPath = usedPath;
 				resolvedLine = preview.line;
 				titleBtn.textContent = alias ?? (heading ? `${preview.title} › ${heading}` : preview.title);
+				titleBtn.title = `Open ${relativeTo(root, usedPath)}`;
 				body.innerHTML = preview.html;
-				hydrateImagesInElement(body, embedPath);
+				hydrateImagesInElement(body, usedPath);
 				void colourCode(body);
-			});
+			})();
 		}
 		card.append(body);
 		return card;
@@ -938,9 +986,22 @@ function buildBlockDecorations(state: EditorState): DecorationSet {
 	// 3. Standalone image lines (`![alt|400](src)` or `![[image.png|Caption|300]]`) & note transclusions (`![[note]]`, `![[note#Heading]]`).
 	const transclusionVer = (rawEmbed: string): number => {
 		const root = appState.workspace?.root;
+		if (rawEmbed.startsWith("#")) {
+			// Self-heading transclusion `![[#Heading]]`: bump whenever this document's own length/version changes.
+			const selfOpen = documents.get(canonical(filePath))?.model.getAlternativeVersionId() ?? state.doc.length;
+			return appState.treeVersion * 100000 + selfOpen;
+		}
 		const parsed = namedLink(rawEmbed);
 		const found = parsed && root ? docByName(parsed.name, docs(), root) : null;
-		const openVer = found ? (documents.get(canonical(found.path))?.model.getAlternativeVersionId() ?? 0) : 0;
+		let openVer = found ? (documents.get(canonical(found.path))?.model.getAlternativeVersionId() ?? 0) : 0;
+		if (!found && parsed && root) {
+			const relCand = resolvePath(dirName(filePath), parsed.name);
+			const rootCand = resolvePath(root, parsed.name.replace(/^\/+/, ""));
+			openVer =
+				documents.get(canonical(relCand))?.model.getAlternativeVersionId() ??
+				documents.get(canonical(rootCand))?.model.getAlternativeVersionId() ??
+				0;
+		}
 		return appState.treeVersion * 100000 + openVer;
 	};
 	for (let n = startLineNum; n <= state.doc.lines; n++) {
@@ -1304,6 +1365,27 @@ function buildInlineDecorations(view: EditorView): DecorationSet {
 		});
 	}
 
+	// Collect footnote definitions across the document so `[^id]` hover tooltips preview the footnote text.
+	const footnoteDefs = new Map<string, string>();
+	const fullText = state.doc.toString();
+	if (fullText.includes("[^")) {
+		const docLines = fullText.split("\n");
+		for (let i = 0; i < docLines.length; i++) {
+			const m = /^[ \t]{0,3}\[\^([^\]\s]+)\]:[ \t]*(.*)$/.exec(docLines[i]!);
+			if (!m) continue;
+			const id = m[1]!;
+			const parts = [m[2]!.trim()];
+			for (let j = i + 1; j < docLines.length && parts.join(" ").length < 220; j++) {
+				if (/^(?: {2,}|\t)\S/.test(docLines[j]!)) parts.push(docLines[j]!.trim());
+				else break;
+			}
+			const preview = parts.filter(Boolean).join(" ").trim();
+			if (preview && !footnoteDefs.has(id)) {
+				footnoteDefs.set(id, preview.length > 220 ? `${preview.slice(0, 219)}…` : preview);
+			}
+		}
+	}
+
 	// Pass 2: Line-level scans across visible ranges (bullets, checkboxes, blockquotes, ==highlights==, [[wikilinks]], #tags, ticket keys).
 	const seenLines = new Set<number>();
 	for (const { from, to } of view.visibleRanges) {
@@ -1460,20 +1542,25 @@ function buildInlineDecorations(view: EditorView): DecorationSet {
 					const rTo = rFrom + m[0].length;
 					if (isSkipped(rFrom, rTo) || lineSkips.some(([a, b]) => rFrom < b && rTo > a)) continue;
 					lineSkips.push([rFrom, rTo]);
+					const fnPreview = footnoteDefs.get(m[1]!);
 					decos.push(
 						Decoration.mark({
 							class: "cm-md-footnote-ref",
-							attributes: { "data-md-footnote": m[1]!, title: `Jump to footnote [^${m[1]!}]` },
+							attributes: {
+								"data-md-footnote": m[1]!,
+								title: fnPreview ? `[^${m[1]!}]: ${fnPreview}\n(Click to jump to footnote)` : `Jump to footnote [^${m[1]!}]`,
+							},
 						}).range(rFrom, rTo),
 					);
 				}
 			}
 
-			// #tags in prose (not ATX heading hashes, not inside links/code)
+			// #tags in prose (not ATX heading hashes, not CSS hex colors, not inside links/code)
 			if (text.includes("#") && !/^[ \t]{0,3}#{1,6}[ \t]/.test(text)) {
 				for (const m of text.matchAll(/(^|[\s(])(#[A-Za-z][A-Za-z0-9_/-]*)/g)) {
 					const leadLen = m[1]!.length;
 					const tag = m[2]!;
+					if (isLikelyHexColorTag(tag.slice(1))) continue;
 					const tFrom = line.from + m.index + leadLen;
 					const tTo = tFrom + tag.length;
 					if (isSkipped(tFrom, tTo) || lineSkips.some(([a, b]) => tFrom < b && tTo > a)) continue;
@@ -1707,15 +1794,22 @@ export const markdownFoldService: Extension = [
 	foldService.of((state, lineStart) => {
 		const line = state.doc.lineAt(lineStart);
 		const text = line.text;
-		// 1. ATX Heading folds everything until the next heading of equal or higher level.
+		// Skip lines inside fenced code blocks so `# comments` in bash/python/yaml fences never fold or terminate heading folds.
+		const fullDoc = state.doc.toString();
+		const codeFences = fenced(fullDoc);
+		const insideFence = (pos: number) => codeFences.some(([a, b]) => pos >= a && pos < b);
+		if (insideFence(line.from)) return null;
+		// 1. ATX Heading folds everything until the next heading of equal or higher level (outside code fences).
 		const hMatch = /^[ \t]{0,3}(#{1,6})[ \t]+/.exec(text);
 		if (hMatch) {
 			const level = hMatch[1]!.length;
 			let endLine = line.number;
 			for (let n = line.number + 1; n <= state.doc.lines; n++) {
 				const next = state.doc.line(n);
-				const nh = /^[ \t]{0,3}(#{1,6})[ \t]+/.exec(next.text);
-				if (nh && nh[1]!.length <= level) break;
+				if (!insideFence(next.from)) {
+					const nh = /^[ \t]{0,3}(#{1,6})[ \t]+/.exec(next.text);
+					if (nh && nh[1]!.length <= level) break;
+				}
 				endLine = n;
 			}
 			while (endLine > line.number && !state.doc.line(endLine).text.trim()) endLine--;

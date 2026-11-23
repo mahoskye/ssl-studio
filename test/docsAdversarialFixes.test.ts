@@ -438,7 +438,7 @@ describe("Wave A–C adversarial review v2 fixes & features", () => {
 		expect(jira).toContain("Use _italic_ and *bold* and *_both_* and {color:#b45309}*mark*{color}.");
 		expect(jira).toContain("* (-) Open task");
 		expect(jira).toContain("** (/) Nested done task");
-		expect(jira).toContain("|{{a || b}}|A | B|");
+		expect(jira).toContain("|{{a \\|\\| b}}|A \\| B|");
 	});
 
 	test("evaluateTicketReadiness evaluates checklists, open questions, registry rows, and Git status", () => {
@@ -543,7 +543,7 @@ describe("Wave A–C adversarial review v2 fixes & features", () => {
 		expect(generateToc(md)).toBe("- [Setup](#setup)\n  - [Details](#details)");
 		const inserted = upsertTocBlock(md);
 		expect(inserted.updated).toBe(true);
-		expect(inserted.text).toContain("<!-- toc -->\n- [Setup](#setup)\n  - [Details](#details)\n<!-- /toc -->");
+		expect(inserted.text).toContain("<!-- toc -->\n\n- [Setup](#setup)\n  - [Details](#details)\n\n<!-- /toc -->");
 		const stats = markdownStats(md);
 		expect(stats.tasksDone).toBe(1);
 		expect(stats.tasksTotal).toBe(2);

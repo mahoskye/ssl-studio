@@ -138,11 +138,42 @@ function menuPoint(e: MouseEvent, fallbackEl: Element | null): { x: number; y: n
 
 export function TableView(props: { path: string }) {
 	const model = documents.get(props.path)?.model;
+	let rootEl: HTMLDivElement | undefined;
 	const [text, setText] = createSignal(model?.getValue() ?? "");
+	type ColumnUiSnapshot = {
+		colFilters: Map<number, ColumnFilter>;
+		order: { column: number; down: boolean } | null;
+		frozenCols: number[];
+		hiddenCols: Set<number>;
+		colOrder: number[];
+		colWidths: Record<number, number>;
+		codeCheck: CodeCheckResult | null;
+	};
+	const colSnapshots = new Map<number, ColumnUiSnapshot>();
+	const captureColUi = (): ColumnUiSnapshot => ({
+		colFilters: new Map(colFilters()),
+		order: order() ? { ...order()! } : null,
+		frozenCols: [...frozenCols()],
+		hiddenCols: new Set(hiddenCols()),
+		colOrder: [...colOrder()],
+		colWidths: { ...colWidths() },
+		codeCheck: codeCheck() ? { ...codeCheck()! } : null,
+	});
+	const restoreColUi = (snap: ColumnUiSnapshot) => {
+		setColFilters(new Map(snap.colFilters));
+		setOrder(snap.order ? { ...snap.order } : null);
+		setFrozenCols([...snap.frozenCols]);
+		setHiddenCols(new Set(snap.hiddenCols));
+		setColOrder([...snap.colOrder]);
+		setColWidths({ ...snap.colWidths });
+		setCodeCheck(snap.codeCheck ? { ...snap.codeCheck } : null);
+	};
 	const listener = model?.onDidChangeContent(() => {
 		const next = model.getValue();
 		setText(next);
-		const count = parseCsv(next).rows.length;
+		const snap = colSnapshots.get(model.getAlternativeVersionId());
+		if (snap) restoreColUi(snap);
+		const count = table().rows.length;
 		const cur = current();
 		if (cur !== null && cur >= count) setCurrent(count > 0 ? count - 1 : null);
 	});
@@ -461,9 +492,11 @@ export function TableView(props: { path: string }) {
 		const targetRows: readonly Cell[][] =
 			spec.rowScope === "selected" && curIdx !== null && table().rows[curIdx]
 				? [table().rows[curIdx]!]
-				: spec.rowScope === "filtered" && hasActiveFilters()
-					? rows().map((r) => r.cells)
-					: table().rows;
+				: spec.rowScope === "checked" && visibleSelectedRows().length > 0
+					? visibleSelectedRows().map((i) => table().rows[i]!).filter(Boolean)
+					: spec.rowScope === "filtered" && hasActiveFilters()
+						? rows().map((r) => r.cells)
+						: table().rows;
 
 		const colName = headerName(spec.column) || `Column ${spec.column + 1}`;
 		const { terms } = columnCheckTargets(targetRows, spec.column, {
@@ -493,21 +526,29 @@ export function TableView(props: { path: string }) {
 		setChecking({ done: 0, total: terms.length, columnName: colName });
 		let cancelled = false;
 		let completed = 0;
+		const CONCURRENCY = 6;
 		try {
-			for (const [idx, term] of terms.entries()) {
-				if (runId !== checkRunId) {
-					cancelled = true;
-					break;
+			let nextIdx = 0;
+			const worker = async () => {
+				while (!cancelled) {
+					const idx = nextIdx++;
+					if (idx >= terms.length) return;
+					if (runId !== checkRunId) {
+						cancelled = true;
+						return;
+					}
+					const term = terms[idx]!;
+					const hits = await backend.search(term, options);
+					if (runId !== checkRunId) {
+						cancelled = true;
+						return;
+					}
+					counts.set(termLookupKey(term, spec.caseSensitive), hits.length);
+					completed++;
+					setChecking({ done: completed, total: terms.length, columnName: colName });
 				}
-				setChecking({ done: idx + 1, total: terms.length, columnName: colName });
-				const hits = await backend.search(term, options);
-				if (runId !== checkRunId) {
-					cancelled = true;
-					break;
-				}
-				counts.set(termLookupKey(term, spec.caseSensitive), hits.length);
-				completed++;
-			}
+			};
+			await Promise.all(Array.from({ length: Math.min(CONCURRENCY, terms.length) }, () => worker()));
 			if (!cancelled || completed > 0) {
 				setCodeCheck({
 					column: spec.column,
@@ -720,23 +761,49 @@ export function TableView(props: { path: string }) {
 			.filter((name) => Boolean(ruleForColumn(csvConfig(), name))),
 	);
 
-	/** The rows drawn: up to `rowLimit()`, plus the row being edited or newly pinned if it sits beyond the window. */
+	// Scroll-windowed virtualization when tables exceed 200 rows so 1,000+ row STARLIMS registries scroll smoothly at 60fps.
+	const VIRTUAL_THRESHOLD = 200;
+	const EST_ROW_H = 31;
+	const VIRT_OVERSCAN = 20;
+	const [scrollTop, setScrollTop] = createSignal(0);
+	const [viewportH, setViewportH] = createSignal(640);
+
+	const virtualWindow = createMemo(() => {
+		const all = rows();
+		if (all.length <= VIRTUAL_THRESHOLD) {
+			return { virtual: false, start: 0, end: all.length, topPad: 0, bottomPad: 0 };
+		}
+		const start = Math.max(0, Math.floor(scrollTop() / EST_ROW_H) - VIRT_OVERSCAN);
+		const visibleCount = Math.ceil((viewportH() || 640) / EST_ROW_H) + VIRT_OVERSCAN * 2;
+		const end = Math.min(all.length, start + visibleCount);
+		return {
+			virtual: true,
+			start,
+			end,
+			topPad: start * EST_ROW_H,
+			bottomPad: Math.max(0, (all.length - end) * EST_ROW_H),
+		};
+	});
+
+	/** The rows drawn: virtualized viewport slice for large tables (>200 rows), or all filtered rows for small tables. */
 	const drawn = createMemo(() => {
-		const first = rows().slice(0, rowLimit());
+		const win = virtualWindow();
+		const all = rows();
+		const slice = win.virtual ? all.slice(win.start, win.end) : all;
 		const ed = editing();
 		const focusRow = ed && !ed.ghost ? ed.row : pinnedRow();
-		const beyond = focusRow !== null && !first.some((row) => row.index === focusRow) ? rows().find((row) => row.index === focusRow) : undefined;
-		return beyond ? [...first, beyond] : first;
+		const beyond = focusRow !== null && !slice.some((row) => row.index === focusRow) ? all.find((row) => row.index === focusRow) : undefined;
+		return beyond ? [...slice, beyond] : slice;
 	});
 
 	const allDrawnSelected = createMemo(() => {
-		const list = drawn();
+		const list = rows();
 		const sel = selectedRows();
 		return list.length > 0 && list.every((r) => sel.has(r.index));
 	});
 
 	const toggleRowSelect = (rowIdx: number, shiftKey: boolean) => {
-		const list = drawn();
+		const list = rows();
 		setSelectedRows((prev) => {
 			const next = new Set(prev);
 			if (shiftKey && lastClickedRow() !== null) {
@@ -761,7 +828,7 @@ export function TableView(props: { path: string }) {
 	};
 
 	const toggleSelectAllDrawn = () => {
-		const list = drawn();
+		const list = rows();
 		if (allDrawnSelected()) {
 			setSelectedRows((prev) => {
 				const next = new Set(prev);
@@ -841,7 +908,21 @@ export function TableView(props: { path: string }) {
 	const focusCell = (row: number, column: number) => {
 		queueMicrotask(() => {
 			const td = body?.querySelector<HTMLElement>(`tr[data-row="${row}"] > td[data-col="${column}"]`);
-			td?.focus();
+			if (td) {
+				td.focus();
+				return;
+			}
+			if (virtualWindow().virtual && scrollEl) {
+				const visIdx = rows().findIndex((r) => r.index === row);
+				if (visIdx >= 0) {
+					const targetTop = Math.max(0, visIdx * EST_ROW_H - Math.floor((viewportH() || 600) / 3));
+					scrollEl.scrollTop = targetTop;
+					setScrollTop(targetTop);
+					requestAnimationFrame(() => {
+						body?.querySelector<HTMLElement>(`tr[data-row="${row}"] > td[data-col="${column}"]`)?.focus();
+					});
+				}
+			}
 		});
 	};
 
@@ -873,6 +954,8 @@ export function TableView(props: { path: string }) {
 
 	/** Commits an existing cell edit and optionally moves to the next/previous visual cell (for Tab / Shift+Tab). */
 	const commitCell = (row: number, column: number, value: string, move: "none" | "stay" | "next" | "prev") => {
+		// Pin the edited row under active filters so editing a cell doesn't immediately drop the row and strand Tab/focus.
+		if (hasActiveFilters()) setPinnedRow(row);
 		changeCell(row, column, value);
 		const cols = visibleColumns();
 		const visCol = cols.indexOf(column);
@@ -1011,6 +1094,10 @@ export function TableView(props: { path: string }) {
 		const pin = pinnedRow();
 		if (pin === row) setPinnedRow(null);
 		else if (pin !== null && pin > row) setPinnedRow(pin - 1);
+		queueMicrotask(() => {
+			if (nextRow !== null) focusCell(nextRow, activeCell()?.column ?? visibleColumns()[0] ?? 0);
+			else rootEl?.focus();
+		});
 	};
 
 	const applyFullText = (nextText: string, message?: string) => {
@@ -1020,6 +1107,7 @@ export function TableView(props: { path: string }) {
 		model.pushEditOperations([], [{ range: fullRange, text: nextText }], () => null);
 		model.pushStackElement();
 		if (message) notify(message);
+		queueMicrotask(() => rootEl?.focus());
 	};
 
 	const visibleRowSet = createMemo(() => new Set(rows().map((r) => r.index)));
@@ -1096,7 +1184,8 @@ export function TableView(props: { path: string }) {
 		const suggestions = rule ? suggestionsForColumn(rule, existing) : [...new Set(existing.map((v) => v.trim()).filter(Boolean))];
 		const CUSTOM = "Enter custom value…";
 		const CLEAR = "(Clear value)";
-		const picked = await choose(`Set “${headerName(col)}” for ${selectedRows().size} selected rows`, [...suggestions, CUSTOM, CLEAR]);
+		const visCount = visibleSelectedRows().length;
+		const picked = await choose(`Set “${headerName(col)}” for ${visCount} selected ${visCount === 1 ? "row" : "rows"}`, [...suggestions, CUSTOM, CLEAR]);
 		if (!picked) return;
 		if (picked === CLEAR) return bulkSetColumn(col, "");
 		if (picked === CUSTOM) {
@@ -1113,7 +1202,8 @@ export function TableView(props: { path: string }) {
 		const keys = [...new Set(docs().filter((d) => d.group === "tickets" && d.exists && d.ticket).map((d) => d.ticket!))];
 		const CUSTOM = "Enter custom ticket key…";
 		const CLEAR = "(Clear ticket)";
-		const picked = await choose(`Assign ticket for ${selectedRows().size} selected rows`, [...keys, CUSTOM, CLEAR]);
+		const visCount = visibleSelectedRows().length;
+		const picked = await choose(`Assign ticket for ${visCount} selected ${visCount === 1 ? "row" : "rows"}`, [...keys, CUSTOM, CLEAR]);
 		if (!picked) return;
 		if (picked === CLEAR) return bulkSetColumn(col, "");
 		if (picked === CUSTOM) {
@@ -1130,7 +1220,8 @@ export function TableView(props: { path: string }) {
 		if (!picked) return;
 		const col = names.indexOf(picked);
 		if (col < 0) return;
-		const val = await ask(`Value for “${picked}” across ${selectedRows().size} selected rows`, "");
+		const visCount = visibleSelectedRows().length;
+		const val = await ask(`Value for “${picked}” across ${visCount} selected ${visCount === 1 ? "row" : "rows"}`, "");
 		if (val === null) return;
 		bulkSetColumn(col, val);
 	};
@@ -1161,6 +1252,7 @@ export function TableView(props: { path: string }) {
 		const fresh = parseCsv(raw);
 		const next = deleteCsvColumn(raw, fresh, col);
 		if (!next) return;
+		colSnapshots.set(model.getAlternativeVersionId(), captureColUi());
 		const shift = (idx: number) => (idx === col ? -1 : idx > col ? idx - 1 : idx);
 
 		// Remap sort, code-check, frozen/hidden/order/widths/filters for remaining columns cleanly.
@@ -1200,6 +1292,7 @@ export function TableView(props: { path: string }) {
 		setEditing(null);
 		closeFilterMenu(false);
 		applyFullText(next, `Deleted column “${name}” (Ctrl+Z to undo).`);
+		colSnapshots.set(model.getAlternativeVersionId(), captureColUi());
 	};
 
 	const applySortToFile = async () => {
@@ -1234,12 +1327,30 @@ export function TableView(props: { path: string }) {
 		applyFullText(next, "Saved row sort order to file (Ctrl+Z to undo).");
 	};
 
-	const copyFilteredAs = async (fmt: "tsv" | "markdown") => {
+	const copyFilteredAs = async (fmt: "tsv" | "csv" | "markdown") => {
 		const cols = visibleColumns();
 		const headers = cols.map((c) => headerName(c));
 		const bodyRows = rows().map((r) => cols.map((c) => r.cells[c]?.text ?? ""));
-		const out = fmt === "tsv" ? tableToTsv(headers, bodyRows) : tableToMarkdown(headers, bodyRows);
-		await copyText(out, fmt === "tsv" ? `Copied ${bodyRows.length} rows as TSV for Excel/Sheets.` : `Copied ${bodyRows.length} rows as a Markdown table.`);
+		const out =
+			fmt === "tsv"
+				? tableToTsv(headers, bodyRows)
+				: fmt === "csv"
+					? [csvRow(headers, table().delimiter), ...bodyRows.map((r) => csvRow(r, table().delimiter))].join("\n")
+					: tableToMarkdown(headers, bodyRows);
+		const label = fmt === "tsv" ? "TSV for Excel/Sheets" : fmt === "csv" ? "CSV" : "a Markdown table";
+		await copyText(out, `Copied ${bodyRows.length} rows as ${label}.`);
+	};
+
+	const copySelectedAsCsv = async () => {
+		const selected = visibleSelectedRows();
+		if (!selected.length) return;
+		const cols = visibleColumns();
+		const headers = cols.map((c) => headerName(c));
+		const bodyRows = selected
+			.sort((a, b) => a - b)
+			.map((rIdx) => cols.map((c) => table().rows[rIdx]?.[c]?.text ?? ""));
+		const out = [csvRow(headers, table().delimiter), ...bodyRows.map((r) => csvRow(r, table().delimiter))].join("\n");
+		await copyText(out, `Copied ${bodyRows.length} selected ${bodyRows.length === 1 ? "row" : "rows"} as CSV.`);
 	};
 
 	const isDatabaseRegistry = createMemo(() => baseName(props.path).toLowerCase() === "database.csv");
@@ -1354,10 +1465,18 @@ export function TableView(props: { path: string }) {
 			return;
 		}
 		if (grid.length > 1 && hasActiveFilters()) {
-			const ok = await choose(
-				`Filters are active. Pasting ${grid.length} rows will update the ${Math.min(grid.length, drawn().length)} visible rows starting here.`,
-				["Paste here", "Cancel"],
-			);
+			const curList = drawn();
+			const startVis = ac.ghost ? curList.length : curList.findIndex((r) => r.index === ac.row);
+			const remainingVis = startVis >= 0 ? Math.max(0, curList.length - startVis) : 0;
+			const willUpdate = Math.min(grid.length, remainingVis);
+			const willAppend = Math.max(0, grid.length - willUpdate);
+			const summary = [
+				willUpdate ? `update ${willUpdate} visible ${willUpdate === 1 ? "row" : "rows"}` : "",
+				willAppend ? `append ${willAppend} new ${willAppend === 1 ? "row" : "rows"}` : "",
+			]
+				.filter(Boolean)
+				.join(" and ");
+			const ok = await choose(`Filters are active. Pasting ${grid.length} rows will ${summary}.`, ["Paste here", "Cancel"]);
 			if (ok !== "Paste here") return;
 		}
 
@@ -1629,6 +1748,7 @@ export function TableView(props: { path: string }) {
 		}
 		closeFilterMenu(false);
 		setEditing(null);
+		colSnapshots.set(model.getAlternativeVersionId(), captureColUi());
 
 		const fullRange = model.getFullModelRange();
 		model.pushStackElement();
@@ -1681,7 +1801,9 @@ export function TableView(props: { path: string }) {
 		}
 
 		setColOrder([]);
+		colSnapshots.set(model.getAlternativeVersionId(), captureColUi());
 		notify("Saved column order to file (Ctrl+Z to undo).");
+		queueMicrotask(() => rootEl?.focus());
 	};
 
 	/** Pointer-based drag-and-drop on column headers (5px threshold so normal clicks sort without interference). */
@@ -2047,6 +2169,7 @@ export function TableView(props: { path: string }) {
 			...(isDatabaseRegistry() ? [{ label: "Sync from schema SQL…", value: "sync-schema" }] : []),
 			...(order() ? [{ label: "Apply sort order to file", value: "sort-apply" }] : []),
 			"separator",
+			{ label: "Copy visible rows as CSV", value: "copy-csv" },
 			{ label: "Copy visible rows as TSV (Excel)", value: "copy-tsv" },
 			{ label: "Copy visible rows as Markdown table", value: "copy-md" },
 			"separator",
@@ -2079,6 +2202,8 @@ export function TableView(props: { path: string }) {
 			void syncDatabaseRegistryFromSchema();
 		} else if (picked === "sort-apply") {
 			applySortToFile();
+		} else if (picked === "copy-csv") {
+			void copyFilteredAs("csv");
 		} else if (picked === "copy-tsv") {
 			void copyFilteredAs("tsv");
 		} else if (picked === "copy-md") {
@@ -2114,6 +2239,8 @@ export function TableView(props: { path: string }) {
 
 	return (
 		<div
+			ref={rootEl}
+			tabIndex={-1}
 			class="table-view"
 			onPaste={(e) => {
 				if (editing()) return;
@@ -2336,6 +2463,17 @@ export function TableView(props: { path: string }) {
 					<button type="button" class="table-bulk-btn" onClick={() => void bulkFillAnyColumn()}>
 						Set column…
 					</button>
+					<button type="button" class="table-bulk-btn" onClick={() => void copySelectedAsCsv()}>
+						Copy CSV
+					</button>
+					<button
+						type="button"
+						class="table-bulk-btn"
+						title="Search workspace code for values in the checked rows"
+						onClick={() => setCheckDialog({ open: true, column: defaultCheckColumn(table()), rowScope: "checked" })}
+					>
+						Check in code…
+					</button>
 					<button type="button" class="table-bulk-btn danger" onClick={() => void bulkDeleteSelected()}>
 						<Icon name="trash" /> Delete
 					</button>
@@ -2358,8 +2496,17 @@ export function TableView(props: { path: string }) {
 
 			<div
 				class="table-scroll"
-				ref={scrollEl}
+				ref={(el) => {
+					scrollEl = el;
+					setViewportH(el.clientHeight || 640);
+					if (typeof ResizeObserver !== "undefined") {
+						const ro = new ResizeObserver(() => setViewportH(el.clientHeight || 640));
+						ro.observe(el);
+						onCleanup(() => ro.disconnect());
+					}
+				}}
 				classList={{ "is-dragging-col": Boolean(colDrag()), "is-resizing-col": resizingCol() !== null }}
+				onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
 				onMouseDown={(e) => {
 					const target = e.target as HTMLElement | null;
 					if (!target?.closest("td, th, button, input")) clearCellSelection();
@@ -2485,6 +2632,11 @@ export function TableView(props: { path: string }) {
 					</thead>
 
 					<tbody ref={body}>
+						<Show when={virtualWindow().topPad > 0}>
+							<tr class="table-virt-spacer" aria-hidden="true">
+								<td colSpan={visibleColumns().length + 1} style={{ height: `${virtualWindow().topPad}px`, padding: "0", border: "0" }} />
+							</tr>
+						</Show>
 						<Index each={drawn()}>
 							{(rowItem) => {
 								const index = () => rowItem().index;
@@ -2677,6 +2829,11 @@ export function TableView(props: { path: string }) {
 								);
 							}}
 						</Index>
+						<Show when={virtualWindow().bottomPad > 0}>
+							<tr class="table-virt-spacer" aria-hidden="true">
+								<td colSpan={visibleColumns().length + 1} style={{ height: `${virtualWindow().bottomPad}px`, padding: "0", border: "0" }} />
+							</tr>
+						</Show>
 					</tbody>
 
 					{/* Blank final row: lives outside tbody and writes nothing to the file until content is entered. */}
@@ -2777,7 +2934,7 @@ export function TableView(props: { path: string }) {
 					</Show>
 				</table>
 
-				<Show when={rows().length > rowLimit()}>
+				<Show when={false && rows().length > rowLimit()}>
 					<div class="table-more-rows" role="status">
 						<span class="hint">
 							Showing {rowLimit()} of {rows().length} rows.
@@ -3021,6 +3178,7 @@ export function TableView(props: { path: string }) {
 				<CsvCodeCheckDialog
 					table={table()}
 					filteredRows={rows().map((r) => r.cells)}
+					checkedRows={visibleSelectedRows().map((i) => table().rows[i]!).filter(Boolean)}
 					hasActiveFilters={hasActiveFilters()}
 					selectedRow={
 						current() !== null && table().rows[current()!]

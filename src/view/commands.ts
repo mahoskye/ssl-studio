@@ -27,6 +27,8 @@ import { goAlong } from "./navigation";
 import { isPlanPath, newPlan, printPlan } from "./plan/model";
 import { docs, isMarkdown, isTable, newDoc, setUpProject, undoSetUp } from "./project";
 import {
+	closeoutTicket,
+	exportDeploymentManifest,
 	exportDocAs,
 	exportTicketPacket,
 	generateSchemaDocFromSql,
@@ -37,6 +39,7 @@ import {
 	newSpec,
 	newState,
 	newTicket,
+	pickActiveTicket,
 	startFolderCatalogs,
 	ticketAtHand,
 	updateCatalogs,
@@ -64,6 +67,7 @@ import {
 	notify,
 	openFile,
 	openFolder,
+	openToSide,
 	planMode,
 	previousTab,
 	reopenClosedTab,
@@ -71,6 +75,7 @@ import {
 	sendTabAcross,
 	setMarkdownMode,
 	setPlanMode,
+	setTableTextMode,
 	shiftTab,
 	save,
 	saveAll,
@@ -78,6 +83,7 @@ import {
 	setState,
 	split,
 	state,
+	tableTextMode,
 	togglePin,
 } from "./state";
 
@@ -153,13 +159,32 @@ function runMarkdownEdit(id: string) {
 	if (editor?.getDomNode()?.offsetParent) runMonacoMarkdownAction(editor, id);
 }
 
-/** Obsidian Ctrl+E: toggles a Markdown document between Live Preview (or Source) and Read view. */
+/** Obsidian Ctrl+E: toggles a Markdown document between Live Preview (or Source) and Read view in the active group. */
 function toggleMarkdownMode() {
 	const path = activePath();
 	if (!path || !isMarkdown(path)) return;
-	const next = markdownMode(path) === "read" ? (state.settings.livePreview === false ? "source" : "live") : "read";
-	setMarkdownMode(path, next);
+	const g = state.activeGroup;
+	const next = markdownMode(path, g) === "read" ? (state.settings.livePreview === false ? "source" : "live") : "read";
+	setMarkdownMode(path, next, g);
 	if (next !== "read") queueMicrotask(focusEditor);
+}
+
+/** Splits the active Markdown document to the side group in Read view while keeping this group editable. */
+async function splitMarkdownRead() {
+	const path = activePath();
+	if (!path || !isMarkdown(path)) return notify("Open a Markdown document first.");
+	const other = state.activeGroup === 0 ? 1 : 0;
+	await openToSide(path);
+	setMarkdownMode(path, "read", other);
+}
+
+/** Opens the workspace's active working ticket in the side editor group beside SSL code. */
+async function openActiveTicketToSide() {
+	const key = state.settings.activeTicket?.trim() || ticketAtHand();
+	if (!key) return notify("No active ticket is set. Use Ticket: Switch active working ticket… first.");
+	const doc = docs().find((d) => d.exists && d.group === "tickets" && d.ticket?.toLowerCase() === key.toLowerCase());
+	if (!doc) return notify(`Ticket ${key} was not found.`, "error");
+	await openToSide(doc.path);
 }
 
 /**
@@ -220,6 +245,8 @@ export const commands: Command[] = [
 	{ id: "word-wrap", label: "Toggle word wrap", detail: "Long lines wrapped at the editor's edge, or not", run: () => void switchSetting("wordWrap", !state.settings.wordWrap, (settings) => Boolean(settings.wordWrap)) },
 	{ id: "live-preview", label: "Toggle Markdown live preview", detail: "A document drawn as it is written, or as its plain text", run: () => void switchSetting("livePreview", state.settings.livePreview === false, (settings) => settings.livePreview !== false) },
 	{ id: "toggle-markdown-mode", label: "Toggle Markdown Live / Read view", detail: "Switch a Markdown note between Live Preview editing and Reading view", run: toggleMarkdownMode },
+	{ id: "split-markdown-read", label: "Markdown: Split Read preview to side", detail: "Keep editing in this group while previewing Read view side-by-side", run: () => void splitMarkdownRead() },
+	{ id: "md-insert-footnote", label: "Markdown: Insert footnote", detail: "Insert the next numbered [^N] footnote reference and definition", run: () => runMarkdownEdit("md-insert-footnote") },
 	{ id: "md-bold", label: "Markdown: Toggle bold", detail: "Wrap or unwrap selection with ** (Ctrl+B in Markdown)", run: () => runMarkdownEdit("md-bold") },
 	{ id: "md-italic", label: "Markdown: Toggle italic", detail: "Wrap or unwrap selection with * (Ctrl+I in Markdown)", run: () => runMarkdownEdit("md-italic") },
 	{ id: "md-strike", label: "Markdown: Toggle strikethrough", detail: "Wrap or unwrap selection with ~~ (Ctrl+Shift+X in Markdown)", run: () => runMarkdownEdit("md-strike") },
@@ -277,6 +304,30 @@ export const commands: Command[] = [
 	{ id: "new-message", label: "New interface message…", detail: "What is exchanged with an instrument or another system, described in the schema folder", run: () => void newSchema("interfaces") },
 	{ id: "new-layout", label: "New file layout…", detail: "A file the project reads or writes, described in the schema folder", run: () => void newSchema("files") },
 	{ id: "generate-schema-doc", label: "Generate table doc from SQL…", detail: "Turn CREATE TABLE DDL under schema/ into a Markdown column reference", run: () => void generateSchemaDocFromSql() },
+	{
+		id: "open-schema-at-cursor",
+		label: "Schema: Open schema doc for table at cursor…",
+		detail: "Jump from a table or message name in SSL/SQL to its documented schema/ file",
+		run: () => void import("./editor/schemaHover").then((m) => m.openSchemaAtCursor()),
+	},
+	{
+		id: "add-selection-to-registry",
+		label: "Registry: Add selection to registry for active ticket…",
+		detail: "Append the selected constant, setting, or table name to a CSV registry linked to the active ticket",
+		run: () => void import("./editor/schemaHover").then((m) => m.addSelectionToRegistry()),
+	},
+	{
+		id: "switch-active-ticket",
+		label: "Ticket: Switch active working ticket…",
+		detail: "Set or clear the workspace active ticket coordinating Agent, Git, Search, Docs & Graph",
+		run: () => void pickActiveTicket(),
+	},
+	{
+		id: "open-active-ticket-side",
+		label: "Ticket: Open active ticket to side",
+		detail: "Pin the active working ticket beside your code in a split editor",
+		run: () => void openActiveTicketToSide(),
+	},
 	{ id: "project-state", label: "Project state…", detail: "Where the project stands, in plain words", run: () => void newState() },
 	{ id: "update-catalogs", label: "Update catalogs", detail: "Write each INDEX.md's list afresh", run: () => void updateCatalogs() },
 	{ id: "start-catalogs", label: "Start folder catalogs", detail: "An INDEX.md for the docs, code and tests folders, where one has none", run: () => void startFolderCatalogs() },
@@ -333,6 +384,34 @@ export const commands: Command[] = [
 			void exportTicketPacket(ticketDoc.path, key, "html");
 		},
 	},
+	{
+		id: "export-deployment-manifest",
+		label: "Export deployment / transport manifest…",
+		detail: "Aggregate scripts, SQL/DDL, registry rows, rollback checklist & DEV->PROD sign-off for the active ticket/epic",
+		run: async () => {
+			const key = ticketAtHand();
+			if (!key) return notify("Open or activate a ticket first.");
+			const ticketDoc = docs().find((d) => d.exists && d.group === "tickets" && d.ticket?.toLowerCase() === key.toLowerCase());
+			if (!ticketDoc) return notify(`Ticket ${key} was not found.`, "error");
+			const { choose } = await import("./dialogs");
+			const picked = await choose(`Export deployment manifest for ${key} as:`, ["Markdown (.md)", "CSV (.csv)", "HTML (.html)"]);
+			if (!picked) return;
+			const fmt = picked.startsWith("CSV") ? "csv" : picked.startsWith("HTML") ? "html" : "markdown";
+			await exportDeploymentManifest(ticketDoc.path, key, fmt);
+		},
+	},
+	{
+		id: "closeout-ticket",
+		label: "Ticket: Close out active ticket…",
+		detail: "Review readiness, mark done, record milestone in STATE.md / README.md & check catalogs",
+		run: () => {
+			const key = ticketAtHand();
+			if (!key) return notify("Open or activate a ticket first.");
+			const ticketDoc = docs().find((d) => d.exists && d.group === "tickets" && d.ticket?.toLowerCase() === key.toLowerCase());
+			if (!ticketDoc) return notify(`Ticket ${key} was not found.`, "error");
+			void closeoutTicket(ticketDoc.path, key);
+		},
+	},
 	// Panels: one form, "Show" and the panel's name
 	{ id: "explorer", label: "Show Explorer", run: () => showPanel("explorer") },
 	{ id: "docs", label: "Show Docs", run: () => showPanel("docs") },
@@ -342,7 +421,7 @@ export const commands: Command[] = [
 	{ id: "search", label: "Show Search", run: () => showPanel("search") },
 	{ id: "replace-in-files", label: "Replace in files…", detail: "In Search: what would change is shown first, and nothing is written until it is confirmed", run: () => void import("./panels/Search").then((search) => search.showReplace()) },
 	{ id: "git", label: "Show Source control", detail: "What has changed since the last commit, and the next commit", run: () => showPanel("git") },
-	{ id: "history", label: "Show Local history", run: () => showPanel("history") },
+	{ id: "history", label: "Show History", detail: "Local snapshots on save and Git commit history", run: () => showPanel("history") },
 	{ id: "health", label: "Show Health", detail: "The script against the house style", run: () => showPanel("health") },
 	{ id: "agent", label: "Show Agent", run: () => showPanel("agent") },
 	{ id: "problems", label: "Show Problems", run: () => showBottom("problems") },
@@ -482,10 +561,11 @@ async function wrapInRegion() {
 /** Blocks for a script; for a plan toggles Chart/Text, for Markdown toggles Live/Read, for a table toggles Table/Text. */
 function toggleVisual() {
 	const path = activePath();
-	if (isPlanPath(path)) setPlanMode(path!, planMode(path!) === "chart" ? "text" : "chart");
+	const g = state.activeGroup;
+	if (isPlanPath(path)) setPlanMode(path!, planMode(path!, g) === "chart" ? "text" : "chart", g);
 	else if (isMarkdown(path)) toggleMarkdownMode();
-	else if (isTable(path)) setState("mdText", path!, (text) => !text);
-	else setState("groups", state.activeGroup, "mode", (m) => (m === "blocks" ? "text" : "blocks"));
+	else if (isTable(path)) setTableTextMode(path!, !tableTextMode(path!, g), g);
+	else setState("groups", g, "mode", (m) => (m === "blocks" ? "text" : "blocks"));
 }
 
 async function openProjectSettings() {

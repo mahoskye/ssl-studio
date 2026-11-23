@@ -3,6 +3,7 @@
 import { MAX_SHORT, headingAnchor } from "../../shared/docTables";
 import { parseCalloutHeader } from "../../shared/markdownEdit";
 import { namedLinksIn } from "../../shared/namedLinks";
+import { isLikelyHexColorTag } from "../../shared/tags";
 import { ticketMatcher } from "../../shared/ticketRefs";
 
 /** A ticket of the project, as a document's page links to it: where it is from that document, and what it is in a line. */
@@ -150,7 +151,7 @@ function renderTags(holder: HTMLTemplateElement) {
 	}
 	for (const node of nodes) {
 		const text = node.data;
-		const matches = [...text.matchAll(/(^|[\s(])(#[A-Za-z][A-Za-z0-9_/-]*)/g)];
+		const matches = [...text.matchAll(/(^|[\s(])(#[A-Za-z][A-Za-z0-9_/-]*)/g)].filter((m) => !isLikelyHexColorTag(m[2]!.slice(1)));
 		if (!matches.length) continue;
 		const parts = document.createDocumentFragment();
 		let at = 0;

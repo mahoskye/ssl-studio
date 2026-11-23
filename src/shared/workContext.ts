@@ -123,8 +123,16 @@ export const TICKET_CHARS = 3000;
 export const SPEC_CHARS = 3000;
 const ANSWER_CHARS = 400;
 const EXTRA_FILE_CHARS = 3500;
+/** Hard upper character cap across the whole assembled work context so local Ollama models never OOM. */
+export const MAX_WORK_PROMPT_CHARS = 18_000;
 
-const cut = (text: string, limit: number) => (text.length <= limit ? text : `${text.slice(0, text.lastIndexOf(" ", limit))} … (cut short)`);
+export function cut(text: string, limit: number): string {
+	if (text.length <= limit) return text;
+	const spaceAt = text.lastIndexOf(" ", limit);
+	// Never let lastIndexOf return -1 (spaceless minified JSON/XML/HL7) and slice(0, -1) the entire file!
+	const end = spaceAt > limit * 0.5 ? spaceAt : limit;
+	return `${text.slice(0, end)} … (cut short)`;
+}
 /** A document's own words: without its front matter and its first heading, which the line above it already says. */
 const body = (text: string) => frontMatter(text).body.replace(/^\s*#\s+.*\r?\n/, "").trim();
 /** One section of a document, by its heading: "Answer". */
@@ -174,7 +182,14 @@ export async function workText(work: Work, readFile: (path: string) => Promise<s
 		if (st !== null && body(st)) parts.push("", "PROJECT STATE (STATE.md):", cut(body(st), 1500));
 	}
 	if (options.includeSchema && work.schemas?.length) {
-		parts.push("", "PROJECT SCHEMA (summary):", ...work.schemas.slice(0, 25).map(line));
+		const shown = work.schemas.slice(0, 25);
+		const extraSchemas = work.schemas.length - shown.length;
+		parts.push(
+			"",
+			"PROJECT SCHEMA (summary):",
+			...shown.map(line),
+			...(extraSchemas > 0 ? [`- … and ${extraSchemas} more schema docs`] : []),
+		);
 	}
 	if (options.includeRegistries && work.registries?.length && ticket.ticket) {
 		const ticketLower = ticket.ticket.toLowerCase();
@@ -218,7 +233,8 @@ export async function workText(work: Work, readFile: (path: string) => Promise<s
 			...(more > 0 ? [`- … and ${more} more`] : []),
 		);
 	}
-	return parts.join("\n");
+	const assembled = parts.join("\n");
+	return assembled.length <= MAX_WORK_PROMPT_CHARS ? assembled : cut(assembled, MAX_WORK_PROMPT_CHARS);
 }
 
 /** Explains how a document or related ticket is associated with a ticket. */
@@ -368,7 +384,7 @@ export function ticketWork(files: readonly DocFile[], key: string): WorkGroup[] 
 	// (no `done`-only filter or LLM 12-item budget cap that would hide `proposed` ADRs or active questions).
 	const allQuestions = real.filter((file) => file.group === "knowledge" && file.kind === "questions" && forIt(file));
 	const answered = allQuestions.filter((file) => toneOf(file.status) === "done");
-	const openQuestions = allQuestions.filter((file) => toneOf(file.status) !== "done");
+	const openQuestions = allQuestions.filter((file) => toneOf(file.status) !== "done" && toneOf(file.status) !== "off");
 	const decisions = real.filter((file) => file.group === "knowledge" && file.kind === "decisions" && forIt(file));
 	const references = real.filter(
 		(file) => file.group === "knowledge" && file.kind !== "decisions" && file.kind !== "questions" && forIt(file),
@@ -398,6 +414,32 @@ export function ticketWork(files: readonly DocFile[], key: string): WorkGroup[] 
 		),
 	];
 	return groups.filter((group) => group.files.length);
+}
+
+/**
+ * Cycle-safe BFS of every descendant ticket nested under `key` via `parent:`
+ * (direct sub-tickets, grandchildren, etc.) so epic rollups, readiness gates,
+ * and deployment manifests cover the entire hierarchy.
+ */
+export function descendantTickets(files: readonly DocFile[], key: string): DocFile[] {
+	const rootKey = key.trim().toLowerCase();
+	if (!rootKey) return [];
+	const tickets = files.filter((f) => f.exists && !isCatalog(f) && f.group === "tickets" && f.ticket);
+	const seen = new Set<string>([rootKey]);
+	const queue = [rootKey];
+	const out: DocFile[] = [];
+	while (queue.length) {
+		const cur = queue.shift()!;
+		for (const t of tickets) {
+			if (!t.parent || t.parent.toLowerCase() !== cur) continue;
+			const k = t.ticket!.toLowerCase();
+			if (seen.has(k)) continue;
+			seen.add(k);
+			out.push(t);
+			queue.push(k);
+		}
+	}
+	return out;
 }
 
 /** For a non-ticket document (spec, plan, decision, question), returns every ticket linked to it and why. */
@@ -492,15 +534,28 @@ export function codeMatchesRef(filePath: string, ref: string, root?: string | nu
 
 	const base = rel.slice(rel.lastIndexOf("/") + 1);
 	const stem = stripExt(base);
+	const relNoExt = stripExt(rel);
+
+	// Extensionless slash path (e.g. `DueDates/WorkCalendar` -> `src/DueDates/WorkCalendar.ssl`).
+	if (clean.includes("/")) {
+		if (relNoExt === clean || relNoExt.endsWith(`/${clean}`)) return true;
+		// When the reference explicitly includes a folder path, NEVER fall back to bare basename matching across other folders.
+		return false;
+	}
 	if (clean === base) return true;
-	if (!clean.includes("/") && !clean.includes(".")) {
+	if (!clean.includes(".")) {
 		return clean === stem;
 	}
-	// STARLIMS dotted module name (`DueDates.DueDateConstants` -> `duedates/duedateconstants`).
-	if (!clean.includes("/") && !/\.(ssl|srvscr|ds|sql|ddl|pks|pkb|md|json|csv|tsv)$/i.test(clean)) {
-		const dottedAsPath = clean.split(".").join("/");
-		const relNoExt = stripExt(rel);
+	// STARLIMS dotted module or 3-part procedure name (`DueDates.DueDateConstants`, `DueDates.DueDateSummary.Combine`).
+	if (!/\.(ssl|srvscr|ds|sql|ddl|pks|pkb|xfd|xml|hl7|astm|md|markdown|json|csv|tsv|ya?ml|toml|txt|html?|css|tsx?|jsx?)$/i.test(clean)) {
+		const segments = clean.split(".").filter(Boolean);
+		const dottedAsPath = segments.join("/");
 		if (relNoExt === dottedAsPath || relNoExt.endsWith(`/${dottedAsPath}`)) return true;
+		// 3-part `Category.Script.Procedure`: strip trailing `.Procedure` and match `Category/Script`.
+		if (segments.length >= 3) {
+			const parentPath = segments.slice(0, -1).join("/");
+			if (relNoExt === parentPath || relNoExt.endsWith(`/${parentPath}`)) return true;
+		}
 	}
 	return false;
 }
@@ -549,10 +604,11 @@ export function docsGoverningFile(
 	// 1. Direct code/SQL references (`plan.targets`, `built.units`, Markdown links/backticks, `source:`, CSV registries).
 	const matchedPlans: DocFile[] = [];
 	const matchedSpecs: DocFile[] = [];
+	const matchedRegistries: DocFile[] = [];
 	for (const file of existing) {
 		if (slashes(file.path).toLowerCase() === targetCanon) continue;
 		if (file.source && codeMatchesRef(filePath, file.source, root)) {
-			add(file, "schema source:");
+			add(file, file.group === "schema" ? "schema source:" : "source:");
 			continue;
 		}
 		if (file.codeRefs?.some((ref) => codeMatchesRef(filePath, ref, root))) {
@@ -567,6 +623,7 @@ export function docsGoverningFile(
 			add(file, reason);
 			if (file.group === "plans") matchedPlans.push(file);
 			if (file.group === "specs") matchedSpecs.push(file);
+			if (file.group === "registries") matchedRegistries.push(file);
 		}
 		if (file.group === "tickets" && file.ticketFolder) {
 			const folder = slashes(file.ticketFolder).toLowerCase().replace(/\/+$/, "");
@@ -585,7 +642,7 @@ export function docsGoverningFile(
 		if (doc.group === "specs" && !matchedSpecs.includes(doc)) matchedSpecs.push(doc);
 	}
 
-	// 3. Transitive links: matched plans -> paired specs & owning tickets; matched specs -> owning tickets.
+	// 3. Transitive links: matched plans -> paired specs & owning tickets; matched specs & registries -> owning tickets.
 	const linkedTicketKeys = new Set<string>();
 	for (const plan of matchedPlans) {
 		for (const k of plan.tickets ?? []) linkedTicketKeys.add(k.toLowerCase());
@@ -609,6 +666,12 @@ export function docsGoverningFile(
 			}
 		}
 	}
+	for (const reg of matchedRegistries) {
+		if (!reg.ticketCodeRefs) continue;
+		for (const [k, scripts] of Object.entries(reg.ticketCodeRefs)) {
+			if (scripts.some((s) => codeMatchesRef(filePath, s, root))) linkedTicketKeys.add(k.toLowerCase());
+		}
+	}
 	for (const t of tickets) {
 		if (linkedTicketKeys.has(t.ticket!.toLowerCase())) {
 			add(t, "governing ticket");
@@ -616,8 +679,12 @@ export function docsGoverningFile(
 	}
 
 	const all = [...hits.values()];
+	const isManifestOnly = (item: GoverningDoc) =>
+		item.file.group === "registries" && /^files\.(csv|tsv)$/i.test(item.file.name);
+	// Hide INDEX.md catalogs when real governing documents exist; also suppress bare `files.csv` manifest noise when it is the sole non-substantive hit.
+	const substantive = all.filter((item) => !isCatalog(item.file) && !isManifestOnly(item));
 	const nonCatalog = all.filter((item) => !isCatalog(item.file));
-	const chosen = nonCatalog.length ? nonCatalog : all;
+	const chosen = substantive.length ? substantive : nonCatalog.length && !nonCatalog.every(isManifestOnly) ? nonCatalog : [];
 	return chosen.sort(
 		(a, b) =>
 			(GOV_RANK[a.file.group] ?? 9) - (GOV_RANK[b.file.group] ?? 9) ||
@@ -659,28 +726,30 @@ export function scriptsForTicket(files: readonly DocFile[], key: string): string
  * Unlike `ticketAtHand()`, NEVER blindly falls back to an unrelated active ticket when `filePath`
  * has no association with any ticket!
  */
-export function ticketForFile(
+/**
+ * Returns ALL ticket keys governing `filePath` (active tickets first), for multi-ticket
+ * commit-prefix chips in Git and traceability views.
+ */
+export function ticketsForFile(
 	files: readonly DocFile[],
 	filePath?: string | null,
 	root?: string | null,
 	incomingLinks: readonly { path: string; line?: number }[] = [],
-): string {
-	if (!filePath) return "";
+): string[] {
+	if (!filePath) return [];
 	const real = files.filter((f) => f.exists && !isCatalog(f));
 	const clean = slashes(filePath).toLowerCase();
 	const here = real.find((f) => slashes(f.path).toLowerCase() === clean);
 	if (here) {
-		if (here.group === "tickets" && here.ticket) return here.ticket;
-		if (here.group !== "registries" && here.tickets?.length) return here.tickets[0]!;
-		return "";
+		if (here.group === "tickets" && here.ticket) return [here.ticket];
+		if (here.group !== "registries" && here.tickets?.length) return [...here.tickets];
+		return [];
 	}
-	// Companion file inside a ticket bundle folder?
 	const owner = real.find(
 		(f) => f.group === "tickets" && f.ticket && f.ticketFolder && clean.startsWith(`${slashes(f.ticketFolder).toLowerCase().replace(/\/+$/, "")}/`),
 	);
-	if (owner?.ticket) return owner.ticket;
+	if (owner?.ticket) return [owner.ticket];
 
-	// Reverse-trace code/SQL file through governing plans, specs, tickets, and registry rows.
 	const gov = docsGoverningFile(files, filePath, root, incomingLinks);
 	const tickets = real.filter((f) => f.group === "tickets" && f.ticket);
 	const byKey = new Map(tickets.map((t) => [t.ticket!.toLowerCase(), t]));
@@ -705,8 +774,19 @@ export function ticketForFile(
 			}
 		}
 	}
-	if (!candidates.length) return "";
-	if (candidates.length === 1) return candidates[0]!.ticket!;
-	const active = candidates.filter((t) => toneOf(t.status) === "active");
-	return active.length === 1 ? active[0]!.ticket! : candidates[0]!.ticket!;
+	candidates.sort((a, b) => {
+		const aActive = toneOf(a.status) === "active" ? 0 : 1;
+		const bActive = toneOf(b.status) === "active" ? 0 : 1;
+		return aActive - bActive || (a.ticket ?? "").localeCompare(b.ticket ?? "", undefined, { numeric: true });
+	});
+	return candidates.map((t) => t.ticket!);
+}
+
+export function ticketForFile(
+	files: readonly DocFile[],
+	filePath?: string | null,
+	root?: string | null,
+	incomingLinks: readonly { path: string; line?: number }[] = [],
+): string {
+	return ticketsForFile(files, filePath, root, incomingLinks)[0] ?? "";
 }

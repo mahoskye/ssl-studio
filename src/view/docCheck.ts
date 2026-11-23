@@ -15,8 +15,10 @@ const OWNER = "doc-tables";
 
 function isSchemaDoc(path?: string): boolean {
 	if (!path || !state.workspace?.root) return false;
-	const schemaRel = state.project?.schema ?? "schema";
-	const schemaDir = joinPath(state.workspace.root, ...schemaRel.split(/[\\/]/).filter((p) => p && p !== "."));
+	const parts = (state.project?.schema ?? "schema").split(/[\\/]/).filter((p) => p && p !== ".");
+	// If `schema = "."`, the schema folder IS the project root — do not silence ADR 0008 table checks across every doc.
+	if (!parts.length) return false;
+	const schemaDir = joinPath(state.workspace.root, ...parts);
 	return isInside(schemaDir, path);
 }
 

@@ -3,7 +3,7 @@
 // - Merges workspace templates with built-in defaults (workspace files override matching defaults)
 // - Runs dynamic `<% tp.* %>` expressions using SSL Studio's native `ask()` and `choose()` dialogs
 // - Provides Insert Template, New Note from Template, Customize Template, Insert Callout, and Insert Image actions.
-import { frontMatter } from "../shared/frontMatter";
+import { addToFrontMatterList, frontMatter, withFrontMatter } from "../shared/frontMatter";
 import { buildCalloutBlock, CALLOUT_PRESETS } from "../shared/markdownEdit";
 import { baseName, dirName, isInside, joinPath, relativePath, relativeTo } from "../shared/paths";
 import { slug } from "../shared/projectDocs";
@@ -165,7 +165,10 @@ function insertIntoActiveEditor(text: string, cursorOffset: number | null, opts?
 		endColumn: 1,
 	};
 	const isEmpty = sel.startLineNumber === sel.endLineNumber && sel.startColumn === sel.endColumn;
-	let insertText = text;
+	const eol = model.getEOL();
+	const normText = text.replace(/\r?\n/g, eol);
+	const normCursor = cursorOffset !== null ? text.slice(0, cursorOffset).replace(/\r?\n/g, eol).length : null;
+	let insertText = normText;
 	let offsetDelta = 0;
 	let range = sel;
 	if (opts?.asBlock && isEmpty) {
@@ -173,16 +176,16 @@ function insertIntoActiveEditor(text: string, cursorOffset: number | null, opts?
 		if (lineContent.trim()) {
 			const endCol = lineContent.length + 1;
 			range = { startLineNumber: sel.startLineNumber, startColumn: endCol, endLineNumber: sel.startLineNumber, endColumn: endCol };
-			insertText = `\n\n${text}`;
-			offsetDelta = 2;
+			insertText = `${eol}${eol}${normText}`;
+			offsetDelta = eol.length * 2;
 		}
 	}
 	const startOffset = model.getOffsetAt({ lineNumber: range.startLineNumber, column: range.startColumn });
 	editor.pushUndoStop();
 	editor.executeEdits("templater", [{ range, text: insertText, forceMoveMarkers: true }]);
 	editor.pushUndoStop();
-	if (cursorOffset !== null) {
-		const targetPos = model.getPositionAt(startOffset + offsetDelta + cursorOffset);
+	if (normCursor !== null) {
+		const targetPos = model.getPositionAt(startOffset + offsetDelta + normCursor);
 		editor.setPosition(targetPos);
 		editor.revealPositionInCenterIfOutsideViewport(targetPos);
 	}
@@ -190,7 +193,7 @@ function insertIntoActiveEditor(text: string, cursorOffset: number | null, opts?
 	return true;
 }
 
-/** Inserts a chosen Templater template at the cursor of the active Markdown editor. */
+/** Inserts a chosen Templater template at the cursor of the active Markdown editor, merging any missing template YAML keys into existing frontmatter. */
 export async function insertMarkdownTemplate(explicit?: MarkdownTemplate): Promise<void> {
 	const path = activePath();
 	if (!path || !isMarkdown(path)) {
@@ -200,19 +203,55 @@ export async function insertMarkdownTemplate(explicit?: MarkdownTemplate): Promi
 	// Pick template BEFORE switching Read -> Live so cancelling leaves view mode untouched.
 	const tpl = explicit ?? (await pickTemplate("Insert template at cursor"));
 	if (!tpl) return;
-	const existing = documents.get(canonical(path))?.model.getValue() ?? "";
-	const shouldStripFm = frontMatter(existing).lines > 0 || existing.trim().length > 0;
-	const sourceContent = shouldStripFm ? stripRawTemplateFrontmatter(tpl.content) : tpl.content;
+	const docObj = documents.get(canonical(path));
+	const existing = docObj?.model.getValue() ?? "";
+	const existingFm = frontMatter(existing);
+	const hasExistingFm = existingFm.lines > 0;
+	const hasBodyContent = existing.trim().length > 0;
+	const tplHasFm = frontMatter(tpl.content).lines > 0;
+
+	// If the target doc already has YAML frontmatter and the template declares frontmatter too,
+	// render the template intact so we can merge any missing YAML properties (e.g. status, ticket, tags) cleanly!
+	const sourceContent = !hasExistingFm && hasBodyContent ? stripRawTemplateFrontmatter(tpl.content) : tpl.content;
 	const renderedRaw = await renderTemplate(sourceContent, buildContext(path));
 	if (renderedRaw.cancelled) return;
 	if (!activeLiveEditor() && !activeEditor()?.getDomNode()?.offsetParent) {
-		setMarkdownMode(path, "live");
-		await new Promise((r) => setTimeout(r, 40));
+		setMarkdownMode(path, "live", state.activeGroup);
+		for (let i = 0; i < 12 && !activeLiveEditor(); i++) {
+			await new Promise((r) => requestAnimationFrame(r));
+		}
 	}
-	const rendered = shouldStripFm ? stripTemplateFrontmatter(renderedRaw) : renderedRaw;
+
+	let mergedKeys: string[] = [];
+	if (hasExistingFm && tplHasFm && docObj) {
+		const tplFm = frontMatter(renderedRaw.text);
+		const missingEntries = Object.entries(tplFm.values).filter(
+			([k, v]) => k !== "title" && !(k in existingFm.values) && (Array.isArray(v) ? v.length > 0 : Boolean(v)),
+		);
+		if (missingEntries.length) {
+			let updated = docObj.model.getValue();
+			for (const [k, v] of missingEntries) {
+				if (Array.isArray(v)) {
+					for (const item of v) updated = addToFrontMatterList(updated, k, item) ?? updated;
+				} else {
+					updated = withFrontMatter(updated, k, v) ?? updated;
+				}
+				mergedKeys.push(k);
+			}
+			if (updated !== docObj.model.getValue()) {
+				docObj.model.pushStackElement();
+				docObj.model.pushEditOperations([], [{ range: docObj.model.getFullModelRange(), text: updated, forceMoveMarkers: true }], () => null);
+				docObj.model.pushStackElement();
+			}
+		}
+	}
+
+	const rendered = hasExistingFm || hasBodyContent ? stripTemplateFrontmatter(renderedRaw) : renderedRaw;
 	const asBlock = rendered.text.includes("\n");
 	if (!insertIntoActiveEditor(rendered.text, rendered.cursorOffset, { asBlock })) {
 		notify("Could not insert template into the active editor.", "error");
+	} else if (mergedKeys.length) {
+		notify(`Inserted template and merged YAML properties: ${mergedKeys.join(", ")}.`);
 	}
 }
 
@@ -412,7 +451,9 @@ export async function insertCalloutInteractive(presetType?: string): Promise<voi
 	}
 	if (!activeLiveEditor() && !activeEditor()?.getDomNode()?.offsetParent) {
 		setMarkdownMode(path, "live");
-		await new Promise((r) => setTimeout(r, 40));
+		for (let i = 0; i < 12 && !activeLiveEditor(); i++) {
+			await new Promise((r) => requestAnimationFrame(r));
+		}
 	}
 
 	let type = presetType;
@@ -438,7 +479,9 @@ export async function insertImageInteractive(): Promise<void> {
 	}
 	if (!activeLiveEditor() && !activeEditor()?.getDomNode()?.offsetParent) {
 		setMarkdownMode(path, "live");
-		await new Promise((r) => setTimeout(r, 40));
+		for (let i = 0; i < 12 && !activeLiveEditor(); i++) {
+			await new Promise((r) => requestAnimationFrame(r));
+		}
 	}
 
 	const root = state.workspace?.root;

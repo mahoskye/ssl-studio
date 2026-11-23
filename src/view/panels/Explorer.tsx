@@ -22,7 +22,7 @@ import { findInFolder } from "./Search";
 import { catalogsKeptFor, followRename } from "../projectDocs";
 import { docs } from "../project";
 import { buildDocNameIndex, lookupInIndex } from "../../shared/namedLinks";
-import { docsGoverningFile } from "../../shared/workContext";
+import { docsGoverningFile, ticketWork } from "../../shared/workContext";
 import { gitStatus } from "../git";
 import { changeLetter } from "../../shared/gitStatus";
 import { IconButton, Row, Rows, type Point, type RowsApi } from "./Rows";
@@ -264,7 +264,7 @@ async function rename(entry: Entry): Promise<string | null> {
 	fileRenamed(entry.path, to);
 	setExpanded((set) => new Set(retarget(set, entry.path, to)));
 	setClip((held) => held && { ...held, path: retarget([held.path], entry.path, to)[0]! });
-	setScopedFolder((cur) => cur && { ...cur, path: retarget([cur.path], entry.path, to)[0]! });
+	retargetScopedFolder(entry.path, to, scopedFolder() && canonical(scopedFolder()!.path) === canonical(entry.path) ? baseName(to) : undefined);
 	void scriptsCameTo(to, entry.path, entry.kind);
 	void changed(entry.path, to);
 	void followRename(entry.path, to, beforeDocs);
@@ -296,9 +296,26 @@ async function trash(entry: Entry): Promise<string | null> {
 	for (const g of docsGoverningFile(allDocs, entry.path, root)) {
 		if (!isSelf(g.file.path)) referencingDocs.add(canonical(g.file.path));
 	}
-	const impact = referencingDocs.size
-		? ` Warning: referenced by ${referencingDocs.size} ${referencingDocs.size === 1 ? "project document" : "project documents"} (links, wikilinks, plans, or registries).`
-		: "";
+	// If trashing a ticket or ticket bundle folder, also include specs, plans, sub-tickets, decisions, questions, and registry rows referencing that ticket.
+	const matchedTickets = allDocs.filter(
+		(d) => d.exists && d.group === "tickets" && d.ticket && (isSelf(d.path) || (d.ticketFolder && isSelf(d.ticketFolder))),
+	);
+	let siblingNote = "";
+	for (const t of matchedTickets) {
+		for (const group of ticketWork(allDocs, t.ticket!)) {
+			for (const ref of group.files) {
+				if (!isSelf(ref.path)) referencingDocs.add(canonical(ref.path));
+			}
+		}
+		if (t.ticketFolder && !isSelf(t.ticketFolder)) {
+			const relSibling = relativeTo(root, t.ticketFolder).split("\\").join("/");
+			siblingNote = ` Note: sibling ticket folder ${relSibling}/ will remain on disk.`;
+		}
+	}
+	const impact =
+		(referencingDocs.size
+			? ` Warning: referenced by ${referencingDocs.size} ${referencingDocs.size === 1 ? "project document" : "project documents"} (links, wikilinks, specs, plans, or registries).`
+			: "") + siblingNote;
 	if ((await choose(`Move ${what} to the trash?${impact}`, [TRASH], { danger: TRASH })) !== TRASH) return null;
 	await backend.trash(entry.path);
 	fileRemoved(entry.path);
@@ -326,7 +343,7 @@ async function moveInto(from: { path: string; kind: "file" | "dir" }, into: stri
 	await backend.rename(from.path, to);
 	fileRenamed(from.path, to);
 	setExpanded((set) => new Set([...retarget(set, from.path, to), into]));
-	setScopedFolder((cur) => cur && { ...cur, path: retarget([cur.path], from.path, to)[0]! });
+	retargetScopedFolder(from.path, to);
 	void scriptsCameTo(to, from.path, from.kind);
 	void changed(from.path, to);
 	void followRename(from.path, to, beforeDocs);
@@ -487,7 +504,8 @@ export function showInExplorer(path: string) {
 	// The folder itself has no row of its own: its rows are shown, and the keyboard goes where it last was among them.
 	const top = isInside(path, viewRoot);
 	const above: string[] = [];
-	for (let dir = dirName(path); !top && dir !== viewRoot && isInside(viewRoot, dir); dir = dirName(dir)) above.push(dir);
+	const viewRootCanon = canonical(viewRoot);
+	for (let dir = dirName(path); !top && canonical(dir) !== viewRootCanon && isInside(viewRoot, dir); dir = dirName(dir)) above.push(dir);
 	setExpanded((set) => new Set([...set, ...above]));
 	showPanel("explorer");
 	// The rows above it are read from the disk as they open: the row is looked for until it is there.
@@ -520,8 +538,11 @@ export function browseFolderInExplorer(folderPath: string, label?: string) {
 export async function explorerNewFile(): Promise<void> {
 	const root = state.workspace?.root;
 	if (!root) return notify("Open a folder first.");
+	const viewRoot = scopedFolder()?.path ?? root;
 	const row = focused();
-	const folder = folderFor(row, activePath(), root);
+	const active = activePath();
+	const scopedActive = active && isInside(viewRoot, active) ? active : null;
+	const folder = folderFor(row, scopedActive, viewRoot);
 	await act(NEW_FILE, { name: baseName(folder), path: folder, kind: "dir", size: 0 }, { home: row?.path, follow: false });
 }
 

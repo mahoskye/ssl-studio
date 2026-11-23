@@ -12,7 +12,7 @@ export const NAME_MIN = 3;
 export const NAMES_CHECKED = 300;
 
 export type CodeFileScopeId = "code" | "ssl" | "data" | "starlims" | "custom";
-export type CodeCheckRowScope = "selected" | "filtered" | "all";
+export type CodeCheckRowScope = "selected" | "checked" | "filtered" | "all";
 
 export type CodeFileScopePreset = {
 	id: CodeFileScopeId;

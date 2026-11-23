@@ -312,17 +312,26 @@ export function ownLinkEdits(
 	text: string,
 	from: string,
 	to: string,
-	movedDir?: { from: string; to: string },
+	moved?: { from: string; to: string } | readonly { from: string; to: string }[],
 ): LinkEdit[] {
 	const [was, now] = [dirName(from), dirName(to)];
-	if (was === now) return [];
+	const moves = moved ? (Array.isArray(moved) ? [...moved] : [moved]) : [];
+	if (was === now && !moves.length) return [];
+	// Longest `from` first so exact file moves (e.g. `OLD/OLD.md -> NEW/NEW.md`) take precedence over their containing folder move (`OLD -> NEW`).
+	moves.sort((a, b) => b.from.length - a.from.length);
 	return fileLinks(text).flatMap((link) => {
 		if (!link.line || link.file.startsWith("/")) return [];
 		const target = resolvePath(was, link.file);
 		let dest = target === from ? to : target;
-		if (movedDir) {
-			if (target === movedDir.from) dest = movedDir.to;
-			else if (isInside(movedDir.from, target)) dest = movedDir.to + target.slice(movedDir.from.length);
+		for (const m of moves) {
+			if (target === m.from) {
+				dest = m.to;
+				break;
+			}
+			if (isInside(m.from, target)) {
+				dest = m.to + target.slice(m.from.length);
+				break;
+			}
 		}
 		const instead = relativePath(now, dest);
 		// What would be written is compared with what is: a folder written with its slash reads the same without it.

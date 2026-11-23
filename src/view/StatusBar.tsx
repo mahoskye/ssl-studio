@@ -6,7 +6,9 @@ import { docChecks } from "../shared/docChecks";
 import { folderParts } from "../shared/docSections";
 import { markdownStats } from "../shared/markdownEdit";
 import { CATALOG_AREAS } from "../shared/projectDocs";
+import { docAuditData, useDocAudit } from "./docAudit";
 import { docs } from "./project";
+import { pickActiveTicket } from "./projectDocs";
 import { level, countHistoryEntries, type SizeReport } from "../shared/houseStyle";
 import { backend } from "./backend";
 import { measure } from "./editor/textmate";
@@ -96,6 +98,7 @@ async function chooseLineEnds(at: { x: number; y: number }) {
 export function StatusBar() {
 	useSizeMeter();
 	useLineEnds();
+	useDocAudit();
 	const limits = () => state.settings.limits;
 	const lspLabel = () => {
 		const s = state.lsp.state;
@@ -107,7 +110,7 @@ export function StatusBar() {
 	const lspWaits = () => !state.workspace && state.lsp.state === "stopped" && !state.info?.lsp.message;
 	/** The regions and the procedure the cursor is in, outermost first: where one is, in a long script. */
 	/** A Markdown document being read (not in Live or Source editing): it has no cursor line to say a place by. */
-	const rendered = () => Boolean(activePath() && /\.(md|markdown)$/i.test(activePath()!) && markdownMode(activePath()!) === "read");
+	const rendered = () => Boolean(activePath() && /\.(md|markdown)$/i.test(activePath()!) && markdownMode(activePath()!, state.activeGroup) === "read");
 	const where = () => (state.centerView === "editors" && !rendered() ? symbolPath(symbols(), state.cursor.line).filter((s) => s.kind !== monaco.languages.SymbolKind.Variable) : []);
 	/** The same in a sentence, innermost first: "DueDate, in Counting days". */
 	const whereWords = () => [...where()].reverse().map((s) => s.name).join(", in ");
@@ -115,8 +118,17 @@ export function StatusBar() {
 	const opencode = () => state.info?.opencode;
 	const docAreas = createMemo(() => CATALOG_AREAS.filter((area) => area !== "schema" || folderParts(state.project?.schema ?? "schema").length > 0));
 	const docCheckList = createMemo(() => docChecks(docs(), docAreas()));
-	const docWarnings = createMemo(() => docCheckList().filter((c) => c.level === "warn").length);
-	const docNotes = createMemo(() => docCheckList().filter((c) => c.level === "note").length);
+	const docWarnings = createMemo(
+		() => docCheckList().filter((c) => c.level === "warn").length + docAuditData().issues.filter((i) => i.level === "warn").length,
+	);
+	const docNotes = createMemo(
+		() =>
+			docCheckList().filter((c) => c.level === "note").length +
+			docAuditData().issues.filter((i) => i.level === "note").length +
+			docAuditData().unusedAttachments.length,
+	);
+	const hasAnyTickets = createMemo(() => docs().some((d) => d.exists && d.group === "tickets" && Boolean(d.ticket)));
+	const focusedTicket = createMemo(() => state.settings.activeTicket?.trim() || "");
 	// Reactive Markdown word count & task progress in StatusBar when a Markdown doc is open.
 	const [mdStats, setMdStats] = createSignal<{ words: number; tasksDone: number; tasksTotal: number } | null>(null);
 	createEffect(
@@ -209,6 +221,21 @@ export function StatusBar() {
 					<Icon name="error" /> {counts().errors} <Icon name="warning" /> {counts().warnings}
 				</span>
 			</button>
+			<Show when={hasAnyTickets()}>
+				<button
+					class="item tier-2 status-ticket-focus"
+					classList={{ active: Boolean(focusedTicket()) }}
+					title={
+						focusedTicket()
+							? `Active working ticket: ${focusedTicket()} (coordinates Agent, Git, Search, Docs & Graph). Click to switch or open.`
+							: "Focus workspace on a working ticket (coordinates Agent, Git, Search, Docs & Graph)"
+					}
+					aria-label={focusedTicket() ? `Working on ${focusedTicket()}. Switch active ticket.` : "Set active working ticket."}
+					onClick={() => void pickActiveTicket()}
+				>
+					<Icon name="checklist" /> {focusedTicket() ? `Working on: ${focusedTicket()}` : "Focus ticket"}
+				</button>
+			</Show>
 			<Show when={docWarnings() > 0 || docNotes() > 0}>
 				<button
 					class="item tier-2"

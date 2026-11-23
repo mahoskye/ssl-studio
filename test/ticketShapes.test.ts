@@ -93,9 +93,9 @@ describe("what a Jira server's search returns", () => {
 	const read = ticketsFromJson(json);
 	test("each issue is a ticket, with its parent, its links and its parts", () => {
 		expect(read.skipped).toBe(0);
-		expect(read.tickets.map((t) => [t.key, t.type, t.status, t.parent, t.related])).toEqual([
-			["LAB-11", "Sub-task", "Open", "LAB-10", ["LAB-12", "LAB-13"]],
-			["LAB-10", "Epic", "In Progress", undefined, ["LAB-11"]],
+		expect(read.tickets.map((t) => [t.key, t.type, t.status, t.parent, t.related, t.blockedBy])).toEqual([
+			["LAB-11", "Sub-task", "Open", "LAB-10", ["LAB-13"], ["LAB-12"]],
+			["LAB-10", "Epic", "In Progress", undefined, ["LAB-11"], undefined],
 		]);
 	});
 	test("the ticket's page is the address a person opens, not the API's", () => {

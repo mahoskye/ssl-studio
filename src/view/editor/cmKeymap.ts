@@ -24,6 +24,8 @@ import { gotoLine, openSearchPanel, search, searchKeymap, selectNextOccurrence, 
 import { EditorSelection, Prec, type ChangeSpec, type Extension } from "@codemirror/state";
 import { EditorView, keymap, type Command, type KeyBinding } from "@codemirror/view";
 import { fenced } from "../../shared/catalog";
+import { linkWritten } from "../../shared/docLinks";
+import { baseName, dirName, relativePath } from "../../shared/paths";
 import {
 	blockquoteEnter,
 	insertLinkEdit,
@@ -180,6 +182,33 @@ function dispatchTableEdit(view: EditorView, edit: TableEdit | null, prefix: str
 	});
 	return true;
 }
+
+/** Inserts the next sequential `[^N]` footnote reference at cursor and appends its `[^N]: ` definition at the bottom. */
+export const cmInsertFootnote: Command = (view) => {
+	const docText = view.state.doc.toString();
+	let maxNum = 0;
+	for (const m of docText.matchAll(/\[\^(\d+)\]/g)) {
+		const n = Number(m[1]);
+		if (Number.isFinite(n) && n > maxNum) maxNum = n;
+	}
+	const nextNum = maxNum + 1;
+	const ref = `[^${nextNum}]`;
+	const main = view.state.selection.main;
+	const docLen = view.state.doc.length;
+	const sep = docText.endsWith("\n\n") ? "" : docText.endsWith("\n") ? "\n" : "\n\n";
+	const def = `${sep}${ref}: `;
+	const defCursor = docLen + ref.length - (main.to - main.from) + def.length;
+	view.dispatch({
+		changes: [
+			{ from: main.from, to: main.to, insert: ref },
+			{ from: docLen, to: docLen, insert: def },
+		],
+		selection: EditorSelection.cursor(defCursor),
+		scrollIntoView: true,
+		userEvent: "input.footnote",
+	});
+	return true;
+};
 
 /** Inserts a new 3×2 formatted GFM table at the cursor and focuses the first header cell in place. */
 export const cmInsertTable: Command = (view) => {
@@ -480,10 +509,10 @@ export const cmShrinkSelection: Command = (view) => {
 	return true;
 };
 
-/** Opens CodeMirror's search panel and optionally moves focus to the Replace input. */
+/** Opens CodeMirror's search panel and optionally moves focus to the Replace input (skipped in Read-only mode). */
 function openFind(view: EditorView, replace: boolean): boolean {
 	openSearchPanel(view);
-	if (replace) {
+	if (replace && !view.state.readOnly) {
 		queueMicrotask(() => {
 			const input = view.dom.querySelector<HTMLInputElement>(".cm-search input[name='replace']");
 			input?.focus();
@@ -622,18 +651,50 @@ export function cmSmartPasteExtension(filePath: () => string): Extension {
 			if (!view.state.facet(EditorView.editable)) return false;
 			const dt = event.dataTransfer;
 			if (!dt) return false;
-			const hasFile = Array.from(dt.types).includes("Files");
-			if (!hasFile) return false;
+			const types = Array.from(dt.types);
+			const accepted =
+				types.includes("Files") ||
+				types.includes("application/x-ssl-studio-file") ||
+				types.includes("application/x-ssl-studio-tab");
+			if (!accepted) return false;
 			event.preventDefault();
 			dt.dropEffect = "copy";
 			return true;
 		},
 		drop(event, view) {
 			if (!view.state.facet(EditorView.editable)) return false;
-			const images = extractImageFiles(event.dataTransfer);
+			const dt = event.dataTransfer;
+			if (!dt) return false;
+			const dropPos = view.posAtCoords({ x: event.clientX, y: event.clientY }) ?? view.state.selection.main.head;
+			const droppedPath = dt.getData("application/x-ssl-studio-file") || dt.getData("application/x-ssl-studio-tab");
+			if (droppedPath) {
+				event.preventDefault();
+				const curPath = filePath();
+				const relRaw = curPath ? relativePath(dirName(curPath), droppedPath) : baseName(droppedPath);
+				const rel = linkWritten(relRaw.replace(/\\/g, "/"), relRaw.replace(/\\/g, "/"));
+				const name = baseName(droppedPath);
+				const stem = name.replace(/\.[^.]+$/, "");
+				let snippet: string;
+				if (IMAGE_FILE_RE.test(name)) {
+					snippet = `![${stem}](${rel})`;
+				} else if (/\.(md|markdown)$/i.test(name)) {
+					snippet = event.shiftKey ? `[${stem}](${rel})` : event.altKey ? `![[${stem}]]` : `[[${stem}]]`;
+				} else {
+					snippet = event.altKey ? `![[${relRaw.replace(/\\/g, "/")}]]` : `[${name}](${rel})`;
+				}
+				const at = Math.max(0, Math.min(dropPos, view.state.doc.length));
+				view.dispatch({
+					changes: { from: at, to: at, insert: snippet },
+					selection: EditorSelection.cursor(at + snippet.length),
+					scrollIntoView: true,
+					userEvent: "input.drop",
+				});
+				view.focus();
+				return true;
+			}
+			const images = extractImageFiles(dt);
 			if (!images.length) return false;
 			event.preventDefault();
-			const dropPos = view.posAtCoords({ x: event.clientX, y: event.clientY }) ?? view.state.selection.main.head;
 			void saveAndInsertImages(view, images, dropPos);
 			return true;
 		},
@@ -755,6 +816,8 @@ export function runCmAction(view: EditorView, id: string): boolean {
 			return cmInsertLink(view);
 		case "md-checkbox":
 			return cmToggleCheckbox(view);
+		case "md-insert-footnote":
+			return cmInsertFootnote(view);
 		default:
 			if (id.startsWith("md-table-")) return runTableAction(view, id);
 			return false;

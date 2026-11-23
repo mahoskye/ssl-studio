@@ -141,7 +141,15 @@ function Picker(props: { mode: QuickMode }) {
 		// Include matching project documents (tickets, specs, plans, decisions, questions, schemas, registries) and ticket companion files in workspace jump (#).
 		const docItems: Item[] = docs()
 			.filter((d) => d.exists && !isCatalog(d))
-			.filter((d) => !q || matchWords(q, `${d.ticket ?? ""} ${d.title ?? ""} ${d.heading ?? ""}`, d.group === "registries" ? registryTitle(d.name) : d.name) > 0)
+			.filter(
+				(d) =>
+					!q ||
+					matchWords(
+						q,
+						`${d.ticket ?? ""} ${d.title ?? ""} ${d.heading ?? ""}`,
+						`${d.group === "registries" ? registryTitle(d.name) : d.name} ${d.summary ?? ""} ${(d.tags ?? []).map((t) => `#${t}`).join(" ")}`,
+					) > 0,
+			)
 			.slice(0, 50)
 			.map((d) => ({
 				label: d.ticket && d.title && !d.title.startsWith(d.ticket) ? `${d.ticket}: ${d.title}` : d.group === "registries" ? registryTitle(d.name) : d.title || d.heading || d.name,

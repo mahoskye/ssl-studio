@@ -92,9 +92,11 @@ const cleanIdent = (raw: string) => raw.trim().replace(/^[[`"]|[\]`"]$/g, "");
 const IDENT_PART = String.raw`(?:\[[^\]]+\]|"[^"]+"|` + "`[^`]+`" + String.raw`|[A-Za-z_][\w$#]*)`;
 const QUALIFIED_NAME = String.raw`(?:${IDENT_PART}\s*\.\s*){0,2}${IDENT_PART}`;
 
-/** Formats 1-, 2-, or 3-part SQL names (`[db].[dbo].[T]` -> `{ name: "dbo.T", bareName: "T" }`). */
+/** Formats 1-, 2-, or 3-part SQL names (`[db].[dbo].[My.Table]` -> `{ name: "dbo.My.Table", bareName: "My.Table" }`). */
 function normalizeObjectName(raw: string): { name: string; bareName: string } {
-	const parts = raw.split(".").map(cleanIdent).filter(Boolean);
+	// Tokenize by IDENT_PART so dots inside bracketed/quoted names (`[dbo].[My.Special.Table]`) stay intact.
+	const partRe = new RegExp(IDENT_PART, "g");
+	const parts = [...raw.matchAll(partRe)].map((m) => cleanIdent(m[0]!)).filter(Boolean);
 	if (!parts.length) return { name: "", bareName: "" };
 	const bareName = parts[parts.length - 1]!;
 	// For 3-part names (`db.schema.object`), drop the database prefix so `dbo.object` stays portable across DEV/QA/PROD.
@@ -129,7 +131,8 @@ export function extractSqlObjects(sql: string, options: { includeIndexes?: boole
 		if (kind === "index" && !options.includeIndexes) continue;
 
 		const { name, bareName } = normalizeObjectName(m[2]!);
-		if (!name) continue;
+		// Skip SQL Server local/global temp tables (`#Temp`, `##Temp`) declared inside procedures/scripts.
+		if (!name || bareName.startsWith("#")) continue;
 		const key = `${kind}:${name.toLowerCase()}`;
 		if (seen.has(key)) continue;
 		seen.add(key);
@@ -223,7 +226,7 @@ export function parseCreateTables(sql: string): SqlTableDef[] {
 	const cleaned = sanitizeSql(sql, false);
 	const masked = sanitizeSql(sql, true);
 	const tables: SqlTableDef[] = [];
-	const byBare = new Map<string, SqlTableDef>();
+	const byKey = new Map<string, SqlTableDef>();
 	const headRe = new RegExp(
 		`\\bCREATE\\s+(?:(?:OR\\s+REPLACE|GLOBAL\\s+TEMPORARY|PRIVATE\\s+TEMPORARY|LOCAL\\s+TEMPORARY|TEMPORARY|TEMP)\\s+)*TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${QUALIFIED_NAME})\\s*\\(`,
 		"gi",
@@ -231,6 +234,7 @@ export function parseCreateTables(sql: string): SqlTableDef[] {
 
 	for (const m of masked.matchAll(headRe)) {
 		const { name, bareName } = normalizeObjectName(m[1]!);
+		if (!bareName || bareName.startsWith("#")) continue;
 		const tableName = bareName || name;
 		const bodyStart = (m.index ?? 0) + m[0].length;
 		let depth = 1;
@@ -261,17 +265,50 @@ export function parseCreateTables(sql: string): SqlTableDef[] {
 		}
 		const def: SqlTableDef = { tableName, columns };
 		tables.push(def);
-		byBare.set(tableName.toLowerCase(), def);
+		byKey.set(name.toLowerCase(), def);
+		if (!byKey.has(bareName.toLowerCase())) byKey.set(bareName.toLowerCase(), def);
 	}
 
-	// Enrich matching tables with columns added via `ALTER TABLE <name> ADD (...)` or `ADD col type`.
-	const alterRe = new RegExp(`\\bALTER\\s+TABLE\\s+(${QUALIFIED_NAME})\\s+ADD\\s+(?:COLUMN\\s+)?(\\([\\s\\S]*?\\)|[^;]+)`, "gi");
-	for (const m of masked.matchAll(alterRe)) {
-		const { bareName } = normalizeObjectName(m[1]!);
-		const target = byBare.get(bareName.toLowerCase());
+	// Enrich matching tables with columns added via `ALTER TABLE <name> ADD (...)` (Oracle balanced parens)
+	// or unparenthesized `ALTER TABLE <name> ADD col type` (T-SQL ending at `;`, standalone `GO`, or next DDL statement).
+	const alterHeadRe = new RegExp(`\\bALTER\\s+TABLE\\s+(${QUALIFIED_NAME})\\s+ADD\\s+(?:COLUMN\\s+)?`, "gi");
+	for (const m of masked.matchAll(alterHeadRe)) {
+		const { name, bareName } = normalizeObjectName(m[1]!);
+		const target = byKey.get(name.toLowerCase()) ?? byKey.get(bareName.toLowerCase());
 		if (!target) continue;
-		const start = (m.index ?? 0) + m[0].length - m[2]!.length;
-		const rawSpec = cleaned.slice(start, start + m[2]!.length).trim().replace(/^\(|\)$/g, "");
+		let pos = (m.index ?? 0) + m[0].length;
+		while (pos < cleaned.length && /\s/.test(cleaned[pos]!)) pos++;
+		let rawSpec = "";
+		if (cleaned[pos] === "(") {
+			// Balanced-paren scan so `NUMBER(10,2)` / `VARCHAR2(20 BYTE)` inside Oracle `ADD (...)` never truncates early.
+			let depth = 1;
+			let i = pos + 1;
+			let quote: string | null = null;
+			while (i < cleaned.length && depth > 0) {
+				const ch = cleaned[i]!;
+				if (quote) {
+					if (ch === quote) {
+						if (cleaned[i + 1] === quote) i++;
+						else quote = null;
+					}
+				} else if (ch === "'" || ch === '"') {
+					quote = ch;
+				} else if (ch === "(") {
+					depth++;
+				} else if (ch === ")") {
+					depth--;
+				}
+				i++;
+			}
+			if (depth === 0) rawSpec = cleaned.slice(pos + 1, i - 1).trim();
+		} else {
+			// Unparenthesized T-SQL/ANSI `ADD col1 type1, col2 type2`: terminate at `;`, standalone `GO`, or next DDL keyword.
+			const restMasked = masked.slice(pos);
+			const stopMatch = /;|(?:^|\r?\n)[ \t]*GO[ \t]*(?=\r?\n|$)|(?:\r?\n[ \t]*|\b)(?:CREATE|ALTER|DROP|GRANT|REVOKE|EXEC(?:UTE)?)\b/i.exec(restMasked);
+			const end = stopMatch ? pos + stopMatch.index : cleaned.length;
+			rawSpec = cleaned.slice(pos, end).trim();
+		}
+		if (!rawSpec) continue;
 		for (const item of splitTopLevelCommas(rawSpec)) {
 			const col = parseColumnClause(item);
 			if (col && !target.columns.some((c) => c.name.toLowerCase() === col.name.toLowerCase())) {

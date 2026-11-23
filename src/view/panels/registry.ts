@@ -56,7 +56,7 @@ export const PANELS: { id: PanelId; icon: string; title: string; home: Side; whe
 	{ id: "reference", icon: "\ueaa4", title: "Reference: built-in functions, classes and keywords", home: "left" },
 	{ id: "search", icon: "\uea6d", title: "Search", home: "left" },
 	{ id: "git", icon: "\uea68", title: "Source control: what has changed, and the next commit", home: "left" },
-	{ id: "history", icon: "\uea82", title: "Local history: snapshots kept on save", home: "left" },
+	{ id: "history", icon: "\uea82", title: "History: local snapshots and Git commits", home: "left" },
 	{ id: "agent", icon: "\uec10", title: "Agent", home: "right" },
 	{ id: "health", icon: "\ueb31", title: "Health: the open script against the house style", home: "left" },
 ];

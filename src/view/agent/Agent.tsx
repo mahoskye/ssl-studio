@@ -3,23 +3,26 @@
 import { Icon, type IconName } from "../Icon";
 import { Menu, type MenuItem } from "../Menu";
 import { showPanel } from "../panels/registry";
-import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { activeEditor } from "../editor/EditorGroup";
 import { activeLiveEditor } from "../editor/liveBridge";
 import { review, openReview } from "../editor/Review";
-import { activeDoc, activePath, applyText, canonical, documents, notify, state } from "../state";
+import { activeDoc, activePath, applyText, canonical, documents, notify, scriptsCameTo, setState, state } from "../state";
 import { addEntry, agent, ask, chooseModel, clearEntries, currentModel, interrupt, resume, safely, setAgent, start, stop, type Entry } from "./store";
 import { groupModels, composeQuestion, composerSend, modelRef, stepAction } from "./logic";
 import { followReplyLink, renderReply } from "./markdown";
 import { notePath, proposalOf, runStep, showReview, startTidy, STEPS, tidy } from "./tidy";
+import { parseCsv } from "../../shared/csv";
 import { baseName, isInside, relativeTo, resolvePath } from "../../shared/paths";
 import { isCatalog, promptText, registryTitle } from "../../shared/projectDocs";
 import type { DocFile } from "../../shared/protocol";
-import { ticketForFile, type WorkTextOptions } from "../../shared/workContext";
+import { keysIn, ticketColumn } from "../../shared/registryTickets";
+import { extractSchemaPreview, referencedSchemaTables } from "../../shared/schemaIndex";
+import { cut, MAX_WORK_PROMPT_CHARS, ticketForFile, type WorkTextOptions } from "../../shared/workContext";
 import { backend } from "../backend";
 import { choose } from "../dialogs";
 import { docs } from "../project";
-import { appendNoteToTicket, promoteToKnowledge, staleCatalogSummary, staleCatalogSummaryAsync, ticketAtHand, updateCatalogs, workPrompt } from "../projectDocs";
+import { appendNoteToTicket, promoteToKnowledge, saveAsSnippet, staleCatalogSummary, staleCatalogSummaryAsync, ticketAtHand, updateCatalogs, workPrompt } from "../projectDocs";
 import { languageFor } from "../editor/languages";
 import { recall, remember } from "../graph/canvas";
 
@@ -37,16 +40,60 @@ export function openAgentWithDraft(text: string, opts?: { cleanContext?: boolean
 const [withWork, setWithWork] = createSignal(recall("agent.withWork") !== "no");
 const [pickedTicket, setPickedTicket] = createSignal<string | null>(null);
 const [withSchema, setWithSchema] = createSignal(false);
+const [withRefTables, setWithRefTables] = createSignal(false);
 const [withRegistries, setWithRegistries] = createSignal(false);
 const [withState, setWithState] = createSignal(false);
 const [attachedFiles, setAttachedFiles] = createSignal<{ path: string; rel: string }[]>([]);
+const [sentTick, setSentTick] = createSignal(0);
+
+/** Fast deterministic content fingerprint so mid-session edits to tickets/specs/files trigger an automatic delta re-send. */
+function hashText(s: string): string {
+	let h = 2166136261 >>> 0;
+	for (let i = 0; i < s.length; i++) {
+		h ^= s.charCodeAt(i);
+		h = Math.imul(h, 16777619) >>> 0;
+	}
+	return `${s.length}:${h.toString(36)}`;
+}
+
+/** Per-session tracker of already-sent context slices (key -> contentHash) so unchanged context is skipped and edited context re-sends cleanly. */
+let sentContext: { session: string | null; root: string | null; hashes: Map<string, string> } = {
+	session: null,
+	root: null,
+	hashes: new Map(),
+};
+let lastWorkspaceRoot: string | null = null;
+
+/** Resets all workspace-scoped Agent context & session state whenever the user opens a different folder. */
+function ensureAgentWorkspace(): void {
+	const curRoot = state.workspace?.root ? canonical(state.workspace.root) : null;
+	if (curRoot === lastWorkspaceRoot) return;
+	lastWorkspaceRoot = curRoot;
+	setPickedTicket(null);
+	setWithSchema(false);
+	setWithRefTables(false);
+	setWithRegistries(false);
+	setWithState(false);
+	setAttachedFiles([]);
+	sentContext = { session: null, root: curRoot, hashes: new Map() };
+	setAgent("chatSession", null);
+	setSentTick((n) => n + 1);
+}
+
+/** Auto-detected ticket: explicit workspace activeTicket > file-specific ticket > single in-progress ticket. */
+function resolvedAutoTicket(): string {
+	return state.settings.activeTicket?.trim() || ticketForFile(docs(), activePath(), state.workspace?.root) || ticketAtHand();
+}
 
 /** Current ticket & extra-context options configured in the Agent panel (honored by `Ctrl+Shift+H` too). */
 export function currentAgentContext(): { includeWork: boolean; ticket: string; workOptions: WorkTextOptions } {
+	ensureAgentWorkspace();
 	const picked = pickedTicket();
-	const auto = ticketForFile(docs(), activePath(), state.workspace?.root) || ticketAtHand();
+	const auto = resolvedAutoTicket();
 	const ticket = picked === null ? auto : picked;
 	const includeWork = Boolean(ticket) && (picked !== null || withWork());
+	const root = state.workspace?.root ?? "";
+	const safeFiles = root ? attachedFiles().filter((f) => isInside(root, f.path)) : [];
 	return {
 		includeWork,
 		ticket,
@@ -54,7 +101,7 @@ export function currentAgentContext(): { includeWork: boolean; ticket: string; w
 			includeSchema: withSchema(),
 			includeRegistries: withRegistries(),
 			includeState: withState(),
-			ticketFiles: attachedFiles(),
+			ticketFiles: safeFiles,
 		},
 	};
 }
@@ -81,76 +128,170 @@ export function selectionContext(): { label: string; code: string } | null {
 	return null;
 }
 
-/** Per-session tracker of already-sent context slices so toggling a chip mid-chat sends ONLY the delta. */
-let sentContext: { session: string | null; keys: Set<string> } = { session: null, keys: new Set() };
-
 async function readForPrompt(path: string): Promise<string | null> {
+	const root = state.workspace?.root;
+	if (root && !isInside(root, path)) return null;
 	const open = documents.get(canonical(path));
 	if (open) return open.model.getValue();
-	return backend.read(path).then((f) => f.text, () => null);
+	return backend.read(path).then((f) => (f.binary ? null : f.text), () => null);
 }
 
-/** Builds standalone optional context blocks (Schema, Registries, STATE.md, attached files) even when no ticket is active. */
-async function buildStandaloneExtras(
+/** Builds ticket-filtered registry rows when a ticket is active, or a compact registry index when standalone. */
+async function buildRegistrySlice(all: DocFile[], ticketKey: string): Promise<string> {
+	const regs = all.filter((d) => d.group === "registries" && /\.(csv|tsv)$/i.test(d.name));
+	if (!regs.length) return "";
+	if (ticketKey) {
+		const ticketLower = ticketKey.toLowerCase();
+		const knownSet = new Set([ticketLower]);
+		const parts: string[] = [];
+		for (const reg of regs) {
+			const csvText = await readForPrompt(reg.path);
+			if (!csvText) continue;
+			const parsed = parseCsv(csvText);
+			const tCol = ticketColumn(parsed);
+			if (tCol < 0) continue;
+			const matched = parsed.rows.filter((cells) =>
+				keysIn(cells[tCol]?.text ?? "", knownSet).some((k) => k.toLowerCase() === ticketLower),
+			);
+			if (!matched.length) continue;
+			const headers = parsed.header.map((c) => c.text.trim());
+			parts.push(
+				`REGISTRY ${registryTitle(reg.name)} (rows for ${ticketKey}):\n` +
+					headers.join(" | ") +
+					"\n" +
+					matched.slice(0, 15).map((r) => headers.map((_, i) => (r[i]?.text ?? "").replace(/\s+/g, " ")).join(" | ")).join("\n") +
+					(matched.length > 15 ? `\n… and ${matched.length - 15} more rows` : ""),
+			);
+		}
+		if (parts.length) return parts.join("\n\n");
+	}
+	return (
+		"PROJECT REGISTRIES:\n" +
+		regs
+			.slice(0, 10)
+			.map((d) => `- ${registryTitle(d.name)} (${d.rows ?? 0} rows)`)
+			.join("\n") +
+		(regs.length > 10 ? `\n- … and ${regs.length - 10} more registries` : "")
+	);
+}
+
+type PreparedContext = {
+	text: string;
+	labels: string[];
+	slices: Map<string, string>;
+	breakdown: { label: string; chars: number; status: "pending" | "edited" | "sent" }[];
+};
+
+/**
+ * Computes the exact pending context delta (ticket work, schema, registries, STATE.md, attached files)
+ * with content-hash change detection: unchanged already-sent slices are skipped, while edited slices re-send automatically.
+ */
+async function prepareContextDelta(
+	ticket: string,
 	workOpts: WorkTextOptions,
-	alreadySent: ReadonlySet<string>,
-): Promise<{ text: string; labels: string[]; addedKeys: string[] }> {
+	alreadySent: ReadonlyMap<string, string>,
+): Promise<PreparedContext> {
+	const root = state.workspace?.root ?? "";
+	const all = docs().filter((d) => d.exists && !isCatalog(d));
 	const parts: string[] = [];
 	const labels: string[] = [];
-	const addedKeys: string[] = [];
-	const all = docs().filter((d) => d.exists && !isCatalog(d));
-	const cut = (s: string, max: number) => (s.length <= max ? s : `${s.slice(0, max)} … (cut short)`);
+	const slices = new Map<string, string>();
+	const breakdown: PreparedContext["breakdown"] = [];
 
-	if (workOpts.includeState && !alreadySent.has("state")) {
+	const addSlice = (key: string, label: string, content: string) => {
+		const trimmed = content.trim();
+		if (!trimmed) return;
+		const h = hashText(trimmed);
+		const prev = alreadySent.get(key);
+		if (prev === h) {
+			breakdown.push({ label, chars: 0, status: "sent" });
+			return;
+		}
+		parts.push(trimmed);
+		labels.push(prev ? `${label} (updated)` : label);
+		slices.set(key, h);
+		breakdown.push({ label, chars: trimmed.length, status: prev ? "edited" : "pending" });
+	};
+
+	// 1. Core ticket work (without standalone toggles so each slice is independently hash-tracked across Turn 1 and Turn 2+).
+	if (ticket) {
+		const work = await workPrompt(ticket, { includeSchema: false, includeRegistries: false, includeState: false, ticketFiles: [] });
+		if (work) {
+			addSlice(`ticket:${ticket.toLowerCase()}`, work.label, work.text);
+		}
+	}
+
+	// 2. STATE.md
+	if (workOpts.includeState) {
 		const stDoc = all.find((d) => d.group === "project" && /^state\.md$/i.test(d.name));
 		if (stDoc) {
 			const txt = await readForPrompt(stDoc.path);
 			if (txt?.trim()) {
-				parts.push("PROJECT STATE (STATE.md):\n" + cut(txt.replace(/\r\n/g, "\n").trim(), 1800));
-				labels.push("STATE.md");
-				addedKeys.push("state");
+				addSlice("state", "STATE.md", "PROJECT STATE (STATE.md):\n" + cut(txt.replace(/\r\n/g, "\n").trim(), 1800));
 			}
 		}
 	}
-	if (workOpts.includeSchema && !alreadySent.has("schema")) {
+
+	// 3. Project Schema (with overflow notice past 25)
+	if (workOpts.includeSchema) {
 		const schemas = all.filter((d) => d.group === "schema");
 		if (schemas.length) {
-			parts.push(
+			const shown = schemas.slice(0, 25);
+			const more = schemas.length - shown.length;
+			const schemaText =
 				"PROJECT SCHEMA (summary):\n" +
-					schemas
-						.slice(0, 25)
-						.map((d) => `- ${d.title || d.name}${d.status ? ` (${d.status})` : ""}${d.summary ? `. ${d.summary}` : ""}`)
-						.join("\n"),
-			);
-			labels.push("schema");
-			addedKeys.push("schema");
+				shown.map((d) => `- ${d.title || d.name}${d.status ? ` (${d.status})` : ""}${d.summary ? `. ${d.summary}` : ""}`).join("\n") +
+				(more > 0 ? `\n- … and ${more} more schema docs` : "");
+			addSlice("schema", "schema", schemaText);
 		}
 	}
-	if (workOpts.includeRegistries && !alreadySent.has("registries:all")) {
-		const regs = all.filter((d) => d.group === "registries" && /\.(csv|tsv)$/i.test(d.name));
-		if (regs.length) {
-			parts.push(
-				"PROJECT REGISTRIES:\n" +
-					regs
-						.slice(0, 10)
-						.map((d) => `- ${registryTitle(d.name)} (${d.rows ?? 0} rows)`)
-						.join("\n"),
-			);
-			labels.push("registries");
-			addedKeys.push("registries:all");
+
+	// 3b. Targeted schema column tables referenced in the active SSL/SQL editor or selection (Wave 3.1).
+	if (withRefTables()) {
+		const sel = selectionContext();
+		const activeModelText = sel?.code || activeDoc()?.model.getValue() || "";
+		const refTables = referencedSchemaTables(activeModelText, all, 6);
+		if (refTables.length) {
+			const blocks: string[] = [];
+			for (const tDoc of refTables) {
+				const raw = await readForPrompt(tDoc.path);
+				if (raw !== null) {
+					blocks.push(`### ${tDoc.title || tDoc.name}\n${extractSchemaPreview(tDoc, raw, 24)}`);
+				}
+			}
+			if (blocks.length) {
+				addSlice(
+					`refTables:${refTables.map((d) => canonical(d.path)).join(",")}`,
+					`${refTables.length} table ${refTables.length === 1 ? "schema" : "schemas"}`,
+					`REFERENCED SCHEMA TABLES (columns):\n${cut(blocks.join("\n\n"), 4500)}`,
+				);
+			}
 		}
 	}
+
+	// 4. Project Registries (unified across Turn 1 and Turn 2+: ticket-filtered rows when a ticket is active!).
+	if (workOpts.includeRegistries) {
+		const regKey = ticket ? `registries:${ticket.toLowerCase()}` : "registries:all";
+		const regText = await buildRegistrySlice(all, ticket);
+		if (regText) addSlice(regKey, "registries", regText);
+	}
+
+	// 5. Attached files (strictly guarded inside the active workspace root).
 	for (const tf of workOpts.ticketFiles ?? []) {
-		const k = `file:${canonical(tf.path)}`;
-		if (alreadySent.has(k)) continue;
+		if (root && !isInside(root, tf.path)) continue;
 		const content = await readForPrompt(tf.path);
 		if (content !== null) {
-			parts.push(`ATTACHED FILE ${tf.rel}:\n${cut(content.replace(/\r\n/g, "\n"), 3500)}`);
-			labels.push(baseName(tf.rel));
-			addedKeys.push(k);
+			addSlice(
+				`file:${canonical(tf.path)}`,
+				baseName(tf.rel),
+				`ATTACHED FILE ${tf.rel}:\n${cut(content.replace(/\r\n/g, "\n"), 3500)}`,
+			);
 		}
 	}
-	return { text: parts.join("\n\n"), labels, addedKeys };
+
+	const joined = parts.join("\n\n");
+	const capped = joined.length <= MAX_WORK_PROMPT_CHARS ? joined : cut(joined, MAX_WORK_PROMPT_CHARS);
+	return { text: capped, labels, slices, breakdown };
 }
 
 export async function askAbout(
@@ -159,52 +300,23 @@ export async function askAbout(
 	includeWork = false,
 	extra?: { ticket?: string; workOptions?: WorkTextOptions },
 ) {
+	ensureAgentWorkspace();
 	const path = activePath();
+	const root = state.workspace?.root ?? "";
 	const context = includeSelection ? selectionContext() : null;
-	const file = path ? relativeTo(state.workspace?.root, path) : "";
-	const ticket = includeWork ? (extra?.ticket ?? (ticketForFile(docs(), path, state.workspace?.root) || ticketAtHand())) : "";
+	const file = path ? relativeTo(root, path) : "";
+	const ticket = includeWork ? (extra?.ticket ?? resolvedAutoTicket()) : "";
 	const workOpts = extra?.workOptions ?? {};
 
-	// Reset delta tracker whenever starting a brand-new conversation session.
-	if (!agent.chatSession || sentContext.session !== agent.chatSession) {
-		sentContext = { session: agent.chatSession, keys: new Set() };
+	// Reset delta tracker whenever starting a brand-new conversation session or switching workspaces.
+	const curRoot = root ? canonical(root) : null;
+	if (!agent.chatSession || sentContext.session !== agent.chatSession || sentContext.root !== curRoot) {
+		sentContext = { session: agent.chatSession, root: curRoot, hashes: new Map() };
 	}
 
-	const already = sentContext.keys;
-	const ticketSent = Boolean(ticket && already.has(`ticket:${ticket.toLowerCase()}`));
-	const newlyAddedKeys: string[] = [];
-	let workBlock = "";
-	const labelParts: string[] = [];
-
-	if (ticket && !ticketSent) {
-		const freshOpts: WorkTextOptions = {
-			includeSchema: Boolean(workOpts.includeSchema) && !already.has("schema"),
-			includeRegistries: Boolean(workOpts.includeRegistries) && !already.has(`registries:${ticket.toLowerCase()}`),
-			includeState: Boolean(workOpts.includeState) && !already.has("state"),
-			ticketFiles: (workOpts.ticketFiles ?? []).filter((f) => !already.has(`file:${canonical(f.path)}`)),
-		};
-		const work = await workPrompt(ticket, freshOpts);
-		if (work) {
-			workBlock = work.text;
-			labelParts.push(work.label);
-			newlyAddedKeys.push(`ticket:${ticket.toLowerCase()}`);
-			if (freshOpts.includeSchema) newlyAddedKeys.push("schema");
-			if (freshOpts.includeRegistries) newlyAddedKeys.push(`registries:${ticket.toLowerCase()}`);
-			if (freshOpts.includeState) newlyAddedKeys.push("state");
-			for (const f of freshOpts.ticketFiles ?? []) newlyAddedKeys.push(`file:${canonical(f.path)}`);
-		}
-	} else {
-		// Mid-conversation delta or no-ticket standalone extras: send ONLY newly enabled extras without repeating the ticket!
-		const delta = await buildStandaloneExtras(workOpts, already);
-		if (delta.text) {
-			workBlock = delta.text;
-			labelParts.push(...delta.labels);
-			newlyAddedKeys.push(...delta.addedKeys);
-		}
-	}
-
-	const text = composeQuestion(question, context && { ...context, file }, workBlock || undefined);
-	const withWhat = [context ? `${file} ${context.label}` : "", ...labelParts].filter(Boolean).join("; ");
+	const prepared = await prepareContextDelta(ticket, workOpts, sentContext.hashes);
+	const text = composeQuestion(question, context && { ...context, file }, prepared.text || undefined);
+	const withWhat = [context ? `${file} ${context.label}` : "", ...prepared.labels].filter(Boolean).join("; ");
 	const isCatalogPrompt = /INDEX\.md|Update catalogs/i.test(question);
 	const reply = await ask(text, {
 		title: "SSL Studio chat",
@@ -213,31 +325,116 @@ export async function askAbout(
 		show: withWhat ? `${question}  (with ${withWhat})` : question,
 		turn: {
 			ticket: ticket || undefined,
-			codePath: path && !/\.(md|markdown)$/i.test(path) ? path : undefined,
+			codePath: path && root && isInside(root, path) ? path : undefined,
 			isCatalogPrompt,
 		},
 	});
 	if (reply) {
 		setAgent("chatSession", reply.sessionID);
-		if (sentContext.session !== reply.sessionID) {
-			sentContext = { session: reply.sessionID, keys: new Set([...already, ...newlyAddedKeys]) };
-		} else {
-			for (const k of newlyAddedKeys) sentContext.keys.add(k);
+		// Commit context slice hashes ONLY when the turn actually succeeded (never on failed/interrupted turns!).
+		if (reply.outcome === "succeeded") {
+			if (sentContext.session !== reply.sessionID) {
+				const next = new Map(sentContext.hashes);
+				for (const [k, v] of prepared.slices) next.set(k, v);
+				sentContext = { session: reply.sessionID, root: curRoot, hashes: next };
+			} else {
+				for (const [k, v] of prepared.slices) sentContext.hashes.set(k, v);
+			}
+			setSentTick((n) => n + 1);
 		}
 	}
 }
 
-/** Extracts the best fenced code/Markdown block (or full reply text) and opens side-by-side ReviewView against a workspace file. */
+type FencedBlock = { lang: string; code: string };
+
+/** Fence-depth-aware Markdown block extractor supporting ``` and ~~~ fences and nested blocks inside markdown replies. */
+function extractFencedBlocks(markdown: string): FencedBlock[] {
+	const lines = markdown.replace(/\r\n/g, "\n").split("\n");
+	const blocks: FencedBlock[] = [];
+	let active: { ch: string; len: number; lang: string; lines: string[] } | null = null;
+	for (const line of lines) {
+		if (!active) {
+			const m = /^[ \t]{0,3}(`{3,}|~{3,})([^\n]*)$/.exec(line);
+			if (m) {
+				const ch = m[1]![0]!;
+				const info = m[2]!.trim();
+				if (ch === "`" && info.includes("`")) continue;
+				active = { ch, len: m[1]!.length, lang: (info.split(/\s+/)[0] ?? "").toLowerCase(), lines: [] };
+			}
+		} else {
+			const isClose = new RegExp(`^[ \\t]{0,3}${active.ch}{${active.len},}[ \\t]*$`).test(line);
+			if (isClose) {
+				const code = active.lines.join("\n").trim();
+				if (code) blocks.push({ lang: active.lang, code });
+				active = null;
+			} else {
+				active.lines.push(line);
+			}
+		}
+	}
+	return blocks;
+}
+
+/** Applies a simple unified diff hunk block onto `original`; returns `null` if hunks do not cleanly apply. */
+function applySimpleUnifiedDiff(original: string, diffText: string): string | null {
+	const origLines = original.replace(/\r\n/g, "\n").split("\n");
+	const diffLines = diffText.replace(/\r\n/g, "\n").split("\n");
+	const hunks: { oldStart: number; lines: string[] }[] = [];
+	let cur: { oldStart: number; lines: string[] } | null = null;
+	for (const line of diffLines) {
+		const h = /^@@\s+-(\d+)(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@/.exec(line);
+		if (h) {
+			cur = { oldStart: Math.max(1, Number(h[1])), lines: [] };
+			hunks.push(cur);
+		} else if (cur && (/^[ +-]/.test(line) || line === "")) {
+			cur.lines.push(line === "" ? " " : line);
+		}
+	}
+	if (!hunks.length) return null;
+	const result = [...origLines];
+	let delta = 0;
+	for (const hunk of hunks) {
+		const expectedOld = hunk.lines.filter((l) => l[0] === " " || l[0] === "-").map((l) => l.slice(1));
+		const nextNew = hunk.lines.filter((l) => l[0] === " " || l[0] === "+").map((l) => l.slice(1));
+		const at = hunk.oldStart - 1 + delta;
+		const matchesAt = (pos: number) =>
+			pos >= 0 &&
+			pos + expectedOld.length <= result.length &&
+			expectedOld.every((line, i) => result[pos + i] === line);
+		let pos = at;
+		if (!matchesAt(pos)) {
+			// Search within +/-15 lines for shifted hunk context.
+			let found = -1;
+			for (let off = 1; off <= 15; off++) {
+				if (matchesAt(at - off)) {
+					found = at - off;
+					break;
+				}
+				if (matchesAt(at + off)) {
+					found = at + off;
+					break;
+				}
+			}
+			if (found < 0) return null;
+			pos = found;
+		}
+		result.splice(pos, expectedOld.length, ...nextNew);
+		delta += nextNew.length - expectedOld.length;
+	}
+	return result.join("\n");
+}
+
+/** Extracts the best fenced code/Markdown block (prompting when multiple blocks exist) and opens side-by-side ReviewView against a workspace file. */
 async function reviewProposedEdit(replyText: string, preferredPath?: string) {
 	const root = state.workspace?.root;
 	if (!root) return notify("Open a folder first.");
-	const codeBlocks = [...replyText.replace(/\r\n/g, "\n").matchAll(/```[^\n]*\n([\s\S]*?)```/g)].map((m) => m[1]!).filter((s) => s.trim().length > 0);
-	const proposed = (codeBlocks.length ? codeBlocks[codeBlocks.length - 1]! : replyText).trim() + "\n";
 
-	const openCur = preferredPath || activePath() || "";
+	const curActive = activePath() || "";
+	const openCur = preferredPath || curActive;
 	const candidates: { label: string; path: string }[] = [];
 	if (openCur && isInside(root, openCur)) {
-		candidates.push({ label: `${relativeTo(root, openCur)} (active file)`, path: openCur });
+		const tag = preferredPath && canonical(preferredPath) !== canonical(curActive) ? "(from turn)" : "(active file)";
+		candidates.push({ label: `${relativeTo(root, openCur)} ${tag}`, path: openCur });
 	}
 	const PICK_OTHER = "Choose another workspace file…";
 	let targetPath = openCur;
@@ -248,7 +445,10 @@ async function reviewProposedEdit(replyText: string, preferredPath?: string) {
 	}
 	if (!targetPath) {
 		const files = await backend.files().catch(() => []);
-		const rels = files.slice(0, 200).map((p) => relativeTo(root, p).replace(/\\/g, "/"));
+		const rels = files
+			.map((p) => relativeTo(root, p).replace(/\\/g, "/"))
+			.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base", numeric: true }))
+			.slice(0, 1000);
 		const chosen = await choose("Select workspace file to diff against", rels);
 		if (!chosen) return;
 		targetPath = resolvePath(root, chosen);
@@ -256,6 +456,41 @@ async function reviewProposedEdit(replyText: string, preferredPath?: string) {
 	}
 
 	const original = (await readForPrompt(targetPath)) ?? "";
+	const targetLang = languageFor(targetPath).toLowerCase();
+	const blocks = extractFencedBlocks(replyText);
+	let chosenBlock: FencedBlock | null = null;
+	if (blocks.length === 1) {
+		chosenBlock = blocks[0]!;
+	} else if (blocks.length > 1) {
+		// Prioritize blocks matching the target file's language (e.g. SSL over small SQL/example snippets).
+		const ranked = [...blocks].sort((a, b) => {
+			const aMatch = a.lang === targetLang ? 0 : 1;
+			const bMatch = b.lang === targetLang ? 0 : 1;
+			return aMatch - bMatch || b.code.length - a.code.length;
+		});
+		const labels = ranked.map((b, i) => {
+			const lines = b.code.split("\n").length;
+			const first = b.code.split("\n")[0]!.trim().slice(0, 48);
+			return `Block ${i + 1} (${b.lang || "text"}, ${lines} lines): ${first}`;
+		});
+		const FULL_REPLY = "Use full reply text";
+		const picked = await choose("This reply has multiple code blocks. Which one should be diffed?", [...labels, FULL_REPLY]);
+		if (!picked) return;
+		const idx = labels.indexOf(picked);
+		chosenBlock = idx >= 0 ? ranked[idx]! : null;
+	}
+
+	let proposed = `${(chosenBlock ? chosenBlock.code : replyText).trim()}\n`;
+	const isDiffBlock = Boolean(chosenBlock && (/^(diff|patch)$/i.test(chosenBlock.lang) || /^@@\s+-\d+/m.test(chosenBlock.code)));
+	if (isDiffBlock && chosenBlock) {
+		const patched = applySimpleUnifiedDiff(original, chosenBlock.code);
+		if (patched !== null) {
+			proposed = patched.endsWith("\n") ? patched : `${patched}\n`;
+		} else {
+			notify("The reply contains a unified diff patch that could not be cleanly applied automatically; inspect the right pane before accepting.", "error");
+		}
+	}
+
 	const rel = relativeTo(root, targetPath).replace(/\\/g, "/");
 	openReview({
 		title: `Agent proposal: ${rel}`,
@@ -267,11 +502,14 @@ async function reviewProposedEdit(replyText: string, preferredPath?: string) {
 			? `Accepting puts the right side into ${rel} as one undoable editor edit (not saved yet).`
 			: `Accepting saves the right side to ${rel} on disk.`,
 		onAccept: async (final) => {
-			if (documents.get(canonical(targetPath))) {
-				applyText(targetPath, final);
+			const key = canonical(targetPath);
+			if (documents.get(key)) {
+				applyText(key, final);
 			} else {
 				await backend.historyKeep(targetPath).catch(() => {});
 				await backend.write(targetPath, final);
+				void scriptsCameTo(targetPath, targetPath, "file");
+				setState("treeVersion", (v) => v + 1);
 			}
 			notify(`Applied reviewed edit to ${rel}.`);
 		},
@@ -291,6 +529,21 @@ function EntryView(props: { entry: Entry }) {
 	const copyReply = () => {
 		void import("../commands").then((m) => m.copyText(props.entry.text, "Copied agent reply."));
 	};
+	const replyCodeBlocks = createMemo(() => extractFencedBlocks(props.entry.text));
+	const saveReplySnippet = async () => {
+		const blocks = replyCodeBlocks();
+		if (!blocks.length) return;
+		const chosen =
+			blocks.length === 1
+				? blocks[0]!
+				: await (async () => {
+						const labels = blocks.map((b, i) => `Block ${i + 1} (${b.lang || "code"}, ${b.code.split("\n").length} lines)`);
+						const picked = await choose("Save which code block as a kept snippet?", labels);
+						const idx = picked ? labels.indexOf(picked) : -1;
+						return idx >= 0 ? blocks[idx]! : null;
+					})();
+		if (chosen) await saveAsSnippet(chosen.code, chosen.lang);
+	};
 	return (
 		<div class={`entry ${props.entry.role}`} classList={{ streaming: Boolean(props.entry.streaming) }} aria-busy={props.entry.streaming ? "true" : undefined}>
 			<Show when={props.entry.role === "agent"} fallback={<pre>{props.entry.text}</pre>}>
@@ -306,6 +559,11 @@ function EntryView(props: { entry: Entry }) {
 						<Show when={hasCatalogDrift()}>
 							<button type="button" class="link" title="Apply Update catalogs now (manual ADR 0031 reconciliation)" onClick={() => void updateCatalogs()}>
 								Update catalogs
+							</button>
+						</Show>
+						<Show when={replyCodeBlocks().length > 0}>
+							<button type="button" class="link" title="Save code block as a kept snippet in docs/knowledge/snippets/" onClick={() => void saveReplySnippet()}>
+								Save as Snippet
 							</button>
 						</Show>
 						<button type="button" class="link" title="Save this reply as a Decision ADR" onClick={() => void promoteToKnowledge("decisions", { body: props.entry.text, ticket: entryTicket(), codePath: entryCode() })}>
@@ -348,6 +606,10 @@ const STARTERS = ["Explain what this does, step by step.", "What could go wrong 
 
 export function AgentPanel() {
 	onMount(() => void resume());
+	createEffect(() => {
+		state.workspace?.root;
+		ensureAgentWorkspace();
+	});
 	const [draft, setDraft] = createSignal("");
 	/** The box the question is typed in, for a starter to hand the keyboard to. */
 	let box: HTMLTextAreaElement | undefined;
@@ -362,7 +624,15 @@ export function AgentPanel() {
 				const picked = await choose("Replace your current Agent draft?", [REPLACE, "Keep current"]);
 				if (picked !== REPLACE) return;
 			}
-			if (handed.cleanContext) setWithSelection(false);
+			if (handed.cleanContext) {
+				setWithSelection(false);
+				setPickedTicket("");
+				setWithSchema(false);
+				setWithRefTables(false);
+				setWithRegistries(false);
+				setWithState(false);
+				setAttachedFiles([]);
+			}
 			setDraft(handed.text);
 			setNotSent("");
 			queueMicrotask(() => box?.focus());
@@ -370,13 +640,19 @@ export function AgentPanel() {
 	});
 	const [notSent, setNotSent] = createSignal("");
 	const [withSelection, setWithSelection] = createSignal(true);
-	// The ticket at hand is read from the open document's text, which says nothing when it changes: this does.
+	// The ticket at hand and selection size react immediately to editor edits AND cursor selection changes.
 	const [edited, setEdited] = createSignal(0);
 	createEffect(() => {
-		const listener = activeDoc()?.model.onDidChangeContent(() => setEdited((n) => n + 1));
-		onCleanup(() => listener?.dispose());
+		const doc = activeDoc();
+		const editor = activeEditor();
+		const d1 = doc?.model.onDidChangeContent(() => setEdited((n) => n + 1));
+		const d2 = editor?.onDidChangeCursorSelection(() => setEdited((n) => n + 1));
+		onCleanup(() => {
+			d1?.dispose();
+			d2?.dispose();
+		});
 	});
-	const autoTicket = createMemo(() => (edited(), ticketForFile(docs(), activePath(), state.workspace?.root) || ticketAtHand()));
+	const autoTicket = createMemo(() => (edited(), resolvedAutoTicket()));
 	const allTickets = createMemo(() =>
 		docs()
 			.filter((d) => d.exists && d.group === "tickets" && d.ticket)
@@ -390,7 +666,49 @@ export function AgentPanel() {
 		const key = ticket();
 		return key ? allTickets().find((d) => d.ticket?.toLowerCase() === key.toLowerCase()) : undefined;
 	});
-	// Live pre-send token & size estimate (approx 1 token ≈ 4 chars) so local-model context budgets stay visible before hitting Send.
+	const detectedRefTables = createMemo(() => {
+		edited();
+		const p = activePath();
+		if (!p || !/\.(ssl|srvscr|ds|sql|ddl|pks|pkb)$/i.test(p)) return [] as DocFile[];
+		const txt = selectionContext()?.code || activeDoc()?.model.getValue() || "";
+		return referencedSchemaTables(txt, docs(), 6);
+	});
+	// Real measured next-turn delta size & token budget (approx 1 token ≈ 4 chars), reflecting sent/edited/pending slices.
+	const [measuredDelta] = createResource(
+		() => {
+			const targetTicket = ticket();
+			const sendWork = Boolean(targetTicket) && (pickedTicket() !== null || withWork());
+			return {
+				root: state.workspace?.root ?? "",
+				ticket: sendWork ? targetTicket : "",
+				schema: withSchema(),
+				refTables: withRefTables(),
+				regs: withRegistries(),
+				st: withState(),
+				files: attachedFiles().map((f) => `${f.path}|${f.rel}`),
+				tree: state.treeVersion,
+				sent: sentTick(),
+				ed: edited(),
+				session: agent.chatSession ?? "",
+			};
+		},
+		async (src) => {
+			if (!src.root) return { chars: 0, breakdown: [] as PreparedContext["breakdown"] };
+			const curRoot = canonical(src.root);
+			const already = sentContext.session === (src.session || null) && sentContext.root === curRoot ? sentContext.hashes : new Map<string, string>();
+			const prepared = await prepareContextDelta(
+				src.ticket,
+				{
+					includeSchema: src.schema,
+					includeRegistries: src.regs,
+					includeState: src.st,
+					ticketFiles: attachedFiles(),
+				},
+				already,
+			);
+			return { chars: prepared.text.length, breakdown: prepared.breakdown };
+		},
+	);
 	const preSendEstimate = createMemo(() => {
 		edited();
 		let chars = draft().length;
@@ -403,30 +721,19 @@ export function AgentPanel() {
 				parts.push(`selection (~${Math.ceil(sel.code.length / 4)} tok)`);
 			}
 		}
-		const targetTicket = ticket();
-		const sendingWork = Boolean(targetTicket) && (pickedTicket() !== null || withWork());
-		if (sendingWork) {
-			chars += 2400;
-			parts.push(`${targetTicket} work (~600 tok)`);
-		}
-		if (withSchema()) {
-			chars += 900;
-			parts.push("schema (~225 tok)");
-		}
-		if (withRegistries()) {
-			chars += 800;
-			parts.push("registries (~200 tok)");
-		}
-		if (withState()) {
-			chars += 1200;
-			parts.push("STATE.md (~300 tok)");
-		}
-		for (const f of attachedFiles()) {
-			chars += 2000;
-			parts.push(`${baseName(f.rel)} (~500 tok)`);
+		const delta = measuredDelta();
+		if (delta) {
+			chars += delta.chars;
+			for (const b of delta.breakdown) {
+				if (b.status === "sent") parts.push(`${b.label} (sent)`);
+				else if (b.status === "edited") parts.push(`${b.label} (updated ~${Math.ceil(b.chars / 4)} tok)`);
+				else parts.push(`${b.label} (~${Math.ceil(b.chars / 4)} tok)`);
+			}
 		}
 		const tokens = Math.ceil(chars / 4);
-		return { tokens, chars, summary: parts.length ? parts.join(" + ") : "No context attached yet" };
+		const activeModel = agent.models.find((m) => modelRef(m) === currentModel());
+		const warn = Boolean((!activeModel || activeModel.local) && tokens > 3500);
+		return { tokens, chars, warn, summary: parts.length ? parts.join(" + ") : "No context attached yet" };
 	});
 	const pickContextFile = async () => {
 		const root = state.workspace?.root;
@@ -499,12 +806,15 @@ export function AgentPanel() {
 		if (!saved) select.value = currentModel();
 	};
 	const newConversation = () => {
+		sentContext = { session: null, root: lastWorkspaceRoot, hashes: new Map() };
 		setAgent("chatSession", null);
+		setSentTick((n) => n + 1);
 		if (agent.entries.at(-1)?.text !== NEW_CONVERSATION) addEntry({ role: "note", text: NEW_CONVERSATION });
 		toEnd();
 	};
 	const clearConversation = () => {
-		sentContext = { session: null, keys: new Set() };
+		sentContext = { session: null, root: lastWorkspaceRoot, hashes: new Map() };
+		setSentTick((n) => n + 1);
 		clearEntries();
 	};
 	const loadKeptPrompt = (file: DocFile) => {
@@ -771,6 +1081,18 @@ export function AgentPanel() {
 				</Show>
 				<Show when={Boolean(state.workspace)}>
 					<div class="agent-ctx-chips" role="group" aria-label="Optional extra project context">
+						<Show when={detectedRefTables().length > 0}>
+							<button
+								type="button"
+								class="agent-ctx-chip"
+								classList={{ active: withRefTables() }}
+								aria-pressed={withRefTables()}
+								title={`Inject exact column definitions for schema tables referenced in this file: ${detectedRefTables().map((d) => d.title || d.name).join(", ")}`}
+								onClick={() => setWithRefTables((v) => !v)}
+							>
+								+ Tables ({detectedRefTables().length})
+							</button>
+						</Show>
 						<button
 							type="button"
 							class="agent-ctx-chip"
@@ -838,7 +1160,11 @@ export function AgentPanel() {
 					</Menu>
 					<span class="spacer" />
 					<Show when={preSendEstimate().tokens > 0}>
-						<span class="agent-token-meter" title={`Estimated next-turn context: ${preSendEstimate().summary}`}>
+						<span
+							class="agent-token-meter"
+							classList={{ warn: preSendEstimate().warn }}
+							title={`Measured next-turn context: ${preSendEstimate().summary}${preSendEstimate().warn ? " (large for a 4K local model — consider trimming chips)" : ""}`}
+						>
 							~{preSendEstimate().tokens} tok
 						</span>
 					</Show>

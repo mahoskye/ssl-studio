@@ -18,6 +18,7 @@ import { Modal } from "../modal";
 export function CsvCodeCheckDialog(props: {
 	table: Table;
 	filteredRows: readonly Cell[][];
+	checkedRows?: readonly Cell[][];
 	hasActiveFilters: boolean;
 	selectedRow: { index: number; cells: Cell[] } | null;
 	initialColumn: number;
@@ -29,12 +30,23 @@ export function CsvCodeCheckDialog(props: {
 }) {
 	const titleId = createUniqueId();
 	const safeInitialCol = Math.max(0, Math.min(props.initialColumn, Math.max(0, props.table.header.length - 1)));
+	const hasChecked = () => (props.checkedRows?.length ?? 0) > 0;
 	const initialScope: CodeCheckRowScope =
-		props.initialRowScope ?? (props.hasActiveFilters ? "filtered" : "all");
+		props.initialRowScope ?? (hasChecked() ? "checked" : props.hasActiveFilters ? "filtered" : "all");
 
 	const [column, setColumn] = createSignal(safeInitialCol);
 	const [rowScope, setRowScope] = createSignal<CodeCheckRowScope>(
-		initialScope === "selected" && !props.selectedRow ? (props.hasActiveFilters ? "filtered" : "all") : initialScope,
+		initialScope === "selected" && !props.selectedRow
+			? hasChecked()
+				? "checked"
+				: props.hasActiveFilters
+					? "filtered"
+					: "all"
+			: initialScope === "checked" && !hasChecked()
+				? props.hasActiveFilters
+					? "filtered"
+					: "all"
+				: initialScope,
 	);
 	const [fileScope, setFileScope] = createSignal<CodeFileScopeId>(props.lastSpec?.fileScope ?? "code");
 	const [include, setInclude] = createSignal(props.lastSpec?.include ?? "");
@@ -52,6 +64,7 @@ export function CsvCodeCheckDialog(props: {
 
 	const targetRows = createMemo<readonly Cell[][]>(() => {
 		if (rowScope() === "selected" && props.selectedRow) return [props.selectedRow.cells];
+		if (rowScope() === "checked" && props.checkedRows?.length) return props.checkedRows;
 		if (rowScope() === "filtered" && props.hasActiveFilters) return props.filteredRows;
 		return props.table.rows;
 	});
@@ -181,6 +194,19 @@ export function CsvCodeCheckDialog(props: {
 								/>
 								<span>
 									Selected row <span class="hint">({selectedCellPreview()})</span>
+								</span>
+							</label>
+						</Show>
+						<Show when={props.checkedRows?.length}>
+							<label>
+								<input
+									type="radio"
+									name="csv-check-rows"
+									checked={rowScope() === "checked"}
+									onChange={() => setRowScope("checked")}
+								/>
+								<span>
+									Checked rows <span class="hint">({props.checkedRows!.length} selected)</span>
 								</span>
 							</label>
 						</Show>

@@ -496,7 +496,8 @@ export function upsertTocBlock(markdown: string): { text: string; updated: boole
 	const toc = generateToc(markdown);
 	if (!toc) return { text: markdown, updated: false };
 	const eol = markdown.includes("\r\n") ? "\r\n" : "\n";
-	const block = `${TOC_START}${eol}${toc.replace(/\n/g, eol)}${eol}${TOC_END}`;
+	// Blank lines around the list match Prettier's Markdown HTML-comment formatting so Format doesn't churn on save.
+	const block = `${TOC_START}${eol}${eol}${toc.replace(/\n/g, eol)}${eol}${eol}${TOC_END}`;
 
 	const start = markdown.indexOf(TOC_START);
 	const end = start >= 0 ? markdown.indexOf(TOC_END, start + TOC_START.length) : -1;

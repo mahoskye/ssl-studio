@@ -12,10 +12,12 @@ import { session } from "../lsp/session";
 import type { SearchHit } from "../../shared/protocol";
 import { backend } from "../backend";
 import { choose } from "../dialogs";
-import { canonical, documents, fileChangedOnDisk, notify, openFile, save, saveAll, setState, state } from "../state";
+import { activePath, canonical, documents, fileChangedOnDisk, notify, openFile, save, saveAll, setState, state } from "../state";
 import { baseName, relativeTo } from "../../shared/paths";
+import { DOC_FOLDERS } from "../../shared/projectDocs";
 import { matchesOn, SEARCH_LIMIT, searchPattern, type SearchOptions } from "../../shared/searchPattern";
 import { outline } from "../../shared/outline";
+import { ticketForFile, ticketWork } from "../../shared/workContext";
 import { docs } from "../project";
 import { ticketAtHand } from "../projectDocs";
 import { focusRowsBelow, IconButton, Row, RowGroup, Rows } from "./Rows";
@@ -119,13 +121,13 @@ export function Search() {
 		input.value = wanted.query;
 		setTyped(wanted.query);
 		setRegex(Boolean(wanted.regex));
-		if (wanted.wholeWord !== undefined) setWholeWord(wanted.wholeWord);
-		if (wanted.caseSensitive !== undefined) setCaseSensitive(wanted.caseSensitive);
-		if (wanted.include !== undefined || wanted.exclude !== undefined) {
-			setInclude(wanted.include ?? "");
-			setExclude(wanted.exclude ?? "");
-			setChoosing(Boolean(wanted.include?.trim() || wanted.exclude?.trim()));
-		}
+		setWholeWord(Boolean(wanted.wholeWord));
+		setCaseSensitive(Boolean(wanted.caseSensitive));
+		const nextInc = wanted.include ?? "";
+		const nextExc = wanted.exclude ?? "";
+		setInclude(nextInc);
+		setExclude(nextExc);
+		setChoosing(Boolean(nextInc.trim() || nextExc.trim()));
 		void run();
 	});
 	// A switch changes what the results on screen mean, so they are fetched again.
@@ -196,7 +198,7 @@ export function Search() {
 	const schemaRel = () => cleanDir(state.project?.schema ?? "schema");
 	const codeExcludeGlob = () =>
 		[
-			docsRel() ? `${docsRel()}/**` : "",
+			docsRel() ? `${docsRel()}/**` : `${DOC_FOLDERS.tickets}/**, ${DOC_FOLDERS.specs}/**, ${DOC_FOLDERS.knowledge}/**, ${DOC_FOLDERS.registries}/**`,
 			plansRel() ? `${plansRel()}/**` : "",
 			schemaRel() ? `${schemaRel()}/**` : "",
 			"README.md",
@@ -207,7 +209,7 @@ export function Search() {
 			.join(", ");
 	const docsIncludeGlob = () =>
 		[
-			docsRel() ? `${docsRel()}/**` : "",
+			docsRel() ? `${docsRel()}/**` : `${DOC_FOLDERS.tickets}/**, ${DOC_FOLDERS.specs}/**, ${DOC_FOLDERS.knowledge}/**, ${DOC_FOLDERS.registries}/**`,
 			plansRel() ? `${plansRel()}/**` : "",
 			schemaRel() ? `${schemaRel()}/**` : "",
 			"*.md",
@@ -215,20 +217,24 @@ export function Search() {
 			.filter(Boolean)
 			.join(", ");
 	const activeTicketScope = createMemo(() => {
-		const key = ticketAtHand();
+		const root = state.workspace?.root;
+		const allDocs = docs();
+		const key = state.settings.activeTicket?.trim() || ticketForFile(allDocs, activePath(), root) || ticketAtHand();
 		if (!key) return null;
-		const found = docs().find((d) => d.exists && d.group === "tickets" && d.ticket?.toLowerCase() === key.toLowerCase());
+		const found = allDocs.find((d) => d.exists && d.group === "tickets" && d.ticket?.toLowerCase() === key.toLowerCase());
 		if (!found) return null;
+		const globs = new Set<string>();
+		globs.add(relativeTo(root, found.path).replace(/\\/g, "/"));
 		if (found.ticketFolder) {
-			const relFolder = relativeTo(state.workspace?.root, found.ticketFolder).replace(/\\/g, "/");
-			return { key, glob: `${relFolder}/**`, tip: `Search inside ${key}'s ticket folder` };
+			globs.add(`${relativeTo(root, found.ticketFolder).replace(/\\/g, "/")}/**`);
 		}
-		const relPaths = [
-			relativeTo(state.workspace?.root, found.path).replace(/\\/g, "/"),
-			...(found.specs ?? []),
-			...(found.plans ?? []),
-		].filter(Boolean);
-		return { key, glob: [...new Set(relPaths)].join(", "), tip: `Search ${key} and its linked specs/plans` };
+		for (const group of ticketWork(allDocs, key)) {
+			if (group.kind === "ticket") continue;
+			for (const ref of group.files) {
+				globs.add(relativeTo(root, ref.path).replace(/\\/g, "/"));
+			}
+		}
+		return { key, glob: [...globs].filter(Boolean).join(", "), tip: `Search ${key}, its ticket folder, and all linked specs/plans/decisions` };
 	});
 	const applyScope = (inc: string, exc = "") => {
 		setInclude(inc);

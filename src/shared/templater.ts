@@ -448,16 +448,17 @@ export function parseTemplateFile(raw: string, fallbackName: string, id: string,
  * tags declared inside frontmatter whose variable is referenced later in the body.
  */
 export function stripRawTemplateFrontmatter(raw: string): string {
-	const m = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n)+/.exec(raw);
+	const m = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)+/.exec(raw);
 	if (!m) return raw;
 	const fmBlock = m[1]!;
 	const body = raw.slice(m[0].length);
 	const preserved: string[] = [];
-	for (const tag of fmBlock.matchAll(/<%[*_-]?([\s\S]*?)[_-]?%>/g)) {
-		const inner = tag[1]!.trim();
-		const decl = /^(?:let|const|var)\s+([A-Za-z_]\w*)\s*=/.exec(inner);
-		if (decl && new RegExp(`\\b${decl[1]}\\b`).test(body)) {
-			preserved.push(`<% ${inner} %>`);
+	for (const tag of fmBlock.matchAll(/<%([*_-]?)([\s\S]*?)([_-]?)%>/g)) {
+		const prefix = tag[1] ?? "";
+		const inner = tag[2]!.trim();
+		const decls = [...inner.matchAll(/\b(?:let|const|var)\s+([A-Za-z_]\w*)\s*=/g)].map((d) => d[1]!);
+		if (decls.some((name) => new RegExp(`\\b${name}\\b`).test(body))) {
+			preserved.push(`<%${prefix} ${inner} %>`);
 		}
 	}
 	return preserved.length ? `${preserved.join("")}${body}` : body;

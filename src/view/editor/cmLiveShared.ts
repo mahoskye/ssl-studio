@@ -26,6 +26,11 @@ export type ImageLightboxInfo = {
 	filePath?: string;
 };
 
+export type MermaidLightboxInfo = {
+	svg: string;
+	code: string;
+};
+
 export type LiveCallbacks = {
 	filePath: () => string;
 	onFollowLink: (href: string) => void;
@@ -41,6 +46,7 @@ export type LiveCallbacks = {
 	onFormatCode?: (openLine: number) => Promise<"changed" | "unchanged" | "error">;
 	onToggleCheckbox: (bracketPos: number) => void;
 	onOpenImageLightbox: (info: ImageLightboxInfo) => void;
+	onOpenMermaidLightbox?: (info: MermaidLightboxInfo) => void;
 	onResizeImage: (from: number, to: number, width: number | null) => void;
 };
 

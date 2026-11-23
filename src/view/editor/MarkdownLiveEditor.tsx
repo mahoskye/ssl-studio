@@ -2,20 +2,21 @@
 // Synced 1:1 with the open document's Monaco ITextModel (ADR 0002: plain text stays the single
 // source of truth for saves, undo across views, Git, Search, Diagnostics, Agent, and Document Outline).
 import { history } from "@codemirror/commands";
-import { openSearchPanel } from "@codemirror/search";
+import { closeSearchPanel, openSearchPanel, searchPanelOpen } from "@codemirror/search";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
-import { Annotation, Compartment, EditorSelection, EditorState, RangeSetBuilder, StateEffect, StateField, type Extension, type Transaction } from "@codemirror/state";
+import { Annotation, Compartment, EditorSelection, EditorState, RangeSetBuilder, StateEffect, StateField, Transaction, type Extension } from "@codemirror/state";
 import { Decoration, type DecorationSet, drawSelection, dropCursor, EditorView, highlightSpecialChars } from "@codemirror/view";
 import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import { Portal } from "solid-js/web";
 import { evaluateTicketReadiness } from "../../shared/docExport";
-import { linkLeads } from "../../shared/docLinks";
+import { linkLeads, withLinkFile } from "../../shared/docLinks";
 import { fenceAtLine, fenceFormatTarget } from "../../shared/fencedFormat";
 import {
 	addToFrontMatterList,
 	formatFrontMatterInnerReplacement,
 	frontMatter,
 	frontMatterInnerSpan,
+	quoteYamlScalar,
 	removeFromFrontMatterList,
 	withFrontMatter,
 } from "../../shared/frontMatter";
@@ -23,10 +24,10 @@ import { workspaceTags } from "../../shared/tags";
 import { documentHeadings, findHeadingLine, withImageWidth } from "../../shared/markdownEdit";
 import type { TableAlign } from "../../shared/markdownTables";
 import { docByName, linkedFrom, namedLink } from "../../shared/namedLinks";
-import { baseName, dirName, isInside, joinPath, relativeTo } from "../../shared/paths";
+import { baseName, dirName, isInside, joinPath, relativeTo, resolvePath } from "../../shared/paths";
 import { DOC_FOLDERS, isCatalog, registryTitle, statusChoices, toneOf } from "../../shared/projectDocs";
 import { rowsLine } from "../../shared/registryTickets";
-import { docLinkedTickets, ticketWork } from "../../shared/workContext";
+import { descendantTickets, docLinkedTickets, ticketWork } from "../../shared/workContext";
 import { lineChanges, type LineChange } from "../../shared/lineDiff";
 import { gitStatus, gitVersion } from "../git";
 import { backend } from "../backend";
@@ -39,9 +40,12 @@ import { searchFor } from "../panels/Search";
 import { docs } from "../project";
 import {
 	addRegistryRowForTicket,
+	closeoutTicket,
 	createTicketFolder,
+	exportDeploymentManifest,
 	exportDocAs,
 	exportTicketPacket,
+	isArchivedTicket,
 	linkDocumentToTicket,
 	linkNonTicketToTicket,
 	newKnowledge,
@@ -50,6 +54,7 @@ import {
 	newTicketFile,
 	promoteQuestionToDecision,
 	setStatus,
+	unarchiveTicket,
 	unlinkDocumentFromTicket,
 } from "../projectDocs";
 import {
@@ -96,7 +101,8 @@ import {
 	type HoverTarget,
 	type ImageLightboxInfo,
 } from "./cmLivePlugin";
-import { applyMarkdownFormatToTextarea, focusLiveWidgetAt } from "./cmLiveShared";
+import { applyMarkdownFormatToTextarea, focusLiveWidgetAt, type MermaidLightboxInfo } from "./cmLiveShared";
+import { copyMermaidAsPng, downloadMermaidBlob } from "./cmMermaid";
 import { cmMarkdownHighlight, cmStudioTheme } from "./cmTheme";
 import { buildHoverPreview, type HoverPreviewData } from "./hoverPreview";
 import { hydrateImagesInElement } from "./imageResolve";
@@ -184,6 +190,8 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 	const [hoverCard, setHoverCard] = createSignal<HoverCardState | null>(null);
 	const [tableHud, setTableHud] = createSignal<ActiveTableHud | null>(null);
 	const [lightbox, setLightbox] = createSignal<(ImageLightboxInfo & { zoomFull?: boolean }) | null>(null);
+	const [mermaidBox, setMermaidBox] = createSignal<(MermaidLightboxInfo & { scale: number; x: number; y: number }) | null>(null);
+	let mermaidPan: { startX: number; startY: number; origX: number; origY: number } | null = null;
 	const [activeHeadingId, setActiveHeadingId] = createSignal("");
 
 	let hostEl!: HTMLDivElement;
@@ -316,7 +324,14 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			const found = docByName(value.trim(), docs(), state.workspace.root);
 			if (found) return { file: found.path, display: found.title || value };
 		}
-		if (["specs", "spec", "plan", "plans", "source"].includes(key) && state.workspace) return { file: joinPath(state.workspace.root, ...value.split("/")) };
+		if (["specs", "spec", "plan", "plans", "source"].includes(key) && state.workspace) {
+			const clean = value.trim().replace(/\\/g, "/");
+			if (!clean) return {};
+			const resolved = clean.startsWith("./") || clean.startsWith("../")
+				? resolvePath(dirName(props.path), clean)
+				: resolvePath(state.workspace.root, clean.replace(/^\/+/, ""));
+			return isInside(state.workspace.root, resolved) ? { file: resolved } : {};
+		}
 		return {};
 	};
 
@@ -390,6 +405,20 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		return (await ask(`Value for ${key}:`))?.trim() || null;
 	};
 
+	const isListProperty = (key: string) => LIST_PROP_KEYS.has(key) || Array.isArray(front().values[key]);
+
+	const editScalarPropertyInteractive = async (key: string, currentVal: string) => {
+		if (isRead()) return;
+		const nextVal =
+			key === "status" || key === "parent" || key === "source" || key === "ticket"
+				? await pickValueForProperty(key)
+				: (await ask(`Edit ${key}:`, currentVal))?.trim() || null;
+		if (!nextVal || nextVal === currentVal) return;
+		const cur = model?.getValue() ?? text();
+		const next = withFrontMatter(cur, key, nextVal);
+		if (next && next !== cur) applyDocTextUpdate(next);
+	};
+
 	const addPropertyValueInteractive = async (explicitKey?: string) => {
 		if (isRead()) return;
 		const COMMON_KEYS = ["status", "ticket", "tickets", "parent", "related", "blocks", "blocked-by", "tags", "specs", "plans", "source", "Custom property…"];
@@ -407,35 +436,42 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		const val = await pickValueForProperty(key);
 		if (!val) return;
 		const cur = model?.getValue() ?? text();
+		// Guard against unclosed `---` frontmatter so we don't prepend a duplicate YAML block.
 		if (!frontMatterInnerSpan(cur)) {
+			if (/^\s*---\s*$/m.test(cur.split(/\r?\n/)[0] ?? "")) {
+				notify("Fix the unclosed YAML frontmatter block (missing closing ---) before adding properties.", "error");
+				return;
+			}
 			const eol = cur.includes("\r\n") ? "\r\n" : "\n";
-			const lineVal = LIST_PROP_KEYS.has(key) ? `[${val}]` : val;
+			const safe = quoteYamlScalar(val);
+			const lineVal = LIST_PROP_KEYS.has(key) ? `[${safe}]` : safe;
 			applyDocTextUpdate(`---${eol}${key}: ${lineVal}${eol}---${eol}${eol}${cur}`);
 			return;
 		}
-		const next = LIST_PROP_KEYS.has(key) ? addToFrontMatterList(cur, key, val) : withFrontMatter(cur, key, val);
+		const next = isListProperty(key) ? addToFrontMatterList(cur, key, val) : withFrontMatter(cur, key, val);
 		if (next && next !== cur) applyDocTextUpdate(next);
+		else if (next === null) notify(`Could not update property "${key}" — click Edit YAML to edit its raw block.`, "error");
 	};
 
 	const removePropertyValue = (key: string, value: string, totalValues: number) => {
 		if (isRead()) return;
 		const cur = model?.getValue() ?? text();
-		if (totalValues > 1 || LIST_PROP_KEYS.has(key)) {
+		if (totalValues > 1 || isListProperty(key)) {
 			const next = removeFromFrontMatterList(cur, key, value);
 			if (next && next !== cur) {
 				applyDocTextUpdate(next);
 				return;
 			}
 		}
-		// Remove single scalar key line cleanly from YAML inner block.
+		// Remove single scalar key line cleanly from YAML inner block (matching frontMatter()'s last-wins semantics).
 		const span = frontMatterInnerSpan(cur);
 		if (!span) return;
 		const keyEsc = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 		const lines = span.inner.split(/\r?\n/);
-		const idx = lines.findIndex((l) => new RegExp(`^${keyEsc}\\s*:`, "i").test(l));
+		const idx = lines.findLastIndex((l) => new RegExp(`^${keyEsc}\\s*:`, "i").test(l));
 		if (idx < 0) return;
 		let endIdx = idx + 1;
-		while (endIdx < lines.length && /^[ \t]+-/.test(lines[endIdx]!)) endIdx++;
+		while (endIdx < lines.length && /^[ \t]*-\s+/.test(lines[endIdx]!)) endIdx++;
 		lines.splice(idx, endIdx - idx);
 		applyYamlInnerEdit(lines.join("\n"));
 	};
@@ -452,6 +488,48 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		ticket() ? evaluateTicketReadiness(docs(), ticket(), { gitFiles: gitStatus()?.files, root: state.workspace?.root }) : null,
 	);
 	const [readinessOpen, setReadinessOpen] = createSignal(false);
+	// Reverse Schema -> Code & Registries usages card for documented `schema/` files (Wave 3.1).
+	const schemaIdent = createMemo(() => {
+		const doc = listed();
+		if (!doc || doc.group !== "schema" || isCatalog(doc)) return "";
+		return baseName(doc.path).replace(/\.(md|markdown)$/i, "").trim();
+	});
+	const [schemaUsagesOpen, setSchemaUsagesOpen] = createSignal(false);
+	const [schemaUsages] = createResource(
+		() => {
+			const ident = schemaIdent();
+			const root = state.workspace?.root;
+			return ident && root ? { ident, root, version: state.treeVersion } : null;
+		},
+		async ({ ident, root }) => {
+			const cleanDir = (dir?: string) => (dir ?? "").replace(/^[./\\]+|[\\/]+$/g, "").replace(/\\/g, "/");
+			const dRel = cleanDir(state.project?.docs ?? "docs");
+			const pRel = cleanDir(state.project?.plans ?? "design");
+			const sRel = cleanDir(state.project?.schema ?? "schema");
+			const exclude = [dRel ? `${dRel}/**` : "", pRel ? `${pRel}/**` : "", sRel ? `${sRel}/**` : "", "README.md", "AGENTS.md", "**/INDEX.md"]
+				.filter(Boolean)
+				.join(", ");
+			const hits = await backend.search(ident, { wholeWord: true, exclude }).catch(() => []);
+			const byFile = new Map<string, { path: string; rel: string; line: number; count: number }>();
+			for (const h of hits) {
+				const k = canonical(h.path);
+				const prev = byFile.get(k);
+				if (!prev) byFile.set(k, { path: h.path, rel: relativeTo(root, h.path).replace(/\\/g, "/"), line: h.line, count: 1 });
+				else prev.count++;
+			}
+			// Also find CSV registry docs whose `codeRefs` mention this table/object (e.g. `database.csv`).
+			const regHits = docs()
+				.filter(
+					(d) =>
+						d.exists &&
+						d.group === "registries" &&
+						!isCatalog(d) &&
+						d.codeRefs?.some((ref) => ref.toLowerCase() === ident.toLowerCase() || ref.toLowerCase().endsWith(`.${ident.toLowerCase()}`)),
+				)
+				.map((d) => ({ path: d.path, rel: registryTitle(d.name), line: 1, count: 0 }));
+			return { code: [...byFile.values()], registries: regHits };
+		},
+	);
 	const exportMenuItems = () => [
 		{ label: "Copy as rich HTML", run: () => void exportDocAs(props.path, "html-copy") },
 		{ label: "Copy as Jira / Confluence markup", run: () => void exportDocAs(props.path, "jira-copy") },
@@ -463,6 +541,10 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 					"separator" as const,
 					{ label: `Export ${ticket()} packet (HTML)…`, run: () => void exportTicketPacket(props.path, ticket(), "html") },
 					{ label: `Export ${ticket()} packet (Markdown)…`, run: () => void exportTicketPacket(props.path, ticket(), "markdown") },
+					"separator" as const,
+					{ label: `Deployment manifest (Markdown)…`, run: () => void exportDeploymentManifest(props.path, ticket(), "markdown") },
+					{ label: `Deployment manifest (CSV)…`, run: () => void exportDeploymentManifest(props.path, ticket(), "csv") },
+					{ label: `Deployment manifest (HTML)…`, run: () => void exportDeploymentManifest(props.path, ticket(), "html") },
 				]
 			: []),
 	];
@@ -470,22 +552,35 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		const me = listed();
 		const groups = work();
 		if (!ticket() || !me) return [];
+		const allDocs = docs();
 		const parts: string[] = [];
-		const subs = groups.find((g) => g.kind === "subticket")?.files ?? [];
-		if (subs.length) {
-			const done = subs.filter((s) => toneOf(s.status) === "done").length;
-			parts.push(`${done}/${subs.length} sub-tickets done`);
+		const descendants = descendantTickets(allDocs, ticket());
+		const activeSubs = descendants.filter((s) => toneOf(s.status) !== "off");
+		if (activeSubs.length) {
+			const done = activeSubs.filter((s) => toneOf(s.status) === "done").length;
+			parts.push(`${done}/${activeSubs.length} sub-tickets done`);
 		}
-		if (me.tasks && me.tasks.total > 0) parts.push(`${me.tasks.done}/${me.tasks.total} checklist items`);
+		const scopeDocs = [me, ...activeSubs];
+		const taskTotal = scopeDocs.reduce((sum, d) => sum + (d.tasks?.total ?? 0), 0);
+		const taskDone = scopeDocs.reduce((sum, d) => sum + (d.tasks?.done ?? 0), 0);
+		if (taskTotal > 0) parts.push(`${taskDone}/${taskTotal} checklist items`);
 		const openQs = groups.find((g) => g.kind === "question")?.files.length ?? 0;
 		if (openQs > 0) parts.push(`${openQs} open ${openQs === 1 ? "question" : "questions"}`);
-		const regRows = (groups.find((g) => g.kind === "registry")?.files ?? []).reduce(
-			(acc, reg) => {
-				const hit = reg.forTickets?.find((r) => r.key.toLowerCase() === ticket().toLowerCase());
-				return { total: acc.total + (hit?.rows ?? 0), done: acc.done + (hit?.done ?? 0) };
-			},
-			{ total: 0, done: 0 },
-		);
+		const scopeKeySet = new Set(scopeDocs.map((d) => d.ticket?.toLowerCase()).filter(Boolean) as string[]);
+		const regRows = allDocs
+			.filter((d) => d.exists && d.group === "registries" && !isCatalog(d) && d.forTickets?.length)
+			.reduce(
+				(acc, reg) => {
+					for (const hit of reg.forTickets ?? []) {
+						if (scopeKeySet.has(hit.key.toLowerCase())) {
+							acc.total += hit.rows;
+							acc.done += hit.done ?? 0;
+						}
+					}
+					return acc;
+				},
+				{ total: 0, done: 0 },
+			);
 		if (regRows.total > 0) parts.push(`${regRows.done}/${regRows.total} registry rows done`);
 		return parts;
 	});
@@ -967,10 +1062,10 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 				const raw = linkEl.dataset.mdHref ?? linkEl.getAttribute("href") ?? linkEl.dataset.mdWiki ?? linkEl.dataset.mdTicket ?? "";
 				await copyText(raw, "Copied the link.");
 			} else if (picked === EDIT) {
-				setMarkdownMode(props.path, "live");
+				setMarkdownMode(props.path, "live", props.group);
 				setState("activeGroup", props.group);
 				queueMicrotask(() => cmView?.focus());
-			} else if (picked === TO_SOURCE) setMarkdownMode(props.path, "source");
+			} else if (picked === TO_SOURCE) setMarkdownMode(props.path, "source", props.group);
 			else if (picked === SHOW) (await import("../panels/Explorer")).showInExplorer(props.path);
 			else await copyPath(picked === PATH ? "whole" : picked === NAME ? "name" : "relative", props.path);
 			return;
@@ -982,8 +1077,21 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		const clickLine = cmView.state.doc.lineAt(clickPos ?? main.head).number;
 		const clickedFence = fenceAtLine(cmView.state.doc.toString(), clickLine);
 		const canFormatFence = Boolean(clickedFence && fenceFormatTarget(clickedFence.rawLang) && clickedFence.bodyStartLine <= clickedFence.bodyEndLine);
+		const cursorLink = linkAtOffset(cmView.state, clickPos ?? main.head);
+		const clickedHref = linkEl?.dataset.mdHref ?? linkEl?.getAttribute("href") ?? (cursorLink?.kind === "href" ? cursorLink.href : undefined);
+		const brokenHit = clickedHref
+			? listed()?.broken?.find((b) => b.href === clickedHref && b.line === clickLine) ??
+				listed()?.broken?.find((b) => b.href === clickedHref)
+			: undefined;
+		const brokenLeads = brokenHit ? linkLeads(brokenHit.href, props.path, state.workspace?.root) : null;
+		const missingTargetPath =
+			brokenLeads && "file" in brokenLeads && state.workspace?.root && isInside(state.workspace.root, brokenLeads.file)
+				? brokenLeads.file
+				: null;
 
 		const OPEN_LINK = "Open link";
+		const FIX_BROKEN = brokenHit?.instead ? `Fix broken link → ${brokenHit.instead}` : "";
+		const CREATE_MISSING = missingTargetPath ? `Create missing file ${relativeTo(state.workspace?.root, missingTargetPath).replace(/\\/g, "/")}` : "";
 		const ADD_PROPS = "Add YAML properties…";
 		const FORMAT_BLOCK = clickedFence?.rawLang ? `Format ${clickedFence.rawLang} code block` : "Format code block";
 		const FORMAT_DOC = "Format document (Ctrl+Shift+I)";
@@ -1008,7 +1116,9 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		const SHOW = "Show in the Explorer";
 
 		const items = [
-			...(linkEl ? [OPEN_LINK] : []),
+			...(FIX_BROKEN ? [FIX_BROKEN] : []),
+			...(CREATE_MISSING ? [CREATE_MISSING] : []),
+			...(linkEl || cursorLink ? [OPEN_LINK] : []),
 			...(!yamlSpan() ? [ADD_PROPS] : []),
 			...(canFormatFence ? [FORMAT_BLOCK] : []),
 			...(hasSelection ? [CUT, COPY] : []),
@@ -1035,15 +1145,37 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		const picked = await chooseFromMenu(`Actions for ${baseName(props.path)}`, items, at);
 		if (!picked || !cmView) return;
 
-		if (picked === OPEN_LINK && linkEl) {
-			if (linkEl.dataset.mdWiki) void followWiki(linkEl.dataset.mdWiki);
-			else if (linkEl.dataset.mdHref) void followLink(linkEl.dataset.mdHref);
-			else if (linkEl.dataset.mdTicket) followTicket(linkEl.dataset.mdTicket);
-			else if (linkEl.getAttribute("href")) void followLink(linkEl.getAttribute("href")!);
+		if (picked === FIX_BROKEN && brokenHit?.instead) {
+			const cur = cmView.state.doc.toString();
+			const fixed = withLinkFile(cur, brokenHit.line || clickLine, brokenHit.href, brokenHit.instead, brokenHit.column);
+			if (fixed !== null && fixed !== cur) {
+				cmView.dispatch({ changes: { from: 0, to: cur.length, insert: fixed }, userEvent: "input.fix" });
+				notify(`Fixed broken link → ${brokenHit.instead}.`);
+			}
+		} else if (picked === CREATE_MISSING && missingTargetPath) {
+			try {
+				await backend.create(missingTargetPath, "file");
+				if (/\.(md|markdown)$/i.test(missingTargetPath)) {
+					const titleStem = baseName(missingTargetPath).replace(/\.(md|markdown)$/i, "");
+					await backend.write(missingTargetPath, `# ${titleStem}\n\n`);
+				}
+				setState("treeVersion", (v) => v + 1);
+				await openFile(missingTargetPath);
+			} catch (err: any) {
+				notify(`Could not create file: ${err?.message ?? err}`, "error");
+			}
+		} else if (picked === OPEN_LINK) {
+			if (linkEl?.dataset.mdWiki) void followWiki(linkEl.dataset.mdWiki);
+			else if (linkEl?.dataset.mdHref) void followLink(linkEl.dataset.mdHref);
+			else if (linkEl?.dataset.mdTicket) followTicket(linkEl.dataset.mdTicket);
+			else if (linkEl?.getAttribute("href")) void followLink(linkEl.getAttribute("href")!);
+			else if (cursorLink?.kind === "wiki") void followWiki(cursorLink.inner);
+			else if (cursorLink?.kind === "href") void followLink(cursorLink.href);
+			else if (cursorLink?.kind === "ticket") followTicket(cursorLink.key);
 		} else if (picked === ADD_PROPS) {
 			const eol = model?.getEOL() ?? "\n";
 			const stem = baseName(props.path).replace(/\.(md|markdown)$/i, "");
-			const starter = `---${eol}title: ${stem}${eol}---${eol}${eol}`;
+			const starter = `---${eol}title: ${quoteYamlScalar(stem)}${eol}---${eol}${eol}`;
 			if (model) {
 				model.pushStackElement();
 				model.pushEditOperations([], [{ range: new monaco.Range(1, 1, 1, 1), text: starter, forceMoveMarkers: true }], () => null);
@@ -1073,12 +1205,14 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		else if (picked === LINK) runCmAction(cmView, "md-link");
 		else if (picked === CHECKBOX) runCmAction(cmView, "md-checkbox");
 		else if (picked === ASK_AGENT) void import("../commands").then((m) => m.runCommand("agent-ask"));
-		else if (picked === TO_READ) setMarkdownMode(props.path, "read");
-		else if (picked === TO_SOURCE) setMarkdownMode(props.path, "source");
+		else if (picked === TO_READ) setMarkdownMode(props.path, "read", props.group);
+		else if (picked === TO_SOURCE) setMarkdownMode(props.path, "source", props.group);
 		else if (picked === SHOW) void import("../panels/Explorer").then((m) => m.showInExplorer(props.path));
 	};
 
-	// --- Sync CM6 Transaction -> Monaco ITextModel (CRLF-safe) ---------------
+	// --- Sync CM6 Transaction -> Monaco ITextModel (CRLF-safe, typing-coalesced undo) ---
+	let lastSyncKind = "";
+	let lastSyncAt = 0;
 	const pushTransactionToModel = (tr: Transaction) => {
 		if (!model || !tr.docChanged || syncingFromModel) return;
 		const startDoc = tr.startState.doc;
@@ -1093,11 +1227,16 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			});
 		});
 		if (!edits.length) return;
+		const now = Date.now();
+		const kind = tr.isUserEvent("input.type") ? "type" : tr.isUserEvent("delete.backward") ? "del" : "other";
+		const coalesce = (kind === "type" || kind === "del") && kind === lastSyncKind && now - lastSyncAt < 450;
+		lastSyncKind = kind;
+		lastSyncAt = now;
 		syncingFromCm = true;
 		try {
-			model.pushStackElement();
+			if (!coalesce) model.pushStackElement();
 			model.pushEditOperations([], edits, () => null);
-			model.pushStackElement();
+			if (kind === "other") model.pushStackElement();
 			setText(model.getValue());
 		} finally {
 			syncingFromCm = false;
@@ -1327,6 +1466,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 					onFormatCode: (openLine) => formatCodeBlockAt(openLine),
 					onToggleCheckbox: toggleCheckboxAt,
 					onOpenImageLightbox: (info) => setLightbox({ ...info, zoomFull: false }),
+					onOpenMermaidLightbox: (info) => setMermaidBox({ ...info, scale: 1, x: 0, y: 0 }),
 					onResizeImage: resizeImageAt,
 				}),
 				liveBlockField,
@@ -1393,7 +1533,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 				cmView.dispatch({
 					changes: { from: 0, to: cur.length, insert: next },
 					selection: EditorSelection.range(Math.min(main.anchor, next.length), Math.min(main.head, next.length)),
-					annotations: externalSyncAnnotation.of(true),
+					annotations: [externalSyncAnnotation.of(true), Transaction.addToHistory.of(false)],
 				});
 			} finally {
 				syncingFromModel = false;
@@ -1405,9 +1545,19 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		});
 
 		const onKeyDownGlobal = (e: KeyboardEvent) => {
+			if (e.key === "Escape" && mermaidBox()) {
+				e.preventDefault();
+				setMermaidBox(null);
+				return;
+			}
 			if (e.key === "Escape" && lightbox()) {
 				e.preventDefault();
 				setLightbox(null);
+				return;
+			}
+			if (e.key === "Escape" && cmView && searchPanelOpen(cmView.state)) {
+				e.preventDefault();
+				closeSearchPanel(cmView);
 				return;
 			}
 			if (
@@ -1823,9 +1973,24 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 																		<Show
 																			when={fact.key === "status" && listed()}
 																			fallback={
-																				<span classList={{ "doc-status": fact.key === "status", [`tone-${toneOf(value)}`]: fact.key === "status" }}>
-																					{value}
-																				</span>
+																				<Show
+																					when={!isRead() && !isListProperty(fact.key)}
+																					fallback={
+																						<span classList={{ "doc-status": fact.key === "status", [`tone-${toneOf(value)}`]: fact.key === "status" }}>
+																							{value}
+																						</span>
+																					}
+																				>
+																					<button
+																						type="button"
+																						class="cm-md-prop-scalar-btn"
+																						classList={{ "doc-status": fact.key === "status", [`tone-${toneOf(value)}`]: fact.key === "status" }}
+																						title={`Click to edit ${fact.key}`}
+																						onClick={() => void editScalarPropertyInteractive(fact.key, value)}
+																					>
+																						{value}
+																					</button>
+																				</Show>
 																			}
 																		>
 																			<Menu
@@ -1857,7 +2022,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 																		{target.display ?? value}
 																	</button>
 																</Show>
-																<Show when={!isRead() && fact.key !== "status" && fact.key !== "title" && fact.key !== "ticket"}>
+																<Show when={!isRead() && !(fact.key === "status" && listed()) && fact.key !== "title" && fact.key !== "ticket"}>
 																	<button
 																		type="button"
 																		class="cm-md-prop-rm"
@@ -1872,7 +2037,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 														);
 													}}
 												</For>
-												<Show when={!isRead() && LIST_PROP_KEYS.has(fact.key)}>
+												<Show when={!isRead() && isListProperty(fact.key)}>
 													<button
 														type="button"
 														class="cm-md-prop-add"
@@ -2013,8 +2178,14 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 										{ label: "New question…", run: () => void newKnowledge("questions", { ticket: ticket() }) },
 										{ label: "Add registry row…", run: () => void addRegistryRowForTicket(ticket()) },
 										"separator",
+										{ label: "Export deployment manifest (Markdown)…", run: () => void exportDeploymentManifest(props.path, ticket(), "markdown") },
+										{ label: "Export deployment manifest (CSV)…", run: () => void exportDeploymentManifest(props.path, ticket(), "csv") },
 										{ label: "Export release packet (HTML)…", run: () => void exportTicketPacket(props.path, ticket(), "html") },
-										{ label: "Export release packet (Markdown)…", run: () => void exportTicketPacket(props.path, ticket(), "markdown") },
+										"separator",
+										{ label: "Close out ticket…", run: () => void closeoutTicket(props.path, ticket()) },
+										...(listed() && isArchivedTicket(listed())
+											? [{ label: "Unarchive ticket…", run: () => void unarchiveTicket(listed()!) }]
+											: []),
 									]}
 								>
 									<Icon name="add" />
@@ -2287,6 +2458,56 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 					</section>
 				</Show>
 
+				{/* Reverse Schema -> Code & Registries bridge: shows scripts, data sources, SQL, and database.csv rows referencing this schema table. */}
+				<Show when={schemaIdent() && ((schemaUsages()?.code.length ?? 0) + (schemaUsages()?.registries.length ?? 0) > 0) ? schemaUsages() : undefined}>
+					{(usages) => {
+						const totalRefs = () => usages().code.length + usages().registries.length;
+						return (
+							<section class="md-linked-tickets md-schema-usages" aria-label="Used in code and registries">
+								<div class="md-linked-head">
+									<button
+										type="button"
+										class="md-readiness-toggle"
+										aria-expanded={schemaUsagesOpen()}
+										onClick={() => setSchemaUsagesOpen((v) => !v)}
+									>
+										<Icon name={schemaUsagesOpen() ? "chevron-down" : "chevron-right"} />
+										<span>Used in code &amp; registries</span>
+										<span class="doc-status tone-active">{totalRefs()}</span>
+									</button>
+								</div>
+								<Show when={schemaUsagesOpen()}>
+									<ul>
+										<For each={usages().registries}>
+											{(r) => (
+												<li>
+													<button class="link" onClick={() => void openFile(r.path)}>
+														{r.rel}
+													</button>
+													<span class="md-work-via">registry</span>
+												</li>
+											)}
+										</For>
+										<For each={usages().code}>
+											{(c) => (
+												<li>
+													<button class="link" title={`${c.rel}:${c.line}`} onClick={() => void openFile(c.path, { reveal: { line: c.line } })}>
+														{c.rel}
+													</button>
+													<span class="md-work-via">
+														L{c.line}
+														{c.count > 1 ? ` · ${c.count} refs` : ""}
+													</span>
+												</li>
+											)}
+										</For>
+									</ul>
+								</Show>
+							</section>
+						);
+					}}
+				</Show>
+
 				{/* Unified CodeMirror 6 surface (powers both Live Preview and Read mode). */}
 				<div ref={cmMountEl} class="cm-md-editor-wrap" />
 
@@ -2442,6 +2663,129 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 							</div>
 							<div class="md-lightbox-stage" classList={{ "is-full": Boolean(box().zoomFull) }} onClick={(e) => e.target === e.currentTarget && setLightbox(null)}>
 								<img src={box().src} alt={box().alt} />
+							</div>
+						</div>
+					</Portal>
+				)}
+			</Show>
+			{/* Mermaid Zoom / Pan Diagram Lightbox Modal */}
+			<Show when={mermaidBox()}>
+				{(box) => (
+					<Portal>
+						<div
+							class="md-lightbox-backdrop"
+							role="dialog"
+							aria-modal="true"
+							aria-label="Mermaid diagram zoom viewer"
+							onClick={(e) => {
+								if (e.target === e.currentTarget) setMermaidBox(null);
+							}}
+						>
+							<div class="md-lightbox-bar">
+								<span class="md-lightbox-caption">Mermaid diagram</span>
+								<span class="md-lightbox-path">{Math.round(box().scale * 100)}% · scroll to zoom, drag to pan</span>
+								<span class="spacer" />
+								<button
+									type="button"
+									class="md-lightbox-btn"
+									title="Zoom out"
+									onClick={() => setMermaidBox((c) => (c ? { ...c, scale: Math.max(0.25, +(c.scale - 0.25).toFixed(2)) } : null))}
+								>
+									<Icon name="zoom-out" />
+								</button>
+								<button
+									type="button"
+									class="md-lightbox-btn"
+									title="Zoom in"
+									onClick={() => setMermaidBox((c) => (c ? { ...c, scale: Math.min(4, +(c.scale + 0.25).toFixed(2)) } : null))}
+								>
+									<Icon name="zoom-in" />
+								</button>
+								<button
+									type="button"
+									class="md-lightbox-btn"
+									title="Reset zoom and pan"
+									onClick={() => setMermaidBox((c) => (c ? { ...c, scale: 1, x: 0, y: 0 } : null))}
+								>
+									<Icon name="refresh" />
+									<span>Reset</span>
+								</button>
+								<button
+									type="button"
+									class="md-lightbox-btn"
+									title="Copy SVG markup"
+									onClick={() => void import("../commands").then((m) => m.copyText(box().svg, "Copied Mermaid SVG."))}
+								>
+									<Icon name="copy" />
+									<span>Copy SVG</span>
+								</button>
+								<button
+									type="button"
+									class="md-lightbox-btn"
+									title="Download SVG file"
+									onClick={() => {
+										const stem = baseName(props.path).replace(/\.(md|markdown)$/i, "");
+										downloadMermaidBlob(new Blob([box().svg], { type: "image/svg+xml;charset=utf-8" }), `${stem}-diagram.svg`);
+										notify(`Saved ${stem}-diagram.svg.`);
+									}}
+								>
+									<span>Save SVG</span>
+								</button>
+								<button
+									type="button"
+									class="md-lightbox-btn"
+									title="Copy diagram as PNG (falls back to download)"
+									onClick={() =>
+										void copyMermaidAsPng(box().svg).then((res) =>
+											notify(
+												res === "copied"
+													? "Copied diagram PNG to clipboard."
+													: res === "downloaded"
+														? "Downloaded diagram.png."
+														: "Could not render diagram PNG.",
+												res === "failed" ? "error" : "info",
+											),
+										)
+									}
+								>
+									<span>Copy PNG</span>
+								</button>
+								<button type="button" class="md-lightbox-btn" title="Close preview (Esc)" aria-label="Close diagram preview" onClick={() => setMermaidBox(null)}>
+									<Icon name="close" />
+								</button>
+							</div>
+							<div
+								class="md-lightbox-stage md-mermaid-lightbox-stage"
+								onWheel={(e) => {
+									e.preventDefault();
+									const delta = e.deltaY < 0 ? 0.15 : -0.15;
+									setMermaidBox((c) => (c ? { ...c, scale: Math.max(0.25, Math.min(4, +(c.scale + delta).toFixed(2))) } : null));
+								}}
+								onPointerDown={(e) => {
+									if (e.button !== 0) return;
+									const cur = mermaidBox();
+									if (!cur) return;
+									mermaidPan = { startX: e.clientX, startY: e.clientY, origX: cur.x, origY: cur.y };
+									(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+								}}
+								onPointerMove={(e) => {
+									if (!mermaidPan) return;
+									const dx = e.clientX - mermaidPan.startX;
+									const dy = e.clientY - mermaidPan.startY;
+									setMermaidBox((c) => (c ? { ...c, x: mermaidPan!.origX + dx, y: mermaidPan!.origY + dy } : null));
+								}}
+								onPointerUp={() => {
+									mermaidPan = null;
+								}}
+								onPointerCancel={() => {
+									mermaidPan = null;
+								}}
+							>
+								<div
+									class="md-mermaid-lightbox-canvas"
+									style={{ transform: `translate(${box().x}px, ${box().y}px) scale(${box().scale})` }}
+									innerHTML={box().svg}
+								/>
 							</div>
 						</div>
 					</Portal>

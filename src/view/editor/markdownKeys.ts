@@ -88,6 +88,35 @@ export function runMonacoMarkdownAction(editor: monaco.editor.IStandaloneCodeEdi
 			editor.focus();
 			return true;
 		}
+		case "md-insert-footnote": {
+			const sel = editor.getSelection();
+			if (!sel) return false;
+			const full = model.getValue();
+			let maxNum = 0;
+			for (const m of full.matchAll(/\[\^(\d+)\]/g)) {
+				const n = Number(m[1]);
+				if (Number.isFinite(n) && n > maxNum) maxNum = n;
+			}
+			const ref = `[^${maxNum + 1}]`;
+			const eol = model.getEOL();
+			const lastLine = model.getLineCount();
+			const lastCol = model.getLineMaxColumn(lastLine);
+			const sep = full.endsWith(`${eol}${eol}`) ? "" : full.endsWith(eol) ? eol : `${eol}${eol}`;
+			const def = `${sep}${ref}: `;
+			editor.pushUndoStop();
+			editor.executeEdits("md-insert-footnote", [
+				{ range: sel, text: ref, forceMoveMarkers: true },
+				{ range: new monaco.Range(lastLine, lastCol, lastLine, lastCol), text: def, forceMoveMarkers: true },
+			]);
+			const newLast = model.getLineCount();
+			const newEndCol = model.getLineMaxColumn(newLast);
+			const endPos = { lineNumber: newLast, column: newEndCol };
+			editor.setPosition(endPos);
+			editor.revealPositionInCenterIfOutsideViewport(endPos);
+			editor.pushUndoStop();
+			editor.focus();
+			return true;
+		}
 		default:
 			return false;
 	}

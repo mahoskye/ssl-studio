@@ -75,14 +75,17 @@ function pickPrimaryTicket(folderName: string, directMd: readonly ScannedTicketE
 		return idx < 0 ? e.rel : e.rel.slice(idx + 1);
 	};
 	const nonCatalogMd = directMd.filter((e) => fold(base(e)) !== fold(CATALOG_FILE));
+	// A grouping/archive bucket (`archive/`, `2026/`, `sprint-12/`) holds separate tickets:
+	// never let a `README.md`, `ticket.md`, or lone ticket file hijack the entire folder.
+	if (GROUPING_FOLDER_RE.test(folderName.trim())) {
+		return nonCatalogMd.find((e) => e.frontTicket && fold(e.frontTicket) === fold(folderName));
+	}
 	const explicitMatch =
 		nonCatalogMd.find((e) => fold(stem(base(e))) === fold(folderName)) ??
 		nonCatalogMd.find((e) => e.frontTicket && fold(e.frontTicket) === fold(folderName)) ??
 		nonCatalogMd.find((e) => fold(stem(base(e))) === "ticket" || fold(stem(base(e))) === "readme");
 	if (explicitMatch) return explicitMatch;
-	// Rule (d): a lone direct .md with explicit `ticket:` frontmatter claims the folder,
-	// EXCEPT when the folder name is a generic grouping/archive bucket (`archive/`, `2026/`, `sprint-12/`).
-	if (GROUPING_FOLDER_RE.test(folderName.trim())) return undefined;
+	// Rule (d): a lone direct .md with explicit `ticket:` frontmatter claims the folder.
 	const withKey = nonCatalogMd.filter((e) => Boolean(e.frontTicket?.trim()));
 	return withKey.length === 1 ? withKey[0] : undefined;
 }

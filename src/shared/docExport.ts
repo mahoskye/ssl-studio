@@ -3,10 +3,11 @@
 // - Clean standalone print-ready HTML (PDF-ready via hidden iframe / browser print)
 // - STARLIMS Release Readiness Gate evaluator
 // - Ticket Release Packet assembler (ticket + readiness + specs + plans + sub-tickets + decisions + questions + registries + folder manifest)
+import { csvRow } from "./csv";
 import { frontMatter } from "./frontMatter";
 import { isCatalog, registryTitle, toneOf } from "./projectDocs";
 import type { DocFile } from "./protocol";
-import { codeMatchesRef, scriptsForTicket, ticketWork, workFor } from "./workContext";
+import { codeMatchesRef, descendantTickets, scriptsForTicket, ticketWork, workFor } from "./workContext";
 
 /** Escapes HTML special characters for safe interpolation inside exported HTML shells. */
 export function escapeHtml(text: string): string {
@@ -55,53 +56,90 @@ export function markdownToJira(markdown: string): string {
 	const lines = raw.split("\n");
 	const out: string[] = [];
 	let i = 0;
-	let listIndents: number[] = [];
-
-	const listDepth = (indentStr: string): number => {
+	const listStack: { width: number; mark: "*" | "#" }[] = [];
+	const listPrefix = (indentStr: string, mark: "*" | "#"): string => {
 		const width = indentStr.replace(/\t/g, "    ").length;
-		if (!listIndents.length) {
-			listIndents = [width];
-			return 1;
+		while (listStack.length > 0 && width < listStack[listStack.length - 1]!.width) {
+			listStack.pop();
 		}
-		while (listIndents.length > 1 && width < listIndents[listIndents.length - 1]!) {
-			listIndents.pop();
+		if (!listStack.length || width > listStack[listStack.length - 1]!.width) {
+			listStack.push({ width, mark });
+		} else {
+			listStack[listStack.length - 1]!.mark = mark;
 		}
-		if (width > listIndents[listIndents.length - 1]!) {
-			listIndents.push(width);
-		}
-		return listIndents.length;
+		return listStack.map((item) => item.mark).join("");
 	};
 
-	const inline = (line: string): string => {
-		// Protect inline code spans before transforming emphasis/links.
+	const inline = (line: string, inTableCell = false): string => {
+		// Strip HTML comments (e.g. <!-- toc -->) from prose.
+		let s = line.replace(/<!--[\s\S]*?-->/g, "");
+		// Protect inline code spans of ANY backtick run length (`...`, ``a `b` c``) before transforming emphasis/links.
 		const spans: string[] = [];
-		let s = line.replace(/`([^`]+)`/g, (_, code: string) => {
-			const token = `\u0000CODE${spans.length}\u0000`;
-			spans.push(`{{${code}}}`);
-			return token;
-		});
+		let masked = "";
+		let ci = 0;
+		while (ci < s.length) {
+			if (s[ci] === "`") {
+				let run = 0;
+				while (ci + run < s.length && s[ci + run] === "`") run++;
+				let j = ci + run;
+				let close = -1;
+				while (j < s.length) {
+					if (s[j] !== "`") {
+						j++;
+						continue;
+					}
+					let cRun = 0;
+					while (j + cRun < s.length && s[j + cRun] === "`") cRun++;
+					if (cRun === run) {
+						close = j;
+						break;
+					}
+					j += cRun;
+				}
+				if (close >= 0) {
+					let code = s.slice(ci + run, close);
+					if (code.length >= 2 && code.startsWith(" ") && code.endsWith(" ") && /[^ ]/.test(code)) {
+						code = code.slice(1, -1);
+					}
+					if (inTableCell) code = code.replace(/\|/g, "\\|");
+					const token = `\u0000CODE${spans.length}\u0000`;
+					spans.push(`{{${code}}}`);
+					masked += token;
+					ci = close + run;
+					continue;
+				}
+				masked += s.slice(ci, ci + run);
+				ci += run;
+				continue;
+			}
+			masked += s[ci++];
+		}
+		s = masked;
+		// Wiki image embeds ![[diagram.png|400]] -> !diagram.png!
+		s = s.replace(/!\[\[([^[\]|#]+)(?:[^[\]]*)\]\]/g, (_, target: string) => `!${target.trim()}!`);
 		// Wikilinks [[Target|Alias]] or [[Target]]
 		s = s.replace(/\[\[([^[\]|]+)(?:\|([^[\]]+))?\]\]/g, (_, target: string, alias?: string) => (alias ? alias.trim() : target.trim()));
 		// Markdown images ![alt](url) -> !url!
 		s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (_, _alt: string, url: string) => `!${url}!`);
-		// Markdown links [text](url) -> [text|url]
-		s = s.replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (_, label: string, url: string) => `[${label}|${url}]`);
-		// Protect bold & bold-italic BEFORE single-* italic conversion so bold doesn't clash with italic.
+		// Markdown links [text](url) -> [text|url] (protect from table-cell pipe escaping)
 		const protectedTokens: string[] = [];
 		const hold = (val: string) => {
 			const tok = `\u0000FMT${protectedTokens.length}\u0000`;
 			protectedTokens.push(val);
 			return tok;
 		};
-		s = s.replace(/\*\*\*([^*\n]+?)\*\*\*/g, (_, body: string) => hold(`*_${body}_*`));
-		s = s.replace(/\*\*([^*\n]+?)\*\*/g, (_, body: string) => hold(`*${body}*`));
-		s = s.replace(/(^|[^\w])__([^_\n]+?)__(?=[^\w]|$)/g, (_, pre: string, body: string) => `${pre}${hold(`*${body}*`)}`);
-		// Italic *text* -> Jira _text_
-		s = s.replace(/(^|[^\w*])\*([^*\n]+?)\*(?=[^\w*]|$)/g, (_, pre: string, body: string) => `${pre}_${body}_`);
+		s = s.replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (_, label: string, url: string) => hold(`[${label}|${url}]`));
+		if (inTableCell) s = s.replace(/(?<!\\)\|/g, "\\|");
+		// Protect bold & bold-italic BEFORE single-* italic conversion so bold doesn't clash with italic.
+		s = s.replace(/\*\*\*(?=\S)([^*\n]*?\S)\*\*\*/g, (_, body: string) => hold(`*_${body}_*`));
+		s = s.replace(/\*\*(?=\S)([^*\n]*?\S)\*\*/g, (_, body: string) => hold(`*${body}*`));
+		s = s.replace(/(^|[^\w])__(?=\S)([^_\n]*?\S)__(?=[^\w]|$)/g, (_, pre: string, body: string) => `${pre}${hold(`*${body}*`)}`);
+		// Italic *text* -> Jira _text_ (require non-whitespace immediately inside `*...*` so `SELECT * FROM a * b` stays verbatim!)
+		s = s.replace(/(^|[^\w*])\*(?=\S)([^*\n]*?\S)\*(?=[^\w*]|$)/g, (_, pre: string, body: string) => `${pre}_${body}_`);
 		// Strikethrough ~~text~~ -> -text-
-		s = s.replace(/~~([^~\n]+?)~~/g, "-$1-");
+		s = s.replace(/~~(?=\S)([^~\n]*?\S)~~/g, "-$1-");
 		// Highlight ==text== -> {color:#b45309}*text*{color}
-		s = s.replace(/==([^=\n]+?)==/g, "{color:#b45309}*$1*{color}");
+		s = s.replace(/==(?=\S)([^=\n]*?\S)==/g, "{color:#b45309}*$1*{color}");
 		// Restore held tokens & inline code spans
 		s = s.replace(/\u0000FMT(\d+)\u0000/g, (_, idx: string) => protectedTokens[Number(idx)] ?? "");
 		return s.replace(/\u0000CODE(\d+)\u0000/g, (_, idx: string) => spans[Number(idx)] ?? "");
@@ -110,10 +148,10 @@ export function markdownToJira(markdown: string): string {
 	while (i < lines.length) {
 		const line = lines[i]!;
 
-		// Fenced code blocks -> {code:lang}...{code}
-		const fence = /^[ \t]{0,3}(`{3,}|~{3,})([A-Za-z0-9_+-]*)[ \t]*$/.exec(line);
-		if (fence) {
-			listIndents = [];
+		// Fenced code blocks (supports info-string args like ```sql title="x") -> {code:lang}...{code}
+		const fence = /^[ \t]{0,3}(`{3,}|~{3,})[ \t]*([A-Za-z0-9_+-]*)(?:[ \t]+.*)?$/.exec(line);
+		if (fence && !(fence[1]![0] === "`" && line.slice(line.indexOf(fence[1]!) + fence[1]!.length).includes("`"))) {
+			listStack.length = 0;
 			const delim = fence[1]![0]!;
 			const len = fence[1]!.length;
 			const lang = fence[2]!.toLowerCase();
@@ -135,10 +173,16 @@ export function markdownToJira(markdown: string): string {
 			continue;
 		}
 
+		// Skip standalone HTML comment lines (e.g. <!-- toc --> / <!-- /catalog -->).
+		if (/^[ \t]*<!--[\s\S]*?-->[ \t]*$/.test(line)) {
+			i++;
+			continue;
+		}
+
 		// Obsidian / GitHub callout block -> {panel:title=...}...{panel}
 		const callout = /^[ \t]{0,3}>[ \t]*\[!([A-Za-z0-9_-]+)\][+-]?[ \t]*(.*)$/.exec(line);
 		if (callout) {
-			listIndents = [];
+			listStack.length = 0;
 			const kind = callout[1]!.toUpperCase();
 			const title = callout[2]!.trim() || kind;
 			i++;
@@ -155,7 +199,7 @@ export function markdownToJira(markdown: string): string {
 
 		// Standard blockquote
 		if (/^[ \t]{0,3}>[ \t]?/.test(line)) {
-			listIndents = [];
+			listStack.length = 0;
 			const bodyLines: string[] = [];
 			while (i < lines.length && /^[ \t]{0,3}>/.test(lines[i]!)) {
 				bodyLines.push(inline(lines[i]!.replace(/^[ \t]{0,3}>[ \t]?/, "")));
@@ -167,8 +211,8 @@ export function markdownToJira(markdown: string): string {
 
 		// GFM pipe table
 		if (line.includes("|") && i + 1 < lines.length && /^[ \t]*\|?[ \t:|-]+\|[ \t:|-]*$/.test(lines[i + 1]!)) {
-			listIndents = [];
-			const splitRow = (row: string) => splitMarkdownTableCells(row).map((c) => inline(c));
+			listStack.length = 0;
+			const splitRow = (row: string) => splitMarkdownTableCells(row).map((c) => inline(c, true));
 			const headers = splitRow(line);
 			out.push(`||${headers.join("||")}||`);
 			i += 2;
@@ -183,7 +227,7 @@ export function markdownToJira(markdown: string): string {
 		// ATX headings #..###### -> h1..h6.
 		const heading = /^(#{1,6})\s+(.*)$/.exec(line);
 		if (heading) {
-			listIndents = [];
+			listStack.length = 0;
 			out.push(`h${heading[1]!.length}. ${inline(heading[2]!.replace(/\s+#+\s*$/, "").trim())}`);
 			i++;
 			continue;
@@ -191,7 +235,7 @@ export function markdownToJira(markdown: string): string {
 
 		// Horizontal rule
 		if (/^[ \t]*(?:[-*_][ \t]*){3,}$/.test(line)) {
-			listIndents = [];
+			listStack.length = 0;
 			out.push("----");
 			i++;
 			continue;
@@ -200,9 +244,9 @@ export function markdownToJira(markdown: string): string {
 		// Task list items -> * (/) or * (-)
 		const task = /^([ \t]*)[-*+]\s+\[([ xX])\]\s+(.*)$/.exec(line);
 		if (task) {
-			const depth = listDepth(task[1]!);
+			const prefix = listPrefix(task[1]!, "*");
 			const mark = task[2]!.toLowerCase() === "x" ? "(/)" : "(-)";
-			out.push(`${"*".repeat(depth)} ${mark} ${inline(task[3]!)}`);
+			out.push(`${prefix} ${mark} ${inline(task[3]!)}`);
 			i++;
 			continue;
 		}
@@ -210,8 +254,8 @@ export function markdownToJira(markdown: string): string {
 		// Unordered lists
 		const ul = /^([ \t]*)[-*+]\s+(.*)$/.exec(line);
 		if (ul) {
-			const depth = listDepth(ul[1]!);
-			out.push(`${"*".repeat(depth)} ${inline(ul[2]!)}`);
+			const prefix = listPrefix(ul[1]!, "*");
+			out.push(`${prefix} ${inline(ul[2]!)}`);
 			i++;
 			continue;
 		}
@@ -219,13 +263,13 @@ export function markdownToJira(markdown: string): string {
 		// Ordered lists
 		const ol = /^([ \t]*)\d+[.)]\s+(.*)$/.exec(line);
 		if (ol) {
-			const depth = listDepth(ol[1]!);
-			out.push(`${"#".repeat(depth)} ${inline(ol[2]!)}`);
+			const prefix = listPrefix(ol[1]!, "#");
+			out.push(`${prefix} ${inline(ol[2]!)}`);
 			i++;
 			continue;
 		}
 
-		if (!line.trim()) listIndents = [];
+		if (!line.trim()) listStack.length = 0;
 		out.push(inline(line));
 		i++;
 	}
@@ -272,10 +316,12 @@ export function buildPrintableHtml(title: string, bodyHtml: string, subtitle?: s
   pre code { background: none; padding: 0; font-size: 0.86em; }
   blockquote { margin-left: 0; padding: 8px 14px; border-left: 3px solid #94a3b8; background: #f8fafc; color: #334155; break-inside: avoid; page-break-inside: avoid; }
   .md-callout { margin: 0 0 1em; padding: 10px 14px; border-radius: 6px; border: 1px solid #cbd5e1; border-left: 4px solid #2563eb; background: #eff6ff; break-inside: avoid; page-break-inside: avoid; }
-  .md-callout-warning, .md-callout-caution { border-left-color: #d97706; background: #fffbeb; }
-  .md-callout-danger, .md-callout-failure, .md-callout-bug { border-left-color: #dc2626; background: #fef2f2; }
-  .md-callout-tip, .md-callout-success, .md-callout-check { border-left-color: #16a34a; background: #f0fdf4; }
-  .md-callout-title { font-weight: 600; margin-bottom: 4px; color: #0f172a; }
+  .md-callout.tone-warning, .md-callout.tone-warn, .md-callout-warning, .md-callout-caution { border-left-color: #d97706; background: #fffbeb; }
+  .md-callout.tone-danger, .md-callout.tone-error, .md-callout-danger, .md-callout-failure, .md-callout-bug { border-left-color: #dc2626; background: #fef2f2; }
+  .md-callout.tone-tip, .md-callout.tone-success, .md-callout.tone-done, .md-callout-tip, .md-callout-success, .md-callout-check { border-left-color: #16a34a; background: #f0fdf4; }
+  .md-callout.tone-quote, .md-callout.tone-muted, .md-callout-quote { border-left-color: #64748b; background: #f8fafc; }
+  .md-callout-head, .md-callout-title { display: flex; align-items: center; gap: 6px; font-weight: 600; margin-bottom: 4px; color: #0f172a; }
+  .md-callout-icon { font-style: normal; font-weight: 700; }
   .md-callout > :last-child { margin-bottom: 0; }
   mark, .md-highlight { background: #fef08a; color: #18181b; padding: 0.05em 0.25em; border-radius: 3px; }
   .md-tag { display: inline-block; padding: 1px 6px; border-radius: 999px; font-size: 0.84em; background: #f4f4f5; color: #3f3f46; border: 1px solid #e4e4e7; }
@@ -345,17 +391,35 @@ export function evaluateTicketReadiness(
 		});
 	}
 
-	// 2. Sub-tickets done
-	const subtickets = groups.find((g) => g.kind === "subticket")?.files ?? [];
-	if (subtickets.length) {
-		const open = subtickets.filter((s) => toneOf(s.status) !== "done");
+	// 2. Sub-tickets done — walks recursive descendants (epic -> story -> task), excluding dropped/cancelled.
+	const subtickets = descendantTickets(files, key);
+	const activeSubtickets = subtickets.filter((s) => toneOf(s.status) !== "off");
+	if (activeSubtickets.length) {
+		const open = activeSubtickets.filter((s) => toneOf(s.status) !== "done");
 		checks.push({
 			label: "Sub-tickets",
 			ok: open.length === 0,
 			level: open.length === 0 ? "pass" : "warn",
-			detail: open.length === 0 ? `All ${subtickets.length} done` : `${open.length} of ${subtickets.length} still open (${open[0]!.ticket ?? open[0]!.name})`,
-			path: open[0]?.path ?? subtickets[0]!.path,
+			detail: open.length === 0 ? `All ${activeSubtickets.length} done` : `${open.length} of ${activeSubtickets.length} still open (${open[0]!.ticket ?? open[0]!.name})`,
+			path: open[0]?.path ?? activeSubtickets[0]!.path,
 		});
+	}
+
+	// 2b. Unresolved blockers (`blocked-by`)
+	if (ticket.blockedBy?.length) {
+		const byTicketKey = new Map(files.filter((f) => f.exists && f.group === "tickets" && f.ticket).map((f) => [f.ticket!.toLowerCase(), f]));
+		const unresolved = ticket.blockedBy
+			.map((bk) => byTicketKey.get(bk.toLowerCase()))
+			.filter((b): b is DocFile => Boolean(b) && toneOf(b!.status) !== "done" && toneOf(b!.status) !== "off");
+		if (unresolved.length) {
+			checks.push({
+				label: "Blockers",
+				ok: false,
+				level: "warn",
+				detail: `Blocked by ${unresolved.map((u) => `${u.ticket} (${u.status || "open"})`).join(", ")}`,
+				path: unresolved[0]!.path,
+			});
+		}
 	}
 
 	// 3. Linked specs status
@@ -387,25 +451,38 @@ export function evaluateTicketReadiness(
 	const registries = groups.find((g) => g.kind === "registry")?.files ?? [];
 	if (registries.length) {
 		let totalRows = 0;
+		let trackedRows = 0;
 		let doneRows = 0;
 		let firstPending: DocFile | undefined;
 		for (const reg of registries) {
 			const entry = reg.forTickets?.find((r) => r.key.toLowerCase() === key.toLowerCase());
 			if (!entry) continue;
 			totalRows += entry.rows;
-			const d = entry.done ?? entry.rows;
-			doneRows += d;
-			if (d < entry.rows && !firstPending) firstPending = reg;
+			if (entry.done !== undefined) {
+				trackedRows += entry.rows;
+				doneRows += entry.done;
+				if (entry.done < entry.rows && !firstPending) firstPending = reg;
+			}
 		}
 		if (totalRows > 0) {
-			const ok = doneRows >= totalRows;
-			checks.push({
-				label: "Registry rows",
-				ok,
-				level: ok ? "pass" : "warn",
-				detail: ok ? `${doneRows}/${totalRows} verified or migrated` : `${doneRows}/${totalRows} done — ${firstPending ? registryTitle(firstPending.name) : "pending rows"}`,
-				path: firstPending?.path ?? registries[0]!.path,
-			});
+			if (trackedRows === 0) {
+				checks.push({
+					label: "Registry rows",
+					ok: false,
+					level: "note",
+					detail: `${totalRows} ${totalRows === 1 ? "row" : "rows"} (no status column to verify)`,
+					path: registries[0]!.path,
+				});
+			} else {
+				const ok = doneRows >= trackedRows;
+				checks.push({
+					label: "Registry rows",
+					ok,
+					level: ok ? "pass" : "warn",
+					detail: ok ? `${doneRows}/${trackedRows} verified or migrated` : `${doneRows}/${trackedRows} done — ${firstPending ? registryTitle(firstPending.name) : "pending rows"}`,
+					path: firstPending?.path ?? registries[0]!.path,
+				});
+			}
 		}
 	}
 
@@ -424,9 +501,11 @@ export function evaluateTicketReadiness(
 	if (options?.gitFiles) {
 		const scriptRefs = scriptsForTicket(files, key);
 		const scopePaths = new Set(scopeDocs.map((d) => d.path.replace(/\\/g, "/").toLowerCase()));
+		const bundlePrefix = ticket.ticketFolder ? `${ticket.ticketFolder.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase()}/` : "";
 		const dirty = options.gitFiles.filter((gf) => {
 			const norm = gf.path.replace(/\\/g, "/").toLowerCase();
 			if (scopePaths.has(norm)) return true;
+			if (bundlePrefix && norm.startsWith(bundlePrefix)) return true;
 			return scriptRefs.some((ref) => codeMatchesRef(gf.path, ref, options.root));
 		});
 		checks.push({
@@ -605,4 +684,188 @@ export function assembleTicketPacketMarkdown(input: TicketPacketInput): string {
 	}
 
 	return parts.join("\n").trimEnd() + "\n";
+}
+
+// --- STARLIMS Deployment / Transport Manifest --------------------------------
+
+export type DeploymentManifestScript = {
+	ref: string;
+	kind: string;
+	ticket: string;
+};
+
+export type DeploymentManifestSql = {
+	path: string;
+	kind: string;
+	source: string;
+};
+
+export type DeploymentManifestRegistry = {
+	title: string;
+	headers: string[];
+	rows: string[][];
+};
+
+export type DeploymentManifestInput = {
+	projectName: string;
+	generatedOn: string;
+	ticketKey: string;
+	ticketTitle: string;
+	status?: string;
+	parent?: string;
+	scopeTickets: { key: string; title: string; status?: string }[];
+	scripts: DeploymentManifestScript[];
+	sqlArtifacts: DeploymentManifestSql[];
+	registries: DeploymentManifestRegistry[];
+	readiness?: ReadinessReport | null;
+	rollbackNotes?: string[];
+};
+
+/** Classifies a STARLIMS code/artifact reference by extension or name for deployment manifests. */
+export function classifyDeploymentArtifact(ref: string): string {
+	const lower = ref.toLowerCase();
+	if (lower.endsWith(".ssl")) return "SSL Script";
+	if (lower.endsWith(".ds")) return "Data Source";
+	if (lower.endsWith(".xfd")) return "XFD Form";
+	if (lower.endsWith(".sql") || lower.endsWith(".ddl") || lower.endsWith(".pks") || lower.endsWith(".pkb")) return "SQL / DDL";
+	if (lower.endsWith(".hl7") || lower.endsWith(".astm")) return "Interface";
+	if (lower.endsWith(".xml") || lower.endsWith(".json") || lower.endsWith(".config")) return "Config / Schema";
+	return "Code / Object";
+}
+
+/**
+ * Assembles a STARLIMS promotion / transport manifest (Markdown) aggregating a
+ * ticket or epic's full blast radius: descendant tickets, SSL scripts, SQL/DDL,
+ * affected registry items, rollback notes, and DEV -> QA -> UAT -> PROD sign-off.
+ */
+export function assembleDeploymentManifestMarkdown(input: DeploymentManifestInput): string {
+	const escCell = (v: string) => v.replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+	const parts: string[] = [
+		`# Deployment Manifest — ${input.ticketKey}: ${input.ticketTitle}`,
+		"",
+		"| Field | Value |",
+		"| --- | --- |",
+		`| Project | ${escCell(input.projectName)} |`,
+		`| Scope | ${escCell(input.scopeTickets.map((t) => t.key).join(", ") || input.ticketKey)} |`,
+		`| Status | ${escCell(input.status || "—")} |`,
+		...(input.parent ? [`| Parent | ${escCell(input.parent)} |`] : []),
+		`| Generated | ${escCell(input.generatedOn)} |`,
+		"",
+	];
+
+	if (input.readiness && input.readiness.checks.length) {
+		parts.push(
+			"## Readiness Gate",
+			"",
+			`Status: **${input.readiness.ready ? "Ready for promotion" : "Attention needed"}** (${input.readiness.pass}/${input.readiness.total} checks passing)`,
+			"",
+			"| Check | Status | Details |",
+			"| --- | --- | --- |",
+		);
+		for (const c of input.readiness.checks) {
+			const badge = c.level === "pass" ? "PASS" : c.level === "warn" ? "WARN" : "NOTE";
+			parts.push(`| ${escCell(c.label)} | ${badge} | ${escCell(c.detail)} |`);
+		}
+		parts.push("");
+	}
+
+	if (input.scopeTickets.length > 1) {
+		parts.push("## Included Tickets", "", "| Ticket | Status | Title |", "| --- | --- | --- |");
+		for (const t of input.scopeTickets) {
+			parts.push(`| ${escCell(t.key)} | ${escCell(t.status || "—")} | ${escCell(t.title)} |`);
+		}
+		parts.push("");
+	}
+
+	parts.push("## Code & Application Artifacts", "");
+	if (input.scripts.length) {
+		parts.push("| Type | Ticket | Artifact |", "| --- | --- | --- |");
+		for (const s of input.scripts) {
+			parts.push(`| ${escCell(s.kind)} | ${escCell(s.ticket)} | \`${escCell(s.ref)}\` |`);
+		}
+		parts.push("");
+	} else {
+		parts.push("_No SSL scripts or application code references linked yet._", "");
+	}
+
+	if (input.sqlArtifacts.length) {
+		parts.push("## Database & Schema Artifacts", "", "| Kind | Source | Artifact |", "| --- | --- | --- |");
+		for (const sql of input.sqlArtifacts) {
+			parts.push(`| ${escCell(sql.kind)} | ${escCell(sql.source)} | \`${escCell(sql.path)}\` |`);
+		}
+		parts.push("");
+	}
+
+	if (input.registries.length) {
+		parts.push("## Configuration & Registry Changes", "");
+		for (const reg of input.registries) {
+			if (!reg.rows.length) continue;
+			parts.push(`### ${reg.title}`, "");
+			parts.push(`| ${reg.headers.map(escCell).join(" | ")} |`);
+			parts.push(`| ${reg.headers.map(() => "---").join(" | ")} |`);
+			for (const row of reg.rows) {
+				parts.push(`| ${reg.headers.map((_, idx) => escCell(row[idx] ?? "")).join(" | ")} |`);
+			}
+			parts.push("");
+		}
+	}
+
+	parts.push("## Rollback Plan", "");
+	if (input.rollbackNotes?.length) {
+		for (const note of input.rollbackNotes) {
+			parts.push(note.trim(), "");
+		}
+	} else {
+		parts.push(
+			"- [ ] Export pre-deployment XFD/SSL backup package from target environment before importing.",
+			"- [ ] Confirm database DDL changes have a tested reverse script or snapshot restore point.",
+			"- [ ] Verify affected settings, jobs, and interfaces can be restored to prior values if smoke checks fail.",
+			"",
+		);
+	}
+
+	parts.push(
+		"## Promotion Sign-Off",
+		"",
+		"| Stage | Target | Verified By | Sign-Off |",
+		"| --- | --- | --- | --- |",
+		"| DEV | Development | | [ ] Pending |",
+		"| QA | Quality Assurance | | [ ] Pending |",
+		"| UAT | User Acceptance | | [ ] Pending |",
+		"| PROD | Production | | [ ] Pending |",
+		"",
+	);
+
+	return parts.join("\n").trimEnd() + "\n";
+}
+
+/** Assembles a flat CSV transport manifest suitable for CAB / ServiceNow / Excel import. */
+export function assembleDeploymentManifestCsv(input: DeploymentManifestInput): string {
+	const rows: string[] = [csvRow(["Category", "Artifact", "Ticket", "Status", "Notes"], ",")];
+	for (const s of input.scripts) {
+		rows.push(csvRow([s.kind, s.ref, s.ticket, "planned", ""], ","));
+	}
+	for (const sql of input.sqlArtifacts) {
+		rows.push(csvRow([sql.kind, sql.path, input.ticketKey, "planned", sql.source], ","));
+	}
+	for (const reg of input.registries) {
+		const lowerHeaders = reg.headers.map((h) => h.trim().toLowerCase());
+		const statusIdx = lowerHeaders.findIndex((h) => h === "status" || h === "state");
+		const ticketIdx = lowerHeaders.findIndex((h) => h === "ticket" || h === "tickets");
+		const notesIdx = lowerHeaders.findIndex((h) => h === "notes" || h === "note" || h === "comment" || h === "description");
+		for (const r of reg.rows) {
+			const item = r[0] ?? "";
+			const t = ticketIdx >= 0 ? (r[ticketIdx] ?? input.ticketKey) : input.ticketKey;
+			const st = statusIdx >= 0 ? (r[statusIdx] ?? "") : "";
+			const extra =
+				notesIdx >= 0 && r[notesIdx]
+					? r[notesIdx]!
+					: reg.headers
+							.map((h, i) => (i === 0 || i === statusIdx || i === ticketIdx || !r[i] ? "" : `${h}: ${r[i]}`))
+							.filter(Boolean)
+							.join("; ");
+			rows.push(csvRow([`Registry: ${reg.title}`, item, t, st, extra], ","));
+		}
+	}
+	return `${rows.join("\n")}\n`;
 }

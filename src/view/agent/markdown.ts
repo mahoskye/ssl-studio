@@ -19,9 +19,18 @@ import { canonical, documents, openFile, state } from "../state";
  */
 const FORBIDDEN = ["img", "picture", "source", "video", "audio", "iframe", "object", "embed", "form", "input", "button", "select", "textarea", "style", "svg", "math"];
 
-const WORKSPACE_FILE_EXT = "(?:ssl|srvscr|ds|sql|ddl|pks|pkb|md|markdown|csv|tsv|json|toml|ya?ml|xml|xsd|txt|ts|tsx|js|css)";
+const WORKSPACE_FILE_EXT = "(?:ssl|srvscr|ds|sql|ddl|pks|pkb|xfd|hl7|astm|ini|config|svg|md|markdown|csv|tsv|json|toml|ya?ml|xml|xsd|txt|ts|tsx|js|css)";
 const SINGLE_FILE_COLON_LINK_RE = new RegExp(`\\[([^\\]]+)\\]\\(([^\\s()/:]+\\.${WORKSPACE_FILE_EXT}:\\d+(?:-\\d+)?)\\)`, "gi");
-const BACKTICK_PATH_RE = new RegExp("`([A-Za-z0-9_./\\\\-]+\\." + WORKSPACE_FILE_EXT + "(?::\\d+(?:-\\d+)?|#L\\d+(?:-L?\\d+)?)?)`", "gi");
+const BACKTICK_PATH_RE = new RegExp("`([A-Za-z0-9_./\\\\ -]+\\." + WORKSPACE_FILE_EXT + "(?::\\d+(?:-\\d+)?|#L\\d+(?:-L?\\d+)?)?)`", "gi");
+
+/** Finds `[label](url)` Markdown link ranges on a line so backtick auto-linkification never nests links inside links. */
+function existingLinkRanges(line: string): [number, number][] {
+	const ranges: [number, number][] = [];
+	for (const m of line.matchAll(/\[[^\]]+\]\([^)\n]+\)/g)) {
+		if (m.index !== undefined) ranges.push([m.index, m.index + m[0].length]);
+	}
+	return ranges;
+}
 
 /**
  * Protects single-filename `:line` links (`[foo.ssl:42](foo.ssl:42)`) and backticked workspace paths
@@ -45,10 +54,13 @@ function rewriteFileLinksBeforeParse(text: string): string {
 			continue;
 		}
 		let next = line.replace(SINGLE_FILE_COLON_LINK_RE, (_, label: string, ref: string) => `[${label}](file-ref://${encodeURIComponent(ref)})`);
-		// Linkify standalone backticked workspace file paths (skipping ones already inside `[`...`](...)`).
-		next = next.replace(BACKTICK_PATH_RE, (full, ref: string, offset: number, src: string) => {
-			if (offset > 0 && src[offset - 1] === "[") return full;
-			return `[\`${ref}\`](file-ref://${encodeURIComponent(ref)})`;
+		// Linkify standalone backticked workspace file paths (skipping anything inside existing `[...](...)` links).
+		const linkSpans = next.includes("](") ? existingLinkRanges(next) : [];
+		next = next.replace(BACKTICK_PATH_RE, (full, ref: string, offset: number) => {
+			if (linkSpans.some(([from, to]) => offset >= from && offset < to)) return full;
+			const trimmed = ref.trim();
+			if (!trimmed || /^\s|\s$/.test(ref)) return full;
+			return `[\`${trimmed}\`](file-ref://${encodeURIComponent(trimmed)})`;
 		});
 		out.push(next);
 	}
@@ -101,13 +113,13 @@ export async function followReplyLink(e: MouseEvent) {
 	const targetEl = e.target as HTMLElement | null;
 	if (!targetEl) return;
 
-	// Inline #tag badge click -> launch workspace Search for that tag.
+	// Inline #tag badge click -> launch workspace Search with clean scope so stale Code filters don't hide docs.
 	const tagEl = targetEl.closest<HTMLElement>(".md-tag");
 	if (tagEl) {
 		const tag = tagEl.dataset.tag || tagEl.textContent?.trim() || "";
 		if (tag) {
 			e.preventDefault();
-			searchFor(tag.startsWith("#") ? tag : `#${tag}`);
+			searchFor(tag.startsWith("#") ? tag : `#${tag}`, { include: "", exclude: "", wholeWord: true });
 		}
 		return;
 	}
@@ -146,9 +158,11 @@ export async function followReplyLink(e: MouseEvent) {
 		return;
 	}
 
-	// Internal `file-ref://` links generated from `file.ssl:42` or backticked paths.
+	// Internal `file-ref://` links generated from `file.ssl:42` or backticked paths (decoded once only).
+	let alreadyDecoded = false;
 	if (href.startsWith("file-ref://")) {
 		href = safeDecode(href.slice("file-ref://".length));
+		alreadyDecoded = true;
 	}
 
 	if (!href || href.startsWith("#")) return;
@@ -159,7 +173,8 @@ export async function followReplyLink(e: MouseEvent) {
 	const hashAt = href.indexOf("#");
 	const rawPath = hashAt >= 0 ? href.slice(0, hashAt) : href;
 	const rawHash = hashAt >= 0 ? href.slice(hashAt + 1) : "";
-	let relative = safeDecode(rawPath.split("?")[0]!).replace(/\\/g, "/");
+	const rawPathNoQuery = rawPath.split("?")[0]!;
+	let relative = (alreadyDecoded ? rawPathNoQuery : safeDecode(rawPathNoQuery)).replace(/\\/g, "/");
 
 	let lineNum: number | undefined;
 	let endLineNum: number | undefined;
@@ -173,12 +188,18 @@ export async function followReplyLink(e: MouseEvent) {
 	let target = resolvePath(root, relative);
 	if (!isInside(root, target)) return;
 
-	// If bare filename (no slash) didn't match root directly, look up matching workspace file by basename.
+	// If bare filename (no slash) didn't match a root file directly, look up matching workspace file by basename.
 	if (!relative.includes("/")) {
 		const allFiles = await backend.files().catch(() => []);
-		const lower = relative.toLowerCase();
-		const exact = allFiles.find((f) => f.replace(/\\/g, "/").toLowerCase().endsWith(`/${lower}`));
-		if (exact && isInside(root, exact)) target = exact;
+		const targetLow = canonical(target);
+		const rootMatch = allFiles.find((f) => canonical(f) === targetLow);
+		if (rootMatch && isInside(root, rootMatch)) {
+			target = rootMatch;
+		} else {
+			const lower = relative.toLowerCase();
+			const exact = allFiles.find((f) => f.replace(/\\/g, "/").toLowerCase().endsWith(`/${lower}`));
+			if (exact && isInside(root, exact)) target = exact;
+		}
 	}
 
 	if (!lineNum && rawHash) {

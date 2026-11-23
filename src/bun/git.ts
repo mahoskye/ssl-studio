@@ -119,6 +119,8 @@ export class Git {
 		const cap = Math.max(1, Math.min(100, Math.round(limit)));
 		const relHere = await this.here(path);
 		const ran = await this.run([
+			"-c",
+			"core.quotePath=false",
 			"log",
 			"--follow",
 			"-n",
@@ -130,6 +132,7 @@ export class Git {
 		]);
 		if (ran.code !== 0) return [];
 		const commits: GitCommit[] = [];
+		let lastKnownPath = `${this.prefix}${relHere}`;
 		for (const chunk of text(ran.out).split("\x1e")) {
 			const trimmed = chunk.trim();
 			if (!trimmed) continue;
@@ -137,7 +140,9 @@ export class Git {
 			const header = lines[0] ?? "";
 			const [sha, shortSha, ct, author, ...subjectParts] = header.split("\x1f");
 			if (!sha || !shortSha) continue;
-			const fileInCommit = lines.slice(1).find((l) => l.trim().length > 0)?.trim() ?? `${this.prefix}${relHere}`;
+			const listedPath = lines.slice(1).find((l) => l.trim().length > 0)?.trim();
+			const fileInCommit = listedPath || lastKnownPath;
+			lastKnownPath = fileInCommit;
 			commits.push({
 				sha,
 				shortSha,

@@ -12,10 +12,13 @@ import { workspaceTags } from "../../shared/tags";
 import { docs, docsError, docsLoading, newDoc, newDocIn, newFolderIn, setUpProject } from "../project";
 import {
 	archiveTicket,
+	closeoutTicket,
 	createTicketFolder,
+	exportDeploymentManifest,
 	exportTicketPacket,
 	generateSchemaDocFromSql,
 	importTickets,
+	isArchivedTicket,
 	newKnowledge,
 	newRegistry,
 	newSchema,
@@ -29,6 +32,7 @@ import {
 	staleCatalogSummaryAsync,
 	startFolderCatalogs,
 	trashTicket,
+	unarchiveTicket,
 	updateCatalogs,
 	updateManifest,
 } from "../projectDocs";
@@ -161,14 +165,20 @@ async function rowMenu(file: DocFile, at: Point) {
 	const isSchemaItem = file.group === "schema" && !catalog;
 	const isSchemaSql = isSchemaItem && /\.(sql|ddl|pks|pkb)$/i.test(file.name);
 	const EXPORT_PACKET = "Export release packet (HTML)…";
+	const EXPORT_MANIFEST = "Export deployment manifest (Markdown)…";
+	const CLOSEOUT_TICKET = "Close out ticket…";
+	const UNARCHIVE_TICKET = "Unarchive ticket…";
 	const PROMOTE_DECISION = "Promote answer to decision…";
 	const DOC_FROM_SQL = "Generate table doc from SQL…";
 	const FIND_IN_CODE = "Find usages in code";
+	const isFocusedTicket = Boolean(file.ticket && state.settings.activeTicket?.toLowerCase() === file.ticket.toLowerCase());
+	const SET_ACTIVE_TICKET = isFocusedTicket ? `Clear active ticket (${file.ticket})` : `Set ${file.ticket} as active ticket`;
+	const archived = isTicket && isArchivedTicket(file);
 	const ticketActions = isTicket
 		? [
-				...(file.ticket ? [NEW_SUBTICKET, EXPORT_PACKET] : []),
+				...(file.ticket ? [SET_ACTIVE_TICKET, NEW_SUBTICKET, EXPORT_MANIFEST, EXPORT_PACKET, CLOSEOUT_TICKET] : []),
 				...(file.ticketFolder ? [NEW_TICKET_FILE, SHOW_TICKET_FOLDER] : [CREATE_TICKET_FOLDER]),
-				ARCHIVE_TICKET,
+				archived ? UNARCHIVE_TICKET : ARCHIVE_TICKET,
 			]
 		: [];
 	const extraActions = [
@@ -182,15 +192,29 @@ async function rowMenu(file: DocFile, at: Point) {
 	if (picked === OPEN) await openFile(file.path, { keep: true });
 	else if (picked === SIDE) await openToSide(file.path);
 	else if (picked === CREATE) await setUpProject();
+	else if (picked === SET_ACTIVE_TICKET && file.ticket) {
+		const { setActiveTicket } = await import("../projectDocs");
+		await setActiveTicket(isFocusedTicket ? null : file.ticket);
+	}
 	else if (picked === NEW_SUBTICKET && file.ticket) await newTicket(undefined, undefined, { parent: file.ticket });
+	else if (picked === EXPORT_MANIFEST && file.ticket) await exportDeploymentManifest(file.path, file.ticket, "markdown");
 	else if (picked === EXPORT_PACKET && file.ticket) await exportTicketPacket(file.path, file.ticket, "html");
+	else if (picked === CLOSEOUT_TICKET && file.ticket) await closeoutTicket(file.path, file.ticket);
 	else if (picked === PROMOTE_DECISION) await promoteQuestionToDecision(file.path);
 	else if (picked === DOC_FROM_SQL) await generateSchemaDocFromSql(file.path);
 	else if (picked === FIND_IN_CODE) {
-		const stem = (file.title || file.name.split(/[\\/]/).pop() || "").replace(/\.[^.]+$/, "").trim();
-		if (stem) searchFor(stem);
+		const rawStem = (file.name.split(/[\\/]/).pop() || file.title || "").replace(/\.[^.]+$/, "").trim();
+		const cleanDir = (dir?: string) => (dir ?? "").replace(/^[./\\]+|[\\/]+$/g, "").replace(/\\/g, "/");
+		const dRel = cleanDir(state.project?.docs ?? "docs");
+		const pRel = cleanDir(state.project?.plans ?? "design");
+		const sRel = cleanDir(state.project?.schema ?? "schema");
+		const exc = [dRel ? `${dRel}/**` : "", pRel ? `${pRel}/**` : "", sRel ? `${sRel}/**` : "", "README.md", "AGENTS.md", "**/INDEX.md"]
+			.filter(Boolean)
+			.join(", ");
+		if (rawStem) searchFor(rawStem, { wholeWord: true, include: "", exclude: exc });
 	}
 	else if (picked === ARCHIVE_TICKET) await archiveTicket(file);
+	else if (picked === UNARCHIVE_TICKET) await unarchiveTicket(file);
 	else if (picked === CREATE_TICKET_FOLDER) await createTicketFolder(file.path);
 	else if (picked === NEW_TICKET_FILE && file.ticketFolder) await newTicketFile(file.ticketFolder, file.ticket ?? file.name);
 	else if (picked === SHOW_TICKET_FOLDER && file.ticketFolder) (await import("./Explorer")).browseFolderInExplorer(file.ticketFolder, `${file.ticket ?? file.name} files`);
@@ -248,6 +272,12 @@ function ItemRow(props: {
 			onActivate={() => void openFile(props.file.path, { preview: true })}
 			onKeep={() => void openFile(props.file.path, { keep: true })}
 			onMenu={(at) => void rowMenu(props.file, at)}
+			draggable={props.file.exists}
+			onDragStart={(e) => {
+				if (!props.file.exists) return;
+				e.dataTransfer?.setData("application/x-ssl-studio-file", props.file.path);
+				if (e.dataTransfer) e.dataTransfer.effectAllowed = "copyMove";
+			}}
 			onKey={(e) => {
 				if (e.key !== "F2" && e.key !== "Delete") return false;
 				const isTicket = props.file.group === "tickets" && !isCatalog(props.file);
@@ -362,7 +392,7 @@ const SCHEMA_TOP = "docs:schema:/";
 const ticketFold = (file: DocFile) => `docs:ticket:${file.path}`;
 /** Every name the panel folds under: its groups, the kinds of the knowledge base, and each ticket. */
 const allFolds = () => [
-	...(["project", "work", "knowledge", "registries", "docs", "schema", "plans"] as const).map((group) => `docs:${group}`),
+	...(["project", "work", "knowledge", "registries", "docs", "schema", "plans", "tags"] as const).map((group) => `docs:${group}`),
 	...KNOWLEDGE.map((kind) => `docs:knowledge:${kind.id}`),
 	SCHEMA_TOP,
 	// The kinds of schema (those the app knows, and the folders the project has made beside them), and the folders
@@ -780,9 +810,25 @@ export function Docs() {
 									class="tree-row doc-row"
 									classList={{ active: activeTag()?.toLowerCase() === bucket.tag.toLowerCase() }}
 									key={`tag:${bucket.tag}`}
-									title={`#${bucket.tag} (${bucket.count} ${bucket.count === 1 ? "document" : "documents"}). Click to filter; right-click to search workspace.`}
+									title={`#${bucket.tag} (${bucket.count} ${bucket.count === 1 ? "document" : "documents"}). Click to filter; right-click to search or rename.`}
 									onActivate={() => setActiveTag((cur) => (cur?.toLowerCase() === bucket.tag.toLowerCase() ? null : bucket.tag))}
-									onMenu={() => searchFor(`#${bucket.tag}`)}
+									onMenu={(at) => {
+										void (async () => {
+											const FILTER = activeTag()?.toLowerCase() === bucket.tag.toLowerCase() ? "Clear tag filter" : `Filter Docs by #${bucket.tag}`;
+											const SEARCH = `Search workspace for #${bucket.tag} (YAML + prose)`;
+											const RENAME_TAG = `Rename #${bucket.tag} across workspace…`;
+											const picked = await chooseFromMenu(`Tag #${bucket.tag}`, [FILTER, SEARCH, "separator", RENAME_TAG], at);
+											if (!picked) return;
+											if (picked === FILTER) setActiveTag((cur) => (cur?.toLowerCase() === bucket.tag.toLowerCase() ? null : bucket.tag));
+											else if (picked === SEARCH) {
+												const esc = bucket.tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+												searchFor(`(?:#|\\btags?:[^\\n]*\\b|\\-\\s+)${esc}(?![A-Za-z0-9_/-])`, { regex: true, include: "", exclude: "" });
+											} else if (picked === RENAME_TAG) {
+												const { renameTagAcrossWorkspace } = await import("../projectDocs");
+												await renameTagAcrossWorkspace(bucket.tag);
+											}
+										})();
+									}}
 								>
 									<Icon name="tag" class="icon" />
 									<span class="label">#{bucket.tag}</span>

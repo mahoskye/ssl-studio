@@ -7,7 +7,7 @@ import { Icon } from "../Icon";
 import { createMemo, createSignal, For, Show } from "solid-js";
 import { changeLetter, changeWord, commitProblem, GIT_ACTIONS, rowActions, stagedOf, unstagedOf, type GitFile } from "../../shared/gitStatus";
 import { baseName, dirName, relativeTo } from "../../shared/paths";
-import { ticketForFile } from "../../shared/workContext";
+import { ticketsForFile } from "../../shared/workContext";
 import { FileMark } from "../FileMark";
 import { branchText, commit, discard, gitFailure, gitStatus, refreshGit, showChange, stage, unstage } from "../git";
 import { docs } from "../project";
@@ -42,7 +42,7 @@ export function GitPanel() {
 		const dir = relativeTo(state.workspace?.root, dirName(path));
 		return dir === dirName(path) || !dir ? "" : dir;
 	};
-	/** Candidate ticket prefixes inferred from staged files first, then active file, then single active ticket. */
+	/** Candidate ticket prefixes inferred from staged files first, then active focus / changed files, then active file. */
 	const suggestedTickets = createMemo(() => {
 		const allDocs = docs();
 		const root = state.workspace?.root;
@@ -50,16 +50,34 @@ export function GitPanel() {
 		const add = (k: string) => {
 			if (k && !keys.some((x) => x.toLowerCase() === k.toLowerCase())) keys.push(k);
 		};
-		for (const f of staged()) add(ticketForFile(allDocs, f.path, root));
+		for (const f of staged()) {
+			for (const k of ticketsForFile(allDocs, f.path, root)) add(k);
+		}
+		if (state.settings.activeTicket?.trim()) add(state.settings.activeTicket.trim());
 		if (!keys.length) {
-			for (const f of changes()) add(ticketForFile(allDocs, f.path, root));
+			for (const f of changes()) {
+				for (const k of ticketsForFile(allDocs, f.path, root)) add(k);
+			}
 		}
 		if (!keys.length) {
-			const fromActive = ticketForFile(allDocs, activePath(), root);
-			add(fromActive || ticketAtHand());
+			for (const k of ticketsForFile(allDocs, activePath(), root)) add(k);
+			if (!keys.length) add(ticketAtHand());
 		}
-		return keys.slice(0, 3);
+		return keys.slice(0, 4);
 	});
+	const messageMentionsKey = (key: string) => {
+		const esc = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		return new RegExp(`(?<![A-Za-z0-9_-])${esc}(?![A-Za-z0-9_-])`, "i").test(message());
+	};
+	const prependTicketKey = (key: string) => {
+		setMessage((cur) => {
+			const trimmed = cur.trimStart();
+			// Combine cleanly if message already opens with `<KEY[, KEY2]>: ...`
+			const m = /^([A-Za-z][A-Za-z0-9_-]*-\d+(?:\s*,\s*[A-Za-z][A-Za-z0-9_-]*-\d+)*):(\s*.*)$/s.exec(trimmed);
+			if (m) return `${m[1]}, ${key}:${m[2]}`;
+			return `${key}: ${trimmed}`;
+		});
+	};
 	const act = async (action: string | null, file: GitFile) => {
 		if (action === OPEN) await openFile(file.path, { keep: true });
 		else if (action === SHOW) await showChange(file, false);
@@ -148,12 +166,12 @@ export function GitPanel() {
 						<div class="git-ticket-chips">
 							<For each={suggestedTickets()}>
 								{(key) => (
-									<Show when={!message().trim().toLowerCase().startsWith(key.toLowerCase())}>
+									<Show when={!messageMentionsKey(key)}>
 										<button
 											type="button"
 											class="git-ticket-chip"
-											title={`Prefix commit message with ${key}:`}
-											onClick={() => setMessage((cur) => `${key}: ${cur.trimStart()}`)}
+											title={`Add ${key} to commit message prefix`}
+											onClick={() => prependTicketKey(key)}
 										>
 											+ {key}:
 										</button>

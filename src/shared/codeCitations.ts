@@ -31,9 +31,45 @@ export type CitationIssue = {
 	reanchor?: { from: number; to: number };
 };
 
-const LINK_LINE_RE = /\[[^\]]+\]\(([^)\s#]+)#L(\d+)(?:-L?(\d+))?\)/g;
+import { CODE_LINES_KEPT } from "./projectDocs";
 
-/** Finds all `#L<from>` / `#L<from>-L<to>` workspace file citations in a Markdown document (outside code fences). */
+const LINK_LINE_RE = /\[[^\]]+\]\(([^)\s#]+)(#L(\d+)(?:-L?(\d+))?)\)/gi;
+const NON_CODE_FENCE_LANGS = new Set(["mermaid", "mmd", "markdown", "md", "text", "txt", "csv", "tsv"]);
+
+function inlineCodeSpans(line: string): [number, number][] {
+	const ranges: [number, number][] = [];
+	let i = 0;
+	while (i < line.length) {
+		if (line[i] !== "`") {
+			i++;
+			continue;
+		}
+		let run = 0;
+		while (i + run < line.length && line[i + run] === "`") run++;
+		let j = i + run;
+		let closed = -1;
+		while (j < line.length) {
+			if (line[j] !== "`") {
+				j++;
+				continue;
+			}
+			let cRun = 0;
+			while (j + cRun < line.length && line[j + cRun] === "`") cRun++;
+			if (cRun === run) {
+				closed = j + cRun;
+				break;
+			}
+			j += cRun;
+		}
+		if (closed >= 0) {
+			ranges.push([i, closed]);
+			i = closed;
+		} else i += run;
+	}
+	return ranges;
+}
+
+/** Finds all `#L<from>` / `#L<from>-L<to>` workspace file citations in a Markdown document (outside code fences & inline code). */
 export function findCodeCitations(markdown: string): CodeCitation[] {
 	const lines = markdown.split(/\r?\n/);
 	const fences = fenced(markdown);
@@ -54,44 +90,56 @@ export function findCodeCitations(markdown: string): CodeCitation[] {
 
 	for (let i = fmLines; i < lines.length; i++) {
 		const lineText = lines[i]!;
-		if (!lineText.includes("#L") || inFence(i)) continue;
-		for (const m of lineText.matchAll(LINK_LINE_RE)) {
-			const file = m[1]!;
-			if (/^https?:/i.test(file)) continue;
-			const from = Number(m[2]);
-			const to = m[3] ? Number(m[3]) : from;
-			if (!Number.isFinite(from) || from < 1 || to < from) continue;
+		if (!/#l\d/i.test(lineText) || inFence(i)) continue;
+		const codeSpans = lineText.includes("`") ? inlineCodeSpans(lineText) : [];
+		const matches = [...lineText.matchAll(LINK_LINE_RE)].filter((m) => {
+			const idx = m.index ?? 0;
+			return !codeSpans.some(([a, b]) => idx >= a && idx < b);
+		});
+		if (!matches.length) continue;
 
-			// Look ahead up to 4 blank/prose lines for an immediately following quoted fenced code block.
-			let snippet: string | undefined;
-			for (let j = i + 1; j < Math.min(lines.length, i + 6); j++) {
+		// Look ahead across at most blank lines (no arbitrary multi-line prose skipping) for an immediately following quoted code block.
+		// Only bind that fence when there is a single citation on the preceding line (avoiding binding two citations to one fence).
+		let followingSnippet: string | undefined;
+		if (matches.length === 1) {
+			for (let j = i + 1; j < Math.min(lines.length, i + 4); j++) {
 				const nextLine = lines[j]!.trim();
 				if (!nextLine) continue;
-				if (/^#{1,6}\s/.test(nextLine)) break;
-				const open = /^(`{3,}|~{3,})/.exec(nextLine);
+				const open = /^(`{3,}|~{3,})[ \t]*([A-Za-z0-9_+-]*)/.exec(nextLine);
 				if (open) {
+					const lang = (open[2] ?? "").toLowerCase();
+					if (NON_CODE_FENCE_LANGS.has(lang)) break;
 					const ch = open[1]![0]!;
 					const len = open[1]!.length;
 					const closeRe = new RegExp(`^[ \\t]{0,3}${ch}{${len},}[ \\t]*$`);
 					const block: string[] = [];
 					for (let k = j + 1; k < lines.length; k++) {
 						if (closeRe.test(lines[k]!)) {
-							snippet = block.join("\n");
+							followingSnippet = block.join("\n");
 							break;
 						}
 						block.push(lines[k]!);
 					}
-					break;
 				}
+				break;
 			}
+		}
+
+		for (const m of matches) {
+			const file = m[1]!;
+			if (/^https?:/i.test(file)) continue;
+			const rawAnchor = m[2]!;
+			const from = Number(m[3]);
+			const to = m[4] ? Number(m[4]) : from;
+			if (!Number.isFinite(from) || from < 1 || to < from) continue;
 
 			out.push({
 				line: i + 1,
-				href: `${file}#L${m[2]}${m[3] ? `-L${m[3]}` : ""}`,
+				href: `${file}${rawAnchor}`,
 				file,
 				from,
 				to,
-				...(snippet !== undefined ? { snippet } : {}),
+				...(followingSnippet !== undefined ? { snippet: followingSnippet } : {}),
 			});
 		}
 	}
@@ -187,9 +235,11 @@ export async function checkCodeCitations(
 
 		if (snippetLines && snippetLines.some((l) => l.trim().length > 0)) {
 			const currentSlice = targetLines.slice(cit.from - 1, cit.to);
+			// Accept exact match OR prefix match when `codeSection()` truncated a >40-line excerpt at `CODE_LINES_KEPT`.
+			const truncatedExcerpt = snippetLines.length === CODE_LINES_KEPT && currentSlice.length > CODE_LINES_KEPT;
 			const matchesNow =
-				currentSlice.length === snippetLines.length &&
-				currentSlice.every((line, idx) => normLine(line) === normLine(snippetLines[idx]!));
+				(currentSlice.length === snippetLines.length || truncatedExcerpt) &&
+				snippetLines.every((line, idx) => normLine(currentSlice[idx] ?? "") === normLine(line));
 			if (!matchesNow) {
 				const moved = locateSnippet(targetLines, snippetLines);
 				if (moved && (moved.from !== cit.from || moved.to !== cit.to)) {

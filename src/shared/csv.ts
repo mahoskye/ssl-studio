@@ -24,10 +24,12 @@ export function parseCsv(text: string): Table {
 	const bomOffset = text.startsWith("\uFEFF") ? 1 : 0;
 	const firstEnd = text.search(/\r?\n|$/);
 	const firstLine = text.slice(bomOffset, firstEnd < 0 ? text.length : firstEnd);
+	// Strip quoted sections on line 1 before detecting delimiter so `"Last, First"\tStatus` is recognized as TSV.
+	const unquotedFirst = firstLine.replace(/"(?:""|[^"])*"/g, "");
 	const delimiter: Table["delimiter"] =
-		firstLine.includes("\t") && !firstLine.includes(",")
+		unquotedFirst.includes("\t") && !unquotedFirst.includes(",")
 			? "\t"
-			: firstLine.includes(";") && !firstLine.includes(",") && !firstLine.includes("\t")
+			: unquotedFirst.includes(";") && !unquotedFirst.includes(",") && !unquotedFirst.includes("\t")
 				? ";"
 				: ",";
 	const all: Cell[][] = [];
@@ -283,7 +285,8 @@ export function deleteCsvColumn(text: string, table: Table, colIdx: number): str
 			const c = cells[i]!;
 			kept.push(text.slice(c.start, c.end));
 		}
-		out += kept.join(table.delimiter);
+		// If deleting column `colIdx` on a ragged 1-cell row leaves zero kept cells, emit `""` so the row isn't silently dropped as a blank line!
+		out += kept.length ? kept.join(table.delimiter) : '""';
 		cursor = rowEnd;
 	}
 	out += text.slice(cursor);

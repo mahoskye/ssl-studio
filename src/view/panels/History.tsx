@@ -66,13 +66,13 @@ export function History() {
 			void openReview({
 				title: `${commit.shortSha}: ${commit.subject} (${shortDay(commit.time)})`,
 				path,
-				effect: `Comparing ${commit.shortSha} (left) against your current editor (right). Restoring puts that commit's text into the editor as one undoable edit.`,
-				original: historical,
-				proposed: doc.model.getValue(),
+				effect: `Restoring puts commit ${commit.shortSha}'s text into the editor as one undoable edit (you can edit the right side before accepting); nothing is saved until you save.`,
+				original: doc.model.getValue(),
+				proposed: historical,
 				language: doc.model.getLanguageId(),
 				acceptLabel: `Restore ${commit.shortSha}`,
-				onAccept: () => {
-					applyText(path, historical);
+				onAccept: (restored) => {
+					applyText(path, restored);
 					notify(`Restored ${baseName(path)} from ${commit.shortSha} into the editor. Save to keep it; undo to go back.`);
 				},
 			});

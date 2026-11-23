@@ -63,13 +63,13 @@ export const SCHEMAS: readonly SchemaKind[] = [
 export type RegistryKind = { id: string; file: string; title: string; about: string; columns: readonly string[] };
 /** The registries a project is offered. Each is a table of values with a `status` column to say how far each row has come. */
 export const REGISTRIES: readonly RegistryKind[] = [
-	{ id: "settings", file: "settings.csv", title: "Application settings", about: "Each setting the application reads: its name, its value, where it is set.", columns: ["name", "value", "where", "status", "note"] },
+	{ id: "settings", file: "settings.csv", title: "Application settings", about: "Each setting the application reads: its name, its value, where it is set.", columns: ["name", "value", "where", "ticket", "status", "note"] },
 	{ id: "files", file: "files.csv", title: "File manifest", about: "Each file of the project, with its size and a checksum, to check that all of it came across.", columns: ["path", "kind", "bytes", "lines", "sha256", "status", "note"] },
-	{ id: "database", file: "database.csv", title: "Database objects", about: "Each table, view, procedure and sequence the project reads or writes.", columns: ["object", "kind", "used by", "status", "note"] },
-	{ id: "interfaces", file: "interfaces.csv", title: "Interfaces", about: "Each system the application sends to or reads from: instruments, other applications, files dropped in a folder.", columns: ["interface", "direction", "how", "status", "note"] },
-	{ id: "jobs", file: "jobs.csv", title: "Scheduled jobs", about: "Each job that runs on its own: when it runs and what it calls.", columns: ["job", "runs", "calls", "status", "note"] },
-	{ id: "reports", file: "reports.csv", title: "Reports and labels", about: "Each report, label and printed form, and what reads it.", columns: ["report", "kind", "used by", "status", "note"] },
-	{ id: "roles", file: "roles.csv", title: "Roles and access", about: "Each role, and what it may do. Roles, not people.", columns: ["role", "may do", "status", "note"] },
+	{ id: "database", file: "database.csv", title: "Database objects", about: "Each table, view, procedure and sequence the project reads or writes.", columns: ["object", "kind", "used by", "ticket", "status", "note"] },
+	{ id: "interfaces", file: "interfaces.csv", title: "Interfaces", about: "Each system the application sends to or reads from: instruments, other applications, files dropped in a folder.", columns: ["interface", "direction", "how", "ticket", "status", "note"] },
+	{ id: "jobs", file: "jobs.csv", title: "Scheduled jobs", about: "Each job that runs on its own: when it runs and what it calls.", columns: ["job", "runs", "calls", "ticket", "status", "note"] },
+	{ id: "reports", file: "reports.csv", title: "Reports and labels", about: "Each report, label and printed form, and what reads it.", columns: ["report", "kind", "used by", "ticket", "status", "note"] },
+	{ id: "roles", file: "roles.csv", title: "Roles and access", about: "Each role, and what it may do. Roles, not people.", columns: ["role", "may do", "ticket", "status", "note"] },
 ];
 
 /** The words a status is usually one of, by what they come to: a row that is finished, under way, waiting, or set aside. */
@@ -463,9 +463,23 @@ export function statusChoices(file: { group?: string; kind?: string } | undefine
  * its title, its name, its ticket's key, its state, what it is about, or the
  * tickets it is for. "open holiday" finds the open question about holidays.
  */
-export function docMatches(file: Pick<DocFile, "name" | "title" | "heading" | "ticket" | "parent" | "status" | "summary" | "tickets" | "kind">, filter: string): boolean {
+export function docMatches(file: Pick<DocFile, "name" | "title" | "heading" | "ticket" | "parent" | "status" | "summary" | "tickets" | "kind" | "tags">, filter: string): boolean {
 	const words = filter.toLowerCase().split(/\s+/).filter(Boolean);
 	if (!words.length) return true;
-	const said = [file.title, file.heading, file.name, file.ticket, file.parent, file.status, file.summary, file.kind, ...(file.tickets ?? [])].filter(Boolean).join("\n").toLowerCase();
+	const said = [
+		file.title,
+		file.heading,
+		file.name,
+		file.ticket,
+		file.parent,
+		file.status,
+		file.summary,
+		file.kind,
+		...(file.tickets ?? []),
+		...(file.tags ?? []).flatMap((t) => [t, `#${t}`]),
+	]
+		.filter(Boolean)
+		.join("\n")
+		.toLowerCase();
 	return words.every((word) => said.includes(word));
 }

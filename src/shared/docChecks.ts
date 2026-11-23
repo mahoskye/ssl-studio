@@ -294,9 +294,48 @@ export function docChecks(files: readonly DocFile[], areas: readonly CatalogArea
 				const target = findDec(ref);
 				if (!target) {
 					checks.push({ level: "warn", text: `${called(dec)} is superseded by a decision that is not there: ${ref}`, path: dec.path });
+				} else {
+					if (!target.supersedes?.some((back) => findDec(back) === dec)) {
+						checks.push({
+							level: "note",
+							text: `${called(dec)} says it is superseded by ${called(target)}, which does not list supersedes back.`,
+							path: target.path,
+						});
+					}
+					if (toneOf(dec.status) === "done") {
+						checks.push({
+							level: "note",
+							text: `${called(dec)} is superseded by ${called(target)} but is still marked "${dec.status}".`,
+							path: dec.path,
+						});
+					}
 				}
 			}
 		}
+	}
+
+	// Broader orphan detection: `.plan.json` files not linked to any ticket (neither `plan.ticket` nor any ticket's `plans:`).
+	const ticketPlanRefs = new Set(
+		files
+			.filter((f) => f.exists && f.group === "tickets")
+			.flatMap((t) => (t.plans ?? []).map((p) => p.replace(/\\/g, "/").replace(/^\/+/, "").toLowerCase())),
+	);
+	const orphanPlans = files.filter((f) => {
+		if (!f.exists || f.group !== "plans" || !/\.plan\.json$/i.test(f.name)) return false;
+		if (f.tickets?.length) return false;
+		const normPath = f.path.replace(/\\/g, "/").toLowerCase();
+		const normName = f.name.replace(/\\/g, "/").toLowerCase();
+		for (const ref of ticketPlanRefs) {
+			if (normPath.endsWith(`/${ref}`) || normPath === ref || normName === ref) return false;
+		}
+		return true;
+	});
+	if (orphanPlans.length && tickets.length) {
+		checks.push({
+			level: "note",
+			text: `${count(orphanPlans.length, "plan has", "plans have")} no ticket linked${orphanPlans.length === 1 ? `: ${orphanPlans[0]!.heading || orphanPlans[0]!.name}` : "."}`,
+			path: orphanPlans[0]!.path,
+		});
 	}
 
 	// What is not yet known.

@@ -5,7 +5,11 @@ import { Icon } from "../Icon";
 import { createResource, For, Show } from "solid-js";
 import { checkCodeCitations, reanchorCitation, type CitationIssue } from "../../shared/codeCitations";
 import { level } from "../../shared/houseStyle";
+import type { OpenTaskItem } from "../../shared/protocol";
+import { tasks } from "../../shared/tasks";
 import { backend } from "../backend";
+import { choose } from "../dialogs";
+import { docAuditData, refreshDocAudit } from "../docAudit";
 import { monaco } from "../editor/monaco";
 import { diagnostics } from "../lsp/session";
 import { size } from "../StatusBar";
@@ -94,44 +98,44 @@ export function Health() {
 			return issues;
 		},
 	);
-	const [orphanAttachments, { refetch: refetchOrphans }] = createResource(
-		() => {
-			const root = state.workspace?.root;
-			const docsRel = (state.project?.docs ?? "docs").replace(/^[./\\]+|[\\/]+$/g, "");
-			return root ? { root, docsRel, version: state.treeVersion } : null;
-		},
-		async ({ root, docsRel }) => {
-			const files = await backend.files().catch(() => []);
-			const prefix = `${docsRel ? `${docsRel}/` : ""}attachments/`.toLowerCase();
-			const images = files.filter((p) => {
-				const rel = relativeTo(root, p).replace(/\\/g, "/").toLowerCase();
-				return rel.startsWith(prefix) && /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif)$/i.test(rel);
-			});
-			if (!images.length) return [] as string[];
-			const mdFiles = files.filter((p) => /\.(md|markdown)$/i.test(p)).slice(0, 250);
-			const corpusParts: string[] = [];
-			for (const m of mdFiles) {
-				const open = documents.get(canonical(m));
-				const txt = open ? open.model.getValue() : await backend.read(m).then((r) => r.text, () => "");
-				if (txt) corpusParts.push(txt.toLowerCase());
-			}
-			const corpus = corpusParts.join("\n");
-			return images.filter((img) => {
-				const name = baseName(img).toLowerCase();
-				const enc = encodeURIComponent(baseName(img)).toLowerCase();
-				return !corpus.includes(name) && !corpus.includes(enc);
-			});
-		},
-	);
+	const auditResult = docAuditData;
+	const orphanAttachments = () => auditResult().unusedAttachments;
+	const openTasks = () => auditResult().openTasks;
+	const docAuditIssues = () => auditResult().issues;
+	const tickOpenTask = async (task: OpenTaskItem) => {
+		const key = canonical(task.path);
+		const open = documents.get(key);
+		const cur = open ? open.model.getValue() : await backend.read(task.path).then((r) => (r.binary ? null : r.text), () => null);
+		if (cur === null) return notify("Could not read the document.", "error");
+		let offset = -1;
+		if (task.offset > 0 && cur[task.offset] === " " && cur[task.offset - 1] === "[" && cur[task.offset + 1] === "]") {
+			offset = task.offset;
+		} else {
+			const hit = tasks(cur).find((t) => !t.done && t.line === task.line && t.text === task.text && t.offset > 0);
+			if (hit) offset = hit.offset;
+		}
+		if (offset < 0) return notify("Could not locate that task box — the document changed. Open it to tick it.", "error");
+		const next = `${cur.slice(0, offset)}x${cur.slice(offset + 1)}`;
+		if (open) {
+			applyText(key, next);
+		} else {
+			await backend.historyKeep(task.path).catch(() => {});
+			await backend.write(task.path, next);
+		}
+		setState("treeVersion", (v) => v + 1);
+		refreshDocAudit();
+		notify(`Ticked off task in ${task.ticket ?? task.title ?? baseName(task.path)}.`);
+	};
 	const reanchorIssue = async (issue: CitationIssue) => {
 		if (!issue.reanchor) return;
-		const open = documents.get(canonical(issue.docPath));
+		const key = canonical(issue.docPath);
+		const open = documents.get(key);
 		const cur = open ? open.model.getValue() : await backend.read(issue.docPath).then((r) => r.text, () => null);
 		if (cur === null) return notify("Could not read the document.", "error");
 		const next = reanchorCitation(cur, issue.citation, issue.reanchor.from, issue.reanchor.to);
 		if (next === cur) return;
 		if (open) {
-			applyText(issue.docPath, next);
+			applyText(key, next);
 		} else {
 			await backend.historyKeep(issue.docPath).catch(() => {});
 			await backend.write(issue.docPath, next);
@@ -141,10 +145,14 @@ export function Health() {
 		notify(`Re-anchored citation to L${issue.reanchor.from}-L${issue.reanchor.to}.`);
 	};
 	const trashOrphanAttachment = async (path: string) => {
+		const root = state.workspace?.root ?? "";
+		const rel = root ? relativeTo(root, path).split("\\").join("/") : baseName(path);
+		const TRASH = "Move to trash";
+		if ((await choose(`Move unused attachment ${rel} to the trash?`, [TRASH], { danger: TRASH })) !== TRASH) return;
 		try {
 			await backend.trash(path);
 			setState("treeVersion", (v) => v + 1);
-			void refetchOrphans();
+			refreshDocAudit();
 			notify(`Moved unused attachment ${baseName(path)} to trash.`);
 		} catch (e: any) {
 			notify(`Could not move to trash: ${e?.message ?? e}`, "error");
@@ -243,6 +251,80 @@ export function Health() {
 								)}
 							</For>
 						</Rows>
+					</Show>
+				</section>
+			</Show>
+			<Show when={docAuditIssues().length > 0}>
+				<section>
+					<h3 title="Workspace-wide Markdown checks: broken #heading anchors, malformed YAML frontmatter, and ADR 0008 table readability">
+						Document checks <span class="meta">{docAuditIssues().length}</span>
+					</h3>
+					<Rows class="health-rows" role="listbox" label="Workspace document checks">
+						<For each={docAuditIssues().slice(0, 60)}>
+							{(issue) => (
+								<Row
+									class="check-row clickable"
+									key={`${issue.path}:${issue.line}:${issue.kind}:${issue.message}`}
+									label={issue.message}
+									title={`${relativeTo(state.workspace?.root, issue.path)}:${issue.line} — ${issue.message}\nClick to open.`}
+									onActivate={() => void openFile(issue.path, { reveal: { line: issue.line, column: issue.column } })}
+								>
+									<span class={`check-mark ${issue.level}`} aria-hidden="true">
+										<Icon name={issue.level === "warn" ? "warning" : "circle-small-filled"} />
+									</span>
+									<span class="label">
+										{issue.message} <span class="meta">({baseName(issue.path)}:{issue.line})</span>
+									</span>
+								</Row>
+							)}
+						</For>
+					</Rows>
+					<Show when={docAuditIssues().length > 60}>
+						<p class="hint">Showing first 60 of {docAuditIssues().length} document checks (all appear in Problems → Docs).</p>
+					</Show>
+				</section>
+			</Show>
+			<Show when={openTasks().length > 0}>
+				<section>
+					<h3 title="Unchecked - [ ] tasks across active tickets, specs, and project notes">
+						Open tasks <span class="meta">{openTasks().length}</span>
+					</h3>
+					<Rows class="health-rows" role="listbox" label="Open checklist tasks across workspace">
+						<For each={openTasks().slice(0, 50)}>
+							{(task) => (
+								<Row
+									class="check-row task-check-row clickable"
+									key={`${task.path}:${task.line}:${task.offset}`}
+									label={task.text}
+									title={`${task.ticket ? `${task.ticket} — ` : ""}${relativeTo(state.workspace?.root, task.path)}:${task.line}\nClick to open at line ${task.line}, or tick the box to mark complete.`}
+									onActivate={() => void openFile(task.path, { reveal: { line: task.line } })}
+								>
+									<button
+										type="button"
+										class="task-tick-btn"
+										tabindex={-1}
+										title="Mark task done"
+										aria-label={`Mark done: ${task.text}`}
+										onClick={(e) => (e.stopPropagation(), void tickOpenTask(task))}
+									>
+										<Icon name="circle-outline" />
+									</button>
+									<span class="label">
+										<Show when={task.ticket}>
+											<strong class="doc-key">{task.ticket}</strong>{" "}
+										</Show>
+										{task.text}
+										<Show when={!task.ticket}>
+											{" "}
+											<span class="meta">({baseName(task.path)})</span>
+										</Show>
+									</span>
+								</Row>
+							)}
+						</For>
+					</Rows>
+					<Show when={openTasks().length > 50}>
+						<p class="hint">Showing first 50 of {openTasks().length} open tasks.</p>
 					</Show>
 				</section>
 			</Show>

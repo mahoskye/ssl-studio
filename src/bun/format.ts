@@ -274,6 +274,18 @@ export async function formatDocument(
 	};
 
 	try {
+		// Preserve leading Templater metadata comment (`<!-- template: ... -->`) before YAML frontmatter
+		// so Prettier still recognizes line 1 `---` as YAML frontmatter instead of corrupting it as Markdown.
+		if (parser === "markdown") {
+			const tplMatch = /^(\uFEFF?[ \t]*<!--\s*template\b[\s\S]*?-->[ \t]*\r?\n)(---\r?\n)/.exec(text);
+			if (tplMatch) {
+				const header = tplMatch[1]!;
+				const rest = text.slice(header.length);
+				const formattedRest = await prettier.format(rest, options);
+				const formatted = `${header.replace(/\r?\n$/, eol)}${formattedRest}`;
+				return { ok: true, text: formatted, changed: formatted !== text, formatter: "prettier" };
+			}
+		}
 		const formatted = await prettier.format(text, options);
 		return { ok: true, text: formatted, changed: formatted !== text, formatter: "prettier" };
 	} catch (err) {

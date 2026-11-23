@@ -136,16 +136,29 @@ docs, existing code samples, screenshots, and test fixtures
 
 - **Explorer scope:** a ticket's page links to its folder in a focused
   Explorer view so large fixture folders never clutter the ticket page.
+- **Active working ticket:** the StatusBar switcher (`Working on: …` /
+  `Focus ticket`) and Command Palette (`Ticket: Switch active working
+  ticket…`) persist a workspace-level focus ticket coordinating Agent,
+  Git commit prefixes, Search `<TICKET>` scope, Docs, Call Graph
+  highlighting, and `Ticket: Open active ticket to side`.
 - **Ticket-scoped attachments:** screenshots pasted or dropped into a
   bundled ticket save inside `<ticketFolder>/attachments/` so archiving,
   trashing, and exporting stay self-contained.
-- **Release readiness gate:** every ticket page computes a collapsible
-  readiness checklist (acceptance tasks, sub-tickets, specs, open
-  questions, registry rows, broken links, and Git status).
-- **Stakeholder exports:** every Markdown document (with or without YAML
-  frontmatter) offers Copy as HTML, Copy as Jira / Confluence markup,
-  Print / Save as PDF, standalone HTML (with inlined images and Mermaid
-  SVGs), and full Ticket Release Packets.
+- **Release readiness gate & epic rollups:** every ticket page rolls up
+  recursive descendant tickets, acceptance tasks, specs, open questions,
+  blockers, registry rows, broken links, and Git status.
+- **Stakeholder exports & deployment manifests:** every Markdown document
+  offers Copy as HTML, Copy as Jira / Confluence markup, Print / Save as
+  PDF, and standalone HTML (with inlined images and Mermaid SVGs).
+  Tickets also export **Ticket Release Packets** and **STARLIMS
+  Deployment / Transport Manifests** (Markdown, CSV, HTML) combining
+  descendant tickets, scripts, SQL/DDL artifacts, registry rows, rollback
+  steps, and a DEV → QA → UAT → PROD sign-off table.
+- **Guided closeout & unarchive:** `Close out ticket…` reviews readiness,
+  marks the ticket done, appends a dated milestone to `docs/STATE.md`
+  (and optionally `README.md`), clears matching active ticket focus, and
+  offers manual `Update catalogs` (ADR 0031). Archived tickets can be
+  restored via `Unarchive ticket…`.
 
 ## Markdown authoring and templates
 
@@ -153,20 +166,37 @@ Markdown opens in a unified CodeMirror 6 Live Preview and Read view
 ([ADR 0028](adr/0028-markdown-live-preview-uses-codemirror-6.md)), synced
 with plain text as the single source of truth (ADR 0002):
 
-- **Structured Properties:** add, edit, or remove YAML frontmatter fields
-  directly from the Properties card without editing raw YAML.
+- **Per-group view modes:** open the same Markdown note in Live/Source
+  and Read side-by-side (`Markdown: Split Read preview to side`) or a CSV
+  registry in Table and Text side-by-side.
+- **Structured Properties:** add, edit scalars inline, or remove YAML
+  frontmatter fields directly from the Properties card without editing
+  raw YAML.
 - **Templater templates:** project templates in `docs/templates/` (or the
   configured Templates folder) expand `<% tp.* %>`, `<%* ... %>`, prompts,
-  and cursor targets.
+  cursor targets, and merge missing YAML keys into existing frontmatter.
+- **Drag-and-drop, Mermaid & footnotes:** drag files from Explorer, Docs,
+  or editor tabs into Markdown to insert images, `[[wikilinks]]`, or
+  relative links; zoom/pan Mermaid diagrams in a lightbox and copy/save
+  SVG or PNG; insert sequential `[^N]` footnotes (`Markdown: Insert
+  footnote`) with hover definition previews; right-click broken links for
+  1-click `Fix broken link` or `Create missing file`.
 - **Tags and navigation:** `#tag` completion spans the whole workspace
   (skipping fenced code blocks), the Docs panel includes a collapsible
-  Tags browser, and commands insert or refresh `<!-- toc -->` tables of
-  contents and copy `[[doc#Heading]]` links.
-- **Code traceability:** SSL and SQL tabs show governing plans, specs,
-  tickets, schema docs, and registries in the Folio Docs menu; Call Graph
-  focuses scripts by ticket and jumps back to governing docs; Health
-  detects drifted `#L10-L20` code citations with 1-click Re-anchor; and
-  History shows per-file Git commits alongside local save snapshots.
+  Tags browser with workspace-wide `#tag` rename, and commands insert or
+  refresh `<!-- toc -->` tables of contents and copy `[[doc#Heading]]`
+  links.
+- **Schema ↔ Code bridge & traceability:** hovering a documented table in
+  SSL/SQL previews its schema columns inline (`Schema: Open schema doc
+  for table at cursor…`); Schema docs list reverse `Used in code &
+  registries` references; Agent offers a targeted `+ Tables (N)` chip
+  injecting only the referenced table definitions; SSL and SQL tabs show
+  governing docs in the Folio Docs menu; Call Graph highlights a
+  ticket's scripts; Health tracks open `- [ ]` tasks with 1-click
+  tick-off, broken `#heading` anchors, drifted `#L10-L20` code citations,
+  malformed YAML, unused attachments, and ADR 0008 table checks (also
+  filterable under `Problems → Docs`); and History combines local save
+  snapshots with Git commits.
 
 ## Registries
 
@@ -184,17 +214,19 @@ column says how far each row has come.
 | Roles and access | A role and what it may do |
 
 - **It opens as a table.** Filter, order, narrow to a status, edit a cell
-  (with `Shift+Enter` for multiline cells), bulk-update or delete visible
-  selected rows, add/rename/delete columns, and paste rectangular ranges.
-  Each change is a minimal text edit; Ctrl+Z undoes it.
+  (with `Shift+Enter` for multiline cells), bulk-update, copy as CSV, or
+  delete visible selected rows, add/rename/delete columns, and paste
+  rectangular ranges. Tables over 200 rows use scroll-windowed
+  virtualization. Each change is a minimal text edit; Ctrl+Z undoes it.
 - **The file manifest is written from the folder,** and written again says
   what is new, changed and gone, keeping your status and notes.
 - **Database objects start from and sync with schema SQL:** a unified
   T-SQL / Oracle DDL parser extracts tables, views, procedures, functions,
   triggers, and sequences, populates column docs, and flags dropped objects.
 - **"Check against code"** looks for each row's name in the project's
-  files. A row found nowhere is one to question. Duplicate primary keys
-  are highlighted in the table banner.
+  files across Selected, Checked, Filtered, or All rows. A row found
+  nowhere is one to question. Duplicate primary keys are highlighted in
+  the table banner.
 - **A `ticket` column links registry rows to a ticket.** The ticket's
   page then lists the registry under "Registries", with how many rows
   and how many are done, and opens the table at those rows. In the table,
