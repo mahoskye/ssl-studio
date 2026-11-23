@@ -1,12 +1,126 @@
-// In-app prompts and confirmations: the system webview may not implement
-// window.prompt or window.confirm. One is shown at a time; the rest wait
-// their turn (dialogQueue.ts).
-import { createSignal, createUniqueId, For, Show } from "solid-js";
+// In-app prompts, confirmations, VS Code-style QuickPick list selectors, and
+// a searchable Workspace File Browser (ADR 0032). One dialog is shown at a
+// time; the rest wait their turn cleanly.
+import { createEffect, createMemo, createResource, createSignal, createUniqueId, For, Show } from "solid-js";
+import { shouldUseQuickPick } from "../shared/contextMenu";
+import { baseName, dirName, isInside, relativeTo } from "../shared/paths";
+import { backend } from "./backend";
 import { defaultButton, DialogQueue, type Request } from "./dialogQueue";
+import { FileMark } from "./FileMark";
+import { Icon, type IconName } from "./Icon";
 import { Modal } from "./modal";
+import { fileTier, matchWords } from "./quickRank";
+import { canonical } from "./state";
 
 const [current, setCurrent] = createSignal<Request | null>(null);
 const queue = new DialogQueue(setCurrent);
+
+// --- VS Code-style QuickPick & File Browser overlay state --------------------
+
+export type QuickPickOption<T = string> = {
+	label: string;
+	value: T;
+	detail?: string;
+	description?: string;
+	icon?: IconName;
+	file?: string;
+	badge?: { text: string; tone?: string };
+	checked?: boolean;
+	danger?: boolean;
+	divide?: boolean;
+	keywords?: string;
+};
+
+type QuickPickRequest = {
+	kind: "pick";
+	title: string;
+	placeholder: string;
+	items: QuickPickOption<any>[];
+	empty: string;
+	searchable: boolean;
+	resolve: (value: any | null) => void;
+};
+
+export type FileBrowserPinned = {
+	path: string;
+	rel: string;
+	detail?: string;
+};
+
+type FileBrowserRequest = {
+	kind: "file";
+	title: string;
+	root: string;
+	initialDir: string;
+	pinned: FileBrowserPinned[];
+	pinnedLabel: string;
+	exclude: Set<string>;
+	resolve: (picked: { path: string; rel: string } | null) => void;
+};
+
+type PickerOverlay = QuickPickRequest | FileBrowserRequest;
+const [picker, setPicker] = createSignal<PickerOverlay | null>(null);
+
+function finishPicker(value: any | null) {
+	const cur = picker();
+	if (!cur) return;
+	setPicker(null);
+	cur.resolve(value);
+}
+
+/**
+ * VS Code-style top-center searchable QuickPick (ADR 0032). Use for selecting
+ * from tickets, files, statuses, templates, headings, registries, or options.
+ */
+export function quickPick<T = string>(options: {
+	title: string;
+	placeholder?: string;
+	items: QuickPickOption<T>[];
+	empty?: string;
+	searchable?: boolean;
+}): Promise<T | null> {
+	finishPicker(null);
+	return new Promise((resolve) =>
+		setPicker({
+			kind: "pick",
+			title: options.title,
+			placeholder: options.placeholder ?? "Type to filter…",
+			items: options.items,
+			empty: options.empty ?? "No matching items.",
+			searchable: options.searchable ?? true,
+			resolve,
+		}),
+	);
+}
+
+/**
+ * VS Code-style Workspace File Browser with folder navigation, breadcrumbs,
+ * pinned quick-access files, and instant fuzzy search across the workspace.
+ */
+export function browseWorkspaceFile(options: {
+	title?: string;
+	root: string;
+	initialDir?: string;
+	pinned?: FileBrowserPinned[];
+	pinnedLabel?: string;
+	exclude?: Iterable<string>;
+}): Promise<{ path: string; rel: string } | null> {
+	finishPicker(null);
+	const exclude = new Set<string>();
+	for (const p of options.exclude ?? []) exclude.add(canonical(p));
+	return new Promise((resolve) =>
+		setPicker({
+			kind: "file",
+			title: options.title ?? "Select a file",
+			root: options.root,
+			initialDir: options.initialDir && isInside(options.root, options.initialDir) ? options.initialDir : options.root,
+			pinned: options.pinned ?? [],
+			pinnedLabel: options.pinnedLabel ?? "Suggested files",
+			exclude,
+			resolve,
+		}),
+	);
+}
 
 /** Asks for a line of text. Null when cancelled. */
 export function ask(title: string, value = ""): Promise<string | null> {
@@ -15,16 +129,521 @@ export function ask(title: string, value = ""): Promise<string | null> {
 
 /**
  * Asks for one of `buttons`; "Cancel" is always offered too and gives null.
- * Enter presses the first button, unless it is the one named in `danger`:
- * a choice that cannot be undone is never the default, and Cancel is. With
- * `details`, a line saying what each button is, the buttons are a list.
+ * Compact confirmations (1-3 short buttons) render as centered confirmation
+ * dialogs; larger option lists render as a VS Code-style QuickPick (ADR 0032).
  */
 export function choose(title: string, buttons: string[], options: { danger?: string; details?: Record<string, string> } = {}): Promise<string | null> {
 	return queue.choose(title, buttons, options);
 }
 
+function formatBytes(bytes: number): string {
+	if (!Number.isFinite(bytes) || bytes < 0) return "";
+	if (bytes < 1024) return `${bytes} B`;
+	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+	return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function QuickPickModal(props: { req: QuickPickRequest }) {
+	const req = props.req;
+	const listId = createUniqueId();
+	const [query, setQuery] = createSignal("");
+	const [selected, setSelected] = createSignal(0);
+	let listEl: HTMLDivElement | undefined;
+
+	const filtered = createMemo(() => {
+		const q = query().trim();
+		if (!q) return req.items;
+		return req.items
+			.map((item) => {
+				const secondary = `${item.detail ?? ""} ${item.description ?? ""} ${item.badge?.text ?? ""} ${item.keywords ?? ""}`;
+				return { item, score: matchWords(q, item.label, secondary) };
+			})
+			.filter((x) => x.score > 0)
+			.sort((a, b) => b.score - a.score)
+			.map((x) => x.item);
+	});
+
+	createEffect(() => {
+		const len = filtered().length;
+		if (selected() >= len) setSelected(Math.max(0, len - 1));
+	});
+	createEffect(() => {
+		const idx = selected();
+		filtered();
+		listEl?.children[idx]?.scrollIntoView({ block: "nearest" });
+	});
+
+	const move = (by: number) => setSelected((i) => Math.max(0, Math.min(i + by, filtered().length - 1)));
+	const pick = (item: QuickPickOption<any> | undefined) => {
+		if (!item) return;
+		finishPicker(item.value);
+	};
+
+	let pointer = "";
+	const pointed = (e: MouseEvent, idx: number) => {
+		const at = `${e.clientX},${e.clientY}`;
+		if (at === pointer) return;
+		pointer = at;
+		setSelected(idx);
+	};
+
+	return (
+		<Modal class="quickpick quickpick-dialog" top label={req.title} onClose={() => finishPicker(null)}>
+			<div class="quickpick-head">
+				<span class="quickpick-title">{req.title}</span>
+				<button type="button" class="quickpick-close" aria-label="Close" title="Close (Escape)" onClick={() => finishPicker(null)}>
+					<Icon name="close" />
+				</button>
+			</div>
+			<Show when={req.searchable}>
+				<input
+					data-autofocus
+					role="combobox"
+					aria-label={req.title}
+					aria-expanded="true"
+					aria-controls={listId}
+					aria-autocomplete="list"
+					aria-activedescendant={filtered().length ? `${listId}-${selected()}` : undefined}
+					autocomplete="off"
+					spellcheck={false}
+					placeholder={req.placeholder}
+					value={query()}
+					onInput={(e) => (setQuery(e.currentTarget.value), setSelected(0))}
+					onKeyDown={(e) => {
+						if (e.key === "ArrowDown") (e.preventDefault(), move(1));
+						else if (e.key === "ArrowUp") (e.preventDefault(), move(-1));
+						else if (e.key === "PageDown") (e.preventDefault(), move(8));
+						else if (e.key === "PageUp") (e.preventDefault(), move(-8));
+						else if (e.key === "Home" && !query()) (e.preventDefault(), setSelected(0));
+						else if (e.key === "End" && !query()) (e.preventDefault(), setSelected(Math.max(0, filtered().length - 1)));
+						else if (e.key === "Enter") (e.preventDefault(), e.stopPropagation(), pick(filtered()[selected()]));
+					}}
+				/>
+			</Show>
+			<div
+				class="items"
+				role="listbox"
+				id={listId}
+				aria-label={req.title}
+				tabindex={req.searchable ? undefined : 0}
+				data-autofocus={req.searchable ? undefined : ""}
+				ref={listEl}
+				onKeyDown={(e) => {
+					if (req.searchable) return;
+					if (e.key === "ArrowDown") (e.preventDefault(), move(1));
+					else if (e.key === "ArrowUp") (e.preventDefault(), move(-1));
+					else if (e.key === "Enter" || e.key === " ") (e.preventDefault(), e.stopPropagation(), pick(filtered()[selected()]));
+				}}
+			>
+				<For each={filtered()}>
+					{(item, i) => (
+						<div
+							class="item"
+							classList={{
+								selected: i() === selected(),
+								"quick-noted": Boolean(item.description),
+								"quick-divide": Boolean(item.divide && !query().trim()),
+								"quick-danger": Boolean(item.danger),
+							}}
+							role="option"
+							id={`${listId}-${i()}`}
+							aria-selected={i() === selected()}
+							onMouseMove={(e) => pointed(e, i())}
+							onMouseDown={(e) => e.button === 0 && (e.preventDefault(), pick(item))}
+						>
+							<Show when={item.checked}>
+								<Icon name="check" class="quick-item-icon quick-item-check" />
+							</Show>
+							<Show when={!item.checked && item.file}>
+								{(name) => <FileMark name={name()} />}
+							</Show>
+							<Show when={!item.checked && !item.file && item.icon}>
+								{(icon) => <Icon name={icon()} class="quick-item-icon" />}
+							</Show>
+							<span class="label">{item.label}</span>
+							<Show when={item.badge}>
+								{(b) => <span class={`doc-status tone-${b().tone ?? "waiting"}`}>{b().text}</span>}
+							</Show>
+							<Show when={item.detail}>
+								<span class="detail">{item.detail}</span>
+							</Show>
+							<Show when={item.description}>
+								<span class="quick-note">{item.description}</span>
+							</Show>
+						</div>
+					)}
+				</For>
+			</div>
+			<Show when={!filtered().length}>
+				<div class="quick-status" role="status">
+					{req.empty}
+				</div>
+			</Show>
+		</Modal>
+	);
+}
+
+type BrowserRow =
+	| { kind: "up"; label: string; dir: string }
+	| { kind: "dir"; label: string; path: string; rel: string; divide?: boolean }
+	| { kind: "file"; label: string; path: string; rel: string; detail?: string; badge?: string; divide?: boolean };
+
+function FileBrowserModal(props: { req: FileBrowserRequest }) {
+	const req = props.req;
+	const listId = createUniqueId();
+	const [dir, setDir] = createSignal(req.initialDir);
+	const [query, setQuery] = createSignal("");
+	const [selected, setSelected] = createSignal(0);
+	let listEl: HTMLDivElement | undefined;
+
+	const [entries] = createResource(dir, (folder) =>
+		backend.list(folder).catch(() => []),
+	);
+	const [allFiles] = createResource(
+		() => Boolean(query().trim()),
+		(need) => (need ? backend.files().catch(() => [] as string[]) : Promise.resolve([] as string[])),
+	);
+
+	const breadcrumbs = createMemo(() => {
+		const rootName = baseName(req.root) || "Workspace";
+		const rel = relativeTo(req.root, dir()).replace(/\\/g, "/");
+		if (!rel || rel === ".") return [{ label: rootName, path: req.root }];
+		const parts = rel.split("/").filter(Boolean);
+		const out = [{ label: rootName, path: req.root }];
+		let acc = req.root;
+		const sep = req.root.includes("\\") ? "\\" : "/";
+		for (const part of parts) {
+			acc = acc.endsWith(sep) ? `${acc}${part}` : `${acc}${sep}${part}`;
+			out.push({ label: part, path: acc });
+		}
+		return out;
+	});
+
+	const rows = createMemo<BrowserRow[]>(() => {
+		const q = query().trim();
+		if (q) {
+			const wsFiles = allFiles() ?? [];
+			const ranked: { row: Extract<BrowserRow, { kind: "file" }>; tier: number }[] = [];
+			for (const full of wsFiles) {
+				if (req.exclude.has(canonical(full))) continue;
+				const rel = relativeTo(req.root, full).replace(/\\/g, "/");
+				const tier = fileTier(q, rel);
+				if (tier === null) continue;
+				const name = baseName(full);
+				const folder = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
+				ranked.push({
+					tier,
+					row: { kind: "file", label: name, path: full, rel, detail: folder },
+				});
+			}
+			ranked.sort((a, b) => a.tier - b.tier || a.row.rel.length - b.row.rel.length || a.row.label.localeCompare(b.row.label));
+			return ranked.slice(0, 80).map((r) => r.row);
+		}
+
+		const out: BrowserRow[] = [];
+		const atRoot = canonical(dir()) === canonical(req.root);
+		if (atRoot && req.pinned.length) {
+			const availPinned = req.pinned.filter((p) => !req.exclude.has(canonical(p.path)));
+			for (const p of availPinned) {
+				out.push({
+					kind: "file",
+					label: baseName(p.path),
+					path: p.path,
+					rel: p.rel,
+					detail: p.detail ?? p.rel,
+					badge: req.pinnedLabel,
+				});
+			}
+		}
+		if (!atRoot) {
+			const parent = dirName(dir());
+			if (isInside(req.root, parent)) {
+				out.push({ kind: "up", label: "..", dir: parent });
+			}
+		}
+		const list = (entries() ?? []).slice().sort((a, b) => {
+			if (a.kind !== b.kind) return a.kind === "dir" ? -1 : 1;
+			return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+		});
+		let firstAfterPinned = out.length > 0 && atRoot;
+		for (const e of list) {
+			if (e.kind === "file" && req.exclude.has(canonical(e.path))) continue;
+			const rel = relativeTo(req.root, e.path).replace(/\\/g, "/");
+			if (e.kind === "dir") {
+				out.push({ kind: "dir", label: e.name, path: e.path, rel, divide: firstAfterPinned });
+			} else {
+				out.push({ kind: "file", label: e.name, path: e.path, rel, detail: formatBytes(e.size), divide: firstAfterPinned });
+			}
+			firstAfterPinned = false;
+		}
+		return out;
+	});
+
+	createEffect(() => {
+		const len = rows().length;
+		if (selected() >= len) setSelected(Math.max(0, len - 1));
+	});
+	createEffect(() => {
+		const idx = selected();
+		rows();
+		listEl?.children[idx]?.scrollIntoView({ block: "nearest" });
+	});
+
+	const move = (by: number) => setSelected((i) => Math.max(0, Math.min(i + by, rows().length - 1)));
+	const activate = (row: BrowserRow | undefined) => {
+		if (!row) return;
+		if (row.kind === "up") {
+			setDir(row.dir);
+			setSelected(0);
+		} else if (row.kind === "dir") {
+			setDir(row.path);
+			setSelected(0);
+		} else {
+			finishPicker({ path: row.path, rel: row.rel });
+		}
+	};
+
+	let pointer = "";
+	const pointed = (e: MouseEvent, idx: number) => {
+		const at = `${e.clientX},${e.clientY}`;
+		if (at === pointer) return;
+		pointer = at;
+		setSelected(idx);
+	};
+
+	return (
+		<Modal class="quickpick quickpick-dialog file-browser-pick" top label={req.title} onClose={() => finishPicker(null)}>
+			<div class="quickpick-head">
+				<span class="quickpick-title">{req.title}</span>
+				<button type="button" class="quickpick-close" aria-label="Close" title="Close (Escape)" onClick={() => finishPicker(null)}>
+					<Icon name="close" />
+				</button>
+			</div>
+			<Show when={!query().trim()}>
+				<nav class="file-browser-crumbs" aria-label="Current folder">
+					<For each={breadcrumbs()}>
+						{(crumb, i) => (
+							<>
+								<Show when={i() > 0}>
+									<Icon name="chevron-right" class="file-browser-crumb-sep" />
+								</Show>
+								<button
+									type="button"
+									class="file-browser-crumb"
+									classList={{ current: i() === breadcrumbs().length - 1 }}
+									onClick={() => (setDir(crumb.path), setSelected(0))}
+								>
+									{crumb.label}
+								</button>
+							</>
+						)}
+					</For>
+				</nav>
+			</Show>
+			<input
+				data-autofocus
+				role="combobox"
+				aria-label={req.title}
+				aria-expanded="true"
+				aria-controls={listId}
+				aria-autocomplete="list"
+				aria-activedescendant={rows().length ? `${listId}-${selected()}` : undefined}
+				autocomplete="off"
+				spellcheck={false}
+				placeholder="Type to search any workspace file, or browse folders below…"
+				value={query()}
+				onInput={(e) => (setQuery(e.currentTarget.value), setSelected(0))}
+				onKeyDown={(e) => {
+					if (e.key === "ArrowDown") (e.preventDefault(), move(1));
+					else if (e.key === "ArrowUp") (e.preventDefault(), move(-1));
+					else if (e.key === "PageDown") (e.preventDefault(), move(8));
+					else if (e.key === "PageUp") (e.preventDefault(), move(-8));
+					else if (e.key === "Backspace" && !query() && canonical(dir()) !== canonical(req.root)) {
+						e.preventDefault();
+						const parent = dirName(dir());
+						if (isInside(req.root, parent)) (setDir(parent), setSelected(0));
+					} else if (e.key === "Enter") {
+						e.preventDefault();
+						e.stopPropagation();
+						activate(rows()[selected()]);
+					}
+				}}
+			/>
+			<div class="items" role="listbox" id={listId} aria-label={req.title} ref={listEl}>
+				<For each={rows()}>
+					{(row, i) => (
+						<div
+							class="item"
+							classList={{
+								selected: i() === selected(),
+								"quick-divide": row.kind !== "up" && Boolean(row.divide),
+							}}
+							role="option"
+							id={`${listId}-${i()}`}
+							aria-selected={i() === selected()}
+							onMouseMove={(e) => pointed(e, i())}
+							onMouseDown={(e) => e.button === 0 && (e.preventDefault(), activate(row))}
+						>
+							<Show when={row.kind === "up"}>
+								<Icon name="arrow-up" class="quick-item-icon" />
+								<span class="label">..</span>
+								<span class="detail">Up one folder</span>
+							</Show>
+							<Show when={row.kind === "dir"}>
+								<Icon name="folder" class="quick-item-icon" />
+								<span class="label">{row.label}/</span>
+								<Icon name="chevron-right" class="file-browser-dir-arrow" />
+							</Show>
+							<Show when={row.kind === "file"}>
+								<FileMark name={row.label} />
+								<span class="label">{row.label}</span>
+								<Show when={row.kind === "file" && row.badge}>
+									<span class="doc-status tone-active">{(row as Extract<BrowserRow, { kind: "file" }>).badge}</span>
+								</Show>
+								<Show when={row.kind === "file" && row.detail}>
+									<span class="detail">{(row as Extract<BrowserRow, { kind: "file" }>).detail}</span>
+								</Show>
+							</Show>
+						</div>
+					)}
+				</For>
+			</div>
+			<Show when={entries.loading || (query().trim() && allFiles.loading)}>
+				<div class="quick-status" role="status">
+					Loading files…
+				</div>
+			</Show>
+			<Show when={!entries.loading && !(query().trim() && allFiles.loading) && !rows().length}>
+				<div class="quick-status" role="status">
+					{query().trim() ? `No workspace files match “${query().trim()}”.` : "This folder has no attachable files."}
+				</div>
+			</Show>
+		</Modal>
+	);
+}
+
+function ChooseQuickPick(props: { request: Request }) {
+	const request = props.request;
+	const listId = createUniqueId();
+	const searchable = request.buttons.length >= 5;
+	const [query, setQuery] = createSignal("");
+	const [selected, setSelected] = createSignal(0);
+	let listEl: HTMLDivElement | undefined;
+
+	const filtered = createMemo(() => {
+		const q = query().trim();
+		if (!q) return request.buttons;
+		return request.buttons
+			.map((b) => ({ button: b, score: matchWords(q, b, request.details?.[b] ?? "") }))
+			.filter((x) => x.score > 0)
+			.sort((a, b) => b.score - a.score)
+			.map((x) => x.button);
+	});
+
+	createEffect(() => {
+		const len = filtered().length;
+		if (selected() >= len) setSelected(Math.max(0, len - 1));
+	});
+	createEffect(() => {
+		const idx = selected();
+		filtered();
+		listEl?.children[idx]?.scrollIntoView({ block: "nearest" });
+	});
+
+	const finish = (button: string | null) => queue.finish(request, button ? { button, value: "" } : null);
+	const move = (by: number) => setSelected((i) => Math.max(0, Math.min(i + by, filtered().length - 1)));
+
+	let pointer = "";
+	const pointed = (e: MouseEvent, idx: number) => {
+		const at = `${e.clientX},${e.clientY}`;
+		if (at === pointer) return;
+		pointer = at;
+		setSelected(idx);
+	};
+
+	return (
+		<Modal class="quickpick quickpick-dialog" top label={request.title} onClose={() => finish(null)}>
+			<div class="quickpick-head">
+				<span class="quickpick-title">{request.title}</span>
+				<button type="button" class="quickpick-close" aria-label="Cancel" title="Cancel (Escape)" onClick={() => finish(null)}>
+					<Icon name="close" />
+				</button>
+			</div>
+			<Show when={searchable}>
+				<input
+					data-autofocus
+					role="combobox"
+					aria-label={request.title}
+					aria-expanded="true"
+					aria-controls={listId}
+					aria-autocomplete="list"
+					aria-activedescendant={filtered().length ? `${listId}-${selected()}` : undefined}
+					autocomplete="off"
+					spellcheck={false}
+					placeholder="Type to filter options…"
+					value={query()}
+					onInput={(e) => (setQuery(e.currentTarget.value), setSelected(0))}
+					onKeyDown={(e) => {
+						if (e.key === "ArrowDown") (e.preventDefault(), move(1));
+						else if (e.key === "ArrowUp") (e.preventDefault(), move(-1));
+						else if (e.key === "PageDown") (e.preventDefault(), move(8));
+						else if (e.key === "PageUp") (e.preventDefault(), move(-8));
+						else if (e.key === "Enter") (e.preventDefault(), e.stopPropagation(), finish(filtered()[selected()] ?? null));
+					}}
+				/>
+			</Show>
+			<div
+				class="items"
+				role="listbox"
+				id={listId}
+				aria-label={request.title}
+				tabindex={searchable ? undefined : 0}
+				data-autofocus={searchable ? undefined : ""}
+				ref={listEl}
+				onKeyDown={(e) => {
+					if (searchable) return;
+					if (e.key === "ArrowDown") (e.preventDefault(), move(1));
+					else if (e.key === "ArrowUp") (e.preventDefault(), move(-1));
+					else if (e.key === "Enter" || e.key === " ") (e.preventDefault(), e.stopPropagation(), finish(filtered()[selected()] ?? null));
+				}}
+			>
+				<For each={filtered()}>
+					{(button, i) => (
+						<div
+							class="item"
+							classList={{
+								selected: i() === selected(),
+								"quick-noted": Boolean(request.details?.[button]),
+								"quick-danger": button === request.danger,
+							}}
+							role="option"
+							id={`${listId}-${i()}`}
+							aria-selected={i() === selected()}
+							onMouseMove={(e) => pointed(e, i())}
+							onMouseDown={(e) => e.button === 0 && (e.preventDefault(), finish(button))}
+						>
+							<span class="label">{button}</span>
+							<Show when={request.details?.[button]}>
+								<span class="quick-note">{request.details![button]}</span>
+							</Show>
+						</div>
+					)}
+				</For>
+			</div>
+			<Show when={!filtered().length}>
+				<div class="quick-status" role="status">
+					No options match “{query().trim()}”.
+				</div>
+			</Show>
+		</Modal>
+	);
+}
+
 function Dialog(props: { request: Request }) {
 	const request = props.request;
+	if (!request.input && shouldUseQuickPick(request.buttons, request.details)) {
+		return <ChooseQuickPick request={request} />;
+	}
 	const titleId = createUniqueId();
 	const inputId = createUniqueId();
 	let input: HTMLInputElement | undefined;
@@ -79,8 +698,15 @@ function Dialog(props: { request: Request }) {
 
 export function Dialogs() {
 	return (
-		<Show when={current()} keyed>
-			{(request) => <Dialog request={request} />}
-		</Show>
+		<>
+			<Show when={current()} keyed>
+				{(request) => <Dialog request={request} />}
+			</Show>
+			<Show when={picker()} keyed>
+				{(active) =>
+					active.kind === "pick" ? <QuickPickModal req={active} /> : <FileBrowserModal req={active} />
+				}
+			</Show>
+		</>
 	);
 }

@@ -1,12 +1,17 @@
 // App commands: the command list shows them, the keyboard runs them.
 // A command's keys are in DEFAULT_KEYS and nowhere else; the user's own are
 // in the `keys` setting.
-import { ask } from "./dialogs";
+import { ask, choose } from "./dialogs";
 import { activeEditor, lastActiveMarkdownPath } from "./editor/EditorGroup";
 import { formatFenceInModel, formatNonSslModel, hadRecentFormatError, languageName } from "./editor/languages";
-import { activeLiveEditor, isInMarkdownTextEditor } from "./editor/liveBridge";
+import { activeLiveEditor, isInMarkdownTextEditor, saveMarkdownSyncAnchor } from "./editor/liveBridge";
 import { linkWritten } from "../shared/docLinks";
+import { folderParts } from "../shared/docSections";
 import { canFormatNonSsl } from "../shared/format";
+import { isCatalog, registryTitle, statusChoices, toneOf } from "../shared/projectDocs";
+import { generateMermaidErDiagram, parseCreateTables, type SqlTableDef } from "../shared/sqlSchema";
+import { workspaceTags } from "../shared/tags";
+import { docsGoverningFile } from "../shared/workContext";
 import { runMonacoMarkdownAction } from "./editor/markdownKeys";
 import { backend, inApp } from "./backend";
 import { monaco } from "./editor/monaco";
@@ -15,10 +20,10 @@ import { symbols } from "./panels/Objects";
 import { symbolPath } from "./editor/regions";
 import { openStyleProfile } from "./StyleProfile";
 import { movePanel, panelOn, resetOutlineActive, resetPlanPaletteActive, showPanel, toggleSide } from "./panels/registry";
-import { explorerDelete, explorerNewFile, explorerRename } from "./panels/Explorer";
+import { explorerDelete, explorerNewFile, explorerRename, showInExplorer } from "./panels/Explorer";
 import { insertTemplate } from "./panels/Palette";
 import { TEMPLATES } from "../shared/houseStyle";
-import { askAbout } from "./agent/Agent";
+import { askAbout, attachFileToAgent } from "./agent/Agent";
 import { startTidy } from "./agent/tidy";
 import { baseName, dirName, joinPath, relativePath, relativeTo } from "../shared/paths";
 import { defaultLayout, type Settings } from "../shared/protocol";
@@ -28,22 +33,36 @@ import { goAlong } from "./navigation";
 import { isPlanPath, newPlan, printPlan } from "./plan/model";
 import { docs, isMarkdown, isTable, newDoc, setUpProject, undoSetUp } from "./project";
 import {
+	archiveTicket,
 	closeoutTicket,
+	createTicketFolder,
 	exportDeploymentManifest,
 	exportDocAs,
+	exportReleaseBundle,
+	exportRtm,
 	exportTicketPacket,
 	generateSchemaDocFromSql,
+	importLegacyDoc,
 	importTickets,
+	isArchivedTicket,
+	linkDocumentToTicket,
+	linkNonTicketToTicket,
 	newKnowledge,
 	newRegistry,
 	newSchema,
 	newSpec,
 	newState,
 	newTicket,
+	newTicketFile,
+	onboardBrownfieldWorkspace,
 	pickActiveTicket,
+	promoteQuestionToDecision,
 	renameHeadingAcrossWorkspace,
+	renameTagAcrossWorkspace,
+	setStatus,
 	startFolderCatalogs,
 	ticketAtHand,
+	unarchiveTicket,
 	updateCatalogs,
 	updateManifest,
 } from "./projectDocs";
@@ -55,11 +74,13 @@ import { stepScale, UI_SCALE } from "./uiScale";
 import {
 	activeDoc,
 	activePath,
+	canonical,
 	closeAllTabs,
 	closeOtherTabs,
 	closeTab,
 	closeTabsToRight,
 	displayName,
+	documents,
 	newUntitled,
 	focusEditor,
 	focusSidePanel,
@@ -166,9 +187,39 @@ function toggleMarkdownMode() {
 	const path = activePath();
 	if (!path || !isMarkdown(path)) return;
 	const g = state.activeGroup;
-	const next = markdownMode(path, g) === "read" ? (state.settings.livePreview === false ? "source" : "live") : "read";
+	const currentMode = markdownMode(path, g);
+	const next = currentMode === "read" ? (state.settings.livePreview === false ? "source" : "live") : "read";
+	if (currentMode === "source" && next !== "source") {
+		const editor = activeEditor();
+		if (editor?.getModel()) {
+			const pos = editor.getPosition();
+			const topLine = editor.getVisibleRanges()[0]?.startLineNumber ?? pos?.lineNumber ?? 1;
+			saveMarkdownSyncAnchor(g, path, {
+				line: pos?.lineNumber ?? 1,
+				column: pos?.column ?? 1,
+				topLine,
+			});
+		}
+	}
 	setMarkdownMode(path, next, g);
 	if (next !== "read") queueMicrotask(focusEditor);
+}
+
+function foldMarkdownHeadings(fold: boolean) {
+	const path = activePath();
+	if (!path || !isMarkdown(path)) return notify("Open a Markdown document first.");
+	const live = activeLiveEditor();
+	if (live) {
+		if (fold) live.foldAll?.();
+		else live.unfoldAll?.();
+		return;
+	}
+	const editor = activeEditor();
+	if (editor?.getDomNode()?.offsetParent) {
+		void editor.getAction(fold ? "editor.foldAll" : "editor.unfoldAll")?.run();
+		return;
+	}
+	notify("Switch to Live or Source mode to fold Markdown headings.");
 }
 
 /** Splits the active Markdown document to the side group in Read view while keeping this group editable. */
@@ -215,6 +266,7 @@ export const commands: Command[] = [
 	// Files and tabs
 	{ id: "open-folder", label: "Open folder…", run: () => void openFolderCommand() },
 	{ id: "quick-open", label: "Go to file…", run: () => setState("quickPick", "files") },
+	{ id: "quick-outline", label: "Go to symbol in file…", detail: "Procedures, regions, headings, or sections in the active file", run: () => (activePath() ? setState("quickPick", "outline") : notify("Open a file first.")) },
 	{ id: "symbols", label: "Go to symbol…", detail: "Anywhere in the workspace", run: () => setState("quickPick", "symbols") },
 	{ id: "command-palette", label: "Show all commands", run: () => setState("quickPick", "commands") },
 	{ id: "new-untitled", label: "New untitled file", detail: "A floating buffer that stays in memory until saved", run: () => void newUntitled() },
@@ -265,6 +317,8 @@ export const commands: Command[] = [
 	{ id: "md-format-code-block", label: "Markdown: Format code block", detail: "Format the fenced code block at the cursor (SSL, SQL, JS/TS, XML/XFD, JSON, HTML, CSS, YAML)", run: () => void formatActiveCodeBlock() },
 	{ id: "md-insert-image", label: "Markdown: Insert image…", detail: "Pick a workspace image or enter a URL (or paste/drop directly)", run: () => void insertImageInteractive() },
 	{ id: "md-toc", label: "Markdown: Insert / update table of contents", detail: "Insert or refresh a <!-- toc --> section list from the document's headings", run: () => void upsertMarkdownToc() },
+	{ id: "md-fold-all", label: "Markdown: Fold all headings", detail: "Collapse all foldable Markdown headings in the active editor", run: () => foldMarkdownHeadings(true) },
+	{ id: "md-unfold-all", label: "Markdown: Unfold all headings", detail: "Expand all folded Markdown headings in the active editor", run: () => foldMarkdownHeadings(false) },
 	{ id: "md-copy-heading-link", label: "Markdown: Copy link to current heading", detail: "Copy a [[doc#Heading]] wikilink for the heading at or above the cursor", run: () => void copyCurrentHeadingLink() },
 	{ id: "rename-heading", label: "Markdown: Rename heading across workspace…", detail: "Rename a heading and rewrite #anchor / [[Doc#Heading]] links across the project", run: () => void renameHeadingAcrossWorkspace() },
 	{ id: "open-link", label: "Open the link at the cursor", detail: "In a document's text: the file, heading or page its link leads to", run: openLinkAtCursor },
@@ -300,10 +354,23 @@ export const commands: Command[] = [
 	{ id: "new-message", label: "New interface message…", detail: "What is exchanged with an instrument or another system, described in the schema folder", run: () => void newSchema("interfaces") },
 	{ id: "new-layout", label: "New file layout…", detail: "A file the project reads or writes, described in the schema folder", run: () => void newSchema("files") },
 	{ id: "generate-schema-doc", label: "Generate table doc from SQL…", detail: "Turn CREATE TABLE DDL under schema/ into a Markdown column reference", run: () => void generateSchemaDocFromSql() },
+	{ id: "generate-er-diagram", label: "Schema: Generate Mermaid ER Diagram…", detail: "Parse workspace SQL DDL into a Mermaid erDiagram block", run: () => void generateErDiagramCommand() },
 	{ id: "open-schema-at-cursor", label: "Schema: Open schema doc for table at cursor…", detail: "Jump from a table or message name in SSL/SQL to its documented schema/ file", run: () => void import("./editor/schemaHover").then((m) => m.openSchemaAtCursor()) },
 	{ id: "add-selection-to-registry", label: "Registry: Add selection to registry for active ticket…", detail: "Append the selected constant, setting, or table name to a CSV registry linked to the active ticket", run: () => void import("./editor/schemaHover").then((m) => m.addSelectionToRegistry()) },
 	{ id: "switch-active-ticket", label: "Ticket: Switch active working ticket…", detail: "Set or clear the workspace active ticket coordinating Agent, Git, Search, Docs & Graph", run: () => void pickActiveTicket() },
 	{ id: "open-active-ticket-side", label: "Ticket: Open active ticket to side", detail: "Pin the active working ticket beside your code in a split editor", run: () => void openActiveTicketToSide() },
+	{ id: "open-governing-doc", label: "Docs: Open governing doc for active file…", detail: "Jump from the active code or SQL file to a governing plan, spec, ticket, decision, or schema doc", run: () => void openGoverningDocCommand() },
+	{ id: "rename-tag", label: "Docs: Rename tag across workspace…", detail: "Rename a #tag across YAML frontmatter and Markdown prose", run: () => void renameTagCommand() },
+	{ id: "promote-question", label: "Docs: Promote answered question to decision…", detail: "Turn an answered knowledge/questions note into a numbered ADR decision", run: () => void promoteQuestionCommand() },
+	{ id: "link-doc-to-ticket", label: "Docs: Link current document to ticket…", detail: "Link the open document to a ticket, or link a document to the open ticket", run: () => void linkDocToTicketCommand() },
+	{ id: "archive-ticket", label: "Docs: Archive active ticket…", detail: "Move the active ticket (and its folder, if any) into tickets/archive/", run: () => void archiveActiveTicketCommand() },
+	{ id: "unarchive-ticket", label: "Docs: Unarchive ticket…", detail: "Restore an archived ticket from tickets/archive/ back into active tickets/", run: () => void unarchiveTicketCommand() },
+	{ id: "set-doc-status", label: "Docs: Change status of active document…", detail: "Update the YAML frontmatter status of the open Markdown document", run: () => void setDocStatusCommand() },
+	{ id: "create-ticket-folder", label: "Docs: Create / add file to ticket folder…", detail: "Promote a ticket into a bundle folder or add a companion file inside it", run: () => void createOrAddTicketFolderCommand() },
+	{ id: "import-legacy-doc", label: "Docs: Import Word (.docx) or HTML Document…", detail: "Import a Word (.docx), HTML, or Markdown file into workspace Markdown with images", run: () => void importLegacyDoc() },
+	{ id: "onboard-workspace", label: "Project: Onboard Existing Workspace…", detail: "Scan existing scripts, SQL DDL, and docs to seed project setup and registries", run: () => void onboardBrownfieldWorkspace() },
+	{ id: "export-release-bundle", label: "Docs: Export Multi-Ticket Release Bundle…", detail: "Bundle multiple tickets by release, status, or key into a Release Bundle or Release Notes", run: () => void exportReleaseBundle() },
+	{ id: "export-rtm", label: "Docs: Export Requirements Traceability Matrix (RTM)…", detail: "Export CSV, Markdown, HTML, or Word traceability matrix linking tickets, specs, plans, code & tests", run: () => void exportRtm() },
 	{ id: "project-state", label: "Project state…", detail: "Where the project stands, in plain words", run: () => void newState() },
 	{ id: "update-catalogs", label: "Update catalogs", detail: "Write each INDEX.md's list afresh", run: () => void updateCatalogs() },
 	{ id: "start-catalogs", label: "Start folder catalogs", detail: "An INDEX.md for the docs, code and tests folders, where one has none", run: () => void startFolderCatalogs() },
@@ -369,6 +436,8 @@ export const commands: Command[] = [
 	{ id: "move-panel-back", label: "Move right panel to the left", detail: "The one that is open", run: () => state.settings.layout.right && movePanel(state.rightView) },
 	// The agent
 	{ id: "agent-ask", label: "Ask the agent…", detail: "About the selection", run: () => void askCommand() },
+	{ id: "attach-file-to-agent", label: "Agent: Attach active file to Agent", detail: "Attach the open workspace file to the next Agent turn context", run: () => { const p = activePath(); if (!p) return notify("Open a file first."); attachFileToAgent(p); } },
+	{ id: "show-in-explorer", label: "Explorer: Reveal active file in Explorer", detail: "Highlight and scroll to the open file in the Explorer tree", run: () => { const p = activePath(); if (!p) return notify("Open a file first."); showInExplorer(p); } },
 	{ id: "tidy", label: "Tidy file with the agent", run: () => (startTidy(), showPanel("agent")) },
 	// The IDE
 	{ id: "style-profile", label: "Edit style profile…", detail: "How the language server formats and checks", run: () => openStyleProfile() },
@@ -690,6 +759,260 @@ async function openFolderCommand() {
 	if (path) await openFolder(path);
 }
 
+async function generateErDiagramCommand() {
+	const wsRoot = state.workspace?.root;
+	if (!wsRoot) return notify("Open a folder first.");
+	const active = activePath();
+	const activeIsSql = Boolean(active && /\.(sql|ddl)$/i.test(active));
+	const schemaSqlPaths = docs()
+		.filter((d) => d.exists && d.group === "schema" && /\.(sql|ddl)$/i.test(d.name))
+		.map((d) => d.path);
+	const allWorkspaceSql = schemaSqlPaths.length
+		? schemaSqlPaths
+		: (await backend.files().catch(() => [])).filter((p) => /\.(sql|ddl)$/i.test(p));
+
+	let sourcePaths: string[] = [];
+	if (activeIsSql && active) {
+		const others = allWorkspaceSql.filter((p) => canonical(p) !== canonical(active));
+		if (others.length) {
+			const ACTIVE_ONLY = `Active file only (${baseName(active)})`;
+			const ALL_SQL = `All workspace SQL files (${others.length + 1})`;
+			const scope = await choose("Generate Mermaid ER diagram from:", [ACTIVE_ONLY, ALL_SQL]);
+			if (!scope) return;
+			sourcePaths = scope === ACTIVE_ONLY ? [active] : [active, ...others];
+		} else {
+			sourcePaths = [active];
+		}
+	} else {
+		sourcePaths = allWorkspaceSql;
+	}
+	if (!sourcePaths.length) return notify("No .sql or .ddl files were found in this workspace.");
+
+	const mergedByName = new Map<string, SqlTableDef>();
+	for (const p of sourcePaths) {
+		const open = documents.get(canonical(p));
+		const text = open ? open.model.getValue() : await backend.read(p).then((r) => (r.binary ? "" : r.text), () => "");
+		if (!text) continue;
+		for (const tbl of parseCreateTables(text, { includeStandaloneAlter: true })) {
+			const key = tbl.tableName.toLowerCase();
+			if (!mergedByName.has(key)) mergedByName.set(key, tbl);
+		}
+	}
+	const tables = [...mergedByName.values()];
+	if (!tables.length) return notify("No CREATE TABLE definitions were found in the SQL files.");
+
+	const diagram = generateMermaidErDiagram(tables);
+	const COPY = "Copy to clipboard";
+	const INSERT = "Insert at cursor";
+	const SAVE_DOC = "Save to schema/database/ER-Diagram.md";
+	const canInsert = Boolean(active && isMarkdown(active) && (activeLiveEditor() || activeEditor()?.getDomNode()?.offsetParent));
+	const choices = [COPY, ...(canInsert ? [INSERT] : []), SAVE_DOC];
+	const picked = await choose(`Generated Mermaid ER diagram for ${tables.length} ${tables.length === 1 ? "table" : "tables"}:`, choices);
+	if (!picked) return;
+	if (picked === COPY) {
+		await copyText(diagram, `Copied Mermaid ER diagram (${tables.length} ${tables.length === 1 ? "table" : "tables"}).`);
+		return;
+	}
+	if (picked === INSERT) {
+		const live = activeLiveEditor();
+		if (live) {
+			live.insertText(`${diagram}\n`, undefined, { asBlock: true });
+			notify("Inserted Mermaid ER diagram.");
+			return;
+		}
+		const editor = activeEditor();
+		const model = editor?.getModel();
+		const sel = editor?.getSelection();
+		if (editor && model && sel) {
+			model.pushStackElement();
+			model.pushEditOperations([], [{ range: sel, text: `${diagram}\n` }], () => null);
+			model.pushStackElement();
+			editor.focus();
+			notify("Inserted Mermaid ER diagram.");
+		}
+		return;
+	}
+	const schemaParts = folderParts(state.project?.schema ?? "schema");
+	const dest = joinPath(wsRoot, ...schemaParts, "database", "ER-Diagram.md");
+	const docText = `# Database ER Diagram\n\n${diagram}\n`;
+	await backend.write(dest, docText);
+	setState("treeVersion", (v) => v + 1);
+	await openFile(dest);
+	notify(`Saved Mermaid ER diagram to ${relativeTo(wsRoot, dest)}.`);
+}
+
+async function renameTagCommand() {
+	if (!state.workspace) return notify("Open a folder first.");
+	const buckets = workspaceTags(docs());
+	if (!buckets.length) {
+		const typed = (await ask("Tag to rename across workspace (without #)"))?.trim();
+		if (typed) await renameTagAcrossWorkspace(typed);
+		return;
+	}
+	const labels = buckets.map((b) => `#${b.tag} (${b.count})`);
+	const picked = await choose("Rename which tag across the workspace?", labels);
+	if (!picked) return;
+	const found = buckets[labels.indexOf(picked)];
+	if (found) await renameTagAcrossWorkspace(found.tag);
+}
+
+async function promoteQuestionCommand() {
+	if (!state.workspace) return notify("Open a folder first.");
+	const p = activePath();
+	const allDocs = docs();
+	const activeListed = p ? allDocs.find((d) => d.exists && canonical(d.path) === canonical(p)) : undefined;
+	if (activeListed?.group === "knowledge" && activeListed.kind === "questions") {
+		await promoteQuestionToDecision(activeListed.path);
+		return;
+	}
+	const questions = allDocs
+		.filter((d) => d.exists && !isCatalog(d) && d.group === "knowledge" && d.kind === "questions")
+		.sort((a, b) => Number(toneOf(b.status) === "done") - Number(toneOf(a.status) === "done") || a.name.localeCompare(b.name));
+	if (!questions.length) return notify("No question documents exist in this project yet.");
+	const labels = questions.map((q) => `${q.title || q.name}${q.status ? ` (${q.status})` : ""}`);
+	const picked = await choose("Promote which question to a decision?", labels);
+	if (!picked) return;
+	const chosen = questions[labels.indexOf(picked)];
+	if (chosen) await promoteQuestionToDecision(chosen.path);
+}
+
+async function linkDocToTicketCommand() {
+	const p = activePath();
+	if (!p) return notify("Open a document first.");
+	const listed = docs().find((d) => d.exists && canonical(d.path) === canonical(p));
+	if (listed?.group === "tickets" && listed.ticket) {
+		await linkDocumentToTicket(listed.path, listed.ticket);
+		return;
+	}
+	if (isMarkdown(p)) {
+		await linkNonTicketToTicket(p);
+		return;
+	}
+	notify("Open a Markdown document or ticket to link it.");
+}
+
+async function archiveActiveTicketCommand() {
+	if (!state.workspace) return notify("Open a folder first.");
+	const allDocs = docs();
+	const p = activePath();
+	const openTicket = p
+		? allDocs.find((d) => d.exists && d.group === "tickets" && !isCatalog(d) && canonical(d.path) === canonical(p) && !isArchivedTicket(d))
+		: undefined;
+	if (openTicket) {
+		await archiveTicket(openTicket);
+		return;
+	}
+	const key = ticketAtHand();
+	const activeTicket = key
+		? allDocs.find((d) => d.exists && d.group === "tickets" && !isCatalog(d) && d.ticket?.toLowerCase() === key.toLowerCase() && !isArchivedTicket(d))
+		: undefined;
+	if (activeTicket) {
+		await archiveTicket(activeTicket);
+		return;
+	}
+	const candidates = allDocs.filter((d) => d.exists && d.group === "tickets" && !isCatalog(d) && d.ticket && !isArchivedTicket(d));
+	if (!candidates.length) return notify("No active tickets found to archive.");
+	const labels = candidates.map((t) => `${t.ticket}: ${t.title || t.name}`);
+	const picked = await choose("Archive which ticket?", labels);
+	if (!picked) return;
+	const chosen = candidates[labels.indexOf(picked)];
+	if (chosen) await archiveTicket(chosen);
+}
+
+async function unarchiveTicketCommand() {
+	if (!state.workspace) return notify("Open a folder first.");
+	const allDocs = docs();
+	const p = activePath();
+	const openArchived = p
+		? allDocs.find((d) => d.exists && d.group === "tickets" && !isCatalog(d) && canonical(d.path) === canonical(p) && isArchivedTicket(d))
+		: undefined;
+	if (openArchived) {
+		await unarchiveTicket(openArchived);
+		return;
+	}
+	const archived = allDocs.filter((d) => d.exists && d.group === "tickets" && !isCatalog(d) && isArchivedTicket(d));
+	if (!archived.length) return notify("No archived tickets were found in tickets/archive/.");
+	const labels = archived.map((t) => `${t.ticket || t.name}${t.title ? `: ${t.title}` : ""}`);
+	const picked = await choose("Unarchive which ticket?", labels);
+	if (!picked) return;
+	const chosen = archived[labels.indexOf(picked)];
+	if (chosen) await unarchiveTicket(chosen);
+}
+
+async function setDocStatusCommand() {
+	const p = activePath();
+	if (!p || !isMarkdown(p)) return notify("Open a Markdown document first.");
+	const listed = docs().find((d) => d.exists && canonical(d.path) === canonical(p));
+	const choices = statusChoices(listed);
+	const CUSTOM = "Custom status…";
+	const picked = await choose(`Change status for ${listed?.title || displayName(p)}`, [...choices, CUSTOM]);
+	if (!picked) return;
+	const nextStatus = picked === CUSTOM ? (await ask("New status"))?.trim() : picked;
+	if (!nextStatus) return;
+	await setStatus(p, nextStatus);
+}
+
+async function createOrAddTicketFolderCommand() {
+	if (!state.workspace) return notify("Open a folder first.");
+	const allDocs = docs();
+	const p = activePath();
+	let target = p
+		? allDocs.find((d) => d.exists && d.group === "tickets" && !isCatalog(d) && canonical(d.path) === canonical(p))
+		: undefined;
+	if (!target) {
+		const key = ticketAtHand();
+		if (key) {
+			target = allDocs.find((d) => d.exists && d.group === "tickets" && !isCatalog(d) && d.ticket?.toLowerCase() === key.toLowerCase());
+		}
+	}
+	if (!target) {
+		const tickets = allDocs.filter((d) => d.exists && d.group === "tickets" && !isCatalog(d) && d.ticket && !isArchivedTicket(d));
+		if (!tickets.length) return notify("No tickets exist in this project yet.");
+		const labels = tickets.map((t) => `${t.ticket}: ${t.title || t.name}`);
+		const picked = await choose("Create or add file to folder for which ticket?", labels);
+		if (!picked) return;
+		target = tickets[labels.indexOf(picked)];
+	}
+	if (!target) return;
+	if (target.ticketFolder) {
+		await newTicketFile(target.ticketFolder, target.ticket || baseName(target.path));
+		return;
+	}
+	const made = await createTicketFolder(target.path);
+	if (made) {
+		const ADD_FILE = "Add companion file now…";
+		const answer = await choose(`Created ticket folder for ${target.ticket || baseName(target.path)}.`, [ADD_FILE, "Done"]);
+		if (answer === ADD_FILE) await newTicketFile(made, target.ticket || baseName(target.path));
+	}
+}
+
+async function openGoverningDocCommand() {
+	const p = activePath();
+	if (!p) return notify("Open a file first.");
+	const incoming = await backend.linksTo(p).catch(() => []);
+	const gov = docsGoverningFile(docs(), p, state.workspace?.root, incoming);
+	if (!gov.length) return notify("No governing documents are linked to this file yet.");
+	if (gov.length === 1) {
+		const only = gov[0]!;
+		await openFile(only.file.path, only.line ? { reveal: { line: only.line } } : {});
+		return;
+	}
+	const labels = gov.map(({ file: d, reason }) => {
+		const title =
+			d.group === "registries"
+				? registryTitle(d.name)
+				: d.ticket && d.title && !d.title.startsWith(d.ticket)
+					? `${d.ticket}: ${d.title}`
+					: d.title || d.heading || d.name;
+		const kind = d.group === "knowledge" && d.kind ? d.kind : d.group;
+		return `${title} (${kind} · ${reason})`;
+	});
+	const picked = await choose(`Governing documents for ${displayName(p)}`, labels);
+	if (!picked) return;
+	const chosen = gov[labels.indexOf(picked)];
+	if (chosen) await openFile(chosen.file.path, chosen.line ? { reveal: { line: chosen.line } } : {});
+}
+
 /**
  * Every default shortcut: the one place a command's keys are written down.
  * A command may have more than one (a key that differs between layouts).
@@ -697,6 +1020,7 @@ async function openFolderCommand() {
 const KEYS: Record<string, string> = {
 	"ctrl+o": "open-folder",
 	"ctrl+p": "quick-open",
+	"ctrl+shift+o": "quick-outline",
 	"ctrl+t": "symbols",
 	"ctrl+shift+p": "command-palette",
 	"ctrl+n": "new-untitled",

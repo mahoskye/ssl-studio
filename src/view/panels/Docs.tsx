@@ -3,13 +3,14 @@
 // plans. Which folders those are comes from .ssl-studio/project.toml.
 import { Icon } from "../Icon";
 import { FileMark } from "../FileMark";
-import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
+import { createContext, createEffect, createMemo, createSignal, For, Show, useContext } from "solid-js";
 import type { DocFile } from "../../shared/protocol";
 import { backend } from "../backend";
-import { choose } from "../dialogs";
+import { ask, choose } from "../dialogs";
 import { docChecks } from "../../shared/docChecks";
-import { CATALOG_AREAS, DOC_FOLDERS, docMatches, isCatalog, KNOWLEDGE, progress, progressShort, registryTitle, SCHEMAS, statusChoices, toneOf } from "../../shared/projectDocs";
-import { tagSearchPattern, workspaceTags } from "../../shared/tags";
+import { addToFrontMatterList, withFrontMatter } from "../../shared/frontMatter";
+import { CATALOG_AREAS, DOC_FOLDERS, docMatches, isCatalog, KNOWLEDGE, progress, progressShort, projectDocLabel, registryTitle, SCHEMAS, statusChoices, toneOf } from "../../shared/projectDocs";
+import { normalizeTag, tagSearchPattern, workspaceTags } from "../../shared/tags";
 import { descendantTickets, ticketWork } from "../../shared/workContext";
 import { docs, docsError, docsLoading, newDoc, newDocIn, newFolderIn, setUpProject } from "../project";
 import {
@@ -41,17 +42,67 @@ import {
 } from "../projectDocs";
 import { searchFor } from "./Search";
 import { manageTemplates, newNoteFromTemplate } from "../templater";
-import { folderParts, folderSaid, IMPORT_TICKETS, kindOf, NEW_DOCUMENT, NEW_FOLDER, NEW_PLAN, NEW_REGISTRY, NEW_SPEC, NEW_TICKET, newOfKind, plainSection, schemaFolderOf, schemaOf, sectionFolder, sectionMenu, SHOW_FOLDER, type DocSection } from "../../shared/docSections";
+import { folderParts, folderSaid, IMPORT_TICKETS, kindOf, NEW_DOCUMENT, NEW_FOLDER, NEW_PLAN, NEW_REGISTRY, NEW_SPEC, NEW_TICKET, newOfKind, plainSection, schemaFolderOf, schemaOf, sectionFolder, sectionMenuEntries, SHOW_FOLDER, type DocSection } from "../../shared/docSections";
 import { baseName, dirName, isInside, joinPath, relativeTo } from "../../shared/paths";
 import { schemaList, schemaRowTitle } from "../../shared/schemaList";
 import { isArchivedTicket as isArchivedTicketPath, shownRows, workList, type WorkSort } from "../../shared/workList";
-import { activePath, canonical, fileRenamed, notify, openFile, openToSide, save, setState, state } from "../state";
+import { activePath, applyText, canonical, documents, fileRenamed, notify, openFile, openToSide, save, setState, state } from "../state";
 import { gitStatus } from "../git";
 import { changeLetter } from "../../shared/gitStatus";
 import { recall, remember } from "../graph/canvas";
 import { focusRowsBelow, IconButton, isFolded, Row, RowGroup, Rows, setFold, setFolds, type Point } from "./Rows";
-import { chooseFromMenu } from "./RowMenu";
+import { chooseFromMenu, type RowMenuEntry } from "./RowMenu";
 import { Menu } from "../Menu";
+
+type BulkSelectState = {
+	active: () => boolean;
+	has: (path: string) => boolean;
+	toggle: (path: string) => void;
+};
+
+const BulkSelectContext = createContext<BulkSelectState>({
+	active: () => false,
+	has: () => false,
+	toggle: () => {},
+});
+
+const isBulkSelectable = (file: DocFile) => file.exists && !isCatalog(file) && /\.(md|markdown)$/i.test(file.name);
+
+type ProjectDocsExtras = {
+	exportReleaseBundle?: () => Promise<void>;
+	exportRtm?: () => Promise<void>;
+	importLegacyDoc?: () => Promise<void>;
+	onboardBrownfieldWorkspace?: () => Promise<void>;
+};
+
+async function runProjectDocsAction(key: keyof ProjectDocsExtras, label: string) {
+	try {
+		const mod = (await import("../projectDocs")) as ProjectDocsExtras;
+		const fn = mod[key];
+		if (typeof fn === "function") await fn();
+		else notify(`${label} is not available yet.`, "error");
+	} catch (e: any) {
+		notify(String(e?.message ?? e), "error");
+	}
+}
+
+async function editDocFrontMatter(path: string, transform: (text: string) => string | null): Promise<boolean> {
+	const key = canonical(path);
+	const open = documents.get(key);
+	const cur = open ? open.model.getValue() : await backend.read(path).then((r) => (r.binary ? null : r.text), () => null);
+	if (cur === null) return false;
+	const next = transform(cur);
+	if (next === null || next === cur) return false;
+	if (open) {
+		const clean = !state.dirty[key];
+		applyText(key, next);
+		if (clean) await save(key, { format: false });
+	} else {
+		await backend.historyKeep(path).catch(() => {});
+		await backend.write(path, next);
+	}
+	return true;
+}
 
 function gitKindOf(path: string) {
 	const st = gitStatus();
@@ -61,18 +112,36 @@ function gitKindOf(path: string) {
 }
 
 function DocRow(props: { file: DocFile }) {
+	const bulk = useContext(BulkSelectContext);
+	const canSelect = () => bulk.active() && isBulkSelectable(props.file);
 	// One click opens it for a look, in a tab the next file clicked takes; a double click keeps the tab.
-	const open = () => (props.file.exists ? void openFile(props.file.path, { preview: true }) : void setUpProject());
-	const selected = () => props.file.exists && activePath() === canonical(props.file.path);
+	// In bulk select mode, clicking a selectable Markdown doc toggles its selection checkbox.
+	const open = () => {
+		if (canSelect()) {
+			bulk.toggle(props.file.path);
+			return;
+		}
+		if (props.file.exists) void openFile(props.file.path, { preview: true });
+		else void setUpProject();
+	};
+	const selected = () => (canSelect() ? bulk.has(props.file.path) : props.file.exists && activePath() === canonical(props.file.path));
 	const dirty = () => props.file.exists && Boolean(state.dirty[canonical(props.file.path)]);
 	const git = () => (props.file.exists ? gitKindOf(props.file.path) : null);
+	const projectInfo = () => projectDocLabel(props.file);
+	const displayLabel = () => projectInfo()?.label || props.file.heading || props.file.title || props.file.name;
 	return (
 		<Row
 			class="tree-row doc-row"
 			key={props.file.path}
 			selected={selected()}
 			classList={{ selected: selected(), missing: !props.file.exists }}
-			title={props.file.exists ? props.file.path : `${props.file.name} is missing. Click it, or press Enter on it, to create it.`}
+			title={
+				props.file.exists
+					? projectInfo()
+						? `${projectInfo()!.label} — ${props.file.name}\n${props.file.path}`
+						: props.file.path
+					: `${displayLabel()} (${props.file.name}) is missing. Click it, or press Enter on it, to create it.`
+			}
 			draggable={props.file.exists}
 			onDragStart={(e) => {
 				if (!props.file.exists) return;
@@ -90,8 +159,22 @@ function DocRow(props: { file: DocFile }) {
 				return true;
 			}}
 		>
+			<Show when={canSelect()}>
+				<input
+					type="checkbox"
+					tabindex={-1}
+					checked={bulk.has(props.file.path)}
+					aria-label={`Select ${displayLabel()}`}
+					style={{ margin: "0 4px 0 0", flex: "none", "accent-color": "var(--accent)", cursor: "pointer" }}
+					onClick={(e) => e.stopPropagation()}
+					onChange={() => bulk.toggle(props.file.path)}
+				/>
+			</Show>
 			<FileMark name={props.file.name} />
-			<span class="label">{props.file.heading || props.file.title || props.file.name}</span>
+			<span class="label">{displayLabel()}</span>
+			<Show when={projectInfo()?.fileMeta}>
+				{(fileMeta) => <span class="meta project-file-meta">{fileMeta()}</span>}
+			</Show>
 			<Show when={!props.file.exists}>
 				<span class="meta warn">missing</span>
 			</Show>
@@ -293,7 +376,13 @@ async function rowMenu(file: DocFile, at: Point) {
 	const markdown = /\.(md|markdown)$/i.test(file.name);
 	// A message exchanged with another system is a contract with it, and has a state too: draft, agreed, retired.
 	const contract = file.group === "schema" && file.kind === "interfaces" && !/(^|[\\/])readme\.(md|markdown)$/i.test(file.name);
-	const states = markdown && !catalog && (contract || (["tickets", "specs", "knowledge"].includes(file.group) && (file.status || file.group !== "knowledge" || file.kind === "decisions" || file.kind === "questions"))) ? statusChoices(file).filter((status) => status.toLowerCase() !== (file.status ?? "").toLowerCase()) : [];
+	const hasStatus =
+		markdown &&
+		!catalog &&
+		(contract ||
+			(["tickets", "specs", "knowledge"].includes(file.group) &&
+				(file.status || file.group !== "knowledge" || file.kind === "decisions" || file.kind === "questions")));
+	const allStates = hasStatus ? statusChoices(file) : [];
 	const UPDATE = catalog ? "Update catalogs" : "Update file manifest";
 	// A file that is not there yet has one thing that can be done to it.
 	// The project's own settings file is what makes the folder a project: it is not renamed or thrown away from its
@@ -317,20 +406,74 @@ async function rowMenu(file: DocFile, at: Point) {
 	const isFocusedTicket = Boolean(file.ticket && state.settings.activeTicket?.toLowerCase() === file.ticket.toLowerCase());
 	const SET_ACTIVE_TICKET = isFocusedTicket ? `Clear active ticket (${file.ticket})` : `Set ${file.ticket} as active ticket`;
 	const archived = isTicket && (isArchivedTicket(file) || isArchivedTicketPath(file));
-	const ticketActions = isTicket
+
+	const statusSubmenu: RowMenuEntry[] = allStates.length
 		? [
-				...(file.ticket ? [SET_ACTIVE_TICKET, NEW_SUBTICKET, EXPORT_MANIFEST, EXPORT_PACKET, CLOSEOUT_TICKET] : []),
-				...(file.ticketFolder ? [NEW_TICKET_FILE, SHOW_TICKET_FOLDER] : [CREATE_TICKET_FOLDER]),
-				archived ? UNARCHIVE_TICKET : ARCHIVE_TICKET,
+				{
+					label: "Set status",
+					children: allStates.map((status) => {
+						const current = status.toLowerCase() === (file.status ?? "").toLowerCase();
+						return {
+							label: status,
+							value: `${STATE}${status}`,
+							checked: current,
+							disabled: current,
+						};
+					}),
+				},
 			]
 		: [];
-	const extraActions = [
-		...(isArchivableDoc ? [ARCHIVE_RETIRE] : []),
+
+	const workflowSection: RowMenuEntry[] = [
+		...statusSubmenu,
+		...(catalog || manifest ? [UPDATE] : []),
+		...(isTicket && file.ticket ? [NEW_SUBTICKET, CLOSEOUT_TICKET] : []),
+		...(isTicket
+			? file.ticketFolder
+				? [{ label: "Ticket folder", children: [NEW_TICKET_FILE, SHOW_TICKET_FOLDER] }]
+				: [CREATE_TICKET_FOLDER]
+			: []),
 		...(isAnsweredQuestion ? [PROMOTE_DECISION] : []),
 		...(isSchemaSql ? [DOC_FROM_SQL] : []),
 		...(isSchemaItem ? [FIND_IN_CODE] : []),
 	];
-	const items = file.exists ? [OPEN, SIDE, ...states.map((status) => `${STATE}${status}`), ...ticketActions, ...extraActions, ...(catalog || manifest ? [UPDATE] : []), PATH, RELATIVE, NAME, SHOW, ...(own ? [] : [RENAME, TRASH])] : [CREATE];
+
+	const exportSection: RowMenuEntry[] =
+		isTicket && file.ticket
+			? [
+					{
+						label: "Export",
+						children: [
+							{ label: "Release packet (HTML)…", value: EXPORT_PACKET },
+							{ label: "Deployment manifest (Markdown)…", value: EXPORT_MANIFEST },
+						],
+					},
+				]
+			: [];
+
+	const lifecycleSection: RowMenuEntry[] = [
+		...(isTicket ? [archived ? UNARCHIVE_TICKET : ARCHIVE_TICKET] : []),
+		...(isArchivableDoc ? [ARCHIVE_RETIRE] : []),
+		...(own ? [] : [{ label: RENAME, value: RENAME, keys: "F2" }]),
+	];
+
+	const items: RowMenuEntry[] = file.exists
+		? [
+				OPEN,
+				SIDE,
+				...(isTicket && file.ticket ? [SET_ACTIVE_TICKET] : []),
+				"separator",
+				...workflowSection,
+				"separator",
+				...exportSection,
+				"separator",
+				{ label: "Copy path", children: [PATH, RELATIVE, NAME] },
+				SHOW,
+				"separator",
+				...lifecycleSection,
+				...(own ? [] : (["separator", { label: TRASH, value: TRASH, keys: "Delete", danger: true }] as RowMenuEntry[])),
+			]
+		: [CREATE];
 	const picked = await chooseFromMenu(`Actions for ${file.ticket ?? file.title ?? file.name}`, items, at);
 	if (!picked) return;
 	if (picked === OPEN) await openFile(file.path, { keep: true });
@@ -388,7 +531,9 @@ function ItemRow(props: {
 	 */
 	fold?: { parent: boolean; shut: boolean; locked?: string; toggle: () => void };
 }) {
-	const selected = () => activePath() === canonical(props.file.path);
+	const bulk = useContext(BulkSelectContext);
+	const canSelect = () => bulk.active() && isBulkSelectable(props.file);
+	const selected = () => (canSelect() ? bulk.has(props.file.path) : activePath() === canonical(props.file.path));
 	const stale = () => props.file.catalog?.stale;
 	const isFocusedTicket = () =>
 		Boolean(
@@ -410,6 +555,7 @@ function ItemRow(props: {
 				isFocusedTicket() ? "Active focused ticket" : "",
 				props.archived ? "Archived ticket" : "",
 				props.file.status ? `Status: ${props.file.status}` : "",
+				props.file.release ? `Release: ${props.file.release}` : "",
 				props.file.ticketFolder
 					? (() => {
 							const n = props.file.ticketFileCount ?? props.file.ticketFiles?.length ?? 0;
@@ -424,7 +570,7 @@ function ItemRow(props: {
 				.join("\n")}
 			expanded={props.fold?.parent ? !props.fold.shut : undefined}
 			onToggle={() => props.fold?.parent && !props.fold.locked && props.fold.toggle()}
-			onActivate={() => void openFile(props.file.path, { preview: true })}
+			onActivate={() => (canSelect() ? bulk.toggle(props.file.path) : void openFile(props.file.path, { preview: true }))}
 			onKeep={() => void openFile(props.file.path, { keep: true })}
 			onMenu={(at) => void rowMenu(props.file, at)}
 			draggable={props.file.exists}
@@ -459,6 +605,17 @@ function ItemRow(props: {
 					</span>
 				)}
 			</Show>
+			<Show when={canSelect()}>
+				<input
+					type="checkbox"
+					tabindex={-1}
+					checked={bulk.has(props.file.path)}
+					aria-label={`Select ${props.file.ticket ?? props.file.title ?? props.file.name}`}
+					style={{ margin: "0 4px 0 0", flex: "none", "accent-color": "var(--accent)", cursor: "pointer" }}
+					onClick={(e) => e.stopPropagation()}
+					onChange={() => bulk.toggle(props.file.path)}
+				/>
+			</Show>
 			<FileMark name={props.file.name} />
 			{/* Open or shut, in words, for what reads the screen aloud: a list's row has no state for it. */}
 			<Show when={props.fold?.parent}>
@@ -475,6 +632,22 @@ function ItemRow(props: {
 				</Show>
 				{isCatalog(props.file) ? "Catalog" : props.file.title || props.file.name}
 			</span>
+			<Show when={props.file.group === "tickets" && !isCatalog(props.file) && props.file.release}>
+				<span
+					class="meta doc-release-pill"
+					title={`Release: ${props.file.release}`}
+					style={{
+						padding: "0 5px",
+						"border-radius": "999px",
+						border: "1px solid color-mix(in srgb, var(--border) 90%, transparent)",
+						"font-size": "var(--text-xs)",
+						"line-height": "1.35",
+						"white-space": "nowrap",
+					}}
+				>
+					{props.file.release}
+				</span>
+			</Show>
 			<Show when={props.archived}>
 				<span class="meta doc-archived-badge" title="Archived ticket">
 					archived
@@ -586,7 +759,7 @@ async function headMenu(section: DocSection, title: string, at: Point) {
 		docs().some(
 			(d) => d.exists && d.group === "tickets" && !isCatalog(d) && !isArchivedTicket(d) && !isArchivedTicketPath(d) && toneOf(d.status) === "done",
 		);
-	const entries = hasDoneTickets ? [...sectionMenu(section), ARCHIVE_ALL_DONE] : sectionMenu(section);
+	const entries = sectionMenuEntries(section, { archiveAllDone: hasDoneTickets ? ARCHIVE_ALL_DONE : undefined });
 	const picked = await chooseFromMenu(`Actions for ${title}, in ${folderSaid(folder)}`, entries, at);
 	if (!picked) return;
 	if (picked === ARCHIVE_ALL_DONE) return void archiveAllDoneTickets();
@@ -836,14 +1009,130 @@ export function Docs() {
 	/** Narrows every list in the panel to the documents the words typed are in. */
 	const [filter, setFilter] = createSignal("");
 	const [mode, setMode] = createSignal<"all" | "active" | "ticket" | "problems">("all");
+	const [typeFilter, setTypeFilter] = createSignal<"all" | "tickets" | "specs" | "decisions" | "questions" | "schema">("all");
+	const [releaseFilter, setReleaseFilter] = createSignal("");
 	const [activeTag, setActiveTag] = createSignal<string | null>(null);
+	const [bulkMode, setBulkMode] = createSignal(false);
+	const [selectedPaths, setSelectedPaths] = createSignal<Set<string>>(new Set());
+
 	const focusedTicket = () => state.settings.activeTicket?.trim() || "";
 	createEffect(() => {
 		if (!focusedTicket() && mode() === "ticket") setMode("all");
 	});
+	const releases = createMemo(() =>
+		[...new Set(docs().filter((d) => d.exists && !isCatalog(d) && d.release?.trim()).map((d) => d.release!.trim()))].sort((a, b) =>
+			a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }),
+		),
+	);
+	createEffect(() => {
+		if (releaseFilter() && !releases().some((r) => r.toLowerCase() === releaseFilter().toLowerCase())) {
+			setReleaseFilter("");
+		}
+	});
 	const tags = createMemo(() => workspaceTags(docs()));
-	const filtering = () => Boolean(filter().trim()) || mode() !== "all" || Boolean(activeTag());
+	const filtering = () =>
+		Boolean(filter().trim()) || mode() !== "all" || Boolean(activeTag()) || typeFilter() !== "all" || Boolean(releaseFilter());
 	const hasIssue = (d: DocFile) => Boolean(d.broken?.length || d.missing?.length || d.missingSource || d.problems?.length || d.catalog?.stale || d.untouched);
+
+	const toggleBulkMode = () => {
+		const next = !bulkMode();
+		setBulkMode(next);
+		if (!next) setSelectedPaths(new Set<string>());
+	};
+	const toggleBulkPath = (path: string) => {
+		setSelectedPaths((prev) => {
+			const next = new Set(prev);
+			if (next.has(path)) next.delete(path);
+			else next.add(path);
+			return next;
+		});
+	};
+	const bulkCtx: BulkSelectState = {
+		active: bulkMode,
+		has: (path) => selectedPaths().has(path),
+		toggle: toggleBulkPath,
+	};
+	const selectedDocs = createMemo(() => {
+		const sel = selectedPaths();
+		if (!sel.size) return [] as DocFile[];
+		return docs().filter((d) => sel.has(d.path) && isBulkSelectable(d));
+	});
+	const previewNames = (list: DocFile[]) =>
+		list
+			.slice(0, 4)
+			.map((d) => d.ticket || d.title || baseName(d.path))
+			.join(", ") + (list.length > 4 ? ` and ${list.length - 4} more` : "");
+
+	const bulkSetStatus = async () => {
+		const targets = selectedDocs();
+		if (!targets.length) return;
+		const statusPool = [...new Set([...targets.flatMap((d) => statusChoices(d)), "open", "in progress", "waiting", "review", "done", "draft", "decided", "retired"])];
+		const picked = await choose(
+			`Set status for ${targets.length} selected ${targets.length === 1 ? "document" : "documents"}`,
+			statusPool.slice(0, 8),
+		);
+		if (!picked) return;
+		if (targets.length > 1) {
+			const GO = `Set status on ${targets.length} documents`;
+			if ((await choose(`Set status to "${picked}" on ${targets.length} documents (${previewNames(targets)})?`, [GO])) !== GO) {
+				return;
+			}
+		}
+		let changed = 0;
+		for (const doc of targets) {
+			if (targets.length === 1) {
+				await setStatus(doc.path, picked);
+				changed++;
+			} else if (await editDocFrontMatter(doc.path, (text) => withFrontMatter(text, "status", picked))) {
+				changed++;
+			}
+		}
+		if (targets.length > 1) {
+			setState("treeVersion", (v) => v + 1);
+			notify(changed ? `Set status to "${picked}" on ${changed} ${changed === 1 ? "document" : "documents"}.` : "Selected documents already had that status.");
+		}
+	};
+
+	const bulkAddTag = async () => {
+		const targets = selectedDocs();
+		if (!targets.length) return;
+		const raw = (await ask(`Add tag to ${targets.length} selected ${targets.length === 1 ? "document" : "documents"} (without #)`))?.trim();
+		if (!raw) return;
+		const tag = normalizeTag(raw, { fromYaml: true });
+		if (!tag) return notify("Enter a valid tag name (letters, digits, _, -, /).", "error");
+		if (targets.length > 1) {
+			const GO = `Add #${tag} to ${targets.length} documents`;
+			if ((await choose(`Add tag #${tag} to ${targets.length} documents (${previewNames(targets)})?`, [GO])) !== GO) {
+				return;
+			}
+		}
+		let changed = 0;
+		for (const doc of targets) {
+			if (await editDocFrontMatter(doc.path, (text) => addToFrontMatterList(text, "tags", tag))) changed++;
+		}
+		setState("treeVersion", (v) => v + 1);
+		notify(changed ? `Added #${tag} to ${changed} ${changed === 1 ? "document" : "documents"}.` : `Selected documents already have #${tag}.`);
+	};
+
+	const bulkSetRelease = async () => {
+		const targets = selectedDocs();
+		if (!targets.length) return;
+		const val = (await ask(`Set release for ${targets.length} selected ${targets.length === 1 ? "document" : "documents"} (e.g. R2026.12)`))?.trim();
+		if (!val) return;
+		if (targets.length > 1) {
+			const GO = `Set release on ${targets.length} documents`;
+			if ((await choose(`Set release: "${val}" on ${targets.length} documents (${previewNames(targets)})?`, [GO])) !== GO) {
+				return;
+			}
+		}
+		let changed = 0;
+		for (const doc of targets) {
+			if (await editDocFrontMatter(doc.path, (text) => withFrontMatter(text, "release", val))) changed++;
+		}
+		setState("treeVersion", (v) => v + 1);
+		notify(changed ? `Set release "${val}" on ${changed} ${changed === 1 ? "document" : "documents"}.` : "Selected documents already had that release.");
+	};
+
 	const focusedTicketPaths = createMemo(() => {
 		const key = focusedTicket();
 		if (!key) return new Set<string>();
@@ -865,10 +1154,23 @@ export function Docs() {
 		const list = docs();
 		if (!filtering()) return list;
 		const tagLower = activeTag()?.toLowerCase() ?? "";
+		const relLower = releaseFilter().trim().toLowerCase();
+		const tf = typeFilter();
 		const tPaths = mode() === "ticket" ? focusedTicketPaths() : null;
 		return list.filter((d) => {
 			if (tagLower) {
 				if (isCatalog(d) || !d.tags?.some((t) => t.toLowerCase() === tagLower)) return false;
+			}
+			if (relLower) {
+				if (isCatalog(d) || d.release?.trim().toLowerCase() !== relLower) return false;
+			}
+			if (tf !== "all") {
+				if (isCatalog(d)) return false;
+				if (tf === "tickets" && d.group !== "tickets") return false;
+				if (tf === "specs" && d.group !== "specs") return false;
+				if (tf === "decisions" && !(d.group === "knowledge" && d.kind === "decisions")) return false;
+				if (tf === "questions" && !(d.group === "knowledge" && d.kind === "questions")) return false;
+				if (tf === "schema" && d.group !== "schema") return false;
 			}
 			if (mode() === "problems") {
 				if (!hasIssue(d)) return false;
@@ -888,10 +1190,11 @@ export function Docs() {
 	/** Whether a list has anything to show: while filtering, one that has nothing is left out, heading and all. */
 	const has = (...groups: DocFile["group"][]) => !filtering() || shown().some((d) => groups.includes(d.group));
 	return (
+		<BulkSelectContext.Provider value={bulkCtx}>
 		<div class="panel-body" data-panel="docs">
 			<div class="panel-title">
 				<span>Docs</span>
-				<Menu floating label="New document, or update the catalogs" title="New…: a ticket, spec, plan, decision, question, snippet, prompt, registry, table, interface message, file layout or document. Also: import tickets, update the catalogs" items={() => [
+				<Menu floating label="New document, export, import, or update the catalogs" title="New…: a ticket, spec, plan, decision, question, snippet, prompt, registry, table, interface message, file layout or document. Also: import, export, onboard, update catalogs" items={() => [
 					{ label: "New ticket…", run: () => void newTicket() },
 					{ label: "Import tickets…", run: () => void importTickets() },
 					{ label: "New spec…", run: () => void newSpec() },
@@ -915,9 +1218,21 @@ export function Docs() {
 					{ label: "Project state…", run: () => void newState() },
 					{ label: "Update catalogs", run: () => void updateCatalogs() },
 					{ label: "Start folder catalogs", run: () => void startFolderCatalogs() },
+					"separator" as const,
+					{ label: "Export Release Bundle…", run: () => void runProjectDocsAction("exportReleaseBundle", "Export Release Bundle") },
+					{ label: "Export Traceability Matrix (RTM)…", run: () => void runProjectDocsAction("exportRtm", "Export Traceability Matrix (RTM)") },
+					{ label: "Import Word / HTML doc…", run: () => void runProjectDocsAction("importLegacyDoc", "Import Word / HTML doc") },
+					{ label: "Onboard existing workspace…", run: () => void runProjectDocsAction("onboardBrownfieldWorkspace", "Onboard existing workspace") },
 				]}>
 					<Icon name="add" />
 				</Menu>
+				<IconButton
+					label={bulkMode() ? "Exit bulk select mode" : "Select multiple documents for bulk actions"}
+					title={bulkMode() ? "Exit bulk select" : "Select multiple documents"}
+					icon="checklist"
+					pressed={bulkMode()}
+					onClick={toggleBulkMode}
+				/>
 				<IconButton label="Collapse all" title={filtering() ? `Collapse all: not while filtering. ${LOCKED}.` : "Collapse all: shut every group and ticket"} icon="collapse-all" disabled={filtering()} onClick={() => setFolds(allFolds(), true)} />
 				<IconButton label="Expand all" title={filtering() ? `Expand all: not while filtering. ${LOCKED}.` : "Expand all: open every group and ticket"} icon="expand-all" disabled={filtering()} onClick={() => setFolds(allFolds(), false)} />
 				<IconButton label="Refresh the document list" title="Refresh" icon="refresh" onClick={() => setState("treeVersion", (v) => v + 1)} />
@@ -998,6 +1313,49 @@ export function Docs() {
 							Issues
 						</button>
 					</div>
+					<div
+						class="docs-facet-row"
+						style={{ display: "flex", gap: "4px", "align-items": "center", "flex-wrap": "wrap" }}
+					>
+						<select
+							aria-label="Filter by document type"
+							title="Filter by document type"
+							value={typeFilter()}
+							onChange={(e) => setTypeFilter(e.currentTarget.value as "all" | "tickets" | "specs" | "decisions" | "questions" | "schema")}
+							style={{
+								flex: "1 1 90px",
+								"min-width": "0",
+								padding: "2px 6px",
+								"font-size": "var(--text-xs)",
+								"line-height": "1.4",
+							}}
+						>
+							<option value="all">All types</option>
+							<option value="tickets">Tickets</option>
+							<option value="specs">Specs</option>
+							<option value="decisions">Decisions</option>
+							<option value="questions">Questions</option>
+							<option value="schema">Schema</option>
+						</select>
+						<Show when={releases().length > 0}>
+							<select
+								aria-label="Filter by release"
+								title="Filter by release"
+								value={releaseFilter()}
+								onChange={(e) => setReleaseFilter(e.currentTarget.value)}
+								style={{
+									flex: "1 1 90px",
+									"min-width": "0",
+									padding: "2px 6px",
+									"font-size": "var(--text-xs)",
+									"line-height": "1.4",
+								}}
+							>
+								<option value="">All releases</option>
+								<For each={releases()}>{(rel) => <option value={rel}>{rel}</option>}</For>
+							</select>
+						</Show>
+					</div>
 					<Show when={activeTag()}>
 						{(tag) => (
 							<button
@@ -1013,18 +1371,63 @@ export function Docs() {
 					</Show>
 				</div>
 			</Show>
+			<Show when={bulkMode()}>
+				<div
+					class="docs-bulk-bar"
+					role="region"
+					aria-label="Bulk document actions"
+					style={{
+						display: "flex",
+						"flex-direction": "column",
+						gap: "4px",
+						margin: "0 var(--space-3) var(--space-2)",
+						padding: "var(--space-1) var(--space-2)",
+						"border-radius": "var(--radius-sm)",
+						border: "1px solid color-mix(in srgb, var(--accent) 45%, var(--border))",
+						background: "color-mix(in srgb, var(--accent) 10%, transparent)",
+						"font-size": "var(--text-xs)",
+						flex: "none",
+					}}
+				>
+					<div style={{ display: "flex", "align-items": "center", "justify-content": "space-between", gap: "var(--space-2)" }}>
+						<span style={{ "font-weight": "500", color: "var(--fg)" }}>
+							{selectedDocs().length === 0
+								? "Select Markdown docs"
+								: `${selectedDocs().length} selected`}
+						</span>
+						<button type="button" class="docs-stale-btn" onClick={toggleBulkMode}>
+							Done
+						</button>
+					</div>
+					<div style={{ display: "flex", "flex-wrap": "wrap", gap: "4px" }}>
+						<button type="button" class="docs-stale-btn" disabled={!selectedDocs().length} onClick={() => void bulkSetStatus()}>
+							Set status…
+						</button>
+						<button type="button" class="docs-stale-btn" disabled={!selectedDocs().length} onClick={() => void bulkAddTag()}>
+							Add tag…
+						</button>
+						<button type="button" class="docs-stale-btn" disabled={!selectedDocs().length} onClick={() => void bulkSetRelease()}>
+							Set release…
+						</button>
+					</div>
+				</div>
+			</Show>
 			<Rows label="The project's documents">
 				<Show when={filtering() && !shown().length}>
 					<p class="hint">
 						{filter().trim()
 							? `No document matches “${filter().trim()}”. Clear the filter to see them all.`
-							: activeTag()
-								? `No matching documents tagged #${activeTag()}.`
-								: mode() === "problems"
-									? "No documents with issues right now."
-									: mode() === "ticket"
-										? `No documents linked to ${focusedTicket()} right now.`
-										: "No active or waiting documents right now."}
+							: releaseFilter()
+								? `No matching documents in release ${releaseFilter()}.`
+								: typeFilter() !== "all"
+									? `No matching ${typeFilter()} right now.`
+									: activeTag()
+										? `No matching documents tagged #${activeTag()}.`
+										: mode() === "problems"
+											? "No documents with issues right now."
+											: mode() === "ticket"
+												? `No documents linked to ${focusedTicket()} right now.`
+												: "No active or waiting documents right now."}
 					</p>
 				</Show>
 				<Show when={has("project")}>
@@ -1087,5 +1490,6 @@ export function Docs() {
 				</Show>
 			</Rows>
 		</div>
+		</BulkSelectContext.Provider>
 	);
 }

@@ -6,7 +6,7 @@ import { createEffect, createResource, createSignal, For, onCleanup, Show } from
 import { snippetAsText, TEMPLATES, type Template } from "../../shared/houseStyle";
 import { CALLOUT_PRESETS } from "../../shared/markdownEdit";
 import { baseName, joinPath, relativeTo } from "../../shared/paths";
-import { isCatalog } from "../../shared/projectDocs";
+import { isCatalog, registryTitle } from "../../shared/projectDocs";
 import type { DocFile } from "../../shared/protocol";
 import type { MarkdownTemplate } from "../../shared/templater";
 import { backend } from "../backend";
@@ -16,7 +16,14 @@ import { activeLiveEditor } from "../editor/liveBridge";
 import { regionColor } from "../editor/regions";
 import { Icon, type IconName } from "../Icon";
 import { activeGraphBridge } from "../graph/graphBridge";
-import { graphHighlightedCount, graphTicketHighlight, setGraphTicketHighlight } from "../graph/GraphView";
+import {
+	graphHighlightedCount,
+	graphTicketHighlight,
+	graphTicketSubgraph,
+	requestGraphTicketImpact,
+	setGraphTicketHighlight,
+	setGraphTicketSubgraph,
+} from "../graph/GraphView";
 import { recall, remember } from "../graph/canvas";
 import { openQuestions } from "../plan/assist";
 import { CODE_INDICATOR_WORDS } from "../plan/chart";
@@ -214,14 +221,23 @@ export function Palette() {
 	const [docPickerIdx, setDocPickerIdx] = createSignal(0);
 	const [planTab, setPlanTabSignal] = createSignal<"design" | "assistant">("design");
 
+	const LINKABLE_KNOWLEDGE_KINDS = new Set(["decisions", "questions", "reference", "snippets"]);
 	const docKindTag = (d: DocFile): string => {
-		if (d.group === "knowledge" && d.kind === "decisions") return "ADR";
+		if (d.group === "knowledge") {
+			if (d.kind === "decisions") return "ADR";
+			if (d.kind === "questions") return "Question";
+			if (d.kind === "reference") return "Ref";
+			if (d.kind === "snippets") return "Snippet";
+			return "Note";
+		}
 		if (d.group === "specs") return "Spec";
 		if (d.group === "schema") return "Schema";
 		if (d.group === "tickets") return "Ticket";
+		if (d.group === "registries") return "Registry";
 		return "Doc";
 	};
 	const docDisplayName = (d: DocFile): string => {
+		if (d.group === "registries") return registryTitle(d.name);
 		if (d.group === "tickets" && d.ticket) {
 			return d.title && !d.title.toLowerCase().startsWith(d.ticket.toLowerCase()) ? `${d.ticket}: ${d.title}` : d.title || d.ticket;
 		}
@@ -250,10 +266,19 @@ export function Palette() {
 					(d.group === "tickets" ||
 						d.group === "specs" ||
 						d.group === "schema" ||
-						(d.group === "knowledge" && d.kind === "decisions")),
+						d.group === "registries" ||
+						(d.group === "knowledge" && LINKABLE_KNOWLEDGE_KINDS.has(d.kind ?? ""))),
 			)
 			.sort((a, b) => {
-				const rank = (d: DocFile) => (d.group === "knowledge" ? 0 : d.group === "schema" ? 1 : d.group === "specs" ? 2 : 3);
+				const rank = (d: DocFile) => {
+					if (d.group === "knowledge" && d.kind === "decisions") return 0;
+					if (d.group === "knowledge" && d.kind === "questions") return 1;
+					if (d.group === "schema") return 2;
+					if (d.group === "specs") return 3;
+					if (d.group === "knowledge") return 4;
+					if (d.group === "registries") return 5;
+					return 6;
+				};
 				return rank(a) - rank(b) || docDisplayName(a).localeCompare(docDisplayName(b), undefined, { sensitivity: "base" });
 			});
 	const workspaceTickets = () =>
@@ -1035,7 +1060,7 @@ export function Palette() {
 																							type="button"
 																							class="plan-node-doc-add"
 																							aria-expanded={docPickerOpen()}
-																							title="Link a decision, spec, schema, or ticket to this step"
+																							title="Link a decision, question, reference, snippet, spec, schema, registry, or ticket to this step"
 																							onClick={() => {
 																								setDocPickerOpen((o) => !o);
 																								setDocPickerQuery("");
@@ -1080,7 +1105,7 @@ export function Palette() {
 																							<input
 																								class="plan-doc-picker-input"
 																								value={docPickerQuery()}
-																								placeholder="Filter decisions, specs, schemas, tickets…"
+																								placeholder="Filter decisions, questions, specs, schemas, registries, tickets…"
 																								aria-label="Filter documents to link"
 																								ref={(el) => queueMicrotask(() => el.focus())}
 																								onInput={(e) => {
@@ -1113,7 +1138,7 @@ export function Palette() {
 																									<p class="hint plan-doc-picker-empty">
 																										{docPickerQuery().trim()
 																											? "No matching documents."
-																											: "No unlinked decisions, specs, schemas, or tickets in this workspace."}
+																											: "No unlinked workspace docs available to link."}
 																									</p>
 																								}
 																							>
@@ -1287,6 +1312,7 @@ export function Palette() {
 								{(() => {
 									const activeKey = () => state.settings.activeTicket?.trim() || "";
 									const litKey = () => graphTicketHighlight()?.trim() || "";
+									const targetKey = () => litKey() || activeKey();
 									const litCount = () => graphHighlightedCount();
 									return (
 										<RowGroup head="Ticket overlay">
@@ -1326,6 +1352,44 @@ export function Palette() {
 													<span class="meta">{`${litCount()} ${litCount() === 1 ? "script" : "scripts"}`}</span>
 												</Row>
 											</Show>
+											<Show when={targetKey()}>
+												{(key) => (
+													<Row
+														class="tree-row palette-item plan-shape-item"
+														classList={{ active: graphTicketSubgraph() }}
+														key="graph:ticket-subgraph"
+														onActivate={() => {
+															const next = !graphTicketSubgraph();
+															if (next && !litKey()) setGraphTicketHighlight(key());
+															setGraphTicketSubgraph(next);
+														}}
+														title={
+															graphTicketSubgraph()
+																? `Showing only ${key()} scripts + 1-hop neighbors. Click to show full workspace graph.`
+																: `Filter Call Graph to ${key()} scripts plus 1-hop callers and callees`
+														}
+													>
+														<Icon name={graphTicketSubgraph() ? "filter-filled" : "filter"} class="icon" />
+														<span class="label">Filter to ticket (+ 1-hop)</span>
+														<span class="meta">{graphTicketSubgraph() ? "On" : "Off"}</span>
+													</Row>
+												)}
+											</Show>
+											<Row
+												class="tree-row palette-item plan-shape-item"
+												key="graph:ticket-impact"
+												onActivate={() => requestGraphTicketImpact(targetKey() || undefined)}
+												title={
+													targetKey()
+														? `Run transitive Impact / Blast-Radius Analysis across all scripts for ${targetKey()}`
+														: "Pick a ticket to run transitive Impact / Blast-Radius Analysis"
+												}
+											>
+												<Icon name="flame" class="icon" />
+												<span class="label">
+													{targetKey() ? `Impact / Blast-Radius (${targetKey()})…` : "Impact / Blast-Radius…"}
+												</span>
+											</Row>
 											<Show when={workspaceTickets().length > 0}>
 												<Row
 													class="tree-row palette-item plan-shape-item"

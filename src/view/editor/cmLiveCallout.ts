@@ -10,13 +10,17 @@
 import { redo, redoDepth, undo, undoDepth } from "@codemirror/commands";
 import { EditorSelection } from "@codemirror/state";
 import { EditorView, WidgetType } from "@codemirror/view";
+import { fenced } from "../../shared/catalog";
+import { htmlToMarkdown, looksLikeRichHtml, tsvToMarkdownTable } from "../../shared/htmlToMarkdown";
 import {
 	CALLOUT_PRESETS,
 	CALLOUT_SPECS,
+	pasteUrlOverSelection,
 	serializeCalloutBlock,
 	type ParsedCallout,
 } from "../../shared/markdownEdit";
 import { listEnter } from "../../shared/markdownText";
+import { createTextareaCompleter, type TextareaCompleter } from "./cmCompletion";
 import {
 	historyFallbackFacet,
 	liveCallbacksFacet,
@@ -60,6 +64,7 @@ type CalloutController = {
 	pickerEl: HTMLDivElement;
 	bodyEl: HTMLDivElement;
 	bodyTextarea: HTMLTextAreaElement | null;
+	bodyCompleter: TextareaCompleter | null;
 	syncAll: () => void;
 	openBodyEditor: (target?: boolean | { cursorOffset?: number }) => void;
 	closeBodyEditor: (commit?: boolean) => void;
@@ -232,6 +237,7 @@ export class CalloutWidget extends WidgetType {
 			pickerEl,
 			bodyEl,
 			bodyTextarea: null,
+			bodyCompleter: null,
 			syncAll: () => {},
 			openBodyEditor: () => {},
 			closeBodyEditor: () => {},
@@ -396,6 +402,8 @@ export class CalloutWidget extends WidgetType {
 
 		ctrl.closeBodyEditor = (commit = true) => {
 			const val = ctrl.bodyTextarea?.value;
+			ctrl.bodyCompleter?.dispose();
+			ctrl.bodyCompleter = null;
 			ctrl.editingBody = false;
 			ctrl.bodyTextarea = null;
 			root.dataset.editing = "false";
@@ -428,6 +436,8 @@ export class CalloutWidget extends WidgetType {
 				placeCaret(ctrl.bodyTextarea);
 				return;
 			}
+			ctrl.bodyCompleter?.dispose();
+			ctrl.bodyCompleter = null;
 			ctrl.editingBody = true;
 			root.dataset.editing = "true";
 			bodyEl.innerHTML = "";
@@ -438,6 +448,18 @@ export class CalloutWidget extends WidgetType {
 			ta.spellcheck = true;
 			ta.placeholder = "Write callout text, lists, or - [ ] tasks… (Ctrl+Enter or Esc to finish)";
 			ta.value = ctrl.bodyMarkdown;
+
+			const completer = createTextareaCompleter(ta, {
+				mode: "markdown",
+				filePath: () => ctrl.filePath,
+				onApply: () => {
+					fitTextarea(ta);
+					commitCallout({ body: ta.value, keepEmptyBodyLine: true });
+				},
+			});
+			ctrl.bodyCompleter = completer;
+
+			let plainPasteUntil = 0;
 
 			ta.addEventListener("beforeinput", (e) => {
 				if (
@@ -459,14 +481,73 @@ export class CalloutWidget extends WidgetType {
 			ta.addEventListener("input", () => {
 				fitTextarea(ta);
 				commitCallout({ body: ta.value, keepEmptyBodyLine: true });
+				completer.update();
+			});
+
+			ta.addEventListener("paste", (e) => {
+				e.stopPropagation();
+				const plainOnly = performance.now() < plainPasteUntil;
+				plainPasteUntil = 0;
+				if (plainOnly) return;
+
+				const plain = e.clipboardData?.getData("text/plain") ?? "";
+				const html = e.clipboardData?.getData("text/html") ?? "";
+				const s = ta.selectionStart ?? 0;
+				const end = ta.selectionEnd ?? s;
+
+				// 1. URL-over-selection paste -> `[selected](url)`.
+				if (end > s) {
+					const wrapped = pasteUrlOverSelection(ta.value.slice(s, end), plain);
+					if (wrapped) {
+						e.preventDefault();
+						completer.close();
+						ta.setRangeText(wrapped, s, end, "end");
+						fitTextarea(ta);
+						commitCallout({ body: ta.value, keepEmptyBodyLine: true });
+						return;
+					}
+				}
+
+				const insideFence = fenced(ta.value).some(([a, b]) => s >= a && s <= b);
+				if (insideFence) return;
+
+				// 2. Multi-row tabular TSV -> GFM table.
+				const tsv = tsvToMarkdownTable(plain);
+				if (tsv) {
+					e.preventDefault();
+					completer.close();
+					ta.setRangeText(tsv, s, end, "end");
+					fitTextarea(ta);
+					commitCallout({ body: ta.value, keepEmptyBodyLine: true });
+					return;
+				}
+
+				// 3. Rich HTML -> clean Markdown.
+				if (html && looksLikeRichHtml(html)) {
+					const md = htmlToMarkdown(html);
+					if (md && md !== plain.trim()) {
+						e.preventDefault();
+						completer.close();
+						ta.setRangeText(md, s, end, "end");
+						fitTextarea(ta);
+						commitCallout({ body: ta.value, keepEmptyBodyLine: true });
+					}
+				}
 			});
 
 			ta.addEventListener("mousedown", (e) => e.stopPropagation());
 
 			ta.addEventListener("keydown", (e) => {
+				if (completer.handleKeyDown(e)) return;
+				if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === "v") {
+					plainPasteUntil = performance.now() + 400;
+					e.stopPropagation();
+					return;
+				}
 				if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "z") {
 					e.preventDefault();
 					e.stopPropagation();
+					completer.close();
 					commitCallout({ body: ta.value, keepEmptyBodyLine: true });
 					runHistory(ctrl.view, e.shiftKey ? "redo" : "undo");
 					return;
@@ -474,6 +555,7 @@ export class CalloutWidget extends WidgetType {
 				if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "y") {
 					e.preventDefault();
 					e.stopPropagation();
+					completer.close();
 					commitCallout({ body: ta.value, keepEmptyBodyLine: true });
 					runHistory(ctrl.view, "redo");
 					return;
@@ -481,6 +563,7 @@ export class CalloutWidget extends WidgetType {
 				if (e.key === "Escape") {
 					e.preventDefault();
 					e.stopPropagation();
+					completer.close();
 					setPickerOpen(false);
 					exitBelow(false);
 					return;
@@ -489,6 +572,7 @@ export class CalloutWidget extends WidgetType {
 					ctrl.suppressEnterUntil = performance.now() + 80;
 					e.preventDefault();
 					e.stopPropagation();
+					completer.close();
 					setPickerOpen(false);
 					exitBelow(true);
 					return;
@@ -496,6 +580,7 @@ export class CalloutWidget extends WidgetType {
 				if (e.key === "ArrowUp" && !e.shiftKey && ta.selectionStart === 0 && caretOnFirstLine(ta)) {
 					e.preventDefault();
 					e.stopPropagation();
+					completer.close();
 					commitCallout({ body: ta.value, keepEmptyBodyLine: true });
 					titleInput.focus();
 					titleInput.setSelectionRange(titleInput.value.length, titleInput.value.length);
@@ -528,6 +613,7 @@ export class CalloutWidget extends WidgetType {
 			});
 
 			ta.addEventListener("blur", (e) => {
+				completer.close();
 				const nextEl = e.relatedTarget instanceof Node ? e.relatedTarget : null;
 				const stayInCallout = Boolean(nextEl && root.contains(nextEl));
 				commitCallout({ body: ta.value, keepEmptyBodyLine: stayInCallout });
@@ -768,6 +854,11 @@ export class CalloutWidget extends WidgetType {
 
 		ctrl.syncAll();
 		return root;
+	}
+
+	destroy(dom: HTMLElement) {
+		const ctrl = (dom as CalloutDomElement).__calloutCtrl;
+		ctrl?.bodyCompleter?.dispose();
 	}
 
 	ignoreEvent() {

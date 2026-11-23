@@ -4,12 +4,16 @@
 import { createStore } from "solid-js/store";
 import { backend } from "../backend";
 import { monaco } from "../editor/monaco";
+import { flatRegions } from "../editor/regions";
 import { session } from "../lsp/session";
-import { documents, notify, openFile, state } from "../state";
+import { canonical, documents, notify, openFile, state } from "../state";
 import { baseName, joinPath, relativeTo } from "../../shared/paths";
+import { manualPlanDrift, planTargetsOf, stageRegionDrift } from "./assist";
 import { lastPart, procedureBodySpan, scriptEntrySpan } from "./build";
 import { builtOf, driftOf, type BuiltUnit, type Drift, type Reading } from "./built";
 import type { Plan } from "./model";
+
+export { manualPlanDrift, stageRegionDrift };
 
 export type DriftState = { items: Drift[]; moved: Record<string, string>; checked: boolean };
 
@@ -27,12 +31,75 @@ export async function readingOf(script: string): Promise<Reading | null> {
 	return session.scriptCalls(scriptUri(script)).catch(() => null);
 }
 
+/** Reads `/* region <Stage>;` names for an SSL script via starlims-lsp DocumentSymbols (ADR 0003). */
+async function readScriptRegions(script: string): Promise<string[] | null> {
+	if (!state.workspace || !/\.(ssl|srvscr)$/i.test(script)) return null;
+	const full = joinPath(state.workspace.root, script);
+	const openModel = documents.get(canonical(full))?.model ?? documents.get(full)?.model;
+	if (openModel) {
+		const syms = await withTimeout(session.documentSymbols(openModel).catch(() => null), 4000, null);
+		return syms ? flatRegions(syms).map((r) => r.symbol.name) : null;
+	}
+	const text = await readWorkspaceText(script);
+	if (text === null) return null;
+	const syms = await withTimeout(session.scratchSymbols(text).catch(() => null), 4000, null);
+	return syms ? flatRegions(syms).map((r) => r.symbol.name) : null;
+}
+
+async function collectTargetRegions(scripts: readonly string[]): Promise<{ regions: Set<string>; checked: string[] }> {
+	const regions = new Set<string>();
+	const checked: string[] = [];
+	for (const script of new Set(scripts)) {
+		const found = await readScriptRegions(script);
+		if (found === null) continue;
+		checked.push(script);
+		for (const name of found) regions.add(name);
+	}
+	return { regions, checked };
+}
+
 export async function readDrift(uri: string, plan: Plan): Promise<Drift[]> {
-	const built = builtOf(plan);
-	if (!built?.units.length || !state.workspace) {
+	if (!state.workspace) {
 		setDrifts(uri, EMPTY);
 		return [];
 	}
+	const built = builtOf(plan);
+	const targets = planTargetsOf(plan);
+
+	// Lightweight ref/target and stage-region drift check for manually authored plans (no `built.units`).
+	if (!built?.units.length) {
+		const sslTargets = targets.filter((t) => /\.(ssl|srvscr)$/i.test(t));
+		if (!sslTargets.length) {
+			setDrifts(uri, EMPTY);
+			return [];
+		}
+		const existingTargets: string[] = [];
+		for (const script of sslTargets) {
+			if ((await readWorkspaceText(script)) !== null) existingTargets.push(script);
+		}
+		if (!existingTargets.length) {
+			setDrifts(uri, { items: [], moved: {}, checked: true });
+			return [];
+		}
+		const readings = new Map<string, Reading | null>();
+		if (session.supports("ssl/callGraph")) {
+			for (const script of existingTargets) {
+				const reading = await readingOf(script);
+				if (!reading) return driftFor(uri).items;
+				readings.set(script, reading);
+			}
+		}
+		const regionInfo = plan.groups.length ? await collectTargetRegions(existingTargets) : { regions: new Set<string>(), checked: [] };
+		const items = manualPlanDrift(
+			plan,
+			readings,
+			regionInfo.checked.length ? regionInfo.regions : undefined,
+			regionInfo.checked.length ? regionInfo.checked : existingTargets,
+		);
+		setDrifts(uri, { items, moved: {}, checked: true });
+		return items;
+	}
+
 	const readings = new Map<string, Reading | null>();
 	for (const script of new Set(built.units.map((u) => u.script))) {
 		const reading = await readingOf(script);
@@ -53,6 +120,13 @@ export async function readDrift(uri: string, plan: Plan): Promise<Drift[]> {
 		moved[unit.name] = script;
 	}
 	const items = driftOf(plan, readings, moved);
+	if (plan.groups.length) {
+		const regionScripts = [...new Set([...targets, ...built.units.map((u) => moved[u.name] ?? u.script)])];
+		const regionInfo = await collectTargetRegions(regionScripts);
+		if (regionInfo.checked.length) {
+			items.push(...stageRegionDrift(plan, regionInfo.regions, regionInfo.checked));
+		}
+	}
 	setDrifts(uri, { items, moved, checked: true });
 	return items;
 }
@@ -96,17 +170,25 @@ export async function resolveReference(ref: string): Promise<ResolvedRef | null>
 	const parts = ref.trim().split(".").filter(Boolean);
 	const shortName = parts.at(-1)!;
 	const qualifiers = parts.slice(0, -1).map((p) => p.toLowerCase());
+	const qualPath = qualifiers.join("/");
 	const symbols = await withTimeout(session.workspaceSymbols(shortName).catch(() => []), 4000, []);
 	const matches = symbols
 		.filter((s) => s.name.toLowerCase() === shortName.toLowerCase())
 		.map((s) => {
 			const rel = relativeTo(state.workspace!.root, monaco.Uri.parse(s.location.uri).fsPath).replace(/\\/g, "/");
 			const lower = rel.toLowerCase();
+			const noExt = lower.replace(/\.(ssl|srvscr|ds)$/i, "");
+			const container = (s.containerName ?? "").trim().replace(/\\/g, "/").replace(/\./g, "/").toLowerCase();
+			const exactQual =
+				qualifiers.length === 0 ||
+				noExt === qualPath ||
+				noExt.endsWith(`/${qualPath}`) ||
+				(Boolean(container) && (container === qualPath || container.endsWith(`/${qualPath}`)));
 			const isProc = s.kind === 6 || s.kind === 12 ? 10 : 0;
 			const qualScore = qualifiers.reduce((acc, q) => acc + (lower.includes(q) ? 5 : 0), 0);
-			return { s, rel, score: isProc + qualScore };
+			return { s, rel, exactQual, score: isProc + qualScore };
 		})
-		.filter((m) => !m.rel.startsWith(".ssl-studio"))
+		.filter((m) => !m.rel.startsWith(".ssl-studio") && m.exactQual)
 		.sort((a, b) => b.score - a.score);
 	const best = matches[0];
 	if (best) {
@@ -118,25 +200,23 @@ export async function resolveReference(ref: string): Promise<ResolvedRef | null>
 		};
 	}
 	// Dotted script, data source, or qualified procedure path (e.g. DueDates.Holidays, DueDates.SaveDueDates, DueDates.DueRules.RuleFor).
-	if (parts.length >= 2) {
-		const files = await backend.files().catch(() => [] as string[]);
-		const candidates = [parts.join("/"), ...(parts.length >= 3 ? [parts.slice(0, -1).join("/")] : [])];
-		for (const base of candidates) {
-			const lowerBase = base.toLowerCase();
-			const targetFile = files.find((f) => {
-				const norm = f.replace(/\\/g, "/").toLowerCase();
-				return (
-					norm.endsWith(`/${lowerBase}.ssl`) ||
-					norm === `${lowerBase}.ssl` ||
-					norm.endsWith(`/${lowerBase}.srvscr`) ||
-					norm === `${lowerBase}.srvscr` ||
-					norm.endsWith(`/${lowerBase}.ds`) ||
-					norm === `${lowerBase}.ds`
-				);
-			});
-			if (targetFile) {
-				return { name: shortName, script: relativeTo(state.workspace.root, targetFile).replace(/\\/g, "/"), line: 1, endLine: 40 };
-			}
+	const files = await backend.files().catch(() => [] as string[]);
+	const candidates = [parts.join("/"), ref.trim(), ...(parts.length >= 3 ? [parts.slice(0, -1).join("/")] : [])];
+	for (const base of candidates) {
+		const lowerBase = base.replace(/\\/g, "/").toLowerCase();
+		const targetFile = files.find((f) => {
+			const norm = f.replace(/\\/g, "/").toLowerCase();
+			return (
+				norm.endsWith(`/${lowerBase}.ssl`) ||
+				norm === `${lowerBase}.ssl` ||
+				norm.endsWith(`/${lowerBase}.srvscr`) ||
+				norm === `${lowerBase}.srvscr` ||
+				norm.endsWith(`/${lowerBase}.ds`) ||
+				norm === `${lowerBase}.ds`
+			);
+		});
+		if (targetFile) {
+			return { name: shortName, script: relativeTo(state.workspace.root, targetFile).replace(/\\/g, "/"), line: 1, endLine: 40 };
 		}
 	}
 	return null;

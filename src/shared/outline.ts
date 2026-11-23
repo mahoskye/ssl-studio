@@ -1,9 +1,11 @@
 // A document's outline: what a file that is not SSL is made of, to find one's
 // way in it. A Markdown document's headings, a TOML or INI file's tables and
 // keys, a JSON document's keys, a SQL file's statements, a YAML file's top
-// keys. SSL's own outline comes from the language server and is not read here
-// (ADR 0003).
-import { HEADING, plainMarkdown } from "./frontMatter";
+// keys, a CSV/TSV file's columns, and a Plan's stages & steps. SSL's own
+// outline comes from the language server and is not read here (ADR 0003).
+import { parseCsv } from "./csv";
+import { headingAnchor } from "./docTables";
+import { frontMatter, HEADING, plainMarkdown } from "./frontMatter";
 
 export type OutlineItem = {
 	name: string;
@@ -18,11 +20,11 @@ export type OutlineItem = {
 };
 
 /** The languages an outline is read for, by the editor's name for each. */
-export const OUTLINED = ["markdown", "toml", "ini", "json", "sql", "yaml"] as const;
+export const OUTLINED = ["markdown", "toml", "ini", "json", "sql", "yaml", "csv"] as const;
 export const hasOutline = (language: string | undefined): boolean => (OUTLINED as readonly string[]).includes(language ?? "");
 
 /** What the file's outline is made of, in a few words: for the panel to say when there is none. */
-export const outlineOf: Record<string, string> = { markdown: "headings", toml: "tables or keys", ini: "sections or keys", json: "keys", sql: "statements", yaml: "keys" };
+export const outlineOf: Record<string, string> = { markdown: "headings", toml: "tables or keys", ini: "sections or keys", json: "keys", sql: "statements", yaml: "keys", csv: "columns" };
 
 /** As many items as an outline holds at one level: a file of ten thousand rows is not an outline. */
 const MOST = 500;
@@ -42,6 +44,15 @@ export function outline(language: string | undefined, text: string): OutlineItem
 			return sql(text);
 		case "yaml":
 			return yaml(lines);
+		case "csv":
+			return csvColumnOutline(text).map((col) => ({
+				name: col.name,
+				kind: "key" as const,
+				line: 1,
+				endLine: 1,
+				detail: `${col.nonEmpty}/${col.totalRows} · ${col.distinct} distinct`,
+				children: [],
+			}));
 		default:
 			return [];
 	}
@@ -303,4 +314,338 @@ export function createdObjects(text: string): { object: string; kind: string }[]
 		if (!found.some((other) => other.object.toLowerCase() === object.toLowerCase())) found.push({ object, kind });
 	}
 	return found;
+}
+
+// --- CSV/TSV column outline ---------------------------------------------------
+
+export type CsvColumnSummary = {
+	/** 0-based column index. */
+	index: number;
+	name: string;
+	nonEmpty: number;
+	totalRows: number;
+	distinct: number;
+	sampleType: "empty" | "number" | "date" | "boolean" | "text";
+};
+
+const CSV_BOOL = /^(?:true|false|yes|no)$/i;
+const CSV_NUM = /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/;
+const CSV_DATE = /^(?:\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?|\d{1,2}\/\d{1,2}\/\d{2,4})$/;
+
+/** Summarizes every column of a CSV or TSV table: name, index, non-empty count, distinct count, and inferred sample type. */
+export function csvColumnOutline(text: string): CsvColumnSummary[] {
+	if (!text.trim()) return [];
+	const table = parseCsv(text);
+	if (!table.header.length) return [];
+	const cols = Math.min(table.header.length, MOST);
+	const totalRows = table.rows.length;
+	const out: CsvColumnSummary[] = [];
+	for (let index = 0; index < cols; index++) {
+		const name = table.header[index]!.text.trim() || `Column ${index + 1}`;
+		let nonEmpty = 0;
+		const seen = new Set<string>();
+		let allBool = true;
+		let allNum = true;
+		let allDate = true;
+		for (const row of table.rows) {
+			const v = (row[index]?.text ?? "").trim();
+			if (!v) continue;
+			nonEmpty++;
+			seen.add(v);
+			if (allBool && !CSV_BOOL.test(v)) allBool = false;
+			if (allNum && !CSV_NUM.test(v)) allNum = false;
+			if (allDate && !CSV_DATE.test(v)) allDate = false;
+		}
+		const sampleType: CsvColumnSummary["sampleType"] =
+			nonEmpty === 0 ? "empty" : allBool ? "boolean" : allNum ? "number" : allDate ? "date" : "text";
+		out.push({ index, name, nonEmpty, totalRows, distinct: seen.size, sampleType });
+	}
+	return out;
+}
+
+// --- Plan (.plan.json) stage & step outline -----------------------------------
+
+export type PlanOutlineNode = {
+	id: string;
+	kind: string;
+	text: string;
+	ref?: string;
+	group?: string;
+	/** 1-based line number in the JSON text. */
+	line: number;
+};
+
+export type PlanOutlineStage = {
+	id: string;
+	name: string;
+	/** 1-based line number in the JSON text. */
+	line: number;
+	ungrouped?: boolean;
+	nodes: PlanOutlineNode[];
+};
+
+/** Finds 1-based line numbers for every `{ "id": "..." }` inside a top-level JSON array field (e.g. `"groups"` or `"nodes"`). */
+function planSectionLines(text: string, field: string, ids: ReadonlySet<string>): Map<string, number> {
+	const lines = text.split(/\r?\n/);
+	const result = new Map<string, number>();
+	const headerRe = new RegExp(`^\\s*"${field}"\\s*:`);
+	const start = lines.findIndex((l) => headerRe.test(l));
+	if (start < 0) return result;
+	for (let i = start; i < lines.length; i++) {
+		if (i > start && /^\s{0,2}"\w+"\s*:/.test(lines[i]!)) break;
+		for (const m of lines[i]!.matchAll(/"id"\s*:\s*"([^"]*)"/g)) {
+			if (ids.has(m[1]!) && !result.has(m[1]!)) result.set(m[1]!, i + 1);
+		}
+	}
+	return result;
+}
+
+/** Parses a `.plan.json` document into navigable stages (`groups`) and their steps, decisions, and calls. */
+export function planStageOutline(text: string): PlanOutlineStage[] {
+	let raw: unknown;
+	try {
+		raw = JSON.parse(text);
+	} catch {
+		return [];
+	}
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+	const obj = raw as Record<string, unknown>;
+	if (!Array.isArray(obj.nodes)) return [];
+
+	const rawGroups = Array.isArray(obj.groups) ? obj.groups : [];
+	const groups: { id: string; name: string }[] = [];
+	for (const g of rawGroups) {
+		if (g && typeof g === "object" && typeof (g as any).id === "string" && typeof (g as any).name === "string") {
+			groups.push({ id: (g as any).id, name: (g as any).name });
+		}
+	}
+	const rawNodes: { id: string; kind: string; text: string; ref?: string; group?: string }[] = [];
+	for (const n of obj.nodes) {
+		if (n && typeof n === "object" && typeof (n as any).id === "string" && typeof (n as any).text === "string") {
+			rawNodes.push({
+				id: (n as any).id,
+				kind: typeof (n as any).kind === "string" ? (n as any).kind : "step",
+				text: (n as any).text,
+				...(typeof (n as any).ref === "string" ? { ref: (n as any).ref } : {}),
+				...(typeof (n as any).group === "string" ? { group: (n as any).group } : {}),
+			});
+		}
+	}
+
+	const groupIds = new Set(groups.map((g) => g.id));
+	const nodeIds = new Set(rawNodes.map((n) => n.id));
+	const groupLineMap = planSectionLines(text, "groups", groupIds);
+	const nodeLineMap = planSectionLines(text, "nodes", nodeIds);
+
+	const byGroup = new Map<string, PlanOutlineNode[]>();
+	for (const g of groups) byGroup.set(g.id, []);
+	const ungrouped: PlanOutlineNode[] = [];
+
+	for (const n of rawNodes) {
+		const item: PlanOutlineNode = {
+			id: n.id,
+			kind: n.kind,
+			text: n.text,
+			...(n.ref ? { ref: n.ref } : {}),
+			...(n.group ? { group: n.group } : {}),
+			line: nodeLineMap.get(n.id) ?? 1,
+		};
+		if (n.group && byGroup.has(n.group)) byGroup.get(n.group)!.push(item);
+		else ungrouped.push(item);
+	}
+
+	const stages: PlanOutlineStage[] = groups.map((g) => {
+		const nodes = byGroup.get(g.id) ?? [];
+		return {
+			id: g.id,
+			name: g.name,
+			line: groupLineMap.get(g.id) ?? nodes[0]?.line ?? 1,
+			nodes,
+		};
+	});
+	if (ungrouped.length) {
+		stages.push({
+			id: "__ungrouped__",
+			name: groups.length ? "Other steps" : "Flow",
+			line: ungrouped[0]!.line,
+			ungrouped: true,
+			nodes: ungrouped,
+		});
+	}
+	return stages;
+}
+
+// --- Markdown section tree & structural refactoring ---------------------------
+
+export type MarkdownSection = {
+	level: number;
+	text: string;
+	slug: string;
+	/** 1-based first line of the heading. */
+	line: number;
+	/** 1-based last line of the section (inclusive of nested subsections). */
+	endLine: number;
+	/** Number of checked `- [x]` tasks within this section (inclusive of children). */
+	tasksDone: number;
+	/** Total number of `- [ ]` / `- [x]` tasks within this section (inclusive of children). */
+	tasksTotal: number;
+	children: MarkdownSection[];
+};
+
+const TASK_LINE_RE = /^\s*(?:>\s*)*(?:(?:[-*+]|\d+[.)])\s+)+\[([ xX])\](?:\s|$)/;
+
+/**
+ * Builds a nested Markdown heading tree with GitHub-compatible unique slugs,
+ * section line spans, and per-section task list completion counts (ignoring
+ * YAML front matter and fenced code blocks).
+ */
+export function markdownSectionTree(text: string): MarkdownSection[] {
+	const lines = text.split(/\r?\n/);
+	const top: MarkdownSection[] = [];
+	const open: MarkdownSection[] = [];
+	const usedSlugs = new Map<string, number>();
+	let fence = "";
+	let at = frontMatter(text).lines;
+
+	for (; at < lines.length; at++) {
+		const line = lines[at]!;
+		const fenced = /^\s{0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+		if (fenced) {
+			const span = !fence && fenced[1]![0] === "`" && fenced[2]!.includes("`");
+			if (!fence && !span) fence = fenced[1]!;
+			else if (fence && fenced[1]![0] === fence[0] && fenced[1]!.length >= fence.length && !fenced[2]!.trim()) fence = "";
+			if (!span) continue;
+		}
+		if (fence) continue;
+
+		const heading = HEADING.exec(line);
+		if (heading) {
+			const level = heading[1]!.length;
+			const name = plainMarkdown(heading[2]!);
+			if (!name) continue;
+			while (open.length && open[open.length - 1]!.level >= level) open.pop()!.endLine = at;
+			const base = headingAnchor(name) || headingAnchor(heading[2]!) || `section-${at + 1}`;
+			const count = usedSlugs.get(base) ?? 0;
+			usedSlugs.set(base, count + 1);
+			const slug = count ? `${base}-${count}` : base;
+			const item: MarkdownSection = {
+				level,
+				text: name,
+				slug,
+				line: at + 1,
+				endLine: lines.length,
+				tasksDone: 0,
+				tasksTotal: 0,
+				children: [],
+			};
+			const into = open.length ? open[open.length - 1]!.children : top;
+			if (into.length < MOST) into.push(item);
+			open.push(item);
+			continue;
+		}
+
+		const task = TASK_LINE_RE.exec(line);
+		if (task && open.length) {
+			const done = task[1] !== " ";
+			for (const anc of open) {
+				anc.tasksTotal++;
+				if (done) anc.tasksDone++;
+			}
+		}
+	}
+	return top;
+}
+
+/** Finds the sibling array and index containing the section starting on `headingLine`. */
+function findSectionSiblings(list: MarkdownSection[], headingLine: number): { siblings: MarkdownSection[]; index: number } | null {
+	for (let i = 0; i < list.length; i++) {
+		const sec = list[i]!;
+		if (sec.line === headingLine) return { siblings: list, index: i };
+		if (headingLine > sec.line && headingLine <= sec.endLine && sec.children.length) {
+			const hit = findSectionSiblings(sec.children, headingLine);
+			if (hit) return hit;
+		}
+	}
+	return null;
+}
+
+/** Splits trailing blank lines off a section slice while always keeping the heading line itself. */
+function splitTrailingBlankLines(slice: string[]): { core: string[]; pad: string[] } {
+	let cut = slice.length;
+	while (cut > 1 && slice[cut - 1]!.trim() === "") cut--;
+	return { core: slice.slice(0, cut), pad: slice.slice(cut) };
+}
+
+/**
+ * Moves a Markdown heading and its entire subtree past its adjacent sibling section
+ * (`up` or `down`), preserving CRLF/LF line endings, trailing newline, and inter-section
+ * blank-line spacing. Returns `null` when already at the sibling boundary or not a heading.
+ */
+export function moveMarkdownSection(text: string, headingLine: number, direction: "up" | "down"): { text: string; newLine: number } | null {
+	if (!text || headingLine < 1) return null;
+	const eol = text.includes("\r\n") ? "\r\n" : "\n";
+	const hasTrailingNewline = text.endsWith("\r\n") || text.endsWith("\n");
+	const body = hasTrailingNewline ? text.slice(0, text.endsWith("\r\n") ? -2 : -1) : text;
+	const rawLines = body.split(/\r?\n/);
+
+	const tree = markdownSectionTree(body);
+	const found = findSectionSiblings(tree, headingLine);
+	if (!found) return null;
+	const { siblings, index } = found;
+	const targetIdx = direction === "up" ? index - 1 : index + 1;
+	if (targetIdx < 0 || targetIdx >= siblings.length) return null;
+
+	const first = direction === "up" ? siblings[targetIdx]! : siblings[index]!;
+	const second = direction === "up" ? siblings[index]! : siblings[targetIdx]!;
+
+	const startA = first.line - 1;
+	const endA = first.endLine - 1;
+	const startB = second.line - 1;
+	const endB = second.endLine - 1;
+	if (startA < 0 || endB >= rawLines.length || endA + 1 !== startB) return null;
+
+	const { core: coreA, pad: padA } = splitTrailingBlankLines(rawLines.slice(startA, endA + 1));
+	const { core: coreB, pad: padB } = splitTrailingBlankLines(rawLines.slice(startB, endB + 1));
+
+	const swapped = [...coreB, ...padA, ...coreA, ...padB];
+	const nextLines = [...rawLines.slice(0, startA), ...swapped, ...rawLines.slice(endB + 1)];
+	const newLine = direction === "up" ? startA + 1 : startA + coreB.length + padA.length + 1;
+	const nextText = nextLines.join(eol) + (hasTrailingNewline ? eol : "");
+	return { text: nextText, newLine };
+}
+
+/**
+ * Reorders a Markdown heading (`fromLine`) before or after another sibling heading (`toLine`)
+ * under the same parent by applying adjacent `moveMarkdownSection` swaps.
+ */
+export function reorderMarkdownSection(
+	text: string,
+	fromLine: number,
+	toLine: number,
+	place: "before" | "after",
+): { text: string; newLine: number } | null {
+	if (fromLine === toLine) return null;
+	const body = text.endsWith("\r\n") ? text.slice(0, -2) : text.endsWith("\n") ? text.slice(0, -1) : text;
+	const tree = markdownSectionTree(body);
+	const fromInfo = findSectionSiblings(tree, fromLine);
+	const toInfo = findSectionSiblings(tree, toLine);
+	if (!fromInfo || !toInfo || fromInfo.siblings !== toInfo.siblings) return null;
+
+	const fromIdx = fromInfo.index;
+	const toIdx = toInfo.index;
+	let desiredIdx = place === "before" ? toIdx : toIdx + 1;
+	if (fromIdx < desiredIdx) desiredIdx--;
+	if (desiredIdx === fromIdx) return null;
+
+	const direction: "up" | "down" = desiredIdx < fromIdx ? "up" : "down";
+	const steps = Math.abs(desiredIdx - fromIdx);
+	let curText = text;
+	let curLine = fromLine;
+	for (let s = 0; s < steps; s++) {
+		const res = moveMarkdownSection(curText, curLine, direction);
+		if (!res) return null;
+		curText = res.text;
+		curLine = res.newLine;
+	}
+	return { text: curText, newLine: curLine };
 }

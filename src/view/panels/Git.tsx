@@ -5,21 +5,24 @@
 // there is no fetch, pull or push here.
 import { Icon } from "../Icon";
 import { createMemo, createResource, createSignal, For, Show } from "solid-js";
-import { changeLetter, changeWord, commitProblem, GIT_ACTIONS, rowActions, stagedOf, unstagedOf, type GitFile } from "../../shared/gitStatus";
+import { changeLetter, changeWord, commitProblem, GIT_ACTIONS, rowMenuEntries, stagedOf, unstagedOf, type GitFile } from "../../shared/gitStatus";
+import { draftCommitMessage, formatTicketChangelog } from "../../shared/markdownDiff";
 import { baseName, dirName, isInside, relativeTo, resolvePath } from "../../shared/paths";
-import type { DocFile } from "../../shared/protocol";
-import { docsGoverningFile, ticketsForFile } from "../../shared/workContext";
+import type { DocFile, TicketGitCommit } from "../../shared/protocol";
+import { codeMatchesRef, docsGoverningFile, ticketsForFile, ticketWork } from "../../shared/workContext";
 import { backend } from "../backend";
 import { docAuditData } from "../docAudit";
+import { languageFor } from "../editor/languages";
+import { openComparison } from "../editor/Review";
 import { FileMark } from "../FileMark";
 import { branchText, commit, discard, gitFailure, gitStatus, gitVersion, refreshGit, showChange, stage, unstage } from "../git";
 import { docs } from "../project";
-import { staleCatalogSummary, ticketAtHand, updateCatalogs } from "../projectDocs";
+import { appendNoteToTicket, staleCatalogSummary, ticketAtHand, updateCatalogs, updateManifest } from "../projectDocs";
 import { activePath, canonical, notify, openFile, state } from "../state";
 import { chooseFromMenu } from "./RowMenu";
 import { IconButton, Row, RowGroup, Rows, type Point } from "./Rows";
 
-const { show: SHOW, open: OPEN, stage: STAGE, unstage: UNSTAGE, discard: DISCARD, trash: TRASH } = GIT_ACTIONS;
+const { show: SHOW, open: OPEN, stage: STAGE, unstage: UNSTAGE, discard: DISCARD, trash: TRASH, copyPath: COPY_PATH, copyRelative: COPY_RELATIVE, copyName: COPY_NAME, showInExplorer: SHOW_EXPLORER } = GIT_ACTIONS;
 
 /** What the next commit is to say. Kept while the panel is away: a message half written is not lost to a look at another panel. */
 const [message, setMessage] = createSignal("");
@@ -52,19 +55,46 @@ export function GitPanel() {
 	const [commitsOpen, setCommitsOpen] = createSignal(false);
 	const activeTicketKey = () => state.settings.activeTicket?.trim() || "";
 
-	// Non-blocking doc-drift advisory for staged code/SQL files: untouched governing docs,
-	// drifted #L code citations pointing into staged files, and out-of-sync INDEX.md catalogs.
+	// Non-blocking pre-commit doc readiness advisory for staged changes:
+	// untouched governing docs, drifted #L citations, stale/unstaged companion .spec.md for .plan.json,
+	// broken links/anchors/YAML issues in staged .md files, open ticket tasks & questions,
+	// newly added .ssl/.sql/.ds files missing from files.csv/database.csv, and stale INDEX.md catalogs.
 	const docDrift = createMemo(() => {
 		const root = state.workspace?.root;
 		const stFiles = staged();
+		type EmptyDrift = {
+			governing: { file: DocFile; reason: string; unstaged?: GitFile }[];
+			citations: NonNullable<ReturnType<typeof docAuditData>["citationIssues"]>;
+			stalePlanSpecs: { planName: string; specPath: string; reason: string; unstaged?: GitFile }[];
+			mdIssues: { path: string; line: number; label: string; detail: string }[];
+			openTasks: ReturnType<typeof docAuditData>["openTasks"];
+			openQuestions: DocFile[];
+			unregisteredAdded: { path: string; rel: string; targetReg: DocFile; missingIn: string }[];
+			hasFilesReg: boolean;
+			staleCatalogCount: number;
+			total: number;
+		};
 		if (!root || !stFiles.length) {
-			return { governing: [] as { file: DocFile; reason: string; unstaged?: GitFile }[], citations: [] as NonNullable<ReturnType<typeof docAuditData>["citationIssues"]>, staleCatalogCount: 0, total: 0 };
+			return {
+				governing: [],
+				citations: [],
+				stalePlanSpecs: [],
+				mdIssues: [],
+				openTasks: [],
+				openQuestions: [],
+				unregisteredAdded: [],
+				hasFilesReg: false,
+				staleCatalogCount: 0,
+				total: 0,
+			} as EmptyDrift;
 		}
 		const allDocs = docs();
+		const docsByCanon = new Map(allDocs.filter((d) => d.exists).map((d) => [canonical(d.path), d]));
 		const stagedSet = new Set(stFiles.map((f) => canonical(f.path)));
 		const unstagedByPath = new Map(changes().map((f) => [canonical(f.path), f]));
 		const stagedCode = stFiles.filter((f) => CODE_OR_SQL_RE.test(f.path));
 
+		// 1. Untouched governing docs for staged code/SQL files
 		const govMap = new Map<string, { file: DocFile; reason: string; unstaged?: GitFile }>();
 		for (const cf of stagedCode) {
 			for (const g of docsGoverningFile(allDocs, cf.path, root)) {
@@ -73,12 +103,151 @@ export function GitPanel() {
 				govMap.set(k, { file: g.file, reason: g.reason, unstaged: unstagedByPath.get(k) });
 			}
 		}
-		const citations = (docAuditData().citationIssues ?? []).filter((ci) => stagedSet.has(canonical(ci.targetPath)));
+
+		// 2. Drifted #L code citations pointing into staged files
+		const audit = docAuditData();
+		const citations = (audit.citationIssues ?? []).filter((ci) => stagedSet.has(canonical(ci.targetPath)));
+
+		// 3. Staged .plan.json files whose companion .spec.md is stale or unstaged
+		const stalePlanSpecs: EmptyDrift["stalePlanSpecs"] = [];
+		for (const sf of stFiles) {
+			if (sf.staged === "deleted" || !sf.path.toLowerCase().endsWith(".plan.json")) continue;
+			const specPath = sf.path.replace(/\.plan\.json$/i, ".spec.md");
+			const specKey = canonical(specPath);
+			if (stagedSet.has(specKey)) continue;
+			const unstagedSpec = unstagedByPath.get(specKey);
+			const specDoc = docsByCanon.get(specKey);
+			const planDoc = docsByCanon.get(canonical(sf.path));
+			if (unstagedSpec) {
+				stalePlanSpecs.push({ planName: baseName(sf.path), specPath, reason: "modified, unstaged", unstaged: unstagedSpec });
+			} else if (specDoc?.exists) {
+				const older = Boolean(planDoc?.mtime && specDoc.mtime && planDoc.mtime > specDoc.mtime);
+				stalePlanSpecs.push({
+					planName: baseName(sf.path),
+					specPath: specDoc.path,
+					reason: older ? "spec older than plan" : "not staged with plan",
+				});
+			}
+		}
+
+		// 4. Broken links / anchors / YAML issues inside staged .md files
+		const stagedMdSet = new Set(
+			stFiles
+				.filter((f) => f.staged !== "deleted" && /\.(md|markdown)$/i.test(f.path))
+				.map((f) => canonical(f.path)),
+		);
+		const mdIssues: EmptyDrift["mdIssues"] = [];
+		if (stagedMdSet.size) {
+			for (const d of allDocs) {
+				if (!d.exists || !stagedMdSet.has(canonical(d.path)) || !d.broken?.length) continue;
+				for (const b of d.broken) {
+					mdIssues.push({
+						path: d.path,
+						line: b.line,
+						label: `${baseName(d.path)}:${b.line}`,
+						detail: `broken link (${b.href})`,
+					});
+				}
+			}
+			for (const iss of audit.issues) {
+				if (!stagedMdSet.has(canonical(iss.path))) continue;
+				if (iss.kind === "orphan" || iss.kind === "stale") continue;
+				mdIssues.push({
+					path: iss.path,
+					line: iss.line,
+					label: `${baseName(iss.path)}:${iss.line}`,
+					detail: `${iss.kind}: ${iss.message}`,
+				});
+			}
+		}
+
+		// 5. Open checklist tasks (- [ ]) and open Questions on ticket(s) touched by staged changes
+		const stagedTicketKeys: string[] = [];
+		const stagedTicketSet = new Set<string>();
+		for (const sf of stFiles) {
+			for (const k of ticketsForFile(allDocs, sf.path, root)) {
+				const kl = k.toLowerCase();
+				if (stagedTicketSet.has(kl)) continue;
+				stagedTicketSet.add(kl);
+				stagedTicketKeys.push(k);
+			}
+		}
+		const ticketScopePaths = new Set<string>();
+		const openQuestionsMap = new Map<string, DocFile>();
+		for (const k of stagedTicketKeys) {
+			const tDoc = allDocs.find((d) => d.exists && d.group === "tickets" && d.ticket?.toLowerCase() === k.toLowerCase());
+			if (tDoc) ticketScopePaths.add(canonical(tDoc.path));
+			for (const grp of ticketWork(allDocs, k)) {
+				if (grp.kind === "spec") {
+					for (const sp of grp.files) ticketScopePaths.add(canonical(sp.path));
+				} else if (grp.kind === "question") {
+					for (const q of grp.files) {
+						const qk = canonical(q.path);
+						if (!openQuestionsMap.has(qk)) openQuestionsMap.set(qk, q);
+					}
+				}
+			}
+		}
+		const openTasks = stagedTicketSet.size
+			? audit.openTasks.filter(
+					(t) => (t.ticket && stagedTicketSet.has(t.ticket.toLowerCase())) || ticketScopePaths.has(canonical(t.path)),
+				)
+			: [];
+		const openQuestions = [...openQuestionsMap.values()];
+
+		// 6. Newly added (.ssl / .sql / .ds) files not yet listed in files.csv or database.csv
+		const filesReg = allDocs.find((d) => d.exists && d.group === "registries" && /^files\.(csv|tsv)$/i.test(d.name));
+		const dbReg = allDocs.find((d) => d.exists && d.group === "registries" && /^database\.(csv|tsv)$/i.test(d.name));
+		const unregisteredAdded: EmptyDrift["unregisteredAdded"] = [];
+		if (filesReg || dbReg) {
+			for (const sf of stFiles) {
+				if (sf.staged !== "added" || !/\.(ssl|sql|ds)$/i.test(sf.path)) continue;
+				const inFiles = Boolean(filesReg?.codeRefs?.some((ref) => codeMatchesRef(sf.path, ref, root)));
+				const inDb = Boolean(dbReg?.codeRefs?.some((ref) => codeMatchesRef(sf.path, ref, root)));
+				if (inFiles || inDb) continue;
+				const isSql = /\.sql$/i.test(sf.path);
+				const targetReg = (isSql && dbReg) || filesReg || dbReg!;
+				const missingIn =
+					isSql && filesReg && dbReg
+						? "files.csv / database.csv"
+						: isSql && dbReg
+							? dbReg.name
+							: filesReg
+								? filesReg.name
+								: dbReg!.name;
+				unregisteredAdded.push({
+					path: sf.path,
+					rel: relativeTo(root, sf.path).replace(/\\/g, "/"),
+					targetReg,
+					missingIn,
+				});
+			}
+		}
+
 		const catSummary = staleCatalogSummary();
 		const staleCatalogCount = catSummary.stale.length + catSummary.missing.length;
 		const governing = [...govMap.values()];
-		const total = governing.length + citations.length + (staleCatalogCount > 0 ? 1 : 0);
-		return { governing, citations, staleCatalogCount, total };
+		const total =
+			governing.length +
+			citations.length +
+			stalePlanSpecs.length +
+			mdIssues.length +
+			openTasks.length +
+			openQuestions.length +
+			unregisteredAdded.length +
+			(staleCatalogCount > 0 ? 1 : 0);
+		return {
+			governing,
+			citations,
+			stalePlanSpecs,
+			mdIssues,
+			openTasks,
+			openQuestions,
+			unregisteredAdded,
+			hasFilesReg: Boolean(filesReg),
+			staleCatalogCount,
+			total,
+		};
 	});
 
 	const [ticketCommits] = createResource(
@@ -137,9 +306,15 @@ export function GitPanel() {
 		else if (action === STAGE) await stage([file]);
 		else if (action === UNSTAGE) await unstage([file]);
 		else if (action === DISCARD || action === TRASH) await discard(file);
+		else if (action === COPY_PATH || action === COPY_RELATIVE || action === COPY_NAME) {
+			await (await import("../commands")).copyPath(action === COPY_PATH ? "whole" : action === COPY_NAME ? "name" : "relative", file.path);
+		} else if (action === SHOW_EXPLORER) {
+			(await import("./Explorer")).showInExplorer(file.path);
+		}
 	};
 	const menu = async (file: GitFile, isStaged: boolean, at: Point) => {
-		const action = await chooseFromMenu(`Actions for ${baseName(file.path)}`, rowActions(file, isStaged), at);
+		const inWorkspace = Boolean(state.workspace && isInside(state.workspace.root, file.path));
+		const action = await chooseFromMenu(`Actions for ${baseName(file.path)}`, rowMenuEntries(file, isStaged, inWorkspace), at);
 		if (action === SHOW) await showChange(file, isStaged);
 		else await act(action, file);
 	};
@@ -149,6 +324,75 @@ export function GitPanel() {
 		const made = await commit(message().trim());
 		setBusy(false);
 		if (made) setMessage("");
+	};
+	const draftMessage = () => {
+		const st = staged();
+		if (!st.length) return notify("Stage files first to draft a commit message.");
+		const primaryKey = suggestedTickets()[0] || activeTicketKey() || "";
+		const ticketDoc = primaryKey
+			? docs().find((d) => d.exists && d.group === "tickets" && d.ticket?.toLowerCase() === primaryKey.toLowerCase())
+			: undefined;
+		const drafted = draftCommitMessage({
+			staged: st,
+			root: state.workspace?.root,
+			ticketKey: primaryKey || undefined,
+			ticketTitle: ticketDoc?.title,
+		});
+		if (drafted) setMessage(drafted);
+	};
+	const openCommitFileDiff = async (commitItem: TicketGitCommit, f: { status: string; path: string }) => {
+		const root = state.workspace?.root;
+		if (!root) return;
+		const full = resolvePath(root, f.path);
+		if (!isInside(root, full)) return;
+		try {
+			const { before, after } = await backend.gitCommitFile(full, commitItem.sha);
+			if (before === null && after === null) {
+				notify(`Could not read text diff for ${f.path} at commit ${commitItem.shortSha}.`, "error");
+				return;
+			}
+			await openComparison({
+				title: `${commitItem.shortSha}: ${baseName(f.path)}`,
+				path: full,
+				before: before ?? "",
+				after: after ?? "",
+				beforeLabel: before === null ? "(not in parent)" : `${commitItem.shortSha}~1`,
+				afterLabel: after === null ? "(deleted)" : commitItem.shortSha,
+				language: languageFor(full),
+				effect: `${commitItem.shortSha} (${commitItem.subject}) — commit diff for ${f.path}. Nothing here changes the file.`,
+			});
+		} catch (e: any) {
+			notify(`Could not open commit diff for ${f.path}: ${String(e?.message ?? e)}`, "error");
+		}
+	};
+	const openCommitCurrentFile = (f: { path: string }) => {
+		const root = state.workspace?.root;
+		if (!root) return;
+		const full = resolvePath(root, f.path);
+		if (isInside(root, full)) void openFile(full, { keep: true });
+	};
+	const commitFileMenu = async (commitItem: TicketGitCommit, f: { status: string; path: string }, at: Point) => {
+		const VIEW_DIFF = "View commit diff";
+		const OPEN_CUR = "Open current file";
+		const action = await chooseFromMenu(baseName(f.path), [VIEW_DIFF, OPEN_CUR], at);
+		if (action === VIEW_DIFF) await openCommitFileDiff(commitItem, f);
+		else if (action === OPEN_CUR) openCommitCurrentFile(f);
+	};
+	const buildTicketChangelog = (key: string): string => {
+		const list = ticketCommits() ?? [];
+		if (!list.length) return "";
+		const tDoc = docs().find((d) => d.exists && d.group === "tickets" && d.ticket?.toLowerCase() === key.toLowerCase());
+		return formatTicketChangelog(key, list, { title: tDoc?.title });
+	};
+	const copyTicketChangelog = async (key: string) => {
+		const md = buildTicketChangelog(key);
+		if (!md) return notify(`No local commits mentioning ${key} to copy.`);
+		await (await import("../commands")).copyText(md, `Copied ${key} changelog.`);
+	};
+	const appendTicketChangelog = async (key: string) => {
+		const md = buildTicketChangelog(key);
+		if (!md) return notify(`No local commits mentioning ${key} to append.`);
+		await appendNoteToTicket(key, md);
 	};
 	const FileRow = (props: { file: GitFile; staged: boolean }) => {
 		const kind = () => (props.staged ? props.file.staged : props.file.unstaged)!;
@@ -220,13 +464,13 @@ export function GitPanel() {
 							type="button"
 							class="git-drift-toggle"
 							aria-expanded={driftOpen()}
-							title="Non-blocking reminder: governing docs, code citations, or folder indexes affected by your staged files"
+							title="Non-blocking pre-commit checklist: governing docs, open ticket tasks/questions, plan specs, staged Markdown issues, registries, citations, and catalogs"
 							onClick={() => setDriftOpen((v) => !v)}
 						>
 							<Icon name={driftOpen() ? "chevron-down" : "chevron-right"} class="twisty" />
 							<Icon name="note" class="git-drift-icon" />
 							<span class="git-drift-title">
-								Doc drift · {docDrift().total} {docDrift().total === 1 ? "note" : "notes"}
+								Doc readiness · {docDrift().total} {docDrift().total === 1 ? "note" : "notes"}
 							</span>
 						</button>
 						<Show when={driftOpen()}>
@@ -257,6 +501,124 @@ export function GitPanel() {
 												</li>
 											)}
 										</For>
+									</ul>
+								</Show>
+								<Show when={docDrift().stalePlanSpecs.length > 0}>
+									<p class="git-drift-sub">Staged plans with stale or unstaged specs</p>
+									<ul class="git-drift-list">
+										<For each={docDrift().stalePlanSpecs.slice(0, 6)}>
+											{(item) => (
+												<li>
+													<span class="git-drift-label" title={`${relativeTo(state.workspace?.root, item.specPath)} (${item.reason})`}>
+														{baseName(item.specPath)} <span class="meta">· {item.reason}</span>
+													</span>
+													<span class="git-drift-acts">
+														<button type="button" class="link" onClick={() => void openFile(item.specPath, { keep: true })}>
+															Open
+														</button>
+														<Show when={item.unstaged}>
+															{(gf) => (
+																<button type="button" class="link" title="Stage companion spec alongside plan" onClick={() => void stage([gf()])}>
+																	Stage
+																</button>
+															)}
+														</Show>
+													</span>
+												</li>
+											)}
+										</For>
+									</ul>
+								</Show>
+								<Show when={docDrift().mdIssues.length > 0}>
+									<p class="git-drift-sub">Issues in staged Markdown ({docDrift().mdIssues.length})</p>
+									<ul class="git-drift-list">
+										<For each={docDrift().mdIssues.slice(0, 6)}>
+											{(iss) => (
+												<li>
+													<span class="git-drift-label" title={`${iss.label}: ${iss.detail}`}>
+														{iss.label} <span class="meta">· {iss.detail}</span>
+													</span>
+													<span class="git-drift-acts">
+														<button type="button" class="link" onClick={() => void openFile(iss.path, { reveal: { line: iss.line }, keep: true })}>
+															Open
+														</button>
+													</span>
+												</li>
+											)}
+										</For>
+										<Show when={docDrift().mdIssues.length > 6}>
+											<li class="meta">… and {docDrift().mdIssues.length - 6} more</li>
+										</Show>
+									</ul>
+								</Show>
+								<Show when={docDrift().openTasks.length > 0}>
+									<p class="git-drift-sub">Open ticket tasks ({docDrift().openTasks.length})</p>
+									<ul class="git-drift-list">
+										<For each={docDrift().openTasks.slice(0, 6)}>
+											{(t) => (
+												<li>
+													<span class="git-drift-label" title={`${t.name}:${t.line} — ${t.text}`}>
+														{t.ticket ? `${t.ticket}: ` : ""}{t.text}
+													</span>
+													<span class="git-drift-acts">
+														<button type="button" class="link" onClick={() => void openFile(t.path, { reveal: { line: t.line }, keep: true })}>
+															Open
+														</button>
+													</span>
+												</li>
+											)}
+										</For>
+										<Show when={docDrift().openTasks.length > 6}>
+											<li class="meta">… and {docDrift().openTasks.length - 6} more</li>
+										</Show>
+									</ul>
+								</Show>
+								<Show when={docDrift().openQuestions.length > 0}>
+									<p class="git-drift-sub">Open ticket questions ({docDrift().openQuestions.length})</p>
+									<ul class="git-drift-list">
+										<For each={docDrift().openQuestions.slice(0, 6)}>
+											{(q) => (
+												<li>
+													<span class="git-drift-label" title={relativeTo(state.workspace?.root, q.path)}>
+														{q.title || q.name}
+													</span>
+													<span class="git-drift-acts">
+														<button type="button" class="link" onClick={() => void openFile(q.path, { keep: true })}>
+															Open
+														</button>
+													</span>
+												</li>
+											)}
+										</For>
+									</ul>
+								</Show>
+								<Show when={docDrift().unregisteredAdded.length > 0}>
+									<p class="git-drift-sub">New scripts/SQL missing from registries</p>
+									<ul class="git-drift-list">
+										<For each={docDrift().unregisteredAdded.slice(0, 6)}>
+											{(u) => (
+												<li>
+													<span class="git-drift-label" title={`${u.rel} is not yet listed in ${u.missingIn}`}>
+														{baseName(u.path)} <span class="meta">· missing in {u.missingIn}</span>
+													</span>
+													<span class="git-drift-acts">
+														<button type="button" class="link" onClick={() => void openFile(u.targetReg.path, { keep: true })}>
+															Open
+														</button>
+													</span>
+												</li>
+											)}
+										</For>
+										<Show when={docDrift().hasFilesReg}>
+											<li>
+												<span class="meta">Refresh files.csv manifest to include newly added files</span>
+												<span class="git-drift-acts">
+													<button type="button" class="link" onClick={() => void updateManifest()}>
+														Update manifest
+													</button>
+												</span>
+											</li>
+										</Show>
 									</ul>
 								</Show>
 								<Show when={docDrift().citations.length > 0}>
@@ -326,10 +688,22 @@ export function GitPanel() {
 						onInput={(e) => setMessage(e.currentTarget.value)}
 						onKeyDown={(e) => e.key === "Enter" && (e.ctrlKey || e.metaKey) && (e.preventDefault(), void make())}
 					/>
-					{/* Not the button's own "disabled": it keeps the keyboard, and says why it does nothing. */}
-					<button type="submit" class="primary" aria-disabled={problem() ? "true" : undefined} title={problem() || `Commit the ${staged().length + above()} staged ${staged().length + above() === 1 ? "file" : "files"}`}>
-						Commit
-					</button>
+					<div style={{ display: "flex", "align-items": "center", gap: "var(--space-2)", "flex-wrap": "wrap" }}>
+						{/* Not the button's own "disabled": it keeps the keyboard, and says why it does nothing. */}
+						<button type="submit" class="primary" aria-disabled={problem() ? "true" : undefined} title={problem() || `Commit the ${staged().length + above()} staged ${staged().length + above() === 1 ? "file" : "files"}`}>
+							Commit
+						</button>
+						<button
+							type="button"
+							style={{ display: "inline-flex", "align-items": "center", gap: "4px" }}
+							aria-disabled={!staged().length ? "true" : undefined}
+							title={staged().length ? "Build a commit message from the staged files and active ticket" : "Stage files first to draft a commit message"}
+							onClick={draftMessage}
+						>
+							<Icon name="sparkle" />
+							<span>Draft commit message</span>
+						</button>
+					</div>
 				</form>
 				<Show when={above()}>
 					<p class="hint warn" role="status">
@@ -376,16 +750,45 @@ export function GitPanel() {
 				<Show when={activeTicketKey()}>
 					{(key) => (
 						<section class="git-ticket-log" aria-label={`Commits mentioning ${key()}`}>
-							<button
-								type="button"
-								class="group-head git-head foldable git-ticket-log-head"
-								aria-expanded={commitsOpen()}
-								onClick={() => setCommitsOpen((v) => !v)}
-							>
-								<Icon name={commitsOpen() ? "chevron-down" : "chevron-right"} class="twisty" />
-								<span class="label">Ticket commits · {key()}</span>
-								<span class="count">{ticketCommits.loading ? "…" : (ticketCommits()?.length ?? 0)}</span>
-							</button>
+							<div class="group-head git-head git-ticket-log-head" style={{ display: "flex", "align-items": "center", gap: "var(--space-2)" }}>
+								<button
+									type="button"
+									class="foldable"
+									style={{
+										flex: 1,
+										display: "flex",
+										"align-items": "center",
+										gap: "var(--space-2)",
+										padding: 0,
+										background: "transparent",
+										border: 0,
+										color: "inherit",
+										font: "inherit",
+										"text-align": "left",
+										"min-width": 0,
+									}}
+									aria-expanded={commitsOpen()}
+									onClick={() => setCommitsOpen((v) => !v)}
+								>
+									<Icon name={commitsOpen() ? "chevron-down" : "chevron-right"} class="twisty" />
+									<span class="label">Ticket commits · {key()}</span>
+									<span class="count">{ticketCommits.loading ? "…" : (ticketCommits()?.length ?? 0)}</span>
+								</button>
+								<Show when={!ticketCommits.loading && (ticketCommits()?.length ?? 0) > 0}>
+									<IconButton
+										label="Copy ticket changelog"
+										title={`Copy ${key()} commits as a Markdown bullet list`}
+										icon="copy"
+										onClick={() => void copyTicketChangelog(key())}
+									/>
+									<IconButton
+										label="Append to ticket"
+										title={`Append ${key()} commit changelog to the ticket document`}
+										icon="note"
+										onClick={() => void appendTicketChangelog(key())}
+									/>
+								</Show>
+							</div>
 							<Show when={commitsOpen()}>
 								<div class="git-ticket-log-body">
 									<Show
@@ -409,12 +812,6 @@ export function GitPanel() {
 															<ul class="git-commit-files">
 																<For each={c.files.slice(0, 8)}>
 																	{(f) => {
-																		const openCommitFile = () => {
-																			const root = state.workspace?.root;
-																			if (!root) return;
-																			const full = resolvePath(root, f.path);
-																			if (isInside(root, full)) void openFile(full, { preview: true });
-																		};
 																		const stClass = f.status.startsWith("A")
 																			? "added"
 																			: f.status.startsWith("D")
@@ -422,7 +819,29 @@ export function GitPanel() {
 																				: "modified";
 																		return (
 																			<li>
-																				<button type="button" class="git-commit-file-btn" title={f.path} onClick={openCommitFile}>
+																				<button
+																					type="button"
+																					class="git-commit-file-btn"
+																					title={`${f.path} — Click to view commit diff (${c.shortSha}~1..${c.shortSha}); right-click for more`}
+																					onClick={() => void openCommitFileDiff(c, f)}
+																					onContextMenu={(e) => {
+																						e.preventDefault();
+																						e.stopPropagation();
+																						const box = e.currentTarget.getBoundingClientRect();
+																						void commitFileMenu(
+																							c,
+																							f,
+																							e.clientX || e.clientY ? { x: e.clientX, y: e.clientY } : { x: box.left + 16, y: box.bottom },
+																						);
+																					}}
+																					onKeyDown={(e) => {
+																						if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
+																							e.preventDefault();
+																							const box = e.currentTarget.getBoundingClientRect();
+																							void commitFileMenu(c, f, { x: box.left + 16, y: box.bottom });
+																						}
+																					}}
+																				>
 																					<span class={`git-letter ${stClass}`}>{f.status[0] ?? "M"}</span>
 																					<span class="label">{f.path}</span>
 																				</button>

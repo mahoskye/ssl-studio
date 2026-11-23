@@ -2,10 +2,14 @@
 // Diff Review, Projects switcher) so open document tabs stay one click away
 // inside the same framed Folio Bento island (ADR 0027).
 import { createEffect, createMemo, createSignal, For, onCleanup, Show, type JSX } from "solid-js";
+import { submenuOrInline, type RowMenuEntry } from "../../shared/contextMenu";
 import { createMiddleCloseTracker } from "../../shared/middleClickGuard";
+import { isInside } from "../../shared/paths";
+import { othersOf, rightOf } from "../../shared/tabOrder";
 import { FileMark } from "../FileMark";
 import { Icon, type IconName } from "../Icon";
-import { closeTab, displayName, newUntitled, notify, setState, state } from "../state";
+import { chooseFromMenu } from "../panels/RowMenu";
+import { closeAllTabs, closeOtherTabs, closeTab, closeTabsToRight, displayName, isUntitled, keepTab, newUntitled, notify, setState, state, togglePin } from "../state";
 import { closeComparison, review } from "./Review";
 import { tabLabels } from "./tabs";
 
@@ -62,6 +66,50 @@ export function CenterTabStrip(props: {
 		closeComparison();
 		setState("centerView", "editors");
 		setState("groups", state.activeGroup, "active", path);
+	};
+
+	const openTabMenu = async (path: string, at: { x: number; y: number }) => {
+		const gIdx = state.activeGroup;
+		const g = group();
+		const isPinned = Boolean(g.pinned?.includes(path));
+		const CLOSE = "Close";
+		const OTHERS = "Close others";
+		const RIGHT = "Close to the right";
+		const ALL = "Close all";
+		const PIN = isPinned ? "Unpin" : "Pin";
+		const KEEP = "Keep open";
+		const PATH = "Copy path";
+		const RELATIVE = "Copy path in the project";
+		const NAME = "Copy file name";
+		const SHOW = "Show in the Explorer";
+		const untitled = isUntitled(path);
+		const inFolder = !untitled && Boolean(state.workspace && isInside(state.workspace.root, path));
+		const bulkClose: RowMenuEntry[] = [
+			...(othersOf(g.tabs, g.pinned ?? [], path).length ? [OTHERS] : []),
+			...(rightOf(g.tabs, g.pinned ?? [], path).length ? [RIGHT] : []),
+			ALL,
+		];
+		const items: RowMenuEntry[] = [
+			...(isPinned ? [] : [{ label: CLOSE, value: CLOSE, keys: "Ctrl+W" }]),
+			...submenuOrInline("Close tabs", bulkClose),
+			"separator",
+			...(g.preview === path ? [KEEP] : []),
+			PIN,
+			"separator",
+			...submenuOrInline("Copy path", [...(untitled ? [] : [PATH]), ...(inFolder ? [RELATIVE] : []), NAME]),
+			...(inFolder ? [SHOW] : []),
+		];
+		const picked = await chooseFromMenu(`Actions for the tab ${displayName(path)}`, items, at);
+		if (!picked) return;
+		if (picked === CLOSE) await closeTab(path, gIdx);
+		else if (picked === KEEP) keepTab(path, gIdx);
+		else if (picked === OTHERS) await closeOtherTabs(path, gIdx);
+		else if (picked === RIGHT) await closeTabsToRight(path, gIdx);
+		else if (picked === ALL) await closeAllTabs(gIdx);
+		else if (picked === PIN) togglePin(path, gIdx);
+		else if (picked === PATH || picked === RELATIVE || picked === NAME) {
+			await (await import("../commands")).copyPath(picked === PATH ? "whole" : picked === NAME ? "name" : "relative", path);
+		} else if (picked === SHOW) (await import("../panels/Explorer")).showInExplorer(path);
 	};
 
 	return (
@@ -142,6 +190,10 @@ export function CenterTabStrip(props: {
 										e.stopPropagation();
 										middleClose.auxClick(path, () => void closeTab(path, state.activeGroup));
 									}}
+									onContextMenu={(e) => {
+										e.preventDefault();
+										void openTabMenu(path, { x: e.clientX, y: e.clientY });
+									}}
 								>
 									<FileMark name={displayName(path)} />
 									<span class="name">{labels().get(path) ?? displayName(path)}</span>
@@ -200,6 +252,13 @@ export function CenterTabStrip(props: {
 									e.preventDefault();
 									props.onClose();
 								}
+							}}
+							onContextMenu={(e) => {
+								e.preventDefault();
+								const CLOSE_VIEW = `Close ${props.title}`;
+								void chooseFromMenu(`Actions for ${props.title}`, [{ label: CLOSE_VIEW, value: CLOSE_VIEW, keys: "Esc" }], { x: e.clientX, y: e.clientY }).then((picked) => {
+									if (picked === CLOSE_VIEW) props.onClose();
+								});
 							}}
 						>
 							<Icon name={props.icon} class="virtual-tab-icon" />

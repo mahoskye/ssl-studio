@@ -8,6 +8,7 @@
 import { redo, redoDepth, undo, undoDepth } from "@codemirror/commands";
 import { EditorSelection } from "@codemirror/state";
 import { EditorView, WidgetType } from "@codemirror/view";
+import { pasteUrlOverSelection } from "../../shared/markdownEdit";
 import {
 	cellValueForEdit,
 	deleteTableColumn,
@@ -21,6 +22,7 @@ import {
 	moveTableColumn,
 	moveTableRow,
 	parseTableRaw,
+	serializeTableCell,
 	setTableAlignment,
 	sortTableByColumn,
 	stepTableCell,
@@ -28,6 +30,7 @@ import {
 	type MarkdownTable,
 	type TableEdit,
 } from "../../shared/markdownTables";
+import { createTextareaCompleter, type TextareaCompleter } from "./cmCompletion";
 import {
 	historyFallbackFacet,
 	liveCallbacksFacet,
@@ -36,6 +39,61 @@ import {
 	type TableWidgetHost,
 } from "./cmLiveShared";
 import { hydrateImagesInElement } from "./imageResolve";
+
+/**
+ * Parses clipboard TSV text (e.g. from Excel / Google Sheets / TableView) into a 2D cell matrix.
+ * Returns null for single-cell text or plain multi-line prose without tabs.
+ */
+export function parseTsvGrid(raw: string): string[][] | null {
+	if (!raw || !raw.includes("\t")) return null;
+	const normalized = raw.replace(/\r\n?/g, "\n").replace(/\n+$/, "");
+	if (!normalized || !normalized.includes("\t")) return null;
+	const rows = normalized.split("\n").map((line) => line.split("\t"));
+	const maxCols = Math.max(...rows.map((r) => r.length));
+	if (maxCols < 2) return null;
+	return rows;
+}
+
+/**
+ * Expands a multi-row or multi-column TSV paste across table cells starting at `(startRow, startCol)`,
+ * automatically adding rows and columns as needed while preserving existing alignments and prefix.
+ */
+export function mergeTsvIntoTable(
+	table: MarkdownTable,
+	startRow: number,
+	startCol: number,
+	raw: string,
+): TableEdit | null {
+	const grid = parseTsvGrid(raw);
+	if (!grid) return null;
+	const safeRow = Math.max(0, startRow);
+	const safeCol = Math.max(0, startCol);
+	const maxCols = Math.max(...grid.map((r) => r.length));
+	const neededRows = safeRow + grid.length;
+	const neededCols = safeCol + maxCols;
+
+	const working: MarkdownTable = {
+		...table,
+		alignments: [...table.alignments],
+		rows: table.rows.map((r) => [...r]),
+	};
+	while (working.alignments.length < neededCols) {
+		working.alignments.push("none");
+		for (let r = 0; r < working.rows.length; r++) {
+			working.rows[r]!.push(r === 0 ? "Column" : "");
+		}
+	}
+	while (working.rows.length < neededRows) {
+		working.rows.push(Array.from({ length: working.alignments.length }, () => ""));
+	}
+	for (let rOff = 0; rOff < grid.length; rOff++) {
+		const srcRow = grid[rOff]!;
+		for (let cOff = 0; cOff < srcRow.length; cOff++) {
+			working.rows[safeRow + rOff]![safeCol + cOff] = serializeTableCell(srcRow[cOff]!);
+		}
+	}
+	return formatTable(working, safeRow + grid.length - 1, safeCol + maxCols - 1);
+}
 
 type TableController = {
 	view: EditorView;
@@ -48,6 +106,7 @@ type TableController = {
 	table: MarkdownTable | null;
 	activeCell: { row: number; col: number } | null;
 	activeTextarea: HTMLTextAreaElement | null;
+	activeCompleter: TextareaCompleter | null;
 	pendingFocus: { row: number; col: number; select?: boolean } | null;
 	switchingCells: boolean;
 	selfDispatching: boolean;
@@ -193,6 +252,7 @@ export class TableWidget extends WidgetType {
 			table: parseTableRaw(this.raw),
 			activeCell: null,
 			activeTextarea: null,
+			activeCompleter: null,
 			pendingFocus: null,
 			switchingCells: false,
 			selfDispatching: false,
@@ -401,6 +461,8 @@ export class TableWidget extends WidgetType {
 
 		ctrl.closeActiveCell = (commit = true) => {
 			if (commit) commitActiveCell();
+			ctrl.activeCompleter?.dispose();
+			ctrl.activeCompleter = null;
 			const prev = ctrl.activeCell;
 			ctrl.activeCell = null;
 			ctrl.activeTextarea = null;
@@ -427,6 +489,8 @@ export class TableWidget extends WidgetType {
 
 			ctrl.switchingCells = true;
 			try {
+				ctrl.activeCompleter?.dispose();
+				ctrl.activeCompleter = null;
 				if (ctrl.activeCell) {
 					const prev = ctrl.activeCell;
 					commitActiveCell();
@@ -453,6 +517,27 @@ export class TableWidget extends WidgetType {
 				const align = ctrl.table.alignments[clampedCol] ?? "none";
 				if (align !== "none") ta.style.textAlign = align;
 
+				const completer = createTextareaCompleter(ta, {
+					mode: "markdown",
+					filePath: () => ctrl.filePath,
+					onApply: () => {
+						fitTextarea(ta);
+						commitActiveCell();
+					},
+				});
+				ctrl.activeCompleter = completer;
+
+				let plainPasteUntil = 0;
+
+				const runCellOp = (fn: (tbl: MarkdownTable) => TableEdit | null) => {
+					if (!ctrl.table) return;
+					const upd = updateTableCell(ctrl.table, clampedRow, clampedCol, ta.value);
+					const latest = parseTableRaw(upd.text) ?? ctrl.table;
+					const edit = fn(latest);
+					if (!edit) return;
+					dispatchEdit(edit, { row: edit.focusRow, col: edit.focusCol, select: Boolean(edit.selectCell) });
+				};
+
 				ta.addEventListener("beforeinput", (e) => {
 					if (
 						performance.now() < ctrl.suppressEnterUntil &&
@@ -473,6 +558,41 @@ export class TableWidget extends WidgetType {
 				ta.addEventListener("input", () => {
 					fitTextarea(ta);
 					commitActiveCell();
+					completer.update();
+				});
+
+				ta.addEventListener("paste", (e) => {
+					e.stopPropagation();
+					const plainOnly = performance.now() < plainPasteUntil;
+					plainPasteUntil = 0;
+					if (plainOnly || !ctrl.table) return;
+					const raw = e.clipboardData?.getData("text/plain") ?? "";
+					if (!raw) return;
+
+					// 1. Multi-row or multi-column TSV paste expands across cells starting at (row, col), auto-growing rows/columns.
+					const latestUpd = updateTableCell(ctrl.table, clampedRow, clampedCol, ta.value);
+					const latestTbl = parseTableRaw(latestUpd.text) ?? ctrl.table;
+					const merged = mergeTsvIntoTable(latestTbl, clampedRow, clampedCol, raw);
+					if (merged) {
+						e.preventDefault();
+						completer.close();
+						dispatchEdit(merged, { row: merged.focusRow, col: merged.focusCol, select: false });
+						return;
+					}
+
+					// 2. URL pasted over selected text inside cell -> `[selected](url)`.
+					const s = ta.selectionStart ?? 0;
+					const end = ta.selectionEnd ?? s;
+					if (end > s) {
+						const wrapped = pasteUrlOverSelection(ta.value.slice(s, end), raw);
+						if (wrapped) {
+							e.preventDefault();
+							completer.close();
+							ta.setRangeText(wrapped, s, end, "end");
+							fitTextarea(ta);
+							commitActiveCell();
+						}
+					}
 				});
 
 				ta.addEventListener("mousedown", (e) => {
@@ -480,9 +600,16 @@ export class TableWidget extends WidgetType {
 				});
 
 				ta.addEventListener("keydown", (e) => {
+					if (completer.handleKeyDown(e)) return;
+					if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === "v") {
+						plainPasteUntil = performance.now() + 400;
+						e.stopPropagation();
+						return;
+					}
 					if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "z") {
 						e.preventDefault();
 						e.stopPropagation();
+						completer.close();
 						commitActiveCell();
 						runHistory(ctrl.view, e.shiftKey ? "redo" : "undo");
 						return;
@@ -490,19 +617,72 @@ export class TableWidget extends WidgetType {
 					if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "y") {
 						e.preventDefault();
 						e.stopPropagation();
+						completer.close();
 						commitActiveCell();
 						runHistory(ctrl.view, "redo");
+						return;
+					}
+					// Structural table shortcuts: Alt+Arrows reorder rows/columns, Ctrl+Alt+Enter inserts row below, Ctrl+Shift+Backspace deletes row.
+					if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+						if (e.key === "ArrowUp") {
+							e.preventDefault();
+							e.stopPropagation();
+							completer.close();
+							runCellOp((tbl) => moveTableRow(tbl, clampedRow, clampedCol, -1));
+							return;
+						}
+						if (e.key === "ArrowDown") {
+							e.preventDefault();
+							e.stopPropagation();
+							completer.close();
+							runCellOp((tbl) => moveTableRow(tbl, clampedRow, clampedCol, 1));
+							return;
+						}
+						if (e.key === "ArrowLeft") {
+							e.preventDefault();
+							e.stopPropagation();
+							completer.close();
+							runCellOp((tbl) => moveTableColumn(tbl, clampedRow, clampedCol, -1));
+							return;
+						}
+						if (e.key === "ArrowRight") {
+							e.preventDefault();
+							e.stopPropagation();
+							completer.close();
+							runCellOp((tbl) => moveTableColumn(tbl, clampedRow, clampedCol, 1));
+							return;
+						}
+					}
+					if ((e.ctrlKey || e.metaKey) && e.altKey && !e.shiftKey && e.key === "Enter") {
+						ctrl.suppressEnterUntil = performance.now() + 80;
+						e.preventDefault();
+						e.stopPropagation();
+						completer.close();
+						runCellOp((tbl) => insertTableRow(tbl, clampedRow, "below"));
+						return;
+					}
+					if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.key === "Backspace") {
+						e.preventDefault();
+						e.stopPropagation();
+						completer.close();
+						if (!ctrl.table || clampedRow <= 0) return;
+						const rowEmpty = ctrl.table.rows[clampedRow]?.every((c, idx) => !(idx === clampedCol ? ta.value : c).trim()) ?? false;
+						if (ctrl.table.rows.length > 2 || rowEmpty) {
+							runCellOp((tbl) => deleteTableRow(tbl, clampedRow, clampedCol));
+						}
 						return;
 					}
 					if (e.key === "Escape") {
 						e.preventDefault();
 						e.stopPropagation();
+						completer.close();
 						exitToDocument("below", false);
 						return;
 					}
 					if (e.key === "Tab") {
 						e.preventDefault();
 						e.stopPropagation();
+						completer.close();
 						if (!ctrl.table) return;
 						const dir = e.shiftKey ? -1 : 1;
 						const cols = ctrl.table.alignments.length;
@@ -531,6 +711,7 @@ export class TableWidget extends WidgetType {
 						ctrl.suppressEnterUntil = performance.now() + 80;
 						e.preventDefault();
 						e.stopPropagation();
+						completer.close();
 						if (!ctrl.table) return;
 						const updated = updateTableCell(ctrl.table, clampedRow, clampedCol, ta.value);
 						const latest = parseTableRaw(updated.text) ?? ctrl.table;
@@ -546,6 +727,7 @@ export class TableWidget extends WidgetType {
 					if (e.key === "ArrowUp" && !e.shiftKey && caretOnFirstLine(ta)) {
 						e.preventDefault();
 						e.stopPropagation();
+						completer.close();
 						if (clampedRow === 0) exitToDocument("above");
 						else {
 							commitActiveCell();
@@ -556,6 +738,7 @@ export class TableWidget extends WidgetType {
 					if (e.key === "ArrowDown" && !e.shiftKey && caretOnLastLine(ta)) {
 						e.preventDefault();
 						e.stopPropagation();
+						completer.close();
 						if (!ctrl.table || clampedRow >= ctrl.table.rows.length - 1) exitToDocument("below");
 						else {
 							commitActiveCell();
@@ -567,6 +750,7 @@ export class TableWidget extends WidgetType {
 				});
 
 				ta.addEventListener("blur", (e) => {
+					completer.close();
 					if (ctrl.switchingCells) return;
 					commitActiveCell();
 					const nextFocused = e.relatedTarget instanceof Node ? e.relatedTarget : null;
@@ -792,6 +976,11 @@ export class TableWidget extends WidgetType {
 
 		ctrl.syncAll();
 		return root;
+	}
+
+	destroy(dom: HTMLElement) {
+		const ctrl = (dom as TableDomElement).__tableCtrl;
+		ctrl?.activeCompleter?.dispose();
 	}
 
 	ignoreEvent() {

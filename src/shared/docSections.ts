@@ -3,6 +3,7 @@
 // keeps, a new folder in the list's folder, and the folder's place in the
 // Explorer. Pure, so it can be tested: which folder a list is, what its menu
 // holds, and where a typed name puts a new document or folder.
+import type { RowMenuEntry } from "./contextMenu";
 import { UNLISTED } from "./paths";
 import { DOC_FOLDERS, KNOWLEDGE, SCHEMAS, type KnowledgeKind, type SchemaKind } from "./projectDocs";
 
@@ -97,6 +98,37 @@ export function sectionMenu(section: DocSection): string[] {
 						? [NEW_PLAN]
 						: [NEW_DOCUMENT];
 	return [...own, NEW_FOLDER, SHOW_FOLDER];
+}
+
+/**
+ * Sectioned context-menu entries for a Docs heading: creation actions at the
+ * top, optional batch maintenance in the middle, and folder navigation at the bottom.
+ */
+export function sectionMenuEntries(
+	section: DocSection,
+	options: { archiveAllDone?: string } = {},
+): RowMenuEntry[] {
+	const kind = kindOf(section) ?? schemaOf(section);
+	const own: RowMenuEntry[] = kind
+		? [newOfKind(kind)]
+		: section === "schema"
+			? SCHEMAS.map(newOfKind)
+			: section === "work"
+				? [NEW_TICKET, NEW_SPEC, "separator", IMPORT_TICKETS]
+				: section === "knowledge"
+					? KNOWLEDGE.map(newOfKind)
+					: section === "registries"
+						? [NEW_REGISTRY]
+						: section === "plans"
+							? [NEW_PLAN]
+							: [NEW_DOCUMENT];
+	return [
+		...own,
+		...(options.archiveAllDone ? (["separator", options.archiveAllDone] as RowMenuEntry[]) : []),
+		"separator",
+		NEW_FOLDER,
+		SHOW_FOLDER,
+	];
 }
 
 /** What a file's or a folder's name cannot hold on one system or another: written as "-". */

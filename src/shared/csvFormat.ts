@@ -27,6 +27,8 @@ export type CsvBadgeRule = {
 	fallback?: BadgeTone | "none";
 };
 
+export type CsvColumnFormatRule = CsvBadgeRule;
+
 export type CsvTableConfig = {
 	/** Master toggle for CSV column badge formatting. */
 	badgeFormatting: boolean;
@@ -192,6 +194,37 @@ export function badgeToneForValue(rule: CsvBadgeRule | null, rawValue: string): 
 	}
 	if (rule.fallback === "none") return null;
 	return rule.fallback ?? "waiting";
+}
+
+/**
+ * True when a column has an explicit badge rule with non-empty `values`, the cell
+ * is non-empty, and `value` does not match any configured canonical value
+ * (case-insensitive) — used to flag typos like `verifed` or `in progres`.
+ */
+export function isUnrecognizedBadgeValue(rule: CsvColumnFormatRule | null | undefined, value: string): boolean {
+	if (!rule) return false;
+	const keys = Object.keys(rule.values);
+	if (!keys.length) return false;
+	const trimmed = value.trim();
+	if (!trimmed) return false;
+	const lower = trimmed.toLowerCase();
+	return !keys.some((key) => key.trim().toLowerCase() === lower);
+}
+
+/** Returns the configured canonical `{ value, tone }` badge options for a column rule (deduplicated case-insensitively). */
+export function knownBadgeValues(rule: CsvColumnFormatRule | null | undefined): { value: string; tone: BadgeTone }[] {
+	if (!rule) return [];
+	const seen = new Set<string>();
+	const out: { value: string; tone: BadgeTone }[] = [];
+	for (const [key, tone] of Object.entries(rule.values)) {
+		const trimmed = key.trim();
+		if (!trimmed) continue;
+		const lower = trimmed.toLowerCase();
+		if (seen.has(lower)) continue;
+		seen.add(lower);
+		out.push({ value: trimmed, tone });
+	}
+	return out;
 }
 
 /** Autocomplete values for editing a cell in a badged column: existing table values followed by the rule's configured values. */

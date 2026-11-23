@@ -9,18 +9,20 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { CATALOG_FILE, catalogStale, fenced, hasCatalogPlace } from "../shared/catalog";
 import { checkCodeCitations } from "../shared/codeCitations";
 import { parseCsv, tally, type Table } from "../shared/csv";
+import { findDuplicateHeadings, orphanDocChecks, staleDocChecks } from "../shared/docChecks";
 import { fileLinks, frontPaths, type DocLink } from "../shared/docLinks";
 import { checkTables } from "../shared/docTables";
 import { frontMatter, many, one, summaryOf, titleOf } from "../shared/frontMatter";
-import { findHeadingLine } from "../shared/markdownEdit";
+import { documentHeadings, findHeadingLine } from "../shared/markdownEdit";
 import { buildDocNameIndex, lookupInIndex, namePlaces } from "../shared/namedLinks";
 import { areaPath, CATALOG_AREAS, CATALOG_FILES_MAX, catalogItems, catalogTemplate, DOC_FOLDERS, fileItems, isCatalog, isFileArea, isPrompt, OPTIONAL_CATALOGS, SCHEMAS, STATE_FILE, toneOf, type AreaFolders, type DocArea, type FileArea } from "../shared/projectDocs";
 import { keysIn, rowsByTicket, ticketColumn } from "../shared/registryTickets";
-import { extractSqlObjects } from "../shared/sqlSchema";
+import { findUndocumentedSqlRefs, schemaDocKeys } from "../shared/schemaIndex";
+import { diffSqlAgainstSchemaMarkdown, extractSqlObjects } from "../shared/sqlSchema";
 import { extractTags } from "../shared/tags";
 import { tasks as tasksIn, taskTally } from "../shared/tasks";
 import { classifyTicketEntries, type ScannedTicketEntry } from "../shared/ticketBundle";
-import type { AuditCitationIssue, DocAuditResult, DocFile, LinkTo, ManifestFile, NameIn, OpenTaskItem, Project, Settings, WorkspaceDocIssue } from "../shared/protocol";
+import type { AuditCitationIssue, DocAuditResult, DocFile, LinkTo, ManifestFile, NameIn, OpenTaskItem, Project, SchemaDriftItem, Settings, UndocumentedSchemaRef, WorkspaceDocIssue } from "../shared/protocol";
 import { workspaceDir } from "./paths";
 import { WorkspaceFiles } from "./workspace";
 
@@ -101,27 +103,80 @@ async function head(path: string): Promise<string> {
 	}
 }
 
-/** What a plan says of itself: ticket, title, status, and referenced code/script targets; empty when unreadable. */
-async function planSays(path: string): Promise<{ ticket: string; title: string; status: string; codeRefs: string[] }> {
+/** Safe file modification time (ms epoch) for staleness checks. */
+function mtimeOf(path: string): number | undefined {
+	try {
+		return Math.round(statSync(path).mtimeMs);
+	} catch {
+		return undefined;
+	}
+}
+
+/** What a plan says of itself: ticket, title, status, targets, test scripts/cases, and node docs; empty when unreadable. */
+async function planSays(path: string): Promise<{
+	ticket: string;
+	title: string;
+	status: string;
+	codeRefs: string[];
+	testScripts: string[];
+	planTests: { name: string; given?: string; expect?: string }[];
+	nodeDocs: string[];
+}> {
 	try {
 		const plan = await Bun.file(path).json();
 		const word = (value: unknown) => (typeof value === "string" ? value.trim() : "");
 		const refs = new Set<string>();
-		const pushRef = (val: unknown) => {
-			if (typeof val === "string" && val.trim()) refs.add(val.trim().split("\\").join("/"));
+		const testScriptSet = new Set<string>();
+		const nodeDocSet = new Set<string>();
+		const pushInto = (set: Set<string>, val: unknown) => {
+			if (typeof val === "string" && val.trim()) set.add(val.trim().split("\\").join("/"));
 			else if (val && typeof val === "object" && "path" in val && typeof (val as { path?: unknown }).path === "string") {
-				const p = ((val as { path: string }).path).trim();
-				if (p) refs.add(p.split("\\").join("/"));
+				const p = (val as { path: string }).path.trim();
+				if (p) set.add(p.split("\\").join("/"));
 			}
 		};
-		if (Array.isArray(plan?.targets)) for (const t of plan.targets) pushRef(t);
-		if (Array.isArray(plan?.scripts)) for (const s of plan.scripts) pushRef(s);
-		if (Array.isArray(plan?.built?.units)) {
-			for (const u of plan.built.units) pushRef((u as { script?: unknown })?.script);
+		if (Array.isArray(plan?.targets)) {
+			for (const t of plan.targets) {
+				pushInto(refs, t);
+				pushInto(nodeDocSet, t);
+			}
 		}
-		return { ticket: word(plan?.ticket), title: word(plan?.title), status: word(plan?.status), codeRefs: [...refs] };
+		if (Array.isArray(plan?.scripts)) for (const s of plan.scripts) pushInto(refs, s);
+		if (Array.isArray(plan?.built?.units)) {
+			for (const u of plan.built.units) pushInto(refs, (u as { script?: unknown })?.script);
+		}
+		if (typeof plan?.built?.tests?.script === "string") pushInto(testScriptSet, plan.built.tests.script);
+		if (Array.isArray(plan?.testScripts)) for (const ts of plan.testScripts) pushInto(testScriptSet, ts);
+		if (Array.isArray(plan?.nodes)) {
+			for (const node of plan.nodes) {
+				if (Array.isArray((node as { docs?: unknown })?.docs)) {
+					for (const d of (node as { docs: unknown[] }).docs) pushInto(nodeDocSet, d);
+				}
+			}
+		}
+		const planTests: { name: string; given?: string; expect?: string }[] = [];
+		if (Array.isArray(plan?.tests)) {
+			for (const tc of plan.tests) {
+				if (!tc || typeof tc !== "object") continue;
+				const rec = tc as { title?: unknown; name?: unknown; given?: unknown; expect?: unknown };
+				const name = word(rec.title) || word(rec.name);
+				if (!name) continue;
+				const given = word(rec.given);
+				const expect = word(rec.expect);
+				planTests.push({ name, ...(given ? { given } : {}), ...(expect ? { expect } : {}) });
+			}
+		}
+		return {
+			ticket: word(plan?.ticket),
+			title: word(plan?.title),
+			status: word(plan?.status),
+			codeRefs: [...refs],
+			testScripts: [...testScriptSet],
+			planTests,
+			nodeDocs: [...nodeDocSet],
+		};
 	} catch {
-		return { ticket: "", title: "", status: "", codeRefs: [] };
+		return { ticket: "", title: "", status: "", codeRefs: [], testScripts: [], planTests: [], nodeDocs: [] };
 	}
 }
 
@@ -219,16 +274,56 @@ function tallyOf(text: string): ReturnType<typeof taskTally> {
 	return tally;
 }
 
-/** What a Markdown document says of itself, for the panel, catalogs, tags, health, and code traceability. */
+/** What a Markdown document says of itself, for the panel, catalogs, tags, governance, health, and code traceability. */
 function described(
 	text: string,
 	root?: string,
 	path?: string,
-): Pick<DocFile, "title" | "status" | "summary" | "tickets" | "untouched" | "tasks" | "tags" | "source" | "missingSource" | "supersedes" | "supersededBy" | "blocks" | "blockedBy" | "codeRefs"> {
+): Pick<
+	DocFile,
+	| "title"
+	| "status"
+	| "summary"
+	| "tickets"
+	| "untouched"
+	| "tasks"
+	| "tags"
+	| "release"
+	| "priority"
+	| "version"
+	| "owner"
+	| "reviewer"
+	| "approvedBy"
+	| "approvedDate"
+	| "changeControl"
+	| "gxpImpact"
+	| "mtime"
+	| "headings"
+	| "source"
+	| "missingSource"
+	| "supersedes"
+	| "supersededBy"
+	| "blocks"
+	| "blockedBy"
+	| "codeRefs"
+> {
 	const { values } = frontMatter(text);
 	const tickets = [...many(values.ticket), ...many(values.tickets)];
 	const tasks = tallyOf(text);
 	const tags = extractTags(text);
+	const release = one(values.release) || one(values.milestone) || one(values.sprint) || undefined;
+	const priority = one(values.priority) || undefined;
+	const version = one(values.version) || undefined;
+	const owner = one(values.owner) || undefined;
+	const reviewer = one(values.reviewer) || undefined;
+	const approvedBy = one(values["approved-by"]) || one(values.approvedby) || undefined;
+	const approvedDate = one(values["approved-date"]) || one(values.approveddate) || undefined;
+	const changeControl = one(values["change-control"]) || one(values.cr) || undefined;
+	const gxpImpact = one(values["gxp-impact"]) || one(values.gxp) || undefined;
+	const mtime = path ? mtimeOf(path) : undefined;
+	const headings = documentHeadings(text)
+		.slice(0, 60)
+		.map((h) => ({ level: h.level, text: h.text, slug: h.anchor, line: h.line }));
 	const source = one(values.source) || undefined;
 	let missingSource: string | undefined;
 	if (source && root && !/^https?:\/\//i.test(source)) {
@@ -249,6 +344,17 @@ function described(
 		...(isPrompt(summaryOf(text)) ? { untouched: true } : {}),
 		...(tasks ? { tasks } : {}),
 		...(tags.length ? { tags } : {}),
+		...(release ? { release } : {}),
+		...(priority ? { priority } : {}),
+		...(version ? { version } : {}),
+		...(owner ? { owner } : {}),
+		...(reviewer ? { reviewer } : {}),
+		...(approvedBy ? { approvedBy } : {}),
+		...(approvedDate ? { approvedDate } : {}),
+		...(changeControl ? { changeControl } : {}),
+		...(gxpImpact ? { gxpImpact } : {}),
+		...(mtime !== undefined ? { mtime } : {}),
+		...(headings.length ? { headings } : {}),
 		...(source ? { source } : {}),
 		...(missingSource ? { missingSource } : {}),
 		...(supersedes.length ? { supersedes } : {}),
@@ -332,8 +438,8 @@ const LINKED_BYTES = 1024 * 1024;
 const LINKING_DOCS = 2000;
 
 /**
- * The links, in the workspace's Markdown documents, that lead to a file or
- * to something in a folder: what a rename leaves pointing at the old name.
+ * The links, in the workspace's Markdown documents and `.plan.json` files (`targets` and `node.docs`),
+ * that lead to a file or to something in a folder: what a rename leaves pointing at the old name.
  * It asks only where each link leads, not whether anything is there, so it
  * is as true after the rename as before it.
  */
@@ -343,9 +449,12 @@ export async function linksTo(files: WorkspaceFiles, target: string): Promise<Li
 	const fold = (path: string) => (process.platform === "linux" ? path : path.toLowerCase());
 	const wanted = fold(resolve(target));
 	const found: LinkTo[] = [];
+	const PLAN_JSON = /\.plan\.json$/i;
 	let read = 0;
 	for (const path of files.files()) {
-		if (!MARKDOWN.test(path)) continue;
+		const isMd = MARKDOWN.test(path);
+		const isPlan = !isMd && PLAN_JSON.test(path);
+		if (!isMd && !isPlan) continue;
 		if (++read > LINKING_DOCS) break;
 		const file = Bun.file(path);
 		if (file.size > LINKED_BYTES) continue;
@@ -356,6 +465,66 @@ export async function linksTo(files: WorkspaceFiles, target: string): Promise<Li
 			continue;
 		}
 		const leadsThere = (leads: string) => fold(leads) === wanted || fold(leads).startsWith(wanted + sep);
+		if (isPlan) {
+			try {
+				const plan = JSON.parse(text) as {
+					targets?: unknown[];
+					nodes?: { docs?: unknown[] }[];
+				};
+				const refs: string[] = [];
+				const collect = (val: unknown) => {
+					if (typeof val === "string" && val.trim()) refs.push(val.trim());
+					else if (val && typeof val === "object" && "path" in val && typeof (val as { path?: unknown }).path === "string") {
+						const p = (val as { path: string }).path.trim();
+						if (p) refs.push(p);
+					}
+				};
+				if (Array.isArray(plan?.targets)) for (const t of plan.targets) collect(t);
+				if (Array.isArray(plan?.nodes)) {
+					for (const n of plan.nodes) {
+						if (Array.isArray(n?.docs)) for (const d of n.docs) collect(d);
+					}
+				}
+				const lines = text.split(/\r?\n/);
+				const usedPlaces = new Set<string>();
+				for (const rawRef of refs) {
+					const isRel = /^\.{1,2}[\\/]/.test(rawRef);
+					const leads = isRel ? resolve(dirname(path), rawRef) : join(root, rawRef);
+					if (!leadsThere(leads)) continue;
+					const quoted = JSON.stringify(rawRef);
+					let hitLine = 1;
+					let hitCol = 0;
+					outer: for (let li = 0; li < lines.length; li++) {
+						const ln = lines[li]!;
+						let searchFrom = 0;
+						while (searchFrom <= ln.length) {
+							const idx = ln.indexOf(quoted, searchFrom);
+							if (idx < 0) break;
+							const col = idx + 1;
+							const placeKey = `${li + 1}:${col}`;
+							if (!usedPlaces.has(placeKey) && ln.startsWith(rawRef, col)) {
+								usedPlaces.add(placeKey);
+								hitLine = li + 1;
+								hitCol = col;
+								break outer;
+							}
+							searchFrom = idx + quoted.length;
+						}
+					}
+					found.push({
+						path,
+						line: hitLine,
+						column: hitCol,
+						href: rawRef,
+						rest: leads.slice(resolve(target).length),
+						from: isRel ? "doc" : "root",
+					});
+				}
+			} catch {
+				// Ignore malformed plan JSON cleanly.
+			}
+			continue;
+		}
 		// A ticket's "specs:"/"plans:" or a schema doc's "source:" line names files: not links, and left behind by a rename all the same.
 		for (const named of frontPaths(text)) {
 			const isRel = /^\.{1,2}[\\/]/.test(named.value);
@@ -423,9 +592,21 @@ function snippet(text: string): Pick<DocFile, "title" | "summary" | "untouched">
 	return { title: words(lines[0]), summary: said(second), ...(isPrompt(second) ? { untouched: true } : {}) };
 }
 
-export async function listDocs(files: WorkspaceFiles, project: Project, options?: { templatesFolder?: string }): Promise<DocFile[]> {
+export async function listDocs(
+	files: WorkspaceFiles,
+	project: Project,
+	options?: { templatesFolder?: string; truncatedOut?: { folder: string; limit: number }[] },
+): Promise<DocFile[]> {
 	const root = files.root;
 	const list: DocFile[] = [];
+	const seenTruncated = new Set<string>();
+	const recordTruncated = (full: string) => {
+		if (!options?.truncatedOut) return;
+		const rel = relative(root, full).split(sep).join("/") || ".";
+		if (seenTruncated.has(rel.toLowerCase())) return;
+		seenTruncated.add(rel.toLowerCase());
+		options.truncatedOut.push({ folder: rel, limit: DOC_LIMIT });
+	};
 	// The project's files by name, read once and only when a link leads nowhere.
 	let names: Map<string, string[]> | undefined;
 	const named = (name: string) => {
@@ -449,9 +630,25 @@ export async function listDocs(files: WorkspaceFiles, project: Project, options?
 		const text = actual ? await textOf(path) : "";
 		const untouched = actual ? text.includes(PLACEHOLDER[name]!) : undefined;
 		const codeRefs = actual ? markdownCodeRefs(root, path, text) : [];
-		list.push({ path, name: actual ?? name, group: "project", exists: Boolean(actual), untouched, ...(codeRefs.length ? { codeRefs } : {}), ...brokenLinks(root, path, text, named) });
+		const headings = actual
+			? documentHeadings(text)
+					.slice(0, 60)
+					.map((h) => ({ level: h.level, text: h.text, slug: h.anchor, line: h.line }))
+			: [];
+		const mtime = actual ? mtimeOf(path) : undefined;
+		list.push({
+			path,
+			name: actual ?? name,
+			group: "project",
+			exists: Boolean(actual),
+			untouched,
+			...(mtime !== undefined ? { mtime } : {}),
+			...(headings.length ? { headings } : {}),
+			...(codeRefs.length ? { codeRefs } : {}),
+			...brokenLinks(root, path, text, named),
+		});
 	}
-	list.push({ path: project.path, name: PROJECT_FILE, group: "project", exists: project.configured });
+	list.push({ path: project.path, name: PROJECT_FILE, group: "project", exists: project.configured, ...(project.configured ? { mtime: mtimeOf(project.path) } : {}) });
 	const docs = join(root, project.docs);
 	const state = existsSync(docs) ? found(docs, STATE_FILE) : undefined;
 	if (state) {
@@ -465,7 +662,14 @@ export async function listDocs(files: WorkspaceFiles, project: Project, options?
 		if (!existsSync(full)) return [];
 		const paths: string[] = [];
 		// What is skipped does not count towards the limit: a folder of tickets must not crowd out the documents beside it.
-		for (const path of files.files(full)) if (pattern.test(path) && !skip?.(path) && paths.push(path) >= DOC_LIMIT) break;
+		for (const path of files.files(full)) {
+			if (!pattern.test(path) || skip?.(path)) continue;
+			if (paths.length >= DOC_LIMIT) {
+				recordTruncated(full);
+				break;
+			}
+			paths.push(path);
+		}
 		return paths.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base", numeric: true }));
 	};
 	const area = (name: DocArea) => join(docs, DOC_FOLDERS[name]);
@@ -560,7 +764,9 @@ export async function listDocs(files: WorkspaceFiles, project: Project, options?
 		// A spec the planner wrote is for the ticket its plan names, and is called what its plan is: it has no
 		// heading of its own to be called by, and its first section is not its name.
 		const planPath = path.replace(/\.spec\.md$/i, ".plan.json");
-		const plan = fromPlan ? await planSays(planPath) : { ticket: "", title: "", status: "", codeRefs: [] };
+		const plan = fromPlan
+			? await planSays(planPath)
+			: { ticket: "", title: "", status: "", codeRefs: [], testScripts: [], planTests: [], nodeDocs: [] };
 		const planned = plan.ticket;
 		if (fromPlan && plan.title && !one(frontMatter(text).values.title) && !/^#\s+\S/m.test(frontMatter(text).body)) said.title = plan.title;
 		const ownTickets = said.tickets?.length ? [...said.tickets] : undefined;
@@ -585,7 +791,16 @@ export async function listDocs(files: WorkspaceFiles, project: Project, options?
 		const name = relative(area("knowledge"), path);
 		const kind = name.includes(sep) ? name.split(sep)[0]! : "";
 		const text = await head(path);
-		list.push({ path, name, group: "knowledge", exists: true, kind, ...(MARKDOWN.test(path) ? { ...described(text, root, path), ...brokenLinks(root, path, text, named) } : snippet(text)) });
+		const mtime = MARKDOWN.test(path) ? undefined : mtimeOf(path);
+		list.push({
+			path,
+			name,
+			group: "knowledge",
+			exists: true,
+			kind,
+			...(mtime !== undefined ? { mtime } : {}),
+			...(MARKDOWN.test(path) ? { ...described(text, root, path), ...brokenLinks(root, path, text, named) } : snippet(text)),
+		});
 	}
 	// The registries: tables of values, each row with how far it has come.
 	const knownTickets = new Set(list.flatMap((file) => (file.group === "tickets" && file.ticket ? [file.ticket.toLowerCase()] : [])));
@@ -618,6 +833,7 @@ export async function listDocs(files: WorkspaceFiles, project: Project, options?
 			name,
 			group: "registries",
 			exists: true,
+			mtime: Math.round(mtimeMs),
 			rows: table.rows.length,
 			tally: tally(table) ?? undefined,
 			problems: table.problems.length ? table.problems : undefined,
@@ -640,14 +856,27 @@ export async function listDocs(files: WorkspaceFiles, project: Project, options?
 			exists: true,
 			...(said.title ? { heading: said.title } : {}),
 			...(said.summary ? { summary: said.summary } : {}),
+			...(said.status ? { status: said.status } : {}),
+			...(said.untouched ? { untouched: true } : {}),
 			...(said.tags?.length ? { tags: said.tags } : {}),
+			...(said.release ? { release: said.release } : {}),
+			...(said.priority ? { priority: said.priority } : {}),
+			...(said.version ? { version: said.version } : {}),
+			...(said.owner ? { owner: said.owner } : {}),
+			...(said.reviewer ? { reviewer: said.reviewer } : {}),
+			...(said.approvedBy ? { approvedBy: said.approvedBy } : {}),
+			...(said.approvedDate ? { approvedDate: said.approvedDate } : {}),
+			...(said.changeControl ? { changeControl: said.changeControl } : {}),
+			...(said.gxpImpact ? { gxpImpact: said.gxpImpact } : {}),
+			...(said.mtime !== undefined ? { mtime: said.mtime } : {}),
+			...(said.headings?.length ? { headings: said.headings } : {}),
 			...(said.codeRefs?.length ? { codeRefs: said.codeRefs } : {}),
 			...brokenLinks(root, path, text, named),
 		});
 	}
 	// What the project's data looks like, each kind in its folder: descriptions in Markdown, and beside them the SQL
 	// that makes the tables, a message's own schema, a sample of a file (including STARLIMS lab/interface formats).
-	for (const path of under(join(root, project.schema), /\.(md|markdown|sql|ddl|pks|pkb|json|xml|xsd|wsdl|yaml|yml|hl7|astm|edi|avsc|proto|csv|tsv|txt)$/i)) {
+	for (const path of under(join(root, project.schema), /\.(md|markdown|sql|ddl|pks|pkb|ds|json|xml|xsd|wsdl|yaml|yml|hl7|astm|edi|avsc|proto|csv|tsv|txt)$/i)) {
 		const name = relative(join(root, project.schema), path);
 		const folder = name.includes(sep) ? name.split(sep)[0]! : "";
 		// A folder that is one of the known kinds in other capitals is that kind: on a disk that does not tell them
@@ -674,12 +903,14 @@ export async function listDocs(files: WorkspaceFiles, project: Project, options?
 			}
 			if (set.size) schemaObjects = [...set];
 		}
+		const mtime = isMd ? undefined : mtimeOf(path);
 		list.push({
 			path,
 			name,
 			group: "schema",
 			exists: true,
 			kind,
+			...(mtime !== undefined ? { mtime } : {}),
 			...(schemaObjects ? { schemaObjects } : {}),
 			...(isMd ? { ...described(text, root, path), ...brokenLinks(root, path, text, named) } : {}),
 		});
@@ -689,15 +920,20 @@ export async function listDocs(files: WorkspaceFiles, project: Project, options?
 		// A plan says which ticket it is for, its title, and the scripts it targets (ADR 0013).
 		const plan = /\.plan\.json$/i.test(path) ? await planSays(path) : null;
 		const mdText = MARKDOWN.test(path) ? await head(path) : "";
+		const mtime = mdText ? undefined : mtimeOf(path);
 		list.push({
 			path,
 			name: relative(join(root, project.plans), path),
 			group: "plans",
 			exists: true,
+			...(mtime !== undefined ? { mtime } : {}),
 			...(plan?.title ? { heading: plan.title } : {}),
 			...(plan?.status ? { status: plan.status } : {}),
 			...(plan?.ticket ? { tickets: [plan.ticket] } : {}),
 			...(plan?.codeRefs.length ? { codeRefs: plan.codeRefs } : {}),
+			...(plan?.testScripts.length ? { testScripts: plan.testScripts } : {}),
+			...(plan?.planTests.length ? { planTests: plan.planTests } : {}),
+			...(plan?.nodeDocs.length ? { nodeDocs: plan.nodeDocs } : {}),
 			...(mdText ? { ...described(mdText, root, path), ...brokenLinks(root, path, mdText, named) } : {}),
 		});
 	}
@@ -1095,6 +1331,7 @@ type CachedDocAuditEntry = {
 	openTasks: { line: number; offset: number; text: string }[];
 	tableIssues: { line: number; message: string }[];
 	yamlIssues: { line: number; message: string }[];
+	duplicateHeadings: { heading: string; line: number; firstLine: number }[];
 };
 const auditFileCache = new Map<string, CachedDocAuditEntry>();
 const AUDIT_CACHE_MAX = 2000;
@@ -1224,7 +1461,8 @@ function buildAuditEntryFromText(path: string, text: string, stamp: string, chec
 		? checkTables(text).map((f) => ({ line: f.line, message: f.message }))
 		: [];
 	const yamlIssues = yamlSyntaxIssues(text);
-	return { stamp, text, links, selfAnchors, wikis, wikiSections, imgRefs, openTasks, tableIssues, yamlIssues };
+	const duplicateHeadings = findDuplicateHeadings(text);
+	return { stamp, text, links, selfAnchors, wikis, wikiSections, imgRefs, openTasks, tableIssues, yamlIssues, duplicateHeadings };
 }
 
 async function readAuditEntry(path: string, checkTableRule: boolean, overrideText?: string): Promise<CachedDocAuditEntry | null> {
@@ -1284,11 +1522,15 @@ export async function docAudit(
 	const allWsFiles = files.files();
 	const candidateImages: string[] = [];
 	const allMdFiles: string[] = [];
+	const allSqlQueryFiles: string[] = [];
+	const SQL_OR_DS_RE = /\.(sql|ds)$/i;
 	for (const p of allWsFiles) {
 		const rel = relative(root, p).split(sep).join("/");
 		const relLow = rel.toLowerCase();
 		if (MARKDOWN.test(p)) {
 			allMdFiles.push(p);
+		} else if (SQL_OR_DS_RE.test(p) && !relLow.startsWith(".ssl-studio/")) {
+			allSqlQueryFiles.push(p);
 		} else if (IMAGE_ASSET_RE.test(p)) {
 			if ([...attachPrefixes].some((pref) => relLow.startsWith(pref)) || ticketsAttachRe.test(relLow)) {
 				candidateImages.push(p);
@@ -1296,7 +1538,8 @@ export async function docAudit(
 		}
 	}
 
-	const docsList = await listDocs(files, project, { templatesFolder: options?.templatesFolder });
+	const truncatedFolders: { folder: string; limit: number }[] = [];
+	const docsList = await listDocs(files, project, { templatesFolder: options?.templatesFolder, truncatedOut: truncatedFolders });
 	const docByPath = new Map<string, DocFile>();
 	const fold = (p: string) => (process.platform === "linux" ? resolve(p) : resolve(p).toLowerCase());
 	for (const d of docsList) docByPath.set(fold(d.path), d);
@@ -1309,10 +1552,12 @@ export async function docAudit(
 
 	const usedImagePaths = new Set<string>();
 	const usedImageNames = new Set<string>();
+	const incomingDocPaths = new Set<string>();
 	const mdEntries = new Map<string, CachedDocAuditEntry>();
 	const openTasks: OpenTaskItem[] = [];
 	const issues: WorkspaceDocIssue[] = [];
 	const citationIssues: AuditCitationIssue[] = [];
+	const schemaDrift: SchemaDriftItem[] = [];
 
 	for (const mdPath of allMdFiles) {
 		const rel = relative(root, mdPath).split(sep).join("/");
@@ -1346,14 +1591,41 @@ export async function docAudit(
 			if (IMAGE_ASSET_RE.test(w.name)) markImageRef(w.name, true);
 		}
 
-		// Surface YAML & ADR 0008 table-rule issues for project docs (excluding catalogs).
+		// Surface YAML, duplicate-heading, & ADR 0008 table-rule issues for project docs (excluding catalogs).
 		const docMeta = docByPath.get(foldedMd);
+		const sourceIsCatalog = Boolean(docMeta && isCatalog(docMeta));
+		if (!sourceIsCatalog) {
+			for (const link of entry.links) {
+				if (link.file) incomingDocPaths.add(linkTarget(root, mdPath, link.file));
+			}
+			for (const w of entry.wikis) {
+				if (IMAGE_ASSET_RE.test(w.name)) continue;
+				const hit = lookupInIndex(w.name, docNameIndex);
+				if (hit) incomingDocPaths.add(hit.path);
+				else if (/[\\/]|\.[a-z0-9]{1,8}$/i.test(w.name)) {
+					incomingDocPaths.add(linkTarget(root, mdPath, w.name));
+				}
+			}
+			for (const fp of frontPaths(entry.text)) {
+				const leads = /^\.{1,2}[\\/]/.test(fp.value) ? resolve(dirname(mdPath), fp.value) : join(root, fp.value);
+				incomingDocPaths.add(leads);
+			}
+		}
 		if (docMeta && !isCatalog(docMeta)) {
 			for (const y of entry.yamlIssues) {
 				issues.push({ path: mdPath, line: y.line, kind: "yaml", level: "warn", message: y.message });
 			}
 			for (const t of entry.tableIssues) {
 				issues.push({ path: mdPath, line: t.line, kind: "table", level: "note", message: t.message });
+			}
+			for (const dup of entry.duplicateHeadings) {
+				issues.push({
+					path: mdPath,
+					line: dup.line,
+					kind: "duplicate-heading",
+					level: "note",
+					message: `Duplicate heading "${dup.heading}" (first defined on line ${dup.firstLine}).`,
+				});
 			}
 			// Aggregate open `- [ ]` tasks for active (non-archived, non-done/off) docs.
 			const isArchived = /(?:^|\/)archive\//i.test(rel);
@@ -1478,6 +1750,69 @@ export async function docAudit(
 		}
 	}
 
+	// Third pass: schema DDL drift checks against Markdown schema docs with `source: *.sql`.
+	for (const doc of docsList) {
+		if (!doc.exists || doc.group !== "schema" || isCatalog(doc) || !MARKDOWN.test(doc.path)) continue;
+		if (!doc.source || doc.missingSource || /^https?:\/\//i.test(doc.source)) continue;
+		const sqlPath = /^\.{1,2}[\\/]/.test(doc.source) ? resolve(dirname(doc.path), doc.source) : join(root, doc.source);
+		if (!/\.(sql|ddl|pks|pkb)$/i.test(sqlPath) || !existsSync(sqlPath)) continue;
+		const sqlText = await readTarget(sqlPath);
+		const mdText = mdEntries.get(fold(doc.path))?.text ?? (await readTarget(doc.path));
+		if (sqlText === null || mdText === null) continue;
+		for (const diff of diffSqlAgainstSchemaMarkdown(sqlText, mdText)) {
+			schemaDrift.push({
+				schemaPath: doc.path,
+				sqlPath,
+				table: diff.table,
+				added: diff.added,
+				modified: diff.modified,
+				dropped: diff.dropped,
+			});
+			const summaryParts = [
+				diff.added.length ? `+${diff.added.length} added` : "",
+				diff.modified.length ? `~${diff.modified.length} modified` : "",
+				diff.dropped.length ? `-${diff.dropped.length} dropped` : "",
+			].filter(Boolean);
+			issues.push({
+				path: doc.path,
+				line: 1,
+				kind: "schema-drift",
+				level: "warn",
+				message: `Schema drift in ${diff.table} vs ${basename(sqlPath)} (${summaryParts.join(", ")}).`,
+			});
+		}
+	}
+
+	// Fourth pass: scan `.sql` and STARLIMS `.ds` files for references to undocumented tables.
+	const knownTables = new Set<string>();
+	for (const doc of docsList) {
+		if (!doc.exists || isCatalog(doc)) continue;
+		if (doc.group === "schema") {
+			for (const k of schemaDocKeys(doc)) knownTables.add(k);
+		} else if (doc.group === "registries" && /(^|[\\/])database\.(csv|tsv)$/i.test(doc.name)) {
+			for (const ref of doc.codeRefs ?? []) {
+				const clean = ref.trim().toLowerCase();
+				if (!clean) continue;
+				knownTables.add(clean);
+				if (clean.includes(".")) knownTables.add(clean.split(".").pop()!);
+			}
+		}
+	}
+	const sqlQueryInputs: { path: string; text: string }[] = [];
+	for (const qPath of allSqlQueryFiles) {
+		const txt = await readTarget(qPath);
+		if (txt) sqlQueryInputs.push({ path: qPath, text: txt });
+	}
+	const undocumentedRefs: UndocumentedSchemaRef[] = findUndocumentedSqlRefs(sqlQueryInputs, knownTables);
+
+	// Fifth pass: workspace orphan docs and stale hygiene checks.
+	for (const orphan of orphanDocChecks(docsList, incomingDocPaths, { root })) {
+		issues.push(orphan);
+	}
+	for (const stale of staleDocChecks(docsList)) {
+		issues.push(stale);
+	}
+
 	const unusedAttachments = candidateImages.filter((imgPath) => {
 		const f = fold(imgPath);
 		if (usedImagePaths.has(f)) return false;
@@ -1486,6 +1821,6 @@ export async function docAudit(
 		return true;
 	});
 
-	return { unusedAttachments, openTasks, issues, citationIssues };
+	return { unusedAttachments, openTasks, issues, citationIssues, schemaDrift, undocumentedRefs, truncatedFolders };
 }
 

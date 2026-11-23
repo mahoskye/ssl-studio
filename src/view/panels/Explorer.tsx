@@ -13,7 +13,9 @@ import { backend } from "../backend";
 import { ask, choose } from "../dialogs";
 import { activePath, canonical, closeAllTabs, closeTab, fileRemoved, fileRenamed, heldFromBefore, isUntitled, notify, openFile, openToSide, saveAll, scriptsCameTo, setState, state } from "../state";
 import { closeComparison } from "../editor/Review";
-import { baseName, dirName, isInside, joinPath, relativeTo } from "../../shared/paths";
+import { baseName, dirName, isInside, joinPath, relativeTo, resolvePath } from "../../shared/paths";
+import { imageType, looksBinary } from "../../shared/fileKind";
+import { htmlToMarkdown } from "../../shared/htmlToMarkdown";
 import { ATTACH_TO_AGENT, COPY, COPY_NAME, COPY_PATH, COPY_RELATIVE, CUT, FIND_IN_FOLDER, folderFor, holdsRoot, menuEntriesFor, nameProblem, NEW_FILE, NEW_FOLDER, OPEN, OPEN_GOVERNING_DOC, OPEN_SIDE, openFolders, PASTE, RENAME, retarget, SCHEMA_FROM_SQL, TRASH, without } from "./explorerMenu";
 import { copyName, copyProblem, folderOf, moveProblem, type Clip } from "./explorerMoves";
 import { chooseFromMenu } from "./RowMenu";
@@ -321,6 +323,18 @@ async function trash(entry: Entry): Promise<string | null> {
 	for (const g of docsGoverningFile(allDocs, entry.path, root)) {
 		if (!isSelf(g.file.path)) referencingDocs.add(canonical(g.file.path));
 	}
+	// Also cross-check indexed `.plan.json` `nodeDocs` references so plan links are always flagged before deletion.
+	for (const d of allDocs) {
+		if (!d.exists || !d.nodeDocs?.length || isSelf(d.path)) continue;
+		for (const ref of d.nodeDocs) {
+			const cleanRef = ref.replace(/\\/g, "/").replace(/^\/+/, "");
+			const abs = resolvePath(root, cleanRef);
+			if (isSelf(abs)) {
+				referencingDocs.add(canonical(d.path));
+				break;
+			}
+		}
+	}
 	// If trashing a ticket or ticket bundle folder, also include specs, plans, sub-tickets, decisions, questions, and registry rows referencing that ticket.
 	const matchedTickets = allDocs.filter(
 		(d) => d.exists && d.group === "tickets" && d.ticket && (isSelf(d.path) || (d.ticketFolder && isSelf(d.ticketFolder))),
@@ -337,9 +351,23 @@ async function trash(entry: Entry): Promise<string | null> {
 			siblingNote = ` Note: sibling ticket folder ${relSibling}/ will remain on disk.`;
 		}
 	}
+	const referencingPlans = [...referencingDocs].filter((p) => /\.plan\.json$/i.test(p));
+	const referencingOtherDocs = [...referencingDocs].filter((p) => !/\.plan\.json$/i.test(p));
+	const planNames =
+		referencingPlans.slice(0, 3).map(baseName).join(", ") +
+		(referencingPlans.length > 3 ? ` and ${referencingPlans.length - 3} more` : "");
+	const impactParts: string[] = [];
+	if (referencingOtherDocs.length) {
+		impactParts.push(
+			`${referencingOtherDocs.length} ${referencingOtherDocs.length === 1 ? "project document" : "project documents"}`,
+		);
+	}
+	if (referencingPlans.length) {
+		impactParts.push(`${referencingPlans.length} ${referencingPlans.length === 1 ? "plan" : "plans"} (${planNames})`);
+	}
 	const impact =
-		(referencingDocs.size
-			? ` Warning: referenced by ${referencingDocs.size} ${referencingDocs.size === 1 ? "project document" : "project documents"} (links, wikilinks, specs, plans, or registries).`
+		(impactParts.length
+			? ` Warning: referenced by ${impactParts.join(" and ")}${referencingOtherDocs.length ? " (links, wikilinks, specs, or registries)" : ""}.`
 			: "") + siblingNote;
 	if ((await choose(`Move ${what} to the trash?${impact}`, [TRASH], { danger: TRASH })) !== TRASH) return null;
 	await backend.trash(entry.path);
@@ -497,10 +525,125 @@ async function act(action: string | null, entry: Entry, where: { home?: string; 
 	if (to !== undefined) tree?.focus(to);
 }
 
-/** A row is dragged over a folder: it may be let go there when it could be moved there. */
+function bytesToBase64(bytes: Uint8Array): string {
+	let binary = "";
+	const chunk = 0x8000;
+	for (let i = 0; i < bytes.length; i += chunk) {
+		binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+	}
+	return btoa(binary);
+}
+
+function sanitizeDropName(raw: string): string {
+	const cleaned = raw.replace(/[\\/:*?"<>|]+/g, "-").replace(/^\.+/, "").trim();
+	return cleaned || "imported";
+}
+
+function isExternalFileDrag(e: DragEvent): boolean {
+	if (dragging) return false;
+	const types = e.dataTransfer?.types;
+	return Boolean(types && [...types].includes("Files"));
+}
+
+async function importExternalFiles(files: File[], into: string): Promise<void> {
+	const root = state.workspace?.root;
+	if (!root || (canonical(into) !== canonical(root) && !isInside(root, into))) {
+		notify("Drop files inside the workspace folder.", "error");
+		return;
+	}
+	const configuredAttach = state.settings.attachmentsFolder?.trim();
+	const docsRel = (state.project?.docs ?? "docs").replace(/^[./\\]+|[\\/]+$/g, "").replace(/\\/g, "/");
+	const attachmentsDir = configuredAttach
+		? resolvePath(root, configuredAttach.replace(/\\/g, "/").replace(/^\/+/, ""))
+		: joinPath(root, ...(docsRel && docsRel !== "." ? docsRel.split("/") : ["docs"]), "attachments");
+
+	const existing = new Set((await backend.list(into).catch(() => [])).map((entry) => entry.name.toLowerCase()));
+	const taken = (name: string) => existing.has(name.toLowerCase());
+	const reserveName = (wanted: string) => {
+		const finalName = taken(wanted) ? copyName(wanted, taken, "file") : wanted;
+		existing.add(finalName.toLowerCase());
+		return finalName;
+	};
+
+	const imported: string[] = [];
+	const errors: string[] = [];
+	let extractedImages = 0;
+
+	for (const file of files) {
+		const safeName = sanitizeDropName(file.name);
+		try {
+			if (/\.docx$/i.test(safeName)) {
+				const stem = safeName.replace(/\.docx$/i, "") || "imported";
+				const mdName = reserveName(`${stem}.md`);
+				const docxNameForBackend = `${mdName.replace(/\.md$/i, "")}.docx`;
+				const bytes = new Uint8Array(await file.arrayBuffer());
+				const res = await backend.importDocxBytes({
+					fileName: docxNameForBackend,
+					base64: bytesToBase64(bytes),
+					destDir: into,
+					attachmentsDir,
+				});
+				imported.push(res.path);
+				extractedImages += res.images.length;
+			} else if (/\.html?$/i.test(safeName)) {
+				const stem = safeName.replace(/\.html?$/i, "") || "imported";
+				const mdName = reserveName(`${stem}.md`);
+				const destPath = joinPath(into, mdName);
+				const md = htmlToMarkdown(await file.text());
+				await backend.write(destPath, md.endsWith("\n") ? md : `${md}\n`, true);
+				imported.push(destPath);
+			} else if (imageType(safeName)) {
+				const imgName = reserveName(safeName);
+				const destPath = joinPath(into, imgName);
+				const bytes = new Uint8Array(await file.arrayBuffer());
+				await backend.writeImage(destPath, bytesToBase64(bytes));
+				imported.push(destPath);
+			} else {
+				const bytes = new Uint8Array(await file.arrayBuffer());
+				if (looksBinary(bytes)) {
+					errors.push(`${file.name}: binary files other than images and .docx cannot be dropped here`);
+					continue;
+				}
+				const textName = reserveName(safeName);
+				const destPath = joinPath(into, textName);
+				const text = new TextDecoder("utf-8").decode(bytes);
+				await backend.write(destPath, text, true);
+				imported.push(destPath);
+			}
+		} catch (e: any) {
+			errors.push(`${file.name}: ${errorText(e)}`);
+		}
+	}
+
+	if (imported.length) {
+		setExpanded((set) => new Set(set).add(into));
+		void changed(...imported);
+		const imgNote = extractedImages ? ` (${extractedImages} ${extractedImages === 1 ? "image" : "images"} extracted)` : "";
+		if (imported.length === 1) {
+			const rel = relativeTo(root, imported[0]!).replace(/\\/g, "/");
+			notify(`Imported ${rel}${imgNote}.`);
+			if (!imageType(imported[0]!)) void openFile(imported[0]!, { keep: true });
+			else tree?.focus(imported[0]!);
+		} else {
+			notify(`Imported ${imported.length} files into ${baseName(into)}${imgNote}.`);
+			tree?.focus(imported[0]!);
+		}
+	}
+	if (errors.length) notify(`Could not import: ${errors.join("; ")}`, "error");
+}
+
+/** A row or external OS file is dragged over a folder: highlight when it can be moved or imported there. */
 function dragOver(e: DragEvent, into: string) {
 	const root = state.workspace?.root;
-	if (!dragging || !root || moveProblem(dragging.path, into, root)) return setDropInto(null);
+	if (!root) return setDropInto(null);
+	if (isExternalFileDrag(e)) {
+		if (canonical(into) !== canonical(root) && !isInside(root, into)) return setDropInto(null);
+		e.preventDefault();
+		if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+		setDropInto(into);
+		return;
+	}
+	if (!dragging || moveProblem(dragging.path, into, root)) return setDropInto(null);
 	e.preventDefault();
 	if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
 	setDropInto(into);
@@ -510,7 +653,13 @@ async function dropOn(e: DragEvent, into: string) {
 	const from = dragging;
 	dragging = null;
 	setDropInto(null);
-	if (!from) return;
+	if (!from) {
+		const dropped = e.dataTransfer?.files;
+		if (!dropped?.length) return;
+		e.preventDefault();
+		await importExternalFiles(Array.from(dropped), into);
+		return;
+	}
 	e.preventDefault();
 	try {
 		const to = await moveInto(from, into, { ask: true });

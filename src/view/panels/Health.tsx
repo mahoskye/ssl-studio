@@ -4,8 +4,9 @@
 import { Icon } from "../Icon";
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import { reanchorCitation, refreshCitationExcerpt } from "../../shared/codeCitations";
+import { withLinkFiles } from "../../shared/docLinks";
 import { level } from "../../shared/houseStyle";
-import type { AuditCitationIssue, OpenTaskItem, WorkspaceDocIssue } from "../../shared/protocol";
+import type { AuditCitationIssue, OpenTaskItem, SchemaDriftItem, UndocumentedSchemaRef, WorkspaceDocIssue } from "../../shared/protocol";
 import { tasks } from "../../shared/tasks";
 import { descendantTickets, ticketWork } from "../../shared/workContext";
 import { backend } from "../backend";
@@ -19,13 +20,13 @@ import { baseName, isInside, relativeTo } from "../../shared/paths";
 import { symbols } from "./Objects";
 import { SeverityMark, SEVERITY } from "./Problems";
 import { focusRowsBelow, IconButton, Row, Rows, type Point } from "./Rows";
-import { chooseFromMenu } from "./RowMenu";
+import { chooseFromMenu, type RowMenuEntry } from "./RowMenu";
 import { serverDown } from "./server";
 import { openStyleProfile } from "../StyleProfile";
 import { docs, setUpProject } from "../project";
 import { checksSummary, docChecks, type DocCheck, type LinkMend } from "../../shared/docChecks";
 import { folderParts } from "../../shared/docSections";
-import { CATALOG_AREAS, isCatalog, registryTitle, toneOf } from "../../shared/projectDocs";
+import { CATALOG_AREAS, isCatalog, projectDocLabel, registryTitle, toneOf } from "../../shared/projectDocs";
 import { mendLinks, newTicket, updateCatalogs } from "../projectDocs";
 
 const PROCEDURE = new Set([monaco.languages.SymbolKind.Function, monaco.languages.SymbolKind.Method]);
@@ -80,8 +81,15 @@ export function Health() {
 	const citationIssues = () => auditResult().citationIssues ?? [];
 	const orphanAttachments = () => auditResult().unusedAttachments;
 	const openTasks = () => auditResult().openTasks;
-	// Citation issues have their own dedicated section below with 1-click Re-anchor and Refresh excerpt.
-	const docAuditIssues = () => auditResult().issues.filter((i) => i.kind !== "citation");
+	const schemaDrift = () => auditResult().schemaDrift ?? [];
+	const undocumentedRefs = () => auditResult().undocumentedRefs ?? [];
+	const truncatedFolders = () => auditResult().truncatedFolders ?? [];
+	// Citation & schema-drift issues have dedicated actionable sections below.
+	const docAuditIssues = () => auditResult().issues.filter((i) => i.kind !== "citation" && i.kind !== "schema-drift");
+
+	const [driftOpen, setDriftOpen] = createSignal(true);
+	const [undocOpen, setUndocOpen] = createSignal(true);
+	const [truncOpen, setTruncOpen] = createSignal(true);
 
 	// Compact Health filter bar (All / Active ticket / Warnings + text search).
 	const [healthMode, setHealthMode] = createSignal<"all" | "ticket" | "warnings">("all");
@@ -166,6 +174,28 @@ export function Health() {
 			if (healthMode() === "ticket" && !inActiveTicket(p)) return false;
 			return matchesQuery(p, baseName(p));
 		}),
+	);
+	const filteredSchemaDrift = createMemo(() =>
+		schemaDrift().filter((item) => {
+			if (healthMode() === "ticket" && !inActiveTicket(item.schemaPath) && !inActiveTicket(item.sqlPath)) return false;
+			return matchesQuery(item.table, item.schemaPath, item.sqlPath, baseName(item.schemaPath), ...item.added, ...item.modified, ...item.dropped);
+		}),
+	);
+	const filteredUndocRefs = createMemo(() =>
+		undocumentedRefs().filter((ref) => {
+			if (healthMode() === "warnings") return false;
+			if (healthMode() === "ticket" && !inActiveTicket(ref.path)) return false;
+			return matchesQuery(ref.object, ref.path, baseName(ref.path));
+		}),
+	);
+	const filteredTruncated = createMemo(() =>
+		truncatedFolders().filter((t) => matchesQuery(t.folder, String(t.limit))),
+	);
+	const mendableChecks = createMemo(() =>
+		filteredChecks().filter(
+			(c): c is DocCheck & { fix: { kind: "links"; mends: LinkMend[] } } =>
+				c.fix?.kind === "links" && c.fix.mends.length > 0,
+		),
 	);
 	const reanchorableCitations = createMemo(() => filteredCitations().filter((c) => Boolean(c.reanchor)));
 
@@ -321,6 +351,113 @@ export function Health() {
 		notify(`Moved ${count(trashed, "unused attachment")} to trash.`);
 	};
 
+	const mendAllBrokenLinks = async () => {
+		const list = mendableChecks();
+		if (list.length < 2) return;
+		const totalLinks = list.reduce((sum, c) => sum + c.fix.mends.length, 0);
+		const preview =
+			list
+				.slice(0, 4)
+				.map((c) => baseName(c.path))
+				.join(", ") + (list.length > 4 ? ` and ${list.length - 4} more` : "");
+		const GO = "Mend all links";
+		const picked = await choose(
+			`Rewrite ${count(totalLinks, "broken link")} across ${count(list.length, "document")} (${preview}) to point at where their files moved?`,
+			[GO],
+		);
+		if (picked !== GO) return;
+		let mendedFiles = 0;
+		let mendedLinks = 0;
+		for (const check of list) {
+			const open = documents.get(canonical(check.path));
+			const before = open
+				? open.model.getValue()
+				: await backend.read(check.path).then((r) => (r.binary ? null : r.text), () => null);
+			if (before === null) continue;
+			const { text: after, done } = withLinkFiles(before, check.fix.mends);
+			if (!done || after === before) continue;
+			try {
+				await writeDocEdit(check.path, after);
+				mendedFiles++;
+				mendedLinks += done;
+			} catch {
+				// continue remaining files
+			}
+		}
+		setState("treeVersion", (v) => v + 1);
+		refreshDocAudit();
+		notify(
+			mendedLinks
+				? `Mended ${count(mendedLinks, "link")} across ${count(mendedFiles, "document")}.`
+				: "No links needed mending — the documents may have already changed.",
+		);
+	};
+
+	const syncSchemaFromSql = async (sqlPath: string) => {
+		try {
+			const mod = (await import("../projectDocs")) as { generateSchemaDocFromSql?: (p?: string) => Promise<void> };
+			if (typeof mod.generateSchemaDocFromSql === "function") {
+				await mod.generateSchemaDocFromSql(sqlPath);
+				refreshDocAudit();
+			}
+		} catch (e: any) {
+			notify(String(e?.message ?? e), "error");
+		}
+	};
+
+	const exportRtmFromHealth = async () => {
+		try {
+			const mod = (await import("../projectDocs")) as { exportRtm?: () => Promise<void> };
+			if (typeof mod.exportRtm === "function") await mod.exportRtm();
+			else notify("Export Traceability Matrix (RTM) is not available yet.", "error");
+		} catch (e: any) {
+			notify(String(e?.message ?? e), "error");
+		}
+	};
+
+	const driftCountsLabel = (item: SchemaDriftItem) =>
+		[
+			item.added.length ? `+${item.added.length} added` : "",
+			item.modified.length ? `~${item.modified.length} modified` : "",
+			item.dropped.length ? `-${item.dropped.length} dropped` : "",
+		]
+			.filter(Boolean)
+			.join(" / ");
+
+	const driftTooltip = (item: SchemaDriftItem) => {
+		const root = state.workspace?.root ?? "";
+		const rel = (p: string) => (root ? relativeTo(root, p).split("\\").join("/") : baseName(p));
+		return [
+			`${item.table}: ${rel(item.schemaPath)} vs ${rel(item.sqlPath)}`,
+			item.added.length ? `Added in SQL: ${item.added.join(", ")}` : "",
+			item.modified.length ? `Modified in SQL: ${item.modified.join(", ")}` : "",
+			item.dropped.length ? `Dropped in SQL: ${item.dropped.join(", ")}` : "",
+			"Click or press Enter to open the schema doc.",
+		]
+			.filter(Boolean)
+			.join("\n");
+	};
+
+	const driftMenu = async (item: SchemaDriftItem, at: Point) => {
+		const OPEN_DOC = "Open schema document";
+		const OPEN_SQL = `Open ${baseName(item.sqlPath)}`;
+		const SYNC = "Sync from SQL…";
+		const picked = await chooseFromMenu(item.table, [OPEN_DOC, OPEN_SQL, "separator", SYNC], at);
+		if (picked === OPEN_DOC) await openFile(item.schemaPath);
+		else if (picked === OPEN_SQL) await openFile(item.sqlPath);
+		else if (picked === SYNC) await syncSchemaFromSql(item.sqlPath);
+	};
+
+	const undocRefMenu = async (ref: UndocumentedSchemaRef, at: Point) => {
+		const OPEN = `Open at line ${ref.line}`;
+		const SHOW = "Show in the Explorer";
+		const inWs = Boolean(state.workspace && isInside(state.workspace.root, ref.path));
+		const items: RowMenuEntry[] = [OPEN, ...(inWs ? (["separator", SHOW] as RowMenuEntry[]) : [])];
+		const picked = await chooseFromMenu(ref.object, items, at);
+		if (picked === OPEN) await openFile(ref.path, { reveal: { line: ref.line } });
+		else if (picked === SHOW) (await import("./Explorer")).showInExplorer(ref.path);
+	};
+
 	const copyHealthReport = async () => {
 		const root = state.workspace?.root ?? "";
 		const rel = (p: string) => (root ? relativeTo(root, p).split("\\").join("/") : baseName(p));
@@ -346,6 +483,21 @@ export function Health() {
 		if (filteredDocIssues().length) {
 			lines.push(`## Document checks (${filteredDocIssues().length})`, "");
 			for (const i of filteredDocIssues()) lines.push(`- [${i.level}] \`${rel(i.path)}:${i.line}\` — ${i.message}`);
+			lines.push("");
+		}
+		if (filteredSchemaDrift().length) {
+			lines.push(`## Schema drift (${filteredSchemaDrift().length})`, "");
+			for (const d of filteredSchemaDrift()) lines.push(`- **${d.table}** (\`${rel(d.schemaPath)}\` vs \`${rel(d.sqlPath)}\`): ${driftCountsLabel(d)}`);
+			lines.push("");
+		}
+		if (filteredUndocRefs().length) {
+			lines.push(`## Undocumented SQL / .ds tables (${filteredUndocRefs().length})`, "");
+			for (const r of filteredUndocRefs()) lines.push(`- \`${r.object}\` in \`${rel(r.path)}:${r.line}\``);
+			lines.push("");
+		}
+		if (filteredTruncated().length) {
+			lines.push(`## Truncated doc folders (${filteredTruncated().length})`, "");
+			for (const t of filteredTruncated()) lines.push(`- \`${t.folder}/\` reached the ${t.limit}-file scan limit`);
 			lines.push("");
 		}
 		if (filteredOpenTasks().length) {
@@ -383,13 +535,17 @@ export function Health() {
 
 	const docIssueMenu = async (issue: WorkspaceDocIssue, at: Point) => {
 		const OPEN = "Open at line";
-		const picked = await chooseFromMenu(baseName(issue.path), [OPEN], at);
+		const SHOW = "Show in the Explorer";
+		const inWs = Boolean(state.workspace && isInside(state.workspace.root, issue.path));
+		const items: RowMenuEntry[] = [OPEN, ...(inWs ? (["separator", SHOW] as RowMenuEntry[]) : [])];
+		const picked = await chooseFromMenu(baseName(issue.path), items, at);
 		if (picked === OPEN) await openFile(issue.path, { reveal: { line: issue.line, column: issue.column } });
+		else if (picked === SHOW) (await import("./Explorer")).showInExplorer(issue.path);
 	};
 	const openTaskMenu = async (task: OpenTaskItem, at: Point) => {
 		const OPEN = "Open at line";
 		const TICK = "Mark task done";
-		const picked = await chooseFromMenu(task.ticket ? `${task.ticket} task` : baseName(task.path), [OPEN, TICK], at);
+		const picked = await chooseFromMenu(task.ticket ? `${task.ticket} task` : baseName(task.path), [OPEN, "separator", TICK], at);
 		if (picked === OPEN) await openFile(task.path, { reveal: { line: task.line } });
 		else if (picked === TICK) await tickOpenTask(task);
 	};
@@ -398,7 +554,8 @@ export function Health() {
 		const OPEN_TARGET = `Open ${baseName(issue.targetPath)} at L${issue.citation.from}`;
 		const REANCHOR = issue.reanchor ? `Re-anchor to L${issue.reanchor.from}-L${issue.reanchor.to}` : "";
 		const REFRESH = issue.kind === "drifted" ? "Refresh excerpt from live file…" : "";
-		const items = [OPEN_DOC, OPEN_TARGET, ...(REANCHOR ? [REANCHOR] : []), ...(REFRESH ? [REFRESH] : [])];
+		const fixes = [...(REANCHOR ? [REANCHOR] : []), ...(REFRESH ? [REFRESH] : [])];
+		const items: RowMenuEntry[] = [OPEN_DOC, OPEN_TARGET, ...(fixes.length ? (["separator", ...fixes] as RowMenuEntry[]) : [])];
 		const picked = await chooseFromMenu("Code citation", items, at);
 		if (picked === OPEN_DOC) await openFile(issue.docPath, { reveal: { line: issue.docLine } });
 		else if (picked === OPEN_TARGET) await openFile(issue.targetPath, { reveal: { line: issue.citation.from } });
@@ -407,9 +564,13 @@ export function Health() {
 	};
 	const orphanMenu = async (imgPath: string, at: Point) => {
 		const PREVIEW = "Preview image";
+		const SHOW = "Show in the Explorer";
 		const TRASH = "Move to trash…";
-		const picked = await chooseFromMenu(baseName(imgPath), [PREVIEW, TRASH], at);
+		const inWs = Boolean(state.workspace && isInside(state.workspace.root, imgPath));
+		const items: RowMenuEntry[] = [PREVIEW, ...(inWs ? [SHOW] : []), "separator", { label: TRASH, value: TRASH, danger: true }];
+		const picked = await chooseFromMenu(baseName(imgPath), items, at);
 		if (picked === PREVIEW) await openFile(imgPath);
+		else if (picked === SHOW) (await import("./Explorer")).showInExplorer(imgPath);
 		else if (picked === TRASH) await trashOrphanAttachment(imgPath);
 	};
 	// The working documents, or a catalog the app keeps: a project with scripts and a code catalog has that to check.
@@ -437,7 +598,7 @@ export function Health() {
 	const checkMenu = async (check: DocCheck, at: Point) => {
 		const open = "Open the document";
 		const put = check.fix?.kind === "catalogs" ? "Update the catalogs" : check.fix?.kind === "ticket" ? `Start ${check.fix.key} as a ticket` : check.fix?.kind === "links" ? mendTitle(check.fix.mends) : "";
-		const picked = await chooseFromMenu("What to do about it", [open, ...(put ? [put] : [])], at);
+		const picked = await chooseFromMenu("What to do about it", [open, ...(put ? (["separator", put] as RowMenuEntry[]) : [])], at);
 		if (picked === open) await openCheck(check);
 		else if (picked && picked === put) fix(check);
 	};
@@ -446,6 +607,12 @@ export function Health() {
 		<div class="panel-body health" data-panel="health">
 			<div class="panel-title">
 				<span>Health</span>
+				<IconButton
+					label="Export Traceability Matrix (RTM)"
+					title="Export Traceability Matrix (RTM)…"
+					icon="table"
+					onClick={() => void exportRtmFromHealth()}
+				/>
 				<IconButton label="Copy Health report as Markdown" title="Copy Health report (Markdown)" icon="copy" onClick={() => void copyHealthReport()} />
 				<IconButton label="Style profile" title="Open the style profile" icon="gear" onClick={() => openStyleProfile()} />
 			</div>
@@ -488,32 +655,53 @@ export function Health() {
 				<h3>Project</h3>
 				<Rows class="health-rows" role="listbox" label="The project's files">
 					<For each={docs().filter((d) => d.group === "project")}>
-						{(file) => (
-							<Row
-								class="meter-row compact clickable"
-								key={file.name}
-								title={file.exists ? `${file.name}: ${fileState(file)}. ${file.path}` : `${file.name} is missing. Click it, or press Enter on it, to create it.`}
-								onActivate={() => (file.exists ? void openFile(file.path) : void setUpProject())}
-							>
-								<span>{file.name}</span>
-								<Show when={file.exists && !file.untouched} fallback={<span class="meta warn">
-										<Icon name="warning" /> {file.exists ? "template" : "missing"}
-									</span>}>
-									<span class="meta">
-										<Icon name="check" />
-										<span class="visually-hidden">written</span>
+						{(file) => {
+							const info = projectDocLabel(file);
+							const label = info?.label ?? file.name;
+							return (
+								<Row
+									class="meter-row compact clickable"
+									key={file.name}
+									title={file.exists ? `${label} (${file.name}): ${fileState(file)}. ${file.path}` : `${label} (${file.name}) is missing. Click it, or press Enter on it, to create it.`}
+									onActivate={() => (file.exists ? void openFile(file.path) : void setUpProject())}
+								>
+									<span class="health-project-label">
+										<span>{label}</span>
+										<Show when={info?.fileMeta}>
+											<span class="project-file-meta">{info!.fileMeta}</span>
+										</Show>
 									</span>
-								</Show>
-							</Row>
-						)}
+									<Show when={file.exists && !file.untouched} fallback={<span class="meta warn">
+											<Icon name="warning" /> {file.exists ? "template" : "missing"}
+										</span>}>
+										<span class="meta">
+											<Icon name="check" />
+											<span class="visually-hidden">written</span>
+										</span>
+									</Show>
+								</Row>
+							);
+						}}
 					</For>
 				</Rows>
 			</section>
 			<Show when={hasWork()}>
 				<section>
-					<h3 title="The tickets, specs, knowledge base and registries under the docs folder: what is out of date, not written, or named and not there">
-						Work <span class="meta">{checksSummary(filteredChecks()) || (isFiltering() ? "0 matches" : "in order")}</span>
-					</h3>
+					<div class="health-sec-head">
+						<h3 title="The tickets, specs, knowledge base and registries under the docs folder: what is out of date, not written, or named and not there">
+							Work <span class="meta">{checksSummary(filteredChecks()) || (isFiltering() ? "0 matches" : "in order")}</span>
+						</h3>
+						<Show when={mendableChecks().length >= 2}>
+							<button
+								type="button"
+								class="link health-sec-action"
+								title={`Mend broken links across ${mendableChecks().length} documents`}
+								onClick={() => void mendAllBrokenLinks()}
+							>
+								Mend all broken links
+							</button>
+						</Show>
+					</div>
 					<Show
 						when={filteredChecks().length}
 						fallback={
@@ -549,6 +737,142 @@ export function Health() {
 								)}
 							</For>
 						</Rows>
+					</Show>
+				</section>
+			</Show>
+			<Show when={filteredTruncated().length > 0}>
+				<section>
+					<div class="health-sec-head">
+						<h3 style={{ display: "flex", "align-items": "center", gap: "4px" }}>
+							<button
+								type="button"
+								aria-expanded={truncOpen() ? "true" : "false"}
+								title={truncOpen() ? "Collapse truncated folders warning" : "Expand truncated folders warning"}
+								style={{ display: "inline-flex", "align-items": "center", gap: "4px", background: "transparent", border: "none", padding: "0", color: "inherit", font: "inherit", cursor: "pointer" }}
+								onClick={() => setTruncOpen((v) => !v)}
+							>
+								<Icon name={truncOpen() ? "chevron-down" : "chevron-right"} />
+								<span>Truncated doc folders</span>
+								<span class="meta">{filteredTruncated().length}</span>
+							</button>
+						</h3>
+					</div>
+					<Show when={truncOpen()}>
+						<Rows class="health-rows" role="listbox" label="Truncated documentation folders">
+							<For each={filteredTruncated()}>
+								{(item) => (
+									<Row
+										class="check-row"
+										key={`trunc:${item.folder}`}
+										label={`${item.folder} reached ${item.limit} files`}
+										title={`Folder ${item.folder}/ has more than ${item.limit} files. Only the first ${item.limit} files are indexed.`}
+									>
+										<span class="check-mark warn" aria-hidden="true">
+											<Icon name="warning" />
+										</span>
+										<span class="label">
+											Folder <code>{item.folder}/</code> reached the {item.limit}-file scan limit; additional files were not indexed.
+										</span>
+									</Row>
+								)}
+							</For>
+						</Rows>
+					</Show>
+				</section>
+			</Show>
+			<Show when={filteredSchemaDrift().length > 0}>
+				<section>
+					<div class="health-sec-head">
+						<h3 title="Schema Markdown documents whose column tables differ from their source SQL DDL">
+							<button
+								type="button"
+								aria-expanded={driftOpen() ? "true" : "false"}
+								title={driftOpen() ? "Collapse schema drift" : "Expand schema drift"}
+								style={{ display: "inline-flex", "align-items": "center", gap: "4px", background: "transparent", border: "none", padding: "0", color: "inherit", font: "inherit", cursor: "pointer" }}
+								onClick={() => setDriftOpen((v) => !v)}
+							>
+								<Icon name={driftOpen() ? "chevron-down" : "chevron-right"} />
+								<span>Schema drift</span>
+								<span class="meta">{filteredSchemaDrift().length}</span>
+							</button>
+						</h3>
+					</div>
+					<Show when={driftOpen()}>
+						<Rows class="health-rows" role="listbox" label="Schema drift between SQL DDL and Markdown docs">
+							<For each={filteredSchemaDrift()}>
+								{(item) => (
+									<Row
+										class="check-row clickable"
+										key={`drift:${item.schemaPath}:${item.table}`}
+										label={`${item.table} ${driftCountsLabel(item)}`}
+										title={driftTooltip(item)}
+										onActivate={() => void openFile(item.schemaPath)}
+										onMenu={(at) => void driftMenu(item, at)}
+									>
+										<span class="check-mark warn" aria-hidden="true">
+											<Icon name="warning" />
+										</span>
+										<span class="label">
+											<strong>{item.table}</strong> <span class="meta">{driftCountsLabel(item)}</span>
+										</span>
+										<button
+											type="button"
+											class="link"
+											tabindex={-1}
+											title={`Sync ${baseName(item.schemaPath)} from ${baseName(item.sqlPath)}`}
+											onClick={(e) => (e.stopPropagation(), void syncSchemaFromSql(item.sqlPath))}
+										>
+											Sync from SQL
+										</button>
+									</Row>
+								)}
+							</For>
+						</Rows>
+					</Show>
+				</section>
+			</Show>
+			<Show when={filteredUndocRefs().length > 0}>
+				<section>
+					<div class="health-sec-head">
+						<h3 title="Tables queried in .sql and .ds files that are not documented in schema/ or database.csv">
+							<button
+								type="button"
+								aria-expanded={undocOpen() ? "true" : "false"}
+								title={undocOpen() ? "Collapse undocumented SQL tables" : "Expand undocumented SQL tables"}
+								style={{ display: "inline-flex", "align-items": "center", gap: "4px", background: "transparent", border: "none", padding: "0", color: "inherit", font: "inherit", cursor: "pointer" }}
+								onClick={() => setUndocOpen((v) => !v)}
+							>
+								<Icon name={undocOpen() ? "chevron-down" : "chevron-right"} />
+								<span>Undocumented SQL / .ds tables</span>
+								<span class="meta">{filteredUndocRefs().length}</span>
+							</button>
+						</h3>
+					</div>
+					<Show when={undocOpen()}>
+						<Rows class="health-rows" role="listbox" label="Undocumented tables queried in SQL and data source files">
+							<For each={filteredUndocRefs().slice(0, 60)}>
+								{(ref) => (
+									<Row
+										class="check-row clickable"
+										key={`undoc:${ref.path}:${ref.line}:${ref.object}`}
+										label={`${ref.object} (${baseName(ref.path)}:${ref.line})`}
+										title={`Undocumented table ${ref.object} queried at ${relativeTo(state.workspace?.root, ref.path)}:${ref.line}.\nClick or press Enter to open.`}
+										onActivate={() => void openFile(ref.path, { reveal: { line: ref.line } })}
+										onMenu={(at) => void undocRefMenu(ref, at)}
+									>
+										<span class="check-mark note" aria-hidden="true">
+											<Icon name="database" />
+										</span>
+										<span class="label">
+											<strong>{ref.object}</strong> <span class="meta">({baseName(ref.path)}:{ref.line})</span>
+										</span>
+									</Row>
+								)}
+							</For>
+						</Rows>
+						<Show when={filteredUndocRefs().length > 60}>
+							<p class="hint">Showing first 60 of {filteredUndocRefs().length} undocumented SQL table references.</p>
+						</Show>
 					</Show>
 				</section>
 			</Show>

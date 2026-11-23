@@ -6,10 +6,11 @@
 // cleanly in the Palette panel's Assistant tab so the chart stays unobstructed.
 import ELK from "elkjs/lib/elk.bundled.js";
 import { createEffect, createMemo, createSignal, createUniqueId, For, on, onCleanup, onMount, Show, untrack } from "solid-js";
-import { dirName, joinPath, relativeTo } from "../../shared/paths";
-import { ticketKey } from "../../shared/projectDocs";
+import { baseName, dirName, joinPath, relativeTo } from "../../shared/paths";
+import { isCatalog, registryTitle, ticketKey } from "../../shared/projectDocs";
+import type { DocFile } from "../../shared/protocol";
 import { backend } from "../backend";
-import { ask } from "../dialogs";
+import { ask, choose } from "../dialogs";
 import { editors } from "../editor/EditorGroup";
 import { monaco } from "../editor/monaco";
 import { cycleRegionColor, regionColor } from "../editor/regions";
@@ -22,11 +23,11 @@ import { ICON } from "../icons";
 import { diagnostics } from "../lsp/session";
 import { Menu, type MenuItem } from "../Menu";
 import { showPanel } from "../panels/registry";
-import { chooseFromMenu } from "../panels/RowMenu";
+import { chooseFromMenu, type RowMenuEntry } from "../panels/RowMenu";
 import { docs } from "../project";
 import { applyText, canonical, documents, notify, openedForALook, openFile, setPlanMode, setState, state } from "../state";
 import { PlanTextView, type TextTestBuilderRequest } from "./PlanTextView";
-import { planHash, previewPlan } from "./assist";
+import { planHash, planToMermaid, previewPlan, syncPlanMermaidInMarkdown } from "./assist";
 import { nodeStatuses } from "./build";
 import { builtOf, chartChanges, pathsForNode, pathSummary, planPaths, unitsOfNode } from "./built";
 import {
@@ -74,6 +75,7 @@ import {
 	hasManualLayout,
 	insertOnEdge,
 	nodeAtLine,
+	nodeDocsOf,
 	nodeLines,
 	parsePlan,
 	printPlan,
@@ -925,6 +927,174 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		if (ref) return void openReference(ref);
 		if (id) notify("No code is linked to this step yet.");
 	};
+	const docKindTag = (d: DocFile): string => {
+		if (d.group === "knowledge") {
+			if (d.kind === "decisions") return "ADR";
+			if (d.kind === "questions") return "Question";
+			if (d.kind === "reference") return "Ref";
+			if (d.kind === "snippets") return "Snippet";
+			return "Note";
+		}
+		if (d.group === "specs") return "Spec";
+		if (d.group === "schema") return "Schema";
+		if (d.group === "tickets") return "Ticket";
+		if (d.group === "registries") return "Registry";
+		return "Doc";
+	};
+	const docDisplayName = (d: DocFile): string => {
+		if (d.group === "registries") return registryTitle(d.name);
+		if (d.group === "tickets" && d.ticket) {
+			return d.title && !d.title.toLowerCase().startsWith(d.ticket.toLowerCase()) ? `${d.ticket}: ${d.title}` : d.title || d.ticket;
+		}
+		return d.title || d.heading || baseName(d.path);
+	};
+	const resolveLinkedDoc = (ref: string): DocFile | null => {
+		const clean = ref.trim().replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
+		if (!clean) return null;
+		const root = state.workspace?.root;
+		const all = docs().filter((d) => d.exists && !isCatalog(d));
+		return (
+			all.find((d) => relativeTo(root, d.path).replace(/\\/g, "/").toLowerCase() === clean) ??
+			all.find((d) => d.name.replace(/\\/g, "/").toLowerCase() === clean) ??
+			all.find((d) => d.path.replace(/\\/g, "/").toLowerCase().endsWith(`/${clean}`)) ??
+			all.find((d) => d.group === "tickets" && d.ticket?.toLowerCase() === clean) ??
+			null
+		);
+	};
+	const linkedDocsOfNode = (node: PlanNode) =>
+		nodeDocsOf(node).map((ref) => {
+			const doc = resolveLinkedDoc(ref);
+			const label = doc ? docDisplayName(doc) : baseName(ref) || ref;
+			const kind = doc ? docKindTag(doc) : "";
+			return { ref, doc, label, kind };
+		});
+	const openLinkedDoc = (item: { ref: string; doc: DocFile | null }) => {
+		if (item.doc) return void openFile(item.doc.path);
+		if (state.workspace?.root) {
+			const full = joinPath(state.workspace.root, item.ref);
+			void backend.read(full).then(
+				() => void openFile(full),
+				() => notify(`Linked document "${item.ref}" was not found in this workspace.`),
+			);
+			return;
+		}
+		notify(`Linked document "${item.ref}" was not found.`);
+	};
+	const openLinkedDocsMenu = async (e: MouseEvent, node: PlanNode) => {
+		e.stopPropagation();
+		const linked = linkedDocsOfNode(node);
+		if (!linked.length) return;
+		if (linked.length === 1) return openLinkedDoc(linked[0]!);
+		const items: RowMenuEntry[] = linked.map((d, i) => ({
+			label: d.kind ? `${d.kind}: ${d.label}` : d.label,
+			value: `doc:${i}`,
+		}));
+		const picked = await chooseFromMenu(`Linked docs for ${node.text.trim() || node.id}`, items, { x: e.clientX, y: e.clientY });
+		if (picked?.startsWith("doc:")) {
+			const hit = linked[Number(picked.slice(4))];
+			if (hit) openLinkedDoc(hit);
+		}
+	};
+	const savePlanPicture = () =>
+		void savePicture(
+			canvas?.querySelector<SVGSVGElement>("svg.graph-canvas") ?? undefined,
+			layout(),
+			joinPath(relativeTo(state.workspace?.root, dirName(props.path)), pictureName(plan()?.title || "plan")),
+		);
+	const copyMermaid = async () => {
+		const p = plan();
+		if (!p) return;
+		const fenced = `\`\`\`mermaid\n${planToMermaid(p, direction())}\n\`\`\``;
+		const copied = (await backend.clipboard(fenced).catch(() => false)) || (await navigator.clipboard?.writeText(fenced).then(() => true, () => false));
+		notify(copied ? "Copied chart as Mermaid." : "Could not reach the clipboard.", copied ? "info" : "error");
+	};
+	const syncMermaidToDoc = async () => {
+		const p = plan();
+		if (!p) return;
+		const mermaid = planToMermaid(p, direction());
+		const allDocs = docs().filter((d) => d.exists && !isCatalog(d));
+		const candidates: { label: string; detail: string; path: string }[] = [];
+		const seen = new Set<string>();
+		const pushCand = (path: string, label: string, detail: string) => {
+			const canon = canonical(path);
+			if (seen.has(canon)) return;
+			seen.add(canon);
+			candidates.push({ label, detail, path });
+		};
+		const pairedSpec = specPath(props.path);
+		if (pairedSpec !== props.path) {
+			const pairedExists =
+				documents.has(canonical(pairedSpec)) ||
+				allDocs.some((d) => canonical(d.path) === canonical(pairedSpec)) ||
+				(await backend.read(pairedSpec).then(
+					() => true,
+					() => false,
+				));
+			if (pairedExists) {
+				pushCand(pairedSpec, `Spec: ${baseName(pairedSpec)}`, "Companion spec for this plan");
+			}
+		}
+		const ticketVal = typeof p.ticket === "string" ? p.ticket.trim() : "";
+		if (ticketVal) {
+			const td = allDocs.find((d) => d.group === "tickets" && d.ticket?.toLowerCase() === ticketVal.toLowerCase());
+			if (td) pushCand(td.path, `Ticket: ${docDisplayName(td)}`, "Linked ticket for this plan");
+			for (const sp of allDocs.filter((d) => d.group === "specs" && d.tickets?.some((k) => k.toLowerCase() === ticketVal.toLowerCase()))) {
+				pushCand(sp.path, `Spec: ${docDisplayName(sp)}`, `Spec for ${ticketVal}`);
+			}
+		}
+		for (const d of allDocs.filter((f) => f.group === "specs" || f.group === "tickets")) {
+			const tag = d.group === "tickets" ? "Ticket" : "Spec";
+			const rel = relativeTo(state.workspace?.root, d.path).replace(/\\/g, "/");
+			pushCand(d.path, `${tag}: ${docDisplayName(d)}`, rel);
+		}
+		if (!candidates.length) {
+			notify("No specs or tickets were found in this workspace to sync Mermaid into.");
+			return;
+		}
+		// Ensure every choice button label is distinct.
+		const counts = new Map<string, number>();
+		for (const c of candidates) counts.set(c.label, (counts.get(c.label) ?? 0) + 1);
+		const labels = candidates.map((c) => ((counts.get(c.label) ?? 0) > 1 ? `${c.label} (${baseName(c.path)})` : c.label));
+		const details: Record<string, string> = {};
+		labels.forEach((lbl, i) => {
+			details[lbl] = candidates[i]!.detail;
+		});
+		const picked = await choose("Sync Mermaid flowchart into which spec or ticket?", labels, { details });
+		if (!picked) return;
+		const idx = labels.indexOf(picked);
+		const target = idx >= 0 ? candidates[idx] : undefined;
+		if (!target) return;
+		const canon = canonical(target.path);
+		const openDoc = documents.get(canon);
+		let before: string;
+		try {
+			before = openDoc ? openDoc.model.getValue() : (await backend.read(target.path)).text;
+		} catch (e: any) {
+			notify(`Could not read ${baseName(target.path)}: ${e?.message ?? e}`, "error");
+			return;
+		}
+		const planLabel = baseName(props.path);
+		const next = syncPlanMermaidInMarkdown(before, mermaid, planLabel);
+		if (next === before) {
+			notify(`${baseName(target.path)} already has the latest Mermaid flowchart.`);
+			await openFile(target.path);
+			return;
+		}
+		if (openDoc) {
+			applyText(canon, next);
+		} else {
+			try {
+				await backend.historyKeep(target.path).catch(() => {});
+				await backend.write(target.path, next, true);
+				setState("treeVersion", (v) => v + 1);
+			} catch (e: any) {
+				notify(`Could not update ${baseName(target.path)}: ${e?.message ?? e}`, "error");
+				return;
+			}
+		}
+		notify(`Synced Mermaid flowchart into ${baseName(target.path)}.`);
+		await openFile(target.path);
+	};
 	const findingCount = () => diagnostics[doc()?.model.uri.toString() ?? ""]?.length ?? 0;
 	const stateOf = (n: PlanNode): NodeState => ({
 		unit: unitStatuses().get(n.id),
@@ -1537,38 +1707,67 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		e.preventDefault();
 		e.stopPropagation();
 		select(n.id);
-		const EDIT = "Edit label (F2)";
-		const ADD_STEP = "Add step after (Enter)";
-		const ADD_BRANCH = "Add branch (B)";
-		const CONNECT = "Connect to another… (C)";
+		const EDIT = "Edit label";
+		const ADD_STEP = "Add step after";
+		const ADD_BRANCH = "Add branch";
+		const CONNECT = "Connect to another…";
 		const TO_STEP = "Convert to Step";
 		const TO_DECISION = "Convert to Decision";
 		const STAGE = "Set stage group…";
 		const DUP = "Duplicate";
-		const RESET_POS = "Reset position (R)";
-		const CODE = "Inspect code (G)";
+		const RESET_POS = "Reset position";
+		const CODE = "Inspect code";
 		const TESTS = "Highlight test path";
 		const BUILD = linksOf(n.id).length > 0 ? "Rebuild this step… (scheduled)" : "Build this step… (scheduled)";
-		const DEL = "Delete (Del)";
+		const DEL = "Delete";
 		const canBranch = n.kind === "step" || n.kind === "call" || n.kind === "decision";
 		const canDup = n.kind !== "start" && n.kind !== "end";
 		const hasCode = linksOf(n.id).length > 0 || Boolean(n.ref?.trim());
 		const off = offsetFor(n.offset, direction());
 		const hasOffset = off.x !== 0 || off.y !== 0;
-		const items = [
-			EDIT,
-			...(n.kind !== "end" ? [ADD_STEP] : []),
-			...(canBranch ? [ADD_BRANCH] : []),
-			...(n.kind !== "end" ? [CONNECT] : []),
+		const flowGroup: RowMenuEntry[] = [
+			...(n.kind !== "end" ? [{ label: ADD_STEP, value: ADD_STEP, keys: "Enter" }] : []),
+			...(canBranch ? [{ label: ADD_BRANCH, value: ADD_BRANCH, keys: "B" }] : []),
+			...(n.kind !== "end" ? [{ label: CONNECT, value: CONNECT, keys: "C" }] : []),
+		];
+		const transformGroup: RowMenuEntry[] = [
 			...(n.kind === "decision" ? [TO_STEP] : []),
 			...(n.kind !== "decision" && canDup ? [TO_DECISION] : []),
 			STAGE,
 			...(canDup ? [DUP] : []),
-			...(hasOffset ? [RESET_POS] : []),
-			...(hasCode ? [CODE] : []),
+			...(hasOffset ? [{ label: RESET_POS, value: RESET_POS, keys: "R" }] : []),
+		];
+		const codeGroup: RowMenuEntry[] = [
+			...(hasCode ? [{ label: CODE, value: CODE, keys: "G" }] : []),
 			TESTS,
 			...(canDup ? [BUILD] : []),
-			DEL,
+		];
+		const linked = linkedDocsOfNode(n);
+		const docGroup: RowMenuEntry[] =
+			linked.length === 1
+				? [{ label: `Open linked doc: ${linked[0]!.label}`, value: "doc:0" }]
+				: linked.length > 1
+					? [
+							{
+								label: `Linked docs (${linked.length})`,
+								children: linked.map((d, i) => ({
+									label: d.kind ? `${d.kind}: ${d.label}` : d.label,
+									value: `doc:${i}`,
+								})),
+							},
+						]
+					: [];
+		const items: RowMenuEntry[] = [
+			{ label: EDIT, value: EDIT, keys: "F2" },
+			"separator",
+			...flowGroup,
+			"separator",
+			...transformGroup,
+			"separator",
+			...codeGroup,
+			...(docGroup.length ? (["separator", ...docGroup] as RowMenuEntry[]) : []),
+			"separator",
+			{ label: DEL, value: DEL, keys: "Del", danger: true },
 		];
 		const picked = await chooseFromMenu(`Actions for ${n.text || n.kind}`, items, { x: e.clientX, y: e.clientY });
 		if (!picked) return refocus();
@@ -1585,19 +1784,32 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		else if (picked === TESTS) highlightNodeTestPath(n.id);
 		else if (picked === BUILD) triggerScheduledBuild({ kind: "node", id: n.id, label: n.text.trim() || n.id });
 		else if (picked === DEL) remove();
+		else if (picked.startsWith("doc:")) {
+			const hit = linked[Number(picked.slice(4))];
+			if (hit) openLinkedDoc(hit);
+		}
 	};
 
 	const edgeContextMenu = async (e: MouseEvent, line: Line) => {
 		e.preventDefault();
 		e.stopPropagation();
 		setEdge({ from: line.from, to: line.to });
-		const LABEL = "Edit label (F2)";
+		const LABEL = "Edit label";
 		const INSERT = "Insert step on wire";
 		const REVERSE = "Reverse direction";
-		const RESET = "Reset wire route (R)";
-		const DEL = "Delete connection (Del)";
+		const RESET = "Reset wire route";
+		const DEL = "Delete connection";
 		const hasCustomRoute = Boolean(line.route && Object.keys(line.route).length > 0);
-		const picked = await chooseFromMenu("Actions for connection", [LABEL, INSERT, REVERSE, ...(hasCustomRoute ? [RESET] : []), DEL], { x: e.clientX, y: e.clientY });
+		const items: RowMenuEntry[] = [
+			{ label: LABEL, value: LABEL, keys: "F2" },
+			"separator",
+			INSERT,
+			REVERSE,
+			...(hasCustomRoute ? [{ label: RESET, value: RESET, keys: "R" }] : []),
+			"separator",
+			{ label: DEL, value: DEL, keys: "Del", danger: true },
+		];
+		const picked = await chooseFromMenu("Actions for connection", items, { x: e.clientX, y: e.clientY });
 		if (!picked) return refocus();
 		if (picked === LABEL) setEditing({ from: line.from, to: line.to });
 		else if (picked === INSERT) insertBetween(line.from, line.to);
@@ -1617,7 +1829,14 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		const dir = direction();
 		const gOff = offsetFor(p?.groups.find((g) => g.id === groupId)?.offset, dir);
 		const movedStage = gOff.x !== 0 || gOff.y !== 0 || Boolean(p?.nodes.some((n) => n.group === groupId && (offsetFor(n.offset, dir).x !== 0 || offsetFor(n.offset, dir).y !== 0)));
-		const picked = await chooseFromMenu(`Stage ${groupName}`, [RENAME, COLOR, ...(movedStage ? [RESET_STAGE] : []), BUILD_STAGE], { x: e.clientX, y: e.clientY });
+		const items: RowMenuEntry[] = [
+			RENAME,
+			COLOR,
+			...(movedStage ? [RESET_STAGE] : []),
+			"separator",
+			BUILD_STAGE,
+		];
+		const picked = await chooseFromMenu(`Stage ${groupName}`, items, { x: e.clientX, y: e.clientY });
 		if (picked === RENAME) void renameStageAsk(groupId);
 		else if (picked === COLOR) cycleRegionColor(groupName, 1);
 		else if (picked === RESET_STAGE) resetGroupPos(groupId);
@@ -1634,7 +1853,9 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		const OPEN_SPEC = "Open spec";
 		const FLIP = direction() === "DOWN" ? "Switch to Horizontal layout" : "Switch to Vertical layout";
 		const AUTO = "Auto-layout (reset manual positions)";
-		const FIT = "Fit chart to view (0)";
+		const FIT = "Fit chart to view";
+		const COPY_MERMAID = "Copy chart as Mermaid";
+		const SYNC_MERMAID = "Sync Mermaid into spec / ticket…";
 		const SAVE = "Save picture…";
 		const p = plan();
 		const manual = Boolean(p && hasManualLayout(p, direction()));
@@ -1651,25 +1872,33 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 					() => true,
 					() => false,
 				)));
-		const docItems = [
+		const docItems: RowMenuEntry[] = [
 			...(ticketDoc ? [OPEN_TICKET] : []),
 			...(hasSpec ? [OPEN_SPEC] : []),
 		];
-		const picked = await chooseFromMenu(
-			"Flowchart actions",
-			[
-				ADD_STEP,
-				ADD_DECISION,
-				BUILD_PLAN,
-				WALK_TESTS,
-				...(docItems.length ? (["separator", ...docItems, "separator"] as const) : []),
-				FLIP,
-				...(manual ? [AUTO] : []),
-				FIT,
-				SAVE,
-			],
-			{ x: e.clientX, y: e.clientY },
-		);
+		const items: RowMenuEntry[] = [
+			ADD_STEP,
+			ADD_DECISION,
+			"separator",
+			BUILD_PLAN,
+			WALK_TESTS,
+			...(docItems.length ? (["separator", ...docItems] as RowMenuEntry[]) : []),
+			"separator",
+			FLIP,
+			...(manual ? [AUTO] : []),
+			{ label: FIT, value: FIT, keys: "0" },
+			"separator",
+			{
+				label: "Export / Sync",
+				children: [
+					{ label: COPY_MERMAID, value: COPY_MERMAID },
+					{ label: SYNC_MERMAID, value: SYNC_MERMAID },
+					"separator",
+					{ label: SAVE, value: SAVE },
+				],
+			},
+		];
+		const picked = await chooseFromMenu("Flowchart actions", items, { x: e.clientX, y: e.clientY });
 		if (picked === ADD_STEP) addNext();
 		else if (picked === ADD_DECISION) addDecisionNode();
 		else if (picked === BUILD_PLAN) triggerScheduledBuild({ kind: "plan", label: p?.title || "this plan" });
@@ -1679,12 +1908,9 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		else if (picked === FLIP) toggleDirection();
 		else if (picked === AUTO) resetAllLayout();
 		else if (picked === FIT) fitOrWhole();
-		else if (picked === SAVE)
-			void savePicture(
-				canvas.querySelector<SVGSVGElement>("svg.graph-canvas") ?? undefined,
-				layout(),
-				joinPath(relativeTo(state.workspace?.root, dirName(props.path)), pictureName(plan()?.title || "plan")),
-			);
+		else if (picked === COPY_MERMAID) void copyMermaid();
+		else if (picked === SYNC_MERMAID) void syncMermaidToDoc();
+		else if (picked === SAVE) savePlanPicture();
 	};
 
 	// --- Inline Text Editor Overlay ------------------------------------------
@@ -1926,6 +2152,28 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		];
 	};
 
+	const exportMenu = (): MenuItem[] => [
+		{
+			label: "Copy chart as Mermaid",
+			run: () => void copyMermaid(),
+			disabled: !plan(),
+			why: "The plan is not loaded yet",
+		},
+		{
+			label: "Sync Mermaid into spec / ticket…",
+			run: () => void syncMermaidToDoc(),
+			disabled: !plan(),
+			why: "The plan is not loaded yet",
+		},
+		"separator",
+		{
+			label: "Save picture…",
+			run: savePlanPicture,
+			disabled: isTextMode() || !layout(),
+			why: isTextMode() ? "Switch to Chart view to save an SVG picture" : "The chart is not drawn yet",
+		},
+	];
+
 	const more = (): MenuItem[] => {
 		const p = plan();
 		const manual = Boolean(p && hasManualLayout(p, direction()));
@@ -1958,15 +2206,22 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 			{ label: keysOpen() ? "Hide keyboard shortcuts" : "Keyboard shortcuts & legend", keys: "?", run: () => setKeysOpen((open) => !open) },
 			"separator",
 			{
+				label: "Copy chart as Mermaid",
+				run: () => void copyMermaid(),
+				disabled: !p,
+				why: "The plan is not loaded yet",
+			},
+			{
+				label: "Sync Mermaid into spec / ticket…",
+				run: () => void syncMermaidToDoc(),
+				disabled: !p,
+				why: "The plan is not loaded yet",
+			},
+			{
 				label: "Save picture…",
-				run: () =>
-					void savePicture(
-						canvas.querySelector<SVGSVGElement>("svg.graph-canvas") ?? undefined,
-						layout(),
-						joinPath(relativeTo(state.workspace?.root, dirName(props.path)), pictureName(plan()?.title || "plan")),
-					),
-				disabled: !layout(),
-				why: "The chart is not drawn yet",
+				run: savePlanPicture,
+				disabled: isTextMode() || !layout(),
+				why: isTextMode() ? "Switch to Chart view to save an SVG picture" : "The chart is not drawn yet",
 			},
 		];
 	};
@@ -2042,6 +2297,15 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 						</div>
 					</Show>
 					<Menu
+						label="Export or sync chart"
+						title="Copy chart as Mermaid, sync into a spec or ticket, or save SVG picture"
+						class="plan-status-menu"
+						items={exportMenu}
+					>
+						<Icon name="copy" />
+						<span class="plan-status-text">Export</span>
+					</Menu>
+					<Menu
 						label={findingCount() ? `${findingCount()} chart findings and build actions` : "Chart is clean — health and build actions"}
 						title={findingCount() ? `${findingCount()} ${findingCount() === 1 ? "finding" : "findings"} — check health or trigger build` : "Clean — check health or trigger a new build"}
 						class={`plan-status-menu ${findingCount() ? "warn" : "ok"}`}
@@ -2050,7 +2314,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 						<Icon name={findingCount() ? "warning" : "check"} />
 						<span class="plan-status-text">{findingCount() ? `${findingCount()} ${findingCount() === 1 ? "finding" : "findings"}` : "Clean"}</span>
 					</Menu>
-					<Menu label="More for the chart" title="More: layout, keys, save picture" class="graph-more" items={more}>
+					<Menu label="More for the chart" title="More: layout, keys, Mermaid export, save picture" class="graph-more" items={more}>
 						<Icon name="ellipsis" />
 					</Menu>
 				</div>
@@ -2115,7 +2379,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 						}}
 						onMouseDown={(e) => {
 							if (e.button !== 0) return;
-							if (e.target instanceof Element && e.target.closest(".plan-edit, .plan-keys, .plan-float-bar, .plan-float-controls, .plan-port, .plan-seg-handle, .plan-group-header")) return;
+							if (e.target instanceof Element && e.target.closest(".plan-edit, .plan-keys, .plan-float-bar, .plan-float-controls, .plan-port, .plan-seg-handle, .plan-group-header, .plan-doc-badge")) return;
 							dragging = { x: e.clientX, y: e.clientY, moved: false };
 							panned = 0;
 						}}
@@ -2491,6 +2755,25 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 											};
 											const hasBuilt = () => linksOf(nid).length > 0;
 											const hasNotes = () => Boolean(n()?.notes?.trim());
+											const linkedDocs = () => (n() ? linkedDocsOfNode(n()!) : []);
+											const docBadgePos = () => {
+												const cur = b();
+												const count = linkedDocs().length;
+												if (!cur || !count) return { x: 0, y: 0, w: 0 };
+												const w = 22 + (String(count).length - 1) * 5.5;
+												if (n()?.kind === "decision") {
+													return {
+														x: cur.x + cur.width - cur.width / 4 - w / 2 - (trouble() ? 14 : 0),
+														y: cur.y + cur.height / 4 - 8,
+														w,
+													};
+												}
+												return {
+													x: cur.x + cur.width - w - (trouble() ? 16 : 6),
+													y: cur.y - 7.5,
+													w,
+												};
+											};
 											const codeState = () => (n() ? codeIndicator(stateOf(n()!)) : "grey");
 											const showCodeDot = () => {
 												const kind = n()?.kind;
@@ -2579,6 +2862,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 															{[
 																n()!.text,
 																n()!.notes,
+																linkedDocs().length ? `Linked docs: ${linkedDocs().map((d) => d.label).join(", ")}` : "",
 																showCodeDot() ? `Code status: ${CODE_INDICATOR_WORDS[codeState()].label} — ${CODE_INDICATOR_WORDS[codeState()].detail}` : "",
 																mark() ? MARK_WORDS[mark()!] : "",
 																changedOnly().has(nid) && mark() !== "changed" ? MARK_WORDS.changed : "",
@@ -2643,6 +2927,44 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 															<text class="node-note-icon" x={notePos().x} y={notePos().y} text-anchor={notePos().anchor}>
 																{ICON.note}
 															</text>
+														</Show>
+														{/* Linked workspace documents badge pill */}
+														<Show when={!far() && linkedDocs().length > 0}>
+															<g
+																class="plan-doc-badge"
+																style={{ cursor: "pointer" }}
+																onMouseDown={(e) => e.stopPropagation()}
+																onClick={(e) => n() && void openLinkedDocsMenu(e, n()!)}
+															>
+																<title>{`Linked docs (${linkedDocs().length}): ${linkedDocs().map((d) => d.label).join(", ")}. Click to open.`}</title>
+																<rect
+																	x={docBadgePos().x}
+																	y={docBadgePos().y}
+																	width={docBadgePos().w}
+																	height="15"
+																	rx="7.5"
+																	style={{
+																		fill: "var(--side-bg)",
+																		stroke: "color-mix(in srgb, var(--accent) 55%, var(--border))",
+																		"stroke-width": "1",
+																	}}
+																/>
+																<text
+																	x={docBadgePos().x + 5.5}
+																	y={docBadgePos().y + 10.8}
+																	style={{ font: "normal 9.5px/1 codicon", fill: "var(--accent)", "pointer-events": "none" }}
+																>
+																	{ICON.file}
+																</text>
+																<text
+																	x={docBadgePos().x + docBadgePos().w - 5}
+																	y={docBadgePos().y + 10.8}
+																	text-anchor="end"
+																	style={{ font: "600 9.5px var(--ui-font)", fill: "var(--accent)", "pointer-events": "none" }}
+																>
+																	{linkedDocs().length}
+																</text>
+															</g>
 														</Show>
 														{/* Build / drift status badge */}
 														<Show when={mark()} keyed>

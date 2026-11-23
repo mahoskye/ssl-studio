@@ -156,20 +156,23 @@ test("paste is offered once something was cut or copied, and into the workspace 
 	expect(menuFor("dir", "/w", "/w", true)).not.toContain(COPY);
 });
 
-test("VS Code-grouped Explorer context menus include open, find in folder, separators, and shortcuts", () => {
+test("Explorer context menus include open, find in folder, separators, Copy path submenu, shortcuts, and danger styling", () => {
 	const fileMenu = menuEntriesFor("file", "/w/Sample/Orders.ssl", "/w", false);
 	expect(fileMenu).toContain("separator");
 	const fileLabels = fileMenu.map((e) => (typeof e === "string" ? e : e.label));
 	expect(fileLabels).toContain(OPEN);
 	expect(fileLabels).toContain(OPEN_SIDE);
 	expect(fileLabels).not.toContain(FIND_IN_FOLDER);
-	const renameEntry = fileMenu.find((e) => typeof e !== "string" && e.label === RENAME);
-	expect(typeof renameEntry !== "string" && renameEntry?.keys).toBe("F2");
-	const trashEntry = fileMenu.find((e) => typeof e !== "string" && e.label === TRASH);
-	expect(typeof trashEntry !== "string" && trashEntry?.keys).toBe("Delete");
+	const copyPathSub = fileMenu.find((e) => typeof e !== "string" && "children" in e && e.label === COPY_PATH);
+	expect(copyPathSub && typeof copyPathSub !== "string" && "children" in copyPathSub ? copyPathSub.children.length : 0).toBe(3);
+	const renameEntry = fileMenu.find((e) => typeof e !== "string" && !("children" in e) && e.label === RENAME);
+	expect(renameEntry && typeof renameEntry !== "string" && !("children" in renameEntry) && renameEntry.keys).toBe("F2");
+	const trashEntry = fileMenu.find((e) => typeof e !== "string" && !("children" in e) && e.label === TRASH);
+	expect(trashEntry && typeof trashEntry !== "string" && !("children" in trashEntry) && trashEntry.keys).toBe("Delete");
+	expect(trashEntry && typeof trashEntry !== "string" && !("children" in trashEntry) && trashEntry.danger).toBe(true);
 
 	const dirMenu = menuEntriesFor("dir", "/w/Sample", "/w", true);
-	const dirValues = dirMenu.map((e) => (typeof e === "string" ? e : (e.value ?? e.label)));
+	const dirValues = dirMenu.map((e) => (typeof e === "string" ? e : "children" in e ? e.label : (e.value ?? e.label)));
 	expect(dirValues).toContain(NEW_FILE);
 	expect(dirValues).toContain(NEW_FOLDER);
 	expect(dirValues).toContain(FIND_IN_FOLDER);

@@ -9,23 +9,27 @@ import { createEffect, createMemo, createResource, createSignal, For, Show } fro
 import { monaco } from "../editor/monaco";
 import { symbolPath } from "../editor/regions";
 import { session } from "../lsp/session";
-import type { SearchHit } from "../../shared/protocol";
+import type { DocFile, SearchHit } from "../../shared/protocol";
 import { backend } from "../backend";
 import { choose } from "../dialogs";
-import { activePath, canonical, documents, fileChangedOnDisk, notify, openFile, save, saveAll, setState, state } from "../state";
-import { baseName, relativeTo } from "../../shared/paths";
+import { activePath, canonical, documents, fileChangedOnDisk, isUntitled, notify, openFile, save, saveAll, setState, state } from "../state";
+import { baseName, isInside, relativeTo } from "../../shared/paths";
+import { parseCsv } from "../../shared/csv";
+import { fileChosen } from "../../shared/fileGlob";
+import { frontMatter, HEADING, many, one, plainMarkdown } from "../../shared/frontMatter";
 import { DOC_FOLDERS, isCatalog, toneOf } from "../../shared/projectDocs";
 import { matchesOn, SEARCH_LIMIT, searchPattern, type SearchOptions } from "../../shared/searchPattern";
 import { outline } from "../../shared/outline";
 import { tagSearchPattern, workspaceTags } from "../../shared/tags";
 import { codeMatchesRef, descendantTickets, scriptsForTicket, ticketForFile, ticketWork } from "../../shared/workContext";
+import { recall, remember } from "../graph/canvas";
 import { docs } from "../project";
 import { ticketAtHand } from "../projectDocs";
 import { focusRowsBelow, IconButton, Row, RowGroup, Rows } from "./Rows";
 import { showPanel } from "./registry";
 import { byLine, markedColumns, segments, type LineHit } from "./searchLines";
 
-const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+const count = (n: number, oneWord: string, manyWord = `${oneWord}s`) => `${n} ${n === 1 ? oneWord : manyWord}`;
 
 /** How much of a line is shown before its first match. */
 const LEAD = 12;
@@ -52,17 +56,57 @@ export function showReplace() {
 	showPanel("search");
 }
 
-/** Replaces every match in an open file's text, as one step that undo takes back. Says how many. */
-function replaceInModel(model: monaco.editor.ITextModel, pattern: RegExp, with_: string, regex: boolean): number {
+/** Replaces every match in an open file's text (optionally restricted to `allowedLines`), as one step that undo takes back. */
+function replaceInModel(model: monaco.editor.ITextModel, pattern: RegExp, with_: string, regex: boolean, allowedLines?: ReadonlySet<number>): number {
 	const edits: monaco.editor.IIdentifiedSingleEditOperation[] = [];
 	for (let line = 1; line <= model.getLineCount(); line++) {
-		for (const match of matchesOn(model.getLineContent(line), pattern, with_, regex)) edits.push({ range: new monaco.Range(line, match.column, line, match.column + match.length), text: match.becomes });
+		if (allowedLines && !allowedLines.has(line)) continue;
+		for (const match of matchesOn(model.getLineContent(line), pattern, with_, regex)) {
+			edits.push({ range: new monaco.Range(line, match.column, line, match.column + match.length), text: match.becomes });
+		}
 	}
 	if (!edits.length) return 0;
 	model.pushStackElement();
 	model.pushEditOperations([], edits, () => null);
 	model.pushStackElement();
 	return edits.length;
+}
+
+/** Replaces matches only on `allowedLines` (1-based) in raw file text, preserving original line endings. */
+function replaceLinesInText(text: string, pattern: RegExp, with_: string, regex: boolean, allowedLines: ReadonlySet<number>): { text: string; count: number } {
+	let replaced = 0;
+	const parts = text.split(/(\r?\n)/);
+	for (let at = 0; at < parts.length; at += 2) {
+		const lineNumber = at / 2 + 1;
+		if (!allowedLines.has(lineNumber)) continue;
+		const line = parts[at]!;
+		const found = matchesOn(line, pattern, with_, regex);
+		if (!found.length) continue;
+		replaced += found.length;
+		let out = "";
+		let from = 0;
+		for (const each of found) {
+			out += line.slice(from, each.column - 1) + each.becomes;
+			from = each.column - 1 + each.length;
+		}
+		parts[at] = out + line.slice(from);
+	}
+	return { text: parts.join(""), count: replaced };
+}
+
+/** Scans a single in-memory text buffer using the exact same `searchPattern` + `matchesOn` walk as backend search. */
+function scanTextBuffer(path: string, text: string, pattern: RegExp, isRegex: boolean, limit: number): SearchHit[] {
+	const out: SearchHit[] = [];
+	const lines = text.split(/\r?\n/);
+	for (let i = 0; i < lines.length && out.length < limit; i++) {
+		const line = lines[i]!;
+		const found = matchesOn(line, pattern, "", isRegex);
+		for (const m of found) {
+			out.push({ path, line: i + 1, column: m.column, length: m.length, text: line });
+			if (out.length >= limit) break;
+		}
+	}
+	return out;
 }
 
 const [request, setRequest] = createSignal<({ query: string } & SearchOptions) | null>(null);
@@ -87,200 +131,340 @@ const [effectiveAsked, setEffectiveAsked] = createSignal("");
 const [searched, setSearched] = createSignal<SearchOptions>({});
 const [failure, setFailure] = createSignal("");
 const [docFilterNote, setDocFilterNote] = createSignal("");
+/** True when post-filters (`heading:` / `task:`) narrowed results to specific lines within files. */
+const [lineFiltered, setLineFiltered] = createSignal(false);
+/** Per-file and per-line exclusions dismissed from the current result set before Replace All. */
+const [dismissedFiles, setDismissedFiles] = createSignal<Set<string>>(new Set());
+const [dismissedLines, setDismissedLines] = createSignal<Set<string>>(new Set());
 let latest = 0;
 
-type ParsedDocFilters = { text: string; tags: string[]; statuses: string[] };
+// --- Search query history (persisted across reloads, up to 25 queries) -------
+const HISTORY_KEY = "search.history";
+const HISTORY_MAX = 25;
+function loadHistory(): string[] {
+	try {
+		const parsed = JSON.parse(recall(HISTORY_KEY) ?? "[]");
+		return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string" && x.trim().length > 0).slice(0, HISTORY_MAX) : [];
+	} catch {
+		return [];
+	}
+}
+const [queryHistory, setQueryHistory] = createSignal<string[]>(loadHistory());
+function recordHistory(q: string) {
+	const clean = q.trim();
+	if (!clean) return;
+	const next = [clean, ...queryHistory().filter((item) => item !== clean)].slice(0, HISTORY_MAX);
+	setQueryHistory(next);
+	remember(HISTORY_KEY, JSON.stringify(next));
+}
 
-/** Extracts `tag:<name>` and `status:<val>` tokens from a search query string (supports quoted values). */
+// --- Expanded metadata search grammar ----------------------------------------
+
+type ParsedDocFilters = {
+	text: string;
+	tags: string[];
+	statuses: string[];
+	tickets: string[];
+	parents: string[];
+	groups: string[];
+	kinds: string[];
+	headings: string[];
+	tasks: ("open" | "done" | "all")[];
+	props: { key: string; value: string }[];
+	/** Unknown lowercase `key:val` tokens that might be custom YAML frontmatter properties. */
+	customProps: { key: string; value: string; raw: string }[];
+};
+
+const KNOWN_DOC_PROP_KEYS = new Set([
+	"owner",
+	"reviewer",
+	"release",
+	"priority",
+	"version",
+	"approved-by",
+	"approvedby",
+	"approved-date",
+	"approveddate",
+	"change-control",
+	"changecontrol",
+	"gxp-impact",
+	"gxpimpact",
+	"source",
+	"blocks",
+	"blocked-by",
+	"blockedby",
+	"supersedes",
+	"superseded-by",
+	"supersededby",
+]);
+
+const NON_PROP_SCHEMES = new Set(["http", "https", "file", "mailto", "data", "ftp", "ssh", "git"]);
+
+/** Extracts structured metadata filter tokens from a search query string (supports quoted values). */
 function parseDocFilterTokens(raw: string): ParsedDocFilters {
 	const tags: string[] = [];
 	const statuses: string[] = [];
+	const tickets: string[] = [];
+	const parents: string[] = [];
+	const groups: string[] = [];
+	const kinds: string[] = [];
+	const headings: string[] = [];
+	const tasks: ("open" | "done" | "all")[] = [];
+	const props: { key: string; value: string }[] = [];
+	const customProps: { key: string; value: string; raw: string }[] = [];
+
 	const rest = raw
-		.replace(/(?:^|\s)(tag|status):(?:"([^"]+)"|'([^']+)'|(\S+))/gi, (full, kind: string, dq?: string, sq?: string, bare?: string) => {
+		.replace(/(?:^|\s)([A-Za-z][A-Za-z0-9_-]{1,}):(?:"([^"]+)"|'([^']+)'|(\S+))/g, (full, rawKey: string, dq?: string, sq?: string, bare?: string) => {
 			const val = (dq ?? sq ?? bare ?? "").trim();
 			if (!val) return full;
-			if (kind.toLowerCase() === "tag") tags.push(val.replace(/^#+/, ""));
-			else statuses.push(val);
-			return " ";
+			const key = rawKey.toLowerCase();
+			if (NON_PROP_SCHEMES.has(key) || val.startsWith("//") || val.startsWith("\\")) return full;
+			if (key === "tag") {
+				const clean = val.replace(/^#+/, "");
+				if (!clean) return full;
+				tags.push(clean);
+				return " ";
+			}
+			if (key === "status") {
+				statuses.push(val);
+				return " ";
+			}
+			if (key === "ticket") {
+				tickets.push(val);
+				return " ";
+			}
+			if (key === "parent") {
+				parents.push(val);
+				return " ";
+			}
+			if (key === "group") {
+				groups.push(val.toLowerCase());
+				return " ";
+			}
+			if (key === "kind") {
+				kinds.push(val.toLowerCase());
+				return " ";
+			}
+			if (key === "heading") {
+				headings.push(val);
+				return " ";
+			}
+			if (key === "task") {
+				const v = val.toLowerCase();
+				if (v === "open" || v === "todo" || v === "unchecked") tasks.push("open");
+				else if (v === "done" || v === "closed" || v === "checked") tasks.push("done");
+				else if (v === "all" || v === "any") tasks.push("all");
+				else return full;
+				return " ";
+			}
+			if (KNOWN_DOC_PROP_KEYS.has(key)) {
+				props.push({ key, value: val });
+				return " ";
+			}
+			// Keep arbitrary lowercase `prop:val` as a candidate custom frontmatter property (avoid SSL `Me:sField`).
+			if (rawKey === key && !/[A-Z]/.test(rawKey)) {
+				customProps.push({ key, value: val, raw: full.trim() });
+				return " ";
+			}
+			return full;
 		})
 		.replace(/\s+/g, " ")
 		.trim();
-	return { text: rest, tags, statuses };
+
+	return { text: rest, tags, statuses, tickets, parents, groups, kinds, headings, tasks, props, customProps };
 }
 
 const normStatus = (s?: string) => (s ?? "").toLowerCase().replace(/[-_]+/g, " ").trim();
+const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const GROUP_ALIASES: Record<string, string> = {
+	spec: "specs",
+	specs: "specs",
+	ticket: "tickets",
+	tickets: "tickets",
+	plan: "plans",
+	plans: "plans",
+	registry: "registries",
+	registries: "registries",
+	schema: "schema",
+	schemas: "schema",
+	knowledge: "knowledge",
+	doc: "docs",
+	docs: "docs",
+	project: "project",
+};
+
+const KIND_ALIASES: Record<string, string> = {
+	decision: "decisions",
+	decisions: "decisions",
+	adr: "decisions",
+	question: "questions",
+	questions: "questions",
+	snippet: "snippets",
+	snippets: "snippets",
+	database: "database",
+	interface: "interfaces",
+	interfaces: "interfaces",
+	file: "files",
+	files: "files",
+};
+
+const TASK_OPEN_RE = /^\s*(?:>\s*)*(?:(?:[-*+]|\d+[.)])\s+)+\[ \]/;
+const TASK_DONE_RE = /^\s*(?:>\s*)*(?:(?:[-*+]|\d+[.)])\s+)+\[[xX]\]/;
+const TASK_ANY_RE = /^\s*(?:>\s*)*(?:(?:[-*+]|\d+[.)])\s+)+\[[ xX]\]/;
+
+function docPropValues(doc: DocFile, key: string): string[] {
+	switch (key) {
+		case "owner":
+			return doc.owner ? [doc.owner] : [];
+		case "reviewer":
+			return doc.reviewer ? [doc.reviewer] : [];
+		case "release":
+			return doc.release ? [doc.release] : [];
+		case "priority":
+			return doc.priority ? [doc.priority] : [];
+		case "version":
+			return doc.version ? [doc.version] : [];
+		case "approved-by":
+		case "approvedby":
+			return doc.approvedBy ? [doc.approvedBy] : [];
+		case "approved-date":
+		case "approveddate":
+			return doc.approvedDate ? [doc.approvedDate] : [];
+		case "change-control":
+		case "changecontrol":
+			return doc.changeControl ? [doc.changeControl] : [];
+		case "gxp-impact":
+		case "gxpimpact":
+			return doc.gxpImpact ? [doc.gxpImpact] : [];
+		case "source":
+			return doc.source ? [doc.source] : [];
+		case "blocks":
+			return doc.blocks ?? [];
+		case "blocked-by":
+		case "blockedby":
+			return doc.blockedBy ?? [];
+		case "supersedes":
+			return doc.supersedes ?? [];
+		case "superseded-by":
+		case "supersededby":
+			return doc.supersededBy ?? [];
+		default:
+			return [];
+	}
+}
+
+function docMatchesMetadata(doc: DocFile, parsed: ParsedDocFilters): boolean {
+	if (!doc.exists || isCatalog(doc)) return false;
+	if (parsed.tags.length) {
+		const dTags = (doc.tags ?? []).map((t) => t.toLowerCase());
+		if (!parsed.tags.every((wanted) => dTags.includes(wanted.toLowerCase()))) return false;
+	}
+	if (parsed.statuses.length) {
+		const dNorm = normStatus(doc.status);
+		const dTone = toneOf(doc.status);
+		if (!parsed.statuses.every((wanted) => dNorm === normStatus(wanted) || dTone === normStatus(wanted))) return false;
+	}
+	if (parsed.tickets.length) {
+		const keys = new Set<string>(
+			[
+				doc.ticket,
+				...(doc.tickets ?? []),
+				doc.pairedPlan?.ticket,
+				...(doc.forTickets?.map((t) => t.key) ?? []),
+			]
+				.filter((k): k is string => Boolean(k))
+				.map((k) => k.toLowerCase()),
+		);
+		if (!parsed.tickets.every((wanted) => keys.has(wanted.toLowerCase()))) return false;
+	}
+	if (parsed.parents.length) {
+		const p = (doc.parent ?? "").toLowerCase();
+		if (!parsed.parents.every((wanted) => p === wanted.toLowerCase())) return false;
+	}
+	if (parsed.groups.length) {
+		if (!parsed.groups.some((g) => (GROUP_ALIASES[g] ?? g) === doc.group.toLowerCase())) return false;
+	}
+	if (parsed.kinds.length) {
+		const k = (doc.kind ?? "").toLowerCase();
+		const g = doc.group.toLowerCase();
+		if (!parsed.kinds.some((wanted) => {
+			const norm = KIND_ALIASES[wanted] ?? wanted;
+			return k === norm || (!k && (GROUP_ALIASES[wanted] ?? wanted) === g);
+		})) return false;
+	}
+	if (parsed.props.length) {
+		for (const { key, value } of parsed.props) {
+			const vals = docPropValues(doc, key);
+			const wanted = value.toLowerCase();
+			if (!vals.some((v) => v.toLowerCase() === wanted || v.toLowerCase().includes(wanted))) return false;
+		}
+	}
+	return true;
+}
+
+/** Reads a file's text from an open dirty editor buffer when available, else from disk. */
+async function currentTextFor(path: string): Promise<string> {
+	const at = canonical(path);
+	const open = documents.get(at);
+	if (open && !open.binary && state.dirty[at]) return open.model.getValue();
+	return backend.read(path).then((r) => r.text, () => "");
+}
+
+/** Computes a `Row Key · Column` breadcrumb for a matched line/column inside a CSV/TSV file. */
+function csvBreadcrumbForLine(text: string, lineNumber: number, matchCol: number): string {
+	const table = parseCsv(text);
+	if (!table.header.length) return "";
+	// Compute 0-based char offset of each 1-based line start.
+	const lineStarts: number[] = [0];
+	for (let i = 0; i < text.length; i++) {
+		if (text[i] === "\n") lineStarts.push(i + 1);
+	}
+	const lineStart = lineStarts[lineNumber - 1];
+	if (lineStart === undefined) return "";
+	const offset = lineStart + Math.max(0, matchCol - 1);
+
+	const colNameAt = (idx: number) => table.header[idx]?.text.trim() || `Col ${idx + 1}`;
+	const colInCells = (cells: { start: number; end: number }[]) => {
+		let best = 0;
+		for (let c = 0; c < cells.length; c++) {
+			const cell = cells[c]!;
+			if (offset >= cell.start && offset <= cell.end) return c;
+			if (cell.start <= offset) best = c;
+		}
+		return best;
+	};
+
+	const headStart = table.header[0]?.start ?? 0;
+	const headEnd = table.header[table.header.length - 1]?.end ?? 0;
+	if (offset >= headStart && offset <= headEnd) {
+		return `Header · ${colNameAt(colInCells(table.header))}`;
+	}
+
+	for (let r = 0; r < table.rows.length; r++) {
+		const row = table.rows[r]!;
+		if (!row.length) continue;
+		const rowStart = row[0]!.start;
+		const rowEnd = row[row.length - 1]!.end;
+		if (offset >= rowStart && offset <= rowEnd) {
+			const rawKey = row[0]?.text.trim() || row.find((c) => c.text.trim())?.text.trim() || `Row ${r + 1}`;
+			const rowKey = rawKey.length > 28 ? `${rawKey.slice(0, 27)}…` : rawKey;
+			return `${rowKey} · ${colNameAt(colInCells(row))}`;
+		}
+	}
+	return "";
+}
 
 export function Search() {
 	let input!: HTMLInputElement;
+	let historyIdx = -1;
+	let historyDraft = "";
+
 	const [workspaceFiles] = createResource(
 		() => (state.workspace?.root ? `${state.workspace.root}#${state.treeVersion}` : false),
 		() => backend.files().catch(() => [] as string[]),
 	);
-	const run = async () => {
-		const rawQuery = input.value;
-		const mine = ++latest;
-		setDocFilterNote("");
-		if (!rawQuery) {
-			setHits([]);
-			setStatus("idle");
-			return;
-		}
-		setStatus("busy");
-		setAsked(rawQuery);
-		// Support `tag:<name>` and `status:<val>` filter tokens using indexed `docs()` metadata when not in raw regex mode.
-		const parsed = !regex() ? parseDocFilterTokens(rawQuery) : { text: rawQuery, tags: [], statuses: [] };
-		let effectiveQuery = parsed.text;
-		let effectiveRegex = regex();
-		let effectiveWhole = wholeWord();
-		let effectiveCase = caseSensitive();
-		let effectiveInclude = choosing() ? include() : "";
-		const effectiveExclude = choosing() ? exclude() : "";
 
-		if (parsed.tags.length || parsed.statuses.length) {
-			const root = state.workspace?.root;
-			const matchedDocs = docs().filter((d) => {
-				if (!d.exists || isCatalog(d)) return false;
-				if (parsed.tags.length) {
-					const dTags = (d.tags ?? []).map((t) => t.toLowerCase());
-					if (!parsed.tags.every((wanted) => dTags.includes(wanted.toLowerCase()))) return false;
-				}
-				if (parsed.statuses.length) {
-					const dNorm = normStatus(d.status);
-					const dTone = toneOf(d.status);
-					if (
-						!parsed.statuses.every((wanted) => {
-							const wNorm = normStatus(wanted);
-							return dNorm === wNorm || dTone === wNorm;
-						})
-					) {
-						return false;
-					}
-				}
-				return true;
-			});
-			const filterLabel = [...parsed.tags.map((t) => `tag:${t}`), ...parsed.statuses.map((s) => `status:${s}`)].join(" ");
-			setDocFilterNote(`${filterLabel} (${matchedDocs.length} ${matchedDocs.length === 1 ? "doc" : "docs"})`);
-			if (!matchedDocs.length) {
-				setHits([]);
-				setSearched({ regex: effectiveRegex, caseSensitive: effectiveCase, wholeWord: effectiveWhole });
-				setStatus("done");
-				return;
-			}
-			effectiveInclude = matchedDocs.map((d) => relativeTo(root, d.path).replace(/\\/g, "/")).join(", ");
-			if (!effectiveQuery) {
-				if (parsed.tags.length) {
-					effectiveQuery = tagSearchPattern(parsed.tags[0]!);
-					effectiveRegex = true;
-					effectiveWhole = false;
-				} else {
-					effectiveQuery = "^status\\s*:";
-					effectiveRegex = true;
-					effectiveCase = false;
-					effectiveWhole = false;
-				}
-			}
-		}
-
-		// The files are narrowed only while their boxes are showing, or when tag:/status: metadata filters narrowed them.
-		const options: SearchOptions = {
-			regex: effectiveRegex,
-			caseSensitive: effectiveCase,
-			wholeWord: effectiveWhole,
-			...(effectiveInclude || effectiveExclude ? { include: effectiveInclude, exclude: effectiveExclude } : {}),
-		};
-		setSearched(options);
-		setEffectiveAsked(effectiveQuery);
-		try {
-			const found = await backend.search(effectiveQuery, options);
-			if (mine !== latest) return;
-			setHits(found);
-			setStatus("done");
-		} catch (e: any) {
-			if (mine !== latest) return;
-			setHits([]);
-			setFailure(String(e?.message ?? e));
-			setStatus("failed");
-		}
-	};
-	// A search asked for from elsewhere is put in the box and run, as if it had been typed.
-	createEffect(() => {
-		const wanted = request();
-		if (!wanted || !input) return;
-		setRequest(null);
-		input.value = wanted.query;
-		setTyped(wanted.query);
-		setRegex(Boolean(wanted.regex));
-		setWholeWord(Boolean(wanted.wholeWord));
-		setCaseSensitive(Boolean(wanted.caseSensitive));
-		const nextInc = wanted.include ?? "";
-		const nextExc = wanted.exclude ?? "";
-		setInclude(nextInc);
-		setExclude(nextExc);
-		setChoosing(Boolean(nextInc.trim() || nextExc.trim()));
-		void run();
-	});
-	// A switch changes what the results on screen mean, so they are fetched again.
-	const flip = (set: (v: boolean) => void, now: boolean) => {
-		set(!now);
-		if (status() !== "idle") void run();
-	};
-	const groups = () => {
-		const map = new Map<string, LineHit[]>();
-		for (const line of byLine(hits())) map.set(line.path, [...(map.get(line.path) ?? []), line]);
-		return [...map];
-	};
-	// Where each line sits: SSL region › procedure (from starlims-lsp) OR Markdown # Heading (from shared/outline).
-	// Strictly skips Monaco model creation for non-SSL files so search never leaks ITextModels, and reads Markdown
-	// from disk to match `backend.search` line numbers accurately.
-	let placesSeq = 0;
-	const [places] = createResource(groups, async (list) => {
-		const mine = ++placesSeq;
-		const out = new Map<string, string>();
-		let sslChecked = 0;
-		for (const [path, lines] of list) {
-			if (mine !== placesSeq) return out;
-			if (/\.(md|markdown)$/i.test(path)) {
-				const text = await backend.read(path).then((r) => r.text, () => "");
-				if (!text || mine !== placesSeq) continue;
-				const mdSymbols = outline("markdown", text);
-				for (const line of lines) {
-					const trail: string[] = [];
-					const walk = (nodes: typeof mdSymbols) => {
-						for (const n of nodes) {
-							if (line.line >= n.line && line.line <= n.endLine) {
-								trail.push(n.name);
-								if (n.children?.length) walk(n.children);
-								break;
-							}
-						}
-					};
-					walk(mdSymbols);
-					if (trail.length) out.set(`${path}:${line.line}`, trail.join(" › "));
-				}
-				continue;
-			}
-			if (!/\.(ssl|srvscr|ds)$/i.test(path) || sslChecked >= 60) continue;
-			sslChecked++;
-			const model = await session.ensureModel(monaco.Uri.file(path).toString());
-			if (mine !== placesSeq) return out;
-			if (!model || model.getLanguageId() !== "ssl") continue;
-			const symbols = await session.documentSymbols(model).catch(() => []);
-			if (mine !== placesSeq) return out;
-			for (const line of lines) out.set(`${path}:${line.line}`, symbolPath(symbols, line.line).filter((s) => s.kind === monaco.languages.SymbolKind.Namespace || s.kind === monaco.languages.SymbolKind.Function || s.kind === monaco.languages.SymbolKind.Method).map((s) => s.name).join(" › "));
-		}
-		return out;
-	});
-	const place = (line: LineHit) => places()?.get(`${line.path}:${line.line}`) ?? "";
-	const byPlace = (list: LineHit[]) => {
-		const map = new Map<string, LineHit[]>();
-		for (const line of list) map.set(place(line), [...(map.get(place(line)) ?? []), line]);
-		return [...map];
-	};
-	const rel = (path: string) => relativeTo(state.workspace?.root, path);
-	const matchesIn = (list: LineHit[]) => list.reduce((n, line) => n + line.matches.length, 0);
-	/** The switches that narrow a search, by the names on their buttons: what to try without when nothing is found. */
-	const switchesOn = () => [caseSensitive() ? "Aa" : "", wholeWord() ? "ab" : "", regex() ? ".*" : ""].filter(Boolean);
-	const narrowed = () => Boolean(searched().include?.trim() || searched().exclude?.trim());
 	const cleanDir = (dir?: string) => (dir ?? "").replace(/^[./\\]+|[\\/]+$/g, "").replace(/\\/g, "/");
 	const docsRel = () => cleanDir(state.project?.docs ?? "docs");
 	const plansRel = () => cleanDir(state.project?.plans ?? "design");
@@ -305,6 +489,399 @@ export function Search() {
 		]
 			.filter(Boolean)
 			.join(", ");
+	const scopeActive = (inc: string, exc = "") => (choosing() ? include().trim() === inc && exclude().trim() === exc : !inc && !exc);
+
+	const run = async () => {
+		const rawQuery = input.value;
+		const mine = ++latest;
+		setDocFilterNote("");
+		setLineFiltered(false);
+		setDismissedFiles(new Set<string>());
+		setDismissedLines(new Set<string>());
+		if (!rawQuery) {
+			setHits([]);
+			setStatus("idle");
+			return;
+		}
+		recordHistory(rawQuery);
+		historyIdx = -1;
+		setStatus("busy");
+		setAsked(rawQuery);
+
+		const parsed = !regex()
+			? parseDocFilterTokens(rawQuery)
+			: { text: rawQuery, tags: [], statuses: [], tickets: [], parents: [], groups: [], kinds: [], headings: [], tasks: [], props: [], customProps: [] };
+
+		const baseInclude = choosing() ? include() : "";
+		const baseExclude = choosing() ? exclude() : "";
+		const root = state.workspace?.root;
+
+		// Resolve candidate custom frontmatter `prop:val` tokens: keep as metadata filter when in Docs scope,
+		// when combined with other metadata tokens, or when any workspace doc defines that frontmatter key.
+		let activeCustomProps: { key: string; value: string }[] = [];
+		let freeText = parsed.text;
+		const hasKnownDocFilters = Boolean(
+			parsed.tags.length ||
+				parsed.statuses.length ||
+				parsed.tickets.length ||
+				parsed.parents.length ||
+				parsed.groups.length ||
+				parsed.kinds.length ||
+				parsed.props.length,
+		);
+		const inDocsScope = scopeActive(docsIncludeGlob(), "");
+		const customMatchedByPath = new Map<string, Record<string, string | string[]>>();
+
+		if (parsed.customProps.length) {
+			const mdDocs = docs().filter((d) => d.exists && !isCatalog(d) && /\.(md|markdown)$/i.test(d.path)).slice(0, 200);
+			const keysSeen = new Set<string>();
+			await Promise.all(
+				mdDocs.map(async (d) => {
+					const text = await currentTextFor(d.path);
+					if (!text) return;
+					const fm = frontMatter(text).values;
+					if (Object.keys(fm).length) {
+						customMatchedByPath.set(canonical(d.path), fm);
+						for (const k of Object.keys(fm)) keysSeen.add(k.toLowerCase());
+					}
+				}),
+			);
+			if (mine !== latest) return;
+			const literalRestored: string[] = [];
+			for (const cp of parsed.customProps) {
+				if (inDocsScope || hasKnownDocFilters || keysSeen.has(cp.key)) {
+					activeCustomProps.push({ key: cp.key, value: cp.value });
+				} else {
+					literalRestored.push(cp.raw);
+				}
+			}
+			if (literalRestored.length) {
+				freeText = `${freeText ? `${freeText} ` : ""}${literalRestored.join(" ")}`.trim();
+			}
+		}
+
+		let effectiveQuery = freeText;
+		let effectiveRegex = regex();
+		let effectiveWhole = wholeWord();
+		let effectiveCase = caseSensitive();
+		let effectiveInclude = baseInclude;
+		const effectiveExclude = baseExclude;
+
+		const hasDocMetaFilters = hasKnownDocFilters || activeCustomProps.length > 0;
+		const hasHeadingFilter = parsed.headings.length > 0;
+		const hasTaskFilter = parsed.tasks.length > 0;
+
+		const filterNotes: string[] = [
+			...parsed.tags.map((t) => `tag:${t}`),
+			...parsed.statuses.map((s) => `status:${s}`),
+			...parsed.tickets.map((t) => `ticket:${t}`),
+			...parsed.parents.map((p) => `parent:${p}`),
+			...parsed.groups.map((g) => `group:${g}`),
+			...parsed.kinds.map((k) => `kind:${k}`),
+			...parsed.props.map((p) => `${p.key}:${p.value}`),
+			...activeCustomProps.map((p) => `${p.key}:${p.value}`),
+			...parsed.headings.map((h) => `heading:${h}`),
+			...parsed.tasks.map((t) => `task:${t}`),
+		];
+
+		let allowedDocSet: Set<string> | null = null;
+
+		if (hasDocMetaFilters) {
+			let matchedDocs = docs().filter((d) => docMatchesMetadata(d, parsed));
+			if (activeCustomProps.length) {
+				matchedDocs = matchedDocs.filter((d) => {
+					const fm = customMatchedByPath.get(canonical(d.path));
+					if (!fm) return false;
+					return activeCustomProps.every(({ key, value }) => {
+						const rawVal = fm[key];
+						if (rawVal === undefined) return false;
+						const wanted = value.toLowerCase();
+						const list = many(rawVal);
+						const joined = one(rawVal).toLowerCase();
+						return joined === wanted || joined.includes(wanted) || list.some((item) => item.toLowerCase() === wanted || item.toLowerCase().includes(wanted));
+					});
+				});
+			}
+			if (hasHeadingFilter || hasTaskFilter) {
+				matchedDocs = matchedDocs.filter((d) => /\.(md|markdown)$/i.test(d.path));
+			}
+			// Intersect with active include/exclude scope (e.g. Active Ticket or custom include globs) instead of overwriting it!
+			if (baseInclude.trim() || baseExclude.trim()) {
+				matchedDocs = matchedDocs.filter((d) => {
+					const relPath = relativeTo(root, d.path).replace(/\\/g, "/");
+					return fileChosen(relPath, baseInclude, baseExclude);
+				});
+			}
+			setDocFilterNote(`${filterNotes.join(" ")} (${matchedDocs.length} ${matchedDocs.length === 1 ? "doc" : "docs"})`);
+			if (!matchedDocs.length) {
+				setHits([]);
+				setSearched({ regex: effectiveRegex, caseSensitive: effectiveCase, wholeWord: effectiveWhole });
+				setStatus("done");
+				return;
+			}
+			allowedDocSet = new Set(matchedDocs.map((d) => canonical(d.path)));
+			effectiveInclude = matchedDocs.map((d) => relativeTo(root, d.path).replace(/\\/g, "/")).join(", ");
+		} else if (hasHeadingFilter || hasTaskFilter) {
+			setDocFilterNote(filterNotes.join(" "));
+			if (!effectiveInclude.trim()) {
+				effectiveInclude = "*.md, *.markdown";
+			}
+		}
+
+		// Choose default search pattern when only metadata/heading/task tokens were entered with no free text.
+		if (!effectiveQuery) {
+			if (hasHeadingFilter) {
+				const first = parsed.headings[0]!;
+				effectiveQuery = first === "*" ? "^\\s{0,3}#{1,6}\\s+\\S" : `^\\s{0,3}#{1,6}\\s+.*${escapeRegex(first)}`;
+				effectiveRegex = true;
+				effectiveWhole = false;
+			} else if (hasTaskFilter) {
+				const mode = parsed.tasks[0]!;
+				effectiveQuery =
+					mode === "open"
+						? "^\\s*(?:>\\s*)*(?:(?:[-*+]|\\d+[.)])\\s+)+\\[ \\]"
+						: mode === "done"
+							? "^\\s*(?:>\\s*)*(?:(?:[-*+]|\\d+[.)])\\s+)+\\[[xX]\\]"
+							: "^\\s*(?:>\\s*)*(?:(?:[-*+]|\\d+[.)])\\s+)+\\[[ xX]\\]";
+				effectiveRegex = true;
+				effectiveWhole = false;
+			} else if (parsed.tags.length) {
+				effectiveQuery = tagSearchPattern(parsed.tags[0]!);
+				effectiveRegex = true;
+				effectiveWhole = false;
+			} else if (parsed.statuses.length) {
+				effectiveQuery = "^status\\s*:";
+				effectiveRegex = true;
+				effectiveCase = false;
+				effectiveWhole = false;
+			} else if (parsed.tickets.length) {
+				effectiveQuery = escapeRegex(parsed.tickets[0]!);
+				effectiveRegex = true;
+				effectiveCase = false;
+				effectiveWhole = false;
+			} else if (parsed.parents.length) {
+				effectiveQuery = "^parent\\s*:";
+				effectiveRegex = true;
+				effectiveCase = false;
+				effectiveWhole = false;
+			} else if (parsed.props.length || activeCustomProps.length) {
+				const firstKey = (parsed.props[0] ?? activeCustomProps[0])!.key;
+				effectiveQuery = `^${escapeRegex(firstKey)}\\s*:`;
+				effectiveRegex = true;
+				effectiveCase = false;
+				effectiveWhole = false;
+			} else {
+				effectiveQuery = "^(?:title\\s*:|#{1,6}\\s+)";
+				effectiveRegex = true;
+				effectiveCase = false;
+				effectiveWhole = false;
+			}
+		}
+
+		const options: SearchOptions = {
+			regex: effectiveRegex,
+			caseSensitive: effectiveCase,
+			wholeWord: effectiveWhole,
+			...(effectiveInclude || effectiveExclude ? { include: effectiveInclude, exclude: effectiveExclude } : {}),
+		};
+		setSearched(options);
+		setEffectiveAsked(effectiveQuery);
+		setLineFiltered(hasHeadingFilter || hasTaskFilter);
+
+		try {
+			const diskHits = await backend.search(effectiveQuery, options);
+			if (mine !== latest) return;
+
+			// Overlay unsaved dirty open editor buffers so freshly edited unsaved text is always searchable.
+			const dirtyPaths = new Set<string>();
+			const dirtyHits: SearchHit[] = [];
+			let compiledPattern: RegExp | null = null;
+			try {
+				compiledPattern = searchPattern(effectiveQuery, options);
+			} catch {
+				compiledPattern = null;
+			}
+			if (compiledPattern) {
+				for (const [docPath, doc] of documents) {
+					const at = canonical(docPath);
+					if (!state.dirty[at] || doc.binary) continue;
+					if (allowedDocSet && !allowedDocSet.has(at)) continue;
+					if (isUntitled(at)) {
+						if (effectiveInclude.trim()) continue;
+					} else if (root && isInside(root, at)) {
+						const relPath = relativeTo(root, at).replace(/\\/g, "/");
+						if (!fileChosen(relPath, effectiveInclude, effectiveExclude)) continue;
+					} else {
+						continue;
+					}
+					dirtyPaths.add(at);
+					const remaining = Math.max(0, SEARCH_LIMIT - dirtyHits.length);
+					if (remaining > 0) {
+						dirtyHits.push(...scanTextBuffer(docPath, doc.model.getValue(), compiledPattern, Boolean(effectiveRegex), remaining));
+					}
+				}
+			}
+
+			let merged: SearchHit[] = [
+				...diskHits.filter((h) => !dirtyPaths.has(canonical(h.path))),
+				...dirtyHits,
+			];
+
+			// Enforce heading:/task: line-level constraints (only Markdown files & matching heading/task lines).
+			if (hasHeadingFilter || hasTaskFilter) {
+				merged = merged.filter((h) => {
+					if (!/\.(md|markdown)$/i.test(h.path)) return false;
+					if (hasHeadingFilter) {
+						const m = HEADING.exec(h.text);
+						if (!m) return false;
+						const headingPlain = plainMarkdown(m[2]!).toLowerCase();
+						if (!parsed.headings.every((wanted) => wanted === "*" || headingPlain.includes(wanted.toLowerCase()))) return false;
+					}
+					if (hasTaskFilter) {
+						const matchesTask = parsed.tasks.every((mode) =>
+							mode === "open" ? TASK_OPEN_RE.test(h.text) : mode === "done" ? TASK_DONE_RE.test(h.text) : TASK_ANY_RE.test(h.text),
+						);
+						if (!matchesTask) return false;
+					}
+					return true;
+				});
+			}
+
+			if (merged.length > SEARCH_LIMIT) merged = merged.slice(0, SEARCH_LIMIT);
+			setHits(merged);
+			setStatus("done");
+		} catch (e: any) {
+			if (mine !== latest) return;
+			setHits([]);
+			setFailure(String(e?.message ?? e));
+			setStatus("failed");
+		}
+	};
+
+	// A search asked for from elsewhere is put in the box and run, as if it had been typed.
+	createEffect(() => {
+		const wanted = request();
+		if (!wanted || !input) return;
+		setRequest(null);
+		input.value = wanted.query;
+		setTyped(wanted.query);
+		setRegex(Boolean(wanted.regex));
+		setWholeWord(Boolean(wanted.wholeWord));
+		setCaseSensitive(Boolean(wanted.caseSensitive));
+		const nextInc = wanted.include ?? "";
+		const nextExc = wanted.exclude ?? "";
+		setInclude(nextInc);
+		setExclude(nextExc);
+		setChoosing(Boolean(nextInc.trim() || nextExc.trim()));
+		void run();
+	});
+	// A switch changes what the results on screen mean, so they are fetched again.
+	const flip = (set: (v: boolean) => void, now: boolean) => {
+		set(!now);
+		if (status() !== "idle") void run();
+	};
+
+	const visibleHits = createMemo(() => {
+		const skipFiles = dismissedFiles();
+		const skipLines = dismissedLines();
+		if (!skipFiles.size && !skipLines.size) return hits();
+		return hits().filter((h) => {
+			const canon = canonical(h.path);
+			return !skipFiles.has(canon) && !skipLines.has(`${canon}:${h.line}`);
+		});
+	});
+
+	const dismissedHitCount = createMemo(() => Math.max(0, hits().length - visibleHits().length));
+
+	const dismissFile = (path: string) =>
+		setDismissedFiles((prev) => {
+			const next = new Set(prev);
+			next.add(canonical(path));
+			return next;
+		});
+
+	const dismissLine = (path: string, line: number) =>
+		setDismissedLines((prev) => {
+			const next = new Set(prev);
+			next.add(`${canonical(path)}:${line}`);
+			return next;
+		});
+
+	const groups = () => {
+		const map = new Map<string, LineHit[]>();
+		for (const line of byLine(visibleHits())) map.set(line.path, [...(map.get(line.path) ?? []), line]);
+		return [...map];
+	};
+
+	// Where each line sits: SSL region › procedure (from starlims-lsp), Markdown # Heading (from shared/outline),
+	// or CSV/TSV Row Key · Column (from shared/csv). Reads dirty open buffers when present so line numbers stay exact.
+	let placesSeq = 0;
+	const [places] = createResource(groups, async (list) => {
+		const mine = ++placesSeq;
+		const out = new Map<string, string>();
+		let sslChecked = 0;
+		for (const [path, lines] of list) {
+			if (mine !== placesSeq) return out;
+			if (/\.(md|markdown)$/i.test(path)) {
+				const text = await currentTextFor(path);
+				if (!text || mine !== placesSeq) continue;
+				const mdSymbols = outline("markdown", text);
+				for (const line of lines) {
+					const trail: string[] = [];
+					const walk = (nodes: typeof mdSymbols) => {
+						for (const n of nodes) {
+							if (line.line >= n.line && line.line <= n.endLine) {
+								trail.push(n.name);
+								if (n.children?.length) walk(n.children);
+								break;
+							}
+						}
+					};
+					walk(mdSymbols);
+					if (trail.length) out.set(`${path}:${line.line}`, trail.join(" › "));
+				}
+				continue;
+			}
+			if (/\.(csv|tsv)$/i.test(path)) {
+				const text = await currentTextFor(path);
+				if (!text || mine !== placesSeq) continue;
+				for (const line of lines) {
+					const crumb = csvBreadcrumbForLine(text, line.line, line.matches[0]?.column ?? 1);
+					if (crumb) out.set(`${path}:${line.line}`, crumb);
+				}
+				continue;
+			}
+			if (!/\.(ssl|srvscr|ds)$/i.test(path) || sslChecked >= 60) continue;
+			sslChecked++;
+			const model = await session.ensureModel(monaco.Uri.file(path).toString());
+			if (mine !== placesSeq) return out;
+			if (!model || model.getLanguageId() !== "ssl") continue;
+			const symbols = await session.documentSymbols(model).catch(() => []);
+			if (mine !== placesSeq) return out;
+			for (const line of lines) {
+				out.set(
+					`${path}:${line.line}`,
+					symbolPath(symbols, line.line)
+						.filter((s) => s.kind === monaco.languages.SymbolKind.Namespace || s.kind === monaco.languages.SymbolKind.Function || s.kind === monaco.languages.SymbolKind.Method)
+						.map((s) => s.name)
+						.join(" › "),
+				);
+			}
+		}
+		return out;
+	});
+	const place = (line: LineHit) => places()?.get(`${line.path}:${line.line}`) ?? "";
+	const byPlace = (list: LineHit[]) => {
+		const map = new Map<string, LineHit[]>();
+		for (const line of list) map.set(place(line), [...(map.get(place(line)) ?? []), line]);
+		return [...map];
+	};
+	const rel = (path: string) => relativeTo(state.workspace?.root, path);
+	const matchesIn = (list: LineHit[]) => list.reduce((n, line) => n + line.matches.length, 0);
+	/** The switches that narrow a search, by the names on their buttons: what to try without when nothing is found. */
+	const switchesOn = () => [caseSensitive() ? "Aa" : "", wholeWord() ? "ab" : "", regex() ? ".*" : ""].filter(Boolean);
+	const narrowed = () => Boolean(searched().include?.trim() || searched().exclude?.trim());
+
 	const activeTicketScope = createMemo(() => {
 		const root = state.workspace?.root;
 		const allDocs = docs();
@@ -352,7 +929,27 @@ export function Search() {
 			tip: `Search ${key}${extras.length ? ` (${extras.join(", ")})` : ""}, its folder, and all linked specs/plans/decisions`,
 		};
 	});
+
 	const topTags = createMemo(() => workspaceTags(docs()).slice(0, 4));
+	/** Distinct statuses actually present across workspace docs (with sensible fallback if none exist yet). */
+	const workspaceStatuses = createMemo(() => {
+		const counts = new Map<string, { label: string; count: number }>();
+		for (const d of docs()) {
+			if (!d.exists || isCatalog(d) || !d.status?.trim()) continue;
+			const raw = d.status.trim();
+			const norm = normStatus(raw);
+			const existing = counts.get(norm);
+			if (existing) existing.count++;
+			else counts.set(norm, { label: raw, count: 1 });
+		}
+		const list = [...counts.values()]
+			.sort((a, b) => b.count - a.count || a.label.localeCompare(b.label))
+			.slice(0, 8);
+		if (list.length) return list;
+		return ["open", "in progress", "draft", "done"].map((label) => ({ label, count: 0 }));
+	});
+
+	const formatToken = (key: string, val: string) => (/\s/.test(val) ? `${key}:"${val}"` : `${key}:${val}`);
 	const toggleQueryToken = (token: string) => {
 		const cur = input ? input.value : typed();
 		const esc = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -366,13 +963,17 @@ export function Search() {
 		const esc = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 		return new RegExp(`(?:^|\\s)${esc}(?=\\s|$)`, "i").test(typed());
 	};
+	const showDocChips = () =>
+		scopeActive(docsIncludeGlob(), "") ||
+		Boolean(docFilterNote()) ||
+		/\b(?:tag|status|ticket|parent|group|kind|heading|task):/i.test(typed());
+
 	const applyScope = (inc: string, exc = "") => {
 		setInclude(inc);
 		setExclude(exc);
 		setChoosing(Boolean(inc || exc));
 		if (typed().trim()) void run();
 	};
-	const scopeActive = (inc: string, exc = "") => (choosing() ? include().trim() === inc && exclude().trim() === exc : !inc && !exc);
 
 	// --- replacing -------------------------------------------------------------
 
@@ -393,7 +994,7 @@ export function Search() {
 	/** Why "Replace all" cannot be pressed now; "" when it can. */
 	const noReplace = () => {
 		if (status() === "busy") return "The search is still running";
-		if (status() !== "done" || !hits().length) return "Search for something first: what is found is what is replaced";
+		if (status() !== "done" || !visibleHits().length) return "Search for something first: what is found is what is replaced";
 		if (hits().length >= SEARCH_LIMIT) return `There are ${SEARCH_LIMIT} results or more, and only the first are listed: narrow the search before replacing`;
 		return "";
 	};
@@ -404,69 +1005,113 @@ export function Search() {
 		const with_ = replacement();
 		const found = pattern();
 		if (!found) return;
-		const paths = groups().map(([path]) => path);
-		const total = hits().length;
-		const answer = await choose(`Replace ${count(total, "match", "matches")} in ${count(paths.length, "file")} with ${with_ ? `“${with_}”` : "nothing"}? Each file that is written is first kept as it was in its local history.`, ["Replace"]);
+		const activeGroups = groups();
+		const paths = activeGroups.map(([path]) => path);
+		const total = visibleHits().length;
+		const answer = await choose(
+			`Replace ${count(total, "match", "matches")} in ${count(paths.length, "file")} with ${with_ ? `“${with_}”` : "nothing"}? Each file that is written is first kept as it was in its local history.`,
+			["Replace"],
+		);
 		if (answer !== "Replace") return;
 		setStatus("busy");
 		let done = 0;
 		let files = 0;
 		const unsaved: string[] = [];
 		const failed: string[] = [];
-		const onDisk: string[] = [];
+		const onDiskFull: string[] = [];
+		const skipLines = dismissedLines();
+		const restrictByLine = lineFiltered();
 		try {
-			for (const path of paths) {
+			for (const [path, fileLines] of activeGroups) {
 				const at = canonical(path);
-				// A file with a tab is changed in the editor, where undo takes it back: saved straight away when it had
-				// nothing unsaved, and left unsaved when it had. A file that was only read to show where its results are
-				// has no tab and nothing to undo in: it is changed on disk like any file that is not open.
+				const hasPartialLines =
+					restrictByLine ||
+					[...skipLines].some((k) => k.startsWith(`${at}:`));
+				const allowedLines = hasPartialLines ? new Set(fileLines.map((l) => l.line)) : undefined;
+
 				const doc = documents.get(at);
 				const tabbed = state.groups.some((group) => group.tabs.includes(at));
 				if (!doc || doc.binary || (!tabbed && !state.dirty[at])) {
-					onDisk.push(path);
+					if (!allowedLines) {
+						onDiskFull.push(path);
+						continue;
+					}
+					// File on disk with specific dismissed/filtered lines: replace only allowed lines safely.
+					try {
+						const read = await backend.read(path);
+						if (read.binary) continue;
+						await backend.historyKeep(path).catch(() => {});
+						const res = replaceLinesInText(read.text, found, with_, Boolean(options.regex), allowedLines);
+						if (!res.count) continue;
+						await backend.write(path, res.text, true);
+						done += res.count;
+						files++;
+						await fileChangedOnDisk(path);
+					} catch (err: any) {
+						failed.push(`${baseName(path)}: ${err?.message ?? err}`);
+					}
 					continue;
 				}
 				const wasUnsaved = Boolean(state.dirty[at]);
-				// The file as it is on disk goes into its local history before the save that follows writes over it.
 				if (!wasUnsaved) await backend.historyKeep(at).catch(() => {});
-				const changed = replaceInModel(doc.model, found, with_, Boolean(options.regex));
+				const changed = replaceInModel(doc.model, found, with_, Boolean(options.regex), allowedLines);
 				if (!changed) continue;
 				done += changed;
 				files++;
 				if (wasUnsaved) unsaved.push(path);
 				else if (!(await save(at, { format: false }))) failed.push(`${baseName(path)}: it is changed in the editor, and could not be saved`);
 			}
-			for (const result of onDisk.length ? await backend.replace(query, with_, options, onDisk) : []) {
+			for (const result of onDiskFull.length ? await backend.replace(query, with_, options, onDiskFull) : []) {
 				if (result.error) failed.push(`${baseName(result.path)}: ${result.error}`);
 				if (!result.count) continue;
 				done += result.count;
 				files++;
-				// The language server and the tree are told, and a copy that was read without a tab follows the disk.
 				await fileChangedOnDisk(result.path);
 			}
 		} catch (e: any) {
 			failed.push(String(e?.message ?? e));
 		}
 		setState("treeVersion", (v) => v + 1);
-		// What was replaced is what is there now, which is what was listed unless a file changed since the search.
-		const differs = done !== total && !failed.length ? ` ${count(total, "match", "matches")} were listed: a file has changed since the search, or holds unsaved changes.` : "";
+		const differs = done !== total && !failed.length ? ` ${count(total, "match", "matches")} were listed: a file has changed since the search.` : "";
 		const note = `Replaced ${count(done, "match", "matches")} in ${count(files, "file")}.${differs}`;
 		if (unsaved.length) {
-			// The one thing left to do: it stays long enough to do it, and offers it.
-			notify(`${note} ${unsaved.length === 1 ? `${baseName(unsaved[0]!)} had unsaved changes: it is changed in the editor and not saved.` : `${unsaved.length} files had unsaved changes: they are changed in the editor and not saved.`} A search reads what is saved, so it finds the old words there until then.`, "info", { label: "Save all", run: () => void saveAll() });
+			notify(
+				`${note} ${unsaved.length === 1 ? `${baseName(unsaved[0]!)} had unsaved changes: it is changed in the editor and not saved.` : `${unsaved.length} files had unsaved changes: they are changed in the editor and not saved.`}`,
+				"info",
+				{ label: "Save all", run: () => void saveAll() },
+			);
 		} else notify(note);
 		if (failed.length) notify(`Not replaced: ${failed.join("; ")}`, "error");
-		// What is left to find is searched for again: nothing, unless the replacement itself is a match.
 		await run();
 	};
+
 	const summary = () => {
 		if (status() === "busy") return "Searching…";
 		if (status() === "failed") return `The search for “${asked()}” failed: ${failure()}${regex() ? " Check the regular expression, or switch .* off." : ""}`;
-		if (status() === "idle") return "Type what to find and press Enter. Use tag:<name> or status:<val> to narrow Docs. Aa matches case; ab whole words; .* regex.";
+		if (status() === "idle") {
+			return "Type what to find and press Enter. Filters: tag:, status:, ticket:, group:, kind:, heading:, task:open|done, prop:val. Up/Down recalls history.";
+		}
 		const filterTail = docFilterNote() ? ` [${docFilterNote()}]` : "";
-		if (!hits().length) return `Nothing found for “${asked()}”${filterTail}${narrowed() && !docFilterNote() ? " in the files chosen" : ""}. Check the spelling${switchesOn().length ? `, or switch ${switchesOn().join(" and ")} off` : ""}${narrowed() ? ", or look in more files" : ""}.`;
-		return `${hits().length >= SEARCH_LIMIT ? `The first ${SEARCH_LIMIT} results` : count(hits().length, "result")} in ${count(groups().length, "file")} for “${asked()}”${filterTail}${narrowed() && !docFilterNote() ? ", in the files chosen" : ""}`;
+		const dismissedTail = dismissedHitCount() ? ` (${dismissedHitCount()} dismissed)` : "";
+		if (!visibleHits().length) {
+			if (dismissedHitCount()) return `All ${count(hits().length, "result")} for “${asked()}” were dismissed.`;
+			return `Nothing found for “${asked()}”${filterTail}${narrowed() && !docFilterNote() ? " in the files chosen" : ""}. Check the spelling${switchesOn().length ? `, or switch ${switchesOn().join(" and ")} off` : ""}${narrowed() ? ", or look in more files" : ""}.`;
+		}
+		return `${hits().length >= SEARCH_LIMIT ? `The first ${SEARCH_LIMIT} results` : count(visibleHits().length, "result")} in ${count(groups().length, "file")} for “${asked()}”${filterTail}${dismissedTail}${narrowed() && !docFilterNote() ? ", in the files chosen" : ""}`;
 	};
+
+	const dismissBtnStyle = {
+		flex: "none",
+		display: "inline-flex",
+		"align-items": "center",
+		"justify-content": "center",
+		width: "18px",
+		height: "18px",
+		padding: "0",
+		color: "var(--muted)",
+		"border-radius": "var(--radius-sm)",
+	} as const;
+
 	const HitRow = (props: { line: LineHit }) => {
 		const first = () => props.line.matches[0]!;
 		/** The line's parts, each marked match with the column it starts at. */
@@ -509,9 +1154,24 @@ export function Search() {
 						}
 					</For>
 				</span>
+				<button
+					type="button"
+					class="search-dismiss"
+					style={dismissBtnStyle}
+					tabindex={-1}
+					title="Dismiss this result from list and Replace all"
+					aria-label={`Dismiss match on line ${props.line.line}`}
+					onClick={(e) => {
+						e.stopPropagation();
+						dismissLine(props.line.path, props.line.line);
+					}}
+				>
+					<Icon name="close" />
+				</button>
 			</Row>
 		);
 	};
+
 	return (
 		<div class="panel-body" data-panel="search">
 			<div class="panel-title">
@@ -531,12 +1191,36 @@ export function Search() {
 					<input
 						ref={(el) => ((input = el), queueMicrotask(() => el.focus()))}
 						value={typed()}
-						onInput={(e) => setTyped(e.currentTarget.value)}
+						onInput={(e) => {
+							historyIdx = -1;
+							setTyped(e.currentTarget.value);
+						}}
 						id="search-input"
 						data-autofocus=""
 						aria-label="Search the workspace"
 						placeholder="Search the workspace"
-						onKeyDown={(e) => e.key === "ArrowDown" && focusRowsBelow(e.currentTarget) && e.preventDefault()}
+						onKeyDown={(e) => {
+							const el = e.currentTarget;
+							const hist = queryHistory();
+							if (e.key === "ArrowUp" && hist.length && (historyIdx >= 0 || !el.value || (el.selectionStart === 0 && el.selectionEnd === 0))) {
+								e.preventDefault();
+								if (historyIdx < 0) historyDraft = el.value;
+								historyIdx = Math.min(hist.length - 1, historyIdx + 1);
+								const nextVal = hist[historyIdx] ?? "";
+								el.value = nextVal;
+								setTyped(nextVal);
+								return;
+							}
+							if (e.key === "ArrowDown" && historyIdx >= 0) {
+								e.preventDefault();
+								historyIdx--;
+								const nextVal = historyIdx < 0 ? historyDraft : (hist[historyIdx] ?? "");
+								el.value = nextVal;
+								setTyped(nextVal);
+								return;
+							}
+							if (e.key === "ArrowDown" && focusRowsBelow(el)) e.preventDefault();
+						}}
 					/>
 					<IconButton label="Match case" glyph="Aa" pressed={caseSensitive()} onClick={() => flip(setCaseSensitive, caseSensitive())} />
 					<IconButton label="Match whole word" title="Whole word" glyph="ab" pressed={wholeWord()} onClick={() => flip(setWholeWord, wholeWord())} />
@@ -606,11 +1290,11 @@ export function Search() {
 						)}
 					</Show>
 				</div>
-				<Show when={scopeActive(docsIncludeGlob(), "")}>
+				<Show when={showDocChips()}>
 					<div class="search-doc-tokens" role="group" aria-label="Document metadata filter chips">
 						<For each={topTags()}>
 							{(bucket) => {
-								const tok = `tag:${bucket.tag}`;
+								const tok = formatToken("tag", bucket.tag);
 								return (
 									<button
 										type="button"
@@ -623,21 +1307,29 @@ export function Search() {
 								);
 							}}
 						</For>
-						<For each={["open", "in-progress", "draft", "done"]}>
+						<For each={workspaceStatuses()}>
 							{(st) => {
-								const tok = `status:${st}`;
+								const tok = formatToken("status", st.label);
 								return (
 									<button
 										type="button"
 										classList={{ on: hasQueryToken(tok) }}
-										title={`Filter Docs by status:${st}`}
+										title={`Filter Docs by ${tok}${st.count ? ` (${st.count})` : ""}`}
 										onClick={() => toggleQueryToken(tok)}
 									>
-										{tok}
+										status:{st.label}
 									</button>
 								);
 							}}
 						</For>
+						<button
+							type="button"
+							classList={{ on: hasQueryToken("task:open") }}
+							title="Match unchecked checklist tasks (- [ ])"
+							onClick={() => toggleQueryToken("task:open")}
+						>
+							task:open
+						</button>
 					</div>
 				</Show>
 			</form>
@@ -657,6 +1349,20 @@ export function Search() {
 									<span class="meta" title={count(matchesIn(list), "match", "matches") + " in this file"}>
 										{matchesIn(list)}
 									</span>
+									<button
+										type="button"
+										class="search-dismiss"
+										style={dismissBtnStyle}
+										tabindex={-1}
+										title={`Dismiss ${rel(path)} from results and Replace all`}
+										aria-label={`Dismiss ${rel(path)} from results`}
+										onClick={(e) => {
+											e.stopPropagation();
+											dismissFile(path);
+										}}
+									>
+										<Icon name="close" />
+									</button>
 								</>
 							}
 						>

@@ -4,16 +4,19 @@ import { DEFAULT_CODE_FONT, resolveFontStack } from "../../shared/fonts";
 import { canFormatNonSsl, SQL_DIALECTS, sqlDialectInfo } from "../../shared/format";
 import { createMiddleCloseTracker } from "../../shared/middleClickGuard";
 import { continueLists } from "./markdownKeys";
-import { liveEditorAt } from "./liveBridge";
+import { emitSplitScrollSync, liveEditorAt, saveMarkdownSyncAnchor, takeMarkdownSyncAnchor } from "./liveBridge";
 import { MarkdownLiveEditor } from "./MarkdownLiveEditor";
 import { Icon } from "../Icon";
 import { tabShown } from "../recentTabs";
 import { createEffect, createMemo, createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { monaco } from "./monaco";
-import { activePath, closeAllTabs, closeOtherTabs, closeTab, closeTabsToRight, displayName, documents, focusRequest, isUntitled, keepTab, markdownMode, moveTab, newUntitled, notify, openFile, openToSide, planMode, revealSignal, revert, save, saveAll, saveSetting, setMarkdownMode, setPlanMode, setState, setTableTextMode, split, state, tabLeaving, tableTextMode, takeReveal, togglePin, openedForALook } from "../state";
+import { activePath, canonical, closeAllTabs, closeOtherTabs, closeTab, closeTabsToRight, displayName, documents, focusRequest, isUntitled, keepTab, markdownMode, moveTab, newUntitled, notify, openFile, openToSide, planMode, revealSignal, revert, save, saveAll, saveSetting, setMarkdownMode, setPlanMode, setState, setTableTextMode, split, state, tabLeaving, tableTextMode, takeReveal, togglePin, openedForALook } from "../state";
+import { docAuditData } from "../docAudit";
+import { showPanel } from "../panels/registry";
 import { landsBefore } from "../../shared/tabOrder";
 import { othersOf, rightOf } from "../../shared/tabOrder";
-import { chooseFromMenu } from "../panels/RowMenu";
+import { submenuOrInline } from "../../shared/contextMenu";
+import { chooseFromMenu, type RowMenuEntry } from "../panels/RowMenu";
 import type { Point } from "../panels/Rows";
 import { symbols } from "../panels/Objects";
 import { flatRegions, regionColor, symbolPath } from "./regions";
@@ -25,7 +28,7 @@ import { tabLabels } from "./tabs";
 import { Menu, type MenuItem } from "../Menu";
 import { backend } from "../backend";
 import { docs, isMarkdown, isTable } from "../project";
-import { registryTitle } from "../../shared/projectDocs";
+import { isCatalog, registryTitle, toneOf } from "../../shared/projectDocs";
 import { docsGoverningFile, ticketForFile } from "../../shared/workContext";
 import { TableView } from "./TableView";
 import { FileView } from "./FileView";
@@ -82,11 +85,12 @@ export function EditorGroup(props: { index: number }) {
 	const sqlDialect = () => sqlDialectInfo(state.settings.sqlDialect);
 	const pickSqlDialect = async (e: MouseEvent) => {
 		const box = (e.currentTarget as HTMLElement).getBoundingClientRect();
-		const labels = SQL_DIALECTS.map((d) => d.label);
-		const picked = await chooseFromMenu("SQL formatting dialect", labels, { x: box.left, y: box.bottom + 4 });
+		const activeId = sqlDialect().id;
+		const items: RowMenuEntry[] = SQL_DIALECTS.map((d) => ({ label: d.label, value: d.label, checked: d.id === activeId }));
+		const picked = await chooseFromMenu("SQL formatting dialect", items, { x: box.left, y: box.bottom + 4 });
 		if (!picked) return;
 		const found = SQL_DIALECTS.find((d) => d.label === picked);
-		if (!found || found.id === sqlDialect().id) return;
+		if (!found || found.id === activeId) return;
 		await saveSetting({ sqlDialect: found.id });
 		notify(`SQL formatting dialect set to ${found.label}.`);
 	};
@@ -166,19 +170,42 @@ export function EditorGroup(props: { index: number }) {
 		return rel === "." ? "" : rel;
 	};
 	const folioCrumbs = () => (group().active && group().active === activePath() && symbols().length ? symbolPath(symbols(), state.cursor.line) : []);
-	const folioAlert = (): { kind: "near" | "over"; text: string } | null => {
-		const path = group().active;
-		if (!path) return null;
-		if (state.conflicts[path]) return { kind: "over", text: "Changed on disk" };
-		if (path !== activePath() || !isSsl()) return null;
-		const s = scriptSize();
-		if (!s) return null;
-		const limits = state.settings.limits;
-		const levels = [level(s.bytes, limits.bytes), level(s.codeLines, limits.codeLines), level(s.historyEntries, limits.historyEntries, 1)];
-		if (levels.includes("over")) return { kind: "over", text: "Over size limit" };
-		if (levels.includes("near")) return { kind: "near", text: "Near size limit" };
-		return null;
-	};
+	/** Last known visible top line while Monaco was shown (used for Source -> Live/Read scroll handoff). */
+	let lastSourceTopLine = 1;
+	let lastSavedSourceAnchorAt = 0;
+
+	function saveSourceAnchor(path: string) {
+		if (!editor || shown !== path) return;
+		const pos = editor.getPosition();
+		const visible = editor.getVisibleRanges();
+		const topLine = visible[0]?.startLineNumber ?? lastSourceTopLine ?? pos?.lineNumber ?? 1;
+		lastSavedSourceAnchorAt = Date.now();
+		saveMarkdownSyncAnchor(props.index, path, {
+			line: pos?.lineNumber ?? 1,
+			column: pos?.column ?? 1,
+			topLine,
+		});
+	}
+
+	function applySourceAnchor(path: string): boolean {
+		if (!editor || shown !== path || showLive() || showRendered()) return false;
+		const anchor = takeMarkdownSyncAnchor(props.index, path);
+		if (!anchor) return false;
+		const model = editor.getModel();
+		if (!model) return false;
+		const line = Math.max(1, Math.min(anchor.line, model.getLineCount()));
+		const column = Math.max(1, Math.min(anchor.column, model.getLineMaxColumn(line)));
+		editor.layout();
+		editor.setPosition({ lineNumber: line, column });
+		if (anchor.topLine && anchor.topLine >= 1) {
+			const top = Math.min(anchor.topLine, model.getLineCount());
+			lastSourceTopLine = top;
+			editor.revealLineNearTop(top, monaco.editor.ScrollType.Immediate);
+		} else {
+			editor.revealLineInCenterIfOutsideViewport(line, monaco.editor.ScrollType.Immediate);
+		}
+		return true;
+	}
 
 	onMount(() => {
 		editor = monaco.editor.create(host, {
@@ -210,22 +237,26 @@ export function EditorGroup(props: { index: number }) {
 			editors[at] = editor;
 			onCleanup(() => editors[at] === editor && delete editors[at]);
 		});
-		// The app's own commands for the code at hand, on the editor's right-click menu beside the editor's own.
-		for (const [order, [id, label]] of (
-			[
-				["agent-ask", "Ask the Agent About This…"],
-				["open-schema-at-cursor", "Open Schema Doc for Table at Cursor"],
-				["find-in-docs", "Find References in Docs"],
-				["copy-code-citation", "Copy Markdown Code Citation"],
-				["copy-code-citation-excerpt", "Copy Markdown Code Citation + Excerpt"],
-				["add-selection-to-registry", "Add Selection to Registry…"],
-				["new-question", "New Question About This Code…"],
-				["new-decision", "New Decision About This Code…"],
-				["copy-designer", "Copy for Designer"],
-				["wrap-region", "Wrap in Region…"],
-			] as const
-		).entries()) {
-			editor.addAction({ id: `app.${id}`, label, contextMenuGroupId: "9_app", contextMenuOrder: order, run: () => void import("../commands").then((all) => all.runCommand(id)) });
+		// The app's own commands for the code at hand, sectioned cleanly on the editor's right-click menu.
+		for (const [groupId, order, id, label] of [
+			["9_app_1_nav", 1, "open-schema-at-cursor", "Open Schema Doc for Table at Cursor"],
+			["9_app_1_nav", 2, "find-in-docs", "Find References in Docs"],
+			["9_app_2_docs", 1, "copy-code-citation", "Copy Markdown Code Citation"],
+			["9_app_2_docs", 2, "copy-code-citation-excerpt", "Copy Markdown Code Citation + Excerpt"],
+			["9_app_2_docs", 3, "add-selection-to-registry", "Add Selection to Registry…"],
+			["9_app_2_docs", 4, "new-decision", "New Decision About This Code…"],
+			["9_app_2_docs", 5, "new-question", "New Question About This Code…"],
+			["9_app_3_tools", 1, "agent-ask", "Ask the Agent About This…"],
+			["9_app_3_tools", 2, "wrap-region", "Wrap in Region…"],
+			["9_app_3_tools", 3, "copy-designer", "Copy for Designer"],
+		] as const) {
+			editor.addAction({
+				id: `app.${id}`,
+				label,
+				contextMenuGroupId: groupId,
+				contextMenuOrder: order,
+				run: () => void import("../commands").then((all) => all.runCommand(id)),
+			});
 		}
 		useGitMarks(editor, () => group().active);
 		// The editor keeps Ctrl+F12 for "Go to definition" to where it is told it is in a web view, where F12 alone
@@ -243,11 +274,22 @@ export function EditorGroup(props: { index: number }) {
 			if (!e.scrollTopChanged) return;
 			if (e.scrollTop > 22 && !scrolled()) setScrolled(true);
 			else if (e.scrollTop < 6 && scrolled()) setScrolled(false);
+			if (shown && !showLive() && !showRendered() && !showBlocks() && !showChart() && !showTable() && !showFile()) {
+				const visible = editor.getVisibleRanges();
+				const topLine = visible[0]?.startLineNumber ?? 1;
+				lastSourceTopLine = topLine;
+				if (isMarkdown(shown)) {
+					const maxScroll = Math.max(1, e.scrollHeight - editor.getLayoutInfo().height);
+					const ratio = Math.max(0, Math.min(1, e.scrollTop / maxScroll));
+					emitSplitScrollSync(props.index, shown, topLine, ratio);
+				}
+			}
 		});
 		editor.onDidChangeModelContent(() => setLineCount(editor.getModel()?.getLineCount() ?? 0));
 		editor.onDidChangeModel(() => {
 			setLineCount(editor.getModel()?.getLineCount() ?? 0);
 			setScrolled(editor.getScrollTop() > 22);
+			lastSourceTopLine = editor.getVisibleRanges()[0]?.startLineNumber ?? 1;
 			// A file taken up with the cursor where the editor already had it moves no cursor: without this the status bar
 			// would go on saying the last file's line.
 			const at = editor.getPosition();
@@ -261,7 +303,7 @@ export function EditorGroup(props: { index: number }) {
 			if (shown && e.source !== "model" && e.source !== "restoreState") noteCursor({ path: shown, line: e.position.lineNumber, column: e.position.column });
 		});
 		const stop = revealSignal.listen((path) => {
-			if (path === group().active && shown === path && !showLive() && !showRendered()) reveal(path);
+			if (path === group().active && shown === path && !showLive() && !showRendered() && !showTable()) reveal(path);
 		});
 		// "Focus editor": the text editor, or whichever view of the file is showing in its place.
 		const stopFocus = focusRequest.listen((target) => {
@@ -314,6 +356,8 @@ export function EditorGroup(props: { index: number }) {
 	createEffect(() => {
 		const path = group().active;
 		const inLive = showLive();
+		const inRead = showRendered();
+		const inTable = showTable();
 		const activeCodeFont = state.settings.codeFont?.trim() ? resolveFontStack(state.settings.codeFont, DEFAULT_CODE_FONT) : codeFont || undefined;
 		const options: monaco.editor.IEditorOptions & monaco.editor.IGlobalEditorOptions = {
 			fontSize: state.settings.fontSize,
@@ -346,8 +390,34 @@ export function EditorGroup(props: { index: number }) {
 		if (doc) {
 			const view = viewStates.get(`${props.index}:${path}`) ?? lastViews.get(path!);
 			if (view) editor.restoreViewState(view);
-			if (!inLive) reveal(path!);
-			if (state.activeGroup === props.index && !openedForALook(path!) && !inLive && !showRendered()) editor.focus();
+			if (!inLive && !inRead && !inTable) reveal(path!);
+			if (state.activeGroup === props.index && !openedForALook(path!) && !inLive && !inRead && !inTable) editor.focus();
+		}
+	});
+
+	// Bidirectional Live/Read <-> Source cursor & scroll sync (works even when `path === shown`).
+	let prevMdPath: string | null = null;
+	let prevMdInCm = false;
+	createEffect(() => {
+		const path = group().active;
+		const inCm = showLive() || showRendered();
+		const wasInCm = prevMdInCm;
+		const wasPath = prevMdPath;
+		prevMdPath = path;
+		prevMdInCm = inCm;
+		if (!path || !isMarkdown(path)) return;
+		if (inCm && !wasInCm && wasPath === path) {
+			if (Date.now() - lastSavedSourceAnchorAt > 100) saveSourceAnchor(path);
+			return;
+		}
+		if (!inCm && (wasInCm || wasPath !== path)) {
+			if (!applySourceAnchor(path)) {
+				queueMicrotask(() => {
+					if (!applySourceAnchor(path)) {
+						requestAnimationFrame(() => void applySourceAnchor(path));
+					}
+				});
+			}
 		}
 	});
 
@@ -419,21 +489,28 @@ export function EditorGroup(props: { index: number }) {
 		const SIDE_READ = isMarkdown(path) ? "Open Read preview to the side" : "";
 		const untitled = isUntitled(path);
 		const inFolder = !untitled && Boolean(state.workspace && isInside(state.workspace.root, path));
-		// Only what would do something: a tab with nothing to its right has no "close to the right".
-		const items = [
-			// A tab opened for a look: the way to keep it that needs no pointer.
-			...(g.preview === path ? [KEEP] : []),
-			...(pinned() ? [] : [CLOSE]),
+		const bulkClose: RowMenuEntry[] = [
 			...(othersOf(g.tabs, g.pinned ?? [], path).length ? [OTHERS] : []),
 			...(rightOf(g.tabs, g.pinned ?? [], path).length ? [RIGHT] : []),
 			ALL,
-			PIN,
+		];
+		const pathEntries: RowMenuEntry[] = [
 			...(untitled ? [] : [PATH]),
 			...(inFolder ? [RELATIVE] : []),
 			NAME,
-			...(inFolder ? [SHOW] : []),
+		];
+		// Sectioned tab menu: close actions, tab state & layout, then path & reveal.
+		const items: RowMenuEntry[] = [
+			...(pinned() ? [] : [{ label: CLOSE, value: CLOSE, keys: "Ctrl+W" }]),
+			...submenuOrInline("Close tabs", bulkClose),
+			"separator",
+			...(g.preview === path ? [KEEP] : []),
+			PIN,
 			SIDE,
 			...(SIDE_READ ? [SIDE_READ] : []),
+			"separator",
+			...submenuOrInline("Copy path", pathEntries),
+			...(inFolder ? [SHOW] : []),
 		];
 		const picked = await chooseFromMenu(`Actions for the tab ${base(path)}`, items, at);
 		if (picked === CLOSE) await closeTab(path, props.index);
@@ -540,11 +617,13 @@ export function EditorGroup(props: { index: number }) {
 		},
 		({ path }) => backend.linksTo(path).catch(() => []),
 	);
-	const governingDocs = createMemo(() => {
+	const governingRaw = createMemo(() => {
 		const p = group().active;
 		if (!isGovernableFile() || !p) return [];
-		const list = docsGoverningFile(docs(), p, state.workspace?.root, governingLinks() ?? []);
-		return list.map(({ file: d, reason, line }) => {
+		return docsGoverningFile(docs(), p, state.workspace?.root, governingLinks() ?? []);
+	});
+	const governingDocs = createMemo(() =>
+		governingRaw().map(({ file: d, reason, line }) => {
 			const label =
 				d.group === "registries"
 					? registryTitle(d.name)
@@ -553,8 +632,77 @@ export function EditorGroup(props: { index: number }) {
 						: d.title || d.heading || d.name;
 			const kind = d.group === "knowledge" && d.kind ? d.kind : d.group;
 			return { path: d.path, line, label, kind, reason };
-		});
-	});
+		}),
+	);
+	const folioAlert = (): { kind: "near" | "over"; text: string; icon?: "warning" | "question"; title?: string; onClick?: () => void } | null => {
+		const path = group().active;
+		if (!path) return null;
+		if (state.conflicts[path]) return { kind: "over", text: "Changed on disk" };
+		if (path === activePath() && isSsl()) {
+			const s = scriptSize();
+			if (s) {
+				const limits = state.settings.limits;
+				const levels = [level(s.bytes, limits.bytes), level(s.codeLines, limits.codeLines), level(s.historyEntries, limits.historyEntries, 1)];
+				if (levels.includes("over")) return { kind: "over", icon: "warning", text: "Over size limit", title: "Open Health panel to inspect script size limits", onClick: () => showPanel("health") };
+				if (levels.includes("near")) return { kind: "near", icon: "warning", text: "Near size limit", title: "Open Health panel to inspect script size limits", onClick: () => showPanel("health") };
+			}
+		}
+		// Doc-health alert: drifted #L code citations pointing to/from this file.
+		const canonPath = canonical(path);
+		const drifted = (docAuditData().citationIssues ?? []).filter(
+			(c) => canonical(c.targetPath) === canonPath || canonical(c.docPath) === canonPath,
+		);
+		if (drifted.length) {
+			const severe = drifted.some((c) => c.level === "warn" || c.kind === "out-of-range");
+			return {
+				kind: severe ? "over" : "near",
+				icon: "warning",
+				text: drifted.length === 1 ? "1 drifted citation" : `${drifted.length} drifted citations`,
+				title: "Drifted #L citations involve this file — click to open Health",
+				onClick: () => showPanel("health"),
+			};
+		}
+		// Doc-health alert: open Questions governing this file.
+		let openQuestions = governingRaw()
+			.map((g) => g.file)
+			.filter((d) => d.group === "knowledge" && d.kind === "questions" && toneOf(d.status) === "waiting");
+		if (!openQuestions.length && isMarkdown(path)) {
+			const allDocs = docs();
+			const here = allDocs.find((d) => d.exists && canonical(d.path) === canonPath);
+			const ticketKeys = new Set<string>(
+				[
+					...(here?.group === "tickets" && here.ticket ? [here.ticket] : []),
+					...(here?.group !== "registries" ? (here?.tickets ?? []) : []),
+				].map((k) => k.toLowerCase()),
+			);
+			if (ticketKeys.size) {
+				openQuestions = allDocs.filter(
+					(d) =>
+						d.exists &&
+						!isCatalog(d) &&
+						d.group === "knowledge" &&
+						d.kind === "questions" &&
+						toneOf(d.status) === "waiting" &&
+						canonical(d.path) !== canonPath &&
+						Boolean(d.tickets?.some((t) => ticketKeys.has(t.toLowerCase()))),
+				);
+			}
+		}
+		if (openQuestions.length) {
+			const first = openQuestions[0]!;
+			return {
+				kind: "near",
+				icon: "question",
+				text: openQuestions.length === 1 ? "1 open question" : `${openQuestions.length} open questions`,
+				title:
+					openQuestions.length === 1
+						? `Open question: ${first.title || first.name} — click to open`
+						: `${openQuestions.length} open questions governing this file — click to open Health`,
+				onClick: () => (openQuestions.length === 1 ? void openFile(first.path) : showPanel("health")),
+			};
+		}
+		return null;
+	};
 	const governingMenu = (): MenuItem[] => {
 		const list = governingDocs();
 		const items: MenuItem[] = list.map((g) => ({
@@ -808,7 +956,9 @@ export function EditorGroup(props: { index: number }) {
 							aria-pressed={mdViewMode() === "live"}
 							title="Live Preview while editing (Ctrl+E toggles Live and Read)"
 							onClick={() => {
-								setMarkdownMode(group().active!, "live", props.index);
+								const p = group().active!;
+								if (mdViewMode() === "source") saveSourceAnchor(p);
+								setMarkdownMode(p, "live", props.index);
 								queueMicrotask(() => focusRequest.fire("editor"));
 							}}
 						>
@@ -818,7 +968,11 @@ export function EditorGroup(props: { index: number }) {
 							classList={{ on: mdViewMode() === "read" }}
 							aria-pressed={mdViewMode() === "read"}
 							title="Finished reading view (Ctrl+E toggles Live and Read)"
-							onClick={() => setMarkdownMode(group().active!, "read", props.index)}
+							onClick={() => {
+								const p = group().active!;
+								if (mdViewMode() === "source") saveSourceAnchor(p);
+								setMarkdownMode(p, "read", props.index);
+							}}
 						>
 							Read
 						</button>
@@ -856,7 +1010,25 @@ export function EditorGroup(props: { index: number }) {
 							</div>
 							<div class="folio-actions">
 								<Show when={folioAlert()}>
-									{(alert) => <span class={`folio-alert ${alert().kind}`}>{alert().text}</span>}
+									{(alert) => (
+										<Show
+											when={alert().onClick}
+											fallback={<span class={`folio-alert ${alert().kind}`} title={alert().title}>{alert().text}</span>}
+										>
+											<button
+												type="button"
+												class={`folio-alert ${alert().kind}`}
+												title={alert().title}
+												onClick={() => alert().onClick?.()}
+												style={{ border: 0, cursor: "pointer", display: "inline-flex", "align-items": "center", gap: "4px" }}
+											>
+												<Show when={alert().icon}>
+													{(icon) => <Icon name={icon()} />}
+												</Show>
+												<span>{alert().text}</span>
+											</button>
+										</Show>
+									)}
 								</Show>
 								<Show when={isGovernableFile()}>
 									<Menu
@@ -949,7 +1121,7 @@ export function EditorGroup(props: { index: number }) {
 					{(path) => <FileView path={path} />}
 				</Show>
 				<Show when={showTable() && group().active} keyed>
-					{(path) => <TableView path={path} />}
+					{(path) => <TableView path={path} group={props.index} />}
 				</Show>
 				<div class="editor-row" classList={{ hidden: showBlocks() || showChart() || showRendered() || showLive() || showTable() || showFile() }}>
 					{/* An overview of the whole file, top to bottom, to the left of the line numbers: not marks on the lines in view. */}

@@ -115,6 +115,27 @@ export type DocFile = {
 	schemaObjects?: string[];
 	/** Tags declared in YAML `tags:` or inline `#tag` prose (without leading `#`). */
 	tags?: string[];
+	/** Optional release/sprint/milestone & priority metadata (tickets/specs). */
+	release?: string;
+	priority?: string;
+	/** Controlled-document approval & governance metadata (ISO-17025 / GxP). */
+	version?: string;
+	owner?: string;
+	reviewer?: string;
+	approvedBy?: string;
+	approvedDate?: string;
+	changeControl?: string;
+	gxpImpact?: string;
+	/** Last-modified timestamp on disk (ms epoch) for staleness hygiene. */
+	mtime?: number;
+	/** Indexed Markdown headings for fast cross-workspace `#heading` jump. */
+	headings?: { level: number; text: string; slug: string; line: number }[];
+	/** Linked test scripts (e.g. `plan.built.tests` or matched `tests/*.ssl`). */
+	testScripts?: string[];
+	/** Business test cases extracted from a `.plan.json` (`plan.tests`). */
+	planTests?: { name: string; given?: string; expect?: string }[];
+	/** Workspace-relative doc paths linked by a `.plan.json` (`node.docs` + `targets`). */
+	nodeDocs?: string[];
 	/** Source file path declared in YAML `source:` (e.g. schema docs pointing to their DDL `.sql`). */
 	source?: string;
 	/** Set when `source:` points to a file inside the workspace that does not exist on disk. */
@@ -257,10 +278,26 @@ export type WorkspaceDocIssue = {
 	path: string;
 	line: number;
 	column?: number;
-	kind: "anchor" | "table" | "yaml" | "citation";
+	kind: "anchor" | "table" | "yaml" | "citation" | "duplicate-heading" | "schema-drift" | "orphan" | "stale";
 	level: "warn" | "note";
 	message: string;
 	href?: string;
+};
+
+export type SchemaDriftItem = {
+	schemaPath: string;
+	sqlPath: string;
+	table: string;
+	added: string[];
+	modified: string[];
+	dropped: string[];
+};
+
+export type UndocumentedSchemaRef = {
+	path: string;
+	line: number;
+	object: string;
+	kind: "table" | "column";
 };
 
 export type AuditCitationIssue = {
@@ -279,6 +316,9 @@ export type DocAuditResult = {
 	openTasks: OpenTaskItem[];
 	issues: WorkspaceDocIssue[];
 	citationIssues?: AuditCitationIssue[];
+	schemaDrift?: SchemaDriftItem[];
+	undocumentedRefs?: UndocumentedSchemaRef[];
+	truncatedFolders?: { folder: string; limit: number }[];
 };
 
 export type SettingsScope = "user" | "workspace";
@@ -318,6 +358,16 @@ export interface BackendApi {
 	gitTicketLog(ticketKey: string, limit?: number): Promise<TicketGitCommit[]>;
 	/** A file's text at a specific Git commit SHA (using its path in that commit when renamed). Null when binary or absent. */
 	gitShow(path: string, sha: string, repoPath?: string): Promise<string | null>;
+	/** Local unified diff (staged or working tree), optionally filtered to specific workspace paths and byte-capped (ADR 0022). */
+	gitDiff(options?: { staged?: boolean; paths?: string[]; maxBytes?: number }): Promise<string>;
+	/** Local Git tags sorted newest first (ADR 0022). */
+	gitTags(): Promise<{ name: string; sha: string; time: number }[]>;
+	/** Short/full HEAD commit SHA for audit manifests (null outside git or unborn HEAD). */
+	gitHeadSha(): Promise<string | null>;
+	/** Local Git commits in `from..to` range with changed file statuses (ADR 0022). */
+	gitRangeLog(from: string, to?: string, limit?: number): Promise<TicketGitCommit[]>;
+	/** Before (`sha~1`) and after (`sha`) file text for a single Git commit diff. */
+	gitCommitFile(path: string, sha: string, repoPath?: string): Promise<{ before: string | null; after: string | null }>;
 	/** Puts files into the next commit as they are now; takes them out of it again. */
 	gitStage(paths: string[]): Promise<void>;
 	gitUnstage(paths: string[]): Promise<void>;
@@ -363,8 +413,20 @@ export interface BackendApi {
 	openExternal(path: string): Promise<void>;
 	/** Reveals/highlights a workspace file in the operating system's file manager (validated inside workspace root). */
 	revealInFileManager(path: string): Promise<void>;
-	/** Writes a minimal OpenXML `.docx` document rendered from Markdown inside the workspace (validated inside root). */
-	exportDocx(request: { path: string; title: string; subtitle?: string; markdown: string }): Promise<{ path: string; bytes: number }>;
+	/** Writes an OpenXML `.docx` document rendered from Markdown inside the workspace (embedding images, Mermaid PNGs, hyperlinks, footnotes & metadata). */
+	exportDocx(request: {
+		path: string;
+		title: string;
+		subtitle?: string;
+		markdown: string;
+		baseDir?: string;
+		meta?: Record<string, string>;
+		mermaidPngs?: Record<string, string>;
+	}): Promise<{ path: string; bytes: number }>;
+	/** Imports a `.docx`, `.html`, or `.md` document into the workspace as Markdown (extracting embedded images). */
+	importDocFile(request: { sourcePath?: string; destDir: string; attachmentsDir?: string }): Promise<{ path: string; images: string[]; kind: "docx" | "html" | "md" } | null>;
+	/** Converts uploaded/dropped `.docx` base64 bytes into Markdown + extracted images inside the workspace. */
+	importDocxBytes(request: { fileName: string; base64: string; destDir: string; attachmentsDir?: string }): Promise<{ path: string; images: string[] }>;
 	/** Every file of the project with its size and a checksum, for the file manifest. */
 	manifest(): Promise<ManifestFile[]>;
 	/**

@@ -3,6 +3,12 @@
 // each cell's place in the text, so that a table drawn from it can change a
 // cell by changing that part of the text and nothing else (ADR 0002).
 
+export type CsvDelimiter = "," | "\t" | ";" | "|";
+export type ParseCsvOptions = {
+	delimiter?: CsvDelimiter;
+	hasHeader?: boolean;
+};
+
 export type Cell = {
 	text: string;
 	/** Where the cell is in the source, quotes and all: from `start` up to `end`. */
@@ -10,28 +16,34 @@ export type Cell = {
 	end: number;
 };
 export type Table = {
-	delimiter: "," | "\t" | ";";
-	/** The column names: the first row's cells. */
+	delimiter: CsvDelimiter;
+	/** The column names: the first row's cells (or synthesized `Column 1`, `Column 2`, ... when `hasHeader` is false). */
 	header: Cell[];
 	rows: Cell[][];
 	/** What is wrong with it as a table, in words; empty when nothing is. */
 	problems: string[];
+	/** Set to `false` when parsed with `{ hasHeader: false }` so callers know `header` is synthetic. */
+	hasHeader?: boolean;
 };
+export type CsvTable = Table;
 
 /** Reads the rows, a quoted cell holding the delimiter, a line end or a doubled quote as itself. Blank lines are passed over. */
-export function parseCsv(text: string): Table {
+export function parseCsv(text: string, options?: ParseCsvOptions): Table {
 	// Skip UTF-8 BOM without shifting offsets into `text` so cell edits land on exact byte/char ranges.
 	const bomOffset = text.startsWith("\uFEFF") ? 1 : 0;
 	const firstEnd = text.search(/\r?\n|$/);
 	const firstLine = text.slice(bomOffset, firstEnd < 0 ? text.length : firstEnd);
 	// Strip quoted sections on line 1 before detecting delimiter so `"Last, First"\tStatus` is recognized as TSV.
 	const unquotedFirst = firstLine.replace(/"(?:""|[^"])*"/g, "");
-	const delimiter: Table["delimiter"] =
-		unquotedFirst.includes("\t") && !unquotedFirst.includes(",")
+	const delimiter: CsvDelimiter =
+		options?.delimiter ??
+		(unquotedFirst.includes("\t") && !unquotedFirst.includes(",")
 			? "\t"
 			: unquotedFirst.includes(";") && !unquotedFirst.includes(",") && !unquotedFirst.includes("\t")
 				? ";"
-				: ",";
+				: unquotedFirst.includes("|") && !unquotedFirst.includes(",") && !unquotedFirst.includes("\t") && !unquotedFirst.includes(";")
+					? "|"
+					: ",");
 	const all: Cell[][] = [];
 	let row: Cell[] = [];
 	let i = bomOffset;
@@ -81,17 +93,30 @@ export function parseCsv(text: string): Table {
 		i++;
 		endRow();
 	}
-	const [header = [], ...rows] = all;
+	const hasHeader = options?.hasHeader !== false;
+	let header: Cell[];
+	let rows: Cell[][];
+	if (hasHeader) {
+		const [first = [], ...rest] = all;
+		header = first;
+		rows = rest;
+	} else {
+		const colCount = all.reduce((max, r) => Math.max(max, r.length), 0);
+		header = Array.from({ length: colCount }, (_, idx) => ({ text: `Column ${idx + 1}`, start: 0, end: 0 }));
+		rows = all;
+	}
 	const problems: string[] = [];
 	const names = header.map((c) => c.text.trim());
-	if (!names.length) problems.push("It has no first row to name its columns.");
-	const blank = names.filter((name) => !name).length;
-	if (blank) problems.push(`${blank} ${blank === 1 ? "column has" : "columns have"} no name.`);
-	const twice = [...new Set(names.filter((name, at) => name && names.findIndex((other) => other.toLowerCase() === name.toLowerCase()) !== at))];
-	if (twice.length) problems.push(`More than one column is named ${twice.join(", ")}.`);
+	if (hasHeader) {
+		if (!names.length) problems.push("It has no first row to name its columns.");
+		const blank = names.filter((name) => !name).length;
+		if (blank) problems.push(`${blank} ${blank === 1 ? "column has" : "columns have"} no name.`);
+		const twice = [...new Set(names.filter((name, at) => name && names.findIndex((other) => other.toLowerCase() === name.toLowerCase()) !== at))];
+		if (twice.length) problems.push(`More than one column is named ${twice.join(", ")}.`);
+	}
 	const ragged = rows.filter((cells) => cells.length !== header.length).length;
 	if (ragged) problems.push(`${ragged} ${ragged === 1 ? "row has" : "rows have"} more or fewer cells than there are columns.`);
-	return { delimiter, header, rows, problems };
+	return hasHeader ? { delimiter, header, rows, problems } : { delimiter, header, rows, problems, hasHeader: false };
 }
 
 /** A value as it is written in a cell: quoted when it holds the delimiter, a quote, a line end, or space at either end. */
@@ -205,7 +230,7 @@ export function reorderCsvColumns(text: string, table: Table, newOrder: readonly
 	}
 	if (newOrder.every((col, idx) => col === idx)) return null;
 
-	const allRows: Cell[][] = [table.header, ...table.rows];
+	const allRows: Cell[][] = table.hasHeader === false ? table.rows : [table.header, ...table.rows];
 	let out = "";
 	let cursor = 0;
 	for (const cells of allRows) {
@@ -238,7 +263,8 @@ export function addCsvColumn(text: string, table: Table, name: string, defaultVa
 	const trimmed = name.trim();
 	if (!trimmed || !table.header.length) return null;
 	const count = table.header.length;
-	const allRows: Cell[][] = [table.header, ...table.rows];
+	const headerless = table.hasHeader === false;
+	const allRows: Cell[][] = headerless ? table.rows : [table.header, ...table.rows];
 	let out = "";
 	let cursor = 0;
 	for (let r = 0; r < allRows.length; r++) {
@@ -246,8 +272,9 @@ export function addCsvColumn(text: string, table: Table, name: string, defaultVa
 		if (!cells.length) continue;
 		const rowEnd = cells[cells.length - 1]!.end;
 		out += text.slice(cursor, rowEnd);
-		const padCount = r === 0 ? 0 : Math.max(0, count - cells.length);
-		const val = r === 0 ? csvCell(trimmed, table.delimiter) : csvCell(defaultValue, table.delimiter);
+		const isHeaderRow = !headerless && r === 0;
+		const padCount = isHeaderRow ? 0 : Math.max(0, count - cells.length);
+		const val = isHeaderRow ? csvCell(trimmed, table.delimiter) : csvCell(defaultValue, table.delimiter);
 		out += table.delimiter.repeat(padCount + 1) + val;
 		cursor = rowEnd;
 	}
@@ -257,6 +284,7 @@ export function addCsvColumn(text: string, table: Table, name: string, defaultVa
 
 /** Renames a single column header cell in `text`, touching nothing else (ADR 0002). */
 export function renameCsvColumn(text: string, table: Table, colIdx: number, newName: string): string | null {
+	if (table.hasHeader === false) return null;
 	const trimmed = newName.trim();
 	const cell = table.header[colIdx];
 	if (!trimmed || !cell) return null;
@@ -271,7 +299,7 @@ export function renameCsvColumn(text: string, table: Table, colIdx: number, newN
 export function deleteCsvColumn(text: string, table: Table, colIdx: number): string | null {
 	const count = table.header.length;
 	if (count < 2 || colIdx < 0 || colIdx >= count) return null;
-	const allRows: Cell[][] = [table.header, ...table.rows];
+	const allRows: Cell[][] = table.hasHeader === false ? table.rows : [table.header, ...table.rows];
 	let out = "";
 	let cursor = 0;
 	for (const cells of allRows) {
@@ -313,6 +341,56 @@ export function sortCsvRows(text: string, table: Table, rowOrder: readonly numbe
 	const start = firstRow[0]!.start;
 	const end = lastRow[lastRow.length - 1]!.end;
 	return text.slice(0, start) + rowOrder.map((idx) => rawRows[idx]!).join(nl) + text.slice(end);
+}
+
+/**
+ * Moves data row `fromRow` to `toRow`, preserving header, line endings, and every
+ * row's exact raw source text verbatim (ADR 0002). Returns `text` unchanged when
+ * indices are out of bounds or identical.
+ */
+export function moveCsvRow(text: string, table: CsvTable, fromRow: number, toRow: number): string {
+	const count = table.rows.length;
+	if (
+		count < 2 ||
+		!Number.isInteger(fromRow) ||
+		!Number.isInteger(toRow) ||
+		fromRow < 0 ||
+		fromRow >= count ||
+		toRow < 0 ||
+		toRow >= count ||
+		fromRow === toRow
+	) {
+		return text;
+	}
+	const rowOrder = Array.from({ length: count }, (_, idx) => idx);
+	const [moved] = rowOrder.splice(fromRow, 1);
+	rowOrder.splice(toRow, 0, moved!);
+	return sortCsvRows(text, table, rowOrder) ?? text;
+}
+
+/**
+ * Converts `text` from `table.delimiter` to `nextDelimiter`, re-quoting cells only
+ * as required by `nextDelimiter` while preserving BOM, blank lines, and line endings.
+ */
+export function convertCsvDelimiter(text: string, table: CsvTable, nextDelimiter: CsvDelimiter): string {
+	if (table.delimiter === nextDelimiter) return text;
+	const allRows: Cell[][] = table.hasHeader === false ? table.rows : [table.header, ...table.rows];
+	let out = "";
+	let cursor = 0;
+	for (const cells of allRows) {
+		if (!cells.length) continue;
+		const rowStart = cells[0]!.start;
+		const rowEnd = cells[cells.length - 1]!.end;
+		out += text.slice(cursor, rowStart);
+		if (cells.length === 1 && cells[0]!.text === "") {
+			out += '""';
+		} else {
+			out += cells.map((c) => csvCell(c.text, nextDelimiter)).join(nextDelimiter);
+		}
+		cursor = rowEnd;
+	}
+	out += text.slice(cursor);
+	return out;
 }
 
 /** Exports tabular headers and rows as tab-separated text for pasting into Excel or Sheets. */

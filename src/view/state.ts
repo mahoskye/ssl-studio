@@ -77,7 +77,7 @@ export const [state, setState] = createStore({
 	cursor: { line: 1, column: 1 },
 	/** Bumped when the tree should reload a folder. */
 	treeVersion: 0,
-	quickPick: null as null | "files" | "commands" | "symbols",
+	quickPick: null as null | "files" | "commands" | "symbols" | "outline",
 	/** Counts up when an open file turns out to be text where it was not, or the other way round, or a picture changed on disk: what shows it looks again. */
 	kindVersion: 0,
 });

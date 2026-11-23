@@ -46,3 +46,64 @@ export function fileAndLine(query: string): { query: string; at: LineAsked | nul
 	if (!found[2]) return { query: found[1]!, at: null };
 	return { query: found[1]!, at: { line: Math.max(1, Number(found[2])), column: Math.max(1, Number(found[3] || 1)) } };
 }
+
+export type FileTarget = {
+	file: string;
+	at: LineAsked | null;
+	heading: string | null;
+};
+
+/**
+ * Parses a Files-mode quick-pick target:
+ * - `spec.md#Rollback` -> `{ file: "spec.md", heading: "Rollback", at: null }`
+ * - `DueRules.ssl:20:5` -> `{ file: "DueRules.ssl", at: { line: 20, column: 5 }, heading: null }`
+ * Requires a non-whitespace character immediately before `#` so standalone `#tag` words stay intact.
+ */
+export function fileTarget(query: string): FileTarget {
+	const trimmed = query.trim();
+	const hash = /^(.+?[^\s#])#(.*)$/.exec(trimmed);
+	if (hash) {
+		const file = hash[1]!.trim();
+		const heading = hash[2]!.trim() || null;
+		return { file, at: null, heading };
+	}
+	const lined = fileAndLine(query);
+	return { file: lined.query, at: lined.at, heading: null };
+}
+
+export type QuickFacets = {
+	text: string;
+	tags: string[];
+	statuses: string[];
+	types: string[];
+};
+
+/**
+ * Extracts `tag:<name>`, `status:<val>`, and `type:<kind>` facet tokens from a
+ * Files-mode query (supporting quoted values like `status:"in progress"`), leaving
+ * remaining free text and `file#heading` targets intact.
+ */
+export function parseQuickFacets(query: string): QuickFacets {
+	const tags: string[] = [];
+	const statuses: string[] = [];
+	const types: string[] = [];
+	const text = query
+		.replace(/(?:^|\s)(tag|status|type):(?:"([^"]+)"|'([^']+)'|(\S+))/gi, (full, kind: string, dq?: string, sq?: string, bare?: string) => {
+			const val = (dq ?? sq ?? bare ?? "").trim();
+			if (!val) return full;
+			const k = kind.toLowerCase();
+			if (k === "tag") {
+				const clean = val.replace(/^#+/, "");
+				if (clean) tags.push(clean);
+				else return full;
+			} else if (k === "status") {
+				statuses.push(val);
+			} else {
+				types.push(val.toLowerCase());
+			}
+			return " ";
+		})
+		.replace(/\s+/g, " ")
+		.trim();
+	return { text, tags, statuses, types };
+}

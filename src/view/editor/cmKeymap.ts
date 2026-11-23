@@ -20,12 +20,13 @@ import {
 	undo,
 	undoDepth,
 } from "@codemirror/commands";
-import { foldKeymap } from "@codemirror/language";
+import { foldAll, foldKeymap, unfoldAll } from "@codemirror/language";
 import { gotoLine, openSearchPanel, search, searchKeymap, selectNextOccurrence, selectSelectionMatches } from "@codemirror/search";
 import { EditorSelection, Prec, type ChangeSpec, type Extension } from "@codemirror/state";
 import { EditorView, keymap, type Command, type KeyBinding } from "@codemirror/view";
 import { fenced } from "../../shared/catalog";
 import { linkWritten } from "../../shared/docLinks";
+import { htmlToMarkdown, looksLikeRichHtml, tsvToMarkdownTable } from "../../shared/htmlToMarkdown";
 import { nameFor } from "../../shared/namedLinks";
 import { baseName, dirName, relativePath } from "../../shared/paths";
 import {
@@ -548,15 +549,71 @@ async function cmCopy(view: EditorView, cut: boolean) {
 	}
 }
 
-async function cmPaste(view: EditorView) {
-	const text = await navigator.clipboard?.readText().catch(() => null);
-	if (text === null || text === undefined) {
+/**
+ * Resolves clipboard payload (`text/plain` + optional `text/html`) into smart Markdown:
+ * 1. Plain-text paste (`plainOnly`) returns null so raw text inserts verbatim.
+ * 2. Selected text + URL -> `[selected](url)`.
+ * 3. Multi-row tabular TSV outside fenced code blocks -> GFM Markdown table.
+ * 4. Rich semantic HTML outside fenced code blocks -> clean GFM Markdown.
+ */
+export function resolveSmartPasteText(opts: {
+	plain: string;
+	html?: string;
+	selected: string;
+	insideFence: boolean;
+	beforeOnLine?: string;
+	plainOnly?: boolean;
+}): string | null {
+	if (opts.plainOnly) return null;
+	if (opts.selected) {
+		const wrapped = pasteUrlOverSelection(opts.selected, opts.plain);
+		if (wrapped) return wrapped;
+	}
+	if (!opts.insideFence) {
+		const tsvTable = tsvToMarkdownTable(opts.plain);
+		if (tsvTable) {
+			const lead = opts.beforeOnLine?.trim() ? "\n\n" : "";
+			return `${lead}${tsvTable}`;
+		}
+		if (opts.html && looksLikeRichHtml(opts.html)) {
+			const md = htmlToMarkdown(opts.html);
+			if (md && md !== opts.plain.trim()) return md;
+		}
+	}
+	return null;
+}
+
+async function cmPaste(view: EditorView, plainOnly = false) {
+	let plain: string | null = null;
+	let html = "";
+	if (!plainOnly && typeof navigator.clipboard?.read === "function") {
+		try {
+			const items = await navigator.clipboard.read();
+			for (const item of items) {
+				if (plain === null && item.types.includes("text/plain")) {
+					plain = await (await item.getType("text/plain")).text();
+				}
+				if (!html && item.types.includes("text/html")) {
+					html = await (await item.getType("text/html")).text();
+				}
+			}
+		} catch {
+			// Fall back to readText() when rich clipboard read is denied or unsupported.
+		}
+	}
+	if (plain === null) {
+		plain = await navigator.clipboard?.readText().catch(() => null);
+	}
+	if (plain === null || plain === undefined) {
 		return notify("This window was not allowed to read the clipboard. Paste with Ctrl+V.");
 	}
 	const main = view.state.selection.main;
 	const selected = view.state.sliceDoc(main.from, main.to);
-	const smart = pasteUrlOverSelection(selected, text);
-	const insert = smart ?? text;
+	const insideFence = fenced(view.state.doc.toString()).some(([a, b]) => main.from >= a && main.from <= b);
+	const line = view.state.doc.lineAt(main.from);
+	const beforeOnLine = line.text.slice(0, main.from - line.from);
+	const smart = resolveSmartPasteText({ plain, html, selected, insideFence, beforeOnLine, plainOnly });
+	const insert = smart ?? plain.replace(/\r\n?/g, "\n");
 	view.dispatch({
 		changes: { from: main.from, to: main.to, insert },
 		selection: EditorSelection.cursor(main.from + insert.length),
@@ -564,6 +621,12 @@ async function cmPaste(view: EditorView) {
 		userEvent: "input.paste",
 	});
 }
+
+/** Pastes plain text verbatim (`Ctrl+Shift+V`), bypassing URL / TSV / HTML smart conversion. */
+export const cmPastePlain: Command = (view) => {
+	void cmPaste(view, true);
+	return true;
+};
 
 /** Auto-wrap non-empty selection when typing a Markdown delimiter (`*`, `_`, `` ` ``, `~`, `=`, `[`, `(`). */
 export const cmAutoWrapExtension: Extension = EditorView.inputHandler.of((view, from, to, text) => {
@@ -583,10 +646,16 @@ export const cmAutoWrapExtension: Extension = EditorView.inputHandler.of((view, 
 
 /**
  * Smart paste & drop:
- * 1. Pasting or dropping an image file saves it to workspace attachments and inserts `![alt](relative/path.png)`.
- * 2. Pasting an `http(s)://` URL over selected prose creates `[selected](url)`.
+ * 1. `Ctrl+Shift+V` pastes plain text verbatim, bypassing smart conversion.
+ * 2. Pasting or dropping an image file saves it to workspace attachments and inserts `![alt](relative/path.png)`.
+ * 3. Pasting an `http(s)://` URL over selected prose creates `[selected](url)`.
+ * 4. Pasting multi-row TSV (Excel/Sheets) outside fenced code inserts a clean GFM table.
+ * 5. Pasting rich semantic HTML outside fenced code converts it via `htmlToMarkdown`.
  */
 export function cmSmartPasteExtension(filePath: () => string): Extension {
+	let plainPasteUntil = 0;
+	let lastPasteAt = 0;
+
 	const extractImageFiles = (dt: DataTransfer | null): File[] => {
 		if (!dt) return [];
 		const out: File[] = [];
@@ -627,24 +696,63 @@ export function cmSmartPasteExtension(filePath: () => string): Extension {
 	};
 
 	return EditorView.domEventHandlers({
+		keydown(event, view) {
+			if (!view.state.facet(EditorView.editable)) return false;
+			if ((event.ctrlKey || event.metaKey) && event.shiftKey && !event.altKey && event.key.toLowerCase() === "v") {
+				const pressedAt = performance.now();
+				plainPasteUntil = pressedAt + 400;
+				// If the host webview does not emit a native `paste` event for Ctrl+Shift+V, fall back to clipboard readText.
+				setTimeout(() => {
+					if (lastPasteAt < pressedAt && view.hasFocus && typeof navigator.clipboard?.readText === "function") {
+						plainPasteUntil = 0;
+						void cmPaste(view, true);
+					}
+				}, 45);
+			}
+			return false;
+		},
 		paste(event, view) {
 			if (!view.state.facet(EditorView.editable)) return false;
+			const now = performance.now();
+			lastPasteAt = now;
+			const plainOnly = now < plainPasteUntil;
+			plainPasteUntil = 0;
+
+			const plain = event.clipboardData?.getData("text/plain") ?? "";
+			const html = event.clipboardData?.getData("text/html") ?? "";
+			const main = view.state.selection.main;
+
+			if (plainOnly) {
+				const verbatim = plain.replace(/\r\n?/g, "\n");
+				event.preventDefault();
+				view.dispatch({
+					changes: { from: main.from, to: main.to, insert: verbatim },
+					selection: EditorSelection.cursor(main.from + verbatim.length),
+					scrollIntoView: true,
+					userEvent: "input.paste",
+				});
+				return true;
+			}
+
+			// Save pasted image files (ignoring Excel/Calc bitmap previews that accompany TSV clipboard data).
 			const images = extractImageFiles(event.clipboardData);
-			if (images.length) {
+			if (images.length && !tsvToMarkdownTable(plain)) {
 				event.preventDefault();
 				void saveAndInsertImages(view, images);
 				return true;
 			}
-			const main = view.state.selection.main;
-			if (main.empty || view.state.selection.ranges.length !== 1) return false;
-			const pasted = event.clipboardData?.getData("text/plain") ?? "";
+
+			if (view.state.selection.ranges.length !== 1) return false;
 			const selected = view.state.sliceDoc(main.from, main.to);
-			const wrapped = pasteUrlOverSelection(selected, pasted);
-			if (!wrapped) return false;
+			const insideFence = fenced(view.state.doc.toString()).some(([a, b]) => main.from >= a && main.from <= b);
+			const line = view.state.doc.lineAt(main.from);
+			const beforeOnLine = line.text.slice(0, main.from - line.from);
+			const smart = resolveSmartPasteText({ plain, html, selected, insideFence, beforeOnLine });
+			if (smart === null) return false;
 			event.preventDefault();
 			view.dispatch({
-				changes: { from: main.from, to: main.to, insert: wrapped },
-				selection: EditorSelection.cursor(main.from + wrapped.length),
+				changes: { from: main.from, to: main.to, insert: smart },
+				selection: EditorSelection.cursor(main.from + smart.length),
 				scrollIntoView: true,
 				userEvent: "input.paste",
 			});
@@ -805,6 +913,13 @@ export function runCmAction(view: EditorView, id: string): boolean {
 		case "editor.action.clipboardPasteAction":
 			void cmPaste(view);
 			return true;
+		case "editor.action.pasteAsPlainText":
+		case "md-paste-plain":
+			return cmPastePlain(view);
+		case "editor.foldAll":
+			return foldAll(view);
+		case "editor.unfoldAll":
+			return unfoldAll(view);
 		case "actions.find":
 			return openFind(view, false);
 		case "editor.action.startFindReplaceAction":

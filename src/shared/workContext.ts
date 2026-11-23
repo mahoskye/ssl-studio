@@ -185,22 +185,35 @@ export async function workText(work: Work, readFile: (path: string) => Promise<s
 				const parsed = JSON.parse(raw) as {
 					title?: string;
 					goal?: string;
-					targets?: { script?: string; procedures?: string[] }[];
-					nodes?: { label?: string; kind?: string }[];
+					targets?: (string | { script?: string; path?: string; procedures?: string[] })[];
+					nodes?: { label?: string; text?: string; kind?: string }[];
+					tests?: { title?: string; name?: string; given?: string; expect?: string }[];
+					built?: { tests?: { script?: string } };
 					openQuestions?: string[];
 				};
 				const targets = (parsed.targets ?? [])
-					.map((t) => [t.script, t.procedures?.length ? `(${t.procedures.join(", ")})` : ""].filter(Boolean).join(" "))
+					.map((t) =>
+						typeof t === "string"
+							? t
+							: [t.script ?? t.path, t.procedures?.length ? `(${t.procedures.join(", ")})` : ""].filter(Boolean).join(" "),
+					)
 					.filter(Boolean);
 				const steps = (parsed.nodes ?? [])
-					.map((n) => n.label?.trim())
+					.map((n) => (n.label ?? n.text)?.trim())
 					.filter((l): l is string => Boolean(l))
 					.slice(0, 12);
+				const testCases = (parsed.tests ?? [])
+					.map((tc) => (tc.title ?? tc.name)?.trim())
+					.filter((t): t is string => Boolean(t))
+					.slice(0, 6);
+				const testScript = typeof parsed.built?.tests?.script === "string" ? parsed.built.tests.script.trim() : "";
 				const bits = [
 					`- PLAN ${parsed.title || planDoc.title || planDoc.name}:`,
 					parsed.goal ? `Goal: ${cut(parsed.goal.replace(/\s+/g, " "), 240)}` : "",
 					targets.length ? `Targets: ${targets.join("; ")}` : "",
 					steps.length ? `Steps: ${steps.join(" → ")}` : "",
+					testScript ? `Test script: ${testScript}` : "",
+					testCases.length ? `Tests: ${testCases.join("; ")}` : "",
 					parsed.openQuestions?.length ? `Open plan questions: ${parsed.openQuestions.slice(0, 4).join("; ")}` : "",
 				].filter(Boolean);
 				planSummaries.push(bits.join(" "));
@@ -304,7 +317,7 @@ export type WorkItem = { file: DocFile; reason: string; detail: string };
 
 /** One kind of thing tied to a ticket, with the documents of that kind. */
 export type WorkGroup = {
-	kind: "plan" | "spec" | "subticket" | "ticket" | "question" | "answer" | "decision" | "reference" | "schema" | "registry";
+	kind: "plan" | "spec" | "subticket" | "ticket" | "question" | "answer" | "decision" | "reference" | "schema" | "registry" | "test";
 	name: string;
 	files: DocFile[];
 	items: WorkItem[];
@@ -408,10 +421,55 @@ export function workLinkOf(ticket: DocFile, file: DocFile, kind: WorkGroup["kind
 		};
 	}
 
+	if (kind === "test") {
+		const cases = file.planTests?.length;
+		return {
+			reason: cases ? `test (${cases} ${cases === 1 ? "case" : "cases"})` : "test script",
+			detail: cases
+				? `${file.name} covers ${cases} business test ${cases === 1 ? "case" : "cases"} for ${key}.`
+				: `${file.name} is linked as a test script for ${key}.`,
+		};
+	}
+
 	return {
 		reason: `doc ticket: ${key}`,
 		detail: `${file.name} declares ticket: ${key} (or tickets: [${key}, ...]) in its YAML frontmatter.`,
 	};
+}
+
+function inferWorkspaceRoot(files: readonly DocFile[], anchor: DocFile): string {
+	const proj = files.find((f) => f.group === "project" && /^(?:readme\.md|agents\.md)$/i.test(f.name));
+	if (proj) {
+		const p = slashes(proj.path);
+		const suffix = `/${slashes(proj.name)}`;
+		if (p.toLowerCase().endsWith(suffix.toLowerCase())) return p.slice(0, p.length - suffix.length);
+	}
+	const anchorPath = slashes(anchor.path);
+	const anchorName = slashes(anchor.name);
+	if (anchor.group === "plans") {
+		const idx = anchorPath.toLowerCase().lastIndexOf(`/${anchorName.toLowerCase()}`);
+		if (idx > 0) {
+			const parent = anchorPath.slice(0, idx);
+			const slash = parent.lastIndexOf("/");
+			return slash > 0 ? parent.slice(0, slash) : parent;
+		}
+	}
+	const ticketsIdx = anchorPath.toLowerCase().lastIndexOf(`/docs/tickets/${anchorName.toLowerCase()}`);
+	if (ticketsIdx > 0) return anchorPath.slice(0, ticketsIdx);
+	const plainIdx = anchorPath.toLowerCase().lastIndexOf(`/${anchorName.toLowerCase()}`);
+	if (plainIdx > 0) {
+		const parent = anchorPath.slice(0, plainIdx);
+		const grand = parent.lastIndexOf("/");
+		return grand > 0 ? parent.slice(0, grand) : parent;
+	}
+	return "";
+}
+
+function resolveRefPath(root: string, ref: string): string {
+	const clean = slashes(ref).trim().replace(/^\.\//, "");
+	if (!clean) return "";
+	if (clean.startsWith("/") || /^[A-Za-z]:\//.test(clean)) return clean;
+	return root ? `${root.replace(/\/+$/, "")}/${clean.replace(/^\/+/, "")}` : clean;
 }
 
 /**
@@ -444,6 +502,71 @@ export function ticketWork(files: readonly DocFile[], key: string): WorkGroup[] 
 		(file) => file.group === "knowledge" && file.kind !== "decisions" && file.kind !== "questions" && forIt(file),
 	);
 	const schemas = real.filter((file) => file.group === "schema" && forIt(file));
+
+	// Linked test scripts (`plan.built.tests.script` / `testScripts`) and business test cases (`plan.tests`).
+	const wsRoot = inferWorkspaceRoot(files, plans[0] ?? work.ticket);
+	const testItems: WorkItem[] = [];
+	const seenTests = new Set<string>();
+	const addTestScript = (scriptRef: string, sourceDoc: DocFile) => {
+		const clean = slashes(scriptRef).trim().replace(/^\.\//, "");
+		if (!clean) return;
+		const dedupKey = clean.toLowerCase();
+		if (seenTests.has(dedupKey)) return;
+		seenTests.add(dedupKey);
+		const existingDoc = real.find((d) => pathMatchesRef(d.path, clean));
+		const resolved = existingDoc?.path ?? resolveRefPath(wsRoot, clean);
+		const base = clean.split("/").pop() || clean;
+		const cases = sourceDoc.planTests?.length ?? 0;
+		const synthetic: DocFile = existingDoc
+			? { ...existingDoc, ...(sourceDoc.planTests?.length ? { planTests: sourceDoc.planTests } : {}) }
+			: {
+					path: resolved,
+					name: clean,
+					title: base,
+					group: "docs",
+					exists: true,
+					...(sourceDoc.planTests?.length ? { planTests: sourceDoc.planTests } : {}),
+				};
+		const sourceStem = sourceDoc.name.replace(/\.plan\.json$/i, "");
+		const reason =
+			sourceDoc.group === "plans"
+				? cases
+					? `plan test (${cases} ${cases === 1 ? "case" : "cases"})`
+					: `plan test (${sourceStem})`
+				: "test script";
+		const casePreview = sourceDoc.planTests?.length
+			? ` covering ${cases} ${cases === 1 ? "case" : "cases"}: ${sourceDoc.planTests
+					.slice(0, 3)
+					.map((c) => c.name)
+					.join(", ")}`
+			: "";
+		testItems.push({
+			file: synthetic,
+			reason,
+			detail: `Test script ${clean} linked from ${sourceDoc.name}${casePreview}.`,
+		});
+	};
+	for (const src of [work.ticket, ...plans, ...work.specs]) {
+		for (const script of src.testScripts ?? []) addTestScript(script, src);
+	}
+	for (const plan of plans) {
+		if (plan.planTests?.length && !(plan.testScripts?.length)) {
+			const k = `plan-tests:${slashes(plan.path).toLowerCase()}`;
+			if (!seenTests.has(k)) {
+				seenTests.add(k);
+				const cases = plan.planTests.length;
+				testItems.push({
+					file: plan,
+					reason: `${cases} test ${cases === 1 ? "case" : "cases"} in plan`,
+					detail: `Business test cases in ${plan.name}: ${plan.planTests
+						.slice(0, 4)
+						.map((c) => c.name)
+						.join(", ")}.`,
+				});
+			}
+		}
+	}
+
 	const make = (kind: WorkGroup["kind"], name: string, groupFiles: DocFile[]): WorkGroup => ({
 		kind,
 		name,
@@ -460,6 +583,7 @@ export function ticketWork(files: readonly DocFile[], key: string): WorkGroup[] 
 		make("decision", "Decisions", decisions),
 		make("reference", "Notes & snippets", references),
 		make("schema", "Schema", schemas),
+		...(testItems.length ? [{ kind: "test" as const, name: "Tests", files: testItems.map((i) => i.file), items: testItems }] : []),
 		// Linked CSV registries with rows mentioning this ticket in their Ticket column.
 		make(
 			"registry",
@@ -679,6 +803,11 @@ export function docsGoverningFile(
 			if (file.group === "specs") matchedSpecs.push(file);
 			if (file.group === "registries") matchedRegistries.push(file);
 		}
+		if (file.testScripts?.some((ref) => codeMatchesRef(filePath, ref, root))) {
+			add(file, file.group === "plans" ? "plan test script" : "test script");
+			if (file.group === "plans" && !matchedPlans.includes(file)) matchedPlans.push(file);
+			if (file.group === "specs" && !matchedSpecs.includes(file)) matchedSpecs.push(file);
+		}
 		if (file.group === "tickets" && file.ticketFolder) {
 			const folder = slashes(file.ticketFolder).toLowerCase().replace(/\/+$/, "");
 			if (targetCanon.startsWith(`${folder}/`)) {
@@ -767,13 +896,22 @@ export function scriptsForTicket(files: readonly DocFile[], key: string, options
 		const work = workFor(files, k);
 		if (!work) continue;
 		addRefs(work.ticket.codeRefs);
+		addRefs(work.ticket.testScripts);
 		for (const group of groups) {
 			if (group.kind === "registry") {
 				for (const reg of group.files) {
 					addRefs(reg.ticketCodeRefs?.[k.toLowerCase()]);
 				}
+			} else if (group.kind === "test") {
+				for (const doc of group.files) {
+					if (doc.group !== "plans") addRefs([doc.name]);
+					addRefs(doc.testScripts);
+				}
 			} else {
-				for (const doc of group.files) addRefs(doc.codeRefs);
+				for (const doc of group.files) {
+					addRefs(doc.codeRefs);
+					addRefs(doc.testScripts);
+				}
 			}
 		}
 	}

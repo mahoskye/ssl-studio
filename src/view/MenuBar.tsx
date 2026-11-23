@@ -20,7 +20,7 @@ import { keysFor, onOpenMenu, runCommand } from "./commands";
 import { Icon } from "./Icon";
 import { crowdedOut, isPanelAvailable, isShown, narrowHosted, narrowPanels, panelOn, PANELS, showPanel, sideOf } from "./panels/registry";
 import { activeEditor } from "./editor/EditorGroup";
-import { activeLiveEditor, openReadFind } from "./editor/liveBridge";
+import { activeLiveEditor, hasTableFind, openReadFind, openTableFind } from "./editor/liveBridge";
 import { review } from "./editor/Review";
 import { Menu, nextItem, type MenuItem } from "./Menu";
 import { canGo } from "./navigation";
@@ -62,11 +62,29 @@ function editorKeys(id: string): string {
 	}
 }
 
+/** Commands that work cleanly in Markdown Read view and SSL Blocks mode without requiring raw text mode. */
+const NON_TEXT_OK_COMMANDS = new Set([
+	"rename-heading",
+	"copy-code-citation",
+	"copy-code-citation-excerpt",
+	"go-to-symbol-in-file",
+	"quick-outline",
+]);
+
 function runEditor(id: string, shown: boolean) {
+	// TableView Find & Replace when a CSV/TSV grid is showing.
+	if ((id === "actions.find" || id === "editor.action.startFindReplaceAction") && hasTableFind()) {
+		openTableFind(id === "editor.action.startFindReplaceAction");
+		return;
+	}
 	// Behind blocks or a rendered page the text is not on screen, but what was done to it can still be undone;
-	// Find also works on a read-mode Markdown page via CodeMirror search.
+	// Find also works on a read-mode Markdown page via CodeMirror search, and Quick Outline works in any view.
 	if (!shown) {
 		if (id === "actions.find" && (activeLiveEditor()?.runAction(id) || openReadFind())) return;
+		if (id === "editor.action.quickOutline") {
+			setState("quickPick", "outline");
+			return;
+		}
 		return void (id === "undo" ? activeDoc()?.model.undo() : id === "redo" ? activeDoc()?.model.redo() : undefined);
 	}
 	const live = activeLiveEditor();
@@ -101,12 +119,15 @@ const NO_PASTE = "This window cannot read the clipboard: paste with the keyboard
 /** A menu's entries as they are now, with the keys they have. One that cannot run says why. `box` is the text box the keyboard was in. */
 function itemsOf(entries: readonly BarEntry[], box: HTMLElement | null): MenuItem[] {
 	const now = has();
+	const bytes = now.file && documents.get(activePath()!)?.binary ? "The open file is not text" : "";
 	return entries.map((entry): MenuItem => {
 		if (entry === "separator") return "separator";
 		if ("command" in entry) {
+			const lifted = NON_TEXT_OK_COMMANDS.has(entry.command) && now.file && inFront() && !bytes;
+			const effective = lifted ? { ...now, text: true } : now;
 			const way = ({ "go-back": -1, "go-forward": 1 } as Record<string, 1 | -1>)[entry.command];
 			const nowhere = way && !canGo(way) ? (way < 0 ? "Nowhere to go back to yet" : "Nowhere to go forward to") : "";
-			return { label: entry.label, keys: keysFor(entry.command), run: () => runCommand(entry.command), why: missing(entry, now) || nowhere };
+			return { label: entry.label, keys: keysFor(entry.command), run: () => runCommand(entry.command), why: missing(entry, effective) || nowhere };
 		}
 		// A web view that may not read the clipboard cannot paste from a menu; the key still does.
 		const noPaste = entry.editor === PASTE && !navigator.clipboard?.readText ? NO_PASTE : "";
@@ -115,9 +136,15 @@ function itemsOf(entries: readonly BarEntry[], box: HTMLElement | null): MenuIte
 		if (box) return inBox ? { label: entry.label, keys: editorKeys(entry.editor), run: () => void runInBox(box, inBox), why: noPaste } : { label: entry.label, keys: editorKeys(entry.editor), run: () => {}, why: "For the code: the keyboard is in a text box" };
 		// Undo and redo reach text that is not shown as text (blocks, a page), but not a file that is behind something else.
 		// A picture, or other bytes, has no text to undo anything in.
-		const bytes = now.file && documents.get(activePath()!)?.binary ? "The open file is not text" : "";
 		const readFind = entry.editor === "actions.find" && now.file && inFront() && !bytes && isMarkdown(activePath()!);
-		const effective = readFind ? { ...now, text: true } : now;
+		const tableFind =
+			(entry.editor === "actions.find" || entry.editor === "editor.action.startFindReplaceAction") &&
+			now.file &&
+			inFront() &&
+			!bytes &&
+			hasTableFind();
+		const quickOutline = entry.editor === "editor.action.quickOutline" && now.file && inFront() && !bytes;
+		const effective = readFind || tableFind || quickOutline ? { ...now, text: true } : now;
 		const behind = bytes || (!effective.text && now.file && !inFront() ? "The file is not in front" : "");
 		return { label: entry.label, keys: editorKeys(entry.editor), run: () => runEditor(entry.editor, now.text), why: missing(entry, effective) || behind || noPaste };
 	});

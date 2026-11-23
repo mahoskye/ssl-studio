@@ -86,7 +86,14 @@ async function chooseLineEnds(at: { x: number; y: number }) {
 	const doc = activeDoc();
 	if (!doc || doc.binary) return;
 	const now = eolName(doc.model.getEOL());
-	const picked = await chooseFromMenu(`Line ends of this file, now ${now}`, [LF, CRLF], at);
+	const picked = await chooseFromMenu(
+		`Line ends of this file, now ${now}`,
+		[
+			{ label: LF, value: LF, checked: now === "LF" },
+			{ label: CRLF, value: CRLF, checked: now === "CRLF" },
+		],
+		at,
+	);
 	const want = picked === LF ? "LF" : picked === CRLF ? "CRLF" : null;
 	if (!want || want === now) return;
 	doc.model.pushStackElement();

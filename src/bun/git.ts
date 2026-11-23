@@ -216,7 +216,7 @@ export class Git {
 
 	/** Reads a file's text at a specific Git commit SHA. Returns null if binary, missing, or invalid SHA. */
 	async show(path: string, sha: string, repoPath?: string): Promise<string | null> {
-		if (!/^[0-9a-f]{4,40}$/i.test(sha.trim())) return null;
+		if (!/^[0-9a-f]{4,40}(~\d+|\^\d*)?$/i.test(sha.trim())) return null;
 		if (!(await this.repository())) return null;
 		const gitPath = repoPath?.trim() || (await this.named(path));
 		const ran = await this.run(["show", `${sha.trim()}:${gitPath}`]);
@@ -226,6 +226,102 @@ export class Git {
 		} catch {
 			return null;
 		}
+	}
+
+	/** Reads a file's text before (`sha~1`) and after (`sha`) a specific commit for commit-level diffing. */
+	async commitFile(path: string, sha: string, repoPath?: string): Promise<{ before: string | null; after: string | null }> {
+		const clean = sha.trim();
+		if (!/^[0-9a-f]{4,40}$/i.test(clean)) return { before: null, after: null };
+		const [before, after] = await Promise.all([
+			this.show(path, `${clean}~1`, repoPath),
+			this.show(path, clean, repoPath),
+		]);
+		return { before, after };
+	}
+
+	/** Local unified diff (staged or working tree), optionally scoped to specific workspace paths and byte-capped. */
+	async diff(options: { staged?: boolean; paths?: string[]; maxBytes?: number } = {}): Promise<string> {
+		if (!(await this.repository())) return "";
+		const args = ["diff", "--no-color", "--unified=3"];
+		if (options.staged) args.push("--cached");
+		if (options.paths?.length) {
+			const rels = await Promise.all(options.paths.map((p) => this.here(p)));
+			args.push("--", ...rels);
+		}
+		const ran = await this.run(args);
+		if (ran.code !== 0) return "";
+		const out = text(ran.out);
+		const cap = Math.max(1024, options.maxBytes ?? 60_000);
+		return out.length > cap ? `${out.slice(0, cap)}\n... (diff truncated at ${cap} chars)` : out;
+	}
+
+	/** Local Git tags sorted newest-first by committer/tagger date. */
+	async tags(): Promise<{ name: string; sha: string; time: number }[]> {
+		if (!(await this.repository())) return [];
+		const ran = await this.run(["for-each-ref", "--sort=-creatordate", "--format=%(refname:short)\x1f%(objectname:short)\x1f%(creatordate:unix)", "refs/tags"]);
+		if (ran.code !== 0) return [];
+		const out: { name: string; sha: string; time: number }[] = [];
+		for (const line of text(ran.out).split(/\r?\n/)) {
+			if (!line.trim()) continue;
+			const [name, sha, ts] = line.split("\x1f");
+			if (name && sha) out.push({ name, sha, time: (Number(ts) || 0) * 1000 });
+		}
+		return out;
+	}
+
+	/** Full HEAD commit SHA, or null outside a repository / unborn HEAD. */
+	async headSha(): Promise<string | null> {
+		if (!(await this.repository())) return null;
+		const ran = await this.run(["rev-parse", "--verify", "HEAD"]);
+		if (ran.code !== 0) return null;
+		const sha = text(ran.out).trim();
+		return /^[0-9a-f]{7,40}$/i.test(sha) ? sha : null;
+	}
+
+	/** Commits between `from` and `to` (defaults to HEAD) with changed file paths (ADR 0022). */
+	async rangeLog(from: string, to = "HEAD", limit = 100): Promise<TicketGitCommit[]> {
+		if (!(await this.repository())) return [];
+		const safeRef = (r: string) => /^[A-Za-z0-9._/~^@+-]+$/.test(r.trim());
+		if (!safeRef(from) || !safeRef(to)) return [];
+		const n = Math.max(1, Math.min(limit, 300));
+		const ran = await this.run([
+			"log",
+			"-n",
+			String(n),
+			`${from.trim()}..${to.trim()}`,
+			"--format=%x1e%H%x1f%h%x1f%ct%x1f%an%x1f%s",
+			"--name-status",
+		]);
+		if (ran.code !== 0) return [];
+		const commits: TicketGitCommit[] = [];
+		for (const chunk of text(ran.out).split("\x1e")) {
+			const trimmed = chunk.trim();
+			if (!trimmed) continue;
+			const lines = trimmed.split(/\r?\n/);
+			const [sha, shortSha, ct, author, ...subjectParts] = (lines[0] ?? "").split("\x1f");
+			if (!sha || !shortSha) continue;
+			const files: { status: string; path: string }[] = [];
+			for (const line of lines.slice(1)) {
+				const l = line.trim();
+				if (!l) continue;
+				const parts = l.split("\t");
+				if (parts.length < 2) continue;
+				const status = parts[0]!.trim();
+				const filePath = (parts[2] ?? parts[1]!).trim();
+				if (!filePath) continue;
+				const rel = this.prefix && filePath.startsWith(this.prefix) ? filePath.slice(this.prefix.length) : filePath;
+				files.push({ status, path: rel });
+			}
+			commits.push({
+				sha,
+				shortSha,
+				time: (Number(ct) || 0) * 1000,
+				author: author ?? "",
+				subject: subjectParts.join(" "),
+				files,
+			});
+		}
+		return commits;
 	}
 
 	/** Paths as git is given them, a hundred to a command: a command line is only so long, on Windows shortest of all. */

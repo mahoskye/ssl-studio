@@ -7,6 +7,7 @@ import { marked } from "marked";
 import { parseCsv } from "../../shared/csv";
 import { DEFAULT_CODE_FONT, resolveFontStack } from "../../shared/fonts";
 import { frontMatter } from "../../shared/frontMatter";
+import { diffInlineWords, diffMarkdownBlocks, type MarkdownDiffRow } from "../../shared/markdownDiff";
 import { Icon } from "../Icon";
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, untrack } from "solid-js";
 import { choose } from "../dialogs";
@@ -14,6 +15,7 @@ import { canonical, keepTab, state, notify } from "../state";
 import { baseName, isInside, joinPath, relativeTo } from "../../shared/paths";
 import { recall, remember } from "../graph/canvas";
 import { CenterTabStrip } from "./CenterTabStrip";
+import { languageFor } from "./languages";
 import { finishMarkdown } from "./markdownHtml";
 import { monaco } from "./monaco";
 import { changeSize, reviewFlow } from "./reviewFlow";
@@ -33,10 +35,18 @@ export type Review = {
 	note?: string;
 	/** The accept button's words when "Accept" would not say enough: "Restore this snapshot". */
 	acceptLabel?: string;
+	/** The reject/cancel button's words when "Reject" would not say enough: "Close". */
+	rejectLabel?: string;
 	/** What accepting will do, as a sentence for the header: "Accepting puts the right side into the editor. The file is not saved." */
 	effect?: string;
 	/** Why this cannot be accepted as it stands: a check it must pass has failed. */
 	blocked?: string;
+	/** Custom column titles for actionable reviews (e.g. left: "Snapshot 14:02", right: "Current"). */
+	sides?: { left: string; right: string };
+	/** Which side Accept passes to `onAccept` (defaults to "proposed"). When "original", right side is read-only. */
+	acceptSide?: "proposed" | "original";
+	/** Force both sides read-only even on actionable reviews. */
+	readOnly?: boolean;
 	/**
 	 * Two texts to look at side by side, with nothing to accept: a file against what git has of it. The names of the
 	 * two sides. Neither side can be edited, and the one button closes.
@@ -45,6 +55,17 @@ export type Review = {
 	/** May fail: the review then stays open and shows the error. */
 	onAccept: (text: string) => void | Promise<void>;
 	onReject?: () => void | Promise<void>;
+};
+
+export type ComparisonInput = {
+	title: string;
+	path?: string;
+	before: string;
+	after: string;
+	beforeLabel: string;
+	afterLabel: string;
+	language?: string;
+	effect?: string;
 };
 
 const [review, setReview] = createSignal<Review | null>(null);
@@ -75,21 +96,100 @@ export const closeReview = () => setReview(null);
 /** A comparison gives way to a file that is opened: it holds nothing to lose, and would otherwise stand in front of the file. */
 export const closeComparison = () => void (untrack(review)?.compare && setReview(null));
 
+/** Opens a read-only side-by-side comparison (`before` on the left vs `after` on the right) in ReviewView. */
+export function openComparison(input: ComparisonInput): Promise<boolean> {
+	return openReview({
+		title: input.title,
+		path: input.path,
+		original: input.before,
+		proposed: input.after,
+		language: input.language ?? (input.path ? languageFor(input.path) : "plaintext"),
+		compare: { left: input.beforeLabel, right: input.afterLabel },
+		effect: input.effect ?? `${input.beforeLabel} compared with ${input.afterLabel}. Nothing here changes either.`,
+		onAccept: () => {},
+	});
+}
+export const compareTexts = openComparison;
+
 type CsvDiffRow = {
 	kind: "same" | "added" | "removed" | "modified";
 	oldCells?: string[];
 	newCells?: string[];
 };
 
-/** Renders Markdown safely for side-by-side Rendered Review panes (stripping frontmatter into a dedicated summary block). */
-function renderReviewMarkdown(text: string): { fm: string; html: string } {
-	const parsed = frontMatter(text);
-	const fmRaw = parsed.lines > 0 ? text.split(/\r?\n/).slice(0, parsed.lines).join("\n").trim() : "";
-	const rawHtml = marked.parse(parsed.body, { async: false, gfm: true }) as string;
-	const clean = DOMPurify.sanitize(rawHtml, {
-		FORBID_TAGS: ["iframe", "object", "embed", "script", "style", "form", "input", "textarea", "select"],
+const FORBID_TAGS = ["iframe", "object", "embed", "script", "style", "form", "input", "textarea", "select"];
+
+function escapeHtmlText(text: string): string {
+	return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function renderMarkdownBlockHtml(source: string, preRendered?: boolean): string {
+	const rawHtml = preRendered ? source : (marked.parse(source, { async: false, gfm: true }) as string);
+	const clean = DOMPurify.sanitize(rawHtml, { FORBID_TAGS });
+	return preRendered ? clean : finishMarkdown(clean, { anchors: false });
+}
+
+type RenderedMdDiffRow = {
+	kind: MarkdownDiffRow["kind"];
+	blockKind: MarkdownDiffRow["blockKind"];
+	leftHtml: string;
+	rightHtml: string;
+};
+
+type RenderedMdDiff = {
+	fmBeforeHtml: string;
+	fmAfterHtml: string;
+	fmChanged: boolean;
+	rows: RenderedMdDiffRow[];
+	stats: { same: number; added: number; removed: number; modified: number };
+};
+
+/** Computes aligned, sanitized left/right Rendered Markdown diff blocks + frontmatter diff. */
+function buildRenderedMarkdownDiff(beforeText: string, afterText: string): RenderedMdDiff {
+	const beforeFmParsed = frontMatter(beforeText);
+	const afterFmParsed = frontMatter(afterText);
+	const fmBeforeRaw = beforeFmParsed.lines > 0 ? beforeText.split(/\r?\n/).slice(0, beforeFmParsed.lines).join("\n").trim() : "";
+	const fmAfterRaw = afterFmParsed.lines > 0 ? afterText.split(/\r?\n/).slice(0, afterFmParsed.lines).join("\n").trim() : "";
+	const fmChanged = fmBeforeRaw !== fmAfterRaw;
+
+	let fmBeforeHtml = "";
+	let fmAfterHtml = "";
+	if (fmBeforeRaw || fmAfterRaw) {
+		if (!fmChanged) {
+			fmBeforeHtml = escapeHtmlText(fmBeforeRaw);
+			fmAfterHtml = escapeHtmlText(fmAfterRaw);
+		} else if (fmBeforeRaw && fmAfterRaw) {
+			const fmDiff = diffInlineWords(escapeHtmlText(fmBeforeRaw), escapeHtmlText(fmAfterRaw));
+			fmBeforeHtml = DOMPurify.sanitize(fmDiff.before, { FORBID_TAGS });
+			fmAfterHtml = DOMPurify.sanitize(fmDiff.after, { FORBID_TAGS });
+		} else if (fmBeforeRaw) {
+			fmBeforeHtml = `<del class="md-diff-del">${escapeHtmlText(fmBeforeRaw)}</del>`;
+		} else {
+			fmAfterHtml = `<ins class="md-diff-ins">${escapeHtmlText(fmAfterRaw)}</ins>`;
+		}
+	}
+
+	const diff = diffMarkdownBlocks(beforeFmParsed.body, afterFmParsed.body);
+	const rows: RenderedMdDiffRow[] = diff.rows.map((row) => {
+		if (row.kind === "same") {
+			const html = renderMarkdownBlockHtml(row.after ?? row.before ?? "");
+			return { kind: row.kind, blockKind: row.blockKind, leftHtml: html, rightHtml: html };
+		}
+		if (row.kind === "added") {
+			return { kind: row.kind, blockKind: row.blockKind, leftHtml: "", rightHtml: renderMarkdownBlockHtml(row.after ?? "") };
+		}
+		if (row.kind === "removed") {
+			return { kind: row.kind, blockKind: row.blockKind, leftHtml: renderMarkdownBlockHtml(row.before ?? ""), rightHtml: "" };
+		}
+		return {
+			kind: row.kind,
+			blockKind: row.blockKind,
+			leftHtml: renderMarkdownBlockHtml(row.beforeHighlighted ?? row.before ?? "", row.preRendered),
+			rightHtml: renderMarkdownBlockHtml(row.afterHighlighted ?? row.after ?? "", row.preRendered),
+		};
 	});
-	return { fm: fmRaw, html: finishMarkdown(clean, { anchors: true }) };
+
+	return { fmBeforeHtml, fmAfterHtml, fmChanged, rows, stats: diff.stats };
 }
 
 /** Computes a structured row/cell diff between two CSV/TSV texts. Uses col-0 key alignment when keys are unique, else positional LCS. */
@@ -198,19 +298,78 @@ export function ReviewView() {
 	const [liveProposed, setLiveProposed] = createSignal(r.proposed);
 	/** Explicit diff layout (ADR 0027): never silently flips behind the column headers. */
 	const [diffLayout, setDiffLayout] = createSignal<"split" | "inline" | "rendered" | "table">(recall("review.layout") === "inline" ? "inline" : "split");
+	const [mdOnlyChanged, setMdOnlyChanged] = createSignal(false);
 	const [csvOnlyChanged, setCsvOnlyChanged] = createSignal(false);
 	const chooseLayout = (next: "split" | "inline" | "rendered" | "table") => {
 		setDiffLayout(next);
 		if (next === "split" || next === "inline") remember("review.layout", next);
 	};
 	const isCodeDiff = () => diffLayout() === "split" || diffLayout() === "inline";
-	const renderedOrig = createMemo(() => (isMdReview && diffLayout() === "rendered" ? renderReviewMarkdown(r.original) : null));
-	const renderedProp = createMemo(() => (isMdReview && diffLayout() === "rendered" ? renderReviewMarkdown(liveProposed()) : null));
+	const renderedDiff = createMemo(() => (isMdReview && diffLayout() === "rendered" ? buildRenderedMarkdownDiff(r.original, liveProposed()) : null));
 	const csvDiff = createMemo(() => (isCsvReview && diffLayout() === "table" ? diffCsvTables(r.original, liveProposed()) : null));
+	const isReadOnly = Boolean(r.compare || r.readOnly || r.acceptSide === "original");
+	const leftLabel = r.compare?.left ?? r.sides?.left ?? "Now";
+	const rightLabel = r.compare?.right ?? r.sides?.right ?? "Proposed";
 	const label = r.acceptLabel ?? "Accept";
+	const rejectLabel = r.rejectLabel ?? "Reject";
 	const file = r.path ? relativeTo(state.workspace?.root, r.path) : "";
 	const tabTitle = r.path ? (r.compare ? `${baseName(r.path)} (diff)` : `Review: ${baseName(r.path)}`) : r.title;
-	const effect = r.effect ?? `"${label}" applies the right side.`;
+	const effect = r.effect ?? `"${label}" applies the ${r.acceptSide === "original" ? "left" : "right"} side.`;
+
+	// Bidirectional block-aligned vertical scroll sync between Rendered Markdown diff panes.
+	let leftPaneEl: HTMLDivElement | undefined;
+	let rightPaneEl: HTMLDivElement | undefined;
+	let syncingFrom: "left" | "right" | null = null;
+	let syncFrame = 0;
+	onCleanup(() => {
+		if (syncFrame) cancelAnimationFrame(syncFrame);
+	});
+	const syncRenderedScroll = (from: "left" | "right") => {
+		const src = from === "left" ? leftPaneEl : rightPaneEl;
+		const dst = from === "left" ? rightPaneEl : leftPaneEl;
+		if (!src || !dst) return;
+		if (syncingFrom && syncingFrom !== from) return;
+		syncingFrom = from;
+		if (syncFrame) cancelAnimationFrame(syncFrame);
+
+		const maxSrc = Math.max(0, src.scrollHeight - src.clientHeight);
+		const maxDst = Math.max(0, dst.scrollHeight - dst.clientHeight);
+		if (maxSrc <= 0 || maxDst <= 0) {
+			dst.scrollTop = 0;
+		} else if (src.scrollTop <= 1) {
+			dst.scrollTop = 0;
+		} else if (src.scrollTop >= maxSrc - 2) {
+			dst.scrollTop = maxDst;
+		} else {
+			const srcBlocks = [...src.querySelectorAll<HTMLElement>("[data-block-idx]")];
+			const dstBlocks = [...dst.querySelectorAll<HTMLElement>("[data-block-idx]")];
+			let synced = false;
+			if (srcBlocks.length && srcBlocks.length === dstBlocks.length) {
+				const top = src.scrollTop;
+				let anchorIdx = srcBlocks.length - 1;
+				for (let i = 0; i < srcBlocks.length; i++) {
+					const el = srcBlocks[i]!;
+					if (el.offsetTop + el.offsetHeight > top) {
+						anchorIdx = i;
+						break;
+					}
+				}
+				const sEl = srcBlocks[anchorIdx]!;
+				const dEl = dstBlocks[anchorIdx]!;
+				const frac = Math.max(0, Math.min(1, (top - sEl.offsetTop) / Math.max(1, sEl.offsetHeight)));
+				dst.scrollTop = Math.min(maxDst, Math.max(0, dEl.offsetTop + frac * dEl.offsetHeight));
+				synced = true;
+			}
+			if (!synced) {
+				dst.scrollTop = (src.scrollTop / maxSrc) * maxDst;
+			}
+		}
+
+		syncFrame = requestAnimationFrame(() => {
+			syncFrame = 0;
+			syncingFrom = null;
+		});
+	};
 
 	onMount(() => {
 		const original = monaco.editor.createModel(r.original, r.language);
@@ -220,7 +379,7 @@ export function ReviewView() {
 			renderSideBySide: diffLayout() !== "inline",
 			useInlineViewWhenSpaceIsLimited: false,
 			originalEditable: false,
-			readOnly: Boolean(r.compare),
+			readOnly: isReadOnly,
 			fontSize: state.settings.fontSize,
 			selectionClipboard: false,
 		}));
@@ -261,12 +420,13 @@ export function ReviewView() {
 	});
 
 	// Undoing every edit counts as not edited: the version id goes back with the text.
-	const edited = () => Boolean(proposedModel && !proposedModel.isDisposed() && proposedModel.getAlternativeVersionId() !== untouched);
+	const edited = () => !isReadOnly && Boolean(proposedModel && !proposedModel.isDisposed() && proposedModel.getAlternativeVersionId() !== untouched);
 	const accept = async () => {
 		if (busy() || r.blocked || !proposedModel) return;
 		setBusy(true);
 		setError("");
-		const failed = await flow.accept(r, proposedModel.getValue());
+		const nextText = r.acceptSide === "original" ? r.original : proposedModel.getValue();
+		const failed = await flow.accept(r, nextText);
 		setBusy(false);
 		if (failed !== null) setError(failed);
 	};
@@ -296,12 +456,12 @@ export function ReviewView() {
 						<p class="review-effect">
 							{r.compare
 								? (r.effect ?? (diffLayout() === "split" ? "The two are shown side by side. Nothing here changes either." : "Shown inline. Nothing here changes either."))
-								: `${effect} Reject (Esc) changes nothing.`}
+								: `${effect} ${rejectLabel} (Esc) changes nothing.`}
 						</p>
 					</div>
 					<div class="review-actions">
 						<div class="mode-switch diff-layout-switch" role="group" aria-label="Diff layout">
-							<button classList={{ on: diffLayout() === "split" }} aria-pressed={diffLayout() === "split"} title="Show original and proposed side by side" onClick={() => chooseLayout("split")}>
+							<button classList={{ on: diffLayout() === "split" }} aria-pressed={diffLayout() === "split"} title="Show left and right versions side by side" onClick={() => chooseLayout("split")}>
 								Side-by-Side
 							</button>
 							<button classList={{ on: diffLayout() === "inline" }} aria-pressed={diffLayout() === "inline"} title="Show changes inline in one column" onClick={() => chooseLayout("inline")}>
@@ -311,7 +471,7 @@ export function ReviewView() {
 								<button
 									classList={{ on: diffLayout() === "rendered" }}
 									aria-pressed={diffLayout() === "rendered"}
-									title="Show rendered Markdown side by side"
+									title="Show rendered Markdown diff side by side with inline highlights"
 									onClick={() => chooseLayout("rendered")}
 								>
 									Rendered
@@ -339,8 +499,8 @@ export function ReviewView() {
 							<button class="primary" disabled={Boolean(r.blocked) || busy()} title={r.blocked ?? (busy() ? "Accepting…" : effect)} onClick={() => void accept()}>
 								{label}
 							</button>
-							<button disabled={busy()} title={busy() ? "Wait for the accept to finish." : "Reject: close this review and change nothing (Esc)"} onClick={reject}>
-								Reject
+							<button disabled={busy()} title={busy() ? "Wait for the accept to finish." : `${rejectLabel}: close this review and change nothing (Esc)`} onClick={reject}>
+								{rejectLabel}
 							</button>
 						</Show>
 					</div>
@@ -379,10 +539,10 @@ export function ReviewView() {
 				{/* Column headers bound strictly to the active diff layout (Defect B11 fix). */}
 				<Show when={diffLayout() === "split" || diffLayout() === "rendered"}>
 					<div class="diff-sides" aria-hidden="true">
-						<span>{r.compare?.left ?? "Now"}</span>
+						<span>{leftLabel}</span>
 						<span>
-							{r.compare?.right ?? "Proposed"}{" "}
-							<Show when={!r.compare && diffLayout() === "split"}>
+							{rightLabel}{" "}
+							<Show when={!isReadOnly && diffLayout() === "split"}>
 								<span class="hint">you can edit this side</span>
 							</Show>
 							<span class="diff-size">{size()}</span>
@@ -392,10 +552,10 @@ export function ReviewView() {
 				<Show when={diffLayout() === "inline"}>
 					<div class="diff-sides inline" aria-hidden="true">
 						<span class="diff-inline-label">
-							{r.compare?.left ?? "Now"}
+							{leftLabel}
 							<Icon name="arrow-right" class="diff-inline-sep" />
-							{r.compare?.right ?? "Proposed"}
-							<Show when={!r.compare}>
+							{rightLabel}
+							<Show when={!isReadOnly}>
 								<span class="hint">you can edit the proposed lines</span>
 							</Show>
 						</span>
@@ -406,23 +566,107 @@ export function ReviewView() {
 					{size()}
 				</p>
 				<div class="diff-host" ref={host} style={{ display: isCodeDiff() ? undefined : "none" }} />
-				<Show when={diffLayout() === "rendered" && renderedOrig() && renderedProp()}>
-					<div class="review-rendered-split" onClick={(e) => {
-						if ((e.target as HTMLElement | null)?.closest("a")) e.preventDefault();
-					}}>
-						<div class="review-rendered-pane">
-							<Show when={renderedOrig()!.fm}>
-								<pre class="review-md-fm">{renderedOrig()!.fm}</pre>
-							</Show>
-							<div class="md" innerHTML={renderedOrig()!.html} />
-						</div>
-						<div class="review-rendered-pane">
-							<Show when={renderedProp()!.fm}>
-								<pre class="review-md-fm">{renderedProp()!.fm}</pre>
-							</Show>
-							<div class="md" innerHTML={renderedProp()!.html} />
-						</div>
-					</div>
+				<Show when={diffLayout() === "rendered" && renderedDiff()}>
+					{(diff) => {
+						const visibleRows = () => (mdOnlyChanged() ? diff().rows.filter((row) => row.kind !== "same") : diff().rows);
+						const showFm = () => Boolean((diff().fmBeforeHtml || diff().fmAfterHtml) && (!mdOnlyChanged() || diff().fmChanged));
+						const hasAnyVisible = () => visibleRows().length > 0 || showFm();
+						return (
+							<div class="review-md-wrap">
+								<style>{`
+									.review-md-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--editor-bg, var(--bg)); }
+									.md-diff-block { position: relative; padding: var(--space-2) var(--space-3); margin-bottom: var(--space-2); border-radius: var(--radius-sm); border-left: 3px solid transparent; }
+									.md-diff-block > :first-child { margin-top: 0; }
+									.md-diff-block > :last-child { margin-bottom: 0; }
+									.md-diff-block.md-diff-added { background: color-mix(in srgb, var(--ok) 10%, transparent); border-left-color: var(--ok); }
+									.md-diff-block.md-diff-removed { background: color-mix(in srgb, var(--error) 10%, transparent); border-left-color: var(--error); }
+									.md-diff-block.md-diff-modified { background: color-mix(in srgb, var(--warning) 8%, transparent); border-left-color: var(--warning); }
+									.md-diff-del { background: color-mix(in srgb, var(--error) 22%, transparent); color: var(--error); text-decoration: line-through; padding: 0 2px; border-radius: 2px; }
+									.md-diff-ins { background: color-mix(in srgb, var(--ok) 22%, transparent); color: var(--ok); text-decoration: none; border-bottom: 1.5px solid var(--ok); padding: 0 2px; border-radius: 2px; font-weight: 500; }
+									.md-diff-placeholder { min-height: 28px; padding: var(--space-2) var(--space-3); margin-bottom: var(--space-2); border: 1px dashed var(--border); border-radius: var(--radius-sm); color: var(--muted); font-size: var(--text-xs); font-style: italic; display: flex; align-items: center; opacity: 0.78; }
+								`}</style>
+								<div class="review-csv-bar">
+									<span class="review-csv-stats">
+										<span class="csv-stat added">+{diff().stats.added} added</span>
+										<span class="csv-stat removed">−{diff().stats.removed} removed</span>
+										<span class="csv-stat modified">~{diff().stats.modified} modified</span>
+										<span class="meta">{diff().stats.same} unchanged</span>
+										<Show when={diff().fmChanged}>
+											<span class="csv-stat modified">frontmatter changed</span>
+										</Show>
+									</span>
+									<label class="check review-csv-toggle">
+										<input type="checkbox" checked={mdOnlyChanged()} onChange={(e) => setMdOnlyChanged(e.currentTarget.checked)} />
+										<span>Changed sections only</span>
+									</label>
+								</div>
+								<Show
+									when={hasAnyVisible()}
+									fallback={<p class="hint" style={{ padding: "var(--space-5)" }}>No Markdown differences between the two versions.</p>}
+								>
+									<div
+										class="review-rendered-split"
+										onClick={(e) => {
+											if ((e.target as HTMLElement | null)?.closest("a")) e.preventDefault();
+										}}
+									>
+										<div
+											class="review-rendered-pane"
+											ref={(el) => (leftPaneEl = el)}
+											onScroll={() => syncRenderedScroll("left")}
+										>
+											<Show when={showFm()}>
+												<Show
+													when={diff().fmBeforeHtml}
+													fallback={<div class="md-diff-placeholder" data-block-idx="fm" aria-hidden="true">Frontmatter added</div>}
+												>
+													<pre class="review-md-fm" data-block-idx="fm" innerHTML={diff().fmBeforeHtml} />
+												</Show>
+											</Show>
+											<For each={visibleRows()}>
+												{(row, idx) => (
+													<Show
+														when={row.kind !== "added"}
+														fallback={<div class="md-diff-placeholder" data-block-idx={String(idx())} aria-hidden="true">Added</div>}
+													>
+														<div class={`md-diff-block md-diff-${row.kind}`} data-block-idx={String(idx())}>
+															<div class="md" innerHTML={row.leftHtml} />
+														</div>
+													</Show>
+												)}
+											</For>
+										</div>
+										<div
+											class="review-rendered-pane"
+											ref={(el) => (rightPaneEl = el)}
+											onScroll={() => syncRenderedScroll("right")}
+										>
+											<Show when={showFm()}>
+												<Show
+													when={diff().fmAfterHtml}
+													fallback={<div class="md-diff-placeholder" data-block-idx="fm" aria-hidden="true">Frontmatter removed</div>}
+												>
+													<pre class="review-md-fm" data-block-idx="fm" innerHTML={diff().fmAfterHtml} />
+												</Show>
+											</Show>
+											<For each={visibleRows()}>
+												{(row, idx) => (
+													<Show
+														when={row.kind !== "removed"}
+														fallback={<div class="md-diff-placeholder" data-block-idx={String(idx())} aria-hidden="true">Removed</div>}
+													>
+														<div class={`md-diff-block md-diff-${row.kind}`} data-block-idx={String(idx())}>
+															<div class="md" innerHTML={row.rightHtml} />
+														</div>
+													</Show>
+												)}
+											</For>
+										</div>
+									</div>
+								</Show>
+							</div>
+						);
+					}}
 				</Show>
 				<Show when={diffLayout() === "table" && csvDiff()}>
 					{(diff) => {

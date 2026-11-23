@@ -13,18 +13,18 @@ import { groupModels, composeQuestion, composerSend, modelRef, stepAction } from
 import { followReplyLink, renderReply } from "./markdown";
 import { notePath, proposalOf, runStep, showReview, startTidy, STEPS, tidy } from "./tidy";
 import { parseCsv } from "../../shared/csv";
-import { withFrontMatter } from "../../shared/frontMatter";
-import { baseName, dirName, isInside, relativeTo, resolvePath } from "../../shared/paths";
-import { isCatalog, promptText, registryTitle } from "../../shared/projectDocs";
+import { frontMatter, withFrontMatter } from "../../shared/frontMatter";
+import { baseName, dirName, isInside, joinPath, relativeTo } from "../../shared/paths";
+import { DOC_FOLDERS, frontValue, isCatalog, promptText, registryTitle, slug } from "../../shared/projectDocs";
 import type { DocFile } from "../../shared/protocol";
 import { keysIn, ticketColumn } from "../../shared/registryTickets";
 import { extractSchemaPreview, referencedSchemaTables } from "../../shared/schemaIndex";
 import { renderTemplate } from "../../shared/templater";
-import { cut, docsGoverningFile, MAX_WORK_PROMPT_CHARS, ticketForFile, ticketWork, type WorkTextOptions } from "../../shared/workContext";
+import { cut, docsGoverningFile, MAX_WORK_PROMPT_CHARS, ticketForFile, ticketWork, workFor, type WorkTextOptions } from "../../shared/workContext";
 import { backend } from "../backend";
-import { ask as askDialog, choose } from "../dialogs";
+import { ask as askDialog, browseWorkspaceFile, choose } from "../dialogs";
 import { refreshDocAudit } from "../docAudit";
-import { gitStatus } from "../git";
+import { gitStatus, gitVersion } from "../git";
 import { docs } from "../project";
 import { appendNoteToTicket, promoteToKnowledge, saveAsSnippet, staleCatalogSummary, staleCatalogSummaryAsync, ticketAtHand, updateCatalogs, workPrompt } from "../projectDocs";
 import { languageFor } from "../editor/languages";
@@ -59,8 +59,12 @@ const [withSchema, setWithSchema] = createSignal(false);
 const [withRefTables, setWithRefTables] = createSignal(false);
 const [withRegistries, setWithRegistries] = createSignal(false);
 const [withState, setWithState] = createSignal(false);
+const [withGitDiff, setWithGitDiff] = createSignal(false);
+const [withGoverningDocs, setWithGoverningDocs] = createSignal(false);
 const [attachedFiles, setAttachedFiles] = createSignal<{ path: string; rel: string }[]>([]);
 const [sentTick, setSentTick] = createSignal(0);
+
+const CODE_FILE_RE = /\.(ssl|srvscr|ds|sql|ddl|pks|pkb|xfd|xml|js|ts|css|html)$/i;
 
 /** Fast deterministic content fingerprint so mid-session edits to tickets/specs/files trigger an automatic delta re-send. */
 function hashText(s: string): string {
@@ -90,6 +94,8 @@ function ensureAgentWorkspace(): void {
 	setWithRefTables(false);
 	setWithRegistries(false);
 	setWithState(false);
+	setWithGitDiff(false);
+	setWithGoverningDocs(false);
 	setAttachedFiles([]);
 	sentContext = { session: null, root: curRoot, hashes: new Map() };
 	setAgent("chatSession", null);
@@ -191,6 +197,104 @@ async function buildRegistrySlice(all: DocFile[], ticketKey: string): Promise<st
 	);
 }
 
+type GoverningContextItem = {
+	file: DocFile;
+	reason: string;
+	forFiles: string[];
+};
+
+/**
+ * Collects unique governing docs (`docsGoverningFile()`) for the active code/SQL file and
+ * modified Git code/SQL files — even when they belong to another ticket or when no ticket is active.
+ */
+function collectGoverningDocsForContext(
+	allDocs: readonly DocFile[],
+	root: string,
+	activeFile: string | null | undefined,
+): GoverningContextItem[] {
+	if (!root) return [];
+	const candidates: string[] = [];
+	const seenCode = new Set<string>();
+	const addCode = (p?: string | null) => {
+		if (!p || !isInside(root, p)) return;
+		const k = canonical(p);
+		if (seenCode.has(k)) return;
+		seenCode.add(k);
+		candidates.push(p);
+	};
+	if (activeFile && CODE_FILE_RE.test(activeFile)) addCode(activeFile);
+	const st = gitStatus();
+	if (st) {
+		for (const f of st.files) {
+			if (CODE_FILE_RE.test(f.path)) addCode(f.path);
+		}
+	}
+	if (!candidates.length && activeFile) addCode(activeFile);
+
+	const byDoc = new Map<string, GoverningContextItem>();
+	for (const codePath of candidates) {
+		const relCode = relativeTo(root, codePath).replace(/\\/g, "/");
+		for (const g of docsGoverningFile(allDocs, codePath, root)) {
+			const dk = canonical(g.file.path);
+			const prev = byDoc.get(dk);
+			if (!prev) {
+				byDoc.set(dk, { file: g.file, reason: g.reason, forFiles: [relCode] });
+			} else if (!prev.forFiles.includes(relCode)) {
+				prev.forFiles.push(relCode);
+			}
+		}
+	}
+	return [...byDoc.values()].slice(0, 6);
+}
+
+function formatGoverningDocExcerpt(doc: DocFile, raw: string): string {
+	const clean = raw.replace(/\r\n/g, "\n").trim();
+	if (doc.path.toLowerCase().endsWith(".plan.json")) {
+		try {
+			const parsed = JSON.parse(clean) as {
+				title?: string;
+				goal?: string;
+				targets?: { script?: string; procedures?: string[] }[];
+				nodes?: { label?: string }[];
+				openQuestions?: string[];
+			};
+			const targets = (parsed.targets ?? [])
+				.map((t) => [t.script, t.procedures?.length ? `(${t.procedures.join(", ")})` : ""].filter(Boolean).join(" "))
+				.filter(Boolean);
+			const steps = (parsed.nodes ?? [])
+				.map((n) => n.label?.trim())
+				.filter((l): l is string => Boolean(l))
+				.slice(0, 12);
+			return [
+				parsed.title ? `Title: ${parsed.title}` : "",
+				parsed.goal ? `Goal: ${cut(parsed.goal.replace(/\s+/g, " "), 300)}` : "",
+				targets.length ? `Targets: ${targets.join("; ")}` : "",
+				steps.length ? `Steps: ${steps.join(" -> ")}` : "",
+				parsed.openQuestions?.length ? `Open questions: ${parsed.openQuestions.slice(0, 4).join("; ")}` : "",
+			]
+				.filter(Boolean)
+				.join("\n");
+		} catch {
+			return cut(clean, 1400);
+		}
+	}
+	const body = frontMatter(clean).body.trim();
+	return cut(body || clean, 1800);
+}
+
+/** Fetches compact staged + unstaged unified diff via `backend.gitDiff` (falling back cleanly outside git). */
+async function buildGitDiffSlice(): Promise<string> {
+	const [stagedDiff, unstagedDiff] = await Promise.all([
+		backend.gitDiff({ staged: true, maxBytes: 24000 }).catch(() => ""),
+		backend.gitDiff({ maxBytes: 24000 }).catch(() => ""),
+	]);
+	const chunks: string[] = [];
+	if (stagedDiff.trim()) chunks.push(`STAGED GIT DIFF:\n\`\`\`diff\n${cut(stagedDiff.trim(), 5500)}\n\`\`\``);
+	if (unstagedDiff.trim()) chunks.push(`UNSTAGED GIT DIFF:\n\`\`\`diff\n${cut(unstagedDiff.trim(), 5500)}\n\`\`\``);
+	if (!chunks.length) return "";
+	return cut(chunks.join("\n\n"), 9500);
+}
+
 type PreparedContext = {
 	text: string;
 	labels: string[];
@@ -199,8 +303,9 @@ type PreparedContext = {
 };
 
 /**
- * Computes the exact pending context delta (ticket work, schema, registries, STATE.md, attached files)
- * with content-hash change detection: unchanged already-sent slices are skipped, while edited slices re-send automatically.
+ * Computes the exact pending context delta (ticket work, Git diff, governing docs, schema,
+ * referenced tables, registries, STATE.md, attached files) with content-hash change detection:
+ * unchanged already-sent slices are skipped, while edited slices re-send automatically.
  */
 async function prepareContextDelta(
 	ticket: string,
@@ -230,10 +335,42 @@ async function prepareContextDelta(
 	};
 
 	// 1. Core ticket work (without standalone toggles so each slice is independently hash-tracked across Turn 1 and Turn 2+).
+	const sentByTicket = new Set<string>();
 	if (ticket) {
 		const work = await workPrompt(ticket, { includeSchema: false, includeRegistries: false, includeState: false, ticketFiles: [] });
 		if (work) {
 			addSlice(`ticket:${ticket.toLowerCase()}`, work.label, work.text);
+			const wf = workFor(all, ticket);
+			if (wf) {
+				sentByTicket.add(canonical(wf.ticket.path));
+				for (const s of wf.specs) sentByTicket.add(canonical(s.path));
+				for (const p of wf.plans ?? []) sentByTicket.add(canonical(p.path));
+			}
+		}
+	}
+
+	// 1b. Compact staged + unstaged Git diff (Wave 1.4).
+	if (withGitDiff()) {
+		const diffText = await buildGitDiffSlice();
+		if (diffText) addSlice("git-diff", "git diff", diffText);
+	}
+
+	// 1c. Governing docs for active / changed code & SQL files (even across tickets or with Ticket=None).
+	if (withGoverningDocs() && root) {
+		const govItems = collectGoverningDocsForContext(all, root, activePath());
+		for (const item of govItems) {
+			const dk = canonical(item.file.path);
+			if (sentByTicket.has(dk)) continue;
+			const raw = await readForPrompt(item.file.path);
+			if (raw === null) continue;
+			const rel = relativeTo(root, item.file.path).replace(/\\/g, "/");
+			const excerpt = formatGoverningDocExcerpt(item.file, raw);
+			if (!excerpt) continue;
+			addSlice(
+				`gov:${dk}`,
+				baseName(item.file.path),
+				`GOVERNING DOC ${rel} (${item.reason}, for ${item.forFiles.slice(0, 3).join(", ")}):\n${excerpt}`,
+			);
 		}
 	}
 
@@ -460,15 +597,12 @@ async function reviewProposedEdit(replyText: string, preferredPath?: string) {
 		if (picked === PICK_OTHER) targetPath = "";
 	}
 	if (!targetPath) {
-		const files = await backend.files().catch(() => []);
-		const rels = files
-			.map((p) => relativeTo(root, p).replace(/\\/g, "/"))
-			.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base", numeric: true }))
-			.slice(0, 1000);
-		const chosen = await choose("Select workspace file to diff against", rels);
-		if (!chosen) return;
-		targetPath = resolvePath(root, chosen);
-		if (!isInside(root, targetPath)) return;
+		const chosen = await browseWorkspaceFile({
+			title: "Select workspace file to diff against",
+			root,
+		});
+		if (!chosen || !isInside(root, chosen.path)) return;
+		targetPath = chosen.path;
 	}
 
 	const original = (await readForPrompt(targetPath)) ?? "";
@@ -553,12 +687,71 @@ function withQuestionAnswer(docText: string, answerMd: string): string {
 	return `${before}${eol}${body}${eol}${tail ? `${eol}${tail}` : ""}`;
 }
 
+/** Creates a new spec document in `docs/specs/` from an Agent reply, pre-linked to the active ticket. */
+async function saveReplyAsSpec(replyText: string, ticketKey?: string): Promise<string | null> {
+	const root = state.workspace?.root;
+	if (!root || !state.project) {
+		notify("Open a folder first.");
+		return null;
+	}
+	const headingMatch = /^#\s+([^\r\n]+)/m.exec(replyText.trim());
+	const defaultTitle = headingMatch ? headingMatch[1]!.trim() : "";
+	const title = (await askDialog("Spec title", defaultTitle))?.trim();
+	if (!title) return null;
+	const fileSlug = slug(title);
+	if (!fileSlug) {
+		notify("Give the spec a title with at least one letter or digit.", "error");
+		return null;
+	}
+	const docsParts = (state.project.docs ?? "docs").split(/[\\/]/).filter((part) => part && part !== ".");
+	const specsDir = joinPath(root, ...docsParts, DOC_FOLDERS.specs);
+	const dest = joinPath(specsDir, `${fileSlug}.md`);
+	if ((await readForPrompt(dest)) !== null) {
+		const OPEN_EXISTING = "Open existing spec";
+		const picked = await choose(`${relativeTo(root, dest)} already exists.`, [OPEN_EXISTING]);
+		if (picked === OPEN_EXISTING) {
+			await openFile(dest, { keep: true });
+			return dest;
+		}
+		return null;
+	}
+	const linkedTicket = ticketKey?.trim() || state.settings.activeTicket?.trim() || ticketAtHand() || "";
+	const fmLines = [
+		"---",
+		`title: ${frontValue(title)}`,
+		...(linkedTicket ? [`ticket: ${linkedTicket}`] : []),
+		"status: draft",
+		"---",
+		"",
+	];
+	const cleanBody = replyText.trim().replace(/^#\s+[^\r\n]+\r?\n+/, "");
+	const content = `${fmLines.join("\n")}# ${title}\n\n${cleanBody}\n`;
+	try {
+		await backend.create(dest, "file");
+		await backend.write(dest, content);
+	} catch (e: any) {
+		notify(String(e?.message ?? e), "error");
+		return null;
+	}
+	setState("treeVersion", (v) => v + 1);
+	setState("mdText", canonical(dest), true);
+	refreshDocAudit();
+	await openFile(dest, { keep: true });
+	notify(`Saved spec ${baseName(dest)}${linkedTicket ? ` linked to ${linkedTicket}` : ""}.`);
+	return dest;
+}
+
 /** One entry of the conversation. A reply is Markdown with 1-click actions to capture it into project docs or diff it in ReviewView. */
 function EntryView(props: { entry: Entry }) {
 	const html = createMemo(() => (props.entry.role === "agent" ? renderReply(props.entry.text) : ""));
 	const entryTicket = () => props.entry.turn?.ticket;
 	const entryCode = () => props.entry.turn?.codePath;
-	const activeTicketForReply = () => entryTicket() || state.settings.activeTicket?.trim() || ticketForFile(docs(), entryCode(), state.workspace?.root) || "";
+	const activeTicketForReply = () =>
+		entryTicket() ||
+		state.settings.activeTicket?.trim() ||
+		(pickedTicket() || "").trim() ||
+		ticketForFile(docs(), entryCode(), state.workspace?.root) ||
+		"";
 	const openQuestionsForTicket = createMemo(() => {
 		const key = activeTicketForReply();
 		if (!key) return [] as DocFile[];
@@ -645,13 +838,16 @@ function EntryView(props: { entry: Entry }) {
 								Save as Snippet
 							</button>
 						</Show>
-						<button type="button" class="link" title="Save this reply as a Decision ADR" onClick={() => void promoteToKnowledge("decisions", { body: props.entry.text, ticket: entryTicket(), codePath: entryCode() })}>
+						<button type="button" class="link" title="Save this reply as a Spec in docs/specs/ linked to the active ticket" onClick={() => void saveReplyAsSpec(props.entry.text, activeTicketForReply() || undefined)}>
+							Save as Spec…
+						</button>
+						<button type="button" class="link" title="Save this reply as a Decision ADR" onClick={() => void promoteToKnowledge("decisions", { body: props.entry.text, ticket: activeTicketForReply() || undefined, codePath: entryCode() })}>
 							Save as Decision
 						</button>
-						<button type="button" class="link" title="Save this reply as a Question" onClick={() => void promoteToKnowledge("questions", { body: props.entry.text, ticket: entryTicket(), codePath: entryCode() })}>
+						<button type="button" class="link" title="Save this reply as a Question" onClick={() => void promoteToKnowledge("questions", { body: props.entry.text, ticket: activeTicketForReply() || undefined, codePath: entryCode() })}>
 							Save as Question
 						</button>
-						<button type="button" class="link" title="Save this reply as a Reference note" onClick={() => void promoteToKnowledge("reference", { body: props.entry.text, ticket: entryTicket(), codePath: entryCode() })}>
+						<button type="button" class="link" title="Save this reply as a Reference note" onClick={() => void promoteToKnowledge("reference", { body: props.entry.text, ticket: activeTicketForReply() || undefined, codePath: entryCode() })}>
 							Save as Note
 						</button>
 						<Show when={openQuestionsForTicket().length > 0}>
@@ -664,7 +860,7 @@ function EntryView(props: { entry: Entry }) {
 								Answer open question…
 							</button>
 						</Show>
-						<Show when={entryTicket()}>
+						<Show when={activeTicketForReply()}>
 							{(key) => (
 								<button type="button" class="link" title={`Append this reply as a dated note on ${key()}`} onClick={() => void appendNoteToTicket(key(), props.entry.text)}>
 									Append to {key()}
@@ -720,6 +916,8 @@ export function AgentPanel() {
 				setWithRefTables(false);
 				setWithRegistries(false);
 				setWithState(false);
+				setWithGitDiff(false);
+				setWithGoverningDocs(false);
 				setAttachedFiles([]);
 			}
 			setDraft(handed.text);
@@ -763,6 +961,16 @@ export function AgentPanel() {
 		const txt = selectionContext()?.code || doc.model.getValue() || "";
 		return referencedSchemaTables(txt, docs(), 6);
 	});
+	const detectedGoverningDocs = createMemo(() => {
+		const root = state.workspace?.root ?? "";
+		if (!root) return [] as GoverningContextItem[];
+		gitVersion();
+		return collectGoverningDocsForContext(
+			docs().filter((d) => d.exists && !isCatalog(d)),
+			root,
+			activePath(),
+		);
+	});
 	// Real measured next-turn delta size & token budget (approx 1 token ≈ 4 chars), reflecting sent/edited/pending slices.
 	const [measuredDelta] = createResource(
 		() => {
@@ -775,6 +983,10 @@ export function AgentPanel() {
 				refTables: withRefTables(),
 				regs: withRegistries(),
 				st: withState(),
+				gitDiff: withGitDiff(),
+				govDocs: withGoverningDocs(),
+				gitVer: gitVersion(),
+				curPath: activePath() ?? "",
 				files: attachedFiles().map((f) => `${f.path}|${f.rel}`),
 				tree: state.treeVersion,
 				sent: sentTick(),
@@ -832,26 +1044,17 @@ export function AgentPanel() {
 		if (!root) return notify("Open a folder first.");
 		const already = new Set(attachedFiles().map((f) => canonical(f.path)));
 		const ticketFiles = (activeTicketDoc()?.ticketFiles ?? []).filter((f) => !already.has(canonical(f.path)));
-		const BROWSE_ALL = "Pick any workspace file…";
-		if (ticketFiles.length) {
-			const picked = await choose(
-				`Attach a file from ${ticket()}'s folder (or any workspace file)`,
-				[...ticketFiles.map((f) => f.rel), BROWSE_ALL],
-			);
-			if (!picked) return;
-			if (picked !== BROWSE_ALL) {
-				const hit = ticketFiles.find((f) => f.rel === picked);
-				if (hit) setAttachedFiles((prev) => [...prev, hit]);
-				return;
-			}
-		}
-		const allWs = (await backend.files().catch(() => [])).filter((p) => !already.has(canonical(p)));
-		if (!allWs.length) return notify("No additional workspace files available to attach.");
-		const rels = allWs.slice(0, 250).map((p) => relativeTo(root, p).replace(/\\/g, "/"));
-		const picked = await choose("Attach a workspace file to the next prompt", rels);
-		if (!picked) return;
-		const full = resolvePath(root, picked);
-		if (isInside(root, full)) setAttachedFiles((prev) => [...prev, { path: full, rel: picked }]);
+		const picked = await browseWorkspaceFile({
+			title: "Attach file to Agent",
+			root,
+			pinned: ticketFiles.map((f) => ({ path: f.path, rel: f.rel, detail: f.rel })),
+			pinnedLabel: ticket() || "Ticket",
+			exclude: attachedFiles().map((f) => f.path),
+		});
+		if (!picked || !isInside(root, picked.path)) return;
+		setAttachedFiles((prev) =>
+			prev.some((f) => canonical(f.path) === canonical(picked.path)) ? prev : [...prev, picked],
+		);
 	};
 	const modelOf = (ref: string) => agent.models.find((m) => modelRef(m) === ref);
 	const usable = () => agent.models.filter((m) => m.tools);
@@ -982,6 +1185,51 @@ export function AgentPanel() {
 		const title = activeTicketDoc()?.title;
 		return `Draft concise release notes and a dated STATE.md completion update for ${key}${title ? ` (${title})` : ""}, summarizing what changed, impacted STARLIMS objects, verification steps, and any rollback notes.`;
 	};
+	/** Grounds the doc-drift starter in actual Git diff + governing doc excerpts for tool-less local models. */
+	const runDocDriftStarter = () => {
+		const text = docDriftStarterPrompt();
+		if (!text) return;
+		setWithGitDiff(true);
+		setWithGoverningDocs(true);
+		setWithSelection(false);
+		setDraft(text);
+		setNotSent("");
+		const govCount = detectedGoverningDocs().length;
+		notify(
+			`Enabled + Git diff and + Governing docs (${govCount} ${govCount === 1 ? "doc" : "docs"}) for doc-drift review.`,
+		);
+		box?.focus();
+	};
+	/** Grounds release-notes drafting in local Git commits for the active ticket + current Git diff + STATE.md. */
+	const runReleaseNotesStarter = async () => {
+		const key = ticket();
+		if (!key) return;
+		setWithGitDiff(true);
+		setWithState(true);
+		const commits = await backend.gitTicketLog(key, 25).catch(() => []);
+		const basePrompt = releaseNotesStarterPrompt();
+		let fullPrompt = basePrompt;
+		if (commits.length) {
+			const summaryLines = commits.slice(0, 15).map((c) => {
+				const files = c.files
+					.slice(0, 4)
+					.map((f) => `${f.status[0] ?? "M"} ${f.path}`)
+					.join(", ");
+				const more = c.files.length > 4 ? ` (+${c.files.length - 4} more)` : "";
+				return `- ${c.shortSha} ${c.subject}${files ? ` [${files}${more}]` : ""}`;
+			});
+			if (commits.length > 15) summaryLines.push(`- … and ${commits.length - 15} earlier commits`);
+			fullPrompt = `${basePrompt}\n\nLocal commits mentioning ${key} (${commits.length}):\n${summaryLines.join("\n")}`;
+		}
+		setDraft(fullPrompt);
+		setNotSent("");
+		notify(
+			commits.length
+				? `Embedded ${commits.length} local ${commits.length === 1 ? "commit" : "commits"} for ${key} and enabled + Git diff & + STATE.md.`
+				: `Enabled + Git diff & + STATE.md for ${key} release notes (no local commits mentioning ${key} yet).`,
+		);
+		box?.focus();
+	};
 	const promptMenuItems = (): MenuItem[] => {
 		const items: MenuItem[] = [];
 		const kept = keptPrompts();
@@ -993,13 +1241,62 @@ export function AgentPanel() {
 		if (changedCodeWithDocs().length) {
 			contextual.push({
 				label: `Check doc drift for ${changedCodeWithDocs().length} changed ${changedCodeWithDocs().length === 1 ? "file" : "files"}`,
-				run: () => (setDraft(docDriftStarterPrompt()), setNotSent(""), box?.focus()),
+				run: () => runDocDriftStarter(),
 			});
 		}
 		if (ticket()) {
 			contextual.push({
 				label: `Draft release notes / STATE.md update (${ticket()})`,
-				run: () => (setDraft(releaseNotesStarterPrompt()), setNotSent(""), box?.focus()),
+				run: () => void runReleaseNotesStarter(),
+			});
+		}
+		const curPath = activePath() ?? "";
+		const root = state.workspace?.root ?? "";
+		const activeIsSsl = Boolean(curPath && (activeDoc()?.model.getLanguageId() === "ssl" || /\.(ssl|srvscr|ds)$/i.test(curPath)));
+		const govDocs = detectedGoverningDocs();
+		if (activeIsSsl && (ticket() || govDocs.length > 0)) {
+			const relSsl = root ? relativeTo(root, curPath).replace(/\\/g, "/") : baseName(curPath);
+			contextual.push({
+				label: "Review active SSL against spec & decisions",
+				run: () => {
+					if (govDocs.length > 0) setWithGoverningDocs(true);
+					setDraft(
+						`Review \`${relSsl}\` against its governing spec, plan, and settled project decisions. List any behavioral mismatches, missing guardrails, or house-style issues with exact line references.`,
+					);
+					setNotSent("");
+					box?.focus();
+				},
+			});
+		}
+		if (state.workspace) {
+			contextual.push({
+				label: "Draft an ADR decision record (Context / Decision / Consequences)",
+				run: () => {
+					const key = ticket();
+					setDraft(
+						`Draft a concise ADR decision record${key ? ` for ${key}` : ""} with YAML frontmatter (title, status: proposed${key ? `, ticket: ${key}` : ""}) and clear sections: ## Context, ## Decision, and ## Consequences.`,
+					);
+					setNotSent("");
+					box?.focus();
+				},
+			});
+		}
+		const activeDocMeta = curPath ? docs().find((d) => d.exists && canonical(d.path) === canonical(curPath)) : undefined;
+		const hasSpecOrTicket = Boolean(ticket() || activeDocMeta?.group === "specs" || govDocs.some((g) => g.file.group === "specs"));
+		if (hasSpecOrTicket) {
+			contextual.push({
+				label: "Generate test cases from active spec / ticket",
+				run: () => {
+					if (!ticket() && govDocs.length > 0) setWithGoverningDocs(true);
+					const targetLabel = ticket()
+						? `${ticket()} and its linked specs`
+						: activeDocMeta?.title || baseName(curPath) || "the active spec";
+					setDraft(
+						`Generate concrete test cases (happy path, boundary conditions, null/empty inputs, and STARLIMS regression checks) from ${targetLabel}. Format each case with Given / When / Expect and a Markdown checklist.`,
+					);
+					setNotSent("");
+					box?.focus();
+				},
 			});
 		}
 		const { stale, missing } = staleCatalogSummary();
@@ -1147,14 +1444,14 @@ export function AgentPanel() {
 							<ul class="agent-starters" aria-label="Questions to start from">
 								<Show when={changedCodeWithDocs().length > 0}>
 									<li>
-										<button title="Check governing docs for drift against your modified code files" onClick={() => (setDraft(docDriftStarterPrompt()), setNotSent(""), box?.focus())}>
+										<button title="Check governing docs for drift against your modified code files (attaches Git diff + governing docs)" onClick={() => runDocDriftStarter()}>
 											Check doc drift for changed files ({changedCodeWithDocs().length})
 										</button>
 									</li>
 								</Show>
 								<Show when={ticket()}>
 									<li>
-										<button title={`Draft release notes and a STATE.md update for ${ticket()}`} onClick={() => (setDraft(releaseNotesStarterPrompt()), setNotSent(""), box?.focus())}>
+										<button title={`Draft release notes and a STATE.md update for ${ticket()} grounded in local Git commits and diff`} onClick={() => void runReleaseNotesStarter()}>
 											Draft release notes / STATE.md update ({ticket()})
 										</button>
 									</li>
@@ -1309,6 +1606,34 @@ export function AgentPanel() {
 							onClick={() => setWithState((v) => !v)}
 						>
 							+ STATE.md
+						</button>
+						<button
+							type="button"
+							class="agent-ctx-chip"
+							classList={{ active: withGitDiff() }}
+							aria-pressed={withGitDiff()}
+							title={
+								gitStatus()
+									? `Include compact staged + unstaged Git diff (${gitStatus()!.files.length} changed ${gitStatus()!.files.length === 1 ? "file" : "files"})`
+									: "Include compact staged + unstaged Git diff (no git repository detected)"
+							}
+							onClick={() => setWithGitDiff((v) => !v)}
+						>
+							+ Git diff
+						</button>
+						<button
+							type="button"
+							class="agent-ctx-chip"
+							classList={{ active: withGoverningDocs() }}
+							aria-pressed={withGoverningDocs()}
+							title={
+								detectedGoverningDocs().length
+									? `Include compact excerpts of governing docs for active/changed code files: ${detectedGoverningDocs().map((g) => g.file.title || g.file.name).join(", ")}`
+									: "Include compact excerpts of governing docs for active/changed code files (0 detected right now)"
+							}
+							onClick={() => setWithGoverningDocs((v) => !v)}
+						>
+							+ Governing docs{detectedGoverningDocs().length ? ` (${detectedGoverningDocs().length})` : ""}
 						</button>
 						<button
 							type="button"

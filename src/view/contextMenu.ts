@@ -9,10 +9,11 @@
 import { askedByKey, boxMenu } from "../shared/menuBar";
 import { copyText } from "./commands";
 import { runInBox } from "./MenuBar";
-import { chooseFromMenu } from "./panels/RowMenu";
+import { chooseFromMenu, type RowMenuEntry } from "./panels/RowMenu";
 import type { Point } from "./panels/Rows";
 
 const NAMES = { cut: "Cut", copy: "Copy", paste: "Paste", selectAll: "Select all" } as const;
+const KEYS = { cut: "Ctrl+X", copy: "Ctrl+C", paste: "Ctrl+V", selectAll: "Ctrl+A" } as const;
 
 /** A box that text is typed into. Not the text editor's own hidden one: the code has the editor's menu. */
 function typedInto(el: Element | null): HTMLInputElement | HTMLTextAreaElement | HTMLElement | null {
@@ -79,8 +80,13 @@ export function installContextMenu() {
 		if (box) {
 			const items = boxMenu({ ...stateOf(box), canPaste: Boolean(navigator.clipboard?.readText) });
 			if (!items.length) return;
+			const clip = items.filter((item) => item !== "selectAll");
+			const entries: RowMenuEntry[] = [
+				...clip.map((item) => ({ label: NAMES[item], value: NAMES[item], keys: KEYS[item] })),
+				...(items.includes("selectAll") ? (["separator", { label: NAMES.selectAll, value: NAMES.selectAll, keys: KEYS.selectAll }] as RowMenuEntry[]) : []),
+			];
 			// The keyboard stays in the box: one that saves or shuts when it loses the keyboard is not to do so for its menu.
-			void chooseFromMenu("Actions for this text box", items.map((item) => NAMES[item]), at, { box }).then((picked) => {
+			void chooseFromMenu("Actions for this text box", entries, at, { box }).then((picked) => {
 				const name = items.find((item) => NAMES[item] === picked);
 				if (name && box.isConnected) void runInBox(box, name);
 			});
@@ -97,6 +103,6 @@ export function installContextMenu() {
 		const pointed = !askedByKey(keyAt, pressAt, e.timeStamp);
 		const onWords = pointed ? wordBoxes(selection.getRangeAt(0)).some((rect) => e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom) : selection.containsNode(on, true);
 		if (!onWords) return;
-		void chooseFromMenu("Actions for the selected text", [NAMES.copy], at).then((picked) => picked === NAMES.copy && void copyText(words, "Copied the selected text."));
+		void chooseFromMenu("Actions for the selected text", [{ label: NAMES.copy, value: NAMES.copy, keys: KEYS.copy }], at).then((picked) => picked === NAMES.copy && void copyText(words, "Copied the selected text."));
 	});
 }

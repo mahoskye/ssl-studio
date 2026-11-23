@@ -2,6 +2,7 @@
 // (`git status --porcelain=v2 --branch -z`): the branch, and each file that
 // differs, with what is staged for the next commit and what is not. No
 // process and no file system: git's text in, a list out.
+import type { RowMenuEntry } from "./contextMenu";
 
 /** How a file differs. "conflict" is a merge git could not finish for it. */
 export type Change = "added" | "modified" | "deleted" | "renamed" | "untracked" | "conflict";
@@ -97,7 +98,18 @@ export function commitProblem(status: GitStatus | null, message: string): string
 }
 
 /** What can be done to a changed file from its row, by name. */
-export const GIT_ACTIONS = { show: "Show the change", open: "Open the file", stage: "Stage", unstage: "Unstage", discard: "Discard changes…", trash: "Move to trash…" } as const;
+export const GIT_ACTIONS = {
+	show: "Show the change",
+	open: "Open the file",
+	stage: "Stage",
+	unstage: "Unstage",
+	discard: "Discard changes…",
+	trash: "Move to trash…",
+	copyPath: "Copy path",
+	copyRelative: "Copy path in the project",
+	copyName: "Copy name",
+	showInExplorer: "Show in the Explorer",
+} as const;
 
 /**
  * What a row's menu offers. A removed file has nothing to open. Only what is not staged can be let go, and a
@@ -108,4 +120,28 @@ export function rowActions(file: GitFile, staged: boolean): string[] {
 	const kind = staged ? file.staged : file.unstaged;
 	const letGo = staged || kind === "conflict" ? [] : [kind === "untracked" ? GIT_ACTIONS.trash : GIT_ACTIONS.discard];
 	return [GIT_ACTIONS.show, ...(kind === "deleted" ? [] : [GIT_ACTIONS.open]), staged ? GIT_ACTIONS.unstage : GIT_ACTIONS.stage, ...letGo];
+}
+
+/** Sectioned context-menu entries for a Git row: inspect, index, path/reveal, and isolated destructive discard. */
+export function rowMenuEntries(file: GitFile, staged: boolean, inWorkspace = true): RowMenuEntry[] {
+	const kind = staged ? file.staged : file.unstaged;
+	const deleted = kind === "deleted";
+	const letGo = staged || kind === "conflict" ? null : kind === "untracked" ? GIT_ACTIONS.trash : GIT_ACTIONS.discard;
+	return [
+		GIT_ACTIONS.show,
+		...(deleted ? [] : [GIT_ACTIONS.open]),
+		"separator",
+		staged ? GIT_ACTIONS.unstage : GIT_ACTIONS.stage,
+		"separator",
+		{
+			label: "Copy path",
+			children: [
+				GIT_ACTIONS.copyPath,
+				...(inWorkspace ? [GIT_ACTIONS.copyRelative] : []),
+				GIT_ACTIONS.copyName,
+			],
+		},
+		...(deleted || !inWorkspace ? [] : [GIT_ACTIONS.showInExplorer]),
+		...(letGo ? (["separator", { label: letGo, value: letGo, danger: true }] as RowMenuEntry[]) : []),
+	];
 }

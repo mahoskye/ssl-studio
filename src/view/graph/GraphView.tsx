@@ -7,15 +7,18 @@
 // a plain list.
 import { docs } from "../project";
 import { codeMatchesRef, docsGoverningFile, scriptsForTicket } from "../../shared/workContext";
+import { referencedSchemaTables } from "../../shared/schemaIndex";
+import { registryTitle } from "../../shared/projectDocs";
 import "./graphExtra.css";
 import { Icon } from "../Icon";
+import { ICON } from "../icons";
 import { CenterTabStrip } from "../editor/CenterTabStrip";
 import ELK from "elkjs/lib/elk.bundled.js";
 import { batch, createEffect, createMemo, createSignal, createUniqueId, For, on, onCleanup, Show } from "solid-js";
 import { level } from "../../shared/houseStyle";
 import { backend } from "../backend";
 import { regionColor } from "../editor/regions";
-import { openFile, setState, state } from "../state";
+import { canonical, documents, notify, openFile, openToSide, setState, state } from "../state";
 import { canvasMeasure, clearLabels, clearOf, fitShare, fitView, legibleScale, mapArea, outOfSight, nearest, recall, remember, reveal, splinePath, splinePoint, zoomAt, type Point } from "./canvas";
 import { loadGraph } from "./load";
 import { Minimap, type MapBox } from "./Minimap";
@@ -24,8 +27,9 @@ import { Menu, type MenuItem } from "../Menu";
 import { savePicture } from "./picture";
 import { registerGraphBridge } from "./graphBridge";
 import { session } from "../lsp/session";
-import { aroundFocus, callList, choices, sameStep, dirId, keptFolds, withoutUnresolved, fold, gather, isFolderEnd, FOLD_ABOVE, FOLD_DIRS_ABOVE, foldId, isDir, isFold, RELATION_WORDS, scriptOf, topLabel, UNRESOLVED, visible, type Direction, type DrawnEdge, type Filter, type FocusLink, type Graph, type ListedProc, relationOf, type Relation } from "./model";
-import { baseName, dirName, relativeTo } from "../../shared/paths";
+import { aroundFocus, callList, choices, computeImpactAnalysis, formatImpactMarkdown, sameStep, dirId, keptFolds, withoutUnresolved, fold, gather, isFolderEnd, FOLD_ABOVE, FOLD_DIRS_ABOVE, foldId, isDir, isFold, RELATION_WORDS, scriptOf, ticketSubgraphFilter, topLabel, UNRESOLVED, visible, type Direction, type DrawnEdge, type Filter, type FocusLink, type Graph, type ImpactDocSummary, type ImpactNode, type ImpactReport, type ListedProc, relationOf, type Relation } from "./model";
+import { baseName, dirName, isInside, joinPath, relativeTo } from "../../shared/paths";
+import { submenuOrInline, type RowMenuEntry } from "../../shared/contextMenu";
 
 type Box = {
 	id: string;
@@ -101,14 +105,33 @@ const KIND_WORDS: Record<string, string> = { procedure: "procedure", datasource:
 
 const [ticketHighlightKey, setTicketHighlightKeySignal] = createSignal<string | null>(null);
 const [ticketHighlightCount, setTicketHighlightCount] = createSignal(0);
+const [ticketSubgraphOnly, setTicketSubgraphOnlySignal] = createSignal(false);
+const [ticketImpactRequest, setTicketImpactRequest] = createSignal<{ key?: string; seq: number } | null>(null);
+let ticketImpactSeq = 0;
 
 /** Currently highlighted ticket key in Call Graph (shared with Palette's Ticket overlay). */
 export const graphTicketHighlight = ticketHighlightKey;
 /** Number of Call Graph scripts matched by the current ticket highlight. */
 export const graphHighlightedCount = ticketHighlightCount;
+/** Whether Call Graph is filtered to the highlighted ticket's scripts + 1-hop callers/callees. */
+export const graphTicketSubgraph = ticketSubgraphOnly;
 /** Sets or clears the Call Graph ticket overlay highlight. */
 export function setGraphTicketHighlight(key: string | null) {
-	setTicketHighlightKeySignal(key?.trim() || null);
+	const next = key?.trim() || null;
+	setTicketHighlightKeySignal(next);
+	if (!next) setTicketSubgraphOnlySignal(false);
+}
+/** Toggles isolating Call Graph to the ticket's architectural slice (+ 1-hop neighbors). */
+export function setGraphTicketSubgraph(on: boolean) {
+	if (on && !ticketHighlightKey()) {
+		const active = state.settings.activeTicket?.trim() || "";
+		if (active) setTicketHighlightKeySignal(active);
+	}
+	setTicketSubgraphOnlySignal(on);
+}
+/** Requests a ticket-wide Impact / Blast-Radius Analysis from Palette or external controls. */
+export function requestGraphTicketImpact(key?: string) {
+	setTicketImpactRequest({ key: key?.trim() || undefined, seq: ++ticketImpactSeq });
 }
 
 export function GraphView() {
@@ -155,10 +178,22 @@ export function GraphView() {
 	/** Whether the list of the graph's keys or the shape/edge legend popover is showing. */
 	const [keysOpen, setKeysOpen] = createSignal(false);
 	const [legendOpen, setLegendOpen] = createSignal(false);
+	const [impactOpen, setImpactOpen] = createSignal(false);
+	const [impactHops, setImpactHops] = createSignal(4);
+	const [impactSeeds, setImpactSeeds] = createSignal<{ ids: string[]; label: string; ticketKey?: string } | null>(null);
+	const [impactReport, setImpactReport] = createSignal<ImpactReport | null>(null);
+	const [impactScanning, setImpactScanning] = createSignal(false);
+	let impactRunSeq = 0;
+
 	createEffect(
 		on(
 			() => state.workspace?.root,
-			() => setGraphTicketHighlight(null),
+			() => {
+				setGraphTicketHighlight(null);
+				setImpactOpen(false);
+				setImpactReport(null);
+				setImpactSeeds(null);
+			},
 			{ defer: true },
 		),
 	);
@@ -198,18 +233,236 @@ export function GraphView() {
 	createEffect(() => {
 		setTicketHighlightCount(highlightedTicketPaths().size);
 	});
+	createEffect(
+		on(
+			() => [ticketSubgraphOnly(), ticketHighlightKey()] as const,
+			([subOn]) => {
+				fittedFor = "";
+				if (subOn && filter().mode === "around") {
+					setFilter({ ...filter(), mode: "all" });
+				}
+			},
+			{ defer: true },
+		),
+	);
 	onCleanup(() => setTicketHighlightCount(0));
 	const keysId = createUniqueId();
 	const legendId = createUniqueId();
 	const toggleKeys = () => {
 		const next = !keysOpen();
 		setKeysOpen(next);
-		if (next) setLegendOpen(false);
+		if (next) {
+			setLegendOpen(false);
+			setImpactOpen(false);
+		}
 	};
 	const toggleLegend = () => {
 		const next = !legendOpen();
 		setLegendOpen(next);
-		if (next) setKeysOpen(false);
+		if (next) {
+			setKeysOpen(false);
+			setImpactOpen(false);
+		}
+	};
+
+	/** Governing docs per script path, computed in both Canvas and List modes. */
+	const governingDocsByScript = createMemo(() => {
+		const map = new Map<string, ReturnType<typeof docsGoverningFile>>();
+		const allDocs = docs();
+		if (!allDocs.length) return map;
+		const root = state.workspace?.root;
+		for (const s of graph()?.scripts ?? []) {
+			if (!s.path || s.path === UNRESOLVED) continue;
+			const gov = docsGoverningFile(allDocs, s.path, root);
+			if (gov.length) map.set(s.path, gov);
+		}
+		return map;
+	});
+
+	const runImpactAnalysis = (seedIds: string[], label: string, opts?: { ticketKey?: string; hops?: number }) => {
+		const g = graph();
+		if (!g || !seedIds.length) {
+			notify("No call graph nodes available for impact analysis.");
+			return;
+		}
+		const hops = opts?.hops ?? impactHops();
+		const run = ++impactRunSeq;
+		setImpactSeeds({ ids: seedIds, label, ticketKey: opts?.ticketKey });
+		setImpactOpen(true);
+		setKeysOpen(false);
+		setLegendOpen(false);
+
+		const base = computeImpactAnalysis(g, seedIds, hops);
+		const allDocs = docs();
+		const root = state.workspace?.root;
+
+		// Aggregate governing docs across seed scripts first, then transitively affected scripts.
+		const govMap = new Map<string, ImpactDocSummary>();
+		const testScriptSet = new Set<string>();
+		const orderedScripts = [...new Set([...base.seedScripts, ...base.affectedScripts])];
+		for (const scriptPath of orderedScripts) {
+			const gov = docsGoverningFile(allDocs, scriptPath, root);
+			for (const entry of gov) {
+				const key = canonical(entry.file.path);
+				if (!govMap.has(key)) {
+					const docLabel =
+						entry.file.group === "registries"
+							? registryTitle(entry.file.name)
+							: entry.file.ticket && entry.file.title && !entry.file.title.toLowerCase().startsWith(entry.file.ticket.toLowerCase())
+								? `${entry.file.ticket}: ${entry.file.title}`
+								: entry.file.title || entry.file.heading || entry.file.name;
+					govMap.set(key, {
+						label: docLabel,
+						group: entry.file.group,
+						path: entry.file.path,
+						reason: entry.reason,
+						ticket: entry.file.ticket,
+					});
+				}
+				for (const ts of entry.file.testScripts ?? []) {
+					if (ts.trim()) testScriptSet.add(ts.trim());
+				}
+			}
+		}
+
+		// Also include any workspace test scripts in the call graph that directly call a seed script.
+		const testFolder = (state.project?.tests || "tests").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "").toLowerCase();
+		for (const caller of base.upstream) {
+			const relPath = rel(caller.path).replace(/\\/g, "/");
+			if (testFolder && relPath.toLowerCase().startsWith(`${testFolder}/`)) {
+				testScriptSet.add(relPath);
+			}
+		}
+
+		const initialReport: ImpactReport = {
+			...base,
+			targetLabel: label,
+			governingDocs: [...govMap.values()],
+			testScripts: [...testScriptSet].sort((a, b) => a.localeCompare(b)),
+			schemaTables: [],
+		};
+		setImpactReport(initialReport);
+
+		// Async schema table scan across seed scripts and downstream `.ds` data sources.
+		const scanFiles = [...new Set([...base.seedScripts, ...base.dataSources.map((d) => d.path)])].filter((p) => p && p !== UNRESOLVED).slice(0, 16);
+		if (!scanFiles.length || !allDocs.length) {
+			setImpactScanning(false);
+			return;
+		}
+		setImpactScanning(true);
+		void (async () => {
+			const chunks: string[] = [];
+			for (const filePath of scanFiles) {
+				const openText = documents.get(canonical(filePath))?.model.getValue();
+				if (openText !== undefined) {
+					chunks.push(openText);
+					continue;
+				}
+				const disk = await backend.read(filePath).then(
+					(f) => f.text,
+					() => "",
+				);
+				if (disk) chunks.push(disk);
+			}
+			if (run !== impactRunSeq) return;
+			const tables = referencedSchemaTables(chunks.join("\n"), allDocs, 16).map((d) => ({
+				name: d.title || baseName(d.path).replace(/\.[^.]+$/, ""),
+				path: d.path,
+			}));
+			setImpactReport((prev) => (prev ? { ...prev, schemaTables: tables } : prev));
+			setImpactScanning(false);
+		})();
+	};
+
+	const runTicketImpactAnalysis = async (explicitKey?: string) => {
+		const g = graph();
+		if (!g) {
+			notify("Build the call graph first.");
+			return;
+		}
+		let key = explicitKey?.trim() || ticketHighlightKey()?.trim() || state.settings.activeTicket?.trim() || "";
+		if (!key) {
+			const tickets = docs().filter((d) => d.exists && d.group === "tickets" && d.ticket);
+			if (tickets.length) {
+				const { choose } = await import("../dialogs");
+				const labels = tickets.map((t) => `${t.ticket}: ${t.title || t.name}`);
+				const picked = await choose("Run Impact / Blast-Radius Analysis for which ticket?", labels);
+				if (!picked) return;
+				const idx = labels.indexOf(picked);
+				key = idx >= 0 ? (tickets[idx]?.ticket ?? "") : "";
+			} else if (filter().focus) {
+				const focusId = filter().focus!;
+				runImpactAnalysis([focusId], focusName() || focusId);
+				return;
+			}
+		}
+		if (!key) {
+			notify("No active ticket or focused procedure to analyze.");
+			return;
+		}
+		const refs = scriptsForTicket(docs(), key, { includeDescendants: true });
+		const root = state.workspace?.root;
+		const matches = g.scripts.filter((s) => refs.some((r) => codeMatchesRef(s.path, r, root)));
+		if (!matches.length) {
+			notify(`No Call Graph scripts matched ${key} yet.`);
+			return;
+		}
+		runImpactAnalysis(
+			matches.map((s) => `${s.path}#`),
+			`${key} (${matches.length} ${matches.length === 1 ? "script" : "scripts"})`,
+			{ ticketKey: key },
+		);
+	};
+
+	let handledImpactReq = 0;
+	createEffect(() => {
+		const req = ticketImpactRequest();
+		if (!req || req.seq === handledImpactReq) return;
+		handledImpactReq = req.seq;
+		void runTicketImpactAnalysis(req.key);
+	});
+
+	const copyImpactMarkdown = async () => {
+		const report = impactReport();
+		if (!report) return;
+		const md = formatImpactMarkdown(report);
+		const copied = (await backend.clipboard(md).catch(() => false)) || (await navigator.clipboard?.writeText(md).then(() => true, () => false));
+		notify(copied ? "Copied Impact Analysis Markdown." : "Could not reach the clipboard.", copied ? "info" : "error");
+	};
+
+	const appendImpactToTicket = async () => {
+		const report = impactReport();
+		if (!report) return;
+		let key = impactSeeds()?.ticketKey?.trim() || state.settings.activeTicket?.trim() || ticketHighlightKey()?.trim() || "";
+		if (!key) {
+			const tickets = docs().filter((d) => d.exists && d.group === "tickets" && d.ticket);
+			if (!tickets.length) {
+				notify("No tickets found in docs/tickets/ to append to.");
+				return;
+			}
+			const { choose } = await import("../dialogs");
+			const labels = tickets.map((t) => `${t.ticket}: ${t.title || t.name}`);
+			const picked = await choose("Append Impact Analysis to which ticket?", labels);
+			if (!picked) return;
+			const idx = labels.indexOf(picked);
+			key = idx >= 0 ? (tickets[idx]?.ticket ?? "") : "";
+		}
+		if (!key) return;
+		const { appendNoteToTicket } = await import("../projectDocs");
+		await appendNoteToTicket(key, formatImpactMarkdown(report));
+	};
+
+	const toggleTicketSubgraph = () => {
+		const next = !ticketSubgraphOnly();
+		if (next) {
+			const key = ticketHighlightKey()?.trim() || state.settings.activeTicket?.trim() || "";
+			if (!key) {
+				notify("Highlight or activate a ticket first to filter the graph.");
+				return;
+			}
+			if (!ticketHighlightKey()) setGraphTicketHighlight(key);
+		}
+		setGraphTicketSubgraph(next);
 	};
 	/** A script to bring into sight once the picture is laid out again: the one just folded or unfolded. */
 	let showNext: string | null = null;
@@ -246,7 +499,13 @@ export function GraphView() {
 	const shown = createMemo(() => {
 		const g = graph();
 		if (!g) return null;
-		const keep = visible(g, filter());
+		let keep = visible(g, filter());
+		if (ticketSubgraphOnly() && highlightedTicketPaths().size > 0 && filter().mode !== "around") {
+			const subIds = ticketSubgraphFilter(g, highlightedTicketPaths(), true);
+			const nodes = new Set([...keep.nodes].filter((id) => subIds.has(id)));
+			const edges = keep.edges.filter((e) => nodes.has(e.from) && nodes.has(e.to));
+			keep = { nodes, edges };
+		}
 		return unresolved() ? keep : withoutUnresolved(g, keep);
 	});
 	// What is folded is kept with the workspace, so the graph opens next time as it was left.
@@ -255,10 +514,12 @@ export function GraphView() {
 		const kept = JSON.stringify({ scripts: [...folded()], folders: [...foldedDirs()] });
 		if (root && foldedFor === root) remember(`${FOLDS_KEY}:${root}`, kept);
 	});
-	/** What is drawn of it: around a focus the neighbourhood is small, and is shown procedure by procedure. */
+	/** What is drawn of it: around a focus (or a small ticket slice) the neighbourhood is shown procedure by procedure. */
 	const drawn = createMemo(() => {
 		const keep = shown();
-		return keep ? (filter().mode === "around" ? fold(keep, new Set()) : fold(keep, folded(), { folded: foldedDirs(), of: folderOf })) : null;
+		if (!keep) return null;
+		const smallTicketSlice = ticketSubgraphOnly() && highlightedTicketPaths().size > 0 && keep.nodes.size <= FOLD_ABOVE;
+		return filter().mode === "around" || smallTicketSlice ? fold(keep, new Set()) : fold(keep, folded(), { folded: foldedDirs(), of: folderOf });
 	});
 	const sizeNote = (bytes: number) => {
 		// A size that is not known (a data source's file, the box of unresolved targets) is not written as 0.
@@ -309,13 +570,15 @@ export function GraphView() {
 			const dirNodes = [...keep.nodes].filter(isDir).sort();
 			const inFolders = new Set([...drawnScripts.map((s) => folderOf(s.path)).filter(Boolean), ...dirNodes.map((id) => id.slice(4))]).size > 1;
 			const nameIn = (path: string) => (inFolders && folderOf(path) ? baseName(path) : rel(path));
+			const govMap = governingDocsByScript();
 			const scriptNodes = g.scripts
 				.map((s) => {
+					const hasGov = (govMap.get(s.path)?.length ?? 0) > 0;
 					if (keep.nodes.has(foldId(s.path))) {
 						const note = `${s.isClass ? "class, " : ""}${foldNote(g, s.path, keep.inside.get(s.path))}`;
 						notes.set(s.path, note);
 						const name = nameIn(s.path);
-						return { id: foldId(s.path), width: Math.ceil(Math.max(measureBold(name), measure(note))) + 46, height: FOLD_HEIGHT, labels: [{ text: name }] };
+						return { id: foldId(s.path), width: Math.ceil(Math.max(measureBold(name) + (hasGov ? 34 : 0), measure(note))) + 46, height: FOLD_HEIGHT, labels: [{ text: name }] };
 					}
 					const procs = g.nodes.filter((n) => n.path === s.path && keep.nodes.has(n.id));
 					const top = keep.nodes.has(`${s.path}#`) && g.topLevel.includes(s.path);
@@ -325,8 +588,8 @@ export function GraphView() {
 					return {
 						id: `script:${s.path}`,
 						labels: [{ text: s.isClass ? `class  ${nameIn(s.path)}` : nameIn(s.path) }],
-						// Wide enough for its own name and size, so the label never runs over the next box.
-						layoutOptions: { "elk.padding": "[top=34,left=14,bottom=14,right=14]", ...sized(`${s.isClass ? "class  " : ""}${nameIn(s.path)}  ${sizeNote(s.bytes)}`, true) },
+						// Wide enough for its own name, size, and governing doc pill so labels never collide.
+						layoutOptions: { "elk.padding": "[top=34,left=14,bottom=14,right=14]", ...sized(`${s.isClass ? "class  " : ""}${nameIn(s.path)}  ${sizeNote(s.bytes)}${hasGov ? "   00" : ""}`, true) },
 						children: [
 							...(top ? [{ id: `${s.path}#`, width: textWidth(topLabel(s)), height: 28, labels: [{ text: topLabel(s) }] }] : []),
 							...procs.filter((p) => !p.region).map(leaf),
@@ -481,7 +744,7 @@ export function GraphView() {
 				setLayout({ boxes, lines, width: result.width, height: result.height });
 				// A different set of calls is a different picture: show it whole. A refresh keeps the view,
 				// and folding one script keeps it too, moved only as far as brings that script into sight.
-				const key = JSON.stringify(filter());
+				const key = JSON.stringify([filter(), ticketSubgraphOnly(), ticketHighlightKey()]);
 				if (fittedFor !== key) fit();
 				else if (showNext !== null) {
 					const box = boxes.find((b) => ((b.kind === "fold" || b.kind === "script") && b.path === showNext) || ((b.kind === "dir" || b.kind === "folder") && b.folder === showNext));
@@ -503,8 +766,11 @@ export function GraphView() {
 		void openFile(at.path, { reveal: { line: (at.line ?? 0) + 1 } });
 	};
 	const procs = () => layout()?.boxes.filter((b) => b.kind === "proc" || b.kind === "top" || b.kind === "fold" || b.kind === "dir") ?? [];
-	/** Whether scripts can be folded now: around a focus they are not. */
-	const folding = () => filter().mode !== "around";
+	/** Whether scripts can be folded now: around a focus (or a small ticket slice) they are not. */
+	const folding = () => {
+		const smallTicketSlice = ticketSubgraphOnly() && highlightedTicketPaths().size > 0 && (shown()?.nodes.size ?? 0) <= FOLD_ABOVE;
+		return filter().mode !== "around" && !smallTicketSlice;
+	};
 	/** Folds a script to one node, or unfolds it; the keyboard stays with it. */
 	const toggleFold = (path: string | undefined) => {
 		const g = graph();
@@ -704,6 +970,7 @@ export function GraphView() {
 			Escape: () => {
 				setKeysOpen(false);
 				setLegendOpen(false);
+				setImpactOpen(false);
 			},
 		};
 		const action = actions[key];
@@ -769,7 +1036,17 @@ export function GraphView() {
 			...(() => {
 				const activeKey = state.settings.activeTicket?.trim() || "";
 				const litKey = ticketHighlightKey()?.trim() || "";
+				const targetKey = litKey || activeKey;
 				const items: MenuItem[] = [];
+				if (targetKey) {
+					items.push({
+						label: `Filter to ${targetKey} (+ 1-hop)`,
+						checked: ticketSubgraphOnly(),
+						run: toggleTicketSubgraph,
+						disabled: !graph(),
+						why: "Build the call graph first",
+					});
+				}
 				if (litKey) {
 					items.push({
 						label: `Clear ${litKey} highlight`,
@@ -786,6 +1063,12 @@ export function GraphView() {
 				}
 				return items;
 			})(),
+			{
+				label: "Impact / Blast-Radius Analysis…",
+				run: () => void runTicketImpactAnalysis(),
+				disabled: !graph(),
+				why: "Build the call graph first",
+			},
 			{
 				label: "Focus script linked to a ticket…",
 				run: () =>
@@ -832,14 +1115,19 @@ export function GraphView() {
 		if (target.kind === "dir" || target.kind === "folder" || target.kind === "region" || !boxPath || boxPath === "(unresolved)") return;
 		const opener = document.activeElement instanceof SVGElement ? document.activeElement : null;
 		void (async () => {
-			const { registryTitle } = await import("../../shared/projectDocs");
 			const { chooseFromMenu } = await import("../panels/RowMenu");
-			const { notify } = await import("../state");
 			const links = await backend.linksTo(boxPath).catch(() => []);
 			const gov = docsGoverningFile(docs(), boxPath, state.workspace?.root, links);
 			const isDs = /\.ds$/i.test(boxPath);
 			const OPEN_ITEM = isDs ? "Open data source" : "Open script";
+			const OPEN_SIDE = "Open to the side";
 			const FOCUS_NODE = "Focus callers & callees";
+			const IMPACT = "Impact / Blast-Radius Analysis…";
+			const PATH = "Copy path";
+			const RELATIVE = "Copy path in the project";
+			const NAME = "Copy name";
+			const SHOW = "Show in the Explorer";
+			const inWs = Boolean(state.workspace && isInside(state.workspace.root, boxPath));
 			const rawLabels = gov.map((g) => {
 				const base =
 					g.file.group === "registries"
@@ -847,20 +1135,38 @@ export function GraphView() {
 						: g.file.ticket && g.file.title && !g.file.title.startsWith(g.file.ticket)
 							? `${g.file.ticket}: ${g.file.title}`
 							: g.file.title || g.file.heading || g.file.name;
-				return `Open doc: ${base}`;
+				return base;
 			});
 			const counts = new Map<string, number>();
 			for (const l of rawLabels) counts.set(l, (counts.get(l) ?? 0) + 1);
 			const docChoices = gov.map((g, i) => ({
+				value: `doc:${i}`,
 				label: (counts.get(rawLabels[i]!) ?? 0) > 1 ? `${rawLabels[i]!} (${g.file.name})` : rawLabels[i]!,
 				doc: g.file,
 				line: g.line,
 			}));
-			const picked = await chooseFromMenu(
-				target.label || rel(boxPath),
-				[OPEN_ITEM, FOCUS_NODE, ...docChoices.map((d) => d.label)],
-				at,
-			);
+			const docSection: RowMenuEntry[] =
+				docChoices.length === 1
+					? [{ label: `Open doc: ${docChoices[0]!.label}`, value: docChoices[0]!.value }]
+					: docChoices.length > 1
+						? [
+								{
+									label: `Governing docs (${docChoices.length})`,
+									children: docChoices.map((d) => ({ label: d.label, value: d.value })),
+								},
+							]
+						: [];
+			const items: RowMenuEntry[] = [
+				OPEN_ITEM,
+				OPEN_SIDE,
+				FOCUS_NODE,
+				IMPACT,
+				...(docSection.length ? (["separator", ...docSection] as RowMenuEntry[]) : []),
+				"separator",
+				...submenuOrInline("Copy path", [PATH, ...(inWs ? [RELATIVE] : []), NAME]),
+				...(inWs ? [SHOW] : []),
+			];
+			const picked = await chooseFromMenu(target.label || rel(boxPath), items, at);
 			if (!picked) {
 				if (opener?.isConnected) opener.focus();
 				return;
@@ -868,11 +1174,24 @@ export function GraphView() {
 			if (picked === OPEN_ITEM) {
 				if (target.id && target.kind && target.kind !== "script" && target.kind !== "fold") open(target as Box);
 				else void openFile(boxPath, { keep: true });
+			} else if (picked === OPEN_SIDE) {
+				void openToSide(boxPath);
 			} else if (picked === FOCUS_NODE) {
 				focus(!target.id || target.kind === "script" || target.kind === "fold" ? `${boxPath}#` : target.id);
 				if (opener?.isConnected) queueMicrotask(() => nodeEls.get(cursor() ?? "")?.focus());
+			} else if (picked === IMPACT) {
+				const seedId = !target.id || target.kind === "script" || target.kind === "fold" ? `${boxPath}#` : target.id;
+				const label =
+					!target.id || target.kind === "script" || target.kind === "fold"
+						? rel(boxPath)
+						: `${target.label || target.id.slice(target.id.lastIndexOf("#") + 1)} (${baseName(boxPath)})`;
+				runImpactAnalysis([seedId], label);
+			} else if (picked === PATH || picked === RELATIVE || picked === NAME) {
+				await (await import("../commands")).copyPath(picked === PATH ? "whole" : picked === NAME ? "name" : "relative", boxPath);
+			} else if (picked === SHOW) {
+				(await import("../panels/Explorer")).showInExplorer(boxPath);
 			} else {
-				const hit = docChoices.find((d) => d.label === picked);
+				const hit = docChoices.find((d) => d.value === picked);
 				if (hit) await openFile(hit.doc.path, hit.line ? { reveal: { line: hit.line } } : {});
 				else notify("Could not open governing document.");
 			}
@@ -973,18 +1292,6 @@ export function GraphView() {
 		const keep = shown();
 		return g && keep ? callList(g, keep.edges) : [];
 	});
-	const governingDocsByScript = createMemo(() => {
-		const map = new Map<string, ReturnType<typeof docsGoverningFile>>();
-		const allDocs = docs();
-		if (mode() !== "list" || !allDocs.length) return map;
-		const root = state.workspace?.root;
-		for (const s of graph()?.scripts ?? []) {
-			if (!s.path || s.path === UNRESOLVED) continue;
-			const gov = docsGoverningFile(allDocs, s.path, root);
-			if (gov.length) map.set(s.path, gov);
-		}
-		return map;
-	});
 	/** Around a focus, the list starts with the answer: what calls it, and what it calls. */
 	const around = createMemo(() => {
 		const g = graph();
@@ -1049,7 +1356,7 @@ export function GraphView() {
 
 	return (
 		<CenterTabStrip title="Call graph" icon="references" onClose={() => setState("centerView", "editors")}>
-			<div class="graph" ref={watchWidth}>
+			<div class="graph" ref={watchWidth} style={{ position: "relative" }}>
 				<div class="graph-bar" classList={{ narrow: narrow(), around: filter().mode === "around" }}>
 				{/* No title: the switch's first word is the view's name, and the bar needs the room. */}
 				<div class="mode-switch" role="group" aria-label="Call graph: show the calls as">
@@ -1109,6 +1416,52 @@ export function GraphView() {
 							<Icon name="add" />
 						</button>
 					</div>
+				</Show>
+				<Show when={graph()?.nodes.length && (ticketHighlightKey() || state.settings.activeTicket?.trim())}>
+					{(() => {
+						const key = () => ticketHighlightKey()?.trim() || state.settings.activeTicket?.trim() || "";
+						return (
+							<button
+								type="button"
+								classList={{ on: ticketSubgraphOnly() }}
+								aria-pressed={ticketSubgraphOnly()}
+								title={
+									ticketSubgraphOnly()
+										? `Showing ${key()} scripts + 1-hop callers/callees. Click to show the full workspace graph.`
+										: `Isolate ${key()} scripts plus 1-hop callers and callees`
+								}
+								onClick={toggleTicketSubgraph}
+							>
+								<Icon name={ticketSubgraphOnly() ? "filter-filled" : "filter"} />
+								<Show when={!narrow()}>
+									<span>{ticketSubgraphOnly() ? `${key()} (+1-hop)` : `Filter ${key()}`}</span>
+								</Show>
+							</button>
+						);
+					})()}
+				</Show>
+				<Show when={graph()?.nodes.length}>
+					<button
+						type="button"
+						classList={{ on: impactOpen() }}
+						aria-expanded={impactOpen()}
+						title="Run transitive Impact / Blast-Radius Analysis across callers, callees, data sources, schemas, and docs"
+						onClick={() => {
+							if (impactOpen() && impactReport()) {
+								setImpactOpen(false);
+								return;
+							}
+							const key = ticketHighlightKey()?.trim() || state.settings.activeTicket?.trim() || "";
+							if (key) void runTicketImpactAnalysis(key);
+							else if (filter().focus) runImpactAnalysis([filter().focus!], focusName() || filter().focus!);
+							else void runTicketImpactAnalysis();
+						}}
+					>
+						<Icon name="flame" />
+						<Show when={!narrow()}>
+							<span>Impact</span>
+						</Show>
+					</button>
 				</Show>
 				<Show when={mode() === "graph" && legend().length}>
 					<button
@@ -1213,7 +1566,20 @@ export function GraphView() {
 												}}
 											>
 												<Show when={b.kind === "script"}>
-													<title>{`${[b.path ?? b.label, sizeNote(b.bytes ?? 0)].filter(Boolean).join(": ")}. Click its name to show only this script's calls.`}</title>
+													{(() => {
+														const gov = () => (b.path ? governingDocsByScript().get(b.path) : undefined);
+														return (
+															<title>
+																{`${[
+																	b.path ?? b.label,
+																	sizeNote(b.bytes ?? 0),
+																	gov()?.length ? `${gov()!.length} governing ${gov()!.length === 1 ? "doc" : "docs"}` : "",
+																]
+																	.filter(Boolean)
+																	.join(": ")}. Click its name to show only this script's calls.`}
+															</title>
+														);
+													})()}
 												</Show>
 												<rect x={b.x} y={b.y} width={b.width} height={b.height} rx="8" style={b.region ? { stroke: `color-mix(in srgb, ${regionColor(b.region)} 55%, transparent)`, fill: `color-mix(in srgb, ${regionColor(b.region)} 7%, transparent)` } : undefined} />
 												<Show when={b.kind === "folder" && folding()}>
@@ -1236,6 +1602,56 @@ export function GraphView() {
 														<tspan class="g-size">{`  ${sizeNote(b.bytes ?? 0)}`}</tspan>
 													</Show>
 												</text>
+												<Show when={!far() && b.kind === "script" && b.path && (governingDocsByScript().get(b.path)?.length ?? 0) > 0}>
+													{(() => {
+														const gov = () => governingDocsByScript().get(b.path!) ?? [];
+														const count = () => gov().length;
+														const pillW = () => 24 + (String(count()).length - 1) * 5.5;
+														const px = () => b.x + b.width - pillW() - 6;
+														const py = () => b.y + 5;
+														return (
+															<g
+																class="g-doc-pill"
+																style={{ cursor: "pointer" }}
+																onMouseDown={(e) => e.stopPropagation()}
+																onClick={(e) => {
+																	e.stopPropagation();
+																	const rect = (e.currentTarget as SVGGElement).getBoundingClientRect();
+																	openGraphNodeMenu(b, { x: Math.round(rect.left), y: Math.round(rect.bottom + 2) });
+																}}
+															>
+																<title>{`${count()} governing ${count() === 1 ? "doc" : "docs"}: ${gov().map((g) => g.file.title || g.file.name).join(", ")}. Click to open.`}</title>
+																<rect
+																	x={px()}
+																	y={py()}
+																	width={pillW()}
+																	height="16"
+																	rx="8"
+																	style={{
+																		fill: "color-mix(in srgb, var(--accent) 12%, var(--side-bg))",
+																		stroke: "color-mix(in srgb, var(--accent) 45%, var(--border))",
+																		"stroke-width": "1",
+																	}}
+																/>
+																<text
+																	x={px() + 5.5}
+																	y={py() + 11.5}
+																	style={{ font: "normal 10px/1 codicon", fill: "var(--accent)", "pointer-events": "none" }}
+																>
+																	{ICON.file}
+																</text>
+																<text
+																	x={px() + pillW() - 5.5}
+																	y={py() + 11.5}
+																	text-anchor="end"
+																	style={{ font: "600 10px var(--ui-font)", fill: "var(--accent)", "pointer-events": "none" }}
+																>
+																	{count()}
+																</text>
+															</g>
+														);
+													})()}
+												</Show>
 											</g>
 										)}
 									</For>
@@ -1317,6 +1733,56 @@ export function GraphView() {
 													<text class="g-fold-note" x={b.x + 26} y={b.y + 36}>
 														{b.note}
 													</text>
+													<Show when={!far() && b.kind === "fold" && b.path && (governingDocsByScript().get(b.path)?.length ?? 0) > 0}>
+														{(() => {
+															const gov = () => governingDocsByScript().get(b.path!) ?? [];
+															const count = () => gov().length;
+															const pillW = () => 24 + (String(count()).length - 1) * 5.5;
+															const px = () => b.x + b.width - pillW() - 6;
+															const py = () => b.y + 6;
+															return (
+																<g
+																	class="g-doc-pill"
+																	style={{ cursor: "pointer" }}
+																	onMouseDown={(e) => e.stopPropagation()}
+																	onClick={(e) => {
+																		e.stopPropagation();
+																		const rect = (e.currentTarget as SVGGElement).getBoundingClientRect();
+																		openGraphNodeMenu(b, { x: Math.round(rect.left), y: Math.round(rect.bottom + 2) });
+																	}}
+																>
+																	<title>{`${count()} governing ${count() === 1 ? "doc" : "docs"}: ${gov().map((g) => g.file.title || g.file.name).join(", ")}. Click to open.`}</title>
+																	<rect
+																		x={px()}
+																		y={py()}
+																		width={pillW()}
+																		height="16"
+																		rx="8"
+																		style={{
+																			fill: "color-mix(in srgb, var(--accent) 12%, var(--side-bg))",
+																			stroke: "color-mix(in srgb, var(--accent) 45%, var(--border))",
+																			"stroke-width": "1",
+																		}}
+																	/>
+																	<text
+																		x={px() + 5.5}
+																		y={py() + 11.5}
+																		style={{ font: "normal 10px/1 codicon", fill: "var(--accent)", "pointer-events": "none" }}
+																	>
+																		{ICON.file}
+																	</text>
+																	<text
+																		x={px() + pillW() - 5.5}
+																		y={py() + 11.5}
+																		text-anchor="end"
+																		style={{ font: "600 10px var(--ui-font)", fill: "var(--accent)", "pointer-events": "none" }}
+																	>
+																		{count()}
+																	</text>
+																</g>
+															);
+														})()}
+													</Show>
 												</Show>
 											</g>
 										)}
@@ -1593,6 +2059,367 @@ export function GraphView() {
 						</Show>
 					</div>
 				</Show>
+			</Show>
+			<Show when={impactOpen() && impactReport()} keyed>
+				{(report) => {
+					const targetTicket = () => impactSeeds()?.ticketKey?.trim() || state.settings.activeTicket?.trim() || ticketHighlightKey()?.trim() || "";
+					const renderImpactRow = (n: ImpactNode) => (
+						<li
+							style={{
+								display: "flex",
+								"align-items": "center",
+								gap: "6px",
+								padding: "3px 0",
+								"font-size": "var(--text-sm)",
+							}}
+						>
+							<button
+								type="button"
+								class="link"
+								style={{
+									"min-width": "0",
+									overflow: "hidden",
+									"text-overflow": "ellipsis",
+									"white-space": "nowrap",
+									"text-align": "left",
+								}}
+								title={`Open ${n.name} in ${rel(n.path)}`}
+								onClick={() => open(n)}
+							>
+								{n.name}
+							</button>
+							<Show when={n.entryPoint}>
+								<span
+									class="graph-list-ticket-badge"
+									title="Entry point: no upstream callers in the workspace call graph"
+								>
+									Entry
+								</span>
+							</Show>
+							<span
+								class="hint"
+								style={{
+									"margin-left": "auto",
+									"font-size": "var(--text-xs)",
+									overflow: "hidden",
+									"text-overflow": "ellipsis",
+									"white-space": "nowrap",
+									"max-width": "130px",
+								}}
+								title={rel(n.path)}
+							>
+								{baseName(n.path)}
+							</span>
+							<button
+								type="button"
+								class="graph-list-focus"
+								title={`Focus ${n.name} in Call Graph`}
+								onClick={() => {
+									setMode("graph");
+									focus(n.id);
+								}}
+							>
+								Focus
+							</button>
+						</li>
+					);
+					return (
+						<aside
+							role="dialog"
+							aria-label={`Impact analysis for ${report.targetLabel || "selection"}`}
+							onKeyDown={(e) => {
+								if (e.key === "Escape") {
+									e.stopPropagation();
+									setImpactOpen(false);
+								}
+							}}
+							style={{
+								position: "absolute",
+								top: "46px",
+								right: "12px",
+								bottom: "12px",
+								width: "min(400px, calc(100% - 24px))",
+								"z-index": "15",
+								display: "flex",
+								"flex-direction": "column",
+								background: "var(--side-bg)",
+								color: "var(--side-fg, var(--fg))",
+								border: "1px solid var(--input-border)",
+								"border-radius": "var(--radius-lg)",
+								"box-shadow": "var(--shadow)",
+								overflow: "hidden",
+							}}
+						>
+							<div
+								style={{
+									display: "flex",
+									"align-items": "center",
+									gap: "8px",
+									padding: "10px 12px",
+									"border-bottom": "1px solid var(--border)",
+									background: "var(--panel-bg)",
+								}}
+							>
+								<Icon name="flame" />
+								<div style={{ "min-width": "0", flex: "1" }}>
+									<div style={{ "font-weight": "600", "font-size": "var(--text-md)", color: "var(--strong-fg)" }}>
+										Impact Analysis
+									</div>
+									<div
+										class="hint"
+										style={{
+											"font-size": "var(--text-xs)",
+											overflow: "hidden",
+											"text-overflow": "ellipsis",
+											"white-space": "nowrap",
+										}}
+										title={report.targetLabel}
+									>
+										{report.targetLabel || plural(report.seedScripts.length, "script")}
+									</div>
+								</div>
+								<label
+									style={{
+										display: "inline-flex",
+										"align-items": "center",
+										gap: "4px",
+										"font-size": "var(--text-xs)",
+										color: "var(--muted)",
+									}}
+									title="Maximum transitive BFS hop depth"
+								>
+									Hops
+									<input
+										type="number"
+										min="1"
+										max="6"
+										value={impactHops()}
+										style={{ width: "42px", padding: "2px 4px", "font-size": "var(--text-xs)" }}
+										onChange={(e) => {
+											const next = Math.max(1, Math.min(6, Number(e.currentTarget.value) || 4));
+											setImpactHops(next);
+											const seeds = impactSeeds();
+											if (seeds) runImpactAnalysis(seeds.ids, seeds.label, { ticketKey: seeds.ticketKey, hops: next });
+										}}
+									/>
+								</label>
+								<button
+									type="button"
+									class="graph-legend-close"
+									aria-label="Close impact analysis"
+									title="Close (Esc)"
+									onClick={() => setImpactOpen(false)}
+								>
+									<Icon name="close" />
+								</button>
+							</div>
+
+							<div
+								style={{
+									display: "flex",
+									"flex-wrap": "wrap",
+									"align-items": "center",
+									gap: "6px",
+									padding: "8px 12px",
+									"border-bottom": "1px solid var(--border)",
+								}}
+							>
+								<button
+									type="button"
+									class="graph-list-docs"
+									style={{ "margin-left": "0", padding: "3px 8px" }}
+									title="Copy ADR 0008-compliant Markdown impact summary to clipboard"
+									onClick={() => void copyImpactMarkdown()}
+								>
+									<Icon name="copy" />
+									<span>Copy Markdown</span>
+								</button>
+								<button
+									type="button"
+									class="graph-list-docs"
+									style={{ "margin-left": "0", padding: "3px 8px" }}
+									title={targetTicket() ? `Append Markdown impact summary to ${targetTicket()}` : "Pick a ticket to append this impact summary to"}
+									onClick={() => void appendImpactToTicket()}
+								>
+									<Icon name="add" />
+									<span>{targetTicket() ? `Append to ${targetTicket()}` : "Append to ticket…"}</span>
+								</button>
+							</div>
+
+							<div
+								style={{
+									display: "flex",
+									"flex-wrap": "wrap",
+									gap: "6px",
+									padding: "8px 12px",
+									"border-bottom": "1px solid var(--border)",
+									"font-size": "var(--text-xs)",
+								}}
+							>
+								<span class="graph-list-ticket-badge">
+									{plural(report.upstream.length, "caller")} ({plural(report.entryPoints.length, "entry", "entries")})
+								</span>
+								<span class="graph-list-docs" style={{ "margin-left": "0" }}>
+									{plural(report.downstream.length, "callee")}
+								</span>
+								<span class="graph-list-docs" style={{ "margin-left": "0" }}>
+									{plural(report.dataSources.length, "data source")}
+								</span>
+								<span class="graph-list-docs" style={{ "margin-left": "0" }}>
+									{plural(report.affectedScripts.length, "script")}
+								</span>
+							</div>
+
+							<div style={{ flex: "1", "overflow-y": "auto", padding: "10px 12px", display: "flex", "flex-direction": "column", gap: "12px" }}>
+								<section>
+									<h4 style={{ margin: "0 0 6px", "font-size": "var(--text-sm)", "font-weight": "600", color: "var(--strong-fg)", display: "flex", "align-items": "center", gap: "5px" }}>
+										<Icon name="arrow-up" />
+										<span>Upstream Callers ({report.upstream.length})</span>
+									</h4>
+									<Show when={report.upstreamByHop.length > 0} fallback={<p class="hint" style={{ margin: "0" }}>No upstream callers in the call graph.</p>}>
+										<For each={report.upstreamByHop}>
+											{(group) => (
+												<div style={{ "margin-bottom": "6px" }}>
+													<div class="hint" style={{ "font-size": "var(--text-xs)", "font-weight": "600", "margin-bottom": "2px" }}>
+														Hop {group.hop} ({group.nodes.length})
+													</div>
+													<ul style={{ "list-style": "none", margin: "0", padding: "0" }}>
+														<For each={group.nodes}>{renderImpactRow}</For>
+													</ul>
+												</div>
+											)}
+										</For>
+									</Show>
+								</section>
+
+								<section>
+									<h4 style={{ margin: "0 0 6px", "font-size": "var(--text-sm)", "font-weight": "600", color: "var(--strong-fg)", display: "flex", "align-items": "center", gap: "5px" }}>
+										<Icon name="arrow-down" />
+										<span>Downstream Callees ({report.downstream.length})</span>
+									</h4>
+									<Show when={report.downstreamByHop.length > 0} fallback={<p class="hint" style={{ margin: "0" }}>No downstream procedure callees.</p>}>
+										<For each={report.downstreamByHop}>
+											{(group) => (
+												<div style={{ "margin-bottom": "6px" }}>
+													<div class="hint" style={{ "font-size": "var(--text-xs)", "font-weight": "600", "margin-bottom": "2px" }}>
+														Hop {group.hop} ({group.nodes.length})
+													</div>
+													<ul style={{ "list-style": "none", margin: "0", padding: "0" }}>
+														<For each={group.nodes}>{renderImpactRow}</For>
+													</ul>
+												</div>
+											)}
+										</For>
+									</Show>
+								</section>
+
+								<Show when={report.dataSources.length > 0}>
+									<section>
+										<h4 style={{ margin: "0 0 6px", "font-size": "var(--text-sm)", "font-weight": "600", color: "var(--strong-fg)", display: "flex", "align-items": "center", gap: "5px" }}>
+											<Icon name="database" />
+											<span>Data Sources ({report.dataSources.length})</span>
+										</h4>
+										<ul style={{ "list-style": "none", margin: "0", padding: "0" }}>
+											<For each={report.dataSources}>{renderImpactRow}</For>
+										</ul>
+									</section>
+								</Show>
+
+								<section>
+									<h4 style={{ margin: "0 0 6px", "font-size": "var(--text-sm)", "font-weight": "600", color: "var(--strong-fg)", display: "flex", "align-items": "center", gap: "5px" }}>
+										<Icon name="table" />
+										<span>Schema Tables ({report.schemaTables?.length ?? 0})</span>
+									</h4>
+									<Show
+										when={(report.schemaTables?.length ?? 0) > 0}
+										fallback={
+											<p class="hint" style={{ margin: "0" }}>
+												{impactScanning() ? "Scanning referenced schema tables…" : "No documented schema tables referenced."}
+											</p>
+										}
+									>
+										<div style={{ display: "flex", "flex-wrap": "wrap", gap: "4px" }}>
+											<For each={report.schemaTables ?? []}>
+												{(tbl) => (
+													<button
+														type="button"
+														class="graph-list-docs"
+														style={{ "margin-left": "0" }}
+														title={tbl.path ? `Open schema doc: ${rel(tbl.path)}` : tbl.name}
+														onClick={() => tbl.path && void openFile(tbl.path)}
+													>
+														<Icon name="database" />
+														<span>{tbl.name}</span>
+													</button>
+												)}
+											</For>
+										</div>
+									</Show>
+								</section>
+
+								<section>
+									<h4 style={{ margin: "0 0 6px", "font-size": "var(--text-sm)", "font-weight": "600", color: "var(--strong-fg)", display: "flex", "align-items": "center", gap: "5px" }}>
+										<Icon name="file" />
+										<span>Governing Docs &amp; Tickets ({report.governingDocs?.length ?? 0})</span>
+									</h4>
+									<Show when={(report.governingDocs?.length ?? 0) > 0} fallback={<p class="hint" style={{ margin: "0" }}>No linked specs, decisions, or tickets.</p>}>
+										<ul style={{ "list-style": "none", margin: "0", padding: "0", display: "flex", "flex-direction": "column", gap: "4px" }}>
+											<For each={report.governingDocs ?? []}>
+												{(doc) => (
+													<li style={{ display: "flex", "align-items": "center", gap: "6px", "font-size": "var(--text-sm)" }}>
+														<button
+															type="button"
+															class="link"
+															style={{ "min-width": "0", overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap", "text-align": "left" }}
+															title={`Open ${rel(doc.path)}`}
+															onClick={() => void openFile(doc.path)}
+														>
+															{doc.label}
+														</button>
+														<Show when={doc.reason}>
+															<span class="hint" style={{ "margin-left": "auto", "font-size": "var(--text-xs)", "white-space": "nowrap" }}>
+																{doc.reason}
+															</span>
+														</Show>
+													</li>
+												)}
+											</For>
+										</ul>
+									</Show>
+								</section>
+
+								<Show when={(report.testScripts?.length ?? 0) > 0}>
+									<section>
+										<h4 style={{ margin: "0 0 6px", "font-size": "var(--text-sm)", "font-weight": "600", color: "var(--strong-fg)", display: "flex", "align-items": "center", gap: "5px" }}>
+											<Icon name="beaker" />
+											<span>Linked Test Scripts ({report.testScripts!.length})</span>
+										</h4>
+										<ul style={{ "list-style": "none", margin: "0", padding: "0", display: "flex", "flex-direction": "column", gap: "4px" }}>
+											<For each={report.testScripts!}>
+												{(ts) => (
+													<li style={{ "font-size": "var(--text-sm)" }}>
+														<button
+															type="button"
+															class="link"
+															title={`Open test script ${ts}`}
+															onClick={() => {
+																if (!state.workspace?.root) return;
+																const full = isInside(state.workspace.root, ts) ? ts : joinPath(state.workspace.root, ts);
+																void openFile(full);
+															}}
+														>
+															{ts}
+														</button>
+													</li>
+												)}
+											</For>
+										</ul>
+									</section>
+								</Show>
+							</div>
+						</aside>
+					);
+				}}
 			</Show>
 			</div>
 		</CenterTabStrip>

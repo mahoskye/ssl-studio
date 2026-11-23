@@ -459,14 +459,39 @@ export function statusChoices(file: { group?: string; kind?: string } | undefine
 }
 
 /**
+ * Standard friendly label and quiet filename metadata for curated Project-section
+ * documents (ADR 0032). Returns null for documents outside the Project group.
+ */
+export function projectDocLabel(
+	file: Pick<DocFile, "name" | "group" | "catalog">,
+): { label: string; fileMeta: string } | null {
+	if (file.group !== "project") return null;
+	const norm = file.name.replace(/\\/g, "/");
+	const base = norm.split("/").pop()?.toLowerCase() ?? norm.toLowerCase();
+	if (base === "readme.md" || base === "readme.markdown") return { label: "Project Overview", fileMeta: file.name };
+	if (base === "agents.md" || base === "agents.markdown") return { label: "Agent Instructions", fileMeta: file.name };
+	if (base === "project.toml") return { label: "Project Settings", fileMeta: file.name };
+	if (base === "state.md" || base === "state.markdown") return { label: "Project State", fileMeta: file.name };
+	if (file.catalog?.area === "code") return { label: "Deployment", fileMeta: file.name };
+	if (file.catalog?.area === "tests") return { label: "Tests", fileMeta: file.name };
+	return { label: file.name, fileMeta: "" };
+}
+
+/**
  * Whether a document is one a filter is looking for: every word typed is in
  * its title, its name, its ticket's key, its state, what it is about, or the
  * tickets it is for. "open holiday" finds the open question about holidays.
  */
-export function docMatches(file: Pick<DocFile, "name" | "title" | "heading" | "ticket" | "parent" | "status" | "summary" | "tickets" | "kind" | "tags">, filter: string): boolean {
+export function docMatches(
+	file: Pick<DocFile, "name" | "title" | "heading" | "ticket" | "parent" | "status" | "summary" | "tickets" | "kind" | "tags"> &
+		Partial<Pick<DocFile, "group" | "catalog">>,
+	filter: string,
+): boolean {
 	const words = filter.toLowerCase().split(/\s+/).filter(Boolean);
 	if (!words.length) return true;
+	const friendly = file.group === "project" ? projectDocLabel({ name: file.name, group: file.group, catalog: file.catalog })?.label : undefined;
 	const said = [
+		friendly,
 		file.title,
 		file.heading,
 		file.name,

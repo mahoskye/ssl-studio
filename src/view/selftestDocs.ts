@@ -29,7 +29,13 @@ async function until<T>(get: () => T | undefined | null | false, ms = 8000): Pro
 
 const rows = () => [...document.querySelectorAll<HTMLElement>(".doc-row")];
 const label = (row: HTMLElement) => row.querySelector(".label")?.textContent ?? "";
-const row = (name: string) => rows().find((r) => label(r) === name);
+const row = (name: string) =>
+	rows().find(
+		(r) =>
+			label(r) === name ||
+			r.querySelector(".project-file-meta")?.textContent?.toLowerCase() === name.toLowerCase() ||
+			baseName(r.dataset.row ?? "").toLowerCase() === name.toLowerCase(),
+	);
 const marked = (name: string, mark: string) => [...(row(name)?.querySelectorAll(".meta") ?? [])].some((m) => m.textContent === mark);
 const setupButton = () => document.querySelector<HTMLButtonElement>(".docs-setup button");
 const rendered = () => document.querySelector<HTMLElement>(".cm-md-host.cm-md-read .cm-content");
@@ -39,7 +45,10 @@ const healthRows = () => {
 	const section = [...document.querySelectorAll("section")].find((s) => s.querySelector("h3")?.textContent === "Project");
 	return [...(section?.querySelectorAll<HTMLElement>(".meter-row") ?? [])];
 };
-const healthMark = (name: string) => healthRows().find((r) => r.querySelector("span")?.textContent === name)?.querySelector(".meta")?.textContent ?? "";
+const healthMark = (name: string) =>
+	healthRows()
+		.find((r) => r.dataset.row?.toLowerCase() === name.toLowerCase() || r.querySelector("span")?.textContent === name)
+		?.querySelector(".meta")?.textContent ?? "";
 /** Health agrees with what the Bun side says about each root file. */
 const healthAgrees = () => {
 	const files = docs().filter((d) => d.group === "project");
@@ -87,7 +96,7 @@ export function selftestDocs(): Promise<Steps> {
 		showPanel("docs");
 		await step("panelOpens", () => until(() => state.project && row("project.toml")));
 		// README.md and AGENTS.md are listed whether or not they exist, each marked missing when it does not.
-		await step("rootFilesListed", async () => ["README.md", "AGENTS.md"].every((name) => rows().some((r) => label(r).toLowerCase() === name.toLowerCase())));
+		await step("rootFilesListed", async () => ["README.md", "AGENTS.md"].every((name) => Boolean(row(name))));
 		await step("missingMarked", async () => rows().every((r) => r.classList.contains("missing") === [...r.querySelectorAll(".meta")].some((m) => m.textContent === "missing")));
 		// The sample workspace has a plan in design/.
 		await step("plansListed", async () => row("Release.plan.json"));
@@ -263,9 +272,17 @@ export function selftestWork(): Promise<Steps> {
 			const target = await until(() => keyed("SELF-2"));
 			const box = target!.getBoundingClientRect();
 			target!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: box.left + 8, clientY: box.top + 4 }));
-			return until(() => [...document.querySelectorAll(".menu-pop.row-menu [role=menuitem], .menu-pop.row-menu button")].some((item) => item.textContent?.trim() === "Set to done"));
+			const statusTrigger = await until(() =>
+				[...document.querySelectorAll<HTMLElement>(".menu-pop.row-menu [role=menuitem]")].find((item) => item.textContent?.trim() === "Set status"),
+			);
+			if (!statusTrigger) return false;
+			statusTrigger.click();
+			return until(() => [...document.querySelectorAll(".row-submenu [role=menuitem]")].some((item) => item.textContent?.trim() === "done"));
 		});
 		await step("rowMenuCloses", async () => {
+			// Escape in submenu returns to parent, second Escape closes root menu.
+			(document.activeElement ?? document.body).dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+			await until(() => !document.querySelector(".row-submenu"));
 			(document.activeElement ?? document.body).dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
 			return until(() => !document.querySelector(".menu-pop.row-menu"));
 		});

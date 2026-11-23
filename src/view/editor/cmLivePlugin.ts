@@ -27,7 +27,7 @@ import { noteCursor } from "../navigation";
 import { canonical, documents, notify, openFile, state as appState } from "../state";
 import { currentThemeVersion } from "../themes/themes";
 import { CalloutWidget } from "./cmLiveCallout";
-import { MermaidWidget } from "./cmMermaid";
+import { MermaidLivePreviewWidget, MermaidWidget, mermaidLivePreviewTheme } from "./cmMermaid";
 import { buildHoverPreview } from "./hoverPreview";
 import { colourCode } from "./markdownCode";
 import { findInlineMathSpans, hydrateMathInElement, renderKatexHtml, renderKatexSync } from "./markdownHtml";
@@ -526,6 +526,43 @@ class CodeHeaderWidget extends WidgetType {
 	}
 }
 
+class FootnoteRefWidget extends WidgetType {
+	constructor(
+		private readonly id: string,
+		private readonly preview?: string,
+	) {
+		super();
+	}
+	eq(other: FootnoteRefWidget) {
+		return other.id === this.id && other.preview === this.preview;
+	}
+	toDOM() {
+		const sup = document.createElement("sup");
+		sup.className = "cm-md-footnote-ref cm-md-fn-ref-read";
+		sup.dataset.mdFootnote = this.id;
+		sup.textContent = `[${this.id}]`;
+		sup.title = this.preview ? `[${this.id}]: ${this.preview}\n(Click to jump to footnote)` : `Jump to footnote [${this.id}]`;
+		return sup;
+	}
+}
+
+class FootnoteDefWidget extends WidgetType {
+	constructor(private readonly id: string) {
+		super();
+	}
+	eq(other: FootnoteDefWidget) {
+		return other.id === this.id;
+	}
+	toDOM() {
+		const badge = document.createElement("span");
+		badge.className = "cm-md-footnote-def cm-md-fn-def-read";
+		badge.dataset.mdFnDef = this.id;
+		badge.textContent = `${this.id}.`;
+		badge.title = `Jump back to reference [${this.id}]`;
+		return badge;
+	}
+}
+
 class HiddenFenceWidget extends WidgetType {
 	eq() {
 		return true;
@@ -949,10 +986,20 @@ function buildBlockDecorations(state: EditorState): DecorationSet {
 	const fm = frontmatterRange(state);
 	const isRead = state.facet(readOnlyModeFacet);
 
-	// 1. YAML Frontmatter: always collapsed out of the CM6 body surface; raw YAML editing lives inside the Properties card above.
-	if (fm) {
+	// 1. YAML Frontmatter: collapsed out of the CM6 body surface; raw YAML editing lives inside the Properties card above.
+	// When CM6 Ctrl+F search matches inside frontmatter, reveal the YAML lines cleanly so search never lands on 0px bytes.
+	const fmRevealedBySearch = Boolean(fm && searchMatchesBlock(state, fm.from, fm.to));
+	if (fm && !fmRevealedBySearch) {
 		if (guard.canAdd(fm.from, fm.to)) {
 			decos.push(Decoration.replace({ widget: new HiddenFrontmatterWidget(), block: true }).range(fm.from, fm.to));
+		}
+	} else if (fm && fmRevealedBySearch) {
+		for (let n = 1; n <= fm.lines; n++) {
+			const ln = state.doc.line(n);
+			const cls = ["cm-md-fm-search-line"];
+			if (n === 1) cls.push("cm-md-fm-search-first");
+			if (n === fm.lines) cls.push("cm-md-fm-search-last");
+			decos.push(Decoration.line({ class: cls.join(" ") }).range(ln.from));
 		}
 	}
 
@@ -996,19 +1043,30 @@ function buildBlockDecorations(state: EditorState): DecorationSet {
 				const open = parseFenceOpen(startLine.text);
 				if (open && normalizeFenceLang(open.lang) === "mermaid" && endLine.number > startLine.number) {
 					const hasClose = isFenceClose(endLine.text, open.fenceChar, open.fenceLen, Boolean(open.quotePrefix.length));
-					if (hasClose && !selectionTouches(state, node.from, node.to) && !isRawEditing(state, node.from, node.to) && !searchMatchesBlock(state, node.from, node.to) && guard.canAdd(node.from, node.to)) {
+					if (hasClose) {
 						const bodyLines: string[] = [];
 						for (let k = startLine.number + 1; k < endLine.number; k++) {
 							const rawLine = state.doc.line(k).text;
 							bodyLines.push(open.quotePrefix.length ? stripQuotePrefix(rawLine, true).text : rawLine);
 						}
 						const code = bodyLines.join("\n").trim();
-						if (code) {
+						const editingMermaid = !isRead && (selectionTouches(state, node.from, node.to) || isRawEditing(state, node.from, node.to));
+						if (!editingMermaid && !searchMatchesBlock(state, node.from, node.to) && guard.canAdd(node.from, node.to)) {
+							if (code) {
+								decos.push(
+									Decoration.replace({
+										widget: new MermaidWidget(code, isRead, currentThemeVersion()),
+										block: true,
+									}).range(node.from, node.to),
+								);
+							}
+						} else if (editingMermaid) {
 							decos.push(
-								Decoration.replace({
-									widget: new MermaidWidget(code, isRead, currentThemeVersion()),
+								Decoration.widget({
+									widget: new MermaidLivePreviewWidget(code, currentThemeVersion(), startLine.number + 1, endLine.number),
+									side: 1,
 									block: true,
-								}).range(node.from, node.to),
+								}).range(endLine.to),
 							);
 						}
 					}
@@ -1852,13 +1910,19 @@ function buildInlineDecorations(view: EditorView): DecorationSet {
 			}
 
 			// Footnote definitions (`[^id]: ...`) and inline footnote refs (`[^id]`)
+			const isReadMode = state.facet(readOnlyModeFacet);
 			const fnDef = /^([ \t]{0,3})(\[\^([^\]\s]+)\]:)/.exec(text);
 			if (fnDef) {
 				const dFrom = line.from + fnDef[1]!.length;
 				const dTo = dFrom + fnDef[2]!.length;
 				if (!isSkipped(dFrom, dTo)) {
 					lineSkips.push([dFrom, dTo]);
-					decos.push(Decoration.mark({ class: "cm-md-footnote-def", attributes: { "data-md-fn-def": fnDef[3]! } }).range(dFrom, dTo));
+					if (isReadMode && !searchMatchesBlock(state, dFrom, dTo) && guard.canAdd(dFrom, dTo)) {
+						decos.push(Decoration.line({ class: "cm-md-fn-def-line" }).range(line.from));
+						decos.push(Decoration.replace({ widget: new FootnoteDefWidget(fnDef[3]!) }).range(dFrom, dTo));
+					} else {
+						decos.push(Decoration.mark({ class: "cm-md-footnote-def", attributes: { "data-md-fn-def": fnDef[3]! } }).range(dFrom, dTo));
+					}
 				}
 			}
 			if (text.includes("[^")) {
@@ -1868,15 +1932,19 @@ function buildInlineDecorations(view: EditorView): DecorationSet {
 					if (isSkipped(rFrom, rTo) || lineSkips.some(([a, b]) => rFrom < b && rTo > a)) continue;
 					lineSkips.push([rFrom, rTo]);
 					const fnPreview = footnoteDefs.get(m[1]!);
-					decos.push(
-						Decoration.mark({
-							class: "cm-md-footnote-ref",
-							attributes: {
-								"data-md-footnote": m[1]!,
-								title: fnPreview ? `[^${m[1]!}]: ${fnPreview}\n(Click to jump to footnote)` : `Jump to footnote [^${m[1]!}]`,
-							},
-						}).range(rFrom, rTo),
-					);
+					if (isReadMode && !searchMatchesBlock(state, rFrom, rTo) && guard.canAdd(rFrom, rTo)) {
+						decos.push(Decoration.replace({ widget: new FootnoteRefWidget(m[1]!, fnPreview) }).range(rFrom, rTo));
+					} else {
+						decos.push(
+							Decoration.mark({
+								class: "cm-md-footnote-ref",
+								attributes: {
+									"data-md-footnote": m[1]!,
+									title: fnPreview ? `[^${m[1]!}]: ${fnPreview}\n(Click to jump to footnote)` : `Jump to footnote [^${m[1]!}]`,
+								},
+							}).range(rFrom, rTo),
+						);
+					}
 				}
 			}
 
@@ -1951,13 +2019,70 @@ export const liveInlinePlugin = ViewPlugin.fromClass(
 
 // --- Interactive click & hover handlers --------------------------------------
 
+const liveExtraBaseTheme = EditorView.baseTheme({
+	".cm-md-fm-search-line": {
+		fontFamily: "var(--code-font, ui-monospace, monospace)",
+		fontSize: "0.86em",
+		lineHeight: "1.55",
+		backgroundColor: "color-mix(in srgb, var(--editor-fg, var(--fg)) 4%, var(--editor-bg, var(--bg)))",
+		borderLeft: "2px solid color-mix(in srgb, var(--editor-accent, var(--accent)) 55%, transparent)",
+		paddingLeft: "10px",
+		paddingRight: "10px",
+	},
+	".cm-md-fm-search-first": {
+		borderTopLeftRadius: "var(--radius-sm, 4px)",
+		borderTopRightRadius: "var(--radius-sm, 4px)",
+		paddingTop: "4px",
+	},
+	".cm-md-fm-search-last": {
+		borderBottomLeftRadius: "var(--radius-sm, 4px)",
+		borderBottomRightRadius: "var(--radius-sm, 4px)",
+		paddingBottom: "4px",
+		marginBottom: "8px",
+	},
+	".cm-md-fn-ref-read": {
+		verticalAlign: "super",
+		fontSize: "0.75em",
+		lineHeight: "0",
+		padding: "0 2px",
+		borderRadius: "3px",
+		color: "var(--editor-accent, var(--accent))",
+		fontWeight: "600",
+		cursor: "pointer",
+	},
+	".cm-md-fn-ref-read:hover": {
+		backgroundColor: "color-mix(in srgb, var(--editor-accent, var(--accent)) 14%, transparent)",
+		textDecoration: "underline",
+	},
+	".cm-md-fn-def-line": {
+		paddingLeft: "10px",
+		borderLeft: "2px solid color-mix(in srgb, var(--editor-border, var(--border)) 85%, transparent)",
+		fontSize: "0.92em",
+		color: "var(--editor-muted, var(--muted))",
+	},
+	".cm-md-fn-def-read": {
+		display: "inline-block",
+		minWidth: "1.4em",
+		marginRight: "4px",
+		fontFamily: "var(--ui-font)",
+		fontWeight: "700",
+		color: "var(--editor-accent, var(--accent))",
+		cursor: "pointer",
+	},
+	".cm-md-fn-def-read:hover": {
+		textDecoration: "underline",
+	},
+});
+
 export const liveInteractionExtension: Extension = [
+	mermaidLivePreviewTheme,
+	liveExtraBaseTheme,
 	// Keep user cursor navigation, Backspace, and Live-mode Replace / Replace All cleanly outside hidden YAML frontmatter.
 	EditorState.transactionFilter.of((tr) => {
 		if (tr.docChanged && tr.isUserEvent("input.replace")) {
 			const cb = tr.startState.facet(liveCallbacksFacet);
 			const fmStart = frontmatterRange(tr.startState);
-			if (fmStart && !cb?.isYamlEditorOpen?.()) {
+			if (fmStart && !cb?.isYamlEditorOpen?.() && !searchMatchesBlock(tr.startState, fmStart.from, fmStart.to)) {
 				const kept: ChangeSpec[] = [];
 				let skipped = 0;
 				tr.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
@@ -1984,7 +2109,7 @@ export const liveInteractionExtension: Extension = [
 		}
 		if (tr.isUserEvent("delete.backward")) {
 			const fmStart = frontmatterRange(tr.startState);
-			if (fmStart) {
+			if (fmStart && !searchMatchesBlock(tr.startState, fmStart.from, fmStart.to)) {
 				const bodyStart = Math.min(tr.startState.doc.length, fmStart.to + 1);
 				const prev = tr.startState.selection.main;
 				if (prev.empty && prev.head <= bodyStart) return [];
@@ -1992,7 +2117,7 @@ export const liveInteractionExtension: Extension = [
 		}
 		if (tr.docChanged || !tr.selection) return tr;
 		const fm = frontmatterRange(tr.state);
-		if (!fm) return tr;
+		if (!fm || searchMatchesBlock(tr.state, fm.from, fm.to)) return tr;
 		const bodyStart = Math.min(tr.state.doc.length, fm.to + 1);
 		if (bodyStart <= fm.to) return tr;
 		const main = tr.selection.main;

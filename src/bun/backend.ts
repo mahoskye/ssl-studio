@@ -1,9 +1,10 @@
 // The BackendApi (src/shared/protocol.ts), whichever host carries it.
 import { openInSystemApp, revealPathInFileManager, systemPrefersDark } from "./system";
-import { basename, dirname } from "node:path";
+import { basename, dirname, extname, join } from "node:path";
 import { mkdirSync, statSync } from "node:fs";
 import type { BackendApi, BackendEvents, Info, LspState, Workspace } from "../shared/protocol";
-import { markdownToDocx } from "./docx";
+import { htmlToMarkdown } from "../shared/htmlToMarkdown";
+import { markdownToDocx, parseDocxToMarkdown } from "./docx";
 import { History } from "./history";
 import { LspProcess } from "./lsp";
 import { catalogFilesOf, docAudit, EXPORT_TYPES, fileManifest, linksTo, listDocs, namesIn, readExport, readProject, setupProject, tomlProblem, undoSetup } from "./project";
@@ -125,6 +126,11 @@ export function createBackend(host: Host, initial?: string) {
 		gitLog: (path, limit) => (files ? git().log(need().inside(path), limit) : Promise.resolve([])),
 		gitTicketLog: (ticketKey, limit) => (files ? git().ticketLog(ticketKey, limit) : Promise.resolve([])),
 		gitShow: (path, sha, repoPath) => (files ? git().show(need().inside(path), sha, repoPath) : Promise.resolve(null)),
+		gitDiff: (options) => (files ? git().diff(options) : Promise.resolve("")),
+		gitTags: () => (files ? git().tags() : Promise.resolve([])),
+		gitHeadSha: () => (files ? git().headSha() : Promise.resolve(null)),
+		gitRangeLog: (from, to, limit) => (files ? git().rangeLog(from, to, limit) : Promise.resolve([])),
+		gitCommitFile: (path, sha, repoPath) => (files ? git().commitFile(need().inside(path), sha, repoPath) : Promise.resolve({ before: null, after: null })),
 		gitStage: (paths) => git().stage(paths.map((path) => need().inside(path))),
 		gitUnstage: (paths) => git().unstage(paths.map((path) => need().inside(path))),
 		gitCommit: (message) => git().commit(message),
@@ -207,9 +213,80 @@ export function createBackend(host: Host, initial?: string) {
 		exportDocx: async (request) => {
 			const full = need().inside(request.path);
 			mkdirSync(dirname(full), { recursive: true });
-			const bytes = markdownToDocx({ title: request.title, subtitle: request.subtitle, markdown: request.markdown });
+			const baseDir = request.baseDir ? need().inside(request.baseDir) : dirname(full);
+			const bytes = markdownToDocx({
+				title: request.title,
+				subtitle: request.subtitle,
+				markdown: request.markdown,
+				baseDir,
+				workspaceRoot: need().root,
+				meta: request.meta,
+				mermaidPngs: request.mermaidPngs,
+			});
 			await Bun.write(full, bytes);
 			return { path: full, bytes: bytes.length };
+		},
+		importDocFile: async (request) => {
+			const ws = need();
+			const src = request.sourcePath?.trim() || (await host.pick("file", "docx,html,htm,md,markdown"));
+			if (!src) return null;
+			const destDir = ws.inside(request.destDir);
+			const attachDir = request.attachmentsDir ? ws.inside(request.attachmentsDir) : join(ws.root, "docs", "attachments");
+			mkdirSync(destDir, { recursive: true });
+			const ext = extname(src).toLowerCase();
+			const rawStem = basename(src, ext).replace(/[\\/:*?"<>|]+/g, "-").trim() || "imported";
+			const destPath = ws.inside(join(destDir, `${rawStem}.md`));
+			const savedImages: string[] = [];
+			if (ext === ".docx") {
+				const bytes = new Uint8Array(await Bun.file(src).arrayBuffer());
+				const parsed = parseDocxToMarkdown(bytes);
+				let md = parsed.markdown;
+				if (parsed.images.length) {
+					mkdirSync(attachDir, { recursive: true });
+					for (const img of parsed.images) {
+						const safeImg = `${rawStem}-${img.name.replace(/[^A-Za-z0-9._-]+/g, "-")}`;
+						const imgPath = ws.inside(join(attachDir, safeImg));
+						await Bun.write(imgPath, img.bytes);
+						savedImages.push(imgPath);
+						md = md.split(`{{DOCX_IMG:${img.name}}}`).join(`![[${safeImg}]]`);
+					}
+				}
+				await Bun.write(destPath, md.endsWith("\n") ? md : `${md}\n`);
+				return { path: destPath, images: savedImages, kind: "docx" };
+			}
+			const rawText = await Bun.file(src).text();
+			if (ext === ".html" || ext === ".htm") {
+				const md = htmlToMarkdown(rawText);
+				await Bun.write(destPath, md.endsWith("\n") ? md : `${md}\n`);
+				return { path: destPath, images: [], kind: "html" };
+			}
+			await Bun.write(destPath, rawText.endsWith("\n") ? rawText : `${rawText}\n`);
+			return { path: destPath, images: [], kind: "md" };
+		},
+		importDocxBytes: async (request) => {
+			const ws = need();
+			const destDir = ws.inside(request.destDir);
+			const attachDir = request.attachmentsDir ? ws.inside(request.attachmentsDir) : join(ws.root, "docs", "attachments");
+			mkdirSync(destDir, { recursive: true });
+			const ext = extname(request.fileName);
+			const rawStem = basename(request.fileName, ext).replace(/[\\/:*?"<>|]+/g, "-").trim() || "imported";
+			const destPath = ws.inside(join(destDir, `${rawStem}.md`));
+			const bytes = Uint8Array.from(Buffer.from(request.base64, "base64"));
+			const parsed = parseDocxToMarkdown(bytes);
+			let md = parsed.markdown;
+			const savedImages: string[] = [];
+			if (parsed.images.length) {
+				mkdirSync(attachDir, { recursive: true });
+				for (const img of parsed.images) {
+					const safeImg = `${rawStem}-${img.name.replace(/[^A-Za-z0-9._-]+/g, "-")}`;
+					const imgPath = ws.inside(join(attachDir, safeImg));
+					await Bun.write(imgPath, img.bytes);
+					savedImages.push(imgPath);
+					md = md.split(`{{DOCX_IMG:${img.name}}}`).join(`![[${safeImg}]]`);
+				}
+			}
+			await Bun.write(destPath, md.endsWith("\n") ? md : `${md}\n`);
+			return { path: destPath, images: savedImages };
 		},
 		manifest: async () => fileManifest(need(), await readProject(need().root)),
 		catalogFiles: async (area) => catalogFilesOf(need(), await readProject(need().root), area),

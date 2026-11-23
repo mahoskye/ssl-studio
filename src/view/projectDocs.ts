@@ -12,16 +12,28 @@ import { docChecks } from "../shared/docChecks";
 import {
 	assembleDeploymentManifestCsv,
 	assembleDeploymentManifestMarkdown,
+	assembleReleaseBundleMarkdown,
+	assembleReleaseNotesMarkdown,
+	assembleRtmCsv,
+	assembleRtmMarkdown,
 	assembleTicketPacketMarkdown,
 	buildPrintableHtml,
+	buildRtmRows,
 	classifyDeploymentArtifact,
 	demoteMarkdownHeadings,
 	escapeHtml,
 	evaluateTicketReadiness,
+	extractExportMeta,
 	inlineExportStyles,
 	markdownToJira,
+	renderFrontMatterSummaryHtml,
 	transformMarkdownFootnotes,
+	type PlanBusinessTest,
+	type ReleaseBundleCommit,
+	type ReleaseBundleInput,
+	type ReleaseBundleTicket,
 } from "../shared/docExport";
+import { headingAnchor } from "../shared/docTables";
 import {
 	addToFrontMatterList,
 	bodyOffset,
@@ -80,7 +92,7 @@ import {
 import { folderParts, typedParts } from "../shared/docSections";
 import type { DocFile, LinkTo, NameIn } from "../shared/protocol";
 import { backend } from "./backend";
-import { ask, choose } from "./dialogs";
+import { ask, choose, quickPick, type QuickPickOption } from "./dialogs";
 import { toggleTask } from "../shared/tasks";
 import type { LinkMend } from "../shared/docChecks";
 import { linkFile, linkWritten, ownLinkEdits, rewriteHeadingReferences, withLinkFiles, type LinkEdit } from "../shared/docLinks";
@@ -440,6 +452,9 @@ export async function importTickets() {
 			const was = before[at] ?? (await current(dest));
 			if (was === null) {
 				let fresh = ticketTemplate(ticket);
+				if (ticket.release) fresh = withFrontMatter(fresh, "release", frontValue(ticket.release)) ?? fresh;
+				if (ticket.priority) fresh = withFrontMatter(fresh, "priority", frontValue(ticket.priority)) ?? fresh;
+				for (const tag of ticket.tags ?? []) fresh = addToFrontMatterList(fresh, "tags", tag) ?? fresh;
 				if (ticket.acceptanceCriteria?.trim()) {
 					const ac = ticket.acceptanceCriteria.trim();
 					const donePlaceholder = /^## What done looks like\r?\n\r?\n- \[ \] What must be true when this is done:[^\r\n]*/m;
@@ -461,6 +476,8 @@ export async function importTickets() {
 				["status", ticket.status],
 				["title", ticket.title],
 				["type", ticket.type],
+				["release", ticket.release],
+				["priority", ticket.priority],
 				["parent", ticket.parent],
 				["source", ticket.source],
 			] as const) {
@@ -472,6 +489,7 @@ export async function importTickets() {
 				const h1 = new RegExp(`^(#\\s+${ticket.key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:\\s+)${oldTitle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`, "m");
 				if (h1.test(now)) now = now.replace(h1, (_, prefix: string) => `${prefix}${ticket.title}`);
 			}
+			for (const tag of ticket.tags ?? []) now = addToFrontMatterList(now, "tags", tag) ?? now;
 			for (const relKey of ticket.related) now = addToFrontMatterList(now, "related", relKey) ?? now;
 			for (const blk of ticket.blocks ?? []) now = addToFrontMatterList(now, "blocks", blk) ?? now;
 			for (const by of ticket.blockedBy ?? []) now = addToFrontMatterList(now, "blocked-by", by) ?? now;
@@ -992,15 +1010,152 @@ async function followPaths(fromOrPairs: string | readonly { from: string; to: st
 }
 
 /**
+ * Rewrites matching workspace-relative paths inside `.plan.json` files (`targets` and `node.docs`),
+ * serializing via `printPlan()` after user confirmation (ADR 0009).
+ */
+async function followPlanPaths(rawPairs: readonly { from: string; to: string }[]) {
+	if (!state.workspace) return;
+	const wsRoot = root();
+	const pairs = rawPairs
+		.filter((p) => p.from && p.to && canonical(p.from) !== canonical(p.to))
+		.map((p) => ({ from: p.from, to: p.to, fromCanon: canonical(p.from), toCanon: canonical(p.to) }))
+		.sort((a, b) => b.fromCanon.length - a.fromCanon.length);
+	if (!pairs.length) return;
+
+	const rewriteRef = (rawRef: string): string | null => {
+		const trimmed = rawRef.trim();
+		if (!trimmed || /^(?:https?:|mailto:|#)/i.test(trimmed)) return null;
+		const hashIdx = trimmed.indexOf("#");
+		const pathPart = hashIdx >= 0 ? trimmed.slice(0, hashIdx) : trimmed;
+		const fragPart = hashIdx >= 0 ? trimmed.slice(hashIdx) : "";
+		const leadSlash = pathPart.startsWith("/");
+		const clean = pathPart.replace(/\\/g, "/").replace(/^\/+/, "").replace(/^\.\//, "");
+		if (!clean) return null;
+		const resolved = resolvePath(wsRoot, clean);
+		const canonRes = canonical(resolved);
+		for (const pair of pairs) {
+			if (canonRes === pair.fromCanon || isInside(pair.fromCanon, canonRes)) {
+				const dest = canonRes === pair.fromCanon ? pair.to : joinPath(pair.to, relativeTo(pair.from, resolved));
+				const nextRel = relativeTo(wsRoot, dest).split("\\").join("/");
+				const nextFull = `${leadSlash ? "/" : ""}${nextRel}${fragPart}`;
+				return nextFull !== trimmed ? nextFull : null;
+			}
+		}
+		return null;
+	};
+
+	const allDocs = await backend.docs().catch(() => docs());
+	const planDocs = allDocs.filter((d) => d.exists && isPlanPath(d.path));
+	if (!planDocs.length) return;
+
+	const updates: { path: string; nextText: string; hits: number }[] = [];
+	for (const pDoc of planDocs) {
+		const rawText = await current(pDoc.path);
+		if (rawText === null) continue;
+		const parsed = parsePlan(rawText);
+		if (!parsed.plan) continue;
+		let hits = 0;
+		const plan = parsed.plan;
+
+		let nextTargets = plan.targets;
+		if (Array.isArray(plan.targets)) {
+			nextTargets = plan.targets.map((entry: unknown) => {
+				if (typeof entry === "string") {
+					const rep = rewriteRef(entry);
+					if (rep) {
+						hits++;
+						return rep;
+					}
+					return entry;
+				}
+				if (entry && typeof entry === "object") {
+					const obj = { ...(entry as Record<string, unknown>) };
+					let objChanged = false;
+					if (typeof obj.path === "string") {
+						const rep = rewriteRef(obj.path);
+						if (rep) {
+							obj.path = rep;
+							hits++;
+							objChanged = true;
+						}
+					}
+					if (typeof obj.script === "string") {
+						const rep = rewriteRef(obj.script);
+						if (rep) {
+							obj.script = rep;
+							hits++;
+							objChanged = true;
+						}
+					}
+					return objChanged ? obj : entry;
+				}
+				return entry;
+			});
+		}
+
+		const nextNodes = plan.nodes.map((node) => {
+			if (!Array.isArray(node.docs) || !node.docs.length) return node;
+			let nodeChanged = false;
+			const nextDocs = node.docs.map((docRef) => {
+				if (typeof docRef !== "string") return docRef;
+				const rep = rewriteRef(docRef);
+				if (rep) {
+					hits++;
+					nodeChanged = true;
+					return rep;
+				}
+				return docRef;
+			});
+			return nodeChanged ? { ...node, docs: nextDocs } : node;
+		});
+
+		if (hits > 0) {
+			const nextPlan = {
+				...plan,
+				...(nextTargets !== undefined ? { targets: nextTargets } : {}),
+				nodes: nextNodes,
+			};
+			const nextText = printPlan(nextPlan);
+			if (nextText !== rawText) updates.push({ path: pDoc.path, nextText, hits });
+		}
+	}
+
+	if (!updates.length) return;
+	const totalHits = updates.reduce((sum, u) => sum + u.hits, 0);
+	const primary = pairs[0]!;
+	const where = updates.length === 1 ? relativeTo(wsRoot, updates[0]!.path) : `${updates.length} plans`;
+	const said = `${totalHits === 1 ? "One path" : `${totalHits} paths`} in ${where} (targets / node docs) still ${totalHits === 1 ? "points" : "point"} to ${baseName(primary.from)}.`;
+	const go = updates.length === 1 ? "Update plan" : `Update ${updates.length} plans`;
+	if ((await choose(said, [go])) !== go) return;
+
+	let written = 0;
+	for (const item of updates) {
+		try {
+			await put(item.path, item.nextText, true);
+			written++;
+		} catch (e: any) {
+			notify(String(e?.message ?? e), "error");
+		}
+	}
+	if (written) {
+		setState("treeVersion", (v) => v + 1);
+		notify(`Updated ${totalHits} ${totalHits === 1 ? "path" : "paths"} in ${written} ${written === 1 ? "plan" : "plans"} for ${baseName(primary.to)}.`);
+	}
+}
+
+/**
  * After a file or a folder is renamed: first the links by path that led to
  * the old name, then the links by name that no longer mean what they
- * meant. Each is asked about once, and written on the person's word.
+ * meant, then matching workspace paths inside `.plan.json` files (`targets` and `node.docs`).
+ * Each is asked about once, and written on the person's word.
  */
 export async function followRename(from: string, to: string, beforeDocs?: DocFile[], coMoved?: readonly { from: string; to: string }[]) {
 	// Prefer a caller-provided pre-rename snapshot so `followNames` never races an async `docs()` refresh.
 	const listed = (beforeDocs ?? docs()).map((file) => ({ ...file, path: canonical(file.path) }));
-	await followPaths(coMoved?.length ? [{ from, to }, ...coMoved] : from, to);
+	const allPairs = coMoved?.length ? [{ from, to }, ...coMoved] : [{ from, to }];
+	await followPaths(coMoved?.length ? allPairs : from, to);
 	await followNames(from, to, listed);
+	await followPlanPaths(allPairs);
 }
 
 /**
@@ -2181,7 +2336,148 @@ export async function appendNoteToTicket(key: string, noteMarkdown: string): Pro
 	}
 }
 
-/** Parses `CREATE TABLE` / `ALTER TABLE ADD` DDL from a schema SQL file and creates or non-destructively updates a Markdown table reference doc. */
+/** Inspects an existing Markdown schema doc against parsed SQL tables to surface exact modified and dropped columns. */
+function diffExistingSchemaColumns(
+	existingMd: string,
+	tables: readonly ReturnType<typeof parseCreateTables>[number][],
+): { modified: string[]; dropped: string[] } {
+	const lines = existingMd.split(/\r?\n/);
+	const stripCell = (s: string) => s.trim().replace(/^`|`$/g, "").trim();
+	const splitRow = (line: string): string[] => {
+		const trimmed = line.trim().replace(/^\|/, "").replace(/\|$/, "");
+		const cells: string[] = [];
+		let cur = "";
+		for (let i = 0; i < trimmed.length; i++) {
+			if (trimmed[i] === "\\" && trimmed[i + 1] === "|") {
+				cur += "|";
+				i++;
+			} else if (trimmed[i] === "|") {
+				cells.push(cur.trim());
+				cur = "";
+			} else cur += trimmed[i]!;
+		}
+		cells.push(cur.trim());
+		return cells;
+	};
+	const modified: string[] = [];
+	const dropped: string[] = [];
+
+	for (const tbl of tables) {
+		const target = tbl.tableName.toLowerCase();
+		let startSearch = 0;
+		let headLine = -1;
+		for (let i = 0; i < lines.length; i++) {
+			const hm = /^#{1,3}\s+`?([A-Za-z_][\w$.]*)`?\s*$/.exec(lines[i]!.trim());
+			if (hm) {
+				const hName = hm[1]!.toLowerCase();
+				const bare = hName.includes(".") ? hName.split(".").pop()! : hName;
+				if (hName === target || bare === target) {
+					headLine = i;
+					startSearch = i + 1;
+					break;
+				}
+			}
+		}
+		if (headLine < 0 && tables.length > 1) continue;
+		let tableStart = -1;
+		let tableEnd = -1;
+		for (let i = startSearch; i < lines.length; i++) {
+			if (headLine >= 0 && /^#{1,2}\s+/.test(lines[i]!)) break;
+			if (!lines[i]!.trim().startsWith("|")) continue;
+			const hdr = splitRow(lines[i]!).map((c) => c.toLowerCase());
+			if (!hdr[0]?.includes("column")) continue;
+			if (i + 1 >= lines.length || !/^\s*\|?\s*:?-{2,}/.test(lines[i + 1]!)) continue;
+			tableStart = i;
+			tableEnd = i + 2;
+			while (tableEnd < lines.length && lines[tableEnd]!.trim().startsWith("|")) tableEnd++;
+			break;
+		}
+		if (tableStart < 0) continue;
+
+		const sqlByCol = new Map(tbl.columns.map((c) => [c.name.toLowerCase(), c]));
+		for (const raw of lines.slice(tableStart + 2, tableEnd)) {
+			const cells = splitRow(raw);
+			const colName = stripCell(cells[0] ?? "");
+			if (!colName) continue;
+			const sqlCol = sqlByCol.get(colName.toLowerCase());
+			if (!sqlCol) {
+				dropped.push(tables.length > 1 ? `${tbl.tableName}.${colName}` : colName);
+			} else {
+				const prevType = stripCell(cells[1] ?? "");
+				const prevCons = (cells[2] ?? "").trim();
+				const nextCons = (sqlCol.constraints || "—").replace(/\|/g, "\\|");
+				if (prevType !== sqlCol.type || prevCons !== nextCons) {
+					modified.push(tables.length > 1 ? `${tbl.tableName}.${colName}` : colName);
+				}
+			}
+		}
+	}
+	return { modified, dropped };
+}
+
+/** Annotates dropped column rows in a Markdown schema table with `(dropped in SQL)` without deleting existing notes. */
+function annotateDroppedSchemaColumns(markdown: string, droppedBareNames: readonly string[]): string {
+	if (!droppedBareNames.length) return markdown;
+	const droppedSet = new Set(droppedBareNames.map((n) => (n.includes(".") ? n.split(".").pop()! : n).toLowerCase()));
+	const eol = markdown.includes("\r\n") ? "\r\n" : "\n";
+	return markdown
+		.split(/\r?\n/)
+		.map((line) => {
+			if (!line.trim().startsWith("|")) return line;
+			const trimmed = line.trim().replace(/^\|/, "").replace(/\|$/, "");
+			const parts = trimmed.split(/(?<!\\)\|/);
+			if (parts.length < 4) return line;
+			const col = parts[0]!.trim().replace(/^`|`$/g, "").trim().toLowerCase();
+			if (!droppedSet.has(col)) return line;
+			const lastIdx = parts.length - 1;
+			const note = parts[lastIdx]!.trim();
+			if (/dropped in sql/i.test(note)) return line;
+			parts[lastIdx] = note ? ` ${note} (dropped in SQL) ` : " (dropped in SQL) ";
+			return `|${parts.join("|")}|`;
+		})
+		.join(eol);
+}
+
+/** Formats non-table SQL objects (Views, Procedures, Functions, Triggers, Packages, Sequences, Synonyms, Types) as clean Markdown. */
+function sqlNonTableObjectsToMarkdown(
+	objects: readonly ReturnType<typeof extractSqlObjects>[number][],
+	relSql: string,
+	docTitle: string,
+): string {
+	const esc = (s: string) => s.replace(/\|/g, "\\|");
+	const kindLabel = (k: string) => k.charAt(0).toUpperCase() + k.slice(1);
+	const lines: string[] = [
+		"---",
+		`title: ${quoteYamlScalar(docTitle)}`,
+		"status: draft",
+		`source: ${quoteYamlScalar(relSql)}`,
+		"---",
+		"",
+		`# ${docTitle}`,
+		"",
+		`Database objects defined in \`${relSql}\`.`,
+		"",
+		"| Object | Kind | Action | Notes |",
+		"| --- | --- | --- | --- |",
+	];
+	for (const obj of objects) {
+		lines.push(`| \`${esc(obj.name)}\` | ${kindLabel(obj.kind)} | ${obj.action === "alter" ? "ALTER" : "CREATE"} |  |`);
+	}
+	lines.push("");
+	for (const obj of objects) {
+		lines.push(`## ${obj.bareName}`, "");
+		lines.push(`- **Object:** \`${obj.name}\` (${obj.kind})`);
+		lines.push(`- **Source:** \`${relSql}\``);
+		lines.push("");
+	}
+	return lines.join("\n").trimEnd() + "\n";
+}
+
+/**
+ * Parses `CREATE TABLE` / `ALTER TABLE ADD` DDL (or Views, Stored Procedures, Functions, Triggers,
+ * and Packages when no table DDL is present) from a schema SQL file and creates or non-destructively
+ * updates a Markdown reference doc, clearly surfacing added, modified, and dropped columns.
+ */
 export async function generateSchemaDocFromSql(sqlPath?: string): Promise<void> {
 	if (!ready()) return;
 	let sourcePath = sqlPath;
@@ -2189,7 +2485,7 @@ export async function generateSchemaDocFromSql(sqlPath?: string): Promise<void> 
 		const sqlFiles = docs().filter((d) => d.exists && d.group === "schema" && /\.(sql|ddl|pks|pkb)$/i.test(d.name));
 		if (!sqlFiles.length) return notify(`No SQL/DDL files found under ${state.project!.schema}/.`);
 		const labels = sqlFiles.map((f) => f.name);
-		const picked = await choose("Choose a SQL file to document tables from", labels);
+		const picked = await choose("Choose a SQL file to document database objects from", labels);
 		if (!picked) return;
 		sourcePath = sqlFiles.find((f) => f.name === picked)?.path;
 	}
@@ -2197,12 +2493,56 @@ export async function generateSchemaDocFromSql(sqlPath?: string): Promise<void> 
 	const sqlText = await current(sourcePath);
 	if (sqlText === null) return notify("Could not read the SQL file.", "error");
 	const tables = parseCreateTables(sqlText, { includeStandaloneAlter: true });
-	if (!tables.length) return notify(`No CREATE TABLE or ALTER TABLE ADD statements were found in ${baseName(sourcePath)}.`);
 	const relSql = relativeTo(root(), sourcePath).split("\\").join("/");
 	const schemaEntries = await backend.list(schemaFolder()).catch(() => []);
 	const dbFolderEntry = schemaEntries.find((e) => e.kind === "dir" && e.name.toLowerCase() === "database");
 	const existingDbDoc = docs().find((d) => d.exists && d.group === "schema" && d.kind === "database" && d.name.includes("/"));
 	const dbSubfolder = dbFolderEntry?.name || existingDbDoc?.name.split(/[\\/]/)[0] || "database";
+
+	// Handle Views, Stored Procedures, Functions, Triggers, Packages, Sequences, Synonyms, and Types when no CREATE TABLE exists.
+	if (!tables.length) {
+		const objects = extractSqlObjects(sqlText, { includeAlter: true }).filter((o) => o.kind !== "index");
+		if (!objects.length) {
+			return notify(`No CREATE/ALTER SQL objects (tables, views, procedures, functions, triggers, or packages) were found in ${baseName(sourcePath)}.`);
+		}
+		const defaultName = objects.length === 1 ? objects[0]!.bareName : baseName(sourcePath).replace(/\.[^.]+$/, "");
+		const name = (await ask(`Schema document name (saved under ${state.project!.schema}/${dbSubfolder}/)`, defaultName))?.trim();
+		if (!name) return;
+		const named = typedParts(name, "file");
+		if ("problem" in named || named.parts.length !== 1) return notify("Give a single valid filename.", "error");
+		const dest = joinPath(schemaFolder(), dbSubfolder, `${named.parts[0]}.md`);
+		const existingMd = await current(dest);
+		if (existingMd !== null) {
+			const missingObjs = objects.filter(
+				(o) => !existingMd.toLowerCase().includes(o.bareName.toLowerCase()) && !existingMd.toLowerCase().includes(o.name.toLowerCase()),
+			);
+			let nextText = existingMd;
+			if (!one(frontMatter(nextText).values.source)) {
+				nextText = withFrontMatter(nextText, "source", relSql) ?? nextText;
+			}
+			if (missingObjs.length) {
+				const eol = nextText.includes("\r\n") ? "\r\n" : "\n";
+				const additions = missingObjs
+					.map((o) => `## ${o.bareName}${eol}${eol}- **Object:** \`${o.name}\` (${o.kind})${eol}- **Source:** \`${relSql}\``)
+					.join(`${eol}${eol}`);
+				nextText = `${nextText.trimEnd()}${eol}${eol}${additions}${eol}`;
+			}
+			if (nextText === existingMd) {
+				notify(`${baseName(dest)} already lists all ${objects.length} SQL ${objects.length === 1 ? "object" : "objects"} from ${baseName(sourcePath)}.`);
+				await openFile(dest);
+				return;
+			}
+			await put(dest, nextText, true);
+			setState("treeVersion", (v) => v + 1);
+			notify(`Updated ${baseName(dest)} with ${missingObjs.length} new SQL ${missingObjs.length === 1 ? "object" : "objects"} from ${baseName(sourcePath)}.`);
+			await openFile(dest);
+			return;
+		}
+		const docTitle = objects.length === 1 ? objects[0]!.bareName : name;
+		await start(dest, sqlNonTableObjectsToMarkdown(objects, relSql, docTitle), "schema");
+		return;
+	}
+
 	const defaultName = tables.length === 1 ? tables[0]!.tableName : baseName(sourcePath).replace(/\.[^.]+$/, "");
 	const name = (await ask(`Table document name (saved under ${state.project!.schema}/${dbSubfolder}/)`, defaultName))?.trim();
 	if (!name) return;
@@ -2211,13 +2551,33 @@ export async function generateSchemaDocFromSql(sqlPath?: string): Promise<void> 
 	const dest = joinPath(schemaFolder(), dbSubfolder, `${named.parts[0]}.md`);
 	const existingMd = await current(dest);
 	if (existingMd !== null) {
+		const diff = diffExistingSchemaColumns(existingMd, tables);
 		const merged = mergeSqlTablesIntoMarkdown(existingMd, tables, relSql);
 		let nextText = merged.text;
 		if (!one(frontMatter(nextText).values.source)) {
 			nextText = withFrontMatter(nextText, "source", relSql) ?? nextText;
 		}
+
+		// Surface dropped & modified columns clearly so nothing is silently hidden or deleted (ADR 0002 / 0009).
+		if (diff.dropped.length > 0) {
+			const droppedPreview = diff.dropped.slice(0, 6).join(", ") + (diff.dropped.length > 6 ? `, +${diff.dropped.length - 6} more` : "");
+			const modNote = diff.modified.length ? ` Modified: ${diff.modified.slice(0, 5).join(", ")}${diff.modified.length > 5 ? "…" : ""}.` : "";
+			const MARK = "Mark dropped in Notes";
+			const KEEP = "Keep existing rows as-is";
+			const choice = await choose(
+				`${diff.dropped.length} documented ${diff.dropped.length === 1 ? "column is" : "columns are"} no longer in ${baseName(sourcePath)}: ${droppedPreview}.${modNote} Existing rows are preserved — how should dropped columns be handled?`,
+				[MARK, KEEP],
+			);
+			if (!choice) return;
+			if (choice === MARK) nextText = annotateDroppedSchemaColumns(nextText, diff.dropped);
+		}
+
 		if (nextText === existingMd) {
-			notify(`${baseName(dest)} is already up to date with ${baseName(sourcePath)}.`);
+			if (diff.dropped.length > 0) {
+				notify(`${baseName(dest)} kept ${diff.dropped.length} dropped ${diff.dropped.length === 1 ? "column" : "columns"} (${diff.dropped.slice(0, 4).join(", ")}) for manual review.`);
+			} else {
+				notify(`${baseName(dest)} is already up to date with ${baseName(sourcePath)}.`);
+			}
 			await openFile(dest);
 			return;
 		}
@@ -2226,9 +2586,12 @@ export async function generateSchemaDocFromSql(sqlPath?: string): Promise<void> 
 		const parts = [
 			merged.addedTables ? `${merged.addedTables} ${merged.addedTables === 1 ? "table" : "tables"} added` : "",
 			merged.addedColumns ? `${merged.addedColumns} ${merged.addedColumns === 1 ? "column" : "columns"} added` : "",
-			merged.updatedColumns ? `${merged.updatedColumns} ${merged.updatedColumns === 1 ? "column" : "columns"} updated` : "",
+			merged.updatedColumns
+				? `${merged.updatedColumns} modified${diff.modified.length && diff.modified.length <= 4 ? ` (${diff.modified.join(", ")})` : ""}`
+				: "",
+			diff.dropped.length ? `${diff.dropped.length} dropped in SQL (${diff.dropped.slice(0, 4).join(", ")}${diff.dropped.length > 4 ? "…" : ""})` : "",
 		].filter(Boolean);
-		notify(`Synced ${baseName(dest)} from ${baseName(sourcePath)}${parts.length ? ` (${parts.join(", ")})` : ""}.`);
+		notify(`Synced ${baseName(dest)} from ${baseName(sourcePath)}${parts.length ? ` (${parts.join("; ")})` : ""}.`);
 		await openFile(dest);
 		return;
 	}
@@ -2259,6 +2622,24 @@ function rewriteRelativeImagesForBase(md: string, srcDocPath: string, baseDocPat
 		const resolved = resolvePath(srcDir, decoded);
 		const rel = linkWritten(relativePath(baseDir, resolved).split("\\").join("/"), url);
 		return `![${alt}](${rel}${title ?? ""})`;
+	});
+}
+
+/** Rewrites BOTH relative images AND relative Markdown/file links from `srcDocPath` to stay valid relative to `baseDocPath`. */
+function rewriteRelativeLinksForBase(md: string, srcDocPath: string, baseDocPath: string): string {
+	if (canonical(dirName(srcDocPath)) === canonical(dirName(baseDocPath))) return md;
+	const srcDir = dirName(srcDocPath);
+	const baseDir = dirName(baseDocPath);
+	return md.replace(/(!?)\[([^\]]*)\]\(([^)\s]+)(\s+"[^"]*")?\)/g, (full, bang: string, label: string, url: string, title?: string) => {
+		if (!url || /^(?:https?:|mailto:|data:|#|\/)/i.test(url)) return full;
+		const hashIdx = url.indexOf("#");
+		const filePart = hashIdx >= 0 ? url.slice(0, hashIdx) : url;
+		const fragPart = hashIdx >= 0 ? url.slice(hashIdx) : "";
+		if (!filePart) return full;
+		const decoded = linkFile(filePart);
+		const resolved = resolvePath(srcDir, decoded);
+		const rel = linkWritten(relativePath(baseDir, resolved).split("\\").join("/"), filePart);
+		return `${bang}[${label}](${rel}${fragPart}${title ?? ""})`;
 	});
 }
 
@@ -2448,7 +2829,86 @@ async function expandTransclusionsForExport(
 	return head + out.join("\n");
 }
 
-async function renderCleanHtmlForExport(markdown: string, docPath: string): Promise<string> {
+/** Converts an ArrayBuffer to a base64 string in chunked slices safe against call-stack limits. */
+function bytesToBase64(buf: ArrayBuffer): string {
+	const bytes = new Uint8Array(buf);
+	let binary = "";
+	const chunk = 0x8000;
+	for (let i = 0; i < bytes.length; i += chunk) {
+		binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+	}
+	return btoa(binary);
+}
+
+/**
+ * Finds fenced `mermaid` / `mmd` blocks outside outer fences and rasterizes each to a light-mode
+ * 2x PNG base64 string for `.docx` embedding. Safely skips any block that fails or taints canvas.
+ */
+async function rasterizeMermaidPngsForDocx(markdown: string): Promise<Record<string, string>> {
+	if (typeof document === "undefined" || !/```|~~~/.test(markdown)) return {};
+	const body = frontMatter(markdown).body.replace(/\r\n/g, "\n");
+	const lines = body.split("\n");
+	const sources: string[] = [];
+	let outerFence: { ch: string; len: number } | null = null;
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i]!;
+		if (outerFence) {
+			if (new RegExp(`^[ \\t]{0,3}${outerFence.ch}{${outerFence.len},}[ \\t]*$`).test(line)) outerFence = null;
+			continue;
+		}
+		const fenceOpen = /^[ \t]{0,3}(`{3,}|~{3,})[ \t]*([A-Za-z0-9_+-]*)(?:[ \t]+.*)?$/.exec(line);
+		if (fenceOpen && !(fenceOpen[1]![0] === "`" && line.slice(line.indexOf(fenceOpen[1]!) + fenceOpen[1]!.length).includes("`"))) {
+			const delim = fenceOpen[1]![0]!;
+			const len = fenceOpen[1]!.length;
+			const lang = fenceOpen[2]!.toLowerCase();
+			if (lang === "mermaid" || lang === "mmd") {
+				const closeRe = new RegExp(`^[ \\t]{0,3}${delim}{${len},}[ \\t]*$`);
+				const block: string[] = [];
+				let j = i + 1;
+				while (j < lines.length && !closeRe.test(lines[j]!)) {
+					block.push(lines[j]!);
+					j++;
+				}
+				const code = block.join("\n").trim();
+				if (code) sources.push(code);
+				i = j;
+				continue;
+			}
+			outerFence = { ch: delim, len };
+		}
+	}
+	if (!sources.length) return {};
+
+	const out: Record<string, string> = {};
+	try {
+		const { renderMermaidSvgForExport, mermaidSvgToPngBlob } = await import("./editor/cmMermaid");
+		for (let idx = 0; idx < sources.length; idx++) {
+			const code = sources[idx]!;
+			try {
+				const svg = await renderMermaidSvgForExport(code, "light");
+				if (!svg) continue;
+				const blob = await mermaidSvgToPngBlob(svg, "light");
+				if (!blob) continue;
+				const b64 = bytesToBase64(await blob.arrayBuffer());
+				if (b64) {
+					out[code] = b64;
+					out[`mermaid-${idx}`] = b64;
+				}
+			} catch {
+				// Canvas taint or render error: gracefully fall back to code box in docx.ts.
+			}
+		}
+	} catch {
+		// Mermaid unavailable in headless environment.
+	}
+	return out;
+}
+
+async function renderCleanHtmlForExport(
+	markdown: string,
+	docPath: string,
+	options?: { bundledAnchors?: ReadonlyMap<string, string>; exportDestPath?: string },
+): Promise<string> {
 	const expanded = await expandTransclusionsForExport(markdown, docPath);
 	const rawBody = transformMarkdownFootnotes(frontMatter(expanded).body.replace(/\r\n/g, "\n"), "html");
 	if (rawBody.includes("$")) await loadKatex().catch(() => {});
@@ -2578,6 +3038,34 @@ async function renderCleanHtmlForExport(markdown: string, docPath: string): Prom
 		tn.replaceWith(...Array.from(span.childNodes));
 	}
 
+	// Rewrite intra-packet doc links to `#section-slug` anchors and rebase relative workspace `.md`/file links when exported to another folder.
+	if (options?.bundledAnchors?.size || options?.exportDestPath) {
+		const existingIds = new Set(Array.from(box.querySelectorAll<HTMLElement>("[id]")).map((el) => el.id));
+		const srcDir = dirName(docPath);
+		const destDir = options.exportDestPath ? dirName(options.exportDestPath) : "";
+		for (const anchor of box.querySelectorAll<HTMLAnchorElement>("a[href]")) {
+			const rawHref = anchor.getAttribute("href")?.trim() ?? "";
+			if (!rawHref || rawHref.startsWith("#") || /^(?:https?:|mailto:|tel:|data:|javascript:)/i.test(rawHref)) continue;
+			const hashIdx = rawHref.indexOf("#");
+			const filePart = hashIdx >= 0 ? rawHref.slice(0, hashIdx) : rawHref;
+			const fragPart = hashIdx >= 0 ? rawHref.slice(hashIdx + 1) : "";
+			if (!filePart) continue;
+			const decoded = linkFile(filePart);
+			const resolved = decoded.startsWith("/") && wsRoot ? resolvePath(wsRoot, decoded.slice(1)) : resolvePath(srcDir, decoded);
+			const targetCanon = canonical(resolved);
+			const bundledSlug = options.bundledAnchors?.get(targetCanon);
+			if (bundledSlug) {
+				const targetFrag = fragPart && existingIds.has(fragPart) ? fragPart : bundledSlug;
+				anchor.setAttribute("href", `#${targetFrag}`);
+				continue;
+			}
+			if (destDir && wsRoot && isInside(wsRoot, resolved)) {
+				const rebased = linkWritten(relativePath(destDir, resolved).split("\\").join("/"), filePart);
+				anchor.setAttribute("href", fragPart ? `${rebased}#${fragPart}` : rebased);
+			}
+		}
+	}
+
 	// Apply Obsidian image sizing (`![alt|400]`, `![alt|400x250]`) & inline local workspace images as data URLs.
 	const { loadImageUrl } = await import("./editor/imageResolve");
 	const imgs = Array.from(box.querySelectorAll<HTMLImageElement>("img"));
@@ -2612,7 +3100,7 @@ function downloadBlobFile(filename: string, content: string, mime: string) {
 async function saveExportFile(
 	defaultRelPath: string,
 	filename: string,
-	content: string | ((destPath: string) => string),
+	content: string | ((destPath: string) => string | Promise<string>),
 	mime: string,
 ): Promise<boolean> {
 	const { inApp } = await import("./backend");
@@ -2635,7 +3123,7 @@ async function saveExportFile(
 			} else {
 				await backend.create(dest, "file");
 			}
-			const payload = typeof content === "function" ? content(dest) : content;
+			const payload = typeof content === "function" ? await content(dest) : content;
 			await put(dest, payload, true);
 			setState("treeVersion", (v) => v + 1);
 			notify(`Saved export to ${relativeTo(state.workspace.root, dest)}.`);
@@ -2646,14 +3134,20 @@ async function saveExportFile(
 		}
 	}
 	const fallbackDest = state.workspace?.root ? resolvePath(state.workspace.root, defaultRelPath) : defaultRelPath;
-	const payload = typeof content === "function" ? content(fallbackDest) : content;
+	const payload = typeof content === "function" ? await content(fallbackDest) : content;
 	downloadBlobFile(filename, payload, mime);
 	notify(`Exported ${filename}.`);
 	return true;
 }
 
-/** Saves an OpenXML `.docx` document generated by the backend inside the workspace (under `<docs>/exports/` by default). */
-async function saveDocxExport(defaultRelPath: string, title: string, subtitle: string | undefined, markdown: string): Promise<boolean> {
+/** Saves an OpenXML `.docx` document generated by the backend inside the workspace (embedding local images, Mermaid PNGs, hyperlinks, footnotes & metadata). */
+async function saveDocxExport(
+	defaultRelPath: string,
+	title: string,
+	subtitle: string | undefined,
+	markdown: string,
+	options?: { baseDir?: string; meta?: Record<string, string> },
+): Promise<boolean> {
 	if (!state.workspace?.root) {
 		notify("Open a workspace folder before exporting to Word (.docx).", "error");
 		return false;
@@ -2675,7 +3169,17 @@ async function saveDocxExport(defaultRelPath: string, title: string, subtitle: s
 				return false;
 			}
 		}
-		const res = await backend.exportDocx({ path: dest, title, subtitle, markdown });
+		const meta = options?.meta ?? extractExportMeta(markdown);
+		const mermaidPngs = await rasterizeMermaidPngsForDocx(markdown);
+		const res = await backend.exportDocx({
+			path: dest,
+			title,
+			subtitle,
+			markdown,
+			...(options?.baseDir ? { baseDir: options.baseDir } : {}),
+			...(Object.keys(meta).length ? { meta } : {}),
+			...(Object.keys(mermaidPngs).length ? { mermaidPngs } : {}),
+		});
 		setState("treeVersion", (v) => v + 1);
 		notify(`Saved Word document to ${relativeTo(state.workspace.root, res.path)}.`, "info", {
 			label: "Open externally",
@@ -2735,6 +3239,8 @@ export async function exportDocAs(
 	const title = one(fm.values.title) || baseName(path).replace(/\.(md|markdown)$/i, "");
 	const stem = baseName(path).replace(/\.(md|markdown)$/i, "");
 	const subtitle = state.project?.name ? `${state.project.name} · Exported ${today()}` : `Exported ${today()}`;
+	const meta = extractExportMeta(text);
+	const metaHtml = renderFrontMatterSummaryHtml(meta);
 
 	if (format === "jira-copy") {
 		const expanded = await expandTransclusionsForExport(text, path);
@@ -2748,7 +3254,24 @@ export async function exportDocAs(
 	if (format === "docx") {
 		const expanded = await expandTransclusionsForExport(text, path);
 		const docsRel = (state.project?.docs ?? "docs").replace(/^[./\\]+|[\\/]+$/g, "");
-		await saveDocxExport(`${docsRel}/exports/${stem}.docx`, title, subtitle, expanded);
+		await saveDocxExport(`${docsRel}/exports/${stem}.docx`, title, subtitle, expanded, {
+			baseDir: dirName(path),
+			meta,
+		});
+		return;
+	}
+
+	if (format === "html-download") {
+		const docsRel = (state.project?.docs ?? "docs").replace(/^[./\\]+|[\\/]+$/g, "");
+		await saveExportFile(
+			`${docsRel}/exports/${stem}.html`,
+			`${stem}.html`,
+			async (destPath) => {
+				const bodyHtml = await renderCleanHtmlForExport(text, path, { exportDestPath: destPath });
+				return buildPrintableHtml(title, bodyHtml, subtitle, metaHtml);
+			},
+			"text/html;charset=utf-8",
+		);
 		return;
 	}
 
@@ -2776,33 +3299,50 @@ export async function exportDocAs(
 		return;
 	}
 
-	const fullHtml = buildPrintableHtml(title, bodyHtml, subtitle);
-
-	if (format === "html-download") {
-		const docsRel = (state.project?.docs ?? "docs").replace(/^[./\\]+|[\\/]+$/g, "");
-		await saveExportFile(`${docsRel}/exports/${stem}.html`, `${stem}.html`, fullHtml, "text/html;charset=utf-8");
-		return;
-	}
-
+	const fullHtml = buildPrintableHtml(title, bodyHtml, subtitle, metaHtml);
 	printHtmlDocument(fullHtml);
 }
 
-/** Assembles and exports a complete Ticket Release Packet (HTML, Markdown, or Word .docx) bundling all linked work & Readiness Gate. */
+/** Assembles and exports a complete Ticket Release Packet (HTML, Markdown, or Word .docx) rolling up recursive descendants, tests, governance metadata, & Readiness Gate. */
 export async function exportTicketPacket(ticketPath: string, key: string, format: "html" | "markdown" | "docx"): Promise<void> {
 	if (!ready()) return;
 	const ticketText = await current(ticketPath);
 	if (ticketText === null) return notify("Could not read the ticket.", "error");
 	const allDocs = docs();
 	const ticketDoc = allDocs.find((d) => canonical(d.path) === canonical(ticketPath));
-	const groups = ticketWork(allDocs, key);
+	const allDescendants = descendantTickets(allDocs, key);
+	const activeDescendants = allDescendants.filter((s) => toneOf(s.status) !== "off");
+	const scopeDocs = [ticketDoc, ...activeDescendants].filter((d): d is DocFile => Boolean(d));
+	const scopeKeys = [key, ...activeDescendants.map((d) => d.ticket).filter((k): k is string => Boolean(k))];
+	const scopeKeySet = new Set(scopeKeys.map((k) => k.toLowerCase()));
+	const allGroups = scopeKeys.flatMap((k) => ticketWork(allDocs, k));
+
+	const dedupeDocs = (list: DocFile[]) => {
+		const seen = new Set<string>();
+		const out: DocFile[] = [];
+		for (const d of list) {
+			const c = canonical(d.path);
+			if (!seen.has(c)) {
+				seen.add(c);
+				out.push(d);
+			}
+		}
+		return out;
+	};
+
+	const bundledAnchors = new Map<string, string>();
+	bundledAnchors.set(canonical(ticketPath), headingAnchor(`${key}: ${ticketDoc?.title || key}`));
 
 	const readGroup = async (kind: string) => {
-		const files = groups.find((g) => g.kind === kind)?.files ?? [];
+		const files = dedupeDocs(allGroups.filter((g) => g.kind === kind).flatMap((g) => g.files));
 		const out: { title: string; status?: string; body: string }[] = [];
 		for (const f of files) {
 			const rawTxt = (await current(f.path)) ?? "";
 			const expanded = await expandTransclusionsForExport(rawTxt, f.path);
-			out.push({ title: f.title || f.name, status: f.status, body: rewriteRelativeImagesForBase(expanded, f.path, ticketPath) });
+			const title = f.title || f.name;
+			const sectionHeading = `${title}${f.status ? ` (${f.status})` : ""}`;
+			bundledAnchors.set(canonical(f.path), headingAnchor(sectionHeading));
+			out.push({ title, status: f.status, body: rewriteRelativeLinksForBase(expanded, f.path, ticketPath) });
 		}
 		return out;
 	};
@@ -2813,34 +3353,47 @@ export async function exportTicketPacket(ticketPath: string, key: string, format
 	const questions = [...(await readGroup("answer")), ...(await readGroup("question"))];
 	const references = await readGroup("reference");
 	const schemas = await readGroup("schema");
-	const subtickets = (groups.find((g) => g.kind === "subticket")?.files ?? []).map((t) => ({
+	const subtickets = allDescendants.map((t) => ({
 		key: t.ticket ?? t.name,
 		title: t.title || t.name,
 		status: t.status,
 	}));
-	const related = (groups.find((g) => g.kind === "ticket")?.files ?? []).map((t) => ({
-		key: t.ticket ?? t.name,
-		title: t.title || t.name,
-		status: t.status,
-	}));
-	const plans = (groups.find((g) => g.kind === "plan")?.files ?? []).map((p) => ({
+	const related = dedupeDocs(allGroups.filter((g) => g.kind === "ticket").flatMap((g) => g.files))
+		.filter((t) => !scopeKeySet.has((t.ticket ?? "").toLowerCase()))
+		.map((t) => ({
+			key: t.ticket ?? t.name,
+			title: t.title || t.name,
+			status: t.status,
+		}));
+	const planDocs = dedupeDocs(allGroups.filter((g) => g.kind === "plan").flatMap((g) => g.files));
+	const plans = planDocs.map((p) => ({
 		name: p.name,
 		title: p.heading || p.title,
 		status: p.status,
 		scripts: p.codeRefs,
+		testScripts: p.testScripts,
+		planTests: p.planTests,
 	}));
 
+	const testScripts = [
+		...new Set(
+			[...scopeDocs, ...planDocs, ...dedupeDocs(allGroups.filter((g) => g.kind === "spec").flatMap((g) => g.files))]
+				.flatMap((d) => d.testScripts ?? [])
+				.map((s) => s.trim())
+				.filter(Boolean),
+		),
+	];
+
 	const registries: { title: string; headers: string[]; rows: string[][] }[] = [];
-	const keyLower = key.toLowerCase();
-	const knownSet = new Set([keyLower]);
-	for (const reg of groups.find((g) => g.kind === "registry")?.files ?? []) {
+	const regDocs = dedupeDocs(allGroups.filter((g) => g.kind === "registry").flatMap((g) => g.files));
+	for (const reg of regDocs) {
 		const csvText = await current(reg.path);
 		if (!csvText) continue;
 		const parsed = parseCsv(csvText);
 		const tCol = ticketColumn(parsed);
 		if (tCol < 0) continue;
 		const matched = parsed.rows
-			.filter((cells) => keysIn(cells[tCol]?.text ?? "", knownSet).some((k) => k.toLowerCase() === keyLower))
+			.filter((cells) => keysIn(cells[tCol]?.text ?? "", scopeKeySet).some((k) => scopeKeySet.has(k.toLowerCase())))
 			.map((cells) => parsed.header.map((_, i) => cells[i]?.text ?? ""));
 		if (matched.length) {
 			registries.push({
@@ -2849,6 +3402,15 @@ export async function exportTicketPacket(ticketPath: string, key: string, format
 				rows: matched,
 			});
 		}
+	}
+
+	// Collect ticket folder artifacts across ticket + descendants.
+	const ticketFiles: { rel: string }[] = [];
+	let totalTicketFiles = 0;
+	for (const sd of scopeDocs) {
+		const prefix = sd !== ticketDoc && sd.ticket ? `${sd.ticket}/` : "";
+		for (const tf of sd.ticketFiles ?? []) ticketFiles.push({ rel: `${prefix}${tf.rel}` });
+		totalTicketFiles += Math.max(sd.ticketFiles?.length ?? 0, sd.ticketFileCount ?? 0);
 	}
 
 	const { gitStatus } = await import("./git");
@@ -2864,9 +3426,19 @@ export async function exportTicketPacket(ticketPath: string, key: string, format
 		ticketTitle: ticketDoc?.title || key,
 		status: ticketDoc?.status,
 		parent: ticketDoc?.parent,
+		release: ticketDoc?.release,
+		priority: ticketDoc?.priority,
+		version: ticketDoc?.version,
+		owner: ticketDoc?.owner,
+		reviewer: ticketDoc?.reviewer,
+		approvedBy: ticketDoc?.approvedBy,
+		approvedDate: ticketDoc?.approvedDate,
+		changeControl: ticketDoc?.changeControl,
+		gxpImpact: ticketDoc?.gxpImpact,
 		ticketBody: expandedTicketText,
 		specs,
 		plans,
+		testScripts,
 		subtickets,
 		related,
 		decisions,
@@ -2874,8 +3446,8 @@ export async function exportTicketPacket(ticketPath: string, key: string, format
 		references,
 		schemas,
 		registries,
-		ticketFiles: ticketDoc?.ticketFiles ?? [],
-		totalTicketFiles: ticketDoc?.ticketFileCount,
+		ticketFiles,
+		totalTicketFiles,
 		readiness,
 	});
 
@@ -2888,7 +3460,7 @@ export async function exportTicketPacket(ticketPath: string, key: string, format
 		await saveExportFile(
 			`${exportDir}/${key}-release-packet.md`,
 			`${key}-release-packet.md`,
-			(outPath) => rewriteRelativeImagesForBase(packetMd, ticketPath, outPath),
+			(outPath) => rewriteRelativeLinksForBase(packetMd, ticketPath, outPath),
 			"text/markdown;charset=utf-8",
 		);
 		return;
@@ -2896,13 +3468,24 @@ export async function exportTicketPacket(ticketPath: string, key: string, format
 
 	if (format === "docx") {
 		const subtitle = state.project?.name ? `${state.project.name} · Generated ${today()}` : `Generated ${today()}`;
-		await saveDocxExport(`${exportDir}/${key}-release-packet.docx`, `${key}: ${ticketDoc?.title || key} — Release Packet`, subtitle, packetMd);
+		await saveDocxExport(`${exportDir}/${key}-release-packet.docx`, `${key}: ${ticketDoc?.title || key} — Release Packet`, subtitle, packetMd, {
+			baseDir: dirName(ticketPath),
+		});
 		return;
 	}
 
-	const bodyHtml = await renderCleanHtmlForExport(packetMd, ticketPath);
-	const html = buildPrintableHtml(`${key}: ${ticketDoc?.title || key} — Release Packet`, bodyHtml);
-	await saveExportFile(`${exportDir}/${key}-release-packet.html`, `${key}-release-packet.html`, html, "text/html;charset=utf-8");
+	await saveExportFile(
+		`${exportDir}/${key}-release-packet.html`,
+		`${key}-release-packet.html`,
+		async (destPath) => {
+			const bodyHtml = await renderCleanHtmlForExport(packetMd, ticketPath, {
+				bundledAnchors,
+				exportDestPath: destPath,
+			});
+			return buildPrintableHtml(`${key}: ${ticketDoc?.title || key} — Release Packet`, bodyHtml);
+		},
+		"text/html;charset=utf-8",
+	);
 }
 
 /** Extracts any `## Rollback` / `## Backout` / `## Revert` section from a Markdown document. */
@@ -2914,8 +3497,8 @@ function extractRollbackSection(md: string): string {
 /**
  * Exports a STARLIMS Deployment / Transport Manifest (Markdown, CSV, HTML, or Word .docx)
  * aggregating the ticket + all recursive descendant tickets: SSL scripts & data sources,
- * SQL/DDL artifacts, local Git committed files, affected CSV registry rows, readiness gate,
- * rollback notes, and DEV->PROD sign-off.
+ * test scripts & plan test cases, SQL/DDL artifacts, SHA-256 checksums, local Git HEAD & commits,
+ * affected CSV registry rows, readiness gate, rollback notes across all descendants & specs, and DEV->PROD sign-off.
  */
 export async function exportDeploymentManifest(
 	ticketPath: string,
@@ -2933,38 +3516,64 @@ export async function exportDeploymentManifest(
 	if (!scopeKeys.length) scopeKeys.push(key);
 	const scopeKeySet = new Set(scopeKeys.map((k) => k.toLowerCase()));
 
-	// 1. All scripts / code refs across ticket + recursive descendants (from prose, specs, plans, registries).
+	// 1. All scripts / code refs & test scripts across ticket + recursive descendants.
 	const scripts: { ref: string; kind: string; ticket: string }[] = [];
 	const seenScripts = new Set<string>();
+	const testScripts: { ref: string; ticket: string }[] = [];
+	const seenTestScripts = new Set<string>();
+	const planTests: PlanBusinessTest[] = [];
+	const seenPlanTests = new Set<string>();
+
 	for (const k of scopeKeys) {
+		const groups = ticketWork(allDocs, k);
+		const planFiles = groups.find((g) => g.kind === "plan")?.files ?? [];
+		const specFiles = groups.find((g) => g.kind === "spec")?.files ?? [];
+		const docSelf = scopeDocs.find((d) => d.ticket?.toLowerCase() === k.toLowerCase());
+		for (const d of [docSelf, ...planFiles, ...specFiles].filter((x): x is DocFile => Boolean(x))) {
+			for (const ts of d.testScripts ?? []) {
+				const clean = ts.trim();
+				if (!clean || seenTestScripts.has(clean.toLowerCase())) continue;
+				seenTestScripts.add(clean.toLowerCase());
+				testScripts.push({ ref: clean, ticket: k });
+			}
+		}
+		for (const p of planFiles) {
+			const planName = p.heading || p.title || p.name;
+			for (const pt of p.planTests ?? []) {
+				const ptKey = `${planName.toLowerCase()}::${pt.name.toLowerCase()}`;
+				if (seenPlanTests.has(ptKey)) continue;
+				seenPlanTests.add(ptKey);
+				planTests.push({ ...pt, plan: planName, ticket: k });
+			}
+		}
 		for (const ref of scriptsForTicket(allDocs, k)) {
 			const norm = ref.toLowerCase();
-			if (seenScripts.has(norm)) continue;
+			if (seenScripts.has(norm) || seenTestScripts.has(norm)) continue;
 			seenScripts.add(norm);
 			scripts.push({ ref, kind: classifyDeploymentArtifact(ref), ticket: k });
 		}
 	}
 
-	// 2. SQL / DDL / Schema artifacts tied to the ticket or its descendants.
-	const sqlArtifacts: { path: string; kind: string; source: string }[] = [];
+	// 2. SQL / DDL / Schema artifacts tied to the ticket or its descendants (stamping owning sub-ticket key).
+	const sqlArtifacts: { path: string; kind: string; source: string; ticket: string }[] = [];
 	const seenSql = new Set<string>();
-	const addSql = (artifactPath: string, kind: string, source: string) => {
+	const addSql = (artifactPath: string, kind: string, source: string, ownerTicket: string) => {
 		const norm = artifactPath.replace(/\\/g, "/").toLowerCase();
 		if (seenSql.has(norm)) return;
 		seenSql.add(norm);
-		sqlArtifacts.push({ path: artifactPath.replace(/\\/g, "/"), kind, source });
+		sqlArtifacts.push({ path: artifactPath.replace(/\\/g, "/"), kind, source, ticket: ownerTicket });
 	};
 	for (const doc of scopeDocs) {
 		const k = doc.ticket ?? key;
 		// Ticket bundle SQL/DDL files
 		for (const tf of doc.ticketFiles ?? []) {
-			if (/\.(sql|ddl|pks|pkb)$/i.test(tf.rel)) addSql(tf.rel, "Ticket SQL / DDL", `${k} bundle`);
+			if (/\.(sql|ddl|pks|pkb)$/i.test(tf.rel)) addSql(tf.rel, "Ticket SQL / DDL", `${k} bundle`, k);
 		}
 		// Linked schema docs + their `source:` DDL
 		const groups = ticketWork(allDocs, k);
 		for (const sc of groups.find((g) => g.kind === "schema")?.files ?? []) {
-			addSql(relativeTo(root(), sc.path), "Schema doc", k);
-			if (sc.source) addSql(sc.source, "DDL source", sc.title || sc.name);
+			addSql(relativeTo(root(), sc.path), "Schema doc", k, k);
+			if (sc.source) addSql(sc.source, "DDL source", sc.title || sc.name, k);
 		}
 	}
 
@@ -2988,21 +3597,53 @@ export async function exportDeploymentManifest(
 		}
 	}
 
-	// 4. Rollback notes extracted from the ticket and its specs (if written).
+	// 4. Rollback notes extracted across the ticket, ALL descendant tickets, and ALL their linked specs (deduplicated).
 	const rollbackNotes: string[] = [];
-	const mainRollback = extractRollbackSection(ticketText);
-	if (mainRollback) rollbackNotes.push(mainRollback);
-	for (const sp of ticketWork(allDocs, key).find((g) => g.kind === "spec")?.files ?? []) {
-		const spText = await current(sp.path);
-		const rb = spText ? extractRollbackSection(spText) : "";
-		if (rb) rollbackNotes.push(`**From ${sp.title || sp.name}:**\n\n${rb}`);
+	const seenRollbackBodies = new Set<string>();
+	const seenSpecPaths = new Set<string>();
+	const pushRollback = (label: string | null, rawBody: string) => {
+		const sig = rawBody.trim().replace(/\s+/g, " ").toLowerCase();
+		if (!sig || seenRollbackBodies.has(sig)) return;
+		seenRollbackBodies.add(sig);
+		rollbackNotes.push(label ? `**From ${label}:**\n\n${rawBody.trim()}` : rawBody.trim());
+	};
+	for (const doc of scopeDocs) {
+		const text = canonical(doc.path) === canonical(ticketPath) ? ticketText : await current(doc.path);
+		const rb = text ? extractRollbackSection(text) : "";
+		if (rb) pushRollback(doc === ticketDoc ? null : `${doc.ticket ?? doc.name}`, rb);
+		const k = doc.ticket ?? key;
+		for (const sp of ticketWork(allDocs, k).find((g) => g.kind === "spec")?.files ?? []) {
+			const spCanon = canonical(sp.path);
+			if (seenSpecPaths.has(spCanon)) continue;
+			seenSpecPaths.add(spCanon);
+			const spText = await current(sp.path);
+			const spRb = spText ? extractRollbackSection(spText) : "";
+			if (spRb) pushRollback(`${sp.title || sp.name} (${k})`, spRb);
+		}
 	}
 
-	const { gitStatus } = await import("./git");
+	const [{ gitStatus }, headSha, manifestFiles] = await Promise.all([
+		import("./git"),
+		backend.gitHeadSha().catch(() => null),
+		backend.manifest().catch(() => []),
+	]);
 	const readiness = evaluateTicketReadiness(allDocs, key, {
 		gitFiles: gitStatus()?.files,
 		root: state.workspace?.root,
 	});
+
+	// Match SHA-256 checksums for referenced script, test script, and SQL artifacts.
+	const wsRoot = state.workspace?.root;
+	const checksums: { path: string; sha256: string }[] = [];
+	const seenChecksum = new Set<string>();
+	const allArtifactRefs = [...scripts.map((s) => s.ref), ...testScripts.map((t) => t.ref), ...sqlArtifacts.map((s) => s.path)];
+	for (const mf of manifestFiles) {
+		if (!allArtifactRefs.some((ref) => codeMatchesRef(mf.path, ref, wsRoot))) continue;
+		const k = mf.path.toLowerCase();
+		if (seenChecksum.has(k)) continue;
+		seenChecksum.add(k);
+		checksums.push({ path: mf.path, sha256: mf.sha256 });
+	}
 
 	const manifestInput = {
 		projectName: state.project?.name || state.workspace?.name || "Project",
@@ -3011,16 +3652,24 @@ export async function exportDeploymentManifest(
 		ticketTitle: ticketDoc?.title || key,
 		status: ticketDoc?.status,
 		parent: ticketDoc?.parent,
+		release: ticketDoc?.release,
+		headSha: headSha ?? undefined,
+		changeControl: ticketDoc?.changeControl,
+		approvedBy: ticketDoc?.approvedBy,
+		approvedDate: ticketDoc?.approvedDate,
+		gxpImpact: ticketDoc?.gxpImpact,
 		scopeTickets: scopeDocs.map((d) => ({ key: d.ticket ?? d.name, title: d.title || d.name, status: d.status })),
 		scripts,
+		testScripts: testScripts.length ? testScripts : undefined,
+		planTests: planTests.length ? planTests : undefined,
 		sqlArtifacts,
 		registries,
+		checksums: checksums.length ? checksums : undefined,
 		readiness,
 		rollbackNotes: rollbackNotes.length ? rollbackNotes : undefined,
 	};
 
 	// 5. Best-effort local Git commits mentioning any ticket in scope (files not already listed above).
-	const wsRoot = state.workspace?.root;
 	const gitCommitted: { status: string; commit: string; path: string; ticket: string }[] = [];
 	const seenGitFiles = new Set<string>();
 	const statusWord = (code: string) => {
@@ -3035,8 +3684,9 @@ export async function exportDeploymentManifest(
 				const norm = cleanPath.toLowerCase();
 				if (seenGitFiles.has(norm)) continue;
 				const coveredByScripts = scripts.some((s) => codeMatchesRef(cleanPath, s.ref, wsRoot));
+				const coveredByTests = testScripts.some((t) => codeMatchesRef(cleanPath, t.ref, wsRoot));
 				const coveredBySql = sqlArtifacts.some((s) => codeMatchesRef(cleanPath, s.path, wsRoot));
-				if (coveredByScripts || coveredBySql) continue;
+				if (coveredByScripts || coveredByTests || coveredBySql) continue;
 				seenGitFiles.add(norm);
 				gitCommitted.push({ status: statusWord(gf.status), commit: commit.shortSha, path: cleanPath, ticket: k });
 			}
@@ -3081,13 +3731,21 @@ export async function exportDeploymentManifest(
 	if (format === "docx") {
 		const expanded = await expandTransclusionsForExport(manifestMd, ticketPath);
 		const subtitle = state.project?.name ? `${state.project.name} · Generated ${today()}` : `Generated ${today()}`;
-		await saveDocxExport(`${exportDir}/${key}-deployment-manifest.docx`, `${key}: ${ticketDoc?.title || key} — Deployment Manifest`, subtitle, expanded);
+		await saveDocxExport(`${exportDir}/${key}-deployment-manifest.docx`, `${key}: ${ticketDoc?.title || key} — Deployment Manifest`, subtitle, expanded, {
+			baseDir: dirName(ticketPath),
+		});
 		return;
 	}
 
-	const bodyHtml = await renderCleanHtmlForExport(manifestMd, ticketPath);
-	const html = buildPrintableHtml(`${key}: ${ticketDoc?.title || key} — Deployment Manifest`, bodyHtml);
-	await saveExportFile(`${exportDir}/${key}-deployment-manifest.html`, `${key}-deployment-manifest.html`, html, "text/html;charset=utf-8");
+	await saveExportFile(
+		`${exportDir}/${key}-deployment-manifest.html`,
+		`${key}-deployment-manifest.html`,
+		async (destPath) => {
+			const bodyHtml = await renderCleanHtmlForExport(manifestMd, ticketPath, { exportDestPath: destPath });
+			return buildPrintableHtml(`${key}: ${ticketDoc?.title || key} — Deployment Manifest`, bodyHtml);
+		},
+		"text/html;charset=utf-8",
+	);
 }
 
 /**
@@ -3259,6 +3917,7 @@ export async function setActiveTicket(key: string | null): Promise<void> {
 /** Interactive StatusBar / Command Palette switcher for the active working ticket. */
 export async function pickActiveTicket(): Promise<void> {
 	if (!ready()) return;
+	const root = state.workspace?.root ?? "";
 	const allTickets = docs()
 		.filter((d) => d.exists && d.group === "tickets" && !isCatalog(d) && d.ticket)
 		.sort((a, b) => {
@@ -3270,32 +3929,70 @@ export async function pickActiveTicket(): Promise<void> {
 
 	const cur = state.settings.activeTicket?.trim() ?? "";
 	const curDoc = cur ? allTickets.find((t) => t.ticket?.toLowerCase() === cur.toLowerCase()) : undefined;
-	const OPEN_CUR = curDoc ? `Open ${curDoc.ticket}` : "";
-	const BROWSE_CUR = curDoc?.ticketFolder ? `Browse ${curDoc.ticket} files in Explorer` : "";
-	const CLEAR_CUR = cur ? `Clear active ticket (${cur})` : "";
 
-	const ticketChoices = allTickets.map((t) => {
-		const mark = cur && t.ticket?.toLowerCase() === cur.toLowerCase() ? "[active] " : "";
-		return `${mark}${t.ticket}: ${t.title || t.name}${t.status ? ` (${t.status})` : ""}`;
+	type Action = { kind: "open" } | { kind: "browse" } | { kind: "clear" } | { kind: "select"; ticket: string };
+	const items: QuickPickOption<Action>[] = [];
+	if (curDoc) {
+		items.push({
+			label: `Open ${curDoc.ticket}`,
+			value: { kind: "open" },
+			icon: "go-to-file",
+			detail: curDoc.title || curDoc.name,
+			keywords: `open active ${curDoc.ticket}`,
+		});
+		if (curDoc.ticketFolder) {
+			items.push({
+				label: `Browse ${curDoc.ticket} files in Explorer`,
+				value: { kind: "browse" },
+				icon: "folder",
+				detail: root ? relativeTo(root, curDoc.ticketFolder).replace(/\\/g, "/") : "",
+				keywords: `browse folder files explorer ${curDoc.ticket}`,
+			});
+		}
+	}
+
+	const firstTicketIdx = items.length;
+	for (const t of allTickets) {
+		const isActive = Boolean(cur && t.ticket?.toLowerCase() === cur.toLowerCase());
+		const progressText = t.tasks?.total ? `${t.tasks.done}/${t.tasks.total}` : "";
+		const detail = [t.release, progressText].filter(Boolean).join(" · ") || undefined;
+		items.push({
+			label: `${t.ticket}: ${t.title || t.name}`,
+			value: { kind: "select", ticket: t.ticket! },
+			checked: isActive,
+			icon: isActive ? undefined : "checklist",
+			badge: t.status ? { text: t.status, tone: toneOf(t.status) } : undefined,
+			detail,
+			divide: items.length === firstTicketIdx && firstTicketIdx > 0,
+			keywords: [t.ticket, t.title, t.status, t.release, ...(t.tags ?? [])].filter(Boolean).join(" "),
+		});
+	}
+
+	if (cur) {
+		items.push({
+			label: `Clear active ticket (${cur})`,
+			value: { kind: "clear" },
+			icon: "close",
+			divide: true,
+			keywords: "clear reset none unfocus",
+		});
+	}
+
+	const picked = await quickPick<Action>({
+		title: cur ? `Active ticket: ${cur}` : "Switch active ticket",
+		placeholder: "Filter by ticket key, title, status, or release…",
+		items,
+		empty: "No matching tickets.",
 	});
-	const options = [
-		...(OPEN_CUR ? [OPEN_CUR] : []),
-		...(BROWSE_CUR ? [BROWSE_CUR] : []),
-		...ticketChoices,
-		...(CLEAR_CUR ? [CLEAR_CUR] : []),
-	];
-	const picked = await choose(cur ? `Active ticket: ${cur}` : "Focus workspace on which ticket?", options);
 	if (!picked) return;
-	if (picked === OPEN_CUR && curDoc) return void openFile(curDoc.path);
-	if (picked === BROWSE_CUR && curDoc?.ticketFolder) {
+	if (picked.kind === "open" && curDoc) return void openFile(curDoc.path);
+	if (picked.kind === "browse" && curDoc?.ticketFolder) {
 		const { browseFolderInExplorer } = await import("./panels/Explorer");
 		browseFolderInExplorer(curDoc.ticketFolder, `${curDoc.ticket} files`);
 		return;
 	}
-	if (picked === CLEAR_CUR) return void setActiveTicket(null);
-	const idx = ticketChoices.indexOf(picked);
-	const chosen = idx >= 0 ? allTickets[idx] : undefined;
-	if (chosen?.ticket) await setActiveTicket(chosen.ticket);
+	if (picked.kind === "clear") return void setActiveTicket(null);
+	if (picked.kind === "select") await setActiveTicket(picked.ticket);
 }
 
 /**
@@ -3433,5 +4130,560 @@ export async function renameHeadingAcrossWorkspace(targetPath?: string): Promise
 				? `Renamed heading to “${typed}” and updated ${totalRefs} ${totalRefs === 1 ? "reference" : "references"} across ${written} ${written === 1 ? "file" : "files"}.`
 				: `Renamed heading to “${typed}”.`,
 		);
+	}
+}
+
+/**
+ * Interactive Multi-Ticket Release Bundle & Release Notes exporter.
+ * Selects tickets by release tag, status, or explicit keys, optionally includes a local Git tag range,
+ * deduplicates scripts, test scripts, SQL artifacts, registry rows, and rollback notes across all
+ * tickets + descendants, and exports the Release Bundle and/or stakeholder Release Notes.
+ */
+export async function exportReleaseBundle(format?: "markdown" | "html" | "docx"): Promise<void> {
+	if (!ready()) return;
+	const allDocs = docs();
+	const allTickets = allDocs.filter((d) => d.exists && d.group === "tickets" && !isCatalog(d) && d.ticket);
+	if (!allTickets.length) return notify("No tickets exist in this project yet.");
+
+	const activeTickets = allTickets.filter((t) => !isArchivedTicket(t));
+	const releases = [...new Set(activeTickets.map((t) => t.release?.trim()).filter((r): r is string => Boolean(r)))].sort((a, b) =>
+		a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }),
+	);
+	const doneTickets = activeTickets.filter((t) => toneOf(t.status) === "done");
+	const inProgTickets = activeTickets.filter((t) => toneOf(t.status) === "active");
+
+	const scopeOptions: { label: string; detail: string; tickets?: DocFile[]; defaultName: string; custom?: boolean }[] = [];
+	for (const rel of releases) {
+		const matched = activeTickets.filter((t) => t.release?.trim().toLowerCase() === rel.toLowerCase());
+		scopeOptions.push({
+			label: `Release: ${rel} (${matched.length})`,
+			detail: matched.map((t) => t.ticket).slice(0, 6).join(", ") + (matched.length > 6 ? "…" : ""),
+			tickets: matched,
+			defaultName: rel,
+		});
+	}
+	if (doneTickets.length) {
+		scopeOptions.push({
+			label: `All done tickets (${doneTickets.length})`,
+			detail: "Non-archived tickets marked done / resolved / approved",
+			tickets: doneTickets,
+			defaultName: `release-${today()}`,
+		});
+	}
+	if (inProgTickets.length) {
+		scopeOptions.push({
+			label: `Active / in-progress tickets (${inProgTickets.length})`,
+			detail: "Tickets currently under way",
+			tickets: inProgTickets,
+			defaultName: `release-${today()}`,
+		});
+	}
+	scopeOptions.push({
+		label: `All active tickets (${activeTickets.length})`,
+		detail: "Every non-archived ticket in the workspace",
+		tickets: activeTickets,
+		defaultName: `release-${today()}`,
+	});
+	scopeOptions.push({
+		label: "Select ticket keys…",
+		detail: "Enter a comma-separated list of ticket keys (e.g. LIMS-101, LIMS-102)",
+		defaultName: `release-${today()}`,
+		custom: true,
+	});
+
+	const pickedScope = await choose(
+		"Which tickets belong in this Release Bundle?",
+		scopeOptions.map((o) => o.label),
+		{ details: Object.fromEntries(scopeOptions.map((o) => [o.label, o.detail])) },
+	);
+	if (!pickedScope) return;
+	const chosenScope = scopeOptions.find((o) => o.label === pickedScope);
+	if (!chosenScope) return;
+
+	let baseTickets = chosenScope.tickets ?? [];
+	if (chosenScope.custom) {
+		const defaultKeys = state.settings.activeTicket?.trim() || activeTickets.slice(0, 5).map((t) => t.ticket).join(", ");
+		const typed = (await ask("Ticket keys to bundle (comma-separated)", defaultKeys))?.trim();
+		if (!typed) return;
+		const wanted = new Set(typed.split(/[\s,;]+/).map((k) => ticketKey(k).toLowerCase()).filter(Boolean));
+		baseTickets = allTickets.filter((t) => t.ticket && wanted.has(t.ticket.toLowerCase()));
+		if (!baseTickets.length) return notify("None of those ticket keys matched tickets in this project.", "error");
+	}
+
+	const releaseName = (await ask("Release name or version label", chosenScope.defaultName))?.trim();
+	if (!releaseName) return;
+
+	// Roll up descendants of every selected ticket (excluding dropped/cancelled) and deduplicate.
+	const scopedMap = new Map<string, DocFile>();
+	for (const t of baseTickets) {
+		scopedMap.set(canonical(t.path), t);
+		if (t.ticket) {
+			for (const desc of descendantTickets(allDocs, t.ticket)) {
+				if (toneOf(desc.status) === "off") continue;
+				scopedMap.set(canonical(desc.path), desc);
+			}
+		}
+	}
+	const scopeDocs = [...scopedMap.values()].sort((a, b) =>
+		(a.ticket ?? "").localeCompare(b.ticket ?? "", undefined, { numeric: true, sensitivity: "base" }),
+	);
+	const scopeKeys = scopeDocs.map((d) => d.ticket!).filter(Boolean);
+	const scopeKeySet = new Set(scopeKeys.map((k) => k.toLowerCase()));
+
+	// Optional local Git tag range
+	let commits: ReleaseBundleCommit[] | undefined;
+	let gitRange: { from: string; to: string } | undefined;
+	const tags = await backend.gitTags().catch(() => []);
+	if (tags.length) {
+		const NONE = "Skip Git commit range";
+		const tagChoices = tags.slice(0, 10).map((t) => `${t.name} (${t.sha})`);
+		const pickedTag = await choose("Include local Git commits since a previous tag?", [NONE, ...tagChoices]);
+		if (!pickedTag) return;
+		if (pickedTag !== NONE) {
+			const tagObj = tags[tagChoices.indexOf(pickedTag)];
+			if (tagObj) {
+				gitRange = { from: tagObj.name, to: "HEAD" };
+				const log = await backend.gitRangeLog(tagObj.name, "HEAD", 150).catch(() => []);
+				if (log.length) commits = log;
+			}
+		}
+	}
+
+	let chosenFormat = format;
+	if (!chosenFormat) {
+		const DOCX = "Word (.docx)";
+		const HTML = "HTML (Print / PDF)";
+		const MD = "Markdown (.md)";
+		const pickedFmt = await choose(`Export “${releaseName}” as`, [DOCX, HTML, MD]);
+		if (!pickedFmt) return;
+		chosenFormat = pickedFmt === DOCX ? "docx" : pickedFmt === HTML ? "html" : "markdown";
+	}
+
+	const BOTH = "Release Bundle + Release Notes";
+	const BUNDLE_ONLY = "Release Bundle only";
+	const NOTES_ONLY = "Release Notes only";
+	const outputChoice = await choose(`Generate artifacts for ${releaseName}`, [BOTH, BUNDLE_ONLY, NOTES_ONLY]);
+	if (!outputChoice) return;
+
+	// Aggregate scripts, test scripts, SQL, registries, rollback notes & readiness across all tickets.
+	const scripts: { ref: string; kind: string; ticket: string }[] = [];
+	const testScripts: { ref: string; ticket: string }[] = [];
+	const sqlArtifacts: { path: string; kind: string; source: string; ticket: string }[] = [];
+	const rollbackNotes: { ticket: string; source?: string; body: string }[] = [];
+	const seenSpecRollback = new Set<string>();
+
+	const [{ gitStatus }, headSha] = await Promise.all([
+		import("./git"),
+		backend.gitHeadSha().catch(() => null),
+	]);
+	const gitFiles = gitStatus()?.files;
+
+	const bundleTickets: ReleaseBundleTicket[] = [];
+	for (const doc of scopeDocs) {
+		const k = doc.ticket!;
+		const groups = ticketWork(allDocs, k);
+		const planDocs = groups.find((g) => g.kind === "plan")?.files ?? [];
+		const specDocs = groups.find((g) => g.kind === "spec")?.files ?? [];
+		const tsSet = new Set<string>();
+		for (const d of [doc, ...planDocs, ...specDocs]) {
+			for (const ts of d.testScripts ?? []) {
+				const clean = ts.trim();
+				if (clean && !tsSet.has(clean.toLowerCase())) {
+					tsSet.add(clean.toLowerCase());
+					testScripts.push({ ref: clean, ticket: k });
+				}
+			}
+		}
+		for (const ref of scriptsForTicket(allDocs, k)) {
+			if (!tsSet.has(ref.toLowerCase())) {
+				scripts.push({ ref, kind: classifyDeploymentArtifact(ref), ticket: k });
+			}
+		}
+		for (const tf of doc.ticketFiles ?? []) {
+			if (/\.(sql|ddl|pks|pkb)$/i.test(tf.rel)) {
+				sqlArtifacts.push({ path: tf.rel, kind: "Ticket SQL / DDL", source: `${k} bundle`, ticket: k });
+			}
+		}
+		for (const sc of groups.find((g) => g.kind === "schema")?.files ?? []) {
+			sqlArtifacts.push({ path: relativeTo(root(), sc.path).split("\\").join("/"), kind: "Schema doc", source: k, ticket: k });
+			if (sc.source) sqlArtifacts.push({ path: sc.source, kind: "DDL source", source: sc.title || sc.name, ticket: k });
+		}
+		const docText = await current(doc.path);
+		const docRb = docText ? extractRollbackSection(docText) : "";
+		if (docRb) rollbackNotes.push({ ticket: k, body: docRb });
+		for (const sp of specDocs) {
+			const spKey = `${k.toLowerCase()}::${canonical(sp.path)}`;
+			if (seenSpecRollback.has(spKey)) continue;
+			seenSpecRollback.add(spKey);
+			const spText = await current(sp.path);
+			const spRb = spText ? extractRollbackSection(spText) : "";
+			if (spRb) rollbackNotes.push({ ticket: k, source: sp.title || sp.name, body: spRb });
+		}
+		const fmVals = docText ? frontMatter(docText).values : {};
+		bundleTickets.push({
+			key: k,
+			title: doc.title || doc.name,
+			type: one(fmVals.type) || undefined,
+			status: doc.status,
+			release: doc.release,
+			priority: doc.priority,
+			summary: doc.summary,
+			approvedBy: doc.approvedBy,
+			approvedDate: doc.approvedDate,
+			changeControl: doc.changeControl,
+			readiness: evaluateTicketReadiness(allDocs, k, { gitFiles, root: state.workspace?.root }),
+		});
+	}
+
+	const registries: { title: string; headers: string[]; rows: string[][] }[] = [];
+	for (const reg of allDocs.filter((d) => d.exists && d.group === "registries" && !isCatalog(d) && /\.(csv|tsv)$/i.test(d.name))) {
+		const csvText = await current(reg.path);
+		if (!csvText) continue;
+		const parsed = parseCsv(csvText);
+		const tCol = ticketColumn(parsed);
+		if (tCol < 0) continue;
+		const matched = parsed.rows
+			.filter((cells) => keysIn(cells[tCol]?.text ?? "", scopeKeySet).some((k) => scopeKeySet.has(k.toLowerCase())))
+			.map((cells) => parsed.header.map((_, i) => cells[i]?.text ?? ""));
+		if (matched.length) {
+			registries.push({
+				title: registryTitle(reg.name),
+				headers: parsed.header.map((c) => c.text.trim()),
+				rows: matched,
+			});
+		}
+	}
+
+	const changeControls = [...new Set(scopeDocs.map((d) => d.changeControl?.trim()).filter((c): c is string => Boolean(c)))];
+	const bundleInput: ReleaseBundleInput = {
+		projectName: state.project?.name || state.workspace?.name || "Project",
+		releaseName,
+		generatedOn: today(),
+		headSha: headSha ?? undefined,
+		gitRange,
+		changeControl: changeControls.length ? changeControls.join(", ") : undefined,
+		tickets: bundleTickets,
+		scripts,
+		testScripts: testScripts.length ? testScripts : undefined,
+		sqlArtifacts,
+		registries,
+		rollbackNotes: rollbackNotes.length ? rollbackNotes : undefined,
+		commits,
+	};
+
+	const docsRel = (state.project?.docs ?? "docs").replace(/^[./\\]+|[\\/]+$/g, "");
+	const fileSlug = slug(releaseName).toLowerCase() || `release-${today()}`;
+	const anchorPath = joinPath(docsFolder(), "INDEX.md");
+	const subtitle = `${bundleInput.projectName} · Generated ${today()}`;
+
+	const writeArtifact = async (kind: "bundle" | "notes", title: string, md: string) => {
+		const suffix = kind === "bundle" ? "release-bundle" : "release-notes";
+		if (chosenFormat === "markdown") {
+			await saveExportFile(`${docsRel}/exports/${fileSlug}-${suffix}.md`, `${fileSlug}-${suffix}.md`, md, "text/markdown;charset=utf-8");
+		} else if (chosenFormat === "docx") {
+			await saveDocxExport(`${docsRel}/exports/${fileSlug}-${suffix}.docx`, title, subtitle, md, { baseDir: docsFolder() });
+		} else {
+			await saveExportFile(
+				`${docsRel}/exports/${fileSlug}-${suffix}.html`,
+				`${fileSlug}-${suffix}.html`,
+				async (destPath) => {
+					const bodyHtml = await renderCleanHtmlForExport(md, anchorPath, { exportDestPath: destPath });
+					return buildPrintableHtml(title, bodyHtml, subtitle);
+				},
+				"text/html;charset=utf-8",
+			);
+		}
+	};
+
+	if (outputChoice === BOTH || outputChoice === BUNDLE_ONLY) {
+		await writeArtifact("bundle", `${releaseName} — Release Bundle`, assembleReleaseBundleMarkdown(bundleInput));
+	}
+	if (outputChoice === BOTH || outputChoice === NOTES_ONLY) {
+		await writeArtifact("notes", `${releaseName} — Release Notes`, assembleReleaseNotesMarkdown(bundleInput));
+	}
+}
+
+/**
+ * Exports a Requirements Traceability Matrix (CSV, Markdown, HTML, or Word .docx)
+ * linking tickets, acceptance criteria, specs, plans, code scripts, test scripts,
+ * business test cases, decisions, registries, formal approvals, and HEAD Git SHA.
+ */
+export async function exportRtm(format?: "csv" | "markdown" | "html" | "docx"): Promise<void> {
+	if (!ready()) return;
+	const allDocs = docs();
+	const allTickets = allDocs.filter((d) => d.exists && d.group === "tickets" && !isCatalog(d) && d.ticket);
+	if (!allTickets.length) return notify("No tickets exist in this project yet.");
+
+	const activeTickets = allTickets.filter((t) => !isArchivedTicket(t));
+	const releases = [...new Set(activeTickets.map((t) => t.release?.trim()).filter((r): r is string => Boolean(r)))].sort();
+	const epics = activeTickets.filter((t) => t.ticket && descendantTickets(allDocs, t.ticket).length > 0);
+
+	let selectedTickets = activeTickets.length ? activeTickets : allTickets;
+	let scopeSlug = "rtm";
+	let scopeTitle = state.project?.name || state.workspace?.name || "Project";
+
+	if (releases.length || epics.length) {
+		const options: { label: string; detail: string; tickets: DocFile[]; slug: string; title: string }[] = [
+			{
+				label: `All active tickets (${selectedTickets.length})`,
+				detail: "Every non-archived ticket in the project",
+				tickets: selectedTickets,
+				slug: "rtm",
+				title: scopeTitle,
+			},
+		];
+		for (const rel of releases) {
+			const matched = activeTickets.filter((t) => t.release?.trim().toLowerCase() === rel.toLowerCase());
+			options.push({
+				label: `Release: ${rel} (${matched.length})`,
+				detail: matched.map((t) => t.ticket).slice(0, 6).join(", "),
+				tickets: matched,
+				slug: `${slug(rel).toLowerCase()}-rtm`,
+				title: `${scopeTitle} (${rel})`,
+			});
+		}
+		for (const epic of epics) {
+			const kids = descendantTickets(allDocs, epic.ticket!).filter((d) => toneOf(d.status) !== "off");
+			const group = [epic, ...kids];
+			options.push({
+				label: `Epic: ${epic.ticket} (${group.length})`,
+				detail: epic.title || epic.name,
+				tickets: group,
+				slug: `${epic.ticket!.toLowerCase()}-rtm`,
+				title: `${epic.ticket}: ${epic.title || epic.name}`,
+			});
+		}
+		const picked = await choose(
+			"Build Requirements Traceability Matrix for which scope?",
+			options.map((o) => o.label),
+			{ details: Object.fromEntries(options.map((o) => [o.label, o.detail])) },
+		);
+		if (!picked) return;
+		const hit = options.find((o) => o.label === picked);
+		if (hit) {
+			selectedTickets = hit.tickets;
+			scopeSlug = hit.slug;
+			scopeTitle = hit.title;
+		}
+	}
+
+	let chosenFormat = format;
+	if (!chosenFormat) {
+		const CSV = "CSV (.csv)";
+		const DOCX = "Word (.docx)";
+		const HTML = "HTML (Print / PDF)";
+		const MD = "Markdown (.md)";
+		const pickedFmt = await choose("Export Requirements Traceability Matrix as", [CSV, DOCX, HTML, MD]);
+		if (!pickedFmt) return;
+		chosenFormat = pickedFmt === CSV ? "csv" : pickedFmt === DOCX ? "docx" : pickedFmt === HTML ? "html" : "markdown";
+	}
+
+	const headSha = await backend.gitHeadSha().catch(() => null);
+	const rows = buildRtmRows(allDocs, selectedTickets, headSha);
+	const docsRel = (state.project?.docs ?? "docs").replace(/^[./\\]+|[\\/]+$/g, "");
+
+	if (chosenFormat === "csv") {
+		const csv = assembleRtmCsv(rows);
+		await saveExportFile(`${docsRel}/exports/${scopeSlug}.csv`, `${scopeSlug}.csv`, csv, "text/csv;charset=utf-8");
+		return;
+	}
+
+	const rtmMd = assembleRtmMarkdown(rows, scopeTitle);
+	const title = `Requirements Traceability Matrix — ${scopeTitle}`;
+	const subtitle = `${state.project?.name || state.workspace?.name || "Project"} · Generated ${today()}`;
+
+	if (chosenFormat === "markdown") {
+		await saveExportFile(`${docsRel}/exports/${scopeSlug}.md`, `${scopeSlug}.md`, rtmMd, "text/markdown;charset=utf-8");
+		return;
+	}
+
+	if (chosenFormat === "docx") {
+		await saveDocxExport(`${docsRel}/exports/${scopeSlug}.docx`, title, subtitle, rtmMd, { baseDir: docsFolder() });
+		return;
+	}
+
+	const anchorPath = joinPath(docsFolder(), "INDEX.md");
+	await saveExportFile(
+		`${docsRel}/exports/${scopeSlug}.html`,
+		`${scopeSlug}.html`,
+		async (destPath) => {
+			const bodyHtml = await renderCleanHtmlForExport(rtmMd, anchorPath, { exportDestPath: destPath });
+			return buildPrintableHtml(title, bodyHtml, subtitle);
+		},
+		"text/html;charset=utf-8",
+	);
+}
+
+/**
+ * Imports a legacy `.docx`, `.html`, or `.md` document into the workspace as Markdown,
+ * extracting embedded Word images into the workspace attachments folder and opening the result.
+ */
+export async function importLegacyDoc(targetGroup?: "docs" | "specs" | "knowledge" | "schema"): Promise<void> {
+	if (!ready()) return;
+	let group = targetGroup;
+	if (!group) {
+		const DOCS_OPT = "Docs";
+		const SPECS_OPT = "Specs";
+		const KNOW_OPT = "Knowledge (Reference)";
+		const SCHEMA_OPT = "Schema (Database)";
+		const picked = await choose("Import document (.docx, .html, .md) into which folder?", [DOCS_OPT, SPECS_OPT, KNOW_OPT, SCHEMA_OPT], {
+			details: {
+				[DOCS_OPT]: `${areaSaid("docs")}/ — general project documentation`,
+				[SPECS_OPT]: `${areaSaid("docs")}/specs/ — functional & technical specifications`,
+				[KNOW_OPT]: `${areaSaid("docs")}/knowledge/reference/ — SOPs, runbooks, & architecture notes`,
+				[SCHEMA_OPT]: `${areaSaid("schema")}/database/ — database & data contract docs`,
+			},
+		});
+		if (!picked) return;
+		group = picked === SPECS_OPT ? "specs" : picked === KNOW_OPT ? "knowledge" : picked === SCHEMA_OPT ? "schema" : "docs";
+	}
+
+	const destDir =
+		group === "specs"
+			? areaFolder("specs")
+			: group === "knowledge"
+				? joinPath(areaFolder("knowledge"), "reference")
+				: group === "schema"
+					? joinPath(schemaFolder(), "database")
+					: areaFolder("docs");
+
+	const configuredAttach = state.settings.attachmentsFolder?.trim();
+	const attachmentsDir = configuredAttach
+		? resolvePath(root(), configuredAttach.replace(/\\/g, "/").replace(/^\/+/, ""))
+		: joinPath(docsFolder(), "attachments");
+
+	let sourcePath: string | undefined;
+	if (state.info?.host !== "app") {
+		const typed = (await ask("Full path to the .docx, .html, or .md file to import"))?.trim();
+		if (!typed) return;
+		sourcePath = typed.replace(/^(["'])(.*)\1$/, "$2");
+	}
+
+	try {
+		const res = await backend.importDocFile({ sourcePath, destDir, attachmentsDir });
+		if (!res) return;
+		setState("treeVersion", (v) => v + 1);
+		const imgNote = res.images.length ? ` (${res.images.length} ${res.images.length === 1 ? "image" : "images"} extracted)` : "";
+		notify(`Imported ${relativeTo(root(), res.path)} from ${res.kind.toUpperCase()}${imgNote}.`);
+		await openFile(res.path);
+	} catch (e: any) {
+		notify(`Could not import document: ${e?.message ?? e}`, "error");
+	}
+}
+
+/**
+ * Non-destructive brownfield workspace onboarding: scans existing `.sql`, `.ssl`, `.ds`, and `.md`
+ * files to create missing `project.toml` setup, seed `database.csv` and `files.csv` registries,
+ * and report legacy Markdown docs living outside `docs/` without moving or overwriting existing files.
+ */
+export async function onboardBrownfieldWorkspace(): Promise<void> {
+	if (!state.workspace) {
+		notify("Open a folder first.");
+		return;
+	}
+	const wsRoot = root();
+	const wsFiles = await backend.files().catch(() => []);
+	const docsDir = docsFolder();
+	const skipPath = (rel: string) => /(?:^|\/)(?:node_modules|\.git|\.ssl-studio|dist|build)\//i.test(rel);
+
+	const scriptFiles: string[] = [];
+	const sqlFiles: string[] = [];
+	const legacyMdFiles: string[] = [];
+	for (const full of wsFiles) {
+		const rel = relativeTo(wsRoot, full).split("\\").join("/");
+		if (skipPath(rel)) continue;
+		if (/\.(ssl|srvscr|ds|xfd)$/i.test(rel)) scriptFiles.push(full);
+		else if (/\.(sql|ddl|pks|pkb)$/i.test(rel)) sqlFiles.push(full);
+		else if (/\.(md|markdown)$/i.test(rel)) {
+			const topName = rel.toLowerCase();
+			if (topName === "readme.md" || topName === "agents.md") continue;
+			if (isInside(docsDir, full) && canonical(docsDir) !== canonical(wsRoot)) continue;
+			if (rel.toLowerCase().startsWith("design/")) continue;
+			legacyMdFiles.push(rel);
+		}
+	}
+
+	const dbCsvPath = joinPath(areaFolder("registries"), REGISTRIES.find((r) => r.id === "database")!.file);
+	const filesCsvPath = joinPath(areaFolder("registries"), REGISTRIES.find((r) => r.id === "files")!.file);
+	const [hasDbCsv, hasFilesCsv] = await Promise.all([
+		current(dbCsvPath).then((t) => t !== null),
+		current(filesCsvPath).then((t) => t !== null),
+	]);
+	const needsSetup = !state.project?.configured;
+	const actions: string[] = [];
+	if (needsSetup) actions.push("create .ssl-studio/project.toml");
+	if (!hasDbCsv && sqlFiles.length) actions.push(`seed database.csv from ${sqlFiles.length} SQL files`);
+	if (!hasFilesCsv) actions.push("seed files.csv manifest");
+
+	if (!actions.length && !legacyMdFiles.length) {
+		notify(`Workspace is already onboarded (${scriptFiles.length} scripts, ${sqlFiles.length} SQL files; project.toml and registries are in place).`);
+		return;
+	}
+
+	const summary = `Scanned workspace: ${scriptFiles.length} scripts/data sources, ${sqlFiles.length} SQL files, ${legacyMdFiles.length} legacy Markdown ${legacyMdFiles.length === 1 ? "doc" : "docs"} outside ${areaSaid("docs")}/.`;
+	const ONBOARD = "Set up & seed registries";
+	const LIST_ONLY = "List legacy Markdown files";
+	const choices = [...(actions.length ? [ONBOARD] : []), ...(legacyMdFiles.length ? [LIST_ONLY] : [])];
+	const details: Record<string, string> = {};
+	if (actions.length) details[ONBOARD] = `Non-destructive: ${actions.join("; ")}. Existing files are never overwritten.`;
+	if (legacyMdFiles.length) details[LIST_ONLY] = `Preview ${legacyMdFiles.length} Markdown ${legacyMdFiles.length === 1 ? "file" : "files"} outside ${areaSaid("docs")}/ without moving them.`;
+
+	const picked = await choose(summary, choices, { details });
+	if (!picked) return;
+
+	if (picked === LIST_ONLY) {
+		const preview = legacyMdFiles.slice(0, 12).join(", ") + (legacyMdFiles.length > 12 ? `, and ${legacyMdFiles.length - 12} more` : "");
+		notify(`Legacy Markdown outside ${areaSaid("docs")}/ (${legacyMdFiles.length}): ${preview}`);
+		return;
+	}
+
+	const created: string[] = [];
+	try {
+		if (needsSetup) {
+			const made = await backend.setupProject();
+			created.push(...made);
+			const refreshed = await backend.project();
+			setState("project", refreshed);
+		}
+
+		if (!hasDbCsv && sqlFiles.length) {
+			const dbKind = REGISTRIES.find((r) => r.id === "database")!;
+			const rows: string[] = [];
+			const seen = new Set<string>();
+			for (const sf of sqlFiles.slice(0, 200)) {
+				const txt = await current(sf);
+				if (!txt) continue;
+				const rel = relativeTo(wsRoot, sf).split("\\").join("/");
+				for (const obj of extractSqlObjects(txt, { includeAlter: true })) {
+					const k = obj.name.toLowerCase();
+					if (seen.has(k)) continue;
+					seen.add(k);
+					rows.push(csvRow([obj.name, obj.kind, "", "", "found", `From ${rel}`]));
+				}
+			}
+			const csvBody = `${csvRow(dbKind.columns)}\n${rows.length ? `${rows.join("\n")}\n` : ""}`;
+			await put(dbCsvPath, csvBody, false);
+			created.push(relativeTo(wsRoot, dbCsvPath).split("\\").join("/"));
+		}
+
+		if (!hasFilesCsv) {
+			const ownRel = relativeTo(wsRoot, filesCsvPath).split("\\").join("/");
+			const manifest = (await backend.manifest()).filter((f) => f.path !== ownRel);
+			const merged = mergeManifest(null, manifest);
+			await put(filesCsvPath, merged.text, false);
+			created.push(ownRel);
+		}
+
+		setState("treeVersion", (v) => v + 1);
+		const legacyNote = legacyMdFiles.length
+			? ` Found ${legacyMdFiles.length} legacy Markdown ${legacyMdFiles.length === 1 ? "doc" : "docs"} outside ${areaSaid("docs")}/ (${legacyMdFiles.slice(0, 4).join(", ")}${legacyMdFiles.length > 4 ? "…" : ""}).`
+			: "";
+		notify(
+			created.length
+				? `Onboarded workspace: created ${created.join(", ")}.${legacyNote}`
+				: `Workspace setup checked; nothing new needed.${legacyNote}`,
+		);
+	} catch (e: any) {
+		notify(`Onboarding error: ${e?.message ?? e}`, "error");
 	}
 }

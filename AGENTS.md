@@ -34,6 +34,22 @@
 - Design is held to a standard, and the standard is enforced: excellent and
   beautiful, judged by whether it helps someone develop functionality for
   STARLIMS (ADR 0007). A design defect is a defect.
+- Follow SSL Studio's design precedents (ADR 0032; extend ADR 0032 when a new
+  surface is added):
+  - **Code editing, overall IDE chrome, dialogs, pickers & menus:** VS Code.
+    Use a top-center searchable QuickPick (`quickPick()` / workspace file
+    browser) whenever the user picks from a list of items, tickets, statuses,
+    or files — never a horizontal button-bar modal. Reserve centered modals
+    (`choose()` / `ask()`) for compact binary/destructive confirmations and
+    single-line prompts. Menus and popovers must clamp inside the viewport and
+    flip upward/left near window edges.
+  - **Keybindings & editing ergonomics:** Sublime Text.
+  - **Markdown authoring, Live Preview, links & notes:** Obsidian.
+  - **CSV / TSV registries:** Excel / Google Sheets.
+  - **Flowchart Plans & Call Graph:** Excalidraw / Miro.
+  - **Curated sidebar sections (e.g. Docs → Project):** use one consistent
+    friendly-name standard with quiet filename metadata rather than mixing H1
+    headings and raw filenames.
 - Look at a visible change in the running app before calling it done, at a
   narrow layout and a wide one, in the light and the dark theme, and say what
   you looked at.

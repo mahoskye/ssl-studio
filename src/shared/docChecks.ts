@@ -1,5 +1,7 @@
 import { CATALOG_FILE } from "./catalog";
 import { linkFile, type LinkEdit } from "./docLinks";
+import { headingAnchor } from "./docTables";
+import { documentHeadings } from "./markdownEdit";
 import { CATALOG_AREAS, DOC_FOLDERS, isCatalog, isFileArea, registryTitle, toneOf, type CatalogArea } from "./projectDocs";
 import type { DocFile } from "./protocol";
 
@@ -46,7 +48,11 @@ const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? on
  * What needs attention among the working documents, the worst first. `areas` are the folders that have catalogs
  * here: all of them, but for a project whose schema folder is its own folder, which is no folder to catalogue.
  */
-export function docChecks(files: readonly DocFile[], areas: readonly CatalogArea[] = CATALOG_AREAS): DocCheck[] {
+export function docChecks(
+	files: readonly DocFile[],
+	areas: readonly CatalogArea[] = CATALOG_AREAS,
+	options?: { incomingLinks?: ReadonlySet<string>; root?: string },
+): DocCheck[] {
 	const checks: DocCheck[] = [];
 	const inGroup = (area: CatalogArea) => files.filter((file) => (file.group as string) === area && file.exists);
 	const tickets = inGroup("tickets").filter((file) => !isCatalog(file));
@@ -395,7 +401,188 @@ export function docChecks(files: readonly DocFile[], areas: readonly CatalogArea
 	const open = files.filter((file) => file.exists && file.group === "knowledge" && file.kind === "questions" && toneOf(file.status) === "waiting" && !isCatalog(file));
 	if (open.length) checks.push({ level: "note", text: `${count(open.length, "question is", "questions are")} open${open.length === 1 ? `: ${open[0]!.title || open[0]!.name}` : "."}`, path: open[0]!.path });
 
+	if (options?.incomingLinks) {
+		for (const orphan of orphanDocChecks(files, options.incomingLinks, { root: options.root })) {
+			checks.push({ level: orphan.level, text: orphan.message, path: orphan.path });
+		}
+	}
+
 	return checks.sort((a, b) => Number(b.level === "warn") - Number(a.level === "warn"));
+}
+
+const normPath = (p: string) => p.split("\\").join("/").replace(/\/+$/, "").toLowerCase();
+const isArchivedDoc = (file: DocFile) => /(?:^|[\\/])archive[\\/]/i.test(file.path) || /(?:^|[\\/])archive[\\/]/i.test(file.name);
+const isReservedDocName = (file: DocFile) => {
+	const base = (file.name.split(/[\\/]/).pop() ?? file.name).toLowerCase();
+	return base === "readme.md" || base === "agents.md" || base === "state.md" || base === "index.md";
+};
+
+const KNOWLEDGE_LABEL: Record<string, string> = {
+	decisions: "decision",
+	questions: "question",
+	reference: "reference note",
+	snippets: "snippet",
+	prompts: "prompt",
+};
+
+/**
+ * Flags unreferenced `knowledge/` (`decisions`, `questions`, `reference`, `snippets`, `prompts`),
+ * `schema/`, and `docs/*.md` files that have zero incoming links, zero ticket associations, and
+ * zero code references. Never flags `README.md`, `AGENTS.md`, `STATE.md`, `INDEX.md`, or archived docs.
+ */
+export function orphanDocChecks(
+	files: readonly DocFile[],
+	incomingLinks: ReadonlySet<string>,
+	options?: { root?: string },
+): { path: string; line: number; kind: "orphan"; level: "note"; message: string }[] {
+	const linkedNorm = new Set<string>();
+	for (const p of incomingLinks) {
+		const n = normPath(p);
+		if (n) linkedNorm.add(n);
+	}
+	const rootPrefix = options?.root ? `${normPath(options.root)}/` : "";
+	const metaRefs = new Set<string>();
+	const addMetaRef = (raw?: string) => {
+		if (!raw) return;
+		const clean = normPath(raw).replace(/^\.?\/+/, "");
+		if (clean) {
+			metaRefs.add(clean);
+			if (rootPrefix) metaRefs.add(`${rootPrefix}${clean}`);
+		}
+	};
+	for (const doc of files) {
+		if (!doc.exists) continue;
+		if (doc.source && !/^https?:\/\//i.test(doc.source)) addMetaRef(doc.source);
+		for (const p of doc.nodeDocs ?? []) addMetaRef(p);
+		for (const p of doc.specs ?? []) addMetaRef(p);
+		for (const p of doc.plans ?? []) addMetaRef(p);
+	}
+
+	const isLinkedByMeta = (filePath: string) => {
+		const full = normPath(filePath);
+		if (linkedNorm.has(full) || metaRefs.has(full)) return true;
+		for (const ref of metaRefs) {
+			if (full === ref || full.endsWith(`/${ref}`)) return true;
+		}
+		for (const link of linkedNorm) {
+			if (full.endsWith(`/${link}`) || link.endsWith(`/${full}`)) return true;
+		}
+		return false;
+	};
+
+	const out: { path: string; line: number; kind: "orphan"; level: "note"; message: string }[] = [];
+	for (const file of files) {
+		if (!file.exists || isCatalog(file) || isReservedDocName(file) || isArchivedDoc(file)) continue;
+		if (file.group !== "knowledge" && file.group !== "schema" && file.group !== "docs") continue;
+		if (file.group === "docs" && !/\.(md|markdown)$/i.test(file.name)) continue;
+		if (file.tickets?.length || file.codeRefs?.length) continue;
+		if (file.group === "knowledge" && file.kind === "decisions" && (file.supersedes?.length || file.supersededBy?.length)) continue;
+		if (isLinkedByMeta(file.path)) continue;
+
+		const kindLabel =
+			file.group === "schema"
+				? "schema doc"
+				: file.group === "docs"
+					? "document"
+					: KNOWLEDGE_LABEL[(file.kind ?? "").toLowerCase()] ?? "knowledge note";
+		out.push({
+			path: file.path,
+			line: 1,
+			kind: "orphan",
+			level: "note",
+			message: `Unreferenced ${kindLabel}: ${called(file)} has no incoming links, tickets, or code references.`,
+		});
+	}
+	return out;
+}
+
+/** Finds duplicate Markdown ATX headings (same anchor slug / text) within a single document. */
+export function findDuplicateHeadings(text: string): { heading: string; line: number; firstLine: number }[] {
+	const headings = documentHeadings(text);
+	const firstByKey = new Map<string, number>();
+	const dupes: { heading: string; line: number; firstLine: number }[] = [];
+	for (const h of headings) {
+		const key = headingAnchor(h.text) || h.text.trim().toLowerCase();
+		if (!key) continue;
+		const firstLine = firstByKey.get(key);
+		if (firstLine !== undefined) {
+			dupes.push({ heading: h.text, line: h.line, firstLine });
+		} else {
+			firstByKey.set(key, h.line);
+		}
+	}
+	return dupes;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Surfaces stale documentation hygiene notes:
+ * - Untouched templates older than 7 days
+ * - Open questions older than 30 days
+ * - `STATE.md` older than 14 days
+ * - Controlled documents (`version`, `change-control`, `gxp-impact`, or `status: approved`) missing approval metadata
+ */
+export function staleDocChecks(
+	docs: readonly DocFile[],
+	nowMs = Date.now(),
+): { path: string; line: number; kind: "stale"; level: "note"; message: string }[] {
+	const out: { path: string; line: number; kind: "stale"; level: "note"; message: string }[] = [];
+	for (const doc of docs) {
+		if (!doc.exists || isCatalog(doc) || isArchivedDoc(doc)) continue;
+		const ageMs = typeof doc.mtime === "number" && doc.mtime > 0 ? Math.max(0, nowMs - doc.mtime) : null;
+		const ageDays = ageMs !== null ? Math.floor(ageMs / DAY_MS) : null;
+
+		// 1. Untouched templates older than 7 days
+		if (doc.untouched && doc.group !== "project" && ageMs !== null && ageMs > 7 * DAY_MS) {
+			out.push({
+				path: doc.path,
+				line: 1,
+				kind: "stale",
+				level: "note",
+				message: `Untouched template (${ageDays} days old): ${called(doc)}.`,
+			});
+		}
+
+		// 2. Open questions older than 30 days
+		if (doc.group === "knowledge" && doc.kind === "questions" && toneOf(doc.status) === "waiting" && ageMs !== null && ageMs > 30 * DAY_MS) {
+			out.push({
+				path: doc.path,
+				line: 1,
+				kind: "stale",
+				level: "note",
+				message: `Open question untouched for ${ageDays} days: ${called(doc)}.`,
+			});
+		}
+
+		// 3. STATE.md older than 14 days
+		if (doc.group === "project" && /^state\.md$/i.test(doc.name) && ageMs !== null && ageMs > 14 * DAY_MS) {
+			out.push({
+				path: doc.path,
+				line: 1,
+				kind: "stale",
+				level: "note",
+				message: `STATE.md has not been updated in ${ageDays} days.`,
+			});
+		}
+
+		// 4. Controlled documents missing approval metadata (`approved-by` / `approved-date`)
+		const hasGxpImpact = Boolean(doc.gxpImpact && !/^(?:none|no|n\/a|false)$/i.test(doc.gxpImpact.trim()));
+		const isControlled = Boolean(doc.version || doc.changeControl || hasGxpImpact || /^approved$/i.test(doc.status?.trim() ?? ""));
+		if (isControlled && (!doc.approvedBy || !doc.approvedDate)) {
+			const missing: string[] = [];
+			if (!doc.approvedBy) missing.push("approved-by");
+			if (!doc.approvedDate) missing.push("approved-date");
+			out.push({
+				path: doc.path,
+				line: 1,
+				kind: "stale",
+				level: "note",
+				message: `Controlled document ${called(doc)} is missing ${missing.join(" and ")}.`,
+			});
+		}
+	}
+	return out;
 }
 
 /** The checks in a line, for a heading: "2 to fix, 3 to know". Empty when there is nothing. */

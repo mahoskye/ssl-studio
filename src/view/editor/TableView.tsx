@@ -7,18 +7,20 @@
 // row/cell/column actions live in right-click context menus, a blank final row
 // lets users add entries without writing empty lines until content is entered,
 // and code-usage checks target the exact column, rows, and file globs chosen.
-import { createEffect, createMemo, createSignal, createUniqueId, For, Index, on, onCleanup, Show, type JSX } from "solid-js";
+import { createEffect, createMemo, createSignal, createUniqueId, For, Index, on, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { Portal } from "solid-js/web";
 import {
 	addCsvColumn,
 	appendRowEdit,
 	columnOf,
+	convertCsvDelimiter,
 	csvCell,
 	csvDuplicateKeys,
 	csvRow,
 	deleteCsvColumn,
 	deleteCsvRows,
 	insertRowEdit,
+	moveCsvRow,
 	parseClipboardGrid,
 	parseCsv,
 	rawRowText,
@@ -28,7 +30,9 @@ import {
 	sortCsvRows,
 	tableToMarkdown,
 	tableToTsv,
+	tally,
 	type Cell,
+	type CsvDelimiter,
 } from "../../shared/csv";
 import {
 	badgeToneForValue,
@@ -39,6 +43,8 @@ import {
 	hideColumn,
 	isColumnFilterActive,
 	isNaturalOrder,
+	isUnrecognizedBadgeValue,
+	knownBadgeValues,
 	moveColumnInList,
 	pruneColumnOrder,
 	pruneFrozenColumns,
@@ -52,6 +58,7 @@ import {
 	toggleColumnFilterValue,
 	toggleFrozenColumn,
 	visualColumnOrder,
+	type BadgeTone,
 	type ColumnFilter,
 } from "../../shared/csvFormat";
 import {
@@ -65,7 +72,7 @@ import {
 	type CodeCheckRowScope,
 	type CodeCheckSpec,
 } from "../../shared/registryCheck";
-import { baseName, isInside, joinPath, relativeTo, resolvePath } from "../../shared/paths";
+import { baseName, dirName, isInside, joinPath, relativeTo, resolvePath } from "../../shared/paths";
 import { keyOf, keysIn, ticketColumn } from "../../shared/registryTickets";
 import { findSchemaDocForIdentifier } from "../../shared/schemaIndex";
 import { SEARCH_LIMIT, type SearchOptions } from "../../shared/searchPattern";
@@ -75,12 +82,14 @@ const copyText = (text: string, label: string) => import("../commands").then((m)
 import { ask, choose } from "../dialogs";
 import { Icon } from "../Icon";
 import { modalOpen } from "../modal";
+import { submenuOrInline } from "../../shared/contextMenu";
 import { chooseFromMenu, rowMenuOpen, type RowMenuEntry } from "../panels/RowMenu";
 import { searchFor } from "../panels/Search";
 import { docs } from "../project";
-import { canonical, documents, notify, openFile, saveSetting, state } from "../state";
+import { canonical, documents, notify, openFile, revealSignal, saveSetting, state, takeReveal, type Reveal } from "../state";
 import { CsvCodeCheckDialog } from "./CsvCodeCheckDialog";
 import { CsvFormatDialog } from "./CsvFormatDialog";
+import { registerTableColumnJump, registerTableFind } from "./liveBridge";
 import { rowsAsked, rowsShown } from "./tableRows";
 import "./tableViewExtra.css";
 
@@ -165,7 +174,127 @@ type ColDrag = {
 	y: number;
 };
 
+type RowDrag = {
+	fromRow: number;
+	dropRow: number;
+	side: "before" | "after";
+	label: string;
+	x: number;
+	y: number;
+};
+
+type CellRangeRect = {
+	r1: number;
+	r2: number;
+	c1: number;
+	c2: number;
+	rowCount: number;
+	colCount: number;
+	isMulti: boolean;
+};
+
+type CellPickerOption = {
+	value: string;
+	tone?: BadgeTone | null;
+	meta?: string;
+	isCurrent?: boolean;
+};
+
+type DisplayEntry =
+	| { kind: "group"; key: string; label: string; count: number; rowIndices: number[]; collapsed: boolean }
+	| { kind: "row"; index: number; cells: Cell[] };
+
+type CommitMove = "none" | "stay" | "next" | "prev" | "down";
+
 const shortLabel = (text: string, max = 26) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
+
+function delimiterLabel(d: CsvDelimiter): string {
+	if (d === "\t") return "Tab";
+	if (d === ";") return "Semicolon";
+	if (d === "|") return "Pipe";
+	return "Comma";
+}
+
+function parseTicketToken(raw: string): { prefix: string; token: string; existingKeys: Set<string> } {
+	const m = /^(.*[,;]\s*)([^,;]*)$/.exec(raw);
+	const prefix = m ? m[1]! : "";
+	const token = (m ? m[2]! : raw).trim();
+	const existingKeys = new Set(
+		prefix
+			.split(/[\s,;/]+/)
+			.map((s) => s.trim().toLowerCase())
+			.filter(Boolean),
+	);
+	return { prefix, token, existingKeys };
+}
+
+function remapIndexAfterMove(idx: number, from: number, to: number): number {
+	if (idx === from) return to;
+	if (from < to && idx > from && idx <= to) return idx - 1;
+	if (from > to && idx >= to && idx < from) return idx + 1;
+	return idx;
+}
+
+const TABLE_POWER_STYLE_ID = "table-view-power-styles";
+const TABLE_POWER_CSS = `
+.table-view th.table-sel-col,
+.table-view td.table-sel-col { width: 56px; min-width: 56px; max-width: 56px; }
+.table-sel-inner { display: inline-flex; align-items: center; justify-content: flex-end; gap: 5px; width: 100%; padding: 0 6px; box-sizing: border-box; }
+.table-row-num { font-family: var(--ui-font); font-size: var(--text-xs); color: var(--muted); font-variant-numeric: tabular-nums; min-width: 2ch; text-align: right; user-select: none; }
+.table-row-num.draggable { cursor: grab; }
+.table-row-num.draggable:hover { color: var(--strong-fg); }
+.table-scroll.is-dragging-row,
+.table-scroll.is-dragging-row td,
+.table-scroll.is-dragging-row tr { cursor: grabbing; user-select: none; }
+.table-scroll.is-drag-selecting,
+.table-scroll.is-drag-selecting td { user-select: none; }
+.table-view tbody tr.row-dragging { opacity: .45; }
+.table-view tbody tr.row-drop-before td { box-shadow: inset 0 2px 0 var(--accent); }
+.table-view tbody tr.row-drop-after td { box-shadow: inset 0 -2px 0 var(--accent); }
+.table-view tbody tr.row-revealed td,
+.table-view tbody tr.row-revealed td.col-frozen { background: color-mix(in srgb, var(--accent) 22%, var(--bg)); transition: background .35s ease; }
+.table-view tbody tr td.cell-in-range,
+.table-view tbody tr:hover td.cell-in-range,
+.table-view tbody tr.row-current td.cell-in-range,
+.table-view tbody tr.row-current:hover td.cell-in-range,
+.table-view tbody tr td.col-frozen.cell-in-range { background: color-mix(in srgb, var(--accent) 16%, var(--bg)); }
+.table-view tbody tr td.cell-in-range.cell-selected,
+.table-view tbody tr:hover td.cell-in-range.cell-selected,
+.table-view tbody tr.row-current td.cell-in-range.cell-selected,
+.table-view tbody tr td.col-frozen.cell-in-range.cell-selected { background: color-mix(in srgb, var(--accent) 26%, var(--bg)); outline: 2px solid var(--accent); outline-offset: -2px; }
+.table-view tbody tr td.cell-empty-key:not(.col-frozen-last) { box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--warning) 70%, transparent); }
+.table-view tbody tr td.cell-empty-key.col-frozen-last { box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--warning) 70%, transparent), 2px 0 0 color-mix(in srgb, var(--accent) 42%, var(--border)), 6px 0 12px -4px rgb(0 0 0 / .24); }
+.table-empty-key-warn { display: inline-flex; align-items: center; gap: 3px; color: var(--warning); font: var(--text-xs) var(--ui-font); opacity: .9; }
+.table-badge-warn { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; }
+.table-badge-warn-icon { color: var(--warning); flex: none; display: inline-flex; align-items: center; }
+.table-view tbody tr.table-group-row td { background: color-mix(in srgb, var(--fg) 4%, var(--side-bg)); border-bottom: 1px solid var(--border); padding: 4px var(--space-4); font-family: var(--ui-font); font-size: var(--text-sm); overflow: visible; }
+.table-view tbody tr.table-group-row:hover td { background: color-mix(in srgb, var(--fg) 7%, var(--side-bg)); }
+.table-view tbody tr.table-group-row td.table-sel-col { padding: 0; background: color-mix(in srgb, var(--fg) 4%, var(--side-bg)); overflow: hidden; }
+.table-group-toggle { position: sticky; left: 58px; display: inline-flex; align-items: center; gap: var(--space-2); padding: 1px 4px; min-height: 0; font: 600 var(--text-sm) var(--ui-font); color: var(--strong-fg); background: transparent; border: 0; cursor: pointer; }
+.table-group-count { font-weight: 400; font-size: var(--text-xs); color: var(--muted); font-variant-numeric: tabular-nums; }
+.table-status-strip { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; }
+.table-status-pill { display: inline-flex; align-items: center; gap: 4px; min-height: 0; padding: 1px 7px; font-size: var(--text-xs); line-height: 1.5; cursor: pointer; }
+.table-status-pill[aria-pressed="true"] { outline: 1.5px solid var(--accent); outline-offset: -1px; font-weight: 600; }
+.table-status-pill-count { opacity: .82; font-variant-numeric: tabular-nums; }
+.table-cell-picker { position: fixed; z-index: 65; min-width: 185px; max-width: min(340px, calc(100vw - 16px)); max-height: 250px; overflow: auto; padding: 4px; background: var(--side-bg); color: var(--side-fg); border: 1px solid var(--input-border); border-radius: var(--radius-md); box-shadow: var(--shadow); font-family: var(--ui-font); font-size: var(--text-sm); display: flex; flex-direction: column; gap: 2px; }
+.table-cell-picker-opt { flex: none; display: flex; align-items: center; gap: var(--space-2); width: 100%; min-height: 26px; padding: 4px 8px; box-sizing: border-box; text-align: left; border-radius: var(--radius-sm); background: transparent; color: var(--fg); border: 0; cursor: pointer; overflow: hidden; }
+.table-cell-picker-opt:hover,
+.table-cell-picker-opt.active { background: var(--hover); color: var(--strong-fg); }
+.table-cell-picker-opt.active { outline: 1px solid color-mix(in srgb, var(--accent) 55%, transparent); outline-offset: -1px; }
+.table-cell-picker-val { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--code-font); font-size: var(--text-sm); }
+.table-cell-picker-meta { margin-left: auto; font-size: var(--text-xs); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 18ch; }
+.table-cell-picker-check { margin-left: auto; color: var(--accent); flex: none; display: inline-flex; align-items: center; }
+.table-bar .doc-status.table-fmt-chip { min-height: 0; line-height: 1.6; gap: var(--space-1); color: var(--fg); border-color: var(--input-border); }
+`;
+
+function ensureTablePowerStyles() {
+	if (typeof document === "undefined") return;
+	if (document.getElementById(TABLE_POWER_STYLE_ID)) return;
+	const style = document.createElement("style");
+	style.id = TABLE_POWER_STYLE_ID;
+	style.textContent = TABLE_POWER_CSS;
+	document.head.appendChild(style);
+}
 
 function menuPoint(e: MouseEvent, fallbackEl: Element | null): { x: number; y: number } {
 	if (e.clientX || e.clientY || !fallbackEl) return { x: e.clientX, y: e.clientY };
@@ -173,10 +302,27 @@ function menuPoint(e: MouseEvent, fallbackEl: Element | null): { x: number; y: n
 	return { x: rect.left + 8, y: rect.bottom };
 }
 
-export function TableView(props: { path: string }) {
+export function TableView(props: { path: string; group?: number }) {
+	ensureTablePowerStyles();
 	const model = documents.get(props.path)?.model;
 	let rootEl: HTMLDivElement | undefined;
 	const [text, setText] = createSignal(model?.getValue() ?? "");
+	/** Per-view format overrides (visual projection until converted in-file — ADR 0002). */
+	const [delimiterOverride, setDelimiterOverride] = createSignal<CsvDelimiter | "auto">("auto");
+	const [hasHeader, setHasHeader] = createSignal(true);
+	const parseCurrentCsv = (raw: string) => {
+		const delim = delimiterOverride();
+		return parseCsv(raw, {
+			delimiter: delim === "auto" ? undefined : delim,
+			hasHeader: hasHeader(),
+		});
+	};
+	const autoDelimiter = createMemo(() => parseCsv(text()).delimiter);
+
+	/** Optional collapsible group-by column index (visual projection only). */
+	const [groupByCol, setGroupByCol] = createSignal<number | null>(null);
+	const [collapsedGroups, setCollapsedGroups] = createSignal<Set<string>>(new Set());
+
 	type ColumnUiSnapshot = {
 		colFilters: Map<number, ColumnFilter>;
 		order: { column: number; down: boolean } | null;
@@ -185,6 +331,7 @@ export function TableView(props: { path: string }) {
 		colOrder: number[];
 		colWidths: Record<number, number>;
 		codeCheck: CodeCheckResult | null;
+		groupByCol: number | null;
 	};
 	const colSnapshots = new Map<number, ColumnUiSnapshot>();
 	const captureColUi = (): ColumnUiSnapshot => ({
@@ -195,6 +342,7 @@ export function TableView(props: { path: string }) {
 		colOrder: [...colOrder()],
 		colWidths: { ...colWidths() },
 		codeCheck: codeCheck() ? { ...codeCheck()! } : null,
+		groupByCol: groupByCol(),
 	});
 	const restoreColUi = (snap: ColumnUiSnapshot) => {
 		setColFilters(new Map(snap.colFilters));
@@ -204,6 +352,7 @@ export function TableView(props: { path: string }) {
 		setColOrder([...snap.colOrder]);
 		setColWidths({ ...snap.colWidths });
 		setCodeCheck(snap.codeCheck ? { ...snap.codeCheck } : null);
+		setGroupByCol(snap.groupByCol);
 	};
 	const listener = model?.onDidChangeContent(() => {
 		const next = model.getValue();
@@ -216,7 +365,7 @@ export function TableView(props: { path: string }) {
 	});
 	onCleanup(() => listener?.dispose());
 
-	const table = createMemo(() => parseCsv(text()));
+	const table = createMemo(() => parseCurrentCsv(text()));
 	const csvConfig = createMemo(() => effectiveCsvTableConfig(state.settings.csvTable));
 	const headerName = (col: number) => table().header[col]?.text.trim() ?? "";
 	const columnRule = (col: number) => ruleForColumn(csvConfig(), headerName(col));
@@ -238,11 +387,24 @@ export function TableView(props: { path: string }) {
 
 	/** Currently selected cell (drives both row highlight and crisp cell selection frame). */
 	const [activeCell, setActiveCell] = createSignal<ActiveCell | null>(null);
+	/** Anchor corner of rectangular multi-cell selection (Shift+Arrow, Shift+Click, or pointer drag). */
+	const [cellAnchor, setCellAnchor] = createSignal<{ row: number; column: number } | null>(null);
+	/** True while pointer-dragging across cells to select a rectangular range. */
+	const [isDragSelecting, setIsDragSelecting] = createSignal(false);
+	/** Active row grip pointer drag state (only when unsorted, unfiltered, ungrouped). */
+	const [rowDrag, setRowDrag] = createSignal<RowDrag | null>(null);
+	/** Briefly highlights a row revealed from Search, Outline, or navigation history. */
+	const [revealedRow, setRevealedRow] = createSignal<number | null>(null);
+	let revealTimer: ReturnType<typeof setTimeout> | undefined;
+	onCleanup(() => {
+		if (revealTimer !== undefined) clearTimeout(revealTimer);
+	});
 	const current = () => {
 		const ac = activeCell();
 		return ac && !ac.ghost ? ac.row : null;
 	};
 	const setCurrent = (row: number | null) => {
+		setCellAnchor(null);
 		if (row === null) {
 			setActiveCell(null);
 			return;
@@ -260,6 +422,7 @@ export function TableView(props: { path: string }) {
 		return Boolean(ac && ac.ghost && ac.column === col);
 	};
 	const clearCellSelection = () => {
+		setCellAnchor(null);
 		setActiveCell(null);
 		if (document.activeElement instanceof HTMLElement && document.activeElement.closest(".table-view td")) {
 			document.activeElement.blur();
@@ -279,12 +442,12 @@ export function TableView(props: { path: string }) {
 	let findInputEl: HTMLInputElement | undefined;
 	let replaceInputEl: HTMLInputElement | undefined;
 
-	// Press Escape (when no edit input, popover, menu, modal, or column drag is active) to close Find or clear cell selection.
+	// Press Escape (when no edit input, popover, menu, modal, or drag is active) to close Find or clear cell selection.
 	createEffect(() => {
 		if (!activeCell() && !findOpen()) return;
 		const onKeyDown = (e: KeyboardEvent) => {
 			if (e.key !== "Escape" || e.defaultPrevented) return;
-			if (editing() || filterMenu() || colDrag() || modalOpen() || rowMenuOpen()) return;
+			if (editing() || filterMenu() || colDrag() || rowDrag() || modalOpen() || rowMenuOpen()) return;
 			const target = e.target as HTMLElement | null;
 			if (findOpen()) {
 				if (target?.closest(".table-view")) {
@@ -308,12 +471,18 @@ export function TableView(props: { path: string }) {
 		props.path;
 		setSelectedRows(new Set<number>());
 		setLastClickedRow(null);
+		setCellAnchor(null);
 		setOnlyDupes(false);
 		setFindOpen(false);
 		setReplaceOpen(false);
 		setFindQuery("");
 		setReplaceText("");
 		setFindMatchIdx(0);
+		setGroupByCol(null);
+		setCollapsedGroups(new Set<string>());
+		setDelimiterOverride("auto");
+		setHasHeader(true);
+		setRevealedRow(null);
 	});
 	// Prune selected row indices when rows are deleted from the file.
 	createEffect(() => {
@@ -370,7 +539,7 @@ export function TableView(props: { path: string }) {
 		const w = colWidths()[col];
 		if (!isFrozen && w === undefined) return undefined;
 		const style: JSX.CSSProperties = {};
-		if (isFrozen) style.left = `${frozenLefts()[visIdx] ?? (visIdx === 0 ? 32 : 0)}px`;
+		if (isFrozen) style.left = `${frozenLefts()[visIdx] ?? (visIdx === 0 ? 56 : 0)}px`;
 		if (w !== undefined) {
 			style.width = `${w}px`;
 			style["min-width"] = `${w}px`;
@@ -380,8 +549,36 @@ export function TableView(props: { path: string }) {
 	};
 	/** The cell currently being edited (either an existing row or the blank final ghost row). */
 	const [editing, setEditing] = createSignal<EditingCell | null>(null);
+	/** Live inline editor draft + custom cell picker popover state (replaces native `<datalist>`). */
+	const [editDraft, setEditDraft] = createSignal("");
+	const [editDirty, setEditDirty] = createSignal(false);
+	const [pickerOpen, setPickerOpen] = createSignal(false);
+	const [pickerIdx, setPickerIdx] = createSignal(-1);
+	const [pickerAnchor, setPickerAnchor] = createSignal<DOMRect | null>(null);
+	let activeInputEl: HTMLInputElement | undefined;
+	let commitActiveEdit: ((val: string, move: CommitMove) => void) | null = null;
+	const pickerListboxId = createUniqueId();
 
-	// Prune column filters, frozen/hidden columns, widths, custom order, popovers, or code-check state if columns were removed in Text view.
+	createEffect(() => {
+		const ed = editing();
+		if (!ed) {
+			setPickerOpen(false);
+			setPickerAnchor(null);
+			setPickerIdx(-1);
+			activeInputEl = undefined;
+			commitActiveEdit = null;
+			return;
+		}
+		const existingVal = ed.ghost ? "" : (table().rows[ed.row]?.[ed.column]?.text ?? "");
+		const initVal = ed.seed !== undefined ? ed.seed : existingVal;
+		const isMultiline = Boolean(ed.forceMultiline) || (ed.seed === undefined && !ed.ghost && /[\r\n]/.test(existingVal));
+		setEditDraft(initVal);
+		setEditDirty(ed.seed !== undefined);
+		setPickerIdx(-1);
+		setPickerOpen(!isMultiline);
+	});
+
+	// Prune column filters, frozen/hidden columns, widths, custom order, grouping, popovers, or code-check state if columns were removed in Text view.
 	createEffect(() => {
 		const count = table().header.length;
 		const cur = colFilters();
@@ -429,6 +626,8 @@ export function TableView(props: { path: string }) {
 		if (menu && menu.column >= count) setFilterMenu(null);
 		const curSort = order();
 		if (curSort && (curSort.column < 0 || curSort.column >= count)) setOrder(null);
+		const curGroup = groupByCol();
+		if (curGroup !== null && (curGroup < 0 || curGroup >= count)) setGroupByCol(null);
 		const chk = codeCheck();
 		if (chk && chk.column >= count) {
 			setCodeCheck(null);
@@ -457,44 +656,93 @@ export function TableView(props: { path: string }) {
 		if (wanted !== null && (ticketAt() < 0 || !table().rows.some((cells) => namesTicket(cells, wanted)))) setOnlyTicket(null);
 	});
 
-	/** Autocomplete suggestions for whichever cell is currently being edited (tickets, badge rules, or column distinct values). */
-	const activeSuggestions = createMemo(() => {
+	/** Applies a picked dropdown option to the active input value (preserving prior comma-separated ticket keys in ticket columns). */
+	const resolvePickerChoice = (pickedValue: string, currentDraft: string): string => {
 		const ed = editing();
-		if (!ed) return [];
+		if (ed && ed.column === ticketAt()) {
+			const { prefix } = parseTicketToken(currentDraft);
+			return prefix ? `${prefix}${pickedValue}` : pickedValue;
+		}
+		return pickedValue;
+	};
+
+	/** Custom dropdown popover options for the currently edited cell (canonical badge pills, multi-ticket keys, or distinct values). */
+	const pickerOptions = createMemo<CellPickerOption[]>(() => {
+		const ed = editing();
+		if (!ed || !pickerOpen()) return [];
+		const draft = editDraft();
+		const dirty = editDirty();
+		const existingCellVal = ed.ghost ? "" : (table().rows[ed.row]?.[ed.column]?.text ?? "").trim().toLowerCase();
 		const existing = table().rows.map((r) => r[ed.column]?.text ?? "");
+
+		// 1. Ticket column: parse token after last comma/semicolon and suggest remaining workspace tickets + existing keys.
 		if (ed.column === ticketAt()) {
+			const { prefix, token, existingKeys } = parseTicketToken(draft);
+			const needle = (dirty || prefix ? token : "").toLowerCase();
 			const seen = new Set<string>();
-			const out: string[] = [];
+			const out: CellPickerOption[] = [];
 			for (const d of docs()) {
 				if (d.group !== "tickets" || !d.exists || !d.ticket) continue;
 				const k = d.ticket.toLowerCase();
-				if (seen.has(k)) continue;
+				if (seen.has(k) || existingKeys.has(k)) continue;
 				seen.add(k);
-				out.push(d.ticket);
+				const meta = d.title?.trim() || d.status?.trim() || "";
+				if (needle && !k.includes(needle) && !meta.toLowerCase().includes(needle)) continue;
+				out.push({ value: d.ticket, meta: meta || undefined, isCurrent: !prefix && k === existingCellVal });
+			}
+			for (const rawCell of existing) {
+				for (const part of rawCell.split(/[\s,;/]+/)) {
+					const t = part.trim();
+					const k = t.toLowerCase();
+					if (!t || seen.has(k) || existingKeys.has(k) || TICKET_PLACEHOLDER_RE.test(t)) continue;
+					seen.add(k);
+					if (needle && !k.includes(needle)) continue;
+					out.push({ value: t, isCurrent: !prefix && k === existingCellVal });
+				}
+			}
+			return out.slice(0, 40);
+		}
+
+		// 2. Configured badge column: show ALL canonical badge options immediately on open; filter only once user starts typing.
+		const rule = columnRule(ed.column);
+		if (rule) {
+			const needle = dirty ? draft.trim().toLowerCase() : "";
+			const seen = new Set<string>();
+			const out: CellPickerOption[] = [];
+			for (const entry of knownBadgeValues(rule)) {
+				const k = entry.value.toLowerCase();
+				seen.add(k);
+				if (needle && !k.includes(needle)) continue;
+				out.push({ value: entry.value, tone: entry.tone, isCurrent: k === existingCellVal });
 			}
 			for (const val of existing) {
-				const t = val.trim();
-				if (!t || seen.has(t.toLowerCase())) continue;
-				seen.add(t.toLowerCase());
-				out.push(t);
+				const trimmed = val.trim();
+				if (!trimmed) continue;
+				const k = trimmed.toLowerCase();
+				if (seen.has(k)) continue;
+				seen.add(k);
+				if (needle && !k.includes(needle)) continue;
+				out.push({ value: trimmed, tone: badgeToneForValue(rule, trimmed), isCurrent: k === existingCellVal });
 			}
-			return out;
+			return out.slice(0, 50);
 		}
-		const rule = columnRule(ed.column);
-		if (rule) return suggestionsForColumn(rule, existing);
-		// Offer distinct non-empty values for low-cardinality columns (e.g. Kind, Module, Owner).
+
+		// 3. Other columns: offer distinct non-empty values from the column as quick-pick suggestions.
 		const distinct: string[] = [];
 		const seen = new Set<string>();
 		for (const val of existing) {
 			const t = val.trim();
-			if (!t || seen.has(t.toLowerCase())) continue;
-			seen.add(t.toLowerCase());
+			if (!t) continue;
+			const k = t.toLowerCase();
+			if (seen.has(k)) continue;
+			seen.add(k);
 			distinct.push(t);
-			if (distinct.length > 40) return [];
 		}
-		return distinct;
+		if (!dirty && distinct.length > 40) return [];
+		const needle = dirty ? draft.trim().toLowerCase() : "";
+		const filtered = needle ? distinct.filter((v) => v.toLowerCase().includes(needle)) : distinct;
+		return filtered.slice(0, 30).map((v) => ({ value: v, isCurrent: v.toLowerCase() === existingCellVal }));
 	});
-	const suggestionListId = createUniqueId();
 
 	/** Default exclude glob list built from the workspace's docs, plans, and IDE metadata folders. */
 	const defaultExclude = createMemo(() =>
@@ -970,6 +1218,141 @@ export function TableView(props: { path: string }) {
 			.filter((name) => Boolean(ruleForColumn(csvConfig(), name))),
 	);
 
+	const canReorderRows = createMemo(() => !order() && !hasActiveFilters() && groupByCol() === null);
+
+	/** Flat list of rendered tbody entries: either plain filtered/sorted rows or collapsible group header + member rows. */
+	const displayEntries = createMemo<DisplayEntry[]>(() => {
+		const gCol = groupByCol();
+		const list = rows();
+		if (gCol === null || gCol < 0 || gCol >= table().header.length) {
+			return list.map((r) => ({ kind: "row" as const, index: r.index, cells: r.cells }));
+		}
+		const collapsed = collapsedGroups();
+		const buckets = new Map<string, { label: string; items: { index: number; cells: Cell[] }[] }>();
+		for (const item of list) {
+			const raw = (item.cells[gCol]?.text ?? "").trim();
+			const key = raw.toLowerCase();
+			const bucket = buckets.get(key);
+			if (bucket) bucket.items.push(item);
+			else buckets.set(key, { label: raw, items: [item] });
+		}
+		const groups = [...buckets.entries()];
+		if (order()?.column !== gCol) {
+			groups.sort(([ka, a], [kb, b]) => {
+				if ((ka === "") !== (kb === "")) return ka === "" ? 1 : -1;
+				return a.label.localeCompare(b.label, undefined, { numeric: true, sensitivity: "base" });
+			});
+		}
+		const out: DisplayEntry[] = [];
+		for (const [key, info] of groups) {
+			const isCollapsed = collapsed.has(key);
+			out.push({
+				kind: "group",
+				key,
+				label: info.label,
+				count: info.items.length,
+				rowIndices: info.items.map((x) => x.index),
+				collapsed: isCollapsed,
+			});
+			if (!isCollapsed) {
+				for (const item of info.items) {
+					out.push({ kind: "row", index: item.index, cells: item.cells });
+				}
+			}
+		}
+		return out;
+	});
+
+	/** All non-collapsed data rows in exact visual display order (used for keyboard nav, rectangular range, paste, and fill-down). */
+	const displayRows = createMemo<{ index: number; cells: Cell[] }[]>(() => {
+		if (groupByCol() === null) return rows();
+		const out: { index: number; cells: Cell[] }[] = [];
+		for (const e of displayEntries()) {
+			if (e.kind === "row") out.push({ index: e.index, cells: e.cells });
+		}
+		return out;
+	});
+
+	const rowVisIndexMap = createMemo(() => {
+		const map = new Map<number, number>();
+		const list = displayRows();
+		for (let i = 0; i < list.length; i++) map.set(list[i]!.index, i);
+		return map;
+	});
+
+	const colVisIndexMap = createMemo(() => {
+		const map = new Map<number, number>();
+		const cols = visibleColumns();
+		for (let i = 0; i < cols.length; i++) map.set(cols[i]!, i);
+		return map;
+	});
+
+	/** Rectangular multi-cell selection bounds in visual row/column coordinates, or null when no range is anchored. */
+	const cellRange = createMemo<CellRangeRect | null>(() => {
+		const anchor = cellAnchor();
+		const ac = activeCell();
+		if (!anchor || !ac || ac.ghost) return null;
+		const rMap = rowVisIndexMap();
+		const cMap = colVisIndexMap();
+		const ar = rMap.get(anchor.row);
+		const fr = rMap.get(ac.row);
+		const acol = cMap.get(anchor.column);
+		const fcol = cMap.get(ac.column);
+		if (ar === undefined || fr === undefined || acol === undefined || fcol === undefined) return null;
+		const r1 = Math.min(ar, fr);
+		const r2 = Math.max(ar, fr);
+		const c1 = Math.min(acol, fcol);
+		const c2 = Math.max(acol, fcol);
+		return {
+			r1,
+			r2,
+			c1,
+			c2,
+			rowCount: r2 - r1 + 1,
+			colCount: c2 - c1 + 1,
+			isMulti: r1 !== r2 || c1 !== c2,
+		};
+	});
+
+	const isCellInRange = (row: number, col: number): boolean => {
+		const range = cellRange();
+		if (!range || !range.isMulti) return false;
+		const vr = rowVisIndexMap().get(row);
+		const vc = colVisIndexMap().get(col);
+		return vr !== undefined && vc !== undefined && vr >= range.r1 && vr <= range.r2 && vc >= range.c1 && vc <= range.c2;
+	};
+
+	const toggleGroupCollapsed = (key: string) => {
+		setCollapsedGroups((prev) => {
+			const next = new Set(prev);
+			if (next.has(key)) next.delete(key);
+			else next.add(key);
+			return next;
+		});
+	};
+
+	const toggleGroupSelect = (rowIndices: readonly number[]) => {
+		setSelectedRows((prev) => {
+			const next = new Set(prev);
+			const allSelected = rowIndices.length > 0 && rowIndices.every((r) => prev.has(r));
+			for (const r of rowIndices) {
+				if (allSelected) next.delete(r);
+				else next.add(r);
+			}
+			return next;
+		});
+	};
+
+	const toggleGroupByColumn = (col: number) => {
+		if (groupByCol() === col) {
+			setGroupByCol(null);
+			setCollapsedGroups(new Set<string>());
+		} else {
+			setGroupByCol(col);
+			setCollapsedGroups(new Set<string>());
+		}
+	};
+
 	// Scroll-windowed virtualization when tables exceed 200 rows so 1,000+ row STARLIMS registries scroll smoothly at 60fps.
 	const VIRTUAL_THRESHOLD = 200;
 	const EST_ROW_H = 31;
@@ -978,7 +1361,7 @@ export function TableView(props: { path: string }) {
 	const [viewportH, setViewportH] = createSignal(640);
 
 	const virtualWindow = createMemo(() => {
-		const all = rows();
+		const all = displayEntries();
 		if (all.length <= VIRTUAL_THRESHOLD) {
 			return { virtual: false, start: 0, end: all.length, topPad: 0, bottomPad: 0 };
 		}
@@ -994,14 +1377,17 @@ export function TableView(props: { path: string }) {
 		};
 	});
 
-	/** The rows drawn: virtualized viewport slice for large tables (>200 rows), or all filtered rows for small tables. */
-	const drawn = createMemo(() => {
+	/** The tbody entries drawn: virtualized viewport slice for large tables (>200 entries), or all entries for small tables. */
+	const drawnEntries = createMemo<DisplayEntry[]>(() => {
 		const win = virtualWindow();
-		const all = rows();
+		const all = displayEntries();
 		const slice = win.virtual ? all.slice(win.start, win.end) : all;
 		const ed = editing();
 		const focusRow = ed && !ed.ghost ? ed.row : pinnedRow();
-		const beyond = focusRow !== null && !slice.some((row) => row.index === focusRow) ? all.find((row) => row.index === focusRow) : undefined;
+		const beyond =
+			focusRow !== null && !slice.some((e) => e.kind === "row" && e.index === focusRow)
+				? all.find((e) => e.kind === "row" && e.index === focusRow)
+				: undefined;
 		return beyond ? [...slice, beyond] : slice;
 	});
 
@@ -1010,12 +1396,13 @@ export function TableView(props: { path: string }) {
 		const cols = visibleColumns();
 		if (!cols.length) return null;
 		const ac = activeCell();
-		const list = drawn();
+		const list = drawnEntries();
 		if (ac && cols.includes(ac.column)) {
 			if (ac.ghost) return ac;
-			if (list.some((r) => r.index === ac.row)) return ac;
+			if (list.some((e) => e.kind === "row" && e.index === ac.row)) return ac;
 		}
-		if (list.length > 0) return { ghost: false, row: list[0]!.index, column: cols[0]! };
+		const firstRow = list.find((e) => e.kind === "row");
+		if (firstRow && firstRow.kind === "row") return { ghost: false, row: firstRow.index, column: cols[0]! };
 		return { ghost: true, column: cols[0]! };
 	});
 	const isRovingBodyCell = (row: number, col: number) => {
@@ -1038,7 +1425,7 @@ export function TableView(props: { path: string }) {
 	});
 
 	const toggleRowSelect = (rowIdx: number, shiftKey: boolean) => {
-		const list = rows();
+		const list = displayRows();
 		setSelectedRows((prev) => {
 			const next = new Set(prev);
 			if (shiftKey && lastClickedRow() !== null) {
@@ -1088,9 +1475,13 @@ export function TableView(props: { path: string }) {
 	let lastKeyMenuAt = 0;
 	let cancelActiveDrag: (() => void) | null = null;
 	let cancelActiveResize: (() => void) | null = null;
+	let cancelActiveRowDrag: (() => void) | null = null;
+	let cancelActiveCellDrag: (() => void) | null = null;
 	onCleanup(() => {
 		cancelActiveDrag?.();
 		cancelActiveResize?.();
+		cancelActiveRowDrag?.();
+		cancelActiveCellDrag?.();
 	});
 
 	// Measure cumulative widths of frozen columns so multi-column freezing locks seamlessly with zero overlap/gap.
@@ -1104,6 +1495,7 @@ export function TableView(props: { path: string }) {
 		rows();
 		codeCheck();
 		order();
+		groupByCol();
 		if (!count) {
 			setFrozenLefts([]);
 			return;
@@ -1141,7 +1533,9 @@ export function TableView(props: { path: string }) {
 		});
 	});
 
-	/** Adjusts `scrollEl.scrollTop` synchronously so row `visIdx` in `rows()` renders inside the virtual window. */
+	const visEntryIdxForRow = (rowIdx: number) => displayEntries().findIndex((e) => e.kind === "row" && e.index === rowIdx);
+
+	/** Adjusts `scrollEl.scrollTop` synchronously so entry `visIdx` in `displayEntries()` renders inside the virtual window. */
 	const ensureVisRowInWindow = (visIdx: number, align: "nearest" | "center" = "nearest") => {
 		if (!scrollEl || visIdx < 0) return;
 		const win = virtualWindow();
@@ -1180,11 +1574,12 @@ export function TableView(props: { path: string }) {
 		}
 	};
 
-	const focusCell = (row: number, column: number) => {
-		const visIdx = rows().findIndex((r) => r.index === row);
+	const focusCell = (row: number, column: number, opts?: { keepAnchor?: boolean; align?: "nearest" | "center" }) => {
+		if (!opts?.keepAnchor) setCellAnchor(null);
+		const visIdx = visEntryIdxForRow(row);
 		if (visIdx >= 0) {
 			setPinnedRow(row);
-			ensureVisRowInWindow(visIdx, "nearest");
+			ensureVisRowInWindow(visIdx, opts?.align ?? "nearest");
 		}
 		setActiveCell({ ghost: false, row, column });
 		queueMicrotask(() => {
@@ -1210,6 +1605,7 @@ export function TableView(props: { path: string }) {
 	};
 
 	const focusGhostCell = (column: number) => {
+		setCellAnchor(null);
 		setActiveCell({ ghost: true, column });
 		queueMicrotask(() => {
 			const td = foot?.querySelector<HTMLElement>(`tr.table-ghost-row > td[data-col="${column}"]`);
@@ -1220,21 +1616,243 @@ export function TableView(props: { path: string }) {
 		});
 	};
 
-	/** Moves selection/focus (or editing) to visual row `targetVis` in `rows()` cleanly across virtualized windows. */
-	const navigateToVisRow = (targetVis: number, column: number, opts?: { edit?: boolean; align?: "nearest" | "center" }) => {
-		const list = rows();
+	/** Moves selection/focus (or editing) to visual row `targetVis` in `displayRows()` cleanly across virtualized windows. */
+	const navigateToVisRow = (
+		targetVis: number,
+		column: number,
+		opts?: { edit?: boolean; align?: "nearest" | "center"; keepAnchor?: boolean },
+	) => {
+		const list = displayRows();
 		const target = list[targetVis];
 		if (!target) return;
 		const nextRow = target.index;
+		if (!opts?.keepAnchor) setCellAnchor(null);
 		setPinnedRow(nextRow);
-		const freshVis = rows().findIndex((r) => r.index === nextRow);
-		ensureVisRowInWindow(freshVis >= 0 ? freshVis : targetVis, opts?.align ?? "nearest");
+		const entryIdx = visEntryIdxForRow(nextRow);
+		ensureVisRowInWindow(entryIdx >= 0 ? entryIdx : targetVis, opts?.align ?? "nearest");
 		setActiveCell({ ghost: false, row: nextRow, column });
 		if (opts?.edit) {
 			setEditing({ ghost: false, row: nextRow, column });
 		} else {
-			focusCell(nextRow, column);
+			focusCell(nextRow, column, { keepAnchor: opts?.keepAnchor, align: opts?.align });
 		}
+	};
+
+	/** Applies multiple `(row, col, value)` updates in a SINGLE Monaco undo step, preserving untouched quoting and padding short rows (ADR 0002). */
+	const applyCellUpdates = (updates: readonly { row: number; col: number; value: string }[]): number => {
+		if (!model || !updates.length) return 0;
+		const raw = model.getValue();
+		const t = parseCurrentCsv(raw);
+		const byRow = new Map<number, Map<number, string>>();
+		for (const u of updates) {
+			if (u.row < 0 || u.row >= t.rows.length || u.col < 0 || u.col >= t.header.length) continue;
+			let colsMap = byRow.get(u.row);
+			if (!colsMap) {
+				colsMap = new Map<number, string>();
+				byRow.set(u.row, colsMap);
+			}
+			colsMap.set(u.col, u.value);
+		}
+		const cellEdits: { start: number; end: number; text: string }[] = [];
+		let changedCells = 0;
+		for (const [rowIdx, colsMap] of byRow) {
+			const cells = t.rows[rowIdx];
+			if (!cells?.length) continue;
+			let maxColNeeded = -1;
+			const tailVals = new Map<number, string>();
+			for (const [colIdx, val] of colsMap) {
+				const existing = cells[colIdx];
+				if (existing) {
+					if (existing.text !== val) {
+						cellEdits.push({ start: existing.start, end: existing.end, text: csvCell(val, t.delimiter) });
+						changedCells++;
+					}
+				} else if (val !== "") {
+					tailVals.set(colIdx, val);
+					if (colIdx > maxColNeeded) maxColNeeded = colIdx;
+				}
+			}
+			if (tailVals.size && maxColNeeded >= cells.length) {
+				const last = cells[cells.length - 1]!;
+				let suffix = "";
+				for (let c = cells.length; c <= maxColNeeded; c++) {
+					suffix += t.delimiter + csvCell(tailVals.get(c) ?? "", t.delimiter);
+				}
+				cellEdits.push({ start: last.end, end: last.end, text: suffix });
+				changedCells += tailVals.size;
+			}
+		}
+		if (!cellEdits.length) return 0;
+		const ops = cellEdits
+			.sort((a, b) => b.start - a.start || b.end - a.end)
+			.map((ed) => {
+				const from = model.getPositionAt(ed.start);
+				const to = model.getPositionAt(ed.end);
+				return {
+					range: { startLineNumber: from.lineNumber, startColumn: from.column, endLineNumber: to.lineNumber, endColumn: to.column },
+					text: ed.text,
+				};
+			});
+		model.pushStackElement();
+		model.pushEditOperations([], ops, () => null);
+		model.pushStackElement();
+		return changedCells;
+	};
+
+	const clearCellRange = (range: CellRangeRect) => {
+		const list = displayRows();
+		const cols = visibleColumns();
+		const updates: { row: number; col: number; value: string }[] = [];
+		for (let vr = range.r1; vr <= range.r2; vr++) {
+			const item = list[vr];
+			if (!item) continue;
+			for (let vc = range.c1; vc <= range.c2; vc++) {
+				const col = cols[vc];
+				if (col === undefined) continue;
+				updates.push({ row: item.index, col, value: "" });
+			}
+		}
+		const count = applyCellUpdates(updates);
+		if (count > 0) notify(`Cleared ${count} ${count === 1 ? "cell" : "cells"} (Ctrl+Z to undo).`);
+	};
+
+	const fillDownSelection = () => {
+		if (!model) return;
+		const list = displayRows();
+		const cols = visibleColumns();
+		const range = cellRange();
+		const ac = activeCell();
+		if (!ac || ac.ghost) return;
+		const t = table();
+		const updates: { row: number; col: number; value: string }[] = [];
+
+		if (range && range.isMulti && range.r2 > range.r1) {
+			const topRow = list[range.r1];
+			if (!topRow) return;
+			for (let vc = range.c1; vc <= range.c2; vc++) {
+				const col = cols[vc];
+				if (col === undefined) continue;
+				const fillVal = t.rows[topRow.index]?.[col]?.text ?? "";
+				for (let vr = range.r1 + 1; vr <= range.r2; vr++) {
+					const targetRow = list[vr];
+					if (!targetRow) continue;
+					updates.push({ row: targetRow.index, col, value: fillVal });
+				}
+			}
+		} else {
+			// Single cell or single-row horizontal range: copy from the row directly above.
+			const targetVisRow = range ? range.r1 : rowVisIndexMap().get(ac.row);
+			if (targetVisRow === undefined || targetVisRow <= 0) return;
+			const srcRow = list[targetVisRow - 1];
+			const dstRow = list[targetVisRow];
+			if (!srcRow || !dstRow) return;
+			const cStart = range ? range.c1 : colVisIndexMap().get(ac.column);
+			const cEnd = range ? range.c2 : cStart;
+			if (cStart === undefined || cEnd === undefined) return;
+			for (let vc = cStart; vc <= cEnd; vc++) {
+				const col = cols[vc];
+				if (col === undefined) continue;
+				const fillVal = t.rows[srcRow.index]?.[col]?.text ?? "";
+				updates.push({ row: dstRow.index, col, value: fillVal });
+			}
+		}
+		const count = applyCellUpdates(updates);
+		if (count > 0) notify(`Filled down ${count} ${count === 1 ? "cell" : "cells"} (Ctrl+Z to undo).`);
+	};
+
+	const copyCellRangeAsTsv = async (range: CellRangeRect) => {
+		const list = displayRows();
+		const cols = visibleColumns();
+		const lines: string[] = [];
+		for (let vr = range.r1; vr <= range.r2; vr++) {
+			const item = list[vr];
+			if (!item) continue;
+			const rowVals: string[] = [];
+			for (let vc = range.c1; vc <= range.c2; vc++) {
+				const col = cols[vc];
+				rowVals.push(col === undefined ? "" : csvCell(item.cells[col]?.text ?? "", "\t"));
+			}
+			lines.push(rowVals.join("\t"));
+		}
+		await copyText(lines.join("\n"), `Copied ${range.rowCount} × ${range.colCount} cells as TSV.`);
+	};
+
+	/** Starts pointer drag-selection across cells (clears browser text selection only once drag crosses into another cell). */
+	const onCellMouseDown = (e: MouseEvent, row: number, col: number) => {
+		if (e.button !== 0) {
+			// Right-clicking a cell already inside a multi-cell range preserves the range.
+			if (!isCellInRange(row, col)) {
+				setCellAnchor(null);
+				setActiveCell({ ghost: false, row, column: col });
+			}
+			return;
+		}
+		const target = e.target as HTMLElement | null;
+		if (target?.closest("input, textarea, button")) {
+			setCellAnchor(null);
+			setActiveCell({ ghost: false, row, column: col });
+			return;
+		}
+		if (e.shiftKey) {
+			e.preventDefault();
+			const curAc = activeCell();
+			if (!cellAnchor()) {
+				if (curAc && !curAc.ghost) setCellAnchor({ row: curAc.row, column: curAc.column });
+				else setCellAnchor({ row, column: col });
+			}
+			setActiveCell({ ghost: false, row, column: col });
+			(e.currentTarget as HTMLElement).focus();
+			return;
+		}
+		setCellAnchor({ row, column: col });
+		setActiveCell({ ghost: false, row, column: col });
+		let dragged = false;
+		let endRow = row;
+		let endCol = col;
+		const cleanup = () => {
+			window.removeEventListener("pointermove", onMove, true);
+			window.removeEventListener("pointerup", onUp, true);
+			window.removeEventListener("pointercancel", onUp, true);
+			cancelActiveCellDrag = null;
+			setIsDragSelecting(false);
+		};
+		const onMove = (ev: PointerEvent) => {
+			const el = document.elementFromPoint(ev.clientX, ev.clientY);
+			const td = el?.closest<HTMLElement>("tbody tr[data-row] > td[data-col]");
+			if (!td || !body?.contains(td)) return;
+			const tr = td.parentElement;
+			const rAttr = tr?.getAttribute("data-row");
+			const cAttr = td.getAttribute("data-col");
+			if (rAttr === null || rAttr === undefined || cAttr === null) return;
+			const nextRow = Number(rAttr);
+			const nextCol = Number(cAttr);
+			if (!Number.isInteger(nextRow) || !Number.isInteger(nextCol)) return;
+			if (!dragged && (nextRow !== row || nextCol !== col)) {
+				dragged = true;
+				setIsDragSelecting(true);
+				window.getSelection()?.removeAllRanges();
+			}
+			if (dragged) {
+				endRow = nextRow;
+				endCol = nextCol;
+				setActiveCell({ ghost: false, row: nextRow, column: nextCol });
+			}
+		};
+		const onUp = () => {
+			cleanup();
+			if (!dragged) {
+				setCellAnchor(null);
+			} else {
+				queueMicrotask(() => {
+					body?.querySelector<HTMLElement>(`tr[data-row="${endRow}"] > td[data-col="${endCol}"]`)?.focus();
+				});
+			}
+		};
+		cancelActiveCellDrag?.();
+		cancelActiveCellDrag = cleanup;
+		window.addEventListener("pointermove", onMove, true);
+		window.addEventListener("pointerup", onUp, true);
+		window.addEventListener("pointercancel", onUp, true);
 	};
 
 	/** Changes one cell: that part of the text, written as a cell must be. A row short of the column gets the cells between. */
@@ -1256,8 +1874,8 @@ export function TableView(props: { path: string }) {
 		model.pushStackElement();
 	};
 
-	/** Commits an existing cell edit and optionally moves to the next/previous visual cell (for Tab / Shift+Tab). */
-	const commitCell = (row: number, column: number, value: string, move: "none" | "stay" | "next" | "prev") => {
+	/** Commits an existing cell edit and optionally moves right/left (Tab/Shift+Tab) or down (Enter). */
+	const commitCell = (row: number, column: number, value: string, move: CommitMove) => {
 		// Pin the edited row under active filters so editing a cell doesn't immediately drop the row and strand Tab/focus.
 		if (hasActiveFilters()) setPinnedRow(row);
 		changeCell(row, column, value);
@@ -1266,16 +1884,18 @@ export function TableView(props: { path: string }) {
 		if (move === "next") {
 			if (visCol >= 0 && visCol + 1 < cols.length) {
 				const nextCol = cols[visCol + 1]!;
+				setCellAnchor(null);
 				setActiveCell({ ghost: false, row, column: nextCol });
 				setEditing({ ghost: false, row, column: nextCol });
 				return;
 			}
-			const list = rows();
+			const list = displayRows();
 			const vis = list.findIndex((r) => r.index === row);
 			const firstCol = cols[0] ?? 0;
 			if (vis >= 0 && vis + 1 < list.length) {
 				navigateToVisRow(vis + 1, firstCol, { edit: true });
 			} else {
+				setCellAnchor(null);
 				setActiveCell({ ghost: true, column: firstCol });
 				setEditing({ ghost: true, column: firstCol });
 				queueMicrotask(() => foot?.scrollIntoView({ block: "nearest" }));
@@ -1285,16 +1905,28 @@ export function TableView(props: { path: string }) {
 		if (move === "prev") {
 			if (visCol > 0) {
 				const prevCol = cols[visCol - 1]!;
+				setCellAnchor(null);
 				setActiveCell({ ghost: false, row, column: prevCol });
 				setEditing({ ghost: false, row, column: prevCol });
 				return;
 			}
-			const list = rows();
+			const list = displayRows();
 			const vis = list.findIndex((r) => r.index === row);
 			if (vis > 0) {
 				navigateToVisRow(vis - 1, cols[cols.length - 1] ?? 0, { edit: true });
 				return;
 			}
+		}
+		if (move === "down") {
+			setEditing(null);
+			const list = displayRows();
+			const vis = list.findIndex((r) => r.index === row);
+			if (vis >= 0 && vis + 1 < list.length) {
+				navigateToVisRow(vis + 1, column);
+			} else {
+				focusGhostCell(column);
+			}
+			return;
 		}
 		setEditing(null);
 		if (move === "stay") focusCell(row, column);
@@ -1305,7 +1937,7 @@ export function TableView(props: { path: string }) {
 	 * the user entered non-empty content; Tab on an empty ghost cell moves
 	 * horizontally across the ghost row without dirtying the file.
 	 */
-	const commitGhost = (column: number, value: string, move: "none" | "stay" | "next" | "prev") => {
+	const commitGhost = (column: number, value: string, move: CommitMove) => {
 		const cols = visibleColumns();
 		const visCol = cols.indexOf(column);
 		if (!model || !cols.length) {
@@ -1315,6 +1947,7 @@ export function TableView(props: { path: string }) {
 		if (value === "") {
 			if (move === "next" && visCol >= 0 && visCol + 1 < cols.length) {
 				const nextCol = cols[visCol + 1]!;
+				setCellAnchor(null);
 				setActiveCell({ ghost: true, column: nextCol });
 				setEditing({ ghost: true, column: nextCol });
 				return;
@@ -1322,18 +1955,19 @@ export function TableView(props: { path: string }) {
 			if (move === "prev") {
 				if (visCol > 0) {
 					const prevCol = cols[visCol - 1]!;
+					setCellAnchor(null);
 					setActiveCell({ ghost: true, column: prevCol });
 					setEditing({ ghost: true, column: prevCol });
 					return;
 				}
-				const list = rows();
+				const list = displayRows();
 				if (list.length > 0) {
 					navigateToVisRow(list.length - 1, cols[cols.length - 1] ?? 0, { edit: true });
 					return;
 				}
 			}
 			setEditing(null);
-			if (move === "stay") focusGhostCell(column);
+			if (move === "stay" || move === "down") focusGhostCell(column);
 			return;
 		}
 
@@ -1363,7 +1997,140 @@ export function TableView(props: { path: string }) {
 			return;
 		}
 		setEditing(null);
-		if (move === "stay") focusCell(newRow, column);
+		if (move === "down") focusGhostCell(column);
+		else if (move === "stay") focusCell(newRow, column);
+	};
+
+	const moveRowTo = (fromRow: number, toRow: number, focusCol?: number) => {
+		if (!model) return;
+		if (order()) {
+			notify("Clear or apply the active sort before reordering rows.");
+			return;
+		}
+		if (hasActiveFilters()) {
+			notify("Clear active filters before reordering rows.");
+			return;
+		}
+		if (groupByCol() !== null) {
+			notify("Clear row grouping before reordering rows.");
+			return;
+		}
+		const count = table().rows.length;
+		if (fromRow < 0 || fromRow >= count || toRow < 0 || toRow >= count || fromRow === toRow) return;
+		const raw = model.getValue();
+		const fresh = parseCurrentCsv(raw);
+		const next = moveCsvRow(raw, fresh, fromRow, toRow);
+		if (next === raw) return;
+
+		setSelectedRows((prev) => {
+			if (!prev.size) return prev;
+			const remapped = new Set<number>();
+			for (const r of prev) remapped.add(remapIndexAfterMove(r, fromRow, toRow));
+			return remapped;
+		});
+		const lastClk = lastClickedRow();
+		if (lastClk !== null) setLastClickedRow(remapIndexAfterMove(lastClk, fromRow, toRow));
+		const pin = pinnedRow();
+		if (pin !== null) setPinnedRow(remapIndexAfterMove(pin, fromRow, toRow));
+		setCellAnchor(null);
+		setEditing(null);
+
+		const fullRange = model.getFullModelRange();
+		model.pushStackElement();
+		model.pushEditOperations([], [{ range: fullRange, text: next }], () => null);
+		model.pushStackElement();
+
+		const col = focusCol ?? activeCell()?.column ?? visibleColumns()[0] ?? 0;
+		focusCell(toRow, col);
+	};
+
+	const onRowGripPointerDown = (e: PointerEvent, rowIdx: number) => {
+		if (e.button !== 0 || !canReorderRows() || table().rows.length < 2) return;
+		const target = e.target as HTMLElement | null;
+		if (target?.closest("input")) return;
+		e.stopPropagation();
+		const startY = e.clientY;
+		const label = table().rows[rowIdx]?.[0]?.text.trim() || `Row ${rowIdx + 1}`;
+		let dragging = false;
+
+		const computeDrop = (clientY: number): { dropRow: number; side: "before" | "after" } => {
+			if (!body) return { dropRow: rowIdx, side: "before" };
+			const trs = body.querySelectorAll<HTMLElement>("tr[data-row]");
+			let hoverRow = rowIdx;
+			let side: "before" | "after" = "before";
+			for (const tr of trs) {
+				const r = Number(tr.getAttribute("data-row"));
+				if (!Number.isInteger(r)) continue;
+				const rect = tr.getBoundingClientRect();
+				if (clientY <= rect.bottom) {
+					hoverRow = r;
+					side = clientY < rect.top + rect.height / 2 ? "before" : "after";
+					return { dropRow: hoverRow, side };
+				}
+				hoverRow = r;
+				side = "after";
+			}
+			return { dropRow: hoverRow, side };
+		};
+
+		const cleanup = () => {
+			window.removeEventListener("pointermove", onMove, true);
+			window.removeEventListener("pointerup", onUp, true);
+			window.removeEventListener("pointercancel", onCancel, true);
+			window.removeEventListener("keydown", onKey, true);
+			cancelActiveRowDrag = null;
+		};
+
+		const onMove = (ev: PointerEvent) => {
+			if (!dragging) {
+				if (Math.abs(ev.clientY - startY) < 5) return;
+				dragging = true;
+				closeFilterMenu(false);
+				setEditing(null);
+			}
+			ev.preventDefault();
+			if (scrollEl) {
+				const sRect = scrollEl.getBoundingClientRect();
+				if (ev.clientY > sRect.bottom - 28) scrollEl.scrollTop += 14;
+				else if (ev.clientY < sRect.top + 48) scrollEl.scrollTop -= 14;
+			}
+			const { dropRow, side } = computeDrop(ev.clientY);
+			setRowDrag({ fromRow: rowIdx, dropRow, side, label: shortLabel(label), x: ev.clientX, y: ev.clientY });
+		};
+
+		const onUp = () => {
+			const drag = rowDrag();
+			cleanup();
+			if (dragging && drag) {
+				let target = drag.dropRow + (drag.side === "after" ? 1 : 0);
+				if (target > drag.fromRow) target--;
+				target = Math.max(0, Math.min(table().rows.length - 1, target));
+				setRowDrag(null);
+				if (target !== drag.fromRow) moveRowTo(drag.fromRow, target);
+			} else {
+				setRowDrag(null);
+			}
+		};
+
+		const onCancel = () => {
+			cleanup();
+			setRowDrag(null);
+		};
+
+		const onKey = (ev: KeyboardEvent) => {
+			if (ev.key === "Escape" && dragging) {
+				ev.preventDefault();
+				ev.stopPropagation();
+				onCancel();
+			}
+		};
+
+		cancelActiveRowDrag?.();
+		cancelActiveRowDrag = onCancel;
+		window.addEventListener("pointermove", onMove, true);
+		window.addEventListener("pointerup", onUp, true);
+		window.addEventListener("pointercancel", onCancel, true);
+		window.addEventListener("keydown", onKey, true);
 	};
 
 	const insertRowAt = (row: number, position: "above" | "below") => {
@@ -1449,7 +2216,7 @@ export function TableView(props: { path: string }) {
 	/** Applies a single column value across all visible selected rows in one undoable edit. */
 	const bulkSetColumn = (colIdx: number, value: string) => {
 		if (!model) return;
-		const t = parseCsv(model.getValue());
+		const t = parseCurrentCsv(model.getValue());
 		const targetRows = visibleSelectedRows().filter((r) => r >= 0 && r < t.rows.length).sort((a, b) => b - a);
 		if (!targetRows.length) return;
 		const ops: { range: { startLineNumber: number; startColumn: number; endLineNumber: number; endColumn: number }; text: string }[] = [];
@@ -1478,7 +2245,7 @@ export function TableView(props: { path: string }) {
 		if (!targetBefore.length) return;
 		if ((await choose(`Delete ${targetBefore.length} selected ${targetBefore.length === 1 ? "row" : "rows"}?`, ["Delete rows", "Cancel"], { danger: "Delete rows" })) !== "Delete rows") return;
 		const raw = model.getValue();
-		const fresh = parseCsv(raw);
+		const fresh = parseCurrentCsv(raw);
 		const targetRows = visibleSelectedRows().filter((r) => r >= 0 && r < fresh.rows.length);
 		const nextText = deleteCsvRows(raw, fresh, targetRows);
 		if (nextText === null) return;
@@ -1555,7 +2322,7 @@ export function TableView(props: { path: string }) {
 	};
 
 	const renameColumnInteractive = async (col: number) => {
-		if (!model) return;
+		if (!model || !hasHeader()) return;
 		const oldName = headerName(col);
 		const nextName = (await ask(`Rename column “${oldName || `Column ${col + 1}`}” to`, oldName))?.trim();
 		if (!nextName || nextName === oldName) return;
@@ -1568,17 +2335,22 @@ export function TableView(props: { path: string }) {
 		const name = headerName(col) || `Column ${col + 1}`;
 		if ((await choose(`Delete column “${name}” and all of its values?`, ["Delete column", "Cancel"], { danger: "Delete column" })) !== "Delete column") return;
 		const raw = model.getValue();
-		const fresh = parseCsv(raw);
+		const fresh = parseCurrentCsv(raw);
 		const next = deleteCsvColumn(raw, fresh, col);
 		if (!next) return;
 		colSnapshots.set(model.getAlternativeVersionId(), captureColUi());
 		const shift = (idx: number) => (idx === col ? -1 : idx > col ? idx - 1 : idx);
 
-		// Remap sort, code-check, frozen/hidden/order/widths/filters for remaining columns cleanly.
+		// Remap sort, grouping, code-check, frozen/hidden/order/widths/filters for remaining columns cleanly.
 		const curSort = order();
 		if (curSort) {
 			const mapped = shift(curSort.column);
 			setOrder(mapped >= 0 ? { ...curSort, column: mapped } : null);
+		}
+		const curGrp = groupByCol();
+		if (curGrp !== null) {
+			const mapped = shift(curGrp);
+			setGroupByCol(mapped >= 0 ? mapped : null);
 		}
 		const curChk = codeCheck();
 		if (curChk) {
@@ -1609,6 +2381,7 @@ export function TableView(props: { path: string }) {
 			return out;
 		});
 		setEditing(null);
+		setCellAnchor(null);
 		closeFilterMenu(false);
 		applyFullText(next, `Deleted column “${name}” (Ctrl+Z to undo).`);
 		colSnapshots.set(model.getAlternativeVersionId(), captureColUi());
@@ -1626,7 +2399,7 @@ export function TableView(props: { path: string }) {
 			if (ok !== "Apply sort to file") return;
 		}
 		const raw = model.getValue();
-		const t = parseCsv(raw);
+		const t = parseCurrentCsv(raw);
 		const sortedIndices = t.rows
 			.map((cells, idx) => ({ idx, val: cells[by.column]?.text ?? "" }))
 			.sort((a, b) => a.val.localeCompare(b.val, undefined, { numeric: true, sensitivity: "base" }) * (by.down ? -1 : 1))
@@ -1641,6 +2414,7 @@ export function TableView(props: { path: string }) {
 		setSelectedRows(new Set<number>());
 		setLastClickedRow(null);
 		setPinnedRow(null);
+		setCellAnchor(null);
 		setActiveCell(null);
 		setEditing(null);
 		applyFullText(next, "Saved row sort order to file (Ctrl+Z to undo).");
@@ -1654,10 +2428,75 @@ export function TableView(props: { path: string }) {
 			fmt === "tsv"
 				? tableToTsv(headers, bodyRows)
 				: fmt === "csv"
-					? [csvRow(headers, table().delimiter), ...bodyRows.map((r) => csvRow(r, table().delimiter))].join("\n")
+					? (hasHeader() ? [csvRow(headers, table().delimiter), ...bodyRows.map((r) => csvRow(r, table().delimiter))] : bodyRows.map((r) => csvRow(r, table().delimiter))).join("\n")
 					: tableToMarkdown(headers, bodyRows);
 		const label = fmt === "tsv" ? "TSV for Excel/Sheets" : fmt === "csv" ? "CSV" : "a Markdown table";
 		await copyText(out, `Copied ${bodyRows.length} rows as ${label}.`);
+	};
+
+	const exportVisibleToFile = async (fmt: "csv" | "tsv") => {
+		const stem = baseName(props.path).replace(/\.(csv|tsv|txt|psv)$/i, "") || "table";
+		const suffix = hasActiveFilters() ? "filtered" : "export";
+		const suggestedFile = `${stem}-${suffix}.${fmt}`;
+		const root = state.workspace?.root;
+		const inWorkspace = Boolean(root && isInside(root, props.path));
+		const curDir = dirName(props.path);
+		const relDir = inWorkspace && root ? relativeTo(root, curDir) : "";
+		const defaultDest =
+			inWorkspace && relDir && relDir !== curDir && relDir !== "."
+				? `${relDir}/${suggestedFile}`
+				: suggestedFile;
+		const entered = (
+			await ask(
+				`Export ${rows().length} visible ${rows().length === 1 ? "row" : "rows"} as ${fmt.toUpperCase()} file`,
+				defaultDest,
+			)
+		)?.trim();
+		if (!entered) return;
+		const isAbs = entered.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(entered);
+		const baseDir = inWorkspace && root ? root : curDir;
+		const dest = isAbs ? entered : resolvePath(baseDir, entered);
+		const exists = await backend.read(dest).then(() => true, () => false);
+		if (exists) {
+			const ok = await choose(`Overwrite existing file “${relativeTo(root, dest)}”?`, ["Overwrite", "Cancel"], { danger: "Overwrite" });
+			if (ok !== "Overwrite") return;
+		}
+		const cols = visibleColumns();
+		const headers = cols.map((c) => headerName(c));
+		const bodyRows = rows().map((r) => cols.map((c) => r.cells[c]?.text ?? ""));
+		const delim: CsvDelimiter = fmt === "tsv" ? "\t" : ",";
+		const lines = hasHeader()
+			? [csvRow(headers, delim), ...bodyRows.map((r) => csvRow(r, delim))]
+			: bodyRows.map((r) => csvRow(r, delim));
+		const content = `${lines.join("\n")}\n`;
+		try {
+			await backend.write(dest, content);
+			notify(`Exported ${bodyRows.length} ${bodyRows.length === 1 ? "row" : "rows"} to ${relativeTo(root, dest)}.`);
+		} catch (e: any) {
+			notify(`Could not export file: ${e?.message ?? e}`, "error");
+		}
+	};
+
+	const convertDelimiterInteractive = async () => {
+		if (!model) return;
+		const choices: { label: string; value: CsvDelimiter }[] = [
+			{ label: "Comma (,)", value: "," },
+			{ label: "Tab (TSV)", value: "\t" },
+			{ label: "Semicolon (;)", value: ";" },
+			{ label: "Pipe (|)", value: "|" },
+		];
+		const cur = table().delimiter;
+		const options = choices.filter((c) => c.value !== cur).map((c) => c.label);
+		const picked = await choose(`Convert file delimiter from ${delimiterLabel(cur)} to`, options);
+		if (!picked) return;
+		const target = choices.find((c) => c.label === picked)?.value;
+		if (!target) return;
+		const raw = model.getValue();
+		const fresh = parseCurrentCsv(raw);
+		const next = convertCsvDelimiter(raw, fresh, target);
+		if (next === raw) return;
+		setDelimiterOverride("auto");
+		applyFullText(next, `Converted file delimiter to ${delimiterLabel(target)} (Ctrl+Z to undo).`);
 	};
 
 	const copySelectedAsCsv = async () => {
@@ -1667,7 +2506,7 @@ export function TableView(props: { path: string }) {
 		const cols = visibleColumns();
 		const headers = cols.map((c) => headerName(c));
 		const bodyRows = ordered.map((r) => cols.map((c) => r.cells[c]?.text ?? ""));
-		const out = [csvRow(headers, table().delimiter), ...bodyRows.map((r) => csvRow(r, table().delimiter))].join("\n");
+		const out = (hasHeader() ? [csvRow(headers, table().delimiter), ...bodyRows.map((r) => csvRow(r, table().delimiter))] : bodyRows.map((r) => csvRow(r, table().delimiter))).join("\n");
 		await copyText(out, `Copied ${bodyRows.length} selected ${bodyRows.length === 1 ? "row" : "rows"} as CSV.`);
 	};
 
@@ -1678,7 +2517,7 @@ export function TableView(props: { path: string }) {
 		const cols = visibleColumns();
 		const headers = cols.map((c) => headerName(c));
 		const bodyRows = ordered.map((r) => cols.map((c) => r.cells[c]?.text ?? ""));
-		const out = tableToTsv(headers, bodyRows);
+		const out = hasHeader() ? tableToTsv(headers, bodyRows) : bodyRows.map((r) => r.map((v) => csvCell(v, "\t")).join("\t")).join("\n");
 		await copyText(out, `Copied ${bodyRows.length} selected ${bodyRows.length === 1 ? "row" : "rows"} as TSV for Excel/Sheets.`);
 	};
 
@@ -1696,7 +2535,7 @@ export function TableView(props: { path: string }) {
 				notify(`No SQL files found under ${schemaRel}/ to sync from.`);
 				return;
 			}
-			const t = parseCsv(model.getValue());
+			const t = parseCurrentCsv(model.getValue());
 			const nameCol = (() => {
 				for (const candidate of ["object", "name", "table"]) {
 					const idx = columnOf(t, candidate);
@@ -1794,7 +2633,7 @@ export function TableView(props: { path: string }) {
 
 			const nl = model.getEOL();
 			const textNow = model.getValue();
-			const freshTable = parseCsv(textNow);
+			const freshTable = parseCurrentCsv(textNow);
 			const freshStatusIdx = columnOf(freshTable, "status");
 			const rawEdits: { start: number; end: number; text: string }[] = [];
 			let markedCount = 0;
@@ -1890,7 +2729,7 @@ export function TableView(props: { path: string }) {
 			return;
 		}
 		if (grid.length > 1 && hasActiveFilters()) {
-			const curList = rows();
+			const curList = displayRows();
 			const startVis = ac.ghost ? curList.length : curList.findIndex((r) => r.index === ac.row);
 			const remainingVis = startVis >= 0 ? Math.max(0, curList.length - startVis) : 0;
 			const willUpdate = Math.min(grid.length, remainingVis);
@@ -1906,9 +2745,9 @@ export function TableView(props: { path: string }) {
 		}
 
 		const curText = model.getValue();
-		const t = parseCsv(curText);
-		// Index the FULL filtered/sorted `rows()` array (not virtualized `drawn()`) so pasting past the viewport updates real rows instead of duplicating at EOF.
-		const list = rows();
+		const t = parseCurrentCsv(curText);
+		// Index the FULL filtered/sorted/display `displayRows()` array (not virtualized slice) so pasting past the viewport updates real rows instead of duplicating at EOF.
+		const list = displayRows();
 		const startVisRow = ac.ghost ? list.length : list.findIndex((r) => r.index === ac.row);
 		if (startVisRow < 0) return;
 
@@ -2029,9 +2868,25 @@ export function TableView(props: { path: string }) {
 		return i >= 0 ? findMatches()[i]! : null;
 	});
 
+	const expandGroupForRow = (rowIdx: number) => {
+		const gCol = groupByCol();
+		if (gCol === null) return;
+		const key = (table().rows[rowIdx]?.[gCol]?.text ?? "").trim().toLowerCase();
+		if (collapsedGroups().has(key)) {
+			setCollapsedGroups((prev) => {
+				const next = new Set(prev);
+				next.delete(key);
+				return next;
+			});
+		}
+	};
+
 	const revealMatch = (match: { row: number; visRow: number; column: number }) => {
+		expandGroupForRow(match.row);
 		setPinnedRow(match.row);
-		ensureVisRowInWindow(match.visRow, "center");
+		const entryIdx = visEntryIdxForRow(match.row);
+		ensureVisRowInWindow(entryIdx >= 0 ? entryIdx : match.visRow, "center");
+		setCellAnchor(null);
 		setActiveCell({ ghost: false, row: match.row, column: match.column });
 		queueMicrotask(() => {
 			const td = body?.querySelector<HTMLElement>(`tr[data-row="${match.row}"] > td[data-col="${match.column}"]`);
@@ -2107,7 +2962,7 @@ export function TableView(props: { path: string }) {
 		const cs = findCaseSensitive();
 		const rep = replaceText();
 		const curText = model.getValue();
-		const t = parseCsv(curText);
+		const t = parseCurrentCsv(curText);
 		const matches = findMatches();
 		if (!matches.length) return;
 		const cellEdits: { start: number; end: number; text: string }[] = [];
@@ -2138,17 +2993,257 @@ export function TableView(props: { path: string }) {
 		notify(`Replaced in ${ops.length} ${ops.length === 1 ? "cell" : "cells"} (Ctrl+Z to undo).`);
 	};
 
-	// --- Compact footer summary strip stats ---------------------------------
+	// --- Reveal from Search / Outline / Nav history & liveBridge wiring -----
+
+	const offsetAtLineCol = (raw: string, line: number, column = 1): { lineStart: number; lineEnd: number; offset: number } => {
+		if (model) {
+			const maxLine = Math.max(1, model.getLineCount());
+			const ln = Math.max(1, Math.min(line, maxLine));
+			const maxCol = model.getLineMaxColumn(ln);
+			const col = Math.max(1, Math.min(column, maxCol));
+			return {
+				lineStart: model.getOffsetAt({ lineNumber: ln, column: 1 }),
+				lineEnd: model.getOffsetAt({ lineNumber: ln, column: maxCol }),
+				offset: model.getOffsetAt({ lineNumber: ln, column: col }),
+			};
+		}
+		let curLine = 1;
+		let idx = 0;
+		while (curLine < line && idx < raw.length) {
+			const nl = raw.indexOf("\n", idx);
+			if (nl < 0) {
+				idx = raw.length;
+				break;
+			}
+			idx = nl + 1;
+			curLine++;
+		}
+		const lineStart = idx;
+		const nextNl = raw.indexOf("\n", lineStart);
+		const lineEnd = nextNl < 0 ? raw.length : nextNl > lineStart && raw[nextNl - 1] === "\r" ? nextNl - 1 : nextNl;
+		const offset = Math.min(lineEnd, lineStart + Math.max(0, column - 1));
+		return { lineStart, lineEnd, offset };
+	};
+
+	const revealAt = (r: Reveal) => {
+		const raw = model?.getValue() ?? text();
+		const t = table();
+		if (!t.rows.length) return;
+		const { lineStart, lineEnd, offset } = offsetAtLineCol(raw, r.line, r.column ?? 1);
+		let matchedRow = -1;
+		for (let i = 0; i < t.rows.length; i++) {
+			const cells = t.rows[i]!;
+			if (!cells.length) continue;
+			const rStart = cells[0]!.start;
+			const rEnd = cells[cells.length - 1]!.end;
+			if ((offset >= rStart && offset <= rEnd) || (rStart <= lineEnd && rEnd >= lineStart)) {
+				matchedRow = i;
+				break;
+			}
+		}
+		if (matchedRow < 0) {
+			if (offset < (t.rows[0]?.[0]?.start ?? 0)) {
+				matchedRow = 0;
+			} else {
+				let nearest = -1;
+				for (let i = 0; i < t.rows.length; i++) {
+					const s = t.rows[i]?.[0]?.start;
+					if (s !== undefined && s <= offset) nearest = i;
+				}
+				matchedRow = nearest >= 0 ? nearest : Math.max(0, Math.min(t.rows.length - 1, r.line - (hasHeader() ? 2 : 1)));
+			}
+		}
+		let matchedCol = visibleColumns()[0] ?? 0;
+		if (r.column !== undefined && r.column >= 1) {
+			const rowCells = t.rows[matchedRow] ?? [];
+			const foundInRow = rowCells.findIndex((c) => offset >= c.start && offset <= c.end);
+			if (foundInRow >= 0 && foundInRow < t.header.length) {
+				matchedCol = foundInRow;
+			} else if (hasHeader() && t.header.length) {
+				const foundInHeader = t.header.findIndex((c) => offset >= c.start && offset <= c.end);
+				if (foundInHeader >= 0) matchedCol = foundInHeader;
+			}
+		}
+		if (hiddenCols().has(matchedCol)) showCol(matchedCol);
+		expandGroupForRow(matchedRow);
+		setPinnedRow(matchedRow);
+		const entryIdx = visEntryIdxForRow(matchedRow);
+		ensureVisRowInWindow(entryIdx, "center");
+		setCellAnchor(null);
+		setActiveCell({ ghost: false, row: matchedRow, column: matchedCol });
+		setRevealedRow(matchedRow);
+		if (revealTimer !== undefined) clearTimeout(revealTimer);
+		revealTimer = setTimeout(() => setRevealedRow((cur) => (cur === matchedRow ? null : cur)), 1800);
+		queueMicrotask(() => {
+			const tryFocus = () => {
+				const td = body?.querySelector<HTMLElement>(`tr[data-row="${matchedRow}"] > td[data-col="${matchedCol}"]`);
+				if (!td) return false;
+				td.scrollIntoView({ block: "center", inline: "nearest" });
+				nudgeCellOutFromHeader(td);
+				td.focus();
+				return true;
+			};
+			if (!tryFocus() && virtualWindow().virtual && scrollEl && entryIdx >= 0) {
+				const targetTop = Math.max(0, entryIdx * EST_ROW_H - Math.floor((viewportH() || 600) / 2));
+				scrollEl.scrollTop = targetTop;
+				setScrollTop(targetTop);
+				requestAnimationFrame(() => void tryFocus());
+			}
+		});
+	};
+
+	const jumpToColumn = (colIdx: number) => {
+		if (colIdx < 0 || colIdx >= table().header.length) return;
+		if (hiddenCols().has(colIdx)) showCol(colIdx);
+		setCellAnchor(null);
+		const curRow = current();
+		const list = displayRows();
+		const targetRow = curRow !== null && list.some((r) => r.index === curRow) ? curRow : (list[0]?.index ?? null);
+		if (targetRow !== null) setActiveCell({ ghost: false, row: targetRow, column: colIdx });
+		else setActiveCell({ ghost: true, column: colIdx });
+		queueMicrotask(() => {
+			const th = headRow?.querySelector<HTMLElement>(`th[data-col="${colIdx}"]`);
+			if (th && scrollEl && !isFrozenCol(colIdx)) {
+				const sRect = scrollEl.getBoundingClientRect();
+				const thRect = th.getBoundingClientRect();
+				const frozenWidth = (() => {
+					const lastFrozenIdx = frozenCols().length - 1;
+					if (lastFrozenIdx < 0) return headRow?.querySelector<HTMLElement>("th.table-sel-col")?.getBoundingClientRect().width ?? 56;
+					const lastTh = headRow?.querySelectorAll<HTMLElement>("th[data-col]")[lastFrozenIdx];
+					return lastTh ? lastTh.getBoundingClientRect().right - sRect.left : 56;
+				})();
+				if (thRect.left < sRect.left + frozenWidth) {
+					scrollEl.scrollLeft = Math.max(0, scrollEl.scrollLeft - (sRect.left + frozenWidth - thRect.left) - 12);
+				} else if (thRect.right > sRect.right) {
+					scrollEl.scrollLeft += thRect.right - sRect.right + 12;
+				}
+			}
+			if (targetRow !== null) {
+				const td = body?.querySelector<HTMLElement>(`tr[data-row="${targetRow}"] > td[data-col="${colIdx}"]`);
+				if (td) {
+					td.focus();
+					nudgeCellOutFromHeader(td);
+				}
+			} else {
+				th?.querySelector<HTMLElement>(".table-th-sort")?.focus();
+			}
+		});
+	};
+
+	const resolvedGroup = () => {
+		if (props.group !== undefined) return props.group;
+		const idx = state.groups.findIndex((g) => g.active === props.path);
+		return idx >= 0 ? idx : state.activeGroup;
+	};
+
+	// Register Find/Replace and Outline column-jump bridges for MenuBar & Document Outline.
+	createEffect(() => {
+		const grp = resolvedGroup();
+		const opener = (rep?: boolean) => openFind(Boolean(rep));
+		const jumper = (colIdx: number) => jumpToColumn(colIdx);
+		registerTableFind(grp, opener);
+		registerTableColumnJump(grp, jumper);
+		onCleanup(() => {
+			registerTableFind(grp, undefined);
+			registerTableColumnJump(grp, undefined);
+		});
+	});
+
+	// Honor pending reveals on mount and live `revealSignal` updates from Search / Outline / Nav history.
+	onMount(() => {
+		const pending = takeReveal(props.path);
+		if (pending) revealAt(pending);
+		const stopReveal = revealSignal.listen((path) => {
+			if (canonical(path) !== canonical(props.path)) return;
+			const r = takeReveal(path) ?? takeReveal(props.path);
+			if (r) revealAt(r);
+		});
+		onCleanup(stopReveal);
+	});
+
+	// --- Inline status tally strip (`tally(table(), "status")`) --------------
+
+	const exactStatusCol = createMemo(() => columnOf(table(), "status"));
+	const statusTally = createMemo(() => tally(table(), "status"));
+	const activeSingleStatusFilter = createMemo<string | null>(() => {
+		const stCol = exactStatusCol();
+		if (stCol < 0) return null;
+		const f = colFilters().get(stCol);
+		if (!f || f.text.trim() || !f.values || f.values.size !== 1) return null;
+		return [...f.values][0] ?? null;
+	});
+	const toggleStatusTallyFilter = (statusKey: string) => {
+		const stCol = exactStatusCol();
+		if (stCol < 0) return;
+		if (activeSingleStatusFilter() === statusKey) {
+			setColumnFilter(stCol, undefined);
+		} else {
+			setColumnFilter(stCol, { text: "", values: new Set([statusKey]) });
+		}
+	};
+
+	// --- Compact footer summary strip stats (range-aware) --------------------
 
 	const footerStats = createMemo(() => {
 		const list = rows();
 		const total = table().rows.length;
 		const selected = visibleSelectedRows().length;
 		const cols = visibleColumns();
+		const range = cellRange();
+		if (range && range.isMulti) {
+			const dRows = displayRows();
+			let cellCount = 0;
+			let nonEmpty = 0;
+			const distinct = new Set<string>();
+			let numericCount = 0;
+			let sumVal = 0;
+			for (let vr = range.r1; vr <= range.r2; vr++) {
+				const item = dRows[vr];
+				if (!item) continue;
+				for (let vc = range.c1; vc <= range.c2; vc++) {
+					const c = cols[vc];
+					if (c === undefined) continue;
+					cellCount++;
+					const trimmed = (item.cells[c]?.text ?? "").trim();
+					if (!trimmed) continue;
+					nonEmpty++;
+					distinct.add(trimmed);
+					const num = parseNumericValue(trimmed);
+					if (num !== null) {
+						numericCount++;
+						sumVal += num;
+					}
+				}
+			}
+			const fmtNum = (n: number) => (Math.round(n * 1e6) / 1e6).toLocaleString(undefined, { maximumFractionDigits: 6 });
+			return {
+				shown: list.length,
+				total,
+				selected,
+				isRange: true,
+				colName: `${range.rowCount} × ${range.colCount} cells`,
+				cellCount,
+				nonEmpty,
+				distinct: distinct.size,
+				sum: numericCount >= 1 ? fmtNum(sumVal) : null,
+				avg: numericCount >= 1 ? fmtNum(sumVal / numericCount) : null,
+			};
+		}
 		const ac = activeCell();
 		const col = ac && cols.includes(ac.column) ? ac.column : (cols[0] ?? -1);
 		if (col < 0) {
-			return { shown: list.length, total, selected, colName: "", nonEmpty: 0, distinct: 0, sum: null as string | null };
+			return {
+				shown: list.length,
+				total,
+				selected,
+				isRange: false,
+				colName: "",
+				cellCount: 0,
+				nonEmpty: 0,
+				distinct: 0,
+				sum: null as string | null,
+				avg: null as string | null,
+			};
 		}
 		let nonEmpty = 0;
 		const distinct = new Set<string>();
@@ -2173,10 +3268,13 @@ export function TableView(props: { path: string }) {
 			shown: list.length,
 			total,
 			selected,
+			isRange: false,
 			colName: headerName(col) || `Column ${col + 1}`,
+			cellCount: list.length,
 			nonEmpty,
 			distinct: distinct.size,
 			sum,
+			avg: null as string | null,
 		};
 	});
 
@@ -2419,6 +3517,16 @@ export function TableView(props: { path: string }) {
 			const mapped = remapColumnIndex(ac.column, applied);
 			if (mapped >= 0) setActiveCell(ac.ghost ? { ghost: true, column: mapped } : { ghost: false, row: ac.row, column: mapped });
 		}
+		const anc = cellAnchor();
+		if (anc) {
+			const mapped = remapColumnIndex(anc.column, applied);
+			setCellAnchor(mapped >= 0 ? { row: anc.row, column: mapped } : null);
+		}
+		const curGrp = groupByCol();
+		if (curGrp !== null) {
+			const mapped = remapColumnIndex(curGrp, applied);
+			setGroupByCol(mapped >= 0 ? mapped : null);
+		}
 
 		const curCheck = codeCheck();
 		if (curCheck) {
@@ -2534,7 +3642,7 @@ export function TableView(props: { path: string }) {
 		return Math.max(1, Math.floor((vh - headH) / EST_ROW_H) - 1);
 	};
 
-	/** Arrow / Page / Home / End keys index `rows()` directly across virtualized windows; ContextMenu / Shift+F10 opens cell actions (ADR 0010). */
+	/** Arrow / Shift+Arrow / Page / Home / End / Alt+Arrow keys index `displayRows()` across virtualized windows; ContextMenu / Shift+F10 opens cell actions (ADR 0010). */
 	const onCellKey = (e: KeyboardEvent, row: number, column: number) => {
 		if (editing()) return;
 		const targetEl = e.target as HTMLElement | null;
@@ -2552,6 +3660,11 @@ export function TableView(props: { path: string }) {
 			focusCell(row, column);
 			return;
 		}
+		if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+			e.preventDefault();
+			moveRowTo(row, row + (e.key === "ArrowUp" ? -1 : 1), column);
+			return;
+		}
 		if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key === "Enter") {
 			if (openCellLink(column, table().rows[row]?.[column]?.text ?? "")) {
 				e.preventDefault();
@@ -2564,70 +3677,99 @@ export function TableView(props: { path: string }) {
 			toggleRowSelect(row, false);
 			return;
 		}
-		if (e.key === "Enter" || e.key === "F2") return e.preventDefault(), setEditing({ ghost: false, row, column });
+		if (e.key === "Enter" || e.key === "F2") {
+			e.preventDefault();
+			setCellAnchor(null);
+			setEditing({ ghost: false, row, column });
+			return;
+		}
 		if ((e.key === "Delete" || e.key === "Backspace") && !e.ctrlKey && !e.metaKey && !e.altKey) {
 			e.preventDefault();
-			changeCell(row, column, "");
+			const range = cellRange();
+			if (range && range.isMulti) clearCellRange(range);
+			else changeCell(row, column, "");
 			return;
 		}
 		const cols = visibleColumns();
 		const visCol = cols.indexOf(column);
-		const list = rows();
+		const list = displayRows();
 		const visRow = list.findIndex((r) => r.index === row);
+		const extendRange = () => {
+			if (!cellAnchor()) setCellAnchor({ row, column });
+		};
 
 		if (e.key === "ArrowRight" && !e.ctrlKey && !e.metaKey && !e.altKey) {
 			e.preventDefault();
-			if (visCol >= 0 && visCol + 1 < cols.length) focusCell(row, cols[visCol + 1]!);
+			if (visCol >= 0 && visCol + 1 < cols.length) {
+				if (e.shiftKey) extendRange();
+				focusCell(row, cols[visCol + 1]!, { keepAnchor: e.shiftKey });
+			}
 			return;
 		}
 		if (e.key === "ArrowLeft" && !e.ctrlKey && !e.metaKey && !e.altKey) {
 			e.preventDefault();
-			if (visCol > 0) focusCell(row, cols[visCol - 1]!);
+			if (visCol > 0) {
+				if (e.shiftKey) extendRange();
+				focusCell(row, cols[visCol - 1]!, { keepAnchor: e.shiftKey });
+			}
 			return;
 		}
 		if (e.key === "ArrowDown" && !e.ctrlKey && !e.metaKey && !e.altKey) {
 			e.preventDefault();
 			if (visRow >= 0 && visRow + 1 < list.length) {
-				navigateToVisRow(visRow + 1, column);
-			} else {
+				if (e.shiftKey) extendRange();
+				navigateToVisRow(visRow + 1, column, { keepAnchor: e.shiftKey });
+			} else if (!e.shiftKey) {
 				focusGhostCell(column);
 			}
 			return;
 		}
 		if (e.key === "ArrowUp" && !e.ctrlKey && !e.metaKey && !e.altKey) {
 			e.preventDefault();
-			if (visRow > 0) navigateToVisRow(visRow - 1, column);
+			if (visRow > 0) {
+				if (e.shiftKey) extendRange();
+				navigateToVisRow(visRow - 1, column, { keepAnchor: e.shiftKey });
+			}
 			return;
 		}
 		if (e.key === "PageDown" && !e.ctrlKey && !e.metaKey && !e.altKey) {
 			e.preventDefault();
 			if (visRow >= 0 && list.length > 0) {
-				if (visRow >= list.length - 1) focusGhostCell(column);
-				else navigateToVisRow(Math.min(list.length - 1, visRow + pageStepRows()), column);
+				if (visRow >= list.length - 1 && !e.shiftKey) focusGhostCell(column);
+				else {
+					if (e.shiftKey) extendRange();
+					navigateToVisRow(Math.min(list.length - 1, visRow + pageStepRows()), column, { keepAnchor: e.shiftKey });
+				}
 			}
 			return;
 		}
 		if (e.key === "PageUp" && !e.ctrlKey && !e.metaKey && !e.altKey) {
 			e.preventDefault();
-			if (visRow > 0) navigateToVisRow(Math.max(0, visRow - pageStepRows()), column);
+			if (visRow > 0) {
+				if (e.shiftKey) extendRange();
+				navigateToVisRow(Math.max(0, visRow - pageStepRows()), column, { keepAnchor: e.shiftKey });
+			}
 			return;
 		}
 		if (e.key === "Home" && !e.altKey) {
 			e.preventDefault();
 			const firstCol = cols[0] ?? column;
-			if ((e.ctrlKey || e.metaKey) && list.length > 0) navigateToVisRow(0, firstCol);
-			else focusCell(row, firstCol);
+			if (e.shiftKey) extendRange();
+			if ((e.ctrlKey || e.metaKey) && list.length > 0) navigateToVisRow(0, firstCol, { keepAnchor: e.shiftKey });
+			else focusCell(row, firstCol, { keepAnchor: e.shiftKey });
 			return;
 		}
 		if (e.key === "End" && !e.altKey) {
 			e.preventDefault();
 			const lastCol = cols[cols.length - 1] ?? column;
-			if ((e.ctrlKey || e.metaKey) && list.length > 0) navigateToVisRow(list.length - 1, lastCol);
-			else focusCell(row, lastCol);
+			if (e.shiftKey) extendRange();
+			if ((e.ctrlKey || e.metaKey) && list.length > 0) navigateToVisRow(list.length - 1, lastCol, { keepAnchor: e.shiftKey });
+			else focusCell(row, lastCol, { keepAnchor: e.shiftKey });
 			return;
 		}
 		if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
 			e.preventDefault();
+			setCellAnchor(null);
 			setEditing({ ghost: false, row, column, seed: e.key });
 		}
 	};
@@ -2644,7 +3786,7 @@ export function TableView(props: { path: string }) {
 		if (e.key === "Enter" || e.key === "F2") return e.preventDefault(), setEditing({ ghost: true, column });
 		const cols = visibleColumns();
 		const visCol = cols.indexOf(column);
-		const list = rows();
+		const list = displayRows();
 		if (e.key === "ArrowRight" && !e.ctrlKey && !e.metaKey && !e.altKey) {
 			e.preventDefault();
 			if (visCol >= 0 && visCol + 1 < cols.length) focusGhostCell(cols[visCol + 1]!);
@@ -2689,7 +3831,12 @@ export function TableView(props: { path: string }) {
 
 	const openCellContextMenu = async (at: { x: number; y: number }, row: number, column: number) => {
 		closeFilterMenu(false);
-		setActiveCell({ ghost: false, row, column });
+		const curRange = cellRange();
+		const inMultiRange = Boolean(curRange && curRange.isMulti && isCellInRange(row, column));
+		if (!inMultiRange) {
+			setCellAnchor(null);
+			setActiveCell({ ghost: false, row, column });
+		}
 		const cells = table().rows[row];
 		if (!cells) return;
 		const rawVal = (cells[column]?.text ?? "").trim();
@@ -2698,19 +3845,9 @@ export function TableView(props: { path: string }) {
 		const frozenHere = isFrozenCol(column);
 		const schemaDoc = schemaDocForCell(column, rawVal);
 		const fileLink = !schemaDoc ? fileLinkForCell(column, rawVal) : null;
+		const totalRows = table().rows.length;
 
-		const items: RowMenuEntry[] = [
-			...(schemaDoc ? [{ label: `Open schema doc “${shortLabel(schemaDoc.name)}”`, value: "open-schema", keys: "Ctrl+Enter" }] : []),
-			...(fileLink ? [{ label: `Open file “${shortLabel(rawVal)}”`, value: "open-file", keys: "Ctrl+Enter" }] : []),
-			...(schemaDoc || fileLink ? ["separator" as const] : []),
-			{ label: "Edit cell", value: "edit", keys: "Enter" },
-			...(rawVal ? [{ label: "Copy cell", value: "copy-cell", keys: "Ctrl+C" }] : []),
-			{ label: "Copy row", value: "copy-row" },
-			"separator",
-			{
-				label: rawVal ? `Filter by “${shortLabel(rawVal)}”` : `Filter by empty in “${shortLabel(col)}”`,
-				value: "filter-val",
-			},
+		const codeCheckEntries: RowMenuEntry[] = [
 			...(rawVal
 				? [
 						{ label: `Find “${shortLabel(rawVal)}” in code`, value: "find-code" },
@@ -2718,15 +3855,54 @@ export function TableView(props: { path: string }) {
 					]
 				: []),
 			{ label: `Check “${shortLabel(col)}” in code…`, value: "check-col" },
+		];
+
+		const items: RowMenuEntry[] = [
+			...(schemaDoc ? [{ label: `Open schema doc “${shortLabel(schemaDoc.name)}”`, value: "open-schema", keys: "Ctrl+Enter" }] : []),
+			...(fileLink ? [{ label: `Open file “${shortLabel(rawVal)}”`, value: "open-file", keys: "Ctrl+Enter" }] : []),
 			"separator",
-			{ label: "Insert row above", value: "insert-above" },
-			{ label: "Insert row below", value: "insert-below" },
-			{ label: "Duplicate row", value: "duplicate" },
-			{ label: "Delete row", value: "delete" },
+			{ label: "Edit cell", value: "edit", keys: "Enter" },
+			...(inMultiRange && curRange
+				? [
+						{ label: `Copy ${curRange.rowCount} × ${curRange.colCount} cells (TSV)`, value: "copy-range", keys: "Ctrl+C" },
+						{ label: "Fill down selection", value: "fill-down", keys: "Ctrl+D" },
+						{ label: "Clear selected cells", value: "clear-range", keys: "Delete" },
+					]
+				: [
+						...(rawVal ? [{ label: "Copy cell", value: "copy-cell", keys: "Ctrl+C" }] : []),
+						...(row > 0 ? [{ label: "Fill from cell above", value: "fill-down", keys: "Ctrl+D" }] : []),
+					]),
+			{ label: "Copy row", value: "copy-row" },
 			"separator",
-			{ label: frozenHere ? `Unfreeze “${shortLabel(col)}”` : `Freeze “${shortLabel(col)}” to left`, value: "freeze" },
-			...(visibleColumns().length > 1 ? [{ label: `Hide “${shortLabel(col)}”`, value: "hide" }] : []),
-			{ label: hasRule ? `Configure “${shortLabel(col)}” badges…` : `Format “${shortLabel(col)}” as badges…`, value: "badges" },
+			{
+				label: rawVal ? `Filter by “${shortLabel(rawVal)}”` : `Filter by empty in “${shortLabel(col)}”`,
+				value: "filter-val",
+			},
+			...submenuOrInline("Code check", codeCheckEntries),
+			"separator",
+			{
+				label: "Row",
+				children: [
+					{ label: "Insert row above", value: "insert-above" },
+					{ label: "Insert row below", value: "insert-below" },
+					{ label: "Duplicate row", value: "duplicate" },
+					"separator",
+					{ label: "Move row up", value: "move-row-up", keys: "Alt+Up", disabled: row <= 0 },
+					{ label: "Move row down", value: "move-row-down", keys: "Alt+Down", disabled: row >= totalRows - 1 },
+				],
+			},
+			{
+				label: `Column “${shortLabel(col)}”`,
+				children: [
+					{ label: frozenHere ? `Unfreeze “${shortLabel(col)}”` : `Freeze “${shortLabel(col)}” to left`, value: "freeze" },
+					...(visibleColumns().length > 1 ? [{ label: `Hide “${shortLabel(col)}”`, value: "hide" }] : []),
+					{ label: groupByCol() === column ? "Clear grouping" : `Group by “${shortLabel(col)}”`, value: "group-by", checked: groupByCol() === column },
+					"separator",
+					{ label: hasRule ? `Configure “${shortLabel(col)}” badges…` : `Format “${shortLabel(col)}” as badges…`, value: "badges" },
+				],
+			},
+			"separator",
+			{ label: "Delete row", value: "delete", danger: true },
 		];
 
 		const picked = await chooseFromMenu(`Actions for ${col}, row ${row + 1}`, items, at);
@@ -2736,7 +3912,14 @@ export function TableView(props: { path: string }) {
 		} else if (picked === "open-file" && fileLink) {
 			void openFile(fileLink.path);
 		} else if (picked === "edit") {
+			setCellAnchor(null);
 			setEditing({ ghost: false, row, column });
+		} else if (picked === "copy-range" && curRange) {
+			await copyCellRangeAsTsv(curRange);
+		} else if (picked === "fill-down") {
+			fillDownSelection();
+		} else if (picked === "clear-range" && curRange) {
+			clearCellRange(curRange);
 		} else if (picked === "copy-cell") {
 			await copyText(cells[column]?.text ?? "", "Copied cell value.");
 		} else if (picked === "copy-row") {
@@ -2768,12 +3951,18 @@ export function TableView(props: { path: string }) {
 			insertRowAt(row, "below");
 		} else if (picked === "duplicate") {
 			duplicateRowAt(row);
+		} else if (picked === "move-row-up") {
+			moveRowTo(row, row - 1, column);
+		} else if (picked === "move-row-down") {
+			moveRowTo(row, row + 1, column);
 		} else if (picked === "delete") {
 			deleteRowAt(row);
 		} else if (picked === "freeze") {
 			toggleFreeze(column);
 		} else if (picked === "hide") {
 			hideCol(column);
+		} else if (picked === "group-by") {
+			toggleGroupByColumn(column);
 		} else if (picked === "badges") {
 			setFormatDialog({ open: true, initialColumn: headerName(column) });
 		}
@@ -2795,37 +3984,50 @@ export function TableView(props: { path: string }) {
 		const sortedHere = order()?.column === column;
 		const filteredHere = isColFiltered(column);
 		const frozenHere = isFrozenCol(column);
+		const groupedHere = groupByCol() === column;
 
-		const items: RowMenuEntry[] = [
-			{ label: "Sort ascending", value: "sort-asc" },
-			{ label: "Sort descending", value: "sort-desc" },
-			...(sortedHere ? [{ label: "Apply sort order to file", value: "sort-apply" }, { label: "Clear sort", value: "sort-clear" }] : []),
-			"separator",
-			{ label: `Filter “${shortLabel(col)}”…`, value: "filter" },
-			...(filteredHere ? [{ label: `Clear filter on “${shortLabel(col)}”`, value: "filter-clear" }] : []),
-			"separator",
-			{ label: `Rename “${shortLabel(col)}”…`, value: "rename-col" },
-			{ label: "Add column…", value: "add-col" },
-			...(table().header.length > 1 ? [{ label: `Delete “${shortLabel(col)}”…`, value: "delete-col" }] : []),
-			"separator",
+		const colLayoutEntries: RowMenuEntry[] = [
 			{ label: frozenHere ? `Unfreeze “${shortLabel(col)}”` : `Freeze “${shortLabel(col)}” to left`, value: "freeze" },
 			...(frozenCols().length > 1 || (frozenCols().length === 1 && !frozenHere)
 				? [{ label: "Unfreeze all columns", value: "unfreeze-all" }]
 				: []),
+			"separator",
 			...(visibleColumns().length > 1 ? [{ label: `Hide “${shortLabel(col)}”`, value: "hide" }] : []),
 			...(hiddenCols().size > 0 ? [{ label: `Show all hidden columns (${hiddenCols().size})`, value: "show-all" }] : []),
+			"separator",
 			...(canMoveColumn(column, -1) ? [{ label: `Move “${shortLabel(col)}” left`, value: "move-left", keys: "Alt+Left" }] : []),
 			...(canMoveColumn(column, 1) ? [{ label: `Move “${shortLabel(col)}” right`, value: "move-right", keys: "Alt+Right" }] : []),
-			{ label: `Auto-fit “${shortLabel(col)}” width`, value: "autofit" },
-			...(hasCustomWidths() ? [{ label: "Reset column widths", value: "reset-widths" }] : []),
 			...(differsFromFile() ? [{ label: "Save column order to file", value: "save-order" }] : []),
 			...(hasCustomOrder() ? [{ label: "Reset column order", value: "reset-order" }] : []),
 			"separator",
-			{ label: `Check “${shortLabel(col)}” in code…`, value: "check-col" },
-			...(codeCheck() ? [{ label: "Clear code check results", value: "check-clear" }] : []),
+			{ label: `Auto-fit “${shortLabel(col)}” width`, value: "autofit" },
+			...(hasCustomWidths() ? [{ label: "Reset column widths", value: "reset-widths" }] : []),
+		];
+
+		const items: RowMenuEntry[] = [
+			{ label: "Sort ascending", value: "sort-asc", checked: sortedHere && !order()?.down },
+			{ label: "Sort descending", value: "sort-desc", checked: sortedHere && Boolean(order()?.down) },
+			...(sortedHere ? [{ label: "Apply sort order to file", value: "sort-apply" }, { label: "Clear sort", value: "sort-clear" }] : []),
 			"separator",
-			{ label: hasRule ? `Configure “${shortLabel(col)}” badges…` : `Format “${shortLabel(col)}” as badges…`, value: "badges" },
-			...(hasRule ? [{ label: `Turn off badges for “${shortLabel(col)}”`, value: "badges-off" }] : []),
+			{ label: `Filter “${shortLabel(col)}”…`, value: "filter" },
+			...(filteredHere ? [{ label: `Clear filter on “${shortLabel(col)}”`, value: "filter-clear" }] : []),
+			{ label: groupedHere ? "Clear grouping" : `Group by “${shortLabel(col)}”`, value: "group-by", checked: groupedHere },
+			"separator",
+			...(hasHeader() ? [{ label: `Rename “${shortLabel(col)}”…`, value: "rename-col" }] : []),
+			{ label: "Add column…", value: "add-col" },
+			{ label: "Column layout", children: colLayoutEntries },
+			"separator",
+			...submenuOrInline("Badges", [
+				{ label: hasRule ? `Configure “${shortLabel(col)}” badges…` : `Format “${shortLabel(col)}” as badges…`, value: "badges" },
+				...(hasRule ? [{ label: `Turn off badges for “${shortLabel(col)}”`, value: "badges-off" }] : []),
+			]),
+			...submenuOrInline("Code check", [
+				{ label: `Check “${shortLabel(col)}” in code…`, value: "check-col" },
+				...(codeCheck() ? [{ label: "Clear code check results", value: "check-clear" }] : []),
+			]),
+			...(table().header.length > 1
+				? (["separator", { label: `Delete “${shortLabel(col)}”…`, value: "delete-col", danger: true }] as RowMenuEntry[])
+				: []),
 		];
 
 		const picked = await chooseFromMenu(`Actions for column ${col}`, items, at);
@@ -2834,6 +4036,7 @@ export function TableView(props: { path: string }) {
 		else if (picked === "sort-desc") setOrder({ column, down: true });
 		else if (picked === "sort-apply") applySortToFile();
 		else if (picked === "sort-clear") setOrder(null);
+		else if (picked === "group-by") toggleGroupByColumn(column);
 		else if (picked === "rename-col") void renameColumnInteractive(column);
 		else if (picked === "add-col") void addColumnInteractive();
 		else if (picked === "delete-col") void deleteColumnInteractive(column);
@@ -2914,37 +4117,82 @@ export function TableView(props: { path: string }) {
 		const selIdx = current();
 		const hasSelectedRow = selIdx !== null && Boolean(table().rows[selIdx]);
 		const selName = currentName();
+		const totalRows = table().rows.length;
 
-		const items: RowMenuEntry[] = [
-			{ label: "Find & replace…", value: "find", keys: "Ctrl+F" },
-			"separator",
-			{ label: "Add column…", value: "add-col" },
-			...(isDatabaseRegistry() ? [{ label: "Sync from schema SQL…", value: "sync-schema" }] : []),
-			...(order() ? [{ label: "Apply sort order to file", value: "sort-apply" }] : []),
-			"separator",
-			{ label: "Copy visible rows as CSV", value: "copy-csv" },
-			{ label: "Copy visible rows as TSV (Excel)", value: "copy-tsv" },
-			{ label: "Copy visible rows as Markdown table", value: "copy-md" },
-			"separator",
-			{ label: "Check column in code…", value: "check" },
-			...(codeCheck() ? [{ label: "Clear code check results", value: "check-clear" }] : []),
+		const layoutResetEntries: RowMenuEntry[] = [
 			...(frozenCols().length ? [{ label: "Unfreeze all columns", value: "unfreeze-all" }] : []),
 			...(hiddenCols().size ? [{ label: `Show all hidden columns (${hiddenCols().size})`, value: "show-all-cols" }] : []),
 			...(hasCustomWidths() ? [{ label: "Reset column widths", value: "reset-widths" }] : []),
 			...(differsFromFile() ? [{ label: "Save column order to file", value: "save-order" }] : []),
 			...(hasCustomOrder() ? [{ label: "Reset column order", value: "reset-order" }] : []),
+		];
+
+		const groupEntries: RowMenuEntry[] = [
+			...table().header.map((h, i) => ({
+				label: shortLabel(h.text.trim() || `Column ${i + 1}`),
+				value: `group:${i}`,
+				checked: groupByCol() === i,
+			})),
+			...(groupByCol() !== null ? ["separator" as const, { label: "Clear grouping", value: "group-clear" }] : []),
+		];
+
+		const formatEntries: RowMenuEntry[] = [
+			{ label: "First row is header", value: "fmt-toggle-header", checked: hasHeader() },
 			"separator",
-			{ label: "Configure column badges…", value: "badges" },
+			{ label: `Delimiter: Auto (${delimiterLabel(autoDelimiter())})`, value: "fmt-delim-auto", checked: delimiterOverride() === "auto" },
+			{ label: "Delimiter: Comma (,)", value: "fmt-delim-comma", checked: delimiterOverride() === "," },
+			{ label: "Delimiter: Tab (TSV)", value: "fmt-delim-tab", checked: delimiterOverride() === "\t" },
+			{ label: "Delimiter: Semicolon (;)", value: "fmt-delim-semi", checked: delimiterOverride() === ";" },
+			{ label: "Delimiter: Pipe (|)", value: "fmt-delim-pipe", checked: delimiterOverride() === "|" },
+			"separator",
+			{ label: "Convert file delimiter to…", value: "fmt-convert-delim" },
+		];
+
+		const items: RowMenuEntry[] = [
+			{ label: "Find & replace…", value: "find", keys: "Ctrl+F" },
 			"separator",
 			{ label: "Start new row at end", value: "add-end" },
 			...(hasSelectedRow
 				? [
-						{ label: "Insert row above selected", value: "insert-above" },
-						{ label: "Insert row below selected", value: "insert-below" },
-						{ label: "Duplicate selected row", value: "duplicate" },
-						{ label: `Delete selected row${selName ? ` (“${shortLabel(selName)}”)` : ""}`, value: "delete-selected" },
+						{
+							label: `Selected row${selName ? ` (“${shortLabel(selName)}”)` : ""}`,
+							children: [
+								{ label: "Insert row above", value: "insert-above" },
+								{ label: "Insert row below", value: "insert-below" },
+								{ label: "Duplicate row", value: "duplicate" },
+								"separator",
+								{ label: "Move row up", value: "move-row-up", keys: "Alt+Up", disabled: selIdx! <= 0 },
+								{ label: "Move row down", value: "move-row-down", keys: "Alt+Down", disabled: selIdx! >= totalRows - 1 },
+								"separator",
+								{ label: "Delete row", value: "delete-selected", danger: true },
+							],
+						} satisfies RowMenuEntry,
 					]
 				: []),
+			{ label: "Add column…", value: "add-col" },
+			...(isDatabaseRegistry() ? [{ label: "Sync from schema SQL…", value: "sync-schema" }] : []),
+			...(order() ? [{ label: "Apply sort order to file", value: "sort-apply" }] : []),
+			"separator",
+			{
+				label: "Copy / Export visible rows",
+				children: [
+					{ label: "As CSV", value: "copy-csv" },
+					{ label: "As TSV (Excel)", value: "copy-tsv" },
+					{ label: "As Markdown table", value: "copy-md" },
+					"separator",
+					{ label: "Export visible rows as CSV file…", value: "export-csv" },
+					{ label: "Export visible rows as TSV file…", value: "export-tsv" },
+				],
+			},
+			...submenuOrInline("Group rows by", groupEntries),
+			{ label: "Table format", children: formatEntries },
+			"separator",
+			...submenuOrInline("Code check", [
+				{ label: "Check column in code…", value: "check" },
+				...(codeCheck() ? [{ label: "Clear code check results", value: "check-clear" }] : []),
+			]),
+			{ label: "Configure column badges…", value: "badges" },
+			...submenuOrInline("Column layout", layoutResetEntries),
 		];
 
 		const picked = await chooseFromMenu("Table actions", items, at);
@@ -2963,6 +4211,29 @@ export function TableView(props: { path: string }) {
 			void copyFilteredAs("tsv");
 		} else if (picked === "copy-md") {
 			void copyFilteredAs("markdown");
+		} else if (picked === "export-csv") {
+			void exportVisibleToFile("csv");
+		} else if (picked === "export-tsv") {
+			void exportVisibleToFile("tsv");
+		} else if (picked === "group-clear") {
+			setGroupByCol(null);
+			setCollapsedGroups(new Set<string>());
+		} else if (picked.startsWith("group:")) {
+			toggleGroupByColumn(Number(picked.slice(6)));
+		} else if (picked === "fmt-toggle-header") {
+			setHasHeader((v) => !v);
+		} else if (picked === "fmt-delim-auto") {
+			setDelimiterOverride("auto");
+		} else if (picked === "fmt-delim-comma") {
+			setDelimiterOverride(",");
+		} else if (picked === "fmt-delim-tab") {
+			setDelimiterOverride("\t");
+		} else if (picked === "fmt-delim-semi") {
+			setDelimiterOverride(";");
+		} else if (picked === "fmt-delim-pipe") {
+			setDelimiterOverride("|");
+		} else if (picked === "fmt-convert-delim") {
+			void convertDelimiterInteractive();
 		} else if (picked === "check") {
 			setCheckDialog({ open: true, column: defaultCheckColumn(table()), rowScope: hasActiveFilters() ? "filtered" : "all" });
 		} else if (picked === "check-clear") {
@@ -2987,6 +4258,10 @@ export function TableView(props: { path: string }) {
 			insertRowAt(selIdx, "below");
 		} else if (picked === "duplicate" && selIdx !== null) {
 			duplicateRowAt(selIdx);
+		} else if (picked === "move-row-up" && selIdx !== null) {
+			moveRowTo(selIdx, selIdx - 1);
+		} else if (picked === "move-row-down" && selIdx !== null) {
+			moveRowTo(selIdx, selIdx + 1);
 		} else if (picked === "delete-selected" && selIdx !== null) {
 			deleteRowAt(selIdx);
 		}
@@ -3025,9 +4300,21 @@ export function TableView(props: { path: string }) {
 				if (isTextInput) return;
 				if (key === "z" && !e.shiftKey) (e.preventDefault(), void model.undo());
 				else if (key === "y" || (key === "z" && e.shiftKey)) (e.preventDefault(), void model.redo());
-				else if (key === "c" && !e.shiftKey) {
+				else if (key === "d" && !e.shiftKey) {
+					if (editing() || modalOpen()) return;
+					if (!activeCell() || activeCell()?.ghost) return;
+					e.preventDefault();
+					e.stopPropagation();
+					fillDownSelection();
+				} else if (key === "c" && !e.shiftKey) {
 					const sel = window.getSelection();
 					if (sel && !sel.isCollapsed) return;
+					const range = cellRange();
+					if (range && range.isMulti) {
+						e.preventDefault();
+						void copyCellRangeAsTsv(range);
+						return;
+					}
 					if (visibleSelectedRows().length > 0) {
 						e.preventDefault();
 						void copySelectedAsTsv();
@@ -3143,6 +4430,47 @@ export function TableView(props: { path: string }) {
 							</button>
 						</span>
 					)}
+				</Show>
+
+				<Show when={groupByCol() !== null}>
+					<button
+						type="button"
+						class="doc-status tone-active table-col-chip"
+						aria-pressed="true"
+						title={`Grouped by “${headerName(groupByCol()!) || `Column ${groupByCol()! + 1}`}”. Click to clear grouping.`}
+						onClick={() => {
+							setGroupByCol(null);
+							setCollapsedGroups(new Set<string>());
+						}}
+					>
+						<Icon name="list-tree" />
+						<span>Group: {headerName(groupByCol()!) || `Column ${groupByCol()! + 1}`}</span>
+						<Icon name="close" />
+					</button>
+				</Show>
+
+				<Show when={!hasHeader()}>
+					<button
+						type="button"
+						class="doc-status tone-waiting table-fmt-chip"
+						title="Treating row 1 as data (no header row). Click to restore header row."
+						onClick={() => setHasHeader(true)}
+					>
+						<span>No header</span>
+						<Icon name="close" />
+					</button>
+				</Show>
+
+				<Show when={delimiterOverride() !== "auto"}>
+					<button
+						type="button"
+						class="doc-status tone-waiting table-fmt-chip"
+						title={`Delimiter override: ${delimiterLabel(delimiterOverride() as CsvDelimiter)}. Click to return to Auto.`}
+						onClick={() => setDelimiterOverride("auto")}
+					>
+						<span>Delim: {delimiterLabel(delimiterOverride() as CsvDelimiter)}</span>
+						<Icon name="close" />
+					</button>
 				</Show>
 
 				<Show when={hiddenCols().size > 0}>
@@ -3441,11 +4769,6 @@ export function TableView(props: { path: string }) {
 				</p>
 			</Show>
 
-			{/* Autocomplete suggestions for whichever configured badge column is currently being edited. */}
-			<datalist id={suggestionListId}>
-				<For each={activeSuggestions()}>{(val) => <option value={val} />}</For>
-			</datalist>
-
 			<div
 				class="table-scroll"
 				ref={(el) => {
@@ -3457,8 +4780,18 @@ export function TableView(props: { path: string }) {
 						onCleanup(() => ro.disconnect());
 					}
 				}}
-				classList={{ "is-dragging-col": Boolean(colDrag()), "is-resizing-col": resizingCol() !== null }}
-				onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
+				classList={{
+					"is-dragging-col": Boolean(colDrag()),
+					"is-dragging-row": Boolean(rowDrag()),
+					"is-resizing-col": resizingCol() !== null,
+					"is-drag-selecting": isDragSelecting(),
+				}}
+				onScroll={(e) => {
+					setScrollTop(e.currentTarget.scrollTop);
+					if (editing() && activeInputEl?.isConnected) {
+						setPickerAnchor(activeInputEl.getBoundingClientRect());
+					}
+				}}
 				onMouseDown={(e) => {
 					const target = e.target as HTMLElement | null;
 					if (!target?.closest("td, th, button, input")) clearCellSelection();
@@ -3469,13 +4802,15 @@ export function TableView(props: { path: string }) {
 						<tr ref={headRow}>
 							<Show when={table().header.length > 0}>
 								<th scope="col" class="table-sel-col">
-									<input
-										type="checkbox"
-										checked={allDrawnSelected()}
-										aria-label="Select all visible rows"
-										title="Select all visible rows"
-										onChange={toggleSelectAllDrawn}
-									/>
+									<div class="table-sel-inner">
+										<input
+											type="checkbox"
+											checked={allDrawnSelected()}
+											aria-label="Select all visible rows"
+											title="Select all visible rows"
+											onChange={toggleSelectAllDrawn}
+										/>
+									</div>
 								</th>
 							</Show>
 							<Index each={visibleColumns()}>
@@ -3598,210 +4933,425 @@ export function TableView(props: { path: string }) {
 								<td colSpan={visibleColumns().length + 1} style={{ height: `${virtualWindow().topPad}px`, padding: "0", border: "0" }} />
 							</tr>
 						</Show>
-						<Index each={drawn()}>
-							{(rowItem) => {
-								const index = () => rowItem().index;
-								const cells = () => rowItem().cells;
+						<Index each={drawnEntries()}>
+							{(entryItem) => {
+								const isGroup = () => entryItem().kind === "group";
+								const groupEntry = () => {
+									const e = entryItem();
+									return e.kind === "group" ? e : null;
+								};
+								const index = () => {
+									const e = entryItem();
+									return e.kind === "row" ? e.index : -1;
+								};
+								const cells = () => {
+									const e = entryItem();
+									return e.kind === "row" ? e.cells : [];
+								};
 								return (
-									<tr data-row={index()} classList={{ "row-current": current() === index(), "row-selected": selectedRows().has(index()) }}>
-										<td class="table-sel-col" onClick={(e) => e.stopPropagation()}>
-											<input
-												type="checkbox"
-												tabindex={isRovingRow(index()) ? 0 : -1}
-												checked={selectedRows().has(index())}
-												aria-label={`Select row ${index() + 1}`}
-												onClick={(e) => {
-													e.stopPropagation();
-													toggleRowSelect(index(), e.shiftKey);
-												}}
-												onChange={() => {}}
-											/>
-										</td>
-										<Index each={visibleColumns()}>
-											{(colAcc, visIdx) => {
-												const col = () => colAcc();
-												const value = () => cells()[col()]?.text ?? "";
-												const open = () => {
-													const ed = editing();
-													return Boolean(ed && !ed.ghost && ed.row === index() && ed.column === col());
-												};
-												const rule = () => columnRule(col());
-												const badgeTone = () => badgeToneForValue(rule(), value());
-												const checkedHere = () => {
-													const chk = codeCheck();
-													return chk && chk.column === col() ? chk : null;
-												};
-												const isFrozen = () => visIdx < frozenCols().length;
-												const isLastFrozen = () => isFrozen() && visIdx === frozenCols().length - 1;
-												const cellTabIndex = () => (isRovingBodyCell(index(), col()) ? 0 : -1);
-												const isDupeKeyCell = () => col() === 0 && duplicateRowSet().has(index());
-												const isFindMatch = () => findOpen() && findMatchSet().has(`${index()}:${col()}`);
-												const isCurrentMatch = () => {
-													const m = activeFindMatch();
-													return Boolean(findOpen() && m && m.row === index() && m.column === col());
-												};
-												const schemaDoc = () => schemaDocForCell(col(), value());
-												const fileLink = () => (!schemaDoc() ? fileLinkForCell(col(), value()) : null);
-												const malformedPath = () => (!schemaDoc() && !fileLink() ? isMalformedFilePath(col(), value()) : false);
-												return (
-													<td
-														tabindex={cellTabIndex()}
-														data-col={col()}
-														style={cellStyle(col(), visIdx)}
-														classList={{
-															number: /^-?\d[\d.,]*$/.test(value().trim()),
-															"col-frozen": isFrozen(),
-															"col-frozen-last": isLastFrozen(),
-															"cell-selected": isCellSelected(index(), col()),
-															"cell-editing": open(),
-															"cell-dupe": isDupeKeyCell(),
-															"cell-find-match": isFindMatch(),
-															"cell-find-current": isCurrentMatch(),
-														}}
-														title="Double-click, Enter or F2 to edit; right-click or Shift+F10 for actions"
-														onMouseDown={() => setActiveCell({ ghost: false, row: index(), column: col() })}
-														onFocus={() => setActiveCell({ ghost: false, row: index(), column: col() })}
-														onClick={(e) => {
-															if ((e.ctrlKey || e.metaKey) && !open() && openCellLink(col(), value())) {
-																e.preventDefault();
-																e.stopPropagation();
-															}
-														}}
-														onDblClick={() => setEditing({ ghost: false, row: index(), column: col() })}
-														onKeyDown={(e) => onCellKey(e, index(), col())}
-														onContextMenu={(e) => void onCellContextMenu(e, index(), col())}
-													>
-														<Show
-															when={open()}
-															fallback={
-																<Show
-																	when={checkedHere()?.splitLists && value().trim()}
-																	fallback={
-																		<>
-																			<Show
-																				when={col() === ticketAt() && value().trim()}
-																				fallback={
-																					<Show
-																						when={schemaDoc()}
-																						fallback={
-																							<Show
-																								when={fileLink()}
-																								fallback={
-																									<Show
-																										when={malformedPath()}
-																										fallback={
-																											<Show when={badgeTone()} fallback={value()}>
-																												{(tone) => <span class={`doc-status tone-${tone()}`}>{value()}</span>}
-																											</Show>
-																										}
-																									>
-																										<span class="table-val-warn" title="Path looks malformed or points outside the workspace">
-																											{value()}
-																										</span>
-																									</Show>
-																								}
-																							>
-																								{(fl) => (
-																									<button
-																										type="button"
-																										tabindex={cellTabIndex()}
-																										class="link table-cell-link"
-																										classList={{ "table-val-warn": fl().missing }}
-																										title={
-																											fl().missing
-																												? `${value().trim()} — file not found in workspace`
-																												: `Open ${value().trim()} (Click or Ctrl+Click)`
-																										}
-																										onClick={(e) => (e.stopPropagation(), void openFile(fl().path))}
-																										onDblClick={(e) => e.stopPropagation()}
-																									>
-																										{value()}
-																									</button>
-																								)}
-																							</Show>
-																						}
-																					>
-																						{(doc) => (
-																							<button
-																								type="button"
-																								tabindex={cellTabIndex()}
-																								class="link table-cell-link"
-																								title={`Open schema doc: ${relativeTo(state.workspace?.root, doc().path)} (Click or Ctrl+Click)`}
-																								onClick={(e) => (e.stopPropagation(), void openFile(doc().path))}
-																								onDblClick={(e) => e.stopPropagation()}
-																							>
-																								{value()}
-																							</button>
-																						)}
-																					</Show>
-																				}
-																			>
-																				{ticketCell(value(), cellTabIndex)}
-																			</Show>
-																			<Show when={checkedHere()}>
-																				{(chk) => {
-																					const trimmed = value().trim();
-																					if (!trimmed) return null;
-																					const count = chk().counts.get(termLookupKey(trimmed, chk().caseSensitive));
-																					return renderCheckBadge(trimmed, count, chk().options, cellTabIndex());
-																				}}
-																			</Show>
-																		</>
-																	}
-																>
-																	{/* Split comma/semicolon list cell with per-term code check counts */}
-																	<For each={value().split(/([,;\r\n]+\s*)/)}>
-																		{(part) => {
-																			const trimmed = part.trim();
-																			const chk = checkedHere();
-																			if (!trimmed || /^[,;\r\n]+$/.test(trimmed) || !chk) return part;
-																			const count = chk.counts.get(termLookupKey(trimmed, chk.caseSensitive));
-																			return (
-																				<>
-																					{part}
-																					{renderCheckBadge(trimmed, count, chk.options, cellTabIndex())}
-																				</>
-																			);
-																		}}
-																	</For>
-																</Show>
-															}
+									<Show
+										when={!isGroup()}
+										fallback={(() => {
+											const ge = () => groupEntry()!;
+											const allInGroupSelected = () => {
+												const sel = selectedRows();
+												const ids = ge().rowIndices;
+												return ids.length > 0 && ids.every((r) => sel.has(r));
+											};
+											const someInGroupSelected = () => {
+												const sel = selectedRows();
+												const ids = ge().rowIndices;
+												const hit = ids.filter((r) => sel.has(r)).length;
+												return hit > 0 && hit < ids.length;
+											};
+											const groupTone = () => {
+												const gCol = groupByCol();
+												if (gCol === null) return null;
+												return badgeToneForValue(columnRule(gCol), ge().label);
+											};
+											return (
+												<tr class="table-group-row">
+													<td class="table-sel-col" onClick={(e) => e.stopPropagation()}>
+														<div class="table-sel-inner">
+															<input
+																type="checkbox"
+																checked={allInGroupSelected()}
+																ref={(el) => {
+																	createEffect(() => {
+																		el.indeterminate = someInGroupSelected();
+																	});
+																}}
+																aria-label={`Select all ${ge().count} rows in group ${ge().label || "(empty)"}`}
+																title={`Select/deselect all ${ge().count} rows in “${ge().label || "(empty)"}”`}
+																onClick={(e) => {
+																	e.stopPropagation();
+																	toggleGroupSelect(ge().rowIndices);
+																}}
+																onChange={() => {}}
+															/>
+														</div>
+													</td>
+													<td colSpan={visibleColumns().length}>
+														<button
+															type="button"
+															class="table-group-toggle"
+															aria-expanded={!ge().collapsed}
+															onClick={() => toggleGroupCollapsed(ge().key)}
 														>
-															{(() => {
-																let done = false;
-																const rowIdx = index();
-																const targetCol = col();
-																const ed = editing();
-																const seed = ed && !ed.ghost && ed.seed !== undefined ? ed.seed : undefined;
-																const initVal = seed !== undefined ? seed : value();
-																const finish = (val: string, move: "none" | "stay" | "next" | "prev") => {
-																	if (done) return;
-																	done = true;
-																	commitCell(rowIdx, targetCol, val, move);
-																};
-																const multiline = Boolean(ed && !ed.ghost && ed.forceMultiline) || (seed === undefined && /[\r\n]/.test(value()));
-																if (multiline) {
+															<Icon name={ge().collapsed ? "chevron-right" : "chevron-down"} />
+															<Show
+																when={ge().label}
+																fallback={<span class="table-filter-blank">(empty)</span>}
+															>
+																<Show when={groupTone()} fallback={<span>{ge().label}</span>}>
+																	{(tone) => <span class={`doc-status tone-${tone()}`}>{ge().label}</span>}
+																</Show>
+															</Show>
+															<span class="table-group-count">
+																{ge().count} {ge().count === 1 ? "row" : "rows"}
+															</span>
+														</button>
+													</td>
+												</tr>
+											);
+										})()}
+									>
+										<tr
+											data-row={index()}
+											classList={{
+												"row-current": current() === index(),
+												"row-selected": selectedRows().has(index()),
+												"row-revealed": revealedRow() === index(),
+												"row-dragging": rowDrag()?.fromRow === index(),
+												"row-drop-before": Boolean(rowDrag() && rowDrag()!.dropRow === index() && rowDrag()!.side === "before"),
+												"row-drop-after": Boolean(rowDrag() && rowDrag()!.dropRow === index() && rowDrag()!.side === "after"),
+											}}
+										>
+											<td
+												class="table-sel-col"
+												onClick={(e) => e.stopPropagation()}
+												onPointerDown={(e) => onRowGripPointerDown(e, index())}
+											>
+												<div class="table-sel-inner">
+													<span
+														class="table-row-num"
+														classList={{ draggable: canReorderRows() && table().rows.length > 1 }}
+														title={
+															canReorderRows() && table().rows.length > 1
+																? `Row ${index() + 1} — drag to reorder (or Alt+Up / Alt+Down)`
+																: `Row ${index() + 1}`
+														}
+													>
+														{index() + 1}
+													</span>
+													<input
+														type="checkbox"
+														tabindex={isRovingRow(index()) ? 0 : -1}
+														checked={selectedRows().has(index())}
+														aria-label={`Select row ${index() + 1}`}
+														onClick={(e) => {
+															e.stopPropagation();
+															toggleRowSelect(index(), e.shiftKey);
+														}}
+														onChange={() => {}}
+													/>
+												</div>
+											</td>
+											<Index each={visibleColumns()}>
+												{(colAcc, visIdx) => {
+													const col = () => colAcc();
+													const value = () => cells()[col()]?.text ?? "";
+													const open = () => {
+														const ed = editing();
+														return Boolean(ed && !ed.ghost && ed.row === index() && ed.column === col());
+													};
+													const rule = () => columnRule(col());
+													const badgeTone = () => badgeToneForValue(rule(), value());
+													const unrecognizedBadge = () => isUnrecognizedBadgeValue(rule(), value());
+													const emptyPrimaryKey = () =>
+														col() === 0 &&
+														isCol0KeyLike() &&
+														!value().trim() &&
+														cells().some((c, ci) => ci !== 0 && Boolean(c.text.trim()));
+													const checkedHere = () => {
+														const chk = codeCheck();
+														return chk && chk.column === col() ? chk : null;
+													};
+													const isFrozen = () => visIdx < frozenCols().length;
+													const isLastFrozen = () => isFrozen() && visIdx === frozenCols().length - 1;
+													const cellTabIndex = () => (isRovingBodyCell(index(), col()) ? 0 : -1);
+													const isDupeKeyCell = () => col() === 0 && duplicateRowSet().has(index());
+													const isFindMatch = () => findOpen() && findMatchSet().has(`${index()}:${col()}`);
+													const isCurrentMatch = () => {
+														const m = activeFindMatch();
+														return Boolean(findOpen() && m && m.row === index() && m.column === col());
+													};
+													const schemaDoc = () => schemaDocForCell(col(), value());
+													const fileLink = () => (!schemaDoc() ? fileLinkForCell(col(), value()) : null);
+													const malformedPath = () => (!schemaDoc() && !fileLink() ? isMalformedFilePath(col(), value()) : false);
+													const cellTitle = () => {
+														if (emptyPrimaryKey()) return `Missing primary key in “${headerName(0) || "Column 1"}”`;
+														if (unrecognizedBadge()) return `Unrecognized value “${value().trim()}” for ${headerName(col()) || `Column ${col() + 1}`}`;
+														return "Double-click, Enter or F2 to edit; right-click or Shift+F10 for actions";
+													};
+													return (
+														<td
+															tabindex={cellTabIndex()}
+															data-col={col()}
+															style={cellStyle(col(), visIdx)}
+															classList={{
+																number: /^-?\d[\d.,]*$/.test(value().trim()),
+																"col-frozen": isFrozen(),
+																"col-frozen-last": isLastFrozen(),
+																"cell-selected": isCellSelected(index(), col()),
+																"cell-in-range": isCellInRange(index(), col()),
+																"cell-editing": open(),
+																"cell-dupe": isDupeKeyCell(),
+																"cell-empty-key": emptyPrimaryKey(),
+																"cell-find-match": isFindMatch(),
+																"cell-find-current": isCurrentMatch(),
+															}}
+															title={cellTitle()}
+															onMouseDown={(e) => onCellMouseDown(e, index(), col())}
+															onFocus={() => setActiveCell({ ghost: false, row: index(), column: col() })}
+															onClick={(e) => {
+																if ((e.ctrlKey || e.metaKey) && !open() && openCellLink(col(), value())) {
+																	e.preventDefault();
+																	e.stopPropagation();
+																}
+															}}
+															onDblClick={() => {
+																setCellAnchor(null);
+																setEditing({ ghost: false, row: index(), column: col() });
+															}}
+															onKeyDown={(e) => onCellKey(e, index(), col())}
+															onContextMenu={(e) => void onCellContextMenu(e, index(), col())}
+														>
+															<Show
+																when={open()}
+																fallback={
+																	<Show
+																		when={checkedHere()?.splitLists && value().trim()}
+																		fallback={
+																			<>
+																				<Show
+																					when={col() === ticketAt() && value().trim()}
+																					fallback={
+																						<Show
+																							when={schemaDoc()}
+																							fallback={
+																								<Show
+																									when={fileLink()}
+																									fallback={
+																										<Show
+																											when={malformedPath()}
+																											fallback={
+																												<Show
+																													when={emptyPrimaryKey()}
+																													fallback={
+																														<Show
+																															when={unrecognizedBadge()}
+																															fallback={
+																																<Show when={badgeTone()} fallback={value()}>
+																																	{(tone) => <span class={`doc-status tone-${tone()}`}>{value()}</span>}
+																																</Show>
+																															}
+																														>
+																															<span
+																																class="table-badge-warn"
+																																title={`Unrecognized value “${value().trim()}” for ${headerName(col()) || `Column ${col() + 1}`}`}
+																															>
+																																<Show when={badgeTone()} fallback={<span class="table-val-warn">{value()}</span>}>
+																																	{(tone) => <span class={`doc-status tone-${tone()}`}>{value()}</span>}
+																																</Show>
+																																<span class="table-badge-warn-icon" aria-hidden="true">
+																																	<Icon name="warning" />
+																																</span>
+																															</span>
+																														</Show>
+																													}
+																												>
+																													<span class="table-empty-key-warn" title={`Missing primary key in “${headerName(0) || "Column 1"}”`}>
+																														<Icon name="warning" />
+																													</span>
+																												</Show>
+																											}
+																										>
+																											<span class="table-val-warn" title="Path looks malformed or points outside the workspace">
+																												{value()}
+																											</span>
+																										</Show>
+																									}
+																								>
+																									{(fl) => (
+																										<button
+																											type="button"
+																											tabindex={cellTabIndex()}
+																											class="link table-cell-link"
+																											classList={{ "table-val-warn": fl().missing }}
+																											title={
+																												fl().missing
+																													? `${value().trim()} — file not found in workspace`
+																													: `Open ${value().trim()} (Click or Ctrl+Click)`
+																											}
+																											onClick={(e) => (e.stopPropagation(), void openFile(fl().path))}
+																											onDblClick={(e) => e.stopPropagation()}
+																										>
+																											{value()}
+																										</button>
+																									)}
+																								</Show>
+																							}
+																						>
+																							{(doc) => (
+																								<button
+																									type="button"
+																									tabindex={cellTabIndex()}
+																									class="link table-cell-link"
+																									title={`Open schema doc: ${relativeTo(state.workspace?.root, doc().path)} (Click or Ctrl+Click)`}
+																									onClick={(e) => (e.stopPropagation(), void openFile(doc().path))}
+																									onDblClick={(e) => e.stopPropagation()}
+																								>
+																									{value()}
+																								</button>
+																							)}
+																						</Show>
+																					}
+																				>
+																					{ticketCell(value(), cellTabIndex)}
+																				</Show>
+																				<Show when={checkedHere()}>
+																					{(chk) => {
+																						const trimmed = value().trim();
+																						if (!trimmed) return null;
+																						const count = chk().counts.get(termLookupKey(trimmed, chk().caseSensitive));
+																						return renderCheckBadge(trimmed, count, chk().options, cellTabIndex());
+																					}}
+																				</Show>
+																			</>
+																		}
+																	>
+																		{/* Split comma/semicolon list cell with per-term code check counts */}
+																		<For each={value().split(/([,;\r\n]+\s*)/)}>
+																			{(part) => {
+																				const trimmed = part.trim();
+																				const chk = checkedHere();
+																				if (!trimmed || /^[,;\r\n]+$/.test(trimmed) || !chk) return part;
+																				const count = chk.counts.get(termLookupKey(trimmed, chk.caseSensitive));
+																				return (
+																					<>
+																						{part}
+																						{renderCheckBadge(trimmed, count, chk.options, cellTabIndex())}
+																					</>
+																				);
+																			}}
+																		</For>
+																	</Show>
+																}
+															>
+																{(() => {
+																	let done = false;
+																	const rowIdx = index();
+																	const targetCol = col();
+																	const ed = editing();
+																	const seed = ed && !ed.ghost && ed.seed !== undefined ? ed.seed : undefined;
+																	const initVal = seed !== undefined ? seed : value();
+																	const finish = (val: string, move: CommitMove) => {
+																		if (done) return;
+																		done = true;
+																		commitCell(rowIdx, targetCol, val, move);
+																	};
+																	commitActiveEdit = finish;
+																	const multiline = Boolean(ed && !ed.ghost && ed.forceMultiline) || (seed === undefined && /[\r\n]/.test(value()));
+																	if (multiline) {
+																		return (
+																			<textarea
+																				class="table-cell-multiline"
+																				value={initVal}
+																				rows={Math.min(6, Math.max(2, initVal.split(/\r?\n/).length))}
+																				aria-label={`${headerName(targetCol) || "Cell"}, row ${rowIdx + 1} (Ctrl+Enter to save)`}
+																				ref={(el) =>
+																					queueMicrotask(() => {
+																						el.focus();
+																						if (seed !== undefined) el.setSelectionRange(seed.length, seed.length);
+																						else el.select();
+																					})
+																				}
+																				onKeyDown={(e) => {
+																					e.stopPropagation();
+																					if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+																						e.preventDefault();
+																						finish(e.currentTarget.value, "down");
+																					} else if (e.key === "Tab") {
+																						e.preventDefault();
+																						finish(e.currentTarget.value, e.shiftKey ? "prev" : "next");
+																					} else if (e.key === "Escape") {
+																						e.preventDefault();
+																						done = true;
+																						setEditing(null);
+																						focusCell(rowIdx, targetCol);
+																					}
+																				}}
+																				onBlur={(e) => finish(e.currentTarget.value, "none")}
+																			/>
+																		);
+																	}
 																	return (
-																		<textarea
-																			class="table-cell-multiline"
+																		<input
+																			role="combobox"
+																			aria-autocomplete="list"
+																			aria-expanded={pickerOpen() && pickerOptions().length > 0}
+																			aria-controls={pickerOpen() && pickerOptions().length > 0 ? pickerListboxId : undefined}
 																			value={initVal}
-																			rows={Math.min(6, Math.max(2, initVal.split(/\r?\n/).length))}
-																			aria-label={`${headerName(targetCol) || "Cell"}, row ${rowIdx + 1} (Ctrl+Enter to save)`}
-																			ref={(el) =>
+																			aria-label={`${headerName(targetCol) || "Cell"}, row ${rowIdx + 1} (Shift+Enter for new line)`}
+																			ref={(el) => {
+																				activeInputEl = el;
 																				queueMicrotask(() => {
 																					el.focus();
 																					if (seed !== undefined) el.setSelectionRange(seed.length, seed.length);
 																					else el.select();
-																				})
-																			}
+																					setPickerAnchor(el.getBoundingClientRect());
+																				});
+																			}}
+																			onInput={(e) => {
+																				setEditDraft(e.currentTarget.value);
+																				setEditDirty(true);
+																				setPickerOpen(true);
+																				setPickerIdx(-1);
+																				setPickerAnchor(e.currentTarget.getBoundingClientRect());
+																			}}
 																			onKeyDown={(e) => {
 																				e.stopPropagation();
-																				if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+																				const opts = pickerOptions();
+																				if (pickerOpen() && opts.length > 0) {
+																					if (e.key === "ArrowDown") {
+																						e.preventDefault();
+																						setPickerIdx((i) => (i + 1) % opts.length);
+																						return;
+																					}
+																					if (e.key === "ArrowUp") {
+																						e.preventDefault();
+																						setPickerIdx((i) => (i <= 0 ? opts.length - 1 : i - 1));
+																						return;
+																					}
+																				}
+																				if (e.key === "Enter" && (e.shiftKey || e.altKey)) {
 																					e.preventDefault();
-																					finish(e.currentTarget.value, "stay");
+																					const el = e.currentTarget;
+																					const at = el.selectionStart ?? el.value.length;
+																					const nextSeed = `${el.value.slice(0, at)}\n${el.value.slice(el.selectionEnd ?? at)}`;
+																					done = true;
+																					setEditing({ ghost: false, row: rowIdx, column: targetCol, seed: nextSeed, forceMultiline: true });
+																				} else if (e.key === "Enter") {
+																					e.preventDefault();
+																					const chosen = pickerOpen() && pickerIdx() >= 0 ? opts[pickerIdx()] : undefined;
+																					const val = chosen ? resolvePickerChoice(chosen.value, e.currentTarget.value) : e.currentTarget.value;
+																					finish(val, "down");
 																				} else if (e.key === "Tab") {
 																					e.preventDefault();
-																					finish(e.currentTarget.value, e.shiftKey ? "prev" : "next");
+																					const chosen = pickerOpen() && pickerIdx() >= 0 ? opts[pickerIdx()] : undefined;
+																					const val = chosen ? resolvePickerChoice(chosen.value, e.currentTarget.value) : e.currentTarget.value;
+																					finish(val, e.shiftKey ? "prev" : "next");
 																				} else if (e.key === "Escape") {
 																					e.preventDefault();
 																					done = true;
@@ -3812,51 +5362,14 @@ export function TableView(props: { path: string }) {
 																			onBlur={(e) => finish(e.currentTarget.value, "none")}
 																		/>
 																	);
-																}
-																return (
-																	<input
-																		list={activeSuggestions().length ? suggestionListId : undefined}
-																		value={initVal}
-																		aria-label={`${headerName(targetCol) || "Cell"}, row ${rowIdx + 1} (Shift+Enter for new line)`}
-																		ref={(el) =>
-																			queueMicrotask(() => {
-																				el.focus();
-																				if (seed !== undefined) el.setSelectionRange(seed.length, seed.length);
-																				else el.select();
-																			})
-																		}
-																		onKeyDown={(e) => {
-																			e.stopPropagation();
-																			if (e.key === "Enter" && (e.shiftKey || e.altKey)) {
-																				e.preventDefault();
-																				const el = e.currentTarget;
-																				const at = el.selectionStart ?? el.value.length;
-																				const nextSeed = `${el.value.slice(0, at)}\n${el.value.slice(el.selectionEnd ?? at)}`;
-																				done = true;
-																				setEditing({ ghost: false, row: rowIdx, column: targetCol, seed: nextSeed, forceMultiline: true });
-																			} else if (e.key === "Enter") {
-																				e.preventDefault();
-																				finish(e.currentTarget.value, "stay");
-																			} else if (e.key === "Tab") {
-																				e.preventDefault();
-																				finish(e.currentTarget.value, e.shiftKey ? "prev" : "next");
-																			} else if (e.key === "Escape") {
-																				e.preventDefault();
-																				done = true;
-																				setEditing(null);
-																				focusCell(rowIdx, targetCol);
-																			}
-																		}}
-																		onBlur={(e) => finish(e.currentTarget.value, "none")}
-																	/>
-																);
-															})()}
-														</Show>
-													</td>
-												);
-											}}
-										</Index>
-									</tr>
+																})()}
+															</Show>
+														</td>
+													);
+												}}
+											</Index>
+										</tr>
+									</Show>
 								);
 							}}
 						</Index>
@@ -3919,31 +5432,61 @@ export function TableView(props: { path: string }) {
 														const targetCol = col();
 														const ed = editing();
 														const seed = ed && ed.ghost && ed.seed ? ed.seed : "";
-														const finish = (val: string, move: "none" | "stay" | "next" | "prev") => {
+														const finish = (val: string, move: CommitMove) => {
 															if (done) return;
 															done = true;
 															commitGhost(targetCol, val, move);
 														};
+														commitActiveEdit = finish;
 														return (
 															<input
-																list={activeSuggestions().length ? suggestionListId : undefined}
+																role="combobox"
+																aria-autocomplete="list"
+																aria-expanded={pickerOpen() && pickerOptions().length > 0}
+																aria-controls={pickerOpen() && pickerOptions().length > 0 ? pickerListboxId : undefined}
 																value={seed}
 																placeholder={colLabel()}
 																aria-label={`New row, ${colLabel()}`}
-																ref={(el) =>
+																ref={(el) => {
+																	activeInputEl = el;
 																	queueMicrotask(() => {
 																		el.focus();
 																		if (seed) el.setSelectionRange(seed.length, seed.length);
-																	})
-																}
+																		setPickerAnchor(el.getBoundingClientRect());
+																	});
+																}}
+																onInput={(e) => {
+																	setEditDraft(e.currentTarget.value);
+																	setEditDirty(true);
+																	setPickerOpen(true);
+																	setPickerIdx(-1);
+																	setPickerAnchor(e.currentTarget.getBoundingClientRect());
+																}}
 																onKeyDown={(e) => {
 																	e.stopPropagation();
+																	const opts = pickerOptions();
+																	if (pickerOpen() && opts.length > 0) {
+																		if (e.key === "ArrowDown") {
+																			e.preventDefault();
+																			setPickerIdx((i) => (i + 1) % opts.length);
+																			return;
+																		}
+																		if (e.key === "ArrowUp") {
+																			e.preventDefault();
+																			setPickerIdx((i) => (i <= 0 ? opts.length - 1 : i - 1));
+																			return;
+																		}
+																	}
 																	if (e.key === "Enter") {
 																		e.preventDefault();
-																		finish(e.currentTarget.value, "stay");
+																		const chosen = pickerOpen() && pickerIdx() >= 0 ? opts[pickerIdx()] : undefined;
+																		const val = chosen ? resolvePickerChoice(chosen.value, e.currentTarget.value) : e.currentTarget.value;
+																		finish(val, "down");
 																	} else if (e.key === "Tab") {
 																		e.preventDefault();
-																		finish(e.currentTarget.value, e.shiftKey ? "prev" : "next");
+																		const chosen = pickerOpen() && pickerIdx() >= 0 ? opts[pickerIdx()] : undefined;
+																		const val = chosen ? resolvePickerChoice(chosen.value, e.currentTarget.value) : e.currentTarget.value;
+																		finish(val, e.shiftKey ? "prev" : "next");
 																	} else if (e.key === "Escape") {
 																		e.preventDefault();
 																		done = true;
@@ -3975,7 +5518,7 @@ export function TableView(props: { path: string }) {
 				</Show>
 			</div>
 
-			{/* Compact footer summary strip: visible/total rows, selection count, and focused column statistics. */}
+			{/* Compact footer summary strip: visible/total rows, clickable status tally pills, and range / focused column statistics. */}
 			<Show when={table().header.length > 0}>
 				<div class="table-footer" role="status" aria-label="Table summary">
 					<span class="table-footer-left">
@@ -3987,12 +5530,59 @@ export function TableView(props: { path: string }) {
 						<span>
 							Selected <strong class="table-footer-val">{footerStats().selected}</strong>
 						</span>
+						<Show when={statusTally() && statusTally()!.by.length > 0}>
+							{(() => {
+								const stCol = () => exactStatusCol();
+								const stRule = () => (stCol() >= 0 ? columnRule(stCol()) : null);
+								const entries = () => statusTally()!.by.slice(0, 8);
+								const extraCount = () => Math.max(0, statusTally()!.by.length - 8);
+								return (
+									<>
+										<span class="table-footer-sep" aria-hidden="true" />
+										<span class="table-status-strip" role="group" aria-label="Filter by status">
+											<For each={entries()}>
+												{([statusKey, count]) => {
+													const tone = () => badgeToneForValue(stRule(), statusKey) ?? "waiting";
+													const label = () => statusKey || "(empty)";
+													const isActive = () => activeSingleStatusFilter() === statusKey;
+													return (
+														<button
+															type="button"
+															class={`doc-status tone-${tone()} table-status-pill`}
+															aria-pressed={isActive()}
+															title={
+																isActive()
+																	? `Showing status “${label()}” (${count}). Click to clear status filter.`
+																	: `Filter by status “${label()}” (${count})`
+															}
+															onClick={() => toggleStatusTallyFilter(statusKey)}
+														>
+															<span>{label()}</span>
+															<span class="table-status-pill-count">{count}</span>
+														</button>
+													);
+												}}
+											</For>
+											<Show when={extraCount() > 0}>
+												<span class="hint">+{extraCount()} more</span>
+											</Show>
+										</span>
+									</>
+								);
+							})()}
+						</Show>
 					</span>
 					<Show when={footerStats().colName}>
 						<span class="table-footer-right">
 							<span class="table-footer-col" title={footerStats().colName}>
 								{footerStats().colName}
 							</span>
+							<Show when={footerStats().isRange}>
+								<span>
+									Count <strong class="table-footer-val">{footerStats().cellCount}</strong>
+								</span>
+								<span class="table-footer-sep" aria-hidden="true" />
+							</Show>
 							<span>
 								Non-empty <strong class="table-footer-val">{footerStats().nonEmpty}</strong>
 							</span>
@@ -4006,9 +5596,88 @@ export function TableView(props: { path: string }) {
 									Sum <strong class="table-footer-val">{footerStats().sum}</strong>
 								</span>
 							</Show>
+							<Show when={footerStats().avg !== null}>
+								<span class="table-footer-sep" aria-hidden="true" />
+								<span>
+									Avg <strong class="table-footer-val">{footerStats().avg}</strong>
+								</span>
+							</Show>
 						</span>
 					</Show>
 				</div>
+			</Show>
+
+			{/* Portaled custom cell dropdown picker (badge pills, multi-ticket suggestions, or distinct column values). */}
+			<Show when={editing() && pickerOpen() && pickerAnchor() && pickerOptions().length > 0}>
+				{(() => {
+					const opts = () => pickerOptions();
+					const posStyle = (): JSX.CSSProperties => {
+						const rect = pickerAnchor()!;
+						const minW = Math.max(176, Math.round(rect.width));
+						const maxW = Math.min(340, window.innerWidth - 16);
+						const popW = Math.min(Math.max(minW, 220), maxW);
+						const estH = Math.min(240, opts().length * 30 + 12);
+						const left = Math.max(8, Math.min(rect.left, window.innerWidth - popW - 8));
+						const fitsBelow = rect.bottom + 4 + estH <= window.innerHeight - 8;
+						const top = fitsBelow ? rect.bottom + 4 : Math.max(8, rect.top - estH - 4);
+						return { left: `${left}px`, top: `${top}px`, "min-width": `${Math.min(minW, maxW)}px` };
+					};
+					return (
+						<Portal>
+							<div
+								id={pickerListboxId}
+								class="table-cell-picker"
+								role="listbox"
+								aria-label="Cell suggestions"
+								style={posStyle()}
+								onMouseDown={(e) => e.preventDefault()}
+							>
+								<For each={opts()}>
+									{(opt, idx) => {
+										const isActive = () => pickerIdx() === idx();
+										return (
+											<button
+												type="button"
+												role="option"
+												aria-selected={isActive()}
+												class="table-cell-picker-opt"
+												classList={{ active: isActive(), current: Boolean(opt.isCurrent) }}
+												ref={(el) => {
+													createEffect(() => {
+														if (isActive()) el.scrollIntoView({ block: "nearest" });
+													});
+												}}
+												onMouseEnter={() => setPickerIdx(idx())}
+												onClick={() => {
+													const baseVal = activeInputEl?.value ?? editDraft();
+													const nextVal = resolvePickerChoice(opt.value, baseVal);
+													commitActiveEdit?.(nextVal, "down");
+												}}
+											>
+												<Show
+													when={opt.tone}
+													fallback={<span class="table-cell-picker-val">{opt.value}</span>}
+												>
+													{(tone) => <span class={`doc-status tone-${tone()}`}>{opt.value}</span>}
+												</Show>
+												<Show when={opt.meta}>
+													<span class="table-cell-picker-meta" title={opt.meta}>
+														{opt.meta}
+													</span>
+												</Show>
+												<Show when={opt.isCurrent}>
+													<span class="table-cell-picker-check" aria-hidden="true">
+														<Icon name="check" />
+													</span>
+												</Show>
+											</button>
+										);
+									}}
+								</For>
+							</div>
+						</Portal>
+					);
+				})()}
 			</Show>
 
 			{/* Portaled per-column header filter popover (never clipped by .table-scroll overflow). */}
@@ -4212,8 +5881,21 @@ export function TableView(props: { path: string }) {
 				/>
 			</Show>
 
-			{/* Floating drag ghost pill while dragging a column header. */}
+			{/* Floating drag ghost pill while dragging a column header or row grip. */}
 			<Show when={colDrag()}>
+				{(drag) => (
+					<Portal>
+						<div
+							class="table-col-drag-ghost"
+							style={{ left: `${drag().x + 12}px`, top: `${drag().y + 12}px` }}
+							aria-hidden="true"
+						>
+							{drag().label}
+						</div>
+					</Portal>
+				)}
+			</Show>
+			<Show when={rowDrag()}>
 				{(drag) => (
 					<Portal>
 						<div

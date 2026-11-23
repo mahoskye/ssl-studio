@@ -422,3 +422,369 @@ export function withoutUnresolved(graph: Pick<Graph, "nodes">, shown: { nodes: R
 	const gone = new Set(graph.nodes.filter((n) => n.kind === "unresolved").map((n) => n.id));
 	return { nodes: new Set([...shown.nodes].filter((id) => !gone.has(id))), edges: shown.edges.filter((e) => !gone.has(e.from) && !gone.has(e.to)) };
 }
+
+// --- Transitive Blast-Radius / Impact Analysis & Ticket Subgraph (Wave 4.1) ---
+
+export type ImpactNode = ListedProc & {
+	/** Shortest hop distance from any seed node (1 = direct caller or callee). */
+	hop: number;
+	/** For upstream callers: true when no node in the graph calls this node (an entry point). */
+	entryPoint?: boolean;
+	/** Edge relation(s) reaching this node at its shortest hop. */
+	relations: Relation[];
+};
+
+export type ImpactDocSummary = {
+	label: string;
+	group: string;
+	path: string;
+	reason?: string;
+	ticket?: string;
+};
+
+export type ImpactReport = {
+	targetLabel?: string;
+	seeds: ListedProc[];
+	seedScripts: string[];
+	maxHops: number;
+	upstream: ImpactNode[];
+	upstreamByHop: { hop: number; nodes: ImpactNode[] }[];
+	entryPoints: ImpactNode[];
+	downstream: ImpactNode[];
+	downstreamByHop: { hop: number; nodes: ImpactNode[] }[];
+	dataSources: ImpactNode[];
+	affectedScripts: string[];
+	schemaTables?: { name: string; path?: string }[];
+	governingDocs?: ImpactDocSummary[];
+	testScripts?: string[];
+};
+
+const normGraphPath = (p: string) => p.replace(/\\/g, "/").toLowerCase();
+
+/**
+ * Multi-root BFS transitive impact / blast-radius analysis across the call graph.
+ * Walks upstream (callers by hop 1..maxHops, flagging 0-in-degree entry points)
+ * and downstream (callees + `.ds` data sources). Accepts procedure IDs (`path#Proc`),
+ * script sentinels (`path#`), folded script IDs (`fold:path`), or raw script paths.
+ */
+export function computeImpactAnalysis(graph: Graph, seedNodeIds: string[], maxHops = 4): ImpactReport {
+	const hopsLimit = Math.max(1, Math.floor(maxHops));
+	const proc = lister(graph);
+	const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+	const isUnresolved = (id: string) => {
+		const n = byId.get(id);
+		return n?.kind === "unresolved" || scriptOf(id) === UNRESOLVED;
+	};
+
+	const scriptByNorm = new Map(graph.scripts.map((s) => [normGraphPath(s.path), s.path]));
+	const topLevelSet = new Set(graph.topLevel);
+	const edgeTouchedTop = new Set<string>();
+	for (const e of graph.edges) {
+		if (e.from.endsWith("#")) edgeTouchedTop.add(e.from);
+		if (e.to.endsWith("#")) edgeTouchedTop.add(e.to);
+	}
+
+	const seedSet = new Set<string>();
+	const addScriptSeeds = (scriptPath: string) => {
+		const matched = scriptByNorm.get(normGraphPath(scriptPath)) ?? scriptPath;
+		let addedAny = false;
+		for (const n of graph.nodes) {
+			if (n.path === matched && n.kind !== "unresolved") {
+				seedSet.add(n.id);
+				addedAny = true;
+			}
+		}
+		const topId = `${matched}#`;
+		if (topLevelSet.has(matched) || edgeTouchedTop.has(topId) || !addedAny) {
+			seedSet.add(topId);
+		}
+	};
+
+	for (const raw of seedNodeIds) {
+		const id = raw.trim();
+		if (!id) continue;
+		if (isFold(id)) {
+			addScriptSeeds(scriptOf(id));
+		} else if (id.endsWith("#")) {
+			addScriptSeeds(id.slice(0, -1));
+		} else if (!id.includes("#") && scriptByNorm.has(normGraphPath(id))) {
+			addScriptSeeds(id);
+		} else if (!isUnresolved(id)) {
+			seedSet.add(id);
+		}
+	}
+
+	const incoming = new Map<string, { from: string; relation: Relation }[]>();
+	const outgoing = new Map<string, { to: string; relation: Relation }[]>();
+	const callersOf = new Map<string, Set<string>>();
+
+	for (const e of graph.edges) {
+		if (e.from === e.to) continue;
+		if (isUnresolved(e.from) || isUnresolved(e.to)) continue;
+		const relation = relationOf(e.kind);
+		const inc = incoming.get(e.to) ?? [];
+		inc.push({ from: e.from, relation });
+		incoming.set(e.to, inc);
+
+		const out = outgoing.get(e.from) ?? [];
+		out.push({ to: e.to, relation });
+		outgoing.set(e.from, out);
+
+		const set = callersOf.get(e.to) ?? new Set<string>();
+		set.add(e.from);
+		callersOf.set(e.to, set);
+	}
+
+	const sortImpact = (a: ImpactNode, b: ImpactNode) =>
+		a.hop - b.hop || a.path.localeCompare(b.path) || a.name.localeCompare(b.name);
+
+	// 1. Multi-root upstream BFS (callers by hop 1..N)
+	const visitedUp = new Set<string>(seedSet);
+	let upFrontier = [...seedSet];
+	const upstream: ImpactNode[] = [];
+	for (let hop = 1; hop <= hopsLimit && upFrontier.length > 0; hop++) {
+		const nextMap = new Map<string, Set<Relation>>();
+		for (const cur of upFrontier) {
+			for (const edge of incoming.get(cur) ?? []) {
+				if (visitedUp.has(edge.from)) continue;
+				const rels = nextMap.get(edge.from) ?? new Set<Relation>();
+				rels.add(edge.relation);
+				nextMap.set(edge.from, rels);
+			}
+		}
+		if (!nextMap.size) break;
+		const nextIds: string[] = [];
+		for (const [id, rels] of nextMap) {
+			visitedUp.add(id);
+			nextIds.push(id);
+			upstream.push({
+				...proc(id),
+				hop,
+				entryPoint: (callersOf.get(id)?.size ?? 0) === 0,
+				relations: [...rels].sort(),
+			});
+		}
+		upFrontier = nextIds;
+	}
+	upstream.sort(sortImpact);
+
+	// 2. Multi-root downstream BFS (callees + data sources by hop 1..N)
+	const visitedDown = new Set<string>(seedSet);
+	let downFrontier = [...seedSet];
+	const downstream: ImpactNode[] = [];
+	const dataSources: ImpactNode[] = [];
+	for (let hop = 1; hop <= hopsLimit && downFrontier.length > 0; hop++) {
+		const nextMap = new Map<string, Set<Relation>>();
+		for (const cur of downFrontier) {
+			for (const edge of outgoing.get(cur) ?? []) {
+				if (visitedDown.has(edge.to)) continue;
+				const rels = nextMap.get(edge.to) ?? new Set<Relation>();
+				rels.add(edge.relation);
+				nextMap.set(edge.to, rels);
+			}
+		}
+		if (!nextMap.size) break;
+		const nextIds: string[] = [];
+		for (const [id, rels] of nextMap) {
+			visitedDown.add(id);
+			nextIds.push(id);
+			const info = proc(id);
+			const item: ImpactNode = { ...info, hop, relations: [...rels].sort() };
+			if (info.kind === "datasource") dataSources.push(item);
+			else downstream.push(item);
+		}
+		downFrontier = nextIds;
+	}
+	downstream.sort(sortImpact);
+	dataSources.sort(sortImpact);
+
+	const groupByHop = (nodes: readonly ImpactNode[]) => {
+		const map = new Map<number, ImpactNode[]>();
+		for (const n of nodes) {
+			const bucket = map.get(n.hop) ?? [];
+			bucket.push(n);
+			map.set(n.hop, bucket);
+		}
+		return [...map.entries()].sort(([a], [b]) => a - b).map(([hop, list]) => ({ hop, nodes: list }));
+	};
+
+	const seeds = [...seedSet]
+		.map((id) => proc(id))
+		.sort((a, b) => a.path.localeCompare(b.path) || a.line - b.line || a.name.localeCompare(b.name));
+	const uniquePaths = (list: readonly { path: string }[]) =>
+		[...new Set(list.map((x) => x.path).filter((p) => Boolean(p) && p !== UNRESOLVED))].sort((a, b) => a.localeCompare(b));
+
+	const seedScripts = uniquePaths(seeds);
+	const affectedScripts = uniquePaths([...seeds, ...upstream, ...downstream, ...dataSources]);
+	const entryPoints = upstream.filter((n) => n.entryPoint);
+
+	return {
+		seeds,
+		seedScripts,
+		maxHops: hopsLimit,
+		upstream,
+		upstreamByHop: groupByHop(upstream),
+		entryPoints,
+		downstream,
+		downstreamByHop: groupByHop(downstream),
+		dataSources,
+		affectedScripts,
+	};
+}
+
+function escapeMdCell(raw: string): string {
+	return raw.replace(/\r?\n/g, " ").replace(/\s+/g, " ").replace(/\|/g, "\\|").trim();
+}
+
+function clipMdText(raw: string, max: number): string {
+	if (raw.length <= max) return raw;
+	return `${raw.slice(0, Math.max(1, max - 1)).trimEnd()}…`;
+}
+
+function formatImpactTargetCell(node: Pick<ListedProc, "name" | "path">): string {
+	const file = node.path ? node.path.split(/[\\/]/).pop() ?? node.path : "";
+	const name = escapeMdCell(node.name);
+	const cleanFile = escapeMdCell(file);
+	const plain = cleanFile && cleanFile.toLowerCase() !== name.toLowerCase() ? `${name} (${cleanFile})` : name;
+	if (plain.length > 94) return clipMdText(plain, 94);
+	return cleanFile && cleanFile.toLowerCase() !== name.toLowerCase() ? `\`${name}\` (${cleanFile})` : `\`${name}\``;
+}
+
+const IMPACT_KIND_LABEL: Record<ListedProc["kind"], string> = {
+	procedure: "Procedure",
+	datasource: "Data source",
+	unresolved: "Unresolved",
+	top: "Top level",
+	class: "Class",
+};
+
+const DOC_GROUP_LABEL: Record<string, string> = {
+	tickets: "Ticket",
+	specs: "Spec",
+	plans: "Plan",
+	knowledge: "Knowledge",
+	schema: "Schema",
+	registries: "Registry",
+	docs: "Doc",
+	project: "Project",
+};
+
+/**
+ * Formats an `ImpactReport` into crisp, ADR 0008-compliant Markdown
+ * (every table has <= 4 columns, headings <= 16 chars, non-last cells <= 20 chars, last cell <= 100 chars).
+ */
+export function formatImpactMarkdown(analysis: ImpactReport): string {
+	const target =
+		analysis.targetLabel?.trim() ||
+		(analysis.seeds.length === 1
+			? analysis.seeds[0]!.name
+			: analysis.seedScripts.length === 1
+				? analysis.seedScripts[0]!.split(/[\\/]/).pop() ?? analysis.seedScripts[0]!
+				: `${analysis.seedScripts.length} scripts`);
+
+	const lines: string[] = [
+		`## Impact Analysis: ${target}`,
+		"",
+		`- **Target**: ${target} (${analysis.seeds.length} ${analysis.seeds.length === 1 ? "node" : "nodes"} across ${analysis.seedScripts.length} ${analysis.seedScripts.length === 1 ? "script" : "scripts"})`,
+		`- **Blast radius**: ${analysis.upstream.length} upstream ${analysis.upstream.length === 1 ? "caller" : "callers"} (${analysis.entryPoints.length} entry ${analysis.entryPoints.length === 1 ? "point" : "points"}), ${analysis.downstream.length} downstream ${analysis.downstream.length === 1 ? "callee" : "callees"}, ${analysis.dataSources.length} data ${analysis.dataSources.length === 1 ? "source" : "sources"} (max ${analysis.maxHops} hops)`,
+		`- **Affected scripts**: ${analysis.affectedScripts.length}`,
+	];
+
+	lines.push("", "### Upstream Callers", "");
+	if (!analysis.upstream.length) {
+		lines.push("None found in the call graph.");
+	} else {
+		lines.push("| Hop | Role | Caller |", "| --- | --- | --- |");
+		for (const n of analysis.upstream) {
+			const role = n.entryPoint ? "Entry point" : "Caller";
+			lines.push(`| ${n.hop} | ${role} | ${formatImpactTargetCell(n)} |`);
+		}
+	}
+
+	const downAll = [...analysis.downstream, ...analysis.dataSources].sort(
+		(a, b) => a.hop - b.hop || Number(a.kind === "datasource") - Number(b.kind === "datasource") || a.path.localeCompare(b.path) || a.name.localeCompare(b.name),
+	);
+	lines.push("", "### Downstream Callees & Data Sources", "");
+	if (!downAll.length) {
+		lines.push("None found in the call graph.");
+	} else {
+		lines.push("| Hop | Kind | Target |", "| --- | --- | --- |");
+		for (const n of downAll) {
+			const kind = IMPACT_KIND_LABEL[n.kind] ?? "Procedure";
+			lines.push(`| ${n.hop} | ${kind} | ${formatImpactTargetCell(n)} |`);
+		}
+	}
+
+	lines.push("", "### Schema Tables", "");
+	if (!analysis.schemaTables?.length) {
+		lines.push("None referenced.");
+	} else {
+		for (const t of analysis.schemaTables) {
+			lines.push(`- \`${t.name}\`${t.path ? ` (${t.path})` : ""}`);
+		}
+	}
+
+	lines.push("", "### Governing Docs & Tickets", "");
+	if (!analysis.governingDocs?.length) {
+		lines.push("None linked.");
+	} else {
+		lines.push("| Kind | Document |", "| --- | --- |");
+		for (const doc of analysis.governingDocs) {
+			const kind = clipMdText(escapeMdCell(DOC_GROUP_LABEL[doc.group] ?? doc.group ?? "Doc"), 18);
+			const desc = clipMdText(escapeMdCell(doc.reason ? `${doc.label} (${doc.reason})` : doc.label), 94);
+			lines.push(`| ${kind} | ${desc} |`);
+		}
+	}
+
+	lines.push("", "### Test Scripts", "");
+	if (!analysis.testScripts?.length) {
+		lines.push("None linked.");
+	} else {
+		for (const ts of analysis.testScripts) {
+			lines.push(`- \`${ts}\``);
+		}
+	}
+
+	return lines.join("\n");
+}
+
+/**
+ * Returns the set of visible node IDs for a ticket's scripts (`ticketScriptPaths`),
+ * plus optional 1-hop callers and callees when `includeNeighbors` is true.
+ */
+export function ticketSubgraphFilter(
+	graph: Graph,
+	ticketScriptPaths: Set<string>,
+	includeNeighbors: boolean,
+): Set<string> {
+	const wanted = new Set<string>();
+	for (const p of ticketScriptPaths) {
+		const n = normGraphPath(p.trim());
+		if (n) wanted.add(n);
+	}
+	if (!wanted.size) return new Set<string>();
+
+	const keep = new Set<string>();
+	for (const n of graph.nodes) {
+		if (wanted.has(normGraphPath(n.path))) keep.add(n.id);
+	}
+	for (const top of graph.topLevel) {
+		if (wanted.has(normGraphPath(top))) keep.add(`${top}#`);
+	}
+	for (const e of graph.edges) {
+		if (e.from.endsWith("#") && wanted.has(normGraphPath(scriptOf(e.from)))) keep.add(e.from);
+		if (e.to.endsWith("#") && wanted.has(normGraphPath(scriptOf(e.to)))) keep.add(e.to);
+	}
+
+	if (includeNeighbors) {
+		const core = new Set(keep);
+		for (const e of graph.edges) {
+			const fromIn = core.has(e.from) || wanted.has(normGraphPath(scriptOf(e.from)));
+			const toIn = core.has(e.to) || wanted.has(normGraphPath(scriptOf(e.to)));
+			if (fromIn) keep.add(e.to);
+			if (toIn) keep.add(e.from);
+		}
+	}
+
+	return keep;
+}

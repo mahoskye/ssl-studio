@@ -341,7 +341,10 @@ export class MermaidWidget extends WidgetType {
 					stage.textContent = "";
 					const err = document.createElement("div");
 					err.className = "cm-md-mermaid-error";
-					err.textContent = `Mermaid diagram could not be rendered: ${error ?? "syntax error"}`;
+					const parsed = extractMermaidErrorLine(error ?? "syntax error");
+					err.textContent = parsed.line
+						? `Mermaid syntax error on line ${parsed.line}: ${parsed.message}`
+						: `Mermaid diagram could not be rendered: ${parsed.message}`;
 					const pre = document.createElement("pre");
 					pre.textContent = this.code;
 					stage.append(err, pre);
@@ -357,3 +360,359 @@ export class MermaidWidget extends WidgetType {
 		return true;
 	}
 }
+
+/** Extracts a 1-based diagram line number and clean summary from a Mermaid parser/lexer error message. */
+export function extractMermaidErrorLine(rawError: string): { line: number | null; message: string } {
+	const text = (rawError || "").replace(/\r\n?/g, "\n").trim();
+	if (!text) return { line: null, message: "Syntax error" };
+	const lineMatch =
+		/(?:parse|lexical|syntax)?\s*error(?:\s+in\s+[^\n:]+)?\s+on\s+line\s+(\d+)/i.exec(text) ??
+		/\bline\s+(\d+)\b/i.exec(text);
+	const parsedLine = lineMatch ? Number.parseInt(lineMatch[1]!, 10) : NaN;
+	const line = Number.isFinite(parsedLine) && parsedLine > 0 ? parsedLine : null;
+	const lines = text
+		.split("\n")
+		.map((l) => l.trim())
+		.filter((l) => l && !/^mermaid version\b/i.test(l) && !/^[-^~]+$/.test(l));
+	const summary = lines.slice(0, 2).join(" — ");
+	return { line, message: summary.length > 220 ? `${summary.slice(0, 219)}…` : summary || "Syntax error" };
+}
+
+type LivePreviewCtrl = {
+	view: EditorView;
+	code: string;
+	themeVer: number;
+	bodyStartLine: number;
+	closeLine: number;
+	lastSvg: string;
+	reqSeq: number;
+	timer: ReturnType<typeof setTimeout> | undefined;
+	statusEl: HTMLSpanElement;
+	errEl: HTMLDivElement;
+	stageEl: HTMLDivElement;
+	zoomBtn: HTMLButtonElement;
+	scheduleRender: (immediate?: boolean) => void;
+};
+
+type LivePreviewDom = HTMLDivElement & { __mermaidLive?: LivePreviewCtrl };
+
+/**
+ * Debounced live preview card rendered directly below a ```` ```mermaid ```` fence while editing it.
+ * Uses `updateDOM` to keep the last valid SVG visible with zero flicker as the user types, and surfaces
+ * extracted Mermaid syntax error line numbers with 1-click jump back to the offending diagram line.
+ */
+export class MermaidLivePreviewWidget extends WidgetType {
+	constructor(
+		private readonly code: string,
+		private readonly themeVer: number,
+		private readonly bodyStartLine: number,
+		private readonly closeLine: number,
+	) {
+		super();
+	}
+
+	eq(other: MermaidLivePreviewWidget): boolean {
+		return (
+			other.code === this.code &&
+			other.themeVer === this.themeVer &&
+			other.bodyStartLine === this.bodyStartLine &&
+			other.closeLine === this.closeLine
+		);
+	}
+
+	updateDOM(dom: HTMLElement, view: EditorView): boolean {
+		const host = dom as LivePreviewDom;
+		const ctrl = host.__mermaidLive;
+		if (!ctrl) return false;
+		const changed = ctrl.code !== this.code || ctrl.themeVer !== this.themeVer;
+		ctrl.view = view;
+		ctrl.code = this.code;
+		ctrl.themeVer = this.themeVer;
+		ctrl.bodyStartLine = this.bodyStartLine;
+		ctrl.closeLine = this.closeLine;
+		if (changed) ctrl.scheduleRender(false);
+		return true;
+	}
+
+	toDOM(view: EditorView): HTMLElement {
+		const card = document.createElement("div") as LivePreviewDom;
+		card.className = "cm-md-mermaid-card cm-md-mermaid-live-preview";
+		card.setAttribute("contenteditable", "false");
+
+		const head = document.createElement("div");
+		head.className = "cm-md-mermaid-head";
+
+		const titleWrap = document.createElement("span");
+		titleWrap.className = "cm-md-mermaid-live-title";
+		const badge = document.createElement("span");
+		badge.className = "cm-md-code-lang";
+		badge.textContent = "mermaid";
+		const statusEl = document.createElement("span");
+		statusEl.className = "cm-md-mermaid-live-status";
+		statusEl.textContent = "Live preview";
+		titleWrap.append(badge, statusEl);
+
+		const actions = document.createElement("span");
+		actions.className = "cm-md-code-actions";
+
+		const zoomBtn = document.createElement("button");
+		zoomBtn.type = "button";
+		zoomBtn.className = "cm-md-code-btn";
+		zoomBtn.textContent = "Zoom";
+		zoomBtn.title = "Open interactive Zoom / Pan diagram lightbox";
+		zoomBtn.disabled = true;
+
+		const doneBtn = document.createElement("button");
+		doneBtn.type = "button";
+		doneBtn.className = "cm-md-code-btn";
+		doneBtn.textContent = "Done";
+		doneBtn.title = "Finish editing Mermaid source and collapse to rendered diagram";
+
+		actions.append(zoomBtn, doneBtn);
+		head.append(titleWrap, actions);
+
+		const errEl = document.createElement("div");
+		errEl.className = "cm-md-mermaid-err-banner";
+		errEl.hidden = true;
+
+		const stageEl = document.createElement("div");
+		stageEl.className = "cm-md-mermaid-stage";
+		stageEl.title = "Double-click to open diagram zoom viewer";
+
+		card.append(head, errEl, stageEl);
+
+		const ctrl: LivePreviewCtrl = {
+			view,
+			code: this.code,
+			themeVer: this.themeVer,
+			bodyStartLine: this.bodyStartLine,
+			closeLine: this.closeLine,
+			lastSvg: "",
+			reqSeq: 0,
+			timer: undefined,
+			statusEl,
+			errEl,
+			stageEl,
+			zoomBtn,
+			scheduleRender: () => {},
+		};
+		card.__mermaidLive = ctrl;
+
+		const jumpToDiagramLine = (relLine: number) => {
+			const doc = ctrl.view.state.doc;
+			const targetLineNum = Math.max(1, Math.min(doc.lines, ctrl.bodyStartLine + relLine - 1));
+			const ln = doc.line(targetLineNum);
+			ctrl.view.focus();
+			ctrl.view.dispatch({
+				selection: EditorSelection.cursor(ln.from),
+				effects: EditorView.scrollIntoView(ln.from, { y: "center" }),
+			});
+		};
+
+		const showError = (rawError: string) => {
+			const parsed = extractMermaidErrorLine(rawError);
+			ctrl.errEl.textContent = "";
+			const icon = document.createElement("span");
+			icon.className = "codicon-glyph";
+			icon.setAttribute("aria-hidden", "true");
+			icon.textContent = "\uea87";
+			ctrl.errEl.append(icon);
+			if (parsed.line !== null) {
+				const lineBtn = document.createElement("button");
+				lineBtn.type = "button";
+				lineBtn.className = "cm-md-mermaid-err-line-btn";
+				lineBtn.textContent = `Line ${parsed.line}`;
+				lineBtn.title = `Jump to diagram line ${parsed.line} (document line ${ctrl.bodyStartLine + parsed.line - 1})`;
+				lineBtn.addEventListener("mousedown", (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					jumpToDiagramLine(parsed.line!);
+				});
+				ctrl.errEl.append(lineBtn);
+			}
+			const msg = document.createElement("span");
+			msg.className = "cm-md-mermaid-err-msg";
+			msg.textContent = parsed.message;
+			ctrl.errEl.append(msg);
+			ctrl.errEl.hidden = false;
+			ctrl.statusEl.textContent = parsed.line !== null ? `Error · line ${parsed.line}` : "Syntax error";
+			ctrl.statusEl.classList.add("is-error");
+			if (ctrl.lastSvg) {
+				ctrl.stageEl.classList.add("is-stale");
+			} else {
+				ctrl.stageEl.textContent = "";
+				ctrl.stageEl.classList.remove("is-stale");
+			}
+		};
+
+		const applySuccess = (svg: string) => {
+			ctrl.lastSvg = svg;
+			ctrl.zoomBtn.disabled = false;
+			ctrl.errEl.hidden = true;
+			ctrl.statusEl.textContent = "Live preview";
+			ctrl.statusEl.classList.remove("is-error");
+			ctrl.stageEl.classList.remove("is-stale");
+			ctrl.stageEl.innerHTML = svg;
+		};
+
+		const runRender = (codeSnapshot: string, seq: number) => {
+			const trimmed = codeSnapshot.trim();
+			if (!trimmed) {
+				ctrl.errEl.hidden = true;
+				ctrl.statusEl.textContent = "Empty diagram";
+				ctrl.statusEl.classList.remove("is-error");
+				ctrl.stageEl.classList.remove("is-stale");
+				ctrl.stageEl.textContent = "";
+				const empty = document.createElement("span");
+				empty.className = "cm-md-mermaid-loading";
+				empty.textContent = "Type Mermaid syntax above to preview live…";
+				ctrl.stageEl.append(empty);
+				ctrl.lastSvg = "";
+				ctrl.zoomBtn.disabled = true;
+				return;
+			}
+			const mode = isDarkEditorTheme() ? "dark" : "light";
+			const cached = svgCache.get(`${mode}\0live\0${trimmed}`);
+			if (cached) {
+				applySuccess(cached);
+				return;
+			}
+			void renderMermaidSvg(trimmed, mode).then(({ svg, error }) => {
+				if (!card.isConnected || seq !== ctrl.reqSeq) return;
+				if (svg) applySuccess(svg);
+				else showError(error ?? "Syntax error");
+			});
+		};
+
+		ctrl.scheduleRender = (immediate = false) => {
+			clearTimeout(ctrl.timer);
+			const seq = ++ctrl.reqSeq;
+			const trimmed = ctrl.code.trim();
+			const mode = isDarkEditorTheme() ? "dark" : "light";
+			if (!trimmed || svgCache.has(`${mode}\0live\0${trimmed}`)) {
+				runRender(ctrl.code, seq);
+				return;
+			}
+			ctrl.statusEl.textContent = "Updating…";
+			ctrl.statusEl.classList.remove("is-error");
+			if (!ctrl.lastSvg) {
+				ctrl.stageEl.textContent = "";
+				const loading = document.createElement("span");
+				loading.className = "cm-md-mermaid-loading";
+				loading.textContent = "Rendering preview…";
+				ctrl.stageEl.append(loading);
+			}
+			if (immediate) {
+				runRender(ctrl.code, seq);
+			} else {
+				ctrl.timer = setTimeout(() => {
+					ctrl.timer = undefined;
+					if (card.isConnected && seq === ctrl.reqSeq) runRender(ctrl.code, seq);
+				}, 260);
+			}
+		};
+
+		zoomBtn.addEventListener("mousedown", (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			if (!ctrl.lastSvg) return;
+			ctrl.view.state.facet(liveCallbacksFacet)?.onOpenMermaidLightbox?.({ svg: ctrl.lastSvg, code: ctrl.code });
+		});
+
+		stageEl.addEventListener("dblclick", (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			if (!ctrl.lastSvg) return;
+			ctrl.view.state.facet(liveCallbacksFacet)?.onOpenMermaidLightbox?.({ svg: ctrl.lastSvg, code: ctrl.code });
+		});
+
+		doneBtn.addEventListener("mousedown", (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			const doc = ctrl.view.state.doc;
+			if (ctrl.closeLine < doc.lines) {
+				const nextLine = doc.line(ctrl.closeLine + 1);
+				ctrl.view.focus();
+				ctrl.view.dispatch({
+					selection: EditorSelection.cursor(nextLine.from),
+					effects: [setRawEditBlockEffect.of(null), EditorView.scrollIntoView(nextLine.from, { y: "nearest" })],
+				});
+			} else {
+				const endPos = doc.length;
+				ctrl.view.focus();
+				ctrl.view.dispatch({
+					changes: { from: endPos, to: endPos, insert: "\n" },
+					selection: EditorSelection.cursor(endPos + 1),
+					effects: setRawEditBlockEffect.of(null),
+					userEvent: "input",
+				});
+			}
+		});
+
+		ctrl.scheduleRender(true);
+		return card;
+	}
+
+	destroy(dom: HTMLElement): void {
+		const ctrl = (dom as LivePreviewDom).__mermaidLive;
+		if (ctrl?.timer !== undefined) {
+			clearTimeout(ctrl.timer);
+			ctrl.timer = undefined;
+		}
+	}
+
+	ignoreEvent(): boolean {
+		return true;
+	}
+}
+
+export const mermaidLivePreviewTheme = EditorView.baseTheme({
+	".cm-md-mermaid-live-preview": {
+		marginTop: "6px",
+		borderStyle: "dashed",
+	},
+	".cm-md-mermaid-live-title": {
+		display: "inline-flex",
+		alignItems: "center",
+		gap: "8px",
+	},
+	".cm-md-mermaid-live-status": {
+		fontSize: "var(--text-xs, 11px)",
+		color: "var(--editor-muted, var(--muted))",
+		fontWeight: "500",
+	},
+	".cm-md-mermaid-live-status.is-error": {
+		color: "var(--error)",
+	},
+	".cm-md-mermaid-err-banner": {
+		display: "flex",
+		alignItems: "center",
+		gap: "6px",
+		padding: "6px 10px",
+		borderBottom: "1px solid color-mix(in srgb, var(--error) 35%, transparent)",
+		backgroundColor: "color-mix(in srgb, var(--error) 10%, transparent)",
+		color: "var(--error)",
+		fontFamily: "var(--ui-font)",
+		fontSize: "var(--text-xs, 12px)",
+		lineHeight: "1.4",
+	},
+	".cm-md-mermaid-err-line-btn": {
+		flex: "none",
+		padding: "1px 6px",
+		borderRadius: "var(--radius-sm, 4px)",
+		border: "1px solid color-mix(in srgb, var(--error) 45%, transparent)",
+		backgroundColor: "color-mix(in srgb, var(--error) 14%, transparent)",
+		color: "var(--error)",
+		fontFamily: "var(--code-font, ui-monospace, monospace)",
+		fontSize: "11px",
+		fontWeight: "600",
+		cursor: "pointer",
+	},
+	".cm-md-mermaid-err-msg": {
+		minWidth: "0",
+		overflowWrap: "anywhere",
+	},
+	".cm-md-mermaid-stage.is-stale": {
+		opacity: "0.45",
+	},
+});

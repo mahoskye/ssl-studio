@@ -29,10 +29,74 @@ export type LiveEditorHandle = {
 	runAction(id: string): boolean;
 	openLinkAtCursor(): boolean;
 	insertText(text: string, cursorOffset?: number, opts?: { asBlock?: boolean }): void;
+	getTopLine?(): number;
+	foldAll?(): void;
+	unfoldAll?(): void;
 };
 
 const liveEditors: Record<number, LiveEditorHandle | undefined> = {};
 const readFinders: Record<number, (() => void) | undefined> = {};
+const tableFinders: Record<number, ((replace?: boolean) => void) | undefined> = {};
+const tableColumnJumpers: Record<number, ((colIndex: number) => void) | undefined> = {};
+
+export type MarkdownSyncAnchor = { line: number; column: number; topLine?: number; at: number };
+const syncAnchors = new Map<string, MarkdownSyncAnchor>();
+
+/** Saves cursor/scroll position before toggling between Markdown Live/Read and Source modes. */
+export function saveMarkdownSyncAnchor(group: number, path: string, anchor: { line: number; column: number; topLine?: number }) {
+	syncAnchors.set(`${group}:${path}`, { ...anchor, at: Date.now() });
+}
+
+/** Reads and consumes a recent (<3s) Live<->Source cursor/scroll handoff anchor. */
+export function takeMarkdownSyncAnchor(group: number, path: string): MarkdownSyncAnchor | null {
+	const key = `${group}:${path}`;
+	const found = syncAnchors.get(key);
+	if (!found) return null;
+	syncAnchors.delete(key);
+	return Date.now() - found.at < 3000 ? found : null;
+}
+
+type SplitScrollPayload = { sourceGroup: number; path: string; topLine: number; ratio: number };
+const splitScrollListeners = new Set<(payload: SplitScrollPayload) => void>();
+
+/** Broadcasts vertical scroll position so a split Read preview of the same Markdown file stays in sync. */
+export function emitSplitScrollSync(sourceGroup: number, path: string, topLine: number, ratio: number) {
+	for (const fn of splitScrollListeners) fn({ sourceGroup, path, topLine, ratio });
+}
+
+export function onSplitScrollSync(listener: (payload: SplitScrollPayload) => void): () => void {
+	splitScrollListeners.add(listener);
+	return () => splitScrollListeners.delete(listener);
+}
+
+export function registerTableFind(group: number, opener: ((replace?: boolean) => void) | undefined) {
+	if (opener) tableFinders[group] = opener;
+	else delete tableFinders[group];
+}
+
+/** Opens the TableView Find/Replace bar on the active group when a CSV/TSV table is visible. */
+export function openTableFind(replace = false): boolean {
+	const fn = tableFinders[state.activeGroup];
+	if (!fn) return false;
+	fn(replace);
+	return true;
+}
+
+export function hasTableFind(): boolean {
+	return Boolean(tableFinders[state.activeGroup]);
+}
+
+export function registerTableColumnJump(group: number, jumper: ((colIndex: number) => void) | undefined) {
+	if (jumper) tableColumnJumpers[group] = jumper;
+	else delete tableColumnJumpers[group];
+}
+
+export function jumpToTableColumn(colIndex: number): boolean {
+	const fn = tableColumnJumpers[state.activeGroup];
+	if (!fn) return false;
+	fn(colIndex);
+	return true;
+}
 
 export function registerLiveEditor(group: number, handle: LiveEditorHandle | undefined) {
 	if (handle) liveEditors[group] = handle;

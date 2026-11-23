@@ -3,7 +3,11 @@
 // no model. Replies use marker lines rather than fences, since a spec holds
 // fences of its own, and parsing is lenient, because models close markers the
 // wrong way (docs/spikes/planning-mode.md).
-import { nextNodeId, type NodeKind, type Plan, type PlanEdge, type PlanNode } from "./model";
+import { baseName, relativeTo } from "../../shared/paths";
+import type { DocFile } from "../../shared/protocol";
+import { codeMatchesRef } from "../../shared/workContext";
+import type { Drift, Reading } from "./built";
+import { nextNodeId, nodeDocsOf, type Finding, type NodeKind, type Plan, type PlanEdge, type PlanNode } from "./model";
 
 // --- reply blocks ----------------------------------------------------------------
 
@@ -343,4 +347,445 @@ export function specPrompt(plan: Plan, survey: string, limits: { codeLines: numb
 		survey,
 		...(extra ? ["", extra] : []),
 	].join("\n");
+}
+
+// --- plan-to-Mermaid export & surgical Markdown sync (Wave 4.2) ------------------
+
+const MERMAID_RESERVED = new Set([
+	"end",
+	"subgraph",
+	"class",
+	"style",
+	"click",
+	"call",
+	"graph",
+	"flowchart",
+	"direction",
+	"linkstyle",
+	"classdef",
+]);
+
+function makeMermaidIdMapper(prefix: string) {
+	const mapped = new Map<string, string>();
+	const taken = new Set<string>();
+	return (raw: string): string => {
+		const hit = mapped.get(raw);
+		if (hit) return hit;
+		let clean = raw.replace(/[^A-Za-z0-9_]/g, "_").replace(/^_+|_+$/g, "");
+		if (!clean || /^\d/.test(clean) || MERMAID_RESERVED.has(clean.toLowerCase())) {
+			clean = `${prefix}_${clean || "x"}`;
+		}
+		let candidate = clean;
+		let suffix = 2;
+		while (taken.has(candidate.toLowerCase())) {
+			candidate = `${clean}_${suffix++}`;
+		}
+		taken.add(candidate.toLowerCase());
+		mapped.set(raw, candidate);
+		return candidate;
+	};
+}
+
+/** Escapes node/subgraph text cleanly for Mermaid double-quoted labels. */
+function escapeMermaidLabel(raw: string): string {
+	const text = raw.trim();
+	if (!text) return "(untitled)";
+	return text
+		.replace(/\r\n/g, "\n")
+		.replace(/\r/g, "\n")
+		.replace(/\t+/g, " ")
+		.replace(/"/g, "#quot;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/\n/g, "<br/>");
+}
+
+/** Formats an edge label for Mermaid `-->|...|`, quoting/escaping when punctuation is present. */
+function formatMermaidEdgeLabel(raw: string): string {
+	const clean = raw.trim().replace(/\r?\n/g, " ").replace(/\s+/g, " ");
+	if (!clean) return "";
+	if (!/[|"<>\[\]{}()]/.test(clean)) return clean;
+	const escaped = clean
+		.replace(/"/g, "#quot;")
+		.replace(/\|/g, "/")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;");
+	return `"${escaped}"`;
+}
+
+function mermaidNodeDecl(id: string, node: PlanNode): string {
+	const label = escapeMermaidLabel(node.text || node.id);
+	switch (node.kind) {
+		case "start":
+		case "end":
+			return `${id}(["${label}"])`;
+		case "decision":
+			return `${id}{"${label}"}`;
+		case "call":
+			return `${id}[["${label}"]]`;
+		default:
+			return `${id}["${label}"]`;
+	}
+}
+
+/**
+ * Deterministic Plan-to-Mermaid flowchart generator (`flowchart TD` or `flowchart LR`):
+ * emits stage subgraphs for `plan.groups`, shape-accurate nodes (stadium for start/end,
+ * diamond `{}` for decisions, subroutine `[[]]` for calls, rectangle `[]` for steps),
+ * properly escaped labels, and labeled edges (`-->|label|`).
+ */
+export function planToMermaid(plan: Plan, direction: "DOWN" | "RIGHT" = "DOWN"): string {
+	const lines: string[] = [`flowchart ${direction === "RIGHT" ? "LR" : "TD"}`];
+	const nodeId = makeMermaidIdMapper("node");
+	const groupId = makeMermaidIdMapper("stage");
+	const validGroupIds = new Set(plan.groups.map((g) => g.id));
+	const knownNodeIds = new Set(plan.nodes.map((n) => n.id));
+
+	// Pre-assign deterministic node IDs in plan order.
+	for (const n of plan.nodes) nodeId(n.id);
+
+	const ungrouped = plan.nodes.filter((n) => !n.group || !validGroupIds.has(n.group));
+	const startUngrouped = ungrouped.filter((n) => n.kind === "start");
+	const middleUngrouped = ungrouped.filter((n) => n.kind !== "start" && n.kind !== "end");
+	const endUngrouped = ungrouped.filter((n) => n.kind === "end");
+
+	for (const n of startUngrouped) {
+		lines.push(`  ${mermaidNodeDecl(nodeId(n.id), n)}`);
+	}
+
+	for (const g of plan.groups) {
+		const members = plan.nodes.filter((n) => n.group === g.id);
+		if (!members.length) continue;
+		const gid = groupId(g.id);
+		lines.push(`  subgraph ${gid}["${escapeMermaidLabel(g.name || g.id)}"]`);
+		for (const n of members) {
+			lines.push(`    ${mermaidNodeDecl(nodeId(n.id), n)}`);
+		}
+		lines.push("  end");
+	}
+
+	for (const n of middleUngrouped) {
+		lines.push(`  ${mermaidNodeDecl(nodeId(n.id), n)}`);
+	}
+	for (const n of endUngrouped) {
+		lines.push(`  ${mermaidNodeDecl(nodeId(n.id), n)}`);
+	}
+
+	for (const e of plan.edges) {
+		if (!knownNodeIds.has(e.from) || !knownNodeIds.has(e.to)) continue;
+		const from = nodeId(e.from);
+		const to = nodeId(e.to);
+		const label = e.label ? formatMermaidEdgeLabel(e.label) : "";
+		lines.push(label ? `  ${from} -->|${label}| ${to}` : `  ${from} --> ${to}`);
+	}
+
+	return lines.join("\n");
+}
+
+const PLAN_MERMAID_START = "<!-- plan-mermaid:start -->";
+const PLAN_MERMAID_END = "<!-- plan-mermaid:end -->";
+const PLAN_MERMAID_RE = /(<!--\s*plan-mermaid:start(?:\s+[^>]*)?\s*-->)[\s\S]*?(<!--\s*plan-mermaid:end\s*-->)/;
+
+/**
+ * Surgically updates the Mermaid chart between `<!-- plan-mermaid:start -->` and
+ * `<!-- plan-mermaid:end -->` markers in a Markdown spec or ticket (ADR 0002),
+ * preserving surrounding prose and CRLF/LF line endings. Appends a `## Flow`
+ * section with markers cleanly when none is present yet.
+ */
+export function syncPlanMermaidInMarkdown(markdown: string, mermaidBlock: string, planName?: string): string {
+	const eol = markdown.includes("\r\n") ? "\r\n" : "\n";
+	const raw = mermaidBlock.trim().replace(/\r?\n/g, eol);
+	const fenced = raw.startsWith("```") ? raw : `\`\`\`mermaid${eol}${raw}${eol}\`\`\``;
+
+	if (PLAN_MERMAID_RE.test(markdown)) {
+		return markdown.replace(PLAN_MERMAID_RE, (_match, open: string, close: string) => `${open}${eol}${fenced}${eol}${close}`);
+	}
+
+	const heading = planName?.trim()
+		? `## Flow${eol}${eol}_Synced from \`${planName.trim()}\`._`
+		: "## Flow";
+	const section = `${heading}${eol}${eol}${PLAN_MERMAID_START}${eol}${fenced}${eol}${PLAN_MERMAID_END}${eol}`;
+	if (!markdown.trim()) return section;
+	const sep = markdown.endsWith(`${eol}${eol}`) ? "" : markdown.endsWith(eol) ? eol : `${eol}${eol}`;
+	return `${markdown}${sep}${section}`;
+}
+
+// --- pure plan validation & lightweight drift helpers (Wave 1.5) -----------------
+
+const normSlash = (p: string) => p.trim().replace(/\\/g, "/").replace(/^\.?\/+/, "").toLowerCase();
+const stripCodeExt = (p: string) => p.replace(/\.(ssl|srvscr|ds)$/i, "");
+const refLastPart = (ref: string) => ref.split(/[./\\]/).filter(Boolean).at(-1) ?? ref;
+
+/** Extracts normalized non-empty target script paths from `plan.targets`. */
+export function planTargetsOf(plan: Plan): string[] {
+	if (!Array.isArray(plan.targets)) return [];
+	const out: string[] = [];
+	const seen = new Set<string>();
+	for (const item of plan.targets) {
+		const raw = typeof item === "string" ? item : isObject(item) && typeof item.script === "string" ? item.script : "";
+		const trimmed = raw.trim();
+		if (!trimmed) continue;
+		const key = trimmed.toLowerCase();
+		if (seen.has(key)) continue;
+		seen.add(key);
+		out.push(trimmed);
+	}
+	return out;
+}
+
+export type WorkspaceSymbolHit = { name: string; kind?: number; containerName?: string; path: string };
+
+/**
+ * Pure verification of a plan node's `ref` (unqualified procedure, qualified `Script.Proc`
+ * or `Category.Script.Proc`, or script/data-source `.ssl`/`.srvscr`/`.ds` path/name)
+ * against workspace symbols and files. Rejects mismatched script qualifiers (e.g.
+ * `WrongScript.Helper`) while accepting valid `.ds` and script references.
+ */
+export function refMatchesWorkspace(
+	ref: string,
+	symbols: readonly WorkspaceSymbolHit[],
+	workspaceFiles: readonly string[],
+	root?: string | null,
+): boolean {
+	const raw = ref.trim();
+	if (!raw) return false;
+	const relOf = (p: string) => normSlash(relativeTo(root, p));
+	const codeFiles = workspaceFiles.filter((f) => /\.(ssl|srvscr|ds)$/i.test(f));
+
+	// Explicit path or file extension (e.g. `src/DueDates/Holidays.ds`, `Orders/Helper.ssl`).
+	if (raw.includes("/") || raw.includes("\\") || /\.(ssl|srvscr|ds)$/i.test(raw)) {
+		const clean = normSlash(raw);
+		return codeFiles.some((f) => {
+			const rel = relOf(f);
+			const full = normSlash(f);
+			return rel === clean || full === clean || rel.endsWith(`/${clean}`) || full.endsWith(`/${clean}`) || codeMatchesRef(f, raw, root);
+		});
+	}
+
+	const parts = raw.split(".").filter(Boolean);
+	if (!parts.length) return false;
+	const last = parts.at(-1)!.toLowerCase();
+	const qualifiers = parts.slice(0, -1).map((p) => p.toLowerCase());
+	const qualPath = qualifiers.join("/");
+
+	// 1. Match workspace symbols (verifying script/category qualifiers when qualified).
+	for (const sym of symbols) {
+		const symRel = relOf(sym.path);
+		if (symRel.startsWith(".ssl-studio/") || symRel.includes("/.ssl-studio/")) continue;
+		if (sym.name.toLowerCase() !== last) continue;
+		if (qualifiers.length === 0) return true;
+		const symNoExt = stripCodeExt(symRel);
+		if (symNoExt === qualPath || symNoExt.endsWith(`/${qualPath}`)) return true;
+		if (sym.containerName) {
+			const container = sym.containerName.trim().replace(/\\/g, "/").replace(/\./g, "/").toLowerCase();
+			if (container === qualPath || container.endsWith(`/${qualPath}`)) return true;
+		}
+	}
+
+	// 2. Match script or data source files (e.g. `DueDates.Holidays` -> `src/DueDates/Holidays.ds` or `Orders.GetOpen.ds`).
+	const dottedPath = parts.map((p) => p.toLowerCase()).join("/");
+	const rawLower = raw.toLowerCase();
+	for (const f of codeFiles) {
+		const fRel = relOf(f);
+		if (fRel.startsWith(".ssl-studio/") || fRel.includes("/.ssl-studio/")) continue;
+		const fNoExt = stripCodeExt(fRel);
+		if (fNoExt === dottedPath || fNoExt.endsWith(`/${dottedPath}`)) return true;
+		if (fNoExt === rawLower || fNoExt.endsWith(`/${rawLower}`)) return true;
+	}
+
+	return false;
+}
+
+/** Validates `n.ref` on ALL actionable node kinds (`step`, `decision`, `call`). */
+export function checkPlanRefs(plan: Plan, known: (ref: string) => boolean): Finding[] {
+	return plan.nodes
+		.filter((n) => (n.kind === "call" || n.kind === "step" || n.kind === "decision") && n.ref?.trim() && !known(n.ref.trim()))
+		.map((n) => ({
+			severity: "warning" as const,
+			code: "plan-unresolved-ref",
+			message: `Nothing in the workspace is called ${n.ref!.trim()}.`,
+			node: n.id,
+		}));
+}
+
+export type PlanDocCheckOptions = {
+	tickets?: readonly { ticket?: string }[];
+	specText?: string | null;
+	docs?: readonly Pick<DocFile, "path" | "name" | "group" | "exists" | "ticket">[];
+	workspaceFiles?: readonly string[];
+	root?: string | null;
+};
+
+/** Pure doc/spec/target consistency checks for a plan (ticket, companion spec, `node.docs`, and `plan.targets`). */
+export function checkPlanDocs(plan: Plan, options: PlanDocCheckOptions): Finding[] {
+	const out: Finding[] = [];
+	const ticket = typeof plan.ticket === "string" ? plan.ticket.trim() : "";
+	const tickets = (options.tickets ?? []).filter((t) => Boolean(t.ticket?.trim()));
+	if (ticket && tickets.length > 0 && !tickets.some((t) => t.ticket!.trim().toLowerCase() === ticket.toLowerCase())) {
+		out.push({
+			severity: "warning",
+			code: "plan-unknown-ticket",
+			message: `Ticket ${ticket} was not found in the project's tickets.`,
+			field: "ticket",
+		});
+	}
+	const recorded = options.specText ? specHash(options.specText) : null;
+	if (recorded !== null && recorded !== planHash(plan)) {
+		out.push({
+			severity: "warning",
+			code: "plan-stale-spec",
+			message: "The companion spec is out of sync with the current plan. Write the spec again before building.",
+		});
+	}
+
+	// Validate per-node `docs` links against workspace docs & files.
+	if (options.docs !== undefined || options.workspaceFiles !== undefined) {
+		const existingDocs = (options.docs ?? []).filter((d) => d.exists);
+		const wsFiles = options.workspaceFiles ?? [];
+		const docExists = (ref: string): boolean => {
+			const clean = normSlash(ref);
+			if (!clean) return true;
+			const inDocs = existingDocs.some((d) => {
+				const rel = normSlash(relativeTo(options.root, d.path));
+				const full = normSlash(d.path);
+				const name = normSlash(d.name);
+				return (
+					rel === clean ||
+					full === clean ||
+					full.endsWith(`/${clean}`) ||
+					name === clean ||
+					(d.group === "tickets" && d.ticket?.trim().toLowerCase() === clean)
+				);
+			});
+			if (inDocs) return true;
+			return wsFiles.some((f) => {
+				const rel = normSlash(relativeTo(options.root, f));
+				const full = normSlash(f);
+				return rel === clean || full === clean || full.endsWith(`/${clean}`);
+			});
+		};
+		for (const n of plan.nodes) {
+			for (const ref of nodeDocsOf(n)) {
+				if (!docExists(ref)) {
+					out.push({
+						severity: "warning",
+						code: "plan-missing-doc",
+						message: `Linked document "${ref}" on "${n.text.trim() || n.id}" was not found in the workspace.`,
+						node: n.id,
+					});
+				}
+			}
+		}
+	}
+
+	// Validate `plan.targets` against workspace files.
+	if (options.workspaceFiles !== undefined) {
+		const wsFiles = options.workspaceFiles;
+		for (const target of planTargetsOf(plan)) {
+			const clean = normSlash(target);
+			const exists = wsFiles.some((f) => {
+				const rel = normSlash(relativeTo(options.root, f));
+				const full = normSlash(f);
+				return rel === clean || full === clean || full.endsWith(`/${clean}`) || codeMatchesRef(f, target, options.root);
+			});
+			if (!exists) {
+				out.push({
+					severity: "warning",
+					code: "plan-missing-target",
+					message: `Target script "${target}" was not found in the workspace.`,
+					field: "targets",
+				});
+			}
+		}
+	}
+
+	return out;
+}
+
+/**
+ * Checks plan stage `groups` against SSL `/* region <Stage>;` markers returned by `starlims-lsp`
+ * (Namespace DocumentSymbols, ADR 0003). Flags stages absent from all checked target SSL files.
+ */
+export function stageRegionDrift(plan: Plan, targetRegions: ReadonlySet<string>, targetScripts: readonly string[]): Drift[] {
+	if (!targetScripts.length || !plan.groups.length) return [];
+	const known = new Set([...targetRegions].map((r) => r.trim().toLowerCase()));
+	const out: Drift[] = [];
+	for (const g of plan.groups) {
+		const members = plan.nodes.filter((n) => n.group === g.id);
+		if (!members.length) continue;
+		const wanted = g.name.trim().toLowerCase();
+		if (!wanted || known.has(wanted)) continue;
+		out.push({
+			kind: "orphan",
+			unit: g.name,
+			node: members[0]!.id,
+			severity: "info",
+			message: `Stage "${g.name}" has no matching /* region ${g.name}; marker in ${targetScripts.join(", ")}.`,
+		});
+	}
+	return out;
+}
+
+/**
+ * Lightweight ref/target and stage-region drift check for manually authored plans
+ * whose `built.units` is empty. Uses only language-server readings & regions (ADR 0003).
+ */
+export function manualPlanDrift(
+	plan: Plan,
+	readings: ReadonlyMap<string, Reading | null>,
+	targetRegions?: ReadonlySet<string>,
+	checkedTargets: readonly string[] = [],
+): Drift[] {
+	const out: Drift[] = [];
+	if (targetRegions !== undefined && checkedTargets.length > 0) {
+		out.push(...stageRegionDrift(plan, targetRegions, checkedTargets));
+	}
+
+	const validReadings = [...readings.entries()].filter((entry): entry is [string, Reading] => entry[1] !== null);
+	if (!validReadings.length) return out;
+
+	const definedProcs = new Set<string>();
+	const calledTargets = new Set<string>();
+	const scriptNames = new Set<string>();
+	for (const [scriptPath, reading] of validReadings) {
+		const stem = stripCodeExt(baseName(scriptPath)).toLowerCase();
+		if (stem) scriptNames.add(stem);
+		if (reading.name) {
+			scriptNames.add(reading.name.toLowerCase());
+			scriptNames.add(refLastPart(reading.name).toLowerCase());
+		}
+		for (const proc of reading.procedures) definedProcs.add(proc.name.toLowerCase());
+		for (const edge of reading.edges) {
+			calledTargets.add(edge.target.toLowerCase());
+			calledTargets.add(refLastPart(edge.target).toLowerCase());
+		}
+	}
+
+	const labelTargets = checkedTargets.length ? checkedTargets.join(", ") : validReadings.map(([p]) => p).join(", ");
+	const unitLabel = checkedTargets[0] ?? validReadings[0]![0];
+	for (const n of plan.nodes) {
+		if (n.kind !== "call" && n.kind !== "step" && n.kind !== "decision") continue;
+		const ref = n.ref?.trim();
+		if (!ref) continue;
+		const refLower = ref.toLowerCase();
+		const short = refLastPart(ref).toLowerCase();
+		if (
+			definedProcs.has(short) ||
+			calledTargets.has(short) ||
+			calledTargets.has(refLower) ||
+			scriptNames.has(short) ||
+			scriptNames.has(refLower)
+		) {
+			continue;
+		}
+		out.push({
+			kind: "missing-call",
+			unit: unitLabel,
+			node: n.id,
+			severity: "warning",
+			message: `The chart's "${n.text.trim() || n.id}" references ${ref}, which is neither defined nor called in ${labelTargets}.`,
+		});
+	}
+
+	return out;
 }

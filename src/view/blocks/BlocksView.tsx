@@ -3,15 +3,45 @@
 // is a text edit on the model the text editor shows, so one undo stack serves
 // both modes (ADR 0002).
 import { Icon } from "../Icon";
-import { createEffect, createResource, createSignal, For, Match, on, onCleanup, Show, Switch } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, For, Match, on, onCleanup, Show, Switch } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
+import { findCodeCitations } from "../../shared/codeCitations";
+import { dirName, isInside, joinPath, resolvePath } from "../../shared/paths";
+import { isCatalog } from "../../shared/projectDocs";
+import type { DocFile } from "../../shared/protocol";
+import { codeMatchesRef, docsGoverningFile } from "../../shared/workContext";
+import { backend } from "../backend";
+import { docAuditData } from "../docAudit";
 import { monaco } from "../editor/monaco";
 import { editors } from "../editor/EditorGroup";
 import { regionColor } from "../editor/regions";
 import { session } from "../lsp/session";
 import { ask, choose } from "../dialogs";
-import { documents, notify, setState, state } from "../state";
+import { docs, isMarkdown } from "../project";
+import { canonical, documents, notify, openFile, setState, state } from "../state";
 import { buildTree, neighbour, pathTo, procedureGroups, splitHeader, swapLines, treeFromSyntax, type Node, type SymbolIn } from "./model";
+
+import { ticketRefsIn, type TicketSegment } from "../../shared/editorDocHelpers";
+export { ticketRefsIn, type TicketSegment };
+
+type BlockPlanBadge = { path: string; title: string; steps: number };
+type BlockDocCitation = { docPath: string; docTitle: string; docLine: number; from: number; to: number; drifted?: boolean };
+
+async function readWorkspaceText(path: string): Promise<string> {
+	const open = documents.get(canonical(path));
+	if (open) return open.model.getValue();
+	return backend.read(path).then((r) => (r.binary ? "" : r.text), () => "");
+}
+
+function collectProcedureNames(node: Node): string[] {
+	const names: string[] = [];
+	const walk = (n: Node) => {
+		if (n.kind === "procedure" && n.name) names.push(n.name.toLowerCase());
+		for (const c of n.children) walk(c);
+	};
+	walk(node);
+	return names;
+}
 
 const collapsedByPath = new Map<string, Set<string>>();
 
@@ -144,8 +174,17 @@ export function BlocksView(props: { path: string; group: number }) {
 	};
 	const select = (n: Node, focusText = false) => {
 		const editor = editors[props.group];
+		const model = doc()?.model;
 		setState("activeGroup", props.group);
-		editor?.setSelection(new monaco.Range(n.start, 1, n.start, 1));
+		if (model && !model.isDisposed()) {
+			const lineCount = model.getLineCount();
+			const start = Math.max(1, Math.min(n.start, lineCount));
+			const end = Math.max(start, Math.min(n.end, lineCount));
+			const maxCol = model.getLineMaxColumn(end);
+			editor?.setSelection(new monaco.Range(start, 1, end, maxCol));
+		} else {
+			editor?.setSelection(new monaco.Range(n.start, 1, n.end, 1));
+		}
 		setState("cursor", { line: n.start, column: 1 });
 		if (focusText) {
 			setState("groups", props.group, "mode", "text");
@@ -154,6 +193,194 @@ export function BlocksView(props: { path: string; group: number }) {
 				editor?.focus();
 			});
 		}
+	};
+
+	const runBlockCommand = (n: Node, commandId: string) => {
+		select(n);
+		void import("../commands").then((m) => m.runCommand(commandId));
+	};
+
+	// Workspace ticket lookup for clickable ticket pills in file banners & comments.
+	const ticketLookup = createMemo(() => {
+		const byKey = new Map<string, DocFile>();
+		const keys: string[] = [];
+		for (const d of docs()) {
+			if (!d.exists || d.group !== "tickets" || isCatalog(d) || !d.ticket) continue;
+			byKey.set(d.ticket.toLowerCase(), d);
+			keys.push(d.ticket);
+		}
+		return { byKey, keys };
+	});
+
+	const TicketLinkedText = (p: { text: string }) => (
+		<For each={ticketRefsIn(p.text, ticketLookup().keys)}>
+			{(seg) => {
+				if (!seg.ticket) return seg.text;
+				const ticketDoc = () => ticketLookup().byKey.get(seg.ticket!.toLowerCase());
+				return (
+					<Show when={ticketDoc()} fallback={seg.text}>
+						{(td) => (
+							<button
+								type="button"
+								class="block-ticket-pill"
+								title={`${td().ticket}${td().title ? `: ${td().title}` : ""}${td().status ? ` (${td().status})` : ""} — click to open ticket`}
+								onClick={(e) => {
+									e.stopPropagation();
+									void openFile(td().path);
+								}}
+								style={{
+									display: "inline-flex",
+									"align-items": "center",
+									padding: "0 6px",
+									margin: "0 1px",
+									"border-radius": "999px",
+									border: "1px solid color-mix(in srgb, var(--accent) 36%, transparent)",
+									background: "color-mix(in srgb, var(--accent) 12%, transparent)",
+									color: "var(--accent)",
+									"font-family": "var(--ui-font)",
+									"font-size": "var(--text-xs)",
+									"font-style": "normal",
+									"font-weight": "600",
+									"line-height": "1.45",
+									cursor: "pointer",
+									"vertical-align": "baseline",
+								}}
+							>
+								{seg.text}
+							</button>
+						)}
+					</Show>
+				);
+			}}
+		</For>
+	);
+
+	// Governing Plan & Doc citation trace data for subtle badges on procedure and region cards.
+	const govFingerprint = createMemo(() => {
+		const gov = docsGoverningFile(docs(), props.path, state.workspace?.root);
+		return `${props.path}|${state.treeVersion}|${gov.map((g) => g.file.path).join(",")}`;
+	});
+	const [traceData] = createResource(govFingerprint, async () => {
+		const wsRoot = state.workspace?.root;
+		const allDocs = docs();
+		const gov = docsGoverningFile(allDocs, props.path, wsRoot);
+		const planByProc = new Map<string, BlockPlanBadge[]>();
+		const citations: BlockDocCitation[] = [];
+		const canonSelf = canonical(props.path);
+
+		for (const g of gov) {
+			if (g.file.group === "plans") {
+				const raw = await readWorkspaceText(g.file.path);
+				if (!raw) continue;
+				try {
+					const parsed = JSON.parse(raw) as {
+						title?: string;
+						nodes?: { id?: string; text?: string; ref?: string }[];
+						targets?: (string | { script?: string; path?: string; procedures?: string[] })[];
+						built?: { units?: { name?: string; script?: string; nodes?: string[] }[] };
+					};
+					const title = parsed.title || g.file.title || g.file.name.replace(/\.plan\.json$/i, "");
+					const addProc = (procName: string, steps: number) => {
+						const k = procName.toLowerCase();
+						const arr = planByProc.get(k) ?? [];
+						const existing = arr.find((x) => canonical(x.path) === canonical(g.file.path));
+						if (existing) existing.steps = Math.max(existing.steps, steps);
+						else arr.push({ path: g.file.path, title, steps });
+						planByProc.set(k, arr);
+					};
+					for (const u of parsed.built?.units ?? []) {
+						if (!u?.name) continue;
+						if (u.script && !codeMatchesRef(props.path, u.script, wsRoot)) continue;
+						addProc(u.name, Array.isArray(u.nodes) ? u.nodes.length : 0);
+					}
+					for (const t of parsed.targets ?? []) {
+						if (typeof t === "object" && t && Array.isArray(t.procedures)) {
+							const scriptRef = t.script ?? t.path ?? "";
+							if (scriptRef && !codeMatchesRef(props.path, scriptRef, wsRoot)) continue;
+							for (const pName of t.procedures) if (typeof pName === "string") addProc(pName, 0);
+						}
+					}
+					for (const node of parsed.nodes ?? []) {
+						if (!node?.ref) continue;
+						const tail = node.ref.split(".").pop();
+						if (tail) addProc(tail, 1);
+					}
+				} catch {
+					// Ignore malformed plan JSON.
+				}
+			} else if (isMarkdown(g.file.path)) {
+				const text = await readWorkspaceText(g.file.path);
+				if (!text) continue;
+				const docTitle =
+					g.file.ticket && g.file.title && !g.file.title.startsWith(g.file.ticket)
+						? `${g.file.ticket}: ${g.file.title}`
+						: g.file.title || g.file.name;
+				for (const cit of findCodeCitations(text)) {
+					if (!cit.file) continue;
+					let matches = codeMatchesRef(props.path, cit.file, wsRoot);
+					if (!matches && wsRoot) {
+						const resolved = cit.file.startsWith("/")
+							? joinPath(wsRoot, ...cit.file.split("/").filter(Boolean))
+							: resolvePath(dirName(g.file.path), cit.file);
+						if (isInside(wsRoot, resolved) && canonical(resolved) === canonSelf) matches = true;
+					}
+					if (matches) {
+						citations.push({ docPath: g.file.path, docTitle, docLine: cit.line, from: cit.from, to: cit.to });
+					}
+				}
+			}
+		}
+		return { planByProc, citations };
+	});
+
+	const allFileCitations = createMemo<BlockDocCitation[]>(() => {
+		const base = traceData()?.citations ?? [];
+		const canonSelf = canonical(props.path);
+		const auditIssues = (docAuditData().citationIssues ?? []).filter((c) => canonical(c.targetPath) === canonSelf);
+		if (!auditIssues.length) return base;
+		const merged = base.map((c) => {
+			const drifted = auditIssues.some((i) => canonical(i.docPath) === canonical(c.docPath) && i.docLine === c.docLine);
+			return drifted ? { ...c, drifted: true } : c;
+		});
+		const allDocs = docs();
+		for (const issue of auditIssues) {
+			const exists = merged.some((c) => canonical(c.docPath) === canonical(issue.docPath) && c.docLine === issue.docLine);
+			if (!exists) {
+				const d = allDocs.find((f) => canonical(f.path) === canonical(issue.docPath));
+				merged.push({
+					docPath: issue.docPath,
+					docTitle: d?.title || d?.name || issue.docPath,
+					docLine: issue.docLine,
+					from: issue.citation.from,
+					to: issue.citation.to,
+					drifted: true,
+				});
+			}
+		}
+		return merged;
+	});
+
+	const badgesFor = (n: Node): { plans: BlockPlanBadge[]; docs: BlockDocCitation[] } => {
+		if (n.kind !== "procedure" && n.kind !== "region") return { plans: [], docs: [] };
+		const planMap = traceData()?.planByProc;
+		const planSeen = new Map<string, BlockPlanBadge>();
+		if (planMap) {
+			const procNames = n.kind === "procedure" ? (n.name ? [n.name.toLowerCase()] : []) : collectProcedureNames(n);
+			for (const name of procNames) {
+				for (const badge of planMap.get(name) ?? []) {
+					const k = canonical(badge.path);
+					if (!planSeen.has(k)) planSeen.set(k, badge);
+				}
+			}
+		}
+		const docSeen = new Map<string, BlockDocCitation>();
+		for (const cit of allFileCitations()) {
+			if (cit.from > n.end || cit.to < n.start) continue;
+			const k = canonical(cit.docPath);
+			const prev = docSeen.get(k);
+			if (!prev || (cit.drifted && !prev.drifted)) docSeen.set(k, cit);
+		}
+		return { plans: [...planSeen.values()], docs: [...docSeen.values()] };
 	};
 
 	/** Replaces lines start..end (1-based) with `text`, as one undoable edit. */
@@ -266,6 +493,15 @@ export function BlocksView(props: { path: string; group: number }) {
 	// Out of the Tab order: the keys on the view do the same (see onKey), and the buttons show for the selected block.
 	const Tools = (props: { node: Node }) => (
 		<span class="block-tools" onClick={(e) => e.stopPropagation()}>
+			<button tabindex={-1} title="Copy Markdown code citation" aria-label="Copy Markdown code citation" onClick={() => runBlockCommand(props.node, "copy-code-citation")}>
+				<Icon name="quote" />
+			</button>
+			<button tabindex={-1} title="New decision about this block…" aria-label="New decision about this block" onClick={() => runBlockCommand(props.node, "new-decision")}>
+				<Icon name="lightbulb" />
+			</button>
+			<button tabindex={-1} title="Ask the Agent about this block…" aria-label="Ask the Agent about this block" onClick={() => runBlockCommand(props.node, "agent-ask")}>
+				<Icon name="sparkle" />
+			</button>
 			<button tabindex={-1} title="Move up (Alt+Up)" aria-label="Move up" onClick={() => void move(props.node, -1)}>
 				<Icon name="arrow-up" />
 			</button>
@@ -395,12 +631,105 @@ export function BlocksView(props: { path: string; group: number }) {
 
 	function Block(p: { node: Node }) {
 		const n = p.node;
+		const badges = () => badgesFor(n);
+		const bannerTickets = () => {
+			if (n.kind !== "comment" || n.start !== 1) return [];
+			const seen = new Set<string>();
+			const found: DocFile[] = [];
+			for (const seg of ticketRefsIn(lines(n), ticketLookup().keys)) {
+				if (!seg.ticket) continue;
+				const k = seg.ticket.toLowerCase();
+				if (seen.has(k)) continue;
+				const td = ticketLookup().byKey.get(k);
+				if (td) {
+					seen.add(k);
+					found.push(td);
+				}
+			}
+			return found.slice(0, 4);
+		};
+		const badgeStyle = (warn = false) => ({
+			display: "inline-flex",
+			"align-items": "center",
+			gap: "3px",
+			padding: "1px 7px",
+			"border-radius": "999px",
+			border: warn
+				? "1px solid color-mix(in srgb, var(--warning) 45%, transparent)"
+				: "1px solid var(--border)",
+			background: warn
+				? "color-mix(in srgb, var(--warning) 14%, transparent)"
+				: "color-mix(in srgb, var(--accent) 10%, transparent)",
+			color: warn ? "var(--warning)" : "var(--accent)",
+			"font-family": "var(--ui-font)",
+			"font-size": "var(--text-xs)",
+			"font-weight": "500",
+			"white-space": "nowrap",
+			cursor: "pointer",
+			flex: "none",
+		});
 		const header = (label: any, meta?: string) => (
 			<div class="block-head" {...dropZone(n.start)} classList={{ drop: dropAt() === n.start }} onClick={() => select(n)} onDblClick={() => toggle(n)}>
 				<button class="twisty" tabindex={-1} aria-label={isCollapsed(n) ? "Unfold" : "Fold"} aria-expanded={!isCollapsed(n)} onClick={(e) => (e.stopPropagation(), toggle(n))}>
 					<Icon name={isCollapsed(n) ? "chevron-right" : "chevron-down"} />
 				</button>
 				<span class="block-label">{label}</span>
+				<Show when={badges().plans.length}>
+					<button
+						type="button"
+						class="block-plan-badge"
+						title={`Linked plan: ${badges().plans.map((pl) => pl.title).join(", ")} — click to open`}
+						style={badgeStyle(false)}
+						onClick={(e) => {
+							e.stopPropagation();
+							void openFile(badges().plans[0]!.path);
+						}}
+					>
+						<Icon name="graph" />
+						<span>{badges().plans.length === 1 ? "Plan" : `${badges().plans.length} plans`}</span>
+					</button>
+				</Show>
+				<Show when={badges().docs.length}>
+					{(() => {
+						const list = () => badges().docs;
+						const drifted = () => list().some((c) => c.drifted);
+						return (
+							<button
+								type="button"
+								class="block-doc-badge"
+								title={`Cited by: ${list().map((c) => `${c.docTitle} (line ${c.docLine}${c.drifted ? ", drifted" : ""})`).join(", ")} — click to open`}
+								style={badgeStyle(drifted())}
+								onClick={(e) => {
+									e.stopPropagation();
+									const first = list()[0]!;
+									void openFile(first.docPath, { reveal: { line: first.docLine } });
+								}}
+							>
+								<Icon name={drifted() ? "warning" : "references"} />
+								<span>{list().length === 1 ? "Doc" : `${list().length} docs`}</span>
+							</button>
+						);
+					})()}
+				</Show>
+				<Show when={bannerTickets().length}>
+					<For each={bannerTickets()}>
+						{(td) => (
+							<button
+								type="button"
+								class="block-ticket-pill"
+								title={`${td.ticket}${td.title ? `: ${td.title}` : ""}${td.status ? ` (${td.status})` : ""} — click to open ticket`}
+								style={badgeStyle(false)}
+								onClick={(e) => {
+									e.stopPropagation();
+									void openFile(td.path);
+								}}
+							>
+								<Icon name="tag" />
+								<span>{td.ticket}</span>
+							</button>
+						)}
+					</For>
+				</Show>
 				<Show when={meta}>
 					<span class="meta">{meta}</span>
 				</Show>
@@ -460,10 +789,23 @@ export function BlocksView(props: { path: string; group: number }) {
 				</Match>
 				<Match when={n.kind === "comment"}>
 					<section class="b-comment" classList={{ selected: selectedKey() === n.key, banner: n.start === 1, "b-doc": Boolean(n.doc) }}>
-						{header(n.start === 1 ? <strong>File banner</strong> : n.doc ? <span class="doc-mark">Doc block</span> : <span class="comment-first">{firstLine(n).trim()}</span>, size)}
+						{header(
+							n.start === 1 ? (
+								<strong>File banner</strong>
+							) : n.doc ? (
+								<span class="doc-mark">Doc block</span>
+							) : (
+								<span class="comment-first">
+									<TicketLinkedText text={firstLine(n).trim()} />
+								</span>
+							),
+							size,
+						)}
 						<Show when={!isCollapsed(n)}>
 							<div class="block-body">
-								<pre class="comment-text">{lines(n).split(/\r?\n/).slice(1).join("\n")}</pre>
+								<pre class="comment-text">
+									<TicketLinkedText text={lines(n).split(/\r?\n/).slice(1).join("\n")} />
+								</pre>
 							</div>
 						</Show>
 					</section>

@@ -51,8 +51,8 @@ describe("a table as a Jira server exports it", () => {
 		expect(ticket("LAB-10").description).toBe("### Why\n\nEach site keeps `holidays` of its own.\n\n1. first\n1. second\n\n```sql\nSELECT * FROM DEMO_HOLIDAYS\n```\n\nSee [the wiki](https://example.test/wiki).");
 		expect(ticket("LAB-12").description).toBe("Plain words only.");
 	});
-	test("people, rank, sprint and comments are not read", () => {
-		expect(Object.keys(ticket("LAB-11")).sort()).toEqual(["description", "key", "parent", "related", "source", "status", "title", "type"]);
+	test("people, rank and comments are not read; priority and sprint/release are preserved", () => {
+		expect(Object.keys(ticket("LAB-11")).sort()).toEqual(["description", "key", "parent", "priority", "related", "release", "source", "status", "title", "type"]);
 	});
 });
 

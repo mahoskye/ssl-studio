@@ -1,5 +1,6 @@
 // What the Explorer offers for a file or a folder, and what it refuses. Pure,
 // so it can be tested.
+import type { RowMenuEntry } from "../../shared/contextMenu";
 import { dirName, isInside } from "../../shared/paths";
 
 export const OPEN = "Open";
@@ -36,7 +37,7 @@ export type Action =
 	| typeof SCHEMA_FROM_SQL
 	| typeof OPEN_GOVERNING_DOC
 	| typeof ATTACH_TO_AGENT;
-export type MenuEntry = "separator" | { label: string; value: Action; keys?: string };
+export type MenuEntry = RowMenuEntry;
 export type ExplorerMenuExtra = { sql?: boolean; governingCount?: number; attachable?: boolean };
 
 /** True for the workspace folder and for anything that holds it: never renamed or trashed from here. */
@@ -54,10 +55,11 @@ export function menuFor(kind: "file" | "dir", path: string, root: string, canPas
 }
 
 /**
- * VS Code-grouped Explorer context menu with section dividers and shortcut hints.
+ * Sectioned Explorer context menu with dividers, a Copy path submenu,
+ * shortcut hints, and isolated destructive actions.
  */
 export function menuEntriesFor(kind: "file" | "dir", path: string, root: string, canPaste = false, extra?: ExplorerMenuExtra): MenuEntry[] {
-	const item = (value: Action, label: string = value, keys?: string): MenuEntry => ({ label, value, keys });
+	const item = (value: Action, label: string = value, keys?: string, danger?: boolean): MenuEntry => ({ label, value, keys, danger });
 	const paste: MenuEntry[] = canPaste ? [item(PASTE, PASTE, "Ctrl+V")] : [];
 	if (holdsRoot(root, path)) {
 		return [
@@ -71,8 +73,12 @@ export function menuEntriesFor(kind: "file" | "dir", path: string, root: string,
 		];
 	}
 	const clipGroup: MenuEntry[] = [item(CUT, CUT, "Ctrl+X"), item(COPY, COPY, "Ctrl+C"), ...paste];
-	const pathGroup: MenuEntry[] = [item(COPY_PATH), item(COPY_RELATIVE), item(COPY_NAME)];
-	const editGroup: MenuEntry[] = [item(RENAME, RENAME, "F2"), item(TRASH, TRASH, "Delete")];
+	const pathSubmenu: MenuEntry = {
+		label: "Copy path",
+		children: [item(COPY_PATH), item(COPY_RELATIVE), item(COPY_NAME)],
+	};
+	const renameItem = item(RENAME, RENAME, "F2");
+	const trashItem = item(TRASH, TRASH, "Delete", true);
 	if (kind === "dir") {
 		return [
 			item(NEW_FILE, "New file…"),
@@ -82,9 +88,11 @@ export function menuEntriesFor(kind: "file" | "dir", path: string, root: string,
 			"separator",
 			...clipGroup,
 			"separator",
-			...pathGroup,
+			pathSubmenu,
 			"separator",
-			...editGroup,
+			renameItem,
+			"separator",
+			trashItem,
 		];
 	}
 	const docGroup: MenuEntry[] = [];
@@ -100,9 +108,11 @@ export function menuEntriesFor(kind: "file" | "dir", path: string, root: string,
 		"separator",
 		...clipGroup,
 		"separator",
-		...pathGroup,
+		pathSubmenu,
 		"separator",
-		...editGroup,
+		renameItem,
+		"separator",
+		trashItem,
 	];
 }
 

@@ -2,6 +2,7 @@
 // Synced 1:1 with the open document's Monaco ITextModel (ADR 0002: plain text stays the single
 // source of truth for saves, undo across views, Git, Search, Diagnostics, Agent, and Document Outline).
 import { history } from "@codemirror/commands";
+import { foldAll as cmFoldAll, foldEffect, foldedRanges, unfoldAll as cmUnfoldAll } from "@codemirror/language";
 import { closeSearchPanel, openSearchPanel, searchPanelOpen } from "@codemirror/search";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { Annotation, Compartment, EditorSelection, EditorState, RangeSetBuilder, StateEffect, StateField, Transaction, type Extension } from "@codemirror/state";
@@ -26,7 +27,7 @@ import {
 import { tagSearchPattern, workspaceTags } from "../../shared/tags";
 import { documentHeadings, findHeadingLine, withImageWidth } from "../../shared/markdownEdit";
 import type { TableAlign } from "../../shared/markdownTables";
-import { docByName, linkedFrom, namedLink } from "../../shared/namedLinks";
+import { docByName, linkedFrom, namedLink, nameFor } from "../../shared/namedLinks";
 import { baseName, dirName, isInside, joinPath, relativeTo, resolvePath } from "../../shared/paths";
 import { DOC_FOLDERS, isCatalog, registryTitle, statusChoices, toneOf } from "../../shared/projectDocs";
 import { rowsLine } from "../../shared/registryTickets";
@@ -38,7 +39,8 @@ import { ask, choose } from "../dialogs";
 import { Icon } from "../Icon";
 import { Menu } from "../Menu";
 import { noteCursor } from "../navigation";
-import { chooseFromMenu } from "../panels/RowMenu";
+import { submenuOrInline } from "../../shared/contextMenu";
+import { chooseFromMenu, type RowMenuEntry } from "../panels/RowMenu";
 import { searchFor } from "../panels/Search";
 import { docs } from "../project";
 import {
@@ -76,7 +78,7 @@ import {
 import { insertCalloutInteractive, insertImageInteractive, insertMarkdownTemplate } from "../templater";
 import { themeVersion } from "../themes/themes";
 import { liveCodeHighlightPlugin } from "./cmCodeHighlight";
-import { cmMarkdownCompletion } from "./cmCompletion";
+import { cmMarkdownCompletion, createTextareaCompleter, type TextareaCompleter } from "./cmCompletion";
 import {
 	activeTableAtCursor,
 	cmAutoWrapExtension,
@@ -108,14 +110,32 @@ import { cmMarkdownHighlight, cmStudioTheme } from "./cmTheme";
 import { buildHoverPreview, type HoverPreviewData } from "./hoverPreview";
 import { hydrateImagesInElement } from "./imageResolve";
 import { formatCodeFence } from "./languages";
-import { bumpLiveSelection, registerLiveEditor, registerReadFind, type LiveEditorHandle } from "./liveBridge";
+import {
+	bumpLiveSelection,
+	emitSplitScrollSync,
+	onSplitScrollSync,
+	registerLiveEditor,
+	registerReadFind,
+	saveMarkdownSyncAnchor,
+	takeMarkdownSyncAnchor,
+	type LiveEditorHandle,
+} from "./liveBridge";
 import { colourCode } from "./markdownCode";
 import { hydrateMathInElement } from "./markdownHtml";
+import {
+	extractLineContextSnippet,
+	extractOutgoingLinks,
+	findUnlinkedMentions,
+	linkifyMentionInText,
+	mentionTermsForDoc,
+	type OutgoingLinkItem,
+	type UnlinkedMentionItem,
+} from "./markdownLinks";
 import { mdOutline, setMdOutline } from "./mdOutline";
 import { monaco } from "./monaco";
 import { askRows } from "./tableRows";
 
-type SavedLiveView = { anchor: number; head: number; scrollTop: number };
+type SavedLiveView = { anchor: number; head: number; scrollTop: number; folds?: [number, number][] };
 const savedLiveViews = new Map<string, SavedLiveView>();
 
 type HoverCardState = HoverPreviewData & {
@@ -189,6 +209,9 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 	const [editYaml, setEditYaml] = createSignal(false);
 	const [workGuideOpen, setWorkGuideOpen] = createSignal(false);
 	const [backlinksOpen, setBacklinksOpen] = createSignal(true);
+	const [linksTab, setLinksTab] = createSignal<"backlinks" | "outgoing" | "unlinked">("backlinks");
+	const [linksForcedVisible, setLinksForcedVisible] = createSignal(false);
+	const [linksRefresh, setLinksRefresh] = createSignal(0);
 	const [hoverCard, setHoverCard] = createSignal<HoverCardState | null>(null);
 	const [tableHud, setTableHud] = createSignal<ActiveTableHud | null>(null);
 	const [lightbox, setLightbox] = createSignal<(ImageLightboxInfo & { zoomFull?: boolean }) | null>(null);
@@ -199,7 +222,9 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 	let hostEl!: HTMLDivElement;
 	let pageEl!: HTMLDivElement;
 	let cmMountEl!: HTMLDivElement;
+	let linksSectionEl: HTMLElement | undefined;
 	let yamlInputEl: HTMLTextAreaElement | undefined;
+	let yamlCompleter: TextareaCompleter | undefined;
 	let yamlEditBtnEl: HTMLButtonElement | undefined;
 	let hoverBodyEl: HTMLDivElement | undefined;
 	let cmView: EditorView | undefined;
@@ -207,6 +232,9 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 	let syncingFromCm = false;
 	let syncingFromModel = false;
 	let refreshSeq = 0;
+	let lastTopLine = 1;
+	let scrollSyncRaf = 0;
+	let suppressSplitSyncUntil = 0;
 
 	const modeExtensions = (read: boolean): Extension => [
 		readOnlyModeFacet.of(read),
@@ -660,24 +688,136 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		return `${list.length}:${list.map((d) => `${d.path}|${d.title ?? ""}|${d.broken?.length ?? 0}`).join("\n")}`;
 	});
 	const [linked] = createResource(
-		() => ({ path: props.path, sig: docsFingerprint(), root: state.workspace?.root }),
+		() => ({ path: props.path, sig: docsFingerprint(), root: state.workspace?.root, rev: linksRefresh() }),
 		async ({ path, root }) => {
 			if (!root) return [];
 			const files = docs();
 			try {
 				const [byPath, byName] = await Promise.all([backend.linksTo(path), backend.namesIn()]);
-				return linkedFrom(
+				const hits = linkedFrom(
 					canonical(path),
 					byPath.map((link) => ({ path: canonical(link.path), line: link.line })),
 					byName.map((place) => ({ ...place, path: canonical(place.path) })),
 					files.map((file) => ({ ...file, path: canonical(file.path) })),
 					root,
 				);
+				return await Promise.all(
+					hits.map(async (item) => {
+						const content = await readFileText(item.path);
+						return { ...item, snippet: extractLineContextSnippet(content, item.line) };
+					}),
+				);
 			} catch {
 				return [];
 			}
 		},
 	);
+
+	// Outgoing links in this document (resolved links, broken links, transclusions, ticket refs, web links).
+	const outgoingLinks = createMemo<OutgoingLinkItem[]>(() =>
+		extractOutgoingLinks(text(), props.path, docs(), {
+			root: state.workspace?.root,
+			broken: listed()?.broken,
+		}),
+	);
+	const brokenOutgoingCount = createMemo(() => outgoingLinks().filter((o) => o.broken).length);
+
+	// Unlinked plain-text mentions of this document's title/ticket in other workspace Markdown docs.
+	const [unlinkedMentions] = createResource(
+		() => {
+			const root = state.workspace?.root;
+			const me = listed();
+			const title = me?.title || one(front().values.title) || "";
+			const tKey = ticket();
+			const stem = baseName(props.path).replace(/\.(md|markdown)$/i, "");
+			const linkedPaths = (linked() ?? []).map((b) => canonical(b.path));
+			return root ? { path: props.path, root, title, ticket: tKey, stem, sig: docsFingerprint(), linkedPaths, rev: linksRefresh() } : null;
+		},
+		async (src) => {
+			if (!src) return [] as UnlinkedMentionItem[];
+			const terms = mentionTermsForDoc({ title: src.title, ticket: src.ticket, stem: src.stem });
+			if (!terms.length) return [] as UnlinkedMentionItem[];
+			const linkedSet = new Set(src.linkedPaths.map((p) => canonical(p)));
+			const allMd = new Map<string, { path: string; name: string; title?: string }>();
+			for (const d of docs()) {
+				if (!d.exists || !/\.(md|markdown)$/i.test(d.path)) continue;
+				const k = canonical(d.path);
+				if (k === canonical(src.path) || linkedSet.has(k)) continue;
+				allMd.set(k, { path: d.path, name: d.name, title: d.title });
+			}
+			if (!allMd.size) return [] as UnlinkedMentionItem[];
+			const candidatePaths = new Set<string>();
+			for (const term of terms.slice(0, 2)) {
+				const hits = await backend.search(term, { wholeWord: true, caseSensitive: false }).catch(() => []);
+				for (const h of hits) {
+					const k = canonical(h.path);
+					if (allMd.has(k)) candidatePaths.add(k);
+					if (candidatePaths.size >= 24) break;
+				}
+				if (candidatePaths.size >= 24) break;
+			}
+			if (!candidatePaths.size) return [] as UnlinkedMentionItem[];
+			const candidates = await Promise.all(
+				[...candidatePaths].map(async (k) => {
+					const info = allMd.get(k)!;
+					return { ...info, text: await readFileText(info.path) };
+				}),
+			);
+			return findUnlinkedMentions(
+				{ path: src.path, title: src.title, ticket: src.ticket, stem: src.stem },
+				candidates,
+				linkedSet,
+			);
+		},
+	);
+
+	const totalLinksCount = createMemo(
+		() => (linked()?.length ?? 0) + outgoingLinks().length + (unlinkedMentions()?.length ?? 0),
+	);
+
+	const linkifyUnlinkedMention = async (mention: UnlinkedMentionItem) => {
+		const root = state.workspace?.root;
+		const me = listed();
+		const wikiName = (me ? nameFor(me, docs(), root) : null) ?? baseName(props.path).replace(/\.(md|markdown)$/i, "");
+		if (!wikiName) return;
+		const key = canonical(mention.path);
+		const openDoc = documents.get(key);
+		const curText = openDoc ? openDoc.model.getValue() : await readFileText(mention.path);
+		const next = linkifyMentionInText(curText, mention.line, mention.column, mention.matchedText, wikiName);
+		if (!next || next === curText) {
+			notify("That mention moved or was already updated.");
+			setLinksRefresh((v) => v + 1);
+			return;
+		}
+		try {
+			if (openDoc) {
+				openDoc.model.pushStackElement();
+				openDoc.model.pushEditOperations([], [{ range: openDoc.model.getFullModelRange(), text: next, forceMoveMarkers: true }], () => null);
+				openDoc.model.pushStackElement();
+				if (!state.dirty[key]) await save(key);
+			} else {
+				await backend.historyKeep(mention.path).catch(() => {});
+				await backend.write(mention.path, next);
+			}
+			setState("treeVersion", (v) => v + 1);
+			setLinksRefresh((v) => v + 1);
+			notify(`Linked mention in ${called(key)}.`);
+		} catch (err: any) {
+			notify(`Could not link mention: ${err?.message ?? err}`, "error");
+		}
+	};
+
+	const openLinksInspector = () => {
+		setLinksForcedVisible(true);
+		setBacklinksOpen(true);
+		if ((linked()?.length ?? 0) === 0) {
+			if (outgoingLinks().length > 0) setLinksTab("outgoing");
+			else if ((unlinkedMentions()?.length ?? 0) > 0) setLinksTab("unlinked");
+		}
+		requestAnimationFrame(() => {
+			linksSectionEl?.scrollIntoView({ behavior: "smooth", block: "start" });
+		});
+	};
 
 	const called = (path: string) => {
 		const file = docs().find((d) => canonical(d.path) === path);
@@ -1101,20 +1241,20 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			const COPY = "Copy";
 			const OPEN = "Open link";
 			const COPY_LINK = "Copy link";
-			const EDIT = "Edit in Live view (Ctrl+E)";
+			const EDIT = "Edit in Live view";
 			const TO_SOURCE = "Switch to Source view";
 			const PATH = "Copy path";
 			const RELATIVE = "Copy path in the project";
 			const NAME = "Copy file name";
 			const SHOW = "Show in the Explorer";
-			const items = [
-				...(words.trim() ? [COPY] : []),
+			const items: RowMenuEntry[] = [
+				...(words.trim() ? [{ label: COPY, value: COPY, keys: "Ctrl+C" }] : []),
 				...(linkEl ? [OPEN, COPY_LINK] : []),
-				EDIT,
+				"separator",
+				{ label: EDIT, value: EDIT, keys: "Ctrl+E" },
 				TO_SOURCE,
-				PATH,
-				...(inFolder ? [RELATIVE] : []),
-				NAME,
+				"separator",
+				...submenuOrInline("Copy path", [PATH, ...(inFolder ? [RELATIVE] : []), NAME]),
 				...(inFolder ? [SHOW] : []),
 			];
 			const picked = await chooseFromMenu(`Actions for ${baseName(props.path)}`, items, at);
@@ -1133,8 +1273,10 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 				setMarkdownMode(props.path, "live", props.group);
 				setState("activeGroup", props.group);
 				queueMicrotask(() => cmView?.focus());
-			} else if (picked === TO_SOURCE) setMarkdownMode(props.path, "source", props.group);
-			else if (picked === SHOW) (await import("../panels/Explorer")).showInExplorer(props.path);
+			} else if (picked === TO_SOURCE) {
+				saveSyncAnchor();
+				setMarkdownMode(props.path, "source", props.group);
+			} else if (picked === SHOW) (await import("../panels/Explorer")).showInExplorer(props.path);
 			else await copyPath(picked === PATH ? "whole" : picked === NAME ? "name" : "relative", props.path);
 			return;
 		}
@@ -1158,55 +1300,90 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 				: null;
 
 		const OPEN_LINK = "Open link";
-		const FIX_BROKEN = brokenHit?.instead ? `Fix broken link → ${brokenHit.instead}` : "";
+		const FIX_BROKEN = brokenHit?.instead ? `Fix broken link to ${brokenHit.instead}` : "";
 		const CREATE_MISSING = missingTargetPath ? `Create missing file ${relativeTo(state.workspace?.root, missingTargetPath).replace(/\\/g, "/")}` : "";
-		const ADD_PROPS = "Add YAML properties…";
+		const ADD_PROPS = "YAML properties…";
 		const FORMAT_BLOCK = clickedFence?.rawLang ? `Format ${clickedFence.rawLang} code block` : "Format code block";
-		const FORMAT_DOC = "Format document (Ctrl+Shift+I)";
+		const FORMAT_DOC = "Format document";
 		const CUT = "Cut";
 		const COPY = "Copy";
 		const PASTE = "Paste";
+		const PASTE_PLAIN = "Paste as plain text";
 		const SELECT_ALL = "Select all";
-		const INSERT_TEMPLATE = "Insert template…";
-		const INSERT_CALLOUT = "Insert callout…";
-		const INSERT_TABLE = "Insert table";
-		const INSERT_IMAGE = "Insert image…";
-		const BOLD = "Bold (Ctrl+B)";
-		const ITALIC = "Italic (Ctrl+I)";
-		const CODE = "Inline code (Ctrl+`)";
-		const STRIKE = "Strikethrough (Ctrl+Shift+X)";
-		const HIGHLIGHT = "Highlight (Ctrl+Alt+H)";
-		const LINK = "Insert link (Ctrl+K)";
-		const CHECKBOX = "Toggle checkbox (Ctrl+L)";
+		const INSERT_TEMPLATE = "Template…";
+		const INSERT_CALLOUT = "Callout…";
+		const INSERT_TABLE = "Table";
+		const INSERT_IMAGE = "Image…";
+		const BOLD = "Bold";
+		const ITALIC = "Italic";
+		const CODE = "Inline code";
+		const STRIKE = "Strikethrough";
+		const HIGHLIGHT = "Highlight";
+		const LINK = "Insert link";
+		const CHECKBOX = "Toggle checkbox";
 		const ASK_AGENT = "Ask the Agent About This…";
-		const TO_READ = "Switch to Read view (Ctrl+E)";
+		const TO_READ = "Switch to Read view";
 		const TO_SOURCE = "Switch to Source view";
+		const PATH = "Copy path";
+		const RELATIVE = "Copy path in the project";
+		const NAME = "Copy file name";
 		const SHOW = "Show in the Explorer";
 
-		const items = [
+		const contextual: RowMenuEntry[] = [
 			...(FIX_BROKEN ? [FIX_BROKEN] : []),
 			...(CREATE_MISSING ? [CREATE_MISSING] : []),
 			...(linkEl || cursorLink ? [OPEN_LINK] : []),
-			...(!yamlSpan() ? [ADD_PROPS] : []),
 			...(canFormatFence ? [FORMAT_BLOCK] : []),
-			...(hasSelection ? [CUT, COPY] : []),
-			PASTE,
-			SELECT_ALL,
-			FORMAT_DOC,
-			INSERT_TEMPLATE,
-			INSERT_CALLOUT,
-			INSERT_TABLE,
-			INSERT_IMAGE,
-			BOLD,
-			ITALIC,
-			CODE,
-			STRIKE,
-			HIGHLIGHT,
-			LINK,
-			CHECKBOX,
+		];
+
+		const items: RowMenuEntry[] = [
+			...contextual,
+			"separator",
+			...(hasSelection
+				? [
+						{ label: CUT, value: CUT, keys: "Ctrl+X" },
+						{ label: COPY, value: COPY, keys: "Ctrl+C" },
+					]
+				: []),
+			{ label: PASTE, value: PASTE, keys: "Ctrl+V" },
+			{ label: PASTE_PLAIN, value: PASTE_PLAIN, keys: "Ctrl+Shift+V" },
+			{ label: SELECT_ALL, value: SELECT_ALL, keys: "Ctrl+A" },
+			"separator",
+			{
+				label: "Format",
+				children: [
+					{ label: BOLD, value: BOLD, keys: "Ctrl+B" },
+					{ label: ITALIC, value: ITALIC, keys: "Ctrl+I" },
+					{ label: CODE, value: CODE, keys: "Ctrl+`" },
+					{ label: STRIKE, value: STRIKE, keys: "Ctrl+Shift+X" },
+					{ label: HIGHLIGHT, value: HIGHLIGHT, keys: "Ctrl+Alt+H" },
+					"separator",
+					{ label: LINK, value: LINK, keys: "Ctrl+K" },
+					{ label: CHECKBOX, value: CHECKBOX, keys: "Ctrl+L" },
+				],
+			},
+			{
+				label: "Insert",
+				children: [
+					INSERT_TEMPLATE,
+					INSERT_CALLOUT,
+					INSERT_TABLE,
+					INSERT_IMAGE,
+					...(!yamlSpan() ? (["separator", ADD_PROPS] as RowMenuEntry[]) : []),
+				],
+			},
+			{ label: FORMAT_DOC, value: FORMAT_DOC, keys: "Ctrl+Shift+I" },
+			"separator",
 			ASK_AGENT,
-			TO_READ,
-			TO_SOURCE,
+			"separator",
+			{
+				label: "View",
+				children: [
+					{ label: TO_READ, value: TO_READ, keys: "Ctrl+E" },
+					TO_SOURCE,
+				],
+			},
+			...submenuOrInline("Copy path", [PATH, ...(inFolder ? [RELATIVE] : []), NAME]),
 			...(inFolder ? [SHOW] : []),
 		];
 
@@ -1218,7 +1395,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			const fixed = withLinkFile(cur, brokenHit.line || clickLine, brokenHit.href, brokenHit.instead, brokenHit.column);
 			if (fixed !== null && fixed !== cur) {
 				cmView.dispatch({ changes: { from: 0, to: cur.length, insert: fixed }, userEvent: "input.fix" });
-				notify(`Fixed broken link → ${brokenHit.instead}.`);
+				notify(`Fixed broken link to ${brokenHit.instead}.`);
 			}
 		} else if (picked === CREATE_MISSING && missingTargetPath) {
 			try {
@@ -1260,6 +1437,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		else if (picked === CUT) runCmAction(cmView, "editor.action.clipboardCutAction");
 		else if (picked === COPY) runCmAction(cmView, "editor.action.clipboardCopyAction");
 		else if (picked === PASTE) runCmAction(cmView, "editor.action.clipboardPasteAction");
+		else if (picked === PASTE_PLAIN) runCmAction(cmView, "md-paste-plain");
 		else if (picked === SELECT_ALL) runCmAction(cmView, "editor.action.selectAll");
 		else if (picked === INSERT_TEMPLATE) void insertMarkdownTemplate();
 		else if (picked === INSERT_CALLOUT) void insertCalloutInteractive();
@@ -1274,8 +1452,13 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		else if (picked === CHECKBOX) runCmAction(cmView, "md-checkbox");
 		else if (picked === ASK_AGENT) void import("../commands").then((m) => m.runCommand("agent-ask"));
 		else if (picked === TO_READ) setMarkdownMode(props.path, "read", props.group);
-		else if (picked === TO_SOURCE) setMarkdownMode(props.path, "source", props.group);
-		else if (picked === SHOW) void import("../panels/Explorer").then((m) => m.showInExplorer(props.path));
+		else if (picked === TO_SOURCE) {
+			saveSyncAnchor();
+			setMarkdownMode(props.path, "source", props.group);
+		}
+		else if (picked === PATH || picked === RELATIVE || picked === NAME) {
+			await (await import("../commands")).copyPath(picked === PATH ? "whole" : picked === NAME ? "name" : "relative", props.path);
+		} else if (picked === SHOW) void import("../panels/Explorer").then((m) => m.showInExplorer(props.path));
 	};
 
 	// --- Sync CM6 Transaction -> Monaco ITextModel (CRLF-safe, typing-coalesced undo) ---
@@ -1323,13 +1506,48 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		}
 	};
 
+	const currentTopLine = (view: EditorView): number => {
+		if (!hostEl) return Math.max(1, lastTopLine);
+		const hostRect = hostEl.getBoundingClientRect();
+		const contentRect = view.contentDOM.getBoundingClientRect();
+		if (hostRect.height === 0 && contentRect.height === 0) {
+			return Math.max(1, Math.min(lastTopLine, view.state.doc.lines));
+		}
+		const relY = Math.max(0, hostRect.top - contentRect.top + 4);
+		const block = view.lineBlockAtHeight(relY);
+		const lineNum = view.state.doc.lineAt(block.from).number;
+		lastTopLine = lineNum;
+		return lineNum;
+	};
+
+	const saveSyncAnchor = () => {
+		if (!cmView) return;
+		const topLine = currentTopLine(cmView);
+		if (isRead()) {
+			saveMarkdownSyncAnchor(props.group, props.path, { line: topLine, column: 1, topLine });
+			return;
+		}
+		const head = cmView.state.selection.main.head;
+		const ln = cmView.state.doc.lineAt(head);
+		saveMarkdownSyncAnchor(props.group, props.path, {
+			line: ln.number,
+			column: head - ln.from + 1,
+			topLine,
+		});
+	};
+
 	const saveView = () => {
 		if (!cmView) return;
 		const main = cmView.state.selection.main;
+		const folds: [number, number][] = [];
+		foldedRanges(cmView.state).between(0, cmView.state.doc.length, (from, to) => {
+			folds.push([from, to]);
+		});
 		savedLiveViews.set(`${props.group}:${props.path}`, {
 			anchor: main.anchor,
 			head: main.head,
 			scrollTop: hostEl?.scrollTop ?? 0,
+			folds,
 		});
 	};
 
@@ -1342,6 +1560,10 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 	const toggleEditYaml = () => {
 		if (isRead() || !yamlSpan()) return;
 		const next = !editYaml();
+		if (!next) {
+			yamlCompleter?.dispose();
+			yamlCompleter = undefined;
+		}
 		setEditYaml(next);
 		if (next) {
 			focusYamlLine(2, 1);
@@ -1435,14 +1657,29 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			}
 			queueMicrotask(() => updateTableHud(view));
 		},
+		getTopLine: () => currentTopLine(view),
+		foldAll: () => {
+			cmFoldAll(view);
+		},
+		unfoldAll: () => {
+			cmUnfoldAll(view);
+		},
 	});
 
 	// --- Lifecycle & Bidirectional Binding -----------------------------------
 	onMount(() => {
 		const initial = (model?.getValue() ?? "").replace(/\r\n/g, "\n");
+		const syncAnchor = takeMarkdownSyncAnchor(props.group, props.path);
 		const saved = savedLiveViews.get(`${props.group}:${props.path}`);
 		const fm = frontMatter(initial);
 		const initialLines = initial.split("\n");
+		const lineColOffset = (lineNum: number, colNum: number): number => {
+			const clampedLine = Math.max(1, Math.min(lineNum, initialLines.length));
+			let pos = 0;
+			for (let i = 0; i < clampedLine - 1; i++) pos += initialLines[i]!.length + 1;
+			const lineLen = initialLines[clampedLine - 1]?.length ?? 0;
+			return Math.min(initial.length, pos + Math.max(0, Math.min(colNum - 1, lineLen)));
+		};
 		const defaultCursor =
 			fm.lines > 0 && fm.lines < initialLines.length
 				? (() => {
@@ -1454,12 +1691,22 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 					})()
 				: 0;
 
-		const anchor = saved ? Math.min(saved.anchor, initial.length) : defaultCursor;
-		const head = saved ? Math.min(saved.head, initial.length) : defaultCursor;
+		const anchorPos = syncAnchor
+			? syncAnchor.line <= fm.lines && fm.lines > 0
+				? defaultCursor
+				: lineColOffset(syncAnchor.line, syncAnchor.column)
+			: saved
+				? Math.min(saved.anchor, initial.length)
+				: defaultCursor;
+		const headPos = syncAnchor
+			? anchorPos
+			: saved
+				? Math.min(saved.head, initial.length)
+				: defaultCursor;
 
 		const editorState = EditorState.create({
 			doc: initial,
-			selection: EditorSelection.range(anchor, head),
+			selection: EditorSelection.range(anchorPos, headPos),
 			extensions: [
 				modeCompartment.of(modeExtensions(isRead())),
 				history(),
@@ -1573,7 +1820,33 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 
 		cmView = new EditorView({ state: editorState, parent: cmMountEl });
 
-		if (saved && hostEl) {
+		// Restore persisted heading/list folds before measuring scroll offsets.
+		if (saved?.folds?.length) {
+			const docLen = cmView.state.doc.length;
+			const foldEffects = saved.folds
+				.filter(([from, to]) => from >= 0 && to <= docLen && from < to)
+				.map(([from, to]) => foldEffect.of({ from, to }));
+			if (foldEffects.length) cmView.dispatch({ effects: foldEffects });
+		}
+
+		if (syncAnchor && hostEl) {
+			requestAnimationFrame(() => {
+				if (!cmView || !hostEl) return;
+				if (syncAnchor.topLine !== undefined) {
+					if (syncAnchor.topLine <= Math.max(1, fm.lines + 1)) {
+						hostEl.scrollTop = 0;
+					} else {
+						const ln = Math.max(1, Math.min(syncAnchor.topLine, cmView.state.doc.lines));
+						const block = cmView.lineBlockAt(cmView.state.doc.line(ln).from);
+						hostEl.scrollTop = Math.max(0, (cmMountEl?.offsetTop ?? 0) + block.top);
+					}
+					lastTopLine = syncAnchor.topLine;
+				} else {
+					cmView.dispatch({ effects: EditorView.scrollIntoView(headPos, { y: "center" }) });
+				}
+				updateOutlineScrollspy();
+			});
+		} else if (saved && hostEl) {
 			queueMicrotask(() => {
 				if (hostEl) hostEl.scrollTop = saved.scrollTop;
 				updateOutlineScrollspy();
@@ -1581,6 +1854,33 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		} else {
 			queueMicrotask(updateOutlineScrollspy);
 		}
+
+		// Subscribe to split Read preview scroll sync from another group viewing the same Markdown file.
+		const stopSplitSync = onSplitScrollSync((payload) => {
+			if (!isRead() || !cmView || !hostEl) return;
+			if (payload.sourceGroup === props.group) return;
+			if (canonical(payload.path) !== canonical(props.path)) return;
+			suppressSplitSyncUntil = performance.now() + 260;
+			const maxScroll = Math.max(0, hostEl.scrollHeight - hostEl.clientHeight);
+			let targetTop: number;
+			if (payload.ratio <= 0.002) {
+				targetTop = 0;
+			} else if (payload.ratio >= 0.998) {
+				targetTop = maxScroll;
+			} else {
+				const ln = Math.max(1, Math.min(payload.topLine, cmView.state.doc.lines));
+				if (ln <= front().lines + 1 && payload.ratio < 0.05) {
+					targetTop = 0;
+				} else {
+					const block = cmView.lineBlockAt(cmView.state.doc.line(ln).from);
+					targetTop = Math.min(maxScroll, Math.max(0, (cmMountEl?.offsetTop ?? 0) + block.top));
+				}
+			}
+			if (Math.abs(hostEl.scrollTop - targetTop) > 2) {
+				const behavior: ScrollBehavior = Math.abs(hostEl.scrollTop - targetTop) > 160 ? "smooth" : "auto";
+				hostEl.scrollTo({ top: targetTop, behavior });
+			}
+		});
 
 		const openReadSearch = () => {
 			if (!cmView) return;
@@ -1660,7 +1960,15 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 
 		onCleanup(() => {
 			cancelHover();
+			if (scrollSyncRaf) {
+				cancelAnimationFrame(scrollSyncRaf);
+				scrollSyncRaf = 0;
+			}
+			yamlCompleter?.dispose();
+			yamlCompleter = undefined;
+			saveSyncAnchor();
 			saveView();
+			stopSplitSync();
 			window.removeEventListener("keydown", onKeyDownGlobal);
 			registerLiveEditor(props.group, undefined);
 			registerReadFind(props.group, undefined);
@@ -1678,6 +1986,8 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			(read) => {
 				if (!cmView) return;
 				if (read && editYaml()) {
+					yamlCompleter?.dispose();
+					yamlCompleter = undefined;
 					setEditYaml(false);
 				}
 				cmView.dispatch({
@@ -1803,6 +2113,22 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 				updateOutlineScrollspy();
 				if (pointerY !== null) scheduleReadAssist();
 				if (tableHud()) updateTableHud();
+				if (!scrollSyncRaf) {
+					scrollSyncRaf = requestAnimationFrame(() => {
+						scrollSyncRaf = 0;
+						if (!cmView || !hostEl) return;
+						const topLine = currentTopLine(cmView);
+						const maxScroll = Math.max(1, hostEl.scrollHeight - hostEl.clientHeight);
+						const ratio = Math.max(0, Math.min(1, hostEl.scrollTop / maxScroll));
+						if (!isRead()) {
+							if (performance.now() >= suppressSplitSyncUntil) {
+								emitSplitScrollSync(props.group, props.path, topLine, ratio);
+							}
+						} else if (state.activeGroup === props.group) {
+							setState("cursor", { line: topLine, column: 1 });
+						}
+					});
+				}
 			}}
 			onMouseMove={(e) => {
 				pointerY = e.clientY;
@@ -1952,6 +2278,33 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 									<span>Properties</span>
 								</button>
 							</Show>
+							<button
+								type="button"
+								class="cm-md-props-edit cm-md-links-pill"
+								title={
+									brokenOutgoingCount() > 0
+										? `Jump to Links inspector (${brokenOutgoingCount()} broken outgoing)`
+										: "Jump to Links inspector (Backlinks, Outgoing, Unlinked mentions)"
+								}
+								onClick={openLinksInspector}
+							>
+								<Icon name="references" />
+								<span>Links ({totalLinksCount()})</span>
+								<Show when={brokenOutgoingCount() > 0}>
+									<span
+										style={{
+											color: "var(--error)",
+											display: "inline-flex",
+											"align-items": "center",
+											gap: "2px",
+											"font-weight": "600",
+										}}
+									>
+										<Icon name="warning" />
+										<span>{brokenOutgoingCount()}</span>
+									</span>
+								</Show>
+							</button>
 							<Menu
 								floating
 								class="cm-md-props-menu"
@@ -1998,6 +2351,33 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 										Promote to decision
 									</button>
 								</Show>
+								<button
+									type="button"
+									class="cm-md-props-edit cm-md-links-pill"
+									title={
+										brokenOutgoingCount() > 0
+											? `Jump to Links inspector (${brokenOutgoingCount()} broken outgoing)`
+											: "Jump to Links inspector (Backlinks, Outgoing, Unlinked mentions)"
+									}
+									onClick={openLinksInspector}
+								>
+									<Icon name="references" />
+									<span>Links ({totalLinksCount()})</span>
+									<Show when={brokenOutgoingCount() > 0}>
+										<span
+											style={{
+												color: "var(--error)",
+												display: "inline-flex",
+												"align-items": "center",
+												gap: "2px",
+												"font-weight": "600",
+											}}
+										>
+											<Icon name="warning" />
+											<span>{brokenOutgoingCount()}</span>
+										</span>
+									</Show>
+								</button>
 								<Menu
 									floating
 									class="cm-md-props-menu"
@@ -2159,8 +2539,18 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 									<div class="cm-md-props-yaml-fence" aria-hidden="true">---</div>
 									<textarea
 										ref={(el) => {
+											yamlCompleter?.dispose();
 											yamlInputEl = el;
 											el.value = span().inner;
+											yamlCompleter = createTextareaCompleter(el, {
+												mode: "yaml",
+												filePath: () => props.path,
+												getListedDoc: () => listed(),
+												onApply: () => {
+													resizeYamlInput(el);
+													applyYamlInnerEdit(el.value);
+												},
+											});
 											queueMicrotask(() => resizeYamlInput(el));
 										}}
 										class="cm-md-props-yaml"
@@ -2171,11 +2561,18 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 											const el = e.currentTarget;
 											resizeYamlInput(el);
 											applyYamlInnerEdit(el.value);
+											yamlCompleter?.update();
+										}}
+										onBlur={() => {
+											yamlCompleter?.close();
 										}}
 										onKeyDown={(e) => {
+											if (yamlCompleter?.handleKeyDown(e)) return;
 											if (e.key === "Escape") {
 												e.preventDefault();
 												e.stopPropagation();
+												yamlCompleter?.dispose();
+												yamlCompleter = undefined;
 												setEditYaml(false);
 												yamlEditBtnEl?.focus();
 											} else if (e.key === "Tab" && !e.shiftKey) {
@@ -2612,39 +3009,281 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 				{/* Unified CodeMirror 6 surface (powers both Live Preview and Read mode). */}
 				<div ref={cmMountEl} class="cm-md-editor-wrap" />
 
-				{/* Collapsible Backlinks footer ("Linked from", with hover previews). */}
-				<Show when={(linked()?.length ?? 0) > 0}>
-					<section class="cm-md-backlinks" aria-label="Linked from">
-						<button
-							type="button"
-							class="cm-md-backlinks-toggle"
-							aria-expanded={backlinksOpen()}
-							onClick={() => setBacklinksOpen((v) => !v)}
+				{/* Compact 3-tab Links Inspector (Backlinks with context snippets, Outgoing links, Unlinked mentions). */}
+				<Show when={linksForcedVisible() || totalLinksCount() > 0}>
+					<section ref={linksSectionEl} class="cm-md-backlinks cm-md-links-inspector" aria-label="Document links inspector">
+						<div
+							class="cm-md-links-head"
+							style={{
+								display: "flex",
+								"flex-wrap": "wrap",
+								"align-items": "center",
+								gap: "6px 12px",
+							}}
 						>
-							<Icon name={backlinksOpen() ? "chevron-down" : "chevron-right"} />
-							<span>Linked from ({linked()!.length})</span>
-						</button>
+							<button
+								type="button"
+								class="cm-md-backlinks-toggle"
+								aria-expanded={backlinksOpen()}
+								onClick={() => setBacklinksOpen((v) => !v)}
+							>
+								<Icon name={backlinksOpen() ? "chevron-down" : "chevron-right"} />
+								<span>Links</span>
+							</button>
+							<div
+								class="cm-md-links-tabs"
+								role="tablist"
+								aria-label="Links inspector tabs"
+								style={{ display: "inline-flex", "flex-wrap": "wrap", gap: "4px" }}
+							>
+								<button
+									type="button"
+									role="tab"
+									class="md-work-btn"
+									classList={{ active: linksTab() === "backlinks" }}
+									aria-selected={linksTab() === "backlinks"}
+									onClick={() => {
+										setLinksTab("backlinks");
+										setBacklinksOpen(true);
+									}}
+								>
+									<span>Backlinks ({linked()?.length ?? 0})</span>
+								</button>
+								<button
+									type="button"
+									role="tab"
+									class="md-work-btn"
+									classList={{ active: linksTab() === "outgoing" }}
+									aria-selected={linksTab() === "outgoing"}
+									onClick={() => {
+										setLinksTab("outgoing");
+										setBacklinksOpen(true);
+									}}
+								>
+									<span>Outgoing ({outgoingLinks().length})</span>
+									<Show when={brokenOutgoingCount() > 0}>
+										<span
+											style={{
+												color: "var(--error)",
+												display: "inline-flex",
+												"align-items": "center",
+												gap: "2px",
+												"font-weight": "600",
+											}}
+											title={`${brokenOutgoingCount()} broken outgoing ${brokenOutgoingCount() === 1 ? "link" : "links"}`}
+										>
+											<Icon name="warning" />
+											<span>{brokenOutgoingCount()}</span>
+										</span>
+									</Show>
+								</button>
+								<button
+									type="button"
+									role="tab"
+									class="md-work-btn"
+									classList={{ active: linksTab() === "unlinked" }}
+									aria-selected={linksTab() === "unlinked"}
+									onClick={() => {
+										setLinksTab("unlinked");
+										setBacklinksOpen(true);
+									}}
+								>
+									<span>Unlinked mentions ({unlinkedMentions()?.length ?? 0})</span>
+								</button>
+							</div>
+						</div>
 						<Show when={backlinksOpen()}>
-							<ul>
-								<For each={linked()}>
-									{(from) => (
-										<li>
-											<button
-												class="link"
-												title={relativeTo(state.workspace?.root, from.path)}
-												onClick={() => void openFile(from.path, { reveal: { line: from.line } })}
-												onMouseEnter={(e) => hoverFileButton(from.path, e.currentTarget, { line: from.line })}
-												onMouseLeave={scheduleHideHover}
-											>
-												{called(from.path)}
-											</button>
-											<Show when={from.places > 1}>
-												<span class="md-work-note">{from.places} places</span>
-											</Show>
-										</li>
-									)}
-								</For>
-							</ul>
+							<Show when={linksTab() === "backlinks"}>
+								<Show
+									when={(linked()?.length ?? 0) > 0}
+									fallback={<p class="md-work-empty">No other workspace documents link here yet.</p>}
+								>
+									<ul>
+										<For each={linked()}>
+											{(from) => (
+												<li style={{ "flex-direction": "column", "align-items": "stretch", gap: "3px" }}>
+													<div style={{ display: "flex", "flex-wrap": "wrap", "align-items": "baseline", gap: "4px 10px" }}>
+														<button
+															class="link"
+															title={relativeTo(state.workspace?.root, from.path)}
+															onClick={() => void openFile(from.path, { reveal: { line: from.line } })}
+															onMouseEnter={(e) => hoverFileButton(from.path, e.currentTarget, { line: from.line })}
+															onMouseLeave={scheduleHideHover}
+														>
+															{called(from.path)}
+														</button>
+														<span class="md-work-via">L{from.line}</span>
+														<Show when={from.places > 1}>
+															<span class="md-work-note">{from.places} places</span>
+														</Show>
+													</div>
+													<Show when={from.snippet}>
+														<div
+															class="cm-md-link-snippet"
+															style={{
+																"font-size": "var(--text-xs, 12px)",
+																color: "var(--editor-muted, var(--muted))",
+																"line-height": "1.45",
+																"padding-left": "10px",
+																"border-left": "2px solid color-mix(in srgb, var(--editor-border, var(--border)) 80%, transparent)",
+																"overflow-wrap": "anywhere",
+															}}
+														>
+															{from.snippet}
+														</div>
+													</Show>
+												</li>
+											)}
+										</For>
+									</ul>
+								</Show>
+							</Show>
+							<Show when={linksTab() === "outgoing"}>
+								<Show
+									when={outgoingLinks().length > 0}
+									fallback={<p class="md-work-empty">No outgoing links, embeds, or ticket references in this document.</p>}
+								>
+									<ul>
+										<For each={outgoingLinks()}>
+											{(item) => (
+												<li>
+													<button
+														type="button"
+														class="link"
+														title={
+															item.broken
+																? `Broken link on line ${item.line}: ${item.target}`
+																: item.resolvedPath
+																	? relativeTo(state.workspace?.root, item.resolvedPath)
+																	: item.target
+														}
+														onClick={() => {
+															if (item.kind === "web") {
+																void window.open(item.target, "_blank", "noopener");
+															} else if (item.broken) {
+																jumpToLine(item.line);
+															} else if (item.resolvedPath) {
+																if (item.heading) void followHeadingInFile(item.resolvedPath, item.heading);
+																else void openFile(item.resolvedPath, item.targetLine ? { reveal: { line: item.targetLine } } : {});
+															} else if (item.kind === "wiki" || item.kind === "embed") {
+																void followWiki(item.target);
+															} else {
+																void followLink(item.target);
+															}
+														}}
+														onMouseEnter={(e) => {
+															if (item.resolvedPath && !item.broken) {
+																hoverFileButton(item.resolvedPath, e.currentTarget, { line: item.targetLine });
+															}
+														}}
+														onMouseLeave={scheduleHideHover}
+													>
+														{item.label}
+													</button>
+													<span class="md-work-via">{item.kind}</span>
+													<button
+														type="button"
+														class="md-work-btn"
+														title={`Jump to line ${item.line} in this document`}
+														onClick={() => jumpToLine(item.line)}
+													>
+														L{item.line}
+													</button>
+													<Show when={item.broken}>
+														<span
+															style={{
+																display: "inline-flex",
+																"align-items": "center",
+																gap: "4px",
+																padding: "1px 6px",
+																"border-radius": "999px",
+																"font-size": "11px",
+																"font-weight": "600",
+																color: "var(--error)",
+																background: "color-mix(in srgb, var(--error) 14%, transparent)",
+															}}
+														>
+															<Icon name="warning" />
+															<span>Broken</span>
+														</span>
+													</Show>
+													<Show when={item.broken && item.instead && !isRead()}>
+														<button
+															type="button"
+															class="md-work-btn"
+															title={`Update broken link to ${item.instead}`}
+															onClick={() => {
+																if (!cmView || !item.instead) return;
+																const cur = cmView.state.doc.toString();
+																const fixed = withLinkFile(cur, item.line, item.target, item.instead);
+																if (fixed !== null && fixed !== cur) {
+																	cmView.dispatch({ changes: { from: 0, to: cur.length, insert: fixed }, userEvent: "input.fix" });
+																	notify(`Fixed broken link to ${item.instead}.`);
+																}
+															}}
+														>
+															<Icon name="wand" />
+															<span>Fix</span>
+														</button>
+													</Show>
+												</li>
+											)}
+										</For>
+									</ul>
+								</Show>
+							</Show>
+							<Show when={linksTab() === "unlinked"}>
+								<Show
+									when={(unlinkedMentions()?.length ?? 0) > 0}
+									fallback={<p class="md-work-empty">No unlinked plain-text mentions found in other workspace docs.</p>}
+								>
+									<ul>
+										<For each={unlinkedMentions()}>
+											{(m) => (
+												<li style={{ "flex-direction": "column", "align-items": "stretch", gap: "3px" }}>
+													<div style={{ display: "flex", "flex-wrap": "wrap", "align-items": "center", gap: "4px 10px" }}>
+														<button
+															type="button"
+															class="link"
+															title={`Open ${relativeTo(state.workspace?.root, m.path)} at line ${m.line}`}
+															onClick={() => void openFile(m.path, { reveal: { line: m.line, column: m.column + 1 } })}
+															onMouseEnter={(e) => hoverFileButton(m.path, e.currentTarget, { line: m.line })}
+															onMouseLeave={scheduleHideHover}
+														>
+															{called(canonical(m.path))}
+														</button>
+														<span class="md-work-via">L{m.line}</span>
+														<button
+															type="button"
+															class="md-work-btn"
+															title={`Convert "${m.matchedText}" into a [[wikilink]] in ${called(canonical(m.path))}`}
+															onClick={() => void linkifyUnlinkedMention(m)}
+														>
+															<Icon name="references" />
+															<span>Link</span>
+														</button>
+													</div>
+													<Show when={m.snippet}>
+														<div
+															class="cm-md-link-snippet"
+															style={{
+																"font-size": "var(--text-xs, 12px)",
+																color: "var(--editor-muted, var(--muted))",
+																"line-height": "1.45",
+																"padding-left": "10px",
+																"border-left": "2px solid color-mix(in srgb, var(--editor-border, var(--border)) 80%, transparent)",
+																"overflow-wrap": "anywhere",
+															}}
+														>
+															{m.snippet}
+														</div>
+													</Show>
+												</li>
+											)}
+										</For>
+									</ul>
+								</Show>
+							</Show>
 						</Show>
 					</section>
 				</Show>

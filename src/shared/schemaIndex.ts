@@ -3,7 +3,7 @@
 import { frontMatter } from "./frontMatter";
 import { isCatalog } from "./projectDocs";
 import type { DocFile } from "./protocol";
-import { parseCreateTables, sqlTablesToMarkdown } from "./sqlSchema";
+import { extractQueriedTablesFromSql, parseCreateTables, sqlTablesToMarkdown } from "./sqlSchema";
 
 const SCHEMA_EXT_RE = /\.(md|markdown|sql|ddl|pks|pkb)$/i;
 
@@ -184,4 +184,56 @@ export function referencedSchemaTables(codeText: string, files: readonly DocFile
 		}
 	}
 	return found;
+}
+
+const BUILTIN_SQL_OBJECTS = new Set([
+	"dual",
+	"inserted",
+	"deleted",
+	"sysobjects",
+	"syscolumns",
+	"systypes",
+	"sysindexes",
+	"sysusers",
+	"sysdatabases",
+	"syscomments",
+	"sysfiles",
+	"sysprocesses",
+]);
+
+const SYSTEM_OBJECT_PREFIX_RE = /^(?:sys_|dba_|all_|user_|v\$|gv\$|cdb_|nls_|pg_|sqlite_)/i;
+
+/**
+ * Flags `.sql` and STARLIMS `.ds` references to tables that are not documented in `schema/`
+ * or `database.csv`, filtering out standard SQL built-ins, CTEs, temp `#tables`, `dual`,
+ * and database system catalog tables.
+ */
+export function findUndocumentedSqlRefs(
+	files: readonly { path: string; text: string }[],
+	knownTables: ReadonlySet<string>,
+): { path: string; line: number; object: string; kind: "table" }[] {
+	const knownLower = new Set<string>();
+	for (const entry of knownTables) {
+		const t = entry.trim().toLowerCase();
+		if (!t) continue;
+		knownLower.add(t);
+		if (t.includes(".")) {
+			const bare = t.split(".").pop()!.trim();
+			if (bare) knownLower.add(bare);
+		}
+	}
+	const out: { path: string; line: number; object: string; kind: "table" }[] = [];
+	for (const file of files) {
+		if (!file.text.trim()) continue;
+		for (const hit of extractQueriedTablesFromSql(file.text)) {
+			const low = hit.object.toLowerCase();
+			const bare = low.includes(".") ? low.split(".").pop()! : low;
+			if (!bare || bare.length < 2) continue;
+			if (bare.startsWith("#") || bare.startsWith("@") || bare.startsWith("?")) continue;
+			if (BUILTIN_SQL_OBJECTS.has(bare) || SYSTEM_OBJECT_PREFIX_RE.test(bare)) continue;
+			if (knownLower.has(low) || knownLower.has(bare)) continue;
+			out.push({ path: file.path, line: hit.line, object: hit.object, kind: "table" });
+		}
+	}
+	return out;
 }

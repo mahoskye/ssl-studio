@@ -5,15 +5,18 @@
 // between chart and code is reported the same way, and re-read as scripts change.
 import { createEffect, createRoot, on } from "solid-js";
 import { jsonProblem } from "../../shared/jsonCheck";
+import { baseName } from "../../shared/paths";
 import { backend } from "../backend";
 import { monaco } from "../editor/monaco";
 import { publishFindings, session } from "../lsp/session";
 import { docs } from "../project";
-import { canonical, documents } from "../state";
-import { planHash, specHash } from "./assist";
+import { canonical, documents, state } from "../state";
+import { checkPlanDocs, checkPlanRefs, planTargetsOf, refMatchesWorkspace, type PlanDocCheckOptions, type WorkspaceSymbolHit } from "./assist";
 import { builtOf, driftFindings } from "./built";
 import { clearDrift, driftFor, readDrift } from "./drift";
-import { checkPlan, checkRefs, findingLine, parsePlan, type Finding, type Plan } from "./model";
+import { checkPlan, findingLine, parsePlan, type Plan } from "./model";
+
+export { checkPlanDocs, checkPlanRefs, planTargetsOf, refMatchesWorkspace, type PlanDocCheckOptions, type WorkspaceSymbolHit };
 
 const specPath = (planPath: string) => planPath.replace(/\.plan\.json$/i, ".spec.md");
 
@@ -26,39 +29,31 @@ export const recheckPlan = (uri: string) => rechecks.get(uri)?.();
 /** A file changed on disk: the server takes a moment to read it again. */
 export const recheckPlans = () => rechecks.forEach((_soon, uri) => recheckPlan(uri));
 
-/** Pure doc/spec consistency checks for a plan (missing linked ticket, stale companion spec). */
-export function checkPlanDocs(plan: Plan, options: { tickets?: readonly { ticket?: string }[]; specText?: string | null }): Finding[] {
-	const out: Finding[] = [];
-	const ticket = typeof plan.ticket === "string" ? plan.ticket.trim() : "";
-	const tickets = (options.tickets ?? []).filter((t) => Boolean(t.ticket?.trim()));
-	if (ticket && tickets.length > 0 && !tickets.some((t) => t.ticket!.trim().toLowerCase() === ticket.toLowerCase())) {
-		out.push({
-			severity: "warning",
-			code: "plan-unknown-ticket",
-			message: `Ticket ${ticket} was not found in the project's tickets.`,
-			field: "ticket",
-		});
-	}
-	const recorded = options.specText ? specHash(options.specText) : null;
-	if (recorded !== null && recorded !== planHash(plan)) {
-		out.push({
-			severity: "warning",
-			code: "plan-stale-spec",
-			message: "The companion spec is out of sync with the current plan. Write the spec again before building.",
-		});
-	}
-	return out;
-}
-
-async function knownRefs(plan: Plan): Promise<Set<string> | null> {
-	const refs = [...new Set(plan.nodes.filter((n) => n.kind === "call" && n.ref?.trim()).map((n) => n.ref!))];
+async function knownRefs(plan: Plan, workspaceFiles: readonly string[]): Promise<Set<string> | null> {
+	const refs = [
+		...new Set(
+			plan.nodes
+				.filter((n) => (n.kind === "call" || n.kind === "step" || n.kind === "decision") && n.ref?.trim())
+				.map((n) => n.ref!.trim()),
+		),
+	];
+	if (!refs.length) return new Set<string>();
 	const known = new Set<string>();
+	const root = state.workspace?.root;
 	try {
 		for (const ref of refs) {
-			// A target may be written whole (Category.Script.Procedure); symbols are named by their last part.
-			const name = ref.split(".").at(-1)!;
-			const found = await session.workspaceSymbols(name);
-			if (found.some((s) => s.name.toLowerCase() === name.toLowerCase())) known.add(ref);
+			const queryName =
+				ref.includes("/") || ref.includes("\\") || /\.(ssl|srvscr|ds)$/i.test(ref)
+					? baseName(ref).replace(/\.(ssl|srvscr|ds)$/i, "")
+					: ref.split(".").at(-1)!;
+			const found = await session.workspaceSymbols(queryName);
+			const hits: WorkspaceSymbolHit[] = found.map((s) => ({
+				name: s.name,
+				kind: s.kind,
+				containerName: s.containerName,
+				path: monaco.Uri.parse(s.location.uri).fsPath,
+			}));
+			if (refMatchesWorkspace(ref, hits, workspaceFiles, root)) known.add(ref);
 		}
 	} catch {
 		return null;
@@ -94,16 +89,24 @@ export function trackPlan(model: monaco.editor.ITextModel) {
 			return;
 		}
 		const plan = parsed.plan;
-		const [known, drift, specText] = await Promise.all([knownRefs(plan), readDrift(uri, plan), readSpec()]);
+		const workspaceFiles = state.workspace ? await backend.files().catch(() => null) : null;
+		const [known, drift, specText] = await Promise.all([knownRefs(plan, workspaceFiles ?? []), readDrift(uri, plan), readSpec()]);
 		if (model.isDisposed() || model.getVersionId() !== version) return;
 		// The server cannot compare while it is still indexing: ask again.
-		if (builtOf(plan) && !driftFor(uri).checked && session.supports("ssl/callGraph")) soon(5000);
-		const loadedTickets = docs().filter((d) => d.exists && d.group === "tickets" && d.ticket);
+		if ((builtOf(plan) || planTargetsOf(plan).length > 0) && !driftFor(uri).checked && session.supports("ssl/callGraph")) soon(5000);
+		const allDocs = docs();
+		const loadedTickets = allDocs.filter((d) => d.exists && d.group === "tickets" && d.ticket);
 		const findings = [
 			...checkPlan(plan),
-			...(known ? checkRefs(plan, (ref) => known.has(ref)) : []),
+			...(known ? checkPlanRefs(plan, (ref) => known.has(ref)) : []),
 			...driftFindings(drift),
-			...checkPlanDocs(plan, { tickets: loadedTickets, specText }),
+			...checkPlanDocs(plan, {
+				tickets: loadedTickets,
+				specText,
+				docs: allDocs.length > 0 || workspaceFiles !== null ? allDocs : undefined,
+				workspaceFiles: workspaceFiles ?? undefined,
+				root: state.workspace?.root,
+			}),
 		];
 		publishFindings(
 			model,

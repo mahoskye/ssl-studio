@@ -4,15 +4,19 @@
 // and edit business test cases by clicking decision branches directly on the flow,
 // stays live-synced with Palette (Design | Assistant), and switches smoothly to Chart or Source.
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
+import { baseName, joinPath, relativeTo } from "../../shared/paths";
+import { isCatalog, registryTitle } from "../../shared/projectDocs";
+import type { DocFile } from "../../shared/protocol";
+import { backend } from "../backend";
 import { regionColor } from "../editor/regions";
 import { Icon } from "../Icon";
 import type { IconName } from "../icons";
 import { IconButton } from "../panels/Rows";
 import { docs } from "../project";
-import { notify, openFile } from "../state";
+import { notify, openFile, state } from "../state";
 import { journeyDraft, pathSummary, shortPhrase, type PlanPath } from "./built";
 import { CODE_INDICATOR_WORDS, type CodeIndicator } from "./chart";
-import { planTestsOf, type Plan, type PlanNode, type PlanTestCase, type PlanTestInput, type PlanTestPatch } from "./model";
+import { nodeDocsOf, planTestsOf, type Plan, type PlanNode, type PlanTestCase, type PlanTestInput, type PlanTestPatch } from "./model";
 import "./planExtra.css";
 import {
 	choicesFromPath,
@@ -360,6 +364,95 @@ export function PlanTextView(props: {
 		if (!key) return null;
 		return docs().find((d) => d.group === "tickets" && d.exists && d.ticket?.toLowerCase() === key.toLowerCase()) ?? null;
 	});
+	const docKindTag = (d: DocFile): string => {
+		if (d.group === "knowledge") {
+			if (d.kind === "decisions") return "ADR";
+			if (d.kind === "questions") return "Question";
+			if (d.kind === "reference") return "Ref";
+			if (d.kind === "snippets") return "Snippet";
+			return "Note";
+		}
+		if (d.group === "specs") return "Spec";
+		if (d.group === "schema") return "Schema";
+		if (d.group === "tickets") return "Ticket";
+		if (d.group === "registries") return "Registry";
+		return "Doc";
+	};
+	const docDisplayName = (d: DocFile): string => {
+		if (d.group === "registries") return registryTitle(d.name);
+		if (d.group === "tickets" && d.ticket) {
+			return d.title && !d.title.toLowerCase().startsWith(d.ticket.toLowerCase()) ? `${d.ticket}: ${d.title}` : d.title || d.ticket;
+		}
+		return d.title || d.heading || baseName(d.path);
+	};
+	const resolveLinkedDoc = (ref: string): DocFile | null => {
+		const clean = ref.trim().replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
+		if (!clean) return null;
+		const root = state.workspace?.root;
+		const all = docs().filter((d) => d.exists && !isCatalog(d));
+		return (
+			all.find((d) => relativeTo(root, d.path).replace(/\\/g, "/").toLowerCase() === clean) ??
+			all.find((d) => d.name.replace(/\\/g, "/").toLowerCase() === clean) ??
+			all.find((d) => d.path.replace(/\\/g, "/").toLowerCase().endsWith(`/${clean}`)) ??
+			all.find((d) => d.group === "tickets" && d.ticket?.toLowerCase() === clean) ??
+			null
+		);
+	};
+	const linkedDocsOf = (node: PlanNode) =>
+		nodeDocsOf(node).map((ref) => {
+			const doc = resolveLinkedDoc(ref);
+			const label = doc ? docDisplayName(doc) : baseName(ref) || ref;
+			const kind = doc ? docKindTag(doc) : "";
+			const rel = doc ? relativeTo(state.workspace?.root, doc.path).replace(/\\/g, "/") : ref;
+			const tooltip = doc ? `Open ${kind}: ${rel}` : `${ref} (not found in workspace)`;
+			return { ref, doc, label, kind, tooltip };
+		});
+	const openLinkedDoc = (item: { ref: string; doc: DocFile | null }) => {
+		if (item.doc) return void openFile(item.doc.path);
+		if (state.workspace?.root) {
+			const full = joinPath(state.workspace.root, item.ref);
+			void backend.read(full).then(
+				() => void openFile(full),
+				() => notify(`Linked document "${item.ref}" was not found in this workspace.`),
+			);
+			return;
+		}
+		notify(`Linked document "${item.ref}" was not found.`);
+	};
+	const LinkedDocChips = (p: { node: PlanNode; marginTop?: string }) => {
+		const items = createMemo(() => linkedDocsOf(p.node));
+		return (
+			<Show when={items().length > 0}>
+				<div
+					class="plan-node-doc-chips"
+					style={{ "margin-top": p.marginTop ?? "5px", "margin-bottom": "2px" }}
+					aria-label={`Linked documents for ${p.node.text.trim() || p.node.id}`}
+				>
+					<For each={items()}>
+						{(item) => (
+							<span class="plan-node-doc-chip" classList={{ missing: !item.doc }}>
+								<button
+									type="button"
+									class="plan-node-doc-open"
+									title={item.tooltip}
+									onClick={(e) => {
+										e.stopPropagation();
+										openLinkedDoc(item);
+									}}
+								>
+									<Icon name="file" />
+									<Show when={item.kind}>
+										<span class="plan-node-doc-kind">{item.kind}</span>
+									</Show>
+									<span class="plan-node-doc-label">{item.label}</span>
+								</button>
+							</span>
+						)}
+					</For>
+				</div>
+			</Show>
+		);
+	};
 	const goalText = () => (typeof props.plan.goal === "string" ? props.plan.goal.trim() : "");
 	const anchorNodeName = () => {
 		const id = anchorNodeId();
@@ -511,6 +604,8 @@ export function PlanTextView(props: {
 					<Show when={p.row.node.notes?.trim()}>
 						<p class="plan-text-row-notes">{p.row.node.notes}</p>
 					</Show>
+
+					<LinkedDocChips node={p.row.node} />
 
 					<Show when={p.row.links.length > 0}>
 						<ul class="plan-text-links" aria-label={`Next from ${p.row.node.text.trim() || nid}`}>
@@ -1020,6 +1115,7 @@ export function PlanTextView(props: {
 											<Show when={nf.node.notes?.trim()}>
 												<p class="plan-text-around-notes">{nf.node.notes}</p>
 											</Show>
+											<LinkedDocChips node={nf.node} marginTop="6px" />
 											<div class="plan-text-around-cols">
 												<section>
 													<h3>
