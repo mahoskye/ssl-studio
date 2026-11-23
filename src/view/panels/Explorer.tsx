@@ -20,11 +20,35 @@ import { chooseFromMenu } from "./RowMenu";
 import { showPanel } from "./registry";
 import { findInFolder } from "./Search";
 import { catalogsKeptFor, followRename } from "../projectDocs";
+import { docs } from "../project";
+import { buildDocNameIndex, lookupInIndex } from "../../shared/namedLinks";
+import { docsGoverningFile } from "../../shared/workContext";
+import { gitStatus } from "../git";
+import { changeLetter } from "../../shared/gitStatus";
 import { IconButton, Row, Rows, type Point, type RowsApi } from "./Rows";
 import { outlineAnyOpen, outlineHasExpandable, outlineMenuItems, SymbolOutline, toggleOutlineCollapseAll } from "./Objects";
 import { SectionSplitter } from "./SectionSplitter";
 import { Menu } from "../Menu";
 import { recall, remember } from "../graph/canvas";
+
+/** Optional subfolder scope for Explorer (e.g. browsing a ticket bundle folder without workspace clutter). */
+const [scopedFolder, setScopedFolder] = createSignal<{ path: string; label?: string } | null>(null);
+
+/** Updates or clears Explorer's active subfolder scope when that folder is renamed, archived, or trashed. */
+export function retargetScopedFolder(from: string, to: string | null, label?: string) {
+	const cur = scopedFolder();
+	if (!cur) return;
+	const curCanon = canonical(cur.path);
+	const fromCanon = canonical(from);
+	if (curCanon === fromCanon || isInside(fromCanon, curCanon)) {
+		if (!to) {
+			setScopedFolder(null);
+		} else {
+			const nextPath = curCanon === fromCanon ? to : to + curCanon.slice(fromCanon.length);
+			setScopedFolder({ path: nextPath, label: label ?? cur.label });
+		}
+	}
+}
 
 const [expanded, setExpanded] = createSignal<Set<string>>(new Set());
 const toggle = (path: string) =>
@@ -111,6 +135,13 @@ function EntryRow(props: { entry: Entry; depth: number }) {
 	const size = () => level(props.entry.size, state.settings.limits.bytes);
 	const entry = (): Entry => ({ ...props.entry });
 	const isCut = () => clip()?.cut === true && clip()?.path === props.entry.path;
+	const isDirty = () => !isDir() && Boolean(state.dirty[canonical(props.entry.path)]);
+	const gitKind = () => {
+		const st = gitStatus();
+		if (!st || isDir()) return null;
+		const hit = st.files.find((f) => canonical(f.path) === canonical(props.entry.path));
+		return hit ? (hit.unstaged ?? hit.staged ?? null) : null;
+	};
 	return (
 		<>
 			<Row
@@ -183,6 +214,16 @@ function EntryRow(props: { entry: Entry; depth: number }) {
 						{kb(props.entry.size)}
 					</span>
 				</Show>
+				<Show when={isDirty()}>
+					<span class="tree-dirty-dot" title="Unsaved changes" aria-label="Unsaved changes" />
+				</Show>
+				<Show when={gitKind()}>
+					{(kind) => (
+						<span class={`tree-git-badge git-letter ${kind()}`} title={`Git: ${kind()}`} aria-label={`Git: ${kind()}`}>
+							{changeLetter(kind())}
+						</span>
+					)}
+				</Show>
 			</Row>
 			<Show when={open()}>
 				<div role="group">
@@ -216,27 +257,55 @@ async function rename(entry: Entry): Promise<string | null> {
 	if (problem) return notify(problem, "error"), null;
 	const to = joinPath(dirName(entry.path), name);
 	if (await heldFromBefore(to)) return null;
+	// Snapshot docs before renaming so followNames has the exact pre-rename metadata without racing docs() refresh.
+	const beforeDocs = docs().slice();
 	await backend.rename(entry.path, to);
 	// Open tabs follow the file, so saving one does not bring the old name back.
 	fileRenamed(entry.path, to);
 	setExpanded((set) => new Set(retarget(set, entry.path, to)));
 	setClip((held) => held && { ...held, path: retarget([held.path], entry.path, to)[0]! });
+	setScopedFolder((cur) => cur && { ...cur, path: retarget([cur.path], entry.path, to)[0]! });
 	void scriptsCameTo(to, entry.path, entry.kind);
-	const listed = changed(entry.path, to);
-	// Documents that link to the old name are offered the new one. Not waited for: the row is renamed either way.
-	void listed.then(() => followRename(entry.path, to));
+	void changed(entry.path, to);
+	void followRename(entry.path, to, beforeDocs);
 	return to;
 }
 
 async function trash(entry: Entry): Promise<string | null> {
 	if (!state.workspace || holdsRoot(state.workspace.root, entry.path)) return notify("The workspace folder itself cannot be moved to the trash from here.", "error"), null;
 	const what = entry.kind === "dir" ? `the folder ${entry.name} and everything in it` : entry.name;
-	if ((await choose(`Move ${what} to the trash?`, [TRASH], { danger: TRASH })) !== TRASH) return null;
+	// Pre-delete impact check: Markdown path links, [[wikilinks]], and unified governing docs (plans/specs/tickets/registries).
+	const entryCanon = canonical(entry.path);
+	const isSelf = (p: string) => canonical(p) === entryCanon || isInside(entry.path, p);
+	const allDocs = docs();
+	const root = state.workspace.root;
+	const [incoming, allNames] = await Promise.all([
+		backend.linksTo(entry.path).catch(() => []),
+		backend.namesIn().catch(() => []),
+	]);
+	const referencingDocs = new Set<string>();
+	for (const l of incoming) {
+		if (!isSelf(l.path)) referencingDocs.add(canonical(l.path));
+	}
+	const nameIdx = buildDocNameIndex(allDocs, root);
+	for (const n of allNames) {
+		if (isSelf(n.path)) continue;
+		const resolved = lookupInIndex(n.name, nameIdx);
+		if (resolved && isSelf(resolved.path)) referencingDocs.add(canonical(n.path));
+	}
+	for (const g of docsGoverningFile(allDocs, entry.path, root)) {
+		if (!isSelf(g.file.path)) referencingDocs.add(canonical(g.file.path));
+	}
+	const impact = referencingDocs.size
+		? ` Warning: referenced by ${referencingDocs.size} ${referencingDocs.size === 1 ? "project document" : "project documents"} (links, wikilinks, plans, or registries).`
+		: "";
+	if ((await choose(`Move ${what} to the trash?${impact}`, [TRASH], { danger: TRASH })) !== TRASH) return null;
 	await backend.trash(entry.path);
 	fileRemoved(entry.path);
 	// What was cut or copied and is now in the trash is no longer there to paste.
 	setClip((held) => (held && without([held.path], entry.path).length ? held : null));
 	setExpanded((set) => new Set(without(set, entry.path)));
+	setScopedFolder((cur) => (cur && without([cur.path], entry.path).length ? cur : null));
 	void changed(entry.path);
 	// Its row is going: the keyboard lands on the row that takes its place.
 	return "";
@@ -253,12 +322,14 @@ async function moveInto(from: { path: string; kind: "file" | "dir" }, into: stri
 	if (options.ask && (await choose(`Move ${from.kind === "dir" ? `the folder ${name} and everything in it` : name} into ${baseName(into)}?`, ["Move"])) !== "Move") return null;
 	const to = joinPath(into, name);
 	if (await heldFromBefore(to)) return null;
+	const beforeDocs = docs().slice();
 	await backend.rename(from.path, to);
 	fileRenamed(from.path, to);
 	setExpanded((set) => new Set([...retarget(set, from.path, to), into]));
+	setScopedFolder((cur) => cur && { ...cur, path: retarget([cur.path], from.path, to)[0]! });
 	void scriptsCameTo(to, from.path, from.kind);
-	// The catalog first, as in a rename: its own line for the file is written afresh, not asked about.
-	void changed(from.path, to).then(() => followRename(from.path, to));
+	void changed(from.path, to);
+	void followRename(from.path, to, beforeDocs);
 	return to;
 }
 
@@ -380,8 +451,11 @@ async function dropOn(e: DragEvent, into: string) {
 async function entryMenu(entry: Entry, at: Point) {
 	const root = state.workspace?.root;
 	if (!root) return;
-	const isRoot = holdsRoot(root, entry.path);
-	const action = await chooseFromMenu(isRoot ? "New in the workspace folder" : `Actions for ${entry.name}`, menuEntriesFor(entry.kind, entry.path, root, clip() !== null), at);
+	const scope = scopedFolder();
+	const viewRoot = scope?.path ?? root;
+	const isRoot = holdsRoot(viewRoot, entry.path);
+	const title = isRoot ? (scope ? `New in ${baseName(viewRoot)}` : "New in the workspace folder") : `Actions for ${entry.name}`;
+	const action = await chooseFromMenu(title, menuEntriesFor(entry.kind, entry.path, viewRoot, clip() !== null), at);
 	await act(action, entry, { home: isRoot ? undefined : entry.path, follow: true });
 }
 
@@ -406,10 +480,14 @@ export const trashFile = (path: string) => act(TRASH, { path, name: baseName(pat
 export function showInExplorer(path: string) {
 	const root = state.workspace?.root;
 	if (!root || !isInside(root, path)) return notify("That file is not in this folder.");
+	// If Explorer is scoped to a subfolder that doesn't contain `path` (or IS `path`), step back to the full workspace first.
+	const scope = scopedFolder();
+	if (scope && (canonical(path) === canonical(scope.path) || !isInside(scope.path, path))) setScopedFolder(null);
+	const viewRoot = scopedFolder()?.path ?? root;
 	// The folder itself has no row of its own: its rows are shown, and the keyboard goes where it last was among them.
-	const top = isInside(path, root);
+	const top = isInside(path, viewRoot);
 	const above: string[] = [];
-	for (let dir = dirName(path); !top && dir !== root && isInside(root, dir); dir = dirName(dir)) above.push(dir);
+	for (let dir = dirName(path); !top && dir !== viewRoot && isInside(viewRoot, dir); dir = dirName(dir)) above.push(dir);
 	setExpanded((set) => new Set([...set, ...above]));
 	showPanel("explorer");
 	// The rows above it are read from the disk as they open: the row is looked for until it is there.
@@ -417,6 +495,23 @@ export function showInExplorer(path: string) {
 	const look = () => {
 		if (document.querySelector(`[data-panel="explorer"] [data-row${top ? "" : `="${CSS.escape(path)}"`}]`) || tries++ > 20) return void tree?.focus(top ? undefined : path);
 		setTimeout(look, 100);
+	};
+	look();
+}
+
+/** Opens Explorer focused directly on `folderPath` (e.g. a ticket bundle folder) with an easy back button to All files. */
+export function browseFolderInExplorer(folderPath: string, label?: string) {
+	const root = state.workspace?.root;
+	if (!root || !isInside(root, folderPath)) return notify("That folder is not in this workspace.");
+	setScopedFolder({ path: folderPath, label });
+	showPanel("explorer");
+	let tries = 0;
+	const look = () => {
+		if (document.querySelector(`[data-panel="explorer"] .explorer-scope-bar`) || tries++ > 20) {
+			tree?.focus();
+			return;
+		}
+		setTimeout(look, 60);
 	};
 	look();
 }
@@ -443,9 +538,11 @@ export async function explorerDelete(): Promise<void> {
 }
 
 export function Explorer() {
-	const root = useListing(() => state.workspace && ([state.workspace.root, state.treeVersion] as const));
-	const read = () => root.path === state.workspace?.root;
-	const rootMenu = (at: Point) => state.workspace && void entryMenu({ name: state.workspace.name, path: state.workspace.root, kind: "dir", size: 0 }, at);
+	const activeRootPath = () => scopedFolder()?.path ?? state.workspace?.root ?? "";
+	const activeRootName = () => scopedFolder()?.label ?? (scopedFolder() ? baseName(scopedFolder()!.path) : state.workspace?.name ?? "");
+	const root = useListing(() => (activeRootPath() ? ([activeRootPath(), state.treeVersion] as const) : null));
+	const read = () => Boolean(activeRootPath()) && root.path === activeRootPath();
+	const rootMenu = (at: Point) => activeRootPath() && void entryMenu({ name: activeRootName(), path: activeRootPath(), kind: "dir", size: 0 }, at);
 	// A row stays "the focused row" while a dialog, the palette, its own menu or the menu bar has the keyboard, and no longer.
 	const forget = (e: FocusEvent) => !(e.target as Element | null)?.closest?.(".explorer, .overlay, .quickpick, .row-menu, .menubar") && setFocused(null);
 	onMount(() => document.addEventListener("focusin", forget));
@@ -455,6 +552,8 @@ export function Explorer() {
 		on(
 			() => state.workspace?.root,
 			(root) => {
+				const cur = scopedFolder();
+				if (cur && (!root || !isInside(root, cur.path))) setScopedFolder(null);
 				// Once for a workspace, not each time the panel comes back: what was opened while another panel was
 				// showing (the folders above a file another panel asked to be shown here) is not shut again by the
 				// panel's return. Folders opened before the first showing are kept beside the ones remembered.
@@ -495,6 +594,9 @@ export function Explorer() {
 	};
 
 	const [wsOpen, setWsOpen] = createSignal(recall("explorer.workspace") !== "closed");
+	createEffect(() => {
+		if (scopedFolder()) setWsOpen(true);
+	});
 	const toggleWs = () => {
 		const next = !wsOpen();
 		setWsOpen(next);
@@ -534,27 +636,42 @@ export function Explorer() {
 			})),
 		);
 	const anyDirty = () => Object.values(state.dirty).some(Boolean);
-	const anyOpen = () => expanded().size > 0;
+	const anyOpen = () => {
+		const base = activeRootPath();
+		if (!base) return false;
+		if (!scopedFolder()) return expanded().size > 0;
+		for (const p of expanded()) if (p !== base && isInside(base, p)) return true;
+		return false;
+	};
 	const toggleAllFolders = () => {
-		if (anyOpen()) setExpanded(new Set<string>());
-		else setExpanded(new Set(root.entries.filter((e) => e.kind === "dir").map((e) => e.path)));
+		const base = activeRootPath();
+		if (!base) return;
+		if (anyOpen()) {
+			if (!scopedFolder()) setExpanded(new Set<string>());
+			else setExpanded((set) => new Set([...set].filter((p) => !isInside(base, p))));
+		} else {
+			const dirs = root.entries.filter((e) => e.kind === "dir").map((e) => e.path);
+			setExpanded((set) => new Set([...set, ...dirs]));
+		}
 	};
 	const newInTarget = (kind: "file" | "dir") => {
-		const wsRoot = state.workspace?.root;
-		if (!wsRoot) return;
-		const folder = folderFor(focused(), activePath(), wsRoot);
+		const base = activeRootPath();
+		if (!base) return;
+		const row = focused();
+		const targetRow = row && isInside(base, row.path) ? row : null;
+		const folder = folderFor(targetRow, scopedFolder() ? null : activePath(), base);
 		setWsOpen(true);
-		void act(kind === "file" ? NEW_FILE : NEW_FOLDER, { name: baseName(folder), path: folder, kind: "dir", size: 0 }, { home: focused()?.path, follow: false });
+		void act(kind === "file" ? NEW_FILE : NEW_FOLDER, { name: baseName(folder), path: folder, kind: "dir", size: 0 }, { home: targetRow?.path, follow: false });
 	};
 	return (
 		<div
 			class="panel-body explorer"
 			data-panel="explorer"
-			classList={{ "drop-root": dropInto() !== null && dropInto() === state.workspace?.root }}
-			// Below the rows, or between them: the workspace folder itself.
-			onDragOver={(e) => state.workspace && dragOver(e, state.workspace.root)}
+			classList={{ "drop-root": dropInto() !== null && dropInto() === activeRootPath() }}
+			// Below the rows, or between them: the active root folder (workspace or scoped ticket folder).
+			onDragOver={(e) => activeRootPath() && dragOver(e, activeRootPath())}
 			onDragLeave={(e) => !e.currentTarget.contains(e.relatedTarget as Node | null) && setDropInto(null)}
-			onDrop={(e) => state.workspace && void dropOn(e, state.workspace.root)}
+			onDrop={(e) => activeRootPath() && void dropOn(e, activeRootPath())}
 		>
 			<div class="panel-title">
 				<span>Explorer</span>
@@ -632,12 +749,12 @@ export function Explorer() {
 				/>
 			</Show>
 
-			{/* Collapsible Workspace root section (architected for future multi-root workspace support) */}
-			<section class="explorer-section explorer-workspace" classList={{ open: wsOpen() }} aria-label={`Workspace ${state.workspace?.name ?? ""}`}>
+			{/* Collapsible Workspace root section (or focused subfolder scope, e.g. a ticket bundle folder) */}
+			<section class="explorer-section explorer-workspace" classList={{ open: wsOpen(), scoped: Boolean(scopedFolder()) }} aria-label={`Folder ${activeRootName()}`}>
 				<div class="explorer-section-head">
 					<button class="explorer-section-toggle" aria-expanded={wsOpen()} onClick={toggleWs}>
 						<Icon name={wsOpen() ? "chevron-down" : "chevron-right"} class="twisty" />
-						<span class="explorer-section-title">{state.workspace?.name}</span>
+						<span class="explorer-section-title">{activeRootName()}</span>
 					</button>
 					<div class="explorer-section-actions">
 						<IconButton label="New file" title="New file…" icon="new-file" onClick={() => newInTarget("file")} />
@@ -651,6 +768,47 @@ export function Explorer() {
 						/>
 					</div>
 				</div>
+				<Show when={scopedFolder()}>
+					{(scope) => {
+						const scopedTicket = () =>
+							docs().find((d) => d.exists && d.group === "tickets" && d.ticketFolder && canonical(d.ticketFolder) === canonical(scope().path));
+						const relScope = () => relativeTo(state.workspace?.root, scope().path).split("\\").join("/");
+						return (
+							<div class="explorer-scope-bar" role="region" aria-label={`Focused on ${activeRootName()}`}>
+								<button
+									type="button"
+									class="explorer-scope-back"
+									title="Back to full workspace folder"
+									onClick={() => setScopedFolder(null)}
+								>
+									<Icon name="arrow-left" />
+									<span>All files</span>
+								</button>
+								<span class="explorer-scope-path" title={scope().path}>
+									{relScope()}/
+								</span>
+								<div class="explorer-scope-acts">
+									<Show when={scopedTicket()}>
+										{(t) => (
+											<IconButton
+												label={`Open ${t().ticket ?? t().name}`}
+												title={`Open primary ticket ${t().ticket ?? t().name}`}
+												icon="go-to-file"
+												onClick={() => void openFile(t().path)}
+											/>
+										)}
+									</Show>
+									<IconButton
+										label={`Search inside ${relScope()}`}
+										title={`Search inside ${relScope()}/`}
+										icon="search"
+										onClick={() => findInFolder(relScope())}
+									/>
+								</div>
+							</div>
+						);
+					}}
+				</Show>
 				<Show when={wsOpen()}>
 					<div class="explorer-workspace-body">
 						<Show when={!read()}>
@@ -661,14 +819,14 @@ export function Explorer() {
 						</Show>
 						<Rows
 							role="tree"
-							label={`Files in ${state.workspace?.name ?? "the workspace"}`}
+							label={`Files in ${activeRootName() || "the workspace"}`}
 							api={(rows) => (tree = rows)}
 							onContextMenu={(e) => {
 								e.preventDefault();
 								rootMenu({ x: e.clientX, y: e.clientY });
 							}}
 						>
-							<Listed listing={root} path={state.workspace?.root ?? ""} depth={0} />
+							<Listed listing={root} path={activeRootPath()} depth={0} />
 						</Rows>
 					</div>
 				</Show>

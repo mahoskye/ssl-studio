@@ -51,7 +51,7 @@ describe("a document's outline", () => {
 		const names = async (language: string, ...path: string[]) => outline(language, await Bun.file(join(demo, ...path)).text()).map((item) => item.name);
 		expect(await names("toml", ".ssl-studio", "project.toml")).toContain("project");
 		expect((await names("sql", "schema", "database", "demo.sql")).some((name) => name.startsWith("CREATE TABLE DEMO_"))).toBe(true);
-		expect(await names("markdown", "docs", "tickets", "DEMO-103.md")).toEqual(["DEMO-103: A report of the samples due soon"]);
+		expect(await names("markdown", "docs", "tickets", "DEMO-103", "DEMO-103.md")).toEqual(["DEMO-103: A report of the samples due soon"]);
 		expect(await names("json", "design", "SetSampleDueDates.plan.json")).toContain("nodes");
 		expect(hasOutline("ssl")).toBe(false);
 		expect(outline("ssl", ":PROCEDURE A;\n:ENDPROC;")).toEqual([]);

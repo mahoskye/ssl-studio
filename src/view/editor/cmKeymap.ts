@@ -581,8 +581,9 @@ export function cmSmartPasteExtension(filePath: () => string): Extension {
 			if (saved) snippets.push(saved.markdown);
 		}
 		if (!snippets.length) return;
-		const at = pos ?? view.state.selection.main.from;
-		const to = pos ?? view.state.selection.main.to;
+		const docLen = view.state.doc.length;
+		const at = Math.max(0, Math.min(pos ?? view.state.selection.main.from, docLen));
+		const to = Math.max(at, Math.min(pos ?? view.state.selection.main.to, docLen));
 		const insert = snippets.join("\n");
 		view.dispatch({
 			changes: { from: at, to, insert },

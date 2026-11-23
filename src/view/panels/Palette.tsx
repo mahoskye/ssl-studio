@@ -56,7 +56,13 @@ const snippetText = (file: DocFile) => backend.read(file.path).then((f) => f.tex
 
 /** Puts a kept snippet at the cursor, as it is written: a `$` in a query is a `$`, not a field to fill. */
 export async function insertSnippet(file: DocFile) {
-	const live = activeLiveEditor();
+	let live = activeLiveEditor();
+	const path = activePath();
+	if (!live && path && isMarkdown(path) && !activeEditor()?.getDomNode()?.offsetParent) {
+		setMarkdownMode(path, "live");
+		await new Promise((r) => setTimeout(r, 40));
+		live = activeLiveEditor();
+	}
 	const editor = activeEditor();
 	const model = editor?.getModel();
 	if (!live && (!editor || !model)) return notify("Open a file to insert a snippet into. Its row's title says where it is kept.");
@@ -67,7 +73,9 @@ export async function insertSnippet(file: DocFile) {
 		return notify(`The snippet could not be read: ${e?.message ?? e}`, "error");
 	}
 	if (live) {
-		live.insertText(text.replace(/\r\n/g, "\n"));
+		const raw = text.replace(/\r\n/g, "\n").trimEnd();
+		const lang = /\.sql$/i.test(file.name) ? "sql" : /\.(ssl|srvscr|ds)$/i.test(file.name) ? "ssl" : "";
+		live.insertText(lang ? `\`\`\`${lang}\n${raw}\n\`\`\`\n` : `${raw}\n`, undefined, { asBlock: true });
 		return;
 	}
 	const position = editor!.getPosition() ?? model!.getFullModelRange().getEndPosition();
@@ -158,14 +166,23 @@ export function Palette() {
 		() => loadMarkdownTemplates(),
 	);
 	const [shownMdTpl, setShownMdTpl] = createSignal<MarkdownTemplate | null>(null);
-	const insertTableInMd = async () => {
+	const ensureLiveMd = async () => {
 		const path = activeMdPath();
-		if (!path) return;
+		if (!path) return null;
 		if (!activeLiveEditor() && !activeEditor()?.getDomNode()?.offsetParent) {
 			setMarkdownMode(path, "live");
 			await new Promise((r) => setTimeout(r, 40));
 		}
-		activeLiveEditor()?.runAction("md-table-insert");
+		return activeLiveEditor() ?? null;
+	};
+	const insertTableInMd = async () => {
+		(await ensureLiveMd())?.runAction("md-table-insert");
+	};
+	const insertMermaidInMd = async () => {
+		const live = await ensureLiveMd();
+		if (!live) return;
+		const block = "```mermaid\nflowchart LR\n\tA[Start] --> B[End]\n```\n";
+		live.insertText(block, "```mermaid\nflowchart LR\n\t".length, { asBlock: true });
 	};
 	const savedPreviewH = Number(recall("palette.preview.h"));
 	const [previewH, setPreviewH] = createSignal(Number.isFinite(savedPreviewH) && savedPreviewH >= 80 ? savedPreviewH : 190);
@@ -369,7 +386,7 @@ export function Palette() {
 											</Row>
 										</RowGroup>
 										<RowGroup head="Callouts">
-											<For each={CALLOUT_PRESETS.slice(0, 8)}>
+											<For each={CALLOUT_PRESETS}>
 												{(preset) => (
 													<Row
 														class="tree-row palette-item"
@@ -395,7 +412,29 @@ export function Palette() {
 												<span class="label">Image…</span>
 												<span class="meta">Paste / drop</span>
 											</Row>
+											<Row
+												class="tree-row palette-item"
+												key="md:mermaid"
+												onActivate={() => void insertMermaidInMd()}
+												title="Insert a Mermaid diagram block rendered inline"
+											>
+												<Icon name="graph" class="icon" />
+												<span class="label">Mermaid diagram</span>
+												<span class="meta">flowchart</span>
+											</Row>
 										</RowGroup>
+										<Show when={keptSnippets().length}>
+											<RowGroup head="Kept snippets">
+												<For each={keptSnippets()}>
+													{(file) => (
+														<Row class="tree-row palette-item kept" key={file.path} onActivate={() => void insertSnippet(file)} title={[file.title || file.name, file.summary, file.path].filter(Boolean).join("\n")}>
+															<span class="label">{file.title || file.name}</span>
+															<span class="meta">{/\.sql$/i.test(file.name) ? "SQL" : /\.(ssl|srvscr|ds)$/i.test(file.name) ? "SSL" : ""}</span>
+														</Row>
+													)}
+												</For>
+											</RowGroup>
+										</Show>
 									</Rows>
 									<SectionSplitter label="Height of the template preview" value={previewH()} min={80} max={440} onDrag={resizePreview} onReset={resetPreview} />
 									<div class="palette-preview" role="region" aria-label="Template preview" style={{ height: `${previewH()}px` }}>

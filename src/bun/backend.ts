@@ -11,6 +11,7 @@ import { findLsp, findOpencode } from "./tools";
 import { WorkspaceFiles } from "./workspace";
 import { Git } from "./git";
 import { Agent } from "./agent";
+import { formatDocument } from "./format";
 
 export type Host = {
 	emit<K extends keyof BackendEvents>(event: K, payload: BackendEvents[K]): void;
@@ -120,6 +121,8 @@ export function createBackend(host: Host, initial?: string) {
 		},
 		gitStatus: async () => (files ? git().status() : null),
 		gitBase: (path, from) => git().base(need().inside(path), from),
+		gitLog: (path, limit) => (files ? git().log(need().inside(path), limit) : Promise.resolve([])),
+		gitShow: (path, sha, repoPath) => (files ? git().show(need().inside(path), sha, repoPath) : Promise.resolve(null)),
 		gitStage: (paths) => git().stage(paths.map((path) => need().inside(path))),
 		gitUnstage: (paths) => git().unstage(paths.map((path) => need().inside(path))),
 		gitCommit: (message) => git().commit(message),
@@ -187,6 +190,7 @@ export function createBackend(host: Host, initial?: string) {
 		manifest: async () => fileManifest(need(), await readProject(need().root)),
 		catalogFiles: async (area) => catalogFilesOf(need(), await readProject(need().root), area),
 		tomlProblem: async (text) => tomlProblem(text),
+		formatDocument: (request) => formatDocument(request, files?.root ?? null),
 		linksTo: async (path) => linksTo(need(), path),
 		namesIn: async () => namesIn(need()),
 		settings: () => settings.load(),

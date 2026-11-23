@@ -107,13 +107,30 @@ export async function decideModel(ref: string, models: ModelLike[], choose: (tit
 	return { model: ref, own: answer === MINE };
 }
 
+function fenceLangFor(file: string): string {
+	const lower = file.toLowerCase();
+	if (/\.(ssl|srvscr|ds)$/.test(lower)) return "ssl";
+	if (/\.sql$/.test(lower)) return "sql";
+	if (/\.(md|markdown)$/.test(lower)) return "markdown";
+	if (/\.(json|jsonc)$/.test(lower)) return "json";
+	if (/\.(xml|xfd|xsd|xsl|wsdl|config|svg)$/.test(lower)) return "xml";
+	if (/\.(csv|tsv)$/.test(lower)) return "csv";
+	if (/\.ya?ml$/.test(lower)) return "yaml";
+	if (/\.toml$/.test(lower)) return "toml";
+	if (/\.tsx?$/.test(lower)) return "typescript";
+	if (/\.jsx?$/.test(lower)) return "javascript";
+	if (/\.html?$/.test(lower)) return "html";
+	if (/\.css$/.test(lower)) return "css";
+	return "ssl";
+}
+
 /**
  * A question as it is sent: the work it is for, then the question, then the
  * code it is about. The agent has no file tools here, and is told so.
  */
 export function composeQuestion(question: string, code?: { file: string; label: string; code: string } | null, work?: string): string {
 	const parts = [...(work ? [work, "", "THE QUESTION:"] : []), question];
-	if (code) parts.push("", `About this code from ${code.file}, ${code.label}:`, "```ssl", code.code, "```");
+	if (code) parts.push("", `About this code from ${code.file}, ${code.label}:`, `\`\`\`${fenceLangFor(code.file)}`, code.code, "```");
 	if (code || work) parts.push("", `You cannot read files in this session; answer from ${code && work ? "the code and the documents above" : code ? "the code above" : "the documents above"}.`);
 	return parts.join("\n");
 }

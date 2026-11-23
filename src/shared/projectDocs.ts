@@ -117,6 +117,7 @@ export const PROMPTS = {
 	interfaces: "Who sends it, who receives it, and when.",
 	files: "What the file is, who writes it and who reads it.",
 	contract: "Where the agreed specification is kept, and who answers for it on each side.",
+	state: "One paragraph.",
 } as const;
 /** Whether a line is one a template wrote, not yet replaced. */
 export const isPrompt = (line: string | undefined) => Object.values(PROMPTS).some((prompt) => prompt === (line ?? "").trim());
@@ -130,7 +131,7 @@ const quoted = (value: string) => {
 /** A value as it is written in front matter: quoted when it holds what would be read as something else. */
 export const frontValue = quoted;
 
-export const ticketTemplate = (ticket: { key: string; title: string; source?: string; related?: readonly string[]; status?: string; type?: string; parent?: string; description?: string }) => `${fence([
+export const ticketTemplate = (ticket: { key: string; title: string; source?: string; related?: readonly string[]; blocks?: readonly string[]; blockedBy?: readonly string[]; status?: string; type?: string; parent?: string; description?: string }) => `${fence([
 	["ticket", ticket.key],
 	["title", quoted(ticket.title)],
 	["type", ticket.type ? quoted(ticket.type) : undefined],
@@ -138,6 +139,8 @@ export const ticketTemplate = (ticket: { key: string; title: string; source?: st
 	["status", ticket.status ? quoted(ticket.status) : "open"],
 	["parent", ticket.parent || undefined],
 	["related", `[${(ticket.related ?? []).join(", ")}]`],
+	["blocks", ticket.blocks?.length ? `[${ticket.blocks.join(", ")}]` : undefined],
+	["blocked-by", ticket.blockedBy?.length ? `[${ticket.blockedBy.join(", ")}]` : undefined],
 ])}
 # ${ticket.key}: ${ticket.title}
 
@@ -460,9 +463,9 @@ export function statusChoices(file: { group?: string; kind?: string } | undefine
  * its title, its name, its ticket's key, its state, what it is about, or the
  * tickets it is for. "open holiday" finds the open question about holidays.
  */
-export function docMatches(file: Pick<DocFile, "name" | "title" | "ticket" | "status" | "summary" | "tickets" | "kind">, filter: string): boolean {
+export function docMatches(file: Pick<DocFile, "name" | "title" | "heading" | "ticket" | "parent" | "status" | "summary" | "tickets" | "kind">, filter: string): boolean {
 	const words = filter.toLowerCase().split(/\s+/).filter(Boolean);
 	if (!words.length) return true;
-	const said = [file.title, file.name, file.ticket, file.status, file.summary, file.kind, ...(file.tickets ?? [])].filter(Boolean).join("\n").toLowerCase();
+	const said = [file.title, file.heading, file.name, file.ticket, file.parent, file.status, file.summary, file.kind, ...(file.tickets ?? [])].filter(Boolean).join("\n").toLowerCase();
 	return words.every((word) => said.includes(word));
 }

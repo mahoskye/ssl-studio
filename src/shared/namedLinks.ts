@@ -39,9 +39,15 @@ const withoutEnding = (name: string) => name.replace(/\.[^./\\]+$/, "");
  * first in the order links are offered in is meant (tickets, specs, what was
  * learned, and so on). Null when no document answers.
  */
-export function docByName(name: string, files: readonly DocFile[], root?: string | null): DocFile | null {
-	const wanted = plain(name);
-	if (!wanted) return null;
+export type DocNameIndex = {
+	byTicket: Map<string, DocFile>;
+	byPath: Map<string, DocFile>;
+	byBase: Map<string, DocFile>;
+	byTitle: Map<string, DocFile>;
+};
+
+/** Pre-indexes documents once in DOC_ORDER priority so repeated `docByName` / `nameChoices` lookups are O(1). */
+export function buildDocNameIndex(files: readonly DocFile[], root?: string | null): DocNameIndex {
 	const order: readonly string[] = DOC_ORDER;
 	const there = files
 		.filter((file) => file.exists)
@@ -53,21 +59,48 @@ export function docByName(name: string, files: readonly DocFile[], root?: string
 		const path = plain(file.path);
 		return top && path.startsWith(`${top}/`) ? path.slice(top.length + 1) : path;
 	};
-	const tries: ((file: DocFile) => boolean)[] = [
-		(file) => Boolean(file.ticket) && plain(file.ticket!) === wanted,
-		(file) => fromTop(file) === wanted || withoutEnding(fromTop(file)) === wanted,
-		(file) => plain(baseName(file.path)) === wanted || plain(withoutEnding(baseName(file.path))) === wanted,
-		(file) => Boolean(file.title) && plain(file.title!) === wanted,
-	];
-	for (const answers of tries) {
-		const found = there.find(answers);
-		if (found) return found;
+	const byTicket = new Map<string, DocFile>();
+	const byPath = new Map<string, DocFile>();
+	const byBase = new Map<string, DocFile>();
+	const byTitle = new Map<string, DocFile>();
+	const put = (map: Map<string, DocFile>, key: string, file: DocFile) => {
+		if (key && !map.has(key)) map.set(key, file);
+	};
+	for (const file of there) {
+		if (file.ticket) put(byTicket, plain(file.ticket), file);
+		const rel = fromTop(file);
+		put(byPath, rel, file);
+		put(byPath, withoutEnding(rel), file);
+		const base = plain(baseName(file.path));
+		put(byBase, base, file);
+		put(byBase, plain(withoutEnding(baseName(file.path))), file);
+		if (file.title) put(byTitle, plain(file.title), file);
 	}
-	return null;
+	return { byTicket, byPath, byBase, byTitle };
+}
+
+export function lookupInIndex(name: string, index: DocNameIndex): DocFile | null {
+	const wanted = plain(name);
+	if (!wanted) return null;
+	return index.byTicket.get(wanted) ?? index.byPath.get(wanted) ?? index.byBase.get(wanted) ?? index.byTitle.get(wanted) ?? null;
+}
+
+export function docByName(name: string, files: readonly DocFile[], root?: string | null): DocFile | null {
+	const wanted = plain(name);
+	if (!wanted) return null;
+	return lookupInIndex(wanted, buildDocNameIndex(files, root));
 }
 
 /** What ends a name where it stands between the brackets: a name that holds one of these cannot be written there. */
 const UNWRITABLE = /[[\]|#\n]/;
+
+export function nameForIndexed(file: DocFile, index: DocNameIndex, root?: string | null): string | null {
+	const fromTop = relativeTo(root, file.path).split("\\").join("/");
+	for (const name of [file.ticket ?? "", withoutEnding(baseName(file.path)), withoutEnding(fromTop), fromTop]) {
+		if (name.trim() && !UNWRITABLE.test(name) && lookupInIndex(name, index) === file) return name;
+	}
+	return null;
+}
 
 /**
  * The name to write for a document, so that the name means that document
@@ -77,11 +110,7 @@ const UNWRITABLE = /[[\]|#\n]/;
  * hash or a bracket.
  */
 export function nameFor(file: DocFile, files: readonly DocFile[], root?: string | null): string | null {
-	const fromTop = relativeTo(root, file.path).split("\\").join("/");
-	for (const name of [file.ticket ?? "", withoutEnding(baseName(file.path)), withoutEnding(fromTop), fromTop]) {
-		if (name.trim() && !UNWRITABLE.test(name) && docByName(name, files, root) === file) return name;
-	}
-	return null;
+	return nameForIndexed(file, buildDocNameIndex(files, root), root);
 }
 
 /** What has been typed of a link's name, when the cursor is in one: the text after "[[" on this line, up to the cursor. Null anywhere else. */
@@ -113,11 +142,12 @@ export function namedLinksIn(text: string): { from: number; to: number; link: Na
  */
 export function nameChoices(files: readonly DocFile[], path: string, root: string, all: readonly DocFile[] = files): { label: string; detail: string; name: string }[] {
 	const byPlace = new Map(files.map((file) => [relativeTo(root, file.path).split("\\").join("/"), file]));
+	const index = buildDocNameIndex(all, root);
 	return linkChoices(files, path, root).flatMap((choice) => {
 		const file = byPlace.get(choice.detail);
 		// Worked out among all the documents, the one being written in too: a name that is this document's own
 		// would lead back here, not to the one chosen.
-		const name = file && nameFor(file, all, root);
+		const name = file && nameForIndexed(file, index, root);
 		return name ? [{ label: choice.label, detail: choice.detail, name }] : [];
 	});
 }
@@ -133,6 +163,42 @@ export type NamePlace = { line: number; column: number; name: string };
  * row has to write it. (Code set in by four spaces, and a fence inside a
  * list or a quote, are not known to be code here.)
  */
+/** Computes inline code spans (`...`, ``...``) on a single Markdown line following CommonMark backtick-run rules. */
+function inlineCodeRanges(line: string): [number, number][] {
+	const ranges: [number, number][] = [];
+	let i = 0;
+	while (i < line.length) {
+		if (line[i] !== "`") {
+			i++;
+			continue;
+		}
+		let run = 0;
+		while (i + run < line.length && line[i + run] === "`") run++;
+		let j = i + run;
+		let closed = -1;
+		while (j < line.length) {
+			if (line[j] !== "`") {
+				j++;
+				continue;
+			}
+			let closeRun = 0;
+			while (j + closeRun < line.length && line[j + closeRun] === "`") closeRun++;
+			if (closeRun === run) {
+				closed = j + closeRun;
+				break;
+			}
+			j += closeRun;
+		}
+		if (closed >= 0) {
+			ranges.push([i, closed]);
+			i = closed;
+		} else {
+			i += run;
+		}
+	}
+	return ranges;
+}
+
 export function namePlaces(text: string): NamePlace[] {
 	if (!text.includes("[[")) return [];
 	const lines = text.split(/\r?\n/);
@@ -147,9 +213,9 @@ export function namePlaces(text: string): NamePlace[] {
 		offset += line.length + (text[start + line.length] === "\r" ? 2 : 1);
 		if (index < opening || !line.includes("[[")) continue;
 		if (fences.some(([from, to]) => start >= from && start < to)) continue;
+		const codeSpans = line.includes("`") ? inlineCodeRanges(line) : [];
 		for (const match of line.matchAll(/\[\[([^[\]\n]+)\]\]/g)) {
-			// In a span of code: an odd count of backticks before it, and one after it to close the span.
-			if ((line.slice(0, match.index).match(/`/g)?.length ?? 0) % 2 === 1 && line.includes("`", match.index + match[0].length)) continue;
+			if (codeSpans.some(([from, to]) => match.index >= from && match.index < to)) continue;
 			const link = namedLink(match[1]!.replace(/\\\|/g, "|"));
 			if (link) found.push({ line: index + 1, column: match.index + 2 + match[1]!.indexOf(link.name), name: link.name });
 		}
@@ -194,14 +260,17 @@ export function withNames(text: string, edits: readonly NameEdit[]): { text: str
  */
 export function namesToFollow<Place extends NamePlace>(places: readonly Place[], before: readonly DocFile[], after: readonly DocFile[], moved: (path: string) => string, root?: string | null): (Place & { instead: string })[] {
 	const follow: (Place & { instead: string })[] = [];
+	const beforeIdx = buildDocNameIndex(before, root);
+	const afterIdx = buildDocNameIndex(after, root);
+	const afterByPath = new Map(after.map((file) => [file.path, file]));
 	// Each name is asked once, however many places write it.
 	const instead = new Map<string, string | null>();
 	for (const place of places) {
 		if (!instead.has(place.name)) {
-			const was = docByName(place.name, before, root);
+			const was = lookupInIndex(place.name, beforeIdx);
 			const went = was ? moved(was.path) : "";
-			const target = was ? after.find((file) => file.path === went) : undefined;
-			const name = target && docByName(place.name, after, root) !== target ? nameFor(target, after, root) : null;
+			const target = was ? afterByPath.get(went) : undefined;
+			const name = target && lookupInIndex(place.name, afterIdx) !== target ? nameForIndexed(target, afterIdx, root) : null;
 			instead.set(place.name, name && name !== place.name ? name : null);
 		}
 		const name = instead.get(place.name);
@@ -231,15 +300,17 @@ export function linkedFrom(here: string, byPath: readonly { path: string; line: 
 	};
 	for (const link of byPath) add(link.path, link.line);
 	const me = files.find((file) => file.path === here);
+	const idx = buildDocNameIndex(files, root);
 	// Each name is asked once, however many places write it.
 	const meant = new Map<string, DocFile | null>();
 	for (const place of byName) {
-		if (!meant.has(place.name)) meant.set(place.name, docByName(place.name, files, root));
+		if (!meant.has(place.name)) meant.set(place.name, lookupInIndex(place.name, idx));
 		if (me && meant.get(place.name) === me) add(place.path, place.line);
 	}
 	const order: readonly string[] = DOC_ORDER;
+	const groupByPath = new Map(files.map((file) => [file.path, file.group]));
 	const rank = (path: string) => {
-		const group = files.find((file) => file.path === path)?.group;
+		const group = groupByPath.get(path);
 		const at = group ? order.indexOf(group) : -1;
 		return at < 0 ? order.length : at;
 	};

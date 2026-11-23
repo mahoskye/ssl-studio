@@ -287,7 +287,13 @@ export class WorkspaceFiles {
 	}
 
 	*files(dir = this.root): Generator<string> {
-		for (const d of readdirSync(dir, { withFileTypes: true })) {
+		let entries;
+		try {
+			entries = readdirSync(dir, { withFileTypes: true });
+		} catch {
+			return;
+		}
+		for (const d of entries) {
 			if (SKIP.has(d.name)) continue;
 			const path = join(dir, d.name);
 			if (d.isDirectory()) yield* this.files(path);
@@ -301,7 +307,11 @@ export class WorkspaceFiles {
 		const hits: SearchHit[] = [];
 		for (const path of this.files()) {
 			if (!fileChosen(relative(this.root, path), options.include, options.exclude)) continue;
-			if (statSync(path).size > SEARCH_MAX_BYTES) continue;
+			try {
+				if (statSync(path).size > SEARCH_MAX_BYTES) continue;
+			} catch {
+				continue;
+			}
 			const text = await textOf(path);
 			if (text.includes("\u0000")) continue;
 			const lines = text.split(/\r?\n/);

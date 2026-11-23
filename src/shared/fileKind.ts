@@ -12,6 +12,7 @@ const IMAGE_TYPES: Readonly<Record<string, string>> = {
 	webp: "image/webp",
 	bmp: "image/bmp",
 	ico: "image/x-icon",
+	avif: "image/avif",
 };
 
 /** The kind of picture a file is by its name ("image/png"), or null when it is not one this can show. */

@@ -8,12 +8,17 @@ import { marked } from "marked";
 import { parseCsv } from "../../shared/csv";
 import { frontMatter, one } from "../../shared/frontMatter";
 import { findHeadingLine } from "../../shared/markdownEdit";
-import { baseName, relativeTo } from "../../shared/paths";
+import { docByName } from "../../shared/namedLinks";
+import { baseName, dirName, relativePath, relativeTo } from "../../shared/paths";
 import { registryTitle, toneOf } from "../../shared/projectDocs";
+import { keysIn } from "../../shared/registryTickets";
 import { backend } from "../backend";
 import { isPlanPath, parsePlan } from "../plan/model";
+import { docs } from "../project";
 import { canonical, documents, state } from "../state";
-import { finishMarkdown } from "./markdownHtml";
+import { languageFor } from "./languages";
+import { resolveCodeLanguage } from "./markdownCode";
+import { finishMarkdown, type NameResolver, type TicketRef } from "./markdownHtml";
 
 export type HoverPreviewData = {
 	path: string;
@@ -97,7 +102,11 @@ function renderCsvPreview(raw: string, path: string, filterTicket?: string): Omi
 
 	if (filterTicket && ticketCol >= 0) {
 		const wanted = filterTicket.toLowerCase();
-		const matching = table.rows.filter((r) => (r[ticketCol]?.text ?? "").toLowerCase().includes(wanted));
+		const known = new Set(docs().flatMap((d) => (d.exists && d.group === "tickets" && d.ticket ? [d.ticket.toLowerCase()] : [])));
+		known.add(wanted);
+		const matching = table.rows.filter((r) =>
+			keysIn(r[ticketCol]?.text ?? "", known).some((k) => k.toLowerCase() === wanted),
+		);
 		if (matching.length) {
 			rows = matching;
 			note = `${matching.length} of ${table.rows.length} rows for ${filterTicket}`;
@@ -121,20 +130,98 @@ function renderCsvPreview(raw: string, path: string, filterTicket?: string): Omi
 	};
 }
 
-function renderMarkdownPreview(raw: string, path: string, options: { heading?: string; line?: number }): Omit<HoverPreviewData, "path" | "relPath"> {
+/** Closes any unclosed fenced code block left open by slicing a preview to N lines. */
+function closeDanglingFence(slice: string): string {
+	let openFence: string | null = null;
+	for (const line of slice.split(/\r?\n/)) {
+		const trimmed = line.trimStart();
+		if (!openFence) {
+			const m = /^(`{3,}|~{3,})/.exec(trimmed);
+			if (m) openFence = m[1]![0]!.repeat(m[1]!.length);
+		} else if (trimmed.startsWith(openFence) && new RegExp(`^${openFence[0]}{${openFence.length},}\\s*$`).test(trimmed)) {
+			openFence = null;
+		}
+	}
+	return openFence ? `${slice}\n${openFence}` : slice;
+}
+
+/** Extracts just the requested heading section (stopping at the next heading of equal or higher level outside fenced code). */
+function sliceHeadingSection(raw: string, startLine: number): string {
+	const lines = raw.split(/\r?\n/);
+	const headingLine = lines[startLine - 1] ?? "";
+	const m = /^\s*(#{1,6})\s+/.exec(headingLine);
+	const level = m ? m[1]!.length : 6;
+	let openFence: string | null = null;
+	let endIdx = lines.length;
+	for (let i = startLine; i < lines.length; i++) {
+		const trimmed = lines[i]!.trimStart();
+		if (!openFence) {
+			const fm = /^(`{3,}|~{3,})/.exec(trimmed);
+			if (fm) {
+				openFence = fm[1]![0]!.repeat(fm[1]!.length);
+				continue;
+			}
+			const hm = /^#{1,6}(?=\s)/.exec(trimmed);
+			if (hm && hm[0].length <= level) {
+				endIdx = i;
+				break;
+			}
+		} else if (trimmed.startsWith(openFence) && new RegExp(`^${openFence[0]}{${openFence.length},}\\s*$`).test(trimmed)) {
+			openFence = null;
+		}
+	}
+	return lines.slice(startLine - 1, endIdx).join("\n");
+}
+
+function renderMarkdownPreview(
+	raw: string,
+	path: string,
+	options: { heading?: string; line?: number; maxLines?: number },
+): Omit<HoverPreviewData, "path" | "relPath"> {
 	const fm = frontMatter(raw);
 	let snippet = fm.body;
+	let resolvedLine = options.line;
+	let headingMissing = false;
 	if (options.heading) {
 		const ln = findHeadingLine(raw, options.heading);
-		if (ln) snippet = raw.split(/\r?\n/).slice(ln - 1).join("\n");
+		if (ln) {
+			resolvedLine = ln;
+			snippet = sliceHeadingSection(raw, ln);
+		} else {
+			headingMissing = true;
+		}
 	} else if (options.line && options.line > 1) {
 		const lines = raw.split(/\r?\n/);
 		const start = Math.max(fm.lines, options.line - 2);
 		snippet = lines.slice(start).join("\n");
 	}
-	const previewMd = snippet.split(/\r?\n/).slice(0, 28).join("\n");
-	const cleanHtml = DOMPurify.sanitize(marked.parse(previewMd, { async: false, gfm: true }) as string);
-	const html = finishMarkdown(cleanHtml);
+	const maxLines = options.maxLines ?? 28;
+	const snippetLines = snippet.split(/\r?\n/);
+	const omitted = Math.max(0, snippetLines.length - maxLines);
+	const previewMd = closeDanglingFence(snippetLines.slice(0, maxLines).join("\n"));
+	const cleanHtml = headingMissing
+		? `<p class="md-hover-empty">Heading “${esc(options.heading ?? "")}” not found in this document.</p>`
+		: DOMPurify.sanitize(marked.parse(previewMd, { async: false, gfm: true }) as string);
+	const allDocs = docs();
+	const wsRoot = state.workspace?.root;
+	const tickets: TicketRef[] = allDocs
+		.filter((d) => d.exists && d.group === "tickets" && d.ticket && canonical(d.path) !== canonical(path))
+		.map((d) => ({
+			key: d.ticket!,
+			href: relativePath(dirName(path), d.path),
+			about: [d.ticket, d.title, d.status ? `(${d.status})` : ""].filter(Boolean).join(" "),
+		}));
+	const named: NameResolver = (name) => {
+		const found = docByName(name, allDocs, wsRoot);
+		if (!found) return null;
+		return {
+			href: relativePath(dirName(path), found.path),
+			about: found.title || found.name,
+		};
+	};
+	const rendered = headingMissing ? cleanHtml : finishMarkdown(cleanHtml, { tickets, named });
+	const moreFooter = !headingMissing && omitted > 0 ? `<p class="md-hover-more">… ${omitted} more line${omitted === 1 ? "" : "s"}</p>` : "";
+	const html = rendered ? `${rendered}${moreFooter}` : `<p class="md-hover-empty">Empty document.</p>`;
 	const fmTitle = one(fm.values.title);
 	const fmTicket = one(fm.values.ticket);
 	const fmStatus = one(fm.values.status);
@@ -145,20 +232,24 @@ function renderMarkdownPreview(raw: string, path: string, options: { heading?: s
 		status: fmStatus || undefined,
 		statusTone: fmStatus ? toneOf(fmStatus) : undefined,
 		badge: !fmTitle && fmTicket ? fmTicket : undefined,
-		html: html || `<p class="md-hover-empty">Empty document.</p>`,
-		line: options.line,
+		html,
+		line: resolvedLine,
 	};
 }
 
-function renderCodePreview(raw: string, path: string, line?: number): Omit<HoverPreviewData, "path" | "relPath"> {
+function renderCodePreview(raw: string, path: string, line?: number, maxLines = 20): Omit<HoverPreviewData, "path" | "relPath"> {
 	const allLines = raw.split(/\r?\n/);
 	const start = line && line > 1 ? Math.max(0, line - 3) : 0;
-	const slice = allLines.slice(start, start + 20);
+	const slice = allLines.slice(start, start + maxLines);
 	const more = allLines.length > start + slice.length ? `\n… (${allLines.length - start - slice.length} more lines)` : "";
+	const byFile = languageFor(path);
+	const ext = /\.([A-Za-z0-9_#-]+)$/.exec(path)?.[1];
+	const lang = byFile !== "plaintext" ? byFile : resolveCodeLanguage(ext);
+	const cls = lang ? ` class="language-${esc(lang)}"` : "";
 	return {
 		title: baseName(path),
 		kind: "code",
-		html: `<pre class="md-hover-code"><code>${esc(slice.join("\n") + more)}</code></pre>`,
+		html: `<pre class="md-hover-code"><code${cls}>${esc(slice.join("\n") + more)}</code></pre>`,
 		line,
 	};
 }
@@ -166,7 +257,7 @@ function renderCodePreview(raw: string, path: string, line?: number): Omit<Hover
 /** Builds a rich hover preview card for any workspace document (Markdown, Plan, CSV/TSV registry, or code). */
 export async function buildHoverPreview(
 	path: string,
-	options: { heading?: string; line?: number; ticket?: string } = {},
+	options: { heading?: string; line?: number; ticket?: string; maxLines?: number } = {},
 ): Promise<HoverPreviewData | null> {
 	const raw = await readText(path);
 	if (!raw.trim()) return null;
@@ -183,5 +274,5 @@ export async function buildHoverPreview(
 		const csvPreview = renderCsvPreview(raw, path, options.ticket);
 		return csvPreview ? { path, relPath, ...csvPreview } : null;
 	}
-	return { path, relPath, ...renderCodePreview(raw, path, options.line) };
+	return { path, relPath, ...renderCodePreview(raw, path, options.line, options.maxLines ?? 20) };
 }

@@ -38,7 +38,7 @@ describe("a ticket and what it has to carry across", () => {
 	const other: DocFile = { path: "/p/docs/registries/database.csv", name: "database.csv", group: "registries", exists: true, rows: 2 };
 	test("the ticket's page lists the registries with rows that name it", () => {
 		const groups = ticketWork([ticket, registry, other], "T-1");
-		expect(groups.map((group) => [group.kind, group.name, group.files.map((file) => file.name)])).toEqual([["registry", "To carry across", ["settings.csv"]]]);
+		expect(groups.map((group) => [group.kind, group.name, group.files.map((file) => file.name)])).toEqual([["registry", "Registries", ["settings.csv"]]]);
 	});
 	test("a ticket a row names that is not in the folder is said, by the registry's name", () => {
 		const check = docChecks([ticket, registry]).find((c) => c.text.includes("T-9"));

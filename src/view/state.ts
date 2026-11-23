@@ -6,7 +6,9 @@ import { createStore, produce } from "solid-js/store";
 import { DEFAULT_SETTINGS, type Info, type LspState, type Project, type Settings, type SettingsPatch, type ThemeFile, type Workspace } from "../shared/protocol";
 import { backend, on } from "./backend";
 import { monaco } from "./editor/monaco";
-import { languageFor } from "./editor/languages";
+import { languageFor, setFormattingHost } from "./editor/languages";
+import { DEFAULT_SQL_DIALECT } from "../shared/format";
+import { getPath, SERVER_DEFAULTS } from "../shared/styleProfile";
 import { session } from "./lsp/session";
 import { changedRanges, minimalReplace } from "./lsp/edits";
 import { ask, choose } from "./dialogs";
@@ -416,7 +418,7 @@ function attach(path: string, text: string, saved: { text: string; mtime: number
 	});
 	session.track(model);
 	if (isPlanPath(path)) trackPlan(model);
-	if (/\.(md|markdown)$/i.test(path)) trackDoc(model);
+	if (/\.(md|markdown)$/i.test(path)) trackDoc(model, path);
 	// A plan's own check says where it cannot be read (plan/check.ts): one source of findings to a document.
 	else if (/\.json$/i.test(path) && !isPlanPath(path)) trackJson(model);
 	else if (/\.toml$/i.test(path)) trackToml(model);
@@ -439,6 +441,31 @@ async function loadDoc(path: string): Promise<Doc> {
 }
 
 session.sslSettings = () => JSON.parse(JSON.stringify(state.settings.ssl ?? {}));
+
+setFormattingHost({
+	options: () => ({
+		printWidth: Number(getPath(state.settings.ssl, "format.maxLineLength") ?? SERVER_DEFAULTS.format.maxLineLength),
+		sqlDialect: state.settings.sqlDialect ?? DEFAULT_SQL_DIALECT,
+		sqlKeywordCase: getPath(state.settings.ssl, "format.sql.keywordCase") ?? SERVER_DEFAULTS.format.sql.keywordCase,
+	}),
+	formatSsl: async (code) => {
+		if (state.lsp.state !== "running") {
+			return { ok: false, error: "Start or restart the language server to format SSL code.", lspOffline: true };
+		}
+		try {
+			const indentStyle = getPath(state.settings.ssl, "format.indentStyle") ?? SERVER_DEFAULTS.format.indentStyle;
+			const tabSize = Number(getPath(state.settings.ssl, "format.indentSize") ?? SERVER_DEFAULTS.format.indentSize);
+			const input = code.replace(/\r\n/g, "\n");
+			const normalized = input.endsWith("\n") ? input : `${input}\n`;
+			const formatted = await session.formatText(normalized, { tabSize, insertSpaces: indentStyle === "space" });
+			return { ok: true, text: formatted };
+		} catch (err: any) {
+			return { ok: false, error: String(err?.message ?? err) };
+		}
+	},
+	onError: (error, path) => notify(`Could not format ${displayName(path)}: ${error}`, "error"),
+	onNotice: (message) => notify(message),
+});
 
 /** Models for files the language server points at (peek, rename) without opening a tab. */
 session.ensureModel = async (uri) => {

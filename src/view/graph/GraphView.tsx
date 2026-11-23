@@ -687,6 +687,42 @@ export function GraphView() {
 				: []),
 			{ label: legendOpen() ? "Hide legend" : "Show legend", run: toggleLegend, disabled: !inGraph || !legend().length, why: "The legend is for the graph" },
 			{ label: keysOpen() ? "Hide the keys" : "Keys and what the pointer does", keys: "?", run: toggleKeys, disabled: !inGraph, why: "The keys are the graph's" },
+			{
+				label: "Focus script linked to a ticket…",
+				run: () =>
+					void (async () => {
+						const { docs } = await import("../project");
+						const { codeMatchesRef, scriptsForTicket } = await import("../../shared/workContext");
+						const { choose } = await import("../dialogs");
+						const { notify } = await import("../state");
+						const tickets = docs().filter((d) => d.exists && d.group === "tickets" && d.ticket);
+						if (!tickets.length) return notify("No tickets found in docs/tickets/ yet.");
+						const labels = tickets.map((t) => `${t.ticket}: ${t.title || t.name}`);
+						const picked = await choose("Focus Call Graph on scripts governed by which ticket?", labels);
+						if (!picked) return;
+						const idx = labels.indexOf(picked);
+						const ticket = idx >= 0 ? tickets[idx] : undefined;
+						if (!ticket?.ticket) return;
+						const refs = scriptsForTicket(docs(), ticket.ticket);
+						const root = state.workspace?.root;
+						const matches = (graph()?.scripts ?? []).filter((s) => refs.some((r) => codeMatchesRef(s.path, r, root)));
+						if (!matches.length) {
+							notify(`No Call Graph scripts found for ${ticket.ticket} yet.`);
+							return;
+						}
+						let chosen = matches[0]!;
+						if (matches.length > 1) {
+							const scriptLabels = matches.map((m) => rel(m.path).replace(/\\/g, "/"));
+							const pickedScript = await choose(`${ticket.ticket} spans ${matches.length} scripts — focus which one?`, scriptLabels);
+							if (!pickedScript) return;
+							const si = scriptLabels.indexOf(pickedScript);
+							if (si >= 0) chosen = matches[si]!;
+						}
+						focus(`${chosen.path}#`);
+					})(),
+				disabled: !graph(),
+				why: "Build the call graph first",
+			},
 			"separator",
 			{ label: "Save picture…", run: () => void savePicture(svg, layout(), "docs/call-graph.svg"), disabled: !inGraph || !layout(), why: "There is no picture in the list" },
 			{ label: "Refresh", run: () => void refresh(), disabled: state.lsp.state !== "running", why: "Needs the language server" },
@@ -1073,6 +1109,40 @@ export function GraphView() {
 												onMouseLeave={() => setPointed(null)}
 												onClick={(e) => (e.stopPropagation(), far() ? comeIn(b) : b.kind === "dir" ? toggleDir(b.folder) : b.kind === "fold" ? toggleFold(b.path) : focus(b.id))}
 												onDblClick={() => b.kind !== "fold" && b.kind !== "dir" && open(b)}
+												onContextMenu={(e) => {
+													const boxPath = b.path;
+													if (b.kind === "dir" || !boxPath) return;
+													e.preventDefault();
+													e.stopPropagation();
+													void (async () => {
+														const { docs } = await import("../project");
+														const { docsGoverningFile } = await import("../../shared/workContext");
+														const { registryTitle } = await import("../../shared/projectDocs");
+														const { chooseFromMenu } = await import("../panels/RowMenu");
+														const { openFile, notify } = await import("../state");
+														const gov = docsGoverningFile(docs(), boxPath, state.workspace?.root);
+														const OPEN_SCRIPT = "Open script";
+														const FOCUS_NODE = "Focus callers & callees";
+														const docChoices = gov.map((g) => ({
+															label: `Open doc: ${g.file.group === "registries" ? registryTitle(g.file.name) : g.file.ticket && g.file.title && !g.file.title.startsWith(g.file.ticket) ? `${g.file.ticket}: ${g.file.title}` : g.file.title || g.file.name}`,
+															doc: g.file,
+															line: g.line,
+														}));
+														const picked = await chooseFromMenu(
+															b.label,
+															[OPEN_SCRIPT, FOCUS_NODE, ...docChoices.map((d) => d.label)],
+															{ x: e.clientX, y: e.clientY },
+														);
+														if (!picked) return;
+														if (picked === OPEN_SCRIPT) open(b);
+														else if (picked === FOCUS_NODE) focus(b.kind === "fold" ? `${b.path}#` : b.id);
+														else {
+															const hit = docChoices.find((d) => d.label === picked);
+															if (hit) await openFile(hit.doc.path, hit.line ? { reveal: { line: hit.line } } : {});
+															else notify("Could not open governing document.");
+														}
+													})();
+												}}
 											>
 												<Show
 													when={b.kind === "fold" || b.kind === "dir"}

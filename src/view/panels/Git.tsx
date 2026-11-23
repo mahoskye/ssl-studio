@@ -4,12 +4,15 @@
 // or lets its changes go (after asking). Everything stays on this machine:
 // there is no fetch, pull or push here.
 import { Icon } from "../Icon";
-import { createSignal, For, Show } from "solid-js";
+import { createMemo, createSignal, For, Show } from "solid-js";
 import { changeLetter, changeWord, commitProblem, GIT_ACTIONS, rowActions, stagedOf, unstagedOf, type GitFile } from "../../shared/gitStatus";
 import { baseName, dirName, relativeTo } from "../../shared/paths";
+import { ticketForFile } from "../../shared/workContext";
 import { FileMark } from "../FileMark";
 import { branchText, commit, discard, gitFailure, gitStatus, refreshGit, showChange, stage, unstage } from "../git";
-import { notify, openFile, state } from "../state";
+import { docs } from "../project";
+import { ticketAtHand } from "../projectDocs";
+import { activePath, notify, openFile, state } from "../state";
 import { chooseFromMenu } from "./RowMenu";
 import { IconButton, Row, RowGroup, Rows, type Point } from "./Rows";
 
@@ -39,6 +42,24 @@ export function GitPanel() {
 		const dir = relativeTo(state.workspace?.root, dirName(path));
 		return dir === dirName(path) || !dir ? "" : dir;
 	};
+	/** Candidate ticket prefixes inferred from staged files first, then active file, then single active ticket. */
+	const suggestedTickets = createMemo(() => {
+		const allDocs = docs();
+		const root = state.workspace?.root;
+		const keys: string[] = [];
+		const add = (k: string) => {
+			if (k && !keys.some((x) => x.toLowerCase() === k.toLowerCase())) keys.push(k);
+		};
+		for (const f of staged()) add(ticketForFile(allDocs, f.path, root));
+		if (!keys.length) {
+			for (const f of changes()) add(ticketForFile(allDocs, f.path, root));
+		}
+		if (!keys.length) {
+			const fromActive = ticketForFile(allDocs, activePath(), root);
+			add(fromActive || ticketAtHand());
+		}
+		return keys.slice(0, 3);
+	});
 	const act = async (action: string | null, file: GitFile) => {
 		if (action === OPEN) await openFile(file.path, { keep: true });
 		else if (action === SHOW) await showChange(file, false);
@@ -123,6 +144,24 @@ export function GitPanel() {
 					{gitStatus()!.initial ? ", with no commit yet" : ""}
 				</p>
 				<form class="git-commit" onSubmit={(e) => (e.preventDefault(), void make())}>
+					<Show when={suggestedTickets().length > 0}>
+						<div class="git-ticket-chips">
+							<For each={suggestedTickets()}>
+								{(key) => (
+									<Show when={!message().trim().toLowerCase().startsWith(key.toLowerCase())}>
+										<button
+											type="button"
+											class="git-ticket-chip"
+											title={`Prefix commit message with ${key}:`}
+											onClick={() => setMessage((cur) => `${key}: ${cur.trimStart()}`)}
+										>
+											+ {key}:
+										</button>
+									</Show>
+								)}
+							</For>
+						</div>
+					</Show>
 					<textarea
 						aria-label="What the commit does"
 						placeholder="What the commit does (Ctrl+Enter commits)"

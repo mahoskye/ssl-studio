@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Draft STARLIMS XML Form Definition (.xfd) snippet for DEMO-103 (invented). -->
+<Form id="DEMO_DUE_SOON_REPORT" title="Samples Due Soon">
+  <DataSources>
+    <DataSource name="dsDueSoon" ref="DueDates.SamplesDueSoon" />
+  </DataSources>
+  <Layout>
+    <Toolbar name="tbReport">
+      <DatePicker name="dpAsOf" label="As of" bind="dAsOf" />
+      <NumberBox name="nbDays" label="Window (days)" default="3" bind="nDays" />
+      <Button name="btnRefresh" label="Refresh" onClick="RefreshDueSoon" />
+    </Toolbar>
+    <DataGrid name="dgSamples" dataSource="dsDueSoon">
+      <Column field="SAMPLE_ID" caption="Sample" width="120" />
+      <Column field="STATUS" caption="Status" width="120" />
+      <Column field="DUE_ON" caption="Due Date" width="110" />
+      <Column field="PRIORITY" caption="Priority" width="90" />
+      <Column field="INSTRUMENT_ID" caption="Instrument" width="120" />
+    </DataGrid>
+  </Layout>
+</Form>

@@ -17,6 +17,9 @@ import { activePath, applyText, documents, keepTab, notify, state } from "../sta
 import { addEntry, ask, safely } from "./store";
 import type { StepState } from "./logic";
 import { baseName, joinPath, relativeTo } from "../../shared/paths";
+import { ticketForFile } from "../../shared/workContext";
+import { docs } from "../project";
+import { workPrompt } from "../projectDocs";
 
 export type StepKind = "note" | "code" | "report";
 export const STEPS: { skill: string; title: string; kind: StepKind; commentsOnly?: boolean }[] = [
@@ -112,7 +115,7 @@ async function callers(path: string, model: monaco.editor.ITextModel): Promise<s
 	return lines.length ? lines.join("\n") : "(none found in the workspace)";
 }
 
-function prompt(step: (typeof STEPS)[number], index: number, path: string, text: string, note: string | null, found?: string) {
+function prompt(step: (typeof STEPS)[number], index: number, path: string, text: string, note: string | null, found?: string, workContext?: string) {
 	const reply =
 		step.kind === "note"
 			? "Reply with the complete context note in one ```markdown block, and nothing else."
@@ -130,6 +133,7 @@ function prompt(step: (typeof STEPS)[number], index: number, path: string, text:
 		"```",
 		...(note ? ["", `CONTEXT NOTE design/${base(path)}.tidy.md:`, "```markdown", note, "```"] : []),
 		...(found ? ["", "CALLERS SSL Studio found (language server references, and a text search for the script name; scope: the open workspace):", "```", found, "```"] : []),
+		...(workContext ? ["", workContext] : []),
 	].join("\n");
 }
 
@@ -198,7 +202,10 @@ export async function runStep(index: number) {
 			mark("running");
 			const text = doc.model.getValue();
 			const found = step.kind === "note" ? await callers(path, doc.model) : undefined;
-			const reply = await ask(prompt(step, index, path, text, note, found), { title: `Tidy ${step.title}: ${rel(path)}`, skills: [step.skill], show: `Tidy step ${index + 1}, ${step.title.toLowerCase()}: ${rel(path)}` });
+			// Only attach governing ticket context on Step 0 (Context) using this script's actual linked ticket — never an unrelated active ticket!
+			const scriptTicket = index === 0 ? ticketForFile(docs(), path, state.workspace?.root) : "";
+			const work = scriptTicket ? await workPrompt(scriptTicket, { specs: false }).catch(() => null) : null;
+			const reply = await ask(prompt(step, index, path, text, note, found, work?.text), { title: `Tidy ${step.title}: ${rel(path)}`, skills: [step.skill], show: `Tidy step ${index + 1}, ${step.title.toLowerCase()}: ${rel(path)}` });
 			if (!reply) return mark("failed", "The request did not go through: the conversation below says why.");
 			if (reply.outcome !== "succeeded") return mark("failed", reply.outcome === "interrupted" ? `Stopped before it finished${reply.error ? `: ${reply.error}` : "."}` : `The reply ${reply.outcome === "timeout" ? "timed out" : "failed"}${reply.error ? `: ${reply.error}` : "."}`);
 			const markdown = fenced(reply.text, "markdown").join("\n\n") || (step.kind === "code" ? "" : reply.text.trim());

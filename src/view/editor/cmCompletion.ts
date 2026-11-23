@@ -10,6 +10,7 @@ import { linkBeingWritten, linkChoices } from "../../shared/docLinks";
 import { CALLOUT_PRESETS, CALLOUT_SPECS, documentHeadings } from "../../shared/markdownEdit";
 import { docByName, nameBeingWritten, nameChoices } from "../../shared/namedLinks";
 import { baseName, relativeTo } from "../../shared/paths";
+import { extractTags, workspaceTags } from "../../shared/tags";
 import { backend } from "../backend";
 import { docs } from "../project";
 import { canonical, documents, state } from "../state";
@@ -43,6 +44,58 @@ function markdownCompletionSource(filePath: () => string) {
 		const before = line.text.slice(0, col);
 		const after = line.text.slice(col);
 
+		// 0. Fenced code block language completion on an opening fence line: ```<lang>
+		const fenceOpenMatch = /^[ \t]{0,3}(`{3,}|~{3,})([A-Za-z0-9_+-]*)$/.exec(before);
+		if (fenceOpenMatch && after.trim() === "") {
+			const priorLines = context.state.doc.sliceString(0, line.from).split(/\r?\n/);
+			let openChar: string | null = null;
+			let openLen = 0;
+			for (const l of priorLines) {
+				const m = /^[ \t]{0,3}(`{3,}|~{3,})(.*)$/.exec(l);
+				if (!m) continue;
+				const ch = m[1]![0]!;
+				const len = m[1]!.length;
+				if (!openChar) {
+					openChar = ch;
+					openLen = len;
+				} else if (ch === openChar && len >= openLen && m[2]!.trim() === "") {
+					openChar = null;
+					openLen = 0;
+				}
+			}
+			if (!openChar) {
+				const typed = fenceOpenMatch[2]!;
+				const from = context.pos - typed.length;
+				const langs: [string, string][] = [
+					["ssl", "STARLIMS Scripting Language"],
+					["sql", "SQL query / DDL"],
+					["tsql", "SQL Server T-SQL"],
+					["plsql", "Oracle PL/SQL"],
+					["mermaid", "Mermaid diagram"],
+					["json", "JSON payload"],
+					["xml", "XML / HL7 / XFD"],
+					["yaml", "YAML configuration"],
+					["javascript", "JavaScript"],
+					["typescript", "TypeScript"],
+					["csv", "CSV table"],
+					["markdown", "Markdown"],
+					["diff", "Unified diff"],
+					["bash", "Shell script"],
+				];
+				return {
+					from,
+					to: context.pos,
+					options: langs.map(([lang, detail], idx) => ({
+						label: lang,
+						detail,
+						type: "keyword",
+						boost: 100 - idx,
+					})),
+					validFor: /^[A-Za-z0-9_+-]*$/,
+				};
+			}
+		}
+
 		// Never suggest Markdown syntax inside fenced code blocks.
 		const fullText = context.state.doc.toString();
 		if (fenced(fullText).some(([from, to]) => context.pos >= from && context.pos <= to)) return null;
@@ -71,28 +124,37 @@ function markdownCompletionSource(filePath: () => string) {
 		const root = state.workspace?.root;
 		const here = canonical(filePath());
 
-		// 1b. Obsidian image embed completion: `![[name` -> workspace image attachments.
+		// 1b. Obsidian embed completion: `![[name` -> workspace images AND project documents (transclusion).
 		const imgEmbedMatch = /!\[\[([^[\]|#\n]*)$/.exec(before);
 		if (imgEmbedMatch && root && !insideBackticks(before.slice(0, imgEmbedMatch.index))) {
 			const typed = imgEmbedMatch[1]!;
 			const images = await listWorkspaceImages();
-			if (images.length) {
-				const from = context.pos - typed.length;
-				const rest = /^[^[\]|#]*/.exec(after)![0].length;
-				const closed = /^(?:\|[^[\]]*)?\]\]/.test(after.slice(rest));
-				const options: Completion[] = images.map((imgPath, idx) => {
+			const all = docs();
+			const docOpts = nameChoices(all.filter((f) => canonical(f.path) !== here), here, root, all);
+			const from = context.pos - typed.length;
+			const rest = /^[^[\]|#]*/.exec(after)![0].length;
+			const closed = /^(?:\|[^[\]]*)?\]\]/.test(after.slice(rest));
+			const options: Completion[] = [
+				...images.map((imgPath, idx) => {
 					const name = baseName(imgPath);
 					const rel = relativeTo(root, imgPath);
 					return {
 						label: name,
 						detail: rel,
 						type: "file",
-						boost: 500 - idx,
+						boost: 600 - idx,
 						apply: closed ? name : `${name}]]`,
 					};
-				});
-				return { from, to: context.pos + (closed ? rest : 0), options, validFor: /^[^[\]|#\n]*$/ };
-			}
+				}),
+				...docOpts.map((choice, idx) => ({
+					label: choice.label,
+					detail: `Embed · ${choice.detail}`,
+					type: "text",
+					boost: 400 - idx,
+					apply: closed ? choice.name : `${choice.name}]]`,
+				})),
+			];
+			if (options.length) return { from, to: context.pos + (closed ? rest : 0), options, validFor: /^[^[\]|#\n]*$/ };
 		}
 
 		// 2. Wikilink heading completion: `[[doc#heading` or `[[#heading`.
@@ -156,6 +218,40 @@ function markdownCompletionSource(filePath: () => string) {
 				apply: choice.insert,
 			}));
 			return { from, to: context.pos + rest, options, validFor: /^[^()<>\s]*$/ };
+		}
+
+		// 5. #tag completion from tags across this document + all workspace docs (skipping fenced code blocks & hex colors).
+		const tagMatch = /(?:^|[\s(])#([A-Za-z][A-Za-z0-9_/-]*)$/.exec(before);
+		if (tagMatch && !/^[ \t]{0,3}#/.test(before) && !insideBackticks(before.slice(0, tagMatch.index))) {
+			const fences = fenced(fullText);
+			if (fences.some(([a, b]) => context.pos >= a && context.pos <= b)) return null;
+			const typed = tagMatch[1]!;
+			const typedLower = typed.toLowerCase();
+			const byLower = new Map<string, { tag: string; count: number }>();
+			for (const bucket of workspaceTags(docs())) {
+				byLower.set(bucket.tag.toLowerCase(), { tag: bucket.tag, count: bucket.count });
+			}
+			for (const localTag of extractTags(fullText)) {
+				const k = localTag.toLowerCase();
+				if (!byLower.has(k)) byLower.set(k, { tag: localTag, count: 1 });
+			}
+			const options: Completion[] = [...byLower.values()]
+				.filter((entry) => entry.tag.toLowerCase() !== typedLower)
+				.sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag, undefined, { sensitivity: "base" }))
+				.map((entry) => ({
+					label: `#${entry.tag}`,
+					detail: entry.count > 1 ? `${entry.count} docs` : undefined,
+					apply: entry.tag,
+					type: "keyword",
+				}));
+			if (options.length) {
+				const from = context.pos - typed.length;
+				return {
+					from,
+					options,
+					validFor: /^[A-Za-z0-9_/-]*$/,
+				};
+			}
 		}
 
 		return null;

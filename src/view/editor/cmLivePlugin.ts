@@ -6,26 +6,37 @@
 //   mentions, fenced code headers, bullets, clickable task checkboxes, and blockquotes.
 // - FoldService (`markdownFoldService`): heading section & nested list folding.
 import { foldGutter, foldService, syntaxTree } from "@codemirror/language";
-import { EditorSelection, StateField, type EditorState, type Extension, type Range } from "@codemirror/state";
+import { getSearchQuery, searchPanelOpen } from "@codemirror/search";
+import { EditorSelection, EditorState, StateField, type Extension, type Range } from "@codemirror/state";
 import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, type ViewUpdate } from "@codemirror/view";
 import { fenced } from "../../shared/catalog";
+import { isFenceClose, normalizeFenceLang, parseFenceOpen, stripQuotePrefix } from "../../shared/codeTokens";
+import { fenceAtLine, fenceFormatTarget } from "../../shared/fencedFormat";
 import { hrefWritten, linkFile, linkLeads } from "../../shared/docLinks";
 import { headingAnchor } from "../../shared/docTables";
 import { frontMatter } from "../../shared/frontMatter";
+import { closedHtmlCommentSpans, commentBlockHideLines, isStandaloneHtmlComment } from "../../shared/htmlComments";
 import { parseCalloutHeader, parseImageExpression, type ParsedImageSpec } from "../../shared/markdownEdit";
 import { parseMarkdownTable } from "../../shared/markdownTables";
 import { docByName, namedLink } from "../../shared/namedLinks";
-import { relativeTo } from "../../shared/paths";
+import { dirName, isInside, relativeTo, resolvePath } from "../../shared/paths";
 import { ticketMatcher } from "../../shared/ticketRefs";
 import { docs } from "../project";
-import { canonical, state as appState } from "../state";
+import { noteCursor } from "../navigation";
+import { canonical, documents, openFile, state as appState } from "../state";
+import { currentThemeVersion } from "../themes/themes";
 import { CalloutWidget } from "./cmLiveCallout";
+import { MermaidWidget } from "./cmMermaid";
+import { buildHoverPreview } from "./hoverPreview";
+import { colourCode } from "./markdownCode";
+import { hydrateImagesInElement } from "./imageResolve";
 import {
 	editYamlField,
 	liveCallbacksFacet,
 	rawEditBlockField,
 	readOnlyModeFacet,
 	refreshLiveEffect,
+	searchStateSig,
 	setEditYamlEffect,
 	setRawEditBlockEffect,
 	type HoverTarget,
@@ -69,8 +80,33 @@ function isRawEditing(state: EditorState, from: number, to: number): boolean {
 	return Boolean(raw && from <= raw.to && to >= raw.from);
 }
 
-/** Tables stay interactive widgets in Live mode unless explicitly in `Raw` mode (or mid-typing a brand-new 2-line delimiter row). */
+/** True when the CM6 search panel is open and its query matches text inside `[from, to]`. */
+function searchMatchesBlock(state: EditorState, from: number, to: number): boolean {
+	try {
+		if (!searchPanelOpen(state)) return false;
+		const q = getSearchQuery(state);
+		if (!q.search) return false;
+		const slice = state.sliceDoc(from, to);
+		if (q.regexp) {
+			try {
+				return new RegExp(q.search, q.caseSensitive ? "" : "i").test(slice);
+			} catch {
+				return false;
+			}
+		}
+		if (q.wholeWord) {
+			const esc = q.search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+			return new RegExp(`\\b${esc}\\b`, q.caseSensitive ? "" : "i").test(slice);
+		}
+		return q.caseSensitive ? slice.includes(q.search) : slice.toLowerCase().includes(q.search.toLowerCase());
+	} catch {
+		return false;
+	}
+}
+
+/** Tables stay interactive widgets in Live mode unless explicitly in `Raw` mode, searched, or mid-typing a 2-line delimiter row. */
 function tableShouldStayRaw(state: EditorState, from: number, to: number, startLine: number, endLine: number): boolean {
+	if (searchMatchesBlock(state, from, to)) return true;
 	if (state.facet(readOnlyModeFacet)) return false;
 	if (isRawEditing(state, from, to)) return true;
 	if (endLine === startLine + 1 && endLine <= state.doc.lines) {
@@ -80,8 +116,9 @@ function tableShouldStayRaw(state: EditorState, from: number, to: number, startL
 	return false;
 }
 
-/** Callouts stay interactive cards in Live mode unless explicitly in `Raw` mode (or mid-typing a brand-new 1-line `> [!` header). */
+/** Callouts stay interactive cards in Live mode unless explicitly in `Raw` mode, searched, or mid-typing a 1-line `> [!` header. */
 function calloutShouldStayRaw(state: EditorState, from: number, to: number, startLine: number, endLine: number): boolean {
+	if (searchMatchesBlock(state, from, to)) return true;
 	if (state.facet(readOnlyModeFacet)) return false;
 	if (isRawEditing(state, from, to)) return true;
 	if (startLine === endLine && selectionTouches(state, from, to)) return true;
@@ -119,6 +156,18 @@ class HiddenFrontmatterWidget extends WidgetType {
 	toDOM() {
 		const el = document.createElement("div");
 		el.className = "cm-md-fm-hidden";
+		el.setAttribute("aria-hidden", "true");
+		return el;
+	}
+}
+
+class HiddenCommentWidget extends WidgetType {
+	eq() {
+		return true;
+	}
+	toDOM() {
+		const el = document.createElement("div");
+		el.className = "cm-md-comment-hidden";
 		el.setAttribute("aria-hidden", "true");
 		return el;
 	}
@@ -332,13 +381,21 @@ class CheckboxWidget extends WidgetType {
 class CodeHeaderWidget extends WidgetType {
 	constructor(
 		private readonly lang: string,
-		private readonly code: string,
 		private readonly linePos: number,
+		private readonly openLine: number,
+		private readonly canFormat: boolean,
+		private readonly readOnly: boolean,
 	) {
 		super();
 	}
 	eq(other: CodeHeaderWidget) {
-		return other.lang === this.lang && other.code === this.code && other.linePos === this.linePos;
+		return (
+			other.lang === this.lang &&
+			other.linePos === this.linePos &&
+			other.openLine === this.openLine &&
+			other.canFormat === this.canFormat &&
+			other.readOnly === this.readOnly
+		);
 	}
 	toDOM(view: EditorView) {
 		const bar = document.createElement("span");
@@ -346,20 +403,115 @@ class CodeHeaderWidget extends WidgetType {
 		const label = document.createElement("span");
 		label.className = "cm-md-code-lang";
 		label.textContent = this.lang || "code";
+
+		const actions = document.createElement("span");
+		actions.className = "cm-md-code-actions";
+
+		if (this.canFormat && !this.readOnly) {
+			const fmtBtn = document.createElement("button");
+			fmtBtn.type = "button";
+			fmtBtn.className = "cm-md-code-btn cm-md-code-format";
+			fmtBtn.textContent = "Format";
+			const target = fenceFormatTarget(this.lang);
+			fmtBtn.title =
+				target?.languageId === "ssl"
+					? "Format SSL code block via language server"
+					: `Format ${this.lang || target?.languageId || "code"} block`;
+			fmtBtn.addEventListener("mousedown", (e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				const cb = view.state.facet(liveCallbacksFacet);
+				if (!cb?.onFormatCode || fmtBtn.disabled) return;
+				fmtBtn.disabled = true;
+				void cb
+					.onFormatCode(this.openLine)
+					.then((outcome) => {
+						if (!fmtBtn.isConnected) return;
+						fmtBtn.disabled = false;
+						if (outcome === "changed" || outcome === "unchanged") {
+							fmtBtn.textContent = outcome === "changed" ? "Formatted" : "Clean";
+							setTimeout(() => {
+								if (fmtBtn.isConnected) fmtBtn.textContent = "Format";
+							}, 1400);
+						}
+					})
+					.catch(() => {
+						if (fmtBtn.isConnected) fmtBtn.disabled = false;
+					});
+			});
+			actions.append(fmtBtn);
+		}
+
+		const normLang = normalizeFenceLang(this.lang);
+		if (normLang === "ssl") {
+			const desBtn = document.createElement("button");
+			desBtn.type = "button";
+			desBtn.className = "cm-md-code-btn";
+			desBtn.textContent = "Designer";
+			desBtn.title = "Format and copy SSL snippet for STARLIMS Designer";
+			desBtn.addEventListener("mousedown", (e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				const cb = view.state.facet(liveCallbacksFacet);
+				const current = fenceAtLine(view.state.doc.toString(), this.openLine)?.code ?? "";
+				void cb?.onCopyCodeForDesigner?.(current).then(() => {
+					if (!desBtn.isConnected) return;
+					desBtn.textContent = "Copied";
+					setTimeout(() => {
+						if (desBtn.isConnected) desBtn.textContent = "Designer";
+					}, 1400);
+				});
+			});
+			actions.append(desBtn);
+		}
+		if (normLang === "ssl" || normLang === "sql") {
+			const snipBtn = document.createElement("button");
+			snipBtn.type = "button";
+			snipBtn.className = "cm-md-code-btn";
+			snipBtn.textContent = "Save snippet";
+			snipBtn.title = `Save this ${normLang.toUpperCase()} block to docs/knowledge/snippets/`;
+			snipBtn.addEventListener("mousedown", (e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				const cb = view.state.facet(liveCallbacksFacet);
+				const current = fenceAtLine(view.state.doc.toString(), this.openLine)?.code ?? "";
+				void cb?.onSaveCodeSnippet?.(current, normLang);
+			});
+			actions.append(snipBtn);
+		}
+		if (normLang && normLang !== "mermaid") {
+			const scratchBtn = document.createElement("button");
+			scratchBtn.type = "button";
+			scratchBtn.className = "cm-md-code-btn";
+			scratchBtn.textContent = "Scratch";
+			scratchBtn.title = "Open code block in an untitled editor tab (full LSP diagnostics & editing)";
+			scratchBtn.addEventListener("mousedown", (e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				const cb = view.state.facet(liveCallbacksFacet);
+				const current = fenceAtLine(view.state.doc.toString(), this.openLine)?.code ?? "";
+				void cb?.onOpenCodeScratch?.(current, normLang);
+			});
+			actions.append(scratchBtn);
+		}
+
 		const btn = document.createElement("button");
 		btn.type = "button";
-		btn.className = "cm-md-code-copy";
+		btn.className = "cm-md-code-btn cm-md-code-copy";
 		btn.textContent = "Copy";
 		btn.addEventListener("mousedown", (e) => {
 			e.preventDefault();
 			e.stopPropagation();
 			const cb = view.state.facet(liveCallbacksFacet);
-			cb?.onCopyCode(this.code);
+			const current = fenceAtLine(view.state.doc.toString(), this.openLine)?.code ?? "";
+			cb?.onCopyCode(current);
 			btn.textContent = "Copied";
 			setTimeout(() => {
 				if (btn.isConnected) btn.textContent = "Copy";
 			}, 1400);
 		});
+		actions.append(btn);
+
 		bar.addEventListener("mousedown", (e) => {
 			if ((e.target as HTMLElement | null)?.closest("button")) return;
 			if (view.state.facet(readOnlyModeFacet)) return;
@@ -367,7 +519,7 @@ class CodeHeaderWidget extends WidgetType {
 			view.focus();
 			view.dispatch({ selection: EditorSelection.cursor(Math.min(this.linePos, view.state.doc.length)) });
 		});
-		bar.append(label, btn);
+		bar.append(label, actions);
 		return bar;
 	}
 	ignoreEvent() {
@@ -387,6 +539,152 @@ class HiddenFenceWidget extends WidgetType {
 	}
 }
 
+/** Obsidian-style embedded note / heading transclusion (`![[doc]]`, `![[doc#Heading]]`). */
+class TransclusionWidget extends WidgetType {
+	constructor(
+		private readonly inner: string,
+		private readonly sourcePath: string,
+		private readonly readOnly: boolean,
+		private readonly themeVer: number,
+		private readonly targetVer: number,
+	) {
+		super();
+	}
+	eq(other: TransclusionWidget): boolean {
+		return (
+			other.inner === this.inner &&
+			other.sourcePath === this.sourcePath &&
+			other.readOnly === this.readOnly &&
+			other.themeVer === this.themeVer &&
+			other.targetVer === this.targetVer
+		);
+	}
+	toDOM(view: EditorView): HTMLElement {
+		const card = document.createElement("div");
+		card.className = "cm-md-embed-card";
+		card.setAttribute("contenteditable", "false");
+		const root = appState.workspace?.root;
+		const bar = this.inner.indexOf("|");
+		const rawTarget = (bar < 0 ? this.inner : this.inner.slice(0, bar)).trim();
+		const alias = bar < 0 ? undefined : this.inner.slice(bar + 1).trim() || undefined;
+		const selfHeading = rawTarget.startsWith("#") ? rawTarget.slice(1).trim() : undefined;
+		const parsed = selfHeading ? null : namedLink(this.inner);
+
+		let targetPath: string | null = null;
+		let heading = selfHeading ?? parsed?.heading;
+		let isSelfDoc = false;
+		if (selfHeading) {
+			targetPath = this.sourcePath;
+		} else if (parsed && root) {
+			const docFound = docByName(parsed.name, docs(), root);
+			if (docFound) {
+				targetPath = docFound.path;
+			} else if (parsed.name.includes("/") || /\.[a-z0-9]{1,8}$/i.test(parsed.name)) {
+				// Allow transcluding relative workspace code/SQL/CSV/fixture files (`![[samples/query.sql]]`).
+				const relCandidate = resolvePath(dirName(this.sourcePath), parsed.name);
+				const rootCandidate = resolvePath(root, parsed.name);
+				targetPath = isInside(root, relCandidate) ? relCandidate : isInside(root, rootCandidate) ? rootCandidate : null;
+			}
+			if (targetPath && !heading && canonical(targetPath) === canonical(this.sourcePath)) {
+				isSelfDoc = true;
+			}
+		}
+
+		let resolvedLine: number | undefined;
+		const head = document.createElement("div");
+		head.className = "cm-md-embed-head";
+		const titleBtn = document.createElement("button");
+		titleBtn.type = "button";
+		titleBtn.className = "cm-md-embed-title";
+		titleBtn.textContent = alias ?? (selfHeading ? `#${selfHeading}` : parsed ? (parsed.words ?? (parsed.heading ? `${parsed.name} › ${parsed.heading}` : parsed.name)) : this.inner);
+		titleBtn.title = targetPath ? `Open ${relativeTo(root, targetPath)}` : `No note named “${this.inner}”`;
+		titleBtn.addEventListener("mousedown", (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			if (targetPath) void openFile(targetPath, resolvedLine ? { reveal: { line: resolvedLine } } : {});
+			else view.state.facet(liveCallbacksFacet)?.onFollowWiki(this.inner);
+		});
+		head.append(titleBtn);
+
+		if (!this.readOnly) {
+			const editBtn = document.createElement("button");
+			editBtn.type = "button";
+			editBtn.className = "cm-md-code-btn";
+			editBtn.textContent = "Edit";
+			editBtn.addEventListener("mousedown", (e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				const pos = Math.min(view.posAtDOM(card), view.state.doc.length);
+				view.focus();
+				view.dispatch({ selection: EditorSelection.cursor(pos) });
+			});
+			head.append(editBtn);
+		}
+		card.append(head);
+
+		const body = document.createElement("div");
+		body.className = "cm-md-embed-body md";
+		const setStatusMsg = (cls: string, msg: string) => {
+			const p = document.createElement("p");
+			p.className = cls;
+			p.textContent = msg;
+			body.replaceChildren(p);
+		};
+		// Safely intercept links and #tags inside embedded notes so clicks never hijack the app window.
+		body.addEventListener("click", (e) => {
+			const el = e.target instanceof Element ? e.target : null;
+			if (!el) return;
+			const tagEl = el.closest<HTMLElement>("[data-tag]");
+			if (tagEl?.dataset.tag) {
+				e.preventDefault();
+				e.stopPropagation();
+				view.state.facet(liveCallbacksFacet)?.onTagClick(tagEl.dataset.tag);
+				return;
+			}
+			const link = el.closest<HTMLAnchorElement>("a[href]");
+			if (!link) return;
+			e.preventDefault();
+			e.stopPropagation();
+			const href = link.getAttribute("href") ?? "";
+			if (/^https?:\/\//i.test(href)) {
+				void window.open(href, "_blank", "noopener");
+				return;
+			}
+			if (targetPath && root && href && !href.startsWith("#")) {
+				const clean = decodeURIComponent(href.split(/[?#]/)[0] ?? "");
+				const dest = resolvePath(dirName(targetPath), clean);
+				if (isInside(root, dest)) void openFile(dest);
+			}
+		});
+
+		if (isSelfDoc) {
+			setStatusMsg("cm-md-embed-missing", "Cannot embed a document inside itself (use ![[#Heading]] to embed a section).");
+		} else if (!targetPath) {
+			setStatusMsg("cm-md-embed-missing", `Embedded note “${this.inner}” was not found. Click the title to create it.`);
+		} else {
+			setStatusMsg("cm-md-embed-loading", "Loading embedded note…");
+			const embedPath = targetPath;
+			void buildHoverPreview(embedPath, { heading, maxLines: 120 }).then((preview) => {
+				if (!body.isConnected) return;
+				if (!preview) {
+					setStatusMsg("cm-md-embed-missing", `Could not read “${this.inner}”.`);
+					return;
+				}
+				resolvedLine = preview.line;
+				titleBtn.textContent = alias ?? (heading ? `${preview.title} › ${heading}` : preview.title);
+				body.innerHTML = preview.html;
+				hydrateImagesInElement(body, embedPath);
+				void colourCode(body);
+			});
+		}
+		card.append(body);
+		return card;
+	}
+	ignoreEvent() {
+		return true;
+	}
+}
+
 // --- Block StateField (multi-line & block widgets) ---------------------------
 
 function buildBlockDecorations(state: EditorState): DecorationSet {
@@ -396,19 +694,11 @@ function buildBlockDecorations(state: EditorState): DecorationSet {
 	const filePath = cb?.filePath() ?? "";
 	const fm = frontmatterRange(state);
 	const isRead = state.facet(readOnlyModeFacet);
-	const editYaml = !isRead && (state.field(editYamlField, false) ?? false);
 
-	// 1. YAML Frontmatter: hidden into zero-height block widget unless editing YAML or cursor enters it in Live mode.
+	// 1. YAML Frontmatter: always collapsed out of the CM6 body surface; raw YAML editing lives inside the Properties card above.
 	if (fm) {
-		const cursorInFm = selectionTouches(state, fm.from, fm.to);
-		if (!editYaml && !cursorInFm) {
-			if (guard.canAdd(fm.from, fm.to)) {
-				decos.push(Decoration.replace({ widget: new HiddenFrontmatterWidget(), block: true }).range(fm.from, fm.to));
-			}
-		} else {
-			for (let n = 1; n <= fm.lines; n++) {
-				decos.push(Decoration.line({ class: "cm-md-frontmatter-line" }).range(state.doc.line(n).from));
-			}
+		if (guard.canAdd(fm.from, fm.to)) {
+			decos.push(Decoration.replace({ widget: new HiddenFrontmatterWidget(), block: true }).range(fm.from, fm.to));
 		}
 	}
 
@@ -418,15 +708,59 @@ function buildBlockDecorations(state: EditorState): DecorationSet {
 	const inFence = (pos: number) => fences.some(([a, b]) => pos >= a && pos < b);
 	const linesArray = docText.split("\n");
 
-	// 2. Walk syntax tree for multi-line Table, Callout (Blockquote), and HorizontalRule nodes.
+	// 2. Walk syntax tree for multi-line Table, Callout (Blockquote), HorizontalRule, and CommentBlock nodes.
 	const tree = syntaxTree(state);
 	const handledTables = new Set<number>();
 	const handledCallouts = new Set<number>();
+	const handledComments = new Set<number>();
+	const applyStandaloneComment = (startNum: number, endNum: number) => {
+		for (let k = startNum; k <= endNum; k++) handledComments.add(k);
+		const rawFrom = state.doc.line(startNum).from;
+		const rawTo = state.doc.line(endNum).to;
+		if (!selectionTouches(state, rawFrom, rawTo)) {
+			const hidden = commentBlockHideLines(linesArray, startNum, endNum, isRead);
+			const hideFrom = state.doc.line(hidden.startLine).from;
+			const hideTo = state.doc.line(hidden.endLine).to;
+			if (guard.canAdd(hideFrom, hideTo)) {
+				decos.push(Decoration.replace({ widget: new HiddenCommentWidget(), block: true }).range(hideFrom, hideTo));
+			} else if (guard.canAdd(rawFrom, rawTo)) {
+				decos.push(Decoration.replace({ widget: new HiddenCommentWidget(), block: true }).range(rawFrom, rawTo));
+			}
+		} else {
+			for (let k = startNum; k <= endNum; k++) {
+				decos.push(Decoration.line({ class: "cm-md-comment-line" }).range(state.doc.line(k).from));
+			}
+		}
+	};
 	tree.iterate({
 		enter(node) {
 			// Skip nodes wholly inside frontmatter; allow container nodes like `Document` (from === 0) to descend!
 			if (node.to <= fmEnd) return false;
-			if (node.name === "FencedCode") return false;
+			if (node.name === "FencedCode") {
+				const startLine = state.doc.lineAt(node.from);
+				const endLine = state.doc.lineAt(node.to);
+				const open = parseFenceOpen(startLine.text);
+				if (open && normalizeFenceLang(open.lang) === "mermaid" && endLine.number > startLine.number) {
+					const hasClose = isFenceClose(endLine.text, open.fenceChar, open.fenceLen, Boolean(open.quotePrefix.length));
+					if (hasClose && !selectionTouches(state, node.from, node.to) && !isRawEditing(state, node.from, node.to) && !searchMatchesBlock(state, node.from, node.to) && guard.canAdd(node.from, node.to)) {
+						const bodyLines: string[] = [];
+						for (let k = startLine.number + 1; k < endLine.number; k++) {
+							const rawLine = state.doc.line(k).text;
+							bodyLines.push(open.quotePrefix.length ? stripQuotePrefix(rawLine, true).text : rawLine);
+						}
+						const code = bodyLines.join("\n").trim();
+						if (code) {
+							decos.push(
+								Decoration.replace({
+									widget: new MermaidWidget(code, isRead, currentThemeVersion()),
+									block: true,
+								}).range(node.from, node.to),
+							);
+						}
+					}
+				}
+				return false;
+			}
 			if (node.from <= fmEnd) return;
 
 			if (node.name === "Table") {
@@ -473,7 +807,7 @@ function buildBlockDecorations(state: EditorState): DecorationSet {
 					}
 					decos.push(
 						Decoration.replace({
-							widget: new CalloutWidget(parsed, bodyLines.join("\n"), node.from, blockTo, firstLine.number, endLine.number, filePath, isRead),
+							widget: new CalloutWidget(parsed, bodyLines.join("\n"), node.from, blockTo, firstLine.number, endLine.number, filePath, isRead, currentThemeVersion()),
 							block: true,
 						}).range(node.from, blockTo),
 					);
@@ -493,6 +827,15 @@ function buildBlockDecorations(state: EditorState): DecorationSet {
 			if (node.name === "HorizontalRule") {
 				if (!selectionTouches(state, node.from, node.to) && guard.canAdd(node.from, node.to)) {
 					decos.push(Decoration.replace({ widget: new HrWidget(node.from), block: true }).range(node.from, node.to));
+				}
+				return false;
+			}
+
+			if (node.name === "CommentBlock") {
+				const startLine = state.doc.lineAt(node.from);
+				const endLine = state.doc.lineAt(node.to);
+				if (isStandaloneHtmlComment(state.sliceDoc(startLine.from, endLine.to))) {
+					applyStandaloneComment(startLine.number, endLine.number);
 				}
 				return false;
 			}
@@ -522,7 +865,7 @@ function buildBlockDecorations(state: EditorState): DecorationSet {
 					}
 					decos.push(
 						Decoration.replace({
-							widget: new CalloutWidget(parsed, bodyLines.join("\n"), from, to, n, endLineNum, filePath, isRead),
+							widget: new CalloutWidget(parsed, bodyLines.join("\n"), from, to, n, endLineNum, filePath, isRead, currentThemeVersion()),
 							block: true,
 						}).range(from, to),
 					);
@@ -537,6 +880,27 @@ function buildBlockDecorations(state: EditorState): DecorationSet {
 				}
 				n = endLineNum;
 				continue;
+			}
+		}
+		// Standalone HTML comment fallback (e.g. EOF `<!-- plan ... -->` or `<!-- /catalog -->` before incremental tree catches up)
+		if (!handledComments.has(n) && !handledTables.has(n) && !handledCallouts.has(n) && /^[ \t]*<!--/.test(line.text)) {
+			if (isStandaloneHtmlComment(line.text)) {
+				applyStandaloneComment(n, n);
+				continue;
+			}
+			// Multi-line standalone comment fallback.
+			let endLineNum = n;
+			while (endLineNum < state.doc.lines && !state.doc.line(endLineNum).text.includes("-->")) {
+				endLineNum++;
+				if (inFence(state.doc.line(endLineNum).from)) break;
+			}
+			if (endLineNum > n && !inFence(state.doc.line(endLineNum).from)) {
+				const slice = state.sliceDoc(line.from, state.doc.line(endLineNum).to);
+				if (isStandaloneHtmlComment(slice)) {
+					applyStandaloneComment(n, endLineNum);
+					n = endLineNum;
+					continue;
+				}
 			}
 		}
 		// GFM table fallback
@@ -571,22 +935,51 @@ function buildBlockDecorations(state: EditorState): DecorationSet {
 		}
 	}
 
-	// 3. Standalone image lines (`![alt|400](src)` or `![[image.png|Caption|300]]`).
+	// 3. Standalone image lines (`![alt|400](src)` or `![[image.png|Caption|300]]`) & note transclusions (`![[note]]`, `![[note#Heading]]`).
+	const transclusionVer = (rawEmbed: string): number => {
+		const root = appState.workspace?.root;
+		const parsed = namedLink(rawEmbed);
+		const found = parsed && root ? docByName(parsed.name, docs(), root) : null;
+		const openVer = found ? (documents.get(canonical(found.path))?.model.getAlternativeVersionId() ?? 0) : 0;
+		return appState.treeVersion * 100000 + openVer;
+	};
 	for (let n = startLineNum; n <= state.doc.lines; n++) {
 		const line = state.doc.line(n);
 		if (!line.text.includes("![")) continue;
 		if (inFence(line.from) || selectionTouches(state, line.from, line.to)) continue;
 		const parsed = parseImageExpression(line.text);
-		if (!parsed) continue;
-		if (parsed.kind === "wiki" && !IMAGE_FILE_RE.test(parsed.src)) continue;
-		const cleanSpec: ParsedImageSpec = parsed.kind === "md" ? { ...parsed, src: hrefWritten(parsed.src) } : parsed;
-		if (cleanSpec.src && guard.canAdd(line.from, line.to)) {
-			decos.push(
-				Decoration.replace({
-					widget: new ImageWidget(cleanSpec, line.from, line.to, filePath, isRead, false),
-					block: true,
-				}).range(line.from, line.to),
-			);
+		if (parsed) {
+			if (parsed.kind === "wiki" && !IMAGE_FILE_RE.test(parsed.src)) {
+				const rawEmbed = /^\s*!\[\[([^[\]\n]+)\]\]\s*$/.exec(line.text)?.[1]?.trim();
+				if (rawEmbed && !searchMatchesBlock(state, line.from, line.to) && guard.canAdd(line.from, line.to)) {
+					decos.push(
+						Decoration.replace({
+							widget: new TransclusionWidget(rawEmbed, filePath, isRead, currentThemeVersion(), transclusionVer(rawEmbed)),
+							block: true,
+						}).range(line.from, line.to),
+					);
+				}
+				continue;
+			}
+			const cleanSpec: ParsedImageSpec = parsed.kind === "md" ? { ...parsed, src: hrefWritten(parsed.src) } : parsed;
+			if (cleanSpec.src && !searchMatchesBlock(state, line.from, line.to) && guard.canAdd(line.from, line.to)) {
+				decos.push(
+					Decoration.replace({
+						widget: new ImageWidget(cleanSpec, line.from, line.to, filePath, isRead, false),
+						block: true,
+					}).range(line.from, line.to),
+				);
+			}
+		} else {
+			const rawEmbed = /^\s*!\[\[([^[\]\n]+)\]\]\s*$/.exec(line.text)?.[1]?.trim();
+			if (rawEmbed && !IMAGE_FILE_RE.test(rawEmbed.split(/[|#]/)[0] ?? "") && !searchMatchesBlock(state, line.from, line.to) && guard.canAdd(line.from, line.to)) {
+				decos.push(
+					Decoration.replace({
+						widget: new TransclusionWidget(rawEmbed, filePath, isRead, currentThemeVersion(), transclusionVer(rawEmbed)),
+						block: true,
+					}).range(line.from, line.to),
+				);
+			}
 		}
 	}
 
@@ -600,7 +993,8 @@ export const liveBlockField = StateField.define<DecorationSet>({
 	update(value, tr) {
 		const refreshed = tr.effects.some((e) => e.is(refreshLiveEffect) || e.is(setEditYamlEffect) || e.is(setRawEditBlockEffect));
 		const rawChanged = tr.startState.field(rawEditBlockField, false) !== tr.state.field(rawEditBlockField, false);
-		if (tr.docChanged || tr.selection || tr.reconfigured || refreshed || rawChanged || syntaxTree(tr.startState) !== syntaxTree(tr.state)) {
+		const searchChanged = searchStateSig(tr.startState) !== searchStateSig(tr.state);
+		if (tr.docChanged || tr.selection || tr.reconfigured || refreshed || rawChanged || searchChanged || syntaxTree(tr.startState) !== syntaxTree(tr.state)) {
 			return buildBlockDecorations(tr.state);
 		}
 		return value;
@@ -709,15 +1103,17 @@ function buildInlineDecorations(view: EditorView): DecorationSet {
 					blockSkipRanges.push([node.from, node.to]);
 					const startLine = state.doc.lineAt(node.from);
 					const endLine = state.doc.lineAt(node.to);
-					const openText = startLine.text;
-					const closeText = endLine.text;
-					const langMatch = /^[ \t]*[`~]{3,}[ \t]*([^\s`~]*)/.exec(openText);
-					const lang = langMatch?.[1] ?? "";
-					const hasClose = endLine.number > startLine.number && /^[ \t]*[`~]{3,}[ \t]*$/.test(closeText);
-					const codeLines: string[] = [];
+					const open = parseFenceOpen(startLine.text);
+					const lang = open?.lang ?? "";
+					const quoted = Boolean(open?.quotePrefix.length);
+					const hasClose =
+						endLine.number > startLine.number &&
+						(open ? isFenceClose(endLine.text, open.fenceChar, open.fenceLen, quoted) : /^[ \t]*[`~]{3,}[ \t]*$/.test(endLine.text));
+					// When rendered as a MermaidWidget block decoration, skip line/header decorations.
+					if (normalizeFenceLang(lang) === "mermaid" && hasClose && !selectionTouches(state, node.from, node.to) && !isRawEditing(state, node.from, node.to) && !searchMatchesBlock(state, node.from, node.to)) {
+						return false;
+					}
 					const bodyEndLine = hasClose ? endLine.number - 1 : endLine.number;
-					for (let n = startLine.number + 1; n <= bodyEndLine; n++) codeLines.push(state.doc.line(n).text);
-					const codeText = codeLines.join("\n");
 
 					for (let n = startLine.number; n <= endLine.number; n++) {
 						const ln = state.doc.line(n);
@@ -727,10 +1123,49 @@ function buildInlineDecorations(view: EditorView): DecorationSet {
 						decos.push(Decoration.line({ class: classes.join(" ") }).range(ln.from));
 					}
 					if (!selectionTouches(state, startLine.from, startLine.to) && guard.canAdd(startLine.from, startLine.to)) {
-						decos.push(Decoration.replace({ widget: new CodeHeaderWidget(lang, codeText, startLine.from) }).range(startLine.from, startLine.to));
+						const canFormat = Boolean(fenceFormatTarget(lang)) && bodyEndLine >= startLine.number + 1;
+						decos.push(
+							Decoration.replace({
+								widget: new CodeHeaderWidget(lang, startLine.from, startLine.number, canFormat, state.facet(readOnlyModeFacet)),
+							}).range(startLine.from, startLine.to),
+						);
 					}
 					if (hasClose && !selectionTouches(state, endLine.from, endLine.to) && guard.canAdd(endLine.from, endLine.to)) {
 						decos.push(Decoration.replace({ widget: new HiddenFenceWidget() }).range(endLine.from, endLine.to));
+					}
+					return false;
+				}
+
+				if (node.name === "CommentBlock" || node.name === "Comment") {
+					if (node.name === "CommentBlock") {
+						const startLine = state.doc.lineAt(node.from);
+						const endLine = state.doc.lineAt(node.to);
+						if (isStandaloneHtmlComment(state.sliceDoc(startLine.from, endLine.to))) {
+							// Standalone comment blocks are hidden (or styled when cursor enters) by `liveBlockField`.
+							blockSkipRanges.push([node.from, node.to]);
+							return false;
+						}
+					}
+					const raw = state.sliceDoc(node.from, node.to);
+					const commentMark = Decoration.mark({ class: "cm-md-comment" });
+					for (const span of closedHtmlCommentSpans(raw)) {
+						const cFrom = node.from + span.from;
+						const cTo = node.from + span.to;
+						inlineSkipRanges.push([cFrom, cTo]);
+						const revealed = selectionTouches(state, cFrom, cTo);
+						const firstLn = state.doc.lineAt(cFrom).number;
+						const lastLn = state.doc.lineAt(cTo).number;
+						for (let lnNum = firstLn; lnNum <= lastLn; lnNum++) {
+							const ln = state.doc.line(lnNum);
+							const segFrom = Math.max(cFrom, ln.from);
+							const segTo = Math.min(cTo, ln.to);
+							if (segFrom >= segTo) continue;
+							if (revealed) {
+								decos.push(commentMark.range(segFrom, segTo));
+							} else if (guard.canAdd(segFrom, segTo)) {
+								decos.push(Decoration.replace({}).range(segFrom, segTo));
+							}
+						}
 					}
 					return false;
 				}
@@ -1009,6 +1444,31 @@ function buildInlineDecorations(view: EditorView): DecorationSet {
 				}
 			}
 
+			// Footnote definitions (`[^id]: ...`) and inline footnote refs (`[^id]`)
+			const fnDef = /^([ \t]{0,3})(\[\^([^\]\s]+)\]:)/.exec(text);
+			if (fnDef) {
+				const dFrom = line.from + fnDef[1]!.length;
+				const dTo = dFrom + fnDef[2]!.length;
+				if (!isSkipped(dFrom, dTo)) {
+					lineSkips.push([dFrom, dTo]);
+					decos.push(Decoration.mark({ class: "cm-md-footnote-def", attributes: { "data-md-fn-def": fnDef[3]! } }).range(dFrom, dTo));
+				}
+			}
+			if (text.includes("[^")) {
+				for (const m of text.matchAll(/\[\^([^\]\s]+)\](?!:)/g)) {
+					const rFrom = line.from + m.index;
+					const rTo = rFrom + m[0].length;
+					if (isSkipped(rFrom, rTo) || lineSkips.some(([a, b]) => rFrom < b && rTo > a)) continue;
+					lineSkips.push([rFrom, rTo]);
+					decos.push(
+						Decoration.mark({
+							class: "cm-md-footnote-ref",
+							attributes: { "data-md-footnote": m[1]!, title: `Jump to footnote [^${m[1]!}]` },
+						}).range(rFrom, rTo),
+					);
+				}
+			}
+
 			// #tags in prose (not ATX heading hashes, not inside links/code)
 			if (text.includes("#") && !/^[ \t]{0,3}#{1,6}[ \t]/.test(text)) {
 				for (const m of text.matchAll(/(^|[\s(])(#[A-Za-z][A-Za-z0-9_/-]*)/g)) {
@@ -1060,12 +1520,14 @@ export const liveInlinePlugin = ViewPlugin.fromClass(
 				(tr) => tr.reconfigured || tr.effects.some((e) => e.is(refreshLiveEffect) || e.is(setEditYamlEffect) || e.is(setRawEditBlockEffect)),
 			);
 			const rawChanged = update.startState.field(rawEditBlockField, false) !== update.state.field(rawEditBlockField, false);
+			const searchChanged = searchStateSig(update.startState) !== searchStateSig(update.state);
 			if (
 				update.docChanged ||
 				update.selectionSet ||
 				update.viewportChanged ||
 				refreshed ||
 				rawChanged ||
+				searchChanged ||
 				syntaxTree(update.startState) !== syntaxTree(update.state)
 			) {
 				this.decorations = buildInlineDecorations(update.view);
@@ -1077,7 +1539,37 @@ export const liveInlinePlugin = ViewPlugin.fromClass(
 
 // --- Interactive click & hover handlers --------------------------------------
 
-export const liveInteractionExtension: Extension = EditorView.domEventHandlers({
+export const liveInteractionExtension: Extension = [
+	// Keep user cursor navigation and Backspace cleanly inside the Markdown body below hidden YAML frontmatter.
+	EditorState.transactionFilter.of((tr) => {
+		if (tr.isUserEvent("delete.backward")) {
+			const fmStart = frontmatterRange(tr.startState);
+			if (fmStart) {
+				const bodyStart = Math.min(tr.startState.doc.length, fmStart.to + 1);
+				const prev = tr.startState.selection.main;
+				if (prev.empty && prev.head <= bodyStart) return [];
+			}
+		}
+		if (tr.docChanged || !tr.selection) return tr;
+		const fm = frontmatterRange(tr.state);
+		if (!fm) return tr;
+		const bodyStart = Math.min(tr.state.doc.length, fm.to + 1);
+		if (bodyStart <= fm.to) return tr;
+		const main = tr.selection.main;
+		if (main.anchor <= fm.to || main.head <= fm.to) {
+			return [
+				tr,
+				{
+					selection: EditorSelection.range(
+						Math.max(main.anchor, bodyStart),
+						Math.max(main.head, bodyStart),
+					),
+				},
+			];
+		}
+		return tr;
+	}),
+	EditorView.domEventHandlers({
 	mousedown(event, view) {
 		if (event.button !== 0 || event.altKey) return false;
 		const cb = view.state.facet(liveCallbacksFacet);
@@ -1110,6 +1602,68 @@ export const liveInteractionExtension: Extension = EditorView.domEventHandlers({
 			event.preventDefault();
 			cb.onTagClick(tagEl.dataset.mdTag ?? "");
 			return true;
+		}
+		const fnEl = el.closest<HTMLElement>("[data-md-footnote]");
+		if (fnEl) {
+			const id = fnEl.dataset.mdFootnote ?? "";
+			if (id) {
+				const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+				const defRe = new RegExp(`^[ \\t]{0,3}\\[\\^${escaped}\\]:`);
+				const fmEndLine = frontmatterRange(view.state)?.lines ?? 0;
+				let openFence: { ch: string; len: number } | null = null;
+				for (let n = fmEndLine + 1; n <= view.state.doc.lines; n++) {
+					const ln = view.state.doc.line(n);
+					const fm = /^[ \t]{0,3}(`{3,}|~{3,})(.*)$/.exec(ln.text);
+					if (fm) {
+						if (!openFence) openFence = { ch: fm[1]![0]!, len: fm[1]!.length };
+						else if (fm[1]![0] === openFence.ch && fm[1]!.length >= openFence.len && fm[2]!.trim() === "") openFence = null;
+						continue;
+					}
+					if (openFence) continue;
+					if (defRe.test(ln.text)) {
+						event.preventDefault();
+						const fp = cb?.filePath();
+						if (fp) {
+							const curLn = view.state.doc.lineAt(view.state.selection.main.head);
+							noteCursor({ path: fp, line: curLn.number, column: view.state.selection.main.head - curLn.from + 1 });
+						}
+						view.dispatch({ selection: EditorSelection.cursor(ln.from), effects: EditorView.scrollIntoView(ln.from, { y: "center" }) });
+						return true;
+					}
+				}
+			}
+		}
+		const fnDefEl = el.closest<HTMLElement>("[data-md-fn-def]");
+		if (fnDefEl) {
+			const id = fnDefEl.dataset.mdFnDef ?? "";
+			if (id) {
+				const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+				const refRe = new RegExp(`\\[\\^${escaped}\\](?!:)`);
+				const fmEndLine = frontmatterRange(view.state)?.lines ?? 0;
+				let openFence: { ch: string; len: number } | null = null;
+				for (let n = fmEndLine + 1; n <= view.state.doc.lines; n++) {
+					const ln = view.state.doc.line(n);
+					const fm = /^[ \t]{0,3}(`{3,}|~{3,})(.*)$/.exec(ln.text);
+					if (fm) {
+						if (!openFence) openFence = { ch: fm[1]![0]!, len: fm[1]!.length };
+						else if (fm[1]![0] === openFence.ch && fm[1]!.length >= openFence.len && fm[2]!.trim() === "") openFence = null;
+						continue;
+					}
+					if (openFence) continue;
+					const hit = refRe.exec(ln.text);
+					if (hit) {
+						event.preventDefault();
+						const fp = cb?.filePath();
+						if (fp) {
+							const curLn = view.state.doc.lineAt(view.state.selection.main.head);
+							noteCursor({ path: fp, line: curLn.number, column: view.state.selection.main.head - curLn.from + 1 });
+						}
+						const pos = ln.from + hit.index;
+						view.dispatch({ selection: EditorSelection.cursor(pos), effects: EditorView.scrollIntoView(pos, { y: "center" }) });
+						return true;
+					}
+				}
+			}
 		}
 		return false;
 	},
@@ -1144,7 +1698,8 @@ export const liveInteractionExtension: Extension = EditorView.domEventHandlers({
 		}
 		return false;
 	},
-});
+	}),
+];
 
 // --- Heading & nested list folding -------------------------------------------
 

@@ -3,6 +3,7 @@
 // - Merges workspace templates with built-in defaults (workspace files override matching defaults)
 // - Runs dynamic `<% tp.* %>` expressions using SSL Studio's native `ask()` and `choose()` dialogs
 // - Provides Insert Template, New Note from Template, Customize Template, Insert Callout, and Insert Image actions.
+import { frontMatter } from "../shared/frontMatter";
 import { buildCalloutBlock, CALLOUT_PRESETS } from "../shared/markdownEdit";
 import { baseName, dirName, isInside, joinPath, relativePath, relativeTo } from "../shared/paths";
 import { slug } from "../shared/projectDocs";
@@ -11,6 +12,7 @@ import {
 	mergeTemplates,
 	parseTemplateFile,
 	renderTemplate,
+	stripRawTemplateFrontmatter,
 	stripTemplateFrontmatter,
 	type MarkdownTemplate,
 	type TemplaterContext,
@@ -22,7 +24,7 @@ import { listWorkspaceImages } from "./editor/imageResolve";
 import { activeLiveEditor } from "./editor/liveBridge";
 import { isMarkdown } from "./project";
 import { ticketAtHand } from "./projectDocs";
-import { activePath, canonical, documents, notify, openFile, setMarkdownMode, setState, state } from "./state";
+import { activePath, canonical, documents, fileRemoved, notify, openFile, setMarkdownMode, setState, state } from "./state";
 
 /** Absolute path to the workspace templates folder (`<docs>/templates` by default, or `settings.templatesFolder`). */
 export function templatesFolderPath(): string | null {
@@ -34,21 +36,50 @@ export function templatesFolderPath(): string | null {
 	return joinPath(root, ...docsRel.split(/[\\/]/).filter((p) => p && p !== "."), "templates");
 }
 
-/** Loads workspace Markdown templates from the templates folder and merges them with built-in defaults. */
+/** Recursively discovers `.md` / `.markdown` templates under `dir` (up to depth 4). */
+async function walkTemplateDir(dir: string, prefix = "", depth = 0): Promise<{ path: string; name: string; relStem: string }[]> {
+	if (depth > 4) return [];
+	const out: { path: string; name: string; relStem: string }[] = [];
+	try {
+		const entries = await backend.list(dir);
+		for (const entry of entries) {
+			if (entry.name.startsWith(".")) continue;
+			if (entry.kind === "dir") {
+				const subPrefix = prefix ? `${prefix}/${entry.name}` : entry.name;
+				out.push(...(await walkTemplateDir(entry.path, subPrefix, depth + 1)));
+			} else if (entry.kind === "file" && /\.(md|markdown)$/i.test(entry.name)) {
+				const stem = entry.name.replace(/\.(md|markdown)$/i, "");
+				out.push({ path: entry.path, name: entry.name, relStem: prefix ? `${prefix}/${stem}` : stem });
+			}
+		}
+	} catch {
+		// Folder missing or unreadable.
+	}
+	return out;
+}
+
+/** Loads workspace Markdown templates recursively from the templates folder and merges them with built-in defaults. */
 export async function loadMarkdownTemplates(): Promise<MarkdownTemplate[]> {
 	const dir = templatesFolderPath();
 	if (!dir) return [...DEFAULT_TEMPLATES];
 	try {
-		const entries = await backend.list(dir);
-		const mdFiles = entries.filter((e) => e.kind === "file" && /\.(md|markdown)$/i.test(e.name));
+		const mdFiles = await walkTemplateDir(dir);
 		const workspace: MarkdownTemplate[] = [];
 		for (const entry of mdFiles) {
 			try {
 				const res = await backend.read(entry.path);
 				if (res.binary) continue;
 				const stem = entry.name.replace(/\.(md|markdown)$/i, "");
-				const id = slug(stem).toLowerCase() || stem.toLowerCase();
-				const displayName = stem.replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+				const id = entry.relStem.includes("/")
+					? entry.relStem
+							.split("/")
+							.map((p) => slug(p).toLowerCase() || p.toLowerCase())
+							.join("/")
+					: slug(stem).toLowerCase() || stem.toLowerCase();
+				const displayName = entry.relStem
+					.split("/")
+					.map((p) => p.replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()))
+					.join(" / ");
 				workspace.push(parseTemplateFile(res.text, displayName, id, entry.path));
 			} catch {
 				// Skip unreadable file.
@@ -58,6 +89,15 @@ export async function loadMarkdownTemplates(): Promise<MarkdownTemplate[]> {
 	} catch {
 		return [...DEFAULT_TEMPLATES];
 	}
+}
+
+function activeSelectionText(): string {
+	const live = activeLiveEditor();
+	if (live) return live.getSelectedText();
+	const ed = activeEditor();
+	const model = ed?.getModel();
+	const sel = ed?.getSelection();
+	return model && sel && !sel.isEmpty() ? model.getValueInRange(sel) : "";
 }
 
 function buildContext(targetPath: string | null, explicitTitle?: string): TemplaterContext {
@@ -75,6 +115,7 @@ function buildContext(targetPath: string | null, explicitTitle?: string): Templa
 		folder: folder === "." ? "" : folder,
 		projectName: state.project?.name || state.workspace?.name || "Project",
 		ticket: ticketAtHand() || "",
+		selection: activeSelectionText(),
 		prompt: (label, def) => ask(label, def ?? ""),
 		suggest: async (labels, values, placeholder) => {
 			const picked = await choose(placeholder || "Choose an option", labels);
@@ -94,7 +135,11 @@ async function pickTemplate(title: string): Promise<MarkdownTemplate | null> {
 	const byLabel = new Map<string, MarkdownTemplate>();
 
 	for (const tpl of all) {
-		const label = tpl.source === "workspace" ? `${tpl.name} (Custom)` : tpl.name;
+		const baseLabel = tpl.source === "workspace" ? `${tpl.name} (Custom)` : tpl.name;
+		let label = baseLabel;
+		if (byLabel.has(label)) {
+			label = `${baseLabel} · ${tpl.id}`;
+		}
 		labels.push(label);
 		details[label] = tpl.description;
 		byLabel.set(label, tpl);
@@ -152,17 +197,19 @@ export async function insertMarkdownTemplate(explicit?: MarkdownTemplate): Promi
 		notify("Open a Markdown document to insert a template.");
 		return;
 	}
+	// Pick template BEFORE switching Read -> Live so cancelling leaves view mode untouched.
+	const tpl = explicit ?? (await pickTemplate("Insert template at cursor"));
+	if (!tpl) return;
+	const existing = documents.get(canonical(path))?.model.getValue() ?? "";
+	const shouldStripFm = frontMatter(existing).lines > 0 || existing.trim().length > 0;
+	const sourceContent = shouldStripFm ? stripRawTemplateFrontmatter(tpl.content) : tpl.content;
+	const renderedRaw = await renderTemplate(sourceContent, buildContext(path));
+	if (renderedRaw.cancelled) return;
 	if (!activeLiveEditor() && !activeEditor()?.getDomNode()?.offsetParent) {
-		// If currently in Read view, switch to Live view so insertion lands cleanly!
 		setMarkdownMode(path, "live");
 		await new Promise((r) => setTimeout(r, 40));
 	}
-	const tpl = explicit ?? (await pickTemplate("Insert template at cursor"));
-	if (!tpl) return;
-	const renderedRaw = await renderTemplate(tpl.content, buildContext(path));
-	if (renderedRaw.cancelled) return;
-	const existing = documents.get(canonical(path))?.model.getValue() ?? "";
-	const rendered = existing.trim().length > 0 ? stripTemplateFrontmatter(renderedRaw) : renderedRaw;
+	const rendered = shouldStripFm ? stripTemplateFrontmatter(renderedRaw) : renderedRaw;
 	const asBlock = rendered.text.includes("\n");
 	if (!insertIntoActiveEditor(rendered.text, rendered.cursorOffset, { asBlock })) {
 		notify("Could not insert template into the active editor.", "error");
@@ -186,7 +233,16 @@ export async function newNoteFromTemplate(explicit?: MarkdownTemplate): Promise<
 	const defaultFolder = tpl.folder
 		? tpl.folder.replace(/^docs(?=\/|$)/, docsRel)
 		: docsRel;
-	const defaultFile = `${defaultFolder ? `${defaultFolder}/` : ""}${slug(title) || "untitled"}.md`;
+	// Share variable map between `fileName` and `content` so prompts aren't repeated.
+	const sharedVars = new Map<string, string>();
+	let stemName = slug(title) || "untitled";
+	if (tpl.fileName) {
+		const renderedName = await renderTemplate(tpl.fileName, buildContext(joinPath(root, docsRel, `${stemName}.md`), title), sharedVars);
+		if (renderedName.cancelled) return;
+		const cleanStem = renderedName.text.trim().replace(/\.(md|markdown)$/i, "").replace(/[\\/:*?"<>|]+/g, "-").replace(/^-+|-+$/g, "");
+		if (cleanStem) stemName = cleanStem;
+	}
+	const defaultFile = `${defaultFolder ? `${defaultFolder}/` : ""}${stemName}.md`;
 	const targetRel = (await ask("Where to save the new note (path in workspace)", defaultFile))?.trim();
 	if (!targetRel) return;
 
@@ -198,30 +254,31 @@ export async function newNoteFromTemplate(explicit?: MarkdownTemplate): Promise<
 		return;
 	}
 
-	const rendered = await renderTemplate(tpl.content, buildContext(dest, title));
+	// Check target existence BEFORE running interactive content prompts so user effort is never wasted.
+	const alreadyExists = await backend
+		.read(dest)
+		.then(() => true)
+		.catch(() => false);
+	if (alreadyExists) {
+		notify(`${withExt} already exists — opened it instead.`);
+		await openFile(dest);
+		return;
+	}
+
+	const rendered = await renderTemplate(tpl.content, buildContext(dest, title), sharedVars);
 	if (rendered.cancelled) return;
 
 	try {
-		const exists = await backend
-			.read(dest)
-			.then(() => true)
-			.catch(() => false);
-		if (exists) {
-			notify(`${withExt} already exists — opened it instead.`);
-			await openFile(dest);
-			return;
-		}
 		await backend.create(dest, "file");
 		await backend.write(dest, rendered.text);
 		setState("treeVersion", (v) => v + 1);
 		setMarkdownMode(canonical(dest), "live");
-		await openFile(dest);
-		if (rendered.cursorOffset !== null) {
+		const reveal = (() => {
+			if (rendered.cursorOffset === null) return undefined;
 			const before = rendered.text.slice(0, rendered.cursorOffset).split("\n");
-			const line = before.length;
-			const column = before[before.length - 1]!.length + 1;
-			setTimeout(() => activeLiveEditor()?.reveal({ line, column }), 50);
-		}
+			return { line: before.length, column: before[before.length - 1]!.length + 1 };
+		})();
+		await openFile(dest, reveal ? { reveal } : {});
 	} catch (e: any) {
 		notify(`Could not create note from template: ${e?.message ?? e}`, "error");
 	}
@@ -244,7 +301,7 @@ export async function manageTemplates(copyBuiltin?: MarkdownTemplate): Promise<v
 		const dest = joinPath(dir, fileName);
 		const exists = await backend.read(dest).then(() => true, () => false);
 		if (!exists) {
-			const header = `<!-- template: name="${copyBuiltin.name}" description="${copyBuiltin.description}" group="${copyBuiltin.group}"${copyBuiltin.folder ? ` folder="${copyBuiltin.folder}"` : ""} -->\n`;
+			const header = `<!-- template: name="${copyBuiltin.name}" description="${copyBuiltin.description}" group="${copyBuiltin.group}"${copyBuiltin.folder ? ` folder="${copyBuiltin.folder}"` : ""}${copyBuiltin.fileName ? ` fileName="${copyBuiltin.fileName}"` : ""} -->\n`;
 			await backend.create(dest, "file");
 			await backend.write(dest, header + copyBuiltin.content);
 			setState("treeVersion", (v) => v + 1);
@@ -257,13 +314,49 @@ export async function manageTemplates(copyBuiltin?: MarkdownTemplate): Promise<v
 
 	const CREATE_BLANK = "Create blank custom template…";
 	const CUSTOMIZE = "Customize a built-in template…";
-	const action = await choose(`Project templates live in ${relativeTo(root, dir)}/`, [CREATE_BLANK, CUSTOMIZE], {
-		details: {
-			[CREATE_BLANK]: "Start a new .md template with <% tp.date.now() %> and <% tp.file.cursor() %> tags",
-			[CUSTOMIZE]: "Copy a built-in default (Ticket, Change Spec, Meeting Notes…) into your project to edit",
-		},
-	});
+	const customTemplates = (await loadMarkdownTemplates()).filter((t) => t.source === "workspace" && t.path);
+	const customLabels = new Map<string, MarkdownTemplate>();
+	const options: string[] = [CREATE_BLANK, CUSTOMIZE];
+	const details: Record<string, string> = {
+		[CREATE_BLANK]: "Start a new .md template with <% tp.date.now() %> and <% tp.file.cursor() %> tags",
+		[CUSTOMIZE]: "Copy a built-in default (Ticket, Change Spec, Meeting Notes…) into your project to edit",
+	};
+	for (const tpl of customTemplates) {
+		const label = `Edit / delete: ${tpl.name}`;
+		options.push(label);
+		details[label] = tpl.path ? relativeTo(root, tpl.path) : tpl.description;
+		customLabels.set(label, tpl);
+	}
+	const action = await choose(`Project templates live in ${relativeTo(root, dir)}/`, options, { details });
 	if (!action) return;
+
+	const chosenCustom = customLabels.get(action);
+	if (chosenCustom?.path) {
+		const EDIT = "Edit template";
+		const DELETE = "Move template to trash";
+		const sub = await choose(chosenCustom.name, [EDIT, DELETE], {
+			details: {
+				[EDIT]: `Open ${relativeTo(root, chosenCustom.path)} in Live Preview`,
+				[DELETE]: "Move this custom template file to trash",
+			},
+		});
+		if (sub === EDIT) {
+			setMarkdownMode(canonical(chosenCustom.path), "live");
+			await openFile(chosenCustom.path);
+		} else if (sub === DELETE) {
+			if ((await choose(`Move template ${relativeTo(root, chosenCustom.path)} to trash?`, ["Move to trash", "Cancel"], { danger: "Move to trash" })) === "Move to trash") {
+				try {
+					await backend.trash(chosenCustom.path);
+					fileRemoved(chosenCustom.path);
+					setState("treeVersion", (v) => v + 1);
+					notify(`Moved ${chosenCustom.name} to trash.`);
+				} catch (e: any) {
+					notify(`Could not move template to trash: ${e?.message ?? e}`, "error");
+				}
+			}
+		}
+		return;
+	}
 
 	if (action === CUSTOMIZE) {
 		const names = DEFAULT_TEMPLATES.map((t) => t.name);

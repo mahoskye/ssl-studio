@@ -2,6 +2,8 @@
 // The same API travels over Electrobun's RPC in the app and over a WebSocket
 // in the browser host (src/bun/web.ts); src/bun/backend.ts implements it.
 
+import type { CsvTableConfig } from "./csvFormat";
+import type { FormatDocumentRequest, FormatDocumentResult, SqlDialect } from "./format";
 import type { SearchOptions } from "./searchPattern";
 import type { GitStatus } from "./gitStatus";
 
@@ -38,6 +40,16 @@ export type Project = {
 	error?: string;
 };
 
+/** A companion reference doc, code sample, or fixture kept inside a ticket's dedicated folder. */
+export type TicketFile = {
+	/** Absolute path on disk. */
+	path: string;
+	/** Path relative to the ticket's folder, using "/" separators (e.g. "samples/Legacy.ssl"). */
+	rel: string;
+	/** File size in bytes. */
+	size: number;
+};
+
 /** One row of the Docs panel. README.md and AGENTS.md are listed even when missing. */
 export type DocGroup = "project" | "tickets" | "specs" | "knowledge" | "registries" | "docs" | "schema" | "plans";
 export type DocFile = {
@@ -72,6 +84,12 @@ export type DocFile = {
 	pairedPlan?: { name: string; ticket?: string };
 	/** A ticket: those of the specs or plans it names that are not there. */
 	missing?: string[];
+	/** A ticket with a dedicated bundle folder (docs/tickets/<KEY>/): the folder's absolute path. */
+	ticketFolder?: string;
+	/** Total number of companion files inside the ticket's bundle folder (uncapped). */
+	ticketFileCount?: number;
+	/** Sample of companion reference docs, code samples, and fixtures inside the ticket's bundle folder. */
+	ticketFiles?: TicketFile[];
 	/**
 	 * Knowledge: the folder it is in under the knowledge base ("decisions", "snippets"); "" at its top. Schema: the
 	 * folder it is in under the schema folder ("database", "interfaces", "files", or one of the project's own).
@@ -89,6 +107,22 @@ export type DocFile = {
 	broken?: { href: string; line: number; column: number; instead?: string }[];
 	/** A registry with a "ticket" column: each ticket its rows name, with how many rows it has and how many of them are done. */
 	forTickets?: { key: string; rows: number; done?: number }[];
+	/** Per-ticket code/script tokens extracted from registry columns (keyed by lowercase ticket key). */
+	ticketCodeRefs?: Record<string, string[]>;
+	/** Code/SQL script paths or module names referenced by this document, plan, schema doc, or CSV registry. */
+	codeRefs?: string[];
+	/** Tags declared in YAML `tags:` or inline `#tag` prose (without leading `#`). */
+	tags?: string[];
+	/** Source file path declared in YAML `source:` (e.g. schema docs pointing to their DDL `.sql`). */
+	source?: string;
+	/** Set when `source:` points to a file inside the workspace that does not exist on disk. */
+	missingSource?: string;
+	/** ADRs/decisions this doc supersedes or is superseded by. */
+	supersedes?: string[];
+	supersededBy?: string[];
+	/** Ticket dependency keys from `blocks:` / `blocked-by:`. */
+	blocks?: string[];
+	blockedBy?: string[];
 	/**
 	 * What a plain document in the docs folder calls itself: for its line in that folder's catalog. Not `title`: a
 	 * plain document is linked by its file's name, as it always was, and not by a heading it happens to have.
@@ -115,6 +149,7 @@ export type NameIn = { path: string; line: number; column: number; name: string 
 export type ManifestFile = { path: string; kind: string; bytes: number; lines: number; sha256: string };
 
 export type Snapshot = { id: string; time: number; size: number };
+export type GitCommit = { sha: string; shortSha: string; time: number; author: string; subject: string; path: string };
 
 export type SearchHit = { path: string; line: number; column: number; length: number; text: string };
 
@@ -196,6 +231,10 @@ export type Settings = {
 	agentServerUrl?: string;
 	/** Shortcut overrides: key ("ctrl+shift+x") to command id; "" unbinds a default. */
 	keys: Record<string, string>;
+	/** Configurable CSV table column badge formatting (columns, value-to-tone mappings, fallback). */
+	csvTable?: CsvTableConfig;
+	/** SQL dialect used when formatting standalone .sql files (default "tsql" for SQL Server STARLIMS). */
+	sqlDialect?: SqlDialect;
 };
 
 export type SettingsScope = "user" | "workspace";
@@ -229,6 +268,10 @@ export interface BackendApi {
 	gitStatus(): Promise<GitStatus | null>;
 	/** A file's text in the last commit ("head") or as it is staged ("index"); null when it was not there, or was not text. */
 	gitBase(path: string, from: "head" | "index"): Promise<string | null>;
+	/** Recent Git commits touching `path` (following renames). Empty outside a repository. */
+	gitLog(path: string, limit?: number): Promise<GitCommit[]>;
+	/** A file's text at a specific Git commit SHA (using its path in that commit when renamed). Null when binary or absent. */
+	gitShow(path: string, sha: string, repoPath?: string): Promise<string | null>;
 	/** Puts files into the next commit as they are now; takes them out of it again. */
 	gitStage(paths: string[]): Promise<void>;
 	gitUnstage(paths: string[]): Promise<void>;
@@ -278,6 +321,8 @@ export interface BackendApi {
 	catalogFiles(area: "tests" | "code"): Promise<string[] | null>;
 	/** The first thing that keeps a text from being TOML, and where (from 1); null when it reads. */
 	tomlProblem(text: string): Promise<{ message: string; line: number; column: number } | null>;
+	/** Formats a non-SSL document (SQL, JavaScript, TypeScript, HTML, CSS, XML/XFD, JSON, YAML, Markdown). */
+	formatDocument(request: FormatDocumentRequest): Promise<FormatDocumentResult>;
 	/** The links in the workspace's Markdown documents that lead to this file, or into this folder. */
 	linksTo(path: string): Promise<LinkTo[]>;
 	/** The links by name ([[name]]) in the workspace's Markdown documents, as they stand on disk. */

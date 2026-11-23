@@ -305,15 +305,26 @@ export function withLinkFiles(text: string, edits: readonly LinkEdit[]): { text:
  * A document that is moved to another folder has links of its own, written
  * from where it was: each is to be written from where it is now. A link from
  * the project's top, and one that already reads the same, is left.
+ * When `movedDir` is supplied (an entire folder moved together), links whose
+ * target lies inside `movedDir.from` moved with the folder and stay intact.
  */
-export function ownLinkEdits(text: string, from: string, to: string): LinkEdit[] {
+export function ownLinkEdits(
+	text: string,
+	from: string,
+	to: string,
+	movedDir?: { from: string; to: string },
+): LinkEdit[] {
 	const [was, now] = [dirName(from), dirName(to)];
 	if (was === now) return [];
 	return fileLinks(text).flatMap((link) => {
 		if (!link.line || link.file.startsWith("/")) return [];
 		const target = resolvePath(was, link.file);
-		// A link to itself follows it.
-		const instead = relativePath(now, target === from ? to : target);
+		let dest = target === from ? to : target;
+		if (movedDir) {
+			if (target === movedDir.from) dest = movedDir.to;
+			else if (isInside(movedDir.from, target)) dest = movedDir.to + target.slice(movedDir.from.length);
+		}
+		const instead = relativePath(now, dest);
 		// What would be written is compared with what is: a folder written with its slash reads the same without it.
 		const asWritten = link.href.replace(/[?#].*$/, "");
 		return instead === link.file || linkWritten(instead, asWritten) === asWritten ? [] : [{ line: link.line, column: link.column, href: link.href, instead }];

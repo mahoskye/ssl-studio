@@ -3,7 +3,9 @@
 // in the `keys` setting.
 import { ask } from "./dialogs";
 import { activeEditor } from "./editor/EditorGroup";
+import { formatFenceInModel, formatNonSslModel, hadRecentFormatError, languageName } from "./editor/languages";
 import { activeLiveEditor, isInMarkdownTextEditor } from "./editor/liveBridge";
+import { canFormatNonSsl } from "../shared/format";
 import { runMonacoMarkdownAction } from "./editor/markdownKeys";
 import { backend, inApp } from "./backend";
 import { monaco } from "./editor/monaco";
@@ -23,8 +25,23 @@ import { menuForLetter } from "../shared/menuBar";
 import { installRecentTabs, stepRecent } from "./recentTabs";
 import { goAlong } from "./navigation";
 import { isPlanPath, newPlan, printPlan } from "./plan/model";
-import { isMarkdown, isTable, newDoc, setUpProject, undoSetUp } from "./project";
-import { importTickets, newKnowledge, newRegistry, newSchema, newSpec, newState, newTicket, startFolderCatalogs, ticketAtHand, updateCatalogs, updateManifest } from "./projectDocs";
+import { docs, isMarkdown, isTable, newDoc, setUpProject, undoSetUp } from "./project";
+import {
+	exportDocAs,
+	exportTicketPacket,
+	generateSchemaDocFromSql,
+	importTickets,
+	newKnowledge,
+	newRegistry,
+	newSchema,
+	newSpec,
+	newState,
+	newTicket,
+	startFolderCatalogs,
+	ticketAtHand,
+	updateCatalogs,
+	updateManifest,
+} from "./projectDocs";
 import { insertCalloutInteractive, insertImageInteractive, insertMarkdownTemplate, manageTemplates, newNoteFromTemplate } from "./templater";
 import { displayKey, effectiveKeys, isModifierKey, keyNames, keysOf } from "./keys";
 import { modalOpen, setFocusFallback } from "./modal";
@@ -37,6 +54,7 @@ import {
 	closeOtherTabs,
 	closeTab,
 	closeTabsToRight,
+	displayName,
 	newUntitled,
 	focusEditor,
 	focusSidePanel,
@@ -215,13 +233,26 @@ export const commands: Command[] = [
 	{ id: "md-insert-callout", label: "Markdown: Insert callout…", detail: "Insert or wrap selection in > [!important], [!note], [!warning], …", run: () => void insertCalloutInteractive() },
 	{ id: "md-insert-table", label: "Markdown: Insert table", detail: "Insert a formatted 3×2 table with Tab/Enter cell navigation", run: () => runMarkdownEdit("md-table-insert") },
 	{ id: "md-format-table", label: "Markdown: Format table", detail: "Align pipes and pad columns on the table at the cursor", run: () => runMarkdownEdit("md-table-format") },
+	{ id: "md-format-code-block", label: "Markdown: Format code block", detail: "Format the fenced code block at the cursor (SSL, SQL, JS/TS, XML/XFD, JSON, HTML, CSS, YAML)", run: () => void formatActiveCodeBlock() },
 	{ id: "md-insert-image", label: "Markdown: Insert image…", detail: "Pick a workspace image or enter a URL (or paste/drop directly)", run: () => void insertImageInteractive() },
+	{
+		id: "md-toc",
+		label: "Markdown: Insert / update table of contents",
+		detail: "Insert or refresh a <!-- toc --> section list from the document's headings",
+		run: () => void upsertMarkdownToc(),
+	},
+	{
+		id: "md-copy-heading-link",
+		label: "Markdown: Copy link to current heading",
+		detail: "Copy a [[doc#Heading]] wikilink for the heading at or above the cursor",
+		run: () => void copyCurrentHeadingLink(),
+	},
 	{ id: "open-link", label: "Open the link at the cursor", detail: "In a document's text: the file, heading or page its link leads to", run: openLinkAtCursor },
 	{ id: "focus-editor", label: "Focus editor", run: focusEditor },
 	{ id: "focus-side-panel", label: "Focus side panel", run: focusSidePanel },
 	// The code
 	{ id: "blocks", label: "Toggle blocks view", detail: "A plan shows its chart; Markdown shows rendered", run: toggleVisual },
-	{ id: "format", label: "Format document", run: () => void activeEditor()?.getAction("editor.action.formatDocument")?.run() },
+	{ id: "format", label: "Format document", detail: "SSL via language server; SQL, JS/TS, XML/XFD, HTML, CSS, JSON, YAML & Markdown", run: () => void formatActiveDocument() },
 	{ id: "copy-designer", label: "Copy for Designer", detail: "Selection, procedure or file, formatted", run: () => void copyForDesigner() },
 	{ id: "wrap-region", label: "Wrap in region…", detail: "The selected lines", run: () => void wrapInRegion() },
 	{ id: "insert-banner", label: "Insert file banner", run: () => insertTemplate(TEMPLATES.find((t) => t.id === "banner")!) },
@@ -245,10 +276,63 @@ export const commands: Command[] = [
 	{ id: "new-table", label: "New table…", detail: "A table the project reads or writes, described in the schema folder", run: () => void newSchema("database") },
 	{ id: "new-message", label: "New interface message…", detail: "What is exchanged with an instrument or another system, described in the schema folder", run: () => void newSchema("interfaces") },
 	{ id: "new-layout", label: "New file layout…", detail: "A file the project reads or writes, described in the schema folder", run: () => void newSchema("files") },
+	{ id: "generate-schema-doc", label: "Generate table doc from SQL…", detail: "Turn CREATE TABLE DDL under schema/ into a Markdown column reference", run: () => void generateSchemaDocFromSql() },
 	{ id: "project-state", label: "Project state…", detail: "Where the project stands, in plain words", run: () => void newState() },
 	{ id: "update-catalogs", label: "Update catalogs", detail: "Write each INDEX.md's list afresh", run: () => void updateCatalogs() },
 	{ id: "start-catalogs", label: "Start folder catalogs", detail: "An INDEX.md for the docs, code and tests folders, where one has none", run: () => void startFolderCatalogs() },
 	{ id: "update-manifest", label: "Update file manifest", detail: "Sizes and checksums of the project's files", run: () => void updateManifest() },
+	{
+		id: "copy-doc-html",
+		label: "Copy document as HTML",
+		detail: "Copy the open Markdown document as clean rich HTML",
+		run: () => {
+			const p = activePath();
+			if (!p || !isMarkdown(p)) return notify("Open a Markdown document first.");
+			void exportDocAs(p, "html-copy");
+		},
+	},
+	{
+		id: "copy-doc-jira",
+		label: "Copy document as Jira / Confluence markup",
+		detail: "Convert the open Markdown document to Jira wiki syntax",
+		run: () => {
+			const p = activePath();
+			if (!p || !isMarkdown(p)) return notify("Open a Markdown document first.");
+			void exportDocAs(p, "jira-copy");
+		},
+	},
+	{
+		id: "export-doc-html",
+		label: "Export document as standalone HTML…",
+		detail: "Download a print-ready HTML version of the open Markdown document",
+		run: () => {
+			const p = activePath();
+			if (!p || !isMarkdown(p)) return notify("Open a Markdown document first.");
+			void exportDocAs(p, "html-download");
+		},
+	},
+	{
+		id: "print-doc",
+		label: "Print / Save document as PDF…",
+		detail: "Open a clean printable version of the active Markdown document",
+		run: () => {
+			const p = activePath();
+			if (!p || !isMarkdown(p)) return notify("Open a Markdown document first.");
+			void exportDocAs(p, "print");
+		},
+	},
+	{
+		id: "export-ticket-packet",
+		label: "Export ticket release packet…",
+		detail: "Bundle the active ticket, specs, plans, decisions, questions, and registry rows as HTML",
+		run: () => {
+			const key = ticketAtHand();
+			if (!key) return notify("Open or activate a ticket first.");
+			const ticketDoc = docs().find((d) => d.exists && d.group === "tickets" && d.ticket?.toLowerCase() === key.toLowerCase());
+			if (!ticketDoc) return notify(`Ticket ${key} was not found.`, "error");
+			void exportTicketPacket(ticketDoc.path, key, "html");
+		},
+	},
 	// Panels: one form, "Show" and the panel's name
 	{ id: "explorer", label: "Show Explorer", run: () => showPanel("explorer") },
 	{ id: "docs", label: "Show Docs", run: () => showPanel("docs") },
@@ -291,6 +375,53 @@ export const commands: Command[] = [
 /** The commands run from the command list this session, newest first (ten are kept). */
 let recent: string[] = [];
 export const recentCommands = () => recent;
+
+/** Formats the single fenced code block enclosing the cursor in a Markdown document (Live or Source). */
+async function formatActiveCodeBlock() {
+	const path = activePath();
+	const doc = activeDoc();
+	if (!path || !doc || doc.binary || doc.model.getLanguageId() !== "markdown") {
+		return notify("Place the cursor inside a fenced code block in a Markdown document.");
+	}
+	const live = activeLiveEditor();
+	const line = live ? live.getPosition().lineNumber : (activeEditor()?.getPosition()?.lineNumber ?? 1);
+	const outcome = await formatFenceInModel(doc.model, line);
+	if (outcome === "none") notify("Place the cursor inside a fenced code block to format it.");
+	else if (outcome === "unchanged") notify("Code block is already formatted.");
+}
+
+/** Formats the active document via starlims-lsp (for SSL) or the non-SSL Prettier/SQL formatter. */
+async function formatActiveDocument() {
+	const path = activePath();
+	const doc = activeDoc();
+	if (!path || !doc || doc.binary) return notify("Open a text file to format.");
+	if (isPlanPath(path)) return notify("Plan files keep their own layout.");
+	const languageId = doc.model.getLanguageId();
+	if (languageId === "ssl") {
+		if (state.lsp.state !== "running") {
+			return notify("The language server is not running; restart it to format SSL files.", "error");
+		}
+		const editor = activeEditor();
+		if (!editor) return;
+		await editor.getAction("editor.action.formatDocument")?.run();
+		return;
+	}
+	if (!canFormatNonSsl(languageId, path)) {
+		return notify(`No formatter is configured for ${languageName(languageId)} files.`);
+	}
+	if (activeLiveEditor()) {
+		const outcome = await formatNonSslModel(doc.model);
+		if (outcome === "unchanged") notify(`${displayName(path)} is already formatted.`);
+		return;
+	}
+	const editor = activeEditor();
+	if (!editor) return;
+	const before = doc.model.getAlternativeVersionId();
+	await editor.getAction("editor.action.formatDocument")?.run();
+	if (doc.model.getAlternativeVersionId() === before && !hadRecentFormatError(doc.model)) {
+		notify(`${displayName(path)} is already formatted.`);
+	}
+}
 
 /** Runs a command by id. `remember` puts it among the recently used, for the command list. */
 export function runCommand(id: string, options: { remember?: boolean } = {}) {
@@ -407,11 +538,39 @@ async function copyForDesigner() {
 	notify(copied ? `Copied the ${what}, formatted, for Designer.` : "Could not reach the clipboard.", copied ? "info" : "error");
 }
 
+async function upsertMarkdownToc() {
+	const path = activePath();
+	const doc = activeDoc();
+	if (!path || !doc || !isMarkdown(path)) return notify("Open a Markdown document first.");
+	const { upsertTocBlock } = await import("../shared/markdownEdit");
+	const before = doc.model.getValue();
+	const { text, updated } = upsertTocBlock(before);
+	if (!updated) return notify("No H2–H4 headings found (or table of contents is already up to date).");
+	const { applyText } = await import("./state");
+	applyText(path, text);
+	notify("Updated table of contents.");
+}
+
+async function copyCurrentHeadingLink() {
+	const path = activePath();
+	const doc = activeDoc();
+	if (!path || !doc || !isMarkdown(path)) return notify("Open a Markdown document first.");
+	const { documentHeadings } = await import("../shared/markdownEdit");
+	const headings = documentHeadings(doc.model.getValue());
+	if (!headings.length) return notify("This document has no headings.");
+	const line = activeLiveEditor()?.getPosition().lineNumber ?? activeEditor()?.getPosition()?.lineNumber ?? state.cursor.line;
+	const hit = [...headings].reverse().find((h) => h.line <= line) ?? headings[0]!;
+	const stem = path.replace(/^.*[\\/]/, "").replace(/\.(md|markdown)$/i, "");
+	await copyText(`[[${stem}#${hit.text}]]`, `Copied [[${stem}#${hit.text}]].`);
+}
+
 async function askCommand() {
 	const question = await ask("Ask the agent about the selection");
 	if (!question) return;
 	showPanel("agent");
-	await askAbout(question, true);
+	const { currentAgentContext } = await import("./agent/Agent");
+	const ctx = currentAgentContext();
+	await askAbout(question, true, ctx.includeWork, { ticket: ctx.ticket, workOptions: ctx.workOptions });
 }
 
 async function openFolderCommand() {

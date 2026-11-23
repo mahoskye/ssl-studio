@@ -11,7 +11,9 @@ import { showPanel } from "./panels/registry";
 import { fileRemoved, heldFromBefore, loadProject, loadSettings, notify, openFile, setState, state } from "./state";
 
 const [docs, setDocs] = createSignal<DocFile[]>([]);
-export { docs };
+const [docsLoading, setDocsLoading] = createSignal(false);
+const [docsError, setDocsError] = createSignal("");
+export { docs, docsLoading, docsError };
 
 export const isMarkdown = (path: string | null | undefined) => Boolean(path && /\.(md|markdown)$/i.test(path));
 /** A table of values: a registry, or any other CSV or TSV file. */
@@ -27,12 +29,35 @@ export function projectGaps(): { file: DocFile; problem: string }[] {
 /** Keeps the document list current: call once, inside the app's root. */
 export function useProject() {
 	let timer: ReturnType<typeof setTimeout> | undefined;
+	let seq = 0;
 	createEffect(
 		on([() => state.workspace?.root, () => state.treeVersion], ([root]) => {
 			clearTimeout(timer);
-			if (!root) return setDocs([]);
+			const mySeq = ++seq;
+			if (!root) {
+				setDocs([]);
+				setDocsLoading(false);
+				setDocsError("");
+				return;
+			}
+			setDocsLoading(true);
 			// A save or a burst of file events asks once.
-			timer = setTimeout(() => void backend.docs().then(setDocs, () => setDocs([])), 150);
+			timer = setTimeout(() => {
+				void backend.docs().then(
+					(list) => {
+						if (mySeq !== seq) return;
+						setDocs(list);
+						setDocsError("");
+						setDocsLoading(false);
+					},
+					(e) => {
+						if (mySeq !== seq) return;
+						setDocs([]);
+						setDocsError(String(e?.message ?? e));
+						setDocsLoading(false);
+					},
+				);
+			}, 150);
 		}),
 	);
 }
@@ -112,9 +137,6 @@ export async function newDocIn(folder?: string): Promise<boolean> {
 	}
 	setState("treeVersion", (v) => v + 1);
 	setState("mdText", path, true);
-	// Listed in the catalog of the folder it is in, where that folder keeps one. Loaded when asked for: the working
-	// documents' steps are built on this file.
-	void import("./projectDocs").then((m) => m.catalogsKeptFor([path]));
 	await openFile(path);
 	return true;
 }

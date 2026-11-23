@@ -29,9 +29,17 @@ const ENDINGS: [ending: string, kind: FileKind][] = [
 	[".markdown", "doc"],
 	[".md", "doc"],
 	[".toml", "config"],
+	[".jsonc", "config"],
 	[".json", "config"],
 	[".yml", "config"],
 	[".yaml", "config"],
+	[".xml", "config"],
+	[".xfd", "config"],
+	[".xsd", "config"],
+	[".xsl", "config"],
+	[".xslt", "config"],
+	[".wsdl", "config"],
+	[".config", "config"],
 ];
 
 export function fileKind(name: string): FileKind {

@@ -236,10 +236,14 @@ export function selftestWork(): Promise<Steps> {
 			[...document.querySelectorAll<HTMLButtonElement>(".md-work li button")].find((button) => button.textContent?.trim() === "Application settings")?.click();
 			return until(() => document.querySelector(".table-view .table-for")?.textContent?.includes("SELF-1") && document.querySelectorAll(".table-view button.table-ticket").length === 2);
 		});
-		// A state set from the document's page is the file's one line and the catalog's, both.
+		// A state set from the document's page updates the file's one line and marks its catalog out of date
+		// until Update catalogs is run manually (ADR 0031).
 		await step("statusSetFromPage", async () => {
 			await setStatus(ticket, "done");
-			return until(() => docs().find((d) => canonical(d.path) === ticket)?.status === "done" && docs().filter((d) => d.catalog).every((d) => !d.catalog!.stale));
+			const markedStale = await until(() => docs().find((d) => canonical(d.path) === ticket)?.status === "done" && docs().some((d) => d.group === "tickets" && d.catalog?.stale));
+			if (!markedStale) return false;
+			await updateCatalogs();
+			return until(() => docs().filter((d) => d.catalog).every((d) => !d.catalog!.stale));
 		});
 
 		// What done looks like is a list that is ticked on the ticket's page: the box is the item of that place in the text.

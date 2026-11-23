@@ -26,10 +26,24 @@ export type LiveEditorHandle = {
 };
 
 const liveEditors: Record<number, LiveEditorHandle | undefined> = {};
+const readFinders: Record<number, (() => void) | undefined> = {};
 
 export function registerLiveEditor(group: number, handle: LiveEditorHandle | undefined) {
 	if (handle) liveEditors[group] = handle;
 	else delete liveEditors[group];
+}
+
+export function registerReadFind(group: number, opener: (() => void) | undefined) {
+	if (opener) readFinders[group] = opener;
+	else delete readFinders[group];
+}
+
+/** Opens the CM6 Find panel on the active group when it is in Read-only Markdown view. */
+export function openReadFind(): boolean {
+	const fn = readFinders[state.activeGroup];
+	if (!fn) return false;
+	fn();
+	return true;
 }
 
 /** The active group's live Markdown editor, when it is mounted and showing Markdown Live mode. */

@@ -31,8 +31,18 @@ function inlineList(inner: string): string[] {
 	const items: string[] = [];
 	let item = "";
 	let quote = "";
-	for (const ch of inner) {
+	for (let i = 0; i < inner.length; i++) {
+		const ch = inner[i]!;
 		if (quote) {
+			if (quote === '"' && ch === "\\" && i + 1 < inner.length) {
+				item += ch + inner[++i]!;
+				continue;
+			}
+			if (quote === "'" && ch === "'" && inner[i + 1] === "'") {
+				item += "''";
+				i++;
+				continue;
+			}
 			if (ch === quote) quote = "";
 			item += ch;
 		} else if (ch === '"' || ch === "'") {
@@ -47,6 +57,26 @@ function inlineList(inner: string): string[] {
 	return items.map(unquote).filter(Boolean);
 }
 
+/** Strips a YAML inline comment (` # ...`) outside quotes on an unquoted or quoted scalar value. */
+function stripInlineComment(raw: string): string {
+	let quote = "";
+	for (let i = 0; i < raw.length; i++) {
+		const ch = raw[i]!;
+		if (quote) {
+			if (quote === '"' && ch === "\\" && i + 1 < raw.length) {
+				i++;
+				continue;
+			}
+			if (ch === quote) quote = "";
+		} else if (ch === '"' || ch === "'") {
+			quote = ch;
+		} else if (ch === "#" && (i === 0 || /\s/.test(raw[i - 1]!))) {
+			return raw.slice(0, i).trim();
+		}
+	}
+	return raw.trim();
+}
+
 export function frontMatter(text: string): FrontMatter {
 	const none = { values: {}, lines: 0, body: text };
 	const lines = text.replace(/^﻿/, "").split(/\r?\n/);
@@ -59,13 +89,13 @@ export function frontMatter(text: string): FrontMatter {
 		if (!line.trim() || line.trim().startsWith("#")) continue;
 		const item = /^\s*-\s+(.*)$/.exec(line);
 		if (item && listKey) {
-			(values[listKey] as string[]).push(unquote(item[1]!));
+			(values[listKey] as string[]).push(unquote(stripInlineComment(item[1]!)));
 			continue;
 		}
 		const pair = /^([A-Za-z0-9_-]+)\s*:\s*(.*)$/.exec(line);
 		if (!pair) continue;
 		const key = pair[1]!.toLowerCase();
-		const value = pair[2]!.trim();
+		const value = stripInlineComment(pair[2]!);
 		listKey = "";
 		if (!value) {
 			values[key] = [];
@@ -162,15 +192,22 @@ export function withFrontMatter(text: string, key: string, value: string): strin
 	// The last line that sets the key is the one that is read, so it is the one that is written.
 	const at = lines.findLastIndex((line, i) => i > 0 && i < close && new RegExp(`^${key}\\s*:`, "i").test(line.text));
 	if (at < 0) return `${text.slice(0, lines[close]!.start)}${key}: ${value}${eol}${text.slice(lines[close]!.start)}`;
-	// A list written as dashes under the key is the person's layout: not rewritten here.
-	if (/:\s*$/.test(lines[at]!.text) && /^\s*-\s+/.test(lines[at + 1]?.text ?? "")) return null;
+	// A list written as dashes under the key is the person's layout: skip blank/comment lines when checking.
+	if (/:\s*(?:#.*)?$/.test(lines[at]!.text)) {
+		for (let j = at + 1; j < close; j++) {
+			const next = lines[j]!.text.trim();
+			if (!next || next.startsWith("#")) continue;
+			if (/^-\s+/.test(next)) return null;
+			break;
+		}
+	}
 	return `${text.slice(0, lines[at]!.start)}${lines[at]!.text.slice(0, lines[at]!.text.indexOf(":"))}: ${value}${text.slice(lines[at]!.end)}`;
 }
 
 /**
  * Adds `item` to a front matter list key (e.g. `specs: [a, b]`, `plans: [...]`, `related: [...]`).
- * If `item` is already present (case-insensitive), returns `text` unchanged.
- * Returns `null` if the key is written as a multi-line YAML bullet list that cannot be updated inline.
+ * Supports BOTH inline arrays (`key: [a, b]`) AND multi-line YAML bullet lists (`key:\n  - a`),
+ * preserving the author's list style. If `item` is already present (case-insensitive), returns `text` unchanged.
  */
 export function addToFrontMatterList(text: string, key: string, item: string): string | null {
 	const wanted = item.trim();
@@ -179,7 +216,123 @@ export function addToFrontMatterList(text: string, key: string, item: string): s
 	if (existing.some((v) => v.toLowerCase() === wanted.toLowerCase())) return text;
 	const quote = (v: string) => (/[:#[\]{},&*?|>!'"%@`]|^\s|\s$/.test(v) ? JSON.stringify(v) : v);
 	const formatted = `[${[...existing, wanted].map(quote).join(", ")}]`;
-	return withFrontMatter(text, key, formatted);
+	const inline = withFrontMatter(text, key, formatted);
+	if (inline !== null) return inline;
+
+	// Multi-line YAML bullet list: append a new `- <item>` with the same indentation after the last bullet item.
+	const eol = text.includes("\r\n") ? "\r\n" : "\n";
+	const lines: { text: string; start: number; end: number }[] = [];
+	for (let at = 0; at <= text.length; ) {
+		const stop = text.indexOf("\n", at);
+		const end = stop < 0 ? text.length : stop;
+		lines.push({ text: text.slice(at, end).replace(/\r$/, ""), start: at, end: text[end - 1] === "\r" ? end - 1 : end });
+		if (stop < 0) break;
+		at = stop + 1;
+	}
+	const close = lines.findIndex((line, i) => i > 0 && /^(---|\.\.\.)\s*$/.test(line.text));
+	if (close < 0) return null;
+	const at = lines.findLastIndex((line, i) => i > 0 && i < close && new RegExp(`^${key}\\s*:`, "i").test(line.text));
+	if (at < 0) return null;
+	let lastItem = at;
+	let indent = "  ";
+	for (let j = at + 1; j < close; j++) {
+		const t = lines[j]!.text;
+		if (!t.trim() || t.trim().startsWith("#")) continue;
+		const m = /^(\s*)-\s+/.exec(t);
+		if (m) {
+			indent = m[1] || "  ";
+			lastItem = j;
+		} else break;
+	}
+	const insertAt = lines[lastItem]!.end;
+	return `${text.slice(0, insertAt)}${eol}${indent}- ${quote(wanted)}${text.slice(insertAt)}`;
+}
+
+/**
+ * Removes `item` (case-insensitive) from a front matter list or scalar key.
+ * If the key becomes empty, removes the key line(s) cleanly.
+ */
+export function removeFromFrontMatterList(text: string, key: string, item: string): string | null {
+	const target = item.trim().toLowerCase();
+	if (!target) return text;
+	const fm = frontMatter(text);
+	if (fm.lines < 2) return text;
+	const existing = many(fm.values[key.toLowerCase()]);
+	const kept = existing.filter((v) => v.toLowerCase() !== target);
+	if (kept.length === existing.length) return text;
+
+	const lines: { text: string; start: number; end: number; lineEnd: number }[] = [];
+	for (let at = 0; at <= text.length; ) {
+		const stop = text.indexOf("\n", at);
+		const end = stop < 0 ? text.length : stop;
+		lines.push({
+			text: text.slice(at, end).replace(/\r$/, ""),
+			start: at,
+			end: text[end - 1] === "\r" ? end - 1 : end,
+			lineEnd: stop < 0 ? text.length : stop + 1,
+		});
+		if (stop < 0) break;
+		at = stop + 1;
+	}
+	const close = lines.findIndex((line, i) => i > 0 && /^(---|\.\.\.)\s*$/.test(line.text));
+	if (close < 0) return null;
+	const at = lines.findLastIndex((line, i) => i > 0 && i < close && new RegExp(`^${key}\\s*:`, "i").test(line.text));
+	if (at < 0) return text;
+
+	// Check if multi-line bullet list
+	let isMulti = false;
+	let listEnd = at;
+	if (/:\s*(?:#.*)?$/.test(lines[at]!.text)) {
+		for (let j = at + 1; j < close; j++) {
+			const t = lines[j]!.text.trim();
+			if (!t || t.startsWith("#")) continue;
+			if (/^-\s+/.test(t)) {
+				isMulti = true;
+				listEnd = j;
+			} else break;
+		}
+	}
+	if (isMulti) {
+		if (!kept.length) return `${text.slice(0, lines[at]!.start)}${text.slice(lines[listEnd]!.lineEnd)}`;
+		const toRemove: { start: number; end: number }[] = [];
+		for (let j = at + 1; j <= listEnd; j++) {
+			const m = /^\s*-\s+(.*)$/.exec(lines[j]!.text);
+			if (m && unquote(stripInlineComment(m[1]!)).toLowerCase() === target) {
+				toRemove.push({ start: lines[j]!.start, end: lines[j]!.lineEnd });
+			}
+		}
+		if (!toRemove.length) return text;
+		let out = text;
+		for (let k = toRemove.length - 1; k >= 0; k--) {
+			out = `${out.slice(0, toRemove[k]!.start)}${out.slice(toRemove[k]!.end)}`;
+		}
+		return out;
+	}
+	if (!kept.length) return `${text.slice(0, lines[at]!.start)}${text.slice(lines[at]!.lineEnd)}`;
+	const quote = (v: string) => (/[:#[\]{},&*?|>!'"%@`]|^\s|\s$/.test(v) ? JSON.stringify(v) : v);
+	const rawVal = lines[at]!.text.slice(lines[at]!.text.indexOf(":") + 1).trim();
+	const nextVal = rawVal.startsWith("[") || kept.length > 1 ? `[${kept.map(quote).join(", ")}]` : quote(kept[0]!);
+	return `${text.slice(0, lines[at]!.start)}${lines[at]!.text.slice(0, lines[at]!.text.indexOf(":"))}: ${nextVal}${text.slice(lines[at]!.end)}`;
+}
+
+/**
+ * Replaces `oldItem` (case-insensitive) with `newItem` inside a scalar, inline list,
+ * or multi-line YAML bullet list while preserving all other entries verbatim.
+ */
+export function replaceInFrontMatterList(text: string, key: string, oldItem: string, newItem: string): string | null {
+	const target = oldItem.trim().toLowerCase();
+	const next = newItem.trim();
+	if (!target || !next) return text;
+	const vals = many(frontMatter(text).values[key.toLowerCase()]);
+	if (!vals.some((v) => v.toLowerCase() === target)) return text;
+	if (vals.length === 1 && !/^\s*-\s+/m.test(text.slice(0, bodyOffset(text)))) {
+		const updated = withFrontMatter(text, key, next);
+		if (updated !== null) return updated;
+	}
+	const removed = removeFromFrontMatterList(text, key, oldItem);
+	if (removed === null) return null;
+	if (vals.length <= 1) return withFrontMatter(removed, key, next);
+	return addToFrontMatterList(removed, key, next);
 }
 
 /** Where the body starts in the text: after the front matter's lines. */
@@ -191,4 +344,44 @@ export function bodyOffset(text: string): number {
 		at = end + 1;
 	}
 	return at;
+}
+
+/**
+ * Character span `[start, end)` of the raw YAML content strictly *inside* the
+ * opening and closing `---` fences, plus its normalized LF `inner` text and
+ * the file's `eol`. Returns `null` when the document has no closed front matter.
+ */
+export function frontMatterInnerSpan(text: string): { start: number; end: number; inner: string; eol: "\r\n" | "\n" } | null {
+	const fm = frontMatter(text);
+	if (fm.lines < 2) return null;
+	const eol: "\r\n" | "\n" = text.includes("\r\n") ? "\r\n" : "\n";
+	let at = 0;
+	let start = -1;
+	let end = -1;
+	for (let lineNum = 1; lineNum <= fm.lines; lineNum++) {
+		if (lineNum === 2) start = at;
+		if (lineNum === fm.lines) {
+			end = at;
+			break;
+		}
+		const nl = text.indexOf("\n", at);
+		if (nl < 0) return null;
+		at = nl + 1;
+	}
+	if (start < 0 || end < start) return null;
+	const raw = text.slice(start, end);
+	// Strip the single trailing line break immediately preceding the closing fence.
+	const inner = raw.replace(/\r?\n$/, "").replace(/\r\n/g, "\n");
+	return { start, end, inner, eol };
+}
+
+/**
+ * Formats edited inner YAML text (LF-normalized from a textarea) into the exact
+ * replacement slice for `frontMatterInnerSpan(text)`, preserving the file's EOL
+ * and keeping the opening/closing `---` fences intact even when empty.
+ */
+export function formatFrontMatterInnerReplacement(nextInner: string, eol: "\r\n" | "\n"): string {
+	const normalized = nextInner.replace(/\r\n/g, "\n").replace(/\n/g, eol);
+	if (!normalized) return "";
+	return normalized.endsWith(eol) ? normalized : `${normalized}${eol}`;
 }

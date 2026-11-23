@@ -21,7 +21,11 @@ const packages = [
 	"vscode-oniguruma",
 	"elkjs",
 	"marked",
+	"mermaid",
 	"dompurify",
+	"prettier",
+	"@prettier/plugin-xml",
+	"sql-formatter",
 	"vite",
 ];
 const fence = (text: string) => `\`\`\`\n${text.trim()}\n\`\`\`\n`;

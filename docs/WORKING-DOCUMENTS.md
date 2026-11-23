@@ -1,16 +1,19 @@
 # The work, written down
 
-**Status:** built (2026-11-19). Decisions:
+**Status:** built (2026-11-23). Decisions:
 [ADR 0012](adr/0012-a-projects-work-is-written-down.md),
 [0013](adr/0013-the-agent-is-told-the-work-a-question-is-for.md),
 [0014](adr/0014-tickets-come-in-from-an-export.md),
 [0015](adr/0015-what-is-not-ssl-is-read-here.md),
 [0016](adr/0016-an-export-is-read-where-it-lies-and-comes-across-as-markdown.md),
 [0017](adr/0017-documents-link-to-each-other-and-the-links-are-kept-true.md),
-[0018](adr/0018-a-check-is-not-built-on-a-reader-that-is-wrong.md) and
-[0019](adr/0019-a-file-is-written-back-in-what-it-was-written-in.md), each
-drafted from the user's request and not yet reviewed by them point by
-point.
+[0018](adr/0018-a-check-is-not-built-on-a-reader-that-is-wrong.md),
+[0019](adr/0019-a-file-is-written-back-in-what-it-was-written-in.md),
+[0025](adr/0025-documents-link-by-name.md),
+[0026](adr/0026-schema-is-kept-by-kind-and-prompts-are-kept.md),
+[0028](adr/0028-markdown-live-preview-uses-codemirror-6.md),
+[0030](adr/0030-ticket-bundle-folders-keep-fixtures-beside-tickets.md) and
+[0031](adr/0031-manual-and-agent-assisted-catalog-reconciliation.md).
 
 **The idea, in the user's words:** "most often the project will come from a
 jira ticket or some similar source. it and any related tickets will be the
@@ -106,15 +109,64 @@ the JSON its API returns
 
 Each folder's `INDEX.md` is its catalog: one line for each document, with
 its title, its state and what it is about. The IDE writes the list between
-two marker lines and leaves everything else in the file alone. It writes it
-when it makes or changes a document; "Update catalogs" writes them all.
-The schema folder has one too, under its kinds and, among the interfaces,
-the system each message is exchanged with. So have the docs folder itself
-(its plain documents, and the way to the four catalogs under it), and the
-tests and code folders, which list their files as they lie: "Set up
-project" writes these where it used to write a README. A project may do
-without them: "Update catalogs" keeps the ones that are there, and "Start
-folder catalogs" starts one for a folder that has none.
+two marker lines and leaves everything else in the file alone.
+
+**Manual and agent-assisted reconciliation ([ADR 0031](adr/0031-manual-and-agent-assisted-catalog-reconciliation.md)):**
+Catalogs are never silently rewritten when documents are created, edited,
+renamed, or archived. Instead, the Docs panel and Health flag out-of-sync
+or missing catalogs with two explicit controls:
+
+- **Update catalogs:** rewrites every out-of-date or missing `INDEX.md`
+  list cleanly in one step.
+- **Agent:** hands the Agent panel a diff-backed summary of the exact
+  additions and removals so you can review them before running Update
+  catalogs.
+
+The schema folder has a catalog too, under its kinds and, among the
+interfaces, the system each message is exchanged with. So have the docs
+folder itself, and the tests and code folders ("Start folder catalogs"
+starts one where a folder has none).
+
+## Ticket folders and release packets
+
+A ticket can stay a flat file (`docs/tickets/LIMS-101.md`) or own a
+dedicated folder (`docs/tickets/LIMS-101/LIMS-101.md`) for reference
+docs, existing code samples, screenshots, and test fixtures
+([ADR 0030](adr/0030-ticket-bundle-folders-keep-fixtures-beside-tickets.md)).
+
+- **Explorer scope:** a ticket's page links to its folder in a focused
+  Explorer view so large fixture folders never clutter the ticket page.
+- **Ticket-scoped attachments:** screenshots pasted or dropped into a
+  bundled ticket save inside `<ticketFolder>/attachments/` so archiving,
+  trashing, and exporting stay self-contained.
+- **Release readiness gate:** every ticket page computes a collapsible
+  readiness checklist (acceptance tasks, sub-tickets, specs, open
+  questions, registry rows, broken links, and Git status).
+- **Stakeholder exports:** every Markdown document (with or without YAML
+  frontmatter) offers Copy as HTML, Copy as Jira / Confluence markup,
+  Print / Save as PDF, standalone HTML (with inlined images and Mermaid
+  SVGs), and full Ticket Release Packets.
+
+## Markdown authoring and templates
+
+Markdown opens in a unified CodeMirror 6 Live Preview and Read view
+([ADR 0028](adr/0028-markdown-live-preview-uses-codemirror-6.md)), synced
+with plain text as the single source of truth (ADR 0002):
+
+- **Structured Properties:** add, edit, or remove YAML frontmatter fields
+  directly from the Properties card without editing raw YAML.
+- **Templater templates:** project templates in `docs/templates/` (or the
+  configured Templates folder) expand `<% tp.* %>`, `<%* ... %>`, prompts,
+  and cursor targets.
+- **Tags and navigation:** `#tag` completion spans the whole workspace
+  (skipping fenced code blocks), the Docs panel includes a collapsible
+  Tags browser, and commands insert or refresh `<!-- toc -->` tables of
+  contents and copy `[[doc#Heading]]` links.
+- **Code traceability:** SSL and SQL tabs show governing plans, specs,
+  tickets, schema docs, and registries in the Folio Docs menu; Call Graph
+  focuses scripts by ticket and jumps back to governing docs; Health
+  detects drifted `#L10-L20` code citations with 1-click Re-anchor; and
+  History shows per-file Git commits alongside local save snapshots.
 
 ## Registries
 
@@ -131,17 +183,20 @@ column says how far each row has come.
 | Reports and labels | A report, label or printed form |
 | Roles and access | A role and what it may do |
 
-- **It opens as a table.** Filter, order, narrow to a status, edit a cell,
-  add or delete a row. Each change is that part of the text; Ctrl+Z undoes
-  it.
+- **It opens as a table.** Filter, order, narrow to a status, edit a cell
+  (with `Shift+Enter` for multiline cells), bulk-update or delete visible
+  selected rows, add/rename/delete columns, and paste rectangular ranges.
+  Each change is a minimal text edit; Ctrl+Z undoes it.
 - **The file manifest is written from the folder,** and written again says
   what is new, changed and gone, keeping your status and notes.
-- **Database objects start from the schema:** a row for each object the
-  schema folder's SQL creates.
+- **Database objects start from and sync with schema SQL:** a unified
+  T-SQL / Oracle DDL parser extracts tables, views, procedures, functions,
+  triggers, and sequences, populates column docs, and flags dropped objects.
 - **"Check against code"** looks for each row's name in the project's
-  files. A row found nowhere is one to question.
-- **A `ticket` column says which ticket carries each row.** The ticket's
-  page then lists the registry under "To carry across", with how many rows
+  files. A row found nowhere is one to question. Duplicate primary keys
+  are highlighted in the table banner.
+- **A `ticket` column links registry rows to a ticket.** The ticket's
+  page then lists the registry under "Registries", with how many rows
   and how many are done, and opens the table at those rows. In the table,
   the key is a link to the ticket. A key that is no ticket of the project
   is said in Health. A key is one of the project's tickets, or a word
@@ -189,9 +244,15 @@ what the ticket asks, the tickets around it, the questions nobody has
 answered (with an instruction not to guess), the answers given, and the
 decisions that stand.
 
-- **The planner** is sent it when it refines a plan or writes its spec.
-- **A chat** is sent it once in a conversation, with the ticket's specs,
-  when "include the ticket" is ticked.
+- **The planner and tidy steps** attach only the ticket actually governing
+  that plan or script (never falling back to an unrelated active ticket).
+- **A chat** lets you choose any ticket (Auto, None, or explicit key) and
+  toggle `+ Schema`, `+ Registries`, `+ STATE.md`, or `+ File…` with or
+  without a ticket. Context deltas are sent only once per session, and a
+  live pre-send token estimate appears beside Send.
+- **Capturing replies:** every finished reply offers Copy, Review diff…
+  (opening a side-by-side diff before applying to any file), Save as
+  Decision / Question / Note, and Append to ticket.
 - **A small context cuts it.** With Ollama's default of 4096 tokens a
   second question, or a build, no longer fits. The conversation says when a
   prompt was cut; [INSTALL.md](INSTALL.md) says how to raise it.

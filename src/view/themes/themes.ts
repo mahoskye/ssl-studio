@@ -2,6 +2,7 @@
 // palettes (ADR 0027). Token colours go through the grammar's TextMate scopes
 // (editor/textmate.ts); workbench colours become CSS variables for chrome and
 // editor canvases.
+import { createSignal } from "solid-js";
 import type { IRawTheme } from "vscode-textmate";
 import { DEFAULT_CODE_FONT, DEFAULT_UI_FONT, resolveFontStack } from "../../shared/fonts";
 import { parseJsonc } from "../../shared/jsonc";
@@ -91,17 +92,51 @@ export function shapeEditorMenus() {
 	}).observe(document.body, { childList: true, subtree: true });
 }
 
+let themeRevision = 0;
+const [themeVersion, setThemeVersion] = createSignal(0);
+
+/** Reactive counter bumped whenever the active editor/UI theme changes. */
+export { themeVersion };
+/** Non-reactive read of the current theme revision (safe inside CodeMirror plugins & caches). */
+export const currentThemeVersion = () => themeRevision;
+
+/**
+ * Mirrors Monaco's active `.mtk*` token colour and font-style rules under
+ * `.cm-md-codeblock-line` so fenced code blocks in CodeMirror Live & Read
+ * views render in the exact same colours as the Monaco editor—even inside
+ * blockquotes or nested Markdown structures whose single-class CM6 rules
+ * would otherwise match `.mtk*` specificity.
+ */
+export function syncCodeTokenStyles() {
+	if (typeof document === "undefined") return;
+	const declared = [...document.querySelectorAll("style.monaco-colors")].map((style) => style.textContent ?? "").join("\n");
+	const rules: string[] = [];
+	for (const match of declared.matchAll(/(\.mtk(?:\d+|[bius])(?:\.mtk[bius])*)\s*(\{[^{}]*\})/g)) {
+		rules.push(`.cm-md-codeblock-line ${match[1]} ${match[2]}`);
+	}
+	if (!rules.length) return;
+	let style = document.getElementById("studio-code-tokens");
+	if (!style) {
+		style = document.createElement("style");
+		style.id = "studio-code-tokens";
+		document.head.append(style);
+	}
+	style.textContent = rules.join("\n");
+}
+
 function carryMenuColours() {
 	const declared = [...document.querySelectorAll("style.monaco-colors")].map((style) => style.textContent ?? "").join("\n");
 	const block = /\{([^{}]*--vscode-menu-background[^{}]*)\}/.exec(declared)?.[1];
-	if (!block) return;
-	let style = document.getElementById("studio-menu-colours");
-	if (!style) {
-		style = document.createElement("style");
-		style.id = "studio-menu-colours";
-		document.head.append(style);
+	if (block) {
+		let style = document.getElementById("studio-menu-colours");
+		if (!style) {
+			style = document.createElement("style");
+			style.id = "studio-menu-colours";
+			document.head.append(style);
+		}
+		style.textContent = `.shadow-root-host { ${block} }`;
 	}
-	style.textContent = `.shadow-root-host { ${block} }`;
+	syncCodeTokenStyles();
 }
 
 /** Applies the configured UI, code and optional Markdown reading font stacks. */
@@ -242,6 +277,8 @@ export function applyTheme(theme: VsTheme) {
 	root.dataset.theme = chromeDark ? "dark" : "light";
 	root.dataset.editorTheme = editorDark ? "dark" : "light";
 	root.style.colorScheme = chromeDark ? "dark" : "light";
+	themeRevision++;
+	setThemeVersion(themeRevision);
 }
 
 /**

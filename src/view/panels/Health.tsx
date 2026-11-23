@@ -2,12 +2,15 @@
 // someone, and the current script against the house style: size, procedures,
 // findings.
 import { Icon } from "../Icon";
-import { For, Show } from "solid-js";
+import { createResource, For, Show } from "solid-js";
+import { checkCodeCitations, reanchorCitation, type CitationIssue } from "../../shared/codeCitations";
 import { level } from "../../shared/houseStyle";
+import { backend } from "../backend";
 import { monaco } from "../editor/monaco";
 import { diagnostics } from "../lsp/session";
 import { size } from "../StatusBar";
-import { activeDoc, activePath, openFile, setState, state } from "../state";
+import { activeDoc, activePath, applyText, canonical, documents, notify, openFile, setState, state } from "../state";
+import { baseName, relativeTo } from "../../shared/paths";
 import { symbols } from "./Objects";
 import { SeverityMark, SEVERITY } from "./Problems";
 import { IconButton, Row, Rows, type Point } from "./Rows";
@@ -68,6 +71,85 @@ export function Health() {
 	// A schema folder that is the project's own folder is no folder of descriptions: it has no catalog to ask for.
 	const areas = () => CATALOG_AREAS.filter((area) => area !== "schema" || folderParts(state.project?.schema ?? "schema").length > 0);
 	const checks = () => docChecks(docs(), areas());
+	// Async live checks: #L10-L20 code-citation drift detection + orphaned docs/attachments/ image audit.
+	const [citationIssues, { refetch: refetchCitations }] = createResource(
+		() => {
+			const root = state.workspace?.root;
+			const mdDocs = docs().filter((d) => d.exists && !isCatalog(d) && /\.(md|markdown)$/i.test(d.path));
+			return root && mdDocs.length ? { root, version: state.treeVersion, mdDocs } : null;
+		},
+		async ({ root, mdDocs }) => {
+			const readCached = async (p: string) => {
+				const open = documents.get(canonical(p));
+				if (open) return open.model.getValue();
+				return backend.read(p).then((r) => (r.binary ? null : r.text), () => null);
+			};
+			const issues: CitationIssue[] = [];
+			for (const d of mdDocs.slice(0, 120)) {
+				const txt = await readCached(d.path);
+				if (!txt || !txt.includes("#L")) continue;
+				const found = await checkCodeCitations(d.path, txt, root, readCached);
+				issues.push(...found);
+			}
+			return issues;
+		},
+	);
+	const [orphanAttachments, { refetch: refetchOrphans }] = createResource(
+		() => {
+			const root = state.workspace?.root;
+			const docsRel = (state.project?.docs ?? "docs").replace(/^[./\\]+|[\\/]+$/g, "");
+			return root ? { root, docsRel, version: state.treeVersion } : null;
+		},
+		async ({ root, docsRel }) => {
+			const files = await backend.files().catch(() => []);
+			const prefix = `${docsRel ? `${docsRel}/` : ""}attachments/`.toLowerCase();
+			const images = files.filter((p) => {
+				const rel = relativeTo(root, p).replace(/\\/g, "/").toLowerCase();
+				return rel.startsWith(prefix) && /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif)$/i.test(rel);
+			});
+			if (!images.length) return [] as string[];
+			const mdFiles = files.filter((p) => /\.(md|markdown)$/i.test(p)).slice(0, 250);
+			const corpusParts: string[] = [];
+			for (const m of mdFiles) {
+				const open = documents.get(canonical(m));
+				const txt = open ? open.model.getValue() : await backend.read(m).then((r) => r.text, () => "");
+				if (txt) corpusParts.push(txt.toLowerCase());
+			}
+			const corpus = corpusParts.join("\n");
+			return images.filter((img) => {
+				const name = baseName(img).toLowerCase();
+				const enc = encodeURIComponent(baseName(img)).toLowerCase();
+				return !corpus.includes(name) && !corpus.includes(enc);
+			});
+		},
+	);
+	const reanchorIssue = async (issue: CitationIssue) => {
+		if (!issue.reanchor) return;
+		const open = documents.get(canonical(issue.docPath));
+		const cur = open ? open.model.getValue() : await backend.read(issue.docPath).then((r) => r.text, () => null);
+		if (cur === null) return notify("Could not read the document.", "error");
+		const next = reanchorCitation(cur, issue.citation, issue.reanchor.from, issue.reanchor.to);
+		if (next === cur) return;
+		if (open) {
+			applyText(issue.docPath, next);
+		} else {
+			await backend.historyKeep(issue.docPath).catch(() => {});
+			await backend.write(issue.docPath, next);
+		}
+		setState("treeVersion", (v) => v + 1);
+		void refetchCitations();
+		notify(`Re-anchored citation to L${issue.reanchor.from}-L${issue.reanchor.to}.`);
+	};
+	const trashOrphanAttachment = async (path: string) => {
+		try {
+			await backend.trash(path);
+			setState("treeVersion", (v) => v + 1);
+			void refetchOrphans();
+			notify(`Moved unused attachment ${baseName(path)} to trash.`);
+		} catch (e: any) {
+			notify(`Could not move to trash: ${e?.message ?? e}`, "error");
+		}
+	};
 	// The working documents, or a catalog the app keeps: a project with scripts and a code catalog has that to check.
 	const hasWork = () => docs().some((d) => d.exists && (d.group === "tickets" || d.group === "specs" || d.group === "knowledge" || d.group === "registries" || Boolean(d.catalog)));
 	/** Each registry with how many of its rows are done: how far a migration has come, list by list. */
@@ -162,6 +244,74 @@ export function Health() {
 							</For>
 						</Rows>
 					</Show>
+				</section>
+			</Show>
+			<Show when={(citationIssues()?.length ?? 0) > 0}>
+				<section>
+					<h3 title="Markdown #L10-L20 code citations whose line numbers drifted or went out of range">
+						Code citations <span class="meta">{citationIssues()!.length}</span>
+					</h3>
+					<Rows class="health-rows" role="listbox" label="Drifted code citations">
+						<For each={citationIssues()}>
+							{(issue) => (
+								<Row
+									class="check-row clickable"
+									key={`${issue.docPath}:${issue.docLine}:${issue.citation.href}`}
+									label={issue.text}
+									title={`${issue.text}\nClick to open ${baseName(issue.docPath)} at line ${issue.docLine}.`}
+									onActivate={() => void openFile(issue.docPath, { reveal: { line: issue.docLine } })}
+								>
+									<span class={`check-mark ${issue.level}`} aria-hidden="true">
+										<Icon name={issue.level === "warn" ? "warning" : "circle-small-filled"} />
+									</span>
+									<span class="label">{issue.text}</span>
+									<Show when={issue.reanchor}>
+										<button
+											class="link"
+											tabindex={-1}
+											title={`Update citation to #L${issue.reanchor!.from}-L${issue.reanchor!.to}`}
+											onClick={(e) => (e.stopPropagation(), void reanchorIssue(issue))}
+										>
+											Re-anchor
+										</button>
+									</Show>
+								</Row>
+							)}
+						</For>
+					</Rows>
+				</section>
+			</Show>
+			<Show when={(orphanAttachments()?.length ?? 0) > 0}>
+				<section>
+					<h3 title="Images in docs/attachments/ not referenced by any Markdown document">
+						Unused attachments <span class="meta">{orphanAttachments()!.length}</span>
+					</h3>
+					<Rows class="health-rows" role="listbox" label="Unused attachment images">
+						<For each={orphanAttachments()}>
+							{(imgPath) => (
+								<Row
+									class="check-row clickable"
+									key={imgPath}
+									label={baseName(imgPath)}
+									title={`Unused attachment ${relativeTo(state.workspace?.root, imgPath)}. Click to preview.`}
+									onActivate={() => void openFile(imgPath)}
+								>
+									<span class="check-mark note" aria-hidden="true">
+										<Icon name="file-media" />
+									</span>
+									<span class="label">{baseName(imgPath)}</span>
+									<button
+										class="link"
+										tabindex={-1}
+										title={`Move ${baseName(imgPath)} to trash`}
+										onClick={(e) => (e.stopPropagation(), void trashOrphanAttachment(imgPath))}
+									>
+										Trash
+									</button>
+								</Row>
+							)}
+						</For>
+					</Rows>
 				</section>
 			</Show>
 			<Show when={registries().length}>

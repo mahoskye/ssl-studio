@@ -1,11 +1,13 @@
-// Local history of the current file: a snapshot per save, with diff and restore.
+// File history: local save snapshots AND per-file Git commits (with diff & restore in ReviewView).
 import { createResource, createSignal, For, onCleanup, Show } from "solid-js";
-import type { Snapshot } from "../../shared/protocol";
+import type { GitCommit, Snapshot } from "../../shared/protocol";
 import { backend } from "../backend";
 import { openReview } from "../editor/Review";
+import { gitStatus, gitVersion } from "../git";
 import { activeDoc, activePath, applyText, historyChanged, notify } from "../state";
 import { baseName } from "../../shared/paths";
-import { Row, Rows } from "./Rows";
+import { Icon } from "../Icon";
+import { Row, RowGroup, Rows } from "./Rows";
 
 export function History() {
 	const [version, setVersion] = createSignal(0);
@@ -14,10 +16,20 @@ export function History() {
 		() => [activePath(), version()] as const,
 		([path]) => (path ? backend.history(path).then((list) => ({ list, error: "" }), (e) => ({ list: [] as Snapshot[], error: String(e?.message ?? e) })) : { list: [] as Snapshot[], error: "" }),
 	);
+	const [commits] = createResource(
+		() => [activePath(), gitVersion(), Boolean(gitStatus())] as const,
+		([path, , inRepo]) =>
+			path && inRepo && !path.startsWith("untitled:")
+				? backend.gitLog(path, 25).catch(() => [] as GitCommit[])
+				: Promise.resolve([] as GitCommit[]),
+	);
 	const snapshots = () => history()?.list ?? [];
+	const gitCommits = () => commits() ?? [];
 	const when = (time: number) => new Date(time).toLocaleString();
+	const shortDay = (time: number) => new Date(time).toLocaleDateString();
 	const size = (bytes: number) => `${Math.max(1, Math.round(bytes / 1024))} KB`;
-	const show = async (id: string, time: number) => {
+
+	const showSnapshot = async (id: string, time: number) => {
 		const path = activePath();
 		const doc = activeDoc();
 		if (!path || !doc) return notify("Open the file again to see its snapshots.", "error");
@@ -40,33 +52,79 @@ export function History() {
 			notify(`The snapshot of ${when(time)} could not be opened: ${String(e?.message ?? e)}`, "error");
 		}
 	};
+
+	const showCommit = async (commit: GitCommit) => {
+		const path = activePath();
+		const doc = activeDoc();
+		if (!path || !doc) return notify("Open the file again to inspect its Git history.", "error");
+		try {
+			const historical = await backend.gitShow(path, commit.sha, commit.path);
+			if (historical === null) {
+				notify(`Could not read ${baseName(path)} at commit ${commit.shortSha}.`, "error");
+				return;
+			}
+			void openReview({
+				title: `${commit.shortSha}: ${commit.subject} (${shortDay(commit.time)})`,
+				path,
+				effect: `Comparing ${commit.shortSha} (left) against your current editor (right). Restoring puts that commit's text into the editor as one undoable edit.`,
+				original: historical,
+				proposed: doc.model.getValue(),
+				language: doc.model.getLanguageId(),
+				acceptLabel: `Restore ${commit.shortSha}`,
+				onAccept: () => {
+					applyText(path, historical);
+					notify(`Restored ${baseName(path)} from ${commit.shortSha} into the editor. Save to keep it; undo to go back.`);
+				},
+			});
+		} catch (e: any) {
+			notify(`Could not load commit ${commit.shortSha}: ${String(e?.message ?? e)}`, "error");
+		}
+	};
+
 	return (
 		<div class="panel-body" data-panel="history">
 			<div class="panel-title">
-				<span>Local history</span>
+				<span>History</span>
 			</div>
-			<Show when={activePath()} fallback={<p class="hint">No file open. Open a file to see the snapshots kept of it.</p>}>
-				<p class="hint">A snapshot is kept on every save that changes the file, outside the workspace. Click one, or press Enter on it, to compare it with the editor and restore it.</p>
+			<Show when={activePath()} fallback={<p class="hint">No file open. Open a file to see its local snapshots and Git commit history.</p>}>
+				<p class="hint">Local snapshots are kept on every save; Git commits show committed revisions. Click any entry to compare it with the editor.</p>
 				<Show when={history()?.error}>
 					<p class="hint warn" role="alert">
 						The snapshots of {baseName(activePath()!)} could not be read: {history()!.error}
 					</p>
 				</Show>
-				<Show when={!history()?.error && !snapshots().length}>
-					<p class="hint">{history.loading ? "Reading the snapshots…" : `No snapshots of ${baseName(activePath()!)} yet. The first is kept when you save a change to it.`}</p>
-				</Show>
-				{/* A list with nothing in it is not drawn: it would take the keyboard and show an empty frame. */}
-				<Show when={snapshots().length}>
-					<Rows role="listbox" label={`Snapshots of ${baseName(activePath()!)}`}>
-						<For each={snapshots()}>
-							{(snap) => (
-								<Row key={snap.id} title={`Snapshot of ${when(snap.time)}, ${size(snap.size)}. Click, or press Enter, to compare it with the editor.`} onActivate={() => void show(snap.id, snap.time)}>
-									<span class="snap-dot" aria-hidden="true" />
-									<span class="label">{when(snap.time)}</span>
-									<span class="meta">{size(snap.size)}</span>
-								</Row>
-							)}
-						</For>
+				<Show when={snapshots().length || gitCommits().length} fallback={<p class="hint">{history.loading || commits.loading ? "Reading history…" : `No local snapshots or Git commits for ${baseName(activePath()!)} yet.`}</p>}>
+					<Rows role="listbox" label={`History of ${baseName(activePath()!)}`}>
+						<Show when={snapshots().length}>
+							<RowGroup fold="history:local" label="Local snapshots" count={snapshots().length} head={<span class="label">Local snapshots</span>} rows={true}>
+								<For each={snapshots()}>
+									{(snap) => (
+										<Row key={`snap:${snap.id}`} title={`Snapshot of ${when(snap.time)}, ${size(snap.size)}. Click, or press Enter, to compare it with the editor.`} onActivate={() => void showSnapshot(snap.id, snap.time)}>
+											<span class="snap-dot" aria-hidden="true" />
+											<span class="label">{when(snap.time)}</span>
+											<span class="meta">{size(snap.size)}</span>
+										</Row>
+									)}
+								</For>
+							</RowGroup>
+						</Show>
+						<Show when={gitCommits().length}>
+							<RowGroup fold="history:git" label="Git commits" count={gitCommits().length} head={<span class="label">Git commits</span>} rows={true}>
+								<For each={gitCommits()}>
+									{(commit) => (
+										<Row
+											key={`git:${commit.sha}`}
+											title={`${commit.shortSha} · ${commit.subject}\n${commit.author ? `${commit.author} · ` : ""}${when(commit.time)}\nClick to diff against the current file.`}
+											onActivate={() => void showCommit(commit)}
+										>
+											<Icon name="git-branch" class="icon" />
+											<span class="label">{commit.subject || commit.shortSha}</span>
+											<span class="meta">{commit.shortSha} · {shortDay(commit.time)}</span>
+										</Row>
+									)}
+								</For>
+							</RowGroup>
+						</Show>
 					</Rows>
 				</Show>
 			</Show>

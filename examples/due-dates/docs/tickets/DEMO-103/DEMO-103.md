@@ -25,3 +25,5 @@ each one needs.
 ## Notes
 
 - Marking late samples is not built yet: see the spec.
+- Reference notes from the lab, a sample SQL check, expected JSON rows, and a
+  draft `.xfd` form layout sit beside this ticket in `docs/tickets/DEMO-103/`.

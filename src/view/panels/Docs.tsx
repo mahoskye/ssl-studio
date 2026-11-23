@@ -3,26 +3,61 @@
 // plans. Which folders those are comes from .ssl-studio/project.toml.
 import { Icon } from "../Icon";
 import { FileMark } from "../FileMark";
-import { createMemo, createResource, createSignal, For, Show } from "solid-js";
+import { createMemo, createSignal, For, Show } from "solid-js";
 import type { DocFile } from "../../shared/protocol";
 import { backend } from "../backend";
-import { docMatches, isCatalog, KNOWLEDGE, progress, progressShort, registryTitle, SCHEMAS, statusChoices, toneOf } from "../../shared/projectDocs";
-import { docs, newDoc, newDocIn, newFolderIn, setUpProject } from "../project";
-import { importTickets, newKnowledge, newRegistry, newSchema, newSpec, schemaCatalogKept, startFolderCatalogs, newState, newTicket, setStatus, updateCatalogs, updateManifest } from "../projectDocs";
+import { docChecks } from "../../shared/docChecks";
+import { CATALOG_AREAS, docMatches, isCatalog, KNOWLEDGE, progress, progressShort, registryTitle, SCHEMAS, statusChoices, toneOf } from "../../shared/projectDocs";
+import { workspaceTags } from "../../shared/tags";
+import { docs, docsError, docsLoading, newDoc, newDocIn, newFolderIn, setUpProject } from "../project";
+import {
+	archiveTicket,
+	createTicketFolder,
+	exportTicketPacket,
+	generateSchemaDocFromSql,
+	importTickets,
+	newKnowledge,
+	newRegistry,
+	newSchema,
+	newSpec,
+	newState,
+	newTicket,
+	newTicketFile,
+	promoteQuestionToDecision,
+	renameTicket,
+	setStatus,
+	staleCatalogSummaryAsync,
+	startFolderCatalogs,
+	trashTicket,
+	updateCatalogs,
+	updateManifest,
+} from "../projectDocs";
+import { searchFor } from "./Search";
 import { manageTemplates, newNoteFromTemplate } from "../templater";
 import { folderParts, folderSaid, IMPORT_TICKETS, kindOf, NEW_DOCUMENT, NEW_FOLDER, NEW_PLAN, NEW_REGISTRY, NEW_SPEC, NEW_TICKET, newOfKind, plainSection, schemaFolderOf, schemaOf, sectionFolder, sectionMenu, SHOW_FOLDER, type DocSection } from "../../shared/docSections";
 import { joinPath } from "../../shared/paths";
 import { schemaList, schemaRowTitle } from "../../shared/schemaList";
 import { shownRows, workList } from "../../shared/workList";
 import { activePath, canonical, notify, openFile, openToSide, setState, state } from "../state";
+import { gitStatus } from "../git";
+import { changeLetter } from "../../shared/gitStatus";
 import { focusRowsBelow, IconButton, isFolded, Row, RowGroup, Rows, setFold, setFolds, type Point } from "./Rows";
 import { chooseFromMenu } from "./RowMenu";
 import { Menu } from "../Menu";
+
+function gitKindOf(path: string) {
+	const st = gitStatus();
+	if (!st) return null;
+	const hit = st.files.find((f) => canonical(f.path) === canonical(path));
+	return hit ? (hit.unstaged ?? hit.staged ?? null) : null;
+}
 
 function DocRow(props: { file: DocFile }) {
 	// One click opens it for a look, in a tab the next file clicked takes; a double click keeps the tab.
 	const open = () => (props.file.exists ? void openFile(props.file.path, { preview: true }) : void setUpProject());
 	const selected = () => props.file.exists && activePath() === canonical(props.file.path);
+	const dirty = () => props.file.exists && Boolean(state.dirty[canonical(props.file.path)]);
+	const git = () => (props.file.exists ? gitKindOf(props.file.path) : null);
 	return (
 		<Row
 			class="tree-row doc-row"
@@ -33,9 +68,16 @@ function DocRow(props: { file: DocFile }) {
 			onActivate={open}
 			onKeep={() => props.file.exists && void openFile(props.file.path, { keep: true })}
 			onMenu={(at) => void rowMenu(props.file, at)}
+			onKey={(e) => {
+				if (!props.file.exists || (e.key !== "F2" && e.key !== "Delete")) return false;
+				const own = Boolean(state.project && canonical(props.file.path) === canonical(state.project.path));
+				if (own) return false;
+				void (e.key === "F2" ? import("./Explorer").then((m) => m.renameFile(props.file.path)) : import("./Explorer").then((m) => m.trashFile(props.file.path)));
+				return true;
+			}}
 		>
 			<FileMark name={props.file.name} />
-			<span class="label">{props.file.name}</span>
+			<span class="label">{props.file.heading || props.file.title || props.file.name}</span>
 			<Show when={!props.file.exists}>
 				<span class="meta warn">missing</span>
 			</Show>
@@ -46,9 +88,24 @@ function DocRow(props: { file: DocFile }) {
 			</Show>
 			{/* The tests' and the code's catalogs are listed here, with the project's own files. */}
 			<Show when={props.file.catalog?.stale}>
-				<span class="meta warn" title="The list in this catalog no longer says what the folder holds. “Update catalogs”, under New above, writes it afresh.">
+				<span class="meta warn" title="The list in this catalog no longer says what the folder holds. “Update catalogs” writes it afresh.">
 					out of date
 				</span>
+			</Show>
+			<Show when={props.file.broken?.length}>
+				<span class="meta warn" title={`${props.file.broken!.length} broken ${props.file.broken!.length === 1 ? "link" : "links"}`}>
+					{props.file.broken!.length === 1 ? "1 broken" : `${props.file.broken!.length} broken`}
+				</span>
+			</Show>
+			<Show when={dirty()}>
+				<span class="tree-dirty-dot" title="Unsaved changes" aria-label="Unsaved changes" />
+			</Show>
+			<Show when={git()}>
+				{(kind) => (
+					<span class={`tree-git-badge git-letter ${kind()}`} title={`Git: ${kind()}`} aria-label={`Git: ${kind()}`}>
+						{changeLetter(kind())}
+					</span>
+				)}
 			</Show>
 		</Row>
 	);
@@ -71,6 +128,11 @@ const PATH = "Copy path";
 const RELATIVE = "Copy path in the project";
 const NAME = "Copy name";
 const SHOW = "Show in the Explorer";
+const SHOW_TICKET_FOLDER = "Browse ticket files in Explorer";
+const CREATE_TICKET_FOLDER = "Create ticket folder…";
+const NEW_TICKET_FILE = "New file in ticket folder…";
+const NEW_SUBTICKET = "New sub-ticket…";
+const ARCHIVE_TICKET = "Archive ticket…";
 const RENAME = "Rename…";
 const TRASH = "Move to trash…";
 /**
@@ -94,19 +156,51 @@ async function rowMenu(file: DocFile, at: Point) {
 	// The project's own settings file is what makes the folder a project: it is not renamed or thrown away from its
 	// row here, where nothing would read the project again after it.
 	const own = Boolean(state.project && canonical(file.path) === canonical(state.project.path));
-	const items = file.exists ? [OPEN, SIDE, ...states.map((status) => `${STATE}${status}`), ...(catalog || manifest ? [UPDATE] : []), PATH, RELATIVE, NAME, SHOW, ...(own ? [] : [RENAME, TRASH])] : [CREATE];
+	const isTicket = file.group === "tickets" && !catalog;
+	const isAnsweredQuestion = file.group === "knowledge" && file.kind === "questions" && !catalog && toneOf(file.status) === "done";
+	const isSchemaItem = file.group === "schema" && !catalog;
+	const isSchemaSql = isSchemaItem && /\.(sql|ddl|pks|pkb)$/i.test(file.name);
+	const EXPORT_PACKET = "Export release packet (HTML)…";
+	const PROMOTE_DECISION = "Promote answer to decision…";
+	const DOC_FROM_SQL = "Generate table doc from SQL…";
+	const FIND_IN_CODE = "Find usages in code";
+	const ticketActions = isTicket
+		? [
+				...(file.ticket ? [NEW_SUBTICKET, EXPORT_PACKET] : []),
+				...(file.ticketFolder ? [NEW_TICKET_FILE, SHOW_TICKET_FOLDER] : [CREATE_TICKET_FOLDER]),
+				ARCHIVE_TICKET,
+			]
+		: [];
+	const extraActions = [
+		...(isAnsweredQuestion ? [PROMOTE_DECISION] : []),
+		...(isSchemaSql ? [DOC_FROM_SQL] : []),
+		...(isSchemaItem ? [FIND_IN_CODE] : []),
+	];
+	const items = file.exists ? [OPEN, SIDE, ...states.map((status) => `${STATE}${status}`), ...ticketActions, ...extraActions, ...(catalog || manifest ? [UPDATE] : []), PATH, RELATIVE, NAME, SHOW, ...(own ? [] : [RENAME, TRASH])] : [CREATE];
 	const picked = await chooseFromMenu(`Actions for ${file.ticket ?? file.title ?? file.name}`, items, at);
 	if (!picked) return;
 	if (picked === OPEN) await openFile(file.path, { keep: true });
 	else if (picked === SIDE) await openToSide(file.path);
 	else if (picked === CREATE) await setUpProject();
+	else if (picked === NEW_SUBTICKET && file.ticket) await newTicket(undefined, undefined, { parent: file.ticket });
+	else if (picked === EXPORT_PACKET && file.ticket) await exportTicketPacket(file.path, file.ticket, "html");
+	else if (picked === PROMOTE_DECISION) await promoteQuestionToDecision(file.path);
+	else if (picked === DOC_FROM_SQL) await generateSchemaDocFromSql(file.path);
+	else if (picked === FIND_IN_CODE) {
+		const stem = (file.title || file.name.split(/[\\/]/).pop() || "").replace(/\.[^.]+$/, "").trim();
+		if (stem) searchFor(stem);
+	}
+	else if (picked === ARCHIVE_TICKET) await archiveTicket(file);
+	else if (picked === CREATE_TICKET_FOLDER) await createTicketFolder(file.path);
+	else if (picked === NEW_TICKET_FILE && file.ticketFolder) await newTicketFile(file.ticketFolder, file.ticket ?? file.name);
+	else if (picked === SHOW_TICKET_FOLDER && file.ticketFolder) (await import("./Explorer")).browseFolderInExplorer(file.ticketFolder, `${file.ticket ?? file.name} files`);
 	else if (picked === UPDATE) await (catalog ? updateCatalogs() : updateManifest());
 	else if (picked.startsWith(STATE)) await setStatus(file.path, picked.slice(STATE.length));
 	else if (picked === PATH || picked === RELATIVE || picked === NAME) await (await import("../commands")).copyPath(picked === PATH ? "whole" : picked === NAME ? "name" : "relative", file.path);
 	// The tree's own steps, asking and all: loaded when asked for, since the Explorer is another panel.
 	else if (picked === SHOW) (await import("./Explorer")).showInExplorer(file.path);
-	else if (picked === RENAME) await (await import("./Explorer")).renameFile(file.path);
-	else if (picked === TRASH) await (await import("./Explorer")).trashFile(file.path);
+	else if (picked === RENAME) await (isTicket ? renameTicket(file) : (await import("./Explorer")).renameFile(file.path));
+	else if (picked === TRASH) await (isTicket ? trashTicket(file) : (await import("./Explorer")).trashFile(file.path));
 }
 
 /** A row for one of the working documents: its title where it has one, and its state. */
@@ -134,12 +228,34 @@ function ItemRow(props: {
 			classList={{ selected: selected(), catalog: isCatalog(props.file) }}
 			style={{ "padding-left": `${8 + (props.depth ?? 0) * 14}px` }}
 			// Where it is, its state, what it is for, how it is linked, and what is wrong with it: nothing the reader has to keep up by hand.
-			title={[props.file.path, props.file.status ? `Status: ${props.file.status}` : "", props.file.tickets?.length ? `${props.file.group === "tickets" ? "Related to" : "For"} ${props.file.tickets.join(", ")}` : "", props.linkDetail ? `Linked via: ${props.linkDetail}` : "", ...(props.file.problems ?? [])].filter(Boolean).join("\n")}
+			title={[
+				props.file.path,
+				props.file.status ? `Status: ${props.file.status}` : "",
+				props.file.ticketFolder
+					? (() => {
+							const n = props.file.ticketFileCount ?? props.file.ticketFiles?.length ?? 0;
+							return `Ticket folder: ${n} ${n === 1 ? "file" : "files"}`;
+						})()
+					: "",
+				props.file.tickets?.length ? `${props.file.group === "tickets" ? "Related to" : "For"} ${props.file.tickets.join(", ")}` : "",
+				props.linkDetail ? `Linked via: ${props.linkDetail}` : "",
+				...(props.file.problems ?? []),
+			]
+				.filter(Boolean)
+				.join("\n")}
 			expanded={props.fold?.parent ? !props.fold.shut : undefined}
 			onToggle={() => props.fold?.parent && !props.fold.locked && props.fold.toggle()}
 			onActivate={() => void openFile(props.file.path, { preview: true })}
 			onKeep={() => void openFile(props.file.path, { keep: true })}
 			onMenu={(at) => void rowMenu(props.file, at)}
+			onKey={(e) => {
+				if (e.key !== "F2" && e.key !== "Delete") return false;
+				const isTicket = props.file.group === "tickets" && !isCatalog(props.file);
+				void (e.key === "F2"
+					? isTicket ? renameTicket(props.file) : import("./Explorer").then((m) => m.renameFile(props.file.path))
+					: isTicket ? trashTicket(props.file) : import("./Explorer").then((m) => m.trashFile(props.file.path)));
+				return true;
+			}}
 		>
 			<Show when={props.fold}>
 				{(fold) => (
@@ -186,8 +302,17 @@ function ItemRow(props: {
 					{props.file.tasks!.done}/{props.file.tasks!.total}
 				</span>
 			</Show>
+			<Show when={props.file.ticketFolder}>
+				<span
+					class="meta doc-folder-badge"
+					title={`Ticket folder: ${props.file.ticketFileCount ?? props.file.ticketFiles?.length ?? 0} extra files. Right-click -> Browse ticket files in Explorer.`}
+				>
+					<Icon name="folder" />
+					<span>{props.file.ticketFileCount ?? props.file.ticketFiles?.length ?? 0}</span>
+				</span>
+			</Show>
 			<Show when={stale()}>
-				<span class="meta warn" title="The list in this catalog no longer says what the folder holds. “Update catalogs”, under New above, writes it afresh.">
+				<span class="meta warn" title="The list in this catalog no longer says what the folder holds. “Update catalogs” writes it afresh.">
 					out of date
 				</span>
 			</Show>
@@ -196,10 +321,31 @@ function ItemRow(props: {
 					template
 				</span>
 			</Show>
+			<Show when={(props.file.broken?.length ?? 0) + (props.file.missing?.length ?? 0) > 0}>
+				<span
+					class="meta warn"
+					title={[
+						...(props.file.missing ?? []).map((m) => `Missing: ${m}`),
+						...(props.file.broken ?? []).map((b) => `Broken link: ${b.href}`),
+					].join("\n")}
+				>
+					{(props.file.broken?.length ?? 0) + (props.file.missing?.length ?? 0)} broken
+				</span>
+			</Show>
 			<Show when={props.file.problems?.length}>
 				<span class="meta warn" title={props.file.problems!.join("\n")}>
 					{props.file.problems!.length === 1 ? "1 problem" : `${props.file.problems!.length} problems`}
 				</span>
+			</Show>
+			<Show when={Boolean(state.dirty[canonical(props.file.path)])}>
+				<span class="tree-dirty-dot" title="Unsaved changes" aria-label="Unsaved changes" />
+			</Show>
+			<Show when={gitKindOf(props.file.path)}>
+				{(kind) => (
+					<span class={`tree-git-badge git-letter ${kind()}`} title={`Git: ${kind()}`} aria-label={`Git: ${kind()}`}>
+						{changeLetter(kind())}
+					</span>
+				)}
 			</Show>
 			<Status status={props.file.status} />
 		</Row>
@@ -249,9 +395,7 @@ async function headMenu(section: DocSection, title: string, at: Point) {
 	// layout from its template, in the new folder. Elsewhere it is a plain document, where the list holds those.
 	const known = schemaOf(section);
 	const schemaRoot = sectionFolder("schema", project);
-	// Whether the step made anything: one that was cancelled or refused leaves the folder as it was.
-	let made = false;
-	if (picked === NEW_FOLDER) made = await newFolderIn(folder, known ? (inFolder) => newSchema(known.id, inFolder.slice(schemaRoot ? schemaRoot.length + 1 : 0)) : plainSection(section));
+	if (picked === NEW_FOLDER) await newFolderIn(folder, known ? (inFolder) => newSchema(known.id, inFolder.slice(schemaRoot ? schemaRoot.length + 1 : 0)) : plainSection(section));
 	else if (picked === SHOW_FOLDER) {
 		const path = joinPath(root, ...folderParts(folder));
 		// A list is shown for a folder that is not there yet: its first document or folder makes it.
@@ -261,7 +405,7 @@ async function headMenu(section: DocSection, title: string, at: Point) {
 		);
 		if (there) (await import("./Explorer")).showInExplorer(path);
 		else notify(`${folderSaid(folder)} is not there yet: the first document or folder made here makes it.`);
-	} else if (picked === NEW_DOCUMENT) made = await newDocIn(folder);
+	} else if (picked === NEW_DOCUMENT) await newDocIn(folder);
 	else if (picked === NEW_TICKET) await newTicket();
 	else if (picked === IMPORT_TICKETS) await importTickets();
 	else if (picked === NEW_SPEC) await newSpec();
@@ -269,10 +413,6 @@ async function headMenu(section: DocSection, title: string, at: Point) {
 	else if (picked === NEW_PLAN) (await import("../commands")).runCommand("new-plan");
 	else if (schema) await newSchema(schema.id, schemaFolderOf(section));
 	else if (kind) await newKnowledge(kind.id);
-	// A plain document made in the schema folder (in a kind of the project's own, or the first in a new folder) is
-	// listed in its catalog like any description: the catalog is written afresh, when something was made. A
-	// description from its template has written it already.
-	if (made && (section === "schema" || section.startsWith("schema:"))) await schemaCatalogKept();
 }
 
 /**
@@ -410,8 +550,8 @@ function Registries(props: { files: DocFile[]; empty?: string; filtered?: boolea
 	);
 }
 
-function Group(props: { title: string; folder?: string; group: DocFile["group"]; empty?: string; filter?: string }) {
-	const files = () => docs().filter((d) => d.group === props.group && docMatches(d, props.filter ?? ""));
+function Group(props: { title: string; folder?: string; group: DocFile["group"]; files: DocFile[]; empty?: string; filtered?: boolean }) {
+	const files = () => props.files.filter((d) => d.group === props.group);
 	/** The catalog of this list's own folder: the one the app keeps, which says so of itself. */
 	const own = (file: DocFile) => isCatalog(file) && file.catalog?.area === props.group;
 	return (
@@ -420,7 +560,7 @@ function Group(props: { title: string; folder?: string; group: DocFile["group"];
 			label={props.title}
 			// The lists that are a folder of the project's: "Project" is the files at its top, and has no menu.
 			onMenu={props.group === "docs" || props.group === "plans" ? (at) => void headMenu(props.group as DocSection, props.title, at) : undefined}
-			open={Boolean(props.filter?.trim())}
+			open={props.filtered}
 			count={files().filter((file) => !own(file)).length}
 			head={<Head title={props.title} folder={props.folder} />}
 			rows={files().length > 0}
@@ -438,19 +578,47 @@ function Group(props: { title: string; folder?: string; group: DocFile["group"];
 }
 
 export function Docs() {
-	// The list itself comes from project.ts, which shows nothing when it cannot be read. This asks
-	// as well, only to learn whether the listing failed or is still on its way.
-	const [failure] = createResource(
-		() => state.workspace && ([state.workspace.root, state.treeVersion] as const),
-		() => backend.docs().then(() => "", (e) => String(e?.message ?? e)),
-	);
-	const reading = () => failure.loading && !docs().length;
+	const reading = () => docsLoading() && !docs().length;
+	const failure = () => docsError();
 	const settled = () => !reading() && !failure();
+	const areas = createMemo(() => CATALOG_AREAS.filter((area) => area !== "schema" || folderParts(state.project?.schema ?? "schema").length > 0));
+	const staleCatalogs = createMemo(() => docs().filter((d) => d.exists && d.catalog?.stale));
+	const catalogIssues = createMemo(() => docChecks(docs(), areas()).filter((c) => c.fix?.kind === "catalogs"));
+	const askAgentToReconcile = () => {
+		void staleCatalogSummaryAsync().then(({ prompt }) => {
+			if (!prompt) return;
+			void import("../agent/Agent").then((m) => m.openAgentWithDraft(prompt, { cleanContext: true }));
+		});
+	};
 	/** Narrows every list in the panel to the documents the words typed are in. */
 	const [filter, setFilter] = createSignal("");
-	const filtering = () => Boolean(filter().trim());
+	const [mode, setMode] = createSignal<"all" | "active" | "problems">("all");
+	const [activeTag, setActiveTag] = createSignal<string | null>(null);
+	const tags = createMemo(() => workspaceTags(docs()));
+	const filtering = () => Boolean(filter().trim()) || mode() !== "all" || Boolean(activeTag());
+	const hasIssue = (d: DocFile) => Boolean(d.broken?.length || d.missing?.length || d.missingSource || d.problems?.length || d.catalog?.stale || d.untouched);
 	// A registry is known by what it is called, not by its file's name.
-	const shown = createMemo(() => (filtering() ? docs().filter((d) => !isCatalog(d) && docMatches(d.group === "registries" ? { ...d, title: registryTitle(d.name) } : d, filter())) : docs()));
+	const shown = createMemo(() => {
+		const list = docs();
+		if (!filtering()) return list;
+		const tagLower = activeTag()?.toLowerCase() ?? "";
+		return list.filter((d) => {
+			if (tagLower) {
+				if (isCatalog(d) || !d.tags?.some((t) => t.toLowerCase() === tagLower)) return false;
+			}
+			if (mode() === "problems") {
+				if (!hasIssue(d)) return false;
+			} else if (mode() === "active") {
+				if (isCatalog(d)) return false;
+				const t = toneOf(d.status);
+				if (t !== "active" && t !== "waiting") return false;
+			} else if (isCatalog(d)) {
+				return false;
+			}
+			if (!filter().trim()) return true;
+			return docMatches(d.group === "registries" ? { ...d, title: registryTitle(d.name) } : d, filter());
+		});
+	});
 	/** Whether a list has anything to show: while filtering, one that has nothing is left out, heading and all. */
 	const has = (...groups: DocFile["group"][]) => !filtering() || shown().some((d) => groups.includes(d.group));
 	return (
@@ -473,6 +641,7 @@ export function Docs() {
 					{ label: "Update file manifest", run: () => void updateManifest() },
 					"separator",
 					...SCHEMAS.map((kind) => ({ label: newOfKind(kind), run: () => void newSchema(kind.id) })),
+					{ label: "Generate table doc from SQL…", run: () => void generateSchemaDocFromSql() },
 					"separator" as const,
 					{ label: "New document…", run: () => void newDoc() },
 					{ label: "New from template…", run: () => void newNoteFromTemplate() },
@@ -509,24 +678,79 @@ export function Docs() {
 					The documents could not be listed: {failure()}. Press Refresh, above, to try again.
 				</p>
 			</Show>
-			{/* Shown for a list long enough to need it, and for as long as it is narrowing the list: it is the way to clear itself. */}
-			<Show when={filtering() || docs().filter((d) => d.exists).length > 6}>
-				<input
-					class="filter"
-					type="search"
-					aria-label="Filter the project's documents by title, key, state or what they are about"
-					placeholder="Filter"
-					value={filter()}
-					onInput={(e) => setFilter(e.currentTarget.value)}
-					onKeyDown={(e) => e.key === "ArrowDown" && focusRowsBelow(e.currentTarget) && e.preventDefault()}
-				/>
+			<Show when={catalogIssues().length > 0}>
+				<div class="docs-stale-bar" role="status">
+					<span class="docs-stale-text" title={catalogIssues().map((c) => c.text).join("\n")}>
+						<Icon name="warning" />
+						<span>
+							{staleCatalogs().length > 0
+								? staleCatalogs().length === 1
+									? "1 index out of sync"
+									: `${staleCatalogs().length} indexes out of sync`
+								: "Missing folder index"}
+						</span>
+					</span>
+					<div class="docs-stale-actions">
+						<button type="button" class="docs-stale-btn" title="Rewrite out-of-date or missing INDEX.md catalogs now (manual reconciliation)" onClick={() => void updateCatalogs()}>
+							Update
+						</button>
+						<button type="button" class="docs-stale-btn" title="Open Agent with a reconciliation prompt for out-of-date or missing catalogs" onClick={askAgentToReconcile}>
+							Agent
+						</button>
+					</div>
+				</div>
+			</Show>
+			<Show when={filtering() || docs().some((d) => d.exists)}>
+				<div class="docs-filter-bar">
+					<input
+						class="filter"
+						type="search"
+						aria-label="Filter the project's documents by title, key, state or what they are about"
+						placeholder="Filter"
+						value={filter()}
+						onInput={(e) => setFilter(e.currentTarget.value)}
+						onKeyDown={(e) => e.key === "ArrowDown" && focusRowsBelow(e.currentTarget) && e.preventDefault()}
+					/>
+					<div class="docs-filter-pills" role="group" aria-label="Document filter mode">
+						<button type="button" classList={{ on: mode() === "all" }} onClick={() => setMode("all")}>
+							All
+						</button>
+						<button type="button" classList={{ on: mode() === "active" }} title="Active and waiting work" onClick={() => setMode("active")}>
+							Active
+						</button>
+						<button type="button" classList={{ on: mode() === "problems" }} title="Documents with broken links, problems, or stale catalogs" onClick={() => setMode("problems")}>
+							Issues
+						</button>
+					</div>
+					<Show when={activeTag()}>
+						{(tag) => (
+							<button
+								type="button"
+								class="docs-tag-active"
+								title={`Filtering by #${tag()}. Click to clear.`}
+								onClick={() => setActiveTag(null)}
+							>
+								<span>#{tag()}</span>
+								<Icon name="close" />
+							</button>
+						)}
+					</Show>
+				</div>
 			</Show>
 			<Rows label="The project's documents">
 				<Show when={filtering() && !shown().length}>
-					<p class="hint">No document matches “{filter().trim()}”. Clear the filter to see them all.</p>
+					<p class="hint">
+						{filter().trim()
+							? `No document matches “${filter().trim()}”. Clear the filter to see them all.`
+							: activeTag()
+								? `No matching documents tagged #${activeTag()}.`
+								: mode() === "problems"
+									? "No documents with issues right now."
+									: "No active or waiting documents right now."}
+					</p>
 				</Show>
 				<Show when={has("project")}>
-					<Group title="Project" group="project" filter={filter()} />
+					<Group title="Project" group="project" files={shown()} filtered={filtering()} />
 				</Show>
 				<Show when={state.project?.configured || docs().some((d) => d.group === "tickets" || d.group === "specs" || d.group === "knowledge" || d.group === "registries")}>
 					<Show when={has("tickets", "specs")}>
@@ -540,13 +764,33 @@ export function Docs() {
 					</Show>
 				</Show>
 				<Show when={has("docs")}>
-					<Group title="Docs" folder={folderOf("docs")} group="docs" filter={filter()} empty={settled() ? "No Markdown files here yet. Use New, above, to add one." : undefined} />
+					<Group title="Docs" folder={folderOf("docs")} group="docs" files={shown()} filtered={filtering()} empty={settled() ? "No Markdown files here yet. Use New, above, to add one." : undefined} />
 				</Show>
 				<Show when={has("schema")}>
 					<Schema files={shown()} filtered={filtering()} empty={settled() ? "Nothing described yet. Use New, above, to describe a table, a message or a file layout." : undefined} />
 				</Show>
 				<Show when={has("plans")}>
-					<Group title="Plans" folder={folderOf("plans")} group="plans" filter={filter()} empty={settled() ? "No plans yet. Use New, above, to draw one." : undefined} />
+					<Group title="Plans" folder={folderOf("plans")} group="plans" files={shown()} filtered={filtering()} empty={settled() ? "No plans yet. Use New, above, to draw one." : undefined} />
+				</Show>
+				<Show when={tags().length > 0}>
+					<RowGroup fold="docs:tags" label="Tags" count={tags().length} head={<Head title="Tags" />} rows={true}>
+						<For each={tags()}>
+							{(bucket) => (
+								<Row
+									class="tree-row doc-row"
+									classList={{ active: activeTag()?.toLowerCase() === bucket.tag.toLowerCase() }}
+									key={`tag:${bucket.tag}`}
+									title={`#${bucket.tag} (${bucket.count} ${bucket.count === 1 ? "document" : "documents"}). Click to filter; right-click to search workspace.`}
+									onActivate={() => setActiveTag((cur) => (cur?.toLowerCase() === bucket.tag.toLowerCase() ? null : bucket.tag))}
+									onMenu={() => searchFor(`#${bucket.tag}`)}
+								>
+									<Icon name="tag" class="icon" />
+									<span class="label">#{bucket.tag}</span>
+									<span class="meta">{bucket.count}</span>
+								</Row>
+							)}
+						</For>
+					</RowGroup>
 				</Show>
 			</Rows>
 		</div>

@@ -1,6 +1,8 @@
 // Settings: appearance, the editor, the language server and the keyboard,
 // each saying where it is saved.
 import { Icon } from "./Icon";
+import { cloneCsvTableConfig, DEFAULT_CSV_TABLE_CONFIG, effectiveCsvTableConfig } from "../shared/csvFormat";
+import { DEFAULT_SQL_DIALECT, SQL_DIALECTS, type SqlDialect } from "../shared/format";
 import { CODE_FONT_PRESETS, READ_FONT_PRESETS, UI_FONT_PRESETS, type FontPreset } from "../shared/fonts";
 import { RULER_MARGIN } from "../shared/houseStyle";
 import {
@@ -174,18 +176,22 @@ export function SettingsDialog() {
 		codeFont: ["Code font", "Editor, Blocks, Tables and Output; empty uses the system monospace"],
 		readFont: ["Reading font", "Optional face for rendered Markdown Read view; empty matches the interface font"],
 		formatOnSave: ["Format changed lines on save", "Only the lines changed since the last save"],
+		sqlDialect: ["SQL dialect", "Database dialect used when formatting standalone .sql files (T-SQL for SQL Server, PL/SQL for Oracle)"],
 		minimap: ["Minimap", "The outline of the file at the editor's edge; a narrow editor goes without"],
 		wordWrap: ["Word wrap", "Long lines wrapped at the editor's edge, not scrolled to; Alt+Z switches it"],
 		livePreview: ["Markdown live preview", "A document drawn as it is written: headings larger, the markup hidden except on the line being written"],
 		inlayHints: ["Parameter name hints", "Names shown beside the arguments of a call"],
 		rulers: ["Ruler at the line length", "A line down the editor at the style profile's line length"],
 		rulerMargin: ["Rulers beside it", "Fainter rulers this many columns before and after; 0 for none"],
+		csvTable: ["CSV column badges", "Format configured CSV columns (such as status) as colored badges; customize rules from any CSV table's Format button"],
+		attachmentsFolder: ["Attachments folder", "Workspace folder where pasted or dropped Markdown images are saved; empty uses ticket folder or docs/attachments"],
+		templatesFolder: ["Templates folder", "Workspace folder for custom Markdown templates; empty uses docs/templates"],
 		lspPath: ["Language server program", "Leave empty to have it found"],
 	} as const;
 	const anyShown = (group: Group, ...rows: (keyof typeof ROWS)[]) => rows.some((r) => shown(group, ...ROWS[r]));
 	const groups = {
 		appearance: () => anyShown("Appearance", "theme", "uiScale", "fontSize", "uiFont", "codeFont", "readFont", "menuBar"),
-		editor: () => anyShown("Editor", "formatOnSave", "minimap", "wordWrap", "livePreview", "inlayHints", "rulers", "rulerMargin"),
+		editor: () => anyShown("Editor", "formatOnSave", "sqlDialect", "minimap", "wordWrap", "livePreview", "inlayHints", "rulers", "rulerMargin", "csvTable", "attachmentsFolder", "templatesFolder"),
 		server: () => anyShown("Language server", "lspPath"),
 		keyboard: () => keyRows().length > 0,
 	};
@@ -391,6 +397,18 @@ export function SettingsDialog() {
 						<Row group="Editor" label={ROWS.formatOnSave[0]} hint={ROWS.formatOnSave[1]} setting="formatOnSave">
 							{(ids) => <input id={ids.control} aria-describedby={ids.hint} type="checkbox" checked={state.settings.formatOnSave} onChange={(e) => void save("formatOnSave", e.currentTarget.checked)} />}
 						</Row>
+						<Row group="Editor" label={ROWS.sqlDialect[0]} hint={ROWS.sqlDialect[1]} setting="sqlDialect">
+							{(ids) => (
+								<select
+									id={ids.control}
+									aria-describedby={ids.hint}
+									value={state.settings.sqlDialect ?? DEFAULT_SQL_DIALECT}
+									onChange={(e) => void save("sqlDialect", e.currentTarget.value as SqlDialect)}
+								>
+									<For each={SQL_DIALECTS}>{(d) => <option value={d.id}>{d.label}</option>}</For>
+								</select>
+							)}
+						</Row>
 						<Row group="Editor" label={ROWS.minimap[0]} hint={ROWS.minimap[1]} setting="minimap">
 							{(ids) => <input id={ids.control} aria-describedby={ids.hint} type="checkbox" checked={state.settings.minimap} onChange={(e) => void save("minimap", e.currentTarget.checked)} />}
 						</Row>
@@ -417,6 +435,55 @@ export function SettingsDialog() {
 									disabled={state.settings.rulers === false}
 									value={state.settings.rulerMargin ?? RULER_MARGIN}
 									onChange={(e) => void save("rulerMargin", Math.min(60, Math.max(0, Math.round(Number(e.currentTarget.value)) || 0)))}
+								/>
+							)}
+						</Row>
+						<Row group="Editor" label={ROWS.csvTable[0]} hint={ROWS.csvTable[1]} setting="csvTable">
+							{(ids) => {
+								const cfg = () => effectiveCsvTableConfig(state.settings.csvTable);
+								return (
+									<div class="settings-csv-control">
+										<input
+											id={ids.control}
+											aria-describedby={ids.hint}
+											type="checkbox"
+											checked={cfg().badgeFormatting}
+											onChange={(e) => void save("csvTable", { ...cfg(), badgeFormatting: e.currentTarget.checked })}
+										/>
+										<Show when={Boolean(state.settings.csvTable)}>
+											<button
+												type="button"
+												title="Restore default STARLIMS + Registry CSV column badge rules"
+												onClick={() => void save("csvTable", cloneCsvTableConfig(DEFAULT_CSV_TABLE_CONFIG))}
+											>
+												Reset
+											</button>
+										</Show>
+									</div>
+								);
+							}}
+						</Row>
+						<Row group="Editor" label={ROWS.attachmentsFolder[0]} hint={ROWS.attachmentsFolder[1]} setting="attachmentsFolder" wide>
+							{(ids) => (
+								<input
+									id={ids.control}
+									aria-describedby={ids.hint}
+									type="text"
+									placeholder="docs/attachments"
+									value={state.settings.attachmentsFolder ?? ""}
+									onChange={(e) => void save("attachmentsFolder", e.currentTarget.value.trim() || undefined)}
+								/>
+							)}
+						</Row>
+						<Row group="Editor" label={ROWS.templatesFolder[0]} hint={ROWS.templatesFolder[1]} setting="templatesFolder" wide>
+							{(ids) => (
+								<input
+									id={ids.control}
+									aria-describedby={ids.hint}
+									type="text"
+									placeholder="docs/templates"
+									value={state.settings.templatesFolder ?? ""}
+									onChange={(e) => void save("templatesFolder", e.currentTarget.value.trim() || undefined)}
 								/>
 							)}
 						</Row>

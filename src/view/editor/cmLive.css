@@ -62,6 +62,129 @@
 .cm-md-host .cm-line {
 	max-width: 100%;
 	box-sizing: border-box;
+	position: relative;
+}
+
+.cm-md-host .cm-line.cm-git-added {
+	box-shadow: inset 3px 0 0 var(--ok);
+	padding-left: 8px;
+}
+
+.cm-md-host .cm-line.cm-git-modified {
+	box-shadow: inset 3px 0 0 var(--accent);
+	padding-left: 8px;
+}
+
+.cm-md-host .cm-line.cm-git-removed {
+	box-shadow: inset 3px 0 0 var(--error);
+	padding-left: 8px;
+}
+
+/* Mermaid diagrams rendered inline inside Live & Read views */
+.cm-md-mermaid-card {
+	margin: var(--space-3) 0;
+	border: 1px solid var(--editor-border, var(--border));
+	border-radius: var(--radius-md);
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 2.5%, var(--editor-bg, var(--bg)));
+	overflow: hidden;
+}
+
+.cm-md-mermaid-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 4px var(--space-3);
+	border-bottom: 1px solid color-mix(in srgb, var(--editor-border, var(--border)) 75%, transparent);
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 3.5%, transparent);
+	font-family: var(--ui-font);
+}
+
+.cm-md-mermaid-stage {
+	padding: var(--space-4);
+	overflow-x: auto;
+	display: flex;
+	justify-content: center;
+}
+
+.cm-md-mermaid-stage svg {
+	max-width: 100%;
+	height: auto;
+}
+
+.cm-md-mermaid-loading {
+	font-size: var(--text-sm);
+	color: var(--editor-muted, var(--muted));
+}
+
+.cm-md-mermaid-error {
+	font-size: var(--text-sm);
+	color: var(--error);
+	margin-bottom: var(--space-2);
+}
+
+/* Note / section transclusion embeds (`![[doc]]`, `![[doc#Heading]]`) */
+.cm-md-embed-card {
+	margin: var(--space-3) 0;
+	border: 1px solid var(--editor-border, var(--border));
+	border-left: 3px solid var(--editor-accent, var(--accent));
+	border-radius: var(--radius-md);
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 2.5%, var(--editor-bg, var(--bg)));
+	overflow: hidden;
+}
+
+.cm-md-embed-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--space-2);
+	padding: 5px var(--space-3);
+	border-bottom: 1px solid color-mix(in srgb, var(--editor-border, var(--border)) 75%, transparent);
+	font-family: var(--ui-font);
+}
+
+.cm-md-embed-title {
+	color: var(--editor-accent, var(--accent));
+	font-size: var(--text-sm);
+	font-weight: 600;
+	text-align: left;
+}
+
+.cm-md-embed-title:hover {
+	text-decoration: underline;
+}
+
+.cm-md-embed-body {
+	padding: var(--space-3) var(--space-4);
+	max-height: 300px;
+	overflow: auto;
+	font-size: 0.94em;
+}
+
+.cm-md-embed-missing,
+.cm-md-embed-loading {
+	margin: 0;
+	font-size: var(--text-sm);
+	color: var(--editor-muted, var(--muted));
+}
+
+/* Footnotes (`[^1]` and `[^1]: ...`) */
+.cm-md-footnote-ref {
+	vertical-align: super;
+	font-size: 0.78em;
+	color: var(--editor-accent, var(--accent));
+	cursor: pointer;
+	font-weight: 600;
+}
+
+.cm-md-footnote-ref:hover {
+	text-decoration: underline;
+}
+
+.cm-md-footnote-def {
+	font-family: var(--code-font);
+	font-size: 0.88em;
+	color: var(--editor-accent, var(--accent));
+	font-weight: 600;
 }
 
 /* Read mode shares the exact same CM6 engine with natural reading cursor & footer spacing. */
@@ -130,17 +253,84 @@
 	color: var(--editor-strong, var(--strong-fg));
 }
 
-.cm-md-props-edit {
-	margin-left: auto;
+.cm-md-props-edit,
+.cm-md-props-menu > button {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
 	font-size: var(--text-sm);
 	color: var(--editor-muted, var(--muted));
 	padding: 2px var(--space-3);
 	border-radius: var(--radius-sm);
 }
 
-.cm-md-props-edit:hover {
+.cm-md-props-edit {
+	margin-left: auto;
+}
+
+.cm-md-props-edit .codicon-glyph,
+.cm-md-props-menu > button .codicon-glyph {
+	font-size: calc(12px * var(--ui-scale));
+	line-height: 1;
+	flex: none;
+}
+
+.cm-md-props-edit:hover,
+.cm-md-props-menu > button:hover,
+.cm-md-props-menu > button[aria-expanded="true"] {
 	color: var(--editor-strong, var(--strong-fg));
 	background: var(--hover);
+}
+
+.cm-md-props-menu .menu-pop {
+	font-size: var(--text-base);
+}
+
+.cm-md-props-edit.active {
+	color: var(--accent);
+	background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.cm-md-props-yaml-wrap {
+	border-top: 1px solid color-mix(in srgb, var(--editor-border, var(--border)) 70%, transparent);
+	padding: var(--space-3) var(--space-5) var(--space-4);
+	background: color-mix(in srgb, var(--editor-bg, var(--bg)) 65%, var(--side-bg));
+	border-bottom-left-radius: var(--radius-lg);
+	border-bottom-right-radius: var(--radius-lg);
+}
+
+.cm-md-props-yaml-fence {
+	font-family: var(--code-font, ui-monospace, monospace);
+	font-size: calc(var(--code-size) - 1px);
+	line-height: 1.5;
+	color: var(--editor-muted, var(--muted));
+	opacity: 0.7;
+	user-select: none;
+}
+
+.cm-md-props-yaml {
+	display: block;
+	width: 100%;
+	box-sizing: border-box;
+	margin: var(--space-1) 0;
+	padding: var(--space-2) var(--space-3);
+	border: 1px solid color-mix(in srgb, var(--editor-border, var(--border)) 75%, transparent);
+	border-radius: var(--radius-md);
+	background: var(--editor-bg, var(--bg));
+	color: var(--editor-fg, var(--fg));
+	font-family: var(--code-font, ui-monospace, monospace);
+	font-size: calc(var(--code-size) - 1px);
+	line-height: 1.55;
+	resize: none;
+	outline: none;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	overflow: hidden;
+}
+
+.cm-md-props-yaml:focus {
+	border-color: var(--accent);
+	box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
 }
 
 .cm-md-props-list {
@@ -304,6 +494,22 @@
 	font-weight: 600;
 }
 
+.md-work-file-row {
+	align-items: center !important;
+	gap: 6px var(--space-3) !important;
+}
+
+.md-work-folder-link {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+}
+
+.md-work-folder-link .codicon {
+	font-size: 13px;
+	flex: none;
+}
+
 .md-work-via {
 	display: inline-block;
 	padding: 1px 7px;
@@ -316,6 +522,63 @@
 	line-height: 1.45;
 	max-width: 100%;
 	overflow-wrap: break-word;
+}
+
+.md-work-unlink {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 18px;
+	height: 18px;
+	padding: 0;
+	border-radius: var(--radius-sm);
+	color: var(--editor-muted, var(--muted));
+	opacity: 0;
+	transition: opacity 100ms ease, color 100ms ease, background-color 100ms ease;
+}
+
+.md-work li:hover .md-work-unlink,
+.md-linked-tickets li:hover .md-work-unlink,
+.md-work-unlink:focus-visible {
+	opacity: 1;
+}
+
+.md-work-unlink:hover {
+	color: var(--error);
+	background: color-mix(in srgb, var(--error) 12%, transparent);
+}
+
+.md-work-unlink .codicon {
+	font-size: 12px;
+}
+
+.md-linked-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--space-2);
+	margin-bottom: var(--space-2);
+}
+
+.md-linked-head h2 {
+	margin: 0 !important;
+}
+
+.md-work-rollup {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px var(--space-4);
+	margin: 0 0 var(--space-3);
+	padding: var(--space-2) var(--space-3);
+	border-radius: var(--radius-sm);
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 3.5%, transparent);
+	font-size: var(--text-xs);
+	color: var(--editor-muted, var(--muted));
+}
+
+.md-work-rollup strong {
+	color: var(--editor-strong, var(--strong-fg));
+	font-weight: 600;
 }
 
 /* Compact "Linked tickets" strip at the top of non-ticket documents (specs, plans, decisions, questions). */
@@ -599,7 +862,7 @@
 	margin: 0;
 }
 
-/* Fenced code blocks inside Live Preview. */
+/* Fenced code blocks inside Live & Read views (syntax-coloured with the editor's Monaco/TextMate tokens). */
 .cm-editor .cm-md-codeblock-line {
 	font-family: var(--code-font);
 	font-size: calc(var(--code-size) - 0.5px);
@@ -607,6 +870,12 @@
 	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 5.5%, var(--editor-bg, var(--bg)));
 	padding-left: 14px !important;
 	padding-right: 14px !important;
+}
+
+.cm-editor .cm-md-codeblock-line .cm-md-code-tok,
+.cm-editor .cm-md-codeblock-line > span:not(.cm-md-code-header):not(.cm-md-fence-hidden) {
+	font-family: var(--code-font);
+	font-size: inherit;
 }
 
 .cm-editor .cm-md-codeblock-first {
@@ -640,10 +909,17 @@
 	font-weight: 600;
 }
 
+.cm-md-code-actions {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+}
+
+.cm-md-code-btn,
 .cm-md-code-copy {
 	font-family: var(--ui-font);
 	font-size: var(--text-xs);
-	color: var(--editor-muted, var(--muted));
+	color: color-mix(in srgb, var(--editor-strong, var(--strong-fg)) 78%, var(--editor-muted, var(--muted)));
 	padding: 1px 7px;
 	border-radius: var(--radius-sm);
 	border: 1px solid transparent;
@@ -651,10 +927,16 @@
 	cursor: pointer;
 }
 
-.cm-md-code-copy:hover {
+.cm-md-code-btn:hover:not(:disabled),
+.cm-md-code-copy:hover:not(:disabled) {
 	color: var(--editor-strong, var(--strong-fg));
 	background: var(--hover);
 	border-color: var(--editor-border, var(--border));
+}
+
+.cm-md-code-btn:disabled {
+	opacity: 0.5;
+	cursor: default;
 }
 
 .cm-md-fence-hidden {
@@ -672,9 +954,27 @@
 	padding-left: 12px !important;
 }
 
-.cm-md-fm-hidden {
+.cm-md-fm-hidden,
+.cm-md-comment-hidden {
 	height: 0;
 	overflow: hidden;
+}
+
+/* HTML comments (`<!-- ... -->`) revealed while the cursor is on them in Live mode. */
+.cm-editor .cm-md-comment-line {
+	font-family: var(--code-font);
+	font-size: calc(var(--code-size) - 1px);
+	color: var(--editor-muted, var(--muted));
+	font-style: italic;
+	opacity: 0.78;
+}
+
+.cm-editor .cm-md-comment {
+	font-family: var(--code-font);
+	font-size: 0.9em;
+	color: var(--editor-muted, var(--muted));
+	font-style: italic;
+	opacity: 0.78;
 }
 
 /* Interactive Live Table Grid & Read-mode Table Widget (ADR 0028). */
@@ -1317,6 +1617,25 @@
 	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 8%, transparent);
 }
 
+.cm-md-callout-body pre {
+	margin: 0.45em 0;
+	padding: 8px 12px;
+	border-radius: var(--radius-sm);
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 5.5%, var(--editor-bg, var(--bg)));
+	color: var(--editor-fg, var(--fg));
+	font-family: var(--code-font);
+	font-size: calc(var(--code-size) - 0.5px);
+	line-height: 1.5;
+	overflow-x: auto;
+}
+
+.cm-md-callout-body pre code {
+	padding: 0;
+	border-radius: 0;
+	background: none;
+	font-size: inherit;
+}
+
 /* Preserve callout visual identity while editing raw `> [!important]` lines in Live mode. */
 .cm-editor .cm-md-callout-editing {
 	border-left: 4px solid var(--callout-tone, var(--info)) !important;
@@ -1719,15 +2038,30 @@
 	font-weight: 600;
 }
 
+.md-hover-body pre,
 .md-hover-code {
-	margin: 0;
+	margin: 0 0 0.55em;
 	padding: 8px 10px;
 	border-radius: var(--radius-sm);
-	background: color-mix(in srgb, var(--fg) 5%, transparent);
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 4%, var(--editor-bg, var(--bg)));
+	color: var(--editor-fg, var(--fg));
+	border: 1px solid var(--editor-border, var(--border));
 	font-family: var(--code-font);
 	font-size: var(--text-xs);
 	line-height: 1.45;
 	overflow-x: auto;
+}
+
+.md-hover-body pre:last-child,
+.md-hover-code:last-child {
+	margin-bottom: 0;
+}
+
+.md-hover-body pre code,
+.md-hover-code code {
+	padding: 0;
+	background: none;
+	font-size: inherit;
 }
 
 /* Fold gutter chevron visibility on active/hovered lines. */
@@ -1737,4 +2071,198 @@
 
 .cm-editor:hover .cm-foldGutter .cm-gutterElement {
 	opacity: 0.5;
+}
+
+.cm-md-props-actions {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	margin-left: auto;
+}
+
+.cm-md-props-actions .cm-md-props-edit,
+.cm-md-doc-bar .cm-md-props-edit {
+	margin-left: 0;
+}
+
+.cm-md-prop-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+}
+
+.cm-md-prop-rm,
+.cm-md-prop-add {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 16px;
+	height: 16px;
+	padding: 0;
+	border: none;
+	border-radius: 3px;
+	background: transparent;
+	color: var(--editor-muted, var(--muted));
+	cursor: pointer;
+	opacity: 0.45;
+}
+
+.cm-md-prop-chip:hover .cm-md-prop-rm,
+.cm-md-prop-rm:focus-visible,
+.cm-md-prop-add:hover,
+.cm-md-prop-add:focus-visible {
+	opacity: 1;
+	color: var(--editor-fg, var(--fg));
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 10%, transparent);
+}
+
+.cm-md-prop-rm .codicon,
+.cm-md-prop-add .codicon {
+	font-size: 11px;
+}
+
+/* Read-only Markdown Find bar: hide Replace inputs/buttons so Ctrl+F stays a crisp Find-only bar. */
+.cm-md-read .cm-search input[name="replace"],
+.cm-md-read .cm-search button[name="replace"],
+.cm-md-read .cm-search button[name="replaceAll"],
+.cm-md-read .cm-search br {
+	display: none !important;
+}
+
+/* Minimal action strip shown on Markdown docs without YAML frontmatter (README, STATE, plain notes). */
+.cm-md-doc-bar {
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 6px;
+	margin: 0 0 10px;
+}
+
+/* Ticket Release Readiness Gate strip inside .md-work. */
+.md-readiness {
+	margin-top: 10px;
+	padding-top: 8px;
+	border-top: 1px solid color-mix(in srgb, var(--editor-border, var(--border)) 70%, transparent);
+}
+
+.md-readiness-toggle {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	border: none;
+	background: none;
+	padding: 2px 4px;
+	border-radius: var(--radius-sm);
+	color: var(--editor-fg, var(--fg));
+	font-size: var(--text-xs);
+	font-weight: 600;
+	cursor: pointer;
+}
+
+.md-readiness-toggle:hover {
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 7%, transparent);
+}
+
+.md-readiness-badge {
+	display: inline-flex;
+	align-items: center;
+	padding: 1px 6px;
+	border-radius: 999px;
+	font-size: 10.5px;
+	font-weight: 600;
+}
+
+.md-readiness-badge.ready {
+	background: color-mix(in srgb, var(--editor-ok, var(--ok)) 18%, transparent);
+	color: var(--editor-ok, var(--ok));
+}
+
+.md-readiness-badge.pending {
+	background: color-mix(in srgb, var(--editor-warning, var(--warning)) 18%, transparent);
+	color: var(--editor-warning, var(--warning));
+}
+
+.md-readiness-list {
+	list-style: none;
+	margin: 6px 0 0;
+	padding: 0;
+	display: grid;
+	gap: 4px;
+}
+
+.md-readiness-row {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	font-size: var(--text-xs);
+	color: var(--editor-fg, var(--fg));
+}
+
+.md-readiness-row.level-pass .codicon {
+	color: var(--editor-ok, var(--ok));
+}
+
+.md-readiness-row.level-warn .codicon {
+	color: var(--editor-warning, var(--warning));
+}
+
+.md-readiness-row.level-note .codicon {
+	color: var(--editor-info, var(--info));
+}
+
+.md-readiness-detail {
+	color: var(--editor-muted, var(--muted));
+}
+
+/* Clean print / Save-as-PDF layout: hide IDE chrome, keep headings attached to content, avoid splitting tables/callouts/diagrams. */
+@media print {
+	.menubar,
+	.activity,
+	.sidebar,
+	.rightbar,
+	.bottom,
+	.statusbar,
+	.tabs-row,
+	.folio-hdr,
+	.splitter,
+	.toasts,
+	.cm-md-table-toolbar-wrap,
+	.cm-md-props-actions,
+	.cm-md-doc-bar,
+	.md-work-actions,
+	.md-work-unlink,
+	.md-work-guide,
+	.cm-md-code-actions,
+	.cm-tbl-bar,
+	.cm-md-callout-actions,
+	.cm-gutters,
+	.cm-search {
+		display: none !important;
+	}
+	.cm-md-host {
+		overflow: visible !important;
+		height: auto !important;
+		background: #fff !important;
+		color: #111 !important;
+	}
+	.cm-md-page {
+		max-width: none !important;
+		padding: 0 !important;
+		margin: 0 !important;
+	}
+	.cm-md-h1,
+	.cm-md-h2,
+	.cm-md-h3,
+	.cm-md-h4 {
+		break-after: avoid;
+		page-break-after: avoid;
+	}
+	.cm-md-table-wrap,
+	.cm-md-callout-card,
+	.cm-md-mermaid-card,
+	.cm-md-embed-card,
+	.md-work {
+		break-inside: avoid;
+		page-break-inside: avoid;
+	}
 }

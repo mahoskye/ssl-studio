@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { catalogBlock, catalogLine, catalogList, catalogStale, withCatalog, CATALOG_END, CATALOG_START } from "../src/shared/catalog";
 import { columnOf, csvCell, csvRow, parseCsv, tally } from "../src/shared/csv";
-import { addToFrontMatterList, frontMatter, many, one, summaryOf, titleOf } from "../src/shared/frontMatter";
+import { addToFrontMatterList, formatFrontMatterInnerReplacement, frontMatter, frontMatterInnerSpan, many, one, summaryOf, titleOf } from "../src/shared/frontMatter";
 import { catalogTemplate, decisionTemplate, KNOWLEDGE, promptTemplate, promptText, questionTemplate, SCHEMAS, schemaTemplate, slug, specTemplate, statusChoices, ticketKey, ticketTemplate, toneOf } from "../src/shared/projectDocs";
 
 describe("front matter", () => {
@@ -41,6 +41,30 @@ describe("front matter", () => {
 		expect(summaryOf("# Title\n\n- a list\n\n| a | b |\n\nThen [a link](x.md) here")).toBe("Then a link here");
 		expect(summaryOf("# Only a title")).toBe("");
 		expect(summaryOf(`x\n\n${"word ".repeat(60)}`).length).toBeLessThanOrEqual(140);
+	});
+
+	test("frontMatterInnerSpan and formatFrontMatterInnerReplacement edit only inside fences while preserving EOL and body", () => {
+		const lf = "---\nticket: DEMO-1\nstatus: open\n---\n\n# Body\n";
+		const span = frontMatterInnerSpan(lf)!;
+		expect(span.inner).toBe("ticket: DEMO-1\nstatus: open");
+		expect(span.eol).toBe("\n");
+		const updated = lf.slice(0, span.start) + formatFrontMatterInnerReplacement("ticket: DEMO-1\nstatus: done", span.eol) + lf.slice(span.end);
+		expect(updated).toBe("---\nticket: DEMO-1\nstatus: done\n---\n\n# Body\n");
+
+		// Clearing all lines keeps the --- fences valid
+		const cleared = lf.slice(0, span.start) + formatFrontMatterInnerReplacement("", span.eol) + lf.slice(span.end);
+		expect(cleared).toBe("---\n---\n\n# Body\n");
+		expect(frontMatterInnerSpan(cleared)?.inner).toBe("");
+
+		// CRLF preservation
+		const crlf = "---\r\nstatus: open\r\n---\r\n# Body\r\n";
+		const cSpan = frontMatterInnerSpan(crlf)!;
+		expect(cSpan.eol).toBe("\r\n");
+		expect(cSpan.inner).toBe("status: open");
+		const cUpdated = crlf.slice(0, cSpan.start) + formatFrontMatterInnerReplacement("status: done\nowner: lab", cSpan.eol) + crlf.slice(cSpan.end);
+		expect(cUpdated).toBe("---\r\nstatus: done\r\nowner: lab\r\n---\r\n# Body\r\n");
+
+		expect(frontMatterInnerSpan("# No front matter\n")).toBeNull();
 	});
 });
 
@@ -329,6 +353,17 @@ describe("the demo project's working documents", () => {
 		const tickets = (await listed()).filter((d) => d.group === "tickets" && !d.catalog);
 		expect(tickets.map((t) => [t.ticket, t.status])).toEqual([["DEMO-101", "done"], ["DEMO-102", "done"], ["DEMO-103", "in progress"]]);
 		expect(tickets[0]).toMatchObject({ title: "Give every waiting sample a due date", tickets: ["DEMO-102", "DEMO-103"], specs: ["design/SetSampleDueDates.spec.md"] });
+		// DEMO-103 is a ticket bundle folder with companion notes, SQL sample, JSON fixture, and .xfd layout.
+		expect(tickets[2]?.ticketFolder).toBe(join(root, "docs", "tickets", "DEMO-103"));
+		expect(tickets[2]?.ticketFiles?.map((f) => f.rel)).toEqual([
+			"fixtures/due-soon-expected.json",
+			"fixtures/due-soon-panel.xfd",
+			"lab-morning-notes.md",
+			"samples/overdue-check.sql",
+		]);
+		expect(docLinkedTickets(await listed(), join(root, "docs", "tickets", "DEMO-103", "lab-morning-notes.md")).map((e) => [e.key, e.reason])).toEqual([
+			["DEMO-103", "in ticket folder"],
+		]);
 	});
 
 	test("a spec the planner wrote beside a plan is a spec, and is not listed with the plans", async () => {
@@ -439,10 +474,13 @@ describe("the demo project's working documents", () => {
 		expect(catalogItems("tickets", docs, join(root, "docs")).map((item) => item.title)[0]).toBe("DEMO-101: Give every waiting sample a due date");
 	});
 
-	test("what its documents need from someone is one open question, and nothing is wrong", async () => {
+	test("what its documents need from someone is its open question notes, and nothing is wrong", async () => {
 		const checks = docChecks(await listed());
-		expect(checks.map((check) => [check.level, check.text])).toEqual([["note", "1 question is open: Which holidays does each site keep?"]]);
-		expect(checksSummary(checks)).toBe("1 to know");
+		expect(checks.map((check) => [check.level, check.text])).toEqual([
+			["note", "DEMO-101 is done, with 1 open question tied to it."],
+			["note", "1 question is open: Which holidays does each site keep?"],
+		]);
+		expect(checksSummary(checks)).toBe("2 to know");
 	});
 
 	test("the work a ticket is: its spec, the tickets around it, what is not known and what was decided", async () => {
@@ -458,6 +496,9 @@ describe("the demo project's working documents", () => {
 		expect(text).toContain("SPEC The report of samples due soon (in progress):");
 		expect(text).toContain("QUESTIONS NOBODY HAS ANSWERED YET (do not guess the answer; say what depends on it):\n- Which holidays does each site keep? (open).");
 		expect(text).toContain("DECISIONS ALREADY MADE (keep to them):\n- A walk looks at most 730 days ahead (accepted).");
+		expect(text).toContain("TICKET FOLDER FILES");
+		expect(text).toContain("- fixtures/due-soon-expected.json");
+		expect(text).toContain("- samples/overdue-check.sql");
 		expect(await workText(work, (path) => Bun.file(path).text(), { specs: false })).not.toContain("SPEC ");
 		// A question that was answered for the ticket comes with its answer.
 		const rush = await workText(workFor(docs, "DEMO-102")!, (path) => Bun.file(path).text());
@@ -783,11 +824,11 @@ describe("a ticket's own page", () => {
 			["Related tickets", ["Rush samples count Saturday as a working day", "A report of the samples due soon"]],
 			["Open questions", ["Which holidays does each site keep?"]],
 			["Decisions", ["A walk looks at most 730 days ahead", "Planning and saving are two scripts"]],
-			// The settings registry says which ticket carries each row.
-			["To carry across", ["settings.csv"]],
+			// The settings registry lists rows tagged for this ticket.
+			["Registries", ["settings.csv"]],
 		]);
 		// A decision made for another ticket stands, and is not this ticket's work.
-		expect(ticketWork(docs, "DEMO-103").map((group) => group.name)).toEqual(["Specs", "Related tickets", "To carry across"]);
+		expect(ticketWork(docs, "DEMO-103").map((group) => group.name)).toEqual(["Specs", "Related tickets", "Registries"]);
 		expect(ticketWork(docs, "DEMO-102").map((group) => group.name)).toContain("Answered");
 		expect(ticketWork(docs, "DEMO-999")).toEqual([]);
 	});
@@ -802,7 +843,7 @@ describe("a ticket's own page", () => {
 			"Related tickets": ["related: (both)", "related: (both)"],
 			"Open questions": ["doc ticket: DEMO-101"],
 			Decisions: ["doc ticket: DEMO-101", "doc ticket: DEMO-101"],
-			"To carry across": ["Ticket column"],
+			Registries: ["Ticket column"],
 		});
 		expect(byGroup("DEMO-102").Specs).toEqual(["ticket specs:"]);
 		expect(byGroup("DEMO-103").Specs).toEqual(["spec ticket: DEMO-103"]);
@@ -849,7 +890,7 @@ describe("a ticket's own page", () => {
 		expect(docLinkedTickets(syntheticDocs, "/p/design/Flow.plan.json").map((e) => [e.key, e.reason])).toEqual([["T-1", "ticket plans:"]]);
 	});
 
-	test("addToFrontMatterList appends, creates, deduplicates, and leaves multi-line lists untouched", () => {
+	test("addToFrontMatterList appends, creates, deduplicates, and preserves multi-line bullet lists", () => {
 		const base = "---\nticket: T-1\nspecs: [design/A.spec.md]\n---\n# T-1\n";
 		expect(addToFrontMatterList(base, "specs", "docs/specs/B.md")).toBe("---\nticket: T-1\nspecs: [design/A.spec.md, docs/specs/B.md]\n---\n# T-1\n");
 		// Case-insensitive deduplication
@@ -858,9 +899,11 @@ describe("a ticket's own page", () => {
 		expect(addToFrontMatterList(base, "plans", "design/Flow.plan.json")).toBe(
 			"---\nticket: T-1\nspecs: [design/A.spec.md]\nplans: [design/Flow.plan.json]\n---\n# T-1\n",
 		);
-		// Multi-line YAML list returns null so caller doesn't clobber custom formatting
+		// Multi-line YAML bullet list preserves bullet layout and indentation
 		const multiline = "---\nticket: T-1\nspecs:\n  - design/A.spec.md\n---\n# T-1\n";
-		expect(addToFrontMatterList(multiline, "specs", "docs/specs/B.md")).toBeNull();
+		expect(addToFrontMatterList(multiline, "specs", "docs/specs/B.md")).toBe(
+			"---\nticket: T-1\nspecs:\n  - design/A.spec.md\n  - docs/specs/B.md\n---\n# T-1\n",
+		);
 	});
 });
 

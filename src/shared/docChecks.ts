@@ -56,8 +56,13 @@ export function docChecks(files: readonly DocFile[], areas: readonly CatalogArea
 	// A registry that does not read as a table: the rows it counts cannot be trusted.
 	for (const file of inGroup("registries")) for (const problem of file.problems ?? []) checks.push({ level: "warn", text: `${registryTitle(file.name)}: ${problem}`, path: file.path });
 
-	// A ticket's spec that is not where the ticket says.
-	for (const ticket of tickets) for (const spec of ticket.missing ?? []) checks.push({ level: "warn", text: `${ticket.ticket} names a spec that is not there: ${spec}`, path: ticket.path });
+	// A ticket's spec or plan that is not where the ticket says.
+	for (const ticket of tickets) {
+		for (const ref of ticket.missing ?? []) {
+			const kind = /\.plan\.json$/i.test(ref) ? "plan" : "spec";
+			checks.push({ level: "warn", text: `${ticket.ticket} names a ${kind} that is not there: ${ref}`, path: ticket.path });
+		}
+	}
 
 	// A catalog that no longer says what its folder holds, or a folder with documents and no catalog.
 	// One update writes them all, so they are said together.
@@ -98,12 +103,98 @@ export function docChecks(files: readonly DocFile[], areas: readonly CatalogArea
 	// A document still as its template left it.
 	for (const file of files) if (file.exists && file.untouched && file.group !== "project") checks.push({ level: "note", text: `Not written yet: ${file.ticket ? `${file.ticket} ` : ""}${file.title || file.name}`, path: file.path });
 
-	// A ticket that is finished while a spec for it is not.
+	// Duplicate ticket keys across files cause ambiguous lookup/import behavior.
+	const keyGroups = new Map<string, DocFile[]>();
+	for (const t of tickets) {
+		if (!t.ticket) continue;
+		const k = t.ticket.toLowerCase();
+		keyGroups.set(k, [...(keyGroups.get(k) ?? []), t]);
+	}
+	for (const group of keyGroups.values()) {
+		if (group.length > 1) {
+			checks.push({
+				level: "warn",
+				text: `Duplicate ticket key ${group[0]!.ticket} in ${group.length} files (${group.map((g) => g.name).join(", ")}).`,
+				path: group[1]!.path,
+			});
+		}
+	}
+
+	// Circular parent chains among tickets.
+	const byKey = new Map<string, DocFile>();
+	for (const t of tickets) {
+		if (!t.ticket) continue;
+		const k = t.ticket.toLowerCase();
+		if (!byKey.has(k) || (!byKey.get(k)!.parent && t.parent)) byKey.set(k, t);
+	}
+	const reportedCycle = new Set<string>();
+	for (const t of tickets) {
+		if (!t.ticket || !t.parent || reportedCycle.has(t.ticket.toLowerCase())) continue;
+		const seen = new Set<string>([t.ticket.toLowerCase()]);
+		let cur = byKey.get(t.parent.toLowerCase());
+		while (cur?.ticket) {
+			const k = cur.ticket.toLowerCase();
+			if (k === t.ticket.toLowerCase()) {
+				for (const member of seen) reportedCycle.add(member);
+				checks.push({ level: "warn", text: `${t.ticket} is part of a circular parent chain (${[...seen].join(" → ")}).`, path: t.path });
+				break;
+			}
+			if (seen.has(k)) break;
+			seen.add(k);
+			cur = cur.parent ? byKey.get(cur.parent.toLowerCase()) : undefined;
+		}
+	}
+
+	// A ticket that is finished while a spec, sub-ticket, open question, or registry row for it is not.
+	const questions = files.filter((file) => file.exists && file.group === "knowledge" && file.kind === "questions" && !isCatalog(file));
+	const registries = inGroup("registries").filter((file) => !isCatalog(file));
 	for (const ticket of tickets) {
 		if (toneOf(ticket.status) !== "done" || !ticket.ticket) continue;
 		for (const spec of specs) {
 			if (!spec.tickets?.some((key) => same(key, ticket.ticket!)) || !spec.status) continue;
 			if (toneOf(spec.status) === "active" || toneOf(spec.status) === "waiting") checks.push({ level: "note", text: `${ticket.ticket} is ${ticket.status}; its spec is ${spec.status}: ${spec.title || spec.name}`, path: spec.path });
+		}
+		const openChildren = tickets.filter((child) => child !== ticket && child.parent && same(child.parent, ticket.ticket!) && (toneOf(child.status) === "active" || toneOf(child.status) === "waiting"));
+		if (openChildren.length) {
+			checks.push({
+				level: "note",
+				text: `${ticket.ticket} is ${ticket.status}, with ${count(openChildren.length, "sub-ticket")} still open (${openChildren.slice(0, 2).map((c) => c.ticket).join(", ")}${openChildren.length > 2 ? ", …" : ""}).`,
+				path: openChildren[0]!.path,
+			});
+		}
+		const openQs = questions.filter((q) => toneOf(q.status) === "waiting" && q.tickets?.some((k) => same(k, ticket.ticket!)));
+		if (openQs.length) {
+			checks.push({
+				level: "note",
+				text: `${ticket.ticket} is ${ticket.status}, with ${count(openQs.length, "open question")} tied to it.`,
+				path: openQs[0]!.path,
+			});
+		}
+		for (const reg of registries) {
+			const hit = reg.forTickets?.find((r) => same(r.key, ticket.ticket!));
+			if (hit && hit.done !== undefined && hit.done < hit.rows) {
+				checks.push({
+					level: "note",
+					text: `${ticket.ticket} is ${ticket.status}; ${registryTitle(reg.name)} still has ${hit.rows - hit.done} of ${hit.rows} rows unfinished.`,
+					path: reg.path,
+				});
+			}
+		}
+	}
+
+	// Orphaned hand-written specs not linked to any ticket (when the project uses tickets).
+	if (tickets.length) {
+		const linkedSpecPaths = new Set<string>();
+		for (const t of tickets) {
+			for (const ref of t.specs ?? []) linkedSpecPaths.add(ref.split("\\").join("/").replace(/^\.\//, "").toLowerCase());
+		}
+		for (const spec of specs) {
+			if (spec.tickets?.length || spec.pairedPlan || spec.name.includes(".spec.")) continue;
+			const norm = spec.path.split("\\").join("/").toLowerCase();
+			const matchedByTicket = [...linkedSpecPaths].some((ref) => norm.endsWith(`/${ref}`));
+			if (!matchedByTicket) {
+				checks.push({ level: "note", text: `Spec has no linked ticket: ${spec.title || spec.name}`, path: spec.path });
+			}
 		}
 	}
 
@@ -121,6 +212,92 @@ export function docChecks(files: readonly DocFile[], areas: readonly CatalogArea
 		for (const key of file.tickets ?? []) if (!here(key) && ![...named.keys()].some((seen) => same(seen, key))) named.set(key, file);
 	}
 	for (const [key, by] of named) checks.push({ level: "note", text: `${key} is not among the tickets; ${called(by)} names it.`, path: by.path, fix: { kind: "ticket", key, ...(by.ticket ? { related: by.ticket } : {}) } });
+
+	// Missing `source:` file on schema/reference docs.
+	for (const file of files) {
+		if (!file.exists || !file.missingSource) continue;
+		checks.push({
+			level: "warn",
+			text: `${called(file)} names a source file that is not there: ${file.missingSource}`,
+			path: file.path,
+		});
+	}
+
+	// Circular `blocks:` / `blocked-by:` dependency chains among tickets.
+	const depEdges = new Map<string, Set<string>>();
+	const addEdge = (from: string, to: string) => {
+		const fk = from.toLowerCase();
+		const tk = to.toLowerCase();
+		if (fk === tk) return;
+		let set = depEdges.get(fk);
+		if (!set) {
+			set = new Set();
+			depEdges.set(fk, set);
+		}
+		set.add(tk);
+	};
+	for (const t of tickets) {
+		if (!t.ticket) continue;
+		for (const b of t.blocks ?? []) addEdge(t.ticket, b);
+		for (const b of t.blockedBy ?? []) addEdge(b, t.ticket);
+	}
+	const blockReported = new Set<string>();
+	for (const t of tickets) {
+		if (!t.ticket) continue;
+		const start = t.ticket.toLowerCase();
+		if (blockReported.has(start)) continue;
+		const stack: { node: string; trail: string[] }[] = [{ node: start, trail: [t.ticket] }];
+		const visited = new Set<string>();
+		while (stack.length) {
+			const cur = stack.pop()!;
+			for (const nxt of depEdges.get(cur.node) ?? []) {
+				if (nxt === start) {
+					for (const member of cur.trail) blockReported.add(member.toLowerCase());
+					checks.push({
+						level: "warn",
+						text: `${t.ticket} is in a circular blocks/blocked-by dependency (${[...cur.trail, t.ticket].join(" → ")}).`,
+						path: t.path,
+					});
+					stack.length = 0;
+					break;
+				}
+				if (!visited.has(nxt) && byKey.has(nxt)) {
+					visited.add(nxt);
+					stack.push({ node: nxt, trail: [...cur.trail, byKey.get(nxt)!.ticket!] });
+				}
+			}
+		}
+	}
+
+	// Asymmetric or unresolved `supersedes:` / `superseded-by:` references among decisions.
+	const decisions = files.filter((file) => file.exists && file.group === "knowledge" && file.kind === "decisions" && !isCatalog(file));
+	if (decisions.length) {
+		const decStem = (d: DocFile) => d.name.replace(/^.*\//, "").replace(/\.(md|markdown)$/i, "").toLowerCase();
+		const findDec = (ref: string) => {
+			const clean = ref.replace(/^\[\[|\]\]$/g, "").replace(/\.(md|markdown)$/i, "").trim().toLowerCase();
+			return decisions.find((d) => decStem(d) === clean || (d.title && d.title.toLowerCase() === clean));
+		};
+		for (const dec of decisions) {
+			for (const ref of dec.supersedes ?? []) {
+				const target = findDec(ref);
+				if (!target) {
+					checks.push({ level: "warn", text: `${called(dec)} supersedes a decision that is not there: ${ref}`, path: dec.path });
+				} else if (!target.supersededBy?.some((back) => findDec(back) === dec)) {
+					checks.push({
+						level: "note",
+						text: `${called(dec)} supersedes ${called(target)}, which does not list superseded-by back.`,
+						path: target.path,
+					});
+				}
+			}
+			for (const ref of dec.supersededBy ?? []) {
+				const target = findDec(ref);
+				if (!target) {
+					checks.push({ level: "warn", text: `${called(dec)} is superseded by a decision that is not there: ${ref}`, path: dec.path });
+				}
+			}
+		}
+	}
 
 	// What is not yet known.
 	const open = files.filter((file) => file.exists && file.group === "knowledge" && file.kind === "questions" && toneOf(file.status) === "waiting" && !isCatalog(file));

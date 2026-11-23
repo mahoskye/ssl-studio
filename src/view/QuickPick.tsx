@@ -9,9 +9,11 @@ import { commands, keysFor, recentCommands, runCommand } from "./commands";
 import { monaco } from "./editor/monaco";
 import { session } from "./lsp/session";
 import { Modal } from "./modal";
-import { filterCommands, matchWords, orderCommands, rankFiles } from "./quickRank";
+import { fileTier, filterCommands, isScript, matchWords, orderCommands } from "./quickRank";
 import { symbols as fileSymbols } from "./panels/Objects";
-import { activeDoc, activePath, openFile, setState, state } from "./state";
+import { activeDoc, activePath, canonical, openFile, setState, state } from "./state";
+import { docs, isMarkdown } from "./project";
+import { isCatalog, registryTitle } from "../shared/projectDocs";
 import { baseName, relativeTo } from "../shared/paths";
 import { fileAndLine, lineAsked, prefixFor, QUICK_PREFIXES, readQuick, type QuickMode } from "../shared/quickPrefix";
 
@@ -58,8 +60,46 @@ function Picker(props: { mode: QuickMode }) {
 		if (mode() === "files") {
 			// "DueRules:20" is the file and the line to open it at.
 			const asked = fileAndLine(query());
-			const found = (files() ?? []).map((path) => ({ path, rel: rel(path) }));
-			return rankFiles(asked.query, found, (f) => f.rel).map((f) => ({ label: baseName(f.path), detail: f.rel, file: baseName(f.path), run: () => void openFile(f.path, asked.at ? { reveal: asked.at, keep: true } : { keep: true }) }));
+			const docByPath = new Map(docs().filter((d) => d.exists).map((d) => [canonical(d.path), d]));
+			const found = (files() ?? []).map((path) => {
+				const doc = docByPath.get(canonical(path));
+				const title = doc
+					? doc.group === "registries"
+						? registryTitle(doc.name)
+						: doc.ticket && doc.title && !doc.title.startsWith(doc.ticket)
+							? `${doc.ticket}: ${doc.title}`
+							: doc.ticket || doc.title || doc.heading || ""
+					: "";
+				const relPath = rel(path);
+				const searchText = title ? `${title} ${doc?.status ?? ""} ${relPath}` : relPath;
+				return { path, rel: relPath, title, status: doc?.status, searchText };
+			});
+			const q = asked.query.trim();
+			const ranked: { item: (typeof found)[number]; tier: number; script: boolean }[] = [];
+			for (const f of found) {
+				// Score path properly via `fileTier` on `f.rel` AND allow multi-word out-of-order matches against title/ticket/path.
+				const pathTier = fileTier(q, f.rel);
+				const wordScore = q ? matchWords(q, f.title || baseName(f.path), `${f.status ?? ""} ${f.rel}`) : 1;
+				let tier: number | null = pathTier;
+				if (wordScore > 0) {
+					const titleTier = wordScore >= 4 ? 1.5 : 2.5;
+					tier = tier === null ? titleTier : Math.min(tier, titleTier);
+				}
+				if (tier !== null) ranked.push({ item: f, tier, script: isScript(f.rel) });
+			}
+			ranked.sort(
+				(a, b) =>
+					a.tier - b.tier ||
+					Number(b.script) - Number(a.script) ||
+					a.item.rel.length - b.item.rel.length ||
+					(a.item.rel < b.item.rel ? -1 : a.item.rel > b.item.rel ? 1 : 0),
+			);
+			return ranked.slice(0, 200).map(({ item: f }) => ({
+				label: f.title || baseName(f.path),
+				detail: f.status ? `${f.status} · ${f.rel}` : f.rel,
+				file: baseName(f.path),
+				run: () => void openFile(f.path, asked.at ? { reveal: asked.at, keep: true } : { keep: true }),
+			}));
 		}
 		if (mode() === "help") {
 			return [{ label: "A file's name", detail: "Go to a file; with :12 after the name, to that line of it", stay: true, run: () => setText("") }, ...QUICK_PREFIXES.filter((each) => each.mode !== "help").map((each) => ({ label: each.prefix, detail: each.says, stay: true, run: () => setText(each.prefix) }))];
@@ -92,11 +132,39 @@ function Picker(props: { mode: QuickMode }) {
 				run: () => runCommand(c.id, { remember: true }),
 			}));
 		}
-		return (symbols() ?? []).slice(0, 200).map((s) => {
+		const q = query().trim();
+		const codeSymbols: Item[] = (symbols() ?? []).slice(0, 150).map((s) => {
 			const path = monaco.Uri.parse(s.location.uri).fsPath;
 			const r = s.location.range;
 			return { label: s.name, detail: `${s.containerName ? s.containerName + " · " : ""}${rel(path)}`, run: () => void openFile(path, { reveal: { line: r.start.line + 1, column: r.start.character + 1 } }) };
 		});
+		// Include matching project documents (tickets, specs, plans, decisions, questions, schemas, registries) and ticket companion files in workspace jump (#).
+		const docItems: Item[] = docs()
+			.filter((d) => d.exists && !isCatalog(d))
+			.filter((d) => !q || matchWords(q, `${d.ticket ?? ""} ${d.title ?? ""} ${d.heading ?? ""}`, d.group === "registries" ? registryTitle(d.name) : d.name) > 0)
+			.slice(0, 50)
+			.map((d) => ({
+				label: d.ticket && d.title && !d.title.startsWith(d.ticket) ? `${d.ticket}: ${d.title}` : d.group === "registries" ? registryTitle(d.name) : d.title || d.heading || d.name,
+				detail: `${d.status ? `${d.status} · ` : ""}${rel(d.path)}`,
+				file: baseName(d.path),
+				run: () => void openFile(d.path, { keep: true }),
+			}));
+		const ticketFileItems: Item[] = [];
+		for (const d of docs()) {
+			if (!d.exists || d.group !== "tickets" || !d.ticketFiles?.length) continue;
+			for (const tf of d.ticketFiles) {
+				if (q && matchWords(q, baseName(tf.path), `${d.ticket ?? ""} ${tf.rel}`) <= 0) continue;
+				ticketFileItems.push({
+					label: baseName(tf.path),
+					detail: `${d.ticket ? `${d.ticket} file · ` : ""}${rel(tf.path)}`,
+					file: baseName(tf.path),
+					run: () => void openFile(tf.path, { keep: true }),
+				});
+				if (ticketFileItems.length >= 25) break;
+			}
+			if (ticketFileItems.length >= 25) break;
+		}
+		return [...codeSymbols, ...docItems, ...ticketFileItems];
 	});
 	const pick = (item?: Item) => {
 		if (!item) return;
@@ -124,8 +192,8 @@ function Picker(props: { mode: QuickMode }) {
 		if (loading()) return "Loading…";
 		if (failed()) return failed();
 		if (mode() === "files") return !state.workspace ? "Open a folder to go to its files." : query().trim() ? "No files match." : "This folder has no files.";
-		if (mode() === "symbols") return state.lsp.state !== "running" ? "The language server is not running." : query().trim() ? "No symbols match." : "Type a name to find it in the workspace.";
-		if (mode() === "outline") return !activePath() ? "Open a file to go to its symbols." : query().trim() ? "No symbols match." : state.lsp.state !== "running" ? "The language server is not running." : "This file has no symbols.";
+		if (mode() === "symbols") return !docs().length && state.lsp.state !== "running" ? "The language server is not running." : query().trim() ? "No symbols or documents match." : "Type a symbol, ticket key, or document title.";
+		if (mode() === "outline") return !activePath() ? "Open a file to go to its symbols." : query().trim() ? "No symbols match." : !isMarkdown(activePath()) && state.lsp.state !== "running" ? "The language server is not running." : isMarkdown(activePath()) ? "This document has no headings." : "This file has no symbols.";
 		if (mode() === "line") return !activePath() ? "Open a file to go to a line of it." : activeDoc()?.binary ? "The open file is not text: it has no lines to go to." : `Type a line number, 1 to ${activeDoc()?.model.getLineCount() ?? 1}; 12:5 is line 12, column 5.`;
 		return "No commands match.";
 	};

@@ -5,6 +5,7 @@
 import { join, relative, resolve, sep } from "node:path";
 import { looksBinary } from "../shared/fileKind";
 import { parseStatus, type GitStatus } from "../shared/gitStatus";
+import type { GitCommit } from "../shared/protocol";
 import { decode } from "./encoding";
 
 type Ran = { code: number; out: Uint8Array; err: string };
@@ -103,6 +104,58 @@ export class Git {
 	 */
 	async base(path: string, from: "head" | "index"): Promise<string | null> {
 		const ran = await this.run(["show", `${from === "head" ? "HEAD" : ""}:${await this.named(path)}`]);
+		if (ran.code !== 0 || looksBinary(ran.out)) return null;
+		try {
+			return decode(ran.out).text;
+		} catch {
+			return null;
+		}
+	}
+
+	/** Recent Git commits touching `path` (following renames). Returns `[]` outside a repository or on untracked files. */
+	async log(path: string, limit = 25): Promise<GitCommit[]> {
+		const top = await this.repository();
+		if (!top) return [];
+		const cap = Math.max(1, Math.min(100, Math.round(limit)));
+		const relHere = await this.here(path);
+		const ran = await this.run([
+			"log",
+			"--follow",
+			"-n",
+			String(cap),
+			"--format=%x1e%H%x1f%h%x1f%ct%x1f%an%x1f%s",
+			"--name-only",
+			"--",
+			relHere,
+		]);
+		if (ran.code !== 0) return [];
+		const commits: GitCommit[] = [];
+		for (const chunk of text(ran.out).split("\x1e")) {
+			const trimmed = chunk.trim();
+			if (!trimmed) continue;
+			const lines = trimmed.split(/\r?\n/);
+			const header = lines[0] ?? "";
+			const [sha, shortSha, ct, author, ...subjectParts] = header.split("\x1f");
+			if (!sha || !shortSha) continue;
+			const fileInCommit = lines.slice(1).find((l) => l.trim().length > 0)?.trim() ?? `${this.prefix}${relHere}`;
+			commits.push({
+				sha,
+				shortSha,
+				time: (Number(ct) || 0) * 1000,
+				author: author ?? "",
+				subject: subjectParts.join(" "),
+				path: fileInCommit,
+			});
+		}
+		return commits;
+	}
+
+	/** Reads a file's text at a specific Git commit SHA. Returns null if binary, missing, or invalid SHA. */
+	async show(path: string, sha: string, repoPath?: string): Promise<string | null> {
+		if (!/^[0-9a-f]{4,40}$/i.test(sha.trim())) return null;
+		if (!(await this.repository())) return null;
+		const gitPath = repoPath?.trim() || (await this.named(path));
+		const ran = await this.run(["show", `${sha.trim()}:${gitPath}`]);
 		if (ran.code !== 0 || looksBinary(ran.out)) return null;
 		try {
 			return decode(ran.out).text;

@@ -4,14 +4,25 @@
 // came from somewhere else is not this project's to fix.
 import { checkTables } from "../shared/docTables";
 import { jsonProblem } from "../shared/jsonCheck";
+import { isInside, joinPath } from "../shared/paths";
 import { looksLikeXml, xmlProblem } from "../shared/xmlCheck";
 import { backend } from "./backend";
 import { monaco } from "./editor/monaco";
 import { publishFindings } from "./lsp/session";
+import { state } from "./state";
 
 const OWNER = "doc-tables";
 
-export function trackDoc(model: monaco.editor.ITextModel) {
+function isSchemaDoc(path?: string): boolean {
+	if (!path || !state.workspace?.root) return false;
+	const schemaRel = state.project?.schema ?? "schema";
+	const schemaDir = joinPath(state.workspace.root, ...schemaRel.split(/[\\/]/).filter((p) => p && p !== "."));
+	return isInside(schemaDir, path);
+}
+
+export function trackDoc(model: monaco.editor.ITextModel, path?: string) {
+	// Schema reference tables hold real STARLIMS SQL identifiers and column types that naturally exceed 20 chars.
+	if (isSchemaDoc(path)) return;
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const run = () => {
 		if (model.isDisposed()) return;

@@ -1,15 +1,39 @@
-// The languages of a project's documents: Markdown, SQL, YAML, XML and INI
-// from the editor's own grammars, and JSON, TOML and CSV from the small ones
-// here. None of this is SSL: that comes from the language server and the
-// formatter's grammar (ADR 0003). These colour a file and pair its brackets,
-// and nothing more.
+// The languages of a project's documents and companion STARLIMS files:
+// Markdown, SQL, YAML, XML/XFD/config, INI, JavaScript, TypeScript, HTML,
+// CSS/SCSS/Less, C#, PowerShell, Shell, Python from the editor's own grammars,
+// and JSON, TOML and CSV from the small ones here. None of this is SSL: that
+// comes from the language server and the formatter's grammar (ADR 0003).
+// Non-SSL formatting runs through the backend's Prettier + XML + sql-formatter
+// pipeline (ADR 0015, ADR 0029).
+import { canFormatNonSsl, DEFAULT_SQL_DIALECT, FORMATTABLE_NON_SSL_LANGUAGES, type SqlDialect, type SqlKeywordCase } from "../../shared/format";
+import {
+	fenceAtLine,
+	fenceFormatTarget,
+	findMarkdownCodeFences,
+	formatFenceBodyForMarkdown,
+	replaceFencesInMarkdown,
+	virtualFencePath,
+	type MarkdownCodeFence,
+} from "../../shared/fencedFormat";
 import { formatJson } from "../../shared/jsonFormat";
+import { backend } from "../backend";
 import { monaco } from "./monaco";
 import "monaco-editor/languages/definitions/markdown/register";
 import "monaco-editor/languages/definitions/sql/register";
 import "monaco-editor/languages/definitions/yaml/register";
 import "monaco-editor/languages/definitions/xml/register";
 import "monaco-editor/languages/definitions/ini/register";
+// Common STARLIMS companion & fenced-code languages (lazy-loaded on first use by Monaco).
+import "monaco-editor/languages/definitions/shell/register";
+import "monaco-editor/languages/definitions/powershell/register";
+import "monaco-editor/languages/definitions/javascript/register";
+import "monaco-editor/languages/definitions/typescript/register";
+import "monaco-editor/languages/definitions/html/register";
+import "monaco-editor/languages/definitions/css/register";
+import "monaco-editor/languages/definitions/scss/register";
+import "monaco-editor/languages/definitions/less/register";
+import "monaco-editor/languages/definitions/csharp/register";
+import "monaco-editor/languages/definitions/python/register";
 
 type Language = { id: string; name: string; extensions: RegExp };
 
@@ -22,7 +46,17 @@ export const LANGUAGES: readonly Language[] = [
 	{ id: "sql", name: "SQL", extensions: /\.sql$/i },
 	{ id: "csv", name: "CSV", extensions: /\.(csv|tsv)$/i },
 	{ id: "yaml", name: "YAML", extensions: /\.(ya?ml)$/i },
-	{ id: "xml", name: "XML", extensions: /\.(xml|xsd|xsl|xslt|config)$/i },
+	{ id: "xml", name: "XML", extensions: /\.(xml|xfd|xsd|xsl|xslt|wsdl|config|csproj|svg)$/i },
+	{ id: "javascript", name: "JavaScript", extensions: /\.(m?js|cjs|jsx)$/i },
+	{ id: "typescript", name: "TypeScript", extensions: /\.(m?ts|cts|tsx)$/i },
+	{ id: "html", name: "HTML", extensions: /\.html?$/i },
+	{ id: "css", name: "CSS", extensions: /\.css$/i },
+	{ id: "scss", name: "SCSS", extensions: /\.scss$/i },
+	{ id: "less", name: "Less", extensions: /\.less$/i },
+	{ id: "csharp", name: "C#", extensions: /\.cs$/i },
+	{ id: "powershell", name: "PowerShell", extensions: /\.(ps1|psm1|psd1)$/i },
+	{ id: "shell", name: "Shell", extensions: /\.(sh|bash)$/i },
+	{ id: "python", name: "Python", extensions: /\.py$/i },
 	{ id: "ini", name: "INI", extensions: /\.(ini|cfg|conf|properties)$/i },
 ];
 
@@ -150,7 +184,26 @@ for (const [id, grammar, configuration] of [
 }
 
 /** What each grammar puts after its tokens' names: "string.sql", "key.toml". */
-export const DOCUMENT_POSTFIXES: readonly string[] = ["md", "sql", "yaml", "xml", "ini", "json", "toml", "csv"];
+export const DOCUMENT_POSTFIXES: readonly string[] = [
+	"md",
+	"sql",
+	"yaml",
+	"xml",
+	"ini",
+	"json",
+	"toml",
+	"csv",
+	"shell",
+	"ps1",
+	"js",
+	"ts",
+	"html",
+	"css",
+	"scss",
+	"less",
+	"cs",
+	"python",
+];
 
 /**
  * What each kind of token in those grammars is to a theme: the TextMate scope
@@ -165,11 +218,13 @@ export const DOCUMENT_SCOPES: Readonly<Record<string, string>> = {
 	"string.escape": "constant.character.escape",
 	"string.link": "markup.underline.link",
 	"string.target": "markup.underline.link",
+	regexp: "string.regexp",
 	keyword: "keyword.control",
 	"keyword.md": "markup.heading",
 	"keyword.table": "punctuation.definition.table",
 	number: "constant.numeric",
 	constant: "constant.language",
+	constants: "constant.language",
 	true: "constant.language",
 	false: "constant.language",
 	null: "constant.language",
@@ -184,11 +239,15 @@ export const DOCUMENT_SCOPES: Readonly<Record<string, string>> = {
 	key: "support.type.property-name",
 	"attribute.name": "entity.other.attribute-name",
 	"attribute.value": "string",
+	"attribute.value.number": "constant.numeric",
+	"attribute.value.hex": "constant.numeric",
+	"attribute.value.unit": "keyword.operator",
 	variable: "variable.other.property",
 	"variable.md": "markup.inline.raw",
 	"variable.source": "markup.inline.raw",
 	strong: "markup.bold",
 	emphasis: "markup.italic",
+	invalid: "invalid",
 	"meta.separator": "comment",
 	// The columns of a table of values, in turn.
 	column0: "entity.name.function",
@@ -199,13 +258,211 @@ export const DOCUMENT_SCOPES: Readonly<Record<string, string>> = {
 	column5: "support.function.method",
 };
 
-// "Format document" for JSON: the layout only, every value written as it was (shared/jsonFormat.ts). A plan is laid out
-// by its own printer, a row to a line, and is left alone here.
-monaco.languages.registerDocumentFormattingEditProvider("json", {
-	provideDocumentFormattingEdits(model, options) {
-		if (/\.plan\.json$/i.test(model.uri.path)) return [];
-		const formatted = formatJson(model.getValue(), options.insertSpaces ? " ".repeat(options.tabSize) : "\t");
-		return formatted === null || formatted === model.getValue() ? [] : [{ range: model.getFullModelRange(), text: formatted }];
-	},
-});
+type FormattingOptions = {
+	printWidth?: number;
+	sqlDialect?: SqlDialect;
+	sqlKeywordCase?: SqlKeywordCase;
+};
+
+type FormattingHost = {
+	options(): FormattingOptions;
+	formatSsl(code: string): Promise<{ ok: true; text: string } | { ok: false; error: string; lspOffline?: boolean }>;
+	onError(error: string, path: string): void;
+	onNotice?(message: string): void;
+};
+
+let formattingHost: FormattingHost = {
+	options: () => ({ sqlDialect: DEFAULT_SQL_DIALECT, sqlKeywordCase: "upper" }),
+	formatSsl: async () => ({ ok: false, error: "The language server is not running; restart it to format SSL code.", lspOffline: true }),
+	onError: () => {},
+};
+
+let lastFormatError: { uri: string; at: number } | null = null;
+
+export function setFormattingHost(host: FormattingHost) {
+	formattingHost = host;
+}
+
+export function hadRecentFormatError(model: monaco.editor.ITextModel, withinMs = 2000): boolean {
+	return Boolean(lastFormatError && lastFormatError.uri === model.uri.toString() && Date.now() - lastFormatError.at <= withinMs);
+}
+
+/** Formats a single fenced code block's body (SSL via starlims-lsp; SQL/JS/TS/XML/JSON/HTML/CSS/YAML via backend). */
+export async function formatCodeFence(
+	fence: MarkdownCodeFence,
+	markdownPath: string,
+	eol: string,
+): Promise<{ ok: true; body: string; changed: boolean } | { ok: false; error: string; lspOffline?: boolean }> {
+	const target = fenceFormatTarget(fence.rawLang);
+	if (!target) {
+		return { ok: false, error: `No formatter is configured for \`${fence.rawLang || "plain"}\` code blocks.` };
+	}
+	if (!fence.code.trim() || fence.bodyStartLine > fence.bodyEndLine) {
+		return { ok: true, body: "", changed: false };
+	}
+	const currentBody = formatFenceBodyForMarkdown(fence.code, fence.linePrefix, eol);
+
+	if (target.languageId === "ssl") {
+		const res = await formattingHost.formatSsl(fence.code);
+		if (!res.ok) return res;
+		const nextBody = formatFenceBodyForMarkdown(res.text, fence.linePrefix, eol);
+		return { ok: true, body: nextBody, changed: nextBody !== currentBody };
+	}
+
+	const extra = formattingHost.options();
+	try {
+		const res = await backend.formatDocument({
+			path: virtualFencePath(markdownPath, { rawLang: fence.rawLang, languageId: target.languageId }),
+			text: fence.code,
+			languageId: target.languageId,
+			tabSize: target.languageId === "sql" ? 4 : 2,
+			insertSpaces: true,
+			printWidth: extra.printWidth,
+			sqlDialect: target.sqlDialectOverride ?? extra.sqlDialect,
+			sqlKeywordCase: extra.sqlKeywordCase,
+		});
+		if (!res.ok) return { ok: false, error: res.error };
+		const nextBody = formatFenceBodyForMarkdown(res.text, fence.linePrefix, eol);
+		return { ok: true, body: nextBody, changed: nextBody !== currentBody };
+	} catch (err: any) {
+		return { ok: false, error: String(err?.message ?? err) };
+	}
+}
+
+/** Formats every formattable fenced code block inside a Markdown text, leaving broken blocks intact (ADR 0002). */
+async function formatAllMarkdownFences(
+	markdownText: string,
+	markdownPath: string,
+): Promise<{ text: string; skippedErrors: string[]; skippedSslOffline: number }> {
+	const eol = markdownText.includes("\r\n") ? "\r\n" : "\n";
+	const fences = findMarkdownCodeFences(markdownText);
+	const replacements = new Map<number, string>();
+	const skippedErrors: string[] = [];
+	let skippedSslOffline = 0;
+
+	for (const fence of fences) {
+		if (!fenceFormatTarget(fence.rawLang)) continue;
+		if (!fence.code.trim() || fence.bodyStartLine > fence.bodyEndLine) continue;
+		const res = await formatCodeFence(fence, markdownPath, eol);
+		if (res.ok) {
+			if (res.changed) replacements.set(fence.openLine, res.body);
+		} else if (res.lspOffline) {
+			skippedSslOffline++;
+		} else {
+			skippedErrors.push(`${fence.rawLang || fence.languageId} block at line ${fence.openLine} (${res.error})`);
+		}
+	}
+
+	if (!replacements.size) return { text: markdownText, skippedErrors, skippedSslOffline };
+	return {
+		text: replaceFencesInMarkdown(markdownText, fences, replacements),
+		skippedErrors,
+		skippedSslOffline,
+	};
+}
+
+/** Formats the single fenced code block at 1-based `lineNumber` inside a Markdown Monaco model. */
+export async function formatFenceInModel(
+	model: monaco.editor.ITextModel,
+	lineNumber: number,
+): Promise<"changed" | "unchanged" | "error" | "none"> {
+	const path = model.uri.fsPath || model.uri.path;
+	const text = model.getValue();
+	const fence = fenceAtLine(text, lineNumber);
+	if (!fence) return "none";
+	if (!fenceFormatTarget(fence.rawLang)) {
+		formattingHost.onError(`No formatter is configured for \`${fence.rawLang || "untagged"}\` code blocks.`, path);
+		return "error";
+	}
+	if (fence.bodyStartLine > fence.bodyEndLine || !fence.code.trim()) return "unchanged";
+	const eol = model.getEOL();
+	const res = await formatCodeFence(fence, path, eol);
+	if (!res.ok) {
+		lastFormatError = { uri: model.uri.toString(), at: Date.now() };
+		formattingHost.onError(res.error, path);
+		return "error";
+	}
+	if (!res.changed) return "unchanged";
+	const endCol = model.getLineMaxColumn(fence.bodyEndLine);
+	const range = new monaco.Range(fence.bodyStartLine, 1, fence.bodyEndLine, endCol);
+	model.pushStackElement();
+	model.pushEditOperations([], [{ range, text: res.body }], () => null);
+	model.pushStackElement();
+	return "changed";
+}
+
+async function computeNonSslFormat(
+	model: monaco.editor.ITextModel,
+	indent: { tabSize: number; insertSpaces: boolean },
+): Promise<{ ok: true; text: string; changed: boolean } | { ok: false }> {
+	const languageId = model.getLanguageId();
+	const path = model.uri.fsPath || model.uri.path;
+	if (!canFormatNonSsl(languageId, path)) return { ok: true, text: model.getValue(), changed: false };
+	const text = model.getValue();
+	const extra = formattingHost.options();
+	try {
+		const result = await backend.formatDocument({
+			path,
+			text,
+			languageId,
+			tabSize: indent.tabSize,
+			insertSpaces: indent.insertSpaces,
+			printWidth: extra.printWidth,
+			sqlDialect: extra.sqlDialect,
+			sqlKeywordCase: extra.sqlKeywordCase,
+		});
+		if (!result.ok) {
+			lastFormatError = { uri: model.uri.toString(), at: Date.now() };
+			formattingHost.onError(result.error, path);
+			return { ok: false };
+		}
+		let finalText = result.text;
+		if (languageId === "markdown") {
+			const embedded = await formatAllMarkdownFences(finalText, path);
+			finalText = embedded.text;
+			if (embedded.skippedErrors.length) {
+				formattingHost.onError(`Skipped unformattable code block: ${embedded.skippedErrors[0]}`, path);
+			} else if (embedded.skippedSslOffline > 0) {
+				formattingHost.onNotice?.(
+					`Skipped ${embedded.skippedSslOffline} SSL code ${embedded.skippedSslOffline === 1 ? "block" : "blocks"} because the language server is not running.`,
+				);
+			}
+		}
+		return { ok: true, text: finalText, changed: finalText !== text };
+	} catch (err: any) {
+		// If the backend is unreachable for plain JSON, keep the local zero-dependency JSON formatter working.
+		if (languageId === "json" && !/\.jsonc$/i.test(path) && !/\.plan\.json$/i.test(path)) {
+			const fallback = formatJson(text, indent.insertSpaces ? " ".repeat(indent.tabSize) : "\t");
+			if (fallback !== null) return { ok: true, text: fallback, changed: fallback !== text };
+		}
+		lastFormatError = { uri: model.uri.toString(), at: Date.now() };
+		formattingHost.onError(String(err?.message ?? err), path);
+		return { ok: false };
+	}
+}
+
+/** Formats a non-SSL model directly (used for Markdown Live mode where Monaco is hidden). */
+export async function formatNonSslModel(model: monaco.editor.ITextModel): Promise<"changed" | "unchanged" | "error"> {
+	const opts = model.getOptions();
+	const res = await computeNonSslFormat(model, { tabSize: opts.tabSize, insertSpaces: opts.insertSpaces });
+	if (!res.ok) return "error";
+	if (!res.changed) return "unchanged";
+	model.pushStackElement();
+	model.pushEditOperations([], [{ range: model.getFullModelRange(), text: res.text }], () => null);
+	model.pushStackElement();
+	return "changed";
+}
+
+// "Format document" for non-SSL companion files via the backend Prettier + XML + sql-formatter
+// pipeline (ADR 0015, ADR 0029). SSL stays owned exclusively by starlims-lsp (ADR 0003), and
+// .plan.json keeps its own deterministic line-per-node layout.
+for (const languageId of FORMATTABLE_NON_SSL_LANGUAGES) {
+	monaco.languages.registerDocumentFormattingEditProvider(languageId, {
+		async provideDocumentFormattingEdits(model, options) {
+			const res = await computeNonSslFormat(model, options);
+			if (!res.ok || !res.changed) return [];
+			return [{ range: model.getFullModelRange(), text: res.text }];
+		},
+	});
+}
 

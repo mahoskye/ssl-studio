@@ -24,6 +24,9 @@ export type ImportedTicket = {
 	parent?: string;
 	/** The tickets it is tied to, the parent not among them. */
 	related: string[];
+	/** Directional blocking links when present in the export. */
+	blocks?: string[];
+	blockedBy?: string[];
 	/** What was asked, in the ticket's own words. */
 	description: string;
 };
@@ -248,12 +251,45 @@ export function ticketsFromJson(value: unknown): Imported {
 			skipped++;
 			continue;
 		}
-		const above = likeOwn(own, [ticketKey(keyOf(fields.parent))].filter(Boolean))[0] ?? "";
-		const links = Array.isArray(fields.issuelinks) ? fields.issuelinks.flatMap((link) => [keyOf((link as Record<string, unknown>)?.outwardIssue), keyOf((link as Record<string, unknown>)?.inwardIssue)]) : [];
+		// Parent: prefer `fields.parent`, then Jira Server/DC `fields.epic` / `fields.epicLink` / epic custom field string matching the same key prefix.
+		const ownPrefix = /^([A-Za-z][A-Za-z0-9_]*)-/.exec(own)?.[1]?.toLowerCase() ?? "";
+		let epicFallback = keyOf(fields.epic ?? fields.epicLink);
+		if (!epicFallback && ownPrefix) {
+			for (const [k, v] of Object.entries(fields)) {
+				if (!/^customfield_\d+$/i.test(k) || typeof v !== "string") continue;
+				const cand = ticketKey(v);
+				if (cand && cand.toLowerCase().startsWith(`${ownPrefix}-`) && cand.toLowerCase() !== own.toLowerCase()) {
+					epicFallback = cand;
+					break;
+				}
+			}
+		}
+		const above = likeOwn(own, [ticketKey(keyOf(fields.parent) || epicFallback)].filter(Boolean))[0] ?? "";
+		const rawIssueLinks = Array.isArray(fields.issuelinks) ? (fields.issuelinks as Record<string, unknown>[]) : [];
+		const blocksRaw: string[] = [];
+		const blockedByRaw: string[] = [];
+		const links: string[] = [];
+		for (const link of rawIssueLinks) {
+			const typeObj = (link?.type && typeof link.type === "object" ? link.type : {}) as Record<string, unknown>;
+			const outward = keyOf(link?.outwardIssue);
+			const inward = keyOf(link?.inwardIssue);
+			const outName = String(typeObj.outward ?? typeObj.name ?? "").toLowerCase();
+			const inName = String(typeObj.inward ?? typeObj.name ?? "").toLowerCase();
+			if (outward) {
+				links.push(outward);
+				if (/\bblocks\b/.test(outName)) blocksRaw.push(outward);
+			}
+			if (inward) {
+				links.push(inward);
+				if (/\bblocked by\b/.test(inName)) blockedByRaw.push(inward);
+			}
+		}
 		// Under one name or the other, and as a key or as a link to one.
 		const under = [fields.subtasks, fields["sub-tasks"]].flatMap((list) => (Array.isArray(list) ? list : []));
 		const subtasks = under.flatMap((task) => [keyOf(task), keyOf((task as Record<string, unknown>)?.outwardIssue)]);
 		const related = Array.isArray(fields.related) ? fields.related.map(keyOf) : [];
+		const blocks = unique(likeOwn(own, blocksRaw.map(ticketKey)), [own, above]);
+		const blockedBy = unique(likeOwn(own, blockedByRaw.map(ticketKey)), [own, above]);
 		tickets.push({
 			key: own,
 			title,
@@ -262,6 +298,8 @@ export function ticketsFromJson(value: unknown): Imported {
 			source: pageOf(issue) ?? browseLink(issue.self, own),
 			parent: above && above.toLowerCase() !== own.toLowerCase() ? above : undefined,
 			related: unique(likeOwn(own, [...links, ...subtasks, ...related].filter(Boolean).map(ticketKey)), [own, above]),
+			...(blocks.length ? { blocks } : {}),
+			...(blockedBy.length ? { blockedBy } : {}),
 			// An API of the Jira kind gives the fields under "fields", and a description that is text in its wiki markup.
 			// What was asked is under one name or another: "description", or an issue's "body".
 			description: described(clean(flat(fields.description ?? fields.body ?? fields.details)), typeof fields.description === "string" && fields !== issue),

@@ -7,7 +7,21 @@ import { choose } from "../dialogs";
 import { looksCut } from "../plan/assist";
 import { attempt, cutNote, decideModel, errorText, Turns } from "./logic";
 
-export type Entry = { id: number; role: "user" | "agent" | "note"; text: string; sessionID?: string; streaming?: boolean; meta?: string };
+export type EntryMeta = {
+	ticket?: string;
+	codePath?: string;
+	isCatalogPrompt?: boolean;
+};
+
+export type Entry = {
+	id: number;
+	role: "user" | "agent" | "note";
+	text: string;
+	sessionID?: string;
+	streaming?: boolean;
+	meta?: string;
+	turn?: EntryMeta;
+};
 
 export const [agent, setAgent] = createStore({
 	status: { state: "off" } as AgentStatus,
@@ -23,6 +37,8 @@ export const [agent, setAgent] = createStore({
 let nextEntry = 1;
 /** The reply being written, by session: the entry its text goes into. */
 const streaming = new Map<string, number>();
+/** Metadata for the turn currently in flight so streamed agent replies bind to their own turn's ticket/file. */
+let activeTurnMeta: EntryMeta | undefined;
 /** The turn in flight, from the moment it is asked for (logic.ts). */
 const turns = new Turns((sessionID) => backend.agent("interrupt", [sessionID]));
 
@@ -30,6 +46,10 @@ export function addEntry(entry: Omit<Entry, "id">) {
 	const id = nextEntry++;
 	setAgent("entries", (list) => [...list.slice(-199), { ...entry, id }]);
 	return id;
+}
+
+export function clearEntries() {
+	setAgent({ entries: [], chatSession: null });
 }
 
 /** For work nobody waits for: a failure is shown and written to Output, never dropped. */
@@ -43,7 +63,7 @@ on("agent", ({ type, data }) => {
 	else if (type === "session.text.delta") {
 		let id = streaming.get(d.sessionID);
 		if (id === undefined) {
-			id = addEntry({ role: "agent", text: "", sessionID: d.sessionID, streaming: true });
+			id = addEntry({ role: "agent", text: "", sessionID: d.sessionID, streaming: true, ...(activeTurnMeta ? { turn: activeTurnMeta } : {}) });
 			streaming.set(d.sessionID, id);
 		}
 		setAgent("entries", (e) => e.id === id, produce((e: Entry) => void (e.text += d.delta)));
@@ -107,14 +127,15 @@ export async function chooseModel(ref: string): Promise<boolean> {
 }
 
 /** One prompt; streams into the conversation; returns the reply. */
-export async function ask(text: string, options: { title?: string; skills?: string[]; show?: string; keep?: boolean; sessionID?: string; toolLimit?: number } = {}): Promise<AgentReply | null> {
+export async function ask(text: string, options: { title?: string; skills?: string[]; show?: string; keep?: boolean; sessionID?: string; toolLimit?: number; turn?: EntryMeta } = {}): Promise<AgentReply | null> {
 	if (agent.busy) {
 		notify("The agent is still working on the last request.");
 		return null;
 	}
 	setAgent("busy", true);
+	activeTurnMeta = options.turn;
 	turns.begin(options.sessionID);
-	addEntry({ role: "user", text: options.show ?? text });
+	addEntry({ role: "user", text: options.show ?? text, ...(options.turn ? { turn: options.turn } : {}) });
 	try {
 		if (agent.status.state !== "ready") await start();
 		const reply = (await backend.agent("ask", [{ text, title: options.title, skills: options.skills, keep: options.keep, sessionID: options.sessionID, toolLimit: options.toolLimit }])) as AgentReply;
@@ -133,6 +154,7 @@ export async function ask(text: string, options: { title?: string; skills?: stri
 		return null;
 	} finally {
 		turns.end();
+		activeTurnMeta = undefined;
 		// A turn that ended without its closing event (a lost stream) must not stay marked as being written.
 		for (const id of streaming.values()) setAgent("entries", (e) => e.id === id, "streaming", false);
 		streaming.clear();

@@ -1,7 +1,8 @@
 // Shared CodeMirror 6 facets, effects, inline HTML renderer, widget focus helper,
 // and inline-formatting helpers used across cmLivePlugin.ts, cmLiveTable.ts,
 // cmLiveCallout.ts, cmKeymap.ts, and MarkdownLiveEditor.tsx.
-import { Facet, StateEffect, StateField } from "@codemirror/state";
+import { getSearchQuery, searchPanelOpen } from "@codemirror/search";
+import { Facet, StateEffect, StateField, type EditorState } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
@@ -34,6 +35,10 @@ export type LiveCallbacks = {
 	onHoverLink: (target: HoverTarget) => void;
 	onHoverLeave: () => void;
 	onCopyCode: (code: string) => void;
+	onCopyCodeForDesigner?: (code: string) => Promise<void>;
+	onOpenCodeScratch?: (code: string, lang: string) => Promise<void>;
+	onSaveCodeSnippet?: (code: string, lang: string) => Promise<void>;
+	onFormatCode?: (openLine: number) => Promise<"changed" | "unchanged" | "error">;
 	onToggleCheckbox: (bracketPos: number) => void;
 	onOpenImageLightbox: (info: ImageLightboxInfo) => void;
 	onResizeImage: (from: number, to: number, width: number | null) => void;
@@ -94,6 +99,17 @@ export const rawEditBlockField = StateField.define<{ from: number; to: number } 
 export type TableWidgetHost = HTMLDivElement & {
 	__liveTableFocus?: (pos: number, opts?: { select?: boolean }) => boolean;
 };
+
+/** Stable fingerprint of active CM6 search state so block, inline, and code-highlight plugins stay synced. */
+export function searchStateSig(state: EditorState): string {
+	try {
+		if (!searchPanelOpen(state)) return "";
+		const q = getSearchQuery(state);
+		return `1:${q.caseSensitive ? 1 : 0}:${q.regexp ? 1 : 0}:${q.wholeWord ? 1 : 0}:${q.search}`;
+	} catch {
+		return "";
+	}
+}
 
 export type CalloutWidgetHost = HTMLDivElement & {
 	__liveCalloutFocus?: (pos: number, opts?: { suppressEnter?: boolean }) => boolean;

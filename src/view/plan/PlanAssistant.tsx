@@ -8,6 +8,7 @@ import { IconButton } from "../panels/Rows";
 import { agent, currentModel } from "../agent/store";
 import { choose } from "../dialogs";
 import { showPanel } from "../panels/registry";
+import { promoteToKnowledge } from "../projectDocs";
 import { documents, openFile, state } from "../state";
 import { joinPath } from "../../shared/paths";
 import { decisionsOf, describeSuggestion, openQuestions, planHash } from "./assist";
@@ -344,6 +345,22 @@ export function PlanAssistant(props: {
 												if (e.currentTarget.value.trim()) answer(props.path, q.question, e.currentTarget.value);
 											}}
 										/>
+										<div class="pa-promote-row">
+											<button
+												type="button"
+												class="link pa-promote-btn"
+												title="Save this open question to docs/knowledge/questions/"
+												onClick={() =>
+													void promoteToKnowledge("questions", {
+														title: q.question,
+														body: `Raised while refining plan "${props.plan.title || "Plan"}".`,
+														ticket: typeof props.plan.ticket === "string" ? props.plan.ticket : undefined,
+													})
+												}
+											>
+												Save as Question doc…
+											</button>
+										</div>
 									</div>
 								)}
 							</For>
@@ -389,6 +406,24 @@ export function PlanAssistant(props: {
 												{q.question} <Node id={q.node} />
 											</p>
 											<input value={q.answer} aria-label={q.question} onChange={(e) => answer(props.path, q.question, e.currentTarget.value)} />
+											<div class="pa-promote-row">
+												<button
+													type="button"
+													class="link pa-promote-btn"
+													title="Promote this settled answer to a numbered Decision ADR in docs/knowledge/decisions/"
+													onClick={() =>
+														void promoteToKnowledge("decisions", {
+															title: q.question.replace(/\?+$/, ""),
+															body: `Question from plan "${props.plan.title || "Plan"}": ${q.question}`,
+															decision: q.answer,
+															sourcePlan: props.path,
+															ticket: typeof props.plan.ticket === "string" ? props.plan.ticket : undefined,
+														})
+													}
+												>
+													Promote to Decision ADR…
+												</button>
+											</div>
 										</div>
 									)}
 								</For>

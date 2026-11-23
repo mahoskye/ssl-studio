@@ -6,14 +6,16 @@ import { existsSync, mkdirSync, readdirSync, rmdirSync, statSync, unlinkSync } f
 import { homedir } from "node:os";
 import { decode, decodePart, textOf } from "./encoding";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { CATALOG_FILE, catalogStale, hasCatalogPlace } from "../shared/catalog";
-import { parseCsv, tally } from "../shared/csv";
+import { CATALOG_FILE, catalogStale, fenced, hasCatalogPlace } from "../shared/catalog";
+import { parseCsv, tally, type Table } from "../shared/csv";
 import { fileLinks, frontPaths, type DocLink } from "../shared/docLinks";
 import { frontMatter, many, one, summaryOf, titleOf } from "../shared/frontMatter";
-import { namePlaces } from "../shared/namedLinks";
-import { areaPath, CATALOG_AREAS, CATALOG_FILES_MAX, catalogItems, catalogTemplate, DOC_FOLDERS, fileItems, isCatalog, isFileArea, isPrompt, OPTIONAL_CATALOGS, SCHEMAS, STATE_FILE, type AreaFolders, type DocArea, type FileArea } from "../shared/projectDocs";
-import { rowsByTicket } from "../shared/registryTickets";
+import { buildDocNameIndex, lookupInIndex, namePlaces } from "../shared/namedLinks";
+import { areaPath, CATALOG_AREAS, CATALOG_FILES_MAX, catalogItems, catalogTemplate, DOC_FOLDERS, fileItems, isFileArea, isPrompt, OPTIONAL_CATALOGS, SCHEMAS, STATE_FILE, type AreaFolders, type DocArea, type FileArea } from "../shared/projectDocs";
+import { keysIn, rowsByTicket, ticketColumn } from "../shared/registryTickets";
+import { extractTags } from "../shared/tags";
 import { taskTally } from "../shared/tasks";
+import { classifyTicketEntries, type ScannedTicketEntry } from "../shared/ticketBundle";
 import type { DocFile, LinkTo, ManifestFile, NameIn, Project, Settings } from "../shared/protocol";
 import { workspaceDir } from "./paths";
 import { WorkspaceFiles } from "./workspace";
@@ -81,17 +83,108 @@ async function head(path: string): Promise<string> {
 	}
 }
 
-/** What a plan says of itself: the ticket it is for and its title; "" for what it does not say, or when it cannot be read. */
-async function planSays(path: string): Promise<{ ticket: string; title: string }> {
+/** What a plan says of itself: ticket, title, status, and referenced code/script targets; empty when unreadable. */
+async function planSays(path: string): Promise<{ ticket: string; title: string; status: string; codeRefs: string[] }> {
 	try {
 		const plan = await Bun.file(path).json();
 		const word = (value: unknown) => (typeof value === "string" ? value.trim() : "");
-		return { ticket: word(plan?.ticket), title: word(plan?.title) };
+		const refs = new Set<string>();
+		const pushRef = (val: unknown) => {
+			if (typeof val === "string" && val.trim()) refs.add(val.trim().split("\\").join("/"));
+			else if (val && typeof val === "object" && "path" in val && typeof (val as { path?: unknown }).path === "string") {
+				const p = ((val as { path: string }).path).trim();
+				if (p) refs.add(p.split("\\").join("/"));
+			}
+		};
+		if (Array.isArray(plan?.targets)) for (const t of plan.targets) pushRef(t);
+		if (Array.isArray(plan?.scripts)) for (const s of plan.scripts) pushRef(s);
+		if (Array.isArray(plan?.built?.units)) {
+			for (const u of plan.built.units) pushRef((u as { script?: unknown })?.script);
+		}
+		return { ticket: word(plan?.ticket), title: word(plan?.title), status: word(plan?.status), codeRefs: [...refs] };
 	} catch {
-		return { ticket: "", title: "" };
+		return { ticket: "", title: "", status: "", codeRefs: [] };
 	}
 }
-const planTicket = async (path: string) => (await planSays(path)).ticket;
+
+const CODE_FILE_EXT_RE = /\.(ssl|srvscr|ds|sql|ddl|pks|pkb)$/i;
+const INLINE_CODE_FILE_RE = /`([A-Za-z0-9_./\\-]+\.(?:ssl|srvscr|ds|sql|ddl|pks|pkb))`/gi;
+const REGISTRY_CODE_COL_RE = /^(path|file|script|scripts|where|used[\s_-]*by|source)$/i;
+
+/** Extracts workspace-relative code/SQL file references from Markdown links, `source:` frontmatter, and inline code mentions. */
+function markdownCodeRefs(root: string, path: string, text: string): string[] {
+	const refs = new Set<string>();
+	const addPath = (raw: string) => {
+		const cleaned = raw.trim().split("\\").join("/").replace(/^\.\//, "");
+		if (!cleaned) return;
+		if (CODE_FILE_EXT_RE.test(cleaned)) refs.add(cleaned);
+	};
+	const fm = frontMatter(text);
+	for (const s of many(fm.values.source)) addPath(s);
+	for (const link of linksIn(path, text)) {
+		if (!CODE_FILE_EXT_RE.test(link.file)) continue;
+		const target = linkTarget(root, path, link.file);
+		const rel = relative(root, target).split(sep).join("/");
+		if (!rel.startsWith("..") && !isAbsolute(rel)) refs.add(rel);
+	}
+	if (text.includes("`")) {
+		const fences = fenced(text);
+		const lines = text.split(/\r?\n/);
+		let offset = 0;
+		for (let i = 0; i < lines.length; i++) {
+			const ln = lines[i]!;
+			const start = offset;
+			offset += ln.length + (text[start + ln.length] === "\r" ? 2 : 1);
+			if (i < fm.lines || !ln.includes("`")) continue;
+			if (fences.some(([from, to]) => start >= from && start < to)) continue;
+			for (const m of ln.matchAll(INLINE_CODE_FILE_RE)) addPath(m[1]!);
+		}
+	}
+	return [...refs];
+}
+
+/** Extracts code/script tokens referenced by a CSV registry (and per-ticket script lists when a ticket column exists). */
+function registryCodeInfo(
+	table: Table,
+	knownTickets: ReadonlySet<string>,
+): { codeRefs: string[]; ticketCodeRefs?: Record<string, string[]> } {
+	const codeCols: number[] = [];
+	table.header.forEach((cell, idx) => {
+		if (REGISTRY_CODE_COL_RE.test(cell.text.trim())) codeCols.push(idx);
+	});
+	if (!codeCols.length) return { codeRefs: [] };
+	const allRefs = new Set<string>();
+	const byTicket = new Map<string, Set<string>>();
+	const tCol = ticketColumn(table);
+	for (const row of table.rows) {
+		const rowRefs: string[] = [];
+		for (const ci of codeCols) {
+			const raw = row[ci]?.text ?? "";
+			for (const part of raw.split(/[,;]+/)) {
+				const tok = part.trim().split("\\").join("/").replace(/^\.\//, "");
+				if (!tok || tok.length > 180) continue;
+				// Ignore pure numbers/dates/status words; keep paths, dotted module names, or identifier-like script names.
+				if (!/[A-Za-z]/.test(tok) || /\s/.test(tok)) continue;
+				rowRefs.push(tok);
+				if (allRefs.size < 500) allRefs.add(tok);
+			}
+		}
+		if (tCol >= 0 && rowRefs.length) {
+			for (const k of keysIn(row[tCol]?.text ?? "", knownTickets)) {
+				const kl = k.toLowerCase();
+				let set = byTicket.get(kl);
+				if (!set) {
+					set = new Set();
+					byTicket.set(kl, set);
+				}
+				for (const r of rowRefs) set.add(r);
+			}
+		}
+	}
+	const ticketCodeRefs: Record<string, string[]> = {};
+	for (const [k, set] of byTicket) ticketCodeRefs[k] = [...set];
+	return { codeRefs: [...allRefs], ...(byTicket.size ? { ticketCodeRefs } : {}) };
+}
 
 /** A summary, unless it is a line a template wrote and nobody has replaced. */
 const said = (summary: string | undefined) => (summary && !isPrompt(summary) ? summary : undefined);
@@ -108,12 +201,44 @@ function tallyOf(text: string): ReturnType<typeof taskTally> {
 	return tally;
 }
 
-/** What a Markdown document says of itself, for the panel and the catalogs. */
-function described(text: string): Pick<DocFile, "title" | "status" | "summary" | "tickets" | "untouched" | "tasks"> {
+/** What a Markdown document says of itself, for the panel, catalogs, tags, health, and code traceability. */
+function described(
+	text: string,
+	root?: string,
+	path?: string,
+): Pick<DocFile, "title" | "status" | "summary" | "tickets" | "untouched" | "tasks" | "tags" | "source" | "missingSource" | "supersedes" | "supersededBy" | "blocks" | "blockedBy" | "codeRefs"> {
 	const { values } = frontMatter(text);
 	const tickets = [...many(values.ticket), ...many(values.tickets)];
 	const tasks = tallyOf(text);
-	return { title: titleOf(text) || undefined, status: one(values.status) || undefined, summary: said(summaryOf(text)), ...(tickets.length ? { tickets } : {}), ...(isPrompt(summaryOf(text)) ? { untouched: true } : {}), ...(tasks ? { tasks } : {}) };
+	const tags = extractTags(text);
+	const source = one(values.source) || undefined;
+	let missingSource: string | undefined;
+	if (source && root && !/^https?:\/\//i.test(source)) {
+		const target = join(root, source);
+		const rel = relative(root, target);
+		if (!rel.startsWith("..") && !isAbsolute(rel) && !existsSync(target)) missingSource = source;
+	}
+	const supersedes = many(values.supersedes);
+	const supersededBy = many(values["superseded-by"]);
+	const blocks = many(values.blocks);
+	const blockedBy = many(values["blocked-by"]);
+	const codeRefs = root && path ? markdownCodeRefs(root, path, text) : [];
+	return {
+		title: titleOf(text) || undefined,
+		status: one(values.status) || undefined,
+		summary: said(summaryOf(text)),
+		...(tickets.length ? { tickets } : {}),
+		...(isPrompt(summaryOf(text)) ? { untouched: true } : {}),
+		...(tasks ? { tasks } : {}),
+		...(tags.length ? { tags } : {}),
+		...(source ? { source } : {}),
+		...(missingSource ? { missingSource } : {}),
+		...(supersedes.length ? { supersedes } : {}),
+		...(supersededBy.length ? { supersededBy } : {}),
+		...(blocks.length ? { blocks } : {}),
+		...(blockedBy.length ? { blockedBy } : {}),
+		...(codeRefs.length ? { codeRefs } : {}),
+	};
 }
 
 /**
@@ -126,17 +251,40 @@ function described(text: string): Pick<DocFile, "title" | "status" | "summary" |
  * again whenever anything in the folder changes.
  */
 const linksRead = new Map<string, { hash: number | bigint; links: DocLink[] }>();
-const LINKS_KEPT = 1000;
-function linksIn(path: string, text: string): DocLink[] {
+const LINKS_KEPT = 4000;
+function linksIn(path: string, text: string, scope: "H" | "F" = "H"): DocLink[] {
+	const key = `${scope}\0${path}`;
 	const hash = Bun.hash(text);
-	const kept = linksRead.get(path);
-	if (kept && kept.hash === hash) return kept.links;
+	const kept = linksRead.get(key);
+	if (kept && kept.hash === hash) {
+		// Touch for LRU eviction order.
+		linksRead.delete(key);
+		linksRead.set(key, kept);
+		return kept.links;
+	}
 	const links = fileLinks(text);
-	// The oldest goes when there are too many: a Map keeps the order things were put in.
 	if (linksRead.size >= LINKS_KEPT) linksRead.delete(linksRead.keys().next().value!);
-	linksRead.delete(path);
-	linksRead.set(path, { hash, links });
+	linksRead.delete(key);
+	linksRead.set(key, { hash, links });
 	return links;
+}
+
+/** Cached `namePlaces()` per Markdown file, keyed by path + size + mtimeMs. */
+const namesRead = new Map<string, { stamp: string; places: ReturnType<typeof namePlaces> }>();
+const NAMES_KEPT = 4000;
+
+/** Cached `parseCsv()` per registry file, keyed by path + size + mtimeMs. */
+const csvRead = new Map<string, { stamp: string; table: ReturnType<typeof parseCsv> }>();
+const CSV_KEPT = 256;
+
+async function cachedParseCsv(path: string, size: number, mtimeMs: number): Promise<ReturnType<typeof parseCsv>> {
+	const stamp = `${size}:${mtimeMs}`;
+	const kept = csvRead.get(path);
+	if (kept && kept.stamp === stamp) return kept.table;
+	const table = parseCsv(await textOf(path));
+	if (csvRead.size >= CSV_KEPT) csvRead.delete(csvRead.keys().next().value!);
+	csvRead.set(path, { stamp, table });
+	return table;
 }
 
 /** The file a link in a document leads to. A path from the top is from the project's top, as a repository's page reads it. */
@@ -196,7 +344,7 @@ export async function linksTo(files: WorkspaceFiles, target: string): Promise<Li
 			if (leadsThere(leads)) found.push({ path, line: named.line, column: named.column, href: named.value, rest: leads.slice(resolve(target).length), from: "root" });
 		}
 		if (!text.includes("](") && !text.includes("]:")) continue;
-		for (const link of linksIn(path, text)) {
+		for (const link of linksIn(path, text, "F")) {
 			if (!link.line) continue;
 			const leads = linkTarget(root, path, link.file);
 			if (leadsThere(leads)) found.push({ path, line: link.line, column: link.column, href: link.href, rest: leads.slice(resolve(target).length), from: link.file.startsWith("/") ? "top" : "doc" });
@@ -216,15 +364,30 @@ export async function namesIn(files: WorkspaceFiles): Promise<NameIn[]> {
 	for (const path of files.files()) {
 		if (!MARKDOWN.test(path)) continue;
 		if (++read > LINKING_DOCS) break;
-		const file = Bun.file(path);
-		if (file.size > LINKED_BYTES) continue;
-		let text = "";
+		let stamp = "";
 		try {
-			text = decode(new Uint8Array(await file.arrayBuffer())).text;
+			const s = statSync(path);
+			if (s.size > LINKED_BYTES) continue;
+			stamp = `${s.size}:${s.mtimeMs}`;
 		} catch {
 			continue;
 		}
-		for (const place of namePlaces(text)) found.push({ path, ...place });
+		const kept = namesRead.get(path);
+		let places: ReturnType<typeof namePlaces>;
+		if (kept && kept.stamp === stamp) {
+			places = kept.places;
+		} else {
+			let text = "";
+			try {
+				text = decode(new Uint8Array(await Bun.file(path).arrayBuffer())).text;
+			} catch {
+				continue;
+			}
+			places = namePlaces(text);
+			if (namesRead.size >= NAMES_KEPT) namesRead.delete(namesRead.keys().next().value!);
+			namesRead.set(path, { stamp, places });
+		}
+		for (const place of places) found.push({ path, ...place });
 	}
 	return found;
 }
@@ -276,86 +439,232 @@ export async function listDocs(files: WorkspaceFiles, project: Project): Promise
 		return paths.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base", numeric: true }));
 	};
 	const area = (name: DocArea) => join(docs, DOC_FOLDERS[name]);
-	const inArea = (path: string) => (Object.keys(DOC_FOLDERS) as DocArea[]).some((name) => path.startsWith(area(name) + sep));
+	const templatesDir = join(docs, "templates");
+	const inArea = (path: string) =>
+		(Object.keys(DOC_FOLDERS) as DocArea[]).some((name) => path.startsWith(area(name) + sep)) ||
+		path.startsWith(templatesDir + sep);
 
-	// The tickets that drive the work.
-	for (const path of under(area("tickets"), MARKDOWN)) {
-		const text = await head(path);
-		const { values } = frontMatter(text);
-		const name = relative(area("tickets"), path);
-		const key = one(values.ticket) || basename(path).replace(MARKDOWN, "");
-		const specs = many(values.specs);
-		const plans = many(values.plans);
-		const related = [...many(values.related), ...many(values.blocks), ...many(values["blocked-by"]), ...many(values.parent)];
-		const missing = [...specs, ...plans].filter((ref) => !existsSync(join(root, ref)));
-		list.push({ path, name, group: "tickets", exists: true, ...described(text), ...brokenLinks(root, path, text, named), ...(isCatalog({ name }) ? {} : { ticket: key, parent: one(values.parent) || undefined, tickets: related.length ? related : undefined, specs: specs.length ? specs : undefined, plans: plans.length ? plans : undefined, missing: missing.length ? missing : undefined }) });
+	// The tickets that drive the work: flat Markdown files (docs/tickets/LIMS-123.md)
+	// and self-contained ticket bundle folders (docs/tickets/LIMS-123/LIMS-123.md plus
+	// reference docs, existing code samples, and fixtures beside it — ADR 0030).
+	const ticketsDir = area("tickets");
+	if (existsSync(ticketsDir)) {
+		// Cache direct subdirectories of ticketsDir once (avoids 2× readdirSync per flat ticket).
+		const ticketSubdirs = new Map<string, string>();
+		try {
+			for (const d of readdirSync(ticketsDir, { withFileTypes: true })) {
+				if (d.isDirectory()) ticketSubdirs.set(d.name.toLowerCase(), d.name);
+			}
+		} catch {
+			// Ignore unreadable tickets directory.
+		}
+		const scanned: ScannedTicketEntry[] = [];
+		const ticketHeads = new Map<string, string>();
+		for (const path of files.files(ticketsDir)) {
+			const rel = relative(ticketsDir, path).split(sep).join("/");
+			let size = 0;
+			try {
+				size = statSync(path).size;
+			} catch {
+				// Ignore unreadable entry.
+			}
+			let frontTicket = "";
+			if (MARKDOWN.test(path)) {
+				const text = await head(path);
+				ticketHeads.set(path, text);
+				frontTicket = one(frontMatter(text).values.ticket);
+			}
+			scanned.push({ path, rel, size, ...(frontTicket ? { frontTicket } : {}) });
+		}
+		for (const resolved of classifyTicketEntries(scanned)) {
+			const path = resolved.entry.path;
+			const text = ticketHeads.get(path) ?? (await head(path));
+			const { values } = frontMatter(text);
+			const name = relative(ticketsDir, path);
+			if (resolved.isCatalog) {
+				list.push({ path, name, group: "tickets", exists: true, ...described(text, root, path), ...brokenLinks(root, path, text, named) });
+				continue;
+			}
+			const stem = basename(path).replace(MARKDOWN, "");
+			const key = one(values.ticket) || (resolved.folderRel && /^(readme|ticket)$/i.test(stem) ? basename(resolved.folderRel) : stem);
+			const specs = [...new Set([...many(values.specs), ...many(values.spec)])];
+			const plans = [...new Set([...many(values.plans), ...many(values.plan)])];
+			const related = [...many(values.related), ...many(values.blocks), ...many(values["blocked-by"]), ...many(values.parent)];
+			const missing = [...specs, ...plans].filter((ref) => !existsSync(join(root, ref)));
+			// Also detect an empty sibling folder matching this flat ticket's key/stem (O(1) map lookup).
+			let ticketFolder = resolved.folderRel ? join(ticketsDir, resolved.folderRel) : undefined;
+			if (!ticketFolder) {
+				const sibling = ticketSubdirs.get(key.toLowerCase()) ?? ticketSubdirs.get(stem.toLowerCase());
+				if (sibling) ticketFolder = join(ticketsDir, sibling);
+			}
+			list.push({
+				path,
+				name,
+				group: "tickets",
+				exists: true,
+				...described(text, root, path),
+				...brokenLinks(root, path, text, named),
+				ticket: key,
+				parent: one(values.parent) || undefined,
+				tickets: related.length ? related : undefined,
+				specs: specs.length ? specs : undefined,
+				plans: plans.length ? plans : undefined,
+				missing: missing.length ? missing : undefined,
+				...(ticketFolder ? { ticketFolder, ticketFileCount: resolved.fileCount, ticketFiles: resolved.files } : {}),
+			});
+		}
 	}
 	// The specs: those written by hand, and those the planner writes beside a plan.
 	for (const path of [...under(area("specs"), MARKDOWN), ...under(join(root, project.plans), /\.spec\.md$/i)]) {
 		const fromPlan = !path.startsWith(area("specs") + sep);
 		const text = await head(path);
-		const said = described(text);
+		const said = described(text, root, path);
 		// A spec the planner wrote is for the ticket its plan names, and is called what its plan is: it has no
 		// heading of its own to be called by, and its first section is not its name.
 		const planPath = path.replace(/\.spec\.md$/i, ".plan.json");
-		const plan = fromPlan ? await planSays(planPath) : { ticket: "", title: "" };
+		const plan = fromPlan ? await planSays(planPath) : { ticket: "", title: "", status: "", codeRefs: [] };
 		const planned = plan.ticket;
 		if (fromPlan && plan.title && !one(frontMatter(text).values.title) && !/^#\s+\S/m.test(frontMatter(text).body)) said.title = plan.title;
 		const ownTickets = said.tickets?.length ? [...said.tickets] : undefined;
 		const pairedPlan = fromPlan && existsSync(planPath) ? { name: basename(planPath), ...(planned ? { ticket: planned } : {}) } : undefined;
 		const tickets = planned && !said.tickets?.some((key) => key.toLowerCase() === planned.toLowerCase()) ? [...(said.tickets ?? []), planned] : said.tickets;
-		list.push({ path, name: fromPlan ? `${project.plans}/${relative(join(root, project.plans), path)}` : relative(area("specs"), path), group: "specs", exists: true, ...said, ...brokenLinks(root, path, text, named), ...(tickets?.length ? { tickets } : {}), ...(ownTickets ? { ownTickets } : {}), ...(pairedPlan ? { pairedPlan } : {}) });
+		const mergedCodeRefs = [...new Set([...(said.codeRefs ?? []), ...plan.codeRefs])];
+		list.push({
+			path,
+			name: fromPlan ? `${project.plans}/${relative(join(root, project.plans), path)}` : relative(area("specs"), path),
+			group: "specs",
+			exists: true,
+			...said,
+			...brokenLinks(root, path, text, named),
+			...(tickets?.length ? { tickets } : {}),
+			...(ownTickets ? { ownTickets } : {}),
+			...(pairedPlan ? { pairedPlan } : {}),
+			...(mergedCodeRefs.length ? { codeRefs: mergedCodeRefs } : {}),
+		});
 	}
 	// The knowledge base: decisions, questions, snippets and notes, each kind in its folder.
 	for (const path of under(area("knowledge"), /\.(md|markdown|sql|ssl|srvscr|ds|txt|json|toml|csv)$/i)) {
 		const name = relative(area("knowledge"), path);
 		const kind = name.includes(sep) ? name.split(sep)[0]! : "";
 		const text = await head(path);
-		list.push({ path, name, group: "knowledge", exists: true, kind, ...(MARKDOWN.test(path) ? { ...described(text), ...brokenLinks(root, path, text, named) } : snippet(text)) });
+		list.push({ path, name, group: "knowledge", exists: true, kind, ...(MARKDOWN.test(path) ? { ...described(text, root, path), ...brokenLinks(root, path, text, named) } : snippet(text)) });
 	}
 	// The registries: tables of values, each row with how far it has come.
 	for (const path of under(area("registries"), /\.(md|markdown|csv|tsv)$/i)) {
 		const name = relative(area("registries"), path);
 		if (MARKDOWN.test(path)) {
 			const text = await head(path);
-			list.push({ path, name, group: "registries", exists: true, ...described(text), ...brokenLinks(root, path, text, named) });
+			list.push({ path, name, group: "registries", exists: true, ...described(text, root, path), ...brokenLinks(root, path, text, named) });
 			continue;
 		}
-		const file = Bun.file(path);
-		if (file.size > REGISTRY_BYTES) {
+		let size = 0;
+		let mtimeMs = 0;
+		try {
+			const st = statSync(path);
+			size = st.size;
+			mtimeMs = st.mtimeMs;
+		} catch {
+			continue;
+		}
+		if (size > REGISTRY_BYTES) {
 			list.push({ path, name, group: "registries", exists: true, problems: ["It is too large to read here."] });
 			continue;
 		}
-		const table = parseCsv(await textOf(path));
+		const table = await cachedParseCsv(path, size, mtimeMs);
 		// A row can say which ticket carries it: the ticket's page lists what it has to bring across.
-		const forTickets = rowsByTicket(table, new Set(list.flatMap((file) => (file.group === "tickets" && file.ticket ? [file.ticket.toLowerCase()] : []))));
-		list.push({ path, name, group: "registries", exists: true, rows: table.rows.length, tally: tally(table) ?? undefined, problems: table.problems.length ? table.problems : undefined, ...(forTickets.length ? { tickets: forTickets.map((rows) => rows.key), forTickets } : {}) });
+		const knownTickets = new Set(list.flatMap((file) => (file.group === "tickets" && file.ticket ? [file.ticket.toLowerCase()] : [])));
+		const forTickets = rowsByTicket(table, knownTickets);
+		const regCode = registryCodeInfo(table, knownTickets);
+		list.push({
+			path,
+			name,
+			group: "registries",
+			exists: true,
+			rows: table.rows.length,
+			tally: tally(table) ?? undefined,
+			problems: table.problems.length ? table.problems : undefined,
+			...(forTickets.length ? { tickets: forTickets.map((rows) => rows.key), forTickets } : {}),
+			...(regCode.ticketCodeRefs ? { ticketCodeRefs: regCode.ticketCodeRefs } : {}),
+			...(regCode.codeRefs.length ? { codeRefs: regCode.codeRefs } : {}),
+		});
 	}
 	// Everything else in the docs folder.
 	for (const path of under(docs, MARKDOWN, inArea)) {
 		if (state && path === join(docs, state)) continue;
 		// What it calls itself and what it is about: its line in the docs folder's catalog.
 		const text = await head(path);
-		const said = described(text);
+		const said = described(text, root, path);
 		// Its heading is not a name it is linked by: a plain document is linked by its file's name, as it always was.
-		list.push({ path, name: relative(docs, path), group: "docs", exists: true, ...(said.title ? { heading: said.title } : {}), ...(said.summary ? { summary: said.summary } : {}), ...brokenLinks(root, path, text, named) });
+		list.push({
+			path,
+			name: relative(docs, path),
+			group: "docs",
+			exists: true,
+			...(said.title ? { heading: said.title } : {}),
+			...(said.summary ? { summary: said.summary } : {}),
+			...(said.tags?.length ? { tags: said.tags } : {}),
+			...(said.codeRefs?.length ? { codeRefs: said.codeRefs } : {}),
+			...brokenLinks(root, path, text, named),
+		});
 	}
 	// What the project's data looks like, each kind in its folder: descriptions in Markdown, and beside them the SQL
-	// that makes the tables, a message's own schema, a sample of a file.
-	for (const path of under(join(root, project.schema), /\.(md|markdown|sql|json|xml|xsd|wsdl|yaml|yml|hl7|csv|tsv|txt)$/i)) {
+	// that makes the tables, a message's own schema, a sample of a file (including STARLIMS lab/interface formats).
+	for (const path of under(join(root, project.schema), /\.(md|markdown|sql|ddl|pks|pkb|json|xml|xsd|wsdl|yaml|yml|hl7|astm|edi|avsc|proto|csv|tsv|txt)$/i)) {
 		const name = relative(join(root, project.schema), path);
 		const folder = name.includes(sep) ? name.split(sep)[0]! : "";
 		// A folder that is one of the known kinds in other capitals is that kind: on a disk that does not tell them
 		// apart it is the same folder, and nowhere is it a second kind beside it.
 		const kind = SCHEMAS.find((known) => known.id === folder.toLowerCase())?.id ?? folder;
 		const text = MARKDOWN.test(path) ? await head(path) : "";
-		list.push({ path, name, group: "schema", exists: true, kind, ...(MARKDOWN.test(path) ? { ...described(text), ...brokenLinks(root, path, text, named) } : {}) });
+		list.push({ path, name, group: "schema", exists: true, kind, ...(MARKDOWN.test(path) ? { ...described(text, root, path), ...brokenLinks(root, path, text, named) } : {}) });
 	}
 	for (const path of under(join(root, project.plans), /\.(plan\.json|md)$/i)) {
 		if (/\.spec\.md$/i.test(path)) continue;
-		// A plan says which ticket it is for (ADR 0013): the Docs panel shows it under that ticket.
-		const ticket = /\.plan\.json$/i.test(path) ? await planTicket(path) : "";
-		list.push({ path, name: relative(join(root, project.plans), path), group: "plans", exists: true, ...(ticket ? { tickets: [ticket] } : {}), ...(MARKDOWN.test(path) ? brokenLinks(root, path, await head(path), named) : {}) });
+		// A plan says which ticket it is for, its title, and the scripts it targets (ADR 0013).
+		const plan = /\.plan\.json$/i.test(path) ? await planSays(path) : null;
+		const mdText = MARKDOWN.test(path) ? await head(path) : "";
+		list.push({
+			path,
+			name: relative(join(root, project.plans), path),
+			group: "plans",
+			exists: true,
+			...(plan?.title ? { heading: plan.title } : {}),
+			...(plan?.status ? { status: plan.status } : {}),
+			...(plan?.ticket ? { tickets: [plan.ticket] } : {}),
+			...(plan?.codeRefs.length ? { codeRefs: plan.codeRefs } : {}),
+			...(mdText ? { ...described(mdText, root, path), ...brokenLinks(root, path, mdText, named) } : {}),
+		});
+	}
+	// Check broken [[wikilinks]] across Markdown docs using a single O(N) pre-built index.
+	const IMAGE_EMBED_RE = /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif)$/i;
+	const docNameIndex = buildDocNameIndex(list, root);
+	for (const doc of list) {
+		if (!doc.exists || !MARKDOWN.test(doc.path)) continue;
+		try {
+			const s = statSync(doc.path);
+			if (s.size > LINKED_BYTES) continue;
+			const stamp = `${s.size}:${s.mtimeMs}`;
+			const kept = namesRead.get(doc.path);
+			let places: ReturnType<typeof namePlaces>;
+			if (kept && kept.stamp === stamp) {
+				places = kept.places;
+			} else {
+				places = namePlaces(await head(doc.path));
+				if (namesRead.size >= NAMES_KEPT) namesRead.delete(namesRead.keys().next().value!);
+				namesRead.set(doc.path, { stamp, places });
+			}
+			if (!places.length) continue;
+			const brokenWiki: { href: string; line: number; column: number }[] = [];
+			for (const place of places) {
+				if (IMAGE_EMBED_RE.test(place.name)) continue;
+				if (!lookupInIndex(place.name, docNameIndex)) {
+					brokenWiki.push({ href: `[[${place.name}]]`, line: place.line, column: place.column });
+				}
+			}
+			if (brokenWiki.length) doc.broken = [...(doc.broken ?? []), ...brokenWiki];
+		} catch {
+			// Skip unreadable files cleanly.
+		}
 	}
 	// Each catalog says whether its list is still what the documents are.
 	const folders = projectFolders(root, project);
@@ -456,11 +765,21 @@ const KINDS: [RegExp, string][] = [
  */
 export async function fileManifest(files: WorkspaceFiles, project: Project): Promise<ManifestFile[]> {
 	const rows: ManifestFile[] = [];
-	const apart = [project.docs, project.plans, ".ssl-studio"].map((folder) => `${folder.split(/[\\/]/).join("/")}/`);
+	const apart = [project.docs, project.plans, ".ssl-studio"]
+		.map((folder) => folder.split(/[\\/]/).filter((p) => p && p !== ".").join("/"))
+		.filter(Boolean)
+		.map((folder) => `${folder}/`);
+	const codeAtRoot = project.code.trim() === "." || project.code.trim() === "";
 	for (const path of files.files()) {
 		const name = relative(files.root, path).split(sep).join("/");
-		if (!name.includes("/") || apart.some((folder) => name.startsWith(folder))) continue;
-		const bytes = new Uint8Array(await Bun.file(path).arrayBuffer());
+		if (apart.some((folder) => name.startsWith(folder))) continue;
+		if (!name.includes("/")) {
+			// Skip root project docs (README.md, AGENTS.md) and non-code root files unless code = ".".
+			if (!codeAtRoot || !/\.(ssl|srvscr|ds|sql)$/i.test(name)) continue;
+		}
+		const stat = Bun.file(path);
+		if (stat.size > 32 * 1024 * 1024) continue;
+		const bytes = new Uint8Array(await stat.arrayBuffer());
 		let lines = bytes.length ? 1 : 0;
 		for (const byte of bytes) if (byte === 10) lines++;
 		if (bytes.length && bytes[bytes.length - 1] === 10) lines--;

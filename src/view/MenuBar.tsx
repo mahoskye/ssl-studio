@@ -20,7 +20,7 @@ import { keysFor, onOpenMenu, runCommand } from "./commands";
 import { Icon } from "./Icon";
 import { crowdedOut, isPanelAvailable, isShown, narrowHosted, narrowPanels, panelOn, PANELS, showPanel, sideOf } from "./panels/registry";
 import { activeEditor } from "./editor/EditorGroup";
-import { activeLiveEditor } from "./editor/liveBridge";
+import { activeLiveEditor, openReadFind } from "./editor/liveBridge";
 import { review } from "./editor/Review";
 import { Menu, nextItem, type MenuItem } from "./Menu";
 import { canGo } from "./navigation";
@@ -63,8 +63,12 @@ function editorKeys(id: string): string {
 }
 
 function runEditor(id: string, shown: boolean) {
-	// Behind blocks or a rendered page the text is not on screen, but what was done to it can still be undone.
-	if (!shown) return void (id === "undo" ? activeDoc()?.model.undo() : id === "redo" ? activeDoc()?.model.redo() : undefined);
+	// Behind blocks or a rendered page the text is not on screen, but what was done to it can still be undone;
+	// Find also works on a read-mode Markdown page via CodeMirror search.
+	if (!shown) {
+		if (id === "actions.find" && (activeLiveEditor()?.runAction(id) || openReadFind())) return;
+		return void (id === "undo" ? activeDoc()?.model.undo() : id === "redo" ? activeDoc()?.model.redo() : undefined);
+	}
 	const live = activeLiveEditor();
 	if (live && live.runAction(id)) return;
 	const editor = activeEditor();
@@ -112,8 +116,10 @@ function itemsOf(entries: readonly BarEntry[], box: HTMLElement | null): MenuIte
 		// Undo and redo reach text that is not shown as text (blocks, a page), but not a file that is behind something else.
 		// A picture, or other bytes, has no text to undo anything in.
 		const bytes = now.file && documents.get(activePath()!)?.binary ? "The open file is not text" : "";
-		const behind = bytes || (!now.text && now.file && !inFront() ? "The file is not in front" : "");
-		return { label: entry.label, keys: editorKeys(entry.editor), run: () => runEditor(entry.editor, now.text), why: missing(entry, now) || behind || noPaste };
+		const readFind = entry.editor === "actions.find" && now.file && inFront() && !bytes && isMarkdown(activePath()!);
+		const effective = readFind ? { ...now, text: true } : now;
+		const behind = bytes || (!effective.text && now.file && !inFront() ? "The file is not in front" : "");
+		return { label: entry.label, keys: editorKeys(entry.editor), run: () => runEditor(entry.editor, now.text), why: missing(entry, effective) || behind || noPaste };
 	});
 }
 

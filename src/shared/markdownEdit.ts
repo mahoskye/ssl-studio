@@ -471,3 +471,84 @@ export function withImageWidth(raw: string, width: number | null): string {
 	const altPart = [parsed.alt, width !== null ? String(width) : ""].filter(Boolean).join("|");
 	return `${lead}![${altPart}](${parsed.src})${trail}`;
 }
+
+/** Generates a nested GFM Table of Contents list from document headings (`minLevel..maxLevel`). */
+export function generateToc(markdown: string, minLevel = 2, maxLevel = 4): string {
+	const headings = documentHeadings(markdown).filter((h) => h.level >= minLevel && h.level <= maxLevel);
+	if (!headings.length) return "";
+	const baseLevel = Math.min(...headings.map((h) => h.level));
+	return headings
+		.map((h) => {
+			const indent = "  ".repeat(Math.max(0, h.level - baseLevel));
+			return `${indent}- [${h.text}](#${h.anchor})`;
+		})
+		.join("\n");
+}
+
+const TOC_START = "<!-- toc -->";
+const TOC_END = "<!-- /toc -->";
+
+/**
+ * Updates an existing `<!-- toc --> ... <!-- /toc -->` block in place, or inserts one
+ * right after the first H1 heading (or YAML frontmatter) when none exists yet.
+ */
+export function upsertTocBlock(markdown: string): { text: string; updated: boolean } {
+	const toc = generateToc(markdown);
+	if (!toc) return { text: markdown, updated: false };
+	const eol = markdown.includes("\r\n") ? "\r\n" : "\n";
+	const block = `${TOC_START}${eol}${toc.replace(/\n/g, eol)}${eol}${TOC_END}`;
+
+	const start = markdown.indexOf(TOC_START);
+	const end = start >= 0 ? markdown.indexOf(TOC_END, start + TOC_START.length) : -1;
+	if (start >= 0 && end >= 0) {
+		const next = markdown.slice(0, start) + block + markdown.slice(end + TOC_END.length);
+		return { text: next, updated: next !== markdown };
+	}
+
+	const fm = frontMatter(markdown);
+	const lines = markdown.split(/\r?\n/);
+	let insertAfter = fm.lines;
+	for (let i = fm.lines; i < lines.length; i++) {
+		if (/^#\s+\S/.test(lines[i]!)) {
+			insertAfter = i + 1;
+			break;
+		}
+		if (lines[i]!.trim()) break;
+	}
+	const head = lines.slice(0, insertAfter).join(eol);
+	const tail = lines.slice(insertAfter).join(eol).replace(/^(?:\r?\n)+/, "");
+	const next = head ? `${head}${eol}${eol}${block}${tail ? `${eol}${eol}${tail}` : eol}` : `${block}${tail ? `${eol}${eol}${tail}` : eol}`;
+	return { text: next, updated: true };
+}
+
+/** Counts words (excluding YAML frontmatter & code fence syntax) and Markdown task checklist progress. */
+export function markdownStats(markdown: string): { words: number; tasksDone: number; tasksTotal: number } {
+	const body = frontMatter(markdown).body;
+	const lines = body.split(/\r?\n/);
+	let inFence: { ch: string; len: number } | null = null;
+	let words = 0;
+	let tasksDone = 0;
+	let tasksTotal = 0;
+	for (const line of lines) {
+		const fm = /^[ \t]{0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+		if (fm) {
+			if (!inFence) inFence = { ch: fm[1]![0]!, len: fm[1]!.length };
+			else if (fm[1]![0] === inFence.ch && fm[1]!.length >= inFence.len && fm[2]!.trim() === "") inFence = null;
+			continue;
+		}
+		if (!inFence) {
+			const task = /^[ \t]*[-*+]\s+\[([ xX])\]\s/.exec(line);
+			if (task) {
+				tasksTotal++;
+				if (task[1]!.toLowerCase() === "x") tasksDone++;
+			}
+		}
+		const clean = line
+			.replace(/!\[[^\]]*\]\([^)]*\)/g, " ")
+			.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+			.replace(/[#*_`~>|]/g, " ");
+		const tokens = clean.trim().split(/\s+/).filter((w) => /[A-Za-z0-9]/.test(w));
+		words += tokens.length;
+	}
+	return { words, tasksDone, tasksTotal };
+}

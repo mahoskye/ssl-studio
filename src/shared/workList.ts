@@ -39,34 +39,80 @@ export function workList(files: readonly DocFile[], root: string | undefined | n
 	const specsOf = (ticket: DocFile) => specs.filter((spec) => spec.tickets?.some((key) => same(key, ticket.ticket)) || ticket.specs?.some((path) => matchesRef(spec.path, path)));
 	const plansOf = (ticket: DocFile) => plans.filter((plan) => plan.tickets?.some((key) => same(key, ticket.ticket)) || ticket.plans?.some((path) => matchesRef(plan.path, path)));
 	// A ticket is under its parent when the parent is in the folder, and is not its own ancestor.
-	const parentOf = (ticket: DocFile) => tickets.find((other) => other !== ticket && same(other.ticket, ticket.parent));
+	const byKey = new Map<string, DocFile>();
+	for (const t of tickets) if (t.ticket && !byKey.has(t.ticket.toLowerCase())) byKey.set(t.ticket.toLowerCase(), t);
+	const parentOf = (ticket: DocFile) => {
+		if (!ticket.parent) return undefined;
+		const found = byKey.get(ticket.parent.toLowerCase());
+		return found && found !== ticket ? found : undefined;
+	};
 	/** Whether a ticket is its own ancestor: one of a ring of tickets that name each other. A ticket under such a ring is not. */
-	const loops = (ticket: DocFile) => {
+	const loopsMemo = new Map<DocFile, boolean>();
+	const loops = (ticket: DocFile): boolean => {
+		const cached = loopsMemo.get(ticket);
+		if (cached !== undefined) return cached;
 		const seen = new Set<DocFile>();
+		let res = false;
 		for (let up = parentOf(ticket); up && !seen.has(up); up = parentOf(up)) {
-			if (up === ticket) return true;
+			if (up === ticket) {
+				res = true;
+				break;
+			}
 			seen.add(up);
 		}
-		return false;
+		loopsMemo.set(ticket, res);
+		return res;
 	};
-	const childrenOf = (ticket: DocFile) => tickets.filter((other) => !loops(other) && parentOf(other) === ticket);
-	const top = tickets.filter((ticket) => loops(ticket) || !parentOf(ticket));
+	const childrenMap = new Map<DocFile, DocFile[]>();
+	const top: DocFile[] = [];
+	for (const ticket of tickets) {
+		const p = !loops(ticket) ? parentOf(ticket) : undefined;
+		if (p) {
+			const list = childrenMap.get(p) ?? [];
+			list.push(ticket);
+			childrenMap.set(p, list);
+		} else top.push(ticket);
+	}
+	const childrenOf = (ticket: DocFile) => childrenMap.get(ticket) ?? [];
+	const specsByTicket = new Map<DocFile, DocFile[]>();
+	const attachedSpecs = new Set<DocFile>();
+	for (const ticket of tickets) {
+		const list = specsOf(ticket);
+		specsByTicket.set(ticket, list);
+		for (const s of list) attachedSpecs.add(s);
+	}
+	const plansByTicket = new Map<DocFile, DocFile[]>();
+	for (const ticket of tickets) plansByTicket.set(ticket, plansOf(ticket));
+
+	const rankMemo = new Map<DocFile, number>();
 	/** How far along a ticket is, with what is under it: the least finished of them. */
-	const rank = (ticket: DocFile, depth = 0): number => Math.min(ORDER[toneOf(ticket.status)], ...(depth < 8 ? childrenOf(ticket).map((child) => rank(child, depth + 1)) : []));
+	const rank = (ticket: DocFile, depth = 0): number => {
+		const cached = rankMemo.get(ticket);
+		if (cached !== undefined) return cached;
+		let min = ORDER[toneOf(ticket.status)];
+		if (depth < 8) {
+			for (const child of childrenOf(ticket)) {
+				const r = rank(child, depth + 1);
+				if (r < min) min = r;
+			}
+		}
+		rankMemo.set(ticket, min);
+		return min;
+	};
 	const byRank = (list: DocFile[]) => list.map((ticket, at) => ({ ticket, at, rank: rank(ticket) })).sort((a, b) => a.rank - b.rank || a.at - b.at);
 
 	const rows: WorkRow[] = [];
 	const add = (ticket: DocFile, depth: number, parentTicket?: DocFile) => {
 		rows.push({ file: ticket, kind: "ticket", depth, ...(parentTicket ? { link: workLinkOf(parentTicket, ticket, "ticket") } : {}) });
-		for (const plan of plansOf(ticket)) rows.push({ file: plan, kind: "plan", depth: depth + 1, link: workLinkOf(ticket, plan, "plan") });
-		for (const spec of specsOf(ticket)) rows.push({ file: spec, kind: "spec", depth: depth + 1, link: workLinkOf(ticket, spec, "spec") });
+		for (const plan of plansByTicket.get(ticket) ?? []) rows.push({ file: plan, kind: "plan", depth: depth + 1, link: workLinkOf(ticket, plan, "plan") });
+		for (const spec of specsByTicket.get(ticket) ?? []) rows.push({ file: spec, kind: "spec", depth: depth + 1, link: workLinkOf(ticket, spec, "spec") });
 		if (depth < 8) for (const { ticket: child } of byRank(childrenOf(ticket))) add(child, depth + 1, ticket);
 	};
 	const ordered = byRank(top);
 	const finished = ordered.filter((entry) => entry.rank >= ORDER.done);
 	const fold = !options.all && finished.length > FINISHED_SHOWN;
 	for (const entry of ordered) if (!fold || entry.rank < ORDER.done) add(entry.ticket, 0);
-	return { rows, folded: fold ? finished.length : 0, loose: specs.filter((spec) => !tickets.some((ticket) => specsOf(ticket).includes(spec))) };
+	return { rows, folded: fold ? finished.length : 0, loose: specs.filter((spec) => !attachedSpecs.has(spec)) };
 }
 
 /** A row of the Work list as it is drawn: whether anything is under it, and whether that is shut away. */

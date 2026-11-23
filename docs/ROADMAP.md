@@ -879,6 +879,17 @@ walkthrough of the baseline UI ([UI-DESIGN.md](UI-DESIGN.md),
   sticky first column in Table View, and explicit `Side-by-Side | Inline`
   layout switching in Diff Review.
 
+## Planned
+
+- **Document export to Confluence and PDF (2026-11-22).** Convert project
+  documents across their formats (Markdown notes, tickets, specs, CSV
+  registries, plans/flowcharts, and schema files) into Confluence-ready
+  documents and polished PDFs. Visual formatting of the finished deliverable
+  is a priority, with particular care around sensible pagination—preventing
+  orphaned headings and awkward mid-section, mid-table, mid-callout, or
+  mid-diagram page breaks so the exported PDF reads as a cohesive,
+  publication-quality document.
+
 ## On hold
 
 - **Forms, client scripts and code-behind (2026-11-17).** Wanted eventually, in

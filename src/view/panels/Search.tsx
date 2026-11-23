@@ -15,6 +15,9 @@ import { choose } from "../dialogs";
 import { canonical, documents, fileChangedOnDisk, notify, openFile, save, saveAll, setState, state } from "../state";
 import { baseName, relativeTo } from "../../shared/paths";
 import { matchesOn, SEARCH_LIMIT, searchPattern, type SearchOptions } from "../../shared/searchPattern";
+import { outline } from "../../shared/outline";
+import { docs } from "../project";
+import { ticketAtHand } from "../projectDocs";
 import { focusRowsBelow, IconButton, Row, RowGroup, Rows } from "./Rows";
 import { showPanel } from "./registry";
 import { byLine, markedColumns, segments, type LineHit } from "./searchLines";
@@ -59,10 +62,10 @@ function replaceInModel(model: monaco.editor.ITextModel, pattern: RegExp, with_:
 	return edits.length;
 }
 
-const [request, setRequest] = createSignal<{ query: string; regex: boolean } | null>(null);
-/** Shows the Search panel with this searched for: a registry's row asks where its name is in the code. */
-export function searchFor(query: string, options: { regex?: boolean } = {}) {
-	setRequest({ query, regex: Boolean(options.regex) });
+const [request, setRequest] = createSignal<({ query: string } & SearchOptions) | null>(null);
+/** Shows the Search panel with this searched for: a table cell or code check asks where a value appears in code. */
+export function searchFor(query: string, options: SearchOptions = {}) {
+	setRequest({ query, ...options });
 	showPanel("search");
 }
 
@@ -115,7 +118,14 @@ export function Search() {
 		setRequest(null);
 		input.value = wanted.query;
 		setTyped(wanted.query);
-		setRegex(wanted.regex);
+		setRegex(Boolean(wanted.regex));
+		if (wanted.wholeWord !== undefined) setWholeWord(wanted.wholeWord);
+		if (wanted.caseSensitive !== undefined) setCaseSensitive(wanted.caseSensitive);
+		if (wanted.include !== undefined || wanted.exclude !== undefined) {
+			setInclude(wanted.include ?? "");
+			setExclude(wanted.exclude ?? "");
+			setChoosing(Boolean(wanted.include?.trim() || wanted.exclude?.trim()));
+		}
 		void run();
 	});
 	// A switch changes what the results on screen mean, so they are fetched again.
@@ -128,13 +138,43 @@ export function Search() {
 		for (const line of byLine(hits())) map.set(line.path, [...(map.get(line.path) ?? []), line]);
 		return [...map];
 	};
-	// Where each line sits, region › procedure, from the server's symbols (first 40 files).
+	// Where each line sits: SSL region › procedure (from starlims-lsp) OR Markdown # Heading (from shared/outline).
+	// Strictly skips Monaco model creation for non-SSL files so search never leaks ITextModels, and reads Markdown
+	// from disk to match `backend.search` line numbers accurately.
+	let placesSeq = 0;
 	const [places] = createResource(groups, async (list) => {
+		const mine = ++placesSeq;
 		const out = new Map<string, string>();
-		for (const [path, lines] of list.slice(0, 40)) {
+		let sslChecked = 0;
+		for (const [path, lines] of list) {
+			if (mine !== placesSeq) return out;
+			if (/\.(md|markdown)$/i.test(path)) {
+				const text = await backend.read(path).then((r) => r.text, () => "");
+				if (!text || mine !== placesSeq) continue;
+				const mdSymbols = outline("markdown", text);
+				for (const line of lines) {
+					const trail: string[] = [];
+					const walk = (nodes: typeof mdSymbols) => {
+						for (const n of nodes) {
+							if (line.line >= n.line && line.line <= n.endLine) {
+								trail.push(n.name);
+								if (n.children?.length) walk(n.children);
+								break;
+							}
+						}
+					};
+					walk(mdSymbols);
+					if (trail.length) out.set(`${path}:${line.line}`, trail.join(" › "));
+				}
+				continue;
+			}
+			if (!/\.(ssl|srvscr|ds)$/i.test(path) || sslChecked >= 60) continue;
+			sslChecked++;
 			const model = await session.ensureModel(monaco.Uri.file(path).toString());
+			if (mine !== placesSeq) return out;
 			if (!model || model.getLanguageId() !== "ssl") continue;
 			const symbols = await session.documentSymbols(model).catch(() => []);
+			if (mine !== placesSeq) return out;
 			for (const line of lines) out.set(`${path}:${line.line}`, symbolPath(symbols, line.line).filter((s) => s.kind === monaco.languages.SymbolKind.Namespace || s.kind === monaco.languages.SymbolKind.Function || s.kind === monaco.languages.SymbolKind.Method).map((s) => s.name).join(" › "));
 		}
 		return out;
@@ -150,6 +190,53 @@ export function Search() {
 	/** The switches that narrow a search, by the names on their buttons: what to try without when nothing is found. */
 	const switchesOn = () => [caseSensitive() ? "Aa" : "", wholeWord() ? "ab" : "", regex() ? ".*" : ""].filter(Boolean);
 	const narrowed = () => Boolean(searched().include?.trim() || searched().exclude?.trim());
+	const cleanDir = (dir?: string) => (dir ?? "").replace(/^[./\\]+|[\\/]+$/g, "").replace(/\\/g, "/");
+	const docsRel = () => cleanDir(state.project?.docs ?? "docs");
+	const plansRel = () => cleanDir(state.project?.plans ?? "design");
+	const schemaRel = () => cleanDir(state.project?.schema ?? "schema");
+	const codeExcludeGlob = () =>
+		[
+			docsRel() ? `${docsRel()}/**` : "",
+			plansRel() ? `${plansRel()}/**` : "",
+			schemaRel() ? `${schemaRel()}/**` : "",
+			"README.md",
+			"AGENTS.md",
+			"**/INDEX.md",
+		]
+			.filter(Boolean)
+			.join(", ");
+	const docsIncludeGlob = () =>
+		[
+			docsRel() ? `${docsRel()}/**` : "",
+			plansRel() ? `${plansRel()}/**` : "",
+			schemaRel() ? `${schemaRel()}/**` : "",
+			"*.md",
+		]
+			.filter(Boolean)
+			.join(", ");
+	const activeTicketScope = createMemo(() => {
+		const key = ticketAtHand();
+		if (!key) return null;
+		const found = docs().find((d) => d.exists && d.group === "tickets" && d.ticket?.toLowerCase() === key.toLowerCase());
+		if (!found) return null;
+		if (found.ticketFolder) {
+			const relFolder = relativeTo(state.workspace?.root, found.ticketFolder).replace(/\\/g, "/");
+			return { key, glob: `${relFolder}/**`, tip: `Search inside ${key}'s ticket folder` };
+		}
+		const relPaths = [
+			relativeTo(state.workspace?.root, found.path).replace(/\\/g, "/"),
+			...(found.specs ?? []),
+			...(found.plans ?? []),
+		].filter(Boolean);
+		return { key, glob: [...new Set(relPaths)].join(", "), tip: `Search ${key} and its linked specs/plans` };
+	});
+	const applyScope = (inc: string, exc = "") => {
+		setInclude(inc);
+		setExclude(exc);
+		setChoosing(Boolean(inc || exc));
+		if (typed().trim()) void run();
+	};
+	const scopeActive = (inc: string, exc = "") => (choosing() ? include().trim() === inc && exclude().trim() === exc : !inc && !exc);
 
 	// --- replacing -------------------------------------------------------------
 
@@ -348,6 +435,39 @@ export function Search() {
 						<input aria-label="Files to exclude" title="Patterns with commas between: tests, *.md. These are left out even when included above." placeholder="Files to exclude: tests, *.md" value={exclude()} onInput={(e) => setExclude(e.currentTarget.value)} />
 					</div>
 				</Show>
+				<div class="search-scopes" role="group" aria-label="Quick search scope">
+					<button type="button" classList={{ on: scopeActive("", "") }} title="Search all workspace files" onClick={() => applyScope("", "")}>
+						All
+					</button>
+					<button
+						type="button"
+						classList={{ on: scopeActive("", codeExcludeGlob()) }}
+						title="Search code files only (exclude docs, design, schema, and catalogs)"
+						onClick={() => applyScope("", codeExcludeGlob())}
+					>
+						Code
+					</button>
+					<button
+						type="button"
+						classList={{ on: scopeActive(docsIncludeGlob(), "") }}
+						title="Search project documentation, plans, schema, and Markdown files"
+						onClick={() => applyScope(docsIncludeGlob(), "")}
+					>
+						Docs
+					</button>
+					<Show when={activeTicketScope()}>
+						{(scope) => (
+							<button
+								type="button"
+								classList={{ on: scopeActive(scope().glob, "") }}
+								title={scope().tip}
+								onClick={() => applyScope(scope().glob, "")}
+							>
+								{scope().key}
+							</button>
+						)}
+					</Show>
+				</div>
 			</form>
 			<p class="hint" classList={{ warn: status() === "failed" }} role="status">
 				{summary()}

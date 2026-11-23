@@ -25,6 +25,7 @@ import {
 	type CalloutWidgetHost,
 } from "./cmLiveShared";
 import { hydrateImagesInElement } from "./imageResolve";
+import { colourCode } from "./markdownCode";
 
 const TASK_RE = /^((?:[ \t]*>[ \t]?)*[ \t]*)([-*+]|\d{1,9}[.)])([ \t]+)\[([ xX])\]([ \t]?)/;
 
@@ -95,6 +96,7 @@ export class CalloutWidget extends WidgetType {
 		private readonly endLine: number,
 		private readonly filePath: string,
 		private readonly readMode: boolean,
+		private readonly themeVer: number = 0,
 	) {
 		super();
 	}
@@ -110,7 +112,8 @@ export class CalloutWidget extends WidgetType {
 			other.startLine === this.startLine &&
 			other.endLine === this.endLine &&
 			other.filePath === this.filePath &&
-			other.readMode === this.readMode
+			other.readMode === this.readMode &&
+			other.themeVer === this.themeVer
 		);
 	}
 
@@ -321,6 +324,7 @@ export class CalloutWidget extends WidgetType {
 			}
 			bodyEl.innerHTML = renderInlineHtml(ctrl.bodyMarkdown, ctrl.filePath, false, true);
 			hydrateImagesInElement(bodyEl, ctrl.filePath);
+			void colourCode(bodyEl);
 
 			const boxes = [...bodyEl.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')];
 			if (boxes.length) {

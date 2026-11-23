@@ -10,7 +10,9 @@ import { openReview, type Check } from "../editor/Review";
 import { monaco } from "../editor/monaco";
 import { measure } from "../editor/textmate";
 import { session } from "../lsp/session";
-import { catalogsKeptFor } from "../projectDocs";
+import { ticketForFile } from "../../shared/workContext";
+import { docs } from "../project";
+import { catalogsKeptFor, workPrompt } from "../projectDocs";
 import { applyText, canonical, documents, notify, openFile, setState, state } from "../state";
 import { baseName, joinPath } from "../../shared/paths";
 import { bannerTemplate, TEMPLATES } from "../../shared/houseStyle";
@@ -113,7 +115,10 @@ async function buildUnit(path: string, plan: Plan, spec: string, run: BuildRun, 
 	const current = unit.change && existing !== null ? procedureText(existing, spans, unit.name) : null;
 	if (!current) delete unit.change;
 	const known = run.units.filter((u) => u.status === "passed" || u.status === "kept");
-	const base = unitPrompt(plan, spec, unit, known, callable, patternsFrom(TEMPLATES), current ? changeText(plan, unit, current) : "");
+	const ticketKey = (typeof plan.ticket === "string" && plan.ticket.trim()) || ticketForFile(docs(), path, state.workspace?.root);
+	const work = ticketKey ? await workPrompt(ticketKey, { specs: false }).catch(() => null) : null;
+	const rawBase = unitPrompt(plan, spec, unit, known, callable, patternsFrom(TEMPLATES), current ? changeText(plan, unit, current) : "");
+	const base = work ? `${rawBase}\n\n${work.text}` : rawBase;
 	const units = run.units;
 	let prompt = base;
 	let problems: string[] = [];
@@ -165,7 +170,7 @@ async function buildUnit(path: string, plan: Plan, spec: string, run: BuildRun, 
 			return publish(path, run);
 		}
 		if (overBudget(run)) break;
-		prompt = retryPrompt(base, code, problems);
+		prompt = retryPrompt(rawBase, code, problems);
 	}
 	unit.status = "stuck";
 	unit.problems = problems;

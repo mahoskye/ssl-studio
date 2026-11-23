@@ -7,7 +7,9 @@ import { fenced } from "../agent/tidy";
 import { openReview, type Check } from "../editor/Review";
 import { monaco } from "../editor/monaco";
 import { session } from "../lsp/session";
-import { catalogsKeptFor } from "../projectDocs";
+import { ticketForFile } from "../../shared/workContext";
+import { docs } from "../project";
+import { catalogsKeptFor, workPrompt } from "../projectDocs";
 import { applyText, notify, openFile, setState, state } from "../state";
 import { baseName, joinPath } from "../../shared/paths";
 import { TEMPLATES } from "../../shared/houseStyle";
@@ -68,7 +70,10 @@ export function writeTests(path: string) {
 			() => "",
 		);
 		const file = testFile(path, plan);
-		const base = testsPrompt(plan, baseName(file), paths, code, spec, patternsFrom(TEMPLATES));
+		const ticketKey = (typeof plan.ticket === "string" && plan.ticket.trim()) || ticketForFile(docs(), path, state.workspace?.root);
+		const work = ticketKey ? await workPrompt(ticketKey, { specs: false }).catch(() => null) : null;
+		const rawBase = testsPrompt(plan, baseName(file), paths, code, spec, patternsFrom(TEMPLATES));
+		const base = work ? `${rawBase}\n\n${work.text}` : rawBase;
 		let prompt = base;
 		let best: string | null = null;
 		let reading: Awaited<ReturnType<typeof read>> | null = null;
@@ -84,7 +89,7 @@ export function writeTests(path: string) {
 			problems = problemsIn(attemptCode, attemptReading, paths.length);
 			if (attemptCode) (best = attemptCode), (reading = attemptReading);
 			if (!problems.length) break;
-			prompt = retryPrompt(base, attemptCode, problems);
+			prompt = retryPrompt(rawBase, attemptCode, problems);
 		}
 		if (!best || !reading) return notify(`The agent did not write a test script: ${problems[0] ?? "it gave no code."}`, "error");
 		const proposed = await session.formatText(best, { tabSize: 4, insertSpaces: false }).catch(() => best!);

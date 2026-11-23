@@ -2,29 +2,56 @@
 // Synced 1:1 with the open document's Monaco ITextModel (ADR 0002: plain text stays the single
 // source of truth for saves, undo across views, Git, Search, Diagnostics, Agent, and Document Outline).
 import { history } from "@codemirror/commands";
+import { openSearchPanel } from "@codemirror/search";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
-import { Annotation, Compartment, EditorSelection, EditorState, type Extension, type Transaction } from "@codemirror/state";
-import { drawSelection, dropCursor, EditorView, highlightSpecialChars } from "@codemirror/view";
+import { Annotation, Compartment, EditorSelection, EditorState, RangeSetBuilder, StateEffect, StateField, type Extension, type Transaction } from "@codemirror/state";
+import { Decoration, type DecorationSet, drawSelection, dropCursor, EditorView, highlightSpecialChars } from "@codemirror/view";
 import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import { Portal } from "solid-js/web";
+import { evaluateTicketReadiness } from "../../shared/docExport";
 import { linkLeads } from "../../shared/docLinks";
-import { frontMatter } from "../../shared/frontMatter";
+import { fenceAtLine, fenceFormatTarget } from "../../shared/fencedFormat";
+import {
+	addToFrontMatterList,
+	formatFrontMatterInnerReplacement,
+	frontMatter,
+	frontMatterInnerSpan,
+	removeFromFrontMatterList,
+	withFrontMatter,
+} from "../../shared/frontMatter";
+import { workspaceTags } from "../../shared/tags";
 import { documentHeadings, findHeadingLine, withImageWidth } from "../../shared/markdownEdit";
 import type { TableAlign } from "../../shared/markdownTables";
 import { docByName, linkedFrom, namedLink } from "../../shared/namedLinks";
 import { baseName, dirName, isInside, joinPath, relativeTo } from "../../shared/paths";
-import { DOC_FOLDERS, registryTitle, statusChoices, toneOf } from "../../shared/projectDocs";
+import { DOC_FOLDERS, isCatalog, registryTitle, statusChoices, toneOf } from "../../shared/projectDocs";
 import { rowsLine } from "../../shared/registryTickets";
 import { docLinkedTickets, ticketWork } from "../../shared/workContext";
+import { lineChanges, type LineChange } from "../../shared/lineDiff";
+import { gitStatus, gitVersion } from "../git";
 import { backend } from "../backend";
-import { choose } from "../dialogs";
+import { ask, choose } from "../dialogs";
 import { Icon } from "../Icon";
 import { Menu } from "../Menu";
 import { noteCursor } from "../navigation";
 import { chooseFromMenu } from "../panels/RowMenu";
 import { searchFor } from "../panels/Search";
 import { docs } from "../project";
-import { linkDocumentToTicket, newSpec, setStatus } from "../projectDocs";
+import {
+	addRegistryRowForTicket,
+	createTicketFolder,
+	exportDocAs,
+	exportTicketPacket,
+	linkDocumentToTicket,
+	linkNonTicketToTicket,
+	newKnowledge,
+	newSpec,
+	newTicket,
+	newTicketFile,
+	promoteQuestionToDecision,
+	setStatus,
+	unlinkDocumentFromTicket,
+} from "../projectDocs";
 import {
 	canonical,
 	documents,
@@ -39,6 +66,8 @@ import {
 	takeReveal,
 } from "../state";
 import { insertCalloutInteractive, insertImageInteractive, insertMarkdownTemplate } from "../templater";
+import { themeVersion } from "../themes/themes";
+import { liveCodeHighlightPlugin } from "./cmCodeHighlight";
 import { cmMarkdownCompletion } from "./cmCompletion";
 import {
 	activeTableAtCursor,
@@ -71,7 +100,9 @@ import { applyMarkdownFormatToTextarea, focusLiveWidgetAt } from "./cmLiveShared
 import { cmMarkdownHighlight, cmStudioTheme } from "./cmTheme";
 import { buildHoverPreview, type HoverPreviewData } from "./hoverPreview";
 import { hydrateImagesInElement } from "./imageResolve";
-import { registerLiveEditor, type LiveEditorHandle } from "./liveBridge";
+import { formatCodeFence } from "./languages";
+import { registerLiveEditor, registerReadFind, type LiveEditorHandle } from "./liveBridge";
+import { colourCode } from "./markdownCode";
 import { mdOutline, setMdOutline } from "./mdOutline";
 import { monaco } from "./monaco";
 import { askRows } from "./tableRows";
@@ -101,6 +132,35 @@ type ActiveTableHud = {
 /** Marks programmatic model->CM6 syncs so Read mode's transaction filter permits them. */
 const externalSyncAnnotation = Annotation.define<boolean>();
 
+/** Subtle left-edge Git gutter marks inside CM6 Live Preview (matching Monaco gitMarks). */
+const setGitChangesEffect = StateEffect.define<LineChange[]>();
+const gitMarksField = StateField.define<DecorationSet>({
+	create: () => Decoration.none,
+	update(value, tr) {
+		for (const e of tr.effects) {
+			if (e.is(setGitChangesEffect)) {
+				const builder = new RangeSetBuilder<Decoration>();
+				const last = tr.state.doc.lines;
+				const seen = new Set<number>();
+				for (const change of e.value) {
+					const start = Math.min(Math.max(change.line, 1), last);
+					const end = change.kind === "removed" ? start : Math.min(Math.max(change.endLine, start), last);
+					const cls = change.kind === "added" ? "cm-git-added" : change.kind === "removed" ? "cm-git-removed" : "cm-git-modified";
+					for (let ln = start; ln <= end; ln++) {
+						if (seen.has(ln)) continue;
+						seen.add(ln);
+						const line = tr.state.doc.line(ln);
+						builder.add(line.from, line.from, Decoration.line({ class: cls }));
+					}
+				}
+				return builder.finish();
+			}
+		}
+		return tr.docChanged ? value.map(tr.changes) : value;
+	},
+	provide: (f) => EditorView.decorations.from(f),
+});
+
 async function readFileText(path: string): Promise<string> {
 	const key = canonical(path);
 	const open = documents.get(key);
@@ -129,6 +189,8 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 	let hostEl!: HTMLDivElement;
 	let pageEl!: HTMLDivElement;
 	let cmMountEl!: HTMLDivElement;
+	let yamlInputEl: HTMLTextAreaElement | undefined;
+	let yamlEditBtnEl: HTMLButtonElement | undefined;
 	let hoverBodyEl: HTMLDivElement | undefined;
 	let cmView: EditorView | undefined;
 	const modeCompartment = new Compartment();
@@ -152,13 +214,95 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 
 	// --- Frontmatter Properties, Ticket Work & Backlinks ---------------------
 	const front = createMemo(() => frontMatter(text()));
+	const yamlSpan = createMemo(() => frontMatterInnerSpan(text()));
 	const facts = createMemo(() =>
 		Object.entries(front().values)
 			.filter(([key, value]) => key !== "title" && (Array.isArray(value) ? value.length : value))
 			.map(([key, value]) => ({ key, values: Array.isArray(value) ? value : [value] })),
 	);
-	const ticketFile = (key: string) =>
-		state.workspace && state.project ? joinPath(state.workspace.root, ...state.project.docs.split(/[\\/]/), DOC_FOLDERS.tickets, `${key}.md`) : "";
+
+	const resizeYamlInput = (el: HTMLTextAreaElement | undefined) => {
+		if (!el) return;
+		el.style.height = "auto";
+		el.style.height = `${Math.max(44, el.scrollHeight)}px`;
+	};
+
+	// Keep the inline raw YAML textarea synced with external model edits (Status dropdown, Ctrl+Z, Revert) without jumping caret on typing.
+	createEffect(() => {
+		const open = editYaml();
+		const inner = yamlSpan()?.inner ?? "";
+		if (!open) return;
+		queueMicrotask(() => {
+			if (!yamlInputEl) return;
+			if (yamlInputEl.value !== inner) yamlInputEl.value = inner;
+			resizeYamlInput(yamlInputEl);
+		});
+	});
+
+	// Re-measure wrapped YAML textarea height if the editor pane resizes horizontally.
+	createEffect(() => {
+		if (!editYaml() || typeof ResizeObserver === "undefined") return;
+		let ro: ResizeObserver | undefined;
+		const frame = requestAnimationFrame(() => {
+			if (!yamlInputEl) return;
+			resizeYamlInput(yamlInputEl);
+			ro = new ResizeObserver(() => resizeYamlInput(yamlInputEl));
+			ro.observe(yamlInputEl);
+		});
+		onCleanup(() => {
+			cancelAnimationFrame(frame);
+			ro?.disconnect();
+		});
+	});
+
+	const applyYamlInnerEdit = (nextInner: string) => {
+		if (cmView) {
+			const cur = cmView.state.doc.toString();
+			const span = frontMatterInnerSpan(cur);
+			if (!span) return;
+			const replacement = formatFrontMatterInnerReplacement(nextInner, "\n");
+			if (cur.slice(span.start, span.end) === replacement) return;
+			cmView.dispatch({
+				changes: { from: span.start, to: span.end, insert: replacement },
+				userEvent: "input.yaml",
+			});
+			return;
+		}
+		if (!model) return;
+		const cur = model.getValue();
+		const span = frontMatterInnerSpan(cur);
+		if (!span) return;
+		const replacement = formatFrontMatterInnerReplacement(nextInner, span.eol);
+		if (cur.slice(span.start, span.end) === replacement) return;
+		const from = model.getPositionAt(span.start);
+		const to = model.getPositionAt(span.end);
+		model.pushEditOperations(
+			[],
+			[{ range: new monaco.Range(from.lineNumber, from.column, to.lineNumber, to.column), text: replacement }],
+			() => null,
+		);
+	};
+
+	const focusYamlLine = (docLineNum = 2, column = 1) => {
+		queueMicrotask(() => {
+			if (!yamlInputEl) return;
+			yamlInputEl.focus();
+			const lines = yamlInputEl.value.split("\n");
+			const innerLineIdx = Math.max(0, Math.min(lines.length - 1, docLineNum - 2));
+			let offset = 0;
+			for (let i = 0; i < innerLineIdx; i++) offset += lines[i]!.length + 1;
+			offset += Math.min(lines[innerLineIdx]!.length, Math.max(0, column - 1));
+			yamlInputEl.setSelectionRange(offset, offset);
+			yamlInputEl.scrollIntoView({ block: "nearest" });
+		});
+	};
+	const ticketFile = (key: string) => {
+		const found = docs().find((d) => d.group === "tickets" && d.exists && d.ticket?.toLowerCase() === key.trim().toLowerCase());
+		if (found) return found.path;
+		if (!state.workspace || !state.project) return "";
+		const parts = state.project.docs.split(/[\\/]/).filter((p) => p && p !== ".");
+		return joinPath(state.workspace.root, ...parts, DOC_FOLDERS.tickets, `${key.trim()}.md`);
+	};
 	const targetOf = (key: string, value: string): { file?: string; web?: string; display?: string } => {
 		if (/^https?:\/\//i.test(value)) return { web: value };
 		const wiki = /^\[\[([^[\]]+)\]\]$/.exec(value.trim());
@@ -168,24 +312,196 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			if (found) return { file: found.path, display: parsed?.words || parsed?.name || value };
 		}
 		if (["ticket", "tickets", "related", "parent", "blocks", "blocked-by"].includes(key)) return { file: ticketFile(value) };
-		if (["specs", "spec", "plan", "plans"].includes(key) && state.workspace) return { file: joinPath(state.workspace.root, ...value.split("/")) };
+		if (["supersedes", "superseded-by"].includes(key) && state.workspace) {
+			const found = docByName(value.trim(), docs(), state.workspace.root);
+			if (found) return { file: found.path, display: found.title || value };
+		}
+		if (["specs", "spec", "plan", "plans", "source"].includes(key) && state.workspace) return { file: joinPath(state.workspace.root, ...value.split("/")) };
 		return {};
+	};
+
+	const LIST_PROP_KEYS = new Set(["tags", "tickets", "related", "blocks", "blocked-by", "specs", "plans"]);
+
+	const applyDocTextUpdate = (nextText: string) => {
+		if (cmView) {
+			const cur = cmView.state.doc.toString();
+			const norm = nextText.replace(/\r\n/g, "\n");
+			if (cur === norm) return;
+			// Find minimal changed slice so CM6 preserves scroll & non-frontmatter widgets.
+			let start = 0;
+			while (start < cur.length && start < norm.length && cur[start] === norm[start]) start++;
+			let endCur = cur.length;
+			let endNorm = norm.length;
+			while (endCur > start && endNorm > start && cur[endCur - 1] === norm[endNorm - 1]) {
+				endCur--;
+				endNorm--;
+			}
+			cmView.dispatch({ changes: { from: start, to: endCur, insert: norm.slice(start, endNorm) }, userEvent: "input.yaml" });
+			return;
+		}
+		if (!model) return;
+		const full = model.getFullModelRange();
+		model.pushEditOperations([], [{ range: full, text: nextText }], () => null);
+	};
+
+	const pickValueForProperty = async (key: string): Promise<string | null> => {
+		const root = state.workspace?.root;
+		const all = docs().filter((d) => d.exists && !isCatalog(d));
+		const CUSTOM = "Enter custom value…";
+		if (key === "status") {
+			const choices = statusChoices(listed());
+			return await choose("Choose status", [...choices]);
+		}
+		if (["ticket", "tickets", "parent", "related", "blocks", "blocked-by"].includes(key)) {
+			const tks = all.filter((d) => d.group === "tickets" && d.ticket).map((d) => d.ticket!);
+			if (tks.length) {
+				const picked = await choose(`Choose ticket for ${key}:`, [...tks, CUSTOM]);
+				if (!picked) return null;
+				if (picked !== CUSTOM) return picked;
+			}
+			return (await ask(`Value for ${key}:`))?.trim() || null;
+		}
+		if (key === "tags") {
+			const existingTags = workspaceTags(all).map((t) => t.tag);
+			if (existingTags.length) {
+				const picked = await choose("Choose tag (or enter a new one)", [...existingTags, CUSTOM]);
+				if (!picked) return null;
+				if (picked !== CUSTOM) return picked;
+			}
+			return (await ask("New tag name (without #)"))?.trim().replace(/^#+/, "") || null;
+		}
+		if ((key === "specs" || key === "plans") && root) {
+			const grp = key === "specs" ? "specs" : "plans";
+			const items = all.filter((d) => d.group === grp).map((d) => relativeTo(root, d.path).replace(/\\/g, "/"));
+			if (items.length) {
+				const picked = await choose(`Choose ${grp === "specs" ? "spec" : "plan"}`, [...items, CUSTOM]);
+				if (!picked) return null;
+				if (picked !== CUSTOM) return picked;
+			}
+		}
+		if (key === "source" && root) {
+			const sqls = all.filter((d) => d.group === "schema" && /\.(sql|ddl|pks|pkb|json|xml|xsd)$/i.test(d.name)).map((d) => relativeTo(root, d.path).replace(/\\/g, "/"));
+			if (sqls.length) {
+				const picked = await choose("Choose source schema file", [...sqls, CUSTOM]);
+				if (!picked) return null;
+				if (picked !== CUSTOM) return picked;
+			}
+		}
+		return (await ask(`Value for ${key}:`))?.trim() || null;
+	};
+
+	const addPropertyValueInteractive = async (explicitKey?: string) => {
+		if (isRead()) return;
+		const COMMON_KEYS = ["status", "ticket", "tickets", "parent", "related", "blocks", "blocked-by", "tags", "specs", "plans", "source", "Custom property…"];
+		let key = explicitKey;
+		if (!key) {
+			const picked = await choose("Add or update YAML property", COMMON_KEYS);
+			if (!picked) return;
+			if (picked === "Custom property…") {
+				key = (await ask("Property name (e.g. owner, version, system)"))?.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "");
+				if (!key) return;
+			} else {
+				key = picked;
+			}
+		}
+		const val = await pickValueForProperty(key);
+		if (!val) return;
+		const cur = model?.getValue() ?? text();
+		if (!frontMatterInnerSpan(cur)) {
+			const eol = cur.includes("\r\n") ? "\r\n" : "\n";
+			const lineVal = LIST_PROP_KEYS.has(key) ? `[${val}]` : val;
+			applyDocTextUpdate(`---${eol}${key}: ${lineVal}${eol}---${eol}${eol}${cur}`);
+			return;
+		}
+		const next = LIST_PROP_KEYS.has(key) ? addToFrontMatterList(cur, key, val) : withFrontMatter(cur, key, val);
+		if (next && next !== cur) applyDocTextUpdate(next);
+	};
+
+	const removePropertyValue = (key: string, value: string, totalValues: number) => {
+		if (isRead()) return;
+		const cur = model?.getValue() ?? text();
+		if (totalValues > 1 || LIST_PROP_KEYS.has(key)) {
+			const next = removeFromFrontMatterList(cur, key, value);
+			if (next && next !== cur) {
+				applyDocTextUpdate(next);
+				return;
+			}
+		}
+		// Remove single scalar key line cleanly from YAML inner block.
+		const span = frontMatterInnerSpan(cur);
+		if (!span) return;
+		const keyEsc = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		const lines = span.inner.split(/\r?\n/);
+		const idx = lines.findIndex((l) => new RegExp(`^${keyEsc}\\s*:`, "i").test(l));
+		if (idx < 0) return;
+		let endIdx = idx + 1;
+		while (endIdx < lines.length && /^[ \t]+-/.test(lines[endIdx]!)) endIdx++;
+		lines.splice(idx, endIdx - idx);
+		applyYamlInnerEdit(lines.join("\n"));
 	};
 	const go = (target: { file?: string; web?: string }) =>
 		target.web ? void window.open(target.web, "_blank", "noopener") : target.file ? void openFile(target.file) : undefined;
 
+	const listed = createMemo(() => docs().find((d) => ["tickets", "specs", "knowledge", "schema"].includes(d.group) && canonical(d.path) === props.path));
 	const ticket = createMemo(() => {
 		const file = docs().find((d) => d.group === "tickets" && d.ticket && canonical(d.path) === props.path);
 		return file?.ticket ?? "";
 	});
 	const work = createMemo(() => (ticket() ? ticketWork(docs(), ticket()) : []));
+	const readiness = createMemo(() =>
+		ticket() ? evaluateTicketReadiness(docs(), ticket(), { gitFiles: gitStatus()?.files, root: state.workspace?.root }) : null,
+	);
+	const [readinessOpen, setReadinessOpen] = createSignal(false);
+	const exportMenuItems = () => [
+		{ label: "Copy as rich HTML", run: () => void exportDocAs(props.path, "html-copy") },
+		{ label: "Copy as Jira / Confluence markup", run: () => void exportDocAs(props.path, "jira-copy") },
+		"separator" as const,
+		{ label: "Print / Save as PDF…", run: () => void exportDocAs(props.path, "print") },
+		{ label: "Export standalone HTML…", run: () => void exportDocAs(props.path, "html-download") },
+		...(ticket()
+			? [
+					"separator" as const,
+					{ label: `Export ${ticket()} packet (HTML)…`, run: () => void exportTicketPacket(props.path, ticket(), "html") },
+					{ label: `Export ${ticket()} packet (Markdown)…`, run: () => void exportTicketPacket(props.path, ticket(), "markdown") },
+				]
+			: []),
+	];
+	const workRollup = createMemo(() => {
+		const me = listed();
+		const groups = work();
+		if (!ticket() || !me) return [];
+		const parts: string[] = [];
+		const subs = groups.find((g) => g.kind === "subticket")?.files ?? [];
+		if (subs.length) {
+			const done = subs.filter((s) => toneOf(s.status) === "done").length;
+			parts.push(`${done}/${subs.length} sub-tickets done`);
+		}
+		if (me.tasks && me.tasks.total > 0) parts.push(`${me.tasks.done}/${me.tasks.total} checklist items`);
+		const openQs = groups.find((g) => g.kind === "question")?.files.length ?? 0;
+		if (openQs > 0) parts.push(`${openQs} open ${openQs === 1 ? "question" : "questions"}`);
+		const regRows = (groups.find((g) => g.kind === "registry")?.files ?? []).reduce(
+			(acc, reg) => {
+				const hit = reg.forTickets?.find((r) => r.key.toLowerCase() === ticket().toLowerCase());
+				return { total: acc.total + (hit?.rows ?? 0), done: acc.done + (hit?.done ?? 0) };
+			},
+			{ total: 0, done: 0 },
+		);
+		if (regRows.total > 0) parts.push(`${regRows.done}/${regRows.total} registry rows done`);
+		return parts;
+	});
 	const linkedTickets = createMemo(() => (!ticket() ? docLinkedTickets(docs(), props.path) : []));
-	const listed = createMemo(() => docs().find((d) => ["tickets", "specs", "knowledge"].includes(d.group) && canonical(d.path) === props.path));
 
+	// Only re-scan workspace backlinks when this path changes or the set of project docs changes
+	// (avoids triggering 2× workspace scans per open Markdown tab on every unrelated `.ssl` save).
+	const docsFingerprint = createMemo(() => {
+		const list = docs();
+		return `${list.length}:${list.map((d) => `${d.path}|${d.title ?? ""}|${d.broken?.length ?? 0}`).join("\n")}`;
+	});
 	const [linked] = createResource(
-		() => ({ path: props.path, files: docs(), root: state.workspace?.root }),
-		async ({ path, files, root }) => {
+		() => ({ path: props.path, sig: docsFingerprint(), root: state.workspace?.root }),
+		async ({ path, root }) => {
 			if (!root) return [];
+			const files = docs();
 			try {
 				const [byPath, byName] = await Promise.all([backend.linksTo(path), backend.namesIn()]);
 				return linkedFrom(
@@ -210,15 +526,23 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 
 	// --- Document Outline (published for BOTH Read and Live modes) -----------
 	const headings = createMemo(() =>
-		documentHeadings(text())
-			.filter((h) => h.level <= 3)
-			.map((h) => ({ id: h.anchor, text: h.text, level: h.level, line: h.line })),
+		documentHeadings(text()).map((h) => ({ id: h.anchor, text: h.text, level: h.level, line: h.line })),
 	);
 
 	const scrollToLine = (line: number, focus = false, column = 1, endLine?: number, endColumn?: number) => {
 		if (!cmView) return;
 		const docObj = cmView.state.doc;
 		const ln = Math.max(1, Math.min(line, docObj.lines));
+		if (ln <= front().lines && yamlSpan()) {
+			if (isRead()) {
+				hostEl?.scrollTo({ top: 0, behavior: "smooth" });
+				return;
+			}
+			setEditYaml(true);
+			hostEl?.scrollTo({ top: 0, behavior: "smooth" });
+			if (focus) focusYamlLine(ln, column);
+			return;
+		}
 		const startLine = docObj.line(ln);
 		const from = Math.min(startLine.to, startLine.from + Math.max(0, column - 1));
 		let to = from;
@@ -258,16 +582,20 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 
 	const updateOutlineScrollspy = () => {
 		if (!hostEl || !cmView) return;
-		const top = hostEl.getBoundingClientRect().top + 36;
 		const list = headings();
 		if (!list.length) return setActiveHeadingId("");
+		// Use CM6's layout geometry (`lineBlockAt`) rather than querying virtualized DOM nodes,
+		// so long sections whose heading scrolled out of the DOM viewport stay accurately highlighted.
+		const hostRect = hostEl.getBoundingClientRect();
+		const cmTopInHost = cmView.contentDOM.getBoundingClientRect().top - hostRect.top;
+		const threshold = 40;
 		let currentId = list[0]!.id;
-		const lineEls = hostEl.querySelectorAll<HTMLElement>(".cm-line[data-md-heading-line]");
-		for (const el of lineEls) {
-			if (el.getBoundingClientRect().top > top) break;
-			const ln = Number(el.dataset.mdHeadingLine);
-			const matched = list.find((h) => h.line === ln);
-			if (matched) currentId = matched.id;
+		const lineCount = cmView.state.doc.lines;
+		for (const h of list) {
+			if (h.line < 1 || h.line > lineCount) continue;
+			const block = cmView.lineBlockAt(cmView.state.doc.line(h.line).from);
+			if (cmTopInHost + block.top > threshold) break;
+			currentId = h.id;
 		}
 		setActiveHeadingId(currentId);
 	};
@@ -534,7 +862,9 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		const leads = linkLeads(target.href, props.path, root);
 		if (!leads || "web" in leads) return null;
 		if ("heading" in leads) return { path: props.path, heading: leads.heading };
-		return { path: leads.file, line: leads.lines?.line };
+		const hashIdx = target.href.indexOf("#");
+		const heading = !leads.lines && hashIdx >= 0 ? decodeURIComponent(target.href.slice(hashIdx + 1)).trim() || undefined : undefined;
+		return { path: leads.file, line: leads.lines?.line, heading };
 	};
 
 	const handleHoverLink = (target: HoverTarget) => {
@@ -556,7 +886,10 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			const y = preferBelow + 260 < window.innerHeight ? preferBelow : Math.max(16, rect.top - 280);
 			setHoverCard({ ...preview, x, y });
 			queueMicrotask(() => {
-				if (hoverBodyEl) hydrateImagesInElement(hoverBodyEl, resolved.path);
+				if (hoverBodyEl) {
+					hydrateImagesInElement(hoverBodyEl, resolved.path);
+					void colourCode(hoverBodyEl);
+				}
 			});
 		}, 320);
 	};
@@ -564,6 +897,27 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 	const hoverFileButton = (path: string | undefined, anchor: HTMLElement, extra: { line?: number; ticket?: string } = {}) => {
 		if (!path) return;
 		handleHoverLink({ kind: "file", path, line: extra.line, ticket: extra.ticket, anchor });
+	};
+
+	const formatCodeBlockAt = async (lineNumber: number): Promise<"changed" | "unchanged" | "error"> => {
+		if (!cmView || isRead()) return "error";
+		const docText = cmView.state.doc.toString();
+		const fence = fenceAtLine(docText, lineNumber);
+		if (!fence || fence.bodyStartLine > fence.bodyEndLine) return "unchanged";
+		const res = await formatCodeFence(fence, props.path, "\n");
+		if (!res.ok) {
+			notify(`Could not format ${fence.rawLang || "code"} block: ${res.error}`, "error");
+			return "error";
+		}
+		if (!res.changed) return "unchanged";
+		if (!cmView || cmView.state.doc.toString() !== docText) return "unchanged";
+		const from = cmView.state.doc.line(fence.bodyStartLine).from;
+		const to = cmView.state.doc.line(fence.bodyEndLine).to;
+		cmView.dispatch({
+			changes: { from, to, insert: res.body },
+			userEvent: "input.format",
+		});
+		return "changed";
 	};
 
 	// --- Right-Click Context Menu (tailored for Live vs Read) ----------------
@@ -624,8 +978,15 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 
 		const main = cmView.state.selection.main;
 		const hasSelection = !main.empty;
+		const clickPos = e.clientX || e.clientY ? cmView.posAtCoords({ x: e.clientX, y: e.clientY }) : null;
+		const clickLine = cmView.state.doc.lineAt(clickPos ?? main.head).number;
+		const clickedFence = fenceAtLine(cmView.state.doc.toString(), clickLine);
+		const canFormatFence = Boolean(clickedFence && fenceFormatTarget(clickedFence.rawLang) && clickedFence.bodyStartLine <= clickedFence.bodyEndLine);
 
 		const OPEN_LINK = "Open link";
+		const ADD_PROPS = "Add YAML properties…";
+		const FORMAT_BLOCK = clickedFence?.rawLang ? `Format ${clickedFence.rawLang} code block` : "Format code block";
+		const FORMAT_DOC = "Format document (Ctrl+Shift+I)";
 		const CUT = "Cut";
 		const COPY = "Copy";
 		const PASTE = "Paste";
@@ -648,9 +1009,12 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 
 		const items = [
 			...(linkEl ? [OPEN_LINK] : []),
+			...(!yamlSpan() ? [ADD_PROPS] : []),
+			...(canFormatFence ? [FORMAT_BLOCK] : []),
 			...(hasSelection ? [CUT, COPY] : []),
 			PASTE,
 			SELECT_ALL,
+			FORMAT_DOC,
 			INSERT_TEMPLATE,
 			INSERT_CALLOUT,
 			INSERT_TABLE,
@@ -676,7 +1040,24 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			else if (linkEl.dataset.mdHref) void followLink(linkEl.dataset.mdHref);
 			else if (linkEl.dataset.mdTicket) followTicket(linkEl.dataset.mdTicket);
 			else if (linkEl.getAttribute("href")) void followLink(linkEl.getAttribute("href")!);
-		} else if (picked === CUT) runCmAction(cmView, "editor.action.clipboardCutAction");
+		} else if (picked === ADD_PROPS) {
+			const eol = model?.getEOL() ?? "\n";
+			const stem = baseName(props.path).replace(/\.(md|markdown)$/i, "");
+			const starter = `---${eol}title: ${stem}${eol}---${eol}${eol}`;
+			if (model) {
+				model.pushStackElement();
+				model.pushEditOperations([], [{ range: new monaco.Range(1, 1, 1, 1), text: starter, forceMoveMarkers: true }], () => null);
+				model.pushStackElement();
+				setPropsOpen(true);
+				setEditYaml(true);
+				focusYamlLine(2, 1);
+			}
+		} else if (picked === FORMAT_BLOCK && clickedFence) {
+			void formatCodeBlockAt(clickedFence.openLine).then((out) => {
+				if (out === "unchanged") notify("Code block is already formatted.");
+			});
+		} else if (picked === FORMAT_DOC) void import("../commands").then((m) => m.runCommand("format"));
+		else if (picked === CUT) runCmAction(cmView, "editor.action.clipboardCutAction");
 		else if (picked === COPY) runCmAction(cmView, "editor.action.clipboardCopyAction");
 		else if (picked === PASTE) runCmAction(cmView, "editor.action.clipboardPasteAction");
 		else if (picked === SELECT_ALL) runCmAction(cmView, "editor.action.selectAll");
@@ -752,15 +1133,13 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 	};
 
 	const toggleEditYaml = () => {
-		if (isRead()) return;
+		if (isRead() || !yamlSpan()) return;
 		const next = !editYaml();
 		setEditYaml(next);
-		if (!cmView) return;
-		cmView.dispatch({ effects: setEditYamlEffect.of(next) });
 		if (next) {
-			const fm = front();
-			const targetLine = Math.min(cmView.state.doc.lines, fm.lines > 1 ? 2 : 1);
-			jumpToLine(targetLine, 1);
+			focusYamlLine(2, 1);
+		} else {
+			yamlEditBtnEl?.focus();
 		}
 	};
 
@@ -901,6 +1280,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 				cmMarkdownHighlight,
 				editYamlField,
 				rawEditBlockField,
+				gitMarksField,
 				liveCallbacksFacet.of({
 					filePath: () => props.path,
 					onFollowLink: (href) => void followLink(href),
@@ -912,12 +1292,46 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 					onCopyCode: (code) => {
 						void import("../commands").then((m) => m.copyText(code, "Copied code block."));
 					},
+					onCopyCodeForDesigner: async (code) => {
+						const { session } = await import("../lsp/session");
+						let out = code;
+						if (state.lsp.state === "running") {
+							out = await session.formatText(code, { tabSize: 4, insertSpaces: true }).catch(() => code);
+						}
+						const { copyText } = await import("../commands");
+						await copyText(out, "Copied SSL code block, formatted, for Designer.");
+					},
+					onOpenCodeScratch: async (code, lang) => {
+						const { newUntitled } = await import("../state");
+						const scratchPath = newUntitled(state.activeGroup, lang);
+						documents.get(scratchPath)?.model.setValue(code);
+					},
+					onSaveCodeSnippet: async (code, lang) => {
+						const { ask } = await import("../dialogs");
+						const { slug, snippetTemplate } = await import("../../shared/projectDocs");
+						const title = (await ask(`Save ${lang.toUpperCase()} snippet to docs/knowledge/snippets/ as`))?.trim();
+						if (!title || !slug(title) || !state.workspace || !state.project) return;
+						const ext = lang === "sql" ? "sql" : "ssl";
+						const docsParts = state.project.docs.split(/[\\/]/).filter((p) => p && p !== ".");
+						const dest = joinPath(state.workspace.root, ...docsParts, DOC_FOLDERS.knowledge, "snippets", `${slug(title)}.${ext}`);
+						const header = snippetTemplate({ title, language: ext });
+						try {
+							await backend.create(dest, "file");
+							await backend.write(dest, `${header.replace(/\n*$/, "\n\n")}${code}\n`);
+							setState("treeVersion", (v) => v + 1);
+							notify(`Saved snippet to ${relativeTo(state.workspace.root, dest)}.`);
+						} catch (e: any) {
+							notify(`Could not save snippet: ${e?.message ?? e}`, "error");
+						}
+					},
+					onFormatCode: (openLine) => formatCodeBlockAt(openLine),
 					onToggleCheckbox: toggleCheckboxAt,
 					onOpenImageLightbox: (info) => setLightbox({ ...info, zoomFull: false }),
 					onResizeImage: resizeImageAt,
 				}),
 				liveBlockField,
 				liveInlinePlugin,
+				liveCodeHighlightPlugin,
 				liveInteractionExtension,
 				markdownFoldService,
 				cmMarkdownCompletion(() => props.path),
@@ -959,7 +1373,12 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			queueMicrotask(updateOutlineScrollspy);
 		}
 
+		const openReadSearch = () => {
+			if (!cmView) return;
+			openSearchPanel(cmView);
+		};
 		if (!isRead()) registerLiveEditor(props.group, makeHandle(cmView));
+		else registerReadFind(props.group, openReadSearch);
 
 		// Reflect external Monaco model edits (Revert, Status menu, Rename links, Search & Replace, Read-mode checkbox ticks) back into CM6.
 		const modelSub = model?.onDidChangeContent(() => {
@@ -989,6 +1408,27 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			if (e.key === "Escape" && lightbox()) {
 				e.preventDefault();
 				setLightbox(null);
+				return;
+			}
+			if (
+				isRead() &&
+				(e.ctrlKey || e.metaKey) &&
+				!e.altKey &&
+				!e.shiftKey &&
+				e.key.toLowerCase() === "f" &&
+				cmView &&
+				state.activeGroup === props.group &&
+				state.centerView === "editors"
+			) {
+				const activeEl = document.activeElement;
+				const inOtherInput =
+					activeEl instanceof HTMLElement &&
+					!activeEl.closest(".cm-md-host") &&
+					activeEl.matches("input, textarea, [contenteditable=''], [contenteditable=true]");
+				if (!inOtherInput) {
+					e.preventDefault();
+					openSearchPanel(cmView);
+				}
 			}
 		};
 		window.addEventListener("keydown", onKeyDownGlobal);
@@ -1004,6 +1444,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			saveView();
 			window.removeEventListener("keydown", onKeyDownGlobal);
 			registerLiveEditor(props.group, undefined);
+			registerReadFind(props.group, undefined);
 			modelSub?.dispose();
 			stopReveal();
 			cmView?.destroy();
@@ -1031,7 +1472,11 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 				if (read) {
 					setTableHud(null);
 					registerLiveEditor(props.group, undefined);
+					registerReadFind(props.group, () => {
+						if (cmView) openSearchPanel(cmView);
+					});
 				} else {
+					registerReadFind(props.group, undefined);
 					registerLiveEditor(props.group, makeHandle(cmView));
 					queueMicrotask(() => updateTableHud(cmView));
 				}
@@ -1055,13 +1500,74 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		),
 	);
 
+	// Keep CM6 Git gutter marks synced with `backend.gitBase` and live document edits.
+	let gitBaseLines: string[] | null = null;
+	let gitDrawTimer: ReturnType<typeof setTimeout> | undefined;
+	const redrawGitMarks = () => {
+		if (!cmView) return;
+		if (!gitBaseLines) {
+			cmView.dispatch({ effects: setGitChangesEffect.of([]) });
+			return;
+		}
+		const changes = lineChanges(gitBaseLines, cmView.state.doc.toString().split(/\r?\n/));
+		cmView.dispatch({ effects: setGitChangesEffect.of(changes) });
+	};
+	createEffect(
+		on([() => props.path, gitVersion, () => Boolean(gitStatus())], ([path, , repo]) => {
+			if (!repo || !path || path.startsWith("untitled:")) {
+				gitBaseLines = null;
+				redrawGitMarks();
+				return;
+			}
+			let stale = false;
+			onCleanup(() => (stale = true));
+			backend.gitBase(path, "index").then(
+				(baseText) => {
+					if (stale) return;
+					gitBaseLines = baseText === null ? null : baseText.split(/\r?\n/);
+					redrawGitMarks();
+				},
+				() => {},
+			);
+		}),
+	);
+	createEffect(
+		on(
+			text,
+			() => {
+				if (!gitBaseLines) return;
+				clearTimeout(gitDrawTimer);
+				gitDrawTimer = setTimeout(redrawGitMarks, 300);
+			},
+			{ defer: true },
+		),
+	);
+	onCleanup(() => clearTimeout(gitDrawTimer));
+
+	// Re-tokenize fenced code blocks and callout snippets whenever the active theme changes.
+	createEffect(
+		on(
+			themeVersion,
+			() => {
+				if (cmView) cmView.dispatch({ effects: refreshLiveEffect.of(++refreshSeq) });
+			},
+			{ defer: true },
+		),
+	);
+
 	// Re-register handle if group index shifts (e.g. closing an earlier split group).
 	createEffect(
 		on(
 			() => props.group,
 			() => {
-				if (!cmView || isRead()) return;
-				registerLiveEditor(props.group, makeHandle(cmView));
+				if (!cmView) return;
+				if (isRead()) {
+					registerReadFind(props.group, () => {
+						if (cmView) openSearchPanel(cmView);
+					});
+				} else {
+					registerLiveEditor(props.group, makeHandle(cmView));
+				}
 			},
 			{ defer: true },
 		),
@@ -1089,6 +1595,12 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 				clearReadAssist();
 			}}
 			onContextMenu={(e) => void onContextMenu(e)}
+			onKeyDown={(e) => {
+				if (isRead() && (e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "f" && cmView) {
+					e.preventDefault();
+					openSearchPanel(cmView);
+				}
+			}}
 			onMouseDown={(e) => {
 				setState("activeGroup", props.group);
 				// In Live mode, clicking empty page margin below editor puts cursor at the end (Obsidian feel).
@@ -1206,8 +1718,35 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			</Show>
 
 			<div ref={pageEl} class="cm-md-page">
-				{/* Inline Obsidian Properties card for YAML frontmatter (unified across Live & Read, with hover previews). */}
-				<Show when={facts().length > 0}>
+				{/* Inline Obsidian Properties card for YAML frontmatter (unified across Live & Read, with inline raw YAML editing). */}
+				<Show
+					when={facts().length > 0 || Boolean(yamlSpan())}
+					fallback={
+						<div class="cm-md-doc-bar" aria-label="Document actions">
+							<Show when={!isRead()}>
+								<button
+									type="button"
+									class="cm-md-props-edit"
+									title="Add YAML frontmatter properties (status, ticket, tags, …)"
+									onClick={() => void addPropertyValueInteractive()}
+								>
+									<Icon name="add" />
+									<span>Properties</span>
+								</button>
+							</Show>
+							<Menu
+								floating
+								class="cm-md-props-menu"
+								label="Copy or export this document"
+								title="Copy as HTML or Jira markup, print to PDF, or export standalone HTML"
+								items={exportMenuItems}
+							>
+								<span>Export</span>
+								<Icon name="chevron-down" />
+							</Menu>
+						</div>
+					}
+				>
 					<section class="cm-md-props" aria-label="Document properties">
 						<div class="cm-md-props-head">
 							<button
@@ -1219,18 +1758,54 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 								<Icon name={propsOpen() ? "chevron-down" : "chevron-right"} />
 								<span>Properties</span>
 							</button>
-							<Show when={!isRead()}>
-								<button
-									type="button"
-									class="cm-md-props-edit"
-									title={editYaml() ? "Hide raw YAML frontmatter" : "Edit raw YAML frontmatter"}
-									onClick={toggleEditYaml}
+							<div class="cm-md-props-actions">
+								<Show when={!isRead()}>
+									<button
+										type="button"
+										class="cm-md-props-edit"
+										title="Add or update a YAML property without editing raw YAML"
+										onClick={() => void addPropertyValueInteractive()}
+									>
+										<Icon name="add" />
+										<span>Property</span>
+									</button>
+								</Show>
+								<Show when={listed()?.group === "knowledge" && listed()?.kind === "questions" && toneOf(listed()?.status) === "done"}>
+									<button
+										type="button"
+										class="cm-md-props-edit"
+										title="Create a numbered Decision ADR pre-filled with this question and answer"
+										onClick={() => void promoteQuestionToDecision(props.path)}
+									>
+										Promote to decision
+									</button>
+								</Show>
+								<Menu
+									floating
+									class="cm-md-props-menu"
+									label="Copy or export this document"
+									title="Copy as HTML or Jira markup, print to PDF, or export standalone HTML"
+									items={exportMenuItems}
 								>
-									{editYaml() ? "Hide YAML" : "Edit YAML"}
-								</button>
-							</Show>
+									<span>Export</span>
+									<Icon name="chevron-down" />
+								</Menu>
+								<Show when={!isRead() && yamlSpan()}>
+									<button
+										ref={yamlEditBtnEl}
+										type="button"
+										class="cm-md-props-edit"
+										classList={{ active: editYaml() }}
+										aria-expanded={editYaml()}
+										title={editYaml() ? "Hide raw YAML frontmatter (Esc)" : "Edit raw YAML frontmatter"}
+										onClick={toggleEditYaml}
+									>
+										{editYaml() ? "Hide YAML" : "Edit YAML"}
+									</button>
+								</Show>
+							</div>
 						</div>
-						<Show when={propsOpen()}>
+						<Show when={propsOpen() && facts().length > 0}>
 							<dl class="cm-md-props-list">
 								<For each={facts()}>
 									{(fact) => (
@@ -1241,54 +1816,129 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 													{(value) => {
 														const target = targetOf(fact.key, value);
 														return (
-															<Show
-																when={target.file || target.web}
-																fallback={
-																	<Show
-																		when={fact.key === "status" && listed()}
-																		fallback={
-																			<span classList={{ "doc-status": fact.key === "status", [`tone-${toneOf(value)}`]: fact.key === "status" }}>
-																				{value}
-																			</span>
-																		}
-																	>
-																		<Menu
-																			class="md-status"
-																			label={`Status: ${value}. Change it`}
-																			title="Change the status"
-																			items={() =>
-																				statusChoices(listed()).map((status) => ({
-																					label: status,
-																					disabled: status.toLowerCase() === value.toLowerCase(),
-																					why: "It is this already",
-																					run: () => void setStatus(props.path, status),
-																				}))
+															<span class="cm-md-prop-chip">
+																<Show
+																	when={target.file || target.web}
+																	fallback={
+																		<Show
+																			when={fact.key === "status" && listed()}
+																			fallback={
+																				<span classList={{ "doc-status": fact.key === "status", [`tone-${toneOf(value)}`]: fact.key === "status" }}>
+																					{value}
+																				</span>
 																			}
 																		>
-																			<span class={`doc-status tone-${toneOf(value)}`}>{value}</span>
-																			<Icon name="chevron-down" />
-																		</Menu>
-																	</Show>
-																}
-															>
-																<button
-																	class="link"
-																	title={target.web ?? target.file}
-																	onClick={() => go(target)}
-																	onMouseEnter={(e) => hoverFileButton(target.file, e.currentTarget, { ticket: ticket() || undefined })}
-																	onMouseLeave={scheduleHideHover}
+																			<Menu
+																				class="md-status"
+																				label={`Status: ${value}. Change it`}
+																				title="Change the status"
+																				items={() =>
+																					statusChoices(listed()).map((status) => ({
+																						label: status,
+																						disabled: status.toLowerCase() === value.toLowerCase(),
+																						why: "It is this already",
+																						run: () => void setStatus(props.path, status),
+																					}))
+																				}
+																			>
+																				<span class={`doc-status tone-${toneOf(value)}`}>{value}</span>
+																				<Icon name="chevron-down" />
+																			</Menu>
+																		</Show>
+																	}
 																>
-																	{target.display ?? value}
-																</button>
-															</Show>
+																	<button
+																		class="link"
+																		title={target.web ?? target.file}
+																		onClick={() => go(target)}
+																		onMouseEnter={(e) => hoverFileButton(target.file, e.currentTarget, { ticket: ticket() || undefined })}
+																		onMouseLeave={scheduleHideHover}
+																	>
+																		{target.display ?? value}
+																	</button>
+																</Show>
+																<Show when={!isRead() && fact.key !== "status" && fact.key !== "title" && fact.key !== "ticket"}>
+																	<button
+																		type="button"
+																		class="cm-md-prop-rm"
+																		title={`Remove ${value} from ${fact.key}`}
+																		aria-label={`Remove ${value} from ${fact.key}`}
+																		onClick={() => removePropertyValue(fact.key, value, fact.values.length)}
+																	>
+																		<Icon name="close" />
+																	</button>
+																</Show>
+															</span>
 														);
 													}}
 												</For>
+												<Show when={!isRead() && LIST_PROP_KEYS.has(fact.key)}>
+													<button
+														type="button"
+														class="cm-md-prop-add"
+														title={`Add another value to ${fact.key}`}
+														aria-label={`Add value to ${fact.key}`}
+														onClick={() => void addPropertyValueInteractive(fact.key)}
+													>
+														<Icon name="add" />
+													</button>
+												</Show>
 											</dd>
 										</div>
 									)}
 								</For>
 							</dl>
+						</Show>
+						<Show when={!isRead() && editYaml() && yamlSpan()}>
+							{(span) => (
+								<div class="cm-md-props-yaml-wrap">
+									<div class="cm-md-props-yaml-fence" aria-hidden="true">---</div>
+									<textarea
+										ref={(el) => {
+											yamlInputEl = el;
+											el.value = span().inner;
+											queueMicrotask(() => resizeYamlInput(el));
+										}}
+										class="cm-md-props-yaml"
+										aria-label="Raw YAML frontmatter"
+										spellcheck={false}
+										rows={2}
+										onInput={(e) => {
+											const el = e.currentTarget;
+											resizeYamlInput(el);
+											applyYamlInnerEdit(el.value);
+										}}
+										onKeyDown={(e) => {
+											if (e.key === "Escape") {
+												e.preventDefault();
+												e.stopPropagation();
+												setEditYaml(false);
+												yamlEditBtnEl?.focus();
+											} else if (e.key === "Tab" && !e.shiftKey) {
+												e.preventDefault();
+												const el = e.currentTarget;
+												const s = el.selectionStart;
+												const end = el.selectionEnd;
+												const next = `${el.value.slice(0, s)}  ${el.value.slice(end)}`;
+												el.value = next;
+												el.setSelectionRange(s + 2, s + 2);
+												resizeYamlInput(el);
+												applyYamlInnerEdit(next);
+											} else if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+												const k = e.key.toLowerCase();
+												if (k === "z" && !e.shiftKey) {
+													e.preventDefault();
+													model?.undo();
+												} else if (k === "y" || (k === "z" && e.shiftKey)) {
+													e.preventDefault();
+													model?.redo();
+												}
+											}
+										}}
+									/>
+									<div class="cm-md-props-yaml-fence" aria-hidden="true">---</div>
+								</div>
+							)}
 						</Show>
 					</section>
 				</Show>
@@ -1326,6 +1976,51 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 									<Icon name="references" />
 									<span>Link…</span>
 								</button>
+								<Show
+									when={listed()?.ticketFolder}
+									fallback={
+										<button
+											type="button"
+											class="md-work-btn"
+											title={`Move ${ticket()} into its own folder (docs/tickets/${ticket()}/) for reference docs, code samples, and fixtures`}
+											onClick={() => void createTicketFolder(props.path)}
+										>
+											<Icon name="new-folder" />
+											<span>Folder</span>
+										</button>
+									}
+								>
+									{(folder) => (
+										<button
+											type="button"
+											class="md-work-btn"
+											title={`Create a new reference note, sample, or fixture inside ${relativeTo(state.workspace?.root, folder())}/`}
+											onClick={() => void newTicketFile(folder(), ticket())}
+										>
+											<Icon name="new-file" />
+											<span>File</span>
+										</button>
+									)}
+								</Show>
+								<Menu
+									floating
+									class="md-work-btn"
+									label={`More work items for ${ticket()}`}
+									title={`Create a sub-ticket, decision, question, or registry row for ${ticket()}`}
+									items={() => [
+										{ label: "New sub-ticket…", run: () => void newTicket(undefined, undefined, { parent: ticket() }) },
+										{ label: "New decision…", run: () => void newKnowledge("decisions", { ticket: ticket() }) },
+										{ label: "New question…", run: () => void newKnowledge("questions", { ticket: ticket() }) },
+										{ label: "Add registry row…", run: () => void addRegistryRowForTicket(ticket()) },
+										"separator",
+										{ label: "Export release packet (HTML)…", run: () => void exportTicketPacket(props.path, ticket(), "html") },
+										{ label: "Export release packet (Markdown)…", run: () => void exportTicketPacket(props.path, ticket(), "markdown") },
+									]}
+								>
+									<Icon name="add" />
+									<span>More</span>
+									<Icon name="chevron-down" />
+								</Menu>
 								<button
 									type="button"
 									class="md-work-btn md-work-guide-btn"
@@ -1372,17 +2067,28 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 									<div>
 										<dt>Registries</dt>
 										<dd>
-											Any CSV row whose <code>Ticket</code> column lists <code>{ticket()}</code> appears under <em>To carry across</em>.
+											Any CSV row whose <code>Ticket</code> column lists <code>{ticket()}</code> appears under <em>Registries</em> and opens filtered to those rows.
+										</dd>
+									</div>
+									<div>
+										<dt>Ticket folder</dt>
+										<dd>
+											Place reference docs, existing code samples, and fixtures inside <code>docs/tickets/{ticket()}/</code> — click the folder under <em>Ticket files</em> to browse them in a focused Explorer view without cluttering the Work sidebar.
 										</dd>
 									</div>
 								</dl>
 							</div>
 						</Show>
+						<Show when={workRollup().length > 0}>
+							<div class="md-work-rollup" aria-label="Work progress summary">
+								<For each={workRollup()}>{(part) => <span>{part}</span>}</For>
+							</div>
+						</Show>
 						<Show
-							when={work().length > 0}
+							when={work().length > 0 || Boolean(listed()?.ticketFolder)}
 							fallback={
 								<p class="md-work-empty">
-									No specs, plans, or notes linked yet. Use <strong>Spec</strong>, <strong>Plan</strong>, or <strong>Link…</strong> above, or open <strong>How links work</strong> to wire them in YAML.
+									No specs, plans, or notes linked yet. Use <strong>Spec</strong>, <strong>Plan</strong>, <strong>Link…</strong>, or <strong>Folder</strong> above, or open <strong>How links work</strong> to wire them in YAML.
 								</p>
 							}
 						>
@@ -1422,6 +2128,17 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 															<span class="md-work-via" title={item.detail}>
 																{item.reason}
 															</span>
+															<Show when={group.kind !== "registry"}>
+																<button
+																	type="button"
+																	class="md-work-unlink"
+																	title={`Unlink ${file.ticket ?? file.title ?? file.name} from ${ticket()}`}
+																	aria-label={`Unlink ${file.ticket ?? file.title ?? file.name}`}
+																	onClick={() => void unlinkDocumentFromTicket(props.path, ticket(), file)}
+																>
+																	<Icon name="close" />
+																</button>
+															</Show>
 														</li>
 													);
 												}}
@@ -1430,40 +2147,143 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 									</div>
 								)}
 							</For>
+							<Show when={listed()?.ticketFolder}>
+								{(folder) => {
+									const count = () => listed()?.ticketFileCount ?? listed()?.ticketFiles?.length ?? 0;
+									const relFolder = () => relativeTo(state.workspace?.root, folder()).split("\\").join("/");
+									const openScoped = () =>
+										void import("../panels/Explorer").then((m) => m.browseFolderInExplorer(folder(), `${ticket()} files`));
+									return (
+										<div class="md-work-group md-work-files">
+											<h3>Ticket files</h3>
+											<ul>
+												<li class="md-work-file-row">
+													<button
+														type="button"
+														class="link md-work-folder-link"
+														title={`Browse ${relFolder()}/ in a focused Explorer view`}
+														onClick={openScoped}
+													>
+														<Icon name="folder" />
+														<span>{relFolder()}/</span>
+													</button>
+													<span class="md-work-note">
+														{count() === 0 ? "No extra files" : `${count()} ${count() === 1 ? "file" : "files"}`}
+													</span>
+													<span class="md-work-via" title="Opens this ticket's folder in a focused Explorer view">
+														Explorer
+													</span>
+												</li>
+											</ul>
+										</div>
+									);
+								}}
+							</Show>
+							<Show when={readiness()}>
+								{(rep) => (
+									<div class="md-readiness">
+										<button
+											type="button"
+											class="md-readiness-toggle"
+											aria-expanded={readinessOpen()}
+											title="STARLIMS transport & release readiness checklist for this ticket"
+											onClick={() => setReadinessOpen((v) => !v)}
+										>
+											<Icon name={readinessOpen() ? "chevron-down" : "chevron-right"} />
+											<span>Release readiness</span>
+											<span class={`md-readiness-badge ${rep().ready ? "ready" : "pending"}`}>
+												{rep().pass}/{rep().total} {rep().ready ? "ready" : "checks"}
+											</span>
+										</button>
+										<Show when={readinessOpen()}>
+											<ul class="md-readiness-list">
+												<For each={rep().checks}>
+													{(chk) => (
+														<li class={`md-readiness-row level-${chk.level}`}>
+															<Icon name={chk.level === "pass" ? "check" : chk.level === "warn" ? "warning" : "info"} />
+															<strong>{chk.label}:</strong>
+															<Show
+																when={chk.path && !chk.ok}
+																fallback={<span class="md-readiness-detail">{chk.detail}</span>}
+															>
+																<button
+																	type="button"
+																	class="link"
+																	title="Open referenced document"
+																	onClick={() => void openFile(chk.path!)}
+																>
+																	{chk.detail}
+																</button>
+															</Show>
+														</li>
+													)}
+												</For>
+											</ul>
+										</Show>
+									</div>
+								)}
+							</Show>
 						</Show>
 					</section>
 				</Show>
 
-				{/* Non-ticket linked documents (e.g. companion .spec.md with no YAML frontmatter): show which tickets reference this doc and why. */}
-				<Show when={linkedTickets().length > 0}>
+				{/* Non-ticket linked documents (specs, decisions, questions, reference, schema): show linked tickets + unlink + Link to ticket action. */}
+				<Show when={linkedTickets().length > 0 || (!ticket() && listed() && !isCatalog(listed()!) && ["specs", "knowledge", "schema"].includes(listed()!.group))}>
 					<section class="md-linked-tickets" aria-label="Linked tickets">
-						<h2>Linked tickets</h2>
-						<ul>
-							<For each={linkedTickets()}>
-								{(entry) => (
-									<li>
-										<button
-											class="link"
-											title={[entry.ticket.path, `Linked via: ${entry.detail}`].join("\n")}
-											onClick={() => void openFile(entry.ticket.path)}
-											onMouseEnter={(e) => hoverFileButton(entry.ticket.path, e.currentTarget)}
-											onMouseLeave={scheduleHideHover}
-										>
-											<strong>{entry.key}</strong>
-											<Show when={entry.ticket.title && !entry.ticket.title.toLowerCase().startsWith(entry.key.toLowerCase())}>
-												{`: ${entry.ticket.title}`}
+						<div class="md-linked-head">
+							<h2>Linked tickets</h2>
+							<button
+								type="button"
+								class="md-work-btn"
+								title="Link this document to a ticket"
+								onClick={() => void linkNonTicketToTicket(props.path)}
+							>
+								<Icon name="references" />
+								<span>Link to ticket…</span>
+							</button>
+						</div>
+						<Show
+							when={linkedTickets().length > 0}
+							fallback={<p class="md-work-empty">Not linked to a ticket yet.</p>}
+						>
+							<ul>
+								<For each={linkedTickets()}>
+									{(entry) => (
+										<li>
+											<button
+												class="link"
+												title={[entry.ticket.path, `Linked via: ${entry.detail}`].join("\n")}
+												onClick={() => void openFile(entry.ticket.path)}
+												onMouseEnter={(e) => hoverFileButton(entry.ticket.path, e.currentTarget)}
+												onMouseLeave={scheduleHideHover}
+											>
+												<strong>{entry.key}</strong>
+												<Show when={entry.ticket.title && !entry.ticket.title.toLowerCase().startsWith(entry.key.toLowerCase())}>
+													{`: ${entry.ticket.title}`}
+												</Show>
+											</button>
+											<Show when={entry.ticket.status}>
+												<span class={`doc-status tone-${toneOf(entry.ticket.status)}`}>{entry.ticket.status}</span>
 											</Show>
-										</button>
-										<Show when={entry.ticket.status}>
-											<span class={`doc-status tone-${toneOf(entry.ticket.status)}`}>{entry.ticket.status}</span>
-										</Show>
-										<span class="md-work-via" title={entry.detail}>
-											{entry.reason}
-										</span>
-									</li>
-								)}
-							</For>
-						</ul>
+											<span class="md-work-via" title={entry.detail}>
+												{entry.reason}
+											</span>
+											<Show when={entry.reason !== "in ticket folder" && listed()}>
+												<button
+													type="button"
+													class="md-work-unlink"
+													title={`Unlink from ${entry.key}`}
+													aria-label={`Unlink from ${entry.key}`}
+													onClick={() => void unlinkDocumentFromTicket(entry.ticket.path, entry.key, listed()!)}
+												>
+													<Icon name="close" />
+												</button>
+											</Show>
+										</li>
+									)}
+								</For>
+							</ul>
+						</Show>
 					</section>
 				</Show>
 
@@ -1508,44 +2328,68 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 				</Show>
 			</div>
 
-			{/* Obsidian-style Hover Page Preview popover (Markdown, Plans, Registries, and Code). */}
+			{/* Obsidian-style Hover Page Preview popover (portaled to body so container-type: inline-size never offsets/clips fixed positioning). */}
 			<Show when={hoverCard()}>
 				{(card) => (
-					<div
-						class="md-hover-card"
-						style={{ left: `${card().x}px`, top: `${card().y}px` }}
-						onMouseEnter={() => {
-							cardHovered = true;
-							clearTimeout(hideTimer);
-						}}
-						onMouseLeave={() => {
-							cardHovered = false;
-							scheduleHideHover();
-						}}
-					>
-						<div class="md-hover-head">
-							<button
-								type="button"
-								class="md-hover-title"
-								title={`Open ${card().relPath}`}
-								onClick={() => {
-									const target = card();
+					<Portal>
+						<div
+							class="md-hover-card"
+							style={{ left: `${card().x}px`, top: `${card().y}px` }}
+							onMouseEnter={() => {
+								cardHovered = true;
+								clearTimeout(hideTimer);
+							}}
+							onMouseLeave={() => {
+								cardHovered = false;
+								scheduleHideHover();
+							}}
+						>
+							<div class="md-hover-head">
+								<button
+									type="button"
+									class="md-hover-title"
+									title={`Open ${card().relPath}`}
+									onClick={() => {
+										const target = card();
+										setHoverCard(null);
+										void openFile(target.path, target.line ? { reveal: { line: target.line } } : {});
+									}}
+								>
+									{card().title}
+								</button>
+								<Show when={card().status}>
+									<span class={`doc-status tone-${card().statusTone ?? "active"}`}>{card().status}</span>
+								</Show>
+								<Show when={card().badge}>
+									<span class="md-hover-badge">{card().badge}</span>
+								</Show>
+								<span class="md-hover-path">{card().relPath}</span>
+							</div>
+							<div
+								ref={hoverBodyEl}
+								class="md-hover-body md"
+								innerHTML={card().html}
+								onClick={(e) => {
+									const a = (e.target as HTMLElement | null)?.closest?.("a");
+									if (!a) return;
+									e.preventDefault();
+									const href = a.getAttribute("href");
+									const basePath = card().path;
 									setHoverCard(null);
-									void openFile(target.path, target.line ? { reveal: { line: target.line } } : {});
+									if (!href) return;
+									const leads = linkLeads(href, basePath, state.workspace?.root);
+									if (!leads) return;
+									if ("web" in leads) return void window.open(leads.web, "_blank", "noopener");
+									if ("heading" in leads) return void followHeadingInFile(basePath, leads.heading);
+									if (!leads.lines && href.includes("#")) {
+										const h = decodeURIComponent(href.slice(href.indexOf("#") + 1));
+										if (h) return void followHeadingInFile(leads.file, h);
+									}
+									void openFile(leads.file, leads.lines ? { reveal: leads.lines } : {});
 								}}
-							>
-								{card().title}
-							</button>
-							<Show when={card().status}>
-								<span class={`doc-status tone-${card().statusTone ?? "active"}`}>{card().status}</span>
-							</Show>
-							<Show when={card().badge}>
-								<span class="md-hover-badge">{card().badge}</span>
-							</Show>
-							<span class="md-hover-path">{card().relPath}</span>
+							/>
 						</div>
-						<div ref={hoverBodyEl} class="md-hover-body md" innerHTML={card().html} />
-					</div>
+					</Portal>
 				)}
 			</Show>
 

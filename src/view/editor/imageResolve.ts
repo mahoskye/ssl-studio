@@ -6,7 +6,8 @@ import DOMPurify from "dompurify";
 import { imageType } from "../../shared/fileKind";
 import { baseName, dirName, isInside, joinPath, relativePath, resolvePath } from "../../shared/paths";
 import { backend } from "../backend";
-import { notify, setState, state } from "../state";
+import { docs } from "../project";
+import { canonical, notify, setState, state } from "../state";
 
 const dataUrlCache = new Map<string, string>();
 let workspaceFilesCache: { root: string; at: number; files: string[] } | null = null;
@@ -162,9 +163,14 @@ const MIME_EXT: Record<string, string> = {
 	"image/jpg": "jpg",
 	"image/gif": "gif",
 	"image/webp": "webp",
+	"image/svg+xml": "svg",
 	"image/bmp": "bmp",
 	"image/x-icon": "ico",
+	"image/avif": "avif",
 };
+
+/** Generic browser clipboard filenames like `image.png` get timestamped so pastes stay descriptive and unique. */
+const GENERIC_CLIPBOARD_NAME_RE = /^image\.(png|jpe?g|webp|gif|bmp|avif)$/i;
 
 function sanitizeImageBaseName(name: string): string {
 	return name
@@ -203,16 +209,27 @@ export async function saveImageAttachment(file: File | Blob, docPath: string): P
 
 	const rawName = file instanceof File ? file.name : "";
 	const extFromName = rawName.includes(".") ? rawName.split(".").pop()!.toLowerCase() : "";
-	const ext = MIME_EXT[file.type.toLowerCase()] ?? (imageType(`a.${extFromName}`) ? extFromName : "png");
-	const stem = sanitizeImageBaseName(rawName) || `pasted-image-${timestampSlug()}`;
+	const ext = MIME_EXT[file.type.toLowerCase()] ?? (extFromName === "svg" ? "svg" : imageType(`a.${extFromName}`) ? extFromName : "png");
+	const meaningfulName = rawName && !GENERIC_CLIPBOARD_NAME_RE.test(rawName.trim()) ? sanitizeImageBaseName(rawName) : "";
+	const stem = meaningfulName || `pasted-image-${timestampSlug()}`;
 
 	const docsRoot = joinPath(root, ...(state.project?.docs ?? "docs").split(/[\\/]/).filter((p) => p && p !== "."));
 	const configured = state.settings.attachmentsFolder?.trim();
+	const docCanon = canonical(docPath);
+	const ownerTicket = docs().find(
+		(d) =>
+			d.exists &&
+			d.group === "tickets" &&
+			d.ticketFolder &&
+			(canonical(d.path) === docCanon || isInside(d.ticketFolder, docPath)),
+	);
 	const destDir = configured
 		? joinPath(root, ...configured.split(/[\\/]/).filter(Boolean))
-		: isInside(docsRoot, docPath)
-			? joinPath(docsRoot, "attachments")
-			: joinPath(dirName(docPath), "attachments");
+		: ownerTicket?.ticketFolder
+			? joinPath(ownerTicket.ticketFolder, "attachments")
+			: isInside(docsRoot, docPath)
+				? joinPath(docsRoot, "attachments")
+				: joinPath(dirName(docPath), "attachments");
 
 	const existing = new Set((await listWorkspaceFiles()).map((f) => f.toLowerCase()));
 	let candidate = joinPath(destDir, `${stem}.${ext}`);
@@ -222,19 +239,33 @@ export async function saveImageAttachment(file: File | Blob, docPath: string): P
 	}
 
 	try {
-		const base64 = arrayBufferToBase64(await file.arrayBuffer());
-		const saved = await backend.writeImage(candidate, base64);
-		const dataUrl = `data:${file.type || `image/${ext === "jpg" ? "jpeg" : ext}`};base64,${base64}`;
-		dataUrlCache.set(saved.path, dataUrl);
+		let savedPath = candidate;
+		if (ext === "svg") {
+			const rawSvg = await file.text();
+			const cleanSvg = DOMPurify.sanitize(rawSvg, { USE_PROFILES: { svg: true, svgFilters: true } });
+			if (!cleanSvg.trim()) {
+				notify("The dropped SVG was empty after sanitization.", "error");
+				return null;
+			}
+			await backend.create(candidate, "file");
+			await backend.write(candidate, cleanSvg);
+			dataUrlCache.set(candidate, `data:image/svg+xml;charset=utf-8,${encodeURIComponent(cleanSvg)}`);
+		} else {
+			const base64 = arrayBufferToBase64(await file.arrayBuffer());
+			const saved = await backend.writeImage(candidate, base64);
+			savedPath = saved.path;
+			const dataUrl = `data:${file.type || `image/${ext === "jpg" ? "jpeg" : ext}`};base64,${base64}`;
+			dataUrlCache.set(savedPath, dataUrl);
+		}
 		workspaceFilesCache = null;
 		setState("treeVersion", (v) => v + 1);
-		const rel = relativePath(dirName(docPath), saved.path);
-		const alt = rawName && !/^image\./i.test(rawName) ? sanitizeImageBaseName(rawName).replace(/[-_]+/g, " ") : "";
+		const rel = relativePath(dirName(docPath), savedPath);
+		const alt = meaningfulName ? meaningfulName.replace(/[-_]+/g, " ") : "";
 		const encodedRel = rel
 			.split("/")
 			.map((seg) => encodeURIComponent(seg))
 			.join("/");
-		return { markdown: `![${alt}](${encodedRel})`, path: saved.path, rel };
+		return { markdown: `![${alt}](${encodedRel})`, path: savedPath, rel };
 	} catch (e: any) {
 		notify(`Could not save image: ${e?.message ?? e}`, "error");
 		return null;

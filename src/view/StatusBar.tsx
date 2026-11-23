@@ -1,7 +1,12 @@
 // Workspace, language server and opencode status, cursor, and the size meter
 // for the current script (program decision 0006).
 import { Icon } from "./Icon";
-import { createEffect, createSignal, on, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, on, onCleanup, Show } from "solid-js";
+import { docChecks } from "../shared/docChecks";
+import { folderParts } from "../shared/docSections";
+import { markdownStats } from "../shared/markdownEdit";
+import { CATALOG_AREAS } from "../shared/projectDocs";
+import { docs } from "./project";
 import { level, countHistoryEntries, type SizeReport } from "../shared/houseStyle";
 import { backend } from "./backend";
 import { measure } from "./editor/textmate";
@@ -108,6 +113,32 @@ export function StatusBar() {
 	const whereWords = () => [...where()].reverse().map((s) => s.name).join(", in ");
 	const lspNote = () => state.lsp.message ?? state.info?.lsp.message;
 	const opencode = () => state.info?.opencode;
+	const docAreas = createMemo(() => CATALOG_AREAS.filter((area) => area !== "schema" || folderParts(state.project?.schema ?? "schema").length > 0));
+	const docCheckList = createMemo(() => docChecks(docs(), docAreas()));
+	const docWarnings = createMemo(() => docCheckList().filter((c) => c.level === "warn").length);
+	const docNotes = createMemo(() => docCheckList().filter((c) => c.level === "note").length);
+	// Reactive Markdown word count & task progress in StatusBar when a Markdown doc is open.
+	const [mdStats, setMdStats] = createSignal<{ words: number; tasksDone: number; tasksTotal: number } | null>(null);
+	createEffect(
+		on(activePath, (p) => {
+			const doc = activeDoc();
+			if (!p || !doc || !/\.(md|markdown)$/i.test(p)) {
+				setMdStats(null);
+				return;
+			}
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const refresh = () => setMdStats(markdownStats(doc.model.getValue()));
+			refresh();
+			const sub = doc.model.onDidChangeContent(() => {
+				clearTimeout(timer);
+				timer = setTimeout(refresh, 250);
+			});
+			onCleanup(() => {
+				clearTimeout(timer);
+				sub.dispose();
+			});
+		}),
+	);
 	// "near" and "over" are also said in words, for anyone who cannot tell them by colour.
 	const part = (value: number, limit: number, text: string, near?: number, narrowHide = false) => {
 		const at = level(value, limit, near);
@@ -178,6 +209,17 @@ export function StatusBar() {
 					<Icon name="error" /> {counts().errors} <Icon name="warning" /> {counts().warnings}
 				</span>
 			</button>
+			<Show when={docWarnings() > 0 || docNotes() > 0}>
+				<button
+					class="item tier-2"
+					classList={{ warn: docWarnings() > 0 }}
+					title={`${docWarnings()} document ${docWarnings() === 1 ? "warning" : "warnings"}, ${docNotes()} ${docNotes() === 1 ? "note" : "notes"} in Health. Click to open Health.`}
+					aria-label={`${docWarnings()} document warnings, ${docNotes()} notes. Open Health.`}
+					onClick={() => showPanel("health")}
+				>
+					<Icon name="note" /> {docWarnings() > 0 ? (docNotes() > 0 ? `${docWarnings()} · ${docNotes()}` : docWarnings()) : docNotes()}
+				</button>
+			</Show>
 			<Show when={where().length}>
 				<button
 					class="item where tier-2"
@@ -208,6 +250,14 @@ export function StatusBar() {
 						</span>
 					);
 				}}
+			</Show>
+			<Show when={state.centerView === "editors" && !review() && mdStats()}>
+				{(st) => (
+					<span class="item tier-2" title="Word count and Markdown task checklist progress in this document">
+						{st().words} {st().words === 1 ? "word" : "words"}
+						{st().tasksTotal > 0 ? ` · ${st().tasksDone}/${st().tasksTotal} tasks` : ""}
+					</span>
+				)}
 			</Show>
 			<Show when={state.centerView === "editors" && review()}>
 				{(r) => <span class="item">{languageName(r().language)}</span>}

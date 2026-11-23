@@ -1,14 +1,15 @@
 // One editor group: a tab strip over one Monaco editor that shows the
 // group's active document. Two groups side by side make a split.
 import { DEFAULT_CODE_FONT, resolveFontStack } from "../../shared/fonts";
+import { canFormatNonSsl, SQL_DIALECTS, sqlDialectInfo } from "../../shared/format";
 import { continueLists } from "./markdownKeys";
 import { liveEditorAt } from "./liveBridge";
 import { MarkdownLiveEditor } from "./MarkdownLiveEditor";
 import { Icon } from "../Icon";
 import { tabShown } from "../recentTabs";
-import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { monaco } from "./monaco";
-import { activePath, closeAllTabs, closeOtherTabs, closeTab, closeTabsToRight, displayName, documents, focusRequest, isUntitled, keepTab, markdownMode, moveTab, newUntitled, openFile, planMode, revealSignal, revert, save, saveAll, setMarkdownMode, setPlanMode, setState, split, state, tabLeaving, takeReveal, togglePin, openedForALook } from "../state";
+import { activePath, closeAllTabs, closeOtherTabs, closeTab, closeTabsToRight, displayName, documents, focusRequest, isUntitled, keepTab, markdownMode, moveTab, newUntitled, notify, openFile, planMode, revealSignal, revert, save, saveAll, saveSetting, setMarkdownMode, setPlanMode, setState, split, state, tabLeaving, takeReveal, togglePin, openedForALook } from "../state";
 import { landsBefore } from "../../shared/tabOrder";
 import { othersOf, rightOf } from "../../shared/tabOrder";
 import { chooseFromMenu } from "../panels/RowMenu";
@@ -21,7 +22,10 @@ import { PlanView } from "../plan/PlanView";
 import { dirName, isInside, relativeTo } from "../../shared/paths";
 import { tabLabels } from "./tabs";
 import { Menu, type MenuItem } from "../Menu";
-import { isMarkdown, isTable } from "../project";
+import { backend } from "../backend";
+import { docs, isMarkdown, isTable } from "../project";
+import { registryTitle } from "../../shared/projectDocs";
+import { docsGoverningFile } from "../../shared/workContext";
 import { TableView } from "./TableView";
 import { FileView } from "./FileView";
 import { useGitMarks } from "./gitMarks";
@@ -62,6 +66,30 @@ export function EditorGroup(props: { index: number }) {
 	const planViewMode = () => (group().active && isPlan() ? planMode(group().active!) : "chart");
 	const showChart = () => isPlan() && planViewMode() !== "source";
 	const isSsl = () => Boolean(group().active && documents.get(group().active!)?.model.getLanguageId() === "ssl");
+	const activeLang = () => (group().active ? documents.get(group().active!)?.model.getLanguageId() : undefined);
+	const isSql = () => activeLang() === "sql" && !showFile();
+	const canFormat = () => {
+		const path = group().active;
+		const lang = activeLang();
+		if (!path || !lang || showFile() || isPlan()) return false;
+		return lang === "ssl" || canFormatNonSsl(lang, path);
+	};
+	const formatDisabled = () => activeLang() === "ssl" && state.lsp.state !== "running";
+	const sqlDialect = () => sqlDialectInfo(state.settings.sqlDialect);
+	const pickSqlDialect = async (e: MouseEvent) => {
+		const box = (e.currentTarget as HTMLElement).getBoundingClientRect();
+		const labels = SQL_DIALECTS.map((d) => d.label);
+		const picked = await chooseFromMenu("SQL formatting dialect", labels, { x: box.left, y: box.bottom + 4 });
+		if (!picked) return;
+		const found = SQL_DIALECTS.find((d) => d.label === picked);
+		if (!found || found.id === sqlDialect().id) return;
+		await saveSetting({ sqlDialect: found.id });
+		notify(`SQL formatting dialect set to ${found.label}.`);
+	};
+	const runFormat = () => {
+		setState("activeGroup", props.index);
+		void import("../commands").then((all) => all.runCommand("format"));
+	};
 	// Blocks are a view of SSL only. The group remembers the choice, so the next
 	// script opens as blocks again, but a Markdown or SQL file never does.
 	const showBlocks = () => group().mode === "blocks" && isSsl() && !isPlan() && !showFile();
@@ -455,6 +483,55 @@ export function EditorGroup(props: { index: number }) {
 		];
 	};
 
+	// Reverse Code -> Docs ("Governed by"): unified lookup combining plans, specs, tickets, decisions,
+	// questions, schema docs (`source:`), CSV registries (`files.csv`, `settings.csv`, `database.csv`),
+	// and incoming Markdown links. Uses a fingerprint of `docs()` so unrelated code saves don't spam `linksTo`.
+	const docsFingerprint = createMemo(() =>
+		docs()
+			.filter((d) => d.exists)
+			.map((d) => `${d.path}:${d.codeRefs?.length ?? 0}:${d.tickets?.length ?? 0}`)
+			.join("\0"),
+	);
+	const isGovernableFile = () => {
+		const p = group().active;
+		return Boolean(p && !isUntitled(p) && !isMarkdown(p) && !isTable(p) && !isPlanPath(p) && state.workspace?.root);
+	};
+	const [governingLinks] = createResource(
+		() => {
+			if (!isGovernableFile()) return null;
+			return { path: group().active!, fp: docsFingerprint() };
+		},
+		({ path }) => backend.linksTo(path).catch(() => []),
+	);
+	const governingDocs = createMemo(() => {
+		const p = group().active;
+		if (!isGovernableFile() || !p) return [];
+		const list = docsGoverningFile(docs(), p, state.workspace?.root, governingLinks() ?? []);
+		return list.map(({ file: d, reason, line }) => {
+			const label =
+				d.group === "registries"
+					? registryTitle(d.name)
+					: d.ticket && d.title && !d.title.startsWith(d.ticket)
+						? `${d.ticket}: ${d.title}`
+						: d.title || d.heading || d.name;
+			const kind = d.group === "knowledge" && d.kind ? d.kind : d.group;
+			return { path: d.path, line, label, kind, reason };
+		});
+	});
+	const governingMenu = (): MenuItem[] => {
+		const list = governingDocs();
+		const items: MenuItem[] = list.map((g) => ({
+			label: `${g.label} (${g.kind} · ${g.reason})`,
+			run: () => void openFile(g.path, g.line ? { reveal: { line: g.line } } : {}),
+		}));
+		if (items.length) items.push("separator");
+		items.push(
+			{ label: "New decision about this code…", run: () => void import("../projectDocs").then((m) => m.newKnowledge("decisions")) },
+			{ label: "New question about this code…", run: () => void import("../projectDocs").then((m) => m.newKnowledge("questions")) },
+		);
+		return items;
+	};
+
 	return (
 		<section
 			ref={section}
@@ -716,9 +793,65 @@ export function EditorGroup(props: { index: number }) {
 									</span>
 								</Show>
 							</div>
-							<Show when={folioAlert()}>
-								{(alert) => <span class={`folio-alert ${alert().kind}`}>{alert().text}</span>}
-							</Show>
+							<div class="folio-actions">
+								<Show when={folioAlert()}>
+									{(alert) => <span class={`folio-alert ${alert().kind}`}>{alert().text}</span>}
+								</Show>
+								<Show when={isGovernableFile()}>
+									<Menu
+										floating
+										class="folio-docs-menu"
+										label={
+											governingDocs().length
+												? `Governed by ${governingDocs().length} project ${governingDocs().length === 1 ? "document" : "documents"}`
+												: "Documents for this file"
+										}
+										title={
+											governingDocs().length
+												? `Plans, specs, tickets, and registries for this file (${governingDocs().length})`
+												: "No governing docs linked yet — create a decision or question for this code"
+										}
+										items={governingMenu}
+									>
+										<Icon name="references" />
+										<span>
+											{governingDocs().length === 0
+												? "Docs"
+												: governingDocs().length === 1
+													? "1 doc"
+													: `${governingDocs().length} docs`}
+										</span>
+										<Icon name="chevron-down" />
+									</Menu>
+								</Show>
+								<Show when={isSql()}>
+									<button
+										type="button"
+										class="folio-btn folio-dialect-btn"
+										title={`SQL formatting dialect: ${sqlDialect().label}. Click to switch.`}
+										aria-label={`SQL formatting dialect: ${sqlDialect().label}`}
+										aria-haspopup="menu"
+										onClick={(e) => void pickSqlDialect(e)}
+									>
+										<Icon name="database" />
+										<span>{sqlDialect().short}</span>
+										<Icon name="chevron-down" />
+									</button>
+								</Show>
+								<Show when={canFormat()}>
+									<button
+										type="button"
+										class="folio-btn"
+										disabled={formatDisabled()}
+										title={formatDisabled() ? "Start or restart the language server to format SSL files" : "Format document (Ctrl+Shift+I)"}
+										aria-label="Format document"
+										onClick={runFormat}
+									>
+										<Icon name="wand" />
+										<span>Format</span>
+									</button>
+								</Show>
+							</div>
 						</div>
 						<div class="folio-sub-wrap">
 							<div class="folio-sub-inner">
