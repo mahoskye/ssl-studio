@@ -143,7 +143,7 @@ const { sigOf } = await import("../src/view/plan/PlanCodeDrilldown");
 const { validTestScript } = await import("../src/view/plan/PlanTests");
 const { computeAnchorDetachState, isEditableTarget, planTextUndoAction, resolveBuilderSaveMode } = await import("../src/view/plan/PlanTextView");
 
-const readSrc = (rel: string) => readFileSync(join(import.meta.dir, rel), "utf8");
+const readSrc = (rel: string) => readFileSync(join(import.meta.dir, rel), "utf8").replace(/\r\n/g, "\n");
 
 const basePlan = (): Plan => ({
 	version: 1,

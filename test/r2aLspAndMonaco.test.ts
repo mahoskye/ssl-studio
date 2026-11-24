@@ -466,9 +466,15 @@ describe("LspProcess stale-pipe isolation, spawn error, and failed state cleanup
 	});
 
 	test("enters failed state after rapid crashes, clears dead proc, and does not throw on send()", async () => {
-		const crashing = join(rootTmp, "crash-lsp.sh");
-		writeFileSync(crashing, "#!/bin/sh\necho 'fatal boom' >&2\nexit 1\n");
-		chmodSync(crashing, 0o755);
+		const crashJs = join(rootTmp, "crash-lsp.js");
+		writeFileSync(crashJs, `process.stderr.write("fatal boom\\n"); process.exit(1);\n`);
+		const crashing = join(rootTmp, process.platform === "win32" ? "crash-lsp.cmd" : "crash-lsp.sh");
+		if (process.platform === "win32") {
+			writeFileSync(crashing, `@echo off\r\n"${process.execPath}" "${crashJs}" %*\r\n`);
+		} else {
+			writeFileSync(crashing, `#!/bin/sh\nexec "${process.execPath}" "${crashJs}" "$@"\n`);
+			chmodSync(crashing, 0o755);
+		}
 
 		const states: { state: string; message?: string }[] = [];
 		let resolveFailed!: () => void;
@@ -492,26 +498,40 @@ describe("LspProcess stale-pipe isolation, spawn error, and failed state cleanup
 	});
 
 	test("drops stale stdout frames from a stopped or restarted subprocess", async () => {
-		// Script traps SIGTERM briefly and emits a stale frame after receiving it (or sleeps briefly then emits).
 		const markerFile = join(rootTmp, "run-count");
 		writeFileSync(markerFile, "");
-		const noisy = join(rootTmp, "stale-lsp.sh");
+		const noisyJs = join(rootTmp, "stale-lsp.js");
 		writeFileSync(
-			noisy,
-			`#!/bin/sh
-echo x >> "${markerFile}"
-COUNT=$(wc -l < "${markerFile}" | tr -d ' ')
-if [ "$COUNT" -eq 1 ]; then
-  trap 'printf "Content-Length: 14\\r\\n\\r\\n{\\"gen\\":\\"old\\"}"; exit 0' TERM
-  printf 'Content-Length: 16\\r\\n\\r\\n{"gen":"first1"}'
-  sleep 2
-else
-  printf 'Content-Length: 14\\r\\n\\r\\n{"gen":"new1"}'
-  sleep 2
-fi
+			noisyJs,
+			`const fs = require("node:fs");
+const marker = ${JSON.stringify(markerFile)};
+fs.appendFileSync(marker, "x\\n");
+const count = fs.readFileSync(marker, "utf8").split(/\\r?\\n/).filter(Boolean).length;
+if (count === 1) {
+  const emitOld = () => {
+    process.stdout.write('Content-Length: 14\\r\\n\\r\\n{"gen":"old"}');
+    process.exit(0);
+  };
+  process.on("SIGTERM", emitOld);
+  process.stdin.resume();
+  process.stdin.on("end", emitOld);
+  process.stdout.write('Content-Length: 16\\r\\n\\r\\n{"gen":"first1"}');
+  setTimeout(() => process.exit(0), 2500);
+} else {
+  process.stdin.resume();
+  process.stdin.on("end", () => process.exit(0));
+  process.stdout.write('Content-Length: 14\\r\\n\\r\\n{"gen":"new1"}');
+  setTimeout(() => process.exit(0), 2500);
+}
 `,
 		);
-		chmodSync(noisy, 0o755);
+		const noisy = join(rootTmp, process.platform === "win32" ? "stale-lsp.cmd" : "stale-lsp.sh");
+		if (process.platform === "win32") {
+			writeFileSync(noisy, `@echo off\r\n"${process.execPath}" "${noisyJs}" %*\r\n`);
+		} else {
+			writeFileSync(noisy, `#!/bin/sh\nexec "${process.execPath}" "${noisyJs}" "$@"\n`);
+			chmodSync(noisy, 0o755);
+		}
 
 		const received: string[] = [];
 		let gotFirst!: () => void;

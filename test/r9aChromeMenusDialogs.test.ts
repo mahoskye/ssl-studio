@@ -246,7 +246,7 @@ const { clampNumericSetting, validateWorkspaceFolderSetting } = await import("..
 const { templatesFolderPath } = await import("../src/view/templater");
 const { setState } = await import("../src/view/state");
 
-const readSrc = (rel: string) => readFileSync(join(import.meta.dir, rel), "utf8");
+const readSrc = (rel: string) => readFileSync(join(import.meta.dir, rel), "utf8").replace(/\r\n/g, "\n");
 const rootTmp = mkdtempSync(join(tmpdir(), "ssl-studio-r9a-"));
 afterAll(() => rmSync(rootTmp, { recursive: true, force: true }));
 

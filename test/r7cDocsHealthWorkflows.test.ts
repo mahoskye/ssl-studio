@@ -144,7 +144,7 @@ const {
 } = await import("../src/view/projectDocs");
 const { applyCombinedLinkMends, findOpenTaskOffset } = await import("../src/view/panels/Health");
 
-const readSrc = (rel: string) => readFileSync(join(import.meta.dir, rel), "utf8");
+const readSrc = (rel: string) => readFileSync(join(import.meta.dir, rel), "utf8").replace(/\r\n/g, "\n");
 
 describe("Round 7B P1-18 — renameProseTagInMarkdown", () => {
 	test("renames prose #auth while preserving Markdown anchor links, HTML attributes, wikilinks, inline code, and headings", () => {

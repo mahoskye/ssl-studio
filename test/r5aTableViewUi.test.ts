@@ -156,7 +156,7 @@ const {
 } = await import("../src/view/editor/TableView");
 const { fromDraft } = await import("../src/view/editor/CsvFormatDialog");
 
-const readSrc = (rel: string) => readFileSync(join(import.meta.dir, rel), "utf8");
+const readSrc = (rel: string) => readFileSync(join(import.meta.dir, rel), "utf8").replace(/\r\n/g, "\n");
 
 /** Applies offset-based edits in descending offset order (mirroring Monaco `pushEditOperations`). */
 function applyOffsetEdits(raw: string, edits: readonly OffsetTextEdit[]): string {

@@ -10,7 +10,7 @@ import {
 } from "../src/shared/markdownDiff";
 import { KEEP, LOSE_EDITS, REPLACE, reviewFlow, type Reviewable } from "../src/view/editor/reviewFlow";
 
-const readSrc = (rel: string) => readFileSync(join(import.meta.dir, rel), "utf8");
+const readSrc = (rel: string) => readFileSync(join(import.meta.dir, rel), "utf8").replace(/\r\n/g, "\n");
 
 // =============================================================================
 // 1. lineDiff.ts — (a.length + 1) * (b.length + 1) allocation cap

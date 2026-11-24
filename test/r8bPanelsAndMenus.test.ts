@@ -178,7 +178,7 @@ const { clampExplorerHeight, decodeDroppedText, gitKindMapFor, MAX_DROP_FILE_BYT
 const { focusRowsBelow } = await import("../src/view/panels/Rows");
 const { narrowHosted, panelOn, setNarrowHosted, setNarrowPanels, toggleSide } = await import("../src/view/panels/registry");
 
-const readSrc = (rel: string) => readFileSync(join(import.meta.dir, rel), "utf8");
+const readSrc = (rel: string) => readFileSync(join(import.meta.dir, rel), "utf8").replace(/\r\n/g, "\n");
 
 /** Minimal fake Monaco model + editor to verify edit mutations, visibility guards, and null-position safety. */
 function makeFakeMonaco(initialText: string, opts: { languageId?: string; visible?: boolean; nullPosition?: boolean; disposed?: boolean } = {}) {

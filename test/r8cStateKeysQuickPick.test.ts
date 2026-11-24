@@ -1063,7 +1063,7 @@ describe("R8C P1 — quickRank memoization, quickPrefix 1-char prefix, layout sa
 	});
 
 	test("QuickPick.tsx, App.tsx, main.tsx, commands.ts, navigation.ts enforce Round 8C UI invariants", () => {
-		const readSrc = (rel: string) => readFileSync(join(import.meta.dir, rel), "utf8");
+		const readSrc = (rel: string) => readFileSync(join(import.meta.dir, rel), "utf8").replace(/\r\n/g, "\n");
 
 		const qp = readSrc("../src/view/QuickPick.tsx");
 		expect(qp).toContain("e.isComposing || e.keyCode === 229");

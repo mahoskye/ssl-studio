@@ -110,7 +110,7 @@ const { evaluateTidyChecks, fenced, isExplicitUnchanged, notePath, pickPrimarySs
 const { MAX_SAVED_ENTRY_CHARS, trimThreadsForStorage, writeSavedThreads } = await import("../src/view/agent/store");
 const { codeOnly } = await import("../src/view/editor/textmate");
 
-const readSrc = (rel: string) => readFileSync(join(import.meta.dir, rel), "utf8");
+const readSrc = (rel: string) => readFileSync(join(import.meta.dir, rel), "utf8").replace(/\r\n/g, "\n");
 
 describe("R6B — decideModel fail-closed paid-model confirmation", () => {
 	const models = [
@@ -419,7 +419,7 @@ describe("R6B — textmate.ts codeOnly unloaded guard & token-boundary preservat
 	test("codeOnly preserves token boundaries so :IF x != :IFx while ignoring comments and layout", async () => {
 		const wasm = readFileSync(resolve(import.meta.dir, "../node_modules/vscode-oniguruma/release/onig.wasm"));
 		await oniguruma.loadWASM({ data: wasm });
-		const rawGrammar = JSON.parse(readFileSync(resolve(import.meta.dir, "../dist/grammar/ssl.tmLanguage.json"), "utf8"));
+		const rawGrammar = JSON.parse(readFileSync(resolve(import.meta.dir, "../src/view/public/grammar/ssl.tmLanguage.json"), "utf8"));
 		const reg = new Registry({
 			onigLib: Promise.resolve({
 				createOnigScanner: (patterns) => new oniguruma.OnigScanner(patterns),

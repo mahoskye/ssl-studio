@@ -90,10 +90,18 @@ export function lspCandidates(configured?: string): string[] {
 	].filter((p): p is string => Boolean(p));
 }
 
+/** Builds the argv to invoke `starlims-lsp`, wrapping `.cmd`/`.bat` shims via `cmd.exe` on Windows. */
+export function lspCommand(path: string, args: string[]): string[] {
+	if (process.platform === "win32" && /\.(cmd|bat)$/i.test(path)) {
+		return ["cmd.exe", "/d", "/s", "/c", path, ...args];
+	}
+	return [path, ...args];
+}
+
 export async function findLsp(configured?: string): Promise<ToolStatus> {
 	for (const path of lspCandidates(configured)) {
 		if (!existsSync(path)) continue;
-		const out = await run([path, "--version"]);
+		const out = await run(lspCommand(path, ["--version"]));
 		// A developer build says "version dev": usable, with the pin warning.
 		const version = out && /starlims-lsp version (\S+)/.exec(out)?.[1];
 		if (!version) continue;

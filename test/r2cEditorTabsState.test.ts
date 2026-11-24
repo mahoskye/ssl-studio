@@ -797,7 +797,7 @@ describe("state.ts — lifecycle & race-condition repairs", () => {
 // 5. Structural UI regression guards for CenterTabStrip, EditorGroup, FileView
 // =============================================================================
 describe("UI interaction guards (EditorGroup, CenterTabStrip, FileView)", () => {
-	const readSrc = (rel: string) => readFileSync(join(import.meta.dir, rel), "utf8");
+	const readSrc = (rel: string) => readFileSync(join(import.meta.dir, rel), "utf8").replace(/\r\n/g, "\n");
 
 	test("CenterTabStrip guards tab activation on left click (e.button === 0) and renders unpin button for pinned tabs", () => {
 		const src = readSrc("../src/view/editor/CenterTabStrip.tsx");

@@ -287,7 +287,10 @@ export class WorkspaceFiles {
 		this.inside(full);
 		mkdirSync(dirname(full), { recursive: true });
 		const temp = join(dirname(full), `.${basename(full)}.${process.pid}.${randomBytes(6).toString("hex")}${TMP_SUFFIX}`);
-		const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
+		const flags =
+			process.platform === "win32"
+				? "wx"
+				: constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
 		let created = false;
 		try {
 			const fh = await open(temp, flags, 0o666);

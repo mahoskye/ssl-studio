@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent, firstUrl, isLocalModelRef, parseModelRef, validateAgentServerUrl } from "../src/bun/agent";
@@ -9,8 +9,8 @@ import { dirs } from "../src/bun/paths";
 import { projectSettings, readProject } from "../src/bun/project";
 import { SettingsStore, USER_ONLY_SETTINGS } from "../src/bun/settings";
 
-const rootTmp = mkdtempSync(join(tmpdir(), "ssl-studio-r6a-"));
-const gitCfgDir = mkdtempSync(join(tmpdir(), "ssl-studio-r6a-gitconfig-"));
+const rootTmp = realpathSync.native(mkdtempSync(join(tmpdir(), "ssl-studio-r6a-")));
+const gitCfgDir = realpathSync.native(mkdtempSync(join(tmpdir(), "ssl-studio-r6a-gitconfig-")));
 const emptyGitConfig = join(gitCfgDir, "config");
 writeFileSync(emptyGitConfig, "");
 const gitIdentity: Record<string, string> = {

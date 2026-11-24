@@ -365,15 +365,18 @@ describe("LSP framing safety and LspProcess resilience", () => {
 	});
 
 	test("LspProcess survives a throwing onMessage callback and keeps delivering later frames", async () => {
-		const fakeLsp = join(rootTmp, "fake-lsp.sh");
+		const fakeJs = join(rootTmp, "fake-lsp.js");
 		writeFileSync(
-			fakeLsp,
-			`#!/bin/sh
-printf 'Content-Length: 8\\r\\n\\r\\n{"id":1}Content-Length: 8\\r\\n\\r\\n{"id":2}'
-sleep 0.2
-`,
+			fakeJs,
+			`process.stdout.write('Content-Length: 8\\r\\n\\r\\n{"id":1}Content-Length: 8\\r\\n\\r\\n{"id":2}');\nsetTimeout(() => {}, 250);\n`,
 		);
-		chmodSync(fakeLsp, 0o755);
+		const fakeLsp = join(rootTmp, process.platform === "win32" ? "fake-lsp.cmd" : "fake-lsp.sh");
+		if (process.platform === "win32") {
+			writeFileSync(fakeLsp, `@echo off\r\n"${process.execPath}" "${fakeJs}" %*\r\n`);
+		} else {
+			writeFileSync(fakeLsp, `#!/bin/sh\nexec "${process.execPath}" "${fakeJs}" "$@"\n`);
+			chmodSync(fakeLsp, 0o755);
+		}
 
 		const received: string[] = [];
 		let doneResolve!: () => void;

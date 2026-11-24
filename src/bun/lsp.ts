@@ -3,6 +3,7 @@
 import type { Subprocess } from "bun";
 import type { LspState } from "../shared/protocol";
 import { createFrameReader, frame } from "./frames";
+import { lspCommand } from "./tools";
 
 const MAX_RESTARTS = 3;
 const RESTART_WINDOW_MS = 60_000;
@@ -24,7 +25,7 @@ export class LspProcess {
 		this.onState({ state: "starting" });
 		let proc: Subprocess<"pipe", "pipe", "pipe">;
 		try {
-			proc = Bun.spawn([this.path, "--stdio"], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+			proc = Bun.spawn(lspCommand(this.path, ["--stdio"]), { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
 		} catch (err: any) {
 			this.proc = undefined;
 			const msg = String(err?.message ?? err).slice(-500);
@@ -106,6 +107,12 @@ export class LspProcess {
 		this.stopping = true;
 		const proc = this.proc;
 		this.proc = undefined;
+		try {
+			const ended = proc?.stdin.end();
+			if (ended && typeof (ended as any).catch === "function") (ended as Promise<unknown>).catch(() => {});
+		} catch {
+			// Stdin already closed.
+		}
 		try {
 			proc?.kill();
 		} catch {

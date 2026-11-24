@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, mock, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createBackend, parseOpencodeCommandEnv, type Host } from "../src/bun/backend";
@@ -155,7 +155,7 @@ mock.module("monaco-editor/editor/contrib/semanticTokens/browser/documentSemanti
 mock.module("monaco-editor/editor/editor.worker?worker", () => ({ default: class {} }));
 mock.module(`${resolve(import.meta.dir, "../src/view/editor/markdownLive.worker.ts")}?worker`, () => ({ default: class {} }));
 
-const rootTmp = mkdtempSync(join(tmpdir(), "ssl-studio-r10b-"));
+const rootTmp = realpathSync.native(mkdtempSync(join(tmpdir(), "ssl-studio-r10b-")));
 afterAll(() => {
 	rmSync(rootTmp, { recursive: true, force: true });
 	if (origLocation === undefined) delete (globalThis as any).location;
@@ -164,7 +164,7 @@ afterAll(() => {
 	else (globalThis as any).localStorage = origLocalStorage;
 });
 
-const readSrc = (rel: string) => readFileSync(resolve(import.meta.dir, "..", rel), "utf8");
+const readSrc = (rel: string) => readFileSync(resolve(import.meta.dir, "..", rel), "utf8").replace(/\r\n/g, "\n");
 
 function withTempDirs<T>(fn: (d: { config: string; data: string; state: string }) => Promise<T> | T): Promise<T> {
 	const prev = { ...dirs };
@@ -187,19 +187,31 @@ function withTempDirs<T>(fn: (d: { config: string; data: string; state: string }
 }
 
 function makeFakeLspScript(dir: string, name: string, version: string, markerFile: string): string {
-	const scriptPath = join(dir, name);
-	const body = `#!/usr/bin/env sh
-if [ "$1" = "--version" ]; then
-  echo "starlims-lsp version ${version}"
-  exit 0
-fi
-printf '%s\\n' "${version}" >> "${markerFile}"
-# Stay alive reading stdin until killed.
-cat >/dev/null
-`;
-	writeFileSync(scriptPath, body, "utf8");
-	chmodSync(scriptPath, 0o755);
-	return scriptPath;
+	const stem = name.replace(/\.(sh|cmd|bat|js)$/i, "");
+	const jsPath = join(dir, `${stem}.js`);
+	writeFileSync(
+		jsPath,
+		`const fs = require("node:fs");
+if (process.argv[2] === "--version") {
+  process.stdout.write("starlims-lsp version ${version}\\n");
+  process.exit(0);
+}
+fs.appendFileSync(${JSON.stringify(markerFile)}, "${version}\\n");
+process.stdin.resume();
+process.stdin.on("end", () => process.exit(0));
+setTimeout(() => process.exit(0), 10000);
+`,
+		"utf8",
+	);
+	if (process.platform === "win32") {
+		const cmdPath = join(dir, `${stem}.cmd`);
+		writeFileSync(cmdPath, `@echo off\r\n"${process.execPath}" "${jsPath}" %*\r\n`, "utf8");
+		return cmdPath;
+	}
+	const shPath = join(dir, `${stem}.sh`);
+	writeFileSync(shPath, `#!/bin/sh\nexec "${process.execPath}" "${jsPath}" "$@"\n`, "utf8");
+	chmodSync(shPath, 0o755);
+	return shPath;
 }
 
 /** Spins up a lightweight in-process WS server speaking src/view/backend.ts's Call/Reply/Push wire protocol. */
@@ -466,14 +478,17 @@ describe("R10B #3 — LSP recovery from initial failure, lspRestart() lspPath pi
 				return null;
 			},
 			async ({ push }) => {
-				const { LspSession } = await import("../src/view/lsp/session");
+				const { LspSession, session } = await import("../src/view/lsp/session");
+				// Ensure the module singleton does not emit an initialize for a stale root from an earlier test file.
+				session.reset();
 				const s = new LspSession();
 				// Simulate initial failure: root is recorded via setRoot(), start() was NOT called.
 				s.setRoot("/ws/recovered-folder");
 				push("lspState", { state: "running" });
 				await Bun.sleep(20);
 
-				const initMsg = sentLsp.map((m) => JSON.parse(m)).find((m) => m.method === "initialize");
+				const initMsgs = sentLsp.map((m) => JSON.parse(m)).filter((m) => m.method === "initialize");
+				const initMsg = initMsgs.find((m) => m.params?.rootUri === "file:///ws/recovered-folder");
 				expect(initMsg).toBeDefined();
 				expect(initMsg.params.rootUri).toBe("file:///ws/recovered-folder");
 
