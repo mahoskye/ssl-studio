@@ -173,7 +173,7 @@ function Listed(props: { listing: Listing; path: string; depth: number }) {
 		<>
 			<Show when={props.listing.error}>
 				<Row role="treeitem" key={`${props.path}?error`} level={props.depth + 1} class="tree-row tree-note warn" style={indent(props.depth)} onActivate={refresh}>
-					<span class="label">This folder could not be read: {props.listing.error}. Press Enter here, or Refresh above, to try again.</span>
+					<span class="label">This folder could not be read: {props.listing.error.replace(/\.+$/, "")}. Press Enter here, or Refresh above, to try again.</span>
 				</Row>
 			</Show>
 			<For each={props.listing.entries}>{(entry) => <EntryRow entry={entry} depth={props.depth} />}</For>
