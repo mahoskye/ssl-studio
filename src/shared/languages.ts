@@ -17,7 +17,7 @@ export type LanguageDef = {
  * general-purpose languages and Plain Text. First matching extension wins in `languageFor()`.
  */
 export const LANGUAGES: readonly LanguageDef[] = [
-	{ id: "ssl", name: "SSL", extensions: /\.(ssl|srvscr|ds)$/i, hint: ".ssl, .srvscr, .ds", aliases: ["starlims", "script", "datasource"] },
+	{ id: "ssl", name: "SSL", extensions: /\.(ssl|srvscr|ds)(?:\.txt)?$/i, hint: ".ssl, .srvscr, .ds, .ssl.txt, .ds.txt", aliases: ["starlims", "script", "datasource"] },
 	{ id: "sql", name: "SQL", extensions: /\.(sql|ddl|pks|pkb|pls)$/i, hint: ".sql, .ddl, .pks, .pkb", aliases: ["tsql", "plsql", "oracle", "mssql"] },
 	{
 		id: "xml",

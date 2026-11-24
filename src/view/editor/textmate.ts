@@ -30,7 +30,12 @@ class State implements monaco.languages.IState {
 }
 
 let registry: Registry;
-let grammar: IGrammar;
+let grammar: IGrammar | undefined;
+
+/** Clears cached TextMate grammar/registry state between isolated unit tests. */
+export function resetGrammarForTest() {
+	grammar = undefined;
+}
 
 // The other languages' tokens take their colours from the same theme matching: a grammar of one
 // word for each scope they map to is tokenized, and what the theme gives each word is its colour.
@@ -107,6 +112,7 @@ export function applyTokenTheme(theme: IRawTheme): monaco.editor.ITokenThemeRule
 	monaco.languages.setTokensProvider("ssl", {
 		getInitialState: () => new State(INITIAL),
 		tokenize(line, state: State) {
+			if (!grammar) return { tokens: [], endState: state };
 			const result = grammar.tokenizeLine2(line, state.stack, 500);
 			const tokens: monaco.languages.IToken[] = [];
 			for (let i = 0; i < result.tokens.length; i += 2) {
@@ -127,12 +133,14 @@ export function applyTokenTheme(theme: IRawTheme): monaco.editor.ITokenThemeRule
  * comment; the banner is the run of comment and blank lines the file opens with.
  */
 export function measure(text: string): { codeLines: number; bannerLines: string[] } {
+	const active = grammar;
+	if (!active) return { codeLines: 0, bannerLines: [] };
 	let stack = INITIAL;
 	let codeLines = 0;
 	let bannerEnd = -1;
 	const lines = text.split(/\r?\n/);
 	lines.forEach((line, index) => {
-		const result = grammar.tokenizeLine2(line, stack, 500);
+		const result = active.tokenizeLine2(line, stack, 500);
 		stack = result.ruleStack;
 		for (let i = 0; i < result.tokens.length; i += 2) {
 			const start = result.tokens[i]!;
@@ -152,7 +160,7 @@ export function measure(text: string): { codeLines: number; bannerLines: string[
  * equal before and after means only comments and layout changed.
  * Returns null before `loadGrammar()` completes.
  */
-export function codeOnly(text: string, targetGrammar: IGrammar | undefined = grammar): string | null {
+export function codeOnly(text: string, targetGrammar: IGrammar | null | undefined = grammar): string | null {
 	if (!targetGrammar) return null;
 	let stack = INITIAL;
 	const pieces: string[] = [];
@@ -182,7 +190,7 @@ export function codeOnly(text: string, targetGrammar: IGrammar | undefined = gra
  */
 export function sslCommentSpans(
 	lines: readonly string[],
-	targetGrammar: IGrammar | undefined = grammar,
+	targetGrammar: IGrammar | null | undefined = grammar,
 ): { from: number; to: number }[][] | null {
 	if (!targetGrammar) return null;
 	let stack = INITIAL;

@@ -4,6 +4,7 @@
 // editor canvases.
 import { createSignal } from "solid-js";
 import type { IRawTheme } from "vscode-textmate";
+import { pickAccentFg } from "../../shared/contrast";
 import { DEFAULT_CODE_FONT, DEFAULT_UI_FONT, resolveFontStack } from "../../shared/fonts";
 import { parseJsonc } from "../../shared/jsonc";
 import {
@@ -13,6 +14,7 @@ import {
 	generateOklchTheme,
 	isThemeMaterial,
 	parseOklchThemeId,
+	studioVars,
 	type StudioTokens,
 } from "../../shared/oklchTheme";
 import { monaco } from "../editor/monaco";
@@ -64,9 +66,51 @@ const CSS_VARS: [string, string][] = [
 	["--ok", "testing.iconPassed"],
 ];
 
-const isChromeDark = (theme: VsTheme) => theme.chromeDark ?? (theme.type !== "light" && theme.type !== "hcLight");
-const isEditorDark = (theme: VsTheme) => theme.editorDark ?? (theme.type !== "light" && theme.type !== "hcLight");
+const isPlainObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+const isChromeDark = (theme: VsTheme) => (typeof theme.chromeDark === "boolean" ? theme.chromeDark : theme.type !== "light" && theme.type !== "hcLight");
+const isEditorDark = (theme: VsTheme) => (typeof theme.editorDark === "boolean" ? theme.editorDark : theme.type !== "light" && theme.type !== "hcLight");
 const validColor = (value: unknown): value is string => typeof value === "string" && /^#([0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(value);
+
+type TokenColorEntry = { name?: string; scope?: string | string[]; settings: { foreground?: string; background?: string; fontStyle?: string } };
+
+/** Sanitizes untrusted tokenColors from imported VS Code themes so vscode-textmate and semantic.ts never crash. */
+export function sanitizeTokenColors(raw: unknown): TokenColorEntry[] {
+	if (!Array.isArray(raw)) return [];
+	const out: TokenColorEntry[] = [];
+	for (const item of raw) {
+		if (!isPlainObject(item) || !isPlainObject(item.settings)) continue;
+		const settings: TokenColorEntry["settings"] = {};
+		if (validColor(item.settings.foreground)) settings.foreground = item.settings.foreground;
+		if (validColor(item.settings.background)) settings.background = item.settings.background;
+		if (typeof item.settings.fontStyle === "string") settings.fontStyle = item.settings.fontStyle;
+		const entry: TokenColorEntry = { settings };
+		if (typeof item.name === "string") entry.name = item.name;
+		if (typeof item.scope === "string") entry.scope = item.scope;
+		else if (Array.isArray(item.scope)) entry.scope = item.scope.filter((s): s is string => typeof s === "string");
+		out.push(entry);
+	}
+	return out;
+}
+
+function sanitizeSemanticTokenColors(raw: unknown): VsTheme["semanticTokenColors"] {
+	if (!isPlainObject(raw)) return undefined;
+	const out: NonNullable<VsTheme["semanticTokenColors"]> = {};
+	for (const [selector, value] of Object.entries(raw)) {
+		if (typeof value === "string") {
+			if (validColor(value)) out[selector] = value;
+		} else if (isPlainObject(value)) {
+			const rule: { foreground?: string; fontStyle?: string; bold?: boolean; italic?: boolean; underline?: boolean; strikethrough?: boolean } = {};
+			if (validColor(value.foreground)) rule.foreground = value.foreground;
+			if (typeof value.fontStyle === "string") rule.fontStyle = value.fontStyle;
+			if (typeof value.bold === "boolean") rule.bold = value.bold;
+			if (typeof value.italic === "boolean") rule.italic = value.italic;
+			if (typeof value.underline === "boolean") rule.underline = value.underline;
+			if (typeof value.strikethrough === "boolean") rule.strikethrough = value.strikethrough;
+			out[selector] = rule;
+		}
+	}
+	return out;
+}
 
 /** The shape of the app's own menus (style.css, .menu-pop and .menu-item), for the editor's menu in its own tree. */
 const MENU_SHAPE = `
@@ -74,11 +118,14 @@ const MENU_SHAPE = `
 .monaco-menu { font: var(--text-base)/1.4 var(--ui-font, system-ui, -apple-system, "Segoe UI", sans-serif) !important; }
 .monaco-menu .monaco-action-bar.vertical { padding: var(--space-2) !important; }
 .monaco-menu .monaco-action-bar.vertical .action-item { border-radius: var(--radius-sm); }
-.monaco-menu .monaco-action-bar.vertical .keybinding { color: var(--muted) !important; opacity: 1 !important; font-size: var(--text-sm) !important; }
+.monaco-menu .monaco-action-bar.vertical .keybinding { color: var(--chrome-muted, var(--muted)) !important; opacity: 1 !important; font-size: var(--text-sm) !important; }
 `;
+
+let menuObserver: MutationObserver | null = null;
 
 /** Gives each of the editor's menus, as it is made, the shape of the app's own. */
 export function shapeEditorMenus() {
+	if (typeof document === "undefined" || !document.body) return;
 	const shape = (host: Element) => {
 		const root = host.shadowRoot;
 		if (!root || root.querySelector("style[data-studio]")) return;
@@ -87,9 +134,23 @@ export function shapeEditorMenus() {
 		style.textContent = MENU_SHAPE;
 		root.append(style);
 	};
-	new MutationObserver((changes) => {
-		for (const change of changes) for (const node of change.addedNodes) if (node instanceof Element && node.classList.contains("shadow-root-host")) shape(node);
-	}).observe(document.body, { childList: true, subtree: true });
+	const scan = (node: Node) => {
+		if (!node || (node as Element).nodeType !== 1) return;
+		const el = node as Element;
+		if (el.classList?.contains("shadow-root-host")) shape(el);
+		if (typeof el.querySelectorAll === "function") {
+			for (const nested of el.querySelectorAll(".shadow-root-host")) shape(nested);
+		}
+	};
+	// Shape any pre-existing Monaco menu shadow hosts already present in the DOM.
+	for (const host of document.body.querySelectorAll(".shadow-root-host")) shape(host);
+	if (menuObserver) menuObserver.disconnect();
+	if (typeof MutationObserver === "function") {
+		menuObserver = new MutationObserver((changes) => {
+			for (const change of changes) for (const node of change.addedNodes) scan(node);
+		});
+		menuObserver.observe(document.body, { childList: true, subtree: true });
+	}
 }
 
 let themeRevision = 0;
@@ -124,17 +185,26 @@ export function syncCodeTokenStyles() {
 	style.textContent = rules.join("\n");
 }
 
+let menuColoursRaf = 0;
+
 function carryMenuColours() {
+	if (menuColoursRaf && typeof cancelAnimationFrame === "function") {
+		cancelAnimationFrame(menuColoursRaf);
+		menuColoursRaf = 0;
+	}
+	if (typeof document === "undefined") return;
 	const declared = [...document.querySelectorAll("style.monaco-colors")].map((style) => style.textContent ?? "").join("\n");
 	const block = /\{([^{}]*--vscode-menu-background[^{}]*)\}/.exec(declared)?.[1];
+	let style = document.getElementById("studio-menu-colours");
 	if (block) {
-		let style = document.getElementById("studio-menu-colours");
 		if (!style) {
 			style = document.createElement("style");
 			style.id = "studio-menu-colours";
 			document.head.append(style);
 		}
 		style.textContent = `.shadow-root-host { ${block} }`;
+	} else if (style) {
+		style.textContent = "";
 	}
 	syncCodeTokenStyles();
 }
@@ -151,10 +221,20 @@ export function applyFonts(fonts: { uiFont?: string; codeFont?: string; readFont
 }
 
 export function applyTheme(theme: VsTheme) {
-	const chromeDark = isChromeDark(theme);
-	const editorDark = isEditorDark(theme);
+	const safeTheme: VsTheme = isPlainObject(theme) ? theme : {};
+	const chromeDark = isChromeDark(safeTheme);
+	const editorDark = isEditorDark(safeTheme);
 	const base = editorDark ? builtIn.dark! : builtIn.light!;
-	const themed: Record<string, string> = { ...base.colors, ...theme.colors };
+	// Filter theme.colors through validColor() BEFORE merging onto base.colors so invalid/empty/
+	// "transparent"/"rgb(...)" keys in imported themes cleanly fall back to base.colors instead
+	// of leaving stale CSS custom properties or passing bad foregrounds to vscode-textmate.
+	const validThemeColors: Record<string, string> = {};
+	if (isPlainObject(safeTheme.colors)) {
+		for (const [key, value] of Object.entries(safeTheme.colors)) {
+			if (validColor(value)) validThemeColors[key] = value;
+		}
+	}
+	const themed: Record<string, string> = { ...base.colors, ...validThemeColors };
 	// The editor's right-click menu takes the colours the app's own menus are drawn in, whatever the theme says of
 	// "menu.*": those keys are for a window's menu bar, which this app does not have.
 	const colors: Record<string, string> = {
@@ -195,24 +275,35 @@ export function applyTheme(theme: VsTheme) {
 		"editorHoverWidget.foreground": themed["editorHoverWidget.foreground"] ?? themed["sideBar.foreground"] ?? themed["editor.foreground"],
 		"editorHoverWidget.border": themed["editorHoverWidget.border"] ?? themed["input.border"] ?? themed["sideBar.border"],
 	};
+	const tokenColors = sanitizeTokenColors(safeTheme.tokenColors);
+	const sanitizedTheme: VsTheme = {
+		...safeTheme,
+		tokenColors,
+		semanticTokenColors: sanitizeSemanticTokenColors(safeTheme.semanticTokenColors),
+	};
 	const raw: IRawTheme = {
-		name: theme.name,
+		name: typeof safeTheme.name === "string" ? safeTheme.name : undefined,
 		settings: [
 			{ settings: { foreground: colors["editor.foreground"], background: colors["editor.background"] } },
-			...((theme.tokenColors ?? []) as IRawTheme["settings"]),
+			...(tokenColors as IRawTheme["settings"]),
 		],
 	};
 	const rules = applyTokenTheme(raw);
 	monaco.editor.defineTheme("studio", {
 		base: editorDark ? "vs-dark" : "vs",
 		inherit: true,
-		rules: [...rules, ...semanticRules(theme)],
+		rules: [...rules, ...semanticRules(sanitizedTheme)],
 		colors: Object.fromEntries(Object.entries(colors).filter(([, v]) => validColor(v))),
 	});
 	monaco.editor.setTheme("studio");
 	carryMenuColours();
 	// The editor may write its colours a moment after the theme is set: carried again then.
-	requestAnimationFrame(carryMenuColours);
+	if (typeof requestAnimationFrame === "function") {
+		menuColoursRaf = requestAnimationFrame(() => {
+			menuColoursRaf = 0;
+			carryMenuColours();
+		});
+	}
 	refreshSemanticTokens();
 
 	const root = document.documentElement;
@@ -220,56 +311,18 @@ export function applyTheme(theme: VsTheme) {
 		if (validColor(value)) root.style.setProperty(name, value);
 	};
 
-	if (theme.studio) {
-		const s = theme.studio;
-		const pairs: [string, string][] = [
-			["--tray-bg", s.trayBg],
-			["--cmd-bg", s.cmdBg],
-			["--strong-fg", s.strongFg],
-			["--bg", s.bg],
-			["--fg", s.fg],
-			["--side-bg", s.sideBg],
-			["--side-fg", s.sideFg],
-			["--border", s.border],
-			["--panel-bg", s.panelBg],
-			["--status-bg", s.statusBg],
-			["--status-fg", s.statusFg],
-			["--tab-bg", s.tabBg],
-			["--tab-fg", s.tabFg],
-			["--tab-active-bg", s.tabActiveBg],
-			["--tab-active-fg", s.tabActiveFg],
-			["--accent", s.accent],
-			["--button-bg", s.buttonBg],
-			["--button-fg", s.buttonFg],
-			["--input-bg", s.inputBg],
-			["--input-fg", s.inputFg],
-			["--input-border", s.inputBorder],
-			["--hover", s.hover],
-			["--selected", s.selected],
-			["--muted", s.muted],
-			["--error", s.error],
-			["--warning", s.warning],
-			["--info", s.info],
-			["--ok", s.ok],
-			["--editor-bg", s.editorBg],
-			["--editor-fg", s.editorFg],
-			["--editor-strong", s.editorStrong],
-			["--editor-muted", s.editorMuted],
-			["--editor-accent", s.editorAccent],
-			["--editor-border", s.editorBorder],
-			["--editor-strip-bg", s.editorStripBg],
-			["--editor-line-hl", s.editorLineHl],
-			["--editor-ok", s.editorOk],
-			["--editor-warning", s.editorWarning],
-			["--editor-error", s.editorError],
-			["--editor-info", s.editorInfo],
-		];
-		for (const [cssVar, value] of pairs) setVar(cssVar, value);
+	const studioMap = isPlainObject(safeTheme.studio) ? studioVars(safeTheme.studio as StudioTokens) : null;
+	if (studioMap && Object.values(studioMap).every(validColor)) {
+		for (const [cssVar, value] of Object.entries(studioMap)) setVar(cssVar, value);
 	} else {
-		for (const [cssVar, key] of CSS_VARS) setVar(cssVar, colors[key] ?? base.colors![key]);
+		const get = (key: string) => colors[key] ?? base.colors![key]!;
+		const accent = get("focusBorder");
+		const accentFg = pickAccentFg(accent);
+		for (const [cssVar, key] of CSS_VARS) setVar(cssVar, get(key));
 		// Classic and imported VS Code themes populate the decoupled Folio Bento
 		// and editor-scoped variables from their own workbench keys.
-		const get = (key: string) => colors[key] ?? base.colors![key];
+		setVar("--accent-fg", accentFg);
+		setVar("--chrome-muted", get("descriptionForeground"));
 		setVar("--tray-bg", get("statusBar.background"));
 		setVar("--cmd-bg", get("input.background"));
 		setVar("--strong-fg", get("tab.activeForeground"));
@@ -277,8 +330,10 @@ export function applyTheme(theme: VsTheme) {
 		setVar("--editor-fg", get("editor.foreground"));
 		setVar("--editor-strong", get("tab.activeForeground"));
 		setVar("--editor-muted", get("descriptionForeground"));
-		setVar("--editor-accent", get("focusBorder"));
+		setVar("--editor-accent", accent);
+		setVar("--editor-accent-fg", accentFg);
 		setVar("--editor-border", get("sideBar.border"));
+		setVar("--editor-input-border", get("input.border"));
 		setVar("--editor-strip-bg", get("tab.inactiveBackground"));
 		setVar("--editor-line-hl", get("editor.lineHighlightBackground"));
 		setVar("--editor-ok", get("testing.iconPassed"));
@@ -304,7 +359,13 @@ export function resolveTheme(choice: string, custom: { id: string; json: string 
 		const file = custom.find((t) => t.id === choice);
 		if (file) {
 			try {
-				return parseJsonc(file.json);
+				const parsed: unknown = parseJsonc(file.json);
+				if (isPlainObject(parsed)) {
+					// Strip untrusted internal fields so imported themes never bypass CSS_VARS
+					// or leave stale custom properties behind.
+					const { studio: _studio, chromeDark: _chromeDark, editorDark: _editorDark, ...safe } = parsed;
+					return safe as VsTheme;
+				}
 			} catch {
 				// Fall through to the default OKLCH theme.
 			}
@@ -314,6 +375,11 @@ export function resolveTheme(choice: string, custom: { id: string; json: string 
 	if (parsed) return generateOklchTheme(parsed.tone, parsed.material);
 	if (choice === "dark" || choice === "light") return builtIn[choice]!;
 	const mat = isThemeMaterial(material) ? material : DEFAULT_MATERIAL;
-	const preferDark = systemDark !== undefined ? systemDark : !matchMedia("(prefers-color-scheme: light)").matches;
+	const preferDark =
+		systemDark !== undefined
+			? systemDark
+			: typeof matchMedia === "function"
+				? !matchMedia("(prefers-color-scheme: light)").matches
+				: true;
 	return generateOklchTheme(preferDark ? DEFAULT_DARK_TONE : DEFAULT_LIGHT_TONE, mat);
 }

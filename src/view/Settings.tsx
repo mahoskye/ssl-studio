@@ -19,11 +19,12 @@ import {
 	type ThemeTone,
 } from "../shared/oklchTheme";
 import { createSignal, createUniqueId, For, Show, type JSX } from "solid-js";
-import type { Settings } from "../shared/protocol";
-import { backend } from "./backend";
+import { isInside, resolvePath } from "../shared/paths";
+import type { Settings, SettingsPatch } from "../shared/protocol";
+import { backend, inApp } from "./backend";
 import { commands, DEFAULT_KEYS, keymap, keysFor, onOpenSettings } from "./commands";
 import { choose } from "./dialogs";
-import { bindable, conflict, displayKey, isModifierKey, keyNames, rebind, unbind } from "./keys";
+import { bindable, conflict, displayKey, isModifierKey, keyNamesForPlatform, rebind, unbind } from "./keys";
 import { Modal } from "./modal";
 import { matchWords } from "./quickRank";
 import { loadSettings, notify, saveSetting, state, syncLivePreviewMode } from "./state";
@@ -33,6 +34,54 @@ type Layers = { user: Partial<Settings>; workspace: Partial<Settings> };
 type Group = "Appearance" | "Editor" | "Language server" | "Keyboard";
 
 const FONT = { min: 8, max: 32, normal: 13 };
+const onMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform ?? "");
+
+/** Clamps a numeric setting cleanly; empty or non-finite input falls back to `fallback`, while finite `0` clamps to `min`. */
+export function clampNumericSetting(raw: string, min: number, max: number, fallback: number): number {
+	const trimmed = raw.trim();
+	if (!trimmed) return fallback;
+	const parsed = Number(trimmed);
+	if (!Number.isFinite(parsed)) return fallback;
+	return Math.min(max, Math.max(min, Math.round(parsed)));
+}
+
+/** Validates a workspace-relative folder setting (`attachmentsFolder`, `templatesFolder`), rejecting absolute paths and `..` escapes. */
+export function validateWorkspaceFolderSetting(raw: string): { ok: true; value: string | null } | { ok: false; error: string } {
+	const trimmed = raw.trim();
+	if (!trimmed) return { ok: true, value: null };
+	if (/[\x00-\x1f\x7f]/.test(trimmed)) {
+		return { ok: false, error: "Folder path cannot contain control characters." };
+	}
+	if (trimmed.startsWith("/") || trimmed.startsWith("\\") || /^[a-zA-Z]:/.test(trimmed)) {
+		return { ok: false, error: "Folder path must be relative to the workspace root (not an absolute path)." };
+	}
+	let depth = 0;
+	for (const part of trimmed.split(/[\\/]/)) {
+		if (!part || part === ".") continue;
+		if (part === "..") {
+			depth--;
+			if (depth < 0) {
+				return { ok: false, error: "Folder path cannot use “..” to escape the workspace folder." };
+			}
+		} else {
+			depth++;
+		}
+	}
+	const probeRoot = "/__ws_root__";
+	const resolved = resolvePath(probeRoot, trimmed);
+	if (!isInside(probeRoot, resolved)) {
+		return { ok: false, error: "Folder path must stay inside the workspace folder." };
+	}
+	return { ok: true, value: trimmed };
+}
+
+const commitOnEnter = (e: KeyboardEvent & { currentTarget: HTMLInputElement }) => {
+	if (e.isComposing || e.keyCode === 229) return;
+	if (e.key === "Enter") {
+		e.preventDefault();
+		e.currentTarget.blur();
+	}
+};
 
 export function SettingsDialog() {
 	const [open, setOpen] = createSignal(false);
@@ -63,9 +112,19 @@ export function SettingsDialog() {
 	// A value this project's own settings file holds is changed there: yours
 	// would not be seen while the project's is in the way.
 	const scopeOf = (key: keyof Settings) => (state.workspace && key in layers().workspace ? "workspace" : "user");
-	const save = async <K extends keyof Settings>(key: K, value: Settings[K]) => {
-		await saveSetting({ [key]: value } as Partial<Settings>, scopeOf(key));
+	const save = async <K extends keyof Settings>(key: K, value: Settings[K] | null) => {
+		await saveSetting({ [key]: value } as SettingsPatch, scopeOf(key));
 		await loadLayers();
+	};
+	const saveRelFolder = (key: "attachmentsFolder" | "templatesFolder", input: HTMLInputElement) => {
+		const check = validateWorkspaceFolderSetting(input.value);
+		if (!check.ok) {
+			notify(check.error, "error");
+			input.value = state.settings[key] ?? "";
+			return;
+		}
+		input.value = check.value ?? "";
+		void save(key, check.value);
 	};
 	const shown = (group: Group, ...text: (string | undefined)[]) => matchWords(query(), [group, ...text].filter(Boolean).join(" ")) > 0;
 
@@ -82,6 +141,7 @@ export function SettingsDialog() {
 	const onKey = (e: KeyboardEvent) => {
 		const id = capturing();
 		if (!id) return false;
+		if (e.isComposing || e.keyCode === 229) return true;
 		e.preventDefault();
 		e.stopImmediatePropagation();
 		if (isModifierKey(e.key)) return true;
@@ -89,12 +149,18 @@ export function SettingsDialog() {
 			setCapturing(null);
 			return true;
 		}
-		const key = keyNames(e)[0]!;
+		const names = keyNamesForPlatform(e, onMac);
+		if (!names.length) {
+			setRefused("On macOS, bare Ctrl+letter shortcuts are reserved for system text navigation. Use Cmd, Alt, or add Shift.");
+			return true;
+		}
+		const key = names[0]!;
 		const check = bindable(key);
 		if (!check.ok) {
 			setRefused(check.why);
 			return true;
 		}
+		setRefused("");
 		setCapturing(null);
 		void bind(id, key);
 		return true;
@@ -117,7 +183,10 @@ export function SettingsDialog() {
 	const importTheme = async () => {
 		try {
 			const theme = await backend.importTheme();
-			if (!theme) return notify("Theme import needs the app's file dialog; copy the theme into ~/.config/ssl-studio/themes/ instead.");
+			if (!theme) {
+				if (!inApp) notify("Theme import needs the app's file dialog; copy the theme into ~/.config/ssl-studio/themes/ instead.");
+				return;
+			}
 			await loadSettings();
 			await save("theme", theme.id);
 		} catch (e: any) {
@@ -245,6 +314,7 @@ export function SettingsDialog() {
 						aria-label={`${ROWS[p.setting][0]} family name`}
 						placeholder={p.placeholder}
 						value={current()}
+						onKeyDown={commitOnEnter}
 						onChange={(e) => {
 							const val = e.currentTarget.value.trim();
 							if (!val) setCustomizing(false);
@@ -377,7 +447,12 @@ export function SettingsDialog() {
 									min={FONT.min}
 									max={FONT.max}
 									value={state.settings.fontSize}
-									onChange={(e) => void save("fontSize", Math.min(FONT.max, Math.max(FONT.min, Math.round(Number(e.currentTarget.value)) || FONT.normal)))}
+									onKeyDown={commitOnEnter}
+									onChange={(e) => {
+										const next = clampNumericSetting(e.currentTarget.value, FONT.min, FONT.max, FONT.normal);
+										e.currentTarget.value = String(next);
+										void save("fontSize", next);
+									}}
 								/>
 							)}
 						</Row>
@@ -458,7 +533,12 @@ export function SettingsDialog() {
 									max="60"
 									disabled={state.settings.rulers === false}
 									value={state.settings.rulerMargin ?? RULER_MARGIN}
-									onChange={(e) => void save("rulerMargin", Math.min(60, Math.max(0, Math.round(Number(e.currentTarget.value)) || 0)))}
+									onKeyDown={commitOnEnter}
+									onChange={(e) => {
+										const next = clampNumericSetting(e.currentTarget.value, 0, 60, RULER_MARGIN);
+										e.currentTarget.value = String(next);
+										void save("rulerMargin", next);
+									}}
 								/>
 							)}
 						</Row>
@@ -495,7 +575,8 @@ export function SettingsDialog() {
 									type="text"
 									placeholder="docs/attachments"
 									value={state.settings.attachmentsFolder ?? ""}
-									onChange={(e) => void save("attachmentsFolder", e.currentTarget.value.trim() || undefined)}
+									onKeyDown={commitOnEnter}
+									onChange={(e) => saveRelFolder("attachmentsFolder", e.currentTarget)}
 								/>
 							)}
 						</Row>
@@ -507,7 +588,8 @@ export function SettingsDialog() {
 									type="text"
 									placeholder="docs/templates"
 									value={state.settings.templatesFolder ?? ""}
-									onChange={(e) => void save("templatesFolder", e.currentTarget.value.trim() || undefined)}
+									onKeyDown={commitOnEnter}
+									onChange={(e) => saveRelFolder("templatesFolder", e.currentTarget)}
 								/>
 							)}
 						</Row>
@@ -522,6 +604,7 @@ export function SettingsDialog() {
 									spellcheck={false}
 									placeholder={state.info?.lsp.path ?? "Found automatically"}
 									value={state.settings.lspPath ?? ""}
+									onKeyDown={commitOnEnter}
 									onChange={(e) => void save("lspPath", e.currentTarget.value.trim())}
 								/>
 							)}

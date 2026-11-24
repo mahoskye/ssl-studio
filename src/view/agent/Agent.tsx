@@ -840,12 +840,22 @@ function EntryView(props: { entry: Entry }) {
 		const chosen =
 			blocks.length === 1
 				? blocks[0]!
-				: await (async () => {
-						const labels = blocks.map((b, i) => `Block ${i + 1} (${b.lang || "code"}, ${b.code.split("\n").length} lines)`);
-						const picked = await choose("Save which code block as a kept snippet?", labels);
-						const idx = picked ? labels.indexOf(picked) : -1;
-						return idx >= 0 ? blocks[idx]! : null;
-					})();
+				: await quickPick<FencedBlock>({
+						title: "Save which code block as a kept snippet?",
+						placeholder: "Filter code blocks by language or preview…",
+						items: blocks.map((b, i) => {
+							const lines = b.code.split("\n");
+							const firstLine = lines.find((l) => l.trim())?.trim() ?? "";
+							return {
+								label: `Block ${i + 1} (${b.lang || "code"})`,
+								value: b,
+								icon: "code" as const,
+								detail: `${lines.length} ${lines.length === 1 ? "line" : "lines"}`,
+								description: firstLine ? firstLine.slice(0, 96) : undefined,
+								keywords: `${b.lang || "code"} ${firstLine}`,
+							};
+						}),
+					});
 		if (chosen) await saveAsSnippet(chosen.code, chosen.lang);
 	};
 	const answerOpenQuestion = async () => {
@@ -853,10 +863,18 @@ function EntryView(props: { entry: Entry }) {
 		if (!questions.length) return;
 		let target: DocFile | null = questions[0]!;
 		if (questions.length > 1) {
-			const labels = questions.map((q) => q.title || q.name);
-			const picked = await choose(`Write this reply as the answer to which open question for ${activeTicketForReply()}?`, labels);
-			const idx = picked ? labels.indexOf(picked) : -1;
-			target = idx >= 0 ? questions[idx]! : null;
+			target = await quickPick<DocFile>({
+				title: `Answer which open question for ${activeTicketForReply()}?`,
+				placeholder: "Filter open questions by title or file name…",
+				items: questions.map((q) => ({
+					label: q.title || q.name,
+					value: q,
+					icon: "question" as const,
+					detail: q.name,
+					description: q.summary || undefined,
+					keywords: `${q.title ?? ""} ${q.name} ${q.summary ?? ""}`,
+				})),
+			});
 		}
 		if (!target) return;
 		const WRITE_MARK = "Write answer & mark answered";
@@ -1335,10 +1353,18 @@ export function AgentPanel() {
 						selection: selectionContext()?.code ?? "",
 						prompt: (label, def) => askDialog(label, def),
 						suggest: async (labels, values, placeholder) => {
-							const picked = await choose(placeholder || "Choose an option", labels);
-							if (!picked) return null;
-							const idx = labels.indexOf(picked);
-							return idx >= 0 ? (values[idx] ?? picked) : picked;
+							if (!labels.length) return null;
+							const idx = await quickPick<number>({
+								title: placeholder || "Choose an option",
+								placeholder: "Filter options…",
+								items: labels.map((label, i) => ({
+									label,
+									value: i,
+									detail: values[i] !== undefined && values[i] !== label ? String(values[i]) : undefined,
+								})),
+							});
+							if (idx === null) return null;
+							return values[idx] ?? labels[idx] ?? null;
 						},
 						clipboard: () => navigator.clipboard?.readText().catch(() => "") ?? "",
 					});

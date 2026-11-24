@@ -99,7 +99,7 @@ button.plan-text-ticket:hover {
 	flex: none;
 	padding: 0 4px;
 	border-radius: 3px;
-	background: color-mix(in srgb, var(--accent) 14%, transparent);
+	background: color-mix(in srgb, var(--accent) 10%, transparent);
 	color: var(--accent);
 	font-size: 10px;
 	font-weight: 600;
@@ -125,7 +125,7 @@ button.plan-text-ticket:hover {
 }
 
 .plan-node-doc-remove:hover {
-	background: color-mix(in srgb, var(--error) 14%, transparent);
+	background: color-mix(in srgb, var(--error) 10%, transparent);
 	color: var(--error);
 }
 
@@ -185,4 +185,10 @@ button.plan-text-ticket:hover {
 .plan-doc-picker-empty {
 	margin: 2px 0;
 	font-size: var(--text-xs);
+}
+
+@media (prefers-reduced-motion: reduce) {
+	button.plan-text-ticket {
+		transition: none;
+	}
 }

@@ -346,7 +346,11 @@ export function EditorGroup(props: { index: number }) {
 		});
 		setRoomy(editor.getLayoutInfo().width >= MINIMAP_FROM);
 		editor.onDidLayoutChange((layout) => setRoomy(layout.width >= MINIMAP_FROM));
-		editor.onDidFocusEditorText(() => setState("activeGroup", props.index));
+		editor.onDidFocusEditorText(() => {
+			setState("activeGroup", props.index);
+			const at = editor.getPosition();
+			if (at && isMonacoVisible()) setState("cursor", { line: at.lineNumber, column: at.column });
+		});
 		editor.onDidScrollChange((e) => {
 			if (!e.scrollTopChanged) return;
 			if (e.scrollTop > 22 && !scrolled()) setScrolled(true);
@@ -378,6 +382,20 @@ export function EditorGroup(props: { index: number }) {
 			// Where the cursor comes to rest is somewhere to go back to. Not where the editor puts it as it takes a file
 			// up or puts it back as it was: the file coming to the front says that, once it is where it was asked to be.
 			if (shown && e.source !== "model" && e.source !== "restoreState") noteCursor({ path: shown, line: e.position.lineNumber, column: e.position.column });
+		});
+		createEffect(() => {
+			const isActive = state.activeGroup === props.index;
+			const path = activePath();
+			const liveShown = showLive();
+			const monacoShown = isMonacoVisible();
+			if (!isActive || !path || path !== group().active || disposed) return;
+			if (liveShown) {
+				const pos = liveEditorAt(props.index)?.getPosition();
+				if (pos) setState("cursor", { line: pos.lineNumber, column: pos.column });
+			} else if (monacoShown) {
+				const pos = editor?.getPosition();
+				if (pos) setState("cursor", { line: pos.lineNumber, column: pos.column });
+			}
 		});
 		const stop = revealSignal.listen((path) => {
 			if (state.activeGroup === props.index && path === group().active && shown === path && isMonacoVisible()) reveal(path);

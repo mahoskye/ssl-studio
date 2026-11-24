@@ -85,7 +85,7 @@
 	display: inline-flex;
 	align-items: center;
 	gap: 4px;
-	min-height: 22px;
+	min-height: calc(22px * var(--ui-scale));
 	padding: 1px 7px;
 	border: 0;
 	border-radius: var(--radius-sm);
@@ -96,21 +96,18 @@
 	font-weight: 500;
 	cursor: pointer;
 	white-space: nowrap;
-	opacity: 0.82;
-	transition: background 120ms ease, color 120ms ease, opacity 120ms ease;
+	transition: background 120ms ease, color 120ms ease;
 }
 
 .cm-md-compact-btn:hover,
 .cm-md-compact-btn:focus-visible {
-	opacity: 1;
-	color: var(--editor-strong, var(--strong-fg));
+	color: var(--editor-fg, var(--fg));
 	background: var(--hover);
 }
 
 .cm-md-compact-btn.active {
-	opacity: 1;
 	color: var(--editor-accent, var(--accent));
-	background: color-mix(in srgb, var(--editor-accent, var(--accent)) 11%, transparent);
+	background: color-mix(in srgb, var(--editor-accent, var(--accent)) 10%, transparent);
 }
 
 .cm-md-compact-btn .codicon-glyph {
@@ -500,8 +497,9 @@
 	display: inline-flex;
 	align-items: center;
 	gap: 4px;
-	height: 24px;
-	padding: 0 8px;
+	min-height: calc(24px * var(--ui-scale));
+	height: auto;
+	padding: 2px 8px;
 	border-radius: var(--radius-sm);
 	border: 1px solid color-mix(in srgb, var(--editor-border, var(--border)) 85%, transparent);
 	background: transparent;
@@ -817,7 +815,6 @@
 
 .cm-editor .cm-md-syntax {
 	color: var(--editor-muted, var(--muted));
-	opacity: 0.58;
 	font-family: var(--code-font);
 	font-size: 0.88em;
 	font-weight: 400;
@@ -982,7 +979,6 @@
 .cm-editor .cm-md-task-done {
 	color: var(--editor-muted, var(--muted));
 	text-decoration: line-through;
-	opacity: 0.78;
 }
 
 /* Blockquotes & Horizontal rules. */
@@ -1112,7 +1108,6 @@
 	font-size: calc(var(--code-size) - 1px);
 	color: var(--editor-muted, var(--muted));
 	font-style: italic;
-	opacity: 0.78;
 }
 
 .cm-editor .cm-md-comment {
@@ -1120,7 +1115,6 @@
 	font-size: 0.9em;
 	color: var(--editor-muted, var(--muted));
 	font-style: italic;
-	opacity: 0.78;
 }
 
 /* Interactive Live Table Grid & Read-mode Table Widget (ADR 0028). */
@@ -1357,13 +1351,18 @@
 .cm-md-table-toolbar-wrap {
 	position: sticky;
 	top: 0;
-	z-index: 15;
+	z-index: 12;
 	width: 100%;
 	box-sizing: border-box;
 	padding: 6px var(--space-5);
 	background: color-mix(in srgb, var(--editor-bg, var(--bg)) 92%, transparent);
 	backdrop-filter: blur(6px);
 	border-bottom: 1px solid var(--editor-border, var(--border));
+}
+
+/* Keep the CodeMirror Find/Replace bar above the sticky Raw table toolbar so Ctrl+F is never occluded. */
+.cm-md-host .cm-panels.cm-panels-top {
+	z-index: 16;
 }
 
 @container (max-width: 480px) {
@@ -1421,8 +1420,9 @@
 	display: inline-flex;
 	align-items: center;
 	gap: 3px;
-	height: 24px;
-	padding: 0 6px;
+	min-height: calc(24px * var(--ui-scale));
+	height: auto;
+	padding: 2px 6px;
 	border-radius: var(--radius-sm);
 	border: 1px solid transparent;
 	background: transparent;
@@ -1469,7 +1469,7 @@
 	border-radius: var(--radius-md);
 	border: 1px solid color-mix(in srgb, var(--callout-tone, var(--info)) 32%, transparent);
 	border-left: 4px solid var(--callout-tone, var(--info));
-	background: color-mix(in srgb, var(--callout-tone, var(--info)) 7.5%, var(--editor-bg, var(--bg)));
+	background: color-mix(in srgb, var(--callout-tone, var(--info)) 6%, var(--bg));
 	overflow: hidden;
 	cursor: text;
 	white-space: normal;
@@ -1484,10 +1484,10 @@
 
 .cm-md-callout.tone-info, .md .md-callout.tone-info, .cm-editor .cm-md-callout-editing.tone-info, .cm-callout-pick.tone-info { --callout-tone: var(--info); }
 .cm-md-callout.tone-ok, .md .md-callout.tone-ok, .cm-editor .cm-md-callout-editing.tone-ok, .cm-callout-pick.tone-ok { --callout-tone: var(--ok); }
-.cm-md-callout.tone-accent, .md .md-callout.tone-accent, .cm-editor .cm-md-callout-editing.tone-accent, .cm-callout-pick.tone-accent { --callout-tone: var(--editor-accent, var(--accent)); }
+.cm-md-callout.tone-accent, .md .md-callout.tone-accent, .cm-editor .cm-md-callout-editing.tone-accent, .cm-callout-pick.tone-accent { --callout-tone: var(--accent); }
 .cm-md-callout.tone-warning, .md .md-callout.tone-warning, .cm-editor .cm-md-callout-editing.tone-warning, .cm-callout-pick.tone-warning { --callout-tone: var(--warning); }
 .cm-md-callout.tone-error, .md .md-callout.tone-error, .cm-editor .cm-md-callout-editing.tone-error, .cm-callout-pick.tone-error { --callout-tone: var(--error); }
-.cm-md-callout.tone-muted, .md .md-callout.tone-muted, .cm-editor .cm-md-callout-editing.tone-muted, .cm-callout-pick.tone-muted { --callout-tone: var(--editor-muted, var(--muted)); }
+.cm-md-callout.tone-muted, .md .md-callout.tone-muted, .cm-editor .cm-md-callout-editing.tone-muted, .cm-callout-pick.tone-muted { --callout-tone: var(--muted); }
 
 .cm-md-callout-head,
 .md .md-callout-head {
@@ -1495,7 +1495,7 @@
 	align-items: center;
 	gap: var(--space-2);
 	padding: 6px var(--space-4);
-	background: color-mix(in srgb, var(--callout-tone, var(--info)) 11%, transparent);
+	background: color-mix(in srgb, var(--callout-tone, var(--info)) 4%, transparent);
 	font-family: var(--ui-font);
 	font-weight: 600;
 	font-size: var(--text-base);
@@ -1598,8 +1598,9 @@
 }
 
 .cm-callout-action-btn {
-	height: 20px;
-	padding: 0 7px;
+	min-height: calc(20px * var(--ui-scale));
+	height: auto;
+	padding: 1px 7px;
 	border-radius: var(--radius-sm);
 	border: 1px solid transparent;
 	background: transparent;
@@ -1647,8 +1648,9 @@
 	display: inline-flex;
 	align-items: center;
 	gap: 5px;
-	height: 24px;
-	padding: 0 8px;
+	min-height: calc(24px * var(--ui-scale));
+	height: auto;
+	padding: 2px 8px;
 	border-radius: var(--radius-sm);
 	border: 1px solid color-mix(in srgb, var(--callout-tone, var(--info)) 26%, transparent);
 	background: color-mix(in srgb, var(--callout-tone, var(--info)) 8%, transparent);
@@ -1664,20 +1666,22 @@
 }
 
 .cm-callout-pick:hover {
-	background: color-mix(in srgb, var(--callout-tone, var(--info)) 16%, transparent);
+	background: color-mix(in srgb, var(--callout-tone, var(--info)) 12%, transparent);
 	border-color: color-mix(in srgb, var(--callout-tone, var(--info)) 55%, transparent);
+	color: var(--strong-fg);
 }
 
 .cm-callout-pick.active {
-	background: color-mix(in srgb, var(--callout-tone, var(--info)) 22%, transparent);
+	background: color-mix(in srgb, var(--callout-tone, var(--info)) 12%, transparent);
 	border-color: var(--callout-tone, var(--info));
+	color: var(--strong-fg);
 	font-weight: 600;
 }
 
 .cm-md-callout-body,
 .md .md-callout-body {
 	padding: var(--space-3) var(--space-5) var(--space-3);
-	color: var(--editor-fg, var(--fg));
+	color: var(--fg);
 	line-height: 1.55;
 }
 
@@ -1914,7 +1918,7 @@
 .md-lightbox-backdrop {
 	position: fixed;
 	inset: 0;
-	z-index: 90;
+	z-index: 65;
 	display: flex;
 	flex-direction: column;
 	background: rgba(12, 11, 10, 0.86);
@@ -1923,8 +1927,10 @@
 
 .md-lightbox-bar {
 	display: flex;
+	flex-wrap: wrap;
 	align-items: center;
-	gap: var(--space-3);
+	gap: var(--space-2) var(--space-3);
+	min-width: 0;
 	padding: var(--space-3) var(--space-5);
 	background: color-mix(in srgb, var(--side-bg) 92%, transparent);
 	border-bottom: 1px solid var(--border);
@@ -1934,6 +1940,8 @@
 }
 
 .md-lightbox-caption {
+	flex: 0 1 auto;
+	min-width: 0;
 	font-weight: 600;
 	color: var(--strong-fg);
 	overflow: hidden;
@@ -1942,12 +1950,17 @@
 }
 
 .md-lightbox-path {
+	flex: 0 1 auto;
+	min-width: 0;
 	font-size: var(--text-xs);
 	color: var(--muted);
+	overflow: hidden;
+	text-overflow: ellipsis;
 	white-space: nowrap;
 }
 
 .md-lightbox-btn {
+	flex: none;
 	display: inline-flex;
 	align-items: center;
 	gap: 5px;
@@ -1958,6 +1971,7 @@
 	color: var(--fg);
 	font-family: var(--ui-font);
 	font-size: var(--text-sm);
+	white-space: nowrap;
 	cursor: pointer;
 }
 
@@ -2025,7 +2039,7 @@
 /* Hover Page Preview popover (Obsidian-style: Markdown, Flowcharts, Registries & Code). */
 .md-hover-card {
 	position: fixed;
-	z-index: 60;
+	z-index: 56;
 	width: min(460px, calc(100vw - 32px));
 	max-height: min(380px, calc(100vh - 32px));
 	overflow: auto;
@@ -2504,13 +2518,15 @@
 }
 
 .md-readiness-badge.ready {
-	background: color-mix(in srgb, var(--editor-ok, var(--ok)) 18%, transparent);
-	color: var(--editor-ok, var(--ok));
+	background: color-mix(in srgb, var(--editor-ok, var(--ok)) 12%, transparent);
+	border: 1px solid color-mix(in srgb, var(--editor-ok, var(--ok)) 42%, transparent);
+	color: var(--editor-strong, var(--strong-fg));
 }
 
 .md-readiness-badge.pending {
-	background: color-mix(in srgb, var(--editor-warning, var(--warning)) 18%, transparent);
-	color: var(--editor-warning, var(--warning));
+	background: color-mix(in srgb, var(--editor-warning, var(--warning)) 12%, transparent);
+	border: 1px solid color-mix(in srgb, var(--editor-warning, var(--warning)) 45%, transparent);
+	color: var(--editor-strong, var(--strong-fg));
 }
 
 .md-readiness-list {
@@ -2587,11 +2603,38 @@
 	.cm-search {
 		display: none !important;
 	}
-	.cm-md-host {
+	.cm-md-host,
+	.md-view {
+		--editor-bg: #ffffff;
+		--editor-fg: #111111;
+		--editor-strong: #000000;
+		--editor-muted: #4b5563;
+		--editor-accent: #1d4ed8;
+		--editor-border: #d1d5db;
+		--editor-strip-bg: #f8fafc;
+		--editor-ok: #15803d;
+		--editor-warning: #92400e;
+		--editor-error: #b91c1c;
+		--editor-info: #1d4ed8;
+		--bg: #ffffff;
+		--fg: #111111;
+		--strong-fg: #000000;
+		--muted: #4b5563;
+		--accent: #1d4ed8;
+		--border: #d1d5db;
+		--side-bg: #f8fafc;
+		--side-fg: #111111;
+		--input-bg: #f8fafc;
+		--input-fg: #111111;
+		--ok: #15803d;
+		--warning: #92400e;
+		--error: #b91c1c;
+		--info: #1d4ed8;
+		color-scheme: light;
 		overflow: visible !important;
 		height: auto !important;
-		background: #fff !important;
-		color: #111 !important;
+		background: #ffffff !important;
+		color: #111111 !important;
 	}
 	.cm-md-page {
 		max-width: none !important;
@@ -2718,7 +2761,7 @@
 
 .cm-widget-ac {
 	position: fixed;
-	z-index: 65;
+	z-index: 58;
 	min-width: 190px;
 	max-width: min(340px, calc(100vw - 16px));
 	max-height: 220px;
@@ -2844,8 +2887,9 @@
 	display: inline-flex;
 	align-items: center;
 	gap: 3px;
-	padding: 0 6px;
-	height: 18px;
+	padding: 1px 6px;
+	min-height: calc(18px * var(--ui-scale));
+	height: auto;
 	border-radius: 999px;
 	border: 1px solid color-mix(in srgb, var(--warning) 42%, transparent);
 	background: color-mix(in srgb, var(--warning) 12%, transparent);
@@ -2890,8 +2934,9 @@
 	display: inline-flex;
 	align-items: center;
 	gap: 3px;
-	height: 21px;
-	padding: 0 6px;
+	min-height: calc(21px * var(--ui-scale));
+	height: auto;
+	padding: 1px 6px;
 	border-radius: var(--radius-sm);
 	border: 1px solid color-mix(in srgb, var(--editor-border, var(--border)) 80%, transparent);
 	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 3.5%, var(--editor-bg, var(--bg)));
@@ -2917,8 +2962,9 @@
 .cm-tbl-range-badge {
 	display: inline-flex;
 	align-items: center;
-	height: 20px;
-	padding: 0 7px;
+	min-height: calc(20px * var(--ui-scale));
+	height: auto;
+	padding: 1px 7px;
 	margin-right: auto;
 	border-radius: 999px;
 	background: color-mix(in srgb, var(--editor-accent, var(--accent)) 14%, transparent);
@@ -3022,7 +3068,7 @@ details.md-callout > summary.md-callout-head::after {
 	font-size: 13px;
 	line-height: 1;
 	margin-left: auto;
-	color: var(--editor-muted, var(--muted));
+	color: var(--muted);
 	transition: transform 120ms ease;
 	flex: none;
 }
@@ -3152,7 +3198,7 @@ details.md-callout:not([open]) > summary.md-callout-head {
 /* Floating Selection Formatting Toolbar in Live Mode */
 .cm-md-sel-bubble {
 	position: fixed;
-	z-index: 64;
+	z-index: 57;
 	display: inline-flex;
 	flex-wrap: wrap;
 	align-items: center;
@@ -3172,8 +3218,9 @@ details.md-callout:not([open]) > summary.md-callout-head {
 	display: inline-flex;
 	align-items: center;
 	gap: 4px;
-	height: 24px;
-	padding: 0 7px;
+	min-height: calc(24px * var(--ui-scale));
+	height: auto;
+	padding: 2px 7px;
 	border: 1px solid transparent;
 	border-radius: var(--radius-sm);
 	background: transparent;
@@ -3216,6 +3263,19 @@ details.md-callout:not([open]) > summary.md-callout-head {
 }
 
 @media (prefers-reduced-motion: reduce) {
+	.cm-md-compact-meta,
+	.cm-md-compact-btn,
+	.md-work-btn,
+	.md-work-unlink,
+	.cm-tbl-add-col,
+	.cm-tbl-add-row,
+	.cm-md-callout,
+	.cm-callout-type-btn,
+	.cm-callout-title-input,
+	.cm-callout-actions,
+	.cm-md-image-tools,
+	.cm-md-details-summary::before,
+	.cm-md-details-edit,
 	.cm-tbl-hover-bar,
 	.cm-tbl-th-sort,
 	.cm-md-image-resize-handle,

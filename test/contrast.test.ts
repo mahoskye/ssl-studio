@@ -63,8 +63,8 @@ describe("font stack normalization", () => {
 	test("defaults cleanly and quotes multi-word font names safely", () => {
 		expect(resolveFontStack("", DEFAULT_UI_FONT)).toBe(DEFAULT_UI_FONT);
 		expect(resolveFontStack("IBM Plex Sans", DEFAULT_UI_FONT)).toBe(`"IBM Plex Sans", ${DEFAULT_UI_FONT}`);
-		expect(resolveFontStack("JetBrains Mono; color: red", DEFAULT_CODE_FONT)).toBe(`"JetBrains Mono color: red", ${DEFAULT_CODE_FONT}`);
-		expect(resolveFontStack("Inter", DEFAULT_UI_FONT)).toBe(`Inter, ${DEFAULT_UI_FONT}`);
+		expect(resolveFontStack("JetBrains Mono; color: red", DEFAULT_CODE_FONT)).toBe(`"JetBrains Mono color red", ${DEFAULT_CODE_FONT}`);
+		expect(resolveFontStack("Inter", DEFAULT_UI_FONT)).toBe(`"Inter", ${DEFAULT_UI_FONT}`);
 	});
 });
 

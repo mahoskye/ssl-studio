@@ -21,10 +21,18 @@ const ALSO: readonly (readonly [id: string, label: string])[] = [
 ];
 
 export function Welcome() {
-	const [recent] = createResource(() => backend.recent());
+	const [recent] = createResource(
+		() => state.workspace?.root ?? "",
+		() => backend.recent().catch(() => [] as string[]),
+	);
 	// commands.ts imports the editors, so it is loaded here when it is needed, not at the top.
-	const [loaded] = createResource(() => import("./commands"));
+	const commandsPromise = import("./commands").catch(() => null);
+	const [loaded] = createResource(() => commandsPromise);
 	const keys = (id: string) => loaded()?.keysFor(id) ?? "";
+	const runAlso = async (id: string) => {
+		const mod = loaded() ?? (await commandsPromise);
+		mod?.runCommand(id);
+	};
 	const open = async () => {
 		if (inApp) return openFolder();
 		const path = await ask("Folder to open (absolute path)");
@@ -38,13 +46,13 @@ export function Welcome() {
 				<button class="primary" onClick={() => void open()}>
 					Open folder…
 				</button>
+				<Show when={keys("open-folder")}>
+					<kbd>{keys("open-folder")}</kbd>
+				</Show>
 				<Show when={state.workspace}>
 					<button onClick={() => setState("centerView", "editors")}>
 						Return to {state.workspace!.name}
 					</button>
-				</Show>
-				<Show when={keys("open-folder")}>
-					<kbd>{keys("open-folder")}</kbd>
 				</Show>
 			</div>
 			<Show when={recent()?.length}>
@@ -92,7 +100,7 @@ export function Welcome() {
 			<p class="welcome-also">
 				<For each={ALSO}>
 					{([id, label]) => (
-						<button class="link" onClick={() => loaded()?.runCommand(id)}>
+						<button class="link" onClick={() => void runAlso(id)}>
 							{label}
 							<Show when={keys(id)}>
 								<kbd>{keys(id)}</kbd>

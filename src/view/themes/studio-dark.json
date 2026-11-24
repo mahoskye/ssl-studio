@@ -13,7 +13,7 @@
 		"editor.foreground": "#d4d7de",
 		"editorLineNumber.foreground": "#858d9d",
 		"editorLineNumber.activeForeground": "#a9afbc",
-		"editor.selectionBackground": "#2f3b54",
+		"editor.selectionBackground": "#283248",
 		"editor.lineHighlightBackground": "#22252c",
 		"editorCursor.foreground": "#f0c674",
 		"editorIndentGuide.background1": "#2a2e36",
@@ -52,7 +52,7 @@
 		"testing.iconPassed": "#7fc98f"
 	},
 	"tokenColors": [
-		{ "scope": "comment", "settings": { "foreground": "#858d9b", "fontStyle": "italic" } },
+		{ "scope": "comment", "settings": { "foreground": "#959dad", "fontStyle": "italic" } },
 		{ "scope": ["string", "string.quoted"], "settings": { "foreground": "#a8cc8c" } },
 		{ "scope": "string.quoted.double.identifier", "settings": { "foreground": "#c3e88d" } },
 		{ "scope": "constant.numeric", "settings": { "foreground": "#e5a96b" } },

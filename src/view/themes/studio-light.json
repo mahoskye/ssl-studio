@@ -6,7 +6,7 @@
 		"method": "#0f766e",
 		"variable.defaultLibrary": "#cf226f",
 		"variable.public": { "foreground": "#c2410c", "italic": true },
-		"variable.unknown": { "foreground": "#dc2626", "underline": true }
+		"variable.unknown": { "foreground": "#be2841", "underline": true }
 	},
 	"colors": {
 		"editor.background": "#fbfbfc",
@@ -41,7 +41,7 @@
 		"button.foreground": "#ffffff",
 		"input.background": "#ffffff",
 		"input.foreground": "#2b2f36",
-		"input.border": "#838ea0",
+		"input.border": "#7b8698",
 		"list.hoverBackground": "#e8eaee",
 		"list.activeSelectionBackground": "#dde3f0",
 		"list.activeSelectionForeground": "#2b2f36",

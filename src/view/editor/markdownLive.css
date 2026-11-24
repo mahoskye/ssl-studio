@@ -23,8 +23,8 @@
 .monaco-editor .md-live-done { color: var(--muted); text-decoration: line-through; }
 .monaco-editor .md-live-quoted { color: var(--muted); }
 .monaco-editor .md-live-faint { color: var(--muted); }
-/* Markup on the line being written: there, and quiet. */
-.monaco-editor .md-live-syntax { color: var(--muted); opacity: .7; }
+/* Markup on the line being written: there, and quiet without dropping below WCAG AA contrast. */
+.monaco-editor .md-live-syntax { color: var(--muted); }
 /* Whole lines: a quote's bar, a block of code's ground, a rule drawn through its own dashes. */
 .monaco-editor .md-live-quote { box-shadow: inset 3px 0 0 color-mix(in srgb, var(--accent) 55%, transparent); background: color-mix(in srgb, var(--fg) 3%, transparent); }
 .monaco-editor .md-live-codeblock { background: color-mix(in srgb, var(--fg) 6%, transparent); }

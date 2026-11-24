@@ -93,6 +93,16 @@ export function normalizeMenuEntries(items: readonly RowMenuEntry[]): ResolvedMe
 	return cleaned;
 }
 
+function toRowMenuEntries(entries: readonly ResolvedMenuEntry[]): RowMenuEntry[] {
+	return entries.map((e): RowMenuEntry => {
+		if (e === "separator") return "separator";
+		if (e.kind === "item") {
+			return { label: e.label, value: e.value, keys: e.keys, danger: e.danger, disabled: e.disabled, checked: e.checked };
+		}
+		return { label: e.label, children: toRowMenuEntries(e.children), danger: e.danger };
+	});
+}
+
 /**
  * Helper for conditional submenus: when `children` has only 1 actionable item,
  * returns that single item inline (avoiding single-item submenus); when 2+,
@@ -107,7 +117,7 @@ export function submenuOrInline(label: string, children: readonly RowMenuEntry[]
 		if (only.kind === "item") {
 			return [{ label: only.label, value: only.value, keys: only.keys, danger: only.danger, disabled: only.disabled, checked: only.checked }];
 		}
-		return [{ label: only.label, children: children.slice(), danger: only.danger }];
+		return [{ label: only.label, children: toRowMenuEntries(only.children), danger: only.danger }];
 	}
 	return [{ label, children: children.slice() }];
 }
@@ -226,10 +236,42 @@ export function placeAnchoredMenu(
 }
 
 /**
+ * Clamps a relative-positioned dropdown menu horizontally inside the viewport,
+ * keeping its left edge `>= margin` and right edge `<= viewportWidth - margin`.
+ * Returns the CSS `left` offset delta (in px) relative to the menu's natural left edge.
+ */
+export function clampMenuBarLeftOffset(naturalLeft: number, menuWidth: number, viewportWidth: number, margin = 8): number {
+	const maxRight = viewportWidth - margin;
+	let desiredLeft = naturalLeft;
+	if (desiredLeft + menuWidth > maxRight) {
+		desiredLeft = maxRight - menuWidth;
+	}
+	if (desiredLeft < margin) {
+		desiredLeft = margin;
+	}
+	return desiredLeft - naturalLeft;
+}
+
+/**
+ * Initial highlighted index for `ChooseQuickPick`: selects the first non-danger
+ * option, or `-1` when no safe option exists (so pressing Enter never
+ * auto-executes a destructive action).
+ */
+export function safeQuickPickInitialIndex(buttons: readonly string[], danger?: string): number {
+	if (!buttons.length) return -1;
+	if (!danger) return 0;
+	return buttons.findIndex((b) => b !== danger);
+}
+
+/**
  * True when a `choose()` request represents a multi-item selection list rather
  * than a compact binary/ternary confirmation (ADR 0032 — VS Code QuickPick).
+ * Destructive confirmations (`danger` with <= 3 buttons) ALWAYS remain in the
+ * centered modal Dialog so `defaultButton()` never makes the danger action the
+ * Enter default and long warning messages wrap cleanly.
  */
-export function shouldUseQuickPick(buttons: readonly string[], details?: Record<string, string>): boolean {
+export function shouldUseQuickPick(buttons: readonly string[], details?: Record<string, string>, danger?: string): boolean {
+	if (danger && buttons.length <= 3) return false;
 	if (buttons.length > 3) return true;
 	if (details && Object.keys(details).length > 0 && buttons.length >= 2) return true;
 	return buttons.some((b) => b.length > 34);

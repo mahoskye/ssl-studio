@@ -126,13 +126,18 @@ function Splitter(props: {
 const shortcut = (id: string) => (keysFor(id) ? ` (${keysFor(id)})` : "");
 
 function useTheme() {
-	const media = matchMedia("(prefers-color-scheme: light)");
-	// In the desktop app the system is asked for its preference; in a browser the browser's answer is the system's.
-	const system = () => (state.info?.host === "app" ? state.info.systemDark : undefined);
+	const media = typeof matchMedia === "function" ? matchMedia("(prefers-color-scheme: dark)") : null;
+	const [liveDark, setLiveDark] = createSignal<boolean | undefined>(undefined);
+	// In the desktop app the system is asked for its preference at startup; once a live OS
+	// media-query change arrives, follow the live preference instead of the startup snapshot.
+	const system = () => liveDark() ?? (state.info?.host === "app" ? state.info.systemDark : undefined);
 	const apply = () => applyTheme(resolveTheme(state.settings.theme, state.themes, system(), state.settings.themeMaterial));
 	createEffect(on([() => state.settings.theme, () => state.settings.themeMaterial, () => state.themes, system], apply));
-	media.addEventListener("change", apply);
-	onCleanup(() => media.removeEventListener("change", apply));
+	if (media) {
+		const onMediaChange = (e: MediaQueryListEvent) => setLiveDark(typeof e?.matches === "boolean" ? e.matches : media.matches);
+		media.addEventListener("change", onMediaChange);
+		onCleanup(() => media.removeEventListener("change", onMediaChange));
+	}
 	createEffect(() => applyFonts({ uiFont: state.settings.uiFont, codeFont: state.settings.codeFont, readFont: state.settings.readFont }));
 }
 

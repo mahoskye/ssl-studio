@@ -5,7 +5,7 @@
 // - Provides Insert Template, New Note from Template, Customize Template, Insert Callout, and Insert Image actions.
 import { addToFrontMatterList, frontMatter, withFrontMatter } from "../shared/frontMatter";
 import { buildCalloutBlock, CALLOUT_PRESETS } from "../shared/markdownEdit";
-import { baseName, dirName, isInside, joinPath, relativePath, relativeTo } from "../shared/paths";
+import { baseName, dirName, isInside, joinPath, relativePath, relativeTo, resolvePath } from "../shared/paths";
 import { slug } from "../shared/projectDocs";
 import {
 	DEFAULT_TEMPLATES,
@@ -39,7 +39,10 @@ export function templatesFolderPath(): string | null {
 	const root = state.workspace?.root;
 	if (!root) return null;
 	const custom = state.settings.templatesFolder?.trim();
-	if (custom) return joinPath(root, ...custom.split(/[\\/]/).filter((p) => p && p !== "."));
+	if (custom && !custom.startsWith("/") && !custom.startsWith("\\") && !/^[a-zA-Z]:/.test(custom)) {
+		const resolved = resolvePath(root, custom);
+		if (isInside(root, resolved)) return resolved;
+	}
 	const docsRel = state.project?.docs ?? "docs";
 	return joinPath(root, ...docsRel.split(/[\\/]/).filter((p) => p && p !== "."), "templates");
 }

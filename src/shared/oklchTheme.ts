@@ -1,7 +1,7 @@
 // Deterministic OKLCH Warm Material theme engine (ADR 0027, docs/UI-DESIGN.md).
 // Pure TypeScript with zero DOM or Monaco imports so both the view and
 // test/contrast.test.ts can share the exact same generated themes.
-import { contrast, luminance } from "./contrast";
+import { contrast, luminance, pickAccentFg } from "./contrast";
 
 export const TONES = ["paper", "stone", "split", "dusk", "obsidian"] as const;
 export type ThemeTone = (typeof TONES)[number];
@@ -85,6 +85,7 @@ export type StudioTokens = {
 	tabActiveBg: string;
 	tabActiveFg: string;
 	accent: string;
+	accentFg: string;
 	buttonBg: string;
 	buttonFg: string;
 	inputBg: string;
@@ -93,6 +94,7 @@ export type StudioTokens = {
 	hover: string;
 	selected: string;
 	muted: string;
+	chromeMuted: string;
 	error: string;
 	warning: string;
 	info: string;
@@ -104,7 +106,9 @@ export type StudioTokens = {
 	editorStrong: string;
 	editorMuted: string;
 	editorAccent: string;
+	editorAccentFg: string;
 	editorBorder: string;
+	editorInputBorder: string;
 	editorStripBg: string;
 	editorLineHl: string;
 	editorOk: string;
@@ -156,6 +160,37 @@ export function oklchHex(L: number, C: number, H: number): string {
 	);
 }
 
+/** Linearly blends two #rrggbb hex colours in sRGB (mirrors CSS color-mix(in srgb, fg p%, bg)). */
+function mixSrgb(fg: string, weight: number, bg: string): string {
+	const parse = (h: string) => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)] as const;
+	const [fr, fgg, fb] = parse(fg);
+	const [br, bgg, bb] = parse(bg);
+	const ch = (a: number, b: number) => Math.round(a * weight + b * (1 - weight)).toString(16).padStart(2, "0");
+	return `#${ch(fr, br)}${ch(fgg, bgg)}${ch(fb, bb)}`;
+}
+
+/**
+ * Nudges OKLCH lightness (and gently eases chroma if hitting sRGB bounds) until
+ * the resulting colour satisfies `passes(hex)`.
+ */
+function safeColor(L: number, C: number, H: number, dark: boolean, passes: (color: string) => boolean): string {
+	let curL = L;
+	let curC = C;
+	let hex = oklchHex(curL, curC, H);
+	if (passes(hex)) return hex;
+	for (let i = 0; i < 65; i++) {
+		curL = dark ? Math.min(0.985, curL + 0.012) : Math.max(0.10, curL - 0.012);
+		hex = oklchHex(curL, curC, H);
+		if (passes(hex)) return hex;
+		if ((dark && curL >= 0.975) || (!dark && curL <= 0.12)) {
+			curC *= 0.82;
+			hex = oklchHex(curL, curC, H);
+			if (passes(hex)) return hex;
+		}
+	}
+	return hex;
+}
+
 /**
  * Nudges OKLCH lightness (and gently eases chroma if hitting sRGB bounds) until
  * the resulting colour achieves at least `target` contrast against every surface
@@ -163,22 +198,7 @@ export function oklchHex(L: number, C: number, H: number): string {
  */
 function safeFgOnAll(L: number, C: number, H: number, surfaces: string[], target = 4.65): string {
 	const dark = surfaces.every((bg) => luminance(bg) < 0.25);
-	let curL = L;
-	let curC = C;
-	let hex = oklchHex(curL, curC, H);
-	const ok = (color: string) => surfaces.every((bg) => contrast(color, bg) >= target);
-	if (ok(hex)) return hex;
-	for (let i = 0; i < 65; i++) {
-		curL = dark ? Math.min(0.985, curL + 0.012) : Math.max(0.10, curL - 0.012);
-		hex = oklchHex(curL, curC, H);
-		if (ok(hex)) return hex;
-		if ((dark && curL >= 0.975) || (!dark && curL <= 0.12)) {
-			curC *= 0.82;
-			hex = oklchHex(curL, curC, H);
-			if (ok(hex)) return hex;
-		}
-	}
-	return hex;
+	return safeColor(L, C, H, dark, (color) => surfaces.every((bg) => contrast(color, bg) >= target));
 }
 
 /** Picks a filled button background + white/ink foreground guaranteed >= 4.7:1. */
@@ -255,17 +275,23 @@ export function generateOklchTheme(tone: ThemeTone, material: ThemeMaterial): Ge
 	const indentGuide = edDark ? edMk(c.ed + 0.06, 0.9) : edMk(isSplit ? 0.915 : c.ed - 0.055, 0.9);
 	const whitespace = edDark ? edMk(c.ed + 0.12, 0.9) : edMk(isSplit ? 0.845 : c.ed - 0.12, 0.9);
 
-	// Every chrome surface where chrome text/status labels may sit.
-	const chromeSurfaces = isSplit ? [trayBg, sideBg, panelBg, hover, selected] : [trayBg, sideBg, panelBg, hover, selected, editorBg];
+	// Every chrome surface where chrome text/status labels may sit (including cmdBg for title-bar chips).
+	const chromeSurfaces = isSplit ? [trayBg, cmdBg, sideBg, panelBg, hover, selected] : [trayBg, cmdBg, sideBg, panelBg, hover, selected, editorBg];
 	const editorSurfaces = [editorBg, lineHl];
+	const editorSemanticSurfaces = [editorBg, lineHl, editorStripBg];
 
 	const sideFg = safeFgOnAll(c.dark ? 0.86 : 0.28, m.baseC * 0.5, m.baseH, [sideBg, hover, selected], 7.0);
-	const strongFg = safeFgOnAll(c.dark ? 0.94 : 0.18, m.baseC * 0.4, m.baseH, [sideBg, trayBg, hover, selected], 9.0);
+	const strongFg = safeFgOnAll(c.dark ? 0.94 : 0.18, m.baseC * 0.4, m.baseH, [sideBg, trayBg, cmdBg, hover, selected], 9.0);
 	const statusFg = safeFgOnAll(c.dark ? 0.78 : 0.34, m.baseC * 0.6, m.baseH, [trayBg], 5.5);
 	const inputFg = safeFgOnAll(c.dark ? 0.89 : 0.24, m.baseC * 0.5, m.baseH, [inputBg], 8.5);
 	const muted = safeFgOnAll(c.dark ? 0.69 : 0.47, m.baseC * 0.7, m.baseH, chromeSurfaces, 4.65);
-	const inputBorder = safeFgOnAll(c.dark ? 0.50 : 0.56, m.baseC * 0.85, m.baseH, isSplit ? [sideBg, inputBg] : [sideBg, inputBg, editorBg], 3.15);
-	const accent = safeFgOnAll(c.dark ? 0.75 : 0.47, m.accC, m.accH, [...chromeSurfaces, inputBg], 4.65);
+	const chromeMuted = muted;
+	const inputBorder = safeFgOnAll(c.dark ? 0.50 : 0.56, m.baseC * 0.85, m.baseH, isSplit ? [sideBg, inputBg, cmdBg] : [sideBg, inputBg, cmdBg, editorBg], 3.15);
+	const accentSurfaces = [...chromeSurfaces, inputBg];
+	const accent = safeColor(c.dark ? 0.75 : 0.47, m.accC, m.accH, accentSurfaces.every((bg) => luminance(bg) < 0.25), (color) =>
+		accentSurfaces.every((bg) => contrast(color, bg) >= 4.65) && contrast(color, mixSrgb(color, 0.12, cmdBg)) >= 4.65,
+	);
+	const accentFg = pickAccentFg(accent);
 	const button = safeButton(accent, m.accC, m.accH, c.dark);
 
 	const ok = safeFgOnAll(c.dark ? 0.76 : 0.45, 0.12, 148, chromeSurfaces, 4.65);
@@ -276,14 +302,16 @@ export function generateOklchTheme(tone: ThemeTone, material: ThemeMaterial): Ge
 	// Editor-calibrated foregrounds & semantic marks.
 	const editorFg = safeFgOnAll(edDark ? 0.89 : 0.23, edC * 0.5, edH, editorSurfaces, 9.5);
 	const editorStrong = safeFgOnAll(edDark ? 0.95 : 0.17, edC * 0.4, edH, editorSurfaces, 11.0);
-	const editorMuted = safeFgOnAll(edDark ? 0.67 : 0.48, edC * 0.7, edH, editorSurfaces, 4.65);
+	const editorMuted = safeFgOnAll(edDark ? 0.67 : 0.48, edC * 0.7, edH, editorSemanticSurfaces, 4.65);
 	const lineNum = safeFgOnAll(edDark ? 0.61 : 0.51, edC * 0.6, edH, editorSurfaces, 4.65);
 	const lineNumActive = safeFgOnAll(edDark ? 0.80 : 0.34, edC * 0.5, edH, editorSurfaces, 6.5);
-	const editorAccent = safeFgOnAll(edDark ? 0.75 : 0.46, m.accC, m.accH, editorSurfaces, 4.65);
-	const editorOk = safeFgOnAll(edDark ? 0.76 : 0.45, 0.13, 148, editorSurfaces, 4.65);
-	const editorWarning = safeFgOnAll(edDark ? 0.80 : 0.50, 0.13, 78, editorSurfaces, 4.65);
-	const editorError = safeFgOnAll(edDark ? 0.72 : 0.47, 0.15, 22, editorSurfaces, 4.65);
-	const editorInfo = safeFgOnAll(edDark ? 0.75 : 0.46, 0.13, 245, editorSurfaces, 4.65);
+	const editorAccent = safeFgOnAll(edDark ? 0.75 : 0.46, m.accC, m.accH, editorSemanticSurfaces, 4.65);
+	const editorAccentFg = pickAccentFg(editorAccent);
+	const editorInputBorder = safeFgOnAll(edDark ? 0.50 : 0.56, edC * 0.85, edH, editorSemanticSurfaces, 3.15);
+	const editorOk = isSplit ? safeFgOnAll(0.45, 0.13, 148, editorSemanticSurfaces, 4.65) : ok;
+	const editorWarning = isSplit ? safeFgOnAll(0.50, 0.13, 78, editorSemanticSurfaces, 4.65) : warning;
+	const editorError = isSplit ? safeFgOnAll(0.47, 0.15, 22, editorSemanticSurfaces, 4.65) : error;
+	const editorInfo = isSplit ? safeFgOnAll(0.46, 0.13, 245, editorSemanticSurfaces, 4.65) : info;
 
 	// Peek references / Peek definition widget surfaces & foregrounds (editor-polarity calibrated on Split Warm).
 	const peekEditorBg = isSplit
@@ -343,6 +371,7 @@ export function generateOklchTheme(tone: ThemeTone, material: ThemeMaterial): Ge
 		tabActiveBg: editorBg,
 		tabActiveFg: editorStrong,
 		accent,
+		accentFg,
 		buttonBg: button.bg,
 		buttonFg: button.fg,
 		inputBg,
@@ -351,6 +380,7 @@ export function generateOklchTheme(tone: ThemeTone, material: ThemeMaterial): Ge
 		hover,
 		selected,
 		muted,
+		chromeMuted,
 		error,
 		warning,
 		info,
@@ -360,7 +390,9 @@ export function generateOklchTheme(tone: ThemeTone, material: ThemeMaterial): Ge
 		editorStrong,
 		editorMuted,
 		editorAccent,
+		editorAccentFg,
 		editorBorder,
+		editorInputBorder,
 		editorStripBg,
 		editorLineHl: lineHl,
 		editorOk,
@@ -493,6 +525,56 @@ export function generateOklchTheme(tone: ThemeTone, material: ThemeMaterial): Ge
 
 	cache.set(id, generated);
 	return generated;
+}
+
+/** Maps a theme's StudioTokens to its complete CSS custom property record. */
+export function studioVars(s: StudioTokens): Record<string, string> {
+	return {
+		"--tray-bg": s.trayBg,
+		"--cmd-bg": s.cmdBg,
+		"--strong-fg": s.strongFg,
+		"--bg": s.bg,
+		"--fg": s.fg,
+		"--side-bg": s.sideBg,
+		"--side-fg": s.sideFg,
+		"--border": s.border,
+		"--panel-bg": s.panelBg,
+		"--status-bg": s.statusBg,
+		"--status-fg": s.statusFg,
+		"--tab-bg": s.tabBg,
+		"--tab-fg": s.tabFg,
+		"--tab-active-bg": s.tabActiveBg,
+		"--tab-active-fg": s.tabActiveFg,
+		"--accent": s.accent,
+		"--accent-fg": s.accentFg,
+		"--button-bg": s.buttonBg,
+		"--button-fg": s.buttonFg,
+		"--input-bg": s.inputBg,
+		"--input-fg": s.inputFg,
+		"--input-border": s.inputBorder,
+		"--hover": s.hover,
+		"--selected": s.selected,
+		"--muted": s.muted,
+		"--chrome-muted": s.chromeMuted,
+		"--error": s.error,
+		"--warning": s.warning,
+		"--info": s.info,
+		"--ok": s.ok,
+		"--editor-bg": s.editorBg,
+		"--editor-fg": s.editorFg,
+		"--editor-strong": s.editorStrong,
+		"--editor-muted": s.editorMuted,
+		"--editor-accent": s.editorAccent,
+		"--editor-accent-fg": s.editorAccentFg,
+		"--editor-border": s.editorBorder,
+		"--editor-input-border": s.editorInputBorder,
+		"--editor-strip-bg": s.editorStripBg,
+		"--editor-line-hl": s.editorLineHl,
+		"--editor-ok": s.editorOk,
+		"--editor-warning": s.editorWarning,
+		"--editor-error": s.editorError,
+		"--editor-info": s.editorInfo,
+	};
 }
 
 /** All 25 built-in OKLCH Tone × Material themes. */

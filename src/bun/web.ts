@@ -11,6 +11,8 @@ import type { Call, Push, Reply } from "../shared/protocol";
 import { createBackend, dispatch } from "./backend";
 
 const MAX_WS_PAYLOAD = 32 * 1024 * 1024;
+export const HTML_CSP =
+	"default-src 'self'; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'";
 
 function withSep(p: string): string {
 	return p.endsWith(sep) ? p : p + sep;
@@ -181,6 +183,15 @@ export function startWebHost(options?: { port?: number; dist?: string; folder?: 
 					headers: {
 						"Content-Type": "text/html; charset=utf-8",
 						"Cache-Control": "no-store",
+						"Content-Security-Policy": HTML_CSP,
+					},
+				});
+			}
+			if (/\.html?$/i.test(resolved.path)) {
+				return new Response(Bun.file(resolved.path), {
+					headers: {
+						"Content-Type": "text/html; charset=utf-8",
+						"Content-Security-Policy": HTML_CSP,
 					},
 				});
 			}

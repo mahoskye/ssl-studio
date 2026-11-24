@@ -286,7 +286,7 @@ export function RowMenu() {
 					el.style.maxHeight = `${placed.maxHeight}px`;
 					el.style.zIndex = `${66 + depth}`;
 					if (sub.focusFirst) {
-						el.querySelector<HTMLElement>("[role=menuitem]:not(:disabled)")?.focus();
+						el.querySelector<HTMLElement>("[role=menuitem]:not(:disabled), [role=menuitemcheckbox]:not(:disabled)")?.focus();
 					}
 				};
 
@@ -391,7 +391,7 @@ export function RowMenu() {
 				}
 
 				const onPanelKeyDown = (depth: number, entries: ResolvedMenuEntry[], e: KeyboardEvent & { currentTarget: HTMLDivElement }) => {
-					const items = [...e.currentTarget.querySelectorAll<HTMLButtonElement>("[role=menuitem]:not(:disabled)")];
+					const items = [...e.currentTarget.querySelectorAll<HTMLButtonElement>("[role=menuitem]:not(:disabled), [role=menuitemcheckbox]:not(:disabled)")];
 					const active = document.activeElement as HTMLButtonElement | null;
 					const at = active ? items.indexOf(active) : -1;
 					if (e.key === "Tab") {
@@ -497,7 +497,7 @@ export function RowMenu() {
 										class="menu-item"
 										classList={{ marked: isMarked(), danger: Boolean(entry.danger) }}
 										id={menu.keep && navIdx >= 0 ? `${id}-${depth}-${navIdx}` : undefined}
-										role="menuitem"
+										role={entry.checked !== undefined ? "menuitemcheckbox" : "menuitem"}
 										aria-checked={entry.checked !== undefined ? entry.checked : undefined}
 										disabled={entry.disabled}
 										tabindex={-1}

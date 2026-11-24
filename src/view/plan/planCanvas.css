@@ -26,7 +26,7 @@
 	box-sizing: border-box;
 	flex-wrap: nowrap;
 	overflow: visible;
-	z-index: 4;
+	z-index: 15;
 }
 
 .plan-topbar-title {
@@ -214,10 +214,14 @@
 	cursor: crosshair;
 }
 
-.plan-canvas:focus,
-.plan-canvas:focus-visible {
+.plan-canvas:focus {
 	outline: none;
 	box-shadow: none;
+}
+
+.plan-canvas:focus-visible {
+	outline: 2px solid var(--accent);
+	outline-offset: -2px;
 }
 
 .plan-grid-dot {
@@ -449,7 +453,7 @@
 }
 
 .plan-port:hover .plan-port-plus {
-	stroke: var(--accent-fg, #fff);
+	stroke: var(--accent-fg);
 }
 
 .plan-port-hit {
@@ -536,7 +540,7 @@
 
 .plan-seg-handle:hover .plan-seg-grip,
 .plan-seg-handle.active .plan-seg-grip {
-	stroke: var(--accent-fg, #fff);
+	stroke: var(--accent-fg);
 }
 
 .plan-edge-hit {
@@ -783,13 +787,14 @@
 	align-items: center;
 	justify-content: center;
 	min-width: 16px;
-	height: 16px;
+	min-height: calc(16px * var(--ui-scale));
+	height: auto;
 	padding: 0 5px;
 	border-radius: 999px;
 	font-size: 10px;
 	font-weight: 700;
 	background: var(--accent);
-	color: var(--accent-fg, #fff);
+	color: var(--accent-fg);
 }
 
 .plan-assist.in-palette {
@@ -1295,7 +1300,7 @@
 .plan-impl-code {
 	border: 1px solid var(--border);
 	border-radius: var(--radius-md);
-	background: var(--editor-bg, var(--bg));
+	background: var(--input-bg);
 	overflow: hidden;
 }
 
@@ -1341,7 +1346,7 @@
 	max-height: 210px;
 	overflow: auto;
 	font: 400 11px/1.48 var(--code-font);
-	color: var(--fg);
+	color: var(--input-fg, var(--fg));
 	tab-size: 2;
 }
 
@@ -1356,7 +1361,7 @@
 	width: 34px;
 	padding-right: 8px;
 	text-align: right;
-	color: color-mix(in srgb, var(--muted) 72%, transparent);
+	color: var(--muted);
 	user-select: none;
 	font-variant-numeric: tabular-nums;
 }
@@ -1617,7 +1622,8 @@ rect.plan-code-dot.red,
 	display: inline-flex;
 	align-items: center;
 	padding: 0 5px;
-	height: 15px;
+	min-height: calc(15px * var(--ui-scale));
+	height: auto;
 	border-radius: 999px;
 	font-size: 9.5px;
 	font-weight: 600;
@@ -1627,7 +1633,8 @@ rect.plan-code-dot.red,
 }
 
 .plan-sched-pill.on-primary {
-	background: rgb(255 255 255 / 0.2);
+	background: transparent;
+	border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
 	color: inherit;
 }
 
@@ -3984,4 +3991,29 @@ rect.plan-code-dot.red,
 .plan-text-test-card.editing {
 	border-color: var(--accent);
 	background: color-mix(in srgb, var(--accent) 7%, var(--side-bg));
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.plan-node.unit-running rect.plan-code-dot.blue {
+		animation: none;
+	}
+	.plan-shape-dock,
+	.plan-port,
+	.plan-node,
+	.plan-node .node-shape,
+	.plan-edge .g-edge,
+	.plan-group-box,
+	.plan-port-bg,
+	.plan-seg-pill,
+	.plan-dock-btn,
+	.plan-shape-tile,
+	.plan-stage-chip,
+	.plan-impl-card,
+	.plan-sched-btn,
+	.plan-test-row,
+	.pa-hero-secondary button,
+	.plan-text-row,
+	.plan-text-branch-pick {
+		transition: none;
+	}
 }

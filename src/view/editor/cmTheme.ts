@@ -165,6 +165,7 @@ export const cmStudioTheme = EditorView.theme({
 		fontFamily: "var(--ui-font)",
 		fontSize: "var(--text-base)",
 		overflow: "hidden",
+		zIndex: "58",
 	},
 	".cm-tooltip.cm-tooltip-autocomplete > ul": {
 		fontFamily: "var(--ui-font)",

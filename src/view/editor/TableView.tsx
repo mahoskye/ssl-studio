@@ -418,67 +418,6 @@ function remapIndexAfterMove(idx: number, from: number, to: number): number {
 	return idx;
 }
 
-const TABLE_POWER_STYLE_ID = "table-view-power-styles";
-const TABLE_POWER_CSS = `
-.table-view th.table-sel-col,
-.table-view td.table-sel-col { width: 56px; min-width: 56px; max-width: 56px; }
-.table-sel-inner { display: inline-flex; align-items: center; justify-content: flex-end; gap: 5px; width: 100%; padding: 0 6px; box-sizing: border-box; }
-.table-row-num { font-family: var(--ui-font); font-size: var(--text-xs); color: var(--muted); font-variant-numeric: tabular-nums; min-width: 2ch; text-align: right; user-select: none; }
-.table-row-num.draggable { cursor: grab; }
-.table-row-num.draggable:hover { color: var(--strong-fg); }
-.table-scroll.is-dragging-row,
-.table-scroll.is-dragging-row td,
-.table-scroll.is-dragging-row tr { cursor: grabbing; user-select: none; }
-.table-scroll.is-drag-selecting,
-.table-scroll.is-drag-selecting td { user-select: none; }
-.table-view tbody tr.row-dragging { opacity: .45; }
-.table-view tbody tr.row-drop-before td { box-shadow: inset 0 2px 0 var(--accent); }
-.table-view tbody tr.row-drop-after td { box-shadow: inset 0 -2px 0 var(--accent); }
-.table-view tbody tr.row-revealed td,
-.table-view tbody tr.row-revealed td.col-frozen { background: color-mix(in srgb, var(--accent) 22%, var(--bg)); transition: background .35s ease; }
-.table-view tbody tr td.cell-in-range,
-.table-view tbody tr:hover td.cell-in-range,
-.table-view tbody tr.row-current td.cell-in-range,
-.table-view tbody tr.row-current:hover td.cell-in-range,
-.table-view tbody tr td.col-frozen.cell-in-range { background: color-mix(in srgb, var(--accent) 16%, var(--bg)); }
-.table-view tbody tr td.cell-in-range.cell-selected,
-.table-view tbody tr:hover td.cell-in-range.cell-selected,
-.table-view tbody tr.row-current td.cell-in-range.cell-selected,
-.table-view tbody tr td.col-frozen.cell-in-range.cell-selected { background: color-mix(in srgb, var(--accent) 26%, var(--bg)); outline: 2px solid var(--accent); outline-offset: -2px; }
-.table-view tbody tr td.cell-empty-key:not(.col-frozen-last) { box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--warning) 70%, transparent); }
-.table-view tbody tr td.cell-empty-key.col-frozen-last { box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--warning) 70%, transparent), 2px 0 0 color-mix(in srgb, var(--accent) 42%, var(--border)), 6px 0 12px -4px rgb(0 0 0 / .24); }
-.table-empty-key-warn { display: inline-flex; align-items: center; gap: 3px; color: var(--warning); font: var(--text-xs) var(--ui-font); opacity: .9; }
-.table-badge-warn { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; }
-.table-badge-warn-icon { color: var(--warning); flex: none; display: inline-flex; align-items: center; }
-.table-view tbody tr.table-group-row td { background: color-mix(in srgb, var(--fg) 4%, var(--side-bg)); border-bottom: 1px solid var(--border); padding: 4px var(--space-4); font-family: var(--ui-font); font-size: var(--text-sm); overflow: visible; }
-.table-view tbody tr.table-group-row:hover td { background: color-mix(in srgb, var(--fg) 7%, var(--side-bg)); }
-.table-view tbody tr.table-group-row td.table-sel-col { padding: 0; background: color-mix(in srgb, var(--fg) 4%, var(--side-bg)); overflow: hidden; }
-.table-group-toggle { position: sticky; left: 58px; display: inline-flex; align-items: center; gap: var(--space-2); padding: 1px 4px; min-height: 0; font: 600 var(--text-sm) var(--ui-font); color: var(--strong-fg); background: transparent; border: 0; cursor: pointer; }
-.table-group-count { font-weight: 400; font-size: var(--text-xs); color: var(--muted); font-variant-numeric: tabular-nums; }
-.table-status-strip { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; }
-.table-status-pill { display: inline-flex; align-items: center; gap: 4px; min-height: 0; padding: 1px 7px; font-size: var(--text-xs); line-height: 1.5; cursor: pointer; }
-.table-status-pill[aria-pressed="true"] { outline: 1.5px solid var(--accent); outline-offset: -1px; font-weight: 600; }
-.table-status-pill-count { opacity: .82; font-variant-numeric: tabular-nums; }
-.table-cell-picker { position: fixed; z-index: 65; min-width: 185px; max-width: min(340px, calc(100vw - 16px)); max-height: 250px; overflow: auto; padding: 4px; background: var(--side-bg); color: var(--side-fg); border: 1px solid var(--input-border); border-radius: var(--radius-md); box-shadow: var(--shadow); font-family: var(--ui-font); font-size: var(--text-sm); display: flex; flex-direction: column; gap: 2px; }
-.table-cell-picker-opt { flex: none; display: flex; align-items: center; gap: var(--space-2); width: 100%; min-height: 26px; padding: 4px 8px; box-sizing: border-box; text-align: left; border-radius: var(--radius-sm); background: transparent; color: var(--fg); border: 0; cursor: pointer; overflow: hidden; }
-.table-cell-picker-opt:hover,
-.table-cell-picker-opt.active { background: var(--hover); color: var(--strong-fg); }
-.table-cell-picker-opt.active { outline: 1px solid color-mix(in srgb, var(--accent) 55%, transparent); outline-offset: -1px; }
-.table-cell-picker-val { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--code-font); font-size: var(--text-sm); }
-.table-cell-picker-meta { margin-left: auto; font-size: var(--text-xs); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 18ch; }
-.table-cell-picker-check { margin-left: auto; color: var(--accent); flex: none; display: inline-flex; align-items: center; }
-.table-bar .doc-status.table-fmt-chip { min-height: 0; line-height: 1.6; gap: var(--space-1); color: var(--fg); border-color: var(--input-border); }
-`;
-
-function ensureTablePowerStyles() {
-	if (typeof document === "undefined") return;
-	if (document.getElementById(TABLE_POWER_STYLE_ID)) return;
-	const style = document.createElement("style");
-	style.id = TABLE_POWER_STYLE_ID;
-	style.textContent = TABLE_POWER_CSS;
-	document.head.appendChild(style);
-}
-
 function menuPoint(e: MouseEvent, fallbackEl: Element | null): { x: number; y: number } {
 	if (e.clientX || e.clientY || !fallbackEl) return { x: e.clientX, y: e.clientY };
 	const rect = fallbackEl.getBoundingClientRect();
@@ -486,7 +425,6 @@ function menuPoint(e: MouseEvent, fallbackEl: Element | null): { x: number; y: n
 }
 
 export function TableView(props: { path: string; group?: number }) {
-	ensureTablePowerStyles();
 	const model = documents.get(props.path)?.model;
 	let rootEl: HTMLDivElement | undefined;
 	const [text, setText] = createSignal(model?.getValue() ?? "");
@@ -3212,7 +3150,7 @@ export function TableView(props: { path: string; group?: number }) {
 		if (!model) return;
 		const targetBefore = visibleSelectedRows();
 		if (!targetBefore.length) return;
-		if ((await choose(`Delete ${targetBefore.length} selected ${targetBefore.length === 1 ? "row" : "rows"}?`, ["Delete rows", "Cancel"], { danger: "Delete rows" })) !== "Delete rows") return;
+		if ((await choose(`Delete ${targetBefore.length} selected ${targetBefore.length === 1 ? "row" : "rows"}?`, ["Delete rows"], { danger: "Delete rows" })) !== "Delete rows") return;
 		const raw = model.getValue();
 		const fresh = parseCurrentCsv(raw);
 		const targetRows = visibleSelectedRows().filter((r) => r >= 0 && r < fresh.rows.length);
@@ -3405,7 +3343,7 @@ export function TableView(props: { path: string; group?: number }) {
 	const deleteColumnInteractive = async (col: number) => {
 		if (!model || table().header.length < 2) return;
 		const name = headerName(col) || `Column ${col + 1}`;
-		if ((await choose(`Delete column “${name}” and all of its values?`, ["Delete column", "Cancel"], { danger: "Delete column" })) !== "Delete column") return;
+		if ((await choose(`Delete column “${name}” and all of its values?`, ["Delete column"], { danger: "Delete column" })) !== "Delete column") return;
 		const raw = model.getValue();
 		const fresh = parseCurrentCsv(raw);
 		const next = deleteCsvColumn(raw, fresh, col);
@@ -3471,7 +3409,7 @@ export function TableView(props: { path: string; group?: number }) {
 		if (hasActiveFilters()) {
 			const ok = await choose(
 				"Filters are active. Applying sort writes the sorted order for all rows in the file (including hidden rows).",
-				["Apply sort to file", "Cancel"],
+				["Apply sort to file"],
 			);
 			if (ok !== "Apply sort to file") return;
 		}
@@ -3539,7 +3477,7 @@ export function TableView(props: { path: string; group?: number }) {
 		const dest = isAbs ? entered : resolvePath(baseDir, entered);
 		const exists = await backend.read(dest).then(() => true, () => false);
 		if (exists) {
-			const ok = await choose(`Overwrite existing file “${relativeTo(root, dest)}”?`, ["Overwrite", "Cancel"], { danger: "Overwrite" });
+			const ok = await choose(`Overwrite existing file “${relativeTo(root, dest)}”?`, ["Overwrite"], { danger: "Overwrite" });
 			if (ok !== "Overwrite") return;
 		}
 		const cols = visibleColumns();

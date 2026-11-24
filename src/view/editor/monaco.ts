@@ -8,7 +8,11 @@ import EditorWorker from "monaco-editor/editor/editor.worker?worker";
 
 self.MonacoEnvironment = { getWorker: () => new EditorWorker() };
 
-monaco.languages.register({ id: "ssl", extensions: [".ssl", ".srvscr", ".ds"], aliases: ["SSL", "STARLIMS Scripting Language"] });
+monaco.languages.register({
+	id: "ssl",
+	extensions: [".ssl", ".srvscr", ".ds", ".ssl.txt", ".srvscr.txt", ".ds.txt"],
+	aliases: ["SSL", "STARLIMS Scripting Language"],
+});
 
 /** Comment markers and brackets from the formatter extension's language configuration. */
 export async function loadLanguageConfiguration() {

@@ -37,8 +37,8 @@ function withTempDirs<T>(fn: (d: { config: string; data: string; state: string }
 }
 
 describe("settings security, shape safety, atomic saves, and themes", () => {
-	test("USER_ONLY_SETTINGS contains executable, server, and billing trust keys", () => {
-		expect([...USER_ONLY_SETTINGS].sort()).toEqual(["agentModel", "agentOwnModels", "agentServerConfig", "agentServerUrl", "lspPath"]);
+	test("USER_ONLY_SETTINGS contains executable, server, billing trust, and keybinding keys", () => {
+		expect([...USER_ONLY_SETTINGS].sort()).toEqual(["agentModel", "agentOwnModels", "agentServerConfig", "agentServerUrl", "keys", "lspPath"]);
 	});
 
 	test("load() strips USER_ONLY_SETTINGS from workspace layer while honoring user layer", async () => {

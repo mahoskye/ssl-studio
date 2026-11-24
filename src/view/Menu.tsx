@@ -2,10 +2,11 @@
 // near the bottom of the window) it. For the actions that otherwise live only
 // in the command palette, where nobody who does not already know their names
 // will find them.
-import { createSignal, For, onCleanup, Show } from "solid-js";
+import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
 import { Portal } from "solid-js/web";
 import { placeAnchoredMenu } from "../shared/contextMenu";
 import { Icon } from "./Icon";
+import { modalOpen } from "./modal";
 
 export type MenuItem = { label: string; keys?: string; checked?: boolean; run: () => void; disabled?: boolean; why?: string } | "separator";
 
@@ -39,18 +40,43 @@ export function Menu(props: {
 	let list: HTMLDivElement | undefined;
 	let openSeq = 0;
 	let disposed = false;
-	const focusAt = (index: number) => list?.querySelectorAll<HTMLElement>("[data-item]")[index]?.focus();
+	const focusAt = (index: number) => {
+		const target = index >= 0 ? list?.querySelectorAll<HTMLElement>("[data-item]")[index] : undefined;
+		if (target && !target.hasAttribute("disabled") && target.getAttribute("role") !== "separator") {
+			target.focus();
+		} else {
+			list?.focus();
+		}
+	};
+	const detachListeners = () => {
+		document.removeEventListener("mousedown", outside, true);
+		window.removeEventListener("resize", reposition);
+		window.removeEventListener("blur", onBlur);
+		window.removeEventListener("scroll", onScroll, true);
+	};
 	const close = (refocus = true) => {
 		openSeq++;
 		setItems(null);
 		list = undefined;
-		document.removeEventListener("mousedown", outside, true);
-		window.removeEventListener("resize", reposition);
+		detachListeners();
 		if (refocus && button.isConnected) button.focus();
 	};
 	const outside = (e: MouseEvent) => {
 		if (!list?.contains(e.target as Node) && !button.contains(e.target as Node)) close(false);
 	};
+	const onBlur = () => close(false);
+	const onScroll = (e: Event) => {
+		if (list && e.target instanceof Node && list.contains(e.target)) return;
+		close(false);
+	};
+	const onFocusOut = (e: FocusEvent) => {
+		if (items() === null) return;
+		const to = e.relatedTarget as Node | null;
+		if (to && !list?.contains(to) && !button.contains(to)) close(false);
+	};
+	createEffect(() => {
+		if (modalOpen() && items() !== null) close(false);
+	});
 	const reposition = () => {
 		if (!list || !button.isConnected) return;
 		// Clear previous constraints so window resizes re-measure natural dimensions cleanly.
@@ -58,6 +84,8 @@ export function Menu(props: {
 		list.style.maxWidth = "";
 		list.style.top = "";
 		list.style.bottom = "";
+		list.style.left = "";
+		list.style.right = "";
 		const from = button.getBoundingClientRect();
 		const box = list.getBoundingClientRect();
 		const naturalH = Math.max(box.height, list.scrollHeight);
@@ -78,7 +106,16 @@ export function Menu(props: {
 			list.style.overflowY = "auto";
 			list.style.overflowX = "hidden";
 		} else {
-			// Guard non-floating menus too if they would overflow the bottom of the viewport.
+			// Guard non-floating menus vertically AND horizontally inside the viewport.
+			const maxW = Math.min(360, Math.max(160, window.innerWidth - 16));
+			list.style.maxWidth = `${maxW}px`;
+			const rect = list.getBoundingClientRect();
+			const parentLeft = (list.offsetParent as HTMLElement | null)?.getBoundingClientRect().left ?? from.left;
+			const targetLeft = Math.max(8, Math.min(rect.left, window.innerWidth - rect.width - 8));
+			if (Math.abs(targetLeft - rect.left) > 0.5) {
+				list.style.right = "auto";
+				list.style.left = `${targetLeft - parentLeft}px`;
+			}
 			const spaceBelow = window.innerHeight - from.bottom - 8;
 			const spaceAbove = from.top - 8;
 			if (naturalH > spaceBelow && spaceAbove > spaceBelow) {
@@ -92,30 +129,42 @@ export function Menu(props: {
 			}
 		}
 	};
-	const open = async () => {
+	const open = async (focus: "first" | "last" = "first") => {
 		const seq = ++openSeq;
-		const loaded = await props.items();
-		if (disposed || seq !== openSeq || !button.isConnected) return;
+		let loaded: MenuItem[];
+		try {
+			loaded = await props.items();
+		} catch {
+			if (seq === openSeq && items() !== null) close(false);
+			return;
+		}
+		if (disposed || seq !== openSeq || !button.isConnected || modalOpen()) return;
 		setItems(loaded);
 		document.addEventListener("mousedown", outside, true);
 		window.addEventListener("resize", reposition);
+		window.addEventListener("blur", onBlur);
+		window.addEventListener("scroll", onScroll, true);
 		queueMicrotask(() => {
 			if (disposed || seq !== openSeq) return;
 			reposition();
-			focusAt(nextItem(loaded, -1, 1));
+			focusAt(focus === "last" ? nextItem(loaded, loaded.length, -1) : nextItem(loaded, -1, 1));
 		});
 	};
 	onCleanup(() => {
 		disposed = true;
 		openSeq++;
-		document.removeEventListener("mousedown", outside, true);
-		window.removeEventListener("resize", reposition);
+		detachListeners();
 	});
 	const onKey = (e: KeyboardEvent) => {
 		const all = items();
 		if (!all) return;
 		const at = [...(list?.querySelectorAll("[data-item]") ?? [])].indexOf(document.activeElement as Element);
-		const to = { ArrowDown: () => nextItem(all, at, 1), ArrowUp: () => nextItem(all, at, -1), Home: () => nextItem(all, -1, 1), End: () => nextItem(all, all.length, -1) }[e.key];
+		const to = {
+			ArrowDown: () => nextItem(all, at, 1),
+			ArrowUp: () => nextItem(all, at < 0 ? all.length : at, -1),
+			Home: () => nextItem(all, -1, 1),
+			End: () => nextItem(all, all.length, -1),
+		}[e.key];
 		if (to) {
 			e.preventDefault();
 			focusAt(to());
@@ -132,8 +181,10 @@ export function Menu(props: {
 			classList={{ "menu-pop-floating": isFloating() }}
 			role="menu"
 			aria-label={props.label}
+			tabindex={-1}
 			ref={(el) => (list = el)}
 			onKeyDown={onKey}
+			onFocusOut={onFocusOut}
 		>
 			<For each={all()}>
 				{(item) =>
@@ -180,11 +231,20 @@ export function Menu(props: {
 				aria-haspopup="menu"
 				aria-expanded={items() !== null}
 				onClick={() => (items() ? close() : void open())}
+				onFocusOut={onFocusOut}
 				onKeyDown={(e) => {
 					if (e.key === "Escape" && items()) {
 						e.preventDefault();
 						e.stopPropagation();
 						close();
+					} else if (e.key === "ArrowDown" && !items()) {
+						e.preventDefault();
+						e.stopPropagation();
+						void open("first");
+					} else if (e.key === "ArrowUp" && !items()) {
+						e.preventDefault();
+						e.stopPropagation();
+						void open("last");
 					}
 				}}
 			>

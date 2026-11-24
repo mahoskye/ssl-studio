@@ -902,7 +902,7 @@ export function createTextareaCompleter(
 			popEl.setAttribute("role", "listbox");
 			Object.assign(popEl.style, {
 				position: "fixed",
-				zIndex: "1200",
+				zIndex: "58",
 				minWidth: "200px",
 				maxWidth: "360px",
 				maxHeight: "210px",

@@ -25,6 +25,8 @@ export function lspIndicator(
 ): ServiceIndicator {
 	const version = info?.version ? ` ${info.version}` : "";
 	const note = lsp.message ?? info?.message;
+	const restartDetail = hasWorkspace ? "\nClick to restart." : "";
+	const restartAria = hasWorkspace ? " Click to restart." : "";
 
 	if (!hasWorkspace && lsp.state === "stopped" && !note) {
 		return {
@@ -40,9 +42,9 @@ export function lspIndicator(
 		return {
 			tone: "busy",
 			label: "LSP",
-			detail: `Language server${version} is starting…\nClick to restart.`,
-			ariaLabel: `Language server${version} starting. Click to restart.`,
-			actionable: true,
+			detail: `Language server${version} is starting…${restartDetail}`,
+			ariaLabel: `Language server${version} starting.${restartAria}`,
+			actionable: hasWorkspace,
 		};
 	}
 
@@ -51,17 +53,17 @@ export function lspIndicator(
 			return {
 				tone: "warn",
 				label: "LSP",
-				detail: `Language server${version}: ${note}\nClick to restart.`,
-				ariaLabel: `Language server${version} running with warning: ${note}. Click to restart.`,
-				actionable: true,
+				detail: `Language server${version}: ${note}${restartDetail}`,
+				ariaLabel: `Language server${version} running with warning: ${note}.${restartAria}`,
+				actionable: hasWorkspace,
 			};
 		}
 		return {
 			tone: "ok",
 			label: "LSP",
-			detail: `Language server${version} running.\nClick to restart.`,
-			ariaLabel: `Language server${version} running. Click to restart.`,
-			actionable: true,
+			detail: `Language server${version} running.${restartDetail}`,
+			ariaLabel: `Language server${version} running.${restartAria}`,
+			actionable: hasWorkspace,
 		};
 	}
 
@@ -69,9 +71,9 @@ export function lspIndicator(
 	return {
 		tone: "error",
 		label: "LSP",
-		detail: `${note ? `${note}\n` : `Language server${version} ${statusWord}.\n`}Click to restart.`,
-		ariaLabel: `Language server${version} ${statusWord}${note ? `: ${note}` : ""}. Click to restart.`,
-		actionable: true,
+		detail: `${note ? `${note}${restartDetail}` : `Language server${version} ${statusWord}.${restartDetail}`}`,
+		ariaLabel: `Language server${version} ${statusWord}${note ? `: ${note}` : ""}.${restartAria}`,
+		actionable: hasWorkspace,
 	};
 }
 

@@ -15,10 +15,11 @@
 // bottom panel and the right panel, each shown or hidden by a press, and a
 // menu for the rest of the layout.
 import { createMemo, createSignal, createUniqueId, For, onCleanup, onMount, Show } from "solid-js";
+import { clampMenuBarLeftOffset } from "../shared/contextMenu";
 import { FIELD_COMMANDS, letterItem, MENU_BAR, missing, stepMenu, type BarEntry, type Has } from "../shared/menuBar";
 import { keysFor, onOpenMenu, runCommand } from "./commands";
 import { Icon } from "./Icon";
-import { crowdedOut, isPanelAvailable, isShown, narrowHosted, narrowPanels, panelOn, PANELS, showPanel, sideOf } from "./panels/registry";
+import { crowdedOut, isPanelAvailable, isShown, movePanel, narrowHosted, narrowPanels, panelOn, PANELS, showPanel, sideOf } from "./panels/registry";
 import { activeEditor } from "./editor/EditorGroup";
 import { activeLiveEditor, hasTableFind, openReadFind, openTableFind } from "./editor/liveBridge";
 import { review } from "./editor/Review";
@@ -68,7 +69,6 @@ const NON_TEXT_OK_COMMANDS = new Set([
 	"rename-heading",
 	"copy-code-citation",
 	"copy-code-citation-excerpt",
-	"go-to-symbol-in-file",
 	"quick-outline",
 ]);
 
@@ -99,21 +99,39 @@ function runEditor(id: string, shown: boolean) {
 		return void (id === "undo" ? activeDoc()?.model.undo() : id === "redo" ? activeDoc()?.model.redo() : undefined);
 	}
 	const live = activeLiveEditor();
-	if (live && live.runAction(id)) return;
+	if (live) {
+		live.runAction(id);
+		return;
+	}
 	const editor = activeEditor();
 	if (!editor) return;
 	editor.focus();
 	editor.trigger("menu", id, null);
 }
 
-/** A box that text is typed into, other than the code/markdown editors: a search, a filter, the agent's prompt. */
-function textBox(el: Element | null): HTMLElement | null {
-	if (!(el instanceof HTMLElement) || el.closest(".monaco-editor, .cm-editor")) return null;
-	return el.matches("input:not([type=checkbox]):not([type=radio]):not([type=button]), textarea, [contenteditable=''], [contenteditable=true]") ? el : null;
+const NON_TEXT_BOX =
+	".cm-content, .inputarea, .ime-text-area, .native-edit-context, input[type=checkbox], input[type=radio], input[type=button], input[type=submit], input[type=reset], input[type=range], input[type=color], input[type=file]";
+const MUTATING_BOX_COMMANDS = new Set<(typeof FIELD_COMMANDS)[string]>(["cut", "paste", "undo", "redo"]);
+
+function boxCannotEdit(box: HTMLElement): string {
+	if (box instanceof HTMLInputElement || box instanceof HTMLTextAreaElement) {
+		if (box.disabled) return "This text box is disabled";
+		if (box.readOnly) return "This text box is read-only";
+	}
+	return "";
+}
+
+/** A box that text is typed into, other than the code/markdown editors' own text surface: a search, a filter, Find/Replace, inline inputs, or the agent's prompt. */
+export function textBox(el: Element | null): HTMLElement | null {
+	if (!(el instanceof HTMLElement)) return null;
+	if (!el.matches("input, textarea, [contenteditable=''], [contenteditable=true]")) return null;
+	if (el.matches(NON_TEXT_BOX)) return null;
+	return el;
 }
 
 /** One of a text box's own six commands, run in the box. */
 export async function runInBox(box: HTMLElement, name: (typeof FIELD_COMMANDS)[string]) {
+	if (MUTATING_BOX_COMMANDS.has(name) && boxCannotEdit(box)) return;
 	box.focus();
 	if (name !== "paste") return void document.execCommand(name);
 	// A page may not paste by itself; it may read the clipboard where the web view allows, and type what it read.
@@ -144,7 +162,11 @@ function itemsOf(entries: readonly BarEntry[], box: HTMLElement | null): MenuIte
 		const noPaste = entry.editor === PASTE && !navigator.clipboard?.readText ? NO_PASTE : "";
 		const inBox = FIELD_COMMANDS[entry.editor];
 		// With the keyboard in a text box, the box's own commands work on the box, and the code's are not for it.
-		if (box) return inBox ? { label: entry.label, keys: editorKeys(entry.editor), run: () => void runInBox(box, inBox), why: noPaste } : { label: entry.label, keys: editorKeys(entry.editor), run: () => {}, why: "For the code: the keyboard is in a text box" };
+		if (box) {
+			if (!inBox) return { label: entry.label, keys: editorKeys(entry.editor), run: () => {}, why: "For the code: the keyboard is in a text box" };
+			const readOnlyWhy = MUTATING_BOX_COMMANDS.has(inBox) ? boxCannotEdit(box) : "";
+			return { label: entry.label, keys: editorKeys(entry.editor), run: () => void runInBox(box, inBox), why: readOnlyWhy || noPaste };
+		}
 		// Undo and redo reach text that is not shown as text (blocks, a page), but not a file that is behind something else.
 		// A picture, or other bytes, has no text to undo anything in.
 		const graphFind = entry.editor === "actions.find" && state.centerView === "graph" && !review();
@@ -206,6 +228,8 @@ function LayoutControls() {
 	const items = (): MenuItem[] => {
 		const none = "Open a folder first";
 		const entry = (label: string, id: string, why = ""): MenuItem => ({ label, keys: keysFor(id) || undefined, run: () => runCommand(id), disabled: !folder() || Boolean(why), why: folder() ? why : none });
+		const hostedRight = narrowPanels() ? narrowHosted() : null;
+		const canMoveRightBack = right() && Boolean(hostedRight ? sideOf(hostedRight) === "right" : layout().right);
 		return [
 			entry(`${left() ? "Hide" : "Show"} the side panel`, "toggle-sidebar", panelOn("left") ? "" : "No panel is docked on the left"),
 			entry(`${bottom() ? "Hide" : "Show"} the bottom panel`, "toggle-panel"),
@@ -213,7 +237,17 @@ function LayoutControls() {
 			{ label: "Hide the menu bar", keys: keysFor("toggle-menu-bar") || undefined, run: () => runCommand("toggle-menu-bar") },
 			"separator",
 			entry("Move the side panel to the right", "move-panel", left() ? "" : "The side panel is not showing"),
-			entry("Move the right panel to the left", "move-panel-back", right() ? "" : "The right panel is not showing"),
+			{
+				label: "Move the right panel to the left",
+				keys: keysFor("move-panel-back") || undefined,
+				disabled: !folder() || !canMoveRightBack,
+				why: folder() ? (canMoveRightBack ? "" : "The right panel is not showing") : none,
+				run: () => {
+					const hosted = narrowPanels() ? narrowHosted() : null;
+					if (hosted && sideOf(hosted) === "right") movePanel(hosted);
+					else runCommand("move-panel-back");
+				},
+			},
 			"separator",
 			entry("Reset the layout", "reset-layout"),
 		];
@@ -308,6 +342,19 @@ export function MenuBar() {
 		if (!bar.contains(e.target as Node)) shut("nowhere");
 	};
 
+	const reposition = () => {
+		const el = list;
+		if (!el || !el.isConnected) return;
+		el.style.left = "";
+		el.style.maxWidth = "";
+		const vw = document.documentElement.clientWidth || window.innerWidth;
+		const margin = 8;
+		el.style.maxWidth = `${Math.max(120, vw - margin * 2)}px`;
+		const rect = el.getBoundingClientRect();
+		const offset = clampMenuBarLeftOffset(rect.left, rect.width, vw, margin);
+		if (offset !== 0) el.style.left = `${offset}px`;
+	};
+
 	/** Opens a menu. From the keyboard the first entry has the keyboard; from the mouse the menu's name keeps it. */
 	const show = (index: number, keyboard: boolean) => {
 		// What has the keyboard now, when it is not the bar already: a text box there has the Edit menu to itself.
@@ -319,6 +366,7 @@ export function MenuBar() {
 		setOpen(index);
 		setStop(index);
 		document.addEventListener("mousedown", outside, true);
+		window.addEventListener("resize", reposition);
 		names()[index]?.focus();
 		moving = false;
 		if (keyboard) queueMicrotask(() => rows()[nextItem(loaded, -1, 1)]?.focus());
@@ -335,7 +383,9 @@ export function MenuBar() {
 		// Taking the menu away takes the entry that had the keyboard with it: that is not the keyboard leaving the bar.
 		moving = true;
 		setOpen(null);
+		list = undefined;
 		document.removeEventListener("mousedown", outside, true);
+		window.removeEventListener("resize", reposition);
 		if (to === "name" && at !== null) names()[at]?.focus();
 		moving = false;
 		if (to === "before") leave();
@@ -348,16 +398,14 @@ export function MenuBar() {
 	onCleanup(() => {
 		onOpenMenu(null);
 		document.removeEventListener("mousedown", outside, true);
+		window.removeEventListener("resize", reposition);
 		window.removeEventListener("mousemove", track, true);
 	});
 
-	/** A menu that would run past the window's edge is moved back inside it. */
+	/** A menu that would run past the window's edge is moved back inside it (clamped >= 8px on both edges). */
 	const place = (el: HTMLDivElement) => {
 		list = el;
-		queueMicrotask(() => {
-			const over = el.getBoundingClientRect().right - document.documentElement.clientWidth;
-			if (over > 0) el.style.left = `${-over}px`;
-		});
+		queueMicrotask(reposition);
 	};
 	const pick = (item: Exclude<MenuItem, "separator">) => {
 		// One that cannot run stays where it is, saying why.

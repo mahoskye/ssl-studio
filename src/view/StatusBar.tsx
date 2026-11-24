@@ -3,7 +3,8 @@
 // Right: view-appropriate essentials only (hides text/JSON metadata in visual modes;
 // keeps encoding, LF/CRLF, cursor, and clickable Language Mode selector in code/text views).
 import { Icon } from "./Icon";
-import { createEffect, createMemo, createSignal, on, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, on, onCleanup, Show } from "solid-js";
+import { placeAnchoredMenu } from "../shared/contextMenu";
 import { markdownStats } from "../shared/markdownEdit";
 import {
 	agentIndicator,
@@ -41,8 +42,9 @@ function useSizeMeter() {
 		on([activePath, () => state.kindVersion], () => {
 			const doc = activeDoc();
 			setSize(null);
-			if (!doc || doc.model.getLanguageId() !== "ssl") return;
+			if (!doc || doc.binary || doc.model.isDisposed() || doc.model.getLanguageId() !== "ssl") return;
 			const update = () => {
+				if (doc.model.isDisposed()) return;
 				const text = doc.model.getValue();
 				const { codeLines, bannerLines } = measure(text);
 				setSize({ bytes: new TextEncoder().encode(text).length, codeLines, historyEntries: countHistoryEntries(bannerLines) });
@@ -78,11 +80,13 @@ async function goToLine() {
 const [eol, setEol] = createSignal("");
 function useLineEnds() {
 	createEffect(
-		on(activePath, () => {
+		on([activePath, () => state.kindVersion], () => {
 			const doc = activeDoc();
-			setEol(doc && !doc.binary ? doc.model.getEOL() : "");
-			if (!doc || doc.binary) return;
-			const sub = doc.model.onDidChangeContent(() => setEol(doc.model.getEOL()));
+			setEol(doc && !doc.binary && !doc.model.isDisposed() ? doc.model.getEOL() : "");
+			if (!doc || doc.binary || doc.model.isDisposed()) return;
+			const sub = doc.model.onDidChangeContent(() => {
+				if (!doc.model.isDisposed()) setEol(doc.model.getEOL());
+			});
 			onCleanup(() => sub.dispose());
 		}),
 	);
@@ -92,30 +96,41 @@ const LF = "LF: one character, as on Linux and macOS";
 const CRLF = "CRLF: two characters, as on Windows";
 
 /** Changes every line end of the open file to the other kind. It is an edit: it can be undone, and is kept by saving. */
-async function chooseLineEnds(at: { x: number; y: number }) {
+async function chooseLineEnds(anchor: HTMLElement) {
 	const doc = activeDoc();
-	if (!doc || doc.binary) return;
+	if (!doc || doc.binary || doc.model.isDisposed()) return;
 	const now = eolName(doc.model.getEOL());
+	const box = anchor.getBoundingClientRect();
+	const scale = state.settings.uiScale ?? 1;
+	const placed = placeAnchoredMenu(
+		{ left: box.left, right: box.right, top: box.top, bottom: box.bottom },
+		{ width: Math.round(280 * scale), height: Math.round(76 * scale) },
+		{ width: window.innerWidth, height: window.innerHeight },
+	);
 	const picked = await chooseFromMenu(
 		`Line ends of this file, now ${now}`,
 		[
 			{ label: LF, value: LF, checked: now === "LF" },
 			{ label: CRLF, value: CRLF, checked: now === "CRLF" },
 		],
-		at,
+		{ x: placed.left, y: placed.top },
 	);
 	const want = picked === LF ? "LF" : picked === CRLF ? "CRLF" : null;
-	if (!want || want === now) return;
+	if (!want || want === now || doc.model.isDisposed()) return;
 	doc.model.pushStackElement();
 	doc.model.pushEOL(want === "LF" ? monaco.editor.EndOfLineSequence.LF : monaco.editor.EndOfLineSequence.CRLF);
 	doc.model.pushStackElement();
-	notify(`Every line of ${displayName(activePath()!)} now ends in ${want}. Save to keep it; undo takes it back.`);
+	notify(`Every line of ${displayName(doc.path)} now ends in ${want}. Save to keep it; undo takes it back.`);
 }
 
 export function StatusBar() {
 	useSizeMeter();
 	useLineEnds();
 	useDocAudit();
+
+	// Loaded dynamically to avoid a static import cycle (commands -> EditorGroup -> StatusBar -> commands).
+	const [cmds] = createResource(() => import("./commands").catch(() => null));
+	const problemsKeys = () => cmds()?.keysFor("problems") ?? "";
 
 	const lsp = createMemo(() => lspIndicator(state.lsp, state.info?.lsp, Boolean(state.workspace)));
 	const agentInfo = createMemo(() => agentIndicator(agent.status, state.info?.opencode));
@@ -150,9 +165,9 @@ export function StatusBar() {
 	const [tableStats, setTableStats] = createSignal<string | null>(null);
 
 	createEffect(
-		on(activePath, (p) => {
+		on([activePath, () => state.kindVersion], ([p]) => {
 			const doc = activeDoc();
-			if (!p || !doc || doc.binary) {
+			if (!p || !doc || doc.binary || doc.model.isDisposed()) {
 				setMdStats(null);
 				setPlanSteps(null);
 				setTableStats(null);
@@ -168,6 +183,7 @@ export function StatusBar() {
 
 			let timer: ReturnType<typeof setTimeout> | undefined;
 			const refresh = () => {
+				if (doc.model.isDisposed()) return;
 				const text = doc.model.getValue();
 				if (md) setMdStats(markdownStats(text));
 				if (plan) setPlanSteps(planStepSummary(text));
@@ -229,9 +245,11 @@ export function StatusBar() {
 			</Show>
 			<button
 				class="item"
-				title="Show Problems (Ctrl+Shift+M)"
-				aria-label={`${counts().errors} errors, ${counts().warnings} warnings. Show Problems.`}
+				disabled={!state.workspace}
+				title={state.workspace ? `Show Problems${problemsKeys() ? ` (${problemsKeys()})` : ""}` : "Problems: open a folder first"}
+				aria-label={state.workspace ? `${counts().errors} errors, ${counts().warnings} warnings. Show Problems.` : "Problems: open a folder first."}
 				onClick={() => {
+					if (!state.workspace) return;
 					setState("bottomView", "problems");
 					setState("settings", "layout", "bottom", true);
 				}}
@@ -247,7 +265,7 @@ export function StatusBar() {
 				title={lsp().detail}
 				aria-label={lsp().ariaLabel}
 				onClick={() => {
-					if (!lsp().actionable) return;
+					if (!lsp().actionable || !state.workspace) return;
 					notify("Restarting the language server.");
 					void backend.lspRestart();
 				}}
@@ -262,13 +280,15 @@ export function StatusBar() {
 					warn: agentInfo().tone === "warn",
 					err: agentInfo().tone === "error",
 				}}
-				title={agentInfo().detail}
-				aria-label={agentInfo().ariaLabel}
+				disabled={!state.workspace && (!state.info || state.info.opencode.ok)}
+				title={state.workspace || (state.info && !state.info.opencode.ok) ? agentInfo().detail : "Agent: open a folder first"}
+				aria-label={state.workspace || (state.info && !state.info.opencode.ok) ? agentInfo().ariaLabel : "Agent: open a folder first."}
 				onClick={() => {
 					if (state.info && !state.info.opencode.ok) {
 						notify(state.info.opencode.message ?? "opencode was not found. The Agent panel needs opencode 2.2.5 or 2.3.x on PATH.", "error");
 					}
-					if (state.workspace) showPanel("agent");
+					if (!state.workspace) return;
+					showPanel("agent");
 				}}
 			>
 				<span class={`status-dot ${agentInfo().tone}`} aria-hidden="true" />
@@ -339,8 +359,7 @@ export function StatusBar() {
 						title={`Lines end in ${lineEnd()}. Click to change them all.`}
 						aria-label={`Line ends: ${lineEnd()}. Change them.`}
 						onClick={(e) => {
-							const box = e.currentTarget.getBoundingClientRect();
-							void chooseLineEnds({ x: box.left, y: box.top - 70 });
+							void chooseLineEnds(e.currentTarget);
 						}}
 					>
 						{lineEnd()}

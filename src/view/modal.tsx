@@ -3,10 +3,11 @@
 // gives it back when it closes, keeps Tab inside, closes on Escape or a click
 // on the overlay, and makes the rest of the app inert meanwhile.
 import { createSignal, onCleanup, onMount, type JSX } from "solid-js";
-import { Dynamic } from "solid-js/web";
+import { Dynamic, Portal } from "solid-js/web";
 import { rowMenuOpen } from "./panels/RowMenu";
 
 type Open = {
+	overlay: () => HTMLElement | undefined;
 	dialog: () => HTMLElement | undefined;
 	close: () => void;
 	key: (e: KeyboardEvent) => boolean | void;
@@ -50,6 +51,7 @@ if (typeof window !== "undefined") {
 	window.addEventListener(
 		"keydown",
 		(e) => {
+			if (e.isComposing || e.keyCode === 229) return;
 			const top = stack[stack.length - 1];
 			if (!top) return;
 			// A menu opened over the dialog (a right-click in one of its boxes) has the keys while it is open: Escape shuts
@@ -79,18 +81,56 @@ if (typeof window !== "undefined") {
 	);
 }
 
-/** Makes everything outside `el` inert, up to the body; returns the undo. */
-function isolate(el: HTMLElement): () => void {
+const KEEP_INTERACTIVE_SELECTOR = ".row-menu-host, .row-menu-shade, .toasts";
+
+function isRowMenuPortalWrapper(el: HTMLElement): boolean {
+	for (const child of el.children) {
+		if (child instanceof HTMLElement && child.classList.contains("row-menu-host")) return true;
+	}
+	return false;
+}
+
+function isolateNode(el: HTMLElement, activeOverlay: HTMLElement, made: HTMLElement[]) {
+	if (el === activeOverlay || el.contains(activeOverlay)) return;
+	if (el.matches(KEEP_INTERACTIVE_SELECTOR) || isRowMenuPortalWrapper(el)) return;
+	if (el.querySelector(KEEP_INTERACTIVE_SELECTOR)) {
+		for (const child of el.children) {
+			if (child instanceof HTMLElement) isolateNode(child, activeOverlay, made);
+		}
+		return;
+	}
+	if (!el.inert) {
+		el.inert = true;
+		made.push(el);
+	}
+}
+
+/**
+ * Makes everything outside `overlay` inert up to `document.body`, skipping
+ * `.row-menu-host`, `.row-menu-shade`, and `.toasts` so context menus inside
+ * dialogs and toast notifications remain interactive. Returns the elements made inert.
+ */
+export function isolateOutsideOverlay(overlay: HTMLElement): HTMLElement[] {
 	const made: HTMLElement[] = [];
-	for (let node: HTMLElement | null = el; node && node !== document.body; node = node.parentElement) {
+	if (typeof document === "undefined" || !document.body) return made;
+	for (let node: HTMLElement | null = overlay; node && node !== document.body; node = node.parentElement) {
 		for (const sibling of node.parentElement?.children ?? []) {
-			if (sibling !== node && sibling instanceof HTMLElement && !sibling.inert) {
-				sibling.inert = true;
-				made.push(sibling);
+			if (sibling !== node && sibling instanceof HTMLElement) {
+				isolateNode(sibling, overlay, made);
 			}
 		}
 	}
-	return () => made.forEach((sibling) => (sibling.inert = false));
+	return made;
+}
+
+let isolated: HTMLElement[] = [];
+
+function syncIsolation() {
+	for (const el of isolated) el.inert = false;
+	isolated = [];
+	const topOverlay = stack[stack.length - 1]?.overlay();
+	if (!topOverlay || !topOverlay.isConnected) return;
+	isolated = isolateOutsideOverlay(topOverlay);
 }
 
 export function Modal(props: {
@@ -110,16 +150,15 @@ export function Modal(props: {
 	children: JSX.Element;
 }) {
 	// What had the keyboard before, read before anything of the modal exists.
-	const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+	const previous = typeof document !== "undefined" && document.activeElement instanceof HTMLElement ? document.activeElement : null;
 	let overlay: HTMLDivElement | undefined;
 	let dialog: HTMLElement | undefined;
-	let release = () => {};
-	const entry: Open = { dialog: () => dialog, close: () => props.onClose(), key: (e) => props.onKey?.(e) };
+	const entry: Open = { overlay: () => overlay, dialog: () => dialog, close: () => props.onClose(), key: (e) => props.onKey?.(e) };
 
 	onMount(() => {
 		stack.push(entry);
 		setDepth(stack.length);
-		if (overlay) release = isolate(overlay);
+		syncIsolation();
 		// The element marked `data-autofocus`, else the first control, else the dialog itself.
 		const target = dialog?.querySelector<HTMLElement>("[data-autofocus]") ?? (dialog && focusable(dialog)[0]) ?? dialog;
 		target?.focus();
@@ -128,15 +167,22 @@ export function Modal(props: {
 
 	onCleanup(() => {
 		const at = stack.indexOf(entry);
+		const wasTop = at === stack.length - 1;
+		const containedFocus = Boolean(overlay && typeof document !== "undefined" && overlay.contains(document.activeElement));
 		if (at >= 0) stack.splice(at, 1);
 		setDepth(stack.length);
-		release();
-		// Back to what had the keyboard; when that is gone or cannot take it, the editor.
+		syncIsolation();
+		if (!wasTop && !containedFocus) return;
+		// Back to what had the keyboard; when that is gone or cannot take it, the underlying modal or the editor.
 		if (previous && previous !== document.body && previous.isConnected && !previous.closest("[inert]")) previous.focus();
-		if (!previous || document.activeElement !== previous) focusFallback();
+		if (!previous || (typeof document !== "undefined" && document.activeElement !== previous)) {
+			const nextTop = stack[stack.length - 1]?.dialog();
+			if (nextTop && nextTop.isConnected) nextTop.focus();
+			else focusFallback();
+		}
 	});
 
-	return (
+	const renderOverlay = () => (
 		<div class="overlay" classList={{ top: props.top }} ref={overlay} onMouseDown={(e) => e.target === e.currentTarget && props.onClose()}>
 			<Dynamic
 				component={(props.onSubmit ? "form" : "div") as "div"}
@@ -153,4 +199,6 @@ export function Modal(props: {
 			</Dynamic>
 		</div>
 	);
+
+	return typeof document !== "undefined" && document.body ? <Portal mount={document.body}>{renderOverlay()}</Portal> : renderOverlay();
 }

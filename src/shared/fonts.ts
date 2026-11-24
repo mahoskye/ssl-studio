@@ -26,17 +26,27 @@ export const READ_FONT_PRESETS: readonly FontPreset[] = [
 	{ id: "Newsreader", label: "Newsreader" },
 ];
 
+const CSS_WIDE_KEYWORDS = /^(inherit|initial|unset|revert|revert-layer|default)$/i;
+const CSS_GENERIC_FAMILIES = /^(system-ui|-apple-system|sans-serif|serif|monospace|ui-sans-serif|ui-serif|ui-monospace|cursive|fantasy|emoji|math|fangsong)$/i;
+const UNSAFE_FONT_CHARS = /[\x00-\x1f\x7f\\;{}()<>:]/g;
+
 /** Normalizes a user-chosen font name or stack and appends the safe fallback stack. */
 export function resolveFontStack(configured: string | undefined, fallback: string): string {
-	const raw = (configured ?? "").replace(/[;{}<>]/g, "").trim();
+	const raw = (configured ?? "").replace(UNSAFE_FONT_CHARS, "").trim();
 	if (!raw) return fallback;
-	const parts = raw
-		.split(",")
-		.map((part) => part.trim())
-		.filter(Boolean)
-		.map((part) => {
-			if (/^["'].*["']$/.test(part) || /^(system-ui|-apple-system|sans-serif|serif|monospace|ui-sans-serif|ui-serif|ui-monospace)$/i.test(part)) return part;
-			return /\s/.test(part) ? `"${part.replace(/"/g, "")}"` : part;
-		});
+	const parts: string[] = [];
+	for (const segment of raw.split(",")) {
+		let name = segment.trim();
+		if (name.length >= 2 && ((name.startsWith('"') && name.endsWith('"')) || (name.startsWith("'") && name.endsWith("'")))) {
+			name = name.slice(1, -1).trim();
+		}
+		name = name.replace(/["']/g, "").replace(/\s+/g, " ").trim();
+		if (!name || CSS_WIDE_KEYWORDS.test(name)) continue;
+		if (CSS_GENERIC_FAMILIES.test(name)) {
+			parts.push(name.toLowerCase());
+		} else {
+			parts.push(`"${name}"`);
+		}
+	}
 	return parts.length ? `${parts.join(", ")}, ${fallback}` : fallback;
 }

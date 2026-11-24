@@ -6,6 +6,7 @@ import { createEffect, createMemo, createResource, createSignal, createUniqueId,
 import {
 	initialMultiSelectIndices,
 	resolveMultiSelectValues,
+	safeQuickPickInitialIndex,
 	selectAllVisibleIndices,
 	shouldUseQuickPick,
 	toggleMultiSelectIndex,
@@ -196,6 +197,7 @@ function QuickPickModal(props: { req: QuickPickRequest }) {
 					value={query()}
 					onInput={(e) => (setQuery(e.currentTarget.value), setSelected(0))}
 					onKeyDown={(e) => {
+						if (e.isComposing || e.keyCode === 229) return;
 						if (e.key === "ArrowDown") (e.preventDefault(), move(1));
 						else if (e.key === "ArrowUp") (e.preventDefault(), move(-1));
 						else if (e.key === "PageDown") (e.preventDefault(), move(8));
@@ -211,13 +213,18 @@ function QuickPickModal(props: { req: QuickPickRequest }) {
 				role="listbox"
 				id={listId}
 				aria-label={req.title}
+				aria-activedescendant={!req.searchable && filtered().length ? `${listId}-${selected()}` : undefined}
 				tabindex={req.searchable ? undefined : 0}
 				data-autofocus={req.searchable ? undefined : ""}
 				ref={listEl}
 				onKeyDown={(e) => {
-					if (req.searchable) return;
+					if (req.searchable || e.isComposing || e.keyCode === 229) return;
 					if (e.key === "ArrowDown") (e.preventDefault(), move(1));
 					else if (e.key === "ArrowUp") (e.preventDefault(), move(-1));
+					else if (e.key === "PageDown") (e.preventDefault(), move(8));
+					else if (e.key === "PageUp") (e.preventDefault(), move(-8));
+					else if (e.key === "Home") (e.preventDefault(), setSelected(0));
+					else if (e.key === "End") (e.preventDefault(), setSelected(Math.max(0, filtered().length - 1)));
 					else if (e.key === "Enter" || e.key === " ") (e.preventDefault(), e.stopPropagation(), pick(filtered()[selected()]));
 				}}
 			>
@@ -276,6 +283,7 @@ function QuickPickManyModal(props: { req: QuickPickManyRequest }) {
 	const [focused, setFocused] = createSignal(0);
 	const [navigatingList, setNavigatingList] = createSignal(false);
 	const [picked, setPicked] = createSignal<Set<number>>(initialMultiSelectIndices(req.items, req.initialSelected));
+	let inputEl: HTMLInputElement | undefined;
 	let listEl: HTMLDivElement | undefined;
 
 	const indexed = req.items.map((item, index) => ({ item, index }));
@@ -313,14 +321,19 @@ function QuickPickManyModal(props: { req: QuickPickManyRequest }) {
 		const entry = filtered()[focused()];
 		if (entry) toggleIndex(entry.index);
 	};
-	const selectAllVisible = () =>
+	const selectAllVisible = () => {
 		setPicked((cur) =>
 			selectAllVisibleIndices(
 				cur,
 				filtered().map((entry) => entry.index),
 			),
 		);
-	const clearAll = () => setPicked(new Set<number>());
+		inputEl?.focus();
+	};
+	const clearAll = () => {
+		setPicked(new Set<number>());
+		inputEl?.focus();
+	};
 	const allVisiblePicked = createMemo(() => {
 		const cur = picked();
 		const vis = filtered();
@@ -339,8 +352,33 @@ function QuickPickManyModal(props: { req: QuickPickManyRequest }) {
 		setFocused(idx);
 	};
 
+	const onModalKey = (e: KeyboardEvent) => {
+		if (e.isComposing || e.keyCode === 229) return false;
+		const target = e.target as HTMLElement | null;
+		if (target === inputEl || (target && listEl?.contains(target))) return false;
+		if (e.key === "ArrowDown") {
+			e.preventDefault();
+			move(1);
+			inputEl?.focus();
+			return true;
+		}
+		if (e.key === "ArrowUp") {
+			e.preventDefault();
+			move(-1);
+			inputEl?.focus();
+			return true;
+		}
+		if (e.key === "Enter" && !target?.closest("button, a[href], input, textarea, select")) {
+			e.preventDefault();
+			e.stopPropagation();
+			confirm();
+			return true;
+		}
+		return false;
+	};
+
 	return (
-		<Modal class="quickpick quickpick-dialog quickpick-many" top label={req.title} onClose={() => finish(null)}>
+		<Modal class="quickpick quickpick-dialog quickpick-many" top label={req.title} onClose={() => finish(null)} onKey={onModalKey}>
 			<div class="quickpick-head">
 				<span class="quickpick-title">{req.title}</span>
 				<div class="quickpick-many-actions">
@@ -372,6 +410,7 @@ function QuickPickManyModal(props: { req: QuickPickManyRequest }) {
 				</div>
 			</div>
 			<input
+				ref={inputEl}
 				data-autofocus
 				class="quickpick-search"
 				role="combobox"
@@ -390,6 +429,7 @@ function QuickPickManyModal(props: { req: QuickPickManyRequest }) {
 					setNavigatingList(false);
 				}}
 				onKeyDown={(e) => {
+					if (e.isComposing || e.keyCode === 229) return;
 					if (e.key === "ArrowDown") (e.preventDefault(), move(1));
 					else if (e.key === "ArrowUp") (e.preventDefault(), move(-1));
 					else if (e.key === "PageDown") (e.preventDefault(), move(8));
@@ -414,6 +454,7 @@ function QuickPickManyModal(props: { req: QuickPickManyRequest }) {
 				aria-label={req.title}
 				ref={listEl}
 				onKeyDown={(e) => {
+					if (e.isComposing || e.keyCode === 229) return;
 					if (e.key === "ArrowDown") (e.preventDefault(), move(1));
 					else if (e.key === "ArrowUp") (e.preventDefault(), move(-1));
 					else if (e.key === " ") (e.preventDefault(), toggleFocused());
@@ -490,6 +531,7 @@ function FileBrowserModal(props: { req: FileBrowserRequest }) {
 	const [dir, setDir] = createSignal(req.initialDir);
 	const [query, setQuery] = createSignal("");
 	const [selected, setSelected] = createSignal(0);
+	let inputEl: HTMLInputElement | undefined;
 	let listEl: HTMLDivElement | undefined;
 
 	const [entries] = createResource(dir, (folder) =>
@@ -628,7 +670,7 @@ function FileBrowserModal(props: { req: FileBrowserRequest }) {
 									type="button"
 									class="file-browser-crumb"
 									classList={{ current: i() === breadcrumbs().length - 1 }}
-									onClick={() => (setDir(crumb.path), setSelected(0))}
+									onClick={() => (setDir(crumb.path), setSelected(0), inputEl?.focus())}
 								>
 									{crumb.label}
 								</button>
@@ -638,6 +680,7 @@ function FileBrowserModal(props: { req: FileBrowserRequest }) {
 				</nav>
 			</Show>
 			<input
+				ref={inputEl}
 				data-autofocus
 				role="combobox"
 				aria-label={req.title}
@@ -651,10 +694,13 @@ function FileBrowserModal(props: { req: FileBrowserRequest }) {
 				value={query()}
 				onInput={(e) => (setQuery(e.currentTarget.value), setSelected(0))}
 				onKeyDown={(e) => {
+					if (e.isComposing || e.keyCode === 229) return;
 					if (e.key === "ArrowDown") (e.preventDefault(), move(1));
 					else if (e.key === "ArrowUp") (e.preventDefault(), move(-1));
 					else if (e.key === "PageDown") (e.preventDefault(), move(8));
 					else if (e.key === "PageUp") (e.preventDefault(), move(-8));
+					else if (e.key === "Home" && !query()) (e.preventDefault(), setSelected(0));
+					else if (e.key === "End" && !query()) (e.preventDefault(), setSelected(Math.max(0, rows().length - 1)));
 					else if (e.key === "Backspace" && !query() && canonical(dir()) !== canonical(req.root)) {
 						e.preventDefault();
 						const parent = dirName(dir());
@@ -724,8 +770,10 @@ function ChooseQuickPick(props: { request: Request }) {
 	const listId = createUniqueId();
 	const searchable = true;
 	const [query, setQuery] = createSignal("");
-	const [selected, setSelected] = createSignal(0);
+	const [selected, setSelected] = createSignal(safeQuickPickInitialIndex(request.buttons, request.danger));
+	const [explicitPick, setExplicitPick] = createSignal(false);
 	let listEl: HTMLDivElement | undefined;
+	const longPrompt = request.title.length > 64 || request.title.includes("\n");
 
 	const filtered = createMemo(() => {
 		const q = query().trim();
@@ -738,13 +786,16 @@ function ChooseQuickPick(props: { request: Request }) {
 	});
 
 	createEffect(() => {
-		const len = filtered().length;
-		if (selected() >= len) setSelected(Math.max(0, len - 1));
+		const list = filtered();
+		const idx = selected();
+		if (idx >= list.length || (idx >= 0 && list[idx] === request.danger && !explicitPick())) {
+			setSelected(safeQuickPickInitialIndex(list, request.danger));
+		}
 	});
 	createEffect(() => {
 		const idx = selected();
 		filtered();
-		listEl?.children[idx]?.scrollIntoView({ block: "nearest" });
+		if (idx >= 0) listEl?.children[idx]?.scrollIntoView({ block: "nearest" });
 	});
 
 	const finish = (button: string | null) => queue.finish(request, button ? { button, value: "" } : null);
@@ -752,24 +803,46 @@ function ChooseQuickPick(props: { request: Request }) {
 		if (!button) return;
 		finish(button);
 	};
-	const move = (by: number) => setSelected((i) => Math.max(0, Math.min(i + by, filtered().length - 1)));
+	const move = (by: number) => {
+		const len = filtered().length;
+		if (!len) return;
+		setExplicitPick(true);
+		setSelected((i) => {
+			if (i < 0) return by > 0 ? 0 : len - 1;
+			return Math.max(0, Math.min(i + by, len - 1));
+		});
+	};
 
 	let pointer = "";
 	const pointed = (e: MouseEvent, idx: number) => {
 		const at = `${e.clientX},${e.clientY}`;
 		if (at === pointer) return;
 		pointer = at;
+		setExplicitPick(true);
 		setSelected(idx);
 	};
 
 	return (
 		<Modal class="quickpick quickpick-dialog" top label={request.title} onClose={() => finish(null)}>
 			<div class="quickpick-head">
-				<span class="quickpick-title">{request.title}</span>
+				<span class="quickpick-title">{longPrompt ? "Choose an option" : request.title}</span>
 				<button type="button" class="quickpick-close" aria-label="Cancel" title="Cancel (Escape)" onClick={() => finish(null)}>
 					<Icon name="close" />
 				</button>
 			</div>
+			<Show when={longPrompt}>
+				<p
+					class="dialog-message quickpick-prompt"
+					style={{
+						padding: "var(--space-3) var(--space-5)",
+						"border-bottom": "1px solid var(--border)",
+						"font-size": "var(--text-sm)",
+						color: "var(--fg)",
+					}}
+				>
+					{request.title}
+				</p>
+			</Show>
 			<Show when={searchable}>
 				<input
 					data-autofocus
@@ -778,20 +851,31 @@ function ChooseQuickPick(props: { request: Request }) {
 					aria-expanded="true"
 					aria-controls={listId}
 					aria-autocomplete="list"
-					aria-activedescendant={filtered().length ? `${listId}-${selected()}` : undefined}
+					aria-activedescendant={filtered().length && selected() >= 0 ? `${listId}-${selected()}` : undefined}
 					autocomplete="off"
 					spellcheck={false}
 					placeholder="Type to filter options…"
 					value={query()}
-					onInput={(e) => (setQuery(e.currentTarget.value), setSelected(0))}
+					onInput={(e) => {
+						setQuery(e.currentTarget.value);
+						setExplicitPick(false);
+						setSelected(safeQuickPickInitialIndex(filtered(), request.danger));
+					}}
 					onKeyDown={(e) => {
+						if (e.isComposing || e.keyCode === 229) return;
 						if (e.key === "ArrowDown") (e.preventDefault(), move(1));
 						else if (e.key === "ArrowUp") (e.preventDefault(), move(-1));
 						else if (e.key === "PageDown") (e.preventDefault(), move(8));
 						else if (e.key === "PageUp") (e.preventDefault(), move(-8));
-						else if (e.key === "Home" && !query()) (e.preventDefault(), setSelected(0));
-						else if (e.key === "End" && !query()) (e.preventDefault(), setSelected(Math.max(0, filtered().length - 1)));
-						else if (e.key === "Enter") (e.preventDefault(), e.stopPropagation(), pick(filtered()[selected()]));
+						else if (e.key === "Home" && !query() && filtered().length) (e.preventDefault(), setExplicitPick(true), setSelected(0));
+						else if (e.key === "End" && !query() && filtered().length) (e.preventDefault(), setExplicitPick(true), setSelected(filtered().length - 1));
+						else if (e.key === "Enter") {
+							e.preventDefault();
+							e.stopPropagation();
+							const idx = selected();
+							const cur = idx >= 0 ? filtered()[idx] : undefined;
+							if (cur && (cur !== request.danger || explicitPick())) pick(cur);
+						}
 					}}
 				/>
 			</Show>
@@ -830,7 +914,7 @@ function ChooseQuickPick(props: { request: Request }) {
 
 function Dialog(props: { request: Request }) {
 	const request = props.request;
-	if (!request.input && shouldUseQuickPick(request.buttons, request.details)) {
+	if (!request.input && shouldUseQuickPick(request.buttons, request.details, request.danger)) {
 		return <ChooseQuickPick request={request} />;
 	}
 	const titleId = createUniqueId();

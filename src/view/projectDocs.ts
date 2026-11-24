@@ -766,9 +766,20 @@ export async function newSchema(id: SchemaKind["id"], inFolder?: string, initial
 	// One already there is opened, before anything more is asked about a new one.
 	if ((await current(path)) !== null) return await start(path, "", "schema"), false;
 	// Which way a message goes is part of what was agreed: asked, since a wrong guess would stand as if it were known.
-	const way = id === "interfaces" ? await choose(`Which way does “${title}” go?`, Object.keys(WAYS), { details: WAYS }) : undefined;
+	const way =
+		id === "interfaces"
+			? await quickPick<"in" | "out" | "both">({
+					title: `Which way does “${title}” go?`,
+					placeholder: "Choose message direction…",
+					items: Object.entries(WAYS).map(([label, detail]) => ({
+						label,
+						value: label.toLowerCase() as "in" | "out" | "both",
+						detail,
+					})),
+				})
+			: undefined;
 	if (id === "interfaces" && !way) return false;
-	await start(path, schemaTemplate(kind, title, { with: system, direction: way ? (way.toLowerCase() as "in" | "out" | "both") : undefined }), "schema");
+	await start(path, schemaTemplate(kind, title, { with: system, direction: way ?? undefined }), "schema");
 	return (await current(path)) !== null;
 }
 
@@ -862,14 +873,34 @@ export async function setStatus(path: string, status: string) {
 	// Decision Supersede flow: offer to link an existing ADR OR create a new superseding ADR and cross-link both frontmatters.
 	const decisionDoc = docs().find((d) => d.group === "knowledge" && d.kind === "decisions" && canonical(d.path) === canonical(path));
 	if (decisionDoc && status.toLowerCase() === "superseded" && ready()) {
-		const LINK_EXISTING = "Link existing decision…";
-		const CREATE = "Create superseding decision…";
-		const picked = await choose("Link a superseding decision to this ADR?", [LINK_EXISTING, CREATE, "Skip"], {
-			details: {
-				[LINK_EXISTING]: "Pick an already-written decision and cross-link supersedes: / superseded-by:",
-				[CREATE]: "Creates the next numbered decision with supersedes: and adds superseded-by: here",
-				Skip: "Keep status as superseded without linking a decision",
-			},
+		const LINK_EXISTING = "link";
+		const CREATE = "create";
+		const picked = await quickPick<"link" | "create" | "skip">({
+			title: "Link a superseding decision to this ADR?",
+			placeholder: "Choose how to record the superseding decision…",
+			items: [
+				{
+					label: "Link existing decision…",
+					value: LINK_EXISTING,
+					icon: "references",
+					detail: "Cross-link existing ADR",
+					description: "Pick an already-written decision and cross-link supersedes: / superseded-by:",
+				},
+				{
+					label: "Create superseding decision…",
+					value: CREATE,
+					icon: "add",
+					detail: "New numbered ADR",
+					description: "Creates the next numbered decision with supersedes: and adds superseded-by: here",
+				},
+				{
+					label: "Skip",
+					value: "skip",
+					detail: "Leave unlinked",
+					description: "Keep status as superseded without linking a decision",
+					divide: true,
+				},
+			],
 		});
 		if (picked === LINK_EXISTING) {
 			const allDocs = await backend.docs().catch(() => docs());
@@ -2502,10 +2533,10 @@ export async function trashTicket(file: DocFile): Promise<void> {
 		}
 	}
 	const refNote = outsideRefs.size ? ` Warning: referenced by ${outsideRefs.size} other ${outsideRefs.size === 1 ? "document" : "documents"} (links, wikilinks, specs, plans, or registries).` : "";
-	const TRASH_ALL = isLayout1 ? `Trash folder (${relFolder}/)` : `Trash ticket & folder (${relFolder}/)`;
-	const TRASH_DOC = `Trash only ${baseName(file.path)}`;
+	const TRASH_ALL = isLayout1 ? "Trash folder" : "Trash ticket & folder";
+	const TRASH_DOC = "Trash ticket file only";
 	const picked = await choose(
-		`${file.ticket ?? baseName(file.path)} has a ticket folder with ${count} extra ${count === 1 ? "file" : "files"}.${refNote} What should be moved to the trash?`,
+		`${file.ticket ?? baseName(file.path)} has a ticket folder (${relFolder}/) with ${count} extra ${count === 1 ? "file" : "files"}.${refNote} Move ${relFolder}/ or only ${baseName(file.path)} to the trash?`,
 		[TRASH_ALL, TRASH_DOC],
 		{ danger: TRASH_ALL },
 	);
@@ -6354,15 +6385,34 @@ export async function onboardBrownfieldWorkspace(): Promise<void> {
 		return;
 	}
 
-	const summary = `Scanned workspace: ${scriptFiles.length} scripts/data sources, ${sqlFiles.length} SQL files, ${legacyMdFiles.length} legacy Markdown ${legacyMdFiles.length === 1 ? "doc" : "docs"} outside ${areaSaid("docs")}/.`;
-	const ONBOARD = "Set up & seed registries";
-	const LIST_ONLY = "List legacy Markdown files";
-	const choices = [...(actions.length ? [ONBOARD] : []), ...(legacyMdFiles.length ? [LIST_ONLY] : [])];
-	const details: Record<string, string> = {};
-	if (actions.length) details[ONBOARD] = `Non-destructive: ${actions.join("; ")}. Existing files are never overwritten.`;
-	if (legacyMdFiles.length) details[LIST_ONLY] = `Preview ${legacyMdFiles.length} Markdown ${legacyMdFiles.length === 1 ? "file" : "files"} outside ${areaSaid("docs")}/ without moving them.`;
+	const summary = `Onboard workspace (${scriptFiles.length} scripts, ${sqlFiles.length} SQL, ${legacyMdFiles.length} legacy ${legacyMdFiles.length === 1 ? "doc" : "docs"})`;
+	const ONBOARD = "onboard";
+	const LIST_ONLY = "list";
+	const items: QuickPickOption<"onboard" | "list">[] = [];
+	if (actions.length) {
+		items.push({
+			label: "Set up & seed registries",
+			value: ONBOARD,
+			icon: "checklist",
+			detail: "Non-destructive",
+			description: `Non-destructive: ${actions.join("; ")}. Existing files are never overwritten.`,
+		});
+	}
+	if (legacyMdFiles.length) {
+		items.push({
+			label: "List legacy Markdown files",
+			value: LIST_ONLY,
+			icon: "list-flat",
+			detail: `${legacyMdFiles.length} ${legacyMdFiles.length === 1 ? "file" : "files"}`,
+			description: `Preview ${legacyMdFiles.length} Markdown ${legacyMdFiles.length === 1 ? "file" : "files"} outside ${areaSaid("docs")}/ without moving them.`,
+		});
+	}
 
-	const picked = await choose(summary, choices, { details });
+	const picked = await quickPick<"onboard" | "list">({
+		title: summary,
+		placeholder: "Choose an onboarding action…",
+		items,
+	});
 	if (!picked) return;
 	if (!state.workspace || root() !== wsRoot) return;
 
