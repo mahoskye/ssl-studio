@@ -5,7 +5,7 @@
 // The menus are the ones an editor is expected to have (File, Edit, Selection,
 // View, Go, Help), and hold what is already a command here or in the text
 // editor: a menu is a way to find a command, not a second place to keep one.
-import { matchesOn } from "./searchPattern";
+import { matchesOn, REGEX_MAX_LINE_LENGTH } from "./searchPattern";
 
 /** What has to be there before an entry can run. */
 export type Needs = "folder" | "file" | "text";
@@ -889,6 +889,7 @@ export function replaceSafeInText(
 		const lineNumber = at / 2 + 1;
 		if (options.allowedLines && !options.allowedLines.has(lineNumber)) continue;
 		const line = parts[at]!;
+		if (regex && line.length > REGEX_MAX_LINE_LENGTH) continue;
 		const found = matchesOn(line, pattern, with_, regex);
 		if (!found.length) continue;
 		const lineSpans = protectedMap?.get(lineNumber);

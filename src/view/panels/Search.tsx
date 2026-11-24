@@ -19,7 +19,7 @@ import { createFileFilter } from "../../shared/fileGlob";
 import { frontMatter, HEADING, many, one, plainMarkdown } from "../../shared/frontMatter";
 import { overlapsProtectedSpan, planLineBreadcrumb, protectedMarkdownSpans, replaceSafeInText, type TextSpan } from "../../shared/menuBar";
 import { DOC_FOLDERS, isCatalog, toneOf } from "../../shared/projectDocs";
-import { excerptForMatch, matchesOn, SEARCH_LIMIT, SEARCH_LINE_WINDOW, searchPattern, type SearchOptions } from "../../shared/searchPattern";
+import { excerptForMatch, matchesOn, REGEX_MAX_LINE_LENGTH, SEARCH_LIMIT, SEARCH_LINE_WINDOW, searchPattern, type SearchOptions } from "../../shared/searchPattern";
 import { outline } from "../../shared/outline";
 import { workspaceTags } from "../../shared/tags";
 import { codeMatchesRef, descendantTickets, scriptsForTicket, ticketForFile, ticketWork } from "../../shared/workContext";
@@ -70,7 +70,7 @@ export function showReplace() {
 }
 
 /** Replaces every match in an open file's text (optionally restricted to `allowedLines` and skipping `protectedSpans`), as one undoable step. */
-function replaceInModel(
+export function replaceInModel(
 	model: monaco.editor.ITextModel,
 	pattern: RegExp,
 	with_: string,
@@ -81,8 +81,10 @@ function replaceInModel(
 	const edits: monaco.editor.IIdentifiedSingleEditOperation[] = [];
 	for (let line = 1; line <= model.getLineCount(); line++) {
 		if (allowedLines && !allowedLines.has(line)) continue;
+		const content = model.getLineContent(line);
+		if (regex && content.length > REGEX_MAX_LINE_LENGTH) continue;
 		const spans = protectedSpans?.get(line);
-		for (const match of matchesOn(model.getLineContent(line), pattern, with_, regex)) {
+		for (const match of matchesOn(content, pattern, with_, regex)) {
 			if (overlapsProtectedSpan(match.column, match.length, spans)) continue;
 			edits.push({ range: new monaco.Range(line, match.column, line, match.column + match.length), text: match.becomes });
 		}
@@ -95,11 +97,12 @@ function replaceInModel(
 }
 
 /** Scans a single in-memory text buffer using the exact same `searchPattern` + `matchesOn` + windowing walk as backend search. */
-function scanTextBuffer(path: string, text: string, pattern: RegExp, isRegex: boolean, limit: number): SearchHit[] {
+export function scanTextBuffer(path: string, text: string, pattern: RegExp, isRegex: boolean, limit: number): SearchHit[] {
 	const out: SearchHit[] = [];
 	const lines = text.split(/\r?\n/);
 	for (let i = 0; i < lines.length && out.length < limit; i++) {
 		const line = lines[i]!;
+		if (isRegex && line.length > REGEX_MAX_LINE_LENGTH) continue;
 		const found = matchesOn(line, pattern, "", isRegex, limit - out.length);
 		for (const m of found) {
 			const { text: excerpt, textOffset } = excerptForMatch(line, m.column, m.length);
@@ -1168,13 +1171,7 @@ export function Search() {
 						safeDocs: protect,
 						...(Object.keys(linesByPath).length ? { linesByPath } : {}),
 					};
-					const results = (await backend.replace(query, with_, replaceOptions, onDiskPaths)) as {
-						path: string;
-						count: number;
-						error?: string;
-						skippedProtected?: number;
-						invalidJson?: boolean;
-					}[];
+					const results = await backend.replace(query, with_, replaceOptions, onDiskPaths);
 					if (state.workspace?.root !== startRoot) return;
 					for (const result of results) {
 						if (result.skippedProtected) skippedProtected += result.skippedProtected;

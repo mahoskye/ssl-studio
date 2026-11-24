@@ -54,7 +54,7 @@ A sample with no instrument is never held up by an outage.
 
 ## What it shows in SSL Studio
 
-- **`SetSampleDueDates.ssl`:** regions as frames in Blocks, the size meter, the Objects outline.
+- **`SetSampleDueDates.ssl`:** regions as frames in Blocks, the size meter, the Document outline.
 - **`DueSoonReport.ssl`:** `:BEGINCASE` arms, a text `:REGION`, nested regions, a `RunDS` call.
 - **`DueRule.ssl` and `RushDueRule.ssl`:** a class and the one that inherits it.
 - **The call graph:** the folders and scripts joined by their calls, the data sources, the

@@ -21,6 +21,24 @@ import { formatDocument } from "./format";
 const IMPORT_MAX_BYTES = 20 * 1024 * 1024;
 const ALLOWED_IMPORT_EXTS = new Set([".docx", ".html", ".htm", ".md", ".markdown"]);
 
+/** Parses `SSL_STUDIO_OPENCODE` as a JSON string array when it starts with `[` (supporting spaces in paths), falling back to space-splitting. */
+export function parseOpencodeCommandEnv(raw: string | undefined): string[] | undefined {
+	if (!raw) return undefined;
+	const trimmed = raw.trim();
+	if (!trimmed) return undefined;
+	if (trimmed.startsWith("[")) {
+		try {
+			const parsed = JSON.parse(trimmed);
+			if (Array.isArray(parsed) && parsed.length > 0 && parsed.every((item) => typeof item === "string" && item.length > 0)) {
+				return parsed;
+			}
+		} catch {
+			// Fall back to space-delimited parsing when not valid JSON.
+		}
+	}
+	return raw.split(" ");
+}
+
 function pathTaken(p: string): boolean {
 	try {
 		lstatSync(p);
@@ -67,6 +85,8 @@ export function createBackend(host: Host, initial?: string) {
 	let files: WorkspaceFiles | null = null;
 	let history: History | null = null;
 	let lsp: LspProcess | null = null;
+	let lspPath = "";
+	let lspRestartSeq = 0;
 	let info: Info | null = null;
 	let lspState: LspState = { state: "stopped" };
 	let openSeq = 0;
@@ -81,7 +101,7 @@ export function createBackend(host: Host, initial?: string) {
 	};
 	const settings = new SettingsStore(() => files?.root ?? null);
 	// SSL_STUDIO_OPENCODE replaces the opencode command (tests use test/fake-opencode.ts).
-	const command = process.env.SSL_STUDIO_OPENCODE?.split(" ");
+	const command = parseOpencodeCommandEnv(process.env.SSL_STUDIO_OPENCODE);
 	const agent = new Agent((type, data) => host.emit("agent", { type, data }), () => files?.root ?? null, command);
 
 	const need = () => {
@@ -137,6 +157,8 @@ export function createBackend(host: Host, initial?: string) {
 		files = nextFiles;
 		history = nextHistory;
 		lsp = null;
+		lspPath = "";
+		lspRestartSeq++;
 		asked = null;
 		prevFiles?.close();
 		prevLsp?.stop();
@@ -160,17 +182,19 @@ export function createBackend(host: Host, initial?: string) {
 				return { root: nextFiles.root, name: basename(nextFiles.root) };
 			}
 			if (status.ok && status.path) {
-				startedLsp = new LspProcess(
+				const nextLsp = new LspProcess(
 					status.path,
 					(m) => {
-						if (!isStale()) host.emit("lsp", m);
+						if (!isStale() && lsp === nextLsp) host.emit("lsp", m);
 					},
 					(s) => {
-						if (!isStale()) emitLspState(s);
+						if (!isStale() && lsp === nextLsp) emitLspState(s);
 					},
 				);
-				lsp = startedLsp;
-				startedLsp.start();
+				startedLsp = nextLsp;
+				lsp = nextLsp;
+				lspPath = status.path;
+				nextLsp.start();
 			} else {
 				emitLspState({ state: "failed", message: status.message });
 			}
@@ -617,8 +641,42 @@ export function createBackend(host: Host, initial?: string) {
 		lspSend: async (message) => lsp?.send(message),
 		lspRestart: async () => {
 			if (disposed) return;
-			if (lsp) lsp.restart();
-			else if (files) await open(files.root);
+			const seq = openSeq;
+			const restartSeq = ++lspRestartSeq;
+			const isStale = () => disposed || seq !== openSeq || restartSeq !== lspRestartSeq;
+			const { lsp: status } = await loadInfo();
+			if (isStale() || !files) return;
+			if (!status.ok || !status.path) {
+				const prev = lsp;
+				lsp = null;
+				lspPath = "";
+				prev?.stop();
+				emitLspState({ state: "failed", message: status.message });
+				return;
+			}
+			if (lsp && lspPath === status.path) {
+				lsp.restart();
+				return;
+			}
+			const prev = lsp;
+			lsp = null;
+			lspPath = "";
+			if (prev) {
+				prev.stop();
+				emitLspState({ state: "stopped" });
+			}
+			const nextLsp = new LspProcess(
+				status.path,
+				(m) => {
+					if (!disposed && seq === openSeq && lsp === nextLsp) host.emit("lsp", m);
+				},
+				(s) => {
+					if (!disposed && seq === openSeq && lsp === nextLsp) emitLspState(s);
+				},
+			);
+			lsp = nextLsp;
+			lspPath = status.path;
+			nextLsp.start();
 		},
 		lspState: async () => lspState,
 		agent: async (method, args) => {
@@ -668,10 +726,12 @@ export function createBackend(host: Host, initial?: string) {
 			if (disposed) return;
 			disposed = true;
 			openSeq++;
+			lspRestartSeq++;
 			files?.close();
 			files = null;
 			lsp?.stop();
 			lsp = null;
+			lspPath = "";
 			asked?.git.dispose();
 			asked = null;
 			agent.dispose();

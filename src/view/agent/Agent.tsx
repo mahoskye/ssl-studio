@@ -1002,7 +1002,7 @@ export function AgentPanel() {
 			const existing = draft().trim();
 			if (existing && existing !== handed.text.trim()) {
 				const REPLACE = "Replace draft";
-				const picked = await choose("Replace your current Agent draft?", [REPLACE, "Keep current"]);
+				const picked = await choose("Replace your current Agent draft?", [REPLACE]);
 				if (picked !== REPLACE) return;
 			}
 			if (handed.cleanContext) {

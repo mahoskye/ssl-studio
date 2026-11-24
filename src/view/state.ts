@@ -15,6 +15,7 @@ import { changedRanges, minimalReplace } from "./lsp/edits";
 import { ask, choose } from "./dialogs";
 import { closeComparison, closeReview, openReview } from "./editor/Review";
 import { syncWorkspaceThreads } from "./agent/store";
+import { resetTidy } from "./agent/tidy";
 import { clearEditorViewStates } from "./editor/EditorGroup";
 import { invalidateImageCache } from "./editor/imageResolve";
 import { baseName, isInside, joinPath, plainFileError } from "../shared/paths";
@@ -203,12 +204,16 @@ export async function openFolder(path?: string) {
 	const workspace = await guarded(() => backend.openFolder(path));
 	if (seq !== openSeq) return;
 	if (!workspace) {
-		if (prevRoot && (prevLspRunning || state.lsp.state === "running")) {
-			void session.start(prevRoot).catch(() => {});
+		if (prevRoot) {
+			session.setRoot(prevRoot);
+			if (prevLspRunning || state.lsp.state === "running") {
+				void session.start(prevRoot).catch(() => {});
+			}
 		}
 		return;
 	}
 	closeReview();
+	resetTidy();
 	syncWorkspaceThreads(canonical(workspace.root));
 	setTabsReady(false);
 	closedTabs.length = 0;
@@ -241,9 +246,18 @@ export async function openFolder(path?: string) {
 	const lsp = await backend.lspState();
 	if (seq !== openSeq) return;
 	setState("lsp", reconcile(lsp));
+	session.setRoot(workspace.root);
 	if (state.lsp.state === "running") void session.start(workspace.root).catch(() => {});
 	log(`opened ${workspace.root}`);
 	await restoreTabs();
+}
+
+/** Restarts the language server (re-resolving `lspPath`) and refreshes `state.info` so Settings and StatusBar stay current. */
+export async function restartLsp(): Promise<void> {
+	await guarded(async () => {
+		await backend.lspRestart();
+		setState("info", await backend.info());
+	});
 }
 
 // --- the tabs a folder was left with ---------------------------------------------

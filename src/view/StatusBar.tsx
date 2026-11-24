@@ -17,7 +17,6 @@ import {
 import { countHistoryEntries, type SizeReport } from "../shared/houseStyle";
 import { encodingName, eolName } from "../shared/fileKind";
 import { agent } from "./agent/store";
-import { backend } from "./backend";
 import { useDocAudit } from "./docAudit";
 import { activeLiveEditor } from "./editor/liveBridge";
 import { pickLanguageMode } from "./editor/languagePicker";
@@ -31,7 +30,7 @@ import { showPanel } from "./panels/registry";
 import { chooseFromMenu } from "./panels/RowMenu";
 import { isPlanPath } from "./plan/model";
 import { isMarkdown, isTable } from "./project";
-import { activeDoc, activePath, displayName, markdownMode, notify, planMode, setState, state, tableTextMode } from "./state";
+import { activeDoc, activePath, displayName, markdownMode, notify, planMode, restartLsp, setState, state, tableTextMode } from "./state";
 
 const [size, setSize] = createSignal<SizeReport | null>(null);
 export { size };
@@ -267,7 +266,7 @@ export function StatusBar() {
 				onClick={() => {
 					if (!lsp().actionable || !state.workspace) return;
 					notify("Restarting the language server.");
-					void backend.lspRestart();
+					void restartLsp();
 				}}
 			>
 				<span class={`status-dot ${lsp().tone}`} aria-hidden="true" />

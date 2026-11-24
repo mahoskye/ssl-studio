@@ -5,7 +5,11 @@ import { existsSync } from "node:fs";
 // so look for files relative to the file itself.
 const has = (path: string) => existsSync(new URL(path, import.meta.url));
 // The pinned language server, when scripts/bundle-lsp.ts has put it in vendor/.
-const lsp = ["vendor/starlims-lsp", "vendor/starlims-lsp.exe"].find(has);
+const lspCandidates =
+	process.platform === "win32"
+		? ["vendor/starlims-lsp.exe", "vendor/starlims-lsp"]
+		: ["vendor/starlims-lsp", "vendor/starlims-lsp.exe"];
+const lsp = lspCandidates.find(has);
 
 export default {
 	app: {

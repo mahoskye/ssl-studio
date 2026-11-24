@@ -10,7 +10,8 @@ import { loadLanguageConfiguration } from "./editor/monaco";
 import "./editor/opener";
 import { loadGrammar } from "./editor/textmate";
 import { registerProviders, session } from "./lsp/session";
-import { loadProject, loadSettings, log, notify, restoreTabs, setState, state, unsavedPaths } from "./state";
+import { syncWorkspaceThreads } from "./agent/store";
+import { canonical, loadProject, loadSettings, log, notify, restoreTabs, setState, state, unsavedPaths } from "./state";
 import { applyFonts, applyTheme, resolveTheme, shapeEditorMenus } from "./themes/themes";
 
 export const errors: string[] = [];
@@ -64,8 +65,10 @@ async function start() {
 	const workspace = await backend.workspace();
 	if (workspace) {
 		setState("workspace", workspace);
+		syncWorkspaceThreads(canonical(workspace.root));
 		setState("lsp", reconcile(await backend.lspState()));
 		await Promise.all([loadSettings(true), loadProject()]);
+		session.setRoot(workspace.root);
 		if (state.lsp.state === "running") void session.start(workspace.root).catch(() => {});
 	}
 	render(() => <App />, document.getElementById("app")!);

@@ -7,46 +7,84 @@
 import { $ } from "bun";
 import { homedir } from "node:os";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { findLsp, LSP_PIN } from "../src/bun/tools";
 
-const vendor = join(import.meta.dir, "../vendor");
-const suffix = process.platform === "win32" ? ".exe" : "";
-const target = join(vendor, `starlims-lsp${suffix}`);
-mkdirSync(vendor, { recursive: true });
-
-async function versionOf(path: string) {
+export async function versionOf(path: string): Promise<string | undefined> {
 	if (!existsSync(path)) return undefined;
 	const out = await $`${path} --version`.nothrow().quiet().text();
 	return /starlims-lsp version (\S+)/.exec(out)?.[1];
 }
 
-if (process.argv.includes("--download")) {
-	const platform = process.platform === "win32" ? "windows" : process.platform;
-	const arch = process.arch === "arm64" ? "arm64" : "amd64";
-	const asset = `starlims-lsp-${platform}-${arch}${suffix}`;
-	// The release is public: plain HTTPS works where gh is not installed (a fresh Windows VM).
-	const release = `https://github.com/mahoskye/starlims-lsp/releases/download/v${LSP_PIN}`;
-	const fetchTo = async (url: string, path: string) => {
-		const response = await fetch(url, { signal: AbortSignal.timeout(120_000) });
-		if (!response.ok) throw new Error(`${url}: ${response.status}`);
-		await Bun.write(path, response);
-	};
-	// Beside the old one, then renamed over it: a server that is running (an open
-	// SSL Studio) keeps its own copy, where writing into the file in use fails.
-	await fetchTo(`${release}/${asset}`, `${target}.new`);
-	renameSync(`${target}.new`, target);
-	await fetchTo(`${release}/THIRD-PARTY-NOTICES.md`, join(vendor, "THIRD-PARTY-NOTICES.md"));
-	await fetchTo(`https://raw.githubusercontent.com/mahoskye/starlims-lsp/v${LSP_PIN}/LICENSE`, join(vendor, "STARLIMS-LSP-LICENSE"));
-} else if ((await versionOf(target)) === LSP_PIN && existsSync(join(vendor, "STARLIMS-LSP-LICENSE"))) {
-	// Already here, from an earlier --download (CI and the Windows VM do that first).
-} else {
-	const found = await findLsp();
-	if (!found.ok || found.version !== LSP_PIN) throw new Error(`No local starlims-lsp ${LSP_PIN} (found: ${found.version ?? "none"}). Use --download.`);
-	copyFileSync(found.path!, target);
-	// Its license and notices travel with it.
-	const repo = process.env.STARLIMS_LSP_REPO ?? `${homedir()}/dev/starlims-projects/starlims-lsp`;
-	for (const file of ["LICENSE", "THIRD-PARTY-NOTICES.md"]) if (existsSync(join(repo, file))) copyFileSync(join(repo, file), join(vendor, file === "LICENSE" ? "STARLIMS-LSP-LICENSE" : file));
+export type BundleLspOptions = {
+	vendorDir?: string;
+	download?: boolean;
+	repoDir?: string;
+	platform?: NodeJS.Platform;
+	arch?: string;
+	findLocal?: typeof findLsp;
+	getVersion?: (path: string) => Promise<string | undefined>;
+};
+
+export async function bundleLsp(opts: BundleLspOptions = {}): Promise<{ target: string; action: "downloaded" | "cached" | "copied" }> {
+	const vendor = opts.vendorDir ?? join(import.meta.dir, "../vendor");
+	const platformName = opts.platform ?? process.platform;
+	const suffix = platformName === "win32" ? ".exe" : "";
+	const target = join(vendor, `starlims-lsp${suffix}`);
+	const licensePath = join(vendor, "STARLIMS-LSP-LICENSE");
+	const noticesPath = join(vendor, "THIRD-PARTY-NOTICES.md");
+	const getVersion = opts.getVersion ?? versionOf;
+	const findLocal = opts.findLocal ?? findLsp;
+	mkdirSync(vendor, { recursive: true });
+
+	let action: "downloaded" | "cached" | "copied";
+	if (opts.download) {
+		const platform = platformName === "win32" ? "windows" : platformName;
+		const arch = (opts.arch ?? process.arch) === "arm64" ? "arm64" : "amd64";
+		const asset = `starlims-lsp-${platform}-${arch}${suffix}`;
+		// The release is public: plain HTTPS works where gh is not installed (a fresh Windows VM).
+		const release = `https://github.com/mahoskye/starlims-lsp/releases/download/v${LSP_PIN}`;
+		const fetchTo = async (url: string, path: string) => {
+			const response = await fetch(url, { signal: AbortSignal.timeout(120_000) });
+			if (!response.ok) throw new Error(`${url}: ${response.status}`);
+			await Bun.write(path, response);
+		};
+		// Beside the old one, then renamed over it: a server that is running (an open
+		// SSL Studio) keeps its own copy, where writing into the file in use fails.
+		await fetchTo(`${release}/${asset}`, `${target}.new`);
+		renameSync(`${target}.new`, target);
+		await fetchTo(`${release}/THIRD-PARTY-NOTICES.md`, noticesPath);
+		await fetchTo(`https://raw.githubusercontent.com/mahoskye/starlims-lsp/v${LSP_PIN}/LICENSE`, licensePath);
+		action = "downloaded";
+	} else if ((await getVersion(target)) === LSP_PIN && existsSync(licensePath) && existsSync(noticesPath)) {
+		// Already here, from an earlier --download (CI and the Windows VM do that first).
+		action = "cached";
+	} else {
+		const found = await findLocal();
+		if (!found.ok || found.version !== LSP_PIN) throw new Error(`No local starlims-lsp ${LSP_PIN} (found: ${found.version ?? "none"}). Use --download.`);
+		// Skip copying when findLocal() resolved to vendor/starlims-lsp itself; otherwise stage atomically.
+		if (resolve(found.path!) !== resolve(target)) {
+			copyFileSync(found.path!, `${target}.new`);
+			renameSync(`${target}.new`, target);
+		}
+		// Its license and notices travel with it.
+		const repo = opts.repoDir ?? process.env.STARLIMS_LSP_REPO ?? `${homedir()}/dev/starlims-projects/starlims-lsp`;
+		for (const file of ["LICENSE", "THIRD-PARTY-NOTICES.md"]) {
+			const src = join(repo, file);
+			const dest = file === "LICENSE" ? licensePath : noticesPath;
+			if (existsSync(src) && resolve(src) !== resolve(dest)) copyFileSync(src, dest);
+		}
+		if (!existsSync(licensePath)) {
+			throw new Error(`Missing required ${licensePath} after bundling local starlims-lsp (looked in ${repo}). Set STARLIMS_LSP_REPO or use --download.`);
+		}
+		action = "copied";
+	}
+	chmodSync(target, 0o755);
+	return { target, action };
 }
-chmodSync(target, 0o755);
-console.log(`vendor/starlims-lsp${suffix}: ${(await $`${target} --version`.text()).split("\n")[0]}`);
+
+if (import.meta.main) {
+	const { target } = await bundleLsp({ download: process.argv.includes("--download") });
+	const suffix = process.platform === "win32" ? ".exe" : "";
+	console.log(`vendor/starlims-lsp${suffix}: ${(await $`${target} --version`.text()).split("\n")[0]}`);
+}

@@ -6,7 +6,7 @@ import { createBackend, dispatch, type Host } from "../src/bun/backend";
 import { decodePart, encode, looksBinary } from "../src/bun/encoding";
 import { injectTokenMeta, isAllowedHost, isAllowedOrigin, resolveStaticPath, startWebHost, tokensMatch } from "../src/bun/web";
 import { WorkspaceFiles } from "../src/bun/workspace";
-import { backend as viewBackend, connect as viewConnect, on as viewOn, onConnectionLost } from "../src/view/backend";
+import { backend as viewBackend, connect as viewConnect, disconnectForTest, on as viewOn, onConnectionLost } from "../src/view/backend";
 
 const rootTmp = mkdtempSync(join(tmpdir(), "ssl-studio-r1a-"));
 afterAll(() => rmSync(rootTmp, { recursive: true, force: true }));
@@ -224,6 +224,7 @@ describe("view/backend.ts proxy & listener safety", () => {
 		// Promise.resolve(viewBackend) must not invoke backend.then()
 		expect(await Promise.resolve(viewBackend)).toBe(viewBackend);
 		// Disconnected call returns rejected promise instead of throwing synchronously
+		disconnectForTest();
 		const promise = viewBackend.workspace();
 		expect(promise).toBeInstanceOf(Promise);
 		await expect(promise).rejects.toThrow("backend not connected");

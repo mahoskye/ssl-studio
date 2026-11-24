@@ -27,7 +27,7 @@ import { choose } from "./dialogs";
 import { bindable, conflict, displayKey, isModifierKey, keyNamesForPlatform, rebind, unbind } from "./keys";
 import { Modal } from "./modal";
 import { matchWords } from "./quickRank";
-import { loadSettings, notify, saveSetting, state, syncLivePreviewMode } from "./state";
+import { loadSettings, notify, restartLsp, saveSetting, state, syncLivePreviewMode } from "./state";
 import { clampScale, stepScale, UI_SCALE } from "./uiScale";
 
 type Layers = { user: Partial<Settings>; workspace: Partial<Settings> };
@@ -113,8 +113,9 @@ export function SettingsDialog() {
 	// would not be seen while the project's is in the way.
 	const scopeOf = (key: keyof Settings) => (state.workspace && key in layers().workspace ? "workspace" : "user");
 	const save = async <K extends keyof Settings>(key: K, value: Settings[K] | null) => {
-		await saveSetting({ [key]: value } as SettingsPatch, scopeOf(key));
+		const saved = await saveSetting({ [key]: value } as SettingsPatch, scopeOf(key));
 		await loadLayers();
+		if (key === "lspPath" && saved) await restartLsp();
 	};
 	const saveRelFolder = (key: "attachmentsFolder" | "templatesFolder", input: HTMLInputElement) => {
 		const check = validateWorkspaceFolderSetting(input.value);

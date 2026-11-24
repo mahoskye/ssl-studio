@@ -19,7 +19,7 @@ import { cp, open, rm, writeFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type { Entry, FileText, SearchHit } from "../shared/protocol";
-import { excerptForMatch, matchesOn, replaceIn, SEARCH_LIMIT, searchPattern, type SearchOptions } from "../shared/searchPattern";
+import { excerptForMatch, matchesOn, REGEX_MAX_LINE_LENGTH, replaceIn, SEARCH_LIMIT, searchPattern, type SearchOptions } from "../shared/searchPattern";
 import { createFileFilter } from "../shared/fileGlob";
 import { replaceSafeInText } from "../shared/menuBar";
 import { decode, encode, encodingOf, looksBinary, textOf, type Encoding } from "./encoding";
@@ -75,8 +75,6 @@ const isFolder = (full: string) => {
 };
 
 const SEARCH_MAX_BYTES = 4 * 1024 * 1024;
-/** Maximum single line length scanned with user-supplied regexes (guards against ReDoS on minified bundles). */
-const REGEX_MAX_LINE_LENGTH = 20_000;
 /** Default safety time budget (ms) for a workspace search scan. */
 const SEARCH_TIMEOUT_MS = 5000;
 /** The largest picture that is sent to the window to be shown. */

@@ -7,6 +7,8 @@
 export const SEARCH_LIMIT = 2000;
 /** Maximum characters kept per search hit excerpt. */
 export const SEARCH_LINE_WINDOW = 400;
+/** Maximum single line length scanned or replaced with user-supplied regexes (guards against ReDoS on minified bundles). */
+export const REGEX_MAX_LINE_LENGTH = 20_000;
 
 export type SearchOptions = {
 	regex?: boolean;
@@ -130,12 +132,14 @@ export function matchesOn(
  */
 export function replaceIn(text: string, query: string, replacement: string, options: SearchOptions = {}): { text: string; count: number } {
 	const pattern = searchPattern(query, options);
+	const isRegex = Boolean(options.regex);
 	let count = 0;
 	// The lines and what ends each of them, turn about: only the lines are searched.
 	const parts = text.split(/(\r?\n)/);
 	for (let at = 0; at < parts.length; at += 2) {
 		const line = parts[at]!;
-		const found = matchesOn(line, pattern, replacement, Boolean(options.regex));
+		if (isRegex && line.length > REGEX_MAX_LINE_LENGTH) continue;
+		const found = matchesOn(line, pattern, replacement, isRegex);
 		if (!found.length) continue;
 		count += found.length;
 		let out = "";

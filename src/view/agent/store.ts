@@ -2,7 +2,7 @@
 import { createStore, produce } from "solid-js/store";
 import type { AgentModel, AgentReply, AgentStatus } from "../../shared/protocol";
 import { backend, on } from "../backend";
-import { log, notify, saveSetting, state } from "../state";
+import { canonical, log, notify, saveSetting, state } from "../state";
 import { choose } from "../dialogs";
 import { looksCut } from "../plan/assist";
 import { attempt, cutNote, decideModel, errorText, Turns } from "./logic";
@@ -405,9 +405,9 @@ export async function chooseModel(ref: string): Promise<boolean> {
 		const savedOwn = await saveSetting({ agentOwnModels: [...new Set([...(state.settings.agentOwnModels ?? []), chosen])] });
 		if (!savedOwn) return false;
 	}
-	// A project that names its model wins over the user's own setting, so the choice is kept with the workspace there.
+	// `agentModel` is a user-only setting (workspace saves strip USER_ONLY_SETTINGS).
 	// An empty choice takes the setting out, so the default model shows through.
-	const savedModel = await saveSetting({ agentModel: chosen || null }, state.project?.agentModel ? "workspace" : "user");
+	const savedModel = await saveSetting({ agentModel: chosen || null }, "user");
 	if (!savedModel) return false;
 	setAgent("models", (await backend.agent("models", [])) as AgentModel[]);
 	setAgent("chatSession", null);
@@ -419,6 +419,9 @@ export async function ask(text: string, options: { title?: string; skills?: stri
 	if (agent.busy) {
 		notify("The agent is still working on the last request.");
 		return null;
+	}
+	if (activeWorkspaceKey === null && state.workspace?.root) {
+		syncWorkspaceThreads(canonical(state.workspace.root));
 	}
 	const myWorkspace = activeWorkspaceKey;
 	const myEpoch = ++turnEpoch;

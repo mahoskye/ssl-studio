@@ -30,6 +30,6 @@ The list between the two markers is written by SSL Studio from the files here (D
 
 <!-- /catalog -->
 
-`SetSampleDueDates` reads all three tables and hands what it plans to `SaveDueDates`; `SamplesDueSoon` reads `DEMO_SAMPLES` only. Each table doc pairs 1:1 with its own DDL file, and [demo-seed.sql](database/demo-seed.sql) loads the sample rows the worked examples use.
+`SetSampleDueDates` reads all four tables and hands what it plans to `SaveDueDates`; `SamplesDueSoon` reads `DEMO_SAMPLES` only. Each table doc pairs 1:1 with its own DDL file, and [demo-seed.sql](database/demo-seed.sql) loads the sample rows the worked examples use.
 
 Nothing in `src/` reads a message or a file yet: the one of each here is described so that the script that will can be written against it.

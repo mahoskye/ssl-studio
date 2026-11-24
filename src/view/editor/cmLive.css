@@ -1914,15 +1914,24 @@
 	line-height: 1.4;
 }
 
-/* Image Lightbox Modal. */
-.md-lightbox-backdrop {
-	position: fixed;
-	inset: 0;
-	z-index: 65;
+/* Image & Mermaid Lightbox Modal (portaled inside <Modal>'s .overlay at z-index: 80). */
+.md-lightbox-modal {
+	position: relative;
+	width: 100%;
+	height: 100%;
+	min-width: 0;
+	min-height: 0;
+	overflow: hidden;
+	z-index: 80;
 	display: flex;
 	flex-direction: column;
 	background: rgba(12, 11, 10, 0.86);
 	backdrop-filter: blur(4px);
+	outline: none;
+}
+
+.md-lightbox-modal:focus-visible {
+	outline: none;
 }
 
 .md-lightbox-bar {

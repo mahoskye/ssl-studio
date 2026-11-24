@@ -209,6 +209,15 @@ export async function connect() {
 	caller = next;
 }
 
+/** Resets active RPC caller and socket state between isolated unit tests. */
+export function disconnectForTest() {
+	connectSeq++;
+	caller = undefined;
+	electrobunConnecting = null;
+	closeActiveSocket?.();
+	closeActiveSocket = null;
+}
+
 /** `backend.read(path)` and so on: every BackendApi method, called remotely. */
 export const backend = new Proxy({} as BackendApi, {
 	get: (_target, method) => {

@@ -51,12 +51,16 @@ import { noteCursor } from "../navigation";
 const viewStates = new Map<string, monaco.editor.ICodeEditorViewState | null>();
 /** The same by the file alone, as it was last left in any group: what a tab moved to another group opens with. */
 const lastViews = new Map<string, monaco.editor.ICodeEditorViewState | null>();
+/** Most recently active Markdown tab path (used by code-citation commands to compute relative paths cleanly). */
+const [lastMarkdownPath, setLastMarkdownPath] = createSignal<string | null>(null);
+export const lastActiveMarkdownPath = () => lastMarkdownPath();
 
 /** Clears saved Monaco editor view states: all entries (workspace switch), one tab in one group, or all entries for a closed file. */
 export function clearEditorViewStates(path?: string, groupIndex?: number) {
-	if (path === undefined) {
+	if (!path) {
 		viewStates.clear();
 		lastViews.clear();
+		setLastMarkdownPath(null);
 		return;
 	}
 	if (groupIndex !== undefined) {
@@ -68,6 +72,10 @@ export function clearEditorViewStates(path?: string, groupIndex?: number) {
 		if (sep >= 0 && key.slice(sep + 1) === path) viewStates.delete(key);
 	}
 	lastViews.delete(path);
+	const lastMd = lastMarkdownPath();
+	if (lastMd && canonical(path) === canonical(lastMd)) {
+		setLastMarkdownPath(null);
+	}
 }
 
 /** The editor width, in pixels, from which the minimap is shown: under it, code at the line length would run beneath the map. */
@@ -91,9 +99,6 @@ export function editorGroupOf(source: monaco.editor.ICodeEditor | null | undefin
 let dragged: { path: string; group: number } | null = null;
 /** Where it would land: in which group, and before which tab (last, with null). */
 const [dropAt, setDropAt] = createSignal<{ group: number; before: string | null } | null>(null);
-/** Most recently active Markdown tab path (used by code-citation commands to compute relative paths cleanly). */
-const [lastMarkdownPath, setLastMarkdownPath] = createSignal<string | null>(null);
-export const lastActiveMarkdownPath = () => lastMarkdownPath();
 
 const base = (path: string) => displayName(path);
 

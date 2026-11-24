@@ -160,6 +160,11 @@ export class LspSession {
 		this.handleDown("reset");
 	}
 
+	/** Records the open workspace root so a server that starts or recovers later initializes cleanly. */
+	setRoot(root: string): void {
+		this.root = root;
+	}
+
 	start(root: string) {
 		this.root = root;
 		const myEpoch = ++this.epoch;

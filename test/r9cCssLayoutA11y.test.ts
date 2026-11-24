@@ -240,7 +240,7 @@ describe("R9C strict Z-index hierarchy across all stylesheets, cmTheme.ts & cmCo
 		const zWidgetAcInline = Number(zWidgetAcInlineMatch![1]);
 
 		const zMenuPop = zIndexOf(styleCss, /^\.menu-pop\s*\{/m);
-		const zLightbox = zIndexOf(cmLiveCss, /^\.md-lightbox-backdrop\s*\{/m);
+		const zLightbox = zIndexOf(cmLiveCss, /^\.md-lightbox-modal\s*\{/m);
 		const zMenuFloating = zIndexOf(styleCss, /^\.menu-pop-floating\s*\{/m);
 		const zOverlay = zIndexOf(styleCss, /^\.overlay\s*\{/m);
 		const zRowMenuShade = zIndexOf(styleCss, /^\.row-menu-shade\s*\{/m);
@@ -282,20 +282,20 @@ describe("R9C strict Z-index hierarchy across all stylesheets, cmTheme.ts & cmCo
 
 		// Global stacking tiers
 		expect(zMenuPop).toBe(60);
-		expect(zLightbox).toBe(65);
 		expect(zMenuFloating).toBe(70);
 		expect(zOverlay).toBe(80);
+		expect(zLightbox).toBe(80);
 		expect(zRowMenuShade).toBe(84);
 		expect(zRowMenuHost).toBe(85);
 		expect(zToasts).toBe(95);
 
 		// Strictly monotonic chain across all tiers
 		expect(zCmPanelsTop).toBeLessThan(zGraphFind);
-		expect(zWidgetAcInline).toBeLessThan(zLightbox);
-		expect(zCmTooltip).toBeLessThan(zLightbox);
-		expect(zTableCellPicker).toBeLessThan(zLightbox);
-		expect(zLightbox).toBeLessThan(zMenuFloating);
+		expect(zWidgetAcInline).toBeLessThan(zMenuFloating);
+		expect(zCmTooltip).toBeLessThan(zMenuFloating);
+		expect(zTableCellPicker).toBeLessThan(zMenuFloating);
 		expect(zMenuFloating).toBeLessThan(zOverlay);
+		expect(zLightbox).toBe(zOverlay);
 		expect(zOverlay).toBeLessThan(zRowMenuShade);
 		expect(zRowMenuShade).toBeLessThan(zRowMenuHost);
 		expect(zRowMenuHost).toBeLessThan(zToasts);

@@ -415,7 +415,12 @@ export interface BackendApi {
 	 * Replaces every match in the files named, on disk, each as it is written now. Says how many in each; a file
 	 * that could not be written is left as it was and says why. Each file as it was is kept in local history.
 	 */
-	replace(query: string, replacement: string, options: SearchOptions, paths: string[]): Promise<{ path: string; count: number; error?: string }[]>;
+	replace(
+		query: string,
+		replacement: string,
+		options: SearchOptions,
+		paths: string[],
+	): Promise<{ path: string; count: number; skippedProtected?: number; invalidJson?: boolean; error?: string }[]>;
 	history(path: string): Promise<Snapshot[]>;
 	snapshot(path: string, id: string): Promise<string>;
 	/** The open folder's project settings (defaults when it has no project.toml). */

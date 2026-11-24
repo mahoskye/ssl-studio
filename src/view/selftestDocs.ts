@@ -9,7 +9,7 @@ import { backend } from "./backend";
 import { activeEditor } from "./editor/EditorGroup";
 import { activeLiveEditor } from "./editor/liveBridge";
 import { ICON } from "./icons";
-import { requestMarkdownInspector } from "./panels/markdownBridge";
+import { requestMarkdownInspector, requestMarkdownPanelTab } from "./panels/markdownBridge";
 import { showPanel } from "./panels/registry";
 import { docs } from "./project";
 import { followRename, setStatus, updateCatalogs } from "./projectDocs";
@@ -40,7 +40,13 @@ const row = (name: string) =>
 const marked = (name: string, mark: string) => [...(row(name)?.querySelectorAll(".meta") ?? [])].some((m) => m.textContent === mark);
 const setupButton = () => document.querySelector<HTMLButtonElement>(".docs-setup button");
 const rendered = () => document.querySelector<HTMLElement>(".cm-md-host.cm-md-read .cm-content");
-const renderedHeading = () => rendered()?.querySelector<HTMLElement>(".cm-md-h1")?.textContent?.trim();
+const renderedHeading = () => {
+	const el = rendered()?.querySelector<HTMLElement>(".cm-md-h1");
+	if (!el) return undefined;
+	const clone = el.cloneNode(true) as HTMLElement;
+	for (const copyBtn of clone.querySelectorAll(".cm-md-heading-link")) copyBtn.remove();
+	return clone.textContent?.trim();
+};
 /** Health’s Project section: one row for each root file, with its mark. */
 const healthRows = () => {
 	const section = [...document.querySelectorAll("section")].find((s) => s.querySelector("h3")?.textContent === "Project");
@@ -75,8 +81,16 @@ const LINKS = `# Links
 <img src="missing.png" onerror="window.selftestScriptRan = true">
 `;
 
-const switchTo = (view: "Edit" | "Read") =>
-	[...document.querySelectorAll<HTMLButtonElement>(".mode-switch button")].find((b) => b.innerText.trim() === (view === "Edit" ? "Live" : view) || b.innerText.trim() === view)?.click();
+const switchButton = (view: "Edit" | "Read") =>
+	[...document.querySelectorAll<HTMLButtonElement>(".mode-switch button")].find((b) => b.innerText.trim() === (view === "Edit" ? "Live" : view) || b.innerText.trim() === view);
+const switchTo = (view: "Edit" | "Read") => switchButton(view)?.click();
+const ensureRead = async () => {
+	if (rendered()) return true;
+	const btn = await until(() => switchButton("Read"));
+	if (!btn) return false;
+	btn.click();
+	return Boolean(await until(rendered));
+};
 
 /** Runs each step in turn, and stops at the first that fails: the later ones build on it. */
 async function run(steps: Steps, work: (step: (name: string, check: () => Promise<unknown>) => Promise<void>) => Promise<void>) {
@@ -120,7 +134,11 @@ export function selftestDocsSetup(): Promise<Steps> {
 		await step("nothingMissing", () => until(() => rows().length > 0 && !document.querySelector(".doc-row.missing")));
 		// Fresh from the template: said so until someone writes them.
 		await step("templatesMarked", () => until(() => marked("README.md", "template") && marked("AGENTS.md", "template")));
-		await step("readmeOpensRendered", () => until(() => baseName(activePath() ?? "") === "README.md" && renderedHeading() === state.project!.name));
+		await step("readmeOpensRendered", async () => {
+			if (!(await until(() => baseName(activePath() ?? "") === "README.md" && document.querySelector(".cm-md-host")))) return false;
+			if (!(await ensureRead())) return false;
+			return until(() => baseName(activePath() ?? "") === "README.md" && renderedHeading() === state.project!.name);
+		});
 		await step("tableRendered", async () => rendered()?.querySelector("table td"));
 		await step("textSwitch", async () => {
 			switchTo("Edit");
@@ -134,6 +152,8 @@ export function selftestDocsSetup(): Promise<Steps> {
 		await step("docsFolderListed", () => until(() => docsCatalog() && label(docsCatalog()!).trim() === "Catalog"));
 		await step("rowOpensDocument", async () => {
 			docsCatalog()!.click();
+			if (!(await until(() => baseName(activePath() ?? "") === "INDEX.md" && document.querySelector(".cm-md-host")))) return false;
+			if (!(await ensureRead())) return false;
 			return until(() => renderedHeading() === "Docs");
 		});
 		await step("openRowSelected", async () => document.querySelector(".doc-row.selected"));
@@ -143,6 +163,8 @@ export function selftestDocsSetup(): Promise<Steps> {
 		await step("healthSaysSetUp", async () => healthMark("project.toml").includes(ICON.check));
 		await step("healthRowOpens", async () => {
 			healthRows()[0]!.click();
+			if (!(await until(() => baseName(activePath() ?? "") === "README.md" && document.querySelector(".cm-md-host")))) return false;
+			if (!(await ensureRead())) return false;
 			return until(() => baseName(activePath() ?? "") === "README.md" && renderedHeading() === state.project!.name);
 		});
 
@@ -158,6 +180,8 @@ export function selftestDocsSetup(): Promise<Steps> {
 		try {
 			const toDoc = async () => {
 				await openFile(path);
+				if (!(await until(() => activePath() === path && document.querySelector(".cm-md-host")))) return null;
+				if (!(await ensureRead())) return null;
 				return until(() => activePath() === path && link("Orders"));
 			};
 			await step("linksRender", toDoc);
@@ -260,8 +284,10 @@ export function selftestWork(): Promise<Steps> {
 		// What done looks like is a list that is ticked on the ticket's page: the box is the item of that place in the text.
 		await step("taskTickedFromPage", async () => {
 			await openFile(ticket);
+			if (!(await until(() => activePath() === ticket && document.querySelector(".cm-md-host")))) return false;
+			if (!(await ensureRead())) return false;
 			const box = await until(() => {
-				const found = document.querySelector<HTMLInputElement>('.cm-md-host input[type="checkbox"]');
+				const found = document.querySelector<HTMLInputElement>('.cm-md-host.cm-md-read input[type="checkbox"]');
 				return found && !found.disabled && found;
 			});
 			box?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 }));
@@ -279,7 +305,9 @@ export function selftestWork(): Promise<Steps> {
 			);
 			if (!statusTrigger) return false;
 			statusTrigger.click();
-			return until(() => [...document.querySelectorAll(".row-submenu [role=menuitem]")].some((item) => item.textContent?.trim() === "done"));
+			return until(() =>
+				[...document.querySelectorAll(".row-submenu [role=menuitem], .row-submenu [role=menuitemcheckbox]")].some((item) => item.textContent?.trim() === "done"),
+			);
 		});
 		await step("rowMenuCloses", async () => {
 			// Escape in submenu returns to parent, second Escape closes root menu.
@@ -354,8 +382,11 @@ export function selftestWork(): Promise<Steps> {
 			name.form.requestSubmit();
 			return until(() => docs().some((d) => d.group === "schema" && d.kind === "database" && /(^|[\\/])SELF_TABLE\.md$/.test(d.name) && d.title === "SELF_TABLE" && d.untouched));
 		});
-		// The schema folder has a catalog like the other folders: written with the first description, and up to date.
-		await step("schemaCatalogKept", () => until(() => docs().some((d) => d.group === "schema" && !d.kind && isCatalog(d) && d.catalog && !d.catalog.stale)));
+		// The schema folder has a catalog like the other folders: written on Update catalogs (ADR 0031), and up to date.
+		await step("schemaCatalogKept", async () => {
+			await updateCatalogs();
+			return until(() => docs().some((d) => d.group === "schema" && !d.kind && isCatalog(d) && d.catalog && !d.catalog.stale));
+		});
 		// A prompt kept in the knowledge base is offered in the Agent panel, by its name.
 		await step("promptKeptAndOffered", async () => {
 			await write(["knowledge", "prompts", "Self-prompt.md"], "# Self prompt\n\nSay what the selected code does.\n");
@@ -368,6 +399,7 @@ export function selftestWork(): Promise<Steps> {
 		showPanel("objects");
 		await step("documentOutlined", async () => {
 			await openFile(question);
+			requestMarkdownPanelTab("outline");
 			return until(() => [...document.querySelectorAll('[data-panel="objects"] [data-row]')].some((r) => r.textContent?.includes("Why it matters")));
 		});
 

@@ -98,6 +98,7 @@ import {
 	planMode,
 	previousTab,
 	reopenClosedTab,
+	restartLsp,
 	revert,
 	sendTabAcross,
 	setMarkdownMode,
@@ -486,7 +487,7 @@ export const commands: Command[] = [
 	{ id: "tidy", label: "Tidy file with the agent", run: () => (!state.workspace ? notify("Open a folder first.") : (startTidy(), showPanel("agent"))) },
 	// The IDE
 	{ id: "style-profile", label: "Edit style profile…", detail: "How the language server formats and checks", run: () => openStyleProfile() },
-	{ id: "lsp-restart", label: "Restart language server", run: () => (!state.workspace ? notify("Open a folder first.") : void backend.lspRestart()) },
+	{ id: "lsp-restart", label: "Restart language server", run: () => (!state.workspace ? notify("Open a folder first.") : void restartLsp()) },
 	{ id: "zoom-in", label: "Zoom in", detail: "A larger interface", run: () => zoom(1) },
 	{ id: "zoom-out", label: "Zoom out", detail: "A smaller interface", run: () => zoom(-1) },
 	{ id: "zoom-reset", label: "Reset zoom", run: () => zoom(0) },
@@ -769,8 +770,11 @@ async function copyCodeCitation(withExcerpt: boolean) {
 	}
 
 	const wsRoot = state.workspace?.root;
-	const otherMd = state.groups.find((g, idx) => idx !== state.activeGroup && g.active && isMarkdown(g.active))?.active ?? null;
-	const mdBase = otherMd ?? (lastActiveMarkdownPath() && lastActiveMarkdownPath() !== path ? lastActiveMarkdownPath() : null);
+	const rawOtherMd = state.groups.find((g, idx) => idx !== state.activeGroup && g.active && isMarkdown(g.active))?.active ?? null;
+	const otherMd = rawOtherMd && !isUntitled(rawOtherMd) && (!wsRoot || isInside(wsRoot, rawOtherMd)) ? rawOtherMd : null;
+	const lastMd = lastActiveMarkdownPath();
+	const validLastMd = lastMd && !isUntitled(lastMd) && lastMd !== path && (!wsRoot || isInside(wsRoot, lastMd)) ? lastMd : null;
+	const mdBase = otherMd ?? validLastMd;
 	let relHref: string;
 	if (mdBase) {
 		relHref = relativePath(dirName(mdBase), path).split("\\").join("/");
@@ -1183,7 +1187,7 @@ async function createOrAddTicketFolderCommand() {
 	const made = await createTicketFolder(target.path);
 	if (made) {
 		const ADD_FILE = "Add companion file now…";
-		const answer = await choose(`Created ticket folder for ${target.ticket || baseName(target.path)}.`, [ADD_FILE, "Done"]);
+		const answer = await choose(`Created ticket folder for ${target.ticket || baseName(target.path)}.`, [ADD_FILE]);
 		if (answer === ADD_FILE) await newTicketFile(made, target.ticket || baseName(target.path));
 	}
 }

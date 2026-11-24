@@ -12,14 +12,6 @@
       "workingDaysLeft": -1
     },
     {
-      "sampleId": "S-1002",
-      "priority": "ROUTINE",
-      "instrumentId": "BAL-01",
-      "dueOn": "2026-11-20",
-      "status": "DUE_TODAY",
-      "workingDaysLeft": 0
-    },
-    {
       "sampleId": "S-1004",
       "priority": "RUSH",
       "instrumentId": null,
@@ -28,12 +20,20 @@
       "workingDaysLeft": 1
     },
     {
+      "sampleId": "S-1002",
+      "priority": "ROUTINE",
+      "instrumentId": "BAL-01",
+      "dueOn": "2026-11-23",
+      "status": "DUE_NEXT_DAY",
+      "workingDaysLeft": 1
+    },
+    {
       "sampleId": "S-1003",
       "priority": "ROUTINE",
       "instrumentId": null,
       "dueOn": "2026-11-23",
-      "status": "DUE_SOON",
-      "workingDaysLeft": 2
+      "status": "DUE_NEXT_DAY",
+      "workingDaysLeft": 1
     }
   ]
 }

@@ -26,6 +26,7 @@ import { gitStatus, gitVersion } from "../git";
 import { backend } from "../backend";
 import { choose } from "../dialogs";
 import { Icon } from "../Icon";
+import { Modal, modalOpen } from "../modal";
 import { noteCursor } from "../navigation";
 import {
 	activeMarkdownTab,
@@ -1548,8 +1549,17 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 					},
 					onFormatCode: (openLine) => formatCodeBlockAt(openLine),
 					onToggleCheckbox: toggleCheckboxAt,
-					onOpenImageLightbox: (info) => setLightbox({ ...info, zoomFull: false }),
-					onOpenMermaidLightbox: (info) => setMermaidBox({ ...info, scale: 1, x: 0, y: 0 }),
+					onOpenImageLightbox: (info) => {
+						setSelBubble(null);
+						setHoverCard(null);
+						setLightbox({ ...info, zoomFull: false });
+					},
+					onOpenMermaidLightbox: (info) => {
+						setSelBubble(null);
+						setHoverCard(null);
+						mermaidPan = null;
+						setMermaidBox({ ...info, scale: 1, x: 0, y: 0 });
+					},
 					onResizeImage: resizeImageAt,
 					isYamlEditorOpen: () => markdownYamlEditorOpen(),
 				}),
@@ -1700,18 +1710,9 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		});
 
 		const onKeyDownGlobal = (e: KeyboardEvent) => {
+			if (modalOpen()) return;
 			if (e.key === "Escape" && selBubble()) {
 				setSelBubble(null);
-			}
-			if (e.key === "Escape" && mermaidBox()) {
-				e.preventDefault();
-				setMermaidBox(null);
-				return;
-			}
-			if (e.key === "Escape" && lightbox()) {
-				e.preventDefault();
-				setLightbox(null);
-				return;
 			}
 			if (e.key === "Escape" && cmView && searchPanelOpen(cmView.state)) {
 				e.preventDefault();
@@ -2280,218 +2281,220 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 				)}
 			</Show>
 
-			{/* Image Lightbox Modal (portaled to body so it covers tab strips & panels cleanly). */}
+			{/* Image Lightbox Modal (hosted inside <Modal> for inert isolation, focus trap, Esc close, and z-index: 80 stacking). */}
 			<Show when={lightbox()}>
 				{(box) => (
-					<Portal>
-						<div
-							class="md-lightbox-backdrop"
-							role="dialog"
-							aria-modal="true"
-							aria-label={`Image preview: ${box().alt || "image"}`}
-							onClick={(e) => {
-								if (e.target === e.currentTarget) setLightbox(null);
-							}}
-						>
-							<div class="md-lightbox-bar">
-								<span class="md-lightbox-caption">{box().alt || (box().filePath ? baseName(box().filePath!) : "Image preview")}</span>
-								<Show when={box().filePath}>
-									<span class="md-lightbox-path">{relativeTo(state.workspace?.root, box().filePath!)}</span>
-								</Show>
-								<span class="spacer" />
+					<Modal
+						class="md-lightbox-modal"
+						label={`Image preview: ${box().alt || "image"}`}
+						onClose={() => setLightbox(null)}
+					>
+						<div class="md-lightbox-bar">
+							<span class="md-lightbox-caption">{box().alt || (box().filePath ? baseName(box().filePath!) : "Image preview")}</span>
+							<Show when={box().filePath}>
+								<span class="md-lightbox-path">{relativeTo(state.workspace?.root, box().filePath!)}</span>
+							</Show>
+							<span class="spacer" />
+							<button
+								type="button"
+								class="md-lightbox-btn"
+								title={box().zoomFull ? "Fit image to window" : "View at 100% actual size"}
+								onClick={() => setLightbox((cur) => (cur ? { ...cur, zoomFull: !cur.zoomFull } : null))}
+							>
+								<Icon name={box().zoomFull ? "zoom-out" : "zoom-in"} />
+								<span>{box().zoomFull ? "Fit" : "100%"}</span>
+							</button>
+							<Show when={box().filePath}>
 								<button
 									type="button"
 									class="md-lightbox-btn"
-									title={box().zoomFull ? "Fit image to window" : "View at 100% actual size"}
-									onClick={() => setLightbox((cur) => (cur ? { ...cur, zoomFull: !cur.zoomFull } : null))}
+									title="Open image file in a tab"
+									onClick={() => {
+										const p = box().filePath!;
+										setLightbox(null);
+										void openFile(p);
+									}}
 								>
-									<Icon name={box().zoomFull ? "zoom-out" : "zoom-in"} />
-									<span>{box().zoomFull ? "Fit" : "100%"}</span>
+									<Icon name="go-to-file" />
+									<span>Open file</span>
 								</button>
-								<Show when={box().filePath}>
-									<button
-										type="button"
-										class="md-lightbox-btn"
-										title="Open image file in a tab"
-										onClick={() => {
-											const p = box().filePath!;
-											setLightbox(null);
-											void openFile(p);
-										}}
-									>
-										<Icon name="go-to-file" />
-										<span>Open file</span>
-									</button>
-								</Show>
-								<button type="button" class="md-lightbox-btn" title="Close preview (Esc)" aria-label="Close image preview" onClick={() => setLightbox(null)}>
-									<Icon name="close" />
-								</button>
-							</div>
-							<div class="md-lightbox-stage" classList={{ "is-full": Boolean(box().zoomFull) }} onClick={(e) => e.target === e.currentTarget && setLightbox(null)}>
-								<img src={box().src} alt={box().alt} />
-							</div>
+							</Show>
+							<button type="button" class="md-lightbox-btn" data-autofocus title="Close preview (Esc)" aria-label="Close image preview" onClick={() => setLightbox(null)}>
+								<Icon name="close" />
+							</button>
 						</div>
-					</Portal>
+						<div class="md-lightbox-stage" classList={{ "is-full": Boolean(box().zoomFull) }} onClick={(e) => e.target === e.currentTarget && setLightbox(null)}>
+							<img src={box().src} alt={box().alt} />
+						</div>
+					</Modal>
 				)}
 			</Show>
-			{/* Mermaid Zoom / Pan Diagram Lightbox Modal */}
+			{/* Mermaid Zoom / Pan Diagram Lightbox Modal (hosted inside <Modal> for inert isolation, focus trap, and custom zoom/pan keys). */}
 			<Show when={mermaidBox()}>
 				{(box) => (
-					<Portal>
-						<div
-							ref={(el) => queueMicrotask(() => el.focus())}
-							tabIndex={-1}
-							class="md-lightbox-backdrop"
-							role="dialog"
-							aria-modal="true"
-							aria-label="Mermaid diagram zoom viewer"
-							onKeyDown={(e) => {
-								if (e.key === "Escape") {
-									e.preventDefault();
-									e.stopPropagation();
+					<Modal
+						class="md-lightbox-modal"
+						label="Mermaid diagram zoom viewer"
+						onClose={() => {
+							mermaidPan = null;
+							setMermaidBox(null);
+						}}
+						onKey={(e) => {
+							if (e.ctrlKey || e.metaKey || e.altKey) return false;
+							if (e.key === "+" || e.key === "=") {
+								e.preventDefault();
+								setMermaidBox((c) => (c ? { ...c, scale: Math.min(4, +(c.scale + 0.25).toFixed(2)) } : null));
+								return true;
+							}
+							if (e.key === "-" || e.key === "_") {
+								e.preventDefault();
+								setMermaidBox((c) => (c ? { ...c, scale: Math.max(0.25, +(c.scale - 0.25).toFixed(2)) } : null));
+								return true;
+							}
+							if (e.key === "0") {
+								e.preventDefault();
+								setMermaidBox((c) => (c ? { ...c, scale: 1, x: 0, y: 0 } : null));
+								return true;
+							}
+							if (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "ArrowUp" || e.key === "ArrowDown") {
+								e.preventDefault();
+								const step = e.shiftKey ? 120 : 48;
+								const dx = e.key === "ArrowLeft" ? step : e.key === "ArrowRight" ? -step : 0;
+								const dy = e.key === "ArrowUp" ? step : e.key === "ArrowDown" ? -step : 0;
+								setMermaidBox((c) => (c ? { ...c, x: c.x + dx, y: c.y + dy } : null));
+								return true;
+							}
+							return false;
+						}}
+					>
+						<div class="md-lightbox-bar">
+							<span class="md-lightbox-caption">Mermaid diagram</span>
+							<span class="md-lightbox-path">{Math.round(box().scale * 100)}% · scroll or +/- to zoom, drag or arrows to pan, 0 to reset</span>
+							<span class="spacer" />
+							<button
+								type="button"
+								class="md-lightbox-btn"
+								title="Zoom out (-)"
+								onClick={() => setMermaidBox((c) => (c ? { ...c, scale: Math.max(0.25, +(c.scale - 0.25).toFixed(2)) } : null))}
+							>
+								<Icon name="zoom-out" />
+							</button>
+							<button
+								type="button"
+								class="md-lightbox-btn"
+								title="Zoom in (+)"
+								onClick={() => setMermaidBox((c) => (c ? { ...c, scale: Math.min(4, +(c.scale + 0.25).toFixed(2)) } : null))}
+							>
+								<Icon name="zoom-in" />
+							</button>
+							<button
+								type="button"
+								class="md-lightbox-btn"
+								title="Reset zoom and pan (0)"
+								onClick={() => setMermaidBox((c) => (c ? { ...c, scale: 1, x: 0, y: 0 } : null))}
+							>
+								<Icon name="refresh" />
+								<span>Reset</span>
+							</button>
+							<button
+								type="button"
+								class="md-lightbox-btn"
+								title="Copy standalone SVG markup"
+								onClick={() =>
+									void (async () => {
+										const isDark = document.documentElement.dataset.editorTheme !== "light" && document.documentElement.dataset.theme !== "light";
+										const exportSvg = (await renderMermaidSvgForExport(box().code, isDark ? "dark" : "light")) || box().svg;
+										const { copyText } = await import("../commands");
+										await copyText(exportSvg, "Copied Mermaid SVG.");
+									})()
+								}
+							>
+								<Icon name="copy" />
+								<span>Copy SVG</span>
+							</button>
+							<button
+								type="button"
+								class="md-lightbox-btn"
+								title="Download standalone SVG file"
+								onClick={() =>
+									void (async () => {
+										const stem = baseName(props.path).replace(/\.(md|markdown)$/i, "");
+										const isDark = document.documentElement.dataset.editorTheme !== "light" && document.documentElement.dataset.theme !== "light";
+										const exportSvg = (await renderMermaidSvgForExport(box().code, isDark ? "dark" : "light")) || box().svg;
+										downloadMermaidBlob(new Blob([exportSvg], { type: "image/svg+xml;charset=utf-8" }), `${stem}-diagram.svg`);
+										notify(`Saved ${stem}-diagram.svg.`);
+									})()
+								}
+							>
+								<span>Save SVG</span>
+							</button>
+							<button
+								type="button"
+								class="md-lightbox-btn"
+								title="Copy diagram as PNG (falls back to download)"
+								onClick={() =>
+									void copyMermaidAsPng(box().svg, box().code).then((res) =>
+										notify(
+											res === "copied"
+												? "Copied diagram PNG to clipboard."
+												: res === "downloaded"
+													? "Downloaded diagram.png."
+													: "Could not render diagram PNG.",
+											res === "failed" ? "error" : "info",
+										),
+									)
+								}
+							>
+								<span>Copy PNG</span>
+							</button>
+							<button
+								type="button"
+								class="md-lightbox-btn"
+								data-autofocus
+								title="Close preview (Esc)"
+								aria-label="Close diagram preview"
+								onClick={() => {
+									mermaidPan = null;
 									setMermaidBox(null);
-									return;
-								}
-								if (e.key === "+" || e.key === "=") {
-									e.preventDefault();
-									setMermaidBox((c) => (c ? { ...c, scale: Math.min(4, +(c.scale + 0.25).toFixed(2)) } : null));
-								} else if (e.key === "-" || e.key === "_") {
-									e.preventDefault();
-									setMermaidBox((c) => (c ? { ...c, scale: Math.max(0.25, +(c.scale - 0.25).toFixed(2)) } : null));
-								} else if (e.key === "0") {
-									e.preventDefault();
-									setMermaidBox((c) => (c ? { ...c, scale: 1, x: 0, y: 0 } : null));
-								} else if (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "ArrowUp" || e.key === "ArrowDown") {
-									e.preventDefault();
-									const step = e.shiftKey ? 120 : 48;
-									const dx = e.key === "ArrowLeft" ? step : e.key === "ArrowRight" ? -step : 0;
-									const dy = e.key === "ArrowUp" ? step : e.key === "ArrowDown" ? -step : 0;
-									setMermaidBox((c) => (c ? { ...c, x: c.x + dx, y: c.y + dy } : null));
-								}
-							}}
-							onClick={(e) => {
-								if (e.target === e.currentTarget) setMermaidBox(null);
-							}}
-						>
-							<div class="md-lightbox-bar">
-								<span class="md-lightbox-caption">Mermaid diagram</span>
-								<span class="md-lightbox-path">{Math.round(box().scale * 100)}% · scroll or +/- to zoom, drag or arrows to pan, 0 to reset</span>
-								<span class="spacer" />
-								<button
-									type="button"
-									class="md-lightbox-btn"
-									title="Zoom out (-)"
-									onClick={() => setMermaidBox((c) => (c ? { ...c, scale: Math.max(0.25, +(c.scale - 0.25).toFixed(2)) } : null))}
-								>
-									<Icon name="zoom-out" />
-								</button>
-								<button
-									type="button"
-									class="md-lightbox-btn"
-									title="Zoom in (+)"
-									onClick={() => setMermaidBox((c) => (c ? { ...c, scale: Math.min(4, +(c.scale + 0.25).toFixed(2)) } : null))}
-								>
-									<Icon name="zoom-in" />
-								</button>
-								<button
-									type="button"
-									class="md-lightbox-btn"
-									title="Reset zoom and pan (0)"
-									onClick={() => setMermaidBox((c) => (c ? { ...c, scale: 1, x: 0, y: 0 } : null))}
-								>
-									<Icon name="refresh" />
-									<span>Reset</span>
-								</button>
-								<button
-									type="button"
-									class="md-lightbox-btn"
-									title="Copy standalone SVG markup"
-									onClick={() =>
-										void (async () => {
-											const isDark = document.documentElement.dataset.editorTheme !== "light" && document.documentElement.dataset.theme !== "light";
-											const exportSvg = (await renderMermaidSvgForExport(box().code, isDark ? "dark" : "light")) || box().svg;
-											const { copyText } = await import("../commands");
-											await copyText(exportSvg, "Copied Mermaid SVG.");
-										})()
-									}
-								>
-									<Icon name="copy" />
-									<span>Copy SVG</span>
-								</button>
-								<button
-									type="button"
-									class="md-lightbox-btn"
-									title="Download standalone SVG file"
-									onClick={() =>
-										void (async () => {
-											const stem = baseName(props.path).replace(/\.(md|markdown)$/i, "");
-											const isDark = document.documentElement.dataset.editorTheme !== "light" && document.documentElement.dataset.theme !== "light";
-											const exportSvg = (await renderMermaidSvgForExport(box().code, isDark ? "dark" : "light")) || box().svg;
-											downloadMermaidBlob(new Blob([exportSvg], { type: "image/svg+xml;charset=utf-8" }), `${stem}-diagram.svg`);
-											notify(`Saved ${stem}-diagram.svg.`);
-										})()
-									}
-								>
-									<span>Save SVG</span>
-								</button>
-								<button
-									type="button"
-									class="md-lightbox-btn"
-									title="Copy diagram as PNG (falls back to download)"
-									onClick={() =>
-										void copyMermaidAsPng(box().svg, box().code).then((res) =>
-											notify(
-												res === "copied"
-													? "Copied diagram PNG to clipboard."
-													: res === "downloaded"
-														? "Downloaded diagram.png."
-														: "Could not render diagram PNG.",
-												res === "failed" ? "error" : "info",
-											),
-										)
-									}
-								>
-									<span>Copy PNG</span>
-								</button>
-								<button type="button" class="md-lightbox-btn" title="Close preview (Esc)" aria-label="Close diagram preview" onClick={() => setMermaidBox(null)}>
-									<Icon name="close" />
-								</button>
-							</div>
-							<div
-								class="md-lightbox-stage md-mermaid-lightbox-stage"
-								onWheel={(e) => {
-									e.preventDefault();
-									const delta = e.deltaY < 0 ? 0.15 : -0.15;
-									setMermaidBox((c) => (c ? { ...c, scale: Math.max(0.25, Math.min(4, +(c.scale + delta).toFixed(2))) } : null));
-								}}
-								onPointerDown={(e) => {
-									if (e.button !== 0) return;
-									const cur = mermaidBox();
-									if (!cur) return;
-									mermaidPan = { startX: e.clientX, startY: e.clientY, origX: cur.x, origY: cur.y };
-									(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-								}}
-								onPointerMove={(e) => {
-									if (!mermaidPan) return;
-									const dx = e.clientX - mermaidPan.startX;
-									const dy = e.clientY - mermaidPan.startY;
-									setMermaidBox((c) => (c ? { ...c, x: mermaidPan!.origX + dx, y: mermaidPan!.origY + dy } : null));
-								}}
-								onPointerUp={() => {
-									mermaidPan = null;
-								}}
-								onPointerCancel={() => {
-									mermaidPan = null;
 								}}
 							>
-								<div
-									class="md-mermaid-lightbox-canvas"
-									style={{ transform: `translate(${box().x}px, ${box().y}px) scale(${box().scale})` }}
-									innerHTML={box().svg}
-								/>
-							</div>
+								<Icon name="close" />
+							</button>
 						</div>
-					</Portal>
+						<div
+							class="md-lightbox-stage md-mermaid-lightbox-stage"
+							onWheel={(e) => {
+								e.preventDefault();
+								const delta = e.deltaY < 0 ? 0.15 : -0.15;
+								setMermaidBox((c) => (c ? { ...c, scale: Math.max(0.25, Math.min(4, +(c.scale + delta).toFixed(2))) } : null));
+							}}
+							onPointerDown={(e) => {
+								if (e.button !== 0) return;
+								const cur = mermaidBox();
+								if (!cur) return;
+								mermaidPan = { startX: e.clientX, startY: e.clientY, origX: cur.x, origY: cur.y };
+								(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+							}}
+							onPointerMove={(e) => {
+								if (!mermaidPan) return;
+								const dx = e.clientX - mermaidPan.startX;
+								const dy = e.clientY - mermaidPan.startY;
+								setMermaidBox((c) => (c ? { ...c, x: mermaidPan!.origX + dx, y: mermaidPan!.origY + dy } : null));
+							}}
+							onPointerUp={() => {
+								mermaidPan = null;
+							}}
+							onPointerCancel={() => {
+								mermaidPan = null;
+							}}
+						>
+							<div
+								class="md-mermaid-lightbox-canvas"
+								style={{ transform: `translate(${box().x}px, ${box().y}px) scale(${box().scale})` }}
+								innerHTML={box().svg}
+							/>
+						</div>
+					</Modal>
 				)}
 			</Show>
 		</div>

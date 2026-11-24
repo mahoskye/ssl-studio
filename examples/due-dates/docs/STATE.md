@@ -7,8 +7,9 @@ engineer: no file names, no code.
 
 Samples that arrive without a due date now get one, counted in working days
 and moved past any day their instrument is out of service. The report of
-what is due soon is planned and not yet built. Nothing here has run in
-STARLIMS itself: it has run in a local sandbox only.
+what is due soon is half-built: it reads the right samples, and does not yet
+mark late ones. Nothing here has run in STARLIMS itself: it has run in a local
+sandbox only.
 
 ## What works now
 

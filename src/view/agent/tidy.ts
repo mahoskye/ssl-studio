@@ -69,6 +69,13 @@ export function startTidy() {
 	setTidy({ path, steps: STEPS.map(() => "pending"), problems: STEPS.map(() => "") });
 }
 
+/** Clears tidy state and pending step proposals (e.g. when switching workspaces). */
+export function resetTidy() {
+	generation++;
+	proposals.clear();
+	setTidy({ path: null, steps: STEPS.map(() => "pending"), problems: STEPS.map(() => "") });
+}
+
 /** The proposal a step has under review, if any: the panel compares it with the review that is open. */
 export const proposalOf = (index: number) => proposals.get(index);
 
