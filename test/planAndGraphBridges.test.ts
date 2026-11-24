@@ -65,7 +65,7 @@ describe("Wave 4.2 — planToMermaid", () => {
 		expect(m1).toContain('  n6(["Return summary"])');
 
 		// Subgraphs for non-empty stages only (empty group omitted)
-		expect(m1).toContain('  subgraph g1["Intake & Validation"]');
+		expect(m1).toContain('  subgraph g1["Intake &amp; Validation"]');
 		expect(m1).toContain('  subgraph g2["Persistence"]');
 		expect(m1).not.toContain("Unused Stage");
 
@@ -78,7 +78,7 @@ describe("Wave 4.2 — planToMermaid", () => {
 
 		// Plain labeled edge + punctuation-escaped labeled edge
 		expect(m1).toContain("  n3 -->|yes| n4");
-		expect(m1).toContain('  n3 -->|"no / standard"| n5');
+		expect(m1).toContain('  n3 -->|"no #124; standard"| n5');
 		expect(m1).toContain("  n1 --> n2");
 	});
 

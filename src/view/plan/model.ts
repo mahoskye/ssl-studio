@@ -29,6 +29,76 @@ export type Plan = { version: number; title: string; groups: PlanGroup[]; nodes:
 
 const KINDS = new Set<string>(["start", "end", "step", "decision", "call"]);
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+const isSerializable = (value: unknown): boolean => value !== undefined && typeof value !== "function" && typeof value !== "symbol";
+const optString = (value: unknown): string | undefined =>
+	typeof value === "string" ? value : typeof value === "number" || typeof value === "boolean" ? String(value) : undefined;
+
+function validOffset(value: unknown): PlanOffset | undefined {
+	if (!isObject(value)) return undefined;
+	if (typeof value.x !== "number" || !Number.isFinite(value.x) || typeof value.y !== "number" || !Number.isFinite(value.y)) return undefined;
+	const { x, y, dir, ...rest } = value;
+	return dir === "RIGHT" || dir === "DOWN" ? ({ ...rest, x, y, dir } as PlanOffset) : ({ ...rest, x, y } as PlanOffset);
+}
+
+function validRoute(value: unknown): RouteOffsets | undefined {
+	if (!isObject(value)) return undefined;
+	const cleaned: RouteOffsets = {};
+	for (const [k, v] of Object.entries(value)) {
+		if (typeof v === "number" && Number.isFinite(v)) cleaned[k] = v;
+	}
+	return Object.keys(cleaned).length ? cleaned : undefined;
+}
+
+function sanitizeNode(n: Record<string, unknown>): PlanNode {
+	const out: Record<string, unknown> = { ...n };
+	if ("ref" in out) {
+		const s = optString(out.ref);
+		if (s !== undefined) out.ref = s;
+		else delete out.ref;
+	}
+	if ("notes" in out) {
+		const s = optString(out.notes);
+		if (s !== undefined) out.notes = s;
+		else delete out.notes;
+	}
+	if ("group" in out) {
+		const s = optString(out.group);
+		if (s !== undefined) out.group = s;
+		else delete out.group;
+	}
+	if ("docs" in out && !Array.isArray(out.docs)) delete out.docs;
+	if ("offset" in out) {
+		const off = validOffset(out.offset);
+		if (off) out.offset = off;
+		else delete out.offset;
+	}
+	return out as PlanNode;
+}
+
+function sanitizeEdge(e: Record<string, unknown>): PlanEdge {
+	const out: Record<string, unknown> = { ...e };
+	if ("label" in out) {
+		const s = optString(out.label);
+		if (s !== undefined) out.label = s;
+		else delete out.label;
+	}
+	if ("route" in out) {
+		const r = validRoute(out.route);
+		if (r) out.route = r;
+		else delete out.route;
+	}
+	return out as PlanEdge;
+}
+
+function sanitizeGroup(g: Record<string, unknown>): PlanGroup {
+	const out: Record<string, unknown> = { ...g };
+	if ("offset" in out) {
+		const off = validOffset(out.offset);
+		if (off) out.offset = off;
+		else delete out.offset;
+	}
+	return out as PlanGroup;
+}
 
 /** Dragged from the Objects panel to make a call node. */
 export const PROCEDURE_DRAG = "application/x-ssl-procedure";
@@ -59,19 +129,50 @@ export function parsePlan(text: string): { plan: Plan; error?: undefined } | { p
 	}
 	if (!isObject(raw)) return { error: "A plan is one JSON object." };
 	if (raw.version !== 1) return { error: `This plan is version ${JSON.stringify(raw.version)}; SSL Studio reads version 1.` };
-	const groups = raw.groups ?? [];
-	if (!Array.isArray(raw.nodes) || !Array.isArray(raw.edges) || !Array.isArray(groups)) return { error: '"nodes" and "edges" must be lists.' };
+	const rawGroups = raw.groups ?? [];
+	if (!Array.isArray(raw.nodes) || !Array.isArray(raw.edges) || !Array.isArray(rawGroups)) return { error: '"nodes" and "edges" must be lists.' };
+	const nodes: PlanNode[] = [];
 	for (const n of raw.nodes) {
 		if (!isObject(n) || typeof n.id !== "string" || typeof n.text !== "string") return { error: 'Each node needs an "id" and a "text".' };
 		if (!KINDS.has(String(n.kind))) return { error: `Node ${n.id} has an unknown kind: ${JSON.stringify(n.kind)}.` };
+		nodes.push(sanitizeNode(n));
 	}
-	for (const e of raw.edges) if (!isObject(e) || typeof e.from !== "string" || typeof e.to !== "string") return { error: 'Each edge needs a "from" and a "to".' };
-	for (const g of groups) if (!isObject(g) || typeof g.id !== "string" || typeof g.name !== "string") return { error: 'Each group needs an "id" and a "name".' };
-	return { plan: { ...raw, title: typeof raw.title === "string" ? raw.title : "", groups } as Plan };
+	const edges: PlanEdge[] = [];
+	for (const e of raw.edges) {
+		if (!isObject(e) || typeof e.from !== "string" || typeof e.to !== "string") return { error: 'Each edge needs a "from" and a "to".' };
+		edges.push(sanitizeEdge(e));
+	}
+	const groups: PlanGroup[] = [];
+	for (const g of rawGroups) {
+		if (!isObject(g) || typeof g.id !== "string" || typeof g.name !== "string") return { error: 'Each group needs an "id" and a "name".' };
+		groups.push(sanitizeGroup(g));
+	}
+	const out: Record<string, unknown> = {
+		...raw,
+		title: typeof raw.title === "string" ? raw.title : "",
+		groups,
+		nodes,
+		edges,
+	};
+	if ("tests" in out) {
+		if (Array.isArray(out.tests)) out.tests = out.tests.filter(isObject);
+		else delete out.tests;
+	}
+	if ("decisions" in out) {
+		if (Array.isArray(out.decisions)) out.decisions = out.decisions.filter(isObject);
+		else delete out.decisions;
+	}
+	if (isObject(out.built) && Array.isArray(out.built.units)) {
+		out.built = { ...out.built, units: out.built.units.filter(isObject) };
+	}
+	return { plan: out as Plan };
 }
 
 const row = (value: Record<string, unknown>, first: string[]) => {
-	const keys = [...first.filter((k) => value[k] !== undefined), ...Object.keys(value).filter((k) => !first.includes(k))];
+	const keys = [
+		...first.filter((k) => isSerializable(value[k])),
+		...Object.keys(value).filter((k) => !first.includes(k) && isSerializable(value[k])),
+	];
 	return `{ ${keys.map((k) => `${JSON.stringify(k)}: ${JSON.stringify(value[k])}`).join(", ")} }`;
 };
 const rows = (name: string, list: Record<string, unknown>[], first: string[]) =>
@@ -79,25 +180,39 @@ const rows = (name: string, list: Record<string, unknown>[], first: string[]) =>
 
 /** The record of a build, as `built.ts` has it: a unit a line, a node a line. */
 function printBuilt(built: Record<string, unknown>) {
-	const inner = Object.entries(built).map(([k, v]) => (k === "units" && Array.isArray(v) ? `    "units": [\n${v.map((u) => `      ${row(u, ["name", "script", "parameters", "nodes", "calls"])}`).join(",\n")}\n    ]` : `    ${JSON.stringify(k)}: ${JSON.stringify(v, null, 2).replace(/\n/g, "\n    ")}`));
-	return `  "built": {\n${inner.join(",\n")}\n  }`;
+	const inner = Object.entries(built)
+		.filter(([, v]) => isSerializable(v))
+		.map(([k, v]) => {
+			if (k === "units" && Array.isArray(v)) {
+				const valid = v.filter(isObject);
+				return valid.length
+					? `    "units": [\n${valid.map((u) => `      ${row(u, ["name", "script", "parameters", "nodes", "calls"])}`).join(",\n")}\n    ]`
+					: `    "units": []`;
+			}
+			return `    ${JSON.stringify(k)}: ${JSON.stringify(v, null, 2).replace(/\n/g, "\n    ")}`;
+		});
+	return inner.length ? `  "built": {\n${inner.join(",\n")}\n  }` : `  "built": {}`;
 }
 
 /** One node or edge a line, in a stable order, so a change shows as a small diff. */
 export function printPlan(plan: Plan): string {
 	const { version, title, goal, ticket, targets, groups, nodes, edges, tests, built, ...rest } = plan;
 	const head = { version, title, goal, ticket, targets };
-	const cleanTests = Array.isArray(tests) ? tests : [];
+	const cleanTests = Array.isArray(tests) ? tests.filter(isObject) : [];
+	const restLines = Object.entries(rest)
+		.filter(([, v]) => isSerializable(v))
+		.map(([k, v]) => JSON.stringify({ [k]: v }, null, 2).split("\n").slice(1, -1).join("\n"))
+		.filter((line) => line.length > 0);
 	const lines = [
 		...Object.entries(head)
-			.filter(([, v]) => v !== undefined)
+			.filter(([, v]) => isSerializable(v))
 			.map(([k, v]) => `  ${JSON.stringify(k)}: ${JSON.stringify(v)}`),
 		rows("groups", groups, ["id", "name", "offset"]),
 		rows("nodes", nodes, ["id", "kind", "text", "ref", "group", "notes", "docs", "offset"]),
 		rows("edges", edges, ["from", "to", "label", "route"]),
 		...(cleanTests.length ? [rows("tests", cleanTests, ["id", "title", "node", "journey", "given", "expect", "notes"])] : []),
-		...Object.entries(rest).map(([k, v]) => JSON.stringify({ [k]: v }, null, 2).split("\n").slice(1, -1).join("\n")),
-		...(isObject(built) ? [printBuilt(built)] : built === undefined ? [] : [`  "built": ${JSON.stringify(built)}`]),
+		...restLines,
+		...(isObject(built) ? [printBuilt(built)] : isSerializable(built) ? [`  "built": ${JSON.stringify(built)}`] : []),
 	];
 	return `{\n${lines.join(",\n")}\n}\n`;
 }
@@ -119,7 +234,7 @@ const into = (plan: Plan, id: string) => plan.edges.filter((e) => e.to === id);
 const nodeOf = (plan: Plan, id: string) => plan.nodes.find((n) => n.id === id);
 
 function nextLabel(plan: Plan, id: string) {
-	const used = new Set(outOf(plan, id).map((e) => e.label?.toLowerCase()));
+	const used = new Set(outOf(plan, id).map((e) => (typeof e.label === "string" ? e.label.toLowerCase() : undefined)));
 	if (!used.has("yes")) return "yes";
 	if (!used.has("no")) return "no";
 	return `option ${used.size + 1}`;
@@ -130,23 +245,29 @@ function make(plan: Plan, kind: NodeKind, text: string, near?: PlanNode, ref?: s
 }
 
 /** The next step: takes over the selected node's way out, or comes before an end. */
-export function addAfter(plan: Plan, id: string, kind: NodeKind = "step", text = "New step", ref?: string): Edit {
+export function addAfter(plan: Plan, id: string, kind: NodeKind = "step", text?: string, ref?: string): Edit {
 	const at = nodeOf(plan, id);
 	if (!at) return { plan };
 	if (at.kind === "decision") return addBranch(plan, id, kind, text, ref) ?? { plan };
-	const node = make(plan, kind, text, at, ref);
+	const label = text ?? (kind === "end" ? "End" : "New step");
+	const node = make(plan, kind, label, at, ref);
 	const edges =
-		at.kind === "end"
-			? [...plan.edges.map((e) => (e.to === id ? { ...e, to: node.id } : e)), { from: node.id, to: id }]
-			: [...plan.edges.map((e) => (e.from === id ? { ...e, from: node.id } : e)), { from: id, to: node.id }];
+		kind === "end"
+			? at.kind === "end"
+				? plan.edges
+				: [...plan.edges, { from: id, to: node.id }]
+			: at.kind === "end"
+				? [...plan.edges.map((e) => (e.to === id ? { ...e, to: node.id } : e)), { from: node.id, to: id }]
+				: [...plan.edges.map((e) => (e.from === id ? { ...e, from: node.id } : e)), { from: id, to: node.id }];
 	return { plan: { ...plan, nodes: [...plan.nodes, node], edges }, select: node.id };
 }
 
 /** Another way out. A step becomes a decision; the new branch runs to the first end. */
-export function addBranch(plan: Plan, id: string, kind: NodeKind = "step", text = "New step", ref?: string): Edit | null {
+export function addBranch(plan: Plan, id: string, kind: NodeKind = "step", text?: string, ref?: string): Edit | null {
 	const at = nodeOf(plan, id);
 	if (!at || (at.kind !== "step" && at.kind !== "decision")) return null;
-	const node = make(plan, kind, text, at, ref);
+	const label = text ?? (kind === "end" ? "End" : "New step");
+	const node = make(plan, kind, label, at, ref);
 	// What already leaves a step is its first branch.
 	let edges = plan.edges;
 	if (at.kind === "step") {
@@ -157,7 +278,15 @@ export function addBranch(plan: Plan, id: string, kind: NodeKind = "step", text 
 	const after = { ...plan, nodes, edges };
 	const end = plan.nodes.find((n) => n.kind === "end");
 	return {
-		plan: { ...after, nodes: [...nodes, node], edges: [...edges, { from: id, to: node.id, label: nextLabel(after, id) }, ...(end ? [{ from: node.id, to: end.id }] : [])] },
+		plan: {
+			...after,
+			nodes: [...nodes, node],
+			edges: [
+				...edges,
+				{ from: id, to: node.id, label: nextLabel(after, id) },
+				...(kind !== "end" && end ? [{ from: node.id, to: end.id }] : []),
+			],
+		},
 		select: node.id,
 	};
 }
@@ -173,7 +302,15 @@ export function removeNode(plan: Plan, id: string): Edit {
 	const ins = into(plan, id).filter((e) => e.from !== id);
 	const outs = outOf(plan, id).filter((e) => e.to !== id);
 	const edges = plan.edges.filter((e) => e.from !== id && e.to !== id);
-	if (ins.length === 1 && outs.length === 1 && !edges.some((e) => e.from === ins[0]!.from && e.to === outs[0]!.to)) edges.push({ ...ins[0]!, to: outs[0]!.to });
+	if (
+		ins.length === 1 &&
+		outs.length === 1 &&
+		ins[0]!.from !== outs[0]!.to &&
+		!edges.some((e) => e.from === ins[0]!.from && e.to === outs[0]!.to)
+	) {
+		const { route: _oldRoute, ...restIn } = ins[0]!;
+		edges.push({ ...restIn, to: outs[0]!.to } as PlanEdge);
+	}
 	// Keep any business test cases attached to the removed node as plan-level tests (ADR 0009: nothing lost silently).
 	const existingTests = planTestsOf(plan);
 	const nextTests = existingTests.length
@@ -274,7 +411,7 @@ export function setKind(plan: Plan, id: string, kind: NodeKind, ref?: string): P
 			if (n.id !== id) return n;
 			const { ref: prevRef, ...rest } = n;
 			if (kind === "call") {
-				const nextRef = ref?.trim() || prevRef || n.text.trim();
+				const nextRef = ref?.trim() || (typeof prevRef === "string" ? prevRef.trim() : "") || n.text.trim();
 				return { ...rest, kind, ...(nextRef ? { ref: nextRef } : {}) } as PlanNode;
 			}
 			return { ...rest, kind } as PlanNode;
@@ -298,16 +435,22 @@ export function insertOnEdge(plan: Plan, from: string, to: string, kind: NodeKin
 	return { plan: { ...plan, nodes: [...plan.nodes, node], edges }, select: node.id };
 }
 
-/** Duplicates a node right after itself (preserving kind, text, ref, group, notes, and docs). */
+/** Duplicates a node right after itself (preserving kind, text, ref, group, notes, docs, and custom fields). */
 export function duplicateNode(plan: Plan, id: string): Edit | null {
 	const src = nodeOf(plan, id);
 	if (!src || src.kind === "start" || src.kind === "end") return null;
-	const added = addAfter(plan, id, src.kind, src.text, src.ref);
+	const added = addAfter(plan, id, src.kind, src.text, typeof src.ref === "string" ? src.ref : undefined);
 	if (!added.select) return null;
 	const docs = nodeDocsOf(src);
+	const { id: _id, offset: _offset, docs: _docs, notes: _notes, pending: _pending, ...srcRest } = src;
 	const nextNodes = added.plan.nodes.map((n) =>
 		n.id === added.select
-			? { ...n, ...(src.notes ? { notes: src.notes } : {}), ...(docs.length ? { docs } : {}) }
+			? {
+					...srcRest,
+					...n,
+					...(typeof src.notes === "string" && src.notes ? { notes: src.notes } : {}),
+					...(docs.length ? { docs } : {}),
+				}
 			: n,
 	);
 	return { plan: { ...added.plan, nodes: nextNodes }, select: added.select };
@@ -497,7 +640,8 @@ export function resetPlanLayout(plan: Plan): Plan {
 
 /** Whether any node, stage group, or edge carries manual layout tweaks for the active direction. */
 export function hasManualLayout(plan: Plan, dir: "DOWN" | "RIGHT" = "DOWN"): boolean {
-	const matches = (o?: PlanOffset) => Boolean(o && (o.dir ?? "DOWN") === dir && (Math.abs(o.x) >= 2 || Math.abs(o.y) >= 2));
+	const matches = (o?: PlanOffset) =>
+		Boolean(o && Number.isFinite(o.x) && Number.isFinite(o.y) && (o.dir ?? "DOWN") === dir && (Math.abs(o.x) >= 2 || Math.abs(o.y) >= 2));
 	return (
 		plan.nodes.some((n) => matches(n.offset)) ||
 		plan.groups.some((g) => matches(g.offset)) ||
@@ -546,16 +690,21 @@ export function checkPlan(plan: Plan): Finding[] {
 	for (const n of plan.nodes) {
 		const at = { node: n.id };
 		const outs = outOf(plan, n.id);
-		if (!n.text.trim()) add("warning", "plan-empty-text", `Node ${n.id} says nothing.`, at);
+		const text = typeof n.text === "string" ? n.text.trim() : "";
+		const ref = typeof n.ref === "string" ? n.ref.trim() : "";
+		if (!text) add("warning", "plan-empty-text", `Node ${n.id} says nothing.`, at);
 		if (starts.length && !reachable.has(n.id)) add("warning", "plan-unreachable", `Nothing leads to ${label(n)}.`, at);
 		if (n.kind !== "end" && !outs.length) add("warning", "plan-dead-end", `${label(n)} leads nowhere.`, at);
 		if (n.kind === "end" && outs.length) add("warning", "plan-end-continues", `${label(n)} is an end, but the flow continues from it.`, at);
 		if (n.kind === "start" && into(plan, n.id).length) add("warning", "plan-start-entered", `${label(n)} is a start, but the flow comes back to it.`, at);
-		if (n.kind === "call" && !n.ref?.trim()) add("warning", "plan-call-no-ref", `${label(n)} does not say what it calls.`, at);
+		if (n.kind === "call" && !ref) add("warning", "plan-call-no-ref", `${label(n)} does not say what it calls.`, at);
 		if (n.group && !groups.has(n.group)) add("warning", "plan-unknown-group", `${label(n)} names a group that does not exist.`, at);
 		if (n.kind === "decision") {
 			if (outs.length < 2) add("warning", "plan-one-way-decision", `The decision ${label(n)} has ${outs.length ? "one way" : "no way"} out.`, at);
-			for (const e of outs) if (!e.label?.trim()) add("warning", "plan-unlabelled-branch", `A branch of the decision ${label(n)} has no label.`, { edge: { from: e.from, to: e.to } });
+			for (const e of outs) {
+				const edgeLabel = typeof e.label === "string" ? e.label.trim() : "";
+				if (!edgeLabel) add("warning", "plan-unlabelled-branch", `A branch of the decision ${label(n)} has no label.`, { edge: { from: e.from, to: e.to } });
+			}
 		}
 	}
 	return out;
@@ -564,53 +713,235 @@ export function checkPlan(plan: Plan): Finding[] {
 /** Call nodes whose `ref` the language server does not know, by the caller's test. */
 export function checkRefs(plan: Plan, known: (ref: string) => boolean): Finding[] {
 	return plan.nodes
-		.filter((n) => n.kind === "call" && n.ref?.trim() && !known(n.ref))
+		.filter((n) => n.kind === "call" && typeof n.ref === "string" && n.ref.trim() && !known(n.ref))
 		.map((n) => ({ severity: "warning" as const, code: "plan-unresolved-ref", message: `Nothing in the workspace is called ${n.ref}.`, node: n.id }));
 }
 
 // --- between the chart and its text ------------------------------------------------
 
+type ScannedPlanJson = {
+	topFields: Map<string, number>;
+	nodes: { id: string; idLine: number; startLine: number; endLine: number }[];
+	edges: { from: string; to: string; line: number; startLine: number; endLine: number }[];
+	nodesRange: { startLine: number; endLine: number } | null;
+};
+
+type JsonFrame = {
+	type: "object" | "array";
+	section?: "root" | "nodes-array" | "node-obj" | "edges-array" | "edge-obj";
+	expectKey?: boolean;
+	pendingKey?: string;
+	startLine: number;
+	nodeId?: string;
+	nodeIdLine?: number;
+	edgeFrom?: string;
+	edgeTo?: string;
+	edgeFromLine?: number;
+};
+
+/** Structural JSON scanner tracking brace/bracket depth and line numbers regardless of indentation or field order. */
+function scanPlanJson(text: string): ScannedPlanJson {
+	const topFields = new Map<string, number>();
+	const nodes: ScannedPlanJson["nodes"] = [];
+	const edges: ScannedPlanJson["edges"] = [];
+	let nodesRange: ScannedPlanJson["nodesRange"] = null;
+	let seenNodesArray = false;
+	let seenEdgesArray = false;
+	const stack: JsonFrame[] = [];
+
+	let i = 0;
+	let line = 1;
+	const len = text.length;
+
+	const skipWs = () => {
+		while (i < len) {
+			const c = text.charCodeAt(i);
+			if (c === 10) {
+				line++;
+				i++;
+			} else if (c === 32 || c === 9 || c === 13) {
+				i++;
+			} else break;
+		}
+	};
+
+	const readString = (): { value: string; line: number } => {
+		const start = i;
+		const startLine = line;
+		i++; // opening quote
+		while (i < len) {
+			const c = text.charCodeAt(i);
+			if (c === 92) {
+				// backslash escape
+				i++;
+				if (i < len) {
+					if (text.charCodeAt(i) === 10) line++;
+					i++;
+				}
+			} else if (c === 34) {
+				i++;
+				break;
+			} else {
+				if (c === 10) line++;
+				i++;
+			}
+		}
+		const raw = text.slice(start, i);
+		try {
+			return { value: JSON.parse(raw), line: startLine };
+		} catch {
+			return { value: raw.slice(1, raw.endsWith('"') ? -1 : undefined), line: startLine };
+		}
+	};
+
+	while (i < len) {
+		skipWs();
+		if (i >= len) break;
+		const ch = text[i]!;
+		const top = stack[stack.length - 1];
+
+		if (ch === '"') {
+			const tok = readString();
+			if (top?.type === "object") {
+				if (top.expectKey) {
+					skipWs();
+					if (text[i] === ":") {
+						i++;
+						top.pendingKey = tok.value;
+						top.expectKey = false;
+						if (top.section === "root" && !topFields.has(tok.value)) topFields.set(tok.value, tok.line);
+					}
+				} else {
+					if (top.section === "node-obj" && top.pendingKey === "id" && top.nodeId === undefined) {
+						top.nodeId = tok.value;
+						top.nodeIdLine = tok.line;
+					} else if (top.section === "edge-obj") {
+						if (top.pendingKey === "from" && top.edgeFrom === undefined) {
+							top.edgeFrom = tok.value;
+							top.edgeFromLine = tok.line;
+						} else if (top.pendingKey === "to" && top.edgeTo === undefined) {
+							top.edgeTo = tok.value;
+						}
+					}
+					top.pendingKey = undefined;
+				}
+			}
+			continue;
+		}
+
+		if (ch === "{") {
+			i++;
+			if (!top) {
+				stack.push({ type: "object", section: "root", expectKey: true, startLine: line });
+			} else if (top.type === "array" && top.section === "nodes-array") {
+				stack.push({ type: "object", section: "node-obj", expectKey: true, startLine: line });
+			} else if (top.type === "array" && top.section === "edges-array") {
+				stack.push({ type: "object", section: "edge-obj", expectKey: true, startLine: line });
+			} else {
+				if (top.type === "object") top.pendingKey = undefined;
+				stack.push({ type: "object", expectKey: true, startLine: line });
+			}
+			continue;
+		}
+
+		if (ch === "}") {
+			i++;
+			const closed = stack.pop();
+			if (closed?.section === "node-obj" && closed.nodeId !== undefined) {
+				nodes.push({ id: closed.nodeId, idLine: closed.nodeIdLine!, startLine: closed.startLine, endLine: line });
+			} else if (closed?.section === "edge-obj" && closed.edgeFrom !== undefined && closed.edgeTo !== undefined) {
+				edges.push({ from: closed.edgeFrom, to: closed.edgeTo, line: closed.edgeFromLine ?? closed.startLine, startLine: closed.startLine, endLine: line });
+			}
+			continue;
+		}
+
+		if (ch === "[") {
+			i++;
+			if (top?.type === "object" && top.section === "root" && top.pendingKey === "nodes" && !seenNodesArray) {
+				seenNodesArray = true;
+				nodesRange = { startLine: line, endLine: Number.MAX_SAFE_INTEGER };
+				top.pendingKey = undefined;
+				stack.push({ type: "array", section: "nodes-array", startLine: line });
+			} else if (top?.type === "object" && top.section === "root" && top.pendingKey === "edges" && !seenEdgesArray) {
+				seenEdgesArray = true;
+				top.pendingKey = undefined;
+				stack.push({ type: "array", section: "edges-array", startLine: line });
+			} else {
+				if (top?.type === "object") top.pendingKey = undefined;
+				stack.push({ type: "array", startLine: line });
+			}
+			continue;
+		}
+
+		if (ch === "]") {
+			i++;
+			const closed = stack.pop();
+			if (closed?.section === "nodes-array" && nodesRange) {
+				nodesRange.endLine = line;
+			}
+			continue;
+		}
+
+		if (ch === ",") {
+			i++;
+			if (top?.type === "object") {
+				top.expectKey = true;
+				top.pendingKey = undefined;
+			}
+			continue;
+		}
+
+		if (ch === ":") {
+			i++;
+			continue;
+		}
+
+		// Primitive token (number, boolean, null)
+		while (i < len && !/[\s,:\[\]{}"]/.test(text[i]!)) i++;
+		if (top?.type === "object") top.pendingKey = undefined;
+	}
+
+	if (nodesRange && nodesRange.endLine === Number.MAX_SAFE_INTEGER) nodesRange.endLine = line;
+	return { topFields, nodes, edges, nodesRange };
+}
+
 /** Each node's 1-based line in the plan's text. */
 export function nodeLines(text: string, plan: Plan): Map<string, number> {
-	const lines = text.split(/\r?\n/);
-	const result = new Map<string, number>();
-	const start = lines.findIndex((l) => /^\s*"nodes"\s*:/.test(l));
-	if (start < 0) return result;
 	const ids = new Set(plan.nodes.map((n) => n.id));
-	for (let i = start; i < lines.length; i++) {
-		if (i > start && /^\s{0,2}"\w+"\s*:/.test(lines[i]!)) break;
-		for (const m of lines[i]!.matchAll(/"id"\s*:\s*"([^"]*)"/g)) if (ids.has(m[1]!) && !result.has(m[1]!)) result.set(m[1]!, i + 1);
+	const result = new Map<string, number>();
+	for (const entry of scanPlanJson(text).nodes) {
+		if (ids.has(entry.id) && !result.has(entry.id)) result.set(entry.id, entry.idLine);
 	}
 	return result;
 }
 
 /** The node whose lines hold the text cursor: the chart's selection. */
 export function nodeAtLine(text: string, plan: Plan, line: number): string | null {
-	let found: string | null = null;
-	let best = 0;
-	const lines = nodeLines(text, plan);
-	for (const [id, at] of lines) if (at <= line && at > best) (found = id), (best = at);
-	if (!found) return null;
-	// Past the nodes list, the cursor is on something else.
-	const all = text.split(/\r?\n/);
-	for (let i = best; i < line && i < all.length; i++) if (/^\s{0,2}"\w+"\s*:/.test(all[i]!)) return null;
-	return found;
+	const ids = new Set(plan.nodes.map((n) => n.id));
+	const scanned = scanPlanJson(text);
+	if (!scanned.nodesRange || line < scanned.nodesRange.startLine || line > scanned.nodesRange.endLine) return null;
+	for (const entry of scanned.nodes) {
+		if (ids.has(entry.id) && line >= entry.startLine && line <= entry.endLine) return entry.id;
+	}
+	return null;
 }
 
 /** Where a finding points in the text. */
 export function findingLine(text: string, plan: Plan, finding: Finding): number {
-	if (finding.node) return nodeLines(text, plan).get(finding.node) ?? 1;
+	const scanned = scanPlanJson(text);
+	if (finding.node) {
+		const ids = new Set(plan.nodes.map((n) => n.id));
+		const hit = scanned.nodes.find((entry) => entry.id === finding.node && ids.has(entry.id)) ?? scanned.nodes.find((entry) => entry.id === finding.node);
+		return hit?.idLine ?? 1;
+	}
 	if (finding.edge) {
 		const { from, to } = finding.edge;
-		const lines = text.split(/\r?\n/);
-		const at = lines.findIndex((l) => l.includes(`"from": "${from}"`) && l.includes(`"to": "${to}"`));
-		if (at >= 0) return at + 1;
+		const hit = scanned.edges.find((e) => e.from === from && e.to === to);
+		if (hit) return hit.line;
 	}
 	if (finding.field) {
-		const lines = text.split(/\r?\n/);
-		const pattern = new RegExp(`^\\s*${JSON.stringify(finding.field).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*:`);
-		const at = lines.findIndex((l) => pattern.test(l));
-		if (at >= 0) return at + 1;
+		const hit = scanned.topFields.get(finding.field);
+		if (hit) return hit;
 	}
 	return 1;
 }

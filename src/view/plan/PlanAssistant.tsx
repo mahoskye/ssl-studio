@@ -10,13 +10,13 @@ import { showPanel } from "../panels/registry";
 import { promoteToKnowledge } from "../projectDocs";
 import { documents, openFile, state } from "../state";
 import { baseName, joinPath } from "../../shared/paths";
-import { buildDriftAgentDraft, buildPlanAgentDraft, buildTestsAgentDraft, decisionsOf, describeSuggestion, openQuestions, planHash } from "./assist";
+import { buildDriftAgentDraft, buildPlanAgentDraft, buildTestsAgentDraft, decisionsOf, describeSuggestion, planHash, planTargetsOf, type Decision } from "./assist";
 import { planTestsOf, type Plan, type PlanNode, type PlanTestInput, type PlanTestPatch } from "./model";
 import { scriptOf, unbuiltNodes } from "./build";
-import { anyChanges, builtOf, chartChanges, journeyDraft, pathSummary, planPaths, type PlanPath } from "./built";
+import { anyChanges, builtOf, chartChanges, journeyDraft, pathSummary, planPaths, type BuiltUnit, type Drift, type PlanPath } from "./built";
 import { CODE_INDICATOR_WORDS, type CodeIndicator } from "./chart";
 import { recheckPlan } from "./check";
-import { driftFor, openProcedure } from "./drift";
+import { driftFor, openProcedure, openScript } from "./drift";
 import type { ScheduledBuildScope } from "./planBridge";
 import { TestCaseList, type TestCaseDraft } from "./PlanTests";
 import { writeTests } from "./testScript";
@@ -24,6 +24,53 @@ import { answerUnit, discardRun, loadRun, retryUnit, reviewBuild, scriptsToRevie
 import { acceptAll, acceptSuggestion, answer, assistOf, declineSuggestion, dismissWarning, refine, specPath, specState, stopAssist, writeSpec } from "./run";
 
 const CODE_ORDER: readonly CodeIndicator[] = ["green", "yellow", "red", "blue", "grey"];
+
+/** Filters malformed or non-string entries out of `plan.decisions` so hand-edited JSON cannot crash the Assistant UI. */
+export function safeDecisionsOf(plan: Plan): Decision[] {
+	const raw = decisionsOf(plan) as unknown[];
+	const out: Decision[] = [];
+	for (const d of raw) {
+		if (!d || typeof d !== "object" || Array.isArray(d)) continue;
+		const rec = d as Record<string, unknown>;
+		if (typeof rec.question !== "string" || !rec.question.trim()) continue;
+		const answer = typeof rec.answer === "string" ? rec.answer : undefined;
+		const node = typeof rec.node === "string" ? rec.node : undefined;
+		const suggested = Array.isArray(rec.suggested)
+			? rec.suggested.filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+			: undefined;
+		out.push({
+			question: rec.question,
+			...(node ? { node } : {}),
+			...(answer !== undefined ? { answer } : {}),
+			...(suggested?.length ? { suggested } : {}),
+		});
+	}
+	return out;
+}
+
+export type DriftOpenAction =
+	| { kind: "unit"; unit: BuiltUnit }
+	| { kind: "script"; script: string }
+	| { kind: "node"; nodeId: string };
+
+/** Resolves what clicking Open / Show step on a drift item should navigate to (handles both built-unit and manual-plan drift items). */
+export function resolveDriftOpenAction(
+	d: Drift,
+	builtUnits: readonly BuiltUnit[],
+	targets: readonly string[],
+	nodeIds: ReadonlySet<string>,
+): DriftOpenAction | null {
+	if (d.kind !== "gone") {
+		const unit = builtUnits.find((u) => u.name === d.unit);
+		if (unit) return { kind: "unit", unit };
+		const matchedTarget = targets.find((t) => t.toLowerCase() === d.unit.toLowerCase());
+		if (matchedTarget) return { kind: "script", script: matchedTarget };
+		if (/\.(ssl|srvscr|ds)$/i.test(d.unit)) return { kind: "script", script: d.unit };
+	}
+	if (d.node && nodeIds.has(d.node)) return { kind: "node", nodeId: d.node };
+	if (d.kind !== "gone" && targets.length > 0) return { kind: "script", script: targets[0]! };
+	return null;
+}
 
 /** Mounted while its plan shows, and hidden when collapsed: a build under way is not lost from sight for good. */
 export function PlanAssistant(props: {
@@ -75,10 +122,21 @@ export function PlanAssistant(props: {
 	const uri = () => documents.get(props.path)?.model.uri.toString();
 	const drift = () => driftFor(uri());
 	const paths = createMemo(() => props.allPaths ?? planPaths(props.plan));
-	const unitByName = (name: string) => built()?.units.find((u) => u.name === name);
-	const open = () => openQuestions(props.plan);
-	const closed = () => decisionsOf(props.plan).filter((d) => d.answer?.trim());
+	const nodeIdSet = createMemo(() => new Set(props.plan.nodes.map((n) => n.id)));
+	const planTargets = createMemo(() => planTargetsOf(props.plan));
+	const allDecisions = createMemo(() => safeDecisionsOf(props.plan));
+	const open = () => allDecisions().filter((d) => !d.answer?.trim());
+	const closed = () => allDecisions().filter((d) => Boolean(d.answer?.trim()));
 	const inputCount = () => open().length + a().suggestions.length;
+
+	// Clear any pending journey test draft when collapsing the Tests card or switching plans.
+	createEffect(() => {
+		props.path;
+		setDraftReq(null);
+	});
+	createEffect(() => {
+		if (!testsOpen()) setDraftReq(null);
+	});
 
 	// Auto-open "Needs your input" whenever questions or suggestions arrive.
 	createEffect(() => {
@@ -596,7 +654,7 @@ export function PlanAssistant(props: {
 							</Show>
 						</div>
 
-						<Show when={built()?.units.length}>
+						<Show when={built()?.units.length || drift().checked || drift().items.length}>
 							<div class="pa-subsection">
 								<div class="pa-subhead-row">
 									<h4 class="pa-subhead">Chart and code</h4>
@@ -616,16 +674,29 @@ export function PlanAssistant(props: {
 									}
 								>
 									<For each={drift().items}>
-										{(d) => (
-											<p class="plan-drift" classList={{ warning: d.severity === "warning" }}>
-												{d.message}{" "}
-												<Show when={d.kind !== "gone" && unitByName(d.unit)}>
-													<button type="button" class="link" onClick={() => void openProcedure(uri(), unitByName(d.unit)!)}>
-														Open
-													</button>
-												</Show>
-											</p>
-										)}
+										{(d) => {
+											const openAction = () => resolveDriftOpenAction(d, built()?.units ?? [], planTargets(), nodeIdSet());
+											return (
+												<p class="plan-drift" classList={{ warning: d.severity === "warning" }}>
+													{d.message}{" "}
+													<Show when={openAction()} keyed>
+														{(action) => (
+															<button
+																type="button"
+																class="link"
+																onClick={() => {
+																	if (action.kind === "unit") void openProcedure(uri(), action.unit);
+																	else if (action.kind === "script") void openScript(action.script);
+																	else props.onSelect(action.nodeId);
+																}}
+															>
+																{action.kind === "node" ? "Show step" : "Open"}
+															</button>
+														)}
+													</Show>
+												</p>
+											);
+										}}
 									</For>
 									<p class="hint">Review these differences — the code may have been updated outside the flowchart.</p>
 									<button
@@ -677,6 +748,7 @@ export function PlanAssistant(props: {
 									heading={`Business test cases (${customTests().length})`}
 									emptyText="Add business test cases here or on any selected step, then click any case to inspect or edit all details."
 									externalDraft={draftReq()}
+									onConsumeDraft={() => setDraftReq(null)}
 									onHighlightPath={(idx) => setShownPath(idx)}
 									onJumpToNode={(id) => props.onSelect(id)}
 									onAddTestCase={(input) => props.onAddTestCase!(input)}
@@ -781,10 +853,10 @@ export function PlanAssistant(props: {
 								</button>
 							</Show>
 
-							<Show when={built()?.tests}>
+							<Show when={built()?.tests && typeof built()!.tests!.script === "string" && built()!.tests!.script.trim().length > 0 ? built()!.tests! : null}>
 								{(tests) => (
 									<p class="hint">
-										<button type="button" class="link" onClick={() => void openFile(joinPath(state.workspace!.root, tests().script))}>
+										<button type="button" class="link" onClick={() => state.workspace && void openFile(joinPath(state.workspace.root, tests().script))}>
 											{tests().script}
 										</button>
 										{tests().hash === planHash(props.plan) ? "" : " was written before the chart last changed."}

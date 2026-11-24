@@ -21,6 +21,13 @@ export type TestCaseDraft = {
 	notes?: string;
 };
 
+/** Returns a valid non-empty built test script record, ignoring malformed non-string entries in hand-edited JSON. */
+export function validTestScript(plan: Plan): { script: string; hash?: string } | null {
+	const tests = builtOf(plan)?.tests as { script?: unknown; hash?: unknown } | undefined;
+	if (!tests || typeof tests !== "object" || typeof tests.script !== "string" || !tests.script.trim()) return null;
+	return { script: tests.script, hash: typeof tests.hash === "string" ? tests.hash : undefined };
+}
+
 /** Auto-grow a textarea to fit its multi-line content cleanly (up to 180px before scrolling). */
 function fitTextBox(el: HTMLTextAreaElement) {
 	el.style.height = "auto";
@@ -237,6 +244,7 @@ export function TestCaseList(props: {
 	stepAction?: "jump" | "peek";
 	/** Optional external draft request (e.g. from clicking "Add test details" on a flowchart journey). */
 	externalDraft?: { draft: TestCaseDraft; seq: number } | null;
+	onConsumeDraft?: () => void;
 	onHighlightPath: (index: number | null) => void;
 	onJumpToNode: (id: string) => void;
 	onPeekNode?: (id: string | null, opts?: { pan?: boolean }) => void;
@@ -257,14 +265,16 @@ export function TestCaseList(props: {
 		props.defaultNodeId;
 		setAdding(null);
 		setEditingId(null);
+		props.onConsumeDraft?.();
 	});
 
-	// Open pre-filled form when user clicks "Add test details" on a flowchart journey.
+	// Open pre-filled form when user clicks "Add test details" on a flowchart journey, and consume so collapsing never resurrects it.
 	createEffect(() => {
 		const req = props.externalDraft;
 		if (!req) return;
 		setEditingId(null);
 		setAdding(req.draft);
+		props.onConsumeDraft?.();
 	});
 
 	return (
@@ -321,8 +331,12 @@ export function TestCaseList(props: {
 						onSave={(val) => {
 							props.onAddTestCase(val);
 							setAdding(null);
+							props.onConsumeDraft?.();
 						}}
-						onCancel={() => setAdding(null)}
+						onCancel={() => {
+							setAdding(null);
+							props.onConsumeDraft?.();
+						}}
 					/>
 				)}
 			</Show>
@@ -687,10 +701,14 @@ export function NodeTests(props: {
 	const [journeyFilter, setJourneyFilter] = createSignal<JourneyFilter | null>(null);
 	let draftSeq = 0;
 
-	// Clear any active branch/outcome filter when switching to another step.
+	// Clear any active branch/outcome filter and draft form when switching to another step or collapsing the drawer.
 	createEffect(() => {
 		props.node.id;
 		setJourneyFilter(null);
+		setDraftReq(null);
+	});
+	createEffect(() => {
+		if (!props.open) setDraftReq(null);
 	});
 
 	const info = createMemo(() => pathsForNode(props.plan, props.node.id, props.allPaths));
@@ -702,7 +720,7 @@ export function NodeTests(props: {
 		return planTestsOf(props.plan).filter((t) => t.node !== props.node.id && Boolean(t.journey && hitJourneys.has(t.journey)));
 	});
 
-	const testScript = createMemo(() => builtOf(props.plan)?.tests ?? null);
+	const testScript = createMemo(() => validTestScript(props.plan));
 	const testStale = createMemo(() => {
 		const t = testScript();
 		return Boolean(t && t.hash !== planHash(props.plan));
@@ -782,6 +800,7 @@ export function NodeTests(props: {
 						defaultNodeId={props.node.id}
 						hideStepBadge
 						externalDraft={draftReq()}
+						onConsumeDraft={() => setDraftReq(null)}
 						onHighlightPath={props.onHighlightPath}
 						onJumpToNode={props.onJumpToNode}
 						onPeekNode={props.onPeekNode}
@@ -994,22 +1013,24 @@ export function NodeTests(props: {
 
 					<Show when={testScript()} keyed>
 						{(tests) => (
-							<div class="plan-impl-group">
-								<span class="plan-impl-subhead">STARLIMS test script</span>
-								<button
-									type="button"
-									class="plan-impl-script-row"
-									title={`Open ${tests.script}`}
-									onClick={() => props.onOpenScript(tests.script)}
-								>
-									<Icon name="beaker" />
-									<span class="plan-impl-script-file">{baseName(tests.script)}</span>
-									<Show when={testStale()}>
-										<span class="spacer" />
-										<span class="plan-test-stale">Out of date</span>
-									</Show>
-								</button>
-							</div>
+							<Show when={typeof tests?.script === "string" && tests.script.length > 0}>
+								<div class="plan-impl-group">
+									<span class="plan-impl-subhead">STARLIMS test script</span>
+									<button
+										type="button"
+										class="plan-impl-script-row"
+										title={`Open ${tests.script}`}
+										onClick={() => props.onOpenScript(tests.script)}
+									>
+										<Icon name="beaker" />
+										<span class="plan-impl-script-file">{baseName(tests.script)}</span>
+										<Show when={testStale()}>
+											<span class="spacer" />
+											<span class="plan-test-stale">Out of date</span>
+										</Show>
+									</button>
+								</div>
+							</Show>
 						)}
 					</Show>
 
@@ -1017,12 +1038,14 @@ export function NodeTests(props: {
 						<button
 							type="button"
 							class="plan-sched-btn"
-							title="Scheduled — turn this step's journeys and business test cases into runnable STARLIMS SSL tests (see docs/AGENT-INTEGRATION.md)"
-							onClick={() => props.onTriggerScheduled({ kind: "tests", label: props.node.text.trim() || "this step" })}
+							title="Draft STARLIMS SSL tests for this step's journeys and business test cases with Agent"
+							onClick={() => {
+								const scope = { kind: "tests" as const, id: props.node.id, label: props.node.text.trim() || "this step" };
+								props.onTriggerScheduled(scope);
+							}}
 						>
 							<Icon name="beaker" />
 							<span>Generate STARLIMS tests</span>
-							<span class="plan-sched-pill">Soon</span>
 						</button>
 					</div>
 				</div>
@@ -1051,10 +1074,14 @@ export function PlanTests(props: {
 	const [draftReq, setDraftReq] = createSignal<{ draft: TestCaseDraft; seq: number } | null>(null);
 	let draftSeq = 0;
 
+	createEffect(() => {
+		if (!props.open) setDraftReq(null);
+	});
+
 	const pathsResult = createMemo(() => props.allPaths ?? planPaths(props.plan));
 	const cases = createMemo(() => planTestsOf(props.plan));
 
-	const testScript = createMemo(() => builtOf(props.plan)?.tests ?? null);
+	const testScript = createMemo(() => validTestScript(props.plan));
 	const testStale = createMemo(() => {
 		const t = testScript();
 		return Boolean(t && t.hash !== planHash(props.plan));
@@ -1096,6 +1123,7 @@ export function PlanTests(props: {
 						heading="Business test cases"
 						emptyText="No custom test cases yet. Click Add test or pick any journey below to add scenario details."
 						externalDraft={draftReq()}
+						onConsumeDraft={() => setDraftReq(null)}
 						onHighlightPath={props.onHighlightPath}
 						onJumpToNode={props.onJumpToNode}
 						onPeekNode={props.onPeekNode}
@@ -1180,22 +1208,24 @@ export function PlanTests(props: {
 
 					<Show when={testScript()} keyed>
 						{(tests) => (
-							<div class="plan-impl-group">
-								<span class="plan-impl-subhead">STARLIMS test script</span>
-								<button
-									type="button"
-									class="plan-impl-script-row"
-									title={`Open ${tests.script}`}
-									onClick={() => props.onOpenScript(tests.script)}
-								>
-									<Icon name="beaker" />
-									<span class="plan-impl-script-file">{baseName(tests.script)}</span>
-									<Show when={testStale()}>
-										<span class="spacer" />
-										<span class="plan-test-stale">Out of date</span>
-									</Show>
-								</button>
-							</div>
+							<Show when={typeof tests?.script === "string" && tests.script.length > 0}>
+								<div class="plan-impl-group">
+									<span class="plan-impl-subhead">STARLIMS test script</span>
+									<button
+										type="button"
+										class="plan-impl-script-row"
+										title={`Open ${tests.script}`}
+										onClick={() => props.onOpenScript(tests.script)}
+									>
+										<Icon name="beaker" />
+										<span class="plan-impl-script-file">{baseName(tests.script)}</span>
+										<Show when={testStale()}>
+											<span class="spacer" />
+											<span class="plan-test-stale">Out of date</span>
+										</Show>
+									</button>
+								</div>
+							</Show>
 						)}
 					</Show>
 
@@ -1206,12 +1236,11 @@ export function PlanTests(props: {
 						<button
 							type="button"
 							class="plan-sched-btn"
-							title="Scheduled — generate a STARLIMS SSL test script from your flowchart journeys and business test cases (see docs/AGENT-INTEGRATION.md)"
+							title="Generate a STARLIMS SSL test script from this plan's flowchart journeys and business test cases"
 							onClick={() => props.onTriggerScheduled({ kind: "tests", label: props.plan.title || "this plan" })}
 						>
 							<Icon name="beaker" />
 							<span>Generate STARLIMS test script</span>
-							<span class="plan-sched-pill">Soon</span>
 						</button>
 					</div>
 				</div>

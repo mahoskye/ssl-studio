@@ -59,8 +59,12 @@ const listOf = (v: unknown): Record<string, any>[] => (Array.isArray(v) ? v.filt
 
 export type Decision = { question: string; node?: string; answer?: string; suggested?: string[] };
 
-export const decisionsOf = (plan: Plan): Decision[] => (Array.isArray(plan.decisions) ? (plan.decisions as Decision[]) : []);
-export const openQuestions = (plan: Plan) => decisionsOf(plan).filter((d) => !d.answer?.trim());
+export const decisionsOf = (plan: Plan): Decision[] =>
+	Array.isArray(plan.decisions)
+		? plan.decisions.filter((d): d is Decision => isObject(d) && typeof d.question === "string")
+		: [];
+export const openQuestions = (plan: Plan) =>
+	decisionsOf(plan).filter((d) => typeof d.answer !== "string" || !d.answer.trim());
 
 const sameQuestion = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
 
@@ -144,7 +148,8 @@ export function applySuggestion(plan: Plan, s: Suggestion, ids: Map<string, stri
 		}
 		case "edge": {
 			const [from, to] = [real(s.from), real(s.to)];
-			if (!from || !to) return null;
+			if (!from || !to || from === to) return null;
+			if (!plan.nodes.some((n) => n.id === from) || !plan.nodes.some((n) => n.id === to)) return null;
 			if (plan.edges.some((e) => e.from === from && e.to === to)) return plan;
 			return { ...plan, edges: [...plan.edges, { from, to, ...(s.label ? { label: s.label } : {}) }] };
 		}
@@ -200,6 +205,18 @@ export function parseContext(block: string | undefined): ContextRequest[] {
 		.slice(0, 6);
 }
 
+/** Whether a workspace-relative path requested by the agent may be auto-read (rejects absolute, traversal, and dot/hidden segments). */
+export function isAllowedContextPath(rel: string): boolean {
+	if (typeof rel !== "string") return false;
+	const trimmed = rel.trim();
+	if (!trimmed || trimmed.includes("\0")) return false;
+	const norm = trimmed.replace(/\\/g, "/");
+	if (norm.startsWith("/") || /^[A-Za-z]:/.test(norm)) return false;
+	const segments = norm.split("/").filter((s) => s.length > 0);
+	if (!segments.length) return false;
+	return segments.every((seg) => !seg.startsWith("."));
+}
+
 // --- the spec ---------------------------------------------------------------------------
 
 export type SpecUnit = { name: string; script?: string; parameters?: string[]; nodes?: string[]; calls?: string[]; lines?: number };
@@ -220,9 +237,14 @@ export function unaccounted(plan: Plan, units: SpecUnit[], map: NodeMap[], settl
 
 /** Scripts the spec expects to go over the code-line limit (program decision 0006). */
 export function overLimit(plan: Plan, units: SpecUnit[], limit: number): { script: string; lines: number }[] {
-	const fallback = Array.isArray(plan.targets) && plan.targets.length ? String(plan.targets[0]) : "the script";
+	if (!Number.isFinite(limit) || limit <= 0) return [];
+	const fallback = planTargetsOf(plan)[0] ?? "the script";
 	const totals = new Map<string, number>();
-	for (const u of units) if (typeof u.lines === "number") totals.set(u.script ?? fallback, (totals.get(u.script ?? fallback) ?? 0) + u.lines);
+	for (const u of units) {
+		if (typeof u.lines !== "number" || !Number.isFinite(u.lines)) continue;
+		const script = u.script?.trim() || fallback;
+		totals.set(script, (totals.get(script) ?? 0) + u.lines);
+	}
 	return [...totals].filter(([, lines]) => lines > limit).map(([script, lines]) => ({ script, lines }));
 }
 
@@ -286,7 +308,7 @@ export function formatSurvey(s: Survey): string {
 const NO_TOOLS = "You are inside SSL Studio. You cannot read, search or write files: everything you need is below, and SSL Studio applies what you return after the user reviews it.";
 
 const answered = (plan: Plan) => {
-	const list = decisionsOf(plan).filter((d) => d.answer?.trim());
+	const list = decisionsOf(plan).filter((d) => typeof d.answer === "string" && d.answer.trim());
 	return list.length ? ["", "THE USER HAS ALREADY DECIDED (do not ask these again):", ...list.map((d) => `- ${d.question} ${d.answer}`)] : [];
 };
 const planFor = (plan: Plan) => {
@@ -366,9 +388,8 @@ const MERMAID_RESERVED = new Set([
 	"classdef",
 ]);
 
-function makeMermaidIdMapper(prefix: string) {
+function makeMermaidIdMapper(prefix: string, taken: Set<string>) {
 	const mapped = new Map<string, string>();
-	const taken = new Set<string>();
 	return (raw: string): string => {
 		const hit = mapped.get(raw);
 		if (hit) return hit;
@@ -395,6 +416,10 @@ function escapeMermaidLabel(raw: string): string {
 		.replace(/\r\n/g, "\n")
 		.replace(/\r/g, "\n")
 		.replace(/\t+/g, " ")
+		.replace(/&/g, "&amp;")
+		.replace(/\\/g, "#92;")
+		.replace(/\|/g, "#124;")
+		.replace(/`{3,}/g, (m) => "#96;".repeat(m.length))
 		.replace(/"/g, "#quot;")
 		.replace(/</g, "&lt;")
 		.replace(/>/g, "&gt;")
@@ -405,10 +430,13 @@ function escapeMermaidLabel(raw: string): string {
 function formatMermaidEdgeLabel(raw: string): string {
 	const clean = raw.trim().replace(/\r?\n/g, " ").replace(/\s+/g, " ");
 	if (!clean) return "";
-	if (!/[|"<>\[\]{}()]/.test(clean)) return clean;
+	if (!/[|"<>\[\]{}();%\\&]/.test(clean) && !/`{3,}/.test(clean)) return clean;
 	const escaped = clean
+		.replace(/&/g, "&amp;")
+		.replace(/\\/g, "#92;")
 		.replace(/"/g, "#quot;")
-		.replace(/\|/g, "/")
+		.replace(/\|/g, "#124;")
+		.replace(/`{3,}/g, (m) => "#96;".repeat(m.length))
 		.replace(/</g, "&lt;")
 		.replace(/>/g, "&gt;");
 	return `"${escaped}"`;
@@ -437,8 +465,9 @@ function mermaidNodeDecl(id: string, node: PlanNode): string {
  */
 export function planToMermaid(plan: Plan, direction: "DOWN" | "RIGHT" = "DOWN"): string {
 	const lines: string[] = [`flowchart ${direction === "RIGHT" ? "LR" : "TD"}`];
-	const nodeId = makeMermaidIdMapper("node");
-	const groupId = makeMermaidIdMapper("stage");
+	const taken = new Set<string>();
+	const nodeId = makeMermaidIdMapper("node", taken);
+	const groupId = makeMermaidIdMapper("stage", taken);
 	const validGroupIds = new Set(plan.groups.map((g) => g.id));
 	const knownNodeIds = new Set(plan.nodes.map((n) => n.id));
 
@@ -476,7 +505,7 @@ export function planToMermaid(plan: Plan, direction: "DOWN" | "RIGHT" = "DOWN"):
 		if (!knownNodeIds.has(e.from) || !knownNodeIds.has(e.to)) continue;
 		const from = nodeId(e.from);
 		const to = nodeId(e.to);
-		const label = e.label ? formatMermaidEdgeLabel(e.label) : "";
+		const label = typeof e.label === "string" && e.label ? formatMermaidEdgeLabel(e.label) : "";
 		lines.push(label ? `  ${from} -->|${label}| ${to}` : `  ${from} --> ${to}`);
 	}
 
@@ -496,7 +525,16 @@ const PLAN_MERMAID_RE = /(<!--\s*plan-mermaid:start(?:\s+[^>]*)?\s*-->)[\s\S]*?(
 export function syncPlanMermaidInMarkdown(markdown: string, mermaidBlock: string, planName?: string): string {
 	const eol = markdown.includes("\r\n") ? "\r\n" : "\n";
 	const raw = mermaidBlock.trim().replace(/\r?\n/g, eol);
-	const fenced = raw.startsWith("```") ? raw : `\`\`\`mermaid${eol}${raw}${eol}\`\`\``;
+	const alreadyFenced = /^(`{3,})[^\r\n]*\r?\n[\s\S]*\r?\n\1$/.test(raw);
+	let fenced: string;
+	if (alreadyFenced) {
+		fenced = raw;
+	} else {
+		let maxTicks = 0;
+		for (const m of raw.matchAll(/`+/g)) if (m[0].length > maxTicks) maxTicks = m[0].length;
+		const fence = "`".repeat(Math.max(3, maxTicks + 1));
+		fenced = `${fence}mermaid${eol}${raw}${eol}${fence}`;
+	}
 
 	if (PLAN_MERMAID_RE.test(markdown)) {
 		return markdown.replace(PLAN_MERMAID_RE, (_match, open: string, close: string) => `${open}${eol}${fenced}${eol}${close}`);
@@ -515,7 +553,7 @@ export function syncPlanMermaidInMarkdown(markdown: string, mermaidBlock: string
 
 const normSlash = (p: string) => p.trim().replace(/\\/g, "/").replace(/^\.?\/+/, "").toLowerCase();
 const stripCodeExt = (p: string) => p.replace(/\.(ssl|srvscr|ds)$/i, "");
-const refLastPart = (ref: string) => ref.split(/[./\\]/).filter(Boolean).at(-1) ?? ref;
+const refLastPart = (ref: string) => stripCodeExt(ref.trim()).split(/[./\\]/).filter(Boolean).at(-1) ?? ref.trim();
 
 /** Extracts normalized non-empty target script paths from `plan.targets`. */
 export function planTargetsOf(plan: Plan): string[] {
@@ -600,7 +638,7 @@ export function refMatchesWorkspace(
 /** Validates `n.ref` on ALL actionable node kinds (`step`, `decision`, `call`). */
 export function checkPlanRefs(plan: Plan, known: (ref: string) => boolean): Finding[] {
 	return plan.nodes
-		.filter((n) => (n.kind === "call" || n.kind === "step" || n.kind === "decision") && n.ref?.trim() && !known(n.ref.trim()))
+		.filter((n) => (n.kind === "call" || n.kind === "step" || n.kind === "decision") && typeof n.ref === "string" && n.ref.trim() && !known(n.ref.trim()))
 		.map((n) => ({
 			severity: "warning" as const,
 			code: "plan-unresolved-ref",
@@ -749,6 +787,10 @@ export function manualPlanDrift(
 	const calledTargets = new Set<string>();
 	const scriptNames = new Set<string>();
 	for (const [scriptPath, reading] of validReadings) {
+		const normPath = normSlash(scriptPath);
+		const noExtPath = stripCodeExt(normPath);
+		if (normPath) scriptNames.add(normPath);
+		if (noExtPath) scriptNames.add(noExtPath);
 		const stem = stripCodeExt(baseName(scriptPath)).toLowerCase();
 		if (stem) scriptNames.add(stem);
 		if (reading.name) {
@@ -758,6 +800,7 @@ export function manualPlanDrift(
 		for (const proc of reading.procedures) definedProcs.add(proc.name.toLowerCase());
 		for (const edge of reading.edges) {
 			calledTargets.add(edge.target.toLowerCase());
+			calledTargets.add(stripCodeExt(normSlash(edge.target)));
 			calledTargets.add(refLastPart(edge.target).toLowerCase());
 		}
 	}
@@ -766,16 +809,21 @@ export function manualPlanDrift(
 	const unitLabel = checkedTargets[0] ?? validReadings[0]![0];
 	for (const n of plan.nodes) {
 		if (n.kind !== "call" && n.kind !== "step" && n.kind !== "decision") continue;
-		const ref = n.ref?.trim();
+		const ref = typeof n.ref === "string" ? n.ref.trim() : "";
 		if (!ref) continue;
 		const refLower = ref.toLowerCase();
+		const refNorm = normSlash(ref);
+		const refNoExt = stripCodeExt(refNorm);
 		const short = refLastPart(ref).toLowerCase();
 		if (
 			definedProcs.has(short) ||
 			calledTargets.has(short) ||
 			calledTargets.has(refLower) ||
+			calledTargets.has(refNoExt) ||
 			scriptNames.has(short) ||
-			scriptNames.has(refLower)
+			scriptNames.has(refLower) ||
+			scriptNames.has(refNorm) ||
+			scriptNames.has(refNoExt)
 		) {
 			continue;
 		}
@@ -811,6 +859,12 @@ const MERMAID_OPENERS: readonly { open: string; close: string; shape: MermaidSha
 	{ open: "(", close: ")", shape: "round" },
 ];
 
+function isEscapedAt(s: string, index: number): boolean {
+	let slashes = 0;
+	for (let k = index - 1; k >= 0 && s[k] === "\\"; k--) slashes++;
+	return (slashes & 1) === 1;
+}
+
 function unescapeMermaidLabel(raw: string): string {
 	let s = raw.trim();
 	if (s.length >= 2 && s.startsWith('"') && s.endsWith('"')) {
@@ -818,12 +872,15 @@ function unescapeMermaidLabel(raw: string): string {
 	}
 	return s
 		.replace(/<br\s*\/?>/gi, "\n")
+		.replace(/\\([\\"])/g, "$1")
 		.replace(/#quot;/gi, '"')
 		.replace(/&quot;/gi, '"')
+		.replace(/(?:&#|(?<!&amp;)#)124;/gi, "|")
+		.replace(/(?:&#|(?<!&amp;)#)96;/gi, "`")
+		.replace(/(?:&#|(?<!&amp;)#)92;/gi, "\\")
 		.replace(/&lt;/gi, "<")
 		.replace(/&gt;/gi, ">")
 		.replace(/&amp;/gi, "&")
-		.replace(/\\"/g, '"')
 		.trim();
 }
 
@@ -831,7 +888,7 @@ function stripMermaidComment(line: string): string {
 	let inQuote = false;
 	for (let i = 0; i < line.length; i++) {
 		const ch = line[i]!;
-		if (ch === '"' && line[i - 1] !== "\\") {
+		if (ch === '"' && !isEscapedAt(line, i)) {
 			inQuote = !inQuote;
 			continue;
 		}
@@ -848,14 +905,14 @@ function splitMermaidStatements(line: string): string[] {
 	let start = 0;
 	for (let i = 0; i < line.length; i++) {
 		const ch = line[i]!;
-		if (ch === '"' && line[i - 1] !== "\\") {
+		if (ch === '"' && !isEscapedAt(line, i)) {
 			inQuote = !inQuote;
 			continue;
 		}
 		if (inQuote || ch !== ";") continue;
-		// Do not split on HTML/Mermaid entities like `&lt;`, `&gt;`, `#quot;`, `&#39;`.
+		// Do not split on HTML/Mermaid entities like `&lt;`, `&gt;`, `#quot;`, `#124;`, `#96;`, `#92;`, `&#39;`.
 		const before = line.slice(start, i);
-		if (/(?:&[A-Za-z0-9#]+|#quot)$/.test(before)) continue;
+		if (/(?:&[A-Za-z0-9#]+|#[A-Za-z0-9]+)$/.test(before)) continue;
 		const piece = before.trim();
 		if (piece) out.push(piece);
 		start = i + 1;
@@ -873,13 +930,33 @@ type ParsedMermaidAtom = { id: string; shape?: MermaidShape; text?: string };
 function readMermaidAtom(src: string, start: number): { atom: ParsedMermaidAtom; next: number } | null {
 	let i = start;
 	while (i < src.length && /\s/.test(src[i]!)) i++;
-	const idMatch = /^([A-Za-z0-9_][A-Za-z0-9_.-]*)/.exec(src.slice(i));
-	if (!idMatch) return null;
-	const id = idMatch[1]!;
-	if (MERMAID_RESERVED.has(id.toLowerCase()) && i + id.length < src.length && /\s/.test(src[i + id.length]!)) {
+	if (i >= src.length || !/[A-Za-z0-9_]/.test(src[i]!)) return null;
+	let idEnd = i + 1;
+	while (idEnd < src.length) {
+		const ch = src[idEnd]!;
+		if (ch === "-") {
+			const nextCh = src[idEnd + 1];
+			if (nextCh === "-" || nextCh === "." || nextCh === ">") break;
+			idEnd++;
+			continue;
+		}
+		if (ch === ".") {
+			const nextCh = src[idEnd + 1];
+			if (nextCh === "." || nextCh === "-") break;
+			idEnd++;
+			continue;
+		}
+		if (/[A-Za-z0-9_]/.test(ch)) {
+			idEnd++;
+			continue;
+		}
+		break;
+	}
+	const id = src.slice(i, idEnd);
+	if (MERMAID_RESERVED.has(id.toLowerCase()) && idEnd < src.length && /\s/.test(src[idEnd]!)) {
 		return null;
 	}
-	i += id.length;
+	i = idEnd;
 
 	let shape: MermaidShape | undefined;
 	let text: string | undefined;
@@ -891,7 +968,7 @@ function readMermaidAtom(src: string, start: number): { atom: ParsedMermaidAtom;
 		if (src[j] === '"') {
 			j++;
 			while (j < src.length) {
-				if (src[j] === '"' && src[j - 1] !== "\\") {
+				if (src[j] === '"' && !isEscapedAt(src, j)) {
 					j++;
 					break;
 				}
@@ -969,7 +1046,7 @@ function readMermaidArrow(src: string, start: number): { label?: string; next: n
 		let k = j + 1;
 		let inQuote = false;
 		while (k < src.length) {
-			if (src[k] === '"' && src[k - 1] !== "\\") {
+			if (src[k] === '"' && !isEscapedAt(src, k)) {
 				inQuote = !inQuote;
 				k++;
 				continue;
@@ -992,9 +1069,10 @@ function readMermaidArrow(src: string, start: number): { label?: string; next: n
  */
 export function mermaidToPlan(mermaidSource: string, title?: string): Plan | null {
 	if (typeof mermaidSource !== "string" || !mermaidSource.trim()) return null;
-	// Unwrap outer Markdown ```mermaid fence when pasted with fences.
-	const fenced = /```(?:mermaid)?\s*\r?\n([\s\S]*?)```/i.exec(mermaidSource);
-	const body = (fenced ? fenced[1]! : mermaidSource).replace(/\r\n?/g, "\n");
+	// Unwrap outer Markdown ```mermaid (or longer ````mermaid) fence when pasted with fences.
+	const fenceRe = /(?:^|\n)[ \t]*(`{3,})(?:mermaid)?[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*\1(?=[ \t]*(?:\r?\n|$))/i;
+	const fenced = fenceRe.exec(mermaidSource);
+	const body = (fenced ? fenced[2]! : mermaidSource).replace(/\r\n?/g, "\n");
 
 	const rawLines = body.split("\n").map((l) => stripMermaidComment(l).trim());
 	const headerIdx = rawLines.findIndex((l) => l.length > 0);
@@ -1002,16 +1080,18 @@ export function mermaidToPlan(mermaidSource: string, title?: string): Plan | nul
 	const headerLine = rawLines[headerIdx]!;
 	if (!/^(?:flowchart|graph)(?:\s+(?:TD|TB|LR|RL|BT))?\s*;?\s*$/i.test(headerLine)) return null;
 
-	type DraftNode = { id: string; text: string; shape: MermaidShape; group?: string; hasLabel: boolean };
+	type DraftNode = { id: string; text: string; shape: MermaidShape; group?: string; explicitGroup: boolean; hasLabel: boolean };
 	const nodeMap = new Map<string, DraftNode>();
 	const nodeOrder: string[] = [];
 	const groups: PlanGroup[] = [];
 	const groupById = new Map<string, PlanGroup>();
+	const autoGroupIds = new Set<string>();
+	let nextAutoGroup = 1;
 	const groupStack: string[] = [];
 	const edges: PlanEdge[] = [];
 	const edgeKeys = new Set<string>();
 
-	const ensureNode = (atom: ParsedMermaidAtom, currentGroup: string | undefined) => {
+	const ensureNode = (atom: ParsedMermaidAtom, currentGroup: string | undefined, explicit: boolean) => {
 		let entry = nodeMap.get(atom.id);
 		if (!entry) {
 			entry = {
@@ -1019,6 +1099,7 @@ export function mermaidToPlan(mermaidSource: string, title?: string): Plan | nul
 				text: atom.text || atom.id,
 				shape: atom.shape ?? "bare",
 				...(currentGroup ? { group: currentGroup } : {}),
+				explicitGroup: Boolean(currentGroup) && explicit,
 				hasLabel: atom.text !== undefined,
 			};
 			nodeMap.set(atom.id, entry);
@@ -1031,8 +1112,16 @@ export function mermaidToPlan(mermaidSource: string, title?: string): Plan | nul
 				entry.text = atom.text || atom.id;
 				entry.hasLabel = true;
 			}
-			if (currentGroup && !entry.group) {
-				entry.group = currentGroup;
+			if (currentGroup) {
+				if (!entry.group) {
+					entry.group = currentGroup;
+					entry.explicitGroup = explicit;
+				} else if (explicit && !entry.explicitGroup) {
+					entry.group = currentGroup;
+					entry.explicitGroup = true;
+				} else if (explicit && entry.group === currentGroup) {
+					entry.explicitGroup = true;
+				}
 			}
 		}
 		return entry;
@@ -1054,8 +1143,9 @@ export function mermaidToPlan(mermaidSource: string, title?: string): Plan | nul
 		}
 		// Form 2: `subgraph "Label"` or `subgraph Plain Label`
 		const label = unescapeMermaidLabel(rest) || `Stage ${groups.length + 1}`;
-		let id = `g${groups.length + 1}`;
-		while (groupById.has(id) || nodeMap.has(id)) id = `g${groups.length + Math.floor(Math.random() * 1000) + 2}`;
+		while (groupById.has(`g${nextAutoGroup}`) || nodeMap.has(`g${nextAutoGroup}`)) nextAutoGroup++;
+		const id = `g${nextAutoGroup++}`;
+		autoGroupIds.add(id);
 		const g: PlanGroup = { id, name: label };
 		groupById.set(id, g);
 		groups.push(g);
@@ -1080,7 +1170,8 @@ export function mermaidToPlan(mermaidSource: string, title?: string): Plan | nul
 			const currentGroup = groupStack.at(-1);
 			const firstGroup = readMermaidNodeGroup(stmt, 0);
 			if (!firstGroup) continue;
-			for (const a of firstGroup.atoms) ensureNode(a, currentGroup);
+			const hasArrow = readMermaidArrow(stmt, firstGroup.next) !== null;
+			for (const a of firstGroup.atoms) ensureNode(a, currentGroup, !hasArrow || a.shape !== undefined);
 
 			let prevAtoms = firstGroup.atoms;
 			let pos = firstGroup.next;
@@ -1089,7 +1180,7 @@ export function mermaidToPlan(mermaidSource: string, title?: string): Plan | nul
 				if (!arrow) break;
 				const nextGroup = readMermaidNodeGroup(stmt, arrow.next);
 				if (!nextGroup) break;
-				for (const a of nextGroup.atoms) ensureNode(a, currentGroup);
+				for (const a of nextGroup.atoms) ensureNode(a, currentGroup, a.shape !== undefined);
 				for (const srcAtom of prevAtoms) {
 					for (const dstAtom of nextGroup.atoms) {
 						if (srcAtom.id === dstAtom.id) continue;
@@ -1111,6 +1202,20 @@ export function mermaidToPlan(mermaidSource: string, title?: string): Plan | nul
 
 	if (!nodeOrder.length) return null;
 
+	// Deterministically disambiguate any auto-generated group IDs that collide with nodes declared later.
+	for (const g of groups) {
+		if (!autoGroupIds.has(g.id) || !nodeMap.has(g.id)) continue;
+		const oldId = g.id;
+		while (groupById.has(`g${nextAutoGroup}`) || nodeMap.has(`g${nextAutoGroup}`)) nextAutoGroup++;
+		const freshId = `g${nextAutoGroup++}`;
+		groupById.delete(oldId);
+		g.id = freshId;
+		groupById.set(freshId, g);
+		for (const d of nodeMap.values()) {
+			if (d.group === oldId) d.group = freshId;
+		}
+	}
+
 	const inDeg = new Map<string, number>();
 	const outDeg = new Map<string, number>();
 	for (const id of nodeOrder) {
@@ -1121,6 +1226,12 @@ export function mermaidToPlan(mermaidSource: string, title?: string): Plan | nul
 		outDeg.set(e.from, (outDeg.get(e.from) ?? 0) + 1);
 		inDeg.set(e.to, (inDeg.get(e.to) ?? 0) + 1);
 	}
+
+	const hasNaturalStart = nodeOrder.some((id) => {
+		const shape = nodeMap.get(id)!.shape;
+		return (shape === "circle" || shape === "stadium") && (inDeg.get(id) ?? 0) === 0 && (outDeg.get(id) ?? 0) > 0;
+	});
+	const looksLikeCallRef = (text: string) => /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+$/.test(text.trim());
 
 	let assignedStart = false;
 	const nodes: PlanNode[] = nodeOrder.map((id) => {
@@ -1145,10 +1256,12 @@ export function mermaidToPlan(mermaidSource: string, title?: string): Plan | nul
 			case "stadium":
 				if (ins === 0 && outs > 0) kind = "start";
 				else if (outs === 0 && ins > 0) kind = "end";
-				else if (ins > 0 && outs > 0) kind = "call";
 				else if (/^(start|begin|receive|entry)\b/i.test(d.text)) kind = "start";
 				else if (/^(end|done|finish|return|stop|exit)\b/i.test(d.text)) kind = "end";
-				else kind = "call";
+				else if (ins > 0 && outs > 0) {
+					kind = !assignedStart && !hasNaturalStart && !looksLikeCallRef(d.text) ? "start" : "call";
+				} else if (!assignedStart) kind = "start";
+				else kind = "end";
 				break;
 			default:
 				kind = "step";
@@ -1181,7 +1294,14 @@ export function mermaidToPlan(mermaidSource: string, title?: string): Plan | nul
 
 export type NodeRect = { id: string; x: number; y: number; width: number; height: number };
 export type AlignAction = "left" | "center" | "top" | "distribute-h" | "distribute-v";
-export type PlanClipboard = { nodes: PlanNode[]; edges: PlanEdge[] };
+export type PlanClipboard = {
+	nodes: PlanNode[];
+	edges: PlanEdge[];
+	/** Optional source plan identity (path/URI) to prevent cross-plan group-ID collisions. */
+	sourcePlanPath?: string;
+	/** Optional map of copied group ID -> stage name for matching stages by name across plans. */
+	groupNames?: Record<string, string>;
+};
 
 /** Returns IDs of all nodes whose bounding box intersects the selection marquee rectangle. */
 export function marqueeNodeIds(
@@ -1308,14 +1428,23 @@ export function alignPlanNodes(
 }
 
 /** Captures the selected nodes and their internal edges into an immutable clipboard payload. */
-export function copyPlanSelection(plan: Plan, ids: ReadonlySet<string>): PlanClipboard | null {
+export function copyPlanSelection(plan: Plan, ids: ReadonlySet<string>, sourcePlanPath?: string): PlanClipboard | null {
 	const nodes = plan.nodes.filter((n) => ids.has(n.id) && !n.pending);
 	if (!nodes.length) return null;
 	const keptIds = new Set(nodes.map((n) => n.id));
 	const edges = plan.edges.filter((e) => keptIds.has(e.from) && keptIds.has(e.to) && !e.pending && !e.removing);
+	const groupNames: Record<string, string> = {};
+	for (const g of plan.groups) {
+		if (nodes.some((n) => n.group === g.id)) groupNames[g.id] = g.name;
+	}
 	return {
 		nodes: nodes.map((n) => ({ ...n, ...(n.docs ? { docs: [...n.docs] } : {}), ...(n.offset ? { offset: { ...n.offset } } : {}) })),
-		edges: edges.map((e) => ({ from: e.from, to: e.to, ...(e.label ? { label: e.label } : {}) })),
+		edges: edges.map((e) => {
+			const { route: _oldRoute, pending: _p, removing: _r, ...restEdge } = e;
+			return { ...restEdge, from: e.from, to: e.to, ...(typeof e.label === "string" && e.label ? { label: e.label } : {}) };
+		}),
+		...(sourcePlanPath ? { sourcePlanPath } : {}),
+		...(Object.keys(groupNames).length ? { groupNames } : {}),
 	};
 }
 
@@ -1325,11 +1454,14 @@ export function pastePlanSelection(
 	clip: PlanClipboard,
 	dir: LayoutDirection = "DOWN",
 	shift = 36,
+	targetPlanPath?: string,
 ): { plan: Plan; pastedIds: string[] } {
 	if (!clip.nodes.length) return { plan, pastedIds: [] };
 	const idMap = new Map<string, string>();
 	const validGroups = new Set(plan.groups.map((g) => g.id));
-	const alreadyHasStart = plan.nodes.some((n) => n.kind === "start");
+	const groupByName = new Map(plan.groups.map((g) => [g.name.trim().toLowerCase(), g.id]));
+	const samePlan = !clip.sourcePlanPath || !targetPlanPath || clip.sourcePlanPath === targetPlanPath;
+	let alreadyHasStart = plan.nodes.some((n) => n.kind === "start");
 	let working: Plan = { ...plan, nodes: [...plan.nodes], edges: [...plan.edges] };
 	const pastedIds: string[] = [];
 
@@ -1344,13 +1476,38 @@ export function pastePlanSelection(
 			...(dir === "RIGHT" ? { dir: "RIGHT" } : {}),
 		};
 		const docs = nodeDocsOf(src);
+		const kind: NodeKind = src.kind === "start" && alreadyHasStart ? "step" : src.kind;
+		if (kind === "start") alreadyHasStart = true;
+
+		let resolvedGroup: string | undefined;
+		if (typeof src.group === "string" && src.group) {
+			if (samePlan && validGroups.has(src.group)) {
+				resolvedGroup = src.group;
+			} else if (!samePlan && clip.groupNames?.[src.group]) {
+				resolvedGroup = groupByName.get(clip.groupNames[src.group]!.trim().toLowerCase());
+			}
+		}
+
+		const {
+			id: _id,
+			kind: _kind,
+			text: _text,
+			ref: _ref,
+			group: _group,
+			notes: _notes,
+			docs: _docs,
+			offset: _offset,
+			pending: _pending,
+			...srcRest
+		} = src;
 		const clone: PlanNode = {
+			...srcRest,
 			id: freshId,
-			kind: src.kind === "start" && alreadyHasStart ? "step" : src.kind,
+			kind,
 			text: src.text,
-			...(src.ref ? { ref: src.ref } : {}),
-			...(src.group && validGroups.has(src.group) ? { group: src.group } : {}),
-			...(src.notes ? { notes: src.notes } : {}),
+			...(typeof src.ref === "string" && src.ref ? { ref: src.ref } : {}),
+			...(resolvedGroup ? { group: resolvedGroup } : {}),
+			...(typeof src.notes === "string" && src.notes ? { notes: src.notes } : {}),
 			...(docs.length ? { docs } : {}),
 			offset: nextOffset,
 		};
@@ -1362,7 +1519,8 @@ export function pastePlanSelection(
 		const from = idMap.get(e.from);
 		const to = idMap.get(e.to);
 		if (!from || !to) continue;
-		newEdges.push({ from, to, ...(e.label ? { label: e.label } : {}) });
+		const { from: _f, to: _t, label: _l, route: _r, pending: _p, removing: _rm, ...edgeRest } = e;
+		newEdges.push({ ...edgeRest, from, to, ...(typeof e.label === "string" && e.label ? { label: e.label } : {}) });
 	}
 	return { plan: { ...working, edges: [...working.edges, ...newEdges] }, pastedIds };
 }

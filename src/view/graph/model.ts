@@ -41,11 +41,13 @@ export function assemble(scripts: ScriptIn[], calls: CallIn[]): Graph {
 		if (!caller) topLevel.add(call.path);
 		if (from === call.callee) continue; // recursion, or the declaration itself
 		const key = `${from}→${call.callee}`;
-		const edge = edges.get(key) ?? { from, to: call.callee, crossScript: call.callee.split("#")[0] !== call.path, sites: [] };
+		const edge = edges.get(key) ?? { from, to: call.callee, crossScript: scriptOf(call.callee) !== call.path, sites: [] };
 		edge.sites.push({ path: call.path, line: call.line });
 		edges.set(key, edge);
 	}
-	return { scripts, nodes, edges: [...edges.values()], topLevel: [...topLevel] };
+	const extra = [...topLevel].filter((path) => !byPath.has(path)).sort((a, b) => a.localeCompare(b));
+	const allScripts = extra.length ? [...scripts, ...extra.map((path): ScriptIn => ({ path, bytes: 0, procedures: [] }))] : scripts;
+	return { scripts: allScripts, nodes, edges: [...edges.values()], topLevel: [...topLevel] };
 }
 
 /** Around a focus: what it calls, what calls it, or both (when nothing is said). */
@@ -59,20 +61,26 @@ export function visible(graph: Graph, filter: Filter): { nodes: Set<string>; edg
 		const edges = graph.edges.filter((e) => e.crossScript);
 		return { nodes: new Set(edges.flatMap((e) => [e.from, e.to])), edges };
 	}
-	const keep = new Set<string>(filter.focus ? [filter.focus] : []);
-	let frontier = [...keep];
-	for (let d = 0; d < filter.depth; d++) {
-		const next: string[] = [];
+	const keep = new Set<string>();
+	if (filter.focus) {
+		keep.add(filter.focus);
+		// A script focus ("path#") seeds all of that script's procedures before walking out.
+		if (filter.focus.endsWith("#")) {
+			const focusPath = filter.focus.slice(0, -1);
+			for (const n of graph.nodes) if (n.id.includes("#") && scriptOf(n.id) === focusPath) keep.add(n.id);
+		}
+	}
+	const maxDepth = Math.max(0, Math.min(20, Math.floor(filter.depth) || 0));
+	let frontier = new Set(keep);
+	for (let d = 0; d < maxDepth && frontier.size > 0; d++) {
+		const next = new Set<string>();
 		for (const e of graph.edges) {
-			const focusIsScript = (id: string) => frontier.some((f) => (f.endsWith("#") ? id.startsWith(f) : id === f));
 			// Outwards along a line is to what is called; back along it is to what calls.
-			if (filter.direction !== "callers" && focusIsScript(e.from) && !keep.has(e.to)) (keep.add(e.to), next.push(e.to));
-			if (filter.direction !== "callees" && focusIsScript(e.to) && !keep.has(e.from)) (keep.add(e.from), next.push(e.from));
+			if (filter.direction !== "callers" && frontier.has(e.from) && !keep.has(e.to)) (keep.add(e.to), next.add(e.to));
+			if (filter.direction !== "callees" && frontier.has(e.to) && !keep.has(e.from)) (keep.add(e.from), next.add(e.from));
 		}
 		frontier = next;
 	}
-	// A script focus ("path#") keeps all of that script's procedures.
-	if (filter.focus?.endsWith("#")) for (const n of graph.nodes) if (n.id.startsWith(filter.focus)) keep.add(n.id);
 	return { nodes: keep, edges: graph.edges.filter((e) => keep.has(e.from) && keep.has(e.to)) };
 }
 
@@ -209,7 +217,7 @@ export function fromCallGraph(input: CallGraphIn, toPath: (uri: string) => strin
 		if (to.endsWith("#")) topLevel.add(to.slice(0, -1));
 		// A call and a class relation between the same two are two edges: they say different things.
 		const key = `${from}→${to}→${relationOf(e.kind)}`;
-		const edge = edges.get(key) ?? { from, to, crossScript: from.split("#")[0] !== to.split("#")[0], sites: [], kind: e.kind, resolved: e.resolved };
+		const edge = edges.get(key) ?? { from, to, crossScript: scriptOf(from) !== scriptOf(to), sites: [], kind: e.kind, resolved: e.resolved };
 		if (e.location) edge.sites.push({ path: toPath(e.location.uri), line: e.location.range.start.line });
 		edges.set(key, edge);
 	}
@@ -227,7 +235,11 @@ export function fromCallGraph(input: CallGraphIn, toPath: (uri: string) => strin
 export const foldId = (path: string) => `fold:${path}`;
 export const isFold = (id: string) => id.startsWith("fold:");
 /** The script (or the box of unresolved targets) a node is in, from its id. */
-export const scriptOf = (id: string) => (isFold(id) ? id.slice(5) : id.slice(0, id.lastIndexOf("#")));
+export const scriptOf = (id: string) => {
+	if (isFold(id)) return id.slice(5);
+	const at = id.lastIndexOf("#");
+	return at >= 0 ? id.slice(0, at) : id;
+};
 
 /** The id a folded folder's node has: every script in the folder drawn as one node. */
 export const dirId = (folder: string) => `dir:${folder}`;

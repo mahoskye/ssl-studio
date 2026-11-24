@@ -44,6 +44,7 @@ function collectProcedureNames(node: Node): string[] {
 }
 
 const collapsedByPath = new Map<string, Set<string>>();
+let collapsedRoot: string | undefined;
 
 function toSymbols(list: monaco.languages.DocumentSymbol[]): SymbolIn[] {
 	return list.map((s) => ({
@@ -92,26 +93,65 @@ export function BlocksView(props: { path: string; group: number }) {
 	};
 
 	let timer: ReturnType<typeof setTimeout> | undefined;
+	let reqSeq = 0;
+	let treeVersionId = -1;
+	const refreshNow = () => {
+		clearTimeout(timer);
+		timer = undefined;
+		setVersion((v) => v + 1);
+	};
+	onCleanup(() => {
+		reqSeq++;
+		clearTimeout(timer);
+		timer = undefined;
+	});
+	// Clear per-file fold memory when switching workspaces.
+	createEffect(() => {
+		const root = state.workspace?.root;
+		if (collapsedRoot !== undefined && collapsedRoot !== root) {
+			collapsedByPath.clear();
+			setCollapseVersion((v) => v + 1);
+		}
+		collapsedRoot = root;
+	});
 	createEffect(
 		on(
 			() => [props.path, state.lsp.state] as const,
 			() => {
+				treeVersionId = -1;
 				const model = doc()?.model;
-				if (!model) return;
+				if (!model || model.isDisposed()) return;
 				const sub = model.onDidChangeContent(() => {
 					clearTimeout(timer);
 					timer = setTimeout(() => setVersion((v) => v + 1), 300);
 				});
-				setVersion((v) => v + 1);
-				onCleanup(() => sub.dispose());
+				refreshNow();
+				onCleanup(() => {
+					clearTimeout(timer);
+					timer = undefined;
+					sub.dispose();
+				});
 			},
 		),
 	);
 	createEffect(
 		on(version, async () => {
+			const req = ++reqSeq;
 			const model = doc()?.model;
-			if (!model) return;
+			if (!model || model.isDisposed()) return;
+			if (state.lsp.state !== "running") {
+				setFailed(null);
+				return;
+			}
+			const startVersion = model.getVersionId();
+			const stale = () => req !== reqSeq || model.isDisposed() || doc()?.model !== model || model.getVersionId() !== startVersion;
 			try {
+				await session.waitReady().catch(() => {});
+				if (stale()) return;
+				if (state.lsp.state !== "running") {
+					setFailed(null);
+					return;
+				}
 				let root: Node;
 				if (session.supports("ssl/syntaxTree")) {
 					// The server's own parse (L1): statement-level chips, arms, unreadable spans.
@@ -119,6 +159,7 @@ export function BlocksView(props: { path: string; group: number }) {
 						session.request("ssl/syntaxTree", { textDocument: { uri: model.uri.toString() } }),
 						session.documentSymbols(model).catch(() => []),
 					]);
+					if (stale()) return;
 					// Parameter names come from the outline, which lists them per procedure.
 					const params = new Map<string, string[]>();
 					const walk = (list: monaco.languages.DocumentSymbol[]) =>
@@ -130,11 +171,13 @@ export function BlocksView(props: { path: string; group: number }) {
 						session.documentSymbols(model),
 						session.request("textDocument/foldingRange", { textDocument: { uri: model.uri.toString() } }).then((f) => f ?? []),
 					]);
+					if (stale()) return;
 					root = buildTree(model.getLinesContent(), toSymbols(symbols), folds);
 				}
-				// The answer is for the text as it was when asked: a file closed or swapped since is not this one.
-				if (model.isDisposed() || doc()?.model !== model) return;
+				// The answer is for the text as it was when asked: a file closed, edited, or swapped since is not this one.
+				if (stale()) return;
 				const first = tree.root === null;
+				treeVersionId = startVersion;
 				setFailed(null);
 				setTree("root", reconcile(root, { key: "key", merge: false }));
 				setRead((v) => v + 1);
@@ -149,6 +192,12 @@ export function BlocksView(props: { path: string; group: number }) {
 					setCollapseVersion((v) => v + 1);
 				}
 			} catch (e: any) {
+				if (stale()) return;
+				if (state.lsp.state !== "running") {
+					setFailed(null);
+					return;
+				}
+				treeVersionId = -1;
 				setTree("root", null);
 				setFailed(String(e?.message ?? e));
 			}
@@ -383,28 +432,42 @@ export function BlocksView(props: { path: string; group: number }) {
 		return { plans: [...planSeen.values()], docs: [...docSeen.values()] };
 	};
 
-	/** Replaces lines start..end (1-based) with `text`, as one undoable edit. */
-	const replaceLines = (start: number, end: number, text: string | null) => {
-		const model = doc()!.model;
+	const isTreeFresh = (model: monaco.editor.ITextModel | undefined): model is monaco.editor.ITextModel =>
+		Boolean(model && !model.isDisposed() && model.getVersionId() === treeVersionId);
+
+	/** Replaces lines start..end (1-based) with `text`, as one undoable edit (or open for a following `formatLines`). */
+	const replaceLines = (start: number, end: number, text: string | null, closeUndo = true) => {
+		const model = doc()?.model;
+		if (!model || model.isDisposed()) return;
 		const eol = model.getEOL();
+		const lineCount = model.getLineCount();
 		let range: monaco.Range;
 		let replacement = text ?? "";
 		if (text === null) {
 			// Delete whole lines, with their line break.
-			range = end < model.getLineCount() ? new monaco.Range(start, 1, end + 1, 1) : new monaco.Range(Math.max(1, start - 1), model.getLineMaxColumn(Math.max(1, start - 1)), end, model.getLineMaxColumn(end));
+			if (start <= 1 && end >= lineCount) {
+				range = new monaco.Range(1, 1, lineCount, model.getLineMaxColumn(lineCount));
+			} else if (end < lineCount) {
+				range = new monaco.Range(start, 1, end + 1, 1);
+			} else {
+				range = new monaco.Range(start - 1, model.getLineMaxColumn(start - 1), end, model.getLineMaxColumn(end));
+			}
 			replacement = "";
 		} else range = new monaco.Range(start, 1, end, model.getLineMaxColumn(end));
 		model.pushStackElement();
 		model.pushEditOperations([], [{ range, text: replacement.replace(/\r?\n/g, eol) }], () => null);
-		model.pushStackElement();
+		if (closeUndo) model.pushStackElement();
 	};
 	const formatLines = async (start: number, end: number) => {
-		const model = doc()!.model;
+		const model = doc()?.model;
+		if (!model || model.isDisposed()) return;
 		try {
 			const edits = await session.formatRanges(model, [[start - 1, Math.min(end, model.getLineCount()) - 1]], model.getOptions());
-			if (edits.length) model.pushEditOperations([], edits, () => null);
+			if (!model.isDisposed() && edits.length) model.pushEditOperations([], edits, () => null);
 		} catch {
 			// The move stands unformatted; format on save will tidy it.
+		} finally {
+			if (!model.isDisposed()) model.pushStackElement();
 		}
 	};
 	const parentOf = (target: Node, from: Node | null = tree.root): Node | null => {
@@ -417,24 +480,37 @@ export function BlocksView(props: { path: string; group: number }) {
 		return null;
 	};
 	const move = async (n: Node, direction: -1 | 1) => {
+		const model = doc()?.model;
+		if (!isTreeFresh(model) || !within(n)) return;
 		const parent = parentOf(n);
 		const other = parent && neighbour(parent, n, direction);
-		if (!other) return;
+		if (!other || !within(other)) return;
 		const [a, b] = direction < 0 ? [other, n] : [n, other];
-		const swapped = swapLines(doc()!.model.getLinesContent(), a, b);
-		replaceLines(swapped.start, swapped.end, swapped.lines.join("\n"));
+		const swapped = swapLines(model.getLinesContent(), a, b);
+		replaceLines(swapped.start, swapped.end, swapped.lines.join("\n"), false);
 		await formatLines(swapped.start, swapped.end);
+		refreshNow();
 	};
 	const wrap = async (n: Node) => {
+		const model = doc()?.model;
+		if (!isTreeFresh(model) || !within(n)) return;
+		const beforeVer = model.getVersionId();
 		const name = await ask("Name of the new region");
 		if (!name) return;
+		if (model.isDisposed() || doc()?.model !== model || model.getVersionId() !== beforeVer || !within(n)) return;
 		const body = lines(n);
-		replaceLines(n.start, n.end, `/* region ${name};\n${body}\n/* endregion;`);
+		replaceLines(n.start, n.end, `/* region ${name};\n${body}\n/* endregion;`, false);
 		await formatLines(n.start, n.end + 2);
+		refreshNow();
 	};
 	const remove = async (n: Node) => {
+		const model = doc()?.model;
+		if (!isTreeFresh(model) || !within(n)) return;
+		const beforeVer = model.getVersionId();
 		if ((await choose(`Delete ${n.name ?? `lines ${n.start}-${n.end}`}? Undo brings it back.`, ["Delete"], { danger: "Delete" })) !== "Delete") return;
+		if (model.isDisposed() || doc()?.model !== model || model.getVersionId() !== beforeVer || !within(n)) return;
 		replaceLines(n.start, n.end, null);
+		refreshNow();
 	};
 	/**
 	 * An in-place editor's text, set once as it opens: bound reactively, a tree
@@ -449,40 +525,56 @@ export function BlocksView(props: { path: string; group: number }) {
 		read();
 		const h = n.header;
 		if (!h) return null;
-		const model = doc()!.model;
-		const split = splitHeader(model.getValueInRange(new monaco.Range(h.line, h.startColumn, h.line, h.endColumn)), h.keyword);
-		return split && { ...split, rest: model.getLineContent(h.line).slice(h.endColumn - 1) };
+		const model = doc()?.model;
+		if (!model || model.isDisposed() || h.line < 1 || h.line > model.getLineCount()) return null;
+		const maxCol = model.getLineMaxColumn(h.line);
+		const startCol = Math.max(1, Math.min(h.startColumn, maxCol));
+		const endCol = Math.max(startCol, Math.min(h.endColumn, maxCol));
+		const split = splitHeader(model.getValueInRange(new monaco.Range(h.line, startCol, h.line, endCol)), h.keyword);
+		return split && { ...split, rest: model.getLineContent(h.line).slice(endCol - 1) };
 	};
 	const conditionKey = (n: Node) => `${n.key}:condition`;
 	/** Replaces only the condition, as one undoable edit; keyword, spacing and `;` stay as written. */
 	const commitCondition = (n: Node, value: string) => {
 		if (editing() !== conditionKey(n)) return;
 		setEditing(null);
+		const model = doc()?.model;
+		if (!isTreeFresh(model)) return;
 		const parts = headerParts(n);
 		const condition = value.trim();
 		if (!parts || condition === parts.condition) return;
 		if (!condition) return notify("A condition cannot be empty; edit the statement in text to remove it.");
 		const h = n.header!;
 		const from = h.startColumn + parts.before.length;
-		const model = doc()!.model;
 		model.pushStackElement();
 		model.pushEditOperations([], [{ range: new monaco.Range(h.line, from, h.line, from + parts.condition.length), text: condition }], () => null);
 		model.pushStackElement();
+		refreshNow();
 	};
 	const commitEdit = (n: Node, text: string) => {
+		if (editing() !== n.key) return;
 		setEditing(null);
-		if (text !== lines(n)) replaceLines(n.start, n.end, text);
+		const model = doc()?.model;
+		if (!isTreeFresh(model) || !within(n)) return;
+		if (text !== lines(n).replace(/\r\n/g, "\n")) {
+			replaceLines(n.start, n.end, text);
+			refreshNow();
+		}
 	};
 	const drop = (e: DragEvent, line: number) => {
 		e.preventDefault();
 		setDropAt(null);
+		const model = doc()?.model;
+		if (!isTreeFresh(model)) return;
 		const text = e.dataTransfer?.getData("text/plain");
 		if (!text) return;
-		const model = doc()!.model;
+		const targetLine = Math.max(1, Math.min(line, model.getLineCount()));
+		const eol = model.getEOL();
 		model.pushStackElement();
-		model.pushEditOperations([], [{ range: new monaco.Range(line, 1, line, 1), text: text.replace(/\n?$/, "\n") }], () => null);
+		model.pushEditOperations([], [{ range: new monaco.Range(targetLine, 1, targetLine, 1), text: text.replace(/\r?\n/g, "\n").replace(/\n?$/, "\n").replace(/\n/g, eol) }], () => null);
 		model.pushStackElement();
 		notify("Inserted. Format or save to settle its layout.");
+		refreshNow();
 	};
 	const dropZone = (line: number) => ({
 		onDragOver: (e: DragEvent) => (e.preventDefault(), setDropAt(line)),
@@ -552,8 +644,8 @@ export function BlocksView(props: { path: string; group: number }) {
 	};
 	const editable = (n: Node) => n.kind === "text" || n.kind === "raw";
 	const onKey = (e: KeyboardEvent) => {
-		// An open editor has its own keys, and its own undo.
-		if (editing() || (e.target as HTMLElement).closest("input, textarea")) return;
+		// An open editor has its own keys, and its own undo; interactive badges handle their own Enter/Space.
+		if (editing() || (e.target as HTMLElement | null)?.closest("input, textarea, button, a")) return;
 		const mod = e.ctrlKey || e.metaKey;
 		const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
 		const editor = editors[props.group];
@@ -610,8 +702,16 @@ export function BlocksView(props: { path: string; group: number }) {
 								onClick={(e) => e.stopPropagation()}
 								onDblClick={(e) => e.stopPropagation()}
 								onKeyDown={(e) => {
-									if (e.key === "Escape") setEditing(null);
-									if (e.key === "Enter") commitCondition(n, e.currentTarget.value);
+									if (e.key === "Escape") {
+										e.preventDefault();
+										e.stopPropagation();
+										setEditing(null);
+									}
+									if (e.key === "Enter") {
+										e.preventDefault();
+										e.stopPropagation();
+										commitCondition(n, e.currentTarget.value);
+									}
 								}}
 								onBlur={(e) => commitCondition(n, e.currentTarget.value)}
 							/>
@@ -678,7 +778,7 @@ export function BlocksView(props: { path: string; group: number }) {
 			cursor: "pointer",
 			flex: "none",
 		});
-		const header = (label: any, meta?: string) => (
+		const header = (label: any, meta?: () => string | undefined) => (
 			<div class="block-head" {...dropZone(n.start)} classList={{ drop: dropAt() === n.start }} onClick={() => select(n)} onDblClick={() => toggle(n)}>
 				<button class="twisty" tabindex={-1} aria-label={isCollapsed(n) ? "Unfold" : "Fold"} aria-expanded={!isCollapsed(n)} onClick={(e) => (e.stopPropagation(), toggle(n))}>
 					<Icon name={isCollapsed(n) ? "chevron-right" : "chevron-down"} />
@@ -779,20 +879,20 @@ export function BlocksView(props: { path: string; group: number }) {
 						)}
 					</For>
 				</Show>
-				<Show when={meta}>
-					<span class="meta">{meta}</span>
+				<Show when={meta?.()}>
+					{(text) => <span class="meta">{text()}</span>}
 				</Show>
 				<Tools node={n} />
 			</div>
 		);
-		const size = `${n.end - n.start + 1} lines`;
+		const size = () => `${n.end - n.start + 1} lines`;
 		// Where it starts in the text, so that a block here and a line number in Problems or a diff are the same place.
-		const from = `line ${n.start}`;
+		const from = () => `line ${n.start}`;
 		return (
 			<Switch>
 				<Match when={n.kind === "region"}>
 					<section class="b-region" classList={{ selected: selectedKey() === n.key }} style={{ "--region": regionColor(n.name!) }}>
-						{header(<strong>{n.name}</strong>, `${from} · ${size} · ${n.children.filter((c) => c.kind === "procedure").length} procedures`)}
+						{header(<strong>{n.name}</strong>, () => `${from()} · ${size()} · ${n.children.filter((c) => c.kind === "procedure").length} procedures`)}
 						<Show when={!isCollapsed(n)}>
 							<div class="block-body">
 								<Children node={n} />
@@ -807,7 +907,7 @@ export function BlocksView(props: { path: string; group: number }) {
 								<span class="proc-icon">ƒ</span> <strong>{n.name}</strong>
 								<span class="params">({n.params?.join(", ")})</span>
 							</>,
-							`${from} · ${size}`,
+							() => `${from()} · ${size()}`,
 						)}
 						<Show when={!isCollapsed(n)}>
 							<div class="block-body">
@@ -827,7 +927,7 @@ export function BlocksView(props: { path: string; group: number }) {
 								</Show>
 								<HeadLine node={n} />
 							</>,
-							n.end - n.start > 1 ? size : undefined,
+							() => (n.end - n.start > 1 ? size() : undefined),
 						)}
 						<Show when={!isCollapsed(n)}>
 							<div class="block-body">
@@ -873,8 +973,16 @@ export function BlocksView(props: { path: string; group: number }) {
 							ref={(el) => opened(el, lines(n))}
 							rows={n.end - n.start + 1}
 							onKeyDown={(e) => {
-								if (e.key === "Escape") setEditing(null);
-								if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) commitEdit(n, e.currentTarget.value);
+								if (e.key === "Escape") {
+									e.preventDefault();
+									e.stopPropagation();
+									setEditing(null);
+								}
+								if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+									e.preventDefault();
+									e.stopPropagation();
+									commitEdit(n, e.currentTarget.value);
+								}
 							}}
 							onBlur={(e) => commitEdit(n, e.currentTarget.value)}
 						/>
@@ -888,8 +996,16 @@ export function BlocksView(props: { path: string; group: number }) {
 								ref={(el) => opened(el, lines(n))}
 								rows={n.end - n.start + 1}
 								onKeyDown={(e) => {
-									if (e.key === "Escape") setEditing(null);
-									if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) commitEdit(n, e.currentTarget.value);
+									if (e.key === "Escape") {
+										e.preventDefault();
+										e.stopPropagation();
+										setEditing(null);
+									}
+									if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+										e.preventDefault();
+										e.stopPropagation();
+										commitEdit(n, e.currentTarget.value);
+									}
 								}}
 								onBlur={(e) => commitEdit(n, e.currentTarget.value)}
 							/>

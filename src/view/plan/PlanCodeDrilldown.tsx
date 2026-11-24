@@ -7,13 +7,15 @@ import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import { baseName, dirName } from "../../shared/paths";
 import { Icon } from "../Icon";
 import { IconButton } from "../panels/Rows";
+import { planTargetsOf } from "./assist";
 import { nodeCodeDetails, type BuiltUnit } from "./built";
 import { readProcedurePreview, type ProcedurePreview } from "./drift";
 import type { Plan, PlanNode } from "./model";
 
 type PreviewTarget = { name: string; script?: string; hintScript?: string; label: string };
 
-const sigOf = (u: BuiltUnit) => `${u.name}(${(u.parameters ?? []).join(", ")})`;
+export const sigOf = (u: Pick<BuiltUnit, "name" | "parameters">) =>
+	`${u.name}(${(Array.isArray(u.parameters) ? u.parameters.filter((p): p is string => typeof p === "string") : []).join(", ")})`;
 
 export function NodeImplementation(props: {
 	plan: Plan;
@@ -258,7 +260,7 @@ export function PlanImplementation(props: {
 	bindTextarea: (value: () => string) => (el: HTMLTextAreaElement) => void;
 	fitTextarea: (el: HTMLTextAreaElement) => void;
 }) {
-	const targets = createMemo(() => (Array.isArray(props.plan.targets) ? (props.plan.targets as string[]).filter((s) => typeof s === "string" && s.trim()) : []));
+	const targets = createMemo(() => planTargetsOf(props.plan));
 	const allScripts = createMemo(() => [...new Set([...targets(), ...props.builtUnits.map((u) => u.script).filter(Boolean)])]);
 	const scriptsText = () => targets().join(", ");
 

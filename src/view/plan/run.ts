@@ -9,13 +9,15 @@ import { openReview, type Check } from "../editor/Review";
 import { monaco } from "../editor/monaco";
 import { session } from "../lsp/session";
 import { describeElement } from "../panels/Reference";
-import { applyText, documents, keepTab, notify, setState, state } from "../state";
+import { applyText, canonical, documents, keepTab, notify, setState, state } from "../state";
 import { workPrompt } from "../projectDocs";
 import { joinPath, relativeTo } from "../../shared/paths";
-import { addQuestions, answerQuestion, applySuggestion, formatSurvey, looksCut, nounsOf, openQuestions, overLimit, parseContext, parseQuestions, parseSpec, parseSuggestions, planHash, printSpec, readBlocks, refinePrompt, specHash, specPrompt, unaccounted, type ContextRequest, type Suggestion, type Survey } from "./assist";
+import { addQuestions, answerQuestion, applySuggestion, formatSurvey, isAllowedContextPath, looksCut, nounsOf, openQuestions, overLimit, parseContext, parseQuestions, parseSpec, parseSuggestions, planHash, planTargetsOf, printSpec, readBlocks, refinePrompt, specHash, specPrompt, unaccounted, type ContextRequest, type Suggestion, type Survey } from "./assist";
 import type { BuildRun } from "./build";
 import { revisionText, settledNodes } from "./built";
 import { parsePlan, printPlan, type Plan } from "./model";
+
+export { isAllowedContextPath };
 
 export type AssistState = { running: "" | "refine" | "spec" | "build" | "tests"; progress: string; warnings: string[]; suggestions: Suggestion[]; tokens: number; cost: number; specVersion: number; run: BuildRun | null };
 const blank = (): AssistState => ({ running: "", progress: "", warnings: [], suggestions: [], tokens: 0, cost: 0, specVersion: 0, run: null });
@@ -35,11 +37,11 @@ export const planDocPath = (planPath: string) => planPath.replace(/\.plan\.json$
 export const specPath = planDocPath;
 
 export const planOf = (path: string): Plan | undefined => {
-	const doc = documents.get(path);
+	const doc = documents.get(canonical(path)) ?? documents.get(path);
 	return doc ? parsePlan(doc.model.getValue()).plan : undefined;
 };
 export const savePlan = (path: string, plan: Plan) => applyText(path, printPlan(plan));
-const rel = (path: string) => relativeTo(state.workspace?.root, path);
+const rel = (path: string, root = state.workspace?.root) => relativeTo(root, path);
 const PROCEDURES = new Set([6, 12]); // LSP SymbolKind: Method, Function.
 const fileOf = (uri: string) => monaco.Uri.parse(uri).fsPath;
 
@@ -54,34 +56,52 @@ async function readLines(uri: string, start: number, end: number): Promise<strin
 
 /** Survey before you build: the agent cannot look, so SSL Studio does. */
 export async function survey(plan: Plan): Promise<string> {
+	const root = state.workspace?.root;
+	if (!root) return "Nothing in the workspace matched.";
 	const found: Survey = { calls: [], targets: [], symbols: [], hits: [], callGraph: [] };
 	for (const word of nounsOf(plan)) {
+		if (state.workspace?.root !== root) return "";
 		const symbols = await session.workspaceSymbols(word).catch(() => []);
-		for (const s of symbols) if (PROCEDURES.has(s.kind) && !found.symbols.some((f) => f.name === s.name)) found.symbols.push({ name: s.name, file: rel(fileOf(s.location.uri)) });
+		if (state.workspace?.root !== root) return "";
+		for (const s of symbols) {
+			const fRel = rel(fileOf(s.location.uri), root);
+			if (!isAllowedContextPath(fRel)) continue;
+			if (PROCEDURES.has(s.kind) && !found.symbols.some((f) => f.name === s.name)) found.symbols.push({ name: s.name, file: fRel });
+		}
 		const hits = await backend.search(word, { caseSensitive: false }).catch(() => []);
-		for (const h of hits.filter((x) => !/\.(plan\.json|spec\.md|tidy\.md)$/i.test(x.path)).slice(0, 3)) found.hits.push({ word, file: rel(h.path), line: h.line, text: h.text.trim().slice(0, 120) });
+		if (state.workspace?.root !== root) return "";
+		for (const h of hits.filter((x) => !/\.(plan\.json|spec\.md|tidy\.md)$/i.test(x.path) && isAllowedContextPath(rel(x.path, root))).slice(0, 3)) {
+			found.hits.push({ word, file: rel(h.path, root), line: h.line, text: h.text.trim().slice(0, 120) });
+		}
 	}
 	found.symbols = found.symbols.slice(0, 30);
 	found.hits = found.hits.slice(0, 20);
-	for (const node of plan.nodes.filter((n) => n.kind === "call" && n.ref)) {
-		const name = node.ref!.split(".").at(-1)!;
+	for (const node of plan.nodes.filter((n) => n.kind === "call" && typeof n.ref === "string" && n.ref.trim())) {
+		if (state.workspace?.root !== root) return "";
+		const name = node.ref!.trim().split(".").filter(Boolean).at(-1);
+		if (!name) continue;
 		const symbol = (await session.workspaceSymbols(name).catch(() => [])).find((s) => s.name.toLowerCase() === name.toLowerCase());
-		if (!symbol) continue;
+		if (state.workspace?.root !== root) return "";
+		if (!symbol || !isAllowedContextPath(rel(fileOf(symbol.location.uri), root))) continue;
 		const start = symbol.location.range.start.line;
 		const code = await readLines(symbol.location.uri, start, start + 12);
+		if (state.workspace?.root !== root) return "";
 		if (code !== null) found.calls.push({ ref: node.ref!, code: code.trim() });
 		if (session.supports("ssl/callGraph")) {
 			const graph: any = await session.request("ssl/callGraph", { textDocument: { uri: symbol.location.uri }, procedure: name, depth: 1 }).catch(() => null);
+			if (state.workspace?.root !== root) return "";
 			const names = new Map<string, string>((graph?.nodes ?? []).map((n: any) => [n.id, n.name]));
 			for (const e of graph?.edges ?? []) found.callGraph.push(`${names.get(e.from) ?? e.from} calls ${e.target}${e.resolved ? "" : " (unresolved)"}`);
 		}
 	}
 	found.callGraph = [...new Set(found.callGraph)].slice(0, 20);
-	for (const target of Array.isArray(plan.targets) ? (plan.targets as string[]) : []) {
-		const text = await backend.read(joinPath(state.workspace!.root, target)).then(
+	for (const target of planTargetsOf(plan)) {
+		if (state.workspace?.root !== root) return "";
+		const text = await backend.read(joinPath(root, target)).then(
 			(f) => f.text,
 			() => null,
 		);
+		if (state.workspace?.root !== root) return "";
 		if (text === null) {
 			found.targets.push({ path: target, outline: null });
 			continue;
@@ -90,6 +110,7 @@ export async function survey(plan: Plan): Promise<string> {
 		const lines: string[] = [];
 		const walk = (list: monaco.languages.DocumentSymbol[], depth: number) => list.forEach((s) => (lines.push(`${"  ".repeat(depth)}${s.name}`), walk(s.children ?? [], depth + 1)));
 		walk((await session.analyze(text).catch(() => ({ symbols: [] }))).symbols, 1);
+		if (state.workspace?.root !== root) return "";
 		found.targets.push({ path: target, outline: lines.join("\n") });
 	}
 	return formatSurvey(found);
@@ -99,22 +120,36 @@ const MAX_CONTEXT_CHARS = 8000;
 
 /** Answers an agent's `CONTEXT` block from the workspace and the server. */
 async function readContext(requests: ContextRequest[]): Promise<string> {
+	const root = state.workspace?.root;
+	if (!root) return "";
 	const parts = ["CONTEXT YOU ASKED FOR:"];
 	for (const r of requests) {
+		if (state.workspace?.root !== root) return "";
 		if (r.file) {
-			const text = await backend.read(joinPath(state.workspace!.root, r.file)).then(
-				(f) => f.text,
-				() => null,
-			);
-			parts.push(`FILE ${r.file}:`, text === null ? "(no such file in the workspace)" : text.slice(0, MAX_CONTEXT_CHARS));
+			if (!isAllowedContextPath(r.file)) {
+				parts.push(`FILE ${r.file}:`, "(blocked: hidden or outside-workspace paths cannot be read automatically)");
+			} else {
+				const text = await backend.read(joinPath(root, r.file)).then(
+					(f) => f.text,
+					() => null,
+				);
+				if (state.workspace?.root !== root) return "";
+				parts.push(`FILE ${r.file}:`, text === null ? "(no such file in the workspace)" : text.slice(0, MAX_CONTEXT_CHARS));
+			}
 		}
 		if (r.procedure) {
-			const symbol = (await session.workspaceSymbols(r.procedure).catch(() => [])).find((s) => s.name.toLowerCase() === r.procedure!.toLowerCase());
+			const symbols = await session.workspaceSymbols(r.procedure).catch(() => []);
+			if (state.workspace?.root !== root) return "";
+			const symbol = symbols.find(
+				(s) => s.name.toLowerCase() === r.procedure!.toLowerCase() && isAllowedContextPath(rel(fileOf(s.location.uri), root)),
+			);
 			const code = symbol && (await readLines(symbol.location.uri, symbol.location.range.start.line, symbol.location.range.end.line));
+			if (state.workspace?.root !== root) return "";
 			parts.push(`PROCEDURE ${r.procedure}:`, code ? code.slice(0, MAX_CONTEXT_CHARS) : "(no such procedure in the workspace)");
 		}
 		if (r.element) {
-			const text = await describeElement(r.element, state.workspace!.root).catch(() => "");
+			const text = await describeElement(r.element, root).catch(() => "");
+			if (state.workspace?.root !== root) return "";
 			parts.push(`ELEMENT ${r.element}:`, text || "(the language server does not know it)");
 		}
 	}
@@ -203,28 +238,35 @@ const together = (...parts: (string | undefined | null)[]) => parts.filter(Boole
 /** Stage 2: the agent finds what the chart leaves undecided. */
 export function refine(path: string) {
 	return begin(path, "refine", async () => {
+		const root = state.workspace?.root;
+		if (!root) return;
 		const plan = planOf(path);
 		if (!plan) return notify("Fix the plan's text first.");
 		update(path, { progress: "Surveying the workspace…" });
 		const found = await survey(plan);
+		if (state.workspace?.root !== root) return;
 		const skills = await planningSkills(path);
+		if (state.workspace?.root !== root) return;
 		const work = await workOf(path, plan);
+		if (state.workspace?.root !== root) return;
 		let extra: string | undefined;
 		let blocks: Record<string, string> = {};
 		for (let round = 0; round < 4; round++) {
 			const text = await askAgent(path, "Refine the plan", refinePrompt(plan, found, together(work, extra)), skills);
-			if (text === null) return;
+			if (state.workspace?.root !== root || text === null) return;
 			blocks = readBlocks(text);
 			const wanted = round < 3 ? parseContext(blocks.CONTEXT) : [];
 			if (wanted.length) {
 				update(path, { progress: "Reading what the agent asked for…" });
 				extra = await readContext(wanted);
+				if (state.workspace?.root !== root) return;
 				continue;
 			}
 			if (Object.keys(blocks).length) break;
 			if (round > 0) break;
 			extra = "Your last reply had none of the marker lines. Reply using only them.";
 		}
+		if (state.workspace?.root !== root) return;
 		const questions = parseQuestions(blocks.QUESTIONS);
 		// The plan as it is now: you may have kept working while the agent thought.
 		const current = planOf(path) ?? plan;
@@ -240,33 +282,42 @@ export function refine(path: string) {
 /** Stage 3: the written spec. Open questions come first: in the spike, models guessed where they had asked. */
 export function writeSpec(path: string) {
 	return begin(path, "spec", async () => {
+		const root = state.workspace?.root;
+		if (!root) return;
 		const plan = planOf(path);
 		if (!plan) return notify("Fix the plan's text first.");
 		const open = openQuestions(plan);
 		if (open.length) return notify(`Answer ${open.length === 1 ? "the open question" : `the ${open.length} open questions`} first.`);
 		update(path, { progress: "Surveying the workspace…" });
 		const found = await survey(plan);
+		if (state.workspace?.root !== root) return;
 		const skills = await planningSkills(path);
+		if (state.workspace?.root !== root) return;
 		const limits = state.settings.limits;
 		const file = specPath(path);
 		const original = await backend.read(file).then(
 			(f) => f.text,
 			() => "",
 		);
+		if (state.workspace?.root !== root) return;
 		// With code already built, this revises the spec, and only what changed needs saying.
 		const revision = revisionText(plan, original ? original.split("\n## Units")[0]!.trim() : null);
 		const work = await workOf(path, plan);
+		if (state.workspace?.root !== root) return;
 		let text = await askAgent(path, "Write the plan doc", specPrompt(plan, found, limits, together(work, revision)), skills);
-		if (text === null) return;
+		if (state.workspace?.root !== root || text === null) return;
 		let parsed = parseSpec(text);
 		const lacking = () => [!parsed.spec && "SPEC", !revision && !parsed.units.length && "UNITS", !revision && !parsed.map.length && "MAP"].filter(Boolean);
 		if (lacking().length) {
 			text = await askAgent(path, "Write the plan doc", specPrompt(plan, found, limits, [work, revision, `Your last reply lacked these blocks, or they did not parse as JSON: ${lacking().join(", ")}. Reply again with every block.`].filter(Boolean).join("\n\n")), skills);
-			if (text === null) return;
+			if (state.workspace?.root !== root || text === null) return;
 			parsed = parseSpec(text);
 		}
+		if (state.workspace?.root !== root) return;
 		if (!parsed.spec) return warn(path, "The agent did not return a plan doc it could be read from. Try again, or choose another model.");
-		const asked = addQuestions(plan, parsed.questions);
+		// Re-read the latest plan before saving questions so concurrent edits aren't clobbered.
+		const latest = planOf(path) ?? plan;
+		const asked = addQuestions(latest, parsed.questions);
 		if (openQuestions(asked).length) {
 			savePlan(path, asked);
 			return notify("The agent has questions before it can finish the plan doc.");
@@ -280,7 +331,7 @@ export function writeSpec(path: string) {
 		];
 		const blocked = missing.length ? "Every node needs an answer before this can be approved. Reject it, and write it again." : over.length ? "A script goes over the size limit: the plan doc must split it (decision 0006). Reject it, and write it again." : undefined;
 		openReview({
-			title: `Plan doc: ${rel(file)}`,
+			title: `Plan doc: ${rel(file, root)}`,
 			original,
 			proposed: printSpec(parsed.spec, parsed.units, parsed.map, planHash(plan)),
 			language: "markdown",
@@ -289,7 +340,9 @@ export function writeSpec(path: string) {
 			note: "A plan doc is the build's only memory. Nothing has been built, and the code is untouched.",
 			acceptLabel: "Approve the plan doc",
 			onAccept: async (final) => {
+				if (state.workspace?.root !== root) return;
 				await backend.write(file, final);
+				if (state.workspace?.root !== root) return;
 				setState("treeVersion", (v) => v + 1);
 				update(path, { specVersion: assistOf(path).specVersion + 1 });
 				notify("Plan doc approved and saved.");

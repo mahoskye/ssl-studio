@@ -10,8 +10,11 @@ import type { Size } from "./canvas";
 /** What an element is drawn with, and must take with it when it leaves the page. */
 const KEPT = ["fill", "stroke", "stroke-width", "stroke-dasharray", "stroke-linecap", "stroke-linejoin", "opacity", "font-family", "font-size", "font-weight", "font-style", "text-anchor"];
 /** What is there for the pointer or for measuring, and is no part of the picture. */
-const NOT_DRAWN = ".g-edge-hit, .plan-edge-hit, .plan-probe";
+const NOT_DRAWN = ".g-edge-hit, .g-far, .plan-edge-hit, .plan-probe";
 const MARGIN = 20;
+
+const escapeXmlAttr = (value: string) =>
+	value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
 /** Writes the computed style of each element of `from` onto the element of `to` in the same place. */
 function carryStyles(from: Element, to: Element) {
@@ -27,6 +30,7 @@ function carryStyles(from: Element, to: Element) {
  * full size whatever the zoom, on the window's own background.
  */
 export function pictureOf(svg: SVGSVGElement, content: Size): string {
+	if (!Number.isFinite(content.width) || !Number.isFinite(content.height) || !(content.width > 0) || !(content.height > 0)) return "";
 	const drawn = svg.querySelector<SVGGElement>(":scope > g[transform]");
 	if (!drawn) return "";
 	const copy = drawn.cloneNode(true) as SVGGElement;
@@ -48,7 +52,7 @@ export function pictureOf(svg: SVGSVGElement, content: Size): string {
 	for (const el of doomed) el?.remove();
 	copy.setAttribute("transform", `translate(${MARGIN},${MARGIN})`);
 	const [width, height] = [Math.ceil(content.width) + 2 * MARGIN, Math.ceil(content.height) + 2 * MARGIN];
-	const background = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim() || "#ffffff";
+	const background = escapeXmlAttr(getComputedStyle(document.documentElement).getPropertyValue("--bg").trim() || "#ffffff");
 	const serialise = (node: Node) => new XMLSerializer().serializeToString(node);
 	return [
 		`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`,

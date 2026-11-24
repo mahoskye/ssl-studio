@@ -155,13 +155,21 @@ export function setGraphTicketSubgraph(on: boolean) {
 export function requestGraphTicketImpact(key?: string) {
 	setTicketImpactRequest({ key: key?.trim() || undefined, seq: ++ticketImpactSeq });
 }
+/** Resets module-level Call Graph highlight and pending navigation requests (e.g. on workspace switch). */
+export function resetGraphState(): void {
+	setTicketHighlightKeySignal(null);
+	setTicketHighlightCount(0);
+	setTicketSubgraphOnlySignal(false);
+	setGraphFocusRequest(null);
+	setTicketImpactRequest(null);
+}
 
 export function GraphView() {
 	const [graph, setGraph] = createSignal<(Graph & { truncated: boolean }) | null>(null);
 	const [progress, setProgress] = createSignal("");
 	const [failed, setFailed] = createSignal("");
 	const [filter, setFilter] = createSignal<Filter>({ mode: "all", depth: 1 });
-	const [layout, setLayout] = createSignal<{ boxes: Box[]; lines: Line[]; width: number; height: number } | null>(null);
+	const [layout, setLayout] = createSignal<{ boxes: Box[]; lines: Line[]; width: number; height: number; key: string } | null>(null);
 	const [view, setView] = createSignal({ x: 20, y: 20, scale: 1 });
 	const [mode, setMode] = createSignal<Mode>(recall(MODE_KEY) === "list" ? "list" : "graph");
 	/** The node the keyboard is on: the one Tab lands on, and the arrow keys move from. */
@@ -318,6 +326,7 @@ export function GraphView() {
 		const g = graph();
 		if (!req || !g || req.seq === handledFocusReq) return;
 		handledFocusReq = req.seq;
+		setGraphFocusRequest(null);
 		const targetCanon = canonical(req.scriptPath);
 		const root = state.workspace?.root;
 		const reqRel = root ? relativeTo(root, req.scriptPath).replace(/\\/g, "/").toLowerCase() : req.scriptPath.replace(/\\/g, "/").toLowerCase();
@@ -404,7 +413,9 @@ export function GraphView() {
 			{ defer: true },
 		),
 	);
-	onCleanup(() => setTicketHighlightCount(0));
+	createEffect(() => {
+		if (mode() !== "graph") nodeEls.clear();
+	});
 	const keysId = createUniqueId();
 	const legendId = createUniqueId();
 	const toggleKeys = () => {
@@ -514,6 +525,7 @@ export function GraphView() {
 		void (async () => {
 			const chunks: string[] = [];
 			for (const filePath of scanFiles) {
+				if (run !== impactRunSeq) return;
 				const openText = documents.get(canonical(filePath))?.model.getValue();
 				if (openText !== undefined) {
 					chunks.push(openText);
@@ -577,6 +589,7 @@ export function GraphView() {
 		const req = ticketImpactRequest();
 		if (!req || req.seq === handledImpactReq) return;
 		handledImpactReq = req.seq;
+		setTicketImpactRequest(null);
 		void runTicketImpactAnalysis(req.key);
 	});
 
@@ -622,29 +635,71 @@ export function GraphView() {
 	/** A script to bring into sight once the picture is laid out again: the one just folded or unfolded. */
 	let showNext: string | null = null;
 
+	let refreshSeq = 0;
+	let refreshAbort: AbortController | null = null;
+	onCleanup(() => {
+		refreshSeq++;
+		refreshAbort?.abort();
+		refreshAbort = null;
+		schemaScanSeq++;
+		impactRunSeq++;
+		layoutRun++;
+		nodeEls.clear();
+		setTicketHighlightCount(0);
+	});
+
 	const refresh = async () => {
+		const startRoot = state.workspace?.root ?? "";
+		const run = ++refreshSeq;
+		refreshAbort?.abort();
+		const controller = new AbortController();
+		refreshAbort = controller;
 		setProgress("Reading the workspace…");
 		setFailed("");
 		try {
-			const read = await loadGraph((done, total) => setProgress(`Finding calls: ${done} of ${total} procedures`));
+			const read = await loadGraph(
+				(done, total) => {
+					if (run === refreshSeq && !controller.signal.aborted) {
+						setProgress(`Finding calls: ${done} of ${total} procedures`);
+					}
+				},
+				controller.signal,
+			);
+			if (run !== refreshSeq || controller.signal.aborted || (state.workspace?.root ?? "") !== startRoot) return;
 			// The first picture of a large workspace is of its scripts: every one folded.
-			const root = state.workspace?.root ?? "";
-			if (foldedFor !== root) {
-				const kept = keptFolds(recall(`${FOLDS_KEY}:${root}`));
+			if (foldedFor !== startRoot) {
+				const kept = keptFolds(recall(`${FOLDS_KEY}:${startRoot}`));
 				// What was folded here last time, if anything was kept; otherwise the opening picture.
 				setFolded(new Set(kept?.scripts ?? (read.nodes.length > FOLD_ABOVE ? read.scripts.map((s) => s.path) : [])));
 				// And of a workspace of many scripts, its folders: a picture that fits a screen, to unfold from.
 				const folders = foldersOf(read);
 				setFoldedDirs(new Set(kept?.folders ?? (read.scripts.length > FOLD_DIRS_ABOVE && folders.size > 1 ? folders : [])));
 			}
-			foldedFor = root;
+			foldedFor = startRoot;
 			setGraph(read);
 		} catch (e: any) {
+			if (run !== refreshSeq || controller.signal.aborted || (state.workspace?.root ?? "") !== startRoot) return;
 			setFailed(`Could not read the calls from the language server: ${e?.message ?? e}`);
+		} finally {
+			if (refreshAbort === controller) refreshAbort = null;
+			if (run === refreshSeq && !controller.signal.aborted) setProgress("");
 		}
-		setProgress("");
 	};
-	createEffect(on(() => [state.workspace?.root, state.lsp.state] as const, ([root, lsp]) => root && lsp === "running" && void refresh()));
+	createEffect(
+		on(
+			() => [state.workspace?.root, state.lsp.state] as const,
+			([root, lsp]) => {
+				if (root && lsp === "running") {
+					void refresh();
+				} else {
+					refreshSeq++;
+					refreshAbort?.abort();
+					refreshAbort = null;
+					setProgress("");
+				}
+			},
+		),
+	);
 
 	/** Whether the targets the server could not resolve are drawn: a choice the view remembers. */
 	const [unresolved, setUnresolved] = createSignal(recall(UNRESOLVED_KEY) !== "hidden");
@@ -712,6 +767,7 @@ export function GraphView() {
 	};
 
 	const govScriptKeys = createMemo(() => [...governingDocsByScript().keys()].sort().join("\n"));
+	const fitKey = () => JSON.stringify([filter(), ticketSubgraphOnly(), ticketSubgraphOnly() ? ticketHighlightKey() : null]);
 
 	createEffect(
 		on([graph, drawn, mode, gathered, govScriptKeys], async ([g, keep, as, gathering]) => {
@@ -719,6 +775,7 @@ export function GraphView() {
 			if (!g || !keep || as !== "graph") return;
 			// A layout takes a while, and a later one may finish first: only the last one asked for is drawn.
 			const run = ++layoutRun;
+			const layoutKey = fitKey();
 			const sized = (label: string, bold = false, extra = 56) => ({
 				"elk.nodeSize.constraints": "MINIMUM_SIZE",
 				"elk.nodeSize.options": "MINIMUM_SIZE_ACCOUNTS_FOR_PADDING",
@@ -782,9 +839,17 @@ export function GraphView() {
 					return { id, width: Math.ceil(Math.max(measureBold(id.slice(4)), measure(note))) + 46, height: FOLD_HEIGHT, labels: [{ text: id.slice(4) }] };
 				}),
 			];
+			// Collect every node id actually emitted to ELK so dangling edges can never fail layout.
+			const elkNodeIds = new Set<string>();
+			const collectElkIds = (node: { id: string; children?: any[] }) => {
+				elkNodeIds.add(node.id);
+				for (const c of node.children ?? []) collectElkIds(c);
+			};
+			for (const s of scripts) collectElkIds(s);
 			// Around a focus every call is drawn: there are few, and each is what was asked for.
 			const openFolder = (id: string) => (isDir(id) ? undefined : folders.find((f) => f === folderOf(scriptOf(id))));
-			const drawnEdges = gathering && folding() ? gather(keep.edges, openFolder) : keep.edges;
+			const rawDrawnEdges = gathering && folding() ? gather(keep.edges, openFolder) : keep.edges;
+			const drawnEdges = rawDrawnEdges.filter((e) => elkNodeIds.has(e.from) && elkNodeIds.has(e.to));
 			const edges = drawnEdges.map((e, i) => ({ id: `e${i}`, sources: [e.from], targets: [e.to] }));
 			try {
 				// The scripts of a folder that stand at the same step of its calls (the callers of one
@@ -903,12 +968,11 @@ export function GraphView() {
 				nodeEls.clear();
 				setPointed(null);
 				setPointedLine(null);
-				setLayout({ boxes, lines, width: result.width, height: result.height });
+				setLayout({ boxes, lines, width: result.width, height: result.height, key: layoutKey });
 				// A different set of calls is a different picture: show it whole. A refresh keeps the view,
 				// and folding one script keeps it too, moved only as far as brings that script into sight.
-				const key = JSON.stringify([filter(), ticketSubgraphOnly(), ticketHighlightKey()]);
-				if (fittedFor !== key) {
-					if (fit()) fittedFor = key;
+				if (fittedFor !== layoutKey) {
+					if (fit()) fittedFor = layoutKey;
 				} else if (showNext !== null) {
 					const box = boxes.find((b) => ((b.kind === "fold" || b.kind === "script") && b.path === showNext) || ((b.kind === "dir" || b.kind === "folder") && b.folder === showNext));
 					const curSize = size();
@@ -917,6 +981,7 @@ export function GraphView() {
 				showNext = null;
 				if (hadFocus) queueMicrotask(() => nodeEls.get(cursor() ?? "")?.focus());
 			} catch (e: any) {
+				if (run !== layoutRun) return;
 				setProgress(`Layout failed: ${e?.message ?? e}`);
 			}
 		}),
@@ -1049,11 +1114,14 @@ export function GraphView() {
 	};
 	// If layout completed while Call Graph was hidden (display: none), fit cleanly once visible again without touching already-fitted views.
 	createEffect(() => {
-		if (state.centerView !== "graph" || mode() !== "graph" || !layout()) return;
-		const key = JSON.stringify([filter(), ticketSubgraphOnly(), ticketHighlightKey()]);
-		if (fittedFor === key) return;
+		const l = layout();
+		if (state.centerView !== "graph" || mode() !== "graph" || !l) return;
+		const key = fitKey();
+		if (l.key !== key || fittedFor === l.key) return;
 		const frame = requestAnimationFrame(() => {
-			if (fit()) fittedFor = key;
+			const cur = layout();
+			if (!cur || cur.key !== key || fittedFor === cur.key) return;
+			if (fit()) fittedFor = cur.key;
 		});
 		onCleanup(() => cancelAnimationFrame(frame));
 	});
@@ -1090,8 +1158,11 @@ export function GraphView() {
 		const own = b.kind === "proc" || b.kind === "top" ? layout()?.boxes.find((s) => s.kind === "script" && s.path === b.path) : undefined;
 		const to = own ?? b;
 		const box = size();
-		const scale = Math.max(FIT_FLOOR, Math.min(1, (box.width - 80) / to.width, (box.height - 80) / to.height));
-		setView({ scale, x: box.width / 2 - (to.x + to.width / 2) * scale, y: box.height / 2 - (to.y + to.height / 2) * scale });
+		if (box.width < 10 || box.height < 10) return;
+		const toW = Math.max(1, to.width);
+		const toH = Math.max(1, to.height);
+		const scale = Math.max(FIT_FLOOR, Math.min(1, (box.width - 80) / toW, (box.height - 80) / toH));
+		setView({ scale, x: box.width / 2 - (to.x + toW / 2) * scale, y: box.height / 2 - (to.y + toH / 2) * scale });
 	};
 	/** Zooms about a point of the canvas: the pointer, or its middle for the buttons and keys. */
 	const zoomBy = (factor: number, at?: Point) => {
@@ -1594,6 +1665,14 @@ export function GraphView() {
 						e.preventDefault();
 						e.stopPropagation();
 						focusFinder?.();
+						return;
+					}
+					if (e.key === "Escape" && (impactOpen() || legendOpen() || keysOpen())) {
+						e.preventDefault();
+						e.stopPropagation();
+						setImpactOpen(false);
+						setLegendOpen(false);
+						setKeysOpen(false);
 					}
 				}}
 			>
@@ -1618,7 +1697,18 @@ export function GraphView() {
 					</select>
 				<Show when={filter().mode === "around"}>
 					<label>
-						Depth <input type="number" min="1" max="6" value={filter().depth} onChange={(e) => setFilter({ ...filter(), depth: Number(e.currentTarget.value) || 1 })} />
+						Depth{" "}
+						<input
+							type="number"
+							min="1"
+							max="6"
+							value={filter().depth}
+							onChange={(e) => {
+								const next = Math.max(1, Math.min(6, Math.floor(Number(e.currentTarget.value)) || 1));
+								e.currentTarget.value = String(next);
+								setFilter({ ...filter(), depth: next });
+							}}
+						/>
 					</label>
 					<select aria-label="Which way from the focus" title="What the focus calls, what calls it, or both" value={filter().direction ?? "both"} onChange={(e) => setFilter({ ...filter(), direction: e.currentTarget.value as Direction })}>
 						<option value="both">Callers and callees</option>
@@ -1636,7 +1726,10 @@ export function GraphView() {
 						none={(typed) => `No procedure's name has “${typed}” in it.`}
 						onChoose={find}
 						onRef={(fn) => (focusFinder = fn)}
-						onEscape={() => nodeEls.get(cursor() ?? "")?.focus()}
+						onEscape={() => {
+							const el = nodeEls.get(cursor() ?? "");
+							if (el?.isConnected) el.focus();
+						}}
 					/>
 				</Show>
 				<span class="spacer" />
@@ -1768,9 +1861,17 @@ export function GraphView() {
 							const box = e.currentTarget.getBoundingClientRect();
 							zoomBy(e.deltaY < 0 ? 1.1 : 0.9, { x: e.clientX - box.left, y: e.clientY - box.top });
 						}}
-						onMouseDown={(e) => ((dragging = { x: e.clientX, y: e.clientY }), (panned = 0))}
+						onMouseDown={(e) => {
+							if (e.button !== 0) return;
+							dragging = { x: e.clientX, y: e.clientY };
+							panned = 0;
+						}}
 						onMouseMove={(e) => {
 							if (!dragging) return;
+							if ((e.buttons & 1) === 0) {
+								dragging = null;
+								return;
+							}
 							const v = view();
 							panned += Math.abs(e.clientX - dragging.x) + Math.abs(e.clientY - dragging.y);
 							setView({ ...v, x: v.x + e.clientX - dragging.x, y: v.y + e.clientY - dragging.y });

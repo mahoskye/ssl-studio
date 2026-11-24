@@ -29,11 +29,13 @@ export function Minimap(props: { content: Size; boxes: readonly MapBox[]; view: 
 	const part = () => seen(props.view, box());
 	let dragging = false;
 	const moveTo = (e: MouseEvent & { currentTarget: SVGSVGElement }) => {
+		const scale = k();
+		if (!(scale > 0)) return;
 		const rect = e.currentTarget.getBoundingClientRect();
-		props.onMove(centredOn(props.view, { x: (e.clientX - rect.left) / k(), y: (e.clientY - rect.top) / k() }, box()));
+		props.onMove(centredOn(props.view, { x: (e.clientX - rect.left) / scale, y: (e.clientY - rect.top) / scale }, box()));
 	};
 	return (
-		<Show when={box().width > 0 && props.content.width > 0 && outOfSight(props.content, props.view, box())}>
+		<Show when={box().width > 0 && box().height > 0 && props.content.width > 0 && props.content.height > 0 && k() > 0 && outOfSight(props.content, props.view, box())}>
 			<svg
 				class="picture-map"
 				aria-hidden="true"

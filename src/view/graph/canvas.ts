@@ -38,6 +38,7 @@ export function fitView(content: Size, box: Size, options: { floor: number; marg
 
 /** Zooms by a factor, keeping the content under `point` (in the view's own pixels) where it is. */
 export function zoomAt(view: View, point: Point, factor: number, min: number, max: number): View {
+	if (!Number.isFinite(view.scale) || !(view.scale > 0)) return view;
 	const scale = clamp(view.scale * factor, min, max);
 	const k = scale / view.scale;
 	return { scale, x: point.x - (point.x - view.x) * k, y: point.y - (point.y - view.y) * k };

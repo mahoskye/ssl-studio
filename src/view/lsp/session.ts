@@ -369,6 +369,11 @@ export class LspSession {
 		}
 	}
 
+	/** Waits until the language server has finished initializing. */
+	waitReady(): Promise<void> {
+		return this.ready().then(() => {});
+	}
+
 	private async ready() {
 		const init = this.initialized;
 		if (!init) throw new Error("language server not running");

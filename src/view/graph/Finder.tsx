@@ -1,7 +1,7 @@
 // A box that finds one of many by name, for the call graph's procedures and a
 // plan's steps: type part of a name, and the ones that match are listed under
 // the box. The arrow keys move through them and Enter, or a click, chooses.
-import { createMemo, createSignal, createUniqueId, For, Show } from "solid-js";
+import { createMemo, createSignal, createUniqueId, For, onCleanup, Show } from "solid-js";
 import { matching, type Choice } from "./model";
 
 export function Finder(props: {
@@ -14,7 +14,7 @@ export function Finder(props: {
 	none: (typed: string) => string;
 	onChoose: (id: string) => void;
 	/** Exposes a focus callback for canvas Ctrl+F shortcuts. */
-	onRef?: (focus: () => void) => void;
+	onRef?: (focus: (() => void) | undefined) => void;
 	/** Called when Escape is pressed on an already-empty box to return focus cleanly. */
 	onEscape?: () => void;
 }) {
@@ -22,6 +22,10 @@ export function Finder(props: {
 	const [text, setText] = createSignal("");
 	const [at, setAt] = createSignal(0);
 	let inputEl: HTMLInputElement | undefined;
+	onCleanup(() => {
+		inputEl = undefined;
+		props.onRef?.(undefined);
+	});
 	const found = createMemo(() => matching(props.choices, text()));
 	const here = () => Math.min(at(), found().length - 1);
 	const choose = (id: string) => {
@@ -34,6 +38,7 @@ export function Finder(props: {
 				ref={(el) => {
 					inputEl = el;
 					props.onRef?.(() => {
+						if (!el.isConnected) return;
 						el.focus();
 						el.select();
 					});

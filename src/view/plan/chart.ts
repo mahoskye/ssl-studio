@@ -128,6 +128,8 @@ export type ChartGraph = {
 	nodes: PlanNode[];
 	edges: PlanEdge[];
 	groups: PlanGroup[];
+	/** Maps each ELK group container id back to its PlanGroup `id`, guaranteeing unambiguous lookup even if a group id collides with a node id. */
+	groupElkIds: ReadonlyMap<string, string>;
 	/** Edges given to ELK the other way round, by their place in `edges`: its route for one runs from the edge's end to its start. */
 	reversed: Set<number>;
 	/** A way that closes a loop leaves a decision by the side asked for: the other side is another chart, worth trying. */
@@ -156,8 +158,23 @@ export function chartGraph(
 	const ids = new Set<string>();
 	const nodes = plan.nodes.filter((n) => !ids.has(n.id) && ids.add(n.id));
 	const edges = plan.edges.filter((e) => ids.has(e.from) && ids.has(e.to));
-	const groups = plan.groups.filter((g) => nodes.some((n) => n.group === g.id));
+	const seenGroups = new Set<string>();
+	const groups = plan.groups.filter((g) => !seenGroups.has(g.id) && nodes.some((n) => n.group === g.id) && seenGroups.add(g.id));
 	const known = new Set(groups.map((g) => g.id));
+	let rootId = "root";
+	if (ids.has(rootId) || known.has(rootId)) {
+		rootId = "__root__";
+		while (ids.has(rootId) || known.has(rootId)) rootId += "_";
+	}
+	let groupStem = "__grp__";
+	while ([...ids, ...known, rootId].some((id) => id === groupStem || id.startsWith(`${groupStem}:`))) groupStem += "_";
+	const groupElkIds = new Map<string, string>();
+	const elkIdForGroup = new Map<string, string>();
+	for (const g of groups) {
+		const elkId = ids.has(g.id) || g.id === rootId ? `${groupStem}:${g.id}` : g.id;
+		groupElkIds.set(elkId, g.id);
+		elkIdForGroup.set(g.id, elkId);
+	}
 	const reversed = new Set([...backEdges(nodes, edges)].filter((i) => edges[i]!.from !== edges[i]!.to));
 	const primaryIn = IN_SIDE[direction];
 	const primaryOut = OUT_SIDE[direction];
@@ -168,9 +185,9 @@ export function chartGraph(
 	const loopSide = mapSide(loopTip);
 	const returnSide = mapSide(returnsAt);
 	const altReturnSide = mapSide("WEST");
-	// A name for ports that no node or group can already have.
+	// A name for ports that no node, group container, or root can already have.
 	let stem = "port";
-	while ([...ids, ...known].some((id) => id.startsWith(`${stem}:`))) stem += "_";
+	while ([...ids, ...known, ...groupElkIds.keys(), rootId].some((id) => id === stem || id.startsWith(`${stem}:`))) stem += "_";
 	const ports = new Map<string, ElkNode[]>();
 	const port = (node: string, id: string, side: Side) => {
 		if (!ports.get(node)?.some((p) => p.id === id)) ports.set(node, [...(ports.get(node) ?? []), { id, width: 0, height: 0, layoutOptions: { "elk.port.side": side } }]);
@@ -217,11 +234,12 @@ export function chartGraph(
 		nodes,
 		edges,
 		groups,
+		groupElkIds,
 		reversed,
 		sided,
 		returning,
 		graph: {
-			id: "root",
+			id: rootId,
 			layoutOptions: {
 				"elk.algorithm": "layered",
 				"elk.direction": direction,
@@ -237,7 +255,7 @@ export function chartGraph(
 			children: [
 				...nodes.filter((n) => !n.group || !known.has(n.group)).map(leaf),
 				...groups.map((g) => ({
-					id: g.id,
+					id: elkIdForGroup.get(g.id)!,
 					// ELK reads the spacing from the box the nodes are in: without it a group's steps stand closer than the rest.
 					layoutOptions: {
 						"elk.padding": `[top=${REGION_PADDING.top},left=${REGION_PADDING.left},bottom=${REGION_PADDING.bottom},right=${REGION_PADDING.right}]`,
@@ -681,9 +699,9 @@ export function edgeHandles(
 	return handles;
 }
 
-/** Resolves a stored offset for the active layout direction (zero when stored for the opposite orientation). */
+/** Resolves a stored offset for the active layout direction (zero when stored for the opposite orientation or invalid). */
 export function offsetFor(offset: PlanOffset | undefined, dir: LayoutDirection): Point {
-	if (!offset || (offset.dir ?? "DOWN") !== dir) return { x: 0, y: 0 };
+	if (!offset || (offset.dir ?? "DOWN") !== dir || !Number.isFinite(offset.x) || !Number.isFinite(offset.y)) return { x: 0, y: 0 };
 	return { x: offset.x, y: offset.y };
 }
 
@@ -1007,14 +1025,16 @@ export function statusWords(state: NodeState): string[] {
 
 /** A node's accessible name: its words, its kind, its state. */
 export function describeNode(node: Pick<PlanNode, "text" | "kind" | "ref">, state: NodeState = {}): string {
-	const kind = node.kind === "call" && node.ref?.trim() ? `call to ${node.ref.trim()}` : node.kind;
+	const ref = typeof node.ref === "string" ? node.ref.trim() : "";
+	const kind = node.kind === "call" && ref ? `call to ${ref}` : node.kind;
 	return [node.text.trim() || NO_WORDS, kind, ...statusWords(state)].join(", ");
 }
 
 /** An edge's accessible name: where it runs, and its label, or that a decision's branch still needs one. */
 export function describeEdge(plan: Pick<Plan, "nodes" | "edges">, edge: EdgeRef): string {
 	const words = (id: string) => `"${plan.nodes.find((n) => n.id === id)?.text.trim() || id}"`;
-	const label = plan.edges.find((e) => e.from === edge.from && e.to === edge.to)?.label?.trim();
+	const rawLabel = plan.edges.find((e) => e.from === edge.from && e.to === edge.to)?.label;
+	const label = typeof rawLabel === "string" ? rawLabel.trim() : "";
 	const decision = plan.nodes.find((n) => n.id === edge.from)?.kind === "decision";
 	return `Way out of ${words(edge.from)} to ${words(edge.to)}, ${label ? `labelled ${label}` : decision ? "no label yet: a decision's branch needs one" : "no label"}`;
 }

@@ -28,7 +28,7 @@ import { Docs } from "./panels/Docs";
 import { docs, isMarkdown, isTable, setUpProject, useProject } from "./project";
 import { StyleProfile } from "./StyleProfile";
 import { AgentPanel } from "./agent/Agent";
-import { GraphView } from "./graph/GraphView";
+import { GraphView, resetGraphState } from "./graph/GraphView";
 import { session } from "./lsp/session";
 import { QuickPick } from "./QuickPick";
 import { SettingsDialog } from "./Settings";
@@ -401,7 +401,10 @@ export function App() {
 	createEffect(
 		on(
 			() => state.workspace?.root,
-			() => setGraphMounted(false),
+			() => {
+				setGraphMounted(false);
+				resetGraphState();
+			},
 		),
 	);
 	createEffect(() => {

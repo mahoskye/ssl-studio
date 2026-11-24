@@ -75,6 +75,36 @@ export type PlanStageFocus = {
 
 export type PlanFocusView = PlanNodeFocus | PlanStageFocus;
 
+const optStr = (v: unknown): string =>
+	typeof v === "string" ? v : typeof v === "number" || typeof v === "boolean" ? String(v) : "";
+
+const safeNode = (n: PlanNode): PlanNode => {
+	const badRef = n.ref !== undefined && typeof n.ref !== "string";
+	const badNotes = n.notes !== undefined && typeof n.notes !== "string";
+	if (!badRef && !badNotes) return n;
+	const next: PlanNode = { ...n };
+	if (badRef) {
+		const s = optStr(n.ref);
+		if (s) next.ref = s;
+		else delete next.ref;
+	}
+	if (badNotes) {
+		const s = optStr(n.notes);
+		if (s) next.notes = s;
+		else delete next.notes;
+	}
+	return next;
+};
+
+const safeEdge = (e: PlanEdge): PlanEdge => {
+	if (e.label === undefined || typeof e.label === "string") return e;
+	const next: PlanEdge = { ...e };
+	const s = optStr(e.label);
+	if (s) next.label = s;
+	else delete next.label;
+	return next;
+};
+
 /**
  * Orders a plan's steps top-to-bottom in natural business execution order:
  * starts from Start nodes, keeps steps inside the same stage contiguous, prefers "yes"
@@ -82,12 +112,14 @@ export type PlanFocusView = PlanNodeFocus | PlanStageFocus;
  * groups any unreachable steps cleanly at the bottom.
  */
 export function planTextOutline(plan: Plan): PlanTextOutline {
-	const nodeById = new Map(plan.nodes.map((n) => [n.id, n]));
+	const safeNodes = plan.nodes.map(safeNode);
+	const nodeById = new Map(safeNodes.map((n) => [n.id, n]));
 	const groupName = new Map(plan.groups.map((g) => [g.id, g.name]));
 	const outEdges = new Map<string, PlanEdge[]>();
 	const inEdges = new Map<string, PlanEdge[]>();
-	for (const e of plan.edges) {
-		if (!nodeById.has(e.from) || !nodeById.has(e.to)) continue;
+	for (const rawEdge of plan.edges) {
+		if (!nodeById.has(rawEdge.from) || !nodeById.has(rawEdge.to)) continue;
+		const e = safeEdge(rawEdge);
 		const out = outEdges.get(e.from);
 		if (out) out.push(e);
 		else outEdges.set(e.from, [e]);
@@ -103,7 +135,7 @@ export function planTextOutline(plan: Plan): PlanTextOutline {
 	const edgePriority = (from: PlanNode, e: PlanEdge): number => {
 		const target = nodeById.get(e.to)!;
 		const sameStage = Boolean(from.group && target.group === from.group);
-		const lbl = e.label?.trim().toLowerCase() ?? "";
+		const lbl = optStr(e.label).trim().toLowerCase();
 		let score = 0;
 		// Keep steps inside the current stage together before exiting to another stage.
 		if (sameStage) score -= 20;
@@ -137,7 +169,7 @@ export function planTextOutline(plan: Plan): PlanTextOutline {
 		}
 	};
 
-	const starts = plan.nodes.filter((n) => n.kind === "start");
+	const starts = safeNodes.filter((n) => n.kind === "start");
 	for (const s of starts) walk(s);
 	// Append deferred terminal outcomes in the order discovered.
 	for (const endNode of deferredEnds) ordered.push(endNode);
@@ -145,7 +177,7 @@ export function planTextOutline(plan: Plan): PlanTextOutline {
 	const reachableIds = new Set(ordered.map((n) => n.id));
 	// Collect any nodes unreachable from a Start node (or all nodes when there is no Start yet).
 	const unreachable: PlanNode[] = [];
-	for (const n of plan.nodes) {
+	for (const n of safeNodes) {
 		if (!reachableIds.has(n.id)) unreachable.push(n);
 	}
 
@@ -161,7 +193,7 @@ export function planTextOutline(plan: Plan): PlanTextOutline {
 			const target = nodeById.get(edge.to)!;
 			const targetIdx = orderOf.get(target.id) ?? 0;
 			const loopsBack = targetIdx <= index;
-			const label = edge.label?.trim() || undefined;
+			const label = optStr(edge.label).trim() || undefined;
 			const isImmediateNext = !label && !loopsBack && targetIdx === index + 1 && node.kind !== "decision" && rawOut.length === 1;
 			return {
 				edge,
@@ -175,7 +207,7 @@ export function planTextOutline(plan: Plan): PlanTextOutline {
 		const links = allOutgoing.filter((o) => !o.isImmediateNext);
 		const incoming = (inEdges.get(node.id) ?? []).map((edge) => {
 			const source = nodeById.get(edge.from)!;
-			const label = edge.label?.trim() || undefined;
+			const label = optStr(edge.label).trim() || undefined;
 			return {
 				edge,
 				source,
@@ -305,7 +337,7 @@ export function decisionDisplayLabel(outline: PlanTextOutline, decisionId: strin
 function firstBranchOnPath(path: PlanPath, decisionId: string): string | null {
 	for (let i = 1; i < path.steps.length; i++) {
 		if (path.steps[i - 1]!.id === decisionId) {
-			const lbl = path.steps[i]!.label?.trim();
+			const lbl = optStr(path.steps[i]!.label).trim();
 			if (lbl) return lbl;
 		}
 	}
@@ -323,28 +355,31 @@ export function matchPathsForChoices(
 	anchorNodeId?: string | null,
 ): TestChoiceMatch {
 	const nodeById = new Map(plan.nodes.map((n) => [n.id, n]));
-	const entries = Object.entries(choices).filter(([, v]) => v.trim().length > 0);
+	const entries = Object.entries(choices).filter(([, v]) => optStr(v).trim().length > 0);
 	const matchingPathIndices: number[] = [];
 	const reachableNodeIds = new Set<string>();
 	const endIds = new Set<string>();
+	let allEndAtEnd = true;
 
 	paths.forEach((path, idx) => {
 		if (anchorNodeId && !path.steps.some((s) => s.id === anchorNodeId)) return;
 		for (const [decId, wanted] of entries) {
 			const taken = firstBranchOnPath(path, decId);
-			if (!taken || taken.toLowerCase() !== wanted.trim().toLowerCase()) return;
+			if (!taken || taken.toLowerCase() !== optStr(wanted).trim().toLowerCase()) return;
 		}
 		matchingPathIndices.push(idx);
 		for (const s of path.steps) reachableNodeIds.add(s.id);
 		const last = path.steps.at(-1);
-		if (last) {
-			const n = nodeById.get(last.id);
-			if (!n || n.kind === "end") endIds.add(last.id);
+		const n = last ? nodeById.get(last.id) : undefined;
+		if (last && n && n.kind === "end") {
+			endIds.add(last.id);
+		} else {
+			allEndAtEnd = false;
 		}
 	});
 
 	let uniqueOutcome: PlanNode | null = null;
-	if (endIds.size === 1) {
+	if (matchingPathIndices.length > 0 && allEndAtEnd && endIds.size === 1) {
 		const onlyId = [...endIds][0]!;
 		uniqueOutcome = nodeById.get(onlyId) ?? null;
 	}
@@ -377,7 +412,7 @@ export function choicesFromStep(nodeId: string, paths: PlanPath[]): TestBranchCh
 		for (let i = 1; i <= pos; i++) {
 			const prev = p.steps[i - 1]!;
 			const cur = p.steps[i]!;
-			const lbl = cur.label?.trim();
+			const lbl = optStr(cur.label).trim();
 			if (!lbl || prev.id === nodeId || m.has(prev.id)) continue;
 			m.set(prev.id, lbl);
 		}

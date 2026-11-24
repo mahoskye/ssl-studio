@@ -55,6 +55,46 @@ export type TextTestBuilderRequest = {
 	seq: number;
 };
 
+const EDITABLE_SELECTOR = "input, textarea, select, [contenteditable]:not([contenteditable='false'])";
+
+export function isEditableTarget(target: EventTarget | null): boolean {
+	if (!target || typeof (target as Element).closest !== "function") return false;
+	return Boolean((target as Element).closest(EDITABLE_SELECTOR));
+}
+
+/** Resolves Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z, and Ctrl/Cmd+Y to undo/redo when focus is outside form inputs. */
+export function planTextUndoAction(
+	e: Pick<KeyboardEvent, "ctrlKey" | "metaKey" | "altKey" | "shiftKey" | "key">,
+	inEditable: boolean,
+): "undo" | "redo" | null {
+	if (inEditable || !(e.ctrlKey || e.metaKey) || e.altKey) return null;
+	const key = e.key.toLowerCase();
+	if (key === "z") return e.shiftKey ? "redo" : "undo";
+	if (key === "y" && !e.shiftKey) return "redo";
+	return null;
+}
+
+/** Recomputes `linkedJourney` and auto-filled `expect` immediately after detaching the step anchor. */
+export function computeAnchorDetachState(
+	plan: Plan,
+	paths: PlanPath[],
+	choices: TestBranchChoices,
+	currentExpect: string,
+	expectAuto: boolean,
+): { linkedJourney: number | null; expect: string } {
+	const match = matchPathsForChoices(plan, paths, choices, null);
+	return {
+		linkedJourney: match.exactPathIndex !== null ? match.exactPathIndex + 1 : null,
+		expect: expectAuto ? (match.uniqueOutcome?.text.trim() ?? "") : currentExpect,
+	};
+}
+
+/** Checks whether a test being edited still exists in `plan.tests` before saving so edits are never silently discarded. */
+export function resolveBuilderSaveMode(plan: Plan, editingTestId: string | null): "update" | "recreate" | "create" {
+	if (!editingTestId) return "create";
+	return planTestsOf(plan).some((t) => t.id === editingTestId) ? "update" : "recreate";
+}
+
 function fitArea(el: HTMLTextAreaElement) {
 	el.style.height = "auto";
 	el.style.height = `${Math.min(200, Math.max(66, el.scrollHeight + 2))}px`;
@@ -80,6 +120,8 @@ export function PlanTextView(props: {
 	onUpdateTestCase: (id: string, patch: PlanTestPatch) => void;
 	onRemoveTestCase: (id: string) => void;
 	onFind?: () => void;
+	onUndo?: () => void;
+	onRedo?: () => void;
 }) {
 	let container!: HTMLDivElement;
 	let givenEl: HTMLTextAreaElement | undefined;
@@ -292,6 +334,14 @@ export function PlanTextView(props: {
 		return "e.g. Rush sample received on a holiday";
 	});
 
+	const detachAnchor = () => {
+		setAnchorNodeId(null);
+		const next = computeAnchorDetachState(props.plan, props.allPaths.paths, choices(), expect(), expectAuto());
+		setLinkedJourney(next.linkedJourney);
+		setExpect(next.expect);
+		refitBoxes();
+	};
+
 	const saveBuilder = (e?: Event) => {
 		e?.preventDefault();
 		const finalTitle = title().trim();
@@ -299,7 +349,8 @@ export function PlanTextView(props: {
 		const resolvedJourney =
 			linkedJourney() ?? (choiceMatch().exactPathIndex !== null ? choiceMatch().exactPathIndex! + 1 : undefined);
 		const editId = editingTestId();
-		if (editId) {
+		const mode = resolveBuilderSaveMode(props.plan, editId);
+		if (mode === "update" && editId) {
 			props.onUpdateTestCase(editId, {
 				title: finalTitle,
 				node: anchorNodeId() ?? "",
@@ -317,6 +368,9 @@ export function PlanTextView(props: {
 				expect: expect().trim() || undefined,
 				notes: notes().trim() || undefined,
 			});
+			if (mode === "recreate") {
+				notify("The original test case was removed while editing — saved your changes as a new test case.");
+			}
 		}
 		closeBuilder();
 	};
@@ -602,7 +656,7 @@ export function PlanTextView(props: {
 						</button>
 					</div>
 
-					<Show when={p.row.node.notes?.trim()}>
+					<Show when={typeof p.row.node.notes === "string" && p.row.node.notes.trim()}>
 						<p class="plan-text-row-notes">{p.row.node.notes}</p>
 					</Show>
 
@@ -713,6 +767,19 @@ export function PlanTextView(props: {
 					e.preventDefault();
 					e.stopPropagation();
 					props.onFind?.();
+					return;
+				}
+				const action = planTextUndoAction(e, isEditableTarget(e.target) || isEditableTarget(document.activeElement));
+				if (action === "undo" && props.onUndo) {
+					e.preventDefault();
+					e.stopPropagation();
+					props.onUndo();
+					return;
+				}
+				if (action === "redo" && props.onRedo) {
+					e.preventDefault();
+					e.stopPropagation();
+					props.onRedo();
 				}
 			}}
 			onClick={(e) => {
@@ -835,7 +902,7 @@ export function PlanTextView(props: {
 											type="button"
 											title="Switch from this step to whole plan"
 											aria-label="Detach step anchor"
-											onClick={() => setAnchorNodeId(null)}
+											onClick={detachAnchor}
 										>
 											<Icon name="close" />
 										</button>
@@ -1120,7 +1187,7 @@ export function PlanTextView(props: {
 													Clear focus
 												</button>
 											</div>
-											<Show when={nf.node.notes?.trim()}>
+											<Show when={typeof nf.node.notes === "string" && nf.node.notes.trim()}>
 												<p class="plan-text-around-notes">{nf.node.notes}</p>
 											</Show>
 											<LinkedDocChips node={nf.node} marginTop="6px" />

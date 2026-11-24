@@ -19,8 +19,23 @@ const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 export function builtOf(plan: Plan): Built | null {
 	const raw = plan.built;
 	if (!isObject(raw) || !Array.isArray(raw.units) || !isObject(raw.nodes)) return null;
-	const units = raw.units.filter((u) => typeof u?.name === "string" && typeof u?.script === "string").map((u) => ({ ...u, nodes: strings(u.nodes), calls: strings(u.calls) }));
-	return units.length || raw.tests ? { ...raw, units, nodes: raw.nodes } as Built : null;
+	const units: BuiltUnit[] = raw.units
+		.filter((u): u is Record<string, any> => isObject(u) && typeof u.name === "string" && typeof u.script === "string")
+		.map((u) => ({
+			...u,
+			name: u.name,
+			script: u.script,
+			parameters: Array.isArray(u.parameters) ? u.parameters.filter((p): p is string => typeof p === "string") : [],
+			nodes: strings(u.nodes),
+			calls: strings(u.calls),
+		}));
+	const tests =
+		isObject(raw.tests) && typeof raw.tests.script === "string"
+			? { script: raw.tests.script, hash: typeof raw.tests.hash === "string" ? raw.tests.hash : "" }
+			: undefined;
+	if (!units.length && !tests) return null;
+	const { tests: _rawTests, ...rest } = raw;
+	return { ...rest, units, nodes: raw.nodes, ...(tests ? { tests } : {}) } as Built;
 }
 
 /**
@@ -61,7 +76,8 @@ export function settledNodes(plan: Plan): string[] {
 	return plan.nodes.filter((n) => built.nodes[n.id] && !changed.includes(n.id)).map((n) => n.id);
 }
 
-const refsIn = (plan: Plan, nodes: string[]) => plan.nodes.filter((n) => nodes.includes(n.id) && n.kind === "call" && n.ref?.trim()).map((n) => n.ref!);
+const refsIn = (plan: Plan, nodes: string[]) =>
+	plan.nodes.filter((n) => nodes.includes(n.id) && n.kind === "call" && typeof n.ref === "string" && n.ref.trim()).map((n) => n.ref!);
 
 /**
  * Sorts a new run against what is built, so only what the chart changed is rebuilt. SSL Studio
@@ -142,7 +158,7 @@ export function nodeCodeDetails(plan: Plan, node: PlanNode): NodeCodeDetails {
 	const units = unitsOfNode(plan, node.id);
 	const scripts = [...new Set(units.map((u) => u.script).filter(Boolean))];
 	const unitNames = new Set(units.map((u) => lastPart(u.name).toLowerCase()));
-	const rawRef = node.ref?.trim() || "";
+	const rawRef = typeof node.ref === "string" ? node.ref.trim() : "";
 	const primaryRef = rawRef && !unitNames.has(lastPart(rawRef).toLowerCase()) ? rawRef : null;
 	const calls: string[] = [];
 	const seen = new Set<string>();
@@ -242,23 +258,44 @@ export function changeText(plan: Plan, unit: BuildUnit, code: string): string {
 export type PlanPath = { steps: { id: string; text: string; label?: string }[] };
 
 export const MAX_PATHS = 24;
+export const MAX_PATH_STEPS = 5000;
 
 /** Every way through the chart: each is a test case. A loop is taken once, as each edge is used at most once on a path. */
-export function planPaths(plan: Plan, limit = MAX_PATHS): { paths: PlanPath[]; truncated: boolean } {
+export function planPaths(plan: Plan, limit = MAX_PATHS, maxSteps = MAX_PATH_STEPS): { paths: PlanPath[]; truncated: boolean } {
 	const paths: PlanPath[] = [];
 	let truncated = false;
+	let visits = 0;
+	const nodeById = new Map<string, PlanNode>();
+	for (const n of plan.nodes) if (!nodeById.has(n.id)) nodeById.set(n.id, n);
+	const outByFrom = new Map<string, typeof plan.edges>();
+	for (const e of plan.edges) {
+		if (!nodeById.has(e.from) || !nodeById.has(e.to)) continue;
+		const list = outByFrom.get(e.from);
+		if (list) list.push(e);
+		else outByFrom.set(e.from, [e]);
+	}
 	const walk = (id: string, label: string | undefined, steps: PlanPath["steps"], used: Set<string>) => {
 		if (truncated) return;
-		const node = plan.nodes.find((n) => n.id === id);
+		if (++visits > maxSteps) {
+			truncated = true;
+			return;
+		}
+		const node = nodeById.get(id);
 		if (!node) return;
 		const here = [...steps, { id, text: node.text, ...(label ? { label } : {}) }];
-		const out = plan.edges.filter((e) => e.from === id && !used.has(`${e.from}>${e.to}`));
+		const out = (outByFrom.get(id) ?? []).filter((e) => !used.has(`${e.from}>${e.to}`));
 		if (!out.length) {
 			if (paths.length >= limit) truncated = true;
 			else paths.push({ steps: here });
 			return;
 		}
-		for (const e of out) walk(e.to, e.label, here, new Set([...used, `${e.from}>${e.to}`]));
+		for (const e of out) {
+			const edgeKey = `${e.from}>${e.to}`;
+			used.add(edgeKey);
+			walk(e.to, typeof e.label === "string" ? e.label : undefined, here, used);
+			used.delete(edgeKey);
+			if (truncated) return;
+		}
 	};
 	for (const start of plan.nodes.filter((n) => n.kind === "start")) walk(start.id, undefined, [], new Set());
 	return { paths, truncated };
