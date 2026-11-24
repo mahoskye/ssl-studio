@@ -17,7 +17,7 @@ import { docAuditData, refreshDocAudit } from "../docAudit";
 import { monaco } from "../editor/monaco";
 import { diagnostics } from "../lsp/session";
 import { size } from "../StatusBar";
-import { activeDoc, activePath, applyText, canonical, documents, notify, openFile, save, setState, state } from "../state";
+import { activeDoc, activePath, applyText, canonical, documents, fileRemoved, notify, openFile, save, setState, state } from "../state";
 import { baseName, isInside, relativeTo } from "../../shared/paths";
 import { symbols } from "./Objects";
 import { SeverityMark, SEVERITY } from "./Problems";
@@ -40,6 +40,56 @@ function procedures(list = symbols()): monaco.languages.DocumentSymbol[] {
 /** How many of the longest procedures are listed. */
 const LONGEST = 8;
 const count = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
+
+/**
+ * Locates an unchecked Markdown checklist box (`[ ]`) in live document text via `tasks(text)`,
+ * matching `(offset, text)` first and falling back to `(line, text)` so stale offsets after edits
+ * never corrupt another task or prose text.
+ */
+export function findOpenTaskOffset(text: string, task: Pick<OpenTaskItem, "offset" | "line" | "text">): number {
+	const list = tasks(text);
+	const exact = list.find((t) => !t.done && t.offset === task.offset && t.text === task.text && t.offset > 0);
+	if (exact && text[exact.offset] === " ") return exact.offset;
+	const byLine = list.find((t) => !t.done && t.line === task.line && t.text === task.text && t.offset > 0);
+	if (byLine && text[byLine.offset] === " ") return byLine.offset;
+	return -1;
+}
+
+export type CombinedLinkMend =
+	| { kind: "path"; edit: LinkMend }
+	| { kind: "wiki"; edit: WikiLinkMend };
+
+/**
+ * Applies mixed path-link and wikilink mends to one document in reverse `(line, column)` order
+ * so earlier edits on the same line never shift columns of later edits.
+ */
+export function applyCombinedLinkMends(
+	text: string,
+	mends: readonly CombinedLinkMend[],
+): { text: string; done: number } {
+	const seen = new Set<string>();
+	const unique: CombinedLinkMend[] = [];
+	for (const m of mends) {
+		const key =
+			m.kind === "wiki"
+				? `wiki:${m.edit.line}:${m.edit.column}:${m.edit.name}`
+				: `path:${m.edit.line}:${m.edit.column ?? ""}:${m.edit.href}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		unique.push(m);
+	}
+	unique.sort((a, b) => b.edit.line - a.edit.line || (b.edit.column ?? 0) - (a.edit.column ?? 0));
+	let cur = text;
+	let done = 0;
+	for (const m of unique) {
+		const res = m.kind === "wiki" ? withNames(cur, [m.edit]) : withLinkFiles(cur, [m.edit]);
+		if (res.done > 0 && res.text !== cur) {
+			cur = res.text;
+			done += res.done;
+		}
+	}
+	return { text: cur, done };
+}
 
 export function Health() {
 	const limits = () => state.settings.limits;
@@ -199,16 +249,28 @@ export function Health() {
 				(c.fix?.kind === "links" || c.fix?.kind === "mend-wikilinks") && c.fix.mends.length > 0,
 		),
 	);
+	const mendableDocCount = createMemo(() => new Set(mendableChecks().map((c) => canonical(c.path))).size);
 	const reanchorableCitations = createMemo(() => filteredCitations().filter((c) => Boolean(c.reanchor)));
+
+	/** Reads live editor text when open as a non-disposed text buffer, otherwise reads from disk. */
+	const readDocText = async (path: string): Promise<string | null> => {
+		const open = documents.get(canonical(path));
+		if (open?.binary) return null;
+		if (open && !open.binary && !open.model.isDisposed()) return open.model.getValue();
+		return backend.read(path).then((r) => (r.binary ? null : r.text), () => null);
+	};
 
 	/** Applies an edit to an open or closed document: clean open buffers save to disk; dirty buffers stay unsaved (ADR 0009). */
 	const writeDocEdit = async (path: string, next: string) => {
 		const key = canonical(path);
 		const open = documents.get(key);
-		if (open) {
+		if (open?.binary) throw new Error(`${baseName(path)} is a binary file and cannot be edited as text.`);
+		if (open && !open.binary && !open.model.isDisposed()) {
 			const clean = !state.dirty[key];
-			applyText(key, next);
-			if (clean) await save(key, { format: false });
+			if (!applyText(key, next)) throw new Error(`Could not update open buffer for ${baseName(path)}.`);
+			if (clean && !(await save(key, { format: false }))) {
+				throw new Error(`${baseName(path)} was changed in the editor and could not be saved.`);
+			}
 		} else {
 			await backend.historyKeep(path).catch(() => {});
 			await backend.write(path, next);
@@ -216,50 +278,44 @@ export function Health() {
 	};
 
 	const tickOpenTask = async (task: OpenTaskItem) => {
-		const key = canonical(task.path);
-		const open = documents.get(key);
-		const cur = open ? open.model.getValue() : await backend.read(task.path).then((r) => (r.binary ? null : r.text), () => null);
+		const cur = await readDocText(task.path);
 		if (cur === null) return notify("Could not read the document.", "error");
-		let offset = -1;
-		if (task.offset > 0 && cur[task.offset] === " " && cur[task.offset - 1] === "[" && cur[task.offset + 1] === "]") {
-			offset = task.offset;
-		} else {
-			const hit = tasks(cur).find((t) => !t.done && t.line === task.line && t.text === task.text && t.offset > 0);
-			if (hit) offset = hit.offset;
-		}
+		const offset = findOpenTaskOffset(cur, task);
 		if (offset < 0) return notify("Could not locate that task box — the document changed. Open it to tick it.", "error");
 		const next = `${cur.slice(0, offset)}x${cur.slice(offset + 1)}`;
-		await writeDocEdit(task.path, next);
-		setState("treeVersion", (v) => v + 1);
-		refreshDocAudit();
-		notify(`Ticked off task in ${task.ticket ?? task.title ?? baseName(task.path)}.`);
+		try {
+			await writeDocEdit(task.path, next);
+			setState("treeVersion", (v) => v + 1);
+			refreshDocAudit();
+			notify(`Ticked off task in ${task.ticket ?? task.title ?? baseName(task.path)}.`);
+		} catch (e: any) {
+			notify(`Could not update ${baseName(task.path)}: ${e?.message ?? e}`, "error");
+		}
 	};
 
 	const reanchorIssue = async (issue: AuditCitationIssue) => {
 		if (!issue.reanchor) return;
-		const key = canonical(issue.docPath);
-		const open = documents.get(key);
-		const cur = open ? open.model.getValue() : await backend.read(issue.docPath).then((r) => (r.binary ? null : r.text), () => null);
+		const cur = await readDocText(issue.docPath);
 		if (cur === null) return notify("Could not read the document.", "error");
 		const next = reanchorCitation(cur, issue.citation, issue.reanchor.from, issue.reanchor.to);
 		if (next === cur) return;
-		await writeDocEdit(issue.docPath, next);
-		setState("treeVersion", (v) => v + 1);
-		refreshDocAudit();
-		notify(`Re-anchored citation to L${issue.reanchor.from}-L${issue.reanchor.to}.`);
+		try {
+			await writeDocEdit(issue.docPath, next);
+			setState("treeVersion", (v) => v + 1);
+			refreshDocAudit();
+			notify(`Re-anchored citation to L${issue.reanchor.from}-L${issue.reanchor.to}.`);
+		} catch (e: any) {
+			notify(`Could not update ${baseName(issue.docPath)}: ${e?.message ?? e}`, "error");
+		}
 	};
 
 	const refreshExcerptIssue = async (issue: AuditCitationIssue) => {
 		if (issue.kind !== "drifted") return;
-		const readCurrent = async (p: string) => {
-			const open = documents.get(canonical(p));
-			if (open) return open.model.getValue();
-			return backend.read(p).then((r) => (r.binary ? null : r.text), () => null);
-		};
-		const [docText, targetText] = await Promise.all([readCurrent(issue.docPath), readCurrent(issue.targetPath)]);
+		const startRoot = state.workspace?.root;
+		const [docText, targetText] = await Promise.all([readDocText(issue.docPath), readDocText(issue.targetPath)]);
 		if (docText === null || targetText === null) return notify("Could not read the document or cited file.", "error");
-		const next = refreshCitationExcerpt(docText, issue.citation, targetText);
-		if (!next || next === docText) return notify("Could not find a following fenced code block to refresh.", "error");
+		const previewNext = refreshCitationExcerpt(docText, issue.citation, targetText);
+		if (!previewNext || previewNext === docText) return notify("Could not find a following fenced code block to refresh.", "error");
 		const REFRESH = "Refresh excerpt";
 		const rangeLabel = issue.citation.from === issue.citation.to ? `L${issue.citation.from}` : `L${issue.citation.from}-L${issue.citation.to}`;
 		if (
@@ -270,15 +326,26 @@ export function Health() {
 		) {
 			return;
 		}
-		await writeDocEdit(issue.docPath, next);
-		setState("treeVersion", (v) => v + 1);
-		refreshDocAudit();
-		notify(`Refreshed quoted excerpt in ${baseName(issue.docPath)}.`);
+		if (state.workspace?.root !== startRoot) return;
+		// Re-read both buffers after confirmation so concurrent edits are never overwritten.
+		const [freshDoc, freshTarget] = await Promise.all([readDocText(issue.docPath), readDocText(issue.targetPath)]);
+		if (freshDoc === null || freshTarget === null) return notify("Could not read the document or cited file.", "error");
+		const next = refreshCitationExcerpt(freshDoc, issue.citation, freshTarget);
+		if (!next || next === freshDoc) return notify("Could not refresh excerpt — the document changed since.", "error");
+		try {
+			await writeDocEdit(issue.docPath, next);
+			setState("treeVersion", (v) => v + 1);
+			refreshDocAudit();
+			notify(`Refreshed quoted excerpt in ${baseName(issue.docPath)}.`);
+		} catch (e: any) {
+			notify(`Could not update ${baseName(issue.docPath)}: ${e?.message ?? e}`, "error");
+		}
 	};
 
 	const reanchorAll = async () => {
 		const list = reanchorableCitations();
 		if (!list.length) return;
+		const startRoot = state.workspace?.root;
 		const byDoc = new Map<string, AuditCitationIssue[]>();
 		for (const item of list) {
 			const k = canonical(item.docPath);
@@ -289,28 +356,44 @@ export function Health() {
 			`Re-anchor ${count(list.length, "code citation")} across ${count(byDoc.size, "document")}?`,
 			[GO],
 		);
-		if (answer !== GO) return;
+		if (answer !== GO || state.workspace?.root !== startRoot) return;
 		let updated = 0;
+		let changedFiles = 0;
+		let failed = 0;
 		for (const [, docItems] of byDoc) {
+			if (state.workspace?.root !== startRoot) break;
 			const docPath = docItems[0]!.docPath;
-			const open = documents.get(canonical(docPath));
-			let cur = open ? open.model.getValue() : await backend.read(docPath).then((r) => (r.binary ? null : r.text), () => null);
+			let cur = await readDocText(docPath);
 			if (cur === null) continue;
-			let changed = false;
+			let docUpdated = 0;
 			for (const item of docItems) {
 				if (!item.reanchor) continue;
 				const next = reanchorCitation(cur, item.citation, item.reanchor.from, item.reanchor.to);
 				if (next !== cur) {
 					cur = next;
-					changed = true;
-					updated++;
+					docUpdated++;
 				}
 			}
-			if (changed) await writeDocEdit(docPath, cur);
+			if (docUpdated > 0) {
+				try {
+					await writeDocEdit(docPath, cur);
+					updated += docUpdated;
+					changedFiles++;
+				} catch (e: any) {
+					failed++;
+					notify(`Could not update ${baseName(docPath)}: ${e?.message ?? e}`, "error");
+				}
+			}
 		}
-		setState("treeVersion", (v) => v + 1);
-		refreshDocAudit();
-		notify(updated ? `Re-anchored ${count(updated, "citation")}.` : "Citations were already up to date.");
+		if (changedFiles) {
+			setState("treeVersion", (v) => v + 1);
+			refreshDocAudit();
+		}
+		if (updated) {
+			notify(`Re-anchored ${count(updated, "citation")}${failed ? ` (${failed} ${failed === 1 ? "file" : "files"} failed)` : ""}.`);
+		} else if (!failed) {
+			notify("Citations were already up to date.");
+		}
 	};
 
 	const trashOrphanAttachment = async (path: string) => {
@@ -318,8 +401,10 @@ export function Health() {
 		const rel = root ? relativeTo(root, path).split("\\").join("/") : baseName(path);
 		const TRASH = "Move to trash";
 		if ((await choose(`Move unused attachment ${rel} to the trash?`, [TRASH], { danger: TRASH })) !== TRASH) return;
+		if ((state.workspace?.root ?? "") !== root) return;
 		try {
 			await backend.trash(path);
+			fileRemoved(path);
 			setState("treeVersion", (v) => v + 1);
 			refreshDocAudit();
 			notify(`Moved unused attachment ${baseName(path)} to trash.`);
@@ -331,6 +416,7 @@ export function Health() {
 	const trashAllOrphans = async () => {
 		const list = filteredOrphans();
 		if (!list.length) return;
+		const startRoot = state.workspace?.root;
 		const TRASH_ALL = `Trash ${list.length} unused`;
 		const preview = list.slice(0, 4).map(baseName).join(", ") + (list.length > 4 ? ` and ${list.length - 4} more` : "");
 		const picked = await choose(
@@ -338,36 +424,44 @@ export function Health() {
 			[TRASH_ALL],
 			{ danger: TRASH_ALL },
 		);
-		if (picked !== TRASH_ALL) return;
+		if (picked !== TRASH_ALL || state.workspace?.root !== startRoot) return;
 		let trashed = 0;
+		let failed = 0;
 		for (const p of list) {
+			if (state.workspace?.root !== startRoot) break;
 			try {
 				await backend.trash(p);
+				fileRemoved(p);
 				trashed++;
-			} catch {
-				// continue remaining
+			} catch (e: any) {
+				failed++;
+				notify(`Could not move ${baseName(p)} to trash: ${e?.message ?? e}`, "error");
 			}
 		}
-		setState("treeVersion", (v) => v + 1);
-		refreshDocAudit();
-		notify(`Moved ${count(trashed, "unused attachment")} to trash.`);
+		if (trashed) {
+			setState("treeVersion", (v) => v + 1);
+			refreshDocAudit();
+			notify(`Moved ${count(trashed, "unused attachment")} to trash${failed ? ` (${failed} failed)` : ""}.`);
+		}
 	};
 
 	const mendWikiLinks = async (path: string, mends: WikiLinkMend[]) => {
-		const open = documents.get(canonical(path));
-		const before = open ? open.model.getValue() : await backend.read(path).then((r) => (r.binary ? null : r.text), () => null);
+		const before = await readDocText(path);
 		if (before === null) return notify("Could not read the document.", "error");
 		const { text: after, done } = withNames(before, mends);
 		if (!done || after === before) return notify("Those wikilinks could not be mended — the document may have already changed.");
-		await writeDocEdit(path, after);
-		setState("treeVersion", (v) => v + 1);
-		refreshDocAudit();
-		notify(`Mended ${count(done, "wikilink")} in ${baseName(path)}.`);
+		try {
+			await writeDocEdit(path, after);
+			setState("treeVersion", (v) => v + 1);
+			refreshDocAudit();
+			notify(`Mended ${count(done, "wikilink")} in ${baseName(path)}.`);
+		} catch (e: any) {
+			notify(`Could not update ${baseName(path)}: ${e?.message ?? e}`, "error");
+		}
 	};
 
 	const fixReciprocalAdr = async (fixSpec: { path: string; field: "supersedes" | "superseded-by"; value: string }) => {
-		const open = documents.get(canonical(fixSpec.path));
-		const before = open ? open.model.getValue() : await backend.read(fixSpec.path).then((r) => (r.binary ? null : r.text), () => null);
+		const before = await readDocText(fixSpec.path);
 		if (before === null) return notify("Could not read the decision document.", "error");
 		const fm = frontMatter(before);
 		const existing = many(fm.values[fixSpec.field]);
@@ -375,10 +469,14 @@ export function Health() {
 			? addToFrontMatterList(before, fixSpec.field, fixSpec.value)
 			: withFrontMatter(before, fixSpec.field, fixSpec.value);
 		if (!next || next === before) return notify(`${baseName(fixSpec.path)} already lists ${fixSpec.field}: ${fixSpec.value}.`);
-		await writeDocEdit(fixSpec.path, next);
-		setState("treeVersion", (v) => v + 1);
-		refreshDocAudit();
-		notify(`Added ${fixSpec.field}: ${fixSpec.value} to ${baseName(fixSpec.path)}.`);
+		try {
+			await writeDocEdit(fixSpec.path, next);
+			setState("treeVersion", (v) => v + 1);
+			refreshDocAudit();
+			notify(`Added ${fixSpec.field}: ${fixSpec.value} to ${baseName(fixSpec.path)}.`);
+		} catch (e: any) {
+			notify(`Could not update ${baseName(fixSpec.path)}: ${e?.message ?? e}`, "error");
+		}
 	};
 
 	const runRecordApproval = async (path: string) => {
@@ -389,46 +487,58 @@ export function Health() {
 	const mendAllBrokenLinks = async () => {
 		const list = mendableChecks();
 		if (list.length < 2) return;
-		const totalLinks = list.reduce((sum, c) => sum + c.fix.mends.length, 0);
+		const startRoot = state.workspace?.root;
+		const byPath = new Map<string, { path: string; mends: CombinedLinkMend[] }>();
+		for (const check of list) {
+			const key = canonical(check.path);
+			const entry = byPath.get(key) ?? { path: check.path, mends: [] };
+			if (check.fix.kind === "mend-wikilinks") {
+				for (const edit of check.fix.mends) entry.mends.push({ kind: "wiki", edit });
+			} else {
+				for (const edit of check.fix.mends) entry.mends.push({ kind: "path", edit });
+			}
+			byPath.set(key, entry);
+		}
+		const totalLinks = [...byPath.values()].reduce((sum, entry) => sum + entry.mends.length, 0);
+		const uniquePaths = [...byPath.values()].map((e) => e.path);
 		const preview =
-			list
+			uniquePaths
 				.slice(0, 4)
-				.map((c) => baseName(c.path))
-				.join(", ") + (list.length > 4 ? ` and ${list.length - 4} more` : "");
+				.map((p) => baseName(p))
+				.join(", ") + (uniquePaths.length > 4 ? ` and ${uniquePaths.length - 4} more` : "");
 		const GO = "Mend all links";
 		const picked = await choose(
-			`Rewrite ${count(totalLinks, "broken link")} across ${count(list.length, "document")} (${preview}) to point at where their files moved?`,
+			`Rewrite ${count(totalLinks, "broken link")} across ${count(byPath.size, "document")} (${preview}) to point at where their files moved?`,
 			[GO],
 		);
-		if (picked !== GO) return;
+		if (picked !== GO || state.workspace?.root !== startRoot) return;
 		const mendedPaths = new Set<string>();
 		let mendedLinks = 0;
-		for (const check of list) {
-			const open = documents.get(canonical(check.path));
-			const before = open
-				? open.model.getValue()
-				: await backend.read(check.path).then((r) => (r.binary ? null : r.text), () => null);
+		let failed = 0;
+		for (const [key, entry] of byPath) {
+			if (state.workspace?.root !== startRoot) break;
+			const before = await readDocText(entry.path);
 			if (before === null) continue;
-			const { text: after, done } =
-				check.fix.kind === "mend-wikilinks"
-					? withNames(before, check.fix.mends)
-					: withLinkFiles(before, check.fix.mends);
+			const { text: after, done } = applyCombinedLinkMends(before, entry.mends);
 			if (!done || after === before) continue;
 			try {
-				await writeDocEdit(check.path, after);
-				mendedPaths.add(canonical(check.path));
+				await writeDocEdit(entry.path, after);
+				mendedPaths.add(key);
 				mendedLinks += done;
-			} catch {
-				// continue remaining files
+			} catch (e: any) {
+				failed++;
+				notify(`Could not update ${baseName(entry.path)}: ${e?.message ?? e}`, "error");
 			}
 		}
-		setState("treeVersion", (v) => v + 1);
-		refreshDocAudit();
-		notify(
-			mendedLinks
-				? `Mended ${count(mendedLinks, "link")} across ${count(mendedPaths.size, "document")}.`
-				: "No links needed mending — the documents may have already changed.",
-		);
+		if (mendedPaths.size) {
+			setState("treeVersion", (v) => v + 1);
+			refreshDocAudit();
+		}
+		if (mendedLinks) {
+			notify(`Mended ${count(mendedLinks, "link")} across ${count(mendedPaths.size, "document")}${failed ? ` (${failed} failed)` : ""}.`);
+		} else if (!failed) {
+			notify("No links needed mending — the documents may have already changed.");
+		}
 	};
 
 	const syncSchemaFromSql = async (sqlPath: string, schemaPath?: string) => {
@@ -826,7 +936,7 @@ export function Health() {
 							<button
 								type="button"
 								class="link health-sec-action"
-								title={`Mend broken links across ${mendableChecks().length} documents`}
+								title={`Mend broken links across ${count(mendableDocCount(), "document")}`}
 								onClick={() => void mendAllBrokenLinks()}
 							>
 								Mend all broken links

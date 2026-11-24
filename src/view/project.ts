@@ -1,7 +1,7 @@
 // The open folder as a project: its settings (.ssl-studio/project.toml) and
 // its documents. The Bun process reads them (src/bun/project.ts); the Docs
 // and Health panels show them.
-import { createEffect, createSignal, on } from "solid-js";
+import { createEffect, createSignal, on, onCleanup } from "solid-js";
 import type { DocFile } from "../shared/protocol";
 import { folderParts, folderSaid, typedDocument, typedParts } from "../shared/docSections";
 import { joinPath } from "../shared/paths";
@@ -30,15 +30,26 @@ export function projectGaps(): { file: DocFile; problem: string }[] {
 export function useProject() {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	let seq = 0;
+	let prevRoot: string | undefined;
+	onCleanup(() => {
+		clearTimeout(timer);
+		seq++;
+	});
 	createEffect(
 		on([() => state.workspace?.root, () => state.treeVersion], ([root]) => {
 			clearTimeout(timer);
 			const mySeq = ++seq;
+			const rootChanged = root !== prevRoot;
+			prevRoot = root;
 			if (!root) {
 				setDocs([]);
 				setDocsLoading(false);
 				setDocsError("");
 				return;
+			}
+			if (rootChanged) {
+				setDocs([]);
+				setDocsError("");
 			}
 			setDocsLoading(true);
 			// A save or a burst of file events asks once.
@@ -72,22 +83,27 @@ export const setupQuestion = (folder: string, files: string[]) =>
  */
 export async function setUpProject() {
 	if (!state.workspace) return notify("Open a folder first.");
+	const startRoot = state.workspace.root;
 	let made: string[];
 	try {
 		const planned = await backend.setupPreview();
+		if (!state.workspace || state.workspace.root !== startRoot) return;
 		if (!planned.length) return notify("This project already has its settings, README and AGENTS files.");
 		// The self-test presses the button on a copy of the workspace and has nobody to ask.
 		if (!state.info?.selftest && (await choose(setupQuestion(state.workspace.name, planned), [`Create ${planned.length === 1 ? "the file" : `${planned.length} files`}`])) === null) return;
+		if (!state.workspace || state.workspace.root !== startRoot) return;
 		made = await backend.setupProject();
 	} catch (e: any) {
 		return notify(String(e?.message ?? e), "error");
 	}
+	if (!state.workspace || state.workspace.root !== startRoot) return;
 	await Promise.all([loadProject(), loadSettings()]);
+	if (!state.workspace || state.workspace.root !== startRoot) return;
 	setState("treeVersion", (v) => v + 1);
 	notify(made.length ? `Created ${made.join(", ")}.` : "This project already has its settings, README and AGENTS files.", "info", made.length ? { label: "Undo", run: () => void undoSetUp() } : undefined);
 	showPanel("docs");
 	const readme = (await backend.docs()).find((d) => d.group === "project" && /^readme\.md$/i.test(d.name));
-	if (readme?.exists) await openFile(readme.path);
+	if (readme?.exists && state.workspace?.root === startRoot) await openFile(readme.path);
 }
 
 /**
@@ -121,14 +137,17 @@ export const newDoc = () => newDocIn();
  */
 export async function newDocIn(folder?: string): Promise<boolean> {
 	if (!state.workspace || !state.project) return notify("Open a folder first."), false;
+	const startRoot = state.workspace.root;
 	const into = folderParts(folder ?? state.project.docs);
 	// A slash in the name is a folder, not part of the name: said, since it is not what a title's slash means.
 	const typed = (await ask(`Name of the new document in ${folderSaid(into.join("/"))} (a folder may come first: guides/Intro)`))?.trim();
 	if (!typed) return false;
+	if (!state.workspace || state.workspace.root !== startRoot) return false;
 	const named = typedDocument(typed);
 	if ("problem" in named) return notify(named.problem, "error"), false;
-	const path = joinPath(state.workspace.root, ...into, ...named.folders, named.file);
+	const path = joinPath(startRoot, ...into, ...named.folders, named.file);
 	if (await heldFromBefore(path)) return false;
+	if (!state.workspace || state.workspace.root !== startRoot) return false;
 	try {
 		await backend.create(path, "file");
 		await backend.write(path, `# ${named.title}\n`);
@@ -150,14 +169,16 @@ export async function newDocIn(folder?: string): Promise<boolean> {
  */
 export async function newFolderIn(folder: string, first: boolean | ((made: string) => Promise<boolean>)): Promise<boolean> {
 	if (!state.workspace || !state.project) return notify("Open a folder first."), false;
+	const startRoot = state.workspace.root;
 	const into = folderParts(folder);
 	const typed = (await ask(`Name of the new folder in ${folderSaid(into.join("/"))}`))?.trim();
 	if (!typed) return false;
+	if (!state.workspace || state.workspace.root !== startRoot) return false;
 	const named = typedParts(typed);
 	if ("problem" in named) return notify(named.problem, "error"), false;
 	const made = [...into, ...named.parts].join("/");
 	try {
-		await backend.create(joinPath(state.workspace.root, ...into, ...named.parts), "dir");
+		await backend.create(joinPath(startRoot, ...into, ...named.parts), "dir");
 	} catch (e: any) {
 		return notify(String(e?.message ?? e), "error"), false;
 	}

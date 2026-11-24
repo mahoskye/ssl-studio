@@ -108,7 +108,7 @@ export function withCatalog(text: string, items: readonly CatalogItem[]): string
 		const rest = text.slice(open + CATALOG_START.length);
 		// Only what a catalog's list is made of: a line that links to a document, a section's heading as the list writes
 		// it, the words for an empty list, and the blank lines between. A heading or a bullet of the person's own ends it.
-		const listed = /^(?:[ \t]*\r?\n|- \[[^\]\n]*\]\([^)\n]*\).*\r?\n?|### .*\r?\n?|Nothing here yet\.[ \t]*\r?\n?)*/.exec(rest)![0];
+		const listed = /^(?:[ \t]*\r?\n|- \[(?:\\.|[^\]\n])*\]\([^)\n]*\).*\r?\n?|### .*\r?\n?|Nothing here yet\.[ \t]*\r?\n?)*/.exec(rest)![0];
 		const after = rest.slice(listed.length);
 		return text.slice(0, open) + eol(block(items)) + (after ? eol("\n\n") + after : eol("\n"));
 	}

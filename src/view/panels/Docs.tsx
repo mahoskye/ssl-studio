@@ -3,7 +3,7 @@
 // plans. Which folders those are comes from .ssl-studio/project.toml.
 import { Icon } from "../Icon";
 import { FileMark } from "../FileMark";
-import { createContext, createEffect, createMemo, createSignal, For, on, Show, useContext } from "solid-js";
+import { createContext, createEffect, createMemo, createSignal, For, on, onCleanup, Show, useContext } from "solid-js";
 import type { DocFile } from "../../shared/protocol";
 import { backend } from "../backend";
 import { ask, choose, quickPick, type QuickPickOption } from "../dialogs";
@@ -11,7 +11,7 @@ import { localDay } from "../../shared/dates";
 import { docChecks } from "../../shared/docChecks";
 import { aggregateDocIssues, applyMultiSelectClick, hasAnyDocIssue, type DocIssueSummary } from "../../shared/docSelection";
 import { addToFrontMatterList, frontMatter, one, withFrontMatter } from "../../shared/frontMatter";
-import { CATALOG_AREAS, DOC_FOLDERS, docMatches, frontValue, isCatalog, KNOWLEDGE, progress, progressShort, projectDocLabel, registryTitle, SCHEMAS, statusChoices, toneOf } from "../../shared/projectDocs";
+import { CATALOG_AREAS, DOC_FOLDERS, docMatches, isCatalog, KNOWLEDGE, progress, progressShort, projectDocLabel, registryTitle, SCHEMAS, statusChoices, toneOf } from "../../shared/projectDocs";
 import { normalizeTag, tagSearchPattern, workspaceTags } from "../../shared/tags";
 import { descendantTickets, ticketWork } from "../../shared/workContext";
 import { docs, docsError, docsLoading, newDoc, newDocIn, newFolderIn, setUpProject } from "../project";
@@ -60,9 +60,9 @@ import { folderParts, folderSaid, IMPORT_TICKETS, kindOf, NEW_DOCUMENT, NEW_FOLD
 import { baseName, dirName, isInside, joinPath, relativeTo } from "../../shared/paths";
 import { schemaList, schemaRowTitle } from "../../shared/schemaList";
 import { isArchivedTicket as isArchivedTicketPath, shownRows, workList, type WorkSort } from "../../shared/workList";
-import { activePath, applyText, canonical, documents, fileRenamed, notify, openFile, openToSide, save, setState, state } from "../state";
+import { activePath, applyText, canonical, documents, fileRenamed, notify, openFile, openToSide, save, saveSetting, setState, state } from "../state";
 import { gitStatus } from "../git";
-import { docAuditData } from "../docAudit";
+import { docAuditData, refreshDocAudit } from "../docAudit";
 import { changeLetter } from "../../shared/gitStatus";
 import { recall, remember } from "../graph/canvas";
 import { focusRowsBelow, IconButton, isFolded, Row, RowGroup, Rows, setFold, setFolds, type Point } from "./Rows";
@@ -92,14 +92,18 @@ const isBulkSelectable = (file: DocFile) => file.exists && !isCatalog(file) && /
 async function editDocFrontMatter(path: string, transform: (text: string) => string | null): Promise<boolean> {
 	const key = canonical(path);
 	const open = documents.get(key);
-	const cur = open ? open.model.getValue() : await backend.read(path).then((r) => (r.binary ? null : r.text), () => null);
+	if (open?.binary) return false;
+	const liveOpen = open && !open.binary && !open.model.isDisposed() ? open : undefined;
+	const cur = liveOpen ? liveOpen.model.getValue() : await backend.read(path).then((r) => (r.binary ? null : r.text), () => null);
 	if (cur === null) return false;
 	const next = transform(cur);
 	if (next === null || next === cur) return false;
-	if (open) {
+	if (liveOpen) {
 		const clean = !state.dirty[key];
-		applyText(key, next);
-		if (clean) await save(key, { format: false });
+		if (!applyText(key, next)) throw new Error(`Could not update open buffer for ${baseName(path)}.`);
+		if (clean && !(await save(key, { format: false }))) {
+			throw new Error(`${baseName(path)} was changed in the editor and could not be saved.`);
+		}
 	} else {
 		await backend.historyKeep(path).catch(() => {});
 		await backend.write(path, next);
@@ -272,6 +276,7 @@ async function archiveSpecOrDecision(file: DocFile): Promise<void> {
 		needsStatus ? [ARCHIVE_MARK, ARCHIVE_KEEP] : ["Archive"],
 	);
 	if (!picked) return;
+	if (!state.workspace || state.workspace.root !== root) return;
 	const key = canonical(file.path);
 	if (state.dirty[key] && !(await save(key))) {
 		notify("Save unsaved edits before archiving this document.", "error");
@@ -279,16 +284,29 @@ async function archiveSpecOrDecision(file: DocFile): Promise<void> {
 	}
 	const beforeDocs = await backend.docs().catch(() => docs().slice());
 	try {
-		if (picked === ARCHIVE_MARK) await setStatus(file.path, targetStatus);
 		await backend.rename(file.path, dest);
 		fileRenamed(file.path, dest);
-		setState("treeVersion", (v) => v + 1);
-		await followRename(file.path, dest, beforeDocs);
-		notify(`Archived ${file.title || baseName(file.path)} to ${relArchive}/.`);
 	} catch (e: any) {
 		setState("treeVersion", (v) => v + 1);
 		notify(String(e?.message ?? e), "error");
+		return;
 	}
+	// Update status on the moved path directly without invoking the interactive supersede wizard mid-archive.
+	if (picked === ARCHIVE_MARK) {
+		try {
+			await editDocFrontMatter(dest, (text) => withFrontMatter(text, "status", targetStatus));
+		} catch (e: any) {
+			notify(`Archived, but could not update status on ${baseName(dest)}: ${e?.message ?? e}`, "error");
+		}
+	}
+	setState("treeVersion", (v) => v + 1);
+	refreshDocAudit();
+	try {
+		await followRename(file.path, dest, beforeDocs);
+	} catch (e: any) {
+		notify(`Archived ${file.title || baseName(file.path)}, but could not update links: ${e?.message ?? e}`, "error");
+	}
+	notify(`Archived ${file.title || baseName(file.path)} to ${relArchive}/.`);
 }
 
 /** Batch-archives all non-archived tickets whose status is done into `<tickets>/archive/` after ADR 0009 confirmation. */
@@ -309,10 +327,12 @@ async function archiveAllDoneTickets(): Promise<void> {
 	if ((await choose(`Move ${doneTickets.length} done ${doneTickets.length === 1 ? "ticket" : "tickets"} (${preview}) into ${relArchive}/?`, [GO])) !== GO) {
 		return;
 	}
+	if (!state.workspace || state.workspace.root !== root) return;
 	const { retargetScopedFolder } = await import("./Explorer");
 	let archived = 0;
 	const skipped: string[] = [];
 	for (const file of doneTickets) {
+		if (!state.workspace || state.workspace.root !== root) break;
 		const isLayout1 = Boolean(file.ticketFolder && isInside(file.ticketFolder, file.path));
 		const isLayout2 = Boolean(file.ticketFolder && !isLayout1);
 		const fromPrimary = isLayout1 ? file.ticketFolder! : file.path;
@@ -362,15 +382,24 @@ async function archiveAllDoneTickets(): Promise<void> {
 			} else if (isLayout1) {
 				retargetScopedFolder(fromPrimary, toPrimary);
 			}
-			const coMoved = fromSibling && toSibling ? [{ from: fromSibling, to: toSibling }] : undefined;
-			await followRename(fromPrimary, toPrimary, beforeDocs, coMoved);
-			archived++;
 		} catch {
 			skipped.push(file.ticket || baseName(fromPrimary));
+			continue;
+		}
+		archived++;
+		if (file.ticket && state.settings.activeTicket?.trim().toLowerCase() === file.ticket.toLowerCase()) {
+			await saveSetting({ activeTicket: null }, "workspace").catch(() => {});
+		}
+		try {
+			const coMoved = fromSibling && toSibling ? [{ from: fromSibling, to: toSibling }] : undefined;
+			await followRename(fromPrimary, toPrimary, beforeDocs, coMoved);
+		} catch (e: any) {
+			notify(`Archived ${file.ticket || baseName(fromPrimary)}, but could not update links: ${e?.message ?? e}`, "error");
 		}
 	}
-	setState("treeVersion", (v) => v + 1);
 	if (archived) {
+		setState("treeVersion", (v) => v + 1);
+		refreshDocAudit();
 		notify(`Archived ${archived} done ${archived === 1 ? "ticket" : "tickets"} to ${relArchive}/${skipped.length ? ` (skipped: ${skipped.join(", ")})` : ""}.`);
 	} else if (skipped.length) {
 		notify(`Could not archive: ${skipped.join(", ")} (already in archive/ or unsaved).`, "error");
@@ -1135,11 +1164,22 @@ export function Docs() {
 	let panelEl: HTMLDivElement | undefined;
 	const [truncated, setTruncated] = createSignal<{ folder: string; limit: number; total: number }[]>([]);
 	let truncSeq = 0;
+	let prevRoot: string | undefined;
+	onCleanup(() => {
+		truncSeq++;
+	});
 	createEffect(
 		on(
 			() => [state.workspace?.root, state.treeVersion, docs().length] as const,
 			([root]) => {
 				const seq = ++truncSeq;
+				const rootChanged = root !== prevRoot;
+				prevRoot = root;
+				if (rootChanged) {
+					setTruncated([]);
+					setSelectedPaths(new Set<string>());
+					anchorPath = null;
+				}
 				if (!root) {
 					setTruncated([]);
 					return;
@@ -1169,20 +1209,6 @@ export function Docs() {
 		if (releaseFilter() && !releases().some((r) => r.toLowerCase() === releaseFilter().toLowerCase())) {
 			setReleaseFilter("");
 		}
-	});
-	// Prune multi-selected paths if files are removed or become non-selectable.
-	createEffect(() => {
-		const valid = new Set(docs().filter(isBulkSelectable).map((d) => d.path));
-		setSelectedPaths((prev) => {
-			if (!prev.size) return prev;
-			let changed = false;
-			const next = new Set<string>();
-			for (const p of prev) {
-				if (valid.has(p)) next.add(p);
-				else changed = true;
-			}
-			return changed ? next : prev;
-		});
 	});
 	const tags = createMemo(() => workspaceTags(docs()));
 	const filtering = () => Boolean(filter().trim()) || mode() !== "all" || Boolean(activeTag()) || Boolean(releaseFilter());
@@ -1230,11 +1256,6 @@ export function Docs() {
 		return false;
 	};
 
-	const selectedDocs = createMemo(() => {
-		const sel = selectedPaths();
-		if (!sel.size) return [] as DocFile[];
-		return docs().filter((d) => sel.has(d.path) && isBulkSelectable(d));
-	});
 	const previewNames = (list: DocFile[]) =>
 		list
 			.slice(0, 4)
@@ -1244,6 +1265,7 @@ export function Docs() {
 	const bulkSetStatus = async () => {
 		const targets = selectedDocs();
 		if (!targets.length) return;
+		const startRoot = state.workspace?.root;
 		const statusPool = [...new Set([...targets.flatMap((d) => statusChoices(d)), "open", "in progress", "waiting", "review", "done", "draft", "approved", "decided", "answered", "retired", "superseded"])];
 		const picked = await quickPick<string>({
 			title: `Set status for ${targets.length} selected ${targets.length === 1 ? "document" : "documents"}`,
@@ -1254,45 +1276,61 @@ export function Docs() {
 				badge: { text: st, tone: toneOf(st) },
 			})),
 		});
-		if (!picked) return;
+		if (!picked || state.workspace?.root !== startRoot) return;
 		if (targets.length > 1) {
 			const GO = `Set status on ${targets.length} documents`;
 			if ((await choose(`Set status to "${picked}" on ${targets.length} documents (${previewNames(targets)})?`, [GO])) !== GO) {
 				return;
 			}
+			if (state.workspace?.root !== startRoot) return;
 		}
 		const todayStr = localDay();
-		const quotedStatus = frontValue(picked);
 		let changed = 0;
+		let failed = 0;
 		for (const doc of targets) {
-			if (targets.length === 1) {
-				await setStatus(doc.path, picked);
-				changed++;
-			} else if (
-				await editDocFrontMatter(doc.path, (text) => {
-					let next = withFrontMatter(text, "status", quotedStatus);
-					if (next === null) return null;
-					if (doc.group === "knowledge" && doc.kind === "questions" && toneOf(picked) === "done") {
-						const fm = frontMatter(next);
-						if (!one(fm.values.answered)) {
-							next = withFrontMatter(next, "answered", todayStr) ?? next;
+			try {
+				if (targets.length === 1) {
+					await setStatus(doc.path, picked);
+					changed++;
+				} else if (
+					await editDocFrontMatter(doc.path, (text) => {
+						let next = withFrontMatter(text, "status", picked);
+						if (next === null) return null;
+						if (doc.group === "knowledge" && doc.kind === "questions" && toneOf(picked) === "done") {
+							const fm = frontMatter(next);
+							if (!one(fm.values.answered)) {
+								next = withFrontMatter(next, "answered", todayStr) ?? next;
+							}
 						}
-					}
-					return next;
-				})
-			) {
-				changed++;
+						return next;
+					})
+				) {
+					changed++;
+				}
+			} catch (e: any) {
+				failed++;
+				notify(`Could not update ${baseName(doc.path)}: ${e?.message ?? e}`, "error");
 			}
 		}
 		if (targets.length > 1) {
-			setState("treeVersion", (v) => v + 1);
-			notify(changed ? `Set status to "${picked}" on ${changed} ${changed === 1 ? "document" : "documents"}.` : "Selected documents already had that status.");
+			if (changed) {
+				setState("treeVersion", (v) => v + 1);
+				refreshDocAudit();
+			}
+			if (changed) {
+				notify(`Set status to "${picked}" on ${changed} ${changed === 1 ? "document" : "documents"}${failed ? ` (${failed} failed)` : ""}.`);
+			} else if (!failed) {
+				notify("Selected documents already had that status.");
+			}
+		} else if (changed) {
+			refreshDocAudit();
 		}
 	};
 
 	const bulkAddTag = async () => {
 		const targets = selectedDocs();
 		if (!targets.length) return;
+		const startRoot = state.workspace?.root;
 		const existingTags = tags();
 		let raw: string | null = null;
 		if (existingTags.length) {
@@ -1316,12 +1354,12 @@ export function Docs() {
 				placeholder: "Search existing tags or add a new tag…",
 				items,
 			});
-			if (!chosen) return;
+			if (!chosen || state.workspace?.root !== startRoot) return;
 			raw = chosen === "__new__" ? (await ask(`New tag for ${targets.length} selected ${targets.length === 1 ? "document" : "documents"} (without #)`))?.trim() ?? null : chosen;
 		} else {
 			raw = (await ask(`Add tag to ${targets.length} selected ${targets.length === 1 ? "document" : "documents"} (without #)`))?.trim() ?? null;
 		}
-		if (!raw) return;
+		if (!raw || state.workspace?.root !== startRoot) return;
 		const tag = normalizeTag(raw, { fromYaml: true });
 		if (!tag) return notify("Enter a valid tag name (letters, digits, _, -, /).", "error");
 		if (targets.length > 1) {
@@ -1329,18 +1367,33 @@ export function Docs() {
 			if ((await choose(`Add tag #${tag} to ${targets.length} documents (${previewNames(targets)})?`, [GO])) !== GO) {
 				return;
 			}
+			if (state.workspace?.root !== startRoot) return;
 		}
 		let changed = 0;
+		let failed = 0;
 		for (const doc of targets) {
-			if (await editDocFrontMatter(doc.path, (text) => addToFrontMatterList(text, "tags", tag))) changed++;
+			try {
+				if (await editDocFrontMatter(doc.path, (text) => addToFrontMatterList(text, "tags", tag))) changed++;
+			} catch (e: any) {
+				failed++;
+				notify(`Could not update ${baseName(doc.path)}: ${e?.message ?? e}`, "error");
+			}
 		}
-		setState("treeVersion", (v) => v + 1);
-		notify(changed ? `Added #${tag} to ${changed} ${changed === 1 ? "document" : "documents"}.` : `Selected documents already have #${tag}.`);
+		if (changed) {
+			setState("treeVersion", (v) => v + 1);
+			refreshDocAudit();
+		}
+		if (changed) {
+			notify(`Added #${tag} to ${changed} ${changed === 1 ? "document" : "documents"}${failed ? ` (${failed} failed)` : ""}.`);
+		} else if (!failed) {
+			notify(`Selected documents already have #${tag}.`);
+		}
 	};
 
 	const bulkSetRelease = async () => {
 		const targets = selectedDocs();
 		if (!targets.length) return;
+		const startRoot = state.workspace?.root;
 		const existingReleases = releases();
 		let val: string | null = null;
 		if (existingReleases.length) {
@@ -1363,30 +1416,44 @@ export function Docs() {
 				placeholder: "Search existing releases or enter a new one…",
 				items,
 			});
-			if (!chosen) return;
+			if (!chosen || state.workspace?.root !== startRoot) return;
 			val = chosen === "__new__" ? (await ask(`Set release for ${targets.length} selected ${targets.length === 1 ? "document" : "documents"} (e.g. R2026.12)`))?.trim() ?? null : chosen;
 		} else {
 			val = (await ask(`Set release for ${targets.length} selected ${targets.length === 1 ? "document" : "documents"} (e.g. R2026.12)`))?.trim() ?? null;
 		}
-		if (!val) return;
+		if (!val || state.workspace?.root !== startRoot) return;
 		if (targets.length > 1) {
 			const GO = `Set release on ${targets.length} documents`;
 			if ((await choose(`Set release: "${val}" on ${targets.length} documents (${previewNames(targets)})?`, [GO])) !== GO) {
 				return;
 			}
+			if (state.workspace?.root !== startRoot) return;
 		}
-		const quotedRel = frontValue(val);
 		let changed = 0;
+		let failed = 0;
 		for (const doc of targets) {
-			if (await editDocFrontMatter(doc.path, (text) => withFrontMatter(text, "release", quotedRel))) changed++;
+			try {
+				if (await editDocFrontMatter(doc.path, (text) => withFrontMatter(text, "release", val))) changed++;
+			} catch (e: any) {
+				failed++;
+				notify(`Could not update ${baseName(doc.path)}: ${e?.message ?? e}`, "error");
+			}
 		}
-		setState("treeVersion", (v) => v + 1);
-		notify(changed ? `Set release "${val}" on ${changed} ${changed === 1 ? "document" : "documents"}.` : "Selected documents already had that release.");
+		if (changed) {
+			setState("treeVersion", (v) => v + 1);
+			refreshDocAudit();
+		}
+		if (changed) {
+			notify(`Set release "${val}" on ${changed} ${changed === 1 ? "document" : "documents"}${failed ? ` (${failed} failed)` : ""}.`);
+		} else if (!failed) {
+			notify("Selected documents already had that release.");
+		}
 	};
 
 	const bulkGovernance = async () => {
 		const targets = selectedDocs();
 		if (!targets.length) return;
+		const startRoot = state.workspace?.root;
 		const field = await quickPick<"change-control" | "gxp-impact">({
 			title: `Governance field for ${targets.length} selected ${targets.length === 1 ? "document" : "documents"}`,
 			searchable: false,
@@ -1405,7 +1472,7 @@ export function Docs() {
 				},
 			],
 		});
-		if (!field) return;
+		if (!field || state.workspace?.root !== startRoot) return;
 		let value: string | null = null;
 		if (field === "change-control") {
 			value = (await ask(`Change-control ID for ${targets.length} ${targets.length === 1 ? "document" : "documents"} (e.g. CC-2026-042)`))?.trim() ?? null;
@@ -1423,20 +1490,33 @@ export function Docs() {
 				],
 			});
 		}
-		if (!value) return;
+		if (!value || state.workspace?.root !== startRoot) return;
 		if (targets.length > 1) {
 			const GO = `Set ${field} on ${targets.length} documents`;
 			if ((await choose(`Set ${field}: "${value}" on ${targets.length} documents (${previewNames(targets)})?`, [GO])) !== GO) {
 				return;
 			}
+			if (state.workspace?.root !== startRoot) return;
 		}
-		const quoted = frontValue(value);
 		let changed = 0;
+		let failed = 0;
 		for (const doc of targets) {
-			if (await editDocFrontMatter(doc.path, (text) => withFrontMatter(text, field, quoted))) changed++;
+			try {
+				if (await editDocFrontMatter(doc.path, (text) => withFrontMatter(text, field, value))) changed++;
+			} catch (e: any) {
+				failed++;
+				notify(`Could not update ${baseName(doc.path)}: ${e?.message ?? e}`, "error");
+			}
 		}
-		setState("treeVersion", (v) => v + 1);
-		notify(changed ? `Set ${field} "${value}" on ${changed} ${changed === 1 ? "document" : "documents"}.` : `Selected documents already had ${field}: "${value}".`);
+		if (changed) {
+			setState("treeVersion", (v) => v + 1);
+			refreshDocAudit();
+		}
+		if (changed) {
+			notify(`Set ${field} "${value}" on ${changed} ${changed === 1 ? "document" : "documents"}${failed ? ` (${failed} failed)` : ""}.`);
+		} else if (!failed) {
+			notify(`Selected documents already had ${field}: "${value}".`);
+		}
 	};
 
 	const bulkBundleOrRtm = async () => {
@@ -1489,6 +1569,7 @@ export function Docs() {
 		if ((await choose(`Move ${total} selected ${total === 1 ? "document" : "documents"} (${previewNames(combined)}) into archive/?`, [GO])) !== GO) {
 			return;
 		}
+		if (!state.workspace || state.workspace.root !== root) return;
 		const { retargetScopedFolder } = await import("./Explorer");
 		const docsParts = folderParts(project.docs ?? "docs");
 		const ticketArchiveDir = joinPath(root, ...docsParts, DOC_FOLDERS.tickets, "archive");
@@ -1497,6 +1578,7 @@ export function Docs() {
 		const skipped: string[] = [];
 
 		for (const file of ticketsToArchive) {
+			if (!state.workspace || state.workspace.root !== root) break;
 			const isLayout1 = Boolean(file.ticketFolder && isInside(file.ticketFolder, file.path));
 			const isLayout2 = Boolean(file.ticketFolder && !isLayout1);
 			const fromPrimary = isLayout1 ? file.ticketFolder! : file.path;
@@ -1544,16 +1626,25 @@ export function Docs() {
 				} else if (isLayout1) {
 					retargetScopedFolder(fromPrimary, toPrimary);
 				}
-				const coMoved = fromSibling && toSibling ? [{ from: fromSibling, to: toSibling }] : undefined;
-				await followRename(fromPrimary, toPrimary, beforeDocs, coMoved);
-				archived++;
-				archivedOriginals.add(file.path);
 			} catch {
 				skipped.push(file.ticket || baseName(fromPrimary));
+				continue;
+			}
+			archived++;
+			archivedOriginals.add(file.path);
+			if (file.ticket && state.settings.activeTicket?.trim().toLowerCase() === file.ticket.toLowerCase()) {
+				await saveSetting({ activeTicket: null }, "workspace").catch(() => {});
+			}
+			try {
+				const coMoved = fromSibling && toSibling ? [{ from: fromSibling, to: toSibling }] : undefined;
+				await followRename(fromPrimary, toPrimary, beforeDocs, coMoved);
+			} catch (e: any) {
+				notify(`Archived ${file.ticket || baseName(fromPrimary)}, but could not update links: ${e?.message ?? e}`, "error");
 			}
 		}
 
 		for (const file of docsToArchive) {
+			if (!state.workspace || state.workspace.root !== root) break;
 			const archiveDir = joinPath(dirName(file.path), "archive");
 			const dest = joinPath(archiveDir, baseName(file.path));
 			const existing = await backend.list(archiveDir).catch(() => []);
@@ -1570,11 +1661,16 @@ export function Docs() {
 			try {
 				await backend.rename(file.path, dest);
 				fileRenamed(file.path, dest);
-				await followRename(file.path, dest, beforeDocs);
-				archived++;
-				archivedOriginals.add(file.path);
 			} catch {
 				skipped.push(file.title || baseName(file.path));
+				continue;
+			}
+			archived++;
+			archivedOriginals.add(file.path);
+			try {
+				await followRename(file.path, dest, beforeDocs);
+			} catch (e: any) {
+				notify(`Archived ${file.title || baseName(file.path)}, but could not update links: ${e?.message ?? e}`, "error");
 			}
 		}
 
@@ -1585,8 +1681,9 @@ export function Docs() {
 				return next;
 			});
 		}
-		setState("treeVersion", (v) => v + 1);
 		if (archived) {
+			setState("treeVersion", (v) => v + 1);
+			refreshDocAudit();
 			notify(`Archived ${archived} ${archived === 1 ? "document" : "documents"}${skipped.length ? ` (skipped: ${skipped.join(", ")})` : ""}.`);
 		} else if (skipped.length) {
 			notify(`Could not archive: ${skipped.join(", ")} (already in archive/ or unsaved).`, "error");
@@ -1641,6 +1738,26 @@ export function Docs() {
 	/** Whether a list has anything to show: while filtering, one that has nothing is left out, heading and all. */
 	const has = (...groups: DocFile["group"][]) => !filtering() || shown().some((d) => groups.includes(d.group));
 	const visibleSelectablePaths = createMemo(() => shown().filter(isBulkSelectable).map((d) => d.path));
+	const selectedDocs = createMemo(() => {
+		const sel = selectedPaths();
+		if (!sel.size) return [] as DocFile[];
+		return shown().filter((d) => sel.has(d.path) && isBulkSelectable(d));
+	});
+	// Prune multi-selected paths against currently visible selectable docs (`shown()`) so hidden/filtered docs are never bulk-mutated.
+	createEffect(() => {
+		const valid = new Set(visibleSelectablePaths());
+		setSelectedPaths((prev) => {
+			if (!prev.size) return prev;
+			let changed = false;
+			const next = new Set<string>();
+			for (const p of prev) {
+				if (valid.has(p)) next.add(p);
+				else changed = true;
+			}
+			return changed ? next : prev;
+		});
+		if (anchorPath && !valid.has(anchorPath)) anchorPath = null;
+	});
 	const allVisibleSelected = createMemo(() => {
 		const vis = visibleSelectablePaths();
 		const sel = selectedPaths();

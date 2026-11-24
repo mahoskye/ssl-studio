@@ -54,6 +54,13 @@ export type Imported = {
 
 const KEY_LIKE = /^[A-Za-z][A-Za-z0-9_]*-\d+$|^\d+$/;
 const clean = (text: string | undefined) => (text ?? "").replace(/\r\n/g, "\n").trim();
+/** Validates a ticket `source` URL, rejecting embedded newlines or control characters. */
+function cleanSourceUrl(raw: unknown): string | undefined {
+	if (typeof raw !== "string") return undefined;
+	const trimmed = raw.trim();
+	if (!trimmed || /[\r\n\u0000-\u001f\u007f]/.test(trimmed) || !/^https?:\/\//i.test(trimmed)) return undefined;
+	return trimmed;
+}
 const keysIn = (text: string) =>
 	text
 		.split(/[\s,;|]+/)
@@ -264,7 +271,7 @@ export function ticketsFromTable(table: Table): Imported {
 			...(release ? { release } : {}),
 			...(priority ? { priority } : {}),
 			...(tags.length ? { tags } : {}),
-			source: /^https?:\/\//i.test(at(source)) ? at(source) : undefined,
+			source: cleanSourceUrl(at(source)),
 			parent: above && above.toLowerCase() !== own.toLowerCase() ? above : undefined,
 			related,
 			...(blocks.length ? { blocks } : {}),
@@ -293,8 +300,11 @@ const keyOf = (value: unknown): string => {
  * or its "url" when that is a page and not the API's own address for it.
  */
 const pageOf = (issue: Record<string, unknown>) => {
-	const page = [issue.html_url, issue.url].find((value): value is string => typeof value === "string" && /^https?:\/\//i.test(value) && !/^https?:\/\/api\.|\/rest\/api\/|\/api\/v\d/i.test(value));
-	return page;
+	for (const value of [issue.html_url, issue.url]) {
+		const url = cleanSourceUrl(value);
+		if (url && !/^https?:\/\/api\.|\/rest\/api\/|\/api\/v\d/i.test(url)) return url;
+	}
+	return undefined;
 };
 /** A closed issue that says why it was closed without being done is that, not "closed": not planned, a duplicate. */
 const closedAs = (fields: Record<string, unknown>) => {
@@ -304,8 +314,9 @@ const closedAs = (fields: Record<string, unknown>) => {
 
 /** The page a person opens for a ticket, from the address the API gives for it: ".../rest/api/2/issue/10011" is ".../browse/KEY". */
 const browseLink = (self: unknown, key: string) => {
-	const found = typeof self === "string" ? /^(https?:\/\/.+?)\/rest\/api\/[^/]+\/issue\/[^/]+$/i.exec(self) : null;
-	return found ? `${found[1]}/browse/${key}` : undefined;
+	const safeSelf = cleanSourceUrl(self);
+	const found = safeSelf ? /^(https?:\/\/.+?)\/rest\/api\/[^/]+\/issue\/[^/]+$/i.exec(safeSelf) : null;
+	return found ? cleanSourceUrl(`${found[1]}/browse/${key}`) : undefined;
 };
 
 /**

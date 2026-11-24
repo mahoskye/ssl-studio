@@ -131,7 +131,7 @@ import {
 	type WorkTextOptions,
 } from "../shared/workContext";
 import { finishMarkdown, loadKatex } from "./editor/markdownHtml";
-import { activeDoc, activePath, applyText, canonical, documents, fileRemoved, fileRenamed, notify, openFile, save, saveSetting, setState, state } from "./state";
+import { activeDoc, activePath, applyText, canonical, changingOnDisk, documents, fileRemoved, fileRenamed, notify, openFile, revert, save, saveSetting, setState, state } from "./state";
 
 const today = () => localDay();
 const root = () => state.workspace?.root ?? "";
@@ -160,9 +160,11 @@ const ready = () => (state.workspace && state.project ? true : (notify("Open a f
 /** A file's text as it stands: in the editor if it is open there, on disk otherwise, null when there is no such file. */
 async function current(path: string): Promise<string | null> {
 	const open = documents.get(canonical(path));
-	if (open) return open.model.getValue();
+	if (open?.binary) return null;
+	if (open && !open.model.isDisposed()) return open.model.getValue();
 	try {
-		return (await backend.read(path)).text;
+		const res = await backend.read(path);
+		return res.binary ? null : res.text;
 	} catch {
 		return null;
 	}
@@ -176,9 +178,10 @@ async function current(path: string): Promise<string | null> {
  */
 async function put(path: string, text: string, existed: boolean) {
 	const open = canonical(path);
-	if (documents.get(open)) {
+	const openDoc = documents.get(open);
+	if (openDoc && !openDoc.binary && !openDoc.model.isDisposed()) {
 		const clean = !state.dirty[open];
-		applyText(open, text);
+		if (!applyText(open, text)) throw new Error(`${relativeTo(root(), path)} could not be updated in the editor.`);
 		// A save that fails has said why; whoever asked for the write is told it was not made.
 		if (clean && !(await save(open))) throw new Error(`${relativeTo(root(), path)} was changed in the editor and could not be saved.`);
 		return;
@@ -361,27 +364,30 @@ export async function newTicket(known?: string, related?: string, options?: { pa
 /** Promotes a flat ticket (`docs/tickets/LIMS-123.md`) into a self-contained ticket bundle folder (`docs/tickets/LIMS-123/LIMS-123.md`). */
 export async function createTicketFolder(ticketPath: string): Promise<string | null> {
 	if (!ready()) return null;
+	const startRoot = root();
 	const clean = canonical(ticketPath);
 	const listed = docs().find((d) => d.exists && d.group === "tickets" && canonical(d.path) === clean);
 	if (listed?.ticketFolder && isInside(listed.ticketFolder, ticketPath)) {
-		notify(`${listed.ticket ?? baseName(ticketPath)} already lives inside its ticket folder (${relativeTo(root(), listed.ticketFolder)}/).`);
+		notify(`${listed.ticket ?? baseName(ticketPath)} already lives inside its ticket folder (${relativeTo(startRoot, listed.ticketFolder)}/).`);
 		return listed.ticketFolder;
 	}
 	const key = listed?.ticket || ticketKey(baseName(ticketPath).replace(/\.(md|markdown)$/i, ""));
 	if (!key) return null;
 	const folderPath = listed?.ticketFolder ?? joinPath(dirName(ticketPath), key);
 	const targetPath = joinPath(folderPath, baseName(ticketPath));
-	const relFolder = relativeTo(root(), folderPath).split("\\").join("/");
+	const relFolder = relativeTo(startRoot, folderPath).split("\\").join("/");
 	const GO = listed?.ticketFolder ? "Move into folder" : "Create folder";
 	const answer = await choose(
 		`Move ${baseName(ticketPath)} into its own ticket folder (${relFolder}/)? Reference docs, code samples, and fixtures placed there stay accessible via Explorer without cluttering the Docs panel.`,
 		[GO],
 	);
 	if (answer !== GO) return null;
+	if (!state.workspace || root() !== startRoot) return null;
 	if (state.dirty[clean]) {
 		const saved = await save(clean);
 		if (!saved) return null;
 	}
+	const beforeDocs = await backend.docs().catch(() => docs().slice());
 	try {
 		await backend.rename(ticketPath, targetPath);
 	} catch (e: any) {
@@ -390,7 +396,11 @@ export async function createTicketFolder(ticketPath: string): Promise<string | n
 	}
 	fileRenamed(ticketPath, targetPath);
 	setState("treeVersion", (v) => v + 1);
-	await followRename(ticketPath, targetPath);
+	try {
+		await followRename(ticketPath, targetPath, beforeDocs);
+	} catch (e: any) {
+		notify(`Moved ${baseName(ticketPath)}, but could not update links: ${e?.message ?? e}`, "error");
+	}
 	notify(`Moved ${baseName(ticketPath)} into ${relFolder}/.`);
 	return folderPath;
 }
@@ -423,11 +433,12 @@ export async function newTicketFile(ticketFolder: string, key: string) {
  */
 export async function importTickets() {
 	if (!ready()) return;
+	const startRoot = root();
 	const exported = /\.(csv|tsv|json)$/i;
 	const open = activePath();
 	// Both spelled the one way the editor spells a path: a drive's letter is lowered there.
 	const notProjectJson = (p: string) => !isPlanPath(p) && !/^(package|tsconfig|jsconfig|settings)\.json$/i.test(baseName(p)) && !canonical(p).includes("/.ssl-studio/");
-	const inFolder = open && exported.test(open) && notProjectJson(open) && !canonical(open).startsWith(canonical(areaFolder("registries"))) ? relativeTo(root(), open) : "";
+	const inFolder = open && exported.test(open) && notProjectJson(open) && !canonical(open).startsWith(canonical(areaFolder("registries"))) ? relativeTo(startRoot, open) : "";
 	let typed: string;
 	let from: string;
 	let text: string | null;
@@ -440,19 +451,22 @@ export async function importTickets() {
 			return notify(String(e?.message ?? e), "error");
 		}
 		if (!picked) return;
+		if (!state.workspace || root() !== startRoot) return;
 		[typed, from, text] = [baseName(picked.path), picked.path, picked.text];
 	} else {
 		typed = (await ask("The exported file (CSV or JSON): its path in this folder, or its whole path anywhere", inFolder))?.trim() ?? "";
 		if (!typed) return;
+		if (!state.workspace || root() !== startRoot) return;
 		// As a person writes a path: in quotes when it was copied, from "~" for their own folder, or up and out of this one.
 		const said = typed.replace(/^(["'])(.*)\1$/, "$2");
 		const home = /^~[\\/]/.test(said);
 		const whole = home || /^([A-Za-z]:[\\/]|\/)/.test(said);
 		// "." and ".." are taken out before asking where it is: "/project/../Downloads" is not in the project.
-		from = home ? said : whole ? resolvePath(said, ".") : resolvePath(root(), said);
-		const inside = !home && isInside(root(), from);
+		from = home ? said : whole ? resolvePath(said, ".") : resolvePath(startRoot, said);
+		const inside = !home && isInside(startRoot, from);
 		// In the folder it is read as the editor has it; anywhere else, from the disk, and the backend says why not.
 		text = inside ? await current(from) : await backend.readExport(from).catch((e: any) => (notify(String(e?.message ?? e), "error"), null));
+		if (!state.workspace || root() !== startRoot) return;
 		if (text === null) return inside ? notify(`${typed} could not be read: there is no such file in this folder.`, "error") : undefined;
 		// From outside the folder it is called by its name: the way there is long, and not the point.
 		if (!inside) typed = baseName(from);
@@ -479,6 +493,7 @@ export async function importTickets() {
 	read = { ...read, tickets: [...once.values()] };
 	// Read fresh docs from backend so a newly pulled/created ticket bundle isn't missed by a debounced cache.
 	const freshDocs = await backend.docs().catch(() => docs());
+	if (!state.workspace || root() !== startRoot) return;
 	const existingByKey = new Map(
 		freshDocs
 			.filter((d) => d.exists && d.group === "tickets" && d.ticket)
@@ -486,6 +501,7 @@ export async function importTickets() {
 	);
 	const path = (ticket: ImportedTicket) => existingByKey.get(ticket.key.toLowerCase()) ?? joinPath(areaFolder("tickets"), `${ticket.key}.md`);
 	const before = await Promise.all(read.tickets.map((ticket) => current(path(ticket))));
+	if (!state.workspace || root() !== startRoot) return;
 	const here = before.filter((was) => was !== null).length;
 	const newCount = read.tickets.length - here;
 	let useFolders = false;
@@ -495,20 +511,25 @@ export async function importTickets() {
 		const said = `${read.tickets.length} ${read.tickets.length === 1 ? "ticket" : "tickets"} in ${typed}: ${newCount} new, ${here} already here. Existing tickets keep your notes; state, title, type, parent, source, and links update.`;
 		const picked = await choose(said, [FOLDERS, SINGLE]);
 		if (!picked) return;
+		if (!state.workspace || root() !== startRoot) return;
 		useFolders = picked === FOLDERS;
 	} else {
 		const go = "Update existing";
 		const said = `${read.tickets.length} ${read.tickets.length === 1 ? "ticket" : "tickets"} in ${typed}: all ${here} already here. Your notes stay; state, title, type, parent, source, and links update.`;
 		if ((await choose(said, [go])) !== go) return;
+		if (!state.workspace || root() !== startRoot) return;
 	}
 	const destPath = (ticket: ImportedTicket) =>
 		existingByKey.get(ticket.key.toLowerCase()) ??
 		(useFolders ? joinPath(areaFolder("tickets"), ticket.key, `${ticket.key}.md`) : joinPath(areaFolder("tickets"), `${ticket.key}.md`));
 	const counts = { made: 0, updated: 0, same: 0, skipped: read.skipped, pulls: read.pulls };
-	try {
-		for (const [at, ticket] of read.tickets.entries()) {
-			const dest = destPath(ticket);
-			const was = before[at] ?? (await current(dest));
+	let failed = 0;
+	for (const ticket of read.tickets) {
+		if (!state.workspace || root() !== startRoot) break;
+		const dest = destPath(ticket);
+		// Always re-read at the resolved destination AFTER confirmation (respecting useFolders and live edits).
+		const was = await current(dest);
+		try {
 			if (was === null) {
 				let fresh = ticketTemplate(ticket);
 				if (ticket.release) fresh = withFrontMatter(fresh, "release", ticket.release) ?? fresh;
@@ -566,12 +587,16 @@ export async function importTickets() {
 				await put(dest, now, true);
 				counts.updated++;
 			}
+		} catch (e: any) {
+			failed++;
+			notify(`Could not import ${ticket.key}: ${e?.message ?? e}`, "error");
 		}
-	} catch (e: any) {
-		notify(String(e?.message ?? e), "error");
 	}
-	setState("treeVersion", (v) => v + 1);
-	notify(importSummary(counts));
+	if (!state.workspace || root() !== startRoot) return;
+	if (counts.made || counts.updated) setState("treeVersion", (v) => v + 1);
+	if (counts.made || counts.updated || counts.same || !failed) {
+		notify(`${importSummary(counts)}${failed ? ` (${failed} failed)` : ""}`);
+	}
 	if (counts.made === 1 && read.tickets.length === 1) await openFile(destPath(read.tickets[0]!));
 }
 
@@ -870,24 +895,36 @@ export async function setStatus(path: string, status: string) {
 			if (!targetDecision) return;
 			const oldStem = baseName(path).replace(/\.(md|markdown)$/i, "");
 			const newStem = baseName(targetDecision.path).replace(/\.(md|markdown)$/i, "");
-			const oldText = await current(path);
-			if (oldText !== null) {
-				const curBy = many(frontMatter(oldText).values["superseded-by"]);
-				const updatedOld = curBy.length
-					? addToFrontMatterList(oldText, "superseded-by", newStem)
-					: withFrontMatter(oldText, "superseded-by", newStem);
-				if (updatedOld && updatedOld !== oldText) await put(path, updatedOld, true);
+			let linked = false;
+			try {
+				const oldText = await current(path);
+				if (oldText !== null) {
+					const curBy = many(frontMatter(oldText).values["superseded-by"]);
+					const updatedOld = curBy.length
+						? addToFrontMatterList(oldText, "superseded-by", newStem)
+						: withFrontMatter(oldText, "superseded-by", newStem);
+					if (updatedOld && updatedOld !== oldText) {
+						await put(path, updatedOld, true);
+						linked = true;
+					}
+				}
+				const targetText = await current(targetDecision.path);
+				if (targetText !== null) {
+					const curSup = many(frontMatter(targetText).values.supersedes);
+					const updatedTarget = curSup.length
+						? addToFrontMatterList(targetText, "supersedes", oldStem)
+						: withFrontMatter(targetText, "supersedes", oldStem);
+					if (updatedTarget && updatedTarget !== targetText) {
+						await put(targetDecision.path, updatedTarget, true);
+						linked = true;
+					}
+				}
+				if (linked) setState("treeVersion", (v) => v + 1);
+				notify(`Linked ${newStem} as superseding ${oldStem}.`);
+			} catch (e: any) {
+				if (linked) setState("treeVersion", (v) => v + 1);
+				notify(`Could not link superseding decision: ${e?.message ?? e}`, "error");
 			}
-			const targetText = await current(targetDecision.path);
-			if (targetText !== null) {
-				const curSup = many(frontMatter(targetText).values.supersedes);
-				const updatedTarget = curSup.length
-					? addToFrontMatterList(targetText, "supersedes", oldStem)
-					: withFrontMatter(targetText, "supersedes", oldStem);
-				if (updatedTarget && updatedTarget !== targetText) await put(targetDecision.path, updatedTarget, true);
-			}
-			setState("treeVersion", (v) => v + 1);
-			notify(`Linked ${newStem} as superseding ${oldStem}.`);
 		} else if (picked === CREATE) {
 			const nextTitle = (await ask(`Title for the decision that supersedes “${decisionDoc.title || baseName(path)}”`))?.trim();
 			if (nextTitle && slug(nextTitle)) {
@@ -902,10 +939,14 @@ export async function setStatus(path: string, status: string) {
 				const ticket = decisionDoc.tickets?.[0] ?? ticketAtHand() ?? undefined;
 				let newBody = decisionTemplate({ title: nextTitle, date: today(), ticket });
 				newBody = withFrontMatter(newBody, "supersedes", oldStem) ?? newBody;
-				const oldText = await current(path);
-				if (oldText !== null) {
-					const updatedOld = withFrontMatter(oldText, "superseded-by", newStem);
-					if (updatedOld && updatedOld !== oldText) await put(path, updatedOld, true);
+				try {
+					const oldText = await current(path);
+					if (oldText !== null) {
+						const updatedOld = withFrontMatter(oldText, "superseded-by", newStem);
+						if (updatedOld && updatedOld !== oldText) await put(path, updatedOld, true);
+					}
+				} catch (e: any) {
+					notify(`Could not update superseded-by on ${baseName(path)}: ${e?.message ?? e}`, "error");
 				}
 				await start(joinPath(folder, `${newStem}.md`), newBody, "knowledge");
 			}
@@ -955,28 +996,56 @@ export async function mendLinks(path: string, mends: readonly LinkMend[]) {
  * link's file part on its line, through the editor where the document is
  * open, so it can be undone there.
  */
+/** Returns the 1-based inclusive line range of a catalog's managed `<!-- catalog --> ... <!-- /catalog -->` block, or null. */
+export function catalogLineRange(text: string): { from: number; to: number } | null {
+	const at = catalogBlock(text);
+	if (!at) return null;
+	return {
+		from: text.slice(0, at.start).split("\n").length,
+		to: text.slice(0, at.end).split("\n").length,
+	};
+}
+
 /**
- * Drops links that sit inside a catalog's managed `<!-- catalog -->` block:
+ * Drops links or wikilinks whose 1-based `line` sits inside a catalog file's managed
+ * `<!-- catalog --> ... <!-- /catalog -->` block (ADR 0031). Matches outside catalog markers
+ * or in non-catalog files are kept intact.
+ */
+export function excludeCatalogBlockMatches<T extends { path: string; line: number }>(
+	items: readonly T[],
+	textByPath: ReadonlyMap<string, string>,
+): T[] {
+	const lists = new Map<string, { from: number; to: number }>();
+	for (const [path, text] of textByPath) {
+		if (!isCatalog({ name: path })) continue;
+		const range = catalogLineRange(text);
+		if (range) lists.set(path, range);
+	}
+	if (!lists.size) return [...items];
+	return items.filter((item) => {
+		const list = lists.get(item.path);
+		return !list || item.line < list.from || item.line > list.to;
+	});
+}
+
+/**
+ * Drops links/wikilinks that sit inside a catalog's managed `<!-- catalog -->` block:
  * under ADR 0031 catalogs are reconciled explicitly via Update catalogs or the
  * Agent, never partially patched during rename/move prompts. Links written by a
  * person outside the catalog markers are still updated normally.
  */
-async function withoutCatalogLists(links: LinkTo[]): Promise<LinkTo[]> {
-	const lists = new Map<string, { from: number; to: number }>();
+async function withoutCatalogLists<T extends { path: string; line: number }>(links: T[]): Promise<T[]> {
+	const textByPath = new Map<string, string>();
 	for (const path of new Set(links.map((link) => link.path))) {
 		if (!isCatalog({ name: path })) continue;
 		try {
 			const text = (await current(path)) ?? (await backend.read(path)).text;
-			const at = catalogBlock(text);
-			if (at) lists.set(path, { from: text.slice(0, at.start).split("\n").length, to: text.slice(0, at.end).split("\n").length });
+			textByPath.set(path, text);
 		} catch {
 			// Not there to read: nothing of it is asked about either way.
 		}
 	}
-	return links.filter((link) => {
-		const list = lists.get(link.path);
-		return !list || link.line < list.from || link.line > list.to;
-	});
+	return excludeCatalogBlockMatches(links, textByPath);
 }
 
 type NormalizedMovePair = { from: string; to: string; fromCanon: string; toCanon: string };
@@ -1343,18 +1412,16 @@ async function followPlanPaths(rawPairs: readonly { from: string; to: string }[]
 	if (!pairs.length) return;
 
 	const allDocs = await backend.docs().catch(() => docs());
+	if (!state.workspace || root() !== wsRoot) return;
 	const planDocs = allDocs.filter((d) => d.exists && isPlanPath(d.path));
 	if (!planDocs.length) return;
 
-	const updates: { path: string; nextText: string; hits: number }[] = [];
-	for (const pDoc of planDocs) {
-		const rawText = await current(pDoc.path);
-		if (rawText === null) continue;
+	const rewritePlanText = (rawText: string, planPath: string): { nextText: string; hits: number } | null => {
 		const parsed = parsePlan(rawText);
-		if (!parsed.plan) continue;
+		if (!parsed.plan) return null;
 		let hits = 0;
 		const plan = parsed.plan;
-		const rewriteRef = (rawRef: string) => rewritePlainPathRef(rawRef, pDoc.path, pairs, wsRoot);
+		const rewriteRef = (rawRef: string) => rewritePlainPathRef(rawRef, planPath, pairs, wsRoot);
 
 		const rewriteEntryList = (list: unknown): unknown => {
 			if (!Array.isArray(list)) return list;
@@ -1447,18 +1514,25 @@ async function followPlanPaths(rawPairs: readonly { from: string; to: string }[]
 			return nodeChanged ? { ...node, docs: nextDocs } : node;
 		});
 
-		if (hits > 0) {
-			const nextPlan = {
-				...plan,
-				...(nextTargets !== undefined ? { targets: nextTargets } : {}),
-				...(nextScripts !== undefined ? { scripts: nextScripts } : {}),
-				...(nextTestScripts !== undefined ? { testScripts: nextTestScripts } : {}),
-				...(nextBuilt !== undefined ? { built: nextBuilt } : {}),
-				nodes: nextNodes,
-			};
-			const nextText = printPlan(nextPlan);
-			if (nextText !== rawText) updates.push({ path: pDoc.path, nextText, hits });
-		}
+		if (hits <= 0) return null;
+		const nextPlan = {
+			...plan,
+			...(nextTargets !== undefined ? { targets: nextTargets } : {}),
+			...(nextScripts !== undefined ? { scripts: nextScripts } : {}),
+			...(nextTestScripts !== undefined ? { testScripts: nextTestScripts } : {}),
+			...(nextBuilt !== undefined ? { built: nextBuilt } : {}),
+			nodes: nextNodes,
+		};
+		const nextText = printPlan(nextPlan);
+		return nextText !== rawText ? { nextText, hits } : null;
+	};
+
+	const updates: { path: string; hits: number }[] = [];
+	for (const pDoc of planDocs) {
+		const rawText = await current(pDoc.path);
+		if (rawText === null) continue;
+		const res = rewritePlanText(rawText, pDoc.path);
+		if (res) updates.push({ path: pDoc.path, hits: res.hits });
 	}
 
 	if (!updates.length) return;
@@ -1468,19 +1542,27 @@ async function followPlanPaths(rawPairs: readonly { from: string; to: string }[]
 	const said = `${totalHits === 1 ? "One path" : `${totalHits} paths`} in ${where} (targets / scripts / node docs) still ${totalHits === 1 ? "points" : "point"} to ${baseName(primary.from)}.`;
 	const go = updates.length === 1 ? "Update plan" : `Update ${updates.length} plans`;
 	if ((await choose(said, [go])) !== go) return;
+	if (!state.workspace || root() !== wsRoot) return;
 
 	let written = 0;
+	let writtenHits = 0;
 	for (const item of updates) {
+		// Re-read current buffer after confirmation so edits made meanwhile are preserved.
+		const freshRaw = await current(item.path);
+		if (freshRaw === null) continue;
+		const fresh = rewritePlanText(freshRaw, item.path);
+		if (!fresh) continue;
 		try {
-			await put(item.path, item.nextText, true);
+			await put(item.path, fresh.nextText, true);
 			written++;
+			writtenHits += fresh.hits;
 		} catch (e: any) {
 			notify(String(e?.message ?? e), "error");
 		}
 	}
 	if (written) {
 		setState("treeVersion", (v) => v + 1);
-		notify(`Updated ${totalHits} ${totalHits === 1 ? "path" : "paths"} in ${written} ${written === 1 ? "plan" : "plans"} for ${baseName(primary.to)}.`);
+		notify(`Updated ${writtenHits} ${writtenHits === 1 ? "path" : "paths"} in ${written} ${written === 1 ? "plan" : "plans"} for ${baseName(primary.to)}.`);
 	}
 }
 
@@ -1506,13 +1588,13 @@ async function followRegistryPaths(
 	}
 	if (!uniqueRegPaths.size) return;
 
-	const updates: { path: string; nextText: string; hits: number }[] = [];
+	const updates: { path: string; hits: number }[] = [];
 	for (const regPath of uniqueRegPaths.values()) {
 		const before = await current(regPath);
 		if (before === null) continue;
 		const res = rewriteRegistryPathsInCsv(before, regPath, pairs, wsRoot);
 		if (res.hits > 0 && res.text !== before) {
-			updates.push({ path: regPath, nextText: res.text, hits: res.hits });
+			updates.push({ path: regPath, hits: res.hits });
 		}
 	}
 	if (!updates.length) return;
@@ -1523,19 +1605,26 @@ async function followRegistryPaths(
 	const said = `${totalHits === 1 ? "One path cell" : `${totalHits} path cells`} in ${where} still ${totalHits === 1 ? "references" : "reference"} ${baseName(primary.from)}. Status and notes will be preserved.`;
 	const go = updates.length === 1 ? "Update registry" : `Update ${updates.length} registries`;
 	if ((await choose(said, [go])) !== go) return;
+	if (!state.workspace || root() !== wsRoot) return;
 
 	let written = 0;
+	let writtenHits = 0;
 	for (const item of updates) {
+		const freshBefore = await current(item.path);
+		if (freshBefore === null) continue;
+		const res = rewriteRegistryPathsInCsv(freshBefore, item.path, pairs, wsRoot);
+		if (res.hits <= 0 || res.text === freshBefore) continue;
 		try {
-			await put(item.path, item.nextText, true);
+			await put(item.path, res.text, true);
 			written++;
+			writtenHits += res.hits;
 		} catch (e: any) {
 			notify(String(e?.message ?? e), "error");
 		}
 	}
 	if (written) {
 		setState("treeVersion", (v) => v + 1);
-		notify(`Updated ${totalHits} ${totalHits === 1 ? "path cell" : "path cells"} in ${written} ${written === 1 ? "registry" : "registries"} for ${baseName(primary.to)}.`);
+		notify(`Updated ${writtenHits} ${writtenHits === 1 ? "path cell" : "path cells"} in ${written} ${written === 1 ? "registry" : "registries"} for ${baseName(primary.to)}.`);
 	}
 }
 
@@ -1563,36 +1652,43 @@ async function followCodeCommentLinks(
 	}
 	if (!byFile.size) return;
 
-	const updates: { path: string; nextText: string; hits: number }[] = [];
+	const updates: { path: string; hits: { link: LinkTo; pair: NormalizedMovePair }[]; count: number }[] = [];
 	for (const bucket of byFile.values()) {
 		const before = await current(bucket.path);
 		if (before === null) continue;
 		const res = rewriteCodeCommentPaths(before, bucket.path, bucket.hits, wsRoot);
 		if (res.done > 0 && res.text !== before) {
-			updates.push({ path: bucket.path, nextText: res.text, hits: res.done });
+			updates.push({ path: bucket.path, hits: bucket.hits, count: res.done });
 		}
 	}
 	if (!updates.length) return;
 
-	const totalHits = updates.reduce((sum, u) => sum + u.hits, 0);
+	const totalHits = updates.reduce((sum, u) => sum + u.count, 0);
 	const primary = pairs[0]!;
 	const where = updates.length === 1 ? relativeTo(wsRoot, updates[0]!.path) : `${updates.length} code files`;
 	const said = `${totalHits === 1 ? "One comment link" : `${totalHits} comment links`} in ${where} still ${totalHits === 1 ? "references" : "reference"} ${baseName(primary.from)}. Only comment lines will be edited.`;
 	const go = updates.length === 1 ? "Update comment" : `Update ${totalHits} comments`;
 	if ((await choose(said, [go])) !== go) return;
+	if (!state.workspace || root() !== wsRoot) return;
 
 	let written = 0;
+	let writtenHits = 0;
 	for (const item of updates) {
+		const freshBefore = await current(item.path);
+		if (freshBefore === null) continue;
+		const res = rewriteCodeCommentPaths(freshBefore, item.path, item.hits, wsRoot);
+		if (res.done <= 0 || res.text === freshBefore) continue;
 		try {
-			await put(item.path, item.nextText, true);
+			await put(item.path, res.text, true);
 			written++;
+			writtenHits += res.done;
 		} catch (e: any) {
 			notify(String(e?.message ?? e), "error");
 		}
 	}
 	if (written) {
 		setState("treeVersion", (v) => v + 1);
-		notify(`Updated ${totalHits} ${totalHits === 1 ? "comment reference" : "comment references"} across ${written} ${written === 1 ? "file" : "files"} for ${baseName(primary.to)}.`);
+		notify(`Updated ${writtenHits} ${writtenHits === 1 ? "comment reference" : "comment references"} across ${written} ${written === 1 ? "file" : "files"} for ${baseName(primary.to)}.`);
 	}
 }
 
@@ -1624,7 +1720,7 @@ export async function followRename(from: string, to: string, beforeDocs?: DocFil
 	}
 
 	await followPaths(coMoved?.length ? allPairs : from, to, preloadedByPair);
-	await followNames(from, to, listed);
+	await followNames(allPairs, listed);
 	await followPlanPaths(allPairs);
 	await followRegistryPaths(allPairs, registryHits);
 	await followCodeCommentLinks(allPairs, codeHits);
@@ -1638,12 +1734,29 @@ export async function followRename(from: string, to: string, beforeDocs?: DocFil
  * is written anew, through the editor where the document is open. `listed`
  * is the project's documents as they were in hand when the rename was made.
  */
-async function followNames(from: string, to: string, listed: DocFile[]) {
-	if (!state.workspace) return;
-	const was = canonical(from);
-	const is = canonical(to);
+async function followNames(rawPairs: readonly { from: string; to: string }[], listed: DocFile[]) {
+	if (!state.workspace || !rawPairs.length) return;
+	const wsRoot = root();
+	const pairs = normalizeMovePairs(rawPairs);
+	if (!pairs.length) return;
+	const primary = { from: rawPairs[0]!.from, to: rawPairs[0]!.to };
+	const was = canonical(primary.from);
+	const is = canonical(primary.to);
 	const under = (path: string, base: string) => path === base || (isInside(base, path) && path.length > base.length);
-	const moved = (path: string) => (under(path, was) ? is + path.slice(was.length) : path);
+	const moved = (path: string) => {
+		for (const p of pairs) {
+			if (under(path, p.fromCanon)) return p.toCanon + path.slice(p.fromCanon.length);
+		}
+		return path;
+	};
+	const pairsByTo = [...pairs].sort((a, b) => b.toCanon.length - a.toCanon.length);
+	const unmoved = (path: string) => {
+		for (const p of pairsByTo) {
+			if (under(path, p.toCanon)) return p.fromCanon + path.slice(p.toCanon.length);
+		}
+		return path;
+	};
+	const anyUnderFrom = (files: readonly DocFile[]) => files.some((file) => pairs.some((p) => under(file.path, p.fromCanon)));
 	// The documents as they are now are asked for: what a document is called, and whether it is still one of the
 	// project's, can change with where it is. As they were is the list that was in hand, where that is of before
 	// the rename; where it was already of after, it is the new one with the moved paths put back, which knows the
@@ -1654,46 +1767,67 @@ async function followNames(from: string, to: string, listed: DocFile[]) {
 	} catch {
 		return;
 	}
-	const before = listed.some((file) => under(file.path, was)) ? listed : after.map((file) => (under(file.path, is) ? { ...file, path: was + file.path.slice(is.length) } : file));
+	if (!state.workspace || root() !== wsRoot) return;
+	const before = anyUnderFrom(listed)
+		? listed
+		: after.map((file) => {
+				const orig = unmoved(file.path);
+				return orig !== file.path ? { ...file, path: orig } : file;
+			});
 	let places: NameIn[];
 	try {
 		places = (await backend.namesIn()).map((place) => ({ ...place, path: canonical(place.path) }));
 	} catch {
 		return;
 	}
-	const follow: (NameIn & { instead: string })[] = before.some((file) => under(file.path, was))
-		? namesToFollow(places, before, after, moved, root())
+	if (!state.workspace || root() !== wsRoot) return;
+	// Respect ADR 0031: never rewrite wikilinks inside managed `<!-- catalog --> ... <!-- /catalog -->` blocks.
+	places = await withoutCatalogLists(places);
+	const follow: (NameIn & { instead: string })[] = anyUnderFrom(before)
+		? namesToFollow(places, before, after, moved, wsRoot)
 		: [];
 
-	// Also rewrite non-doc wikilink/embed references such as `![[old.png]]` or `![[samples/old.sql]]`.
+	// Also rewrite non-doc wikilink/embed references such as `![[old.png]]` or `![[samples/old.sql]]` across all co-moved pairs.
 	const seenFollow = new Set(follow.map((p) => `${p.path}:${p.line}:${p.column}`));
-	const oldBase = baseName(was);
-	const newBase = baseName(is);
-	const wsRoot = root();
 	for (const place of places) {
 		const key = `${place.path}:${place.line}:${place.column}`;
 		if (seenFollow.has(key)) continue;
 		const raw = place.name.replace(/\\/g, "/").trim();
 		if (!raw) continue;
+		const placeOrigPath = unmoved(place.path);
+		const placeOrigDir = dirName(placeOrigPath);
+		const placeCurDir = dirName(place.path);
 		let instead: string | null = null;
 		if (raw.includes("/")) {
 			const cleanRaw = raw.replace(/^\.\//, "");
-			const candDoc = canonical(resolvePath(dirName(place.path), cleanRaw));
+			const candDoc = canonical(resolvePath(placeOrigDir, cleanRaw));
 			const candRoot = canonical(resolvePath(wsRoot, cleanRaw.replace(/^\/+/, "")));
-			if (under(candDoc, was)) {
+			const hitDoc = pairs.find((p) => under(candDoc, p.fromCanon));
+			const hitRoot = !hitDoc ? pairs.find((p) => under(candRoot, p.fromCanon)) : undefined;
+			if (hitDoc) {
 				const destPath = moved(candDoc);
-				const rel = relativePath(dirName(place.path), destPath).split("\\").join("/");
+				const rel = relativePath(placeCurDir, destPath).split("\\").join("/");
 				instead = raw.startsWith("./") && !rel.startsWith(".") ? `./${rel}` : rel;
-			} else if (under(candRoot, was)) {
+			} else if (hitRoot) {
 				const destPath = moved(candRoot);
 				const rel = relativeTo(wsRoot, destPath).split("\\").join("/");
 				instead = raw.startsWith("/") ? `/${rel}` : rel;
+			} else if (canonical(placeOrigDir) !== canonical(placeCurDir) && /^\.{1,2}\//.test(raw)) {
+				const rel = relativePath(placeCurDir, candDoc).split("\\").join("/");
+				instead = raw.startsWith("./") && !rel.startsWith(".") ? `./${rel}` : rel;
 			}
-		} else if (raw.toLowerCase() === oldBase.toLowerCase() && ((place as NameIn & { embed?: boolean }).embed || /\.[a-z0-9]{1,8}$/i.test(oldBase))) {
-			if (oldBase.toLowerCase() !== newBase.toLowerCase()) {
-				instead = newBase;
-			} else if (canonical(dirName(was)) === canonical(dirName(place.path)) && canonical(dirName(is)) !== canonical(dirName(place.path))) {
-				instead = relativePath(dirName(place.path), is).split("\\").join("/");
+		} else {
+			for (const p of pairs) {
+				const oldBase = baseName(p.fromCanon);
+				const newBase = baseName(p.toCanon);
+				if (raw.toLowerCase() !== oldBase.toLowerCase()) continue;
+				if (!((place as NameIn & { embed?: boolean }).embed || /\.[a-z0-9]{1,8}$/i.test(oldBase))) continue;
+				if (oldBase.toLowerCase() !== newBase.toLowerCase()) {
+					instead = newBase;
+				} else if (canonical(dirName(p.fromCanon)) === canonical(placeOrigDir) && canonical(dirName(p.toCanon)) !== canonical(placeCurDir)) {
+					instead = relativePath(placeCurDir, p.toCanon).split("\\").join("/");
+				}
+				break;
 			}
 		}
 		if (instead && instead !== place.name) {
@@ -1704,10 +1838,10 @@ async function followNames(from: string, to: string, listed: DocFile[]) {
 
 	if (follow.length) {
 		const holders = [...new Set(follow.map((place) => place.path))];
-		const where = holders.length === 1 ? relativeTo(root(), holders[0]!) : `${holders.length} documents`;
-		const said = `${follow.length === 1 ? "One link by name" : `${follow.length} links by name`} in ${where} no longer ${follow.length === 1 ? "means what it" : "mean what they"} meant, now that ${baseName(from)} is ${baseName(from) === baseName(to) ? `in ${relativeTo(root(), dirName(to)) || "the project's folder"}` : baseName(to)}.`;
+		const where = holders.length === 1 ? relativeTo(wsRoot, holders[0]!) : `${holders.length} documents`;
+		const said = `${follow.length === 1 ? "One link by name" : `${follow.length} links by name`} in ${where} no longer ${follow.length === 1 ? "means what it" : "mean what they"} meant, now that ${baseName(primary.from)} is ${baseName(primary.from) === baseName(primary.to) ? `in ${relativeTo(wsRoot, dirName(primary.to)) || "the project's folder"}` : baseName(primary.to)}.`;
 		const go = follow.length === 1 ? "Update it" : "Update them";
-		if ((await choose(said, [go])) === go) {
+		if ((await choose(said, [go])) === go && state.workspace && root() === wsRoot) {
 			let done = 0;
 			for (const path of holders) {
 				const text = await current(path);
@@ -1725,7 +1859,7 @@ async function followNames(from: string, to: string, listed: DocFile[]) {
 				}
 			}
 			setState("treeVersion", (v) => v + 1);
-			if (done) notify(`${done} ${done === 1 ? "link by name was" : "links by name were"} written anew for ${baseName(to)}.`);
+			if (done) notify(`${done} ${done === 1 ? "link by name was" : "links by name were"} written anew for ${baseName(primary.to)}.`);
 			const left = follow.length - done;
 			if (left > 0) notify(`${left} of them ${left === 1 ? "is" : "are"} not where ${left === 1 ? "it was" : "they were"}: the document has changed since. Mend ${left === 1 ? "it" : "them"} in the text.`, "error");
 		}
@@ -1735,10 +1869,10 @@ async function followNames(from: string, to: string, listed: DocFile[]) {
 	const movedDecision =
 		before.find((file) => file.path === was && file.group === "knowledge" && file.kind === "decisions") ??
 		after.find((file) => file.path === is && file.group === "knowledge" && file.kind === "decisions");
-	const oldStem = oldBase.replace(/\.(md|markdown)$/i, "");
-	const newStem = newBase.replace(/\.(md|markdown)$/i, "");
+	const oldStem = baseName(was).replace(/\.(md|markdown)$/i, "");
+	const newStem = baseName(is).replace(/\.(md|markdown)$/i, "");
 	if (movedDecision && oldStem && newStem && oldStem.toLowerCase() !== newStem.toLowerCase()) {
-		const decisionUpdates: { path: string; next: string }[] = [];
+		const decisionTargets: string[] = [];
 		for (const doc of after) {
 			if (!doc.exists || doc.group !== "knowledge" || doc.kind !== "decisions" || doc.path === is || isCatalog(doc)) continue;
 			const text = await current(doc.path);
@@ -1747,17 +1881,24 @@ async function followNames(from: string, to: string, listed: DocFile[]) {
 			for (const field of ["supersedes", "superseded-by"]) {
 				next = replaceInFrontMatterList(next, field, oldStem, newStem) ?? next;
 			}
-			if (next !== text) decisionUpdates.push({ path: doc.path, next });
+			if (next !== text) decisionTargets.push(doc.path);
 		}
-		if (decisionUpdates.length) {
-			const count = decisionUpdates.length;
+		if (decisionTargets.length) {
+			const count = decisionTargets.length;
 			const go = count === 1 ? "Update decision link" : `Update ${count} decisions`;
 			const said = `${count === 1 ? "One decision" : `${count} decisions`} still ${count === 1 ? "references" : "reference"} ${oldStem} in supersedes / superseded-by frontmatter.`;
-			if ((await choose(said, [go])) === go) {
+			if ((await choose(said, [go])) === go && state.workspace && root() === wsRoot) {
 				let updatedCount = 0;
-				for (const item of decisionUpdates) {
+				for (const targetPath of decisionTargets) {
+					const freshText = await current(targetPath);
+					if (freshText === null) continue;
+					let next = freshText;
+					for (const field of ["supersedes", "superseded-by"]) {
+						next = replaceInFrontMatterList(next, field, oldStem, newStem) ?? next;
+					}
+					if (next === freshText) continue;
 					try {
-						await put(item.path, item.next, true);
+						await put(targetPath, next, true);
 						updatedCount++;
 					} catch (e: any) {
 						notify(String(e?.message ?? e), "error");
@@ -1812,8 +1953,8 @@ export function diffCatalogLines(existingText: string, expectedItems: readonly C
 }
 
 /** Builds a concise summary prompt for Agent-assisted catalog reconciliation (ADR 0031), including missing catalogs. */
-export function staleCatalogSummary(): { stale: DocFile[]; missing: string[]; prompt: string } {
-	const all = docs();
+export function staleCatalogSummary(files?: readonly DocFile[]): { stale: DocFile[]; missing: string[]; prompt: string } {
+	const all = files ?? docs();
 	const areas = CATALOG_AREAS.filter((area) => area !== "schema" || folderParts(state.project?.schema ?? "schema").length > 0);
 	const stale = all.filter((d) => d.exists && d.catalog?.stale);
 	const missingChecks = docChecks(all, areas).filter((c) => c.fix?.kind === "catalogs" && c.text.includes("no catalog"));
@@ -2150,6 +2291,7 @@ export async function unlinkDocumentFromTicket(ticketPath: string, key: string, 
 /** Links an unlinked spec, decision, question, reference note, or schema doc to a chosen ticket. */
 export async function linkNonTicketToTicket(docPath: string): Promise<void> {
 	if (!ready()) return;
+	const startRoot = root();
 	const before = await current(docPath);
 	if (before === null) return;
 	const fm = frontMatter(before);
@@ -2171,25 +2313,37 @@ export async function linkNonTicketToTicket(docPath: string): Promise<void> {
 		})),
 	});
 	if (!ticket?.ticket) return;
-	let next: string | null = before;
-	if (existingMulti.length) next = addToFrontMatterList(before, "tickets", ticket.ticket);
-	else if (existingSingle.length) {
-		const merged = [...new Set([...existingSingle, ticket.ticket])];
-		let cleared = before;
-		for (const prev of existingSingle) cleared = removeFromFrontMatterList(cleared, "ticket", prev) ?? cleared;
+	if (!state.workspace || root() !== startRoot) return;
+	// Re-read current buffer after modal so edits made meanwhile are preserved.
+	const fresh = await current(docPath);
+	if (fresh === null) return;
+	const freshFm = frontMatter(fresh);
+	const freshSingle = many(freshFm.values.ticket);
+	const freshMulti = many(freshFm.values.tickets);
+	let next: string | null = fresh;
+	if (freshMulti.length) next = addToFrontMatterList(fresh, "tickets", ticket.ticket);
+	else if (freshSingle.length) {
+		const merged = [...new Set([...freshSingle, ticket.ticket])];
+		let cleared = fresh;
+		for (const prev of freshSingle) cleared = removeFromFrontMatterList(cleared, "ticket", prev) ?? cleared;
 		next = cleared;
 		for (const t of merged) next = addToFrontMatterList(next, "tickets", t) ?? next;
-	} else next = withFrontMatter(before, "ticket", ticket.ticket);
-	if (next && next !== before) {
-		await put(docPath, next, true);
-		setState("treeVersion", (v) => v + 1);
-		notify(`Linked ${baseName(docPath)} to ${ticket.ticket}.`);
+	} else next = withFrontMatter(fresh, "ticket", ticket.ticket);
+	if (next && next !== fresh) {
+		try {
+			await put(docPath, next, true);
+			setState("treeVersion", (v) => v + 1);
+			notify(`Linked ${baseName(docPath)} to ${ticket.ticket}.`);
+		} catch (e: any) {
+			notify(String(e?.message ?? e), "error");
+		}
 	}
 }
 
 /** Appends a new row to a chosen CSV registry pre-filled with `key` in its Ticket column (adding a `ticket` column if missing). */
 export async function addRegistryRowForTicket(key: string, initialItem?: string): Promise<void> {
 	if (!ready()) return;
+	const startRoot = root();
 	const regs = docs().filter((d) => d.exists && d.group === "registries" && !isCatalog(d) && /\.(csv|tsv)$/i.test(d.name));
 	if (!regs.length) return notify("No CSV registries exist yet. Create one from Docs -> New -> New registry….");
 	const reg =
@@ -2207,6 +2361,7 @@ export async function addRegistryRowForTicket(key: string, initialItem?: string)
 					})),
 				});
 	if (!reg) return;
+	if (!state.workspace || root() !== startRoot) return;
 	const text = await current(reg.path);
 	if (text === null) return;
 	const table = parseCsv(text);
@@ -2218,16 +2373,23 @@ export async function addRegistryRowForTicket(key: string, initialItem?: string)
 		if ((await choose(`${reg.name} has no "ticket" column yet, so a new row wouldn't link to ${key}. Add a "ticket" column first?`, [ADD_COL])) !== ADD_COL) {
 			return;
 		}
+		if (!state.workspace || root() !== startRoot) return;
 		addTicketCol = true;
 	}
 	const firstCol = table.header[0]!.text.trim() || "item";
 	const name = (await ask(`New ${firstCol} for ${key} in ${reg.name}`, initialItem ?? ""))?.trim();
 	if (!name) return;
-	const nl = text.includes("\r\n") ? "\r\n" : "\n";
-	let nextText = text;
-	if (addTicketCol) {
-		const headerVals = [...table.header.map((h) => h.text), "ticket"];
-		const dataLines = table.rows.map((r) => csvRow([...r.map((c) => c.text), ""], table.delimiter));
+	if (!state.workspace || root() !== startRoot) return;
+	// Re-read current CSV after user prompts so edits made meanwhile are preserved.
+	const freshText = await current(reg.path);
+	if (freshText === null) return;
+	const freshTable = parseCsv(freshText);
+	if (!freshTable.header.length) return notify(`${reg.name} has no header row.`, "error");
+	const nl = freshText.includes("\r\n") ? "\r\n" : "\n";
+	let nextText = freshText;
+	if (addTicketCol && ticketColumn(freshTable) < 0) {
+		const headerVals = [...freshTable.header.map((h) => h.text), "ticket"];
+		const dataLines = freshTable.rows.map((r) => csvRow([...r.map((c) => c.text), ""], freshTable.delimiter));
 		const newRow = headerVals.map((h, idx) => {
 			const col = h.trim().toLowerCase();
 			if (idx === 0) return name;
@@ -2235,22 +2397,26 @@ export async function addRegistryRowForTicket(key: string, initialItem?: string)
 			if (col === "status") return "found";
 			return "";
 		});
-		nextText = [csvRow(headerVals, table.delimiter), ...dataLines, csvRow(newRow, table.delimiter)].join(nl) + nl;
+		nextText = [csvRow(headerVals, freshTable.delimiter), ...dataLines, csvRow(newRow, freshTable.delimiter)].join(nl) + nl;
 	} else {
-		const row = table.header.map((h, idx) => {
+		const row = freshTable.header.map((h, idx) => {
 			const col = h.text.trim().toLowerCase();
 			if (idx === 0) return name;
 			if (col === "ticket" || col === "tickets") return key;
 			if (col === "status") return "found";
 			return "";
 		});
-		const prefix = text && !/\r?\n$/.test(text) ? nl : "";
-		nextText = `${text}${prefix}${csvRow(row, table.delimiter)}${nl}`;
+		const prefix = freshText && !/\r?\n$/.test(freshText) ? nl : "";
+		nextText = `${freshText}${prefix}${csvRow(row, freshTable.delimiter)}${nl}`;
 	}
-	await put(reg.path, nextText, true);
-	setState("treeVersion", (v) => v + 1);
-	notify(`Added “${name}” to ${reg.name} for ${key}.`);
-	await openFile(reg.path);
+	try {
+		await put(reg.path, nextText, true);
+		setState("treeVersion", (v) => v + 1);
+		notify(`Added “${name}” to ${reg.name} for ${key}.`);
+		await openFile(reg.path);
+	} catch (e: any) {
+		notify(String(e?.message ?? e), "error");
+	}
 }
 
 /** Saves any dirty open editor buffers matching `target` (or inside `target` when it is a folder) before a filesystem move. Returns false if any save failed or was cancelled. */
@@ -2290,6 +2456,7 @@ function replaceTicketKeyInCsv(text: string, oldKey: string, newKey: string): st
 /** Bundle-aware ticket trash: handles Layout 1 (`KEY/KEY.md`), Layout 2 (`KEY.md` + sibling `KEY/`), and incoming link checks. */
 export async function trashTicket(file: DocFile): Promise<void> {
 	if (!ready()) return;
+	const startRoot = root();
 	const clearActiveIfMatching = async () => {
 		if (file.ticket && state.settings.activeTicket?.trim().toLowerCase() === file.ticket.toLowerCase()) {
 			await saveSetting({ activeTicket: null }, "workspace");
@@ -2300,11 +2467,14 @@ export async function trashTicket(file: DocFile): Promise<void> {
 	if (!file.ticketFolder) {
 		await (await import("./panels/Explorer")).trashFile(file.path);
 		const stillExists = await backend.read(file.path).then(() => true, () => false);
-		if (!stillExists) await clearActiveIfMatching();
+		if (!stillExists) {
+			await clearActiveIfMatching().catch(() => {});
+			setState("treeVersion", (v) => v + 1);
+		}
 		return;
 	}
 	const folder = file.ticketFolder;
-	const relFolder = relativeTo(root(), folder).split("\\").join("/");
+	const relFolder = relativeTo(startRoot, folder).split("\\").join("/");
 	const count = file.ticketFileCount ?? file.ticketFiles?.length ?? 0;
 	const allDocs = docs();
 	const isSelf = (p: string) => canonical(p) === canonical(file.path) || isInside(canonical(folder), canonical(p));
@@ -2313,11 +2483,12 @@ export async function trashTicket(file: DocFile): Promise<void> {
 		backend.linksTo(folder).catch(() => []),
 		backend.namesIn().catch(() => []),
 	]);
+	if (!state.workspace || root() !== startRoot) return;
 	const outsideRefs = new Set<string>();
 	for (const l of [...incomingDoc, ...incomingFolder]) {
 		if (!isCatalog({ name: l.path }) && !isSelf(l.path)) outsideRefs.add(canonical(l.path));
 	}
-	const nameIdx = buildDocNameIndex(allDocs, root());
+	const nameIdx = buildDocNameIndex(allDocs, startRoot);
 	for (const n of allNames) {
 		if (isSelf(n.path)) continue;
 		const resolved = lookupInIndex(n.name, nameIdx);
@@ -2339,27 +2510,36 @@ export async function trashTicket(file: DocFile): Promise<void> {
 		{ danger: TRASH_ALL },
 	);
 	if (!picked) return;
+	if (!state.workspace || root() !== startRoot) return;
 	const { retargetScopedFolder } = await import("./panels/Explorer");
+	let primaryTrashed = false;
 	try {
 		if (picked === TRASH_ALL) {
 			if (isLayout2) {
 				await backend.trash(file.path);
 				fileRemoved(file.path);
+				primaryTrashed = true;
 			}
 			await backend.trash(folder);
 			fileRemoved(folder);
+			primaryTrashed = true;
 			retargetScopedFolder(folder, null);
-			await clearActiveIfMatching();
+			await clearActiveIfMatching().catch(() => {});
 			setState("treeVersion", (v) => v + 1);
 			notify(`Moved ${isLayout2 ? `${baseName(file.path)} and ` : ""}${relFolder}/ to the trash.`);
 		} else {
 			await backend.trash(file.path);
 			fileRemoved(file.path);
-			await clearActiveIfMatching();
+			primaryTrashed = true;
+			await clearActiveIfMatching().catch(() => {});
 			setState("treeVersion", (v) => v + 1);
-			notify(`Moved ${relativeTo(root(), file.path)} to the trash.`);
+			notify(`Moved ${relativeTo(startRoot, file.path)} to the trash.`);
 		}
 	} catch (e: any) {
+		if (primaryTrashed) {
+			await clearActiveIfMatching().catch(() => {});
+			setState("treeVersion", (v) => v + 1);
+		}
 		notify(String(e?.message ?? e), "error");
 	}
 }
@@ -2367,6 +2547,7 @@ export async function trashTicket(file: DocFile): Promise<void> {
 /** Bundle-aware ticket key rename (`TEMP-1` -> `LIMS-456`): handles Layout 1, Layout 2, and flat tickets; updates wikilinks, paths, plans, and CSV ticket cells. */
 export async function renameTicket(file: DocFile): Promise<void> {
 	if (!ready()) return;
+	const startRoot = root();
 	const oldKey = file.ticket;
 	if (!oldKey) {
 		await (await import("./panels/Explorer")).renameFile(file.path);
@@ -2375,13 +2556,15 @@ export async function renameTicket(file: DocFile): Promise<void> {
 	const typed = (await ask(`Rename ticket key ${oldKey} to`, oldKey))?.trim();
 	const newKey = ticketKey(typed ?? "");
 	if (!newKey || newKey === oldKey) return;
+	if (!state.workspace || root() !== startRoot) return;
 
 	const beforeDocs = await backend.docs();
+	if (!state.workspace || root() !== startRoot) return;
 	const duplicate = beforeDocs.find(
 		(d) => d.exists && d.group === "tickets" && d.ticket?.toLowerCase() === newKey.toLowerCase() && canonical(d.path) !== canonical(file.path),
 	);
 	if (duplicate) {
-		notify(`Ticket ${newKey} already exists at ${relativeTo(root(), duplicate.path)}.`, "error");
+		notify(`Ticket ${newKey} already exists at ${relativeTo(startRoot, duplicate.path)}.`, "error");
 		return;
 	}
 
@@ -2454,8 +2637,19 @@ export async function renameTicket(file: DocFile): Promise<void> {
 				fileRenamed(file.path, toPath);
 			}
 		}
+	} catch (e: any) {
+		setState("treeVersion", (v) => v + 1);
+		notify(String(e?.message ?? e), "error");
+		return;
+	}
 
-		// Update `ticket:` frontmatter + body-only H1 BEFORE `followRename` so `followNames` detects `[[OLD]]` -> `[[NEW]]`.
+	// Always update activeTicket right after rename succeeds so follow-up errors/cancels never leave it stale.
+	if (state.settings.activeTicket?.trim().toLowerCase() === oldKey.toLowerCase()) {
+		await saveSetting({ activeTicket: newKey }, "workspace").catch(() => {});
+	}
+
+	// Update `ticket:` frontmatter + body-only H1 BEFORE `followRename` so `followNames` detects `[[OLD]]` -> `[[NEW]]`.
+	try {
 		const selfText = await current(toPath);
 		if (selfText !== null) {
 			let updated = withFrontMatter(selfText, "ticket", newKey) ?? selfText;
@@ -2466,61 +2660,98 @@ export async function renameTicket(file: DocFile): Promise<void> {
 			updated = head + bodyText.replace(h1Re, (_, prefix: string) => `${prefix}${newKey}`);
 			if (updated !== selfText) await put(toPath, updated, true);
 		}
+	} catch (e: any) {
+		notify(`Renamed file, but could not update header in ${baseName(toPath)}: ${e?.message ?? e}`, "error");
+	}
 
-		// Follow incoming file path links & [[wikilinks]] atomically with all co-moved bundle paths so intra-bundle links stay intact.
-		const coMoved = oldFolder && newFolder && canonical(oldFolder) !== canonical(newFolder) ? [{ from: oldFolder, to: newFolder }] : undefined;
+	// Follow incoming file path links & [[wikilinks]] atomically with all co-moved bundle paths so intra-bundle links stay intact.
+	const coMoved = oldFolder && newFolder && canonical(oldFolder) !== canonical(newFolder) ? [{ from: oldFolder, to: newFolder }] : undefined;
+	try {
 		await followRename(file.path, toPath, beforeDocs, coMoved);
+	} catch (e: any) {
+		notify(`Renamed ${oldKey} to ${newKey}, but could not follow some links: ${e?.message ?? e}`, "error");
+	}
 
-		// Refactor ticket key references in other Markdown docs, plans, and CSV registries (Ticket column only!).
-		let refactored = 0;
-		for (const doc of beforeDocs) {
-			if (!doc.exists || canonical(doc.path) === canonical(file.path) || isCatalog(doc)) continue;
-			const docPath =
-				oldFolder && newFolder && isInside(canonical(oldFolder), canonical(doc.path))
-					? joinPath(newFolder, relativeTo(oldFolder, doc.path))
-					: doc.path;
-			const text = await current(docPath);
-			if (text === null) continue;
-			if (doc.group === "plans" && isPlanPath(docPath)) {
-				const parsed = parsePlan(text);
-				if (parsed.plan && typeof parsed.plan.ticket === "string" && parsed.plan.ticket.toLowerCase() === oldKey.toLowerCase()) {
-					await put(docPath, printPlan({ ...parsed.plan, ticket: newKey }), true);
-					refactored++;
+	// Collect candidate ticket key refactoring edits across Markdown docs, plans, and CSV registries (Ticket column only!).
+	const candidates: { docPath: string; kind: "plan" | "registry" | "markdown" }[] = [];
+	for (const doc of beforeDocs) {
+		if (!doc.exists || canonical(doc.path) === canonical(file.path) || isCatalog(doc)) continue;
+		const docPath =
+			oldFolder && newFolder && isInside(canonical(oldFolder), canonical(doc.path))
+				? joinPath(newFolder, relativeTo(oldFolder, doc.path))
+				: doc.path;
+		const text = await current(docPath);
+		if (text === null) continue;
+		if (doc.group === "plans" && isPlanPath(docPath)) {
+			const parsed = parsePlan(text);
+			if (parsed.plan && typeof parsed.plan.ticket === "string" && parsed.plan.ticket.toLowerCase() === oldKey.toLowerCase()) {
+				candidates.push({ docPath, kind: "plan" });
+			}
+		} else if (doc.group === "registries" && /\.(csv|tsv)$/i.test(doc.name)) {
+			const next = replaceTicketKeyInCsv(text, oldKey, newKey);
+			if (next !== text) candidates.push({ docPath, kind: "registry" });
+		} else if (isMarkdown(docPath)) {
+			let next = text;
+			for (const field of ["ticket", "tickets", "parent", "related", "blocks", "blocked-by"]) {
+				next = replaceInFrontMatterList(next, field, oldKey, newKey) ?? next;
+			}
+			if (next !== text) candidates.push({ docPath, kind: "markdown" });
+		}
+	}
+
+	let refactored = 0;
+	if (candidates.length && state.workspace && root() === startRoot) {
+		const preview =
+			candidates
+				.slice(0, 4)
+				.map((c) => relativeTo(startRoot, c.docPath).split("\\").join("/"))
+				.join(", ") + (candidates.length > 4 ? ` and ${candidates.length - 4} more` : "");
+		const GO = candidates.length === 1 ? "Update reference" : `Update ${candidates.length} files`;
+		const picked = await choose(
+			`${candidates.length} other ${candidates.length === 1 ? "file references" : "files reference"} ${oldKey} in frontmatter, plan metadata, or registry Ticket columns (${preview}). Update ${candidates.length === 1 ? "it" : "them"} to ${newKey}?`,
+			[GO],
+		);
+		if (picked === GO && state.workspace && root() === startRoot) {
+			for (const cand of candidates) {
+				const text = await current(cand.docPath);
+				if (text === null) continue;
+				let next: string | null = null;
+				if (cand.kind === "plan") {
+					const parsed = parsePlan(text);
+					if (parsed.plan && typeof parsed.plan.ticket === "string" && parsed.plan.ticket.toLowerCase() === oldKey.toLowerCase()) {
+						next = printPlan({ ...parsed.plan, ticket: newKey });
+					}
+				} else if (cand.kind === "registry") {
+					const updatedCsv = replaceTicketKeyInCsv(text, oldKey, newKey);
+					if (updatedCsv !== text) next = updatedCsv;
+				} else {
+					let updatedMd = text;
+					for (const field of ["ticket", "tickets", "parent", "related", "blocks", "blocked-by"]) {
+						updatedMd = replaceInFrontMatterList(updatedMd, field, oldKey, newKey) ?? updatedMd;
+					}
+					if (updatedMd !== text) next = updatedMd;
 				}
-			} else if (doc.group === "registries" && /\.(csv|tsv)$/i.test(doc.name)) {
-				const next = replaceTicketKeyInCsv(text, oldKey, newKey);
-				if (next !== text) {
-					await put(docPath, next, true);
+				if (next === null || next === text) continue;
+				try {
+					await put(cand.docPath, next, true);
 					refactored++;
-				}
-			} else if (isMarkdown(docPath)) {
-				let next = text;
-				for (const field of ["ticket", "tickets", "parent", "related", "blocks", "blocked-by"]) {
-					next = replaceInFrontMatterList(next, field, oldKey, newKey) ?? next;
-				}
-				if (next !== text) {
-					await put(docPath, next, true);
-					refactored++;
+				} catch (e: any) {
+					notify(`Could not update ${baseName(cand.docPath)}: ${e?.message ?? e}`, "error");
 				}
 			}
 		}
-		if (state.settings.activeTicket?.trim().toLowerCase() === oldKey.toLowerCase()) {
-			await saveSetting({ activeTicket: newKey }, "workspace");
-		}
-		setState("treeVersion", (v) => v + 1);
-		notify(`Renamed ${oldKey} to ${newKey}${refactored ? ` and updated ${refactored} referencing ${refactored === 1 ? "file" : "files"}` : ""}.`);
-	} catch (e: any) {
-		setState("treeVersion", (v) => v + 1);
-		notify(String(e?.message ?? e), "error");
 	}
+	setState("treeVersion", (v) => v + 1);
+	notify(`Renamed ${oldKey} to ${newKey}${refactored ? ` and updated ${refactored} referencing ${refactored === 1 ? "file" : "files"}` : ""}.`);
 }
 
 /** Moves a flat ticket, Layout 1 bundle, or Layout 2 ticket + sibling folder cleanly into `<tickets>/archive/`. */
 export async function archiveTicket(file: DocFile): Promise<void> {
 	if (!ready()) return;
+	const startRoot = root();
 	const ticketsRoot = areaFolder("tickets");
 	const archiveDir = joinPath(ticketsRoot, "archive");
-	const relArchive = relativeTo(root(), archiveDir).split("\\").join("/");
+	const relArchive = relativeTo(startRoot, archiveDir).split("\\").join("/");
 	if (isInside(archiveDir, file.path)) return notify(`${file.ticket ?? baseName(file.path)} is already archived.`);
 
 	const isLayout1 = Boolean(file.ticketFolder && isInside(file.ticketFolder, file.path));
@@ -2546,14 +2777,15 @@ export async function archiveTicket(file: DocFile): Promise<void> {
 		markDone ? [ARCHIVE_DONE, ARCHIVE_KEEP] : ["Archive"],
 	);
 	if (!picked) return;
+	if (!state.workspace || root() !== startRoot) return;
 	const beforeDocs = await backend.docs();
+	if (!state.workspace || root() !== startRoot) return;
 	const { retargetScopedFolder } = await import("./panels/Explorer");
 	try {
 		if (!(await saveDirtyUnder(fromSibling ? [fromPrimary, fromSibling] : [fromPrimary]))) {
 			notify("Save unsaved edits before archiving this ticket.", "error");
 			return;
 		}
-		if (picked === ARCHIVE_DONE) await setStatus(file.path, "done");
 		await backend.rename(fromPrimary, toPrimary);
 		fileRenamed(fromPrimary, toPrimary);
 		if (fromSibling && toSibling) {
@@ -2570,17 +2802,29 @@ export async function archiveTicket(file: DocFile): Promise<void> {
 		} else if (isLayout1) {
 			retargetScopedFolder(fromPrimary, toPrimary);
 		}
-		if (file.ticket && state.settings.activeTicket?.trim().toLowerCase() === file.ticket.toLowerCase()) {
-			await saveSetting({ activeTicket: null }, "workspace");
-		}
-		setState("treeVersion", (v) => v + 1);
-		const coMoved = fromSibling && toSibling ? [{ from: fromSibling, to: toSibling }] : undefined;
-		await followRename(fromPrimary, toPrimary, beforeDocs, coMoved);
-		notify(`Archived ${file.ticket ?? baseName(fromPrimary)} to ${relArchive}/.`);
 	} catch (e: any) {
 		setState("treeVersion", (v) => v + 1);
 		notify(String(e?.message ?? e), "error");
+		return;
 	}
+	// Update status on the moved path AFTER rename succeeds so a failed/rolled-back move never leaves mutated status behind.
+	const movedTicketPath = isLayout1
+		? joinPath(toPrimary, ...relativeTo(fromPrimary, file.path).split(/[\\/]/))
+		: toPrimary;
+	if (picked === ARCHIVE_DONE) {
+		await setStatus(movedTicketPath, "done");
+	}
+	if (file.ticket && state.settings.activeTicket?.trim().toLowerCase() === file.ticket.toLowerCase()) {
+		await saveSetting({ activeTicket: null }, "workspace").catch(() => {});
+	}
+	setState("treeVersion", (v) => v + 1);
+	try {
+		const coMoved = fromSibling && toSibling ? [{ from: fromSibling, to: toSibling }] : undefined;
+		await followRename(fromPrimary, toPrimary, beforeDocs, coMoved);
+	} catch (e: any) {
+		notify(`Archived ${file.ticket ?? baseName(fromPrimary)}, but could not update links: ${e?.message ?? e}`, "error");
+	}
+	notify(`Archived ${file.ticket ?? baseName(fromPrimary)} to ${relArchive}/.`);
 }
 
 /** True when `file` lives inside the project's `<tickets>/archive/` folder. */
@@ -2593,6 +2837,7 @@ export function isArchivedTicket(file: Pick<DocFile, "path"> | null | undefined)
 /** Moves an archived ticket (flat, Layout 1, or Layout 2 + sibling folder) cleanly back to `<tickets>/`. */
 export async function unarchiveTicket(file: DocFile): Promise<void> {
 	if (!ready()) return;
+	const startRoot = root();
 	const ticketsRoot = areaFolder("tickets");
 	const archiveDir = joinPath(ticketsRoot, "archive");
 	if (!isInside(archiveDir, file.path)) return notify(`${file.ticket ?? baseName(file.path)} is not in archive/.`);
@@ -2604,7 +2849,7 @@ export async function unarchiveTicket(file: DocFile): Promise<void> {
 	const fromSibling = isLayout2 ? file.ticketFolder! : null;
 	const toSibling = fromSibling ? joinPath(ticketsRoot, baseName(fromSibling)) : null;
 
-	const relTickets = relativeTo(root(), ticketsRoot).split("\\").join("/");
+	const relTickets = relativeTo(startRoot, ticketsRoot).split("\\").join("/");
 	const activeEntries = await backend.list(ticketsRoot).catch(() => []);
 	const existingNames = new Set(activeEntries.map((e) => e.name.toLowerCase()));
 	if (existingNames.has(baseName(toPrimary).toLowerCase()) || (toSibling && existingNames.has(baseName(toSibling).toLowerCase()))) {
@@ -2619,14 +2864,15 @@ export async function unarchiveTicket(file: DocFile): Promise<void> {
 		toneOf(file.status) === "done" || toneOf(file.status) === "off" ? [RESTORE_ACTIVE, RESTORE_KEEP] : [RESTORE_KEEP],
 	);
 	if (!picked) return;
+	if (!state.workspace || root() !== startRoot) return;
 	const beforeDocs = await backend.docs();
+	if (!state.workspace || root() !== startRoot) return;
 	const { retargetScopedFolder } = await import("./panels/Explorer");
 	try {
 		if (!(await saveDirtyUnder(fromSibling ? [fromPrimary, fromSibling] : [fromPrimary]))) {
 			notify("Save unsaved edits before unarchiving this ticket.", "error");
 			return;
 		}
-		if (picked === RESTORE_ACTIVE) await setStatus(file.path, "in progress");
 		await backend.rename(fromPrimary, toPrimary);
 		fileRenamed(fromPrimary, toPrimary);
 		if (fromSibling && toSibling) {
@@ -2642,14 +2888,25 @@ export async function unarchiveTicket(file: DocFile): Promise<void> {
 		} else if (isLayout1) {
 			retargetScopedFolder(fromPrimary, toPrimary);
 		}
-		setState("treeVersion", (v) => v + 1);
-		const coMoved = fromSibling && toSibling ? [{ from: fromSibling, to: toSibling }] : undefined;
-		await followRename(fromPrimary, toPrimary, beforeDocs, coMoved);
-		notify(`Restored ${file.ticket ?? baseName(fromPrimary)} to ${relTickets}/.`);
 	} catch (e: any) {
 		setState("treeVersion", (v) => v + 1);
 		notify(String(e?.message ?? e), "error");
+		return;
 	}
+	const movedTicketPath = isLayout1
+		? joinPath(toPrimary, ...relativeTo(fromPrimary, file.path).split(/[\\/]/))
+		: toPrimary;
+	if (picked === RESTORE_ACTIVE) {
+		await setStatus(movedTicketPath, "in progress");
+	}
+	setState("treeVersion", (v) => v + 1);
+	try {
+		const coMoved = fromSibling && toSibling ? [{ from: fromSibling, to: toSibling }] : undefined;
+		await followRename(fromPrimary, toPrimary, beforeDocs, coMoved);
+	} catch (e: any) {
+		notify(`Restored ${file.ticket ?? baseName(fromPrimary)}, but could not update links: ${e?.message ?? e}`, "error");
+	}
+	notify(`Restored ${file.ticket ?? baseName(fromPrimary)} to ${relTickets}/.`);
 }
 
 /**
@@ -2985,10 +3242,14 @@ export async function generateSchemaDocFromSql(sqlPath?: string, targetDocPath?:
 				await openFile(dest);
 				return;
 			}
-			await put(dest, nextText, true);
-			setState("treeVersion", (v) => v + 1);
-			notify(`Updated ${baseName(dest)} with ${missingObjs.length} new SQL ${missingObjs.length === 1 ? "object" : "objects"} from ${baseName(sourcePath)}.`);
-			await openFile(dest);
+			try {
+				await put(dest, nextText, true);
+				setState("treeVersion", (v) => v + 1);
+				notify(`Updated ${baseName(dest)} with ${missingObjs.length} new SQL ${missingObjs.length === 1 ? "object" : "objects"} from ${baseName(sourcePath)}.`);
+				await openFile(dest);
+			} catch (e: any) {
+				notify(String(e?.message ?? e), "error");
+			}
 			return;
 		}
 		await start(dest, sqlNonTableObjectsToMarkdown(objects, relSql, docTitle), "schema");
@@ -3021,6 +3282,7 @@ export async function generateSchemaDocFromSql(sqlPath?: string, targetDocPath?:
 
 		// Prompt BEFORE merging so "Keep existing rows as-is" genuinely leaves dropped rows untagged (ADR 0002 / 0009).
 		let markDropped = false;
+		let latestMd = existingMd;
 		if (dropped.length > 0) {
 			const droppedPreview = dropped.slice(0, 6).join(", ") + (dropped.length > 6 ? `, +${dropped.length - 6} more` : "");
 			const modNote = modified.length ? ` Modified: ${modified.slice(0, 5).join(", ")}${modified.length > 5 ? "…" : ""}.` : "";
@@ -3032,16 +3294,17 @@ export async function generateSchemaDocFromSql(sqlPath?: string, targetDocPath?:
 			);
 			if (!action) return;
 			markDropped = action === MARK_DROPPED;
+			latestMd = (await current(dest)) ?? existingMd;
 		}
 
-		const targetTables = filterSqlTablesForMarkdown(tables, existingMd);
-		const merged = mergeSqlTablesIntoMarkdown(existingMd, targetTables, relSql, { markDropped });
+		const targetTables = filterSqlTablesForMarkdown(tables, latestMd);
+		const merged = mergeSqlTablesIntoMarkdown(latestMd, targetTables, relSql, { markDropped });
 		let nextText = merged.text;
 		if (!one(frontMatter(nextText).values.source)) {
 			nextText = withFrontMatter(nextText, "source", relSql) ?? nextText;
 		}
 
-		if (nextText === existingMd) {
+		if (nextText === latestMd) {
 			if (dropped.length > 0) {
 				notify(`${baseName(dest)} kept ${dropped.length} dropped ${dropped.length === 1 ? "column" : "columns"} (${dropped.slice(0, 4).join(", ")}) for manual review.`);
 			} else {
@@ -3050,21 +3313,25 @@ export async function generateSchemaDocFromSql(sqlPath?: string, targetDocPath?:
 			await openFile(dest);
 			return;
 		}
-		await put(dest, nextText, true);
-		setState("treeVersion", (v) => v + 1);
-		void import("./docAudit").then((m) => m.refreshDocAudit());
-		const parts = [
-			merged.addedTables ? `${merged.addedTables} ${merged.addedTables === 1 ? "table" : "tables"} added` : "",
-			merged.addedColumns ? `${merged.addedColumns} ${merged.addedColumns === 1 ? "column" : "columns"} added` : "",
-			merged.updatedColumns
-				? `${merged.updatedColumns} modified${modified.length && modified.length <= 4 ? ` (${modified.join(", ")})` : ""}`
-				: "",
-			dropped.length
-				? `${dropped.length} dropped in SQL${markDropped ? " (marked)" : " (kept as-is)"} (${dropped.slice(0, 4).join(", ")}${dropped.length > 4 ? "…" : ""})`
-				: "",
-		].filter(Boolean);
-		notify(`Synced ${baseName(dest)} from ${baseName(sourcePath)}${parts.length ? ` (${parts.join("; ")})` : ""}.`);
-		await openFile(dest);
+		try {
+			await put(dest, nextText, true);
+			setState("treeVersion", (v) => v + 1);
+			void import("./docAudit").then((m) => m.refreshDocAudit());
+			const parts = [
+				merged.addedTables ? `${merged.addedTables} ${merged.addedTables === 1 ? "table" : "tables"} added` : "",
+				merged.addedColumns ? `${merged.addedColumns} ${merged.addedColumns === 1 ? "column" : "columns"} added` : "",
+				merged.updatedColumns
+					? `${merged.updatedColumns} modified${modified.length && modified.length <= 4 ? ` (${modified.join(", ")})` : ""}`
+					: "",
+				dropped.length
+					? `${dropped.length} dropped in SQL${markDropped ? " (marked)" : " (kept as-is)"} (${dropped.slice(0, 4).join(", ")}${dropped.length > 4 ? "…" : ""})`
+					: "",
+			].filter(Boolean);
+			notify(`Synced ${baseName(dest)} from ${baseName(sourcePath)}${parts.length ? ` (${parts.join("; ")})` : ""}.`);
+			await openFile(dest);
+		} catch (e: any) {
+			notify(String(e?.message ?? e), "error");
+		}
 		return;
 	}
 	const mdBody = [
@@ -3088,9 +3355,10 @@ export async function generateSchemaDocFromSql(sqlPath?: string, targetDocPath?:
  */
 export async function generateSqlFromSchemaDoc(mdPath: string): Promise<void> {
 	if (!ready()) return;
+	const startRoot = root();
 	const mdText = await current(mdPath);
 	if (mdText === null) return;
-	const relMd = relativeTo(root(), mdPath).split("\\").join("/");
+	const relMd = relativeTo(startRoot, mdPath).split("\\").join("/");
 	const stem = baseName(mdPath).replace(/\.(md|markdown)$/i, "");
 	const generated = schemaMarkdownToSql(mdText, { sourceNote: relMd, fallbackTableName: stem });
 	if (!generated) {
@@ -3110,33 +3378,65 @@ export async function generateSqlFromSchemaDoc(mdPath: string): Promise<void> {
 		: 0;
 	let dest = joinPath(dirName(mdPath), `${stem}.sql`);
 	if (existingSource && !/^https?:\/\//i.test(existingSource) && /\.(sql|ddl)$/i.test(existingSource) && otherDocsUsingSource === 0) {
-		dest = /^\.{1,2}[\\/]/.test(existingSource) ? resolvePath(dirName(mdPath), existingSource) : joinPath(root(), existingSource);
+		const isAbs = /^([A-Za-z]:[\\/]|\/)/.test(existingSource);
+		const candidate = isAbs
+			? resolvePath(existingSource, ".")
+			: /^\.{1,2}[\\/]/.test(existingSource)
+				? resolvePath(dirName(mdPath), existingSource)
+				: resolvePath(startRoot, existingSource);
+		if (!isInside(startRoot, candidate)) {
+			notify(`Cannot write SQL outside the workspace: ${existingSource}`, "error");
+			return;
+		}
+		dest = candidate;
+	}
+	if (!isInside(startRoot, dest)) {
+		notify("Cannot write SQL outside the workspace.", "error");
+		return;
 	}
 
 	const existingSql = await current(dest);
+	let finalGenerated = generated;
 	if (existingSql !== null && existingSql.replace(/\r\n/g, "\n").trim() !== generated.sql.trim()) {
 		const OVERWRITE = "Update SQL file";
 		const picked = await choose(
 			`Overwrite ${baseName(dest)} with CREATE TABLE DDL generated from ${baseName(mdPath)}?`,
 			[OVERWRITE],
+			{ danger: OVERWRITE },
 		);
 		if (picked !== OVERWRITE) return;
+		if (!state.workspace || root() !== startRoot) return;
+		// Re-read the schema doc after confirmation so edits made meanwhile are reflected & preserved.
+		const freshMd = await current(mdPath);
+		if (freshMd === null) return notify("Could not read the schema document.", "error");
+		const regenerated = schemaMarkdownToSql(freshMd, { sourceNote: relMd, fallbackTableName: stem });
+		if (!regenerated) {
+			notify("Add a column table (| Column | Type | Null | ... |) before generating SQL DDL.");
+			return;
+		}
+		finalGenerated = regenerated;
 	}
 
 	try {
-		if (existingSql !== null) {
-			await put(dest, generated.sql, true);
+		const existedNow = (await current(dest)) !== null;
+		if (existedNow) {
+			await put(dest, finalGenerated.sql, true);
 		} else {
-			await backend.write(dest, generated.sql);
+			await backend.create(dest, "file");
+			await backend.write(dest, finalGenerated.sql);
 		}
-		const relSql = relativeTo(root(), dest).split("\\").join("/");
-		if (existingSource.toLowerCase() !== relSql.toLowerCase()) {
-			const updatedMd = withFrontMatter(mdText, "source", relSql);
-			if (updatedMd && updatedMd !== mdText) await put(mdPath, updatedMd, true);
+		const latestMd = await current(mdPath);
+		const relSql = relativeTo(startRoot, dest).split("\\").join("/");
+		if (latestMd !== null) {
+			const latestSource = one(frontMatter(latestMd).values.source)?.trim() ?? "";
+			if (latestSource.toLowerCase() !== relSql.toLowerCase()) {
+				const updatedMd = withFrontMatter(latestMd, "source", relSql);
+				if (updatedMd && updatedMd !== latestMd) await put(mdPath, updatedMd, true);
+			}
 		}
 		setState("treeVersion", (v) => v + 1);
 		void import("./docAudit").then((m) => m.refreshDocAudit());
-		notify(`Generated ${baseName(dest)} (${generated.tables.join(", ")}) from ${baseName(mdPath)}.`);
+		notify(`Generated ${baseName(dest)} (${finalGenerated.tables.join(", ")}) from ${baseName(mdPath)}.`);
 		await openFile(dest);
 	} catch (e: any) {
 		notify(String(e?.message ?? e), "error");
@@ -3163,6 +3463,7 @@ export async function unlinkSchemaDocSql(mdPath: string): Promise<void> {
 /** Opens a searchable QuickPick to link, switch, generate, or unlink a schema doc's SQL source. */
 export async function linkSchemaDocToSql(mdPath: string): Promise<void> {
 	if (!ready()) return;
+	const startRoot = root();
 	const cur = await current(mdPath);
 	if (cur === null) return;
 	const currentSource = one(frontMatter(cur).values.source)?.trim() ?? "";
@@ -3183,7 +3484,7 @@ export async function linkSchemaDocToSql(mdPath: string): Promise<void> {
 		placeholder: "Pick a SQL/DDL file, generate a 1:1 .sql file, or unlink…",
 		items: [
 			...sqlDocs.map((f) => {
-				const rel = relativeTo(root(), f.path).split("\\").join("/");
+				const rel = relativeTo(startRoot, f.path).split("\\").join("/");
 				const isCurrent = Boolean(currentSource && rel.toLowerCase() === currentSource.toLowerCase());
 				return {
 					label: baseName(f.name),
@@ -3220,6 +3521,7 @@ export async function linkSchemaDocToSql(mdPath: string): Promise<void> {
 		],
 	});
 	if (!picked) return;
+	if (!state.workspace || root() !== startRoot) return;
 	if (picked === GENERATE) return generateSqlFromSchemaDoc(mdPath);
 	if (picked === UNLINK) return unlinkSchemaDocSql(mdPath);
 
@@ -3227,15 +3529,19 @@ export async function linkSchemaDocToSql(mdPath: string): Promise<void> {
 	if (picked === BROWSE) {
 		const browsed = await browseWorkspaceFile({
 			title: `Choose SQL source for ${baseName(mdPath)}`,
-			root: root(),
+			root: startRoot,
 			initialDir: dirName(mdPath),
 		});
 		if (!browsed) return;
+		if (!state.workspace || root() !== startRoot) return;
 		chosenPath = browsed.path;
 	}
-	const relSql = relativeTo(root(), chosenPath).split("\\").join("/");
-	const next = withFrontMatter(cur, "source", relSql);
-	if (!next || next === cur) return;
+	// Re-read schema doc after modals so edits made meanwhile are preserved.
+	const freshCur = await current(mdPath);
+	if (freshCur === null) return;
+	const relSql = relativeTo(startRoot, chosenPath).split("\\").join("/");
+	const next = withFrontMatter(freshCur, "source", relSql);
+	if (!next || next === freshCur) return;
 	try {
 		await put(mdPath, next, true);
 		setState("treeVersion", (v) => v + 1);
@@ -3740,11 +4046,13 @@ async function saveExportFile(
 ): Promise<boolean> {
 	const { inApp } = await import("./backend");
 	if (inApp && state.workspace?.root) {
+		const startRoot = state.workspace.root;
 		const picked = (await ask("Save export to (path in workspace)", defaultRelPath))?.trim();
 		if (!picked) return false;
+		if (!state.workspace || state.workspace.root !== startRoot) return false;
 		const cleanRel = picked.replace(/\\/g, "/").replace(/^\/+/, "");
-		const dest = resolvePath(state.workspace.root, cleanRel);
-		if (!isInside(state.workspace.root, dest)) {
+		const dest = resolvePath(startRoot, cleanRel);
+		if (!isInside(startRoot, dest)) {
 			notify("Export path must stay inside the workspace.", "error");
 			return false;
 		}
@@ -3752,16 +4060,22 @@ async function saveExportFile(
 			const exists = await backend.read(dest).then(() => true, () => false);
 			if (exists) {
 				const OVERWRITE = "Overwrite file";
-				if ((await choose(`${relativeTo(state.workspace.root, dest)} already exists. Overwrite it?`, [OVERWRITE], { danger: OVERWRITE })) !== OVERWRITE) {
+				if ((await choose(`${relativeTo(startRoot, dest)} already exists. Overwrite it?`, [OVERWRITE], { danger: OVERWRITE })) !== OVERWRITE) {
 					return false;
 				}
-			} else {
-				await backend.create(dest, "file");
+				if (!state.workspace || state.workspace.root !== startRoot) return false;
 			}
+			// Compute payload BEFORE creating or touching any file on disk.
 			const payload = typeof content === "function" ? await content(dest) : content;
-			await put(dest, payload, true);
+			const openKey = canonical(dest);
+			await changingOnDisk(dest, async () => {
+				if (!exists) await backend.create(dest, "file");
+				else await backend.historyKeep(dest).catch(() => {});
+				await backend.write(dest, payload);
+				if (documents.get(openKey)) await revert(openKey);
+			});
 			setState("treeVersion", (v) => v + 1);
-			notify(`Saved export to ${relativeTo(state.workspace.root, dest)}.`);
+			notify(`Saved export to ${relativeTo(startRoot, dest)}.`);
 			return true;
 		} catch (e: any) {
 			notify(`Could not save export: ${e?.message ?? e}`, "error");
@@ -4670,6 +4984,7 @@ export async function exportDeploymentManifest(
  */
 export async function closeoutTicket(ticketPath: string, key: string): Promise<void> {
 	if (!ready()) return;
+	const startRoot = root();
 	const allDocs = docs();
 	const ticketDoc = allDocs.find((d) => canonical(d.path) === canonical(ticketPath));
 	const title = ticketDoc?.title || key;
@@ -4678,6 +4993,7 @@ export async function closeoutTicket(ticketPath: string, key: string): Promise<v
 		backend.gitHeadSha().catch(() => null),
 		loadWorkspaceTestRuns(allDocs),
 	]);
+	if (!state.workspace || root() !== startRoot) return;
 	const readiness = evaluateTicketReadiness(allDocs, key, {
 		gitFiles: gitStatus()?.files,
 		root: state.workspace?.root,
@@ -4694,11 +5010,13 @@ export async function closeoutTicket(ticketPath: string, key: string): Promise<v
 	const DONE_ONLY = "Mark done only";
 	const picked = await choose(`Close out ${key}: ${title}?${warnNote}`, [DONE_STATE, DONE_STATE_README, DONE_ONLY]);
 	if (!picked) return;
+	if (!state.workspace || root() !== startRoot) return;
 
 	let summaryLine = "";
 	if (picked !== DONE_ONLY) {
 		const typed = (await ask("One-line completion summary for STATE.md", `${key}: ${title}`))?.trim();
 		if (!typed) return;
+		if (!state.workspace || root() !== startRoot) return;
 		summaryLine = typed;
 	}
 
@@ -4708,69 +5026,248 @@ export async function closeoutTicket(ticketPath: string, key: string): Promise<v
 	}
 
 	// 2. Append dated bullet to `docs/STATE.md` (creating it from template if absent, honoring existing casing on Linux).
+	let stateUpdated = false;
 	if (picked === DONE_STATE || picked === DONE_STATE_README) {
-		const stateDoc = allDocs.find(
-			(d) => d.exists && canonical(dirName(d.path)) === canonical(docsFolder()) && baseName(d.path).toLowerCase() === STATE_FILE.toLowerCase(),
-		);
-		const statePath = stateDoc?.path ?? joinPath(docsFolder(), STATE_FILE);
-		const existingState = await current(statePath);
-		const bullet = `- ${today()} — ${summaryLine}`;
-		if (existingState === null) {
-			const fresh = `${stateTemplate(state.project!.name, today()).trimEnd()}\n\n## Completed\n\n${bullet}\n`;
-			await start(statePath, fresh);
-		} else {
-			const eol = existingState.includes("\r\n") ? "\r\n" : "\n";
-			const headingRe = /^(##\s+(?:Completed|Recent(?:ly)?\s+(?:completed|done|milestones)|Done|History)[^\r\n]*\r?\n+)/im;
-			let nextState: string;
-			if (headingRe.test(existingState)) {
-				nextState = existingState.replace(headingRe, (_, head: string) => `${head}${bullet}${eol}`);
+		try {
+			const stateDoc = allDocs.find(
+				(d) => d.exists && canonical(dirName(d.path)) === canonical(docsFolder()) && baseName(d.path).toLowerCase() === STATE_FILE.toLowerCase(),
+			);
+			const statePath = stateDoc?.path ?? joinPath(docsFolder(), STATE_FILE);
+			const existingState = await current(statePath);
+			const bullet = `- ${today()} — ${summaryLine}`;
+			if (existingState === null) {
+				const fresh = `${stateTemplate(state.project!.name, today()).trimEnd()}\n\n## Completed\n\n${bullet}\n`;
+				await start(statePath, fresh);
+				stateUpdated = true;
 			} else {
-				const sep = existingState.endsWith("\n") ? eol : `${eol}${eol}`;
-				nextState = `${existingState}${sep}## Completed${eol}${eol}${bullet}${eol}`;
+				const eol = existingState.includes("\r\n") ? "\r\n" : "\n";
+				const headingRe = /^(##\s+(?:Completed|Recent(?:ly)?\s+(?:completed|done|milestones)|Done|History)[^\r\n]*\r?\n+)/im;
+				let nextState: string;
+				if (headingRe.test(existingState)) {
+					nextState = existingState.replace(headingRe, (_, head: string) => `${head}${bullet}${eol}`);
+				} else {
+					const sep = existingState.endsWith("\n") ? eol : `${eol}${eol}`;
+					nextState = `${existingState}${sep}## Completed${eol}${eol}${bullet}${eol}`;
+				}
+				await put(statePath, nextState, true);
+				stateUpdated = true;
 			}
-			await put(statePath, nextState, true);
+		} catch (e: any) {
+			notify(`Could not update ${STATE_FILE}: ${e?.message ?? e}`, "error");
 		}
 	}
 
 	// 3. Optionally promote completed milestone / capability note into `README.md` (honoring existing casing on Linux).
+	let readmeUpdated = false;
 	if (picked === DONE_STATE_README) {
-		const readmeDoc = allDocs.find((d) => d.exists && d.group === "project" && baseName(d.path).toLowerCase() === "readme.md");
-		const readmePath = readmeDoc?.path ?? joinPath(root(), "README.md");
-		const existingReadme = await current(readmePath);
-		if (existingReadme !== null) {
-			const eol = existingReadme.includes("\r\n") ? "\r\n" : "\n";
-			const bullet = `- **${key}** (${today()}): ${summaryLine.replace(new RegExp(`^${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[:\\s—-]+`, "i"), "")}`;
-			const secRe = /^(##\s+(?:Completed|Milestones|Capabilities|Delivered|What this does)[^\r\n]*\r?\n+)/im;
-			const nextReadme = secRe.test(existingReadme)
-				? existingReadme.replace(secRe, (_, head: string) => `${head}${bullet}${eol}`)
-				: `${existingReadme.trimEnd()}${eol}${eol}## Milestones${eol}${eol}${bullet}${eol}`;
-			await put(readmePath, nextReadme, true);
+		try {
+			const readmeDoc = allDocs.find((d) => d.exists && d.group === "project" && baseName(d.path).toLowerCase() === "readme.md");
+			const readmePath = readmeDoc?.path ?? joinPath(startRoot, "README.md");
+			const existingReadme = await current(readmePath);
+			if (existingReadme !== null) {
+				const eol = existingReadme.includes("\r\n") ? "\r\n" : "\n";
+				const bullet = `- **${key}** (${today()}): ${summaryLine.replace(new RegExp(`^${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[:\\s—-]+`, "i"), "")}`;
+				const secRe = /^(##\s+(?:Completed|Milestones|Capabilities|Delivered|What this does)[^\r\n]*\r?\n+)/im;
+				const nextReadme = secRe.test(existingReadme)
+					? existingReadme.replace(secRe, (_, head: string) => `${head}${bullet}${eol}`)
+					: `${existingReadme.trimEnd()}${eol}${eol}## Milestones${eol}${eol}${bullet}${eol}`;
+				await put(readmePath, nextReadme, true);
+				readmeUpdated = true;
+			}
+		} catch (e: any) {
+			notify(`Could not update README.md: ${e?.message ?? e}`, "error");
 		}
 	}
 
-	// 4. Clear active workspace ticket focus if it matched this closed-out ticket.
+	// 4. Always clear active workspace ticket focus if it matched this closed-out ticket and refresh tree.
 	if (state.settings.activeTicket?.toLowerCase() === key.toLowerCase()) {
-		await saveSetting({ activeTicket: null }, "workspace");
+		await saveSetting({ activeTicket: null }, "workspace").catch(() => {});
 	}
 
 	setState("treeVersion", (v) => v + 1);
-	// Respect ADR 0031: never auto-rewrite INDEX.md catalogs silently — offer explicit manual trigger if stale.
-	const staleInfo = staleCatalogSummary();
+	// Respect ADR 0031: never auto-rewrite INDEX.md catalogs silently — check fresh backend docs and offer manual trigger if stale.
+	const freshDocs = await backend.docs().catch(() => docs());
+	const staleInfo = staleCatalogSummary(freshDocs);
 	const hasStale = staleInfo.stale.length > 0 || staleInfo.missing.length > 0;
+	const detail =
+		stateUpdated && readmeUpdated
+			? " (updated STATE.md & README.md)"
+			: stateUpdated
+				? " (recorded in STATE.md)"
+				: readmeUpdated
+					? " (updated README.md)"
+					: "";
 	notify(
-		`Closed out ${key}${picked === DONE_STATE_README ? " (updated STATE.md & README.md)" : picked === DONE_STATE ? " (recorded in STATE.md)" : ""}.`,
+		`Closed out ${key}${detail}.`,
 		"info",
 		hasStale ? { label: "Update catalogs", run: () => void updateCatalogs() } : undefined,
 	);
 }
 
+/** Computes inline protected character ranges on one Markdown line (code spans, comments, wikilinks, link destinations, HTML tags/attributes, bare URLs). */
+function protectedProseRanges(line: string): [number, number][] {
+	const ranges: [number, number][] = [];
+	let i = 0;
+	while (i < line.length) {
+		if (line[i] === "`") {
+			let run = 0;
+			while (i + run < line.length && line[i + run] === "`") run++;
+			let j = i + run;
+			let closed = -1;
+			while (j < line.length) {
+				if (line[j] !== "`") {
+					j++;
+					continue;
+				}
+				let closeRun = 0;
+				while (j + closeRun < line.length && line[j + closeRun] === "`") closeRun++;
+				if (closeRun === run) {
+					closed = j + closeRun;
+					break;
+				}
+				j += closeRun;
+			}
+			if (closed >= 0) {
+				ranges.push([i, closed]);
+				i = closed;
+				continue;
+			}
+			i += run;
+			continue;
+		}
+		if (line.startsWith("<!--", i)) {
+			const end = line.indexOf("-->", i + 4);
+			if (end >= 0) {
+				ranges.push([i, end + 3]);
+				i = end + 3;
+				continue;
+			}
+		}
+		if (line.startsWith("[[", i)) {
+			const m = /^\[\[[^[\]\n]*\]\]/.exec(line.slice(i));
+			if (m) {
+				ranges.push([i, i + m[0].length]);
+				i += m[0].length;
+				continue;
+			}
+		}
+		if (line.startsWith("](", i)) {
+			const m = /^\]\((?:[^()\n]|\([^()\n]*\))*\)/.exec(line.slice(i));
+			if (m) {
+				ranges.push([i, i + m[0].length]);
+				i += m[0].length;
+				continue;
+			}
+		}
+		if (line[i] === "<") {
+			const m = /^<(?:[A-Za-z/!][^>\n]*|https?:\/\/[^>\s\n]+)>/.exec(line.slice(i));
+			if (m) {
+				ranges.push([i, i + m[0].length]);
+				i += m[0].length;
+				continue;
+			}
+		}
+		if (line[i] === "=") {
+			const m = /^=\s*(?:"[^"\n]*"|'[^'\n]*')/.exec(line.slice(i));
+			if (m) {
+				ranges.push([i, i + m[0].length]);
+				i += m[0].length;
+				continue;
+			}
+		}
+		if ((line[i] === "h" || line[i] === "H") && /^https?:\/\//i.test(line.slice(i))) {
+			const m = /^https?:\/\/[^\s)>]+/i.exec(line.slice(i));
+			if (m) {
+				ranges.push([i, i + m[0].length]);
+				i += m[0].length;
+				continue;
+			}
+		}
+		i++;
+	}
+	return ranges;
+}
+
+/**
+ * Pure helper that renames inline prose `#oldTag` occurrences in Markdown text while preserving:
+ * - YAML frontmatter (handled separately by `replaceInFrontMatterList`),
+ * - fenced code blocks (following CommonMark fence length + `/^[ \t]*$/` closing-line rules),
+ * - ATX headings & reference-link definitions,
+ * - inline code spans, HTML comments, HTML tags & attributes (`href="#tag"`, `="...#tag"`),
+ * - Markdown link destinations (`](#tag)`), wikilinks (`[[Doc#tag]]`), and bare URLs.
+ */
+export function renameProseTagInMarkdown(text: string, oldTag: string, newTag: string): string {
+	const cleanOld = oldTag.trim().replace(/^#+/, "");
+	const cleanNew = newTag.trim().replace(/^#+/, "");
+	if (!cleanOld || !cleanNew) return text;
+	const cutAt = bodyOffset(text);
+	const headPart = text.slice(0, cutAt);
+	const bodyPart = text.slice(cutAt);
+	const esc = cleanOld.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	const proseRe = new RegExp(`(^|[\\s([{"'.,;:])#${esc}(?=$|[\\s)\\]}"'.,;:!?])`, "gi");
+	const lines = bodyPart.split(/(\r?\n)/);
+	let inFence: { ch: string; len: number } | null = null;
+	let inHtmlComment = false;
+	for (let i = 0; i < lines.length; i += 2) {
+		const ln = lines[i]!;
+		const fm = /^[ \t]{0,3}(`{3,}|~{3,})(.*)$/.exec(ln);
+		if (fm) {
+			const ch = fm[1]![0]!;
+			const len = fm[1]!.length;
+			const rest = fm[2] ?? "";
+			if (!inFence) {
+				if (!(ch === "`" && rest.includes("`"))) inFence = { ch, len };
+				continue;
+			}
+			if (ch === inFence.ch && len >= inFence.len && /^[ \t]*$/.test(rest)) {
+				inFence = null;
+			}
+			continue;
+		}
+		if (inFence) continue;
+		const ranges: [number, number][] = [];
+		let scanFrom = 0;
+		if (inHtmlComment) {
+			const closeIdx = ln.indexOf("-->");
+			if (closeIdx < 0) continue;
+			ranges.push([0, closeIdx + 3]);
+			scanFrom = closeIdx + 3;
+			inHtmlComment = false;
+		}
+		if (scanFrom === 0 && (/^[ \t]{0,3}#{1,6}[ \t]+/.test(ln) || /^[ \t]{0,3}\[[^\]]+\]:[ \t]*\S/.test(ln))) {
+			continue;
+		}
+		if (!ln.includes("#") && !ln.includes("<!--")) continue;
+		const subRanges = protectedProseRanges(scanFrom ? ln.slice(scanFrom) : ln);
+		for (const [from, to] of subRanges) ranges.push([from + scanFrom, to + scanFrom]);
+		// Detect an unclosed multi-line `<!--` comment outside already-protected spans.
+		for (let idx = ln.indexOf("<!--", scanFrom); idx >= 0; idx = ln.indexOf("<!--", idx + 4)) {
+			if (ranges.some(([from, to]) => idx >= from && idx < to)) continue;
+			if (ln.indexOf("-->", idx + 4) < 0) {
+				ranges.push([idx, ln.length]);
+				inHtmlComment = true;
+				break;
+			}
+		}
+		if (!ln.includes("#")) continue;
+		lines[i] = ln.replace(proseRe, (full, lead: string, offset: number) => {
+			const hashAt = offset + lead.length;
+			if (ranges.some(([from, to]) => hashAt >= from && hashAt < to)) return full;
+			return `${lead}#${cleanNew}`;
+		});
+	}
+	return headPart + lines.join("");
+}
+
 /** Renames a `#tag` across both YAML frontmatter (`tags:`/`tag:`) and prose `#tag` occurrences in workspace Markdown docs. */
 export async function renameTagAcrossWorkspace(oldTag: string): Promise<void> {
 	if (!ready()) return;
+	const startRoot = root();
 	const cleanOld = oldTag.trim().replace(/^#+/, "");
 	if (!cleanOld) return;
 	const typed = (await ask(`Rename tag #${cleanOld} across workspace to (without #)`, cleanOld))?.trim().replace(/^#+/, "");
 	if (!typed || typed.toLowerCase() === cleanOld.toLowerCase()) return;
+	if (!state.workspace || root() !== startRoot) return;
 	if (!/^[A-Za-z][A-Za-z0-9_/-]{0,63}$/.test(typed)) {
 		notify("Tags must start with a letter and use letters, numbers, _, /, or -.", "error");
 		return;
@@ -4783,47 +5280,31 @@ export async function renameTagAcrossWorkspace(oldTag: string): Promise<void> {
 	if ((await choose(`Rename #${cleanOld} to #${typed} across ${targets.length} ${targets.length === 1 ? "document" : "documents"} (YAML frontmatter and prose)?`, [GO])) !== GO) {
 		return;
 	}
-	const esc = cleanOld.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-	const proseRe = new RegExp(`(^|[\\s([{"'.,;:])#${esc}(?=$|[\\s)\\]}"'.,;:!?])`, "gi");
+	if (!state.workspace || root() !== startRoot) return;
 	let changedCount = 0;
+	let failedCount = 0;
 	for (const doc of targets) {
+		if (!state.workspace || root() !== startRoot) break;
 		const before = await current(doc.path);
 		if (before === null) continue;
 		let next = before;
 		for (const field of ["tags", "tag"]) {
 			next = replaceInFrontMatterList(next, field, cleanOld, typed) ?? next;
 		}
-		const cutAt = bodyOffset(next);
-		const headPart = next.slice(0, cutAt);
-		const bodyPart = next.slice(cutAt);
-		// Rewrite prose `#oldTag` lines outside fenced code blocks & ATX headings.
-		const lines = bodyPart.split(/(\r?\n)/);
-		let inFence: { ch: string; len: number } | null = null;
-		for (let i = 0; i < lines.length; i += 2) {
-			const ln = lines[i]!;
-			const fm = /^[ \t]{0,3}(`{3,}|~{3,})/.exec(ln);
-			if (fm) {
-				if (!inFence) inFence = { ch: fm[1]![0]!, len: fm[1]!.length };
-				else if (fm[1]![0] === inFence.ch && fm[1]!.length >= inFence.len) inFence = null;
-				continue;
-			}
-			if (inFence || /^[ \t]{0,3}#{1,6}[ \t]+/.test(ln)) continue;
-			// Skip inline backtick spans while rewriting `#oldTag`.
-			const parts = ln.split(/(`+[^`]*`+)/);
-			for (let p = 0; p < parts.length; p += 2) {
-				parts[p] = parts[p]!.replace(proseRe, `$1#${typed}`);
-			}
-			lines[i] = parts.join("");
-		}
-		next = headPart + lines.join("");
+		next = renameProseTagInMarkdown(next, cleanOld, typed);
 		if (next !== before) {
-			await put(doc.path, next, true);
-			changedCount++;
+			try {
+				await put(doc.path, next, true);
+				changedCount++;
+			} catch (e: any) {
+				failedCount++;
+				notify(`Could not update ${baseName(doc.path)}: ${e?.message ?? e}`, "error");
+			}
 		}
 	}
 	if (changedCount) {
 		setState("treeVersion", (v) => v + 1);
-		notify(`Renamed #${cleanOld} to #${typed} in ${changedCount} ${changedCount === 1 ? "document" : "documents"}.`);
+		notify(`Renamed #${cleanOld} to #${typed} in ${changedCount} ${changedCount === 1 ? "document" : "documents"}${failedCount ? ` (${failedCount} failed)` : ""}.`);
 	}
 }
 
@@ -4923,6 +5404,7 @@ export async function pickActiveTicket(): Promise<void> {
  */
 export async function renameHeadingAcrossWorkspace(targetPath?: string): Promise<void> {
 	if (!ready()) return;
+	const startRoot = root();
 	const docPath = targetPath ?? activePath();
 	if (!docPath || !isMarkdown(docPath)) {
 		notify("Open a Markdown document first to rename a heading.");
@@ -4971,24 +5453,38 @@ export async function renameHeadingAcrossWorkspace(targetPath?: string): Promise
 			})) ?? undefined;
 	}
 	if (!pickedHeading) return;
+	if (!state.workspace || root() !== startRoot) return;
 
 	const typed = (await ask(`Rename heading “${pickedHeading.text}” to`, pickedHeading.text))?.trim();
 	if (!typed || typed === pickedHeading.text) return;
+	if (!state.workspace || root() !== startRoot) return;
 
-	const lines = sourceText.split(/(\r?\n)/);
-	const lineIdx = (pickedHeading.line - 1) * 2;
-	const rawLine = lines[lineIdx];
-	if (rawLine === undefined) return;
-	const updatedLine = rawLine.replace(/^([ \t]{0,3}#{1,6}[ \t]+).+?([ \t]*#*[ \t]*)$/, (_, prefix: string, suffix: string) => `${prefix}${typed}${suffix}`);
-	if (updatedLine === rawLine) return;
-	lines[lineIdx] = updatedLine;
-	const renamedSource = lines.join("");
+	const renameSourceHeading = (raw: string): { text: string; newAnchor: string } | null => {
+		const curHeadings = documentHeadings(raw);
+		const match =
+			curHeadings.find((h) => h.line === pickedHeading!.line && h.text === pickedHeading!.text) ??
+			curHeadings.find((h) => h.text === pickedHeading!.text && h.level === pickedHeading!.level);
+		if (!match) return null;
+		const lines = raw.split(/(\r?\n)/);
+		const lineIdx = (match.line - 1) * 2;
+		const rawLine = lines[lineIdx];
+		if (rawLine === undefined) return null;
+		const updatedLine = rawLine.replace(/^([ \t]{0,3}#{1,6}[ \t]+).+?([ \t]*#*[ \t]*)$/, (_, prefix: string, suffix: string) => `${prefix}${typed}${suffix}`);
+		if (updatedLine === rawLine) return null;
+		lines[lineIdx] = updatedLine;
+		const renamed = lines.join("");
+		const nextH = documentHeadings(renamed).find((h) => h.line === match.line);
+		if (!nextH) return null;
+		return { text: renamed, newAnchor: nextH.anchor };
+	};
 
-	const nextHeading = documentHeadings(renamedSource).find((h) => h.line === pickedHeading.line);
-	if (!nextHeading) return;
+	const freshSourceBeforeConfirm = await current(docPath);
+	if (freshSourceBeforeConfirm === null) return notify("Could not read the active Markdown document.", "error");
+	const sourcePreview = renameSourceHeading(freshSourceBeforeConfirm);
+	if (!sourcePreview) return;
 
 	const allDocs = docs();
-	const wsRoot = root();
+	const wsRoot = startRoot;
 	const targetCanon = canonical(docPath);
 	const nameIdx = buildDocNameIndex(allDocs, wsRoot);
 	const scanPaths = new Map<string, string>();
@@ -4999,12 +5495,7 @@ export async function renameHeadingAcrossWorkspace(targetPath?: string): Promise
 		if (!scanPaths.has(c)) scanPaths.set(c, d.path);
 	}
 
-	const edits: { path: string; next: string; refs: number; isSource: boolean }[] = [];
-	let totalRefs = 0;
-	for (const [canon, filePath] of scanPaths) {
-		const isSameDoc = canon === targetCanon;
-		const baseText = isSameDoc ? renamedSource : await current(filePath);
-		if (baseText === null) continue;
+	const rewriteFileRefs = (baseText: string, filePath: string, isSameDoc: boolean, newAnchor: string) => {
 		const res = rewriteHeadingReferences(baseText, {
 			isSameDoc,
 			matchesDocHref: (hrefPath) => {
@@ -5017,37 +5508,63 @@ export async function renameHeadingAcrossWorkspace(targetPath?: string): Promise
 				const found = lookupInIndex(name, nameIdx);
 				return Boolean(found && canonical(found.path) === targetCanon);
 			},
-			oldHeading: pickedHeading.text,
-			oldAnchor: pickedHeading.anchor,
+			oldHeading: pickedHeading!.text,
+			oldAnchor: pickedHeading!.anchor,
 			newHeading: typed,
-			newAnchor: nextHeading.anchor,
+			newAnchor,
 		});
 		let finalText = res.text;
 		if (isSameDoc && finalText.includes("<!-- toc -->") && finalText.includes("<!-- /toc -->")) {
 			finalText = upsertTocBlock(finalText).text;
 		}
-		if (isSameDoc || res.count > 0) {
-			totalRefs += res.count;
-			edits.push({ path: filePath, next: finalText, refs: res.count, isSource: isSameDoc });
+		return { text: finalText, refs: res.count };
+	};
+
+	const candidateFiles: { path: string; refs: number; isSource: boolean }[] = [];
+	let totalRefs = 0;
+	for (const [canon, filePath] of scanPaths) {
+		const isSameDoc = canon === targetCanon;
+		const baseText = isSameDoc ? sourcePreview.text : await current(filePath);
+		if (baseText === null) continue;
+		const res = rewriteFileRefs(baseText, filePath, isSameDoc, sourcePreview.newAnchor);
+		if (isSameDoc || res.refs > 0) {
+			totalRefs += res.refs;
+			candidateFiles.push({ path: filePath, refs: res.refs, isSource: isSameDoc });
 		}
 	}
 
-	const externalCount = edits.filter((e) => !e.isSource).length;
+	const externalCount = candidateFiles.filter((e) => !e.isSource).length;
 	if (totalRefs > 0 || externalCount > 0) {
 		const GO = "Rename heading";
 		const scope =
 			externalCount > 0
-				? `${totalRefs} ${totalRefs === 1 ? "reference" : "references"} across ${edits.length} ${edits.length === 1 ? "file" : "files"}`
+				? `${totalRefs} ${totalRefs === 1 ? "reference" : "references"} across ${candidateFiles.length} ${candidateFiles.length === 1 ? "file" : "files"}`
 				: `${totalRefs} ${totalRefs === 1 ? "reference" : "references"} in ${baseName(docPath)}`;
 		const ok = await choose(`Rename “${pickedHeading.text}” to “${typed}” and update ${scope}?`, [GO]);
 		if (ok !== GO) return;
+		if (!state.workspace || root() !== startRoot) return;
 	}
 
 	let written = 0;
-	for (const item of edits) {
+	let writtenRefs = 0;
+	let activeNewAnchor = sourcePreview.newAnchor;
+	for (const item of candidateFiles) {
+		// Re-read current buffer after confirmation so edits made meanwhile are never overwritten.
+		const freshText = await current(item.path);
+		if (freshText === null) continue;
+		let baseText = freshText;
+		if (item.isSource) {
+			const renamed = renameSourceHeading(freshText);
+			if (!renamed) continue;
+			baseText = renamed.text;
+			activeNewAnchor = renamed.newAnchor;
+		}
+		const rewritten = rewriteFileRefs(baseText, item.path, item.isSource, activeNewAnchor);
+		if (rewritten.text === freshText) continue;
 		try {
-			await put(item.path, item.next, true);
+			await put(item.path, rewritten.text, true);
 			written++;
+			writtenRefs += rewritten.refs;
 		} catch (e: any) {
 			notify(`Could not update ${baseName(item.path)}: ${e?.message ?? e}`, "error");
 		}
@@ -5055,8 +5572,8 @@ export async function renameHeadingAcrossWorkspace(targetPath?: string): Promise
 	if (written) {
 		setState("treeVersion", (v) => v + 1);
 		notify(
-			totalRefs > 0
-				? `Renamed heading to “${typed}” and updated ${totalRefs} ${totalRefs === 1 ? "reference" : "references"} across ${written} ${written === 1 ? "file" : "files"}.`
+			writtenRefs > 0
+				? `Renamed heading to “${typed}” and updated ${writtenRefs} ${writtenRefs === 1 ? "reference" : "references"} across ${written} ${written === 1 ? "file" : "files"}.`
 				: `Renamed heading to “${typed}”.`,
 		);
 	}
@@ -5631,12 +6148,12 @@ export async function exportRtm(
 	);
 }
 
-/** Syncs an already-open editor buffer from disk after an import writes over its path so the buffer never goes stale. */
+/** Syncs an already-open editor buffer from disk after an import writes over its path so `savedText`/`mtime` stay aligned without double-writing. */
 async function syncImportedBuffer(importedPath: string): Promise<void> {
-	if (!documents.get(canonical(importedPath))) return;
+	const key = canonical(importedPath);
+	if (!documents.get(key)) return;
 	try {
-		const disk = await backend.read(importedPath);
-		if (!disk.binary) await put(importedPath, disk.text, true);
+		await changingOnDisk(importedPath, () => revert(key));
 	} catch {
 		// Ignore if unreadable; `openFile` will surface any file error.
 	}
@@ -5710,7 +6227,7 @@ export async function importLegacyDoc(
 		if (res.conflict) {
 			const resolution = await promptImportConflict(res.existingPath || res.path);
 			if (!resolution) return;
-			res = await backend.importDocFile({ sourcePath, destDir, attachmentsDir, onConflict: resolution });
+			res = await backend.importDocFile({ sourcePath: res.sourcePath ?? sourcePath, destDir, attachmentsDir, onConflict: resolution });
 			if (!res) return;
 		}
 		await syncImportedBuffer(res.path);
@@ -5793,6 +6310,7 @@ export async function onboardBrownfieldWorkspace(): Promise<void> {
 	}
 	const wsRoot = root();
 	const wsFiles = await backend.files().catch(() => []);
+	if (!state.workspace || root() !== wsRoot) return;
 	const docsDir = docsFolder();
 	const skipPath = (rel: string) => /(?:^|\/)(?:node_modules|\.git|\.ssl-studio|dist|build)\//i.test(rel);
 
@@ -5815,13 +6333,17 @@ export async function onboardBrownfieldWorkspace(): Promise<void> {
 
 	const dbCsvPath = joinPath(areaFolder("registries"), REGISTRIES.find((r) => r.id === "database")!.file);
 	const filesCsvPath = joinPath(areaFolder("registries"), REGISTRIES.find((r) => r.id === "files")!.file);
-	const [hasDbCsv, hasFilesCsv] = await Promise.all([
+	const needsSetup = !state.project?.configured;
+	const [hasDbCsv, hasFilesCsv, plannedSetup] = await Promise.all([
 		current(dbCsvPath).then((t) => t !== null),
 		current(filesCsvPath).then((t) => t !== null),
+		needsSetup ? backend.setupPreview().catch(() => [] as string[]) : Promise.resolve([] as string[]),
 	]);
-	const needsSetup = !state.project?.configured;
+	if (!state.workspace || root() !== wsRoot) return;
 	const actions: string[] = [];
-	if (needsSetup) actions.push("create .ssl-studio/project.toml");
+	if (needsSetup) {
+		actions.push(plannedSetup.length ? `create ${plannedSetup.join(", ")}` : "create .ssl-studio/project.toml");
+	}
 	if (!hasDbCsv && sqlFiles.length) actions.push(`seed database.csv from ${sqlFiles.length} SQL files`);
 	if (!hasFilesCsv) actions.push("seed files.csv manifest");
 
@@ -5840,6 +6362,7 @@ export async function onboardBrownfieldWorkspace(): Promise<void> {
 
 	const picked = await choose(summary, choices, { details });
 	if (!picked) return;
+	if (!state.workspace || root() !== wsRoot) return;
 
 	if (picked === LIST_ONLY) {
 		const preview = legacyMdFiles.slice(0, 12).join(", ") + (legacyMdFiles.length > 12 ? `, and ${legacyMdFiles.length - 12} more` : "");
@@ -5851,8 +6374,10 @@ export async function onboardBrownfieldWorkspace(): Promise<void> {
 	try {
 		if (needsSetup) {
 			const made = await backend.setupProject();
+			if (!state.workspace || root() !== wsRoot) return;
 			created.push(...made);
 			const refreshed = await backend.project();
+			if (!state.workspace || root() !== wsRoot) return;
 			setState("project", refreshed);
 		}
 
@@ -5871,6 +6396,7 @@ export async function onboardBrownfieldWorkspace(): Promise<void> {
 					rows.push(csvRow([obj.name, obj.kind, "", "", "found", `From ${rel}`]));
 				}
 			}
+			if (!state.workspace || root() !== wsRoot) return;
 			const csvBody = `${csvRow(dbKind.columns)}\n${rows.length ? `${rows.join("\n")}\n` : ""}`;
 			await put(dbCsvPath, csvBody, false);
 			created.push(relativeTo(wsRoot, dbCsvPath).split("\\").join("/"));
@@ -5879,11 +6405,13 @@ export async function onboardBrownfieldWorkspace(): Promise<void> {
 		if (!hasFilesCsv) {
 			const ownRel = relativeTo(wsRoot, filesCsvPath).split("\\").join("/");
 			const manifest = (await backend.manifest()).filter((f) => f.path !== ownRel);
+			if (!state.workspace || root() !== wsRoot) return;
 			const merged = mergeManifest(null, manifest);
 			await put(filesCsvPath, merged.text, false);
 			created.push(ownRel);
 		}
 
+		if (!state.workspace || root() !== wsRoot) return;
 		setState("treeVersion", (v) => v + 1);
 		const legacyNote = legacyMdFiles.length
 			? ` Found ${legacyMdFiles.length} legacy Markdown ${legacyMdFiles.length === 1 ? "doc" : "docs"} outside ${areaSaid("docs")}/ (${legacyMdFiles.slice(0, 4).join(", ")}${legacyMdFiles.length > 4 ? "…" : ""}).`
@@ -6037,6 +6565,7 @@ function applyApprovalToMarkdown(
  */
 export async function recordDocApproval(targetPath?: string): Promise<void> {
 	if (!ready()) return;
+	const startRoot = root();
 	const docPath = targetPath ?? activePath();
 	if (!docPath || !isMarkdown(docPath)) {
 		notify("Open a Markdown document first to record approval.");
@@ -6054,10 +6583,12 @@ export async function recordDocApproval(targetPath?: string): Promise<void> {
 
 	const approver = (await ask(`Approver name or role for ${baseName(docPath)}`, defaultApprover))?.trim();
 	if (!approver) return;
+	if (!state.workspace || root() !== startRoot) return;
 	remember("docs.lastApprover", approver);
 
 	const ccInput = await ask("Change-control / CAB ID (optional, leave empty to skip)", one(fm.values["change-control"]) || "");
 	if (ccInput === null) return;
+	if (!state.workspace || root() !== startRoot) return;
 	const changeControl = ccInput.trim();
 
 	const curVer = one(fm.values.version);
@@ -6080,6 +6611,7 @@ export async function recordDocApproval(targetPath?: string): Promise<void> {
 				],
 	});
 	if (!versionPick) return;
+	if (!state.workspace || root() !== startRoot) return;
 	const nextVersion = versionPick === "__none__" ? "" : versionPick;
 
 	const approvalDate = today();
@@ -6096,10 +6628,14 @@ export async function recordDocApproval(targetPath?: string): Promise<void> {
 		],
 	});
 	if (!reviewPick) return;
+	if (!state.workspace || root() !== startRoot) return;
 	const reviewDue = reviewPick === "__none__" ? "" : reviewPick;
 
+	// Re-read current buffer after confirmation modals so edits made meanwhile are preserved.
+	const freshBefore = await current(docPath);
+	if (freshBefore === null) return notify("Could not read the document.", "error");
 	const summary = changeControl ? `Approved (${changeControl})` : "Formal approval recorded";
-	const after = applyApprovalToMarkdown(before, {
+	const after = applyApprovalToMarkdown(freshBefore, {
 		approver,
 		date: approvalDate,
 		version: nextVersion || undefined,
@@ -6527,8 +7063,10 @@ function suggestSubticketKey(parentKey: string, allDocs: readonly DocFile[]): st
  */
 export async function splitTicketSubticket(targetPath?: string): Promise<void> {
 	if (!ready()) return;
+	const startRoot = root();
 	const srcDoc = await resolveTargetTicket(targetPath, "Split checklist items from which ticket?");
 	if (!srcDoc?.ticket) return;
+	if (!state.workspace || root() !== startRoot) return;
 	const parentKey = srcDoc.ticket;
 	const srcText = await current(srcDoc.path);
 	if (srcText === null) return notify("Could not read the ticket.", "error");
@@ -6552,15 +7090,17 @@ export async function splitTicketSubticket(targetPath?: string): Promise<void> {
 		})),
 	});
 	if (!pickedItems || !pickedItems.length) return;
+	if (!state.workspace || root() !== startRoot) return;
 
 	const allDocs = docs();
 	const suggestedKey = suggestSubticketKey(parentKey, allDocs);
 	const rawChildKey = await ask(`New sub-ticket key under ${parentKey}`, suggestedKey);
 	const childKey = ticketKey(rawChildKey ?? "");
 	if (!childKey) return;
+	if (!state.workspace || root() !== startRoot) return;
 	const duplicate = allDocs.find((d) => d.exists && d.group === "tickets" && d.ticket?.toLowerCase() === childKey.toLowerCase());
 	if (duplicate) {
-		notify(`${childKey} already exists (${relativeTo(root(), duplicate.path)}).`, "error");
+		notify(`${childKey} already exists (${relativeTo(startRoot, duplicate.path)}).`, "error");
 		return;
 	}
 
@@ -6570,8 +7110,12 @@ export async function splitTicketSubticket(targetPath?: string): Promise<void> {
 			: `${srcDoc.title || parentKey} — follow-up`;
 	const childTitle = (await ask(`${childKey}: sub-ticket title`, defaultTitle))?.trim();
 	if (!childTitle) return;
+	if (!state.workspace || root() !== startRoot) return;
 
-	const fm = frontMatter(srcText).values;
+	// Re-read parent ticket after confirmation modals so edits made meanwhile are preserved.
+	const freshSrcText = await current(srcDoc.path);
+	if (freshSrcText === null) return notify("Could not read the ticket.", "error");
+	const fm = frontMatter(freshSrcText).values;
 	let childMd = ticketTemplate({
 		key: childKey,
 		title: childTitle,
@@ -6599,8 +7143,14 @@ export async function splitTicketSubticket(targetPath?: string): Promise<void> {
 	try {
 		await backend.create(childDest, "file");
 		await backend.write(childDest, childMd);
-		const removedSet = new Set(pickedItems.map((it) => it.line));
-		const nextParent = splitParentTicketChecklist(srcText, removedSet, childKey, childTitle);
+		const freshUnchecked = extractUncheckedChecklistLines(freshSrcText);
+		const removedSet = new Set<number>();
+		for (const picked of pickedItems) {
+			const exact = freshUnchecked.find((u) => !removedSet.has(u.line) && u.line === picked.line && u.text === picked.text);
+			const fallback = exact ?? freshUnchecked.find((u) => !removedSet.has(u.line) && u.text === picked.text);
+			if (fallback) removedSet.add(fallback.line);
+		}
+		const nextParent = splitParentTicketChecklist(freshSrcText, removedSet, childKey, childTitle);
 		await put(srcDoc.path, nextParent, true);
 		setState("treeVersion", (v) => v + 1);
 		notify(`Split ${pickedItems.length} ${pickedItems.length === 1 ? "item" : "items"} from ${parentKey} into ${childKey}.`);
@@ -6627,9 +7177,13 @@ export async function addDatabaseRegistryRow(objectName: string, sourcePath: str
 	const existingText = await current(dbPath);
 	if (existingText === null) {
 		const fresh = `${csvRow(dbKind.columns)}\n${csvRow([cleanObj, "table", relSrc, "", "found", citeNote])}\n`;
-		await put(dbPath, fresh, false);
-		setState("treeVersion", (v) => v + 1);
-		notify(`Created database.csv and added ${cleanObj}.`);
+		try {
+			await put(dbPath, fresh, false);
+			setState("treeVersion", (v) => v + 1);
+			notify(`Created database.csv and added ${cleanObj}.`);
+		} catch (e: any) {
+			notify(String(e?.message ?? e), "error");
+		}
 		return;
 	}
 
@@ -6659,7 +7213,11 @@ export async function addDatabaseRegistryRow(objectName: string, sourcePath: str
 	});
 	const prefix = existingText && !/\r?\n$/.test(existingText) ? nl : "";
 	const nextText = `${existingText}${prefix}${csvRow(newRow, table.delimiter)}${nl}`;
-	await put(dbPath, nextText, true);
-	setState("treeVersion", (v) => v + 1);
-	notify(`Added ${cleanObj} to database.csv (${relSrc}).`);
+	try {
+		await put(dbPath, nextText, true);
+		setState("treeVersion", (v) => v + 1);
+		notify(`Added ${cleanObj} to database.csv (${relSrc}).`);
+	} catch (e: any) {
+		notify(String(e?.message ?? e), "error");
+	}
 }

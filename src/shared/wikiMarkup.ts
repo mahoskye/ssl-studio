@@ -36,13 +36,38 @@ function words(text: string): string {
 	);
 }
 
+/** Allows only http(s), mailto, or safe relative URLs; percent-encodes `< > ( )` and whitespace. */
+function safeWikiUrl(raw: string): string {
+	const clean = raw.replace(/[\u0000-\u001f\u007f]+/g, "").trim();
+	if (!clean || clean.startsWith("//")) return "";
+	const scheme = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(clean);
+	if (scheme && !/^(?:https?|mailto)$/i.test(scheme[1]!)) return "";
+	return clean.replace(/[()\s<>]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`);
+}
+
+/** Escapes Markdown/HTML control chars in panel and code-block titles without mangling interior underscores. */
+function escapeTitle(raw: string): string {
+	const text = raw.replace(/\s*[\r\n]+\s*/g, " ").trim();
+	const isWord = (ch: string | undefined) => ch !== undefined && /[\p{L}\p{N}]/u.test(ch);
+	let out = "";
+	for (let i = 0; i < text.length; i++) {
+		const ch = text[i]!;
+		const next = text[i + 1];
+		if (ch === "\\" || ch === "*" || ch === "`" || ch === "~" || ch === "[" || ch === "]") out += `\\${ch}`;
+		else if (ch === "_" && !(isWord(text[i - 1]) && isWord(next))) out += "\\_";
+		else if (ch === "<" && next !== undefined && /[A-Za-z/!?]/.test(next)) out += "&lt;";
+		else out += ch;
+	}
+	return out;
+}
+
 /**
  * What a line holds whole, and is written as it is or as Markdown's own
  * form of it: text in backticks, one of the wiki's own marks written with a
  * backslash (which says "this is itself" there as it does in Markdown), a link with
  * its words, an address in brackets, and an address in the sentence.
  */
-const WHOLE = /(`[^`\n]+`)|(\\[*_\-+^~?{}[\]|!#\\])|\[([^\]|\n]+)\|([a-z][a-z0-9+.-]*:[^\]|\s]+)(?:\|[^\]\n]*)?\]|\[(https?:\/\/[^\]|\s]+)\]|(https?:\/\/[^\s<>]+)/gi;
+const WHOLE = /(`[^`\n]+`)|(\\[*_\-+^~?{}[\]|!#\\])|\[([^\]|\n]+)\|((?:https?:\/\/|mailto:|javascript:|vbscript:|data:)[^\]|\n]+|[a-z][a-z0-9+.-]*:[^\]|\s]+)(?:\|[^\]\n]*)?\]|\[(https?:\/\/[^\]|\s]+)\]|(https?:\/\/[^\s<>]+)/gi;
 
 /** The marks inside a stretch of a line that is not code. */
 function prose(text: string): string {
@@ -53,9 +78,13 @@ function prose(text: string): string {
 	for (const found of plain.matchAll(WHOLE)) {
 		out += words(plain.slice(at, found.index));
 		if (found[1] ?? found[2]) out += found[1] ?? found[2];
-		else if (found[3]) out += `[${words(found[3])}](${found[4]})`;
-		else if (found[5]) out += `<${found[5]}>`;
-		else {
+		else if (found[3]) {
+			const safe = safeWikiUrl(found[4]!);
+			out += safe ? `[${words(found[3])}](${safe})` : words(found[3]);
+		} else if (found[5]) {
+			const safe = safeWikiUrl(found[5]);
+			out += safe ? `<${safe}>` : words(found[5]);
+		} else {
 			const [address, rest] = addressAndRest(found[6]!);
 			out += `<${address}>${words(rest)}`;
 		}
@@ -154,7 +183,8 @@ export function wikiToMarkdown(text: string): string {
 		const body = found[3]!.replace(/^\n+|\n+$/g, "");
 		if (tag === "panel") {
 			const says = codeSays(found[2] ?? "");
-			const heading = says.title ? `> [!note] ${says.title}` : "> [!note]";
+			const safeTitle = says.title ? escapeTitle(says.title) : "";
+			const heading = safeTitle ? `> [!note] ${safeTitle}` : "> [!note]";
 			const inner = wikiToMarkdown(body);
 			gap();
 			out.push(
@@ -170,7 +200,7 @@ export function wikiToMarkdown(text: string): string {
 		const fence = ticks(body, 3);
 		gap();
 		// A block's title is words of the ticket's: kept, above the block.
-		if (says.title) out.push(`**${says.title}**`, "");
+		if (says.title) out.push(`**${escapeTitle(says.title)}**`, "");
 		out.push(`${fence}${says.language}`, body, fence, "");
 		at = found.index + found[0].length;
 	}

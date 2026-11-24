@@ -83,14 +83,65 @@ export function extractTags(markdown: string): string[] {
 		for (const part of raw.split(/[\s,]+/)) add(part, true);
 	}
 
-	const lines = markdown.split(/\r?\n/);
-	const fences = fenced(markdown);
+	const body = fm.body;
+	const fences = fenced(body);
+	// Strip single-line AND multi-line HTML comments outside fenced code blocks and inline code spans
+	// while preserving newlines so offsets and ATX heading checks stay exact.
+	let cleanBody = "";
+	let ci = 0;
+	let fIdx = 0;
+	while (ci < body.length) {
+		while (fIdx < fences.length && fences[fIdx]![1] <= ci) fIdx++;
+		const curFence = fences[fIdx];
+		if (curFence && ci >= curFence[0] && ci < curFence[1]) {
+			cleanBody += body.slice(ci, curFence[1]);
+			ci = curFence[1];
+			continue;
+		}
+		if (body[ci] === "`") {
+			let run = 0;
+			while (ci + run < body.length && body[ci + run] === "`") run++;
+			let j = ci + run;
+			let closed = -1;
+			while (j < body.length && body[j] !== "\n" && body[j] !== "\r") {
+				if (body[j] !== "`") {
+					j++;
+					continue;
+				}
+				let cRun = 0;
+				while (j + cRun < body.length && body[j + cRun] === "`") cRun++;
+				if (cRun === run) {
+					closed = j + cRun;
+					break;
+				}
+				j += cRun;
+			}
+			if (closed >= 0) {
+				cleanBody += body.slice(ci, closed);
+				ci = closed;
+				continue;
+			}
+			cleanBody += body.slice(ci, ci + run);
+			ci += run;
+			continue;
+		}
+		if (body.startsWith("<!--", ci)) {
+			const end = body.indexOf("-->", ci + 4);
+			if (end >= 0) {
+				cleanBody += body.slice(ci, end + 3).replace(/[^\r\n]/g, " ");
+				ci = end + 3;
+				continue;
+			}
+		}
+		cleanBody += body[ci++];
+	}
+
+	const lines = cleanBody.split(/\r?\n/);
 	let offset = 0;
 	for (let idx = 0; idx < lines.length; idx++) {
 		const line = lines[idx]!;
 		const start = offset;
-		offset += line.length + (markdown[start + line.length] === "\r" ? 2 : 1);
-		if (idx < fm.lines) continue;
+		offset += line.length + (cleanBody[start + line.length] === "\r" ? 2 : 1);
 		if (!line.includes("#")) continue;
 		if (fences.some(([from, to]) => start >= from && start < to)) continue;
 		// Skip Markdown ATX headings (`# Title`, `## Sub`).

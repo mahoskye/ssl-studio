@@ -28,27 +28,35 @@ export function escapeHtml(text: string): string {
 	return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-/** Splits a GFM pipe table row on unescaped `|` outside backtick code spans. */
+/** Splits a GFM pipe table row on unescaped `|` outside backtick code spans of any run length. */
 function splitMarkdownTableCells(row: string): string[] {
 	let s = row.trim();
 	if (s.startsWith("|")) s = s.slice(1);
-	if (s.endsWith("|") && !s.endsWith("\\|")) s = s.slice(0, -1);
+	if (s.endsWith("|")) {
+		let bs = 0;
+		for (let k = s.length - 2; k >= 0 && s[k] === "\\"; k--) bs++;
+		if (bs % 2 === 0) s = s.slice(0, -1);
+	}
 	const cells: string[] = [];
 	let cur = "";
-	let inCode = false;
+	let codeRun = 0;
 	for (let i = 0; i < s.length; i++) {
 		const ch = s[i]!;
-		if (ch === "\\" && !inCode && s[i + 1] === "|") {
+		if (codeRun === 0 && ch === "\\" && s[i + 1] === "|") {
 			cur += "|";
 			i++;
 			continue;
 		}
 		if (ch === "`") {
-			inCode = !inCode;
-			cur += ch;
+			let run = 0;
+			while (i + run < s.length && s[i + run] === "`") run++;
+			cur += "`".repeat(run);
+			if (codeRun === 0) codeRun = run;
+			else if (codeRun === run) codeRun = 0;
+			i += run - 1;
 			continue;
 		}
-		if (ch === "|" && !inCode) {
+		if (ch === "|" && codeRun === 0) {
 			cells.push(cur.trim());
 			cur = "";
 			continue;
@@ -66,7 +74,11 @@ function splitMarkdownTableCells(row: string): string[] {
  * links, wikilinks, highlights, and inline emphasis cleanly.
  */
 export function markdownToJira(markdown: string): string {
-	const raw = frontMatter(markdown).body.replace(/\r\n/g, "\n");
+	return markdownToJiraInternal(markdown, true);
+}
+
+function markdownToJiraInternal(markdown: string, stripFrontMatter = true): string {
+	const raw = (stripFrontMatter ? frontMatter(markdown).body : markdown).replace(/\r\n/g, "\n");
 	const lines = raw.split("\n");
 	const out: string[] = [];
 	let i = 0;
@@ -115,6 +127,8 @@ export function markdownToJira(markdown: string): string {
 					if (code.length >= 2 && code.startsWith(" ") && code.endsWith(" ") && /[^ ]/.test(code)) {
 						code = code.slice(1, -1);
 					}
+					// Escape braces so `{` / `}` inside code never break Jira `{{...}}` monospace spans.
+					code = code.replace(/([{}])/g, "\\$1");
 					if (inTableCell) code = code.replace(/\|/g, "\\|");
 					const token = `\u0000CODE${spans.length}\u0000`;
 					spans.push(`{{${code}}}`);
@@ -148,34 +162,105 @@ export function markdownToJira(markdown: string): string {
 			}
 			return rawTarget;
 		});
-		// Markdown images ![alt](url) -> !filename.png! (basename for local paths; keep full remote http(s) URLs)
-		s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (_, _alt: string, url: string) => `!${attachmentBasename(url)}!`);
-		// Markdown links [text](url) -> [text|url] (protect from table-cell pipe escaping)
+
 		const protectedTokens: string[] = [];
 		const hold = (val: string) => {
 			const tok = `\u0000FMT${protectedTokens.length}\u0000`;
 			protectedTokens.push(val);
 			return tok;
 		};
-		s = s.replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (_, label: string, url: string) => hold(`[${label}|${url}]`));
+		const restoreFmt = (val: string): string => {
+			let cur = val;
+			while (/\u0000FMT\d+\u0000/.test(cur)) {
+				cur = cur.replace(/\u0000FMT(\d+)\u0000/g, (_, idx: string) => protectedTokens[Number(idx)] ?? "");
+			}
+			return cur;
+		};
+		const formatMarks = (seg: string): string => {
+			let t = seg;
+			// Protect bold & bold-italic BEFORE single-* italic conversion so bold doesn't clash with italic.
+			t = t.replace(/\*\*\*(?=\S)([^*\n]*?\S)\*\*\*/g, (_, body: string) => hold(`*_${body}_*`));
+			t = t.replace(/\*\*(?=\S)([^*\n]*?\S)\*\*/g, (_, body: string) => hold(`*${body}*`));
+			t = t.replace(/(^|[^\w])__(?=\S)([^_\n]*?\S)__(?=[^\w]|$)/g, (_, pre: string, body: string) => `${pre}${hold(`*${body}*`)}`);
+			// Italic *text* -> Jira _text_ (require non-whitespace immediately inside `*...*` so `SELECT * FROM a * b` stays verbatim!)
+			t = t.replace(/(^|[^\w*])\*(?=\S)([^*\n]*?\S)\*(?=[^\w*]|$)/g, (_, pre: string, body: string) => `${pre}_${body}_`);
+			// Strikethrough ~~text~~ -> -text-
+			t = t.replace(/~~(?=\S)([^~\n]*?\S)~~/g, "-$1-");
+			// Highlight ==text== -> {color:#b45309}*text*{color}
+			t = t.replace(/==(?=\S)([^=\n]*?\S)==/g, "{color:#b45309}*$1*{color}");
+			return t;
+		};
+
+		// Parse Markdown images `![alt](url)` and links `[label](url)` with balanced parentheses,
+		// formatting link labels BEFORE linkifying & protecting links from table-cell pipe escaping.
+		let linkScanned = "";
+		let p = 0;
+		while (p < s.length) {
+			if (s[p] === "!" && s[p + 1] === "[") {
+				const closeBr = findInlineBracketClose(s, p + 1);
+				if (closeBr >= 0 && s[closeBr + 1] === "(") {
+					const dest = parseInlineLinkDest(s, closeBr + 1);
+					if (dest && dest.url) {
+						linkScanned += hold(`!${attachmentBasename(dest.url)}!`);
+						p = dest.end;
+						continue;
+					}
+				}
+			}
+			if (s[p] === "[") {
+				const closeBr = findInlineBracketClose(s, p);
+				if (closeBr > p + 1 && s[closeBr + 1] === "(") {
+					const dest = parseInlineLinkDest(s, closeBr + 1);
+					if (dest && dest.url) {
+						const rawLabel = s.slice(p + 1, closeBr);
+						const formattedLabel = restoreFmt(formatMarks(rawLabel)).replace(/(?<!\\)\|/g, "\\|");
+						linkScanned += hold(`[${formattedLabel}|${dest.url}]`);
+						p = dest.end;
+						continue;
+					}
+				}
+			}
+			linkScanned += s[p++];
+		}
+		s = linkScanned;
+
 		if (inTableCell) s = s.replace(/(?<!\\)\|/g, "\\|");
-		// Protect bold & bold-italic BEFORE single-* italic conversion so bold doesn't clash with italic.
-		s = s.replace(/\*\*\*(?=\S)([^*\n]*?\S)\*\*\*/g, (_, body: string) => hold(`*_${body}_*`));
-		s = s.replace(/\*\*(?=\S)([^*\n]*?\S)\*\*/g, (_, body: string) => hold(`*${body}*`));
-		s = s.replace(/(^|[^\w])__(?=\S)([^_\n]*?\S)__(?=[^\w]|$)/g, (_, pre: string, body: string) => `${pre}${hold(`*${body}*`)}`);
-		// Italic *text* -> Jira _text_ (require non-whitespace immediately inside `*...*` so `SELECT * FROM a * b` stays verbatim!)
-		s = s.replace(/(^|[^\w*])\*(?=\S)([^*\n]*?\S)\*(?=[^\w*]|$)/g, (_, pre: string, body: string) => `${pre}_${body}_`);
-		// Strikethrough ~~text~~ -> -text-
-		s = s.replace(/~~(?=\S)([^~\n]*?\S)~~/g, "-$1-");
-		// Highlight ==text== -> {color:#b45309}*text*{color}
-		s = s.replace(/==(?=\S)([^=\n]*?\S)==/g, "{color:#b45309}*$1*{color}");
+		s = formatMarks(s);
 		// Restore held tokens & inline code spans
-		s = s.replace(/\u0000FMT(\d+)\u0000/g, (_, idx: string) => protectedTokens[Number(idx)] ?? "");
+		s = restoreFmt(s);
 		return s.replace(/\u0000CODE(\d+)\u0000/g, (_, idx: string) => spans[Number(idx)] ?? "");
 	};
 
 	while (i < lines.length) {
-		const line = lines[i]!;
+		let line = lines[i]!;
+
+		// Strip single-line AND multi-line HTML comments while keeping any trailing prose after closed `-->`.
+		if (/^[ \t]*<!--/.test(line)) {
+			const stripped = line.replace(/<!--[\s\S]*?-->/g, "");
+			const openAt = stripped.indexOf("<!--");
+			if (openAt >= 0) {
+				const beforeOpen = stripped.slice(0, openAt).trim();
+				i++;
+				let trailing = "";
+				while (i < lines.length) {
+					const closeAt = lines[i]!.indexOf("-->");
+					if (closeAt >= 0) {
+						trailing = lines[i]!.slice(closeAt + 3).replace(/<!--[\s\S]*?-->/g, "").trim();
+						i++;
+						break;
+					}
+					i++;
+				}
+				const remainder = [beforeOpen, trailing].filter(Boolean).join(" ").trim();
+				if (remainder) out.push(inline(remainder));
+				continue;
+			}
+			if (!stripped.trim()) {
+				i++;
+				continue;
+			}
+			line = stripped.replace(/^[ \t]+/, "");
+		}
 
 		// Fenced code blocks (supports info-string args like ```sql title="x") -> {code:lang}...{code}
 		const fence = /^[ \t]{0,3}(`{3,}|~{3,})[ \t]*([A-Za-z0-9_+-]*)(?:[ \t]+.*)?$/.exec(line);
@@ -211,31 +296,19 @@ export function markdownToJira(markdown: string): string {
 			continue;
 		}
 
-		// Skip single-line AND multi-line HTML comments (e.g. <!-- toc --> / <!-- /catalog --> / multi-line notes).
-		if (/^[ \t]*<!--/.test(line)) {
-			if (/-->[ \t]*$/.test(line)) {
-				i++;
-				continue;
-			}
-			i++;
-			while (i < lines.length && !/-->/.test(lines[i]!)) i++;
-			if (i < lines.length) i++;
-			continue;
-		}
-
 		// Obsidian / GitHub callout block -> {panel:title=...}...{panel} (recursively converts nested lists, checklists, code blocks).
 		const callout = /^[ \t]{0,3}>[ \t]*\[!([A-Za-z0-9_-]+)\][+-]?[ \t]*(.*)$/.exec(line);
 		if (callout) {
 			listStack.length = 0;
 			const kind = callout[1]!.toUpperCase();
-			const title = callout[2]!.trim() || kind;
+			const title = (callout[2]!.trim() || kind).replace(/([}|])/g, "\\$1");
 			i++;
 			const rawBody: string[] = [];
 			while (i < lines.length && /^[ \t]{0,3}>/.test(lines[i]!)) {
 				rawBody.push(lines[i]!.replace(/^[ \t]{0,3}>[ \t]?/, ""));
 				i++;
 			}
-			const converted = rawBody.length ? markdownToJira(rawBody.join("\n")).trimEnd() : "";
+			const converted = rawBody.length ? markdownToJiraInternal(rawBody.join("\n"), false).trimEnd() : "";
 			out.push(`{panel:title=${title}}`);
 			if (converted) out.push(converted);
 			out.push("{panel}");
@@ -245,12 +318,13 @@ export function markdownToJira(markdown: string): string {
 		// Standard blockquote (recursively converts nested lists/code)
 		if (/^[ \t]{0,3}>[ \t]?/.test(line)) {
 			listStack.length = 0;
-			const rawBody: string[] = [];
+			const rawBody: string[] = [line.replace(/^[ \t]{0,3}>[ \t]?/, "")];
+			i++;
 			while (i < lines.length && /^[ \t]{0,3}>/.test(lines[i]!)) {
 				rawBody.push(lines[i]!.replace(/^[ \t]{0,3}>[ \t]?/, ""));
 				i++;
 			}
-			const converted = rawBody.length ? markdownToJira(rawBody.join("\n")).trimEnd() : "";
+			const converted = rawBody.length ? markdownToJiraInternal(rawBody.join("\n"), false).trimEnd() : "";
 			out.push("{quote}", ...(converted ? [converted] : []), "{quote}");
 			continue;
 		}
@@ -372,9 +446,10 @@ export function renderFrontMatterSummaryHtml(meta: Record<string, string>): stri
 /** Escapes a string safely for interpolation inside a CSS `content: "..."` literal within `<style>`. */
 function escapeCssString(text: string): string {
 	return text
+		.replace(/\u0000/g, "")
 		.replace(/\\/g, "\\\\")
 		.replace(/"/g, '\\"')
-		.replace(/\r?\n/g, " ")
+		.replace(/[\r\n\f]+/g, " ")
 		.replace(/</g, "\\3c ")
 		.replace(/>/g, "\\3e ");
 }
@@ -758,6 +833,14 @@ export function parseTestRunDocument(path: string, text: string): TestRunSummary
 	};
 }
 
+/** Safely formats a single-line YAML scalar (collapsing newlines/control chars and quoting special characters). */
+function quoteYamlScalar(raw: string): string {
+	const clean = raw.replace(/[\r\n]+/g, " ").replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
+	if (!clean) return "";
+	if (/[:#\[\]{}"',&*!|>%@`\\]|^[-?]\s|^[-?]$/.test(clean)) return JSON.stringify(clean);
+	return clean;
+}
+
 /**
  * Generates a pre-populated IQ/OQ/PQ Validation Test Execution Protocol Markdown document
  * from `plan.tests`, ticket checklist items, `testScripts`, `gitSha`, `phase`, and `environment`.
@@ -766,18 +849,20 @@ export function parseTestRunDocument(path: string, text: string): TestRunSummary
 export function assembleTestExecutionProtocol(input: TestExecutionProtocolInput): string {
 	const date = input.executedDate?.trim() || new Date().toISOString().slice(0, 10);
 	const sha = input.gitSha?.trim() ?? "";
-	const title = `${input.ticketKey} ${input.phase} Validation Test Run`;
+	const cleanTicketKey = input.ticketKey.replace(/[\r\n]+/g, " ").trim();
+	const cleanEnv = input.environment.replace(/[\r\n]+/g, " ").trim();
+	const title = `${cleanTicketKey} ${input.phase} Validation Test Run`;
 	const fmLines: string[] = [
 		"---",
 		`title: ${JSON.stringify(title)}`,
 		"type: test-run",
-		`ticket: ${input.ticketKey}`,
+		`ticket: ${quoteYamlScalar(input.ticketKey)}`,
 		`phase: ${input.phase}`,
-		`environment: ${input.environment}`,
-		`git-sha: ${sha}`,
-		`executed-by: ${input.executedBy?.trim() ?? ""}`,
-		`executed-date: ${date}`,
-		...(input.changeControl?.trim() ? [`change-control: ${input.changeControl.trim()}`] : []),
+		`environment: ${quoteYamlScalar(input.environment)}`,
+		`git-sha: ${quoteYamlScalar(sha)}`,
+		`executed-by: ${quoteYamlScalar(input.executedBy ?? "")}`,
+		`executed-date: ${quoteYamlScalar(date)}`,
+		...(input.changeControl?.trim() ? [`change-control: ${quoteYamlScalar(input.changeControl)}`] : []),
 		"result: partial",
 		"status: draft",
 		"---",
@@ -786,12 +871,12 @@ export function assembleTestExecutionProtocol(input: TestExecutionProtocolInput)
 	const parts: string[] = [
 		...fmLines,
 		"",
-		`# ${input.ticketKey}: ${input.phase} Validation Test Run`,
+		`# ${cleanTicketKey}: ${input.phase} Validation Test Run`,
 		"",
 		`_${[
 			input.projectName?.trim() || "",
 			input.ticketTitle?.trim() || "",
-			`Env: ${input.environment}`,
+			`Env: ${cleanEnv}`,
 			sha ? `Git SHA \`${sha.slice(0, 12)}\`` : "",
 		]
 			.filter(Boolean)
@@ -841,6 +926,8 @@ export function assembleTestExecutionProtocol(input: TestExecutionProtocolInput)
 	return parts.join("\n");
 }
 
+const PHASE_RANK: Record<TestRunPhase, number> = { IQ: 0, OQ: 1, PQ: 2 };
+
 function summarizeTicketTestRuns(
 	runs: readonly TestRunSummary[],
 	currentGitSha?: string | null,
@@ -854,13 +941,31 @@ function summarizeTicketTestRuns(
 	runLines: string[];
 } | null {
 	if (!runs.length) return null;
-	const sorted = runs.slice().sort((a, b) => (b.executedDate || "").localeCompare(a.executedDate || ""));
-	const phases = [...new Set(runs.map((r) => r.phase))].join("/");
-	const failed = sorted.filter((r) => r.result === "fail");
-	const freshPassed = sorted.filter((r) => r.result === "pass" && !isTestRunStale(r, currentGitSha));
-	const stalePassed = sorted.filter((r) => r.result === "pass" && isTestRunStale(r, currentGitSha));
+	const headSha = (currentGitSha ?? "").trim().toLowerCase();
+	const indexed = runs.map((run, idx) => ({ run, idx }));
 
-	const runLines = sorted.map((r) => {
+	// Comparator: prefer non-stale (current HEAD SHA) over stale SHAs, then latest executedDate,
+	// then explicit HEAD SHA match over empty SHA, then later input index.
+	const cmpRuns = (a: { run: TestRunSummary; idx: number }, b: { run: TestRunSummary; idx: number }) => {
+		const aStale = isTestRunStale(a.run, currentGitSha) ? 1 : 0;
+		const bStale = isTestRunStale(b.run, currentGitSha) ? 1 : 0;
+		if (aStale !== bStale) return aStale - bStale;
+		const dateDiff = (b.run.executedDate || "").localeCompare(a.run.executedDate || "");
+		if (dateDiff !== 0) return dateDiff;
+		if (headSha) {
+			const aHasSha = a.run.gitSha.trim() ? 1 : 0;
+			const bHasSha = b.run.gitSha.trim() ? 1 : 0;
+			if (aHasSha !== bHasSha) return bHasSha - aHasSha;
+		}
+		return b.idx - a.idx;
+	};
+
+	const sortedAll = indexed
+		.slice()
+		.sort((a, b) => (b.run.executedDate || "").localeCompare(a.run.executedDate || "") || cmpRuns(a, b))
+		.map((x) => x.run);
+
+	const runLines = sortedAll.map((r) => {
 		const staleFlag = isTestRunStale(r, currentGitSha);
 		const shaPart = r.gitSha ? ` @ ${r.gitSha.slice(0, 12)}` : "";
 		const whoPart = r.executedBy ? ` by ${r.executedBy}` : "";
@@ -868,6 +973,23 @@ function summarizeTicketTestRuns(
 		const envPart = r.environment ? ` (${r.environment})` : "";
 		return `${r.phase}${envPart}: ${r.result.toUpperCase()}${staleFlag ? " [STALE SHA]" : ""}${shaPart}${whoPart}${datePart}`;
 	});
+
+	// Group runs by `(phase, environment)` and select the latest authoritative run per pair.
+	const groups = new Map<string, { run: TestRunSummary; idx: number }[]>();
+	for (const entry of indexed) {
+		const key = `${entry.run.phase}::${entry.run.environment.trim().toLowerCase()}`;
+		const list = groups.get(key) ?? [];
+		list.push(entry);
+		groups.set(key, list);
+	}
+	const latestRuns = [...groups.values()]
+		.map((entries) => entries.slice().sort(cmpRuns)[0]!.run)
+		.sort((a, b) => PHASE_RANK[a.phase] - PHASE_RANK[b.phase] || (b.executedDate || "").localeCompare(a.executedDate || ""));
+
+	const phases = [...new Set(latestRuns.map((r) => r.phase))].join("/");
+	const failed = latestRuns.filter((r) => r.result === "fail");
+	const staleRuns = latestRuns.filter((r) => isTestRunStale(r, currentGitSha));
+	const partialRuns = latestRuns.filter((r) => r.result !== "pass");
 
 	if (failed.length) {
 		const f = failed[0]!;
@@ -882,42 +1004,44 @@ function summarizeTicketTestRuns(
 			runLines,
 		};
 	}
-	if (freshPassed.length) {
-		const p = freshPassed[0]!;
-		const badge = `${phases} PASS`.length <= 20 ? `${phases} PASS` : "PASS";
-		return {
-			badge,
-			ok: true,
-			level: "pass",
-			detail: `${phases} passed${p.environment ? ` in ${p.environment}` : ""}${p.gitSha ? ` @ ${p.gitSha.slice(0, 8)}` : ""}`,
-			stale: false,
-			primaryPath: p.path,
-			runLines,
-		};
-	}
-	if (stalePassed.length) {
-		const s = stalePassed[0]!;
+	if (staleRuns.length) {
+		const s = staleRuns[0]!;
 		const badge = `${s.phase} STALE`.slice(0, 20);
 		return {
 			badge,
 			ok: false,
 			level: "warn",
-			detail: `${s.phase} passed on stale SHA ${s.gitSha.slice(0, 8)} (current ${(currentGitSha ?? "").slice(0, 8)}) — re-run required`,
+			detail:
+				s.result === "pass"
+					? `${s.phase} passed on stale SHA ${s.gitSha.slice(0, 8)} (current ${(currentGitSha ?? "").slice(0, 8)}) — re-run required`
+					: `${s.phase} validation partial on stale SHA ${s.gitSha.slice(0, 8)} (current ${(currentGitSha ?? "").slice(0, 8)}) — re-run required`,
 			stale: true,
 			primaryPath: s.path,
 			runLines,
 		};
 	}
-	const latest = sorted[0]!;
-	const stale = isTestRunStale(latest, currentGitSha);
-	const badge = `${latest.phase} PARTIAL`.slice(0, 20);
+	if (partialRuns.length) {
+		const latest = partialRuns[0]!;
+		const badge = `${latest.phase} PARTIAL`.slice(0, 20);
+		return {
+			badge,
+			ok: false,
+			level: "warn",
+			detail: `${latest.phase} validation partial/incomplete${latest.environment ? ` in ${latest.environment}` : ""}`,
+			stale: false,
+			primaryPath: latest.path,
+			runLines,
+		};
+	}
+	const p = latestRuns[0]!;
+	const badge = `${phases} PASS`.length <= 20 ? `${phases} PASS` : "PASS";
 	return {
 		badge,
-		ok: false,
-		level: "warn",
-		detail: `${latest.phase} validation partial/incomplete${stale ? ` (stale SHA ${latest.gitSha.slice(0, 8)})` : ""}`,
-		stale,
-		primaryPath: latest.path,
+		ok: true,
+		level: "pass",
+		detail: `${phases} passed${p.environment ? ` in ${p.environment}` : ""}${p.gitSha ? ` @ ${p.gitSha.slice(0, 8)}` : ""}`,
+		stale: false,
+		primaryPath: p.path,
 		runLines,
 	};
 }
@@ -1699,6 +1823,8 @@ export function transformMarkdownFootnotes(markdown: string, target: "html" | "j
 		}
 		return idx + 1;
 	};
+	const encFnId = (id: string) => escapeHtml(encodeURIComponent(id));
+	const refCounts = new Map<string, number>();
 	fenceChar = "";
 	fenceLen = 0;
 	const replaced = kept.map((line) => {
@@ -1719,7 +1845,11 @@ export function transformMarkdownFootnotes(markdown: string, target: "html" | "j
 				if (!defs.has(id)) return full;
 				const n = numOf(id);
 				if (target === "jira") return `^[${n}]^`;
-				return `<sup class="md-fn-ref"><a href="#fn-${encodeURIComponent(id)}" id="fnref-${encodeURIComponent(id)}">${n}</a></sup>`;
+				const seen = (refCounts.get(id) ?? 0) + 1;
+				refCounts.set(id, seen);
+				const enc = encFnId(id);
+				const refId = seen === 1 ? `fnref-${enc}` : `fnref-${enc}-${seen}`;
+				return `<sup class="md-fn-ref"><a href="#fn-${enc}" id="${refId}">${n}</a></sup>`;
 			}),
 		);
 	});
@@ -1731,10 +1861,10 @@ export function transformMarkdownFootnotes(markdown: string, target: "html" | "j
 		return `${replaced.join("\n").trimEnd()}\n\n----\n\n${footLines.join("\n")}\n`;
 	}
 	const items = order
-		.map(
-			(id) =>
-				`<li id="fn-${escapeHtml(id)}">${renderFootnoteInlineHtml(defs.get(id) ?? "")} <a href="#fnref-${escapeHtml(id)}" aria-label="Back to content">↩</a></li>`,
-		)
+		.map((id) => {
+			const enc = encFnId(id);
+			return `<li id="fn-${enc}">${renderFootnoteInlineHtml(defs.get(id) ?? "")} <a href="#fnref-${enc}" aria-label="Back to content">↩</a></li>`;
+		})
 		.join("");
 	return `${replaced.join("\n").trimEnd()}\n\n<section class="md-footnotes"><ol>${items}</ol></section>\n`;
 }
@@ -2341,38 +2471,89 @@ export function assembleDeploymentRunbook(input: DeploymentRunbookInput): string
 
 	// 2. Database DDL in FK-topological order (parent tables -> child tables -> views/procs/packages)
 	parts.push("### 2. Database DDL (FK-Topological Order)", "");
+	const normTableId = (raw: string) => raw.trim().replace(/[\[\]"`]/g, "").toLowerCase();
+	const bareTableId = (norm: string) => {
+		const dot = norm.lastIndexOf(".");
+		return dot >= 0 ? norm.slice(dot + 1) : norm;
+	};
 	const tableDepByLower = new Map<string, DeploymentRunbookTableDep>();
 	for (const td of input.sqlTables ?? []) {
-		if (td.name.trim()) tableDepByLower.set(td.name.trim().toLowerCase(), td);
+		const k = normTableId(td.name);
+		if (k) tableDepByLower.set(k, td);
 	}
 	const orderedTableNames = orderSqlTablesTopologically(input.sqlTables ?? []);
-	const orderedTableSet = new Set(orderedTableNames.map((n) => n.toLowerCase()));
+	const orderedTableSet = new Set<string>();
+	const bareToOrderedKeys = new Map<string, string[]>();
+	for (const tblName of orderedTableNames) {
+		const norm = normTableId(tblName);
+		orderedTableSet.add(norm);
+		const bare = bareTableId(norm);
+		const list = bareToOrderedKeys.get(bare) ?? [];
+		if (!list.includes(norm)) list.push(norm);
+		bareToOrderedKeys.set(bare, list);
+	}
+	const matchOrderedTable = (rawSource: string): string | null => {
+		const norm = normTableId(rawSource);
+		if (!norm) return null;
+		if (orderedTableSet.has(norm)) return norm;
+		const bare = bareTableId(norm);
+		const hits = bareToOrderedKeys.get(bare);
+		return hits && hits.length === 1 ? hits[0]! : null;
+	};
+
 	const tableSqlItems: { label: string; path?: string }[] = [];
 	const nonTableSqlItems: { label: string; kind: string; path?: string }[] = [];
 
-	// Map sqlArtifacts to matching tables or views/procs/packages
-	const sqlByTableLower = new Map<string, DeploymentManifestSql>();
+	// Map sqlArtifacts to matching tables (1-to-many so multiple DDL scripts per table are never dropped) or views/procs/packages
+	const sqlByTableLower = new Map<string, DeploymentManifestSql[]>();
+	const seenOtherSql = new Set<string>();
+	const NON_TABLE_KIND_RE = /\b(?:view|proc(?:edure)?|func(?:tion)?|pack(?:age)?|trig(?:ger)?)\b/i;
 	for (const sql of input.sqlArtifacts ?? []) {
-		const srcLower = sql.source.trim().toLowerCase();
-		const srcBare = srcLower.includes(".") ? srcLower.slice(srcLower.lastIndexOf(".") + 1) : srcLower;
-		if (orderedTableSet.has(srcLower)) {
-			sqlByTableLower.set(srcLower, sql);
-		} else if (orderedTableSet.has(srcBare)) {
-			sqlByTableLower.set(srcBare, sql);
+		const matchedKey = !NON_TABLE_KIND_RE.test(sql.kind) ? matchOrderedTable(sql.source) : null;
+		if (matchedKey) {
+			const list = sqlByTableLower.get(matchedKey) ?? [];
+			const pKey = normPathKey(sql.path);
+			if (!pKey || !list.some((existing) => normPathKey(existing.path) === pKey)) {
+				list.push(sql);
+			}
+			sqlByTableLower.set(matchedKey, list);
 		} else if (/\btable\b/i.test(sql.kind)) {
+			const dedupeKey = normPathKey(sql.path || sql.source);
+			if (dedupeKey && seenOtherSql.has(dedupeKey)) continue;
+			if (dedupeKey) seenOtherSql.add(dedupeKey);
 			tableSqlItems.push({ label: sql.source || sql.path, path: sql.path });
 		} else {
+			const dedupeKey = normPathKey(sql.path || sql.source);
+			if (dedupeKey && seenOtherSql.has(dedupeKey)) continue;
+			if (dedupeKey) seenOtherSql.add(dedupeKey);
 			nonTableSqlItems.push({ label: sql.source || sql.path, kind: sql.kind || "DDL", path: sql.path });
 		}
 	}
 
 	const ddlLines: string[] = [];
 	for (const tblName of orderedTableNames) {
-		const key = tblName.toLowerCase();
+		const key = normTableId(tblName);
 		const dep = tableDepByLower.get(key);
-		const linkedSql = sqlByTableLower.get(key);
-		const sqlPath = dep?.path || linkedSql?.path;
-		ddlLines.push(`- [ ] Apply table DDL \`${tblName}\`${sqlPath ? ` (\`${sqlPath}\`)` : ""}.`);
+		const linkedSqls = sqlByTableLower.get(key) ?? [];
+		const paths: string[] = [];
+		const seenPaths = new Set<string>();
+		const pushPath = (p?: string) => {
+			const clean = (p ?? "").trim();
+			if (!clean) return;
+			const pk = normPathKey(clean);
+			if (seenPaths.has(pk)) return;
+			seenPaths.add(pk);
+			paths.push(clean);
+		};
+		pushPath(dep?.path);
+		for (const s of linkedSqls) pushPath(s.path);
+		if (!paths.length) {
+			ddlLines.push(`- [ ] Apply table DDL \`${tblName}\`.`);
+		} else {
+			for (const p of paths) {
+				ddlLines.push(`- [ ] Apply table DDL \`${tblName}\` (\`${p}\`).`);
+			}
+		}
 	}
 	for (const t of tableSqlItems) {
 		ddlLines.push(`- [ ] Apply table DDL \`${t.label}\`${t.path && t.path !== t.label ? ` (\`${t.path}\`)` : ""}.`);
@@ -2809,7 +2990,7 @@ function deduplicateReleaseBundleArtifacts(input: ReleaseBundleInput) {
 	// 3. Deduplicate SQL artifacts.
 	const sqlMap = new Map<string, { path: string; kind: string; sources: string[]; tickets: string[] }>();
 	for (const sql of input.sqlArtifacts) {
-		const norm = sql.path.replace(/\\/g, "/").trim().toLowerCase();
+		const norm = normPathKey(sql.path);
 		if (!norm) continue;
 		const srcLabel = sql.ticket && sql.source && !sql.source.includes(sql.ticket) ? `${sql.ticket} (${sql.source})` : sql.source || sql.ticket || "";
 		const existing = sqlMap.get(norm);
@@ -3150,17 +3331,20 @@ export function assembleReleaseNotesMarkdown(input: ReleaseBundleInput): string 
 		parts.push("");
 	}
 
-	const uniqueSqlCount = new Set(input.sqlArtifacts.map((s) => s.path.toLowerCase())).size;
-	const uniqueRegRows = input.registries.reduce((sum, r) => sum + r.rows.length, 0);
-	if (uniqueSqlCount > 0 || uniqueRegRows > 0 || (input.rollbackNotes?.length ?? 0) > 0) {
+	const { sqlMap, regMap, dedupedRollbacks } = deduplicateReleaseBundleArtifacts(input);
+	const uniqueSqlCount = sqlMap.size;
+	const nonEmptyRegs = [...regMap.values()].filter((r) => r.rows.length > 0);
+	const uniqueRegRows = nonEmptyRegs.reduce((sum, r) => sum + r.rows.length, 0);
+	if (uniqueSqlCount > 0 || uniqueRegRows > 0 || dedupedRollbacks.length > 0) {
 		parts.push("## Deployment & Upgrade Notes", "");
 		if (uniqueSqlCount > 0) {
 			parts.push(`- **Database / Schema:** ${uniqueSqlCount} SQL/schema ${uniqueSqlCount === 1 ? "artifact" : "artifacts"} included; apply before importing application scripts.`);
 		}
 		if (uniqueRegRows > 0) {
-			parts.push(`- **Configuration / Registries:** ${uniqueRegRows} tracked registry ${uniqueRegRows === 1 ? "change" : "changes"} across ${input.registries.map((r) => r.title).join(", ")}.`);
+			const regNames = nonEmptyRegs.map((r) => r.title).filter(Boolean);
+			parts.push(`- **Configuration / Registries:** ${uniqueRegRows} tracked registry ${uniqueRegRows === 1 ? "change" : "changes"} across ${regNames.join(", ")}.`);
 		}
-		if (input.rollbackNotes?.length) {
+		if (dedupedRollbacks.length > 0) {
 			parts.push(`- **Rollback Guidance:** Ticket-specific rollback steps are included in the companion Release Bundle.`);
 		}
 		parts.push("");

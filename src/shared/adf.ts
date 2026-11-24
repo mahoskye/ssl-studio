@@ -48,12 +48,21 @@ let inCell = false;
  */
 const codeTag = (text: string) => `<code>${literal(text).replace(/\|/g, "&#124;")}</code>`;
 
+/** Allows only http(s), mailto, or safe relative URLs; percent-encodes delimiters/whitespace. */
+function safeUrl(raw: string): string {
+	const clean = raw.replace(/[\u0000-\u001f\u007f]+/g, "").trim();
+	if (!clean || clean.startsWith("//")) return "";
+	const scheme = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(clean);
+	if (scheme && !/^(?:https?|mailto)$/i.test(scheme[1]!)) return "";
+	return clean.replace(/[()\s<>]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`);
+}
+
 /** Text with the marks it carries: code, bold, italic, struck through, a link. */
 function marked(node: Node): string {
 	const text = node.text ?? "";
 	const marks = (node.marks ?? []).map((mark) => mark.type);
 	const link = (node.marks ?? []).find((mark) => mark.type === "link");
-	const href = said(link?.attrs?.href).replace(/[()\s<>]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`);
+	const href = safeUrl(said(link?.attrs?.href));
 	if (marks.includes("code")) {
 		const fence = ticks(text, 1);
 		// A backtick at either end needs room to be told from the fence.
@@ -91,7 +100,15 @@ function joined(nodes: Node[]): Node[] {
 }
 
 /** A card for a page: the page's address. One that holds its page as data and not as an address is said to have been there. */
-const card = (node: Node) => (said(node.attrs?.url) ? `<${said(node.attrs!.url)}>` : node.attrs?.data ? "*(a linked page, not brought across)*" : "");
+const card = (node: Node) => {
+	const raw = said(node.attrs?.url);
+	if (raw) {
+		const safe = safeUrl(raw);
+		if (!safe) return "";
+		return /^(?:https?:\/\/|mailto:)/i.test(safe) ? `<${safe}>` : `[${literal(raw)}](${safe})`;
+	}
+	return node.attrs?.data ? "*(a linked page, not brought across)*" : "";
+};
 
 /** The nodes of a line, side by side. */
 function inline(nodes: Node[]): string {
@@ -113,7 +130,9 @@ function inline(nodes: Node[]): string {
 					return card(node);
 				case "date": {
 					const when = Number(said(node.attrs?.timestamp));
-					return Number.isFinite(when) && when > 0 ? new Date(when).toISOString().slice(0, 10) : "";
+					if (!Number.isFinite(when) || when <= 0) return "";
+					const d = new Date(when);
+					return Number.isFinite(d.getTime()) ? d.toISOString().slice(0, 10) : "";
 				}
 				case "media":
 				case "mediaInline":
@@ -203,6 +222,7 @@ function block(node: Node): string {
 			// A cell is one line: what is on several lines in it is written with a break between, code a line at a
 			// time. Code there is written as a tag: Markdown's own code cannot hold a pipe in a cell.
 			const inCells = (kid: Node) => {
+				const prev = inCell;
 				inCell = true;
 				try {
 					return kid.type === "codeBlock"
@@ -213,7 +233,7 @@ function block(node: Node): string {
 								.join("<br>")
 						: block(kid).replace(/\s*\n+\s*/g, "<br>");
 				} finally {
-					inCell = false;
+					inCell = prev;
 				}
 			};
 			const rows = kids(node).map((row) =>
@@ -227,6 +247,7 @@ function block(node: Node): string {
 			);
 			if (!rows.length) return "";
 			const width = Math.max(...rows.map((row) => row.length));
+			if (width === 0) return "";
 			const line = (cells: string[]) => `| ${Array.from({ length: width }, (_, at) => cells[at] ?? "").join(" | ")} |`;
 			return [line(rows[0]!), line(Array.from({ length: width }, () => "---")), ...rows.slice(1).map(line)].join("\n");
 		}
@@ -245,8 +266,10 @@ function block(node: Node): string {
 		case "inlineCard":
 			return card(node);
 		case "expand":
-		case "nestedExpand":
-			return [said(node.attrs?.title) ? `**${said(node.attrs!.title)}**` : "", blocks(kids(node))].filter(Boolean).join("\n\n");
+		case "nestedExpand": {
+			const title = said(node.attrs?.title).replace(/\s*[\r\n]+\s*/g, " ").trim();
+			return [title ? `**${literal(title)}**` : "", blocks(kids(node))].filter(Boolean).join("\n\n");
+		}
 		default:
 			// A node of a kind not known here: its blocks if it has any, its words if it has those.
 			if (typeof node.text === "string") return marked(node);

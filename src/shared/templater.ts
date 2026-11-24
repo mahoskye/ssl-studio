@@ -169,8 +169,14 @@ export function parseCallArgs(argText: string, resolveIdent?: (ident: string) =>
 			const arr: unknown[] = [];
 			skipWs();
 			while (i < src.length && src[i] !== "]") {
-				arr.push(parseValue());
+				const prevI = i;
+				const val = parseValue();
 				skipWs();
+				if (i === prevI && src[i] !== ",") {
+					i++;
+					break;
+				}
+				arr.push(val);
 				if (src[i] === ",") i++;
 				skipWs();
 			}
@@ -180,6 +186,7 @@ export function parseCallArgs(argText: string, resolveIdent?: (ident: string) =>
 		// Number / boolean / null / identifier / nested `tp.x.y(...)` call
 		const start = i;
 		let parenDepth = 0;
+		let bracketDepth = 0;
 		while (i < src.length) {
 			const c = src[i]!;
 			if (c === '"' || c === "'" || c === "`") {
@@ -194,7 +201,11 @@ export function parseCallArgs(argText: string, resolveIdent?: (ident: string) =>
 			}
 			if (c === "(") parenDepth++;
 			else if (c === ")" && parenDepth > 0) parenDepth--;
-			else if (parenDepth === 0 && (c === "," || c === "]")) break;
+			else if (c === "[") bracketDepth++;
+			else if (c === "]") {
+				if (bracketDepth > 0) bracketDepth--;
+				else if (parenDepth === 0) break;
+			} else if (parenDepth === 0 && bracketDepth === 0 && c === ",") break;
 			i++;
 		}
 		const raw = src.slice(start, i).trim();
@@ -212,8 +223,19 @@ export function parseCallArgs(argText: string, resolveIdent?: (ident: string) =>
 	while (i < src.length) {
 		skipWs();
 		if (i >= src.length) break;
-		args.push(parseValue());
+		const prevI = i;
+		const val = parseValue();
 		skipWs();
+		if (i === prevI && src[i] !== ",") {
+			// Guard against unconsumable stray tokens (e.g. unmatched `]`) spinning forever.
+			i++;
+			continue;
+		}
+		args.push(val);
+		while (i < src.length && src[i] === "]") {
+			i++;
+			skipWs();
+		}
 		if (src[i] === ",") i++;
 	}
 	return args;
@@ -435,6 +457,37 @@ async function evaluateExpression(
 	return { value: `<% ${rawExpr.trim()} %>` };
 }
 
+/** Formats one `key="value"` attribute for a `<!-- template: ... -->` header comment, escaping backslashes, quotes, newlines, and `-->`. */
+export function formatTemplateHeaderAttr(key: string, value: string): string {
+	const escaped = value
+		.replace(/[\r\n]+/g, " ")
+		.replace(/\\/g, "\\\\")
+		.replace(/"/g, '\\"')
+		.replace(/-->/g, "--\\>");
+	return `${key}="${escaped}"`;
+}
+
+function unescapeHeaderAttr(raw: string, quote: '"' | "'"): string {
+	let out = "";
+	for (let i = 0; i < raw.length; i++) {
+		const ch = raw[i]!;
+		if (ch === "\\" && i + 1 < raw.length) {
+			const next = raw[i + 1]!;
+			if (next === quote || next === "\\" || next === ">") {
+				out += next;
+				i++;
+				continue;
+			}
+		}
+		out += ch;
+	}
+	return out
+		.replace(/&quot;/gi, '"')
+		.replace(/&apos;|&#39;/gi, "'")
+		.replace(/&gt;/gi, ">")
+		.replace(/&amp;/gi, "&");
+}
+
 /**
  * Strips optional template metadata header comment (`<!-- template: ... -->`) from
  * a workspace template file and returns parsed metadata + body content.
@@ -453,9 +506,11 @@ export function parseTemplateFile(raw: string, fallbackName: string, id: string,
 	if (m) {
 		content = raw.slice(m[0].length);
 		const body = m[1]!;
-		for (const kv of body.matchAll(/([a-zA-Z_-]+)\s*=\s*"([^"]*)"/g)) {
+		const attrRe = /([a-zA-Z_-]+)\s*=\s*(?:"((?:\\[\s\S]|[^"\\])*)"|'((?:\\[\s\S]|[^'\\])*)')/g;
+		for (const kv of body.matchAll(attrRe)) {
 			const key = kv[1]!.toLowerCase();
-			const val = kv[2]!.trim();
+			const rawVal = kv[2] !== undefined ? unescapeHeaderAttr(kv[2], '"') : unescapeHeaderAttr(kv[3] ?? "", "'");
+			const val = rawVal.trim();
 			if (key === "name" && val) name = val;
 			else if (key === "description" && val) description = val;
 			else if (key === "folder" && val) folder = val;
@@ -467,6 +522,9 @@ export function parseTemplateFile(raw: string, fallbackName: string, id: string,
 	return { id, name, description, group, folder, fileName, source: "workspace", path, content };
 }
 
+// Lazy `??` ensures an empty `---\n---` block closes immediately instead of scanning past the body to a horizontal rule `---`.
+const FRONTMATTER_BLOCK_RE = /^---\r?\n(?:([\s\S]*?)\r?\n)??---(?:(?:\r?\n)+|$)/;
+
 /**
  * Strips leading YAML frontmatter from raw template source BEFORE evaluating prompts
  * when inserting into a non-empty note, avoiding wasted interactive prompts inside
@@ -476,15 +534,34 @@ export function parseTemplateFile(raw: string, fallbackName: string, id: string,
  * strips keys already present in the target document while keeping missing keys.
  */
 export function stripRawTemplateFrontmatter(raw: string, existingKeys?: ReadonlySet<string>): string {
-	const m = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)+/.exec(raw);
+	const m = FRONTMATTER_BLOCK_RE.exec(raw);
 	if (!m) return raw;
-	const fmBlock = m[1]!;
+	const fmBlock = m[1] ?? "";
 	const body = raw.slice(m[0].length);
 	const TAG_RE = /<%([-_])?(\*)?([\s\S]*?)([-_])?%>/g;
+	const DECL_RE = /\b(?:let|const|var)\s+([A-Za-z_]\w*)\s*(?:\?\?=|=)/g;
+	const isTagOnlyLine = (line: string) => {
+		const t = line.trim();
+		return t.length > 0 && t.replace(TAG_RE, "").trim().length === 0;
+	};
+	const extractUsedVarTags = (text: string, target: string, stripTrim: boolean): string[] => {
+		const out: string[] = [];
+		for (const tag of text.matchAll(TAG_RE)) {
+			const trimL = stripTrim ? "" : (tag[1] ?? "");
+			const star = tag[2] ?? "";
+			const inner = tag[3]!.trim();
+			const trimR = stripTrim ? "" : (tag[4] ?? "");
+			const decls = [...inner.matchAll(DECL_RE)].map((d) => d[1]!);
+			if (decls.some((name) => new RegExp(`\\b${name}\\b`).test(target))) {
+				out.push(`<%${trimL}${star} ${inner} ${trimR}%>`);
+			}
+		}
+		return out;
+	};
+
 	if (existingKeys && existingKeys.size > 0) {
 		const fmLines = fmBlock.split(/\r?\n/);
-		const keptFm: string[] = [];
-		const preserved: string[] = [];
+		const entries: { kind: "skipped" | "tagOnly" | "yaml"; line: string }[] = [];
 		let skipList = false;
 		for (const line of fmLines) {
 			const kv = /^([A-Za-z0-9_-]+)\s*:/.exec(line);
@@ -492,41 +569,57 @@ export function stripRawTemplateFrontmatter(raw: string, existingKeys?: Readonly
 				const k = kv[1]!.toLowerCase();
 				if (existingKeys.has(k)) {
 					skipList = true;
-					for (const tag of line.matchAll(TAG_RE)) {
-						const trimL = tag[1] ?? "";
-						const star = tag[2] ?? "";
-						const inner = tag[3]!.trim();
-						const trimR = tag[4] ?? "";
-						const decls = [...inner.matchAll(/\b(?:let|const|var)\s+([A-Za-z_]\w*)\s*(?:\?\?=|=)/g)].map((d) => d[1]!);
-						if (decls.some((name) => new RegExp(`\\b${name}\\b`).test(body))) {
-							preserved.push(`<%${trimL}${star} ${inner} ${trimR}%>`);
-						}
-					}
+					entries.push({ kind: "skipped", line });
 					continue;
 				}
 				skipList = false;
-				keptFm.push(line);
+				entries.push({ kind: "yaml", line });
 				continue;
 			}
 			if (skipList && /^\s+-\s+/.test(line)) continue;
 			skipList = false;
-			keptFm.push(line);
+			entries.push({ kind: isTagOnlyLine(line) ? "tagOnly" : "yaml", line });
 		}
+
+		const hasYamlContent = entries.some((e) => {
+			if (e.kind !== "yaml") return false;
+			const t = e.line.trim();
+			return t.length > 0 && !t.startsWith("#");
+		});
+		if (!hasYamlContent) {
+			const preserved = extractUsedVarTags(fmBlock, body, true);
+			return preserved.length ? `${preserved.join("")}${body}` : body;
+		}
+
+		const keptYamlText = entries
+			.filter((e) => e.kind === "yaml")
+			.map((e) => e.line)
+			.join("\n");
+		const keptFm: string[] = [];
+		const preserved: string[] = [];
+		for (const entry of entries) {
+			if (entry.kind === "yaml") {
+				keptFm.push(entry.line);
+				continue;
+			}
+			for (const tag of entry.line.matchAll(TAG_RE)) {
+				const star = tag[2] ?? "";
+				const inner = tag[3]!.trim();
+				const decls = [...inner.matchAll(DECL_RE)].map((d) => d[1]!);
+				if (decls.some((name) => new RegExp(`\\b${name}\\b`).test(keptYamlText))) {
+					keptFm.push(`<%${star} ${inner} -%>`);
+				} else if (decls.some((name) => new RegExp(`\\b${name}\\b`).test(body))) {
+					// Strip leading/trailing trim markers so hoisted tags never eat the newline after closing `---`.
+					preserved.push(`<%${star} ${inner} %>`);
+				}
+			}
+		}
+
 		const eol = raw.includes("\r\n") ? "\r\n" : "\n";
-		if (!keptFm.some((l) => l.trim())) return preserved.length ? `${preserved.join("")}${body}` : body;
 		return `---${eol}${keptFm.join(eol)}${eol}---${eol}${preserved.join("")}${body}`;
 	}
-	const preserved: string[] = [];
-	for (const tag of fmBlock.matchAll(TAG_RE)) {
-		const trimL = tag[1] ?? "";
-		const star = tag[2] ?? "";
-		const inner = tag[3]!.trim();
-		const trimR = tag[4] ?? "";
-		const decls = [...inner.matchAll(/\b(?:let|const|var)\s+([A-Za-z_]\w*)\s*(?:\?\?=|=)/g)].map((d) => d[1]!);
-		if (decls.some((name) => new RegExp(`\\b${name}\\b`).test(body))) {
-			preserved.push(`<%${trimL}${star} ${inner} ${trimR}%>`);
-		}
-	}
+
+	const preserved = extractUsedVarTags(fmBlock, body, false);
 	return preserved.length ? `${preserved.join("")}${body}` : body;
 }
 
@@ -535,7 +628,7 @@ export function stripRawTemplateFrontmatter(raw: string, existingKeys?: Readonly
  * mid-document into an already non-empty note, shifting `cursorOffset` cleanly to match.
  */
 export function stripTemplateFrontmatter(rendered: RenderedTemplate): RenderedTemplate {
-	const m = /^---\r?\n[\s\S]*?\r?\n---(?:\r?\n)+/.exec(rendered.text);
+	const m = FRONTMATTER_BLOCK_RE.exec(rendered.text);
 	if (!m) return rendered;
 	const cut = m[0].length;
 	return {
@@ -556,22 +649,38 @@ export async function renderTemplate(
 	sharedVars?: Map<string, string>,
 ): Promise<RenderedTemplate> {
 	const now = ctx.now ?? new Date();
-	// 1. Expand simple Obsidian core template aliases `{{...}}` first.
-	let source = template
-		.replace(/\{\{\s*date\s*\}\}/gi, formatDateToken(now, "YYYY-MM-DD"))
-		.replace(/\{\{\s*today\s*\}\}/gi, formatDateToken(now, "YYYY-MM-DD"))
-		.replace(/\{\{\s*time\s*\}\}/gi, formatDateToken(now, "HH:mm"))
-		.replace(/\{\{\s*title\s*\}\}/gi, ctx.title)
-		.replace(/\{\{\s*ticket\s*\}\}/gi, ctx.ticket ?? "")
-		.replace(/\{\{\s*project\s*\}\}/gi, ctx.projectName);
+	const dateStr = formatDateToken(now, "YYYY-MM-DD");
+	const timeStr = formatDateToken(now, "HH:mm");
 
-	// 2. Walk `<% ... %>` / `<%* ... %>` tags sequentially so interactive prompts appear in natural reading order.
+	// Expand simple Obsidian core template aliases `{{...}}` only on literal template segments
+	// (never on `<% ... %>` output, never re-evaluating substituted values as `<% ... %>`, and
+	// using a replacer function so `$&`/`$1`/`$$` inside values stay literal).
+	const expandAliases = (segment: string): string =>
+		segment.replace(/\{\{\s*(date|today|time|title|ticket|project)\s*\}\}/gi, (matched, key: string) => {
+			switch (key.toLowerCase()) {
+				case "date":
+				case "today":
+					return dateStr;
+				case "time":
+					return timeStr;
+				case "title":
+					return ctx.title;
+				case "ticket":
+					return ctx.ticket ?? "";
+				case "project":
+					return ctx.projectName;
+				default:
+					return matched;
+			}
+		});
+
+	// Walk `<% ... %>` / `<%* ... %>` tags sequentially so interactive prompts appear in natural reading order.
 	const TAG_RE = /<%([-_])?(\*)?([\s\S]*?)([-_])?%>/g;
 	const vars = sharedVars ?? new Map<string, string>();
 	let out = "";
 	let lastIndex = 0;
 
-	for (const match of source.matchAll(TAG_RE)) {
+	for (const match of template.matchAll(TAG_RE)) {
 		const idx = match.index;
 		const full = match[0];
 		const trimLeft = match[1];
@@ -579,10 +688,10 @@ export async function renderTemplate(
 		const expr = match[3] ?? "";
 		const trimRight = match[4];
 
-		let before = source.slice(lastIndex, idx);
+		let before = template.slice(lastIndex, idx);
 		if (trimLeft === "_") before = before.replace(/[ \t\r\n]+$/, "");
 		else if (trimLeft === "-") before = before.replace(/[ \t]*\r?\n$/, "");
-		out += before;
+		out += expandAliases(before);
 
 		const res = await evaluateExpression(expr, ctx, vars, isExec);
 		if (res.cancelled) return { text: "", cursorOffset: null, cancelled: true };
@@ -590,17 +699,17 @@ export async function renderTemplate(
 
 		let nextIndex = idx + full.length;
 		if (trimRight === "_") {
-			const ws = /^[ \t\r\n]+/.exec(source.slice(nextIndex));
+			const ws = /^[ \t\r\n]+/.exec(template.slice(nextIndex));
 			if (ws) nextIndex += ws[0].length;
 		} else if (trimRight === "-") {
-			const nl = /^[ \t]*\r?\n/.exec(source.slice(nextIndex));
+			const nl = /^[ \t]*\r?\n/.exec(template.slice(nextIndex));
 			if (nl) nextIndex += nl[0].length;
 		}
 		lastIndex = nextIndex;
 	}
-	out += source.slice(lastIndex);
+	out += expandAliases(template.slice(lastIndex));
 
-	// 3. Extract first cursor sentinel (remove any extras cleanly).
+	// Extract first cursor sentinel (remove any extras cleanly).
 	const cursorPos = out.indexOf(CURSOR_SENTINEL);
 	const clean = out.split(CURSOR_SENTINEL).join("");
 	return {

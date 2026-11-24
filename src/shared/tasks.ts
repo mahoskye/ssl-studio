@@ -56,19 +56,118 @@ export function tasks(text: string): Task[] {
 	walk(tokens);
 	if (!read.length) return [];
 
-	// Code and raw HTML at the top of the document hold no items, whatever their lines look like.
+	// Code and raw HTML — both top-level and nested inside blockquotes/lists — hold no task items.
 	const closed: [number, number][] = [];
-	let at = 0;
-	for (const token of tokens) {
-		if (token.type === "code" || token.type === "html") closed.push([at, at + token.raw.length]);
-		at += token.raw.length;
-	}
+	const markNestedRaw = (raw: string, boundStart: number, boundEnd: number): number => {
+		if (!raw) return boundStart;
+		const direct = plain.indexOf(raw, boundStart);
+		if (direct >= 0 && direct + raw.length <= boundEnd) {
+			closed.push([direct, direct + raw.length]);
+			return direct + raw.length;
+		}
+		// Inside blockquotes, `marked` strips leading `> ` prefixes from nested `code`/`html` raw text.
+		const rawLines = raw.replace(/\n$/, "").split("\n").map((l) => l.trim());
+		const firstNonEmpty = rawLines.find(Boolean);
+		if (!firstNonEmpty) return boundStart;
+		const slice = plain.slice(boundStart, boundEnd);
+		const sliceLines = slice.split("\n");
+		let pos = boundStart;
+		for (let i = 0; i < sliceLines.length; i++) {
+			const stripped = sliceLines[i]!.replace(/^(?:[ \t]*>[ \t]*)+/, "").trim();
+			if (stripped === rawLines[0] || (!rawLines[0] && stripped === firstNonEmpty)) {
+				let matched = true;
+				let endPos = pos;
+				for (let j = 0; j < rawLines.length; j++) {
+					if (i + j >= sliceLines.length) {
+						matched = false;
+						break;
+					}
+					const cand = sliceLines[i + j]!.replace(/^(?:[ \t]*>[ \t]*)+/, "").trim();
+					if (cand !== rawLines[j]) {
+						matched = false;
+						break;
+					}
+					endPos += sliceLines[i + j]!.length + 1;
+				}
+				if (matched) {
+					closed.push([pos, Math.min(boundEnd, endPos)]);
+					return Math.min(boundEnd, endPos);
+				}
+			}
+			pos += sliceLines[i]!.length + 1;
+		}
+		return boundStart;
+	};
+	const collectClosed = (toks: Token[] | undefined, boundStart: number, boundEnd: number, isTopLevel: boolean) => {
+		let cursor = boundStart;
+		for (const token of toks ?? []) {
+			const raw = token.raw ?? "";
+			let tokStart = cursor;
+			let tokEnd = Math.min(boundEnd, cursor + raw.length);
+			if (!isTopLevel && raw) {
+				const found = plain.indexOf(raw, cursor);
+				if (found >= 0 && found + raw.length <= boundEnd) {
+					tokStart = found;
+					tokEnd = found + raw.length;
+				}
+			}
+			if (token.type === "code" || token.type === "html") {
+				if (isTopLevel) {
+					closed.push([tokStart, tokEnd]);
+					cursor = tokEnd;
+				} else {
+					cursor = Math.max(cursor, markNestedRaw(raw, cursor, boundEnd));
+				}
+				continue;
+			}
+			if (token.type === "list") {
+				let itemCursor = tokStart;
+				for (const item of (token as Tokens.List).items) {
+					const itemRaw = item.raw ?? "";
+					const itemAt = itemRaw ? plain.indexOf(itemRaw, itemCursor) : -1;
+					const iStart = itemAt >= 0 && itemAt < boundEnd ? itemAt : itemCursor;
+					const iEnd = itemAt >= 0 ? Math.min(boundEnd, itemAt + itemRaw.length) : tokEnd;
+					collectClosed(item.tokens, iStart, iEnd, false);
+					if (itemAt >= 0) itemCursor = iEnd;
+				}
+			} else if ("tokens" in token && token.tokens) {
+				collectClosed(token.tokens, tokStart, isTopLevel ? tokEnd : boundEnd, false);
+			}
+			if (isTopLevel) cursor = tokEnd;
+		}
+	};
+	collectClosed(tokens, 0, plain.length, true);
+
 	const candidates: { offset: number; done: boolean; text: string; line: number }[] = [];
 	let offset = 0;
+	let nestedFence: { quoteDepth: number; ch: string; len: number } | null = null;
 	const lines = plain.split("\n");
 	for (let index = 0; index < lines.length; index++) {
 		const line = lines[index]!;
-		const item = closed.some(([from, to]) => offset >= from && offset < to) ? null : ITEM.exec(line);
+		const alreadyClosed = closed.some(([from, to]) => offset >= from && offset < to);
+		// Also track fenced code blocks nested inside blockquotes/lists directly so checkboxes in nested fences are never matched.
+		const bqMatch = /^([ \t]*(?:>[ \t]*)*)/.exec(line)!;
+		const quoteDepth = (bqMatch[1]!.match(/>/g)?.length ?? 0);
+		const rest = line.slice(bqMatch[1]!.length);
+		let inNestedFence = false;
+		if (nestedFence) {
+			if (quoteDepth < nestedFence.quoteDepth) {
+				nestedFence = null;
+			} else {
+				inNestedFence = true;
+				if (new RegExp(`^[ \\t]*${nestedFence.ch}{${nestedFence.len},}[ \\t]*$`).test(rest)) {
+					nestedFence = null;
+				}
+			}
+		}
+		if (!inNestedFence && !alreadyClosed) {
+			const open = /^(`{3,}|~{3,})(.*)$/.exec(rest);
+			if (open && !(open[1]![0] === "`" && open[2]!.includes("`"))) {
+				nestedFence = { quoteDepth, ch: open[1]![0]!, len: open[1]!.length };
+				inNestedFence = true;
+			}
+		}
+		const item = alreadyClosed || inNestedFence ? null : ITEM.exec(line);
 		if (item) candidates.push({ offset: offset + item[1]!.length, done: item[2] !== " ", text: (item[3] ?? "").trim(), line: index });
 		offset += line.length + 1;
 	}

@@ -264,7 +264,6 @@ export function docChecks(
 	const addEdge = (from: string, to: string) => {
 		const fk = from.toLowerCase();
 		const tk = to.toLowerCase();
-		if (fk === tk) return;
 		let set = depEdges.get(fk);
 		if (!set) {
 			set = new Set();
@@ -319,7 +318,7 @@ export function docChecks(
 				const target = findDec(ref);
 				if (!target) {
 					checks.push({ level: "warn", text: `${called(dec)} supersedes a decision that is not there: ${ref}`, path: dec.path });
-				} else if (!target.supersededBy?.some((back) => findDec(back) === dec)) {
+				} else if (target !== dec && !target.supersededBy?.some((back) => findDec(back) === dec)) {
 					checks.push({
 						level: "note",
 						text: `${called(dec)} supersedes ${called(target)}, which does not list superseded-by back.`,
@@ -332,7 +331,7 @@ export function docChecks(
 				const target = findDec(ref);
 				if (!target) {
 					checks.push({ level: "warn", text: `${called(dec)} is superseded by a decision that is not there: ${ref}`, path: dec.path });
-				} else {
+				} else if (target !== dec) {
 					if (!target.supersedes?.some((back) => findDec(back) === dec)) {
 						checks.push({
 							level: "note",
@@ -358,10 +357,9 @@ export function docChecks(
 				});
 			}
 		}
-		// Circular `supersedes:` chains among decisions.
+		// Circular `supersedes:` chains among decisions (including self-loops).
 		const supEdges = new Map<DocFile, Set<DocFile>>();
 		const addSupEdge = (from: DocFile, to: DocFile) => {
-			if (from === to) return;
 			let set = supEdges.get(from);
 			if (!set) {
 				set = new Set();

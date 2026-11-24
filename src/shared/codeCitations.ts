@@ -167,15 +167,20 @@ function locateSnippet(targetLines: readonly string[], snippetLines: readonly st
 		if (ok) return { from: i + 1, to: i + clean.length };
 	}
 
-	// 2. Fallback: match first 2 non-empty anchor lines if unique in file.
+	// 2. Fallback: match first 2 non-empty anchor lines if unique in file (preserving leading-blank & inter-line offsets).
 	if (nonEmpty.length >= 2) {
-		const hits: number[] = [];
-		for (let i = 0; i < normTarget.length - 1; i++) {
-			if (normTarget[i] === nonEmpty[0] && normTarget[i + 1] === nonEmpty[1]) hits.push(i);
-		}
-		if (hits.length === 1) {
-			const start = hits[0]!;
-			return { from: start + 1, to: Math.min(targetLines.length, start + clean.length) };
+		const firstIdx = clean.findIndex(Boolean);
+		const secondIdx = clean.findIndex((l, idx) => idx > firstIdx && Boolean(l));
+		const gap = secondIdx - firstIdx;
+		if (firstIdx >= 0 && gap > 0) {
+			const hits: number[] = [];
+			for (let i = 0; i + gap < normTarget.length; i++) {
+				if (normTarget[i] === clean[firstIdx] && normTarget[i + gap] === clean[secondIdx]) hits.push(i);
+			}
+			if (hits.length === 1) {
+				const start = Math.max(0, hits[0]! - firstIdx);
+				return { from: start + 1, to: Math.min(targetLines.length, start + clean.length) };
+			}
 		}
 	}
 	return null;
@@ -265,7 +270,7 @@ export async function checkCodeCitations(
 						text: `Citation ${relFile}#L${cit.from}-L${cit.to} moved to L${moved.from}-L${moved.to}.`,
 						reanchor: moved,
 					});
-				} else if (!moved) {
+				} else {
 					issues.push({
 						docPath,
 						docLine: cit.line,
@@ -290,7 +295,7 @@ export function reanchorCitation(markdown: string, citation: CodeCitation, newFr
 	if (line === undefined) return markdown;
 	const newAnchor = newFrom === newTo ? `#L${newFrom}` : `#L${newFrom}-L${newTo}`;
 	const oldHrefEsc = citation.href.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-	let next = line.replace(new RegExp(`\\(${oldHrefEsc}\\)`), `(${citation.file}${newAnchor})`);
+	let next = line.replace(new RegExp(`\\(${oldHrefEsc}\\)`), () => `(${citation.file}${newAnchor})`);
 	// Also update human-readable `lines X to Y` / `line X` phrasing on the same line if present.
 	if (citation.from !== citation.to) {
 		next = next.replace(new RegExp(`\\blines\\s+${citation.from}\\s+to\\s+${citation.to}\\b`, "i"), newFrom === newTo ? `line ${newFrom}` : `lines ${newFrom} to ${newTo}`);
@@ -321,8 +326,8 @@ export function refreshCitationExcerpt(markdown: string, citation: CodeCitation,
 	for (let j = citation.line; j < Math.min(lines.length, citation.line + 4); j++) {
 		const trimmed = lines[j]!.trim();
 		if (!trimmed) continue;
-		const open = /^([`~]{3,})([^\s`]*)/.exec(trimmed);
-		if (open) {
+		const open = /^(`{3,}|~{3,})([^\s`]*)/.exec(trimmed);
+		if (open && !(open[1]![0] === "`" && trimmed.slice(open[1]!.length).includes("`"))) {
 			fenceStart = j;
 			fenceChar = open[1]![0]!;
 			fenceLen = open[1]!.length;
@@ -339,6 +344,21 @@ export function refreshCitationExcerpt(markdown: string, citation: CodeCitation,
 		}
 	}
 	if (fenceEnd < 0) return null;
-	const updated = [...lines.slice(0, fenceStart + 1), ...excerpt, ...lines.slice(fenceEnd)];
+	// Widen opening/closing fences when refreshed excerpt contains fenceChar runs >= fenceLen.
+	const innerFenceRe = fenceChar === "`" ? /`+/g : /~+/g;
+	let maxInnerRun = 0;
+	for (const exLine of excerpt) {
+		for (const m of exLine.matchAll(innerFenceRe)) {
+			if (m[0].length > maxInnerRun) maxInnerRun = m[0].length;
+		}
+	}
+	let openLine = lines[fenceStart]!;
+	let closeLine = lines[fenceEnd]!;
+	if (maxInnerRun >= fenceLen) {
+		const widened = fenceChar.repeat(maxInnerRun + 1);
+		openLine = openLine.replace(new RegExp(`^([ \\t]*)${fenceChar}{${fenceLen}}`), `$1${widened}`);
+		closeLine = closeLine.replace(new RegExp(`^([ \\t]*)${fenceChar}{${fenceLen},}`), `$1${widened}`);
+	}
+	const updated = [...lines.slice(0, fenceStart), openLine, ...excerpt, closeLine, ...lines.slice(fenceEnd + 1)];
 	return updated.join(eol);
 }

@@ -2,7 +2,7 @@
 // README.md and an AGENTS.md at its root. The IDE writes all three once, from
 // the templates below, and after that only reads them: project.toml is edited
 // as text, so its comments survive.
-import { existsSync, mkdirSync, readdirSync, rmdirSync, statSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, realpathSync, rmdirSync, statSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { decode, decodePart, textOf } from "./encoding";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -76,7 +76,63 @@ export function projectSettings(project: Project): Partial<Settings> {
 
 /** The file's name as it is on disk, whatever its case (readme.md, Readme.md). */
 function found(root: string, name: string): string | undefined {
-	return readdirSync(root).find((f) => f.toLowerCase() === name.toLowerCase());
+	try {
+		return readdirSync(root).find((f) => f.toLowerCase() === name.toLowerCase());
+	} catch {
+		return undefined;
+	}
+}
+
+/** High-resolution cache stamp capturing size, mtime, ctime, and inode to prevent same-ms / same-size stale cache hits. */
+const fileStamp = (st: { size: number; mtimeMs: number; ctimeMs: number; ino: number }) =>
+	`${st.size}:${st.mtimeMs}:${st.ctimeMs}:${st.ino}`;
+
+/** Lexical + realpath containment check ensuring `target` stays inside `root` (blocks `..` and escaping symlinks). */
+function isInsideWorkspace(root: string, target: string): boolean {
+	const resolvedRoot = resolve(root);
+	const resolvedTarget = resolve(target);
+	const rel = relative(resolvedRoot, resolvedTarget);
+	if (rel.startsWith("..") || isAbsolute(rel)) return false;
+	try {
+		const realRoot = realpathSync(resolvedRoot);
+		const realTarget = realpathSync(resolvedTarget);
+		const realRel = relative(realRoot, realTarget);
+		return !realRel.startsWith("..") && !isAbsolute(realRel);
+	} catch {
+		// Target may not exist; verify its nearest existing ancestor does not symlink outside root.
+		try {
+			const realRoot = realpathSync(resolvedRoot);
+			let cur = dirname(resolvedTarget);
+			while (cur && cur !== dirname(cur)) {
+				if (existsSync(cur)) {
+					const realCur = realpathSync(cur);
+					const curRel = relative(realRoot, realCur);
+					return !curRel.startsWith("..") && !isAbsolute(curRel);
+				}
+				cur = dirname(cur);
+			}
+		} catch {
+			return false;
+		}
+		return true;
+	}
+}
+
+/** Checks workspace containment BEFORE probing existence, then verifies realpath containment to avoid outside-root oracles. */
+function existsInWorkspace(root: string, target: string): boolean {
+	const resolvedRoot = resolve(root);
+	const resolvedTarget = resolve(target);
+	const rel = relative(resolvedRoot, resolvedTarget);
+	if (rel.startsWith("..") || isAbsolute(rel)) return false;
+	if (!existsSync(resolvedTarget)) return false;
+	try {
+		const realRoot = realpathSync(resolvedRoot);
+		const realTarget = realpathSync(resolvedTarget);
+		const realRel = relative(realRoot, realTarget);
+		return !realRel.startsWith("..") && !isAbsolute(realRel);
+	} catch {
+		return false;
+	}
 }
 
 /** The most of a small snippet that is read for its header comment. */
@@ -93,7 +149,7 @@ const HEAD_KEPT = 2000;
 async function head(path: string, maxBytes = HEAD_BYTES): Promise<string> {
 	try {
 		const st = statSync(path);
-		const stamp = `${st.size}:${st.mtimeMs}:${maxBytes}`;
+		const stamp = `${fileStamp(st)}:${maxBytes}`;
 		const kept = headRead.get(path);
 		if (kept && kept.stamp === stamp) {
 			headRead.delete(path);
@@ -119,7 +175,7 @@ const SQL_OBJECTS_KEPT = 4000;
 async function cachedSqlObjects(path: string): Promise<string[] | undefined> {
 	try {
 		const st = statSync(path);
-		const stamp = `${st.size}:${st.mtimeMs}`;
+		const stamp = fileStamp(st);
 		const kept = sqlObjectsCache.get(path);
 		if (kept && kept.stamp === stamp) {
 			sqlObjectsCache.delete(path);
@@ -399,9 +455,12 @@ type DescribedMeta = Pick<
 
 function checkMissingSource(source: string | undefined, root?: string, path?: string): string | undefined {
 	if (!source || !root || /^https?:\/\//i.test(source)) return undefined;
-	const target = path && /^\.{1,2}[\\/]/.test(source) ? resolve(dirname(path), source) : join(root, source);
-	const rel = relative(root, target);
-	return !rel.startsWith("..") && !isAbsolute(rel) && !existsSync(target) ? source : undefined;
+	const clean = source.split(/[?#]/)[0]!.trim();
+	if (!clean) return undefined;
+	const target = path && /^\.{1,2}[\\/]/.test(clean) ? resolve(dirname(path), clean) : join(root, clean);
+	const rel = relative(resolve(root), resolve(target));
+	if (rel.startsWith("..") || isAbsolute(rel)) return undefined;
+	return !existsInWorkspace(root, target) ? source : undefined;
 }
 
 /** What a Markdown document says of itself, for the panel, catalogs, tags, governance, health, and code traceability. */
@@ -503,7 +562,7 @@ async function cachedMdSummary(root: string, path: string): Promise<CachedMdSumm
 	let stamp = "";
 	try {
 		const st = statSync(path);
-		stamp = `${st.size}:${st.mtimeMs}`;
+		stamp = fileStamp(st);
 	} catch {
 		return null;
 	}
@@ -585,12 +644,11 @@ function linksIn(path: string, text: string, scope: "H" | "F" = "H"): DocLink[] 
 const namesRead = new Map<string, { stamp: string; places: ReturnType<typeof namePlaces> }>();
 const NAMES_KEPT = 4000;
 
-/** Cached `parseCsv()` per registry file, keyed by path + size + mtimeMs. */
+/** Cached `parseCsv()` per registry file, keyed by path + file stamp. */
 const csvRead = new Map<string, { stamp: string; table: ReturnType<typeof parseCsv> }>();
 const CSV_KEPT = 256;
 
-async function cachedParseCsv(path: string, size: number, mtimeMs: number): Promise<ReturnType<typeof parseCsv>> {
-	const stamp = `${size}:${mtimeMs}`;
+async function cachedParseCsv(path: string, stamp: string): Promise<ReturnType<typeof parseCsv>> {
 	const kept = csvRead.get(path);
 	if (kept && kept.stamp === stamp) return kept.table;
 	const table = parseCsv(await textOf(path));
@@ -607,8 +665,8 @@ function brokenLinksFrom(root: string, path: string, links: readonly DocLink[], 
 		.filter((link) => {
 			const target = linkTarget(root, path, link.file);
 			// What is outside the project is not this project's to say: it may well be there on another machine.
-			const from = relative(root, target);
-			return !from.startsWith("..") && !isAbsolute(from) && !existsSync(target);
+			const from = relative(resolve(root), resolve(target));
+			return !from.startsWith("..") && !isAbsolute(from) && !existsInWorkspace(root, target);
 		})
 		.map(({ href, file, line, column }) => {
 			// One file of that name elsewhere in the project is where it went, most likely. Two, and it is not ours to pick.
@@ -743,8 +801,10 @@ export async function linksTo(files: WorkspaceFiles, target: string): Promise<Li
 					const leads = isRel ? resolve(dirname(path), filePart) : join(root, filePart);
 					if (!leadsThere(leads)) continue;
 					const quoted = JSON.stringify(rawRef);
-					let hitLine = 1;
-					let hitCol = 0;
+					const inner = quoted.slice(1, -1);
+					let hitLine = -1;
+					let hitCol = -1;
+					let hitHref = rawRef;
 					outer: for (let li = 0; li < lines.length; li++) {
 						const ln = lines[li]!;
 						let searchFrom = 0;
@@ -753,20 +813,39 @@ export async function linksTo(files: WorkspaceFiles, target: string): Promise<Li
 							if (idx < 0) break;
 							const col = idx + 1;
 							const placeKey = `${li + 1}:${col}`;
-							if (!usedPlaces.has(placeKey) && ln.startsWith(rawRef, col)) {
+							if (!usedPlaces.has(placeKey) && ln.startsWith(inner, col)) {
 								usedPlaces.add(placeKey);
 								hitLine = li + 1;
 								hitCol = col;
+								hitHref = inner;
 								break outer;
 							}
 							searchFrom = idx + quoted.length;
 						}
+						// Fallback for alternate JSON escapes (`\/`, `\uXXXX`, etc.).
+						for (const m of ln.matchAll(/"((?:\\.|[^"\\])*)"/g)) {
+							const col = (m.index ?? 0) + 1;
+							const placeKey = `${li + 1}:${col}`;
+							if (usedPlaces.has(placeKey)) continue;
+							try {
+								if (JSON.parse(m[0]) === rawRef) {
+									usedPlaces.add(placeKey);
+									hitLine = li + 1;
+									hitCol = col;
+									hitHref = m[1]!;
+									break outer;
+								}
+							} catch {
+								// Skip malformed literal.
+							}
+						}
 					}
+					if (hitLine < 0) continue;
 					found.push({
 						path,
 						line: hitLine,
 						column: hitCol,
-						href: rawRef,
+						href: hitHref,
 						rest: leads.slice(resolvedTarget.length),
 						from: isRel ? "doc" : "root",
 						kind: "plan",
@@ -954,7 +1033,7 @@ export async function namesIn(files: WorkspaceFiles): Promise<NameIn[]> {
 		try {
 			const s = statSync(path);
 			if (s.size > LINKED_BYTES) continue;
-			stamp = `${s.size}:${s.mtimeMs}`;
+			stamp = fileStamp(s);
 		} catch {
 			continue;
 		}
@@ -1132,7 +1211,7 @@ export async function listDocs(
 	}
 	list.push({ path: project.path, name: PROJECT_FILE, group: "project", exists: project.configured, ...(project.configured ? { mtime: mtimeOf(project.path) } : {}) });
 	const docs = join(root, project.docs);
-	const state = existsSync(docs) ? found(docs, STATE_FILE) : undefined;
+	const state = isFolder(docs) ? found(docs, STATE_FILE) : undefined;
 	if (state) {
 		const statePath = join(docs, state);
 		const summary = await cachedMdSummary(root, statePath);
@@ -1224,8 +1303,10 @@ export async function listDocs(
 			const plans = summary.frontPlans;
 			const related = summary.frontRelated;
 			const missing = [...specs, ...plans].filter((ref) => {
-				const target = /^\.{1,2}[\\/]/.test(ref) ? resolve(dirname(path), ref) : join(root, ref);
-				return !existsSync(target);
+				const filePart = ref.split(/[?#]/)[0]!.trim();
+				if (!filePart) return false;
+				const target = /^\.{1,2}[\\/]/.test(filePart) ? resolve(dirname(path), filePart) : join(root, filePart);
+				return !existsInWorkspace(root, target);
 			});
 			// Also detect an empty sibling folder matching this flat ticket's key/stem (O(1) map lookup).
 			let ticketFolder = resolved.folderRel ? join(ticketsDir, resolved.folderRel) : undefined;
@@ -1306,10 +1387,12 @@ export async function listDocs(
 		}
 		let size = 0;
 		let mtimeMs = 0;
+		let csvStamp = "";
 		try {
 			const st = statSync(path);
 			size = st.size;
 			mtimeMs = st.mtimeMs;
+			csvStamp = fileStamp(st);
 		} catch {
 			continue;
 		}
@@ -1317,7 +1400,7 @@ export async function listDocs(
 			list.push({ path, name, group: "registries", exists: true, problems: ["It is too large to read here."] });
 			continue;
 		}
-		const table = await cachedParseCsv(path, size, mtimeMs);
+		const table = await cachedParseCsv(path, csvStamp);
 		// A row can say which ticket carries it: the ticket's page lists what it has to bring across.
 		const forTickets = rowsByTicket(table, knownTickets);
 		const regCode = registryCodeInfo(table, knownTickets);
@@ -1371,6 +1454,8 @@ export async function listDocs(
 			...(said.docKind ? { docKind: said.docKind } : {}),
 			...(said.mtime !== undefined ? { mtime: said.mtime } : {}),
 			...(said.headings?.length ? { headings: said.headings } : {}),
+			...(said.source ? { source: said.source } : {}),
+			...(said.missingSource ? { missingSource: said.missingSource } : {}),
 			...(said.codeRefs?.length ? { codeRefs: said.codeRefs } : {}),
 			...brokenLinksFrom(root, path, summary.links, named),
 		});
@@ -1573,7 +1658,7 @@ export async function listDocs(
 				if (IMAGE_EMBED_RE.test(place.name)) {
 					const direct = linkTarget(root, doc.path, place.name);
 					const fromRoot = join(root, place.name);
-					const hasFile = existsSync(direct) || existsSync(fromRoot) || (!place.name.includes("/") && !place.name.includes("\\") && wsImageNames.has(basename(place.name).toLowerCase()));
+					const hasFile = existsInWorkspace(root, direct) || existsInWorkspace(root, fromRoot) || (!place.name.includes("/") && !place.name.includes("\\") && wsImageNames.has(basename(place.name).toLowerCase()));
 					if (!hasFile) {
 						const instead = suggestWikiInstead(place, doc);
 						brokenWiki.push({ href: `${place.embed ? "!" : ""}[[${place.name}]]`, line: place.line, column: place.column, ...(instead ? { instead } : {}) });
@@ -1585,7 +1670,7 @@ export async function listDocs(
 				if (place.embed || /[\\/]|\.[a-z0-9]{1,8}$/i.test(place.name)) {
 					const relTarget = linkTarget(root, doc.path, place.name);
 					const rootTarget = join(root, place.name);
-					if (existsSync(relTarget) || existsSync(rootTarget)) continue;
+					if (existsInWorkspace(root, relTarget) || existsInWorkspace(root, rootTarget)) continue;
 				}
 				const instead = suggestWikiInstead(place, doc);
 				brokenWiki.push({ href: `${place.embed ? "!" : ""}[[${place.name}]]`, line: place.line, column: place.column, ...(instead ? { instead } : {}) });
@@ -1945,6 +2030,39 @@ type CachedDocAuditEntry = {
 const auditFileCache = new Map<string, CachedDocAuditEntry>();
 const AUDIT_CACHE_MAX = 2000;
 
+function inlineCodeRanges(line: string): [number, number][] {
+	const ranges: [number, number][] = [];
+	let i = 0;
+	while (i < line.length) {
+		if (line[i] !== "`") {
+			i++;
+			continue;
+		}
+		let run = 0;
+		while (i + run < line.length && line[i + run] === "`") run++;
+		let j = i + run;
+		let closed = -1;
+		while (j < line.length) {
+			if (line[j] !== "`") {
+				j++;
+				continue;
+			}
+			let cRun = 0;
+			while (j + cRun < line.length && line[j + cRun] === "`") cRun++;
+			if (cRun === run) {
+				closed = j + cRun;
+				break;
+			}
+			j += cRun;
+		}
+		if (closed >= 0) {
+			ranges.push([i, closed]);
+			i = closed;
+		} else i += run;
+	}
+	return ranges;
+}
+
 function extractSelfAnchors(text: string): { line: number; column: number; anchor: string; href: string }[] {
 	if (!text.includes("](#")) return [];
 	const lines = text.split(/\r?\n/);
@@ -1958,16 +2076,17 @@ function extractSelfAnchors(text: string): { line: number; column: number; ancho
 		offset += line.length + (text[start + line.length] === "\r" ? 2 : 1);
 		if (i < opening || !line.includes("](#")) continue;
 		if (fences.some(([from, to]) => start >= from && start < to)) continue;
+		const codeSpans = line.includes("`") ? inlineCodeRanges(line) : [];
 		for (const m of line.matchAll(/(?<!\!)\[[^\]]+\]\((#[^)\s]+)\)/g)) {
-			const before = line.slice(0, m.index ?? 0);
-			if ((before.match(/`/g)?.length ?? 0) % 2 === 1) continue;
+			const idx = m.index ?? 0;
+			if (codeSpans.some(([a, b]) => idx >= a && idx < b)) continue;
 			const href = m[1]!;
 			let anchor = href.slice(1).trim();
 			try {
 				anchor = decodeURIComponent(anchor);
 			} catch {}
 			if (anchor && !/^L\d+(?:-L?\d+)?$/i.test(anchor)) {
-				out.push({ line: i + 1, column: (m.index ?? 0) + 1, anchor, href });
+				out.push({ line: i + 1, column: idx + 1, anchor, href });
 			}
 		}
 	}
@@ -1987,16 +2106,16 @@ function extractWikiSections(text: string): { line: number; column: number; targ
 		offset += line.length + (text[start + line.length] === "\r" ? 2 : 1);
 		if (i < opening || !line.includes("[[") || !line.includes("#")) continue;
 		if (fences.some(([from, to]) => start >= from && start < to)) continue;
+		const codeSpans = line.includes("`") ? inlineCodeRanges(line) : [];
 		for (const m of line.matchAll(/\[\[([^[\]\n]+)\]\]/g)) {
-			// Skip if wrapped in backticks on the line.
-			const before = line.slice(0, m.index ?? 0);
-			if ((before.match(/`/g)?.length ?? 0) % 2 === 1) continue;
+			const idx = m.index ?? 0;
+			if (codeSpans.some(([a, b]) => idx >= a && idx < b)) continue;
 			const raw = m[1]!.replace(/\\\|/g, "|").split("|")[0]!.trim();
 			const hash = raw.indexOf("#");
 			if (hash < 0) continue;
 			const target = raw.slice(0, hash).trim();
 			const section = raw.slice(hash + 1).trim();
-			if (section) out.push({ line: i + 1, column: (m.index ?? 0) + 2, target, section });
+			if (section) out.push({ line: i + 1, column: idx + 2, target, section });
 		}
 	}
 	return out;
@@ -2082,7 +2201,7 @@ async function readAuditEntry(path: string, checkTableRule: boolean, overrideTex
 	try {
 		const st = statSync(path);
 		if (st.size > LINKED_BYTES) return null;
-		stamp = `${st.size}:${st.mtimeMs}:${checkTableRule ? 1 : 0}`;
+		stamp = `${fileStamp(st)}:${checkTableRule ? 1 : 0}`;
 	} catch {
 		return null;
 	}
@@ -2261,6 +2380,10 @@ export async function docAudit(
 	const targetReadCache = new Map<string, string | null>();
 	const readTarget = async (targetPath: string): Promise<string | null> => {
 		const f = fold(targetPath);
+		if (!isInsideWorkspace(root, targetPath)) {
+			targetReadCache.set(f, null);
+			return null;
+		}
 		if (dirtyMap.has(f)) return dirtyMap.get(f)!;
 		if (targetReadCache.has(f)) return targetReadCache.get(f)!;
 		try {
@@ -2363,8 +2486,10 @@ export async function docAudit(
 	for (const doc of docsList) {
 		if (!doc.exists || doc.group !== "schema" || isCatalog(doc) || !MARKDOWN.test(doc.path)) continue;
 		if (!doc.source || doc.missingSource || /^https?:\/\//i.test(doc.source)) continue;
-		const sqlPath = /^\.{1,2}[\\/]/.test(doc.source) ? resolve(dirname(doc.path), doc.source) : join(root, doc.source);
-		if (!/\.(sql|ddl|pks|pkb)$/i.test(sqlPath) || !existsSync(sqlPath)) continue;
+		const cleanSrc = doc.source.split(/[?#]/)[0]!.trim();
+		if (!cleanSrc) continue;
+		const sqlPath = /^\.{1,2}[\\/]/.test(cleanSrc) ? resolve(dirname(doc.path), cleanSrc) : join(root, cleanSrc);
+		if (!/\.(sql|ddl|pks|pkb)$/i.test(sqlPath) || !existsInWorkspace(root, sqlPath)) continue;
 		const sqlText = await readTarget(sqlPath);
 		const mdText = mdEntries.get(fold(doc.path))?.text ?? (await readTarget(doc.path));
 		if (sqlText === null || mdText === null) continue;

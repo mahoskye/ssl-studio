@@ -437,7 +437,7 @@ export function createBackend(host: Host, initial?: string) {
 			let destPath = baseDestPath;
 			if (pathTaken(baseDestPath)) {
 				if (mode === "prompt") {
-					return { path: baseDestPath, images: [], kind, conflict: true, existingPath: baseDestPath };
+					return { path: baseDestPath, images: [], kind, conflict: true, existingPath: baseDestPath, sourcePath: src };
 				}
 				if (mode === "copy") {
 					destPath = reserveUniquePath(destDir, rawStem, ".md");

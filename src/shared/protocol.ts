@@ -468,6 +468,7 @@ export interface BackendApi {
 		warnings?: string[];
 		conflict?: boolean;
 		existingPath?: string;
+		sourcePath?: string;
 	} | null>;
 	/** Converts uploaded/dropped `.docx` base64 bytes into Markdown + extracted images inside the workspace. */
 	importDocxBytes(request: {

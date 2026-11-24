@@ -9,6 +9,7 @@ import { baseName, dirName, isInside, joinPath, relativePath, relativeTo } from 
 import { slug } from "../shared/projectDocs";
 import {
 	DEFAULT_TEMPLATES,
+	formatTemplateHeaderAttr,
 	mergeTemplates,
 	parseTemplateFile,
 	renderTemplate,
@@ -24,7 +25,7 @@ import { listWorkspaceImages } from "./editor/imageResolve";
 import { activeLiveEditor } from "./editor/liveBridge";
 import { isMarkdown } from "./project";
 import { ticketAtHand } from "./projectDocs";
-import { activePath, canonical, documents, fileRemoved, markdownMode, notify, openFile, setMarkdownMode, setState, state } from "./state";
+import { activePath, applyText, canonical, documents, fileRemoved, markdownMode, notify, openFile, setMarkdownMode, setState, state } from "./state";
 
 /** Ensures a Markdown file is editable without pulling users out of Source mode if they prefer it. */
 function ensureEditableMarkdown(path: string, group?: number) {
@@ -104,7 +105,14 @@ function activeSelectionText(): string {
 	const ed = activeEditor();
 	const model = ed?.getModel();
 	const sel = ed?.getSelection();
-	return model && sel && !sel.isEmpty() ? model.getValueInRange(sel) : "";
+	return model && !model.isDisposed() && sel && !sel.isEmpty() ? model.getValueInRange(sel) : "";
+}
+
+/** Returns the open document only if the workspace, active tab, and Monaco model still match the captured snapshot. */
+function activeDocIfCurrent(startRoot: string | undefined, canonPath: string) {
+	if (state.workspace?.root !== startRoot || activePath() !== canonPath) return null;
+	const docObj = documents.get(canonPath);
+	return docObj && !docObj.model.isDisposed() ? docObj : null;
 }
 
 function buildContext(targetPath: string | null, explicitTitle?: string): TemplaterContext {
@@ -167,7 +175,7 @@ function insertIntoActiveEditor(text: string, cursorOffset: number | null, opts?
 	}
 	const editor = activeEditor();
 	const model = editor?.getModel();
-	if (!editor || !model) return false;
+	if (!editor || !model || model.isDisposed()) return false;
 	const sel = editor.getSelection() ?? {
 		startLineNumber: 1,
 		startColumn: 1,
@@ -210,11 +218,17 @@ export async function insertMarkdownTemplate(explicit?: MarkdownTemplate): Promi
 		notify("Open a Markdown document to insert a template.");
 		return;
 	}
+	const startRoot = state.workspace?.root;
+	const canonPath = canonical(path);
+	if (!activeDocIfCurrent(startRoot, canonPath)) return;
+
 	// Pick template BEFORE switching Read -> Live so cancelling leaves view mode untouched.
 	const tpl = explicit ?? (await pickTemplate("Insert template at cursor"));
 	if (!tpl) return;
-	const docObj = documents.get(canonical(path));
-	const existing = docObj?.model.getValue() ?? "";
+	const docBeforeRender = activeDocIfCurrent(startRoot, canonPath);
+	if (!docBeforeRender) return;
+
+	const existing = docBeforeRender.model.getValue();
 	const existingFm = frontMatter(existing);
 	const hasExistingFm = existingFm.lines > 0;
 	const hasBodyContent = existing.trim().length > 0;
@@ -231,42 +245,74 @@ export async function insertMarkdownTemplate(explicit?: MarkdownTemplate): Promi
 			: tpl.content;
 	const renderedRaw = await renderTemplate(sourceContent, buildContext(path));
 	if (renderedRaw.cancelled) return;
+	if (!activeDocIfCurrent(startRoot, canonPath)) return;
+
 	if (!activeLiveEditor() && !activeEditor()?.getDomNode()?.offsetParent) {
 		ensureEditableMarkdown(path, state.activeGroup);
-		for (let i = 0; i < 12 && !activeLiveEditor(); i++) {
+		for (let i = 0; i < 12 && !activeLiveEditor() && !activeEditor()?.getDomNode()?.offsetParent; i++) {
 			await new Promise((r) => requestAnimationFrame(r));
+			if (!activeDocIfCurrent(startRoot, canonPath)) return;
 		}
 	}
+	const docObj = activeDocIfCurrent(startRoot, canonPath);
+	if (!docObj) return;
 
-	let mergedKeys: string[] = [];
-	if (hasExistingFm && tplHasFm && docObj) {
+	const latestBeforeInsert = docObj.model.getValue();
+	const latestFm = frontMatter(latestBeforeInsert);
+	const hadExistingFmNow = latestFm.lines > 0;
+	const hadBodyNow = latestBeforeInsert.trim().length > 0;
+
+	// Insert the stripped body at the user's current cursor FIRST so merging YAML keys
+	// never corrupts cursor position in Live (CM6) or Source (Monaco) mode.
+	const rendered = hadExistingFmNow || hadBodyNow ? stripTemplateFrontmatter(renderedRaw) : renderedRaw;
+	if (rendered.text.length > 0) {
+		const asBlock = rendered.text.includes("\n");
+		if (!insertIntoActiveEditor(rendered.text, rendered.cursorOffset, { asBlock })) {
+			notify("Could not insert template into the active editor.", "error");
+			return;
+		}
+	}
+	const liveAfterInsert = activeLiveEditor();
+	const livePosAfterInsert = liveAfterInsert?.getPosition() ?? null;
+
+	const mergedKeys: string[] = [];
+	const docAfterInsert = activeDocIfCurrent(startRoot, canonPath);
+	if (hadExistingFmNow && tplHasFm && docAfterInsert) {
 		const tplFm = frontMatter(renderedRaw.text);
-		const missingEntries = Object.entries(tplFm.values).filter(
-			([k, v]) => k !== "title" && !(k in existingFm.values) && (Array.isArray(v) ? v.length > 0 : Boolean(v)),
-		);
-		if (missingEntries.length) {
-			let updated = docObj.model.getValue();
-			for (const [k, v] of missingEntries) {
-				if (Array.isArray(v)) {
-					for (const item of v) updated = addToFrontMatterList(updated, k, item) ?? updated;
-				} else {
-					updated = withFrontMatter(updated, k, v) ?? updated;
+		const beforeMerge = docAfterInsert.model.getValue();
+		const currentFm = frontMatter(beforeMerge);
+		if (currentFm.lines > 0) {
+			const missingEntries = Object.entries(tplFm.values).filter(
+				([k, v]) => k !== "title" && !(k in currentFm.values) && (Array.isArray(v) ? v.length > 0 : Boolean(v)),
+			);
+			if (missingEntries.length) {
+				let updated = beforeMerge;
+				for (const [k, v] of missingEntries) {
+					if (Array.isArray(v)) {
+						for (const item of v) updated = addToFrontMatterList(updated, k, item) ?? updated;
+					} else {
+						updated = withFrontMatter(updated, k, v) ?? updated;
+					}
+					mergedKeys.push(k);
 				}
-				mergedKeys.push(k);
-			}
-			if (updated !== docObj.model.getValue()) {
-				docObj.model.pushStackElement();
-				docObj.model.pushEditOperations([], [{ range: docObj.model.getFullModelRange(), text: updated, forceMoveMarkers: true }], () => null);
-				docObj.model.pushStackElement();
+				if (updated !== beforeMerge && applyText(canonPath, updated)) {
+					// CM6 external sync keeps raw character offsets; shift Live cursor down by the inserted frontmatter lines.
+					const addedLines = frontMatter(updated).lines - currentFm.lines;
+					if (
+						liveAfterInsert &&
+						liveAfterInsert === activeLiveEditor() &&
+						livePosAfterInsert &&
+						addedLines !== 0 &&
+						livePosAfterInsert.lineNumber > currentFm.lines
+					) {
+						liveAfterInsert.reveal({ line: livePosAfterInsert.lineNumber + addedLines, column: livePosAfterInsert.column });
+					}
+				}
 			}
 		}
 	}
 
-	const rendered = hasExistingFm || hasBodyContent ? stripTemplateFrontmatter(renderedRaw) : renderedRaw;
-	const asBlock = rendered.text.includes("\n");
-	if (!insertIntoActiveEditor(rendered.text, rendered.cursorOffset, { asBlock })) {
-		notify("Could not insert template into the active editor.", "error");
-	} else if (mergedKeys.length) {
+	if (mergedKeys.length) {
 		notify(`Inserted template and merged YAML properties: ${mergedKeys.join(", ")}.`);
 	}
 }
@@ -279,10 +325,10 @@ export async function newNoteFromTemplate(explicit?: MarkdownTemplate): Promise<
 		return;
 	}
 	const tpl = explicit ?? (await pickTemplate("New note from template"));
-	if (!tpl) return;
+	if (!tpl || state.workspace?.root !== root) return;
 
 	const title = (await ask(`Title for new ${tpl.name}`))?.trim();
-	if (!title) return;
+	if (!title || state.workspace?.root !== root) return;
 
 	const docsRel = (state.project?.docs ?? "docs").replace(/^[./\\]+|[\\/]+$/g, "");
 	const schemaRel = (state.project?.schema ?? "schema").replace(/^[./\\]+|[\\/]+$/g, "");
@@ -299,13 +345,13 @@ export async function newNoteFromTemplate(explicit?: MarkdownTemplate): Promise<
 	let stemName = slug(title) || "untitled";
 	if (tpl.fileName) {
 		const renderedName = await renderTemplate(tpl.fileName, buildContext(joinPath(root, docsRel, `${stemName}.md`), title), sharedVars);
-		if (renderedName.cancelled) return;
+		if (renderedName.cancelled || state.workspace?.root !== root) return;
 		const cleanStem = renderedName.text.trim().replace(/\.(md|markdown)$/i, "").replace(/[\\/:*?"<>|]+/g, "-").replace(/^-+|-+$/g, "");
 		if (cleanStem) stemName = cleanStem;
 	}
 	const defaultFile = `${defaultFolder ? `${defaultFolder}/` : ""}${stemName}.md`;
 	const targetRel = (await ask("Where to save the new note (path in workspace)", defaultFile))?.trim();
-	if (!targetRel) return;
+	if (!targetRel || state.workspace?.root !== root) return;
 
 	const cleanRel = targetRel.replace(/\\/g, "/").replace(/^\/+/, "");
 	const withExt = /\.(md|markdown)$/i.test(cleanRel) ? cleanRel : `${cleanRel}.md`;
@@ -320,6 +366,7 @@ export async function newNoteFromTemplate(explicit?: MarkdownTemplate): Promise<
 		.read(dest)
 		.then(() => true)
 		.catch(() => false);
+	if (state.workspace?.root !== root) return;
 	if (alreadyExists) {
 		notify(`${withExt} already exists — opened it instead.`);
 		await openFile(dest);
@@ -327,11 +374,12 @@ export async function newNoteFromTemplate(explicit?: MarkdownTemplate): Promise<
 	}
 
 	const rendered = await renderTemplate(tpl.content, buildContext(dest, title), sharedVars);
-	if (rendered.cancelled) return;
+	if (rendered.cancelled || state.workspace?.root !== root) return;
 
 	try {
 		await backend.create(dest, "file");
 		await backend.write(dest, rendered.text);
+		if (state.workspace?.root !== root) return;
 		setState("treeVersion", (v) => v + 1);
 		ensureEditableMarkdown(canonical(dest));
 		const reveal = (() => {
@@ -356,18 +404,34 @@ export async function manageTemplates(copyBuiltin?: MarkdownTemplate): Promise<v
 		notify("Open a folder first.");
 		return;
 	}
+	const startRoot = root;
 
 	if (copyBuiltin) {
 		const fileName = `${copyBuiltin.id}.md`;
 		const dest = joinPath(dir, fileName);
 		const exists = await backend.read(dest).then(() => true, () => false);
+		if (state.workspace?.root !== startRoot) return;
 		if (!exists) {
-			const header = `<!-- template: name="${copyBuiltin.name}" description="${copyBuiltin.description}" group="${copyBuiltin.group}"${copyBuiltin.folder ? ` folder="${copyBuiltin.folder}"` : ""}${copyBuiltin.fileName ? ` fileName="${copyBuiltin.fileName}"` : ""} -->\n`;
-			await backend.create(dest, "file");
-			await backend.write(dest, header + copyBuiltin.content);
-			setState("treeVersion", (v) => v + 1);
-			notify(`Saved customizable copy to ${relativeTo(root, dest)}.`);
+			const attrs = [
+				formatTemplateHeaderAttr("name", copyBuiltin.name),
+				formatTemplateHeaderAttr("description", copyBuiltin.description),
+				formatTemplateHeaderAttr("group", copyBuiltin.group),
+				...(copyBuiltin.folder ? [formatTemplateHeaderAttr("folder", copyBuiltin.folder)] : []),
+				...(copyBuiltin.fileName ? [formatTemplateHeaderAttr("fileName", copyBuiltin.fileName)] : []),
+			];
+			const header = `<!-- template: ${attrs.join(" ")} -->\n`;
+			try {
+				await backend.create(dest, "file");
+				await backend.write(dest, header + copyBuiltin.content);
+				if (state.workspace?.root !== startRoot) return;
+				setState("treeVersion", (v) => v + 1);
+				notify(`Saved customizable copy to ${relativeTo(startRoot, dest)}.`);
+			} catch (e: any) {
+				notify(`Could not save custom template: ${e?.message ?? e}`, "error");
+				return;
+			}
 		}
+		if (state.workspace?.root !== startRoot) return;
 		ensureEditableMarkdown(canonical(dest));
 		await openFile(dest);
 		return;
@@ -378,6 +442,7 @@ export async function manageTemplates(copyBuiltin?: MarkdownTemplate): Promise<v
 		| { kind: "customize" }
 		| { kind: "custom"; tpl: MarkdownTemplate };
 	const customTemplates = (await loadMarkdownTemplates()).filter((t) => t.source === "workspace" && t.path);
+	if (state.workspace?.root !== startRoot) return;
 	const items: QuickPickOption<ManageAction>[] = [
 		{
 			value: { kind: "blank" },
@@ -396,17 +461,17 @@ export async function manageTemplates(copyBuiltin?: MarkdownTemplate): Promise<v
 			label: `Edit / delete: ${tpl.name}`,
 			icon: "edit",
 			badge: { text: "Custom", tone: "active" },
-			detail: tpl.path ? relativeTo(root, tpl.path) : undefined,
+			detail: tpl.path ? relativeTo(startRoot, tpl.path) : undefined,
 			description: tpl.description,
 			divide: i === 0,
 		})),
 	];
 	const action = await quickPick<ManageAction>({
-		title: `Project templates (${relativeTo(root, dir)}/)`,
+		title: `Project templates (${relativeTo(startRoot, dir)}/)`,
 		placeholder: "Choose a template action or search custom templates…",
 		items,
 	});
-	if (!action) return;
+	if (!action || state.workspace?.root !== startRoot) return;
 
 	if (action.kind === "custom" && action.tpl.path) {
 		const chosenCustom = action.tpl;
@@ -419,7 +484,7 @@ export async function manageTemplates(copyBuiltin?: MarkdownTemplate): Promise<v
 					value: "edit",
 					label: "Edit template",
 					icon: "edit",
-					description: `Open ${relativeTo(root, customPath)} in Live Preview`,
+					description: `Open ${relativeTo(startRoot, customPath)} in Live Preview`,
 				},
 				{
 					value: "delete",
@@ -430,13 +495,16 @@ export async function manageTemplates(copyBuiltin?: MarkdownTemplate): Promise<v
 				},
 			],
 		});
+		if (!sub || state.workspace?.root !== startRoot) return;
 		if (sub === "edit") {
 			ensureEditableMarkdown(canonical(customPath));
 			await openFile(customPath);
 		} else if (sub === "delete") {
-			if ((await choose(`Move template ${relativeTo(root, customPath)} to trash?`, ["Move to trash"], { danger: "Move to trash" })) === "Move to trash") {
+			if ((await choose(`Move template ${relativeTo(startRoot, customPath)} to trash?`, ["Move to trash"], { danger: "Move to trash" })) === "Move to trash") {
+				if (state.workspace?.root !== startRoot) return;
 				try {
 					await backend.trash(customPath);
+					if (state.workspace?.root !== startRoot) return;
 					fileRemoved(customPath);
 					setState("treeVersion", (v) => v + 1);
 					notify(`Moved ${chosenCustom.name} to trash.`);
@@ -460,17 +528,19 @@ export async function manageTemplates(copyBuiltin?: MarkdownTemplate): Promise<v
 				description: t.description,
 			})),
 		});
-		if (found) await manageTemplates(found);
+		if (found && state.workspace?.root === startRoot) await manageTemplates(found);
 		return;
 	}
 
 	const name = (await ask("Name of the new custom template (e.g. Incident Report)"))?.trim();
-	if (!name) return;
+	if (!name || state.workspace?.root !== startRoot) return;
 	const id = slug(name).toLowerCase() || "custom-template";
 	const dest = joinPath(dir, `${id}.md`);
 	const exists = await backend.read(dest).then(() => true, () => false);
+	if (state.workspace?.root !== startRoot) return;
 	if (!exists) {
-		const starter = `<!-- template: name="${name}" description="Custom project template" group="Custom" folder="docs" -->
+		const header = `<!-- template: ${formatTemplateHeaderAttr("name", name)} ${formatTemplateHeaderAttr("description", "Custom project template")} ${formatTemplateHeaderAttr("group", "Custom")} ${formatTemplateHeaderAttr("folder", "docs")} -->`;
+		const starter = `${header}
 ---
 title: <% tp.file.yamlTitle %>
 date: <% tp.date.now("YYYY-MM-DD") %>
@@ -487,10 +557,17 @@ status: draft
 
 - 
 `;
-		await backend.create(dest, "file");
-		await backend.write(dest, starter);
-		setState("treeVersion", (v) => v + 1);
+		try {
+			await backend.create(dest, "file");
+			await backend.write(dest, starter);
+			if (state.workspace?.root !== startRoot) return;
+			setState("treeVersion", (v) => v + 1);
+		} catch (e: any) {
+			notify(`Could not create custom template: ${e?.message ?? e}`, "error");
+			return;
+		}
 	}
+	if (state.workspace?.root !== startRoot) return;
 	ensureEditableMarkdown(canonical(dest));
 	await openFile(dest);
 }
@@ -507,12 +584,18 @@ export async function insertCalloutInteractive(presetType?: string): Promise<voi
 		notify("Open a Markdown document to insert a callout.");
 		return;
 	}
+	const startRoot = state.workspace?.root;
+	const canonPath = canonical(path);
+	if (!activeDocIfCurrent(startRoot, canonPath)) return;
+
 	if (!activeLiveEditor() && !activeEditor()?.getDomNode()?.offsetParent) {
 		ensureEditableMarkdown(path);
-		for (let i = 0; i < 12 && !activeLiveEditor(); i++) {
+		for (let i = 0; i < 12 && !activeLiveEditor() && !activeEditor()?.getDomNode()?.offsetParent; i++) {
 			await new Promise((r) => requestAnimationFrame(r));
+			if (!activeDocIfCurrent(startRoot, canonPath)) return;
 		}
 	}
+	if (!activeDocIfCurrent(startRoot, canonPath)) return;
 
 	let type = presetType;
 	if (!type) {
@@ -527,11 +610,11 @@ export async function insertCalloutInteractive(presetType?: string): Promise<voi
 				description: p.about,
 			})),
 		});
-		if (!picked) return;
+		if (!picked || !activeDocIfCurrent(startRoot, canonPath)) return;
 		type = picked;
 	}
 
-	const selected = activeLiveEditor()?.getSelectedText() ?? "";
+	const selected = activeSelectionText();
 	const { insert, cursorOffset } = buildCalloutBlock(type, "", selected);
 	insertIntoActiveEditor(insert, cursorOffset, { asBlock: !selected });
 }
@@ -543,15 +626,22 @@ export async function insertImageInteractive(): Promise<void> {
 		notify("Open a Markdown document to insert an image.");
 		return;
 	}
+	const startRoot = state.workspace?.root;
+	const canonPath = canonical(path);
+	if (!activeDocIfCurrent(startRoot, canonPath)) return;
+
 	if (!activeLiveEditor() && !activeEditor()?.getDomNode()?.offsetParent) {
 		ensureEditableMarkdown(path);
-		for (let i = 0; i < 12 && !activeLiveEditor(); i++) {
+		for (let i = 0; i < 12 && !activeLiveEditor() && !activeEditor()?.getDomNode()?.offsetParent; i++) {
 			await new Promise((r) => requestAnimationFrame(r));
+			if (!activeDocIfCurrent(startRoot, canonPath)) return;
 		}
 	}
+	if (!activeDocIfCurrent(startRoot, canonPath)) return;
 
-	const root = state.workspace?.root;
+	const root = startRoot;
 	const images = await listWorkspaceImages();
+	if (!activeDocIfCurrent(startRoot, canonPath)) return;
 	let targetSrc = "";
 	let defaultAlt = "";
 
@@ -598,7 +688,7 @@ export async function insertImageInteractive(): Promise<void> {
 		placeholder: images.length ? "Search workspace images or browse files…" : "Browse workspace files or enter a URL…",
 		items,
 	});
-	if (!picked) return;
+	if (!picked || !activeDocIfCurrent(startRoot, canonPath)) return;
 
 	if (picked.kind === "image") {
 		formatLocalTarget(picked.path);
@@ -613,15 +703,16 @@ export async function insertImageInteractive(): Promise<void> {
 			})),
 			pinnedLabel: "Image",
 		});
-		if (!chosen) return;
+		if (!chosen || !activeDocIfCurrent(startRoot, canonPath)) return;
 		formatLocalTarget(chosen.path);
 	} else {
 		const typed = (await ask("Image URL (https://…)", "https://"))?.trim();
-		if (!typed) return;
+		if (!typed || !activeDocIfCurrent(startRoot, canonPath)) return;
 		targetSrc = typed;
 	}
 
-	const alt = (await ask("Optional caption / alt text (add |400 to set width, e.g. Architecture|400)", defaultAlt)) ?? "";
+	const alt = await ask("Optional caption / alt text (add |400 to set width, e.g. Architecture|400)", defaultAlt);
+	if (alt === null || !activeDocIfCurrent(startRoot, canonPath)) return;
 	const snippet = `![${alt.trim()}](${targetSrc})`;
 	insertIntoActiveEditor(snippet, snippet.length);
 }

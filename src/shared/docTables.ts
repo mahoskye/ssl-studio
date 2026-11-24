@@ -14,12 +14,69 @@ export const MAX_TEXT = 100;
 
 export type TableFinding = { line: number; message: string };
 
+/** Strips Markdown links/images `[label](url)` handling balanced inner parentheses in destinations. */
+function stripMarkdownLinks(text: string): string {
+	let out = "";
+	let i = 0;
+	while (i < text.length) {
+		const isImg = text[i] === "!" && text[i + 1] === "[";
+		if (isImg || text[i] === "[") {
+			const openBr = isImg ? i + 1 : i;
+			let brDepth = 0;
+			let closeBr = -1;
+			for (let k = openBr; k < text.length; k++) {
+				if (text[k] === "\\" && k + 1 < text.length) {
+					k++;
+					continue;
+				}
+				if (text[k] === "[") brDepth++;
+				else if (text[k] === "]") {
+					brDepth--;
+					if (brDepth === 0) {
+						closeBr = k;
+						break;
+					}
+				}
+			}
+			if (closeBr >= 0 && text[closeBr + 1] === "(") {
+				let p = closeBr + 2;
+				let parenDepth = 0;
+				let closeParen = -1;
+				while (p < text.length) {
+					const ch = text[p]!;
+					if (ch === "\\" && p + 1 < text.length) {
+						p += 2;
+						continue;
+					}
+					if (ch === "(") parenDepth++;
+					else if (ch === ")") {
+						if (parenDepth === 0) {
+							closeParen = p;
+							break;
+						}
+						parenDepth--;
+					}
+					p++;
+				}
+				if (closeParen >= 0) {
+					out += text.slice(openBr + 1, closeBr);
+					i = closeParen + 1;
+					continue;
+				}
+			}
+		}
+		out += text[i++];
+	}
+	return out;
+}
+
 /** What a cell shows, without its Markdown: `code`, [links](there), and [[Target|Alias]] count as their visible text. */
 export const cellText = (markdown: string) =>
-	markdown
-		.replace(/!?\[\[[^[\]|]+\\?\|([^\]]+)\]\]/g, "$1")
-		.replace(/!?\[\[([^\]]+)\]\]/g, "$1")
-		.replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+	stripMarkdownLinks(
+		markdown
+			.replace(/!?\[\[[^[\]|]+\\?\|([^\]]+)\]\]/g, "$1")
+			.replace(/!?\[\[([^\]]+)\]\]/g, "$1"),
+	)
 		.replace(/[`*_~]/g, "")
 		.replace(/\s+/g, " ")
 		.trim();
@@ -30,15 +87,44 @@ export function checkTables(markdown: string): TableFinding[] {
 	const plain = markdown.replace(/\r\n/g, "\n");
 	const findings: TableFinding[] = [];
 	let offset = 0;
-	const walk = (tokens: any[]) => {
+	const walk = (tokens: any[], isTopLevel = false) => {
 		for (const token of tokens) {
-			if (token.type === "table") {
-				const at = plain.indexOf(token.raw, offset);
-				if (at >= 0) offset = at;
-				check(token, plain.slice(0, Math.max(at, 0)).split("\n").length);
+			let tokenStart = -1;
+			if (isTopLevel && typeof token.raw === "string" && token.raw.length > 0) {
+				tokenStart = plain.indexOf(token.raw, offset);
 			}
-			if (Array.isArray(token.tokens)) walk(token.tokens);
-			if (Array.isArray(token.items)) walk(token.items);
+			if (token.type === "table") {
+				let at = tokenStart >= 0 ? tokenStart : plain.indexOf(token.raw, offset);
+				if (at >= 0) {
+					offset = at + token.raw.length;
+				} else {
+					// Inside blockquotes/lists, `marked` strips `> ` / leading indent from `token.raw`.
+					const firstLine = String(token.raw ?? "").split("\n")[0]?.trim() ?? "";
+					if (firstLine) {
+						let pos = offset;
+						for (const rawLine of plain.slice(offset).split("\n")) {
+							const stripped = rawLine.replace(/^(?:[ \t]*>[ \t]*)+/, "").trim();
+							if (stripped === firstLine) {
+								at = pos;
+								offset = pos + rawLine.length + 1;
+								break;
+							}
+							pos += rawLine.length + 1;
+						}
+					}
+				}
+				check(token, plain.slice(0, Math.max(at, 0)).split("\n").length);
+				continue;
+			}
+			if (isTopLevel && token.type === "code") {
+				if (tokenStart >= 0) offset = tokenStart + token.raw.length;
+				continue;
+			}
+			if (Array.isArray(token.tokens)) walk(token.tokens, false);
+			if (Array.isArray(token.items)) walk(token.items, false);
+			if (isTopLevel && tokenStart >= 0) {
+				offset = Math.max(offset, tokenStart + token.raw.length);
+			}
 		}
 	};
 	const check = (table: any, line: number) => {
@@ -55,7 +141,7 @@ export function checkTables(markdown: string): TableFinding[] {
 			if (i === last && longest > MAX_TEXT) say(`"${name}" holds ${longest} characters in one cell; a cell has at most ${MAX_TEXT}.`);
 		});
 	};
-	walk(marked.lexer(plain));
+	walk(marked.lexer(plain), true);
 	return findings;
 }
 

@@ -135,7 +135,7 @@ export const ticketTemplate = (ticket: { key: string; title: string; source?: st
 	["ticket", ticket.key],
 	["title", quoted(ticket.title)],
 	["type", ticket.type ? quoted(ticket.type) : undefined],
-	["source", ticket.source || undefined],
+	["source", ticket.source?.trim() ? quoted(ticket.source) : undefined],
 	["status", ticket.status ? quoted(ticket.status) : "open"],
 	["parent", ticket.parent || undefined],
 	["related", `[${(ticket.related ?? []).join(", ")}]`],

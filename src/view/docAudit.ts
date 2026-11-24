@@ -54,6 +54,10 @@ export function useDocAudit() {
 	});
 
 	let seq = 0;
+	let prevRoot: string | undefined;
+	onCleanup(() => {
+		seq++;
+	});
 	createEffect(() => {
 		const root = state.workspace?.root;
 		const attach = state.settings.attachmentsFolder ?? "";
@@ -66,9 +70,14 @@ export function useDocAudit() {
 		void editNonce();
 		void auditNonce();
 		const mine = ++seq;
+		const rootChanged = root !== prevRoot;
+		prevRoot = root;
 		if (!root) {
 			setDocAuditData(EMPTY);
 			return;
+		}
+		if (rootChanged) {
+			setDocAuditData(EMPTY);
 		}
 		const dirtyBuffers = collectDirtyBuffers(root);
 		void backend

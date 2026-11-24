@@ -13,13 +13,20 @@ import { basename, extname, isAbsolute, join, relative, resolve } from "node:pat
 import { deflateRawSync, inflateRawSync } from "node:zlib";
 import { frontMatter, one } from "../shared/frontMatter";
 
+const ILLEGAL_XML_RE =
+	/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
 const xmlEsc = (s: string) =>
 	s
+		.replace(ILLEGAL_XML_RE, "")
 		.replace(/&/g, "&amp;")
 		.replace(/</g, "&lt;")
 		.replace(/>/g, "&gt;")
 		.replace(/"/g, "&quot;")
 		.replace(/'/g, "&apos;");
+
+const isValidXmlCodePoint = (n: number) =>
+	Number.isFinite(n) && n > 0 && n <= 0x10ffff && (n < 0xd800 || n > 0xdfff);
 
 const xmlUnesc = (s: string) =>
 	s.replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos);/gi, (m, code: string) => {
@@ -31,11 +38,11 @@ const xmlUnesc = (s: string) =>
 		if (lower === "apos") return "'";
 		if (lower.startsWith("#x")) {
 			const n = Number.parseInt(lower.slice(2), 16);
-			return Number.isFinite(n) && n > 0 ? String.fromCodePoint(n) : m;
+			return isValidXmlCodePoint(n) ? String.fromCodePoint(n) : m;
 		}
 		if (lower.startsWith("#")) {
 			const n = Number.parseInt(lower.slice(1), 10);
-			return Number.isFinite(n) && n > 0 ? String.fromCodePoint(n) : m;
+			return isValidXmlCodePoint(n) ? String.fromCodePoint(n) : m;
 		}
 		return m;
 	});
@@ -133,6 +140,8 @@ function buildZip(entries: { name: string; data: Uint8Array }[]): Uint8Array {
 }
 
 const MAX_ZIP_ENTRY_BYTES = 32 * 1024 * 1024;
+const MAX_ZIP_TOTAL_BYTES = 64 * 1024 * 1024;
+const MAX_ZIP_ENTRIES = 2048;
 
 /** Pure-TypeScript ZIP central-directory reader supporting Stored (0) and Deflate (8) entries. */
 function readZipEntries(bytes: Uint8Array): Map<string, Uint8Array> {
@@ -141,30 +150,55 @@ function readZipEntries(bytes: Uint8Array): Map<string, Uint8Array> {
 	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 	const dec = new TextDecoder();
 
-	// Locate End of Central Directory record (0x06054b50), scanning backwards up to 64 KiB + 22 bytes.
+	// Locate End of Central Directory record (0x06054b50), scanning backwards up to 64 KiB + 22 bytes,
+	// verifying comment bounds match archive end so signatures inside payloads/comments are ignored.
 	const minEocd = Math.max(0, bytes.length - 65557);
 	let eocdPos = -1;
 	for (let p = bytes.length - 22; p >= minEocd; p--) {
 		if (view.getUint32(p, true) === 0x06054b50) {
-			eocdPos = p;
-			break;
+			const commentLen = view.getUint16(p + 20, true);
+			if (p + 22 + commentLen === bytes.length) {
+				eocdPos = p;
+				break;
+			}
 		}
 	}
 
+	let totalBytes = 0;
+	let extractedCount = 0;
+	const seenOffsets = new Set<number>();
+	const seenSpans: [number, number][] = [];
+
 	const extractAtLocal = (localOffset: number, method: number, compSize: number): Uint8Array | null => {
+		if (extractedCount >= MAX_ZIP_ENTRIES) return null;
+		if (seenOffsets.has(localOffset)) return null;
 		if (localOffset < 0 || localOffset + 30 > bytes.length) return null;
 		if (view.getUint32(localOffset, true) !== 0x04034b50) return null;
 		const localNameLen = view.getUint16(localOffset + 26, true);
 		const localExtraLen = view.getUint16(localOffset + 28, true);
 		const dataStart = localOffset + 30 + localNameLen + localExtraLen;
 		const dataEnd = dataStart + compSize;
-		if (dataEnd > bytes.length || compSize > MAX_ZIP_ENTRY_BYTES) return null;
+		if (dataStart > bytes.length || dataEnd > bytes.length || compSize > MAX_ZIP_ENTRY_BYTES) return null;
+		// Reject overlapping local entry ranges (prevents overlapping-entry ZIP bombs).
+		if (seenSpans.some(([s, e]) => localOffset < e && dataEnd > s)) return null;
+		seenOffsets.add(localOffset);
+		seenSpans.push([localOffset, dataEnd]);
+		extractedCount++;
+		const remaining = MAX_ZIP_TOTAL_BYTES - totalBytes;
+		if (remaining <= 0) return null;
+		const maxOut = Math.min(MAX_ZIP_ENTRY_BYTES, remaining);
 		const slice = bytes.subarray(dataStart, dataEnd);
-		if (method === 0) return new Uint8Array(slice);
+		if (method === 0) {
+			if (slice.length > maxOut) return null;
+			totalBytes += slice.length;
+			return new Uint8Array(slice);
+		}
 		if (method === 8) {
 			try {
-				const inflated = inflateRawSync(slice);
-				return inflated.length <= MAX_ZIP_ENTRY_BYTES ? new Uint8Array(inflated) : null;
+				const inflated = inflateRawSync(slice, { maxOutputLength: maxOut });
+				if (inflated.length > maxOut) return null;
+				totalBytes += inflated.length;
+				return new Uint8Array(inflated);
 			} catch {
 				return null;
 			}
@@ -176,9 +210,11 @@ function readZipEntries(bytes: Uint8Array): Map<string, Uint8Array> {
 		const entryCount = view.getUint16(eocdPos + 10, true);
 		const cdSize = view.getUint32(eocdPos + 12, true);
 		const cdOffset = view.getUint32(eocdPos + 16, true);
+		if (cdOffset > eocdPos) return entries;
 		let pos = cdOffset;
-		const cdEnd = Math.min(bytes.length, cdOffset + cdSize);
-		for (let i = 0; i < entryCount && pos + 46 <= cdEnd; i++) {
+		const cdEnd = Math.min(eocdPos, cdOffset + cdSize);
+		const maxLoop = Math.min(entryCount, MAX_ZIP_ENTRIES);
+		for (let i = 0; i < maxLoop && pos + 46 <= cdEnd; i++) {
 			if (view.getUint32(pos, true) !== 0x02014b50) break;
 			const method = view.getUint16(pos + 10, true);
 			const compSize = view.getUint32(pos + 20, true);
@@ -186,9 +222,11 @@ function readZipEntries(bytes: Uint8Array): Map<string, Uint8Array> {
 			const extraLen = view.getUint16(pos + 30, true);
 			const commentLen = view.getUint16(pos + 32, true);
 			const localOffset = view.getUint32(pos + 42, true);
-			if (pos + 46 + nameLen > bytes.length) break;
+			if (pos + 46 + nameLen > cdEnd) break;
+			const nextPos = pos + 46 + nameLen + extraLen + commentLen;
+			if (nextPos > cdEnd) break;
 			const rawName = dec.decode(bytes.subarray(pos + 46, pos + 46 + nameLen)).replace(/\\/g, "/");
-			pos += 46 + nameLen + extraLen + commentLen;
+			pos = nextPos;
 			if (!rawName || rawName.endsWith("/")) continue;
 			const payload = extractAtLocal(localOffset, method, compSize);
 			if (payload) entries.set(rawName, payload);
@@ -198,16 +236,22 @@ function readZipEntries(bytes: Uint8Array): Map<string, Uint8Array> {
 
 	// Fallback: local header sequential walk when EOCD is absent.
 	let pos = 0;
-	while (pos + 30 <= bytes.length && view.getUint32(pos, true) === 0x04034b50) {
+	while (pos + 30 <= bytes.length && extractedCount < MAX_ZIP_ENTRIES && view.getUint32(pos, true) === 0x04034b50) {
 		const method = view.getUint16(pos + 8, true);
 		const compSize = view.getUint32(pos + 18, true);
 		const nameLen = view.getUint16(pos + 26, true);
 		const extraLen = view.getUint16(pos + 28, true);
-		const rawName = dec.decode(bytes.subarray(pos + 30, pos + 30 + nameLen)).replace(/\\/g, "/");
+		if (pos + 30 + nameLen > bytes.length) break;
 		const dataStart = pos + 30 + nameLen + extraLen;
-		const payload = extractAtLocal(pos, method, compSize);
-		if (payload && rawName && !rawName.endsWith("/")) entries.set(rawName, payload);
-		pos = dataStart + compSize;
+		if (dataStart > bytes.length || dataStart + compSize > bytes.length) break;
+		const rawName = dec.decode(bytes.subarray(pos + 30, pos + 30 + nameLen)).replace(/\\/g, "/");
+		if (rawName && !rawName.endsWith("/")) {
+			const payload = extractAtLocal(pos, method, compSize);
+			if (payload) entries.set(rawName, payload);
+		}
+		const nextPos = dataStart + compSize;
+		if (nextPos <= pos) break;
+		pos = nextPos;
 	}
 	return entries;
 }
@@ -481,6 +525,9 @@ function lookupRasterizedPayload(
 	return null;
 }
 
+const MAX_EMBED_IMAGE_BYTES = 20 * 1024 * 1024;
+const MAX_EMBED_BASE64_CHARS = Math.ceil((MAX_EMBED_IMAGE_BYTES * 4) / 3) + 64;
+
 function createDocxContext(
 	options: DocxBuildOptions,
 	footnotes: Map<string, string>,
@@ -532,6 +579,7 @@ function createDocxContext(
 		},
 
 		embedImageBytes(bytes, nameHint, alt, widthPx, heightPx, dedupeKey) {
+			if (!bytes.length || bytes.length > MAX_EMBED_IMAGE_BYTES) return null;
 			const ext = detectImageExt(bytes, nameHint);
 			if (!ext) return null;
 			let rec = dedupeKey ? ctx.mediaRelByKey.get(dedupeKey) : undefined;
@@ -574,7 +622,7 @@ function createDocxContext(
 			const rasterRaw = lookupRasterizedPayload(ctx.rasterizedImages, trimmed, clean);
 			if (rasterRaw) {
 				const b64 = rasterRaw.replace(/^data:image\/[a-z0-9.+-]+;base64,/i, "").replace(/\s+/g, "");
-				if (b64) {
+				if (b64 && b64.length <= MAX_EMBED_BASE64_CHARS) {
 					try {
 						const bytes = Uint8Array.from(Buffer.from(b64, "base64"));
 						const embedded = ctx.embedImageBytes(
@@ -598,7 +646,9 @@ function createDocxContext(
 			const dataMatch = /^data:image\/(png|jpe?g|gif|bmp);base64,([A-Za-z0-9+/=\s]+)$/i.exec(trimmed);
 			if (dataMatch) {
 				try {
-					const bytes = Uint8Array.from(Buffer.from(dataMatch[2]!.replace(/\s+/g, ""), "base64"));
+					const cleanB64 = dataMatch[2]!.replace(/\s+/g, "");
+					if (!cleanB64 || cleanB64.length > MAX_EMBED_BASE64_CHARS) return null;
+					const bytes = Uint8Array.from(Buffer.from(cleanB64, "base64"));
 					return ctx.embedImageBytes(bytes, `inline.${dataMatch[1]!.toLowerCase()}`, alt, widthPx, heightPx);
 				} catch {
 					return null;
@@ -645,7 +695,9 @@ function createDocxContext(
 			for (const cand of candidates) {
 				if (!isWithinRoot(boundary, cand)) continue;
 				try {
-					if (!existsSync(cand) || !statSync(cand).isFile()) continue;
+					if (!existsSync(cand)) continue;
+					const st = statSync(cand);
+					if (!st.isFile() || st.size > MAX_EMBED_IMAGE_BYTES) continue;
 					const bytes = new Uint8Array(readFileSync(cand));
 					return ctx.embedImageBytes(bytes, basename(cand), alt, widthPx, heightPx, `file:${resolve(cand)}`);
 				} catch {
@@ -663,7 +715,7 @@ function createDocxContext(
 			const raw = map[trimmed] ?? map[`mermaid-${idx}`];
 			if (!raw) return null;
 			const b64 = raw.replace(/^data:image\/png;base64,/i, "").replace(/\s+/g, "");
-			if (!b64) return null;
+			if (!b64 || b64.length > MAX_EMBED_BASE64_CHARS) return null;
 			try {
 				const bytes = Uint8Array.from(Buffer.from(b64, "base64"));
 				return ctx.embedImageBytes(bytes, `mermaid-${idx}.png`, `Diagram ${idx + 1}`, undefined, undefined, `mermaid:${idx}`);
@@ -1119,7 +1171,7 @@ function calloutBox(kind: string, title: string, bodyLines: string[], ctx: DocxC
 		`<w:spacing w:before="60" w:after="60"/>`,
 	);
 	const bodyXml = renderMarkdownBlocks(bodyLines, ctx, { compact: true }).join("");
-	return `<w:tbl><w:tblPr><w:tblW w:w="9360" w:type="dxa"/><w:tblBorders><w:top w:val="single" w:sz="4" w:color="CBD5E1"/><w:bottom w:val="single" w:sz="4" w:color="CBD5E1"/><w:right w:val="single" w:sz="4" w:color="CBD5E1"/><w:left w:val="single" w:sz="24" w:color="${border}"/></w:tblBorders><w:tblCellMar><w:top w:w="100" w:type="dxa"/><w:bottom w:w="100" w:type="dxa"/><w:left w:w="160" w:type="dxa"/><w:right w:w="140" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tr><w:tc><w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="${fill}"/></w:tcPr>${titleP}${bodyXml || paragraph("")}</w:tc></w:tr></w:tbl>${paragraph("", undefined, `<w:spacing w:before="0" w:after="80"/>`)}`;
+	return `<w:tbl><w:tblPr><w:tblW w:w="9360" w:type="dxa"/><w:tblBorders><w:top w:val="single" w:sz="4" w:color="CBD5E1"/><w:bottom w:val="single" w:sz="4" w:color="CBD5E1"/><w:right w:val="single" w:sz="4" w:color="CBD5E1"/><w:left w:val="single" w:sz="24" w:color="${border}"/></w:tblBorders><w:tblCellMar><w:top w:w="100" w:type="dxa"/><w:bottom w:w="100" w:type="dxa"/><w:left w:w="160" w:type="dxa"/><w:right w:w="140" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tblGrid><w:gridCol w:w="9360"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="${fill}"/></w:tcPr>${titleP}${bodyXml || paragraph("")}</w:tc></w:tr></w:tbl>${paragraph("", undefined, `<w:spacing w:before="0" w:after="80"/>`)}`;
 }
 
 /** Ordinary `> blockquote`: clean left-bordered muted paragraphs (never a blue "Note" callout). */
@@ -1140,7 +1192,7 @@ function codeBox(codeLines: string[], widthDxa = 9360): string {
 				`<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Consolas" w:hAnsi="Consolas"/><w:sz w:val="18"/></w:rPr><w:t xml:space="preserve">${xmlEsc(l || " ")}</w:t></w:r></w:p>`,
 		)
 		.join("");
-	return `<w:tbl><w:tblPr><w:tblW w:w="${widthDxa}" w:type="dxa"/><w:tblBorders><w:top w:val="single" w:sz="4" w:color="E2E8F0"/><w:bottom w:val="single" w:sz="4" w:color="E2E8F0"/><w:left w:val="single" w:sz="4" w:color="E2E8F0"/><w:right w:val="single" w:sz="4" w:color="E2E8F0"/></w:tblBorders><w:tblCellMar><w:top w:w="90" w:type="dxa"/><w:bottom w:w="90" w:type="dxa"/><w:left w:w="140" w:type="dxa"/><w:right w:w="140" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tr><w:tc><w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="F8FAFC"/></w:tcPr>${ps || paragraph("")}</w:tc></w:tr></w:tbl>${paragraph("", undefined, `<w:spacing w:before="0" w:after="80"/>`)}`;
+	return `<w:tbl><w:tblPr><w:tblW w:w="${widthDxa}" w:type="dxa"/><w:tblBorders><w:top w:val="single" w:sz="4" w:color="E2E8F0"/><w:bottom w:val="single" w:sz="4" w:color="E2E8F0"/><w:left w:val="single" w:sz="4" w:color="E2E8F0"/><w:right w:val="single" w:sz="4" w:color="E2E8F0"/></w:tblBorders><w:tblCellMar><w:top w:w="90" w:type="dxa"/><w:bottom w:w="90" w:type="dxa"/><w:left w:w="140" w:type="dxa"/><w:right w:w="140" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tblGrid><w:gridCol w:w="${widthDxa}"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="F8FAFC"/></w:tcPr>${ps || paragraph("")}</w:tc></w:tr></w:tbl>${paragraph("", undefined, `<w:spacing w:before="0" w:after="80"/>`)}`;
 }
 
 /** Splits a GFM pipe table row on unescaped `|` outside backtick code spans of any run length. */
@@ -1205,12 +1257,13 @@ function unrasterizedImageBox(label: string, rawRef: string): string {
 		undefined,
 		`<w:spacing w:before="0" w:after="40"/>`,
 	);
-	return `<w:tbl><w:tblPr><w:tblW w:w="9360" w:type="dxa"/><w:tblBorders><w:top w:val="single" w:sz="4" w:color="CBD5E1"/><w:bottom w:val="single" w:sz="4" w:color="CBD5E1"/><w:right w:val="single" w:sz="4" w:color="CBD5E1"/><w:left w:val="single" w:sz="18" w:color="64748B"/></w:tblBorders><w:tblCellMar><w:top w:w="90" w:type="dxa"/><w:bottom w:w="90" w:type="dxa"/><w:left w:w="150" w:type="dxa"/><w:right w:w="140" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tr><w:trPr><w:cantSplit/></w:trPr><w:tc><w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="F8FAFC"/></w:tcPr>${titleP}${noteP}</w:tc></w:tr></w:tbl>${paragraph("", undefined, `<w:spacing w:before="0" w:after="80"/>`)}`;
+	return `<w:tbl><w:tblPr><w:tblW w:w="9360" w:type="dxa"/><w:tblBorders><w:top w:val="single" w:sz="4" w:color="CBD5E1"/><w:bottom w:val="single" w:sz="4" w:color="CBD5E1"/><w:right w:val="single" w:sz="4" w:color="CBD5E1"/><w:left w:val="single" w:sz="18" w:color="64748B"/></w:tblBorders><w:tblCellMar><w:top w:w="90" w:type="dxa"/><w:bottom w:w="90" w:type="dxa"/><w:left w:w="150" w:type="dxa"/><w:right w:w="140" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tblGrid><w:gridCol w:w="9360"/></w:tblGrid><w:tr><w:trPr><w:cantSplit/></w:trPr><w:tc><w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="F8FAFC"/></w:tcPr>${titleP}${noteP}</w:tc></w:tr></w:tbl>${paragraph("", undefined, `<w:spacing w:before="0" w:after="80"/>`)}`;
 }
 
 function tableXml(headers: string[], rows: string[][], ctx: DocxContext, compactMeta = false): string {
 	const cols = Math.max(1, headers.length);
 	const colW = compactMeta && cols === 2 ? [2400, 6960] : Array.from({ length: cols }, () => Math.floor(9360 / cols));
+	const tblGrid = `<w:tblGrid>${colW.map((w) => `<w:gridCol w:w="${w}"/>`).join("")}</w:tblGrid>`;
 	const makeCell = (text: string, colIdx: number, isHeader: boolean, shadedKey = false) =>
 		`<w:tc><w:tcPr><w:tcW w:w="${colW[colIdx] ?? Math.floor(9360 / cols)}" w:type="dxa"/>${isHeader || shadedKey ? '<w:shd w:val="clear" w:color="auto" w:fill="F4F4F5"/>' : ""}</w:tcPr>${paragraph(
 			isHeader
@@ -1228,7 +1281,7 @@ function tableXml(headers: string[], rows: string[][], ctx: DocxContext, compact
 	const bodyTrs = rows
 		.map((r) => `<w:tr><w:trPr><w:cantSplit/></w:trPr>${headers.map((_, ci) => makeCell(r[ci] ?? "", ci, false, compactMeta && ci === 0)).join("")}</w:tr>`)
 		.join("");
-	return `<w:tbl><w:tblPr><w:tblW w:w="9360" w:type="dxa"/><w:tblBorders><w:top w:val="single" w:sz="4" w:color="D4D4D8"/><w:bottom w:val="single" w:sz="4" w:color="D4D4D8"/><w:left w:val="single" w:sz="4" w:color="D4D4D8"/><w:right w:val="single" w:sz="4" w:color="D4D4D8"/><w:insideH w:val="single" w:sz="4" w:color="E4E4E7"/><w:insideV w:val="single" w:sz="4" w:color="E4E4E7"/></w:tblBorders><w:tblCellMar><w:top w:w="60" w:type="dxa"/><w:bottom w:w="60" w:type="dxa"/><w:left w:w="100" w:type="dxa"/><w:right w:w="100" w:type="dxa"/></w:tblCellMar></w:tblPr>${headerTr}${bodyTrs}</w:tbl>${paragraph("", undefined, `<w:spacing w:before="0" w:after="80"/>`)}`;
+	return `<w:tbl><w:tblPr><w:tblW w:w="9360" w:type="dxa"/><w:tblBorders><w:top w:val="single" w:sz="4" w:color="D4D4D8"/><w:bottom w:val="single" w:sz="4" w:color="D4D4D8"/><w:left w:val="single" w:sz="4" w:color="D4D4D8"/><w:right w:val="single" w:sz="4" w:color="D4D4D8"/><w:insideH w:val="single" w:sz="4" w:color="E4E4E7"/><w:insideV w:val="single" w:sz="4" w:color="E4E4E7"/></w:tblBorders><w:tblCellMar><w:top w:w="60" w:type="dxa"/><w:bottom w:w="60" w:type="dxa"/><w:left w:w="100" w:type="dxa"/><w:right w:w="100" w:type="dxa"/></w:tblCellMar></w:tblPr>${tblGrid}${headerTr}${bodyTrs}</w:tbl>${paragraph("", undefined, `<w:spacing w:before="0" w:after="80"/>`)}`;
 }
 
 /** Strips GFM footnote definitions (`[^id]: text`) outside fenced code blocks and returns them in a Map. */
@@ -1279,23 +1332,46 @@ type RenderBlockOptions = {
 function renderMarkdownBlocks(lines: string[], ctx: DocxContext, opts: RenderBlockOptions = {}): string[] {
 	const blocks: string[] = [];
 	const quotePPr = opts.quotePPr ?? "";
+	const quotePPrNoInd = quotePPr.replace(/<w:ind\b[^>]*\/>/g, "");
+	const quoteRightAttr = quotePPr ? ' w:right="180"' : "";
 	const baseStyle = opts.baseStyle ?? {};
 	let i = 0;
 
 	while (i < lines.length) {
-		const line = lines[i]!;
+		let line = lines[i]!;
 		if (!line.trim()) {
 			i++;
 			continue;
 		}
-		// Skip HTML comments
+		// Strip HTML comments (preserving any trailing prose after closed `-->` on the same line)
 		if (/^[ \t]*<!--/.test(line)) {
-			if (!/-->[ \t]*$/.test(line)) {
+			const stripped = line.replace(/<!--[\s\S]*?-->/g, "");
+			const openAt = stripped.indexOf("<!--");
+			if (openAt >= 0) {
+				const beforeOpen = stripped.slice(0, openAt).trim();
 				i++;
-				while (i < lines.length && !/-->/.test(lines[i]!)) i++;
+				let trailing = "";
+				while (i < lines.length) {
+					const closeAt = lines[i]!.indexOf("-->");
+					if (closeAt >= 0) {
+						trailing = lines[i]!.slice(closeAt + 3).replace(/<!--[\s\S]*?-->/g, "").trim();
+						i++;
+						break;
+					}
+					i++;
+				}
+				const remainder = [beforeOpen, trailing].filter(Boolean).join(" ").trim();
+				if (remainder) {
+					const spacing = opts.compact ? `<w:spacing w:before="20" w:after="60"/>` : `<w:spacing w:before="40" w:after="120"/>`;
+					blocks.push(paragraph(inlineRuns(remainder, ctx, baseStyle), undefined, `${quotePPr}${spacing}`));
+				}
+				continue;
 			}
-			i++;
-			continue;
+			if (!stripped.trim()) {
+				i++;
+				continue;
+			}
+			line = stripped.replace(/^[ \t]+/, "");
 		}
 		// Display math block (`$$...$$` single-line or multi-line `$$\n...\n$$`)
 		const singleMath = /^[ \t]{0,3}\$\$(.+?)\$\$[ \t]*$/.exec(line);
@@ -1360,7 +1436,8 @@ function renderMarkdownBlocks(lines: string[], ctx: DocxContext, opts: RenderBlo
 		}
 		// Ordinary blockquote `> ...` (muted left-bordered, NEVER a blue "Note" callout)
 		if (/^[ \t]{0,3}>/.test(line)) {
-			const body: string[] = [];
+			const body: string[] = [line.replace(/^[ \t]{0,3}>[ \t]?/, "")];
+			i++;
 			while (i < lines.length && /^[ \t]{0,3}>/.test(lines[i]!)) {
 				body.push(lines[i]!.replace(/^[ \t]{0,3}>[ \t]?/, ""));
 				i++;
@@ -1410,7 +1487,7 @@ function renderMarkdownBlocks(lines: string[], ctx: DocxContext, opts: RenderBlo
 				paragraph(
 					inlineRuns(`${mark}${task[3]!}`, ctx, baseStyle),
 					undefined,
-					`${quotePPr}<w:ind w:left="${indent}" w:hanging="240"/><w:spacing w:before="20" w:after="40"/>`,
+					`${quotePPrNoInd}<w:ind w:left="${indent}"${quoteRightAttr} w:hanging="240"/><w:spacing w:before="20" w:after="40"/>`,
 				),
 			);
 			i++;
@@ -1425,7 +1502,7 @@ function renderMarkdownBlocks(lines: string[], ctx: DocxContext, opts: RenderBlo
 				paragraph(
 					inlineRuns(`• ${bullet[2]!}`, ctx, baseStyle),
 					undefined,
-					`${quotePPr}<w:ind w:left="${indent}" w:hanging="240"/><w:spacing w:before="20" w:after="40"/>`,
+					`${quotePPrNoInd}<w:ind w:left="${indent}"${quoteRightAttr} w:hanging="240"/><w:spacing w:before="20" w:after="40"/>`,
 				),
 			);
 			i++;
@@ -1440,7 +1517,7 @@ function renderMarkdownBlocks(lines: string[], ctx: DocxContext, opts: RenderBlo
 				paragraph(
 					inlineRuns(`${ordered[2]!} ${ordered[3]!}`, ctx, baseStyle),
 					undefined,
-					`${quotePPr}<w:ind w:left="${indent}" w:hanging="280"/><w:spacing w:before="20" w:after="40"/>`,
+					`${quotePPrNoInd}<w:ind w:left="${indent}"${quoteRightAttr} w:hanging="280"/><w:spacing w:before="20" w:after="40"/>`,
 				),
 			);
 			i++;
@@ -1984,8 +2061,13 @@ function formatSegments(segments: StyledSegment[], suppressBold = false): string
 			if (!core) return seg.text;
 			let out = core;
 			if (seg.code) {
-				const fence = out.includes("`") ? "``" : "`";
-				out = `${fence}${out}${fence}`;
+				let maxRun = 0;
+				for (const m of out.matchAll(/`+/g)) {
+					if (m[0].length > maxRun) maxRun = m[0].length;
+				}
+				const fence = "`".repeat(maxRun + 1);
+				const padded = out.startsWith("`") || out.endsWith("`") ? ` ${out} ` : out;
+				out = `${fence}${padded}${fence}`;
 			} else {
 				const bold = seg.bold && !suppressBold;
 				if (bold && seg.italic) out = `***${out}***`;
@@ -2185,7 +2267,8 @@ function parseStylesXml(stylesXml: string): Map<string, ParsedStyleDef> {
 		const ilvlTag = /<w:ilvl\b[^>]*>/i.exec(numPr)?.[0] ?? "";
 		const numId = numIdTag ? xmlAttr(numIdTag, "w:val") : undefined;
 		const ilvlRaw = ilvlTag ? xmlAttr(ilvlTag, "w:val") : "";
-		const ilvl = ilvlRaw !== "" && Number.isFinite(Number(ilvlRaw)) ? Math.max(0, Number(ilvlRaw)) : undefined;
+		const parsedIlvl = ilvlRaw !== "" ? Math.floor(Number(ilvlRaw)) : Number.NaN;
+		const ilvl = Number.isFinite(parsedIlvl) ? Math.min(8, Math.max(0, parsedIlvl)) : undefined;
 		map.set(id.toLowerCase(), {
 			id,
 			name: nameTag ? xmlAttr(nameTag, "w:val") : "",
@@ -2263,6 +2346,18 @@ function wrapAnnotatedMarkdown(text: string, prefix: string, suffix: string): st
 	return `${lead}${prefix}${core}${suffix}${trail}`;
 }
 
+function safeDocxLinkUrl(rawUrl: string): string | null {
+	const cleaned = rawUrl.replace(/[\u0000-\u001f\u007f]+/g, "").trim();
+	if (!cleaned) return null;
+	const scheme = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(cleaned);
+	if (scheme) {
+		if (!/^(?:https?|mailto)$/i.test(scheme[1]!)) return null;
+	} else if (cleaned.startsWith("//")) {
+		return null;
+	}
+	return cleaned.replace(/[()\s<>]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`);
+}
+
 /** Parses a `.docx` binary archive into clean Markdown + extracted image payloads (+ optional import warnings). */
 export function parseDocxToMarkdown(bytes: Uint8Array): DocxParsedResult {
 	const entries = readZipEntries(bytes);
@@ -2318,6 +2413,8 @@ export function parseDocxToMarkdown(bytes: Uint8Array): DocxParsedResult {
 	};
 
 	const extractedImages = new Map<string, Uint8Array>();
+	const extractedByZipPath = new Map<string, string>();
+	const usedImgNames = new Set<string>();
 
 	const resolveImageRel = (rId: string, activeRels: Map<string, ParsedRel>): string | null => {
 		const rel = activeRels.get(rId) ?? docRels.get(rId);
@@ -2330,8 +2427,20 @@ export function parseDocxToMarkdown(bytes: Uint8Array): DocxParsedResult {
 		for (const cand of candidates) {
 			const hit = byLower.get(cand.toLowerCase());
 			if (hit) {
-				const imgName = basename(hit.name);
-				if (!extractedImages.has(imgName)) extractedImages.set(imgName, hit.data);
+				const zipKey = hit.name.toLowerCase();
+				const existing = extractedByZipPath.get(zipKey);
+				if (existing) return existing;
+				const base = basename(hit.name) || "image.png";
+				const ext = extname(base);
+				const stem = ext ? base.slice(0, -ext.length) : base;
+				let imgName = base;
+				let suffix = 2;
+				while (usedImgNames.has(imgName.toLowerCase())) {
+					imgName = `${stem}-${suffix++}${ext}`;
+				}
+				usedImgNames.add(imgName.toLowerCase());
+				extractedByZipPath.set(zipKey, imgName);
+				extractedImages.set(imgName, hit.data);
 				return imgName;
 			}
 		}
@@ -2387,8 +2496,9 @@ export function parseDocxToMarkdown(bytes: Uint8Array): DocxParsedResult {
 		}
 
 		// Extract text (`<w:t>`), deleted text (`<w:delText>`), footnote/comment refs, breaks, and tabs in exact order.
+		// Exclude self-closing `<w:t/>` and `<w:delText/>` so they never swallow subsequent XML up to the next closing tag.
 		const tokenRe =
-			/<w:t\b[^>]*>([\s\S]*?)<\/w:t>|<w:delText\b[^>]*>([\s\S]*?)<\/w:delText>|<w:footnoteReference\b[^>]*\/?>|<w:commentReference\b[^>]*\/?>|<w:br\b[^>]*\/?>|<w:tab\b[^>]*\/?>/gi;
+			/<w:t\b[^>]*(?<!\/)>([\s\S]*?)<\/w:t>|<w:delText\b[^>]*(?<!\/)>([\s\S]*?)<\/w:delText>|<w:footnoteReference\b[^>]*\/?>|<w:commentReference\b[^>]*\/?>|<w:br\b[^>]*\/?>|<w:tab\b[^>]*\/?>/gi;
 		let m: RegExpExecArray | null;
 		while ((m = tokenRe.exec(runBody)) !== null) {
 			const whole = m[0];
@@ -2440,11 +2550,13 @@ export function parseDocxToMarkdown(bytes: Uint8Array): DocxParsedResult {
 				segments.push(...parseRun(child.inner, activeRels, opts));
 			} else if (child.tag === "w:hyperlink") {
 				const rId = xmlAttr(child.openTag, "r:id");
-				const url = rId ? (activeRels.get(rId)?.target ?? docRels.get(rId)?.target ?? "") : "";
+				const rawUrl = rId ? (activeRels.get(rId)?.target ?? docRels.get(rId)?.target ?? "") : "";
+				const safeUrl = rawUrl ? safeDocxLinkUrl(rawUrl) : null;
 				const innerSegs = parseInlineChildren(child.inner, activeRels, suppressBold, opts);
 				const label = formatSegments(innerSegs, suppressBold).trim();
-				if (url && label) {
-					const formatted = label === url ? `<${url}>` : `[${label}](${url})`;
+				if (safeUrl && label) {
+					const formatted =
+						label === safeUrl && /^(?:https?:\/\/|mailto:)/i.test(safeUrl) ? `<${safeUrl}>` : `[${label}](${safeUrl})`;
 					segments.push({ text: formatted, bold: false, italic: false, strike: false, code: false, highlight: false, raw: true });
 				} else if (label) {
 					segments.push({ text: label, bold: false, italic: false, strike: false, code: false, highlight: false, raw: true });
@@ -2570,9 +2682,8 @@ export function parseDocxToMarkdown(bytes: Uint8Array): DocxParsedResult {
 		const ilvlMatch = numPrEl ? /<w:ilvl\b[^>]*>/i.exec(numPrEl.inner) : null;
 		const numId = (numIdMatch ? xmlAttr(numIdMatch[0], "w:val") : undefined) ?? styleNum.numId;
 		const hasNumPr = Boolean((numPrEl && numId !== "0") || (styleNum.numId && styleNum.numId !== "0"));
-		const ilvl = ilvlMatch
-			? Math.max(0, Number(xmlAttr(ilvlMatch[0], "w:val")) || 0)
-			: styleNum.ilvl ?? 0;
+		const rawIlvl = ilvlMatch ? Number(xmlAttr(ilvlMatch[0], "w:val")) : styleNum.ilvl;
+		const ilvl = rawIlvl !== undefined && Number.isFinite(rawIlvl) ? Math.min(8, Math.max(0, Math.floor(rawIlvl))) : 0;
 
 		const contentXml = stripDirectElement(pInner, "w:pPr");
 		const segments = parseInlineChildren(contentXml, docRels, headingLevel > 0 || suppressBoldCell);
@@ -2586,8 +2697,10 @@ export function parseDocxToMarkdown(bytes: Uint8Array): DocxParsedResult {
 		if (hasNumPr && !inTableCell) {
 			const lvlDef = numId ? numberingMap.get(numId)?.get(ilvl) : undefined;
 			if (lvlDef?.ordered && numId) {
-				if (lastListNumId !== numId) {
+				if (ilvl === 0 && lastListNumId !== numId) {
 					orderedCounters.clear();
+					lastListNumId = numId;
+				} else if (lastListNumId === null) {
 					lastListNumId = numId;
 				}
 				// Reset any deeper sub-level counters when returning to a shallower level.
@@ -2600,7 +2713,14 @@ export function parseDocxToMarkdown(bytes: Uint8Array): DocxParsedResult {
 				orderedCounters.set(cKey, nextNum);
 				return { text: `${"  ".repeat(ilvl)}${nextNum}. ${text}`, isList: true };
 			}
-			resetOrderedCounters();
+			if (ilvl === 0) {
+				resetOrderedCounters();
+			} else {
+				for (const k of [...orderedCounters.keys()]) {
+					const lvl = Number(k.slice(k.lastIndexOf(":") + 1));
+					if (lvl >= ilvl) orderedCounters.delete(k);
+				}
+			}
 			return { text: `${"  ".repeat(ilvl)}- ${text}`, isList: true };
 		}
 		if (!inTableCell) {
