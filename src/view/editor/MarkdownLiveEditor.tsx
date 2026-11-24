@@ -7,61 +7,38 @@ import { closeSearchPanel, openSearchPanel, searchPanelOpen } from "@codemirror/
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { Annotation, Compartment, EditorSelection, EditorState, RangeSetBuilder, StateEffect, StateField, Transaction, type Extension } from "@codemirror/state";
 import { Decoration, type DecorationSet, drawSelection, dropCursor, EditorView, highlightSpecialChars } from "@codemirror/view";
-import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, on, onCleanup, onMount, Show } from "solid-js";
 import { Portal } from "solid-js/web";
-import { localDay } from "../../shared/dates";
-import { evaluateTicketReadiness } from "../../shared/docExport";
+import { fenced } from "../../shared/catalog";
+import { placeAnchoredMenu, submenuOrInline, type RectBox } from "../../shared/contextMenu";
 import { linkLeads, withLinkFile } from "../../shared/docLinks";
 import { fenceAtLine, fenceFormatTarget } from "../../shared/fencedFormat";
-import {
-	addToFrontMatterList,
-	formatFrontMatterInnerReplacement,
-	frontMatter,
-	frontMatterInnerSpan,
-	one,
-	quoteYamlScalar,
-	removeFromFrontMatterList,
-	stripEmptyFrontMatter,
-	withFrontMatter,
-} from "../../shared/frontMatter";
-import { tagSearchPattern, workspaceTags } from "../../shared/tags";
-import { documentHeadings, findHeadingLine, withImageWidth } from "../../shared/markdownEdit";
+import { frontMatter, frontMatterInnerSpan, one, quoteYamlScalar } from "../../shared/frontMatter";
+import { tagSearchPattern } from "../../shared/tags";
+import { buildCalloutBlock, documentHeadings, findHeadingLine, withImageWidth } from "../../shared/markdownEdit";
 import type { TableAlign } from "../../shared/markdownTables";
-import { docByName, linkedFrom, namedLink, nameFor } from "../../shared/namedLinks";
-import { baseName, dirName, isInside, joinPath, relativeTo, resolvePath } from "../../shared/paths";
-import { DOC_FOLDERS, isCatalog, registryTitle, statusChoices, toneOf } from "../../shared/projectDocs";
-import { rowsLine } from "../../shared/registryTickets";
-import { descendantTickets, docLinkedTickets, ticketWork } from "../../shared/workContext";
+import { docByName, namedLink, nameFor } from "../../shared/namedLinks";
+import { baseName, dirName, isInside, joinPath, relativeTo } from "../../shared/paths";
+import { DOC_FOLDERS, toneOf } from "../../shared/projectDocs";
+import { resolveReadAssistActiveIndex } from "../../shared/readAssist";
 import { lineChanges, type LineChange } from "../../shared/lineDiff";
 import { gitStatus, gitVersion } from "../git";
 import { backend } from "../backend";
-import { ask, choose } from "../dialogs";
+import { choose } from "../dialogs";
 import { Icon } from "../Icon";
-import { Menu } from "../Menu";
 import { noteCursor } from "../navigation";
-import { submenuOrInline } from "../../shared/contextMenu";
+import {
+	activeMarkdownTab,
+	formatCompactHeaderMeta,
+	markdownLinksSummary,
+	markdownYamlEditorOpen,
+	requestMarkdownInspector,
+} from "../panels/markdownBridge";
+import { isShown } from "../panels/registry";
 import { chooseFromMenu, type RowMenuEntry } from "../panels/RowMenu";
 import { searchFor } from "../panels/Search";
 import { docs } from "../project";
-import {
-	addRegistryRowForTicket,
-	closeoutTicket,
-	createTicketFolder,
-	exportDeploymentManifest,
-	exportDocAs,
-	exportTicketPacket,
-	isArchivedTicket,
-	linkDocumentToTicket,
-	linkNonTicketToTicket,
-	newKnowledge,
-	newSpec,
-	newTicket,
-	newTicketFile,
-	promoteQuestionToDecision,
-	setStatus,
-	unarchiveTicket,
-	unlinkDocumentFromTicket,
-} from "../projectDocs";
+import { exportDocAs, recordDocApproval } from "../projectDocs";
 import {
 	canonical,
 	documents,
@@ -78,7 +55,7 @@ import {
 import { insertCalloutInteractive, insertImageInteractive, insertMarkdownTemplate } from "../templater";
 import { themeVersion } from "../themes/themes";
 import { liveCodeHighlightPlugin } from "./cmCodeHighlight";
-import { cmMarkdownCompletion, createTextareaCompleter, type TextareaCompleter } from "./cmCompletion";
+import { cmMarkdownCompletion } from "./cmCompletion";
 import {
 	activeTableAtCursor,
 	cmAutoWrapExtension,
@@ -107,7 +84,7 @@ import {
 import { applyMarkdownFormatToTextarea, focusLiveWidgetAt, type MermaidLightboxInfo } from "./cmLiveShared";
 import { copyMermaidAsPng, downloadMermaidBlob, renderMermaidSvgForExport } from "./cmMermaid";
 import { cmMarkdownHighlight, cmStudioTheme } from "./cmTheme";
-import { buildHoverPreview, type HoverPreviewData } from "./hoverPreview";
+import { buildFootnoteHoverPreview, buildHoverPreview, type HoverPreviewData } from "./hoverPreview";
 import { hydrateImagesInElement } from "./imageResolve";
 import { formatCodeFence } from "./languages";
 import {
@@ -121,19 +98,10 @@ import {
 	type LiveEditorHandle,
 } from "./liveBridge";
 import { colourCode } from "./markdownCode";
-import { hydrateMathInElement } from "./markdownHtml";
-import {
-	extractLineContextSnippet,
-	extractOutgoingLinks,
-	findUnlinkedMentions,
-	linkifyMentionInText,
-	mentionTermsForDoc,
-	type OutgoingLinkItem,
-	type UnlinkedMentionItem,
-} from "./markdownLinks";
+import { buildHeadingWikiLink, hydrateMathInElement } from "./markdownHtml";
+import { extractOutgoingLinks } from "./markdownLinks";
 import { mdOutline, setMdOutline } from "./mdOutline";
 import { monaco } from "./monaco";
-import { askRows } from "./tableRows";
 
 type SavedLiveView = { anchor: number; head: number; scrollTop: number; folds?: [number, number][] };
 const savedLiveViews = new Map<string, SavedLiveView>();
@@ -141,6 +109,14 @@ const savedLiveViews = new Map<string, SavedLiveView>();
 type HoverCardState = HoverPreviewData & {
 	x: number;
 	y: number;
+	maxHeight: number;
+	anchorRect: RectBox;
+};
+
+type SelectionBubbleState = {
+	x: number;
+	y: number;
+	anchorRect: RectBox;
 };
 
 type ActiveTableHud = {
@@ -205,14 +181,8 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 	const model = doc?.model;
 	const isRead = () => props.mode === "read";
 	const [text, setText] = createSignal(model?.getValue() ?? "");
-	const [propsOpen, setPropsOpen] = createSignal(true);
-	const [editYaml, setEditYaml] = createSignal(false);
-	const [workGuideOpen, setWorkGuideOpen] = createSignal(false);
-	const [backlinksOpen, setBacklinksOpen] = createSignal(true);
-	const [linksTab, setLinksTab] = createSignal<"backlinks" | "outgoing" | "unlinked">("backlinks");
-	const [linksForcedVisible, setLinksForcedVisible] = createSignal(false);
-	const [linksRefresh, setLinksRefresh] = createSignal(0);
 	const [hoverCard, setHoverCard] = createSignal<HoverCardState | null>(null);
+	const [selBubble, setSelBubble] = createSignal<SelectionBubbleState | null>(null);
 	const [tableHud, setTableHud] = createSignal<ActiveTableHud | null>(null);
 	const [lightbox, setLightbox] = createSignal<(ImageLightboxInfo & { zoomFull?: boolean }) | null>(null);
 	const [mermaidBox, setMermaidBox] = createSignal<(MermaidLightboxInfo & { scale: number; x: number; y: number }) | null>(null);
@@ -222,11 +192,10 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 	let hostEl!: HTMLDivElement;
 	let pageEl!: HTMLDivElement;
 	let cmMountEl!: HTMLDivElement;
-	let linksSectionEl: HTMLElement | undefined;
-	let yamlInputEl: HTMLTextAreaElement | undefined;
-	let yamlCompleter: TextareaCompleter | undefined;
-	let yamlEditBtnEl: HTMLButtonElement | undefined;
+	let hoverCardEl: HTMLDivElement | undefined;
 	let hoverBodyEl: HTMLDivElement | undefined;
+	let selBubbleEl: HTMLDivElement | undefined;
+	let pointerSelectingInCm = false;
 	let cmView: EditorView | undefined;
 	const modeCompartment = new Compartment();
 	let syncingFromCm = false;
@@ -251,580 +220,38 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			: []),
 	];
 
-	// --- Frontmatter Properties, Ticket Work & Backlinks ---------------------
+	// --- Lightweight Compact Header Metadata (full inspector lives in Document -> Info) ---
 	const front = createMemo(() => frontMatter(text()));
 	const yamlSpan = createMemo(() => frontMatterInnerSpan(text()));
-	const facts = createMemo(() =>
-		Object.entries(front().values)
-			.filter(([key, value]) => key !== "title" && (Array.isArray(value) ? value.length : value))
-			.map(([key, value]) => ({ key, values: Array.isArray(value) ? value : [value] })),
-	);
-
-	const resizeYamlInput = (el: HTMLTextAreaElement | undefined) => {
-		if (!el) return;
-		el.style.height = "auto";
-		el.style.height = `${Math.max(44, el.scrollHeight)}px`;
-	};
-
-	// Keep the inline raw YAML textarea synced with external model edits (Status dropdown, Ctrl+Z, Revert) without jumping caret on typing.
-	createEffect(() => {
-		const open = editYaml();
-		const inner = yamlSpan()?.inner ?? "";
-		if (!open) return;
-		queueMicrotask(() => {
-			if (!yamlInputEl) return;
-			if (yamlInputEl.value !== inner) yamlInputEl.value = inner;
-			resizeYamlInput(yamlInputEl);
-		});
-	});
-
-	// Re-measure wrapped YAML textarea height if the editor pane resizes horizontally.
-	createEffect(() => {
-		if (!editYaml() || typeof ResizeObserver === "undefined") return;
-		let ro: ResizeObserver | undefined;
-		const frame = requestAnimationFrame(() => {
-			if (!yamlInputEl) return;
-			resizeYamlInput(yamlInputEl);
-			ro = new ResizeObserver(() => resizeYamlInput(yamlInputEl));
-			ro.observe(yamlInputEl);
-		});
-		onCleanup(() => {
-			cancelAnimationFrame(frame);
-			ro?.disconnect();
-		});
-	});
-
-	const applyYamlInnerEdit = (nextInner: string) => {
-		if (cmView) {
-			const cur = cmView.state.doc.toString();
-			const span = frontMatterInnerSpan(cur);
-			if (!span) return;
-			const replacement = formatFrontMatterInnerReplacement(nextInner, "\n");
-			if (cur.slice(span.start, span.end) === replacement) return;
-			cmView.dispatch({
-				changes: { from: span.start, to: span.end, insert: replacement },
-				userEvent: "input.yaml",
-			});
-			return;
-		}
-		if (!model) return;
-		const cur = model.getValue();
-		const span = frontMatterInnerSpan(cur);
-		if (!span) return;
-		const replacement = formatFrontMatterInnerReplacement(nextInner, span.eol);
-		if (cur.slice(span.start, span.end) === replacement) return;
-		const from = model.getPositionAt(span.start);
-		const to = model.getPositionAt(span.end);
-		model.pushEditOperations(
-			[],
-			[{ range: new monaco.Range(from.lineNumber, from.column, to.lineNumber, to.column), text: replacement }],
-			() => null,
-		);
-	};
-
-	const focusYamlLine = (docLineNum = 2, column = 1) => {
-		queueMicrotask(() => {
-			if (!yamlInputEl) return;
-			yamlInputEl.focus();
-			const lines = yamlInputEl.value.split("\n");
-			const innerLineIdx = Math.max(0, Math.min(lines.length - 1, docLineNum - 2));
-			let offset = 0;
-			for (let i = 0; i < innerLineIdx; i++) offset += lines[i]!.length + 1;
-			offset += Math.min(lines[innerLineIdx]!.length, Math.max(0, column - 1));
-			yamlInputEl.setSelectionRange(offset, offset);
-			yamlInputEl.scrollIntoView({ block: "nearest" });
-		});
-	};
-	const ticketFile = (key: string) => {
-		const found = docs().find((d) => d.group === "tickets" && d.exists && d.ticket?.toLowerCase() === key.trim().toLowerCase());
-		if (found) return found.path;
-		if (!state.workspace || !state.project) return "";
-		const parts = state.project.docs.split(/[\\/]/).filter((p) => p && p !== ".");
-		return joinPath(state.workspace.root, ...parts, DOC_FOLDERS.tickets, `${key.trim()}.md`);
-	};
-	const targetOf = (key: string, value: string): { file?: string; web?: string; display?: string } => {
-		if (/^https?:\/\//i.test(value)) return { web: value };
-		const wiki = /^\[\[([^[\]]+)\]\]$/.exec(value.trim());
-		if (wiki && state.workspace) {
-			const parsed = namedLink(wiki[1]!);
-			const found = parsed ? docByName(parsed.name, docs(), state.workspace.root) : null;
-			if (found) return { file: found.path, display: parsed?.words || parsed?.name || value };
-		}
-		if (["ticket", "tickets", "related", "parent", "blocks", "blocked-by"].includes(key)) return { file: ticketFile(value) };
-		if (["supersedes", "superseded-by"].includes(key) && state.workspace) {
-			const found = docByName(value.trim(), docs(), state.workspace.root);
-			if (found) return { file: found.path, display: found.title || value };
-		}
-		if (["specs", "spec", "plan", "plans", "source"].includes(key) && state.workspace) {
-			const clean = value.trim().replace(/\\/g, "/");
-			if (!clean) return {};
-			const resolved = clean.startsWith("./") || clean.startsWith("../")
-				? resolvePath(dirName(props.path), clean)
-				: resolvePath(state.workspace.root, clean.replace(/^\/+/, ""));
-			return isInside(state.workspace.root, resolved) ? { file: resolved } : {};
-		}
-		return {};
-	};
-
-	const LIST_PROP_KEYS = new Set(["tags", "tickets", "related", "blocks", "blocked-by", "specs", "plans"]);
-	const EDITABLE_LINK_KEYS = new Set(["parent", "ticket", "source", "supersedes", "superseded-by"]);
-
-	const applyDocTextUpdate = (nextText: string) => {
-		if (cmView) {
-			const cur = cmView.state.doc.toString();
-			const norm = nextText.replace(/\r\n/g, "\n");
-			if (cur === norm) return;
-			// Find minimal changed slice so CM6 preserves scroll & non-frontmatter widgets.
-			let start = 0;
-			while (start < cur.length && start < norm.length && cur[start] === norm[start]) start++;
-			let endCur = cur.length;
-			let endNorm = norm.length;
-			while (endCur > start && endNorm > start && cur[endCur - 1] === norm[endNorm - 1]) {
-				endCur--;
-				endNorm--;
-			}
-			cmView.dispatch({ changes: { from: start, to: endCur, insert: norm.slice(start, endNorm) }, userEvent: "input.yaml" });
-			return;
-		}
-		if (!model) return;
-		const full = model.getFullModelRange();
-		model.pushEditOperations([], [{ range: full, text: nextText }], () => null);
-	};
-
-	const pickValueForProperty = async (key: string): Promise<string | null> => {
-		const root = state.workspace?.root;
-		const all = docs().filter((d) => d.exists && !isCatalog(d));
-		const CUSTOM = "Enter custom value…";
-		if (key === "status") {
-			const choices = statusChoices(listed());
-			return await choose("Choose status", [...choices]);
-		}
-		if (key === "direction") {
-			return await choose("Message direction", ["in", "out", "both"]);
-		}
-		if (key === "type") {
-			const picked = await choose("Ticket type", ["Task", "Story", "Bug", "Epic", "Sub-task", CUSTOM]);
-			if (!picked) return null;
-			return picked === CUSTOM ? (await ask("Custom ticket type:"))?.trim() || null : picked;
-		}
-		if (key === "date" || key === "asked" || key === "answered") {
-			return (await ask(`Value for ${key} (YYYY-MM-DD):`, localDay()))?.trim() || null;
-		}
-		if (["ticket", "tickets", "parent", "related", "blocks", "blocked-by"].includes(key)) {
-			const tks = all.filter((d) => d.group === "tickets" && d.ticket).map((d) => d.ticket!);
-			if (tks.length) {
-				const picked = await choose(`Choose ticket for ${key}:`, [...tks, CUSTOM]);
-				if (!picked) return null;
-				if (picked !== CUSTOM) return picked;
-			}
-			return (await ask(`Value for ${key}:`))?.trim() || null;
-		}
-		if (key === "supersedes" || key === "superseded-by") {
-			const decisions = all.filter((d) => d.group === "knowledge" && d.kind === "decisions" && canonical(d.path) !== props.path);
-			if (decisions.length) {
-				const stems = decisions.map((d) => baseName(d.path).replace(/\.(md|markdown)$/i, ""));
-				const details = Object.fromEntries(decisions.map((d, i) => [stems[i]!, d.title || d.name]));
-				const picked = await choose(`Choose decision for ${key}:`, [...stems, CUSTOM], { details });
-				if (!picked) return null;
-				if (picked !== CUSTOM) return picked;
-			}
-			return (await ask(`Decision stem for ${key}:`))?.trim() || null;
-		}
-		if (key === "tags") {
-			const existingTags = workspaceTags(all).map((t) => t.tag);
-			if (existingTags.length) {
-				const picked = await choose("Choose tag (or enter a new one)", [...existingTags, CUSTOM]);
-				if (!picked) return null;
-				if (picked !== CUSTOM) return picked;
-			}
-			return (await ask("New tag name (without #)"))?.trim().replace(/^#+/, "") || null;
-		}
-		if ((key === "specs" || key === "plans") && root) {
-			const grp = key === "specs" ? "specs" : "plans";
-			const items = all.filter((d) => d.group === grp).map((d) => relativeTo(root, d.path).replace(/\\/g, "/"));
-			if (items.length) {
-				const picked = await choose(`Choose ${grp === "specs" ? "spec" : "plan"}`, [...items, CUSTOM]);
-				if (!picked) return null;
-				if (picked !== CUSTOM) return picked;
-			}
-		}
-		if (key === "source") {
-			const grp = listed()?.group;
-			if (grp === "tickets") {
-				return (await ask("Ticket URL (https://…):", one(front().values.source) || "https://"))?.trim() || null;
-			}
-			if (grp === "schema" && root) {
-				const sqls = all
-					.filter((d) => d.group === "schema" && /\.(sql|ddl|pks|pkb|json|xml|xsd)$/i.test(d.name))
-					.map((d) => relativeTo(root, d.path).replace(/\\/g, "/"));
-				if (sqls.length) {
-					const picked = await choose("Choose source schema file", [...sqls, CUSTOM]);
-					if (!picked) return null;
-					if (picked !== CUSTOM) return picked;
-				}
-			}
-			return (await ask("Value for source:", one(front().values.source)))?.trim() || null;
-		}
-		return (await ask(`Value for ${key}:`))?.trim() || null;
-	};
-
-	const isListProperty = (key: string) => LIST_PROP_KEYS.has(key) || Array.isArray(front().values[key]);
-
-	const editScalarPropertyInteractive = async (key: string, currentVal: string) => {
-		if (isRead()) return;
-		const nextVal =
-			key === "status" ||
-			key === "parent" ||
-			key === "source" ||
-			key === "ticket" ||
-			key === "supersedes" ||
-			key === "superseded-by" ||
-			key === "direction" ||
-			key === "type"
-				? await pickValueForProperty(key)
-				: (await ask(`Edit ${key}:`, currentVal))?.trim() || null;
-		if (!nextVal || nextVal === currentVal) return;
-		const cur = model?.getValue() ?? text();
-		const next = withFrontMatter(cur, key, nextVal);
-		if (next && next !== cur) applyDocTextUpdate(next);
-	};
-
-	const commonKeysForDoc = (): string[] => {
-		const doc = listed();
-		if (doc?.group === "knowledge" && doc.kind === "decisions") {
-			return ["status", "ticket", "tickets", "supersedes", "superseded-by", "date", "summary", "tags", "Custom property…"];
-		}
-		if (doc?.group === "knowledge" && doc.kind === "questions") {
-			return ["status", "ticket", "tickets", "asked", "answered", "summary", "tags", "Custom property…"];
-		}
-		if (doc?.group === "schema" && doc.kind === "interfaces") {
-			return ["status", "with", "direction", "version", "source", "ticket", "summary", "tags", "Custom property…"];
-		}
-		if (doc?.group === "tickets") {
-			return ["status", "type", "summary", "source", "parent", "blocks", "blocked-by", "related", "specs", "plans", "tags", "Custom property…"];
-		}
-		return ["status", "ticket", "tickets", "parent", "related", "blocks", "blocked-by", "tags", "specs", "plans", "source", "summary", "Custom property…"];
-	};
-
-	const addPropertyValueInteractive = async (explicitKey?: string) => {
-		if (isRead()) return;
-		const COMMON_KEYS = commonKeysForDoc();
-		let key = explicitKey;
-		if (!key) {
-			const picked = await choose("Add or update YAML property", COMMON_KEYS);
-			if (!picked) return;
-			if (picked === "Custom property…") {
-				key = (await ask("Property name (e.g. owner, version, system)"))?.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "");
-				if (!key) return;
-			} else {
-				key = picked;
-			}
-		}
-		const val = await pickValueForProperty(key);
-		if (!val) return;
-		const cur = model?.getValue() ?? text();
-		// Guard against unclosed `---` frontmatter so we don't prepend a duplicate YAML block.
-		if (!frontMatterInnerSpan(cur)) {
-			if (/^\s*---\s*$/m.test(cur.split(/\r?\n/)[0] ?? "")) {
-				notify("Fix the unclosed YAML frontmatter block (missing closing ---) before adding properties.", "error");
-				return;
-			}
-			const eol = cur.includes("\r\n") ? "\r\n" : "\n";
-			const safe = quoteYamlScalar(val);
-			const lineVal = LIST_PROP_KEYS.has(key) ? `[${safe}]` : safe;
-			applyDocTextUpdate(`---${eol}${key}: ${lineVal}${eol}---${eol}${eol}${cur}`);
-			return;
-		}
-		const next = isListProperty(key) ? addToFrontMatterList(cur, key, val) : withFrontMatter(cur, key, val);
-		if (next && next !== cur) applyDocTextUpdate(next);
-		else if (next === null) notify(`Could not update property "${key}" — click Edit YAML to edit its raw block.`, "error");
-	};
-
-	const removePropertyValue = (key: string, value: string, totalValues: number) => {
-		if (isRead()) return;
-		const cur = model?.getValue() ?? text();
-		if (totalValues > 1 || isListProperty(key)) {
-			const next = removeFromFrontMatterList(cur, key, value);
-			if (next && next !== cur) {
-				const cleaned = stripEmptyFrontMatter(next);
-				applyDocTextUpdate(cleaned);
-				if (!frontMatterInnerSpan(cleaned)) setEditYaml(false);
-				return;
-			}
-		}
-		// Remove single scalar key line cleanly from YAML inner block (matching frontMatter()'s last-wins semantics).
-		const span = frontMatterInnerSpan(cur);
-		if (!span) return;
-		const keyEsc = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-		const lines = span.inner.split(/\r?\n/);
-		const idx = lines.findLastIndex((l) => new RegExp(`^${keyEsc}\\s*:`, "i").test(l));
-		if (idx < 0) return;
-		let endIdx = idx + 1;
-		while (endIdx < lines.length && /^[ \t]*-\s+/.test(lines[endIdx]!)) endIdx++;
-		lines.splice(idx, endIdx - idx);
-		const replacement = formatFrontMatterInnerReplacement(lines.join("\n"), span.eol);
-		const nextDoc = stripEmptyFrontMatter(`${cur.slice(0, span.start)}${replacement}${cur.slice(span.end)}`);
-		applyDocTextUpdate(nextDoc);
-		if (!frontMatterInnerSpan(nextDoc)) setEditYaml(false);
-	};
-	const go = (target: { file?: string; web?: string }) =>
-		target.web ? void window.open(target.web, "_blank", "noopener") : target.file ? void openFile(target.file) : undefined;
-
 	const listed = createMemo(() => docs().find((d) => canonical(d.path) === props.path));
 	const ticket = createMemo(() => {
 		const file = docs().find((d) => d.group === "tickets" && d.ticket && canonical(d.path) === props.path);
 		return file?.ticket ?? "";
 	});
-	const work = createMemo(() => (ticket() ? ticketWork(docs(), ticket()) : []));
-	const readiness = createMemo(() =>
-		ticket() ? evaluateTicketReadiness(docs(), ticket(), { gitFiles: gitStatus()?.files, root: state.workspace?.root }) : null,
-	);
-	const [readinessOpen, setReadinessOpen] = createSignal(false);
-	// Reverse Schema -> Code & Registries usages card for documented `schema/` files (Wave 3.1).
-	const schemaIdent = createMemo(() => {
-		const doc = listed();
-		if (!doc || doc.group !== "schema" || isCatalog(doc)) return "";
-		return baseName(doc.path).replace(/\.(md|markdown)$/i, "").trim();
-	});
-	const [schemaUsagesOpen, setSchemaUsagesOpen] = createSignal(false);
-	const [schemaUsages] = createResource(
-		() => {
-			const ident = schemaIdent();
-			const root = state.workspace?.root;
-			return ident && root ? { ident, root, version: state.treeVersion } : null;
-		},
-		async ({ ident, root }) => {
-			const cleanDir = (dir?: string) => (dir ?? "").replace(/^[./\\]+|[\\/]+$/g, "").replace(/\\/g, "/");
-			const dRel = cleanDir(state.project?.docs ?? "docs");
-			const pRel = cleanDir(state.project?.plans ?? "design");
-			const sRel = cleanDir(state.project?.schema ?? "schema");
-			const exclude = [dRel ? `${dRel}/**` : "", pRel ? `${pRel}/**` : "", sRel ? `${sRel}/**` : "", "README.md", "AGENTS.md", "**/INDEX.md"]
-				.filter(Boolean)
-				.join(", ");
-			const hits = await backend.search(ident, { wholeWord: true, exclude }).catch(() => []);
-			const byFile = new Map<string, { path: string; rel: string; line: number; count: number }>();
-			for (const h of hits) {
-				const k = canonical(h.path);
-				const prev = byFile.get(k);
-				if (!prev) byFile.set(k, { path: h.path, rel: relativeTo(root, h.path).replace(/\\/g, "/"), line: h.line, count: 1 });
-				else prev.count++;
-			}
-			// Also find CSV registry docs whose `codeRefs` mention this table/object (e.g. `database.csv`).
-			const regHits = docs()
-				.filter(
-					(d) =>
-						d.exists &&
-						d.group === "registries" &&
-						!isCatalog(d) &&
-						d.codeRefs?.some((ref) => ref.toLowerCase() === ident.toLowerCase() || ref.toLowerCase().endsWith(`.${ident.toLowerCase()}`)),
-				)
-				.map((d) => ({ path: d.path, rel: registryTitle(d.name), line: 1, count: 0 }));
-			return { code: [...byFile.values()], registries: regHits };
-		},
-	);
-	const exportMenuItems = () => [
-		{ label: "Copy as rich HTML", run: () => void exportDocAs(props.path, "html-copy") },
-		{ label: "Copy as Jira / Confluence markup", run: () => void exportDocAs(props.path, "jira-copy") },
-		"separator" as const,
-		{ label: "Print / Save as PDF…", run: () => void exportDocAs(props.path, "print") },
-		{ label: "Export standalone HTML…", run: () => void exportDocAs(props.path, "html-download") },
-		{ label: "Export as Word (.docx)…", run: () => void exportDocAs(props.path, "docx") },
-		...(ticket()
-			? [
-					"separator" as const,
-					{ label: `Export ${ticket()} packet (HTML)…`, run: () => void exportTicketPacket(props.path, ticket(), "html") },
-					{ label: `Export ${ticket()} packet (Word .docx)…`, run: () => void exportTicketPacket(props.path, ticket(), "docx") },
-					{ label: `Export ${ticket()} packet (Markdown)…`, run: () => void exportTicketPacket(props.path, ticket(), "markdown") },
-					"separator" as const,
-					{ label: `Deployment manifest (Markdown)…`, run: () => void exportDeploymentManifest(props.path, ticket(), "markdown") },
-					{ label: `Deployment manifest (CSV)…`, run: () => void exportDeploymentManifest(props.path, ticket(), "csv") },
-					{ label: `Deployment manifest (HTML)…`, run: () => void exportDeploymentManifest(props.path, ticket(), "html") },
-					{ label: `Deployment manifest (Word .docx)…`, run: () => void exportDeploymentManifest(props.path, ticket(), "docx") },
-				]
-			: []),
-	];
-	const workRollup = createMemo(() => {
-		const me = listed();
-		const groups = work();
-		if (!ticket() || !me) return [];
-		const allDocs = docs();
-		const parts: string[] = [];
-		const descendants = descendantTickets(allDocs, ticket());
-		const activeSubs = descendants.filter((s) => toneOf(s.status) !== "off");
-		if (activeSubs.length) {
-			const done = activeSubs.filter((s) => toneOf(s.status) === "done").length;
-			parts.push(`${done}/${activeSubs.length} sub-tickets done`);
-		}
-		const scopeDocs = [me, ...activeSubs];
-		const taskTotal = scopeDocs.reduce((sum, d) => sum + (d.tasks?.total ?? 0), 0);
-		const taskDone = scopeDocs.reduce((sum, d) => sum + (d.tasks?.done ?? 0), 0);
-		if (taskTotal > 0) parts.push(`${taskDone}/${taskTotal} checklist items`);
-		const openQs = groups.find((g) => g.kind === "question")?.files.length ?? 0;
-		if (openQs > 0) parts.push(`${openQs} open ${openQs === 1 ? "question" : "questions"}`);
-		const scopeKeySet = new Set(scopeDocs.map((d) => d.ticket?.toLowerCase()).filter(Boolean) as string[]);
-		const regRows = allDocs
-			.filter((d) => d.exists && d.group === "registries" && !isCatalog(d) && d.forTickets?.length)
-			.reduce(
-				(acc, reg) => {
-					for (const hit of reg.forTickets ?? []) {
-						if (scopeKeySet.has(hit.key.toLowerCase())) {
-							acc.total += hit.rows;
-							acc.done += hit.done ?? 0;
-						}
-					}
-					return acc;
-				},
-				{ total: 0, done: 0 },
-			);
-		if (regRows.total > 0) parts.push(`${regRows.done}/${regRows.total} registry rows done`);
-		return parts;
-	});
-	const linkedTickets = createMemo(() => (!ticket() ? docLinkedTickets(docs(), props.path) : []));
-
-	// Only re-scan workspace backlinks when this path changes or the set of project docs changes
-	// (avoids triggering 2× workspace scans per open Markdown tab on every unrelated `.ssl` save).
-	const docsFingerprint = createMemo(() => {
-		const list = docs();
-		return `${list.length}:${list.map((d) => `${d.path}|${d.title ?? ""}|${d.broken?.length ?? 0}`).join("\n")}`;
-	});
-	const [linked] = createResource(
-		() => ({ path: props.path, sig: docsFingerprint(), root: state.workspace?.root, rev: linksRefresh() }),
-		async ({ path, root }) => {
-			if (!root) return [];
-			const files = docs();
-			try {
-				const [byPath, byName] = await Promise.all([backend.linksTo(path), backend.namesIn()]);
-				const hits = linkedFrom(
-					canonical(path),
-					byPath.map((link) => ({ path: canonical(link.path), line: link.line })),
-					byName.map((place) => ({ ...place, path: canonical(place.path) })),
-					files.map((file) => ({ ...file, path: canonical(file.path) })),
-					root,
-				);
-				return await Promise.all(
-					hits.map(async (item) => {
-						const content = await readFileText(item.path);
-						return { ...item, snippet: extractLineContextSnippet(content, item.line) };
-					}),
-				);
-			} catch {
-				return [];
-			}
-		},
-	);
-
-	// Outgoing links in this document (resolved links, broken links, transclusions, ticket refs, web links).
-	const outgoingLinks = createMemo<OutgoingLinkItem[]>(() =>
+	const docStatus = createMemo(() => one(front().values.status) || listed()?.status || "");
+	const outgoingLinks = createMemo(() =>
 		extractOutgoingLinks(text(), props.path, docs(), {
 			root: state.workspace?.root,
 			broken: listed()?.broken,
 		}),
 	);
-	const brokenOutgoingCount = createMemo(() => outgoingLinks().filter((o) => o.broken).length);
-
-	// Unlinked plain-text mentions of this document's title/ticket in other workspace Markdown docs.
-	const [unlinkedMentions] = createResource(
-		() => {
-			const root = state.workspace?.root;
-			const me = listed();
-			const title = me?.title || one(front().values.title) || "";
-			const tKey = ticket();
-			const stem = baseName(props.path).replace(/\.(md|markdown)$/i, "");
-			const linkedPaths = (linked() ?? []).map((b) => canonical(b.path));
-			return root ? { path: props.path, root, title, ticket: tKey, stem, sig: docsFingerprint(), linkedPaths, rev: linksRefresh() } : null;
-		},
-		async (src) => {
-			if (!src) return [] as UnlinkedMentionItem[];
-			const terms = mentionTermsForDoc({ title: src.title, ticket: src.ticket, stem: src.stem });
-			if (!terms.length) return [] as UnlinkedMentionItem[];
-			const linkedSet = new Set(src.linkedPaths.map((p) => canonical(p)));
-			const allMd = new Map<string, { path: string; name: string; title?: string }>();
-			for (const d of docs()) {
-				if (!d.exists || !/\.(md|markdown)$/i.test(d.path)) continue;
-				const k = canonical(d.path);
-				if (k === canonical(src.path) || linkedSet.has(k)) continue;
-				allMd.set(k, { path: d.path, name: d.name, title: d.title });
-			}
-			if (!allMd.size) return [] as UnlinkedMentionItem[];
-			const candidatePaths = new Set<string>();
-			for (const term of terms.slice(0, 2)) {
-				const hits = await backend.search(term, { wholeWord: true, caseSensitive: false }).catch(() => []);
-				for (const h of hits) {
-					const k = canonical(h.path);
-					if (allMd.has(k)) candidatePaths.add(k);
-					if (candidatePaths.size >= 24) break;
-				}
-				if (candidatePaths.size >= 24) break;
-			}
-			if (!candidatePaths.size) return [] as UnlinkedMentionItem[];
-			const candidates = await Promise.all(
-				[...candidatePaths].map(async (k) => {
-					const info = allMd.get(k)!;
-					return { ...info, text: await readFileText(info.path) };
-				}),
-			);
-			return findUnlinkedMentions(
-				{ path: src.path, title: src.title, ticket: src.ticket, stem: src.stem },
-				candidates,
-				linkedSet,
-			);
-		},
+	const compactLinksCounts = createMemo(() => {
+		const summary = markdownLinksSummary();
+		if (summary && summary.path === canonical(props.path)) {
+			return { total: summary.total, broken: summary.broken };
+		}
+		const out = outgoingLinks();
+		return { total: out.length, broken: out.filter((o) => o.broken).length };
+	});
+	const compactHeader = createMemo(() =>
+		formatCompactHeaderMeta({
+			ticket: ticket(),
+			status: docStatus(),
+			totalLinks: compactLinksCounts().total,
+			brokenLinks: compactLinksCounts().broken,
+		}),
 	);
-
-	const totalLinksCount = createMemo(
-		() => (linked()?.length ?? 0) + outgoingLinks().length + (unlinkedMentions()?.length ?? 0),
-	);
-
-	const linkifyUnlinkedMention = async (mention: UnlinkedMentionItem) => {
-		const root = state.workspace?.root;
-		const me = listed();
-		const wikiName = (me ? nameFor(me, docs(), root) : null) ?? baseName(props.path).replace(/\.(md|markdown)$/i, "");
-		if (!wikiName) return;
-		const key = canonical(mention.path);
-		const openDoc = documents.get(key);
-		const curText = openDoc ? openDoc.model.getValue() : await readFileText(mention.path);
-		const next = linkifyMentionInText(curText, mention.line, mention.column, mention.matchedText, wikiName);
-		if (!next || next === curText) {
-			notify("That mention moved or was already updated.");
-			setLinksRefresh((v) => v + 1);
-			return;
-		}
-		try {
-			if (openDoc) {
-				openDoc.model.pushStackElement();
-				openDoc.model.pushEditOperations([], [{ range: openDoc.model.getFullModelRange(), text: next, forceMoveMarkers: true }], () => null);
-				openDoc.model.pushStackElement();
-				if (!state.dirty[key]) await save(key);
-			} else {
-				await backend.historyKeep(mention.path).catch(() => {});
-				await backend.write(mention.path, next);
-			}
-			setState("treeVersion", (v) => v + 1);
-			setLinksRefresh((v) => v + 1);
-			notify(`Linked mention in ${called(key)}.`);
-		} catch (err: any) {
-			notify(`Could not link mention: ${err?.message ?? err}`, "error");
-		}
-	};
-
-	const openLinksInspector = () => {
-		setLinksForcedVisible(true);
-		setBacklinksOpen(true);
-		if ((linked()?.length ?? 0) === 0) {
-			if (outgoingLinks().length > 0) setLinksTab("outgoing");
-			else if ((unlinkedMentions()?.length ?? 0) > 0) setLinksTab("unlinked");
-		}
-		requestAnimationFrame(() => {
-			linksSectionEl?.scrollIntoView({ behavior: "smooth", block: "start" });
-		});
-	};
-
-	const called = (path: string) => {
-		const file = docs().find((d) => canonical(d.path) === path);
-		if (!file) return relativeTo(state.workspace?.root, path);
-		const title = file.title || file.name;
-		return file.ticket && !title.toLowerCase().startsWith(file.ticket.toLowerCase()) ? `${file.ticket}: ${title}` : title;
-	};
+	const isInfoPanelActive = createMemo(() => isShown("objects") && activeMarkdownTab() === "info");
 
 	// --- Document Outline (published for BOTH Read and Live modes) -----------
 	const headings = createMemo(() =>
@@ -840,9 +267,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 				hostEl?.scrollTo({ top: 0, behavior: "smooth" });
 				return;
 			}
-			setEditYaml(true);
-			hostEl?.scrollTo({ top: 0, behavior: "smooth" });
-			if (focus) focusYamlLine(ln, column);
+			requestMarkdownInspector("yaml");
 			return;
 		}
 		const startLine = docObj.line(ln);
@@ -931,14 +356,54 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		dimmed.clear();
 	};
 
+	const readingHighlightEnabled = () => state.settings.markdownReadingHighlight !== false;
+
+	const findCursorUnitIndex = (content: HTMLElement, units: HTMLElement[]): number | null => {
+		if (isRead() || !cmView) return null;
+		const activeEl = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+		const widgetFocused = Boolean(activeEl && activeEl !== content && content.contains(activeEl));
+		if (!cmView.hasFocus && !widgetFocused) return null;
+
+		if (widgetFocused && activeEl) {
+			let cur: HTMLElement | null = activeEl;
+			while (cur && cur.parentElement !== content) cur = cur.parentElement;
+			if (cur) {
+				const idx = units.indexOf(cur);
+				if (idx >= 0) return idx;
+			}
+		}
+
+		const sel = cmView.state.selection.main;
+		const pos = Math.max(sel.from, sel.to);
+		try {
+			let node: Node | null = cmView.domAtPos(pos).node;
+			let el: HTMLElement | null = node instanceof HTMLElement ? node : node?.parentElement ?? null;
+			while (el && el.parentElement !== content) el = el.parentElement;
+			if (el) {
+				const idx = units.indexOf(el);
+				if (idx >= 0) return idx;
+			}
+		} catch {
+			// Fall back to coordinate lookup below.
+		}
+
+		const coords = cmView.coordsAtPos(pos);
+		if (!coords) return null;
+		const cursorY = (coords.top + coords.bottom) / 2;
+		let idx = 0;
+		for (let i = 0; i < units.length; i++) {
+			const r = units[i]!.getBoundingClientRect();
+			if (r.top <= cursorY) idx = i;
+			else break;
+		}
+		return idx;
+	};
+
 	const applyReadAssist = () => {
 		assistFrame = 0;
-		if (pointerY === null || !cmMountEl || lightbox()) return clearReadAssist();
+		if (!readingHighlightEnabled() || !cmMountEl || lightbox()) return clearReadAssist();
 		const content = cmMountEl.querySelector<HTMLElement>(".cm-content");
 		if (!content) return clearReadAssist();
-		const contentRect = content.getBoundingClientRect();
-		// When hovering Properties, "The work for", or empty top header above the body, keep the body bright.
-		if (pointerY < contentRect.top - 6) return clearReadAssist();
 
 		const units: HTMLElement[] = [];
 		for (const child of content.children) {
@@ -947,28 +412,62 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			if (child.getBoundingClientRect().height === 0) continue;
 			units.push(child);
 		}
-		const backlinksEl = pageEl?.querySelector<HTMLElement>(".cm-md-backlinks");
-		if (backlinksEl && backlinksEl.getBoundingClientRect().height > 0) units.push(backlinksEl);
 		if (!units.length) return clearReadAssist();
 
-		let active = -1;
-		for (let i = 0; i < units.length; i++) {
-			const r = units[i]!.getBoundingClientRect();
-			if (r.top <= pointerY) active = i;
-			else break;
+		const cursorIndex = findCursorUnitIndex(content, units);
+		let pointerIndex: number | null = null;
+		if (pointerY !== null) {
+			const contentRect = content.getBoundingClientRect();
+			// When hovering Properties, "The work for", or empty top header above the body, keep the body bright.
+			if (pointerY >= contentRect.top - 6) {
+				let hit = 0;
+				for (let i = 0; i < units.length; i++) {
+					const r = units[i]!.getBoundingClientRect();
+					if (r.top <= pointerY) hit = i;
+					else break;
+				}
+				pointerIndex = hit;
+			}
 		}
-		if (active < 0) active = 0;
+
+		const active = resolveReadAssistActiveIndex({
+			enabled: readingHighlightEnabled(),
+			unitCount: units.length,
+			cursorIndex,
+			pointerIndex,
+		});
+		if (active === null) return clearReadAssist();
 
 		const nextDimmed = new Set<HTMLElement>();
-		for (let i = active + 1; i < units.length; i++) nextDimmed.add(units[i]!);
-		for (const el of dimmed) if (!nextDimmed.has(el)) el.classList.remove("cm-md-read-below");
-		for (const el of nextDimmed) if (!dimmed.has(el)) el.classList.add("cm-md-read-below");
+		// Reconcile directly against each element's real DOM classList because CM6 resets
+		// `.cm-line` className whenever line decorations update on selection/viewport changes.
+		for (let i = 0; i < units.length; i++) {
+			const el = units[i]!;
+			if (i > active) {
+				if (!el.classList.contains("cm-md-read-below")) el.classList.add("cm-md-read-below");
+				nextDimmed.add(el);
+			} else if (el.classList.contains("cm-md-read-below")) {
+				el.classList.remove("cm-md-read-below");
+			}
+		}
+		for (const el of dimmed) {
+			if (!nextDimmed.has(el)) el.classList.remove("cm-md-read-below");
+		}
 		dimmed = nextDimmed;
 	};
 
 	const scheduleReadAssist = () => {
+		if (!readingHighlightEnabled()) {
+			clearReadAssist();
+			return;
+		}
 		if (!assistFrame) assistFrame = requestAnimationFrame(applyReadAssist);
 	};
+	createEffect(() => {
+		void isRead();
+		if (!readingHighlightEnabled()) clearReadAssist();
+		else scheduleReadAssist();
+	});
 	onCleanup(clearReadAssist);
 
 	// --- Raw Table Toolbar HUD (shown ONLY when explicitly editing a table in `Raw` pipe mode;
@@ -1169,6 +668,52 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		return { path: leads.file, line: leads.lines?.line, heading };
 	};
 
+	const clampHoverCard = () => {
+		const card = hoverCard();
+		if (!card || !hoverCardEl) return;
+		const box = hoverCardEl.getBoundingClientRect();
+		const width = box.width > 0 ? box.width : Math.min(460, window.innerWidth - 24);
+		const height = box.height > 0 ? box.height : 220;
+		const placed = placeAnchoredMenu(
+			card.anchorRect,
+			{ width, height },
+			{ width: window.innerWidth, height: window.innerHeight },
+			12,
+			8,
+		);
+		const clampedMaxH = Math.min(380, placed.maxHeight);
+		hoverCardEl.style.left = `${Math.round(placed.left)}px`;
+		hoverCardEl.style.top = `${Math.round(placed.top)}px`;
+		hoverCardEl.style.maxHeight = `${Math.round(clampedMaxH)}px`;
+	};
+
+	const openMeasuredHoverCard = (preview: HoverPreviewData, rect: DOMRect, basePath: string) => {
+		const anchorRect: RectBox = { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom };
+		const estW = Math.min(460, Math.max(220, window.innerWidth - 24));
+		const placed = placeAnchoredMenu(
+			anchorRect,
+			{ width: estW, height: 220 },
+			{ width: window.innerWidth, height: window.innerHeight },
+			12,
+			8,
+		);
+		setHoverCard({
+			...preview,
+			x: Math.round(placed.left),
+			y: Math.round(placed.top),
+			maxHeight: Math.min(380, Math.round(placed.maxHeight)),
+			anchorRect,
+		});
+		requestAnimationFrame(() => {
+			if (hoverBodyEl) {
+				hydrateImagesInElement(hoverBodyEl, basePath);
+				hydrateMathInElement(hoverBodyEl);
+				void colourCode(hoverBodyEl).then(() => requestAnimationFrame(clampHoverCard));
+			}
+			clampHoverCard();
+		});
+	};
+
 	const handleHoverLink = (target: HoverTarget) => {
 		clearTimeout(hideTimer);
 		clearTimeout(hoverTimer);
@@ -1182,24 +727,168 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 				ticket: resolved.ticket,
 			});
 			if (!preview) return;
-			const cardWidth = Math.min(460, window.innerWidth - 32);
-			const x = Math.max(16, Math.min(rect.left, window.innerWidth - cardWidth - 16));
-			const preferBelow = rect.bottom + 10;
-			const y = preferBelow + 260 < window.innerHeight ? preferBelow : Math.max(16, rect.top - 280);
-			setHoverCard({ ...preview, x, y });
-			queueMicrotask(() => {
-				if (hoverBodyEl) {
-					hydrateImagesInElement(hoverBodyEl, resolved.path);
-					hydrateMathInElement(hoverBodyEl);
-					void colourCode(hoverBodyEl);
-				}
-			});
+			openMeasuredHoverCard(preview, rect, resolved.path);
 		}, 320);
 	};
 
-	const hoverFileButton = (path: string | undefined, anchor: HTMLElement, extra: { line?: number; ticket?: string } = {}) => {
-		if (!path) return;
-		handleHoverLink({ kind: "file", path, line: extra.line, ticket: extra.ticket, anchor });
+	const handleHoverFootnote = (fnId: string, anchor: HTMLElement) => {
+		clearTimeout(hideTimer);
+		clearTimeout(hoverTimer);
+		const rect = anchor.getBoundingClientRect();
+		hoverTimer = setTimeout(() => {
+			const docText = cmView?.state.doc.toString() ?? text();
+			const preview =
+				buildFootnoteHoverPreview(docText, props.path, fnId) ?? {
+					path: props.path,
+					relPath: relativeTo(state.workspace?.root, props.path),
+					title: `Footnote [${fnId}]`,
+					kind: "markdown" as const,
+					html: `<p class="md-hover-empty">No definition found for <code>[^${fnId.replace(/[<>&]/g, "")}]</code>.</p>`,
+				};
+			openMeasuredHoverCard(preview, rect, props.path);
+		}, 240);
+	};
+
+	// --- Floating Selection Formatting Toolbar (Live mode pointer selection) -
+	const clampSelectionBubble = () => {
+		const b = selBubble();
+		if (!b || !selBubbleEl) return;
+		const box = selBubbleEl.getBoundingClientRect();
+		const width = box.width > 0 ? box.width : 280;
+		const height = box.height > 0 ? box.height : 34;
+		const margin = 8;
+		const gap = 8;
+		const centerLeft = b.anchorRect.left + (b.anchorRect.right - b.anchorRect.left) / 2 - width / 2;
+		const left = Math.max(margin, Math.min(centerLeft, window.innerWidth - width - margin));
+		const aboveTop = b.anchorRect.top - height - gap;
+		const belowTop = b.anchorRect.bottom + gap;
+		const top =
+			aboveTop >= margin
+				? aboveTop
+				: belowTop + height <= window.innerHeight - margin
+					? belowTop
+					: Math.max(margin, Math.min(aboveTop, window.innerHeight - height - margin));
+		selBubbleEl.style.left = `${Math.round(left)}px`;
+		selBubbleEl.style.top = `${Math.round(top)}px`;
+	};
+
+	const updateSelectionBubbleFromPointer = () => {
+		if (isRead() || !cmView) {
+			setSelBubble(null);
+			return;
+		}
+		const activeEl = document.activeElement;
+		if (
+			activeEl instanceof HTMLElement &&
+			activeEl.closest(".cm-tbl-cell-input, .cm-callout-body-input, .cm-callout-title-input, .cm-md-props-yaml, .cm-md-prop-inline-input")
+		) {
+			setSelBubble(null);
+			return;
+		}
+		if (cmView.state.selection.ranges.length !== 1) {
+			setSelBubble(null);
+			return;
+		}
+		const range = cmView.state.selection.main;
+		if (range.empty) {
+			setSelBubble(null);
+			return;
+		}
+		const selected = cmView.state.sliceDoc(range.from, range.to);
+		if (!selected.trim()) {
+			setSelBubble(null);
+			return;
+		}
+		const docText = cmView.state.doc.toString();
+		const fm = frontMatter(docText);
+		const fmEnd = fm.lines > 0 && fm.lines <= cmView.state.doc.lines ? cmView.state.doc.line(fm.lines).to : -1;
+		if (range.from <= fmEnd) {
+			setSelBubble(null);
+			return;
+		}
+		if (fenced(docText).some(([a, b]) => range.from < b && range.to > a)) {
+			setSelBubble(null);
+			return;
+		}
+
+		const cFrom = cmView.coordsAtPos(range.from);
+		const cTo = cmView.coordsAtPos(range.to);
+		let anchorRect: RectBox | null = null;
+		if (cFrom && cTo) {
+			anchorRect = {
+				left: Math.min(cFrom.left, cTo.left),
+				right: Math.max(cFrom.right, cTo.right),
+				top: Math.min(cFrom.top, cTo.top),
+				bottom: Math.max(cFrom.bottom, cTo.bottom),
+			};
+		} else {
+			const domSel = window.getSelection();
+			if (domSel && domSel.rangeCount > 0) {
+				const r = domSel.getRangeAt(0).getBoundingClientRect();
+				if (r.width > 0 || r.height > 0) {
+					anchorRect = { left: r.left, right: r.right, top: r.top, bottom: r.bottom };
+				}
+			}
+		}
+		if (!anchorRect) {
+			setSelBubble(null);
+			return;
+		}
+		const estW = 290;
+		const estH = 34;
+		const placed = placeAnchoredMenu(
+			anchorRect,
+			{ width: estW, height: estH },
+			{ width: window.innerWidth, height: window.innerHeight },
+			8,
+			8,
+		);
+		const preferAbove = anchorRect.top - estH - 8 >= 8 ? anchorRect.top - estH - 8 : placed.top;
+		setSelBubble({
+			x: Math.round(placed.left),
+			y: Math.round(preferAbove),
+			anchorRect,
+		});
+		requestAnimationFrame(clampSelectionBubble);
+	};
+
+	const wrapSelectionAsWikilink = () => {
+		if (!cmView || isRead()) return;
+		const r = cmView.state.selection.main;
+		if (r.empty) return;
+		const raw = cmView.state.sliceDoc(r.from, r.to);
+		const trimmed = raw.trim();
+		if (!trimmed) return;
+		const already = /^\[\[([\s\S]+)\]\]$/.exec(trimmed);
+		const insert = already ? already[1]! : `[[${trimmed}]]`;
+		cmView.dispatch({
+			changes: { from: r.from, to: r.to, insert },
+			selection: EditorSelection.range(r.from, r.from + insert.length),
+			scrollIntoView: true,
+			userEvent: "input.format",
+		});
+		setSelBubble(null);
+		cmView.focus();
+	};
+
+	const wrapSelectionAsCallout = () => {
+		if (!cmView || isRead()) return;
+		const r = cmView.state.selection.main;
+		if (r.empty) return;
+		const raw = cmView.state.sliceDoc(r.from, r.to);
+		const built = buildCalloutBlock("note", undefined, raw);
+		const startLn = cmView.state.doc.lineAt(r.from);
+		const lead = r.from > startLn.from && cmView.state.sliceDoc(startLn.from, r.from).trim() ? "\n\n" : "";
+		const insert = `${lead}${built.insert}`;
+		const pos = r.from + lead.length + built.cursorOffset;
+		cmView.dispatch({
+			changes: { from: r.from, to: r.to, insert },
+			selection: EditorSelection.cursor(pos),
+			scrollIntoView: true,
+			userEvent: "input.callout",
+		});
+		setSelBubble(null);
+		cmView.focus();
 	};
 
 	const formatCodeBlockAt = async (lineNumber: number): Promise<"changed" | "unchanged" | "error"> => {
@@ -1227,6 +916,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 	const onContextMenu = async (e: MouseEvent) => {
 		const target = e.target instanceof Element ? e.target : null;
 		if (target?.closest("input, textarea, .menu-pop")) return;
+		setSelBubble(null);
 		e.preventDefault();
 		if (!cmView) return;
 
@@ -1238,9 +928,20 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		if (isRead()) {
 			const selection = window.getSelection();
 			const words = selection && !selection.isCollapsed && hostEl.contains(selection.anchorNode) ? selection.toString() : "";
+			const headingEl = target?.closest<HTMLElement>("[data-md-heading-line]") ?? null;
+			const clickedHeadingLine = headingEl ? Number(headingEl.dataset.mdHeadingLine) : null;
+			const headingList = headings();
+			const targetHeading =
+				(clickedHeadingLine ? headingList.find((h) => h.line === clickedHeadingLine) : null) ??
+				headingList.find((h) => h.id === activeHeadingId()) ??
+				headingList[0] ??
+				null;
 			const COPY = "Copy";
 			const OPEN = "Open link";
 			const COPY_LINK = "Copy link";
+			const COPY_HEADING_LINK = "Copy link to heading";
+			const FIND_DOC = "Find in document";
+			const PRINT_PDF = "Print / Save as PDF…";
 			const EDIT = "Edit in Live view";
 			const TO_SOURCE = "Switch to Source view";
 			const PATH = "Copy path";
@@ -1250,6 +951,10 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			const items: RowMenuEntry[] = [
 				...(words.trim() ? [{ label: COPY, value: COPY, keys: "Ctrl+C" }] : []),
 				...(linkEl ? [OPEN, COPY_LINK] : []),
+				...(targetHeading ? [COPY_HEADING_LINK] : []),
+				"separator",
+				{ label: FIND_DOC, value: FIND_DOC, keys: "Ctrl+F" },
+				PRINT_PDF,
 				"separator",
 				{ label: EDIT, value: EDIT, keys: "Ctrl+E" },
 				TO_SOURCE,
@@ -1269,6 +974,15 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			} else if (picked === COPY_LINK && linkEl) {
 				const raw = linkEl.dataset.mdHref ?? linkEl.getAttribute("href") ?? linkEl.dataset.mdWiki ?? linkEl.dataset.mdTicket ?? "";
 				await copyText(raw, "Copied the link.");
+			} else if (picked === COPY_HEADING_LINK && targetHeading) {
+				const me = listed();
+				const docName = (me ? nameFor(me, docs(), state.workspace?.root) : null) ?? baseName(props.path).replace(/\.(md|markdown)$/i, "");
+				const wiki = buildHeadingWikiLink(docName, targetHeading.text);
+				await copyText(wiki, `Copied ${wiki}.`);
+			} else if (picked === FIND_DOC && cmView) {
+				openSearchPanel(cmView);
+			} else if (picked === PRINT_PDF) {
+				void exportDocAs(props.path, "print");
 			} else if (picked === EDIT) {
 				setMarkdownMode(props.path, "live", props.group);
 				setState("activeGroup", props.group);
@@ -1302,7 +1016,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		const OPEN_LINK = "Open link";
 		const FIX_BROKEN = brokenHit?.instead ? `Fix broken link to ${brokenHit.instead}` : "";
 		const CREATE_MISSING = missingTargetPath ? `Create missing file ${relativeTo(state.workspace?.root, missingTargetPath).replace(/\\/g, "/")}` : "";
-		const ADD_PROPS = "YAML properties…";
+		const EDIT_YAML = yamlSpan() ? "Edit YAML properties…" : "YAML properties…";
 		const FORMAT_BLOCK = clickedFence?.rawLang ? `Format ${clickedFence.rawLang} code block` : "Format code block";
 		const FORMAT_DOC = "Format document";
 		const CUT = "Cut";
@@ -1314,6 +1028,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		const INSERT_CALLOUT = "Callout…";
 		const INSERT_TABLE = "Table";
 		const INSERT_IMAGE = "Image…";
+		const RECORD_APPROVAL = "Record Approval / Bump Version…";
 		const BOLD = "Bold";
 		const ITALIC = "Italic";
 		const CODE = "Inline code";
@@ -1359,7 +1074,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 					{ label: HIGHLIGHT, value: HIGHLIGHT, keys: "Ctrl+Alt+H" },
 					"separator",
 					{ label: LINK, value: LINK, keys: "Ctrl+K" },
-					{ label: CHECKBOX, value: CHECKBOX, keys: "Ctrl+L" },
+					{ label: CHECKBOX, value: CHECKBOX, keys: "Alt+C" },
 				],
 			},
 			{
@@ -1369,7 +1084,9 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 					INSERT_CALLOUT,
 					INSERT_TABLE,
 					INSERT_IMAGE,
-					...(!yamlSpan() ? (["separator", ADD_PROPS] as RowMenuEntry[]) : []),
+					"separator",
+					RECORD_APPROVAL,
+					EDIT_YAML,
 				],
 			},
 			{ label: FORMAT_DOC, value: FORMAT_DOC, keys: "Ctrl+Shift+I" },
@@ -1417,18 +1134,16 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			else if (cursorLink?.kind === "wiki") void followWiki(cursorLink.inner);
 			else if (cursorLink?.kind === "href") void followLink(cursorLink.href);
 			else if (cursorLink?.kind === "ticket") followTicket(cursorLink.key);
-		} else if (picked === ADD_PROPS) {
-			const eol = model?.getEOL() ?? "\n";
-			const stem = baseName(props.path).replace(/\.(md|markdown)$/i, "");
-			const starter = `---${eol}title: ${quoteYamlScalar(stem)}${eol}---${eol}${eol}`;
-			if (model) {
+		} else if (picked === EDIT_YAML) {
+			if (!yamlSpan() && model) {
+				const eol = model.getEOL();
+				const stem = baseName(props.path).replace(/\.(md|markdown)$/i, "");
+				const starter = `---${eol}title: ${quoteYamlScalar(stem)}${eol}---${eol}${eol}`;
 				model.pushStackElement();
 				model.pushEditOperations([], [{ range: new monaco.Range(1, 1, 1, 1), text: starter, forceMoveMarkers: true }], () => null);
 				model.pushStackElement();
-				setPropsOpen(true);
-				setEditYaml(true);
-				focusYamlLine(2, 1);
 			}
+			requestMarkdownInspector("yaml");
 		} else if (picked === FORMAT_BLOCK && clickedFence) {
 			void formatCodeBlockAt(clickedFence.openLine).then((out) => {
 				if (out === "unchanged") notify("Code block is already formatted.");
@@ -1443,6 +1158,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		else if (picked === INSERT_CALLOUT) void insertCalloutInteractive();
 		else if (picked === INSERT_TABLE) runCmAction(cmView, "md-table-insert");
 		else if (picked === INSERT_IMAGE) void insertImageInteractive();
+		else if (picked === RECORD_APPROVAL) void recordDocApproval(props.path);
 		else if (picked === BOLD) runCmAction(cmView, "md-bold");
 		else if (picked === ITALIC) runCmAction(cmView, "md-italic");
 		else if (picked === CODE) runCmAction(cmView, "md-code");
@@ -1555,21 +1271,6 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		const r = takeReveal(props.path);
 		if (!r) return;
 		jumpToLine(r.line, r.column ?? 1, r.endLine, r.endColumn);
-	};
-
-	const toggleEditYaml = () => {
-		if (isRead() || !yamlSpan()) return;
-		const next = !editYaml();
-		if (!next) {
-			yamlCompleter?.dispose();
-			yamlCompleter = undefined;
-		}
-		setEditYaml(next);
-		if (next) {
-			focusYamlLine(2, 1);
-		} else {
-			yamlEditBtnEl?.focus();
-		}
 	};
 
 	const makeHandle = (view: EditorView): LiveEditorHandle => ({
@@ -1782,7 +1483,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 					onOpenImageLightbox: (info) => setLightbox({ ...info, zoomFull: false }),
 					onOpenMermaidLightbox: (info) => setMermaidBox({ ...info, scale: 1, x: 0, y: 0 }),
 					onResizeImage: resizeImageAt,
-					isYamlEditorOpen: () => editYaml(),
+					isYamlEditorOpen: () => markdownYamlEditorOpen(),
 				}),
 				liveBlockField,
 				liveInlinePlugin,
@@ -1794,8 +1495,12 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 				cmSmartPasteExtension(() => props.path),
 				cmMarkdownKeymap,
 				EditorView.domEventHandlers({
-					focus: () => {
+					focus: (_e, view) => {
 						setState("activeGroup", props.group);
+						// Re-evaluate transclusions when returning focus after editing an embedded doc in another tab/split.
+						if (view.state.doc.toString().includes("![[")) {
+							view.dispatch({ effects: refreshLiveEffect.of(++refreshSeq) });
+						}
 					},
 				}),
 				EditorView.updateListener.of((update) => {
@@ -1803,15 +1508,20 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 						if (tr.docChanged) pushTransactionToModel(tr);
 					}
 					if (update.selectionSet) bumpLiveSelection();
-					if (update.selectionSet || update.focusChanged || update.docChanged) {
-						const userMoved = update.transactions.some((tr) => tr.isUserEvent("select") || tr.isUserEvent("input") || tr.isUserEvent("delete"));
-						syncCursorState(update.view, userMoved);
-						queueMicrotask(() => updateTableHud(update.view));
+					if (update.docChanged || (update.selectionSet && update.state.selection.main.empty)) {
+						setSelBubble(null);
+					}
+					if (update.selectionSet || update.focusChanged || update.docChanged || update.viewportChanged || update.geometryChanged) {
+						if (update.selectionSet || update.focusChanged || update.docChanged) {
+							const userMoved = update.transactions.some((tr) => tr.isUserEvent("select") || tr.isUserEvent("input") || tr.isUserEvent("delete"));
+							syncCursorState(update.view, userMoved);
+							queueMicrotask(() => updateTableHud(update.view));
+						}
+						scheduleReadAssist();
 					}
 					if (update.docChanged) {
 						queueMicrotask(() => {
 							updateOutlineScrollspy();
-							if (pointerY !== null) scheduleReadAssist();
 						});
 					}
 				}),
@@ -1914,6 +1624,9 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		});
 
 		const onKeyDownGlobal = (e: KeyboardEvent) => {
+			if (e.key === "Escape" && selBubble()) {
+				setSelBubble(null);
+			}
 			if (e.key === "Escape" && mermaidBox()) {
 				e.preventDefault();
 				setMermaidBox(null);
@@ -1950,7 +1663,13 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 				}
 			}
 		};
+		const onMouseUpGlobal = () => {
+			if (!pointerSelectingInCm) return;
+			pointerSelectingInCm = false;
+			requestAnimationFrame(updateSelectionBubbleFromPointer);
+		};
 		window.addEventListener("keydown", onKeyDownGlobal);
+		window.addEventListener("mouseup", onMouseUpGlobal);
 
 		syncCursorState(cmView, false);
 		applyReveal();
@@ -1964,12 +1683,11 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 				cancelAnimationFrame(scrollSyncRaf);
 				scrollSyncRaf = 0;
 			}
-			yamlCompleter?.dispose();
-			yamlCompleter = undefined;
 			saveSyncAnchor();
 			saveView();
 			stopSplitSync();
 			window.removeEventListener("keydown", onKeyDownGlobal);
+			window.removeEventListener("mouseup", onMouseUpGlobal);
 			registerLiveEditor(props.group, undefined);
 			registerReadFind(props.group, undefined);
 			modelSub?.dispose();
@@ -1985,10 +1703,8 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			isRead,
 			(read) => {
 				if (!cmView) return;
-				if (read && editYaml()) {
-					yamlCompleter?.dispose();
-					yamlCompleter = undefined;
-					setEditYaml(false);
+				if (read) {
+					setSelBubble(null);
 				}
 				cmView.dispatch({
 					effects: [
@@ -2017,10 +1733,10 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		),
 	);
 
-	// Refresh Live/Read decorations whenever workspace docs / broken-link status updates.
+	// Refresh Live/Read decorations whenever workspace docs, tree version, or broken-link status updates.
 	createEffect(
 		on(
-			docs,
+			[docs, () => state.treeVersion],
 			() => {
 				if (cmView) cmView.dispatch({ effects: refreshLiveEffect.of(++refreshSeq) });
 			},
@@ -2110,8 +1826,9 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			aria-label={`${baseName(props.path)}, ${isRead() ? "rendered" : "live preview"}`}
 			aria-haspopup="menu"
 			onScroll={() => {
+				setSelBubble(null);
 				updateOutlineScrollspy();
-				if (pointerY !== null) scheduleReadAssist();
+				scheduleReadAssist();
 				if (tableHud()) updateTableHud();
 				if (!scrollSyncRaf) {
 					scrollSyncRaf = requestAnimationFrame(() => {
@@ -2136,8 +1853,10 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			}}
 			onMouseLeave={() => {
 				pointerY = null;
-				clearReadAssist();
+				scheduleReadAssist();
 			}}
+			onFocusIn={() => scheduleReadAssist()}
+			onFocusOut={() => queueMicrotask(scheduleReadAssist)}
 			onContextMenu={(e) => void onContextMenu(e)}
 			onKeyDown={(e) => {
 				if (isRead() && (e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "f" && cmView) {
@@ -2262,1040 +1981,173 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			</Show>
 
 			<div ref={pageEl} class="cm-md-page">
-				{/* Inline Obsidian Properties card for YAML frontmatter (unified across Live & Read, with inline raw YAML editing). */}
-				<Show
-					when={facts().length > 0 || Boolean(yamlSpan())}
-					fallback={
-						<div class="cm-md-doc-bar" aria-label="Document actions">
-							<Show when={!isRead()}>
-								<button
-									type="button"
-									class="cm-md-props-edit"
-									title="Add YAML frontmatter properties (status, ticket, tags, …)"
-									onClick={() => void addPropertyValueInteractive()}
-								>
-									<Icon name="add" />
-									<span>Properties</span>
-								</button>
-							</Show>
-							<button
-								type="button"
-								class="cm-md-props-edit cm-md-links-pill"
-								title={
-									brokenOutgoingCount() > 0
-										? `Jump to Links inspector (${brokenOutgoingCount()} broken outgoing)`
-										: "Jump to Links inspector (Backlinks, Outgoing, Unlinked mentions)"
-								}
-								onClick={openLinksInspector}
-							>
-								<Icon name="references" />
-								<span>Links ({totalLinksCount()})</span>
-								<Show when={brokenOutgoingCount() > 0}>
-									<span
-										style={{
-											color: "var(--error)",
-											display: "inline-flex",
-											"align-items": "center",
-											gap: "2px",
-											"font-weight": "600",
-										}}
-									>
-										<Icon name="warning" />
-										<span>{brokenOutgoingCount()}</span>
-									</span>
-								</Show>
-							</button>
-							<Menu
-								floating
-								class="cm-md-props-menu"
-								label="Copy or export this document"
-								title="Copy as HTML or Jira markup, print to PDF, or export standalone HTML"
-								items={exportMenuItems}
-							>
-								<span>Export</span>
-								<Icon name="chevron-down" />
-							</Menu>
-						</div>
-					}
-				>
-					<section class="cm-md-props" aria-label="Document properties">
-						<div class="cm-md-props-head">
-							<button
-								type="button"
-								class="cm-md-props-toggle"
-								aria-expanded={propsOpen()}
-								onClick={() => setPropsOpen((v) => !v)}
-							>
-								<Icon name={propsOpen() ? "chevron-down" : "chevron-right"} />
-								<span>Properties</span>
-							</button>
-							<div class="cm-md-props-actions">
-								<Show when={!isRead()}>
-									<button
-										type="button"
-										class="cm-md-props-edit"
-										title="Add or update a YAML property without editing raw YAML"
-										onClick={() => void addPropertyValueInteractive()}
-									>
-										<Icon name="add" />
-										<span>Property</span>
-									</button>
-								</Show>
-								<Show when={listed()?.group === "knowledge" && listed()?.kind === "questions" && toneOf(listed()?.status) === "done"}>
-									<button
-										type="button"
-										class="cm-md-props-edit"
-										title="Create a numbered Decision ADR pre-filled with this question and answer"
-										onClick={() => void promoteQuestionToDecision(props.path)}
-									>
-										Promote to decision
-									</button>
-								</Show>
-								<button
-									type="button"
-									class="cm-md-props-edit cm-md-links-pill"
-									title={
-										brokenOutgoingCount() > 0
-											? `Jump to Links inspector (${brokenOutgoingCount()} broken outgoing)`
-											: "Jump to Links inspector (Backlinks, Outgoing, Unlinked mentions)"
-									}
-									onClick={openLinksInspector}
-								>
-									<Icon name="references" />
-									<span>Links ({totalLinksCount()})</span>
-									<Show when={brokenOutgoingCount() > 0}>
-										<span
-											style={{
-												color: "var(--error)",
-												display: "inline-flex",
-												"align-items": "center",
-												gap: "2px",
-												"font-weight": "600",
-											}}
-										>
-											<Icon name="warning" />
-											<span>{brokenOutgoingCount()}</span>
-										</span>
-									</Show>
-								</button>
-								<Menu
-									floating
-									class="cm-md-props-menu"
-									label="Copy or export this document"
-									title="Copy as HTML or Jira markup, print to PDF, or export standalone HTML"
-									items={exportMenuItems}
-								>
-									<span>Export</span>
-									<Icon name="chevron-down" />
-								</Menu>
-								<Show when={!isRead() && yamlSpan()}>
-									<button
-										ref={yamlEditBtnEl}
-										type="button"
-										class="cm-md-props-edit"
-										classList={{ active: editYaml() }}
-										aria-expanded={editYaml()}
-										title={editYaml() ? "Hide raw YAML frontmatter (Esc)" : "Edit raw YAML frontmatter"}
-										onClick={toggleEditYaml}
-									>
-										{editYaml() ? "Hide YAML" : "Edit YAML"}
-									</button>
-								</Show>
-							</div>
-						</div>
-						<Show when={propsOpen() && facts().length > 0}>
-							<dl class="cm-md-props-list">
-								<For each={facts()}>
-									{(fact) => (
-										<div>
-											<dt>{fact.key}</dt>
-											<dd>
-												<For each={fact.values}>
-													{(value) => {
-														const target = targetOf(fact.key, value);
-														return (
-															<span class="cm-md-prop-chip">
-																<Show
-																	when={target.file || target.web}
-																	fallback={
-																		<Show
-																			when={fact.key === "tags" || fact.key === "tag"}
-																			fallback={
-																				<Show
-																					when={fact.key === "status" && listed()}
-																					fallback={
-																						<Show
-																							when={!isRead() && !isListProperty(fact.key)}
-																							fallback={
-																								<span classList={{ "doc-status": fact.key === "status", [`tone-${toneOf(value)}`]: fact.key === "status" }}>
-																									{value}
-																								</span>
-																							}
-																						>
-																							<button
-																								type="button"
-																								class="cm-md-prop-scalar-btn"
-																								classList={{ "doc-status": fact.key === "status", [`tone-${toneOf(value)}`]: fact.key === "status" }}
-																								title={`Click to edit ${fact.key}`}
-																								onClick={() => void editScalarPropertyInteractive(fact.key, value)}
-																							>
-																								{value}
-																							</button>
-																						</Show>
-																					}
-																				>
-																					<Menu
-																						class="md-status"
-																						label={`Status: ${value}. Change it`}
-																						title="Change the status"
-																						items={() =>
-																							statusChoices(listed()).map((status) => ({
-																								label: status,
-																								disabled: status.toLowerCase() === value.toLowerCase(),
-																								why: "It is this already",
-																								run: () => void setStatus(props.path, status),
-																							}))
-																						}
-																					>
-																						<span class={`doc-status tone-${toneOf(value)}`}>{value}</span>
-																						<Icon name="chevron-down" />
-																					</Menu>
-																				</Show>
-																			}
-																		>
-																			<button
-																				type="button"
-																				class="cm-md-prop-tag"
-																				title={`Search workspace for #${value.replace(/^#+/, "")}`}
-																				onClick={() => searchFor(tagSearchPattern(value), { regex: true })}
-																			>
-																				#{value.replace(/^#+/, "")}
-																			</button>
-																		</Show>
-																	}
-																>
-																	<button
-																		class="link"
-																		title={target.web ?? target.file}
-																		onClick={() => go(target)}
-																		onMouseEnter={(e) => hoverFileButton(target.file, e.currentTarget, { ticket: ticket() || undefined })}
-																		onMouseLeave={scheduleHideHover}
-																	>
-																		{target.display ?? value}
-																	</button>
-																	<Show
-																		when={
-																			!isRead() &&
-																			EDITABLE_LINK_KEYS.has(fact.key) &&
-																			!(fact.key === "ticket" && listed()?.group === "tickets")
-																		}
-																	>
-																		<button
-																			type="button"
-																			class="cm-md-prop-edit"
-																			title={`Edit ${fact.key}`}
-																			aria-label={`Edit ${fact.key}`}
-																			onClick={() => void editScalarPropertyInteractive(fact.key, value)}
-																		>
-																			<Icon name="edit" />
-																		</button>
-																	</Show>
-																</Show>
-																<Show when={!isRead() && !(fact.key === "status" && listed()) && fact.key !== "title" && !(fact.key === "ticket" && listed()?.group === "tickets")}>
-																	<button
-																		type="button"
-																		class="cm-md-prop-rm"
-																		title={`Remove ${value} from ${fact.key}`}
-																		aria-label={`Remove ${value} from ${fact.key}`}
-																		onClick={() => removePropertyValue(fact.key, value, fact.values.length)}
-																	>
-																		<Icon name="close" />
-																	</button>
-																</Show>
-															</span>
-														);
-													}}
-												</For>
-												<Show when={!isRead() && isListProperty(fact.key)}>
-													<button
-														type="button"
-														class="cm-md-prop-add"
-														title={`Add another value to ${fact.key}`}
-														aria-label={`Add value to ${fact.key}`}
-														onClick={() => void addPropertyValueInteractive(fact.key)}
-													>
-														<Icon name="add" />
-													</button>
-												</Show>
-											</dd>
-										</div>
-									)}
-								</For>
-							</dl>
-						</Show>
-						<Show when={!isRead() && editYaml() && yamlSpan()}>
-							{(span) => (
-								<div class="cm-md-props-yaml-wrap">
-									<div class="cm-md-props-yaml-fence" aria-hidden="true">---</div>
-									<textarea
-										ref={(el) => {
-											yamlCompleter?.dispose();
-											yamlInputEl = el;
-											el.value = span().inner;
-											yamlCompleter = createTextareaCompleter(el, {
-												mode: "yaml",
-												filePath: () => props.path,
-												getListedDoc: () => listed(),
-												onApply: () => {
-													resizeYamlInput(el);
-													applyYamlInnerEdit(el.value);
-												},
-											});
-											queueMicrotask(() => resizeYamlInput(el));
-										}}
-										class="cm-md-props-yaml"
-										aria-label="Raw YAML frontmatter"
-										spellcheck={false}
-										rows={2}
-										onInput={(e) => {
-											const el = e.currentTarget;
-											resizeYamlInput(el);
-											applyYamlInnerEdit(el.value);
-											yamlCompleter?.update();
-										}}
-										onBlur={() => {
-											yamlCompleter?.close();
-										}}
-										onKeyDown={(e) => {
-											if (yamlCompleter?.handleKeyDown(e)) return;
-											if (e.key === "Escape") {
-												e.preventDefault();
-												e.stopPropagation();
-												yamlCompleter?.dispose();
-												yamlCompleter = undefined;
-												setEditYaml(false);
-												yamlEditBtnEl?.focus();
-											} else if (e.key === "Tab" && !e.shiftKey) {
-												e.preventDefault();
-												const el = e.currentTarget;
-												const s = el.selectionStart;
-												const end = el.selectionEnd;
-												const next = `${el.value.slice(0, s)}  ${el.value.slice(end)}`;
-												el.value = next;
-												el.setSelectionRange(s + 2, s + 2);
-												resizeYamlInput(el);
-												applyYamlInnerEdit(next);
-											} else if ((e.ctrlKey || e.metaKey) && !e.altKey) {
-												const k = e.key.toLowerCase();
-												if (k === "z" && !e.shiftKey) {
-													e.preventDefault();
-													model?.undo();
-												} else if (k === "y" || (k === "z" && e.shiftKey)) {
-													e.preventDefault();
-													model?.redo();
-												}
-											}
-										}}
-									/>
-									<div class="cm-md-props-yaml-fence" aria-hidden="true">---</div>
-								</div>
-							)}
-						</Show>
-					</section>
-				</Show>
-
-				{/* Ticket work summary (specs, plans, registries, decisions, questions tied to this ticket — with link origins, quick-link actions, and hover previews). */}
-				<Show when={ticket()}>
-					<section class="md-work" aria-label={`The work for ${ticket()}`}>
-						<div class="md-work-head">
-							<h2>The work for {ticket()}</h2>
-							<div class="md-work-actions">
-								<button
-									type="button"
-									class="md-work-btn"
-									title={`Create a new spec for ${ticket()}`}
-									onClick={() => void newSpec()}
-								>
-									<Icon name="add" />
-									<span>Spec</span>
-								</button>
-								<button
-									type="button"
-									class="md-work-btn"
-									title={`Create a new plan for ${ticket()}`}
-									onClick={() => void import("../commands").then((m) => m.runCommand("new-plan"))}
-								>
-									<Icon name="add" />
-									<span>Plan</span>
-								</button>
-								<button
-									type="button"
-									class="md-work-btn"
-									title={`Link an existing spec, plan, ticket, decision, or question to ${ticket()}`}
-									onClick={() => void linkDocumentToTicket(props.path, ticket())}
-								>
-									<Icon name="references" />
-									<span>Link…</span>
-								</button>
-								<Show
-									when={listed()?.ticketFolder}
-									fallback={
-										<button
-											type="button"
-											class="md-work-btn"
-											title={`Move ${ticket()} into its own folder (docs/tickets/${ticket()}/) for reference docs, code samples, and fixtures`}
-											onClick={() => void createTicketFolder(props.path)}
-										>
-											<Icon name="new-folder" />
-											<span>Folder</span>
-										</button>
-									}
-								>
-									{(folder) => (
-										<button
-											type="button"
-											class="md-work-btn"
-											title={`Create a new reference note, sample, or fixture inside ${relativeTo(state.workspace?.root, folder())}/`}
-											onClick={() => void newTicketFile(folder(), ticket())}
-										>
-											<Icon name="new-file" />
-											<span>File</span>
-										</button>
-									)}
-								</Show>
-								<Menu
-									floating
-									class="md-work-btn"
-									label={`More work items for ${ticket()}`}
-									title={`Create a sub-ticket, decision, question, or registry row for ${ticket()}`}
-									items={() => [
-										{ label: "New sub-ticket…", run: () => void newTicket(undefined, undefined, { parent: ticket() }) },
-										{ label: "New decision…", run: () => void newKnowledge("decisions", { ticket: ticket() }) },
-										{ label: "New question…", run: () => void newKnowledge("questions", { ticket: ticket() }) },
-										{ label: "Add registry row…", run: () => void addRegistryRowForTicket(ticket()) },
-										"separator",
-										{ label: "Export deployment manifest (Markdown)…", run: () => void exportDeploymentManifest(props.path, ticket(), "markdown") },
-										{ label: "Export deployment manifest (CSV)…", run: () => void exportDeploymentManifest(props.path, ticket(), "csv") },
-										{ label: "Export deployment manifest (Word .docx)…", run: () => void exportDeploymentManifest(props.path, ticket(), "docx") },
-										{ label: "Export release packet (HTML)…", run: () => void exportTicketPacket(props.path, ticket(), "html") },
-										{ label: "Export release packet (Word .docx)…", run: () => void exportTicketPacket(props.path, ticket(), "docx") },
-										"separator",
-										{ label: "Close out ticket…", run: () => void closeoutTicket(props.path, ticket()) },
-										...(listed() && isArchivedTicket(listed())
-											? [{ label: "Unarchive ticket…", run: () => void unarchiveTicket(listed()!) }]
-											: []),
-									]}
-								>
-									<Icon name="add" />
-									<span>More</span>
-									<Icon name="chevron-down" />
-								</Menu>
-								<button
-									type="button"
-									class="md-work-btn md-work-guide-btn"
-									classList={{ active: workGuideOpen() }}
-									aria-expanded={workGuideOpen()}
-									title="Show how documents and plans associate with a ticket"
-									onClick={() => setWorkGuideOpen((v) => !v)}
-								>
-									<Icon name="question" />
-									<span>How links work</span>
-								</button>
-							</div>
-						</div>
-						<Show when={workGuideOpen()}>
-							<div class="md-work-guide">
-								<p class="md-work-guide-intro">
-									Everything under <strong>{ticket()}</strong> in the Work list and here comes straight from the files — no hidden metadata:
-								</p>
-								<dl class="md-work-guide-list">
-									<div>
-										<dt>Specs</dt>
-										<dd>
-											Add <code>specs: [path/to/spec.md]</code> on this ticket, add <code>ticket: {ticket()}</code> in the spec&apos;s frontmatter, or place a <code>.spec.md</code> beside a linked <code>.plan.json</code>.
-										</dd>
-									</div>
-									<div>
-										<dt>Plans</dt>
-										<dd>
-											Set <code>&quot;ticket&quot;: &quot;{ticket()}&quot;</code> in the plan (via the Plan panel&apos;s Ticket field) or add <code>plans: [design/Name.plan.json]</code> on this ticket.
-										</dd>
-									</div>
-									<div>
-										<dt>Decisions &amp; Questions</dt>
-										<dd>
-											Add <code>ticket: {ticket()}</code> (or <code>tickets: [{ticket()}, …]</code>) in that document&apos;s YAML frontmatter.
-										</dd>
-									</div>
-									<div>
-										<dt>Tickets</dt>
-										<dd>
-											Use <code>parent: {ticket()}</code> on another ticket to nest it under {ticket()} in Work, or <code>related: [OTHER-1]</code> on either ticket.
-										</dd>
-									</div>
-									<div>
-										<dt>Registries</dt>
-										<dd>
-											Any CSV row whose <code>Ticket</code> column lists <code>{ticket()}</code> appears under <em>Registries</em> and opens filtered to those rows.
-										</dd>
-									</div>
-									<div>
-										<dt>Ticket folder</dt>
-										<dd>
-											Place reference docs, existing code samples, and fixtures inside <code>docs/tickets/{ticket()}/</code> — click the folder under <em>Ticket files</em> to browse them in a focused Explorer view without cluttering the Work sidebar.
-										</dd>
-									</div>
-								</dl>
-							</div>
-						</Show>
-						<Show when={workRollup().length > 0}>
-							<div class="md-work-rollup" aria-label="Work progress summary">
-								<For each={workRollup()}>{(part) => <span>{part}</span>}</For>
-							</div>
-						</Show>
-						<Show
-							when={work().length > 0 || Boolean(listed()?.ticketFolder)}
-							fallback={
-								<p class="md-work-empty">
-									No specs, plans, or notes linked yet. Use <strong>Spec</strong>, <strong>Plan</strong>, <strong>Link…</strong>, or <strong>Folder</strong> above, or open <strong>How links work</strong> to wire them in YAML.
-								</p>
-							}
+				{/* Whisper-quiet content-first top strip: ticket/status badge on the left, Info & Links triggers on the right. */}
+				<div class="cm-md-compact-bar" aria-label="Document metadata and actions">
+					<Show when={compactHeader().hasLeftMeta}>
+						<button
+							type="button"
+							class="cm-md-compact-meta"
+							title="Open Document Info panel (Properties, Work, Readiness & Links)"
+							onClick={() => requestMarkdownInspector("properties")}
 						>
-							<For each={work()}>
-								{(group) => (
-									<div class="md-work-group">
-										<h3>{group.name}</h3>
-										<ul>
-											<For each={group.items}>
-												{(item) => {
-													const file = item.file;
-													return (
-														<li>
-															<button
-																class="link"
-																title={[file.path, `Linked via: ${item.detail}`, group.kind === "registry" ? `Opens the table at the rows for ${ticket()}.` : ""].filter(Boolean).join("\n")}
-																onClick={() => {
-																	if (group.kind === "registry") askRows(file.path, ticket());
-																	void openFile(file.path);
-																}}
-																onMouseEnter={(e) =>
-																	hoverFileButton(file.path, e.currentTarget, {
-																		ticket: group.kind === "registry" ? ticket() : undefined,
-																	})
-																}
-																onMouseLeave={scheduleHideHover}
-															>
-																{file.ticket && !file.title?.startsWith(file.ticket) ? `${file.ticket}: ` : ""}
-																{group.kind === "registry" ? registryTitle(file.name) : file.title || file.name.replace(/\.plan\.json$/i, "")}
-															</button>
-															<Show when={group.kind === "registry" && file.forTickets?.find((rows) => rows.key.toLowerCase() === ticket().toLowerCase())}>
-																{(rows) => <span class="md-work-note">{rowsLine(rows())}</span>}
-															</Show>
-															<Show when={file.status}>
-																<span class={`doc-status tone-${toneOf(file.status)}`}>{file.status}</span>
-															</Show>
-															<span class="md-work-via" title={item.detail}>
-																{item.reason}
-															</span>
-															<Show when={group.kind !== "registry"}>
-																<button
-																	type="button"
-																	class="md-work-unlink"
-																	title={`Unlink ${file.ticket ?? file.title ?? file.name} from ${ticket()}`}
-																	aria-label={`Unlink ${file.ticket ?? file.title ?? file.name}`}
-																	onClick={() => void unlinkDocumentFromTicket(props.path, ticket(), file)}
-																>
-																	<Icon name="close" />
-																</button>
-															</Show>
-														</li>
-													);
-												}}
-											</For>
-										</ul>
-									</div>
-								)}
-							</For>
-							<Show when={listed()?.ticketFolder}>
-								{(folder) => {
-									const count = () => listed()?.ticketFileCount ?? listed()?.ticketFiles?.length ?? 0;
-									const relFolder = () => relativeTo(state.workspace?.root, folder()).split("\\").join("/");
-									const openScoped = () =>
-										void import("../panels/Explorer").then((m) => m.browseFolderInExplorer(folder(), `${ticket()} files`));
-									return (
-										<div class="md-work-group md-work-files">
-											<h3>Ticket files</h3>
-											<ul>
-												<li class="md-work-file-row">
-													<button
-														type="button"
-														class="link md-work-folder-link"
-														title={`Browse ${relFolder()}/ in a focused Explorer view`}
-														onClick={openScoped}
-													>
-														<Icon name="folder" />
-														<span>{relFolder()}/</span>
-													</button>
-													<span class="md-work-note">
-														{count() === 0 ? "No extra files" : `${count()} ${count() === 1 ? "file" : "files"}`}
-													</span>
-													<span class="md-work-via" title="Opens this ticket's folder in a focused Explorer view">
-														Explorer
-													</span>
-												</li>
-											</ul>
-										</div>
-									);
-								}}
+							<Show when={compactHeader().ticketLabel}>
+								<span class="cm-md-compact-key">{compactHeader().ticketLabel}</span>
 							</Show>
-							<Show when={readiness()}>
-								{(rep) => (
-									<div class="md-readiness">
-										<button
-											type="button"
-											class="md-readiness-toggle"
-											aria-expanded={readinessOpen()}
-											title="STARLIMS transport & release readiness checklist for this ticket"
-											onClick={() => setReadinessOpen((v) => !v)}
-										>
-											<Icon name={readinessOpen() ? "chevron-down" : "chevron-right"} />
-											<span>Release readiness</span>
-											<span class={`md-readiness-badge ${rep().ready ? "ready" : "pending"}`}>
-												{rep().pass}/{rep().total} {rep().ready ? "ready" : "checks"}
-											</span>
-										</button>
-										<Show when={readinessOpen()}>
-											<ul class="md-readiness-list">
-												<For each={rep().checks}>
-													{(chk) => (
-														<li class={`md-readiness-row level-${chk.level}`}>
-															<Icon name={chk.level === "pass" ? "check" : chk.level === "warn" ? "warning" : "info"} />
-															<strong>{chk.label}:</strong>
-															<Show
-																when={chk.path && !chk.ok}
-																fallback={<span class="md-readiness-detail">{chk.detail}</span>}
-															>
-																<button
-																	type="button"
-																	class="link"
-																	title="Open referenced document"
-																	onClick={() => void openFile(chk.path!)}
-																>
-																	{chk.detail}
-																</button>
-															</Show>
-														</li>
-													)}
-												</For>
-											</ul>
-										</Show>
-									</div>
-								)}
+							<Show when={compactHeader().statusLabel}>
+								<span class={`doc-status tone-${toneOf(compactHeader().statusLabel)}`}>{compactHeader().statusLabel}</span>
 							</Show>
-						</Show>
-					</section>
-				</Show>
-
-				{/* Non-ticket linked documents (specs, decisions, questions, reference, schema): show linked tickets + unlink + Link to ticket action. */}
-				<Show when={linkedTickets().length > 0 || (!ticket() && listed() && !isCatalog(listed()!) && ["specs", "knowledge", "schema"].includes(listed()!.group))}>
-					<section class="md-linked-tickets" aria-label="Linked tickets">
-						<div class="md-linked-head">
-							<h2>Linked tickets</h2>
-							<button
-								type="button"
-								class="md-work-btn"
-								title="Link this document to a ticket"
-								onClick={() => void linkNonTicketToTicket(props.path)}
-							>
-								<Icon name="references" />
-								<span>Link to ticket…</span>
-							</button>
-						</div>
-						<Show
-							when={linkedTickets().length > 0}
-							fallback={<p class="md-work-empty">Not linked to a ticket yet.</p>}
+						</button>
+					</Show>
+					<div class="cm-md-compact-actions">
+						<button
+							type="button"
+							class="cm-md-compact-btn"
+							classList={{ active: isInfoPanelActive() }}
+							title="Open Document Info panel (Properties, Work, Export & Links)"
+							onClick={() => requestMarkdownInspector()}
 						>
-							<ul>
-								<For each={linkedTickets()}>
-									{(entry) => (
-										<li>
-											<button
-												class="link"
-												title={[entry.ticket.path, `Linked via: ${entry.detail}`].join("\n")}
-												onClick={() => void openFile(entry.ticket.path)}
-												onMouseEnter={(e) => hoverFileButton(entry.ticket.path, e.currentTarget)}
-												onMouseLeave={scheduleHideHover}
-											>
-												<strong>{entry.key}</strong>
-												<Show when={entry.ticket.title && !entry.ticket.title.toLowerCase().startsWith(entry.key.toLowerCase())}>
-													{`: ${entry.ticket.title}`}
-												</Show>
-											</button>
-											<Show when={entry.ticket.status}>
-												<span class={`doc-status tone-${toneOf(entry.ticket.status)}`}>{entry.ticket.status}</span>
-											</Show>
-											<span class="md-work-via" title={entry.detail}>
-												{entry.reason}
-											</span>
-											<Show when={entry.reason !== "in ticket folder" && listed()}>
-												<button
-													type="button"
-													class="md-work-unlink"
-													title={`Unlink from ${entry.key}`}
-													aria-label={`Unlink from ${entry.key}`}
-													onClick={() => void unlinkDocumentFromTicket(entry.ticket.path, entry.key, listed()!)}
-												>
-													<Icon name="close" />
-												</button>
-											</Show>
-										</li>
-									)}
-								</For>
-							</ul>
-						</Show>
-					</section>
-				</Show>
-
-				{/* Reverse Schema -> Code & Registries bridge: shows scripts, data sources, SQL, and database.csv rows referencing this schema table. */}
-				<Show when={schemaIdent() && ((schemaUsages()?.code.length ?? 0) + (schemaUsages()?.registries.length ?? 0) > 0) ? schemaUsages() : undefined}>
-					{(usages) => {
-						const totalRefs = () => usages().code.length + usages().registries.length;
-						return (
-							<section class="md-linked-tickets md-schema-usages" aria-label="Used in code and registries">
-								<div class="md-linked-head">
-									<button
-										type="button"
-										class="md-readiness-toggle"
-										aria-expanded={schemaUsagesOpen()}
-										onClick={() => setSchemaUsagesOpen((v) => !v)}
-									>
-										<Icon name={schemaUsagesOpen() ? "chevron-down" : "chevron-right"} />
-										<span>Used in code &amp; registries</span>
-										<span class="doc-status tone-active">{totalRefs()}</span>
-									</button>
-								</div>
-								<Show when={schemaUsagesOpen()}>
-									<ul>
-										<For each={usages().registries}>
-											{(r) => (
-												<li>
-													<button class="link" onClick={() => void openFile(r.path)}>
-														{r.rel}
-													</button>
-													<span class="md-work-via">registry</span>
-												</li>
-											)}
-										</For>
-										<For each={usages().code}>
-											{(c) => (
-												<li>
-													<button class="link" title={`${c.rel}:${c.line}`} onClick={() => void openFile(c.path, { reveal: { line: c.line } })}>
-														{c.rel}
-													</button>
-													<span class="md-work-via">
-														L{c.line}
-														{c.count > 1 ? ` · ${c.count} refs` : ""}
-													</span>
-												</li>
-											)}
-										</For>
-									</ul>
-								</Show>
-							</section>
-						);
-					}}
-				</Show>
+							<Icon name="info" />
+							<span>Info</span>
+						</button>
+						<button
+							type="button"
+							class="cm-md-compact-btn"
+							title={compactHeader().linksTitle}
+							onClick={() => requestMarkdownInspector("links")}
+						>
+							<Icon name="references" />
+							<span>{compactHeader().linksLabel}</span>
+							<Show when={compactHeader().brokenCount > 0}>
+								<span class="cm-md-compact-broken">
+									<Icon name="warning" />
+									<span>{compactHeader().brokenCount}</span>
+								</span>
+							</Show>
+						</button>
+					</div>
+				</div>
 
 				{/* Unified CodeMirror 6 surface (powers both Live Preview and Read mode). */}
-				<div ref={cmMountEl} class="cm-md-editor-wrap" />
+				<div
+					ref={cmMountEl}
+					class="cm-md-editor-wrap"
+					onMouseDown={(e) => {
+						if (e.button === 0 && !isRead()) pointerSelectingInCm = true;
+						setSelBubble(null);
+					}}
+					onMouseOver={(e) => {
+						const fnEl = (e.target instanceof Element ? e.target : null)?.closest<HTMLElement>("[data-md-footnote]");
+						if (fnEl?.dataset.mdFootnote) handleHoverFootnote(fnEl.dataset.mdFootnote, fnEl);
+					}}
+					onMouseOut={(e) => {
+						const fnEl = (e.target instanceof Element ? e.target : null)?.closest<HTMLElement>("[data-md-footnote]");
+						if (fnEl) scheduleHideHover();
+					}}
+				/>
 
-				{/* Compact 3-tab Links Inspector (Backlinks with context snippets, Outgoing links, Unlinked mentions). */}
-				<Show when={linksForcedVisible() || totalLinksCount() > 0}>
-					<section ref={linksSectionEl} class="cm-md-backlinks cm-md-links-inspector" aria-label="Document links inspector">
+			</div>
+
+			{/* Floating Selection Formatting Toolbar in Live Mode (pointer-selected prose outside code blocks/frontmatter). */}
+			<Show when={!isRead() && selBubble()}>
+				{(bubble) => (
+					<Portal>
 						<div
-							class="cm-md-links-head"
-							style={{
-								display: "flex",
-								"flex-wrap": "wrap",
-								"align-items": "center",
-								gap: "6px 12px",
-							}}
+							ref={selBubbleEl}
+							class="cm-md-sel-bubble"
+							role="toolbar"
+							aria-label="Selection formatting"
+							style={{ left: `${bubble().x}px`, top: `${bubble().y}px` }}
+							onMouseDown={(e) => e.preventDefault()}
 						>
 							<button
 								type="button"
-								class="cm-md-backlinks-toggle"
-								aria-expanded={backlinksOpen()}
-								onClick={() => setBacklinksOpen((v) => !v)}
+								class="cm-md-sel-btn cm-md-sel-bold"
+								title="Bold (Ctrl+B)"
+								onClick={() => {
+									if (cmView) runCmAction(cmView, "md-bold");
+									setSelBubble(null);
+								}}
 							>
-								<Icon name={backlinksOpen() ? "chevron-down" : "chevron-right"} />
-								<span>Links</span>
+								B
 							</button>
-							<div
-								class="cm-md-links-tabs"
-								role="tablist"
-								aria-label="Links inspector tabs"
-								style={{ display: "inline-flex", "flex-wrap": "wrap", gap: "4px" }}
+							<button
+								type="button"
+								class="cm-md-sel-btn cm-md-sel-italic"
+								title="Italic (Ctrl+I)"
+								onClick={() => {
+									if (cmView) runCmAction(cmView, "md-italic");
+									setSelBubble(null);
+								}}
 							>
-								<button
-									type="button"
-									role="tab"
-									class="md-work-btn"
-									classList={{ active: linksTab() === "backlinks" }}
-									aria-selected={linksTab() === "backlinks"}
-									onClick={() => {
-										setLinksTab("backlinks");
-										setBacklinksOpen(true);
-									}}
-								>
-									<span>Backlinks ({linked()?.length ?? 0})</span>
-								</button>
-								<button
-									type="button"
-									role="tab"
-									class="md-work-btn"
-									classList={{ active: linksTab() === "outgoing" }}
-									aria-selected={linksTab() === "outgoing"}
-									onClick={() => {
-										setLinksTab("outgoing");
-										setBacklinksOpen(true);
-									}}
-								>
-									<span>Outgoing ({outgoingLinks().length})</span>
-									<Show when={brokenOutgoingCount() > 0}>
-										<span
-											style={{
-												color: "var(--error)",
-												display: "inline-flex",
-												"align-items": "center",
-												gap: "2px",
-												"font-weight": "600",
-											}}
-											title={`${brokenOutgoingCount()} broken outgoing ${brokenOutgoingCount() === 1 ? "link" : "links"}`}
-										>
-											<Icon name="warning" />
-											<span>{brokenOutgoingCount()}</span>
-										</span>
-									</Show>
-								</button>
-								<button
-									type="button"
-									role="tab"
-									class="md-work-btn"
-									classList={{ active: linksTab() === "unlinked" }}
-									aria-selected={linksTab() === "unlinked"}
-									onClick={() => {
-										setLinksTab("unlinked");
-										setBacklinksOpen(true);
-									}}
-								>
-									<span>Unlinked mentions ({unlinkedMentions()?.length ?? 0})</span>
-								</button>
-							</div>
+								I
+							</button>
+							<button
+								type="button"
+								class="cm-md-sel-btn cm-md-sel-code"
+								title="Inline code (Ctrl+`)"
+								onClick={() => {
+									if (cmView) runCmAction(cmView, "md-code");
+									setSelBubble(null);
+								}}
+							>
+								Code
+							</button>
+							<button
+								type="button"
+								class="cm-md-sel-btn cm-md-sel-hl"
+								title="Highlight ==text== (Ctrl+Alt+H)"
+								onClick={() => {
+									if (cmView) runCmAction(cmView, "md-highlight");
+									setSelBubble(null);
+								}}
+							>
+								==
+							</button>
+							<span class="cm-md-sel-sep" aria-hidden="true" />
+							<button
+								type="button"
+								class="cm-md-sel-btn"
+								title="Insert Markdown link (Ctrl+K)"
+								aria-label="Insert Markdown link"
+								onClick={() => {
+									if (cmView) runCmAction(cmView, "md-link");
+									setSelBubble(null);
+								}}
+							>
+								<Icon name="references" />
+								<span>Link</span>
+							</button>
+							<button
+								type="button"
+								class="cm-md-sel-btn"
+								title="Wrap as [[wikilink]]"
+								onClick={wrapSelectionAsWikilink}
+							>
+								[[ ]]
+							</button>
+							<button
+								type="button"
+								class="cm-md-sel-btn"
+								title="Wrap selection in callout"
+								aria-label="Wrap in callout"
+								onClick={wrapSelectionAsCallout}
+							>
+								<Icon name="quote" />
+								<span>Callout</span>
+							</button>
 						</div>
-						<Show when={backlinksOpen()}>
-							<Show when={linksTab() === "backlinks"}>
-								<Show
-									when={(linked()?.length ?? 0) > 0}
-									fallback={<p class="md-work-empty">No other workspace documents link here yet.</p>}
-								>
-									<ul>
-										<For each={linked()}>
-											{(from) => (
-												<li style={{ "flex-direction": "column", "align-items": "stretch", gap: "3px" }}>
-													<div style={{ display: "flex", "flex-wrap": "wrap", "align-items": "baseline", gap: "4px 10px" }}>
-														<button
-															class="link"
-															title={relativeTo(state.workspace?.root, from.path)}
-															onClick={() => void openFile(from.path, { reveal: { line: from.line } })}
-															onMouseEnter={(e) => hoverFileButton(from.path, e.currentTarget, { line: from.line })}
-															onMouseLeave={scheduleHideHover}
-														>
-															{called(from.path)}
-														</button>
-														<span class="md-work-via">L{from.line}</span>
-														<Show when={from.places > 1}>
-															<span class="md-work-note">{from.places} places</span>
-														</Show>
-													</div>
-													<Show when={from.snippet}>
-														<div
-															class="cm-md-link-snippet"
-															style={{
-																"font-size": "var(--text-xs, 12px)",
-																color: "var(--editor-muted, var(--muted))",
-																"line-height": "1.45",
-																"padding-left": "10px",
-																"border-left": "2px solid color-mix(in srgb, var(--editor-border, var(--border)) 80%, transparent)",
-																"overflow-wrap": "anywhere",
-															}}
-														>
-															{from.snippet}
-														</div>
-													</Show>
-												</li>
-											)}
-										</For>
-									</ul>
-								</Show>
-							</Show>
-							<Show when={linksTab() === "outgoing"}>
-								<Show
-									when={outgoingLinks().length > 0}
-									fallback={<p class="md-work-empty">No outgoing links, embeds, or ticket references in this document.</p>}
-								>
-									<ul>
-										<For each={outgoingLinks()}>
-											{(item) => (
-												<li>
-													<button
-														type="button"
-														class="link"
-														title={
-															item.broken
-																? `Broken link on line ${item.line}: ${item.target}`
-																: item.resolvedPath
-																	? relativeTo(state.workspace?.root, item.resolvedPath)
-																	: item.target
-														}
-														onClick={() => {
-															if (item.kind === "web") {
-																void window.open(item.target, "_blank", "noopener");
-															} else if (item.broken) {
-																jumpToLine(item.line);
-															} else if (item.resolvedPath) {
-																if (item.heading) void followHeadingInFile(item.resolvedPath, item.heading);
-																else void openFile(item.resolvedPath, item.targetLine ? { reveal: { line: item.targetLine } } : {});
-															} else if (item.kind === "wiki" || item.kind === "embed") {
-																void followWiki(item.target);
-															} else {
-																void followLink(item.target);
-															}
-														}}
-														onMouseEnter={(e) => {
-															if (item.resolvedPath && !item.broken) {
-																hoverFileButton(item.resolvedPath, e.currentTarget, { line: item.targetLine });
-															}
-														}}
-														onMouseLeave={scheduleHideHover}
-													>
-														{item.label}
-													</button>
-													<span class="md-work-via">{item.kind}</span>
-													<button
-														type="button"
-														class="md-work-btn"
-														title={`Jump to line ${item.line} in this document`}
-														onClick={() => jumpToLine(item.line)}
-													>
-														L{item.line}
-													</button>
-													<Show when={item.broken}>
-														<span
-															style={{
-																display: "inline-flex",
-																"align-items": "center",
-																gap: "4px",
-																padding: "1px 6px",
-																"border-radius": "999px",
-																"font-size": "11px",
-																"font-weight": "600",
-																color: "var(--error)",
-																background: "color-mix(in srgb, var(--error) 14%, transparent)",
-															}}
-														>
-															<Icon name="warning" />
-															<span>Broken</span>
-														</span>
-													</Show>
-													<Show when={item.broken && item.instead && !isRead()}>
-														<button
-															type="button"
-															class="md-work-btn"
-															title={`Update broken link to ${item.instead}`}
-															onClick={() => {
-																if (!cmView || !item.instead) return;
-																const cur = cmView.state.doc.toString();
-																const fixed = withLinkFile(cur, item.line, item.target, item.instead);
-																if (fixed !== null && fixed !== cur) {
-																	cmView.dispatch({ changes: { from: 0, to: cur.length, insert: fixed }, userEvent: "input.fix" });
-																	notify(`Fixed broken link to ${item.instead}.`);
-																}
-															}}
-														>
-															<Icon name="wand" />
-															<span>Fix</span>
-														</button>
-													</Show>
-												</li>
-											)}
-										</For>
-									</ul>
-								</Show>
-							</Show>
-							<Show when={linksTab() === "unlinked"}>
-								<Show
-									when={(unlinkedMentions()?.length ?? 0) > 0}
-									fallback={<p class="md-work-empty">No unlinked plain-text mentions found in other workspace docs.</p>}
-								>
-									<ul>
-										<For each={unlinkedMentions()}>
-											{(m) => (
-												<li style={{ "flex-direction": "column", "align-items": "stretch", gap: "3px" }}>
-													<div style={{ display: "flex", "flex-wrap": "wrap", "align-items": "center", gap: "4px 10px" }}>
-														<button
-															type="button"
-															class="link"
-															title={`Open ${relativeTo(state.workspace?.root, m.path)} at line ${m.line}`}
-															onClick={() => void openFile(m.path, { reveal: { line: m.line, column: m.column + 1 } })}
-															onMouseEnter={(e) => hoverFileButton(m.path, e.currentTarget, { line: m.line })}
-															onMouseLeave={scheduleHideHover}
-														>
-															{called(canonical(m.path))}
-														</button>
-														<span class="md-work-via">L{m.line}</span>
-														<button
-															type="button"
-															class="md-work-btn"
-															title={`Convert "${m.matchedText}" into a [[wikilink]] in ${called(canonical(m.path))}`}
-															onClick={() => void linkifyUnlinkedMention(m)}
-														>
-															<Icon name="references" />
-															<span>Link</span>
-														</button>
-													</div>
-													<Show when={m.snippet}>
-														<div
-															class="cm-md-link-snippet"
-															style={{
-																"font-size": "var(--text-xs, 12px)",
-																color: "var(--editor-muted, var(--muted))",
-																"line-height": "1.45",
-																"padding-left": "10px",
-																"border-left": "2px solid color-mix(in srgb, var(--editor-border, var(--border)) 80%, transparent)",
-																"overflow-wrap": "anywhere",
-															}}
-														>
-															{m.snippet}
-														</div>
-													</Show>
-												</li>
-											)}
-										</For>
-									</ul>
-								</Show>
-							</Show>
-						</Show>
-					</section>
-				</Show>
-			</div>
+					</Portal>
+				)}
+			</Show>
 
 			{/* Obsidian-style Hover Page Preview popover (portaled to body so container-type: inline-size never offsets/clips fixed positioning). */}
 			<Show when={hoverCard()}>
 				{(card) => (
 					<Portal>
 						<div
+							ref={hoverCardEl}
 							class="md-hover-card"
-							style={{ left: `${card().x}px`, top: `${card().y}px` }}
+							style={{ left: `${card().x}px`, top: `${card().y}px`, "max-height": `${card().maxHeight}px` }}
 							onMouseEnter={() => {
 								cardHovered = true;
 								clearTimeout(hideTimer);
@@ -3313,6 +2165,10 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 									onClick={() => {
 										const target = card();
 										setHoverCard(null);
+										if (canonical(target.path) === canonical(props.path) && target.line) {
+											scrollToLine(target.line, !isRead());
+											return;
+										}
 										void openFile(target.path, target.line ? { reveal: { line: target.line } } : {});
 									}}
 								>

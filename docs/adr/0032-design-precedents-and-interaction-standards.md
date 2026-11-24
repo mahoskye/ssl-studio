@@ -30,6 +30,11 @@ Each surface of SSL Studio follows a clear product precedent unless a STARLIMS-s
 - **Binary or destructive confirmations and single-line text prompts:** use a compact centered modal (`choose()` with at most 3 short actions, or `ask()`), with dangerous actions explicitly styled and never the default Enter choice (ADR 0009).
 - **Dropdowns and context menus:** clamp inside the viewport on every edge, flip upward when opened near the bottom (such as the Agent `Prompts` menu) and flip left near the right edge, use section separators and smart submenus, and align keyboard shortcuts in a right column.
 
+### Content-first document editors
+
+- Opening a Markdown document puts the author's prose first in the editor canvas — never bury the document's opening heading beneath multi-card properties, ticket work summaries, readiness gates, or links lists.
+- Move metadata, ticket work, readiness checks, reverse usages, and links inspectors into the shared right-hand Document panel (`Info` | `Outline`, mirroring Flowchart's `Design` | `Assistant` switcher) while keeping at most a single quiet utility line in the editor canvas to jump to the inspector.
+
 ### Curated sidebar naming
 
 - Curated navigation sections use one consistent naming convention across every row rather than mixing headings and raw filenames.
@@ -43,6 +48,13 @@ Each surface of SSL Studio follows a clear product precedent unless a STARLIMS-s
 | Project State | `STATE.md` | Current project status and handoff summary |
 | Deployment | `src/INDEX.md` | Code folder catalog |
 | Tests | `tests/INDEX.md` | Test folder catalog |
+
+### Lean, view-aware status bar and chrome placement
+
+- **Bottom status bar stays quiet and view-aware:** Keep only high-signal anchors on the left (Git branch/changes, Code Problems, compact `● LSP` and `● Agent` status dots with versions/actions on hover/click), clean empty space in the center, and strictly mode-appropriate essentials on the right.
+- **Never show hidden-text metadata in visual modes:** Visual surfaces (Flowchart `Chart` / `Plan Outline`, CSV `Table`, Markdown `Read`, SSL `Blocks`, `Call Graph`, binary previews) hide cursor coordinates, encoding, EOL, and underlying source language (such as `JSON` behind a flowchart) and show a quiet mode label (plus step count, row/col dimensions, or word count where useful).
+- **Keep essential text controls in code/text views:** In text and code editors, keep encoding (`UTF-8`, etc.), line endings (`LF` / `CRLF` switcher), cursor coordinates, and a clickable VS Code-style **Language Mode** selector (`Change Language Mode…`) on the right; keep healthy SSL size metrics quiet in the status bar and surface size-limit warnings only when near or over limit.
+- **Relocate workspace-wide scope & document health out of the status bar center:** Active working ticket scope lives beside the top Command Center in the title bar; document health warning counts appear as a corner badge on the Health Activity Bar button.
 
 ## Consequences
 

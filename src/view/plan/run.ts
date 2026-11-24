@@ -30,7 +30,9 @@ const update = (path: string, patch: Partial<AssistState>) => {
 };
 export const updateAssist = update;
 
-export const specPath = (planPath: string) => planPath.replace(/\.plan\.json$/i, ".spec.md");
+/** The companion plan doc (`<Name>.plan.md`) beside a plan's flowchart (`<Name>.plan.json`, ADR 0033). */
+export const planDocPath = (planPath: string) => planPath.replace(/\.plan\.json$/i, ".plan.md");
+export const specPath = planDocPath;
 
 export const planOf = (path: string): Plan | undefined => {
 	const doc = documents.get(path);
@@ -188,11 +190,11 @@ export const begin = (path: string, running: AssistState["running"], work: () =>
 		});
 };
 
-/** The ticket a plan is for, with what bears on it, for the prompt: the agent is about to write the spec, so the specs are left out. */
+/** The ticket a plan is for, with its behavior specs and decisions, leaving out plans so this chart/plan doc is not duplicated. */
 async function workOf(path: string, plan: Plan): Promise<string | undefined> {
 	const ticket = typeof plan.ticket === "string" ? plan.ticket.trim() : "";
 	if (!ticket) return undefined;
-	const work = await workPrompt(ticket, { specs: false });
+	const work = await workPrompt(ticket, { plans: false });
 	if (!work) warn(path, `This plan is for ${ticket}, which is not among the project's tickets, so the agent is not told what the ticket asks.`);
 	return work?.text;
 }
@@ -254,20 +256,20 @@ export function writeSpec(path: string) {
 		// With code already built, this revises the spec, and only what changed needs saying.
 		const revision = revisionText(plan, original ? original.split("\n## Units")[0]!.trim() : null);
 		const work = await workOf(path, plan);
-		let text = await askAgent(path, "Write the spec", specPrompt(plan, found, limits, together(work, revision)), skills);
+		let text = await askAgent(path, "Write the plan doc", specPrompt(plan, found, limits, together(work, revision)), skills);
 		if (text === null) return;
 		let parsed = parseSpec(text);
 		const lacking = () => [!parsed.spec && "SPEC", !revision && !parsed.units.length && "UNITS", !revision && !parsed.map.length && "MAP"].filter(Boolean);
 		if (lacking().length) {
-			text = await askAgent(path, "Write the spec", specPrompt(plan, found, limits, [work, revision, `Your last reply lacked these blocks, or they did not parse as JSON: ${lacking().join(", ")}. Reply again with every block.`].filter(Boolean).join("\n\n")), skills);
+			text = await askAgent(path, "Write the plan doc", specPrompt(plan, found, limits, [work, revision, `Your last reply lacked these blocks, or they did not parse as JSON: ${lacking().join(", ")}. Reply again with every block.`].filter(Boolean).join("\n\n")), skills);
 			if (text === null) return;
 			parsed = parseSpec(text);
 		}
-		if (!parsed.spec) return warn(path, "The agent did not return a spec it could be read from. Try again, or choose another model.");
+		if (!parsed.spec) return warn(path, "The agent did not return a plan doc it could be read from. Try again, or choose another model.");
 		const asked = addQuestions(plan, parsed.questions);
 		if (openQuestions(asked).length) {
 			savePlan(path, asked);
-			return notify("The agent has questions before it can finish the spec.");
+			return notify("The agent has questions before it can finish the plan doc.");
 		}
 		const missing = unaccounted(plan, parsed.units, parsed.map, settledNodes(plan));
 		const over = overLimit(plan, parsed.units, limits.codeLines);
@@ -276,21 +278,21 @@ export function writeSpec(path: string) {
 			{ label: `Each script under ${limits.codeLines} code lines`, ok: parsed.units.some((u) => typeof u.lines === "number") ? !over.length : null, detail: over.length ? over.map((o) => `${o.script}: about ${o.lines}`).join(", ") : "by the agent's own estimate" },
 			{ label: "Says what already exists", ok: /prior art/i.test(parsed.spec) },
 		];
-		const blocked = missing.length ? "Every node needs an answer before this can be approved. Reject it, and write it again." : over.length ? "A script goes over the size limit: the spec must split it (decision 0006). Reject it, and write it again." : undefined;
+		const blocked = missing.length ? "Every node needs an answer before this can be approved. Reject it, and write it again." : over.length ? "A script goes over the size limit: the plan doc must split it (decision 0006). Reject it, and write it again." : undefined;
 		openReview({
-			title: `Spec: ${rel(file)}`,
+			title: `Plan doc: ${rel(file)}`,
 			original,
 			proposed: printSpec(parsed.spec, parsed.units, parsed.map, planHash(plan)),
 			language: "markdown",
 			checks,
 			blocked,
-			note: "A spec is the build's only memory. Nothing has been built, and the code is untouched.",
-			acceptLabel: "Approve the spec",
+			note: "A plan doc is the build's only memory. Nothing has been built, and the code is untouched.",
+			acceptLabel: "Approve the plan doc",
 			onAccept: async (final) => {
 				await backend.write(file, final);
 				setState("treeVersion", (v) => v + 1);
 				update(path, { specVersion: assistOf(path).specVersion + 1 });
-				notify("Spec approved and saved.");
+				notify("Plan doc approved and saved.");
 			},
 		});
 	});

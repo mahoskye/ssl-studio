@@ -6,7 +6,7 @@
 //
 // The runner finds scripts by the export's layout (Server Scripts/<Category>/
 // <Name>.srvscr, Data Sources/<Category>/<Name>.ds), so the project is copied
-// into that shape under .sandbox/ first, with schema/database/demo.sql as the database.
+// into that shape under .sandbox/ first, with the schema/database/ DDL + seed files as the database.
 // Every *Tests script's RunTests is run, each in a runner process of its own, so
 // each on a fresh copy of the database (the cases of one manifest share one).
 // Prints what passed and what did not, and says when a test script left the
@@ -37,7 +37,10 @@ copy(join(project, "src", "Legacy"), join(out, "Server Scripts", "Legacy"), ".ss
 const tests = copy(join(project, "tests", "DueDatesTests"), join(out, "Server Scripts", "DueDatesTests"), ".ssl", ".srvscr").filter((n) => /Tests$/.test(n));
 const sources = copy(join(project, "src", "DueDates"), join(out, "Data Sources", "DueDates"), ".ds", ".ds");
 mkdirSync(join(out, "fixtures"), { recursive: true });
-cpSync(join(project, "schema", "database", "demo.sql"), join(out, "fixtures", "demo.sql"));
+const demoFixture = ["DEMO_INSTRUMENTS.sql", "DEMO_HOLIDAYS.sql", "DEMO_OUTAGES.sql", "DEMO_SAMPLES.sql", "demo-seed.sql"]
+	.map((f) => readFileSync(join(project, "schema", "database", f), "utf8").trimEnd())
+	.join("\n\n");
+writeFileSync(join(out, "fixtures", "demo.sql"), `${demoFixture}\n`);
 
 // A data source's language is catalog metadata in STARLIMS; here it is read from the file's banner.
 const sql = sources.filter((name) => /DATA SOURCE: \w+ \(SQL\)/.test(readFileSync(join(project, "src", "DueDates", `${name}.ds`), "utf8")));

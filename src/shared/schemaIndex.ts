@@ -68,20 +68,35 @@ export function extractSchemaColumns(doc: DocFile, content: string): SchemaColum
 			.split(/(?<!\\)\|/)
 			.map((c) => c.replace(/\\\|/g, "|").trim());
 
+	const subHeadingRe = /^(?:columns?|fields?|foreign\s+keys?|indexes?|indices|keys?|constraints?|triggers?|notes?|rules?|usage|examples?|history|relationships?)$/i;
+	let inNonColumnSub = false;
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i]!;
-		const hm = /^#{1,3}\s+`?([A-Za-z_][\w$.]{1,64})`?\s*$/.exec(line.trim());
+		const hm = /^#{1,3}\s+`?([A-Za-z_][\w$. ]{1,64})`?\s*$/.exec(line.trim());
 		if (hm) {
-			currentTable = hm[1]!;
+			const hText = hm[1]!.trim();
+			if (/^columns?$|^fields?$/i.test(hText)) {
+				inNonColumnSub = false;
+			} else if (subHeadingRe.test(hText)) {
+				inNonColumnSub = true;
+			} else if (/^[A-Za-z_][\w$.]{1,64}$/.test(hText)) {
+				currentTable = hText;
+				inNonColumnSub = false;
+			}
 			continue;
 		}
-		if (!line.trim().startsWith("|")) continue;
+		if (inNonColumnSub || !line.trim().startsWith("|")) continue;
 		const hdr = splitCells(line).map((c) => c.toLowerCase());
+		const isFkOrIdx =
+			!hdr.some((c) => c.includes("type")) &&
+			(hdr.some((c) => c.includes("reference") || c.includes("target")) ||
+				(hdr.some((c) => c === "columns" || c === "column") && hdr.some((c) => c === "unique" || c === "index")));
+		if (isFkOrIdx) continue;
 		const colIdx = hdr.findIndex((c) => c === "column" || c === "field" || c === "name");
 		if (colIdx < 0 || i + 1 >= lines.length || !/^\s*\|?\s*:?-{2,}/.test(lines[i + 1]!)) continue;
 		const typeIdx = hdr.findIndex((c) => c.includes("type"));
 		const consIdx = hdr.findIndex((c) => c.includes("constraint") || c.includes("key") || c.includes("null"));
-		const noteIdx = hdr.findIndex((c) => c.includes("note") || c.includes("desc") || c.includes("meaning"));
+		const noteIdx = hdr.findIndex((c) => c.includes("note") || c.includes("desc") || c.includes("meaning") || c.includes("holds") || c.includes("what"));
 		i += 2;
 		for (; i < lines.length && lines[i]!.trim().startsWith("|"); i++) {
 			const cells = splitCells(lines[i]!);
@@ -233,6 +248,174 @@ export function findUndocumentedSqlRefs(
 			if (BUILTIN_SQL_OBJECTS.has(bare) || SYSTEM_OBJECT_PREFIX_RE.test(bare)) continue;
 			if (knownLower.has(low) || knownLower.has(bare)) continue;
 			out.push({ path: file.path, line: hit.line, object: hit.object, kind: "table" });
+		}
+	}
+	return out;
+}
+
+export type SchemaUsageCategory = "data-sources" | "scripts" | "tests" | "other" | "registries";
+
+export type SchemaUsageHit = {
+	line: number;
+	text: string;
+};
+
+export type SchemaUsageEntry = {
+	path: string;
+	rel: string;
+	/** Primary display label (`SaveDueDates.ssl` for code, or friendly title `Database objects` for registries). */
+	name: string;
+	/** Underlying filename with extension (used for file-type icons). */
+	fileName: string;
+	/** Secondary location metadata (`src/DueDates` for code, or `database.csv` for registries). */
+	dir: string;
+	category: SchemaUsageCategory;
+	hits: SchemaUsageHit[];
+	count: number;
+};
+
+export type SchemaUsageGroup = {
+	id: SchemaUsageCategory;
+	label: string;
+	items: SchemaUsageEntry[];
+	totalHits: number;
+};
+
+const USAGE_GROUP_META: readonly { id: SchemaUsageCategory; label: string }[] = [
+	{ id: "data-sources", label: "Data sources" },
+	{ id: "scripts", label: "Scripts" },
+	{ id: "tests", label: "Tests" },
+	{ id: "other", label: "Other files" },
+	{ id: "registries", label: "Registries" },
+];
+
+const trimUsageSnippet = (raw: string, maxLen = 140): string => {
+	const compact = raw.replace(/\s+/g, " ").trim();
+	return compact.length > maxLen ? `${compact.slice(0, maxLen - 1).trimEnd()}…` : compact;
+};
+
+const classifyUsageCategory = (relPath: string, testsFolder?: string): SchemaUsageCategory => {
+	const norm = relPath.replace(/\\/g, "/").replace(/^\/+/, "");
+	const cleanTests = (testsFolder ?? "tests").replace(/^[./\\]+|[\\/]+$/g, "").replace(/\\/g, "/").toLowerCase();
+	const low = norm.toLowerCase();
+	if (
+		(cleanTests && (low === cleanTests || low.startsWith(`${cleanTests}/`))) ||
+		/(?:^|\/)(?:tests?|__tests__)\/|(?:\.test\.|\.spec\.|tests?\.(?:ssl|srvscr|ts|js))$/i.test(norm)
+	) {
+		return "tests";
+	}
+	if (/\.ds(?:\.txt)?$/i.test(norm)) return "data-sources";
+	if (/\.(?:ssl|srvscr|sql|ddl|pks|pkb|xfd|xml|js|jsx|ts|tsx|cs|vb|html|htm)$/i.test(norm)) return "scripts";
+	return "other";
+};
+
+/**
+ * Groups raw workspace search hits and matching registry documents into ordered,
+ * collapsible categories (`Data sources`, `Scripts`, `Tests`, `Other files`, `Registries`),
+ * deduplicating hits per file while retaining every matched line and trimmed code snippet.
+ */
+export function groupSchemaUsages(
+	codeHits: readonly { path: string; rel: string; line: number; text?: string }[],
+	registries: readonly { path: string; title: string; fileName: string; rel?: string }[],
+	options?: { testsFolder?: string; canonicalize?: (p: string) => string },
+): SchemaUsageGroup[] {
+	const canon = options?.canonicalize ?? ((p: string) => p.replace(/\\/g, "/"));
+	const byFile = new Map<string, SchemaUsageEntry & { seenLines: Set<number> }>();
+
+	for (const h of codeHits) {
+		const key = canon(h.path);
+		const rel = h.rel.replace(/\\/g, "/");
+		const slash = rel.lastIndexOf("/");
+		const fileName = slash >= 0 ? rel.slice(slash + 1) : rel;
+		const dir = slash >= 0 ? rel.slice(0, slash) : "";
+		let entry = byFile.get(key);
+		if (!entry) {
+			entry = {
+				path: h.path,
+				rel,
+				name: fileName,
+				fileName,
+				dir,
+				category: classifyUsageCategory(rel, options?.testsFolder),
+				hits: [],
+				count: 0,
+				seenLines: new Set<number>(),
+			};
+			byFile.set(key, entry);
+		}
+		entry.count++;
+		if (!entry.seenLines.has(h.line)) {
+			entry.seenLines.add(h.line);
+			entry.hits.push({ line: h.line, text: trimUsageSnippet(h.text ?? "") });
+		}
+	}
+
+	const buckets = new Map<SchemaUsageCategory, SchemaUsageEntry[]>();
+	for (const entry of byFile.values()) {
+		entry.hits.sort((a, b) => a.line - b.line);
+		const { seenLines: _drop, ...clean } = entry;
+		const list = buckets.get(clean.category) ?? [];
+		list.push(clean);
+		buckets.set(clean.category, list);
+	}
+
+	if (registries.length) {
+		const regItems: SchemaUsageEntry[] = registries.map((r) => ({
+			path: r.path,
+			rel: r.rel ?? r.fileName,
+			name: r.title,
+			fileName: r.fileName,
+			dir: r.fileName,
+			category: "registries",
+			hits: [],
+			count: 1,
+		}));
+		buckets.set("registries", regItems);
+	}
+
+	const groups: SchemaUsageGroup[] = [];
+	for (const meta of USAGE_GROUP_META) {
+		const items = buckets.get(meta.id);
+		if (!items?.length) continue;
+		items.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base", numeric: true }) || a.dir.localeCompare(b.dir, undefined, { sensitivity: "base" }));
+		groups.push({
+			id: meta.id,
+			label: meta.label,
+			items,
+			totalHits: items.reduce((sum, item) => sum + item.count, 0),
+		});
+	}
+	return groups;
+}
+
+/** Filters grouped schema usages by filename, folder, label, or matched line snippet. */
+export function filterSchemaUsageGroups(groups: readonly SchemaUsageGroup[], query: string): SchemaUsageGroup[] {
+	const needle = query.trim().toLowerCase();
+	if (!needle) return [...groups];
+	const out: SchemaUsageGroup[] = [];
+	for (const group of groups) {
+		const matchedItems: SchemaUsageEntry[] = [];
+		for (const item of group.items) {
+			const metaMatch =
+				item.name.toLowerCase().includes(needle) ||
+				item.dir.toLowerCase().includes(needle) ||
+				item.rel.toLowerCase().includes(needle) ||
+				group.label.toLowerCase().includes(needle);
+			if (metaMatch) {
+				matchedItems.push(item);
+				continue;
+			}
+			const matchedHits = item.hits.filter((h) => h.text.toLowerCase().includes(needle));
+			if (matchedHits.length) {
+				matchedItems.push({ ...item, hits: matchedHits, count: matchedHits.length });
+			}
+		}
+		if (matchedItems.length) {
+			out.push({
+				...group,
+				items: matchedItems,
+				totalHits: matchedItems.reduce((sum, i) => sum + i.count, 0),
+			});
 		}
 	}
 	return out;

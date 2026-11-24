@@ -18,7 +18,7 @@ import { checkPlan, findingLine, parsePlan, type Plan } from "./model";
 
 export { checkPlanDocs, checkPlanRefs, planTargetsOf, refMatchesWorkspace, type PlanDocCheckOptions, type WorkspaceSymbolHit };
 
-const specPath = (planPath: string) => planPath.replace(/\.plan\.json$/i, ".spec.md");
+const planDocPath = (planPath: string) => planPath.replace(/\.plan\.json$/i, ".plan.md");
 
 const OWNER = "plan";
 const SEVERITY = { error: 1, warning: 2, info: 3 } as const;
@@ -65,7 +65,7 @@ export function trackPlan(model: monaco.editor.ITextModel) {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const uri = model.uri.toString();
 	const planPath = model.uri.scheme === "file" ? model.uri.fsPath : "";
-	const companionSpec = planPath ? specPath(planPath) : "";
+	const companionSpec = planPath ? planDocPath(planPath) : "";
 	const companionCanon = companionSpec && companionSpec !== planPath ? canonical(companionSpec) : "";
 	const readSpec = async (): Promise<string | null> => {
 		if (!companionCanon) return null;

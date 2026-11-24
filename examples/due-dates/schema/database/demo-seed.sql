@@ -1,27 +1,8 @@
--- The Due dates demo: three tables and the rows docs/Worked-examples.md uses.
--- Everything here is invented.
+-- Sample seed rows for the Due dates demo (used by docs/Worked-examples.md and tests/).
+-- Table definitions live 1:1 beside each table doc (DEMO_INSTRUMENTS.sql, DEMO_HOLIDAYS.sql, DEMO_OUTAGES.sql, DEMO_SAMPLES.sql).
 
-CREATE TABLE DEMO_SAMPLES (
-    SAMPLE_ID       VARCHAR(20) NOT NULL PRIMARY KEY,
-    RECEIVED_ON     DATE,
-    PRIORITY        VARCHAR(10) NOT NULL,
-    TURNAROUND_DAYS INT,
-    INSTRUMENT_ID   VARCHAR(20),
-    DUE_ON          DATE
-);
-
-CREATE TABLE DEMO_HOLIDAYS (
-    HOLIDAY_ON DATE        NOT NULL PRIMARY KEY,
-    NAME       VARCHAR(60) NOT NULL
-);
-
-CREATE TABLE DEMO_OUTAGES (
-    OUTAGE_ID     INT         NOT NULL PRIMARY KEY,
-    INSTRUMENT_ID VARCHAR(20) NOT NULL,
-    FROM_ON       DATE        NOT NULL,
-    TO_ON         DATE        NOT NULL,
-    REASON        VARCHAR(60)
-);
+INSERT INTO DEMO_INSTRUMENTS (INSTRUMENT_ID, NAME, LAB_AREA) VALUES ('BAL-01', 'Analytical Balance 01', 'Wet Chemistry');
+INSERT INTO DEMO_INSTRUMENTS (INSTRUMENT_ID, NAME, LAB_AREA) VALUES ('HPLC-02', 'HPLC System 02', 'Chromatography');
 
 INSERT INTO DEMO_HOLIDAYS (HOLIDAY_ON, NAME) VALUES ('2026-11-26', 'Lab closed');
 INSERT INTO DEMO_HOLIDAYS (HOLIDAY_ON, NAME) VALUES ('2026-12-25', 'Lab closed');

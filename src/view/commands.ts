@@ -1,9 +1,10 @@
 // App commands: the command list shows them, the keyboard runs them.
 // A command's keys are in DEFAULT_KEYS and nowhere else; the user's own are
 // in the `keys` setting.
-import { ask, choose } from "./dialogs";
+import { ask, choose, quickPick } from "./dialogs";
 import { activeEditor, lastActiveMarkdownPath } from "./editor/EditorGroup";
 import { formatFenceInModel, formatNonSslModel, hadRecentFormatError, languageName } from "./editor/languages";
+import { pickLanguageMode } from "./editor/languagePicker";
 import { activeLiveEditor, isInMarkdownTextEditor, saveMarkdownSyncAnchor } from "./editor/liveBridge";
 import { linkWritten } from "../shared/docLinks";
 import { folderParts } from "../shared/docSections";
@@ -25,12 +26,12 @@ import { insertTemplate } from "./panels/Palette";
 import { TEMPLATES } from "../shared/houseStyle";
 import { askAbout, attachFileToAgent } from "./agent/Agent";
 import { startTidy } from "./agent/tidy";
-import { baseName, dirName, joinPath, relativePath, relativeTo } from "../shared/paths";
-import { defaultLayout, type Settings } from "../shared/protocol";
-import { menuForLetter } from "../shared/menuBar";
+import { baseName, dirName, isInside, joinPath, relativePath, relativeTo } from "../shared/paths";
+import { defaultLayout, type DocFile, type Settings } from "../shared/protocol";
+import { menuForLetter, replaceErDiagramBlock, shouldLetEditorHandleKey } from "../shared/menuBar";
 import { installRecentTabs, stepRecent } from "./recentTabs";
 import { goAlong } from "./navigation";
-import { isPlanPath, newPlan, printPlan } from "./plan/model";
+import { isPlanPath, newPlan, printPlan, type Plan } from "./plan/model";
 import { docs, isMarkdown, isTable, newDoc, setUpProject, undoSetUp } from "./project";
 import {
 	archiveTicket,
@@ -74,6 +75,7 @@ import { stepScale, UI_SCALE } from "./uiScale";
 import {
 	activeDoc,
 	activePath,
+	applyText,
 	canonical,
 	closeAllTabs,
 	closeOtherTabs,
@@ -106,6 +108,7 @@ import {
 	setState,
 	split,
 	state,
+	syncLivePreviewMode,
 	tableTextMode,
 	togglePin,
 } from "./state";
@@ -244,7 +247,7 @@ async function openActiveTicketToSide() {
  * Switches a setting that is on or off. Where the project's own settings hold it, yours would not be seen while
  * the project's is in the way: it is switched there. Says whether it is now as asked.
  */
-async function switchSetting(key: "wordWrap" | "menuBar" | "livePreview", to: boolean, now: (settings: Settings) => boolean): Promise<boolean> {
+async function switchSetting(key: "wordWrap" | "menuBar" | "livePreview" | "markdownReadingHighlight", to: boolean, now: (settings: Settings) => boolean): Promise<boolean> {
 	// Asked of what each save left, not of what is on screen: the screen may by then show a later save's settings,
 	// and a save that was refused has left nothing to ask.
 	let left = await saveSetting({ [key]: to });
@@ -297,7 +300,8 @@ export const commands: Command[] = [
 	{ id: "copy-relative-path", label: "Copy path in the project", detail: "The open file's path from the project's folder", run: () => void copyPath("relative") },
 	{ id: "copy-file-name", label: "Copy file name", detail: "The open file's name, without its folder", run: () => void copyPath("name") },
 	{ id: "word-wrap", label: "Toggle word wrap", detail: "Long lines wrapped at the editor's edge, or not", run: () => void switchSetting("wordWrap", !state.settings.wordWrap, (settings) => Boolean(settings.wordWrap)) },
-	{ id: "live-preview", label: "Toggle Markdown live preview", detail: "A document drawn as it is written, or as its plain text", run: () => void switchSetting("livePreview", state.settings.livePreview === false, (settings) => settings.livePreview !== false) },
+	{ id: "live-preview", label: "Toggle Markdown live preview", detail: "A document drawn as it is written, or as its plain text", run: () => { const next = state.settings.livePreview === false; syncLivePreviewMode(next); void switchSetting("livePreview", next, (settings) => settings.livePreview !== false); } },
+	{ id: "toggle-markdown-reading-highlight", label: "Toggle Markdown reading highlight", detail: "Subtly dim lines below the active cursor or mouse pointer in Markdown Live and Read views", run: () => void switchSetting("markdownReadingHighlight", state.settings.markdownReadingHighlight === false, (settings) => settings.markdownReadingHighlight !== false) },
 	{ id: "toggle-markdown-mode", label: "Toggle Markdown Live / Read view", detail: "Switch a Markdown note between Live Preview editing and Reading view", run: toggleMarkdownMode },
 	{ id: "split-markdown-read", label: "Markdown: Split Read preview to side", detail: "Keep editing in this group while previewing Read view side-by-side", run: () => void splitMarkdownRead() },
 	{ id: "md-insert-footnote", label: "Markdown: Insert footnote", detail: "Insert the next numbered [^N] footnote reference and definition", run: () => runMarkdownEdit("md-insert-footnote") },
@@ -326,6 +330,7 @@ export const commands: Command[] = [
 	{ id: "focus-side-panel", label: "Focus side panel", run: focusSidePanel },
 	// The code
 	{ id: "blocks", label: "Toggle blocks view", detail: "A plan shows its chart; Markdown shows rendered", run: toggleVisual },
+	{ id: "change-language-mode", label: "Change Language Mode…", detail: "Select syntax highlighting and language mode for the active code editor", run: () => void pickLanguageMode() },
 	{ id: "format", label: "Format document", detail: "SSL via language server; SQL, JS/TS, XML/XFD, HTML, CSS, JSON, YAML & Markdown", run: () => void formatActiveDocument() },
 	{ id: "copy-designer", label: "Copy for Designer", detail: "Selection, procedure or file, formatted", run: () => void copyForDesigner() },
 	{ id: "copy-code-citation", label: "Copy Markdown code citation", detail: "Copy a [file#L10-L25](path#L10-L25) link for the active file and selection", run: () => void copyCodeCitation(false) },
@@ -371,6 +376,15 @@ export const commands: Command[] = [
 	{ id: "onboard-workspace", label: "Project: Onboard Existing Workspace…", detail: "Scan existing scripts, SQL DDL, and docs to seed project setup and registries", run: () => void onboardBrownfieldWorkspace() },
 	{ id: "export-release-bundle", label: "Docs: Export Multi-Ticket Release Bundle…", detail: "Bundle multiple tickets by release, status, or key into a Release Bundle or Release Notes", run: () => void exportReleaseBundle() },
 	{ id: "export-rtm", label: "Docs: Export Requirements Traceability Matrix (RTM)…", detail: "Export CSV, Markdown, HTML, or Word traceability matrix linking tickets, specs, plans, code & tests", run: () => void exportRtm() },
+	{ id: "record-doc-approval", label: "Docs: Record Approval / Bump Version…", detail: "Record reviewer approval, bump semantic version, and stamp approval date on a governing doc", run: () => void runProjectDocAction("recordDocApproval") },
+	{ id: "generate-test-protocol", label: "Docs: Generate Test Execution Protocol (IQ/OQ/PQ)…", detail: "Generate a structured validation test execution protocol from ticket specs and plan tests", run: () => void runProjectDocAction("generateTestExecutionProtocol") },
+	{ id: "release-readiness", label: "Docs: Release Readiness Overview…", detail: "Review ticket completion, approvals, test runs, and deployment readiness across the project", run: () => void runProjectDocAction("openReleaseReadiness") },
+	{ id: "clone-ticket", label: "Ticket: Clone Ticket…", detail: "Clone an existing ticket's template, checklist, and metadata under a new key", run: () => void runProjectDocAction("cloneTicket") },
+	{ id: "split-ticket", label: "Ticket: Split Checklist into Sub-Ticket…", detail: "Extract checked or selected checklist items from a ticket into a linked child sub-ticket", run: () => void runProjectDocAction("splitTicketSubticket") },
+	{ id: "import-mermaid-plan", label: "Plan: Import Mermaid Flowchart as Plan…", detail: "Convert a Mermaid flowchart from the active document or clipboard into a .plan.json chart", run: () => void importMermaidPlanCommand() },
+	{ id: "git-blame-line", label: "Git: Show Line Commit & Ticket (Blame)", detail: "Show the commit, author, date, and ticket that last modified the current line", run: () => void gitBlameLineCommand() },
+	{ id: "git-switch-branch", label: "Git: Switch Branch…", detail: "Switch to another local Git branch", run: () => void gitSwitchBranchCommand() },
+	{ id: "git-stash", label: "Git: Stash Changes / Pop Stash…", detail: "Stash working tree changes, pop the latest stash, or inspect saved stashes", run: () => void gitStashCommand() },
 	{ id: "project-state", label: "Project state…", detail: "Where the project stands, in plain words", run: () => void newState() },
 	{ id: "update-catalogs", label: "Update catalogs", detail: "Write each INDEX.md's list afresh", run: () => void updateCatalogs() },
 	{ id: "start-catalogs", label: "Start folder catalogs", detail: "An INDEX.md for the docs, code and tests folders, where one has none", run: () => void startFolderCatalogs() },
@@ -385,10 +399,16 @@ export const commands: Command[] = [
 		if (!key) return notify("Open or activate a ticket first.");
 		const ticketDoc = docs().find((d) => d.exists && d.group === "tickets" && d.ticket?.toLowerCase() === key.toLowerCase());
 		if (!ticketDoc) return notify(`Ticket ${key} was not found.`, "error");
-		const { choose } = await import("./dialogs");
-		const picked = await choose(`Export release packet for ${key} as:`, ["HTML (.html)", "Word (.docx)", "Markdown (.md)"]);
-		if (!picked) return;
-		const fmt = picked.startsWith("Word") ? "docx" : picked.startsWith("Markdown") ? "markdown" : "html";
+		const fmt = await quickPick<"html" | "docx" | "markdown">({
+			title: `Export release packet for ${key}`,
+			placeholder: "Choose export format…",
+			items: [
+				{ label: "HTML (.html)", value: "html", detail: "Standalone printable webpage", icon: "file" },
+				{ label: "Word (.docx)", value: "docx", detail: "Microsoft Word document", icon: "file" },
+				{ label: "Markdown (.md)", value: "markdown", detail: "Combined Markdown packet", icon: "file" },
+			],
+		});
+		if (!fmt) return;
 		await exportTicketPacket(ticketDoc.path, key, fmt);
 	} },
 	{ id: "export-deployment-manifest", label: "Export deployment / transport manifest…", detail: "Aggregate scripts, SQL/DDL, local Git commits, registry rows, rollback checklist & DEV->PROD sign-off", run: async () => {
@@ -396,10 +416,17 @@ export const commands: Command[] = [
 		if (!key) return notify("Open or activate a ticket first.");
 		const ticketDoc = docs().find((d) => d.exists && d.group === "tickets" && d.ticket?.toLowerCase() === key.toLowerCase());
 		if (!ticketDoc) return notify(`Ticket ${key} was not found.`, "error");
-		const { choose } = await import("./dialogs");
-		const picked = await choose(`Export deployment manifest for ${key} as:`, ["Markdown (.md)", "Word (.docx)", "CSV (.csv)", "HTML (.html)"]);
-		if (!picked) return;
-		const fmt = picked.startsWith("Word") ? "docx" : picked.startsWith("CSV") ? "csv" : picked.startsWith("HTML") ? "html" : "markdown";
+		const fmt = await quickPick<"markdown" | "docx" | "csv" | "html">({
+			title: `Export deployment manifest for ${key}`,
+			placeholder: "Choose export format…",
+			items: [
+				{ label: "Markdown (.md)", value: "markdown", detail: "Transport runbook & checklist", icon: "file" },
+				{ label: "Word (.docx)", value: "docx", detail: "Microsoft Word sign-off packet", icon: "file" },
+				{ label: "CSV (.csv)", value: "csv", detail: "Tabular object transport sheet", icon: "table" },
+				{ label: "HTML (.html)", value: "html", detail: "Standalone printable manifest", icon: "file" },
+			],
+		});
+		if (!fmt) return;
 		await exportDeploymentManifest(ticketDoc.path, key, fmt);
 	} },
 	{ id: "closeout-ticket", label: "Ticket: Close out active ticket…", detail: "Review readiness, mark done, record milestone in STATE.md / README.md & check catalogs", run: () => {
@@ -788,32 +815,74 @@ async function generateErDiagramCommand() {
 	}
 	if (!sourcePaths.length) return notify("No .sql or .ddl files were found in this workspace.");
 
-	const mergedByName = new Map<string, SqlTableDef>();
-	for (const p of sourcePaths) {
+	// Sort deterministically (`numeric: true`) and concatenate all DDL before parsing so
+	// `ALTER TABLE` / `ADD CONSTRAINT ... FOREIGN KEY` migrations in `02_alters.sql` / `03_fks.sql` apply cleanly.
+	const orderedPaths = [...new Map(sourcePaths.map((p) => [canonical(p), p])).values()].sort((a, b) =>
+		relativeTo(wsRoot, a).localeCompare(relativeTo(wsRoot, b), undefined, { numeric: true, sensitivity: "base" }),
+	);
+	const sqlChunks: string[] = [];
+	for (const p of orderedPaths) {
 		const open = documents.get(canonical(p));
 		const text = open ? open.model.getValue() : await backend.read(p).then((r) => (r.binary ? "" : r.text), () => "");
-		if (!text) continue;
-		for (const tbl of parseCreateTables(text, { includeStandaloneAlter: true })) {
-			const key = tbl.tableName.toLowerCase();
-			if (!mergedByName.has(key)) mergedByName.set(key, tbl);
+		if (text.trim()) sqlChunks.push(text.trimEnd());
+	}
+	if (!sqlChunks.length) return notify("No readable SQL content was found in the selected files.");
+
+	const parsedTables = parseCreateTables(sqlChunks.join("\n;\n"), { includeStandaloneAlter: true });
+	// Deduplicate by table name while keeping the most complete/latest definition if a table was re-created across files.
+	const mergedByName = new Map<string, SqlTableDef>();
+	for (const tbl of parsedTables) {
+		const key = tbl.tableName.toLowerCase();
+		const prev = mergedByName.get(key);
+		if (!prev) {
+			mergedByName.set(key, tbl);
+		} else {
+			const cols = [...prev.columns];
+			for (const col of tbl.columns) {
+				const idx = cols.findIndex((c) => c.name.toLowerCase() === col.name.toLowerCase());
+				if (idx >= 0) cols[idx] = col;
+				else cols.push(col);
+			}
+			const fks = [...(prev.foreignKeys ?? [])];
+			for (const fk of tbl.foreignKeys ?? []) {
+				const dup = fks.some(
+					(e) =>
+						e.column.toLowerCase() === fk.column.toLowerCase() &&
+						e.refTable.toLowerCase() === fk.refTable.toLowerCase() &&
+						(e.refColumn ?? "").toLowerCase() === (fk.refColumn ?? "").toLowerCase(),
+				);
+				if (!dup) fks.push(fk);
+			}
+			mergedByName.set(key, { tableName: tbl.tableName, columns: cols, ...(fks.length ? { foreignKeys: fks } : {}) });
 		}
 	}
 	const tables = [...mergedByName.values()];
 	if (!tables.length) return notify("No CREATE TABLE definitions were found in the SQL files.");
 
 	const diagram = generateMermaidErDiagram(tables);
-	const COPY = "Copy to clipboard";
-	const INSERT = "Insert at cursor";
-	const SAVE_DOC = "Save to schema/database/ER-Diagram.md";
 	const canInsert = Boolean(active && isMarkdown(active) && (activeLiveEditor() || activeEditor()?.getDomNode()?.offsetParent));
-	const choices = [COPY, ...(canInsert ? [INSERT] : []), SAVE_DOC];
-	const picked = await choose(`Generated Mermaid ER diagram for ${tables.length} ${tables.length === 1 ? "table" : "tables"}:`, choices);
+	const picked = await quickPick<"copy" | "insert" | "save">({
+		title: `Mermaid ER diagram (${tables.length} ${tables.length === 1 ? "table" : "tables"})`,
+		placeholder: "Choose what to do with the generated diagram…",
+		items: [
+			{ label: "Copy to clipboard", value: "copy", detail: "Copy fenced ```mermaid erDiagram block", icon: "copy" },
+			...(canInsert
+				? [{ label: "Insert at cursor", value: "insert" as const, detail: `Insert into ${displayName(active!)}`, icon: "edit" as const }]
+				: []),
+			{
+				label: "Save to schema/database/ER-Diagram.md",
+				value: "save",
+				detail: "Updates existing erDiagram fence without overwriting hand-written notes",
+				icon: "database",
+			},
+		],
+	});
 	if (!picked) return;
-	if (picked === COPY) {
+	if (picked === "copy") {
 		await copyText(diagram, `Copied Mermaid ER diagram (${tables.length} ${tables.length === 1 ? "table" : "tables"}).`);
 		return;
 	}
-	if (picked === INSERT) {
+	if (picked === "insert") {
 		const live = activeLiveEditor();
 		if (live) {
 			live.insertText(`${diagram}\n`, undefined, { asBlock: true });
@@ -832,13 +901,54 @@ async function generateErDiagramCommand() {
 		}
 		return;
 	}
+
 	const schemaParts = folderParts(state.project?.schema ?? "schema");
 	const dest = joinPath(wsRoot, ...schemaParts, "database", "ER-Diagram.md");
-	const docText = `# Database ER Diagram\n\n${diagram}\n`;
-	await backend.write(dest, docText);
+	const destKey = canonical(dest);
+	const openDest = documents.get(destKey);
+	const existing = openDest
+		? openDest.model.getValue()
+		: await backend.read(dest).then((r) => (r.binary ? null : r.text), () => null);
+
+	let nextText = `# Database ER Diagram\n\n${diagram}\n`;
+	let modeNote = "Saved Mermaid ER diagram to";
+	if (existing !== null) {
+		const merged = replaceErDiagramBlock(existing, diagram);
+		if (merged.replaced) {
+			nextText = merged.text;
+			modeNote = "Updated Mermaid ER diagram in";
+		} else {
+			const APPEND = "Append ER diagram";
+			const REPLACE = "Replace entire file";
+			const answer = await choose(
+				`${relativeTo(wsRoot, dest)} already exists without a Mermaid erDiagram block. How should it be updated?`,
+				[APPEND, REPLACE],
+				{ danger: REPLACE },
+			);
+			if (!answer) return;
+			if (answer === APPEND) {
+				const eol = existing.includes("\r\n") ? "\r\n" : "\n";
+				const normDiagram = diagram.replace(/\r?\n/g, eol);
+				const sep = existing.endsWith("\n") ? eol : `${eol}${eol}`;
+				nextText = `${existing}${sep}${normDiagram}${eol}`;
+				modeNote = "Appended Mermaid ER diagram to";
+			} else {
+				modeNote = "Replaced Mermaid ER diagram in";
+			}
+		}
+	}
+
+	if (openDest) {
+		const wasClean = !state.dirty[destKey];
+		applyText(destKey, nextText);
+		if (wasClean) await save(destKey, { format: false });
+	} else {
+		if (existing !== null) await backend.historyKeep(dest).catch(() => {});
+		await backend.write(dest, nextText);
+	}
 	setState("treeVersion", (v) => v + 1);
 	await openFile(dest);
-	notify(`Saved Mermaid ER diagram to ${relativeTo(wsRoot, dest)}.`);
+	notify(`${modeNote} ${relativeTo(wsRoot, dest)}.`);
 }
 
 async function renameTagCommand() {
@@ -849,11 +959,17 @@ async function renameTagCommand() {
 		if (typed) await renameTagAcrossWorkspace(typed);
 		return;
 	}
-	const labels = buckets.map((b) => `#${b.tag} (${b.count})`);
-	const picked = await choose("Rename which tag across the workspace?", labels);
-	if (!picked) return;
-	const found = buckets[labels.indexOf(picked)];
-	if (found) await renameTagAcrossWorkspace(found.tag);
+	const picked = await quickPick<string>({
+		title: "Rename tag across workspace",
+		placeholder: "Filter tags…",
+		items: buckets.map((b) => ({
+			label: `#${b.tag}`,
+			value: b.tag,
+			detail: `${b.count} ${b.count === 1 ? "doc" : "docs"}`,
+			icon: "tag",
+		})),
+	});
+	if (picked) await renameTagAcrossWorkspace(picked);
 }
 
 async function promoteQuestionCommand() {
@@ -869,10 +985,17 @@ async function promoteQuestionCommand() {
 		.filter((d) => d.exists && !isCatalog(d) && d.group === "knowledge" && d.kind === "questions")
 		.sort((a, b) => Number(toneOf(b.status) === "done") - Number(toneOf(a.status) === "done") || a.name.localeCompare(b.name));
 	if (!questions.length) return notify("No question documents exist in this project yet.");
-	const labels = questions.map((q) => `${q.title || q.name}${q.status ? ` (${q.status})` : ""}`);
-	const picked = await choose("Promote which question to a decision?", labels);
-	if (!picked) return;
-	const chosen = questions[labels.indexOf(picked)];
+	const chosen = await quickPick<DocFile>({
+		title: "Promote question to decision (ADR)",
+		placeholder: "Filter questions…",
+		items: questions.map((q) => ({
+			label: q.title || q.name,
+			value: q,
+			detail: relativeTo(state.workspace?.root, q.path),
+			badge: q.status ? { text: q.status, tone: toneOf(q.status) } : undefined,
+			icon: "question",
+		})),
+	});
 	if (chosen) await promoteQuestionToDecision(chosen.path);
 }
 
@@ -912,10 +1035,17 @@ async function archiveActiveTicketCommand() {
 	}
 	const candidates = allDocs.filter((d) => d.exists && d.group === "tickets" && !isCatalog(d) && d.ticket && !isArchivedTicket(d));
 	if (!candidates.length) return notify("No active tickets found to archive.");
-	const labels = candidates.map((t) => `${t.ticket}: ${t.title || t.name}`);
-	const picked = await choose("Archive which ticket?", labels);
-	if (!picked) return;
-	const chosen = candidates[labels.indexOf(picked)];
+	const chosen = await quickPick<DocFile>({
+		title: "Archive ticket",
+		placeholder: "Filter active tickets…",
+		items: candidates.map((t) => ({
+			label: `${t.ticket}: ${t.title || t.name}`,
+			value: t,
+			detail: t.name,
+			badge: t.status ? { text: t.status, tone: toneOf(t.status) } : undefined,
+			icon: "checklist",
+		})),
+	});
 	if (chosen) await archiveTicket(chosen);
 }
 
@@ -932,10 +1062,17 @@ async function unarchiveTicketCommand() {
 	}
 	const archived = allDocs.filter((d) => d.exists && d.group === "tickets" && !isCatalog(d) && isArchivedTicket(d));
 	if (!archived.length) return notify("No archived tickets were found in tickets/archive/.");
-	const labels = archived.map((t) => `${t.ticket || t.name}${t.title ? `: ${t.title}` : ""}`);
-	const picked = await choose("Unarchive which ticket?", labels);
-	if (!picked) return;
-	const chosen = archived[labels.indexOf(picked)];
+	const chosen = await quickPick<DocFile>({
+		title: "Unarchive ticket",
+		placeholder: "Filter archived tickets…",
+		items: archived.map((t) => ({
+			label: `${t.ticket || t.name}${t.title ? `: ${t.title}` : ""}`,
+			value: t,
+			detail: relativeTo(state.workspace?.root, t.path),
+			badge: t.status ? { text: t.status, tone: toneOf(t.status) } : undefined,
+			icon: "checklist",
+		})),
+	});
 	if (chosen) await unarchiveTicket(chosen);
 }
 
@@ -944,8 +1081,20 @@ async function setDocStatusCommand() {
 	if (!p || !isMarkdown(p)) return notify("Open a Markdown document first.");
 	const listed = docs().find((d) => d.exists && canonical(d.path) === canonical(p));
 	const choices = statusChoices(listed);
-	const CUSTOM = "Custom status…";
-	const picked = await choose(`Change status for ${listed?.title || displayName(p)}`, [...choices, CUSTOM]);
+	const CUSTOM = "__custom__";
+	const picked = await quickPick<string>({
+		title: `Change status for ${listed?.title || displayName(p)}`,
+		placeholder: "Select or search status…",
+		items: [
+			...choices.map((s) => ({
+				label: s,
+				value: s,
+				checked: Boolean(listed?.status && listed.status.toLowerCase() === s.toLowerCase()),
+				badge: { text: s, tone: toneOf(s) },
+			})),
+			{ label: "Custom status…", value: CUSTOM, icon: "edit", divide: true },
+		],
+	});
 	if (!picked) return;
 	const nextStatus = picked === CUSTOM ? (await ask("New status"))?.trim() : picked;
 	if (!nextStatus) return;
@@ -968,10 +1117,18 @@ async function createOrAddTicketFolderCommand() {
 	if (!target) {
 		const tickets = allDocs.filter((d) => d.exists && d.group === "tickets" && !isCatalog(d) && d.ticket && !isArchivedTicket(d));
 		if (!tickets.length) return notify("No tickets exist in this project yet.");
-		const labels = tickets.map((t) => `${t.ticket}: ${t.title || t.name}`);
-		const picked = await choose("Create or add file to folder for which ticket?", labels);
-		if (!picked) return;
-		target = tickets[labels.indexOf(picked)];
+		target =
+			(await quickPick<DocFile>({
+				title: "Ticket folder: choose ticket",
+				placeholder: "Filter active tickets…",
+				items: tickets.map((t) => ({
+					label: `${t.ticket}: ${t.title || t.name}`,
+					value: t,
+					detail: t.ticketFolder ? "Add file to folder" : "Create folder",
+					badge: t.status ? { text: t.status, tone: toneOf(t.status) } : undefined,
+					icon: "folder",
+				})),
+			})) ?? undefined;
 	}
 	if (!target) return;
 	if (target.ticketFolder) {
@@ -997,20 +1154,355 @@ async function openGoverningDocCommand() {
 		await openFile(only.file.path, only.line ? { reveal: { line: only.line } } : {});
 		return;
 	}
-	const labels = gov.map(({ file: d, reason }) => {
-		const title =
-			d.group === "registries"
-				? registryTitle(d.name)
-				: d.ticket && d.title && !d.title.startsWith(d.ticket)
-					? `${d.ticket}: ${d.title}`
-					: d.title || d.heading || d.name;
-		const kind = d.group === "knowledge" && d.kind ? d.kind : d.group;
-		return `${title} (${kind} · ${reason})`;
+	const chosen = await quickPick<(typeof gov)[number]>({
+		title: `Governing documents for ${displayName(p)}`,
+		placeholder: "Filter governing docs…",
+		items: gov.map((entry) => {
+			const d = entry.file;
+			const title =
+				d.group === "registries"
+					? registryTitle(d.name)
+					: d.ticket && d.title && !d.title.startsWith(d.ticket)
+						? `${d.ticket}: ${d.title}`
+						: d.title || d.heading || d.name;
+			const kind = d.group === "knowledge" && d.kind ? d.kind : d.group;
+			return {
+				label: title,
+				value: entry,
+				detail: `${kind} · ${entry.reason}`,
+				badge: d.status ? { text: d.status, tone: toneOf(d.status) } : undefined,
+				file: d.name,
+			};
+		}),
 	});
-	const picked = await choose(`Governing documents for ${displayName(p)}`, labels);
-	if (!picked) return;
-	const chosen = gov[labels.indexOf(picked)];
 	if (chosen) await openFile(chosen.file.path, chosen.line ? { reveal: { line: chosen.line } } : {});
+}
+
+type R6ProjectDocsApi = {
+	recordDocApproval?: (targetPath?: string) => Promise<unknown>;
+	generateTestExecutionProtocol?: (ticketPath?: string) => Promise<unknown>;
+	openReleaseReadiness?: () => Promise<unknown>;
+	cloneTicket?: (targetPath?: string) => Promise<unknown>;
+	splitTicketSubticket?: (targetPath?: string) => Promise<unknown>;
+};
+
+async function runProjectDocAction(name: keyof R6ProjectDocsApi) {
+	const mod = (await import("./projectDocs")) as unknown as R6ProjectDocsApi;
+	const fn = mod[name];
+	if (typeof fn !== "function") {
+		notify(`Action "${name}" is not available in this build.`, "error");
+		return;
+	}
+	await fn();
+}
+
+/** Extracts fenced Mermaid flowchart blocks from Markdown text with 1-based start/end lines. */
+function findMermaidBlocks(markdown: string): { code: string; startLine: number; endLine: number }[] {
+	const lines = markdown.split(/\r?\n/);
+	const out: { code: string; startLine: number; endLine: number }[] = [];
+	let i = 0;
+	while (i < lines.length) {
+		const open = /^[ \t]{0,3}(`{3,}|~{3,})([^\n]*)$/.exec(lines[i]!);
+		if (!open) {
+			i++;
+			continue;
+		}
+		const ch = open[1]![0]!;
+		const len = open[1]!.length;
+		const info = open[2]!.trim();
+		if (ch === "`" && info.includes("`")) {
+			i++;
+			continue;
+		}
+		const lang = (info.split(/\s+/)[0] ?? "").toLowerCase();
+		const closeRe = new RegExp(`^[ \\t]{0,3}${ch}{${len},}[ \\t]*$`);
+		let closeIdx = -1;
+		for (let j = i + 1; j < lines.length; j++) {
+			if (closeRe.test(lines[j]!)) {
+				closeIdx = j;
+				break;
+			}
+		}
+		if (closeIdx < 0) break;
+		if (lang === "mermaid" || lang === "mmd") {
+			const code = lines.slice(i + 1, closeIdx).join("\n").trim();
+			if (code) out.push({ code, startLine: i + 1, endLine: closeIdx + 1 });
+		}
+		i = closeIdx + 1;
+	}
+	return out;
+}
+
+async function importMermaidPlanCommand() {
+	const wsRoot = state.workspace?.root;
+	if (!wsRoot) return notify("Open a folder first.");
+
+	let mermaidSource = "";
+	const p = activePath();
+	const doc = activeDoc();
+	const cursorLine = activeLiveEditor()?.getPosition().lineNumber ?? activeEditor()?.getPosition()?.lineNumber ?? state.cursor.line ?? 1;
+
+	if (p && doc && !doc.binary) {
+		const raw = doc.model.getValue();
+		if (isMarkdown(p)) {
+			const blocks = findMermaidBlocks(raw);
+			const atCursor = blocks.find((b) => cursorLine >= b.startLine && cursorLine <= b.endLine);
+			if (atCursor) {
+				mermaidSource = atCursor.code;
+			} else if (blocks.length === 1) {
+				mermaidSource = blocks[0]!.code;
+			} else if (blocks.length > 1) {
+				const PASTE = "__paste__";
+				const picked = await quickPick<string>({
+					title: `Import Mermaid flowchart from ${displayName(p)}`,
+					placeholder: "Choose a Mermaid block…",
+					items: [
+						...blocks.map((b, idx) => ({
+							label: `Diagram ${idx + 1} (lines ${b.startLine}–${b.endLine})`,
+							value: b.code,
+							detail: (b.code.split("\n")[0] ?? "").trim().slice(0, 48),
+							icon: "graph" as const,
+						})),
+						{ label: "Paste Mermaid flowchart source…", value: PASTE, icon: "edit", divide: true },
+					],
+				});
+				if (!picked) return;
+				if (picked !== PASTE) mermaidSource = picked;
+			}
+		} else if (/\.(mmd|mermaid)$/i.test(p)) {
+			mermaidSource = raw.trim();
+		}
+	}
+
+	if (!mermaidSource) {
+		const clip = (await navigator.clipboard?.readText().catch(() => ""))?.trim() ?? "";
+		const clipHasFlow = /^\s*(?:flowchart|graph)\s+(?:TD|TB|BT|RL|LR)\b/im.test(clip);
+		const entered = await ask(
+			"Mermaid flowchart source to import as a .plan.json",
+			clipHasFlow ? clip : "flowchart TD\n  A([Start]) --> B[Step]\n  B --> C([End])",
+		);
+		if (!entered?.trim()) return;
+		mermaidSource = entered.trim();
+	}
+
+	const defaultTitle = p ? baseName(p).replace(/\.[^.]+$/, "") : "Imported Plan";
+	const title = (await ask("Name of the imported plan", defaultTitle))?.trim();
+	if (!title) return;
+
+	const assist = (await import("./plan/assist")) as unknown as {
+		mermaidToPlan?: (source: string, title?: string) => Plan | { plan: Plan; warnings?: string[] } | null;
+	};
+	if (typeof assist.mermaidToPlan !== "function") {
+		notify("Mermaid flowchart import is not available in this build.", "error");
+		return;
+	}
+	const converted = assist.mermaidToPlan(mermaidSource, title);
+	const wrappedPlan =
+		converted && typeof converted === "object" && "plan" in converted && (converted as { plan?: unknown }).plan
+			? ((converted as { plan: Plan }).plan)
+			: null;
+	const plan: Plan | null =
+		wrappedPlan && Array.isArray(wrappedPlan.nodes)
+			? wrappedPlan
+			: converted && typeof converted === "object" && "nodes" in converted && Array.isArray((converted as Plan).nodes)
+				? (converted as Plan)
+				: null;
+	if (!plan || !Array.isArray(plan.nodes) || !plan.nodes.length) {
+		return notify("Could not parse a Mermaid flowchart from that source.", "error");
+	}
+	const ticket = ticketAtHand();
+	const finalPlan: Plan = ticket && !plan.ticket ? { ...plan, ticket } : plan;
+
+	const planDir = folderParts(state.project?.plans ?? "design");
+	const safeStem = title.replace(/\.plan\.json$/i, "").replace(/[\\/:*?"<>|]+/g, "-").trim() || "imported-plan";
+	const dest = joinPath(wsRoot, ...planDir, `${safeStem}.plan.json`);
+	const exists = await backend.read(dest).then(
+		() => true,
+		() => false,
+	);
+	if (exists) {
+		const OVERWRITE = "Overwrite existing plan";
+		const answer = await choose(`${relativeTo(wsRoot, dest)} already exists. Overwrite it?`, [OVERWRITE], { danger: OVERWRITE });
+		if (answer !== OVERWRITE) return;
+		await backend.historyKeep(dest).catch(() => {});
+	}
+	await backend.write(dest, printPlan(finalPlan));
+	setState("treeVersion", (v) => v + 1);
+	await openFile(dest, { keep: true });
+	notify(`Imported Mermaid flowchart to ${relativeTo(wsRoot, dest)} (${finalPlan.nodes.length} nodes).`);
+}
+
+async function gitBlameLineCommand() {
+	const root = state.workspace?.root;
+	const p = activePath();
+	if (!root || !p || !isInside(root, p)) return notify("Open a workspace file first.");
+	const line = activeLiveEditor()?.getPosition().lineNumber ?? activeEditor()?.getPosition()?.lineNumber ?? state.cursor.line ?? 1;
+	const blame = await backend.gitBlameLine(p, line).catch(() => null);
+	if (!blame) {
+		return notify(`No Git blame info for ${baseName(p)}:${line} (outside Git or untracked file).`);
+	}
+	if (/^0+$/.test(blame.sha)) {
+		return notify(`Line ${line} of ${baseName(p)} has uncommitted local changes.`);
+	}
+	const ticketMatch = blame.ticket || /\b([A-Za-z][A-Za-z0-9]{1,15}-\d+)\b/.exec(blame.summary)?.[1];
+	const ticketDoc = ticketMatch
+		? docs().find((d) => d.exists && d.group === "tickets" && d.ticket?.toLowerCase() === ticketMatch.toLowerCase())
+		: undefined;
+	const action = await quickPick<"diff" | "ticket" | "copy">({
+		title: `${baseName(p)}:${line} · ${blame.shortSha} (${blame.author}, ${blame.date})`,
+		placeholder: blame.summary || "Choose an action for this commit…",
+		items: [
+			{
+				label: `Open commit diff in Review (${blame.shortSha})`,
+				value: "diff",
+				detail: blame.summary,
+				icon: "split-horizontal",
+			},
+			...(ticketMatch
+				? [
+						{
+							label: `Open ticket ${ticketMatch}`,
+							value: "ticket" as const,
+							detail: ticketDoc?.title || "Search workspace for ticket",
+							icon: "checklist" as const,
+						},
+					]
+				: []),
+			{
+				label: `Copy commit SHA (${blame.shortSha})`,
+				value: "copy",
+				detail: blame.sha,
+				icon: "copy",
+			},
+		],
+	});
+	if (!action) return;
+	if (action === "copy") {
+		await copyText(blame.sha, `Copied commit ${blame.shortSha}.`);
+		return;
+	}
+	if (action === "ticket" && ticketMatch) {
+		if (ticketDoc) {
+			await openFile(ticketDoc.path, { keep: true });
+		} else {
+			const { searchFor } = await import("./panels/Search");
+			searchFor(ticketMatch);
+		}
+		return;
+	}
+	if (action === "diff") {
+		try {
+			const { before, after } = await backend.gitCommitFile(p, blame.sha);
+			if (before === null && after === null) {
+				return notify(`Could not read text diff for ${baseName(p)} at ${blame.shortSha}.`, "error");
+			}
+			const [{ openComparison }, { languageFor }] = await Promise.all([import("./editor/Review"), import("./editor/languages")]);
+			await openComparison({
+				title: `${blame.shortSha}: ${baseName(p)}`,
+				path: p,
+				before: before ?? "",
+				after: after ?? "",
+				beforeLabel: before === null ? "(not in parent)" : `${blame.shortSha}~1`,
+				afterLabel: after === null ? "(deleted)" : blame.shortSha,
+				language: languageFor(p),
+				effect: `${blame.shortSha} (${blame.author}, ${blame.date}) — ${blame.summary}. Nothing here changes the file.`,
+			});
+		} catch (e: any) {
+			notify(`Could not open commit diff: ${String(e?.message ?? e)}`, "error");
+		}
+	}
+}
+
+async function gitSwitchBranchCommand() {
+	if (!state.workspace) return notify("Open a folder first.");
+	const info = await backend.gitBranches().catch(() => null);
+	if (!info) return notify("This folder is not in a Git repository.");
+	if (!info.branches.length) return notify("No local Git branches were found.");
+	const picked = await quickPick<string>({
+		title: `Switch Git branch (current: ${info.current || "detached"})`,
+		placeholder: "Filter local branches…",
+		items: info.branches.map((b) => ({
+			label: b.name,
+			value: b.name,
+			checked: b.current,
+			icon: "git-branch",
+			detail: b.upstream ? `tracks ${b.upstream}` : undefined,
+			description: b.lastSubject,
+		})),
+	});
+	if (!picked) return;
+	if (picked === info.current) return notify(`Already on branch ${picked}.`);
+	const res = await backend.gitCheckout(picked).catch((e: any) => ({ ok: false, message: String(e?.message ?? e) }));
+	const { refreshGit } = await import("./git");
+	await refreshGit();
+	setState("treeVersion", (v) => v + 1);
+	notify(res.message || (res.ok ? `Switched to branch ${picked}.` : `Could not switch to branch ${picked}.`), res.ok ? "info" : "error");
+}
+
+async function gitStashCommand() {
+	if (!state.workspace) return notify("Open a folder first.");
+	const listed = await backend.gitStash("list").catch(() => null);
+	if (!listed || !listed.ok) {
+		return notify(listed?.message || "This folder is not in a Git repository.", "error");
+	}
+	const entries = listed.entries ?? [];
+	const action = await quickPick<"push" | "pop" | "list">({
+		title: "Git stash",
+		placeholder: "Choose a stash action…",
+		items: [
+			{
+				label: "Stash working changes (push)…",
+				value: "push",
+				detail: "Save uncommitted changes with an optional message",
+				icon: "layers",
+			},
+			{
+				label: "Pop latest stash",
+				value: "pop",
+				detail: entries[0] ? `${entries[0].ref}: ${entries[0].message}` : "Apply and remove the latest stash entry",
+				icon: "discard",
+			},
+			{
+				label: `List stashes (${entries.length})`,
+				value: "list",
+				detail: entries.length ? "Inspect saved local stash entries" : "No stashes saved",
+				icon: "list-flat",
+			},
+		],
+	});
+	if (!action) return;
+	const { refreshGit } = await import("./git");
+	if (action === "push") {
+		const defaultMsg = ticketAtHand() ? `${ticketAtHand()}: WIP` : "";
+		const msg = await ask("Stash message (optional)", defaultMsg);
+		if (msg === null) return;
+		const res = await backend.gitStash("push", msg.trim() || undefined).catch((e: any) => ({ ok: false, message: String(e?.message ?? e) }));
+		await refreshGit();
+		setState("treeVersion", (v) => v + 1);
+		notify(res.message || (res.ok ? "Stashed working changes." : "Could not stash changes."), res.ok ? "info" : "error");
+		return;
+	}
+	if (action === "pop") {
+		const res = await backend.gitStash("pop").catch((e: any) => ({ ok: false, message: String(e?.message ?? e) }));
+		await refreshGit();
+		setState("treeVersion", (v) => v + 1);
+		notify(res.message || (res.ok ? "Popped latest stash." : "Could not pop stash."), res.ok ? "info" : "error");
+		return;
+	}
+	if (!entries.length) {
+		notify("No local Git stashes exist.");
+		return;
+	}
+	await quickPick<string>({
+		title: `Local Git stashes (${entries.length})`,
+		placeholder: "Filter stashes…",
+		items: entries.map((e) => ({
+			label: e.ref,
+			value: e.ref,
+			description: e.message,
+			icon: "layers",
+		})),
+	});
 }
 
 /**
@@ -1076,8 +1568,16 @@ const KEYS: Record<string, string> = {
 
 /** On a Mac, Alt with an arrow moves the cursor by a word, in the editor and in every box: those keys stay the text's. */
 const NOT_ON_A_MAC = new Set(["alt+arrowleft", "alt+arrowright"]);
+/** macOS VS Code defaults for Go Back / Go Forward (ADR 0032). */
+const MAC_DEFAULT_KEYS: Record<string, string> = {
+	"ctrl+-": "go-back",
+	"ctrl+shift+-": "go-forward",
+	"ctrl+shift+_": "go-forward",
+};
 const onMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform ?? "");
-export const DEFAULT_KEYS: Record<string, string> = onMac ? Object.fromEntries(Object.entries(KEYS).filter(([key]) => !NOT_ON_A_MAC.has(key))) : KEYS;
+export const DEFAULT_KEYS: Record<string, string> = onMac
+	? { ...Object.fromEntries(Object.entries(KEYS).filter(([key]) => !NOT_ON_A_MAC.has(key))), ...MAC_DEFAULT_KEYS }
+	: KEYS;
 
 /** The default shortcuts with the user's overrides ("" unbinds). */
 export function keymap(): Record<string, string> {
@@ -1124,7 +1624,13 @@ export function installKeys() {
 				}
 			}
 			const map = keymap();
-			const id = pressed.map((name) => map[name]).find(Boolean);
+			let id = pressed.map((name) => map[name]).find(Boolean);
+			// On macOS, Cmd+- stays Zoom Out while Ctrl+- runs VS Code Go Back.
+			if (onMac && id === "go-back" && e.metaKey && !e.ctrlKey && e.key === "-") id = "zoom-out";
+			const targetEl = e.target instanceof Element ? e.target : document.activeElement;
+			const inTable = Boolean(targetEl?.closest(".cm-md-table-wrap, .table-view"));
+			const inLiveMarkdown = Boolean(targetEl?.closest(".cm-editor") && !targetEl.closest(".cm-md-read"));
+			if (shouldLetEditorHandleKey({ id, pressed, inTable, inLiveMarkdown })) return;
 			if (id === "toggle-markdown-mode" && !isMarkdown(activePath())) return;
 			// Alt and a menu's first letter opens that menu, where no shortcut has the key. Not with Ctrl or Shift, and not
 			// where Alt and a letter types a character: the key is then that character, not the letter.

@@ -1,5 +1,7 @@
 import { parseCsv } from "./csv";
 import { frontMatter } from "./frontMatter";
+import { dirName, resolvePath } from "./paths";
+import { summarizePlanForPrompt } from "./planSummary";
 import { isCatalog, registryTitle, toneOf } from "./projectDocs";
 import type { DocFile } from "./protocol";
 import { keysIn, ticketColumn } from "./registryTickets";
@@ -13,7 +15,7 @@ export type Work = {
 	ticket: DocFile;
 	/** Parent epic/ticket when `ticket.parent` resolves to a ticket in the folder. */
 	parentEpic?: DocFile;
-	/** Plans (`.plan.json`) tied to this ticket. */
+	/** Plans (`.plan.json`) and companion plan docs (`.plan.md`) tied to this ticket. */
 	plans?: DocFile[];
 	/** The specs written for it. */
 	specs: DocFile[];
@@ -35,6 +37,7 @@ export type Work = {
 
 export type WorkTextOptions = {
 	specs?: boolean;
+	plans?: boolean;
 	includeSchema?: boolean;
 	includeRegistries?: boolean;
 	includeState?: boolean;
@@ -61,7 +64,34 @@ export function workFor(files: readonly DocFile[], key: string): Work | null {
 	const decided = knowledge("decisions").filter(
 		(file) => toneOf(file.status) === "done" || (forIt(file) && toneOf(file.status) !== "off" && !/supersed/i.test(file.status ?? "")),
 	);
-	const plans = real.filter((file) => file.group === "plans" && (forIt(file) || Boolean(ticket.plans?.some((path) => pathMatchesRef(file.path, path)))));
+	const allPlans = real.filter((file) => file.group === "plans");
+	const planDocsByChart = new Map<string, DocFile>();
+	for (const p of allPlans) {
+		if (/\.plan\.md$/i.test(p.name)) planDocsByChart.set(slashes(p.path.replace(/\.plan\.md$/i, ".plan.json")).toLowerCase(), p);
+	}
+	const plans: DocFile[] = [];
+	const seenPlans = new Set<string>();
+	const addPlan = (file: DocFile) => {
+		const k = slashes(file.path).toLowerCase();
+		if (seenPlans.has(k)) return;
+		seenPlans.add(k);
+		plans.push(file);
+	};
+	for (const file of allPlans) {
+		if (/\.plan\.md$/i.test(file.name)) continue;
+		const pairedDoc = planDocsByChart.get(slashes(file.path).toLowerCase());
+		const linked =
+			forIt(file) ||
+			Boolean(ticket.plans?.some((path) => pathMatchesRef(file.path, path, ticket.path))) ||
+			Boolean(pairedDoc && (forIt(pairedDoc) || ticket.plans?.some((path) => pathMatchesRef(pairedDoc.path, path, ticket.path))));
+		if (!linked) continue;
+		addPlan(file);
+		if (pairedDoc) addPlan(pairedDoc);
+	}
+	for (const file of allPlans) {
+		if (!/\.plan\.md$/i.test(file.name)) continue;
+		if (forIt(file) || ticket.plans?.some((path) => pathMatchesRef(file.path, path, ticket.path))) addPlan(file);
+	}
 	const related = tickets.filter(
 		(file) =>
 			file !== ticket &&
@@ -78,7 +108,7 @@ export function workFor(files: readonly DocFile[], key: string): Work | null {
 		ticket,
 		parentEpic,
 		plans,
-		specs: real.filter((file) => file.group === "specs" && (forIt(file) || Boolean(ticket.specs?.some((path) => pathMatchesRef(file.path, path))))),
+		specs: real.filter((file) => file.group === "specs" && (forIt(file) || Boolean(ticket.specs?.some((path) => pathMatchesRef(file.path, path, ticket.path))))),
 		related,
 		open: knowledge("questions").filter((file) => toneOf(file.status) === "waiting" && (forIt(file) || forNone(file) || forRelated(file))),
 		answered: knowledge("questions").filter((file) => toneOf(file.status) === "done" && forIt(file)),
@@ -173,55 +203,28 @@ export async function workText(work: Work, readFile: (path: string) => Promise<s
 			parts.push("", `SPEC ${spec.title || spec.name}${spec.status ? ` (${spec.status})` : ""}:`, text !== null && body(text) ? cut(body(text), SPEC_CHARS) : "(it could not be read)");
 		}
 	}
-	if (work.plans?.length) {
+	if (options.plans !== false && work.plans?.length) {
 		const planSummaries: string[] = [];
-		for (const planDoc of work.plans.slice(0, 4)) {
-			const raw = await read(planDoc.path);
-			if (!raw) {
-				planSummaries.push(line(planDoc));
+		const planDocSections: string[] = [];
+		for (const planItem of work.plans.slice(0, 6)) {
+			const raw = await read(planItem.path);
+			if (/\.plan\.md$/i.test(planItem.name)) {
+				planDocSections.push(
+					"",
+					`PLAN DOC ${planItem.title || planItem.name}${planItem.status ? ` (${planItem.status})` : ""}:`,
+					raw !== null && body(raw) ? cut(body(raw), SPEC_CHARS) : "(it could not be read)",
+				);
 				continue;
 			}
-			try {
-				const parsed = JSON.parse(raw) as {
-					title?: string;
-					goal?: string;
-					targets?: (string | { script?: string; path?: string; procedures?: string[] })[];
-					nodes?: { label?: string; text?: string; kind?: string }[];
-					tests?: { title?: string; name?: string; given?: string; expect?: string }[];
-					built?: { tests?: { script?: string } };
-					openQuestions?: string[];
-				};
-				const targets = (parsed.targets ?? [])
-					.map((t) =>
-						typeof t === "string"
-							? t
-							: [t.script ?? t.path, t.procedures?.length ? `(${t.procedures.join(", ")})` : ""].filter(Boolean).join(" "),
-					)
-					.filter(Boolean);
-				const steps = (parsed.nodes ?? [])
-					.map((n) => (n.label ?? n.text)?.trim())
-					.filter((l): l is string => Boolean(l))
-					.slice(0, 12);
-				const testCases = (parsed.tests ?? [])
-					.map((tc) => (tc.title ?? tc.name)?.trim())
-					.filter((t): t is string => Boolean(t))
-					.slice(0, 6);
-				const testScript = typeof parsed.built?.tests?.script === "string" ? parsed.built.tests.script.trim() : "";
-				const bits = [
-					`- PLAN ${parsed.title || planDoc.title || planDoc.name}:`,
-					parsed.goal ? `Goal: ${cut(parsed.goal.replace(/\s+/g, " "), 240)}` : "",
-					targets.length ? `Targets: ${targets.join("; ")}` : "",
-					steps.length ? `Steps: ${steps.join(" → ")}` : "",
-					testScript ? `Test script: ${testScript}` : "",
-					testCases.length ? `Tests: ${testCases.join("; ")}` : "",
-					parsed.openQuestions?.length ? `Open plan questions: ${parsed.openQuestions.slice(0, 4).join("; ")}` : "",
-				].filter(Boolean);
-				planSummaries.push(bits.join(" "));
-			} catch {
-				planSummaries.push(line(planDoc));
+			const summary = raw ? summarizePlanForPrompt(raw) : null;
+			if (summary) {
+				planSummaries.push(`- PLAN ${planItem.title || planItem.name}:\n  ${summary.replace(/\n/g, "\n  ")}`);
+			} else {
+				planSummaries.push(line(planItem));
 			}
 		}
 		if (planSummaries.length) parts.push("", "PLANS:", ...planSummaries);
+		if (planDocSections.length) parts.push(...planDocSections);
 	}
 	if (work.open.length) parts.push("", "QUESTIONS NOBODY HAS ANSWERED YET (do not guess the answer; say what depends on it):", ...work.open.map(line));
 	if (work.answered.length) {
@@ -323,18 +326,54 @@ export type WorkGroup = {
 	items: WorkItem[];
 };
 
-const pathMatchesRef = (filePath: string, ref: string) => {
+/**
+ * True when `filePath` matches a document reference `ref`. Relative `./` or `../`
+ * refs are resolved against `dirName(fromPath)` when `fromPath` is provided.
+ */
+export function pathMatchesRef(filePath: string, ref: string, fromPath?: string): boolean {
 	const full = slashes(filePath).toLowerCase();
-	const clean = slashes(ref).replace(/^\.?\/+/, "").toLowerCase();
+	const raw = slashes(ref).split(/[?#]/)[0]!.trim();
+	if (!raw) return false;
+	if (fromPath && /^\.{1,2}\//.test(raw)) {
+		const resolved = slashes(resolvePath(dirName(fromPath), raw)).toLowerCase();
+		return full === resolved;
+	}
+	const clean = raw.replace(/^\.?\/+/, "").toLowerCase();
 	return full === clean || full.endsWith(`/${clean}`);
-};
+}
 
 /** Explains how `file` is associated with `ticket`, directly from the project's document metadata. */
 export function workLinkOf(ticket: DocFile, file: DocFile, kind: WorkGroup["kind"]): WorkLink {
 	const key = ticket.ticket ?? ticket.name;
 	if (kind === "plan") {
+		const isPlanDoc = /\.plan\.md$/i.test(file.name);
+		if (isPlanDoc) {
+			const inTicketPlans = Boolean(ticket.plans?.some((ref) => pathMatchesRef(file.path, ref, ticket.path)));
+			const own = file.ownTickets ?? (file.pairedPlan ? [] : (file.tickets ?? []));
+			const inDocFm = own.some((named) => same(named, key));
+			const reasons: string[] = [];
+			const details: string[] = [];
+			if (file.pairedPlan) {
+				const planStem = file.pairedPlan.name.replace(/\.plan\.json$/i, "");
+				reasons.push(`plan doc for ${planStem}`);
+				details.push(`Companion .plan.md beside ${file.pairedPlan.name}`);
+			}
+			if (inTicketPlans) {
+				reasons.push("ticket plans:");
+				details.push(`Listed under plans: in ${ticket.name}'s YAML frontmatter`);
+			}
+			if (inDocFm) {
+				reasons.push(`ticket: ${key}`);
+				details.push(`Declares ticket: ${key} in ${file.name}'s YAML frontmatter`);
+			}
+			if (!reasons.length) {
+				reasons.push("plan doc");
+				details.push(`Companion plan doc for ${key}`);
+			}
+			return { reason: reasons.join(" · "), detail: `${details.join("; ")}.` };
+		}
 		const inPlanJson = Boolean(file.tickets?.some((named) => same(named, key)));
-		const inTicketPlans = Boolean(ticket.plans?.some((ref) => pathMatchesRef(file.path, ref)));
+		const inTicketPlans = Boolean(ticket.plans?.some((ref) => pathMatchesRef(file.path, ref, ticket.path)));
 		if (inPlanJson && inTicketPlans) {
 			return {
 				reason: `plan "ticket" · ticket plans:`,
@@ -354,10 +393,9 @@ export function workLinkOf(ticket: DocFile, file: DocFile, kind: WorkGroup["kind
 	}
 
 	if (kind === "spec") {
-		const inTicketSpecs = Boolean(ticket.specs?.some((ref) => pathMatchesRef(file.path, ref)));
-		const own = file.ownTickets ?? (file.pairedPlan ? [] : (file.tickets ?? []));
+		const inTicketSpecs = Boolean(ticket.specs?.some((ref) => pathMatchesRef(file.path, ref, ticket.path)));
+		const own = file.ownTickets ?? file.tickets ?? [];
 		const inSpecFm = own.some((named) => same(named, key));
-		const viaPlan = Boolean(file.pairedPlan && same(file.pairedPlan.ticket, key));
 		const reasons: string[] = [];
 		const details: string[] = [];
 		if (inTicketSpecs) {
@@ -367,11 +405,6 @@ export function workLinkOf(ticket: DocFile, file: DocFile, kind: WorkGroup["kind
 		if (inSpecFm) {
 			reasons.push(`spec ticket: ${key}`);
 			details.push(`Declares ticket: ${key} in ${file.name}'s YAML frontmatter`);
-		}
-		if (viaPlan && file.pairedPlan) {
-			const planStem = file.pairedPlan.name.replace(/\.plan\.json$/i, "");
-			reasons.push(`paired with ${planStem}`);
-			details.push(`Companion .spec.md beside ${file.pairedPlan.name} ("ticket": "${key}")`);
 		}
 		if (!reasons.length) {
 			reasons.push(`ticket: ${key}`);
@@ -465,9 +498,11 @@ function inferWorkspaceRoot(files: readonly DocFile[], anchor: DocFile): string 
 	return "";
 }
 
-function resolveRefPath(root: string, ref: string): string {
-	const clean = slashes(ref).trim().replace(/^\.\//, "");
-	if (!clean) return "";
+function resolveRefPath(root: string, ref: string, fromPath?: string): string {
+	const raw = slashes(ref).trim();
+	if (!raw) return "";
+	if (fromPath && /^\.{1,2}\//.test(raw)) return slashes(resolvePath(dirName(fromPath), raw));
+	const clean = raw.replace(/^\.\//, "");
 	if (clean.startsWith("/") || /^[A-Za-z]:\//.test(clean)) return clean;
 	return root ? `${root.replace(/\/+$/, "")}/${clean.replace(/^\/+/, "")}` : clean;
 }
@@ -485,11 +520,7 @@ export function ticketWork(files: readonly DocFile[], key: string): WorkGroup[] 
 	if (!work) return [];
 	const real = files.filter((file) => file.exists && !isCatalog(file));
 	const forIt = (file: DocFile) => Boolean(file.tickets?.some((named) => same(named, key)));
-	const plans = real.filter(
-		(file) =>
-			file.group === "plans" &&
-			(forIt(file) || Boolean(work.ticket.plans?.some((ref) => pathMatchesRef(file.path, ref)))),
-	);
+	const plans = work.plans ?? [];
 	const subtickets = work.related.filter((file) => same(file.parent, key));
 	const related = work.related.filter((file) => !same(file.parent, key));
 	// UI lists EVERY decision, question, reference note, and schema linked to this ticket
@@ -508,19 +539,21 @@ export function ticketWork(files: readonly DocFile[], key: string): WorkGroup[] 
 	const testItems: WorkItem[] = [];
 	const seenTests = new Set<string>();
 	const addTestScript = (scriptRef: string, sourceDoc: DocFile) => {
-		const clean = slashes(scriptRef).trim().replace(/^\.\//, "");
+		const rawClean = slashes(scriptRef).trim();
+		const clean = rawClean.replace(/^\.\//, "");
 		if (!clean) return;
-		const dedupKey = clean.toLowerCase();
+		const resolved = resolveRefPath(wsRoot, rawClean, sourceDoc.path);
+		const dedupKey = resolved.toLowerCase();
 		if (seenTests.has(dedupKey)) return;
 		seenTests.add(dedupKey);
-		const existingDoc = real.find((d) => pathMatchesRef(d.path, clean));
-		const resolved = existingDoc?.path ?? resolveRefPath(wsRoot, clean);
+		const existingDoc = real.find((d) => pathMatchesRef(d.path, rawClean, sourceDoc.path));
+		const finalPath = existingDoc?.path ?? resolved;
 		const base = clean.split("/").pop() || clean;
 		const cases = sourceDoc.planTests?.length ?? 0;
 		const synthetic: DocFile = existingDoc
 			? { ...existingDoc, ...(sourceDoc.planTests?.length ? { planTests: sourceDoc.planTests } : {}) }
 			: {
-					path: resolved,
+					path: finalPath,
 					name: clean,
 					title: base,
 					group: "docs",
@@ -664,14 +697,24 @@ export function docLinkedTickets(
 									: "reference"
 							: null;
 	if (!kind) return [];
+	const pairedChart =
+		kind === "plan" && /\.plan\.md$/i.test(doc.name)
+			? real.find((f) => f.group === "plans" && slashes(f.path).toLowerCase() === slashes(doc.path.replace(/\.plan\.md$/i, ".plan.json")).toLowerCase())
+			: undefined;
 	const out: { ticket: DocFile; key: string; reason: string; detail: string }[] = [];
 	for (const t of tickets) {
 		const key = t.ticket!;
 		const linked =
 			kind === "spec"
-				? Boolean(doc.tickets?.some((k) => same(k, key)) || t.specs?.some((ref) => pathMatchesRef(doc.path, ref)))
+				? Boolean(doc.tickets?.some((k) => same(k, key)) || t.specs?.some((ref) => pathMatchesRef(doc.path, ref, t.path)))
 				: kind === "plan"
-					? Boolean(doc.tickets?.some((k) => same(k, key)) || t.plans?.some((ref) => pathMatchesRef(doc.path, ref)))
+					? Boolean(
+							doc.tickets?.some((k) => same(k, key)) ||
+								t.plans?.some((ref) => pathMatchesRef(doc.path, ref, t.path)) ||
+								(pairedChart &&
+									(pairedChart.tickets?.some((k) => same(k, key)) ||
+										t.plans?.some((ref) => pathMatchesRef(pairedChart.path, ref, t.path)))),
+						)
 					: Boolean(doc.tickets?.some((k) => same(k, key)));
 		if (linked) {
 			out.push({ ticket: t, key, ...workLinkOf(t, doc, kind) });
@@ -785,7 +828,7 @@ export function docsGoverningFile(
 	const matchedRegistries: DocFile[] = [];
 	for (const file of existing) {
 		if (slashes(file.path).toLowerCase() === targetCanon) continue;
-		if (file.source && codeMatchesRef(filePath, file.source, root)) {
+		if (file.source && (pathMatchesRef(filePath, file.source, file.path) || codeMatchesRef(filePath, file.source, root))) {
 			add(file, file.group === "schema" ? "schema source:" : "source:");
 			continue;
 		}
@@ -825,18 +868,35 @@ export function docsGoverningFile(
 		if (doc.group === "specs" && !matchedSpecs.includes(doc)) matchedSpecs.push(doc);
 	}
 
-	// 3. Transitive links: matched plans -> paired specs & owning tickets; matched specs & registries -> owning tickets.
+	// 3. Transitive links: matched plans <-> paired plan docs & owning tickets; matched specs & registries -> owning tickets.
 	const linkedTicketKeys = new Set<string>();
-	for (const plan of matchedPlans) {
+	for (const plan of [...matchedPlans]) {
 		for (const k of plan.tickets ?? []) linkedTicketKeys.add(k.toLowerCase());
-		const specPath = plan.path.replace(/\.plan\.json$/i, ".spec.md").toLowerCase();
-		const pairedSpec = byPath.get(slashes(specPath));
-		if (pairedSpec) {
-			add(pairedSpec, "paired spec");
-			if (!matchedSpecs.includes(pairedSpec)) matchedSpecs.push(pairedSpec);
+		if (/\.plan\.json$/i.test(plan.name)) {
+			const planDocPath = plan.path.replace(/\.plan\.json$/i, ".plan.md").toLowerCase();
+			const pairedDoc = byPath.get(slashes(planDocPath));
+			if (pairedDoc) {
+				add(pairedDoc, "plan doc");
+				if (!matchedPlans.includes(pairedDoc)) matchedPlans.push(pairedDoc);
+			}
+		} else if (/\.plan\.md$/i.test(plan.name)) {
+			const chartPath = plan.path.replace(/\.plan\.md$/i, ".plan.json").toLowerCase();
+			const pairedChart = byPath.get(slashes(chartPath));
+			if (pairedChart) {
+				add(pairedChart, "paired plan");
+				for (const k of pairedChart.tickets ?? []) linkedTicketKeys.add(k.toLowerCase());
+				if (!matchedPlans.includes(pairedChart)) matchedPlans.push(pairedChart);
+			}
 		}
 		for (const t of tickets) {
-			if (t.plans?.some((ref) => pathMatchesRef(plan.path, ref))) {
+			if (t.plans?.some((ref) => pathMatchesRef(plan.path, ref, t.path))) {
+				linkedTicketKeys.add(t.ticket!.toLowerCase());
+			}
+		}
+	}
+	for (const plan of matchedPlans) {
+		for (const t of tickets) {
+			if (t.plans?.some((ref) => pathMatchesRef(plan.path, ref, t.path))) {
 				linkedTicketKeys.add(t.ticket!.toLowerCase());
 			}
 		}
@@ -844,7 +904,7 @@ export function docsGoverningFile(
 	for (const spec of matchedSpecs) {
 		for (const k of spec.tickets ?? []) linkedTicketKeys.add(k.toLowerCase());
 		for (const t of tickets) {
-			if (t.specs?.some((ref) => pathMatchesRef(spec.path, ref))) {
+			if (t.specs?.some((ref) => pathMatchesRef(spec.path, ref, t.path))) {
 				linkedTicketKeys.add(t.ticket!.toLowerCase());
 			}
 		}

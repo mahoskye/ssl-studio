@@ -14,7 +14,7 @@
 // At the bar's far end are the window's parts as buttons: the side panel, the
 // bottom panel and the right panel, each shown or hidden by a press, and a
 // menu for the rest of the layout.
-import { createSignal, createUniqueId, For, onCleanup, onMount, Show } from "solid-js";
+import { createMemo, createSignal, createUniqueId, For, onCleanup, onMount, Show } from "solid-js";
 import { FIELD_COMMANDS, letterItem, MENU_BAR, missing, stepMenu, type BarEntry, type Has } from "../shared/menuBar";
 import { keysFor, onOpenMenu, runCommand } from "./commands";
 import { Icon } from "./Icon";
@@ -25,7 +25,8 @@ import { review } from "./editor/Review";
 import { Menu, nextItem, type MenuItem } from "./Menu";
 import { canGo } from "./navigation";
 import { isPlanPath } from "./plan/model";
-import { isMarkdown, isTable } from "./project";
+import { docs, isMarkdown, isTable } from "./project";
+import { pickActiveTicket } from "./projectDocs";
 import { activeDoc, activePath, documents, focusEditor, markdownMode, notify, planMode, setState, state, tableTextMode } from "./state";
 
 /** A file is in front, not the call graph or a review of changes. */
@@ -72,6 +73,16 @@ const NON_TEXT_OK_COMMANDS = new Set([
 ]);
 
 function runEditor(id: string, shown: boolean) {
+	// Call Graph canvas finder when Call Graph is in front.
+	if (id === "actions.find" && state.centerView === "graph" && !review()) {
+		void import("./graph/GraphView").then((m) => (m as { focusActiveGraphFinder?: () => boolean }).focusActiveGraphFinder?.());
+		return;
+	}
+	// Plan canvas finder when a `.plan.json` is active in chart/text view (not raw source).
+	if (id === "actions.find" && inFront() && isPlanPath(activePath()) && !shown) {
+		void import("./plan/PlanView").then((m) => (m as { focusActivePlanFinder?: () => boolean }).focusActivePlanFinder?.());
+		return;
+	}
 	// TableView Find & Replace when a CSV/TSV grid is showing.
 	if ((id === "actions.find" || id === "editor.action.startFindReplaceAction") && hasTableFind()) {
 		openTableFind(id === "editor.action.startFindReplaceAction");
@@ -136,6 +147,8 @@ function itemsOf(entries: readonly BarEntry[], box: HTMLElement | null): MenuIte
 		if (box) return inBox ? { label: entry.label, keys: editorKeys(entry.editor), run: () => void runInBox(box, inBox), why: noPaste } : { label: entry.label, keys: editorKeys(entry.editor), run: () => {}, why: "For the code: the keyboard is in a text box" };
 		// Undo and redo reach text that is not shown as text (blocks, a page), but not a file that is behind something else.
 		// A picture, or other bytes, has no text to undo anything in.
+		const graphFind = entry.editor === "actions.find" && state.centerView === "graph" && !review();
+		const planFind = entry.editor === "actions.find" && now.file && inFront() && !bytes && isPlanPath(activePath()!);
 		const readFind = entry.editor === "actions.find" && now.file && inFront() && !bytes && isMarkdown(activePath()!);
 		const tableFind =
 			(entry.editor === "actions.find" || entry.editor === "editor.action.startFindReplaceAction") &&
@@ -144,8 +157,12 @@ function itemsOf(entries: readonly BarEntry[], box: HTMLElement | null): MenuIte
 			!bytes &&
 			hasTableFind();
 		const quickOutline = entry.editor === "editor.action.quickOutline" && now.file && inFront() && !bytes;
-		const effective = readFind || tableFind || quickOutline ? { ...now, text: true } : now;
-		const behind = bytes || (!effective.text && now.file && !inFront() ? "The file is not in front" : "");
+		const effective = graphFind
+			? { ...now, file: true, text: true }
+			: planFind || readFind || tableFind || quickOutline
+				? { ...now, text: true }
+				: now;
+		const behind = graphFind ? "" : bytes || (!effective.text && now.file && !inFront() ? "The file is not in front" : "");
 		return { label: entry.label, keys: editorKeys(entry.editor), run: () => runEditor(entry.editor, now.text), why: missing(entry, effective) || behind || noPaste };
 	});
 }
@@ -388,6 +405,9 @@ export function MenuBar() {
 		e.stopPropagation();
 	};
 
+	const hasAnyTickets = createMemo(() => docs().some((d) => d.exists && d.group === "tickets" && Boolean(d.ticket)));
+	const focusedTicket = createMemo(() => state.settings.activeTicket?.trim() || "");
+
 	return (
 		<div class="menubar">
 			<Show when={state.workspace}>
@@ -483,18 +503,37 @@ export function MenuBar() {
 			</div>
 			<span class="spacer" />
 			<Show when={state.workspace}>
-				<button
-					class="cmd-center"
-					title={`Go to file…${keysFor("quick-open") ? ` (${keysFor("quick-open")})` : ""}`}
-					aria-label={`Go to file in ${state.workspace!.name}${keysFor("quick-open") ? ` (${keysFor("quick-open")})` : ""}`}
-					onClick={() => runCommand("quick-open")}
-				>
-					<Icon name="search" />
-					<span class="cmd-center-name">{state.workspace!.name}</span>
-					<Show when={keysFor("quick-open")}>
-						<span class="cmd-center-keys">{keysFor("quick-open")}</span>
+				<div class="title-center">
+					<button
+						class="cmd-center"
+						title={`Go to file…${keysFor("quick-open") ? ` (${keysFor("quick-open")})` : ""}`}
+						aria-label={`Go to file in ${state.workspace!.name}${keysFor("quick-open") ? ` (${keysFor("quick-open")})` : ""}`}
+						onClick={() => runCommand("quick-open")}
+					>
+						<Icon name="search" />
+						<span class="cmd-center-name">{state.workspace!.name}</span>
+						<Show when={keysFor("quick-open")}>
+							<span class="cmd-center-keys">{keysFor("quick-open")}</span>
+						</Show>
+					</button>
+					<Show when={hasAnyTickets()}>
+						<button
+							type="button"
+							class="title-ticket"
+							classList={{ active: Boolean(focusedTicket()) }}
+							title={
+								focusedTicket()
+									? `Active working ticket: ${focusedTicket()} (coordinates Docs, Agent, Git, Search & Graph). Click to switch or clear.`
+									: "Set active working ticket (coordinates Docs, Agent, Git, Search & Graph)"
+							}
+							aria-label={focusedTicket() ? `Active working ticket: ${focusedTicket()}. Switch or clear.` : "Set active working ticket."}
+							onClick={() => void pickActiveTicket()}
+						>
+							<Icon name={focusedTicket() ? "pinned" : "checklist"} />
+							<span class="title-ticket-label">{focusedTicket() || "Ticket"}</span>
+						</button>
 					</Show>
-				</button>
+				</div>
 			</Show>
 			<span class="spacer" />
 			<LayoutControls />

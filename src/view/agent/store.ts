@@ -23,10 +23,99 @@ export type Entry = {
 	turn?: EntryMeta;
 };
 
+export type SavedThreadEntry = Omit<Entry, "id" | "streaming">;
+
+export type SavedThread = {
+	id: string;
+	title: string;
+	updatedAt: number;
+	ticket?: string;
+	entries: SavedThreadEntry[];
+};
+
+const MAX_THREADS = 5;
+const MAX_THREAD_ENTRIES = 40;
+const threadStorageKey = (canonRoot: string) => `agent.threads.v1:${canonRoot}`;
+
+let activeWorkspaceKey: string | null = null;
+
+function readSavedThreads(canonRoot: string): SavedThread[] {
+	try {
+		const raw = localStorage.getItem(threadStorageKey(canonRoot));
+		if (!raw) return [];
+		const parsed = JSON.parse(raw);
+		if (!Array.isArray(parsed)) return [];
+		const out: SavedThread[] = [];
+		for (const item of parsed) {
+			if (!item || typeof item !== "object") continue;
+			const id = typeof item.id === "string" && item.id.trim() ? item.id.trim() : "";
+			const title = typeof item.title === "string" && item.title.trim() ? item.title.trim() : "Agent conversation";
+			const updatedAt = typeof item.updatedAt === "number" && Number.isFinite(item.updatedAt) ? item.updatedAt : Date.now();
+			const ticket = typeof item.ticket === "string" && item.ticket.trim() ? item.ticket.trim() : undefined;
+			const rawEntries = Array.isArray(item.entries) ? item.entries : [];
+			const entries: SavedThreadEntry[] = [];
+			for (const e of rawEntries.slice(-MAX_THREAD_ENTRIES)) {
+				if (!e || typeof e !== "object") continue;
+				if (e.role !== "user" && e.role !== "agent" && e.role !== "note") continue;
+				if (typeof e.text !== "string") continue;
+				const turn =
+					e.turn && typeof e.turn === "object"
+						? {
+								...(typeof e.turn.ticket === "string" ? { ticket: e.turn.ticket } : {}),
+								...(typeof e.turn.codePath === "string" ? { codePath: e.turn.codePath } : {}),
+								...(typeof e.turn.isCatalogPrompt === "boolean" ? { isCatalogPrompt: e.turn.isCatalogPrompt } : {}),
+							}
+						: undefined;
+				entries.push({
+					role: e.role,
+					text: e.text,
+					...(typeof e.meta === "string" ? { meta: e.meta } : {}),
+					...(turn && Object.keys(turn).length ? { turn } : {}),
+				});
+			}
+			if (id && entries.length) {
+				out.push({ id, title, updatedAt, ...(ticket ? { ticket } : {}), entries });
+			}
+		}
+		return out.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, MAX_THREADS);
+	} catch {
+		return [];
+	}
+}
+
+function writeSavedThreads(canonRoot: string, threads: readonly SavedThread[]) {
+	try {
+		const trimmed = threads.slice(0, MAX_THREADS).map((t) => ({
+			...t,
+			entries: t.entries.slice(-MAX_THREAD_ENTRIES),
+		}));
+		localStorage.setItem(threadStorageKey(canonRoot), JSON.stringify(trimmed));
+	} catch {
+		// localStorage unavailable or quota reached: ignore cleanly.
+	}
+}
+
+function deriveThreadTitle(entries: readonly Entry[]): string {
+	const firstUser = entries.find((e) => e.role === "user" && e.text.trim());
+	if (!firstUser) return "Agent conversation";
+	const clean = firstUser.text.replace(/\s{2}\(with [^)]+\)\s*$/, "").replace(/\s+/g, " ").trim();
+	return clean.length > 64 ? `${clean.slice(0, 63)}…` : clean || "Agent conversation";
+}
+
+function deriveThreadTicket(entries: readonly Entry[]): string | undefined {
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const t = entries[i]!.turn?.ticket?.trim();
+		if (t) return t;
+	}
+	return undefined;
+}
+
 export const [agent, setAgent] = createStore({
 	status: { state: "off" } as AgentStatus,
 	models: [] as AgentModel[],
 	entries: [] as Entry[],
+	threads: [] as SavedThread[],
+	activeThreadId: null as string | null,
 	busy: false,
 	/** Stop was asked for, and the turn has not ended yet. */
 	stopping: false,
@@ -48,8 +137,88 @@ export function addEntry(entry: Omit<Entry, "id">) {
 	return id;
 }
 
+/** Persists the active thread (capped to 5 threads × 40 entries) to per-workspace localStorage only. */
+export function persistCurrentThread() {
+	if (!activeWorkspaceKey) return;
+	const hasContent = agent.entries.some((e) => (e.role === "user" || e.role === "agent") && e.text.trim().length > 0);
+	if (!hasContent) return;
+	const cleanEntries: SavedThreadEntry[] = agent.entries
+		.filter((e) => e.text.trim().length > 0)
+		.slice(-MAX_THREAD_ENTRIES)
+		.map(({ id: _id, streaming: _s, sessionID: _sid, ...rest }) => ({
+			role: rest.role,
+			text: rest.text,
+			...(rest.meta ? { meta: rest.meta } : {}),
+			...(rest.turn ? { turn: { ...rest.turn } } : {}),
+		}));
+	if (!cleanEntries.length) return;
+	const id = agent.activeThreadId ?? `thr_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+	const ticket = deriveThreadTicket(agent.entries);
+	const saved: SavedThread = {
+		id,
+		title: deriveThreadTitle(agent.entries),
+		updatedAt: Date.now(),
+		...(ticket ? { ticket } : {}),
+		entries: cleanEntries,
+	};
+	const others = agent.threads.filter((t) => t.id !== id);
+	const next = [saved, ...others].slice(0, MAX_THREADS);
+	setAgent({ activeThreadId: id, threads: next });
+	writeSavedThreads(activeWorkspaceKey, next);
+}
+
+/** Loads saved conversation threads for `canonRoot` on workspace open/switch (saving any outgoing thread first). */
+export function syncWorkspaceThreads(canonRoot: string | null) {
+	if (canonRoot === activeWorkspaceKey) return;
+	persistCurrentThread();
+	activeWorkspaceKey = canonRoot;
+	if (!canonRoot) {
+		setAgent({ threads: [], activeThreadId: null, entries: [], chatSession: null });
+		return;
+	}
+	const loaded = readSavedThreads(canonRoot);
+	if (loaded.length > 0) {
+		const latest = loaded[0]!;
+		const restored: Entry[] = latest.entries.map((e) => ({ ...e, id: nextEntry++ }));
+		setAgent({ threads: loaded, activeThreadId: latest.id, entries: restored, chatSession: null });
+	} else {
+		setAgent({ threads: [], activeThreadId: null, entries: [], chatSession: null });
+	}
+}
+
+/** Switches the conversation view to a previously saved thread from this workspace's History. */
+export function switchThread(threadId: string) {
+	if (agent.busy) return;
+	persistCurrentThread();
+	const target = agent.threads.find((t) => t.id === threadId);
+	if (!target) return;
+	const restored: Entry[] = target.entries.map((e) => ({ ...e, id: nextEntry++ }));
+	setAgent({ entries: restored, activeThreadId: target.id, chatSession: null });
+}
+
+/** Archives the current thread into History and starts a fresh conversation thread. */
+export function startNewThread(noteText?: string) {
+	if (agent.busy) return;
+	persistCurrentThread();
+	const entries: Entry[] = noteText ? [{ id: nextEntry++, role: "note", text: noteText }] : [];
+	setAgent({ entries, activeThreadId: null, chatSession: null });
+}
+
+/** Removes all saved threads for the current workspace from localStorage. */
+export function clearSavedThreads() {
+	if (agent.busy) return;
+	if (activeWorkspaceKey) {
+		try {
+			localStorage.removeItem(threadStorageKey(activeWorkspaceKey));
+		} catch {
+			// ignore
+		}
+	}
+	setAgent({ threads: [], activeThreadId: null, entries: [], chatSession: null });
+}
+
 export function clearEntries() {
-	setAgent({ entries: [], chatSession: null });
+	setAgent({ entries: [], activeThreadId: null, chatSession: null });
 }
 
 /** For work nobody waits for: a failure is shown and written to Output, never dropped. */
@@ -159,6 +328,7 @@ export async function ask(text: string, options: { title?: string; skills?: stri
 		for (const id of streaming.values()) setAgent("entries", (e) => e.id === id, "streaming", false);
 		streaming.clear();
 		setAgent({ busy: false, stopping: false });
+		persistCurrentThread();
 	}
 }
 

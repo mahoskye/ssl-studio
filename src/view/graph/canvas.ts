@@ -209,6 +209,133 @@ export function splinePoint(points: readonly Point[], length: number, steps = 12
 	return here;
 }
 
+/**
+ * Cleans an ELK polyline route before curve rounding:
+ * 1) drops consecutive duplicate points (< 0.5px),
+ * 2) removes redundant collinear intermediate waypoints,
+ * 3) absorbs tiny orthogonal port-entry / port-exit micro-jogs (<= 14px) that ELK
+ *    inserts across compound container boundaries, keeping the port stub aligned
+ *    with the box & arrowhead while eliminating jagged 90-degree staircase kinks.
+ */
+export function cleanEdgePoints(points: readonly Point[]): Point[] {
+	if (points.length <= 2) return points.map((p) => ({ x: p.x, y: p.y }));
+	const dedup: Point[] = [{ x: points[0]!.x, y: points[0]!.y }];
+	for (let i = 1; i < points.length; i++) {
+		const p = points[i]!;
+		const prev = dedup[dedup.length - 1]!;
+		if (Math.hypot(p.x - prev.x, p.y - prev.y) >= 0.5) dedup.push({ x: p.x, y: p.y });
+	}
+	if (dedup.length <= 2) return dedup;
+
+	const stripCollinear = (src: Point[]): Point[] => {
+		if (src.length <= 2) return src;
+		const out: Point[] = [src[0]!];
+		for (let i = 1; i < src.length - 1; i++) {
+			const a = out[out.length - 1]!;
+			const b = src[i]!;
+			const c = src[i + 1]!;
+			const abx = b.x - a.x;
+			const aby = b.y - a.y;
+			const bcx = c.x - b.x;
+			const bcy = c.y - b.y;
+			const acLen = Math.hypot(c.x - a.x, c.y - a.y);
+			const dot = abx * bcx + aby * bcy;
+			if (dot > 0 && acLen > 0) {
+				const cross = Math.abs(abx * (c.y - a.y) - aby * (c.x - a.x));
+				if (cross / acLen < 0.5) continue;
+			}
+			out.push(b);
+		}
+		out.push(src[src.length - 1]!);
+		return out;
+	};
+
+	let pts = stripCollinear(dedup);
+
+	// Smooth tiny perpendicular micro-jogs right beside the start port (p0 -> p1 stub, p1 -> p2 micro-jog, p2 -> p3 main leg).
+	if (pts.length >= 4) {
+		const [p0, p1, p2, p3] = [pts[0]!, pts[1]!, pts[2]!, pts[3]!];
+		const hStub = Math.abs(p1.y - p0.y) < 0.5 && Math.abs(p1.x - p0.x) <= 24;
+		const vJog = Math.abs(p2.x - p1.x) < 0.5 && Math.abs(p2.y - p1.y) > 0.5 && Math.abs(p2.y - p1.y) <= 14;
+		const hOut = (p3.x - p2.x) * (p1.x - p0.x) > 0 && Math.abs(p3.x - p2.x) >= 12;
+		const vStub = Math.abs(p1.x - p0.x) < 0.5 && Math.abs(p1.y - p0.y) <= 24;
+		const hJog = Math.abs(p2.y - p1.y) < 0.5 && Math.abs(p2.x - p1.x) > 0.5 && Math.abs(p2.x - p1.x) <= 14;
+		const vOut = (p3.y - p2.y) * (p1.y - p0.y) > 0 && Math.abs(p3.y - p2.y) >= 12;
+		if ((hStub && vJog && hOut) || (vStub && hJog && vOut)) {
+			pts = [p0, p1, ...pts.slice(3)];
+		}
+	}
+
+	// Smooth tiny perpendicular micro-jogs right beside the end port (p0 -> p1 main leg, p1 -> p2 micro-jog, p2 -> p3 stub).
+	if (pts.length >= 4) {
+		const n = pts.length;
+		const [p0, p1, p2, p3] = [pts[n - 4]!, pts[n - 3]!, pts[n - 2]!, pts[n - 1]!];
+		const hStub = Math.abs(p3.y - p2.y) < 0.5 && Math.abs(p3.x - p2.x) <= 24;
+		const vJog = Math.abs(p2.x - p1.x) < 0.5 && Math.abs(p2.y - p1.y) > 0.5 && Math.abs(p2.y - p1.y) <= 14;
+		const hIn = (p1.x - p0.x) * (p3.x - p2.x) > 0 && Math.abs(p1.x - p0.x) >= 12;
+		const vStub = Math.abs(p3.x - p2.x) < 0.5 && Math.abs(p3.y - p2.y) <= 24;
+		const hJog = Math.abs(p2.y - p1.y) < 0.5 && Math.abs(p2.x - p1.x) > 0.5 && Math.abs(p2.x - p1.x) <= 14;
+		const vIn = (p1.y - p0.y) * (p3.y - p2.y) > 0 && Math.abs(p1.y - p0.y) >= 12;
+		if ((hStub && vJog && hIn) || (vStub && hJog && vIn)) {
+			pts = [...pts.slice(0, n - 3), p2, p3];
+		}
+	}
+
+	return stripCollinear(pts);
+}
+
+/**
+ * Draws a clean, C1-continuous smooth curve from ELK POLYLINE waypoints using
+ * capped quadratic corner rounding. Unlike ELK's SPLINES + INCLUDE_CHILDREN mode
+ * (which mixes orthogonal corners and Bezier handles into one flat array), every
+ * waypoint here is a true route corner so curves never kink, loop, or overshoot.
+ */
+export function smoothEdgePath(points: readonly Point[], radius = 24): string {
+	return roundedPath(cleanEdgePoints(points), radius);
+}
+
+/** The point at arc-length `length` along `smoothEdgePath(points, radius)`. */
+export function smoothEdgePoint(points: readonly Point[], length: number, radius = 24, steps = 12): Point {
+	const pts = cleanEdgePoints(points);
+	if (!pts.length) return { x: 0, y: 0 };
+	if (pts.length === 1) return pts[0]!;
+	let here = pts[0]!;
+	let left = length;
+	const walk = (to: Point): Point | null => {
+		const step = Math.hypot(to.x - here.x, to.y - here.y);
+		if (step >= left && step > 0) return { x: here.x + ((to.x - here.x) * left) / step, y: here.y + ((to.y - here.y) * left) / step };
+		left -= step;
+		here = to;
+		return null;
+	};
+	for (let i = 1; i < pts.length - 1; i++) {
+		const [before, corner, after] = [pts[i - 1]!, pts[i]!, pts[i + 1]!];
+		const into = Math.hypot(corner.x - before.x, corner.y - before.y);
+		const out = Math.hypot(after.x - corner.x, after.y - corner.y);
+		const r = Math.min(radius, into / 2, out / 2);
+		if (!(r > 0.5)) {
+			const hit = walk(corner);
+			if (hit) return hit;
+			continue;
+		}
+		const start = { x: corner.x + ((before.x - corner.x) * r) / into, y: corner.y + ((before.y - corner.y) * r) / into };
+		const end = { x: corner.x + ((after.x - corner.x) * r) / out, y: corner.y + ((after.y - corner.y) * r) / out };
+		const pre = walk(start);
+		if (pre) return pre;
+		for (let k = 1; k <= steps; k++) {
+			const t = k / steps;
+			const u = 1 - t;
+			const hit = walk({
+				x: u * u * start.x + 2 * u * t * corner.x + t * t * end.x,
+				y: u * u * start.y + 2 * u * t * corner.y + t * t * end.y,
+			});
+			if (hit) return hit;
+		}
+	}
+	const tail = walk(pts[pts.length - 1]!);
+	return tail ?? here;
+}
+
 // --- the map of a picture larger than its view -------------------------------------
 
 /** The part of the content a view shows, in the content's own units. */

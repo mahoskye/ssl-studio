@@ -23,7 +23,9 @@ import { flatRegions, regionColor, symbolPath } from "./regions";
 import { BlocksView } from "../blocks/BlocksView";
 import { isPlanPath } from "../plan/model";
 import { PlanView } from "../plan/PlanView";
-import { dirName, isInside, relativeTo } from "../../shared/paths";
+import { baseName, dirName, isInside, relativePath, relativeTo } from "../../shared/paths";
+import { linkWritten } from "../../shared/docLinks";
+import { extractCommentSpans } from "../../shared/editorDocHelpers";
 import { tabLabels } from "./tabs";
 import { Menu, type MenuItem } from "../Menu";
 import { backend } from "../backend";
@@ -33,6 +35,7 @@ import { docsGoverningFile, ticketForFile } from "../../shared/workContext";
 import { TableView } from "./TableView";
 import { FileView } from "./FileView";
 import { useGitMarks } from "./gitMarks";
+import { observeMarkerHoverSeverity } from "./hoverSeverity";
 import { Start } from "../Start";
 import { FileMark } from "../FileMark";
 import { size as scriptSize } from "../StatusBar";
@@ -72,9 +75,9 @@ export function EditorGroup(props: { index: number }) {
 	const isPlan = () => isPlanPath(group().active) && !showFile();
 	const planViewMode = () => (group().active && isPlan() ? planMode(group().active!, props.index) : "chart");
 	const showChart = () => isPlan() && planViewMode() !== "source";
-	const isSsl = () => Boolean(group().active && documents.get(group().active!)?.model.getLanguageId() === "ssl");
-	const activeLang = () => (group().active ? documents.get(group().active!)?.model.getLanguageId() : undefined);
-	const isSql = () => activeLang() === "sql" && !showFile();
+	const activeLang = () => (state.kindVersion >= 0 && group().active ? documents.get(group().active!)?.model.getLanguageId() : undefined);
+	const isSsl = () => activeLang() === "ssl" && !showFile();
+	const isSql = () => (activeLang() === "sql" || activeLang() === "pgsql" || activeLang() === "mysql") && !showFile();
 	const canFormat = () => {
 		const path = group().active;
 		const lang = activeLang();
@@ -258,6 +261,30 @@ export function EditorGroup(props: { index: number }) {
 				run: () => void import("../commands").then((all) => all.runCommand(id)),
 			});
 		}
+		editor.addAction({
+			id: "app.show-in-call-graph",
+			label: "Show in Call Graph",
+			precondition: "editorLangId == 'ssl'",
+			contextMenuGroupId: "9_app_1_nav",
+			contextMenuOrder: 3,
+			run: (ed) => {
+				const p = group().active;
+				if (!p) return;
+				const line = ed.getPosition()?.lineNumber ?? 1;
+				void (async () => {
+					let list = canonical(p) === canonical(activePath() ?? "") ? symbols() : [];
+					if (!list.length && ed.getModel()) {
+						const { session } = await import("../lsp/session");
+						list = await session.documentSymbols(ed.getModel()!).catch(() => []);
+					}
+					const proc = [...symbolPath(list, line)]
+						.reverse()
+						.find((s) => s.kind === monaco.languages.SymbolKind.Function || s.kind === monaco.languages.SymbolKind.Method);
+					const { openGraphFocusedOn } = await import("../graph/GraphView");
+					openGraphFocusedOn(p, proc?.name);
+				})();
+			},
+		});
 		useGitMarks(editor, () => group().active);
 		// The editor keeps Ctrl+F12 for "Go to definition" to where it is told it is in a web view, where F12 alone
 		// may be the browser's. It was never told, so the key the Go menu shows (the last the editor lists) did
@@ -266,7 +293,11 @@ export function EditorGroup(props: { index: number }) {
 		// The code's own face, read before any custom font overrides.
 		codeFont = editor.getOption(monaco.editor.EditorOption.fontFamily);
 		const listKeys = continueLists(editor);
-		onCleanup(() => listKeys.dispose());
+		const stopHoverSeverity = observeMarkerHoverSeverity(editor);
+		onCleanup(() => {
+			listKeys.dispose();
+			stopHoverSeverity();
+		});
 		setRoomy(editor.getLayoutInfo().width >= MINIMAP_FROM);
 		editor.onDidLayoutChange((layout) => setRoomy(layout.width >= MINIMAP_FROM));
 		editor.onDidFocusEditorText(() => setState("activeGroup", props.index));
@@ -1147,7 +1178,61 @@ export function EditorGroup(props: { index: number }) {
 							</For>
 						</nav>
 					</Show>
-					<div class="editor-host" ref={host} />
+					<div
+						class="editor-host"
+						ref={host}
+						onDragOver={(e) => {
+							const types = e.dataTransfer?.types;
+							if (!types?.includes("application/x-ssl-studio-file")) return;
+							e.preventDefault();
+							e.stopPropagation();
+							if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+						}}
+						onDrop={(e) => {
+							const droppedPath = e.dataTransfer?.getData("application/x-ssl-studio-file");
+							if (!droppedPath || !editor) return;
+							const model = editor.getModel();
+							const curPath = group().active;
+							if (!model || !curPath) return;
+							e.preventDefault();
+							e.stopPropagation();
+							const hit = editor.getTargetAtClientPoint(e.clientX, e.clientY);
+							const pos = hit?.position ?? editor.getPosition() ?? new monaco.Position(1, 1);
+							const lang = model.getLanguageId();
+							let snippet: string;
+							if (lang === "markdown" || isMarkdown(curPath)) {
+								const relRaw = relativePath(dirName(curPath), droppedPath).replace(/\\/g, "/");
+								const relLink = linkWritten(relRaw, relRaw);
+								const droppedDoc = docs().find((d) => d.exists && canonical(d.path) === canonical(droppedPath));
+								const title = droppedDoc?.title?.trim() || baseName(droppedPath).replace(/\.[^.]+$/, "") || baseName(droppedPath);
+								snippet = `[${title}](${relLink})`;
+							} else if (lang === "ssl" || lang === "sql") {
+								const root = state.workspace?.root;
+								const rel =
+									root && isInside(root, droppedPath)
+										? relativeTo(root, droppedPath).replace(/\\/g, "/")
+										: relativePath(dirName(curPath), droppedPath).replace(/\\/g, "/");
+								let insideComment = false;
+								if (pos.lineNumber <= 5000) {
+									const lines: string[] = [];
+									for (let i = 1; i <= pos.lineNumber; i++) lines.push(model.getLineContent(i));
+									const spans = extractCommentSpans(lines, lang)[pos.lineNumber - 1];
+									const offset = pos.column - 1;
+									insideComment = Boolean(spans?.some((s) => offset >= s.from && offset <= s.to));
+								}
+								snippet = insideComment ? rel : `/* See ${rel}; */`;
+							} else {
+								const root = state.workspace?.root;
+								snippet =
+									root && isInside(root, droppedPath)
+										? relativeTo(root, droppedPath).replace(/\\/g, "/")
+										: relativePath(dirName(curPath), droppedPath).replace(/\\/g, "/");
+							}
+							const range = new monaco.Range(pos.lineNumber, pos.column, pos.lineNumber, pos.column);
+							editor.executeEdits("drop-file", [{ range, text: snippet, forceMoveMarkers: true }]);
+							editor.focus();
+						}}
+					/>
 				</div>
 				<Show when={!group().active}>
 					<div

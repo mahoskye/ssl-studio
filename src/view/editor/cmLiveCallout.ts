@@ -13,6 +13,7 @@ import { EditorView, WidgetType } from "@codemirror/view";
 import { fenced } from "../../shared/catalog";
 import { htmlToMarkdown, looksLikeRichHtml, tsvToMarkdownTable } from "../../shared/htmlToMarkdown";
 import {
+	blockquoteEnter,
 	CALLOUT_PRESETS,
 	CALLOUT_SPECS,
 	pasteUrlOverSelection,
@@ -21,6 +22,7 @@ import {
 } from "../../shared/markdownEdit";
 import { listEnter } from "../../shared/markdownText";
 import { createTextareaCompleter, type TextareaCompleter } from "./cmCompletion";
+import { extractImageFiles } from "./cmKeymap";
 import {
 	historyFallbackFacet,
 	liveCallbacksFacet,
@@ -28,8 +30,9 @@ import {
 	setRawEditBlockEffect,
 	type CalloutWidgetHost,
 } from "./cmLiveShared";
-import { hydrateImagesInElement } from "./imageResolve";
+import { hydrateImagesInElement, saveImageAttachment } from "./imageResolve";
 import { colourCode } from "./markdownCode";
+import { hydrateMathInElement } from "./markdownHtml";
 
 const TASK_RE = /^((?:[ \t]*>[ \t]?)*[ \t]*)([-*+]|\d{1,9}[.)])([ \t]+)\[([ xX])\]([ \t]?)/;
 
@@ -330,6 +333,7 @@ export class CalloutWidget extends WidgetType {
 			}
 			bodyEl.innerHTML = renderInlineHtml(ctrl.bodyMarkdown, ctrl.filePath, false, true);
 			hydrateImagesInElement(bodyEl, ctrl.filePath);
+			hydrateMathInElement(bodyEl);
 			void colourCode(bodyEl);
 
 			const boxes = [...bodyEl.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')];
@@ -484,6 +488,22 @@ export class CalloutWidget extends WidgetType {
 				completer.update();
 			});
 
+			const saveAndInsertCalloutImages = async (files: File[]) => {
+				const snippets: string[] = [];
+				for (const file of files) {
+					const saved = await saveImageAttachment(file, ctrl.filePath);
+					if (saved) snippets.push(saved.markdown);
+				}
+				if (!snippets.length || !ta.isConnected) return;
+				const insert = snippets.join("\n");
+				const curS = ta.selectionStart ?? ta.value.length;
+				const curE = ta.selectionEnd ?? curS;
+				ta.setRangeText(insert, curS, curE, "end");
+				fitTextarea(ta);
+				commitCallout({ body: ta.value, keepEmptyBodyLine: true });
+				ta.focus();
+			};
+
 			ta.addEventListener("paste", (e) => {
 				e.stopPropagation();
 				const plainOnly = performance.now() < plainPasteUntil;
@@ -494,6 +514,15 @@ export class CalloutWidget extends WidgetType {
 				const html = e.clipboardData?.getData("text/html") ?? "";
 				const s = ta.selectionStart ?? 0;
 				const end = ta.selectionEnd ?? s;
+
+				// 0. Pasted screenshot / image file -> save to attachments & insert `![alt](path)`.
+				const images = extractImageFiles(e.clipboardData);
+				if (images.length && !tsvToMarkdownTable(plain)) {
+					e.preventDefault();
+					completer.close();
+					void saveAndInsertCalloutImages(images);
+					return;
+				}
 
 				// 1. URL-over-selection paste -> `[selected](url)`.
 				if (end > s) {
@@ -533,6 +562,23 @@ export class CalloutWidget extends WidgetType {
 						commitCallout({ body: ta.value, keepEmptyBodyLine: true });
 					}
 				}
+			});
+
+			ta.addEventListener("dragover", (e) => {
+				const dt = e.dataTransfer;
+				if (!dt || !Array.from(dt.types).includes("Files")) return;
+				e.preventDefault();
+				e.stopPropagation();
+				dt.dropEffect = "copy";
+			});
+
+			ta.addEventListener("drop", (e) => {
+				const images = extractImageFiles(e.dataTransfer);
+				if (!images.length) return;
+				e.preventDefault();
+				e.stopPropagation();
+				completer.close();
+				void saveAndInsertCalloutImages(images);
 			});
 
 			ta.addEventListener("mousedown", (e) => e.stopPropagation());
@@ -586,7 +632,7 @@ export class CalloutWidget extends WidgetType {
 					titleInput.setSelectionRange(titleInput.value.length, titleInput.value.length);
 					return;
 				}
-				// Smart Markdown list & task continuation inside the callout body!
+				// Smart Markdown list, task & nested callout/blockquote continuation inside the callout body!
 				if (e.key === "Enter" && !e.shiftKey && ta.selectionStart === ta.selectionEnd) {
 					const pos = ta.selectionStart;
 					const lineStart = ta.value.lastIndexOf("\n", pos - 1) + 1;
@@ -594,7 +640,7 @@ export class CalloutWidget extends WidgetType {
 					const lineEnd = lineEndRaw < 0 ? ta.value.length : lineEndRaw;
 					const lineText = ta.value.slice(lineStart, lineEnd);
 					const col = pos - lineStart;
-					const next = listEnter(lineText, col);
+					const next = listEnter(lineText, col) ?? blockquoteEnter(lineText, col);
 					if (next) {
 						ctrl.suppressEnterUntil = performance.now() + 80;
 						e.preventDefault();
@@ -806,11 +852,38 @@ export class CalloutWidget extends WidgetType {
 			ctrl.syncAll();
 		});
 
-		// --- Body click & hover ---
+		// --- Body click, drag-drop & hover ---
+		bodyEl.addEventListener("dragover", (e) => {
+			if (ctrl.readMode) return;
+			const dt = e.dataTransfer;
+			if (!dt || !Array.from(dt.types).includes("Files")) return;
+			e.preventDefault();
+			e.stopPropagation();
+			dt.dropEffect = "copy";
+		});
+		bodyEl.addEventListener("drop", (e) => {
+			if (ctrl.readMode) return;
+			const images = extractImageFiles(e.dataTransfer);
+			if (!images.length) return;
+			e.preventDefault();
+			e.stopPropagation();
+			void (async () => {
+				const snippets: string[] = [];
+				for (const file of images) {
+					const saved = await saveImageAttachment(file, ctrl.filePath);
+					if (saved) snippets.push(saved.markdown);
+				}
+				if (!snippets.length) return;
+				const base = ctrl.bodyTextarea ? ctrl.bodyTextarea.value : ctrl.bodyMarkdown;
+				const nextBody = base.trim() ? `${base.replace(/\n+$/, "")}\n\n${snippets.join("\n")}` : snippets.join("\n");
+				commitCallout({ body: nextBody, keepEmptyBodyLine: ctrl.editingBody });
+			})();
+		});
+
 		bodyEl.addEventListener("mousedown", (e) => {
 			if (e.button !== 0) return;
 			const target = e.target as HTMLElement | null;
-			if (target?.closest("input[type='checkbox'], .cm-callout-body-input")) {
+			if (target?.closest("input[type='checkbox'], .cm-callout-body-input, summary")) {
 				e.stopPropagation();
 				return;
 			}
@@ -831,7 +904,7 @@ export class CalloutWidget extends WidgetType {
 				if (label) cb?.onTagClick(label);
 				return;
 			}
-			if (img && ctrl.readMode && img.src) {
+			if (img && !e.altKey && img.src) {
 				e.preventDefault();
 				e.stopPropagation();
 				cb?.onOpenImageLightbox({ src: img.src, alt: img.alt || "" });

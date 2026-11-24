@@ -1,4 +1,4 @@
-import { relativeTo } from "./paths";
+import { dirName, relativeTo, resolvePath } from "./paths";
 import { isCatalog, toneOf, type Tone } from "./projectDocs";
 import type { DocFile } from "./protocol";
 import { workLinkOf, type WorkLink } from "./workContext";
@@ -8,7 +8,7 @@ import { workLinkOf, type WorkLink } from "./workContext";
 // under its parent, the work under way first and what is finished last. Read
 // from the listing alone; the panel draws the rows.
 
-export type WorkRow = { file: DocFile; kind: "ticket" | "plan" | "spec"; depth: number; link?: WorkLink; archived?: boolean };
+export type WorkRow = { file: DocFile; kind: "ticket" | "plan" | "plan-doc" | "spec"; depth: number; link?: WorkLink; archived?: boolean };
 export type WorkSort = "status" | "key" | "title";
 export type WorkList = {
 	rows: WorkRow[];
@@ -47,10 +47,43 @@ export function workList(files: readonly DocFile[], root: string | undefined | n
 	const archivedTickets = allTickets.filter(isArchivedTicket);
 	const specs = real.filter((file) => file.group === "specs");
 	const plans = real.filter((file) => file.group === "plans");
+	const isPlanDoc = (file: DocFile) => /\.plan\.md$/i.test(file.name);
+	const normPath = (p: string) => p.replace(/\\/g, "/").toLowerCase();
+	const planDocsByChart = new Map<string, DocFile>();
+	for (const p of plans) {
+		if (isPlanDoc(p)) planDocsByChart.set(normPath(p.path.replace(/\.plan\.md$/i, ".plan.json")), p);
+	}
+	const planCharts = plans.filter((file) => !isPlanDoc(file));
+	const standalonePlanDocs = plans.filter((file) => isPlanDoc(file) && !planCharts.some((c) => normPath(c.path) === normPath(file.path.replace(/\.plan\.md$/i, ".plan.json"))));
 	const rel = (path: string) => relativeTo(root, path).split("\\").join("/");
-	const matchesRef = (filePath: string, ref: string) => rel(filePath).toLowerCase() === ref.split("\\").join("/").replace(/^\.?\/+/, "").toLowerCase();
-	const specsOf = (ticket: DocFile) => specs.filter((spec) => spec.tickets?.some((key) => same(key, ticket.ticket)) || ticket.specs?.some((path) => matchesRef(spec.path, path)));
-	const plansOf = (ticket: DocFile) => plans.filter((plan) => plan.tickets?.some((key) => same(key, ticket.ticket)) || ticket.plans?.some((path) => matchesRef(plan.path, path)));
+	const matchesRef = (filePath: string, ref: string, fromPath?: string) => {
+		const raw = ref.split("\\").join("/").split(/[?#]/)[0]!.trim();
+		if (!raw) return false;
+		if (fromPath && /^\.{1,2}\//.test(raw)) {
+			const resolved = resolvePath(dirName(fromPath), raw).split("\\").join("/").toLowerCase();
+			return filePath.split("\\").join("/").toLowerCase() === resolved;
+		}
+		return rel(filePath).toLowerCase() === raw.replace(/^\.?\/+/, "").toLowerCase();
+	};
+	const specsOf = (ticket: DocFile) => specs.filter((spec) => spec.tickets?.some((key) => same(key, ticket.ticket)) || ticket.specs?.some((path) => matchesRef(spec.path, path, ticket.path)));
+	const plansOf = (ticket: DocFile) => {
+		const matchedCharts = planCharts.filter((chart) => {
+			const pairedDoc = planDocsByChart.get(normPath(chart.path));
+			return (
+				chart.tickets?.some((key) => same(key, ticket.ticket)) ||
+				ticket.plans?.some((path) => matchesRef(chart.path, path, ticket.path)) ||
+				Boolean(
+					pairedDoc &&
+						(pairedDoc.tickets?.some((key) => same(key, ticket.ticket)) ||
+							ticket.plans?.some((path) => matchesRef(pairedDoc.path, path, ticket.path))),
+				)
+			);
+		});
+		const matchedStandalone = standalonePlanDocs.filter(
+			(doc) => doc.tickets?.some((key) => same(key, ticket.ticket)) || ticket.plans?.some((path) => matchesRef(doc.path, path, ticket.path)),
+		);
+		return { charts: matchedCharts, standalone: matchedStandalone };
+	};
 	// A ticket is under its parent when the parent is in the folder, and is not its own ancestor.
 	const byKey = new Map<string, DocFile>();
 	for (const t of tickets) if (t.ticket && !byKey.has(t.ticket.toLowerCase())) byKey.set(t.ticket.toLowerCase(), t);
@@ -94,7 +127,7 @@ export function workList(files: readonly DocFile[], root: string | undefined | n
 		specsByTicket.set(ticket, list);
 		for (const s of list) attachedSpecs.add(s);
 	}
-	const plansByTicket = new Map<DocFile, DocFile[]>();
+	const plansByTicket = new Map<DocFile, { charts: DocFile[]; standalone: DocFile[] }>();
 	for (const ticket of allTickets) plansByTicket.set(ticket, plansOf(ticket));
 
 	const rankMemo = new Map<DocFile, number>();
@@ -126,10 +159,25 @@ export function workList(files: readonly DocFile[], root: string | undefined | n
 				return a.rank - b.rank || a.at - b.at;
 			});
 
+	const emitPlans = (target: WorkRow[], ticket: DocFile, depth: number, archivedFlag?: boolean) => {
+		const found = plansByTicket.get(ticket);
+		if (!found) return;
+		for (const plan of found.charts) {
+			target.push({ file: plan, kind: "plan", depth, link: workLinkOf(ticket, plan, "plan"), ...(archivedFlag ? { archived: true } : {}) });
+			const pairedDoc = planDocsByChart.get(normPath(plan.path));
+			if (pairedDoc) {
+				target.push({ file: pairedDoc, kind: "plan-doc", depth: depth + 1, link: workLinkOf(ticket, pairedDoc, "plan"), ...(archivedFlag ? { archived: true } : {}) });
+			}
+		}
+		for (const doc of found.standalone) {
+			target.push({ file: doc, kind: "plan-doc", depth, link: workLinkOf(ticket, doc, "plan"), ...(archivedFlag ? { archived: true } : {}) });
+		}
+	};
+
 	const rows: WorkRow[] = [];
 	const add = (ticket: DocFile, depth: number, parentTicket?: DocFile) => {
 		rows.push({ file: ticket, kind: "ticket", depth, ...(parentTicket ? { link: workLinkOf(parentTicket, ticket, "ticket") } : {}) });
-		for (const plan of plansByTicket.get(ticket) ?? []) rows.push({ file: plan, kind: "plan", depth: depth + 1, link: workLinkOf(ticket, plan, "plan") });
+		emitPlans(rows, ticket, depth + 1);
 		for (const spec of specsByTicket.get(ticket) ?? []) rows.push({ file: spec, kind: "spec", depth: depth + 1, link: workLinkOf(ticket, spec, "spec") });
 		if (depth < 8) for (const { ticket: child } of byOrder(childrenOf(ticket))) add(child, depth + 1, ticket);
 	};
@@ -141,7 +189,7 @@ export function workList(files: readonly DocFile[], root: string | undefined | n
 	const archived: WorkRow[] = [];
 	for (const ticket of archivedTickets) {
 		archived.push({ file: ticket, kind: "ticket", depth: 0, archived: true });
-		for (const plan of plansByTicket.get(ticket) ?? []) archived.push({ file: plan, kind: "plan", depth: 1, link: workLinkOf(ticket, plan, "plan"), archived: true });
+		emitPlans(archived, ticket, 1, true);
 		for (const spec of specsByTicket.get(ticket) ?? []) archived.push({ file: spec, kind: "spec", depth: 1, link: workLinkOf(ticket, spec, "spec"), archived: true });
 	}
 	return { rows, archived, folded: fold ? finished.length : 0, loose: specs.filter((spec) => !attachedSpecs.has(spec)) };

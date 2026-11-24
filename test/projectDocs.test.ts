@@ -352,7 +352,7 @@ describe("the demo project's working documents", () => {
 	test("its tickets are listed with their keys, states and the tickets they are related to", async () => {
 		const tickets = (await listed()).filter((d) => d.group === "tickets" && !d.catalog);
 		expect(tickets.map((t) => [t.ticket, t.status])).toEqual([["DEMO-101", "done"], ["DEMO-102", "done"], ["DEMO-103", "in progress"]]);
-		expect(tickets[0]).toMatchObject({ title: "Give every waiting sample a due date", tickets: ["DEMO-102", "DEMO-103"], specs: ["design/SetSampleDueDates.spec.md"] });
+		expect(tickets[0]).toMatchObject({ title: "Give every waiting sample a due date", tickets: ["DEMO-102", "DEMO-103"], plans: ["design/SetSampleDueDates.plan.json"] });
 		// DEMO-103 is a ticket bundle folder with companion notes, SQL sample, JSON fixture, and .xfd layout.
 		expect(tickets[2]?.ticketFolder).toBe(join(root, "docs", "tickets", "DEMO-103"));
 		expect(tickets[2]?.ticketFiles?.map((f) => f.rel)).toEqual([
@@ -366,10 +366,10 @@ describe("the demo project's working documents", () => {
 		]);
 	});
 
-	test("a spec the planner wrote beside a plan is a spec, and is not listed with the plans", async () => {
+	test("a plan doc written beside a plan is listed with the plans, while specs stay in docs/specs/", async () => {
 		const docs = await listed();
-		expect(docs.filter((d) => d.group === "specs" && !d.catalog).map((d) => d.name.split("\\").join("/"))).toEqual(["Due-soon-report.md", "design/SetSampleDueDates.spec.md"]);
-		expect(docs.filter((d) => d.group === "plans").map((d) => d.name)).toEqual(["SetSampleDueDates.plan.json"]);
+		expect(docs.filter((d) => d.group === "specs" && !d.catalog).map((d) => d.name.split("\\").join("/"))).toEqual(["Due-soon-report.md"]);
+		expect(docs.filter((d) => d.group === "plans").map((d) => d.name)).toEqual(["SetSampleDueDates.plan.json", "SetSampleDueDates.plan.md"]);
 		expect(docs.find((d) => d.name === "Due-soon-report.md")).toMatchObject({ tickets: ["DEMO-103"], status: "in progress" });
 	});
 
@@ -389,7 +389,17 @@ describe("the demo project's working documents", () => {
 		const docs = await listed();
 		const schema = docs.filter((d) => d.group === "schema");
 		const of = (kind: string) => schema.filter((d) => d.kind === kind).map((d) => d.name.split("\\").join("/"));
-		expect(of("database")).toEqual(["database/DEMO_HOLIDAYS.md", "database/DEMO_OUTAGES.md", "database/DEMO_SAMPLES.md", "database/demo.sql"]);
+		expect(of("database")).toEqual([
+			"database/DEMO_HOLIDAYS.md",
+			"database/DEMO_HOLIDAYS.sql",
+			"database/DEMO_INSTRUMENTS.md",
+			"database/DEMO_INSTRUMENTS.sql",
+			"database/DEMO_OUTAGES.md",
+			"database/DEMO_OUTAGES.sql",
+			"database/DEMO_SAMPLES.md",
+			"database/DEMO_SAMPLES.sql",
+			"database/demo-seed.sql",
+		]);
 		expect(of("interfaces")).toEqual(["interfaces/Maintenance/outage-notice.json", "interfaces/Maintenance/Outage-notice.md"]);
 		expect(of("files")).toEqual(["files/Holiday-calendar.md", "files/holidays-2026.csv"]);
 		// At its top lies its catalog and nothing else: no README says what the list already says.
@@ -402,9 +412,9 @@ describe("the demo project's working documents", () => {
 		const list = schemaList(docs, { configured: true });
 		expect(list.catalog?.name).toBe("INDEX.md");
 		expect(list.top).toEqual([]);
-		expect(list.count).toBe(8);
+		expect(list.count).toBe(13);
 		expect(list.kinds.map((kind) => [kind.name, kind.count, kind.files.length, kind.parts.map((part) => [part.name, part.folder, part.files.length])])).toEqual([
-			["Database", 4, 4, []],
+			["Database", 9, 9, []],
 			["Interfaces", 2, 0, [["Maintenance", "interfaces/Maintenance", 2]]],
 			["Files", 2, 2, []],
 		]);
@@ -412,7 +422,8 @@ describe("the demo project's working documents", () => {
 		const items = catalogItems("schema", docs, { docs: join(root, "docs"), schema: join(root, "schema") });
 		expect([...new Set(items.map((item) => item.section))]).toEqual(["Database", "Interfaces: Maintenance", "Files"]);
 		expect(items.find((item) => item.title === "Outage notice")).toMatchObject({ path: "interfaces/Maintenance/Outage-notice.md", status: "draft" });
-		expect(items.find((item) => item.path === "database/demo.sql")?.title).toBe("demo.sql");
+		expect(items.find((item) => item.path === "database/DEMO_HOLIDAYS.sql")?.title).toBe("DEMO_HOLIDAYS.sql");
+		expect(items.find((item) => item.path === "database/demo-seed.sql")?.title).toBe("demo-seed.sql");
 	});
 
 	test("a folder of the project's own under the schema folder is a kind by its name", async () => {
@@ -506,8 +517,8 @@ describe("the demo project's working documents", () => {
 		expect(workFor(docs, "DEMO-999")).toBeNull();
 	});
 
-	test("a spec the planner wrote is for the ticket its plan names", async () => {
-		expect((await listed()).find((d) => d.name.endsWith("SetSampleDueDates.spec.md"))?.tickets).toEqual(["DEMO-101"]);
+	test("a plan doc written beside a plan is for the ticket its plan names", async () => {
+		expect((await listed()).find((d) => d.name.endsWith("SetSampleDueDates.plan.md"))?.tickets).toEqual(["DEMO-101"]);
 	});
 
 	test("the ticket at hand is the open document's, or the one ticket under way", async () => {
@@ -515,7 +526,7 @@ describe("the demo project's working documents", () => {
 		const at = (name: string) => docs.find((d) => d.name.endsWith(name))!.path;
 		expect(ticketAtHand(docs, at("DEMO-102.md"))).toBe("DEMO-102");
 		expect(ticketAtHand(docs, at("Does-rush-work-count-Sunday.md"))).toBe("DEMO-102");
-		expect(ticketAtHand(docs, at("SetSampleDueDates.spec.md"))).toBe("DEMO-101");
+		expect(ticketAtHand(docs, at("SetSampleDueDates.plan.md"))).toBe("DEMO-101");
 		// A script says nothing of a ticket: the one that is under way.
 		expect(ticketAtHand(docs, join(root, "src", "DueDates", "DueRule.ssl"))).toBe("DEMO-103");
 		expect(ticketAtHand(docs)).toBe("DEMO-103");
@@ -553,15 +564,20 @@ describe("what the working documents need", () => {
 		]);
 		// One update writes every catalog, so several are one thing to do.
 		expect(texts([file("tickets", "INDEX.md", { catalog: { stale: true } }), file("specs", "INDEX.md", { catalog: { stale: true } }), file("registries", "INDEX.md", { catalog: { stale: true } })])).toEqual(["The catalogs of tickets/, specs/ and registries/ are out of date."]);
-		// The planner's specs are beside their plans: with no specs folder there is no catalog to miss.
-		expect(texts([file("specs", "design/A.spec.md")])).toEqual([]);
+		// Plan docs live beside their plans in design/ (no catalog expected), whereas specs/ expects a catalog.
+		expect(texts([file("plans", "A.plan.md")])).toEqual([]);
+		expect(texts([file("specs", "A.md")])).toEqual(["specs/ has no catalog (INDEX.md)."]);
 	});
 
-	test("a registry that does not read as a table, and a spec that is not where its ticket says, are wrong", () => {
-		const checks = docChecks([file("registries", "settings.csv", { problems: ["Row 3 has 4 cells, and the first row names 5."] }), file("tickets", "A-1.md", { ticket: "A-1", missing: ["design/Gone.spec.md"] }), file("tickets", "INDEX.md", { catalog: { stale: false } }), file("registries", "INDEX.md", { catalog: { stale: false } })]);
-		expect(checks.map((check) => check.level)).toEqual(["warn", "warn"]);
-		expect(checks.map((check) => check.text)).toEqual(["Application settings: Row 3 has 4 cells, and the first row names 5.", "A-1 names a spec that is not there: design/Gone.spec.md"]);
-		expect(checksSummary(checks)).toBe("2 to fix");
+	test("a registry that does not read as a table, and a spec or plan that is not where its ticket says, are wrong", () => {
+		const checks = docChecks([file("registries", "settings.csv", { problems: ["Row 3 has 4 cells, and the first row names 5."] }), file("tickets", "A-1.md", { ticket: "A-1", missing: ["docs/specs/Gone.md", "design/Gone.plan.md"] }), file("tickets", "INDEX.md", { catalog: { stale: false } }), file("registries", "INDEX.md", { catalog: { stale: false } })]);
+		expect(checks.map((check) => check.level)).toEqual(["warn", "warn", "warn"]);
+		expect(checks.map((check) => check.text)).toEqual([
+			"Application settings: Row 3 has 4 cells, and the first row names 5.",
+			"A-1 names a spec that is not there: docs/specs/Gone.md",
+			"A-1 names a plan that is not there: design/Gone.plan.md",
+		]);
+		expect(checksSummary(checks)).toBe("3 to fix");
 	});
 
 	test("a ticket that is named and not there can be started, and is said once", () => {
@@ -819,8 +835,7 @@ describe("a ticket's own page", () => {
 		const docs = await listed();
 		const first = ticketWork(docs, "DEMO-101");
 		expect(first.map((group) => [group.name, group.files.map((file) => file.title || file.name)])).toEqual([
-			["Plans", ["SetSampleDueDates.plan.json"]],
-			["Specs", ["Set sample due dates"]],
+			["Plans", ["SetSampleDueDates.plan.json", "Set sample due dates"]],
 			["Related tickets", ["Rush samples count Saturday as a working day", "A report of the samples due soon"]],
 			["Open questions", ["Which holidays does each site keep?"]],
 			["Decisions", ["A walk looks at most 730 days ahead", "Planning and saving are two scripts"]],
@@ -838,20 +853,19 @@ describe("a ticket's own page", () => {
 		const byGroup = (key: string) => Object.fromEntries(ticketWork(docs, key).map((g) => [g.name, g.items.map((item) => item.reason)]));
 
 		expect(byGroup("DEMO-101")).toEqual({
-			Plans: ['plan "ticket": "DEMO-101"'],
-			Specs: ["ticket specs: · paired with SetSampleDueDates"],
+			Plans: ['plan "ticket" · ticket plans:', "plan doc for SetSampleDueDates"],
 			"Related tickets": ["related: (both)", "related: (both)"],
 			"Open questions": ["doc ticket: DEMO-101"],
 			Decisions: ["doc ticket: DEMO-101", "doc ticket: DEMO-101"],
 			Registries: ["Ticket column", "Ticket column"],
 		});
-		expect(byGroup("DEMO-102").Specs).toEqual(["ticket specs:"]);
+		expect(byGroup("DEMO-102").Plans).toEqual(["ticket plans:", "plan doc for SetSampleDueDates"]);
 		expect(byGroup("DEMO-103").Specs).toEqual(["spec ticket: DEMO-103"]);
 
-		const specPath = docs.find((d) => d.group === "specs" && d.name.endsWith("SetSampleDueDates.spec.md"))!.path;
-		expect(docLinkedTickets(docs, specPath).map((entry) => [entry.key, entry.reason])).toEqual([
-			["DEMO-101", "ticket specs: · paired with SetSampleDueDates"],
-			["DEMO-102", "ticket specs:"],
+		const planDocPath = docs.find((d) => d.group === "plans" && d.name.endsWith("SetSampleDueDates.plan.md"))!.path;
+		expect(docLinkedTickets(docs, planDocPath).map((entry) => [entry.key, entry.reason])).toEqual([
+			["DEMO-101", "plan doc for SetSampleDueDates"],
+			["DEMO-102", "plan doc for SetSampleDueDates"],
 		]);
 		const reportSpecPath = docs.find((d) => d.group === "specs" && d.name.endsWith("Due-soon-report.md"))!.path;
 		expect(docLinkedTickets(docs, reportSpecPath).map((entry) => [entry.key, entry.reason])).toEqual([
@@ -953,21 +967,28 @@ describe("the Work list", () => {
 		expect(shown([ticket("A-1", "Done"), ticket("A-2", "To Do"), ticket("A-3", "In Progress"), ticket("A-4", "open"), ticket("A-5", "Won't Do"), ticket("A-6", "in review")])).toEqual(["A-3", "A-6", "A-2", "A-4", "A-1", "A-5"]);
 	});
 
-	test("a ticket is under its parent, with its plans and specs under it, and a parent with work under way counts as under way", () => {
+	test("a ticket is under its parent, with its plans (and nested plan docs) and specs under it, and a parent with work under way counts as under way", () => {
 		const files: DocFile[] = [
 			ticket("A-1", "open"),
-			ticket("A-2", "open", { specs: ["design/Two.spec.md"] }),
+			ticket("A-2", "open", { specs: ["docs/specs/Two.md"] }),
 			ticket("A-3", "in progress", { parent: "a-2" }),
 			ticket("A-4", "done", { parent: "A-2" }),
 			ticket("A-5", "open", { parent: "A-99" }),
-			{ path: "/p/design/Two.spec.md", name: "design/Two.spec.md", group: "specs", exists: true },
+			{ path: "/p/docs/specs/Two.md", name: "Two.md", group: "specs", exists: true },
 			{ path: "/p/docs/specs/Three.md", name: "Three.md", group: "specs", exists: true, tickets: ["A-3"] },
 			{ path: "/p/design/Three.plan.json", name: "Three.plan.json", group: "plans", exists: true, tickets: ["A-3"] },
+			{ path: "/p/design/Three.plan.md", name: "Three.plan.md", group: "plans", exists: true, tickets: ["A-3"], pairedPlan: { name: "Three.plan.json", ticket: "A-3" } },
 			{ path: "/p/docs/specs/Alone.md", name: "Alone.md", group: "specs", exists: true },
 			{ path: "/p/docs/tickets/INDEX.md", name: "INDEX.md", group: "tickets", exists: true },
 		];
-		expect(shown(files)).toEqual(["A-2", "  spec:design/Two.spec.md", "  A-3", "    plan:Three.plan.json", "    spec:Three.md", "  A-4", "A-1", "A-5"]);
+		expect(shown(files)).toEqual(["A-2", "  spec:Two.md", "  A-3", "    plan:Three.plan.json", "      plan-doc:Three.plan.md", "    spec:Three.md", "  A-4", "A-1", "A-5"]);
 		expect(workList(files, "/p").loose.map((spec) => spec.name)).toEqual(["Alone.md"]);
+		// Folding the plan collapses its nested plan doc while leaving sibling specs visible.
+		const rows = workList(files, "/p").rows;
+		const folded = shownRows(rows, (r) => r.file.name === "Three.plan.json");
+		expect(folded.map((r) => `${r.file.name}${r.parent ? (r.shut ? "+" : "-") : ""}`)).toContain("Three.plan.json+");
+		expect(folded.some((r) => r.file.name === "Three.plan.md")).toBe(false);
+		expect(folded.some((r) => r.file.name === "Three.md")).toBe(true);
 	});
 
 	test("finished tickets beyond a few fold away behind a count, with what is under them, until they are asked for", () => {
@@ -996,18 +1017,19 @@ describe("the Work list", () => {
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 
-describe("a spec the planner wrote", () => {
+describe("a plan doc written beside a plan", () => {
 	test("is called what its plan is called when it has no heading of its own, and is for its plan's ticket", async () => {
-		const root = mkdtempSync(join(tmpdir(), "ssl-studio-spec-"));
+		const root = mkdtempSync(join(tmpdir(), "ssl-studio-plan-doc-"));
 		try {
 			mkdirSync(join(root, "design"));
 			writeFileSync(join(root, "design", "Mark late.plan.json"), JSON.stringify({ version: 1, title: "Mark late", ticket: "LIMS-7", groups: [], nodes: [], edges: [] }));
-			writeFileSync(join(root, "design", "Mark late.spec.md"), "**Prior art:** none.\n\n## Units\n\n```json\n[]\n```\n");
+			writeFileSync(join(root, "design", "Mark late.plan.md"), "**Prior art:** none.\n\n## Units\n\n```json\n[]\n```\n");
 			writeFileSync(join(root, "design", "Named.plan.json"), JSON.stringify({ version: 1, title: "A plan", groups: [], nodes: [], edges: [] }));
-			writeFileSync(join(root, "design", "Named.spec.md"), "# Its own name\n\n## Units\n");
+			writeFileSync(join(root, "design", "Named.plan.md"), "# Its own name\n\n## Units\n");
 			const docs = await listDocs(new WorkspaceFiles(root), await readProject(root));
-			const specs = docs.filter((d) => d.group === "specs");
-			expect(specs.map((d) => [d.title, d.tickets])).toEqual([["Mark late", ["LIMS-7"]], ["Its own name", undefined]]);
+			const planDocs = docs.filter((d) => d.group === "plans" && d.name.endsWith(".plan.md"));
+			expect(planDocs.map((d) => [d.title, d.tickets])).toEqual([["Mark late", ["LIMS-7"]], ["Its own name", undefined]]);
+			expect(docs.filter((d) => d.group === "specs")).toEqual([]);
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}

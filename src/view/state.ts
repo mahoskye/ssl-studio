@@ -21,8 +21,38 @@ import { trackDoc, trackJson, trackToml, trackXml } from "./docCheck";
 import { recall, remember } from "./graph/canvas";
 import { packTabs, packViews, tabsKey, unpackTabs, unpackViews, viewsKey } from "./editor/sessionTabs";
 import { movedAcross, othersOf, placed, previewed, rightOf, withPin } from "../shared/tabOrder";
+import {
+	MARKDOWN_MODE_KEY,
+	PLAN_MODE_KEY,
+	TABLE_TEXT_MODE_KEY,
+	parseMarkdownViewMode,
+	parsePlanViewMode,
+	parseTableTextMode,
+	resolveMarkdownMode,
+	resolvePlanMode,
+	resolveTableTextMode,
+	shouldUpdateDefaultMode,
+	type MarkdownViewMode,
+	type PlanViewMode,
+} from "../shared/viewModes";
 
-export type Group = { tabs: string[]; active: string | null; mode?: "text" | "blocks"; /** The tabs that stay: first in the row, and not closed with the others. */ pinned?: string[]; /** The tab opened for a look (one click in a list): the next such file takes its place. Shown in italics. */ preview?: string | null };
+export type { MarkdownViewMode, PlanViewMode };
+
+export type Group = {
+	tabs: string[];
+	active: string | null;
+	mode?: "text" | "blocks";
+	/** Per-group Markdown view mode (maintained by file type across all Markdown tabs in the group). */
+	mdMode?: MarkdownViewMode;
+	/** Per-group Plan view mode (maintained by file type across all Plan tabs in the group). */
+	planMode?: PlanViewMode;
+	/** Per-group CSV/TSV table text mode (maintained by file type across all tabular tabs in the group). */
+	tableText?: boolean;
+	/** The tabs that stay: first in the row, and not closed with the others. */
+	pinned?: string[];
+	/** The tab opened for a look (one click in a list): the next such file takes its place. Shown in italics. */
+	preview?: string | null;
+};
 export type PanelId = "explorer" | "objects" | "palette" | "reference" | "search" | "history" | "health" | "agent" | "docs" | "git";
 /** @deprecated names kept for readers: both sides hold any panel. */
 export type LeftView = PanelId;
@@ -64,14 +94,12 @@ export const [state, setState] = createStore({
 	bottomMaximized: false,
 	rightView: "health" as RightView,
 	centerView: "editors" as "editors" | "graph" | "welcome",
-	/** Plans shown as raw JSON source; a plan opens as its chart. */
-	planText: {} as Record<string, boolean>,
-	/** Plan view mode per file: Source (raw JSON), Text (readable outline & focus), Chart (visual flowchart). */
-	planMode: {} as Record<string, "source" | "text" | "chart">,
-	/** Markdown shown as text; a Markdown file opens rendered. */
-	mdText: {} as Record<string, boolean>,
-	/** Obsidian-style Markdown view mode per file: Source (raw), Live (formatted edit), Read (rendered page). */
-	mdMode: {} as Record<string, "source" | "live" | "read">,
+	/** Persisted default Plan view mode (Source | Text | Chart), shared across all Plan documents. */
+	planViewMode: parsePlanViewMode(recall(PLAN_MODE_KEY)) as PlanViewMode | null,
+	/** Persisted default CSV/TSV view mode (`true` = Text, `false` = Table), shared across all tabular files. */
+	tableTextDefault: parseTableTextMode(recall(TABLE_TEXT_MODE_KEY)) as boolean | null,
+	/** Persisted default Markdown view mode (Source | Live | Read), shared across all Markdown documents. */
+	mdViewMode: parseMarkdownViewMode(recall(MARKDOWN_MODE_KEY)) as MarkdownViewMode | null,
 	messages: [] as Message[],
 	output: [] as string[],
 	cursor: { line: 1, column: 1 },
@@ -341,63 +369,67 @@ export async function saveSetting(patch: SettingsPatch, scope: "user" | "workspa
 export const isUntitled = (path: string | null | undefined): path is string => Boolean(path && path.startsWith("untitled:"));
 export const displayName = (path: string) => (isUntitled(path) ? path.slice("untitled:".length) : baseName(path));
 
-export type PlanViewMode = "source" | "text" | "chart";
-
-const modeKey = (path: string, group?: number) => (group === undefined ? path : `${group}:${path}`);
-
-/** Plan view mode per group + file (Source | Text | Chart). Defaults to Chart (or Source if legacy planText is set). */
-export function planMode(path: string, group?: number): PlanViewMode {
-	const explicit = (group !== undefined ? state.planMode[modeKey(path, group)] : undefined) ?? state.planMode[path];
-	if (explicit) return explicit;
-	return state.planText[path] ? "source" : "chart";
+/** Plan view mode by file type per group (Source | Text | Chart). Defaults to Chart. */
+export function planMode(_path: string, group?: number): PlanViewMode {
+	const g = group ?? state.activeGroup;
+	return resolvePlanMode(state.groups[g]?.planMode, state.planViewMode);
 }
 
-export function setPlanMode(path: string, mode: PlanViewMode, group?: number) {
+export function setPlanMode(_path: string, mode: PlanViewMode, group?: number) {
+	const g = group ?? state.activeGroup;
 	batch(() => {
-		if (group !== undefined) {
-			setState("planMode", modeKey(path, group), mode);
-		} else {
-			setState("planMode", path, mode);
-			setState("planMode", modeKey(path, state.activeGroup), mode);
-			setState("planText", path, mode === "source");
+		if (state.groups[g]) setState("groups", g, "planMode", mode);
+		if (shouldUpdateDefaultMode(group, state.groups.length)) {
+			setState("planViewMode", mode);
+			remember(PLAN_MODE_KEY, mode);
 		}
 	});
 }
 
-/** Obsidian-style Markdown mode per group + file (Source | Live | Read). Allows Live + Read split side-by-side! */
-export function markdownMode(path: string, group?: number): "source" | "live" | "read" {
-	const explicit = (group !== undefined ? state.mdMode[modeKey(path, group)] : undefined) ?? state.mdMode[path];
-	if (explicit) return explicit;
-	return state.settings.livePreview === false ? "source" : "live";
+/** Obsidian-style Markdown mode by file type per group (Source | Live | Read). Allows Live + Read split side-by-side while keeping mode across documents. */
+export function markdownMode(_path: string, group?: number): MarkdownViewMode {
+	const g = group ?? state.activeGroup;
+	return resolveMarkdownMode(state.groups[g]?.mdMode, state.mdViewMode, state.settings.livePreview);
 }
-export function setMarkdownMode(path: string, mode: "source" | "live" | "read", group?: number) {
+export function setMarkdownMode(_path: string, mode: MarkdownViewMode, group?: number) {
+	const g = group ?? state.activeGroup;
 	batch(() => {
-		if (group !== undefined) {
-			setState("mdMode", modeKey(path, group), mode);
-		} else {
-			setState("mdMode", path, mode);
-			setState("mdMode", modeKey(path, state.activeGroup), mode);
-			setState("mdText", path, mode !== "read");
+		if (state.groups[g]) setState("groups", g, "mdMode", mode);
+		if (shouldUpdateDefaultMode(group, state.groups.length)) {
+			setState("mdViewMode", mode);
+			remember(MARKDOWN_MODE_KEY, mode);
 		}
 	});
 }
 
-/** Table/CSV view mode per group + file (`true` = plain text, `false` = interactive table). */
-export function tableTextMode(path: string, group?: number): boolean {
-	if (group !== undefined) {
-		const scoped = state.mdText[modeKey(path, group)];
-		if (scoped !== undefined) return scoped;
-	}
-	return Boolean(state.mdText[path]);
+/** Syncs Source <-> Live when the user toggles the "Markdown live preview" setting (preserving Read mode). */
+export function syncLivePreviewMode(enabled: boolean) {
+	const from: MarkdownViewMode = enabled ? "source" : "live";
+	const to: MarkdownViewMode = enabled ? "live" : "source";
+	batch(() => {
+		if (state.mdViewMode === from) {
+			setState("mdViewMode", to);
+			remember(MARKDOWN_MODE_KEY, to);
+		}
+		state.groups.forEach((g, idx) => {
+			if (g.mdMode === from) setState("groups", idx, "mdMode", to);
+		});
+	});
 }
 
-export function setTableTextMode(path: string, text: boolean, group?: number) {
+/** Table/CSV view mode by file type per group (`true` = plain text, `false` = interactive table). */
+export function tableTextMode(_path: string, group?: number): boolean {
+	const g = group ?? state.activeGroup;
+	return resolveTableTextMode(state.groups[g]?.tableText, state.tableTextDefault);
+}
+
+export function setTableTextMode(_path: string, text: boolean, group?: number) {
+	const g = group ?? state.activeGroup;
 	batch(() => {
-		if (group !== undefined) {
-			setState("mdText", modeKey(path, group), text);
-		} else {
-			setState("mdText", path, text);
-			setState("mdText", modeKey(path, state.activeGroup), text);
+		if (state.groups[g]) setState("groups", g, "tableText", text);
+		if (shouldUpdateDefaultMode(group, state.groups.length)) {
+			setState("tableTextDefault", text);
+			remember(TABLE_TEXT_MODE_KEY, String(text));
 		}
 	});
 }
@@ -809,17 +841,6 @@ export function fileRenamed(oldPath: string, newPath: string) {
 			setState("dirty", path, undefined!);
 			setState("conflicts", path, undefined!);
 			setState("dirty", target, dirty || moved.savedVersion === -1);
-			if (state.planText[path]) setState("planText", target, true);
-			if (state.planMode[path]) setState("planMode", target, state.planMode[path]!);
-			if (state.mdText[path]) setState("mdText", target, true);
-			if (state.mdMode[path]) setState("mdMode", target, state.mdMode[path]!);
-			for (let gi = 0; gi < Math.max(2, state.groups.length); gi++) {
-				const gk = modeKey(path, gi);
-				const tk = modeKey(target, gi);
-				if (state.planMode[gk] !== undefined) setState("planMode", tk, state.planMode[gk]!);
-				if (state.mdText[gk] !== undefined) setState("mdText", tk, state.mdText[gk]!);
-				if (state.mdMode[gk] !== undefined) setState("mdMode", tk, state.mdMode[gk]!);
-			}
 		});
 		doc.model.dispose();
 	}
@@ -1078,6 +1099,19 @@ export function widenToProcedures(ranges: [number, number][], symbols: monaco.la
 			else out.push([...r]);
 			return out;
 		}, []);
+}
+
+/** Switches an open text document's Monaco language mode (VS Code "Change Language Mode") and updates LSP & reactive views. */
+export function setDocumentLanguage(path: string, languageId: string): boolean {
+	const doc = docs.get(canonical(path));
+	if (!doc || doc.binary || doc.model.isDisposed()) return false;
+	const prev = doc.model.getLanguageId();
+	if (prev === languageId) return false;
+	if (prev === "ssl" && languageId !== "ssl") session.untrack(doc.model);
+	monaco.editor.setModelLanguage(doc.model, languageId);
+	if (languageId === "ssl" && prev !== "ssl") session.track(doc.model);
+	setState("kindVersion", (v) => v + 1);
+	return true;
 }
 
 /** Replaces a document's text with one undoable edit over the part that changed. */

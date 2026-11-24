@@ -9,6 +9,7 @@ import { backend } from "./backend";
 import { activeEditor } from "./editor/EditorGroup";
 import { activeLiveEditor } from "./editor/liveBridge";
 import { ICON } from "./icons";
+import { requestMarkdownInspector } from "./panels/markdownBridge";
 import { showPanel } from "./panels/registry";
 import { docs } from "./project";
 import { followRename, setStatus, updateCatalogs } from "./projectDocs";
@@ -237,6 +238,7 @@ export function selftestWork(): Promise<Steps> {
 		});
 		await step("ticketPageShowsWork", async () => {
 			await openFile(ticket);
+			requestMarkdownInspector("work");
 			return until(() => document.querySelector(".cm-md-props, .md-front") && [...document.querySelectorAll(".md-work li")].some((li) => li.textContent?.includes("Self spec")));
 		});
 		// A registry's rows say which ticket carries them: the ticket's page lists them, and leads to the table at those rows.
@@ -456,7 +458,10 @@ export function selftestWriting(): Promise<Steps> {
 			return until(() => baseName(activePath() ?? "") === "SELF-1.md");
 		});
 		// The ticket's page says the note links to it, from two places.
-		await step("linkedFromListed", () => until(() => [...document.querySelectorAll(".cm-md-backlinks li, .md-linked li")].some((item) => item.textContent?.includes("Writing") && item.textContent.includes("2 places"))));
+		await step("linkedFromListed", async () => {
+			requestMarkdownInspector("links");
+			return until(() => [...document.querySelectorAll(".cm-md-backlinks li, .md-linked li")].some((item) => item.textContent?.includes("Writing") && item.textContent.includes("2 places")));
+		});
 		await step("drawnAsWritten", async () => {
 			await openFile(note);
 			switchTo("Edit");

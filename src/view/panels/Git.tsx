@@ -7,6 +7,7 @@ import { Icon } from "../Icon";
 import { createMemo, createResource, createSignal, For, Show } from "solid-js";
 import { changeLetter, changeWord, commitProblem, GIT_ACTIONS, rowMenuEntries, stagedOf, unstagedOf, type GitFile } from "../../shared/gitStatus";
 import { draftCommitMessage, formatTicketChangelog } from "../../shared/markdownDiff";
+import { detectBranchTicketMismatch } from "../../shared/menuBar";
 import { baseName, dirName, isInside, relativeTo, resolvePath } from "../../shared/paths";
 import type { DocFile, TicketGitCommit } from "../../shared/protocol";
 import { codeMatchesRef, docsGoverningFile, ticketsForFile, ticketWork } from "../../shared/workContext";
@@ -53,10 +54,23 @@ export function GitPanel() {
 	const above = () => gitStatus()?.stagedOutside ?? 0;
 	const [driftOpen, setDriftOpen] = createSignal(false);
 	const [commitsOpen, setCommitsOpen] = createSignal(false);
+	const [commitScope, setCommitScope] = createSignal<"active" | "file">("active");
 	const activeTicketKey = () => state.settings.activeTicket?.trim() || "";
+	const fileTicketKey = createMemo(() => {
+		const fromFile = ticketsForFile(docs(), activePath(), state.workspace?.root)[0];
+		return fromFile || ticketAtHand() || "";
+	});
+	const displayedCommitTicket = createMemo(() =>
+		commitScope() === "file" ? fileTicketKey() || activeTicketKey() : activeTicketKey() || fileTicketKey(),
+	);
+	const branchMismatch = createMemo(() => detectBranchTicketMismatch(gitStatus()?.branch, activeTicketKey()));
+	const runGitCmd = async (id: string) => {
+		const { runCommand } = await import("../commands");
+		runCommand(id);
+	};
 
 	// Non-blocking pre-commit doc readiness advisory for staged changes:
-	// untouched governing docs, drifted #L citations, stale/unstaged companion .spec.md for .plan.json,
+	// untouched governing docs, drifted #L citations, stale/unstaged companion .plan.md for .plan.json,
 	// broken links/anchors/YAML issues in staged .md files, open ticket tasks & questions,
 	// newly added .ssl/.sql/.ds files missing from files.csv/database.csv, and stale INDEX.md catalogs.
 	const docDrift = createMemo(() => {
@@ -108,11 +122,11 @@ export function GitPanel() {
 		const audit = docAuditData();
 		const citations = (audit.citationIssues ?? []).filter((ci) => stagedSet.has(canonical(ci.targetPath)));
 
-		// 3. Staged .plan.json files whose companion .spec.md is stale or unstaged
+		// 3. Staged .plan.json files whose companion .plan.md is stale or unstaged
 		const stalePlanSpecs: EmptyDrift["stalePlanSpecs"] = [];
 		for (const sf of stFiles) {
 			if (sf.staged === "deleted" || !sf.path.toLowerCase().endsWith(".plan.json")) continue;
-			const specPath = sf.path.replace(/\.plan\.json$/i, ".spec.md");
+			const specPath = sf.path.replace(/\.plan\.json$/i, ".plan.md");
 			const specKey = canonical(specPath);
 			if (stagedSet.has(specKey)) continue;
 			const unstagedSpec = unstagedByPath.get(specKey);
@@ -125,7 +139,7 @@ export function GitPanel() {
 				stalePlanSpecs.push({
 					planName: baseName(sf.path),
 					specPath: specDoc.path,
-					reason: older ? "spec older than plan" : "not staged with plan",
+					reason: older ? "plan doc older than plan" : "not staged with plan",
 				});
 			}
 		}
@@ -253,7 +267,7 @@ export function GitPanel() {
 	const [ticketCommits] = createResource(
 		() => {
 			const root = state.workspace?.root;
-			const key = activeTicketKey();
+			const key = displayedCommitTicket();
 			const hasRepo = Boolean(gitStatus());
 			return root && key && hasRepo ? { key, v: gitVersion() } : null;
 		},
@@ -434,6 +448,11 @@ export function GitPanel() {
 		<div class="panel-body" data-panel="git">
 			<div class="panel-title">
 				<span>Source control</span>
+				<Show when={gitStatus()}>
+					<IconButton label="Switch branch" title="Switch Git branch…" icon="git-branch" onClick={() => void runGitCmd("git-switch-branch")} />
+					<IconButton label="Git stash" title="Stash changes / pop stash…" icon="layers" onClick={() => void runGitCmd("git-stash")} />
+					<IconButton label="Line blame" title="Show Git commit & ticket for the current line" icon="eye" onClick={() => void runGitCmd("git-blame-line")} />
+				</Show>
 				<IconButton label="Ask git again" title="Refresh" icon="refresh" onClick={() => void refreshGit()} />
 			</div>
 			<Show when={gitFailure()}>
@@ -458,6 +477,26 @@ export function GitPanel() {
 					On <strong>{branchText()}</strong>
 					{gitStatus()!.initial ? ", with no commit yet" : ""}
 				</p>
+				<Show when={branchMismatch()}>
+					{(mismatch) => (
+						<div class="git-branch-mismatch" role="status" aria-label="Branch and active ticket mismatch">
+							<div class="git-branch-mismatch-msg">
+								<Icon name="warning" />
+								<span>
+									Branch is <strong>{mismatch().branchTicket}</strong>, active ticket is <strong>{mismatch().activeTicket}</strong>.
+								</span>
+							</div>
+							<div class="git-branch-mismatch-acts">
+								<button type="button" class="link" onClick={() => void runGitCmd("git-switch-branch")}>
+									Switch branch…
+								</button>
+								<button type="button" class="link" onClick={() => void runGitCmd("git-stash")}>
+									Stash…
+								</button>
+							</div>
+						</div>
+					)}
+				</Show>
 				<Show when={docDrift().total > 0}>
 					<div class="git-drift" role="region" aria-label="Documentation drift advisory">
 						<button
@@ -504,7 +543,7 @@ export function GitPanel() {
 									</ul>
 								</Show>
 								<Show when={docDrift().stalePlanSpecs.length > 0}>
-									<p class="git-drift-sub">Staged plans with stale or unstaged specs</p>
+									<p class="git-drift-sub">Staged plans with stale or unstaged plan docs</p>
 									<ul class="git-drift-list">
 										<For each={docDrift().stalePlanSpecs.slice(0, 6)}>
 											{(item) => (
@@ -518,7 +557,7 @@ export function GitPanel() {
 														</button>
 														<Show when={item.unstaged}>
 															{(gf) => (
-																<button type="button" class="link" title="Stage companion spec alongside plan" onClick={() => void stage([gf()])}>
+																<button type="button" class="link" title="Stage companion plan doc alongside plan" onClick={() => void stage([gf()])}>
 																	Stage
 																</button>
 															)}
@@ -747,7 +786,7 @@ export function GitPanel() {
 						</Show>
 					</Rows>
 				</Show>
-				<Show when={activeTicketKey()}>
+				<Show when={displayedCommitTicket()}>
 					{(key) => (
 						<section class="git-ticket-log" aria-label={`Commits mentioning ${key()}`}>
 							<div class="group-head git-head git-ticket-log-head" style={{ display: "flex", "align-items": "center", gap: "var(--space-2)" }}>
@@ -790,6 +829,26 @@ export function GitPanel() {
 								</Show>
 							</div>
 							<Show when={commitsOpen()}>
+								<div class="git-ticket-scope" role="group" aria-label="Ticket commit filter source">
+									<button
+										type="button"
+										classList={{ on: commitScope() === "active" || !fileTicketKey() }}
+										disabled={!activeTicketKey()}
+										title={activeTicketKey() ? `Show commits mentioning active ticket ${activeTicketKey()}` : "No active ticket set"}
+										onClick={() => setCommitScope("active")}
+									>
+										Active ticket{activeTicketKey() ? ` (${activeTicketKey()})` : ""}
+									</button>
+									<button
+										type="button"
+										classList={{ on: commitScope() === "file" || !activeTicketKey() }}
+										disabled={!fileTicketKey()}
+										title={fileTicketKey() ? `Show commits mentioning current file's ticket ${fileTicketKey()}` : "Current file is not linked to a ticket"}
+										onClick={() => setCommitScope("file")}
+									>
+										Current file{fileTicketKey() ? ` (${fileTicketKey()})` : ""}
+									</button>
+								</div>
 								<div class="git-ticket-log-body">
 									<Show
 										when={!ticketCommits.loading && (ticketCommits()?.length ?? 0) > 0}

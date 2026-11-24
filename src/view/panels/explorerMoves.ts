@@ -12,7 +12,7 @@ export const folderOf = (onto: { path: string; kind: "file" | "dir" }) => (onto.
 /**
  * A name for a copy that is not taken: "DueRules copy.ssl", then
  * "DueRules copy 2.ssl". The word goes before the first dot, so that what a
- * file is (".plan.json", ".spec.md") stays whole; a name that begins with a
+ * file is (".plan.json", ".plan.md") stays whole; a name that begins with a
  * dot keeps its dot. A folder's name has no such end: the word goes last.
  */
 export function copyName(name: string, taken: (name: string) => boolean, kind: "file" | "dir" = "file"): string {

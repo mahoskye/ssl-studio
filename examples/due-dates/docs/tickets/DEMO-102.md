@@ -4,7 +4,7 @@ title: Rush samples count Saturday as a working day
 source: https://tickets.example.test/browse/DEMO-102
 status: done
 related: [DEMO-101]
-specs: [design/SetSampleDueDates.spec.md]
+plans: [design/SetSampleDueDates.plan.json]
 ---
 
 # DEMO-102: Rush samples count Saturday as a working day

@@ -67,8 +67,25 @@ import { showPanel } from "../panels/registry";
 import { canonical, notify, state as appState } from "../state";
 import { focusLiveWidgetAt, historyFallbackFacet, rawEditBlockField, type HistoryFallback } from "./cmLiveShared";
 import { IMAGE_FILE_RE, saveImageAttachment } from "./imageResolve";
+import {
+	computeDuplicateLineOrSelection,
+	computeInsertLineAbove,
+	computeInsertLineBelow,
+	computeJoinLines,
+	computeSelectLine,
+	type PureLineEdit,
+} from "./markdownHtml";
 
-export { historyFallbackFacet, type HistoryFallback };
+export {
+	computeDuplicateLineOrSelection,
+	computeInsertLineAbove,
+	computeInsertLineBelow,
+	computeJoinLines,
+	computeSelectLine,
+	historyFallbackFacet,
+	type HistoryFallback,
+	type PureLineEdit,
+};
 
 export const cmUndo: Command = (view) => {
 	if (undoDepth(view.state) > 0) return undo(view);
@@ -126,7 +143,7 @@ export const cmInsertLink: Command = (view) => {
 	return true;
 };
 
-/** Obsidian `Ctrl+L` cycle/toggle task checkbox across every selected line. */
+/** Cycles/toggles task checkboxes across every selected line (`Alt+C` / `Ctrl+Alt+Enter`). */
 export const cmToggleCheckbox: Command = (view) => {
 	const lineNums = new Set<number>();
 	for (const range of view.state.selection.ranges) {
@@ -513,6 +530,82 @@ export const cmShrinkSelection: Command = (view) => {
 	return true;
 };
 
+// --- Sublime Text editing commands (pure helpers imported from markdownHtml.ts) ---
+
+/** Sublime Text `Mod-Shift-d`: duplicate selection inline, or duplicate current line(s) below keeping cursor offset. */
+export const cmDuplicateLineOrSelection: Command = (view) => {
+	const doc = view.state.doc.toString();
+	const spec = view.state.changeByRange((range) => {
+		const edit = computeDuplicateLineOrSelection(doc, range.from, range.to);
+		return {
+			changes: { from: edit.changeFrom, to: edit.changeTo, insert: edit.insert },
+			range: EditorSelection.range(edit.selFrom, edit.selTo),
+		};
+	});
+	view.dispatch(spec, { scrollIntoView: true, userEvent: "input.duplicate" });
+	return true;
+};
+
+/** Sublime Text `Mod-j`: join current line (or selected lines) with next line cleanly using a single space. */
+export const cmJoinLines: Command = (view) => {
+	const doc = view.state.doc.toString();
+	const spec = view.state.changeByRange((range) => {
+		const edit = computeJoinLines(doc, range.from, range.to);
+		if (!edit) return { range };
+		return {
+			changes: { from: edit.changeFrom, to: edit.changeTo, insert: edit.insert },
+			range: EditorSelection.range(edit.selFrom, edit.selTo),
+		};
+	});
+	if (!spec.changes.empty) {
+		view.dispatch(spec, { scrollIntoView: true, userEvent: "input.join" });
+	}
+	return true;
+};
+
+/** Sublime Text `Mod-Enter`: insert blank line below current line without splitting text, preserving indent. */
+export const cmInsertLineBelow: Command = (view) => {
+	const doc = view.state.doc.toString();
+	const spec = view.state.changeByRange((range) => {
+		const edit = computeInsertLineBelow(doc, range.head);
+		return {
+			changes: { from: edit.changeFrom, to: edit.changeTo, insert: edit.insert },
+			range: EditorSelection.range(edit.selFrom, edit.selTo),
+		};
+	});
+	view.dispatch(spec, { scrollIntoView: true, userEvent: "input.enter" });
+	return true;
+};
+
+/** Sublime Text `Mod-Shift-Enter`: insert blank line above current line without splitting text, preserving indent. */
+export const cmInsertLineAbove: Command = (view) => {
+	const doc = view.state.doc.toString();
+	const spec = view.state.changeByRange((range) => {
+		const edit = computeInsertLineAbove(doc, range.head);
+		return {
+			changes: { from: edit.changeFrom, to: edit.changeTo, insert: edit.insert },
+			range: EditorSelection.range(edit.selFrom, edit.selTo),
+		};
+	});
+	view.dispatch(spec, { scrollIntoView: true, userEvent: "input.enter" });
+	return true;
+};
+
+/** Sublime Text / Monaco `Mod-l`: select full current line, expanding to the next line on repeated presses. */
+export const cmSelectLine: Command = (view) => {
+	const doc = view.state.doc.toString();
+	const ranges = view.state.selection.ranges.map((r) => {
+		const next = computeSelectLine(doc, r.from, r.to);
+		return EditorSelection.range(next.from, next.to);
+	});
+	view.dispatch({
+		selection: EditorSelection.create(ranges, view.state.selection.mainIndex),
+		scrollIntoView: true,
+		userEvent: "select",
+	});
+	return true;
+};
+
 /** Opens CodeMirror's search panel and optionally moves focus to the Replace input (skipped in Read-only mode). */
 function openFind(view: EditorView, replace: boolean): boolean {
 	openSearchPanel(view);
@@ -644,6 +737,26 @@ export const cmAutoWrapExtension: Extension = EditorView.inputHandler.of((view, 
 	return true;
 });
 
+/** Extracts pasted or dropped image files from a clipboard / drag-and-drop `DataTransfer`. */
+export function extractImageFiles(dt: DataTransfer | null): File[] {
+	if (!dt) return [];
+	const out: File[] = [];
+	if (dt.items) {
+		for (const item of dt.items) {
+			if (item.kind === "file" && item.type.startsWith("image/")) {
+				const f = item.getAsFile();
+				if (f) out.push(f);
+			}
+		}
+	}
+	if (!out.length && dt.files) {
+		for (const f of dt.files) {
+			if (f.type.startsWith("image/") || IMAGE_FILE_RE.test(f.name)) out.push(f);
+		}
+	}
+	return out;
+}
+
 /**
  * Smart paste & drop:
  * 1. `Ctrl+Shift+V` pastes plain text verbatim, bypassing smart conversion.
@@ -655,25 +768,6 @@ export const cmAutoWrapExtension: Extension = EditorView.inputHandler.of((view, 
 export function cmSmartPasteExtension(filePath: () => string): Extension {
 	let plainPasteUntil = 0;
 	let lastPasteAt = 0;
-
-	const extractImageFiles = (dt: DataTransfer | null): File[] => {
-		if (!dt) return [];
-		const out: File[] = [];
-		if (dt.items) {
-			for (const item of dt.items) {
-				if (item.kind === "file" && item.type.startsWith("image/")) {
-					const f = item.getAsFile();
-					if (f) out.push(f);
-				}
-			}
-		}
-		if (!out.length && dt.files) {
-			for (const f of dt.files) {
-				if (f.type.startsWith("image/") || IMAGE_FILE_RE.test(f.name)) out.push(f);
-			}
-		}
-		return out;
-	};
 
 	const saveAndInsertImages = async (view: EditorView, files: File[], pos?: number) => {
 		const snippets: string[] = [];
@@ -853,7 +947,14 @@ const markdownBindings: KeyBinding[] = [
 	{ key: "Mod-`", run: cmToggleCode, preventDefault: true },
 	{ key: "Mod-Alt-h", run: cmToggleHighlight, preventDefault: true },
 	{ key: "Mod-k", run: cmInsertLink, preventDefault: true },
-	{ key: "Mod-l", run: cmToggleCheckbox, preventDefault: true },
+	{ key: "Mod-Alt-Enter", run: cmToggleCheckbox, preventDefault: true },
+	{ key: "Alt-c", run: cmToggleCheckbox, preventDefault: true },
+	// Sublime Text editing ergonomics (ADR 0032).
+	{ key: "Mod-Shift-d", run: cmDuplicateLineOrSelection, preventDefault: true },
+	{ key: "Mod-j", run: cmJoinLines, preventDefault: true },
+	{ key: "Mod-Enter", run: cmInsertLineBelow, preventDefault: true },
+	{ key: "Mod-Shift-Enter", run: cmInsertLineAbove, preventDefault: true },
+	{ key: "Mod-l", run: cmSelectLine, preventDefault: true },
 	// Live Table & Callout keyboard entry on vertical boundary navigation.
 	{ key: "ArrowDown", run: cmStepIntoLiveWidget(1) },
 	{ key: "ArrowUp", run: cmStepIntoLiveWidget(-1) },
@@ -949,6 +1050,22 @@ export function runCmAction(view: EditorView, id: string): boolean {
 			return selectNextOccurrence(view);
 		case "editor.action.selectHighlights":
 			return selectSelectionMatches(view);
+		case "editor.action.duplicateSelection":
+		case "md-duplicate-line":
+			return cmDuplicateLineOrSelection(view);
+		case "editor.action.joinLines":
+		case "md-join-lines":
+			return cmJoinLines(view);
+		case "editor.action.insertLineAfter":
+		case "md-insert-line-below":
+			return cmInsertLineBelow(view);
+		case "editor.action.insertLineBefore":
+		case "md-insert-line-above":
+			return cmInsertLineAbove(view);
+		case "expandLineSelection":
+		case "editor.action.selectLine":
+		case "md-select-line":
+			return cmSelectLine(view);
 		case "editor.action.gotoLine":
 			return gotoLine(view);
 		case "editor.action.quickOutline":

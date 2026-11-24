@@ -21,10 +21,10 @@ your files until you have reviewed the finished change set.
 | Stage | Who works | What comes out | You decide |
 | --- | --- | --- | --- |
 | 1. Draw | You | `design/<name>.plan.json` | When it is ready |
-| 2. Refine | Agent | Answers to its questions; chart suggestions | Each question and suggestion |
-| 3. Spec | Agent | `design/<name>.spec.md` | Approve, or send it back |
-| 4. Build | Agent, unattended | A pending change set; no file changes | Only what it cannot resolve |
-| 5. Review | You, helped by a second agent | Accepted edits in the editor | Each file: accept, or reject with a reason |
+| 2. Refine | Agent | Questions and suggestions | Each question and suggestion |
+| 3. Plan doc | Agent | `design/<name>.plan.md` | Approve, or send it back |
+| 4. Build | Agent, unattended | Pending change set | Only what it cannot resolve |
+| 5. Review | You + reviewer | Accepted edits in editor | Accept, or reject with reason |
 
 Stages 2 to 5 reuse what the tidy steps already proved: SSL Studio supplies the
 context, the agent replies in fenced blocks, the language server checks the

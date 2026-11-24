@@ -6,15 +6,18 @@ import { showPanel } from "../panels/registry";
 import { createEffect, createMemo, createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { activeEditor } from "../editor/EditorGroup";
 import { activeLiveEditor, liveSelectionVersion } from "../editor/liveBridge";
-import { review, openReview } from "../editor/Review";
+import { review, openReview, type Check } from "../editor/Review";
 import { activeDoc, activePath, applyText, canonical, documents, notify, openFile, save, scriptsCameTo, setState, state } from "../state";
-import { addEntry, agent, ask, chooseModel, clearEntries, currentModel, interrupt, resume, safely, setAgent, start, stop, type Entry } from "./store";
+import { agent, ask, chooseModel, clearEntries, clearSavedThreads, currentModel, interrupt, resume, safely, setAgent, start, startNewThread, stop, switchThread, syncWorkspaceThreads, type Entry } from "./store";
 import { groupModels, composeQuestion, composerSend, modelRef, stepAction } from "./logic";
 import { followReplyLink, renderReply } from "./markdown";
 import { notePath, proposalOf, runStep, showReview, startTidy, STEPS, tidy } from "./tidy";
 import { parseCsv } from "../../shared/csv";
+import { checkTables } from "../../shared/docTables";
 import { frontMatter, withFrontMatter } from "../../shared/frontMatter";
+import { extractPlanTestCasesFromMarkdown, formatAgentThreadMarkdown, planMarkdownReviewExtraction, type ExtractedPlanTestCase } from "../../shared/menuBar";
 import { baseName, dirName, isInside, joinPath, relativeTo } from "../../shared/paths";
+import { summarizePlanForPrompt } from "../../shared/planSummary";
 import { DOC_FOLDERS, frontValue, isCatalog, promptText, registryTitle, slug } from "../../shared/projectDocs";
 import type { DocFile } from "../../shared/protocol";
 import { keysIn, ticketColumn } from "../../shared/registryTickets";
@@ -22,9 +25,10 @@ import { extractSchemaPreview, referencedSchemaTables } from "../../shared/schem
 import { renderTemplate } from "../../shared/templater";
 import { cut, docsGoverningFile, MAX_WORK_PROMPT_CHARS, ticketForFile, ticketWork, workFor, type WorkTextOptions } from "../../shared/workContext";
 import { backend } from "../backend";
-import { ask as askDialog, browseWorkspaceFile, choose } from "../dialogs";
+import { ask as askDialog, browseWorkspaceFile, choose, quickPick, quickPickMany } from "../dialogs";
 import { refreshDocAudit } from "../docAudit";
 import { gitStatus, gitVersion } from "../git";
+import { addPlanTest, parsePlan, planTestsOf, printPlan } from "../plan/model";
 import { docs } from "../project";
 import { appendNoteToTicket, promoteToKnowledge, saveAsSnippet, staleCatalogSummary, staleCatalogSummaryAsync, ticketAtHand, updateCatalogs, workPrompt } from "../projectDocs";
 import { languageFor } from "../editor/languages";
@@ -98,7 +102,7 @@ function ensureAgentWorkspace(): void {
 	setWithGoverningDocs(false);
 	setAttachedFiles([]);
 	sentContext = { session: null, root: curRoot, hashes: new Map() };
-	setAgent("chatSession", null);
+	syncWorkspaceThreads(curRoot);
 	setSentTick((n) => n + 1);
 }
 
@@ -250,33 +254,7 @@ function collectGoverningDocsForContext(
 function formatGoverningDocExcerpt(doc: DocFile, raw: string): string {
 	const clean = raw.replace(/\r\n/g, "\n").trim();
 	if (doc.path.toLowerCase().endsWith(".plan.json")) {
-		try {
-			const parsed = JSON.parse(clean) as {
-				title?: string;
-				goal?: string;
-				targets?: { script?: string; procedures?: string[] }[];
-				nodes?: { label?: string }[];
-				openQuestions?: string[];
-			};
-			const targets = (parsed.targets ?? [])
-				.map((t) => [t.script, t.procedures?.length ? `(${t.procedures.join(", ")})` : ""].filter(Boolean).join(" "))
-				.filter(Boolean);
-			const steps = (parsed.nodes ?? [])
-				.map((n) => n.label?.trim())
-				.filter((l): l is string => Boolean(l))
-				.slice(0, 12);
-			return [
-				parsed.title ? `Title: ${parsed.title}` : "",
-				parsed.goal ? `Goal: ${cut(parsed.goal.replace(/\s+/g, " "), 300)}` : "",
-				targets.length ? `Targets: ${targets.join("; ")}` : "",
-				steps.length ? `Steps: ${steps.join(" -> ")}` : "",
-				parsed.openQuestions?.length ? `Open questions: ${parsed.openQuestions.slice(0, 4).join("; ")}` : "",
-			]
-				.filter(Boolean)
-				.join("\n");
-		} catch {
-			return cut(clean, 1400);
-		}
+		return summarizePlanForPrompt(clean) ?? cut(clean, 1400);
 	}
 	const body = frontMatter(clean).body.trim();
 	return cut(body || clean, 1800);
@@ -608,26 +586,26 @@ async function reviewProposedEdit(replyText: string, preferredPath?: string) {
 	const original = (await readForPrompt(targetPath)) ?? "";
 	const targetLang = languageFor(targetPath).toLowerCase();
 	const blocks = extractFencedBlocks(replyText);
+	const extraction = planMarkdownReviewExtraction(targetLang, blocks);
 	let chosenBlock: FencedBlock | null = null;
-	if (blocks.length === 1) {
-		chosenBlock = blocks[0]!;
-	} else if (blocks.length > 1) {
-		// Prioritize blocks matching the target file's language (e.g. SSL over small SQL/example snippets).
-		const ranked = [...blocks].sort((a, b) => {
-			const aMatch = a.lang === targetLang ? 0 : 1;
-			const bMatch = b.lang === targetLang ? 0 : 1;
-			return aMatch - bMatch || b.code.length - a.code.length;
+	if (extraction.mode === "use-block") {
+		chosenBlock = extraction.block;
+	} else if (extraction.mode === "pick") {
+		const picked = await quickPick<number>({
+			title:
+				targetLang === "markdown"
+					? "Compare Markdown reply (full reply or specific block)"
+					: "This reply has multiple code blocks — choose what to diff",
+			placeholder: "Choose block or full reply…",
+			items: extraction.choices.map((c, idx) => ({
+				label: c.label,
+				value: idx,
+				detail: c.detail,
+				icon: c.block ? "file" : "note",
+			})),
 		});
-		const labels = ranked.map((b, i) => {
-			const lines = b.code.split("\n").length;
-			const first = b.code.split("\n")[0]!.trim().slice(0, 48);
-			return `Block ${i + 1} (${b.lang || "text"}, ${lines} lines): ${first}`;
-		});
-		const FULL_REPLY = "Use full reply text";
-		const picked = await choose("This reply has multiple code blocks. Which one should be diffed?", [...labels, FULL_REPLY]);
-		if (!picked) return;
-		const idx = labels.indexOf(picked);
-		chosenBlock = idx >= 0 ? ranked[idx]! : null;
+		if (picked === null) return;
+		chosenBlock = extraction.choices[picked]?.block ?? null;
 	}
 
 	let proposed = `${(chosenBlock ? chosenBlock.code : replyText).trim()}\n`;
@@ -641,6 +619,39 @@ async function reviewProposedEdit(replyText: string, preferredPath?: string) {
 		}
 	}
 
+	const checks: Check[] = [];
+	if (targetLang === "markdown" || /\.(md|markdown)$/i.test(targetPath)) {
+		const tableFindings = checkTables(proposed);
+		if (tableFindings.length) {
+			checks.push({
+				label: "Markdown tables (ADR 0008)",
+				ok: false,
+				detail: `${tableFindings.length} ${tableFindings.length === 1 ? "issue" : "issues"} — line ${tableFindings[0]!.line}: ${tableFindings[0]!.message}`,
+			});
+		} else {
+			checks.push({
+				label: "Markdown tables (ADR 0008)",
+				ok: true,
+				detail: "Within 4-column and cell-width limits",
+			});
+		}
+	} else if (/\.(csv|tsv)$/i.test(targetPath)) {
+		const parsed = parseCsv(proposed);
+		if (parsed.problems.length) {
+			checks.push({
+				label: "CSV/TSV column consistency",
+				ok: false,
+				detail: parsed.problems.join(" "),
+			});
+		} else {
+			checks.push({
+				label: "CSV/TSV column consistency",
+				ok: true,
+				detail: `${parsed.header.length} columns × ${parsed.rows.length} rows`,
+			});
+		}
+	}
+
 	const rel = relativeTo(root, targetPath).replace(/\\/g, "/");
 	openReview({
 		title: `Agent proposal: ${rel}`,
@@ -648,6 +659,7 @@ async function reviewProposedEdit(replyText: string, preferredPath?: string) {
 		original,
 		proposed,
 		language: languageFor(targetPath),
+		...(checks.length ? { checks } : {}),
 		effect: documents.get(canonical(targetPath))
 			? `Accepting puts the right side into ${rel} as one undoable editor edit (not saved yet).`
 			: `Accepting saves the right side to ${rel} on disk.`,
@@ -734,7 +746,6 @@ async function saveReplyAsSpec(replyText: string, ticketKey?: string): Promise<s
 		return null;
 	}
 	setState("treeVersion", (v) => v + 1);
-	setState("mdText", canonical(dest), true);
 	refreshDocAudit();
 	await openFile(dest, { keep: true });
 	notify(`Saved spec ${baseName(dest)}${linkedTicket ? ` linked to ${linkedTicket}` : ""}.`);
@@ -766,6 +777,105 @@ function EntryView(props: { entry: Entry }) {
 		void import("../commands").then((m) => m.copyText(props.entry.text, "Copied agent reply."));
 	};
 	const replyCodeBlocks = createMemo(() => extractFencedBlocks(props.entry.text));
+	const extractedTests = createMemo(() =>
+		props.entry.role === "agent" && !props.entry.streaming ? extractPlanTestCasesFromMarkdown(props.entry.text) : [],
+	);
+	const addReplyToPlanTests = async () => {
+		const root = state.workspace?.root;
+		if (!root) return notify("Open a folder first.");
+		const candidates = extractedTests();
+		if (!candidates.length) return;
+
+		const allDocs = docs().filter((d) => d.exists && !isCatalog(d));
+		const plans = allDocs.filter((d) => d.group === "plans" && d.path.toLowerCase().endsWith(".plan.json"));
+		if (!plans.length) return notify("No .plan.json files exist in this project yet. Create one with New plan… first.");
+
+		const curTicket = activeTicketForReply().toLowerCase();
+		const govPaths = new Set(
+			(entryCode() || activePath() ? docsGoverningFile(allDocs, (entryCode() || activePath())!, root) : []).map((g) =>
+				canonical(g.file.path),
+			),
+		);
+		const orderedPlans = [...plans].sort((a, b) => {
+			const aGov = govPaths.has(canonical(a.path)) ? 0 : 1;
+			const bGov = govPaths.has(canonical(b.path)) ? 0 : 1;
+			const aTkt = curTicket && (a.ticket?.toLowerCase() === curTicket || a.tickets?.some((t) => t.toLowerCase() === curTicket)) ? 0 : 1;
+			const bTkt = curTicket && (b.ticket?.toLowerCase() === curTicket || b.tickets?.some((t) => t.toLowerCase() === curTicket)) ? 0 : 1;
+			return aGov - bGov || aTkt - bTkt || (a.title || a.name).localeCompare(b.title || b.name);
+		});
+
+		const pickedPlan = await quickPick<DocFile>({
+			title: `Add ${candidates.length} test ${candidates.length === 1 ? "case" : "cases"} to which Plan?`,
+			placeholder: "Choose a .plan.json file…",
+			items: orderedPlans.map((p) => ({
+				label: p.title || p.name,
+				value: p,
+				detail: relativeTo(root, p.path).replace(/\\/g, "/"),
+				badge: p.ticket ? { text: p.ticket, tone: "active" } : undefined,
+				icon: "graph",
+			})),
+		});
+		if (!pickedPlan) return;
+
+		let selectedTests: ExtractedPlanTestCase[] = candidates;
+		if (candidates.length > 1) {
+			const picked = await quickPickMany<ExtractedPlanTestCase>({
+				title: `Select test cases to add to ${pickedPlan.title || pickedPlan.name}`,
+				placeholder: "Filter test cases…",
+				items: candidates.map((tc) => ({
+					label: tc.title,
+					value: tc,
+					detail: tc.node ? `node ${tc.node}` : undefined,
+					description: [tc.given ? `Given: ${tc.given}` : "", tc.expect ? `Expect: ${tc.expect}` : ""].filter(Boolean).join(" · "),
+					icon: "beaker",
+				})),
+				initialSelected: candidates,
+				confirmLabel: "Add tests",
+			});
+			if (!picked || !picked.length) return;
+			selectedTests = picked;
+		}
+
+		const key = canonical(pickedPlan.path);
+		const open = documents.get(key);
+		const raw = open ? open.model.getValue() : await backend.read(pickedPlan.path).then((r) => (r.binary ? null : r.text), () => null);
+		if (raw === null) return notify(`Could not read ${baseName(pickedPlan.path)}.`, "error");
+		const parsed = parsePlan(raw);
+		if (!parsed.plan) return notify(`Could not parse ${baseName(pickedPlan.path)}: ${parsed.error}`, "error");
+
+		const existingTitles = new Set(planTestsOf(parsed.plan).map((t) => t.title.trim().toLowerCase()));
+		const validNodeIds = new Set(parsed.plan.nodes.map((n) => n.id));
+		let updated = parsed.plan;
+		let added = 0;
+		for (const tc of selectedTests) {
+			if (existingTitles.has(tc.title.trim().toLowerCase())) continue;
+			existingTitles.add(tc.title.trim().toLowerCase());
+			const resolvedNode = tc.node && validNodeIds.has(tc.node) ? tc.node : undefined;
+			updated = addPlanTest(updated, {
+				title: tc.title,
+				...(resolvedNode ? { node: resolvedNode } : {}),
+				...(tc.given ? { given: tc.given } : {}),
+				...(tc.expect ? { expect: tc.expect } : {}),
+				...(tc.notes ? { notes: tc.notes } : {}),
+			});
+			added++;
+		}
+		if (!added) {
+			return notify(`All selected test cases are already present in ${baseName(pickedPlan.path)}.`);
+		}
+		const printed = printPlan(updated);
+		if (open) {
+			const clean = !state.dirty[key];
+			applyText(key, printed);
+			if (clean) await save(key, { format: false });
+		} else {
+			await backend.historyKeep(pickedPlan.path).catch(() => {});
+			await backend.write(pickedPlan.path, printed);
+		}
+		setState("treeVersion", (v) => v + 1);
+		await openFile(pickedPlan.path, { keep: true });
+		notify(`Added ${added} test ${added === 1 ? "case" : "cases"} to ${baseName(pickedPlan.path)}.`);
+	};
 	const saveReplySnippet = async () => {
 		const blocks = replyCodeBlocks();
 		if (!blocks.length) return;
@@ -828,6 +938,16 @@ function EntryView(props: { entry: Entry }) {
 						<button type="button" class="link" title="Compare this reply against a workspace file in ReviewView before applying" onClick={() => void reviewProposedEdit(props.entry.text, entryCode())}>
 							Review diff…
 						</button>
+						<Show when={extractedTests().length > 0}>
+							<button
+								type="button"
+								class="link"
+								title={`Add ${extractedTests().length} extracted test ${extractedTests().length === 1 ? "case" : "cases"} to a .plan.json`}
+								onClick={() => void addReplyToPlanTests()}
+							>
+								Add to Plan tests…
+							</button>
+						</Show>
 						<Show when={hasCatalogDrift()}>
 							<button type="button" class="link" title="Apply Update catalogs now (manual ADR 0031 reconciliation)" onClick={() => void updateCatalogs()}>
 								Update catalogs
@@ -1102,15 +1222,113 @@ export function AgentPanel() {
 	};
 	const newConversation = () => {
 		sentContext = { session: null, root: lastWorkspaceRoot, hashes: new Map() };
-		setAgent("chatSession", null);
 		setSentTick((n) => n + 1);
-		if (agent.entries.at(-1)?.text !== NEW_CONVERSATION) addEntry({ role: "note", text: NEW_CONVERSATION });
+		startNewThread(NEW_CONVERSATION);
 		toEnd();
 	};
 	const clearConversation = () => {
 		sentContext = { session: null, root: lastWorkspaceRoot, hashes: new Map() };
 		setSentTick((n) => n + 1);
 		clearEntries();
+	};
+	const hasExportableThread = createMemo(() =>
+		agent.entries.some((e) => (e.role === "user" || e.role === "agent") && e.text.trim().length > 0),
+	);
+	const formatThreadDate = (ms: number) => {
+		const d = new Date(ms);
+		if (Number.isNaN(d.getTime())) return "";
+		return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+	};
+	const openThreadHistory = async () => {
+		if (agent.busy) return notify("Wait for the current reply to finish before switching conversations.");
+		const threads = agent.threads;
+		if (!threads.length) return notify("No saved conversations for this workspace yet.");
+		const NEW_ID = "__new__";
+		const CLEAR_ALL = "__clear_all__";
+		const picked = await quickPick<string>({
+			title: `Agent conversation history (${threads.length}/5)`,
+			placeholder: "Switch to a recent workspace thread…",
+			items: [
+				...threads.map((t) => ({
+					label: t.title,
+					value: t.id,
+					checked: t.id === agent.activeThreadId,
+					badge: t.ticket ? { text: t.ticket, tone: "active" } : undefined,
+					detail: `${t.entries.filter((e) => e.role === "user" || e.role === "agent").length} msgs · ${formatThreadDate(t.updatedAt)}`,
+					icon: "note" as const,
+				})),
+				{ label: "Start new conversation", value: NEW_ID, icon: "add", divide: true },
+				{ label: "Clear saved thread history", value: CLEAR_ALL, icon: "trash", danger: true },
+			],
+		});
+		if (!picked) return;
+		if (picked === NEW_ID) {
+			newConversation();
+			return;
+		}
+		if (picked === CLEAR_ALL) {
+			const CONFIRM = "Clear history";
+			if ((await choose("Clear all saved Agent conversation threads for this workspace?", [CONFIRM], { danger: CONFIRM })) !== CONFIRM) return;
+			sentContext = { session: null, root: lastWorkspaceRoot, hashes: new Map() };
+			setSentTick((n) => n + 1);
+			clearSavedThreads();
+			notify("Cleared saved Agent history for this workspace.");
+			return;
+		}
+		sentContext = { session: null, root: lastWorkspaceRoot, hashes: new Map() };
+		setSentTick((n) => n + 1);
+		switchThread(picked);
+		toEnd();
+	};
+	const exportThread = async () => {
+		const key = ticket() || state.settings.activeTicket?.trim() || ticketAtHand() || "";
+		const md = formatAgentThreadMarkdown(agent.entries, { ticket: key || undefined });
+		if (!md) return notify("There is no conversation to export yet.");
+		const picked = await quickPick<"question" | "decision" | "ticket" | "copy">({
+			title: "Export Agent conversation",
+			placeholder: "Choose where to save this conversation…",
+			items: [
+				{
+					label: "Save as Question (docs/knowledge/questions/)",
+					value: "question",
+					detail: "Create a new knowledge-base Question note",
+					icon: "question",
+				},
+				{
+					label: "Save as Decision ADR (docs/knowledge/decisions/)",
+					value: "decision",
+					detail: "Create a numbered architecture/design Decision",
+					icon: "lightbulb",
+				},
+				...(key
+					? [
+							{
+								label: `Append to ${key} ticket notes`,
+								value: "ticket" as const,
+								detail: `Append dated Q&A summary to ${key}`,
+								icon: "checklist" as const,
+							},
+						]
+					: []),
+				{
+					label: "Copy formatted thread as Markdown",
+					value: "copy",
+					detail: "Copy clean Q&A Markdown to clipboard",
+					icon: "copy",
+					divide: true,
+				},
+			],
+		});
+		if (!picked) return;
+		if (picked === "question") {
+			await promoteToKnowledge("questions", { body: md, ticket: key || undefined });
+		} else if (picked === "decision") {
+			await promoteToKnowledge("decisions", { body: md, ticket: key || undefined });
+		} else if (picked === "ticket" && key) {
+			await appendNoteToTicket(key, md);
+		} else if (picked === "copy") {
+			await (await import("../commands")).copyText(md, "Copied formatted Agent thread.");
+		}
 	};
 	const loadKeptPrompt = (file: DocFile) => {
 		void (async () => {
@@ -1333,18 +1551,42 @@ export function AgentPanel() {
 		<div class="panel-body agent" data-panel="agent">
 			<div class="panel-title">
 				<span>Agent</span>
-				<Show
-					when={agent.status.state === "ready"}
-					fallback={
-						<button disabled={agent.status.state === "starting"} title={agent.status.state === "starting" ? "opencode is starting." : "Start the opencode server"} onClick={() => void start()}>
-							Start opencode
-						</button>
-					}
-				>
-					<button title="Stop the opencode server. A reply in progress ends with it." onClick={() => void stop()}>
-						Stop opencode
+				<div class="agent-header-actions">
+					<button
+						type="button"
+						class="agent-hdr-btn"
+						disabled={agent.busy}
+						title={agent.threads.length ? `Switch between ${agent.threads.length} saved workspace conversations` : "Conversation history (last 5 workspace threads)"}
+						onClick={() => void openThreadHistory()}
+					>
+						<Icon name="list-flat" />
+						<span>History{agent.threads.length ? ` (${agent.threads.length})` : ""}</span>
 					</button>
-				</Show>
+					<Show when={hasExportableThread()}>
+						<button
+							type="button"
+							class="agent-hdr-btn"
+							disabled={agent.busy}
+							title="Export this conversation as a Question, Decision ADR, or active ticket note"
+							onClick={() => void exportThread()}
+						>
+							<Icon name="note" />
+							<span>Export…</span>
+						</button>
+					</Show>
+					<Show
+						when={agent.status.state === "ready"}
+						fallback={
+							<button disabled={agent.status.state === "starting"} title={agent.status.state === "starting" ? "opencode is starting." : "Start the opencode server"} onClick={() => void start()}>
+								Start opencode
+							</button>
+						}
+					>
+						<button title="Stop the opencode server. A reply in progress ends with it." onClick={() => void stop()}>
+							Stop opencode
+						</button>
+					</Show>
+				</div>
 			</div>
 			<div class="agent-status">
 				<span class={`dot ${agent.status.state}`} aria-hidden="true" />

@@ -406,3 +406,141 @@
 	color: var(--strong-fg);
 	background: var(--hover);
 }
+
+/* --- Round 6: Multi-Sort Badges, Excel Fill Handle, Find Regex/Selection, Unified Issues Pill & URL Links --- */
+
+.table-view th .table-th-sort .table-sort-indicator {
+	flex: none;
+	margin-left: auto;
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+	color: var(--accent);
+}
+.table-view th .table-th-sort .table-sort-indicator .codicon-glyph {
+	margin-left: 0;
+}
+.table-sort-prio {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	min-width: 14px;
+	height: 14px;
+	padding: 0 3px;
+	box-sizing: border-box;
+	border-radius: 999px;
+	font-size: 10px;
+	font-weight: 700;
+	line-height: 1;
+	font-variant-numeric: tabular-nums;
+	background: color-mix(in srgb, var(--accent) 18%, transparent);
+	color: var(--accent);
+}
+
+.table-view tbody tr td.cell-has-fill-handle:not(.col-frozen) {
+	position: relative;
+	z-index: 2;
+}
+.table-view tbody tr td.col-frozen.cell-has-fill-handle {
+	z-index: 3;
+}
+.table-fill-handle {
+	position: absolute;
+	right: 0;
+	bottom: 0;
+	width: 8px;
+	height: 8px;
+	box-sizing: border-box;
+	background: var(--accent);
+	border: 1.5px solid var(--bg);
+	border-radius: 1px;
+	cursor: crosshair;
+	z-index: 4;
+	transition: transform 80ms ease;
+}
+.table-fill-handle:hover {
+	transform: scale(1.2);
+}
+.table-scroll.is-fill-dragging,
+.table-scroll.is-fill-dragging td {
+	cursor: crosshair;
+	user-select: none;
+}
+.table-view tbody tr td.cell-fill-target,
+.table-view tbody tr:hover td.cell-fill-target,
+.table-view tbody tr.row-current td.cell-fill-target,
+.table-view tbody tr td.col-frozen.cell-fill-target {
+	background: color-mix(in srgb, var(--accent) 15%, var(--bg));
+	outline: 1.5px dashed var(--accent);
+	outline-offset: -1.5px;
+}
+
+.table-find-input.invalid {
+	border-color: var(--error, var(--warning));
+}
+.table-find-err {
+	font-size: var(--text-xs);
+	font-weight: 500;
+	color: var(--error, var(--warning));
+	white-space: nowrap;
+}
+.table-find-toggle:disabled {
+	opacity: 0.42;
+	cursor: default;
+}
+
+.table-issues-pill {
+	display: inline-flex;
+	align-items: stretch;
+	border-radius: 999px;
+	overflow: hidden;
+	border: 1px solid color-mix(in srgb, var(--warning) 48%, transparent);
+	background: color-mix(in srgb, var(--warning) 7%, transparent);
+}
+.table-bar .doc-status.table-issues-toggle {
+	border: 0;
+	border-radius: 0;
+	padding: 1px 8px;
+	background: transparent;
+}
+.table-bar .doc-status.table-issues-toggle:hover {
+	background: color-mix(in srgb, var(--warning) 14%, transparent);
+}
+.table-bar .doc-status.table-issues-toggle[aria-pressed="true"] {
+	background: color-mix(in srgb, var(--warning) 22%, transparent);
+}
+.table-issues-next {
+	min-height: 0;
+	padding: 1px 8px;
+	border: 0;
+	border-left: 1px solid color-mix(in srgb, var(--warning) 36%, transparent);
+	border-radius: 0;
+	background: transparent;
+	color: var(--warning);
+	font-size: var(--text-xs);
+	font-weight: 600;
+	line-height: 1.6;
+	cursor: pointer;
+}
+.table-issues-next:hover {
+	background: color-mix(in srgb, var(--warning) 16%, transparent);
+	color: var(--strong-fg);
+}
+
+.table-bar .table-reset-view-btn {
+	padding: var(--space-1) var(--space-2);
+	min-height: 0;
+	color: var(--muted);
+}
+.table-bar .table-reset-view-btn:hover {
+	color: var(--accent);
+}
+
+.table-view td button.table-url-link {
+	text-decoration: underline;
+	text-decoration-color: color-mix(in srgb, var(--accent) 45%, transparent);
+	text-underline-offset: 2px;
+}
+.table-view td button.table-url-link:hover {
+	text-decoration-color: var(--accent);
+}

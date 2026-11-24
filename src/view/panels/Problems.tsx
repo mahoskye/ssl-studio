@@ -6,6 +6,7 @@ import { monaco } from "../editor/monaco";
 import { docAuditData } from "../docAudit";
 import { diagnostics, type Diagnostic } from "../lsp/session";
 import { canonical, openFile, state } from "../state";
+import { docIssueCode, docIssueDedupKey } from "../../shared/contextMenu";
 import { relativeTo } from "../../shared/paths";
 import { Row, RowGroup, Rows } from "./Rows";
 import { serverDown } from "./server";
@@ -25,23 +26,23 @@ function collectMergedProblems(): { uri: string; list: Diagnostic[] }[] {
 		const entry = byPath.get(fsPath) ?? { uri, list: [] };
 		for (const d of list) {
 			entry.list.push(d);
-			seenKeys.add(`${fsPath}:${d.line}:${d.code ?? ""}`);
+			const key =
+				d.line <= 1
+					? `${fsPath}:${d.line}:${d.code ?? ""}:${d.message}`
+					: d.column > 1
+						? `${fsPath}:${d.line}:${d.column}:${d.code ?? ""}`
+						: `${fsPath}:${d.line}:${d.code ?? ""}`;
+			seenKeys.add(key);
 		}
 		byPath.set(fsPath, entry);
 	}
-	// Fold workspace-wide doc audit issues (broken #heading anchors, malformed YAML, ADR 0008 tables, code citations)
-	// into Problems under `source: "docs"`, deduplicated against already-open file diagnostics.
+	// Fold workspace-wide doc audit issues (broken #heading anchors, malformed YAML, ADR 0008 tables,
+	// code citations, duplicate headings, schema drift, orphan & stale docs) into Problems under
+	// `source: "docs"`, deduplicated against already-open file diagnostics.
 	for (const issue of docAuditData().issues) {
 		const fsPath = canonical(issue.path);
-		const code =
-			issue.kind === "table"
-				? "table-rule"
-				: issue.kind === "anchor"
-					? "broken-anchor"
-					: issue.kind === "citation"
-						? "code-citation"
-						: "yaml-frontmatter";
-		const dedupKey = `${fsPath}:${issue.line}:${code}`;
+		const code = docIssueCode(issue.kind);
+		const dedupKey = docIssueDedupKey(fsPath, issue);
 		if (seenKeys.has(dedupKey)) continue;
 		seenKeys.add(dedupKey);
 		const uri = monaco.Uri.file(issue.path).toString();
@@ -198,7 +199,7 @@ export function Problems() {
 								{(d) => (
 									<Row
 										class="tree-row problem"
-										key={`${uri}#${d.line}:${d.column}:${d.code ?? ""}`}
+										key={`${uri}#${d.line}:${d.column}:${d.code ?? ""}${d.line <= 1 ? `:${d.message}` : ""}`}
 										style={{ "padding-left": "22px" }}
 										title={`${SEVERITY[d.severity]}: ${d.message}${d.code ? ` [${d.code}]` : ""} (line ${d.line}, column ${d.column})`}
 										onActivate={() => void openFile(monaco.Uri.parse(uri).fsPath, { reveal: { line: d.line, column: d.column, endLine: d.endLine, endColumn: d.endColumn } })}

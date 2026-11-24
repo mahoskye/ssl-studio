@@ -423,6 +423,53 @@ export function replaceInFrontMatterList(text: string, key: string, oldItem: str
 }
 
 /**
+ * Removes a front matter key (and any indented bullet items beneath it) from the
+ * YAML block, then strips the fences if the block becomes empty.
+ */
+export function removeFrontMatterKey(text: string, key: string): string {
+	const lines: { text: string; start: number; lineEnd: number }[] = [];
+	for (let at = 0; at <= text.length; ) {
+		const stop = text.indexOf("\n", at);
+		const end = stop < 0 ? text.length : stop;
+		lines.push({
+			text: text.slice(at, end).replace(/\r$/, ""),
+			start: at,
+			lineEnd: stop < 0 ? text.length : stop + 1,
+		});
+		if (stop < 0) break;
+		at = stop + 1;
+	}
+	const openIdx = TEMPLATE_HEADER_RE.test(lines[0]?.text.replace(/^﻿/, "") ?? "") ? 1 : 0;
+	if (lines[openIdx]?.text.replace(/^﻿/, "").trim() !== "---") return text;
+	const close = lines.findIndex((line, i) => i > openIdx && /^(---|\.\.\.)\s*$/.test(line.text));
+	if (close < 0) return text;
+	const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	const keyRe = new RegExp(`^${escaped}\\s*:`, "i");
+	const ranges: [number, number][] = [];
+	for (let i = openIdx + 1; i < close; i++) {
+		if (!keyRe.test(lines[i]!.text)) continue;
+		let endIdx = i;
+		if (/:\s*(?:#.*)?$/.test(lines[i]!.text)) {
+			for (let j = i + 1; j < close; j++) {
+				const t = lines[j]!.text.trim();
+				if (!t || t.startsWith("#")) continue;
+				if (/^-\s+/.test(t)) endIdx = j;
+				else break;
+			}
+		}
+		ranges.push([lines[i]!.start, lines[endIdx]!.lineEnd]);
+		i = endIdx;
+	}
+	if (!ranges.length) return text;
+	let out = text;
+	for (let r = ranges.length - 1; r >= 0; r--) {
+		const [start, end] = ranges[r]!;
+		out = `${out.slice(0, start)}${out.slice(end)}`;
+	}
+	return stripEmptyFrontMatter(out);
+}
+
+/**
  * Removes an empty YAML front matter block (`---\n---`) left behind when the last
  * property is deleted, keeping any template header comment and body intact.
  */

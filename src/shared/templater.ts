@@ -17,7 +17,7 @@ export type MarkdownTemplate = {
 	/** One-line description of when to use this template. */
 	description: string;
 	/** Category for grouping in the picker and Palette. */
-	group: "Work" | "Knowledge" | "Notes" | "Custom";
+	group: "Work" | "Schema" | "Knowledge" | "Notes" | "Custom";
 	/** Suggested relative folder under the project root (e.g. `docs/tickets`, `docs/specs`). */
 	folder?: string;
 	/** Suggested filename pattern (e.g. `{{ticket}}.md` or `{{slug}}.md`). */
@@ -45,6 +45,10 @@ export type TemplaterContext = {
 	projectName: string;
 	/** Active ticket key if any (e.g. `DEMO-101`). */
 	ticket?: string;
+	/** Configured schema folder relative to workspace root (default `schema`). */
+	schemaFolder?: string;
+	/** Configured plans folder relative to workspace root (default `design`). */
+	plansFolder?: string;
 	/** Currently selected text in the active editor, if any (`tp.file.selection()`). */
 	selection?: string;
 	/** Current date/time (injectable for deterministic unit tests). */
@@ -245,6 +249,8 @@ function resolveSyncToken(raw: string, ctx: TemplaterContext, vars: Map<string, 
 	if (t === "tp.file.selection" || t === "tp.file.selection()") return ctx.selection ?? "";
 	if (t === "tp.project.name" || t === "tp.project.name()") return ctx.projectName;
 	if (t === "tp.project.ticket" || t === "tp.project.ticket()") return ctx.ticket ?? "";
+	if (t === "tp.project.schema" || t === "tp.project.schema()") return ctx.schemaFolder || "schema";
+	if (t === "tp.project.plans" || t === "tp.project.plans()") return ctx.plansFolder || "design";
 	const dateCall = /^tp\.date\.(now|tomorrow|yesterday)\s*\(([\s\S]*)\)$/.exec(t);
 	if (dateCall) {
 		const subArgs = parseCallArgs(dateCall[2]!, (id) => resolveSyncToken(id, ctx, vars));
@@ -314,11 +320,15 @@ async function evaluateExpression(
 	}
 
 	const trimmed = rawExpr.trim().replace(/;+\s*$/, "");
-	// Variable assignment without output: `<% let key = tp.system.prompt("Key"); %>` or `<% let env = "PROD" %>`
-	const assign = /^(?:let|const|var)\s+([A-Za-z_]\w*)\s*=\s*([\s\S]+)$/.exec(trimmed);
+	// Variable assignment without output: `<% let key = tp.system.prompt("Key"); %>` or nullish `<% let key ??= tp.system.prompt("Key"); %>`
+	const assign = /^(?:let|const|var)\s+([A-Za-z_]\w*)\s*(\?\?=|=)\s*([\s\S]+)$/.exec(trimmed);
 	if (assign) {
 		const varName = assign[1]!;
-		const rhs = await evaluateExpression(assign[2]!, ctx, vars);
+		const isNullish = assign[2] === "??=";
+		if (isNullish && vars.has(varName) && vars.get(varName)!.length > 0) {
+			return { value: "" };
+		}
+		const rhs = await evaluateExpression(assign[3]!, ctx, vars);
 		if (rhs.cancelled) return rhs;
 		vars.set(varName, rhs.value);
 		return { value: "" };
@@ -343,6 +353,8 @@ async function evaluateExpression(
 	if (expr === "tp.file.selection") return { value: ctx.selection ?? "" };
 	if (expr === "tp.project.name") return { value: ctx.projectName };
 	if (expr === "tp.project.ticket") return { value: ctx.ticket ?? "" };
+	if (expr === "tp.project.schema") return { value: ctx.schemaFolder || "schema" };
+	if (expr === "tp.project.plans") return { value: ctx.plansFolder || "design" };
 	if (expr === "tp.ticket.key") return { value: ctx.ticket ?? "" };
 
 	// Inline YAML scalar quoting helper: `tp.yaml(expr)`
@@ -391,6 +403,8 @@ async function evaluateExpression(
 	if (group === "project") {
 		if (method === "name") return { value: ctx.projectName };
 		if (method === "ticket") return { value: ctx.ticket ?? "" };
+		if (method === "schema") return { value: ctx.schemaFolder || "schema" };
+		if (method === "plans") return { value: ctx.plansFolder || "design" };
 	}
 
 	if (group === "system") {
@@ -446,7 +460,7 @@ export function parseTemplateFile(raw: string, fallbackName: string, id: string,
 			else if (key === "description" && val) description = val;
 			else if (key === "folder" && val) folder = val;
 			else if (key === "filename" && val) fileName = val;
-			else if (key === "group" && (val === "Work" || val === "Knowledge" || val === "Notes" || val === "Custom")) group = val;
+			else if (key === "group" && (val === "Work" || val === "Schema" || val === "Knowledge" || val === "Notes" || val === "Custom")) group = val;
 		}
 	}
 
@@ -483,7 +497,7 @@ export function stripRawTemplateFrontmatter(raw: string, existingKeys?: Readonly
 						const star = tag[2] ?? "";
 						const inner = tag[3]!.trim();
 						const trimR = tag[4] ?? "";
-						const decls = [...inner.matchAll(/\b(?:let|const|var)\s+([A-Za-z_]\w*)\s*=/g)].map((d) => d[1]!);
+						const decls = [...inner.matchAll(/\b(?:let|const|var)\s+([A-Za-z_]\w*)\s*(?:\?\?=|=)/g)].map((d) => d[1]!);
 						if (decls.some((name) => new RegExp(`\\b${name}\\b`).test(body))) {
 							preserved.push(`<%${trimL}${star} ${inner} ${trimR}%>`);
 						}
@@ -508,7 +522,7 @@ export function stripRawTemplateFrontmatter(raw: string, existingKeys?: Readonly
 		const star = tag[2] ?? "";
 		const inner = tag[3]!.trim();
 		const trimR = tag[4] ?? "";
-		const decls = [...inner.matchAll(/\b(?:let|const|var)\s+([A-Za-z_]\w*)\s*=/g)].map((d) => d[1]!);
+		const decls = [...inner.matchAll(/\b(?:let|const|var)\s+([A-Za-z_]\w*)\s*(?:\?\?=|=)/g)].map((d) => d[1]!);
 		if (decls.some((name) => new RegExp(`\\b${name}\\b`).test(body))) {
 			preserved.push(`<%${trimL}${star} ${inner} ${trimR}%>`);
 		}
@@ -610,13 +624,13 @@ export const DEFAULT_TEMPLATES: readonly MarkdownTemplate[] = [
 	{
 		id: "ticket",
 		name: "Ticket",
-		description: "Work ticket with acceptance criteria, callout banner, and impacted areas",
+		description: "Work ticket with acceptance checklist, callout banner, and impacted STARLIMS areas",
 		group: "Work",
 		folder: "docs/tickets",
-		fileName: "<% key %>.md",
+		fileName: '<%* let key = tp.system.prompt("Ticket key (e.g. LIMS-123)", "LIMS-100") %><% key %>.md',
 		source: "builtin",
 		content: `---
-<%* let key = tp.system.prompt("Ticket key (e.g. LIMS-123)", "LIMS-100") -%>
+<%* let key ??= tp.system.prompt("Ticket key (e.g. LIMS-123)", "LIMS-100") -%>
 ticket: <% key %>
 title: <% tp.file.yamlTitle %>
 type: <% tp.system.suggester(["Feature", "Change request", "Bug fix", "Investigation"], ["feature", "change", "bug", "investigation"], "Ticket type") %>
@@ -625,7 +639,7 @@ created: <% tp.date.now("YYYY-MM-DD") %>
 related: []
 ---
 
-# <% tp.file.title %>
+# <% key %>: <% tp.file.title %>
 
 > [!important] Call to action
 > Summarize the core business outcome and any deadline or regulatory impact here.
@@ -634,7 +648,7 @@ related: []
 
 <% tp.file.cursor() %>
 
-## Acceptance criteria
+## What done looks like
 
 - [ ] Expected business behavior verified in test environment
 - [ ] Edge cases and error messages confirmed with stakeholders
@@ -652,14 +666,14 @@ related: []
 	},
 	{
 		id: "change-spec",
-		name: "Change Spec",
-		description: "Functional and technical change specification linked to a ticket",
+		name: "Spec (Behavior & Design)",
+		description: "Behavior and design specification linked to a ticket (distinct from a .plan.md plan)",
 		group: "Work",
 		folder: "docs/specs",
 		source: "builtin",
 		content: `---
 title: <% tp.file.yamlTitle %>
-ticket: <% tp.system.prompt("Ticket key (leave empty if none)") %>
+ticket: <% tp.system.prompt("Ticket key (leave empty if none)", tp.project.ticket) %>
 status: draft
 created: <% tp.date.now("YYYY-MM-DD") %>
 ---
@@ -667,11 +681,15 @@ created: <% tp.date.now("YYYY-MM-DD") %>
 # <% tp.file.title %>
 
 > [!summary] Overview
-> One concise paragraph explaining what this change builds and why the lab needs it.
+> One concise paragraph explaining what behavior this spec defines and why the lab needs it.
 
 ## Current vs proposed behavior
 
 <% tp.file.cursor() %>
+
+## Design & rules
+
+- 
 
 ## In scope
 
@@ -687,6 +705,7 @@ created: <% tp.date.now("YYYY-MM-DD") %>
 | --- | --- | --- |
 | Script |  |  |
 | Data source |  |  |
+| Table |  |  |
 
 ## Verification checklist
 
@@ -696,6 +715,195 @@ created: <% tp.date.now("YYYY-MM-DD") %>
 
 > [!warning] Rollback & risks
 > Note any schema, configuration, or scheduling dependencies before promoting to production.
+`,
+	},
+	{
+		id: "plan-doc",
+		name: "Plan Doc (.plan.md)",
+		description: "Step-by-step implementation breakdown paired with a .plan.json flowchart (ADR 0033)",
+		group: "Work",
+		folder: "design",
+		fileName: "<% tp.file.title %>.plan.md",
+		source: "builtin",
+		content: `---
+title: <% tp.file.yamlTitle %>
+ticket: <% tp.system.prompt("Ticket key (leave empty if none)", tp.project.ticket) %>
+status: draft
+created: <% tp.date.now("YYYY-MM-DD") %>
+---
+
+# <% tp.file.title %>
+
+Companion plan doc for \`<% tp.project.plans %>/<% tp.file.title %>.plan.json\`: breaks down execution stages, data boundaries, and verification steps.
+
+## Step breakdown
+
+<% tp.file.cursor() %>
+
+| Stage | Target | Action |
+| --- | --- | --- |
+| 1 | Script |  |
+| 2 | Data source |  |
+| 3 | Tests |  |
+
+## Data & transactions
+
+- **Reads:** 
+- **Writes:** 
+- **Transaction scope:** 
+- **Failure handling:** 
+
+## Test plan
+
+- [ ] Happy-path unit test covers expected output
+- [ ] Edge cases and rollback behavior verified
+`,
+	},
+	{
+		id: "release-checklist",
+		name: "Release Checklist",
+		description: "Deployment runbook with pre-flight warning, migration steps, and smoke tests",
+		group: "Work",
+		folder: "docs",
+		source: "builtin",
+		content: `---
+title: <% tp.file.yamlTitle %>
+date: <% tp.date.now("YYYY-MM-DD") %>
+status: draft
+ticket: <% tp.project.ticket %>
+---
+
+# <% tp.file.title %>
+
+> [!warning] Pre-flight check
+> Confirm backups, maintenance window, and stakeholder sign-off before starting deployment.
+
+## Deployment sequence
+
+| Step | Area | Action |
+| --- | --- | --- |
+| 1 | Database | <% tp.file.cursor() %> |
+| 2 | Scripts |  |
+| 3 | Config |  |
+
+## Post-deploy smoke tests
+
+- [ ] Primary workflow runs without errors
+- [ ] Schema DDL, \`database.csv\`, and \`files.csv\` manifests match deployed artifacts
+- [ ] Scheduled jobs / interfaces report healthy status
+- [ ] Stakeholders notified
+
+> [!caution] Rollback plan
+> Steps to restore prior state if a critical defect is found during smoke testing.
+`,
+	},
+	{
+		id: "validation-test-run",
+		name: "Validation Test Run (IQ/OQ/PQ)",
+		description: "GxP / ISO-17025 IQ/OQ/PQ validation test execution protocol with Git SHA and evidence log",
+		group: "Work",
+		folder: "docs/tests",
+		source: "builtin",
+		content: `---
+title: <% tp.file.yamlTitle %>
+type: test-run
+ticket: <% tp.project.ticket %>
+phase: <% tp.system.suggester(["OQ — Operational Qualification", "IQ — Installation Qualification", "PQ — Performance Qualification"], ["OQ", "IQ", "PQ"], "Validation phase") %>
+environment: <% tp.system.suggester(["QA", "UAT", "DEV", "PROD"], ["QA", "UAT", "DEV", "PROD"], "Target environment") %>
+git-sha: <% tp.system.prompt("Git commit SHA under test", "") %>
+executed-by: <% tp.system.prompt("Executed by", "") %>
+executed-date: <% tp.date.now("YYYY-MM-DD") %>
+result: <% tp.system.suggester(["Partial / In Progress", "Pass", "Fail"], ["partial", "pass", "fail"], "Overall result") %>
+status: draft
+---
+
+# <% tp.file.title %>
+
+> [!important] Validation Protocol
+> Record objective evidence (screenshots, SQL output, audit trail IDs) for each test case before QA sign-off.
+
+## Execution Summary
+
+<% tp.file.cursor() %>
+
+## Test Case Execution
+
+| Case | Result | Evidence | Notes |
+| --- | --- | --- | --- |
+| TC-01 | pending |  |  |
+| TC-02 | pending |  |  |
+
+## Deviations & Sign-Off
+
+- **Deviations:** None
+- **QA Reviewer:**
+- **Sign-Off Date:**
+`,
+	},
+	{
+		id: "database-table",
+		name: "Database Table",
+		description: "Schema table doc with Columns, Foreign keys, and Indexes ready for 1:1 SQL generation",
+		group: "Schema",
+		folder: "schema/database",
+		fileName: "<% tp.file.title %>.md",
+		source: "builtin",
+		content: `# <% tp.file.title %>
+
+<% tp.file.cursor() %>What this table holds, and what scripts read or write it.
+
+| Column | Type | Null | What it holds |
+| --- | --- | --- | --- |
+| \`ID\` | varchar(20) | no | Primary key. |
+| \`PARENT_ID\` | varchar(20) | yes | Optional reference to parent record. |
+| \`STATUS\` | varchar(20) | no | Current row status. |
+
+## Foreign keys
+
+| Column | Target table | Target column | Notes |
+| --- | --- | --- | --- |
+| \`PARENT_ID\` | \`PARENT_TABLE\` | \`ID\` | Parent record reference (remove if standalone). |
+
+## Indexes
+
+| Name | Unique | Columns |
+| --- | --- | --- |
+| \`IX_STATUS\` | no | \`STATUS\` |
+
+> [!tip] SQL DDL sync
+> Open **Document → Info → SQL source** to generate a 1:1 \`.sql\` file from these tables or link an existing DDL script.
+`,
+	},
+	{
+		id: "interface-contract",
+		name: "Interface Contract",
+		description: "External system or instrument message contract with direction, version, and fields",
+		group: "Schema",
+		folder: "schema/interfaces",
+		fileName: "<% tp.file.title %>.md",
+		source: "builtin",
+		content: `---
+with: <% tp.yaml(tp.system.prompt("External system or instrument", "Instrument")) %>
+direction: <% tp.system.suggester(["Inbound (into STARLIMS)", "Outbound (from STARLIMS)", "Bidirectional"], ["in", "out", "both"], "Message direction") %>
+version: 1
+status: draft
+ticket: <% tp.project.ticket %>
+---
+
+# <% tp.file.title %>
+
+<% tp.file.cursor() %>Who sends this message, who receives it, and what triggers it.
+
+Where the agreed specification is kept, and who answers for it on each side.
+
+| Field | Type | Needed | What it holds |
+| --- | --- | --- | --- |
+| \`id\` | text, up to 20 | yes | Correlation identifier. |
+| \`timestamp\` | iso-8601 | yes | Event timestamp. |
+
+## Validation & error handling
+
+- Reject messages missing required fields and log the correlation id.
 `,
 	},
 	{
@@ -732,6 +940,30 @@ ticket: <% tp.project.ticket %>
 
 - **Positive:** 
 - **Trade-offs:** 
+`,
+	},
+	{
+		id: "open-question",
+		name: "Open Question",
+		description: "Tracked question tied to a ticket (surfaces in Health and Ticket Work until answered)",
+		group: "Knowledge",
+		folder: "docs/knowledge/questions",
+		source: "builtin",
+		content: `---
+title: <% tp.file.yamlTitle %>
+status: open
+asked: <% tp.date.now("YYYY-MM-DD") %>
+ticket: <% tp.system.prompt("Ticket key (leave empty if none)", tp.project.ticket) %>
+---
+
+# <% tp.file.title %>
+
+## Why it matters
+
+<% tp.file.cursor() %>What cannot be finished or decided until this is known.
+
+> [!question] Answer
+> Not answered yet. Record the answer, who confirmed it, and the date, then set \`status: answered\`.
 `,
 	},
 	{
@@ -796,43 +1028,6 @@ ticket: <% tp.project.ticket %>
 ## Action items
 
 - [ ] Action item — Owner (Due <% tp.date.now("YYYY-MM-DD", 7) %>)
-`,
-	},
-	{
-		id: "release-checklist",
-		name: "Release Checklist",
-		description: "Deployment runbook with pre-flight warning, migration steps, and smoke tests",
-		group: "Work",
-		folder: "docs",
-		source: "builtin",
-		content: `---
-title: <% tp.file.yamlTitle %>
-date: <% tp.date.now("YYYY-MM-DD") %>
-status: draft
-ticket: <% tp.project.ticket %>
----
-
-# <% tp.file.title %>
-
-> [!warning] Pre-flight check
-> Confirm backups, maintenance window, and stakeholder sign-off before starting deployment.
-
-## Deployment sequence
-
-| Step | Area | Action |
-| --- | --- | --- |
-| 1 | Database | <% tp.file.cursor() %> |
-| 2 | Scripts |  |
-| 3 | Config |  |
-
-## Post-deploy smoke tests
-
-- [ ] Primary workflow runs without errors
-- [ ] Scheduled jobs / interfaces report healthy status
-- [ ] Stakeholders notified
-
-> [!caution] Rollback plan
-> Steps to restore prior state if a critical defect is found during smoke testing.
 `,
 	},
 	{

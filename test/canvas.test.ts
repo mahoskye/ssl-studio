@@ -122,7 +122,7 @@ test("a choice is remembered where there is storage, and does no harm where ther
 	expect(recall("test.never-set")).toBeNull();
 });
 
-import { roundedPath, splinePath } from "../src/view/graph/canvas";
+import { cleanEdgePoints, roundedPath, smoothEdgePath, smoothEdgePoint, splinePath } from "../src/view/graph/canvas";
 
 describe("lines as they are drawn", () => {
 	test("a corner is rounded, by no more than half of its shorter stretch", () => {
@@ -145,6 +145,39 @@ describe("lines as they are drawn", () => {
 		// What does not come in threes is joined straight.
 		expect(splinePath([p(0, 0), p(9, 9)])).toBe("M0,0 L9,9");
 		expect(splinePath([p(0, 0), p(1, 1), p(2, 2), p(3, 3), p(4, 4)])).toBe("M0,0 C1,1 2,2 3,3 L4,4");
+	});
+
+	test("cleanEdgePoints strips duplicates, collinear runs, and ELK port micro-jogs", () => {
+		const p = (x: number, y: number) => ({ x, y });
+		// Duplicate + collinear horizontal exit (ELK POLYLINE INCLUDE_CHILDREN output).
+		const e0 = [p(126, 208), p(136, 208), p(136, 208), p(165, 208), p(245, 241), p(443, 241), p(523, 222), p(562, 222)];
+		expect(cleanEdgePoints(e0)).toEqual([p(126, 208), p(165, 208), p(245, 241), p(443, 241), p(523, 222), p(562, 222)]);
+
+		// End-port 3px vertical micro-jog absorbed while preserving horizontal port entry stub.
+		const e1 = [p(126, 251), p(443, 251), p(523, 232), p(552, 232), p(552, 229), p(562, 229)];
+		expect(cleanEdgePoints(e1)).toEqual([p(126, 251), p(443, 251), p(523, 232), p(552, 229), p(562, 229)]);
+
+		// Start-port 6px vertical micro-jog absorbed while preserving horizontal port exit stub.
+		const e2 = [p(116, 122), p(126, 122), p(126, 128), p(171, 128), p(250, 152), p(364, 152)];
+		expect(cleanEdgePoints(e2)).toEqual([p(116, 122), p(126, 122), p(171, 128), p(250, 152), p(364, 152)]);
+
+		// Smooth path emits only M, L, and C1 quadratic Q corners — never broken cubic cusps.
+		const path = smoothEdgePath(e1, 24);
+		expect(path.startsWith("M126,251 ")).toBe(true);
+		expect(path.endsWith(" L562,229")).toBe(true);
+		expect(path).toContain("Q");
+		expect(path).not.toContain("C");
+
+		// smoothEdgePoint tracks arc-length accurately on straight & curved edges.
+		const pt = smoothEdgePoint([p(0, 0), p(40, 0), p(40, 40)], 20, 12);
+		expect(pt.x).toBeCloseTo(20, 4);
+		expect(pt.y).toBeCloseTo(0, 4);
+		const onBend = smoothEdgePoint([p(0, 0), p(40, 0), p(40, 40)], 38, 12, 32);
+		expect(onBend.x).toBeGreaterThan(30);
+		expect(onBend.x).toBeLessThanOrEqual(40);
+		expect(onBend.y).toBeGreaterThan(0);
+		expect(onBend.y).toBeLessThan(15);
+		expect(smoothEdgePoint([p(0, 0), p(30, 0)], 99)).toEqual(p(30, 0));
 	});
 });
 

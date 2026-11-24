@@ -6,14 +6,14 @@ import { hasOutline } from "../../shared/outline";
 import { recall, remember } from "../graph/canvas";
 import { dockedView } from "../layout";
 import { isPlanPath } from "../plan/model";
-import { activeDoc, activePath, focusEditor, setState, state, type PanelId } from "../state";
+import { activeDoc, activePath, focusEditor, planMode, setState, state, type PanelId } from "../state";
 import { formatOutlineActive, observeOutlineState, outlineKey, parseOutlineActive, planPaletteKey, type OutlineMemory, type SideSnapshot } from "./outlineState";
 
 /** True when the active editor tab is a Plan file shown as its visual chart. */
 export const isPlanChartActive = (): boolean => {
 	if (state.centerView !== "editors") return false;
 	const path = activePath();
-	if (!path || !isPlanPath(path) || state.planText[path]) return false;
+	if (!path || !isPlanPath(path) || planMode(path) === "source") return false;
 	const doc = activeDoc();
 	return Boolean(doc && !doc.binary);
 };
@@ -29,6 +29,7 @@ export const PANELS: { id: PanelId; icon: string; title: string; home: Side; whe
 		title: "Document outline: headings, regions and procedures of the open file",
 		home: "right",
 		when: () => {
+			void state.kindVersion;
 			if (state.centerView !== "editors") return false;
 			const path = activePath();
 			if (!path || isPlanPath(path)) return false;
@@ -43,6 +44,7 @@ export const PANELS: { id: PanelId; icon: string; title: string; home: Side; whe
 		title: "Palette: templates, callouts, plan shapes, or call graph controls",
 		home: "left",
 		when: () => {
+			void state.kindVersion;
 			if (state.centerView === "graph") return true;
 			if (state.centerView !== "editors") return false;
 			const path = activePath();
@@ -50,7 +52,7 @@ export const PANELS: { id: PanelId; icon: string; title: string; home: Side; whe
 			const doc = activeDoc();
 			if (!doc || doc.binary) return false;
 			const lang = doc.model.getLanguageId();
-			return (isPlanPath(path) && !state.planText[path]) || lang === "ssl" || lang === "markdown";
+			return (isPlanPath(path) && planMode(path) !== "source") || lang === "ssl" || lang === "markdown";
 		},
 	},
 	{ id: "reference", icon: "\ueaa4", title: "Reference: built-in functions, classes and keywords", home: "left" },

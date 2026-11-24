@@ -1,5 +1,5 @@
 ---
-source: schema/database/demo.sql
+source: schema/database/DEMO_HOLIDAYS.sql
 ---
 
 # DEMO_HOLIDAYS

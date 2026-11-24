@@ -18,13 +18,20 @@ import {
 	type TemplaterContext,
 } from "../shared/templater";
 import { backend } from "./backend";
-import { ask, choose } from "./dialogs";
+import { ask, browseWorkspaceFile, choose, quickPick, type QuickPickOption } from "./dialogs";
 import { activeEditor } from "./editor/EditorGroup";
 import { listWorkspaceImages } from "./editor/imageResolve";
 import { activeLiveEditor } from "./editor/liveBridge";
 import { isMarkdown } from "./project";
 import { ticketAtHand } from "./projectDocs";
-import { activePath, canonical, documents, fileRemoved, notify, openFile, setMarkdownMode, setState, state } from "./state";
+import { activePath, canonical, documents, fileRemoved, markdownMode, notify, openFile, setMarkdownMode, setState, state } from "./state";
+
+/** Ensures a Markdown file is editable without pulling users out of Source mode if they prefer it. */
+function ensureEditableMarkdown(path: string, group?: number) {
+	if (markdownMode(path, group) === "read") {
+		setMarkdownMode(path, state.settings.livePreview === false ? "source" : "live", group);
+	}
+}
 
 /** Absolute path to the workspace templates folder (`<docs>/templates` by default, or `settings.templatesFolder`). */
 export function templatesFolderPath(): string | null {
@@ -115,13 +122,18 @@ function buildContext(targetPath: string | null, explicitTitle?: string): Templa
 		folder: folder === "." ? "" : folder,
 		projectName: state.project?.name || state.workspace?.name || "Project",
 		ticket: ticketAtHand() || "",
+		schemaFolder: (state.project?.schema || "schema").replace(/^[./\\]+|[\\/]+$/g, "") || "schema",
+		plansFolder: (state.project?.plans || "design").replace(/^[./\\]+|[\\/]+$/g, "") || "design",
 		selection: activeSelectionText(),
 		prompt: (label, def) => ask(label, def ?? ""),
 		suggest: async (labels, values, placeholder) => {
-			const picked = await choose(placeholder || "Choose an option", labels);
-			if (!picked) return null;
-			const idx = labels.indexOf(picked);
-			return idx >= 0 ? (values[idx] ?? picked) : picked;
+			const picked = await quickPick<number>({
+				title: placeholder || "Choose an option",
+				placeholder: "Filter options…",
+				items: labels.map((label, idx) => ({ label, value: idx })),
+			});
+			if (picked === null) return null;
+			return values[picked] ?? labels[picked] ?? null;
 		},
 		clipboard: async () => (await navigator.clipboard?.readText().catch(() => "")) ?? "",
 	};
@@ -130,22 +142,20 @@ function buildContext(targetPath: string | null, explicitTitle?: string): Templa
 /** Lets the user choose a template (workspace custom templates listed first, then built-in defaults). */
 async function pickTemplate(title: string): Promise<MarkdownTemplate | null> {
 	const all = await loadMarkdownTemplates();
-	const labels: string[] = [];
-	const details: Record<string, string> = {};
-	const byLabel = new Map<string, MarkdownTemplate>();
-
-	for (const tpl of all) {
-		const baseLabel = tpl.source === "workspace" ? `${tpl.name} (Custom)` : tpl.name;
-		let label = baseLabel;
-		if (byLabel.has(label)) {
-			label = `${baseLabel} · ${tpl.id}`;
-		}
-		labels.push(label);
-		details[label] = tpl.description;
-		byLabel.set(label, tpl);
-	}
-	const picked = await choose(title, labels, { details });
-	return picked ? (byLabel.get(picked) ?? null) : null;
+	const items: QuickPickOption<MarkdownTemplate>[] = all.map((tpl) => ({
+		value: tpl,
+		label: tpl.name,
+		icon: "notebook-template",
+		badge: tpl.source === "workspace" ? { text: "Custom", tone: "active" } : undefined,
+		detail: tpl.group,
+		description: tpl.description,
+		keywords: `${tpl.id} ${tpl.group} ${tpl.source}`,
+	}));
+	return quickPick<MarkdownTemplate>({
+		title,
+		placeholder: "Search templates…",
+		items,
+	});
 }
 
 /** Inserts a text snippet at the active editor's cursor (Live CM6 or Monaco Source), optionally landing at `cursorOffset`. */
@@ -222,7 +232,7 @@ export async function insertMarkdownTemplate(explicit?: MarkdownTemplate): Promi
 	const renderedRaw = await renderTemplate(sourceContent, buildContext(path));
 	if (renderedRaw.cancelled) return;
 	if (!activeLiveEditor() && !activeEditor()?.getDomNode()?.offsetParent) {
-		setMarkdownMode(path, "live", state.activeGroup);
+		ensureEditableMarkdown(path, state.activeGroup);
 		for (let i = 0; i < 12 && !activeLiveEditor(); i++) {
 			await new Promise((r) => requestAnimationFrame(r));
 		}
@@ -274,9 +284,15 @@ export async function newNoteFromTemplate(explicit?: MarkdownTemplate): Promise<
 	const title = (await ask(`Title for new ${tpl.name}`))?.trim();
 	if (!title) return;
 
-	const docsRel = state.project?.docs ?? "docs";
+	const docsRel = (state.project?.docs ?? "docs").replace(/^[./\\]+|[\\/]+$/g, "");
+	const schemaRel = (state.project?.schema ?? "schema").replace(/^[./\\]+|[\\/]+$/g, "");
+	const plansRel = (state.project?.plans ?? "design").replace(/^[./\\]+|[\\/]+$/g, "");
 	const defaultFolder = tpl.folder
-		? tpl.folder.replace(/^docs(?=\/|$)/, docsRel)
+		? tpl.folder
+				.replace(/^docs(?=\/|$)/, docsRel)
+				.replace(/^schema(?=\/|$)/, schemaRel)
+				.replace(/^design(?=\/|$)/, plansRel)
+				.replace(/^\/+|\/+$/g, "")
 		: docsRel;
 	// Share variable map between `fileName` and `content` so prompts aren't repeated.
 	const sharedVars = new Map<string, string>();
@@ -317,7 +333,7 @@ export async function newNoteFromTemplate(explicit?: MarkdownTemplate): Promise<
 		await backend.create(dest, "file");
 		await backend.write(dest, rendered.text);
 		setState("treeVersion", (v) => v + 1);
-		setMarkdownMode(canonical(dest), "live");
+		ensureEditableMarkdown(canonical(dest));
 		const reveal = (() => {
 			if (rendered.cursorOffset === null) return undefined;
 			const before = rendered.text.slice(0, rendered.cursorOffset).split("\n");
@@ -352,47 +368,76 @@ export async function manageTemplates(copyBuiltin?: MarkdownTemplate): Promise<v
 			setState("treeVersion", (v) => v + 1);
 			notify(`Saved customizable copy to ${relativeTo(root, dest)}.`);
 		}
-		setMarkdownMode(canonical(dest), "live");
+		ensureEditableMarkdown(canonical(dest));
 		await openFile(dest);
 		return;
 	}
 
-	const CREATE_BLANK = "Create blank custom template…";
-	const CUSTOMIZE = "Customize a built-in template…";
+	type ManageAction =
+		| { kind: "blank" }
+		| { kind: "customize" }
+		| { kind: "custom"; tpl: MarkdownTemplate };
 	const customTemplates = (await loadMarkdownTemplates()).filter((t) => t.source === "workspace" && t.path);
-	const customLabels = new Map<string, MarkdownTemplate>();
-	const options: string[] = [CREATE_BLANK, CUSTOMIZE];
-	const details: Record<string, string> = {
-		[CREATE_BLANK]: "Start a new .md template with <% tp.date.now() %> and <% tp.file.cursor() %> tags",
-		[CUSTOMIZE]: "Copy a built-in default (Ticket, Change Spec, Meeting Notes…) into your project to edit",
-	};
-	for (const tpl of customTemplates) {
-		const label = `Edit / delete: ${tpl.name}`;
-		options.push(label);
-		details[label] = tpl.path ? relativeTo(root, tpl.path) : tpl.description;
-		customLabels.set(label, tpl);
-	}
-	const action = await choose(`Project templates live in ${relativeTo(root, dir)}/`, options, { details });
+	const items: QuickPickOption<ManageAction>[] = [
+		{
+			value: { kind: "blank" },
+			label: "Create blank custom template…",
+			icon: "new-file",
+			description: "Start a new .md template with <% tp.date.now() %> and <% tp.file.cursor() %> tags",
+		},
+		{
+			value: { kind: "customize" },
+			label: "Customize a built-in template…",
+			icon: "notebook-template",
+			description: "Copy a built-in default (Ticket, Spec, Plan Doc, Database Table…) into your project to edit",
+		},
+		...customTemplates.map((tpl, i): QuickPickOption<ManageAction> => ({
+			value: { kind: "custom", tpl },
+			label: `Edit / delete: ${tpl.name}`,
+			icon: "edit",
+			badge: { text: "Custom", tone: "active" },
+			detail: tpl.path ? relativeTo(root, tpl.path) : undefined,
+			description: tpl.description,
+			divide: i === 0,
+		})),
+	];
+	const action = await quickPick<ManageAction>({
+		title: `Project templates (${relativeTo(root, dir)}/)`,
+		placeholder: "Choose a template action or search custom templates…",
+		items,
+	});
 	if (!action) return;
 
-	const chosenCustom = customLabels.get(action);
-	if (chosenCustom?.path) {
-		const EDIT = "Edit template";
-		const DELETE = "Move template to trash";
-		const sub = await choose(chosenCustom.name, [EDIT, DELETE], {
-			details: {
-				[EDIT]: `Open ${relativeTo(root, chosenCustom.path)} in Live Preview`,
-				[DELETE]: "Move this custom template file to trash",
-			},
+	if (action.kind === "custom" && action.tpl.path) {
+		const chosenCustom = action.tpl;
+		const customPath = action.tpl.path;
+		const sub = await quickPick<"edit" | "delete">({
+			title: chosenCustom.name,
+			searchable: false,
+			items: [
+				{
+					value: "edit",
+					label: "Edit template",
+					icon: "edit",
+					description: `Open ${relativeTo(root, customPath)} in Live Preview`,
+				},
+				{
+					value: "delete",
+					label: "Move template to trash",
+					icon: "trash",
+					danger: true,
+					description: "Move this custom template file to trash",
+				},
+			],
 		});
-		if (sub === EDIT) {
-			setMarkdownMode(canonical(chosenCustom.path), "live");
-			await openFile(chosenCustom.path);
-		} else if (sub === DELETE) {
-			if ((await choose(`Move template ${relativeTo(root, chosenCustom.path)} to trash?`, ["Move to trash", "Cancel"], { danger: "Move to trash" })) === "Move to trash") {
+		if (sub === "edit") {
+			ensureEditableMarkdown(canonical(customPath));
+			await openFile(customPath);
+		} else if (sub === "delete") {
+			if ((await choose(`Move template ${relativeTo(root, customPath)} to trash?`, ["Move to trash"], { danger: "Move to trash" })) === "Move to trash") {
 				try {
-					await backend.trash(chosenCustom.path);
-					fileRemoved(chosenCustom.path);
+					await backend.trash(customPath);
+					fileRemoved(customPath);
 					setState("treeVersion", (v) => v + 1);
 					notify(`Moved ${chosenCustom.name} to trash.`);
 				} catch (e: any) {
@@ -403,11 +448,18 @@ export async function manageTemplates(copyBuiltin?: MarkdownTemplate): Promise<v
 		return;
 	}
 
-	if (action === CUSTOMIZE) {
-		const names = DEFAULT_TEMPLATES.map((t) => t.name);
-		const details = Object.fromEntries(DEFAULT_TEMPLATES.map((t) => [t.name, t.description]));
-		const picked = await choose("Choose a built-in template to customize", names, { details });
-		const found = DEFAULT_TEMPLATES.find((t) => t.name === picked);
+	if (action.kind === "customize") {
+		const found = await quickPick<MarkdownTemplate>({
+			title: "Choose a built-in template to customize",
+			placeholder: "Search built-in templates…",
+			items: DEFAULT_TEMPLATES.map((t) => ({
+				value: t,
+				label: t.name,
+				icon: "notebook-template",
+				detail: t.group,
+				description: t.description,
+			})),
+		});
 		if (found) await manageTemplates(found);
 		return;
 	}
@@ -420,7 +472,7 @@ export async function manageTemplates(copyBuiltin?: MarkdownTemplate): Promise<v
 	if (!exists) {
 		const starter = `<!-- template: name="${name}" description="Custom project template" group="Custom" folder="docs" -->
 ---
-title: <% tp.file.title %>
+title: <% tp.file.yamlTitle %>
 date: <% tp.date.now("YYYY-MM-DD") %>
 ticket: <% tp.project.ticket %>
 status: draft
@@ -439,7 +491,7 @@ status: draft
 		await backend.write(dest, starter);
 		setState("treeVersion", (v) => v + 1);
 	}
-	setMarkdownMode(canonical(dest), "live");
+	ensureEditableMarkdown(canonical(dest));
 	await openFile(dest);
 }
 
@@ -456,7 +508,7 @@ export async function insertCalloutInteractive(presetType?: string): Promise<voi
 		return;
 	}
 	if (!activeLiveEditor() && !activeEditor()?.getDomNode()?.offsetParent) {
-		setMarkdownMode(path, "live");
+		ensureEditableMarkdown(path);
 		for (let i = 0; i < 12 && !activeLiveEditor(); i++) {
 			await new Promise((r) => requestAnimationFrame(r));
 		}
@@ -464,11 +516,19 @@ export async function insertCalloutInteractive(presetType?: string): Promise<voi
 
 	let type = presetType;
 	if (!type) {
-		const labels = CALLOUT_PRESETS.map((p) => p.label);
-		const details = Object.fromEntries(CALLOUT_PRESETS.map((p) => [p.label, p.about]));
-		const picked = await choose("Insert callout", labels, { details });
+		const picked = await quickPick<string>({
+			title: "Insert callout",
+			placeholder: "Filter callout types…",
+			items: CALLOUT_PRESETS.map((p) => ({
+				value: p.type,
+				label: p.label,
+				icon: "quote",
+				detail: `[!${p.type}]`,
+				description: p.about,
+			})),
+		});
 		if (!picked) return;
-		type = CALLOUT_PRESETS.find((p) => p.label === picked)?.type ?? "important";
+		type = picked;
 	}
 
 	const selected = activeLiveEditor()?.getSelectedText() ?? "";
@@ -476,7 +536,7 @@ export async function insertCalloutInteractive(presetType?: string): Promise<voi
 	insertIntoActiveEditor(insert, cursorOffset, { asBlock: !selected });
 }
 
-/** Interactive Insert Image dialog: picks an existing workspace image or lets the user enter a path / URL. */
+/** Interactive Insert Image dialog: picks an existing workspace image, opens the workspace file browser, or accepts a remote URL. */
 export async function insertImageInteractive(): Promise<void> {
 	const path = activePath();
 	if (!path || !isMarkdown(path)) {
@@ -484,7 +544,7 @@ export async function insertImageInteractive(): Promise<void> {
 		return;
 	}
 	if (!activeLiveEditor() && !activeEditor()?.getDomNode()?.offsetParent) {
-		setMarkdownMode(path, "live");
+		ensureEditableMarkdown(path);
 		for (let i = 0; i < 12 && !activeLiveEditor(); i++) {
 			await new Promise((r) => requestAnimationFrame(r));
 		}
@@ -495,37 +555,68 @@ export async function insertImageInteractive(): Promise<void> {
 	let targetSrc = "";
 	let defaultAlt = "";
 
-	if (images.length) {
-		const OTHER = "Enter URL or image path…";
-		const byLabel = new Map<string, string>();
-		const labels: string[] = [];
-		const details: Record<string, string> = {};
-		for (const imgPath of images.slice(0, 20)) {
-			const rel = root ? relativeTo(root, imgPath) : baseName(imgPath);
-			labels.push(rel);
-			details[rel] = `Insert relative link to ${baseName(imgPath)}`;
-			byLabel.set(rel, imgPath);
-		}
-		labels.push(OTHER);
-		details[OTHER] = "Paste an https:// image URL or relative file path";
+	const formatLocalTarget = (abs: string) => {
+		const rel = relativePath(dirName(path), abs);
+		targetSrc = rel
+			.split("/")
+			.map((s) => encodeURIComponent(s))
+			.join("/");
+		defaultAlt = baseName(abs).replace(/\.[^.]+$/, "").replace(/[-_]+/g, " ");
+	};
 
-		const picked = await choose("Insert image (tip: you can also paste or drop images directly)", labels, { details });
-		if (!picked) return;
-		if (picked === OTHER) {
-			const typed = (await ask("Image URL or path relative to this document", "https://"))?.trim();
-			if (!typed) return;
-			targetSrc = typed;
-		} else {
-			const abs = byLabel.get(picked)!;
-			const rel = relativePath(dirName(path), abs);
-			targetSrc = rel
-				.split("/")
-				.map((s) => encodeURIComponent(s))
-				.join("/");
-			defaultAlt = baseName(abs).replace(/\.[^.]+$/, "").replace(/[-_]+/g, " ");
-		}
+	type ImageChoice = { kind: "image"; path: string } | { kind: "browse" } | { kind: "url" };
+	const items: QuickPickOption<ImageChoice>[] = images.map((imgPath) => {
+		const rel = root ? relativeTo(root, imgPath).replace(/\\/g, "/") : baseName(imgPath);
+		return {
+			value: { kind: "image", path: imgPath },
+			label: baseName(imgPath),
+			file: baseName(imgPath),
+			detail: rel,
+			description: `Insert relative link to ${baseName(imgPath)}`,
+			keywords: rel,
+		};
+	});
+	if (root) {
+		items.push({
+			value: { kind: "browse" },
+			label: "Browse workspace files…",
+			icon: "folder",
+			description: "Pick any image or attachment from the workspace file browser",
+			divide: images.length > 0,
+		});
+	}
+	items.push({
+		value: { kind: "url" },
+		label: "Enter remote image URL…",
+		icon: "file-media",
+		description: "Paste an https:// image URL (tip: you can also paste screenshots with Ctrl+V)",
+		divide: !root && images.length > 0,
+	});
+
+	const picked = await quickPick<ImageChoice>({
+		title: "Insert image (tip: you can also paste or drop images directly)",
+		placeholder: images.length ? "Search workspace images or browse files…" : "Browse workspace files or enter a URL…",
+		items,
+	});
+	if (!picked) return;
+
+	if (picked.kind === "image") {
+		formatLocalTarget(picked.path);
+	} else if (picked.kind === "browse" && root) {
+		const chosen = await browseWorkspaceFile({
+			title: "Choose image from workspace",
+			root,
+			initialDir: dirName(path),
+			pinned: images.slice(0, 8).map((p) => ({
+				path: p,
+				rel: relativeTo(root, p).replace(/\\/g, "/"),
+			})),
+			pinnedLabel: "Image",
+		});
+		if (!chosen) return;
+		formatLocalTarget(chosen.path);
 	} else {
-		const typed = (await ask("Image URL or path (tip: you can also paste screenshots with Ctrl+V or drag-drop files)", ""))?.trim();
+		const typed = (await ask("Image URL (https://…)", "https://"))?.trim();
 		if (!typed) return;
 		targetSrc = typed;
 	}

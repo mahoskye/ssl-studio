@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { checkTables } from "../src/shared/docTables";
+import { frontMatter } from "../src/shared/frontMatter";
+import { SCHEMAS, schemaTemplate } from "../src/shared/projectDocs";
+import { diffSqlAgainstSchemaMarkdown, schemaMarkdownToSql } from "../src/shared/sqlSchema";
 import {
 	DEFAULT_TEMPLATES,
 	formatDateToken,
@@ -127,5 +130,75 @@ describe("Templater rendering", () => {
 		expect(stripped.cursorOffset).not.toBeNull();
 		const aroundCursor = stripped.text.slice(stripped.cursorOffset! - 15, stripped.cursorOffset! + 5);
 		expect(aroundCursor).toContain("Database |");
+	});
+
+	test("Ticket fileName + content share prompted key once via ??= and populate key-prefixed heading", async () => {
+		const ticketTpl = DEFAULT_TEMPLATES.find((t) => t.id === "ticket")!;
+		const sharedVars = new Map<string, string>();
+		let promptCalls = 0;
+		const ctx = baseCtx({
+			title: "Track calibration dates",
+			prompt: async () => {
+				promptCalls++;
+				return "LIMS-404";
+			},
+			suggest: async (_labels, values) => values[0]!,
+		});
+		const fileRes = await renderTemplate(ticketTpl.fileName!, ctx, sharedVars);
+		expect(fileRes.text).toBe("LIMS-404.md");
+		expect(promptCalls).toBe(1);
+
+		const bodyRes = await renderTemplate(ticketTpl.content, ctx, sharedVars);
+		expect(promptCalls).toBe(1);
+		expect(bodyRes.text).toContain("ticket: LIMS-404");
+		expect(bodyRes.text).toContain("# LIMS-404: Track calibration dates");
+		expect(bodyRes.text).toContain("## What done looks like");
+	});
+
+	test("Database Table template round-trips cleanly to SQL DDL with foreign keys and indexes, and schemaTemplate matches", async () => {
+		const dbTpl = DEFAULT_TEMPLATES.find((t) => t.id === "database-table")!;
+		expect(dbTpl.group).toBe("Schema");
+		expect(dbTpl.folder).toBe("schema/database");
+		const res = await renderTemplate(dbTpl.content, baseCtx({ title: "DEMO_AUDIT", fileName: "DEMO_AUDIT.md" }));
+		expect(res.cancelled).toBe(false);
+		expect(checkTables(res.text)).toEqual([]);
+		const generated = schemaMarkdownToSql(res.text, { sourceNote: "schema/database/DEMO_AUDIT.md" });
+		expect(generated).not.toBeNull();
+		expect(generated!.sql).toContain("CREATE TABLE DEMO_AUDIT (");
+		expect(generated!.sql).toContain("CONSTRAINT FK_DEMO_AUDIT_PARENT_ID FOREIGN KEY (PARENT_ID) REFERENCES PARENT_TABLE (ID)");
+		expect(generated!.sql).toContain("CREATE INDEX IX_STATUS ON DEMO_AUDIT (STATUS);");
+		expect(diffSqlAgainstSchemaMarkdown(generated!.sql, res.text)).toEqual([]);
+
+		// projectDocs.schemaTemplate for database also includes Foreign keys & Indexes subsections cleanly under ADR 0008.
+		const dbKind = SCHEMAS.find((k) => k.id === "database")!;
+		const starter = schemaTemplate(dbKind, "DEMO_AUDIT");
+		expect(starter).toContain("## Foreign keys");
+		expect(starter).toContain("## Indexes");
+		expect(checkTables(starter)).toEqual([]);
+	});
+
+	test("Plan Doc (.plan.md), Interface Contract, Open Question, and Schema group templates render cleanly", async () => {
+		const planTpl = DEFAULT_TEMPLATES.find((t) => t.id === "plan-doc")!;
+		expect(planTpl.folder).toBe("design");
+		const planName = await renderTemplate(planTpl.fileName!, baseCtx({ title: "CalculateDates", plansFolder: "plans" }));
+		expect(planName.text).toBe("CalculateDates.plan.md");
+		const planRes = await renderTemplate(planTpl.content, baseCtx({ title: "CalculateDates", plansFolder: "plans" }));
+		expect(planRes.text).toContain("ticket: DEMO-101");
+		expect(planRes.text).toContain("`plans/CalculateDates.plan.json`");
+		expect(checkTables(planRes.text)).toEqual([]);
+
+		const ifcTpl = DEFAULT_TEMPLATES.find((t) => t.id === "interface-contract")!;
+		expect(ifcTpl.group).toBe("Schema");
+		const ifcRes = await renderTemplate(ifcTpl.content, baseCtx({ title: "Result Feed" }));
+		expect(frontMatter(ifcRes.text).values).toMatchObject({ with: "Instrument", direction: "in", version: "1", status: "draft", ticket: "DEMO-101" });
+		expect(checkTables(ifcRes.text)).toEqual([]);
+
+		const qTpl = DEFAULT_TEMPLATES.find((t) => t.id === "open-question")!;
+		expect(qTpl.folder).toBe("docs/knowledge/questions");
+		const qRes = await renderTemplate(qTpl.content, baseCtx({ title: "Which timezone applies?" }));
+		expect(frontMatter(qRes.text).values).toMatchObject({ status: "open", ticket: "DEMO-101", asked: "2026-11-22" });
+
+		const customSchema = parseTemplateFile('<!-- template: name="View Doc" group="Schema" folder="schema/database" -->\n# <% tp.file.title %>\n', "View", "view", "/ws/docs/templates/view.md");
+		expect(customSchema.group).toBe("Schema");
 	});
 });

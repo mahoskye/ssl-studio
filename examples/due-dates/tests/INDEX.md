@@ -39,7 +39,7 @@ From the repository root, with the runner beside this repository:
 bun scripts/demo-sandbox.ts
 ```
 
-It runs each script on a fresh copy of [demo.sql](../schema/database/demo.sql), and
+It runs each script on a fresh copy of the tables and [demo-seed.sql](../schema/database/demo-seed.sql), and
 fails if a script leaves the database changed. In STARLIMS, with the scripts
 under the `DueDates` and `DueDatesTests` categories:
 
@@ -65,7 +65,7 @@ A test that raises is recorded as failed, and the rest still run.
 
 ## Tests that need the database
 
-These need the three tables and the rows of `demo.sql`, loaded fresh.
+These need the four tables (`DEMO_INSTRUMENTS.sql`, `DEMO_HOLIDAYS.sql`, `DEMO_OUTAGES.sql`, `DEMO_SAMPLES.sql`) and the rows of `demo-seed.sql`, loaded fresh.
 
 - **`SetSampleDueDatesTests`** (7 tests): the result's shape, the skips, the rules.
 - **`SaveDueDatesTests`** (5 tests): saving a plan, a sample no longer waiting, a plan that is not one.

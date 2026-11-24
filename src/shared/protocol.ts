@@ -80,7 +80,7 @@ export type DocFile = {
 	plans?: string[];
 	/** A spec: the tickets declared in its own front matter (before merging a paired plan's ticket). */
 	ownTickets?: string[];
-	/** A spec written beside a `.plan.json`: the paired plan's name and ticket, when it names one. */
+	/** A companion plan doc (`*.plan.md`) written beside a `.plan.json`: the paired plan's name and ticket, when it names one. */
 	pairedPlan?: { name: string; ticket?: string };
 	/** A ticket: those of the specs or plans it names that are not there. */
 	missing?: string[];
@@ -126,6 +126,13 @@ export type DocFile = {
 	approvedDate?: string;
 	changeControl?: string;
 	gxpImpact?: string;
+	/** Explicit frontmatter dates for git-clone-safe staleness and periodic review hygiene. */
+	asked?: string;
+	date?: string;
+	effectiveDate?: string;
+	reviewDue?: string;
+	/** Optional document subtype (e.g. `"test-run"` for IQ/OQ/PQ validation test runs). */
+	docKind?: "test-run" | string;
 	/** Last-modified timestamp on disk (ms epoch) for staleness hygiene. */
 	mtime?: number;
 	/** Indexed Markdown headings for fast cross-workspace `#heading` jump. */
@@ -165,7 +172,7 @@ export type DocFile = {
  * from the project's top ("/docs/…", "top"), or a path in front matter,
  * which is from the project's top with no mark ("root").
  */
-export type LinkTo = { path: string; line: number; column: number; href: string; rest: string; from: "doc" | "top" | "root" };
+export type LinkTo = { path: string; line: number; column: number; href: string; rest: string; from: "doc" | "top" | "root"; kind?: "markdown" | "plan" | "registry" | "code" };
 /** A link by name in one of the workspace's Markdown documents: the document, the line (from 1), the column its name starts at (from 0), and the name as written. */
 export type NameIn = { path: string; line: number; column: number; name: string };
 /** One file of the project, for the file manifest. */
@@ -174,6 +181,11 @@ export type ManifestFile = { path: string; kind: string; bytes: number; lines: n
 export type Snapshot = { id: string; time: number; size: number };
 export type GitCommit = { sha: string; shortSha: string; time: number; author: string; subject: string; path: string };
 export type TicketGitCommit = { sha: string; shortSha: string; time: number; author: string; subject: string; files: { status: string; path: string }[] };
+export type GitBlameLine = { sha: string; shortSha: string; author: string; date: string; summary: string; ticket?: string };
+export type GitBranchInfo = { name: string; current: boolean; upstream?: string; lastSubject?: string };
+export type GitBranchesResult = { current: string; branches: GitBranchInfo[] };
+export type GitActionResult = { ok: boolean; message: string };
+export type GitStashResult = { ok: boolean; message: string; entries?: { ref: string; message: string }[] };
 
 export type SearchHit = { path: string; line: number; column: number; length: number; text: string };
 
@@ -209,6 +221,8 @@ export type Settings = {
 	wordWrap?: boolean;
 	/** Markdown drawn as it is written, in the text view: headings larger, the markup out of the way. On unless set to false. */
 	livePreview?: boolean;
+	/** Subtly dim lines below the pointer in Markdown Live and Read views. On unless set to false. */
+	markdownReadingHighlight?: boolean;
 	/** Folder relative to workspace root for customizable Templater Markdown templates (defaults to `<docs>/templates`). */
 	templatesFolder?: string;
 	/** Folder relative to workspace root for pasted/dropped Markdown image attachments (defaults to `<docs>/attachments`). */
@@ -282,6 +296,9 @@ export type WorkspaceDocIssue = {
 	level: "warn" | "note";
 	message: string;
 	href?: string;
+	fix?:
+		| { kind: "record-approval"; path: string }
+		| { kind: "reciprocal-adr"; path: string; field: "supersedes" | "superseded-by"; value: string };
 };
 
 export type SchemaDriftItem = {
@@ -318,7 +335,7 @@ export type DocAuditResult = {
 	citationIssues?: AuditCitationIssue[];
 	schemaDrift?: SchemaDriftItem[];
 	undocumentedRefs?: UndocumentedSchemaRef[];
-	truncatedFolders?: { folder: string; limit: number }[];
+	truncatedFolders?: { folder: string; limit: number; total?: number }[];
 };
 
 export type SettingsScope = "user" | "workspace";
@@ -368,6 +385,14 @@ export interface BackendApi {
 	gitRangeLog(from: string, to?: string, limit?: number): Promise<TicketGitCommit[]>;
 	/** Before (`sha~1`) and after (`sha`) file text for a single Git commit diff. */
 	gitCommitFile(path: string, sha: string, repoPath?: string): Promise<{ before: string | null; after: string | null }>;
+	/** Single-line Git blame attribution (`git blame -L line,line --porcelain`). Null outside a repo or on untracked lines. */
+	gitBlameLine(path: string, line: number): Promise<GitBlameLine | null>;
+	/** Local Git branches sorted with current branch first. Null outside a repository. */
+	gitBranches(): Promise<GitBranchesResult | null>;
+	/** Switches to an existing local Git branch. */
+	gitCheckout(branch: string): Promise<GitActionResult>;
+	/** Pushes, pops, or lists local Git stash entries. */
+	gitStash(action: "push" | "pop" | "list", message?: string): Promise<GitStashResult>;
 	/** Puts files into the next commit as they are now; takes them out of it again. */
 	gitStage(paths: string[]): Promise<void>;
 	gitUnstage(paths: string[]): Promise<void>;
@@ -407,6 +432,8 @@ export interface BackendApi {
 	closeWindow(): Promise<void>;
 	/** README.md, AGENTS.md and project.toml, then the Markdown and plans in the project's docs and plans folders. */
 	docs(options?: { templatesFolder?: string }): Promise<DocFile[]>;
+	/** Folders whose doc listing exceeded the deterministic cap, with exact total file counts. */
+	docsTruncated(): Promise<{ folder: string; limit: number; total: number }[]>;
 	/** Cached workspace Markdown audit: unused attachments (configured + ticket bundles), open tasks, broken #anchors, table rule, YAML & code-citation issues. */
 	docAudit(attachmentsFolder?: string, options?: { templatesFolder?: string; dirtyBuffers?: Record<string, string> }): Promise<DocAuditResult>;
 	/** Opens a workspace file with the operating system's default application (validated inside workspace root). */
@@ -422,11 +449,40 @@ export interface BackendApi {
 		baseDir?: string;
 		meta?: Record<string, string>;
 		mermaidPngs?: Record<string, string>;
+		attachmentsFolder?: string;
+		docsFolder?: string;
+		rasterizedImages?: Record<string, string>;
+		toc?: boolean;
+		headerFooter?: boolean;
 	}): Promise<{ path: string; bytes: number }>;
 	/** Imports a `.docx`, `.html`, or `.md` document into the workspace as Markdown (extracting embedded images). */
-	importDocFile(request: { sourcePath?: string; destDir: string; attachmentsDir?: string }): Promise<{ path: string; images: string[]; kind: "docx" | "html" | "md" } | null>;
+	importDocFile(request: {
+		sourcePath?: string;
+		destDir: string;
+		attachmentsDir?: string;
+		onConflict?: "prompt" | "overwrite" | "copy";
+	}): Promise<{
+		path: string;
+		images: string[];
+		kind: "docx" | "html" | "md";
+		warnings?: string[];
+		conflict?: boolean;
+		existingPath?: string;
+	} | null>;
 	/** Converts uploaded/dropped `.docx` base64 bytes into Markdown + extracted images inside the workspace. */
-	importDocxBytes(request: { fileName: string; base64: string; destDir: string; attachmentsDir?: string }): Promise<{ path: string; images: string[] }>;
+	importDocxBytes(request: {
+		fileName: string;
+		base64: string;
+		destDir: string;
+		attachmentsDir?: string;
+		onConflict?: "prompt" | "overwrite" | "copy";
+	}): Promise<{
+		path: string;
+		images: string[];
+		warnings?: string[];
+		conflict?: boolean;
+		existingPath?: string;
+	}>;
 	/** Every file of the project with its size and a checksum, for the file manifest. */
 	manifest(): Promise<ManifestFile[]>;
 	/**

@@ -136,7 +136,6 @@ export async function newDocIn(folder?: string): Promise<boolean> {
 		return notify(String(e?.message ?? e), "error"), false;
 	}
 	setState("treeVersion", (v) => v + 1);
-	setState("mdText", path, true);
 	await openFile(path);
 	return true;
 }

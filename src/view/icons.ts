@@ -24,6 +24,7 @@ export const ICON = {
 	"circle-small-filled": "",
 	close: "",
 	"close-all": "\ueac1",
+	code: "\ueac4",
 	"collapse-all": "",
 	copy: "\uebcc",
 	dash: "",

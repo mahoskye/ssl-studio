@@ -44,7 +44,10 @@
     single-line prompts. Menus and popovers must clamp inside the viewport and
     flip upward/left near window edges.
   - **Keybindings & editing ergonomics:** Sublime Text.
-  - **Markdown authoring, Live Preview, links & notes:** Obsidian.
+  - **Markdown authoring, Live Preview, links & notes:** Obsidian. Keep the
+    editor canvas content-first (prose starts at the top); place Properties,
+    Ticket Work, Readiness, and Links inspectors in the shared right-hand
+    Document panel (`Info` | `Outline`).
   - **CSV / TSV registries:** Excel / Google Sheets.
   - **Flowchart Plans & Call Graph:** Excalidraw / Miro.
   - **Curated sidebar sections (e.g. Docs → Project):** use one consistent

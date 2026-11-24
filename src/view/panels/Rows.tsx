@@ -278,6 +278,8 @@ export function Row(props: {
 	/** Something is dragged over the row, and let go on it. To take it, the row prevents the event's default. */
 	onDragOver?: (e: DragEvent) => void;
 	onDrop?: (e: DragEvent) => void;
+	/** Optional pointer click interceptor (e.g. Ctrl/Shift multi-select). Return true to handle and skip `onActivate`. */
+	onClick?: (e: MouseEvent) => boolean | void;
 	onActivate?: () => void;
 	/** A double click, or Enter: open to stay. False when the row has nothing to keep, and Enter is then one click. */
 	onKeep?: () => boolean | void;
@@ -328,7 +330,10 @@ export function Row(props: {
 			onDragEnd={(e) => props.onDragEnd?.(e)}
 			onDragOver={(e) => props.onDragOver?.(e)}
 			onDrop={(e) => props.onDrop?.(e)}
-			onClick={() => props.onActivate?.()}
+			onClick={(e) => {
+				if (props.onClick?.(e) === true) return;
+				props.onActivate?.();
+			}}
 			onDblClick={() => props.onKeep?.()}
 			onFocus={() => props.onFocus?.()}
 			onMouseEnter={() => props.onPoint?.()}

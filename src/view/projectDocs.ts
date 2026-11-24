@@ -12,26 +12,37 @@ import { docChecks } from "../shared/docChecks";
 import {
 	assembleDeploymentManifestCsv,
 	assembleDeploymentManifestMarkdown,
+	assembleReleaseBundleCsv,
 	assembleReleaseBundleMarkdown,
 	assembleReleaseNotesMarkdown,
 	assembleRtmCsv,
 	assembleRtmMarkdown,
+	assembleTestExecutionProtocol,
 	assembleTicketPacketMarkdown,
 	buildPrintableHtml,
 	buildRtmRows,
 	classifyDeploymentArtifact,
 	demoteMarkdownHeadings,
+	detectChecksumDrift,
 	escapeHtml,
 	evaluateTicketReadiness,
 	extractExportMeta,
 	inlineExportStyles,
+	isTestRunStale,
 	markdownToJira,
+	parseTestRunDocument,
 	renderFrontMatterSummaryHtml,
 	transformMarkdownFootnotes,
+	type DeploymentManifestRegistry,
+	type DeploymentManifestSql,
+	type DeploymentRunbookInput,
+	type DeploymentRunbookTableDep,
 	type PlanBusinessTest,
 	type ReleaseBundleCommit,
 	type ReleaseBundleInput,
 	type ReleaseBundleTicket,
+	type TestRunPhase,
+	type TestRunSummary,
 } from "../shared/docExport";
 import { headingAnchor } from "../shared/docTables";
 import {
@@ -41,13 +52,22 @@ import {
 	many,
 	one,
 	quoteYamlScalar,
+	removeFrontMatterKey,
 	removeFromFrontMatterList,
 	replaceInFrontMatterList,
 	withFrontMatter,
 } from "../shared/frontMatter";
 import { documentHeadings, findHeadingLine, parseImageAltSize, upsertTocBlock } from "../shared/markdownEdit";
 import { keysIn, ticketColumn } from "../shared/registryTickets";
-import { extractSqlObjects, mergeSqlTablesIntoMarkdown, parseCreateTables, sqlTablesToMarkdown } from "../shared/sqlSchema";
+import {
+	diffSqlAgainstSchemaMarkdown,
+	extractSqlObjects,
+	filterSqlTablesForMarkdown,
+	mergeSqlTablesIntoMarkdown,
+	parseCreateTables,
+	schemaMarkdownToSql,
+	sqlTablesToMarkdown,
+} from "../shared/sqlSchema";
 import { importSummary, ticketsFromJson, ticketsFromTable, type Imported, type ImportedTicket } from "../shared/ticketImport";
 import { manifestSummary, mergeManifest } from "../shared/manifest";
 import { buildDocNameIndex, docByName, lookupInIndex, namedLink, namesToFollow, withNames } from "../shared/namedLinks";
@@ -92,8 +112,9 @@ import {
 import { folderParts, typedParts } from "../shared/docSections";
 import type { DocFile, LinkTo, NameIn } from "../shared/protocol";
 import { backend } from "./backend";
-import { ask, choose, quickPick, type QuickPickOption } from "./dialogs";
-import { toggleTask } from "../shared/tasks";
+import { ask, browseWorkspaceFile, choose, quickPick, quickPickMany, type QuickPickOption } from "./dialogs";
+import { recall, remember } from "./graph/canvas";
+import { tasks, toggleTask } from "../shared/tasks";
 import type { LinkMend } from "../shared/docChecks";
 import { linkFile, linkWritten, ownLinkEdits, rewriteHeadingReferences, withLinkFiles, type LinkEdit } from "../shared/docLinks";
 import { parsePlan, printPlan, isPlanPath } from "./plan/model";
@@ -226,7 +247,6 @@ async function start(path: string, text: string, _area?: CatalogArea) {
 		return notify(String(e?.message ?? e), "error");
 	}
 	setState("treeVersion", (v) => v + 1);
-	if (isMarkdown(path)) setState("mdText", canonical(path), true);
 	await openFile(path);
 }
 
@@ -277,12 +297,52 @@ export async function newTicket(known?: string, related?: string, options?: { pa
 	let parent = options?.parent;
 	let type = options?.type;
 	if (!parent && !known) {
-		const kindPick = await choose(`${key}: ticket type`, ["Task", "Story", "Bug", "Epic", "Sub-task"]);
+		const kindPick = await quickPick<string>({
+			title: `${key}: ticket type`,
+			placeholder: "Choose a ticket type…",
+			items: [
+				{ label: "Task", value: "Task", icon: "checklist", description: "Implementation or maintenance work item" },
+				{ label: "Story", value: "Story", icon: "note", description: "User-facing feature or workflow enhancement" },
+				{ label: "Bug", value: "Bug", icon: "bug", description: "Defect or regression fix" },
+				{ label: "Epic", value: "Epic", icon: "layers", description: "Multi-ticket initiative or release theme" },
+				{ label: "Sub-task", value: "Sub-task", icon: "list-tree", description: "Child item rolled up under a parent ticket" },
+			],
+		});
 		if (!kindPick) return;
 		type = kindPick;
 		if (kindPick !== "Epic") {
-			const parentInput = ticketKey((await ask(`${key}: parent epic/ticket key (leave empty for none)`)) ?? "");
-			if (parentInput) parent = parentInput;
+			const parentCandidates = docs()
+				.filter((d) => d.exists && d.group === "tickets" && !isCatalog(d) && d.ticket && !isArchivedTicket(d))
+				.sort((a, b) => (a.ticket ?? "").localeCompare(b.ticket ?? "", undefined, { numeric: true, sensitivity: "base" }));
+			if (parentCandidates.length) {
+				const parentPick = await quickPick<string>({
+					title: `${key}: parent epic or ticket`,
+					placeholder: "Filter by ticket key or title, or choose None…",
+					items: [
+						{ label: "None (top-level ticket)", value: "__none__", icon: "dash" },
+						...parentCandidates.map((t, i) => ({
+							label: `${t.ticket}: ${t.title || t.name}`,
+							value: t.ticket!,
+							icon: "checklist" as const,
+							badge: t.status ? { text: t.status, tone: toneOf(t.status) } : undefined,
+							detail: t.release || undefined,
+							divide: i === 0,
+							keywords: [t.ticket, t.title, t.status, t.release].filter(Boolean).join(" "),
+						})),
+						{ label: "Enter another ticket key…", value: "__other__", icon: "edit", divide: true },
+					],
+				});
+				if (!parentPick) return;
+				if (parentPick === "__other__") {
+					const parentInput = ticketKey((await ask(`${key}: parent epic/ticket key (leave empty for none)`)) ?? "");
+					if (parentInput) parent = parentInput;
+				} else if (parentPick !== "__none__") {
+					parent = parentPick;
+				}
+			} else {
+				const parentInput = ticketKey((await ask(`${key}: parent epic/ticket key (leave empty for none)`)) ?? "");
+				if (parentInput) parent = parentInput;
+			}
 		}
 	} else if (parent && !type) {
 		type = "Sub-task";
@@ -662,7 +722,7 @@ export async function schemaCatalogKept() {
  * kind's folder as the project has it, which may be written in other capitals ("Database"): no second folder is made
  * beside it.
  */
-export async function newSchema(id: SchemaKind["id"], inFolder?: string): Promise<boolean> {
+export async function newSchema(id: SchemaKind["id"], inFolder?: string, initialTitle?: string): Promise<boolean> {
 	if (!ready()) return false;
 	const kind = SCHEMAS.find((known) => known.id === id)!;
 	// Asked for with no folder named (the Schema heading, the New menu, the palette), it goes where the project
@@ -671,7 +731,7 @@ export async function newSchema(id: SchemaKind["id"], inFolder?: string): Promis
 	const into = folderParts(inFolder ?? kept ?? id);
 	// A folder inside the interfaces' is a system the project exchanges messages with: the message is with it.
 	const system = id === "interfaces" ? into[1] : undefined;
-	const title = (await ask(id === "database" ? "The table's name, as the database has it" : `The ${kind.one}${system ? ` with ${system}` : ""}, in a few words`))?.trim();
+	const title = (await ask(id === "database" ? "The table's name, as the database has it" : `The ${kind.one}${system ? ` with ${system}` : ""}, in a few words`, initialTitle ?? ""))?.trim();
 	if (!title) return false;
 	// A file, so a table called BUILD is described: only a folder of that name is left out of the app's lists.
 	const named = typedParts(id === "database" ? title : slug(title), "file");
@@ -716,10 +776,30 @@ async function schemaRows(): Promise<string> {
 /** A registry: a table of what a migration must carry across, each row with how far it has come. */
 export async function newRegistry() {
 	if (!ready()) return;
-	const other = "Another…";
-	const picked = await choose("A registry of what?", [...REGISTRIES.map((r) => r.title), other], { details: { ...Object.fromEntries(REGISTRIES.map((r) => [r.title, r.about])), [other]: "A table of your own: you name its columns." } });
+	const OTHER = "__other__";
+	const picked = await quickPick<string>({
+		title: "A registry of what?",
+		placeholder: "Filter registry templates…",
+		items: [
+			...REGISTRIES.map((r) => ({
+				label: r.title,
+				value: r.id,
+				icon: "table" as const,
+				detail: r.file,
+				description: r.about,
+				keywords: `${r.id} ${r.file} ${r.columns.join(" ")}`,
+			})),
+			{
+				label: "Another…",
+				value: OTHER,
+				icon: "add",
+				description: "A table of your own: you name its columns.",
+				divide: true,
+			},
+		],
+	});
 	if (!picked) return;
-	const kind = REGISTRIES.find((r) => r.title === picked);
+	const kind = REGISTRIES.find((r) => r.id === picked);
 	if (kind?.id === "files") return updateManifest();
 	// The database objects start from what the project's schema already says, where it is kept as SQL.
 	if (kind?.id === "database") return start(joinPath(areaFolder("registries"), kind.file), `${csvRow(kind.columns)}\n${await schemaRows()}`, "registries");
@@ -776,10 +856,18 @@ export async function setStatus(path: string, status: string) {
 				notify("No other decision documents exist yet.");
 				return;
 			}
-			const labels = others.map((d) => `${baseName(d.path).replace(/\.(md|markdown)$/i, "")}${d.title ? ` — ${d.title}` : ""}`);
-			const chosenLabel = await choose("Which existing decision supersedes this one?", labels);
-			if (!chosenLabel) return;
-			const targetDecision = others[labels.indexOf(chosenLabel)];
+			const targetDecision = await quickPick<DocFile>({
+				title: "Which existing decision supersedes this one?",
+				placeholder: "Filter decisions by number, title, or status…",
+				items: others.map((d) => ({
+					label: `${baseName(d.path).replace(/\.(md|markdown)$/i, "")}${d.title ? ` — ${d.title}` : ""}`,
+					value: d,
+					icon: "note",
+					badge: d.status ? { text: d.status, tone: toneOf(d.status) } : undefined,
+					detail: relativeTo(root(), d.path).split("\\").join("/"),
+					keywords: [d.name, d.title, d.status, ...(d.tickets ?? [])].filter(Boolean).join(" "),
+				})),
+			});
 			if (!targetDecision) return;
 			const oldStem = baseName(path).replace(/\.(md|markdown)$/i, "");
 			const newStem = baseName(targetDecision.path).replace(/\.(md|markdown)$/i, "");
@@ -892,31 +980,266 @@ async function withoutCatalogLists(links: LinkTo[]): Promise<LinkTo[]> {
 	});
 }
 
-async function followPaths(fromOrPairs: string | readonly { from: string; to: string }[], toSingle?: string) {
-	if (!state.workspace) return;
-	const rawPairs = typeof fromOrPairs === "string" ? [{ from: fromOrPairs, to: toSingle! }] : [...fromOrPairs];
-	const pairs = rawPairs
+type NormalizedMovePair = { from: string; to: string; fromCanon: string; toCanon: string };
+
+function normalizeMovePairs(rawPairs: readonly { from: string; to: string }[]): NormalizedMovePair[] {
+	return rawPairs
 		.filter((p) => p.from && p.to && canonical(p.from) !== canonical(p.to))
 		.map((p) => ({ from: p.from, to: p.to, fromCanon: canonical(p.from), toCanon: canonical(p.to) }))
 		.sort((a, b) => b.fromCanon.length - a.fromCanon.length);
+}
+
+/** Rewrites a single plain (non-URL-encoded) workspace or relative path ref when it falls inside `pairs`. */
+function rewritePlainPathRef(
+	rawRef: string,
+	docPath: string,
+	pairs: readonly NormalizedMovePair[],
+	wsRoot: string,
+): string | null {
+	const trimmed = rawRef.trim();
+	if (!trimmed || /^(?:https?:|mailto:|#)/i.test(trimmed)) return null;
+	const hashIdx = trimmed.indexOf("#");
+	const pathPart = hashIdx >= 0 ? trimmed.slice(0, hashIdx) : trimmed;
+	const fragPart = hashIdx >= 0 ? trimmed.slice(hashIdx) : "";
+	const normPart = pathPart.replace(/\\/g, "/");
+	const leadSlash = normPart.startsWith("/");
+	const isRel = /^\.{1,2}\//.test(normPart);
+	const clean = normPart.replace(/^\/+/, "").replace(/^\.\//, "");
+	if (!clean) return null;
+	const resolved = isRel ? resolvePath(dirName(docPath), normPart) : resolvePath(wsRoot, clean);
+	const canonRes = canonical(resolved);
+	for (const pair of pairs) {
+		if (canonRes === pair.fromCanon || isInside(pair.fromCanon, canonRes)) {
+			const dest = canonRes === pair.fromCanon ? pair.to : joinPath(pair.to, relativeTo(pair.from, resolved));
+			let nextPath: string;
+			if (isRel) {
+				const rel = relativePath(dirName(docPath), dest).split("\\").join("/");
+				nextPath = normPart.startsWith("./") && !rel.startsWith(".") ? `./${rel}` : rel;
+			} else {
+				const rel = relativeTo(wsRoot, dest).split("\\").join("/");
+				nextPath = `${leadSlash ? "/" : ""}${rel}`;
+			}
+			const nextFull = `${nextPath}${fragPart}`;
+			return nextFull !== trimmed ? nextFull : null;
+		}
+	}
+	return null;
+}
+
+const REGISTRY_FORBIDDEN_COLS = new Set([
+	"status",
+	"state",
+	"note",
+	"notes",
+	"comment",
+	"comments",
+	"ticket",
+	"tickets",
+	"sha256",
+	"sha-256",
+	"checksum",
+	"hash",
+	"bytes",
+	"lines",
+	"kind",
+	"type",
+	"direction",
+]);
+const REGISTRY_PATH_COLS = new Set(["path", "file", "script", "scripts", "calls", "used by", "source", "where", "handler", "how"]);
+
+/**
+ * Surgically updates exact matching path/script cells in `files.csv` (preserving `status` + `note`)
+ * and code columns of `settings.csv`/`database.csv`/`jobs.csv`/`reports.csv` without disturbing
+ * unrelated columns or formatting (ADR 0002).
+ */
+function rewriteRegistryPathsInCsv(
+	csvText: string,
+	regPath: string,
+	pairs: readonly NormalizedMovePair[],
+	wsRoot: string,
+): { text: string; hits: number } {
+	const parsed = parseCsv(csvText);
+	if (!parsed.header.length || !parsed.rows.length) return { text: csvText, hits: 0 };
+	const fileLower = baseName(regPath).toLowerCase();
+	const isFilesManifest = fileLower === "files.csv";
+	const eligibleCols = new Set<number>();
+	parsed.header.forEach((h, idx) => {
+		const col = h.text.trim().toLowerCase();
+		if (!col || REGISTRY_FORBIDDEN_COLS.has(col)) return;
+		if (isFilesManifest) {
+			if (col === "path" || col === "file") eligibleCols.add(idx);
+		} else if (REGISTRY_PATH_COLS.has(col)) {
+			eligibleCols.add(idx);
+		}
+	});
+	if (!eligibleCols.size) return { text: csvText, hits: 0 };
+
+	const edits: { start: number; end: number; replacement: string }[] = [];
+	for (const row of parsed.rows) {
+		for (const colIdx of eligibleCols) {
+			const cell = row[colIdx];
+			if (!cell) continue;
+			const raw = cell.text.trim();
+			if (!raw) continue;
+			const nextVal = rewritePlainPathRef(raw, regPath, pairs, wsRoot);
+			if (nextVal && nextVal !== raw) {
+				edits.push({ start: cell.start, end: cell.end, replacement: csvCell(nextVal, parsed.delimiter) });
+			}
+		}
+	}
+	if (!edits.length) return { text: csvText, hits: 0 };
+	let out = csvText;
+	for (let i = edits.length - 1; i >= 0; i--) {
+		const ed = edits[i]!;
+		out = `${out.slice(0, ed.start)}${ed.replacement}${out.slice(ed.end)}`;
+	}
+	return { text: out, hits: edits.length };
+}
+
+/**
+ * Surgically rewrites old path strings ONLY on comment-only lines/blocks in `.ssl`/`.srvscr`/`.ds`/`.sql`
+ * files using exact range offsets (no SSL parser, pure range edit per ADR 0002 & ADR 0003).
+ */
+function rewriteCodeCommentPaths(
+	text: string,
+	codePath: string,
+	hits: readonly { link: LinkTo; pair: NormalizedMovePair }[],
+	wsRoot: string,
+): { text: string; done: number } {
+	if (!hits.length) return { text, done: 0 };
+	const isSql = /\.sql$/i.test(codePath);
+	const parts = text.split(/(\r?\n)/);
+	const lineCount = Math.ceil(parts.length / 2);
+
+	// Track comment-only lines/blocks without parsing any SSL/SQL syntax.
+	const commentEndCol = new Map<number, number>();
+	let inBlock = false;
+	for (let li = 0; li < lineCount; li++) {
+		const rawLine = parts[li * 2] ?? "";
+		const trimmed = rawLine.trim();
+		if (isSql) {
+			if (inBlock) {
+				const closeIdx = rawLine.indexOf("*/");
+				if (closeIdx >= 0) {
+					inBlock = false;
+					if (!rawLine.slice(closeIdx + 2).trim()) commentEndCol.set(li + 1, closeIdx);
+				} else {
+					commentEndCol.set(li + 1, rawLine.length);
+				}
+			} else if (trimmed.startsWith("--")) {
+				commentEndCol.set(li + 1, rawLine.length);
+			} else if (trimmed.startsWith("/*")) {
+				const openIdx = rawLine.indexOf("/*");
+				const closeIdx = rawLine.indexOf("*/", openIdx + 2);
+				if (closeIdx >= 0) {
+					if (!rawLine.slice(closeIdx + 2).trim()) commentEndCol.set(li + 1, closeIdx);
+				} else {
+					inBlock = true;
+					commentEndCol.set(li + 1, rawLine.length);
+				}
+			}
+		} else {
+			if (inBlock) {
+				const semiIdx = rawLine.indexOf(";");
+				const starIdx = rawLine.indexOf("*/");
+				const closeIdx = semiIdx >= 0 && starIdx >= 0 ? Math.min(semiIdx, starIdx) : semiIdx >= 0 ? semiIdx : starIdx;
+				const closeLen = closeIdx === starIdx && starIdx >= 0 ? 2 : 1;
+				if (closeIdx >= 0) {
+					inBlock = false;
+					if (!rawLine.slice(closeIdx + closeLen).trim()) commentEndCol.set(li + 1, closeIdx);
+				} else {
+					commentEndCol.set(li + 1, rawLine.length);
+				}
+			} else if (trimmed.startsWith("//")) {
+				commentEndCol.set(li + 1, rawLine.length);
+			} else if (trimmed.startsWith("/*")) {
+				const openIdx = rawLine.indexOf("/*");
+				const semiIdx = rawLine.indexOf(";", openIdx + 2);
+				const starIdx = rawLine.indexOf("*/", openIdx + 2);
+				const closeIdx = semiIdx >= 0 && starIdx >= 0 ? Math.min(semiIdx, starIdx) : semiIdx >= 0 ? semiIdx : starIdx;
+				const closeLen = closeIdx === starIdx && starIdx >= 0 ? 2 : 1;
+				if (closeIdx >= 0) {
+					if (!rawLine.slice(closeIdx + closeLen).trim()) commentEndCol.set(li + 1, closeIdx);
+				} else {
+					inBlock = true;
+					commentEndCol.set(li + 1, rawLine.length);
+				}
+			}
+		}
+	}
+
+	const unique = new Map<string, { link: LinkTo; pair: NormalizedMovePair }>();
+	for (const h of hits) {
+		const k = `${h.link.line}:${h.link.column}:${h.link.href}`;
+		if (!unique.has(k)) unique.set(k, h);
+	}
+	const ordered = [...unique.values()].sort((a, b) => b.link.line - a.link.line || b.link.column - a.link.column);
+	let done = 0;
+	for (const { link, pair } of ordered) {
+		const maxCol = commentEndCol.get(link.line);
+		if (maxCol === undefined) continue;
+		const idx = (link.line - 1) * 2;
+		const rawLine = parts[idx];
+		if (rawLine === undefined) continue;
+		if (link.column < 0 || link.column + link.href.length > maxCol) continue;
+		if (!rawLine.startsWith(link.href, link.column)) continue;
+		const target = `${pair.to}${link.rest}`;
+		const fromTop = relativeTo(wsRoot, target).split("\\").join("/");
+		let instead: string;
+		if (link.from === "top") {
+			instead = `/${fromTop}`;
+		} else if (link.from === "doc") {
+			const rel = relativePath(dirName(codePath), target).split("\\").join("/");
+			instead = link.href.startsWith("./") && !rel.startsWith(".") ? `./${rel}` : rel;
+		} else {
+			instead = fromTop;
+		}
+		if (instead === link.href) continue;
+		parts[idx] = `${rawLine.slice(0, link.column)}${instead}${rawLine.slice(link.column + link.href.length)}`;
+		done++;
+	}
+	return { text: done ? parts.join("") : text, done };
+}
+
+async function followPaths(
+	fromOrPairs: string | readonly { from: string; to: string }[],
+	toSingle?: string,
+	preloadedByPair?: Map<string, LinkTo[]>,
+) {
+	if (!state.workspace) return;
+	const rawPairs = typeof fromOrPairs === "string" ? [{ from: fromOrPairs, to: toSingle! }] : [...fromOrPairs];
+	const pairs = normalizeMovePairs(rawPairs);
 	if (!pairs.length) return;
 	const canonMoves = pairs.map((p) => ({ from: p.fromCanon, to: p.toCanon }));
 	const primary = pairs[0]!;
 	const isMovedTarget = (fileCanon: string) =>
 		pairs.some((p) => fileCanon === p.toCanon || isInside(p.toCanon, fileCanon));
 
-	// Gather incoming links across all co-moved paths, matching the most specific move first.
-	const incomingPairs: { link: LinkTo; pair: (typeof pairs)[number] }[] = [];
+	// Gather incoming Markdown links across all co-moved paths, matching the most specific move first.
+	// Explicitly skip `.plan.json`, CSV registries, and code comment hits so each format uses its own safe rewriter.
+	const incomingPairs: { link: LinkTo; pair: NormalizedMovePair }[] = [];
 	const seenIncoming = new Set<string>();
 	for (const pair of pairs) {
 		let links: LinkTo[];
-		try {
-			links = await backend.linksTo(pair.from);
-		} catch {
-			continue;
+		const cached = preloadedByPair?.get(pair.fromCanon);
+		if (cached) {
+			links = cached;
+		} else {
+			try {
+				links = await backend.linksTo(pair.from);
+			} catch {
+				continue;
+			}
 		}
-		links = await withoutCatalogLists(links);
-		for (const link of links) {
+		const mdOnly = links.filter(
+			(link) =>
+				link.kind !== "plan" &&
+				link.kind !== "registry" &&
+				link.kind !== "code" &&
+				!isPlanPath(link.path),
+		);
+		const filtered = await withoutCatalogLists(mdOnly);
+		for (const link of filtered) {
 			const lc = canonical(link.path);
 			// Links inside co-moved files themselves are rewritten atomically via `ownLinkEdits(..., canonMoves)`.
 			if (isMovedTarget(lc)) continue;
@@ -1010,39 +1333,15 @@ async function followPaths(fromOrPairs: string | readonly { from: string; to: st
 }
 
 /**
- * Rewrites matching workspace-relative paths inside `.plan.json` files (`targets` and `node.docs`),
- * serializing via `printPlan()` after user confirmation (ADR 0009).
+ * Rewrites matching workspace-relative and doc-relative paths inside `.plan.json` files
+ * (`targets`, `scripts`, `testScripts`, `built.units[].script`, `built.tests.script`, and `node.docs`),
+ * serializing exclusively via `parsePlan()` / `printPlan()` after user confirmation (ADR 0009).
  */
 async function followPlanPaths(rawPairs: readonly { from: string; to: string }[]) {
 	if (!state.workspace) return;
 	const wsRoot = root();
-	const pairs = rawPairs
-		.filter((p) => p.from && p.to && canonical(p.from) !== canonical(p.to))
-		.map((p) => ({ from: p.from, to: p.to, fromCanon: canonical(p.from), toCanon: canonical(p.to) }))
-		.sort((a, b) => b.fromCanon.length - a.fromCanon.length);
+	const pairs = normalizeMovePairs(rawPairs);
 	if (!pairs.length) return;
-
-	const rewriteRef = (rawRef: string): string | null => {
-		const trimmed = rawRef.trim();
-		if (!trimmed || /^(?:https?:|mailto:|#)/i.test(trimmed)) return null;
-		const hashIdx = trimmed.indexOf("#");
-		const pathPart = hashIdx >= 0 ? trimmed.slice(0, hashIdx) : trimmed;
-		const fragPart = hashIdx >= 0 ? trimmed.slice(hashIdx) : "";
-		const leadSlash = pathPart.startsWith("/");
-		const clean = pathPart.replace(/\\/g, "/").replace(/^\/+/, "").replace(/^\.\//, "");
-		if (!clean) return null;
-		const resolved = resolvePath(wsRoot, clean);
-		const canonRes = canonical(resolved);
-		for (const pair of pairs) {
-			if (canonRes === pair.fromCanon || isInside(pair.fromCanon, canonRes)) {
-				const dest = canonRes === pair.fromCanon ? pair.to : joinPath(pair.to, relativeTo(pair.from, resolved));
-				const nextRel = relativeTo(wsRoot, dest).split("\\").join("/");
-				const nextFull = `${leadSlash ? "/" : ""}${nextRel}${fragPart}`;
-				return nextFull !== trimmed ? nextFull : null;
-			}
-		}
-		return null;
-	};
 
 	const allDocs = await backend.docs().catch(() => docs());
 	const planDocs = allDocs.filter((d) => d.exists && isPlanPath(d.path));
@@ -1056,10 +1355,11 @@ async function followPlanPaths(rawPairs: readonly { from: string; to: string }[]
 		if (!parsed.plan) continue;
 		let hits = 0;
 		const plan = parsed.plan;
+		const rewriteRef = (rawRef: string) => rewritePlainPathRef(rawRef, pDoc.path, pairs, wsRoot);
 
-		let nextTargets = plan.targets;
-		if (Array.isArray(plan.targets)) {
-			nextTargets = plan.targets.map((entry: unknown) => {
+		const rewriteEntryList = (list: unknown): unknown => {
+			if (!Array.isArray(list)) return list;
+			return list.map((entry: unknown) => {
 				if (typeof entry === "string") {
 					const rep = rewriteRef(entry);
 					if (rep) {
@@ -1068,7 +1368,7 @@ async function followPlanPaths(rawPairs: readonly { from: string; to: string }[]
 					}
 					return entry;
 				}
-				if (entry && typeof entry === "object") {
+				if (entry && typeof entry === "object" && !Array.isArray(entry)) {
 					const obj = { ...(entry as Record<string, unknown>) };
 					let objChanged = false;
 					if (typeof obj.path === "string") {
@@ -1091,6 +1391,45 @@ async function followPlanPaths(rawPairs: readonly { from: string; to: string }[]
 				}
 				return entry;
 			});
+		};
+
+		const nextTargets = plan.targets !== undefined ? rewriteEntryList(plan.targets) : undefined;
+		const nextScripts = plan.scripts !== undefined ? rewriteEntryList(plan.scripts) : undefined;
+		const nextTestScripts = plan.testScripts !== undefined ? rewriteEntryList(plan.testScripts) : undefined;
+
+		let nextBuilt = plan.built;
+		if (plan.built && typeof plan.built === "object" && !Array.isArray(plan.built)) {
+			const builtObj = { ...(plan.built as Record<string, unknown>) };
+			let builtChanged = false;
+			if (Array.isArray(builtObj.units)) {
+				let unitsChanged = false;
+				const nextUnits = builtObj.units.map((u: unknown) => {
+					if (!u || typeof u !== "object" || Array.isArray(u)) return u;
+					const rec = u as Record<string, unknown>;
+					if (typeof rec.script !== "string") return u;
+					const rep = rewriteRef(rec.script);
+					if (!rep) return u;
+					hits++;
+					unitsChanged = true;
+					return { ...rec, script: rep };
+				});
+				if (unitsChanged) {
+					builtObj.units = nextUnits;
+					builtChanged = true;
+				}
+			}
+			if (builtObj.tests && typeof builtObj.tests === "object" && !Array.isArray(builtObj.tests)) {
+				const testsRec = builtObj.tests as Record<string, unknown>;
+				if (typeof testsRec.script === "string") {
+					const rep = rewriteRef(testsRec.script);
+					if (rep) {
+						hits++;
+						builtObj.tests = { ...testsRec, script: rep };
+						builtChanged = true;
+					}
+				}
+			}
+			if (builtChanged) nextBuilt = builtObj;
 		}
 
 		const nextNodes = plan.nodes.map((node) => {
@@ -1113,6 +1452,9 @@ async function followPlanPaths(rawPairs: readonly { from: string; to: string }[]
 			const nextPlan = {
 				...plan,
 				...(nextTargets !== undefined ? { targets: nextTargets } : {}),
+				...(nextScripts !== undefined ? { scripts: nextScripts } : {}),
+				...(nextTestScripts !== undefined ? { testScripts: nextTestScripts } : {}),
+				...(nextBuilt !== undefined ? { built: nextBuilt } : {}),
 				nodes: nextNodes,
 			};
 			const nextText = printPlan(nextPlan);
@@ -1124,7 +1466,7 @@ async function followPlanPaths(rawPairs: readonly { from: string; to: string }[]
 	const totalHits = updates.reduce((sum, u) => sum + u.hits, 0);
 	const primary = pairs[0]!;
 	const where = updates.length === 1 ? relativeTo(wsRoot, updates[0]!.path) : `${updates.length} plans`;
-	const said = `${totalHits === 1 ? "One path" : `${totalHits} paths`} in ${where} (targets / node docs) still ${totalHits === 1 ? "points" : "point"} to ${baseName(primary.from)}.`;
+	const said = `${totalHits === 1 ? "One path" : `${totalHits} paths`} in ${where} (targets / scripts / node docs) still ${totalHits === 1 ? "points" : "point"} to ${baseName(primary.from)}.`;
 	const go = updates.length === 1 ? "Update plan" : `Update ${updates.length} plans`;
 	if ((await choose(said, [go])) !== go) return;
 
@@ -1144,18 +1486,149 @@ async function followPlanPaths(rawPairs: readonly { from: string; to: string }[]
 }
 
 /**
- * After a file or a folder is renamed: first the links by path that led to
- * the old name, then the links by name that no longer mean what they
- * meant, then matching workspace paths inside `.plan.json` files (`targets` and `node.docs`).
- * Each is asked about once, and written on the person's word.
+ * Surgically updates exact matching path/script cells in CSV registries (`files.csv`, `settings.csv`,
+ * `database.csv`, `jobs.csv`, `reports.csv`) after ADR 0009 confirmation, preserving `status` and `note`.
+ */
+async function followRegistryPaths(
+	rawPairs: readonly { from: string; to: string }[],
+	registryHits: readonly { link: LinkTo; pair: NormalizedMovePair }[],
+) {
+	if (!state.workspace || !registryHits.length) return;
+	const wsRoot = root();
+	const pairs = normalizeMovePairs(rawPairs);
+	if (!pairs.length) return;
+	const isMovedTarget = (fileCanon: string) => pairs.some((p) => fileCanon === p.toCanon || isInside(p.toCanon, fileCanon));
+
+	const uniqueRegPaths = new Map<string, string>();
+	for (const { link } of registryHits) {
+		const lc = canonical(link.path);
+		if (isMovedTarget(lc)) continue;
+		if (!uniqueRegPaths.has(lc)) uniqueRegPaths.set(lc, link.path);
+	}
+	if (!uniqueRegPaths.size) return;
+
+	const updates: { path: string; nextText: string; hits: number }[] = [];
+	for (const regPath of uniqueRegPaths.values()) {
+		const before = await current(regPath);
+		if (before === null) continue;
+		const res = rewriteRegistryPathsInCsv(before, regPath, pairs, wsRoot);
+		if (res.hits > 0 && res.text !== before) {
+			updates.push({ path: regPath, nextText: res.text, hits: res.hits });
+		}
+	}
+	if (!updates.length) return;
+
+	const totalHits = updates.reduce((sum, u) => sum + u.hits, 0);
+	const primary = pairs[0]!;
+	const where = updates.length === 1 ? relativeTo(wsRoot, updates[0]!.path) : `${updates.length} registries`;
+	const said = `${totalHits === 1 ? "One path cell" : `${totalHits} path cells`} in ${where} still ${totalHits === 1 ? "references" : "reference"} ${baseName(primary.from)}. Status and notes will be preserved.`;
+	const go = updates.length === 1 ? "Update registry" : `Update ${updates.length} registries`;
+	if ((await choose(said, [go])) !== go) return;
+
+	let written = 0;
+	for (const item of updates) {
+		try {
+			await put(item.path, item.nextText, true);
+			written++;
+		} catch (e: any) {
+			notify(String(e?.message ?? e), "error");
+		}
+	}
+	if (written) {
+		setState("treeVersion", (v) => v + 1);
+		notify(`Updated ${totalHits} ${totalHits === 1 ? "path cell" : "path cells"} in ${written} ${written === 1 ? "registry" : "registries"} for ${baseName(primary.to)}.`);
+	}
+}
+
+/**
+ * Surgically rewrites old path strings ONLY on comment-only lines/blocks in `.ssl`/`.srvscr`/`.ds`/`.sql`
+ * files after ADR 0009 confirmation (no SSL parser, pure range edit per ADR 0002 & ADR 0003).
+ */
+async function followCodeCommentLinks(
+	rawPairs: readonly { from: string; to: string }[],
+	codeHits: readonly { link: LinkTo; pair: NormalizedMovePair }[],
+) {
+	if (!state.workspace || !codeHits.length) return;
+	const wsRoot = root();
+	const pairs = normalizeMovePairs(rawPairs);
+	if (!pairs.length) return;
+	const isMovedTarget = (fileCanon: string) => pairs.some((p) => fileCanon === p.toCanon || isInside(p.toCanon, fileCanon));
+
+	const byFile = new Map<string, { path: string; hits: { link: LinkTo; pair: NormalizedMovePair }[] }>();
+	for (const hit of codeHits) {
+		const lc = canonical(hit.link.path);
+		if (isMovedTarget(lc)) continue;
+		const bucket = byFile.get(lc) ?? { path: hit.link.path, hits: [] };
+		bucket.hits.push(hit);
+		byFile.set(lc, bucket);
+	}
+	if (!byFile.size) return;
+
+	const updates: { path: string; nextText: string; hits: number }[] = [];
+	for (const bucket of byFile.values()) {
+		const before = await current(bucket.path);
+		if (before === null) continue;
+		const res = rewriteCodeCommentPaths(before, bucket.path, bucket.hits, wsRoot);
+		if (res.done > 0 && res.text !== before) {
+			updates.push({ path: bucket.path, nextText: res.text, hits: res.done });
+		}
+	}
+	if (!updates.length) return;
+
+	const totalHits = updates.reduce((sum, u) => sum + u.hits, 0);
+	const primary = pairs[0]!;
+	const where = updates.length === 1 ? relativeTo(wsRoot, updates[0]!.path) : `${updates.length} code files`;
+	const said = `${totalHits === 1 ? "One comment link" : `${totalHits} comment links`} in ${where} still ${totalHits === 1 ? "references" : "reference"} ${baseName(primary.from)}. Only comment lines will be edited.`;
+	const go = updates.length === 1 ? "Update comment" : `Update ${totalHits} comments`;
+	if ((await choose(said, [go])) !== go) return;
+
+	let written = 0;
+	for (const item of updates) {
+		try {
+			await put(item.path, item.nextText, true);
+			written++;
+		} catch (e: any) {
+			notify(String(e?.message ?? e), "error");
+		}
+	}
+	if (written) {
+		setState("treeVersion", (v) => v + 1);
+		notify(`Updated ${totalHits} ${totalHits === 1 ? "comment reference" : "comment references"} across ${written} ${written === 1 ? "file" : "files"} for ${baseName(primary.to)}.`);
+	}
+}
+
+/**
+ * After a file or a folder is renamed: updates Markdown path links, wikilinks (`[[name]]`),
+ * `.plan.json` references, CSV registry path cells, and code-comment references — each asked
+ * about clearly and written only on the user's word (ADR 0009).
  */
 export async function followRename(from: string, to: string, beforeDocs?: DocFile[], coMoved?: readonly { from: string; to: string }[]) {
 	// Prefer a caller-provided pre-rename snapshot so `followNames` never races an async `docs()` refresh.
 	const listed = (beforeDocs ?? docs()).map((file) => ({ ...file, path: canonical(file.path) }));
 	const allPairs = coMoved?.length ? [{ from, to }, ...coMoved] : [{ from, to }];
-	await followPaths(coMoved?.length ? allPairs : from, to);
+	const normalized = normalizeMovePairs(allPairs);
+	const preloadedByPair = new Map<string, LinkTo[]>();
+	const registryHits: { link: LinkTo; pair: NormalizedMovePair }[] = [];
+	const codeHits: { link: LinkTo; pair: NormalizedMovePair }[] = [];
+
+	for (const pair of normalized) {
+		try {
+			const links = await backend.linksTo(pair.from);
+			preloadedByPair.set(pair.fromCanon, links);
+			for (const link of links) {
+				if (link.kind === "registry") registryHits.push({ link, pair });
+				else if (link.kind === "code") codeHits.push({ link, pair });
+			}
+		} catch {
+			// Skip unreadable pair cleanly.
+		}
+	}
+
+	await followPaths(coMoved?.length ? allPairs : from, to, preloadedByPair);
 	await followNames(from, to, listed);
 	await followPlanPaths(allPairs);
+	await followRegistryPaths(allPairs, registryHits);
+	await followCodeCommentLinks(allPairs, codeHits);
 }
 
 /**
@@ -1481,47 +1954,67 @@ export async function linkDocumentToTicket(ticketPath: string, key: string): Pro
 								? "Reference"
 								: "Question";
 
-	const labels: string[] = [];
-	const details: Record<string, string> = {};
-	const byLabel = new Map<string, DocFile>();
+	const kindIcon = (f: DocFile) =>
+		f.group === "plans"
+			? ("graph" as const)
+			: f.group === "specs"
+				? ("file" as const)
+				: f.group === "tickets"
+					? ("checklist" as const)
+					: f.group === "schema"
+						? ("database" as const)
+						: f.kind === "questions"
+							? ("question" as const)
+							: ("note" as const);
 
-	for (const f of candidates) {
-		const title =
-			f.group === "plans"
-				? f.name.replace(/\.plan\.json$/i, "")
-				: f.group === "tickets" && f.ticket
-					? `${f.ticket}: ${f.title || f.name}`
-					: f.title || f.name;
-		const label = `${kindTag(f)}: ${title}`;
-		const relPath = rel(f.path);
-		const actionDetail =
-			f.group === "specs"
-				? `Adds ${relPath} to specs: in ${baseName(ticketPath)}`
-				: f.group === "plans"
-					? `Adds ${relPath} to plans: in ${baseName(ticketPath)}`
-					: f.group === "tickets"
-						? `Link ${f.ticket} as related, sub-ticket, blocks, or blocked-by`
-						: `Adds ${key} to ticket: in ${relPath}'s frontmatter`;
-		labels.push(label);
-		details[label] = actionDetail;
-		byLabel.set(label, f);
-	}
-
-	const picked = await choose(`Link an existing document to ${key}`, labels, { details });
-	if (!picked) return;
-	const target = byLabel.get(picked);
+	const target = await quickPick<DocFile>({
+		title: `Link an existing document to ${key}`,
+		placeholder: "Filter specs, plans, tickets, decisions, questions, or schema docs…",
+		items: candidates.map((f) => {
+			const title =
+				f.group === "plans"
+					? f.name.replace(/\.plan\.json$/i, "")
+					: f.group === "tickets" && f.ticket
+						? `${f.ticket}: ${f.title || f.name}`
+						: f.title || f.name;
+			const relPath = rel(f.path);
+			const actionDetail =
+				f.group === "specs"
+					? `Adds ${relPath} to specs: in ${baseName(ticketPath)}`
+					: f.group === "plans"
+						? `Adds ${relPath} to plans: in ${baseName(ticketPath)}`
+						: f.group === "tickets"
+							? `Link ${f.ticket} as related, sub-ticket, blocks, or blocked-by`
+							: `Adds ${key} to ticket: in ${relPath}'s frontmatter`;
+			return {
+				label: `${kindTag(f)}: ${title}`,
+				value: f,
+				icon: kindIcon(f),
+				badge: f.status ? { text: f.status, tone: toneOf(f.status) } : undefined,
+				detail: relPath,
+				description: actionDetail,
+				keywords: [kindTag(f), f.ticket, f.title, f.name, relPath, f.status].filter(Boolean).join(" "),
+			};
+		}),
+	});
 	if (!target) return;
 
 	try {
 		if (target.group === "tickets") {
 			const otherKey = target.ticket ?? target.name;
-			const REL = "Related to";
-			const SUB = `Sub-ticket of ${key}`;
-			const BLOCKS = `${key} blocks ${otherKey}`;
-			const BLOCKED = `${key} is blocked by ${otherKey}`;
-			const relation = await choose(`How does ${otherKey} relate to ${key}?`, [REL, SUB, BLOCKS, BLOCKED]);
+			const relation = await quickPick<"related" | "sub" | "blocks" | "blocked-by">({
+				title: `How does ${otherKey} relate to ${key}?`,
+				placeholder: "Choose ticket relationship…",
+				searchable: false,
+				items: [
+					{ label: "Related to", value: "related", icon: "references", description: `Adds ${otherKey} to related: in ${baseName(ticketPath)}` },
+					{ label: `Sub-ticket of ${key}`, value: "sub", icon: "list-tree", description: `Sets parent: ${key} on ${otherKey}` },
+					{ label: `${key} blocks ${otherKey}`, value: "blocks", icon: "warning", description: `Adds ${otherKey} to blocks: in ${baseName(ticketPath)}` },
+					{ label: `${key} is blocked by ${otherKey}`, value: "blocked-by", icon: "warning", description: `Adds ${otherKey} to blocked-by: in ${baseName(ticketPath)}` },
+				],
+			});
 			if (!relation) return;
-			if (relation === SUB) {
+			if (relation === "sub") {
 				const before = await current(target.path);
 				if (before === null) return;
 				const next = withFrontMatter(before, "parent", key);
@@ -1530,7 +2023,7 @@ export async function linkDocumentToTicket(ticketPath: string, key: string): Pro
 				notify(`Set parent: ${key} on ${otherKey}.`);
 				return;
 			}
-			const field = relation === BLOCKS ? "blocks" : relation === BLOCKED ? "blocked-by" : "related";
+			const field = relation === "blocks" ? "blocks" : relation === "blocked-by" ? "blocked-by" : "related";
 			const before = await current(ticketPath);
 			if (before === null) return;
 			const next = addToFrontMatterList(before, field, otherKey);
@@ -1666,11 +2159,18 @@ export async function linkNonTicketToTicket(docPath: string): Promise<void> {
 	const already = new Set([...existingSingle, ...existingMulti].map((k) => k.toLowerCase()));
 	const tickets = docs().filter((d) => d.exists && d.group === "tickets" && d.ticket && !isCatalog(d) && !already.has(d.ticket.toLowerCase()));
 	if (!tickets.length) return notify(already.size ? "This document is already linked to every ticket in the project." : "No tickets exist in this project yet.");
-	const labels = tickets.map((t) => `${t.ticket}: ${t.title || t.name}`);
-	const byLabel = new Map(tickets.map((t, i) => [labels[i]!, t]));
-	const picked = await choose(`Link ${baseName(docPath)} to a ticket`, labels);
-	if (!picked) return;
-	const ticket = byLabel.get(picked);
+	const ticket = await quickPick<DocFile>({
+		title: `Link ${baseName(docPath)} to a ticket`,
+		placeholder: "Filter by ticket key, title, status, or release…",
+		items: tickets.map((t) => ({
+			label: `${t.ticket}: ${t.title || t.name}`,
+			value: t,
+			icon: "checklist",
+			badge: t.status ? { text: t.status, tone: toneOf(t.status) } : undefined,
+			detail: t.release || undefined,
+			keywords: [t.ticket, t.title, t.status, t.release].filter(Boolean).join(" "),
+		})),
+	});
 	if (!ticket?.ticket) return;
 	let next: string | null = before;
 	if (existingMulti.length) next = addToFrontMatterList(before, "tickets", ticket.ticket);
@@ -1693,11 +2193,20 @@ export async function addRegistryRowForTicket(key: string, initialItem?: string)
 	if (!ready()) return;
 	const regs = docs().filter((d) => d.exists && d.group === "registries" && !isCatalog(d) && /\.(csv|tsv)$/i.test(d.name));
 	if (!regs.length) return notify("No CSV registries exist yet. Create one from Docs -> New -> New registry….");
-	const labels = regs.map((r) => r.name);
-	const byLabel = new Map(regs.map((r, i) => [labels[i]!, r]));
-	const picked = regs.length === 1 ? labels[0]! : await choose(`Add a row for ${key} to which registry?`, labels);
-	if (!picked) return;
-	const reg = byLabel.get(picked);
+	const reg =
+		regs.length === 1
+			? regs[0]!
+			: await quickPick<DocFile>({
+					title: `Add a row for ${key} to which registry?`,
+					placeholder: "Filter registries…",
+					items: regs.map((r) => ({
+						label: registryTitle(r.name),
+						value: r,
+						icon: "table",
+						detail: r.name,
+						keywords: `${registryTitle(r.name)} ${r.name}`,
+					})),
+				});
 	if (!reg) return;
 	const text = await current(reg.path);
 	if (text === null) return;
@@ -2336,108 +2845,6 @@ export async function appendNoteToTicket(key: string, noteMarkdown: string): Pro
 	}
 }
 
-/** Inspects an existing Markdown schema doc against parsed SQL tables to surface exact modified and dropped columns. */
-function diffExistingSchemaColumns(
-	existingMd: string,
-	tables: readonly ReturnType<typeof parseCreateTables>[number][],
-): { modified: string[]; dropped: string[] } {
-	const lines = existingMd.split(/\r?\n/);
-	const stripCell = (s: string) => s.trim().replace(/^`|`$/g, "").trim();
-	const splitRow = (line: string): string[] => {
-		const trimmed = line.trim().replace(/^\|/, "").replace(/\|$/, "");
-		const cells: string[] = [];
-		let cur = "";
-		for (let i = 0; i < trimmed.length; i++) {
-			if (trimmed[i] === "\\" && trimmed[i + 1] === "|") {
-				cur += "|";
-				i++;
-			} else if (trimmed[i] === "|") {
-				cells.push(cur.trim());
-				cur = "";
-			} else cur += trimmed[i]!;
-		}
-		cells.push(cur.trim());
-		return cells;
-	};
-	const modified: string[] = [];
-	const dropped: string[] = [];
-
-	for (const tbl of tables) {
-		const target = tbl.tableName.toLowerCase();
-		let startSearch = 0;
-		let headLine = -1;
-		for (let i = 0; i < lines.length; i++) {
-			const hm = /^#{1,3}\s+`?([A-Za-z_][\w$.]*)`?\s*$/.exec(lines[i]!.trim());
-			if (hm) {
-				const hName = hm[1]!.toLowerCase();
-				const bare = hName.includes(".") ? hName.split(".").pop()! : hName;
-				if (hName === target || bare === target) {
-					headLine = i;
-					startSearch = i + 1;
-					break;
-				}
-			}
-		}
-		if (headLine < 0 && tables.length > 1) continue;
-		let tableStart = -1;
-		let tableEnd = -1;
-		for (let i = startSearch; i < lines.length; i++) {
-			if (headLine >= 0 && /^#{1,2}\s+/.test(lines[i]!)) break;
-			if (!lines[i]!.trim().startsWith("|")) continue;
-			const hdr = splitRow(lines[i]!).map((c) => c.toLowerCase());
-			if (!hdr[0]?.includes("column")) continue;
-			if (i + 1 >= lines.length || !/^\s*\|?\s*:?-{2,}/.test(lines[i + 1]!)) continue;
-			tableStart = i;
-			tableEnd = i + 2;
-			while (tableEnd < lines.length && lines[tableEnd]!.trim().startsWith("|")) tableEnd++;
-			break;
-		}
-		if (tableStart < 0) continue;
-
-		const sqlByCol = new Map(tbl.columns.map((c) => [c.name.toLowerCase(), c]));
-		for (const raw of lines.slice(tableStart + 2, tableEnd)) {
-			const cells = splitRow(raw);
-			const colName = stripCell(cells[0] ?? "");
-			if (!colName) continue;
-			const sqlCol = sqlByCol.get(colName.toLowerCase());
-			if (!sqlCol) {
-				dropped.push(tables.length > 1 ? `${tbl.tableName}.${colName}` : colName);
-			} else {
-				const prevType = stripCell(cells[1] ?? "");
-				const prevCons = (cells[2] ?? "").trim();
-				const nextCons = (sqlCol.constraints || "—").replace(/\|/g, "\\|");
-				if (prevType !== sqlCol.type || prevCons !== nextCons) {
-					modified.push(tables.length > 1 ? `${tbl.tableName}.${colName}` : colName);
-				}
-			}
-		}
-	}
-	return { modified, dropped };
-}
-
-/** Annotates dropped column rows in a Markdown schema table with `(dropped in SQL)` without deleting existing notes. */
-function annotateDroppedSchemaColumns(markdown: string, droppedBareNames: readonly string[]): string {
-	if (!droppedBareNames.length) return markdown;
-	const droppedSet = new Set(droppedBareNames.map((n) => (n.includes(".") ? n.split(".").pop()! : n).toLowerCase()));
-	const eol = markdown.includes("\r\n") ? "\r\n" : "\n";
-	return markdown
-		.split(/\r?\n/)
-		.map((line) => {
-			if (!line.trim().startsWith("|")) return line;
-			const trimmed = line.trim().replace(/^\|/, "").replace(/\|$/, "");
-			const parts = trimmed.split(/(?<!\\)\|/);
-			if (parts.length < 4) return line;
-			const col = parts[0]!.trim().replace(/^`|`$/g, "").trim().toLowerCase();
-			if (!droppedSet.has(col)) return line;
-			const lastIdx = parts.length - 1;
-			const note = parts[lastIdx]!.trim();
-			if (/dropped in sql/i.test(note)) return line;
-			parts[lastIdx] = note ? ` ${note} (dropped in SQL) ` : " (dropped in SQL) ";
-			return `|${parts.join("|")}|`;
-		})
-		.join(eol);
-}
-
 /** Formats non-table SQL objects (Views, Procedures, Functions, Triggers, Packages, Sequences, Synonyms, Types) as clean Markdown. */
 function sqlNonTableObjectsToMarkdown(
 	objects: readonly ReturnType<typeof extractSqlObjects>[number][],
@@ -2477,17 +2884,55 @@ function sqlNonTableObjectsToMarkdown(
  * Parses `CREATE TABLE` / `ALTER TABLE ADD` DDL (or Views, Stored Procedures, Functions, Triggers,
  * and Packages when no table DDL is present) from a schema SQL file and creates or non-destructively
  * updates a Markdown reference doc, clearly surfacing added, modified, and dropped columns.
+ * When `targetDocPath` is provided and exists, updates that exact file in place.
  */
-export async function generateSchemaDocFromSql(sqlPath?: string): Promise<void> {
+export async function generateSchemaDocFromSql(sqlPath?: string, targetDocPath?: string): Promise<void> {
 	if (!ready()) return;
 	let sourcePath = sqlPath;
 	if (!sourcePath) {
 		const sqlFiles = docs().filter((d) => d.exists && d.group === "schema" && /\.(sql|ddl|pks|pkb)$/i.test(d.name));
-		if (!sqlFiles.length) return notify(`No SQL/DDL files found under ${state.project!.schema}/.`);
-		const labels = sqlFiles.map((f) => f.name);
-		const picked = await choose("Choose a SQL file to document database objects from", labels);
-		if (!picked) return;
-		sourcePath = sqlFiles.find((f) => f.name === picked)?.path;
+		const BROWSE = "__browse__";
+		if (!sqlFiles.length) {
+			const browsed = await browseWorkspaceFile({
+				title: "Choose a SQL/DDL file to document",
+				root: root(),
+				initialDir: schemaFolder(),
+			});
+			if (!browsed) return;
+			sourcePath = browsed.path;
+		} else {
+			const picked = await quickPick<string>({
+				title: "Choose a SQL file to document database objects from",
+				placeholder: "Filter schema SQL files or browse workspace…",
+				items: [
+					...sqlFiles.map((f) => ({
+						label: baseName(f.name),
+						value: f.path,
+						file: baseName(f.name),
+						detail: relativeTo(root(), f.path).split("\\").join("/"),
+						keywords: `${f.name} ${f.title ?? ""}`,
+					})),
+					{
+						label: "Browse workspace for another SQL file…",
+						value: BROWSE,
+						icon: "folder",
+						divide: true,
+					},
+				],
+			});
+			if (!picked) return;
+			if (picked === BROWSE) {
+				const browsed = await browseWorkspaceFile({
+					title: "Choose a SQL/DDL file to document",
+					root: root(),
+					initialDir: schemaFolder(),
+				});
+				if (!browsed) return;
+				sourcePath = browsed.path;
+			} else {
+				sourcePath = picked;
+			}
+		}
 	}
 	if (!sourcePath) return;
 	const sqlText = await current(sourcePath);
@@ -2498,6 +2943,7 @@ export async function generateSchemaDocFromSql(sqlPath?: string): Promise<void> 
 	const dbFolderEntry = schemaEntries.find((e) => e.kind === "dir" && e.name.toLowerCase() === "database");
 	const existingDbDoc = docs().find((d) => d.exists && d.group === "schema" && d.kind === "database" && d.name.includes("/"));
 	const dbSubfolder = dbFolderEntry?.name || existingDbDoc?.name.split(/[\\/]/)[0] || "database";
+	const directTargetMd = targetDocPath ? await current(targetDocPath) : null;
 
 	// Handle Views, Stored Procedures, Functions, Triggers, Packages, Sequences, Synonyms, and Types when no CREATE TABLE exists.
 	if (!tables.length) {
@@ -2505,13 +2951,21 @@ export async function generateSchemaDocFromSql(sqlPath?: string): Promise<void> 
 		if (!objects.length) {
 			return notify(`No CREATE/ALTER SQL objects (tables, views, procedures, functions, triggers, or packages) were found in ${baseName(sourcePath)}.`);
 		}
-		const defaultName = objects.length === 1 ? objects[0]!.bareName : baseName(sourcePath).replace(/\.[^.]+$/, "");
-		const name = (await ask(`Schema document name (saved under ${state.project!.schema}/${dbSubfolder}/)`, defaultName))?.trim();
-		if (!name) return;
-		const named = typedParts(name, "file");
-		if ("problem" in named || named.parts.length !== 1) return notify("Give a single valid filename.", "error");
-		const dest = joinPath(schemaFolder(), dbSubfolder, `${named.parts[0]}.md`);
-		const existingMd = await current(dest);
+		let dest: string;
+		let docTitle: string;
+		if (targetDocPath && directTargetMd !== null) {
+			dest = targetDocPath;
+			docTitle = objects.length === 1 ? objects[0]!.bareName : baseName(targetDocPath).replace(/\.(md|markdown)$/i, "");
+		} else {
+			const defaultName = objects.length === 1 ? objects[0]!.bareName : baseName(sourcePath).replace(/\.[^.]+$/, "");
+			const name = (await ask(`Schema document name (saved under ${state.project!.schema}/${dbSubfolder}/)`, defaultName))?.trim();
+			if (!name) return;
+			const named = typedParts(name, "file");
+			if ("problem" in named || named.parts.length !== 1) return notify("Give a single valid filename.", "error");
+			dest = joinPath(schemaFolder(), dbSubfolder, `${named.parts[0]}.md`);
+			docTitle = objects.length === 1 ? objects[0]!.bareName : name;
+		}
+		const existingMd = dest === targetDocPath ? directTargetMd : await current(dest);
 		if (existingMd !== null) {
 			const missingObjs = objects.filter(
 				(o) => !existingMd.toLowerCase().includes(o.bareName.toLowerCase()) && !existingMd.toLowerCase().includes(o.name.toLowerCase()),
@@ -2538,43 +2992,58 @@ export async function generateSchemaDocFromSql(sqlPath?: string): Promise<void> 
 			await openFile(dest);
 			return;
 		}
-		const docTitle = objects.length === 1 ? objects[0]!.bareName : name;
 		await start(dest, sqlNonTableObjectsToMarkdown(objects, relSql, docTitle), "schema");
 		return;
 	}
 
-	const defaultName = tables.length === 1 ? tables[0]!.tableName : baseName(sourcePath).replace(/\.[^.]+$/, "");
-	const name = (await ask(`Table document name (saved under ${state.project!.schema}/${dbSubfolder}/)`, defaultName))?.trim();
-	if (!name) return;
-	const named = typedParts(name, "file");
-	if ("problem" in named || named.parts.length !== 1) return notify("Give a single valid filename.", "error");
-	const dest = joinPath(schemaFolder(), dbSubfolder, `${named.parts[0]}.md`);
-	const existingMd = await current(dest);
+	let dest: string;
+	let docTitle: string;
+	if (targetDocPath && directTargetMd !== null) {
+		dest = targetDocPath;
+		docTitle = tables.length === 1 ? tables[0]!.tableName : baseName(targetDocPath).replace(/\.(md|markdown)$/i, "");
+	} else {
+		const defaultName = tables.length === 1 ? tables[0]!.tableName : baseName(sourcePath).replace(/\.[^.]+$/, "");
+		const name = (await ask(`Table document name (saved under ${state.project!.schema}/${dbSubfolder}/)`, defaultName))?.trim();
+		if (!name) return;
+		const named = typedParts(name, "file");
+		if ("problem" in named || named.parts.length !== 1) return notify("Give a single valid filename.", "error");
+		dest = joinPath(schemaFolder(), dbSubfolder, `${named.parts[0]}.md`);
+		docTitle = tables.length === 1 ? tables[0]!.tableName : name;
+	}
+
+	const existingMd = dest === targetDocPath ? directTargetMd : await current(dest);
 	if (existingMd !== null) {
-		const diff = diffExistingSchemaColumns(existingMd, tables);
-		const merged = mergeSqlTablesIntoMarkdown(existingMd, tables, relSql);
+		// Unify dropped/modified detection via `diffSqlAgainstSchemaMarkdown` so already-tagged
+		// `[deprecated / dropped in SQL]` rows are never re-prompted.
+		const drifts = diffSqlAgainstSchemaMarkdown(sqlText, existingMd);
+		const dropped = drifts.flatMap((d) => d.dropped.map((col) => (tables.length > 1 ? `${d.table}.${col}` : col)));
+		const modified = drifts.flatMap((d) => d.modified.map((col) => (tables.length > 1 ? `${d.table}.${col}` : col)));
+
+		// Prompt BEFORE merging so "Keep existing rows as-is" genuinely leaves dropped rows untagged (ADR 0002 / 0009).
+		let markDropped = false;
+		if (dropped.length > 0) {
+			const droppedPreview = dropped.slice(0, 6).join(", ") + (dropped.length > 6 ? `, +${dropped.length - 6} more` : "");
+			const modNote = modified.length ? ` Modified: ${modified.slice(0, 5).join(", ")}${modified.length > 5 ? "…" : ""}.` : "";
+			const MARK_DROPPED = "Mark dropped in Notes";
+			const KEEP = "Keep existing rows as-is";
+			const action = await choose(
+				`${dropped.length} documented ${dropped.length === 1 ? "column is" : "columns are"} no longer in ${baseName(sourcePath)}: ${droppedPreview}.${modNote} Existing rows are preserved — how should dropped columns be handled?`,
+				[MARK_DROPPED, KEEP],
+			);
+			if (!action) return;
+			markDropped = action === MARK_DROPPED;
+		}
+
+		const targetTables = filterSqlTablesForMarkdown(tables, existingMd);
+		const merged = mergeSqlTablesIntoMarkdown(existingMd, targetTables, relSql, { markDropped });
 		let nextText = merged.text;
 		if (!one(frontMatter(nextText).values.source)) {
 			nextText = withFrontMatter(nextText, "source", relSql) ?? nextText;
 		}
 
-		// Surface dropped & modified columns clearly so nothing is silently hidden or deleted (ADR 0002 / 0009).
-		if (diff.dropped.length > 0) {
-			const droppedPreview = diff.dropped.slice(0, 6).join(", ") + (diff.dropped.length > 6 ? `, +${diff.dropped.length - 6} more` : "");
-			const modNote = diff.modified.length ? ` Modified: ${diff.modified.slice(0, 5).join(", ")}${diff.modified.length > 5 ? "…" : ""}.` : "";
-			const MARK = "Mark dropped in Notes";
-			const KEEP = "Keep existing rows as-is";
-			const choice = await choose(
-				`${diff.dropped.length} documented ${diff.dropped.length === 1 ? "column is" : "columns are"} no longer in ${baseName(sourcePath)}: ${droppedPreview}.${modNote} Existing rows are preserved — how should dropped columns be handled?`,
-				[MARK, KEEP],
-			);
-			if (!choice) return;
-			if (choice === MARK) nextText = annotateDroppedSchemaColumns(nextText, diff.dropped);
-		}
-
 		if (nextText === existingMd) {
-			if (diff.dropped.length > 0) {
-				notify(`${baseName(dest)} kept ${diff.dropped.length} dropped ${diff.dropped.length === 1 ? "column" : "columns"} (${diff.dropped.slice(0, 4).join(", ")}) for manual review.`);
+			if (dropped.length > 0) {
+				notify(`${baseName(dest)} kept ${dropped.length} dropped ${dropped.length === 1 ? "column" : "columns"} (${dropped.slice(0, 4).join(", ")}) for manual review.`);
 			} else {
 				notify(`${baseName(dest)} is already up to date with ${baseName(sourcePath)}.`);
 			}
@@ -2583,19 +3052,21 @@ export async function generateSchemaDocFromSql(sqlPath?: string): Promise<void> 
 		}
 		await put(dest, nextText, true);
 		setState("treeVersion", (v) => v + 1);
+		void import("./docAudit").then((m) => m.refreshDocAudit());
 		const parts = [
 			merged.addedTables ? `${merged.addedTables} ${merged.addedTables === 1 ? "table" : "tables"} added` : "",
 			merged.addedColumns ? `${merged.addedColumns} ${merged.addedColumns === 1 ? "column" : "columns"} added` : "",
 			merged.updatedColumns
-				? `${merged.updatedColumns} modified${diff.modified.length && diff.modified.length <= 4 ? ` (${diff.modified.join(", ")})` : ""}`
+				? `${merged.updatedColumns} modified${modified.length && modified.length <= 4 ? ` (${modified.join(", ")})` : ""}`
 				: "",
-			diff.dropped.length ? `${diff.dropped.length} dropped in SQL (${diff.dropped.slice(0, 4).join(", ")}${diff.dropped.length > 4 ? "…" : ""})` : "",
+			dropped.length
+				? `${dropped.length} dropped in SQL${markDropped ? " (marked)" : " (kept as-is)"} (${dropped.slice(0, 4).join(", ")}${dropped.length > 4 ? "…" : ""})`
+				: "",
 		].filter(Boolean);
 		notify(`Synced ${baseName(dest)} from ${baseName(sourcePath)}${parts.length ? ` (${parts.join("; ")})` : ""}.`);
 		await openFile(dest);
 		return;
 	}
-	const docTitle = tables.length === 1 ? tables[0]!.tableName : name;
 	const mdBody = [
 		"---",
 		`title: ${quoteYamlScalar(docTitle)}`,
@@ -2609,6 +3080,170 @@ export async function generateSchemaDocFromSql(sqlPath?: string): Promise<void> 
 		"",
 	].join("\n");
 	await start(dest, mdBody, "schema");
+}
+
+/**
+ * Generates (or updates) a 1:1 `.sql` DDL file directly from a database schema
+ * Markdown document's column table(s) and links `source:` to it.
+ */
+export async function generateSqlFromSchemaDoc(mdPath: string): Promise<void> {
+	if (!ready()) return;
+	const mdText = await current(mdPath);
+	if (mdText === null) return;
+	const relMd = relativeTo(root(), mdPath).split("\\").join("/");
+	const stem = baseName(mdPath).replace(/\.(md|markdown)$/i, "");
+	const generated = schemaMarkdownToSql(mdText, { sourceNote: relMd, fallbackTableName: stem });
+	if (!generated) {
+		notify("Add a column table (| Column | Type | Null | ... |) before generating SQL DDL.");
+		return;
+	}
+
+	const existingSource = one(frontMatter(mdText).values.source)?.trim() ?? "";
+	const otherDocsUsingSource = existingSource
+		? docs().filter(
+				(d) =>
+					d.exists &&
+					d.group === "schema" &&
+					canonical(d.path) !== canonical(mdPath) &&
+					d.source?.trim().toLowerCase() === existingSource.toLowerCase(),
+			).length
+		: 0;
+	let dest = joinPath(dirName(mdPath), `${stem}.sql`);
+	if (existingSource && !/^https?:\/\//i.test(existingSource) && /\.(sql|ddl)$/i.test(existingSource) && otherDocsUsingSource === 0) {
+		dest = /^\.{1,2}[\\/]/.test(existingSource) ? resolvePath(dirName(mdPath), existingSource) : joinPath(root(), existingSource);
+	}
+
+	const existingSql = await current(dest);
+	if (existingSql !== null && existingSql.replace(/\r\n/g, "\n").trim() !== generated.sql.trim()) {
+		const OVERWRITE = "Update SQL file";
+		const picked = await choose(
+			`Overwrite ${baseName(dest)} with CREATE TABLE DDL generated from ${baseName(mdPath)}?`,
+			[OVERWRITE],
+		);
+		if (picked !== OVERWRITE) return;
+	}
+
+	try {
+		if (existingSql !== null) {
+			await put(dest, generated.sql, true);
+		} else {
+			await backend.write(dest, generated.sql);
+		}
+		const relSql = relativeTo(root(), dest).split("\\").join("/");
+		if (existingSource.toLowerCase() !== relSql.toLowerCase()) {
+			const updatedMd = withFrontMatter(mdText, "source", relSql);
+			if (updatedMd && updatedMd !== mdText) await put(mdPath, updatedMd, true);
+		}
+		setState("treeVersion", (v) => v + 1);
+		void import("./docAudit").then((m) => m.refreshDocAudit());
+		notify(`Generated ${baseName(dest)} (${generated.tables.join(", ")}) from ${baseName(mdPath)}.`);
+		await openFile(dest);
+	} catch (e: any) {
+		notify(String(e?.message ?? e), "error");
+	}
+}
+
+/** Removes the `source:` SQL link from a schema Markdown doc so it acts as a standalone doc. */
+export async function unlinkSchemaDocSql(mdPath: string): Promise<void> {
+	if (!ready()) return;
+	const cur = await current(mdPath);
+	if (cur === null) return;
+	const next = removeFrontMatterKey(cur, "source");
+	if (next === cur) return;
+	try {
+		await put(mdPath, next, true);
+		setState("treeVersion", (v) => v + 1);
+		void import("./docAudit").then((m) => m.refreshDocAudit());
+		notify(`Unlinked SQL source from ${baseName(mdPath)}.`);
+	} catch (e: any) {
+		notify(String(e?.message ?? e), "error");
+	}
+}
+
+/** Opens a searchable QuickPick to link, switch, generate, or unlink a schema doc's SQL source. */
+export async function linkSchemaDocToSql(mdPath: string): Promise<void> {
+	if (!ready()) return;
+	const cur = await current(mdPath);
+	if (cur === null) return;
+	const currentSource = one(frontMatter(cur).values.source)?.trim() ?? "";
+	const stem = baseName(mdPath).replace(/\.(md|markdown)$/i, "");
+	const sqlDocs = docs()
+		.filter((d) => d.exists && d.group === "schema" && /\.(sql|ddl|pks|pkb)$/i.test(d.name))
+		.sort((a, b) => {
+			const aSame = baseName(a.name).replace(/\.[^.]+$/, "").toLowerCase() === stem.toLowerCase() ? 0 : 1;
+			const bSame = baseName(b.name).replace(/\.[^.]+$/, "").toLowerCase() === stem.toLowerCase() ? 0 : 1;
+			return aSame - bSame || a.name.localeCompare(b.name);
+		});
+
+	const GENERATE = "__generate__";
+	const BROWSE = "__browse__";
+	const UNLINK = "__unlink__";
+	const picked = await quickPick<string>({
+		title: `SQL source for ${baseName(mdPath)}`,
+		placeholder: "Pick a SQL/DDL file, generate a 1:1 .sql file, or unlink…",
+		items: [
+			...sqlDocs.map((f) => {
+				const rel = relativeTo(root(), f.path).split("\\").join("/");
+				const isCurrent = Boolean(currentSource && rel.toLowerCase() === currentSource.toLowerCase());
+				return {
+					label: baseName(f.name),
+					value: f.path,
+					detail: rel,
+					icon: "database" as const,
+					badge: isCurrent ? { text: "current", tone: "active" } : undefined,
+				};
+			}),
+			{
+				label: `Generate ${stem}.sql from this document`,
+				value: GENERATE,
+				detail: "Create or update a 1:1 SQL DDL file from this Markdown column table",
+				icon: "wand",
+				divide: sqlDocs.length > 0,
+			},
+			{
+				label: "Browse workspace for SQL file…",
+				value: BROWSE,
+				detail: "Choose any .sql / .ddl file in the repository",
+				icon: "folder",
+			},
+			...(currentSource
+				? [
+						{
+							label: "Unlink SQL source (standalone doc)",
+							value: UNLINK,
+							detail: "Remove source: frontmatter and disable SQL drift checks for this doc",
+							icon: "close" as const,
+							divide: true,
+						},
+					]
+				: []),
+		],
+	});
+	if (!picked) return;
+	if (picked === GENERATE) return generateSqlFromSchemaDoc(mdPath);
+	if (picked === UNLINK) return unlinkSchemaDocSql(mdPath);
+
+	let chosenPath = picked;
+	if (picked === BROWSE) {
+		const browsed = await browseWorkspaceFile({
+			title: `Choose SQL source for ${baseName(mdPath)}`,
+			root: root(),
+			initialDir: dirName(mdPath),
+		});
+		if (!browsed) return;
+		chosenPath = browsed.path;
+	}
+	const relSql = relativeTo(root(), chosenPath).split("\\").join("/");
+	const next = withFrontMatter(cur, "source", relSql);
+	if (!next || next === cur) return;
+	try {
+		await put(mdPath, next, true);
+		setState("treeVersion", (v) => v + 1);
+		void import("./docAudit").then((m) => m.refreshDocAudit());
+		notify(`Linked ${baseName(mdPath)} to ${relSql}.`);
+	} catch (e: any) {
+		notify(String(e?.message ?? e), "error");
+	}
 }
 
 /** Rewrites relative Markdown image paths from `srcDocPath` so they stay valid when embedded inside a packet rendered relative to `baseDocPath`. */
@@ -3140,13 +3775,255 @@ async function saveExportFile(
 	return true;
 }
 
-/** Saves an OpenXML `.docx` document generated by the backend inside the workspace (embedding local images, Mermaid PNGs, hyperlinks, footnotes & metadata). */
+/**
+ * Finds local `.svg` / `.webp` image references in Markdown (outside fenced code blocks)
+ * and rasterizes each to PNG base64 via an offscreen `<canvas>` for Word (`.docx`) embedding.
+ */
+async function rasterizeVectorAndWebpImagesForDocx(markdown: string, baseDocPath: string): Promise<Record<string, string>> {
+	if (typeof document === "undefined" || typeof Image === "undefined") return {};
+	const body = frontMatter(markdown).body.replace(/\r\n/g, "\n");
+	const lines = body.split("\n");
+	const refs = new Set<string>();
+	let outerFence: { ch: string; len: number } | null = null;
+	for (const line of lines) {
+		if (outerFence) {
+			if (new RegExp(`^[ \\t]{0,3}${outerFence.ch}{${outerFence.len},}[ \\t]*$`).test(line)) outerFence = null;
+			continue;
+		}
+		const fenceOpen = /^[ \t]{0,3}(`{3,}|~{3,})[ \t]*([A-Za-z0-9_+-]*)(?:[ \t]+.*)?$/.exec(line);
+		if (fenceOpen && !(fenceOpen[1]![0] === "`" && line.slice(line.indexOf(fenceOpen[1]!) + fenceOpen[1]!.length).includes("`"))) {
+			outerFence = { ch: fenceOpen[1]![0]!, len: fenceOpen[1]!.length };
+			continue;
+		}
+		for (const m of line.matchAll(/!\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g)) {
+			const raw = m[1]!.trim();
+			if (!raw || /^(?:https?:|data:)/i.test(raw)) continue;
+			const clean = raw.split(/[?#]/)[0] ?? raw;
+			if (/\.(?:svg|webp)$/i.test(clean)) refs.add(raw);
+		}
+		for (const m of line.matchAll(/!\[\[([^[\]|#]+\.(?:svg|webp))(?:\|[^[\]]*)?\]\]/gi)) {
+			const raw = m[1]!.trim();
+			if (raw) refs.add(raw);
+		}
+	}
+	if (!refs.size) return {};
+
+	const { loadImageUrl } = await import("./editor/imageResolve");
+	const out: Record<string, string> = {};
+	const rasterizeUrl = (url: string, isSvg: boolean): Promise<string | null> =>
+		new Promise((resolve) => {
+			const img = new Image();
+			img.onload = () => {
+				try {
+					const natW = img.naturalWidth || img.width || 800;
+					const natH = img.naturalHeight || img.height || 600;
+					const scale = isSvg ? 2 : 1;
+					const maxDim = 1600;
+					const fit = Math.min(1, maxDim / Math.max(natW * scale, natH * scale, 1));
+					const w = Math.max(1, Math.round(natW * scale * fit));
+					const h = Math.max(1, Math.round(natH * scale * fit));
+					const canvas = document.createElement("canvas");
+					canvas.width = w;
+					canvas.height = h;
+					const ctx = canvas.getContext("2d");
+					if (!ctx) return resolve(null);
+					ctx.drawImage(img, 0, 0, w, h);
+					const pngUrl = canvas.toDataURL("image/png");
+					const b64 = pngUrl.replace(/^data:image\/png;base64,/i, "");
+					resolve(b64 || null);
+				} catch {
+					resolve(null);
+				}
+			};
+			img.onerror = () => resolve(null);
+			img.src = url;
+		});
+
+	for (const rawRef of refs) {
+		try {
+			const decoded = linkFile(rawRef);
+			const loaded = await loadImageUrl(decoded, baseDocPath);
+			if (!loaded?.url) continue;
+			const isSvg = /\.svg$/i.test(decoded) || loaded.url.startsWith("data:image/svg+xml");
+			const b64 = await rasterizeUrl(loaded.url, isSvg);
+			if (!b64) continue;
+			out[rawRef] = b64;
+			const clean = decoded.replace(/\\/g, "/");
+			if (clean && clean !== rawRef) out[clean] = b64;
+		} catch {
+			// Skip unrasterizable image gracefully.
+		}
+	}
+	return out;
+}
+
+/** Loads and parses all IQ/OQ/PQ validation test run Markdown documents across the workspace. */
+async function loadWorkspaceTestRuns(allDocs: readonly DocFile[]): Promise<TestRunSummary[]> {
+	const candidatePaths = new Map<string, string>();
+	const addCand = (p: string) => {
+		if (!isMarkdown(p)) return;
+		const c = canonical(p);
+		if (!candidatePaths.has(c)) candidatePaths.set(c, p);
+	};
+	for (const d of allDocs) {
+		if (!d.exists || isCatalog(d)) continue;
+		if (
+			d.docKind === "test-run" ||
+			/(?:^|[\\/])test-runs?[\\/]/i.test(d.path) ||
+			(d.group === "docs" && /(?:^|[\\/])tests[\\/]/i.test(d.name))
+		) {
+			addCand(d.path);
+		}
+		for (const tf of d.ticketFiles ?? []) {
+			if (/(?:^|[\\/])test-runs?[\\/]/i.test(tf.rel)) addCand(tf.path);
+		}
+	}
+	const runs: TestRunSummary[] = [];
+	for (const p of candidatePaths.values()) {
+		const txt = await current(p);
+		if (!txt) continue;
+		const parsed = parseTestRunDocument(p, txt);
+		if (parsed) runs.push(parsed);
+	}
+	return runs;
+}
+
+/**
+ * Builds STARLIMS Deployment Execution Runbook inputs:
+ * - FK-ordered table dependencies extracted from workspace SQL DDL (`parseCreateTables`)
+ * - Verified `files.csv` SHA-256 checksum drift (`detectChecksumDrift`)
+ * - Affected scheduled jobs (`jobs.csv`) matching in-scope scripts
+ */
+async function buildDeploymentRunbookData(options: {
+	allDocs: readonly DocFile[];
+	scopeDocs: readonly DocFile[];
+	scripts: readonly { ref: string }[];
+	sqlArtifacts: readonly DeploymentManifestSql[];
+	registries: readonly DeploymentManifestRegistry[];
+	checksums: readonly { path: string; sha256: string }[];
+	wsRoot: string;
+}): Promise<DeploymentRunbookInput> {
+	const { allDocs, scopeDocs, scripts, sqlArtifacts, checksums, wsRoot } = options;
+
+	// 1. Collect SQL DDL files referenced by this manifest/bundle and extract table FK dependencies.
+	const sqlPaths = new Map<string, { abs: string; rel: string }>();
+	const addSqlPath = (abs: string) => {
+		if (!/\.(sql|ddl|pks|pkb)$/i.test(abs)) return;
+		const c = canonical(abs);
+		if (!sqlPaths.has(c)) sqlPaths.set(c, { abs, rel: relativeTo(wsRoot, abs).split("\\").join("/") });
+	};
+	for (const art of sqlArtifacts) {
+		if (!/\.(sql|ddl|pks|pkb)$/i.test(art.path)) continue;
+		const direct = resolvePath(wsRoot, art.path.replace(/^\/+/, ""));
+		if (isInside(wsRoot, direct)) addSqlPath(direct);
+		for (const sd of scopeDocs) {
+			for (const tf of sd.ticketFiles ?? []) {
+				if (tf.rel.replace(/\\/g, "/").toLowerCase() === art.path.replace(/\\/g, "/").toLowerCase()) {
+					addSqlPath(tf.path);
+				}
+			}
+		}
+	}
+	// Also include schema-folder SQL files whose table names match any referenced schema doc.
+	const referencedTables = new Set<string>();
+	for (const art of sqlArtifacts) {
+		const stem = baseName(art.path).replace(/\.[^.]+$/, "").toLowerCase();
+		if (stem) referencedTables.add(stem);
+	}
+	for (const d of allDocs) {
+		if (!d.exists || d.group !== "schema" || !/\.(sql|ddl)$/i.test(d.name)) continue;
+		if (!sqlPaths.size || d.schemaObjects?.some((obj) => referencedTables.has(obj.toLowerCase()))) {
+			addSqlPath(d.path);
+		}
+	}
+
+	const sqlTables: DeploymentRunbookTableDep[] = [];
+	const seenTables = new Set<string>();
+	for (const { abs, rel } of sqlPaths.values()) {
+		const txt = await current(abs);
+		if (!txt) continue;
+		for (const tbl of parseCreateTables(txt, { includeStandaloneAlter: true })) {
+			const k = tbl.tableName.toLowerCase();
+			if (seenTables.has(k)) continue;
+			seenTables.add(k);
+			const dependsOn = [...new Set((tbl.foreignKeys ?? []).map((fk) => fk.refTable).filter(Boolean))];
+			sqlTables.push({ name: tbl.tableName, ...(dependsOn.length ? { dependsOn } : {}), path: rel, kind: "table" });
+		}
+	}
+
+	// 2. Read `files.csv` to detect SHA-256 drift on any `verified` artifact in scope.
+	const fileManifestRows: { path: string; sha256: string; status?: string }[] = [];
+	const filesCsv = allDocs.find((d) => d.exists && d.group === "registries" && /(^|[\\/])files\.csv$/i.test(d.name));
+	if (filesCsv) {
+		const csvText = await current(filesCsv.path);
+		if (csvText) {
+			const parsed = parseCsv(csvText);
+			const lower = parsed.header.map((h) => h.text.trim().toLowerCase());
+			const pathIdx = Math.max(0, lower.findIndex((h) => h === "path" || h === "file"));
+			const shaIdx = lower.findIndex((h) => h === "sha256" || h === "sha-256" || h === "checksum" || h === "hash");
+			const statusIdx = lower.findIndex((h) => h === "status" || h === "state");
+			if (shaIdx >= 0) {
+				for (const row of parsed.rows) {
+					const p = (row[pathIdx]?.text ?? "").trim();
+					const sha = (row[shaIdx]?.text ?? "").trim();
+					if (p && sha) {
+						fileManifestRows.push({
+							path: p,
+							sha256: sha,
+							status: statusIdx >= 0 ? (row[statusIdx]?.text ?? "").trim() : undefined,
+						});
+					}
+				}
+			}
+		}
+	}
+	const checksumDrifts = detectChecksumDrift(fileManifestRows, checksums);
+
+	// 3. Catch any scheduled jobs in `jobs.csv` calling an in-scope script (even if unticketed).
+	const extraJobs: { name: string; schedule?: string; calls?: string; status?: string }[] = [];
+	const jobsCsv = allDocs.find((d) => d.exists && d.group === "registries" && /(^|[\\/])jobs\.csv$/i.test(d.name));
+	if (jobsCsv && scripts.length) {
+		const csvText = await current(jobsCsv.path);
+		if (csvText) {
+			const parsed = parseCsv(csvText);
+			const lower = parsed.header.map((h) => h.text.trim().toLowerCase());
+			const nameIdx = Math.max(0, lower.findIndex((h) => h === "job" || h === "name"));
+			const runsIdx = lower.findIndex((h) => h === "runs" || h === "schedule" || h === "cron");
+			const callsIdx = lower.findIndex((h) => h === "calls" || h === "script");
+			const statusIdx = lower.findIndex((h) => h === "status" || h === "state");
+			if (callsIdx >= 0) {
+				for (const row of parsed.rows) {
+					const name = (row[nameIdx]?.text ?? "").trim();
+					const calls = (row[callsIdx]?.text ?? "").trim();
+					if (!name || !calls) continue;
+					if (scripts.some((s) => codeMatchesRef(calls, s.ref, wsRoot) || codeMatchesRef(s.ref, calls, wsRoot))) {
+						extraJobs.push({
+							name,
+							schedule: runsIdx >= 0 ? (row[runsIdx]?.text ?? "").trim() : undefined,
+							calls,
+							status: statusIdx >= 0 ? (row[statusIdx]?.text ?? "").trim() : undefined,
+						});
+					}
+				}
+			}
+		}
+	}
+
+	return {
+		...(sqlTables.length ? { sqlTables } : {}),
+		...(fileManifestRows.length ? { fileManifestRows } : {}),
+		...(checksumDrifts.length ? { checksumDrifts } : {}),
+		...(extraJobs.length ? { jobs: extraJobs } : {}),
+	};
+}
+
+/** Saves an OpenXML `.docx` document generated by the backend inside the workspace (embedding local images, Mermaid PNGs, rasterized SVG/WebP, hyperlinks, footnotes & metadata). */
 async function saveDocxExport(
 	defaultRelPath: string,
 	title: string,
 	subtitle: string | undefined,
 	markdown: string,
-	options?: { baseDir?: string; meta?: Record<string, string> },
+	options?: { baseDir?: string; baseDocPath?: string; meta?: Record<string, string>; toc?: boolean; headerFooter?: boolean },
 ): Promise<boolean> {
 	if (!state.workspace?.root) {
 		notify("Open a workspace folder before exporting to Word (.docx).", "error");
@@ -3170,7 +4047,11 @@ async function saveDocxExport(
 			}
 		}
 		const meta = options?.meta ?? extractExportMeta(markdown);
-		const mermaidPngs = await rasterizeMermaidPngsForDocx(markdown);
+		const baseDocPath = options?.baseDocPath ?? (options?.baseDir ? joinPath(options.baseDir, "doc.md") : joinPath(docsFolder(), "INDEX.md"));
+		const [mermaidPngs, rasterizedImages] = await Promise.all([
+			rasterizeMermaidPngsForDocx(markdown),
+			rasterizeVectorAndWebpImagesForDocx(markdown, baseDocPath),
+		]);
 		const res = await backend.exportDocx({
 			path: dest,
 			title,
@@ -3179,6 +4060,11 @@ async function saveDocxExport(
 			...(options?.baseDir ? { baseDir: options.baseDir } : {}),
 			...(Object.keys(meta).length ? { meta } : {}),
 			...(Object.keys(mermaidPngs).length ? { mermaidPngs } : {}),
+			...(state.settings.attachmentsFolder?.trim() ? { attachmentsFolder: state.settings.attachmentsFolder.trim() } : {}),
+			...(state.project?.docs ? { docsFolder: state.project.docs } : {}),
+			...(Object.keys(rasterizedImages).length ? { rasterizedImages } : {}),
+			...(options?.toc !== undefined ? { toc: options.toc } : {}),
+			headerFooter: options?.headerFooter ?? true,
 		});
 		setState("treeVersion", (v) => v + 1);
 		notify(`Saved Word document to ${relativeTo(state.workspace.root, res.path)}.`, "info", {
@@ -3256,6 +4142,7 @@ export async function exportDocAs(
 		const docsRel = (state.project?.docs ?? "docs").replace(/^[./\\]+|[\\/]+$/g, "");
 		await saveDocxExport(`${docsRel}/exports/${stem}.docx`, title, subtitle, expanded, {
 			baseDir: dirName(path),
+			baseDocPath: path,
 			meta,
 		});
 		return;
@@ -3413,10 +4300,17 @@ export async function exportTicketPacket(ticketPath: string, key: string, format
 		totalTicketFiles += Math.max(sd.ticketFiles?.length ?? 0, sd.ticketFileCount ?? 0);
 	}
 
-	const { gitStatus } = await import("./git");
+	const [{ gitStatus }, headSha, allTestRuns] = await Promise.all([
+		import("./git"),
+		backend.gitHeadSha().catch(() => null),
+		loadWorkspaceTestRuns(allDocs),
+	]);
+	const matchingRuns = allTestRuns.filter((r) => scopeKeySet.has(r.ticket.trim().toLowerCase()));
 	const readiness = evaluateTicketReadiness(allDocs, key, {
 		gitFiles: gitStatus()?.files,
 		root: state.workspace?.root,
+		testRuns: matchingRuns,
+		currentGitSha: headSha,
 	});
 
 	const packetMd = assembleTicketPacketMarkdown({
@@ -3449,6 +4343,8 @@ export async function exportTicketPacket(ticketPath: string, key: string, format
 		ticketFiles,
 		totalTicketFiles,
 		readiness,
+		...(matchingRuns.length ? { testRuns: matchingRuns } : {}),
+		...(headSha ? { currentGitSha: headSha } : {}),
 	});
 
 	const docsRel = (state.project?.docs ?? "docs").replace(/^[./\\]+|[\\/]+$/g, "");
@@ -3470,6 +4366,8 @@ export async function exportTicketPacket(ticketPath: string, key: string, format
 		const subtitle = state.project?.name ? `${state.project.name} · Generated ${today()}` : `Generated ${today()}`;
 		await saveDocxExport(`${exportDir}/${key}-release-packet.docx`, `${key}: ${ticketDoc?.title || key} — Release Packet`, subtitle, packetMd, {
 			baseDir: dirName(ticketPath),
+			baseDocPath: ticketPath,
+			toc: true,
 		});
 		return;
 	}
@@ -3610,7 +4508,7 @@ export async function exportDeploymentManifest(
 	for (const doc of scopeDocs) {
 		const text = canonical(doc.path) === canonical(ticketPath) ? ticketText : await current(doc.path);
 		const rb = text ? extractRollbackSection(text) : "";
-		if (rb) pushRollback(doc === ticketDoc ? null : `${doc.ticket ?? doc.name}`, rb);
+		if (rb) pushRollback(doc === ticketDoc ? null : `${doc.ticket ?? doc.name}`, rewriteRelativeLinksForBase(rb, doc.path, ticketPath));
 		const k = doc.ticket ?? key;
 		for (const sp of ticketWork(allDocs, k).find((g) => g.kind === "spec")?.files ?? []) {
 			const spCanon = canonical(sp.path);
@@ -3618,22 +4516,26 @@ export async function exportDeploymentManifest(
 			seenSpecPaths.add(spCanon);
 			const spText = await current(sp.path);
 			const spRb = spText ? extractRollbackSection(spText) : "";
-			if (spRb) pushRollback(`${sp.title || sp.name} (${k})`, spRb);
+			if (spRb) pushRollback(`${sp.title || sp.name} (${k})`, rewriteRelativeLinksForBase(spRb, sp.path, ticketPath));
 		}
 	}
 
-	const [{ gitStatus }, headSha, manifestFiles] = await Promise.all([
+	const [{ gitStatus }, headSha, manifestFiles, allTestRuns] = await Promise.all([
 		import("./git"),
 		backend.gitHeadSha().catch(() => null),
 		backend.manifest().catch(() => []),
+		loadWorkspaceTestRuns(allDocs),
 	]);
+	const matchingRuns = allTestRuns.filter((r) => scopeKeySet.has(r.ticket.trim().toLowerCase()));
 	const readiness = evaluateTicketReadiness(allDocs, key, {
 		gitFiles: gitStatus()?.files,
 		root: state.workspace?.root,
+		testRuns: matchingRuns,
+		currentGitSha: headSha,
 	});
 
 	// Match SHA-256 checksums for referenced script, test script, and SQL artifacts.
-	const wsRoot = state.workspace?.root;
+	const wsRoot = state.workspace?.root ?? "";
 	const checksums: { path: string; sha256: string }[] = [];
 	const seenChecksum = new Set<string>();
 	const allArtifactRefs = [...scripts.map((s) => s.ref), ...testScripts.map((t) => t.ref), ...sqlArtifacts.map((s) => s.path)];
@@ -3644,6 +4546,16 @@ export async function exportDeploymentManifest(
 		seenChecksum.add(k);
 		checksums.push({ path: mf.path, sha256: mf.sha256 });
 	}
+
+	const runbook = await buildDeploymentRunbookData({
+		allDocs,
+		scopeDocs,
+		scripts,
+		sqlArtifacts,
+		registries,
+		checksums,
+		wsRoot,
+	});
 
 	const manifestInput = {
 		projectName: state.project?.name || state.workspace?.name || "Project",
@@ -3667,6 +4579,7 @@ export async function exportDeploymentManifest(
 		checksums: checksums.length ? checksums : undefined,
 		readiness,
 		rollbackNotes: rollbackNotes.length ? rollbackNotes : undefined,
+		runbook,
 	};
 
 	// 5. Best-effort local Git commits mentioning any ticket in scope (files not already listed above).
@@ -3733,6 +4646,8 @@ export async function exportDeploymentManifest(
 		const subtitle = state.project?.name ? `${state.project.name} · Generated ${today()}` : `Generated ${today()}`;
 		await saveDocxExport(`${exportDir}/${key}-deployment-manifest.docx`, `${key}: ${ticketDoc?.title || key} — Deployment Manifest`, subtitle, expanded, {
 			baseDir: dirName(ticketPath),
+			baseDocPath: ticketPath,
+			toc: true,
 		});
 		return;
 	}
@@ -3758,10 +4673,16 @@ export async function closeoutTicket(ticketPath: string, key: string): Promise<v
 	const allDocs = docs();
 	const ticketDoc = allDocs.find((d) => canonical(d.path) === canonical(ticketPath));
 	const title = ticketDoc?.title || key;
-	const { gitStatus } = await import("./git");
+	const [{ gitStatus }, headSha, allTestRuns] = await Promise.all([
+		import("./git"),
+		backend.gitHeadSha().catch(() => null),
+		loadWorkspaceTestRuns(allDocs),
+	]);
 	const readiness = evaluateTicketReadiness(allDocs, key, {
 		gitFiles: gitStatus()?.files,
 		root: state.workspace?.root,
+		testRuns: allTestRuns,
+		currentGitSha: headSha,
 	});
 	const warns = readiness ? readiness.checks.filter((c) => c.level === "warn") : [];
 	const warnNote = warns.length
@@ -4036,10 +4957,18 @@ export async function renameHeadingAcrossWorkspace(targetPath?: string): Promise
 			if (aAbove === 0) return b.line - a.line;
 			return a.line - b.line;
 		});
-		const labels = ordered.map((h) => `${"#".repeat(h.level)} ${h.text} (line ${h.line})`);
-		const picked = await choose(`Rename which heading in ${baseName(docPath)}?`, labels);
-		if (!picked) return;
-		pickedHeading = ordered[labels.indexOf(picked)];
+		pickedHeading =
+			(await quickPick<(typeof headings)[number]>({
+				title: `Rename which heading in ${baseName(docPath)}?`,
+				placeholder: "Filter headings…",
+				items: ordered.map((h) => ({
+					label: `${"#".repeat(h.level)} ${h.text}`,
+					value: h,
+					icon: "list-flat",
+					detail: `H${h.level} · line ${h.line}`,
+					keywords: `${h.text} h${h.level} line ${h.line}`,
+				})),
+			})) ?? undefined;
 	}
 	if (!pickedHeading) return;
 
@@ -4135,11 +5064,14 @@ export async function renameHeadingAcrossWorkspace(targetPath?: string): Promise
 
 /**
  * Interactive Multi-Ticket Release Bundle & Release Notes exporter.
- * Selects tickets by release tag, status, or explicit keys, optionally includes a local Git tag range,
- * deduplicates scripts, test scripts, SQL artifacts, registry rows, and rollback notes across all
- * tickets + descendants, and exports the Release Bundle and/or stakeholder Release Notes.
+ * Selects tickets by release tag, status, or multi-select QuickPick, optionally includes a local Git tag range,
+ * deduplicates scripts, test scripts, business tests, SQL artifacts, checksums, ordered deployment runbook,
+ * registry rows, and rebased rollback notes across all tickets + descendants, and exports Markdown, HTML, Word (.docx), or CAB CSV.
  */
-export async function exportReleaseBundle(format?: "markdown" | "html" | "docx"): Promise<void> {
+export async function exportReleaseBundle(
+	format?: "markdown" | "html" | "docx" | "csv",
+	options?: { release?: string; tickets?: DocFile[] },
+): Promise<void> {
 	if (!ready()) return;
 	const allDocs = docs();
 	const allTickets = allDocs.filter((d) => d.exists && d.group === "tickets" && !isCatalog(d) && d.ticket);
@@ -4152,65 +5084,119 @@ export async function exportReleaseBundle(format?: "markdown" | "html" | "docx")
 	const doneTickets = activeTickets.filter((t) => toneOf(t.status) === "done");
 	const inProgTickets = activeTickets.filter((t) => toneOf(t.status) === "active");
 
-	const scopeOptions: { label: string; detail: string; tickets?: DocFile[]; defaultName: string; custom?: boolean }[] = [];
-	for (const rel of releases) {
-		const matched = activeTickets.filter((t) => t.release?.trim().toLowerCase() === rel.toLowerCase());
+	let baseTickets: DocFile[] = [];
+	let defaultReleaseName = options?.release?.trim() || `release-${today()}`;
+
+	if (options?.tickets?.length) {
+		baseTickets = options.tickets.filter((t) => t.exists && t.group === "tickets" && t.ticket);
+		if (!options.release) {
+			const sharedRels = [...new Set(baseTickets.map((t) => t.release?.trim()).filter((r): r is string => Boolean(r)))];
+			if (sharedRels.length === 1) defaultReleaseName = sharedRels[0]!;
+		}
+	} else if (options?.release) {
+		const targetRel = options.release.trim().toLowerCase();
+		baseTickets = activeTickets.filter((t) =>
+			targetRel === "unscheduled" ? !t.release?.trim() : t.release?.trim().toLowerCase() === targetRel,
+		);
+		if (!baseTickets.length) return notify(`No active tickets found for release ${options.release}.`);
+	} else {
+		type ScopeChoice = { label: string; detail: string; description: string; tickets?: DocFile[]; defaultName: string; custom?: boolean };
+		const scopeOptions: ScopeChoice[] = [];
+		for (const rel of releases) {
+			const matched = activeTickets.filter((t) => t.release?.trim().toLowerCase() === rel.toLowerCase());
+			scopeOptions.push({
+				label: `Release: ${rel}`,
+				detail: `${matched.length} ${matched.length === 1 ? "ticket" : "tickets"}`,
+				description: matched.map((t) => t.ticket).slice(0, 6).join(", ") + (matched.length > 6 ? "…" : ""),
+				tickets: matched,
+				defaultName: rel,
+			});
+		}
+		if (doneTickets.length) {
+			scopeOptions.push({
+				label: `All done tickets`,
+				detail: `${doneTickets.length}`,
+				description: "Non-archived tickets marked done / resolved / approved",
+				tickets: doneTickets,
+				defaultName: `release-${today()}`,
+			});
+		}
+		if (inProgTickets.length) {
+			scopeOptions.push({
+				label: `Active / in-progress tickets`,
+				detail: `${inProgTickets.length}`,
+				description: "Tickets currently under way",
+				tickets: inProgTickets,
+				defaultName: `release-${today()}`,
+			});
+		}
 		scopeOptions.push({
-			label: `Release: ${rel} (${matched.length})`,
-			detail: matched.map((t) => t.ticket).slice(0, 6).join(", ") + (matched.length > 6 ? "…" : ""),
-			tickets: matched,
-			defaultName: rel,
-		});
-	}
-	if (doneTickets.length) {
-		scopeOptions.push({
-			label: `All done tickets (${doneTickets.length})`,
-			detail: "Non-archived tickets marked done / resolved / approved",
-			tickets: doneTickets,
+			label: `All active tickets`,
+			detail: `${activeTickets.length}`,
+			description: "Every non-archived ticket in the workspace",
+			tickets: activeTickets,
 			defaultName: `release-${today()}`,
 		});
-	}
-	if (inProgTickets.length) {
 		scopeOptions.push({
-			label: `Active / in-progress tickets (${inProgTickets.length})`,
-			detail: "Tickets currently under way",
-			tickets: inProgTickets,
+			label: "Select tickets…",
+			detail: "Multi-select",
+			description: "Pick individual tickets with checkboxes",
 			defaultName: `release-${today()}`,
+			custom: true,
 		});
+
+		const chosenScope = await quickPick<ScopeChoice>({
+			title: "Which tickets belong in this Release Bundle?",
+			placeholder: "Filter releases or ticket scopes…",
+			items: scopeOptions.map((o, i) => ({
+				label: o.label,
+				value: o,
+				icon: o.custom ? "checklist" : "layers",
+				detail: o.detail,
+				description: o.description,
+				divide: Boolean(o.custom && i > 0),
+				keywords: `${o.label} ${o.description}`,
+			})),
+		});
+		if (!chosenScope) return;
+		defaultReleaseName = chosenScope.defaultName;
+
+		if (chosenScope.custom) {
+			const sortedTickets = [...allTickets].sort((a, b) => {
+				const aArch = isArchivedTicket(a) ? 1 : 0;
+				const bArch = isArchivedTicket(b) ? 1 : 0;
+				if (aArch !== bArch) return aArch - bArch;
+				return (a.ticket ?? "").localeCompare(b.ticket ?? "", undefined, { numeric: true, sensitivity: "base" });
+			});
+			const activeKey = state.settings.activeTicket?.trim().toLowerCase();
+			const preSelected = activeKey
+				? sortedTickets.filter((t) => t.ticket?.toLowerCase() === activeKey)
+				: [];
+			const pickedTickets = await quickPickMany<DocFile>({
+				title: "Select tickets to include in Release Bundle",
+				placeholder: "Filter by ticket key, title, status, or release…",
+				initialSelected: preSelected,
+				confirmLabel: "Bundle selected",
+				items: sortedTickets.map((t) => ({
+					label: `${t.ticket}: ${t.title || t.name}`,
+					value: t,
+					icon: "checklist",
+					badge: t.status ? { text: t.status, tone: toneOf(t.status) } : undefined,
+					detail: [t.release, isArchivedTicket(t) ? "archived" : ""].filter(Boolean).join(" · ") || undefined,
+					keywords: [t.ticket, t.title, t.status, t.release, ...(t.tags ?? [])].filter(Boolean).join(" "),
+				})),
+			});
+			if (!pickedTickets || !pickedTickets.length) return;
+			baseTickets = pickedTickets;
+			const sharedRels = [...new Set(baseTickets.map((t) => t.release?.trim()).filter((r): r is string => Boolean(r)))];
+			if (sharedRels.length === 1) defaultReleaseName = sharedRels[0]!;
+		} else {
+			baseTickets = chosenScope.tickets ?? [];
+		}
 	}
-	scopeOptions.push({
-		label: `All active tickets (${activeTickets.length})`,
-		detail: "Every non-archived ticket in the workspace",
-		tickets: activeTickets,
-		defaultName: `release-${today()}`,
-	});
-	scopeOptions.push({
-		label: "Select ticket keys…",
-		detail: "Enter a comma-separated list of ticket keys (e.g. LIMS-101, LIMS-102)",
-		defaultName: `release-${today()}`,
-		custom: true,
-	});
+	if (!baseTickets.length) return notify("No tickets selected for the Release Bundle.");
 
-	const pickedScope = await choose(
-		"Which tickets belong in this Release Bundle?",
-		scopeOptions.map((o) => o.label),
-		{ details: Object.fromEntries(scopeOptions.map((o) => [o.label, o.detail])) },
-	);
-	if (!pickedScope) return;
-	const chosenScope = scopeOptions.find((o) => o.label === pickedScope);
-	if (!chosenScope) return;
-
-	let baseTickets = chosenScope.tickets ?? [];
-	if (chosenScope.custom) {
-		const defaultKeys = state.settings.activeTicket?.trim() || activeTickets.slice(0, 5).map((t) => t.ticket).join(", ");
-		const typed = (await ask("Ticket keys to bundle (comma-separated)", defaultKeys))?.trim();
-		if (!typed) return;
-		const wanted = new Set(typed.split(/[\s,;]+/).map((k) => ticketKey(k).toLowerCase()).filter(Boolean));
-		baseTickets = allTickets.filter((t) => t.ticket && wanted.has(t.ticket.toLowerCase()));
-		if (!baseTickets.length) return notify("None of those ticket keys matched tickets in this project.", "error");
-	}
-
-	const releaseName = (await ask("Release name or version label", chosenScope.defaultName))?.trim();
+	const releaseName = (await ask("Release name or version label", defaultReleaseName))?.trim();
 	if (!releaseName) return;
 
 	// Roll up descendants of every selected ticket (excluding dropped/cancelled) and deduplicate.
@@ -4235,46 +5221,77 @@ export async function exportReleaseBundle(format?: "markdown" | "html" | "docx")
 	let gitRange: { from: string; to: string } | undefined;
 	const tags = await backend.gitTags().catch(() => []);
 	if (tags.length) {
-		const NONE = "Skip Git commit range";
-		const tagChoices = tags.slice(0, 10).map((t) => `${t.name} (${t.sha})`);
-		const pickedTag = await choose("Include local Git commits since a previous tag?", [NONE, ...tagChoices]);
+		const pickedTag = await quickPick<string>({
+			title: "Include local Git commits since a previous tag?",
+			placeholder: "Choose a Git tag or skip…",
+			items: [
+				{ label: "Skip Git commit range", value: "__none__", icon: "dash" },
+				...tags.slice(0, 20).map((t, i) => ({
+					label: t.name,
+					value: t.name,
+					icon: "git-branch" as const,
+					detail: t.sha,
+					divide: i === 0,
+					keywords: `${t.name} ${t.sha}`,
+				})),
+			],
+		});
 		if (!pickedTag) return;
-		if (pickedTag !== NONE) {
-			const tagObj = tags[tagChoices.indexOf(pickedTag)];
-			if (tagObj) {
-				gitRange = { from: tagObj.name, to: "HEAD" };
-				const log = await backend.gitRangeLog(tagObj.name, "HEAD", 150).catch(() => []);
-				if (log.length) commits = log;
-			}
+		if (pickedTag !== "__none__") {
+			gitRange = { from: pickedTag, to: "HEAD" };
+			const log = await backend.gitRangeLog(pickedTag, "HEAD", 150).catch(() => []);
+			if (log.length) commits = log;
 		}
 	}
 
 	let chosenFormat = format;
 	if (!chosenFormat) {
-		const DOCX = "Word (.docx)";
-		const HTML = "HTML (Print / PDF)";
-		const MD = "Markdown (.md)";
-		const pickedFmt = await choose(`Export “${releaseName}” as`, [DOCX, HTML, MD]);
+		const pickedFmt = await quickPick<"docx" | "html" | "markdown" | "csv">({
+			title: `Export “${releaseName}” as`,
+			placeholder: "Choose export format…",
+			searchable: false,
+			items: [
+				{ label: "Word (.docx)", value: "docx", icon: "file", description: "Formatted Word dossier with TOC, tables, and embedded diagrams" },
+				{ label: "HTML (Print / PDF)", value: "html", icon: "eye", description: "Standalone print-ready HTML with embedded images and Mermaid SVGs" },
+				{ label: "Markdown (.md)", value: "markdown", icon: "note", description: "Portable Git-friendly Markdown bundle" },
+				{ label: "CSV (.csv)", value: "csv", icon: "table", description: "Flat CAB / ServiceNow / Excel artifact manifest with SHA-256 checksums" },
+			],
+		});
 		if (!pickedFmt) return;
-		chosenFormat = pickedFmt === DOCX ? "docx" : pickedFmt === HTML ? "html" : "markdown";
+		chosenFormat = pickedFmt;
 	}
 
-	const BOTH = "Release Bundle + Release Notes";
-	const BUNDLE_ONLY = "Release Bundle only";
-	const NOTES_ONLY = "Release Notes only";
-	const outputChoice = await choose(`Generate artifacts for ${releaseName}`, [BOTH, BUNDLE_ONLY, NOTES_ONLY]);
-	if (!outputChoice) return;
+	let outputChoice: "both" | "bundle" | "notes" = "bundle";
+	if (chosenFormat !== "csv") {
+		const pickedOut = await quickPick<"both" | "bundle" | "notes">({
+			title: `Generate artifacts for ${releaseName}`,
+			placeholder: "Choose which documents to generate…",
+			searchable: false,
+			items: [
+				{ label: "Release Bundle + Release Notes", value: "both", icon: "layers", description: "Full deployment dossier plus stakeholder release notes" },
+				{ label: "Release Bundle only", value: "bundle", icon: "checklist", description: "Artifacts, checksums, runbook, rollback, and readiness" },
+				{ label: "Release Notes only", value: "notes", icon: "megaphone", description: "Stakeholder-ready grouped change summary" },
+			],
+		});
+		if (!pickedOut) return;
+		outputChoice = pickedOut;
+	}
 
-	// Aggregate scripts, test scripts, SQL, registries, rollback notes & readiness across all tickets.
+	// Aggregate scripts, test scripts, plan business tests, SQL, registries, checksums, rebased rollback notes & readiness across all tickets.
+	const anchorPath = joinPath(docsFolder(), "INDEX.md");
 	const scripts: { ref: string; kind: string; ticket: string }[] = [];
 	const testScripts: { ref: string; ticket: string }[] = [];
+	const planTests: PlanBusinessTest[] = [];
+	const seenPlanTests = new Set<string>();
 	const sqlArtifacts: { path: string; kind: string; source: string; ticket: string }[] = [];
 	const rollbackNotes: { ticket: string; source?: string; body: string }[] = [];
 	const seenSpecRollback = new Set<string>();
 
-	const [{ gitStatus }, headSha] = await Promise.all([
+	const [{ gitStatus }, headSha, manifestFiles, allTestRuns] = await Promise.all([
 		import("./git"),
 		backend.gitHeadSha().catch(() => null),
+		backend.manifest().catch(() => []),
+		loadWorkspaceTestRuns(allDocs),
 	]);
 	const gitFiles = gitStatus()?.files;
 
@@ -4294,6 +5311,15 @@ export async function exportReleaseBundle(format?: "markdown" | "html" | "docx")
 				}
 			}
 		}
+		for (const p of planDocs) {
+			const planName = p.heading || p.title || p.name;
+			for (const pt of p.planTests ?? []) {
+				const ptKey = `${planName.toLowerCase()}::${pt.name.toLowerCase()}`;
+				if (seenPlanTests.has(ptKey)) continue;
+				seenPlanTests.add(ptKey);
+				planTests.push({ ...pt, plan: planName, ticket: k });
+			}
+		}
 		for (const ref of scriptsForTicket(allDocs, k)) {
 			if (!tsSet.has(ref.toLowerCase())) {
 				scripts.push({ ref, kind: classifyDeploymentArtifact(ref), ticket: k });
@@ -4310,14 +5336,14 @@ export async function exportReleaseBundle(format?: "markdown" | "html" | "docx")
 		}
 		const docText = await current(doc.path);
 		const docRb = docText ? extractRollbackSection(docText) : "";
-		if (docRb) rollbackNotes.push({ ticket: k, body: docRb });
+		if (docRb) rollbackNotes.push({ ticket: k, body: rewriteRelativeLinksForBase(docRb, doc.path, anchorPath) });
 		for (const sp of specDocs) {
 			const spKey = `${k.toLowerCase()}::${canonical(sp.path)}`;
 			if (seenSpecRollback.has(spKey)) continue;
 			seenSpecRollback.add(spKey);
 			const spText = await current(sp.path);
 			const spRb = spText ? extractRollbackSection(spText) : "";
-			if (spRb) rollbackNotes.push({ ticket: k, source: sp.title || sp.name, body: spRb });
+			if (spRb) rollbackNotes.push({ ticket: k, source: sp.title || sp.name, body: rewriteRelativeLinksForBase(spRb, sp.path, anchorPath) });
 		}
 		const fmVals = docText ? frontMatter(docText).values : {};
 		bundleTickets.push({
@@ -4331,7 +5357,12 @@ export async function exportReleaseBundle(format?: "markdown" | "html" | "docx")
 			approvedBy: doc.approvedBy,
 			approvedDate: doc.approvedDate,
 			changeControl: doc.changeControl,
-			readiness: evaluateTicketReadiness(allDocs, k, { gitFiles, root: state.workspace?.root }),
+			readiness: evaluateTicketReadiness(allDocs, k, {
+				gitFiles,
+				root: state.workspace?.root,
+				testRuns: allTestRuns,
+				currentGitSha: headSha,
+			}),
 		});
 	}
 
@@ -4354,6 +5385,29 @@ export async function exportReleaseBundle(format?: "markdown" | "html" | "docx")
 		}
 	}
 
+	// Deduplicated SHA-256 checksums across all scripts, test scripts, and SQL artifacts in the bundle.
+	const wsRoot = state.workspace?.root ?? "";
+	const checksums: { path: string; sha256: string }[] = [];
+	const seenChecksum = new Set<string>();
+	const allArtifactRefs = [...scripts.map((s) => s.ref), ...testScripts.map((t) => t.ref), ...sqlArtifacts.map((s) => s.path)];
+	for (const mf of manifestFiles) {
+		if (!allArtifactRefs.some((ref) => codeMatchesRef(mf.path, ref, wsRoot))) continue;
+		const ck = mf.path.toLowerCase();
+		if (seenChecksum.has(ck)) continue;
+		seenChecksum.add(ck);
+		checksums.push({ path: mf.path, sha256: mf.sha256 });
+	}
+
+	const runbook = await buildDeploymentRunbookData({
+		allDocs,
+		scopeDocs,
+		scripts,
+		sqlArtifacts,
+		registries,
+		checksums,
+		wsRoot,
+	});
+
 	const changeControls = [...new Set(scopeDocs.map((d) => d.changeControl?.trim()).filter((c): c is string => Boolean(c)))];
 	const bundleInput: ReleaseBundleInput = {
 		projectName: state.project?.name || state.workspace?.name || "Project",
@@ -4365,23 +5419,40 @@ export async function exportReleaseBundle(format?: "markdown" | "html" | "docx")
 		tickets: bundleTickets,
 		scripts,
 		testScripts: testScripts.length ? testScripts : undefined,
+		planTests: planTests.length ? planTests : undefined,
 		sqlArtifacts,
 		registries,
+		checksums: checksums.length ? checksums : undefined,
+		runbook,
 		rollbackNotes: rollbackNotes.length ? rollbackNotes : undefined,
 		commits,
 	};
 
 	const docsRel = (state.project?.docs ?? "docs").replace(/^[./\\]+|[\\/]+$/g, "");
 	const fileSlug = slug(releaseName).toLowerCase() || `release-${today()}`;
-	const anchorPath = joinPath(docsFolder(), "INDEX.md");
 	const subtitle = `${bundleInput.projectName} · Generated ${today()}`;
+
+	if (chosenFormat === "csv") {
+		const csv = assembleReleaseBundleCsv(bundleInput);
+		await saveExportFile(
+			`${docsRel}/exports/${fileSlug}-release-bundle.csv`,
+			`${fileSlug}-release-bundle.csv`,
+			csv,
+			"text/csv;charset=utf-8",
+		);
+		return;
+	}
 
 	const writeArtifact = async (kind: "bundle" | "notes", title: string, md: string) => {
 		const suffix = kind === "bundle" ? "release-bundle" : "release-notes";
 		if (chosenFormat === "markdown") {
 			await saveExportFile(`${docsRel}/exports/${fileSlug}-${suffix}.md`, `${fileSlug}-${suffix}.md`, md, "text/markdown;charset=utf-8");
 		} else if (chosenFormat === "docx") {
-			await saveDocxExport(`${docsRel}/exports/${fileSlug}-${suffix}.docx`, title, subtitle, md, { baseDir: docsFolder() });
+			await saveDocxExport(`${docsRel}/exports/${fileSlug}-${suffix}.docx`, title, subtitle, md, {
+				baseDir: docsFolder(),
+				baseDocPath: anchorPath,
+				toc: kind === "bundle",
+			});
 		} else {
 			await saveExportFile(
 				`${docsRel}/exports/${fileSlug}-${suffix}.html`,
@@ -4395,10 +5466,10 @@ export async function exportReleaseBundle(format?: "markdown" | "html" | "docx")
 		}
 	};
 
-	if (outputChoice === BOTH || outputChoice === BUNDLE_ONLY) {
+	if (outputChoice === "both" || outputChoice === "bundle") {
 		await writeArtifact("bundle", `${releaseName} — Release Bundle`, assembleReleaseBundleMarkdown(bundleInput));
 	}
-	if (outputChoice === BOTH || outputChoice === NOTES_ONLY) {
+	if (outputChoice === "both" || outputChoice === "notes") {
 		await writeArtifact("notes", `${releaseName} — Release Notes`, assembleReleaseNotesMarkdown(bundleInput));
 	}
 }
@@ -4406,9 +5477,12 @@ export async function exportReleaseBundle(format?: "markdown" | "html" | "docx")
 /**
  * Exports a Requirements Traceability Matrix (CSV, Markdown, HTML, or Word .docx)
  * linking tickets, acceptance criteria, specs, plans, code scripts, test scripts,
- * business test cases, decisions, registries, formal approvals, and HEAD Git SHA.
+ * business test cases, validation test runs, decisions, registries, formal approvals, and HEAD Git SHA.
  */
-export async function exportRtm(format?: "csv" | "markdown" | "html" | "docx"): Promise<void> {
+export async function exportRtm(
+	format?: "csv" | "markdown" | "html" | "docx",
+	options?: { release?: string; tickets?: DocFile[] },
+): Promise<void> {
 	if (!ready()) return;
 	const allDocs = docs();
 	const allTickets = allDocs.filter((d) => d.exists && d.group === "tickets" && !isCatalog(d) && d.ticket);
@@ -4422,11 +5496,29 @@ export async function exportRtm(format?: "csv" | "markdown" | "html" | "docx"): 
 	let scopeSlug = "rtm";
 	let scopeTitle = state.project?.name || state.workspace?.name || "Project";
 
-	if (releases.length || epics.length) {
-		const options: { label: string; detail: string; tickets: DocFile[]; slug: string; title: string }[] = [
+	if (options?.tickets?.length) {
+		selectedTickets = options.tickets.filter((t) => t.exists && t.group === "tickets" && t.ticket);
+		if (options.release) {
+			scopeSlug = `${slug(options.release).toLowerCase()}-rtm`;
+			scopeTitle = `${scopeTitle} (${options.release})`;
+		} else if (selectedTickets.length === 1 && selectedTickets[0]!.ticket) {
+			scopeSlug = `${selectedTickets[0]!.ticket.toLowerCase()}-rtm`;
+			scopeTitle = `${selectedTickets[0]!.ticket}: ${selectedTickets[0]!.title || selectedTickets[0]!.name}`;
+		}
+	} else if (options?.release) {
+		const targetRel = options.release.trim().toLowerCase();
+		selectedTickets = activeTickets.filter((t) =>
+			targetRel === "unscheduled" ? !t.release?.trim() : t.release?.trim().toLowerCase() === targetRel,
+		);
+		scopeSlug = `${slug(options.release).toLowerCase()}-rtm`;
+		scopeTitle = `${scopeTitle} (${options.release})`;
+	} else if (releases.length || epics.length) {
+		type RtmScope = { label: string; detail: string; description: string; tickets: DocFile[]; slug: string; title: string };
+		const scopeItems: RtmScope[] = [
 			{
-				label: `All active tickets (${selectedTickets.length})`,
-				detail: "Every non-archived ticket in the project",
+				label: "All active tickets",
+				detail: `${selectedTickets.length}`,
+				description: "Every non-archived ticket in the project",
 				tickets: selectedTickets,
 				slug: "rtm",
 				title: scopeTitle,
@@ -4434,9 +5526,10 @@ export async function exportRtm(format?: "csv" | "markdown" | "html" | "docx"): 
 		];
 		for (const rel of releases) {
 			const matched = activeTickets.filter((t) => t.release?.trim().toLowerCase() === rel.toLowerCase());
-			options.push({
-				label: `Release: ${rel} (${matched.length})`,
-				detail: matched.map((t) => t.ticket).slice(0, 6).join(", "),
+			scopeItems.push({
+				label: `Release: ${rel}`,
+				detail: `${matched.length} ${matched.length === 1 ? "ticket" : "tickets"}`,
+				description: matched.map((t) => t.ticket).slice(0, 6).join(", "),
 				tickets: matched,
 				slug: `${slug(rel).toLowerCase()}-rtm`,
 				title: `${scopeTitle} (${rel})`,
@@ -4445,41 +5538,61 @@ export async function exportRtm(format?: "csv" | "markdown" | "html" | "docx"): 
 		for (const epic of epics) {
 			const kids = descendantTickets(allDocs, epic.ticket!).filter((d) => toneOf(d.status) !== "off");
 			const group = [epic, ...kids];
-			options.push({
-				label: `Epic: ${epic.ticket} (${group.length})`,
-				detail: epic.title || epic.name,
+			scopeItems.push({
+				label: `Epic: ${epic.ticket}`,
+				detail: `${group.length} ${group.length === 1 ? "ticket" : "tickets"}`,
+				description: epic.title || epic.name,
 				tickets: group,
 				slug: `${epic.ticket!.toLowerCase()}-rtm`,
 				title: `${epic.ticket}: ${epic.title || epic.name}`,
 			});
 		}
-		const picked = await choose(
-			"Build Requirements Traceability Matrix for which scope?",
-			options.map((o) => o.label),
-			{ details: Object.fromEntries(options.map((o) => [o.label, o.detail])) },
-		);
-		if (!picked) return;
-		const hit = options.find((o) => o.label === picked);
-		if (hit) {
-			selectedTickets = hit.tickets;
-			scopeSlug = hit.slug;
-			scopeTitle = hit.title;
-		}
+		const hit = await quickPick<RtmScope>({
+			title: "Build Requirements Traceability Matrix for which scope?",
+			placeholder: "Filter releases, epics, or all tickets…",
+			items: scopeItems.map((o) => ({
+				label: o.label,
+				value: o,
+				icon: "table",
+				detail: o.detail,
+				description: o.description,
+				keywords: `${o.label} ${o.description}`,
+			})),
+		});
+		if (!hit) return;
+		selectedTickets = hit.tickets;
+		scopeSlug = hit.slug;
+		scopeTitle = hit.title;
 	}
 
 	let chosenFormat = format;
 	if (!chosenFormat) {
-		const CSV = "CSV (.csv)";
-		const DOCX = "Word (.docx)";
-		const HTML = "HTML (Print / PDF)";
-		const MD = "Markdown (.md)";
-		const pickedFmt = await choose("Export Requirements Traceability Matrix as", [CSV, DOCX, HTML, MD]);
+		const pickedFmt = await quickPick<"csv" | "docx" | "html" | "markdown">({
+			title: "Export Requirements Traceability Matrix as",
+			placeholder: "Choose export format…",
+			searchable: false,
+			items: [
+				{ label: "CSV (.csv)", value: "csv", icon: "table", description: "Spreadsheet / QMS audit import with validation evidence columns" },
+				{ label: "Word (.docx)", value: "docx", icon: "file", description: "Formatted Word RTM dossier with table of contents" },
+				{ label: "HTML (Print / PDF)", value: "html", icon: "eye", description: "Standalone print-ready HTML matrix" },
+				{ label: "Markdown (.md)", value: "markdown", icon: "note", description: "ADR-0008-compliant Markdown traceability matrix" },
+			],
+		});
 		if (!pickedFmt) return;
-		chosenFormat = pickedFmt === CSV ? "csv" : pickedFmt === DOCX ? "docx" : pickedFmt === HTML ? "html" : "markdown";
+		chosenFormat = pickedFmt;
 	}
 
-	const headSha = await backend.gitHeadSha().catch(() => null);
-	const rows = buildRtmRows(allDocs, selectedTickets, headSha);
+	const [headSha, testRuns] = await Promise.all([
+		backend.gitHeadSha().catch(() => null),
+		loadWorkspaceTestRuns(allDocs),
+	]);
+	const rows = buildRtmRows({
+		docs: allDocs,
+		tickets: selectedTickets,
+		headSha,
+		testRuns,
+		currentGitSha: headSha,
+	});
 	const docsRel = (state.project?.docs ?? "docs").replace(/^[./\\]+|[\\/]+$/g, "");
 
 	if (chosenFormat === "csv") {
@@ -4491,6 +5604,7 @@ export async function exportRtm(format?: "csv" | "markdown" | "html" | "docx"): 
 	const rtmMd = assembleRtmMarkdown(rows, scopeTitle);
 	const title = `Requirements Traceability Matrix — ${scopeTitle}`;
 	const subtitle = `${state.project?.name || state.workspace?.name || "Project"} · Generated ${today()}`;
+	const anchorPath = joinPath(docsFolder(), "INDEX.md");
 
 	if (chosenFormat === "markdown") {
 		await saveExportFile(`${docsRel}/exports/${scopeSlug}.md`, `${scopeSlug}.md`, rtmMd, "text/markdown;charset=utf-8");
@@ -4498,11 +5612,14 @@ export async function exportRtm(format?: "csv" | "markdown" | "html" | "docx"): 
 	}
 
 	if (chosenFormat === "docx") {
-		await saveDocxExport(`${docsRel}/exports/${scopeSlug}.docx`, title, subtitle, rtmMd, { baseDir: docsFolder() });
+		await saveDocxExport(`${docsRel}/exports/${scopeSlug}.docx`, title, subtitle, rtmMd, {
+			baseDir: docsFolder(),
+			baseDocPath: anchorPath,
+			toc: true,
+		});
 		return;
 	}
 
-	const anchorPath = joinPath(docsFolder(), "INDEX.md");
 	await saveExportFile(
 		`${docsRel}/exports/${scopeSlug}.html`,
 		`${scopeSlug}.html`,
@@ -4514,28 +5631,56 @@ export async function exportRtm(format?: "csv" | "markdown" | "html" | "docx"): 
 	);
 }
 
+/** Syncs an already-open editor buffer from disk after an import writes over its path so the buffer never goes stale. */
+async function syncImportedBuffer(importedPath: string): Promise<void> {
+	if (!documents.get(canonical(importedPath))) return;
+	try {
+		const disk = await backend.read(importedPath);
+		if (!disk.binary) await put(importedPath, disk.text, true);
+	} catch {
+		// Ignore if unreadable; `openFile` will surface any file error.
+	}
+}
+
+/** Prompts ADR 0009 conflict resolution when an import destination already exists on disk. */
+async function promptImportConflict(existingPath: string): Promise<"copy" | "overwrite" | null> {
+	const relExisting = state.workspace?.root ? relativeTo(state.workspace.root, existingPath).split("\\").join("/") : baseName(existingPath);
+	const SAVE_COPY = "Save as copy";
+	const OVERWRITE = "Overwrite existing";
+	const picked = await choose(
+		`${relExisting} already exists. Save the imported document as a new copy or overwrite the existing file (keeping a local history snapshot)?`,
+		[SAVE_COPY, OVERWRITE],
+		{ danger: OVERWRITE },
+	);
+	if (!picked) return null;
+	return picked === OVERWRITE ? "overwrite" : "copy";
+}
+
 /**
  * Imports a legacy `.docx`, `.html`, or `.md` document into the workspace as Markdown,
- * extracting embedded Word images into the workspace attachments folder and opening the result.
+ * with ADR 0009 conflict prompting, open-editor buffer sync, extracted Word images,
+ * and clear notifications for unaccepted Track Changes or QA comments.
  */
-export async function importLegacyDoc(targetGroup?: "docs" | "specs" | "knowledge" | "schema"): Promise<void> {
+export async function importLegacyDoc(
+	targetGroup?: "docs" | "specs" | "knowledge" | "schema",
+	explicitSourcePath?: string,
+): Promise<void> {
 	if (!ready()) return;
 	let group = targetGroup;
 	if (!group) {
-		const DOCS_OPT = "Docs";
-		const SPECS_OPT = "Specs";
-		const KNOW_OPT = "Knowledge (Reference)";
-		const SCHEMA_OPT = "Schema (Database)";
-		const picked = await choose("Import document (.docx, .html, .md) into which folder?", [DOCS_OPT, SPECS_OPT, KNOW_OPT, SCHEMA_OPT], {
-			details: {
-				[DOCS_OPT]: `${areaSaid("docs")}/ — general project documentation`,
-				[SPECS_OPT]: `${areaSaid("docs")}/specs/ — functional & technical specifications`,
-				[KNOW_OPT]: `${areaSaid("docs")}/knowledge/reference/ — SOPs, runbooks, & architecture notes`,
-				[SCHEMA_OPT]: `${areaSaid("schema")}/database/ — database & data contract docs`,
-			},
+		const picked = await quickPick<"docs" | "specs" | "knowledge" | "schema">({
+			title: "Import document (.docx, .html, .md) into which folder?",
+			placeholder: "Choose destination folder…",
+			searchable: false,
+			items: [
+				{ label: "Docs", value: "docs", icon: "folder", detail: `${areaSaid("docs")}/`, description: "General project documentation" },
+				{ label: "Specs", value: "specs", icon: "file", detail: `${areaSaid("docs")}/specs/`, description: "Functional & technical specifications" },
+				{ label: "Knowledge (Reference)", value: "knowledge", icon: "note", detail: `${areaSaid("docs")}/knowledge/reference/`, description: "SOPs, runbooks, & architecture notes" },
+				{ label: "Schema (Database)", value: "schema", icon: "database", detail: `${areaSaid("schema")}/database/`, description: "Database & data contract docs" },
+			],
 		});
 		if (!picked) return;
-		group = picked === SPECS_OPT ? "specs" : picked === KNOW_OPT ? "knowledge" : picked === SCHEMA_OPT ? "schema" : "docs";
+		group = picked;
 	}
 
 	const destDir =
@@ -4552,22 +5697,87 @@ export async function importLegacyDoc(targetGroup?: "docs" | "specs" | "knowledg
 		? resolvePath(root(), configuredAttach.replace(/\\/g, "/").replace(/^\/+/, ""))
 		: joinPath(docsFolder(), "attachments");
 
-	let sourcePath: string | undefined;
-	if (state.info?.host !== "app") {
+	let sourcePath = explicitSourcePath?.trim() || undefined;
+	if (!sourcePath && state.info?.host !== "app") {
 		const typed = (await ask("Full path to the .docx, .html, or .md file to import"))?.trim();
 		if (!typed) return;
 		sourcePath = typed.replace(/^(["'])(.*)\1$/, "$2");
 	}
 
 	try {
-		const res = await backend.importDocFile({ sourcePath, destDir, attachmentsDir });
+		let res = await backend.importDocFile({ sourcePath, destDir, attachmentsDir, onConflict: "prompt" });
 		if (!res) return;
+		if (res.conflict) {
+			const resolution = await promptImportConflict(res.existingPath || res.path);
+			if (!resolution) return;
+			res = await backend.importDocFile({ sourcePath, destDir, attachmentsDir, onConflict: resolution });
+			if (!res) return;
+		}
+		await syncImportedBuffer(res.path);
 		setState("treeVersion", (v) => v + 1);
 		const imgNote = res.images.length ? ` (${res.images.length} ${res.images.length === 1 ? "image" : "images"} extracted)` : "";
 		notify(`Imported ${relativeTo(root(), res.path)} from ${res.kind.toUpperCase()}${imgNote}.`);
+		if (res.warnings?.length) {
+			notify(`${baseName(res.path)}: ${res.warnings.join(" ")}`);
+		}
 		await openFile(res.path);
 	} catch (e: any) {
 		notify(`Could not import document: ${e?.message ?? e}`, "error");
+	}
+}
+
+/**
+ * Safe `.docx` drop/upload importer using `backend.importDocxBytes` with `onConflict: "prompt"`,
+ * ADR 0009 conflict confirmation, open-editor buffer synchronization via `put()`, and clear
+ * Track-Changes / QA-comment warnings.
+ */
+export async function importDocxDrop(options: {
+	fileName: string;
+	base64: string;
+	destDir: string;
+	attachmentsDir?: string;
+}): Promise<{ path: string; images: string[]; warnings?: string[] } | null> {
+	if (!state.workspace?.root) {
+		notify("Open a folder first.", "error");
+		return null;
+	}
+	const configuredAttach = state.settings.attachmentsFolder?.trim();
+	const attachmentsDir =
+		options.attachmentsDir ??
+		(configuredAttach
+			? resolvePath(root(), configuredAttach.replace(/\\/g, "/").replace(/^\/+/, ""))
+			: joinPath(docsFolder(), "attachments"));
+
+	try {
+		let res = await backend.importDocxBytes({
+			fileName: options.fileName,
+			base64: options.base64,
+			destDir: options.destDir,
+			attachmentsDir,
+			onConflict: "prompt",
+		});
+		if (res.conflict) {
+			const resolution = await promptImportConflict(res.existingPath || res.path);
+			if (!resolution) return null;
+			res = await backend.importDocxBytes({
+				fileName: options.fileName,
+				base64: options.base64,
+				destDir: options.destDir,
+				attachmentsDir,
+				onConflict: resolution,
+			});
+		}
+		await syncImportedBuffer(res.path);
+		setState("treeVersion", (v) => v + 1);
+		const imgNote = res.images.length ? ` (${res.images.length} ${res.images.length === 1 ? "image" : "images"} extracted)` : "";
+		notify(`Imported ${relativeTo(root(), res.path)}${imgNote}.`);
+		if (res.warnings?.length) {
+			notify(`${baseName(res.path)}: ${res.warnings.join(" ")}`);
+		}
+		return { path: res.path, images: res.images, ...(res.warnings?.length ? { warnings: res.warnings } : {}) };
+	} catch (e: any) {
+		notify(`Could not import Word document: ${e?.message ?? e}`, "error");
+		return null;
 	}
 }
 
@@ -4686,4 +5896,770 @@ export async function onboardBrownfieldWorkspace(): Promise<void> {
 	} catch (e: any) {
 		notify(`Onboarding error: ${e?.message ?? e}`, "error");
 	}
+}
+
+// --- Controlled-Document Approval, Validation Protocols, Release Readiness, Clone & Split ---
+
+/** Computes an incremented version string (`keep`, `minor`, or `major`) from a current version label. */
+function computeVersionBump(currentVersion: string | undefined, kind: "keep" | "minor" | "major"): string {
+	const raw = (currentVersion ?? "").trim();
+	if (kind === "keep") return raw;
+	const stripped = raw.replace(/^v/i, "");
+	const match = /^(\d+)(?:\.(\d+))?(?:\.(\d+))?$/.exec(stripped);
+	if (!match) return kind === "major" ? "1.0" : raw ? `${raw}.1` : "1.0";
+	const major = Number(match[1]);
+	const minor = match[2] !== undefined ? Number(match[2]) : 0;
+	const hasPatch = match[3] !== undefined;
+	if (kind === "major") {
+		return hasPatch ? `${major + 1}.0.0` : `${major + 1}.0`;
+	}
+	return hasPatch ? `${major}.${minor + 1}.0` : `${major}.${minor + 1}`;
+}
+
+/** Adds `months` calendar months to an ISO `YYYY-MM-DD` date string (clamping day to month end). */
+function addMonthsIso(isoDate: string, months: number): string {
+	const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoDate.trim());
+	if (!m) return isoDate;
+	const year = Number(m[1]);
+	const monthIdx = Number(m[2]) - 1 + months;
+	const day = Number(m[3]);
+	const targetYear = year + Math.floor(monthIdx / 12);
+	const targetMonth = ((monthIdx % 12) + 12) % 12;
+	const lastDay = new Date(Date.UTC(targetYear, targetMonth + 1, 0)).getUTCDate();
+	const clamped = Math.min(day, lastDay);
+	return `${String(targetYear).padStart(4, "0")}-${String(targetMonth + 1).padStart(2, "0")}-${String(clamped).padStart(2, "0")}`;
+}
+
+/** Clips plain table cells to ADR 0008 column width limits and escapes Markdown pipes. */
+function clipRevisionCell(value: string, maxLen: number): string {
+	const clean = value.replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim();
+	const esc = (s: string) => s.replace(/\|/g, "\\|");
+	if (clean.length <= maxLen) return esc(clean);
+	return esc(`${clean.slice(0, Math.max(1, maxLen - 1)).trimEnd()}…`);
+}
+
+/** Stamps controlled-doc approval metadata in YAML frontmatter and appends an ADR-0008 Revision History row. */
+function applyApprovalToMarkdown(
+	text: string,
+	input: {
+		approver: string;
+		date: string;
+		version?: string;
+		changeControl?: string;
+		reviewDue?: string;
+		summary: string;
+	},
+): string {
+	let next = text;
+	next = withFrontMatter(next, "status", "approved") ?? next;
+	next = withFrontMatter(next, "approved-by", frontValue(input.approver)) ?? next;
+	next = withFrontMatter(next, "approved-date", input.date) ?? next;
+	next = withFrontMatter(next, "effective-date", input.date) ?? next;
+	if (input.version?.trim()) next = withFrontMatter(next, "version", frontValue(input.version.trim())) ?? next;
+	if (input.changeControl?.trim()) next = withFrontMatter(next, "change-control", frontValue(input.changeControl.trim())) ?? next;
+	if (input.reviewDue?.trim()) next = withFrontMatter(next, "review-due", input.reviewDue.trim()) ?? next;
+
+	const eol = next.includes("\r\n") ? "\r\n" : "\n";
+	const verCell = clipRevisionCell(input.version?.trim() || one(frontMatter(next).values.version) || "1.0", 20);
+	const dateCell = clipRevisionCell(input.date, 20);
+	const authorCell = clipRevisionCell(input.approver, 20);
+	const summaryCell = clipRevisionCell(input.summary, 120);
+	const newRow = `| ${verCell} | ${dateCell} | ${authorCell} | ${summaryCell} |`;
+
+	const lines = next.split(/\r?\n/);
+	const fmLines = frontMatter(next).lines;
+	let headingIdx = -1;
+	let fenceChar = "";
+	let fenceLen = 0;
+	for (let i = fmLines; i < lines.length; i++) {
+		const ln = lines[i]!;
+		const fm = /^[ \t]{0,3}(`{3,}|~{3,})/.exec(ln);
+		if (fm) {
+			if (!fenceChar) {
+				fenceChar = fm[1]![0]!;
+				fenceLen = fm[1]!.length;
+			} else if (fm[1]![0] === fenceChar && fm[1]!.length >= fenceLen && /^[ \t]*$/.test(ln.slice(fm[0].length))) {
+				fenceChar = "";
+				fenceLen = 0;
+			}
+			continue;
+		}
+		if (fenceChar) continue;
+		if (/^[ \t]{0,3}##[ \t]+Revision\s+History\b/i.test(ln)) {
+			headingIdx = i;
+			break;
+		}
+	}
+
+	if (headingIdx >= 0) {
+		// Find the end of the Revision History section and any pipe table inside it.
+		let sectionEnd = lines.length;
+		for (let i = headingIdx + 1; i < lines.length; i++) {
+			if (/^[ \t]{0,3}#{1,2}[ \t]+/.test(lines[i]!)) {
+				sectionEnd = i;
+				break;
+			}
+		}
+		let lastTableRow = -1;
+		for (let i = headingIdx + 1; i < sectionEnd; i++) {
+			if (lines[i]!.trim().startsWith("|") && i + 1 < sectionEnd && /^\s*\|?\s*:?-{2,}/.test(lines[i + 1]!)) {
+				let end = i + 2;
+				while (end < sectionEnd && lines[end]!.trim().startsWith("|")) end++;
+				lastTableRow = end;
+				break;
+			}
+		}
+		if (lastTableRow >= 0) {
+			lines.splice(lastTableRow, 0, newRow);
+		} else {
+			lines.splice(headingIdx + 1, 0, "", "| Version | Date | Author | Summary |", "| --- | --- | --- | --- |", newRow);
+		}
+		return lines.join(eol);
+	}
+
+	const trimmed = next.replace(/(?:\r?\n)+$/, "");
+	return [
+		trimmed,
+		"",
+		"## Revision History",
+		"",
+		"| Version | Date | Author | Summary |",
+		"| --- | --- | --- | --- |",
+		newRow,
+		"",
+	].join(eol);
+}
+
+/**
+ * Guided controlled-document approval workflow (ISO-17025 / GxP):
+ * prompts approver, optional change-control ID, version bump, and periodic `review-due`,
+ * stamps frontmatter governance metadata, and appends an ADR-0008 row to `## Revision History`.
+ */
+export async function recordDocApproval(targetPath?: string): Promise<void> {
+	if (!ready()) return;
+	const docPath = targetPath ?? activePath();
+	if (!docPath || !isMarkdown(docPath)) {
+		notify("Open a Markdown document first to record approval.");
+		return;
+	}
+	const before = await current(docPath);
+	if (before === null) return notify("Could not read the document.", "error");
+	const fm = frontMatter(before);
+	const gitAuthor = (await backend.gitLog(docPath, 1).catch(() => []))[0]?.author?.trim() ?? "";
+	const defaultApprover =
+		one(fm.values["approved-by"]) ||
+		recall("docs.lastApprover")?.trim() ||
+		one(fm.values.reviewer) ||
+		gitAuthor;
+
+	const approver = (await ask(`Approver name or role for ${baseName(docPath)}`, defaultApprover))?.trim();
+	if (!approver) return;
+	remember("docs.lastApprover", approver);
+
+	const ccInput = await ask("Change-control / CAB ID (optional, leave empty to skip)", one(fm.values["change-control"]) || "");
+	if (ccInput === null) return;
+	const changeControl = ccInput.trim();
+
+	const curVer = one(fm.values.version);
+	const minorVer = computeVersionBump(curVer, "minor");
+	const majorVer = computeVersionBump(curVer, "major");
+	const versionPick = await quickPick<string>({
+		title: `Version for ${baseName(docPath)}`,
+		placeholder: "Choose version bump…",
+		searchable: false,
+		items: curVer
+			? [
+					{ label: `Bump minor (${curVer} -> ${minorVer})`, value: minorVer, icon: "arrow-up", description: "Recommended for controlled revisions" },
+					{ label: `Bump major (${curVer} -> ${majorVer})`, value: majorVer, icon: "sparkle", description: "Major baseline or breaking specification change" },
+					{ label: `Keep ${curVer}`, value: curVer, icon: "check", description: "Keep current version number unchanged" },
+				]
+			: [
+					{ label: "Set version 1.0", value: "1.0", icon: "check", description: "Initial approved controlled release" },
+					{ label: "Set version 0.1", value: "0.1", icon: "arrow-up", description: "Preliminary controlled baseline" },
+					{ label: "Keep unversioned", value: "__none__", icon: "dash", description: "Do not add a version field" },
+				],
+	});
+	if (!versionPick) return;
+	const nextVersion = versionPick === "__none__" ? "" : versionPick;
+
+	const approvalDate = today();
+	const plusYear = addMonthsIso(approvalDate, 12);
+	const plusSix = addMonthsIso(approvalDate, 6);
+	const reviewPick = await quickPick<string>({
+		title: `Periodic review deadline (review-due)`,
+		placeholder: "Choose review schedule…",
+		searchable: false,
+		items: [
+			{ label: "+1 year", value: plusYear, icon: "sync", detail: plusYear, description: "Standard annual GxP / ISO-17025 document review" },
+			{ label: "+6 months", value: plusSix, icon: "sync", detail: plusSix, description: "Semi-annual review cycle" },
+			{ label: "None", value: "__none__", icon: "dash", description: "Do not set review-due" },
+		],
+	});
+	if (!reviewPick) return;
+	const reviewDue = reviewPick === "__none__" ? "" : reviewPick;
+
+	const summary = changeControl ? `Approved (${changeControl})` : "Formal approval recorded";
+	const after = applyApprovalToMarkdown(before, {
+		approver,
+		date: approvalDate,
+		version: nextVersion || undefined,
+		changeControl: changeControl || undefined,
+		reviewDue: reviewDue || undefined,
+		summary,
+	});
+	try {
+		await put(docPath, after, true);
+		setState("treeVersion", (v) => v + 1);
+		notify(`Recorded approval on ${baseName(docPath)} (${nextVersion ? `v${nextVersion}, ` : ""}${approver}, ${approvalDate}).`);
+		await openFile(docPath);
+	} catch (e: any) {
+		notify(`Could not record approval: ${e?.message ?? e}`, "error");
+	}
+}
+
+/** Resolves a ticket DocFile from an explicit path, active editor/ticket, or a searchable QuickPick. */
+async function resolveTargetTicket(ticketPath: string | undefined, pickTitle: string): Promise<DocFile | null> {
+	const allDocs = docs();
+	const allTickets = allDocs
+		.filter((d) => d.exists && d.group === "tickets" && !isCatalog(d) && d.ticket)
+		.sort((a, b) => (a.ticket ?? "").localeCompare(b.ticket ?? "", undefined, { numeric: true, sensitivity: "base" }));
+	if (!allTickets.length) {
+		notify("No tickets exist in this project yet.");
+		return null;
+	}
+	if (ticketPath) {
+		const hit = allTickets.find((t) => canonical(t.path) === canonical(ticketPath));
+		if (hit) return hit;
+	}
+	const openPath = activePath();
+	if (openPath) {
+		const openTicket = allTickets.find((t) => canonical(t.path) === canonical(openPath));
+		if (openTicket) return openTicket;
+	}
+	const picked = await quickPick<DocFile>({
+		title: pickTitle,
+		placeholder: "Filter by ticket key, title, status, or release…",
+		items: allTickets.map((t) => ({
+			label: `${t.ticket}: ${t.title || t.name}`,
+			value: t,
+			icon: "checklist",
+			badge: t.status ? { text: t.status, tone: toneOf(t.status) } : undefined,
+			detail: t.release || undefined,
+			keywords: [t.ticket, t.title, t.status, t.release].filter(Boolean).join(" "),
+		})),
+	});
+	return picked;
+}
+
+/**
+ * Generates a pre-populated IQ/OQ/PQ Validation Test Execution Protocol Markdown document
+ * from linked `plan.tests`, ticket acceptance checklist, `testScripts`, and current Git HEAD SHA.
+ */
+export async function generateTestExecutionProtocol(ticketPath?: string): Promise<void> {
+	if (!ready()) return;
+	const ticketDoc = await resolveTargetTicket(ticketPath, "Generate IQ/OQ/PQ Test Execution Protocol for which ticket?");
+	if (!ticketDoc?.ticket) return;
+	const key = ticketDoc.ticket;
+
+	const phase = await quickPick<TestRunPhase>({
+		title: `${key}: Validation phase`,
+		placeholder: "Choose qualification phase…",
+		searchable: false,
+		items: [
+			{ label: "OQ — Operational Qualification", value: "OQ", icon: "beaker", description: "Verify business logic, calculations, and error handling" },
+			{ label: "IQ — Installation Qualification", value: "IQ", icon: "tools", description: "Verify DDL, scripts, settings, and roles deployed cleanly" },
+			{ label: "PQ — Performance / User Acceptance", value: "PQ", icon: "pass", description: "Verify end-to-end laboratory workflow with realistic data" },
+		],
+	});
+	if (!phase) return;
+
+	const environment = await quickPick<string>({
+		title: `${key} (${phase}): Target STARLIMS environment`,
+		placeholder: "Choose execution environment…",
+		searchable: false,
+		items: [
+			{ label: "QA", value: "QA", icon: "beaker", description: "Quality Assurance validation environment" },
+			{ label: "UAT", value: "UAT", icon: "pass", description: "User Acceptance Testing environment" },
+			{ label: "PROD", value: "PROD", icon: "warning", description: "Production post-deploy verification" },
+			{ label: "DEV", value: "DEV", icon: "tools", description: "Development integration environment" },
+		],
+	});
+	if (!environment) return;
+
+	const allDocs = docs();
+	const ticketText = (await current(ticketDoc.path)) ?? "";
+	const checklistItems = tasks(ticketText).map((t) => t.text).filter(Boolean);
+	const activeDescendants = descendantTickets(allDocs, key).filter((d) => toneOf(d.status) !== "off");
+	const scopeKeys = [key, ...activeDescendants.map((d) => d.ticket).filter((k): k is string => Boolean(k))];
+	const scopeGroups = scopeKeys.flatMap((k) => ticketWork(allDocs, k));
+
+	const seenPlan = new Set<string>();
+	const planTests: { name: string; given?: string; expect?: string; plan?: string }[] = [];
+	const testScriptSet = new Set<string>();
+	for (const ts of ticketDoc.testScripts ?? []) {
+		if (ts.trim()) testScriptSet.add(ts.trim());
+	}
+	for (const g of scopeGroups) {
+		if (g.kind === "plan" || g.kind === "spec") {
+			for (const f of g.files) {
+				for (const ts of f.testScripts ?? []) {
+					if (ts.trim()) testScriptSet.add(ts.trim());
+				}
+				if (g.kind === "plan") {
+					const c = canonical(f.path);
+					if (seenPlan.has(c)) continue;
+					seenPlan.add(c);
+					const planLabel = f.heading || f.title || f.name;
+					for (const pt of f.planTests ?? []) {
+						planTests.push({ ...pt, plan: planLabel });
+					}
+				}
+			}
+		}
+	}
+
+	const [gitSha, gitLog] = await Promise.all([
+		backend.gitHeadSha().catch(() => null),
+		backend.gitLog(ticketDoc.path, 1).catch(() => []),
+	]);
+	const executedBy = recall("docs.lastApprover")?.trim() || gitLog[0]?.author?.trim() || "";
+	const runDate = today();
+
+	const protocolMd = assembleTestExecutionProtocol({
+		ticketKey: key,
+		ticketTitle: ticketDoc.title || key,
+		phase,
+		environment,
+		gitSha: gitSha ?? undefined,
+		executedBy,
+		executedDate: runDate,
+		projectName: state.project?.name || state.workspace?.name || "Project",
+		planTests,
+		checklistItems,
+		testScripts: [...testScriptSet],
+		changeControl: ticketDoc.changeControl,
+	});
+
+	const baseDir = ticketDoc.ticketFolder
+		? joinPath(ticketDoc.ticketFolder, "test-runs")
+		: joinPath(docsFolder(), "tests");
+	const baseStem = ticketDoc.ticketFolder
+		? `${runDate}-${environment.toLowerCase()}-${phase.toLowerCase()}`
+		: `${key}-${runDate}-${environment.toLowerCase()}-${phase.toLowerCase()}`;
+
+	let dest = joinPath(baseDir, `${baseStem}.md`);
+	let n = 2;
+	while ((await current(dest)) !== null && n < 50) {
+		dest = joinPath(baseDir, `${baseStem}-${n++}.md`);
+	}
+
+	await start(dest, protocolMd);
+	notify(`Created ${phase} validation protocol at ${relativeTo(root(), dest).split("\\").join("/")}.`);
+}
+
+/**
+ * Interactive Release Readiness dashboard via QuickPick:
+ * groups active tickets by `release:` (or `Unscheduled`), evaluates readiness (including validation runs),
+ * and lets you jump directly to any blocked ticket or export the Release Bundle / RTM in one click.
+ */
+export async function openReleaseReadiness(): Promise<void> {
+	if (!ready()) return;
+	const allDocs = docs();
+	const activeTickets = allDocs.filter(
+		(d) => d.exists && d.group === "tickets" && !isCatalog(d) && d.ticket && !isArchivedTicket(d) && toneOf(d.status) !== "off",
+	);
+	if (!activeTickets.length) return notify("No active tickets found to evaluate release readiness.");
+
+	const [{ gitStatus }, headSha, allTestRuns] = await Promise.all([
+		import("./git"),
+		backend.gitHeadSha().catch(() => null),
+		loadWorkspaceTestRuns(allDocs),
+	]);
+	const gitFiles = gitStatus()?.files;
+
+	type TicketEval = { doc: DocFile; report: ReturnType<typeof evaluateTicketReadiness>; staleRuns: number };
+	const byRelease = new Map<string, TicketEval[]>();
+	for (const t of activeTickets) {
+		const rel = t.release?.trim() || "Unscheduled";
+		const report = evaluateTicketReadiness(allDocs, t.ticket!, {
+			gitFiles,
+			root: state.workspace?.root,
+			testRuns: allTestRuns,
+			currentGitSha: headSha,
+		});
+		const staleRuns = allTestRuns.filter(
+			(r) => r.ticket.trim().toLowerCase() === t.ticket!.toLowerCase() && isTestRunStale(r, headSha),
+		).length;
+		const bucket = byRelease.get(rel) ?? [];
+		bucket.push({ doc: t, report, staleRuns });
+		byRelease.set(rel, bucket);
+	}
+
+	const releaseNames = [...byRelease.keys()].sort((a, b) => {
+		if (a === "Unscheduled") return 1;
+		if (b === "Unscheduled") return -1;
+		return a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
+	});
+
+	const chosenRelease = await quickPick<string>({
+		title: "Release Readiness",
+		placeholder: "Filter releases to inspect blockers or export CAB bundles…",
+		items: releaseNames.map((rel) => {
+			const list = byRelease.get(rel)!;
+			const readyCount = list.filter((x) => x.report?.ready).length;
+			const blockedCount = list.length - readyCount;
+			const staleCount = list.reduce((sum, x) => sum + x.staleRuns, 0);
+			const tone = blockedCount === 0 ? ("done" as const) : readyCount > 0 ? ("active" as const) : ("waiting" as const);
+			const sampleKeys = list.map((x) => x.doc.ticket).slice(0, 6).join(", ") + (list.length > 6 ? "…" : "");
+			const detailBits = [
+				blockedCount > 0 ? `${blockedCount} blocked` : "All clear",
+				staleCount > 0 ? `${staleCount} stale run${staleCount === 1 ? "" : "s"}` : "",
+			].filter(Boolean);
+			return {
+				label: `${rel} · ${readyCount}/${list.length} ready`,
+				value: rel,
+				icon: blockedCount === 0 ? "pass" : "warning",
+				badge: { text: `${readyCount}/${list.length} ready`, tone },
+				detail: detailBits.join(" · "),
+				description: sampleKeys,
+				keywords: `${rel} ${list.map((x) => `${x.doc.ticket} ${x.doc.title ?? ""}`).join(" ")}`,
+			};
+		}),
+	});
+	if (!chosenRelease) return;
+
+	const evals = (byRelease.get(chosenRelease) ?? []).slice().sort((a, b) => {
+		const aReady = a.report?.ready ? 1 : 0;
+		const bReady = b.report?.ready ? 1 : 0;
+		return aReady - bReady || (a.doc.ticket ?? "").localeCompare(b.doc.ticket ?? "", undefined, { numeric: true });
+	});
+	const releaseTicketDocs = evals.map((e) => e.doc);
+
+	type DrillAction = { kind: "bundle" } | { kind: "rtm" } | { kind: "open"; path: string };
+	const drillItems: QuickPickOption<DrillAction>[] = [
+		{
+			label: `Export Release Bundle for ${chosenRelease}…`,
+			value: { kind: "bundle" },
+			icon: "layers",
+			detail: `${releaseTicketDocs.length} tickets`,
+			description: "Assemble Release Bundle, Runbook, Checksums & Release Notes",
+			keywords: "export release bundle cab",
+		},
+		{
+			label: `Export Traceability Matrix (RTM) for ${chosenRelease}…`,
+			value: { kind: "rtm" },
+			icon: "table",
+			detail: `${releaseTicketDocs.length} tickets`,
+			description: "Export audit-ready RTM (CSV, Word, HTML, or Markdown)",
+			keywords: "export rtm traceability matrix",
+		},
+		...evals.map((ev, i) => {
+			const r = ev.report;
+			const warns = r ? r.checks.filter((c) => c.level === "warn") : [];
+			const jumpPath = warns[0]?.path ?? ev.doc.path;
+			const warnSummary = warns.length
+				? warns.map((w) => `${w.label}: ${w.detail}`).join("; ")
+				: "All release readiness checks pass";
+			return {
+				label: `${ev.doc.ticket}: ${ev.doc.title || ev.doc.name}`,
+				value: { kind: "open", path: jumpPath } as DrillAction,
+				icon: (r?.ready ? "pass" : "warning") as "pass" | "warning",
+				badge: { text: r?.ready ? "READY" : "BLOCKED", tone: r?.ready ? ("done" as const) : ("off" as const) },
+				detail: r ? `${r.pass}/${r.total} checks` : undefined,
+				description: warnSummary,
+				divide: i === 0,
+				keywords: `${ev.doc.ticket} ${ev.doc.title ?? ""} ${ev.doc.status ?? ""} ${warnSummary}`,
+			};
+		}),
+	];
+
+	const action = await quickPick<DrillAction>({
+		title: `${chosenRelease} — Release Readiness`,
+		placeholder: "Jump to a blocked ticket or export Release Bundle / RTM…",
+		items: drillItems,
+	});
+	if (!action) return;
+	if (action.kind === "bundle") {
+		await exportReleaseBundle(undefined, { release: chosenRelease, tickets: releaseTicketDocs });
+	} else if (action.kind === "rtm") {
+		await exportRtm(undefined, { release: chosenRelease, tickets: releaseTicketDocs });
+	} else {
+		await openFile(action.path);
+	}
+}
+
+/**
+ * Clones an existing ticket's governance & organizational metadata (`release`, `parent`,
+ * `change-control`, `gxp-impact`, `priority`, `tags`, `specs`) into a brand-new ticket with fresh unchecked sections.
+ */
+export async function cloneTicket(targetPath?: string): Promise<void> {
+	if (!ready()) return;
+	const srcDoc = await resolveTargetTicket(targetPath, "Clone which ticket?");
+	if (!srcDoc?.ticket) return;
+	const srcKey = srcDoc.ticket;
+	const srcText = (await current(srcDoc.path)) ?? "";
+	const fm = frontMatter(srcText).values;
+
+	const rawKey = await ask(`New ticket key (cloning ${srcKey})`);
+	const newKey = ticketKey(rawKey ?? "");
+	if (!newKey) return;
+	const duplicate = docs().find((d) => d.exists && d.group === "tickets" && d.ticket?.toLowerCase() === newKey.toLowerCase());
+	if (duplicate) {
+		notify(`${newKey} already exists (${relativeTo(root(), duplicate.path)}): opened.`);
+		await openFile(duplicate.path);
+		return;
+	}
+
+	const srcTitle = srcDoc.title || one(fm.title) || srcKey;
+	const newTitle = (await ask(`${newKey}: title`, `${srcTitle} (copy)`))?.trim();
+	if (!newTitle) return;
+
+	const FOLDER = "Ticket folder";
+	const SINGLE = "Single file";
+	const layout = await choose(
+		`Create ${newKey} in its own ticket folder (${relativeTo(root(), joinPath(areaFolder("tickets"), newKey))}/) or as a single Markdown file?`,
+		srcDoc.ticketFolder ? [FOLDER, SINGLE] : [SINGLE, FOLDER],
+	);
+	if (!layout) return;
+
+	const srcType = one(fm.type) || undefined;
+	const srcParent = srcDoc.parent || one(fm.parent) || undefined;
+	let fresh = ticketTemplate({
+		key: newKey,
+		title: newTitle,
+		type: srcType,
+		parent: srcParent,
+		related: [srcKey],
+	});
+
+	const releaseVal = srcDoc.release || one(fm.release);
+	const priorityVal = srcDoc.priority || one(fm.priority);
+	const ccVal = srcDoc.changeControl || one(fm["change-control"]);
+	const gxpVal = srcDoc.gxpImpact || one(fm["gxp-impact"]);
+	if (releaseVal) fresh = withFrontMatter(fresh, "release", frontValue(releaseVal)) ?? fresh;
+	if (priorityVal) fresh = withFrontMatter(fresh, "priority", frontValue(priorityVal)) ?? fresh;
+	if (ccVal) fresh = withFrontMatter(fresh, "change-control", frontValue(ccVal)) ?? fresh;
+	if (gxpVal) fresh = withFrontMatter(fresh, "gxp-impact", frontValue(gxpVal)) ?? fresh;
+
+	for (const tag of many(fm.tags)) fresh = addToFrontMatterList(fresh, "tags", tag) ?? fresh;
+	for (const sp of [...many(fm.specs), ...many(fm.spec)]) fresh = addToFrontMatterList(fresh, "specs", sp) ?? fresh;
+
+	const dest =
+		layout === FOLDER
+			? joinPath(areaFolder("tickets"), newKey, `${newKey}.md`)
+			: joinPath(areaFolder("tickets"), `${newKey}.md`);
+	await start(dest, fresh, "tickets");
+}
+
+/** Extracts all unchecked `- [ ]` checklist lines (1-based line numbers) outside frontmatter & fenced code blocks. */
+function extractUncheckedChecklistLines(markdown: string): { line: number; text: string; raw: string }[] {
+	const fmLines = frontMatter(markdown).lines;
+	const lines = markdown.split(/\r?\n/);
+	const out: { line: number; text: string; raw: string }[] = [];
+	let fenceChar = "";
+	let fenceLen = 0;
+	for (let i = fmLines; i < lines.length; i++) {
+		const raw = lines[i]!;
+		const fm = /^[ \t]{0,3}(`{3,}|~{3,})/.exec(raw);
+		if (fm) {
+			if (!fenceChar) {
+				fenceChar = fm[1]![0]!;
+				fenceLen = fm[1]!.length;
+			} else if (fm[1]![0] === fenceChar && fm[1]!.length >= fenceLen && /^[ \t]*$/.test(raw.slice(fm[0].length))) {
+				fenceChar = "";
+				fenceLen = 0;
+			}
+			continue;
+		}
+		if (fenceChar) continue;
+		const m = /^[ \t]*[-*+][ \t]+\[ \][ \t]+(.+)$/.exec(raw);
+		if (m && m[1]!.trim()) {
+			out.push({ line: i + 1, text: m[1]!.trim(), raw });
+		}
+	}
+	return out;
+}
+
+/** Removes selected 1-based checklist line numbers from a parent ticket and records a clean wikilink back to the new child ticket. */
+function splitParentTicketChecklist(
+	markdown: string,
+	removedLines: ReadonlySet<number>,
+	childKey: string,
+	childTitle: string,
+): string {
+	const eol = markdown.includes("\r\n") ? "\r\n" : "\n";
+	const lines = markdown.split(/\r?\n/);
+	const kept = lines.filter((_, idx) => !removedLines.has(idx + 1));
+	const linkLine = `- Split to [[${childKey}]]: ${childTitle}`;
+
+	// Place backlink under `## Notes` when present; otherwise append under a new `## Notes` section.
+	const notesIdx = kept.findIndex((ln) => /^[ \t]{0,3}##[ \t]+Notes\b/i.test(ln));
+	if (notesIdx >= 0) {
+		let insertAt = notesIdx + 1;
+		while (insertAt < kept.length && !/^[ \t]{0,3}#{1,2}[ \t]+/.test(kept[insertAt]!)) {
+			insertAt++;
+		}
+		while (insertAt > notesIdx + 1 && !kept[insertAt - 1]!.trim()) insertAt--;
+		if (insertAt === notesIdx + 1) kept.splice(insertAt, 0, "", linkLine);
+		else kept.splice(insertAt, 0, linkLine);
+	} else {
+		while (kept.length && !kept[kept.length - 1]!.trim()) kept.pop();
+		kept.push("", "## Notes", "", linkLine, "");
+	}
+	return kept.join(eol).replace(/(\r?\n){3,}/g, `${eol}${eol}`);
+}
+
+/** Suggests a deterministic next sub-ticket key (e.g. `LIMS-100-1` or `LIMS-101`). */
+function suggestSubticketKey(parentKey: string, allDocs: readonly DocFile[]): string {
+	const taken = new Set(
+		allDocs
+			.filter((d) => d.exists && d.group === "tickets" && d.ticket)
+			.map((d) => d.ticket!.toLowerCase()),
+	);
+	let n = 1;
+	while (taken.has(`${parentKey}-${n}`.toLowerCase())) n++;
+	return `${parentKey}-${n}`;
+}
+
+/**
+ * Splits unchecked `- [ ]` checklist items out of a ticket into a new child sub-ticket (`parent: <KEY>`)
+ * using `quickPickMany()`, moving selected items into the child and linking back from the parent.
+ */
+export async function splitTicketSubticket(targetPath?: string): Promise<void> {
+	if (!ready()) return;
+	const srcDoc = await resolveTargetTicket(targetPath, "Split checklist items from which ticket?");
+	if (!srcDoc?.ticket) return;
+	const parentKey = srcDoc.ticket;
+	const srcText = await current(srcDoc.path);
+	if (srcText === null) return notify("Could not read the ticket.", "error");
+
+	const unchecked = extractUncheckedChecklistLines(srcText);
+	if (!unchecked.length) {
+		notify(`No unchecked checklist items (- [ ]) found in ${parentKey} to split.`);
+		return;
+	}
+
+	const pickedItems = await quickPickMany<{ line: number; text: string; raw: string }>({
+		title: `Move checklist items from ${parentKey} to a new sub-ticket`,
+		placeholder: "Select unchecked items to split out…",
+		confirmLabel: "Split selected",
+		items: unchecked.map((item) => ({
+			label: item.text,
+			value: item,
+			icon: "checklist",
+			detail: `line ${item.line}`,
+			keywords: item.text,
+		})),
+	});
+	if (!pickedItems || !pickedItems.length) return;
+
+	const allDocs = docs();
+	const suggestedKey = suggestSubticketKey(parentKey, allDocs);
+	const rawChildKey = await ask(`New sub-ticket key under ${parentKey}`, suggestedKey);
+	const childKey = ticketKey(rawChildKey ?? "");
+	if (!childKey) return;
+	const duplicate = allDocs.find((d) => d.exists && d.group === "tickets" && d.ticket?.toLowerCase() === childKey.toLowerCase());
+	if (duplicate) {
+		notify(`${childKey} already exists (${relativeTo(root(), duplicate.path)}).`, "error");
+		return;
+	}
+
+	const defaultTitle =
+		pickedItems.length === 1
+			? pickedItems[0]!.text
+			: `${srcDoc.title || parentKey} — follow-up`;
+	const childTitle = (await ask(`${childKey}: sub-ticket title`, defaultTitle))?.trim();
+	if (!childTitle) return;
+
+	const fm = frontMatter(srcText).values;
+	let childMd = ticketTemplate({
+		key: childKey,
+		title: childTitle,
+		type: "Sub-task",
+		parent: parentKey,
+	});
+	const releaseVal = srcDoc.release || one(fm.release);
+	const ccVal = srcDoc.changeControl || one(fm["change-control"]);
+	const gxpVal = srcDoc.gxpImpact || one(fm["gxp-impact"]);
+	if (releaseVal) childMd = withFrontMatter(childMd, "release", frontValue(releaseVal)) ?? childMd;
+	if (ccVal) childMd = withFrontMatter(childMd, "change-control", frontValue(ccVal)) ?? childMd;
+	if (gxpVal) childMd = withFrontMatter(childMd, "gxp-impact", frontValue(gxpVal)) ?? childMd;
+	for (const tag of many(fm.tags)) childMd = addToFrontMatterList(childMd, "tags", tag) ?? childMd;
+
+	const movedChecklist = pickedItems.map((it) => `- [ ] ${it.text}`).join("\n");
+	const donePlaceholder = /^## What done looks like\r?\n\r?\n- \[ \] What must be true when this is done:[^\r\n]*/m;
+	if (donePlaceholder.test(childMd)) {
+		childMd = childMd.replace(donePlaceholder, () => `## What done looks like\n\n${movedChecklist}`);
+	} else {
+		childMd = childMd.replace(/^## What done looks like\r?\n+/m, (m) => `${m}${movedChecklist}\n\n`);
+	}
+	childMd = `${childMd.trimEnd()}\n\nSplit from [[${parentKey}]].\n`;
+
+	const childDest = joinPath(areaFolder("tickets"), `${childKey}.md`);
+	try {
+		await backend.create(childDest, "file");
+		await backend.write(childDest, childMd);
+		const removedSet = new Set(pickedItems.map((it) => it.line));
+		const nextParent = splitParentTicketChecklist(srcText, removedSet, childKey, childTitle);
+		await put(srcDoc.path, nextParent, true);
+		setState("treeVersion", (v) => v + 1);
+		notify(`Split ${pickedItems.length} ${pickedItems.length === 1 ? "item" : "items"} from ${parentKey} into ${childKey}.`);
+		await openFile(childDest);
+	} catch (e: any) {
+		notify(`Could not split sub-ticket: ${e?.message ?? e}`, "error");
+	}
+}
+
+/**
+ * Appends a `found` row to `docs/registries/database.csv` for an undocumented SQL / `.ds` table
+ * citing `relativeTo(root, sourcePath)`, creating `database.csv` with standard columns if missing.
+ */
+export async function addDatabaseRegistryRow(objectName: string, sourcePath: string, line?: number): Promise<void> {
+	if (!ready()) return;
+	const cleanObj = objectName.trim();
+	if (!cleanObj) return;
+	const dbKind = REGISTRIES.find((r) => r.id === "database")!;
+	const existingDoc = docs().find((d) => d.exists && d.group === "registries" && /(^|[\\/])database\.csv$/i.test(d.name));
+	const dbPath = existingDoc?.path ?? joinPath(areaFolder("registries"), dbKind.file);
+	const relSrc = relativeTo(root(), sourcePath).split("\\").join("/");
+	const citeNote = line ? `Referenced in ${relSrc}:${line}` : `Referenced in ${relSrc}`;
+
+	const existingText = await current(dbPath);
+	if (existingText === null) {
+		const fresh = `${csvRow(dbKind.columns)}\n${csvRow([cleanObj, "table", relSrc, "", "found", citeNote])}\n`;
+		await put(dbPath, fresh, false);
+		setState("treeVersion", (v) => v + 1);
+		notify(`Created database.csv and added ${cleanObj}.`);
+		return;
+	}
+
+	const table = parseCsv(existingText);
+	if (!table.header.length) return notify("database.csv has no header row.", "error");
+	const objLower = cleanObj.toLowerCase();
+	const already = table.rows.some((r) => {
+		const v = (r[0]?.text ?? "").trim().toLowerCase();
+		const bare = v.includes(".") ? v.split(".").pop()! : v;
+		return v === objLower || bare === objLower;
+	});
+	if (already) {
+		notify(`${cleanObj} is already listed in database.csv.`);
+		await openFile(dbPath);
+		return;
+	}
+
+	const nl = existingText.includes("\r\n") ? "\r\n" : "\n";
+	const newRow = table.header.map((h, idx) => {
+		const col = h.text.trim().toLowerCase();
+		if (idx === 0 || col === "object" || col === "name") return cleanObj;
+		if (col === "kind" || col === "type") return "table";
+		if (col === "used by" || col === "source") return relSrc;
+		if (col === "status") return "found";
+		if (col === "note" || col === "notes") return citeNote;
+		return "";
+	});
+	const prefix = existingText && !/\r?\n$/.test(existingText) ? nl : "";
+	const nextText = `${existingText}${prefix}${csvRow(newRow, table.delimiter)}${nl}`;
+	await put(dbPath, nextText, true);
+	setState("treeVersion", (v) => v + 1);
+	notify(`Added ${cleanObj} to database.csv (${relSrc}).`);
 }

@@ -79,6 +79,7 @@ export function PlanTextView(props: {
 	onAddTestCase: (input: PlanTestInput) => void;
 	onUpdateTestCase: (id: string, patch: PlanTestPatch) => void;
 	onRemoveTestCase: (id: string) => void;
+	onFind?: () => void;
 }) {
 	let container!: HTMLDivElement;
 	let givenEl: HTMLTextAreaElement | undefined;
@@ -707,6 +708,13 @@ export function PlanTextView(props: {
 			ref={container}
 			tabIndex={0}
 			aria-label={`${props.plan.title || "Plan"}, text outline`}
+			onKeyDown={(e) => {
+				if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "f") {
+					e.preventDefault();
+					e.stopPropagation();
+					props.onFind?.();
+				}
+			}}
 			onClick={(e) => {
 				if (e.target === e.currentTarget || (e.target as HTMLElement).classList.contains("plan-text-col")) {
 					props.onSelectNode(null);

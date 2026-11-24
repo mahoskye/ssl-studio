@@ -124,7 +124,7 @@ describe("backend formatDocument", () => {
 		expect(plsql.text).toContain(":start_date");
 		expect(plsql.text).toContain("SELECT");
 
-		const demoPath = join(import.meta.dir, "../examples/due-dates/schema/database/demo.sql");
+		const demoPath = join(import.meta.dir, "../examples/due-dates/schema/database/DEMO_SAMPLES.sql");
 		const demoText = await Bun.file(demoPath).text();
 		const res = await formatDocument({
 			path: demoPath,
@@ -137,8 +137,20 @@ describe("backend formatDocument", () => {
 		expect(res.ok).toBe(true);
 		if (!res.ok) return;
 		expect(res.text).toContain("CREATE TABLE DEMO_SAMPLES (");
-		expect(res.text).toContain("INSERT INTO");
-		expect(res.text).toContain("'S-1007'");
+
+		const seedPath = join(import.meta.dir, "../examples/due-dates/schema/database/demo-seed.sql");
+		const seedRes = await formatDocument({
+			path: seedPath,
+			text: await Bun.file(seedPath).text(),
+			languageId: "sql",
+			tabSize: 4,
+			insertSpaces: true,
+			sqlDialect: "tsql",
+		});
+		expect(seedRes.ok).toBe(true);
+		if (!seedRes.ok) return;
+		expect(seedRes.text).toContain("INSERT INTO");
+		expect(seedRes.text).toContain("'S-1007'");
 		const again = await formatDocument({
 			path: demoPath,
 			text: res.text,

@@ -59,7 +59,7 @@ export function plainFileError(message: string, root?: string | null): string {
 	return `${path} cannot be ${found[2] === "scandir" ? "listed" : "opened"}: permission was refused.`;
 }
 
-/** The way from one folder to a file, with forward slashes: "../design/A.spec.md". Both are whole paths. */
+/** The way from one folder to a file, with forward slashes: "../design/A.plan.md". Both are whole paths. */
 export function relativePath(fromDir: string, to: string): string {
 	const split = (path: string) => path.split(/[\\/]/).filter(Boolean);
 	const [from, target] = [split(fromDir), split(to)];

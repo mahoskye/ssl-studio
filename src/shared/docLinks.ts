@@ -113,11 +113,64 @@ export function linkWritten(path: string, was = ""): string {
 	return ELSEWHERE.test(written) ? `./${written}` : written;
 }
 
+/**
+ * Drops standalone plain-prose paragraphs (outside fenced code blocks and HTML blocks)
+ * that cannot contain or affect Markdown links, preventing `marked.lexer` quadratic
+ * scanning on large (100 KB–1 MB) Markdown documents while preserving exact link tokens.
+ */
+function compactForLinkScan(plain: string): string {
+	if (plain.length <= 16_384) return plain;
+	const lines = plain.split("\n");
+	const kept: string[] = [];
+	let block: string[] = [];
+	let fenceChar = "";
+	let fenceLen = 0;
+	let inHtmlComment = false;
+	const INTERESTING = /[\[\]`~<>]/;
+	const LIST_START = /^[ \t]*(?:[-*+]|\d+[.)])[ \t]/;
+
+	const flushBlock = (keepAlways: boolean) => {
+		if (!block.length) return;
+		if (keepAlways || block.some((l) => INTERESTING.test(l) || LIST_START.test(l))) {
+			if (kept.length) kept.push("");
+			kept.push(...block);
+		}
+		block = [];
+	};
+
+	for (const line of lines) {
+		if (!fenceChar && !inHtmlComment && !line.trim()) {
+			flushBlock(false);
+			continue;
+		}
+		if (!fenceChar) {
+			const fm = /^[ \t]{0,3}(`{3,}|~{3,})/.exec(line);
+			if (fm) {
+				fenceChar = fm[1]![0]!;
+				fenceLen = fm[1]!.length;
+			}
+		} else {
+			const fm = /^[ \t]{0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
+			if (fm && fm[1]![0] === fenceChar && fm[1]!.length >= fenceLen) {
+				fenceChar = "";
+				fenceLen = 0;
+			}
+		}
+		if (!fenceChar) {
+			if (!inHtmlComment && line.includes("<!--") && !line.includes("-->")) inHtmlComment = true;
+			else if (inHtmlComment && line.includes("-->")) inHtmlComment = false;
+		}
+		block.push(line);
+	}
+	flushBlock(Boolean(fenceChar || inHtmlComment));
+	return kept.join("\n");
+}
+
 /** The targets of a Markdown text's links and images that name a file, in the order the renderer has them. Null when it cannot be read. */
 function targets(plain: string): string[] | null {
 	const found: string[] = [];
 	try {
-		marked.walkTokens(marked.lexer(plain, { gfm: true }), (token: Token) => {
+		marked.walkTokens(marked.lexer(compactForLinkScan(plain), { gfm: true }), (token: Token) => {
 			if ((token.type === "link" || token.type === "image") && typeof token.href === "string" && linkFile(token.href)) found.push(token.href);
 		});
 	} catch {
@@ -319,9 +372,7 @@ export function ownLinkEdits(
 	if (was === now && !moves.length) return [];
 	// Longest `from` first so exact file moves (e.g. `OLD/OLD.md -> NEW/NEW.md`) take precedence over their containing folder move (`OLD -> NEW`).
 	moves.sort((a, b) => b.from.length - a.from.length);
-	return fileLinks(text).flatMap((link) => {
-		if (!link.line || link.file.startsWith("/")) return [];
-		const target = resolvePath(was, link.file);
+	const destinationOf = (target: string): string => {
 		let dest = target === from ? to : target;
 		for (const m of moves) {
 			if (target === m.from) {
@@ -333,18 +384,35 @@ export function ownLinkEdits(
 				break;
 			}
 		}
+		return dest;
+	};
+	const frontEdits: LinkEdit[] = frontPaths(text).flatMap((named) => {
+		const relVal = named.value.replace(/\\/g, "/");
+		if (!/^\.{1,2}\//.test(relVal)) return [];
+		const target = resolvePath(was, relVal);
+		const dest = destinationOf(target);
+		let instead = relativePath(now, dest);
+		if (!instead) instead = ".";
+		else if (!instead.startsWith(".")) instead = `./${instead}`;
+		return instead === relVal ? [] : [{ line: named.line, column: named.column, href: named.value, instead, plain: true }];
+	});
+	const bodyEdits: LinkEdit[] = fileLinks(text).flatMap((link) => {
+		if (!link.line || link.file.startsWith("/")) return [];
+		const target = resolvePath(was, link.file);
+		const dest = destinationOf(target);
 		const instead = relativePath(now, dest);
 		// What would be written is compared with what is: a folder written with its slash reads the same without it.
 		const asWritten = link.href.replace(/[?#].*$/, "");
 		return instead === link.file || linkWritten(instead, asWritten) === asWritten ? [] : [{ line: link.line, column: link.column, href: link.href, instead }];
 	});
+	return [...frontEdits, ...bodyEdits];
 }
 
 /** The keys of a document's front matter whose values are files, named from the project's top: a ticket's specs, a spec's plan, a schema doc's SQL source. */
 const PATH_KEYS = new Set(["spec", "specs", "plan", "plans", "source"]);
 
 /**
- * The files a document's front matter names ("specs: [design/Due.spec.md]"),
+ * The files a document's front matter names ("specs: [docs/specs/Due.md]"),
  * each with its place in the text: not links, but a rename leaves them
  * naming the old file all the same.
  */

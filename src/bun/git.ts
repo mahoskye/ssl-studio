@@ -5,7 +5,7 @@
 import { join, relative, resolve, sep } from "node:path";
 import { looksBinary } from "../shared/fileKind";
 import { parseStatus, type GitStatus } from "../shared/gitStatus";
-import type { GitCommit, TicketGitCommit } from "../shared/protocol";
+import type { GitActionResult, GitBlameLine, GitBranchesResult, GitBranchInfo, GitCommit, GitStashResult, TicketGitCommit } from "../shared/protocol";
 import { decode } from "./encoding";
 
 type Ran = { code: number; out: Uint8Array; err: string };
@@ -369,5 +369,139 @@ export class Git {
 	 */
 	async discard(path: string): Promise<void> {
 		await this.done(["restore", "--worktree", "--", await this.here(path)]);
+	}
+
+	/** Single-line Git blame attribution (`git blame -L line,line --porcelain -- <rel>`). Null outside a repo or on untracked files. */
+	async blameLine(path: string, line: number): Promise<GitBlameLine | null> {
+		const lineNum = Math.floor(Number(line));
+		if (!Number.isFinite(lineNum) || lineNum < 1) return null;
+		if (!(await this.repository())) return null;
+		const relHere = await this.here(path);
+		const ran = await this.run(["blame", "-L", `${lineNum},${lineNum}`, "--porcelain", "--", relHere]);
+		if (ran.code !== 0) return null;
+		const lines = text(ran.out).split(/\r?\n/);
+		const headMatch = /^([0-9a-f]{40})\b/i.exec(lines[0] ?? "");
+		if (!headMatch) return null;
+		const sha = headMatch[1]!;
+		const shortSha = sha.slice(0, 7);
+		let author = "";
+		let authorTime = 0;
+		let summary = "";
+		for (const ln of lines.slice(1)) {
+			if (ln.startsWith("\t")) break;
+			if (ln.startsWith("author ")) author = ln.slice("author ".length).trim();
+			else if (ln.startsWith("author-time ")) authorTime = Number(ln.slice("author-time ".length).trim()) || 0;
+			else if (ln.startsWith("summary ")) summary = ln.slice("summary ".length).trim();
+		}
+		const date = authorTime > 0 ? new Date(authorTime * 1000).toISOString().slice(0, 10) : "";
+		const ticket = /\b([A-Z]{2,12}-\d+)\b/.exec(summary)?.[1];
+		return {
+			sha,
+			shortSha,
+			author,
+			date,
+			summary,
+			...(ticket ? { ticket } : {}),
+		};
+	}
+
+	/** Local Git branches sorted with the active branch first, then most recently committed. Null outside a repository. */
+	async branches(): Promise<GitBranchesResult | null> {
+		if (!(await this.repository())) return null;
+		const ran = await this.run([
+			"for-each-ref",
+			"--sort=-committerdate",
+			"--format=%(HEAD)\x1f%(refname:short)\x1f%(upstream:short)\x1f%(subject)",
+			"refs/heads",
+		]);
+		if (ran.code !== 0) return null;
+		const list: GitBranchInfo[] = [];
+		for (const ln of text(ran.out).split(/\r?\n/)) {
+			if (!ln.trim()) continue;
+			const [headMark, name, upstream, ...subjectParts] = ln.split("\x1f");
+			const cleanName = (name ?? "").trim();
+			if (!cleanName) continue;
+			const current = (headMark ?? "").trim() === "*";
+			const up = (upstream ?? "").trim();
+			const lastSubject = subjectParts.join(" ").trim();
+			list.push({
+				name: cleanName,
+				current,
+				...(up ? { upstream: up } : {}),
+				...(lastSubject ? { lastSubject } : {}),
+			});
+		}
+		list.sort((a, b) => Number(b.current) - Number(a.current));
+		let current = list.find((b) => b.current)?.name ?? "";
+		if (!current) {
+			const sym = await this.run(["symbolic-ref", "--short", "HEAD"]);
+			if (sym.code === 0) current = text(sym.out).trim();
+			else {
+				const det = await this.run(["rev-parse", "--short", "HEAD"]);
+				if (det.code === 0) current = text(det.out).trim();
+			}
+		}
+		return { current, branches: list };
+	}
+
+	/** Switches to an existing local Git branch after validating the ref name safely. */
+	async checkout(branch: string): Promise<GitActionResult> {
+		if (!(await this.repository())) return { ok: false, message: "This folder is not in a git repository." };
+		const clean = branch.trim();
+		if (
+			!clean ||
+			clean.startsWith("-") ||
+			clean.endsWith("/") ||
+			clean.endsWith(".lock") ||
+			clean.includes("..") ||
+			clean.includes("//") ||
+			!/^[A-Za-z0-9._/+-]+$/.test(clean)
+		) {
+			return { ok: false, message: `Invalid branch name: ${branch}` };
+		}
+		const check = await this.run(["show-ref", "--verify", "--quiet", `refs/heads/${clean}`]);
+		if (check.code !== 0) return { ok: false, message: `Local branch "${clean}" was not found.` };
+		const ran = await this.run(["checkout", clean]);
+		const msg = (ran.err || text(ran.out)).trim();
+		if (ran.code !== 0) return { ok: false, message: msg || `Could not switch to branch '${clean}'.` };
+		return { ok: true, message: msg || `Switched to branch '${clean}'.` };
+	}
+
+	/** Pushes, pops, or lists local Git stash entries. */
+	async stash(action: "push" | "pop" | "list", message?: string): Promise<GitStashResult> {
+		if (!(await this.repository())) return { ok: false, message: "This folder is not in a git repository." };
+		if (action === "list") {
+			const ran = await this.run(["stash", "list", "--format=%gd\x1f%gs"]);
+			if (ran.code !== 0) {
+				return { ok: false, message: (ran.err || text(ran.out)).trim() || "git stash list failed", entries: [] };
+			}
+			const entries: { ref: string; message: string }[] = [];
+			for (const ln of text(ran.out).split(/\r?\n/)) {
+				if (!ln.trim()) continue;
+				const [ref, ...rest] = ln.split("\x1f");
+				if (ref?.trim()) entries.push({ ref: ref.trim(), message: rest.join(" ").trim() });
+			}
+			return {
+				ok: true,
+				message: entries.length ? `${entries.length} stash ${entries.length === 1 ? "entry" : "entries"}.` : "No stash entries.",
+				entries,
+			};
+		}
+		if (action === "push") {
+			const cleanMsg = message?.trim();
+			const args = ["stash", "push", ...(cleanMsg ? ["-m", cleanMsg] : [])];
+			const ran = await this.run(args);
+			const out = (text(ran.out) || ran.err).trim();
+			if (ran.code !== 0) return { ok: false, message: out || "git stash push failed." };
+			if (/no local changes to save/i.test(out)) return { ok: false, message: "No local changes to save." };
+			return { ok: true, message: out.split("\n")[0] || "Saved working tree changes to stash." };
+		}
+		if (action === "pop") {
+			const ran = await this.run(["stash", "pop"]);
+			const out = (text(ran.out) || ran.err).trim();
+			if (ran.code !== 0) return { ok: false, message: (ran.err || text(ran.out)).trim() || "git stash pop failed." };
+			return { ok: true, message: out.split("\n")[0] || "Applied and dropped top stash entry." };
+		}
+		return { ok: false, message: `Unsupported stash action: ${String(action)}` };
 	}
 }

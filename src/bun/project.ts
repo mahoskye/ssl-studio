@@ -14,7 +14,7 @@ import { fileLinks, frontPaths, type DocLink } from "../shared/docLinks";
 import { checkTables } from "../shared/docTables";
 import { frontMatter, many, one, summaryOf, titleOf } from "../shared/frontMatter";
 import { documentHeadings, findHeadingLine } from "../shared/markdownEdit";
-import { buildDocNameIndex, lookupInIndex, namePlaces } from "../shared/namedLinks";
+import { buildDocNameIndex, lookupInIndex, nameForIndexed, namePlaces } from "../shared/namedLinks";
 import { areaPath, CATALOG_AREAS, CATALOG_FILES_MAX, catalogItems, catalogTemplate, DOC_FOLDERS, fileItems, isCatalog, isFileArea, isPrompt, OPTIONAL_CATALOGS, SCHEMAS, STATE_FILE, toneOf, type AreaFolders, type DocArea, type FileArea } from "../shared/projectDocs";
 import { keysIn, rowsByTicket, ticketColumn } from "../shared/registryTickets";
 import { findUndocumentedSqlRefs, schemaDocKeys } from "../shared/schemaIndex";
@@ -27,7 +27,8 @@ import { workspaceDir } from "./paths";
 import { WorkspaceFiles } from "./workspace";
 
 export const PROJECT_FILE = "project.toml";
-const DOC_LIMIT = 500;
+export const DOC_LIMIT = 500;
+export const SCHEMA_DOC_LIMIT = 2000;
 const SCRIPT = /\.(ssl|srvscr|ds)$/i;
 /** Sentences only the templates hold: a file that still has one has not been written yet. */
 const PLACEHOLDER: Record<string, string> = {
@@ -74,8 +75,10 @@ function found(root: string, name: string): string | undefined {
 	return readdirSync(root).find((f) => f.toLowerCase() === name.toLowerCase());
 }
 
-/** The most of a document that is read to learn its title and state. */
+/** The most of a small snippet that is read for its header comment. */
 const HEAD_BYTES = 64 * 1024;
+/** Maximum bytes read per file when indexing Markdown metadata/tasks/links or SQL schema objects (1 MB). */
+const INDEX_BYTES = 1024 * 1024;
 /** A registry larger than this is listed without being read. */
 const REGISTRY_BYTES = 4 * 1024 * 1024;
 const MARKDOWN = /\.(md|markdown)$/i;
@@ -83,10 +86,10 @@ const MARKDOWN = /\.(md|markdown)$/i;
 const headRead = new Map<string, { stamp: string; text: string }>();
 const HEAD_KEPT = 2000;
 
-async function head(path: string): Promise<string> {
+async function head(path: string, maxBytes = HEAD_BYTES): Promise<string> {
 	try {
 		const st = statSync(path);
-		const stamp = `${st.size}:${st.mtimeMs}`;
+		const stamp = `${st.size}:${st.mtimeMs}:${maxBytes}`;
 		const kept = headRead.get(path);
 		if (kept && kept.stamp === stamp) {
 			headRead.delete(path);
@@ -94,12 +97,45 @@ async function head(path: string): Promise<string> {
 			return kept.text;
 		}
 		const file = Bun.file(path);
-		const decoded = decodePart(new Uint8Array(await file.slice(0, HEAD_BYTES).arrayBuffer()), file.size > HEAD_BYTES);
-		if (headRead.size >= HEAD_KEPT) headRead.delete(headRead.keys().next().value!);
-		headRead.set(path, { stamp, text: decoded });
+		const decoded = decodePart(new Uint8Array(await file.slice(0, maxBytes).arrayBuffer()), file.size > maxBytes);
+		// Keep raw text cache bounded to smaller heads; 1 MB files use summary caches below.
+		if (maxBytes <= HEAD_BYTES) {
+			if (headRead.size >= HEAD_KEPT) headRead.delete(headRead.keys().next().value!);
+			headRead.set(path, { stamp, text: decoded });
+		}
 		return decoded;
 	} catch {
 		return "";
+	}
+}
+
+const sqlObjectsCache = new Map<string, { stamp: string; objects: string[] }>();
+const SQL_OBJECTS_KEPT = 4000;
+
+async function cachedSqlObjects(path: string): Promise<string[] | undefined> {
+	try {
+		const st = statSync(path);
+		const stamp = `${st.size}:${st.mtimeMs}`;
+		const kept = sqlObjectsCache.get(path);
+		if (kept && kept.stamp === stamp) {
+			sqlObjectsCache.delete(path);
+			sqlObjectsCache.set(path, kept);
+			return kept.objects.length ? kept.objects : undefined;
+		}
+		const text = await head(path, INDEX_BYTES);
+		const set = new Set<string>();
+		if (text) {
+			for (const o of extractSqlObjects(text, { includeAlter: true })) {
+				if (o.name) set.add(o.name);
+				if (o.bareName) set.add(o.bareName);
+			}
+		}
+		const objects = [...set];
+		if (sqlObjectsCache.size >= SQL_OBJECTS_KEPT) sqlObjectsCache.delete(sqlObjectsCache.keys().next().value!);
+		sqlObjectsCache.set(path, { stamp, objects });
+		return objects.length ? objects : undefined;
+	} catch {
+		return undefined;
 	}
 }
 
@@ -130,9 +166,10 @@ async function planSays(path: string): Promise<{
 		const nodeDocSet = new Set<string>();
 		const pushInto = (set: Set<string>, val: unknown) => {
 			if (typeof val === "string" && val.trim()) set.add(val.trim().split("\\").join("/"));
-			else if (val && typeof val === "object" && "path" in val && typeof (val as { path?: unknown }).path === "string") {
-				const p = (val as { path: string }).path.trim();
-				if (p) set.add(p.split("\\").join("/"));
+			else if (val && typeof val === "object") {
+				const rec = val as { path?: unknown; script?: unknown };
+				if (typeof rec.path === "string" && rec.path.trim()) set.add(rec.path.trim().split("\\").join("/"));
+				if (typeof rec.script === "string" && rec.script.trim()) set.add(rec.script.trim().split("\\").join("/"));
 			}
 		};
 		if (Array.isArray(plan?.targets)) {
@@ -185,7 +222,7 @@ const INLINE_CODE_FILE_RE = /`([A-Za-z0-9_./\\-]+\.(?:ssl|srvscr|ds|sql|ddl|pks|
 const REGISTRY_CODE_COL_RE = /^(path|file|script|scripts|where|used[\s_-]*by|source|object)$/i;
 
 /** Extracts workspace-relative code/SQL file references from Markdown links, `source:` frontmatter, and inline code mentions. */
-function markdownCodeRefs(root: string, path: string, text: string): string[] {
+function markdownCodeRefs(root: string, path: string, text: string, precomputedLinks?: readonly DocLink[]): string[] {
 	const refs = new Set<string>();
 	const addPath = (raw: string) => {
 		const cleaned = raw.trim().split("\\").join("/").replace(/^\.\//, "");
@@ -194,7 +231,7 @@ function markdownCodeRefs(root: string, path: string, text: string): string[] {
 	};
 	const fm = frontMatter(text);
 	for (const s of many(fm.values.source)) addPath(s);
-	for (const link of linksIn(path, text)) {
+	for (const link of precomputedLinks ?? linksIn(path, text)) {
 		if (!CODE_FILE_EXT_RE.test(link.file)) continue;
 		const target = linkTarget(root, path, link.file);
 		const rel = relative(root, target).split(sep).join("/");
@@ -262,24 +299,67 @@ function registryCodeInfo(
 /** A summary, unless it is a line a template wrote and nobody has replaced. */
 const said = (summary: string | undefined) => (summary && !isPrompt(summary) ? summary : undefined);
 
+/** Drops standalone plain-prose paragraphs on large docs (>16 KB) before `taskTally` to avoid quadratic `marked.lexer` scanning. */
+function compactForTaskScan(text: string): string {
+	if (text.length <= 16_384) return text;
+	const fm = frontMatter(text);
+	const lines = fm.body.split(/\r?\n/);
+	const kept: string[] = [];
+	let block: string[] = [];
+	let fenceChar = "";
+	let fenceLen = 0;
+	let inHtmlComment = false;
+	const INTERESTING = /[\[\]`~<>]/;
+	const LIST_START = /^[ \t]*(?:[-*+]|\d+[.)])[ \t]/;
+	const flushBlock = (keepAlways: boolean) => {
+		if (!block.length) return;
+		if (keepAlways || block.some((l) => INTERESTING.test(l) || LIST_START.test(l))) {
+			if (kept.length) kept.push("");
+			kept.push(...block);
+		}
+		block = [];
+	};
+	for (const line of lines) {
+		if (!fenceChar && !inHtmlComment && !line.trim()) {
+			flushBlock(false);
+			continue;
+		}
+		if (!fenceChar) {
+			const fmFence = /^[ \t]{0,3}(`{3,}|~{3,})/.exec(line);
+			if (fmFence) {
+				fenceChar = fmFence[1]![0]!;
+				fenceLen = fmFence[1]!.length;
+			}
+		} else {
+			const fmFence = /^[ \t]{0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
+			if (fmFence && fmFence[1]![0] === fenceChar && fmFence[1]!.length >= fenceLen) {
+				fenceChar = "";
+				fenceLen = 0;
+			}
+		}
+		if (!fenceChar) {
+			if (!inHtmlComment && line.includes("<!--") && !line.includes("-->")) inHtmlComment = true;
+			else if (inHtmlComment && line.includes("-->")) inHtmlComment = false;
+		}
+		block.push(line);
+	}
+	flushBlock(Boolean(fenceChar || inHtmlComment));
+	return kept.join("\n");
+}
+
 /** How many of a text's tasks are ticked, read once for a text and kept: it is a pass of the renderer over the document. */
 const talliesRead = new Map<number | bigint, ReturnType<typeof taskTally>>();
 function tallyOf(text: string): ReturnType<typeof taskTally> {
 	if (!/\[[ xX]\]/.test(text)) return null;
 	const hash = Bun.hash(text);
 	if (talliesRead.has(hash)) return talliesRead.get(hash)!;
-	const tally = taskTally(text);
+	const tally = taskTally(compactForTaskScan(text));
 	if (talliesRead.size >= 1000) talliesRead.delete(talliesRead.keys().next().value!);
 	talliesRead.set(hash, tally);
 	return tally;
 }
 
-/** What a Markdown document says of itself, for the panel, catalogs, tags, governance, health, and code traceability. */
-function described(
-	text: string,
-	root?: string,
-	path?: string,
-): Pick<
+type DescribedMeta = Pick<
 	DocFile,
 	| "title"
 	| "status"
@@ -297,6 +377,11 @@ function described(
 	| "approvedDate"
 	| "changeControl"
 	| "gxpImpact"
+	| "asked"
+	| "date"
+	| "effectiveDate"
+	| "reviewDue"
+	| "docKind"
 	| "mtime"
 	| "headings"
 	| "source"
@@ -306,8 +391,25 @@ function described(
 	| "blocks"
 	| "blockedBy"
 	| "codeRefs"
-> {
-	const { values } = frontMatter(text);
+>;
+
+function checkMissingSource(source: string | undefined, root?: string, path?: string): string | undefined {
+	if (!source || !root || /^https?:\/\//i.test(source)) return undefined;
+	const target = path && /^\.{1,2}[\\/]/.test(source) ? resolve(dirname(path), source) : join(root, source);
+	const rel = relative(root, target);
+	return !rel.startsWith("..") && !isAbsolute(rel) && !existsSync(target) ? source : undefined;
+}
+
+/** What a Markdown document says of itself, for the panel, catalogs, tags, governance, health, and code traceability. */
+function described(
+	text: string,
+	root?: string,
+	path?: string,
+	fmArg?: ReturnType<typeof frontMatter>,
+	precomputedLinks?: readonly DocLink[],
+): DescribedMeta {
+	const fm = fmArg ?? frontMatter(text);
+	const { values } = fm;
 	const tickets = [...many(values.ticket), ...many(values.tickets)];
 	const tasks = tallyOf(text);
 	const tags = extractTags(text);
@@ -320,22 +422,27 @@ function described(
 	const approvedDate = one(values["approved-date"]) || one(values.approveddate) || undefined;
 	const changeControl = one(values["change-control"]) || one(values.cr) || undefined;
 	const gxpImpact = one(values["gxp-impact"]) || one(values.gxp) || undefined;
+	const asked = one(values.asked) || undefined;
+	const date = one(values.date) || undefined;
+	const effectiveDate = one(values["effective-date"]) || one(values.effectivedate) || undefined;
+	const reviewDue = one(values["review-due"]) || one(values.reviewdue) || undefined;
+	const phase = one(values.phase);
+	const explicitDocKind = one(values["doc-kind"]) || one(values.dockind) || undefined;
+	const isTestRun =
+		Boolean(path && /(?:^|[\\/])test-runs[\\/].+\.(?:md|markdown)$/i.test(path)) ||
+		/^(?:IQ|OQ|PQ)(?:\/(?:IQ|OQ|PQ))*$/i.test(phase);
+	const docKind = explicitDocKind || (isTestRun ? "test-run" : undefined);
 	const mtime = path ? mtimeOf(path) : undefined;
 	const headings = documentHeadings(text)
 		.slice(0, 60)
 		.map((h) => ({ level: h.level, text: h.text, slug: h.anchor, line: h.line }));
 	const source = one(values.source) || undefined;
-	let missingSource: string | undefined;
-	if (source && root && !/^https?:\/\//i.test(source)) {
-		const target = path && /^\.{1,2}[\\/]/.test(source) ? resolve(dirname(path), source) : join(root, source);
-		const rel = relative(root, target);
-		if (!rel.startsWith("..") && !isAbsolute(rel) && !existsSync(target)) missingSource = source;
-	}
+	const missingSource = checkMissingSource(source, root, path);
 	const supersedes = many(values.supersedes);
 	const supersededBy = many(values["superseded-by"]);
 	const blocks = many(values.blocks);
 	const blockedBy = many(values["blocked-by"]);
-	const codeRefs = root && path ? markdownCodeRefs(root, path, text) : [];
+	const codeRefs = root && path ? markdownCodeRefs(root, path, text, precomputedLinks) : [];
 	return {
 		title: titleOf(text) || undefined,
 		status: one(values.status) || undefined,
@@ -353,6 +460,11 @@ function described(
 		...(approvedDate ? { approvedDate } : {}),
 		...(changeControl ? { changeControl } : {}),
 		...(gxpImpact ? { gxpImpact } : {}),
+		...(asked ? { asked } : {}),
+		...(date ? { date } : {}),
+		...(effectiveDate ? { effectiveDate } : {}),
+		...(reviewDue ? { reviewDue } : {}),
+		...(docKind ? { docKind } : {}),
 		...(mtime !== undefined ? { mtime } : {}),
 		...(headings.length ? { headings } : {}),
 		...(source ? { source } : {}),
@@ -362,6 +474,78 @@ function described(
 		...(blocks.length ? { blocks } : {}),
 		...(blockedBy.length ? { blockedBy } : {}),
 		...(codeRefs.length ? { codeRefs } : {}),
+	};
+}
+
+type CachedMdSummary = {
+	stamp: string;
+	meta: Omit<DescribedMeta, "missingSource">;
+	links: DocLink[];
+	names: ReturnType<typeof namePlaces>;
+	frontTicket: string;
+	frontParent: string;
+	frontSpecs: string[];
+	frontPlans: string[];
+	frontRelated: string[];
+	fmTitle: string;
+	hasH1: boolean;
+	schemaObjects?: string[];
+};
+
+const mdSummaryCache = new Map<string, CachedMdSummary>();
+const MD_SUMMARY_KEPT = 4000;
+
+async function cachedMdSummary(root: string, path: string): Promise<CachedMdSummary | null> {
+	let stamp = "";
+	try {
+		const st = statSync(path);
+		stamp = `${st.size}:${st.mtimeMs}`;
+	} catch {
+		return null;
+	}
+	const key = `${root}\0${path}`;
+	const kept = mdSummaryCache.get(key);
+	if (kept && kept.stamp === stamp) {
+		mdSummaryCache.delete(key);
+		mdSummaryCache.set(key, kept);
+		return kept;
+	}
+	const text = await head(path, INDEX_BYTES);
+	const fm = frontMatter(text);
+	const { values } = fm;
+	const links = linksIn(path, text, "F");
+	const fullDesc = described(text, root, path, fm, links);
+	const { missingSource: _ignoreMissing, ...meta } = fullDesc;
+	const names = namePlaces(text);
+	const schemaSet = new Set<string>();
+	for (const line of fm.body.split(/\r?\n/)) {
+		const m = /^#{1,3}\s+`?([A-Za-z_][\w$.]{1,64})`?\s*$/.exec(line.trim());
+		if (m) schemaSet.add(m[1]!);
+	}
+	const entry: CachedMdSummary = {
+		stamp,
+		meta,
+		links,
+		names,
+		frontTicket: one(values.ticket),
+		frontParent: one(values.parent),
+		frontSpecs: [...new Set([...many(values.specs), ...many(values.spec)])],
+		frontPlans: [...new Set([...many(values.plans), ...many(values.plan)])],
+		frontRelated: [...many(values.related), ...many(values.blocks), ...many(values["blocked-by"]), ...many(values.parent)],
+		fmTitle: one(values.title),
+		hasH1: /^#\s+\S/m.test(fm.body),
+		...(schemaSet.size ? { schemaObjects: [...schemaSet] } : {}),
+	};
+	if (mdSummaryCache.size >= MD_SUMMARY_KEPT) mdSummaryCache.delete(mdSummaryCache.keys().next().value!);
+	mdSummaryCache.set(key, entry);
+	return entry;
+}
+
+function describedWithLiveSource(summary: CachedMdSummary, root: string, path: string): DescribedMeta {
+	const missingSource = checkMissingSource(summary.meta.source, root, path);
+	return {
+		...summary.meta,
+		...(missingSource ? { missingSource } : {}),
 	};
 }
 
@@ -414,8 +598,8 @@ async function cachedParseCsv(path: string, size: number, mtimeMs: number): Prom
 /** The file a link in a document leads to. A path from the top is from the project's top, as a repository's page reads it. */
 const linkTarget = (root: string, path: string, file: string) => (file.startsWith("/") ? join(root, file) : resolve(dirname(path), file));
 
-function brokenLinks(root: string, path: string, text: string, named?: (name: string) => string[]): Pick<DocFile, "broken"> {
-	const broken = linksIn(path, text)
+function brokenLinksFrom(root: string, path: string, links: readonly DocLink[], named?: (name: string) => string[]): Pick<DocFile, "broken"> {
+	const broken = links
 		.filter((link) => {
 			const target = linkTarget(root, path, link.file);
 			// What is outside the project is not this project's to say: it may well be there on another machine.
@@ -432,54 +616,115 @@ function brokenLinks(root: string, path: string, text: string, named?: (name: st
 	return broken.length ? { broken } : {};
 }
 
+function brokenLinks(root: string, path: string, text: string, named?: (name: string) => string[]): Pick<DocFile, "broken"> {
+	return brokenLinksFrom(root, path, linksIn(path, text), named);
+}
+
+/** True when a workspace file lives inside a frozen `docs/exports/` or nested `exports/` snapshot folder. */
+function isInExportsDir(root: string, filePath: string): boolean {
+	const rel = relative(root, filePath).split(sep).join("/").toLowerCase();
+	return /(?:^|\/)exports\//.test(rel);
+}
+
+/** Computes 1-based line and 0-based column from a character offset using precomputed line starts. */
+function lineColAt(lineStarts: readonly number[], offset: number): { line: number; column: number } {
+	let lo = 0;
+	let hi = lineStarts.length - 1;
+	while (lo < hi) {
+		const mid = (lo + hi + 1) >> 1;
+		if (lineStarts[mid]! <= offset) lo = mid;
+		else hi = mid - 1;
+	}
+	return { line: lo + 1, column: offset - lineStarts[lo]! };
+}
+
+function computeLineStarts(text: string): number[] {
+	const starts = [0];
+	for (let i = 0; i < text.length; i++) {
+		if (text[i] === "\n") starts.push(i + 1);
+	}
+	return starts;
+}
+
 /** A Markdown document larger than this is not read for the links it holds. */
 const LINKED_BYTES = 1024 * 1024;
-/** No more Markdown documents than this are read when asked what links to a file. */
+/** No more documents per category than this are read when asked what links to a file. */
 const LINKING_DOCS = 2000;
+const REGISTRY_FILE_RE = /(?:^|\/)registries\/.+\.(?:csv|tsv)$/i;
+const CODE_COMMENT_FILE_RE = /\.(ssl|srvscr|ds|sql)$/i;
+const COMMENT_PATH_RE = /(?:(?:\.\.?\/|\/)?(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+(?:#[A-Za-z0-9_.-]+)?)/g;
 
 /**
- * The links, in the workspace's Markdown documents and `.plan.json` files (`targets` and `node.docs`),
- * that lead to a file or to something in a folder: what a rename leaves pointing at the old name.
- * It asks only where each link leads, not whether anything is there, so it
- * is as true after the rename as before it.
+ * The links across the workspace's Markdown documents, `.plan.json` files (`targets`, `node.docs`,
+ * `built.units[].script`, `built.tests.script`, `scripts`, `testScripts`), CSV/TSV registries under
+ * `registries/`, and comment-only lines/blocks in `.ssl`/`.srvscr`/`.ds`/`.sql` files that lead
+ * to a file or into a folder: what a rename leaves pointing at the old name.
+ * Skips frozen `docs/exports/` and `*\/exports/` snapshot folders.
  */
 export async function linksTo(files: WorkspaceFiles, target: string): Promise<LinkTo[]> {
 	const root = files.root;
 	// A file system that does not tell case apart names one file either way.
 	const fold = (path: string) => (process.platform === "linux" ? path : path.toLowerCase());
-	const wanted = fold(resolve(target));
+	const resolvedTarget = resolve(target);
+	const wanted = fold(resolvedTarget);
+	const targetRel = relative(root, resolvedTarget).split(sep).join("/");
 	const found: LinkTo[] = [];
 	const PLAN_JSON = /\.plan\.json$/i;
-	let read = 0;
+	const leadsThere = (leads: string) => fold(leads) === wanted || fold(leads).startsWith(wanted + sep);
+
+	let docRead = 0;
+	let codeRead = 0;
 	for (const path of files.files()) {
+		if (isInExportsDir(root, path)) continue;
+		const rel = relative(root, path).split(sep).join("/");
 		const isMd = MARKDOWN.test(path);
 		const isPlan = !isMd && PLAN_JSON.test(path);
-		if (!isMd && !isPlan) continue;
-		if (++read > LINKING_DOCS) break;
+		const isReg = !isMd && !isPlan && REGISTRY_FILE_RE.test(rel);
+		const isCode = !isMd && !isPlan && !isReg && CODE_COMMENT_FILE_RE.test(path);
+		if (!isMd && !isPlan && !isReg && !isCode) continue;
+
+		if (isCode) {
+			if (codeRead >= LINKING_DOCS) continue;
+			codeRead++;
+		} else {
+			if (docRead >= LINKING_DOCS) continue;
+			docRead++;
+		}
+
 		const file = Bun.file(path);
-		if (file.size > LINKED_BYTES) continue;
+		if (file.size > (isReg ? REGISTRY_BYTES : LINKED_BYTES)) continue;
 		let text = "";
 		try {
 			text = decode(new Uint8Array(await file.arrayBuffer())).text;
 		} catch {
 			continue;
 		}
-		const leadsThere = (leads: string) => fold(leads) === wanted || fold(leads).startsWith(wanted + sep);
+
 		if (isPlan) {
 			try {
 				const plan = JSON.parse(text) as {
 					targets?: unknown[];
+					scripts?: unknown[];
+					testScripts?: unknown[];
+					built?: { units?: { script?: unknown }[]; tests?: { script?: unknown } };
 					nodes?: { docs?: unknown[] }[];
 				};
 				const refs: string[] = [];
 				const collect = (val: unknown) => {
 					if (typeof val === "string" && val.trim()) refs.push(val.trim());
-					else if (val && typeof val === "object" && "path" in val && typeof (val as { path?: unknown }).path === "string") {
-						const p = (val as { path: string }).path.trim();
-						if (p) refs.push(p);
+					else if (val && typeof val === "object") {
+						const rec = val as { path?: unknown; script?: unknown };
+						if (typeof rec.path === "string" && rec.path.trim()) refs.push(rec.path.trim());
+						if (typeof rec.script === "string" && rec.script.trim()) refs.push(rec.script.trim());
 					}
 				};
 				if (Array.isArray(plan?.targets)) for (const t of plan.targets) collect(t);
+				if (Array.isArray(plan?.scripts)) for (const s of plan.scripts) collect(s);
+				if (Array.isArray(plan?.testScripts)) for (const ts of plan.testScripts) collect(ts);
+				if (Array.isArray(plan?.built?.units)) {
+					for (const u of plan.built.units) collect(u?.script);
+				}
+				if (typeof plan?.built?.tests?.script === "string") collect(plan.built.tests.script);
 				if (Array.isArray(plan?.nodes)) {
 					for (const n of plan.nodes) {
 						if (Array.isArray(n?.docs)) for (const d of n.docs) collect(d);
@@ -488,8 +733,10 @@ export async function linksTo(files: WorkspaceFiles, target: string): Promise<Li
 				const lines = text.split(/\r?\n/);
 				const usedPlaces = new Set<string>();
 				for (const rawRef of refs) {
-					const isRel = /^\.{1,2}[\\/]/.test(rawRef);
-					const leads = isRel ? resolve(dirname(path), rawRef) : join(root, rawRef);
+					const filePart = rawRef.split(/[?#]/)[0]!.trim();
+					if (!filePart) continue;
+					const isRel = /^\.{1,2}[\\/]/.test(filePart);
+					const leads = isRel ? resolve(dirname(path), filePart) : join(root, filePart);
 					if (!leadsThere(leads)) continue;
 					const quoted = JSON.stringify(rawRef);
 					let hitLine = 1;
@@ -516,8 +763,9 @@ export async function linksTo(files: WorkspaceFiles, target: string): Promise<Li
 						line: hitLine,
 						column: hitCol,
 						href: rawRef,
-						rest: leads.slice(resolve(target).length),
+						rest: leads.slice(resolvedTarget.length),
 						from: isRel ? "doc" : "root",
+						kind: "plan",
 					});
 				}
 			} catch {
@@ -525,17 +773,161 @@ export async function linksTo(files: WorkspaceFiles, target: string): Promise<Li
 			}
 			continue;
 		}
-		// A ticket's "specs:"/"plans:" or a schema doc's "source:" line names files: not links, and left behind by a rename all the same.
+
+		if (isReg) {
+			const table = parseCsv(text);
+			const lineStarts = computeLineStarts(text);
+			for (const row of table.rows) {
+				for (const cell of row) {
+					const raw = cell.text.trim();
+					if (!raw || /^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) continue;
+					const normalized = raw.split("\\").join("/");
+					const isTop = normalized.startsWith("/");
+					const isRel = /^\.{1,2}\//.test(normalized);
+					const leads = isTop ? join(root, normalized) : isRel ? resolve(dirname(path), normalized) : join(root, normalized);
+					if (!leadsThere(leads)) continue;
+					const slice = text.slice(cell.start, cell.end);
+					const innerOffset = slice.indexOf(raw);
+					if (innerOffset < 0) continue;
+					const { line, column } = lineColAt(lineStarts, cell.start + innerOffset);
+					found.push({
+						path,
+						line,
+						column,
+						href: raw,
+						rest: leads.slice(resolvedTarget.length),
+						from: isTop ? "top" : isRel ? "doc" : "root",
+						kind: "registry",
+					});
+				}
+			}
+			continue;
+		}
+
+		if (isCode) {
+			// Respect ADR 0003: never parse SSL syntax — only inspect comment-only lines/blocks.
+			const isSql = /\.sql$/i.test(path);
+			const lines = text.split(/\r?\n/);
+			let inBlock = false;
+			for (let li = 0; li < lines.length; li++) {
+				const rawLine = lines[li]!;
+				const trimmed = rawLine.trim();
+				let commentOnly = false;
+				let commentSlice = rawLine;
+				if (isSql) {
+					if (inBlock) {
+						const closeIdx = rawLine.indexOf("*/");
+						if (closeIdx >= 0) {
+							inBlock = false;
+							if (!rawLine.slice(closeIdx + 2).trim()) {
+								commentOnly = true;
+								commentSlice = rawLine.slice(0, closeIdx);
+							}
+						} else {
+							commentOnly = true;
+						}
+					} else if (trimmed.startsWith("--")) {
+						commentOnly = true;
+					} else if (trimmed.startsWith("/*")) {
+						const openIdx = rawLine.indexOf("/*");
+						const closeIdx = rawLine.indexOf("*/", openIdx + 2);
+						if (closeIdx >= 0) {
+							if (!rawLine.slice(closeIdx + 2).trim()) {
+								commentOnly = true;
+								commentSlice = rawLine.slice(0, closeIdx);
+							}
+						} else {
+							inBlock = true;
+							commentOnly = true;
+						}
+					}
+				} else {
+					// SSL / .srvscr / .ds: `/* ... ;` (or `/* ... */`) and `// ...` comment-only lines/blocks.
+					if (inBlock) {
+						const semiIdx = rawLine.indexOf(";");
+						const starIdx = rawLine.indexOf("*/");
+						const closeIdx =
+							semiIdx >= 0 && starIdx >= 0 ? Math.min(semiIdx, starIdx) : semiIdx >= 0 ? semiIdx : starIdx;
+						const closeLen = closeIdx === starIdx && starIdx >= 0 ? 2 : 1;
+						if (closeIdx >= 0) {
+							inBlock = false;
+							if (!rawLine.slice(closeIdx + closeLen).trim()) {
+								commentOnly = true;
+								commentSlice = rawLine.slice(0, closeIdx);
+							}
+						} else {
+							commentOnly = true;
+						}
+					} else if (trimmed.startsWith("//")) {
+						commentOnly = true;
+					} else if (trimmed.startsWith("/*")) {
+						const openIdx = rawLine.indexOf("/*");
+						const semiIdx = rawLine.indexOf(";", openIdx + 2);
+						const starIdx = rawLine.indexOf("*/", openIdx + 2);
+						const closeIdx =
+							semiIdx >= 0 && starIdx >= 0 ? Math.min(semiIdx, starIdx) : semiIdx >= 0 ? semiIdx : starIdx;
+						const closeLen = closeIdx === starIdx && starIdx >= 0 ? 2 : 1;
+						if (closeIdx >= 0) {
+							if (!rawLine.slice(closeIdx + closeLen).trim()) {
+								commentOnly = true;
+								commentSlice = rawLine.slice(0, closeIdx);
+							}
+						} else {
+							inBlock = true;
+							commentOnly = true;
+						}
+					}
+				}
+				if (!commentOnly) continue;
+				const seenCols = new Set<number>();
+				const tryPushToken = (rawTok: string, col: number) => {
+					const before = rawLine.slice(Math.max(0, col - 8), col);
+					if (/(?:https?:|ftp:|file:)?\/\/$/i.test(before)) return;
+					const filePart = rawTok.split(/[?#]/)[0]!.replace(/\.+$/, "");
+					if (!filePart || seenCols.has(col)) return;
+					const isTop = filePart.startsWith("/");
+					const isRel = /^\.{1,2}\//.test(filePart);
+					const leads = isTop ? join(root, filePart) : isRel ? resolve(dirname(path), filePart) : join(root, filePart);
+					if (!leadsThere(leads)) return;
+					seenCols.add(col);
+					found.push({
+						path,
+						line: li + 1,
+						column: col,
+						href: filePart,
+						rest: leads.slice(resolvedTarget.length),
+						from: isTop ? "top" : isRel ? "doc" : "root",
+						kind: "code",
+					});
+				};
+				for (const m of commentSlice.matchAll(COMMENT_PATH_RE)) {
+					tryPushToken(m[0]!, m.index ?? 0);
+				}
+				// Also match workspace-relative paths containing spaces when written verbatim in a comment.
+				if (targetRel.includes(" ") && commentSlice.includes(targetRel)) {
+					let fromIdx = 0;
+					while (fromIdx <= commentSlice.length) {
+						const idx = commentSlice.indexOf(targetRel, fromIdx);
+						if (idx < 0) break;
+						tryPushToken(targetRel, idx);
+						fromIdx = idx + targetRel.length;
+					}
+				}
+			}
+			continue;
+		}
+
+		// Markdown: front matter path keys ("specs:", "plans:", "source:") and Markdown body links.
 		for (const named of frontPaths(text)) {
 			const isRel = /^\.{1,2}[\\/]/.test(named.value);
 			const leads = isRel ? resolve(dirname(path), named.value) : join(root, named.value);
-			if (leadsThere(leads)) found.push({ path, line: named.line, column: named.column, href: named.value, rest: leads.slice(resolve(target).length), from: isRel ? "doc" : "root" });
+			if (leadsThere(leads)) found.push({ path, line: named.line, column: named.column, href: named.value, rest: leads.slice(resolvedTarget.length), from: isRel ? "doc" : "root", kind: "markdown" });
 		}
 		if (!text.includes("](") && !text.includes("]:")) continue;
 		for (const link of linksIn(path, text, "F")) {
 			if (!link.line) continue;
 			const leads = linkTarget(root, path, link.file);
-			if (leadsThere(leads)) found.push({ path, line: link.line, column: link.column, href: link.href, rest: leads.slice(resolve(target).length), from: link.file.startsWith("/") ? "top" : "doc" });
+			if (leadsThere(leads)) found.push({ path, line: link.line, column: link.column, href: link.href, rest: leads.slice(resolvedTarget.length), from: link.file.startsWith("/") ? "top" : "doc", kind: "markdown" });
 		}
 	}
 	return found;
@@ -545,12 +937,14 @@ export async function linksTo(files: WorkspaceFiles, target: string): Promise<Li
  * The links by name in the workspace's Markdown documents, as they stand on
  * disk: what a document is linked from by name, and what a rename may leave
  * meaning nothing. Which document each name means is not asked here.
+ * Skips frozen `docs/exports/` and `*\/exports/` snapshot folders.
  */
 export async function namesIn(files: WorkspaceFiles): Promise<NameIn[]> {
+	const root = files.root;
 	const found: NameIn[] = [];
 	let read = 0;
 	for (const path of files.files()) {
-		if (!MARKDOWN.test(path)) continue;
+		if (!MARKDOWN.test(path) || isInExportsDir(root, path)) continue;
 		if (++read > LINKING_DOCS) break;
 		let stamp = "";
 		try {
@@ -592,20 +986,104 @@ function snippet(text: string): Pick<DocFile, "title" | "summary" | "untouched">
 	return { title: words(lines[0]), summary: said(second), ...(isPrompt(second) ? { untouched: true } : {}) };
 }
 
+const SCHEMA_FILE_RE = /\.(md|markdown|sql|ddl|pks|pkb|ds|json|xml|xsd|wsdl|yaml|yml|hl7|astm|edi|avsc|proto|csv|tsv|txt)$/i;
+const KNOWLEDGE_FILE_RE = /\.(md|markdown|sql|ssl|srvscr|ds|txt|json|toml|csv)$/i;
+const REGISTRY_DOC_RE = /\.(md|markdown|csv|tsv)$/i;
+const PLAN_DOC_RE = /\.(plan\.json|md)$/i;
+
+/** Bounded Levenshtein edit distance (returns `maxDist + 1` as soon as distance exceeds `maxDist`). */
+function boundedLevenshtein(a: string, b: string, maxDist: number): number {
+	const al = a.length;
+	const bl = b.length;
+	if (Math.abs(al - bl) > maxDist) return maxDist + 1;
+	if (a === b) return 0;
+	let prev = Array.from({ length: bl + 1 }, (_, j) => j);
+	let curr = new Array<number>(bl + 1);
+	for (let i = 1; i <= al; i++) {
+		curr[0] = i;
+		let rowMin = curr[0]!;
+		const ca = a.charCodeAt(i - 1);
+		for (let j = 1; j <= bl; j++) {
+			const cost = ca === b.charCodeAt(j - 1) ? 0 : 1;
+			const val = Math.min(prev[j]! + 1, curr[j - 1]! + 1, prev[j - 1]! + cost);
+			curr[j] = val;
+			if (val < rowMin) rowMin = val;
+		}
+		if (rowMin > maxDist) return maxDist + 1;
+		[prev, curr] = [curr, prev];
+	}
+	return prev[bl]!;
+}
+
+/**
+ * Lightweight scan of workspace doc folders returning any folder that exceeds
+ * its deterministic cap (`SCHEMA_DOC_LIMIT = 2000` for `schema/`, `DOC_LIMIT = 500`
+ * for other folders), together with exact `total` file counts.
+ */
+export function docsTruncated(
+	files: WorkspaceFiles,
+	project: Project,
+	options?: { templatesFolder?: string },
+): { folder: string; limit: number; total: number }[] {
+	const root = files.root;
+	const docs = join(root, project.docs);
+	const area = (name: DocArea) => join(docs, DOC_FOLDERS[name]);
+	const templatesDir = join(docs, "templates");
+	const exportsDir = join(docs, "exports");
+	const customTemplatesRel = (options?.templatesFolder ?? "").trim().replace(/\\/g, "/").replace(/^[./]+|\/+$/g, "");
+	const customTemplatesDir = customTemplatesRel ? join(root, customTemplatesRel) : "";
+	const inArea = (path: string) =>
+		(Object.keys(DOC_FOLDERS) as DocArea[]).some((name) => path.startsWith(area(name) + sep)) ||
+		path.startsWith(templatesDir + sep) ||
+		path.startsWith(exportsDir + sep) ||
+		Boolean(customTemplatesDir && path.startsWith(customTemplatesDir + sep));
+
+	const out: { folder: string; limit: number; total: number }[] = [];
+	const seen = new Set<string>();
+	const check = (full: string, pattern: RegExp, limit: number, skip?: (path: string) => boolean) => {
+		if (!existsSync(full)) return;
+		let total = 0;
+		for (const path of files.files(full)) {
+			if (!pattern.test(path) || skip?.(path)) continue;
+			total++;
+		}
+		if (total > limit) {
+			const rel = relative(root, full).split(sep).join("/") || ".";
+			if (seen.has(rel.toLowerCase())) return;
+			seen.add(rel.toLowerCase());
+			out.push({ folder: rel, limit, total });
+		}
+	};
+
+	check(area("specs"), MARKDOWN, DOC_LIMIT);
+	check(join(root, project.plans), /\.spec\.md$/i, DOC_LIMIT);
+	check(area("knowledge"), KNOWLEDGE_FILE_RE, DOC_LIMIT);
+	check(area("registries"), REGISTRY_DOC_RE, DOC_LIMIT);
+	check(docs, MARKDOWN, DOC_LIMIT, inArea);
+	check(join(root, project.schema), SCHEMA_FILE_RE, SCHEMA_DOC_LIMIT);
+	check(join(root, project.plans), PLAN_DOC_RE, DOC_LIMIT);
+	return out;
+}
+
 export async function listDocs(
 	files: WorkspaceFiles,
 	project: Project,
-	options?: { templatesFolder?: string; truncatedOut?: { folder: string; limit: number }[] },
+	options?: {
+		templatesFolder?: string;
+		truncatedOut?: { folder: string; limit: number; total?: number }[];
+		truncatedWithTotalsOut?: { folder: string; limit: number; total: number }[];
+	},
 ): Promise<DocFile[]> {
 	const root = files.root;
 	const list: DocFile[] = [];
 	const seenTruncated = new Set<string>();
-	const recordTruncated = (full: string) => {
-		if (!options?.truncatedOut) return;
+	const recordTruncated = (full: string, limit: number, total: number) => {
+		if (!options?.truncatedOut && !options?.truncatedWithTotalsOut) return;
 		const rel = relative(root, full).split(sep).join("/") || ".";
 		if (seenTruncated.has(rel.toLowerCase())) return;
 		seenTruncated.add(rel.toLowerCase());
-		options.truncatedOut.push({ folder: rel, limit: DOC_LIMIT });
+		options?.truncatedOut?.push({ folder: rel, limit });
+		options?.truncatedWithTotalsOut?.push({ folder: rel, limit, total });
 	};
 	// The project's files by name, read once and only when a link leads nowhere.
 	let names: Map<string, string[]> | undefined;
@@ -653,24 +1131,27 @@ export async function listDocs(
 	const state = existsSync(docs) ? found(docs, STATE_FILE) : undefined;
 	if (state) {
 		const statePath = join(docs, state);
-		const text = await head(statePath);
-		list.push({ path: statePath, name: state, group: "project", exists: true, ...described(text, root, statePath), ...brokenLinks(root, statePath, text, named) });
+		const summary = await cachedMdSummary(root, statePath);
+		if (summary) {
+			list.push({ path: statePath, name: state, group: "project", exists: true, ...describedWithLiveSource(summary, root, statePath), ...brokenLinksFrom(root, statePath, summary.links, named) });
+		}
 	}
 
-	/** The files under a folder that match, by name, up to the limit. */
-	const under = (full: string, pattern: RegExp, skip?: (path: string) => boolean) => {
+	/** The files under a folder that match, sorted deterministically BEFORE applying the cap. */
+	const under = (full: string, pattern: RegExp, skip?: (path: string) => boolean, limit = DOC_LIMIT) => {
 		if (!existsSync(full)) return [];
 		const paths: string[] = [];
 		// What is skipped does not count towards the limit: a folder of tickets must not crowd out the documents beside it.
 		for (const path of files.files(full)) {
 			if (!pattern.test(path) || skip?.(path)) continue;
-			if (paths.length >= DOC_LIMIT) {
-				recordTruncated(full);
-				break;
-			}
 			paths.push(path);
 		}
-		return paths.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base", numeric: true }));
+		paths.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base", numeric: true }));
+		if (paths.length > limit) {
+			recordTruncated(full, limit, paths.length);
+			return paths.slice(0, limit);
+		}
+		return paths;
 	};
 	const area = (name: DocArea) => join(docs, DOC_FOLDERS[name]);
 	const templatesDir = join(docs, "templates");
@@ -682,6 +1163,16 @@ export async function listDocs(
 		path.startsWith(templatesDir + sep) ||
 		path.startsWith(exportsDir + sep) ||
 		Boolean(customTemplatesDir && path.startsWith(customTemplatesDir + sep));
+
+	// Keep summaries indexed during this listing pass so the broken-wikilink check reuses them with zero extra I/O.
+	const passSummaries = new Map<string, CachedMdSummary>();
+	const loadMdSummary = async (path: string) => {
+		const existing = passSummaries.get(path);
+		if (existing) return existing;
+		const summary = await cachedMdSummary(root, path);
+		if (summary) passSummaries.set(path, summary);
+		return summary;
+	};
 
 	// The tickets that drive the work: flat Markdown files (docs/tickets/LIMS-123.md)
 	// and self-contained ticket bundle folders (docs/tickets/LIMS-123/LIMS-123.md plus
@@ -698,8 +1189,8 @@ export async function listDocs(
 			// Ignore unreadable tickets directory.
 		}
 		const scanned: ScannedTicketEntry[] = [];
-		const ticketHeads = new Map<string, string>();
-		for (const path of files.files(ticketsDir)) {
+		const ticketPaths = [...files.files(ticketsDir)].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base", numeric: true }));
+		for (const path of ticketPaths) {
 			const rel = relative(ticketsDir, path).split(sep).join("/");
 			let size = 0;
 			try {
@@ -709,26 +1200,25 @@ export async function listDocs(
 			}
 			let frontTicket = "";
 			if (MARKDOWN.test(path)) {
-				const text = await head(path);
-				ticketHeads.set(path, text);
-				frontTicket = one(frontMatter(text).values.ticket);
+				const summary = await loadMdSummary(path);
+				frontTicket = summary?.frontTicket ?? "";
 			}
 			scanned.push({ path, rel, size, ...(frontTicket ? { frontTicket } : {}) });
 		}
 		for (const resolved of classifyTicketEntries(scanned)) {
 			const path = resolved.entry.path;
-			const text = ticketHeads.get(path) ?? (await head(path));
-			const { values } = frontMatter(text);
+			const summary = await loadMdSummary(path);
+			if (!summary) continue;
 			const name = relative(ticketsDir, path);
 			if (resolved.isCatalog) {
-				list.push({ path, name, group: "tickets", exists: true, ...described(text, root, path), ...brokenLinks(root, path, text, named) });
+				list.push({ path, name, group: "tickets", exists: true, ...describedWithLiveSource(summary, root, path), ...brokenLinksFrom(root, path, summary.links, named) });
 				continue;
 			}
 			const stem = basename(path).replace(MARKDOWN, "");
-			const key = one(values.ticket) || (resolved.folderRel && /^(readme|ticket)$/i.test(stem) ? basename(resolved.folderRel) : stem);
-			const specs = [...new Set([...many(values.specs), ...many(values.spec)])];
-			const plans = [...new Set([...many(values.plans), ...many(values.plan)])];
-			const related = [...many(values.related), ...many(values.blocks), ...many(values["blocked-by"]), ...many(values.parent)];
+			const key = summary.frontTicket || (resolved.folderRel && /^(readme|ticket)$/i.test(stem) ? basename(resolved.folderRel) : stem);
+			const specs = summary.frontSpecs;
+			const plans = summary.frontPlans;
+			const related = summary.frontRelated;
 			const missing = [...specs, ...plans].filter((ref) => {
 				const target = /^\.{1,2}[\\/]/.test(ref) ? resolve(dirname(path), ref) : join(root, ref);
 				return !existsSync(target);
@@ -744,10 +1234,10 @@ export async function listDocs(
 				name,
 				group: "tickets",
 				exists: true,
-				...described(text, root, path),
-				...brokenLinks(root, path, text, named),
+				...describedWithLiveSource(summary, root, path),
+				...brokenLinksFrom(root, path, summary.links, named),
 				ticket: key,
-				parent: one(values.parent) || undefined,
+				parent: summary.frontParent || undefined,
 				tickets: related.length ? related : undefined,
 				specs: specs.length ? specs : undefined,
 				plans: plans.length ? plans : undefined,
@@ -756,59 +1246,58 @@ export async function listDocs(
 			});
 		}
 	}
-	// The specs: those written by hand, and those the planner writes beside a plan.
-	for (const path of [...under(area("specs"), MARKDOWN), ...under(join(root, project.plans), /\.spec\.md$/i)]) {
-		const fromPlan = !path.startsWith(area("specs") + sep);
-		const text = await head(path);
-		const said = described(text, root, path);
-		// A spec the planner wrote is for the ticket its plan names, and is called what its plan is: it has no
-		// heading of its own to be called by, and its first section is not its name.
-		const planPath = path.replace(/\.spec\.md$/i, ".plan.json");
-		const plan = fromPlan
-			? await planSays(planPath)
-			: { ticket: "", title: "", status: "", codeRefs: [], testScripts: [], planTests: [], nodeDocs: [] };
-		const planned = plan.ticket;
-		if (fromPlan && plan.title && !one(frontMatter(text).values.title) && !/^#\s+\S/m.test(frontMatter(text).body)) said.title = plan.title;
-		const ownTickets = said.tickets?.length ? [...said.tickets] : undefined;
-		const pairedPlan = fromPlan && existsSync(planPath) ? { name: basename(planPath), ...(planned ? { ticket: planned } : {}) } : undefined;
-		const tickets = planned && !said.tickets?.some((key) => key.toLowerCase() === planned.toLowerCase()) ? [...(said.tickets ?? []), planned] : said.tickets;
-		const mergedCodeRefs = [...new Set([...(said.codeRefs ?? []), ...plan.codeRefs])];
+	// The specs: behavior and design specifics kept under docs/specs/ (ADR 0033).
+	for (const path of under(area("specs"), MARKDOWN)) {
+		const summary = await loadMdSummary(path);
+		if (!summary) continue;
+		const said = describedWithLiveSource(summary, root, path);
 		list.push({
 			path,
-			name: fromPlan ? `${project.plans}/${relative(join(root, project.plans), path)}` : relative(area("specs"), path),
+			name: relative(area("specs"), path),
 			group: "specs",
 			exists: true,
 			...said,
-			...brokenLinks(root, path, text, named),
-			...(tickets?.length ? { tickets } : {}),
-			...(ownTickets ? { ownTickets } : {}),
-			...(pairedPlan ? { pairedPlan } : {}),
-			...(mergedCodeRefs.length ? { codeRefs: mergedCodeRefs } : {}),
+			...brokenLinksFrom(root, path, summary.links, named),
 		});
 	}
 	// The knowledge base: decisions, questions, snippets and notes, each kind in its folder.
-	for (const path of under(area("knowledge"), /\.(md|markdown|sql|ssl|srvscr|ds|txt|json|toml|csv)$/i)) {
+	for (const path of under(area("knowledge"), KNOWLEDGE_FILE_RE)) {
 		const name = relative(area("knowledge"), path);
 		const kind = name.includes(sep) ? name.split(sep)[0]! : "";
-		const text = await head(path);
-		const mtime = MARKDOWN.test(path) ? undefined : mtimeOf(path);
-		list.push({
-			path,
-			name,
-			group: "knowledge",
-			exists: true,
-			kind,
-			...(mtime !== undefined ? { mtime } : {}),
-			...(MARKDOWN.test(path) ? { ...described(text, root, path), ...brokenLinks(root, path, text, named) } : snippet(text)),
-		});
+		if (MARKDOWN.test(path)) {
+			const summary = await loadMdSummary(path);
+			if (!summary) continue;
+			list.push({
+				path,
+				name,
+				group: "knowledge",
+				exists: true,
+				kind,
+				...describedWithLiveSource(summary, root, path),
+				...brokenLinksFrom(root, path, summary.links, named),
+			});
+		} else {
+			const text = await head(path);
+			const mtime = mtimeOf(path);
+			list.push({
+				path,
+				name,
+				group: "knowledge",
+				exists: true,
+				kind,
+				...(mtime !== undefined ? { mtime } : {}),
+				...snippet(text),
+			});
+		}
 	}
 	// The registries: tables of values, each row with how far it has come.
 	const knownTickets = new Set(list.flatMap((file) => (file.group === "tickets" && file.ticket ? [file.ticket.toLowerCase()] : [])));
-	for (const path of under(area("registries"), /\.(md|markdown|csv|tsv)$/i)) {
+	for (const path of under(area("registries"), REGISTRY_DOC_RE)) {
 		const name = relative(area("registries"), path);
 		if (MARKDOWN.test(path)) {
-			const text = await head(path);
-			list.push({ path, name, group: "registries", exists: true, ...described(text, root, path), ...brokenLinks(root, path, text, named) });
+			const summary = await loadMdSummary(path);
+			if (!summary) continue;
+			list.push({ path, name, group: "registries", exists: true, ...describedWithLiveSource(summary, root, path), ...brokenLinksFrom(root, path, summary.links, named) });
 			continue;
 		}
 		let size = 0;
@@ -846,8 +1335,9 @@ export async function listDocs(
 	for (const path of under(docs, MARKDOWN, inArea)) {
 		if (state && path === join(docs, state)) continue;
 		// What it calls itself and what it is about: its line in the docs folder's catalog.
-		const text = await head(path);
-		const said = described(text, root, path);
+		const summary = await loadMdSummary(path);
+		if (!summary) continue;
+		const said = describedWithLiveSource(summary, root, path);
 		// Its heading is not a name it is linked by: a plain document is linked by its file's name, as it always was.
 		list.push({
 			path,
@@ -857,6 +1347,8 @@ export async function listDocs(
 			...(said.title ? { heading: said.title } : {}),
 			...(said.summary ? { summary: said.summary } : {}),
 			...(said.status ? { status: said.status } : {}),
+			...(said.tickets?.length ? { tickets: said.tickets } : {}),
+			...(said.tasks ? { tasks: said.tasks } : {}),
 			...(said.untouched ? { untouched: true } : {}),
 			...(said.tags?.length ? { tags: said.tags } : {}),
 			...(said.release ? { release: said.release } : {}),
@@ -868,15 +1360,20 @@ export async function listDocs(
 			...(said.approvedDate ? { approvedDate: said.approvedDate } : {}),
 			...(said.changeControl ? { changeControl: said.changeControl } : {}),
 			...(said.gxpImpact ? { gxpImpact: said.gxpImpact } : {}),
+			...(said.asked ? { asked: said.asked } : {}),
+			...(said.date ? { date: said.date } : {}),
+			...(said.effectiveDate ? { effectiveDate: said.effectiveDate } : {}),
+			...(said.reviewDue ? { reviewDue: said.reviewDue } : {}),
+			...(said.docKind ? { docKind: said.docKind } : {}),
 			...(said.mtime !== undefined ? { mtime: said.mtime } : {}),
 			...(said.headings?.length ? { headings: said.headings } : {}),
 			...(said.codeRefs?.length ? { codeRefs: said.codeRefs } : {}),
-			...brokenLinks(root, path, text, named),
+			...brokenLinksFrom(root, path, summary.links, named),
 		});
 	}
 	// What the project's data looks like, each kind in its folder: descriptions in Markdown, and beside them the SQL
 	// that makes the tables, a message's own schema, a sample of a file (including STARLIMS lab/interface formats).
-	for (const path of under(join(root, project.schema), /\.(md|markdown|sql|ddl|pks|pkb|ds|json|xml|xsd|wsdl|yaml|yml|hl7|astm|edi|avsc|proto|csv|tsv|txt)$/i)) {
+	for (const path of under(join(root, project.schema), SCHEMA_FILE_RE, undefined, SCHEMA_DOC_LIMIT)) {
 		const name = relative(join(root, project.schema), path);
 		const folder = name.includes(sep) ? name.split(sep)[0]! : "";
 		// A folder that is one of the known kinds in other capitals is that kind: on a disk that does not tell them
@@ -884,43 +1381,70 @@ export async function listDocs(
 		const kind = SCHEMAS.find((known) => known.id === folder.toLowerCase())?.id ?? folder;
 		const isMd = MARKDOWN.test(path);
 		const isSql = /\.(sql|ddl|pks|pkb)$/i.test(path);
-		const text = isMd || isSql ? await head(path) : "";
-		let schemaObjects: string[] | undefined;
-		if (isSql && text) {
-			const objs = extractSqlObjects(text, { includeAlter: true });
-			const set = new Set<string>();
-			for (const o of objs) {
-				if (o.name) set.add(o.name);
-				if (o.bareName) set.add(o.bareName);
-			}
-			if (set.size) schemaObjects = [...set];
-		} else if (isMd && text) {
-			const body = frontMatter(text).body;
-			const set = new Set<string>();
-			for (const line of body.split(/\r?\n/)) {
-				const m = /^#{1,3}\s+`?([A-Za-z_][\w$.]{1,64})`?\s*$/.exec(line.trim());
-				if (m) set.add(m[1]!);
-			}
-			if (set.size) schemaObjects = [...set];
+		if (isMd) {
+			const summary = await loadMdSummary(path);
+			if (!summary) continue;
+			list.push({
+				path,
+				name,
+				group: "schema",
+				exists: true,
+				kind,
+				...(summary.schemaObjects ? { schemaObjects: summary.schemaObjects } : {}),
+				...describedWithLiveSource(summary, root, path),
+				...brokenLinksFrom(root, path, summary.links, named),
+			});
+		} else {
+			const schemaObjects = isSql ? await cachedSqlObjects(path) : undefined;
+			const mtime = mtimeOf(path);
+			list.push({
+				path,
+				name,
+				group: "schema",
+				exists: true,
+				kind,
+				...(mtime !== undefined ? { mtime } : {}),
+				...(schemaObjects ? { schemaObjects } : {}),
+			});
 		}
-		const mtime = isMd ? undefined : mtimeOf(path);
-		list.push({
-			path,
-			name,
-			group: "schema",
-			exists: true,
-			kind,
-			...(mtime !== undefined ? { mtime } : {}),
-			...(schemaObjects ? { schemaObjects } : {}),
-			...(isMd ? { ...described(text, root, path), ...brokenLinks(root, path, text, named) } : {}),
-		});
 	}
-	for (const path of under(join(root, project.plans), /\.(plan\.json|md)$/i)) {
-		if (/\.spec\.md$/i.test(path)) continue;
+	for (const path of under(join(root, project.plans), PLAN_DOC_RE)) {
 		// A plan says which ticket it is for, its title, and the scripts it targets (ADR 0013).
-		const plan = /\.plan\.json$/i.test(path) ? await planSays(path) : null;
-		const mdText = MARKDOWN.test(path) ? await head(path) : "";
-		const mtime = mdText ? undefined : mtimeOf(path);
+		// A companion `*.plan.md` is the plan doc written beside `<Name>.plan.json` (ADR 0033).
+		const isJsonPlan = /\.plan\.json$/i.test(path);
+		const isPlanDoc = /\.plan\.md$/i.test(path);
+		const plan = isJsonPlan ? await planSays(path) : null;
+		const mdSummary = MARKDOWN.test(path) ? await loadMdSummary(path) : null;
+		const mtime = mdSummary ? undefined : mtimeOf(path);
+		if (isPlanDoc && mdSummary) {
+			const said = describedWithLiveSource(mdSummary, root, path);
+			const chartPath = path.replace(/\.plan\.md$/i, ".plan.json");
+			const chartExists = existsSync(chartPath);
+			const paired = chartExists
+				? await planSays(chartPath)
+				: { ticket: "", title: "", status: "", codeRefs: [], testScripts: [], planTests: [], nodeDocs: [] };
+			if (paired.title && !mdSummary.fmTitle && !mdSummary.hasH1) said.title = paired.title;
+			const ownTickets = said.tickets?.length ? [...said.tickets] : undefined;
+			const pairedPlan = chartExists ? { name: basename(chartPath), ...(paired.ticket ? { ticket: paired.ticket } : {}) } : undefined;
+			const tickets =
+				paired.ticket && !said.tickets?.some((key) => key.toLowerCase() === paired.ticket.toLowerCase())
+					? [...(said.tickets ?? []), paired.ticket]
+					: said.tickets;
+			const mergedCodeRefs = [...new Set([...(said.codeRefs ?? []), ...paired.codeRefs])];
+			list.push({
+				path,
+				name: relative(join(root, project.plans), path),
+				group: "plans",
+				exists: true,
+				...said,
+				...brokenLinksFrom(root, path, mdSummary.links, named),
+				...(tickets?.length ? { tickets } : {}),
+				...(ownTickets ? { ownTickets } : {}),
+				...(pairedPlan ? { pairedPlan } : {}),
+				...(mergedCodeRefs.length ? { codeRefs: mergedCodeRefs } : {}),
+			});
+			continue;
+		}
 		list.push({
 			path,
 			name: relative(join(root, project.plans), path),
@@ -934,41 +1458,121 @@ export async function listDocs(
 			...(plan?.testScripts.length ? { testScripts: plan.testScripts } : {}),
 			...(plan?.planTests.length ? { planTests: plan.planTests } : {}),
 			...(plan?.nodeDocs.length ? { nodeDocs: plan.nodeDocs } : {}),
-			...(mdText ? { ...described(mdText, root, path), ...brokenLinks(root, path, mdText, named) } : {}),
+			...(mdSummary ? { ...describedWithLiveSource(mdSummary, root, path), ...brokenLinksFrom(root, path, mdSummary.links, named) } : {}),
 		});
 	}
-	// Check broken [[wikilinks]] and ![[embeds]] across Markdown docs using O(N) pre-built indexes.
+	// Check broken [[wikilinks]] and ![[embeds]] across Markdown docs using O(N) pre-built indexes,
+	// populating fuzzy/basename candidate `instead` suggestions so Health can 1-click mend them.
 	const IMAGE_EMBED_RE = /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif)$/i;
 	const docNameIndex = buildDocNameIndex(list, root);
 	const wsImageNames = new Set<string>();
+	const wsImageList: string[] = [];
 	for (const p of files.files()) {
-		if (IMAGE_EMBED_RE.test(p)) wsImageNames.add(basename(p).toLowerCase());
+		if (IMAGE_EMBED_RE.test(p)) {
+			const base = basename(p);
+			wsImageNames.add(base.toLowerCase());
+			wsImageList.push(base);
+		}
 	}
+	const normWikiKey = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "");
+	const stemOfDoc = (d: DocFile) => basename(d.path).replace(/\.[^./\\]+$/, "");
+	const candidateDocs = list.filter((d) => d.exists && !isCatalog(d)).map((d) => ({
+		doc: d,
+		stem: stemOfDoc(d),
+		stemNorm: normWikiKey(stemOfDoc(d)),
+		ticketNorm: d.ticket ? normWikiKey(d.ticket) : "",
+		titleNorm: d.title ? normWikiKey(d.title) : "",
+	}));
+	const suggestWikiInstead = (place: ReturnType<typeof namePlaces>[number], sourceDoc: DocFile): string | undefined => {
+		const raw = place.name.trim();
+		if (!raw) return undefined;
+		if (IMAGE_EMBED_RE.test(raw)) {
+			const base = basename(raw);
+			const moved = named(base).filter((c) => c !== sourceDoc.path);
+			if (moved.length === 1) return basename(moved[0]!);
+			const qNorm = normWikiKey(base.replace(/\.[^.]+$/, ""));
+			if (qNorm.length >= 3) {
+				const uniqueImgs = [...new Set(wsImageList)];
+				const normHits = uniqueImgs.filter((img) => normWikiKey(img.replace(/\.[^.]+$/, "")) === qNorm);
+				if (normHits.length === 1) return normHits[0]!;
+			}
+			return undefined;
+		}
+		const baseNoExt = basename(raw).replace(/\.(md|markdown)$/i, "").trim();
+		if (!baseNoExt) return undefined;
+		// 1. Path-moved basename match (e.g. `[[old-dir/Due-soon-report]]` -> `Due-soon-report`)
+		if (raw.includes("/") || raw.includes("\\") || /\.(md|markdown)$/i.test(raw)) {
+			const exactHits = candidateDocs.filter(
+				(c) =>
+					c.doc.path !== sourceDoc.path &&
+					(c.stem.toLowerCase() === baseNoExt.toLowerCase() || (c.doc.ticket && c.doc.ticket.toLowerCase() === baseNoExt.toLowerCase())),
+			);
+			if (exactHits.length === 1) {
+				const suggested = nameForIndexed(exactHits[0]!.doc, docNameIndex, root);
+				if (suggested && suggested !== raw) return suggested;
+			}
+		}
+		// 2. Punctuation/separator/case normalized match (`DueSoonReport` / `due_soon_report` -> `Due-soon-report`)
+		const qNorm = normWikiKey(baseNoExt);
+		if (qNorm.length >= 2) {
+			const normHits = candidateDocs.filter(
+				(c) =>
+					c.doc.path !== sourceDoc.path &&
+					(c.ticketNorm === qNorm || c.stemNorm === qNorm || (c.titleNorm && c.titleNorm === qNorm)),
+			);
+			if (normHits.length === 1) {
+				const suggested = nameForIndexed(normHits[0]!.doc, docNameIndex, root);
+				if (suggested && suggested !== raw) return suggested;
+			}
+		}
+		// 3. Guarded Levenshtein fuzzy match for typos (never suggest a different ticket number like DEMO-103 for DEMO-104)
+		if (qNorm.length >= 4 && !/^[A-Za-z]{2,12}-\d+$/.test(baseNoExt)) {
+			const maxDist = qNorm.length >= 7 ? 2 : 1;
+			let bestDist = maxDist + 1;
+			let bestDoc: DocFile | null = null;
+			let tied = false;
+			for (const c of candidateDocs) {
+				if (c.doc.path === sourceDoc.path) continue;
+				const dStem = c.stemNorm ? boundedLevenshtein(qNorm, c.stemNorm, maxDist) : maxDist + 1;
+				const dTitle = c.titleNorm ? boundedLevenshtein(qNorm, c.titleNorm, maxDist) : maxDist + 1;
+				const dist = Math.min(dStem, dTitle);
+				if (dist > maxDist) continue;
+				if (dist < bestDist) {
+					bestDist = dist;
+					bestDoc = c.doc;
+					tied = false;
+				} else if (dist === bestDist && bestDoc !== c.doc) {
+					tied = true;
+				}
+			}
+			if (bestDoc && !tied) {
+				const suggested = nameForIndexed(bestDoc, docNameIndex, root);
+				if (suggested && suggested !== raw) return suggested;
+			}
+		}
+		// 4. Non-doc file embed moved elsewhere in the workspace (`![[old/query.sql]]`)
+		if (place.embed || /[\\/]|\.[a-z0-9]{1,8}$/i.test(raw)) {
+			const moved = named(basename(raw)).filter((c) => c !== sourceDoc.path);
+			if (moved.length === 1) return relative(dirname(sourceDoc.path), moved[0]!).split(sep).join("/");
+		}
+		return undefined;
+	};
+
 	for (const doc of list) {
 		if (!doc.exists || !MARKDOWN.test(doc.path)) continue;
 		try {
-			const s = statSync(doc.path);
-			if (s.size > LINKED_BYTES) continue;
-			const stamp = `${s.size}:${s.mtimeMs}`;
-			const namesKey = `H\0${doc.path}`;
-			const kept = namesRead.get(namesKey);
-			let places: ReturnType<typeof namePlaces>;
-			if (kept && kept.stamp === stamp) {
-				places = kept.places;
-			} else {
-				places = namePlaces(await head(doc.path));
-				if (namesRead.size >= NAMES_KEPT) namesRead.delete(namesRead.keys().next().value!);
-				namesRead.set(namesKey, { stamp, places });
-			}
+			const summary = passSummaries.get(doc.path) ?? (await cachedMdSummary(root, doc.path));
+			const places = summary?.names ?? [];
 			if (!places.length) continue;
-			const brokenWiki: { href: string; line: number; column: number }[] = [];
+			const brokenWiki: { href: string; line: number; column: number; instead?: string }[] = [];
 			for (const place of places) {
 				if (IMAGE_EMBED_RE.test(place.name)) {
 					const direct = linkTarget(root, doc.path, place.name);
 					const fromRoot = join(root, place.name);
 					const hasFile = existsSync(direct) || existsSync(fromRoot) || (!place.name.includes("/") && !place.name.includes("\\") && wsImageNames.has(basename(place.name).toLowerCase()));
 					if (!hasFile) {
-						brokenWiki.push({ href: `${place.embed ? "!" : ""}[[${place.name}]]`, line: place.line, column: place.column });
+						const instead = suggestWikiInstead(place, doc);
+						brokenWiki.push({ href: `${place.embed ? "!" : ""}[[${place.name}]]`, line: place.line, column: place.column, ...(instead ? { instead } : {}) });
 					}
 					continue;
 				}
@@ -979,7 +1583,8 @@ export async function listDocs(
 					const rootTarget = join(root, place.name);
 					if (existsSync(relTarget) || existsSync(rootTarget)) continue;
 				}
-				brokenWiki.push({ href: `${place.embed ? "!" : ""}[[${place.name}]]`, line: place.line, column: place.column });
+				const instead = suggestWikiInstead(place, doc);
+				brokenWiki.push({ href: `${place.embed ? "!" : ""}[[${place.name}]]`, line: place.line, column: place.column, ...(instead ? { instead } : {}) });
 			}
 			if (brokenWiki.length) doc.broken = [...(doc.broken ?? []), ...brokenWiki];
 		} catch {

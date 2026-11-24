@@ -1,7 +1,7 @@
 # Worked examples
 
 Due dates worked by hand, to check the scripts against. The rows are in
-[demo.sql](../schema/database/demo.sql).
+[demo-seed.sql](../schema/database/demo-seed.sql).
 
 Three facts decide every example:
 

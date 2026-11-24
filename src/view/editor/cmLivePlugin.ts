@@ -18,8 +18,8 @@ import { frontMatter } from "../../shared/frontMatter";
 import { closedHtmlCommentSpans, commentBlockHideLines, isStandaloneHtmlComment } from "../../shared/htmlComments";
 import { parseCalloutHeader, parseImageExpression, type ParsedImageSpec } from "../../shared/markdownEdit";
 import { parseMarkdownTable } from "../../shared/markdownTables";
-import { docByName, namedLink } from "../../shared/namedLinks";
-import { dirName, isInside, relativeTo, resolvePath } from "../../shared/paths";
+import { docByName, namedLink, nameFor } from "../../shared/namedLinks";
+import { baseName, dirName, isInside, relativeTo, resolvePath } from "../../shared/paths";
 import { isLikelyHexColorTag } from "../../shared/tags";
 import { ticketMatcher } from "../../shared/ticketRefs";
 import { docs } from "../project";
@@ -30,7 +30,14 @@ import { CalloutWidget } from "./cmLiveCallout";
 import { MermaidLivePreviewWidget, MermaidWidget, mermaidLivePreviewTheme } from "./cmMermaid";
 import { buildHoverPreview } from "./hoverPreview";
 import { colourCode } from "./markdownCode";
-import { findInlineMathSpans, hydrateMathInElement, renderKatexHtml, renderKatexSync } from "./markdownHtml";
+import {
+	buildHeadingWikiLink,
+	deduplicatedHeadingAnchorsByLine,
+	findInlineMathSpans,
+	hydrateMathInElement,
+	renderKatexHtml,
+	renderKatexSync,
+} from "./markdownHtml";
 import { hydrateImagesInElement } from "./imageResolve";
 import {
 	liveCallbacksFacet,
@@ -45,6 +52,7 @@ import {
 	type LiveCallbacks,
 } from "./cmLiveShared";
 import { TableWidget } from "./cmLiveTable";
+import { parseListLine } from "../../shared/listIndent";
 import { IMAGE_FILE_RE, loadImageUrl } from "./imageResolve";
 
 export {
@@ -58,9 +66,6 @@ export {
 	type LiveCallbacks,
 };
 
-const RULE_RE = /^[ \t]*([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
-const TASK_RE = /^((?:[ \t]*>[ \t]?)*[ \t]*)([-*+]|\d{1,9}[.)])([ \t]+)\[([ xX])\]([ \t]?)/;
-const BULLET_RE = /^((?:[ \t]*>[ \t]?)*[ \t]*)([-*+])([ \t]+)/;
 const QUOTE_RE = /^([ \t]*>[ \t]?)/;
 
 /** True when in Live mode and any selection cursor or range touches `[from, to]`. Always false in Read mode. */
@@ -234,6 +239,9 @@ class ImageWidget extends WidgetType {
 		const img = document.createElement("img");
 		img.alt = this.spec.alt || this.spec.src;
 		img.loading = "lazy";
+		if (this.inline) {
+			img.title = isRead ? "Click to view full size" : "Click to view full size · Alt+Click to edit Markdown";
+		}
 		if (this.spec.width) img.style.width = `${this.spec.width}px`;
 		if (this.spec.height) img.style.height = `${this.spec.height}px`;
 		frame.appendChild(img);
@@ -241,7 +249,7 @@ class ImageWidget extends WidgetType {
 		let resolvedUrl = "";
 		let resolvedPath: string | undefined;
 
-		// Subtle hover pill bar (Zoom always; Resize + Edit in Live mode).
+		// Subtle hover pill bar & right-edge drag-to-resize handle on block images.
 		if (!this.inline) {
 			const tools = document.createElement("div");
 			tools.className = "cm-md-image-tools";
@@ -276,6 +284,48 @@ class ImageWidget extends WidgetType {
 						view.dispatch({ selection: EditorSelection.cursor(Math.min(this.from, view.state.doc.length)), scrollIntoView: true });
 					}),
 				);
+
+				const widthBadge = document.createElement("span");
+				widthBadge.className = "cm-md-image-width-badge";
+				widthBadge.hidden = true;
+				frame.appendChild(widthBadge);
+
+				const handle = document.createElement("div");
+				handle.className = "cm-md-image-resize-handle";
+				handle.setAttribute("role", "separator");
+				handle.setAttribute("aria-orientation", "vertical");
+				handle.setAttribute("aria-label", "Resize image width");
+				handle.title = "Drag to resize image width";
+				handle.addEventListener("mousedown", (e) => {
+					if (e.button !== 0) return;
+					e.preventDefault();
+					e.stopPropagation();
+					const startX = e.clientX;
+					const startW = Math.round(img.getBoundingClientRect().width || this.spec.width || 320);
+					const maxW = Math.max(240, Math.round(wrap.getBoundingClientRect().width || 760));
+					let nextW = startW;
+					frame.classList.add("is-resizing");
+					widthBadge.hidden = false;
+					widthBadge.textContent = `${startW}px`;
+
+					const onMove = (ev: MouseEvent) => {
+						nextW = Math.max(80, Math.min(maxW, Math.round(startW + (ev.clientX - startX))));
+						img.style.width = `${nextW}px`;
+						widthBadge.textContent = `${nextW}px`;
+					};
+					const onUp = () => {
+						window.removeEventListener("mousemove", onMove);
+						window.removeEventListener("mouseup", onUp);
+						frame.classList.remove("is-resizing");
+						widthBadge.hidden = true;
+						if (nextW !== startW) {
+							cb?.onResizeImage(this.from, this.to, nextW);
+						}
+					};
+					window.addEventListener("mousemove", onMove);
+					window.addEventListener("mouseup", onUp);
+				});
+				frame.appendChild(handle);
 			}
 			frame.appendChild(tools);
 		}
@@ -304,10 +354,10 @@ class ImageWidget extends WidgetType {
 			}
 		});
 
-		wrap.addEventListener("mousedown", (e) => {
-			if ((e.target as HTMLElement | null)?.closest(".cm-md-image-tools")) return;
+		(wrap as HTMLElement).addEventListener("mousedown", (e) => {
+			if ((e.target as HTMLElement | null)?.closest(".cm-md-image-tools, .cm-md-image-resize-handle")) return;
 			e.preventDefault();
-			if (isRead) {
+			if (isRead || (this.inline && !e.altKey)) {
 				if (resolvedUrl) cb?.onOpenImageLightbox({ src: resolvedUrl, alt: this.spec.alt || this.spec.src, filePath: resolvedPath });
 				return;
 			}
@@ -333,6 +383,22 @@ class BulletWidget extends WidgetType {
 	}
 }
 
+class OrderedMarkerWidget extends WidgetType {
+	constructor(private readonly marker: string) {
+		super();
+	}
+	eq(other: OrderedMarkerWidget) {
+		return other.marker === this.marker;
+	}
+	toDOM() {
+		const span = document.createElement("span");
+		span.className = "cm-md-ol-num";
+		span.textContent = this.marker;
+		span.setAttribute("aria-hidden", "true");
+		return span;
+	}
+}
+
 class CheckboxWidget extends WidgetType {
 	constructor(
 		private readonly checked: boolean,
@@ -344,6 +410,8 @@ class CheckboxWidget extends WidgetType {
 		return other.checked === this.checked && other.bracketPos === this.bracketPos;
 	}
 	toDOM(view: EditorView) {
+		const slot = document.createElement("span");
+		slot.className = "cm-md-check-slot";
 		const input = document.createElement("input");
 		input.type = "checkbox";
 		input.className = "cm-md-checkbox";
@@ -370,7 +438,8 @@ class CheckboxWidget extends WidgetType {
 			e.preventDefault();
 			e.stopPropagation();
 		});
-		return input;
+		slot.appendChild(input);
+		return slot;
 	}
 	ignoreEvent() {
 		return true;
@@ -526,22 +595,63 @@ class CodeHeaderWidget extends WidgetType {
 	}
 }
 
-class FootnoteRefWidget extends WidgetType {
+class HeadingCopyLinkWidget extends WidgetType {
 	constructor(
-		private readonly id: string,
-		private readonly preview?: string,
+		private readonly headingText: string,
+		private readonly filePath: string,
 	) {
 		super();
 	}
+	eq(other: HeadingCopyLinkWidget) {
+		return other.headingText === this.headingText && other.filePath === this.filePath;
+	}
+	toDOM() {
+		const root = appState.workspace?.root;
+		const all = docs();
+		const found = all.find((d) => d.exists && canonical(d.path) === canonical(this.filePath));
+		const docName =
+			(found ? nameFor(found, all, root) : null) ??
+			(this.filePath ? baseName(this.filePath).replace(/\.(md|markdown)$/i, "") : "");
+		const wikiLink = buildHeadingWikiLink(docName, this.headingText);
+
+		const btn = document.createElement("button");
+		btn.type = "button";
+		btn.className = "cm-md-heading-link";
+		btn.setAttribute("contenteditable", "false");
+		btn.setAttribute("aria-label", `Copy link ${wikiLink}`);
+		btn.title = `Copy link ${wikiLink}`;
+		btn.textContent = "#";
+		btn.addEventListener("mousedown", (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			void import("../commands").then((m) => m.copyText(wikiLink, `Copied ${wikiLink}.`));
+			btn.classList.add("is-copied");
+			btn.innerHTML = `<span class="codicon-glyph" aria-hidden="true">\ueab2</span>`;
+			setTimeout(() => {
+				if (!btn.isConnected) return;
+				btn.classList.remove("is-copied");
+				btn.textContent = "#";
+			}, 1200);
+		});
+		return btn;
+	}
+	ignoreEvent() {
+		return true;
+	}
+}
+
+class FootnoteRefWidget extends WidgetType {
+	constructor(private readonly id: string) {
+		super();
+	}
 	eq(other: FootnoteRefWidget) {
-		return other.id === this.id && other.preview === this.preview;
+		return other.id === this.id;
 	}
 	toDOM() {
 		const sup = document.createElement("sup");
 		sup.className = "cm-md-footnote-ref cm-md-fn-ref-read";
 		sup.dataset.mdFootnote = this.id;
 		sup.textContent = `[${this.id}]`;
-		sup.title = this.preview ? `[${this.id}]: ${this.preview}\n(Click to jump to footnote)` : `Jump to footnote [${this.id}]`;
 		return sup;
 	}
 }
@@ -650,6 +760,74 @@ class TransclusionWidget extends WidgetType {
 		});
 		head.append(titleBtn);
 
+		const actions = document.createElement("span");
+		actions.className = "cm-md-embed-actions";
+
+		const body = document.createElement("div");
+		body.className = "cm-md-embed-body md";
+		const setStatusMsg = (cls: string, msg: string) => {
+			const p = document.createElement("p");
+			p.className = cls;
+			p.textContent = msg;
+			body.replaceChildren(p);
+		};
+
+		const primaryPath = targetPath;
+		const secondaryPath = fallbackTargetPath;
+		const loadEmbed = () => {
+			if (isSelfDoc) {
+				setStatusMsg("cm-md-embed-missing", "Cannot embed a document inside itself (use ![[#Heading]] to embed a section).");
+				return;
+			}
+			if (!primaryPath) {
+				setStatusMsg("cm-md-embed-missing", `Embedded note “${this.inner}” was not found. Click the title to create it.`);
+				return;
+			}
+			setStatusMsg("cm-md-embed-loading", "Loading embedded note…");
+			const hostVisited = new Set<string>();
+			if (this.sourcePath && !selfHeading) hostVisited.add(canonical(this.sourcePath));
+			void (async () => {
+				let usedPath = primaryPath;
+				let preview = await buildHoverPreview(primaryPath, { heading, maxLines: 120, visited: hostVisited });
+				if (!preview && secondaryPath) {
+					usedPath = secondaryPath;
+					preview = await buildHoverPreview(secondaryPath, { heading, maxLines: 120, visited: hostVisited });
+				}
+				if (!body.isConnected) return;
+				if (!preview) {
+					setStatusMsg("cm-md-embed-missing", `Could not read “${this.inner}”.`);
+					return;
+				}
+				targetPath = usedPath;
+				resolvedLine = preview.line;
+				titleBtn.textContent = alias ?? (heading ? `${preview.title} › ${heading}` : preview.title);
+				titleBtn.title = `Open ${relativeTo(root, usedPath)}`;
+				body.innerHTML = preview.html;
+				hydrateImagesInElement(body, usedPath);
+				hydrateMathInElement(body);
+				void colourCode(body);
+			})();
+		};
+
+		if (primaryPath && !isSelfDoc) {
+			const refreshBtn = document.createElement("button");
+			refreshBtn.type = "button";
+			refreshBtn.className = "cm-md-code-btn cm-md-embed-refresh";
+			refreshBtn.title = "Refresh embedded note";
+			refreshBtn.setAttribute("aria-label", "Refresh embedded note");
+			const refIcon = document.createElement("span");
+			refIcon.className = "codicon-glyph";
+			refIcon.setAttribute("aria-hidden", "true");
+			refIcon.textContent = "\ueb37";
+			refreshBtn.appendChild(refIcon);
+			refreshBtn.addEventListener("mousedown", (e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				loadEmbed();
+			});
+			actions.append(refreshBtn);
+		}
+
 		if (!this.readOnly) {
 			const editBtn = document.createElement("button");
 			editBtn.type = "button";
@@ -662,18 +840,11 @@ class TransclusionWidget extends WidgetType {
 				view.focus();
 				view.dispatch({ selection: EditorSelection.cursor(pos) });
 			});
-			head.append(editBtn);
+			actions.append(editBtn);
 		}
+		if (actions.childNodes.length) head.append(actions);
 		card.append(head);
 
-		const body = document.createElement("div");
-		body.className = "cm-md-embed-body md";
-		const setStatusMsg = (cls: string, msg: string) => {
-			const p = document.createElement("p");
-			p.className = cls;
-			p.textContent = msg;
-			body.replaceChildren(p);
-		};
 		// Safely intercept links and #tags inside embedded notes so clicks never hijack the app window.
 		body.addEventListener("click", (e) => {
 			const el = e.target instanceof Element ? e.target : null;
@@ -731,36 +902,7 @@ class TransclusionWidget extends WidgetType {
 			}
 		});
 
-		if (isSelfDoc) {
-			setStatusMsg("cm-md-embed-missing", "Cannot embed a document inside itself (use ![[#Heading]] to embed a section).");
-		} else if (!targetPath) {
-			setStatusMsg("cm-md-embed-missing", `Embedded note “${this.inner}” was not found. Click the title to create it.`);
-		} else {
-			setStatusMsg("cm-md-embed-loading", "Loading embedded note…");
-			const primaryPath = targetPath;
-			const secondaryPath = fallbackTargetPath;
-			void (async () => {
-				let usedPath = primaryPath;
-				let preview = await buildHoverPreview(primaryPath, { heading, maxLines: 120 });
-				if (!preview && secondaryPath) {
-					usedPath = secondaryPath;
-					preview = await buildHoverPreview(secondaryPath, { heading, maxLines: 120 });
-				}
-				if (!body.isConnected) return;
-				if (!preview) {
-					setStatusMsg("cm-md-embed-missing", `Could not read “${this.inner}”.`);
-					return;
-				}
-				targetPath = usedPath;
-				resolvedLine = preview.line;
-				titleBtn.textContent = alias ?? (heading ? `${preview.title} › ${heading}` : preview.title);
-				titleBtn.title = `Open ${relativeTo(root, usedPath)}`;
-				body.innerHTML = preview.html;
-				hydrateImagesInElement(body, usedPath);
-				hydrateMathInElement(body);
-				void colourCode(body);
-			})();
-		}
+		loadEmbed();
 		card.append(body);
 		return card;
 	}
@@ -1441,6 +1583,10 @@ function buildInlineDecorations(view: EditorView): DecorationSet {
 	const allDocs = docs();
 	const fm = frontmatterRange(state);
 	const fmEnd = fm?.to ?? -1;
+	const fullText = state.doc.toString();
+	// Compute deduplicated heading anchors across the full document (`heading`, `heading-1`, `heading-2`)
+	// matching `documentHeadings` / `outline.ts` / `markdownHtml.ts` so `data-md-heading-id` never collides.
+	const headingAnchorsByLine = deduplicatedHeadingAnchorsByLine(fullText);
 
 	// Broken link targets for this file (from docs listing).
 	const brokenFiles = new Set((allDocs.find((d) => canonical(d.path) === here)?.broken ?? []).map((b) => linkFile(b.href)));
@@ -1612,13 +1758,13 @@ function buildInlineDecorations(view: EditorView): DecorationSet {
 					return false;
 				}
 
-				// ATX Headings H1..H6 (tag with heading anchor id for Document Outline scrollspy)
+				// ATX Headings H1..H6 (tag with deduplicated heading anchor id & hover `#` copy-link widget)
 				const hMatch = /^ATXHeading([1-6])$/.exec(node.name);
 				if (hMatch) {
 					const level = Number(hMatch[1]);
 					const line = state.doc.lineAt(node.from);
 					const cleanHeading = line.text.replace(/^[ \t]{0,3}#{1,6}[ \t]+/, "").replace(/[ \t]*#*[ \t]*$/, "").trim();
-					const anchor = headingAnchor(cleanHeading);
+					const anchor = headingAnchorsByLine.get(line.number) ?? headingAnchor(cleanHeading);
 					decos.push(
 						Decoration.line({
 							class: `cm-md-h${level}`,
@@ -1628,6 +1774,14 @@ function buildInlineDecorations(view: EditorView): DecorationSet {
 							},
 						}).range(line.from),
 					);
+					if (cleanHeading) {
+						decos.push(
+							Decoration.widget({
+								widget: new HeadingCopyLinkWidget(cleanHeading, filePath),
+								side: 1,
+							}).range(line.to),
+						);
+					}
 					const revealed = selectionTouches(state, line.from, line.to);
 					for (let child = node.node.firstChild; child; child = child.nextSibling) {
 						if (child.name === "HeaderMark") {
@@ -1730,27 +1884,6 @@ function buildInlineDecorations(view: EditorView): DecorationSet {
 		});
 	}
 
-	// Collect footnote definitions across the document so `[^id]` hover tooltips preview the footnote text.
-	const footnoteDefs = new Map<string, string>();
-	const fullText = state.doc.toString();
-	if (fullText.includes("[^")) {
-		const docLines = fullText.split("\n");
-		for (let i = 0; i < docLines.length; i++) {
-			const m = /^[ \t]{0,3}\[\^([^\]\s]+)\]:[ \t]*(.*)$/.exec(docLines[i]!);
-			if (!m) continue;
-			const id = m[1]!;
-			const parts = [m[2]!.trim()];
-			for (let j = i + 1; j < docLines.length && parts.join(" ").length < 220; j++) {
-				if (/^(?: {2,}|\t)\S/.test(docLines[j]!)) parts.push(docLines[j]!.trim());
-				else break;
-			}
-			const preview = parts.filter(Boolean).join(" ").trim();
-			if (preview && !footnoteDefs.has(id)) {
-				footnoteDefs.set(id, preview.length > 220 ? `${preview.slice(0, 219)}…` : preview);
-			}
-		}
-	}
-
 	// Pass 2: Line-level scans across visible ranges (bullets, checkboxes, blockquotes, ==highlights==, [[wikilinks]], #tags, ticket keys).
 	const seenLines = new Set<number>();
 	for (const { from, to } of view.visibleRanges) {
@@ -1771,36 +1904,43 @@ function buildInlineDecorations(view: EditorView): DecorationSet {
 				hideOrDim(line.from, line.from + qMatch[1]!.length, revealed);
 			}
 
-			// Task checkboxes `- [ ] ` / `- [x] `
-			const taskMatch = TASK_RE.exec(text);
-			if (taskMatch) {
-				const lead = taskMatch[1]!;
-				const marker = taskMatch[2]!;
-				const gap = taskMatch[3]!;
-				const mark = taskMatch[4]!;
-				const trail = taskMatch[5]!;
-				const replaceFrom = line.from + lead.length;
-				const bracketPos = replaceFrom + marker.length + gap.length;
-				const replaceTo = bracketPos + 3 + trail.length;
-				const checked = mark.toLowerCase() === "x";
-				const cursorInBox = selectionTouches(state, replaceFrom, replaceTo);
-				if (!cursorInBox && guard.canAdd(replaceFrom, replaceTo)) {
-					decos.push(Decoration.replace({ widget: new CheckboxWidget(checked, bracketPos) }).range(replaceFrom, replaceTo));
-				}
-				if (checked && replaceTo < line.to) {
-					decos.push(Decoration.mark({ class: "cm-md-task-done" }).range(replaceTo, line.to));
-				}
-			} else if (!RULE_RE.test(text)) {
-				// Unordered list bullets `- ` / `* ` / `+ `
-				const bMatch = BULLET_RE.exec(text);
-				if (bMatch) {
-					const lead = bMatch[1]!;
-					const bulletFrom = line.from + lead.length;
-					const bulletTo = bulletFrom + bMatch[2]!.length;
-					if (selectionTouches(state, bulletFrom, bulletTo + 1)) {
-						decos.push(syntaxMark.range(bulletFrom, bulletTo));
-					} else if (guard.canAdd(bulletFrom, bulletTo)) {
-						decos.push(Decoration.replace({ widget: new BulletWidget() }).range(bulletFrom, bulletTo));
+			// Unordered bullets, ordered lists, and task checkboxes with exact hanging-indent alignment
+			const listInfo = parseListLine(text);
+			if (listInfo) {
+				const prefixFrom = line.from + listInfo.quoteLen;
+				const prefixTo = line.from + listInfo.markerTo;
+				const markerFrom = line.from + listInfo.markerFrom;
+				const cursorInPrefix = selectionTouches(state, prefixFrom, Math.max(prefixFrom, prefixTo - 1));
+				decos.push(
+					Decoration.line({
+						class: cursorInPrefix ? "cm-md-list-line cm-md-list-raw" : "cm-md-list-line",
+						attributes: {
+							style: `--md-list-indent: ${listInfo.indentEm}em; --md-list-hang: ${listInfo.hangEm}em;`,
+						},
+					}).range(line.from),
+				);
+				if (listInfo.kind === "task") {
+					const bracketPos = line.from + listInfo.bracketOffset!;
+					const checked = Boolean(listInfo.checked);
+					if (!cursorInPrefix && guard.canAdd(prefixFrom, prefixTo)) {
+						decos.push(Decoration.replace({ widget: new CheckboxWidget(checked, bracketPos) }).range(prefixFrom, prefixTo));
+					} else if (cursorInPrefix) {
+						decos.push(syntaxMark.range(markerFrom, prefixTo));
+					}
+					if (checked && prefixTo < line.to) {
+						decos.push(Decoration.mark({ class: "cm-md-task-done" }).range(prefixTo, line.to));
+					}
+				} else if (listInfo.kind === "bullet") {
+					if (cursorInPrefix) {
+						decos.push(syntaxMark.range(markerFrom, markerFrom + listInfo.markerText.length));
+					} else if (guard.canAdd(prefixFrom, prefixTo)) {
+						decos.push(Decoration.replace({ widget: new BulletWidget() }).range(prefixFrom, prefixTo));
+					}
+				} else {
+					if (cursorInPrefix) {
+						decos.push(syntaxMark.range(markerFrom, markerFrom + listInfo.markerText.length));
+					} else if (guard.canAdd(prefixFrom, prefixTo)) {
+						decos.push(Decoration.replace({ widget: new OrderedMarkerWidget(listInfo.markerText) }).range(prefixFrom, prefixTo));
 					}
 				}
 			}
@@ -1931,16 +2071,14 @@ function buildInlineDecorations(view: EditorView): DecorationSet {
 					const rTo = rFrom + m[0].length;
 					if (isSkipped(rFrom, rTo) || lineSkips.some(([a, b]) => rFrom < b && rTo > a)) continue;
 					lineSkips.push([rFrom, rTo]);
-					const fnPreview = footnoteDefs.get(m[1]!);
 					if (isReadMode && !searchMatchesBlock(state, rFrom, rTo) && guard.canAdd(rFrom, rTo)) {
-						decos.push(Decoration.replace({ widget: new FootnoteRefWidget(m[1]!, fnPreview) }).range(rFrom, rTo));
+						decos.push(Decoration.replace({ widget: new FootnoteRefWidget(m[1]!) }).range(rFrom, rTo));
 					} else {
 						decos.push(
 							Decoration.mark({
 								class: "cm-md-footnote-ref",
 								attributes: {
 									"data-md-footnote": m[1]!,
-									title: fnPreview ? `[^${m[1]!}]: ${fnPreview}\n(Click to jump to footnote)` : `Jump to footnote [^${m[1]!}]`,
 								},
 							}).range(rFrom, rTo),
 						);

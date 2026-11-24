@@ -116,7 +116,7 @@ async function buildUnit(path: string, plan: Plan, spec: string, run: BuildRun, 
 	if (!current) delete unit.change;
 	const known = run.units.filter((u) => u.status === "passed" || u.status === "kept");
 	const ticketKey = (typeof plan.ticket === "string" && plan.ticket.trim()) || ticketForFile(docs(), path, state.workspace?.root);
-	const work = ticketKey ? await workPrompt(ticketKey, { specs: false }).catch(() => null) : null;
+	const work = ticketKey ? await workPrompt(ticketKey, { specs: false, plans: false }).catch(() => null) : null;
 	const rawBase = unitPrompt(plan, spec, unit, known, callable, patternsFrom(TEMPLATES), current ? changeText(plan, unit, current) : "");
 	const base = work ? `${rawBase}\n\n${work.text}` : rawBase;
 	const units = run.units;
@@ -188,7 +188,7 @@ async function secondOpinion(path: string, plan: Plan, spec: string, run: BuildR
 	// Rebuilding part of a chart: the rest is not in front of the reader, so it is not asked about.
 	const partial = run.units.some((u) => u.status === "kept" || u.change);
 	const ticketKey = (typeof plan.ticket === "string" && plan.ticket.trim()) || ticketForFile(docs(), path, state.workspace?.root);
-	const work = ticketKey ? await workPrompt(ticketKey, { specs: false }).catch(() => null) : null;
+	const work = ticketKey ? await workPrompt(ticketKey, { specs: false, plans: false }).catch(() => null) : null;
 	const workContext = work?.text ? cut(work.text, MAX_WORK_PROMPT_CHARS) : "";
 	const review = reviewPrompt(plan, spec, scripts, partial ? passed.flatMap((u) => u.nodes ?? []) : undefined);
 	const reply = await askAgent(path, "A second opinion", workContext ? `${review}\n\n${workContext}` : review, [], TOOL_LIMIT);
@@ -208,9 +208,9 @@ export function startBuild(path: string) {
 			(f) => f.text,
 			() => null,
 		);
-		if (!specText) return notify("Write and approve a spec first.");
+		if (!specText) return notify("Write and approve a plan doc first.");
 		const hash = planHash(plan);
-		if (specHash(specText) !== hash) return notify("The plan has changed since its spec was approved. Write the spec again first.");
+		if (specHash(specText) !== hash) return notify("The plan has changed since its plan doc was approved. Write the plan doc again first.");
 		const { units, map } = readSpecFile(specText);
 		if (!units.length && !builtOf(plan)) return notify("The spec lists nothing to build.");
 		const model = currentModel();

@@ -7,14 +7,14 @@
 import ELK from "elkjs/lib/elk.bundled.js";
 import { createEffect, createMemo, createSignal, createUniqueId, For, on, onCleanup, onMount, Show, untrack } from "solid-js";
 import { baseName, dirName, joinPath, relativeTo } from "../../shared/paths";
-import { isCatalog, registryTitle, ticketKey } from "../../shared/projectDocs";
+import { isCatalog, registryTitle, ticketKey, toneOf } from "../../shared/projectDocs";
 import type { DocFile } from "../../shared/protocol";
 import { backend } from "../backend";
-import { ask, choose } from "../dialogs";
+import { ask, quickPick, type QuickPickOption } from "../dialogs";
 import { editors } from "../editor/EditorGroup";
 import { monaco } from "../editor/monaco";
 import { cycleRegionColor, regionColor } from "../editor/regions";
-import { canvasMeasure, centredOn, clearLabels, clearOf, fitView, legibleScale, mapArea, nearest, outOfSight, recall, remember, reveal, roundedPath, zoomAt, type Measure, type Point, type Rect } from "../graph/canvas";
+import { canvasMeasure, centredOn, clamp, clearLabels, clearOf, fitView, legibleScale, mapArea, nearest, outOfSight, recall, remember, reveal, roundedPath, zoomAt, type Measure, type Point, type Rect } from "../graph/canvas";
 import { Finder } from "../graph/Finder";
 import { Minimap, type MapBox } from "../graph/Minimap";
 import { pictureName, savePicture } from "../graph/picture";
@@ -24,11 +24,30 @@ import { diagnostics } from "../lsp/session";
 import { Menu, type MenuItem } from "../Menu";
 import { showPanel } from "../panels/registry";
 import { chooseFromMenu, type RowMenuEntry } from "../panels/RowMenu";
-import { docs } from "../project";
-import { applyText, canonical, documents, notify, openedForALook, openFile, setPlanMode, setState, state } from "../state";
+import { docs, isMarkdown } from "../project";
+import { activePath, applyText, canonical, documents, notify, openedForALook, openFile, planMode, setPlanMode, setState, state } from "../state";
 import { PlanTextView, type TextTestBuilderRequest } from "./PlanTextView";
-import { planHash, planToMermaid, previewPlan, syncPlanMermaidInMarkdown } from "./assist";
+import {
+	alignPlanNodes,
+	batchOffsetPlanNodes,
+	buildDriftAgentDraft,
+	buildPlanAgentDraft,
+	buildStageAgentDraft,
+	buildStepAgentDraft,
+	buildTestsAgentDraft,
+	copyPlanSelection,
+	marqueeNodeIds,
+	pastePlanSelection,
+	planHash,
+	planToMermaid,
+	previewPlan,
+	syncPlanMermaidInMarkdown,
+	type AlignAction,
+	type NodeRect,
+	type PlanClipboard,
+} from "./assist";
 import { nodeStatuses } from "./build";
+import { startBuild } from "./buildRun";
 import { builtOf, chartChanges, pathsForNode, pathSummary, planPaths, unitsOfNode } from "./built";
 import {
 	applyRouteOffsets,
@@ -64,16 +83,18 @@ import {
 	type Sized,
 } from "./chart";
 import { recheckPlan } from "./check";
-import { driftFor, openProcedure, openReference, openScript } from "./drift";
+import { driftFor, openProcedure, openReference, openScript, resolveReference } from "./drift";
 import {
 	addAfter,
 	addBranch,
 	addCall,
+	addNodeDoc,
 	addPlanTest,
 	connect,
 	duplicateNode,
 	hasManualLayout,
 	insertOnEdge,
+	isPlanPath,
 	nodeAtLine,
 	nodeDocsOf,
 	nodeLines,
@@ -105,7 +126,8 @@ import {
 } from "./model";
 import { registerPlanBridge, requestPlanPaletteTab, type ScheduledBuildScope } from "./planBridge";
 import "./planCanvas.css";
-import { assistOf, specPath } from "./run";
+import { assistOf, specPath, specState } from "./run";
+import { writeTests } from "./testScript";
 
 type Box = { id: string; x: number; y: number; width: number; height: number; node?: PlanNode; lines: string[]; group?: string; memberCount?: number; pillWidth?: number };
 type Line = {
@@ -156,7 +178,25 @@ type NodeDrag = {
 	moved: boolean;
 	guideX?: number;
 	guideY?: number;
+	multiIds?: string[];
+	delta?: Point;
 };
+
+/** Registered step-finder focus callbacks per editor group so Ctrl+F focuses whichever Plan Chart or Text view is active. */
+const planFinders = new Map<number, () => void>();
+let planClipboard: PlanClipboard | null = null;
+
+/** Focuses the active Plan view's step Finder (works in both Chart and Text modes; returns false in Source or non-plan views). */
+export function focusActivePlanFinder(): boolean {
+	if (state.centerView !== "editors") return false;
+	const group = state.activeGroup;
+	const path = state.groups[group]?.active;
+	if (!path || !isPlanPath(path) || planMode(path, group) === "source") return false;
+	const fn = planFinders.get(group);
+	if (!fn) return false;
+	fn();
+	return true;
+}
 
 const elk = new ELK();
 
@@ -386,12 +426,22 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 	const [view, setView] = createSignal({ x: 20, y: 20, scale: 1 });
 	const [direction, setDirectionSignal] = createSignal<LayoutDirection>(recall(DIRECTION_KEY) === "RIGHT" ? "RIGHT" : "DOWN");
 	const [edge, setEdge] = createSignal<{ from: string; to: string } | null>(null);
+	const [selectedIds, setSelectedIds] = createSignal<Set<string>>(new Set());
+	const [marquee, setMarquee] = createSignal<{ start: Point; cur: Point } | null>(null);
 	const [linking, setLinking] = createSignal<string | null>(null);
 	const [walked, setWalked] = createSignal<string[] | null>(null);
 	const [activePathIndex, setActivePathIndexSignal] = createSignal<number | null>(null);
-	const [scheduledNotice, setScheduledNotice] = createSignal<string | null>(null);
 	const [builderRequest, setBuilderRequest] = createSignal<TextTestBuilderRequest | null>(null);
 	let builderReqSeq = 0;
+	let focusFinder: (() => void) | undefined;
+	createEffect(() => {
+		const g = props.group;
+		const trigger = () => focusFinder?.();
+		planFinders.set(g, trigger);
+		onCleanup(() => {
+			if (planFinders.get(g) === trigger) planFinders.delete(g);
+		});
+	});
 	const [pointed, setPointed] = createSignal<string | null>(null);
 	const [peeked, setPeeked] = createSignal<{ id: string; pinned: boolean } | null>(null);
 	let peekTimer: ReturnType<typeof setTimeout> | undefined;
@@ -608,7 +658,13 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 			return offsetFor(groupMap.get(gid)?.offset, dir);
 		};
 		const nodeOwnDeltaOf = (nid: string): Point => {
-			if (drag?.kind === "node" && drag.id === nid && drag.moved) return drag.curOffset;
+			if (drag?.kind === "node" && drag.moved) {
+				if (drag.id === nid) return drag.curOffset;
+				if (drag.multiIds?.includes(nid) && drag.delta) {
+					const saved = offsetFor(nodeMap.get(nid)?.offset, dir);
+					return { x: saved.x + drag.delta.x, y: saved.y + drag.delta.y };
+				}
+			}
 			return offsetFor(nodeMap.get(nid)?.offset, dir);
 		};
 
@@ -712,11 +768,53 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		editors[props.group]?.setSelection(new monaco.Range(line, 1, line, 1));
 		setState("cursor", { line, column: 1 });
 	};
-	const select = (id: string | null | undefined) => {
+	const select = (id: string | null | undefined, keepMulti = false) => {
 		setEdge(null);
+		if (!keepMulti) setSelectedIds(id ? new Set([id]) : new Set<string>());
 		const p = plan();
 		const line = id && p ? nodeLines(text(), p).get(id) : undefined;
 		moveCursor(line ?? 1);
+	};
+	const activeSelectedIds = (): Set<string> => {
+		const multi = selectedIds();
+		if (multi.size > 0) return multi;
+		const one = selected();
+		return one ? new Set([one]) : new Set();
+	};
+	const toggleSelectNode = (id: string) => {
+		setEdge(null);
+		const next = new Set(activeSelectedIds());
+		if (next.has(id)) next.delete(id);
+		else next.add(id);
+		setSelectedIds(next);
+		const lead = next.has(id) ? id : [...next][0] ?? null;
+		const p = plan();
+		const line = lead && p ? nodeLines(text(), p).get(lead) : undefined;
+		moveCursor(line ?? 1);
+	};
+	const nodeRects = (): NodeRect[] =>
+		(layout()?.boxes ?? [])
+			.filter((b) => Boolean(b.node))
+			.map((b) => ({ id: b.id, x: b.x, y: b.y, width: b.width, height: b.height }));
+	const zoomToSelection = () => {
+		const l = layout();
+		if (!l || !canvas) return;
+		const ids = activeSelectedIds();
+		const picked = l.boxes.filter((b) => b.node && ids.has(b.id));
+		if (!picked.length) return fit();
+		const box = canvas.getBoundingClientRect();
+		if (box.width < 10 || box.height < 10) return;
+		const minX = Math.min(...picked.map((b) => b.x));
+		const minY = Math.min(...picked.map((b) => b.y));
+		const maxX = Math.max(...picked.map((b) => b.x + b.width));
+		const maxY = Math.max(...picked.map((b) => b.y + b.height));
+		const pad = 44;
+		const w = Math.max(40, maxX - minX + pad * 2);
+		const h = Math.max(40, maxY - minY + pad * 2);
+		const scale = clamp(Math.min((box.width - 40) / w, (box.height - 40) / h), MIN_ZOOM, Math.min(MAX_ZOOM, 1.35));
+		const cx = (minX + maxX) / 2;
+		const cy = (minY + maxY) / 2;
+		setView({ scale, x: box.width / 2 - cx * scale, y: box.height / 2 - cy * scale });
 	};
 
 	/** Fits as much of the chart as stays legible; returns true if canvas had real dimensions. */
@@ -1013,57 +1111,66 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		if (!p) return;
 		const mermaid = planToMermaid(p, direction());
 		const allDocs = docs().filter((d) => d.exists && !isCatalog(d));
-		const candidates: { label: string; detail: string; path: string }[] = [];
+		const items: QuickPickOption<string>[] = [];
 		const seen = new Set<string>();
-		const pushCand = (path: string, label: string, detail: string) => {
+		const pushCand = (path: string, label: string, opts: { icon: "tag" | "file"; description?: string; status?: string }) => {
 			const canon = canonical(path);
 			if (seen.has(canon)) return;
 			seen.add(canon);
-			candidates.push({ label, detail, path });
+			const rel = relativeTo(state.workspace?.root, path).replace(/\\/g, "/");
+			items.push({
+				value: path,
+				label,
+				icon: opts.icon,
+				badge: opts.status ? { text: opts.status, tone: toneOf(opts.status) } : undefined,
+				detail: rel,
+				description: opts.description,
+			});
 		};
 		const pairedSpec = specPath(props.path);
 		if (pairedSpec !== props.path) {
+			const pairedDoc = allDocs.find((d) => canonical(d.path) === canonical(pairedSpec));
 			const pairedExists =
 				documents.has(canonical(pairedSpec)) ||
-				allDocs.some((d) => canonical(d.path) === canonical(pairedSpec)) ||
+				Boolean(pairedDoc) ||
 				(await backend.read(pairedSpec).then(
 					() => true,
 					() => false,
 				));
 			if (pairedExists) {
-				pushCand(pairedSpec, `Spec: ${baseName(pairedSpec)}`, "Companion spec for this plan");
+				pushCand(pairedSpec, `Plan doc: ${pairedDoc ? docDisplayName(pairedDoc) : baseName(pairedSpec)}`, {
+					icon: "file",
+					status: pairedDoc?.status,
+					description: "Companion plan doc (.plan.md) for this plan",
+				});
 			}
 		}
 		const ticketVal = typeof p.ticket === "string" ? p.ticket.trim() : "";
 		if (ticketVal) {
 			const td = allDocs.find((d) => d.group === "tickets" && d.ticket?.toLowerCase() === ticketVal.toLowerCase());
-			if (td) pushCand(td.path, `Ticket: ${docDisplayName(td)}`, "Linked ticket for this plan");
+			if (td) pushCand(td.path, docDisplayName(td), { icon: "tag", status: td.status, description: "Linked ticket for this plan" });
 			for (const sp of allDocs.filter((d) => d.group === "specs" && d.tickets?.some((k) => k.toLowerCase() === ticketVal.toLowerCase()))) {
-				pushCand(sp.path, `Spec: ${docDisplayName(sp)}`, `Spec for ${ticketVal}`);
+				pushCand(sp.path, `Spec: ${docDisplayName(sp)}`, { icon: "file", status: sp.status, description: `Spec for ${ticketVal}` });
 			}
 		}
 		for (const d of allDocs.filter((f) => f.group === "specs" || f.group === "tickets")) {
-			const tag = d.group === "tickets" ? "Ticket" : "Spec";
-			const rel = relativeTo(state.workspace?.root, d.path).replace(/\\/g, "/");
-			pushCand(d.path, `${tag}: ${docDisplayName(d)}`, rel);
+			const isTicket = d.group === "tickets";
+			pushCand(d.path, isTicket ? docDisplayName(d) : `Spec: ${docDisplayName(d)}`, {
+				icon: isTicket ? "tag" : "file",
+				status: d.status,
+			});
 		}
-		if (!candidates.length) {
+		if (!items.length) {
 			notify("No specs or tickets were found in this workspace to sync Mermaid into.");
 			return;
 		}
-		// Ensure every choice button label is distinct.
-		const counts = new Map<string, number>();
-		for (const c of candidates) counts.set(c.label, (counts.get(c.label) ?? 0) + 1);
-		const labels = candidates.map((c) => ((counts.get(c.label) ?? 0) > 1 ? `${c.label} (${baseName(c.path)})` : c.label));
-		const details: Record<string, string> = {};
-		labels.forEach((lbl, i) => {
-			details[lbl] = candidates[i]!.detail;
+		const pickedPath = await quickPick<string>({
+			title: "Sync Mermaid flowchart into spec or ticket",
+			placeholder: "Filter specs and tickets…",
+			items,
 		});
-		const picked = await choose("Sync Mermaid flowchart into which spec or ticket?", labels, { details });
-		if (!picked) return;
-		const idx = labels.indexOf(picked);
-		const target = idx >= 0 ? candidates[idx] : undefined;
-		if (!target) return;
+		if (!pickedPath) return;
+		const target = { path: pickedPath };
 		const canon = canonical(target.path);
 		const openDoc = documents.get(canon);
 		let before: string;
@@ -1121,19 +1228,162 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		showPanel("palette");
 		requestPlanPaletteTab("assistant");
 	};
+	const openAgentWithPrompt = async (draft: string) => {
+		const { openAgentWithDraft } = await import("../agent/Agent");
+		openAgentWithDraft(draft, { cleanContext: true });
+	};
+	const runPlanBuild = async () => {
+		const p = plan();
+		if (!p) return;
+		if ((await specState(props.path)) === "current") {
+			void startBuild(props.path);
+			return;
+		}
+		const planRel = relativeTo(state.workspace?.root, props.path).replace(/\\/g, "/");
+		await openAgentWithPrompt(buildPlanAgentDraft(p, { planLabel: planRel, driftItems: driftFor(planUri() ?? "").items }));
+	};
+	const runBuildStep = async (nodeId: string) => {
+		const p = plan();
+		const node = p?.nodes.find((n) => n.id === nodeId);
+		if (!p || !node) return;
+		const planRel = relativeTo(state.workspace?.root, props.path).replace(/\\/g, "/");
+		await openAgentWithPrompt(
+			buildStepAgentDraft(p, node.id, {
+				planLabel: planRel,
+				codeUnits: linksOf(node.id),
+				driftItems: driftFor(planUri() ?? "").items,
+			}),
+		);
+	};
+	const runBuildStage = async (groupIdOrName: string) => {
+		const p = plan();
+		const group = p?.groups.find((g) => g.id === groupIdOrName || g.name === groupIdOrName);
+		if (!p || !group) return;
+		const planRel = relativeTo(state.workspace?.root, props.path).replace(/\\/g, "/");
+		await openAgentWithPrompt(
+			buildStageAgentDraft(p, group.id, {
+				planLabel: planRel,
+				driftItems: driftFor(planUri() ?? "").items,
+			}),
+		);
+	};
+	const runFixDrift = async () => {
+		const p = plan();
+		if (!p) return;
+		const drift = driftFor(planUri() ?? "");
+		if (!drift.items.length) {
+			notify("No drift between chart and code right now.");
+			return;
+		}
+		const planRel = relativeTo(state.workspace?.root, props.path).replace(/\\/g, "/");
+		await openAgentWithPrompt(buildDriftAgentDraft(p, drift.items, { planLabel: planRel }));
+	};
+	const runWriteTests = async () => {
+		const p = plan();
+		if (!p) return;
+		if ((builtOf(p)?.units.length ?? 0) > 0) {
+			void writeTests(props.path);
+			return;
+		}
+		const planRel = relativeTo(state.workspace?.root, props.path).replace(/\\/g, "/");
+		await openAgentWithPrompt(buildTestsAgentDraft(p, { planLabel: planRel }));
+	};
 	const triggerScheduledBuild = (scope: ScheduledBuildScope) => {
-		const title = plan()?.title || "this plan";
-		const msg =
-			scope.kind === "node"
-				? `Build scheduled for step "${scope.label}".`
-				: scope.kind === "stage"
-					? `Build scheduled for stage "${scope.label}".`
-					: scope.kind === "tests"
-						? `Test generation scheduled for "${scope.label || title}".`
-						: `New build scheduled for "${scope.label || title}".`;
-		setScheduledNotice(msg);
-		openAssistant();
-		notify(`${msg} Agent build triggers will run here in the next pass.`);
+		if (scope.kind === "node") {
+			if (scope.id) void runBuildStep(scope.id);
+			else void runPlanBuild();
+		} else if (scope.kind === "stage") {
+			void runBuildStage(scope.label);
+		} else if (scope.kind === "tests") {
+			void runWriteTests();
+		} else {
+			void runPlanBuild();
+		}
+	};
+	const showStepInGraph = async (node: PlanNode) => {
+		let scriptRel = "";
+		let procName: string | undefined;
+		const firstUnit = linksOf(node.id)[0];
+		if (firstUnit?.script) {
+			scriptRel = firstUnit.script;
+			procName = firstUnit.name;
+		} else if (node.ref?.trim()) {
+			const resolved = await resolveReference(node.ref.trim());
+			if (resolved) {
+				scriptRel = resolved.script;
+				procName = resolved.name;
+			}
+		}
+		if (!scriptRel) {
+			notify(`No code reference or built unit was found for "${node.text.trim() || node.id}".`);
+			return;
+		}
+		const fullPath = state.workspace?.root && !scriptRel.startsWith(state.workspace.root) ? joinPath(state.workspace.root, scriptRel) : scriptRel;
+		const { openGraphFocusedOn } = await import("../graph/GraphView");
+		openGraphFocusedOn(fullPath, procName);
+	};
+	const createDocForStep = async (kind: "questions" | "decisions" | "specs", node: PlanNode) => {
+		const p = plan();
+		if (!p) return;
+		const { newSpec, promoteToKnowledge } = await import("../projectDocs");
+		const planRel = relativeTo(state.workspace?.root, props.path).replace(/\\/g, "/");
+		const stepLabel = node.text.trim() || node.id;
+		const body = [`Linked from plan step "${stepLabel}" in \`${planRel}\`.`, node.notes?.trim() ? `\n${node.notes.trim()}` : ""].filter(Boolean).join("\n");
+		let createdPath: string | null = null;
+		if (kind === "specs") {
+			const before = activePath();
+			await newSpec();
+			const after = activePath();
+			if (after && after !== before && isMarkdown(after)) createdPath = after;
+		} else {
+			createdPath = await promoteToKnowledge(kind, {
+				title: stepLabel,
+				body,
+				ticket: typeof p.ticket === "string" ? p.ticket.trim() : undefined,
+				sourcePlan: planRel,
+			});
+		}
+		if (!createdPath) return;
+		const rel = relativeTo(state.workspace?.root, createdPath).replace(/\\/g, "/");
+		const latest = plan();
+		if (latest) applyText(props.path, printPlan(addNodeDoc(latest, node.id, rel)));
+		notify(`Linked ${baseName(createdPath)} to "${stepLabel}".`);
+	};
+	const runAlign = (action: AlignAction) => {
+		const p = plan();
+		const ids = activeSelectedIds();
+		if (!p || ids.size < 2) return;
+		const next = alignPlanNodes(p, ids, nodeRects(), action, direction());
+		if (next !== p) {
+			applyText(props.path, printPlan(next));
+			refocus();
+		}
+	};
+	const copySelection = () => {
+		const p = plan();
+		const ids = activeSelectedIds();
+		if (!p || !ids.size) return;
+		const clip = copyPlanSelection(p, ids);
+		if (!clip) {
+			notify("Select one or more steps to copy.");
+			return;
+		}
+		planClipboard = clip;
+		notify(`Copied ${clip.nodes.length} ${clip.nodes.length === 1 ? "step" : "steps"}.`);
+	};
+	const pasteSelection = () => {
+		const p = plan();
+		if (!p || !planClipboard) return;
+		const res = pastePlanSelection(p, planClipboard, direction());
+		if (!res.pastedIds.length) return;
+		const printed = printPlan(res.plan);
+		applyText(props.path, printed);
+		setSelectedIds(new Set(res.pastedIds));
+		if (res.pastedIds[0]) {
+			const line = nodeLines(printed, res.plan).get(res.pastedIds[0]);
+			moveCursor(line ?? 1);
+		}
+		refocus();
 	};
 	const highlightNodeTestPath = (nodeId: string) => {
 		const p = plan();
@@ -1236,6 +1486,20 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		if (e) {
 			apply(removeEdge(p, e.from, e.to));
 			return setEdge(null);
+		}
+		const multi = selectedIds();
+		if (multi.size > 1) {
+			let cur = p;
+			let lastSel: string | null = null;
+			for (const id of multi) {
+				const res = removeNode(cur, id);
+				if (res) {
+					cur = res.plan;
+					lastSel = res.select ?? null;
+				}
+			}
+			if (cur !== p) apply(cur, lastSel);
+			return;
 		}
 		const at = selected();
 		if (at) applyEdit(removeNode(p, at));
@@ -1361,6 +1625,22 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		if (editing() || e.target !== canvas) return;
 		const mod = e.ctrlKey || e.metaKey;
 		const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+		if (mod && !e.altKey && key === "f") {
+			e.preventDefault();
+			e.stopPropagation();
+			focusFinder?.();
+			return;
+		}
+		if (mod && !e.altKey && key === "c") {
+			e.preventDefault();
+			copySelection();
+			return;
+		}
+		if (mod && !e.altKey && key === "v") {
+			e.preventDefault();
+			pasteSelection();
+			return;
+		}
 		if (mod && key === "z") {
 			e.preventDefault();
 			return undo(e.shiftKey ? "redo" : "undo");
@@ -1370,6 +1650,11 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 			return undo("redo");
 		}
 		if (mod || e.altKey) return;
+		if (e.shiftKey && (e.key === "@" || e.key === "2" || e.code === "Digit2")) {
+			e.preventDefault();
+			zoomToSelection();
+			return;
+		}
 		if (e.shiftKey && (key === "ArrowUp" || key === "ArrowDown" || key === "ArrowLeft" || key === "ArrowRight")) {
 			if (edge()) {
 				e.preventDefault();
@@ -1379,6 +1664,17 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 				else if (key === "ArrowLeft") nudgeEdgeRoute("v", -stepPx);
 				else nudgeEdgeRoute("v", stepPx);
 				return;
+			}
+			if (selectedIds().size > 1) {
+				const p = plan();
+				if (p) {
+					e.preventDefault();
+					const stepPx = 12;
+					const dx = key === "ArrowLeft" ? -stepPx : key === "ArrowRight" ? stepPx : 0;
+					const dy = key === "ArrowUp" ? -stepPx : key === "ArrowDown" ? stepPx : 0;
+					applyText(props.path, printPlan(batchOffsetPlanNodes(p, selectedIds(), dx, dy, direction())));
+					return;
+				}
 			}
 			if (selected()) {
 				e.preventDefault();
@@ -1411,7 +1707,8 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 					cancelActiveDrag();
 					return;
 				}
-				if (keysOpen()) setKeysOpen(false);
+				if (marquee()) setMarquee(null);
+				else if (keysOpen()) setKeysOpen(false);
 				else if (linking()) setLinking(null);
 				else if (wireDrag()) setWireDrag(null);
 				else if (routeDrag()) setRouteDrag(null);
@@ -1431,8 +1728,9 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		}
 	};
 
-	const clickNode = (id: string) => {
+	const clickNode = (id: string, shiftKey = false) => {
 		if (linking()) linkTo(id);
+		else if (shiftKey) toggleSelectNode(id);
 		else select(id);
 		refocus();
 	};
@@ -1565,19 +1863,32 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 	let justDraggedNodeAt = 0;
 
 	const startNodeDrag = (e: MouseEvent, n: PlanNode) => {
-		if (e.button !== 0 || n.pending || linking()) return;
+		if (e.button !== 0 || e.shiftKey || n.pending || linking()) return;
 		e.stopPropagation();
 		cancelActiveDrag?.();
 		const dir = direction();
 		const startOffset = offsetFor(n.offset, dir);
+		const multiSet = selectedIds();
+		const isBatch = multiSet.size > 1 && multiSet.has(n.id);
+		const multiIds = isBatch ? [...multiSet] : undefined;
+		const excludedIds = new Set(multiIds ?? [n.id]);
 		const curLayout = layout();
 		const thisBox = curLayout?.boxes.find((b) => b.id === n.id && b.node);
 		const otherCenters = (curLayout?.boxes ?? [])
-			.filter((b) => b.node && b.id !== n.id)
+			.filter((b) => b.node && !excludedIds.has(b.id))
 			.map((b) => ({ cx: b.x + b.width / 2, cy: b.y + b.height / 2 }));
 		const baseCenter = thisBox ? { cx: thisBox.x + thisBox.width / 2 - startOffset.x, cy: thisBox.y + thisBox.height / 2 - startOffset.y } : null;
 
-		let cur: NodeDrag = { kind: "node", id: n.id, startClient: { x: e.clientX, y: e.clientY }, startOffset, curOffset: startOffset, moved: false };
+		let cur: NodeDrag = {
+			kind: "node",
+			id: n.id,
+			startClient: { x: e.clientX, y: e.clientY },
+			startOffset,
+			curOffset: startOffset,
+			moved: false,
+			multiIds,
+			delta: { x: 0, y: 0 },
+		};
 
 		const cleanup = () => {
 			window.removeEventListener("mousemove", onMove, true);
@@ -1623,7 +1934,14 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 				ox = Math.round(ox);
 				oy = Math.round(oy);
 			}
-			cur = { ...cur, curOffset: { x: ox, y: oy }, moved: true, guideX, guideY };
+			cur = {
+				...cur,
+				curOffset: { x: ox, y: oy },
+				delta: { x: ox - cur.startOffset.x, y: oy - cur.startOffset.y },
+				moved: true,
+				guideX,
+				guideY,
+			};
 			setNodeDrag(cur);
 		};
 		const onUp = () => {
@@ -1633,8 +1951,12 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 			justDraggedNodeAt = performance.now();
 			const p = plan();
 			if (!p) return;
-			const nextOffset: PlanOffset = { x: cur.curOffset.x, y: cur.curOffset.y, ...(dir === "RIGHT" ? { dir: "RIGHT" } : {}) };
-			apply(setNodeOffset(p, cur.id, nextOffset), cur.id);
+			if (cur.multiIds && cur.multiIds.length > 1 && cur.delta) {
+				applyText(props.path, printPlan(batchOffsetPlanNodes(p, new Set(cur.multiIds), cur.delta.x, cur.delta.y, dir)));
+			} else {
+				const nextOffset: PlanOffset = { x: cur.curOffset.x, y: cur.curOffset.y, ...(dir === "RIGHT" ? { dir: "RIGHT" } : {}) };
+				apply(setNodeOffset(p, cur.id, nextOffset), cur.id);
+			}
 			refocus();
 		};
 		cancelActiveDrag = onCancel;
@@ -1703,10 +2025,40 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 
 	// --- Right-Click Context Menus -------------------------------------------
 
+	const alignSubmenu = (): RowMenuEntry[] =>
+		selectedIds().size >= 2
+			? [
+					{
+						label: `Align & Distribute (${selectedIds().size} selected)`,
+						children: [
+							{ label: "Align Left", value: "align:left" },
+							{ label: "Align Center", value: "align:center" },
+							{ label: "Align Top", value: "align:top" },
+							"separator",
+							{ label: "Distribute Horizontally", value: "align:distribute-h" },
+							{ label: "Distribute Vertically", value: "align:distribute-v" },
+							"separator",
+							{ label: "Zoom to Selection", value: "align:zoom", keys: "Shift+2" },
+						],
+					},
+				]
+			: [];
+
+	const handleAlignChoice = (picked: string): boolean => {
+		if (picked === "align:left") return (runAlign("left"), true);
+		if (picked === "align:center") return (runAlign("center"), true);
+		if (picked === "align:top") return (runAlign("top"), true);
+		if (picked === "align:distribute-h") return (runAlign("distribute-h"), true);
+		if (picked === "align:distribute-v") return (runAlign("distribute-v"), true);
+		if (picked === "align:zoom") return (zoomToSelection(), true);
+		return false;
+	};
+
 	const nodeContextMenu = async (e: MouseEvent, n: PlanNode) => {
 		e.preventDefault();
 		e.stopPropagation();
-		select(n.id);
+		const keepMulti = selectedIds().size > 1 && selectedIds().has(n.id);
+		select(n.id, keepMulti);
 		const EDIT = "Edit label";
 		const ADD_STEP = "Add step after";
 		const ADD_BRANCH = "Add branch";
@@ -1715,16 +2067,25 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		const TO_DECISION = "Convert to Decision";
 		const STAGE = "Set stage group…";
 		const DUP = "Duplicate";
+		const COPY = "Copy selection";
 		const RESET_POS = "Reset position";
 		const CODE = "Inspect code";
+		const CALL_GRAPH = "Show in Call Graph";
 		const TESTS = "Highlight test path";
-		const BUILD = linksOf(n.id).length > 0 ? "Rebuild this step… (scheduled)" : "Build this step… (scheduled)";
-		const DEL = "Delete";
+		const BUILD = linksOf(n.id).length > 0 ? "Rebuild this step with Agent" : "Build this step with Agent";
+		const FIX_DRIFT = "Fix drift with Agent";
+		const WRITE_TESTS = "Write tests";
+		const NEW_QUESTION = "New question for this step…";
+		const NEW_DECISION = "New decision for this step…";
+		const NEW_SPEC = "New spec for this step…";
+		const DEL = keepMulti ? `Delete ${selectedIds().size} selected` : "Delete";
 		const canBranch = n.kind === "step" || n.kind === "call" || n.kind === "decision";
 		const canDup = n.kind !== "start" && n.kind !== "end";
 		const hasCode = linksOf(n.id).length > 0 || Boolean(n.ref?.trim());
+		const hasDrift = driftNodes().has(n.id) || driftFor(planUri() ?? "").items.length > 0;
 		const off = offsetFor(n.offset, direction());
 		const hasOffset = off.x !== 0 || off.y !== 0;
+		const alignGroup = alignSubmenu();
 		const flowGroup: RowMenuEntry[] = [
 			...(n.kind !== "end" ? [{ label: ADD_STEP, value: ADD_STEP, keys: "Enter" }] : []),
 			...(canBranch ? [{ label: ADD_BRANCH, value: ADD_BRANCH, keys: "B" }] : []),
@@ -1734,17 +2095,20 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 			...(n.kind === "decision" ? [TO_STEP] : []),
 			...(n.kind !== "decision" && canDup ? [TO_DECISION] : []),
 			STAGE,
-			...(canDup ? [DUP] : []),
+			...(canDup ? [DUP, { label: COPY, value: COPY, keys: "Ctrl+C" }] : []),
+			...alignGroup,
 			...(hasOffset ? [{ label: RESET_POS, value: RESET_POS, keys: "R" }] : []),
 		];
 		const codeGroup: RowMenuEntry[] = [
-			...(hasCode ? [{ label: CODE, value: CODE, keys: "G" }] : []),
+			...(hasCode ? [{ label: CODE, value: CODE, keys: "G" }, CALL_GRAPH] : []),
 			TESTS,
 			...(canDup ? [BUILD] : []),
+			...(hasDrift ? [FIX_DRIFT] : []),
+			WRITE_TESTS,
 		];
 		const linked = linkedDocsOfNode(n);
-		const docGroup: RowMenuEntry[] =
-			linked.length === 1
+		const docGroup: RowMenuEntry[] = [
+			...(linked.length === 1
 				? [{ label: `Open linked doc: ${linked[0]!.label}`, value: "doc:0" }]
 				: linked.length > 1
 					? [
@@ -1756,7 +2120,11 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 								})),
 							},
 						]
-					: [];
+					: []),
+			NEW_QUESTION,
+			NEW_DECISION,
+			NEW_SPEC,
+		];
 		const items: RowMenuEntry[] = [
 			{ label: EDIT, value: EDIT, keys: "F2" },
 			"separator",
@@ -1765,12 +2133,14 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 			...transformGroup,
 			"separator",
 			...codeGroup,
-			...(docGroup.length ? (["separator", ...docGroup] as RowMenuEntry[]) : []),
+			"separator",
+			...docGroup,
 			"separator",
 			{ label: DEL, value: DEL, keys: "Del", danger: true },
 		];
 		const picked = await chooseFromMenu(`Actions for ${n.text || n.kind}`, items, { x: e.clientX, y: e.clientY });
 		if (!picked) return refocus();
+		if (handleAlignChoice(picked)) return;
 		if (picked === EDIT) setEditing({ node: n.id });
 		else if (picked === ADD_STEP) addNextFrom(n.id, "step");
 		else if (picked === ADD_BRANCH) addBranchFrom(n.id);
@@ -1779,10 +2149,17 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		else if (picked === TO_DECISION) changeKind(n.id, "decision");
 		else if (picked === STAGE) void addStageGroupAsk(n.id);
 		else if (picked === DUP) duplicateById(n.id);
+		else if (picked === COPY) copySelection();
 		else if (picked === RESET_POS) resetNodePos(n.id);
 		else if (picked === CODE) openCode(n.id);
+		else if (picked === CALL_GRAPH) void showStepInGraph(n);
 		else if (picked === TESTS) highlightNodeTestPath(n.id);
-		else if (picked === BUILD) triggerScheduledBuild({ kind: "node", id: n.id, label: n.text.trim() || n.id });
+		else if (picked === BUILD) void runBuildStep(n.id);
+		else if (picked === FIX_DRIFT) void runFixDrift();
+		else if (picked === WRITE_TESTS) void runWriteTests();
+		else if (picked === NEW_QUESTION) void createDocForStep("questions", n);
+		else if (picked === NEW_DECISION) void createDocForStep("decisions", n);
+		else if (picked === NEW_SPEC) void createDocForStep("specs", n);
 		else if (picked === DEL) remove();
 		else if (picked.startsWith("doc:")) {
 			const hit = linked[Number(picked.slice(4))];
@@ -1824,7 +2201,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		const RENAME = "Rename stage…";
 		const COLOR = "Next stage colour";
 		const RESET_STAGE = "Reset stage position";
-		const BUILD_STAGE = "Build this stage… (scheduled)";
+		const BUILD_STAGE = "Build this stage with Agent";
 		const p = plan();
 		const dir = direction();
 		const gOff = offsetFor(p?.groups.find((g) => g.id === groupId)?.offset, dir);
@@ -1840,17 +2217,20 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		if (picked === RENAME) void renameStageAsk(groupId);
 		else if (picked === COLOR) cycleRegionColor(groupName, 1);
 		else if (picked === RESET_STAGE) resetGroupPos(groupId);
-		else if (picked === BUILD_STAGE) triggerScheduledBuild({ kind: "stage", label: groupName });
+		else if (picked === BUILD_STAGE) void runBuildStage(groupId);
 	};
 
 	const canvasContextMenu = async (e: MouseEvent) => {
 		e.preventDefault();
 		const ADD_STEP = "Add step";
 		const ADD_DECISION = "Add decision";
-		const BUILD_PLAN = "Trigger new build… (scheduled)";
+		const PASTE = "Paste steps";
+		const BUILD_PLAN = "Build plan";
+		const FIX_DRIFT = "Fix drift with Agent";
+		const WRITE_TESTS = "Write tests";
 		const WALK_TESTS = activePathIndex() === null ? "Walk test paths on chart" : "Hide highlighted test path";
 		const OPEN_TICKET = "Open ticket";
-		const OPEN_SPEC = "Open spec";
+		const OPEN_SPEC = "Open plan doc";
 		const FLIP = direction() === "DOWN" ? "Switch to Horizontal layout" : "Switch to Vertical layout";
 		const AUTO = "Auto-layout (reset manual positions)";
 		const FIT = "Fit chart to view";
@@ -1859,6 +2239,8 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		const SAVE = "Save picture…";
 		const p = plan();
 		const manual = Boolean(p && hasManualLayout(p, direction()));
+		const hasDrift = driftFor(planUri() ?? "").items.length > 0;
+		const alignGroup = alignSubmenu();
 		const ticketVal = typeof p?.ticket === "string" ? p.ticket.trim() : "";
 		const ticketDoc = ticketVal
 			? docs().find((d) => d.group === "tickets" && d.exists && d.ticket?.toLowerCase() === ticketVal.toLowerCase()) ?? null
@@ -1879,8 +2261,12 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		const items: RowMenuEntry[] = [
 			ADD_STEP,
 			ADD_DECISION,
+			...(planClipboard ? [{ label: PASTE, value: PASTE, keys: "Ctrl+V" }] : []),
+			...alignGroup,
 			"separator",
 			BUILD_PLAN,
+			...(hasDrift ? [FIX_DRIFT] : []),
+			WRITE_TESTS,
 			WALK_TESTS,
 			...(docItems.length ? (["separator", ...docItems] as RowMenuEntry[]) : []),
 			"separator",
@@ -1899,9 +2285,14 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 			},
 		];
 		const picked = await chooseFromMenu("Flowchart actions", items, { x: e.clientX, y: e.clientY });
+		if (!picked) return;
+		if (handleAlignChoice(picked)) return;
 		if (picked === ADD_STEP) addNext();
 		else if (picked === ADD_DECISION) addDecisionNode();
-		else if (picked === BUILD_PLAN) triggerScheduledBuild({ kind: "plan", label: p?.title || "this plan" });
+		else if (picked === PASTE) pasteSelection();
+		else if (picked === BUILD_PLAN) void runPlanBuild();
+		else if (picked === FIX_DRIFT) void runFixDrift();
+		else if (picked === WRITE_TESTS) void runWriteTests();
 		else if (picked === WALK_TESTS) setActivePathIndex(activePathIndex() === null ? 0 : null);
 		else if (picked === OPEN_TICKET && ticketDoc) void openFile(ticketDoc.path);
 		else if (picked === OPEN_SPEC && hasSpec) void openFile(specFile);
@@ -1950,13 +2341,27 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 	// --- Floating Contextual Action Bar Coordinates --------------------------
 
 	const floatBarPos = createMemo(() => {
-		if (editing() || far() || panning() || wireDrag() || routeDrag() || nodeDrag()?.moved) return null;
+		if (editing() || far() || panning() || marquee() || wireDrag() || routeDrag() || nodeDrag()?.moved) return null;
 		const l = layout();
 		if (!l || !canvas) return null;
 		const rect = canvas.getBoundingClientRect();
 		if (rect.width < 160) return null;
 		const v = view();
-		const half = Math.min(rect.width / 2 - 8, tight() ? 76 : 130);
+		const half = Math.min(rect.width / 2 - 8, tight() ? 76 : 150);
+		const multi = selectedIds();
+		if (multi.size >= 2) {
+			const boxes = l.boxes.filter((x) => x.node && multi.has(x.id));
+			if (boxes.length >= 2) {
+				const minX = Math.min(...boxes.map((x) => x.x));
+				const maxX = Math.max(...boxes.map((x) => x.x + x.width));
+				const minY = Math.min(...boxes.map((x) => x.y));
+				const maxY = Math.max(...boxes.map((x) => x.y + x.height));
+				const left = Math.max(half, Math.min(rect.width - half, ((minX + maxX) / 2) * v.scale + v.x));
+				const rawTop = minY * v.scale + v.y - 42;
+				const top = rawTop < 10 ? maxY * v.scale + v.y + 14 : Math.min(rect.height - 46, rawTop);
+				return { kind: "multi" as const, count: boxes.length, left, top };
+			}
+		}
 		const chosenEdge = edge();
 		if (chosenEdge) {
 			const line = l.lines.find((x) => x.from === chosenEdge.from && x.to === chosenEdge.to);
@@ -2033,7 +2438,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 
 	// Expose reactive plan state, editing actions, and Assistant callbacks to the Palette panel.
 	createEffect(() => {
-		const active = state.groups[state.activeGroup]?.active === props.path && !state.planText[props.path];
+		const active = state.groups[state.activeGroup]?.active === props.path && planMode(props.path) !== "source";
 		const hasPlan = Boolean(plan());
 		if (!active || !hasPlan) return;
 		const unregister = registerPlanBridge({
@@ -2066,8 +2471,8 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 			activePathIndex,
 			setActivePathIndex,
 			stepActivePath,
-			scheduledNotice,
-			clearScheduledNotice: () => setScheduledNotice(null),
+			scheduledNotice: () => null,
+			clearScheduledNotice: () => {},
 			triggerScheduledBuild,
 			openAssistant,
 			setPlanField: (field, value) => setPlanField(field, field === "ticket" ? ticketKey(value) : value),
@@ -2127,6 +2532,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		const count = findingCount();
 		const counts = codeStatusCounts();
 		const unbuilt = counts.grey + counts.yellow + counts.red;
+		const hasDrift = driftFor(planUri() ?? "").items.length > 0;
 		return [
 			{
 				label: count ? `Show ${count} ${count === 1 ? "finding" : "findings"} in Problems` : "Open Problems panel",
@@ -2142,8 +2548,20 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 			},
 			"separator",
 			{
-				label: unbuilt > 0 ? `Trigger new build (${unbuilt} pending)… (scheduled)` : "Trigger new build… (scheduled)",
-				run: () => triggerScheduledBuild({ kind: "plan", label: plan()?.title || "this plan" }),
+				label: unbuilt > 0 ? `Build plan (${unbuilt} pending)` : "Build plan",
+				run: () => void runPlanBuild(),
+			},
+			...(hasDrift
+				? [
+						{
+							label: "Fix drift with Agent",
+							run: () => void runFixDrift(),
+						},
+					]
+				: []),
+			{
+				label: "Write tests",
+				run: () => void runWriteTests(),
 			},
 			{
 				label: "Open Assistant tab",
@@ -2186,14 +2604,17 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		const hasSpec =
 			specFile !== props.path &&
 			(documents.has(canonical(specFile)) || docs().some((d) => d.exists && canonical(d.path) === canonical(specFile)));
+		const hasDrift = driftFor(planUri() ?? "").items.length > 0;
 		return [
 			{
-				label: "Trigger new build… (scheduled)",
-				run: () => triggerScheduledBuild({ kind: "plan", label: p?.title || "this plan" }),
+				label: "Build plan",
+				run: () => void runPlanBuild(),
 			},
+			...(hasDrift ? [{ label: "Fix drift with Agent", run: () => void runFixDrift() }] : []),
+			{ label: "Write tests", run: () => void runWriteTests() },
 			{ label: "Open Assistant tab", run: openAssistant },
 			...(ticketDoc ? [{ label: "Open ticket", run: () => void openFile(ticketDoc.path) }] : []),
-			...(hasSpec ? [{ label: "Open spec", run: () => void openFile(specFile) }] : []),
+			...(hasSpec ? [{ label: "Open plan doc", run: () => void openFile(specFile) }] : []),
 			{
 				label: activePathIndex() === null ? `Walk test paths (${pathCount})` : "Hide highlighted test path",
 				disabled: pathCount === 0,
@@ -2231,8 +2652,64 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 
 	const gridStep = () => Math.max(12, 24 * view().scale);
 
+	const startMarqueeDrag = (e: MouseEvent) => {
+		e.preventDefault();
+		cancelActiveDrag?.();
+		const start = clientToCanvas(e.clientX, e.clientY);
+		let box = { start, cur: start };
+		setMarquee(box);
+		const cleanup = () => {
+			window.removeEventListener("mousemove", onMove, true);
+			window.removeEventListener("mouseup", onUp, true);
+			window.removeEventListener("blur", onCancel);
+			if (cancelActiveDrag === onCancel) cancelActiveDrag = null;
+		};
+		const onCancel = () => {
+			cleanup();
+			setMarquee(null);
+		};
+		const onMove = (ev: MouseEvent) => {
+			if (ev.buttons === 0) return onUp();
+			const curPt = clientToCanvas(ev.clientX, ev.clientY);
+			box = { start, cur: curPt };
+			setMarquee(box);
+		};
+		const onUp = () => {
+			cleanup();
+			setMarquee(null);
+			panned = 10;
+			const hits = marqueeNodeIds(nodeRects(), {
+				x: box.start.x,
+				y: box.start.y,
+				width: box.cur.x - box.start.x,
+				height: box.cur.y - box.start.y,
+			});
+			setEdge(null);
+			setSelectedIds(new Set(hits));
+			const p = plan();
+			const first = hits[0];
+			const line = first && p ? nodeLines(text(), p).get(first) : undefined;
+			moveCursor(line ?? 1);
+			refocus();
+		};
+		cancelActiveDrag = onCancel;
+		window.addEventListener("mousemove", onMove, true);
+		window.addEventListener("mouseup", onUp, true);
+		window.addEventListener("blur", onCancel);
+	};
+
 	return (
-		<div class="plan" classList={{ compact: compact(), tight: tight() }}>
+		<div
+			class="plan"
+			classList={{ compact: compact(), tight: tight() }}
+			onKeyDown={(e) => {
+				if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "f") {
+					e.preventDefault();
+					e.stopPropagation();
+					focusFinder?.();
+				}
+			}}
+		>
 			<Show
 				when={plan()}
 				fallback={
@@ -2255,10 +2732,12 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 							where: plan()!.groups.find((g) => g.id === n.group)?.name ?? (n.kind === "call" ? "step" : n.kind),
 						}))}
 						label="Find a step by its words and select it"
-						title="Type part of a step's words to jump right to it"
+						title="Type part of a step's words to jump right to it (Ctrl+F)"
 						placeholder="Find a step…"
 						none={(typed) => `No step has “${typed}” in its words.`}
 						onChoose={goTo}
+						onRef={(fn) => (focusFinder = fn)}
+						onEscape={() => refocus()}
 					/>
 					<span class="spacer" />
 					<Show when={!isTextMode() && hasManualLayout(plan()!, direction())}>
@@ -2351,6 +2830,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 									const p = plan();
 									if (p) apply(removePlanTest(p, id));
 								}}
+								onFind={() => focusFinder?.()}
 							/>
 						}
 					>
@@ -2380,6 +2860,10 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 						onMouseDown={(e) => {
 							if (e.button !== 0) return;
 							if (e.target instanceof Element && e.target.closest(".plan-edit, .plan-keys, .plan-float-bar, .plan-float-controls, .plan-port, .plan-seg-handle, .plan-group-header, .plan-doc-badge")) return;
+							if (e.shiftKey) {
+								startMarqueeDrag(e);
+								return;
+							}
 							dragging = { x: e.clientX, y: e.clientY, moved: false };
 							panned = 0;
 						}}
@@ -2805,7 +3289,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 											};
 											const trouble = () => issues().get(nid);
 											const mark = () => (n() ? statusMark(stateOf(n()!)) : null);
-											const isSel = () => selected() === nid;
+											const isSel = () => selected() === nid || selectedIds().has(nid);
 											const corner = () => {
 												const cur = b();
 												return cur && n()?.kind === "decision" ? { x: cur.width / 4, y: cur.height / 4 } : { x: 4, y: 4 };
@@ -2835,7 +3319,10 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 															"on-path": Boolean(onPath()?.nodes.has(nid)),
 															selected: isSel(),
 															peeked: peeked()?.id === nid && !isSel(),
-															dragging: nodeDrag()?.kind === "node" && nodeDrag()?.id === nid && Boolean(nodeDrag()?.moved),
+															dragging:
+																nodeDrag()?.kind === "node" &&
+																Boolean(nodeDrag()?.moved) &&
+																(nodeDrag()?.id === nid || Boolean(nodeDrag()?.multiIds?.includes(nid))),
 															origin: linking() === nid || wireDrag()?.fromId === nid,
 															"drop-target": dropNodeId() === nid,
 															trouble: Boolean(trouble()),
@@ -2853,7 +3340,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 															const node = n();
 															if (!node || node.pending || performance.now() - justDraggedNodeAt < 120) return;
 															if (e.ctrlKey || e.metaKey) openCode(nid);
-															else clickNode(nid);
+															else clickNode(nid, e.shiftKey);
 														}}
 														onDblClick={(e) => (e.stopPropagation(), !n()?.pending && setEditing({ node: nid }))}
 														onContextMenu={(e) => n() && !n()!.pending && void nodeContextMenu(e, n()!)}
@@ -3025,6 +3512,27 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 										</g>
 									</Show>
 
+									{/* Live Shift+Drag marquee box selection */}
+									<Show when={marquee()} keyed>
+										{(m) => (
+											<rect
+												class="plan-marquee"
+												x={Math.min(m.start.x, m.cur.x)}
+												y={Math.min(m.start.y, m.cur.y)}
+												width={Math.abs(m.cur.x - m.start.x)}
+												height={Math.abs(m.cur.y - m.start.y)}
+												rx="4"
+												style={{
+													fill: "color-mix(in srgb, var(--accent) 12%, transparent)",
+													stroke: "var(--accent)",
+													"stroke-width": `${1.5 / (view().scale || 1)}`,
+													"stroke-dasharray": `${5 / (view().scale || 1)} ${3 / (view().scale || 1)}`,
+													"pointer-events": "none",
+												}}
+											/>
+										)}
+									</Show>
+
 									{/* Live rubber-band connector wire while dragging from any port */}
 									<Show when={wireDrag()?.dragged}>
 										<path
@@ -3110,7 +3618,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 							</Show>
 						</svg>
 
-						{/* Floating contextual action toolbar above the selected node or edge. */}
+						{/* Floating contextual action toolbar above the selected node, multi-selection, or edge. */}
 						<Show when={floatBarPos()} keyed>
 							{(bar) => (
 								<div
@@ -3120,93 +3628,133 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 									onClick={(e) => e.stopPropagation()}
 								>
 									<Show
-										when={bar.kind === "node"}
+										when={bar.kind === "multi"}
 										fallback={
-											(() => {
-												const eb = bar as Extract<NonNullable<ReturnType<typeof floatBarPos>>, { kind: "edge" }>;
-												return (
-													<>
-														<button type="button" title="Edit connection label (F2)" onClick={() => setEditing({ from: eb.edge.from, to: eb.edge.to })}>
-															<Icon name="note" />
-															<span>Label</span>
-														</button>
-														<button type="button" title="Insert a step on this wire" onClick={() => insertBetween(eb.edge.from, eb.edge.to)}>
-															<Icon name="add" />
-															<span>Insert step</span>
-														</button>
-														<button type="button" title="Reverse connection direction" onClick={() => reverseSelectedEdge({ from: eb.edge.from, to: eb.edge.to })}>
-															<Icon name="refresh" />
-														</button>
-														<Show when={eb.edge.route && Object.keys(eb.edge.route).length > 0}>
-															<button type="button" title="Reset manual wire route (R)" onClick={() => resetEdgeRoute({ from: eb.edge.from, to: eb.edge.to })}>
-																<Icon name="discard" />
-																<span>Reset</span>
+											<Show
+												when={bar.kind === "node"}
+												fallback={
+													(() => {
+														const eb = bar as Extract<NonNullable<ReturnType<typeof floatBarPos>>, { kind: "edge" }>;
+														return (
+															<>
+																<button type="button" title="Edit connection label (F2)" onClick={() => setEditing({ from: eb.edge.from, to: eb.edge.to })}>
+																	<Icon name="note" />
+																	<span>Label</span>
+																</button>
+																<button type="button" title="Insert a step on this wire" onClick={() => insertBetween(eb.edge.from, eb.edge.to)}>
+																	<Icon name="add" />
+																	<span>Insert step</span>
+																</button>
+																<button type="button" title="Reverse connection direction" onClick={() => reverseSelectedEdge({ from: eb.edge.from, to: eb.edge.to })}>
+																	<Icon name="refresh" />
+																</button>
+																<Show when={eb.edge.route && Object.keys(eb.edge.route).length > 0}>
+																	<button type="button" title="Reset manual wire route (R)" onClick={() => resetEdgeRoute({ from: eb.edge.from, to: eb.edge.to })}>
+																		<Icon name="discard" />
+																		<span>Reset</span>
+																	</button>
+																</Show>
+																<span class="plan-float-sep" />
+																<button type="button" class="danger" title="Delete connection (Del)" onClick={remove}>
+																	<Icon name="trash" />
+																</button>
+															</>
+														);
+													})()
+												}
+											>
+												{(() => {
+													const n = (bar as Extract<NonNullable<ReturnType<typeof floatBarPos>>, { kind: "node" }>).node;
+													const canBranch = n.kind === "step" || n.kind === "call" || n.kind === "decision";
+													const canDup = n.kind !== "start" && n.kind !== "end";
+													const hasCode = linksOf(n.id).length > 0 || Boolean(n.ref?.trim());
+													return (
+														<>
+															<Show when={n.kind !== "end"}>
+																<button type="button" title="Add next step (Enter)" onClick={() => addNextFrom(n.id, "step")}>
+																	<Icon name="add" />
+																	<span>Step</span>
+																</button>
+															</Show>
+															<Show when={canBranch}>
+																<button type="button" title="Add branch (B)" onClick={() => addBranchFrom(n.id)}>
+																	<Icon name="git-branch" />
+																	<span>Branch</span>
+																</button>
+																<button
+																	type="button"
+																	classList={{ on: n.kind === "decision" }}
+																	title="Toggle Step / Decision (D)"
+																	onClick={() => toggleDecision(n.id)}
+																>
+																	<span>{n.kind === "decision" ? "To Step" : "Decision"}</span>
+																</button>
+															</Show>
+															<Show when={n.kind !== "end"}>
+																<button
+																	type="button"
+																	classList={{ on: linking() === n.id }}
+																	title="Connect to another node (C)"
+																	onClick={() => (linking() ? setLinking(null) : beginLink(n.id))}
+																>
+																	<Icon name="symbol-event" />
+																</button>
+															</Show>
+															<Show when={canDup}>
+																<button type="button" title="Duplicate step" onClick={() => duplicateById(n.id)}>
+																	<Icon name="layers" />
+																</button>
+															</Show>
+															<Show when={offsetFor(n.offset, direction()).x !== 0 || offsetFor(n.offset, direction()).y !== 0}>
+																<button type="button" title="Reset node position (R)" onClick={() => resetNodePos(n.id)}>
+																	<Icon name="discard" />
+																	<span>Reset</span>
+																</button>
+															</Show>
+															<Show when={hasCode}>
+																<button type="button" title="Inspect linked code (G)" onClick={() => openCode(n.id)}>
+																	<Icon name="go-to-file" />
+																</button>
+															</Show>
+															<span class="plan-float-sep" />
+															<button type="button" class="danger" title="Delete step (Del)" onClick={remove}>
+																<Icon name="trash" />
 															</button>
-														</Show>
-														<span class="plan-float-sep" />
-														<button type="button" class="danger" title="Delete connection (Del)" onClick={remove}>
-															<Icon name="trash" />
-														</button>
-													</>
-												);
-											})()
+														</>
+													);
+												})()}
+											</Show>
 										}
 									>
 										{(() => {
-											const n = (bar as Extract<NonNullable<ReturnType<typeof floatBarPos>>, { kind: "node" }>).node;
-											const canBranch = n.kind === "step" || n.kind === "call" || n.kind === "decision";
-											const canDup = n.kind !== "start" && n.kind !== "end";
-											const hasCode = linksOf(n.id).length > 0 || Boolean(n.ref?.trim());
+											const mb = bar as Extract<NonNullable<ReturnType<typeof floatBarPos>>, { kind: "multi" }>;
 											return (
 												<>
-													<Show when={n.kind !== "end"}>
-														<button type="button" title="Add next step (Enter)" onClick={() => addNextFrom(n.id, "step")}>
-															<Icon name="add" />
-															<span>Step</span>
+													<button type="button" title="Align selected nodes to left edge" onClick={() => runAlign("left")}>
+														<span>Align L</span>
+													</button>
+													<button type="button" title="Align selected nodes to horizontal center" onClick={() => runAlign("center")}>
+														<span>Center</span>
+													</button>
+													<button type="button" title="Align selected nodes to top edge" onClick={() => runAlign("top")}>
+														<span>Top</span>
+													</button>
+													<Show when={mb.count >= 3}>
+														<button type="button" title="Distribute selected nodes horizontally" onClick={() => runAlign("distribute-h")}>
+															<span>Dist H</span>
 														</button>
-													</Show>
-													<Show when={canBranch}>
-														<button type="button" title="Add branch (B)" onClick={() => addBranchFrom(n.id)}>
-															<Icon name="git-branch" />
-															<span>Branch</span>
-														</button>
-														<button
-															type="button"
-															classList={{ on: n.kind === "decision" }}
-															title="Toggle Step / Decision (D)"
-															onClick={() => toggleDecision(n.id)}
-														>
-															<span>{n.kind === "decision" ? "To Step" : "Decision"}</span>
-														</button>
-													</Show>
-													<Show when={n.kind !== "end"}>
-														<button
-															type="button"
-															classList={{ on: linking() === n.id }}
-															title="Connect to another node (C)"
-															onClick={() => (linking() ? setLinking(null) : beginLink(n.id))}
-														>
-															<Icon name="symbol-event" />
-														</button>
-													</Show>
-													<Show when={canDup}>
-														<button type="button" title="Duplicate step" onClick={() => duplicateById(n.id)}>
-															<Icon name="layers" />
-														</button>
-													</Show>
-													<Show when={offsetFor(n.offset, direction()).x !== 0 || offsetFor(n.offset, direction()).y !== 0}>
-														<button type="button" title="Reset node position (R)" onClick={() => resetNodePos(n.id)}>
-															<Icon name="discard" />
-															<span>Reset</span>
-														</button>
-													</Show>
-													<Show when={hasCode}>
-														<button type="button" title="Inspect linked code (G)" onClick={() => openCode(n.id)}>
-															<Icon name="go-to-file" />
+														<button type="button" title="Distribute selected nodes vertically" onClick={() => runAlign("distribute-v")}>
+															<span>Dist V</span>
 														</button>
 													</Show>
 													<span class="plan-float-sep" />
-													<button type="button" class="danger" title="Delete step (Del)" onClick={remove}>
+													<button type="button" title="Zoom to Selection (Shift+2)" onClick={zoomToSelection}>
+														<Icon name="zoom-in" />
+													</button>
+													<button type="button" title="Copy selected steps (Ctrl+C)" onClick={copySelection}>
+														<Icon name="copy" />
+													</button>
+													<button type="button" class="danger" title={`Delete ${mb.count} selected steps (Del)`} onClick={remove}>
 														<Icon name="trash" />
 													</button>
 												</>

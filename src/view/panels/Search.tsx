@@ -11,18 +11,20 @@ import { symbolPath } from "../editor/regions";
 import { session } from "../lsp/session";
 import type { DocFile, SearchHit } from "../../shared/protocol";
 import { backend } from "../backend";
-import { choose } from "../dialogs";
+import { choose, quickPick } from "../dialogs";
 import { activePath, canonical, documents, fileChangedOnDisk, isUntitled, notify, openFile, save, saveAll, setState, state } from "../state";
 import { baseName, isInside, relativeTo } from "../../shared/paths";
 import { parseCsv } from "../../shared/csv";
 import { fileChosen } from "../../shared/fileGlob";
 import { frontMatter, HEADING, many, one, plainMarkdown } from "../../shared/frontMatter";
+import { overlapsProtectedSpan, planLineBreadcrumb, protectedMarkdownSpans, replaceSafeInText, type TextSpan } from "../../shared/menuBar";
 import { DOC_FOLDERS, isCatalog, toneOf } from "../../shared/projectDocs";
 import { matchesOn, SEARCH_LIMIT, searchPattern, type SearchOptions } from "../../shared/searchPattern";
 import { outline } from "../../shared/outline";
 import { tagSearchPattern, workspaceTags } from "../../shared/tags";
 import { codeMatchesRef, descendantTickets, scriptsForTicket, ticketForFile, ticketWork } from "../../shared/workContext";
 import { recall, remember } from "../graph/canvas";
+import { nodeLines, parsePlan } from "../plan/model";
 import { docs } from "../project";
 import { ticketAtHand } from "../projectDocs";
 import { focusRowsBelow, IconButton, Row, RowGroup, Rows } from "./Rows";
@@ -39,6 +41,7 @@ const [replacing, setReplacing] = createSignal(false);
 /** The rows for which files to look in are open. */
 const [choosing, setChoosing] = createSignal(false);
 const [replacement, setReplacement] = createSignal("");
+const [safeDocs, setSafeDocs] = createSignal(true);
 const [include, setInclude] = createSignal("");
 const [exclude, setExclude] = createSignal("");
 
@@ -56,12 +59,21 @@ export function showReplace() {
 	showPanel("search");
 }
 
-/** Replaces every match in an open file's text (optionally restricted to `allowedLines`), as one step that undo takes back. */
-function replaceInModel(model: monaco.editor.ITextModel, pattern: RegExp, with_: string, regex: boolean, allowedLines?: ReadonlySet<number>): number {
+/** Replaces every match in an open file's text (optionally restricted to `allowedLines` and skipping `protectedSpans`), as one undoable step. */
+function replaceInModel(
+	model: monaco.editor.ITextModel,
+	pattern: RegExp,
+	with_: string,
+	regex: boolean,
+	allowedLines?: ReadonlySet<number>,
+	protectedSpans?: ReadonlyMap<number, TextSpan[]>,
+): number {
 	const edits: monaco.editor.IIdentifiedSingleEditOperation[] = [];
 	for (let line = 1; line <= model.getLineCount(); line++) {
 		if (allowedLines && !allowedLines.has(line)) continue;
+		const spans = protectedSpans?.get(line);
 		for (const match of matchesOn(model.getLineContent(line), pattern, with_, regex)) {
+			if (overlapsProtectedSpan(match.column, match.length, spans)) continue;
 			edits.push({ range: new monaco.Range(line, match.column, line, match.column + match.length), text: match.becomes });
 		}
 	}
@@ -70,28 +82,6 @@ function replaceInModel(model: monaco.editor.ITextModel, pattern: RegExp, with_:
 	model.pushEditOperations([], edits, () => null);
 	model.pushStackElement();
 	return edits.length;
-}
-
-/** Replaces matches only on `allowedLines` (1-based) in raw file text, preserving original line endings. */
-function replaceLinesInText(text: string, pattern: RegExp, with_: string, regex: boolean, allowedLines: ReadonlySet<number>): { text: string; count: number } {
-	let replaced = 0;
-	const parts = text.split(/(\r?\n)/);
-	for (let at = 0; at < parts.length; at += 2) {
-		const lineNumber = at / 2 + 1;
-		if (!allowedLines.has(lineNumber)) continue;
-		const line = parts[at]!;
-		const found = matchesOn(line, pattern, with_, regex);
-		if (!found.length) continue;
-		replaced += found.length;
-		let out = "";
-		let from = 0;
-		for (const each of found) {
-			out += line.slice(from, each.column - 1) + each.becomes;
-			from = each.column - 1 + each.length;
-		}
-		parts[at] = out + line.slice(from);
-	}
-	return { text: parts.join(""), count: replaced };
 }
 
 /** Scans a single in-memory text buffer using the exact same `searchPattern` + `matchesOn` walk as backend search. */
@@ -851,6 +841,35 @@ export function Search() {
 				}
 				continue;
 			}
+			if (/\.plan\.json$/i.test(path)) {
+				const text = await currentTextFor(path);
+				if (!text || mine !== placesSeq) continue;
+				const parsed = parsePlan(text);
+				if (!parsed.plan) continue;
+				const nLines = nodeLines(text, parsed.plan);
+				const groupById = new Map(parsed.plan.groups.map((g) => [g.id, g.name]));
+				const nodeById = new Map(parsed.plan.nodes.map((n) => [n.id, n]));
+				const lineToNodeId = new Map<number, string>();
+				for (const [id, ln] of nLines) lineToNodeId.set(ln, id);
+				for (const line of lines) {
+					const directId = lineToNodeId.get(line.line);
+					if (directId) {
+						const n = nodeById.get(directId);
+						if (n) {
+							const stage = n.group ? groupById.get(n.group) : undefined;
+							const kindLabel =
+								n.kind === "decision" ? "Decision" : n.kind === "call" ? "Call" : n.kind === "start" ? "Start" : n.kind === "end" ? "End" : "Step";
+							const cleanTxt = n.text.replace(/\s+/g, " ").trim() || directId;
+							const shortTxt = cleanTxt.length > 38 ? `${cleanTxt.slice(0, 37)}…` : cleanTxt;
+							out.set(`${path}:${line.line}`, `${stage || kindLabel} › ${shortTxt}`);
+							continue;
+						}
+					}
+					const crumb = planLineBreadcrumb(text, line.line);
+					if (crumb) out.set(`${path}:${line.line}`, crumb);
+				}
+				continue;
+			}
 			if (!/\.(ssl|srvscr|ds)$/i.test(path) || sslChecked >= 60) continue;
 			sslChecked++;
 			const model = await session.ensureModel(monaco.Uri.file(path).toString());
@@ -986,10 +1005,17 @@ export function Search() {
 			return null;
 		}
 	});
-	/** What each marked match of a line would become, by the column it starts at. */
+	/** What each marked match of a line would become, by the column it starts at (skipping Safe-docs link targets on Markdown lines). */
 	const becomes = (line: LineHit) => {
 		const found = pattern();
-		return new Map(found ? matchesOn(line.text, found, replacement(), Boolean(searched().regex)).map((match) => [match.column, match.becomes] as const) : []);
+		if (!found) return new Map<number, string>();
+		const lineSpans = safeDocs() && /\.(md|markdown)$/i.test(line.path) ? protectedMarkdownSpans(line.text).get(1) : undefined;
+		const entries: [number, string][] = [];
+		for (const match of matchesOn(line.text, found, replacement(), Boolean(searched().regex))) {
+			if (overlapsProtectedSpan(match.column, match.length, lineSpans)) continue;
+			entries.push([match.column, match.becomes]);
+		}
+		return new Map(entries);
 	};
 	/** Why "Replace all" cannot be pressed now; "" when it can. */
 	const noReplace = () => {
@@ -998,7 +1024,13 @@ export function Search() {
 		if (hits().length >= SEARCH_LIMIT) return `There are ${SEARCH_LIMIT} results or more, and only the first are listed: narrow the search before replacing`;
 		return "";
 	};
-	const replaceAll = async () => {
+	const allowedLinesFor = (path: string, fileLines: readonly LineHit[]): ReadonlySet<number> | undefined => {
+		const at = canonical(path);
+		const skipLines = dismissedLines();
+		const hasPartialLines = lineFiltered() || [...skipLines].some((k) => k.startsWith(`${at}:`));
+		return hasPartialLines ? new Set(fileLines.map((l) => l.line)) : undefined;
+	};
+	const executeReplace = async (skipConfirm: boolean) => {
 		if (noReplace()) return;
 		const query = effectiveAsked() || asked();
 		const options = searched();
@@ -1008,41 +1040,65 @@ export function Search() {
 		const activeGroups = groups();
 		const paths = activeGroups.map(([path]) => path);
 		const total = visibleHits().length;
-		const answer = await choose(
-			`Replace ${count(total, "match", "matches")} in ${count(paths.length, "file")} with ${with_ ? `“${with_}”` : "nothing"}? Each file that is written is first kept as it was in its local history.`,
-			["Replace"],
-		);
-		if (answer !== "Replace") return;
+		const protect = safeDocs();
+
+		if (!skipConfirm) {
+			const safeTail = protect ? " Safe docs skips YAML keys, Markdown link targets, and invalid .plan.json edits." : "";
+			const prompt = `Replace ${count(total, "match", "matches")} in ${count(paths.length, "file")} with ${with_ ? `“${with_}”` : "nothing"}? Each file that is written is first kept as it was in its local history.${safeTail}`;
+			if (paths.length > 1) {
+				const REPLACE = "Replace all";
+				const PREVIEW = "Preview changes…";
+				const answer = await choose(prompt, [REPLACE, PREVIEW]);
+				if (answer === PREVIEW) {
+					await previewReplace();
+					return;
+				}
+				if (answer !== REPLACE) return;
+			} else {
+				const answer = await choose(prompt, ["Replace"]);
+				if (answer !== "Replace") return;
+			}
+		}
+
 		setStatus("busy");
 		let done = 0;
 		let files = 0;
+		let skippedProtected = 0;
 		const unsaved: string[] = [];
+		const skippedJson: string[] = [];
 		const failed: string[] = [];
 		const onDiskFull: string[] = [];
-		const skipLines = dismissedLines();
-		const restrictByLine = lineFiltered();
 		try {
 			for (const [path, fileLines] of activeGroups) {
 				const at = canonical(path);
-				const hasPartialLines =
-					restrictByLine ||
-					[...skipLines].some((k) => k.startsWith(`${at}:`));
-				const allowedLines = hasPartialLines ? new Set(fileLines.map((l) => l.line)) : undefined;
+				const allowedLines = allowedLinesFor(path, fileLines);
+				const isMd = /\.(md|markdown)$/i.test(path);
+				const isPlan = /\.plan\.json$/i.test(path);
+				const needsSafe = protect && (isMd || isPlan);
 
 				const doc = documents.get(at);
 				const tabbed = state.groups.some((group) => group.tabs.includes(at));
 				if (!doc || doc.binary || (!tabbed && !state.dirty[at])) {
-					if (!allowedLines) {
+					if (!allowedLines && !needsSafe) {
 						onDiskFull.push(path);
 						continue;
 					}
-					// File on disk with specific dismissed/filtered lines: replace only allowed lines safely.
 					try {
 						const read = await backend.read(path);
 						if (read.binary) continue;
-						await backend.historyKeep(path).catch(() => {});
-						const res = replaceLinesInText(read.text, found, with_, Boolean(options.regex), allowedLines);
+						const res = replaceSafeInText(read.text, found, with_, Boolean(options.regex), {
+							allowedLines,
+							isMarkdown: isMd,
+							isPlanJson: isPlan,
+							safeDocs: protect,
+						});
+						skippedProtected += res.skippedProtected;
+						if (res.invalidJson) {
+							skippedJson.push(baseName(path));
+							continue;
+						}
 						if (!res.count) continue;
+						await backend.historyKeep(path).catch(() => {});
 						await backend.write(path, res.text, true);
 						done += res.count;
 						files++;
@@ -1052,9 +1108,27 @@ export function Search() {
 					}
 					continue;
 				}
+
+				const currentValue = doc.model.getValue();
+				let mdProtected: Map<number, TextSpan[]> | undefined;
+				if (needsSafe) {
+					const sim = replaceSafeInText(currentValue, found, with_, Boolean(options.regex), {
+						allowedLines,
+						isMarkdown: isMd,
+						isPlanJson: isPlan,
+						safeDocs: protect,
+					});
+					skippedProtected += sim.skippedProtected;
+					if (sim.invalidJson) {
+						skippedJson.push(baseName(path));
+						continue;
+					}
+					if (!sim.count) continue;
+					if (isMd) mdProtected = protectedMarkdownSpans(currentValue);
+				}
 				const wasUnsaved = Boolean(state.dirty[at]);
 				if (!wasUnsaved) await backend.historyKeep(at).catch(() => {});
-				const changed = replaceInModel(doc.model, found, with_, Boolean(options.regex), allowedLines);
+				const changed = replaceInModel(doc.model, found, with_, Boolean(options.regex), allowedLines, mdProtected);
 				if (!changed) continue;
 				done += changed;
 				files++;
@@ -1072,8 +1146,13 @@ export function Search() {
 			failed.push(String(e?.message ?? e));
 		}
 		setState("treeVersion", (v) => v + 1);
-		const differs = done !== total && !failed.length ? ` ${count(total, "match", "matches")} were listed: a file has changed since the search.` : "";
-		const note = `Replaced ${count(done, "match", "matches")} in ${count(files, "file")}.${differs}`;
+		const protectedNote = skippedProtected
+			? ` (${count(skippedProtected, "protected doc match", "protected doc matches")} skipped by Safe docs)`
+			: "";
+		const differs = done !== total && !failed.length && !skippedProtected && !skippedJson.length
+			? ` ${count(total, "match", "matches")} were listed: a file has changed since the search.`
+			: "";
+		const note = `Replaced ${count(done, "match", "matches")} in ${count(files, "file")}.${protectedNote}${differs}`;
 		if (unsaved.length) {
 			notify(
 				`${note} ${unsaved.length === 1 ? `${baseName(unsaved[0]!)} had unsaved changes: it is changed in the editor and not saved.` : `${unsaved.length} files had unsaved changes: they are changed in the editor and not saved.`}`,
@@ -1081,8 +1160,123 @@ export function Search() {
 				{ label: "Save all", run: () => void saveAll() },
 			);
 		} else notify(note);
+		if (skippedJson.length) {
+			notify(`Skipped ${skippedJson.join(", ")}: replacement would break .plan.json JSON syntax.`, "error");
+		}
 		if (failed.length) notify(`Not replaced: ${failed.join("; ")}`, "error");
 		await run();
+	};
+	const replaceAll = () => executeReplace(false);
+	const previewReplace = async () => {
+		if (noReplace()) return;
+		const options = searched();
+		const with_ = replacement();
+		const found = pattern();
+		if (!found) return;
+		const activeGroups = groups();
+		const protect = safeDocs();
+
+		type PreviewRow = {
+			path: string;
+			relPath: string;
+			count: number;
+			skippedProtected: number;
+			invalidJson: boolean;
+			sampleLine?: number;
+			sampleSummary?: string;
+		};
+		const rows: PreviewRow[] = [];
+		let totalMatches = 0;
+		let totalProtected = 0;
+		let invalidCount = 0;
+
+		for (const [path, fileLines] of activeGroups) {
+			const text = await currentTextFor(path);
+			if (!text) continue;
+			const isMd = /\.(md|markdown)$/i.test(path);
+			const isPlan = /\.plan\.json$/i.test(path);
+			const res = replaceSafeInText(text, found, with_, Boolean(options.regex), {
+				allowedLines: allowedLinesFor(path, fileLines),
+				isMarkdown: isMd,
+				isPlanJson: isPlan,
+				safeDocs: protect,
+				maxSamples: 1,
+			});
+			totalProtected += res.skippedProtected;
+			if (res.invalidJson) {
+				invalidCount++;
+				rows.push({
+					path,
+					relPath: rel(path),
+					count: 0,
+					skippedProtected: res.skippedProtected,
+					invalidJson: true,
+					sampleLine: fileLines[0]?.line,
+					sampleSummary: "Skipped: replacement would produce invalid JSON",
+				});
+				continue;
+			}
+			if (!res.count && !res.skippedProtected) continue;
+			totalMatches += res.count;
+			const sample = res.samples[0];
+			const trim = (s: string) => (s.length > 36 ? `${s.slice(0, 35)}…` : s);
+			rows.push({
+				path,
+				relPath: rel(path),
+				count: res.count,
+				skippedProtected: res.skippedProtected,
+				invalidJson: false,
+				sampleLine: sample?.line ?? fileLines[0]?.line,
+				sampleSummary: sample
+					? `L${sample.line}: ${trim(sample.before)} -> ${trim(sample.after)}`
+					: res.skippedProtected
+						? `${count(res.skippedProtected, "match", "matches")} protected by Safe docs`
+						: undefined,
+			});
+		}
+
+		const readyFiles = rows.filter((r) => r.count > 0 && !r.invalidJson).length;
+		const APPLY = "__apply__";
+		const picked = await quickPick<string>({
+			title: `Replace preview: ${count(totalMatches, "match", "matches")} in ${count(readyFiles, "file")}`,
+			placeholder: "Apply replace or pick a file to inspect…",
+			items: [
+				...(totalMatches > 0
+					? [
+							{
+								label: `Apply replace (${count(totalMatches, "match", "matches")} in ${count(readyFiles, "file")})`,
+								value: APPLY,
+								icon: "check" as const,
+								detail: [
+									totalProtected ? `${totalProtected} protected skipped` : "",
+									invalidCount ? `${invalidCount} invalid JSON skipped` : "",
+								]
+									.filter(Boolean)
+									.join(" · ") || "Local history snapshots kept before writing",
+							},
+						]
+					: []),
+				...rows.map((r, idx) => ({
+					label: `${r.relPath} (${r.invalidJson ? "invalid JSON" : count(r.count, "change")})`,
+					value: r.path,
+					file: baseName(r.path),
+					danger: r.invalidJson,
+					divide: idx === 0 && totalMatches > 0,
+					description: r.sampleSummary,
+					detail: r.skippedProtected && !r.invalidJson ? `${r.skippedProtected} protected` : undefined,
+				})),
+			],
+			empty: "No eligible matches remain to replace.",
+		});
+		if (!picked) return;
+		if (picked === APPLY) {
+			await executeReplace(true);
+			return;
+		}
+		const targetRow = rows.find((r) => r.path === picked);
+		if (targetRow) {
+			await openFile(targetRow.path, { keep: true, ...(targetRow.sampleLine ? { reveal: { line: targetRow.sampleLine } } : {}) });
+		}
 	};
 
 	const summary = () => {
@@ -1241,10 +1435,29 @@ export function Search() {
 					<div class="search-row">
 						<span class="search-fold" aria-hidden="true" />
 						<input aria-label="Replace with" placeholder={regex() ? "Replace with ($1 is the first group)" : "Replace with"} value={replacement()} onInput={(e) => setReplacement(e.currentTarget.value)} />
+						<button
+							type="button"
+							class="search-replace"
+							aria-disabled={noReplace() ? "true" : undefined}
+							title={noReplace() || "Preview affected files and sample before/after changes before replacing"}
+							onClick={() => (noReplace() ? notify(`${noReplace()}.`) : void previewReplace())}
+						>
+							Preview…
+						</button>
 						{/* Not the button's own "disabled": it keeps the keyboard, and says why it does nothing. */}
 						<button type="button" class="search-replace" aria-disabled={noReplace() ? "true" : undefined} title={noReplace() || "Replace every match listed below, after asking"} onClick={() => (noReplace() ? notify(`${noReplace()}.`) : void replaceAll())}>
 							Replace all
 						</button>
+					</div>
+					<div class="search-row search-safe-row">
+						<span class="search-fold" aria-hidden="true" />
+						<label
+							class="check search-safe-toggle"
+							title="Skip matches in YAML frontmatter keys and Markdown link targets ](...) / [[...]], and validate .plan.json JSON syntax before writing"
+						>
+							<input type="checkbox" checked={safeDocs()} onChange={(e) => setSafeDocs(e.currentTarget.checked)} />
+							<span>Safe docs (protect YAML keys, links & JSON)</span>
+						</label>
 					</div>
 				</Show>
 				<Show when={choosing()}>

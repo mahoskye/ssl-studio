@@ -18,4 +18,4 @@ The list between the two markers is written by SSL Studio from the files here (D
 
 <!-- /catalog -->
 
-Also: [where the project stands](STATE.md), in plain words, and [the plan's spec](../design/SetSampleDueDates.spec.md), which says what `SetSampleDueDates` returns, skips and writes.
+Also: [where the project stands](STATE.md), in plain words, and [the plan doc](../design/SetSampleDueDates.plan.md), which says what `SetSampleDueDates` returns, skips and writes.

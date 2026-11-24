@@ -3,26 +3,36 @@
 // plans. Which folders those are comes from .ssl-studio/project.toml.
 import { Icon } from "../Icon";
 import { FileMark } from "../FileMark";
-import { createContext, createEffect, createMemo, createSignal, For, Show, useContext } from "solid-js";
+import { createContext, createEffect, createMemo, createSignal, For, on, Show, useContext } from "solid-js";
 import type { DocFile } from "../../shared/protocol";
 import { backend } from "../backend";
-import { ask, choose } from "../dialogs";
+import { ask, choose, quickPick, type QuickPickOption } from "../dialogs";
+import { localDay } from "../../shared/dates";
 import { docChecks } from "../../shared/docChecks";
-import { addToFrontMatterList, withFrontMatter } from "../../shared/frontMatter";
-import { CATALOG_AREAS, DOC_FOLDERS, docMatches, isCatalog, KNOWLEDGE, progress, progressShort, projectDocLabel, registryTitle, SCHEMAS, statusChoices, toneOf } from "../../shared/projectDocs";
+import { aggregateDocIssues, applyMultiSelectClick, hasAnyDocIssue, type DocIssueSummary } from "../../shared/docSelection";
+import { addToFrontMatterList, frontMatter, one, withFrontMatter } from "../../shared/frontMatter";
+import { CATALOG_AREAS, DOC_FOLDERS, docMatches, frontValue, isCatalog, KNOWLEDGE, progress, progressShort, projectDocLabel, registryTitle, SCHEMAS, statusChoices, toneOf } from "../../shared/projectDocs";
 import { normalizeTag, tagSearchPattern, workspaceTags } from "../../shared/tags";
 import { descendantTickets, ticketWork } from "../../shared/workContext";
 import { docs, docsError, docsLoading, newDoc, newDocIn, newFolderIn, setUpProject } from "../project";
 import {
 	archiveTicket,
+	cloneTicket,
 	closeoutTicket,
 	createTicketFolder,
 	exportDeploymentManifest,
+	exportDocAs,
+	exportReleaseBundle,
+	exportRtm,
 	exportTicketPacket,
 	followRename,
 	generateSchemaDocFromSql,
+	generateSqlFromSchemaDoc,
+	generateTestExecutionProtocol,
+	importLegacyDoc,
 	importTickets,
 	isArchivedTicket,
+	linkSchemaDocToSql,
 	newKnowledge,
 	newRegistry,
 	newSchema,
@@ -30,9 +40,13 @@ import {
 	newState,
 	newTicket,
 	newTicketFile,
+	onboardBrownfieldWorkspace,
+	openReleaseReadiness,
 	promoteQuestionToDecision,
+	recordDocApproval,
 	renameTicket,
 	setStatus,
+	splitTicketSubticket,
 	staleCatalogSummaryAsync,
 	startFolderCatalogs,
 	trashTicket,
@@ -48,43 +62,32 @@ import { schemaList, schemaRowTitle } from "../../shared/schemaList";
 import { isArchivedTicket as isArchivedTicketPath, shownRows, workList, type WorkSort } from "../../shared/workList";
 import { activePath, applyText, canonical, documents, fileRenamed, notify, openFile, openToSide, save, setState, state } from "../state";
 import { gitStatus } from "../git";
+import { docAuditData } from "../docAudit";
 import { changeLetter } from "../../shared/gitStatus";
 import { recall, remember } from "../graph/canvas";
 import { focusRowsBelow, IconButton, isFolded, Row, RowGroup, Rows, setFold, setFolds, type Point } from "./Rows";
 import { chooseFromMenu, type RowMenuEntry } from "./RowMenu";
 import { Menu } from "../Menu";
 
-type BulkSelectState = {
-	active: () => boolean;
+type DocsPanelContextValue = {
 	has: (path: string) => boolean;
-	toggle: (path: string) => void;
+	count: () => number;
+	handleClick: (file: DocFile, e: MouseEvent) => boolean;
+	clear: () => void;
+	issuesOf: (path: string) => DocIssueSummary | undefined;
+	openBulkMenu: (at: Point) => Promise<void>;
 };
 
-const BulkSelectContext = createContext<BulkSelectState>({
-	active: () => false,
+const DocsPanelContext = createContext<DocsPanelContextValue>({
 	has: () => false,
-	toggle: () => {},
+	count: () => 0,
+	handleClick: () => false,
+	clear: () => {},
+	issuesOf: () => undefined,
+	openBulkMenu: async () => {},
 });
 
 const isBulkSelectable = (file: DocFile) => file.exists && !isCatalog(file) && /\.(md|markdown)$/i.test(file.name);
-
-type ProjectDocsExtras = {
-	exportReleaseBundle?: () => Promise<void>;
-	exportRtm?: () => Promise<void>;
-	importLegacyDoc?: () => Promise<void>;
-	onboardBrownfieldWorkspace?: () => Promise<void>;
-};
-
-async function runProjectDocsAction(key: keyof ProjectDocsExtras, label: string) {
-	try {
-		const mod = (await import("../projectDocs")) as ProjectDocsExtras;
-		const fn = mod[key];
-		if (typeof fn === "function") await fn();
-		else notify(`${label} is not available yet.`, "error");
-	} catch (e: any) {
-		notify(String(e?.message ?? e), "error");
-	}
-}
 
 async function editDocFrontMatter(path: string, transform: (text: string) => string | null): Promise<boolean> {
 	const key = canonical(path);
@@ -111,47 +114,62 @@ function gitKindOf(path: string) {
 	return hit ? (hit.unstaged ?? hit.staged ?? null) : null;
 }
 
-function DocRow(props: { file: DocFile }) {
-	const bulk = useContext(BulkSelectContext);
-	const canSelect = () => bulk.active() && isBulkSelectable(props.file);
+function DocRow(props: { file: DocFile; depth?: number }) {
+	const panel = useContext(DocsPanelContext);
+	const multiSelected = () => panel.has(props.file.path);
+	const activeSelected = () => props.file.exists && activePath() === canonical(props.file.path);
 	// One click opens it for a look, in a tab the next file clicked takes; a double click keeps the tab.
-	// In bulk select mode, clicking a selectable Markdown doc toggles its selection checkbox.
+	// Holding Ctrl/Cmd or Shift selects multiple Markdown documents for bulk actions.
 	const open = () => {
-		if (canSelect()) {
-			bulk.toggle(props.file.path);
-			return;
-		}
 		if (props.file.exists) void openFile(props.file.path, { preview: true });
 		else void setUpProject();
 	};
-	const selected = () => (canSelect() ? bulk.has(props.file.path) : props.file.exists && activePath() === canonical(props.file.path));
+	const selected = () => multiSelected() || activeSelected();
 	const dirty = () => props.file.exists && Boolean(state.dirty[canonical(props.file.path)]);
 	const git = () => (props.file.exists ? gitKindOf(props.file.path) : null);
 	const projectInfo = () => projectDocLabel(props.file);
+	const planRole = () =>
+		props.file.group === "plans"
+			? /\.plan\.md$/i.test(props.file.name)
+				? "plan doc"
+				: /\.plan\.json$/i.test(props.file.name)
+					? "plan"
+					: null
+			: null;
 	const displayLabel = () => projectInfo()?.label || props.file.heading || props.file.title || props.file.name;
+	const docIssues = () => panel.issuesOf(props.file.path);
 	return (
 		<Row
 			class="tree-row doc-row"
 			key={props.file.path}
 			selected={selected()}
-			classList={{ selected: selected(), missing: !props.file.exists }}
-			title={
+			classList={{ selected: activeSelected(), "multi-selected": multiSelected(), missing: !props.file.exists }}
+			style={props.depth ? { "padding-left": `${8 + props.depth * 14}px` } : undefined}
+			title={[
 				props.file.exists
 					? projectInfo()
 						? `${projectInfo()!.label} — ${props.file.name}\n${props.file.path}`
 						: props.file.path
-					: `${displayLabel()} (${props.file.name}) is missing. Click it, or press Enter on it, to create it.`
-			}
+					: `${displayLabel()} (${props.file.name}) is missing. Click it, or press Enter on it, to create it.`,
+				...(docIssues()?.extraMessages ?? []),
+			]
+				.filter(Boolean)
+				.join("\n")}
 			draggable={props.file.exists}
 			onDragStart={(e) => {
 				if (!props.file.exists) return;
 				e.dataTransfer?.setData("application/x-ssl-studio-file", props.file.path);
 				if (e.dataTransfer) e.dataTransfer.effectAllowed = "copyMove";
 			}}
+			onClick={(e) => panel.handleClick(props.file, e)}
 			onActivate={open}
 			onKeep={() => props.file.exists && void openFile(props.file.path, { keep: true })}
-			onMenu={(at) => void rowMenu(props.file, at)}
+			onMenu={(at) => void (multiSelected() && panel.count() > 1 ? panel.openBulkMenu(at) : rowMenu(props.file, at))}
 			onKey={(e) => {
+				if (e.key === "Escape" && panel.count() > 0) {
+					panel.clear();
+					return true;
+				}
 				if (!props.file.exists || (e.key !== "F2" && e.key !== "Delete")) return false;
 				const own = Boolean(state.project && canonical(props.file.path) === canonical(state.project.path));
 				if (own) return false;
@@ -159,21 +177,13 @@ function DocRow(props: { file: DocFile }) {
 				return true;
 			}}
 		>
-			<Show when={canSelect()}>
-				<input
-					type="checkbox"
-					tabindex={-1}
-					checked={bulk.has(props.file.path)}
-					aria-label={`Select ${displayLabel()}`}
-					style={{ margin: "0 4px 0 0", flex: "none", "accent-color": "var(--accent)", cursor: "pointer" }}
-					onClick={(e) => e.stopPropagation()}
-					onChange={() => bulk.toggle(props.file.path)}
-				/>
-			</Show>
 			<FileMark name={props.file.name} />
 			<span class="label">{displayLabel()}</span>
 			<Show when={projectInfo()?.fileMeta}>
 				{(fileMeta) => <span class="meta project-file-meta">{fileMeta()}</span>}
+			</Show>
+			<Show when={planRole()}>
+				{(role) => <span class="meta">{role()}</span>}
 			</Show>
 			<Show when={!props.file.exists}>
 				<span class="meta warn">missing</span>
@@ -192,6 +202,11 @@ function DocRow(props: { file: DocFile }) {
 			<Show when={props.file.broken?.length}>
 				<span class="meta warn" title={`${props.file.broken!.length} broken ${props.file.broken!.length === 1 ? "link" : "links"}`}>
 					{props.file.broken!.length === 1 ? "1 broken" : `${props.file.broken!.length} broken`}
+				</span>
+			</Show>
+			<Show when={(docIssues()?.extraWarn ?? 0) > 0}>
+				<span class="meta warn" title={docIssues()!.extraMessages.join("\n")}>
+					{docIssues()!.extraWarn === 1 ? "1 warning" : `${docIssues()!.extraWarn} warnings`}
 				</span>
 			</Show>
 			<Show when={dirty()}>
@@ -396,12 +411,29 @@ async function rowMenu(file: DocFile, at: Point) {
 	const isAnsweredQuestion = file.group === "knowledge" && file.kind === "questions" && !catalog && toneOf(file.status) === "done";
 	const isSchemaItem = file.group === "schema" && !catalog;
 	const isSchemaSql = isSchemaItem && /\.(sql|ddl|pks|pkb)$/i.test(file.name);
-	const EXPORT_PACKET = "Export release packet (HTML)…";
-	const EXPORT_MANIFEST = "Export deployment manifest (Markdown)…";
+	const isSchemaDbMd = isSchemaItem && markdown && file.kind === "database";
+	const EXPORT_HTML_COPY = "Copy as rich HTML";
+	const EXPORT_JIRA_COPY = "Copy as Jira / Confluence markup";
+	const EXPORT_PRINT = "Print / Save as PDF…";
+	const EXPORT_HTML_FILE = "Export standalone HTML…";
+	const EXPORT_DOCX_FILE = "Export as Word (.docx)…";
+	const EXPORT_PACKET_HTML = "Release packet (HTML)…";
+	const EXPORT_PACKET_DOCX = "Release packet (Word .docx)…";
+	const EXPORT_PACKET_MD = "Release packet (Markdown)…";
+	const EXPORT_MANIFEST_MD = "Deployment manifest (Markdown)…";
+	const EXPORT_MANIFEST_CSV = "Deployment manifest (CSV)…";
+	const EXPORT_MANIFEST_DOCX = "Deployment manifest (Word .docx)…";
+	const EXPORT_TICKET_RTM = "Traceability Matrix (RTM)…";
+	const GEN_TEST_PROTOCOL = "Generate Test Execution Protocol (IQ/OQ/PQ)…";
+	const RECORD_APPROVAL = "Record Approval…";
+	const CLONE_TICKET = "Clone ticket…";
+	const SPLIT_SUBTICKET = "Split into sub-ticket…";
 	const CLOSEOUT_TICKET = "Close out ticket…";
 	const UNARCHIVE_TICKET = "Unarchive ticket…";
 	const PROMOTE_DECISION = "Promote answer to decision…";
 	const DOC_FROM_SQL = "Generate table doc from SQL…";
+	const SQL_FROM_DOC = "Generate / update SQL DDL…";
+	const LINK_SQL_SOURCE = "Link / change SQL source…";
 	const FIND_IN_CODE = "Find usages in code";
 	const isFocusedTicket = Boolean(file.ticket && state.settings.activeTicket?.toLowerCase() === file.ticket.toLowerCase());
 	const SET_ACTIVE_TICKET = isFocusedTicket ? `Clear active ticket (${file.ticket})` : `Set ${file.ticket} as active ticket`;
@@ -426,8 +458,9 @@ async function rowMenu(file: DocFile, at: Point) {
 
 	const workflowSection: RowMenuEntry[] = [
 		...statusSubmenu,
+		...(markdown && !catalog ? [RECORD_APPROVAL] : []),
 		...(catalog || manifest ? [UPDATE] : []),
-		...(isTicket && file.ticket ? [NEW_SUBTICKET, CLOSEOUT_TICKET] : []),
+		...(isTicket && file.ticket ? [NEW_SUBTICKET, CLONE_TICKET, SPLIT_SUBTICKET, CLOSEOUT_TICKET] : []),
 		...(isTicket
 			? file.ticketFolder
 				? [{ label: "Ticket folder", children: [NEW_TICKET_FILE, SHOW_TICKET_FOLDER] }]
@@ -435,21 +468,44 @@ async function rowMenu(file: DocFile, at: Point) {
 			: []),
 		...(isAnsweredQuestion ? [PROMOTE_DECISION] : []),
 		...(isSchemaSql ? [DOC_FROM_SQL] : []),
+		...(isSchemaDbMd ? [SQL_FROM_DOC, LINK_SQL_SOURCE] : []),
 		...(isSchemaItem ? [FIND_IN_CODE] : []),
 	];
 
-	const exportSection: RowMenuEntry[] =
-		isTicket && file.ticket
-			? [
-					{
-						label: "Export",
-						children: [
-							{ label: "Release packet (HTML)…", value: EXPORT_PACKET },
-							{ label: "Deployment manifest (Markdown)…", value: EXPORT_MANIFEST },
-						],
-					},
-				]
-			: [];
+	const exportChildren: RowMenuEntry[] = markdown
+		? [
+				EXPORT_HTML_COPY,
+				EXPORT_JIRA_COPY,
+				"separator",
+				EXPORT_PRINT,
+				EXPORT_HTML_FILE,
+				EXPORT_DOCX_FILE,
+				...(isTicket && file.ticket
+					? ([
+							"separator",
+							EXPORT_PACKET_HTML,
+							EXPORT_PACKET_DOCX,
+							EXPORT_PACKET_MD,
+							"separator",
+							EXPORT_MANIFEST_MD,
+							EXPORT_MANIFEST_CSV,
+							EXPORT_MANIFEST_DOCX,
+							"separator",
+							EXPORT_TICKET_RTM,
+							GEN_TEST_PROTOCOL,
+						] as RowMenuEntry[])
+					: []),
+			]
+		: [];
+
+	const exportSection: RowMenuEntry[] = exportChildren.length
+		? [
+				{
+					label: "Export",
+					children: exportChildren,
+				},
+			]
+		: [];
 
 	const lifecycleSection: RowMenuEntry[] = [
 		...(isTicket ? [archived ? UNARCHIVE_TICKET : ARCHIVE_TICKET] : []),
@@ -483,13 +539,29 @@ async function rowMenu(file: DocFile, at: Point) {
 		const { setActiveTicket } = await import("../projectDocs");
 		await setActiveTicket(isFocusedTicket ? null : file.ticket);
 	}
+	else if (picked === RECORD_APPROVAL) await recordDocApproval(file.path);
 	else if (picked === NEW_SUBTICKET && file.ticket) await newTicket(undefined, undefined, { parent: file.ticket });
-	else if (picked === EXPORT_MANIFEST && file.ticket) await exportDeploymentManifest(file.path, file.ticket, "markdown");
-	else if (picked === EXPORT_PACKET && file.ticket) await exportTicketPacket(file.path, file.ticket, "html");
+	else if (picked === CLONE_TICKET && file.ticket) await cloneTicket(file.path);
+	else if (picked === SPLIT_SUBTICKET && file.ticket) await splitTicketSubticket(file.path);
+	else if (picked === EXPORT_HTML_COPY) await exportDocAs(file.path, "html-copy");
+	else if (picked === EXPORT_JIRA_COPY) await exportDocAs(file.path, "jira-copy");
+	else if (picked === EXPORT_PRINT) await exportDocAs(file.path, "print");
+	else if (picked === EXPORT_HTML_FILE) await exportDocAs(file.path, "html-download");
+	else if (picked === EXPORT_DOCX_FILE) await exportDocAs(file.path, "docx");
+	else if (picked === EXPORT_MANIFEST_MD && file.ticket) await exportDeploymentManifest(file.path, file.ticket, "markdown");
+	else if (picked === EXPORT_MANIFEST_CSV && file.ticket) await exportDeploymentManifest(file.path, file.ticket, "csv");
+	else if (picked === EXPORT_MANIFEST_DOCX && file.ticket) await exportDeploymentManifest(file.path, file.ticket, "docx");
+	else if (picked === EXPORT_PACKET_HTML && file.ticket) await exportTicketPacket(file.path, file.ticket, "html");
+	else if (picked === EXPORT_PACKET_DOCX && file.ticket) await exportTicketPacket(file.path, file.ticket, "docx");
+	else if (picked === EXPORT_PACKET_MD && file.ticket) await exportTicketPacket(file.path, file.ticket, "markdown");
+	else if (picked === EXPORT_TICKET_RTM && file.ticket) await exportRtm(undefined, { tickets: [file] });
+	else if (picked === GEN_TEST_PROTOCOL && file.ticket) await generateTestExecutionProtocol(file.path);
 	else if (picked === CLOSEOUT_TICKET && file.ticket) await closeoutTicket(file.path, file.ticket);
 	else if (picked === ARCHIVE_RETIRE) await archiveSpecOrDecision(file);
 	else if (picked === PROMOTE_DECISION) await promoteQuestionToDecision(file.path);
 	else if (picked === DOC_FROM_SQL) await generateSchemaDocFromSql(file.path);
+	else if (picked === SQL_FROM_DOC) await generateSqlFromSchemaDoc(file.path);
+	else if (picked === LINK_SQL_SOURCE) await linkSchemaDocToSql(file.path);
 	else if (picked === FIND_IN_CODE) {
 		const rawStem = (file.name.split(/[\\/]/).pop() || file.title || "").replace(/\.[^.]+$/, "").trim();
 		const cleanDir = (dir?: string) => (dir ?? "").replace(/^[./\\]+|[\\/]+$/g, "").replace(/\\/g, "/");
@@ -520,6 +592,7 @@ function ItemRow(props: {
 	file: DocFile;
 	depth?: number;
 	lead?: string;
+	label?: string;
 	note?: string;
 	aside?: boolean;
 	short?: string;
@@ -531,10 +604,12 @@ function ItemRow(props: {
 	 */
 	fold?: { parent: boolean; shut: boolean; locked?: string; toggle: () => void };
 }) {
-	const bulk = useContext(BulkSelectContext);
-	const canSelect = () => bulk.active() && isBulkSelectable(props.file);
-	const selected = () => (canSelect() ? bulk.has(props.file.path) : activePath() === canonical(props.file.path));
+	const panel = useContext(DocsPanelContext);
+	const multiSelected = () => panel.has(props.file.path);
+	const activeSelected = () => activePath() === canonical(props.file.path);
+	const selected = () => multiSelected() || activeSelected();
 	const stale = () => props.file.catalog?.stale;
+	const docIssues = () => panel.issuesOf(props.file.path);
 	const isFocusedTicket = () =>
 		Boolean(
 			props.file.group === "tickets" &&
@@ -547,7 +622,7 @@ function ItemRow(props: {
 			class="tree-row doc-row"
 			key={props.file.path}
 			selected={selected()}
-			classList={{ selected: selected(), catalog: isCatalog(props.file), "active-ticket": isFocusedTicket(), "archived-row": Boolean(props.archived) }}
+			classList={{ selected: activeSelected(), "multi-selected": multiSelected(), catalog: isCatalog(props.file), "active-ticket": isFocusedTicket(), "archived-row": Boolean(props.archived) }}
 			style={{ "padding-left": `${8 + (props.depth ?? 0) * 14}px` }}
 			// Where it is, its state, what it is for, how it is linked, and what is wrong with it: nothing the reader has to keep up by hand.
 			title={[
@@ -565,14 +640,16 @@ function ItemRow(props: {
 				props.file.tickets?.length ? `${props.file.group === "tickets" ? "Related to" : "For"} ${props.file.tickets.join(", ")}` : "",
 				props.linkDetail ? `Linked via: ${props.linkDetail}` : "",
 				...(props.file.problems ?? []),
+				...(docIssues()?.extraMessages ?? []),
 			]
 				.filter(Boolean)
 				.join("\n")}
 			expanded={props.fold?.parent ? !props.fold.shut : undefined}
 			onToggle={() => props.fold?.parent && !props.fold.locked && props.fold.toggle()}
-			onActivate={() => (canSelect() ? bulk.toggle(props.file.path) : void openFile(props.file.path, { preview: true }))}
+			onClick={(e) => panel.handleClick(props.file, e)}
+			onActivate={() => void openFile(props.file.path, { preview: true })}
 			onKeep={() => void openFile(props.file.path, { keep: true })}
-			onMenu={(at) => void rowMenu(props.file, at)}
+			onMenu={(at) => void (multiSelected() && panel.count() > 1 ? panel.openBulkMenu(at) : rowMenu(props.file, at))}
 			draggable={props.file.exists}
 			onDragStart={(e) => {
 				if (!props.file.exists) return;
@@ -580,6 +657,10 @@ function ItemRow(props: {
 				if (e.dataTransfer) e.dataTransfer.effectAllowed = "copyMove";
 			}}
 			onKey={(e) => {
+				if (e.key === "Escape" && panel.count() > 0) {
+					panel.clear();
+					return true;
+				}
 				if (e.key !== "F2" && e.key !== "Delete") return false;
 				const isTicket = props.file.group === "tickets" && !isCatalog(props.file);
 				void (e.key === "F2"
@@ -605,17 +686,6 @@ function ItemRow(props: {
 					</span>
 				)}
 			</Show>
-			<Show when={canSelect()}>
-				<input
-					type="checkbox"
-					tabindex={-1}
-					checked={bulk.has(props.file.path)}
-					aria-label={`Select ${props.file.ticket ?? props.file.title ?? props.file.name}`}
-					style={{ margin: "0 4px 0 0", flex: "none", "accent-color": "var(--accent)", cursor: "pointer" }}
-					onClick={(e) => e.stopPropagation()}
-					onChange={() => bulk.toggle(props.file.path)}
-				/>
-			</Show>
 			<FileMark name={props.file.name} />
 			{/* Open or shut, in words, for what reads the screen aloud: a list's row has no state for it. */}
 			<Show when={props.fold?.parent}>
@@ -630,7 +700,7 @@ function ItemRow(props: {
 				<Show when={props.lead}>
 					<strong class="doc-key">{props.lead}</strong>{" "}
 				</Show>
-				{isCatalog(props.file) ? "Catalog" : props.file.title || props.file.name}
+				{props.label ?? (isCatalog(props.file) ? "Catalog" : props.file.title || props.file.name)}
 			</span>
 			<Show when={props.file.group === "tickets" && !isCatalog(props.file) && props.file.release}>
 				<span
@@ -705,6 +775,12 @@ function ItemRow(props: {
 					{props.file.problems!.length === 1 ? "1 problem" : `${props.file.problems!.length} problems`}
 				</span>
 			</Show>
+			<Show when={(docIssues()?.extraWarn ?? 0) > 0}>
+				<span class="meta warn" title={docIssues()!.extraMessages.join("\n")}>
+					{docIssues()!.extraWarn === 1 ? "1 warning" : `${docIssues()!.extraWarn} warnings`}
+				</span>
+			</Show>
+			<Status status={props.file.status} />
 			<Show when={Boolean(state.dirty[canonical(props.file.path)])}>
 				<span class="tree-dirty-dot" title="Unsaved changes" aria-label="Unsaved changes" />
 			</Show>
@@ -715,7 +791,6 @@ function ItemRow(props: {
 					</span>
 				)}
 			</Show>
-			<Status status={props.file.status} />
 		</Row>
 	);
 }
@@ -739,7 +814,7 @@ const allFolds = () => [
 	...schemaList(docs()).kinds.flatMap((kind) => [`docs:schema:${kind.id}`, ...kind.parts.map((part) => `docs:schema:${kind.id}/${part.name}`)]),
 	"docs:knowledge:other",
 	...docs()
-		.filter((file) => file.group === "tickets")
+		.filter((file) => file.group === "tickets" || (file.group === "plans" && /\.plan\.json$/i.test(file.name)))
 		.map(ticketFold),
 ];
 
@@ -837,6 +912,8 @@ function Work(props: { files: DocFile[]; empty?: string; filtered?: boolean }) {
 			<ItemRow file={row.file} depth={row.depth + (isArchived ? 1 : 0)} lead={row.file.ticket} linkDetail={row.link?.detail} archived={isArchived} fold={fold(row)} />
 		) : row.kind === "plan" ? (
 			<ItemRow file={{ ...row.file, title: row.file.name.replace(/\.plan\.json$/i, "") }} depth={row.depth + (isArchived ? 1 : 0)} note="plan" linkDetail={row.link?.detail} archived={isArchived} fold={fold(row)} />
+		) : row.kind === "plan-doc" ? (
+			<ItemRow file={{ ...row.file, title: row.file.title || row.file.name.replace(/\.plan\.md$/i, "") }} depth={row.depth + (isArchived ? 1 : 0)} note="plan doc" linkDetail={row.link?.detail} archived={isArchived} fold={fold(row)} />
 		) : (
 			<ItemRow file={row.file} depth={row.depth + (isArchived ? 1 : 0)} note="spec" linkDetail={row.link?.detail} archived={isArchived} fold={fold(row)} />
 		);
@@ -882,7 +959,15 @@ function Work(props: { files: DocFile[]; empty?: string; filtered?: boolean }) {
 					<For each={archivedRows()}>{(row) => renderWorkRow(row, true)}</For>
 				</Show>
 			</Show>
-			<For each={catalogs()}>{(catalog) => <ItemRow file={catalog} note={catalog.group} fold={NO_FOLD} />}</For>
+			<For each={catalogs()}>
+				{(catalog) => (
+					<ItemRow
+						file={catalog}
+						label={catalog.group === "tickets" ? "Ticket Catalog" : catalog.group === "specs" ? "Spec Catalog" : undefined}
+						fold={NO_FOLD}
+					/>
+				)}
+			</For>
 		</RowGroup>
 	);
 }
@@ -918,22 +1003,44 @@ function Knowledge(props: { files: DocFile[]; empty?: string; filtered?: boolean
  */
 function Schema(props: { files: DocFile[]; empty?: string; filtered?: boolean }) {
 	const list = createMemo(() => schemaList(props.files, { configured: state.project?.configured, filtered: props.filtered }));
+	const renderSchemaRows = (items: DocFile[], baseDepth: number, titleDepth: number) => {
+		const mdStems = new Set(
+			items
+				.filter((f) => /\.(md|markdown)$/i.test(f.name))
+				.map((f) => f.name.replace(/\.(md|markdown)$/i, "").toLowerCase()),
+		);
+		return (
+			<For each={items}>
+				{(file) => {
+					const pairedSql =
+						/\.(sql|ddl)$/i.test(file.name) && mdStems.has(file.name.replace(/\.(sql|ddl)$/i, "").toLowerCase());
+					return (
+						<ItemRow
+							file={{ ...file, title: schemaRowTitle(file, titleDepth) }}
+							depth={baseDepth + (pairedSql ? 1 : 0)}
+							note={pairedSql ? "DDL" : undefined}
+						/>
+					);
+				}}
+			</For>
+		);
+	};
 	return (
 		<RowGroup fold="docs:schema" label="Schema" onMenu={(at) => void headMenu("schema", "Schema", at)} open={props.filtered} count={list().count} role="group" head={<Head title="Schema" folder={folderOf("schema")} />} rows={list().kinds.length + list().top.length > 0 || Boolean(list().catalog)} empty={<Show when={props.empty}><p class="hint">{props.empty}</p></Show>}>
 			<For each={list().kinds}>
 				{(kind) => (
 					<RowGroup fold={`docs:schema:${kind.id}`} label={kind.name} onMenu={(at) => void headMenu(`schema:${kind.folder}`, kind.name, at)} open={props.filtered} count={kind.count} role={kind.parts.length ? "group" : undefined} headClass="doc-kind" head={kind.name}>
-						<Show when={kind.parts.length} fallback={<For each={kind.files}>{(file) => <ItemRow file={{ ...file, title: schemaRowTitle(file, 1) }} depth={1} />}</For>}>
+						<Show when={kind.parts.length} fallback={renderSchemaRows(kind.files, 1, 1)}>
 							{/* With folders inside it, a kind holds groups: what lies in the kind's own folder is a list beside them. */}
 							<Show when={kind.files.length}>
 								<div role="listbox" aria-label={`${kind.name}, not in a folder of its own`}>
-									<For each={kind.files}>{(file) => <ItemRow file={{ ...file, title: schemaRowTitle(file, 1) }} depth={1} />}</For>
+									{renderSchemaRows(kind.files, 1, 1)}
 								</div>
 							</Show>
 							<For each={kind.parts}>
 								{(part) => (
 									<RowGroup fold={`docs:schema:${kind.id}/${part.name}`} label={part.name} onMenu={(at) => void headMenu(`schema:${part.folder}`, part.name, at)} open={props.filtered} count={part.files.length} headClass="doc-kind doc-part" head={part.name}>
-										<For each={part.files}>{(file) => <ItemRow file={{ ...file, title: schemaRowTitle(file, 2) }} depth={2} />}</For>
+										{renderSchemaRows(part.files, 2, 2)}
 									</RowGroup>
 								)}
 							</For>
@@ -943,7 +1050,7 @@ function Schema(props: { files: DocFile[]; empty?: string; filtered?: boolean })
 			</For>
 			<Show when={list().top.length}>
 				<RowGroup fold={SCHEMA_TOP} label="At the top" open={props.filtered} count={list().top.length} headClass="doc-kind" head="At the top">
-					<For each={list().top}>{(file) => <ItemRow file={{ ...file, title: schemaRowTitle(file, 0) }} depth={1} />}</For>
+					{renderSchemaRows(list().top, 1, 0)}
 				</RowGroup>
 			</Show>
 			<Show when={list().catalog}>
@@ -970,6 +1077,16 @@ function Group(props: { title: string; folder?: string; group: DocFile["group"];
 	const files = () => props.files.filter((d) => d.group === props.group);
 	/** The catalog of this list's own folder: the one the app keeps, which says so of itself. */
 	const own = (file: DocFile) => isCatalog(file) && file.catalog?.area === props.group;
+	const nonCatalog = () => files().filter((file) => !own(file));
+	const chartPaths = () =>
+		props.group === "plans"
+			? new Set(nonCatalog().filter((f) => /\.plan\.json$/i.test(f.name)).map((f) => canonical(f.path)))
+			: null;
+	const rowDepth = (file: DocFile) => {
+		const charts = chartPaths();
+		if (!charts || !/\.plan\.md$/i.test(file.name)) return 0;
+		return charts.has(canonical(file.path.replace(/\.plan\.md$/i, ".plan.json"))) ? 1 : 0;
+	};
 	return (
 		<RowGroup
 			fold={`docs:${props.group}`}
@@ -977,7 +1094,7 @@ function Group(props: { title: string; folder?: string; group: DocFile["group"];
 			// The lists that are a folder of the project's: "Project" is the files at its top, and has no menu.
 			onMenu={props.group === "docs" || props.group === "plans" ? (at) => void headMenu(props.group as DocSection, props.title, at) : undefined}
 			open={props.filtered}
-			count={files().filter((file) => !own(file)).length}
+			count={nonCatalog().length}
 			head={<Head title={props.title} folder={props.folder} />}
 			rows={files().length > 0}
 			empty={
@@ -986,7 +1103,7 @@ function Group(props: { title: string; folder?: string; group: DocFile["group"];
 				</Show>
 			}
 		>
-			<For each={files().filter((file) => !own(file))}>{(file) => <DocRow file={file} />}</For>
+			<For each={nonCatalog()}>{(file) => <DocRow file={file} depth={rowDepth(file)} />}</For>
 			{/* The folder's own catalog last and apart, as the other lists have theirs. */}
 			<For each={files().filter(own)}>{(catalog) => <ItemRow file={catalog} />}</For>
 		</RowGroup>
@@ -999,7 +1116,9 @@ export function Docs() {
 	const settled = () => !reading() && !failure();
 	const areas = createMemo(() => CATALOG_AREAS.filter((area) => area !== "schema" || folderParts(state.project?.schema ?? "schema").length > 0));
 	const staleCatalogs = createMemo(() => docs().filter((d) => d.exists && d.catalog?.stale));
-	const catalogIssues = createMemo(() => docChecks(docs(), areas()).filter((c) => c.fix?.kind === "catalogs"));
+	const allDocChecks = createMemo(() => docChecks(docs(), areas()));
+	const catalogIssues = createMemo(() => allDocChecks().filter((c) => c.fix?.kind === "catalogs"));
+	const issuesByPath = createMemo(() => aggregateDocIssues(docs(), allDocChecks(), docAuditData(), canonical));
 	const askAgentToReconcile = () => {
 		void staleCatalogSummaryAsync().then(({ prompt }) => {
 			if (!prompt) return;
@@ -1009,11 +1128,33 @@ export function Docs() {
 	/** Narrows every list in the panel to the documents the words typed are in. */
 	const [filter, setFilter] = createSignal("");
 	const [mode, setMode] = createSignal<"all" | "active" | "ticket" | "problems">("all");
-	const [typeFilter, setTypeFilter] = createSignal<"all" | "tickets" | "specs" | "decisions" | "questions" | "schema">("all");
 	const [releaseFilter, setReleaseFilter] = createSignal("");
 	const [activeTag, setActiveTag] = createSignal<string | null>(null);
-	const [bulkMode, setBulkMode] = createSignal(false);
 	const [selectedPaths, setSelectedPaths] = createSignal<Set<string>>(new Set());
+	let anchorPath: string | null = null;
+	let panelEl: HTMLDivElement | undefined;
+	const [truncated, setTruncated] = createSignal<{ folder: string; limit: number; total: number }[]>([]);
+	let truncSeq = 0;
+	createEffect(
+		on(
+			() => [state.workspace?.root, state.treeVersion, docs().length] as const,
+			([root]) => {
+				const seq = ++truncSeq;
+				if (!root) {
+					setTruncated([]);
+					return;
+				}
+				void backend
+					.docsTruncated()
+					.then((list) => {
+						if (seq === truncSeq) setTruncated(list);
+					})
+					.catch(() => {
+						if (seq === truncSeq) setTruncated([]);
+					});
+			},
+		),
+	);
 
 	const focusedTicket = () => state.settings.activeTicket?.trim() || "";
 	createEffect(() => {
@@ -1029,29 +1170,66 @@ export function Docs() {
 			setReleaseFilter("");
 		}
 	});
-	const tags = createMemo(() => workspaceTags(docs()));
-	const filtering = () =>
-		Boolean(filter().trim()) || mode() !== "all" || Boolean(activeTag()) || typeFilter() !== "all" || Boolean(releaseFilter());
-	const hasIssue = (d: DocFile) => Boolean(d.broken?.length || d.missing?.length || d.missingSource || d.problems?.length || d.catalog?.stale || d.untouched);
-
-	const toggleBulkMode = () => {
-		const next = !bulkMode();
-		setBulkMode(next);
-		if (!next) setSelectedPaths(new Set<string>());
-	};
-	const toggleBulkPath = (path: string) => {
+	// Prune multi-selected paths if files are removed or become non-selectable.
+	createEffect(() => {
+		const valid = new Set(docs().filter(isBulkSelectable).map((d) => d.path));
 		setSelectedPaths((prev) => {
-			const next = new Set(prev);
-			if (next.has(path)) next.delete(path);
-			else next.add(path);
-			return next;
+			if (!prev.size) return prev;
+			let changed = false;
+			const next = new Set<string>();
+			for (const p of prev) {
+				if (valid.has(p)) next.add(p);
+				else changed = true;
+			}
+			return changed ? next : prev;
 		});
+	});
+	const tags = createMemo(() => workspaceTags(docs()));
+	const filtering = () => Boolean(filter().trim()) || mode() !== "all" || Boolean(activeTag()) || Boolean(releaseFilter());
+	const hasIssue = (d: DocFile) => hasAnyDocIssue(d, issuesByPath(), canonical);
+	const issueCount = createMemo(() => docs().filter((d) => hasIssue(d)).length);
+
+	const orderedVisibleSelectable = (): string[] => {
+		const selectable = new Set(visibleSelectablePaths());
+		if (panelEl) {
+			const seen = new Set<string>();
+			const domOrder: string[] = [];
+			for (const el of panelEl.querySelectorAll<HTMLElement>("[data-row]")) {
+				const key = el.dataset.row ?? "";
+				if (selectable.has(key) && !seen.has(key)) {
+					seen.add(key);
+					domOrder.push(key);
+				}
+			}
+			if (domOrder.length) return domOrder;
+		}
+		return visibleSelectablePaths();
 	};
-	const bulkCtx: BulkSelectState = {
-		active: bulkMode,
-		has: (path) => selectedPaths().has(path),
-		toggle: toggleBulkPath,
+
+	const handleRowClick = (file: DocFile, e: MouseEvent): boolean => {
+		const ctrl = e.ctrlKey || e.metaKey;
+		const shift = e.shiftKey;
+		if (ctrl || shift) {
+			if (!isBulkSelectable(file)) return false;
+			e.preventDefault();
+			const fallbackAnchor =
+				anchorPath ??
+				(() => {
+					const active = activePath();
+					if (!active) return null;
+					const match = docs().find((d) => isBulkSelectable(d) && canonical(d.path) === active);
+					return match?.path ?? null;
+				})();
+			const res = applyMultiSelectClick(selectedPaths(), orderedVisibleSelectable(), fallbackAnchor, file.path, { ctrl, shift });
+			setSelectedPaths(res.selected);
+			anchorPath = res.anchor;
+			return true;
+		}
+		if (selectedPaths().size > 0) setSelectedPaths(new Set<string>());
+		if (isBulkSelectable(file)) anchorPath = file.path;
+		return false;
 	};
+
 	const selectedDocs = createMemo(() => {
 		const sel = selectedPaths();
 		if (!sel.size) return [] as DocFile[];
@@ -1066,11 +1244,16 @@ export function Docs() {
 	const bulkSetStatus = async () => {
 		const targets = selectedDocs();
 		if (!targets.length) return;
-		const statusPool = [...new Set([...targets.flatMap((d) => statusChoices(d)), "open", "in progress", "waiting", "review", "done", "draft", "decided", "retired"])];
-		const picked = await choose(
-			`Set status for ${targets.length} selected ${targets.length === 1 ? "document" : "documents"}`,
-			statusPool.slice(0, 8),
-		);
+		const statusPool = [...new Set([...targets.flatMap((d) => statusChoices(d)), "open", "in progress", "waiting", "review", "done", "draft", "approved", "decided", "answered", "retired", "superseded"])];
+		const picked = await quickPick<string>({
+			title: `Set status for ${targets.length} selected ${targets.length === 1 ? "document" : "documents"}`,
+			placeholder: "Filter statuses…",
+			items: statusPool.map((st) => ({
+				value: st,
+				label: st,
+				badge: { text: st, tone: toneOf(st) },
+			})),
+		});
 		if (!picked) return;
 		if (targets.length > 1) {
 			const GO = `Set status on ${targets.length} documents`;
@@ -1078,12 +1261,26 @@ export function Docs() {
 				return;
 			}
 		}
+		const todayStr = localDay();
+		const quotedStatus = frontValue(picked);
 		let changed = 0;
 		for (const doc of targets) {
 			if (targets.length === 1) {
 				await setStatus(doc.path, picked);
 				changed++;
-			} else if (await editDocFrontMatter(doc.path, (text) => withFrontMatter(text, "status", picked))) {
+			} else if (
+				await editDocFrontMatter(doc.path, (text) => {
+					let next = withFrontMatter(text, "status", quotedStatus);
+					if (next === null) return null;
+					if (doc.group === "knowledge" && doc.kind === "questions" && toneOf(picked) === "done") {
+						const fm = frontMatter(next);
+						if (!one(fm.values.answered)) {
+							next = withFrontMatter(next, "answered", todayStr) ?? next;
+						}
+					}
+					return next;
+				})
+			) {
 				changed++;
 			}
 		}
@@ -1096,7 +1293,34 @@ export function Docs() {
 	const bulkAddTag = async () => {
 		const targets = selectedDocs();
 		if (!targets.length) return;
-		const raw = (await ask(`Add tag to ${targets.length} selected ${targets.length === 1 ? "document" : "documents"} (without #)`))?.trim();
+		const existingTags = tags();
+		let raw: string | null = null;
+		if (existingTags.length) {
+			const items: QuickPickOption<string>[] = [
+				...existingTags.map((b) => ({
+					value: b.tag,
+					label: `#${b.tag}`,
+					icon: "tag" as const,
+					detail: `${b.count} ${b.count === 1 ? "doc" : "docs"}`,
+				})),
+				{
+					value: "__new__",
+					label: "Enter new tag…",
+					icon: "add" as const,
+					description: "Type a custom tag name",
+					divide: true,
+				},
+			];
+			const chosen = await quickPick<string>({
+				title: `Add tag to ${targets.length} selected ${targets.length === 1 ? "document" : "documents"}`,
+				placeholder: "Search existing tags or add a new tag…",
+				items,
+			});
+			if (!chosen) return;
+			raw = chosen === "__new__" ? (await ask(`New tag for ${targets.length} selected ${targets.length === 1 ? "document" : "documents"} (without #)`))?.trim() ?? null : chosen;
+		} else {
+			raw = (await ask(`Add tag to ${targets.length} selected ${targets.length === 1 ? "document" : "documents"} (without #)`))?.trim() ?? null;
+		}
 		if (!raw) return;
 		const tag = normalizeTag(raw, { fromYaml: true });
 		if (!tag) return notify("Enter a valid tag name (letters, digits, _, -, /).", "error");
@@ -1117,7 +1341,33 @@ export function Docs() {
 	const bulkSetRelease = async () => {
 		const targets = selectedDocs();
 		if (!targets.length) return;
-		const val = (await ask(`Set release for ${targets.length} selected ${targets.length === 1 ? "document" : "documents"} (e.g. R2026.12)`))?.trim();
+		const existingReleases = releases();
+		let val: string | null = null;
+		if (existingReleases.length) {
+			const items: QuickPickOption<string>[] = [
+				...existingReleases.map((rel) => ({
+					value: rel,
+					label: rel,
+					icon: "layers" as const,
+				})),
+				{
+					value: "__new__",
+					label: "Enter new release…",
+					icon: "add" as const,
+					description: "Type a release label (e.g. R2026.12)",
+					divide: true,
+				},
+			];
+			const chosen = await quickPick<string>({
+				title: `Set release for ${targets.length} selected ${targets.length === 1 ? "document" : "documents"}`,
+				placeholder: "Search existing releases or enter a new one…",
+				items,
+			});
+			if (!chosen) return;
+			val = chosen === "__new__" ? (await ask(`Set release for ${targets.length} selected ${targets.length === 1 ? "document" : "documents"} (e.g. R2026.12)`))?.trim() ?? null : chosen;
+		} else {
+			val = (await ask(`Set release for ${targets.length} selected ${targets.length === 1 ? "document" : "documents"} (e.g. R2026.12)`))?.trim() ?? null;
+		}
 		if (!val) return;
 		if (targets.length > 1) {
 			const GO = `Set release on ${targets.length} documents`;
@@ -1125,12 +1375,222 @@ export function Docs() {
 				return;
 			}
 		}
+		const quotedRel = frontValue(val);
 		let changed = 0;
 		for (const doc of targets) {
-			if (await editDocFrontMatter(doc.path, (text) => withFrontMatter(text, "release", val))) changed++;
+			if (await editDocFrontMatter(doc.path, (text) => withFrontMatter(text, "release", quotedRel))) changed++;
 		}
 		setState("treeVersion", (v) => v + 1);
 		notify(changed ? `Set release "${val}" on ${changed} ${changed === 1 ? "document" : "documents"}.` : "Selected documents already had that release.");
+	};
+
+	const bulkGovernance = async () => {
+		const targets = selectedDocs();
+		if (!targets.length) return;
+		const field = await quickPick<"change-control" | "gxp-impact">({
+			title: `Governance field for ${targets.length} selected ${targets.length === 1 ? "document" : "documents"}`,
+			searchable: false,
+			items: [
+				{
+					value: "change-control",
+					label: "Set change-control ID…",
+					icon: "checklist",
+					description: "Stamp change-control: <ID> across selected documents",
+				},
+				{
+					value: "gxp-impact",
+					label: "Set GxP impact…",
+					icon: "pass",
+					description: "Stamp gxp-impact: (high / medium / low / none / direct / indirect)",
+				},
+			],
+		});
+		if (!field) return;
+		let value: string | null = null;
+		if (field === "change-control") {
+			value = (await ask(`Change-control ID for ${targets.length} ${targets.length === 1 ? "document" : "documents"} (e.g. CC-2026-042)`))?.trim() ?? null;
+		} else {
+			value = await quickPick<string>({
+				title: `GxP impact for ${targets.length} ${targets.length === 1 ? "document" : "documents"}`,
+				searchable: false,
+				items: [
+					{ value: "high", label: "high", description: "Direct impact on validated GxP data, calculations, or audit trail" },
+					{ value: "medium", label: "medium", description: "Moderate impact on regulated workflows or reporting" },
+					{ value: "low", label: "low", description: "Low risk / cosmetic or non-critical workflow change" },
+					{ value: "none", label: "none", description: "No GxP regulatory impact" },
+					{ value: "direct", label: "direct", description: "Direct GxP system impact" },
+					{ value: "indirect", label: "indirect", description: "Indirect GxP system impact" },
+				],
+			});
+		}
+		if (!value) return;
+		if (targets.length > 1) {
+			const GO = `Set ${field} on ${targets.length} documents`;
+			if ((await choose(`Set ${field}: "${value}" on ${targets.length} documents (${previewNames(targets)})?`, [GO])) !== GO) {
+				return;
+			}
+		}
+		const quoted = frontValue(value);
+		let changed = 0;
+		for (const doc of targets) {
+			if (await editDocFrontMatter(doc.path, (text) => withFrontMatter(text, field, quoted))) changed++;
+		}
+		setState("treeVersion", (v) => v + 1);
+		notify(changed ? `Set ${field} "${value}" on ${changed} ${changed === 1 ? "document" : "documents"}.` : `Selected documents already had ${field}: "${value}".`);
+	};
+
+	const bulkBundleOrRtm = async () => {
+		const tickets = selectedDocs().filter((d) => d.group === "tickets" && !isCatalog(d) && d.ticket);
+		if (!tickets.length) {
+			notify("Select at least one ticket to export a Release Bundle or RTM.");
+			return;
+		}
+		const keys = tickets.map((t) => t.ticket!).slice(0, 4).join(", ") + (tickets.length > 4 ? ` +${tickets.length - 4}` : "");
+		const picked = await quickPick<"bundle" | "rtm">({
+			title: `Export for ${tickets.length} selected ${tickets.length === 1 ? "ticket" : "tickets"}`,
+			searchable: false,
+			items: [
+				{
+					value: "bundle",
+					label: "Export Release Bundle…",
+					icon: "layers",
+					description: `Bundle ${keys} with runbook, checksums, and CAB CSV / DOCX / HTML`,
+				},
+				{
+					value: "rtm",
+					label: "Export Traceability Matrix (RTM)…",
+					icon: "table",
+					description: `Trace specs, tests, test runs, and artifacts for ${keys}`,
+				},
+			],
+		});
+		if (picked === "bundle") await exportReleaseBundle(undefined, { tickets });
+		else if (picked === "rtm") await exportRtm(undefined, { tickets });
+	};
+
+	const bulkArchive = async () => {
+		const root = state.workspace?.root;
+		const project = state.project;
+		if (!root || !project) return;
+		const targets = selectedDocs();
+		const ticketsToArchive = targets.filter(
+			(d) => d.group === "tickets" && !isCatalog(d) && !isArchivedTicket(d) && !isArchivedTicketPath(d),
+		);
+		const docsToArchive = targets.filter(
+			(d) => (d.group === "specs" || (d.group === "knowledge" && d.kind === "decisions")) && !isCatalog(d) && !/[\\/]archive[\\/]/i.test(d.path),
+		);
+		const total = ticketsToArchive.length + docsToArchive.length;
+		if (!total) {
+			notify("Select active tickets, specs, or decisions to archive.");
+			return;
+		}
+		const combined = [...ticketsToArchive, ...docsToArchive];
+		const GO = `Archive ${total} ${total === 1 ? "document" : "documents"}`;
+		if ((await choose(`Move ${total} selected ${total === 1 ? "document" : "documents"} (${previewNames(combined)}) into archive/?`, [GO])) !== GO) {
+			return;
+		}
+		const { retargetScopedFolder } = await import("./Explorer");
+		const docsParts = folderParts(project.docs ?? "docs");
+		const ticketArchiveDir = joinPath(root, ...docsParts, DOC_FOLDERS.tickets, "archive");
+		let archived = 0;
+		const archivedOriginals = new Set<string>();
+		const skipped: string[] = [];
+
+		for (const file of ticketsToArchive) {
+			const isLayout1 = Boolean(file.ticketFolder && isInside(file.ticketFolder, file.path));
+			const isLayout2 = Boolean(file.ticketFolder && !isLayout1);
+			const fromPrimary = isLayout1 ? file.ticketFolder! : file.path;
+			const toPrimary = joinPath(ticketArchiveDir, baseName(fromPrimary));
+			const fromSibling = isLayout2 ? file.ticketFolder! : null;
+			const toSibling = fromSibling ? joinPath(ticketArchiveDir, baseName(fromSibling)) : null;
+			const archiveEntries = await backend.list(ticketArchiveDir).catch(() => []);
+			const existingNames = new Set(archiveEntries.map((e) => e.name.toLowerCase()));
+			if (existingNames.has(baseName(toPrimary).toLowerCase()) || (toSibling && existingNames.has(baseName(toSibling).toLowerCase()))) {
+				skipped.push(file.ticket || baseName(fromPrimary));
+				continue;
+			}
+			const dirtyTargets = Object.keys(state.dirty).filter(
+				(p) =>
+					state.dirty[p] &&
+					(p === canonical(fromPrimary) ||
+						isInside(fromPrimary, p) ||
+						Boolean(fromSibling && (p === canonical(fromSibling) || isInside(fromSibling, p)))),
+			);
+			let allSaved = true;
+			for (const p of dirtyTargets) {
+				if (!(await save(p))) {
+					allSaved = false;
+					break;
+				}
+			}
+			if (!allSaved) {
+				skipped.push(file.ticket || baseName(fromPrimary));
+				continue;
+			}
+			const beforeDocs = await backend.docs().catch(() => docs().slice());
+			try {
+				await backend.rename(fromPrimary, toPrimary);
+				fileRenamed(fromPrimary, toPrimary);
+				if (fromSibling && toSibling) {
+					try {
+						await backend.rename(fromSibling, toSibling);
+						fileRenamed(fromSibling, toSibling);
+						retargetScopedFolder(fromSibling, toSibling);
+					} catch (err) {
+						await backend.rename(toPrimary, fromPrimary).catch(() => {});
+						fileRenamed(toPrimary, fromPrimary);
+						throw err;
+					}
+				} else if (isLayout1) {
+					retargetScopedFolder(fromPrimary, toPrimary);
+				}
+				const coMoved = fromSibling && toSibling ? [{ from: fromSibling, to: toSibling }] : undefined;
+				await followRename(fromPrimary, toPrimary, beforeDocs, coMoved);
+				archived++;
+				archivedOriginals.add(file.path);
+			} catch {
+				skipped.push(file.ticket || baseName(fromPrimary));
+			}
+		}
+
+		for (const file of docsToArchive) {
+			const archiveDir = joinPath(dirName(file.path), "archive");
+			const dest = joinPath(archiveDir, baseName(file.path));
+			const existing = await backend.list(archiveDir).catch(() => []);
+			if (existing.some((e) => e.name.toLowerCase() === baseName(dest).toLowerCase())) {
+				skipped.push(file.title || baseName(file.path));
+				continue;
+			}
+			const key = canonical(file.path);
+			if (state.dirty[key] && !(await save(key))) {
+				skipped.push(file.title || baseName(file.path));
+				continue;
+			}
+			const beforeDocs = await backend.docs().catch(() => docs().slice());
+			try {
+				await backend.rename(file.path, dest);
+				fileRenamed(file.path, dest);
+				await followRename(file.path, dest, beforeDocs);
+				archived++;
+				archivedOriginals.add(file.path);
+			} catch {
+				skipped.push(file.title || baseName(file.path));
+			}
+		}
+
+		if (archivedOriginals.size) {
+			setSelectedPaths((prev) => {
+				const next = new Set(prev);
+				for (const p of archivedOriginals) next.delete(p);
+				return next;
+			});
+		}
+		setState("treeVersion", (v) => v + 1);
+		if (archived) {
+			notify(`Archived ${archived} ${archived === 1 ? "document" : "documents"}${skipped.length ? ` (skipped: ${skipped.join(", ")})` : ""}.`);
+		} else if (skipped.length) {
+			notify(`Could not archive: ${skipped.join(", ")} (already in archive/ or unsaved).`, "error");
+		}
 	};
 
 	const focusedTicketPaths = createMemo(() => {
@@ -1155,7 +1615,6 @@ export function Docs() {
 		if (!filtering()) return list;
 		const tagLower = activeTag()?.toLowerCase() ?? "";
 		const relLower = releaseFilter().trim().toLowerCase();
-		const tf = typeFilter();
 		const tPaths = mode() === "ticket" ? focusedTicketPaths() : null;
 		return list.filter((d) => {
 			if (tagLower) {
@@ -1163,14 +1622,6 @@ export function Docs() {
 			}
 			if (relLower) {
 				if (isCatalog(d) || d.release?.trim().toLowerCase() !== relLower) return false;
-			}
-			if (tf !== "all") {
-				if (isCatalog(d)) return false;
-				if (tf === "tickets" && d.group !== "tickets") return false;
-				if (tf === "specs" && d.group !== "specs") return false;
-				if (tf === "decisions" && !(d.group === "knowledge" && d.kind === "decisions")) return false;
-				if (tf === "questions" && !(d.group === "knowledge" && d.kind === "questions")) return false;
-				if (tf === "schema" && d.group !== "schema") return false;
 			}
 			if (mode() === "problems") {
 				if (!hasIssue(d)) return false;
@@ -1189,9 +1640,81 @@ export function Docs() {
 	});
 	/** Whether a list has anything to show: while filtering, one that has nothing is left out, heading and all. */
 	const has = (...groups: DocFile["group"][]) => !filtering() || shown().some((d) => groups.includes(d.group));
+	const visibleSelectablePaths = createMemo(() => shown().filter(isBulkSelectable).map((d) => d.path));
+	const allVisibleSelected = createMemo(() => {
+		const vis = visibleSelectablePaths();
+		const sel = selectedPaths();
+		return vis.length > 0 && vis.every((p) => sel.has(p));
+	});
+	const bulkSelectAllVisible = () =>
+		setSelectedPaths((prev) => {
+			const next = new Set(prev);
+			for (const p of visibleSelectablePaths()) next.add(p);
+			return next;
+		});
+	const bulkClearSelection = () => {
+		setSelectedPaths(new Set<string>());
+		anchorPath = null;
+	};
+	const selectedTicketCount = createMemo(() => selectedDocs().filter((d) => d.group === "tickets" && !isCatalog(d) && d.ticket).length);
+	const selectedArchivableCount = createMemo(
+		() =>
+			selectedDocs().filter(
+				(d) =>
+					(d.group === "tickets" && !isCatalog(d) && !isArchivedTicket(d) && !isArchivedTicketPath(d)) ||
+					((d.group === "specs" || (d.group === "knowledge" && d.kind === "decisions")) && !isCatalog(d) && !/[\\/]archive[\\/]/i.test(d.path)),
+			).length,
+	);
+	const openBulkMenu = async (at: Point) => {
+		const n = selectedDocs().length;
+		if (!n) return;
+		const STATUS = `Set status (${n} selected)…`;
+		const TAG = `Add tag (${n} selected)…`;
+		const RELEASE = `Set release (${n} selected)…`;
+		const GOV = `Governance (${n} selected)…`;
+		const BUNDLE = `Release Bundle / RTM (${selectedTicketCount()} tickets)…`;
+		const ARCHIVE = `Archive (${selectedArchivableCount()} selected)…`;
+		const CLEAR = "Clear selection";
+		const entries: RowMenuEntry[] = [
+			STATUS,
+			TAG,
+			RELEASE,
+			GOV,
+			...(selectedTicketCount() > 0 ? ["separator" as const, BUNDLE] : []),
+			...(selectedArchivableCount() > 0 ? [ARCHIVE] : []),
+			"separator",
+			CLEAR,
+		];
+		const picked = await chooseFromMenu(`${n} selected documents`, entries, at);
+		if (picked === STATUS) await bulkSetStatus();
+		else if (picked === TAG) await bulkAddTag();
+		else if (picked === RELEASE) await bulkSetRelease();
+		else if (picked === GOV) await bulkGovernance();
+		else if (picked === BUNDLE) await bulkBundleOrRtm();
+		else if (picked === ARCHIVE) await bulkArchive();
+		else if (picked === CLEAR) bulkClearSelection();
+	};
+	const panelCtx: DocsPanelContextValue = {
+		has: (path) => selectedPaths().has(path),
+		count: () => selectedDocs().length,
+		handleClick: handleRowClick,
+		clear: bulkClearSelection,
+		issuesOf: (path) => issuesByPath().get(canonical(path)),
+		openBulkMenu,
+	};
 	return (
-		<BulkSelectContext.Provider value={bulkCtx}>
-		<div class="panel-body" data-panel="docs">
+		<DocsPanelContext.Provider value={panelCtx}>
+		<div
+			ref={panelEl}
+			class="panel-body"
+			data-panel="docs"
+			onKeyDown={(e) => {
+				if (e.key === "Escape" && selectedPaths().size > 0) {
+					e.preventDefault();
+					bulkClearSelection();
+				}
+			}}
+		>
 			<div class="panel-title">
 				<span>Docs</span>
 				<Menu floating label="New document, export, import, or update the catalogs" title="New…: a ticket, spec, plan, decision, question, snippet, prompt, registry, table, interface message, file layout or document. Also: import, export, onboard, update catalogs" items={() => [
@@ -1219,20 +1742,14 @@ export function Docs() {
 					{ label: "Update catalogs", run: () => void updateCatalogs() },
 					{ label: "Start folder catalogs", run: () => void startFolderCatalogs() },
 					"separator" as const,
-					{ label: "Export Release Bundle…", run: () => void runProjectDocsAction("exportReleaseBundle", "Export Release Bundle") },
-					{ label: "Export Traceability Matrix (RTM)…", run: () => void runProjectDocsAction("exportRtm", "Export Traceability Matrix (RTM)") },
-					{ label: "Import Word / HTML doc…", run: () => void runProjectDocsAction("importLegacyDoc", "Import Word / HTML doc") },
-					{ label: "Onboard existing workspace…", run: () => void runProjectDocsAction("onboardBrownfieldWorkspace", "Onboard existing workspace") },
+					{ label: "Release Readiness…", run: () => void openReleaseReadiness() },
+					{ label: "Export Release Bundle…", run: () => void exportReleaseBundle() },
+					{ label: "Export Traceability Matrix (RTM)…", run: () => void exportRtm() },
+					{ label: "Import Word / HTML doc…", run: () => void importLegacyDoc() },
+					{ label: "Onboard existing workspace…", run: () => void onboardBrownfieldWorkspace() },
 				]}>
 					<Icon name="add" />
 				</Menu>
-				<IconButton
-					label={bulkMode() ? "Exit bulk select mode" : "Select multiple documents for bulk actions"}
-					title={bulkMode() ? "Exit bulk select" : "Select multiple documents"}
-					icon="checklist"
-					pressed={bulkMode()}
-					onClick={toggleBulkMode}
-				/>
 				<IconButton label="Collapse all" title={filtering() ? `Collapse all: not while filtering. ${LOCKED}.` : "Collapse all: shut every group and ticket"} icon="collapse-all" disabled={filtering()} onClick={() => setFolds(allFolds(), true)} />
 				<IconButton label="Expand all" title={filtering() ? `Expand all: not while filtering. ${LOCKED}.` : "Expand all: open every group and ticket"} icon="expand-all" disabled={filtering()} onClick={() => setFolds(allFolds(), false)} />
 				<IconButton label="Refresh the document list" title="Refresh" icon="refresh" onClick={() => setState("treeVersion", (v) => v + 1)} />
@@ -1281,6 +1798,41 @@ export function Docs() {
 					</div>
 				</div>
 			</Show>
+			<Show when={truncated().length > 0}>
+				<div class="docs-stale-bar docs-truncated-bar" role="status">
+					<span
+						class="docs-stale-text"
+						title={truncated()
+							.map((t) => `${t.folder} capped at ${t.limit} of ${t.total} files — filter or open in Explorer`)
+							.join("\n")}
+					>
+						<Icon name="warning" />
+						<span>
+							{truncated().length === 1
+								? `${truncated()[0]!.folder} capped at ${truncated()[0]!.limit} of ${truncated()[0]!.total} files — filter or open in Explorer`
+								: `${truncated().length} folders capped (${truncated()
+										.map((t) => `${t.folder}: ${t.limit}/${t.total}`)
+										.join(", ")}) — filter or open in Explorer`}
+						</span>
+					</span>
+					<div class="docs-stale-actions">
+						<button
+							type="button"
+							class="docs-stale-btn"
+							title={`Open ${truncated()[0]!.folder} in Explorer`}
+							onClick={() => {
+								const root = state.workspace?.root;
+								const first = truncated()[0];
+								if (!root || !first) return;
+								const full = joinPath(root, ...folderParts(first.folder));
+								void import("./Explorer").then((m) => m.showInExplorer(full));
+							}}
+						>
+							Explorer
+						</button>
+					</div>
+				</div>
+			</Show>
 			<Show when={filtering() || docs().some((d) => d.exists)}>
 				<div class="docs-filter-bar">
 					<input
@@ -1309,35 +1861,25 @@ export function Docs() {
 								This ticket
 							</button>
 						</Show>
-						<button type="button" classList={{ on: mode() === "problems" }} title="Documents with broken links, problems, or stale catalogs" onClick={() => setMode("problems")}>
-							Issues
+						<button
+							type="button"
+							classList={{ on: mode() === "problems" }}
+							title="Documents with broken links, missing files, stale catalogs, audit issues, citation drift, or governance warnings"
+							onClick={() => setMode("problems")}
+						>
+							<span>Issues</span>
+							<Show when={issueCount() > 0}>
+								<span class="docs-pill-count" aria-label={`${issueCount()} documents with issues`}>
+									{issueCount()}
+								</span>
+							</Show>
 						</button>
 					</div>
-					<div
-						class="docs-facet-row"
-						style={{ display: "flex", gap: "4px", "align-items": "center", "flex-wrap": "wrap" }}
-					>
-						<select
-							aria-label="Filter by document type"
-							title="Filter by document type"
-							value={typeFilter()}
-							onChange={(e) => setTypeFilter(e.currentTarget.value as "all" | "tickets" | "specs" | "decisions" | "questions" | "schema")}
-							style={{
-								flex: "1 1 90px",
-								"min-width": "0",
-								padding: "2px 6px",
-								"font-size": "var(--text-xs)",
-								"line-height": "1.4",
-							}}
+					<Show when={releases().length > 0}>
+						<div
+							class="docs-facet-row"
+							style={{ display: "flex", gap: "4px", "align-items": "center", "flex-wrap": "wrap" }}
 						>
-							<option value="all">All types</option>
-							<option value="tickets">Tickets</option>
-							<option value="specs">Specs</option>
-							<option value="decisions">Decisions</option>
-							<option value="questions">Questions</option>
-							<option value="schema">Schema</option>
-						</select>
-						<Show when={releases().length > 0}>
 							<select
 								aria-label="Filter by release"
 								title="Filter by release"
@@ -1354,8 +1896,8 @@ export function Docs() {
 								<option value="">All releases</option>
 								<For each={releases()}>{(rel) => <option value={rel}>{rel}</option>}</For>
 							</select>
-						</Show>
-					</div>
+						</div>
+					</Show>
 					<Show when={activeTag()}>
 						{(tag) => (
 							<button
@@ -1371,7 +1913,7 @@ export function Docs() {
 					</Show>
 				</div>
 			</Show>
-			<Show when={bulkMode()}>
+			<Show when={selectedDocs().length > 0}>
 				<div
 					class="docs-bulk-bar"
 					role="region"
@@ -1389,25 +1931,39 @@ export function Docs() {
 						flex: "none",
 					}}
 				>
-					<div style={{ display: "flex", "align-items": "center", "justify-content": "space-between", gap: "var(--space-2)" }}>
-						<span style={{ "font-weight": "500", color: "var(--fg)" }}>
-							{selectedDocs().length === 0
-								? "Select Markdown docs"
-								: `${selectedDocs().length} selected`}
+					<div style={{ display: "flex", "align-items": "center", "justify-content": "space-between", gap: "var(--space-2)", "flex-wrap": "wrap" }}>
+						<span style={{ "font-weight": "500", color: "var(--fg)" }} title="Hold Ctrl/Cmd+Click to toggle docs, Shift+Click for a range, or Escape to clear">
+							{selectedDocs().length} selected
 						</span>
-						<button type="button" class="docs-stale-btn" onClick={toggleBulkMode}>
-							Done
-						</button>
+						<div style={{ display: "flex", "align-items": "center", gap: "4px" }}>
+							<Show when={visibleSelectablePaths().length > 0 && !allVisibleSelected()}>
+								<button type="button" class="docs-stale-btn" onClick={bulkSelectAllVisible}>
+									Select all visible
+								</button>
+							</Show>
+							<button type="button" class="docs-stale-btn" title="Clear selection (Escape)" onClick={bulkClearSelection}>
+								Clear
+							</button>
+						</div>
 					</div>
 					<div style={{ display: "flex", "flex-wrap": "wrap", gap: "4px" }}>
-						<button type="button" class="docs-stale-btn" disabled={!selectedDocs().length} onClick={() => void bulkSetStatus()}>
+						<button type="button" class="docs-stale-btn" onClick={() => void bulkSetStatus()}>
 							Set status…
 						</button>
-						<button type="button" class="docs-stale-btn" disabled={!selectedDocs().length} onClick={() => void bulkAddTag()}>
+						<button type="button" class="docs-stale-btn" onClick={() => void bulkAddTag()}>
 							Add tag…
 						</button>
-						<button type="button" class="docs-stale-btn" disabled={!selectedDocs().length} onClick={() => void bulkSetRelease()}>
+						<button type="button" class="docs-stale-btn" onClick={() => void bulkSetRelease()}>
 							Set release…
+						</button>
+						<button type="button" class="docs-stale-btn" onClick={() => void bulkGovernance()}>
+							Governance…
+						</button>
+						<button type="button" class="docs-stale-btn" disabled={!selectedTicketCount()} onClick={() => void bulkBundleOrRtm()}>
+							Bundle / RTM…
+						</button>
+						<button type="button" class="docs-stale-btn" disabled={!selectedArchivableCount()} onClick={() => void bulkArchive()}>
+							Archive…
 						</button>
 					</div>
 				</div>
@@ -1419,15 +1975,13 @@ export function Docs() {
 							? `No document matches “${filter().trim()}”. Clear the filter to see them all.`
 							: releaseFilter()
 								? `No matching documents in release ${releaseFilter()}.`
-								: typeFilter() !== "all"
-									? `No matching ${typeFilter()} right now.`
-									: activeTag()
-										? `No matching documents tagged #${activeTag()}.`
-										: mode() === "problems"
-											? "No documents with issues right now."
-											: mode() === "ticket"
-												? `No documents linked to ${focusedTicket()} right now.`
-												: "No active or waiting documents right now."}
+								: activeTag()
+									? `No matching documents tagged #${activeTag()}.`
+									: mode() === "problems"
+										? "No documents with issues right now."
+										: mode() === "ticket"
+											? `No documents linked to ${focusedTicket()} right now.`
+											: "No active or waiting documents right now."}
 					</p>
 				</Show>
 				<Show when={has("project")}>
@@ -1490,6 +2044,6 @@ export function Docs() {
 				</Show>
 			</Rows>
 		</div>
-		</BulkSelectContext.Provider>
+		</DocsPanelContext.Provider>
 	);
 }

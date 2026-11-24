@@ -28,7 +28,7 @@ import { buildDocNameIndex, lookupInIndex } from "../../shared/namedLinks";
 import { docsGoverningFile, ticketWork } from "../../shared/workContext";
 import { gitStatus } from "../git";
 import { changeLetter } from "../../shared/gitStatus";
-import { IconButton, Row, Rows, type Point, type RowsApi } from "./Rows";
+import { focusRowsBelow, IconButton, Row, Rows, type Point, type RowsApi } from "./Rows";
 import { outlineAnyOpen, outlineHasExpandable, outlineMenuItems, SymbolOutline, toggleOutlineCollapseAll } from "./Objects";
 import { SectionSplitter } from "./SectionSplitter";
 import { Menu } from "../Menu";
@@ -829,6 +829,7 @@ export function Explorer() {
 	};
 
 	const [wsOpen, setWsOpen] = createSignal(recall("explorer.workspace") !== "closed");
+	const [outlineFilter, setOutlineFilter] = createSignal("");
 	createEffect(() => {
 		if (scopedFolder()) setWsOpen(true);
 	});
@@ -1100,7 +1101,22 @@ export function Explorer() {
 				</div>
 				<Show when={outlineOpen()}>
 					<div class="explorer-outline-body" style={{ height: `${outlineH()}px` }}>
-						<SymbolOutline compact label="Outline of the open file" />
+						<input
+							class="filter"
+							aria-label="Filter outline"
+							placeholder="Filter outline…"
+							value={outlineFilter()}
+							style={{ margin: "4px 8px 4px", "flex-shrink": "0" }}
+							onInput={(e) => setOutlineFilter(e.currentTarget.value)}
+							onKeyDown={(e) => {
+								if (e.key === "ArrowDown" && focusRowsBelow(e.currentTarget)) e.preventDefault();
+								else if (e.key === "Escape" && outlineFilter()) {
+									e.preventDefault();
+									setOutlineFilter("");
+								}
+							}}
+						/>
+						<SymbolOutline compact filter={outlineFilter()} label="Outline of the open file" />
 					</div>
 				</Show>
 			</section>

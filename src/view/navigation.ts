@@ -8,6 +8,7 @@ import { createMiddleClickGuard, isExplicitPasteKey } from "../shared/middleClic
 import { canGoBack, canGoForward, NO_TRAIL, stepTrail, TRAIL_LENGTH, trailRenamed, trailWithout, visited, type Place, type Trail } from "../shared/navHistory";
 import { activeEditor } from "./editor/EditorGroup";
 import { activeLiveEditor } from "./editor/liveBridge";
+import { activeGraphBridge } from "./graph/graphBridge";
 import { isPlanChartActive, narrowHosted, narrowPanels, showPanel } from "./panels/registry";
 import { activePlanTab, requestPlanPaletteTab } from "./plan/planBridge";
 import { activeDoc, activePath, notify, openFile, pathChanges, setState, state, type PanelId } from "./state";
@@ -26,14 +27,27 @@ function currentViewKey(): string {
 	return `${center}|${rightId}${planTab}`;
 }
 
-function parseViewKey(view?: string): { center: "editors" | "graph" | "welcome"; rightId: PanelId | ""; planTab: "design" | "assistant" | null } | null {
-	if (!view || !view.includes("|")) return null;
-	const [centerRaw, rightRaw = ""] = view.split("|");
-	const center = centerRaw === "graph" || centerRaw === "welcome" ? centerRaw : "editors";
+function parseViewKey(view?: string): {
+	center: "editors" | "graph" | "welcome";
+	graphFocus: string | null;
+	rightId: PanelId | "";
+	planTab: "design" | "assistant" | null;
+} | null {
+	if (!view) return null;
+	const [centerPart = "", rightRaw = ""] = view.split("|");
+	const hashAt = centerPart.indexOf("#");
+	const centerRaw = hashAt >= 0 ? centerPart.slice(0, hashAt) : centerPart;
+	const graphFocus = hashAt >= 0 ? centerPart.slice(hashAt + 1) || null : null;
+	if (centerRaw !== "editors" && centerRaw !== "graph" && centerRaw !== "welcome") return null;
 	const [rightIdRaw, tabRaw] = rightRaw.split(":");
 	const rightId = (rightIdRaw || "") as PanelId | "";
 	const planTab = tabRaw === "design" || tabRaw === "assistant" ? tabRaw : null;
-	return { center, rightId, planTab };
+	return { center: centerRaw, graphFocus, rightId, planTab };
+}
+
+function isGraphViewKey(view?: string): boolean {
+	if (!view) return false;
+	return view === "graph" || view.startsWith("graph|") || view.startsWith("graph#");
 }
 
 /** The cursor or view came to rest somewhere, by the user's hand or by a jump. */
@@ -44,10 +58,14 @@ export function noteCursor(place: Place) {
 
 /** Where the window currently stands: active file + cursor + screen/right-panel context. */
 function here(): Place | null {
-	const path = activePath() ?? "";
 	const view = currentViewKey();
-	if (!path && state.centerView === "editors") return null;
-	if (!path) return { path: "", line: 1, column: 1, view };
+	// Non-editor center screens (Call Graph, Welcome) must not stamp a background editor's
+	// file path or cursor line > 1, which would mistakenly trigger `openFile` on Back/Forward.
+	if (state.centerView === "graph" || state.centerView === "welcome") {
+		return { path: "", line: 1, column: 1, view };
+	}
+	const path = activePath() ?? "";
+	if (!path) return null;
 	const live = activeLiveEditor();
 	if (live && live.path === path) {
 		const at = live.getPosition();
@@ -58,11 +76,15 @@ function here(): Place | null {
 	return { path, line: at?.lineNumber ?? 1, column: at?.column ?? 1, view };
 }
 
-/** Restores the center view, right panel, and Palette plan tab recorded on a navigation stop. */
-function restoreView(view?: string) {
+/** Restores the center view, optional graph focus node, right panel, and Palette plan tab recorded on a navigation stop. */
+function restoreView(view?: string, fallbackGraphFocus?: string) {
 	const parsed = parseViewKey(view);
 	if (!parsed) return;
 	if (state.centerView !== parsed.center) setState("centerView", parsed.center);
+	if (parsed.center === "graph") {
+		const focusId = parsed.graphFocus || fallbackGraphFocus;
+		if (focusId) queueMicrotask(() => activeGraphBridge()?.focusTarget(focusId));
+	}
 	if (parsed.rightId) {
 		const currentRight = narrowPanels() ? narrowHosted() : (state.settings.layout.right ? state.rightView : null);
 		if (currentRight !== parsed.rightId) showPanel(parsed.rightId);
@@ -174,25 +196,40 @@ export async function goAlong(by: 1 | -1): Promise<void> {
 		if (!next) return notify(by < 0 ? "There is nowhere to go back to." : "There is nowhere to go forward to.");
 		stepping++;
 		trail = next.trail;
+		let isGraphPlace = false;
 		try {
-			if (next.place.path) {
-				const parsed = parseViewKey(next.place.view);
-				const needsFileOpen = activePath() !== next.place.path || (parsed ? parsed.center === "editors" && state.centerView !== "editors" : false) || next.place.line > 1;
-				if (needsFileOpen) {
-					// In the group that has the file open, this one first: a place in the other group is gone to there, not
-					// opened a second time here.
-					const groupIndex = state.groups[state.activeGroup]?.tabs.includes(next.place.path)
-						? state.activeGroup
-						: state.groups.findIndex((group) => group.tabs.includes(next.place.path));
-					await openFile(next.place.path, { reveal: { line: next.place.line, column: next.place.column }, ...(groupIndex >= 0 ? { group: groupIndex } : {}) });
+			const parsed = parseViewKey(next.place.view);
+			isGraphPlace = isGraphViewKey(next.place.view) || parsed?.center === "graph";
+			if (isGraphPlace) {
+				// Returning to the Call Graph must never open an editor file (which forces centerView="editors").
+				const focusId =
+					parsed?.graphFocus ||
+					(next.place as Place & { graphFocus?: string }).graphFocus ||
+					(next.place.path || undefined);
+				if (state.centerView !== "graph") setState("centerView", "graph");
+				restoreView(next.place.view, focusId);
+			} else {
+				if (next.place.path) {
+					const needsFileOpen =
+						activePath() !== next.place.path ||
+						(parsed ? parsed.center === "editors" && state.centerView !== "editors" : false) ||
+						next.place.line > 1;
+					if (needsFileOpen) {
+						// In the group that has the file open, this one first: a place in the other group is gone to there, not
+						// opened a second time here.
+						const groupIndex = state.groups[state.activeGroup]?.tabs.includes(next.place.path)
+							? state.activeGroup
+							: state.groups.findIndex((group) => group.tabs.includes(next.place.path));
+						await openFile(next.place.path, { reveal: { line: next.place.line, column: next.place.column }, ...(groupIndex >= 0 ? { group: groupIndex } : {}) });
+					}
 				}
+				restoreView(next.place.view);
 			}
-			restoreView(next.place.view);
 		} finally {
 			// Let reactive panel/editor effects settle before recording new stops again.
 			setTimeout(() => stepping--, 60);
 		}
-		if (!next.place.path || activePath() === next.place.path) return;
+		if (isGraphPlace || !next.place.path || activePath() === next.place.path) return;
 		// It could not be opened (and the app has said why): its places are no use, and the cursor is where it was.
 		trail = trailWithout(from, (path) => path === next.place.path);
 	}

@@ -1,5 +1,7 @@
-// Pure context-menu data structures, normalization, and viewport placement.
-// Shared by RowMenu.tsx and tested directly without a DOM.
+// Pure context-menu data structures, normalization, viewport placement,
+// multi-select QuickPick helpers, and workspace doc audit classification.
+// Shared by RowMenu.tsx, dialogs.tsx, and Problems.tsx; tested without a DOM.
+import type { WorkspaceDocIssue } from "./protocol";
 
 export type RowMenuAction = {
 	label: string;
@@ -231,4 +233,97 @@ export function shouldUseQuickPick(buttons: readonly string[], details?: Record<
 	if (buttons.length > 3) return true;
 	if (details && Object.keys(details).length > 0 && buttons.length >= 2) return true;
 	return buttons.some((b) => b.length > 34);
+}
+
+// --- Multi-select QuickPick pure state helpers --------------------------------
+
+/** Initializes selected item indices from explicit `initialSelected` values (or item `checked` flags when omitted). */
+export function initialMultiSelectIndices<T>(
+	items: readonly { value: T; checked?: boolean }[],
+	initialSelected?: readonly T[],
+): Set<number> {
+	const out = new Set<number>();
+	if (initialSelected !== undefined) {
+		const wanted = new Set<T>(initialSelected);
+		for (let i = 0; i < items.length; i++) {
+			if (wanted.has(items[i]!.value)) out.add(i);
+		}
+		return out;
+	}
+	for (let i = 0; i < items.length; i++) {
+		if (items[i]!.checked) out.add(i);
+	}
+	return out;
+}
+
+/** Toggles one item index in a multi-select index set, returning a new Set. */
+export function toggleMultiSelectIndex(selected: ReadonlySet<number>, index: number): Set<number> {
+	const next = new Set(selected);
+	if (next.has(index)) next.delete(index);
+	else next.add(index);
+	return next;
+}
+
+/** Adds all currently visible item indices to the selection while preserving already-selected hidden indices. */
+export function selectAllVisibleIndices(selected: ReadonlySet<number>, visibleIndices: readonly number[]): Set<number> {
+	const next = new Set(selected);
+	for (const idx of visibleIndices) next.add(idx);
+	return next;
+}
+
+/** Resolves selected item indices back into values in their original list order. */
+export function resolveMultiSelectValues<T>(items: readonly { value: T }[], selected: ReadonlySet<number>): T[] {
+	const out: T[] = [];
+	for (let i = 0; i < items.length; i++) {
+		if (selected.has(i)) out.push(items[i]!.value);
+	}
+	return out;
+}
+
+// --- Workspace doc audit Problems classification & deduplication --------------
+
+/**
+ * Exhaustively maps every `WorkspaceDocIssue["kind"]` to its Problems panel
+ * diagnostic code. Unknown future kinds pass through verbatim instead of
+ * silently being misclassified as `"yaml-frontmatter"`.
+ */
+export function docIssueCode(kind: WorkspaceDocIssue["kind"]): string {
+	switch (kind) {
+		case "anchor":
+			return "broken-anchor";
+		case "table":
+			return "table-rule";
+		case "citation":
+			return "code-citation";
+		case "yaml":
+			return "yaml-frontmatter";
+		case "schema-drift":
+			return "schema-drift";
+		case "duplicate-heading":
+			return "duplicate-heading";
+		case "orphan":
+			return "orphan-doc";
+		case "stale":
+			return "stale-doc";
+		default: {
+			const unknown: never = kind;
+			return String(unknown);
+		}
+	}
+}
+
+/**
+ * Builds a collision-free deduplication key for a workspace document issue in
+ * the Problems panel. Document-level findings on line 1 (or 0) include the
+ * issue message so multiple line-1 warnings on the same file (e.g. two
+ * `schema-drift` tables or both `schema-drift` and `yaml-frontmatter`) never
+ * silently drop each other.
+ */
+export function docIssueDedupKey(
+	fsPath: string,
+	issue: Pick<WorkspaceDocIssue, "line" | "kind" | "message"> & { column?: number },
+): string {
+	const code = docIssueCode(issue.kind);
+	if (issue.line <= 1) return `${fsPath}:${issue.line}:${code}:${issue.message}`;
+	return issue.column && issue.column > 1 ? `${fsPath}:${issue.line}:${issue.column}:${code}` : `${fsPath}:${issue.line}:${code}`;
 }

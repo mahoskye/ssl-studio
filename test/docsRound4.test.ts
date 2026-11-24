@@ -413,7 +413,16 @@ describe("Round 4 Waves 2 & 3 — Exports, SQL/Schema, Citations, Templater, Ref
 			entries.set(name, dec.decode(inflated));
 			pos = dataStart + compSize;
 		}
-		expect([...entries.keys()].sort()).toEqual(["[Content_Types].xml", "_rels/.rels", "word/_rels/document.xml.rels", "word/document.xml", "word/styles.xml"]);
+		expect([...entries.keys()].sort()).toEqual([
+			"[Content_Types].xml",
+			"_rels/.rels",
+			"docProps/core.xml",
+			"word/_rels/document.xml.rels",
+			"word/document.xml",
+			"word/footer1.xml",
+			"word/header1.xml",
+			"word/styles.xml",
+		]);
 		const docXml = entries.get("word/document.xml")!;
 		expect(docXml).toContain("LIMS-101 Release Packet");
 		expect(docXml).toContain("Rollback");

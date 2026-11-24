@@ -6,7 +6,7 @@ import { Icon } from "../Icon";
 import { createEffect, createMemo, createResource, createSignal, For, Match, on, onCleanup, Show, Switch } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import { findCodeCitations } from "../../shared/codeCitations";
-import { dirName, isInside, joinPath, resolvePath } from "../../shared/paths";
+import { dirName, isInside, joinPath, relativeTo, resolvePath } from "../../shared/paths";
 import { isCatalog } from "../../shared/projectDocs";
 import type { DocFile } from "../../shared/protocol";
 import { codeMatchesRef, docsGoverningFile } from "../../shared/workContext";
@@ -16,7 +16,7 @@ import { monaco } from "../editor/monaco";
 import { editors } from "../editor/EditorGroup";
 import { regionColor } from "../editor/regions";
 import { session } from "../lsp/session";
-import { ask, choose } from "../dialogs";
+import { ask, choose, quickPick, type QuickPickOption } from "../dialogs";
 import { docs, isMarkdown } from "../project";
 import { canonical, documents, notify, openFile, setState, state } from "../state";
 import { buildTree, neighbour, pathTo, procedureGroups, splitHeader, swapLines, treeFromSyntax, type Node, type SymbolIn } from "./model";
@@ -491,30 +491,40 @@ export function BlocksView(props: { path: string; group: number }) {
 	});
 
 	// Out of the Tab order: the keys on the view do the same (see onKey), and the buttons show for the selected block.
-	const Tools = (props: { node: Node }) => (
+	const Tools = (t: { node: Node }) => (
 		<span class="block-tools" onClick={(e) => e.stopPropagation()}>
-			<button tabindex={-1} title="Copy Markdown code citation" aria-label="Copy Markdown code citation" onClick={() => runBlockCommand(props.node, "copy-code-citation")}>
+			<Show when={t.node.kind === "procedure"}>
+				<button
+					tabindex={-1}
+					title={`Show ${t.node.name || "procedure"} in Call Graph`}
+					aria-label="Show in Call Graph"
+					onClick={() => void import("../graph/GraphView").then((m) => m.openGraphFocusedOn(props.path, t.node.name))}
+				>
+					<Icon name="references" />
+				</button>
+			</Show>
+			<button tabindex={-1} title="Copy Markdown code citation" aria-label="Copy Markdown code citation" onClick={() => runBlockCommand(t.node, "copy-code-citation")}>
 				<Icon name="quote" />
 			</button>
-			<button tabindex={-1} title="New decision about this block…" aria-label="New decision about this block" onClick={() => runBlockCommand(props.node, "new-decision")}>
+			<button tabindex={-1} title="New decision about this block…" aria-label="New decision about this block" onClick={() => runBlockCommand(t.node, "new-decision")}>
 				<Icon name="lightbulb" />
 			</button>
-			<button tabindex={-1} title="Ask the Agent about this block…" aria-label="Ask the Agent about this block" onClick={() => runBlockCommand(props.node, "agent-ask")}>
+			<button tabindex={-1} title="Ask the Agent about this block…" aria-label="Ask the Agent about this block" onClick={() => runBlockCommand(t.node, "agent-ask")}>
 				<Icon name="sparkle" />
 			</button>
-			<button tabindex={-1} title="Move up (Alt+Up)" aria-label="Move up" onClick={() => void move(props.node, -1)}>
+			<button tabindex={-1} title="Move up (Alt+Up)" aria-label="Move up" onClick={() => void move(t.node, -1)}>
 				<Icon name="arrow-up" />
 			</button>
-			<button tabindex={-1} title="Move down (Alt+Down)" aria-label="Move down" onClick={() => void move(props.node, 1)}>
+			<button tabindex={-1} title="Move down (Alt+Down)" aria-label="Move down" onClick={() => void move(t.node, 1)}>
 				<Icon name="arrow-down" />
 			</button>
-			<button tabindex={-1} title="Wrap in a region" aria-label="Wrap in a region" onClick={() => void wrap(props.node)}>
+			<button tabindex={-1} title="Wrap in a region" aria-label="Wrap in a region" onClick={() => void wrap(t.node)}>
 				<Icon name="symbol-namespace" />
 			</button>
-			<button tabindex={-1} title="Show in text" aria-label="Show in text" onClick={() => select(props.node, true)}>
+			<button tabindex={-1} title="Show in text" aria-label="Show in text" onClick={() => select(t.node, true)}>
 				<Icon name="go-to-file" />
 			</button>
-			<button tabindex={-1} title="Delete (Delete)" aria-label="Delete this block" onClick={() => void remove(props.node)}>
+			<button tabindex={-1} title="Delete (Delete)" aria-label="Delete this block" onClick={() => void remove(t.node)}>
 				<Icon name="trash" />
 			</button>
 		</span>
@@ -682,7 +692,26 @@ export function BlocksView(props: { path: string; group: number }) {
 						style={badgeStyle(false)}
 						onClick={(e) => {
 							e.stopPropagation();
-							void openFile(badges().plans[0]!.path);
+							const list = badges().plans;
+							if (list.length === 1) {
+								void openFile(list[0]!.path);
+								return;
+							}
+							void (async () => {
+								const items: QuickPickOption<BlockPlanBadge>[] = list.map((pl) => ({
+									value: pl,
+									label: pl.title,
+									icon: "graph",
+									badge: pl.steps ? { text: `${pl.steps} ${pl.steps === 1 ? "step" : "steps"}` } : undefined,
+									detail: relativeTo(state.workspace?.root, pl.path).replace(/\\/g, "/"),
+								}));
+								const picked = await quickPick<BlockPlanBadge>({
+									title: `Open governing plan for ${n.name || "block"}`,
+									placeholder: "Filter governing plans…",
+									items,
+								});
+								if (picked) void openFile(picked.path);
+							})();
 						}}
 					>
 						<Icon name="graph" />
@@ -701,8 +730,28 @@ export function BlocksView(props: { path: string; group: number }) {
 								style={badgeStyle(drifted())}
 								onClick={(e) => {
 									e.stopPropagation();
-									const first = list()[0]!;
-									void openFile(first.docPath, { reveal: { line: first.docLine } });
+									const cur = list();
+									if (cur.length === 1) {
+										const first = cur[0]!;
+										void openFile(first.docPath, { reveal: { line: first.docLine } });
+										return;
+									}
+									void (async () => {
+										const items: QuickPickOption<BlockDocCitation>[] = cur.map((c) => ({
+											value: c,
+											label: c.docTitle,
+											icon: c.drifted ? "warning" : "references",
+											description: `Line ${c.docLine}`,
+											badge: c.drifted ? { text: "drifted", tone: "waiting" } : undefined,
+											detail: relativeTo(state.workspace?.root, c.docPath).replace(/\\/g, "/"),
+										}));
+										const picked = await quickPick<BlockDocCitation>({
+											title: `Open citing document for ${n.name || "block"}`,
+											placeholder: "Filter citing documents…",
+											items,
+										});
+										if (picked) void openFile(picked.docPath, { reveal: { line: picked.docLine } });
+									})();
 								}}
 							>
 								<Icon name={drifted() ? "warning" : "references"} />

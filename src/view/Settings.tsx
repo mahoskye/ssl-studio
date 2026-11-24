@@ -26,7 +26,7 @@ import { choose } from "./dialogs";
 import { bindable, conflict, displayKey, isModifierKey, keyNames, rebind, unbind } from "./keys";
 import { Modal } from "./modal";
 import { matchWords } from "./quickRank";
-import { loadSettings, notify, saveSetting, state } from "./state";
+import { loadSettings, notify, saveSetting, state, syncLivePreviewMode } from "./state";
 import { clampScale, stepScale, UI_SCALE } from "./uiScale";
 
 type Layers = { user: Partial<Settings>; workspace: Partial<Settings> };
@@ -180,6 +180,7 @@ export function SettingsDialog() {
 		minimap: ["Minimap", "The outline of the file at the editor's edge; a narrow editor goes without"],
 		wordWrap: ["Word wrap", "Long lines wrapped at the editor's edge, not scrolled to; Alt+Z switches it"],
 		livePreview: ["Markdown live preview", "A document drawn as it is written: headings larger, the markup hidden except on the line being written"],
+		markdownReadingHighlight: ["Markdown reading highlight", "Subtly dim lines below the active cursor (or mouse pointer when reading) in Markdown Live and Read views"],
 		inlayHints: ["Parameter name hints", "Names shown beside the arguments of a call"],
 		rulers: ["Ruler at the line length", "A line down the editor at the style profile's line length"],
 		rulerMargin: ["Rulers beside it", "Fainter rulers this many columns before and after; 0 for none"],
@@ -191,7 +192,7 @@ export function SettingsDialog() {
 	const anyShown = (group: Group, ...rows: (keyof typeof ROWS)[]) => rows.some((r) => shown(group, ...ROWS[r]));
 	const groups = {
 		appearance: () => anyShown("Appearance", "theme", "uiScale", "fontSize", "uiFont", "codeFont", "readFont", "menuBar"),
-		editor: () => anyShown("Editor", "formatOnSave", "sqlDialect", "minimap", "wordWrap", "livePreview", "inlayHints", "rulers", "rulerMargin", "csvTable", "attachmentsFolder", "templatesFolder"),
+		editor: () => anyShown("Editor", "formatOnSave", "sqlDialect", "minimap", "wordWrap", "livePreview", "markdownReadingHighlight", "inlayHints", "rulers", "rulerMargin", "csvTable", "attachmentsFolder", "templatesFolder"),
 		server: () => anyShown("Language server", "lspPath"),
 		keyboard: () => keyRows().length > 0,
 	};
@@ -416,7 +417,30 @@ export function SettingsDialog() {
 							{(ids) => <input id={ids.control} aria-describedby={ids.hint} type="checkbox" checked={Boolean(state.settings.wordWrap)} onChange={(e) => void save("wordWrap", e.currentTarget.checked)} />}
 						</Row>
 						<Row group="Editor" label={ROWS.livePreview[0]} hint={ROWS.livePreview[1]} setting="livePreview">
-							{(ids) => <input id={ids.control} aria-describedby={ids.hint} type="checkbox" checked={state.settings.livePreview !== false} onChange={(e) => void save("livePreview", e.currentTarget.checked)} />}
+							{(ids) => (
+								<input
+									id={ids.control}
+									aria-describedby={ids.hint}
+									type="checkbox"
+									checked={state.settings.livePreview !== false}
+									onChange={(e) => {
+										const checked = e.currentTarget.checked;
+										syncLivePreviewMode(checked);
+										void save("livePreview", checked);
+									}}
+								/>
+							)}
+						</Row>
+						<Row group="Editor" label={ROWS.markdownReadingHighlight[0]} hint={ROWS.markdownReadingHighlight[1]} setting="markdownReadingHighlight">
+							{(ids) => (
+								<input
+									id={ids.control}
+									aria-describedby={ids.hint}
+									type="checkbox"
+									checked={state.settings.markdownReadingHighlight !== false}
+									onChange={(e) => void save("markdownReadingHighlight", e.currentTarget.checked)}
+								/>
+							)}
 						</Row>
 						<Row group="Editor" label={ROWS.inlayHints[0]} hint={ROWS.inlayHints[1]} setting="inlayHints">
 							{(ids) => <input id={ids.control} aria-describedby={ids.hint} type="checkbox" checked={state.settings.inlayHints !== false} onChange={(e) => void save("inlayHints", e.currentTarget.checked)} />}

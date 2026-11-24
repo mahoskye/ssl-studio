@@ -1,7 +1,12 @@
 // The window: menu bar, activity bar, side bar, editor groups, bottom panel, status bar.
 import { Icon } from "./Icon";
-import { batch, createEffect, createSignal, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js";
+import { batch, createEffect, createMemo, createSignal, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js";
+import { docChecks } from "../shared/docChecks";
+import { folderParts } from "../shared/docSections";
+import { CATALOG_AREAS } from "../shared/projectDocs";
+import { badgeText } from "../shared/statusBar";
 import { backend } from "./backend";
+import { docAuditData } from "./docAudit";
 import { Dialogs } from "./dialogs";
 import { RowMenu } from "./panels/RowMenu";
 import { review, ReviewView } from "./editor/Review";
@@ -20,7 +25,7 @@ import { Palette } from "./panels/Palette";
 import { Reference } from "./panels/Reference";
 import { Health } from "./panels/Health";
 import { Docs } from "./panels/Docs";
-import { setUpProject, useProject } from "./project";
+import { docs, isMarkdown, isTable, setUpProject, useProject } from "./project";
 import { StyleProfile } from "./StyleProfile";
 import { AgentPanel } from "./agent/Agent";
 import { GraphView } from "./graph/GraphView";
@@ -31,11 +36,10 @@ import { MenuBar } from "./MenuBar";
 import { useNavigation } from "./navigation";
 import { StatusBar } from "./StatusBar";
 import { applyFonts, applyTheme, resolveTheme } from "./themes/themes";
-import { activePath, dismiss, focusEditor, focusRequest, isTabsReady, markdownMode, notify, openFolder, rememberTabs, rememberViews, setState, state, unsavedPaths, type PanelId } from "./state";
+import { activePath, dismiss, focusEditor, focusRequest, isTabsReady, markdownMode, notify, openFolder, planMode, rememberTabs, rememberViews, setState, state, tableTextMode, unsavedPaths, type PanelId } from "./state";
 import { focusPanel, getOutlineMemory, getPlanPaletteMemory, isPanelAvailable, isPlanChartActive, isShown, lastShown, loadOutlineMemory, loadPlanPaletteMemory, movePanel, narrowHosted, narrowPanels, panelOn, PANELS, recordOutlineActive, recordPlanPaletteActive, setCrowded, setNarrowHosted, setNarrowPanels, setOutlineMemory, setPlanPaletteMemory, sideOf, togglePanel } from "./panels/registry";
 import { transitionOutlineAvailability, transitionPanelAvailability } from "./panels/outlineState";
 import { isPlanPath } from "./plan/model";
-import { isMarkdown, isTable } from "./project";
 import { Welcome } from "./Welcome";
 import { ACTIVITY, BOTTOM_MIN, canFitBothPanels, CENTER_MIN, crowdedSides, dragBottomPanel, dragHorizontalPanel, EDITOR_MIN_HEIGHT, fitPanels, horizontalChrome, LEFT_MIN, RIGHT_MIN } from "./layout";
 
@@ -200,15 +204,15 @@ function Panel(props: { id: PanelId }) {
 	);
 }
 
-function PanelButton(props: { id: PanelId }) {
+function PanelButton(props: { id: PanelId; badge?: string; badgeNote?: string }) {
 	const panel = () => PANELS.find((p) => p.id === props.id)!;
 	// A panel shows a folder's contents: with no folder open there is nothing to switch to.
 	const usable = () => Boolean(state.workspace);
 	const name = () => panel().title.split(":")[0]!;
 	return (
 		<button
-			title={usable() ? `${panel().title}${shortcut(props.id)}\nRight-click, or the command "Move ${sideOf(props.id)} panel", moves it to the ${sideOf(props.id) === "left" ? "right" : "left"} side.` : `${name()}: open a folder first`}
-			aria-label={name()}
+			title={usable() ? `${panel().title}${props.badgeNote ? ` — ${props.badgeNote}` : ""}${shortcut(props.id)}\nRight-click, or the command "Move ${sideOf(props.id)} panel", moves it to the ${sideOf(props.id) === "left" ? "right" : "left"} side.` : `${name()}: open a folder first`}
+			aria-label={usable() && props.badgeNote ? `${name()}: ${props.badgeNote}` : name()}
 			aria-pressed={usable() && isShown(props.id)}
 			disabled={!usable()}
 			classList={{ active: usable() && isShown(props.id) }}
@@ -217,6 +221,11 @@ function PanelButton(props: { id: PanelId }) {
 		>
 			{/* Icons in the private use area are Codicons, drawn with that font. */}
 			{/[\ue000-\uf8ff]/.test(panel().icon) ? <span class="codicon-glyph" aria-hidden="true">{panel().icon}</span> : panel().icon}
+			<Show when={usable() && props.badge}>
+				<span class="activity-badge" aria-hidden="true">
+					{props.badge}
+				</span>
+			</Show>
 		</button>
 	);
 }
@@ -387,6 +396,17 @@ export function App() {
 	createEffect(() => void backend.unsavedChanged(unsavedPaths().length).catch(() => undefined));
 	// A review takes the editors' place: one opened while the call graph is showing must not open behind it.
 	createEffect(() => review() && setState("centerView", "editors"));
+	// Keep Call Graph mounted once opened in the current workspace so pan/zoom, folds, focus, and impact state survive jumps to code/docs.
+	const [graphMounted, setGraphMounted] = createSignal(false);
+	createEffect(
+		on(
+			() => state.workspace?.root,
+			() => setGraphMounted(false),
+		),
+	);
+	createEffect(() => {
+		if (state.workspace && state.centerView === "graph") setGraphMounted(true);
+	});
 	const layout = () => state.settings.layout;
 	const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
 	// The window's size, to keep the side panels from crowding out the editors.
@@ -438,9 +458,9 @@ export function App() {
 		if (review()) return "review";
 		const path = activePath();
 		if (path) {
-			if (isPlanPath(path) && !state.planText[path]) return "plan";
+			if (isPlanPath(path) && planMode(path) !== "source") return "plan";
 			if (isMarkdown(path) && markdownMode(path) !== "source") return "doc";
-			if (isTable(path) && !state.mdText[path]) return "table";
+			if (isTable(path) && !tableTextMode(path)) return "table";
 		}
 		return "code";
 	};
@@ -613,6 +633,29 @@ export function App() {
 			if (target === "side") queueMicrotask(() => focusPanel(state.leftView));
 		}),
 	);
+	const docAreas = createMemo(() => CATALOG_AREAS.filter((area) => area !== "schema" || folderParts(state.project?.schema ?? "schema").length > 0));
+	const docCheckList = createMemo(() => docChecks(docs(), docAreas()));
+	const healthWarnings = createMemo(
+		() => docCheckList().filter((c) => c.level === "warn").length + docAuditData().issues.filter((i) => i.level === "warn").length,
+	);
+	const healthNotes = createMemo(
+		() =>
+			docCheckList().filter((c) => c.level === "note").length +
+			docAuditData().issues.filter((i) => i.level === "note").length +
+			docAuditData().unusedAttachments.length,
+	);
+	const panelBadge = (id: PanelId) => (id === "health" ? badgeText(healthWarnings()) : "");
+	const panelBadgeNote = (id: PanelId) => {
+		if (id !== "health") return undefined;
+		const w = healthWarnings();
+		const n = healthNotes();
+		if (!w && !n) return undefined;
+		const parts = [];
+		if (w) parts.push(`${w} ${w === 1 ? "warning" : "warnings"}`);
+		if (n) parts.push(`${n} ${n === 1 ? "note" : "notes"}`);
+		return parts.join(", ");
+	};
+
 	return (
 		<div
 			class="app"
@@ -626,7 +669,7 @@ export function App() {
 				<MenuBar />
 			</Show>
 			<nav class="activity" aria-label="Views">
-				<For each={PANELS.filter((p) => sideOf(p.id) === "left" && isPanelAvailable(p.id))}>{(p) => <PanelButton id={p.id} />}</For>
+				<For each={PANELS.filter((p) => sideOf(p.id) === "left" && isPanelAvailable(p.id))}>{(p) => <PanelButton id={p.id} badge={panelBadge(p.id)} badgeNote={panelBadgeNote(p.id)} />}</For>
 				<button
 					title={state.workspace ? `Call graph${shortcut("graph")}` : "Call graph: open a folder first"}
 					aria-label="Call graph"
@@ -643,7 +686,7 @@ export function App() {
 				<Show when={PANELS.some((p) => sideOf(p.id) === "right" && isPanelAvailable(p.id))}>
 					<span class="activity-divider" aria-hidden="true" />
 				</Show>
-				<For each={PANELS.filter((p) => sideOf(p.id) === "right" && isPanelAvailable(p.id))}>{(p) => <PanelButton id={p.id} />}</For>
+				<For each={PANELS.filter((p) => sideOf(p.id) === "right" && isPanelAvailable(p.id))}>{(p) => <PanelButton id={p.id} badge={panelBadge(p.id)} badgeNote={panelBadgeNote(p.id)} />}</For>
 				<button title={`All commands${shortcut("command-palette")}`} aria-label="All commands" onClick={() => setState("quickPick", "commands")}>
 					<span class="codicon-glyph" aria-hidden="true">
 						{"\ueb94"}
@@ -709,8 +752,18 @@ export function App() {
 				</Show>
 				<div class="editors" classList={{ "panel-maximized": layout().bottom && Boolean(state.workspace) && isBottomMaximized() }}>
 					<Show when={state.workspace} fallback={<Welcome />}>
-						<Show when={state.centerView === "graph"}>
-							<GraphView />
+						<Show when={graphMounted()}>
+							<div
+								class="graph-persist-host"
+								style={{
+									display: state.centerView === "graph" ? "flex" : "none",
+									flex: "1",
+									"min-width": "0",
+									"min-height": "0",
+								}}
+							>
+								<GraphView />
+							</div>
 						</Show>
 						<Show when={state.centerView === "welcome"}>
 							<CenterTabStrip title="Projects" tooltip="Switch workspace or open a recent folder" icon="home" onClose={() => setState("centerView", "editors")}>

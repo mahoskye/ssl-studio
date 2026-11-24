@@ -5,7 +5,9 @@ import { Icon } from "../Icon";
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import { reanchorCitation, refreshCitationExcerpt } from "../../shared/codeCitations";
 import { withLinkFiles } from "../../shared/docLinks";
+import { addToFrontMatterList, frontMatter, many, withFrontMatter } from "../../shared/frontMatter";
 import { level } from "../../shared/houseStyle";
+import { withNames } from "../../shared/namedLinks";
 import type { AuditCitationIssue, OpenTaskItem, SchemaDriftItem, UndocumentedSchemaRef, WorkspaceDocIssue } from "../../shared/protocol";
 import { tasks } from "../../shared/tasks";
 import { descendantTickets, ticketWork } from "../../shared/workContext";
@@ -24,10 +26,10 @@ import { chooseFromMenu, type RowMenuEntry } from "./RowMenu";
 import { serverDown } from "./server";
 import { openStyleProfile } from "../StyleProfile";
 import { docs, setUpProject } from "../project";
-import { checksSummary, docChecks, type DocCheck, type LinkMend } from "../../shared/docChecks";
+import { checksSummary, docChecks, type DocCheck, type LinkMend, type WikiLinkMend } from "../../shared/docChecks";
 import { folderParts } from "../../shared/docSections";
-import { CATALOG_AREAS, isCatalog, projectDocLabel, registryTitle, toneOf } from "../../shared/projectDocs";
-import { mendLinks, newTicket, updateCatalogs } from "../projectDocs";
+import { CATALOG_AREAS, frontValue, isCatalog, projectDocLabel, registryTitle, toneOf } from "../../shared/projectDocs";
+import { addDatabaseRegistryRow, generateSchemaDocFromSql, mendLinks, newSchema, newTicket, recordDocApproval, updateCatalogs } from "../projectDocs";
 
 const PROCEDURE = new Set([monaco.languages.SymbolKind.Function, monaco.languages.SymbolKind.Method]);
 
@@ -193,8 +195,8 @@ export function Health() {
 	);
 	const mendableChecks = createMemo(() =>
 		filteredChecks().filter(
-			(c): c is DocCheck & { fix: { kind: "links"; mends: LinkMend[] } } =>
-				c.fix?.kind === "links" && c.fix.mends.length > 0,
+			(c): c is DocCheck & { fix: { kind: "links"; mends: LinkMend[] } | { kind: "mend-wikilinks"; mends: WikiLinkMend[] } } =>
+				(c.fix?.kind === "links" || c.fix?.kind === "mend-wikilinks") && c.fix.mends.length > 0,
 		),
 	);
 	const reanchorableCitations = createMemo(() => filteredCitations().filter((c) => Boolean(c.reanchor)));
@@ -351,6 +353,39 @@ export function Health() {
 		notify(`Moved ${count(trashed, "unused attachment")} to trash.`);
 	};
 
+	const mendWikiLinks = async (path: string, mends: WikiLinkMend[]) => {
+		const open = documents.get(canonical(path));
+		const before = open ? open.model.getValue() : await backend.read(path).then((r) => (r.binary ? null : r.text), () => null);
+		if (before === null) return notify("Could not read the document.", "error");
+		const { text: after, done } = withNames(before, mends);
+		if (!done || after === before) return notify("Those wikilinks could not be mended — the document may have already changed.");
+		await writeDocEdit(path, after);
+		setState("treeVersion", (v) => v + 1);
+		refreshDocAudit();
+		notify(`Mended ${count(done, "wikilink")} in ${baseName(path)}.`);
+	};
+
+	const fixReciprocalAdr = async (fixSpec: { path: string; field: "supersedes" | "superseded-by"; value: string }) => {
+		const open = documents.get(canonical(fixSpec.path));
+		const before = open ? open.model.getValue() : await backend.read(fixSpec.path).then((r) => (r.binary ? null : r.text), () => null);
+		if (before === null) return notify("Could not read the decision document.", "error");
+		const fm = frontMatter(before);
+		const existing = many(fm.values[fixSpec.field]);
+		const next = existing.length
+			? addToFrontMatterList(before, fixSpec.field, fixSpec.value)
+			: withFrontMatter(before, fixSpec.field, frontValue(fixSpec.value));
+		if (!next || next === before) return notify(`${baseName(fixSpec.path)} already lists ${fixSpec.field}: ${fixSpec.value}.`);
+		await writeDocEdit(fixSpec.path, next);
+		setState("treeVersion", (v) => v + 1);
+		refreshDocAudit();
+		notify(`Added ${fixSpec.field}: ${fixSpec.value} to ${baseName(fixSpec.path)}.`);
+	};
+
+	const runRecordApproval = async (path: string) => {
+		await recordDocApproval(path);
+		refreshDocAudit();
+	};
+
 	const mendAllBrokenLinks = async () => {
 		const list = mendableChecks();
 		if (list.length < 2) return;
@@ -366,7 +401,7 @@ export function Health() {
 			[GO],
 		);
 		if (picked !== GO) return;
-		let mendedFiles = 0;
+		const mendedPaths = new Set<string>();
 		let mendedLinks = 0;
 		for (const check of list) {
 			const open = documents.get(canonical(check.path));
@@ -374,11 +409,14 @@ export function Health() {
 				? open.model.getValue()
 				: await backend.read(check.path).then((r) => (r.binary ? null : r.text), () => null);
 			if (before === null) continue;
-			const { text: after, done } = withLinkFiles(before, check.fix.mends);
+			const { text: after, done } =
+				check.fix.kind === "mend-wikilinks"
+					? withNames(before, check.fix.mends)
+					: withLinkFiles(before, check.fix.mends);
 			if (!done || after === before) continue;
 			try {
 				await writeDocEdit(check.path, after);
-				mendedFiles++;
+				mendedPaths.add(canonical(check.path));
 				mendedLinks += done;
 			} catch {
 				// continue remaining files
@@ -388,18 +426,33 @@ export function Health() {
 		refreshDocAudit();
 		notify(
 			mendedLinks
-				? `Mended ${count(mendedLinks, "link")} across ${count(mendedFiles, "document")}.`
+				? `Mended ${count(mendedLinks, "link")} across ${count(mendedPaths.size, "document")}.`
 				: "No links needed mending — the documents may have already changed.",
 		);
 	};
 
-	const syncSchemaFromSql = async (sqlPath: string) => {
+	const syncSchemaFromSql = async (sqlPath: string, schemaPath?: string) => {
 		try {
-			const mod = (await import("../projectDocs")) as { generateSchemaDocFromSql?: (p?: string) => Promise<void> };
-			if (typeof mod.generateSchemaDocFromSql === "function") {
-				await mod.generateSchemaDocFromSql(sqlPath);
-				refreshDocAudit();
-			}
+			await generateSchemaDocFromSql(sqlPath, schemaPath);
+			refreshDocAudit();
+		} catch (e: any) {
+			notify(String(e?.message ?? e), "error");
+		}
+	};
+
+	const createSchemaForUndocRef = async (ref: UndocumentedSchemaRef) => {
+		try {
+			await newSchema("database", undefined, ref.object);
+			refreshDocAudit();
+		} catch (e: any) {
+			notify(String(e?.message ?? e), "error");
+		}
+	};
+
+	const addUndocRefToDatabaseCsv = async (ref: UndocumentedSchemaRef) => {
+		try {
+			await addDatabaseRegistryRow(ref.object, ref.path, ref.line);
+			refreshDocAudit();
 		} catch (e: any) {
 			notify(String(e?.message ?? e), "error");
 		}
@@ -445,16 +498,20 @@ export function Health() {
 		const picked = await chooseFromMenu(item.table, [OPEN_DOC, OPEN_SQL, "separator", SYNC], at);
 		if (picked === OPEN_DOC) await openFile(item.schemaPath);
 		else if (picked === OPEN_SQL) await openFile(item.sqlPath);
-		else if (picked === SYNC) await syncSchemaFromSql(item.sqlPath);
+		else if (picked === SYNC) await syncSchemaFromSql(item.sqlPath, item.schemaPath);
 	};
 
 	const undocRefMenu = async (ref: UndocumentedSchemaRef, at: Point) => {
 		const OPEN = `Open at line ${ref.line}`;
+		const CREATE_DOC = "Create schema doc…";
+		const ADD_CSV = "Add to database.csv";
 		const SHOW = "Show in the Explorer";
 		const inWs = Boolean(state.workspace && isInside(state.workspace.root, ref.path));
-		const items: RowMenuEntry[] = [OPEN, ...(inWs ? (["separator", SHOW] as RowMenuEntry[]) : [])];
+		const items: RowMenuEntry[] = [OPEN, "separator", CREATE_DOC, ADD_CSV, ...(inWs ? (["separator", SHOW] as RowMenuEntry[]) : [])];
 		const picked = await chooseFromMenu(ref.object, items, at);
 		if (picked === OPEN) await openFile(ref.path, { reveal: { line: ref.line } });
+		else if (picked === CREATE_DOC) await createSchemaForUndocRef(ref);
+		else if (picked === ADD_CSV) await addUndocRefToDatabaseCsv(ref);
 		else if (picked === SHOW) (await import("./Explorer")).showInExplorer(ref.path);
 	};
 
@@ -533,13 +590,42 @@ export function Health() {
 		await copyText(lines.join("\n").trimEnd() + "\n", "Copied Health report as Markdown.");
 	};
 
+	const docIssueFixLabel = (issue: WorkspaceDocIssue) =>
+		issue.fix?.kind === "record-approval"
+			? "Approve…"
+			: issue.fix?.kind === "reciprocal-adr"
+				? `Add ${issue.fix.field}`
+				: "";
+	const docIssueFixTitle = (issue: WorkspaceDocIssue) =>
+		issue.fix?.kind === "record-approval"
+			? `Record approval metadata on ${baseName(issue.fix.path)}`
+			: issue.fix?.kind === "reciprocal-adr"
+				? `Add ${issue.fix.field}: ${issue.fix.value} to ${baseName(issue.fix.path)}`
+				: "";
+	const runDocIssueFix = (issue: WorkspaceDocIssue) => {
+		if (!issue.fix) return;
+		if (issue.fix.kind === "record-approval") void runRecordApproval(issue.fix.path);
+		else if (issue.fix.kind === "reciprocal-adr") void fixReciprocalAdr(issue.fix);
+	};
+
 	const docIssueMenu = async (issue: WorkspaceDocIssue, at: Point) => {
 		const OPEN = "Open at line";
 		const SHOW = "Show in the Explorer";
+		const FIX =
+			issue.fix?.kind === "record-approval"
+				? "Record approval…"
+				: issue.fix?.kind === "reciprocal-adr"
+					? `Add ${issue.fix.field}: ${issue.fix.value}`
+					: "";
 		const inWs = Boolean(state.workspace && isInside(state.workspace.root, issue.path));
-		const items: RowMenuEntry[] = [OPEN, ...(inWs ? (["separator", SHOW] as RowMenuEntry[]) : [])];
+		const items: RowMenuEntry[] = [
+			OPEN,
+			...(FIX ? (["separator", FIX] as RowMenuEntry[]) : []),
+			...(inWs ? (["separator", SHOW] as RowMenuEntry[]) : []),
+		];
 		const picked = await chooseFromMenu(baseName(issue.path), items, at);
 		if (picked === OPEN) await openFile(issue.path, { reveal: { line: issue.line, column: issue.column } });
+		else if (FIX && picked === FIX) runDocIssueFix(issue);
 		else if (picked === SHOW) (await import("./Explorer")).showInExplorer(issue.path);
 	};
 	const openTaskMenu = async (task: OpenTaskItem, at: Point) => {
@@ -585,19 +671,64 @@ export function Health() {
 				const left = d.tally ? d.tally.by.filter(([status]) => toneOf(status) !== "done").map(([status, count]) => `${count} ${status || "with no status"}`) : [];
 				return { file: d, title: registryTitle(d.name), total, done, counted: Boolean(d.tally), left };
 			});
-	const fixLabel = (check: DocCheck) => (check.fix?.kind === "catalogs" ? "Update" : check.fix?.kind === "links" ? "Mend" : "Start it");
+	const fixLabel = (check: DocCheck) =>
+		check.fix?.kind === "catalogs"
+			? "Update"
+			: check.fix?.kind === "links" || check.fix?.kind === "mend-wikilinks"
+				? "Mend"
+				: check.fix?.kind === "reciprocal-adr"
+					? `Add ${check.fix.field}`
+					: check.fix?.kind === "record-approval"
+						? "Approve…"
+						: "Start it";
 	/** What mending a document's links does, in a line: where the one link will lead, or how many will be pointed where their files are. */
 	const mendTitle = (mends: LinkMend[]) => (mends.length === 1 ? `Point the link at ${mends[0]!.instead}, where a file of that name is` : `Point ${mends.length} links at where files of their names are`);
+	const wikiMendTitle = (mends: WikiLinkMend[]) =>
+		mends.length === 1
+			? `Point [[${mends[0]!.name}]] at [[${mends[0]!.instead}]]`
+			: `Point ${mends.length} wikilinks at matching notes`;
 	const fixTitle = (check: DocCheck) =>
-		check.fix?.kind === "catalogs" ? "Write every catalog afresh from the documents in its folder" : check.fix?.kind === "ticket" ? `Start ${check.fix.key} as a ticket of its own` : check.fix?.kind === "links" ? mendTitle(check.fix.mends) : "";
-	const fix = (check: DocCheck) =>
-		check.fix?.kind === "catalogs" ? void updateCatalogs() : check.fix?.kind === "ticket" ? void newTicket(check.fix.key, check.fix.related) : check.fix?.kind === "links" ? void mendLinks(check.path, check.fix.mends) : undefined;
+		check.fix?.kind === "catalogs"
+			? "Write every catalog afresh from the documents in its folder"
+			: check.fix?.kind === "ticket"
+				? `Start ${check.fix.key} as a ticket of its own`
+				: check.fix?.kind === "links"
+					? mendTitle(check.fix.mends)
+					: check.fix?.kind === "mend-wikilinks"
+						? wikiMendTitle(check.fix.mends)
+						: check.fix?.kind === "reciprocal-adr"
+							? `Add ${check.fix.field}: ${check.fix.value} to ${baseName(check.fix.path)}`
+							: check.fix?.kind === "record-approval"
+								? `Record approval metadata on ${baseName(check.fix.path)}`
+								: "";
+	const fix = (check: DocCheck) => {
+		if (!check.fix) return;
+		if (check.fix.kind === "catalogs") void updateCatalogs();
+		else if (check.fix.kind === "ticket") void newTicket(check.fix.key, check.fix.related);
+		else if (check.fix.kind === "links") void mendLinks(check.path, check.fix.mends);
+		else if (check.fix.kind === "mend-wikilinks") void mendWikiLinks(check.path, check.fix.mends);
+		else if (check.fix.kind === "reciprocal-adr") void fixReciprocalAdr(check.fix);
+		else if (check.fix.kind === "record-approval") void runRecordApproval(check.fix.path);
+	};
 	/** A check's document, at the place the check is about where it is about one. */
 	const openCheck = (check: DocCheck) => openFile(check.path, check.line ? { reveal: { line: check.line } } : {});
 	/** A check's menu: open its document, or put it right where the IDE can. */
 	const checkMenu = async (check: DocCheck, at: Point) => {
 		const open = "Open the document";
-		const put = check.fix?.kind === "catalogs" ? "Update the catalogs" : check.fix?.kind === "ticket" ? `Start ${check.fix.key} as a ticket` : check.fix?.kind === "links" ? mendTitle(check.fix.mends) : "";
+		const put =
+			check.fix?.kind === "catalogs"
+				? "Update the catalogs"
+				: check.fix?.kind === "ticket"
+					? `Start ${check.fix.key} as a ticket`
+					: check.fix?.kind === "links"
+						? mendTitle(check.fix.mends)
+						: check.fix?.kind === "mend-wikilinks"
+							? wikiMendTitle(check.fix.mends)
+							: check.fix?.kind === "reciprocal-adr"
+								? `Add ${check.fix.field}: ${check.fix.value}`
+								: check.fix?.kind === "record-approval"
+									? "Record approval…"
+									: "";
 		const picked = await chooseFromMenu("What to do about it", [open, ...(put ? (["separator", put] as RowMenuEntry[]) : [])], at);
 		if (picked === open) await openCheck(check);
 		else if (picked && picked === put) fix(check);
@@ -820,7 +951,7 @@ export function Health() {
 											class="link"
 											tabindex={-1}
 											title={`Sync ${baseName(item.schemaPath)} from ${baseName(item.sqlPath)}`}
-											onClick={(e) => (e.stopPropagation(), void syncSchemaFromSql(item.sqlPath))}
+											onClick={(e) => (e.stopPropagation(), void syncSchemaFromSql(item.sqlPath, item.schemaPath))}
 										>
 											Sync from SQL
 										</button>
@@ -856,7 +987,7 @@ export function Health() {
 										class="check-row clickable"
 										key={`undoc:${ref.path}:${ref.line}:${ref.object}`}
 										label={`${ref.object} (${baseName(ref.path)}:${ref.line})`}
-										title={`Undocumented table ${ref.object} queried at ${relativeTo(state.workspace?.root, ref.path)}:${ref.line}.\nClick or press Enter to open.`}
+										title={`Undocumented table ${ref.object} queried at ${relativeTo(state.workspace?.root, ref.path)}:${ref.line}.\nClick or press Enter to open. Menu key offers Create schema doc or Add to database.csv.`}
 										onActivate={() => void openFile(ref.path, { reveal: { line: ref.line } })}
 										onMenu={(at) => void undocRefMenu(ref, at)}
 									>
@@ -866,6 +997,24 @@ export function Health() {
 										<span class="label">
 											<strong>{ref.object}</strong> <span class="meta">({baseName(ref.path)}:{ref.line})</span>
 										</span>
+										<button
+											type="button"
+											class="link"
+											tabindex={-1}
+											title={`Create a database schema doc for ${ref.object}`}
+											onClick={(e) => (e.stopPropagation(), void createSchemaForUndocRef(ref))}
+										>
+											Create schema doc…
+										</button>
+										<button
+											type="button"
+											class="link"
+											tabindex={-1}
+											title={`Add ${ref.object} to registries/database.csv citing ${relativeTo(state.workspace?.root, ref.path)}`}
+											onClick={(e) => (e.stopPropagation(), void addUndocRefToDatabaseCsv(ref))}
+										>
+											Add to database.csv
+										</button>
 									</Row>
 								)}
 							</For>
@@ -888,7 +1037,7 @@ export function Health() {
 									class="check-row clickable"
 									key={`${issue.path}:${issue.line}:${issue.kind}:${issue.message}`}
 									label={issue.message}
-									title={`${relativeTo(state.workspace?.root, issue.path)}:${issue.line} — ${issue.message}\nClick or press Enter to open.`}
+									title={`${relativeTo(state.workspace?.root, issue.path)}:${issue.line} — ${issue.message}\nClick or press Enter to open.${issue.fix ? ` Menu key offers: ${docIssueFixTitle(issue).toLowerCase()}.` : ""}`}
 									onActivate={() => void openFile(issue.path, { reveal: { line: issue.line, column: issue.column } })}
 									onMenu={(at) => void docIssueMenu(issue, at)}
 								>
@@ -898,6 +1047,17 @@ export function Health() {
 									<span class="label">
 										{issue.message} <span class="meta">({baseName(issue.path)}:{issue.line})</span>
 									</span>
+									<Show when={issue.fix}>
+										<button
+											type="button"
+											class="link"
+											tabindex={-1}
+											title={docIssueFixTitle(issue)}
+											onClick={(e) => (e.stopPropagation(), runDocIssueFix(issue))}
+										>
+											{docIssueFixLabel(issue)}
+										</button>
+									</Show>
 								</Row>
 							)}
 						</For>

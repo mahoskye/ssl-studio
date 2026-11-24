@@ -59,6 +59,7 @@ class Session {
 	private initialized: Promise<void> | null = null;
 	private root = "";
 	private versions = new Map<string, number>();
+	private tracked = new Map<string, () => void>();
 	server: ServerInfo | null = null;
 	capabilities: Record<string, any> = {};
 	/** The style profile's `ssl` settings, sent at start and on change. */
@@ -279,8 +280,11 @@ class Session {
 	track(model: monaco.editor.ITextModel) {
 		if (model.getLanguageId() !== "ssl" || model.uri.scheme !== "file") return;
 		const uri = model.uri.toString();
+		if (this.tracked.has(uri)) return;
 		this.versions.set(uri, 0);
-		this.initialized?.then(() => this.open(model));
+		this.initialized?.then(() => {
+			if (this.tracked.has(uri) && !model.isDisposed() && model.getLanguageId() === "ssl") this.open(model);
+		});
 		const changes = model.onDidChangeContent((event) => {
 			if (!this.initialized || !this.versions.get(uri)) return;
 			const version = this.versions.get(uri)! + 1;
@@ -290,12 +294,25 @@ class Session {
 				contentChanges: event.changes.map((c) => ({ range: toLspRange(c.range), rangeLength: c.rangeLength, text: c.text })),
 			});
 		});
-		model.onWillDispose(() => {
+		const disposeSub = model.onWillDispose(() => this.untrack(model));
+		this.tracked.set(uri, () => {
 			changes.dispose();
-			this.versions.delete(uri);
-			if (this.initialized) this.client.notify("textDocument/didClose", { textDocument: { uri } });
-			setDiagnostics(uri, undefined!);
+			disposeSub.dispose();
 		});
+	}
+
+	/** Stops tracking a model when its language mode switches away from SSL or it is disposed. */
+	untrack(model: monaco.editor.ITextModel) {
+		const uri = model.uri.toString();
+		const stop = this.tracked.get(uri);
+		if (!stop) return;
+		this.tracked.delete(uri);
+		stop();
+		const hadOpen = Boolean(this.versions.get(uri));
+		this.versions.delete(uri);
+		if (this.initialized && hadOpen) this.client.notify("textDocument/didClose", { textDocument: { uri } });
+		setDiagnostics(uri, undefined!);
+		if (!model.isDisposed()) monaco.editor.setModelMarkers(model, "ssl", []);
 	}
 
 	saved(model: monaco.editor.ITextModel) {

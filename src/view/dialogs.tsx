@@ -1,96 +1,86 @@
-// In-app prompts, confirmations, VS Code-style QuickPick list selectors, and
-// a searchable Workspace File Browser (ADR 0032). One dialog is shown at a
-// time; the rest wait their turn cleanly.
+// In-app prompts, confirmations, VS Code-style QuickPick list selectors
+// (single- and multi-select), and a searchable Workspace File Browser
+// (ADR 0032). Every overlay serializes through one unified FIFO queue so two
+// overlays can never mount on top of each other simultaneously.
 import { createEffect, createMemo, createResource, createSignal, createUniqueId, For, Show } from "solid-js";
-import { shouldUseQuickPick } from "../shared/contextMenu";
+import {
+	initialMultiSelectIndices,
+	resolveMultiSelectValues,
+	selectAllVisibleIndices,
+	shouldUseQuickPick,
+	toggleMultiSelectIndex,
+} from "../shared/contextMenu";
 import { baseName, dirName, isInside, relativeTo } from "../shared/paths";
 import { backend } from "./backend";
-import { defaultButton, DialogQueue, type Request } from "./dialogQueue";
+import {
+	defaultButton,
+	DialogQueue,
+	type DialogOverlay,
+	type FileBrowserPinnedItem,
+	type FileBrowserRequest,
+	type QuickPickItemData,
+	type QuickPickManyRequest,
+	type QuickPickRequest,
+	type Request,
+} from "./dialogQueue";
 import { FileMark } from "./FileMark";
 import { Icon, type IconName } from "./Icon";
 import { Modal } from "./modal";
 import { fileTier, matchWords } from "./quickRank";
 import { canonical } from "./state";
 
-const [current, setCurrent] = createSignal<Request | null>(null);
-const queue = new DialogQueue(setCurrent);
+const [activeOverlay, setActiveOverlay] = createSignal<DialogOverlay | null>(null);
+const queue = DialogQueue.unified(setActiveOverlay);
 
-// --- VS Code-style QuickPick & File Browser overlay state --------------------
+// --- VS Code-style QuickPick & File Browser overlay API ----------------------
 
-export type QuickPickOption<T = string> = {
-	label: string;
-	value: T;
-	detail?: string;
-	description?: string;
+export type QuickPickOption<T = string> = Omit<QuickPickItemData<T>, "icon"> & {
 	icon?: IconName;
-	file?: string;
-	badge?: { text: string; tone?: string };
-	checked?: boolean;
-	danger?: boolean;
-	divide?: boolean;
-	keywords?: string;
 };
 
-type QuickPickRequest = {
-	kind: "pick";
-	title: string;
-	placeholder: string;
-	items: QuickPickOption<any>[];
-	empty: string;
-	searchable: boolean;
-	resolve: (value: any | null) => void;
-};
-
-export type FileBrowserPinned = {
-	path: string;
-	rel: string;
-	detail?: string;
-};
-
-type FileBrowserRequest = {
-	kind: "file";
-	title: string;
-	root: string;
-	initialDir: string;
-	pinned: FileBrowserPinned[];
-	pinnedLabel: string;
-	exclude: Set<string>;
-	resolve: (picked: { path: string; rel: string } | null) => void;
-};
-
-type PickerOverlay = QuickPickRequest | FileBrowserRequest;
-const [picker, setPicker] = createSignal<PickerOverlay | null>(null);
-
-function finishPicker(value: any | null) {
-	const cur = picker();
-	if (!cur) return;
-	setPicker(null);
-	cur.resolve(value);
-}
-
-/**
- * VS Code-style top-center searchable QuickPick (ADR 0032). Use for selecting
- * from tickets, files, statuses, templates, headings, registries, or options.
- */
-export function quickPick<T = string>(options: {
+export type QuickPickSingleOptions<T = string> = {
 	title: string;
 	placeholder?: string;
 	items: QuickPickOption<T>[];
 	empty?: string;
 	searchable?: boolean;
-}): Promise<T | null> {
-	finishPicker(null);
-	return new Promise((resolve) =>
-		setPicker({
-			kind: "pick",
-			title: options.title,
-			placeholder: options.placeholder ?? "Type to filter…",
-			items: options.items,
-			empty: options.empty ?? "No matching items.",
-			searchable: options.searchable ?? true,
-			resolve,
-		}),
-	);
+	canPickMany?: false;
+};
+
+export type QuickPickManyOptions<T = string> = {
+	title: string;
+	placeholder?: string;
+	items: QuickPickOption<T>[];
+	initialSelected?: T[];
+	empty?: string;
+	confirmLabel?: string;
+};
+
+export type FileBrowserPinned = FileBrowserPinnedItem;
+
+/**
+ * VS Code-style top-center searchable QuickPick (ADR 0032). Use for selecting
+ * from tickets, files, statuses, templates, headings, registries, or options.
+ * Pass `canPickMany: true` (or call `quickPickMany`) for multi-select checkboxes.
+ */
+export function quickPick<T = string>(options: QuickPickManyOptions<T> & { canPickMany: true }): Promise<T[] | null>;
+export function quickPick<T = string>(options: QuickPickSingleOptions<T>): Promise<T | null>;
+export function quickPick<T = string>(
+	options: (QuickPickManyOptions<T> & { canPickMany: true }) | QuickPickSingleOptions<T>,
+): Promise<T | T[] | null> {
+	if ("canPickMany" in options && options.canPickMany) {
+		return quickPickMany(options);
+	}
+	return queue.quickPick(options);
+}
+
+/**
+ * VS Code-style top-center multi-select QuickPick with checkboxes, live search
+ * that preserves already-checked items, Select all / Clear controls, and
+ * Enter-to-confirm / Escape-to-cancel semantics (ADR 0032).
+ */
+export function quickPickMany<T = string>(options: QuickPickManyOptions<T>): Promise<T[] | null> {
+	return queue.quickPickMany(options);
 }
 
 /**
@@ -105,21 +95,16 @@ export function browseWorkspaceFile(options: {
 	pinnedLabel?: string;
 	exclude?: Iterable<string>;
 }): Promise<{ path: string; rel: string } | null> {
-	finishPicker(null);
 	const exclude = new Set<string>();
 	for (const p of options.exclude ?? []) exclude.add(canonical(p));
-	return new Promise((resolve) =>
-		setPicker({
-			kind: "file",
-			title: options.title ?? "Select a file",
-			root: options.root,
-			initialDir: options.initialDir && isInside(options.root, options.initialDir) ? options.initialDir : options.root,
-			pinned: options.pinned ?? [],
-			pinnedLabel: options.pinnedLabel ?? "Suggested files",
-			exclude,
-			resolve,
-		}),
-	);
+	return queue.browseWorkspaceFile({
+		title: options.title,
+		root: options.root,
+		initialDir: options.initialDir && isInside(options.root, options.initialDir) ? options.initialDir : options.root,
+		pinned: options.pinned,
+		pinnedLabel: options.pinnedLabel,
+		exclude,
+	});
 }
 
 /** Asks for a line of text. Null when cancelled. */
@@ -173,10 +158,11 @@ function QuickPickModal(props: { req: QuickPickRequest }) {
 		listEl?.children[idx]?.scrollIntoView({ block: "nearest" });
 	});
 
+	const finish = (value: any | null) => queue.finishOverlay(req, value);
 	const move = (by: number) => setSelected((i) => Math.max(0, Math.min(i + by, filtered().length - 1)));
-	const pick = (item: QuickPickOption<any> | undefined) => {
+	const pick = (item: QuickPickItemData<any> | undefined) => {
 		if (!item) return;
-		finishPicker(item.value);
+		finish(item.value);
 	};
 
 	let pointer = "";
@@ -188,10 +174,10 @@ function QuickPickModal(props: { req: QuickPickRequest }) {
 	};
 
 	return (
-		<Modal class="quickpick quickpick-dialog" top label={req.title} onClose={() => finishPicker(null)}>
+		<Modal class="quickpick quickpick-dialog" top label={req.title} onClose={() => finish(null)}>
 			<div class="quickpick-head">
 				<span class="quickpick-title">{req.title}</span>
-				<button type="button" class="quickpick-close" aria-label="Close" title="Close (Escape)" onClick={() => finishPicker(null)}>
+				<button type="button" class="quickpick-close" aria-label="Close" title="Close (Escape)" onClick={() => finish(null)}>
 					<Icon name="close" />
 				</button>
 			</div>
@@ -258,7 +244,7 @@ function QuickPickModal(props: { req: QuickPickRequest }) {
 								{(name) => <FileMark name={name()} />}
 							</Show>
 							<Show when={!item.checked && !item.file && item.icon}>
-								{(icon) => <Icon name={icon()} class="quick-item-icon" />}
+								{(icon) => <Icon name={icon() as IconName} class="quick-item-icon" />}
 							</Show>
 							<span class="label">{item.label}</span>
 							<Show when={item.badge}>
@@ -272,6 +258,216 @@ function QuickPickModal(props: { req: QuickPickRequest }) {
 							</Show>
 						</div>
 					)}
+				</For>
+			</div>
+			<Show when={!filtered().length}>
+				<div class="quick-status" role="status">
+					{req.empty}
+				</div>
+			</Show>
+		</Modal>
+	);
+}
+
+function QuickPickManyModal(props: { req: QuickPickManyRequest }) {
+	const req = props.req;
+	const listId = createUniqueId();
+	const [query, setQuery] = createSignal("");
+	const [focused, setFocused] = createSignal(0);
+	const [navigatingList, setNavigatingList] = createSignal(false);
+	const [picked, setPicked] = createSignal<Set<number>>(initialMultiSelectIndices(req.items, req.initialSelected));
+	let listEl: HTMLDivElement | undefined;
+
+	const indexed = req.items.map((item, index) => ({ item, index }));
+	const filtered = createMemo(() => {
+		const q = query().trim();
+		if (!q) return indexed;
+		return indexed
+			.map((entry) => {
+				const secondary = `${entry.item.detail ?? ""} ${entry.item.description ?? ""} ${entry.item.badge?.text ?? ""} ${entry.item.keywords ?? ""}`;
+				return { entry, score: matchWords(q, entry.item.label, secondary) };
+			})
+			.filter((x) => x.score > 0)
+			.sort((a, b) => b.score - a.score)
+			.map((x) => x.entry);
+	});
+
+	createEffect(() => {
+		const len = filtered().length;
+		if (focused() >= len) setFocused(Math.max(0, len - 1));
+	});
+	createEffect(() => {
+		const idx = focused();
+		filtered();
+		listEl?.children[idx]?.scrollIntoView({ block: "nearest" });
+	});
+
+	const finish = (values: any[] | null) => queue.finishOverlay(req, values);
+	const confirm = () => finish(resolveMultiSelectValues(req.items, picked()));
+	const move = (by: number) => {
+		setNavigatingList(true);
+		setFocused((i) => Math.max(0, Math.min(i + by, filtered().length - 1)));
+	};
+	const toggleIndex = (origIndex: number) => setPicked((cur) => toggleMultiSelectIndex(cur, origIndex));
+	const toggleFocused = () => {
+		const entry = filtered()[focused()];
+		if (entry) toggleIndex(entry.index);
+	};
+	const selectAllVisible = () =>
+		setPicked((cur) =>
+			selectAllVisibleIndices(
+				cur,
+				filtered().map((entry) => entry.index),
+			),
+		);
+	const clearAll = () => setPicked(new Set<number>());
+	const allVisiblePicked = createMemo(() => {
+		const cur = picked();
+		const vis = filtered();
+		return vis.length > 0 && vis.every((entry) => cur.has(entry.index));
+	});
+	const confirmText = () => {
+		const base = req.confirmLabel?.trim() || "Confirm";
+		return /\(enter\)/i.test(base) ? base : `${base} (Enter)`;
+	};
+
+	let pointer = "";
+	const pointed = (e: MouseEvent, idx: number) => {
+		const at = `${e.clientX},${e.clientY}`;
+		if (at === pointer) return;
+		pointer = at;
+		setFocused(idx);
+	};
+
+	return (
+		<Modal class="quickpick quickpick-dialog quickpick-many" top label={req.title} onClose={() => finish(null)}>
+			<div class="quickpick-head">
+				<span class="quickpick-title">{req.title}</span>
+				<div class="quickpick-many-actions">
+					<span class="quickpick-many-count" role="status" aria-live="polite">
+						{picked().size} selected
+					</span>
+					<button
+						type="button"
+						class="quickpick-many-btn"
+						disabled={!filtered().length || allVisiblePicked()}
+						onClick={selectAllVisible}
+					>
+						Select all
+					</button>
+					<button
+						type="button"
+						class="quickpick-many-btn"
+						disabled={picked().size === 0}
+						onClick={clearAll}
+					>
+						Clear
+					</button>
+					<button type="button" class="quickpick-many-confirm primary" onClick={confirm}>
+						{confirmText()}
+					</button>
+					<button type="button" class="quickpick-close" aria-label="Close" title="Close (Escape)" onClick={() => finish(null)}>
+						<Icon name="close" />
+					</button>
+				</div>
+			</div>
+			<input
+				data-autofocus
+				class="quickpick-search"
+				role="combobox"
+				aria-label={req.title}
+				aria-expanded="true"
+				aria-controls={listId}
+				aria-autocomplete="list"
+				aria-activedescendant={filtered().length ? `${listId}-${focused()}` : undefined}
+				autocomplete="off"
+				spellcheck={false}
+				placeholder={req.placeholder}
+				value={query()}
+				onInput={(e) => {
+					setQuery(e.currentTarget.value);
+					setFocused(0);
+					setNavigatingList(false);
+				}}
+				onKeyDown={(e) => {
+					if (e.key === "ArrowDown") (e.preventDefault(), move(1));
+					else if (e.key === "ArrowUp") (e.preventDefault(), move(-1));
+					else if (e.key === "PageDown") (e.preventDefault(), move(8));
+					else if (e.key === "PageUp") (e.preventDefault(), move(-8));
+					else if (e.key === "Home" && !query()) (e.preventDefault(), setNavigatingList(true), setFocused(0));
+					else if (e.key === "End" && !query()) (e.preventDefault(), setNavigatingList(true), setFocused(Math.max(0, filtered().length - 1)));
+					else if (e.key === " " && (!query() || navigatingList())) {
+						e.preventDefault();
+						toggleFocused();
+					} else if (e.key === "Enter") {
+						e.preventDefault();
+						e.stopPropagation();
+						confirm();
+					}
+				}}
+			/>
+			<div
+				class="items"
+				role="listbox"
+				aria-multiselectable="true"
+				id={listId}
+				aria-label={req.title}
+				ref={listEl}
+				onKeyDown={(e) => {
+					if (e.key === "ArrowDown") (e.preventDefault(), move(1));
+					else if (e.key === "ArrowUp") (e.preventDefault(), move(-1));
+					else if (e.key === " ") (e.preventDefault(), toggleFocused());
+					else if (e.key === "Enter") (e.preventDefault(), e.stopPropagation(), confirm());
+				}}
+			>
+				<For each={filtered()}>
+					{(entry, i) => {
+						const item = entry.item;
+						const isChecked = () => picked().has(entry.index);
+						return (
+							<div
+								class="item quick-multi-item"
+								classList={{
+									selected: i() === focused(),
+									"quick-multi-checked": isChecked(),
+									"quick-noted": Boolean(item.description),
+									"quick-divide": Boolean(item.divide && !query().trim()),
+									"quick-danger": Boolean(item.danger),
+								}}
+								role="option"
+								id={`${listId}-${i()}`}
+								aria-selected={isChecked()}
+								onMouseMove={(e) => pointed(e, i())}
+								onMouseDown={(e) => e.button === 0 && e.preventDefault()}
+								onClick={() => {
+									setFocused(i());
+									toggleIndex(entry.index);
+								}}
+							>
+								<span class="quick-checkbox" classList={{ checked: isChecked() }} aria-hidden="true">
+									<Show when={isChecked()}>
+										<Icon name="check" />
+									</Show>
+								</span>
+								<Show when={item.file}>
+									{(name) => <FileMark name={name()} />}
+								</Show>
+								<Show when={!item.file && item.icon}>
+									{(icon) => <Icon name={icon() as IconName} class="quick-item-icon" />}
+								</Show>
+								<span class="label">{item.label}</span>
+								<Show when={item.badge}>
+									{(b) => <span class={`doc-status tone-${b().tone ?? "waiting"}`}>{b().text}</span>}
+								</Show>
+								<Show when={item.detail}>
+									<span class="detail">{item.detail}</span>
+								</Show>
+								<Show when={item.description}>
+									<span class="quick-note">{item.description}</span>
+								</Show>
+							</div>
+						);
+					}}
 				</For>
 			</div>
 			<Show when={!filtered().length}>
@@ -389,6 +585,7 @@ function FileBrowserModal(props: { req: FileBrowserRequest }) {
 		listEl?.children[idx]?.scrollIntoView({ block: "nearest" });
 	});
 
+	const finish = (picked: { path: string; rel: string } | null) => queue.finishOverlay(req, picked);
 	const move = (by: number) => setSelected((i) => Math.max(0, Math.min(i + by, rows().length - 1)));
 	const activate = (row: BrowserRow | undefined) => {
 		if (!row) return;
@@ -399,7 +596,7 @@ function FileBrowserModal(props: { req: FileBrowserRequest }) {
 			setDir(row.path);
 			setSelected(0);
 		} else {
-			finishPicker({ path: row.path, rel: row.rel });
+			finish({ path: row.path, rel: row.rel });
 		}
 	};
 
@@ -412,10 +609,10 @@ function FileBrowserModal(props: { req: FileBrowserRequest }) {
 	};
 
 	return (
-		<Modal class="quickpick quickpick-dialog file-browser-pick" top label={req.title} onClose={() => finishPicker(null)}>
+		<Modal class="quickpick quickpick-dialog file-browser-pick" top label={req.title} onClose={() => finish(null)}>
 			<div class="quickpick-head">
 				<span class="quickpick-title">{req.title}</span>
-				<button type="button" class="quickpick-close" aria-label="Close" title="Close (Escape)" onClick={() => finishPicker(null)}>
+				<button type="button" class="quickpick-close" aria-label="Close" title="Close (Escape)" onClick={() => finish(null)}>
 					<Icon name="close" />
 				</button>
 			</div>
@@ -525,7 +722,7 @@ function FileBrowserModal(props: { req: FileBrowserRequest }) {
 function ChooseQuickPick(props: { request: Request }) {
 	const request = props.request;
 	const listId = createUniqueId();
-	const searchable = request.buttons.length >= 5;
+	const searchable = true;
 	const [query, setQuery] = createSignal("");
 	const [selected, setSelected] = createSignal(0);
 	let listEl: HTMLDivElement | undefined;
@@ -551,6 +748,10 @@ function ChooseQuickPick(props: { request: Request }) {
 	});
 
 	const finish = (button: string | null) => queue.finish(request, button ? { button, value: "" } : null);
+	const pick = (button: string | undefined) => {
+		if (!button) return;
+		finish(button);
+	};
 	const move = (by: number) => setSelected((i) => Math.max(0, Math.min(i + by, filtered().length - 1)));
 
 	let pointer = "";
@@ -588,25 +789,13 @@ function ChooseQuickPick(props: { request: Request }) {
 						else if (e.key === "ArrowUp") (e.preventDefault(), move(-1));
 						else if (e.key === "PageDown") (e.preventDefault(), move(8));
 						else if (e.key === "PageUp") (e.preventDefault(), move(-8));
-						else if (e.key === "Enter") (e.preventDefault(), e.stopPropagation(), finish(filtered()[selected()] ?? null));
+						else if (e.key === "Home" && !query()) (e.preventDefault(), setSelected(0));
+						else if (e.key === "End" && !query()) (e.preventDefault(), setSelected(Math.max(0, filtered().length - 1)));
+						else if (e.key === "Enter") (e.preventDefault(), e.stopPropagation(), pick(filtered()[selected()]));
 					}}
 				/>
 			</Show>
-			<div
-				class="items"
-				role="listbox"
-				id={listId}
-				aria-label={request.title}
-				tabindex={searchable ? undefined : 0}
-				data-autofocus={searchable ? undefined : ""}
-				ref={listEl}
-				onKeyDown={(e) => {
-					if (searchable) return;
-					if (e.key === "ArrowDown") (e.preventDefault(), move(1));
-					else if (e.key === "ArrowUp") (e.preventDefault(), move(-1));
-					else if (e.key === "Enter" || e.key === " ") (e.preventDefault(), e.stopPropagation(), finish(filtered()[selected()] ?? null));
-				}}
-			>
+			<div class="items" role="listbox" id={listId} aria-label={request.title} ref={listEl}>
 				<For each={filtered()}>
 					{(button, i) => (
 						<div
@@ -698,15 +887,18 @@ function Dialog(props: { request: Request }) {
 
 export function Dialogs() {
 	return (
-		<>
-			<Show when={current()} keyed>
-				{(request) => <Dialog request={request} />}
-			</Show>
-			<Show when={picker()} keyed>
-				{(active) =>
-					active.kind === "pick" ? <QuickPickModal req={active} /> : <FileBrowserModal req={active} />
-				}
-			</Show>
-		</>
+		<Show when={activeOverlay()} keyed>
+			{(active) =>
+				active.kind === "dialog" ? (
+					<Dialog request={active} />
+				) : active.kind === "pick" ? (
+					<QuickPickModal req={active} />
+				) : active.kind === "pick-many" ? (
+					<QuickPickManyModal req={active} />
+				) : (
+					<FileBrowserModal req={active} />
+				)
+			}
+		</Show>
 	);
 }

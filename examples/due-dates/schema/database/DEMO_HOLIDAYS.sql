@@ -1,0 +1,6 @@
+-- Generated from schema/database/DEMO_HOLIDAYS.md
+
+CREATE TABLE DEMO_HOLIDAYS (
+    HOLIDAY_ON DATE        NOT NULL PRIMARY KEY,
+    NAME       VARCHAR(60) NOT NULL
+);

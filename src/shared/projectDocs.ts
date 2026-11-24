@@ -259,7 +259,23 @@ ${kind.id === "interfaces" ? `\n${PROMPTS.contract}\n` : ""}
 | ${kind.columns.join(" | ")} |
 | ${kind.columns.map(() => "---").join(" | ")} |
 | ${kind.columns.map(() => " ").join(" | ")} |
-`;
+${
+	kind.id === "database"
+		? `
+## Foreign keys
+
+| Column | Target table | Target column | Notes |
+| --- | --- | --- | --- |
+|   |   |   |   |
+
+## Indexes
+
+| Name | Unique | Columns |
+| --- | --- | --- |
+|   |   |   |
+`
+		: ""
+}`;
 
 /** A snippet starts with a comment that says what it is for: the catalog reads its first line as the title. */
 export const snippetTemplate = (snippet: { title: string; language: "sql" | "ssl" }) =>
@@ -302,7 +318,7 @@ export const CATALOG_HEADS: Record<CatalogArea, [string, string]> = {
 	code: ["Code", "The project's scripts and data sources."],
 		schema: ["Schema", "What the project's data looks like, each kind in its own folder: the database's tables, the messages exchanged with other systems and what was agreed with them, and the files read or written. Another folder made here is a kind of the project's own."],
 		tickets: ["Tickets", "The tickets that drive the work: one file for each, with what was asked, its state and the tickets it is related to."],
-		specs: ["Specs", "What is to be built, written from the tickets: one spec in a file, with its state. Specs the planner writes beside a plan are listed here too."],
+		specs: ["Specs", "Behavior and design specifics written from the tickets: one spec in a file, with its state."],
 		knowledge: ["Knowledge base", "What the project has learned: decisions, questions, snippets and prompts kept for use, and notes on how things work."],
 		registries: ["Registries", "What a migration is checked against: tables of the application's settings, its files and its database objects, each row with how far it has come."],
 };
@@ -448,13 +464,29 @@ export function linkedLines(href: string): { line: number; endLine?: number } | 
  * through them: what a status is chosen from. Any other word can still be
  * written in the text.
  */
-export function statusChoices(file: { group?: string; kind?: string } | undefined): string[] {
+export function statusChoices(
+	file:
+		| {
+				group?: string;
+				kind?: string;
+				docKind?: string;
+				version?: string;
+				changeControl?: string;
+				gxpImpact?: string;
+		  }
+		| undefined,
+): string[] {
 	if (file?.group === "tickets") return ["open", "in progress", "done", "blocked", "dropped"];
-	if (file?.group === "specs") return ["draft", "ready", "in progress", "done", "superseded"];
+	if (file?.group === "specs") return ["draft", "ready", "in progress", "approved", "done", "superseded"];
 	if (file?.group === "knowledge" && file.kind === "decisions") return ["proposed", "accepted", "superseded", "rejected"];
 	if (file?.group === "knowledge" && file.kind === "questions") return ["open", "answered"];
+	if (file?.group === "knowledge" && file.kind === "reference") return ["draft", "in progress", "approved", "done", "retired"];
 	// What is exchanged with another system is a contract with it: proposed, then agreed by both, then no longer used.
 	if (file?.group === "schema" && file.kind === "interfaces") return ["draft", "agreed", "retired"];
+	const hasGxp = Boolean(file?.gxpImpact && !/^(?:none|no|n\/a|false)$/i.test(file.gxpImpact.trim()));
+	if (file?.version || file?.changeControl || hasGxp || file?.docKind === "test-run") {
+		return ["draft", "in progress", "approved", "done", "retired"];
+	}
 	return ["draft", "in progress", "done"];
 }
 

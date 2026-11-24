@@ -709,8 +709,8 @@ type FileGroupKind = "ssl" | "sql" | "plan" | "spec" | "ticket" | "decision" | "
 
 function classifyStagedFile(rel: string): FileGroupKind {
 	const norm = rel.replace(/\\/g, "/").toLowerCase();
-	if (norm.endsWith(".plan.json")) return "plan";
-	if (norm.endsWith(".spec.md") || /(^|\/)specs\//.test(norm)) return "spec";
+	if (norm.endsWith(".plan.json") || norm.endsWith(".plan.md")) return "plan";
+	if (/(^|\/)specs\//.test(norm)) return "spec";
 	if (/(^|\/)tickets\//.test(norm)) return "ticket";
 	if (/(^|\/)decisions\//.test(norm)) return "decision";
 	if (/(^|\/)questions\//.test(norm)) return "question";

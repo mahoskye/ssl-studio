@@ -19,7 +19,7 @@ const FOLDER_OPEN = "";
 /** The longest endings first: a plan is a .json, a data source may be a .ds.txt. */
 const ENDINGS: [ending: string, kind: FileKind][] = [
 	[".plan.json", "plan"],
-	[".spec.md", "plan"],
+	[".plan.md", "plan"],
 	[".ssl.txt", "script"],
 	[".ds.txt", "data"],
 	[".srvscr", "script"],

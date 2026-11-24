@@ -4,9 +4,9 @@ import { fileIcon, fileKind } from "../src/view/fileIcon";
 test("a file's kind comes from the longest ending it has", () => {
 	expect(["Release.ssl", "RELEASE.SRVSCR", "Old.ssl.txt"].map(fileKind)).toEqual(["script", "script", "script"]);
 	expect(["Samples.ds", "Samples.ds.txt", "demo.sql"].map(fileKind)).toEqual(["data", "data", "data"]);
-	// A plan and its spec are plans, though one is a .json and the other a .md.
-	expect(["Set.plan.json", "Set.spec.md"].map(fileKind)).toEqual(["plan", "plan"]);
-	expect(["README.md", "notes.markdown"].map(fileKind)).toEqual(["doc", "doc"]);
+	// A plan and its companion plan doc are plans, though one is a .json and the other a .md.
+	expect(["Set.plan.json", "Set.plan.md"].map(fileKind)).toEqual(["plan", "plan"]);
+	expect(["README.md", "notes.markdown", "Set.spec.md"].map(fileKind)).toEqual(["doc", "doc", "doc"]);
 	expect(["project.toml", "package.json"].map(fileKind)).toEqual(["config", "config"]);
 	expect(["LICENSE", "photo.png", ".ssl"].map(fileKind)).toEqual(["file", "file", "script"]);
 });

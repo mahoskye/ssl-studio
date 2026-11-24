@@ -8,18 +8,22 @@
 import { docs } from "../project";
 import { codeMatchesRef, docsGoverningFile, scriptsForTicket } from "../../shared/workContext";
 import { referencedSchemaTables } from "../../shared/schemaIndex";
-import { registryTitle } from "../../shared/projectDocs";
+import { registryTitle, toneOf } from "../../shared/projectDocs";
+import type { DocFile } from "../../shared/protocol";
 import "./graphExtra.css";
 import { Icon } from "../Icon";
 import { ICON } from "../icons";
 import { CenterTabStrip } from "../editor/CenterTabStrip";
+import { quickPick, type QuickPickOption } from "../dialogs";
+import { findMatchingPlanNodeLine } from "../plan/assist";
+import { isPlanPath } from "../plan/model";
 import ELK from "elkjs/lib/elk.bundled.js";
 import { batch, createEffect, createMemo, createSignal, createUniqueId, For, on, onCleanup, Show } from "solid-js";
 import { level } from "../../shared/houseStyle";
 import { backend } from "../backend";
 import { regionColor } from "../editor/regions";
 import { canonical, documents, notify, openFile, openToSide, setState, state } from "../state";
-import { canvasMeasure, clearLabels, clearOf, fitShare, fitView, legibleScale, mapArea, outOfSight, nearest, recall, remember, reveal, splinePath, splinePoint, zoomAt, type Point } from "./canvas";
+import { canvasMeasure, clearLabels, clearOf, fitShare, fitView, legibleScale, mapArea, outOfSight, nearest, recall, remember, reveal, smoothEdgePath, smoothEdgePoint, zoomAt, type Point } from "./canvas";
 import { loadGraph } from "./load";
 import { Minimap, type MapBox } from "./Minimap";
 import { Finder } from "./Finder";
@@ -108,6 +112,24 @@ const [ticketHighlightCount, setTicketHighlightCount] = createSignal(0);
 const [ticketSubgraphOnly, setTicketSubgraphOnlySignal] = createSignal(false);
 const [ticketImpactRequest, setTicketImpactRequest] = createSignal<{ key?: string; seq: number } | null>(null);
 let ticketImpactSeq = 0;
+const [graphFocusRequest, setGraphFocusRequest] = createSignal<{ scriptPath: string; procName?: string; seq: number } | null>(null);
+let graphFocusSeq = 0;
+let activeGraphFinderFocus: (() => void) | null = null;
+
+/** Switches center view to Call Graph and focuses the matching script or procedure node once loaded. */
+export function openGraphFocusedOn(scriptPath: string, procName?: string): void {
+	const cleaned = scriptPath.trim();
+	if (!cleaned) return;
+	setGraphFocusRequest({ scriptPath: cleaned, procName: procName?.trim() || undefined, seq: ++graphFocusSeq });
+	setState("centerView", "graph");
+}
+
+/** Focuses the active Call Graph Finder input (returns false when Call Graph is not active or has no Finder). */
+export function focusActiveGraphFinder(): boolean {
+	if (state.centerView !== "graph" || !activeGraphFinderFocus) return false;
+	activeGraphFinderFocus();
+	return true;
+}
 
 /** Currently highlighted ticket key in Call Graph (shared with Palette's Ticket overlay). */
 export const graphTicketHighlight = ticketHighlightKey;
@@ -184,6 +206,143 @@ export function GraphView() {
 	const [impactReport, setImpactReport] = createSignal<ImpactReport | null>(null);
 	const [impactScanning, setImpactScanning] = createSignal(false);
 	let impactRunSeq = 0;
+	let focusFinder: (() => void) | undefined;
+	const [schemaTablesByScript, setSchemaTablesByScript] = createSignal<Map<string, DocFile[]>>(new Map());
+	let schemaScanSeq = 0;
+
+	createEffect(() => {
+		if (state.centerView !== "graph") return;
+		const fn = () => focusFinder?.();
+		activeGraphFinderFocus = fn;
+		const onWindowKey = (e: KeyboardEvent) => {
+			if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey || e.key.toLowerCase() !== "f") return;
+			if (document.querySelector(".overlay")) return;
+			const target = e.target as HTMLElement | null;
+			if (target?.closest(".sidebar, .right-panel, .bottom-panel") && target.matches("input, textarea, [contenteditable]")) return;
+			if (!focusFinder) return;
+			e.preventDefault();
+			e.stopPropagation();
+			focusFinder();
+		};
+		window.addEventListener("keydown", onWindowKey, true);
+		onCleanup(() => {
+			window.removeEventListener("keydown", onWindowKey, true);
+			if (activeGraphFinderFocus === fn) activeGraphFinderFocus = null;
+		});
+	});
+
+	const readScriptText = async (filePath: string): Promise<string> => {
+		const openText = documents.get(canonical(filePath))?.model.getValue();
+		if (openText !== undefined) return openText;
+		return backend.read(filePath).then(
+			(f) => f.text,
+			() => "",
+		);
+	};
+
+	const schemaTablesForScript = async (filePath: string): Promise<DocFile[]> => {
+		const cached = schemaTablesByScript().get(filePath);
+		if (cached) return cached;
+		const allDocs = docs();
+		if (!allDocs.some((d) => d.exists && d.group === "schema")) return [];
+		const text = await readScriptText(filePath);
+		if (!text) return [];
+		const matched = referencedSchemaTables(text, allDocs, 16);
+		if (matched.length) {
+			setSchemaTablesByScript((prev) => {
+				const next = new Map(prev);
+				next.set(filePath, matched);
+				return next;
+			});
+		}
+		return matched;
+	};
+
+	createEffect(() => {
+		const g = graph();
+		const allDocs = docs();
+		if (!g || !allDocs.some((d) => d.exists && d.group === "schema")) {
+			setSchemaTablesByScript(new Map());
+			return;
+		}
+		const run = ++schemaScanSeq;
+		const scripts = g.scripts.filter((s) => s.path && s.path !== UNRESOLVED).slice(0, 60);
+		void (async () => {
+			const map = new Map<string, DocFile[]>();
+			for (const s of scripts) {
+				if (run !== schemaScanSeq) return;
+				const text = await readScriptText(s.path);
+				if (!text) continue;
+				const matched = referencedSchemaTables(text, allDocs, 12);
+				if (matched.length) map.set(s.path, matched);
+			}
+			if (run === schemaScanSeq) setSchemaTablesByScript(map);
+		})();
+	});
+
+	const pickTicketQuickPick = async (title: string, placeholder = "Filter tickets by key, title, or status…"): Promise<DocFile | null> => {
+		const tickets = docs()
+			.filter((d) => d.exists && d.group === "tickets" && d.ticket)
+			.sort((a, b) => a.ticket!.localeCompare(b.ticket!, undefined, { numeric: true, sensitivity: "base" }));
+		if (!tickets.length) return null;
+		const items: QuickPickOption<DocFile>[] = tickets.map((t) => {
+			const key = t.ticket!;
+			const titleText = t.title && !t.title.toLowerCase().startsWith(key.toLowerCase()) ? t.title : "";
+			return {
+				value: t,
+				label: titleText ? `${key}: ${titleText}` : key,
+				icon: "tag",
+				badge: t.status ? { text: t.status, tone: toneOf(t.status) } : undefined,
+				detail: rel(t.path).replace(/\\/g, "/"),
+				keywords: [key, t.title ?? "", t.status ?? ""].filter(Boolean).join(" "),
+			};
+		});
+		return quickPick<DocFile>({ title, placeholder, items });
+	};
+
+	const openGoverningDoc = async (docPath: string, scriptPath?: string, procName?: string, explicitLine?: number) => {
+		if (isPlanPath(docPath) && scriptPath) {
+			const planText = await readScriptText(docPath);
+			const nodeLine = planText ? findMatchingPlanNodeLine(planText, scriptPath, procName, state.workspace?.root) : null;
+			if (nodeLine) {
+				await openFile(docPath, { reveal: { line: nodeLine, column: 1 } });
+				return;
+			}
+		}
+		await openFile(docPath, explicitLine ? { reveal: { line: explicitLine } } : {});
+	};
+
+	let handledFocusReq = 0;
+	createEffect(() => {
+		const req = graphFocusRequest();
+		const g = graph();
+		if (!req || !g || req.seq === handledFocusReq) return;
+		handledFocusReq = req.seq;
+		const targetCanon = canonical(req.scriptPath);
+		const root = state.workspace?.root;
+		const reqRel = root ? relativeTo(root, req.scriptPath).replace(/\\/g, "/").toLowerCase() : req.scriptPath.replace(/\\/g, "/").toLowerCase();
+		const matchedScript = g.scripts.find((s) => {
+			if (s.path === UNRESOLVED) return false;
+			if (canonical(s.path) === targetCanon) return true;
+			const sRel = rel(s.path).replace(/\\/g, "/").toLowerCase();
+			return sRel === reqRel || sRel.endsWith(`/${reqRel}`);
+		});
+		if (!matchedScript) {
+			notify(`Could not find ${baseName(req.scriptPath)} in the Call Graph yet.`);
+			return;
+		}
+		let targetId = `${matchedScript.path}#`;
+		if (req.procName) {
+			const want = req.procName.toLowerCase();
+			const matchedNode = g.nodes.find((n) => n.path === matchedScript.path && n.name.toLowerCase() === want);
+			if (matchedNode) targetId = matchedNode.id;
+		}
+		batch(() => {
+			setMode("graph");
+			setCurrent(targetId);
+			focus(targetId);
+		});
+	});
 
 	createEffect(
 		on(
@@ -343,8 +502,10 @@ export function GraphView() {
 		};
 		setImpactReport(initialReport);
 
-		// Async schema table scan across seed scripts and downstream `.ds` data sources.
-		const scanFiles = [...new Set([...base.seedScripts, ...base.dataSources.map((d) => d.path)])].filter((p) => p && p !== UNRESOLVED).slice(0, 16);
+		// Async schema table scan across seed scripts, downstream SSL scripts, and `.ds` data sources.
+		const scanFiles = [...new Set([...base.seedScripts, ...base.dataSources.map((d) => d.path), ...base.downstream.map((d) => d.path)])]
+			.filter((p) => p && p !== UNRESOLVED)
+			.slice(0, 24);
 		if (!scanFiles.length || !allDocs.length) {
 			setImpactScanning(false);
 			return;
@@ -382,14 +543,11 @@ export function GraphView() {
 		}
 		let key = explicitKey?.trim() || ticketHighlightKey()?.trim() || state.settings.activeTicket?.trim() || "";
 		if (!key) {
-			const tickets = docs().filter((d) => d.exists && d.group === "tickets" && d.ticket);
-			if (tickets.length) {
-				const { choose } = await import("../dialogs");
-				const labels = tickets.map((t) => `${t.ticket}: ${t.title || t.name}`);
-				const picked = await choose("Run Impact / Blast-Radius Analysis for which ticket?", labels);
-				if (!picked) return;
-				const idx = labels.indexOf(picked);
-				key = idx >= 0 ? (tickets[idx]?.ticket ?? "") : "";
+			const hasTickets = docs().some((d) => d.exists && d.group === "tickets" && d.ticket);
+			if (hasTickets) {
+				const picked = await pickTicketQuickPick("Run Impact / Blast-Radius Analysis for ticket");
+				if (!picked?.ticket) return;
+				key = picked.ticket;
 			} else if (filter().focus) {
 				const focusId = filter().focus!;
 				runImpactAnalysis([focusId], focusName() || focusId);
@@ -435,17 +593,14 @@ export function GraphView() {
 		if (!report) return;
 		let key = impactSeeds()?.ticketKey?.trim() || state.settings.activeTicket?.trim() || ticketHighlightKey()?.trim() || "";
 		if (!key) {
-			const tickets = docs().filter((d) => d.exists && d.group === "tickets" && d.ticket);
-			if (!tickets.length) {
+			const hasTickets = docs().some((d) => d.exists && d.group === "tickets" && d.ticket);
+			if (!hasTickets) {
 				notify("No tickets found in docs/tickets/ to append to.");
 				return;
 			}
-			const { choose } = await import("../dialogs");
-			const labels = tickets.map((t) => `${t.ticket}: ${t.title || t.name}`);
-			const picked = await choose("Append Impact Analysis to which ticket?", labels);
-			if (!picked) return;
-			const idx = labels.indexOf(picked);
-			key = idx >= 0 ? (tickets[idx]?.ticket ?? "") : "";
+			const picked = await pickTicketQuickPick("Append Impact Analysis to ticket");
+			if (!picked?.ticket) return;
+			key = picked.ticket;
 		}
 		if (!key) return;
 		const { appendNoteToTicket } = await import("../projectDocs");
@@ -556,13 +711,19 @@ export function GraphView() {
 		return `${nameOf(g, e.from)} ${words} ${nameOf(g, e.to)}`;
 	};
 
+	const govScriptKeys = createMemo(() => [...governingDocsByScript().keys()].sort().join("\n"));
+
 	createEffect(
-		on([graph, drawn, mode, gathered], async ([g, keep, as, gathering]) => {
+		on([graph, drawn, mode, gathered, govScriptKeys], async ([g, keep, as, gathering]) => {
 			// The list needs no layout, and a large one takes a while.
 			if (!g || !keep || as !== "graph") return;
 			// A layout takes a while, and a later one may finish first: only the last one asked for is drawn.
 			const run = ++layoutRun;
-			const sized = (label: string, bold = false) => ({ "elk.nodeSize.constraints": "MINIMUM_SIZE", "elk.nodeSize.minimum": `(${Math.ceil((bold ? measureBold : measure)(label)) + 44},30)` });
+			const sized = (label: string, bold = false, extra = 56) => ({
+				"elk.nodeSize.constraints": "MINIMUM_SIZE",
+				"elk.nodeSize.options": "MINIMUM_SIZE_ACCOUNTS_FOR_PADDING",
+				"elk.nodeSize.minimum": `(${Math.ceil((bold ? measureBold : measure)(label)) + extra},30)`,
+			});
 			const notes = new Map<string, string>();
 			// Scripts are drawn in their folders when there is more than one folder: the folder's box
 			// carries the path once, and each script goes by its file's name.
@@ -588,8 +749,8 @@ export function GraphView() {
 					return {
 						id: `script:${s.path}`,
 						labels: [{ text: s.isClass ? `class  ${nameIn(s.path)}` : nameIn(s.path) }],
-						// Wide enough for its own name, size, and governing doc pill so labels never collide.
-						layoutOptions: { "elk.padding": "[top=34,left=14,bottom=14,right=14]", ...sized(`${s.isClass ? "class  " : ""}${nameIn(s.path)}  ${sizeNote(s.bytes)}${hasGov ? "   00" : ""}`, true) },
+						// Wide enough for its own name, size, fold button, and governing doc pill so labels never collide.
+						layoutOptions: { "elk.padding": "[top=34,left=14,bottom=14,right=14]", ...sized(`${s.isClass ? "class  " : ""}${nameIn(s.path)}  ${sizeNote(s.bytes)}`, true, hasGov ? 94 : 62) },
 						children: [
 							...(top ? [{ id: `${s.path}#`, width: textWidth(topLabel(s)), height: 28, labels: [{ text: topLabel(s) }] }] : []),
 							...procs.filter((p) => !p.region).map(leaf),
@@ -657,15 +818,16 @@ export function GraphView() {
 							"elk.hierarchyHandling": "INCLUDE_CHILDREN",
 							"elk.spacing.nodeNode": direction === "DOWN" ? "12" : "22",
 							// Room between the layers for the lines to turn in, and between lines that run together.
-							"elk.layered.spacing.nodeNodeBetweenLayers": direction === "DOWN" ? "50" : "72",
-							"elk.layered.spacing.edgeNodeBetweenLayers": direction === "DOWN" ? "12" : "18",
-							"elk.spacing.edgeNode": direction === "DOWN" ? "10" : "14",
-							"elk.spacing.edgeEdge": "9",
+							"elk.layered.spacing.nodeNodeBetweenLayers": direction === "DOWN" ? "54" : "76",
+							"elk.layered.spacing.edgeNodeBetweenLayers": direction === "DOWN" ? "14" : "20",
+							"elk.spacing.edgeNode": direction === "DOWN" ? "12" : "16",
+							"elk.spacing.edgeEdge": "10",
 							"elk.layered.nodePlacement.strategy": "NETWORK_SIMPLEX",
 							"elk.layered.thoroughness": "24",
 							"elk.json.edgeCoords": "ROOT",
-							// Curves, which the eye follows through a crossing where right angles merge into a grid.
-							"elk.edgeRouting": "SPLINES",
+							// POLYLINE waypoints rounded with smoothEdgePath: avoids ELK's SPLINES + INCLUDE_CHILDREN
+							// mixed orthogonal/Bezier bendPoints bug that creates cusps and staircase kinks.
+							"elk.edgeRouting": "POLYLINE",
 							// The order the scripts come in is kept where it costs no crossing, so folding one moves the others little.
 							"elk.layered.considerModelOrder.strategy": "NODES_AND_EDGES",
 						},
@@ -721,11 +883,11 @@ export function GraphView() {
 					const points: Point[] = section ? [section.startPoint, ...(section.bendPoints ?? []), section.endPoint] : [];
 					// A line that stands for several places says how many, just after it leaves: there each line still has its own room.
 					const width = Math.ceil(measure(String(count))) + 12;
-					const near = splinePoint(points, BADGE_AT);
+					const near = smoothEdgePoint(points, BADGE_AT);
 					return {
 						badge: count > 1 && points.length ? { x: near.x - width / 2, y: near.y - 8, width, height: 16 } : undefined,
 						id: e.id,
-						d: splinePath(points),
+						d: smoothEdgePath(points),
 						from: edge.from,
 						to: edge.to,
 						cross: edge.crossScript,
@@ -745,12 +907,13 @@ export function GraphView() {
 				// A different set of calls is a different picture: show it whole. A refresh keeps the view,
 				// and folding one script keeps it too, moved only as far as brings that script into sight.
 				const key = JSON.stringify([filter(), ticketSubgraphOnly(), ticketHighlightKey()]);
-				if (fittedFor !== key) fit();
-				else if (showNext !== null) {
+				if (fittedFor !== key) {
+					if (fit()) fittedFor = key;
+				} else if (showNext !== null) {
 					const box = boxes.find((b) => ((b.kind === "fold" || b.kind === "script") && b.path === showNext) || ((b.kind === "dir" || b.kind === "folder") && b.folder === showNext));
-					if (box) setView((v) => reveal(v, box, size()));
+					const curSize = size();
+					if (box && curSize.width >= 10 && curSize.height >= 10) setView((v) => reveal(v, box, curSize));
 				}
-				fittedFor = key;
 				showNext = null;
 				if (hadFocus) queueMicrotask(() => nodeEls.get(cursor() ?? "")?.focus());
 			} catch (e: any) {
@@ -762,7 +925,8 @@ export function GraphView() {
 	const focus = (id: string) => setFilter({ mode: "around", focus: id, depth: filter().depth, direction: filter().direction });
 	const open = (at: { path?: string; line?: number }) => {
 		if (!at.path || at.path === UNRESOLVED) return;
-		setState("centerView", "editors");
+		// Let openFile switch centerView="editors" atomically with g.active so navigation history
+		// does not record the stale background tab between Call Graph and the opened script.
 		void openFile(at.path, { reveal: { line: (at.line ?? 0) + 1 } });
 	};
 	const procs = () => layout()?.boxes.filter((b) => b.kind === "proc" || b.kind === "top" || b.kind === "fold" || b.kind === "dir") ?? [];
@@ -855,27 +1019,44 @@ export function GraphView() {
 	const centreOf = (b: Box) => ({ x: b.x + b.width / 2, y: b.y + b.height / 2 });
 
 	/** The whole graph, or as much as stays legible around the node the keyboard or the focus is on. */
-	const fit = () => {
+	const fit = (): boolean => {
 		const l = layout();
-		if (!l || !svg) return;
+		if (!l || !svg) return false;
+		const box = size();
+		if (box.width < 10 || box.height < 10) return false;
 		const here = procs().find((b) => b.id === cursor());
-		fittedView = fitView(l, size(), { floor: FIT_FLOOR, anchor: current() || filter().focus ? here && centreOf(here) : undefined });
+		fittedView = fitView(l, box, { floor: FIT_FLOOR, anchor: current() || filter().focus ? here && centreOf(here) : undefined });
 		fittedWhole = false;
 		setView(fittedView);
+		return true;
 	};
 	/** Fit, and Fit again: as much as stays legible, then, where that left some out of sight, the whole picture however small. */
 	const fitOrWhole = () => {
 		const l = layout();
-		if (l && svg && view() === fittedView && !fittedWhole && outOfSight(l, view(), size())) whole();
+		const box = size();
+		if (l && svg && box.width >= 10 && box.height >= 10 && view() === fittedView && !fittedWhole && outOfSight(l, view(), box)) whole();
 		else fit();
 	};
-	const whole = () => {
+	const whole = (): boolean => {
 		const l = layout();
-		if (!l || !svg) return;
-		fittedView = fitView(l, size(), { floor: MIN_ZOOM });
+		if (!l || !svg) return false;
+		const box = size();
+		if (box.width < 10 || box.height < 10) return false;
+		fittedView = fitView(l, box, { floor: MIN_ZOOM });
 		fittedWhole = true;
 		setView(fittedView);
+		return true;
 	};
+	// If layout completed while Call Graph was hidden (display: none), fit cleanly once visible again without touching already-fitted views.
+	createEffect(() => {
+		if (state.centerView !== "graph" || mode() !== "graph" || !layout()) return;
+		const key = JSON.stringify([filter(), ticketSubgraphOnly(), ticketHighlightKey()]);
+		if (fittedFor === key) return;
+		const frame = requestAnimationFrame(() => {
+			if (fit()) fittedFor = key;
+		});
+		onCleanup(() => cancelAnimationFrame(frame));
+	});
 	/** Zoomed far out: the words of the nodes give way to the names of scripts and folders, drawn to be read. */
 	const far = () => view().scale < FAR_UNDER;
 	/** The zoom of the far picture, or 0 while the view is nearer: moving the picture changes nothing a name depends on. */
@@ -930,6 +1111,12 @@ export function GraphView() {
 		});
 	};
 	const onKey = (e: KeyboardEvent) => {
+		if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "f") {
+			e.preventDefault();
+			e.stopPropagation();
+			focusFinder?.();
+			return;
+		}
 		if (e.ctrlKey || e.metaKey || e.altKey) return;
 		const here = procs().find((b) => b.id === cursor());
 		if ((e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) && here && here.kind !== "dir" && here.path && here.path !== UNRESOLVED) {
@@ -983,14 +1170,22 @@ export function GraphView() {
 		setMode(next);
 		remember(MODE_KEY, next);
 	};
+	const schemaNoteOf = (path?: string) => {
+		if (!path || path === UNRESOLVED) return "";
+		const tables = schemaTablesByScript().get(path);
+		if (!tables?.length) return "";
+		const names = tables.slice(0, 6).map((t) => t.title || baseName(t.path).replace(/\.[^.]+$/, ""));
+		return `, tables: ${names.join(", ")}${tables.length > 6 ? ` (+${tables.length - 6})` : ""}`;
+	};
 	const titleOf = (b: Box) => {
 		const litKey = ticketHighlightKey();
 		if (b.kind === "dir") return `${b.label}: folder, ${b.note}, folded${litKey && b.folder && highlightedTicketFolders().has(b.folder) ? `, contains scripts for ${litKey}` : ""}`;
 		const ticketNote = litKey && b.path && highlightedTicketPaths().has(b.path) ? `, governed by ${litKey}` : "";
-		if (b.kind === "fold") return `${b.label}: ${b.path === UNRESOLVED ? "what the language server could not resolve" : "script"}, ${b.note}, folded${filter().focus === `${b.path}#` ? ", the focus" : ""}${ticketNote}`;
+		const tablesNote = schemaNoteOf(b.path);
+		if (b.kind === "fold") return `${b.label}: ${b.path === UNRESOLVED ? "what the language server could not resolve" : "script"}, ${b.note}, folded${filter().focus === `${b.path}#` ? ", the focus" : ""}${ticketNote}${tablesNote}`;
 		const kind = KIND_WORDS[b.kind === "top" ? (graph()?.scripts.find((s) => s.path === b.path)?.isClass ? "class" : "top") : (b.nodeKind ?? "procedure")];
 		const where = b.path && b.path !== UNRESOLVED ? `${kind} in ${rel(b.path)}` : kind;
-		return `${b.label}: ${where}${filter().focus === b.id ? ", the focus" : ""}${ticketNote}`;
+		return `${b.label}: ${where}${filter().focus === b.id ? ", the focus" : ""}${ticketNote}${tablesNote}`;
 	};
 
 	/** The bar's menu: what is not needed at every look. */
@@ -1073,30 +1268,37 @@ export function GraphView() {
 				label: "Focus script linked to a ticket…",
 				run: () =>
 					void (async () => {
-						const { choose } = await import("../dialogs");
-						const { notify } = await import("../state");
-						const tickets = docs().filter((d) => d.exists && d.group === "tickets" && d.ticket);
-						if (!tickets.length) return notify("No tickets found in docs/tickets/ yet.");
-						const labels = tickets.map((t) => `${t.ticket}: ${t.title || t.name}`);
-						const picked = await choose("Focus Call Graph on scripts governed by which ticket?", labels);
-						if (!picked) return;
-						const idx = labels.indexOf(picked);
-						const ticket = idx >= 0 ? tickets[idx] : undefined;
+						const hasTickets = docs().some((d) => d.exists && d.group === "tickets" && d.ticket);
+						if (!hasTickets) return notify("No tickets found in docs/tickets/ yet.");
+						const ticket = await pickTicketQuickPick("Focus Call Graph on scripts governed by ticket");
 						if (!ticket?.ticket) return;
 						const refs = scriptsForTicket(docs(), ticket.ticket, { includeDescendants: true });
 						const root = state.workspace?.root;
-						const matches = (graph()?.scripts ?? []).filter((s) => refs.some((r) => codeMatchesRef(s.path, r, root)));
+						const g = graph();
+						const matches = (g?.scripts ?? []).filter((s) => refs.some((r) => codeMatchesRef(s.path, r, root)));
 						if (!matches.length) {
 							notify(`No Call Graph scripts found for ${ticket.ticket} yet.`);
 							return;
 						}
 						let chosen = matches[0]!;
 						if (matches.length > 1) {
-							const scriptLabels = matches.map((m) => rel(m.path).replace(/\\/g, "/"));
-							const pickedScript = await choose(`${ticket.ticket} spans ${matches.length} scripts — focus which one?`, scriptLabels);
+							const scriptItems: QuickPickOption<typeof chosen>[] = matches.map((m) => {
+								const procCount = g?.nodes.filter((n) => n.path === m.path).length ?? 0;
+								return {
+									value: m,
+									label: baseName(m.path),
+									icon: /\.ds$/i.test(m.path) ? "database" : "file",
+									detail: rel(m.path).replace(/\\/g, "/"),
+									description: plural(procCount, "procedure"),
+								};
+							});
+							const pickedScript = await quickPick({
+								title: `${ticket.ticket} spans ${matches.length} scripts — focus which one?`,
+								placeholder: "Filter scripts…",
+								items: scriptItems,
+							});
 							if (!pickedScript) return;
-							const si = scriptLabels.indexOf(pickedScript);
-							if (si >= 0) chosen = matches[si]!;
+							chosen = pickedScript;
 						}
 						focus(`${chosen.path}#`);
 					})(),
@@ -1116,7 +1318,10 @@ export function GraphView() {
 		const opener = document.activeElement instanceof SVGElement ? document.activeElement : null;
 		void (async () => {
 			const { chooseFromMenu } = await import("../panels/RowMenu");
-			const links = await backend.linksTo(boxPath).catch(() => []);
+			const [links, schemaTables] = await Promise.all([
+				backend.linksTo(boxPath).catch(() => []),
+				schemaTablesForScript(boxPath).catch(() => [] as DocFile[]),
+			]);
 			const gov = docsGoverningFile(docs(), boxPath, state.workspace?.root, links);
 			const isDs = /\.ds$/i.test(boxPath);
 			const OPEN_ITEM = isDs ? "Open data source" : "Open script";
@@ -1156,12 +1361,29 @@ export function GraphView() {
 								},
 							]
 						: [];
+			const schemaChoices = schemaTables.map((tbl, i) => ({
+				value: `schema:${i}`,
+				label: tbl.title || baseName(tbl.path).replace(/\.[^.]+$/, ""),
+				doc: tbl,
+			}));
+			const schemaSection: RowMenuEntry[] =
+				schemaChoices.length === 1
+					? [{ label: `Open schema table: ${schemaChoices[0]!.label}`, value: schemaChoices[0]!.value }]
+					: schemaChoices.length > 1
+						? [
+								{
+									label: `Schema tables (${schemaChoices.length})`,
+									children: schemaChoices.map((s) => ({ label: s.label, value: s.value })),
+								},
+							]
+						: [];
 			const items: RowMenuEntry[] = [
 				OPEN_ITEM,
 				OPEN_SIDE,
 				FOCUS_NODE,
 				IMPACT,
 				...(docSection.length ? (["separator", ...docSection] as RowMenuEntry[]) : []),
+				...(schemaSection.length ? (["separator", ...schemaSection] as RowMenuEntry[]) : []),
 				"separator",
 				...submenuOrInline("Copy path", [PATH, ...(inWs ? [RELATIVE] : []), NAME]),
 				...(inWs ? [SHOW] : []),
@@ -1190,9 +1412,13 @@ export function GraphView() {
 				await (await import("../commands")).copyPath(picked === PATH ? "whole" : picked === NAME ? "name" : "relative", boxPath);
 			} else if (picked === SHOW) {
 				(await import("../panels/Explorer")).showInExplorer(boxPath);
+			} else if (picked.startsWith("schema:")) {
+				const hit = schemaChoices.find((s) => s.value === picked);
+				if (hit) await openFile(hit.doc.path);
 			} else {
 				const hit = docChoices.find((d) => d.value === picked);
-				if (hit) await openFile(hit.doc.path, hit.line ? { reveal: { line: hit.line } } : {});
+				const procName = target.kind === "proc" ? target.label : undefined;
+				if (hit) await openGoverningDoc(hit.doc.path, boxPath, procName, hit.line);
 				else notify("Could not open governing document.");
 			}
 		})();
@@ -1342,7 +1568,10 @@ export function GraphView() {
 		// The bar's height follows from this, and so the picture's: it waits for the next frame.
 		let frame = 0;
 		const observer = new ResizeObserver((entries) => {
-			const width = entries[0]?.contentRect.width ?? Infinity;
+			const rect = entries[0]?.contentRect;
+			const width = rect?.width ?? 0;
+			const height = rect?.height ?? 0;
+			if (width < 10 || height < 10) return;
 			cancelAnimationFrame(frame);
 			frame = requestAnimationFrame(() => {
 				setNarrow(width < NARROW_UNDER);
@@ -1356,7 +1585,18 @@ export function GraphView() {
 
 	return (
 		<CenterTabStrip title="Call graph" icon="references" onClose={() => setState("centerView", "editors")}>
-			<div class="graph" ref={watchWidth} style={{ position: "relative" }}>
+			<div
+				class="graph"
+				ref={watchWidth}
+				style={{ position: "relative" }}
+				onKeyDown={(e) => {
+					if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "f") {
+						e.preventDefault();
+						e.stopPropagation();
+						focusFinder?.();
+					}
+				}}
+			>
 				<div class="graph-bar" classList={{ narrow: narrow(), around: filter().mode === "around" }}>
 				{/* No title: the switch's first word is the view's name, and the bar needs the room. */}
 				<div class="mode-switch" role="group" aria-label="Call graph: show the calls as">
@@ -1391,10 +1631,12 @@ export function GraphView() {
 					<Finder
 						choices={findable()}
 						label="Find a procedure and show its callers and callees"
-						title="Type a procedure's name: the graph shows the one you choose with what calls it and what it calls"
+						title="Type a procedure's name: the graph shows the one you choose with what calls it and what it calls (Ctrl+F)"
 						placeholder="Find a procedure…"
 						none={(typed) => `No procedure's name has “${typed}” in it.`}
 						onChoose={find}
+						onRef={(fn) => (focusFinder = fn)}
+						onEscape={() => nodeEls.get(cursor() ?? "")?.focus()}
 					/>
 				</Show>
 				<span class="spacer" />
@@ -1568,12 +1810,14 @@ export function GraphView() {
 												<Show when={b.kind === "script"}>
 													{(() => {
 														const gov = () => (b.path ? governingDocsByScript().get(b.path) : undefined);
+														const tables = () => (b.path ? schemaTablesByScript().get(b.path) : undefined);
 														return (
 															<title>
 																{`${[
 																	b.path ?? b.label,
 																	sizeNote(b.bytes ?? 0),
 																	gov()?.length ? `${gov()!.length} governing ${gov()!.length === 1 ? "doc" : "docs"}` : "",
+																	tables()?.length ? `tables: ${tables()!.slice(0, 6).map((t) => t.title || baseName(t.path).replace(/\.[^.]+$/, "")).join(", ")}` : "",
 																]
 																	.filter(Boolean)
 																	.join(": ")}. Click its name to show only this script's calls.`}
@@ -1596,12 +1840,36 @@ export function GraphView() {
 														<path d={`M${b.x + 9},${b.y + 12} l4,4 l4,-4`} />
 													</g>
 												</Show>
-												<text x={b.x + (b.kind === "script" && folding() ? 26 : b.kind === "folder" ? (folding() ? 30 : 14) : 10)} y={b.y + (b.kind === "folder" ? 21 : 18)} onClick={() => b.kind === "script" && focus(`${b.path}#`)}>
-													{b.label}
-													<Show when={b.kind === "script"}>
-														<tspan class="g-size">{`  ${sizeNote(b.bytes ?? 0)}`}</tspan>
-													</Show>
-												</text>
+												{(() => {
+													const leftPad = () => (b.kind === "script" && folding() ? 26 : b.kind === "folder" ? (folding() ? 30 : 14) : 10);
+													const docCount = () => (!far() && b.kind === "script" && b.path ? (governingDocsByScript().get(b.path)?.length ?? 0) : 0);
+													const rightReserve = () => (docCount() > 0 ? 24 + (String(docCount()).length - 1) * 5.5 + 14 : 10);
+													const fitted = () => {
+														const avail = Math.max(40, b.width - leftPad() - rightReserve());
+														const sizeText = b.kind === "script" ? `  ${sizeNote(b.bytes ?? 0)}` : "";
+														if (b.kind !== "script" || measureBold(b.label) + measure(sizeText) <= avail) {
+															return { label: b.label, size: sizeText };
+														}
+														if (measureBold(b.label) <= avail) return { label: b.label, size: "" };
+														// Truncate cleanly with ellipsis so header text never overlaps the doc pill or adjacent boxes.
+														let lo = 1;
+														let hi = b.label.length;
+														while (lo < hi) {
+															const mid = Math.ceil((lo + hi) / 2);
+															if (measureBold(`${b.label.slice(0, mid)}…`) <= avail) lo = mid;
+															else hi = mid - 1;
+														}
+														return { label: `${b.label.slice(0, Math.max(1, lo))}…`, size: "" };
+													};
+													return (
+														<text x={b.x + leftPad()} y={b.y + (b.kind === "folder" ? 21 : 18)} onClick={() => b.kind === "script" && focus(`${b.path}#`)}>
+															{fitted().label}
+															<Show when={fitted().size}>
+																<tspan class="g-size">{fitted().size}</tspan>
+															</Show>
+														</text>
+													);
+												})()}
 												<Show when={!far() && b.kind === "script" && b.path && (governingDocsByScript().get(b.path)?.length ?? 0) > 0}>
 													{(() => {
 														const gov = () => governingDocsByScript().get(b.path!) ?? [];
@@ -2372,7 +2640,7 @@ export function GraphView() {
 															class="link"
 															style={{ "min-width": "0", overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap", "text-align": "left" }}
 															title={`Open ${rel(doc.path)}`}
-															onClick={() => void openFile(doc.path)}
+															onClick={() => void openGoverningDoc(doc.path, report.seedScripts[0])}
 														>
 															{doc.label}
 														</button>

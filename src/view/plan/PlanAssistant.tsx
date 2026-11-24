@@ -1,17 +1,16 @@
 // The agent's side of a plan, beside the chart: workflow pipeline, build triggers,
 // five-state code status breakdown, open questions/suggestions, flowchart test
 // walkthroughs, and spec status. Answers and accepted suggestions are undoable
-// text edits on the plan (ADR 0002). Ongoing agent UX tracked in docs/AGENT-INTEGRATION.md.
+// text edits on the plan (ADR 0002).
 import { createEffect, createMemo, createResource, createSignal, createUniqueId, For, onCleanup, onMount, Show } from "solid-js";
 import { Icon } from "../Icon";
-import { IconButton } from "../panels/Rows";
 import { agent, currentModel } from "../agent/store";
 import { choose } from "../dialogs";
 import { showPanel } from "../panels/registry";
 import { promoteToKnowledge } from "../projectDocs";
 import { documents, openFile, state } from "../state";
-import { joinPath } from "../../shared/paths";
-import { decisionsOf, describeSuggestion, openQuestions, planHash } from "./assist";
+import { baseName, joinPath } from "../../shared/paths";
+import { buildDriftAgentDraft, buildPlanAgentDraft, buildTestsAgentDraft, decisionsOf, describeSuggestion, openQuestions, planHash } from "./assist";
 import { planTestsOf, type Plan, type PlanNode, type PlanTestInput, type PlanTestPatch } from "./model";
 import { scriptOf, unbuiltNodes } from "./build";
 import { anyChanges, builtOf, chartChanges, journeyDraft, pathSummary, planPaths, type PlanPath } from "./built";
@@ -42,7 +41,7 @@ export function PlanAssistant(props: {
 	/** Five-state stoplight + grey + blue code counts from PlanView. */
 	codeCounts?: Record<CodeIndicator, number>;
 	nodesByCodeState?: (kind: CodeIndicator) => PlanNode[];
-	/** Scheduled build trigger notice & handler (docs/AGENT-INTEGRATION.md). */
+	/** Optional legacy callbacks kept optional for callers. */
 	scheduledNotice?: string | null;
 	onClearScheduledNotice?: () => void;
 	onTriggerScheduled?: (scope: ScheduledBuildScope) => void;
@@ -149,7 +148,7 @@ export function PlanAssistant(props: {
 		const testsCurrent = Boolean(testsFile && testsFile.hash === planHash(props.plan));
 		return [
 			{
-				name: "Spec",
+				name: "Plan doc",
 				state: spec() === "current" ? "done" : spec() === "stale" ? "warn" : "todo",
 				words: spec() === "current" ? "Approved" : spec() === "stale" ? "Out of date" : "Not written",
 			},
@@ -182,12 +181,23 @@ export function PlanAssistant(props: {
 		return props.nodesByCodeState(k);
 	});
 
-	const openAgentDoc = () => {
-		const root = state.workspace?.root;
-		if (!root) return;
-		void openFile(joinPath(root, "docs", "AGENT-INTEGRATION.md")).catch(() => {
-			// Outside SSL Studio's own repo, the workspace won't contain docs/AGENT-INTEGRATION.md.
-		});
+	const triggerBuildNow = () => {
+		if (spec() === "current") {
+			void startBuild(props.path);
+			return;
+		}
+		const draft = buildPlanAgentDraft(props.plan, { planLabel: baseName(props.path), driftItems: drift().items });
+		void import("../agent/Agent").then((m) => m.openAgentWithDraft(draft, { cleanContext: true }));
+	};
+
+	const fixDriftWithAgent = () => {
+		const draft = buildDriftAgentDraft(props.plan, drift().items, { planLabel: baseName(props.path) });
+		void import("../agent/Agent").then((m) => m.openAgentWithDraft(draft, { cleanContext: true }));
+	};
+
+	const draftTestsWithAgent = () => {
+		const draft = buildTestsAgentDraft(props.plan, { planLabel: baseName(props.path) });
+		void import("../agent/Agent").then((m) => m.openAgentWithDraft(draft, { cleanContext: true }));
 	};
 
 	return (
@@ -198,12 +208,16 @@ export function PlanAssistant(props: {
 					<button
 						type="button"
 						class="primary pa-build-trigger"
-						title="Generate or update STARLIMS code for the steps in this plan (scheduled — automated builds will run here once enabled)"
-						onClick={() => props.onTriggerScheduled?.({ kind: "plan", label: props.plan.title || "this plan" })}
+						disabled={Boolean(a().running)}
+						title={
+							spec() === "current"
+								? "Build or update STARLIMS code from the approved plan doc"
+								: "Open Agent with a scoped implementation brief for this plan"
+						}
+						onClick={triggerBuildNow}
 					>
 						<Icon name="tools" />
-						<span>New build</span>
-						<span class="plan-sched-pill on-primary">Soon</span>
+						<span>{run() && !stale() ? "Carry on building" : built()?.units.length && anyChanges(changes()) ? "Rebuild changes" : "New build"}</span>
 					</button>
 					<div class="pa-hero-secondary">
 						<button
@@ -217,11 +231,11 @@ export function PlanAssistant(props: {
 						<button
 							type="button"
 							disabled={Boolean(a().running) || open().length > 0}
-							title="Turn this flowchart and your settled answers into a plain-language specification document to review before any code is built"
+							title="Turn this flowchart and your settled answers into a companion .plan.md breakdown to review before any code is built"
 							aria-describedby={open().length ? specHint : undefined}
 							onClick={() => void writeSpec(props.path)}
 						>
-							Write spec
+							Write plan doc
 						</button>
 						<Show when={a().running && a().running !== "build"}>
 							<button type="button" title="Stop the assistant; nothing in your files is changed" onClick={() => stopAssist(props.path)}>
@@ -233,7 +247,7 @@ export function PlanAssistant(props: {
 
 				<Show when={open().length}>
 					<p class="hint plan-assist-why" id={specHint}>
-						Write spec waits for your {open().length === 1 ? "answer to the open question" : `answers to the ${open().length} open questions`}.
+						Write plan doc waits for your {open().length === 1 ? "answer to the open question" : `answers to the ${open().length} open questions`}.
 					</p>
 				</Show>
 
@@ -266,24 +280,6 @@ export function PlanAssistant(props: {
 					</Show>
 				</p>
 			</section>
-
-			{/* Scheduled Build Trigger Notice Banner */}
-			<Show when={props.scheduledNotice}>
-				<div class="pa-notice" role="status">
-					<Icon name="sparkle" class="pa-notice-icon" />
-					<div class="pa-notice-body">
-						<p>{props.scheduledNotice}</p>
-						<p class="hint">
-							Agent build automation is scheduled for the next pass. Track design notes in{" "}
-							<button type="button" class="link" onClick={openAgentDoc}>
-								AGENT-INTEGRATION.md
-							</button>
-							.
-						</p>
-					</div>
-					<IconButton label="Dismiss notice" title="Dismiss" icon="close" onClick={() => props.onClearScheduledNotice?.()} />
-				</div>
-			</Show>
 
 			<Show when={a().progress}>
 				<p class="plan-assist-progress">{a().progress}</p>
@@ -502,7 +498,7 @@ export function PlanAssistant(props: {
 								<Show when={changes().removed.length}>
 									<p class="plan-change">Removed: {changes().removed.join(", ")}. Their code stays until you remove it.</p>
 								</Show>
-								<p class="hint">Write the spec again, then build. Only what these touch is rebuilt, and the rest of the code is not reprinted.</p>
+								<p class="hint">Write the plan doc again, then build. Only what these touch is rebuilt, and the rest of the code is not reprinted.</p>
 							</div>
 						</Show>
 
@@ -632,6 +628,15 @@ export function PlanAssistant(props: {
 										)}
 									</For>
 									<p class="hint">Review these differences — the code may have been updated outside the flowchart.</p>
+									<button
+										type="button"
+										class="pa-action-btn"
+										title="Open Agent with a scoped brief to reconcile these flowchart and code differences"
+										onClick={fixDriftWithAgent}
+									>
+										<Icon name="sparkle" />
+										<span>Fix drift with Agent</span>
+									</button>
 								</Show>
 							</div>
 						</Show>
@@ -755,13 +760,13 @@ export function PlanAssistant(props: {
 								fallback={
 									<button
 										type="button"
-										class="plan-sched-btn"
-										title="Scheduled — generate a runnable STARLIMS SSL test script from these journeys and test cases (see docs/AGENT-INTEGRATION.md)"
-										onClick={() => props.onTriggerScheduled?.({ kind: "tests", label: props.plan.title || "this plan" })}
+										class="pa-action-btn"
+										disabled={Boolean(a().running)}
+										title="Open Agent with a scoped brief to draft a STARLIMS SSL test script covering these journeys and business test cases"
+										onClick={draftTestsWithAgent}
 									>
 										<Icon name="beaker" />
-										<span>Generate STARLIMS test script</span>
-										<span class="plan-sched-pill">Soon</span>
+										<span>Write tests with Agent</span>
 									</button>
 								}
 							>
@@ -791,11 +796,11 @@ export function PlanAssistant(props: {
 				</Show>
 			</section>
 
-			{/* 5. Spec Card */}
-			<section class="pa-card" aria-label="Specification">
+			{/* 5. Plan Doc Card */}
+			<section class="pa-card" aria-label="Plan doc">
 				<button type="button" class="pa-card-head" aria-expanded={specOpen()} onClick={() => setSpecOpen((o) => !o)}>
 					<Icon name={specOpen() ? "chevron-down" : "chevron-right"} />
-					<span class="pa-card-title">Spec</span>
+					<span class="pa-card-title">Plan doc</span>
 					<span class="spacer" />
 					<span class="pa-card-meta">
 						{spec() === "current" ? "Approved" : spec() === "stale" ? "Out of date" : "Not written"}
@@ -804,12 +809,12 @@ export function PlanAssistant(props: {
 
 				<Show when={specOpen()}>
 					<div class="pa-card-body">
-						<Show when={spec() && spec() !== "none"} fallback={<p class="hint">Not written yet. Refine the plan, then write the spec.</p>}>
+						<Show when={spec() && spec() !== "none"} fallback={<p class="hint">Not written yet. Refine the plan, then write the plan doc.</p>}>
 							<p class="hint">
-								{spec() === "stale" ? "The plan has changed since this spec was approved: write it again." : "Approved, and up to date with the plan."}
+								{spec() === "stale" ? "The plan has changed since this plan doc was approved: write it again." : "Approved, and up to date with the plan."}
 							</p>
 							<button type="button" class="link" onClick={() => void openFile(specPath(props.path))}>
-								Open the spec
+								Open the plan doc
 							</button>
 						</Show>
 					</div>

@@ -8,8 +8,8 @@ import { marked } from "marked";
 import { parseCsv } from "../../shared/csv";
 import { frontMatter, one } from "../../shared/frontMatter";
 import { findHeadingLine } from "../../shared/markdownEdit";
-import { docByName } from "../../shared/namedLinks";
-import { baseName, dirName, relativePath, relativeTo } from "../../shared/paths";
+import { docByName, namedLink } from "../../shared/namedLinks";
+import { baseName, dirName, isInside, relativePath, relativeTo, resolvePath } from "../../shared/paths";
 import { registryTitle, toneOf } from "../../shared/projectDocs";
 import { keysIn } from "../../shared/registryTickets";
 import { backend } from "../backend";
@@ -18,7 +18,18 @@ import { docs } from "../project";
 import { canonical, documents, state } from "../state";
 import { languageFor } from "./languages";
 import { resolveCodeLanguage } from "./markdownCode";
-import { finishMarkdown, type NameResolver, type TicketRef } from "./markdownHtml";
+import {
+	expandTransclusionsMarkdown,
+	extractFootnoteDefinition,
+	finishMarkdown,
+	MAX_TRANSCLUSION_DEPTH,
+	type NameResolver,
+	type TicketRef,
+	type TransclusionLoader,
+	type TransclusionLoaderResult,
+} from "./markdownHtml";
+
+export { expandTransclusionsMarkdown, MAX_TRANSCLUSION_DEPTH, type TransclusionLoader, type TransclusionLoaderResult };
 
 export type HoverPreviewData = {
 	path: string;
@@ -173,11 +184,105 @@ function sliceHeadingSection(raw: string, startLine: number): string {
 	return lines.slice(startLine - 1, endIdx).join("\n");
 }
 
-function renderMarkdownPreview(
+function buildFinishMarkdownOptions(path: string): { tickets: TicketRef[]; named: NameResolver } {
+	const allDocs = docs();
+	const wsRoot = state.workspace?.root;
+	const tickets: TicketRef[] = allDocs
+		.filter((d) => d.exists && d.group === "tickets" && d.ticket && canonical(d.path) !== canonical(path))
+		.map((d) => ({
+			key: d.ticket!,
+			href: relativePath(dirName(path), d.path),
+			about: [d.ticket, d.title, d.status ? `(${d.status})` : ""].filter(Boolean).join(" "),
+		}));
+	const named: NameResolver = (name) => {
+		const found = docByName(name, allDocs, wsRoot);
+		if (!found) return null;
+		return {
+			href: relativePath(dirName(path), found.path),
+			about: found.title || found.name,
+		};
+	};
+	return { tickets, named };
+}
+
+async function resolveWorkspaceEmbed(inner: string, fromPath: string): Promise<TransclusionLoaderResult | null> {
+	const root = state.workspace?.root;
+	const bar = inner.indexOf("|");
+	const rawTarget = (bar < 0 ? inner : inner.slice(0, bar)).trim();
+	const alias = bar < 0 ? undefined : inner.slice(bar + 1).trim() || undefined;
+	const selfHeading = rawTarget.startsWith("#") ? rawTarget.slice(1).trim() : undefined;
+	const parsed = selfHeading ? null : namedLink(inner);
+
+	let targetPath: string | null = null;
+	let fallbackPath: string | null = null;
+	const heading = selfHeading ?? parsed?.heading;
+	if (selfHeading) {
+		targetPath = fromPath;
+	} else if (parsed && root) {
+		const found = docByName(parsed.name, docs(), root);
+		if (found) {
+			targetPath = found.path;
+		} else if (parsed.name.includes("/") || /\.[a-z0-9]{1,8}$/i.test(parsed.name)) {
+			const relCand = resolvePath(dirName(fromPath), parsed.name);
+			const rootCand = resolvePath(root, parsed.name.replace(/^\/+/, ""));
+			if (isInside(root, relCand)) {
+				targetPath = relCand;
+				if (isInside(root, rootCand) && canonical(rootCand) !== canonical(relCand)) fallbackPath = rootCand;
+			} else if (isInside(root, rootCand)) {
+				targetPath = rootCand;
+			}
+		}
+	}
+	if (!targetPath) return null;
+
+	let usedPath = targetPath;
+	let raw = await readText(targetPath);
+	if (!raw.trim() && fallbackPath) {
+		usedPath = fallbackPath;
+		raw = await readText(fallbackPath);
+	}
+	if (!raw.trim()) return null;
+
+	const docKey = canonical(usedPath);
+	const key = heading ? `${docKey}#${heading.toLowerCase()}` : docKey;
+	if (!/\.(md|markdown)$/i.test(usedPath)) {
+		const ext = /\.([A-Za-z0-9_#-]+)$/.exec(usedPath)?.[1] ?? "";
+		const lang = resolveCodeLanguage(ext) || ext;
+		const codeLines = raw.split(/\r?\n/).slice(0, 32).join("\n");
+		return {
+			key,
+			docKey,
+			title: alias ?? baseName(usedPath),
+			path: usedPath,
+			markdown: `\`\`\`${lang}\n${codeLines}\n\`\`\``,
+		};
+	}
+
+	const fm = frontMatter(raw);
+	let body = fm.body;
+	if (heading) {
+		const ln = findHeadingLine(raw, heading);
+		if (!ln) return null;
+		body = sliceHeadingSection(raw, ln);
+	}
+	const bodyLines = body.split(/\r?\n/);
+	const clipped = closeDanglingFence(bodyLines.slice(0, 40).join("\n"));
+	const fmTitle = one(fm.values.title);
+	const titleBase = fmTitle || baseName(usedPath).replace(/\.(md|markdown)$/i, "");
+	return {
+		key,
+		docKey,
+		title: alias ?? (heading ? `${titleBase} › ${heading}` : titleBase),
+		path: usedPath,
+		markdown: clipped,
+	};
+}
+
+async function renderMarkdownPreview(
 	raw: string,
 	path: string,
-	options: { heading?: string; line?: number; maxLines?: number },
-): Omit<HoverPreviewData, "path" | "relPath"> {
+	options: { heading?: string; line?: number; maxLines?: number; depth?: number; maxDepth?: number; visited?: ReadonlySet<string> },
+): Promise<Omit<HoverPreviewData, "path" | "relPath">> {
 	const fm = frontMatter(raw);
 	let snippet = fm.body;
 	let resolvedLine = options.line;
@@ -198,27 +303,22 @@ function renderMarkdownPreview(
 	const maxLines = options.maxLines ?? 28;
 	const snippetLines = snippet.split(/\r?\n/);
 	const omitted = Math.max(0, snippetLines.length - maxLines);
-	const previewMd = closeDanglingFence(snippetLines.slice(0, maxLines).join("\n"));
+	let previewMd = closeDanglingFence(snippetLines.slice(0, maxLines).join("\n"));
+	if (!headingMissing && previewMd.includes("![[")) {
+		const selfKey = options.heading ? `${canonical(path)}#${options.heading.toLowerCase()}` : canonical(path);
+		const visited = new Set(options.visited ?? []);
+		visited.add(selfKey);
+		if (!options.heading) visited.add(canonical(path));
+		previewMd = await expandTransclusionsMarkdown(previewMd, path, resolveWorkspaceEmbed, {
+			depth: options.depth ?? 0,
+			maxDepth: options.maxDepth ?? MAX_TRANSCLUSION_DEPTH,
+			visited,
+		});
+	}
 	const cleanHtml = headingMissing
 		? `<p class="md-hover-empty">Heading “${esc(options.heading ?? "")}” not found in this document.</p>`
 		: DOMPurify.sanitize(marked.parse(previewMd, { async: false, gfm: true }) as string);
-	const allDocs = docs();
-	const wsRoot = state.workspace?.root;
-	const tickets: TicketRef[] = allDocs
-		.filter((d) => d.exists && d.group === "tickets" && d.ticket && canonical(d.path) !== canonical(path))
-		.map((d) => ({
-			key: d.ticket!,
-			href: relativePath(dirName(path), d.path),
-			about: [d.ticket, d.title, d.status ? `(${d.status})` : ""].filter(Boolean).join(" "),
-		}));
-	const named: NameResolver = (name) => {
-		const found = docByName(name, allDocs, wsRoot);
-		if (!found) return null;
-		return {
-			href: relativePath(dirName(path), found.path),
-			about: found.title || found.name,
-		};
-	};
+	const { tickets, named } = buildFinishMarkdownOptions(path);
 	const rendered = headingMissing ? cleanHtml : finishMarkdown(cleanHtml, { tickets, named });
 	const moreFooter = !headingMissing && omitted > 0 ? `<p class="md-hover-more">… ${omitted} more line${omitted === 1 ? "" : "s"}</p>` : "";
 	const html = rendered ? `${rendered}${moreFooter}` : `<p class="md-hover-empty">Empty document.</p>`;
@@ -234,6 +334,26 @@ function renderMarkdownPreview(
 		badge: !fmTitle && fmTicket ? fmTicket : undefined,
 		html,
 		line: resolvedLine,
+	};
+}
+
+/** Builds a rich Markdown hover card preview for a footnote reference (`[^1]`). */
+export function buildFootnoteHoverPreview(rawDoc: string, docPath: string, footnoteId: string): HoverPreviewData | null {
+	const def = extractFootnoteDefinition(rawDoc, footnoteId);
+	if (!def) return null;
+	const cleanHtml = def.text
+		? DOMPurify.sanitize(marked.parse(def.text, { async: false, gfm: true }) as string)
+		: `<p class="md-hover-empty">Empty footnote definition.</p>`;
+	const { tickets, named } = buildFinishMarkdownOptions(docPath);
+	const html = def.text ? finishMarkdown(cleanHtml, { tickets, named }) : cleanHtml;
+	return {
+		path: docPath,
+		relPath: relativeTo(state.workspace?.root, docPath),
+		title: `Footnote [${footnoteId}]`,
+		kind: "markdown",
+		badge: `Line ${def.line}`,
+		html,
+		line: def.line,
 	};
 }
 
@@ -257,14 +377,22 @@ function renderCodePreview(raw: string, path: string, line?: number, maxLines = 
 /** Builds a rich hover preview card for any workspace document (Markdown, Plan, CSV/TSV registry, or code). */
 export async function buildHoverPreview(
 	path: string,
-	options: { heading?: string; line?: number; ticket?: string; maxLines?: number } = {},
+	options: {
+		heading?: string;
+		line?: number;
+		ticket?: string;
+		maxLines?: number;
+		depth?: number;
+		maxDepth?: number;
+		visited?: ReadonlySet<string>;
+	} = {},
 ): Promise<HoverPreviewData | null> {
 	const raw = await readText(path);
 	if (!raw.trim()) return null;
 	const relPath = relativeTo(state.workspace?.root, path);
 
 	if (/\.(md|markdown)$/i.test(path)) {
-		return { path, relPath, ...renderMarkdownPreview(raw, path, options) };
+		return { path, relPath, ...(await renderMarkdownPreview(raw, path, options)) };
 	}
 	if (isPlanPath(path)) {
 		const planPreview = renderPlanPreview(raw, path);

@@ -7,12 +7,15 @@ import { WorkspaceFiles } from "../src/bun/workspace";
 import { docChecks, findDuplicateHeadings, orphanDocChecks, staleDocChecks } from "../src/shared/docChecks";
 import type { DocFile } from "../src/shared/protocol";
 import { findUndocumentedSqlRefs } from "../src/shared/schemaIndex";
+import { removeFrontMatterKey } from "../src/shared/frontMatter";
 import {
 	diffSqlAgainstSchemaMarkdown,
 	extractQueriedTablesFromSql,
+	filterSqlTablesForMarkdown,
 	generateMermaidErDiagram,
 	mergeSqlTablesIntoMarkdown,
 	parseCreateTables,
+	schemaMarkdownToSql,
 } from "../src/shared/sqlSchema";
 import { docsGoverningFile, scriptsForTicket, ticketsForFile, ticketWork } from "../src/shared/workContext";
 
@@ -139,6 +142,157 @@ ALTER TABLE DEMO_SAMPLES DROP COLUMN DUE_ON;
 		const second = mergeSqlTablesIntoMarkdown(merged.text, tables, "schema/database/demo.sql");
 		expect(second.droppedColumns).toBe(0);
 		expect(second.text).toBe(merged.text);
+	});
+
+	test("shared multi-table SQL file does not emit false drift for unrelated tables on a single-table schema doc", () => {
+		const multiSql = `
+CREATE TABLE DEMO_HOLIDAYS (
+    HOLIDAY_ON DATE NOT NULL PRIMARY KEY,
+    NAME VARCHAR(60) NOT NULL
+);
+CREATE TABLE DEMO_OUTAGES (
+    OUTAGE_ID INT NOT NULL PRIMARY KEY,
+    REASON VARCHAR(60)
+);
+CREATE TABLE DEMO_SAMPLES (
+    SAMPLE_ID VARCHAR(20) NOT NULL PRIMARY KEY,
+    DUE_ON DATE
+);
+`;
+		const holidaysMd = [
+			"---",
+			"source: schema/database/shared.sql",
+			"---",
+			"",
+			"# DEMO_HOLIDAYS",
+			"",
+			"| Column | Type | Null | What it holds |",
+			"| --- | --- | --- | --- |",
+			"| `HOLIDAY_ON` | date | no | The day. Primary key. |",
+			"| `NAME` | varchar(60) | no | What the holiday is. |",
+			"",
+		].join("\n");
+
+		expect(diffSqlAgainstSchemaMarkdown(multiSql, holidaysMd)).toEqual([]);
+		const parsed = parseCreateTables(multiSql);
+		expect(filterSqlTablesForMarkdown(parsed, holidaysMd).map((t) => t.tableName)).toEqual(["DEMO_HOLIDAYS"]);
+	});
+
+	test("schemaMarkdownToSql generates clean CREATE TABLE DDL that round-trips with zero drift, and removeFrontMatterKey unlinks source cleanly", () => {
+		const nullStyleMd = [
+			"---",
+			"source: schema/database/DEMO_HOLIDAYS.sql",
+			"---",
+			"",
+			"# DEMO_HOLIDAYS",
+			"",
+			"| Column | Type | Null | What it holds |",
+			"| --- | --- | --- | --- |",
+			"| `HOLIDAY_ON` | date | no | The day. Primary key. |",
+			"| `NAME` | varchar(60) | no | What the holiday is. |",
+			"| `NOTE` | varchar(120) | yes | Optional remark. |",
+			"",
+		].join("\n");
+
+		const generated = schemaMarkdownToSql(nullStyleMd, { sourceNote: "schema/database/DEMO_HOLIDAYS.md" });
+		expect(generated).not.toBeNull();
+		expect(generated!.tables).toEqual(["DEMO_HOLIDAYS"]);
+		expect(generated!.sql).toContain("CREATE TABLE DEMO_HOLIDAYS (");
+		expect(generated!.sql).toContain("HOLIDAY_ON DATE");
+		expect(generated!.sql).toContain("NOT NULL PRIMARY KEY");
+		expect(generated!.sql).toContain("NAME       VARCHAR(60)  NOT NULL");
+		expect(diffSqlAgainstSchemaMarkdown(generated!.sql, nullStyleMd)).toEqual([]);
+
+		// Unlinking the sole frontmatter property cleanly removes the empty YAML block.
+		const unlinked = removeFrontMatterKey(nullStyleMd, "source");
+		expect(unlinked.startsWith("# DEMO_HOLIDAYS")).toBe(true);
+		expect(unlinked).not.toContain("source:");
+	});
+
+	test("parses, generates, diffs, and merges foreign keys and indexes across Markdown and SQL cleanly", async () => {
+		const { extractSchemaColumns } = await import("../src/shared/schemaIndex");
+		const samplesMd = [
+			"---",
+			"source: schema/database/DEMO_SAMPLES.sql",
+			"---",
+			"",
+			"# DEMO_SAMPLES",
+			"",
+			"| Column | Type | Null | What it holds |",
+			"| --- | --- | --- | --- |",
+			"| `SAMPLE_ID` | varchar(20) | no | Primary key. |",
+			"| `INSTRUMENT_ID` | varchar(20) | yes | Foreign key to [DEMO_INSTRUMENTS](DEMO_INSTRUMENTS.md). |",
+			"| `DUE_ON` | date | yes | Planned due date. |",
+			"| `PRIORITY` | varchar(10) | no | Routine or rush. |",
+			"",
+			"## Foreign keys",
+			"",
+			"| Column | Target table | Target column | Notes |",
+			"| --- | --- | --- | --- |",
+			"| `INSTRUMENT_ID` | `DEMO_INSTRUMENTS` | `INSTRUMENT_ID` | Optional instrument link. |",
+			"",
+			"## Indexes",
+			"",
+			"| Name | Unique | Columns |",
+			"| --- | --- | --- |",
+			"| `IX_SAMPLES_DUE` | no | `DUE_ON`, `PRIORITY` |",
+			"| `UQ_SAMPLE_EXT` | yes | `SAMPLE_ID` |",
+			"",
+		].join("\n");
+
+		// extractSchemaColumns ignores Foreign keys and Indexes subsections.
+		const schemaCols = extractSchemaColumns(
+			{ path: "/ws/schema/database/DEMO_SAMPLES.md", name: "database/DEMO_SAMPLES.md", group: "schema", kind: "database", exists: true, title: "DEMO_SAMPLES" },
+			samplesMd,
+		);
+		expect(schemaCols.map((c) => c.name)).toEqual(["SAMPLE_ID", "INSTRUMENT_ID", "DUE_ON", "PRIORITY"]);
+
+		// schemaMarkdownToSql emits table-level FOREIGN KEY constraint and CREATE [UNIQUE] INDEX statements.
+		const generated = schemaMarkdownToSql(samplesMd, { sourceNote: "schema/database/DEMO_SAMPLES.md" });
+		expect(generated).not.toBeNull();
+		expect(generated!.sql).toContain("CONSTRAINT FK_DEMO_SAMPLES_INSTRUMENT_ID FOREIGN KEY (INSTRUMENT_ID) REFERENCES DEMO_INSTRUMENTS (INSTRUMENT_ID)");
+		expect(generated!.sql).toContain("CREATE INDEX IX_SAMPLES_DUE ON DEMO_SAMPLES (DUE_ON, PRIORITY);");
+		expect(generated!.sql).toContain("CREATE UNIQUE INDEX UQ_SAMPLE_EXT ON DEMO_SAMPLES (SAMPLE_ID);");
+		expect(diffSqlAgainstSchemaMarkdown(generated!.sql, samplesMd)).toEqual([]);
+
+		// parseCreateTables extracts both foreignKeys and indexes accurately.
+		const [parsed] = parseCreateTables(generated!.sql);
+		expect(parsed!.foreignKeys).toEqual([{ column: "INSTRUMENT_ID", refTable: "DEMO_INSTRUMENTS", refColumn: "INSTRUMENT_ID" }]);
+		expect(parsed!.indexes).toEqual([
+			{ name: "IX_SAMPLES_DUE", columns: ["DUE_ON", "PRIORITY"] },
+			{ name: "UQ_SAMPLE_EXT", columns: ["SAMPLE_ID"], unique: true },
+		]);
+
+		// Drift detection catches modified/added/dropped indexes and foreign keys, and mergeSqlTablesIntoMarkdown resolves them while preserving FK notes.
+		const driftedSql = [
+			"CREATE TABLE DEMO_SAMPLES (",
+			"    SAMPLE_ID VARCHAR(20) NOT NULL PRIMARY KEY,",
+			"    INSTRUMENT_ID VARCHAR(20),",
+			"    DUE_ON DATE,",
+			"    PRIORITY VARCHAR(10) NOT NULL,",
+			"    CONSTRAINT FK_DEMO_SAMPLES_INSTRUMENT_ID FOREIGN KEY (INSTRUMENT_ID) REFERENCES DEMO_INSTRUMENTS (INSTRUMENT_ID)",
+			");",
+			"CREATE INDEX IX_SAMPLES_DUE ON DEMO_SAMPLES (DUE_ON);",
+			"CREATE INDEX IX_SAMPLES_INST ON DEMO_SAMPLES (INSTRUMENT_ID);",
+		].join("\n");
+		const drift = diffSqlAgainstSchemaMarkdown(driftedSql, samplesMd);
+		expect(drift).toEqual([
+			{
+				table: "DEMO_SAMPLES",
+				added: ["INDEX: IX_SAMPLES_INST"],
+				modified: ["INDEX: IX_SAMPLES_DUE"],
+				dropped: ["INDEX: UQ_SAMPLE_EXT"],
+			},
+		]);
+
+		const synced = mergeSqlTablesIntoMarkdown(samplesMd, parseCreateTables(driftedSql), "schema/database/DEMO_SAMPLES.sql");
+		expect(synced.text).toContain("Optional instrument link.");
+		expect(synced.text).toContain("| `IX_SAMPLES_DUE` | no | `DUE_ON` |");
+		expect(synced.text).toContain("| `IX_SAMPLES_INST` | no | `INSTRUMENT_ID` |");
+		expect(synced.text).not.toContain("UQ_SAMPLE_EXT");
+		expect(diffSqlAgainstSchemaMarkdown(driftedSql, synced.text)).toEqual([]);
+		// Second merge is idempotent.
+		expect(mergeSqlTablesIntoMarkdown(synced.text, parseCreateTables(driftedSql), "schema/database/DEMO_SAMPLES.sql").text).toBe(synced.text);
 	});
 
 	test("generateMermaidErDiagram emits entities, PK/FK flags, sanitized types, and FK edges", () => {
@@ -315,7 +469,7 @@ describe("Duplicate headings, orphan docs, stale hygiene checks, and workContext
 					{ name: "Skips holiday", given: "Lab closed", expect: "Next business day" },
 				],
 			},
-			{ path: "/ws/design/DueDates.spec.md", name: "design/DueDates.spec.md", group: "specs", exists: true, tickets: ["LIMS-42"] },
+			{ path: "/ws/design/DueDates.plan.md", name: "DueDates.plan.md", group: "plans", exists: true, tickets: ["LIMS-42"], pairedPlan: { name: "DueDates.plan.json", ticket: "LIMS-42" } },
 		];
 
 		const groups = ticketWork(files, "LIMS-42");
@@ -328,7 +482,7 @@ describe("Duplicate headings, orphan docs, stale hygiene checks, and workContext
 		const gov = docsGoverningFile(files, "/ws/tests/TestDueDates.ssl", "/ws");
 		expect(gov.map((g) => [g.file.group, g.reason])).toEqual([
 			["plans", "plan test script"],
-			["specs", "paired spec"],
+			["plans", "plan doc"],
 			["tickets", "governing ticket"],
 		]);
 		expect(ticketsForFile(files, "/ws/tests/TestDueDates.ssl", "/ws")).toEqual(["LIMS-42"]);
@@ -506,5 +660,49 @@ describe("Backend project.ts integration: metadata, plan linksTo, schema drift, 
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("Schema usage grouping and filtering for Document -> Info", () => {
+	test("groups usages into Data sources, Scripts, Tests, and Registries while deduplicating lines and filtering snippets", async () => {
+		const { filterSchemaUsageGroups, groupSchemaUsages } = await import("../src/shared/schemaIndex");
+		const groups = groupSchemaUsages(
+			[
+				{ path: "/ws/src/DueDates/SaveDueDates.ssl", rel: "src/DueDates/SaveDueDates.ssl", line: 135, text: "    UPDATE DEMO_SAMPLES SET" },
+				{ path: "/ws/src/Legacy/OldCheck.ssl", rel: "src/Legacy/OldCheck.ssl", line: 66, text: "select count(*) from DEMO_SAMPLES" },
+				{ path: "/ws/src/Legacy/OldCheck.ssl", rel: "src/Legacy/OldCheck.ssl", line: 28, text: "select * from DEMO_SAMPLES where x = 1" },
+				{ path: "/ws/src/Legacy/OldCheck.ssl", rel: "src/Legacy/OldCheck.ssl", line: 28, text: "select * from DEMO_SAMPLES where x = 1" },
+				{ path: "/ws/src/DueDates/SamplesDueSoon.ds", rel: "src/DueDates/SamplesDueSoon.ds", line: 43, text: "FROM DEMO_SAMPLES" },
+				{ path: "/ws/tests/DueDatesTests/DbTestSupport.ssl", rel: "tests/DueDatesTests/DbTestSupport.ssl", line: 67, text: "INSERT INTO DEMO_SAMPLES (" },
+				{ path: "/ws/tests/DueDatesTests/DbTestSupport.ssl", rel: "tests/DueDatesTests/DbTestSupport.ssl", line: 80, text: "UPDATE DEMO_SAMPLES SET" },
+			],
+			[{ path: "/ws/docs/registries/database.csv", title: "Database objects", fileName: "database.csv", rel: "docs/registries/database.csv" }],
+			{ testsFolder: "tests" },
+		);
+
+		expect(groups.map((g) => [g.id, g.items.length])).toEqual([
+			["data-sources", 1],
+			["scripts", 2],
+			["tests", 1],
+			["registries", 1],
+		]);
+
+		const scripts = groups.find((g) => g.id === "scripts")!;
+		expect(scripts.items.map((i) => i.name)).toEqual(["OldCheck.ssl", "SaveDueDates.ssl"]);
+		const oldCheck = scripts.items[0]!;
+		expect(oldCheck.dir).toBe("src/Legacy");
+		expect(oldCheck.count).toBe(3);
+		expect(oldCheck.hits.map((h) => h.line)).toEqual([28, 66]);
+
+		// Filter by SQL snippet matches across groups and narrows file hits to matching lines.
+		const updatesOnly = filterSchemaUsageGroups(groups, "UPDATE DEMO_SAMPLES");
+		expect(updatesOnly.map((g) => [g.id, g.items.map((i) => `${i.name}:${i.hits.map((h) => h.line).join(",")}`)])).toEqual([
+			["scripts", ["SaveDueDates.ssl:135"]],
+			["tests", ["DbTestSupport.ssl:80"]],
+		]);
+
+		// Filter by folder matches all scripts in that folder.
+		const legacyOnly = filterSchemaUsageGroups(groups, "src/Legacy");
+		expect(legacyOnly.map((g) => g.items.map((i) => i.name))).toEqual([["OldCheck.ssl"]]);
 	});
 });

@@ -4,7 +4,7 @@ title: Give every waiting sample a due date
 source: https://tickets.example.test/browse/DEMO-101
 status: done
 related: [DEMO-102, DEMO-103]
-specs: [design/SetSampleDueDates.spec.md]
+plans: [design/SetSampleDueDates.plan.json]
 ---
 
 # DEMO-101: Give every waiting sample a due date

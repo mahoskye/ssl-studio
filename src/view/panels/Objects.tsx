@@ -7,24 +7,27 @@
 import { Icon, type IconName } from "../Icon";
 import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, Show } from "solid-js";
 import { backend } from "../backend";
-import { activeLiveEditor, jumpToTableColumn, liveSelectionVersion } from "../editor/liveBridge";
+import { activeLiveEditor, jumpToTableColumn, liveSelectionVersion, onSplitScrollSync } from "../editor/liveBridge";
 import { mdOutline } from "../editor/mdOutline";
 import { monaco } from "../editor/monaco";
 import { session } from "../lsp/session";
-import { activeDoc, activePath, canonical, markdownMode, notify, openFile, setState, state } from "../state";
+import { activeDoc, activePath, canonical, documents, markdownMode, notify, openFile, setState, state } from "../state";
 import { cycleRegionColor, isRegion, regionColor, symbolPath } from "../editor/regions";
 import { isPlanPath, PROCEDURE_DRAG } from "../plan/model";
-import { isMarkdown, isTable } from "../project";
+import { docs, isMarkdown, isTable } from "../project";
 import { parseCsv } from "../../shared/csv";
+import { frontMatter } from "../../shared/frontMatter";
 import {
 	csvColumnOutline,
+	demoteMarkdownSection,
 	hasOutline,
 	markdownSectionTree,
 	moveMarkdownSection,
+	moveMarkdownSectionTo,
 	outline,
 	outlineOf,
 	planStageOutline,
-	reorderMarkdownSection,
+	promoteMarkdownSection,
 	type CsvColumnSummary,
 	type MarkdownSection,
 	type OutlineItem,
@@ -34,9 +37,26 @@ import {
 import { baseName, dirName, relativeTo } from "../../shared/paths";
 import { recall, remember } from "../graph/canvas";
 import { Menu, type MenuItem } from "../Menu";
+import {
+	activeMarkdownTab,
+	chooseMarkdownPanelTab,
+	defaultMarkdownPanelTab,
+	hasSavedMarkdownTab,
+	markdownLinksSummary,
+	markdownPanelTabRequest,
+	registerMarkdownPanelOpener,
+	setActiveMarkdownTab,
+} from "./markdownBridge";
+import { MarkdownInspector } from "./MarkdownInspector";
+import { showPanel } from "./registry";
 import { chooseFromMenu, type RowMenuEntry } from "./RowMenu";
 import { focusRowsBelow, IconButton, Row, RowGroup, Rows, type Point, type RowsApi } from "./Rows";
 import { serverDown } from "./server";
+
+registerMarkdownPanelOpener(() => showPanel("objects"));
+
+let lastAutoDefaultMdPath = "";
+let lastHandledMdTabReqSeq = 0;
 
 type Sym = monaco.languages.DocumentSymbol;
 // By Monaco's SymbolKind: Module, Namespace (a region), Class, Method, Function, Variable, Constant, String.
@@ -94,6 +114,7 @@ const [reading, setReading] = createSignal<"idle" | "reading" | "read" | "failed
 const [failure, setFailure] = createSignal("");
 
 const isActiveCsv = () => {
+	void state.kindVersion;
 	const path = activePath();
 	const doc = activeDoc();
 	return Boolean(doc && !doc.binary && (isTable(path) || doc.model.getLanguageId() === "csv"));
@@ -102,7 +123,7 @@ const isActiveCsv = () => {
 export function useSymbols() {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	createEffect(
-		on([activePath, () => state.lsp.state], () => {
+		on([activePath, () => state.lsp.state, () => state.kindVersion], () => {
 			const path = activePath();
 			const doc = activeDoc();
 			setSymbols([]);
@@ -288,12 +309,14 @@ const collectExpandableKeys = (list: Sym[], parent = ""): string[] => {
 	return keys;
 };
 
-const collectMdExpandableKeys = (list: MarkdownSection[]): string[] => {
+const mdCollapseKey = (path: string | null | undefined, slug: string) => `${canonical(path ?? "")}:md:${slug}`;
+
+const collectMdExpandableKeys = (list: MarkdownSection[], path?: string | null): string[] => {
 	const keys: string[] = [];
 	for (const s of list) {
 		if (s.children.length) {
-			keys.push(`md:${s.slug}`);
-			keys.push(...collectMdExpandableKeys(s.children));
+			keys.push(mdCollapseKey(path, s.slug));
+			keys.push(...collectMdExpandableKeys(s.children, path));
 		}
 	}
 	return keys;
@@ -301,7 +324,7 @@ const collectMdExpandableKeys = (list: MarkdownSection[]): string[] => {
 
 const collectActiveExpandableKeys = (): string[] => {
 	const path = activePath();
-	if (isMarkdown(path)) return collectMdExpandableKeys(mdSections());
+	if (isMarkdown(path)) return collectMdExpandableKeys(mdSections(), path);
 	if (isPlanPath(path)) return planStages().filter((st) => st.nodes.length > 0).map((st) => `plan:${st.id}`);
 	return collectExpandableKeys(symbols());
 };
@@ -429,17 +452,38 @@ async function copyClipboardText(text: string, message: string) {
 	}
 }
 
-/** Collapsible Markdown heading tree with task counts, active tracking, context menu, Alt+Up/Down & drag reordering. */
+/** Maximum heading level present in a section or any of its descendants. */
+function maxSectionLevel(sec: MarkdownSection): number {
+	let max = sec.level;
+	for (const child of sec.children) {
+		const sub = maxSectionLevel(child);
+		if (sub > max) max = sub;
+	}
+	return max;
+}
+
+/** Collapsible Markdown heading tree with task counts, active tracking, context menu, Alt+Up/Down/Shift+Left/Right & cross-parent drag reordering. */
 function MarkdownOutline(props: { filter?: string; compact?: boolean; label?: string }) {
 	const filter = () => props.filter ?? "";
 	let rowsApi: RowsApi | undefined;
 	let draggingLine: number | null = null;
-	const [dropTarget, setDropTarget] = createSignal<{ line: number; place: "before" | "after" } | null>(null);
+	const [dropTarget, setDropTarget] = createSignal<{ line: number; place: "before" | "after" | "inside" } | null>(null);
 	const [trackSource, setTrackSource] = createSignal<"cursor" | "scroll">("cursor");
+	const [sourceScrollLine, setSourceScrollLine] = createSignal<{ path: string; line: number } | null>(null);
 
 	createEffect(on(() => state.cursor.line, () => setTrackSource("cursor"), { defer: true }));
 	createEffect(on(() => liveSelectionVersion(), () => setTrackSource("cursor"), { defer: true }));
 	createEffect(on(() => mdOutline()?.activeId, () => setTrackSource("scroll"), { defer: true }));
+	createEffect(() => {
+		const unsub = onSplitScrollSync((payload) => {
+			const p = activePath();
+			if (!p || !isMarkdown(p) || canonical(payload.path) !== canonical(p)) return;
+			if (markdownMode(p) !== "source") return;
+			setSourceScrollLine({ path: payload.path, line: payload.topLine });
+			setTrackSource("scroll");
+		});
+		onCleanup(unsub);
+	});
 
 	const toggle = (key: string) =>
 		setOutlineClosed((set) => {
@@ -479,7 +523,14 @@ function MarkdownOutline(props: { filter?: string; compact?: boolean; label?: st
 			const line = live && canonical(live.path) === canonical(path) ? live.getPosition().lineNumber : state.cursor.line;
 			return innermostSectionAtLine(list, line) ?? fromScrollspy();
 		}
-		// Source mode
+		// Source mode: track Monaco viewport scrollspy when scrolling, cursor line otherwise.
+		if (trackSource() === "scroll") {
+			const scrolled = sourceScrollLine();
+			if (scrolled && canonical(scrolled.path) === canonical(path)) {
+				const hit = innermostSectionAtLine(list, scrolled.line);
+				if (hit) return hit;
+			}
+		}
 		return innermostSectionAtLine(list, state.cursor.line);
 	});
 
@@ -497,45 +548,49 @@ function MarkdownOutline(props: { filter?: string; compact?: boolean; label?: st
 		void openFile(path, { reveal: { line: sec.line, column: 1 } });
 	};
 
+	const commitSectionTransform = (path: string, nextText: string, newLine: number) => {
+		const doc = activeDoc();
+		if (!doc) return;
+		if (!applyMinimalModelEdit(doc.model, nextText)) return;
+		const nextTree = markdownSectionTree(nextText);
+		setMdSections(nextTree);
+		const movedSec = findSectionInfo(nextTree, (s) => s.line === newLine)?.section;
+		if (movedSec) rowsApi?.focus(mdCollapseKey(path, movedSec.slug));
+		const live = activeLiveEditor();
+		if (live && canonical(live.path) === canonical(path)) {
+			live.reveal({ line: newLine, column: 1 });
+		} else {
+			setState("cursor", { line: newLine, column: 1 });
+			if (markdownMode(path) === "source") void openFile(path, { reveal: { line: newLine, column: 1 } });
+		}
+	};
+
 	const moveSection = (sec: MarkdownSection, direction: "up" | "down") => {
 		const doc = activeDoc();
 		const path = activePath();
 		if (!doc || !path || !isMarkdown(path)) return;
-		const text = doc.model.getValue();
-		const moved = moveMarkdownSection(text, sec.line, direction);
+		const moved = moveMarkdownSection(doc.model.getValue(), sec.line, direction);
 		if (!moved) return;
-		if (!applyMinimalModelEdit(doc.model, moved.text)) return;
-		const nextTree = markdownSectionTree(moved.text);
-		setMdSections(nextTree);
-		const movedSec = findSectionInfo(nextTree, (s) => s.line === moved.newLine)?.section;
-		if (movedSec) rowsApi?.focus(`md:${movedSec.slug}`);
-		const live = activeLiveEditor();
-		if (live && canonical(live.path) === canonical(path)) {
-			live.reveal({ line: moved.newLine, column: 1 });
-		} else {
-			setState("cursor", { line: moved.newLine, column: 1 });
-			if (markdownMode(path) === "source") void openFile(path, { reveal: { line: moved.newLine, column: 1 } });
-		}
+		commitSectionTransform(path, moved.text, moved.newLine);
 	};
 
-	const reorderSection = (fromLine: number, toLine: number, place: "before" | "after") => {
+	const moveSectionTo = (fromLine: number, toLine: number, place: "before" | "after" | "inside") => {
+		const doc = activeDoc();
+		const path = activePath();
+		if (!doc || !path || !isMarkdown(path)) return;
+		const moved = moveMarkdownSectionTo(doc.model.getValue(), fromLine, toLine, place);
+		if (!moved.changed) return;
+		commitSectionTransform(path, moved.text, moved.newLine);
+	};
+
+	const shiftSectionLevel = (sec: MarkdownSection, action: "promote" | "demote") => {
 		const doc = activeDoc();
 		const path = activePath();
 		if (!doc || !path || !isMarkdown(path)) return;
 		const text = doc.model.getValue();
-		const moved = reorderMarkdownSection(text, fromLine, toLine, place);
-		if (!moved) return;
-		if (!applyMinimalModelEdit(doc.model, moved.text)) return;
-		const nextTree = markdownSectionTree(moved.text);
-		setMdSections(nextTree);
-		const movedSec = findSectionInfo(nextTree, (s) => s.line === moved.newLine)?.section;
-		if (movedSec) rowsApi?.focus(`md:${movedSec.slug}`);
-		const live = activeLiveEditor();
-		if (live && canonical(live.path) === canonical(path)) {
-			live.reveal({ line: moved.newLine, column: 1 });
-		} else {
-			setState("cursor", { line: moved.newLine, column: 1 });
-		}
+		const res = action === "promote" ? promoteMarkdownSection(text, sec.line) : demoteMarkdownSection(text, sec.line);
+		if (!res.changed) return;
+		commitSectionTransform(path, res.text, res.newLine);
 	};
 
 	const openSectionMenu = async (sec: MarkdownSection, at: Point) => {
@@ -544,12 +599,17 @@ function MarkdownOutline(props: { filter?: string; compact?: boolean; label?: st
 		const info = findSectionInfo(mdSections(), (s) => s.line === sec.line);
 		const canMoveUp = Boolean(info && info.index > 0);
 		const canMoveDown = Boolean(info && info.index < info.siblings.length - 1);
+		const canPromote = sec.level > 1;
+		const canDemote = maxSectionLevel(sec) < 6;
 		const stem = baseName(path).replace(/\.(md|markdown)$/i, "");
 		const entries: RowMenuEntry[] = [
 			{ label: "Jump to section", value: "jump" },
 			"separator",
 			{ label: `Copy link ([[${stem}#${sec.text}]])`, value: "copy-link" },
 			{ label: "Rename heading across workspace…", value: "rename-heading" },
+			"separator",
+			{ label: "Promote heading (#)", value: "promote", keys: "Alt+Shift+Left", disabled: !canPromote },
+			{ label: "Demote heading (#)", value: "demote", keys: "Alt+Shift+Right", disabled: !canDemote },
 			"separator",
 			{ label: "Move section up", value: "move-up", keys: "Alt+Up", disabled: !canMoveUp },
 			{ label: "Move section down", value: "move-down", keys: "Alt+Down", disabled: !canMoveDown },
@@ -569,6 +629,10 @@ function MarkdownOutline(props: { filter?: string; compact?: boolean; label?: st
 				await openFile(path, { reveal: { line: sec.line, column: 1 } });
 			}
 			(await import("../commands")).runCommand("rename-heading");
+		} else if (picked === "promote") {
+			shiftSectionLevel(sec, "promote");
+		} else if (picked === "demote") {
+			shiftSectionLevel(sec, "demote");
 		} else if (picked === "move-up") {
 			moveSection(sec, "up");
 		} else if (picked === "move-down") {
@@ -578,15 +642,19 @@ function MarkdownOutline(props: { filter?: string; compact?: boolean; label?: st
 
 	const canReorder = () => !filter() && outlineSort() === "position";
 
-	const areSiblings = (lineA: number, lineB: number): boolean => {
-		if (lineA === lineB) return false;
-		const a = findSectionInfo(mdSections(), (s) => s.line === lineA);
-		const b = findSectionInfo(mdSections(), (s) => s.line === lineB);
-		return Boolean(a && b && a.siblings === b.siblings);
+	const canDropSection = (fromLine: number, target: MarkdownSection, place: "before" | "after" | "inside"): boolean => {
+		if (fromLine === target.line) return false;
+		const src = findSectionInfo(mdSections(), (s) => s.line === fromLine)?.section;
+		if (!src) return false;
+		// Reject drops onto self or anywhere inside own descendant subtree.
+		if (target.line >= src.line && target.line <= src.endLine) return false;
+		// Cannot nest inside an H6 heading.
+		if (place === "inside" && target.level >= 6) return false;
+		return true;
 	};
 
 	const SectionRow = (rowProps: { section: MarkdownSection; depth: number }) => {
-		const key = () => `md:${rowProps.section.slug}`;
+		const key = () => mdCollapseKey(activePath(), rowProps.section.slug);
 		const children = () => sortSections(rowProps.section.children.filter(matches), outlineSort());
 		const open = () => Boolean(filter()) || !outlineClosed().has(key());
 		const isHere = () => activeSection()?.line === rowProps.section.line;
@@ -614,7 +682,12 @@ function MarkdownOutline(props: { filter?: string; compact?: boolean; label?: st
 							? { "box-shadow": "inset 0 2px 0 var(--accent)" }
 							: drop() === "after"
 								? { "box-shadow": "inset 0 -2px 0 var(--accent)" }
-								: {}),
+								: drop() === "inside"
+									? {
+											outline: "1px solid var(--accent)",
+											background: "color-mix(in srgb, var(--accent) 14%, transparent)",
+										}
+									: {}),
 					}}
 					title={title()}
 					draggable={canReorder()}
@@ -630,11 +703,18 @@ function MarkdownOutline(props: { filter?: string; compact?: boolean; label?: st
 					}}
 					onDragOver={(e) => {
 						if (draggingLine === null || !canReorder()) return;
-						if (!areSiblings(draggingLine, rowProps.section.line)) return;
+						const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+						const relY = e.clientY - rect.top;
+						let place: "before" | "after" | "inside";
+						if (relY < rect.height * 0.25) place = "before";
+						else if (relY > rect.height * 0.75) place = "after";
+						else place = rowProps.section.level < 6 ? "inside" : relY < rect.height / 2 ? "before" : "after";
+						if (!canDropSection(draggingLine, rowProps.section, place)) {
+							setDropTarget(null);
+							return;
+						}
 						e.preventDefault();
 						if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
-						const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-						const place: "before" | "after" = e.clientY < rect.top + rect.height / 2 ? "before" : "after";
 						setDropTarget({ line: rowProps.section.line, place });
 					}}
 					onDrop={(e) => {
@@ -642,9 +722,10 @@ function MarkdownOutline(props: { filter?: string; compact?: boolean; label?: st
 						const currentDrop = dropTarget();
 						draggingLine = null;
 						setDropTarget(null);
-						if (from === null || !canReorder() || !areSiblings(from, rowProps.section.line)) return;
+						const place = currentDrop?.line === rowProps.section.line ? currentDrop.place : "before";
+						if (from === null || !canReorder() || !canDropSection(from, rowProps.section, place)) return;
 						e.preventDefault();
-						reorderSection(from, rowProps.section.line, currentDrop?.place ?? "before");
+						moveSectionTo(from, rowProps.section.line, place);
 					}}
 					onActivate={() => jumpToSection(rowProps.section)}
 					onToggle={() => toggle(key())}
@@ -702,17 +783,23 @@ function MarkdownOutline(props: { filter?: string; compact?: boolean; label?: st
 			<div
 				style={{ display: "flex", "flex-direction": "column", flex: "1", "min-height": "0" }}
 				onKeyDown={(e) => {
-					if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
-					if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+					if (!e.altKey || e.ctrlKey || e.metaKey) return;
 					const rowEl = (e.target as Element | null)?.closest<HTMLElement>("[data-row]");
 					const rowKey = rowEl?.dataset.row ?? "";
-					if (!rowKey.startsWith("md:")) return;
-					const slug = rowKey.slice(3);
+					const sep = rowKey.lastIndexOf(":md:");
+					if (sep < 0) return;
+					const slug = rowKey.slice(sep + 4);
 					const sec = findSectionBySlug(mdSections(), slug);
 					if (!sec) return;
-					e.preventDefault();
-					e.stopPropagation();
-					moveSection(sec, e.key === "ArrowUp" ? "up" : "down");
+					if (!e.shiftKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+						e.preventDefault();
+						e.stopPropagation();
+						moveSection(sec, e.key === "ArrowUp" ? "up" : "down");
+					} else if (e.shiftKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+						e.preventDefault();
+						e.stopPropagation();
+						shiftSectionLevel(sec, e.key === "ArrowLeft" ? "promote" : "demote");
+					}
 				}}
 			>
 				<Rows role="tree" label={props.label ?? "Outline of this document"} api={(api) => (rowsApi = api)}>
@@ -1066,17 +1153,56 @@ export function SymbolOutline(props: { filter?: string; compact?: boolean; label
 	);
 }
 
-/** Unified Document outline panel (replaces separate Objects + Document outline panels). */
+/** Unified Document panel (internal id "objects"): shares Info | Outline for Markdown, Outline for all other files. */
 export function Objects() {
 	const [filter, setFilter] = createSignal("");
 	const [planTab, setPlanTab] = createSignal<"outline" | "procedures">("outline");
 	const isPlan = () => isPlanPath(activePath());
-	const showOutlineControls = () => !(isPlan() && planTab() === "procedures");
+	const isMd = () => isMarkdown(activePath());
+	const mdTab = activeMarkdownTab;
+	const showMdInfo = () => isMd() && mdTab() === "info";
+	const showOutlineControls = () => !(isPlan() && planTab() === "procedures") && !showMdInfo();
+	const showFilterInput = () => !showMdInfo();
+
+	let mdInfoTabEl: HTMLButtonElement | undefined;
+	let mdOutlineTabEl: HTMLButtonElement | undefined;
+
+	// Default to Info for Markdown files with frontmatter or ticket metadata when user hasn't pinned a preference yet.
+	createEffect(
+		on(activePath, (p) => {
+			if (!p || !isMarkdown(p) || hasSavedMarkdownTab()) return;
+			const key = canonical(p);
+			if (key === lastAutoDefaultMdPath) return;
+			lastAutoDefaultMdPath = key;
+			const d = documents.get(key);
+			const hasFm = Boolean(d && !d.binary && frontMatter(d.model.getValue()).lines > 0);
+			const isTicketDoc = docs().some((f) => f.group === "tickets" && f.ticket && canonical(f.path) === key);
+			setActiveMarkdownTab(defaultMarkdownPanelTab(hasFm || isTicketDoc, null));
+		}),
+	);
+
+	// Honor explicit tab-switch requests from the Markdown editor (Info / Links / Edit YAML).
+	createEffect(
+		on(markdownPanelTabRequest, (req) => {
+			if (!req || req.seq <= lastHandledMdTabReqSeq) return;
+			lastHandledMdTabReqSeq = req.seq;
+			setActiveMarkdownTab(req.tab);
+		}),
+	);
+
+	const mdBrokenCount = createMemo(() => {
+		const p = activePath();
+		if (!p || !isMarkdown(p)) return 0;
+		const key = canonical(p);
+		const summary = markdownLinksSummary();
+		if (summary && summary.path === key) return summary.broken;
+		return docs().find((d) => canonical(d.path) === key)?.broken?.length ?? 0;
+	});
 
 	return (
 		<div class="panel-body doc-outline-panel" data-panel="objects">
 			<div class="panel-title">
-				<span>Document outline</span>
+				<span>{isMd() ? "Document" : "Document outline"}</span>
 				<Show when={showOutlineControls()}>
 					<Menu floating label="Outline options" title="Outline options: follow cursor, sort order" class="outline-more" items={outlineMenuItems}>
 						<Icon name="ellipsis" />
@@ -1091,6 +1217,56 @@ export function Objects() {
 					</Show>
 				</Show>
 			</div>
+			<Show when={isMd()}>
+				<div
+					class="plan-palette-tabs"
+					role="tablist"
+					aria-label="Markdown document panel"
+					onKeyDown={(e) => {
+						if (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "Home" || e.key === "End") {
+							e.preventDefault();
+							const next =
+								e.key === "Home"
+									? "info"
+									: e.key === "End"
+										? "outline"
+										: mdTab() === "info"
+											? "outline"
+											: "info";
+							chooseMarkdownPanelTab(next);
+							(next === "info" ? mdInfoTabEl : mdOutlineTabEl)?.focus();
+						}
+					}}
+				>
+					<button
+						ref={mdInfoTabEl}
+						type="button"
+						role="tab"
+						aria-selected={mdTab() === "info"}
+						classList={{ on: mdTab() === "info" }}
+						onClick={() => chooseMarkdownPanelTab("info")}
+					>
+						<span>Info</span>
+						<Show when={mdBrokenCount() > 0}>
+							<span
+								class="md-tab-warn-dot"
+								title={`${mdBrokenCount()} broken outgoing ${mdBrokenCount() === 1 ? "link" : "links"}`}
+								aria-label={`${mdBrokenCount()} broken links`}
+							/>
+						</Show>
+					</button>
+					<button
+						ref={mdOutlineTabEl}
+						type="button"
+						role="tab"
+						aria-selected={mdTab() === "outline"}
+						classList={{ on: mdTab() === "outline" }}
+						onClick={() => chooseMarkdownPanelTab("outline")}
+					>
+						Outline
+					</button>
+				</div>
+			</Show>
 			<Show when={isPlan()}>
 				<div
 					class="mode-switch"
@@ -1118,20 +1294,29 @@ export function Objects() {
 					</button>
 				</div>
 			</Show>
-			<input
-				class="filter"
-				data-autofocus=""
-				aria-label={isPlan() && planTab() === "procedures" ? "Filter the workspace's procedures" : "Filter this document's outline"}
-				placeholder="Filter"
-				value={filter()}
-				onInput={(e) => setFilter(e.currentTarget.value)}
-				onKeyDown={(e) => e.key === "ArrowDown" && focusRowsBelow(e.currentTarget) && e.preventDefault()}
-			/>
+			<Show when={showFilterInput()}>
+				<input
+					class="filter"
+					data-autofocus=""
+					aria-label={isPlan() && planTab() === "procedures" ? "Filter the workspace's procedures" : "Filter this document's outline"}
+					placeholder="Filter"
+					value={filter()}
+					onInput={(e) => setFilter(e.currentTarget.value)}
+					onKeyDown={(e) => e.key === "ArrowDown" && focusRowsBelow(e.currentTarget) && e.preventDefault()}
+				/>
+			</Show>
 			<Show
-				when={isPlan() && planTab() === "procedures"}
-				fallback={<SymbolOutline filter={filter()} />}
+				when={showMdInfo()}
+				fallback={
+					<Show
+						when={isPlan() && planTab() === "procedures"}
+						fallback={<SymbolOutline filter={filter()} />}
+					>
+						<Procedures filter={filter()} />
+					</Show>
+				}
 			>
-				<Procedures filter={filter()} />
+				<MarkdownInspector />
 			</Show>
 		</div>
 	);

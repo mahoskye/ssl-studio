@@ -41,10 +41,10 @@ export async function selftestCycle(plan: string): Promise<Record<string, boolea
 		steps[name] = outcome !== false && outcome !== null;
 		if (!steps[name]) throw new Error(`step failed: ${name}`);
 	};
-	/** Spec, approve, build, review, accept. */
+	/** Plan doc, approve, build, review, accept. */
 	const buildIt = async (start: RegExp, accept: RegExp) => {
-		await press(/^Write spec$/);
-		await press(/^Approve the spec$/);
+		await press(/^Write plan doc$/);
+		await press(/^Approve the plan doc$/);
 		await press(start);
 		await press(/^Review /);
 		await press(accept);

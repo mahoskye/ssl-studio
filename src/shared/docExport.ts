@@ -369,11 +369,46 @@ export function renderFrontMatterSummaryHtml(meta: Record<string, string>): stri
 	return `<section class="doc-meta-card" aria-label="Document properties"><dl class="doc-meta-grid">${items}</dl></section>`;
 }
 
+/** Escapes a string safely for interpolation inside a CSS `content: "..."` literal within `<style>`. */
+function escapeCssString(text: string): string {
+	return text
+		.replace(/\\/g, "\\\\")
+		.replace(/"/g, '\\"')
+		.replace(/\r?\n/g, " ")
+		.replace(/</g, "\\3c ")
+		.replace(/>/g, "\\3e ");
+}
+
+function lookupMetaField(meta: Record<string, string> | undefined, ...keys: string[]): string {
+	if (!meta) return "";
+	const norm = (s: string) => s.trim().toLowerCase().replace(/[\s_-]+/g, "");
+	const wanted = new Set(keys.map(norm));
+	for (const [k, v] of Object.entries(meta)) {
+		if (wanted.has(norm(k)) && v.trim()) return v.trim();
+	}
+	return "";
+}
+
 /**
  * Wraps sanitized rendered HTML in a clean standalone print-ready HTML document
  * suitable for saving, emailing, or Print -> Save as PDF.
  */
-export function buildPrintableHtml(title: string, bodyHtml: string, subtitle?: string, metaHtml?: string): string {
+export function buildPrintableHtml(
+	title: string,
+	bodyHtml: string,
+	subtitle?: string,
+	metaHtml?: string,
+	meta?: Record<string, string>,
+): string {
+	const pageTitle = lookupMetaField(meta, "title") || title;
+	const version = lookupMetaField(meta, "version");
+	const status = lookupMetaField(meta, "status");
+	const changeControl = lookupMetaField(meta, "change-control", "change control", "changeControl");
+	const generatedDate = lookupMetaField(meta, "date", "generated", "approved-date");
+	const verLabel = version ? (/^v/i.test(version) ? version : `v${version}`) : "";
+	const topRight = [verLabel, status, changeControl].filter(Boolean).join(" · ");
+	const bottomLeft = generatedDate || subtitle || "";
+
 	return `<!doctype html>
 <html lang="en">
 <head>
@@ -485,16 +520,43 @@ export function buildPrintableHtml(title: string, bodyHtml: string, subtitle?: s
   .katex .mspace { display: inline-block; }
   .katex .overline .overline-line { border-bottom: 0.04em solid currentColor; display: inline-block; width: 100%; }
   .katex .underline .underline-line { border-bottom: 0.04em solid currentColor; display: inline-block; width: 100%; }
-  table { width: 100%; border-collapse: collapse; font-size: 0.92rem; break-inside: avoid; page-break-inside: avoid; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+  thead { display: table-header-group; }
+  tr { break-inside: avoid; page-break-inside: avoid; }
   th, td { border: 1px solid #e4e4e7; padding: 6px 10px; text-align: left; vertical-align: top; }
   th { background: #f4f4f5; font-weight: 600; }
   hr { border: 0; border-top: 1px solid #e4e4e7; margin: 24px 0; }
   img, svg { max-width: 100%; height: auto; break-inside: avoid; page-break-inside: avoid; }
+  @page {
+    margin: 18mm 14mm 18mm 14mm;
+    @top-left {
+      content: "${escapeCssString(pageTitle)}";
+      font-size: 8.5pt;
+      color: #71717a;
+    }
+    @top-right {
+      content: "${escapeCssString(topRight)}";
+      font-size: 8.5pt;
+      color: #71717a;
+    }
+    @bottom-left {
+      content: "${escapeCssString(bottomLeft)}";
+      font-size: 8.5pt;
+      color: #71717a;
+    }
+    @bottom-right {
+      content: "Page " counter(page) " of " counter(pages);
+      font-size: 8.5pt;
+      color: #71717a;
+    }
+  }
   @media print {
     body { padding: 0; font-size: 11pt; }
     main { max-width: none; }
     a { color: #18181b; text-decoration: underline; }
-    pre, blockquote, table, .md-callout, .md-mermaid-export, .doc-meta-card { break-inside: avoid; page-break-inside: avoid; }
+    thead { display: table-header-group; }
+    tr { break-inside: avoid; page-break-inside: avoid; }
+    pre, blockquote, .md-callout, .md-mermaid-export, .doc-meta-card { break-inside: avoid; page-break-inside: avoid; }
     h1, h2, h3, h4 { break-after: avoid; page-break-after: avoid; }
   }
 </style>
@@ -507,6 +569,357 @@ ${bodyHtml}
 </main>
 </body>
 </html>`;
+}
+
+/** Escapes pipes/newlines and clips plain visible cell text cleanly so generated Markdown tables respect ADR 0008. */
+function clipTableCell(text: string, maxLen: number): string {
+	const cleaned = text.replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim();
+	const visibleLen = cleaned.replace(/[`*_~]/g, "").length;
+	if (visibleLen <= maxLen) return cleaned.replace(/\|/g, "\\|");
+	let cut = cleaned.slice(0, Math.max(1, maxLen - 1)).trimEnd();
+	if ((cut.match(/`/g)?.length ?? 0) % 2 === 1) {
+		const lastTick = cut.lastIndexOf("`");
+		if (lastTick > 0) cut = cut.slice(0, lastTick).trimEnd();
+	}
+	return `${cut}…`.replace(/\|/g, "\\|");
+}
+
+// --- IQ/OQ/PQ Validation Test Execution Evidence -----------------------------
+
+export type TestRunPhase = "IQ" | "OQ" | "PQ";
+export type TestRunResult = "pass" | "fail" | "partial";
+
+export type TestRunCaseOutcome = {
+	caseId: string;
+	result: string;
+	evidence: string;
+	notes: string;
+};
+
+export type TestRunSummary = {
+	path: string;
+	title?: string;
+	ticket: string;
+	phase: TestRunPhase;
+	environment: string;
+	gitSha: string;
+	executedBy: string;
+	executedDate: string;
+	result: TestRunResult;
+	cases: TestRunCaseOutcome[];
+};
+
+export type TestExecutionProtocolInput = {
+	ticketKey: string;
+	ticketTitle?: string;
+	phase: TestRunPhase;
+	environment: string;
+	gitSha?: string;
+	executedBy?: string;
+	executedDate?: string;
+	projectName?: string;
+	planTests?: readonly { name: string; given?: string; expect?: string; plan?: string }[];
+	checklistItems?: readonly string[];
+	testScripts?: readonly string[];
+	changeControl?: string;
+};
+
+/** Returns true when a validation test run was executed against a different Git SHA than `currentGitSha`. */
+export function isTestRunStale(run: Pick<TestRunSummary, "gitSha">, currentGitSha?: string | null): boolean {
+	const a = (run.gitSha ?? "").trim().toLowerCase();
+	const b = (currentGitSha ?? "").trim().toLowerCase();
+	if (!a || !b) return false;
+	if (a.startsWith(b) || b.startsWith(a)) return false;
+	return true;
+}
+
+function normalizeTestRunPhase(raw: string | undefined): TestRunPhase | null {
+	const u = (raw ?? "").trim().toUpperCase();
+	if (u === "IQ" || u.startsWith("IQ ") || u.startsWith("IQ-") || u.startsWith("IQ—")) return "IQ";
+	if (u === "OQ" || u.startsWith("OQ ") || u.startsWith("OQ-") || u.startsWith("OQ—")) return "OQ";
+	if (u === "PQ" || u.startsWith("PQ ") || u.startsWith("PQ-") || u.startsWith("PQ—")) return "PQ";
+	return null;
+}
+
+function normalizeTestRunResult(raw: string | undefined): TestRunResult | null {
+	const l = (raw ?? "").trim().toLowerCase();
+	if (!l) return null;
+	if (/^(?:pass|passed|ok|complete|completed|verified)$/.test(l)) return "pass";
+	if (/^(?:fail|failed|error|rejected)$/.test(l)) return "fail";
+	if (/^(?:partial|pending|in progress|blocked|draft|incomplete|mixed)$/.test(l)) return "partial";
+	return null;
+}
+
+/**
+ * Pure parser for IQ/OQ/PQ Validation Test Run Markdown documents.
+ * Extracts frontmatter governance fields (`ticket`, `phase`, `environment`, `git-sha`,
+ * `executed-by`, `executed-date`, `result`) and per-case outcomes from an ADR-0008
+ * 4-column table (`Case | Result | Evidence | Notes`).
+ * Returns `null` for documents that are not validation test runs.
+ */
+export function parseTestRunDocument(path: string, text: string): TestRunSummary | null {
+	const { values, body } = frontMatter(text);
+	const rawType = (one(values.type) ?? "").trim().toLowerCase();
+	const explicitPhase = normalizeTestRunPhase(one(values.phase)) ?? normalizeTestRunPhase(rawType);
+	const isTaggedTestRun =
+		explicitPhase !== null ||
+		rawType === "test-run" ||
+		rawType === "test_run" ||
+		rawType === "testrun" ||
+		rawType === "validation" ||
+		rawType === "validation-run";
+
+	// Extract per-case outcomes from any ADR-0008 `Case | Result | Evidence | Notes` pipe table outside fenced code.
+	const lines = body.replace(/\r\n/g, "\n").split("\n");
+	const cases: TestRunCaseOutcome[] = [];
+	let foundCaseTable = false;
+	let fenceChar = "";
+	let fenceLen = 0;
+
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i]!;
+		const f = /^[ \t]{0,3}(`{3,}|~{3,})/.exec(line);
+		if (f) {
+			if (!fenceChar) {
+				fenceChar = f[1]![0]!;
+				fenceLen = f[1]!.length;
+			} else if (f[1]![0] === fenceChar && f[1]!.length >= fenceLen && /^[ \t]*$/.test(line.slice(f[0].length))) {
+				fenceChar = "";
+				fenceLen = 0;
+			}
+			continue;
+		}
+		if (fenceChar) continue;
+
+		if (line.includes("|") && i + 1 < lines.length && /^[ \t]*\|?[ \t:|-]+\|[ \t:|-]*$/.test(lines[i + 1]!)) {
+			const headers = splitMarkdownTableCells(line).map((h) => h.trim().toLowerCase());
+			const caseIdx = headers.findIndex((h) => h === "case" || h === "case id" || h === "caseid" || h === "test case" || h === "id");
+			const resultIdx = headers.findIndex((h) => h === "result" || h === "status" || h === "outcome" || h === "verdict");
+			const evidenceIdx = headers.findIndex((h) => h === "evidence" || h === "artifact" || h === "proof");
+			const notesIdx = headers.findIndex((h) => h === "notes" || h === "note" || h === "details" || h === "comments");
+
+			if (caseIdx >= 0 && resultIdx >= 0) {
+				foundCaseTable = true;
+				i += 2;
+				while (i < lines.length && lines[i]!.includes("|") && lines[i]!.trim() !== "") {
+					const cells = splitMarkdownTableCells(lines[i]!);
+					const caseId = (cells[caseIdx] ?? "").replace(/^`(.+)`$/, "$1").trim();
+					const caseResult = (cells[resultIdx] ?? "").trim();
+					const evidence = evidenceIdx >= 0 ? (cells[evidenceIdx] ?? "").trim() : "";
+					const notes = notesIdx >= 0 ? (cells[notesIdx] ?? "").trim() : "";
+					if (caseId || caseResult || evidence || notes) {
+						cases.push({ caseId, result: caseResult, evidence, notes });
+					}
+					i++;
+				}
+				i--;
+			}
+		}
+	}
+
+	if (!isTaggedTestRun && !foundCaseTable) return null;
+
+	const firstTicket =
+		one(values.ticket) ||
+		(Array.isArray(values.tickets) ? String(values.tickets[0] ?? "").trim() : one(values.tickets)) ||
+		"";
+	const environment = one(values.environment) || one(values.env) || "";
+	const gitSha = one(values["git-sha"]) || one(values.gitSha) || one(values.git_sha) || one(values.sha) || one(values.commit) || "";
+	const executedBy = one(values["executed-by"]) || one(values.executedBy) || one(values.executed_by) || one(values.tester) || "";
+	const executedDate = one(values["executed-date"]) || one(values.executedDate) || one(values.executed_date) || one(values.date) || "";
+	const headingTitle = /^[ \t]{0,3}#[ \t]+(.+)$/m.exec(body)?.[1]?.trim();
+	const title = one(values.title) || headingTitle || undefined;
+
+	// Infer result from case rows when frontmatter omits `result`, or honor explicit frontmatter result.
+	let result: TestRunResult = normalizeTestRunResult(one(values.result) || one(values.outcome) || one(values.verdict)) ?? "partial";
+	const hasExplicitResult = normalizeTestRunResult(one(values.result) || one(values.outcome) || one(values.verdict)) !== null;
+	if (!hasExplicitResult && cases.length > 0) {
+		const caseStatuses = cases.map((c) => c.result.trim().toLowerCase());
+		if (caseStatuses.some((s) => /^(?:fail|failed|error|no)$/.test(s))) {
+			result = "fail";
+		} else if (caseStatuses.every((s) => /^(?:pass|passed|ok|yes)$/.test(s))) {
+			result = "pass";
+		} else {
+			result = "partial";
+		}
+	}
+
+	return {
+		path,
+		...(title ? { title } : {}),
+		ticket: firstTicket,
+		phase: explicitPhase ?? "OQ",
+		environment,
+		gitSha,
+		executedBy,
+		executedDate,
+		result,
+		cases,
+	};
+}
+
+/**
+ * Generates a pre-populated IQ/OQ/PQ Validation Test Execution Protocol Markdown document
+ * from `plan.tests`, ticket checklist items, `testScripts`, `gitSha`, `phase`, and `environment`.
+ * All generated tables strictly conform to ADR 0008 (<= 4 columns, short non-last cells).
+ */
+export function assembleTestExecutionProtocol(input: TestExecutionProtocolInput): string {
+	const date = input.executedDate?.trim() || new Date().toISOString().slice(0, 10);
+	const sha = input.gitSha?.trim() ?? "";
+	const title = `${input.ticketKey} ${input.phase} Validation Test Run`;
+	const fmLines: string[] = [
+		"---",
+		`title: ${JSON.stringify(title)}`,
+		"type: test-run",
+		`ticket: ${input.ticketKey}`,
+		`phase: ${input.phase}`,
+		`environment: ${input.environment}`,
+		`git-sha: ${sha}`,
+		`executed-by: ${input.executedBy?.trim() ?? ""}`,
+		`executed-date: ${date}`,
+		...(input.changeControl?.trim() ? [`change-control: ${input.changeControl.trim()}`] : []),
+		"result: partial",
+		"status: draft",
+		"---",
+	];
+
+	const parts: string[] = [
+		...fmLines,
+		"",
+		`# ${input.ticketKey}: ${input.phase} Validation Test Run`,
+		"",
+		`_${[
+			input.projectName?.trim() || "",
+			input.ticketTitle?.trim() || "",
+			`Env: ${input.environment}`,
+			sha ? `Git SHA \`${sha.slice(0, 12)}\`` : "",
+		]
+			.filter(Boolean)
+			.join(" · ")}_`,
+		"",
+		"> [!important] Validation Protocol",
+		"> Record objective evidence (screenshots, query output, audit IDs) for every executed case before QA sign-off.",
+		"",
+	];
+
+	const uniqueScripts = [...new Set((input.testScripts ?? []).map((s) => s.trim()).filter(Boolean))];
+	if (uniqueScripts.length) {
+		parts.push("## Linked Automated Test Scripts", "");
+		for (const s of uniqueScripts) parts.push(`- \`${s}\``);
+		parts.push("");
+	}
+
+	const rows: [string, string, string, string][] = [];
+	let tcNum = 1;
+	for (const pt of input.planTests ?? []) {
+		const id = `TC-${String(tcNum++).padStart(2, "0")}`;
+		const detail = [pt.name.trim(), pt.given?.trim() ? `Given ${pt.given.trim()}` : "", pt.expect?.trim() ? `Expect ${pt.expect.trim()}` : ""]
+			.filter(Boolean)
+			.join(" — ");
+		rows.push([id, "pending", "", clipTableCell(detail || "Plan test case", 98)]);
+	}
+	for (const item of input.checklistItems ?? []) {
+		const clean = item.replace(/^[-*+]\s+\[[ xX]\]\s+/, "").trim();
+		if (!clean) continue;
+		const id = `TC-${String(tcNum++).padStart(2, "0")}`;
+		rows.push([id, "pending", "", clipTableCell(clean, 98)]);
+	}
+	let tsNum = 1;
+	for (const script of uniqueScripts) {
+		const id = `TS-${String(tsNum++).padStart(2, "0")}`;
+		rows.push([id, "pending", "", clipTableCell(`Run automated test script \`${script}\``, 98)]);
+	}
+	if (!rows.length) {
+		rows.push(["TC-01", "pending", "", "Verify primary ticket acceptance behavior"]);
+	}
+
+	parts.push("## Test Case Execution", "", "| Case | Result | Evidence | Notes |", "| --- | --- | --- | --- |");
+	for (const [cid, res, ev, notes] of rows) {
+		parts.push(`| ${clipTableCell(cid, 20)} | ${clipTableCell(res, 20)} | ${clipTableCell(ev, 20)} | ${notes} |`);
+	}
+	parts.push("", "## Deviations & Sign-Off", "", "- **Deviations:** None", "- **QA Reviewer:** ", "- **Sign-Off Date:** ", "");
+	return parts.join("\n");
+}
+
+function summarizeTicketTestRuns(
+	runs: readonly TestRunSummary[],
+	currentGitSha?: string | null,
+): {
+	badge: string;
+	ok: boolean;
+	level: "pass" | "warn";
+	detail: string;
+	stale: boolean;
+	primaryPath: string;
+	runLines: string[];
+} | null {
+	if (!runs.length) return null;
+	const sorted = runs.slice().sort((a, b) => (b.executedDate || "").localeCompare(a.executedDate || ""));
+	const phases = [...new Set(runs.map((r) => r.phase))].join("/");
+	const failed = sorted.filter((r) => r.result === "fail");
+	const freshPassed = sorted.filter((r) => r.result === "pass" && !isTestRunStale(r, currentGitSha));
+	const stalePassed = sorted.filter((r) => r.result === "pass" && isTestRunStale(r, currentGitSha));
+
+	const runLines = sorted.map((r) => {
+		const staleFlag = isTestRunStale(r, currentGitSha);
+		const shaPart = r.gitSha ? ` @ ${r.gitSha.slice(0, 12)}` : "";
+		const whoPart = r.executedBy ? ` by ${r.executedBy}` : "";
+		const datePart = r.executedDate ? ` (${r.executedDate})` : "";
+		const envPart = r.environment ? ` (${r.environment})` : "";
+		return `${r.phase}${envPart}: ${r.result.toUpperCase()}${staleFlag ? " [STALE SHA]" : ""}${shaPart}${whoPart}${datePart}`;
+	});
+
+	if (failed.length) {
+		const f = failed[0]!;
+		const badge = `${f.phase} FAIL`.slice(0, 20);
+		return {
+			badge,
+			ok: false,
+			level: "warn",
+			detail: `${f.phase} failed${f.environment ? ` in ${f.environment}` : ""}${f.executedDate ? ` (${f.executedDate})` : ""}`,
+			stale: isTestRunStale(f, currentGitSha),
+			primaryPath: f.path,
+			runLines,
+		};
+	}
+	if (freshPassed.length) {
+		const p = freshPassed[0]!;
+		const badge = `${phases} PASS`.length <= 20 ? `${phases} PASS` : "PASS";
+		return {
+			badge,
+			ok: true,
+			level: "pass",
+			detail: `${phases} passed${p.environment ? ` in ${p.environment}` : ""}${p.gitSha ? ` @ ${p.gitSha.slice(0, 8)}` : ""}`,
+			stale: false,
+			primaryPath: p.path,
+			runLines,
+		};
+	}
+	if (stalePassed.length) {
+		const s = stalePassed[0]!;
+		const badge = `${s.phase} STALE`.slice(0, 20);
+		return {
+			badge,
+			ok: false,
+			level: "warn",
+			detail: `${s.phase} passed on stale SHA ${s.gitSha.slice(0, 8)} (current ${(currentGitSha ?? "").slice(0, 8)}) — re-run required`,
+			stale: true,
+			primaryPath: s.path,
+			runLines,
+		};
+	}
+	const latest = sorted[0]!;
+	const stale = isTestRunStale(latest, currentGitSha);
+	const badge = `${latest.phase} PARTIAL`.slice(0, 20);
+	return {
+		badge,
+		ok: false,
+		level: "warn",
+		detail: `${latest.phase} validation partial/incomplete${stale ? ` (stale SHA ${latest.gitSha.slice(0, 8)})` : ""}`,
+		stale,
+		primaryPath: latest.path,
+		runLines,
+	};
 }
 
 // --- STARLIMS Release Readiness Gate -----------------------------------------
@@ -527,11 +940,20 @@ export type ReadinessReport = {
 	checks: ReadinessCheck[];
 };
 
-/** Evaluates a ticket's transport / CAB release readiness from workspace docs, registries, and optional Git changes. */
+export type TicketReadinessOptions = {
+	gitFiles?: readonly { path: string }[];
+	root?: string | null;
+	testRuns?: readonly TestRunSummary[];
+	currentGitSha?: string | null;
+};
+
+export type TicketReadinessInput = TicketReadinessOptions;
+
+/** Evaluates a ticket's transport / CAB release readiness from workspace docs, registries, validation runs, and optional Git changes. */
 export function evaluateTicketReadiness(
 	files: readonly DocFile[],
 	key: string,
-	options?: { gitFiles?: readonly { path: string }[]; root?: string | null },
+	options?: TicketReadinessInput,
 ): ReadinessReport | null {
 	const work = workFor(files, key);
 	if (!work) return null;
@@ -771,6 +1193,21 @@ export function evaluateTicketReadiness(
 		});
 	}
 
+	// 5c. IQ/OQ/PQ Validation Test Execution Evidence (when testRuns are supplied)
+	if (options?.testRuns?.length) {
+		const matchingRuns = options.testRuns.filter((r) => scopeKeySet.has(r.ticket.trim().toLowerCase()));
+		const summary = summarizeTicketTestRuns(matchingRuns, options.currentGitSha);
+		if (summary) {
+			checks.push({
+				label: "Validation runs",
+				ok: summary.ok,
+				level: summary.level,
+				detail: summary.detail,
+				path: summary.primaryPath,
+			});
+		}
+	}
+
 	// 6. Broken links / missing refs / missingSource across ticket, sub-tickets & linked docs
 	const scopeDocs = dedupeDocs([ticket, ...activeSubtickets, ...scopeGroups.flatMap((g) => (g.kind === "registry" ? [] : g.files))]).filter((d) => !isCatalog(d));
 	const withBroken = scopeDocs.find((d) => (d.broken?.length ?? 0) > 0 || (d.missing?.length ?? 0) > 0 || Boolean(d.missingSource));
@@ -858,6 +1295,8 @@ export type TicketPacketInput = {
 	ticketFiles: { rel: string }[];
 	totalTicketFiles?: number;
 	readiness?: ReadinessReport | null;
+	testRuns?: readonly TestRunSummary[];
+	currentGitSha?: string;
 };
 
 /** Demotes ATX headings inside an embedded Markdown body so its highest heading starts at `minLevel` (respecting fenced code blocks). */
@@ -905,10 +1344,313 @@ export function demoteMarkdownHeadings(markdown: string, minLevel: number): stri
 		.join("\n");
 }
 
+/** Applies `replaceFn` only to segments outside inline backtick code spans of any run length. */
+function replaceOutsideInlineCode(line: string, replaceFn: (segment: string) => string): string {
+	let out = "";
+	let plainStart = 0;
+	let i = 0;
+	while (i < line.length) {
+		if (line[i] === "\\" && i + 1 < line.length) {
+			i += 2;
+			continue;
+		}
+		if (line[i] === "`") {
+			let run = 0;
+			while (i + run < line.length && line[i + run] === "`") run++;
+			let j = i + run;
+			let close = -1;
+			while (j < line.length) {
+				if (line[j] !== "`") {
+					j++;
+					continue;
+				}
+				let cRun = 0;
+				while (j + cRun < line.length && line[j + cRun] === "`") cRun++;
+				if (cRun === run) {
+					close = j;
+					break;
+				}
+				j += cRun;
+			}
+			if (close >= 0) {
+				if (i > plainStart) out += replaceFn(line.slice(plainStart, i));
+				out += line.slice(i, close + run);
+				i = close + run;
+				plainStart = i;
+				continue;
+			}
+			i += run;
+			continue;
+		}
+		i++;
+	}
+	if (plainStart < line.length) out += replaceFn(line.slice(plainStart));
+	return out;
+}
+
+const isFootnoteWordChar = (ch: string | undefined) => Boolean(ch && /[A-Za-z0-9_]/.test(ch));
+
+function isSafeFootnoteUrl(rawUrl: string): boolean {
+	const clean = rawUrl.replace(/[\u0000-\u001f\u007f]+/g, "").trim();
+	if (!clean || clean.startsWith("//")) return false;
+	const scheme = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(clean);
+	if (scheme) return /^(?:https?|mailto)$/i.test(scheme[1]!);
+	return true;
+}
+
+function findInlineDelimClose(text: string, start: number, delim: string, wordBounded = false): number {
+	if (start >= text.length || /\s/.test(text[start]!)) return -1;
+	let i = start;
+	while (i <= text.length - delim.length) {
+		if (text[i] === "\\" && i + 1 < text.length) {
+			i += 2;
+			continue;
+		}
+		if (text[i] === "`") {
+			let run = 0;
+			while (i + run < text.length && text[i + run] === "`") run++;
+			const end = text.indexOf("`".repeat(run), i + run);
+			if (end >= 0) {
+				i = end + run;
+				continue;
+			}
+			i += run;
+			continue;
+		}
+		if (text.startsWith(delim, i) && i > start && !/\s/.test(text[i - 1]!)) {
+			if (wordBounded && isFootnoteWordChar(text[i + delim.length])) {
+				i++;
+				continue;
+			}
+			return i;
+		}
+		i++;
+	}
+	return -1;
+}
+
+function findInlineBracketClose(text: string, openIdx: number): number {
+	let depth = 0;
+	for (let i = openIdx; i < text.length; i++) {
+		if (text[i] === "\\" && i + 1 < text.length) {
+			i++;
+			continue;
+		}
+		if (text[i] === "[") depth++;
+		else if (text[i] === "]") {
+			depth--;
+			if (depth === 0) return i;
+		}
+	}
+	return -1;
+}
+
+function parseInlineLinkDest(text: string, openParenIdx: number): { url: string; end: number } | null {
+	if (text[openParenIdx] !== "(") return null;
+	let i = openParenIdx + 1;
+	while (i < text.length && /\s/.test(text[i]!)) i++;
+	if (i >= text.length) return null;
+	let url = "";
+	if (text[i] === "<") {
+		const closeAngle = text.indexOf(">", i + 1);
+		if (closeAngle < 0) return null;
+		url = text.slice(i + 1, closeAngle).trim();
+		i = closeAngle + 1;
+	} else {
+		let depth = 0;
+		const start = i;
+		while (i < text.length) {
+			const ch = text[i]!;
+			if (ch === "\\" && i + 1 < text.length) {
+				i += 2;
+				continue;
+			}
+			if (ch === "(") depth++;
+			else if (ch === ")") {
+				if (depth === 0) break;
+				depth--;
+			} else if (/\s/.test(ch) && depth === 0) break;
+			i++;
+		}
+		url = text.slice(start, i).trim();
+	}
+	while (i < text.length && /\s/.test(text[i]!)) i++;
+	if (text[i] === '"' || text[i] === "'") {
+		const q = text[i]!;
+		i++;
+		while (i < text.length && text[i] !== q) {
+			if (text[i] === "\\" && i + 1 < text.length) i += 2;
+			else i++;
+		}
+		if (i < text.length) i++;
+		while (i < text.length && /\s/.test(text[i]!)) i++;
+	}
+	if (text[i] !== ")") return null;
+	return { url, end: i + 1 };
+}
+
 /**
- * Converts GFM footnotes (`[^id]` references and `[^id]: definition` blocks outside fenced code)
- * into clean superscript links + a bottom `<section class="md-footnotes">` block for HTML/PDF exports,
- * or strips/inlines them cleanly for Jira markup.
+ * Pure, XSS-safe inline Markdown-to-HTML renderer for HTML footnote definitions.
+ * Handles inline code spans, safe links `[text](url)`, autolinks, `**bold**`, `*italic*`,
+ * `~~strike~~`, and `==highlight==`, while HTML-escaping all raw text and blocking unsafe URL schemes.
+ */
+function renderFootnoteInlineHtml(text: string): string {
+	let out = "";
+	let plain = "";
+	const flush = () => {
+		if (plain) {
+			out += escapeHtml(plain);
+			plain = "";
+		}
+	};
+
+	let i = 0;
+	while (i < text.length) {
+		const ch = text[i]!;
+
+		if (ch === "\\" && i + 1 < text.length && /[\\`*_{}[\]()#+\-.!~|=<>]/.test(text[i + 1]!)) {
+			plain += text[i + 1]!;
+			i += 2;
+			continue;
+		}
+
+		// Inline code span (any backtick run length)
+		if (ch === "`") {
+			let run = 0;
+			while (i + run < text.length && text[i + run] === "`") run++;
+			let j = i + run;
+			let close = -1;
+			while (j < text.length) {
+				if (text[j] !== "`") {
+					j++;
+					continue;
+				}
+				let cRun = 0;
+				while (j + cRun < text.length && text[j + cRun] === "`") cRun++;
+				if (cRun === run) {
+					close = j;
+					break;
+				}
+				j += cRun;
+			}
+			if (close >= 0) {
+				let inner = text.slice(i + run, close);
+				if (inner.length >= 2 && inner.startsWith(" ") && inner.endsWith(" ") && /[^ ]/.test(inner)) {
+					inner = inner.slice(1, -1);
+				}
+				flush();
+				out += `<code>${escapeHtml(inner)}</code>`;
+				i = close + run;
+				continue;
+			}
+			plain += text.slice(i, i + run);
+			i += run;
+			continue;
+		}
+
+		// Markdown link `[label](url)`
+		if (ch === "[") {
+			const closeBr = findInlineBracketClose(text, i);
+			if (closeBr >= 0 && text[closeBr + 1] === "(") {
+				const dest = parseInlineLinkDest(text, closeBr + 1);
+				if (dest) {
+					const labelHtml = renderFootnoteInlineHtml(text.slice(i + 1, closeBr));
+					flush();
+					if (isSafeFootnoteUrl(dest.url)) {
+						const extAttrs = /^https?:\/\//i.test(dest.url) ? ' target="_blank" rel="noopener noreferrer"' : "";
+						out += `<a href="${escapeHtml(dest.url)}"${extAttrs}>${labelHtml}</a>`;
+					} else {
+						out += labelHtml;
+					}
+					i = dest.end;
+					continue;
+				}
+			}
+		}
+
+		// Autolink `<https://...>` or `<mailto:...>`
+		if (ch === "<") {
+			const m = /^<((?:https?:\/\/|mailto:)[^>\s]+)>/.exec(text.slice(i));
+			if (m && isSafeFootnoteUrl(m[1]!)) {
+				const url = m[1]!;
+				const label = url.startsWith("mailto:") ? url.slice(7) : url;
+				flush();
+				const extAttrs = /^https?:\/\//i.test(url) ? ' target="_blank" rel="noopener noreferrer"' : "";
+				out += `<a href="${escapeHtml(url)}"${extAttrs}>${escapeHtml(label)}</a>`;
+				i += m[0].length;
+				continue;
+			}
+		}
+
+		// Bold-italic `***...***` or `___...___`
+		if ((ch === "*" && text.startsWith("***", i)) || (ch === "_" && text.startsWith("___", i) && !isFootnoteWordChar(text[i - 1]))) {
+			const delim = ch.repeat(3);
+			const close = findInlineDelimClose(text, i + 3, delim, ch === "_");
+			if (close >= 0) {
+				flush();
+				out += `<strong><em>${renderFootnoteInlineHtml(text.slice(i + 3, close))}</em></strong>`;
+				i = close + 3;
+				continue;
+			}
+		}
+
+		// Bold `**...**` or `__...__`
+		if ((ch === "*" && text.startsWith("**", i)) || (ch === "_" && text.startsWith("__", i) && !isFootnoteWordChar(text[i - 1]))) {
+			const delim = ch.repeat(2);
+			const close = findInlineDelimClose(text, i + 2, delim, ch === "_");
+			if (close >= 0) {
+				flush();
+				out += `<strong>${renderFootnoteInlineHtml(text.slice(i + 2, close))}</strong>`;
+				i = close + 2;
+				continue;
+			}
+		}
+
+		// Strikethrough `~~...~~`
+		if (ch === "~" && text.startsWith("~~", i)) {
+			const close = findInlineDelimClose(text, i + 2, "~~");
+			if (close >= 0) {
+				flush();
+				out += `<del>${renderFootnoteInlineHtml(text.slice(i + 2, close))}</del>`;
+				i = close + 2;
+				continue;
+			}
+		}
+
+		// Highlight `==...==`
+		if (ch === "=" && text.startsWith("==", i)) {
+			const close = findInlineDelimClose(text, i + 2, "==");
+			if (close >= 0) {
+				flush();
+				out += `<mark>${renderFootnoteInlineHtml(text.slice(i + 2, close))}</mark>`;
+				i = close + 2;
+				continue;
+			}
+		}
+
+		// Italic `*...*` or `_..._`
+		if (ch === "*" || (ch === "_" && !isFootnoteWordChar(text[i - 1]))) {
+			const close = findInlineDelimClose(text, i + 1, ch, ch === "_");
+			if (close >= 0) {
+				flush();
+				out += `<em>${renderFootnoteInlineHtml(text.slice(i + 1, close))}</em>`;
+				i = close + 1;
+				continue;
+			}
+		}
+
+		plain += ch;
+		i++;
+	}
+
+	flush();
+	return out;
+}
+
+/**
+ * Converts GFM footnotes (`[^id]` references and `[^id]: definition` blocks outside fenced code
+ * and inline backtick code spans) into clean superscript links + a bottom `<section class="md-footnotes">`
+ * block with safe inline Markdown rendering for HTML/PDF exports, or strips/inlines them cleanly for Jira markup.
  */
 export function transformMarkdownFootnotes(markdown: string, target: "html" | "jira"): string {
 	const lines = markdown.replace(/\r\n/g, "\n").split("\n");
@@ -972,12 +1714,14 @@ export function transformMarkdownFootnotes(markdown: string, target: "html" | "j
 			return line;
 		}
 		if (fenceChar) return line;
-		return line.replace(/\[\^([^\]\s]+)\]/g, (full, id: string) => {
-			if (!defs.has(id)) return full;
-			const n = numOf(id);
-			if (target === "jira") return `^[${n}]^`;
-			return `<sup class="md-fn-ref"><a href="#fn-${encodeURIComponent(id)}" id="fnref-${encodeURIComponent(id)}">${n}</a></sup>`;
-		});
+		return replaceOutsideInlineCode(line, (seg) =>
+			seg.replace(/\[\^([^\]\s]+)\]/g, (full, id: string) => {
+				if (!defs.has(id)) return full;
+				const n = numOf(id);
+				if (target === "jira") return `^[${n}]^`;
+				return `<sup class="md-fn-ref"><a href="#fn-${encodeURIComponent(id)}" id="fnref-${encodeURIComponent(id)}">${n}</a></sup>`;
+			}),
+		);
 	});
 	// Also append any defined-but-unreferenced footnotes so nothing is dropped.
 	for (const id of defs.keys()) numOf(id);
@@ -987,7 +1731,10 @@ export function transformMarkdownFootnotes(markdown: string, target: "html" | "j
 		return `${replaced.join("\n").trimEnd()}\n\n----\n\n${footLines.join("\n")}\n`;
 	}
 	const items = order
-		.map((id) => `<li id="fn-${escapeHtml(id)}">${escapeHtml(defs.get(id) ?? "")} <a href="#fnref-${escapeHtml(id)}" aria-label="Back to content">↩</a></li>`)
+		.map(
+			(id) =>
+				`<li id="fn-${escapeHtml(id)}">${renderFootnoteInlineHtml(defs.get(id) ?? "")} <a href="#fnref-${escapeHtml(id)}" aria-label="Back to content">↩</a></li>`,
+		)
 		.join("");
 	return `${replaced.join("\n").trimEnd()}\n\n<section class="md-footnotes"><ol>${items}</ol></section>\n`;
 }
@@ -1135,7 +1882,44 @@ export function assembleTicketPacketMarkdown(input: TicketPacketInput): string {
 			parts.push("### Business Test Cases", "", "| Case | Plan | Expected |", "| --- | --- | --- |");
 			for (const pt of dedupedPlanTests) {
 				const detail = [pt.given ? `Given ${pt.given}` : "", pt.expect || ""].filter(Boolean).join(" -> ") || "—";
-				parts.push(`| ${escCell(pt.name)} | ${escCell(pt.plan || "—")} | ${escCell(detail)} |`);
+				parts.push(`| ${clipTableCell(pt.name, 20)} | ${clipTableCell(pt.plan || "—", 20)} | ${clipTableCell(detail, 100)} |`);
+			}
+			parts.push("");
+		}
+	}
+
+	if (input.testRuns?.length) {
+		const summary = summarizeTicketTestRuns(input.testRuns, input.currentGitSha);
+		parts.push("## Validation Evidence", "");
+		if (summary) {
+			parts.push(`Overall status: **${summary.badge}** — ${summary.detail}`, "");
+		}
+		parts.push("| Phase | Env | Result | Run & SHA |", "| --- | --- | --- | --- |");
+		for (const run of input.testRuns) {
+			const stale = isTestRunStale(run, input.currentGitSha);
+			const resLabel = stale ? `${run.result.toUpperCase()} (STALE)` : run.result.toUpperCase();
+			const detail = [
+				run.gitSha ? `SHA ${run.gitSha.slice(0, 12)}` : "",
+				run.executedBy ? `by ${run.executedBy}` : "",
+				run.executedDate || "",
+				stale ? "stale vs HEAD" : "",
+			]
+				.filter(Boolean)
+				.join(" · ") || "—";
+			parts.push(`| ${clipTableCell(run.phase, 20)} | ${clipTableCell(run.environment || "—", 20)} | ${clipTableCell(resLabel, 20)} | ${clipTableCell(detail, 100)} |`);
+		}
+		parts.push("");
+		for (const run of input.testRuns) {
+			if (!run.cases.length) continue;
+			const stale = isTestRunStale(run, input.currentGitSha);
+			parts.push(
+				`### ${run.phase} (${run.environment || "—"}) — ${run.result.toUpperCase()}${stale ? " (STALE SHA)" : ""}`,
+				"",
+				"| Case | Result | Evidence | Notes |",
+				"| --- | --- | --- | --- |",
+			);
+			for (const c of run.cases) {
+				parts.push(`| ${clipTableCell(c.caseId || "—", 20)} | ${clipTableCell(c.result || "—", 20)} | ${clipTableCell(c.evidence || "—", 20)} | ${clipTableCell(c.notes || "—", 100)} |`);
 			}
 			parts.push("");
 		}
@@ -1206,6 +1990,483 @@ export function assembleTicketPacketMarkdown(input: TicketPacketInput): string {
 	return parts.join("\n").trimEnd() + "\n";
 }
 
+// --- Ordered STARLIMS Deployment Runbook (FK-Topological & Drift Checks) -----
+
+export type DeploymentRunbookTableDep = {
+	name: string;
+	dependsOn?: readonly string[];
+	path?: string;
+	kind?: string;
+};
+
+export type DeploymentRunbookChecksumDrift = {
+	path: string;
+	expectedSha256: string;
+	actualSha256: string;
+	status?: string;
+};
+
+export type DeploymentRunbookInput = {
+	jobs?: readonly { name: string; schedule?: string; calls?: string; status?: string }[];
+	sqlArtifacts?: readonly DeploymentManifestSql[];
+	sqlTables?: readonly DeploymentRunbookTableDep[];
+	settings?: readonly { name: string; value?: string; where?: string; status?: string }[];
+	roles?: readonly { role: string; mayDo?: string; status?: string }[];
+	scripts?: readonly DeploymentManifestScript[];
+	reports?: readonly { name: string; kind?: string; usedBy?: string; status?: string }[];
+	interfaces?: readonly { name: string; direction?: string; how?: string; status?: string }[];
+	testScripts?: readonly { ref: string; ticket?: string }[];
+	planTests?: readonly PlanBusinessTest[];
+	registries?: readonly DeploymentManifestRegistry[];
+	checksums?: readonly { path: string; sha256: string }[];
+	fileManifestRows?: readonly { path: string; sha256: string; status?: string }[];
+	checksumDrifts?: readonly DeploymentRunbookChecksumDrift[];
+};
+
+const normPathKey = (p: string) => p.replace(/\\/g, "/").replace(/^\.\//, "").trim().toLowerCase();
+
+/**
+ * Orders SQL tables in foreign-key dependency order (parent tables before child tables)
+ * using Kahn's topological sort with deterministic lexicographical tie-breaking and
+ * graceful cycle fallback (never throws or drops tables on circular FKs).
+ */
+export function orderSqlTablesTopologically(
+	tables: readonly { name: string; dependsOn?: readonly string[] }[],
+): string[] {
+	type Node = { key: string; name: string; deps: Set<string>; dependents: Set<string>; inDegree: number };
+	const nodes = new Map<string, Node>();
+	const bareToKeys = new Map<string, string[]>();
+
+	const bareOf = (n: string) => {
+		const idx = n.lastIndexOf(".");
+		return idx >= 0 ? n.slice(idx + 1) : n;
+	};
+
+	for (const t of tables) {
+		const clean = t.name.trim();
+		if (!clean) continue;
+		const key = clean.toLowerCase();
+		if (!nodes.has(key)) {
+			nodes.set(key, { key, name: clean, deps: new Set(), dependents: new Set(), inDegree: 0 });
+			const bare = bareOf(key);
+			const list = bareToKeys.get(bare) ?? [];
+			list.push(key);
+			bareToKeys.set(bare, list);
+		}
+	}
+
+	const resolveRef = (raw: string): string | null => {
+		const k = raw.trim().toLowerCase();
+		if (!k) return null;
+		if (nodes.has(k)) return k;
+		const bare = bareOf(k);
+		const hits = bareToKeys.get(bare);
+		if (hits && hits.length === 1) return hits[0]!;
+		return null;
+	};
+
+	for (const t of tables) {
+		const childKey = t.name.trim().toLowerCase();
+		const child = nodes.get(childKey);
+		if (!child) continue;
+		for (const rawDep of t.dependsOn ?? []) {
+			const parentKey = resolveRef(rawDep);
+			if (!parentKey || parentKey === childKey) continue;
+			if (!child.deps.has(parentKey)) {
+				child.deps.add(parentKey);
+				nodes.get(parentKey)!.dependents.add(childKey);
+				child.inDegree++;
+			}
+		}
+	}
+
+	const cmpNames = (a: string, b: string) =>
+		nodes.get(a)!.name.localeCompare(nodes.get(b)!.name, undefined, { numeric: true, sensitivity: "base" });
+
+	const remaining = new Set<string>(nodes.keys());
+	const result: string[] = [];
+
+	const drainReady = () => {
+		const ready = [...remaining].filter((k) => nodes.get(k)!.inDegree === 0).sort(cmpNames);
+		while (ready.length > 0) {
+			const cur = ready.shift()!;
+			if (!remaining.has(cur)) continue;
+			remaining.delete(cur);
+			result.push(nodes.get(cur)!.name);
+			let added = false;
+			for (const depKey of nodes.get(cur)!.dependents) {
+				if (!remaining.has(depKey)) continue;
+				const depNode = nodes.get(depKey)!;
+				depNode.inDegree--;
+				if (depNode.inDegree === 0) {
+					ready.push(depKey);
+					added = true;
+				}
+			}
+			if (added) ready.sort(cmpNames);
+		}
+	};
+
+	drainReady();
+
+	// Graceful cycle fallback: deterministically break cycles by minimal remaining in-degree, then name.
+	while (remaining.size > 0) {
+		const pick = [...remaining].sort((a, b) => {
+			const diff = nodes.get(a)!.inDegree - nodes.get(b)!.inDegree;
+			return diff !== 0 ? diff : cmpNames(a, b);
+		})[0]!;
+		remaining.delete(pick);
+		result.push(nodes.get(pick)!.name);
+		for (const depKey of nodes.get(pick)!.dependents) {
+			if (!remaining.has(depKey)) continue;
+			nodes.get(depKey)!.inDegree = Math.max(0, nodes.get(depKey)!.inDegree - 1);
+		}
+		drainReady();
+	}
+
+	return result;
+}
+
+/**
+ * Compares `files.csv` rows marked `verified` against current artifact SHA-256 checksums
+ * and reports any verified file whose hash has drifted.
+ */
+export function detectChecksumDrift(
+	fileManifestRows: readonly { path: string; sha256: string; status?: string }[],
+	currentChecksums: readonly { path: string; sha256: string }[],
+): DeploymentRunbookChecksumDrift[] {
+	if (!fileManifestRows.length || !currentChecksums.length) return [];
+	const currentByPath = new Map<string, string>();
+	for (const c of currentChecksums) {
+		const key = normPathKey(c.path);
+		const sha = c.sha256.trim().toLowerCase();
+		if (key && sha) currentByPath.set(key, sha);
+	}
+	const drifts: DeploymentRunbookChecksumDrift[] = [];
+	const seen = new Set<string>();
+	for (const row of fileManifestRows) {
+		const status = (row.status ?? "").trim().toLowerCase();
+		if (status !== "verified") continue;
+		const key = normPathKey(row.path);
+		const expected = row.sha256.trim().toLowerCase();
+		if (!key || !expected || seen.has(key)) continue;
+		const actual = currentByPath.get(key);
+		if (!actual) continue;
+		if (actual !== expected && !actual.startsWith(expected) && !expected.startsWith(actual)) {
+			seen.add(key);
+			drifts.push({
+				path: row.path.replace(/\\/g, "/").trim(),
+				expectedSha256: expected,
+				actualSha256: actual,
+				status: row.status,
+			});
+		}
+	}
+	return drifts;
+}
+
+function scriptPromotionRank(s: DeploymentManifestScript): number {
+	const ref = s.ref.trim().toLowerCase();
+	const kind = s.kind.trim().toLowerCase();
+	if (ref.endsWith(".ssl") || ref.endsWith(".srvscr") || kind.includes("ssl") || kind.includes("server script")) return 1;
+	if (ref.endsWith(".ds") || kind.includes("data source")) return 2;
+	if (ref.endsWith(".xfd") || kind.includes("xfd") || kind.includes("form")) return 3;
+	return 4;
+}
+
+/**
+ * Assembles an ordered STARLIMS Deployment Execution Runbook (`## Deployment Execution Runbook`)
+ * following STARLIMS promotion dependency order:
+ * 1. Pre-flight backup & pause affected scheduled jobs (`jobs.csv`)
+ * 2. Database DDL in FK-topological order (parent tables -> child tables -> views/procs/packages)
+ * 3. Configuration & Access (`settings.csv`, `roles.csv`)
+ * 4. Application Code (`.ssl`/`.srvscr` -> `.ds` -> `.xfd` -> `reports.csv`)
+ * 5. Resume scheduled jobs & enable interfaces (`interfaces.csv`)
+ * 6. Post-deploy verification (`testScripts` + `planTests`)
+ * Plus `files.csv` verified SHA-256 checksum drift warnings when detected.
+ */
+export function assembleDeploymentRunbook(input: DeploymentRunbookInput): string {
+	// Extract registry-backed items automatically when registries are passed.
+	const jobs = [...(input.jobs ?? [])];
+	const settings = [...(input.settings ?? [])];
+	const roles = [...(input.roles ?? [])];
+	const reports = [...(input.reports ?? [])];
+	const interfaces = [...(input.interfaces ?? [])];
+	const manifestRows = [...(input.fileManifestRows ?? [])];
+
+	const findCol = (headers: readonly string[], names: readonly string[]) => {
+		const lower = headers.map((h) => h.trim().toLowerCase());
+		for (const n of names) {
+			const idx = lower.indexOf(n);
+			if (idx >= 0) return idx;
+		}
+		return -1;
+	};
+
+	for (const reg of input.registries ?? []) {
+		const t = reg.title.trim().toLowerCase();
+		const statusIdx = findCol(reg.headers, ["status", "state"]);
+		if (t.includes("job")) {
+			const nameIdx = Math.max(0, findCol(reg.headers, ["job", "name"]));
+			const runsIdx = findCol(reg.headers, ["runs", "schedule", "cron"]);
+			const callsIdx = findCol(reg.headers, ["calls", "script"]);
+			for (const r of reg.rows) {
+				const name = (r[nameIdx] ?? "").trim();
+				if (name && !jobs.some((j) => j.name.toLowerCase() === name.toLowerCase())) {
+					jobs.push({
+						name,
+						schedule: runsIdx >= 0 ? (r[runsIdx] ?? "").trim() : undefined,
+						calls: callsIdx >= 0 ? (r[callsIdx] ?? "").trim() : undefined,
+						status: statusIdx >= 0 ? (r[statusIdx] ?? "").trim() : undefined,
+					});
+				}
+			}
+		} else if (t.includes("setting")) {
+			const nameIdx = Math.max(0, findCol(reg.headers, ["name", "setting", "key"]));
+			const valIdx = findCol(reg.headers, ["value", "val"]);
+			const whereIdx = findCol(reg.headers, ["where", "scope", "section"]);
+			for (const r of reg.rows) {
+				const name = (r[nameIdx] ?? "").trim();
+				if (name && !settings.some((s) => s.name.toLowerCase() === name.toLowerCase())) {
+					settings.push({
+						name,
+						value: valIdx >= 0 ? (r[valIdx] ?? "").trim() : undefined,
+						where: whereIdx >= 0 ? (r[whereIdx] ?? "").trim() : undefined,
+						status: statusIdx >= 0 ? (r[statusIdx] ?? "").trim() : undefined,
+					});
+				}
+			}
+		} else if (t.includes("role") || t.includes("access")) {
+			const roleIdx = Math.max(0, findCol(reg.headers, ["role", "name"]));
+			const mayDoIdx = findCol(reg.headers, ["may do", "permissions", "access", "note"]);
+			for (const r of reg.rows) {
+				const role = (r[roleIdx] ?? "").trim();
+				if (role && !roles.some((x) => x.role.toLowerCase() === role.toLowerCase())) {
+					roles.push({
+						role,
+						mayDo: mayDoIdx >= 0 ? (r[mayDoIdx] ?? "").trim() : undefined,
+						status: statusIdx >= 0 ? (r[statusIdx] ?? "").trim() : undefined,
+					});
+				}
+			}
+		} else if (t.includes("report") || t.includes("label")) {
+			const nameIdx = Math.max(0, findCol(reg.headers, ["report", "name", "label"]));
+			const kindIdx = findCol(reg.headers, ["kind", "type"]);
+			const usedIdx = findCol(reg.headers, ["used by", "caller"]);
+			for (const r of reg.rows) {
+				const name = (r[nameIdx] ?? "").trim();
+				if (name && !reports.some((x) => x.name.toLowerCase() === name.toLowerCase())) {
+					reports.push({
+						name,
+						kind: kindIdx >= 0 ? (r[kindIdx] ?? "").trim() : undefined,
+						usedBy: usedIdx >= 0 ? (r[usedIdx] ?? "").trim() : undefined,
+						status: statusIdx >= 0 ? (r[statusIdx] ?? "").trim() : undefined,
+					});
+				}
+			}
+		} else if (t.includes("interface")) {
+			const nameIdx = Math.max(0, findCol(reg.headers, ["interface", "name", "system"]));
+			const dirIdx = findCol(reg.headers, ["direction", "dir"]);
+			const howIdx = findCol(reg.headers, ["how", "protocol", "transport"]);
+			for (const r of reg.rows) {
+				const name = (r[nameIdx] ?? "").trim();
+				if (name && !interfaces.some((x) => x.name.toLowerCase() === name.toLowerCase())) {
+					interfaces.push({
+						name,
+						direction: dirIdx >= 0 ? (r[dirIdx] ?? "").trim() : undefined,
+						how: howIdx >= 0 ? (r[howIdx] ?? "").trim() : undefined,
+						status: statusIdx >= 0 ? (r[statusIdx] ?? "").trim() : undefined,
+					});
+				}
+			}
+		} else if (t.includes("file manifest") || t === "files" || t === "files.csv") {
+			const pathIdx = Math.max(0, findCol(reg.headers, ["path", "file"]));
+			const shaIdx = findCol(reg.headers, ["sha256", "sha-256", "checksum", "hash"]);
+			if (shaIdx >= 0) {
+				for (const r of reg.rows) {
+					const p = (r[pathIdx] ?? "").trim();
+					const sha = (r[shaIdx] ?? "").trim();
+					if (p && sha) {
+						manifestRows.push({ path: p, sha256: sha, status: statusIdx >= 0 ? (r[statusIdx] ?? "").trim() : undefined });
+					}
+				}
+			}
+		}
+	}
+
+	// Merge explicit + auto-detected verified checksum drifts.
+	const drifts: DeploymentRunbookChecksumDrift[] = [...(input.checksumDrifts ?? [])];
+	const seenDrift = new Set(drifts.map((d) => normPathKey(d.path)));
+	for (const d of detectChecksumDrift(manifestRows, input.checksums ?? [])) {
+		const k = normPathKey(d.path);
+		if (!seenDrift.has(k)) {
+			seenDrift.add(k);
+			drifts.push(d);
+		}
+	}
+
+	const parts: string[] = ["## Deployment Execution Runbook", ""];
+
+	if (drifts.length) {
+		parts.push(
+			"> [!warning] Checksum Drift Detected",
+			`> ${drifts.length} artifact${drifts.length === 1 ? "" : "s"} marked \`verified\` in \`files.csv\` changed SHA-256 hash since verification. Re-verify before promoting to target environment.`,
+			"",
+			"| Recorded | Current | Artifact |",
+			"| --- | --- | --- |",
+		);
+		for (const d of drifts) {
+			parts.push(
+				`| \`${clipTableCell(d.expectedSha256.slice(0, 12), 20)}\` | \`${clipTableCell(d.actualSha256.slice(0, 12), 20)}\` | \`${clipTableCell(d.path, 98)}\` |`,
+			);
+		}
+		parts.push("");
+	}
+
+	// 1. Pre-flight backup & pause affected scheduled jobs
+	parts.push(
+		"### 1. Pre-Flight Backup & Pause Scheduled Jobs",
+		"",
+		"- [ ] Export pre-deployment STARLIMS backup package (XFD/SSL/DS) and confirm database restore snapshot.",
+	);
+	if (jobs.length) {
+		for (const j of jobs) {
+			const extra = [j.schedule ? `schedule: ${j.schedule}` : "", j.calls ? `calls: ${j.calls}` : ""].filter(Boolean).join(", ");
+			parts.push(`- [ ] Pause scheduled job \`${j.name}\`${extra ? ` (${extra})` : ""}.`);
+		}
+	} else {
+		parts.push("- [ ] Confirm no conflicting STARLIMS scheduled jobs are active during the maintenance window.");
+	}
+	parts.push("");
+
+	// 2. Database DDL in FK-topological order (parent tables -> child tables -> views/procs/packages)
+	parts.push("### 2. Database DDL (FK-Topological Order)", "");
+	const tableDepByLower = new Map<string, DeploymentRunbookTableDep>();
+	for (const td of input.sqlTables ?? []) {
+		if (td.name.trim()) tableDepByLower.set(td.name.trim().toLowerCase(), td);
+	}
+	const orderedTableNames = orderSqlTablesTopologically(input.sqlTables ?? []);
+	const orderedTableSet = new Set(orderedTableNames.map((n) => n.toLowerCase()));
+	const tableSqlItems: { label: string; path?: string }[] = [];
+	const nonTableSqlItems: { label: string; kind: string; path?: string }[] = [];
+
+	// Map sqlArtifacts to matching tables or views/procs/packages
+	const sqlByTableLower = new Map<string, DeploymentManifestSql>();
+	for (const sql of input.sqlArtifacts ?? []) {
+		const srcLower = sql.source.trim().toLowerCase();
+		const srcBare = srcLower.includes(".") ? srcLower.slice(srcLower.lastIndexOf(".") + 1) : srcLower;
+		if (orderedTableSet.has(srcLower)) {
+			sqlByTableLower.set(srcLower, sql);
+		} else if (orderedTableSet.has(srcBare)) {
+			sqlByTableLower.set(srcBare, sql);
+		} else if (/\btable\b/i.test(sql.kind)) {
+			tableSqlItems.push({ label: sql.source || sql.path, path: sql.path });
+		} else {
+			nonTableSqlItems.push({ label: sql.source || sql.path, kind: sql.kind || "DDL", path: sql.path });
+		}
+	}
+
+	const ddlLines: string[] = [];
+	for (const tblName of orderedTableNames) {
+		const key = tblName.toLowerCase();
+		const dep = tableDepByLower.get(key);
+		const linkedSql = sqlByTableLower.get(key);
+		const sqlPath = dep?.path || linkedSql?.path;
+		ddlLines.push(`- [ ] Apply table DDL \`${tblName}\`${sqlPath ? ` (\`${sqlPath}\`)` : ""}.`);
+	}
+	for (const t of tableSqlItems) {
+		ddlLines.push(`- [ ] Apply table DDL \`${t.label}\`${t.path && t.path !== t.label ? ` (\`${t.path}\`)` : ""}.`);
+	}
+	// Order non-table DDL deterministically: views -> functions -> procedures -> packages -> triggers -> other
+	const nonTableRank = (kind: string) => {
+		const k = kind.toLowerCase();
+		if (k.includes("view")) return 1;
+		if (k.includes("func")) return 2;
+		if (k.includes("proc")) return 3;
+		if (k.includes("pack")) return 4;
+		if (k.includes("trig")) return 5;
+		return 6;
+	};
+	nonTableSqlItems.sort((a, b) => nonTableRank(a.kind) - nonTableRank(b.kind) || a.label.localeCompare(b.label));
+	for (const obj of nonTableSqlItems) {
+		ddlLines.push(`- [ ] Apply ${obj.kind} \`${obj.label}\`${obj.path && obj.path !== obj.label ? ` (\`${obj.path}\`)` : ""}.`);
+	}
+	if (ddlLines.length) parts.push(...ddlLines, "");
+	else parts.push("- [ ] No database DDL changes in scope.", "");
+
+	// 3. Configuration & Access (`settings.csv`, `roles.csv`)
+	parts.push("### 3. Configuration & Access", "");
+	if (settings.length || roles.length) {
+		for (const s of settings) {
+			parts.push(`- [ ] Apply setting \`${s.name}\`${s.value ? ` = \`${s.value}\`` : ""}${s.where ? ` (${s.where})` : ""}.`);
+		}
+		for (const r of roles) {
+			parts.push(`- [ ] Update role \`${r.role}\`${r.mayDo ? ` — ${r.mayDo}` : ""}.`);
+		}
+		parts.push("");
+	} else {
+		parts.push("- [ ] No application settings or role access changes in scope.", "");
+	}
+
+	// 4. Application Code (`.ssl`/`.srvscr` -> `.ds` -> `.xfd` -> `reports.csv`)
+	parts.push("### 4. Application Code & Reports", "");
+	const uniqueScripts = new Map<string, DeploymentManifestScript>();
+	for (const s of input.scripts ?? []) {
+		const k = normPathKey(s.ref);
+		if (k && !uniqueScripts.has(k)) uniqueScripts.set(k, s);
+	}
+	const orderedScripts = [...uniqueScripts.values()].sort(
+		(a, b) => scriptPromotionRank(a) - scriptPromotionRank(b) || a.ref.localeCompare(b.ref),
+	);
+	if (orderedScripts.length || reports.length) {
+		for (const s of orderedScripts) {
+			parts.push(`- [ ] Import ${s.kind || classifyDeploymentArtifact(s.ref)} \`${s.ref}\`${s.ticket ? ` (${s.ticket})` : ""}.`);
+		}
+		for (const rep of reports) {
+			parts.push(`- [ ] Deploy report/label \`${rep.name}\`${rep.kind ? ` (${rep.kind})` : ""}${rep.usedBy ? ` — used by ${rep.usedBy}` : ""}.`);
+		}
+		parts.push("");
+	} else {
+		parts.push("- [ ] No application scripts, forms, or reports in scope.", "");
+	}
+
+	// 5. Resume scheduled jobs & enable interfaces (`interfaces.csv`)
+	parts.push("### 5. Resume Scheduled Jobs & Enable Interfaces", "");
+	if (jobs.length || interfaces.length) {
+		for (const j of jobs) {
+			parts.push(`- [ ] Resume scheduled job \`${j.name}\` and confirm clean first run.`);
+		}
+		for (const iface of interfaces) {
+			const meta = [iface.direction, iface.how].filter(Boolean).join(" / ");
+			parts.push(`- [ ] Enable & verify interface \`${iface.name}\`${meta ? ` (${meta})` : ""}.`);
+		}
+		parts.push("");
+	} else {
+		parts.push("- [ ] Confirm background services and interfaces report healthy status.", "");
+	}
+
+	// 6. Post-deploy verification (`testScripts` + `planTests`)
+	parts.push("### 6. Post-Deploy Verification", "");
+	const uniqueTestScripts = new Map<string, { ref: string; ticket?: string }>();
+	for (const ts of input.testScripts ?? []) {
+		const k = normPathKey(ts.ref);
+		if (k && !uniqueTestScripts.has(k)) uniqueTestScripts.set(k, ts);
+	}
+	if (uniqueTestScripts.size || (input.planTests?.length ?? 0) > 0) {
+		for (const ts of uniqueTestScripts.values()) {
+			parts.push(`- [ ] Execute test script \`${ts.ref}\`${ts.ticket ? ` (${ts.ticket})` : ""}.`);
+		}
+		for (const pt of input.planTests ?? []) {
+			parts.push(`- [ ] Verify business test **${pt.name}**${pt.expect ? ` — expect: ${pt.expect}` : ""}.`);
+		}
+		parts.push("");
+	} else {
+		parts.push("- [ ] Run post-deploy smoke checks and confirm STARLIMS audit trail entries.", "");
+	}
+
+	return parts.join("\n").trimEnd();
+}
+
 // --- STARLIMS Deployment / Transport Manifest --------------------------------
 
 export type DeploymentManifestScript = {
@@ -1251,12 +2512,14 @@ export type DeploymentManifestInput = {
 	checksums?: { path: string; sha256: string }[];
 	readiness?: ReadinessReport | null;
 	rollbackNotes?: string[];
+	/** When `true` or a `DeploymentRunbookInput`, emits an ordered STARLIMS `## Deployment Execution Runbook` section. */
+	runbook?: DeploymentRunbookInput | boolean;
 };
 
 /** Classifies a STARLIMS code/artifact reference by extension or name for deployment manifests. */
 export function classifyDeploymentArtifact(ref: string): string {
 	const lower = ref.toLowerCase();
-	if (lower.endsWith(".ssl")) return "SSL Script";
+	if (lower.endsWith(".ssl") || lower.endsWith(".srvscr")) return "SSL Script";
 	if (lower.endsWith(".ds")) return "Data Source";
 	if (lower.endsWith(".xfd")) return "XFD Form";
 	if (lower.endsWith(".sql") || lower.endsWith(".ddl") || lower.endsWith(".pks") || lower.endsWith(".pkb")) return "SQL / DDL";
@@ -1376,6 +2639,19 @@ export function assembleDeploymentManifestMarkdown(input: DeploymentManifestInpu
 		parts.push("");
 	}
 
+	if (input.runbook) {
+		const rbInput: DeploymentRunbookInput = {
+			scripts: input.scripts,
+			sqlArtifacts: input.sqlArtifacts,
+			registries: input.registries,
+			testScripts: input.testScripts,
+			planTests: input.planTests,
+			checksums: input.checksums,
+			...(typeof input.runbook === "object" ? input.runbook : {}),
+		};
+		parts.push(assembleDeploymentRunbook(rbInput), "");
+	}
+
 	parts.push("## Rollback Plan", "");
 	if (input.rollbackNotes?.length) {
 		for (const note of input.rollbackNotes) {
@@ -1480,23 +2756,20 @@ export type ReleaseBundleInput = {
 	headSha?: string;
 	gitRange?: { from: string; to: string };
 	changeControl?: string;
+	targetEnvironment?: string;
 	tickets: ReleaseBundleTicket[];
 	scripts: DeploymentManifestScript[];
 	testScripts?: { ref: string; ticket: string }[];
+	planTests?: PlanBusinessTest[];
 	sqlArtifacts: DeploymentManifestSql[];
 	registries: DeploymentManifestRegistry[];
+	checksums?: { path: string; sha256: string }[];
+	runbook?: DeploymentRunbookInput | boolean;
 	rollbackNotes?: { ticket: string; source?: string; body: string }[];
 	commits?: ReleaseBundleCommit[];
 };
 
-/**
- * Assembles a deduplicated multi-ticket STARLIMS Release Bundle (Markdown) combining
- * scripts, test scripts, SQL/DDL objects, registries, rollback instructions, and
- * optional Git range commits across N tickets.
- */
-export function assembleReleaseBundleMarkdown(input: ReleaseBundleInput): string {
-	const escCell = (v: string) => v.replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
-
+function deduplicateReleaseBundleArtifacts(input: ReleaseBundleInput) {
 	// 1. Deduplicate scripts (merging owning ticket keys per artifact).
 	const scriptMap = new Map<string, { ref: string; kind: string; tickets: string[] }>();
 	for (const s of input.scripts) {
@@ -1523,8 +2796,18 @@ export function assembleReleaseBundleMarkdown(input: ReleaseBundleInput): string
 		}
 	}
 
+	// 2b. Deduplicate plan business tests.
+	const dedupedPlanTests: PlanBusinessTest[] = [];
+	const seenPlanTests = new Set<string>();
+	for (const pt of input.planTests ?? []) {
+		const k = `${(pt.plan ?? "").trim().toLowerCase()}::${pt.name.trim().toLowerCase()}`;
+		if (!pt.name.trim() || seenPlanTests.has(k)) continue;
+		seenPlanTests.add(k);
+		dedupedPlanTests.push(pt);
+	}
+
 	// 3. Deduplicate SQL artifacts.
-	const sqlMap = new Map<string, { path: string; kind: string; sources: string[] }>();
+	const sqlMap = new Map<string, { path: string; kind: string; sources: string[]; tickets: string[] }>();
 	for (const sql of input.sqlArtifacts) {
 		const norm = sql.path.replace(/\\/g, "/").trim().toLowerCase();
 		if (!norm) continue;
@@ -1532,8 +2815,14 @@ export function assembleReleaseBundleMarkdown(input: ReleaseBundleInput): string
 		const existing = sqlMap.get(norm);
 		if (existing) {
 			if (srcLabel && !existing.sources.includes(srcLabel)) existing.sources.push(srcLabel);
+			if (sql.ticket && !existing.tickets.some((t) => t.toLowerCase() === sql.ticket!.toLowerCase())) existing.tickets.push(sql.ticket);
 		} else {
-			sqlMap.set(norm, { path: sql.path.replace(/\\/g, "/").trim(), kind: sql.kind, sources: srcLabel ? [srcLabel] : [] });
+			sqlMap.set(norm, {
+				path: sql.path.replace(/\\/g, "/").trim(),
+				kind: sql.kind,
+				sources: srcLabel ? [srcLabel] : [],
+				tickets: sql.ticket ? [sql.ticket] : [],
+			});
 		}
 	}
 
@@ -1554,7 +2843,15 @@ export function assembleReleaseBundleMarkdown(input: ReleaseBundleInput): string
 		}
 	}
 
-	// 5. Deduplicate rollback notes by normalized body.
+	// 5. Deduplicate checksums by normalized path.
+	const checksumMap = new Map<string, { path: string; sha256: string }>();
+	for (const c of input.checksums ?? []) {
+		const norm = normPathKey(c.path);
+		if (!norm || !c.sha256.trim()) continue;
+		if (!checksumMap.has(norm)) checksumMap.set(norm, { path: c.path.replace(/\\/g, "/").trim(), sha256: c.sha256.trim() });
+	}
+
+	// 6. Deduplicate rollback notes by normalized body.
 	const dedupedRollbacks: { ticket: string; source?: string; body: string }[] = [];
 	const seenRollback = new Set<string>();
 	for (const rb of input.rollbackNotes ?? []) {
@@ -1563,6 +2860,19 @@ export function assembleReleaseBundleMarkdown(input: ReleaseBundleInput): string
 		seenRollback.add(sig);
 		dedupedRollbacks.push(rb);
 	}
+
+	return { scriptMap, testScriptMap, dedupedPlanTests, sqlMap, regMap, checksumMap, dedupedRollbacks };
+}
+
+/**
+ * Assembles a deduplicated multi-ticket STARLIMS Release Bundle (Markdown) combining
+ * scripts, test scripts, business tests, SQL/DDL objects, registries, artifact checksums,
+ * optional ordered deployment runbook, rollback instructions, and optional Git range commits across N tickets.
+ */
+export function assembleReleaseBundleMarkdown(input: ReleaseBundleInput): string {
+	const escCell = (v: string) => v.replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+	const { scriptMap, testScriptMap, dedupedPlanTests, sqlMap, regMap, checksumMap, dedupedRollbacks } =
+		deduplicateReleaseBundleArtifacts(input);
 
 	const parts: string[] = [
 		`# Release Bundle — ${input.releaseName}`,
@@ -1573,6 +2883,7 @@ export function assembleReleaseBundleMarkdown(input: ReleaseBundleInput): string
 		`| Release | ${escCell(input.releaseName)} |`,
 		`| Tickets | ${input.tickets.length} (${escCell(input.tickets.map((t) => t.key).join(", ") || "—")}) |`,
 		...(input.changeControl ? [`| Change Control | ${escCell(input.changeControl)} |`] : []),
+		...(input.targetEnvironment ? [`| Target Env | ${escCell(input.targetEnvironment)} |`] : []),
 		...(input.headSha ? [`| HEAD Commit | \`${escCell(input.headSha.slice(0, 12))}\` |`] : []),
 		...(input.gitRange ? [`| Git Range | \`${escCell(input.gitRange.from)}..${escCell(input.gitRange.to)}\` |`] : []),
 		`| Generated | ${escCell(input.generatedOn)} |`,
@@ -1582,7 +2893,7 @@ export function assembleReleaseBundleMarkdown(input: ReleaseBundleInput): string
 	if (input.tickets.length) {
 		parts.push("## Included Tickets", "", "| Ticket | Status | Priority | Title |", "| --- | --- | --- | --- |");
 		for (const t of input.tickets) {
-			parts.push(`| ${escCell(t.key)} | ${escCell(t.status || "—")} | ${escCell(t.priority || "—")} | ${escCell(t.title)} |`);
+			parts.push(`| ${clipTableCell(t.key, 20)} | ${clipTableCell(t.status || "—", 20)} | ${clipTableCell(t.priority || "—", 20)} | ${clipTableCell(t.title, 100)} |`);
 		}
 		parts.push("");
 
@@ -1593,7 +2904,7 @@ export function assembleReleaseBundleMarkdown(input: ReleaseBundleInput): string
 				const r = t.readiness!;
 				const warns = r.checks.filter((c) => c.level === "warn").map((c) => c.label).join(", ");
 				parts.push(
-					`| ${escCell(t.key)} | ${r.ready ? "READY" : "WARN"} | ${r.pass}/${r.total} | ${escCell(warns || "All clear")} |`,
+					`| ${clipTableCell(t.key, 20)} | ${r.ready ? "READY" : "WARN"} | ${r.pass}/${r.total} | ${clipTableCell(warns || "All clear", 100)} |`,
 				);
 			}
 			parts.push("");
@@ -1604,25 +2915,36 @@ export function assembleReleaseBundleMarkdown(input: ReleaseBundleInput): string
 	if (scriptMap.size) {
 		parts.push("| Type | Tickets | Artifact |", "| --- | --- | --- |");
 		for (const item of scriptMap.values()) {
-			parts.push(`| ${escCell(item.kind)} | ${escCell(item.tickets.join(", ") || "—")} | \`${escCell(item.ref)}\` |`);
+			parts.push(`| ${clipTableCell(item.kind, 20)} | ${clipTableCell(item.tickets.join(", ") || "—", 20)} | \`${escCell(item.ref)}\` |`);
 		}
 		parts.push("");
 	} else {
 		parts.push("_No SSL scripts or application code references linked in this release._", "");
 	}
 
-	if (testScriptMap.size) {
-		parts.push("## Verification & Test Scripts", "", "| Tickets | Test Script |", "| --- | --- |");
-		for (const ts of testScriptMap.values()) {
-			parts.push(`| ${escCell(ts.tickets.join(", ") || "—")} | \`${escCell(ts.ref)}\` |`);
+	if (testScriptMap.size || dedupedPlanTests.length) {
+		parts.push("## Verification & Test Scripts", "");
+		if (testScriptMap.size) {
+			parts.push("| Tickets | Test Script |", "| --- | --- |");
+			for (const ts of testScriptMap.values()) {
+				parts.push(`| ${clipTableCell(ts.tickets.join(", ") || "—", 20)} | \`${escCell(ts.ref)}\` |`);
+			}
+			parts.push("");
 		}
-		parts.push("");
+		if (dedupedPlanTests.length) {
+			parts.push("### Business Test Cases", "", "| Case | Plan | Expected |", "| --- | --- | --- |");
+			for (const pt of dedupedPlanTests) {
+				const detail = [pt.given ? `Given ${pt.given}` : "", pt.expect || ""].filter(Boolean).join(" -> ") || "—";
+				parts.push(`| ${clipTableCell(pt.name, 20)} | ${clipTableCell(pt.plan || "—", 20)} | ${clipTableCell(detail, 100)} |`);
+			}
+			parts.push("");
+		}
 	}
 
 	if (sqlMap.size) {
 		parts.push("## Database & Schema Artifacts", "", "| Kind | Source | Artifact |", "| --- | --- | --- |");
 		for (const sql of sqlMap.values()) {
-			parts.push(`| ${escCell(sql.kind)} | ${escCell(sql.sources.join(", ") || "—")} | \`${escCell(sql.path)}\` |`);
+			parts.push(`| ${clipTableCell(sql.kind, 20)} | ${clipTableCell(sql.sources.join(", ") || "—", 20)} | \`${escCell(sql.path)}\` |`);
 		}
 		parts.push("");
 	}
@@ -1641,12 +2963,42 @@ export function assembleReleaseBundleMarkdown(input: ReleaseBundleInput): string
 		}
 	}
 
+	if (checksumMap.size) {
+		parts.push("## Artifact Checksums", "", "| SHA-256 | Artifact |", "| --- | --- |");
+		for (const c of checksumMap.values()) {
+			parts.push(`| \`${clipTableCell(c.sha256.slice(0, 16), 20)}\` | \`${clipTableCell(c.path, 98)}\` |`);
+		}
+		parts.push("");
+	}
+
 	if (input.commits?.length) {
 		parts.push("## Git Commits in Range", "", "| Commit | Author | Subject |", "| --- | --- | --- |");
 		for (const c of input.commits) {
-			parts.push(`| \`${escCell(c.shortSha)}\` | ${escCell(c.author || "—")} | ${escCell(c.subject)} |`);
+			parts.push(`| \`${clipTableCell(c.shortSha, 20)}\` | ${clipTableCell(c.author || "—", 20)} | ${clipTableCell(c.subject, 100)} |`);
 		}
 		parts.push("");
+	}
+
+	if (input.runbook) {
+		const dedupedScriptsForRb: DeploymentManifestScript[] = [...scriptMap.values()].map((s) => ({
+			ref: s.ref,
+			kind: s.kind,
+			ticket: s.tickets.join(", "),
+		}));
+		const dedupedTestsForRb = [...testScriptMap.values()].map((ts) => ({
+			ref: ts.ref,
+			ticket: ts.tickets.join(", "),
+		}));
+		const rbInput: DeploymentRunbookInput = {
+			scripts: dedupedScriptsForRb,
+			sqlArtifacts: input.sqlArtifacts,
+			registries: nonEmptyRegs.map((r) => ({ title: r.title, headers: r.headers, rows: r.rows })),
+			testScripts: dedupedTestsForRb,
+			planTests: dedupedPlanTests,
+			checksums: [...checksumMap.values()],
+			...(typeof input.runbook === "object" ? input.runbook : {}),
+		};
+		parts.push(assembleDeploymentRunbook(rbInput), "");
 	}
 
 	parts.push("## Rollback Plan", "");
@@ -1677,6 +3029,56 @@ export function assembleReleaseBundleMarkdown(input: ReleaseBundleInput): string
 	);
 
 	return parts.join("\n").trimEnd() + "\n";
+}
+
+/**
+ * Assembles a deduplicated flat CSV Release Bundle suitable for CAB / ServiceNow / Excel import.
+ * Columns: Release, Category, Artifact, Tickets, Status, SHA-256, Notes.
+ */
+export function assembleReleaseBundleCsv(input: ReleaseBundleInput): string {
+	const { scriptMap, testScriptMap, dedupedPlanTests, sqlMap, regMap, checksumMap } =
+		deduplicateReleaseBundleArtifacts(input);
+	const shaOf = (p: string) => checksumMap.get(normPathKey(p))?.sha256 ?? "";
+	const release = input.releaseName;
+	const rows: string[] = [csvRow(["Release", "Category", "Artifact", "Tickets", "Status", "SHA-256", "Notes"], ",")];
+
+	for (const s of scriptMap.values()) {
+		rows.push(csvRow([release, s.kind, s.ref, s.tickets.join("; "), "planned", shaOf(s.ref), ""], ","));
+	}
+	for (const ts of testScriptMap.values()) {
+		rows.push(csvRow([release, "Test Script", ts.ref, ts.tickets.join("; "), "planned", shaOf(ts.ref), ""], ","));
+	}
+	for (const pt of dedupedPlanTests) {
+		const note = [pt.plan ? `Plan: ${pt.plan}` : "", pt.given ? `Given ${pt.given}` : "", pt.expect ? `Expect ${pt.expect}` : ""]
+			.filter(Boolean)
+			.join("; ");
+		rows.push(csvRow([release, "Business Test", pt.name, pt.ticket ?? "", "planned", "", note], ","));
+	}
+	for (const sql of sqlMap.values()) {
+		rows.push(csvRow([release, sql.kind, sql.path, sql.tickets.join("; "), "planned", shaOf(sql.path), sql.sources.join("; ")], ","));
+	}
+	for (const reg of regMap.values()) {
+		const lowerHeaders = reg.headers.map((h) => h.trim().toLowerCase());
+		const statusIdx = lowerHeaders.findIndex((h) => h === "status" || h === "state");
+		const ticketIdx = lowerHeaders.findIndex((h) => h === "ticket" || h === "tickets");
+		const shaIdx = lowerHeaders.findIndex((h) => h === "sha256" || h === "sha-256" || h === "checksum");
+		const notesIdx = lowerHeaders.findIndex((h) => h === "notes" || h === "note" || h === "comment" || h === "description");
+		for (const r of reg.rows) {
+			const item = r[0] ?? "";
+			const t = ticketIdx >= 0 ? (r[ticketIdx] ?? "").trim() : "";
+			const st = statusIdx >= 0 ? (r[statusIdx] ?? "").trim() : "";
+			const sha = shaIdx >= 0 && r[shaIdx] ? r[shaIdx]!.trim() : shaOf(item);
+			const extra =
+				notesIdx >= 0 && r[notesIdx]
+					? r[notesIdx]!
+					: reg.headers
+							.map((h, i) => (i === 0 || i === statusIdx || i === ticketIdx || i === shaIdx || !r[i] ? "" : `${h}: ${r[i]}`))
+							.filter(Boolean)
+							.join("; ");
+			rows.push(csvRow([release, `Registry: ${reg.title}`, item, t, st, sha, extra], ","));
+		}
+	}
+	return `${rows.join("\n")}\n`;
 }
 
 /**
@@ -1769,6 +3171,19 @@ export function assembleReleaseNotesMarkdown(input: ReleaseBundleInput): string 
 
 // --- Requirements Traceability Matrix (RTM) ----------------------------------
 
+export type RtmOptions = {
+	testRuns?: readonly TestRunSummary[];
+	currentGitSha?: string | null;
+};
+
+export type RtmInput = {
+	docs: readonly DocFile[];
+	tickets?: readonly DocFile[];
+	headSha?: string | null;
+	testRuns?: readonly TestRunSummary[];
+	currentGitSha?: string | null;
+};
+
 export type RtmRow = {
 	ticket: string;
 	title: string;
@@ -1786,18 +3201,39 @@ export type RtmRow = {
 	approval: string;
 	changeControl: string;
 	headSha: string;
+	/** Concise IQ/OQ/PQ execution status badge (e.g. `OQ PASS`, `OQ FAIL`, `OQ STALE`, `PARTIAL`). */
+	validationStatus?: string;
+	/** Human-readable per-run validation evidence lines for CSV & Markdown trace details. */
+	validationRuns?: string[];
+	/** True when the ticket's passing validation run(s) were executed against a stale Git SHA. */
+	validationStale?: boolean;
 };
 
 /**
  * Builds Requirements Traceability Matrix rows linking every selected ticket to its
  * acceptance criteria progress, specs, plans, code scripts, test scripts, plan business
- * test cases, decisions, registries, formal approvals, and HEAD Git SHA.
+ * test cases, decisions, registries, formal approvals, validation runs, and HEAD Git SHA.
  */
+export function buildRtmRows(input: RtmInput): RtmRow[];
 export function buildRtmRows(
 	docs: readonly DocFile[],
 	tickets?: readonly DocFile[],
 	headSha?: string | null,
+	options?: RtmOptions,
+): RtmRow[];
+export function buildRtmRows(
+	docsOrInput: readonly DocFile[] | RtmInput,
+	ticketsArg?: readonly DocFile[],
+	headShaArg?: string | null,
+	optionsArg?: RtmOptions,
 ): RtmRow[] {
+	const isInputObj = !Array.isArray(docsOrInput);
+	const docs = isInputObj ? (docsOrInput as RtmInput).docs : (docsOrInput as readonly DocFile[]);
+	const tickets = isInputObj ? (docsOrInput as RtmInput).tickets : ticketsArg;
+	const headSha = isInputObj ? (docsOrInput as RtmInput).headSha : headShaArg;
+	const testRuns = isInputObj ? (docsOrInput as RtmInput).testRuns : optionsArg?.testRuns;
+	const effectiveGitSha = (isInputObj ? (docsOrInput as RtmInput).currentGitSha : optionsArg?.currentGitSha) ?? headSha;
+
 	const selected = (
 		tickets?.length
 			? tickets
@@ -1807,7 +3243,7 @@ export function buildRtmRows(
 		.slice()
 		.sort((a, b) => (a.ticket ?? "").localeCompare(b.ticket ?? "", undefined, { numeric: true, sensitivity: "base" }));
 
-	const shortSha = headSha ? headSha.trim().slice(0, 12) : "";
+	const shortSha = (effectiveGitSha ?? headSha) ? (effectiveGitSha ?? headSha)!.trim().slice(0, 12) : "";
 	const rows: RtmRow[] = [];
 
 	for (const t of selected) {
@@ -1852,6 +3288,29 @@ export function buildRtmRows(
 			: "—";
 		const changeControl = t.changeControl || specDocs.find((s) => Boolean(s.changeControl))?.changeControl || "";
 
+		let validationFields: Pick<RtmRow, "validationStatus" | "validationRuns" | "validationStale"> = {};
+		if (testRuns?.length) {
+			const childKeys = descendantTickets(docs, key)
+				.filter((d) => toneOf(d.status) !== "off" && d.ticket)
+				.map((d) => d.ticket!.toLowerCase());
+			const ticketKeys = new Set([key.toLowerCase(), ...childKeys]);
+			const matched = testRuns.filter((r) => ticketKeys.has(r.ticket.trim().toLowerCase()));
+			const summary = summarizeTicketTestRuns(matched, effectiveGitSha);
+			if (summary) {
+				validationFields = {
+					validationStatus: summary.badge,
+					validationRuns: summary.runLines,
+					validationStale: summary.stale,
+				};
+			} else {
+				validationFields = {
+					validationStatus: "—",
+					validationRuns: [],
+					validationStale: false,
+				};
+			}
+		}
+
 		rows.push({
 			ticket: key,
 			title: t.title || t.name,
@@ -1869,6 +3328,7 @@ export function buildRtmRows(
 			approval,
 			changeControl,
 			headSha: shortSha,
+			...validationFields,
 		});
 	}
 	return rows;
@@ -1876,53 +3336,48 @@ export function buildRtmRows(
 
 /** Formats Requirements Traceability Matrix rows as an audit-ready CSV export. */
 export function assembleRtmCsv(rows: readonly RtmRow[]): string {
-	const out: string[] = [
-		csvRow(
-			[
-				"Ticket",
-				"Title",
-				"Status",
-				"Release",
-				"Priority",
-				"Acceptance Criteria",
-				"Specs",
-				"Plans",
-				"Code Scripts",
-				"Test Scripts",
-				"Business Tests",
-				"Decisions",
-				"Registries",
-				"Approval",
-				"Change Control",
-				"Git SHA",
-			],
-			",",
-		),
+	const hasValidation = rows.some((r) => Boolean(r.validationStatus || r.validationRuns?.length));
+	const baseHeaders = [
+		"Ticket",
+		"Title",
+		"Status",
+		"Release",
+		"Priority",
+		"Acceptance Criteria",
+		"Specs",
+		"Plans",
+		"Code Scripts",
+		"Test Scripts",
+		"Business Tests",
+		"Decisions",
+		"Registries",
+		"Approval",
+		"Change Control",
+		"Git SHA",
 	];
+	const headers = hasValidation ? [...baseHeaders, "Validation Status", "Validation Runs"] : baseHeaders;
+	const out: string[] = [csvRow(headers, ",")];
 	for (const r of rows) {
-		out.push(
-			csvRow(
-				[
-					r.ticket,
-					r.title,
-					r.status,
-					r.release,
-					r.priority,
-					r.acceptanceCriteria,
-					r.specs.join("; "),
-					r.plans.join("; "),
-					r.codeScripts.join("; "),
-					r.testScripts.join("; "),
-					r.planTests.join("; "),
-					r.decisions.join("; "),
-					r.registries.join("; "),
-					r.approval,
-					r.changeControl,
-					r.headSha,
-				],
-				",",
-			),
-		);
+		const baseCols = [
+			r.ticket,
+			r.title,
+			r.status,
+			r.release,
+			r.priority,
+			r.acceptanceCriteria,
+			r.specs.join("; "),
+			r.plans.join("; "),
+			r.codeScripts.join("; "),
+			r.testScripts.join("; "),
+			r.planTests.join("; "),
+			r.decisions.join("; "),
+			r.registries.join("; "),
+			r.approval,
+			r.changeControl,
+			r.headSha,
+		];
+		const cols = hasValidation ? [...baseCols, r.validationStatus ?? "", (r.validationRuns ?? []).join("; ")] : baseCols;
+		out.push(csvRow(cols, ","));
 	}
 	return `${out.join("\n")}\n`;
 }
@@ -1932,8 +3387,8 @@ export function assembleRtmCsv(rows: readonly RtmRow[]): string {
  * (4-column summary overview table + per-ticket traceability breakdown sections).
  */
 export function assembleRtmMarkdown(rows: readonly RtmRow[], projectName: string): string {
-	const escCell = (v: string) => v.replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
 	const sha = rows.find((r) => r.headSha)?.headSha ?? "";
+	const hasValidation = rows.some((r) => Boolean(r.validationStatus && r.validationStatus !== "—"));
 	const parts: string[] = [
 		`# Requirements Traceability Matrix — ${projectName}`,
 		"",
@@ -1946,9 +3401,20 @@ export function assembleRtmMarkdown(rows: readonly RtmRow[], projectName: string
 		return parts.join("\n");
 	}
 
-	parts.push("## Summary", "", "| Ticket | Status | AC | Title |", "| --- | --- | --- | --- |");
-	for (const r of rows) {
-		parts.push(`| ${escCell(r.ticket)} | ${escCell(r.status)} | ${escCell(r.acceptanceCriteria)} | ${escCell(r.title)} |`);
+	if (hasValidation) {
+		parts.push("## Summary", "", "| Ticket | Status | Validation | Title |", "| --- | --- | --- | --- |");
+		for (const r of rows) {
+			parts.push(
+				`| ${clipTableCell(r.ticket, 20)} | ${clipTableCell(r.status, 20)} | ${clipTableCell(r.validationStatus || "—", 20)} | ${clipTableCell(r.title, 100)} |`,
+			);
+		}
+	} else {
+		parts.push("## Summary", "", "| Ticket | Status | AC | Title |", "| --- | --- | --- | --- |");
+		for (const r of rows) {
+			parts.push(
+				`| ${clipTableCell(r.ticket, 20)} | ${clipTableCell(r.status, 20)} | ${clipTableCell(r.acceptanceCriteria, 20)} | ${clipTableCell(r.title, 100)} |`,
+			);
+		}
 	}
 	parts.push("", "## Traceability Details", "");
 
@@ -1958,17 +3424,29 @@ export function assembleRtmMarkdown(rows: readonly RtmRow[], projectName: string
 	for (const r of rows) {
 		parts.push(`### ${r.ticket}: ${r.title}`, "");
 		parts.push("| Attribute | Trace |", "| --- | --- |");
-		parts.push(`| Status | ${escCell(r.status)}${r.release ? ` · Release: ${escCell(r.release)}` : ""}${r.priority ? ` · Priority: ${escCell(r.priority)}` : ""} |`);
-		parts.push(`| Acceptance | ${escCell(r.acceptanceCriteria)} |`);
-		parts.push(`| Specs | ${escCell(listOrDash(r.specs))} |`);
-		parts.push(`| Plans | ${escCell(listOrDash(r.plans))} |`);
-		parts.push(`| Code Scripts | ${escCell(listOrDash(r.codeScripts, true))} |`);
-		parts.push(`| Test Scripts | ${escCell(listOrDash(r.testScripts, true))} |`);
-		if (r.planTests.length) parts.push(`| Business Tests | ${escCell(listOrDash(r.planTests))} |`);
-		if (r.decisions.length) parts.push(`| Decisions | ${escCell(listOrDash(r.decisions))} |`);
-		if (r.registries.length) parts.push(`| Registries | ${escCell(listOrDash(r.registries))} |`);
-		parts.push(`| Approval | ${escCell(r.approval)}${r.changeControl ? ` · ${escCell(r.changeControl)}` : ""} |`);
-		if (r.headSha) parts.push(`| Git SHA | \`${escCell(r.headSha)}\` |`);
+		parts.push(
+			`| Status | ${clipTableCell(`${r.status}${r.release ? ` · Release: ${r.release}` : ""}${r.priority ? ` · Priority: ${r.priority}` : ""}`, 100)} |`,
+		);
+		parts.push(`| Acceptance | ${clipTableCell(r.acceptanceCriteria, 100)} |`);
+		parts.push(`| Specs | ${clipTableCell(listOrDash(r.specs), 100)} |`);
+		parts.push(`| Plans | ${clipTableCell(listOrDash(r.plans), 100)} |`);
+		parts.push(`| Code Scripts | ${clipTableCell(listOrDash(r.codeScripts, true), 100)} |`);
+		parts.push(`| Test Scripts | ${clipTableCell(listOrDash(r.testScripts, true), 100)} |`);
+		if (r.planTests.length) parts.push(`| Business Tests | ${clipTableCell(listOrDash(r.planTests), 100)} |`);
+		if (r.decisions.length) parts.push(`| Decisions | ${clipTableCell(listOrDash(r.decisions), 100)} |`);
+		if (r.registries.length) parts.push(`| Registries | ${clipTableCell(listOrDash(r.registries), 100)} |`);
+		if (r.validationStatus || r.validationRuns?.length) {
+			const valText = r.validationRuns?.length ? r.validationRuns.join("; ") : (r.validationStatus ?? "—");
+			parts.push(`| Validation | ${clipTableCell(valText, 100)} |`);
+		}
+		parts.push(
+			`| Approval | ${clipTableCell(`${r.approval}${r.changeControl ? ` · ${r.changeControl}` : ""}`, 100)} |`,
+		);
+		if (r.headSha) parts.push(`| Git SHA | \`${clipTableCell(r.headSha, 98)}\` |`);
+		if (r.validationRuns && r.validationRuns.length > 1) {
+			parts.push("");
+			for (const line of r.validationRuns) parts.push(`- ${line}`);
+		}
 		parts.push("");
 	}
 

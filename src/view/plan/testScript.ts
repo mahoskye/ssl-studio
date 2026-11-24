@@ -71,7 +71,7 @@ export function writeTests(path: string) {
 		);
 		const file = testFile(path, plan);
 		const ticketKey = (typeof plan.ticket === "string" && plan.ticket.trim()) || ticketForFile(docs(), path, state.workspace?.root);
-		const work = ticketKey ? await workPrompt(ticketKey, { specs: false }).catch(() => null) : null;
+		const work = ticketKey ? await workPrompt(ticketKey, { specs: false, plans: false }).catch(() => null) : null;
 		const rawBase = testsPrompt(plan, baseName(file), paths, code, spec, patternsFrom(TEMPLATES));
 		const base = work ? `${rawBase}\n\n${work.text}` : rawBase;
 		let prompt = base;

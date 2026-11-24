@@ -28,8 +28,13 @@ import {
 	stepTableCell,
 	updateTableCell,
 	type MarkdownTable,
+	type TableAlign,
 	type TableEdit,
 } from "../../shared/markdownTables";
+import { baseName, isInside, relativeTo, resolvePath } from "../../shared/paths";
+import type { RowMenuEntry } from "../../shared/contextMenu";
+import { backend, inApp } from "../backend";
+import { notify, setState, state as appState } from "../state";
 import { createTextareaCompleter, type TextareaCompleter } from "./cmCompletion";
 import {
 	historyFallbackFacet,
@@ -39,6 +44,15 @@ import {
 	type TableWidgetHost,
 } from "./cmLiveShared";
 import { hydrateImagesInElement } from "./imageResolve";
+import {
+	hydrateMathInElement,
+	normalizeTableRange,
+	serializeTableToCsv,
+	serializeTableToTsv,
+	type TableCellRange,
+} from "./markdownHtml";
+
+export { normalizeTableRange, serializeTableToCsv, serializeTableToTsv, type TableCellRange };
 
 /**
  * Parses clipboard TSV text (e.g. from Excel / Google Sheets / TableView) into a 2D cell matrix.
@@ -108,10 +122,14 @@ type TableController = {
 	activeTextarea: HTMLTextAreaElement | null;
 	activeCompleter: TextareaCompleter | null;
 	pendingFocus: { row: number; col: number; select?: boolean } | null;
+	rangeAnchor: { row: number; col: number } | null;
+	selectedRange: TableCellRange | null;
+	sortState: { col: number; dir: "asc" | "desc" } | null;
 	switchingCells: boolean;
 	selfDispatching: boolean;
 	suppressEnterUntil: number;
 	root: TableDomElement;
+	hoverBarEl: HTMLDivElement;
 	tableEl: HTMLTableElement;
 	barEl: HTMLDivElement;
 	addColBtn: HTMLButtonElement;
@@ -206,7 +224,14 @@ export class TableWidget extends WidgetType {
 	toDOM(view: EditorView): HTMLElement {
 		const root = document.createElement("div") as TableDomElement;
 		root.className = "cm-md-table-wrap cm-md-table-card";
+		root.tabIndex = -1;
 		root.dataset.editing = "false";
+		root.dataset.hasRange = "false";
+
+		const hoverBarEl = document.createElement("div");
+		hoverBarEl.className = "cm-tbl-hover-bar";
+		hoverBarEl.setAttribute("role", "toolbar");
+		hoverBarEl.setAttribute("aria-label", "Quick table actions");
 
 		const scroll = document.createElement("div");
 		scroll.className = "cm-md-table-scroll";
@@ -239,7 +264,7 @@ export class TableWidget extends WidgetType {
 		barEl.setAttribute("role", "toolbar");
 		barEl.setAttribute("aria-label", "Table editing controls");
 
-		root.append(scroll, barEl);
+		root.append(hoverBarEl, scroll, barEl);
 
 		const ctrl: TableController = {
 			view,
@@ -254,10 +279,14 @@ export class TableWidget extends WidgetType {
 			activeTextarea: null,
 			activeCompleter: null,
 			pendingFocus: null,
+			rangeAnchor: null,
+			selectedRange: null,
+			sortState: null,
 			switchingCells: false,
 			selfDispatching: false,
 			suppressEnterUntil: 0,
 			root,
+			hoverBarEl,
 			tableEl,
 			barEl,
 			addColBtn,
@@ -267,6 +296,81 @@ export class TableWidget extends WidgetType {
 			closeActiveCell: () => {},
 		};
 		root.__tableCtrl = ctrl;
+
+		const latestTable = (): MarkdownTable | null => {
+			if (!ctrl.table) return null;
+			if (ctrl.activeCell && ctrl.activeTextarea) {
+				const upd = updateTableCell(ctrl.table, ctrl.activeCell.row, ctrl.activeCell.col, ctrl.activeTextarea.value);
+				return parseTableRaw(upd.text) ?? ctrl.table;
+			}
+			return ctrl.table;
+		};
+
+		const copyDelimited = async (format: "tsv" | "csv", range?: TableCellRange | null) => {
+			const t = latestTable();
+			if (!t) return;
+			const payload = format === "tsv" ? serializeTableToTsv(t, range) : serializeTableToCsv(t, range);
+			const scope = range ? "selected cells" : "table";
+			const label = `Copied ${scope} as ${format.toUpperCase()}.`;
+			try {
+				const { copyText } = await import("../commands");
+				await copyText(payload, label);
+			} catch {
+				const ok = await navigator.clipboard?.writeText(payload).then(() => true, () => false);
+				if (ok) notify(label);
+				else notify("Could not reach the clipboard.", "error");
+			}
+		};
+
+		const exportCsv = async (range?: TableCellRange | null) => {
+			const t = latestTable();
+			if (!t) return;
+			const csvText = `${serializeTableToCsv(t, range)}\n`;
+			const stem = (ctrl.filePath ? baseName(ctrl.filePath).replace(/\.(md|markdown)$/i, "") : "table") || "table";
+			const filename = `${stem}-table.csv`;
+			if (inApp && appState.workspace?.root) {
+				const docsRel = (appState.project?.docs ?? "docs").replace(/^[./\\]+|[\\/]+$/g, "");
+				const defaultRel = `${docsRel}/exports/${filename}`;
+				const { ask, choose } = await import("../dialogs");
+				const picked = (await ask("Export table CSV to (path in workspace)", defaultRel))?.trim();
+				if (!picked) return;
+				const cleanRel = picked.replace(/\\/g, "/").replace(/^\/+/, "");
+				const dest = resolvePath(appState.workspace.root, cleanRel);
+				if (!isInside(appState.workspace.root, dest)) {
+					notify("Export path must stay inside the workspace.", "error");
+					return;
+				}
+				try {
+					const exists = await backend.read(dest).then(() => true, () => false);
+					if (exists) {
+						const OVERWRITE = "Overwrite file";
+						if (
+							(await choose(`${relativeTo(appState.workspace.root, dest)} already exists. Overwrite it?`, [OVERWRITE], {
+								danger: OVERWRITE,
+							})) !== OVERWRITE
+						) {
+							return;
+						}
+					} else {
+						await backend.create(dest, "file");
+					}
+					await backend.write(dest, csvText);
+					setState("treeVersion", (v) => v + 1);
+					notify(`Exported table to ${relativeTo(appState.workspace.root, dest)}.`);
+				} catch (err: any) {
+					notify(`Could not export CSV: ${err?.message ?? err}`, "error");
+				}
+				return;
+			}
+			const blob = new Blob([csvText], { type: "text/csv;charset=utf-8" });
+			const url = URL.createObjectURL(blob);
+			const a = document.createElement("a");
+			a.href = url;
+			a.download = filename;
+			a.click();
+			setTimeout(() => URL.revokeObjectURL(url), 1000);
+			notify(`Exported ${filename}.`);
+		};
 
 		const dispatchEdit = (edit: TableEdit | null, nextFocus?: { row: number; col: number; select?: boolean } | null) => {
 			if (!edit) return;
@@ -294,6 +398,29 @@ export class TableWidget extends WidgetType {
 			if (edit.text === ctrl.raw) return false;
 			dispatchEdit(edit, undefined);
 			return true;
+		};
+
+		const sortByColumnInPlace = (col: number, explicitDir?: "asc" | "desc", keepCellFocus = false) => {
+			if (ctrl.readMode) return;
+			const latest = latestTable();
+			if (!latest || col < 0 || col >= latest.alignments.length) return;
+			const dir: "asc" | "desc" =
+				explicitDir ?? (ctrl.sortState?.col === col && ctrl.sortState.dir === "asc" ? "desc" : "asc");
+			ctrl.sortState = { col, dir };
+			const focusRow = ctrl.activeCell?.row ?? 0;
+			const edit = sortTableByColumn(latest, focusRow, col, dir);
+			dispatchEdit(edit, keepCellFocus ? { row: edit.focusRow, col: edit.focusCol, select: false } : null);
+		};
+
+		const cycleColumnAlignment = (col: number) => {
+			if (ctrl.readMode) return;
+			const latest = latestTable();
+			if (!latest || col < 0 || col >= latest.alignments.length) return;
+			const cur = latest.alignments[col] ?? "none";
+			const next: TableAlign = cur === "left" ? "center" : cur === "center" ? "right" : "left";
+			const row = ctrl.activeCell?.row ?? 0;
+			const edit = setTableAlignment(latest, row, col, next);
+			dispatchEdit(edit, ctrl.activeCell ? { row: edit.focusRow, col: edit.focusCol, select: false } : null);
 		};
 
 		const exitToDocument = (position: "above" | "below", createIfEof = true) => {
@@ -333,20 +460,139 @@ export class TableWidget extends WidgetType {
 			if (rawVal.trim()) {
 				viewBox.innerHTML = renderInlineHtml(rawVal, ctrl.filePath, true);
 				hydrateImagesInElement(viewBox, ctrl.filePath);
+				hydrateMathInElement(viewBox);
 			} else {
 				viewBox.innerHTML = "&nbsp;";
 				viewBox.classList.add("is-empty");
 			}
+			if (cellEl.tagName === "TH" && !ctrl.readMode) {
+				const colIdx = Number(cellEl.dataset.col ?? "0");
+				const inner = document.createElement("div");
+				inner.className = "cm-tbl-th-inner";
+				const sortBtn = document.createElement("button");
+				sortBtn.type = "button";
+				sortBtn.className = "cm-tbl-th-sort";
+				const activeDir = ctrl.sortState?.col === colIdx ? ctrl.sortState.dir : null;
+				if (activeDir) sortBtn.classList.add("is-sorted");
+				sortBtn.title =
+					activeDir === "asc"
+						? "Sorted ascending — click to sort Z to A"
+						: activeDir === "desc"
+							? "Sorted descending — click to sort A to Z"
+							: "Sort column A to Z";
+				sortBtn.setAttribute("aria-label", sortBtn.title);
+				sortBtn.appendChild(codicon(activeDir === "asc" ? "\ueaa1" : activeDir === "desc" ? "\uea9a" : "\ueb55"));
+				sortBtn.addEventListener("mousedown", (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+				});
+				sortBtn.addEventListener("click", (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					sortByColumnInPlace(colIdx);
+				});
+				inner.append(viewBox, sortBtn);
+				cellEl.appendChild(inner);
+				return;
+			}
 			cellEl.appendChild(viewBox);
+		};
+
+		const renderHoverBar = () => {
+			hoverBarEl.innerHTML = "";
+			const t = ctrl.table;
+			if (!t) return;
+
+			const mkQuickBtn = (opts: { icon?: string; label?: string; title: string }, run: () => void) => {
+				const btn = document.createElement("button");
+				btn.type = "button";
+				btn.className = "cm-tbl-qbtn";
+				btn.title = opts.title;
+				if (!opts.label) btn.setAttribute("aria-label", opts.title);
+				if (opts.icon) btn.appendChild(codicon(opts.icon));
+				if (opts.label) {
+					const sp = document.createElement("span");
+					sp.textContent = opts.label;
+					btn.appendChild(sp);
+				}
+				btn.addEventListener("mousedown", (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+				});
+				btn.addEventListener("click", (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					run();
+				});
+				return btn;
+			};
+
+			if (ctrl.selectedRange) {
+				const rCount = ctrl.selectedRange.maxRow - ctrl.selectedRange.minRow + 1;
+				const cCount = ctrl.selectedRange.maxCol - ctrl.selectedRange.minCol + 1;
+				const badge = document.createElement("span");
+				badge.className = "cm-tbl-range-badge";
+				badge.textContent = `${rCount}x${cCount} selected`;
+				badge.title = "Press Ctrl+C to copy selected cells as TSV, or Esc to clear selection";
+				hoverBarEl.appendChild(badge);
+			}
+
+			const activeCol = ctrl.activeCell?.col ?? ctrl.selectedRange?.minCol ?? 0;
+			if (!ctrl.readMode) {
+				const align = t.alignments[activeCol] ?? "none";
+				const alignTag = align === "center" ? "C" : align === "right" ? "R" : "L";
+				hoverBarEl.append(
+					mkQuickBtn({ icon: "\ueb55", label: "Sort", title: `Sort rows by column ${activeCol + 1}` }, () =>
+						sortByColumnInPlace(activeCol, undefined, Boolean(ctrl.activeCell)),
+					),
+					mkQuickBtn(
+						{ label: `Align ${alignTag}`, title: `Cycle alignment for column ${activeCol + 1} (Left / Center / Right)` },
+						() => cycleColumnAlignment(activeCol),
+					),
+				);
+			}
+
+			hoverBarEl.append(
+				mkQuickBtn(
+					{
+						icon: "\uebcc",
+						label: "TSV",
+						title: ctrl.selectedRange ? "Copy selected cells as TSV (Ctrl+C)" : "Copy entire table as TSV (Excel / Sheets)",
+					},
+					() => void copyDelimited("tsv", ctrl.selectedRange),
+				),
+				mkQuickBtn(
+					{
+						label: "CSV",
+						title: ctrl.selectedRange ? "Copy selected cells as CSV" : "Copy entire table as CSV",
+					},
+					() => void copyDelimited("csv", ctrl.selectedRange),
+				),
+				mkQuickBtn({ label: "Export .csv", title: "Export table as a .csv file" }, () => void exportCsv(ctrl.selectedRange)),
+			);
+		};
+
+		const applyRangeClasses = () => {
+			const rng = ctrl.selectedRange;
+			root.dataset.hasRange = rng ? "true" : "false";
+			for (const cell of tableEl.querySelectorAll<HTMLTableCellElement>("th[data-row], td[data-row]")) {
+				const r = Number(cell.dataset.row);
+				const c = Number(cell.dataset.col);
+				const inRange = Boolean(rng && r >= rng.minRow && r <= rng.maxRow && c >= rng.minCol && c <= rng.maxCol);
+				cell.classList.toggle("is-range-selected", inRange);
+			}
+			renderHoverBar();
 		};
 
 		const renderBar = () => {
 			barEl.innerHTML = "";
 			if (ctrl.readMode || !ctrl.table || !ctrl.activeCell) {
 				root.dataset.editing = "false";
+				renderHoverBar();
 				return;
 			}
 			root.dataset.editing = "true";
+			renderHoverBar();
 			const { row, col } = ctrl.activeCell;
 			const t = ctrl.table;
 			const align = t.alignments[col] ?? "none";
@@ -786,8 +1032,10 @@ export class TableWidget extends WidgetType {
 			if (!t) {
 				tableEl.innerHTML = renderInlineHtml(ctrl.raw, ctrl.filePath);
 				hydrateImagesInElement(tableEl, ctrl.filePath);
+				hydrateMathInElement(tableEl);
 				addColBtn.hidden = true;
 				addRowBtn.hidden = true;
+				hoverBarEl.innerHTML = "";
 				barEl.innerHTML = "";
 				root.dataset.editing = "false";
 				return;
@@ -832,6 +1080,12 @@ export class TableWidget extends WidgetType {
 			ctrl.pendingFocus = null;
 			ctrl.activeCell = null;
 			ctrl.activeTextarea = null;
+			if (
+				ctrl.selectedRange &&
+				(ctrl.selectedRange.maxRow >= t.rows.length || ctrl.selectedRange.maxCol >= t.alignments.length)
+			) {
+				ctrl.selectedRange = null;
+			}
 
 			tableEl.innerHTML = "";
 			const thead = document.createElement("thead");
@@ -869,6 +1123,7 @@ export class TableWidget extends WidgetType {
 			} else {
 				renderBar();
 			}
+			applyRangeClasses();
 		};
 
 		// Programmatic focus entrypoint (e.g. after inserting a table, template with cursor in cell, or reveal).
@@ -890,18 +1145,49 @@ export class TableWidget extends WidgetType {
 			return true;
 		};
 
-		// Keep clicks on the table card chrome/bar from bubbling to CM6.
+		// Keep clicks on the table card chrome/bars from bubbling to CM6.
+		hoverBarEl.addEventListener("mousedown", (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+		});
 		barEl.addEventListener("mousedown", (e) => {
 			e.preventDefault();
 			e.stopPropagation();
 		});
 
+		root.addEventListener("keydown", (e) => {
+			if (!ctrl.selectedRange || !ctrl.table) return;
+			if (document.activeElement?.closest(".cm-tbl-cell-input")) return;
+			if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "c") {
+				e.preventDefault();
+				e.stopPropagation();
+				void copyDelimited("tsv", ctrl.selectedRange);
+				return;
+			}
+			if (e.key === "Escape") {
+				e.preventDefault();
+				e.stopPropagation();
+				ctrl.selectedRange = null;
+				applyRangeClasses();
+			}
+		});
+
+		root.addEventListener("focusout", (e) => {
+			if (!ctrl.selectedRange) return;
+			const next = e.relatedTarget instanceof Node ? e.relatedTarget : null;
+			if (next && root.contains(next)) return;
+			ctrl.selectedRange = null;
+			applyRangeClasses();
+		});
+
 		tableEl.addEventListener("mousedown", (e) => {
 			if (e.button !== 0) return;
 			const target = e.target as HTMLElement | null;
+			if (target?.closest(".cm-tbl-th-sort")) return;
 			const cb = ctrl.view.state.facet(liveCallbacksFacet);
 			const anchor = target?.closest<HTMLAnchorElement>("a[href]");
 			const tag = target?.closest<HTMLElement>(".md-tag");
+			const img = target?.closest<HTMLImageElement>("img");
 			if (anchor && !e.altKey) {
 				e.preventDefault();
 				e.stopPropagation();
@@ -915,8 +1201,12 @@ export class TableWidget extends WidgetType {
 				if (label) cb?.onTagClick(label);
 				return;
 			}
-			if (ctrl.readMode) return;
-
+			if (img && !e.altKey && img.src) {
+				e.preventDefault();
+				e.stopPropagation();
+				cb?.onOpenImageLightbox({ src: img.src, alt: img.alt || "" });
+				return;
+			}
 			if (target?.closest(".cm-tbl-cell-input")) {
 				e.stopPropagation();
 				return;
@@ -924,11 +1214,139 @@ export class TableWidget extends WidgetType {
 
 			const cell = target?.closest<HTMLTableCellElement>("th[data-row], td[data-row]");
 			if (!cell) return;
-			e.preventDefault();
-			e.stopPropagation();
 			const r = Number(cell.dataset.row);
 			const c = Number(cell.dataset.col);
+
+			if (e.shiftKey) {
+				const base = ctrl.rangeAnchor ?? ctrl.activeCell ?? { row: r, col: c };
+				e.preventDefault();
+				e.stopPropagation();
+				if (ctrl.activeCell) ctrl.closeActiveCell(true);
+				ctrl.rangeAnchor = base;
+				ctrl.selectedRange = normalizeTableRange(base, { row: r, col: c });
+				applyRangeClasses();
+				root.focus({ preventScroll: true });
+				return;
+			}
+
+			ctrl.rangeAnchor = { row: r, col: c };
+			if (ctrl.selectedRange) {
+				ctrl.selectedRange = null;
+				applyRangeClasses();
+			}
+			if (ctrl.readMode) return;
+
+			e.preventDefault();
+			e.stopPropagation();
 			ctrl.openCell(r, c, { atEnd: true });
+		});
+
+		tableEl.addEventListener("contextmenu", (e) => {
+			const target = e.target as HTMLElement | null;
+			const cell = target?.closest<HTMLTableCellElement>("th[data-row], td[data-row]");
+			const t = latestTable();
+			if (!cell || !t) return;
+			e.preventDefault();
+			e.stopPropagation();
+			const row = Number(cell.dataset.row);
+			const col = Number(cell.dataset.col);
+			const align = t.alignments[col] ?? "none";
+			const hasRange = Boolean(ctrl.selectedRange);
+			const COPY_TSV = hasRange ? "Copy selection as TSV" : "Copy table as TSV";
+			const COPY_CSV = hasRange ? "Copy selection as CSV" : "Copy table as CSV";
+			const EXPORT_CSV = "Export .csv…";
+
+			const ROW_ABOVE = "Insert row above";
+			const ROW_BELOW = "Insert row below";
+			const COL_LEFT = "Insert column left";
+			const COL_RIGHT = "Insert column right";
+			const MOVE_ROW_UP = "Move row up";
+			const MOVE_ROW_DOWN = "Move row down";
+			const MOVE_COL_LEFT = "Move column left";
+			const MOVE_COL_RIGHT = "Move column right";
+			const ALIGN_LEFT = "Align left";
+			const ALIGN_CENTER = "Align center";
+			const ALIGN_RIGHT = "Align right";
+			const SORT_ASC = "Sort ascending (A–Z)";
+			const SORT_DESC = "Sort descending (Z–A)";
+			const DEL_ROW = "Delete row";
+			const DEL_COL = "Delete column";
+
+			const entries: RowMenuEntry[] = ctrl.readMode
+				? [
+						{ label: COPY_TSV, value: COPY_TSV, keys: hasRange ? "Ctrl+C" : undefined },
+						COPY_CSV,
+						"separator",
+						EXPORT_CSV,
+					]
+				: [
+						ROW_ABOVE,
+						ROW_BELOW,
+						COL_LEFT,
+						COL_RIGHT,
+						"separator",
+						{
+							label: "Move",
+							children: [
+								{ label: MOVE_ROW_UP, value: MOVE_ROW_UP, disabled: row <= 1 },
+								{ label: MOVE_ROW_DOWN, value: MOVE_ROW_DOWN, disabled: row <= 0 || row >= t.rows.length - 1 },
+								"separator",
+								{ label: MOVE_COL_LEFT, value: MOVE_COL_LEFT, disabled: col <= 0 },
+								{ label: MOVE_COL_RIGHT, value: MOVE_COL_RIGHT, disabled: col >= t.alignments.length - 1 },
+							],
+						},
+						{
+							label: "Align column",
+							children: [
+								{ label: ALIGN_LEFT, value: ALIGN_LEFT, checked: align === "left" },
+								{ label: ALIGN_CENTER, value: ALIGN_CENTER, checked: align === "center" },
+								{ label: ALIGN_RIGHT, value: ALIGN_RIGHT, checked: align === "right" },
+							],
+						},
+						{
+							label: "Sort column",
+							children: [SORT_ASC, SORT_DESC],
+						},
+						"separator",
+						{ label: DEL_ROW, value: DEL_ROW, danger: true, disabled: row <= 0 || t.rows.length <= 1 },
+						{ label: DEL_COL, value: DEL_COL, danger: true, disabled: t.alignments.length <= 1 },
+						"separator",
+						{ label: COPY_TSV, value: COPY_TSV, keys: hasRange ? "Ctrl+C" : undefined },
+						COPY_CSV,
+						EXPORT_CSV,
+					];
+
+			const at = { x: e.clientX, y: e.clientY };
+			const box = ctrl.activeTextarea && ctrl.activeTextarea.isConnected ? ctrl.activeTextarea : undefined;
+			void (async () => {
+				const { chooseFromMenu } = await import("../panels/RowMenu");
+				const picked = await chooseFromMenu("Table actions", entries, at, box ? { box } : {});
+				if (!picked) return;
+				if (picked === COPY_TSV) return void copyDelimited("tsv", ctrl.selectedRange);
+				if (picked === COPY_CSV) return void copyDelimited("csv", ctrl.selectedRange);
+				if (picked === EXPORT_CSV) return void exportCsv(ctrl.selectedRange);
+				const cur = latestTable();
+				if (!cur || ctrl.readMode) return;
+				const runEdit = (edit: TableEdit | null) => {
+					if (!edit) return;
+					dispatchEdit(edit, { row: edit.focusRow, col: edit.focusCol, select: Boolean(edit.selectCell) });
+				};
+				if (picked === ROW_ABOVE) runEdit(insertTableRow(cur, row, "above"));
+				else if (picked === ROW_BELOW) runEdit(insertTableRow(cur, row, "below"));
+				else if (picked === COL_LEFT) runEdit(insertTableColumn(cur, row, col, "left"));
+				else if (picked === COL_RIGHT) runEdit(insertTableColumn(cur, row, col, "right"));
+				else if (picked === MOVE_ROW_UP) runEdit(moveTableRow(cur, row, col, -1));
+				else if (picked === MOVE_ROW_DOWN) runEdit(moveTableRow(cur, row, col, 1));
+				else if (picked === MOVE_COL_LEFT) runEdit(moveTableColumn(cur, row, col, -1));
+				else if (picked === MOVE_COL_RIGHT) runEdit(moveTableColumn(cur, row, col, 1));
+				else if (picked === ALIGN_LEFT) runEdit(setTableAlignment(cur, row, col, "left"));
+				else if (picked === ALIGN_CENTER) runEdit(setTableAlignment(cur, row, col, "center"));
+				else if (picked === ALIGN_RIGHT) runEdit(setTableAlignment(cur, row, col, "right"));
+				else if (picked === SORT_ASC) sortByColumnInPlace(col, "asc", Boolean(ctrl.activeCell));
+				else if (picked === SORT_DESC) sortByColumnInPlace(col, "desc", Boolean(ctrl.activeCell));
+				else if (picked === DEL_ROW) runEdit(deleteTableRow(cur, row, col));
+				else if (picked === DEL_COL) runEdit(deleteTableColumn(cur, row, col));
+			})();
 		});
 
 		tableEl.addEventListener("mouseover", (e) => {

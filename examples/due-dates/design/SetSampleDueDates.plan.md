@@ -1,6 +1,6 @@
 # Set sample due dates
 
-The spec for `src/DueDates/SetSampleDueDates.ssl`, `src/DueDates/SaveDueDates.ssl` and
+The plan doc for `src/DueDates/SetSampleDueDates.ssl`, `src/DueDates/SaveDueDates.ssl` and
 `src/DueDates/DueDateSummary.ssl`, as they were built. The chart is
 `design/SetSampleDueDates.plan.json`; this says what the chart leaves out.
 

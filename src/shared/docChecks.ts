@@ -2,14 +2,27 @@ import { CATALOG_FILE } from "./catalog";
 import { linkFile, type LinkEdit } from "./docLinks";
 import { headingAnchor } from "./docTables";
 import { documentHeadings } from "./markdownEdit";
+import { dirName, resolvePath } from "./paths";
 import { CATALOG_AREAS, DOC_FOLDERS, isCatalog, isFileArea, registryTitle, toneOf, type CatalogArea } from "./projectDocs";
 import type { DocFile } from "./protocol";
+import { pathMatchesRef } from "./workContext";
 
 // What the documents of the work need from someone (ADR 0012): a catalog
 // that no longer says what its folder holds, a registry that does not read as
 // a table, a document nobody has written yet, a ticket or a spec that names
 // something that is not there. Read from the listing alone, so it costs
 // nothing to ask again.
+
+/** A broken `[[wikilink]]` to rewrite: where it stands, its current name, and the suggested replacement name. */
+export type WikiLinkMend = { line: number; column: number; name: string; href: string; instead: string };
+
+export type DocCheckFix =
+	| { kind: "catalogs" }
+	| { kind: "ticket"; key: string; related?: string }
+	| { kind: "links"; mends: LinkMend[] }
+	| { kind: "mend-wikilinks"; mends: WikiLinkMend[] }
+	| { kind: "reciprocal-adr"; path: string; field: "supersedes" | "superseded-by"; value: string }
+	| { kind: "record-approval"; path: string };
 
 export type DocCheck = {
 	/** "warn" is something wrong; "note" is something to know and perhaps act on. */
@@ -20,10 +33,10 @@ export type DocCheck = {
 	/** The line of it to go to, where the check is about one place. */
 	line?: number;
 	/**
-	 * What would put it right, where the IDE can: write the catalogs afresh, start the ticket of this key, or point
-	 * each link at the one file of its name that the project has elsewhere.
+	 * What would put it right, where the IDE can: write the catalogs afresh, start the ticket of this key, point
+	 * broken path links or wikilinks at a matching file, add a reciprocal ADR link, or record controlled-doc approval.
 	 */
-	fix?: { kind: "catalogs" } | { kind: "ticket"; key: string; related?: string } | { kind: "links"; mends: LinkMend[] };
+	fix?: DocCheckFix;
 };
 
 /** A link to rewrite: where it is, as written, and the file to name in its place. */
@@ -65,7 +78,7 @@ export function docChecks(
 	// A ticket's spec or plan that is not where the ticket says.
 	for (const ticket of tickets) {
 		for (const ref of ticket.missing ?? []) {
-			const kind = /\.plan\.json$/i.test(ref) ? "plan" : "spec";
+			const kind = /\.plan\.(json|md)$/i.test(ref) ? "plan" : "spec";
 			checks.push({ level: "warn", text: `${ticket.ticket} names a ${kind} that is not there: ${ref}`, path: ticket.path });
 		}
 	}
@@ -82,7 +95,7 @@ export function docChecks(
 		const all = isFileArea(area) ? [] : inGroup(area);
 		const catalog = isFileArea(area) ? files.find((file) => file.exists && isCatalog(file) && file.catalog?.area === area) : all.find((file) => isCatalog(file) && !/[\\/]/.test(file.name));
 		if (catalog?.catalog?.stale) stale.push(catalog);
-		else if (!catalog && ASKED_FOR.includes(area) && all.length && !(area === "specs" && all.every((file) => file.name.includes(".spec.")))) without.push(all[0]!);
+		else if (!catalog && ASKED_FOR.includes(area) && all.length) without.push(all[0]!);
 	}
 	const folders = (of: DocFile[]) => listed(of.map((file) => FOLDER_SAID[areaOf(file)]));
 	if (stale.length) checks.push({ level: "warn", text: stale.length === 1 ? `The catalog of ${folders(stale)} is out of date.` : `The catalogs of ${folders(stale)} are out of date.`, path: stale[0]!.path, fix: { kind: "catalogs" } });
@@ -90,20 +103,42 @@ export function docChecks(
 
 	// A link to a file that is not there: the document it led to was moved, renamed or never written. A catalog
 	// that is out of date is said above, and writing it afresh mends its list.
+	const isWikiHref = (href: string) => /^!?\[\[.*\]\]$/.test(href);
 	for (const file of files) {
 		if (!file.exists || !file.broken?.length || stale.includes(file)) continue;
-		const names = [...new Set(file.broken.map((link) => linkFile(link.href)))];
-		const shown = names.slice(0, LINKS_NAMED);
-		const more = names.length - shown.length;
-		// A file of the same name elsewhere in the project is where it went: the link can be pointed there.
-		const mends = file.broken.flatMap((link) => (link.instead && link.line ? [{ line: link.line, column: link.column, href: link.href, instead: link.instead }] : []));
-		checks.push({
-			level: "warn",
-			text: names.length === 1 ? `${called(file)} links to a file that is not there: ${names[0]}` : `${called(file)} links to ${names.length} files that are not there: ${shown.join(", ")}${more ? ` and ${more} more` : ""}`,
-			path: file.path,
-			...(file.broken[0]!.line ? { line: file.broken[0]!.line } : {}),
-			...(mends.length ? { fix: { kind: "links" as const, mends } } : {}),
-		});
+		const pathBroken = file.broken.filter((link) => !isWikiHref(link.href));
+		const wikiBroken = file.broken.filter((link) => isWikiHref(link.href));
+		if (pathBroken.length) {
+			const names = [...new Set(pathBroken.map((link) => linkFile(link.href)))];
+			const shown = names.slice(0, LINKS_NAMED);
+			const more = names.length - shown.length;
+			// A file of the same name elsewhere in the project is where it went: the link can be pointed there.
+			const mends = pathBroken.flatMap((link) => (link.instead && link.line ? [{ line: link.line, column: link.column, href: link.href, instead: link.instead }] : []));
+			checks.push({
+				level: "warn",
+				text: names.length === 1 ? `${called(file)} links to a file that is not there: ${names[0]}` : `${called(file)} links to ${names.length} files that are not there: ${shown.join(", ")}${more ? ` and ${more} more` : ""}`,
+				path: file.path,
+				...(pathBroken[0]!.line ? { line: pathBroken[0]!.line } : {}),
+				...(mends.length ? { fix: { kind: "links" as const, mends } } : {}),
+			});
+		}
+		if (wikiBroken.length) {
+			const names = [...new Set(wikiBroken.map((link) => link.href.replace(/^!?\[\[|\]\]$/g, "")))];
+			const shown = names.slice(0, LINKS_NAMED);
+			const more = names.length - shown.length;
+			const wikiMends: WikiLinkMend[] = wikiBroken.flatMap((link) => {
+				if (!link.instead || !link.line) return [];
+				const name = link.href.replace(/^!?\[\[|\]\]$/g, "");
+				return [{ line: link.line, column: link.column, name, href: link.href, instead: link.instead }];
+			});
+			checks.push({
+				level: "warn",
+				text: names.length === 1 ? `${called(file)} links to a note that is not there: ${names[0]}` : `${called(file)} links to ${names.length} notes that are not there: ${shown.join(", ")}${more ? ` and ${more} more` : ""}`,
+				path: file.path,
+				...(wikiBroken[0]!.line ? { line: wikiBroken[0]!.line } : {}),
+				...(wikiMends.length ? { fix: { kind: "mend-wikilinks" as const, mends: wikiMends } } : {}),
+			});
+		}
 	}
 
 	// A document still as its template left it.
@@ -190,14 +225,9 @@ export function docChecks(
 
 	// Orphaned hand-written specs not linked to any ticket (when the project uses tickets).
 	if (tickets.length) {
-		const linkedSpecPaths = new Set<string>();
-		for (const t of tickets) {
-			for (const ref of t.specs ?? []) linkedSpecPaths.add(ref.split("\\").join("/").replace(/^\.?\/+/, "").toLowerCase());
-		}
 		for (const spec of specs) {
-			if (spec.tickets?.length || spec.pairedPlan || spec.name.includes(".spec.")) continue;
-			const norm = spec.path.split("\\").join("/").toLowerCase();
-			const matchedByTicket = [...linkedSpecPaths].some((ref) => norm.endsWith(`/${ref}`));
+			if (spec.tickets?.length) continue;
+			const matchedByTicket = tickets.some((t) => t.specs?.some((ref) => pathMatchesRef(spec.path, ref, t.path)));
 			if (!matchedByTicket) {
 				checks.push({ level: "note", text: `Spec has no linked ticket: ${spec.title || spec.name}`, path: spec.path });
 			}
@@ -278,7 +308,8 @@ export function docChecks(
 	// Asymmetric or unresolved `supersedes:` / `superseded-by:` references among decisions.
 	const decisions = files.filter((file) => file.exists && file.group === "knowledge" && file.kind === "decisions" && !isCatalog(file));
 	if (decisions.length) {
-		const decStem = (d: DocFile) => d.name.replace(/^.*\//, "").replace(/\.(md|markdown)$/i, "").toLowerCase();
+		const decId = (d: DocFile) => d.name.replace(/^.*[\\/]/, "").replace(/\.(md|markdown)$/i, "");
+		const decStem = (d: DocFile) => decId(d).toLowerCase();
 		const findDec = (ref: string) => {
 			const clean = ref.replace(/^\[\[|\]\]$/g, "").replace(/\.(md|markdown)$/i, "").trim().toLowerCase();
 			return decisions.find((d) => decStem(d) === clean || (d.title && d.title.toLowerCase() === clean));
@@ -293,6 +324,7 @@ export function docChecks(
 						level: "note",
 						text: `${called(dec)} supersedes ${called(target)}, which does not list superseded-by back.`,
 						path: target.path,
+						fix: { kind: "reciprocal-adr", path: target.path, field: "superseded-by", value: decId(dec) },
 					});
 				}
 			}
@@ -306,6 +338,7 @@ export function docChecks(
 							level: "note",
 							text: `${called(dec)} says it is superseded by ${called(target)}, which does not list supersedes back.`,
 							path: target.path,
+							fix: { kind: "reciprocal-adr", path: target.path, field: "supersedes", value: decId(dec) },
 						});
 					}
 					if (toneOf(dec.status) === "done") {
@@ -374,20 +407,14 @@ export function docChecks(
 	}
 
 	// Broader orphan detection: `.plan.json` files not linked to any ticket (neither `plan.ticket` nor any ticket's `plans:`).
-	const ticketPlanRefs = new Set(
-		files
-			.filter((f) => f.exists && f.group === "tickets")
-			.flatMap((t) => (t.plans ?? []).map((p) => p.replace(/\\/g, "/").replace(/^\/+/, "").toLowerCase())),
-	);
 	const orphanPlans = files.filter((f) => {
 		if (!f.exists || f.group !== "plans" || !/\.plan\.json$/i.test(f.name)) return false;
 		if (f.tickets?.length) return false;
-		const normPath = f.path.replace(/\\/g, "/").toLowerCase();
 		const normName = f.name.replace(/\\/g, "/").toLowerCase();
-		for (const ref of ticketPlanRefs) {
-			if (normPath.endsWith(`/${ref}`) || normPath === ref || normName === ref) return false;
-		}
-		return true;
+		const linkedToTicket = tickets.some((t) =>
+			t.plans?.some((ref) => pathMatchesRef(f.path, ref, t.path) || ref.replace(/\\/g, "/").replace(/^\/+/, "").toLowerCase() === normName),
+		);
+		return !linkedToTicket;
 	});
 	if (orphanPlans.length && tickets.length) {
 		checks.push({
@@ -442,9 +469,15 @@ export function orphanDocChecks(
 	}
 	const rootPrefix = options?.root ? `${normPath(options.root)}/` : "";
 	const metaRefs = new Set<string>();
-	const addMetaRef = (raw?: string) => {
+	const addMetaRef = (raw?: string, fromPath?: string) => {
 		if (!raw) return;
-		const clean = normPath(raw).replace(/^\.?\/+/, "");
+		const rawNorm = normPath(raw.split(/[?#]/)[0] ?? "");
+		if (!rawNorm) return;
+		if (fromPath && /^\.{1,2}\//.test(rawNorm)) {
+			metaRefs.add(normPath(resolvePath(dirName(fromPath), rawNorm)));
+			return;
+		}
+		const clean = rawNorm.replace(/^\.?\/+/, "");
 		if (clean) {
 			metaRefs.add(clean);
 			if (rootPrefix) metaRefs.add(`${rootPrefix}${clean}`);
@@ -452,10 +485,10 @@ export function orphanDocChecks(
 	};
 	for (const doc of files) {
 		if (!doc.exists) continue;
-		if (doc.source && !/^https?:\/\//i.test(doc.source)) addMetaRef(doc.source);
-		for (const p of doc.nodeDocs ?? []) addMetaRef(p);
-		for (const p of doc.specs ?? []) addMetaRef(p);
-		for (const p of doc.plans ?? []) addMetaRef(p);
+		if (doc.source && !/^https?:\/\//i.test(doc.source)) addMetaRef(doc.source, doc.path);
+		for (const p of doc.nodeDocs ?? []) addMetaRef(p, doc.path);
+		for (const p of doc.specs ?? []) addMetaRef(p, doc.path);
+		for (const p of doc.plans ?? []) addMetaRef(p, doc.path);
 	}
 
 	const isLinkedByMeta = (filePath: string) => {
@@ -516,21 +549,53 @@ export function findDuplicateHeadings(text: string): { heading: string; line: nu
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+/** Parses `YYYY-MM-DD` (or ISO-8601 prefix) into UTC midnight ms epoch; null if invalid. */
+function parseIsoDateMs(raw: string | undefined): number | null {
+	const s = raw?.trim();
+	if (!s) return null;
+	const m = /^(\d{4})-(\d{2})-(\d{2})(?:$|T|\s)/.exec(s);
+	if (!m) return null;
+	const y = Number(m[1]);
+	const mo = Number(m[2]);
+	const d = Number(m[3]);
+	if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+	const ms = Date.UTC(y, mo - 1, d);
+	const check = new Date(ms);
+	if (check.getUTCFullYear() !== y || check.getUTCMonth() !== mo - 1 || check.getUTCDate() !== d) return null;
+	return ms;
+}
+
+export type StaleDocIssue = {
+	path: string;
+	line: number;
+	kind: "stale";
+	level: "warn" | "note";
+	message: string;
+	fix?: { kind: "record-approval"; path: string };
+};
+
 /**
- * Surfaces stale documentation hygiene notes:
+ * Surfaces stale documentation hygiene notes & warnings:
+ * - Prefers explicit frontmatter dates (`asked`, `date`, `approved-date`) when older than `mtime`
+ *   so a fresh `git clone` never masks aged questions, templates, or SOPs.
  * - Untouched templates older than 7 days
  * - Open questions older than 30 days
  * - `STATE.md` older than 14 days
  * - Controlled documents (`version`, `change-control`, `gxp-impact`, or `status: approved`) missing approval metadata
+ * - Periodic review deadlines (`review-due: YYYY-MM-DD`): past due (`warn`) or due within 30 days (`note`)
  */
-export function staleDocChecks(
-	docs: readonly DocFile[],
-	nowMs = Date.now(),
-): { path: string; line: number; kind: "stale"; level: "note"; message: string }[] {
-	const out: { path: string; line: number; kind: "stale"; level: "note"; message: string }[] = [];
+export function staleDocChecks(docs: readonly DocFile[], nowMs = Date.now()): StaleDocIssue[] {
+	const out: StaleDocIssue[] = [];
+	const nowDate = new Date(nowMs);
+	const todayUtcMs = Date.UTC(nowDate.getUTCFullYear(), nowDate.getUTCMonth(), nowDate.getUTCDate());
+
 	for (const doc of docs) {
 		if (!doc.exists || isCatalog(doc) || isArchivedDoc(doc)) continue;
-		const ageMs = typeof doc.mtime === "number" && doc.mtime > 0 ? Math.max(0, nowMs - doc.mtime) : null;
+		const mtimeMs = typeof doc.mtime === "number" && doc.mtime > 0 ? doc.mtime : null;
+		const explicitMs = parseIsoDateMs(doc.asked) ?? parseIsoDateMs(doc.date) ?? parseIsoDateMs(doc.approvedDate);
+		const effectiveMs =
+			explicitMs !== null && (mtimeMs === null || explicitMs < mtimeMs) ? explicitMs : mtimeMs;
+		const ageMs = effectiveMs !== null ? Math.max(0, nowMs - effectiveMs) : null;
 		const ageDays = ageMs !== null ? Math.floor(ageMs / DAY_MS) : null;
 
 		// 1. Untouched templates older than 7 days
@@ -579,7 +644,35 @@ export function staleDocChecks(
 				kind: "stale",
 				level: "note",
 				message: `Controlled document ${called(doc)} is missing ${missing.join(" and ")}.`,
+				fix: { kind: "record-approval", path: doc.path },
 			});
+		}
+
+		// 5. Periodic review due date (`review-due: YYYY-MM-DD`) on active/controlled docs
+		const reviewDueMs = parseIsoDateMs(doc.reviewDue);
+		if (reviewDueMs !== null && toneOf(doc.status) !== "off") {
+			const daysUntil = Math.round((reviewDueMs - todayUtcMs) / DAY_MS);
+			if (daysUntil < 0) {
+				const overdue = -daysUntil;
+				out.push({
+					path: doc.path,
+					line: 1,
+					kind: "stale",
+					level: "warn",
+					message: `Review past due by ${count(overdue, "day")} (${doc.reviewDue}): ${called(doc)}.`,
+				});
+			} else if (daysUntil <= 30) {
+				out.push({
+					path: doc.path,
+					line: 1,
+					kind: "stale",
+					level: "note",
+					message:
+						daysUntil === 0
+							? `Review due today (${doc.reviewDue}): ${called(doc)}.`
+							: `Review due in ${count(daysUntil, "day")} (${doc.reviewDue}): ${called(doc)}.`,
+				});
+			}
 		}
 	}
 	return out;

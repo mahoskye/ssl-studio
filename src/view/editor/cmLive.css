@@ -16,7 +16,7 @@
 .cm-md-page {
 	width: min(820px, 100%);
 	margin: 0 auto;
-	padding: var(--space-7) var(--space-7) 0;
+	padding: var(--space-4) var(--space-7) 0;
 	box-sizing: border-box;
 	display: flex;
 	flex-direction: column;
@@ -25,8 +25,106 @@
 
 @container (max-width: 480px) {
 	.cm-md-page {
-		padding: var(--space-5) var(--space-4) 0;
+		padding: var(--space-3) var(--space-4) 0;
 	}
+}
+
+/* Whisper-quiet single-line top strip: ticket/status on the left, Info & Links triggers on the right. */
+.cm-md-compact-bar {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 4px 8px;
+	min-height: 24px;
+	margin: 0 0 var(--space-3);
+	padding: 0;
+	border: 0;
+	background: transparent;
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+}
+
+.cm-md-compact-meta {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	min-height: 22px;
+	padding: 1px 6px 1px 4px;
+	margin-left: -4px;
+	border: 0;
+	border-radius: var(--radius-sm);
+	background: transparent;
+	color: var(--editor-muted, var(--muted));
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+	cursor: pointer;
+	transition: background 120ms ease, color 120ms ease;
+}
+
+.cm-md-compact-meta:hover,
+.cm-md-compact-meta:focus-visible {
+	background: var(--hover);
+	color: var(--editor-strong, var(--strong-fg));
+}
+
+.cm-md-compact-key {
+	font-family: var(--code-font);
+	font-weight: 600;
+	letter-spacing: 0.02em;
+	color: var(--editor-strong, var(--strong-fg));
+}
+
+.cm-md-compact-actions {
+	display: inline-flex;
+	align-items: center;
+	gap: 2px;
+	margin-left: auto;
+}
+
+.cm-md-compact-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	min-height: 22px;
+	padding: 1px 7px;
+	border: 0;
+	border-radius: var(--radius-sm);
+	background: transparent;
+	color: var(--editor-muted, var(--muted));
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+	font-weight: 500;
+	cursor: pointer;
+	white-space: nowrap;
+	opacity: 0.82;
+	transition: background 120ms ease, color 120ms ease, opacity 120ms ease;
+}
+
+.cm-md-compact-btn:hover,
+.cm-md-compact-btn:focus-visible {
+	opacity: 1;
+	color: var(--editor-strong, var(--strong-fg));
+	background: var(--hover);
+}
+
+.cm-md-compact-btn.active {
+	opacity: 1;
+	color: var(--editor-accent, var(--accent));
+	background: color-mix(in srgb, var(--editor-accent, var(--accent)) 11%, transparent);
+}
+
+.cm-md-compact-btn .codicon-glyph {
+	font-size: 12px;
+	line-height: 1;
+	flex: none;
+}
+
+.cm-md-compact-broken {
+	display: inline-flex;
+	align-items: center;
+	gap: 2px;
+	color: var(--error);
+	font-weight: 600;
 }
 
 .cm-md-page.full-width {
@@ -66,16 +164,19 @@
 }
 
 .cm-md-host .cm-line.cm-git-added {
+	--md-list-base: 8px;
 	box-shadow: inset 3px 0 0 var(--ok);
 	padding-left: 8px;
 }
 
 .cm-md-host .cm-line.cm-git-modified {
+	--md-list-base: 8px;
 	box-shadow: inset 3px 0 0 var(--accent);
 	padding-left: 8px;
 }
 
 .cm-md-host .cm-line.cm-git-removed {
+	--md-list-base: 8px;
 	box-shadow: inset 3px 0 0 var(--error);
 	padding-left: 8px;
 }
@@ -810,13 +911,31 @@
 	text-decoration: underline;
 }
 
-/* Clean visual bullets and real interactive task checkboxes (drawn via CSS dot, ADR 0023). */
+/* Hanging-indent alignment for bullet, numbered, and task lists: wrapped lines align seamlessly under item text. */
+.cm-md-host .cm-line.cm-md-list-line {
+	padding-left: calc(var(--md-list-base, 6px) + var(--md-list-indent, 0em) + var(--md-list-hang, 1.5em));
+	text-indent: calc(-1 * var(--md-list-hang, 1.5em));
+}
+
+.cm-md-host .cm-line.cm-md-list-line.cm-md-list-raw {
+	padding-left: calc(var(--md-list-base, 6px) + var(--md-list-indent, 0em) + var(--md-list-hang, 1.5em));
+	text-indent: calc(-1 * (var(--md-list-indent, 0em) + var(--md-list-hang, 1.5em)));
+}
+
+/* Reset inherited negative text-indent on inline-block/inline-flex list widgets & pills. */
+.cm-md-host .cm-line.cm-md-list-line :is(.cm-md-bullet, .cm-md-check-slot, .cm-md-ol-num, .cm-md-tag, .cm-md-math-inline, .cm-md-image-wrap) {
+	text-indent: 0;
+}
+
+/* Clean visual bullets, ordered markers, and real interactive task checkboxes (drawn via CSS dot, ADR 0023). */
 .cm-md-bullet {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
-	width: 1.15em;
+	width: var(--md-list-hang, 1.5em);
 	height: 1em;
+	padding-right: 0.25em;
+	box-sizing: border-box;
 	vertical-align: middle;
 	color: var(--editor-accent, var(--accent));
 	user-select: none;
@@ -830,10 +949,31 @@
 	background: currentColor;
 }
 
+.cm-md-ol-num {
+	display: inline-block;
+	width: var(--md-list-hang, 1.75em);
+	padding-right: 0.45em;
+	box-sizing: border-box;
+	text-align: right;
+	font-variant-numeric: tabular-nums;
+	color: var(--editor-muted, var(--muted));
+	user-select: none;
+}
+
+.cm-md-check-slot {
+	display: inline-flex;
+	align-items: center;
+	justify-content: flex-start;
+	width: var(--md-list-hang, 1.7em);
+	padding-left: 0.1em;
+	box-sizing: border-box;
+	vertical-align: middle;
+}
+
 .cm-md-checkbox {
 	width: 1.05em;
 	height: 1.05em;
-	margin: 0 0.45em 0 0;
+	margin: 0;
 	vertical-align: -0.15em;
 	cursor: pointer;
 	accent-color: var(--editor-accent, var(--accent));
@@ -847,10 +987,14 @@
 
 /* Blockquotes & Horizontal rules. */
 .cm-editor .cm-md-quote-line {
+	--md-list-base: 14px;
 	border-left: 3px solid color-mix(in srgb, var(--editor-accent, var(--accent)) 55%, transparent);
-	padding-left: 14px !important;
+	padding-left: 14px;
 	color: var(--editor-muted, var(--muted));
 	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 2.5%, transparent);
+}
+.cm-md-host .cm-line.cm-md-quote-line.cm-md-list-line {
+	padding-left: calc(14px + var(--md-list-indent, 0em) + var(--md-list-hang, 1.5em));
 }
 
 .cm-md-hr-wrap {
@@ -2322,23 +2466,27 @@
 
 /* Ticket Release Readiness Gate strip inside .md-work. */
 .md-readiness {
-	margin-top: 10px;
-	padding-top: 8px;
-	border-top: 1px solid color-mix(in srgb, var(--editor-border, var(--border)) 70%, transparent);
+	margin: 4px 0 10px;
+	padding: 6px 8px;
+	border: 1px solid color-mix(in srgb, var(--editor-border, var(--border)) 85%, transparent);
+	border-radius: var(--radius-md);
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 3%, transparent);
 }
 
 .md-readiness-toggle {
-	display: inline-flex;
+	display: flex;
 	align-items: center;
+	width: 100%;
 	gap: 6px;
 	border: none;
 	background: none;
-	padding: 2px 4px;
+	padding: 2px 2px;
 	border-radius: var(--radius-sm);
 	color: var(--editor-fg, var(--fg));
 	font-size: var(--text-xs);
 	font-weight: 600;
 	cursor: pointer;
+	text-align: left;
 }
 
 .md-readiness-toggle:hover {
@@ -2348,6 +2496,7 @@
 .md-readiness-badge {
 	display: inline-flex;
 	align-items: center;
+	margin-left: auto;
 	padding: 1px 6px;
 	border-radius: 999px;
 	font-size: 10.5px;
@@ -2409,6 +2558,7 @@
 	.splitter,
 	.toasts,
 	.cm-md-table-toolbar-wrap,
+	.cm-md-compact-bar,
 	.cm-md-props-actions,
 	.cm-md-doc-bar,
 	.md-work-actions,
@@ -2416,13 +2566,21 @@
 	.md-work-guide,
 	.cm-md-code-actions,
 	.cm-tbl-bar,
+	.cm-tbl-hover-bar,
+	.cm-tbl-th-sort,
 	.cm-tbl-add-row,
 	.cm-tbl-add-col,
 	.cm-callout-actions,
 	.cm-md-mermaid-actions,
+	.cm-md-embed-actions,
+	.cm-md-heading-link,
+	.cm-md-sel-bubble,
+	.cm-md-image-resize-handle,
+	.cm-md-image-width-badge,
 	.cm-md-prop-rm,
 	.cm-md-prop-edit,
 	.cm-md-prop-add,
+	.cm-md-prop-issue,
 	.cm-md-details-edit,
 	.md-readiness,
 	.cm-gutters,
@@ -2656,4 +2814,413 @@
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
+}
+
+/* --- Round 6: Inline Frontmatter Editing, Validation Pills, Table Power, Foldable/Nested Callouts, Selection Bubble, Drag-Resize & Heading Copy Link --- */
+
+/* Inline scalar/date property editor inside .cm-md-props */
+.cm-md-prop-inline-input {
+	font-family: var(--ui-font);
+	font-size: var(--text-sm);
+	line-height: 1.35;
+	color: var(--editor-strong, var(--strong-fg));
+	background: var(--editor-bg, var(--bg));
+	border: 1px solid var(--editor-accent, var(--accent));
+	border-radius: var(--radius-sm);
+	padding: 1px 6px;
+	min-width: 96px;
+	max-width: 260px;
+	outline: none;
+	box-shadow: 0 0 0 1px color-mix(in srgb, var(--editor-accent, var(--accent)) 32%, transparent);
+}
+
+.cm-md-prop-inline-input[type="date"] {
+	min-width: 130px;
+	color-scheme: inherit;
+}
+
+/* Quiet inline metadata validation warning pill */
+.cm-md-prop-issue {
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+	padding: 0 6px;
+	height: 18px;
+	border-radius: 999px;
+	border: 1px solid color-mix(in srgb, var(--warning) 42%, transparent);
+	background: color-mix(in srgb, var(--warning) 12%, transparent);
+	color: var(--warning);
+	font-family: var(--ui-font);
+	font-size: 11px;
+	font-weight: 500;
+	line-height: 1;
+	white-space: nowrap;
+	cursor: help;
+}
+
+.cm-md-prop-issue .codicon,
+.cm-md-prop-issue .codicon-glyph {
+	font-size: 11px;
+	line-height: 1;
+}
+
+/* Quiet top hover toolbar on Live & Read Markdown tables */
+.cm-tbl-hover-bar {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 3px;
+	min-height: 22px;
+	margin-bottom: 4px;
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+	opacity: 0;
+	transition: opacity 130ms ease;
+}
+
+.cm-md-table-card:hover .cm-tbl-hover-bar,
+.cm-md-table-card:focus-within .cm-tbl-hover-bar,
+.cm-md-table-card[data-editing="true"] .cm-tbl-hover-bar,
+.cm-md-table-card[data-has-range="true"] .cm-tbl-hover-bar {
+	opacity: 1;
+}
+
+.cm-tbl-qbtn {
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+	height: 21px;
+	padding: 0 6px;
+	border-radius: var(--radius-sm);
+	border: 1px solid color-mix(in srgb, var(--editor-border, var(--border)) 80%, transparent);
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 3.5%, var(--editor-bg, var(--bg)));
+	color: var(--editor-muted, var(--muted));
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+	font-weight: 500;
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+.cm-tbl-qbtn:hover {
+	color: var(--editor-strong, var(--strong-fg));
+	background: var(--hover);
+	border-color: color-mix(in srgb, var(--editor-fg, var(--fg)) 26%, transparent);
+}
+
+.cm-tbl-qbtn .codicon-glyph {
+	font-size: 12px;
+	line-height: 1;
+}
+
+.cm-tbl-range-badge {
+	display: inline-flex;
+	align-items: center;
+	height: 20px;
+	padding: 0 7px;
+	margin-right: auto;
+	border-radius: 999px;
+	background: color-mix(in srgb, var(--editor-accent, var(--accent)) 14%, transparent);
+	border: 1px solid color-mix(in srgb, var(--editor-accent, var(--accent)) 36%, transparent);
+	color: var(--editor-accent, var(--accent));
+	font-size: 11px;
+	font-weight: 600;
+	white-space: nowrap;
+}
+
+/* Subtle column header sort affordance */
+.cm-tbl-th-inner {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 6px;
+}
+
+.cm-tbl-th-inner > .cm-tbl-cell-view {
+	flex: 1;
+	min-width: 0;
+}
+
+.cm-tbl-th-sort {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 18px;
+	height: 18px;
+	padding: 0;
+	margin-top: 1px;
+	flex: none;
+	border: 0;
+	border-radius: var(--radius-sm);
+	background: transparent;
+	color: var(--editor-muted, var(--muted));
+	cursor: pointer;
+	opacity: 0;
+	transition: opacity 120ms ease, background 120ms ease, color 120ms ease;
+}
+
+.cm-md-table-wrap th:hover .cm-tbl-th-sort,
+.cm-tbl-th-sort.is-sorted,
+.cm-tbl-th-sort:focus-visible {
+	opacity: 0.85;
+}
+
+.cm-tbl-th-sort:hover,
+.cm-tbl-th-sort.is-sorted {
+	opacity: 1;
+	color: var(--editor-accent, var(--accent));
+	background: color-mix(in srgb, var(--editor-accent, var(--accent)) 14%, transparent);
+}
+
+.cm-tbl-th-sort .codicon-glyph {
+	font-size: 12px;
+	line-height: 1;
+}
+
+/* Shift+Click rectangular cell range selection highlight */
+.cm-md-table-wrap th.is-range-selected,
+.cm-md-table-wrap td.is-range-selected {
+	background: color-mix(in srgb, var(--editor-accent, var(--accent)) 16%, var(--editor-bg, var(--bg))) !important;
+	box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--editor-accent, var(--accent)) 55%, transparent);
+}
+
+/* Transclusion header actions (Refresh + Edit) */
+.cm-md-embed-actions {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	flex: none;
+}
+
+.cm-md-embed-refresh {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	padding: 2px 5px;
+}
+
+.cm-md-embed-refresh .codicon-glyph {
+	font-size: 13px;
+	line-height: 1;
+}
+
+/* Foldable `<details class="md-callout">` and nested callouts inside Callout / Read / Hover bodies */
+details.md-callout > summary.md-callout-head {
+	cursor: pointer;
+	user-select: none;
+	list-style: none;
+}
+
+details.md-callout > summary.md-callout-head::-webkit-details-marker {
+	display: none;
+}
+
+details.md-callout > summary.md-callout-head::after {
+	content: "\eab6";
+	font-family: codicon;
+	font-size: 13px;
+	line-height: 1;
+	margin-left: auto;
+	color: var(--editor-muted, var(--muted));
+	transition: transform 120ms ease;
+	flex: none;
+}
+
+details.md-callout[open] > summary.md-callout-head::after {
+	transform: rotate(90deg);
+}
+
+details.md-callout:not([open]) > summary.md-callout-head {
+	background: transparent;
+}
+
+.cm-md-callout-body .md-callout,
+.md-callout-body .md-callout {
+	margin: 8px 0;
+	border-radius: var(--radius-sm);
+}
+
+.cm-md-callout-body .md-callout-head,
+.md-callout-body .md-callout-head {
+	padding: 5px var(--space-3);
+	font-size: var(--text-sm);
+}
+
+.cm-md-callout-body .md-callout-body,
+.md-callout-body .md-callout-body {
+	padding: var(--space-2) var(--space-3);
+}
+
+/* Inline image lightbox cursor + Block image right-edge drag-to-resize handle */
+.cm-md-image-wrap.is-inline img {
+	cursor: zoom-in;
+}
+
+.cm-md-image-resize-handle {
+	position: absolute;
+	top: 12%;
+	bottom: 12%;
+	right: -5px;
+	width: 10px;
+	cursor: ew-resize;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	opacity: 0;
+	transition: opacity 120ms ease;
+	z-index: 4;
+}
+
+.cm-md-image-resize-handle::after {
+	content: "";
+	width: 4px;
+	height: 36px;
+	max-height: 60%;
+	border-radius: 999px;
+	background: var(--editor-accent, var(--accent));
+	box-shadow: 0 0 0 1px var(--editor-bg, var(--bg));
+}
+
+.cm-md-image-frame:hover .cm-md-image-resize-handle,
+.cm-md-image-frame.is-resizing .cm-md-image-resize-handle {
+	opacity: 1;
+}
+
+.cm-md-image-frame.is-resizing img {
+	outline: 2px solid color-mix(in srgb, var(--editor-accent, var(--accent)) 70%, transparent);
+	outline-offset: 1px;
+}
+
+.cm-md-image-width-badge {
+	position: absolute;
+	bottom: 8px;
+	right: 10px;
+	padding: 2px 7px;
+	border-radius: var(--radius-sm);
+	background: color-mix(in srgb, var(--side-bg, #1c1917) 90%, transparent);
+	border: 1px solid var(--input-border, var(--border));
+	color: var(--strong-fg);
+	font-family: var(--code-font);
+	font-size: var(--text-xs);
+	font-weight: 600;
+	line-height: 1.3;
+	pointer-events: none;
+	z-index: 5;
+}
+
+/* Quiet hover `#` copy-link affordance on headings (Live & Read) */
+.cm-md-heading-link {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	margin-left: 8px;
+	padding: 0 5px;
+	height: 1.15em;
+	vertical-align: middle;
+	border: 0;
+	border-radius: var(--radius-sm);
+	background: transparent;
+	color: var(--editor-muted, var(--muted));
+	font-family: var(--ui-font);
+	font-size: 0.62em;
+	font-weight: 600;
+	line-height: 1;
+	cursor: pointer;
+	opacity: 0;
+	user-select: none;
+	transition: opacity 120ms ease, color 120ms ease, background 120ms ease;
+}
+
+.cm-line:hover .cm-md-heading-link,
+.cm-md-heading-link:focus-visible,
+.cm-md-heading-link.is-copied {
+	opacity: 0.72;
+}
+
+.cm-md-heading-link:hover {
+	opacity: 1;
+	color: var(--editor-accent, var(--accent));
+	background: color-mix(in srgb, var(--editor-accent, var(--accent)) 12%, transparent);
+}
+
+.cm-md-heading-link.is-copied {
+	opacity: 1;
+	color: var(--ok);
+}
+
+/* Floating Selection Formatting Toolbar in Live Mode */
+.cm-md-sel-bubble {
+	position: fixed;
+	z-index: 64;
+	display: inline-flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 2px;
+	max-width: calc(100vw - 16px);
+	padding: 3px 5px;
+	border-radius: var(--radius-md);
+	border: 1px solid var(--input-border, var(--border));
+	background: var(--side-bg, var(--panel-bg));
+	color: var(--side-fg, var(--fg));
+	box-shadow: var(--shadow);
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+}
+
+.cm-md-sel-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	height: 24px;
+	padding: 0 7px;
+	border: 1px solid transparent;
+	border-radius: var(--radius-sm);
+	background: transparent;
+	color: var(--side-fg, var(--fg));
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+	font-weight: 500;
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+.cm-md-sel-btn:hover {
+	background: var(--hover);
+	color: var(--strong-fg);
+}
+
+.cm-md-sel-bold {
+	font-weight: 700;
+}
+
+.cm-md-sel-italic {
+	font-style: italic;
+	font-family: Georgia, serif;
+}
+
+.cm-md-sel-code {
+	font-family: var(--code-font);
+}
+
+.cm-md-sel-hl {
+	background: color-mix(in srgb, var(--warning) 20%, transparent);
+}
+
+.cm-md-sel-sep {
+	width: 1px;
+	height: 15px;
+	background: var(--border);
+	opacity: 0.65;
+	margin: 0 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.cm-tbl-hover-bar,
+	.cm-tbl-th-sort,
+	.cm-md-image-resize-handle,
+	.cm-md-heading-link,
+	details.md-callout > summary.md-callout-head::after {
+		transition: none;
+	}
 }

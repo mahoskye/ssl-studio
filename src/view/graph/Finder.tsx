@@ -13,10 +13,15 @@ export function Finder(props: {
 	/** What to say when nothing matches what was typed. */
 	none: (typed: string) => string;
 	onChoose: (id: string) => void;
+	/** Exposes a focus callback for canvas Ctrl+F shortcuts. */
+	onRef?: (focus: () => void) => void;
+	/** Called when Escape is pressed on an already-empty box to return focus cleanly. */
+	onEscape?: () => void;
 }) {
 	const listId = createUniqueId();
 	const [text, setText] = createSignal("");
 	const [at, setAt] = createSignal(0);
+	let inputEl: HTMLInputElement | undefined;
 	const found = createMemo(() => matching(props.choices, text()));
 	const here = () => Math.min(at(), found().length - 1);
 	const choose = (id: string) => {
@@ -26,6 +31,13 @@ export function Finder(props: {
 	return (
 		<span class="graph-find-box">
 			<input
+				ref={(el) => {
+					inputEl = el;
+					props.onRef?.(() => {
+						el.focus();
+						el.select();
+					});
+				}}
 				class="graph-find"
 				type="search"
 				role="combobox"
@@ -50,10 +62,18 @@ export function Finder(props: {
 						e.preventDefault();
 						const pick = list[here()];
 						if (pick) choose(pick.id);
-					} else if (e.key === "Escape" && text()) {
-						// The first Escape empties the box; it is not the view's Escape yet.
-						e.stopPropagation();
-						setText("");
+					} else if (e.key === "Escape") {
+						if (text()) {
+							// The first Escape empties the box; it is not the view's Escape yet.
+							e.preventDefault();
+							e.stopPropagation();
+							setText("");
+						} else {
+							e.preventDefault();
+							e.stopPropagation();
+							inputEl?.blur();
+							props.onEscape?.();
+						}
 					}
 				}}
 			/>

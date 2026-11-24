@@ -24,22 +24,29 @@ export function Menu(props: {
 	title: string;
 	class?: string;
 	/**
-	 * For a menu inside something that cuts off what runs past its edge (a side panel or bottom bar):
-	 * rendered in a Portal and placed cleanly inside the viewport, flipping upward when near the bottom.
+	 * Rendered in a Portal by default (`true`) so menus inside clipping containers
+	 * (toolbars, side panels, tab bars, properties bars, bottom bars) clamp cleanly
+	 * inside the viewport and flip upward when near the bottom edge. Pass
+	 * `floating={false}` to opt out.
 	 */
 	floating?: boolean;
 	items: () => MenuItem[] | Promise<MenuItem[]>;
 	children: any;
 }) {
+	const isFloating = () => props.floating !== false;
 	const [items, setItems] = createSignal<MenuItem[] | null>(null);
 	let button!: HTMLButtonElement;
 	let list: HTMLDivElement | undefined;
+	let openSeq = 0;
+	let disposed = false;
 	const focusAt = (index: number) => list?.querySelectorAll<HTMLElement>("[data-item]")[index]?.focus();
 	const close = (refocus = true) => {
+		openSeq++;
 		setItems(null);
+		list = undefined;
 		document.removeEventListener("mousedown", outside, true);
 		window.removeEventListener("resize", reposition);
-		if (refocus) button.focus();
+		if (refocus && button.isConnected) button.focus();
 	};
 	const outside = (e: MouseEvent) => {
 		if (!list?.contains(e.target as Node) && !button.contains(e.target as Node)) close(false);
@@ -48,13 +55,14 @@ export function Menu(props: {
 		if (!list || !button.isConnected) return;
 		// Clear previous constraints so window resizes re-measure natural dimensions cleanly.
 		list.style.maxHeight = "";
+		list.style.maxWidth = "";
 		list.style.top = "";
 		list.style.bottom = "";
 		const from = button.getBoundingClientRect();
 		const box = list.getBoundingClientRect();
 		const naturalH = Math.max(box.height, list.scrollHeight);
 		const naturalW = Math.min(Math.max(box.width, list.offsetWidth, 200), Math.min(360, window.innerWidth - 16));
-		if (props.floating) {
+		if (isFloating()) {
 			const placed = placeAnchoredMenu(
 				{ left: from.left, right: from.right, top: from.top, bottom: from.bottom },
 				{ width: naturalW, height: naturalH },
@@ -85,16 +93,21 @@ export function Menu(props: {
 		}
 	};
 	const open = async () => {
+		const seq = ++openSeq;
 		const loaded = await props.items();
+		if (disposed || seq !== openSeq || !button.isConnected) return;
 		setItems(loaded);
 		document.addEventListener("mousedown", outside, true);
 		window.addEventListener("resize", reposition);
 		queueMicrotask(() => {
+			if (disposed || seq !== openSeq) return;
 			reposition();
 			focusAt(nextItem(loaded, -1, 1));
 		});
 	};
 	onCleanup(() => {
+		disposed = true;
+		openSeq++;
 		document.removeEventListener("mousedown", outside, true);
 		window.removeEventListener("resize", reposition);
 	});
@@ -116,7 +129,7 @@ export function Menu(props: {
 	const renderPopup = (all: () => MenuItem[]) => (
 		<div
 			class="menu-pop"
-			classList={{ "menu-pop-floating": Boolean(props.floating) }}
+			classList={{ "menu-pop-floating": isFloating() }}
 			role="menu"
 			aria-label={props.label}
 			ref={(el) => (list = el)}
@@ -160,12 +173,26 @@ export function Menu(props: {
 
 	return (
 		<span class={`menu ${props.class ?? ""}`}>
-			<button ref={button} title={props.title} aria-label={props.label} aria-haspopup="menu" aria-expanded={items() !== null} onClick={() => (items() ? close() : void open())}>
+			<button
+				ref={button}
+				title={props.title}
+				aria-label={props.label}
+				aria-haspopup="menu"
+				aria-expanded={items() !== null}
+				onClick={() => (items() ? close() : void open())}
+				onKeyDown={(e) => {
+					if (e.key === "Escape" && items()) {
+						e.preventDefault();
+						e.stopPropagation();
+						close();
+					}
+				}}
+			>
 				{props.children}
 			</button>
 			<Show when={items()}>
 				{(all) =>
-					props.floating ? <Portal>{renderPopup(all)}</Portal> : renderPopup(all)
+					isFloating() ? <Portal>{renderPopup(all)}</Portal> : renderPopup(all)
 				}
 			</Show>
 		</span>

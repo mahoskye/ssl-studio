@@ -16,6 +16,7 @@ import {
 	type MarkdownCodeFence,
 } from "../../shared/fencedFormat";
 import { formatJson } from "../../shared/jsonFormat";
+import { LANGUAGES, languageFor, languageName, type LanguageDef } from "../../shared/languages";
 import { backend } from "../backend";
 import { monaco } from "./monaco";
 import "monaco-editor/languages/definitions/markdown/register";
@@ -26,6 +27,7 @@ import "monaco-editor/languages/definitions/ini/register";
 // Common STARLIMS companion & fenced-code languages (lazy-loaded on first use by Monaco).
 import "monaco-editor/languages/definitions/shell/register";
 import "monaco-editor/languages/definitions/powershell/register";
+import "monaco-editor/languages/definitions/bat/register";
 import "monaco-editor/languages/definitions/javascript/register";
 import "monaco-editor/languages/definitions/typescript/register";
 import "monaco-editor/languages/definitions/html/register";
@@ -33,36 +35,24 @@ import "monaco-editor/languages/definitions/css/register";
 import "monaco-editor/languages/definitions/scss/register";
 import "monaco-editor/languages/definitions/less/register";
 import "monaco-editor/languages/definitions/csharp/register";
+import "monaco-editor/languages/definitions/vb/register";
+import "monaco-editor/languages/definitions/razor/register";
+import "monaco-editor/languages/definitions/pgsql/register";
+import "monaco-editor/languages/definitions/mysql/register";
 import "monaco-editor/languages/definitions/python/register";
+import "monaco-editor/languages/definitions/java/register";
+import "monaco-editor/languages/definitions/cpp/register";
+import "monaco-editor/languages/definitions/php/register";
+import "monaco-editor/languages/definitions/dockerfile/register";
+import "monaco-editor/languages/definitions/graphql/register";
+import "monaco-editor/languages/definitions/r/register";
+import "monaco-editor/languages/definitions/perl/register";
+import "monaco-editor/languages/definitions/ruby/register";
+import "monaco-editor/languages/definitions/go/register";
+import "monaco-editor/languages/definitions/rust/register";
+import "monaco-editor/languages/definitions/fsharp/register";
 
-type Language = { id: string; name: string; extensions: RegExp };
-
-/** Each language a file can be in, with the name the status bar gives it. The first whose extensions match is the file's. */
-export const LANGUAGES: readonly Language[] = [
-	{ id: "ssl", name: "SSL", extensions: /\.(ssl|srvscr|ds)$/i },
-	{ id: "markdown", name: "Markdown", extensions: /\.(md|markdown)$/i },
-	{ id: "json", name: "JSON", extensions: /\.(json|jsonc)$/i },
-	{ id: "toml", name: "TOML", extensions: /\.toml$/i },
-	{ id: "sql", name: "SQL", extensions: /\.(sql|ddl|pks|pkb)$/i },
-	{ id: "csv", name: "CSV", extensions: /\.(csv|tsv)$/i },
-	{ id: "yaml", name: "YAML", extensions: /\.(ya?ml)$/i },
-	{ id: "xml", name: "XML", extensions: /\.(xml|xfd|xsd|xsl|xslt|wsdl|config|csproj|svg)$/i },
-	{ id: "javascript", name: "JavaScript", extensions: /\.(m?js|cjs|jsx)$/i },
-	{ id: "typescript", name: "TypeScript", extensions: /\.(m?ts|cts|tsx)$/i },
-	{ id: "html", name: "HTML", extensions: /\.html?$/i },
-	{ id: "css", name: "CSS", extensions: /\.css$/i },
-	{ id: "scss", name: "SCSS", extensions: /\.scss$/i },
-	{ id: "less", name: "Less", extensions: /\.less$/i },
-	{ id: "csharp", name: "C#", extensions: /\.cs$/i },
-	{ id: "powershell", name: "PowerShell", extensions: /\.(ps1|psm1|psd1)$/i },
-	{ id: "shell", name: "Shell", extensions: /\.(sh|bash)$/i },
-	{ id: "python", name: "Python", extensions: /\.py$/i },
-	{ id: "ini", name: "INI", extensions: /\.(ini|cfg|conf|properties)$/i },
-];
-
-export const languageFor = (path: string) => LANGUAGES.find((l) => l.extensions.test(path))?.id ?? "plaintext";
-/** A language by the name a person would call it: "TOML", not "toml"; a file in none of them is plain text. */
-export const languageName = (id: string | undefined) => LANGUAGES.find((l) => l.id === id)?.name ?? "Plain text";
+export { LANGUAGES, languageFor, languageName, type LanguageDef };
 
 const BRACKETS: monaco.languages.LanguageConfiguration = {
 	brackets: [
@@ -195,6 +185,7 @@ export const DOCUMENT_POSTFIXES: readonly string[] = [
 	"csv",
 	"shell",
 	"ps1",
+	"bat",
 	"js",
 	"ts",
 	"html",
@@ -202,7 +193,18 @@ export const DOCUMENT_POSTFIXES: readonly string[] = [
 	"scss",
 	"less",
 	"cs",
+	"vb",
 	"python",
+	"java",
+	"cpp",
+	"dockerfile",
+	"gql",
+	"r",
+	"perl",
+	"ruby",
+	"go",
+	"rust",
+	"fs",
 ];
 
 /**

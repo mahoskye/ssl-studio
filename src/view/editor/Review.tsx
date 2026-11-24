@@ -8,6 +8,7 @@ import { parseCsv } from "../../shared/csv";
 import { DEFAULT_CODE_FONT, resolveFontStack } from "../../shared/fonts";
 import { frontMatter } from "../../shared/frontMatter";
 import { diffInlineWords, diffMarkdownBlocks, type MarkdownDiffRow } from "../../shared/markdownDiff";
+import { initialReviewLayout, reviewLayoutKey, type ReviewFormat, type ReviewLayout } from "../../shared/menuBar";
 import { Icon } from "../Icon";
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, untrack } from "solid-js";
 import { choose } from "../dialogs";
@@ -15,6 +16,7 @@ import { canonical, keepTab, state, notify } from "../state";
 import { baseName, isInside, joinPath, relativeTo } from "../../shared/paths";
 import { recall, remember } from "../graph/canvas";
 import { CenterTabStrip } from "./CenterTabStrip";
+import { observeMarkerHoverSeverity } from "./hoverSeverity";
 import { languageFor } from "./languages";
 import { finishMarkdown } from "./markdownHtml";
 import { monaco } from "./monaco";
@@ -290,19 +292,21 @@ export function ReviewView() {
 	const r = untrack(review)!;
 	const isMdReview = /\.(md|markdown)$/i.test(r.path ?? "") || r.language === "markdown";
 	const isCsvReview = /\.(csv|tsv)$/i.test(r.path ?? "");
+	const reviewFormat: ReviewFormat = isMdReview ? "markdown" : isCsvReview ? "csv" : "code";
+	const layoutKey = reviewLayoutKey(reviewFormat);
 	const [busy, setBusy] = createSignal(false);
 	const [error, setError] = createSignal("");
 	/** The lines the proposal adds and takes away, once the diff has been worked out. */
 	const [size, setSize] = createSignal("");
 	/** Live proposed text synced from Monaco so Rendered / Table views reflect in-review edits. */
 	const [liveProposed, setLiveProposed] = createSignal(r.proposed);
-	/** Explicit diff layout (ADR 0027): never silently flips behind the column headers. */
-	const [diffLayout, setDiffLayout] = createSignal<"split" | "inline" | "rendered" | "table">(recall("review.layout") === "inline" ? "inline" : "split");
+	/** Explicit per-format diff layout (ADR 0027): Markdown defaults to Rendered, CSV to Table, code to Split. */
+	const [diffLayout, setDiffLayout] = createSignal<ReviewLayout>(initialReviewLayout(reviewFormat, recall(layoutKey)));
 	const [mdOnlyChanged, setMdOnlyChanged] = createSignal(false);
 	const [csvOnlyChanged, setCsvOnlyChanged] = createSignal(false);
-	const chooseLayout = (next: "split" | "inline" | "rendered" | "table") => {
+	const chooseLayout = (next: ReviewLayout) => {
 		setDiffLayout(next);
-		if (next === "split" || next === "inline") remember("review.layout", next);
+		remember(layoutKey, next);
 	};
 	const isCodeDiff = () => diffLayout() === "split" || diffLayout() === "inline";
 	const renderedDiff = createMemo(() => (isMdReview && diffLayout() === "rendered" ? buildRenderedMarkdownDiff(r.original, liveProposed()) : null));
@@ -381,6 +385,7 @@ export function ReviewView() {
 			originalEditable: false,
 			readOnly: isReadOnly,
 			fontSize: state.settings.fontSize,
+			fixedOverflowWidgets: true,
 			selectionClipboard: false,
 		}));
 		diff.setModel({ original, modified: proposed });
@@ -390,14 +395,19 @@ export function ReviewView() {
 		// How large the change is, kept up to date as the right side is edited.
 		const sized = diff.onDidUpdateDiff(() => setSize(changeSize(diff.getLineChanges())));
 		const synced = proposed.onDidChangeContent(() => setLiveProposed(proposed.getValue()));
+		const stopHoverSevs = [diff.getOriginalEditor(), diff.getModifiedEditor()].map((side) => observeMarkerHoverSeverity(side));
 		onCleanup(() => {
 			sized.dispose();
 			synced.dispose();
+			for (const stop of stopHoverSevs) stop();
 		});
 		untouched = proposed.getAlternativeVersionId();
 		// Escape needs the keyboard in here. Typing somewhere else (the agent's composer) is left alone.
 		const focused = document.activeElement;
-		if (!focused || focused === document.body || root.contains(focused)) diff.getModifiedEditor().focus();
+		if (!focused || focused === document.body || root.contains(focused)) {
+			if (isCodeDiff()) diff.getModifiedEditor().focus();
+			else root.focus();
+		}
 		onCleanup(() => {
 			editor = undefined;
 			diff.dispose();
@@ -442,7 +452,7 @@ export function ReviewView() {
 
 	return (
 		<CenterTabStrip title={tabTitle} tooltip={r.path ?? r.title} icon="split-horizontal" onClose={reject}>
-			<div class="diff" ref={root} onKeyDown={onKey}>
+			<div class="diff" ref={root} tabindex={-1} onKeyDown={onKey}>
 				<div class="diff-bar review-bar">
 					<div class="review-head">
 						<div class="review-what">
@@ -455,7 +465,14 @@ export function ReviewView() {
 						</div>
 						<p class="review-effect">
 							{r.compare
-								? (r.effect ?? (diffLayout() === "split" ? "The two are shown side by side. Nothing here changes either." : "Shown inline. Nothing here changes either."))
+								? (r.effect ??
+									(diffLayout() === "rendered"
+										? "Shown rendered side by side. Nothing here changes either."
+										: diffLayout() === "table"
+											? "Shown as a structured table diff. Nothing here changes either."
+											: diffLayout() === "split"
+												? "The two are shown side by side. Nothing here changes either."
+												: "Shown inline. Nothing here changes either."))
 								: `${effect} ${rejectLabel} (Esc) changes nothing.`}
 						</p>
 					</div>

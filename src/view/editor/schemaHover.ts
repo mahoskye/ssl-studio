@@ -7,8 +7,8 @@ import { findCodeCitations, type CodeCitation } from "../../shared/codeCitations
 import { parseCsv } from "../../shared/csv";
 import { linkBeingWritten } from "../../shared/docLinks";
 import { findHeadingLine } from "../../shared/markdownEdit";
-import { nameBeingWritten } from "../../shared/namedLinks";
-import { dirName, isInside, joinPath, relativeTo, resolvePath } from "../../shared/paths";
+import { nameBeingWritten, nameFor } from "../../shared/namedLinks";
+import { baseName, dirName, isInside, joinPath, relativeTo, resolvePath } from "../../shared/paths";
 import { isCatalog, registryTitle, toneOf } from "../../shared/projectDocs";
 import type { DocFile } from "../../shared/protocol";
 import {
@@ -22,7 +22,9 @@ import {
 import { ticketMatcher } from "../../shared/ticketRefs";
 import { codeMatchesRef, docsGoverningFile } from "../../shared/workContext";
 import { backend } from "../backend";
+import { quickPick, type QuickPickOption } from "../dialogs";
 import { docAuditData } from "../docAudit";
+import { session } from "../lsp/session";
 import { symbols } from "../panels/Objects";
 import { docs, isMarkdown } from "../project";
 import { activeDoc, activePath, canonical, documents, notify, openFile, state } from "../state";
@@ -66,6 +68,27 @@ function findCommentDocRefAt(
 const previewCache = new Map<string, { version: string; markdown: string }>();
 const columnCache = new Map<string, { version: number; columns: SchemaColumnInfo[] }>();
 const citationCache = new Map<string, { version: string; citations: CodeCitation[] }>();
+const modelSymbolCache = new Map<string, { version: number; symbols: monaco.languages.DocumentSymbol[] }>();
+
+/**
+ * Fetches starlims-lsp DocumentSymbols for any open SSL model (including non-active Split Editor panes),
+ * cached per canonical path + model versionId (ADR 0003: zero SSL parsing in the IDE).
+ */
+async function documentSymbolsForModel(model: monaco.editor.ITextModel): Promise<monaco.languages.DocumentSymbol[]> {
+	if (model.uri.scheme !== "file" || model.getLanguageId() !== "ssl") return [];
+	const filePath = canonical(model.uri.fsPath);
+	if (filePath === canonical(activePath() ?? "")) {
+		const activeSyms = symbols();
+		if (activeSyms.length) return activeSyms;
+	}
+	const version = model.getVersionId();
+	const hit = modelSymbolCache.get(filePath);
+	if (hit && hit.version === version) return hit.symbols;
+	if (state.lsp.state !== "running") return [];
+	const list = await session.documentSymbols(model).catch(() => [] as monaco.languages.DocumentSymbol[]);
+	modelSymbolCache.set(filePath, { version, symbols: list });
+	return list;
+}
 
 type ParsedPlanSummary = {
 	title: string;
@@ -395,7 +418,7 @@ async function planMatchesForProcedure(
 ): Promise<PlanProcMatch[]> {
 	const procLower = procName.toLowerCase();
 	const gov = docsGoverningFile(allDocs, filePath, wsRoot);
-	const planDocs = gov.filter((g) => g.file.group === "plans").map((g) => g.file);
+	const planDocs = gov.filter((g) => g.file.group === "plans" && /\.plan\.json$/i.test(g.file.name)).map((g) => g.file);
 	if (!planDocs.length) return [];
 
 	const matches: PlanProcMatch[] = [];
@@ -432,14 +455,15 @@ async function planMatchesForProcedure(
 }
 
 async function buildProcedureHoverMarkdown(
+	model: monaco.editor.ITextModel,
 	filePath: string,
 	word: string,
 	lineNumber: number,
 	allDocs: readonly DocFile[],
 	wsRoot?: string | null,
 ): Promise<string | null> {
-	const isActive = canonical(filePath) === canonical(activePath() ?? "");
-	const fileSyms = isActive ? flattenSymbols(symbols(), HOVER_SYMBOL_KINDS) : [];
+	const rawSyms = await documentSymbolsForModel(model);
+	const fileSyms = flattenSymbols(rawSyms, HOVER_SYMBOL_KINDS);
 	const wordLower = word.toLowerCase();
 	const matchedSym =
 		fileSyms.find((s) => s.name.toLowerCase() === wordLower) ??
@@ -630,7 +654,7 @@ export function registerSchemaHoverProviders(): void {
 
 				// 4. SSL procedure / symbol hover enriched with governing docs, decisions, questions & plan steps
 				if (lang === "ssl" && model.uri.scheme === "file") {
-					const procMd = await buildProcedureHoverMarkdown(canonical(model.uri.fsPath), word.word, position.lineNumber, allDocs, wsRoot);
+					const procMd = await buildProcedureHoverMarkdown(model, canonical(model.uri.fsPath), word.word, position.lineNumber, allDocs, wsRoot);
 					if (procMd) return { range, contents: [{ value: procMd }] };
 				}
 
@@ -930,21 +954,178 @@ export function registerSchemaHoverProviders(): void {
 		});
 	}
 
-	// Lightweight SSL CodeLensProvider using starlims-lsp `symbols()` (ADR 0003: zero SSL parsing).
+	// SSL/SQL comment-context completion provider: suggests [[wikilinks]], active/open tickets, and docs/ relative paths inside comments.
+	for (const commentLang of ["ssl", "sql"] as const) {
+		monaco.languages.registerCompletionItemProvider(commentLang, {
+			triggerCharacters: ["[", "/"],
+			provideCompletionItems(model, position) {
+				const lineNum = position.lineNumber;
+				if (lineNum > 5000) return { suggestions: [] };
+				const lines: string[] = [];
+				for (let i = 1; i <= lineNum; i++) lines.push(model.getLineContent(i));
+				const spans = extractCommentSpans(lines, commentLang)[lineNum - 1];
+				const offset = position.column - 1;
+				if (!spans?.some((s) => offset >= s.from && offset <= s.to)) {
+					return { suggestions: [] };
+				}
+
+				const lineText = lines[lineNum - 1] ?? "";
+				const before = lineText.slice(0, offset);
+				const after = lineText.slice(offset);
+				const allDocs = docs().filter((d) => d.exists && !isCatalog(d));
+				const wsRoot = state.workspace?.root;
+				const activeKey = state.settings.activeTicket?.trim().toLowerCase() ?? "";
+				const suggestions: monaco.languages.CompletionItem[] = [];
+
+				// 1. Inside `[[...` or right after `[`: suggest [[wikilinks]] for workspace docs and tickets.
+				const wikiMatch = /(\[\[?)([^\]\n]*)$/.exec(before);
+				if (wikiMatch) {
+					const openBrackets = wikiMatch[1]!;
+					const typed = wikiMatch[2] ?? "";
+					const typedLower = typed.toLowerCase();
+					const startCol = position.column - openBrackets.length - typed.length;
+					const hasClosing = after.startsWith("]]");
+					const endCol = hasClosing ? position.column + 2 : position.column;
+					const range = new monaco.Range(lineNum, startCol, lineNum, endCol);
+					const seen = new Set<string>();
+					for (const d of allDocs) {
+						const wikiName = nameFor(d, allDocs, wsRoot) || baseName(d.path).replace(/\.[^.]+$/, "");
+						const lower = wikiName.toLowerCase();
+						if (!wikiName || seen.has(lower)) continue;
+						const relPath = wsRoot ? relativeTo(wsRoot, d.path).replace(/\\/g, "/") : d.name;
+						if (
+							typedLower &&
+							!lower.includes(typedLower) &&
+							!(d.title?.toLowerCase().includes(typedLower) ?? false) &&
+							!(d.ticket?.toLowerCase().includes(typedLower) ?? false) &&
+							!relPath.toLowerCase().includes(typedLower)
+						) {
+							continue;
+						}
+						seen.add(lower);
+						const isActiveTicket = Boolean(activeKey && d.ticket?.toLowerCase() === activeKey);
+						const isTicket = d.group === "tickets";
+						suggestions.push({
+							label: `[[${wikiName}]]`,
+							filterText: `${wikiName} ${d.title ?? ""} ${d.ticket ?? ""} ${relPath}`,
+							kind: isTicket ? monaco.languages.CompletionItemKind.Reference : monaco.languages.CompletionItemKind.File,
+							detail: [d.title && d.title !== wikiName ? d.title : "", d.status ? `(${d.status})` : "", relPath].filter(Boolean).join(" · "),
+							documentation: d.summary || undefined,
+							insertText: `[[${wikiName}]]`,
+							sortText: isActiveTicket ? `00_${lower}` : isTicket ? `01_${lower}` : `02_${lower}`,
+							range,
+						});
+						if (suggestions.length >= 80) break;
+					}
+					return { suggestions };
+				}
+
+				// 2. Relative doc path inside comment (e.g. `docs/...`, `design/...`, `schema/...`, `../...`).
+				const pathMatch = /(?:^|[\s([{"'`])((?:\.{1,2}\/|(?:docs|design|schema|knowledge)\/)[A-Za-z0-9_./-]*)$/i.exec(before);
+				if (pathMatch) {
+					const typed = pathMatch[1]!;
+					const typedLower = typed.toLowerCase();
+					const range = new monaco.Range(lineNum, position.column - typed.length, lineNum, position.column);
+					for (const d of allDocs) {
+						const relPath = wsRoot ? relativeTo(wsRoot, d.path).replace(/\\/g, "/") : d.name.replace(/\\/g, "/");
+						if (!relPath.toLowerCase().includes(typedLower)) continue;
+						suggestions.push({
+							label: relPath,
+							kind: monaco.languages.CompletionItemKind.File,
+							detail: [d.title || "", d.status ? `(${d.status})` : ""].filter(Boolean).join(" "),
+							documentation: d.summary || undefined,
+							insertText: relPath,
+							sortText: `10_${relPath.toLowerCase()}`,
+							range,
+						});
+						if (suggestions.length >= 80) break;
+					}
+					return { suggestions };
+				}
+
+				// 3. General comment context: active/open tickets, docs/ relative paths, and [[wikilinks]].
+				const tokenMatch = /([A-Za-z0-9_./-]*)$/.exec(before);
+				const typed = tokenMatch?.[1] ?? "";
+				const typedLower = typed.toLowerCase();
+				const range = new monaco.Range(lineNum, position.column - typed.length, lineNum, position.column);
+
+				const tickets = allDocs
+					.filter((d) => d.group === "tickets" && d.ticket && toneOf(d.status) !== "done")
+					.sort((a, b) => {
+						const aActive = a.ticket!.toLowerCase() === activeKey ? 0 : 1;
+						const bActive = b.ticket!.toLowerCase() === activeKey ? 0 : 1;
+						return aActive - bActive || a.ticket!.localeCompare(b.ticket!, undefined, { numeric: true, sensitivity: "base" });
+					});
+				for (const t of tickets) {
+					const key = t.ticket!;
+					if (typedLower && !key.toLowerCase().includes(typedLower) && !(t.title?.toLowerCase().includes(typedLower) ?? false)) continue;
+					const isActive = key.toLowerCase() === activeKey;
+					suggestions.push({
+						label: key,
+						filterText: `${key} ${t.title ?? ""}`,
+						kind: monaco.languages.CompletionItemKind.Reference,
+						detail: [isActive ? "Active ticket" : "Ticket", t.title || "", t.status ? `(${t.status})` : ""].filter(Boolean).join(" · "),
+						documentation: t.summary || undefined,
+						insertText: key,
+						sortText: isActive ? `00_${key}` : `01_${key}`,
+						range,
+					});
+				}
+
+				for (const d of allDocs) {
+					const relPath = wsRoot ? relativeTo(wsRoot, d.path).replace(/\\/g, "/") : d.name.replace(/\\/g, "/");
+					const wikiName = nameFor(d, allDocs, wsRoot) || baseName(d.path).replace(/\.[^.]+$/, "");
+					if (
+						typedLower &&
+						!relPath.toLowerCase().includes(typedLower) &&
+						!wikiName.toLowerCase().includes(typedLower) &&
+						!(d.title?.toLowerCase().includes(typedLower) ?? false)
+					) {
+						continue;
+					}
+					if (relPath.toLowerCase().startsWith("docs/")) {
+						suggestions.push({
+							label: relPath,
+							kind: monaco.languages.CompletionItemKind.File,
+							detail: d.title || d.group,
+							documentation: d.summary || undefined,
+							insertText: relPath,
+							sortText: `02_${relPath.toLowerCase()}`,
+							range,
+						});
+					}
+					suggestions.push({
+						label: `[[${wikiName}]]`,
+						filterText: `${wikiName} ${d.title ?? ""} ${relPath}`,
+						kind: monaco.languages.CompletionItemKind.Reference,
+						detail: relPath,
+						documentation: d.summary || undefined,
+						insertText: `[[${wikiName}]]`,
+						sortText: `03_${wikiName.toLowerCase()}`,
+						range,
+					});
+					if (suggestions.length >= 80) break;
+				}
+				return { suggestions };
+			},
+		});
+	}
+
+	// Lightweight SSL CodeLensProvider using starlims-lsp symbols per URI (ADR 0003: zero SSL parsing; works across Split Editor panes).
 	const lensEmitter = new monaco.Emitter<monaco.languages.CodeLensProvider>();
 	const codeLensProvider: monaco.languages.CodeLensProvider = {
 		onDidChange: lensEmitter.event,
 		async provideCodeLenses(model) {
 			if (model.uri.scheme !== "file") return { lenses: [], dispose: () => {} };
 			const filePath = canonical(model.uri.fsPath);
-			if (filePath !== canonical(activePath() ?? "")) return { lenses: [], dispose: () => {} };
-			const procs = flattenSymbols(symbols(), PROC_SYMBOL_KINDS);
+			const fileSyms = await documentSymbolsForModel(model);
+			const procs = flattenSymbols(fileSyms, PROC_SYMBOL_KINDS);
 			if (!procs.length) return { lenses: [], dispose: () => {} };
 
 			const allDocs = docs();
 			const wsRoot = state.workspace?.root;
 			const gov = docsGoverningFile(allDocs, filePath, wsRoot);
-			const planDocs = gov.filter((g) => g.file.group === "plans").map((g) => g.file);
+			const planDocs = gov.filter((g) => g.file.group === "plans" && /\.plan\.json$/i.test(g.file.name)).map((g) => g.file);
 			const mdDocs = gov.filter((g) => isMarkdown(g.file.path)).map((g) => g.file);
 			const auditIssues = (docAuditData().citationIssues ?? []).filter((c) => canonical(c.targetPath) === filePath);
 
@@ -1062,8 +1243,14 @@ export function registerSchemaHoverProviders(): void {
 	};
 	monaco.languages.registerCodeLensProvider("ssl", codeLensProvider);
 
-	// Refresh CodeLenses reactively whenever LSP symbols, workspace docs, or doc audit results update.
+	// Refresh CodeLenses reactively whenever LSP state/symbols, workspace docs, or doc audit results update.
 	createRoot(() => {
+		createEffect(() => {
+			void state.workspace?.root;
+			void state.lsp.state;
+			modelSymbolCache.clear();
+			lensEmitter.fire(codeLensProvider);
+		});
 		createEffect(() => {
 			void symbols();
 			void docs();
@@ -1101,14 +1288,25 @@ export async function openSchemaAtCursor(): Promise<void> {
 			return;
 		}
 	}
-	// Fallback: let user pick from documented schema files if cursor isn't on a table name.
-	const schemaDocs = docs().filter((d) => d.exists && d.group === "schema" && !/index\.md$/i.test(d.name));
+	// Fallback: let user pick from documented schema files via searchable QuickPick (ADR 0032).
+	const schemaDocs = docs()
+		.filter((d) => d.exists && d.group === "schema" && !/index\.md$/i.test(d.name))
+		.sort((a, b) => (a.title || a.name).localeCompare(b.title || b.name, undefined, { sensitivity: "base" }));
 	if (!schemaDocs.length) return notify("No schema documents exist in this project yet.");
-	const { choose } = await import("../dialogs");
-	const labels = schemaDocs.map((d) => `${d.title || d.name} (${d.name})`);
-	const picked = await choose("Open which schema document?", labels);
-	if (!picked) return;
-	const found = schemaDocs[labels.indexOf(picked)];
+	const items: QuickPickOption<DocFile>[] = schemaDocs.map((d) => ({
+		value: d,
+		label: d.title || baseName(d.path).replace(/\.[^.]+$/, ""),
+		icon: "database",
+		badge: d.kind ? { text: d.kind } : undefined,
+		detail: relativeTo(state.workspace?.root, d.path).replace(/\\/g, "/"),
+		description: d.summary || undefined,
+		keywords: [d.title ?? "", d.name, ...(d.schemaObjects ?? [])].filter(Boolean).join(" "),
+	}));
+	const found = await quickPick<DocFile>({
+		title: "Open schema document",
+		placeholder: "Filter schema tables, views, or DDL…",
+		items,
+	});
 	if (found) await openFile(found.path);
 }
 

@@ -649,3 +649,215 @@ export function reorderMarkdownSection(
 	}
 	return { text: curText, newLine: curLine };
 }
+
+export type MarkdownSectionTransformResult = {
+	text: string;
+	newLine: number;
+	changed: boolean;
+};
+
+/** Finds a section anywhere in the Markdown heading tree by its 1-based heading line. */
+function findSectionByLine(list: MarkdownSection[], headingLine: number): MarkdownSection | null {
+	for (const sec of list) {
+		if (sec.line === headingLine) return sec;
+		if (headingLine > sec.line && headingLine <= sec.endLine && sec.children.length) {
+			const hit = findSectionByLine(sec.children, headingLine);
+			if (hit) return hit;
+		}
+	}
+	return null;
+}
+
+/** Collects `section` and all its descendant sub-headings in document order. */
+function collectSectionHeadings(section: MarkdownSection, out: MarkdownSection[] = []): MarkdownSection[] {
+	out.push(section);
+	for (const child of section.children) collectSectionHeadings(child, out);
+	return out;
+}
+
+/** Rewrites an ATX heading line's `#` count to `newLevel` (clamped 1..6) without altering its text or indentation. */
+function shiftHeadingLine(line: string, newLevel: number): string {
+	const clamped = Math.max(1, Math.min(6, newLevel));
+	const match = /^(\s{0,3})(#{1,6})(\s+.*)$/.exec(line);
+	if (!match) return line;
+	const indent = match[1]!;
+	const oldCount = match[2]!.length;
+	const rest = match[3]!;
+	const closing = /^(.*?)(\s+)(#{1,6})(\s*)$/.exec(rest);
+	if (closing && closing[3]!.length === oldCount) {
+		return `${indent}${"#".repeat(clamped)}${closing[1]}${closing[2]}${"#".repeat(clamped)}${closing[4]}`;
+	}
+	return `${indent}${"#".repeat(clamped)}${rest}`;
+}
+
+function splitDocumentLines(text: string): { eol: "\r\n" | "\n"; hasTrailingNewline: boolean; body: string; rawLines: string[] } {
+	const eol: "\r\n" | "\n" = text.includes("\r\n") ? "\r\n" : "\n";
+	const hasTrailingNewline = text.endsWith("\r\n") || text.endsWith("\n");
+	const body = hasTrailingNewline ? text.slice(0, text.endsWith("\r\n") ? -2 : -1) : text;
+	return { eol, hasTrailingNewline, body, rawLines: body.split(/\r?\n/) };
+}
+
+/**
+ * Promotes a Markdown heading and all of its descendant sub-headings up by one
+ * level (clamped at `#` level 1). Returns a no-op when the section is already
+ * level 1 or `sectionLine` is not a heading. Preserves CRLF/LF and front matter.
+ */
+export function promoteMarkdownSection(text: string, sectionLine: number): MarkdownSectionTransformResult {
+	const noop: MarkdownSectionTransformResult = { text, newLine: sectionLine, changed: false };
+	if (!text || sectionLine < 1) return noop;
+	const { eol, hasTrailingNewline, body, rawLines } = splitDocumentLines(text);
+	const section = findSectionByLine(markdownSectionTree(body), sectionLine);
+	if (!section || section.level <= 1) return noop;
+
+	const nextLines = rawLines.slice();
+	for (const h of collectSectionHeadings(section)) {
+		const idx = h.line - 1;
+		if (idx >= 0 && idx < nextLines.length) {
+			nextLines[idx] = shiftHeadingLine(nextLines[idx]!, Math.max(1, h.level - 1));
+		}
+	}
+	const nextText = nextLines.join(eol) + (hasTrailingNewline ? eol : "");
+	if (nextText === text) return noop;
+	return { text: nextText, newLine: sectionLine, changed: true };
+}
+
+/**
+ * Demotes a Markdown heading and all of its descendant sub-headings down by one
+ * level (clamped at `######` level 6). Returns a no-op when the section or any
+ * descendant is already level 6, or `sectionLine` is not a heading. Preserves
+ * CRLF/LF and front matter.
+ */
+export function demoteMarkdownSection(text: string, sectionLine: number): MarkdownSectionTransformResult {
+	const noop: MarkdownSectionTransformResult = { text, newLine: sectionLine, changed: false };
+	if (!text || sectionLine < 1) return noop;
+	const { eol, hasTrailingNewline, body, rawLines } = splitDocumentLines(text);
+	const section = findSectionByLine(markdownSectionTree(body), sectionLine);
+	if (!section) return noop;
+
+	const headings = collectSectionHeadings(section);
+	if (headings.some((h) => h.level >= 6)) return noop;
+
+	const nextLines = rawLines.slice();
+	for (const h of headings) {
+		const idx = h.line - 1;
+		if (idx >= 0 && idx < nextLines.length) {
+			nextLines[idx] = shiftHeadingLine(nextLines[idx]!, Math.min(6, h.level + 1));
+		}
+	}
+	const nextText = nextLines.join(eol) + (hasTrailingNewline ? eol : "");
+	if (nextText === text) return noop;
+	return { text: nextText, newLine: sectionLine, changed: true };
+}
+
+/**
+ * Moves a Markdown section and its entire nested subtree to another position
+ * (including across different parents):
+ * - `"before"` / `"after"` places it as a sibling of `targetLine`, adopting `target.level`
+ * - `"inside"` nests it at the end of `targetLine` as a child at `target.level + 1`
+ * Automatically rebases descendant heading levels, ignores `#` inside fenced code
+ * blocks and front matter, preserves CRLF/LF, and rejects drops onto itself or
+ * inside its own descendant subtree.
+ */
+export function moveMarkdownSectionTo(
+	text: string,
+	sourceLine: number,
+	targetLine: number,
+	placement: "before" | "after" | "inside",
+): MarkdownSectionTransformResult {
+	const noop: MarkdownSectionTransformResult = { text, newLine: sourceLine, changed: false };
+	if (!text || sourceLine < 1 || targetLine < 1 || sourceLine === targetLine) return noop;
+	const { eol, hasTrailingNewline, body, rawLines } = splitDocumentLines(text);
+	const tree = markdownSectionTree(body);
+	const source = findSectionByLine(tree, sourceLine);
+	const target = findSectionByLine(tree, targetLine);
+	if (!source || !target) return noop;
+	// Reject invalid drops onto itself or inside its own descendant subtree.
+	if (target.line >= source.line && target.line <= source.endLine) return noop;
+	// ATX headings cannot exceed level 6; cannot nest a child under an H6 section.
+	if (placement === "inside" && target.level >= 6) return noop;
+
+	const desiredLevel = placement === "inside" ? target.level + 1 : target.level;
+	const delta = desiredLevel - source.level;
+
+	const srcStart = source.line - 1;
+	const srcEnd = source.endLine - 1;
+	const tgtStart = target.line - 1;
+	const tgtEnd = target.endLine - 1;
+	if (srcStart < 0 || srcEnd >= rawLines.length || tgtStart < 0 || tgtEnd >= rawLines.length) return noop;
+
+	// Preserve original trailing blank lines at EOF cleanly when moving sections to/from EOF.
+	let eofPadStart = rawLines.length;
+	while (eofPadStart > 0 && rawLines[eofPadStart - 1]!.trim() === "") eofPadStart--;
+	const origEofPad = rawLines.slice(eofPadStart);
+
+	const { core: srcCoreRaw, pad: srcPad } = splitTrailingBlankLines(rawLines.slice(srcStart, srcEnd + 1));
+	const { pad: tgtPad } = splitTrailingBlankLines(rawLines.slice(tgtStart, tgtEnd + 1));
+
+	// Rebase only actual Markdown headings in source's subtree (never touching `#` inside code fences).
+	const rebasedCore = srcCoreRaw.slice();
+	if (delta !== 0) {
+		for (const h of collectSectionHeadings(source)) {
+			const relIdx = h.line - source.line;
+			if (relIdx >= 0 && relIdx < rebasedCore.length) {
+				rebasedCore[relIdx] = shiftHeadingLine(rebasedCore[relIdx]!, h.level + delta);
+			}
+		}
+	}
+
+	// Infer inter-section blank-line spacing from surrounding sections (spaced vs tight documents).
+	const gap: string[] =
+		srcPad.length > 0
+			? srcPad
+			: srcStart > 0 && rawLines[srcStart - 1]!.trim() === ""
+				? [""]
+				: tgtPad.length > 0
+					? tgtPad
+					: tgtStart > 0 && rawLines[tgtStart - 1]!.trim() === ""
+						? [""]
+						: [];
+
+	// Remove source cleanly while preserving inter-section spacing at the splice site.
+	const beforeSrc = rawLines.slice(0, srcStart);
+	const afterSrc = rawLines.slice(srcEnd + 1);
+	let remaining: string[];
+	let removedCount: number;
+	if (afterSrc.length === 0) {
+		let cut = beforeSrc.length;
+		while (cut > 0 && beforeSrc[cut - 1]!.trim() === "") cut--;
+		remaining = [...beforeSrc.slice(0, cut), ...origEofPad];
+		removedCount = rawLines.length - remaining.length;
+	} else {
+		const keepPad = beforeSrc.length > 0 && beforeSrc[beforeSrc.length - 1]!.trim() !== "" ? srcPad : [];
+		remaining = [...beforeSrc, ...keepPad, ...afterSrc];
+		removedCount = srcEnd - srcStart + 1 - keepPad.length;
+	}
+
+	const rawInsertAt = placement === "before" ? tgtStart : tgtEnd + 1;
+	const insertAt = Math.max(
+		0,
+		Math.min(rawInsertAt <= srcStart ? rawInsertAt : rawInsertAt - removedCount, remaining.length),
+	);
+
+	const head = remaining.slice(0, insertAt);
+	const tail = remaining.slice(insertAt);
+
+	let nextLines: string[];
+	let newLine: number;
+	if (tail.length === 0) {
+		let headCut = head.length;
+		while (headCut > 0 && head[headCut - 1]!.trim() === "") headCut--;
+		const cleanHead = head.slice(0, headCut);
+		const leadGap = cleanHead.length > 0 ? gap : [];
+		newLine = cleanHead.length + leadGap.length + 1;
+		nextLines = [...cleanHead, ...leadGap, ...rebasedCore, ...origEofPad];
+	} else {
+		const leadGap = head.length > 0 && head[head.length - 1]!.trim() !== "" ? gap : [];
+		const trailGap = tail[0]!.trim() !== "" ? gap : [];
+		newLine = head.length + leadGap.length + 1;
+		nextLines = [...head, ...leadGap, ...rebasedCore, ...trailGap, ...tail];
+	}
+
+	const nextText = nextLines.join(eol) + (hasTrailingNewline ? eol : "");
+	if (nextText === text) return noop;
+	return { text: nextText, newLine, changed: true };
+}
