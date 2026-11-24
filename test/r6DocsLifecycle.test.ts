@@ -525,8 +525,8 @@ describe("Round 6 Wave 3.5 — Health 1-click fixes & Docs bulk frontmatter help
 		expect(one(frontMatter(next).values.status)).toBe("answered");
 		expect(one(frontMatter(next).values.answered)).toBe("2026-11-20");
 
-		// Scalar containing YAML-special chars is safely quoted by frontValue
-		const relUpdated = withFrontMatter(next, "release", frontValue("R2026:12 #rc1"))!;
+		// Scalar containing YAML-special chars is safely quoted by withFrontMatter
+		const relUpdated = withFrontMatter(next, "release", "R2026:12 #rc1")!;
 		expect(one(frontMatter(relUpdated).values.release)).toBe("R2026:12 #rc1");
 	});
 });

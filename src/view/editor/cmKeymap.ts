@@ -88,34 +88,54 @@ export {
 };
 
 export const cmUndo: Command = (view) => {
-	if (undoDepth(view.state) > 0) return undo(view);
-	return view.state.facet(historyFallbackFacet)?.undo() ?? false;
+	if (view.state.readOnly) return false;
+	const fallback = view.state.facet(historyFallbackFacet);
+	if (fallback) return fallback.undo();
+	return undoDepth(view.state) > 0 ? undo(view) : false;
 };
 
 export const cmRedo: Command = (view) => {
-	if (redoDepth(view.state) > 0) return redo(view);
-	return view.state.facet(historyFallbackFacet)?.redo() ?? false;
+	if (view.state.readOnly) return false;
+	const fallback = view.state.facet(historyFallbackFacet);
+	if (fallback) return fallback.redo();
+	return redoDepth(view.state) > 0 ? redo(view) : false;
 };
 
 /** Opens CodeMirror's search panel docked cleanly at the top of the Markdown page (matching VS Code & Obsidian). */
 export const cmSearchTop: Extension = search({ top: true });
 
-/** Applies an Obsidian inline marker toggle (`**`, `*`, `~~`, `` ` ``, `==`) to every selection range. */
+/** Applies an Obsidian inline marker toggle (`**`, `*`, `~~`, `` ` ``, `==`) to every selection range, deduplicating overlapping spans. */
 function toggleWrapCommand(marker: string): Command {
 	return (view) => {
+		if (view.state.readOnly) return false;
 		const doc = view.state.doc.toString();
-		const changes: ChangeSpec[] = [];
-		const ranges: { from: number; to: number }[] = [];
+		const applied: { from: number; to: number; insert: string; prevDelta: number }[] = [];
+		const rawRanges: ({ kind: "direct"; from: number; to: number } | { kind: "mapped"; from: number; to: number })[] = [];
 		let delta = 0;
 		for (const range of view.state.selection.ranges) {
 			const res = toggleInlineWrap(doc, range.from, range.to, marker);
-			changes.push({ from: res.changeFrom, to: res.changeTo, insert: res.insert });
-			ranges.push({ from: res.selFrom + delta, to: res.selTo + delta });
+			const prev = applied[applied.length - 1];
+			if (prev && res.changeFrom === prev.from && res.changeTo === prev.to) {
+				rawRanges.push({ kind: "direct", from: res.selFrom + prev.prevDelta, to: res.selTo + prev.prevDelta });
+				continue;
+			}
+			if (prev && res.changeFrom < prev.to) {
+				rawRanges.push({ kind: "mapped", from: range.from, to: range.to });
+				continue;
+			}
+			applied.push({ from: res.changeFrom, to: res.changeTo, insert: res.insert, prevDelta: delta });
+			rawRanges.push({ kind: "direct", from: res.selFrom + delta, to: res.selTo + delta });
 			delta += res.insert.length - (res.changeTo - res.changeFrom);
 		}
+		const changeSet = view.state.changes(applied.map((c) => ({ from: c.from, to: c.to, insert: c.insert })));
+		const nextRanges = rawRanges.map((r) =>
+			r.kind === "direct"
+				? EditorSelection.range(r.from, r.to)
+				: EditorSelection.range(changeSet.mapPos(r.from, 1), changeSet.mapPos(r.to, 1)),
+		);
 		view.dispatch({
-			changes,
-			selection: EditorSelection.create(ranges.map((r) => EditorSelection.range(r.from, r.to)), view.state.selection.mainIndex),
+			changes: changeSet,
+			selection: EditorSelection.create(nextRanges, Math.min(view.state.selection.mainIndex, nextRanges.length - 1)),
 			scrollIntoView: true,
 			userEvent: "input.format",
 		});
@@ -546,20 +566,65 @@ export const cmDuplicateLineOrSelection: Command = (view) => {
 	return true;
 };
 
-/** Sublime Text `Mod-j`: join current line (or selected lines) with next line cleanly using a single space. */
+/** Sublime Text `Mod-j`: join current line (or selected lines) with next line cleanly using a single space, merging overlapping multi-cursor spans. */
 export const cmJoinLines: Command = (view) => {
+	if (view.state.readOnly) return false;
 	const doc = view.state.doc.toString();
-	const spec = view.state.changeByRange((range) => {
+	type JoinItem =
+		| { kind: "edit"; edit: PureLineEdit; sourceIndices: number[] }
+		| { kind: "noop"; from: number; to: number; sourceIndex: number };
+	const items: JoinItem[] = [];
+
+	for (let i = 0; i < view.state.selection.ranges.length; i++) {
+		const range = view.state.selection.ranges[i]!;
 		const edit = computeJoinLines(doc, range.from, range.to);
-		if (!edit) return { range };
-		return {
-			changes: { from: edit.changeFrom, to: edit.changeTo, insert: edit.insert },
-			range: EditorSelection.range(edit.selFrom, edit.selTo),
-		};
-	});
-	if (!spec.changes.empty) {
-		view.dispatch(spec, { scrollIntoView: true, userEvent: "input.join" });
+		if (!edit) {
+			items.push({ kind: "noop", from: range.from, to: range.to, sourceIndex: i });
+			continue;
+		}
+		const prev = items[items.length - 1];
+		if (prev && prev.kind === "edit" && edit.changeFrom <= prev.edit.changeTo) {
+			const mergedFrom = prev.edit.changeFrom;
+			const mergedTo = Math.max(prev.edit.changeTo, edit.changeTo);
+			if (mergedFrom !== prev.edit.changeFrom || mergedTo !== prev.edit.changeTo) {
+				const merged = computeJoinLines(doc, mergedFrom, mergedTo);
+				if (merged) prev.edit = merged;
+			}
+			prev.sourceIndices.push(i);
+		} else {
+			items.push({ kind: "edit", edit, sourceIndices: [i] });
+		}
 	}
+
+	const changeSpecs: ChangeSpec[] = [];
+	for (const item of items) {
+		if (item.kind === "edit") {
+			changeSpecs.push({ from: item.edit.changeFrom, to: item.edit.changeTo, insert: item.edit.insert });
+		}
+	}
+	if (!changeSpecs.length) return true;
+
+	const changeSet = view.state.changes(changeSpecs);
+	const nextRanges: ReturnType<typeof EditorSelection.range>[] = [];
+	let mainIndex = 0;
+	let delta = 0;
+	for (const item of items) {
+		if (item.kind === "edit") {
+			if (item.sourceIndices.includes(view.state.selection.mainIndex)) mainIndex = nextRanges.length;
+			nextRanges.push(EditorSelection.range(item.edit.selFrom + delta, item.edit.selTo + delta));
+			delta += item.edit.insert.length - (item.edit.changeTo - item.edit.changeFrom);
+		} else {
+			if (item.sourceIndex === view.state.selection.mainIndex) mainIndex = nextRanges.length;
+			nextRanges.push(EditorSelection.range(changeSet.mapPos(item.from, 1), changeSet.mapPos(item.to, 1)));
+		}
+	}
+
+	view.dispatch({
+		changes: changeSet,
+		selection: EditorSelection.create(nextRanges, Math.min(mainIndex, nextRanges.length - 1)),
+		scrollIntoView: true,
+		userEvent: "input.join",
+	});
 	return true;
 };
 
@@ -620,19 +685,22 @@ function openFind(view: EditorView, replace: boolean): boolean {
 }
 
 async function cmCopy(view: EditorView, cut: boolean) {
+	if (cut && view.state.readOnly) return;
+	const startDoc = view.state.doc;
 	const main = view.state.selection.main;
 	let from = main.from;
 	let to = main.to;
 	let text = view.state.sliceDoc(from, to);
 	if (!text) {
-		const line = view.state.doc.lineAt(main.head);
+		const line = startDoc.lineAt(main.head);
 		from = line.from;
-		to = Math.min(view.state.doc.length, line.to + 1);
+		to = Math.min(startDoc.length, line.to + 1);
 		text = `${line.text}\n`;
 	}
 	const copied = (await backend.clipboard(text).catch(() => false)) || (await navigator.clipboard?.writeText(text).then(() => true, () => false));
 	if (!copied) return notify("Could not reach the clipboard.", "error");
 	if (cut) {
+		if (!view.dom.isConnected || view.state.readOnly || view.state.doc !== startDoc) return;
 		view.dispatch({
 			changes: { from, to, insert: "" },
 			selection: EditorSelection.cursor(from),
@@ -677,6 +745,7 @@ export function resolveSmartPasteText(opts: {
 }
 
 async function cmPaste(view: EditorView, plainOnly = false) {
+	if (view.state.readOnly) return;
 	let plain: string | null = null;
 	let html = "";
 	if (!plainOnly && typeof navigator.clipboard?.read === "function") {
@@ -697,6 +766,7 @@ async function cmPaste(view: EditorView, plainOnly = false) {
 	if (plain === null) {
 		plain = await navigator.clipboard?.readText().catch(() => null);
 	}
+	if (!view.dom.isConnected || view.state.readOnly) return;
 	if (plain === null || plain === undefined) {
 		return notify("This window was not allowed to read the clipboard. Paste with Ctrl+V.");
 	}
@@ -775,7 +845,7 @@ export function cmSmartPasteExtension(filePath: () => string): Extension {
 			const saved = await saveImageAttachment(file, filePath());
 			if (saved) snippets.push(saved.markdown);
 		}
-		if (!snippets.length) return;
+		if (!snippets.length || !view.dom.isConnected || view.state.readOnly) return;
 		const docLen = view.state.doc.length;
 		const at = Math.max(0, Math.min(pos ?? view.state.selection.main.from, docLen));
 		const to = Math.max(at, Math.min(pos ?? view.state.selection.main.to, docLen));
@@ -797,7 +867,13 @@ export function cmSmartPasteExtension(filePath: () => string): Extension {
 				plainPasteUntil = pressedAt + 400;
 				// If the host webview does not emit a native `paste` event for Ctrl+Shift+V, fall back to clipboard readText.
 				setTimeout(() => {
-					if (lastPasteAt < pressedAt && view.hasFocus && typeof navigator.clipboard?.readText === "function") {
+					if (
+						lastPasteAt < pressedAt &&
+						view.dom.isConnected &&
+						!view.state.readOnly &&
+						view.hasFocus &&
+						typeof navigator.clipboard?.readText === "function"
+					) {
 						plainPasteUntil = 0;
 						void cmPaste(view, true);
 					}
@@ -987,10 +1063,12 @@ const markdownBindings: KeyBinding[] = [
 	{ key: "Mod-Shift-\\", run: selectMatchingBracket, preventDefault: true },
 ];
 
+const selectionHistoryKeymap = historyKeymap.filter((b) => b.run !== undo && b.run !== redo);
+
 /** Complete keymap extension combining Obsidian Markdown commands + VS Code parity + CodeMirror defaults. */
 export const cmMarkdownKeymap: Extension = [
 	Prec.high(keymap.of(markdownBindings)),
-	keymap.of([...searchKeymap, ...historyKeymap, ...foldKeymap, ...defaultKeymap]),
+	keymap.of([...searchKeymap, ...selectionHistoryKeymap, ...foldKeymap, ...defaultKeymap]),
 ];
 
 /**

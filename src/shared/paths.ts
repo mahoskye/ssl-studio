@@ -3,10 +3,36 @@
 // and Windows: either separator, and drive letters in either case.
 
 const isWindowsPath = (p: string) => /^[a-zA-Z]:[\\/]/.test(p) || p.includes("\\");
-const norm = (p: string) => {
-	const forward = p.replace(/\\/g, "/").replace(/\/+$/, "");
-	return isWindowsPath(p) ? forward.toLowerCase() : forward;
-};
+
+/** Normalizes separators, collapses `.` and `..` segments, and lowercases Windows paths. */
+function collapsePath(p: string): string {
+	const forward = p.replace(/\\/g, "/");
+	const lower = isWindowsPath(p) ? forward.toLowerCase() : forward;
+	let prefix = "";
+	let rest = lower;
+	const drive = /^[a-zA-Z]:(?=\/|$)/.exec(lower);
+	if (drive) {
+		prefix = `${drive[0].toLowerCase()}/`;
+		rest = lower.slice(drive[0].length);
+	} else if (lower.startsWith("//") && lower[2] !== "/") {
+		prefix = "//";
+		rest = lower.slice(2);
+	} else if (lower.startsWith("/")) {
+		prefix = "/";
+		rest = lower.slice(1);
+	}
+	const out: string[] = [];
+	for (const part of rest.split("/")) {
+		if (!part || part === ".") continue;
+		if (part === "..") {
+			if (out.length > 0 && out[out.length - 1] !== "..") out.pop();
+			else if (!prefix) out.push("..");
+		} else {
+			out.push(part);
+		}
+	}
+	return prefix + out.join("/");
+}
 
 export const baseName = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() ?? path;
 
@@ -27,13 +53,19 @@ export function resolvePath(dir: string, relative: string): string {
 		if (part !== "..") parts.push(part);
 		else if (parts.length > 1) parts.pop();
 	}
-	return parts.join(dir.includes("\\") && !dir.includes("/") ? "\\" : "/");
+	const sep = dir.includes("\\") && !dir.includes("/") ? "\\" : "/";
+	if (parts.length === 1 && parts[0] === "") return "/";
+	if (parts.length === 1 && /^[a-zA-Z]:$/.test(parts[0]!)) return parts[0]! + sep;
+	return parts.join(sep);
 }
 
 export function isInside(root: string, path: string): boolean {
-	const r = norm(root);
-	const p = norm(path);
-	return p === r || p.startsWith(r + "/");
+	if (!root || !path) return false;
+	const r = collapsePath(root);
+	const p = collapsePath(path);
+	if (!r || !p) return false;
+	if (p === r) return true;
+	return r.endsWith("/") ? p.startsWith(r) : p.startsWith(r + "/");
 }
 
 /** The path relative to root, with forward slashes; the path itself when outside. */

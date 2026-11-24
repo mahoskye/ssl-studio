@@ -14,6 +14,7 @@ import { changedRanges, minimalReplace } from "./lsp/edits";
 import { ask, choose } from "./dialogs";
 import { closeComparison, openReview } from "./editor/Review";
 import { clearEditorViewStates } from "./editor/EditorGroup";
+import { invalidateImageCache } from "./editor/imageResolve";
 import { baseName, isInside, joinPath, plainFileError } from "../shared/paths";
 import { lineEnds } from "../shared/fileKind";
 import { isPlanPath } from "./plan/model";
@@ -210,6 +211,7 @@ export async function openFolder(path?: string) {
 		setState("setupDismissed", false);
 	});
 	clearEditorViewStates();
+	invalidateImageCache();
 	for (const doc of oldDocs) disposeDoc(doc);
 	await Promise.all([loadSettings(true), loadProject()]);
 	setState("info", await backend.info());
@@ -1297,6 +1299,7 @@ export async function changingOnDisk<T>(path: string, change: () => Promise<T>):
 export async function fileChangedOnDisk(changed: string) {
 	const path = canonical(changed);
 	if (awaited.has(path)) return;
+	invalidateImageCache(path);
 	setState("treeVersion", (v) => v + 1);
 	const doc = docs.get(path);
 	// The kinds of file the server asks to be told about.

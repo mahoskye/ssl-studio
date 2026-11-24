@@ -1,7 +1,7 @@
 import { marked, type Token } from "marked";
 import { fenced } from "./catalog";
 import { bodyOffset, frontMatter } from "./frontMatter";
-import { baseName, dirName, isInside, joinPath, relativePath, relativeTo, resolvePath } from "./paths";
+import { baseName, dirName, isInside, relativePath, relativeTo, resolvePath } from "./paths";
 import { linkedLines } from "./projectDocs";
 import type { DocFile } from "./protocol";
 
@@ -74,7 +74,7 @@ export function linkLeads(href: string, from: string, root: string | null | unde
 	}
 	const file = linkFile(written);
 	if (!file || !root) return null;
-	const target = file.startsWith("/") ? joinPath(root, ...file.split("/").filter(Boolean)) : resolvePath(dirName(from), file);
+	const target = file.startsWith("/") ? resolvePath(root, file.replace(/^\/+/, "")) : resolvePath(dirName(from), file);
 	if (!isInside(root, target)) return null;
 	const lines = linkedLines(written);
 	return { file: target, ...(lines ? { lines } : {}) };
@@ -227,8 +227,10 @@ function afterOpening(line: string, column: number, above = ""): boolean {
 function candidates(lines: readonly string[], targets: readonly string[]): Spot[] {
 	const found: Spot[] = [];
 	const longest = [...new Set(targets)].sort((a, b) => b.length - a.length);
+	const targetSet = new Set(longest);
 	lines.forEach((line, at) => {
-		if (!line.includes("]") && !/\](?:\(|:)[ \t]*$/.test(lines[at - 1] ?? "")) return;
+		const prevEndsOpen = /\](?:\(|:)[ \t]*$/.test(lines[at - 1] ?? "");
+		if (!line.includes("]") && !prevEndsOpen) return;
 		const taken: [number, number][] = [];
 		for (const target of longest) {
 			for (let column = line.indexOf(target); column >= 0; column = line.indexOf(target, column + 1)) {
@@ -237,6 +239,60 @@ function candidates(lines: readonly string[], targets: readonly string[]): Spot[
 				if (taken.some(([from, to]) => column < to && column + target.length > from)) continue;
 				taken.push([column, column + target.length]);
 				found.push({ line: at, at: column, length: target.length });
+			}
+		}
+		// Also locate raw backslash-escaped link destinations (e.g. `foo\(1\).md`) whose unescaped `hrefWritten` matches a target.
+		if (line.includes("\\")) {
+			const openings: { pos: number; angle: boolean }[] = [];
+			if (prevEndsOpen) {
+				let p = 0;
+				while (p < line.length && (line[p] === " " || line[p] === "\t" || line[p] === ">")) p++;
+				if (line[p] === "<") openings.push({ pos: p + 1, angle: true });
+				else if (p < line.length) openings.push({ pos: p, angle: false });
+			}
+			const openRe = /\](?:\(|:)[ \t]*/g;
+			let om: RegExpExecArray | null;
+			while ((om = openRe.exec(line)) !== null) {
+				const p = om.index + om[0].length;
+				if (line[p] === "<") openings.push({ pos: p + 1, angle: true });
+				else if (p < line.length) openings.push({ pos: p, angle: false });
+			}
+			for (const { pos, angle } of openings) {
+				let end = pos;
+				if (angle) {
+					while (end < line.length) {
+						if (line[end] === "\\" && end + 1 < line.length) {
+							end += 2;
+							continue;
+						}
+						if (line[end] === ">") break;
+						end++;
+					}
+					if (line[end] !== ">") continue;
+				} else {
+					let parenDepth = 0;
+					while (end < line.length) {
+						const ch = line[end]!;
+						if (ch === "\\" && end + 1 < line.length) {
+							end += 2;
+							continue;
+						}
+						if (ch === "(") parenDepth++;
+						else if (ch === ")") {
+							if (parenDepth === 0) break;
+							parenDepth--;
+						} else if (ch === " " || ch === "\t") {
+							break;
+						}
+						end++;
+					}
+				}
+				const raw = line.slice(pos, end);
+				if (!raw || !raw.includes("\\")) continue;
+				if (!targetSet.has(hrefWritten(raw))) continue;
+				if (taken.some(([from, to]) => pos < to && end > from)) continue;
+				taken.push([pos, end]);
+				found.push({ line: at, at: pos, length: raw.length });
 			}
 		}
 	});
@@ -272,8 +328,10 @@ export function fileLinks(text: string): DocLink[] {
 		return found.map((href, index) => {
 			const named = MARKER.exec(read[index]!);
 			const spot = named ? spots[Number(named[1])] : undefined;
-			// The place must hold this link's own target: a name read back for another's is not an answer.
-			return spot && spot.length === href.length && lines[spot.line]!.startsWith(href, spot.at) ? spot : undefined;
+			// The place must hold this link's own target (exact or backslash-escaped): a name read back for another's is not an answer.
+			if (!spot) return undefined;
+			const raw = lines[spot.line]!.slice(spot.at, spot.at + spot.length);
+			return raw === href || hrefWritten(raw) === href ? spot : undefined;
 		});
 	};
 	const all = candidates(lines, found);
@@ -304,7 +362,8 @@ export function fileLinks(text: string): DocLink[] {
 		const key = placed ? `${placed.line}:${placed.at}` : `none:${href}`;
 		if (seen.has(key)) return;
 		seen.add(key);
-		links.push({ href, file: linkFile(href), line: placed ? before + placed.line + 1 : 0, column: placed ? placed.at : 0 });
+		const rawHref = placed ? lines[placed.line]!.slice(placed.at, placed.at + placed.length) : href;
+		links.push({ href: rawHref, file: linkFile(href), line: placed ? before + placed.line + 1 : 0, column: placed ? placed.at : 0 });
 	});
 	return links;
 }
@@ -319,14 +378,32 @@ export function fileLinks(text: string): DocLink[] {
  */
 export function withLinkFile(text: string, line: number, href: string, instead: string, column?: number, plain = false): string | null {
 	let start = 0;
+	let prevStart = -1;
 	for (let at = 1; at < line; at++) {
 		const end = text.indexOf("\n", start);
 		if (end < 0) return null;
+		prevStart = start;
 		start = end + 1;
 	}
 	const end = text.indexOf("\n", start);
 	const here = text.slice(start, end < 0 ? text.length : end);
-	const at = column === undefined ? here.indexOf(href) : here.startsWith(href, column) ? column : -1;
+	const prevLine = prevStart >= 0 ? text.slice(prevStart, start - 1).replace(/\r$/, "") : "";
+	let at = -1;
+	if (column !== undefined) {
+		at = here.startsWith(href, column) ? column : -1;
+	} else if (plain) {
+		at = here.indexOf(href);
+	} else {
+		for (let pos = here.indexOf(href); pos >= 0; pos = here.indexOf(href, pos + 1)) {
+			const after = here[pos + href.length];
+			const validMd = afterOpening(here, pos, prevLine) && (after === undefined || /[\s)>]/.test(after));
+			const validWiki = pos >= 2 && here.slice(pos - 2, pos) === "[[" && (after === "]" || after === "|" || after === "#");
+			if (validMd || validWiki) {
+				at = pos;
+				break;
+			}
+		}
+	}
 	if (at < 0) return null;
 	const rest = plain ? "" : (/[?#].*$/.exec(href)?.[0] ?? "");
 	const anew = plain ? instead : `${linkWritten(instead, href.slice(0, href.length - rest.length))}${rest}`;
@@ -367,20 +444,47 @@ export function ownLinkEdits(
 	to: string,
 	moved?: { from: string; to: string } | readonly { from: string; to: string }[],
 ): LinkEdit[] {
-	const [was, now] = [dirName(from), dirName(to)];
-	const moves = moved ? (Array.isArray(moved) ? [...moved] : [moved]) : [];
-	if (was === now && !moves.length) return [];
+	const isWin = (p: string) => /^[a-zA-Z]:[\\/]/.test(p) || p.includes("\\");
+	const cleanPath = (p: string) => {
+		const f = p.replace(/\\/g, "/").replace(/(?!^)\/+/g, "/");
+		return f.length > 1 && !/^[a-zA-Z]:\/$/.test(f) ? f.replace(/\/+$/, "") : f;
+	};
+	const samePath = (a: string, b: string) => {
+		const na = cleanPath(a);
+		const nb = cleanPath(b);
+		return isWin(a) || isWin(b) ? na.toLowerCase() === nb.toLowerCase() : na === nb;
+	};
+	const relForMove = (fromDir: string, toPath: string): string => {
+		if (!isWin(fromDir) && !isWin(toPath)) return relativePath(fromDir, toPath);
+		const fromSegs = fromDir.split(/[\\/]/).filter(Boolean);
+		const toSegs = toPath.split(/[\\/]/).filter(Boolean);
+		let same = 0;
+		while (same < fromSegs.length && same < toSegs.length && fromSegs[same]!.toLowerCase() === toSegs[same]!.toLowerCase()) same++;
+		return [...fromSegs.slice(same).map(() => ".."), ...toSegs.slice(same)].join("/");
+	};
+
+	const [was, now] = [cleanPath(dirName(from)), cleanPath(dirName(to))];
+	const rawMoves = moved ? (Array.isArray(moved) ? [...moved] : [moved]) : [];
+	if (samePath(was, now) && !rawMoves.length) return [];
+	const moves = rawMoves.map((m) => ({
+		from: cleanPath(m.from),
+		to: cleanPath(m.to),
+		fromSegs: cleanPath(m.from).split("/").filter(Boolean),
+	}));
 	// Longest `from` first so exact file moves (e.g. `OLD/OLD.md -> NEW/NEW.md`) take precedence over their containing folder move (`OLD -> NEW`).
 	moves.sort((a, b) => b.from.length - a.from.length);
 	const destinationOf = (target: string): string => {
-		let dest = target === from ? to : target;
+		const targetNorm = cleanPath(target);
+		let dest = samePath(targetNorm, from) ? cleanPath(to) : targetNorm;
 		for (const m of moves) {
-			if (target === m.from) {
+			if (samePath(targetNorm, m.from)) {
 				dest = m.to;
 				break;
 			}
-			if (isInside(m.from, target)) {
-				dest = m.to + target.slice(m.from.length);
+			if (isInside(m.from, targetNorm)) {
+				const targetSegs = targetNorm.split("/").filter(Boolean);
+				const suffix = targetSegs.slice(m.fromSegs.length).join("/");
+				dest = suffix ? (m.to.endsWith("/") ? `${m.to}${suffix}` : `${m.to}/${suffix}`) : m.to;
 				break;
 			}
 		}
@@ -391,7 +495,7 @@ export function ownLinkEdits(
 		if (!/^\.{1,2}\//.test(relVal)) return [];
 		const target = resolvePath(was, relVal);
 		const dest = destinationOf(target);
-		let instead = relativePath(now, dest);
+		let instead = relForMove(now, dest);
 		if (!instead) instead = ".";
 		else if (!instead.startsWith(".")) instead = `./${instead}`;
 		return instead === relVal ? [] : [{ line: named.line, column: named.column, href: named.value, instead, plain: true }];
@@ -400,7 +504,7 @@ export function ownLinkEdits(
 		if (!link.line || link.file.startsWith("/")) return [];
 		const target = resolvePath(was, link.file);
 		const dest = destinationOf(target);
-		const instead = relativePath(now, dest);
+		const instead = relForMove(now, dest);
 		// What would be written is compared with what is: a folder written with its slash reads the same without it.
 		const asWritten = link.href.replace(/[?#].*$/, "");
 		return instead === link.file || linkWritten(instead, asWritten) === asWritten ? [] : [{ line: link.line, column: link.column, href: link.href, instead }];
@@ -410,6 +514,30 @@ export function ownLinkEdits(
 
 /** The keys of a document's front matter whose values are files, named from the project's top: a ticket's specs, a spec's plan, a schema doc's SQL source. */
 const PATH_KEYS = new Set(["spec", "specs", "plan", "plans", "source"]);
+
+/** Strips an outside-quote YAML inline comment (` # ...`) without changing leading character offsets. */
+function stripYamlInlineComment(raw: string): string {
+	let quote = "";
+	for (let i = 0; i < raw.length; i++) {
+		const ch = raw[i]!;
+		if (quote) {
+			if (quote === '"' && ch === "\\" && i + 1 < raw.length) {
+				i++;
+				continue;
+			}
+			if (quote === "'" && ch === "'" && raw[i + 1] === "'") {
+				i++;
+				continue;
+			}
+			if (ch === quote) quote = "";
+		} else if (ch === '"' || ch === "'") {
+			quote = ch;
+		} else if (ch === "#" && (i === 0 || /\s/.test(raw[i - 1]!))) {
+			return raw.slice(0, i);
+		}
+	}
+	return raw;
+}
 
 /**
  * The files a document's front matter names ("specs: [docs/specs/Due.md]"),
@@ -431,7 +559,8 @@ export function frontPaths(text: string): { value: string; line: number; column:
 			const rest = pair?.[2] ?? item?.[1];
 			if (rest === undefined || !PATH_KEYS.has(key)) return;
 			const at = line.length - rest.length;
-			for (const match of rest.matchAll(/"([^"]*)"|'([^']*)'|([^\s,[\]"'#][^,[\]]*)/g)) {
+			const cleanRest = stripYamlInlineComment(rest);
+			for (const match of cleanRest.matchAll(/"([^"]*)"|'([^']*)'|([^\s,[\]"'#][^,[\]]*)/g)) {
 				const quoted = match[1] !== undefined || match[2] !== undefined;
 				const value = (match[1] ?? match[2] ?? match[3] ?? "").trim();
 				if (value && !/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(value)) {
@@ -477,6 +606,95 @@ export function linkBeingWritten(lineToCursor: string): string | null {
 	return (lead.match(/`/g)?.length ?? 0) % 2 === 1 ? null : found[1]!;
 }
 
+/** Splits a single Markdown line into plain and CommonMark §6.1 equal-length backtick inline-code spans. */
+function splitInlineCodeSpans(line: string): { text: string; isCode: boolean }[] {
+	const out: { text: string; isCode: boolean }[] = [];
+	let plainStart = 0;
+	let i = 0;
+	while (i < line.length) {
+		if (line[i] === "\\" && i + 1 < line.length) {
+			i += 2;
+			continue;
+		}
+		if (line[i] === "`") {
+			let run = 1;
+			while (i + run < line.length && line[i + run] === "`") run++;
+			let j = i + run;
+			let closeStart = -1;
+			while (j < line.length) {
+				if (line[j] === "`") {
+					let cRun = 1;
+					while (j + cRun < line.length && line[j + cRun] === "`") cRun++;
+					if (cRun === run) {
+						closeStart = j;
+						break;
+					}
+					j += cRun;
+				} else {
+					j++;
+				}
+			}
+			if (closeStart >= 0) {
+				if (i > plainStart) out.push({ text: line.slice(plainStart, i), isCode: false });
+				const closeEnd = closeStart + run;
+				out.push({ text: line.slice(i, closeEnd), isCode: true });
+				i = closeEnd;
+				plainStart = i;
+				continue;
+			}
+			// No matching closing backtick run: treat opening ticks as literal prose.
+			i += run;
+			continue;
+		}
+		i++;
+	}
+	if (plainStart < line.length) out.push({ text: line.slice(plainStart), isCode: false });
+	return out;
+}
+
+/** Verifies optional whitespace + optional Markdown link title (`"..."`, `'...'`, `(...)`) followed by closing `)`. Returns index of `)` or -1. */
+function scanLinkCloseAfterDest(seg: string, destEnd: number): number {
+	let p = destEnd;
+	while (p < seg.length && (seg[p] === " " || seg[p] === "\t")) p++;
+	if (seg[p] === ")") return p;
+	if (p === destEnd) return -1;
+	const q = seg[p];
+	if (q === '"' || q === "'") {
+		p++;
+		while (p < seg.length) {
+			if (seg[p] === "\\" && p + 1 < seg.length) {
+				p += 2;
+				continue;
+			}
+			if (seg[p] === q) {
+				p++;
+				break;
+			}
+			p++;
+		}
+		if (seg[p - 1] !== q) return -1;
+	} else if (q === "(") {
+		p++;
+		while (p < seg.length) {
+			if (seg[p] === "\\" && p + 1 < seg.length) {
+				p += 2;
+				continue;
+			}
+			if (seg[p] === "(") return -1;
+			if (seg[p] === ")") {
+				p++;
+				break;
+			}
+			p++;
+		}
+		if (seg[p - 1] !== ")") return -1;
+	} else {
+		return -1;
+	}
+	while (p < seg.length && (seg[p] === " " || seg[p] === "\t")) p++;
+	return seg[p] === ")" ? p : -1;
+}
+
 /**
  * Rewrites Markdown `#anchor` links (`[text](path#old-anchor)` / `[text](#old-anchor)`)
  * and wikilink/embed heading fragments (`[[Target#Old Heading]]`, `![[Target#Old Heading|Alias]]`)
@@ -519,36 +737,143 @@ export function rewriteHeadingReferences(
 		return slug === oldSlug;
 	};
 
+	const rewriteMarkdownLinks = (seg: string): { text: string; changed: boolean } => {
+		let out = "";
+		let cursor = 0;
+		let changed = false;
+		let i = 0;
+		while (i < seg.length) {
+			const openIdx = seg.indexOf("](", i);
+			if (openIdx < 0) break;
+			// Ensure `]` is not escaped by an odd number of backslashes.
+			let bs = 0;
+			for (let k = openIdx - 1; k >= 0 && seg[k] === "\\"; k--) bs++;
+			if (bs % 2 === 1) {
+				i = openIdx + 2;
+				continue;
+			}
+			let destStart = openIdx + 2;
+			while (destStart < seg.length && (seg[destStart] === " " || seg[destStart] === "\t")) destStart++;
+			if (destStart >= seg.length) break;
+
+			let innerStart: number;
+			let innerEnd: number;
+			let closeParen: number;
+
+			if (seg[destStart] === "<") {
+				let gt = destStart + 1;
+				while (gt < seg.length) {
+					if (seg[gt] === "\\" && gt + 1 < seg.length) {
+						gt += 2;
+						continue;
+					}
+					if (seg[gt] === "<") {
+						gt = -1;
+						break;
+					}
+					if (seg[gt] === ">") break;
+					gt++;
+				}
+				if (gt < 0 || seg[gt] !== ">") {
+					i = openIdx + 2;
+					continue;
+				}
+				closeParen = scanLinkCloseAfterDest(seg, gt + 1);
+				if (closeParen < 0) {
+					i = openIdx + 2;
+					continue;
+				}
+				innerStart = destStart + 1;
+				innerEnd = gt;
+			} else {
+				let p = destStart;
+				let parenDepth = 0;
+				while (p < seg.length) {
+					const ch = seg[p]!;
+					if (ch === "\\" && p + 1 < seg.length) {
+						p += 2;
+						continue;
+					}
+					if (ch === "(") parenDepth++;
+					else if (ch === ")") {
+						if (parenDepth === 0) break;
+						parenDepth--;
+					} else if (ch === " " || ch === "\t") {
+						break;
+					}
+					p++;
+				}
+				if (parenDepth !== 0) {
+					i = openIdx + 2;
+					continue;
+				}
+				closeParen = scanLinkCloseAfterDest(seg, p);
+				if (closeParen < 0) {
+					i = openIdx + 2;
+					continue;
+				}
+				innerStart = destStart;
+				innerEnd = p;
+			}
+
+			const rawDest = seg.slice(innerStart, innerEnd);
+			const hashIdx = rawDest.indexOf("#");
+			if (hashIdx >= 0 && hashIdx + 1 < rawDest.length) {
+				const pathPart = rawDest.slice(0, hashIdx);
+				const frag = rawDest.slice(hashIdx + 1);
+				const targetMatch =
+					pathPart === ""
+						? options.isSameDoc
+						: options.matchesDocHref(pathPart) || options.matchesDocHref(hrefWritten(pathPart));
+				if (targetMatch && matchesAnchor(frag)) {
+					const fragStart = innerStart + hashIdx + 1;
+					out += seg.slice(cursor, fragStart) + options.newAnchor;
+					cursor = innerEnd;
+					count++;
+					changed = true;
+				}
+			}
+			i = closeParen + 1;
+		}
+		if (!changed) return { text: seg, changed: false };
+		return { text: out + seg.slice(cursor), changed: true };
+	};
+
 	for (let idx = 0; idx < lines.length; idx += 2) {
 		const lineNum = idx / 2;
 		const line = lines[idx]!;
 		if (lineNum < fmLines) continue;
 		const fm = /^[ \t]{0,3}(`{3,}|~{3,})/.exec(line);
 		if (fm) {
+			const ch = fm[1]![0]!;
+			const len = fm[1]!.length;
+			const rest = line.slice(fm[0].length);
 			if (!fenceChar) {
-				fenceChar = fm[1]![0]!;
-				fenceLen = fm[1]!.length;
-			} else if (fm[1]![0] === fenceChar && fm[1]!.length >= fenceLen && /^[ \t]*$/.test(line.slice(fm[0].length))) {
-				fenceChar = "";
-				fenceLen = 0;
+				// Per CommonMark §4.5, a backtick fence info string cannot contain backticks.
+				if (!(ch === "`" && rest.includes("`"))) {
+					fenceChar = ch;
+					fenceLen = len;
+					continue;
+				}
+			} else {
+				if (ch === fenceChar && len >= fenceLen && /^[ \t]*$/.test(rest)) {
+					fenceChar = "";
+					fenceLen = 0;
+				}
+				continue;
 			}
-			continue;
 		}
 		if (fenceChar) continue;
 
-		// Split out inline code spans so we never rewrite examples inside backticks.
-		const segs = line.split(/(`+[^`]*`+)/);
+		// Split out CommonMark inline code spans so we never rewrite examples inside backticks.
+		const segs = splitInlineCodeSpans(line);
 		let changed = false;
-		for (let s = 0; s < segs.length; s += 2) {
-			let seg = segs[s]!;
-			// 1. Markdown links: `[label](path#anchor)` or `[label](#anchor)`
-			seg = seg.replace(/(\[[^\]]*\]\()([^)\s#]*)#([^)\s]+)(\))/g, (full, open: string, pathPart: string, frag: string, close: string) => {
-				const targetMatch = pathPart === "" ? options.isSameDoc : options.matchesDocHref(pathPart);
-				if (!targetMatch || !matchesAnchor(frag)) return full;
-				count++;
-				changed = true;
-				return `${open}${pathPart}#${options.newAnchor}${close}`;
-			});
+		for (const part of segs) {
+			if (part.isCode) continue;
+			// 1. Markdown links: `[label](path#anchor)`, `[label](foo_(bar).md#anchor)`, `[label](<my file.md#anchor> "Title")`
+			const mdRes = rewriteMarkdownLinks(part.text);
+			let seg = mdRes.text;
+			if (mdRes.changed) changed = true;
 			// 2. Wikilinks / embeds: `[[Target#Heading]]`, `[[#Heading]]`, `![[Target#Heading|Alias]]`
 			seg = seg.replace(/(!?\[\[)([^[\]|#]*)#([^[\]|]+)((?:\\?\|[^[\]]*)?\]\])/g, (full, open: string, target: string, frag: string, rest: string) => {
 				const t = target.trim();
@@ -559,9 +884,9 @@ export function rewriteHeadingReferences(
 				const replacement = frag.trim().toLowerCase() === oldSlug && frag.includes("-") && !frag.includes(" ") ? options.newAnchor : options.newHeading;
 				return `${open}${target}#${replacement}${rest}`;
 			});
-			segs[s] = seg;
+			part.text = seg;
 		}
-		if (changed) lines[idx] = segs.join("");
+		if (changed) lines[idx] = segs.map((s) => s.text).join("");
 	}
 
 	return { text: count ? lines.join("") : markdown, count };

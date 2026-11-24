@@ -161,7 +161,7 @@ export function applyMarkdownFormatToTextarea(el: HTMLTextAreaElement, actionId:
 		return true;
 	}
 	if (actionId === "md-checkbox" && el.classList.contains("cm-callout-body-input")) {
-		const lineStart = val.lastIndexOf("\n", Math.max(0, start - 1)) + 1;
+		const lineStart = start === 0 ? 0 : val.lastIndexOf("\n", start - 1) + 1;
 		const lineEndRaw = val.indexOf("\n", end);
 		const lineEnd = lineEndRaw < 0 ? val.length : lineEndRaw;
 		const chunk = val.slice(lineStart, lineEnd);

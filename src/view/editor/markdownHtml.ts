@@ -1,5 +1,6 @@
 // What is done to Markdown's HTML after it is cleaned, wherever it is shown:
 // a document in the reading view, a reply in the Agent panel.
+import DOMPurify from "dompurify";
 import { csvRow } from "../../shared/csv";
 import { MAX_SHORT, headingAnchor } from "../../shared/docTables";
 import { frontMatter } from "../../shared/frontMatter";
@@ -24,10 +25,15 @@ export function loadKatex(): Promise<KatexModule> {
 		const cssImport =
 			// @ts-expect-error Vite bundles the KaTeX CSS dynamically at runtime (no .d.ts shipped for .css).
 			import("katex/dist/katex.min.css");
-		katexLoading = Promise.all([import("katex"), cssImport]).then(([mod]) => {
-			katexMod = mod.default ?? (mod as unknown as KatexModule);
-			return katexMod;
-		});
+		katexLoading = Promise.all([import("katex"), cssImport])
+			.then(([mod]) => {
+				katexMod = mod.default ?? (mod as unknown as KatexModule);
+				return katexMod;
+			})
+			.catch((err) => {
+				katexLoading = null;
+				throw err;
+			});
 	}
 	return katexLoading;
 }
@@ -166,6 +172,8 @@ export type TicketRef = { key: string; href: string; about: string };
  */
 /** Where a ticket's key is left as written: what is a link already, code, and elements that hold text and no markup. */
 const UNLINKED = "a, code, pre, textarea, option, select, button, script, style";
+/** Math containers whose text nodes must never be rewritten by highlight or tag scanners. */
+const MATH_EXCLUDED = ".md-math, .katex, math, annotation";
 
 function linkTickets(holder: HTMLTemplateElement, tickets: readonly TicketRef[]) {
 	const by = new Map(tickets.map((ticket) => [ticket.key, ticket]));
@@ -270,8 +278,9 @@ function markShortColumns(holder: HTMLTemplateElement) {
 function renderHighlights(holder: HTMLTemplateElement) {
 	const walker = document.createTreeWalker(holder.content, NodeFilter.SHOW_TEXT);
 	const nodes: Text[] = [];
+	const excluded = `code, pre, textarea, option, select, script, style, ${MATH_EXCLUDED}`;
 	for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-		if (node.nodeValue?.includes("==") && !node.parentElement?.closest("code, pre, script, style")) nodes.push(node as Text);
+		if (node.nodeValue?.includes("==") && !node.parentElement?.closest(excluded)) nodes.push(node as Text);
 	}
 	for (const node of nodes) {
 		const text = node.data;
@@ -292,12 +301,13 @@ function renderHighlights(holder: HTMLTemplateElement) {
 	}
 }
 
-/** Turns `#tag` mentions in prose (outside code, links, and headings) into clickable `.md-tag` pills. */
+/** Turns `#tag` mentions in prose (outside code, links, headings, and math) into clickable `.md-tag` pills. */
 function renderTags(holder: HTMLTemplateElement) {
 	const walker = document.createTreeWalker(holder.content, NodeFilter.SHOW_TEXT);
 	const nodes: Text[] = [];
+	const excluded = `${UNLINKED}, h1, h2, h3, h4, h5, h6, ${MATH_EXCLUDED}`;
 	for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-		if (node.nodeValue?.includes("#") && !node.parentElement?.closest(`${UNLINKED}, h1, h2, h3, h4, h5, h6`)) nodes.push(node as Text);
+		if (node.nodeValue?.includes("#") && !node.parentElement?.closest(excluded)) nodes.push(node as Text);
 	}
 	for (const node of nodes) {
 		const text = node.data;
@@ -323,6 +333,26 @@ function renderTags(holder: HTMLTemplateElement) {
 	}
 }
 
+const ELEMENT_NODE = 1;
+const TEXT_NODE = 3;
+const CALLOUT_MARKER_PREFIX_RE = /^[ \t]*\[!([A-Za-z0-9_-]+)\]([+-])?(?:[ \t]+|$)/;
+const VOID_HTML_TAGS = new Set([
+	"area",
+	"base",
+	"br",
+	"col",
+	"embed",
+	"hr",
+	"img",
+	"input",
+	"link",
+	"meta",
+	"param",
+	"source",
+	"track",
+	"wbr",
+]);
+
 function escHtmlText(s: string): string {
 	return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
@@ -336,136 +366,561 @@ function decodeBasicEntities(s: string): string {
 		.replace(/&amp;/gi, "&");
 }
 
+function canUseRealDom(): boolean {
+	if (typeof document === "undefined" || typeof document.createElement !== "function" || typeof document.createTextNode !== "function") {
+		return false;
+	}
+	const t = document.createElement("template") as HTMLTemplateElement | undefined;
+	return Boolean(t && t.content && typeof t.content.querySelectorAll === "function");
+}
+
 /**
- * Pure HTML transformer upgrading Obsidian/GitHub callout blockquotes (`> [!NOTE] Title`,
- * foldable `> [!TIP]+` / `> [!TIP]-` -> `<details>`/`<summary>`, and nested `> > [!WARNING]`)
- * into styled `.md-callout` cards while preserving `<pre>` / `<code>` verbatim.
- * Input HTML must already be sanitized (e.g. via DOMPurify).
+ * DOM-based callout transformer operating strictly on parsed `<blockquote>` elements
+ * deepest-first. Never regex-slices serialized HTML strings, so attribute payloads like
+ * `title="<br><img ...>"` or `title="</p><svg ...>"` cannot break out of attributes.
  */
-export function renderCalloutsHtml(html: string): string {
-	if (!html.includes("<blockquote") && !html.includes("<BLOCKQUOTE")) return html;
-	const TAG_RE = /<(\/?)(blockquote|pre|code)(?=\s|>|\/)[^>]*>/gi;
-	let out = "";
-	let lastIndex = 0;
-	let skipTag: "pre" | "code" | null = null;
-	let skipDepth = 0;
-	let bqDepth = 0;
-	let bqOpenStart = -1;
-	let bqInnerStart = -1;
+export function transformCalloutsDom(root: ParentNode): void {
+	const blockquotes = [...root.querySelectorAll("blockquote")].reverse();
+	for (const bq of blockquotes) {
+		if (!bq.parentNode) continue;
+		if (bq.closest("pre, code")) continue;
 
-	let match: RegExpExecArray | null;
-	while ((match = TAG_RE.exec(html)) !== null) {
-		const isClose = match[1] === "/";
-		const tag = match[2]!.toLowerCase() as "blockquote" | "pre" | "code";
+		// Locate the first non-whitespace child; it must be a `<p>` element.
+		let firstP: Element | null = null;
+		for (let n = bq.firstChild; n; n = n.nextSibling) {
+			if (n.nodeType === TEXT_NODE && !(n.textContent ?? "").trim()) continue;
+			if (n.nodeType === ELEMENT_NODE && (n as Element).tagName.toUpperCase() === "P") {
+				firstP = n as Element;
+			}
+			break;
+		}
+		if (!firstP) continue;
 
-		if (bqDepth === 0) {
-			if (skipTag) {
-				if (tag === skipTag) {
-					if (isClose) {
-						skipDepth--;
-						if (skipDepth <= 0) {
-							skipTag = null;
-							skipDepth = 0;
-						}
-					} else {
-						skipDepth++;
-					}
+		// Non-destructively scan direct children of `firstP` up to the first `<br>` element
+		// or `\r?\n` in a direct Text node (never inspecting inside element attributes).
+		const pChildren = [...firstP.childNodes];
+		let breakIdx = -1;
+		let breakTextOffset = -1;
+		let breakTextLen = 0;
+		let breakWasBr = false;
+		let firstLinePlain = "";
+
+		for (let i = 0; i < pChildren.length; i++) {
+			const child = pChildren[i]!;
+			if (child.nodeType === ELEMENT_NODE && (child as Element).tagName.toUpperCase() === "BR") {
+				breakIdx = i;
+				breakWasBr = true;
+				break;
+			}
+			if (child.nodeType === TEXT_NODE) {
+				const raw = child.textContent ?? "";
+				const nl = /\r?\n/.exec(raw);
+				if (nl) {
+					firstLinePlain += raw.slice(0, nl.index);
+					breakIdx = i;
+					breakTextOffset = nl.index;
+					breakTextLen = nl[0].length;
+					break;
 				}
+				firstLinePlain += raw;
 				continue;
 			}
-			if (!isClose && (tag === "pre" || tag === "code")) {
-				skipTag = tag;
-				skipDepth = 1;
-				continue;
+			firstLinePlain += child.textContent ?? "";
+		}
+
+		const headerEnd = breakIdx < 0 ? pChildren.length : breakTextOffset >= 0 ? breakIdx + 1 : breakIdx;
+		let firstTextIdx = -1;
+		for (let i = 0; i < headerEnd; i++) {
+			const c = pChildren[i]!;
+			if (c.nodeType === TEXT_NODE && (c.textContent ?? "").length === 0) continue;
+			if (c.nodeType === TEXT_NODE) firstTextIdx = i;
+			break;
+		}
+		if (firstTextIdx < 0) continue;
+
+		const firstRaw = pChildren[firstTextIdx]!.textContent ?? "";
+		const firstSeg = firstTextIdx === breakIdx && breakTextOffset >= 0 ? firstRaw.slice(0, breakTextOffset) : firstRaw;
+		const markerMatch = CALLOUT_MARKER_PREFIX_RE.exec(firstSeg);
+		if (!markerMatch) continue;
+		const parsed = parseCalloutHeader(`> ${firstLinePlain}`);
+		if (!parsed) continue;
+
+		const doc = bq.ownerDocument ?? document;
+
+		// Build sanitized callout title DOM nodes by stripping only the `[!type][+-]?` prefix
+		// from the first Text node and moving the remaining existing sanitized nodes intact.
+		const titleNodes: Node[] = [];
+		for (let i = firstTextIdx; i < headerEnd; i++) {
+			if (i === firstTextIdx) {
+				const restOfFirst = firstSeg.slice(markerMatch[0].length);
+				if (restOfFirst) titleNodes.push(doc.createTextNode(restOfFirst));
+			} else if (i === breakIdx && breakTextOffset >= 0) {
+				const beforeNl = (pChildren[i]!.textContent ?? "").slice(0, breakTextOffset);
+				if (beforeNl) titleNodes.push(doc.createTextNode(beforeNl));
+			} else {
+				titleNodes.push(pChildren[i]!);
 			}
-			if (!isClose && tag === "blockquote") {
-				bqDepth = 1;
-				bqOpenStart = match.index;
-				bqInnerStart = TAG_RE.lastIndex;
+		}
+		while (titleNodes.length > 0 && titleNodes[titleNodes.length - 1]!.nodeType === TEXT_NODE) {
+			const last = titleNodes[titleNodes.length - 1]!;
+			const trimmed = (last.textContent ?? "").replace(/[ \t]+$/, "");
+			if (trimmed) {
+				last.textContent = trimmed;
+				break;
 			}
+			titleNodes.pop();
+		}
+		const hasCustomTitle = titleNodes.some(
+			(n) =>
+				(n.textContent ?? "").trim().length > 0 ||
+				(n.nodeType === ELEMENT_NODE &&
+					((n as Element).tagName.toUpperCase() === "IMG" || Boolean((n as Element).querySelector?.("img")))),
+		);
+
+		// Collect body nodes following the header break inside `firstP`.
+		const afterBreakNodes: Node[] = [];
+		if (breakIdx >= 0) {
+			if (breakTextOffset >= 0) {
+				const tail = (pChildren[breakIdx]!.textContent ?? "").slice(breakTextOffset + breakTextLen);
+				if (tail) afterBreakNodes.push(doc.createTextNode(tail));
+			}
+			for (let i = breakIdx + 1; i < pChildren.length; i++) {
+				afterBreakNodes.push(pChildren[i]!);
+			}
+			if (breakWasBr && afterBreakNodes.length > 0 && afterBreakNodes[0]!.nodeType === TEXT_NODE) {
+				const cleaned = (afterBreakNodes[0]!.textContent ?? "").replace(/^\r?\n/, "");
+				if (cleaned) afterBreakNodes[0]!.textContent = cleaned;
+				else afterBreakNodes.shift();
+			}
+		}
+		const hasAfterBody = afterBreakNodes.some(
+			(n) => n.nodeType === ELEMENT_NODE || (n.textContent ?? "").trim().length > 0,
+		);
+
+		// Collect remaining sibling nodes inside `bq` after `firstP` (any nested blockquotes are already transformed).
+		const restNodes: Node[] = [];
+		for (let n = firstP.nextSibling; n; n = n.nextSibling) restNodes.push(n);
+		while (restNodes.length > 0 && restNodes[0]!.nodeType === TEXT_NODE && !(restNodes[0]!.textContent ?? "").trim()) {
+			restNodes.shift();
+		}
+		while (
+			restNodes.length > 0 &&
+			restNodes[restNodes.length - 1]!.nodeType === TEXT_NODE &&
+			!(restNodes[restNodes.length - 1]!.textContent ?? "").trim()
+		) {
+			restNodes.pop();
+		}
+		const hasRestBody = restNodes.some(
+			(n) => n.nodeType === ELEMENT_NODE || (n.textContent ?? "").trim().length > 0,
+		);
+
+		const isFoldable = parsed.fold === "+" || parsed.fold === "-";
+		const container = doc.createElement(isFoldable ? "details" : "div");
+		container.className = isFoldable
+			? `md-callout tone-${parsed.spec.tone} is-foldable`
+			: `md-callout tone-${parsed.spec.tone}`;
+		if (parsed.fold === "+") container.setAttribute("open", "");
+
+		const head = doc.createElement(isFoldable ? "summary" : "div");
+		head.className = "md-callout-head";
+
+		const iconEl = doc.createElement("span");
+		iconEl.className = "md-callout-icon";
+		iconEl.setAttribute("aria-hidden", "true");
+		iconEl.textContent = parsed.spec.icon;
+
+		const titleEl = doc.createElement("span");
+		titleEl.className = "md-callout-title";
+		if (hasCustomTitle) {
+			for (const n of titleNodes) titleEl.appendChild(n);
+		} else {
+			titleEl.textContent = parsed.spec.label;
+		}
+
+		head.appendChild(iconEl);
+		head.appendChild(titleEl);
+		container.appendChild(head);
+
+		if (hasAfterBody || hasRestBody) {
+			const bodyEl = doc.createElement("div");
+			bodyEl.className = "md-callout-body";
+			if (hasAfterBody) {
+				const bodyP = doc.createElement("p");
+				for (const n of afterBreakNodes) bodyP.appendChild(n);
+				bodyEl.appendChild(bodyP);
+			}
+			if (hasRestBody) {
+				for (const n of restNodes) bodyEl.appendChild(n);
+			}
+			container.appendChild(bodyEl);
+		}
+
+		bq.parentNode.replaceChild(container, bq);
+	}
+}
+
+type HtmlToken =
+	| { type: "start"; tag: string; raw: string; selfClosing: boolean }
+	| { type: "end"; tag: string; raw: string }
+	| { type: "comment"; raw: string }
+	| { type: "other"; raw: string }
+	| { type: "text"; raw: string };
+
+/**
+ * Quote-aware HTML5-style tokenizer used solely for the non-DOM / SSR fallback of
+ * `renderCalloutsHtml`. Tags inside attribute values (`title="<br><img ...>"`) and
+ * HTML comments are opaque and never tokenized as markup.
+ */
+function tokenizeHtml(html: string): HtmlToken[] {
+	const tokens: HtmlToken[] = [];
+	const pushText = (chunk: string) => {
+		if (!chunk) return;
+		const prev = tokens[tokens.length - 1];
+		if (prev && prev.type === "text") prev.raw += chunk;
+		else tokens.push({ type: "text", raw: chunk });
+	};
+
+	let i = 0;
+	while (i < html.length) {
+		const lt = html.indexOf("<", i);
+		if (lt < 0) {
+			pushText(html.slice(i));
+			break;
+		}
+		if (lt > i) {
+			pushText(html.slice(i, lt));
+			i = lt;
+		}
+
+		// HTML comment: `<!-- ... -->`
+		if (html.startsWith("<!--", i)) {
+			const end = html.indexOf("-->", i + 4);
+			const next = end < 0 ? html.length : end + 3;
+			tokens.push({ type: "comment", raw: html.slice(i, next) });
+			i = next;
 			continue;
 		}
 
-		// Inside a top-level blockquote: track balanced nested blockquotes (ignoring tags inside pre/code).
-		if (skipTag) {
-			if (tag === skipTag) {
-				if (isClose) {
+		// Declaration / doctype / processing instruction: `<!...>` or `<?...>`
+		const nextCh = html[i + 1];
+		if (nextCh === "!" || nextCh === "?") {
+			const gt = html.indexOf(">", i + 2);
+			const next = gt < 0 ? html.length : gt + 1;
+			tokens.push({ type: "other", raw: html.slice(i, next) });
+			i = next;
+			continue;
+		}
+
+		// End tag: `</tagName ...>`
+		if (nextCh === "/" && i + 2 < html.length && /[A-Za-z]/.test(html[i + 2]!)) {
+			let nameEnd = i + 3;
+			while (nameEnd < html.length && /[A-Za-z0-9:-]/.test(html[nameEnd]!)) nameEnd++;
+			const gt = html.indexOf(">", nameEnd);
+			if (gt >= 0) {
+				tokens.push({ type: "end", tag: html.slice(i + 2, nameEnd).toLowerCase(), raw: html.slice(i, gt + 1) });
+				i = gt + 1;
+				continue;
+			}
+			pushText(html.slice(i));
+			break;
+		}
+
+		// Start tag: `<tagName ...attributes... [/]>`
+		if (nextCh && /[A-Za-z]/.test(nextCh)) {
+			let nameEnd = i + 2;
+			while (nameEnd < html.length && /[A-Za-z0-9:-]/.test(html[nameEnd]!)) nameEnd++;
+			if (nameEnd < html.length && /[\t\n\f\r />]/.test(html[nameEnd]!)) {
+				let j = nameEnd;
+				let closedAt = -1;
+				while (j < html.length) {
+					while (j < html.length && /[\t\n\f\r ]/.test(html[j]!)) j++;
+					if (j >= html.length) break;
+					if (html[j] === ">") {
+						closedAt = j;
+						break;
+					}
+					if (html[j] === "/" && html[j + 1] === ">") {
+						closedAt = j + 1;
+						break;
+					}
+					while (j < html.length && !/[\t\n\f\r =/>]/.test(html[j]!)) j++;
+					while (j < html.length && /[\t\n\f\r ]/.test(html[j]!)) j++;
+					if (html[j] === "=") {
+						j++;
+						while (j < html.length && /[\t\n\f\r ]/.test(html[j]!)) j++;
+						if (html[j] === '"' || html[j] === "'") {
+							const q = html[j]!;
+							j++;
+							const endQ = html.indexOf(q, j);
+							if (endQ < 0) {
+								j = html.length;
+								break;
+							}
+							j = endQ + 1;
+						} else {
+							while (j < html.length && !/[\t\n\f\r >]/.test(html[j]!)) j++;
+						}
+					} else if (html[j] === "/") {
+						j++;
+					}
+				}
+				if (closedAt >= 0) {
+					const tag = html.slice(i + 1, nameEnd).toLowerCase();
+					const raw = html.slice(i, closedAt + 1);
+					const selfClosing = VOID_HTML_TAGS.has(tag) || /\/\s*>$/.test(raw);
+					tokens.push({ type: "start", tag, raw, selfClosing });
+					i = closedAt + 1;
+					if (!selfClosing && (tag === "script" || tag === "style")) {
+						const closeRe = new RegExp(`</${tag}(?=[\\t\\n\\f\\r >])[^>]*>`, "i");
+						const closeMatch = closeRe.exec(html.slice(i));
+						if (closeMatch) {
+							if (closeMatch.index > 0) {
+								tokens.push({ type: "other", raw: html.slice(i, i + closeMatch.index) });
+							}
+							tokens.push({ type: "end", tag, raw: closeMatch[0] });
+							i += closeMatch.index + closeMatch[0].length;
+						} else {
+							tokens.push({ type: "other", raw: html.slice(i) });
+							i = html.length;
+						}
+					}
+					continue;
+				}
+			}
+		}
+
+		pushText("<");
+		i++;
+	}
+
+	return tokens;
+}
+
+function transformCalloutTokens(tokens: HtmlToken[]): string {
+	let out = "";
+	let skipTag: "pre" | "code" | null = null;
+	let skipDepth = 0;
+	let bqDepth = 0;
+	let bqOpenRaw = "";
+	let bqInner: HtmlToken[] = [];
+
+	for (const tok of tokens) {
+		if (bqDepth === 0) {
+			if (skipTag) {
+				if (tok.type === "start" && !tok.selfClosing && tok.tag === skipTag) skipDepth++;
+				else if (tok.type === "end" && tok.tag === skipTag) {
 					skipDepth--;
 					if (skipDepth <= 0) {
 						skipTag = null;
 						skipDepth = 0;
 					}
-				} else {
-					skipDepth++;
 				}
+				out += tok.raw;
+				continue;
 			}
+			if (tok.type === "start" && !tok.selfClosing && (tok.tag === "pre" || tok.tag === "code")) {
+				skipTag = tok.tag;
+				skipDepth = 1;
+				out += tok.raw;
+				continue;
+			}
+			if (tok.type === "start" && !tok.selfClosing && tok.tag === "blockquote") {
+				bqDepth = 1;
+				bqOpenRaw = tok.raw;
+				bqInner = [];
+				continue;
+			}
+			out += tok.raw;
 			continue;
 		}
-		if (!isClose && (tag === "pre" || tag === "code")) {
-			skipTag = tag;
+
+		// Inside a top-level blockquote: track balanced nested blockquotes (ignoring tags inside pre/code).
+		if (skipTag) {
+			if (tok.type === "start" && !tok.selfClosing && tok.tag === skipTag) skipDepth++;
+			else if (tok.type === "end" && tok.tag === skipTag) {
+				skipDepth--;
+				if (skipDepth <= 0) {
+					skipTag = null;
+					skipDepth = 0;
+				}
+			}
+			bqInner.push(tok);
+			continue;
+		}
+		if (tok.type === "start" && !tok.selfClosing && (tok.tag === "pre" || tok.tag === "code")) {
+			skipTag = tok.tag;
 			skipDepth = 1;
+			bqInner.push(tok);
 			continue;
 		}
-		if (tag === "blockquote") {
-			if (!isClose) {
-				bqDepth++;
-			} else {
-				bqDepth--;
-				if (bqDepth === 0) {
-					const innerRaw = html.slice(bqInnerStart, match.index);
-					const bqFullEnd = TAG_RE.lastIndex;
-					out += html.slice(lastIndex, bqOpenStart);
-					out += transformSingleBlockquote(innerRaw, html.slice(bqOpenStart, bqInnerStart));
-					lastIndex = bqFullEnd;
-				}
-			}
+		if (tok.type === "start" && !tok.selfClosing && tok.tag === "blockquote") {
+			bqDepth++;
+			bqInner.push(tok);
+			continue;
 		}
+		if (tok.type === "end" && tok.tag === "blockquote") {
+			bqDepth--;
+			if (bqDepth === 0) {
+				out += transformSingleBlockquoteTokens(bqInner, bqOpenRaw, tok.raw);
+				bqOpenRaw = "";
+				bqInner = [];
+			} else {
+				bqInner.push(tok);
+			}
+			continue;
+		}
+		bqInner.push(tok);
 	}
 
-	out += html.slice(lastIndex);
+	if (bqDepth > 0) {
+		out += bqOpenRaw;
+		for (const tok of bqInner) out += tok.raw;
+	}
 	return out;
 }
 
-function transformSingleBlockquote(innerRaw: string, openTag: string): string {
-	const inner = renderCalloutsHtml(innerRaw);
-	const firstPMatch = /^(\s*)<p\b[^>]*>([\s\S]*?)<\/p>([\s\S]*)$/i.exec(inner);
-	if (!firstPMatch) return `${openTag}${inner}</blockquote>`;
+function transformSingleBlockquoteTokens(innerTokens: HtmlToken[], openRaw: string, closeRaw: string): string {
+	const fallback = () => `${openRaw}${transformCalloutTokens(innerTokens)}${closeRaw}`;
 
-	const pInner = firstPMatch[2]!;
-	const restHtml = firstPMatch[3] ?? "";
+	// First non-whitespace token inside the blockquote must be `<p>`.
+	let idx = 0;
+	while (idx < innerTokens.length && innerTokens[idx]!.type === "text" && !innerTokens[idx]!.raw.trim()) idx++;
+	const firstTok = innerTokens[idx];
+	if (!firstTok || firstTok.type !== "start" || firstTok.selfClosing || firstTok.tag !== "p") return fallback();
 
-	// Split the first line inside `<p>` at the earliest `<br>` or `\n` (handles both `breaks: true` and `breaks: false`).
-	const breakMatch = /<br\s*\/?>|\r?\n/i.exec(pInner);
-	const firstLineHtml = breakMatch ? pInner.slice(0, breakMatch.index) : pInner;
-	const afterBreakHtml = breakMatch ? pInner.slice(breakMatch.index + breakMatch[0].length) : "";
-	const firstLinePlain = decodeBasicEntities(firstLineHtml.replace(/<[^>]+>/g, ""));
+	// Find the matching `</p>` token.
+	let pDepth = 1;
+	let pEndIdx = -1;
+	for (let k = idx + 1; k < innerTokens.length; k++) {
+		const t = innerTokens[k]!;
+		if (t.type === "start" && !t.selfClosing && t.tag === "p") pDepth++;
+		else if (t.type === "end" && t.tag === "p") {
+			pDepth--;
+			if (pDepth === 0) {
+				pEndIdx = k;
+				break;
+			}
+		}
+	}
+	if (pEndIdx < 0) return fallback();
+
+	const pTokens = innerTokens.slice(idx + 1, pEndIdx);
+	const restTokens = innerTokens.slice(pEndIdx + 1);
+
+	// Split direct content of `<p>` at the earliest `<br>` or `\r?\n` at inline depth 0.
+	const headerTokens: HtmlToken[] = [];
+	const afterBreakTokens: HtmlToken[] = [];
+	let inlineDepth = 0;
+	let breakWasBr = false;
+	for (let k = 0; k < pTokens.length; k++) {
+		const t = pTokens[k]!;
+		if (t.type === "start") {
+			if (inlineDepth === 0 && t.tag === "br") {
+				breakWasBr = true;
+				for (let m = k + 1; m < pTokens.length; m++) afterBreakTokens.push(pTokens[m]!);
+				break;
+			}
+			if (!t.selfClosing) inlineDepth++;
+			headerTokens.push(t);
+		} else if (t.type === "end") {
+			if (inlineDepth > 0) inlineDepth--;
+			headerTokens.push(t);
+		} else if (t.type === "text" && inlineDepth === 0) {
+			const nl = /\r?\n/.exec(t.raw);
+			if (nl) {
+				const before = t.raw.slice(0, nl.index);
+				const after = t.raw.slice(nl.index + nl[0].length);
+				if (before) headerTokens.push({ type: "text", raw: before });
+				if (after) afterBreakTokens.push({ type: "text", raw: after });
+				for (let m = k + 1; m < pTokens.length; m++) afterBreakTokens.push(pTokens[m]!);
+				break;
+			}
+			headerTokens.push(t);
+		} else {
+			headerTokens.push(t);
+		}
+	}
+	if (inlineDepth !== 0) return fallback();
+
+	const firstHeader = headerTokens[0];
+	if (!firstHeader || firstHeader.type !== "text") return fallback();
+	const markerMatch = CALLOUT_MARKER_PREFIX_RE.exec(firstHeader.raw);
+	if (!markerMatch) return fallback();
+
+	const firstLinePlain = headerTokens
+		.filter((t): t is { type: "text"; raw: string } => t.type === "text")
+		.map((t) => decodeBasicEntities(t.raw))
+		.join("");
 	const parsed = parseCalloutHeader(`> ${firstLinePlain}`);
-	if (!parsed) return `${openTag}${inner}</blockquote>`;
+	if (!parsed) return fallback();
 
+	const titleTokens: HtmlToken[] = [];
+	const strippedFirst = firstHeader.raw.slice(markerMatch[0].length);
+	if (strippedFirst) titleTokens.push({ type: "text", raw: strippedFirst });
+	for (let k = 1; k < headerTokens.length; k++) titleTokens.push(headerTokens[k]!);
+	while (titleTokens.length > 0 && titleTokens[titleTokens.length - 1]!.type === "text") {
+		const last = titleTokens[titleTokens.length - 1] as { type: "text"; raw: string };
+		const trimmed = last.raw.replace(/[ \t]+$/, "");
+		if (trimmed) {
+			titleTokens[titleTokens.length - 1] = { type: "text", raw: trimmed };
+			break;
+		}
+		titleTokens.pop();
+	}
+	const hasCustomTitle = titleTokens.some(
+		(t) => (t.type === "text" && t.raw.trim().length > 0) || (t.type === "start" && t.tag === "img"),
+	);
+	const titleHtml = hasCustomTitle ? titleTokens.map((t) => t.raw).join("") : escHtmlText(parsed.spec.label);
+
+	if (breakWasBr && afterBreakTokens[0]?.type === "text") {
+		const cleaned = afterBreakTokens[0].raw.replace(/^\r?\n/, "");
+		if (cleaned) afterBreakTokens[0] = { type: "text", raw: cleaned };
+		else afterBreakTokens.shift();
+	}
+	const afterHtml = afterBreakTokens.map((t) => t.raw).join("");
+	const hasAfterBody = afterBreakTokens.some((t) => t.type === "start" || (t.type === "text" && t.raw.trim().length > 0));
+	const restHtml = transformCalloutTokens(restTokens).trim();
 	const bodyParts: string[] = [];
-	const trimmedAfter = afterBreakHtml.replace(/^\r?\n/, "");
-	if (trimmedAfter.trim()) bodyParts.push(`<p>${trimmedAfter}</p>`);
-	if (restHtml.trim()) bodyParts.push(restHtml.trim());
+	if (hasAfterBody) bodyParts.push(`<p>${afterHtml}</p>`);
+	if (restHtml) bodyParts.push(restHtml);
 	const bodyHtml = bodyParts.join("\n");
 
 	const tone = escHtmlText(parsed.spec.tone);
 	const icon = escHtmlText(parsed.spec.icon);
-	const title = escHtmlText(parsed.title);
 	const bodyEl = bodyHtml ? `<div class="md-callout-body">${bodyHtml}</div>` : "";
 
 	if (parsed.fold === "+" || parsed.fold === "-") {
 		const openAttr = parsed.fold === "+" ? " open" : "";
-		return `<details class="md-callout tone-${tone} is-foldable"${openAttr}><summary class="md-callout-head"><span class="md-callout-icon" aria-hidden="true">${icon}</span><span class="md-callout-title">${title}</span></summary>${bodyEl}</details>`;
+		return `<details class="md-callout tone-${tone} is-foldable"${openAttr}><summary class="md-callout-head"><span class="md-callout-icon" aria-hidden="true">${icon}</span><span class="md-callout-title">${titleHtml}</span></summary>${bodyEl}</details>`;
 	}
-	return `<div class="md-callout tone-${tone}"><div class="md-callout-head"><span class="md-callout-icon" aria-hidden="true">${icon}</span><span class="md-callout-title">${title}</span></div>${bodyEl}</div>`;
+	return `<div class="md-callout tone-${tone}"><div class="md-callout-head"><span class="md-callout-icon" aria-hidden="true">${icon}</span><span class="md-callout-title">${titleHtml}</span></div>${bodyEl}</div>`;
+}
+
+/**
+ * Transforms Obsidian/GitHub callout blockquotes (`> [!NOTE] Title`, foldable `> [!TIP]+` /
+ * `> [!TIP]-` -> `<details>`/`<summary>`, and nested `> > [!WARNING]`) into styled `.md-callout`
+ * cards while preserving `<pre>` / `<code>` verbatim. Uses real DOM + DOMPurify when available
+ * and a quote-aware HTML5 tokenizer otherwise so attribute payloads can never escape.
+ */
+export function renderCalloutsHtml(html: string): string {
+	if (!/<blockquote(?=\s|>|\/)/i.test(html) || !html.includes("[!")) return html;
+	if (canUseRealDom()) {
+		const safe = DOMPurify.isSupported ? DOMPurify.sanitize(html) : html;
+		const holder = document.createElement("template");
+		holder.innerHTML = safe;
+		transformCalloutsDom(holder.content);
+		return holder.innerHTML;
+	}
+	return transformCalloutTokens(tokenizeHtml(html));
 }
 
 /** Renders safe `$...$` and `$$...$$` math spans in prose text nodes (skipping code, links, and currency). */
 function renderMath(holder: HTMLTemplateElement) {
 	const walker = document.createTreeWalker(holder.content, NodeFilter.SHOW_TEXT);
 	const nodes: Text[] = [];
+	const excluded = `${UNLINKED}, ${MATH_EXCLUDED}`;
 	for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-		if (node.nodeValue?.includes("$") && !node.parentElement?.closest(UNLINKED)) nodes.push(node as Text);
+		if (node.nodeValue?.includes("$") && !node.parentElement?.closest(excluded)) nodes.push(node as Text);
 	}
 	for (const node of nodes) {
 		const text = node.data;
@@ -484,7 +939,7 @@ function renderMath(holder: HTMLTemplateElement) {
 				el.innerHTML = rendered;
 			} else {
 				el.textContent = span.tex;
-				void loadKatex();
+				void loadKatex().catch(() => {});
 			}
 			parts.append(el);
 			at = span.to;
@@ -519,15 +974,15 @@ export function finishMarkdown(html: string, options: { anchors?: boolean; ticke
 	const names = options.named && html.includes("[[") ? options.named : undefined;
 	const hasExtra = html.includes("==") || html.includes("#") || html.includes("[!") || html.includes("$");
 	if (!options.anchors && !options.tickets?.length && !names && !html.includes("<table") && !hasExtra) return html;
-	const prepared = html.includes("[!") ? renderCalloutsHtml(html) : html;
 	const holder = document.createElement("template");
-	holder.innerHTML = prepared;
+	holder.innerHTML = html;
+	if (html.includes("[!")) transformCalloutsDom(holder.content);
 	if (options.anchors) anchorHeadings(holder);
 	if (names) linkNames(holder, names);
 	if (options.tickets?.length) linkTickets(holder, options.tickets);
-	if (prepared.includes("$")) renderMath(holder);
-	if (prepared.includes("==")) renderHighlights(holder);
-	if (prepared.includes("#")) renderTags(holder);
+	if (html.includes("$")) renderMath(holder);
+	if (html.includes("==")) renderHighlights(holder);
+	if (html.includes("#")) renderTags(holder);
 	markShortColumns(holder);
 	return holder.innerHTML;
 }
@@ -574,9 +1029,18 @@ export function extractFootnoteDefinition(markdown: string, id: string): { text:
 		const raw = lines[i]!;
 		const fenceMatch = /^[ \t]{0,3}(`{3,}|~{3,})(.*)$/.exec(raw);
 		if (fenceMatch) {
-			if (!openFence) openFence = { ch: fenceMatch[1]![0]!, len: fenceMatch[1]!.length };
-			else if (fenceMatch[1]![0] === openFence.ch && fenceMatch[1]!.length >= openFence.len && fenceMatch[2]!.trim() === "") openFence = null;
-			continue;
+			const ch = fenceMatch[1]![0]!;
+			const len = fenceMatch[1]!.length;
+			const info = fenceMatch[2]!;
+			if (!openFence) {
+				if (ch !== "`" || !info.includes("`")) {
+					openFence = { ch, len };
+					continue;
+				}
+			} else if (ch === openFence.ch && len >= openFence.len && info.trim() === "") {
+				openFence = null;
+				continue;
+			}
 		}
 		if (openFence) continue;
 		const m = defRe.exec(raw);
@@ -931,13 +1395,22 @@ export async function expandTransclusionsMarkdown(
 	let openFence: { ch: string; len: number } | null = null;
 
 	for (const line of lines) {
-		const trimmed = line.trimStart();
-		const fm = /^(`{3,}|~{3,})(.*)$/.exec(trimmed);
+		const fm = /^[ \t]{0,3}(`{3,}|~{3,})(.*)$/.exec(line);
 		if (fm) {
-			if (!openFence) openFence = { ch: fm[1]![0]!, len: fm[1]!.length };
-			else if (fm[1]![0] === openFence.ch && fm[1]!.length >= openFence.len && fm[2]!.trim() === "") openFence = null;
-			out.push(line);
-			continue;
+			const ch = fm[1]![0]!;
+			const len = fm[1]!.length;
+			const info = fm[2]!;
+			if (!openFence) {
+				if (ch !== "`" || !info.includes("`")) {
+					openFence = { ch, len };
+					out.push(line);
+					continue;
+				}
+			} else if (ch === openFence.ch && len >= openFence.len && info.trim() === "") {
+				openFence = null;
+				out.push(line);
+				continue;
+			}
 		}
 		if (openFence) {
 			out.push(line);

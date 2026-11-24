@@ -4,20 +4,71 @@
 // and safe sanitized local SVG diagrams.
 import DOMPurify from "dompurify";
 import { imageType } from "../../shared/fileKind";
-import { baseName, dirName, isInside, joinPath, relativePath, resolvePath } from "../../shared/paths";
+import { baseName, dirName, isInside, joinPath, relativePath, relativeTo, resolvePath } from "../../shared/paths";
 import { backend } from "../backend";
 import { docs } from "../project";
 import { canonical, notify, setState, state } from "../state";
 
+const IMAGE_CACHE_MAX_ENTRIES = 40;
+const IMAGE_CACHE_MAX_CHARS = 40 * 1024 * 1024;
 const dataUrlCache = new Map<string, string>();
+let dataUrlCacheChars = 0;
 let workspaceFilesCache: { root: string; at: number; files: string[] } | null = null;
 
 export const IMAGE_FILE_RE = /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif)$/i;
 
-/** Clears cached image data URL (e.g. if an image file changes on disk). */
+function cacheGetImage(key: string): string | undefined {
+	const hit = dataUrlCache.get(key);
+	if (hit === undefined) return undefined;
+	dataUrlCache.delete(key);
+	dataUrlCache.set(key, hit);
+	return hit;
+}
+
+function cacheSetImage(key: string, value: string) {
+	const prev = dataUrlCache.get(key);
+	if (prev !== undefined) {
+		dataUrlCacheChars -= prev.length;
+		dataUrlCache.delete(key);
+	}
+	if (value.length > IMAGE_CACHE_MAX_CHARS) return;
+	dataUrlCache.set(key, value);
+	dataUrlCacheChars += value.length;
+	while (dataUrlCache.size > IMAGE_CACHE_MAX_ENTRIES || dataUrlCacheChars > IMAGE_CACHE_MAX_CHARS) {
+		const oldestKey = dataUrlCache.keys().next().value;
+		if (oldestKey === undefined) break;
+		const oldestVal = dataUrlCache.get(oldestKey);
+		dataUrlCache.delete(oldestKey);
+		if (oldestVal !== undefined) dataUrlCacheChars -= oldestVal.length;
+	}
+}
+
+/** Reports current image data-URL cache size (used for diagnostics and regression tests). */
+export function imageCacheStats(): { entries: number; chars: number } {
+	return { entries: dataUrlCache.size, chars: dataUrlCacheChars };
+}
+
+/** Clears cached image data URL (e.g. if an image file changes on disk or a new folder opens). */
 export function invalidateImageCache(path?: string) {
-	if (path) dataUrlCache.delete(path);
-	else dataUrlCache.clear();
+	if (path) {
+		const prev = dataUrlCache.get(path);
+		if (prev !== undefined) {
+			dataUrlCacheChars -= prev.length;
+			dataUrlCache.delete(path);
+		}
+		const canon = canonical(path);
+		for (const [k, v] of [...dataUrlCache.entries()]) {
+			if (canonical(k) === canon) {
+				dataUrlCacheChars -= v.length;
+				dataUrlCache.delete(k);
+			}
+		}
+		workspaceFilesCache = null;
+	} else {
+		dataUrlCache.clear();
+		dataUrlCacheChars = 0;
+		workspaceFilesCache = null;
+	}
 }
 
 async function listWorkspaceFiles(): Promise<string[]> {
@@ -61,9 +112,21 @@ export async function resolveImageTarget(src: string, docPath: string): Promise<
 		}
 	})();
 
+	const docInWorkspace = Boolean(docPath && !docPath.startsWith("untitled:") && isInside(root, docPath));
+	const isWinAbs = /^[a-zA-Z]:[\\/]/.test(decoded);
+	const hasTraversal = decoded.split(/[\\/]/).includes("..");
 	const direct = decoded.startsWith("/")
-		? joinPath(root, ...decoded.split("/").filter(Boolean))
-		: resolvePath(dirName(docPath), decoded);
+		? resolvePath(root, decoded.replace(/^\/+/, ""))
+		: isWinAbs
+			? decoded
+			: docInWorkspace
+				? resolvePath(dirName(docPath), decoded)
+				: resolvePath(root, decoded);
+
+	// Reject explicit path traversal or rooted paths that escape the workspace root.
+	if ((decoded.startsWith("/") || isWinAbs || hasTraversal) && !isInside(root, direct)) {
+		return null;
+	}
 
 	const files = await listWorkspaceFiles();
 	const byLower = new Map(files.map((f) => [f.toLowerCase(), f]));
@@ -75,14 +138,16 @@ export async function resolveImageTarget(src: string, docPath: string): Promise<
 
 	// Obsidian bare attachment resolution: check local attachments/assets, project attachmentsFolder, then workspace basename.
 	const wantedName = baseName(decoded).toLowerCase();
-	const docDir = dirName(docPath);
-	const docsRoot = joinPath(root, ...(state.project?.docs ?? "docs").split(/[\\/]/).filter((p) => p && p !== "."));
+	const docDir = docInWorkspace ? dirName(docPath) : root;
+	const rawDocsRoot = resolvePath(root, state.project?.docs ?? "docs");
+	const docsRoot = isInside(root, rawDocsRoot) ? rawDocsRoot : joinPath(root, "docs");
 	const configured = state.settings.attachmentsFolder?.trim();
+	const configuredDir = configured ? resolvePath(root, configured) : null;
 	const candidateDirs = [
-		...(configured ? [joinPath(root, ...configured.split(/[\\/]/).filter(Boolean))] : []),
-		joinPath(docDir, "attachments"),
-		joinPath(docDir, "assets"),
-		joinPath(docDir, "images"),
+		...(configuredDir && isInside(root, configuredDir) ? [configuredDir] : []),
+		...(docInWorkspace
+			? [joinPath(docDir, "attachments"), joinPath(docDir, "assets"), joinPath(docDir, "images")]
+			: []),
 		joinPath(docsRoot, "attachments"),
 		joinPath(docsRoot, "assets"),
 		joinPath(docsRoot, "images"),
@@ -91,18 +156,20 @@ export async function resolveImageTarget(src: string, docPath: string): Promise<
 	];
 
 	for (const dir of candidateDirs) {
-		const cand = joinPath(dir, decoded);
+		const cand = resolvePath(dir, decoded);
 		if (isInside(root, cand)) {
 			const hit = byLower.get(cand.toLowerCase());
 			if (hit) return { filePath: hit };
 		}
 	}
 
-	// Fallback: first image in workspace matching basename (preferring closer path).
-	const matches = files.filter((f) => baseName(f).toLowerCase() === wantedName);
-	if (matches.length) {
-		matches.sort((a, b) => relativePath(docDir, a).length - relativePath(docDir, b).length);
-		return { filePath: matches[0]! };
+	// Fallback: first image in workspace matching basename (preferring closer path), never for traversal/rooted paths.
+	if (!decoded.startsWith("/") && !isWinAbs && !hasTraversal) {
+		const matches = files.filter((f) => baseName(f).toLowerCase() === wantedName);
+		if (matches.length) {
+			matches.sort((a, b) => relativePath(docDir, a).length - relativePath(docDir, b).length);
+			return { filePath: matches[0]! };
+		}
 	}
 
 	// If direct path is inside workspace even if workspace cache was slightly stale, let backend try it.
@@ -118,7 +185,7 @@ export async function loadImageUrl(src: string, docPath: string): Promise<{ url:
 	const target = resolved.filePath;
 	if (!target) return null;
 
-	const cached = dataUrlCache.get(target);
+	const cached = cacheGetImage(target);
 	if (cached) return { url: cached, filePath: target };
 
 	if (/\.svg$/i.test(target)) {
@@ -127,7 +194,7 @@ export async function loadImageUrl(src: string, docPath: string): Promise<{ url:
 			if (!res.text.trim()) return null;
 			const cleanSvg = DOMPurify.sanitize(res.text, { USE_PROFILES: { svg: true, svgFilters: true } });
 			const dataUrl = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(cleanSvg)}`;
-			dataUrlCache.set(target, dataUrl);
+			cacheSetImage(target, dataUrl);
 			return { url: dataUrl, filePath: target };
 		} catch {
 			return null;
@@ -138,7 +205,7 @@ export async function loadImageUrl(src: string, docPath: string): Promise<{ url:
 	try {
 		const { type, base64 } = await backend.image(target);
 		const dataUrl = `data:${type};base64,${base64}`;
-		dataUrlCache.set(target, dataUrl);
+		cacheSetImage(target, dataUrl);
 		return { url: dataUrl, filePath: target };
 	} catch {
 		return null;
@@ -207,35 +274,56 @@ export async function saveImageAttachment(file: File | Blob, docPath: string): P
 		return null;
 	}
 
-	const rawName = file instanceof File ? file.name : "";
+	const rawName = file instanceof File ? baseName(file.name) : "";
 	const extFromName = rawName.includes(".") ? rawName.split(".").pop()!.toLowerCase() : "";
 	const ext = MIME_EXT[file.type.toLowerCase()] ?? (extFromName === "svg" ? "svg" : imageType(`a.${extFromName}`) ? extFromName : "png");
-	const meaningfulName = rawName && !GENERIC_CLIPBOARD_NAME_RE.test(rawName.trim()) ? sanitizeImageBaseName(rawName) : "";
+	const sanitized = rawName && !GENERIC_CLIPBOARD_NAME_RE.test(rawName.trim()) ? sanitizeImageBaseName(rawName) : "";
+	const meaningfulName = sanitized && sanitized !== "." && sanitized !== ".." ? sanitized : "";
 	const stem = meaningfulName || `pasted-image-${timestampSlug()}`;
 
-	const docsRoot = joinPath(root, ...(state.project?.docs ?? "docs").split(/[\\/]/).filter((p) => p && p !== "."));
+	const rawDocsRoot = resolvePath(root, state.project?.docs ?? "docs");
+	const docsRoot = isInside(root, rawDocsRoot) ? rawDocsRoot : joinPath(root, "docs");
+	const fallbackDestDir = joinPath(docsRoot, "attachments");
 	const configured = state.settings.attachmentsFolder?.trim();
-	const docCanon = canonical(docPath);
-	const ownerTicket = docs().find(
-		(d) =>
-			d.exists &&
-			d.group === "tickets" &&
-			d.ticketFolder &&
-			(canonical(d.path) === docCanon || isInside(d.ticketFolder, docPath)),
-	);
-	const destDir = configured
-		? joinPath(root, ...configured.split(/[\\/]/).filter(Boolean))
-		: ownerTicket?.ticketFolder
-			? joinPath(ownerTicket.ticketFolder, "attachments")
-			: isInside(docsRoot, docPath)
-				? joinPath(docsRoot, "attachments")
-				: joinPath(dirName(docPath), "attachments");
+	const docInWorkspace = Boolean(docPath && !docPath.startsWith("untitled:") && isInside(root, docPath));
+	const docCanon = docInWorkspace ? canonical(docPath) : "";
+	const ownerTicket = docInWorkspace
+		? docs().find(
+				(d) =>
+					d.exists &&
+					d.group === "tickets" &&
+					d.ticketFolder &&
+					(canonical(d.path) === docCanon || isInside(d.ticketFolder, docPath)),
+			)
+		: undefined;
+	let destDir: string;
+	if (configured) {
+		destDir = resolvePath(root, configured);
+		if (!isInside(root, destDir)) {
+			notify("Attachments folder must stay inside the workspace.", "error");
+			return null;
+		}
+	} else if (ownerTicket?.ticketFolder && isInside(root, ownerTicket.ticketFolder)) {
+		destDir = joinPath(ownerTicket.ticketFolder, "attachments");
+	} else if (!docInWorkspace || isInside(docsRoot, docPath)) {
+		destDir = fallbackDestDir;
+	} else {
+		destDir = joinPath(dirName(docPath), "attachments");
+	}
+	if (!isInside(root, destDir)) {
+		notify("Attachments folder must stay inside the workspace.", "error");
+		return null;
+	}
 
 	const existing = new Set((await listWorkspaceFiles()).map((f) => f.toLowerCase()));
-	let candidate = joinPath(destDir, `${stem}.${ext}`);
+	let candidate = resolvePath(destDir, `${stem}.${ext}`);
 	let n = 2;
 	while (existing.has(candidate.toLowerCase())) {
-		candidate = joinPath(destDir, `${stem}-${n++}.${ext}`);
+		candidate = resolvePath(destDir, `${stem}-${n++}.${ext}`);
+	}
+	if (!isInside(root, candidate)) {
+		notify("Attachment path must stay inside the workspace.", "error");
+		return null;
 	}
 
 	try {
@@ -249,21 +337,21 @@ export async function saveImageAttachment(file: File | Blob, docPath: string): P
 			}
 			await backend.create(candidate, "file");
 			await backend.write(candidate, cleanSvg);
-			dataUrlCache.set(candidate, `data:image/svg+xml;charset=utf-8,${encodeURIComponent(cleanSvg)}`);
+			cacheSetImage(candidate, `data:image/svg+xml;charset=utf-8,${encodeURIComponent(cleanSvg)}`);
 		} else {
 			const base64 = arrayBufferToBase64(await file.arrayBuffer());
 			const saved = await backend.writeImage(candidate, base64);
 			savedPath = saved.path;
 			const dataUrl = `data:${file.type || `image/${ext === "jpg" ? "jpeg" : ext}`};base64,${base64}`;
-			dataUrlCache.set(savedPath, dataUrl);
+			cacheSetImage(savedPath, dataUrl);
 		}
 		workspaceFilesCache = null;
 		setState("treeVersion", (v) => v + 1);
-		const rel = relativePath(dirName(docPath), savedPath);
+		const rel = docInWorkspace ? relativePath(dirName(docPath), savedPath) : `/${relativeTo(root, savedPath)}`;
 		const alt = meaningfulName ? meaningfulName.replace(/[-_]+/g, " ") : "";
 		const encodedRel = rel
 			.split("/")
-			.map((seg) => encodeURIComponent(seg))
+			.map((seg) => (seg ? encodeURIComponent(seg) : ""))
 			.join("/");
 		return { markdown: `![${alt}](${encodedRel})`, path: savedPath, rel };
 	} catch (e: any) {

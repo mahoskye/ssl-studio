@@ -2,10 +2,12 @@
 // Live & Read modes. Computes exact visual indentation (`indentEm`) and marker column
 // width (`hangEm`) so wrapped continuation lines align cleanly under the item's text start.
 
+import { scanQuotePrefix } from "./codeTokens";
+
 const RULE_RE = /^[ \t]*([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
-const TASK_RE = /^((?:[ \t]*>[ \t]?)*)([ \t]*)([-*+]|\d{1,9}[.)])([ \t]+)\[([ xX])\]([ \t]*)/;
-const BULLET_RE = /^((?:[ \t]*>[ \t]?)*)([ \t]*)([-*+])([ \t]+)/;
-const ORDERED_RE = /^((?:[ \t]*>[ \t]?)*)([ \t]*)(\d{1,9}[.)])([ \t]+)/;
+const TASK_RE = /^([ \t]*)([-*+]|\d{1,9}[.)])([ \t]+)\[([ xX])\](?:([ \t]+)|(?=$))/;
+const BULLET_RE = /^([ \t]*)([-*+])([ \t]+)/;
+const ORDERED_RE = /^([ \t]*)(\d{1,9}[.)])([ \t]+)/;
 
 export type ListLineInfo = {
 	kind: "task" | "bullet" | "ordered";
@@ -42,15 +44,18 @@ const round2 = (n: number) => Math.round(n * 100) / 100;
 
 /** Parses a Markdown line into structured list geometry for hanging-indent alignment, or `null` if not a list item. */
 export function parseListLine(text: string): ListLineInfo | null {
-	const taskMatch = TASK_RE.exec(text);
+	const { offset: quoteLen } = scanQuotePrefix(text);
+	const rest = text.slice(quoteLen);
+
+	if (RULE_RE.test(rest)) return null;
+
+	const taskMatch = TASK_RE.exec(rest);
 	if (taskMatch) {
-		const quote = taskMatch[1]!;
-		const ws = taskMatch[2]!;
-		const marker = taskMatch[3]!;
-		const gap = taskMatch[4]!;
-		const mark = taskMatch[5]!;
-		const trail = taskMatch[6]!;
-		const quoteLen = quote.length;
+		const ws = taskMatch[1]!;
+		const marker = taskMatch[2]!;
+		const gap = taskMatch[3]!;
+		const mark = taskMatch[4]!;
+		const trail = taskMatch[5] ?? "";
 		const wsLen = ws.length;
 		const markerFrom = quoteLen + wsLen;
 		const bracketOffset = markerFrom + marker.length + gap.length;
@@ -70,15 +75,11 @@ export function parseListLine(text: string): ListLineInfo | null {
 		};
 	}
 
-	if (RULE_RE.test(text)) return null;
-
-	const bMatch = BULLET_RE.exec(text);
+	const bMatch = BULLET_RE.exec(rest);
 	if (bMatch) {
-		const quote = bMatch[1]!;
-		const ws = bMatch[2]!;
-		const marker = bMatch[3]!;
-		const gap = bMatch[4]!;
-		const quoteLen = quote.length;
+		const ws = bMatch[1]!;
+		const marker = bMatch[2]!;
+		const gap = bMatch[3]!;
 		const wsLen = ws.length;
 		const markerFrom = quoteLen + wsLen;
 		const markerTo = markerFrom + marker.length + gap.length;
@@ -95,13 +96,11 @@ export function parseListLine(text: string): ListLineInfo | null {
 		};
 	}
 
-	const oMatch = ORDERED_RE.exec(text);
+	const oMatch = ORDERED_RE.exec(rest);
 	if (oMatch) {
-		const quote = oMatch[1]!;
-		const ws = oMatch[2]!;
-		const marker = oMatch[3]!;
-		const gap = oMatch[4]!;
-		const quoteLen = quote.length;
+		const ws = oMatch[1]!;
+		const marker = oMatch[2]!;
+		const gap = oMatch[3]!;
 		const wsLen = ws.length;
 		const markerFrom = quoteLen + wsLen;
 		const markerTo = markerFrom + marker.length + gap.length;

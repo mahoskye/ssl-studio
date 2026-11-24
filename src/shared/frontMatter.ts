@@ -2,6 +2,7 @@
 // two lines of three dashes: which ticket a spec is for, what state a decision
 // is in. Only what those lines need is read: a value, a list on one line or as
 // dashes under the key, a comment. Anything else in the block is passed over.
+import { fenced } from "./catalog";
 
 export type FrontMatter = {
 	values: Record<string, string | string[]>;
@@ -78,29 +79,26 @@ function stripInlineComment(raw: string): string {
 }
 
 const TEMPLATE_HEADER_RE = /^\s*<!--\s*template\b[\s\S]*?-->\s*$/i;
+const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /** Quotes a YAML scalar value when it contains characters that would corrupt unquoted YAML (`#`, `: `, `[...]`, quotes, leading/trailing spaces). */
 export function quoteYamlScalar(value: string): string {
 	const v = value.trim();
 	if (!v) return '""';
-	// Already cleanly double-quoted (valid JSON string) or single-quoted (no unescaped internal ') stays as written.
-	if (v.startsWith('"') && v.endsWith('"')) {
-		try {
-			if (typeof JSON.parse(v) === "string") return v;
-		} catch {
-			// Fall through and properly escape embedded quotes.
-		}
-	}
-	if (v.startsWith("'") && v.endsWith("'") && v.length >= 2 && !v.slice(1, -1).replace(/''/g, "").includes("'")) return v;
-	if (v.startsWith("[") && v.endsWith("]") && !v.startsWith("[[")) return v;
-	if (/^[[{!&*?|>'%@`-]|:\s|:$|\s#|^\s|\s$|[\r\n"]/.test(v)) return JSON.stringify(v);
+	if (/^[#[\]{},!&*?|>'\"%@`-]|:\s|:$|\s#|[\r\n"]/.test(v)) return JSON.stringify(v);
 	return v;
+}
+
+function leadingTemplateLines(lines: readonly string[]): number {
+	let idx = 0;
+	while (idx < lines.length && TEMPLATE_HEADER_RE.test(lines[idx]!.replace(/^\uFEFF/, ""))) idx++;
+	return idx;
 }
 
 export function frontMatter(text: string): FrontMatter {
 	const none = { values: {}, lines: 0, body: text };
-	const lines = text.replace(/^﻿/, "").split(/\r?\n/);
-	const start = TEMPLATE_HEADER_RE.test(lines[0] ?? "") ? 1 : 0;
+	const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/);
+	const start = leadingTemplateLines(lines);
 	if (lines[start]?.trim() !== "---") return none;
 	const end = lines.findIndex((line, i) => i > start && /^(---|\.\.\.)\s*$/.test(line));
 	if (end < 0) return none;
@@ -160,11 +158,32 @@ const plain = plainMarkdown;
 /** A heading line: its level and its words. Closing hashes are a mark only after a space: "Using C#" ends in a sharp. */
 export const HEADING = /^\s{0,3}(#{1,6})\s+(.+?)(?:\s+#+)?\s*$/;
 
+/** Replaces fenced code blocks with blank-line separators so headings/code inside fences are skipped. */
+function withoutFenced(body: string): string {
+	const normalized = body.replace(/\r\n/g, "\n");
+	const ranges = fenced(normalized);
+	if (!ranges.length) return normalized;
+	let out = "";
+	let at = 0;
+	for (const [from, to] of ranges) {
+		out += normalized.slice(at, from);
+		out += "\n\n";
+		at = to;
+	}
+	out += normalized.slice(at);
+	return out;
+}
+
 /** A document's title: what its front matter says, or its first heading. */
 export function titleOf(text: string): string {
 	const { values, body } = frontMatter(text);
-	const heading = body.split(/\r?\n/).map((line) => HEADING.exec(line)).find(Boolean);
-	return one(values.title) || (heading ? plain(heading[2]!) : "");
+	const named = one(values.title);
+	if (named) return named;
+	const heading = withoutFenced(body)
+		.split("\n")
+		.map((line) => HEADING.exec(line))
+		.find(Boolean);
+	return heading ? plain(heading[2]!) : "";
 }
 
 /** The longest a one-line summary is. */
@@ -175,7 +194,7 @@ export function summaryOf(text: string): string {
 	const { values, body } = frontMatter(text);
 	const said = one(values.summary);
 	if (said) return said;
-	const paragraph = body
+	const paragraph = withoutFenced(body)
 		.split(/\n\s*\n/)
 		.map((block) => block.trim())
 		.find((block) => block && !/^(#|```|~~~|\||<!--|[-*+]\s|\d+\.\s|>|---)/.test(block));
@@ -189,14 +208,62 @@ export function summaryOf(text: string): string {
 	return `${sentence.slice(0, space > 0 ? space : SUMMARY_MAX - 1).replace(/[\uD800-\uDBFF]$/, "")}…`;
 }
 
-/**
- * The text with one value of its front matter set: the key's own line is
- * changed where it has one, and added at the block's end where it has not.
- * A document with no front matter gets a block. Nothing else is touched, and
- * the file's own line ends are kept. A value that is a list under its key is
- * left alone: null says it could not be set.
- */
-export function withFrontMatter(text: string, key: string, value: string): string | null {
+/** True when `raw` is a single complete double-quoted or single-quoted YAML scalar literal. */
+function isSingleQuotedScalar(raw: string): boolean {
+	const v = raw.trim();
+	if (v.length < 2) return false;
+	if (v[0] === '"' && v.at(-1) === '"') {
+		for (let i = 1; i < v.length - 1; i++) {
+			if (v[i] === "\\") {
+				i++;
+				continue;
+			}
+			if (v[i] === '"') return false;
+		}
+		return true;
+	}
+	if (v[0] === "'" && v.at(-1) === "'") {
+		for (let i = 1; i < v.length - 1; i++) {
+			if (v[i] === "'") {
+				if (v[i + 1] === "'") {
+					i++;
+					continue;
+				}
+				return false;
+			}
+		}
+		return true;
+	}
+	return false;
+}
+
+/** Reads a frontmatter list key without splitting a single quoted scalar that contains a comma. */
+function readFrontMatterListValues(text: string, key: string): string[] {
+	const fm = frontMatter(text);
+	const val = fm.values[key.toLowerCase()];
+	if (val === undefined) return [];
+	if (Array.isArray(val)) return val.map((v) => v.trim()).filter(Boolean);
+	const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/);
+	const openIdx = leadingTemplateLines(lines);
+	const close = lines[openIdx]?.trim() === "---" ? lines.findIndex((line, i) => i > openIdx && /^(---|\.\.\.)\s*$/.test(line)) : -1;
+	if (close >= 0) {
+		const keyRe = new RegExp(`^${escapeRegExp(key)}\\s*:`, "i");
+		const at = lines.findLastIndex((line, i) => i > openIdx && i < close && keyRe.test(line));
+		if (at >= 0) {
+			const colon = lines[at]!.indexOf(":");
+			const rawVal = stripInlineComment(lines[at]!.slice(colon + 1));
+			if (isSingleQuotedScalar(rawVal)) {
+				const trimmed = val.trim();
+				return trimmed ? [trimmed] : [];
+			}
+		}
+	}
+	return many(val);
+}
+
+const quoteListItem = (v: string) => (/[:#[\]{},&*?|>!'"%@`\r\n]|^-|^\s|\s$/.test(v) ? JSON.stringify(v) : v);
+
+function writeFrontMatterRaw(text: string, key: string, serializedVal: string): string | null {
 	const eol = text.includes("\r\n") ? "\r\n" : "\n";
 	// Each line with where it is in the text: only the one line is rewritten, so every other line keeps its own end.
 	const lines: { text: string; start: number; end: number }[] = [];
@@ -207,14 +274,37 @@ export function withFrontMatter(text: string, key: string, value: string): strin
 		if (stop < 0) break;
 		at = stop + 1;
 	}
-	const openIdx = TEMPLATE_HEADER_RE.test(lines[0]?.text.replace(/^﻿/, "") ?? "") ? 1 : 0;
-	const fenced = lines[openIdx]?.text.replace(/^﻿/, "").trim() === "---";
-	const close = fenced ? lines.findIndex((line, i) => i > openIdx && /^(---|\.\.\.)\s*$/.test(line.text)) : -1;
-	const safeVal = quoteYamlScalar(value);
-	if (close < 0) return `---${eol}${key}: ${safeVal}${eol}---${eol}${eol}${text}`;
+	const openIdx = leadingTemplateLines(lines.map((l) => l.text));
+	const fencedOpen = lines[openIdx]?.text.replace(/^\uFEFF/, "").trim() === "---";
+	const close = fencedOpen ? lines.findIndex((line, i) => i > openIdx && /^(---|\.\.\.)\s*$/.test(line.text)) : -1;
+	if (close < 0) {
+		// Never prepend a second broken frontmatter block when an opening `---` was never closed.
+		if (fencedOpen) return null;
+		const bom = text.startsWith("\uFEFF") ? "\uFEFF" : "";
+		const afterBom = bom ? text.slice(1) : text;
+		let insertAt = 0;
+		let pos = 0;
+		while (pos < afterBom.length) {
+			const nl = afterBom.indexOf("\n", pos);
+			const lineEnd = nl < 0 ? afterBom.length : nl;
+			const rawLine = afterBom.slice(pos, lineEnd).replace(/\r$/, "");
+			if (!TEMPLATE_HEADER_RE.test(rawLine)) break;
+			insertAt = nl < 0 ? afterBom.length : nl + 1;
+			pos = insertAt;
+		}
+		const block = `---${eol}${key}: ${serializedVal}${eol}---`;
+		if (insertAt > 0) {
+			const prefix = afterBom.slice(0, insertAt);
+			const prefixWithEol = prefix.endsWith("\n") ? prefix : `${prefix}${eol}`;
+			const rest = afterBom.slice(insertAt).replace(/^(?:\r?\n)+/, "");
+			return `${bom}${prefixWithEol}${block}${rest ? `${eol}${eol}${rest}` : eol}`;
+		}
+		return `${bom}${block}${eol}${eol}${afterBom}`;
+	}
 	// The last line that sets the key is the one that is read, so it is the one that is written.
-	const at = lines.findLastIndex((line, i) => i > openIdx && i < close && new RegExp(`^${key}\\s*:`, "i").test(line.text));
-	if (at < 0) return `${text.slice(0, lines[close]!.start)}${key}: ${safeVal}${eol}${text.slice(lines[close]!.start)}`;
+	const keyRe = new RegExp(`^${escapeRegExp(key)}\\s*:`, "i");
+	const at = lines.findLastIndex((line, i) => i > openIdx && i < close && keyRe.test(line.text));
+	if (at < 0) return `${text.slice(0, lines[close]!.start)}${key}: ${serializedVal}${eol}${text.slice(lines[close]!.start)}`;
 	// A list written as dashes under the key is the person's layout: skip blank/comment lines when checking.
 	if (/:\s*(?:#.*)?$/.test(lines[at]!.text)) {
 		for (let j = at + 1; j < close; j++) {
@@ -224,7 +314,18 @@ export function withFrontMatter(text: string, key: string, value: string): strin
 			break;
 		}
 	}
-	return `${text.slice(0, lines[at]!.start)}${lines[at]!.text.slice(0, lines[at]!.text.indexOf(":"))}: ${safeVal}${text.slice(lines[at]!.end)}`;
+	return `${text.slice(0, lines[at]!.start)}${lines[at]!.text.slice(0, lines[at]!.text.indexOf(":"))}: ${serializedVal}${text.slice(lines[at]!.end)}`;
+}
+
+/**
+ * The text with one value of its front matter set: the key's own line is
+ * changed where it has one, and added at the block's end where it has not.
+ * A document with no front matter gets a block. Nothing else is touched, and
+ * the file's own line ends are kept. A value that is a list under its key is
+ * left alone: null says it could not be set.
+ */
+export function withFrontMatter(text: string, key: string, value: string): string | null {
+	return writeFrontMatterRaw(text, key, quoteYamlScalar(value));
 }
 
 /**
@@ -235,11 +336,10 @@ export function withFrontMatter(text: string, key: string, value: string): strin
 export function addToFrontMatterList(text: string, key: string, item: string): string | null {
 	const wanted = item.trim();
 	if (!wanted) return text;
-	const existing = many(frontMatter(text).values[key.toLowerCase()]);
+	const existing = readFrontMatterListValues(text, key);
 	if (existing.some((v) => v.toLowerCase() === wanted.toLowerCase())) return text;
-	const quote = (v: string) => (/[:#[\]{},&*?|>!'"%@`]|^\s|\s$/.test(v) ? JSON.stringify(v) : v);
-	const formatted = `[${[...existing, wanted].map(quote).join(", ")}]`;
-	const inline = withFrontMatter(text, key, formatted);
+	const formatted = `[${[...existing, wanted].map(quoteListItem).join(", ")}]`;
+	const inline = writeFrontMatterRaw(text, key, formatted);
 	if (inline !== null) return inline;
 
 	// Multi-line YAML bullet list: append a new `- <item>` with the same indentation after the last bullet item.
@@ -252,10 +352,11 @@ export function addToFrontMatterList(text: string, key: string, item: string): s
 		if (stop < 0) break;
 		at = stop + 1;
 	}
-	const openIdx = TEMPLATE_HEADER_RE.test(lines[0]?.text.replace(/^﻿/, "") ?? "") ? 1 : 0;
-	const close = lines.findIndex((line, i) => i > openIdx && /^(---|\.\.\.)\s*$/.test(line.text));
+	const openIdx = leadingTemplateLines(lines.map((l) => l.text));
+	const close = lines[openIdx]?.text.replace(/^\uFEFF/, "").trim() === "---" ? lines.findIndex((line, i) => i > openIdx && /^(---|\.\.\.)\s*$/.test(line.text)) : -1;
 	if (close < 0) return null;
-	const at = lines.findLastIndex((line, i) => i > openIdx && i < close && new RegExp(`^${key}\\s*:`, "i").test(line.text));
+	const keyRe = new RegExp(`^${escapeRegExp(key)}\\s*:`, "i");
+	const at = lines.findLastIndex((line, i) => i > openIdx && i < close && keyRe.test(line.text));
 	if (at < 0) return null;
 	let lastItem = at;
 	let indent = "  ";
@@ -269,7 +370,7 @@ export function addToFrontMatterList(text: string, key: string, item: string): s
 		} else break;
 	}
 	const insertAt = lines[lastItem]!.end;
-	return `${text.slice(0, insertAt)}${eol}${indent}- ${quote(wanted)}${text.slice(insertAt)}`;
+	return `${text.slice(0, insertAt)}${eol}${indent}- ${quoteListItem(wanted)}${text.slice(insertAt)}`;
 }
 
 /**
@@ -281,7 +382,7 @@ export function removeFromFrontMatterList(text: string, key: string, item: strin
 	if (!target) return text;
 	const fm = frontMatter(text);
 	if (fm.lines < 2) return text;
-	const existing = many(fm.values[key.toLowerCase()]);
+	const existing = readFrontMatterListValues(text, key);
 	const kept = existing.filter((v) => v.toLowerCase() !== target);
 	if (kept.length === existing.length) return text;
 
@@ -298,10 +399,11 @@ export function removeFromFrontMatterList(text: string, key: string, item: strin
 		if (stop < 0) break;
 		at = stop + 1;
 	}
-	const openIdx = TEMPLATE_HEADER_RE.test(lines[0]?.text.replace(/^﻿/, "") ?? "") ? 1 : 0;
-	const close = lines.findIndex((line, i) => i > openIdx && /^(---|\.\.\.)\s*$/.test(line.text));
+	const openIdx = leadingTemplateLines(lines.map((l) => l.text));
+	const close = lines[openIdx]?.text.replace(/^\uFEFF/, "").trim() === "---" ? lines.findIndex((line, i) => i > openIdx && /^(---|\.\.\.)\s*$/.test(line.text)) : -1;
 	if (close < 0) return null;
-	const at = lines.findLastIndex((line, i) => i > openIdx && i < close && new RegExp(`^${key}\\s*:`, "i").test(line.text));
+	const keyRe = new RegExp(`^${escapeRegExp(key)}\\s*:`, "i");
+	const at = lines.findLastIndex((line, i) => i > openIdx && i < close && keyRe.test(line.text));
 	if (at < 0) return text;
 
 	// Check if multi-line bullet list
@@ -334,9 +436,8 @@ export function removeFromFrontMatterList(text: string, key: string, item: strin
 		return out;
 	}
 	if (!kept.length) return `${text.slice(0, lines[at]!.start)}${text.slice(lines[at]!.lineEnd)}`;
-	const quote = (v: string) => (/[:#[\]{},&*?|>!'"%@`]|^\s|\s$/.test(v) ? JSON.stringify(v) : v);
 	const rawVal = lines[at]!.text.slice(lines[at]!.text.indexOf(":") + 1).trim();
-	const nextVal = rawVal.startsWith("[") || kept.length > 1 ? `[${kept.map(quote).join(", ")}]` : quote(kept[0]!);
+	const nextVal = rawVal.startsWith("[") || kept.length > 1 ? `[${kept.map(quoteListItem).join(", ")}]` : quoteListItem(kept[0]!);
 	return `${text.slice(0, lines[at]!.start)}${lines[at]!.text.slice(0, lines[at]!.text.indexOf(":"))}: ${nextVal}${text.slice(lines[at]!.end)}`;
 }
 
@@ -348,7 +449,7 @@ export function replaceInFrontMatterList(text: string, key: string, oldItem: str
 	const target = oldItem.trim().toLowerCase();
 	const next = newItem.trim();
 	if (!target || !next) return text;
-	const vals = many(frontMatter(text).values[key.toLowerCase()]);
+	const vals = readFrontMatterListValues(text, key);
 	if (!vals.some((v) => v.toLowerCase() === target)) return text;
 
 	// Scan the frontmatter block directly so we can replace in place without reordering keys or flattening 1-item YAML lists.
@@ -364,13 +465,12 @@ export function replaceInFrontMatterList(text: string, key: string, oldItem: str
 		if (stop < 0) break;
 		at = stop + 1;
 	}
-	const openIdx = TEMPLATE_HEADER_RE.test(lines[0]?.text.replace(/^﻿/, "") ?? "") ? 1 : 0;
-	const close = lines[openIdx]?.text.replace(/^﻿/, "").trim() === "---" ? lines.findIndex((line, i) => i > openIdx && /^(---|\.\.\.)\s*$/.test(line.text)) : -1;
+	const openIdx = leadingTemplateLines(lines.map((l) => l.text));
+	const close = lines[openIdx]?.text.replace(/^\uFEFF/, "").trim() === "---" ? lines.findIndex((line, i) => i > openIdx && /^(---|\.\.\.)\s*$/.test(line.text)) : -1;
 	if (close < 0) return null;
-	const at = lines.findLastIndex((line, i) => i > openIdx && i < close && new RegExp(`^${key}\\s*:`, "i").test(line.text));
+	const keyRe = new RegExp(`^${escapeRegExp(key)}\\s*:`, "i");
+	const at = lines.findLastIndex((line, i) => i > openIdx && i < close && keyRe.test(line.text));
 	if (at < 0) return text;
-
-	const quote = (v: string) => (/[:#[\]{},&*?|>!'"%@`]|^\s|\s$/.test(v) ? JSON.stringify(v) : v);
 
 	// Check multi-line YAML bullet list
 	let isMulti = false;
@@ -395,7 +495,7 @@ export function replaceInFrontMatterList(text: string, key: string, oldItem: str
 					const nextLineEnd = j + 1 < lines.length ? lines[j + 1]!.start : text.length;
 					edits.push({ start: lines[j]!.start, end: nextLineEnd, rep: "" });
 				} else {
-					edits.push({ start: lines[j]!.start, end: lines[j]!.end, rep: `${m[1]}${quote(next)}` });
+					edits.push({ start: lines[j]!.start, end: lines[j]!.end, rep: `${m[1]}${quoteListItem(next)}` });
 				}
 			}
 		}
@@ -418,7 +518,7 @@ export function replaceInFrontMatterList(text: string, key: string, oldItem: str
 			deduped.push(out);
 		}
 	}
-	const formatted = rawVal.startsWith("[") || deduped.length > 1 ? `[${deduped.map(quote).join(", ")}]` : quoteYamlScalar(deduped[0]!);
+	const formatted = rawVal.startsWith("[") || deduped.length > 1 ? `[${deduped.map(quoteListItem).join(", ")}]` : quoteListItem(deduped[0]!);
 	return `${text.slice(0, lines[at]!.start)}${lines[at]!.text.slice(0, lines[at]!.text.indexOf(":"))}: ${formatted}${text.slice(lines[at]!.end)}`;
 }
 
@@ -439,8 +539,8 @@ export function removeFrontMatterKey(text: string, key: string): string {
 		if (stop < 0) break;
 		at = stop + 1;
 	}
-	const openIdx = TEMPLATE_HEADER_RE.test(lines[0]?.text.replace(/^﻿/, "") ?? "") ? 1 : 0;
-	if (lines[openIdx]?.text.replace(/^﻿/, "").trim() !== "---") return text;
+	const openIdx = leadingTemplateLines(lines.map((l) => l.text));
+	if (lines[openIdx]?.text.replace(/^\uFEFF/, "").trim() !== "---") return text;
 	const close = lines.findIndex((line, i) => i > openIdx && /^(---|\.\.\.)\s*$/.test(line.text));
 	if (close < 0) return text;
 	const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -486,8 +586,8 @@ export function stripEmptyFrontMatter(text: string): string {
 		if (stop < 0) break;
 		at = stop + 1;
 	}
-	const openIdx = TEMPLATE_HEADER_RE.test(lines[0]?.text.replace(/^﻿/, "") ?? "") ? 1 : 0;
-	if (lines[openIdx]?.text.replace(/^﻿/, "").trim() !== "---") return text;
+	const openIdx = leadingTemplateLines(lines.map((l) => l.text));
+	if (lines[openIdx]?.text.replace(/^\uFEFF/, "").trim() !== "---") return text;
 	const close = lines.findIndex((line, i) => i > openIdx && /^(---|\.\.\.)\s*$/.test(line.text));
 	if (close < 0) return text;
 	for (let j = openIdx + 1; j < close; j++) {
@@ -520,9 +620,7 @@ export function frontMatterInnerSpan(text: string): { start: number; end: number
 	const fm = frontMatter(text);
 	if (fm.lines < 2) return null;
 	const eol: "\r\n" | "\n" = text.includes("\r\n") ? "\r\n" : "\n";
-	const firstLineEnd = text.indexOf("\n");
-	const firstLine = (firstLineEnd < 0 ? text : text.slice(0, firstLineEnd)).replace(/\r$/, "").replace(/^﻿/, "");
-	const openLine = TEMPLATE_HEADER_RE.test(firstLine) ? 2 : 1;
+	const openLine = leadingTemplateLines(text.split(/\r?\n/)) + 1;
 	let at = 0;
 	let start = -1;
 	let end = -1;
@@ -550,6 +648,5 @@ export function frontMatterInnerSpan(text: string): { start: number; end: number
  */
 export function formatFrontMatterInnerReplacement(nextInner: string, eol: "\r\n" | "\n"): string {
 	const normalized = nextInner.replace(/\r\n/g, "\n").replace(/\n/g, eol);
-	if (!normalized) return "";
-	return normalized.endsWith(eol) ? normalized : `${normalized}${eol}`;
+	return normalized ? `${normalized}${eol}` : "";
 }

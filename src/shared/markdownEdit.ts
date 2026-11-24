@@ -2,8 +2,9 @@
 // parsing. Zero editor or DOM dependencies so every behavior can be unit-tested directly
 // (ADR 0002: every edit is a direct transformation of the plain text).
 import { fenced } from "./catalog";
+import { scanQuotePrefix } from "./codeTokens";
 import { headingAnchor } from "./docTables";
-import { frontMatter } from "./frontMatter";
+import { bodyOffset, frontMatter, plainMarkdown } from "./frontMatter";
 
 export type TextEditResult = {
 	/** Replacement text for [changeFrom, changeTo]. */
@@ -16,6 +17,29 @@ export type TextEditResult = {
 };
 
 const WORD_CHAR = /[\p{L}\p{N}_-]/u;
+
+/** True when `inner` contains an internal delimiter that would close `marker` early (e.g. `a** and **b`). */
+function hasClosingMarkerInside(inner: string, marker: string): boolean {
+	if (!inner) return false;
+	if (marker === "*") {
+		// Any odd-length run of `*` inside `inner` toggles italic state (`*a* and *b*`, `***a*** and ***b***`),
+		// whereas even-length `**` runs (`***word***`, `*a **b** c*`) belong to bold.
+		let i = 0;
+		while (i < inner.length) {
+			if (inner[i] === "*") {
+				let run = 1;
+				while (i + run < inner.length && inner[i + run] === "*") run++;
+				if (run % 2 === 1) return true;
+				i += run;
+			} else {
+				i++;
+			}
+		}
+		return false;
+	}
+	if (marker === "**") return /\*{2,}/.test(inner);
+	return inner.includes(marker);
+}
 
 /**
  * Toggles an inline Markdown marker (`**`, `*`, `~~`, `` ` ``, `==`) around the
@@ -32,11 +56,18 @@ export function toggleInlineWrap(text: string, from: number, to: number, marker:
 	const a = Math.min(from, to);
 	const b = Math.max(from, to);
 
-	// 1. Selected text itself starts and ends with marker (e.g. user selected `**word**`).
+	// 1. Selected text itself starts and ends with marker (e.g. user selected `**word**` or `***word***`).
 	if (b - a >= m * 2 && text.slice(a, a + m) === marker && text.slice(b - m, b) === marker) {
+		const selected = text.slice(a, b);
 		const inner = text.slice(a + m, b - m);
-		// Guard against `*` matching inside `**word**` when marker is `*` and inner starts/ends with `*`.
-		if (!(marker === "*" && inner.startsWith("*") && inner.endsWith("*"))) {
+		let pureBold = false;
+		if (marker === "*") {
+			const leadStars = /^\*+/.exec(selected)?.[0].length ?? 0;
+			const trailStars = /\*+$/.exec(selected)?.[0].length ?? 0;
+			// `**word**` (even stars on both sides) is bold-only, not italic; `***word***` (3 stars) IS bold+italic.
+			pureBold = leadStars % 2 === 0 && trailStars % 2 === 0;
+		}
+		if (!pureBold && !hasClosingMarkerInside(inner, marker)) {
 			return { changeFrom: a, changeTo: b, insert: inner, selFrom: a, selTo: a + inner.length };
 		}
 	}
@@ -45,7 +76,7 @@ export function toggleInlineWrap(text: string, from: number, to: number, marker:
 	const before = a >= m ? text.slice(a - m, a) : "";
 	const after = b + m <= text.length ? text.slice(b, b + m) : "";
 	const extraStar = marker === "*" && text[a - 2] === "*" && text[b + 1] === "*" && !(text[a - 3] === "*" && text[b + 2] === "*");
-	if (before === marker && after === marker && !extraStar) {
+	if (before === marker && after === marker && !extraStar && !hasClosingMarkerInside(text.slice(a, b), marker)) {
 		return { changeFrom: a - m, changeTo: b + m, insert: text.slice(a, b), selFrom: a - m, selTo: b - m };
 	}
 
@@ -103,19 +134,21 @@ export function toggleInlineWrap(text: string, from: number, to: number, marker:
  * - Checked task `"- [x] Task"` → `"- [ ] Task"`
  */
 export function toggleCheckboxLine(line: string): string {
-	const task = /^((?:[ \t]*>[ \t]?)*[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+)\[([ xX])\]([ \t]?.*)$/.exec(line);
+	const { prefix: quotePrefix, offset } = scanQuotePrefix(line);
+	const afterQuote = line.slice(offset);
+	const task = /^([ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+)\[([ xX])\]((?=[ \t]|$).*)$/.exec(afterQuote);
 	if (task) {
-		const [, prefix, mark, rest] = task;
+		const [, listPrefix, mark, rest] = task;
 		const next = mark === " " ? "x" : " ";
-		return `${prefix}[${next}]${rest}`;
+		return `${quotePrefix}${listPrefix}[${next}]${rest}`;
 	}
-	const bullet = /^((?:[ \t]*>[ \t]?)*[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+)(.*)$/.exec(line);
+	const bullet = /^([ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+)(.*)$/.exec(afterQuote);
 	if (bullet) {
-		const [, prefix, rest] = bullet;
-		return `${prefix}[ ] ${rest}`;
+		const [, listPrefix, rest] = bullet;
+		return `${quotePrefix}${listPrefix}[ ] ${rest}`;
 	}
-	const quoteOrIndent = /^((?:[ \t]*>[ \t]?)*[ \t]*)(.*)$/.exec(line)!;
-	return `${quoteOrIndent[1]}- [ ] ${quoteOrIndent[2]}`;
+	const indent = /^([ \t]*)(.*)$/.exec(afterQuote)!;
+	return `${quotePrefix}${indent[1]}- [ ] ${indent[2]}`;
 }
 
 const IS_URL = /^https?:\/\/\S+$/i;
@@ -167,17 +200,16 @@ export const WRAP_PAIRS: Record<string, [string, string]> = {
 	"(": ["(", ")"],
 };
 
-const LIST_LINE = /^((?:[ \t]*>[ \t]?)*)([ \t]*)([-*+]|\d{1,9}[.)])([ \t]+(?:\[[ xX]\][ \t]+)?)/;
+const LIST_LINE_REST = /^([ \t]*)([-*+]|\d{1,9}[.)])([ \t]+(?:\[[ xX]\](?:[ \t]+|$))?)/;
 
 /**
  * Smart Tab / Shift+Tab on a Markdown list line from anywhere on the line.
  * Returns null if the line is not a list item (so default Tab applies).
  */
 export function smartListIndent(line: string, direction: "indent" | "outdent", indent = "  "): { text: string; delta: number } | null {
-	const m = LIST_LINE.exec(line);
-	if (!m) return null;
-	const quotePrefix = m[1]!;
-	const rest = line.slice(quotePrefix.length);
+	const { prefix: quotePrefix, offset } = scanQuotePrefix(line);
+	const rest = line.slice(offset);
+	if (!LIST_LINE_REST.test(rest)) return null;
 	if (direction === "indent") {
 		return { text: `${quotePrefix}${indent}${rest}`, delta: indent.length };
 	}
@@ -199,18 +231,21 @@ export function smartListIndent(line: string, direction: "indent" | "outdent", i
 export function smartListBackspace(line: string, col: number): { from: number; to: number } | null {
 	if (col <= 0) return null;
 	const before = line.slice(0, col);
+	const q = scanQuotePrefix(before);
+	const afterQuote = before.slice(q.offset);
 	// Task marker `- [ ] ` or `- [x] ` -> strip checkbox down to `- ` (or remove whole bullet if already bare).
-	const task = /^((?:[ \t]*>[ \t]?)*[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+)\[[ xX]\][ \t]$/.exec(before);
-	if (task) return { from: task[1]!.length, to: col };
+	const task = /^([ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+)\[[ xX]\][ \t]$/.exec(afterQuote);
+	if (task) return { from: q.offset + task[1]!.length, to: col };
 	// Bullet / ordered list marker `- `, `1. ` -> strip marker keeping indent/quote.
-	const bullet = /^((?:[ \t]*>[ \t]?)*[ \t]*)(?:[-*+]|\d{1,9}[.)])[ \t]+$/.exec(before);
-	if (bullet) return { from: bullet[1]!.length, to: col };
+	const bullet = /^([ \t]*)(?:[-*+]|\d{1,9}[.)])[ \t]+$/.exec(afterQuote);
+	if (bullet) return { from: q.offset + bullet[1]!.length, to: col };
 	// Heading `### ` -> strip heading hashes + space.
-	const heading = /^#{1,6}[ \t]$/.exec(before);
-	if (heading) return { from: 0, to: col };
+	if (q.depth === 0 && /^#{1,6}[ \t]$/.test(afterQuote)) return { from: 0, to: col };
 	// Blockquote `> ` -> strip one quote level.
-	const quote = /^((?:[ \t]*>[ \t]?)*)([ \t]*>[ \t]?)$/.exec(before);
-	if (quote && quote[2]) return { from: quote[1]!.length, to: col };
+	if (q.depth > 0 && afterQuote === "") {
+		const prev = scanQuotePrefix(before, q.depth - 1);
+		return { from: prev.offset, to: col };
+	}
 	return null;
 }
 
@@ -240,11 +275,11 @@ export function documentHeadings(text: string): DocHeading[] {
 		offset += raw.length + eolLen;
 		if (i < fm.lines) continue;
 		if (fences.some(([from, to]) => lineStart >= from && lineStart < to)) continue;
-		const m = /^[ \t]{0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$/.exec(raw);
+		const m = /^[ \t]{0,3}(#{1,6})[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$/.exec(raw);
 		if (!m) continue;
 		const level = m[1]!.length;
 		const title = m[2]!.trim();
-		const base = headingAnchor(title);
+		const base = headingAnchor(plainMarkdown(title));
 		if (!base) continue;
 		const count = used.get(base) ?? 0;
 		used.set(base, count + 1);
@@ -257,9 +292,14 @@ export function documentHeadings(text: string): DocHeading[] {
 export function findHeadingLine(text: string, target: string): number | null {
 	const wanted = target.trim();
 	if (!wanted) return null;
-	const slug = headingAnchor(wanted);
+	const slug = headingAnchor(plainMarkdown(wanted));
 	const list = documentHeadings(text);
-	const exact = list.find((h) => h.anchor === wanted.toLowerCase() || h.text.toLowerCase() === wanted.toLowerCase());
+	const exact = list.find(
+		(h) =>
+			h.anchor === wanted.toLowerCase() ||
+			h.text.toLowerCase() === wanted.toLowerCase() ||
+			plainMarkdown(h.text).toLowerCase() === wanted.toLowerCase(),
+	);
 	if (exact) return exact.line;
 	const bySlug = list.find((h) => h.anchor === slug);
 	return bySlug?.line ?? null;
@@ -403,6 +443,7 @@ export type ParsedImageSpec = {
 	alt: string;
 	width?: number;
 	height?: number;
+	title?: string;
 	kind: "md" | "wiki";
 };
 
@@ -434,16 +475,91 @@ export function parseImageAltSize(rawAlt: string): { alt: string; width?: number
 	return { alt: rawAlt.trim() };
 }
 
+/** Parses the destination + optional title inside `![alt]( ... )` with balanced parens and `<...>` support. */
+function parseMdImageDest(rawInner: string): { src: string; angle: boolean; rawTitle: string; title?: string } | null {
+	const inner = rawInner.trim();
+	if (!inner) return null;
+
+	const parseOptionalTitle = (rest: string): { rawTitle: string; title?: string } | null => {
+		const t = rest.trim();
+		if (!t) return { rawTitle: "" };
+		const first = t[0]!;
+		const close = first === '"' ? '"' : first === "'" ? "'" : first === "(" ? ")" : "";
+		if (!close) return null;
+		let p = 1;
+		while (p < t.length) {
+			if (t[p] === "\\" && p + 1 < t.length) {
+				p += 2;
+				continue;
+			}
+			if (first === "(" && t[p] === "(") return null;
+			if (t[p] === close) {
+				if (p !== t.length - 1) return null;
+				const unescaped = t.slice(1, p).replace(/\\(.)/g, "$1");
+				return { rawTitle: t, title: unescaped };
+			}
+			p++;
+		}
+		return null;
+	};
+
+	if (inner.startsWith("<")) {
+		let gt = 1;
+		while (gt < inner.length) {
+			if (inner[gt] === "\\" && gt + 1 < inner.length) {
+				gt += 2;
+				continue;
+			}
+			if (inner[gt] === "<") return null;
+			if (inner[gt] === ">") break;
+			gt++;
+		}
+		if (gt >= inner.length || inner[gt] !== ">") return null;
+		const src = inner.slice(1, gt);
+		if (!src) return null;
+		const after = inner.slice(gt + 1);
+		if (after.length > 0 && !/^[ \t]/.test(after)) return null;
+		const titleRes = parseOptionalTitle(after);
+		if (!titleRes) return null;
+		return { src, angle: true, ...titleRes };
+	}
+
+	let pos = 0;
+	let parenDepth = 0;
+	while (pos < inner.length) {
+		const ch = inner[pos]!;
+		if (ch === "\\" && pos + 1 < inner.length) {
+			pos += 2;
+			continue;
+		}
+		if (ch === "(") {
+			parenDepth++;
+		} else if (ch === ")") {
+			if (parenDepth === 0) return null;
+			parenDepth--;
+		} else if (ch === " " || ch === "\t") {
+			if (parenDepth !== 0) return null;
+			break;
+		}
+		pos++;
+	}
+	if (parenDepth !== 0) return null;
+	const src = inner.slice(0, pos);
+	if (!src) return null;
+	const titleRes = parseOptionalTitle(inner.slice(pos));
+	if (!titleRes) return null;
+	return { src, angle: false, ...titleRes };
+}
+
 /** Parses a standalone Markdown `![alt|300](src)` or Obsidian `![[img.png|Caption|300]]` image expression. */
 export function parseImageExpression(raw: string): ParsedImageSpec | null {
 	const trimmed = raw.trim();
-	const md = /^!\[([^\]]*)\]\(([^)\n]+)\)$/.exec(trimmed);
+	const md = /^!\[([^\]]*)\]\(([^\n]+)\)$/.exec(trimmed);
 	if (md) {
+		const dest = parseMdImageDest(md[2]!);
+		if (!dest) return null;
 		const { alt, width, height } = parseImageAltSize(md[1]!);
-		// Strip optional Markdown title `"..."` and angle brackets `<...>` from URL.
-		const urlPart = md[2]!.trim().replace(/^<([^>]+)>$/, "$1").replace(/\s+["'][^"']*["']\s*$/, "").trim();
-		if (!urlPart) return null;
-		return { src: urlPart, alt, width, height, kind: "md" };
+		return { src: dest.src, alt, width, height, ...(dest.title !== undefined ? { title: dest.title } : {}), kind: "md" };
 	}
 	const wiki = /^!\[\[([^[\]\n]+)\]\]$/.exec(trimmed);
 	if (wiki) {
@@ -469,8 +585,13 @@ export function withImageWidth(raw: string, width: number | null): string {
 		if (width !== null) segments.push(String(width));
 		return `${lead}![[${segments.join("|")}]]${trail}`;
 	}
+	const trimmed = raw.trim();
+	const md = /^!\[([^\]]*)\]\(([^\n]+)\)$/.exec(trimmed);
+	const dest = md ? parseMdImageDest(md[2]!) : null;
 	const altPart = [parsed.alt, width !== null ? String(width) : ""].filter(Boolean).join("|");
-	return `${lead}![${altPart}](${parsed.src})${trail}`;
+	const srcFormatted = dest && (dest.angle || /\s/.test(dest.src)) ? `<${dest.src}>` : parsed.src;
+	const titleSuffix = dest?.rawTitle ? ` ${dest.rawTitle}` : "";
+	return `${lead}![${altPart}](${srcFormatted}${titleSuffix})${trail}`;
 }
 
 /** Generates a nested GFM Table of Contents list from document headings (`minLevel..maxLevel`). */
@@ -489,6 +610,18 @@ export function generateToc(markdown: string, minLevel = 2, maxLevel = 4): strin
 const TOC_START = "<!-- toc -->";
 const TOC_END = "<!-- /toc -->";
 
+/** Finds a standalone `<!-- toc -->` / `<!-- /toc -->` marker line outside fenced code blocks. */
+function tocMarkerAt(text: string, marker: string, from: number, fences: readonly [number, number][]): number {
+	const escaped = marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	const pattern = new RegExp(`^[ \\t]*${escaped}[ \\t]*\\r?$`, "gm");
+	pattern.lastIndex = from;
+	for (let found = pattern.exec(text); found; found = pattern.exec(text)) {
+		const at = found.index + found[0].indexOf(marker);
+		if (!fences.some(([start, end]) => at >= start && at < end)) return at;
+	}
+	return -1;
+}
+
 /**
  * Updates an existing `<!-- toc --> ... <!-- /toc -->` block in place, or inserts one
  * right after the first H1 heading (or YAML frontmatter) when none exists yet.
@@ -500,8 +633,10 @@ export function upsertTocBlock(markdown: string): { text: string; updated: boole
 	// Blank lines around the list match Prettier's Markdown HTML-comment formatting so Format doesn't churn on save.
 	const block = `${TOC_START}${eol}${eol}${toc.replace(/\n/g, eol)}${eol}${eol}${TOC_END}`;
 
-	const start = markdown.indexOf(TOC_START);
-	const end = start >= 0 ? markdown.indexOf(TOC_END, start + TOC_START.length) : -1;
+	const fmStart = bodyOffset(markdown);
+	const fences = fenced(markdown);
+	const start = tocMarkerAt(markdown, TOC_START, fmStart, fences);
+	const end = start >= 0 ? tocMarkerAt(markdown, TOC_END, start + TOC_START.length, fences) : -1;
 	if (start >= 0 && end >= 0) {
 		const next = markdown.slice(0, start) + block + markdown.slice(end + TOC_END.length);
 		return { text: next, updated: next !== markdown };
@@ -534,9 +669,19 @@ export function markdownStats(markdown: string): { words: number; tasksDone: num
 	for (const line of lines) {
 		const fm = /^[ \t]{0,3}(`{3,}|~{3,})(.*)$/.exec(line);
 		if (fm) {
-			if (!inFence) inFence = { ch: fm[1]![0]!, len: fm[1]!.length };
-			else if (fm[1]![0] === inFence.ch && fm[1]!.length >= inFence.len && fm[2]!.trim() === "") inFence = null;
-			continue;
+			const ch = fm[1]![0]!;
+			const len = fm[1]!.length;
+			const info = fm[2]!;
+			if (!inFence) {
+				// Per CommonMark §4.5, a backtick fence info string cannot contain backticks (` ```inline``` ` is inline code).
+				if (!(ch === "`" && info.includes("`"))) {
+					inFence = { ch, len };
+					continue;
+				}
+			} else if (ch === inFence.ch && len >= inFence.len && info.trim() === "") {
+				inFence = null;
+				continue;
+			}
 		}
 		if (!inFence) {
 			const task = /^[ \t]*[-*+]\s+\[([ xX])\]\s/.exec(line);

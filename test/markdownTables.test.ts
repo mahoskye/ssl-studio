@@ -30,14 +30,14 @@ const SAMPLE = [
 	"| Name | Count | Notes |",
 	"| --- | ---: | :--- |",
 	"| Beta | 10 | Second item |",
-	"| Alpha | 2 | First `a | b` item |",
+	"| Alpha | 2 | First `a \\| b` item |",
 	"",
 	"After table",
 ];
 
 describe("Markdown pipe table parsing & cell locating", () => {
 	test("parses GFM tables with alignments, inline code pipes, and escaped pipes", () => {
-		expect(splitTableRow("| `a | b` | x \\| y | plain |")).toEqual(["`a | b`", "x \\| y", "plain"]);
+		expect(splitTableRow("| `a \\| b` | x \\| y | plain |")).toEqual(["`a \\| b`", "x \\| y", "plain"]);
 		const table = parseMarkdownTable(SAMPLE, 4);
 		expect(table).not.toBeNull();
 		expect(table!.startLine).toBe(2);
@@ -46,7 +46,7 @@ describe("Markdown pipe table parsing & cell locating", () => {
 		expect(table!.rows).toEqual([
 			["Name", "Count", "Notes"],
 			["Beta", "10", "Second item"],
-			["Alpha", "2", "First `a | b` item"],
+			["Alpha", "2", "First `a \\| b` item"],
 		]);
 		expect(docLineToTableRow(table!, 2)).toBe(0);
 		expect(docLineToTableRow(table!, 3)).toBe(-1);
@@ -57,14 +57,14 @@ describe("Markdown pipe table parsing & cell locating", () => {
 	});
 
 	test("locates cell index and exact cell character range", () => {
-		const line = "| Alpha | 2 | First `a | b` item |";
+		const line = "| Alpha | 2 | First `a \\| b` item |";
 		expect(locateTableCell(line, 3, 3)).toBe(0);
 		expect(locateTableCell(line, 10, 3)).toBe(1);
 		expect(locateTableCell(line, 26, 3)).toBe(2);
 		const r0 = cellRangeInLine(line, 0);
 		expect(line.slice(r0.from, r0.to)).toBe("Alpha");
 		const r2 = cellRangeInLine(line, 2);
-		expect(line.slice(r2.from, r2.to)).toBe("First `a | b` item");
+		expect(line.slice(r2.from, r2.to)).toBe("First `a \\| b` item");
 	});
 });
 
@@ -74,8 +74,8 @@ describe("Advanced Tables navigation & formatting", () => {
 		const next = stepTableCell(table, 1, 1, 1);
 		expect(next.focusRow).toBe(1);
 		expect(next.focusCol).toBe(2);
-		expect(next.lines[0]).toBe("| Name  | Count | Notes              |");
-		expect(next.lines[1]).toBe("| ----- | ----: | :----------------- |");
+		expect(next.lines[0]).toBe("| Name  | Count | Notes               |");
+		expect(next.lines[1]).toBe("| ----- | ----: | :------------------ |");
 
 		// From the very last cell (row 2, col 2), Tab appends a fresh row 3 and focuses (3, 0).
 		const added = stepTableCell(table, 2, 2, 1);
@@ -162,9 +162,9 @@ describe("Advanced Tables navigation & formatting", () => {
 		expect(parsed.rows.length).toBe(3);
 		expect(parsed.rows[1]).toEqual(["1", "Database", ""]);
 
-		// Multiline + literal pipe escaping (outside inline code) round-trips cleanly.
-		expect(serializeTableCell("Line 1\nLine 2 | `a | b`")).toBe("Line 1<br>Line 2 \\| `a | b`");
-		expect(cellValueForEdit("Line 1<br>Line 2 \\| `a | b`")).toBe("Line 1\nLine 2 | `a | b`");
+		// Multiline + literal pipe escaping (GFM §4.10: including inside inline code) round-trips cleanly.
+		expect(serializeTableCell("Line 1\nLine 2 | `a | b`")).toBe("Line 1<br>Line 2 \\| `a \\| b`");
+		expect(cellValueForEdit("Line 1<br>Line 2 \\| `a \\| b`")).toBe("Line 1\nLine 2 | `a | b`");
 
 		const edited1 = updateTableCell(parsed, 1, 2, "Run schema migration");
 		const parsed2 = parseTableRaw(edited1.text)!;

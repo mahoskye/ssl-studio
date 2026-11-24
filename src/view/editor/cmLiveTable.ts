@@ -163,12 +163,17 @@ function caretOnLastLine(el: HTMLTextAreaElement): boolean {
 }
 
 function runHistory(view: EditorView, dir: "undo" | "redo") {
+	if (view.state.readOnly) return;
+	const fallback = view.state.facet(historyFallbackFacet);
+	if (fallback) {
+		if (dir === "undo") fallback.undo();
+		else fallback.redo();
+		return;
+	}
 	if (dir === "undo") {
 		if (undoDepth(view.state) > 0) undo(view);
-		else view.state.facet(historyFallbackFacet)?.undo();
 	} else {
 		if (redoDepth(view.state) > 0) redo(view);
-		else view.state.facet(historyFallbackFacet)?.redo();
 	}
 }
 
@@ -934,8 +939,12 @@ export class TableWidget extends WidgetType {
 						const cols = ctrl.table.alignments.length;
 						const updated = updateTableCell(ctrl.table, clampedRow, clampedCol, ta.value);
 						const latest = parseTableRaw(updated.text) ?? ctrl.table;
+						const atVeryStart = dir === -1 && clampedRow === 0 && clampedCol === 0;
 						const atVeryEnd = dir === 1 && clampedRow === latest.rows.length - 1 && clampedCol === cols - 1;
-						if (atVeryEnd) {
+						if (atVeryStart) {
+							if (updated.text !== ctrl.raw) dispatchEdit(updated, undefined);
+							ctrl.openCell(0, 0, { select: true });
+						} else if (atVeryEnd) {
 							const edit = stepTableCell(latest, clampedRow, clampedCol, 1);
 							dispatchEdit(edit, { row: edit.focusRow, col: edit.focusCol, select: true });
 						} else {
@@ -1030,6 +1039,10 @@ export class TableWidget extends WidgetType {
 		ctrl.syncAll = () => {
 			const t = ctrl.table;
 			if (!t) {
+				ctrl.activeCompleter?.dispose();
+				ctrl.activeCompleter = null;
+				ctrl.activeCell = null;
+				ctrl.activeTextarea = null;
 				tableEl.innerHTML = renderInlineHtml(ctrl.raw, ctrl.filePath);
 				hydrateImagesInElement(tableEl, ctrl.filePath);
 				hydrateMathInElement(tableEl);
@@ -1076,6 +1089,8 @@ export class TableWidget extends WidgetType {
 				return;
 			}
 
+			ctrl.activeCompleter?.dispose();
+			ctrl.activeCompleter = null;
 			const preserve = ctrl.pendingFocus ?? (ctrl.activeCell ? { ...ctrl.activeCell, select: false } : null);
 			ctrl.pendingFocus = null;
 			ctrl.activeCell = null;
@@ -1191,7 +1206,6 @@ export class TableWidget extends WidgetType {
 			if (anchor && !e.altKey) {
 				e.preventDefault();
 				e.stopPropagation();
-				cb?.onFollowLink(anchor.getAttribute("href") ?? "");
 				return;
 			}
 			if (tag && !e.altKey) {
@@ -1239,6 +1253,16 @@ export class TableWidget extends WidgetType {
 			e.preventDefault();
 			e.stopPropagation();
 			ctrl.openCell(r, c, { atEnd: true });
+		});
+
+		tableEl.addEventListener("click", (e) => {
+			const anchor = (e.target instanceof Element ? e.target : null)?.closest<HTMLAnchorElement>("a[href]");
+			if (!anchor) return;
+			e.preventDefault();
+			e.stopPropagation();
+			if (!e.altKey) {
+				ctrl.view.state.facet(liveCallbacksFacet)?.onFollowLink(anchor.getAttribute("href") ?? "");
+			}
 		});
 
 		tableEl.addEventListener("contextmenu", (e) => {
@@ -1321,7 +1345,7 @@ export class TableWidget extends WidgetType {
 			void (async () => {
 				const { chooseFromMenu } = await import("../panels/RowMenu");
 				const picked = await chooseFromMenu("Table actions", entries, at, box ? { box } : {});
-				if (!picked) return;
+				if (!picked || !root.isConnected) return;
 				if (picked === COPY_TSV) return void copyDelimited("tsv", ctrl.selectedRange);
 				if (picked === COPY_CSV) return void copyDelimited("csv", ctrl.selectedRange);
 				if (picked === EXPORT_CSV) return void exportCsv(ctrl.selectedRange);

@@ -117,7 +117,7 @@ describe("Wave 2 fixes — YAML, SQL DDL, CSV, Jira export, readiness, citations
 	test("frontMatter preserves leading <!-- template: ... --> comments, quotes risky scalars, and keeps [[wikilink]] as scalar", () => {
 		expect(quoteYamlScalar("Fix: colon & #hash")).toBe('"Fix: colon & #hash"');
 		expect(quoteYamlScalar("[[DEMO-101]]")).toBe('"[[DEMO-101]]"');
-		expect(quoteYamlScalar("[a, b]")).toBe("[a, b]");
+		expect(quoteYamlScalar("[a, b]")).toBe('"[a, b]"');
 		expect(quoteYamlScalar("plain value")).toBe("plain value");
 
 		const tpl = "<!-- template: name=Demo; description=Test -->\n---\ntitle: Sample\nref: [[DEMO-101]]\n---\n\n# Body\n";

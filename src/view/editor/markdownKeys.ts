@@ -1,8 +1,8 @@
 // What the keys do in a Markdown document's text in Monaco Source mode (matching
 // CodeMirror 6 Live Preview 1:1): smart list Enter/Tab/Backspace and Obsidian
 // inline formatting shortcuts (Ctrl+B, Ctrl+I, Ctrl+Shift+X, Ctrl+`, Ctrl+Alt+H,
-// Ctrl+K, Ctrl+L). Every rule lives in shared/markdownEdit.ts and shared/markdownText.ts
-// and mutates only the touched ranges (ADR 0002).
+// Ctrl+K, Alt+C / Ctrl+Alt+Enter). Every rule lives in shared/markdownEdit.ts and
+// shared/markdownText.ts and mutates only the touched ranges (ADR 0002).
 import { fenced } from "../../shared/catalog";
 import {
 	insertLinkEdit,
@@ -250,22 +250,26 @@ export function continueLists(editor: monaco.editor.IStandaloneCodeEditor): mona
 	);
 
 	// Obsidian inline formatting shortcuts in Source mode too!
-	const formatBindings: [id: string, label: string, key: number][] = [
-		["md-bold", "Markdown: Bold", monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyB],
-		["md-italic", "Markdown: Italic", monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyI],
-		["md-strike", "Markdown: Strikethrough", monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyX],
-		["md-code", "Markdown: Inline code", monaco.KeyMod.CtrlCmd | monaco.KeyCode.Backquote],
-		["md-highlight", "Markdown: Highlight", monaco.KeyMod.CtrlCmd | monaco.KeyMod.Alt | monaco.KeyCode.KeyH],
-		["md-link", "Markdown: Insert link", monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyK],
-		["md-checkbox", "Markdown: Toggle checkbox", monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyL],
+	const formatBindings: [id: string, label: string, keys: number[]][] = [
+		["md-bold", "Markdown: Bold", [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyB]],
+		["md-italic", "Markdown: Italic", [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyI]],
+		["md-strike", "Markdown: Strikethrough", [monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyX]],
+		["md-code", "Markdown: Inline code", [monaco.KeyMod.CtrlCmd | monaco.KeyCode.Backquote]],
+		["md-highlight", "Markdown: Highlight", [monaco.KeyMod.CtrlCmd | monaco.KeyMod.Alt | monaco.KeyCode.KeyH]],
+		["md-link", "Markdown: Insert link", [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyK]],
+		[
+			"md-checkbox",
+			"Markdown: Toggle checkbox",
+			[monaco.KeyMod.Alt | monaco.KeyCode.KeyC, monaco.KeyMod.CtrlCmd | monaco.KeyMod.Alt | monaco.KeyCode.Enter],
+		],
 	];
-	for (const [id, label, key] of formatBindings) {
+	for (const [id, label, keybindings] of formatBindings) {
 		disposables.push(
 			editor.addAction({
 				id: `app.${id}`,
 				label,
 				precondition: MD_EDITABLE,
-				keybindings: [key],
+				keybindings,
 				keybindingContext: "editorTextFocus && !editorReadonly && editorLangId == 'markdown'",
 				run: () => void runMonacoMarkdownAction(editor, id),
 			}),

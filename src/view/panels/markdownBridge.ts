@@ -2,6 +2,7 @@
 // and the shared right-hand Document panel (Info | Outline tabs).
 // Pure helpers here have zero browser/Monaco dependencies so they can be unit-tested directly.
 import { createSignal } from "solid-js";
+import { dirName, isInside, resolvePath } from "../../shared/paths";
 import { GOVERNANCE_PROPERTY_KEYS } from "../editor/markdownHtml";
 import { recall, remember } from "../graph/canvas";
 
@@ -143,6 +144,61 @@ export function computeMinimalTextChange(
 		endNext--;
 	}
 	return { start, endPrev, insert: next.slice(start, endNext) };
+}
+
+/** Safely decodes a URI component (e.g. a `#heading` fragment), falling back to raw text on malformed `%` escapes. */
+export function safeDecodeUriComponent(raw: string): string {
+	try {
+		return decodeURIComponent(raw);
+	} catch {
+		return raw;
+	}
+}
+
+/**
+ * Resolves a schema doc's `source:` SQL path relative to either the document's folder
+ * (`./` or `../`) or the workspace root (stripping any leading `/` or `\`), returning `""`
+ * when a workspace root is active and the resolved target escapes the workspace.
+ */
+export function resolveSqlSourcePath(rawSource: string, docPath: string, root?: string | null): string {
+	const clean = rawSource.trim().replace(/\\/g, "/");
+	if (!clean) return "";
+	const target =
+		clean.startsWith("./") || clean.startsWith("../")
+			? resolvePath(dirName(docPath), clean)
+			: root
+				? resolvePath(root, clean.replace(/^\/+/, ""))
+				: clean;
+	if (root && !isInside(root, target)) return "";
+	return target;
+}
+
+const TEMPLATE_HEADER_RE = /^\s*<!--\s*template\b[\s\S]*?-->\s*$/i;
+
+/**
+ * Returns true when a document opens a YAML frontmatter block (`---`) on line 1
+ * (or line 2 immediately after a leading `<!-- template ... -->` header comment)
+ * without a matching closing `---` or `...` delimiter.
+ */
+export function hasUnclosedFrontMatter(text: string): boolean {
+	const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/);
+	const start = TEMPLATE_HEADER_RE.test(lines[0] ?? "") ? 1 : 0;
+	if (lines[start]?.trim() !== "---") return false;
+	return lines.findIndex((line, i) => i > start && /^(---|\.\.\.)\s*$/.test(line)) < 0;
+}
+
+/**
+ * Returns `data.value` only when a SolidJS `createResource` is not currently loading
+ * and its tagged query key matches `expectedKey`, preventing stale cross-tab or
+ * cross-workspace data from leaking while a new query is in flight.
+ */
+export function freshResourceValue<K, T>(
+	loading: boolean,
+	data: { key: K; value: T } | undefined,
+	expectedKey: K | null | undefined,
+): T | undefined {
+	if (loading || !data || expectedKey === null || expectedKey === undefined) return undefined;
+	return data.key === expectedKey ? data.value : undefined;
 }
 
 // --- Reactive bridge signals -------------------------------------------------

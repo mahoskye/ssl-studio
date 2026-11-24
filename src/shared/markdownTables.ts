@@ -1,6 +1,7 @@
 // Pure GFM Markdown pipe-table engine (Obsidian Advanced Tables parity).
 // Zero DOM or editor dependencies — every operation is a deterministic transformation
 // of plain Markdown lines so every edit remains undoable plain text (ADR 0002).
+import { scanQuotePrefix } from "./codeTokens";
 
 export type TableAlign = "none" | "left" | "center" | "right";
 
@@ -36,7 +37,15 @@ export type TableEdit = {
 
 const DELIM_CELL = /^:?-{1,}:?$/;
 
-/** Splits a single Markdown pipe-table row into trimmed cell texts, honoring `\|` and inline `` `code` ``. */
+/** True when `str[i]` is `|` preceded by an even number of backslashes (GFM §4.10 unescaped pipe). */
+function isUnescapedPipe(str: string, i: number, minIdx = 0): boolean {
+	if (str[i] !== "|") return false;
+	let bs = 0;
+	for (let k = i - 1; k >= minIdx && str[k] === "\\"; k--) bs++;
+	return bs % 2 === 0;
+}
+
+/** Splits a single Markdown pipe-table row into trimmed cell texts per GFM §4.10 (splitting on unescaped `|`, honoring `\|` everywhere including inside backticks). */
 export function splitTableRow(rawLine: string, prefix = ""): string[] | null {
 	const stripped = prefix && rawLine.startsWith(prefix) ? rawLine.slice(prefix.length) : rawLine;
 	const trimmed = stripped.trim();
@@ -44,46 +53,20 @@ export function splitTableRow(rawLine: string, prefix = ""): string[] | null {
 
 	const cells: string[] = [];
 	let cur = "";
-	let inCode = false;
-	let codeTicks = 0;
 
 	// Strip optional leading and trailing unescaped pipes.
 	let start = 0;
 	let end = trimmed.length;
 	if (trimmed[start] === "|") start++;
-	if (end > start && trimmed[end - 1] === "|") {
-		let bs = 0;
-		for (let k = end - 2; k >= start && trimmed[k] === "\\"; k--) bs++;
-		if (bs % 2 === 0) end--;
-	}
+	if (end > start && isUnescapedPipe(trimmed, end - 1, start)) end--;
 
 	for (let i = start; i < end; i++) {
-		const ch = trimmed[i]!;
-		if (ch === "\\" && !inCode && i + 1 < end && trimmed[i + 1] === "|") {
-			cur += "\\|";
-			i++;
-			continue;
-		}
-		if (ch === "`") {
-			let run = 1;
-			while (i + run < end && trimmed[i + run] === "`") run++;
-			cur += trimmed.slice(i, i + run);
-			if (!inCode) {
-				inCode = true;
-				codeTicks = run;
-			} else if (run === codeTicks) {
-				inCode = false;
-				codeTicks = 0;
-			}
-			i += run - 1;
-			continue;
-		}
-		if (ch === "|" && !inCode) {
+		if (isUnescapedPipe(trimmed, i, start)) {
 			cells.push(cur.trim());
 			cur = "";
 			continue;
 		}
-		cur += ch;
+		cur += trimmed[i]!;
 	}
 	cells.push(cur.trim());
 	return cells;
@@ -108,7 +91,10 @@ export function parseDelimiterRow(rawLine: string, prefix = ""): TableAlign[] | 
 }
 
 function linePrefix(line: string): string {
-	return /^((?:[ \t]*>[ \t]?)*[ \t]*)/.exec(line)![1]!;
+	const { offset } = scanQuotePrefix(line);
+	let end = offset;
+	while (end < line.length && (line[end] === " " || line[end] === "\t")) end++;
+	return line.slice(0, end);
 }
 
 function looksLikeTableLine(line: string, prefix: string): boolean {
@@ -188,30 +174,10 @@ export function locateTableCell(lineText: string, colOffset: number, colCount: n
 	const hasLeadingPipe = lineText[trimmedStart] === "|";
 
 	let cell = 0;
-	let inCode = false;
-	let codeTicks = 0;
 	let seenFirstPipe = false;
 
 	for (let i = trimmedStart; i < lineText.length && i < colOffset; i++) {
-		const ch = lineText[i]!;
-		if (ch === "\\" && !inCode && i + 1 < lineText.length && lineText[i + 1] === "|") {
-			i++;
-			continue;
-		}
-		if (ch === "`") {
-			let run = 1;
-			while (i + run < lineText.length && lineText[i + run] === "`") run++;
-			if (!inCode) {
-				inCode = true;
-				codeTicks = run;
-			} else if (run === codeTicks) {
-				inCode = false;
-				codeTicks = 0;
-			}
-			i += run - 1;
-			continue;
-		}
-		if (ch === "|" && !inCode) {
+		if (isUnescapedPipe(lineText, i, trimmedStart)) {
 			if (hasLeadingPipe && !seenFirstPipe) {
 				seenFirstPipe = true;
 			} else {
@@ -283,34 +249,23 @@ export function formatTableLines(table: MarkdownTable): string[] {
  */
 export function cellRangeInLine(lineText: string, colIdx: number, prefix = ""): { from: number; to: number } {
 	const startIdx = prefix && lineText.startsWith(prefix) ? prefix.length : 0;
+	const trimmedStart = startIdx + (/^[ \t]*/.exec(lineText.slice(startIdx))?.[0].length ?? 0);
+	const hasLeadingPipe = lineText[trimmedStart] === "|";
 	const pipePositions: number[] = [];
-	let inCode = false;
-	let codeTicks = 0;
 
-	for (let i = startIdx; i < lineText.length; i++) {
-		const ch = lineText[i]!;
-		if (ch === "\\" && !inCode && i + 1 < lineText.length && lineText[i + 1] === "|") {
-			i++;
-			continue;
-		}
-		if (ch === "`") {
-			let run = 1;
-			while (i + run < lineText.length && lineText[i + run] === "`") run++;
-			if (!inCode) {
-				inCode = true;
-				codeTicks = run;
-			} else if (run === codeTicks) {
-				inCode = false;
-				codeTicks = 0;
-			}
-			i += run - 1;
-			continue;
-		}
-		if (ch === "|" && !inCode) pipePositions.push(i);
+	for (let i = trimmedStart; i < lineText.length; i++) {
+		if (isUnescapedPipe(lineText, i, trimmedStart)) pipePositions.push(i);
 	}
 
-	const rawStart = (pipePositions[colIdx] ?? startIdx) + 1;
-	const rawEnd = pipePositions[colIdx + 1] ?? lineText.length;
+	let rawStart: number;
+	let rawEnd: number;
+	if (hasLeadingPipe) {
+		rawStart = colIdx < pipePositions.length ? pipePositions[colIdx]! + 1 : lineText.length;
+		rawEnd = pipePositions[colIdx + 1] ?? lineText.length;
+	} else {
+		rawStart = colIdx === 0 ? trimmedStart : colIdx - 1 < pipePositions.length ? pipePositions[colIdx - 1]! + 1 : lineText.length;
+		rawEnd = pipePositions[colIdx] ?? lineText.length;
+	}
 	const slice = lineText.slice(rawStart, rawEnd);
 	const trimmed = slice.trim();
 	if (!trimmed) {
@@ -366,33 +321,16 @@ export function cellValueForEdit(rawCell: string): string {
 		.replace(/\\\|/g, "|");
 }
 
-/** Serializes edited cell text safely back into a single GFM table cell (newlines → `<br>`, bare `|` outside code → `\|`). */
+/** Serializes edited cell text safely back into a single GFM table cell (newlines → `<br>`, every unescaped `|` → `\|`, including inside inline code per GFM §4.10). */
 export function serializeTableCell(edited: string): string {
 	const singleLine = edited.replace(/\r\n/g, "\n").replace(/\n/g, "<br>").trim();
 	let out = "";
-	let inCode = false;
-	let ticks = 0;
 	for (let i = 0; i < singleLine.length; i++) {
-		const ch = singleLine[i]!;
-		if (ch === "`") {
-			let run = 1;
-			while (i + run < singleLine.length && singleLine[i + run] === "`") run++;
-			out += singleLine.slice(i, i + run);
-			if (!inCode) {
-				inCode = true;
-				ticks = run;
-			} else if (run === ticks) {
-				inCode = false;
-				ticks = 0;
-			}
-			i += run - 1;
-			continue;
-		}
-		if (ch === "|" && !inCode && singleLine[i - 1] !== "\\") {
+		if (isUnescapedPipe(singleLine, i, 0)) {
 			out += "\\|";
-			continue;
+		} else {
+			out += singleLine[i]!;
 		}
-		out += ch;
 	}
 	return out;
 }

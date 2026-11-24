@@ -103,10 +103,27 @@ export function registerLiveEditor(group: number, handle: LiveEditorHandle | und
 	else delete liveEditors[group];
 }
 
+/** Identity-checked unregistration: clears `group` only when `handle` is still the registered instance. */
+export function unregisterLiveEditor(group: number, handle: LiveEditorHandle): boolean {
+	if (liveEditors[group] !== handle) return false;
+	delete liveEditors[group];
+	return true;
+}
+
 export function registerReadFind(group: number, opener: (() => void) | undefined) {
 	if (opener) readFinders[group] = opener;
 	else delete readFinders[group];
 }
+
+/** Identity-checked unregistration: clears `group` only when `opener` is still the registered instance. */
+export function unregisterReadFinder(group: number, opener: () => void): boolean {
+	if (readFinders[group] !== opener) return false;
+	delete readFinders[group];
+	return true;
+}
+
+/** Any group's Read-mode find opener by group index. */
+export const readFinderAt = (group: number): (() => void) | undefined => readFinders[group];
 
 /** Opens the CM6 Find panel on the active group when it is in Read-only Markdown view. */
 export function openReadFind(): boolean {

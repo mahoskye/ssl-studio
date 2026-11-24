@@ -28,7 +28,7 @@ import { openStyleProfile } from "../StyleProfile";
 import { docs, setUpProject } from "../project";
 import { checksSummary, docChecks, type DocCheck, type LinkMend, type WikiLinkMend } from "../../shared/docChecks";
 import { folderParts } from "../../shared/docSections";
-import { CATALOG_AREAS, frontValue, isCatalog, projectDocLabel, registryTitle, toneOf } from "../../shared/projectDocs";
+import { CATALOG_AREAS, isCatalog, projectDocLabel, registryTitle, toneOf } from "../../shared/projectDocs";
 import { addDatabaseRegistryRow, generateSchemaDocFromSql, mendLinks, newSchema, newTicket, recordDocApproval, updateCatalogs } from "../projectDocs";
 
 const PROCEDURE = new Set([monaco.languages.SymbolKind.Function, monaco.languages.SymbolKind.Method]);
@@ -373,7 +373,7 @@ export function Health() {
 		const existing = many(fm.values[fixSpec.field]);
 		const next = existing.length
 			? addToFrontMatterList(before, fixSpec.field, fixSpec.value)
-			: withFrontMatter(before, fixSpec.field, frontValue(fixSpec.value));
+			: withFrontMatter(before, fixSpec.field, fixSpec.value);
 		if (!next || next === before) return notify(`${baseName(fixSpec.path)} already lists ${fixSpec.field}: ${fixSpec.value}.`);
 		await writeDocEdit(fixSpec.path, next);
 		setState("treeVersion", (v) => v + 1);

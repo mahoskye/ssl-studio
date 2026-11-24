@@ -112,6 +112,52 @@ export async function renderMermaidSvgForExport(code: string, mode: "dark" | "li
 	return res.svg ?? null;
 }
 
+function parseAbsoluteSvgLength(attr: string | null | undefined): number {
+	if (!attr) return 0;
+	const trimmed = attr.trim();
+	if (!trimmed || trimmed.endsWith("%")) return 0;
+	const match = /^([+-]?(?:\d+\.?\d*|\.\d+))(?:px)?$/i.exec(trimmed);
+	const n = Number.parseFloat(match ? match[1]! : trimmed);
+	return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function parseViewBoxDims(
+	viewBox: string | { width?: number; height?: number } | null | undefined,
+): { width: number; height: number } | null {
+	if (!viewBox) return null;
+	if (typeof viewBox === "string") {
+		const parts = viewBox
+			.trim()
+			.split(/[\s,]+/)
+			.map((p) => Number.parseFloat(p));
+		if (parts.length !== 4) return null;
+		const w = Number.isFinite(parts[2]) && parts[2]! > 0 ? parts[2]! : 0;
+		const h = Number.isFinite(parts[3]) && parts[3]! > 0 ? parts[3]! : 0;
+		return w > 0 || h > 0 ? { width: w, height: h } : null;
+	}
+	const w = Number.isFinite(viewBox.width) && (viewBox.width ?? 0) > 0 ? viewBox.width! : 0;
+	const h = Number.isFinite(viewBox.height) && (viewBox.height ?? 0) > 0 ? viewBox.height! : 0;
+	return w > 0 || h > 0 ? { width: w, height: h } : null;
+}
+
+/**
+ * Resolves concrete pixel dimensions for rasterizing a Mermaid SVG to PNG.
+ * Prefers positive `viewBox` dimensions (preventing `width="100%"` from parsing as `100px`),
+ * ignores `%`-suffixed attributes, then falls back to numeric `width`/`height` or 800×480.
+ */
+export function resolveMermaidSvgDimensions(
+	svgAttrW: string | null | undefined,
+	svgAttrH: string | null | undefined,
+	viewBox?: string | { width?: number; height?: number } | null,
+): { width: number; height: number } {
+	const vb = parseViewBoxDims(viewBox);
+	const attrW = parseAbsoluteSvgLength(svgAttrW);
+	const attrH = parseAbsoluteSvgLength(svgAttrH);
+	const width = (vb && vb.width > 0 ? vb.width : 0) || attrW || 800;
+	const height = (vb && vb.height > 0 ? vb.height : 0) || attrH || 480;
+	return { width, height };
+}
+
 /** Rasterizes a Mermaid SVG string into a 2x PNG Blob for pasting into Jira/Confluence/Teams or downloading. */
 export async function mermaidSvgToPngBlob(svg: string, mode?: "dark" | "light"): Promise<Blob | null> {
 	if (typeof document === "undefined") return null;
@@ -121,10 +167,12 @@ export async function mermaidSvgToPngBlob(svg: string, mode?: "dark" | "light"):
 	if (!svgEl) return null;
 	if (!svgEl.getAttribute("xmlns")) svgEl.setAttribute("xmlns", "http://www.w3.org/2000/svg");
 	const vb = svgEl.viewBox?.baseVal;
-	let w = Number.parseFloat(svgEl.getAttribute("width") || "0") || vb?.width || 800;
-	let h = Number.parseFloat(svgEl.getAttribute("height") || "0") || vb?.height || 480;
-	if (!Number.isFinite(w) || w <= 0) w = 800;
-	if (!Number.isFinite(h) || h <= 0) h = 480;
+	const vbInput = vb && (vb.width > 0 || vb.height > 0) ? vb : svgEl.getAttribute("viewBox");
+	const { width: w, height: h } = resolveMermaidSvgDimensions(
+		svgEl.getAttribute("width"),
+		svgEl.getAttribute("height"),
+		vbInput,
+	);
 	svgEl.setAttribute("width", String(Math.ceil(w)));
 	svgEl.setAttribute("height", String(Math.ceil(h)));
 	const xml = new XMLSerializer().serializeToString(svgEl);

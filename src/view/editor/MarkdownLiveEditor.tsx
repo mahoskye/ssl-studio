@@ -82,7 +82,7 @@ import {
 	type ImageLightboxInfo,
 } from "./cmLivePlugin";
 import { applyMarkdownFormatToTextarea, focusLiveWidgetAt, type MermaidLightboxInfo } from "./cmLiveShared";
-import { copyMermaidAsPng, downloadMermaidBlob, renderMermaidSvgForExport } from "./cmMermaid";
+import { copyMermaidAsPng, downloadMermaidBlob, mermaidLivePreviewTheme, renderMermaidSvgForExport } from "./cmMermaid";
 import { cmMarkdownHighlight, cmStudioTheme } from "./cmTheme";
 import { buildFootnoteHoverPreview, buildHoverPreview, type HoverPreviewData } from "./hoverPreview";
 import { hydrateImagesInElement } from "./imageResolve";
@@ -95,6 +95,8 @@ import {
 	registerReadFind,
 	saveMarkdownSyncAnchor,
 	takeMarkdownSyncAnchor,
+	unregisterLiveEditor,
+	unregisterReadFinder,
 	type LiveEditorHandle,
 } from "./liveBridge";
 import { colourCode } from "./markdownCode";
@@ -104,7 +106,16 @@ import { mdOutline, setMdOutline } from "./mdOutline";
 import { monaco } from "./monaco";
 
 type SavedLiveView = { anchor: number; head: number; scrollTop: number; folds?: [number, number][] };
+const SAVED_LIVE_VIEWS_MAX = 80;
 const savedLiveViews = new Map<string, SavedLiveView>();
+
+function safeDecodeFragment(raw: string): string {
+	try {
+		return decodeURIComponent(raw);
+	} catch {
+		return raw;
+	}
+}
 
 type HoverCardState = HoverPreviewData & {
 	x: number;
@@ -197,9 +208,11 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 	let selBubbleEl: HTMLDivElement | undefined;
 	let pointerSelectingInCm = false;
 	let cmView: EditorView | undefined;
+	const [mountedView, setMountedView] = createSignal<EditorView | undefined>(undefined);
 	const modeCompartment = new Compartment();
 	let syncingFromCm = false;
 	let syncingFromModel = false;
+	let applyingHistory = false;
 	let refreshSeq = 0;
 	let lastTopLine = 1;
 	let scrollSyncRaf = 0;
@@ -328,6 +341,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 	};
 
 	createEffect(() => {
+		if (state.activeGroup !== props.group) return;
 		const active = state.groups[state.activeGroup]?.active;
 		if (active !== props.path) return;
 		const list = headings();
@@ -339,7 +353,10 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		});
 	});
 	onCleanup(() => {
-		if (mdOutline()?.path === props.path) setMdOutline(null);
+		const cur = mdOutline();
+		if (state.activeGroup === props.group && cur?.path === props.path && cur.goTo === goToHeading) {
+			setMdOutline(null);
+		}
 	});
 
 	// --- Unified Pointer-Y Reading Assist (smooth across empty margins/gaps in BOTH Live & Read) ---
@@ -531,7 +548,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			return;
 		}
 		if (!leads.lines && href.includes("#")) {
-			const hash = decodeURIComponent(href.slice(href.indexOf("#") + 1));
+			const hash = safeDecodeFragment(href.slice(href.indexOf("#") + 1));
 			if (hash) return void followHeadingInFile(leads.file, hash);
 		}
 		await openFile(leads.file, leads.lines ? { reveal: leads.lines } : {});
@@ -628,13 +645,16 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 	let hoverTimer: ReturnType<typeof setTimeout> | undefined;
 	let hideTimer: ReturnType<typeof setTimeout> | undefined;
 	let cardHovered = false;
+	let hoverSeq = 0;
 
 	const cancelHover = () => {
+		hoverSeq++;
 		clearTimeout(hoverTimer);
 		clearTimeout(hideTimer);
 	};
 
 	const scheduleHideHover = () => {
+		hoverSeq++;
 		clearTimeout(hoverTimer);
 		clearTimeout(hideTimer);
 		hideTimer = setTimeout(() => {
@@ -664,7 +684,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		if (!leads || "web" in leads) return null;
 		if ("heading" in leads) return { path: props.path, heading: leads.heading };
 		const hashIdx = target.href.indexOf("#");
-		const heading = !leads.lines && hashIdx >= 0 ? decodeURIComponent(target.href.slice(hashIdx + 1)).trim() || undefined : undefined;
+		const heading = !leads.lines && hashIdx >= 0 ? safeDecodeFragment(target.href.slice(hashIdx + 1)).trim() || undefined : undefined;
 		return { path: leads.file, line: leads.lines?.line, heading };
 	};
 
@@ -717,8 +737,9 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 	const handleHoverLink = (target: HoverTarget) => {
 		clearTimeout(hideTimer);
 		clearTimeout(hoverTimer);
-		const rect = target.anchor.getBoundingClientRect();
+		const seq = ++hoverSeq;
 		hoverTimer = setTimeout(async () => {
+			if (seq !== hoverSeq || !target.anchor.isConnected || !cmView) return;
 			const resolved = resolveHoverPath(target);
 			if (!resolved) return;
 			const preview = await buildHoverPreview(resolved.path, {
@@ -726,7 +747,8 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 				line: resolved.line,
 				ticket: resolved.ticket,
 			});
-			if (!preview) return;
+			if (!preview || seq !== hoverSeq || !target.anchor.isConnected || !cmView) return;
+			const rect = target.anchor.getBoundingClientRect();
 			openMeasuredHoverCard(preview, rect, resolved.path);
 		}, 320);
 	};
@@ -734,9 +756,10 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 	const handleHoverFootnote = (fnId: string, anchor: HTMLElement) => {
 		clearTimeout(hideTimer);
 		clearTimeout(hoverTimer);
-		const rect = anchor.getBoundingClientRect();
+		const seq = ++hoverSeq;
 		hoverTimer = setTimeout(() => {
-			const docText = cmView?.state.doc.toString() ?? text();
+			if (seq !== hoverSeq || !anchor.isConnected || !cmView) return;
+			const docText = cmView.state.doc.toString();
 			const preview =
 				buildFootnoteHoverPreview(docText, props.path, fnId) ?? {
 					path: props.path,
@@ -745,6 +768,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 					kind: "markdown" as const,
 					html: `<p class="md-hover-empty">No definition found for <code>[^${fnId.replace(/[<>&]/g, "")}]</code>.</p>`,
 				};
+			const rect = anchor.getBoundingClientRect();
 			openMeasuredHoverCard(preview, rect, props.path);
 		}, 240);
 	};
@@ -1180,25 +1204,45 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 	// --- Sync CM6 Transaction -> Monaco ITextModel (CRLF-safe, typing-coalesced undo) ---
 	let lastSyncKind = "";
 	let lastSyncAt = 0;
+	let lastSyncPos = -1;
+	const resetSyncCoalesce = () => {
+		lastSyncKind = "";
+		lastSyncAt = 0;
+		lastSyncPos = -1;
+	};
 	const pushTransactionToModel = (tr: Transaction) => {
 		if (!model || !tr.docChanged || syncingFromModel) return;
 		const startDoc = tr.startState.doc;
 		const edits: monaco.editor.IIdentifiedSingleEditOperation[] = [];
+		let firstFromA = -1;
+		let firstToA = -1;
+		let firstInsertLen = 0;
 		tr.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
 			const sLine = startDoc.lineAt(fromA);
 			const eLine = startDoc.lineAt(toA);
+			const insertedText = inserted.toString();
+			if (edits.length === 0) {
+				firstFromA = fromA;
+				firstToA = toA;
+				firstInsertLen = insertedText.length;
+			}
 			edits.push({
 				range: new monaco.Range(sLine.number, fromA - sLine.from + 1, eLine.number, toA - eLine.from + 1),
-				text: inserted.toString(),
+				text: insertedText,
 				forceMoveMarkers: true,
 			});
 		});
 		if (!edits.length) return;
 		const now = Date.now();
 		const kind = tr.isUserEvent("input.type") ? "type" : tr.isUserEvent("delete.backward") ? "del" : "other";
-		const coalesce = (kind === "type" || kind === "del") && kind === lastSyncKind && now - lastSyncAt < 450;
+		const contiguous =
+			edits.length === 1 &&
+			((kind === "type" && firstFromA === lastSyncPos && firstToA === firstFromA) ||
+				(kind === "del" && firstToA === lastSyncPos && firstInsertLen === 0));
+		const coalesce = (kind === "type" || kind === "del") && kind === lastSyncKind && contiguous && now - lastSyncAt < 450;
 		lastSyncKind = kind;
 		lastSyncAt = now;
+		lastSyncPos = edits.length === 1 ? firstFromA + firstInsertLen : -1;
 		syncingFromCm = true;
 		try {
 			if (!coalesce) model.pushStackElement();
@@ -1259,15 +1303,23 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		foldedRanges(cmView.state).between(0, cmView.state.doc.length, (from, to) => {
 			folds.push([from, to]);
 		});
-		savedLiveViews.set(`${props.group}:${props.path}`, {
+		const key = `${props.group}:${props.path}`;
+		savedLiveViews.delete(key);
+		savedLiveViews.set(key, {
 			anchor: main.anchor,
 			head: main.head,
 			scrollTop: hostEl?.scrollTop ?? 0,
 			folds,
 		});
+		while (savedLiveViews.size > SAVED_LIVE_VIEWS_MAX) {
+			const oldest = savedLiveViews.keys().next().value;
+			if (oldest === undefined) break;
+			savedLiveViews.delete(oldest);
+		}
 	};
 
 	const applyReveal = () => {
+		if (state.activeGroup !== props.group) return;
 		const r = takeReveal(props.path);
 		if (!r) return;
 		jumpToLine(r.line, r.column ?? 1, r.endLine, r.endColumn);
@@ -1409,22 +1461,38 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			doc: initial,
 			selection: EditorSelection.range(anchorPos, headPos),
 			extensions: [
+				EditorState.allowMultipleSelections.of(true),
 				modeCompartment.of(modeExtensions(isRead())),
-				history(),
-				historyFallbackFacet.of({
-					undo: () => {
-						if (!model) return false;
-						const before = model.getValue();
-						model.undo();
-						return model.getValue() !== before;
-					},
-					redo: () => {
-						if (!model) return false;
-						const before = model.getValue();
-						model.redo();
-						return model.getValue() !== before;
-					},
-				}),
+				...(model
+					? [
+							historyFallbackFacet.of({
+								undo: () => {
+									if (isRead()) return false;
+									resetSyncCoalesce();
+									const before = model.getValue();
+									applyingHistory = true;
+									try {
+										model.undo();
+									} finally {
+										applyingHistory = false;
+									}
+									return model.getValue() !== before;
+								},
+								redo: () => {
+									if (isRead()) return false;
+									resetSyncCoalesce();
+									const before = model.getValue();
+									applyingHistory = true;
+									try {
+										model.redo();
+									} finally {
+										applyingHistory = false;
+									}
+									return model.getValue() !== before;
+								},
+							}),
+						]
+					: [history()]),
 				cmSearchTop,
 				drawSelection(),
 				dropCursor(),
@@ -1488,6 +1556,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 				liveBlockField,
 				liveInlinePlugin,
 				liveCodeHighlightPlugin,
+				mermaidLivePreviewTheme,
 				liveInteractionExtension,
 				markdownFoldService,
 				cmMarkdownCompletion(() => props.path),
@@ -1529,6 +1598,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		});
 
 		cmView = new EditorView({ state: editorState, parent: cmMountEl });
+		setMountedView(cmView);
 
 		// Restore persisted heading/list folds before measuring scroll offsets.
 		if (saved?.folds?.length) {
@@ -1592,26 +1662,32 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			}
 		});
 
-		const openReadSearch = () => {
-			if (!cmView) return;
-			openSearchPanel(cmView);
-		};
-		if (!isRead()) registerLiveEditor(props.group, makeHandle(cmView));
-		else registerReadFind(props.group, openReadSearch);
-
-		// Reflect external Monaco model edits (Revert, Status menu, Rename links, Search & Replace, Read-mode checkbox ticks) back into CM6.
+		// Reflect external Monaco model edits (Undo/Redo, Revert, Status menu, Rename links, Search & Replace, Read-mode checkbox ticks) back into CM6.
 		const modelSub = model?.onDidChangeContent(() => {
 			if (syncingFromCm || !cmView) return;
+			resetSyncCoalesce();
 			const next = model.getValue().replace(/\r\n/g, "\n");
 			setText(model.getValue());
 			const cur = cmView.state.doc.toString();
 			if (next === cur) return;
+			let start = 0;
+			const minLen = Math.min(cur.length, next.length);
+			while (start < minLen && cur.charCodeAt(start) === next.charCodeAt(start)) start++;
+			let curEnd = cur.length;
+			let nextEnd = next.length;
+			while (curEnd > start && nextEnd > start && cur.charCodeAt(curEnd - 1) === next.charCodeAt(nextEnd - 1)) {
+				curEnd--;
+				nextEnd--;
+			}
 			syncingFromModel = true;
 			try {
 				const main = cmView.state.selection.main;
 				cmView.dispatch({
-					changes: { from: 0, to: cur.length, insert: next },
-					selection: EditorSelection.range(Math.min(main.anchor, next.length), Math.min(main.head, next.length)),
+					changes: { from: start, to: curEnd, insert: next.slice(start, nextEnd) },
+					selection: applyingHistory
+						? EditorSelection.cursor(nextEnd)
+						: EditorSelection.range(Math.min(main.anchor, next.length), Math.min(main.head, next.length)),
+					scrollIntoView: applyingHistory,
 					annotations: [externalSyncAnnotation.of(true), Transaction.addToHistory.of(false)],
 				});
 			} finally {
@@ -1620,7 +1696,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		});
 
 		const stopReveal = revealSignal.listen((path) => {
-			if (path === props.path) applyReveal();
+			if (path === props.path && state.activeGroup === props.group) applyReveal();
 		});
 
 		const onKeyDownGlobal = (e: KeyboardEvent) => {
@@ -1688,13 +1764,31 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			stopSplitSync();
 			window.removeEventListener("keydown", onKeyDownGlobal);
 			window.removeEventListener("mouseup", onMouseUpGlobal);
-			registerLiveEditor(props.group, undefined);
-			registerReadFind(props.group, undefined);
+			setMountedView(undefined);
 			modelSub?.dispose();
 			stopReveal();
 			cmView?.destroy();
 			cmView = undefined;
 		});
+	});
+
+	// Single authoritative liveBridge registration for this pane, identity-checked on cleanup across split/mode changes.
+	createEffect(() => {
+		const view = mountedView();
+		if (!view) return;
+		const at = props.group;
+		const read = isRead();
+		if (read) {
+			const opener = () => {
+				if (cmView) openSearchPanel(cmView);
+			};
+			registerReadFind(at, opener);
+			onCleanup(() => unregisterReadFinder(at, opener));
+		} else {
+			const handle = makeHandle(view);
+			registerLiveEditor(at, handle);
+			onCleanup(() => unregisterLiveEditor(at, handle));
+		}
 	});
 
 	// Seamlessly switch between Live and Read modes on the SAME CM6 instance with zero flash or scroll jump!
@@ -1715,13 +1809,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 				});
 				if (read) {
 					setTableHud(null);
-					registerLiveEditor(props.group, undefined);
-					registerReadFind(props.group, () => {
-						if (cmView) openSearchPanel(cmView);
-					});
 				} else {
-					registerReadFind(props.group, undefined);
-					registerLiveEditor(props.group, makeHandle(cmView));
 					queueMicrotask(() => updateTableHud(cmView));
 				}
 				queueMicrotask(() => {
@@ -1794,24 +1882,6 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			themeVersion,
 			() => {
 				if (cmView) cmView.dispatch({ effects: refreshLiveEffect.of(++refreshSeq) });
-			},
-			{ defer: true },
-		),
-	);
-
-	// Re-register handle if group index shifts (e.g. closing an earlier split group).
-	createEffect(
-		on(
-			() => props.group,
-			() => {
-				if (!cmView) return;
-				if (isRead()) {
-					registerReadFind(props.group, () => {
-						if (cmView) openSearchPanel(cmView);
-					});
-				} else {
-					registerLiveEditor(props.group, makeHandle(cmView));
-				}
 			},
 			{ defer: true },
 		),
@@ -2199,7 +2269,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 									if ("web" in leads) return void window.open(leads.web, "_blank", "noopener");
 									if ("heading" in leads) return void followHeadingInFile(basePath, leads.heading);
 									if (!leads.lines && href.includes("#")) {
-										const h = decodeURIComponent(href.slice(href.indexOf("#") + 1));
+										const h = safeDecodeFragment(href.slice(href.indexOf("#") + 1));
 										if (h) return void followHeadingInFile(leads.file, h);
 									}
 									void openFile(leads.file, leads.lines ? { reveal: leads.lines } : {});

@@ -4,25 +4,40 @@
 
 export type TextSpan = { from: number; to: number };
 
-const CLOSED_HTML_COMMENT_RE = /<!--[\s\S]*?-->/g;
-const STANDALONE_HTML_COMMENTS_RE = /^[ \t]*(?:<!--[\s\S]*?-->[\t \r\n]*)+$/;
-
 /**
  * True when `text` consists exclusively of one or more closed HTML comments
  * (`<!-- ... -->`) plus surrounding whitespace—never matching unclosed comments,
  * blockquoted comments (`> <!-- ...`), or lines with adjacent prose.
  */
 export function isStandaloneHtmlComment(text: string): boolean {
-	return STANDALONE_HTML_COMMENTS_RE.test(text);
+	const len = text.length;
+	let i = 0;
+	// Only horizontal whitespace ([ \t]) is allowed before the first comment.
+	while (i < len && (text[i] === " " || text[i] === "\t")) i++;
+	let count = 0;
+	while (i < len) {
+		if (!text.startsWith("<!--", i)) return false;
+		const close = text.indexOf("-->", i + 4);
+		if (close < 0) return false;
+		count++;
+		i = close + 3;
+		while (i < len && (text[i] === " " || text[i] === "\t" || text[i] === "\r" || text[i] === "\n")) i++;
+	}
+	return count > 0;
 }
 
 /** Returns relative `[from, to]` ranges of every closed `<!-- ... -->` comment inside `text`. */
 export function closedHtmlCommentSpans(text: string): TextSpan[] {
 	const spans: TextSpan[] = [];
-	CLOSED_HTML_COMMENT_RE.lastIndex = 0;
-	let match: RegExpExecArray | null;
-	while ((match = CLOSED_HTML_COMMENT_RE.exec(text))) {
-		spans.push({ from: match.index, to: match.index + match[0].length });
+	let pos = 0;
+	while (pos < text.length) {
+		const open = text.indexOf("<!--", pos);
+		if (open < 0) break;
+		const close = text.indexOf("-->", open + 4);
+		if (close < 0) break;
+		const to = close + 3;
+		spans.push({ from: open, to });
+		pos = to;
 	}
 	return spans;
 }

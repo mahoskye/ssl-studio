@@ -11,6 +11,7 @@ import { redo, redoDepth, undo, undoDepth } from "@codemirror/commands";
 import { EditorSelection } from "@codemirror/state";
 import { EditorView, WidgetType } from "@codemirror/view";
 import { fenced } from "../../shared/catalog";
+import { scanQuotePrefix } from "../../shared/codeTokens";
 import { htmlToMarkdown, looksLikeRichHtml, tsvToMarkdownTable } from "../../shared/htmlToMarkdown";
 import {
 	blockquoteEnter,
@@ -34,10 +35,50 @@ import { hydrateImagesInElement, saveImageAttachment } from "./imageResolve";
 import { colourCode } from "./markdownCode";
 import { hydrateMathInElement } from "./markdownHtml";
 
-const TASK_RE = /^((?:[ \t]*>[ \t]?)*[ \t]*)([-*+]|\d{1,9}[.)])([ \t]+)\[([ xX])\]([ \t]?)/;
+const TASK_AFTER_QUOTE_RE = /^([ \t]*)([-*+]|\d{1,9}[.)])([ \t]+)\[([ xX])\](?:[ \t]|$)/;
+
+/**
+ * Linearly finds the 0-based column offset of `[` in a task list item (including inside
+ * deeply nested blockquotes), or -1 if `line` is not a task checkbox line.
+ * Strips leading blockquote markers linearly via `scanQuotePrefix` to prevent ReDoS.
+ */
+export function findCalloutTaskBracketOffset(line: string): number {
+	const { offset } = scanQuotePrefix(line);
+	const m = TASK_AFTER_QUOTE_RE.exec(line.slice(offset));
+	if (!m) return -1;
+	return offset + m[1]!.length + m[2]!.length + m[3]!.length;
+}
+
+/** Serializes a callout block while preserving an optional leading indent/container prefix on every line. */
+export function serializePrefixedCalloutBlock(
+	type: string,
+	title: string,
+	fold: "+" | "-" | null,
+	bodyText: string,
+	keepEmptyBodyLine = false,
+	linePrefix = "",
+): string {
+	const serialized = serializeCalloutBlock(type, title, fold, bodyText, keepEmptyBodyLine);
+	if (!linePrefix) return serialized;
+	return serialized
+		.split("\n")
+		.map((ln) => `${linePrefix}${ln}`)
+		.join("\n");
+}
 
 /** Remembered callout fold toggles so collapsing/expanding persists across Live <-> Read switches. */
+const CALLOUT_FOLD_STATE_MAX = 200;
 const calloutFoldState = new Map<string, boolean>();
+
+function setCalloutFold(key: string, folded: boolean) {
+	calloutFoldState.delete(key);
+	calloutFoldState.set(key, folded);
+	while (calloutFoldState.size > CALLOUT_FOLD_STATE_MAX) {
+		const oldest = calloutFoldState.keys().next().value;
+		if (oldest === undefined) break;
+		calloutFoldState.delete(oldest);
+	}
+}
 
 type CalloutController = {
 	view: EditorView;
@@ -49,6 +90,7 @@ type CalloutController = {
 	endLine: number;
 	filePath: string;
 	readMode: boolean;
+	linePrefix: string;
 	editingBody: boolean;
 	pickerOpen: boolean;
 	folded: boolean;
@@ -68,6 +110,7 @@ type CalloutController = {
 	bodyEl: HTMLDivElement;
 	bodyTextarea: HTMLTextAreaElement | null;
 	bodyCompleter: TextareaCompleter | null;
+	disposeOutsideClick: () => void;
 	syncAll: () => void;
 	openBodyEditor: (target?: boolean | { cursorOffset?: number }) => void;
 	closeBodyEditor: (commit?: boolean) => void;
@@ -85,12 +128,17 @@ function caretOnFirstLine(el: HTMLTextAreaElement): boolean {
 }
 
 function runHistory(view: EditorView, dir: "undo" | "redo") {
+	if (view.state.readOnly) return;
+	const fallback = view.state.facet(historyFallbackFacet);
+	if (fallback) {
+		if (dir === "undo") fallback.undo();
+		else fallback.redo();
+		return;
+	}
 	if (dir === "undo") {
 		if (undoDepth(view.state) > 0) undo(view);
-		else view.state.facet(historyFallbackFacet)?.undo();
 	} else {
 		if (redoDepth(view.state) > 0) redo(view);
-		else view.state.facet(historyFallbackFacet)?.redo();
 	}
 }
 
@@ -105,6 +153,7 @@ export class CalloutWidget extends WidgetType {
 		private readonly filePath: string,
 		private readonly readMode: boolean,
 		private readonly themeVer: number = 0,
+		private readonly linePrefix: string = "",
 	) {
 		super();
 	}
@@ -121,7 +170,8 @@ export class CalloutWidget extends WidgetType {
 			other.endLine === this.endLine &&
 			other.filePath === this.filePath &&
 			other.readMode === this.readMode &&
-			other.themeVer === this.themeVer
+			other.themeVer === this.themeVer &&
+			other.linePrefix === this.linePrefix
 		);
 	}
 
@@ -139,6 +189,7 @@ export class CalloutWidget extends WidgetType {
 		ctrl.endLine = this.endLine;
 		ctrl.filePath = this.filePath;
 		ctrl.readMode = this.readMode;
+		ctrl.linePrefix = this.linePrefix;
 
 		if (this.readMode) {
 			ctrl.pickerOpen = false;
@@ -220,6 +271,7 @@ export class CalloutWidget extends WidgetType {
 			endLine: this.endLine,
 			filePath: this.filePath,
 			readMode: this.readMode,
+			linePrefix: this.linePrefix,
 			editingBody: false,
 			pickerOpen: false,
 			folded: calloutFoldState.has(`${this.filePath}:${this.startLine}:${this.parsed.spec.type}:${this.parsed.title}`)
@@ -241,6 +293,7 @@ export class CalloutWidget extends WidgetType {
 			bodyEl,
 			bodyTextarea: null,
 			bodyCompleter: null,
+			disposeOutsideClick: () => {},
 			syncAll: () => {},
 			openBodyEditor: () => {},
 			closeBodyEditor: () => {},
@@ -248,17 +301,20 @@ export class CalloutWidget extends WidgetType {
 		root.__calloutCtrl = ctrl;
 
 		let onOutsideClick: ((e: MouseEvent) => void) | null = null;
-		const setPickerOpen = (open: boolean) => {
-			ctrl.pickerOpen = open;
+		const removeOutsideClick = () => {
 			if (onOutsideClick) {
 				window.removeEventListener("mousedown", onOutsideClick, true);
 				onOutsideClick = null;
 			}
+		};
+		ctrl.disposeOutsideClick = removeOutsideClick;
+		const setPickerOpen = (open: boolean) => {
+			ctrl.pickerOpen = open;
+			removeOutsideClick();
 			if (open) {
 				onOutsideClick = (ev: MouseEvent) => {
 					if (!root.isConnected) {
-						window.removeEventListener("mousedown", onOutsideClick!, true);
-						onOutsideClick = null;
+						removeOutsideClick();
 						return;
 					}
 					if (ev.target instanceof Node && !root.contains(ev.target)) {
@@ -276,7 +332,7 @@ export class CalloutWidget extends WidgetType {
 			const nextFold = patch.fold !== undefined ? patch.fold : ctrl.parsed.fold;
 			const nextBody = patch.body ?? (ctrl.bodyTextarea ? ctrl.bodyTextarea.value : ctrl.bodyMarkdown);
 			const keepEmpty = patch.keepEmptyBodyLine ?? (ctrl.editingBody || document.activeElement === titleInput || ctrl.pickerOpen);
-			const serialized = serializeCalloutBlock(nextType, nextTitle, nextFold, nextBody, keepEmpty);
+			const serialized = serializePrefixedCalloutBlock(nextType, nextTitle, nextFold, nextBody, keepEmpty, ctrl.linePrefix);
 			const curFrom = Math.min(ctrl.from, ctrl.view.state.doc.length);
 			const curTo = Math.min(ctrl.to, ctrl.view.state.doc.length);
 			const existing = ctrl.view.state.sliceDoc(curFrom, curTo);
@@ -342,9 +398,9 @@ export class CalloutWidget extends WidgetType {
 				const taskBrackets: number[] = [];
 				for (let n = ctrl.startLine + 1; n <= Math.min(ctrl.endLine, ctrl.view.state.doc.lines); n++) {
 					const ln = ctrl.view.state.doc.line(n);
-					const tm = TASK_RE.exec(ln.text);
-					if (tm) {
-						taskBrackets.push(ln.from + tm[1]!.length + tm[2]!.length + tm[3]!.length);
+					const bracketCol = findCalloutTaskBracketOffset(ln.text);
+					if (bracketCol >= 0) {
+						taskBrackets.push(ln.from + bracketCol);
 					}
 				}
 				if (taskBrackets.length === boxes.length) {
@@ -421,7 +477,7 @@ export class CalloutWidget extends WidgetType {
 			if (ctrl.readMode) return;
 			if (ctrl.folded) {
 				ctrl.folded = false;
-				calloutFoldState.set(foldKey(), false);
+				setCalloutFold(foldKey(), false);
 				bodyEl.style.display = "";
 				root.classList.remove("is-folded");
 			}
@@ -494,7 +550,7 @@ export class CalloutWidget extends WidgetType {
 					const saved = await saveImageAttachment(file, ctrl.filePath);
 					if (saved) snippets.push(saved.markdown);
 				}
-				if (!snippets.length || !ta.isConnected) return;
+				if (!snippets.length || !root.isConnected || !ta.isConnected || ctrl.readMode) return;
 				const insert = snippets.join("\n");
 				const curS = ta.selectionStart ?? ta.value.length;
 				const curE = ta.selectionEnd ?? curS;
@@ -635,7 +691,7 @@ export class CalloutWidget extends WidgetType {
 				// Smart Markdown list, task & nested callout/blockquote continuation inside the callout body!
 				if (e.key === "Enter" && !e.shiftKey && ta.selectionStart === ta.selectionEnd) {
 					const pos = ta.selectionStart;
-					const lineStart = ta.value.lastIndexOf("\n", pos - 1) + 1;
+					const lineStart = pos === 0 ? 0 : ta.value.lastIndexOf("\n", pos - 1) + 1;
 					const lineEndRaw = ta.value.indexOf("\n", pos);
 					const lineEnd = lineEndRaw < 0 ? ta.value.length : lineEndRaw;
 					const lineText = ta.value.slice(lineStart, lineEnd);
@@ -742,13 +798,18 @@ export class CalloutWidget extends WidgetType {
 				titleInput.setSelectionRange(titleInput.value.length, titleInput.value.length);
 			} else {
 				// Compute exact caret offset inside `ctrl.bodyMarkdown` corresponding to document offset `pos`.
+				const stripPrefix = (txt: string) => {
+					const rest = ctrl.linePrefix && txt.startsWith(ctrl.linePrefix) ? txt.slice(ctrl.linePrefix.length) : txt;
+					return rest.replace(/^[ \t]{0,3}>[ \t]?/, "");
+				};
 				let bodyOffset = 0;
 				for (let n = ctrl.startLine + 1; n < line.number && n <= doc.lines; n++) {
-					const stripped = doc.line(n).text.replace(/^[ \t]{0,3}>[ \t]?/, "");
-					bodyOffset += stripped.length + 1;
+					bodyOffset += stripPrefix(doc.line(n).text).length + 1;
 				}
-				const prefixMatch = /^[ \t]{0,3}>[ \t]?/.exec(line.text);
-				const colInBody = Math.max(0, clamped - line.from - (prefixMatch?.[0].length ?? 0));
+				const rest = ctrl.linePrefix && line.text.startsWith(ctrl.linePrefix) ? line.text.slice(ctrl.linePrefix.length) : line.text;
+				const leadRemoved = line.text.length - rest.length;
+				const prefixMatch = /^[ \t]{0,3}>[ \t]?/.exec(rest);
+				const colInBody = Math.max(0, clamped - line.from - leadRemoved - (prefixMatch?.[0].length ?? 0));
 				ctrl.openBodyEditor({ cursorOffset: bodyOffset + colInBody });
 			}
 			root.scrollIntoView({ block: "nearest" });
@@ -820,7 +881,7 @@ export class CalloutWidget extends WidgetType {
 			if (ctrl.readMode) return;
 			const nextFold: "+" | "-" | null = ctrl.parsed.fold === null ? "+" : ctrl.parsed.fold === "+" ? "-" : null;
 			ctrl.folded = nextFold === "-";
-			calloutFoldState.set(foldKey(), ctrl.folded);
+			setCalloutFold(foldKey(), ctrl.folded);
 			commitCallout({ fold: nextFold, keepEmptyBodyLine: ctrl.editingBody });
 		});
 
@@ -848,7 +909,7 @@ export class CalloutWidget extends WidgetType {
 			e.preventDefault();
 			e.stopPropagation();
 			ctrl.folded = !ctrl.folded;
-			calloutFoldState.set(foldKey(), ctrl.folded);
+			setCalloutFold(foldKey(), ctrl.folded);
 			ctrl.syncAll();
 		});
 
@@ -873,7 +934,7 @@ export class CalloutWidget extends WidgetType {
 					const saved = await saveImageAttachment(file, ctrl.filePath);
 					if (saved) snippets.push(saved.markdown);
 				}
-				if (!snippets.length) return;
+				if (!snippets.length || !root.isConnected || ctrl.readMode) return;
 				const base = ctrl.bodyTextarea ? ctrl.bodyTextarea.value : ctrl.bodyMarkdown;
 				const nextBody = base.trim() ? `${base.replace(/\n+$/, "")}\n\n${snippets.join("\n")}` : snippets.join("\n");
 				commitCallout({ body: nextBody, keepEmptyBodyLine: ctrl.editingBody });
@@ -894,7 +955,6 @@ export class CalloutWidget extends WidgetType {
 			if (anchor && !e.altKey) {
 				e.preventDefault();
 				e.stopPropagation();
-				cb?.onFollowLink(anchor.getAttribute("href") ?? "");
 				return;
 			}
 			if (tag && !e.altKey) {
@@ -916,6 +976,16 @@ export class CalloutWidget extends WidgetType {
 			ctrl.openBodyEditor(true);
 		});
 
+		bodyEl.addEventListener("click", (e) => {
+			const anchor = (e.target instanceof Element ? e.target : null)?.closest<HTMLAnchorElement>("a[href]");
+			if (!anchor) return;
+			e.preventDefault();
+			e.stopPropagation();
+			if (!e.altKey) {
+				ctrl.view.state.facet(liveCallbacksFacet)?.onFollowLink(anchor.getAttribute("href") ?? "");
+			}
+		});
+
 		bodyEl.addEventListener("mouseover", (e) => {
 			const anchor = (e.target as HTMLElement | null)?.closest<HTMLAnchorElement>("a[href]");
 			if (anchor) ctrl.view.state.facet(liveCallbacksFacet)?.onHoverLink({ kind: "href", href: anchor.getAttribute("href") ?? "", anchor });
@@ -932,6 +1002,7 @@ export class CalloutWidget extends WidgetType {
 	destroy(dom: HTMLElement) {
 		const ctrl = (dom as CalloutDomElement).__calloutCtrl;
 		ctrl?.bodyCompleter?.dispose();
+		ctrl?.disposeOutsideClick();
 	}
 
 	ignoreEvent() {

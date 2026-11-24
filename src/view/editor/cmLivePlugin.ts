@@ -7,7 +7,7 @@
 // - FoldService (`markdownFoldService`): heading section & nested list folding.
 import { foldGutter, foldService, syntaxTree } from "@codemirror/language";
 import { getSearchQuery, searchPanelOpen } from "@codemirror/search";
-import { EditorSelection, EditorState, StateField, Transaction, type ChangeSpec, type Extension, type Range } from "@codemirror/state";
+import { EditorSelection, EditorState, StateField, Transaction, type ChangeSpec, type Extension, type Range, type Text } from "@codemirror/state";
 import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, type ViewUpdate } from "@codemirror/view";
 import { fenced } from "../../shared/catalog";
 import { isFenceClose, normalizeFenceLang, parseFenceOpen, stripQuotePrefix } from "../../shared/codeTokens";
@@ -17,7 +17,7 @@ import { headingAnchor } from "../../shared/docTables";
 import { frontMatter } from "../../shared/frontMatter";
 import { closedHtmlCommentSpans, commentBlockHideLines, isStandaloneHtmlComment } from "../../shared/htmlComments";
 import { parseCalloutHeader, parseImageExpression, type ParsedImageSpec } from "../../shared/markdownEdit";
-import { parseMarkdownTable } from "../../shared/markdownTables";
+import { parseMarkdownTable, parseTableRaw } from "../../shared/markdownTables";
 import { docByName, namedLink, nameFor } from "../../shared/namedLinks";
 import { baseName, dirName, isInside, relativeTo, resolvePath } from "../../shared/paths";
 import { isLikelyHexColorTag } from "../../shared/tags";
@@ -27,7 +27,7 @@ import { noteCursor } from "../navigation";
 import { canonical, documents, notify, openFile, state as appState } from "../state";
 import { currentThemeVersion } from "../themes/themes";
 import { CalloutWidget } from "./cmLiveCallout";
-import { MermaidLivePreviewWidget, MermaidWidget, mermaidLivePreviewTheme } from "./cmMermaid";
+import { MermaidLivePreviewWidget, MermaidWidget } from "./cmMermaid";
 import { buildHoverPreview } from "./hoverPreview";
 import { colourCode } from "./markdownCode";
 import {
@@ -143,9 +143,65 @@ class ReplaceGuard {
 	}
 }
 
+type DocAnalysisCache = {
+	text?: string;
+	fences?: [number, number][];
+	fm?: ReturnType<typeof frontMatter>;
+	headingAnchors?: Map<number, string>;
+};
+
+/** Per-immutable-Text analysis cache so scroll, foldAll, and keystrokes never rescan the full document per line. */
+const docAnalysisCache = new WeakMap<Text, DocAnalysisCache>();
+
+function getDocCache(doc: Text): DocAnalysisCache {
+	let entry = docAnalysisCache.get(doc);
+	if (!entry) {
+		entry = {};
+		docAnalysisCache.set(doc, entry);
+	}
+	return entry;
+}
+
+function getDocText(doc: Text): string {
+	const entry = getDocCache(doc);
+	if (entry.text === undefined) entry.text = doc.toString();
+	return entry.text;
+}
+
+function getDocFences(doc: Text): [number, number][] {
+	const entry = getDocCache(doc);
+	if (entry.fences === undefined) entry.fences = fenced(getDocText(doc));
+	return entry.fences;
+}
+
+function getDocFrontMatter(doc: Text): ReturnType<typeof frontMatter> {
+	const entry = getDocCache(doc);
+	if (entry.fm === undefined) entry.fm = frontMatter(getDocText(doc));
+	return entry.fm;
+}
+
+function getDocHeadingAnchors(doc: Text): Map<number, string> {
+	const entry = getDocCache(doc);
+	if (entry.headingAnchors === undefined) entry.headingAnchors = deduplicatedHeadingAnchorsByLine(getDocText(doc));
+	return entry.headingAnchors;
+}
+
+function posInRanges(ranges: readonly [number, number][], pos: number): boolean {
+	let lo = 0;
+	let hi = ranges.length - 1;
+	while (lo <= hi) {
+		const mid = (lo + hi) >>> 1;
+		const [a, b] = ranges[mid]!;
+		if (pos < a) hi = mid - 1;
+		else if (pos >= b) lo = mid + 1;
+		else return true;
+	}
+	return false;
+}
+
 /** Computes frontmatter byte range (`0..endLine.to`) if valid YAML frontmatter exists. */
 function frontmatterRange(state: EditorState): { lines: number; from: number; to: number } | null {
-	const fm = frontMatter(state.doc.toString());
+	const fm = getDocFrontMatter(state.doc);
 	if (!fm.lines || fm.lines > state.doc.lines) return null;
 	const endLine = state.doc.line(fm.lines);
 	return { lines: fm.lines, from: 0, to: endLine.to };
@@ -774,7 +830,9 @@ class TransclusionWidget extends WidgetType {
 
 		const primaryPath = targetPath;
 		const secondaryPath = fallbackTargetPath;
+		let loadSeq = 0;
 		const loadEmbed = () => {
+			const seq = ++loadSeq;
 			if (isSelfDoc) {
 				setStatusMsg("cm-md-embed-missing", "Cannot embed a document inside itself (use ![[#Heading]] to embed a section).");
 				return;
@@ -789,11 +847,12 @@ class TransclusionWidget extends WidgetType {
 			void (async () => {
 				let usedPath = primaryPath;
 				let preview = await buildHoverPreview(primaryPath, { heading, maxLines: 120, visited: hostVisited });
+				if (seq !== loadSeq || !body.isConnected) return;
 				if (!preview && secondaryPath) {
 					usedPath = secondaryPath;
 					preview = await buildHoverPreview(secondaryPath, { heading, maxLines: 120, visited: hostVisited });
 				}
-				if (!body.isConnected) return;
+				if (seq !== loadSeq || !body.isConnected) return;
 				if (!preview) {
 					setStatusMsg("cm-md-embed-missing", `Could not read “${this.inner}”.`);
 					return;
@@ -912,7 +971,18 @@ class TransclusionWidget extends WidgetType {
 }
 
 /** Remembered open/closed state for `<details>` blocks so toggling survives Live <-> Read & edits elsewhere. */
+const DETAILS_OPEN_STATE_MAX = 200;
 const detailsOpenState = new Map<string, boolean>();
+
+function setDetailsOpen(key: string, open: boolean) {
+	detailsOpenState.delete(key);
+	detailsOpenState.set(key, open);
+	while (detailsOpenState.size > DETAILS_OPEN_STATE_MAX) {
+		const oldest = detailsOpenState.keys().next().value;
+		if (oldest === undefined) break;
+		detailsOpenState.delete(oldest);
+	}
+}
 
 /** Collapsible `<details><summary>...</summary>...</details>` block widget for Live & Read modes. */
 class DetailsWidget extends WidgetType {
@@ -954,7 +1024,7 @@ class DetailsWidget extends WidgetType {
 		const stateKey = `${this.filePath}:${this.startLine}:${this.summaryMd}`;
 		details.open = detailsOpenState.has(stateKey) ? detailsOpenState.get(stateKey)! : this.defaultOpen;
 		details.addEventListener("toggle", () => {
-			detailsOpenState.set(stateKey, details.open);
+			setDetailsOpen(stateKey, details.open);
 		});
 
 		const enterRaw = () => {
@@ -976,6 +1046,26 @@ class DetailsWidget extends WidgetType {
 		summaryLabel.innerHTML = renderInlineHtml(this.summaryMd || "Details", this.filePath, true);
 		hydrateMathInElement(summaryLabel);
 		summary.appendChild(summaryLabel);
+
+		summary.addEventListener("click", (e) => {
+			const target = e.target instanceof Element ? e.target : null;
+			if (!target) return;
+			const cb = view.state.facet(liveCallbacksFacet);
+			const anchor = target.closest<HTMLAnchorElement>("a[href]");
+			if (anchor) {
+				e.preventDefault();
+				e.stopPropagation();
+				if (!e.altKey) cb?.onFollowLink(anchor.getAttribute("href") ?? "");
+				return;
+			}
+			const tagEl = target.closest<HTMLElement>(".md-tag, [data-tag]");
+			if (tagEl && !e.altKey) {
+				e.preventDefault();
+				e.stopPropagation();
+				const tag = tagEl.dataset.tag ?? tagEl.textContent?.trim() ?? "";
+				if (tag) cb?.onTagClick(tag);
+			}
+		});
 
 		if (!this.readOnly) {
 			const editBtn = document.createElement("button");
@@ -1009,10 +1099,14 @@ class DetailsWidget extends WidgetType {
 			if (!target) return;
 			const cb = view.state.facet(liveCallbacksFacet);
 			const anchor = target.closest<HTMLAnchorElement>("a[href]");
-			if (anchor && !e.altKey) {
+			if (anchor) {
 				e.preventDefault();
 				e.stopPropagation();
-				cb?.onFollowLink(anchor.getAttribute("href") ?? "");
+				if (!e.altKey) {
+					cb?.onFollowLink(anchor.getAttribute("href") ?? "");
+					return;
+				}
+				if (!this.readOnly) enterRaw();
 				return;
 			}
 			const tagEl = target.closest<HTMLElement>(".md-tag, [data-tag]");
@@ -1047,7 +1141,6 @@ class MathWidget extends WidgetType {
 	constructor(
 		private readonly tex: string,
 		private readonly displayMode: boolean,
-		private readonly pos: number,
 		private readonly readOnly: boolean,
 	) {
 		super();
@@ -1086,7 +1179,8 @@ class MathWidget extends WidgetType {
 				if (e.button !== 0) return;
 				e.preventDefault();
 				e.stopPropagation();
-				const targetPos = Math.min(this.pos + (this.displayMode ? 2 : 1), view.state.doc.length);
+				const livePos = view.posAtDOM(el);
+				const targetPos = Math.min(livePos + (this.displayMode ? 2 : 1), view.state.doc.length);
 				view.focus();
 				view.dispatch({
 					selection: EditorSelection.cursor(targetPos),
@@ -1146,9 +1240,9 @@ function buildBlockDecorations(state: EditorState): DecorationSet {
 	}
 
 	const fmEnd = fm?.to ?? -1;
-	const docText = state.doc.toString();
-	const fences = fenced(docText);
-	const inFence = (pos: number) => fences.some(([a, b]) => pos >= a && pos < b);
+	const docText = getDocText(state.doc);
+	const fences = getDocFences(state.doc);
+	const inFence = (pos: number) => posInRanges(fences, pos);
 	const linesArray = docText.split("\n");
 
 	// 2. Walk syntax tree for multi-line Table, Callout (Blockquote), HorizontalRule, and CommentBlock nodes.
@@ -1218,16 +1312,28 @@ function buildBlockDecorations(state: EditorState): DecorationSet {
 			if (node.from <= fmEnd) return;
 
 			if (node.name === "Table") {
-				const startLine = state.doc.lineAt(node.from).number;
-				const endLine = state.doc.lineAt(node.to).number;
+				const startLineObj = state.doc.lineAt(node.from);
+				const endLineObj = state.doc.lineAt(node.to);
+				const startLine = startLineObj.number;
+				const endLine = endLineObj.number;
+				const blockFrom = startLineObj.from;
+				const blockTo = endLineObj.to;
 				for (let n = startLine; n <= endLine; n++) handledTables.add(n);
-				if (!tableShouldStayRaw(state, node.from, node.to, startLine, endLine) && guard.canAdd(node.from, node.to)) {
-					const raw = state.sliceDoc(node.from, node.to);
+				const raw = state.sliceDoc(blockFrom, blockTo);
+				const parsedTable = parseTableRaw(raw);
+				const beforeNode = state.sliceDoc(blockFrom, node.from);
+				const uniformPrefix = Boolean(
+					parsedTable &&
+						parsedTable.startLine === 0 &&
+						parsedTable.endLine === endLine - startLine &&
+						(node.from === blockFrom || beforeNode === parsedTable.prefix),
+				);
+				if (uniformPrefix && !tableShouldStayRaw(state, blockFrom, blockTo, startLine, endLine) && guard.canAdd(blockFrom, blockTo)) {
 					decos.push(
 						Decoration.replace({
-							widget: new TableWidget(raw, node.from, node.to, startLine, filePath, isRead),
+							widget: new TableWidget(raw, blockFrom, blockTo, startLine, filePath, isRead),
 							block: true,
-						}).range(node.from, node.to),
+						}).range(blockFrom, blockTo),
 					);
 				} else {
 					// Raw pipe table editing mode: crisp monospace alignment & subtle highlight.
@@ -1245,25 +1351,54 @@ function buildBlockDecorations(state: EditorState): DecorationSet {
 
 			if (node.name === "Blockquote") {
 				const firstLine = state.doc.lineAt(node.from);
+				const blockFrom = firstLine.from;
+				const beforeNode = state.sliceDoc(blockFrom, node.from);
+				// Never replace a callout embedded on the same line after a list marker or outer quote prefix.
+				if (!/^[ \t]*$/.test(beforeNode)) return;
 				const parsed = parseCalloutHeader(firstLine.text);
 				if (!parsed) return;
+				const leadPrefix = /^[ \t]*/.exec(firstLine.text)![0];
+				const matchesCalloutLine = (txt: string) =>
+					leadPrefix.length > 0
+						? txt.startsWith(leadPrefix) && txt[leadPrefix.length] === ">"
+						: /^[ \t]{0,3}>/.test(txt);
 				let endLine = state.doc.lineAt(node.to);
 				// Never swallow non-quoted lines (CommonMark lazy continuation) into a callout widget!
 				while (endLine.number > firstLine.number && !/^[ \t]{0,3}>/.test(endLine.text)) {
 					endLine = state.doc.line(endLine.number - 1);
 				}
 				const blockTo = endLine.to;
+				let uniformPrefix = true;
+				for (let n = firstLine.number + 1; n <= endLine.number; n++) {
+					if (!matchesCalloutLine(state.doc.line(n).text)) {
+						uniformPrefix = false;
+						break;
+					}
+				}
 				for (let n = firstLine.number; n <= endLine.number; n++) handledCallouts.add(n);
-				if (!calloutShouldStayRaw(state, node.from, blockTo, firstLine.number, endLine.number) && guard.canAdd(node.from, blockTo)) {
+				if (uniformPrefix && !calloutShouldStayRaw(state, blockFrom, blockTo, firstLine.number, endLine.number) && guard.canAdd(blockFrom, blockTo)) {
 					const bodyLines: string[] = [];
 					for (let n = firstLine.number + 1; n <= endLine.number; n++) {
-						bodyLines.push(state.doc.line(n).text.replace(/^[ \t]{0,3}>[ \t]?/, ""));
+						const txt = state.doc.line(n).text;
+						const afterLead = leadPrefix ? txt.slice(leadPrefix.length) : txt;
+						bodyLines.push(afterLead.replace(/^[ \t]{0,3}>[ \t]?/, ""));
 					}
 					decos.push(
 						Decoration.replace({
-							widget: new CalloutWidget(parsed, bodyLines.join("\n"), node.from, blockTo, firstLine.number, endLine.number, filePath, isRead, currentThemeVersion()),
+							widget: new CalloutWidget(
+								parsed,
+								bodyLines.join("\n"),
+								blockFrom,
+								blockTo,
+								firstLine.number,
+								endLine.number,
+								filePath,
+								isRead,
+								currentThemeVersion(),
+								leadPrefix,
+							),
 							block: true,
-						}).range(node.from, blockTo),
+						}).range(blockFrom, blockTo),
 					);
 				} else {
 					// Raw callout editing mode: preserve colored left bar and soft tint!
@@ -1305,21 +1440,35 @@ function buildBlockDecorations(state: EditorState): DecorationSet {
 		if (!handledCallouts.has(n) && line.text.includes("[!")) {
 			const parsed = parseCalloutHeader(line.text);
 			if (parsed) {
+				const leadPrefix = /^[ \t]*/.exec(line.text)![0];
+				const matchesCalloutLine = (txt: string) =>
+					leadPrefix.length > 0
+						? txt.startsWith(leadPrefix) && txt[leadPrefix.length] === ">"
+						: /^[ \t]{0,3}>/.test(txt);
 				let endLineNum = n;
 				while (endLineNum + 1 <= state.doc.lines && /^[ \t]{0,3}>/.test(state.doc.line(endLineNum + 1).text)) {
 					endLineNum++;
 				}
+				let uniformPrefix = true;
+				for (let k = n + 1; k <= endLineNum; k++) {
+					if (!matchesCalloutLine(state.doc.line(k).text)) {
+						uniformPrefix = false;
+						break;
+					}
+				}
 				const from = line.from;
 				const to = state.doc.line(endLineNum).to;
 				for (let k = n; k <= endLineNum; k++) handledCallouts.add(k);
-				if (!calloutShouldStayRaw(state, from, to, n, endLineNum) && guard.canAdd(from, to)) {
+				if (uniformPrefix && !calloutShouldStayRaw(state, from, to, n, endLineNum) && guard.canAdd(from, to)) {
 					const bodyLines: string[] = [];
 					for (let k = n + 1; k <= endLineNum; k++) {
-						bodyLines.push(state.doc.line(k).text.replace(/^[ \t]{0,3}>[ \t]?/, ""));
+						const txt = state.doc.line(k).text;
+						const afterLead = leadPrefix ? txt.slice(leadPrefix.length) : txt;
+						bodyLines.push(afterLead.replace(/^[ \t]{0,3}>[ \t]?/, ""));
 					}
 					decos.push(
 						Decoration.replace({
-							widget: new CalloutWidget(parsed, bodyLines.join("\n"), from, to, n, endLineNum, filePath, isRead, currentThemeVersion()),
+							widget: new CalloutWidget(parsed, bodyLines.join("\n"), from, to, n, endLineNum, filePath, isRead, currentThemeVersion(), leadPrefix),
 							block: true,
 						}).range(from, to),
 					);
@@ -1455,7 +1604,7 @@ function buildBlockDecorations(state: EditorState): DecorationSet {
 			if (!selectionTouches(state, from, to) && !isRawEditing(state, from, to) && !searchMatchesBlock(state, from, to) && guard.canAdd(from, to)) {
 				decos.push(
 					Decoration.replace({
-						widget: new MathWidget(singleMath[1]!.trim(), true, from, isRead),
+						widget: new MathWidget(singleMath[1]!.trim(), true, isRead),
 						block: true,
 					}).range(from, to),
 				);
@@ -1479,7 +1628,7 @@ function buildBlockDecorations(state: EditorState): DecorationSet {
 				if (tex && !selectionTouches(state, from, to) && !isRawEditing(state, from, to) && !searchMatchesBlock(state, from, to) && guard.canAdd(from, to)) {
 					decos.push(
 						Decoration.replace({
-							widget: new MathWidget(tex, true, from, isRead),
+							widget: new MathWidget(tex, true, isRead),
 							block: true,
 						}).range(from, to),
 					);
@@ -1583,10 +1732,9 @@ function buildInlineDecorations(view: EditorView): DecorationSet {
 	const allDocs = docs();
 	const fm = frontmatterRange(state);
 	const fmEnd = fm?.to ?? -1;
-	const fullText = state.doc.toString();
 	// Compute deduplicated heading anchors across the full document (`heading`, `heading-1`, `heading-2`)
 	// matching `documentHeadings` / `outline.ts` / `markdownHtml.ts` so `data-md-heading-id` never collides.
-	const headingAnchorsByLine = deduplicatedHeadingAnchorsByLine(fullText);
+	const headingAnchorsByLine = getDocHeadingAnchors(state.doc);
 
 	// Broken link targets for this file (from docs listing).
 	const brokenFiles = new Set((allDocs.find((d) => canonical(d.path) === here)?.broken ?? []).map((b) => linkFile(b.href)));
@@ -1636,10 +1784,11 @@ function buildInlineDecorations(view: EditorView): DecorationSet {
 				if (node.to <= fmEnd) return false;
 
 				if (node.name === "Table") {
-					const sLine = state.doc.lineAt(node.from).number;
-					const eLine = state.doc.lineAt(node.to).number;
-					if (!tableShouldStayRaw(state, node.from, node.to, sLine, eLine)) {
-						blockSkipRanges.push([node.from, node.to]);
+					const sLineObj = state.doc.lineAt(node.from);
+					const eLineObj = state.doc.lineAt(node.to);
+					const sLine = sLineObj.number;
+					const eLine = eLineObj.number;
+					if (isBlockSkipped(sLineObj.from, eLineObj.to)) {
 						return false;
 					}
 					// Dim pipe separators when editing a table in Raw mode for calm readability.
@@ -1663,8 +1812,7 @@ function buildInlineDecorations(view: EditorView): DecorationSet {
 						endLine = state.doc.line(endLine.number - 1);
 					}
 					const blockTo = endLine.to;
-					if (!calloutShouldStayRaw(state, node.from, blockTo, firstLine.number, endLine.number)) {
-						blockSkipRanges.push([node.from, blockTo]);
+					if (isBlockSkipped(firstLine.from, blockTo)) {
 						// Only skip descending into children when the whole Blockquote node belongs to the callout.
 						if (blockTo === node.to) return false;
 					}
@@ -1980,7 +2128,7 @@ function buildInlineDecorations(view: EditorView): DecorationSet {
 					if (!selectionTouches(state, mFrom, mTo) && guard.canAdd(mFrom, mTo)) {
 						decos.push(
 							Decoration.replace({
-								widget: new MathWidget(span.tex, span.display, mFrom, isReadMode),
+								widget: new MathWidget(span.tex, span.display, isReadMode),
 							}).range(mFrom, mTo),
 						);
 					}
@@ -2213,7 +2361,6 @@ const liveExtraBaseTheme = EditorView.baseTheme({
 });
 
 export const liveInteractionExtension: Extension = [
-	mermaidLivePreviewTheme,
 	liveExtraBaseTheme,
 	// Keep user cursor navigation, Backspace, and Live-mode Replace / Replace All cleanly outside hidden YAML frontmatter.
 	EditorState.transactionFilter.of((tr) => {
@@ -2406,24 +2553,31 @@ export const liveInteractionExtension: Extension = [
 
 // --- Heading & nested list folding -------------------------------------------
 
+const HEADING_FOLD_RE = /^[ \t]{0,3}(#{1,6})[ \t]+/;
+const LIST_FOLD_RE = /^([ \t]*)(?:[-*+]|\d{1,9}[.)])[ \t]+/;
+
 export const markdownFoldService: Extension = [
 	foldService.of((state, lineStart) => {
 		const line = state.doc.lineAt(lineStart);
 		const text = line.text;
+		// Early-return before touching full-document caches when the line is neither a heading nor a list item.
+		const hMatch = HEADING_FOLD_RE.exec(text);
+		const listMatch = hMatch ? null : LIST_FOLD_RE.exec(text);
+		if (!hMatch && !listMatch) return null;
+
 		// Skip lines inside fenced code blocks so `# comments` in bash/python/yaml fences never fold or terminate heading folds.
-		const fullDoc = state.doc.toString();
-		const codeFences = fenced(fullDoc);
-		const insideFence = (pos: number) => codeFences.some(([a, b]) => pos >= a && pos < b);
+		const codeFences = getDocFences(state.doc);
+		const insideFence = (pos: number) => posInRanges(codeFences, pos);
 		if (insideFence(line.from)) return null;
+
 		// 1. ATX Heading folds everything until the next heading of equal or higher level (outside code fences).
-		const hMatch = /^[ \t]{0,3}(#{1,6})[ \t]+/.exec(text);
 		if (hMatch) {
 			const level = hMatch[1]!.length;
 			let endLine = line.number;
 			for (let n = line.number + 1; n <= state.doc.lines; n++) {
 				const next = state.doc.line(n);
 				if (!insideFence(next.from)) {
-					const nh = /^[ \t]{0,3}(#{1,6})[ \t]+/.exec(next.text);
+					const nh = HEADING_FOLD_RE.exec(next.text);
 					if (nh && nh[1]!.length <= level) break;
 				}
 				endLine = n;
@@ -2432,8 +2586,8 @@ export const markdownFoldService: Extension = [
 			if (endLine > line.number) return { from: line.to, to: state.doc.line(endLine).to };
 			return null;
 		}
+
 		// 2. Indented list item folds nested child items below it.
-		const listMatch = /^([ \t]*)(?:[-*+]|\d{1,9}[.)])[ \t]+/.exec(text);
 		if (listMatch) {
 			const baseIndent = listMatch[1]!.replace(/\t/g, "  ").length;
 			let endLine = line.number;

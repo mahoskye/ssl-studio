@@ -141,6 +141,7 @@ export function buildSlashCommandSnippet(
 	}
 }
 
+const HEADING_CACHE_MAX = 60;
 const headingCache = new Map<string, { at: number; text: string }>();
 const CODE_LINK_EXT_RE = /\.(ssl|ds|sql|xfd)$/i;
 let codeFilesCache: { at: number; treeVer: number; root: string; files: string[] } | null = null;
@@ -166,10 +167,20 @@ async function readTargetText(path: string): Promise<string> {
 	const open = documents.get(key);
 	if (open) return open.model.getValue();
 	const cached = headingCache.get(key);
-	if (cached && Date.now() - cached.at < 4000) return cached.text;
+	if (cached && Date.now() - cached.at < 4000) {
+		headingCache.delete(key);
+		headingCache.set(key, cached);
+		return cached.text;
+	}
 	try {
 		const res = await backend.read(path);
+		headingCache.delete(key);
 		headingCache.set(key, { at: Date.now(), text: res.text });
+		while (headingCache.size > HEADING_CACHE_MAX) {
+			const oldest = headingCache.keys().next().value;
+			if (oldest === undefined) break;
+			headingCache.delete(oldest);
+		}
 		return res.text;
 	} catch {
 		return "";
@@ -698,7 +709,7 @@ export function computeTextareaCompletions(opts: {
 	listedDoc?: DocFile;
 }): TextareaCompletionMatch | null {
 	const { mode, value, caret, filePath, explicit = false, docs: allDocs, root, listedDoc } = opts;
-	const lineStart = value.lastIndexOf("\n", Math.max(0, caret - 1)) + 1;
+	const lineStart = caret === 0 ? 0 : value.lastIndexOf("\n", caret - 1) + 1;
 	const lineEndRaw = value.indexOf("\n", caret);
 	const lineEnd = lineEndRaw < 0 ? value.length : lineEndRaw;
 	const before = value.slice(lineStart, caret);

@@ -97,7 +97,6 @@ import {
 	ticketKey,
 	ticketTemplate,
 	toneOf,
-	frontValue,
 	isCatalog,
 	areaPath,
 	CATALOG_AREAS,
@@ -512,8 +511,8 @@ export async function importTickets() {
 			const was = before[at] ?? (await current(dest));
 			if (was === null) {
 				let fresh = ticketTemplate(ticket);
-				if (ticket.release) fresh = withFrontMatter(fresh, "release", frontValue(ticket.release)) ?? fresh;
-				if (ticket.priority) fresh = withFrontMatter(fresh, "priority", frontValue(ticket.priority)) ?? fresh;
+				if (ticket.release) fresh = withFrontMatter(fresh, "release", ticket.release) ?? fresh;
+				if (ticket.priority) fresh = withFrontMatter(fresh, "priority", ticket.priority) ?? fresh;
 				for (const tag of ticket.tags ?? []) fresh = addToFrontMatterList(fresh, "tags", tag) ?? fresh;
 				if (ticket.acceptanceCriteria?.trim()) {
 					const ac = ticket.acceptanceCriteria.trim();
@@ -542,7 +541,7 @@ export async function importTickets() {
 				["source", ticket.source],
 			] as const) {
 				if (!value || one(values[k]).toLowerCase() === value.toLowerCase()) continue;
-				now = withFrontMatter(now, k, frontValue(value)) ?? now;
+				now = withFrontMatter(now, k, value) ?? now;
 			}
 			// Keep heading synced if it still matches `# KEY: Old Title` (function replacer prevents `$` corruption).
 			if (oldTitle && ticket.title && oldTitle.toLowerCase() !== ticket.title.toLowerCase()) {
@@ -821,7 +820,7 @@ export async function setStatus(path: string, status: string) {
 	if (!isMarkdown(path)) return notify("Only a Markdown document has a status to set.", "error");
 	const before = await current(path);
 	if (before === null) return;
-	let after = withFrontMatter(before, "status", frontValue(status));
+	let after = withFrontMatter(before, "status", status);
 	if (after === null) return notify("The status could not be set here: it is written as a list. Change it in the text.", "error");
 	// A question that is answered says when, once: the day is part of the answer.
 	const question = docs().some((d) => d.group === "knowledge" && d.kind === "questions" && canonical(d.path) === canonical(path));
@@ -876,7 +875,7 @@ export async function setStatus(path: string, status: string) {
 				const curBy = many(frontMatter(oldText).values["superseded-by"]);
 				const updatedOld = curBy.length
 					? addToFrontMatterList(oldText, "superseded-by", newStem)
-					: withFrontMatter(oldText, "superseded-by", frontValue(newStem));
+					: withFrontMatter(oldText, "superseded-by", newStem);
 				if (updatedOld && updatedOld !== oldText) await put(path, updatedOld, true);
 			}
 			const targetText = await current(targetDecision.path);
@@ -884,7 +883,7 @@ export async function setStatus(path: string, status: string) {
 				const curSup = many(frontMatter(targetText).values.supersedes);
 				const updatedTarget = curSup.length
 					? addToFrontMatterList(targetText, "supersedes", oldStem)
-					: withFrontMatter(targetText, "supersedes", frontValue(oldStem));
+					: withFrontMatter(targetText, "supersedes", oldStem);
 				if (updatedTarget && updatedTarget !== targetText) await put(targetDecision.path, updatedTarget, true);
 			}
 			setState("treeVersion", (v) => v + 1);
@@ -902,10 +901,10 @@ export async function setStatus(path: string, status: string) {
 				const oldStem = baseName(path).replace(/\.(md|markdown)$/i, "");
 				const ticket = decisionDoc.tickets?.[0] ?? ticketAtHand() ?? undefined;
 				let newBody = decisionTemplate({ title: nextTitle, date: today(), ticket });
-				newBody = withFrontMatter(newBody, "supersedes", frontValue(oldStem)) ?? newBody;
+				newBody = withFrontMatter(newBody, "supersedes", oldStem) ?? newBody;
 				const oldText = await current(path);
 				if (oldText !== null) {
-					const updatedOld = withFrontMatter(oldText, "superseded-by", frontValue(newStem));
+					const updatedOld = withFrontMatter(oldText, "superseded-by", newStem);
 					if (updatedOld && updatedOld !== oldText) await put(path, updatedOld, true);
 				}
 				await start(joinPath(folder, `${newStem}.md`), newBody, "knowledge");
@@ -5952,11 +5951,11 @@ function applyApprovalToMarkdown(
 ): string {
 	let next = text;
 	next = withFrontMatter(next, "status", "approved") ?? next;
-	next = withFrontMatter(next, "approved-by", frontValue(input.approver)) ?? next;
+	next = withFrontMatter(next, "approved-by", input.approver) ?? next;
 	next = withFrontMatter(next, "approved-date", input.date) ?? next;
 	next = withFrontMatter(next, "effective-date", input.date) ?? next;
-	if (input.version?.trim()) next = withFrontMatter(next, "version", frontValue(input.version.trim())) ?? next;
-	if (input.changeControl?.trim()) next = withFrontMatter(next, "change-control", frontValue(input.changeControl.trim())) ?? next;
+	if (input.version?.trim()) next = withFrontMatter(next, "version", input.version.trim()) ?? next;
+	if (input.changeControl?.trim()) next = withFrontMatter(next, "change-control", input.changeControl.trim()) ?? next;
 	if (input.reviewDue?.trim()) next = withFrontMatter(next, "review-due", input.reviewDue.trim()) ?? next;
 
 	const eol = next.includes("\r\n") ? "\r\n" : "\n";
@@ -6436,10 +6435,10 @@ export async function cloneTicket(targetPath?: string): Promise<void> {
 	const priorityVal = srcDoc.priority || one(fm.priority);
 	const ccVal = srcDoc.changeControl || one(fm["change-control"]);
 	const gxpVal = srcDoc.gxpImpact || one(fm["gxp-impact"]);
-	if (releaseVal) fresh = withFrontMatter(fresh, "release", frontValue(releaseVal)) ?? fresh;
-	if (priorityVal) fresh = withFrontMatter(fresh, "priority", frontValue(priorityVal)) ?? fresh;
-	if (ccVal) fresh = withFrontMatter(fresh, "change-control", frontValue(ccVal)) ?? fresh;
-	if (gxpVal) fresh = withFrontMatter(fresh, "gxp-impact", frontValue(gxpVal)) ?? fresh;
+	if (releaseVal) fresh = withFrontMatter(fresh, "release", releaseVal) ?? fresh;
+	if (priorityVal) fresh = withFrontMatter(fresh, "priority", priorityVal) ?? fresh;
+	if (ccVal) fresh = withFrontMatter(fresh, "change-control", ccVal) ?? fresh;
+	if (gxpVal) fresh = withFrontMatter(fresh, "gxp-impact", gxpVal) ?? fresh;
 
 	for (const tag of many(fm.tags)) fresh = addToFrontMatterList(fresh, "tags", tag) ?? fresh;
 	for (const sp of [...many(fm.specs), ...many(fm.spec)]) fresh = addToFrontMatterList(fresh, "specs", sp) ?? fresh;
@@ -6581,9 +6580,9 @@ export async function splitTicketSubticket(targetPath?: string): Promise<void> {
 	const releaseVal = srcDoc.release || one(fm.release);
 	const ccVal = srcDoc.changeControl || one(fm["change-control"]);
 	const gxpVal = srcDoc.gxpImpact || one(fm["gxp-impact"]);
-	if (releaseVal) childMd = withFrontMatter(childMd, "release", frontValue(releaseVal)) ?? childMd;
-	if (ccVal) childMd = withFrontMatter(childMd, "change-control", frontValue(ccVal)) ?? childMd;
-	if (gxpVal) childMd = withFrontMatter(childMd, "gxp-impact", frontValue(gxpVal)) ?? childMd;
+	if (releaseVal) childMd = withFrontMatter(childMd, "release", releaseVal) ?? childMd;
+	if (ccVal) childMd = withFrontMatter(childMd, "change-control", ccVal) ?? childMd;
+	if (gxpVal) childMd = withFrontMatter(childMd, "gxp-impact", gxpVal) ?? childMd;
 	for (const tag of many(fm.tags)) childMd = addToFrontMatterList(childMd, "tags", tag) ?? childMd;
 
 	const movedChecklist = pickedItems.map((it) => `- [ ] ${it.text}`).join("\n");

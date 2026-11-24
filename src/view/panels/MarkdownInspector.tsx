@@ -2,7 +2,7 @@
 // Readiness, Linked Tickets, Schema Usages, and Links Inspector).
 // Stays live-synced with the active Markdown document across Live, Read, and Source
 // modes via the underlying Monaco ITextModel (ADR 0002).
-import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, Show, untrack } from "solid-js";
 import { Portal } from "solid-js/web";
 import { placeAnchoredMenu, type RectBox } from "../../shared/contextMenu";
 import { localDay } from "../../shared/dates";
@@ -15,6 +15,7 @@ import {
 	frontMatterInnerSpan,
 	one,
 	quoteYamlScalar,
+	removeFrontMatterKey,
 	removeFromFrontMatterList,
 	stripEmptyFrontMatter,
 	withFrontMatter,
@@ -89,8 +90,12 @@ import {
 	chooseDefaultLinksTab,
 	computeMinimalTextChange,
 	extractDisplayProperties,
+	freshResourceValue,
 	groupPropertiesForInspector,
+	hasUnclosedFrontMatter,
 	markdownPanelTabRequest,
+	resolveSqlSourcePath,
+	safeDecodeUriComponent,
 	setMarkdownLinksSummary,
 	setMarkdownYamlEditorOpen,
 	type InspectorPropertyFact,
@@ -212,6 +217,16 @@ export function MarkdownInspector() {
 	let hoverCardEl: HTMLDivElement | undefined;
 	let hoverBodyEl: HTMLDivElement | undefined;
 	let lastYamlEditAt = 0;
+	let hoverTimer: ReturnType<typeof setTimeout> | undefined;
+	let hideTimer: ReturnType<typeof setTimeout> | undefined;
+	let hoverSeq = 0;
+	let cardHovered = false;
+
+	const cancelHover = () => {
+		hoverSeq++;
+		clearTimeout(hoverTimer);
+		clearTimeout(hideTimer);
+	};
 
 	// Sync live text with the open Monaco model across Live, Read, and Source modes.
 	createEffect(() => {
@@ -233,6 +248,8 @@ export function MarkdownInspector() {
 	});
 	onCleanup(() => {
 		setMarkdownYamlEditorOpen(false);
+		setMarkdownLinksSummary(null);
+		cancelHover();
 		yamlCompleter?.dispose();
 		yamlCompleter = undefined;
 	});
@@ -245,6 +262,7 @@ export function MarkdownInspector() {
 			setEditYaml(false);
 			setEditingProp(null);
 			setWorkGuideOpen(false);
+			cancelHover();
 			setHoverCard(null);
 			if (!p) return;
 			const cur = documents.get(p)?.model.getValue() ?? "";
@@ -356,7 +374,7 @@ export function MarkdownInspector() {
 		if (!p || !d) return;
 		const cur = d.model.getValue();
 		if (!frontMatterInnerSpan(cur)) {
-			if (/^\s*---\s*$/m.test(cur.split(/\r?\n/)[0] ?? "")) {
+			if (hasUnclosedFrontMatter(cur)) {
 				notify("Fix the unclosed YAML frontmatter block (missing closing ---) in Source mode first.", "error");
 				return;
 			}
@@ -452,7 +470,15 @@ export function MarkdownInspector() {
 
 	const [allWorkspaceFiles] = createResource(
 		() => (state.workspace?.root ? { root: state.workspace.root, ver: state.treeVersion } : null),
-		async () => backend.files().catch(() => [] as string[]),
+		async ({ root }) => ({
+			key: root,
+			root,
+			value: await backend.files().catch(() => [] as string[]),
+		}),
+	);
+
+	const currentWorkspaceFiles = createMemo(
+		() => freshResourceValue(allWorkspaceFiles.loading, allWorkspaceFiles(), state.workspace?.root) ?? [],
 	);
 
 	const workspaceFilesSet = createMemo(() => {
@@ -460,7 +486,7 @@ export function MarkdownInspector() {
 		for (const d of docs()) {
 			if (d.exists) out.add(d.path.replace(/\\/g, "/").toLowerCase());
 		}
-		for (const f of allWorkspaceFiles() ?? []) {
+		for (const f of currentWorkspaceFiles()) {
 			out.add(f.replace(/\\/g, "/").toLowerCase());
 		}
 		return out;
@@ -482,13 +508,7 @@ export function MarkdownInspector() {
 		const isSql = Boolean(rawSource && !/^https?:\/\//i.test(rawSource) && /\.(sql|ddl|pks|pkb)$/i.test(rawSource));
 		if (doc.kind !== "database" && !isSql) return null;
 		const root = state.workspace?.root ?? "";
-		const resolvedPath = isSql
-			? /^\.{1,2}[\\/]/.test(rawSource)
-				? resolvePath(dirName(p), rawSource)
-				: root
-					? joinPath(root, rawSource)
-					: rawSource
-			: "";
+		const resolvedPath = isSql ? resolveSqlSourcePath(rawSource, p, root) : "";
 		const exists = Boolean(resolvedPath && workspaceFilesSet().has(resolvedPath.replace(/\\/g, "/").toLowerCase()));
 		const drifts = (docAuditData().schemaDrift ?? []).filter((d) => canonical(d.schemaPath) === p);
 		const sharedCount = isSql
@@ -510,6 +530,11 @@ export function MarkdownInspector() {
 			drifts,
 			sharedCount,
 		};
+	});
+	const schemaUsageKey = createMemo(() => {
+		const ident = schemaIdent();
+		const root = state.workspace?.root;
+		return ident && root ? `${root}\0${ident}` : null;
 	});
 	const [schemaUsages] = createResource(
 		() => {
@@ -552,14 +577,27 @@ export function MarkdownInspector() {
 			});
 			const totalFiles = groups.reduce((sum, g) => sum + g.items.length, 0);
 			const totalRefs = groups.reduce((sum, g) => sum + g.totalHits, 0);
-			return { ident, exclude, groups, totalFiles, totalRefs };
+			return {
+				key: `${root}\0${ident}`,
+				ident,
+				root,
+				value: { ident, exclude, groups, totalFiles, totalRefs },
+			};
 		},
+	);
+	const currentSchemaUsages = createMemo(
+		() => freshResourceValue(schemaUsages.loading, schemaUsages(), schemaUsageKey()) ?? null,
 	);
 
 	// Workspace Backlinks, Outgoing Links, and Unlinked Mentions.
 	const docsFingerprint = createMemo(() => {
 		const list = docs();
 		return `${list.length}:${list.map((d) => `${d.path}|${d.title ?? ""}|${d.broken?.length ?? 0}`).join("\n")}`;
+	});
+	const linksResourceKey = createMemo(() => {
+		const p = path();
+		const root = state.workspace?.root;
+		return p && root ? `${root}\0${p}` : null;
 	});
 
 	const [linked] = createResource(
@@ -569,7 +607,8 @@ export function MarkdownInspector() {
 			return p && root ? { path: p, sig: docsFingerprint(), root, rev: linksRefresh() } : null;
 		},
 		async (src) => {
-			if (!src) return [];
+			if (!src) return { key: "", path: "", root: "", value: [] as (ReturnType<typeof linkedFrom>[number] & { snippet: string })[] };
+			const key = `${src.root}\0${src.path}`;
 			const files = docs();
 			try {
 				const [byPath, byName] = await Promise.all([backend.linksTo(src.path), backend.namesIn()]);
@@ -580,16 +619,20 @@ export function MarkdownInspector() {
 					files.map((file) => ({ ...file, path: canonical(file.path) })),
 					src.root,
 				);
-				return await Promise.all(
+				const items = await Promise.all(
 					hits.map(async (item) => {
 						const content = await readFileText(item.path);
 						return { ...item, snippet: extractLineContextSnippet(content, item.line) };
 					}),
 				);
+				return { key, path: src.path, root: src.root, value: items };
 			} catch {
-				return [];
+				return { key, path: src.path, root: src.root, value: [] };
 			}
 		},
+	);
+	const currentBacklinks = createMemo(
+		() => freshResourceValue(linked.loading, linked(), linksResourceKey()) ?? [],
 	);
 
 	const outgoingLinks = createMemo<OutgoingLinkItem[]>(() => {
@@ -607,17 +650,20 @@ export function MarkdownInspector() {
 			const p = path();
 			const root = state.workspace?.root;
 			if (!p || !root) return null;
+			const backlinksRes = linked();
+			if (linked.loading || !backlinksRes || backlinksRes.path !== p || backlinksRes.root !== root) return null;
 			const me = listed();
 			const title = me?.title || one(front().values.title) || "";
 			const tKey = ticket();
 			const stem = baseName(p).replace(/\.(md|markdown)$/i, "");
-			const linkedPaths = (linked() ?? []).map((b) => canonical(b.path));
+			const linkedPaths = backlinksRes.value.map((b) => canonical(b.path));
 			return { path: p, root, title, ticket: tKey, stem, sig: docsFingerprint(), linkedPaths, rev: linksRefresh() };
 		},
 		async (src) => {
-			if (!src) return [] as UnlinkedMentionItem[];
+			if (!src) return { key: "", path: "", root: "", value: [] as UnlinkedMentionItem[] };
+			const key = `${src.root}\0${src.path}`;
 			const terms = mentionTermsForDoc({ title: src.title, ticket: src.ticket, stem: src.stem });
-			if (!terms.length) return [] as UnlinkedMentionItem[];
+			if (!terms.length) return { key, path: src.path, root: src.root, value: [] as UnlinkedMentionItem[] };
 			const linkedSet = new Set(src.linkedPaths.map((p) => canonical(p)));
 			const allMd = new Map<string, { path: string; name: string; title?: string }>();
 			for (const d of docs()) {
@@ -626,7 +672,7 @@ export function MarkdownInspector() {
 				if (k === canonical(src.path) || linkedSet.has(k)) continue;
 				allMd.set(k, { path: d.path, name: d.name, title: d.title });
 			}
-			if (!allMd.size) return [] as UnlinkedMentionItem[];
+			if (!allMd.size) return { key, path: src.path, root: src.root, value: [] as UnlinkedMentionItem[] };
 			const candidatePaths = new Set<string>();
 			for (const term of terms.slice(0, 2)) {
 				const hits = await backend.search(term, { wholeWord: true, caseSensitive: false }).catch(() => []);
@@ -637,32 +683,50 @@ export function MarkdownInspector() {
 				}
 				if (candidatePaths.size >= 24) break;
 			}
-			if (!candidatePaths.size) return [] as UnlinkedMentionItem[];
+			if (!candidatePaths.size) return { key, path: src.path, root: src.root, value: [] as UnlinkedMentionItem[] };
 			const candidates = await Promise.all(
 				[...candidatePaths].map(async (k) => {
 					const info = allMd.get(k)!;
 					return { ...info, text: await readFileText(info.path) };
 				}),
 			);
-			return findUnlinkedMentions(
+			const items = findUnlinkedMentions(
 				{ path: src.path, title: src.title, ticket: src.ticket, stem: src.stem },
 				candidates,
 				linkedSet,
 			);
+			return { key, path: src.path, root: src.root, value: items };
 		},
 	);
+	const currentUnlinkedState = createMemo(() => {
+		const p = path();
+		const key = linksResourceKey();
+		const items = freshResourceValue(unlinkedMentions.loading, unlinkedMentions(), key);
+		return p && items ? { path: p, items } : { path: "", items: [] as UnlinkedMentionItem[] };
+	});
+	const currentUnlinked = () => currentUnlinkedState().items;
 
 	const totalLinksCount = createMemo(
-		() => (linked()?.length ?? 0) + outgoingLinks().length + (unlinkedMentions()?.length ?? 0),
+		() => currentBacklinks().length + outgoingLinks().length + currentUnlinked().length,
 	);
 
 	// Publish live link counts back to the compact editor strip & Objects tab badge.
 	createEffect(() => {
 		const p = path();
-		if (!p) return;
-		const backlinks = linked()?.length ?? 0;
+		if (!p) {
+			setMarkdownLinksSummary(null);
+			return;
+		}
+		const key = linksResourceKey();
+		const backlinksFresh = key ? freshResourceValue(linked.loading, linked(), key) : [];
+		const unlinkedFresh = key ? freshResourceValue(unlinkedMentions.loading, unlinkedMentions(), key) : [];
+		if (key && (backlinksFresh === undefined || unlinkedFresh === undefined)) {
+			setMarkdownLinksSummary(null);
+			return;
+		}
+		const backlinks = backlinksFresh?.length ?? 0;
 		const outgoing = outgoingLinks().length;
-		const unlinked = unlinkedMentions()?.length ?? 0;
+		const unlinked = unlinkedFresh?.length ?? 0;
 		const broken = brokenOutgoingCount();
 		setMarkdownLinksSummary({
 			path: p,
@@ -692,13 +756,14 @@ export function MarkdownInspector() {
 			requestAnimationFrame(() => workSectionEl?.scrollIntoView({ behavior: "smooth", block: "start" }));
 		} else if (target === "links") {
 			setLinksOpen(true);
+			const key = linksResourceKey();
 			setLinksTab(
 				chooseDefaultLinksTab({
-					backlinks: linked()?.length ?? 0,
+					backlinks: currentBacklinks().length,
 					outgoing: outgoingLinks().length,
-					unlinked: unlinkedMentions()?.length ?? 0,
+					unlinked: currentUnlinked().length,
 					brokenOutgoing: brokenOutgoingCount(),
-					backlinksLoading: linked.loading,
+					backlinksLoading: Boolean(key && (linked.loading || linked()?.key !== key)),
 				}),
 			);
 			requestAnimationFrame(() => linksSectionEl?.scrollIntoView({ behavior: "smooth", block: "start" }));
@@ -747,7 +812,7 @@ export function MarkdownInspector() {
 			return;
 		}
 		if (!leads.lines && href.includes("#")) {
-			const hash = decodeURIComponent(href.slice(href.indexOf("#") + 1));
+			const hash = safeDecodeUriComponent(href.slice(href.indexOf("#") + 1));
 			if (hash) return void followHeadingInFile(leads.file, hash);
 		}
 		await openFile(leads.file, leads.lines ? { reveal: leads.lines } : {});
@@ -1022,7 +1087,7 @@ export function MarkdownInspector() {
 	const commitInlinePropertyEdit = (key: string, origVal: string, nextRaw: string, isDate: boolean) => {
 		const trimmed = nextRaw.trim();
 		setEditingProp(null);
-		if (!trimmed || trimmed === origVal) return;
+		if (isRead() || !trimmed || trimmed === origVal) return;
 		if (isDate && !isValidIsoDate(trimmed)) return;
 		const cur = activeMdDoc()?.model.getValue() ?? text();
 		const next = withFrontMatter(cur, key, trimmed);
@@ -1038,13 +1103,18 @@ export function MarkdownInspector() {
 
 	const editScalarPropertyInteractive = async (key: string, currentVal: string) => {
 		if (isRead()) return;
+		const origPath = path();
+		if (!origPath) return;
 		if (!QUICKPICK_SCALAR_KEYS.has(key)) {
 			startInlinePropertyEdit(key, currentVal);
 			return;
 		}
 		const nextVal = await pickValueForProperty(key);
+		if (path() !== origPath || isRead()) return;
 		if (!nextVal || nextVal === currentVal) return;
-		const cur = activeMdDoc()?.model.getValue() ?? text();
+		const d = activeMdDoc();
+		if (!d) return;
+		const cur = d.model.getValue();
 		const next = withFrontMatter(cur, key, nextVal);
 		if (next && next !== cur) applyDocTextUpdate(next);
 	};
@@ -1071,8 +1141,8 @@ export function MarkdownInspector() {
 
 	const addPropertyValueInteractive = async (explicitKey?: string) => {
 		if (isRead()) return;
-		const p = path();
-		if (!p) return;
+		const origPath = path();
+		if (!origPath) return;
 		let key = explicitKey;
 		if (!key) {
 			const CUSTOM_KEY = "__custom_prop__";
@@ -1116,31 +1186,25 @@ export function MarkdownInspector() {
 				placeholder: "Filter document or governance properties…",
 				items,
 			});
-			if (!picked) return;
+			if (!picked || path() !== origPath || isRead()) return;
 			if (picked === APPROVAL_ACTION) {
-				await recordDocApproval(p);
+				await recordDocApproval(origPath);
 				return;
 			}
 			if (picked === CUSTOM_KEY) {
 				key = (await ask("Property name (e.g. owner, version, system)"))?.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "");
-				if (!key) return;
+				if (!key || path() !== origPath || isRead()) return;
 			} else {
 				key = picked;
 			}
 		}
 		const val = await pickValueForProperty(key);
-		if (!val) return;
-		const cur = activeMdDoc()?.model.getValue() ?? text();
-		if (!frontMatterInnerSpan(cur)) {
-			if (/^\s*---\s*$/m.test(cur.split(/\r?\n/)[0] ?? "")) {
-				notify("Fix the unclosed YAML frontmatter block (missing closing ---) before adding properties.", "error");
-				return;
-			}
-			const eol = cur.includes("\r\n") ? "\r\n" : "\n";
-			const safe = quoteYamlScalar(val);
-			const lineVal = LIST_PROP_KEYS.has(key) ? `[${safe}]` : safe;
-			applyDocTextUpdate(`---${eol}${key}: ${lineVal}${eol}---${eol}${eol}${cur}`);
-			setPropsOpen(true);
+		if (!val || path() !== origPath || isRead()) return;
+		const d = activeMdDoc();
+		if (!d) return;
+		const cur = d.model.getValue();
+		if (hasUnclosedFrontMatter(cur)) {
+			notify("Fix the unclosed YAML frontmatter block (missing closing ---) before adding properties.", "error");
 			return;
 		}
 		const next = isListProperty(key) ? addToFrontMatterList(cur, key, val) : withFrontMatter(cur, key, val);
@@ -1164,31 +1228,27 @@ export function MarkdownInspector() {
 				return;
 			}
 		}
-		const span = frontMatterInnerSpan(cur);
-		if (!span) return;
-		const keyEsc = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-		const lines = span.inner.split(/\r?\n/);
-		const idx = lines.findLastIndex((l) => new RegExp(`^${keyEsc}\\s*:`, "i").test(l));
-		if (idx < 0) return;
-		let endIdx = idx + 1;
-		while (endIdx < lines.length && /^[ \t]*-\s+/.test(lines[endIdx]!)) endIdx++;
-		lines.splice(idx, endIdx - idx);
-		const replacement = formatFrontMatterInnerReplacement(lines.join("\n"), span.eol);
-		const nextDoc = stripEmptyFrontMatter(`${cur.slice(0, span.start)}${replacement}${cur.slice(span.end)}`);
-		applyDocTextUpdate(nextDoc);
-		if (!frontMatterInnerSpan(nextDoc)) setEditYaml(false);
+		const nextDoc = removeFrontMatterKey(cur, key);
+		if (nextDoc !== cur) {
+			applyDocTextUpdate(nextDoc);
+			if (!frontMatterInnerSpan(nextDoc)) setEditYaml(false);
+		}
 	};
 
-	const linkifyUnlinkedMention = async (mention: UnlinkedMentionItem) => {
-		const p = path();
-		if (!p) return;
+	const linkifyUnlinkedMention = async (mention: UnlinkedMentionItem, forPath?: string) => {
+		const origPath = path();
+		if (!origPath) return;
+		if (!forPath || canonical(forPath) !== origPath) return;
+		const res = unlinkedMentions();
+		if (unlinkedMentions.loading || !res || res.path !== origPath) return;
 		const root = state.workspace?.root;
 		const me = listed();
-		const wikiName = (me ? nameFor(me, docs(), root) : null) ?? baseName(p).replace(/\.(md|markdown)$/i, "");
+		const wikiName = (me ? nameFor(me, docs(), root) : null) ?? baseName(origPath).replace(/\.(md|markdown)$/i, "");
 		if (!wikiName) return;
 		const key = canonical(mention.path);
 		const openDoc = documents.get(key);
 		const curText = openDoc ? openDoc.model.getValue() : await readFileText(mention.path);
+		if (path() !== origPath) return;
 		const next = linkifyMentionInText(curText, mention.line, mention.column, mention.matchedText, wikiName);
 		if (!next || next === curText) {
 			notify("That mention moved or was already updated.");
@@ -1196,11 +1256,28 @@ export function MarkdownInspector() {
 			return;
 		}
 		try {
-			if (openDoc) {
-				openDoc.model.pushStackElement();
-				openDoc.model.pushEditOperations([], [{ range: openDoc.model.getFullModelRange(), text: next, forceMoveMarkers: true }], () => null);
-				openDoc.model.pushStackElement();
-				if (!state.dirty[key]) await save(key);
+			const liveOpen = documents.get(key);
+			if (liveOpen) {
+				const liveText = liveOpen.model.getValue();
+				const liveNext =
+					liveOpen === openDoc
+						? next
+						: linkifyMentionInText(liveText, mention.line, mention.column, mention.matchedText, wikiName);
+				if (!liveNext || liveNext === liveText) {
+					notify("That mention moved or was already updated.");
+					setLinksRefresh((v) => v + 1);
+					return;
+				}
+				const diff = computeMinimalTextChange(liveText, liveNext);
+				if (!diff) return;
+				const wasDirty = Boolean(state.dirty[key]);
+				const from = liveOpen.model.getPositionAt(diff.start);
+				const to = liveOpen.model.getPositionAt(diff.endPrev);
+				const range = new monaco.Range(from.lineNumber, from.column, to.lineNumber, to.column);
+				liveOpen.model.pushStackElement();
+				liveOpen.model.pushEditOperations([], [{ range, text: diff.insert, forceMoveMarkers: true }], () => null);
+				liveOpen.model.pushStackElement();
+				if (!wasDirty) await save(key);
 			} else {
 				await backend.historyKeep(mention.path).catch(() => {});
 				await backend.write(mention.path, next);
@@ -1251,17 +1328,8 @@ export function MarkdownInspector() {
 	};
 
 	// --- Obsidian Hover Page Preview for sidebar links -----------------------
-	let hoverTimer: ReturnType<typeof setTimeout> | undefined;
-	let hideTimer: ReturnType<typeof setTimeout> | undefined;
-	let cardHovered = false;
-
-	const cancelHover = () => {
-		clearTimeout(hoverTimer);
-		clearTimeout(hideTimer);
-	};
-	onCleanup(cancelHover);
-
 	const scheduleHideHover = () => {
+		hoverSeq++;
 		clearTimeout(hoverTimer);
 		clearTimeout(hideTimer);
 		hideTimer = setTimeout(() => {
@@ -1283,12 +1351,14 @@ export function MarkdownInspector() {
 
 	const hoverFileButton = (targetPath: string | undefined, anchor: HTMLElement, extra: { line?: number; ticket?: string } = {}) => {
 		if (!targetPath) return;
+		const seq = ++hoverSeq;
 		clearTimeout(hideTimer);
 		clearTimeout(hoverTimer);
 		const rect = anchor.getBoundingClientRect();
 		hoverTimer = setTimeout(async () => {
+			if (seq !== hoverSeq) return;
 			const preview = await buildHoverPreview(targetPath, { line: extra.line, ticket: extra.ticket });
-			if (!preview) return;
+			if (seq !== hoverSeq || !preview) return;
 			const anchorRect: RectBox = { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom };
 			const estW = Math.min(440, Math.max(220, window.innerWidth - 24));
 			const placed = placeAnchoredMenu(anchorRect, { width: estW, height: 220 }, { width: window.innerWidth, height: window.innerHeight }, 12, 8);
@@ -1300,17 +1370,63 @@ export function MarkdownInspector() {
 				anchorRect,
 			});
 			requestAnimationFrame(() => {
+				if (seq !== hoverSeq) return;
 				if (hoverBodyEl) {
 					hydrateImagesInElement(hoverBodyEl, targetPath);
 					hydrateMathInElement(hoverBodyEl);
-					void colourCode(hoverBodyEl).then(() => requestAnimationFrame(clampHoverCard));
+					void colourCode(hoverBodyEl).then(() => {
+						if (hoverCard()?.path === preview.path) requestAnimationFrame(clampHoverCard);
+					});
 				}
 				clampHoverCard();
 			});
 		}, 320);
 	};
 
-	// --- Reusable Property Row Renderer --------------------------------------
+	// --- Reusable Inline Property Input & Property Row Renderer --------------
+	const InlinePropInput = (inputProps: { propKey: string }) => {
+		let cancelled = false;
+		const isDate = untrack(() => Boolean(editingProp()?.isDate));
+		return (
+			<input
+				ref={(el) => {
+					queueMicrotask(() => {
+						if (!el.isConnected) return;
+						el.focus();
+						if (el.type === "text") el.select();
+					});
+				}}
+				type={isDate ? "date" : "text"}
+				class="cm-md-prop-inline-input"
+				aria-label={`Edit ${inputProps.propKey}`}
+				value={editingProp()?.draft ?? ""}
+				onInput={(e) => {
+					const v = e.currentTarget.value;
+					setEditingProp((cur) => (cur ? { ...cur, draft: v } : null));
+				}}
+				onKeyDown={(e) => {
+					if (e.key === "Escape") {
+						cancelled = true;
+						e.preventDefault();
+						e.stopPropagation();
+						setEditingProp(null);
+					} else if (e.key === "Enter") {
+						cancelled = true;
+						e.preventDefault();
+						e.stopPropagation();
+						const cur = editingProp();
+						if (cur) commitInlinePropertyEdit(cur.key, cur.value, e.currentTarget.value, cur.isDate);
+					}
+				}}
+				onBlur={(e) => {
+					if (cancelled) return;
+					const cur = editingProp();
+					if (cur) commitInlinePropertyEdit(cur.key, cur.value, e.currentTarget.value, cur.isDate);
+				}}
+			/>
+		);
+	};
+
 	const PropertyRow = (rowProps: { fact: InspectorPropertyFact }) => (
 		<div class="md-insp-prop-row">
 			<dt class="md-insp-prop-key">{rowProps.fact.key}</dt>
@@ -1363,46 +1479,7 @@ export function MarkdownInspector() {
 																	</button>
 																}
 															>
-																{(() => {
-																	let cancelled = false;
-																	const ed = editingProp()!;
-																	return (
-																		<input
-																			ref={(el) => {
-																				queueMicrotask(() => {
-																					el.focus();
-																					if (el.type === "text") el.select();
-																				});
-																			}}
-																			type={ed.isDate ? "date" : "text"}
-																			class="cm-md-prop-inline-input"
-																			aria-label={`Edit ${rowProps.fact.key}`}
-																			value={ed.draft}
-																			onInput={(e) => {
-																				const v = e.currentTarget.value;
-																				setEditingProp((cur) => (cur ? { ...cur, draft: v } : null));
-																			}}
-																			onKeyDown={(e) => {
-																				if (e.key === "Escape") {
-																					cancelled = true;
-																					e.preventDefault();
-																					e.stopPropagation();
-																					setEditingProp(null);
-																				} else if (e.key === "Enter") {
-																					e.preventDefault();
-																					e.stopPropagation();
-																					const cur = editingProp();
-																					if (cur) commitInlinePropertyEdit(cur.key, cur.value, e.currentTarget.value, cur.isDate);
-																				}
-																			}}
-																			onBlur={(e) => {
-																				if (cancelled) return;
-																				const cur = editingProp();
-																				if (cur) commitInlinePropertyEdit(cur.key, cur.value, e.currentTarget.value, cur.isDate);
-																			}}
-																		/>
-																	);
-																})()}
+																<InlinePropInput propKey={rowProps.fact.key} />
 															</Show>
 														</Show>
 													}
@@ -2203,7 +2280,7 @@ export function MarkdownInspector() {
 			</Show>
 
 			{/* Section 4: Used in Code & Registries (for schema/ docs) */}
-			<Show when={schemaIdent() && (schemaUsages()?.totalFiles ?? 0) > 0 ? schemaUsages() : undefined}>
+			<Show when={(currentSchemaUsages()?.totalFiles ?? 0) > 0 ? currentSchemaUsages() : undefined}>
 				{(usages) => {
 					const USAGE_GROUP_CAP = 8;
 					const filteredGroups = createMemo(() => filterSchemaUsageGroups(usages().groups, usageFilter()));
@@ -2456,7 +2533,7 @@ export function MarkdownInspector() {
 							aria-selected={linksTab() === "backlinks"}
 							onClick={() => setLinksTab("backlinks")}
 						>
-							<span>Backlinks ({linked()?.length ?? 0})</span>
+							<span>Backlinks ({currentBacklinks().length})</span>
 						</button>
 						<button
 							type="button"
@@ -2480,17 +2557,17 @@ export function MarkdownInspector() {
 							aria-selected={linksTab() === "unlinked"}
 							onClick={() => setLinksTab("unlinked")}
 						>
-							<span>Unlinked ({unlinkedMentions()?.length ?? 0})</span>
+							<span>Unlinked ({currentUnlinked().length})</span>
 						</button>
 					</div>
 
 					<Show when={linksTab() === "backlinks"}>
 						<Show
-							when={(linked()?.length ?? 0) > 0}
+							when={currentBacklinks().length > 0}
 							fallback={<p class="md-insp-empty">No other workspace documents link here yet.</p>}
 						>
 							<ul>
-								<For each={linked()}>
+								<For each={currentBacklinks()}>
 									{(from) => (
 										<li>
 											<div class="md-insp-link-row-head">
@@ -2608,40 +2685,43 @@ export function MarkdownInspector() {
 
 					<Show when={linksTab() === "unlinked"}>
 						<Show
-							when={(unlinkedMentions()?.length ?? 0) > 0}
+							when={currentUnlinked().length > 0}
 							fallback={<p class="md-insp-empty">No unlinked plain-text mentions found in other workspace docs.</p>}
 						>
 							<ul>
-								<For each={unlinkedMentions()}>
-									{(m) => (
-										<li>
-											<div class="md-insp-link-row-head">
-												<button
-													type="button"
-													class="link"
-													title={`Open ${relativeTo(state.workspace?.root, m.path)} at line ${m.line}`}
-													onClick={() => void openFile(m.path, { reveal: { line: m.line, column: m.column + 1 } })}
-													onMouseEnter={(e) => hoverFileButton(m.path, e.currentTarget, { line: m.line })}
-													onMouseLeave={scheduleHideHover}
-												>
-													{called(canonical(m.path))}
-												</button>
-												<span class="md-work-via">L{m.line}</span>
-												<button
-													type="button"
-													class="md-insp-mini-btn"
-													title={`Convert "${m.matchedText}" into a [[wikilink]] in ${called(canonical(m.path))}`}
-													onClick={() => void linkifyUnlinkedMention(m)}
-												>
-													<Icon name="references" />
-													<span>Link</span>
-												</button>
-											</div>
-											<Show when={m.snippet}>
-												<div class="cm-md-link-snippet">{m.snippet}</div>
-											</Show>
-										</li>
-									)}
+								<For each={currentUnlinked()}>
+									{(m) => {
+										const ownerPath = untrack(() => currentUnlinkedState().path);
+										return (
+											<li>
+												<div class="md-insp-link-row-head">
+													<button
+														type="button"
+														class="link"
+														title={`Open ${relativeTo(state.workspace?.root, m.path)} at line ${m.line}`}
+														onClick={() => void openFile(m.path, { reveal: { line: m.line, column: m.column + 1 } })}
+														onMouseEnter={(e) => hoverFileButton(m.path, e.currentTarget, { line: m.line })}
+														onMouseLeave={scheduleHideHover}
+													>
+														{called(canonical(m.path))}
+													</button>
+													<span class="md-work-via">L{m.line}</span>
+													<button
+														type="button"
+														class="md-insp-mini-btn"
+														title={`Convert "${m.matchedText}" into a [[wikilink]] in ${called(canonical(m.path))}`}
+														onClick={() => void linkifyUnlinkedMention(m, ownerPath)}
+													>
+														<Icon name="references" />
+														<span>Link</span>
+													</button>
+												</div>
+												<Show when={m.snippet}>
+													<div class="cm-md-link-snippet">{m.snippet}</div>
+												</Show>
+											</li>
+										);
+									}}
 								</For>
 							</ul>
 						</Show>
@@ -2673,6 +2753,7 @@ export function MarkdownInspector() {
 									title={`Open ${card().relPath}`}
 									onClick={() => {
 										const target = card();
+										cancelHover();
 										setHoverCard(null);
 										if (canonical(target.path) === path() && target.line) {
 											jumpToLine(target.line);
@@ -2701,6 +2782,7 @@ export function MarkdownInspector() {
 									e.preventDefault();
 									const href = a.getAttribute("href");
 									const basePath = card().path;
+									cancelHover();
 									setHoverCard(null);
 									if (!href) return;
 									const leads = linkLeads(href, basePath, state.workspace?.root);
@@ -2708,7 +2790,7 @@ export function MarkdownInspector() {
 									if ("web" in leads) return void window.open(leads.web, "_blank", "noopener");
 									if ("heading" in leads) return void followHeadingInFile(basePath, leads.heading);
 									if (!leads.lines && href.includes("#")) {
-										const h = decodeURIComponent(href.slice(href.indexOf("#") + 1));
+										const h = safeDecodeUriComponent(href.slice(href.indexOf("#") + 1));
 										if (h) return void followHeadingInFile(leads.file, h);
 									}
 									void openFile(leads.file, leads.lines ? { reveal: leads.lines } : {});
