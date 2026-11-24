@@ -300,7 +300,7 @@ export function createBackend(host: Host, initial?: string) {
 		replace: async (query, replacement, options, paths) => {
 			const ws = need();
 			const hist = history!;
-			const done: { path: string; count: number; error?: string }[] = [];
+			const done: { path: string; count: number; error?: string; skippedProtected?: number; invalidJson?: boolean }[] = [];
 			for (const path of paths) {
 				// One file that cannot be written (its encoding has no way to write the replacement, say) does not
 				// stop the others: it is left as it was, and says why.
@@ -308,16 +308,26 @@ export function createBackend(host: Host, initial?: string) {
 					const full = ws.inside(path);
 					// Read and written as one step: a save of the file that landed between the two would have been
 					// written away by text worked out from the file as it was before it.
-					const count = await ws.alone(full, async (write) => {
-						const change = await ws.replaced(full, query, replacement, options);
-						if (!change) return 0;
+					const outcome = await ws.alone(full, async (write) => {
+						const change = await ws.replaced(path, query, replacement, options);
+						if (!change) return null;
+						if (change.invalidJson || !change.count) {
+							return { count: 0, skippedProtected: change.skippedProtected, invalidJson: change.invalidJson };
+						}
 						// The file as it was goes into local history first, so that there is a way back.
 						await hist.record(full, change.before);
-						await write(change.after);
+						await write(change.after, false);
 						await hist.record(full, change.after);
-						return change.count;
+						return { count: change.count, skippedProtected: change.skippedProtected, invalidJson: false };
 					});
-					if (count) done.push({ path: full, count });
+					if (outcome && (outcome.count || outcome.skippedProtected || outcome.invalidJson)) {
+						done.push({
+							path: full,
+							count: outcome.count,
+							...(outcome.skippedProtected ? { skippedProtected: outcome.skippedProtected } : {}),
+							...(outcome.invalidJson ? { invalidJson: true } : {}),
+						});
+					}
 				} catch (e: any) {
 					done.push({ path, count: 0, error: String(e?.message ?? e) });
 				}

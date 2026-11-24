@@ -2,9 +2,10 @@
 // Documents are Monaco models; the text in them is the source of truth
 // (ADR 0002).
 import { batch, createSignal } from "solid-js";
-import { createStore, produce } from "solid-js/store";
+import { createStore, produce, reconcile, unwrap } from "solid-js/store";
 import { DEFAULT_SETTINGS, type Info, type LspState, type Project, type Settings, type SettingsPatch, type ThemeFile, type Workspace } from "../shared/protocol";
 import { backend, on } from "./backend";
+import { removeRecentGroup, resetRecentTabs } from "./recentTabs";
 import { monaco } from "./editor/monaco";
 import { languageFor, setFormattingHost } from "./editor/languages";
 import { DEFAULT_SQL_DIALECT } from "../shared/format";
@@ -87,7 +88,7 @@ export const [state, setState] = createStore({
 	setupDismissed: false,
 	info: null as Info | null,
 	lsp: { state: "stopped" } as LspState,
-	settings: DEFAULT_SETTINGS as Settings,
+	settings: structuredClone(DEFAULT_SETTINGS) as Settings,
 	themes: [] as ThemeFile[],
 	groups: [{ tabs: [], active: null }] as Group[],
 	activeGroup: 0,
@@ -151,6 +152,7 @@ export const focusRequest = (() => {
 })();
 export const focusEditor = () => focusRequest.fire("editor");
 export const focusSidePanel = () => {
+	if (!state.workspace) return;
 	if (!state.settings.layout.left) setState("settings", "layout", "left", true);
 	focusRequest.fire("side");
 };
@@ -188,24 +190,39 @@ export async function settleUnsaved(what: string): Promise<boolean> {
 	return answer === "Discard changes";
 }
 
+let openSeq = 0;
+
 export async function openFolder(path?: string) {
 	if (!(await settleUnsaved("Opening another folder closes them."))) return;
+	const seq = ++openSeq;
+	const prevRoot = state.workspace?.root ?? null;
+	const prevLspRunning = state.lsp.state === "running";
 	// Clear prior LSP session state before the backend restarts the server for the new folder,
 	// so an early `lspState: running` notification cannot re-initialize against the old root.
 	session.reset();
 	const workspace = await guarded(() => backend.openFolder(path));
-	if (!workspace) return;
+	if (seq !== openSeq) return;
+	if (!workspace) {
+		if (prevRoot && (prevLspRunning || state.lsp.state === "running")) {
+			void session.start(prevRoot).catch(() => {});
+		}
+		return;
+	}
 	closeReview();
 	syncWorkspaceThreads(canonical(workspace.root));
 	setTabsReady(false);
+	closedTabs.length = 0;
+	pendingReveal.clear();
+	resetRecentTabs();
 	const oldDocs = [...docs.values()];
 	docs.clear();
 	batch(() => {
 		setState("workspace", workspace);
 		setState("groups", [{ tabs: [], active: null }]);
 		setState("activeGroup", 0);
-		setState("dirty", {});
-		setState("conflicts", {});
+		setState("dirty", reconcile({}));
+		setState("conflicts", reconcile({}));
+		setState("bottomMaximized", false);
 		// What was said about the folder that is gone is no longer news.
 		setState("messages", []);
 		setState("centerView", "editors");
@@ -217,8 +234,13 @@ export async function openFolder(path?: string) {
 	invalidateImageCache();
 	for (const doc of oldDocs) disposeDoc(doc);
 	await Promise.all([loadSettings(true), loadProject()]);
-	setState("info", await backend.info());
-	setState("lsp", await backend.lspState());
+	if (seq !== openSeq) return;
+	const info = await backend.info();
+	if (seq !== openSeq) return;
+	setState("info", info);
+	const lsp = await backend.lspState();
+	if (seq !== openSeq) return;
+	setState("lsp", reconcile(lsp));
 	if (state.lsp.state === "running") void session.start(workspace.root).catch(() => {});
 	log(`opened ${workspace.root}`);
 	await restoreTabs();
@@ -260,6 +282,7 @@ export async function restoreTabs() {
 	const root = state.workspace?.root;
 	// A self-test starts from nothing open, and leaves nothing behind for the next run.
 	if (state.info?.selftest || state.info?.selftestClose) return;
+	setTabsReady(false);
 	try {
 		// The panels first: they are there at once, and the files take a moment to read.
 		const views = root ? unpackViews(recall(viewsKey(root)), LEFT_VIEWS, BOTTOM_VIEWS) : {};
@@ -300,7 +323,20 @@ export async function restoreTabs() {
 				return next;
 			});
 		}
-		setState("activeGroup", Math.min(saved.activeGroup, state.groups.length - 1));
+		// Drop empty leading groups if Group 0's files were all deleted while a later group still has tabs.
+		if (state.groups.length > 1 && state.groups.some((g) => !g.tabs.length) && state.groups.some((g) => g.tabs.length > 0)) {
+			const keptIndices: number[] = [];
+			state.groups.forEach((g, i) => {
+				if (g.tabs.length > 0) keptIndices.push(i);
+			});
+			const mappedActive = keptIndices.indexOf(saved.activeGroup);
+			batch(() => {
+				setState("groups", (groups) => groups.filter((g) => g.tabs.length > 0));
+				setState("activeGroup", mappedActive >= 0 ? mappedActive : 0);
+			});
+		} else {
+			setState("activeGroup", Math.min(saved.activeGroup, state.groups.length - 1));
+		}
 	} finally {
 		if (state.workspace?.root === root) {
 			setTabsReady(true);
@@ -311,8 +347,9 @@ export async function restoreTabs() {
 }
 
 export async function loadProject() {
+	const startRoot = state.workspace?.root;
 	const project = await guarded(() => backend.project());
-	if (project) setState("project", project);
+	if (project && state.workspace?.root === startRoot) setState("project", project);
 }
 
 /**
@@ -321,10 +358,12 @@ export async function loadProject() {
  * not be on disk yet (see saveSetting).
  */
 export async function loadSettings(fresh = false) {
+	const startRoot = state.workspace?.root;
 	const [{ effective }, themes] = await Promise.all([backend.settings(), backend.themes()]);
-	const { layout: onDisk, ...rest } = effective;
+	if (state.workspace?.root !== startRoot) return;
+	const { layout: _onDisk, ...rest } = effective;
 	batch(() => {
-		setState("settings", fresh ? effective : rest);
+		setState("settings", reconcile(fresh ? effective : { ...rest, layout: unwrap(state.settings.layout) }));
 		setState("themes", themes);
 	});
 }
@@ -349,9 +388,11 @@ let settingFailed = false;
 export async function saveSetting(patch: SettingsPatch, scope: "user" | "workspace" = "user"): Promise<Settings | undefined> {
 	const mine = ++settingsAsked;
 	settingsOut++;
-	const atOnce: Record<string, unknown> = {};
-	for (const key of WORKED_OUT_HERE) if (patch[key] !== undefined && patch[key] !== null) atOnce[key] = patch[key];
-	if (Object.keys(atOnce).length) setState("settings", atOnce as Partial<Settings>);
+	batch(() => {
+		for (const key of WORKED_OUT_HERE) {
+			if (patch[key] !== undefined && patch[key] !== null) setState("settings", key, reconcile(patch[key] as any));
+		}
+	});
 	const effective = await guarded(() => backend.saveSettings(scope, patch));
 	settingsOut--;
 	if (!effective) settingFailed = true;
@@ -361,8 +402,8 @@ export async function saveSetting(patch: SettingsPatch, scope: "user" | "workspa
 	if (effective && mine === settingsAsked) {
 		// What comes back is the settings as they are on disk. The layout is the view's own, and is saved a moment
 		// after it changes (App.tsx): the one on disk may be older, and must not come back over the one on screen.
-		const { layout: onDisk, ...rest } = effective;
-		setState("settings", "layout" in patch ? effective : rest);
+		const { layout: _onDisk, ...rest } = effective;
+		setState("settings", reconcile("layout" in patch ? effective : { ...rest, layout: unwrap(state.settings.layout) }));
 	}
 	// A save that failed has said so. What is on screen may then hold a value shown at once that was never saved,
 	// or lack one from an answer passed over above: it is put back to what is on disk, once every save asked for
@@ -376,8 +417,8 @@ export async function saveSetting(patch: SettingsPatch, scope: "user" | "workspa
 			() => undefined,
 		);
 		if (disk && asked === settingsAsked) {
-			const { layout: onDisk, ...rest } = disk;
-			setState("settings", rest);
+			const { layout: _onDisk, ...rest } = disk;
+			setState("settings", reconcile({ ...rest, layout: unwrap(state.settings.layout) }));
 		}
 	}
 	return effective;
@@ -459,6 +500,12 @@ export const canonical = (path: string) => (isUntitled(path) ? path : monaco.Uri
 
 /** Opens a floating untitled buffer (Untitled-1, Untitled-2, ...) that stays in memory until saved. */
 export function newUntitled(group = state.activeGroup, language = "plaintext"): string {
+	if (!state.workspace) {
+		notify("Open a folder first.");
+		return "";
+	}
+	const targetGroup = Math.max(0, Math.min(group, Math.max(0, state.groups.length - 1)));
+	if (!state.groups[targetGroup]) return "";
 	let n = 1;
 	while (docs.has(`untitled:Untitled-${n}`)) n++;
 	const path = `untitled:Untitled-${n}`;
@@ -475,13 +522,13 @@ export function newUntitled(group = state.activeGroup, language = "plaintext"): 
 	batch(() => {
 		setState(
 			"groups",
-			group,
+			targetGroup,
 			produce((g: Group) => {
 				if (!g.tabs.includes(path)) g.tabs.push(path);
 				g.active = path;
 			}),
 		);
-		setState("activeGroup", group);
+		setState("activeGroup", targetGroup);
 		setState("centerView", "editors");
 	});
 	focusEditor();
@@ -738,44 +785,56 @@ export async function closeTab(path: string, group = state.activeGroup, options:
 		notify(`${baseName(path)} is pinned. Unpin it to close it: right-click its tab.`);
 		return false;
 	}
+	let closePath = path;
 	const lastView = state.groups.filter((g) => g.tabs.includes(path)).length === 1;
 	if (state.dirty[path] && lastView && !options.discard) {
 		const answer = await choose(`${displayName(path)} has unsaved changes.`, ["Save", "Discard changes"], { danger: "Discard changes" });
 		if (!answer) return false;
 		// A save that failed has already said why: the tab stays, with the edits in it.
-		if (answer === "Save" && !(await save(path))) return false;
+		if (answer === "Save") {
+			let promoted: string | null = null;
+			if (!(await save(path, { onPromoted: (target) => (promoted = target) }))) return false;
+			if (promoted) closePath = promoted;
+		}
 	}
-	if (!state.groups[group]?.tabs.includes(path)) return true;
-	if (lastView && !isUntitled(path)) closedTabs.push(path);
+	if (!state.groups[group]?.tabs.includes(closePath)) return true;
+	const closingLastView = state.groups.filter((g) => g.tabs.includes(closePath)).length === 1;
+	if (closingLastView && !isUntitled(closePath)) closedTabs.push(closePath);
+	let removedGroup = false;
 	batch(() => {
 		setState(
 			"groups",
 			group,
 			produce((g: Group) => {
-				const index = g.tabs.indexOf(path);
+				const index = g.tabs.indexOf(closePath);
 				if (index < 0) return;
 				g.tabs.splice(index, 1);
-				if (g.pinned) g.pinned = g.pinned.filter((p) => p !== path);
-				if (g.preview === path) g.preview = null;
-				if (g.active === path) g.active = g.tabs[Math.min(index, g.tabs.length - 1)] ?? null;
+				if (g.pinned) g.pinned = g.pinned.filter((p) => p !== closePath);
+				if (g.preview === closePath) g.preview = null;
+				if (g.active === closePath) g.active = g.tabs[Math.min(index, g.tabs.length - 1)] ?? null;
 			}),
 		);
 		if (state.groups.length > 1 && !state.groups[group]!.tabs.length) {
 			setState("groups", (groups) => groups.filter((_, i) => i !== group));
 			setState("activeGroup", 0);
+			removedGroup = true;
 		}
 	});
-	clearEditorViewStates(path, group);
-	if (!state.groups.some((g) => g.tabs.includes(path))) {
-		clearEditorViewStates(path);
-		const doc = docs.get(path);
+	if (removedGroup) removeRecentGroup(group);
+	clearEditorViewStates(closePath, group);
+	if (!state.groups.some((g) => g.tabs.includes(closePath))) {
+		clearEditorViewStates(closePath);
+		const doc = docs.get(closePath);
 		if (doc) {
-			docs.delete(path);
+			docs.delete(closePath);
 			disposeDoc(doc);
 			batch(() => {
-				setState("dirty", path, undefined!);
-				setState("conflicts", path, undefined!);
+				setState("dirty", closePath, undefined!);
+				setState("conflicts", closePath, undefined!);
 			});
+		}
+		if (isUntitled(closePath)) {
+			pathChanges.gone.forEach((told) => told((p) => p === closePath));
 		}
 	}
 	return true;
@@ -821,6 +880,7 @@ export const tabLeaving = new Set<(group: number, path: string) => void>();
 export function sendTabAcross() {
 	const path = activePath();
 	if (!path) return;
+	if (state.groups.length === 1 && state.groups[0]!.tabs.length <= 1) return;
 	const from = state.activeGroup;
 	if (state.groups.length === 1) setState("groups", (groups) => [...groups, { tabs: [], active: null }]);
 	moveTab(path, from, from === 0 ? 1 : 0, null);
@@ -837,14 +897,16 @@ export function moveTab(path: string, from: number, to: number, before: string |
 	if (from !== to) tabLeaving.forEach((told) => told(from, path));
 	const next = movedAcross(state.groups as Group[], path, from, to, before);
 	const fields = (g: Group) => ({ tabs: g.tabs, active: g.active, ...(g.pinned ? { pinned: g.pinned } : {}) });
+	const removedGroup = next.groups.length < state.groups.length;
 	batch(() => {
-		if (next.groups.length < state.groups.length) {
+		if (removedGroup) {
 			// The group it left is gone: the one it came to is changed where it stands, so that its editor stays.
 			setState("groups", to, fields(next.groups[next.active]!));
 			setState("groups", (groups) => groups.filter((_, i) => i !== from));
 		} else next.groups.forEach((g, i) => (i === from || i === to) && setState("groups", i, fields(g)));
 		setState("activeGroup", next.active);
 	});
+	if (removedGroup) removeRecentGroup(from);
 	if (from !== to) revealSignal.fire(path);
 	focusEditor();
 }
@@ -909,6 +971,7 @@ function letGoIfOnlyRead(path: string) {
 export function fileRenamed(oldPath: string, newPath: string) {
 	oldPath = canonical(oldPath);
 	newPath = canonical(newPath);
+	if (oldPath === newPath) return;
 	pathChanges.renamed.forEach((told) => told((path) => (path === oldPath ? newPath : isInside(oldPath, path) ? newPath + path.slice(oldPath.length) : path)));
 	// What was only read at the new path, or under it, before its file went is not what has come to be there.
 	for (const path of [...docs.keys()]) if (path === newPath || isInside(newPath, path)) letGoIfOnlyRead(path);
@@ -918,6 +981,11 @@ export function fileRenamed(oldPath: string, newPath: string) {
 		const dirty = Boolean(state.dirty[path]);
 		const text = doc.model.getValue();
 		docs.delete(path);
+		const prevTarget = docs.get(target);
+		if (prevTarget && prevTarget !== doc) {
+			docs.delete(target);
+			disposeDoc(prevTarget);
+		}
 		const moved = attach(target, text, { text: doc.savedText, mtime: doc.mtime });
 		moved.encoding = doc.encoding;
 		moved.binary = doc.binary;
@@ -926,8 +994,8 @@ export function fileRenamed(oldPath: string, newPath: string) {
 				"groups",
 				produce((groups: Group[]) => {
 					for (const g of groups) {
-						g.tabs = g.tabs.map((tab) => (tab === path ? target : tab));
-						if (g.pinned) g.pinned = g.pinned.map((tab) => (tab === path ? target : tab));
+						g.tabs = [...new Set(g.tabs.map((tab) => (tab === path ? target : tab)))];
+						if (g.pinned) g.pinned = [...new Set(g.pinned.map((tab) => (tab === path ? target : tab)))];
 						if (g.preview === path) g.preview = target;
 						if (g.active === path) g.active = target;
 					}
@@ -1026,6 +1094,7 @@ export async function openToSide(path: string) {
 			setState("groups", (groups) => groups.slice(0, 1));
 			setState("activeGroup", 0);
 		});
+		removeRecentGroup(1);
 	}
 }
 
@@ -1043,14 +1112,16 @@ async function settleConflict(doc: Doc): Promise<boolean> {
 	try {
 		disk = await backend.read(doc.path);
 	} catch {
-		return true; // Deleted or moved on disk: saving puts it back.
+		return docs.get(doc.path) === doc && !doc.model.isDisposed(); // Deleted or moved on disk: saving puts it back.
 	}
+	if (docs.get(doc.path) !== doc || doc.model.isDisposed()) return false;
 	if (disk.mtime === doc.mtime) return true;
 	// Bytes where there was text have no text to compare: they are a change, whatever the empty text of them equals.
 	const turnedBytes = Boolean(disk.binary) && !doc.binary;
 	if (!turnedBytes && (disk.text === doc.savedText || disk.text === doc.model.getValue())) return true;
 	const name = baseName(doc.path);
 	const answer = await choose(`${name} changed on disk after you opened it. Saving would replace what is there.`, ["Compare", "Overwrite the file on disk", "Reload from disk"], { danger: "Overwrite the file on disk" });
+	if (docs.get(doc.path) !== doc || doc.model.isDisposed()) return false;
 	if (answer === "Overwrite the file on disk") return true;
 	if (answer === "Reload from disk") await revert(doc.path);
 	if (answer === "Compare") {
@@ -1073,25 +1144,54 @@ async function settleConflict(doc: Doc): Promise<boolean> {
 }
 
 /** Says whether the file is on disk as it is in the editor. */
-export async function save(path = activePath(), options: { /** False to leave the lines as they are, whatever the setting says. */ format?: boolean } = {}): Promise<Saved> {
+export async function save(
+	path = activePath(),
+	options: {
+		/** False to leave the lines as they are, whatever the setting says. */
+		format?: boolean;
+		/** Receives the promoted file path when saving an untitled buffer. */
+		onPromoted?: (target: string) => void;
+	} = {},
+): Promise<Saved> {
 	if (!path) return false;
 	const doc = docs.get(path);
-	if (!doc) return false;
+	if (!doc || doc.model.isDisposed()) return false;
 	// First save of a floating untitled buffer: ask for a path, write to disk, and promote the tab.
 	if (isUntitled(path)) {
 		const root = state.workspace?.root;
 		const suggested = `${displayName(path)}.ssl`;
 		const entered = (await ask(root ? "Save file as (relative to workspace, or absolute path)" : "Save file as (absolute path)", suggested))?.trim();
 		if (!entered) return false;
+		if (docs.get(path) !== doc || doc.model.isDisposed()) return false;
 		const isAbs = entered.startsWith("/") || /^[A-Za-z]:[\\/]/.test(entered);
 		if (!isAbs && !root) return notify("Open a folder or enter an absolute file path to save.", "error"), false;
 		const target = canonical(isAbs ? entered : joinPath(root!, ...entered.split(/[\\/]/).filter(Boolean)));
+		const onDisk = await backend
+			.sizes([target])
+			.then((sizes) => Boolean(sizes && (target in sizes || Object.keys(sizes).some((k) => canonical(k) === target))))
+			.catch(() => false);
+		if (docs.get(path) !== doc || doc.model.isDisposed()) return false;
+		const existingBefore = docs.get(target);
+		const isOpen = Boolean(existingBefore && !existingBefore.model.isDisposed());
+		const isDirtyTarget = Boolean(state.dirty[target]);
+		if (onDisk || isOpen || isDirtyTarget) {
+			const prompt = isDirtyTarget
+				? `${baseName(target)} is already open with unsaved edits. Overwriting it will replace both those edits and the file on disk.`
+				: `${baseName(target)} already exists. Overwriting it will replace its contents.`;
+			const answer = await choose(prompt, ["Overwrite"], { danger: "Overwrite" });
+			if (answer !== "Overwrite") return false;
+			if (docs.get(path) !== doc || doc.model.isDisposed()) return false;
+		}
+		const version = doc.model.getAlternativeVersionId();
 		const text = doc.model.getValue();
 		const created = await guarded(async () => {
 			await backend.create(target, "file").catch(() => undefined);
 			return backend.write(target, text, true);
 		});
 		if (!created) return false;
+		if (docs.get(path) !== doc || doc.model.isDisposed()) return false;
+		const currentText = doc.model.getValue();
+		const stillDirty = doc.model.getAlternativeVersionId() !== version && currentText !== text;
 		const existing = docs.get(target);
 		let realDoc: Doc;
 		let wasBinary = false;
@@ -1101,21 +1201,21 @@ export async function save(path = activePath(), options: { /** False to leave th
 			existing.binary = undefined;
 			existing.savedText = text;
 			existing.mtime = created.mtime;
-			const nextEol = text.includes("\n")
-				? lineEnds(text) === "\r\n"
+			const nextEol = currentText.includes("\n")
+				? lineEnds(currentText) === "\r\n"
 					? monaco.editor.EndOfLineSequence.CRLF
 					: monaco.editor.EndOfLineSequence.LF
 				: doc.model.getEOL() === "\r\n"
 					? monaco.editor.EndOfLineSequence.CRLF
 					: monaco.editor.EndOfLineSequence.LF;
 			existing.model.setEOL(nextEol);
-			if (existing.model.getValue() !== text) {
-				existing.model.pushEditOperations([], [{ range: existing.model.getFullModelRange(), text }], () => null);
+			if (existing.model.getValue() !== currentText) {
+				existing.model.pushEditOperations([], [{ range: existing.model.getFullModelRange(), text: currentText }], () => null);
 			}
-			existing.savedVersion = existing.model.getAlternativeVersionId();
+			existing.savedVersion = stillDirty ? -1 : existing.model.getAlternativeVersionId();
 			realDoc = existing;
 		} else {
-			realDoc = attach(target, text, { text, mtime: created.mtime });
+			realDoc = attach(target, currentText, { text, mtime: created.mtime });
 			realDoc.encoding = "utf-8";
 		}
 		batch(() => {
@@ -1136,33 +1236,40 @@ export async function save(path = activePath(), options: { /** False to leave th
 				);
 			}
 			setState("dirty", path, undefined!);
-			setState("dirty", target, false);
+			setState("dirty", target, stillDirty);
 			setState("conflicts", target, undefined!);
 			setState("treeVersion", (v) => v + 1);
 			if (wasBinary) setState("kindVersion", (v) => v + 1);
 		});
+		pathChanges.renamed.forEach((told) => told((p) => (p === path ? target : p)));
 		clearEditorViewStates(path);
 		if (docs.get(path) === doc) docs.delete(path);
 		disposeDoc(doc);
 		session.saved(realDoc.model);
 		historyChanged.fire(target);
+		options.onPromoted?.(target);
 		return true;
 	}
 	// A picture, or other bytes: there is no text of it here to save.
 	if (doc.binary) return notify(`${baseName(path)} is not text: there is nothing of it to save here.`), false;
 	if (!(await settleConflict(doc))) return false;
+	if (docs.get(path) !== doc || doc.model.isDisposed()) return false;
 	if (options.format !== false && state.settings.formatOnSave && doc.model.getLanguageId() === "ssl" && state.lsp.state === "running") {
 		await formatChanged(doc);
+		if (docs.get(path) !== doc || doc.model.isDisposed()) return false;
 	}
+	const version = doc.model.getAlternativeVersionId();
 	const text = doc.model.getValue();
 	// "It was read as text": a file that holds a zero byte the user typed is still theirs to save.
 	const result = await guarded(() => backend.write(path, text, true));
 	if (!result) return false;
+	if (docs.get(path) !== doc || doc.model.isDisposed()) return false;
 	doc.savedText = text;
-	doc.savedVersion = doc.model.getAlternativeVersionId();
+	doc.savedVersion = version;
 	doc.mtime = result.mtime;
+	const stillDirty = doc.model.getAlternativeVersionId() !== version && doc.model.getValue() !== text;
 	batch(() => {
-		setState("dirty", path, false);
+		setState("dirty", path, stillDirty);
 		setState("conflicts", path, undefined!);
 		setState("treeVersion", (v) => v + 1);
 	});
@@ -1183,14 +1290,18 @@ export const historyChanged = (() => {
 
 /** Format on save formats only the lines changed since the last save (ARCHITECTURE). */
 async function formatChanged(doc: Doc) {
+	if (doc.model.isDisposed()) return;
 	const eol = doc.model.getEOL();
+	const version = doc.model.getAlternativeVersionId();
 	let ranges = changedRanges(doc.savedText.split(/\r?\n/), doc.model.getValue().split(eol));
 	if (!ranges.length) return;
 	try {
 		// A lone line formats without its block's indentation: widen each range
 		// to the procedure the server says it is in.
 		ranges = widenToProcedures(ranges, await session.documentSymbols(doc.model).catch(() => []));
+		if (doc.model.isDisposed() || doc.model.getAlternativeVersionId() !== version) return;
 		const edits = await session.formatRanges(doc.model, ranges, doc.model.getOptions());
+		if (doc.model.isDisposed() || doc.model.getAlternativeVersionId() !== version) return;
 		if (edits.length) doc.model.pushEditOperations([], edits, () => null);
 	} catch (e: any) {
 		log(`format on save skipped: ${e?.message ?? e}`);
@@ -1261,12 +1372,7 @@ export async function saveAll(): Promise<Saved> {
 	return true;
 }
 
-export async function revert(path: string) {
-	const doc = docs.get(path);
-	if (!doc) return;
-	const file = await guarded(() => backend.read(path));
-	// The document may have been let go, or moved away, while the file was read.
-	if (!file || docs.get(path) !== doc) return;
+function applyFileToDoc(path: string, doc: Doc, file: { text: string; mtime: number; encoding?: string; binary?: { size: number; image?: string } }) {
 	doc.encoding = file.encoding;
 	doc.binary = file.binary;
 	// The line ends go back to the file's too: put in as an edit, the text would take on whichever kind the editor
@@ -1282,6 +1388,16 @@ export async function revert(path: string) {
 		setState("conflicts", path, undefined!);
 		setState("kindVersion", (v) => v + 1);
 	});
+}
+
+export async function revert(path: string) {
+	if (isUntitled(path)) return;
+	const doc = docs.get(path);
+	if (!doc || doc.model.isDisposed()) return;
+	const file = await guarded(() => backend.read(path));
+	// The document may have been let go, or moved away, while the file was read.
+	if (!file || docs.get(path) !== doc || doc.model.isDisposed()) return;
+	applyFileToDoc(path, doc, file);
 }
 
 on("fileChanged", ({ path }) => fileChangedOnDisk(path));
@@ -1303,6 +1419,7 @@ export async function changingOnDisk<T>(path: string, change: () => Promise<T>):
 export async function fileChangedOnDisk(changed: string) {
 	const path = canonical(changed);
 	if (awaited.has(path)) return;
+	const startRoot = state.workspace?.root;
 	invalidateImageCache(path);
 	setState("treeVersion", (v) => v + 1);
 	const doc = docs.get(path);
@@ -1318,14 +1435,17 @@ export async function fileChangedOnDisk(changed: string) {
 	try {
 		file = await backend.read(path);
 	} catch {
-		told(false);
-		// Deleted or moved: a copy open in a tab is kept, and one that was only read is not.
-		letGoIfOnlyRead(path);
+		if (state.workspace?.root === startRoot) {
+			told(false);
+			// Deleted or moved: a copy open in a tab is kept, and one that was only read is not.
+			letGoIfOnlyRead(path);
+		}
 		return;
 	}
+	if (!state.workspace || state.workspace.root !== startRoot || !isInside(state.workspace.root, path)) return;
 	told(true);
 	// It may have been let go, or moved away, while the file was read.
-	if (!doc || docs.get(path) !== doc) return;
+	if (!doc || docs.get(path) !== doc || doc.model.isDisposed()) return;
 	// A picture, or other bytes, has no text to compare: a later date on it is the change.
 	if (doc.binary && file.binary) {
 		if (file.mtime !== doc.mtime) {
@@ -1346,8 +1466,8 @@ export async function fileChangedOnDisk(changed: string) {
 	if (state.dirty[path]) {
 		if (!state.conflicts[path]) notify(`${baseName(path)} changed on disk while you have unsaved edits. Saving will ask which to keep.`, "error");
 		setState("conflicts", path, true);
-	} else {
-		await revert(path);
+	} else if (!state.dirty[path] && state.workspace && isInside(state.workspace.root, path)) {
+		applyFileToDoc(path, doc, file);
 		log(`reloaded ${path} after an external change`);
 	}
 }
@@ -1365,6 +1485,6 @@ on("closeRequested", async () => {
 });
 
 on("lspState", (lsp) => {
-	setState("lsp", lsp);
+	setState("lsp", reconcile(lsp));
 	if (lsp.message) log(lsp.message);
 });

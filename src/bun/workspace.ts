@@ -19,8 +19,9 @@ import { cp, open, rm, writeFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type { Entry, FileText, SearchHit } from "../shared/protocol";
-import { matchesOn, replaceIn, SEARCH_LIMIT, searchPattern, type SearchOptions } from "../shared/searchPattern";
-import { fileChosen } from "../shared/fileGlob";
+import { excerptForMatch, matchesOn, replaceIn, SEARCH_LIMIT, searchPattern, type SearchOptions } from "../shared/searchPattern";
+import { createFileFilter } from "../shared/fileGlob";
+import { replaceSafeInText } from "../shared/menuBar";
 import { decode, encode, encodingOf, looksBinary, textOf, type Encoding } from "./encoding";
 import { imageType, sizeText, SNIFF_BYTES } from "../shared/fileKind";
 import { UNLISTED } from "../shared/paths";
@@ -74,6 +75,10 @@ const isFolder = (full: string) => {
 };
 
 const SEARCH_MAX_BYTES = 4 * 1024 * 1024;
+/** Maximum single line length scanned with user-supplied regexes (guards against ReDoS on minified bundles). */
+const REGEX_MAX_LINE_LENGTH = 20_000;
+/** Default safety time budget (ms) for a workspace search scan. */
+const SEARCH_TIMEOUT_MS = 5000;
 /** The largest picture that is sent to the window to be shown. */
 const IMAGE_MAX_BYTES = 20 * 1024 * 1024;
 
@@ -83,6 +88,8 @@ export class WorkspaceFiles {
 	private watcher?: FSWatcher;
 	/** How long work on a folder waits for the saves inside it to stop coming, in milliseconds. */
 	static quietMs = 10_000;
+	/** Safety time budget (ms) for `search()` across workspace files. */
+	static searchTimeoutMs = SEARCH_TIMEOUT_MS;
 	/** Paths (normalized via fileKey) this process wrote recently; their watch events are not external changes. */
 	private ownWrites = new Map<string, number>();
 
@@ -527,11 +534,23 @@ export class WorkspaceFiles {
 
 	async search(query: string, options: SearchOptions): Promise<SearchHit[]> {
 		if (!query) return [];
+		if (options.paths !== undefined && options.paths.length === 0) return [];
 		const pattern = searchPattern(query, options);
+		const filter = createFileFilter(options.include, options.exclude);
+		const normRel = (p: string) => p.replace(/\\/g, "/").replace(/^(?:\.\/)+/, "").replace(/^\/+/, "");
+		const pathSet =
+			options.paths !== undefined
+				? new Set(options.paths.map((p) => (process.platform === "win32" ? normRel(p).toLowerCase() : normRel(p))))
+				: null;
 		const hits: SearchHit[] = [];
+		const deadline = performance.now() + WorkspaceFiles.searchTimeoutMs;
+		const isRegex = Boolean(options.regex);
 		for (const path of this.files()) {
+			if (performance.now() > deadline) return hits;
 			if (imageType(path)) continue;
-			if (!fileChosen(relative(this.root, path), options.include, options.exclude)) continue;
+			const relPath = normRel(relative(this.root, path));
+			if (pathSet !== null && !pathSet.has(process.platform === "win32" ? relPath.toLowerCase() : relPath)) continue;
+			if (!filter(relPath)) continue;
 			try {
 				const st = statSync(path);
 				if (!st.isFile() || st.size > SEARCH_MAX_BYTES) continue;
@@ -549,9 +568,20 @@ export class WorkspaceFiles {
 			if (text.includes("\u0000")) continue;
 			const lines = text.split(/\r?\n/);
 			for (let i = 0; i < lines.length; i++) {
+				if ((isRegex || (i & 63) === 0) && performance.now() > deadline) return hits;
+				const line = lines[i]!;
+				if (isRegex && line.length > REGEX_MAX_LINE_LENGTH) continue;
 				// The same walk a replace makes over the line: what is listed is what would be replaced.
-				for (const match of matchesOn(lines[i]!, pattern, "", false)) {
-					hits.push({ path, line: i + 1, column: match.column, length: match.length, text: lines[i]!.slice(0, 400) });
+				for (const match of matchesOn(line, pattern, "", false, SEARCH_LIMIT - hits.length)) {
+					const { text: excerpt, textOffset } = excerptForMatch(line, match.column, match.length);
+					hits.push({
+						path,
+						line: i + 1,
+						column: match.column,
+						length: match.length,
+						text: excerpt,
+						...(textOffset > 0 ? { textOffset } : {}),
+					});
 					if (hits.length >= SEARCH_LIMIT) return hits;
 				}
 			}
@@ -563,11 +593,74 @@ export class WorkspaceFiles {
 	 * One file as it would be with every match replaced: its text before and after, and how many matches. Null
 	 * when it has none, or is a file the search does not look in (too large, or not text).
 	 */
-	async replaced(path: string, query: string, replacement: string, options: SearchOptions): Promise<{ before: string; after: string; count: number } | null> {
+	async replaced(
+		path: string,
+		query: string,
+		replacement: string,
+		options: SearchOptions,
+	): Promise<{ before: string; after: string; count: number; skippedProtected?: number; invalidJson?: boolean } | null> {
 		const full = this.inside(path);
 		if (!query || statSync(full).size > SEARCH_MAX_BYTES) return null;
 		const file = await this.read(full);
 		if (file.binary || file.text.includes("\u0000")) return null;
+
+		const relNorm = relative(this.root, full).replace(/\\/g, "/");
+		let allowedLines: ReadonlySet<number> | undefined;
+		if (options.linesByPath) {
+			const direct = options.linesByPath[path] ?? options.linesByPath[full] ?? options.linesByPath[relNorm];
+			if (direct) {
+				allowedLines = new Set(direct);
+			} else if (process.platform === "win32" || process.platform === "darwin") {
+				const targetKey = fileKey(full);
+				for (const [k, v] of Object.entries(options.linesByPath)) {
+					try {
+						if (fileKey(this.inside(k)) === targetKey) {
+							allowedLines = new Set(v);
+							break;
+						}
+					} catch {
+						if (k.replace(/\\/g, "/").toLowerCase() === relNorm.toLowerCase()) {
+							allowedLines = new Set(v);
+							break;
+						}
+					}
+				}
+			}
+		}
+
+		const isMd = /\.(md|markdown)$/i.test(full);
+		const isPlan = /\.plan\.json$/i.test(full);
+		const needsSafe = Boolean(options.safeDocs && (isMd || isPlan));
+
+		if (allowedLines || needsSafe) {
+			const pattern = searchPattern(query, options);
+			const res = replaceSafeInText(file.text, pattern, replacement, Boolean(options.regex), {
+				allowedLines,
+				isMarkdown: isMd,
+				isPlanJson: isPlan,
+				safeDocs: Boolean(options.safeDocs),
+				maxSamples: 0,
+			});
+			if (res.invalidJson) {
+				return {
+					before: file.text,
+					after: file.text,
+					count: 0,
+					invalidJson: true,
+					...(res.skippedProtected ? { skippedProtected: res.skippedProtected } : {}),
+				};
+			}
+			if (!res.count) {
+				return res.skippedProtected ? { before: file.text, after: file.text, count: 0, skippedProtected: res.skippedProtected } : null;
+			}
+			return {
+				before: file.text,
+				after: res.text,
+				count: res.count,
+				...(res.skippedProtected ? { skippedProtected: res.skippedProtected } : {}),
+			};
+		}
+
 		const done = replaceIn(file.text, query, replacement, options);
 		return done.count ? { before: file.text, after: done.text, count: done.count } : null;
 	}

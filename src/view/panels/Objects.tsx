@@ -10,7 +10,7 @@ import { backend } from "../backend";
 import { activeLiveEditor, jumpToTableColumn, liveSelectionVersion, onSplitScrollSync } from "../editor/liveBridge";
 import { mdOutline } from "../editor/mdOutline";
 import { monaco } from "../editor/monaco";
-import { session } from "../lsp/session";
+import { lspReadyEpoch, session } from "../lsp/session";
 import { activeDoc, activePath, canonical, documents, markdownMode, notify, openFile, setState, state } from "../state";
 import { cycleRegionColor, isRegion, regionColor, symbolPath } from "../editor/regions";
 import { isPlanPath, PROCEDURE_DRAG } from "../plan/model";
@@ -18,6 +18,7 @@ import { docs, isMarkdown, isTable } from "../project";
 import { parseCsv } from "../../shared/csv";
 import { frontMatter } from "../../shared/frontMatter";
 import {
+	canDropSection as canDropMdSection,
 	csvColumnOutline,
 	demoteMarkdownSection,
 	hasOutline,
@@ -123,7 +124,8 @@ const isActiveCsv = () => {
 export function useSymbols() {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	createEffect(
-		on([activePath, () => state.lsp.state, () => state.kindVersion], () => {
+		on([activePath, () => state.lsp.state, lspReadyEpoch, () => state.kindVersion], () => {
+			clearTimeout(timer);
 			const path = activePath();
 			const doc = activeDoc();
 			setSymbols([]);
@@ -192,11 +194,23 @@ export function useSymbols() {
 			}
 			if (doc.model.getLanguageId() !== "ssl") return;
 			let current = true;
-			const load = () =>
+			let reqSeq = 0;
+			const load = () => {
+				const seq = ++reqSeq;
 				session.documentSymbols(doc.model).then(
-					(list) => current && (setSymbols(list), setReading("read")),
-					(e) => current && (setSymbols([]), setFailure(String(e?.message ?? e)), setReading("failed")),
+					(list) => {
+						if (!current || seq !== reqSeq) return;
+						setSymbols(list);
+						setReading("read");
+					},
+					(e) => {
+						if (!current || seq !== reqSeq) return;
+						setSymbols([]);
+						setFailure(String(e?.message ?? e));
+						setReading("failed");
+					},
 				);
+			};
 			setReading("reading");
 			void load();
 			const sub = doc.model.onDidChangeContent(() => {
@@ -205,6 +219,7 @@ export function useSymbols() {
 			});
 			onCleanup(() => {
 				current = false;
+				clearTimeout(timer);
 				sub.dispose();
 			});
 		}),
@@ -217,7 +232,11 @@ const PROCEDURE_KINDS = new Set([6, 12]);
 /** With a plan open: the workspace's procedures, to drag into the chart as calls. */
 function Procedures(props: { filter: string }) {
 	const [all] = createResource(
-		() => state.lsp.state === "running" && (state.workspace?.root ?? false),
+		() => {
+			const epoch = lspReadyEpoch();
+			const root = state.workspace?.root;
+			return state.lsp.state === "running" && epoch > 0 && root ? ([root, epoch] as const) : false;
+		},
 		() => session.workspaceSymbols("").then((list) => ({ list, error: "" }), (e) => ({ list: [], error: String(e?.message ?? e) })),
 	);
 	const procedures = () => (all()?.list ?? []).filter((s) => PROCEDURE_KINDS.has(s.kind));
@@ -225,7 +244,7 @@ function Procedures(props: { filter: string }) {
 	const fileOf = (uri: string) => relativeTo(state.workspace?.root, monaco.Uri.parse(uri).fsPath);
 	const empty = () => {
 		if (serverDown()) return `${serverDown()} The workspace's procedures come from it.`;
-		if (all.loading && !all()) return "Reading the workspace's procedures…";
+		if ((all.loading || (state.lsp.state === "running" && lspReadyEpoch() === 0)) && !all()) return "Reading the workspace's procedures…";
 		if (all()?.error) return `The language server could not list the workspace's procedures: ${all()!.error}`;
 		if (!procedures().length) return "The language server found no procedures in the workspace.";
 		return `No procedure matches “${props.filter}”. Clear the filter to see them all.`;
@@ -297,19 +316,57 @@ export const setOutlineFollow = (next: boolean) => {
 	remember("outline.follow", next ? "on" : "off");
 };
 
-const collectExpandableKeys = (list: Sym[], parent = ""): string[] => {
-	const keys: string[] = [];
-	for (const s of list) {
-		const key = `${parent}/${s.name}`;
-		if (s.children?.length) {
-			keys.push(key);
-			keys.push(...collectExpandableKeys(s.children, key));
+/** Scopes a symbol collapse key by canonical file path, parent hierarchy, name, start line, and sibling occurrence index. */
+export function symbolCollapseKey(
+	path: string | null | undefined,
+	name: string,
+	line: number,
+	parent = "",
+	occurrence = 0,
+): string {
+	const base = parent || `${canonical(path ?? "")}:sym:`;
+	return `${base}/${name}@${line}${occurrence > 0 ? `#${occurrence}` : ""}`;
+}
+
+/** Assigns collision-free, sort-order-invariant collapse keys to every symbol node in a document's outline tree. */
+export function buildSymbolKeyMap(list: readonly Sym[], path?: string | null): Map<Sym, string> {
+	const keys = new Map<Sym, string>();
+	const walk = (nodes: readonly Sym[], parent: string) => {
+		const seen = new Map<string, number>();
+		for (const s of nodes) {
+			const line = s.range?.startLineNumber ?? 0;
+			const sig = `${s.name}@${line}`;
+			const occ = seen.get(sig) ?? 0;
+			seen.set(sig, occ + 1);
+			const key = symbolCollapseKey(path, s.name, line, parent, occ);
+			keys.set(s, key);
+			if (s.children?.length) walk(s.children, key);
 		}
-	}
+	};
+	walk(list, "");
 	return keys;
+}
+
+const collectExpandableKeys = (list: readonly Sym[], path?: string | null): string[] => {
+	const keyMap = buildSymbolKeyMap(list, path);
+	const out: string[] = [];
+	const walk = (nodes: readonly Sym[]) => {
+		for (const s of nodes) {
+			if (s.children?.length) {
+				const k = keyMap.get(s);
+				if (k) out.push(k);
+				walk(s.children);
+			}
+		}
+	};
+	walk(list);
+	return out;
 };
 
 const mdCollapseKey = (path: string | null | undefined, slug: string) => `${canonical(path ?? "")}:md:${slug}`;
+
+/** Scopes a Plan stage collapse key by canonical file path so two plan files never collide. */
+export const planCollapseKey = (path: string | null | undefined, stageId: string) => `${canonical(path ?? "")}:plan:${stageId}`;
 
 const collectMdExpandableKeys = (list: MarkdownSection[], path?: string | null): string[] => {
 	const keys: string[] = [];
@@ -325,9 +382,22 @@ const collectMdExpandableKeys = (list: MarkdownSection[], path?: string | null):
 const collectActiveExpandableKeys = (): string[] => {
 	const path = activePath();
 	if (isMarkdown(path)) return collectMdExpandableKeys(mdSections(), path);
-	if (isPlanPath(path)) return planStages().filter((st) => st.nodes.length > 0).map((st) => `plan:${st.id}`);
-	return collectExpandableKeys(symbols());
+	if (isPlanPath(path)) return planStages().filter((st) => st.nodes.length > 0).map((st) => planCollapseKey(path, st.id));
+	return collectExpandableKeys(symbols(), path);
 };
+
+/** Toggles collapse-all strictly for `activeKeys`, preserving every other file's collapse state in `current`. */
+export function applyOutlineCollapseAll(current: ReadonlySet<string>, activeKeys: readonly string[]): Set<string> {
+	const next = new Set(current);
+	if (!activeKeys.length) return next;
+	const anyOpen = activeKeys.some((k) => !current.has(k));
+	if (anyOpen) {
+		for (const k of activeKeys) next.add(k);
+	} else {
+		for (const k of activeKeys) next.delete(k);
+	}
+	return next;
+}
 
 export const outlineHasExpandable = () => collectActiveExpandableKeys().length > 0;
 export const outlineAnyOpen = () => {
@@ -337,8 +407,7 @@ export const outlineAnyOpen = () => {
 export const toggleOutlineCollapseAll = () => {
 	const all = collectActiveExpandableKeys();
 	if (!all.length) return;
-	if (outlineAnyOpen()) setOutlineClosed(new Set(all));
-	else setOutlineClosed(new Set<string>());
+	setOutlineClosed((cur) => applyOutlineCollapseAll(cur, all));
 };
 
 /** VS Code-style outline options shared by Explorer's Outline drawer and the Document outline panel. */
@@ -566,6 +635,7 @@ function MarkdownOutline(props: { filter?: string; compact?: boolean; label?: st
 	};
 
 	const moveSection = (sec: MarkdownSection, direction: "up" | "down") => {
+		if (outlineSort() !== "position") return;
 		const doc = activeDoc();
 		const path = activePath();
 		if (!doc || !path || !isMarkdown(path)) return;
@@ -596,9 +666,10 @@ function MarkdownOutline(props: { filter?: string; compact?: boolean; label?: st
 	const openSectionMenu = async (sec: MarkdownSection, at: Point) => {
 		const path = activePath();
 		if (!path) return;
+		const inPositionOrder = outlineSort() === "position";
 		const info = findSectionInfo(mdSections(), (s) => s.line === sec.line);
-		const canMoveUp = Boolean(info && info.index > 0);
-		const canMoveDown = Boolean(info && info.index < info.siblings.length - 1);
+		const canMoveUp = Boolean(inPositionOrder && info && info.index > 0);
+		const canMoveDown = Boolean(inPositionOrder && info && info.index < info.siblings.length - 1);
 		const canPromote = sec.level > 1;
 		const canDemote = maxSectionLevel(sec) < 6;
 		const stem = baseName(path).replace(/\.(md|markdown)$/i, "");
@@ -621,14 +692,7 @@ function MarkdownOutline(props: { filter?: string; compact?: boolean; label?: st
 		} else if (picked === "copy-link") {
 			await copyClipboardText(`[[${stem}#${sec.text}]]`, `Copied [[${stem}#${sec.text}]].`);
 		} else if (picked === "rename-heading") {
-			// Position cursor on this exact heading before invoking the rename-heading command.
-			const live = activeLiveEditor();
-			if (live && canonical(live.path) === canonical(path)) {
-				live.reveal({ line: sec.line, column: 1 });
-			} else {
-				await openFile(path, { reveal: { line: sec.line, column: 1 } });
-			}
-			(await import("../commands")).runCommand("rename-heading");
+			await (await import("../projectDocs")).renameHeadingAcrossWorkspace(path, sec.line);
 		} else if (picked === "promote") {
 			shiftSectionLevel(sec, "promote");
 		} else if (picked === "demote") {
@@ -646,11 +710,7 @@ function MarkdownOutline(props: { filter?: string; compact?: boolean; label?: st
 		if (fromLine === target.line) return false;
 		const src = findSectionInfo(mdSections(), (s) => s.line === fromLine)?.section;
 		if (!src) return false;
-		// Reject drops onto self or anywhere inside own descendant subtree.
-		if (target.line >= src.line && target.line <= src.endLine) return false;
-		// Cannot nest inside an H6 heading.
-		if (place === "inside" && target.level >= 6) return false;
-		return true;
+		return canDropMdSection(src, target, place);
 	};
 
 	const SectionRow = (rowProps: { section: MarkdownSection; depth: number }) => {
@@ -794,7 +854,7 @@ function MarkdownOutline(props: { filter?: string; compact?: boolean; label?: st
 					if (!e.shiftKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
 						e.preventDefault();
 						e.stopPropagation();
-						moveSection(sec, e.key === "ArrowUp" ? "up" : "down");
+						if (outlineSort() === "position") moveSection(sec, e.key === "ArrowUp" ? "up" : "down");
 					} else if (e.shiftKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
 						e.preventDefault();
 						e.stopPropagation();
@@ -944,7 +1004,7 @@ function PlanOutline(props: { filter?: string; compact?: boolean; label?: string
 			<Rows role="tree" label={props.label ?? "Outline of this plan"}>
 				<For each={visibleStages()}>
 					{(stage) => {
-						const key = () => `plan:${stage.id}`;
+						const key = () => planCollapseKey(activePath(), stage.id);
 						const open = () => Boolean(filter()) || !outlineClosed().has(key());
 						return (
 							<>
@@ -1034,8 +1094,11 @@ export function SymbolOutline(props: { filter?: string; compact?: boolean; label
 		const p = symbolPath(symbols(), state.cursor.line).filter((s) => !isVariable(s));
 		return p[p.length - 1];
 	};
+	const keyMap = createMemo(() => buildSymbolKeyMap(symbols(), path()));
 	const TreeRow = (rowProps: { symbol: Sym; depth: number; parent: string }) => {
-		const key = () => `${rowProps.parent}/${rowProps.symbol.name}`;
+		const key = () =>
+			keyMap().get(rowProps.symbol) ??
+			symbolCollapseKey(path(), rowProps.symbol.name, rowProps.symbol.range?.startLineNumber ?? 0, rowProps.parent);
 		const parameter = () => isParameter(rowProps.symbol);
 		const children = () => sortSymbols((rowProps.symbol.children ?? []).filter(matches), outlineSort());
 		// A filter shows what it found, whatever was closed.

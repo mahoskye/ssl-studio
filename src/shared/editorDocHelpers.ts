@@ -1,7 +1,7 @@
 // Pure cross-IDE doc helper utilities (comment doc-ref scanner, Blocks ticket segments,
 // and Reference workspace knowledge matching) — zero DOM/Monaco dependencies so unit tests run cleanly.
 import { buildDocNameIndex, lookupInIndex, namedLinksIn, type DocNameIndex } from "./namedLinks";
-import { relativeTo } from "./paths";
+import { dirName, isInside, relativeTo, resolvePath } from "./paths";
 import { isCatalog } from "./projectDocs";
 import type { DocFile } from "./protocol";
 import { ticketMatcher } from "./ticketRefs";
@@ -134,8 +134,38 @@ function buildDocPathLookup(files: readonly DocFile[], root?: string | null): Ma
 	return map;
 }
 
-function resolveDocPath(rawPath: string, byPath: ReadonlyMap<string, DocFile>, files: readonly DocFile[]): DocFile | null {
-	const clean = rawPath.replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+/, "").toLowerCase();
+function normalizeDocSegments(raw: string): string {
+	const parts = raw.replace(/\\/g, "/").split("/");
+	const stack: string[] = [];
+	for (const part of parts) {
+		if (!part || part === ".") continue;
+		if (part === "..") {
+			if (stack.length) stack.pop();
+		} else {
+			stack.push(part);
+		}
+	}
+	return stack.join("/").toLowerCase();
+}
+
+function resolveDocPath(
+	rawPath: string,
+	byPath: ReadonlyMap<string, DocFile>,
+	files: readonly DocFile[],
+	root?: string | null,
+	sourcePath?: string | null,
+): DocFile | null {
+	const forward = rawPath.replace(/\\/g, "/");
+	if (sourcePath && /^\.{1,2}\//.test(forward)) {
+		const resolved = resolvePath(dirName(sourcePath), forward);
+		if (root && !isInside(root, resolved)) return null;
+		const relKey = (root ? relativeTo(root, resolved) : resolved).replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+/, "").toLowerCase();
+		const byRel = byPath.get(relKey);
+		if (byRel) return byRel;
+		const fullKey = resolved.replace(/\\/g, "/").replace(/^\/+/, "").toLowerCase();
+		return byPath.get(fullKey) ?? null;
+	}
+	const clean = normalizeDocSegments(forward);
 	if (!clean) return null;
 	const exact = byPath.get(clean);
 	if (exact) return exact;
@@ -152,13 +182,16 @@ function resolveDocPath(rawPath: string, byPath: ReadonlyMap<string, DocFile>, f
 
 function parseDocFragment(frag: string | undefined): { targetLine?: number; targetEndLine?: number; heading?: string } {
 	if (!frag) return {};
-	const lineMatch = /^L(\d+)(?:-L?(\d+))?$/i.exec(frag.trim());
+	const trimmed = frag.trim();
+	const lineMatch = /^L(\d+)(?:-L?(\d+))?$/i.exec(trimmed);
 	if (lineMatch) {
 		const targetLine = Number(lineMatch[1]);
-		const targetEndLine = lineMatch[2] ? Number(lineMatch[2]) : undefined;
+		if (!Number.isFinite(targetLine) || targetLine < 1) return {};
+		const rawEnd = lineMatch[2] ? Number(lineMatch[2]) : undefined;
+		const targetEndLine = rawEnd !== undefined && Number.isFinite(rawEnd) && rawEnd >= targetLine ? rawEnd : undefined;
 		return { targetLine, ...(targetEndLine ? { targetEndLine } : {}) };
 	}
-	return { heading: frag.trim() };
+	return trimmed ? { heading: trimmed } : {};
 }
 
 /**
@@ -170,7 +203,7 @@ export function findCommentDocRefsInLines(
 	lang: "ssl" | "sql",
 	files: readonly DocFile[],
 	root?: string | null,
-	precomputed?: { nameIndex?: DocNameIndex; pathMap?: ReadonlyMap<string, DocFile> },
+	precomputed?: { nameIndex?: DocNameIndex; pathMap?: ReadonlyMap<string, DocFile>; sourcePath?: string },
 ): CommentDocRef[] {
 	const existing = files.filter((f) => f.exists);
 	if (!existing.length || !lines.length) return [];
@@ -218,7 +251,7 @@ export function findCommentDocRefsInLines(
 					const from = span.from + m.index + leadOffset;
 					const to = from + fullToken.length;
 					if (taken.some(([a, b]) => from < b && to > a)) continue;
-					const doc = resolveDocPath(rawPath, pathMap, existing);
+					const doc = resolveDocPath(rawPath, pathMap, existing, root, precomputed?.sourcePath);
 					if (!doc) continue;
 					taken.push([from, to]);
 					results.push({

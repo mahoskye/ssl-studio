@@ -217,8 +217,51 @@ export function cut(text: string, limit: number): string {
 }
 /** A document's own words: without its front matter and its first heading, which the line above it already says. */
 const body = (text: string) => frontMatter(text).body.replace(/^\s*#\s+.*\r?\n/, "").trim();
-/** One section of a document, by its heading: "Answer". */
-const section = (text: string, heading: string) => new RegExp(`^#{1,6}\\s+${heading}\\s*$\\r?\\n([\\s\\S]*?)(?=^#{1,6}\\s|(?![\\s\\S]))`, "im").exec(text)?.[1]?.trim() ?? "";
+const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** One section of a document, by its heading: "Answer". Tracks CommonMark code fences so `# comment` lines inside fences never start or truncate a section. */
+export function extractSection(text: string, heading: string): string {
+	const headingRe = new RegExp(`^#{1,6}\\s+${escapeRegExp(heading)}\\s*$`, "i");
+	const anyHeadingRe = /^#{1,6}\s/;
+	const lines = text.split(/\r?\n/);
+	let fence: { ch: string; len: number } | null = null;
+	let collecting = false;
+	const out: string[] = [];
+
+	for (const current of lines) {
+		const fenceMatch = /^[ \t]{0,3}(`{3,}|~{3,})(.*)$/.exec(current);
+		if (!fence) {
+			if (fenceMatch) {
+				const ch = fenceMatch[1]![0]!;
+				const len = fenceMatch[1]!.length;
+				const info = fenceMatch[2]!;
+				if (!(ch === "`" && info.includes("`"))) {
+					fence = { ch, len };
+					if (collecting) out.push(current);
+					continue;
+				}
+			}
+			if (!collecting) {
+				if (headingRe.test(current)) collecting = true;
+			} else {
+				if (anyHeadingRe.test(current)) break;
+				out.push(current);
+			}
+		} else {
+			if (fenceMatch) {
+				const ch = fenceMatch[1]![0]!;
+				const len = fenceMatch[1]!.length;
+				const info = fenceMatch[2]!;
+				if (ch === fence.ch && len >= fence.len && info.trim() === "") {
+					fence = null;
+				}
+			}
+			if (collecting) out.push(current);
+		}
+	}
+	return out.join("\n").trim();
+}
+const section = extractSection;
 const line = (file: DocFile) => `- ${file.ticket && !file.title?.startsWith(file.ticket) ? `${file.ticket}: ` : ""}${file.title || file.name}${file.status ? ` (${file.status})` : ""}${file.summary ? `. ${file.summary}` : ""}`;
 
 /**
@@ -928,6 +971,7 @@ export function docsGoverningFile(
 			const pairedDoc = byPath.get(slashes(planDocPath));
 			if (pairedDoc) {
 				add(pairedDoc, "plan doc");
+				for (const k of pairedDoc.tickets ?? []) linkedTicketKeys.add(k.toLowerCase());
 				if (!matchedPlans.includes(pairedDoc)) matchedPlans.push(pairedDoc);
 			}
 		} else if (/\.plan\.md$/i.test(plan.name)) {
@@ -1009,6 +1053,7 @@ export function scriptsForTicket(files: readonly DocFile[], key: string, options
 		addRefs(work.ticket.codeRefs);
 		addRefs(work.ticket.testScripts);
 		for (const group of groups) {
+			if (group.kind === "ticket" || group.kind === "subticket") continue;
 			if (group.kind === "registry") {
 				for (const reg of group.files) {
 					addRefs(reg.ticketCodeRefs?.[k.toLowerCase()]);

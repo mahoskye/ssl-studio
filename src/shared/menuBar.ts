@@ -843,7 +843,10 @@ export function protectedMarkdownSpans(text: string): Map<number, TextSpan[]> {
 export function overlapsProtectedSpan(column1Based: number, length: number, spans: readonly TextSpan[] | undefined): boolean {
 	if (!spans?.length) return false;
 	const mStart = column1Based - 1;
-	const mEnd = mStart + Math.max(1, length);
+	if (length === 0) {
+		return spans.some((s) => mStart >= s.start && mStart <= s.end);
+	}
+	const mEnd = mStart + length;
 	return spans.some((s) => mStart < s.end && mEnd > s.start);
 }
 

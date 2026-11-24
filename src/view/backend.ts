@@ -110,6 +110,7 @@ async function connectSocket(): Promise<Caller> {
 	closeActiveSocket = closeThis;
 
 	socket.addEventListener("message", (event) => {
+		if (replaced) return;
 		let message: Reply | Push;
 		try {
 			message = JSON.parse(String(event.data)) as Reply | Push;
@@ -148,6 +149,7 @@ async function connectSocket(): Promise<Caller> {
 	socket.addEventListener(
 		"open",
 		() => {
+			if (replaced) return;
 			opened = true;
 			open = true;
 			resolveHandshake();
@@ -167,7 +169,7 @@ async function connectSocket(): Promise<Caller> {
 
 	return (method, args) =>
 		new Promise((resolve, reject) => {
-			if (!open || socket.readyState !== WebSocket.OPEN) {
+			if (replaced || !open || socket.readyState !== WebSocket.OPEN) {
 				return reject(new Error("The connection to SSL Studio was lost. Reload the page."));
 			}
 			const id = next++;
@@ -183,15 +185,28 @@ async function connectSocket(): Promise<Caller> {
 }
 
 let caller: Caller | undefined;
+let electrobunConnecting: Promise<void> | null = null;
+let connectSeq = 0;
 
 export async function connect() {
 	if (inApp) {
 		if (caller) return;
-		caller = await connectElectrobun();
-		return;
+		if (!electrobunConnecting) {
+			electrobunConnecting = connectElectrobun()
+				.then((next) => {
+					caller = next;
+				})
+				.finally(() => {
+					electrobunConnecting = null;
+				});
+		}
+		return electrobunConnecting;
 	}
+	const seq = ++connectSeq;
 	caller = undefined;
-	caller = await connectSocket();
+	const next = await connectSocket();
+	if (seq !== connectSeq) return;
+	caller = next;
 }
 
 /** `backend.read(path)` and so on: every BackendApi method, called remotely. */

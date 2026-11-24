@@ -90,6 +90,117 @@ export function chooseFromMenu(
 /** True while a row's menu is open: a dialog under it leaves the menu's own keys to it. */
 export const rowMenuOpen = () => open() !== null;
 
+export type NavigableMenuEntry = { entryIdx: number; entry: ResolvedMenuLeaf | ResolvedMenuSub };
+export type KeptMenuMark = { depth: number; index: number };
+export type KeptMenuKeyAction =
+	| { action: "ignore" }
+	| { action: "noop"; consume: true }
+	| { action: "close"; consume: boolean }
+	| { action: "choose"; value: string }
+	| { action: "mark"; mark: KeptMenuMark; closeSubDepth?: number }
+	| { action: "open-sub"; depth: number; parentIdx: number; entry: ResolvedMenuSub; mark: KeptMenuMark }
+	| { action: "close-sub"; depth: number; mark: KeptMenuMark };
+
+/** All keyboard-navigable entries in a menu panel: enabled leaf items and submenu triggers. */
+export function navigableMenuEntries(entries: readonly ResolvedMenuEntry[]): NavigableMenuEntry[] {
+	const out: NavigableMenuEntry[] = [];
+	for (let i = 0; i < entries.length; i++) {
+		const entry = entries[i]!;
+		if (entry === "separator") continue;
+		if (entry.kind === "submenu" || !entry.disabled) out.push({ entryIdx: i, entry });
+	}
+	return out;
+}
+
+/**
+ * Tracks screen coordinates so synthetic `mouseenter`/`mousemove` events fired when a menu
+ * clamps upward under a stationary pointer never mark an item or pop open a submenu.
+ */
+export function createPointerTracker(): (pt: { screenX: number; screenY: number }) => boolean {
+	let pointerAt: string | null = null;
+	return (pt) => {
+		const at = `${pt.screenX},${pt.screenY}`;
+		const moved = pointerAt !== null && pointerAt !== at;
+		pointerAt = at;
+		return moved;
+	};
+}
+
+/** Pure keyboard state machine for `menu.keep` menus (leaves DOM focus in the opener text box while supporting submenus). */
+export function stepKeptMenuKey(
+	key: string,
+	mods: { ctrlKey: boolean; metaKey: boolean; altKey: boolean; shiftKey: boolean },
+	rootEntries: readonly ResolvedMenuEntry[],
+	openSubs: readonly { parentIdx: number; entry: ResolvedMenuSub }[],
+	marked: KeptMenuMark,
+): KeptMenuKeyAction {
+	if (mods.ctrlKey || mods.metaKey || mods.altKey || (mods.shiftKey && key !== "Tab")) {
+		return isModifierKey(key) ? { action: "ignore" } : { action: "close", consume: false };
+	}
+	const depth = Math.min(Math.max(0, marked.depth), openSubs.length);
+	const entriesAt = (d: number) => (d === 0 ? rootEntries : openSubs[d - 1]?.entry.children ?? []);
+	const nav = navigableMenuEntries(entriesAt(depth));
+	const curIdx = marked.depth === depth ? marked.index : -1;
+	const cur = curIdx >= 0 ? nav[curIdx] : undefined;
+
+	if (key === "Escape") {
+		if (depth > 0) {
+			const closing = openSubs[depth - 1];
+			const parentNav = navigableMenuEntries(entriesAt(depth - 1));
+			const parentNavIdx = closing ? parentNav.findIndex((n) => n.entryIdx === closing.parentIdx) : -1;
+			return { action: "close-sub", depth: depth - 1, mark: { depth: depth - 1, index: parentNavIdx } };
+		}
+		return { action: "close", consume: true };
+	}
+	if (key === "ArrowDown" || key === "ArrowUp") {
+		const nextIdx = moveIndex(nav.length, curIdx, key, { wrap: true });
+		const nextEntry = nextIdx >= 0 ? nav[nextIdx] : undefined;
+		const closeSubDepth = openSubs[depth] && openSubs[depth]!.parentIdx !== nextEntry?.entryIdx ? depth : undefined;
+		return { action: "mark", mark: { depth, index: nextIdx }, closeSubDepth };
+	}
+	if (key === "ArrowRight") {
+		if (cur?.entry.kind === "submenu") {
+			const subNav = navigableMenuEntries(cur.entry.children);
+			return {
+				action: "open-sub",
+				depth,
+				parentIdx: cur.entryIdx,
+				entry: cur.entry,
+				mark: { depth: depth + 1, index: subNav.length > 0 ? 0 : -1 },
+			};
+		}
+		return { action: "noop", consume: true };
+	}
+	if (key === "ArrowLeft") {
+		if (depth > 0) {
+			const closing = openSubs[depth - 1];
+			const parentNav = navigableMenuEntries(entriesAt(depth - 1));
+			const parentNavIdx = closing ? parentNav.findIndex((n) => n.entryIdx === closing.parentIdx) : -1;
+			return { action: "close-sub", depth: depth - 1, mark: { depth: depth - 1, index: parentNavIdx } };
+		}
+		if (openSubs.length > 0) {
+			return { action: "close-sub", depth: 0, mark: { depth: 0, index: curIdx } };
+		}
+		return { action: "noop", consume: true };
+	}
+	if (key === "Enter") {
+		if (!cur) return { action: "noop", consume: true };
+		if (cur.entry.kind === "submenu") {
+			const subNav = navigableMenuEntries(cur.entry.children);
+			return {
+				action: "open-sub",
+				depth,
+				parentIdx: cur.entryIdx,
+				entry: cur.entry,
+				mark: { depth: depth + 1, index: subNav.length > 0 ? 0 : -1 },
+			};
+		}
+		return { action: "choose", value: cur.entry.value };
+	}
+	if (key === "Tab") return { action: "close", consume: true };
+	return isModifierKey(key) ? { action: "ignore" } : { action: "close", consume: false };
+}
+
 const hasCheckedEntry = (entries: readonly ResolvedMenuEntry[]) =>
 	entries.some((e) => e !== "separator" && e.kind === "item" && e.checked !== undefined);
 
@@ -173,34 +284,37 @@ export function RowMenu() {
 					el.style.left = `${placed.left}px`;
 					el.style.top = `${placed.top}px`;
 					el.style.maxHeight = `${placed.maxHeight}px`;
-					el.style.zIndex = `${51 + depth}`;
+					el.style.zIndex = `${66 + depth}`;
 					if (sub.focusFirst) {
 						el.querySelector<HTMLElement>("[role=menuitem]:not(:disabled)")?.focus();
 					}
 				};
 
+				// Close on window resize so menus never float out-of-bounds.
+				onMount(() => {
+					const onResize = () => finish(null);
+					window.addEventListener("resize", onResize);
+					onCleanup(() => window.removeEventListener("resize", onResize));
+				});
+
 				/** The entry the arrow keys or the pointer have marked, in a menu that does not hold the keyboard. */
-				const [marked, setMarked] = createSignal(-1);
+				const [marked, setMarked] = createSignal<KeptMenuMark>({ depth: 0, index: -1 });
 				const id = createUniqueId();
 				/**
 				 * Where the pointer last was over the menu. A web view also reports a move when a menu opens under a pointer
 				 * at rest (one kept inside the window's edge does): that marks nothing, or Enter would take an entry nobody chose.
 				 */
-				let pointerAt: string | null = null;
-				const pointerMoved = (e: MouseEvent) => {
-					const at = `${e.screenX},${e.screenY}`;
-					const moved = pointerAt !== null && pointerAt !== at;
-					pointerAt = at;
-					return moved;
-				};
-				const actionable = menu.items.filter(
-					(entry): entry is ResolvedMenuLeaf => entry !== "separator" && entry.kind === "item" && !entry.disabled,
-				);
+				const pointerMoved = createPointerTracker();
+				const rootNav = navigableMenuEntries(menu.items);
 				/** What the hidden line says. Filled a moment after it is on the page: a line that arrives already filled is not always read out. */
 				const [said, setSaid] = createSignal("");
 				if (menu.keep) {
+					const hasSubs = rootNav.some((n) => n.entry.kind === "submenu");
 					const saying = setTimeout(
-						() => setSaid(`${menu.label}: ${actionable.map((e) => e.label).join(", ")}. Up and Down choose, Enter takes one, Escape closes.`),
+						() =>
+							setSaid(
+								`${menu.label}: ${rootNav.map((n) => n.entry.label).join(", ")}. Up and Down choose${hasSubs ? ", Right and Left open or close submenus" : ""}, Enter takes one, Escape closes.`,
+							),
 						60,
 					);
 					onCleanup(() => clearTimeout(saying));
@@ -208,27 +322,59 @@ export function RowMenu() {
 				if (menu.keep) {
 					const onWindowKey = (e: KeyboardEvent) => {
 						const used = () => (e.preventDefault(), e.stopPropagation());
-						// A key with Ctrl, Alt or Shift is not the menu's: it shuts the menu and does what it does in the box.
-						if (e.ctrlKey || e.metaKey || e.altKey || (e.shiftKey && e.key !== "Tab")) return void (isModifierKey(e.key) || finish(null));
-						if (e.key === "Escape") (used(), finish(null));
-						else if (e.key === "ArrowDown" || e.key === "ArrowUp") (used(), setMarked(moveIndex(actionable.length, marked(), e.key, { wrap: true })));
-						// Enter alone takes nothing, and does not go on to the box or the dialog under the menu.
-						else if (e.key === "Enter") (used(), marked() >= 0 && finish(actionable[marked()]!.value));
-						// Tab shuts the menu and goes nowhere: the keyboard stays in the box.
-						else if (e.key === "Tab") (used(), finish(null));
-						// Anything else is for the box: the menu goes, and the key is typed.
-						else if (!isModifierKey(e.key)) finish(null);
+						const res = stepKeptMenuKey(
+							e.key,
+							{ ctrlKey: e.ctrlKey, metaKey: e.metaKey, altKey: e.altKey, shiftKey: e.shiftKey },
+							menu.items,
+							trail(),
+							marked(),
+						);
+						if (res.action === "ignore") return;
+						if (res.action === "noop") {
+							used();
+							return;
+						}
+						if (res.action === "close") {
+							if (res.consume) used();
+							finish(null);
+							return;
+						}
+						if (res.action === "choose") {
+							used();
+							finish(res.value);
+							return;
+						}
+						if (res.action === "mark") {
+							used();
+							setMarked(res.mark);
+							if (res.closeSubDepth !== undefined) closeFrom(res.closeSubDepth, false);
+							return;
+						}
+						if (res.action === "open-sub") {
+							used();
+							const triggerEl = hostEl?.querySelector<HTMLButtonElement>(`[data-menu-depth="${res.depth}"] [data-sub-idx="${res.parentIdx}"]`);
+							if (triggerEl) {
+								openSubAt(res.depth, res.parentIdx, res.entry, triggerEl, false);
+								setMarked(res.mark);
+							}
+							return;
+						}
+						if (res.action === "close-sub") {
+							used();
+							closeFrom(res.depth, false);
+							setMarked(res.mark);
+						}
 					};
 					const onLeave = () => finish(null);
 					const ATTR = "aria-activedescendant";
 					const ours = (value: string | null) => Boolean(value?.startsWith(`${id}-`));
 					let own: string | null = menu.opener?.getAttribute(ATTR) ?? null;
-					const name = (at: number) => {
+					const name = (m: KeptMenuMark) => {
 						const box = menu.opener;
 						if (!box) return;
 						const now = box.getAttribute(ATTR);
 						if (!ours(now)) own = now;
-						if (at >= 0) box.setAttribute(ATTR, `${id}-${at}`);
+						if (m.index >= 0) box.setAttribute(ATTR, `${id}-${m.depth}-${m.index}`);
 						else if (own === null) box.removeAttribute(ATTR);
 						else box.setAttribute(ATTR, own);
 					};
@@ -240,7 +386,7 @@ export function RowMenu() {
 					onCleanup(() => {
 						window.removeEventListener("keydown", onWindowKey, true);
 						menu.opener?.removeEventListener("blur", onLeave);
-						name(-1);
+						name({ depth: 0, index: -1 });
 					});
 				}
 
@@ -298,30 +444,43 @@ export function RowMenu() {
 
 				const renderItems = (entries: ResolvedMenuEntry[], depth: number) => {
 					const showChecks = hasCheckedEntry(entries);
+					const nav = navigableMenuEntries(entries);
+					const navIndexByEntry = new Map(nav.map((n, i) => [n.entryIdx, i]));
 					return (
 						<For each={entries}>
 							{(entry, entryIdx) => {
 								if (entry === "separator") return <div class="menu-sep" role="separator" />;
+								const navIdx = navIndexByEntry.get(entryIdx()) ?? -1;
+								const isMarked = () => menu.keep && navIdx >= 0 && marked().depth === depth && marked().index === navIdx;
 								if (entry.kind === "submenu") {
 									const isOpen = () => trail()[depth]?.parentIdx === entryIdx();
 									return (
 										<button
 											type="button"
 											class="menu-item menu-sub-trigger"
-											classList={{ "sub-open": isOpen(), danger: Boolean(entry.danger) }}
+											classList={{ "sub-open": isOpen(), marked: isMarked(), danger: Boolean(entry.danger) }}
+											id={menu.keep && navIdx >= 0 ? `${id}-${depth}-${navIdx}` : undefined}
 											role="menuitem"
 											aria-haspopup="menu"
 											aria-expanded={isOpen()}
 											data-sub-idx={String(entryIdx())}
 											tabindex={-1}
-											onMouseEnter={(e) => !menu.keep && scheduleOpenSub(depth, entryIdx(), entry, e.currentTarget)}
+											onMouseEnter={(e) => {
+												if (!pointerMoved(e)) return;
+												if (menu.keep && navIdx >= 0) setMarked({ depth, index: navIdx });
+												scheduleOpenSub(depth, entryIdx(), entry, e.currentTarget);
+											}}
 											onMouseMove={(e) => {
-												if (menu.keep) return;
-												if (pointerMoved(e)) scheduleOpenSub(depth, entryIdx(), entry, e.currentTarget);
+												if (!pointerMoved(e)) return;
+												if (menu.keep && navIdx >= 0 && (marked().depth !== depth || marked().index !== navIdx)) {
+													setMarked({ depth, index: navIdx });
+												}
+												scheduleOpenSub(depth, entryIdx(), entry, e.currentTarget);
 											}}
 											onClick={(e) => {
 												e.stopPropagation();
-												openSubAt(depth, entryIdx(), entry, e.currentTarget, true);
+												if (menu.keep && navIdx >= 0) setMarked({ depth, index: navIdx });
+												openSubAt(depth, entryIdx(), entry, e.currentTarget, !menu.keep);
 											}}
 										>
 											<Show when={showChecks}>
@@ -332,25 +491,26 @@ export function RowMenu() {
 										</button>
 									);
 								}
-								const idx = depth === 0 ? actionable.indexOf(entry) : -1;
 								return (
 									<button
 										type="button"
 										class="menu-item"
-										classList={{ marked: depth === 0 && idx >= 0 && marked() === idx, danger: Boolean(entry.danger) }}
-										id={depth === 0 && idx >= 0 ? `${id}-${idx}` : undefined}
+										classList={{ marked: isMarked(), danger: Boolean(entry.danger) }}
+										id={menu.keep && navIdx >= 0 ? `${id}-${depth}-${navIdx}` : undefined}
 										role="menuitem"
 										aria-checked={entry.checked !== undefined ? entry.checked : undefined}
 										disabled={entry.disabled}
 										tabindex={-1}
-										onMouseEnter={() => {
-											if (!menu.keep) scheduleCloseSub(depth);
+										onMouseEnter={(e) => {
+											if (!pointerMoved(e)) return;
+											scheduleCloseSub(depth);
+											if (menu.keep && navIdx >= 0) setMarked({ depth, index: navIdx });
 										}}
 										onMouseMove={(e) => {
-											if (menu.keep) {
-												if (idx >= 0 && pointerMoved(e) && marked() !== idx) setMarked(idx);
-											} else if (pointerMoved(e)) {
-												scheduleCloseSub(depth);
+											if (!pointerMoved(e)) return;
+											scheduleCloseSub(depth);
+											if (menu.keep && navIdx >= 0 && (marked().depth !== depth || marked().index !== navIdx)) {
+												setMarked({ depth, index: navIdx });
 											}
 										}}
 										onClick={() => !entry.disabled && finish(entry.value)}
@@ -373,11 +533,19 @@ export function RowMenu() {
 					);
 				};
 
+				const clearMarkIfLeftMenu = (e: MouseEvent) => {
+					if (!menu.keep) return;
+					const to = e.relatedTarget as Node | null;
+					if (to && hostEl?.contains(to)) return;
+					setMarked({ depth: 0, index: -1 });
+				};
+
 				return (
 					<Portal>
 						{/* A press beside a menu that left the keyboard in its box shuts the menu and leaves the keyboard there still. */}
 						<div
 							class="row-menu-shade"
+							onMouseMove={(e) => void pointerMoved(e)}
 							onMouseDown={(e) => (menu.keep && e.preventDefault(), finish(null))}
 							onContextMenu={(e) => (e.preventDefault(), finish(null))}
 						/>
@@ -394,6 +562,7 @@ export function RowMenu() {
 								ref={(el) => queueMicrotask(() => placeRoot(el))}
 								class="menu-pop row-menu"
 								classList={{ kept: menu.keep }}
+								data-menu-depth="0"
 								role="menu"
 								aria-label={menu.label}
 								tabindex={-1}
@@ -402,7 +571,7 @@ export function RowMenu() {
 								onMouseDown={(e) => menu.keep && e.preventDefault()}
 								onMouseEnter={() => clearCloseTimer()}
 								// The pointer's mark goes with the pointer: Enter typed in the box must not take an entry it only passed over.
-								onMouseLeave={() => menu.keep && setMarked(-1)}
+								onMouseLeave={clearMarkIfLeftMenu}
 							>
 								{renderItems(menu.items, 0)}
 							</div>
@@ -413,12 +582,16 @@ export function RowMenu() {
 										<div
 											ref={(el) => queueMicrotask(() => placeSub(el, sub, depth()))}
 											class="menu-pop row-menu row-submenu"
+											classList={{ kept: menu.keep }}
+											data-menu-depth={String(depth())}
 											role="menu"
 											aria-label={sub.entry.label}
 											tabindex={-1}
 											style={{ left: `${sub.rect.right - 4}px`, top: `${sub.rect.top - 5}px` }}
 											onKeyDown={(e) => onPanelKeyDown(depth(), sub.entry.children, e)}
+											onMouseDown={(e) => menu.keep && e.preventDefault()}
 											onMouseEnter={() => clearCloseTimer()}
+											onMouseLeave={clearMarkIfLeftMenu}
 										>
 											{renderItems(sub.entry.children, depth())}
 										</div>

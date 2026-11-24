@@ -5,8 +5,8 @@ import { createEffect, createMemo, createSignal, For, on, Show } from "solid-js"
 import { monaco } from "../editor/monaco";
 import { docAuditData } from "../docAudit";
 import { diagnostics, type Diagnostic } from "../lsp/session";
-import { canonical, openFile, state } from "../state";
-import { docIssueCode, docIssueDedupKey } from "../../shared/contextMenu";
+import { canonical, displayName, isUntitled, openFile, state } from "../state";
+import { docIssueCode } from "../../shared/contextMenu";
 import { relativeTo } from "../../shared/paths";
 import { Row, RowGroup, Rows } from "./Rows";
 import { serverDown } from "./server";
@@ -17,22 +17,31 @@ const CLASS = ["", "error", "warning", "info", "hint"];
 /** What a severity mark means, in a word: read out, and shown on hover. */
 export const SEVERITY = ["", "Error", "Warning", "Note", "Hint"];
 
+/** Resolves a diagnostic URI to a path `openFile()` understands, preserving `untitled:` buffers verbatim. */
+export function problemPath(uri: string): string {
+	return isUntitled(uri) ? uri : monaco.Uri.parse(uri).fsPath;
+}
+
+/** Collision-free dedup key incorporating file, line, column, code, and message so same-line findings never drop each other. */
+export function problemDedupKey(fsPath: string, line: number, column: number, code: string, message: string): string {
+	return `${fsPath}:${line}:${column}:${code}:${message}`;
+}
+
+/** Stable Row key for a diagnostic, disambiguated across multiple findings on the same line. */
+export function problemRowKey(uri: string, d: Pick<Diagnostic, "line" | "column" | "code" | "message">): string {
+	return `${uri}#${d.line}:${d.column}:${d.code ?? ""}:${d.message}`;
+}
+
 function collectMergedProblems(): { uri: string; list: Diagnostic[] }[] {
 	const byPath = new Map<string, { uri: string; list: Diagnostic[] }>();
 	const seenKeys = new Set<string>();
 	for (const [uri, list] of Object.entries(diagnostics)) {
 		if (!list?.length) continue;
-		const fsPath = canonical(monaco.Uri.parse(uri).fsPath);
+		const fsPath = canonical(problemPath(uri));
 		const entry = byPath.get(fsPath) ?? { uri, list: [] };
 		for (const d of list) {
 			entry.list.push(d);
-			const key =
-				d.line <= 1
-					? `${fsPath}:${d.line}:${d.code ?? ""}:${d.message}`
-					: d.column > 1
-						? `${fsPath}:${d.line}:${d.column}:${d.code ?? ""}`
-						: `${fsPath}:${d.line}:${d.code ?? ""}`;
-			seenKeys.add(key);
+			seenKeys.add(problemDedupKey(fsPath, d.line, d.column ?? 1, d.code ?? "", d.message));
 		}
 		byPath.set(fsPath, entry);
 	}
@@ -42,7 +51,8 @@ function collectMergedProblems(): { uri: string; list: Diagnostic[] }[] {
 	for (const issue of docAuditData().issues) {
 		const fsPath = canonical(issue.path);
 		const code = docIssueCode(issue.kind);
-		const dedupKey = docIssueDedupKey(fsPath, issue);
+		const col = issue.column ?? 1;
+		const dedupKey = problemDedupKey(fsPath, issue.line, col, code, issue.message);
 		if (seenKeys.has(dedupKey)) continue;
 		seenKeys.add(dedupKey);
 		const uri = monaco.Uri.file(issue.path).toString();
@@ -50,9 +60,9 @@ function collectMergedProblems(): { uri: string; list: Diagnostic[] }[] {
 		entry.list.push({
 			uri,
 			line: issue.line,
-			column: issue.column ?? 1,
+			column: col,
 			endLine: issue.line,
-			endColumn: (issue.column ?? 1) + 1,
+			endColumn: col + 1,
 			severity: issue.level === "warn" ? 2 : 3,
 			message: issue.message,
 			code,
@@ -82,10 +92,11 @@ export function SeverityMark(props: { severity: number }) {
 
 type ProblemsScope = "all" | "code" | "docs";
 const [problemsScope, setProblemsScope] = createSignal<ProblemsScope>("all");
+let lastProblemsRoot: string | undefined;
 
 const isDocDiag = (uri: string, d: Diagnostic): boolean => {
 	if (d.source === "docs") return true;
-	const p = monaco.Uri.parse(uri).fsPath;
+	const p = problemPath(uri);
 	return /\.(md|markdown|json|toml|xml|csv|tsv)$/i.test(p);
 };
 
@@ -95,6 +106,16 @@ export function Problems() {
 	const hasDocIssues = createMemo(() =>
 		mergedFiles().some(({ uri, list }) => list.some((d) => isDocDiag(uri, d))),
 	);
+	createEffect(() => {
+		const root = state.workspace?.root;
+		if (root !== lastProblemsRoot) {
+			lastProblemsRoot = root;
+			setProblemsScope("all");
+		}
+	});
+	createEffect(() => {
+		if (!hasDocIssues() && problemsScope() !== "all") setProblemsScope("all");
+	});
 	const scopeCounts = createMemo(() => {
 		let code = 0;
 		let docsN = 0;
@@ -122,8 +143,8 @@ export function Problems() {
 		return out;
 	});
 	const rel = (uri: string) => {
-		const path = monaco.Uri.parse(uri).fsPath;
-		return relativeTo(state.workspace?.root, path);
+		if (isUntitled(uri)) return displayName(uri);
+		return relativeTo(state.workspace?.root, problemPath(uri));
 	};
 	return (
 		<Rows class="problems" label="Problems in workspace">
@@ -177,7 +198,7 @@ export function Problems() {
 					{([uri, list]) => (
 						<RowGroup
 							headClass="tree-row file-head"
-							title={monaco.Uri.parse(uri).fsPath}
+							title={isUntitled(uri) ? displayName(uri) : problemPath(uri)}
 							head={
 								<>
 									<FileMark name={rel(uri)} />
@@ -199,10 +220,10 @@ export function Problems() {
 								{(d) => (
 									<Row
 										class="tree-row problem"
-										key={`${uri}#${d.line}:${d.column}:${d.code ?? ""}${d.line <= 1 ? `:${d.message}` : ""}`}
+										key={problemRowKey(uri, d)}
 										style={{ "padding-left": "22px" }}
 										title={`${SEVERITY[d.severity]}: ${d.message}${d.code ? ` [${d.code}]` : ""} (line ${d.line}, column ${d.column})`}
-										onActivate={() => void openFile(monaco.Uri.parse(uri).fsPath, { reveal: { line: d.line, column: d.column, endLine: d.endLine, endColumn: d.endColumn } })}
+										onActivate={() => void openFile(problemPath(uri), { reveal: { line: d.line, column: d.column, endLine: d.endLine, endColumn: d.endColumn } })}
 									>
 										<SeverityMark severity={d.severity} />
 										<span class="label">{d.message}</span>

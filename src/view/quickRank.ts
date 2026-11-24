@@ -30,10 +30,19 @@ export function wordStarts(name: string): number[] {
 
 /** Each letter of the query continues a word of the name or begins a later one: "ssdd" in SetSampleDueDates. */
 function matchesWords(query: string, lower: string, starts: number[]): boolean {
+	if (!query.length) return true;
+	const failed = new Set<number>();
+	const stride = lower.length + 1;
 	const from = (q: number, at: number): boolean => {
 		if (q === query.length) return true;
+		const key = q * stride + at;
+		if (failed.has(key)) return false;
 		if (lower[at] === query[q] && from(q + 1, at + 1)) return true;
-		return starts.some((s) => s > at && lower[s] === query[q] && from(q + 1, s + 1));
+		for (const s of starts) {
+			if (s > at && lower[s] === query[q] && from(q + 1, s + 1)) return true;
+		}
+		failed.add(key);
+		return false;
 	};
 	return starts.some((s) => lower[s] === query[0] && from(1, s + 1));
 }

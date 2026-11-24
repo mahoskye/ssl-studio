@@ -7,11 +7,11 @@ import { Icon } from "../Icon";
 import { FileMark } from "../FileMark";
 import { batch, createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
-import type { Entry } from "../../shared/protocol";
+import type { DocFile, Entry } from "../../shared/protocol";
 import { level } from "../../shared/houseStyle";
 import { backend } from "../backend";
-import { ask, choose } from "../dialogs";
-import { activePath, canonical, closeAllTabs, closeTab, fileRemoved, fileRenamed, heldFromBefore, isUntitled, notify, openFile, openToSide, saveAll, scriptsCameTo, setState, state } from "../state";
+import { ask, choose, quickPick } from "../dialogs";
+import { activePath, canonical, closeAllTabs, closeTab, fileRemoved, fileRenamed, focusEditor, heldFromBefore, isUntitled, notify, openFile, openToSide, saveAll, scriptsCameTo, setState, state } from "../state";
 import { closeComparison } from "../editor/Review";
 import { baseName, dirName, isInside, joinPath, relativeTo, resolvePath } from "../../shared/paths";
 import { imageType, looksBinary } from "../../shared/fileKind";
@@ -62,6 +62,20 @@ const toggle = (path: string) =>
 	});
 /** The workspace whose open folders were last brought back from what was kept. */
 let recalledFor: string | undefined;
+/** The last workspace root observed by Explorer, used to clear stale cut/copy state on workspace switch. */
+let lastWorkspaceRoot: string | undefined;
+/** Whether the Workspace tree accordion is expanded (module-level so `showInExplorer` can open it before mount). */
+const [wsOpen, setWsOpen] = createSignal(recall("explorer.workspace") !== "closed");
+/** Monotonic sequence & active timer for `showInExplorer` / `browseFolderInExplorer` focus retry loops. */
+let focusSearchSeq = 0;
+let focusSearchTimer: ReturnType<typeof setTimeout> | null = null;
+function cancelExplorerFocusSearch() {
+	focusSearchSeq++;
+	if (focusSearchTimer !== null) {
+		clearTimeout(focusSearchTimer);
+		focusSearchTimer = null;
+	}
+}
 /** The row the keyboard is on, for the palette's commands. Forgotten once focus goes to work somewhere else. */
 const [focused, setFocused] = createSignal<Entry | null>(null);
 /** The tree on screen, to put the keyboard back in after a dialog. */
@@ -72,6 +86,44 @@ const [clip, setClip] = createSignal<Clip | null>(null);
 let dragging: Entry | null = null;
 /** The folder a drag would move it into, were it let go now. */
 const [dropInto, setDropInto] = createSignal<string | null>(null);
+
+type GitStatusSnapshot = NonNullable<ReturnType<typeof gitStatus>>;
+type GitChangeKind = NonNullable<GitStatusSnapshot["files"][number]["unstaged"] | GitStatusSnapshot["files"][number]["staged"]>;
+const gitKindCache = new WeakMap<GitStatusSnapshot, Map<string, GitChangeKind>>();
+
+/** Builds/caches a canonical-path -> git-change Map per status snapshot so each tree row looks up status in O(1). */
+export function gitKindMapFor(st: GitStatusSnapshot | null | undefined): Map<string, GitChangeKind> {
+	if (!st) return new Map();
+	let map = gitKindCache.get(st);
+	if (!map) {
+		map = new Map();
+		for (const f of st.files) {
+			const key = canonical(f.path);
+			if (map.has(key)) continue;
+			const kind = f.unstaged ?? f.staged ?? null;
+			if (kind) map.set(key, kind);
+		}
+		gitKindCache.set(st, map);
+	}
+	return map;
+}
+
+/** Clamps a recalled splitter height into `[min, max]`, falling back when missing or non-numeric. */
+export function clampExplorerHeight(raw: string | null, min: number, max: number, fallback: number): number {
+	if (raw === null || raw.trim() === "") return fallback;
+	const n = Number(raw);
+	return Number.isFinite(n) ? Math.max(min, Math.min(max, n)) : fallback;
+}
+
+export const OPEN_EDITORS_MIN_H = 56;
+export const OPEN_EDITORS_MAX_H = 360;
+
+/** Computes the next Open Editors height when dragging the splitter, aligned with SectionSplitter min/max. */
+export function resizeOpenEditorsHeight(current: number, cap: number, delta: number): number {
+	const safeCap = Math.max(OPEN_EDITORS_MIN_H, cap);
+	const base = delta < 0 ? Math.min(current, safeCap) : Math.max(current, OPEN_EDITORS_MIN_H);
+	return Math.max(OPEN_EDITORS_MIN_H, Math.min(OPEN_EDITORS_MAX_H, base + delta));
+}
 
 const kb = (bytes: number) => `${Math.round(bytes / 1024)} KB`;
 const indent = (depth: number) => ({ "padding-left": `${8 + depth * 14}px` });
@@ -139,12 +191,7 @@ function EntryRow(props: { entry: Entry; depth: number }) {
 	const entry = (): Entry => ({ ...props.entry });
 	const isCut = () => clip()?.cut === true && clip()?.path === props.entry.path;
 	const isDirty = () => !isDir() && Boolean(state.dirty[canonical(props.entry.path)]);
-	const gitKind = () => {
-		const st = gitStatus();
-		if (!st || isDir()) return null;
-		const hit = st.files.find((f) => canonical(f.path) === canonical(props.entry.path));
-		return hit ? (hit.unstaged ?? hit.staged ?? null) : null;
-	};
+	const gitKind = () => (isDir() ? null : (gitKindMapFor(gitStatus()).get(canonical(props.entry.path)) ?? null));
 	return (
 		<>
 			<Row
@@ -481,17 +528,26 @@ async function act(action: string | null, entry: Entry, where: { home?: string; 
 				await openFile(governing[0]!.file.path, { keep: true });
 				return;
 			} else {
-				const labels = governing.map((g) => {
-					const title =
-						g.file.ticket && g.file.title && !g.file.title.startsWith(g.file.ticket)
-							? `${g.file.ticket}: ${g.file.title}`
-							: g.file.ticket || g.file.title || g.file.name;
-					return `${title} (${g.reason})`;
+				const picked = await quickPick<DocFile>({
+					title: `Open governing doc for ${entry.name}`,
+					placeholder: "Filter governing documents…",
+					items: governing.map((g) => {
+						const title =
+							g.file.ticket && g.file.title && !g.file.title.startsWith(g.file.ticket)
+								? `${g.file.ticket}: ${g.file.title}`
+								: g.file.ticket || g.file.title || g.file.name;
+						const rel = state.workspace ? relativeTo(state.workspace.root, g.file.path).replace(/\\/g, "/") : g.file.path;
+						return {
+							value: g.file,
+							label: title,
+							description: g.reason,
+							detail: rel,
+							keywords: [title, g.reason, rel, g.file.ticket ?? ""].filter(Boolean).join(" "),
+						};
+					}),
 				});
-				const picked = await choose(`Open governing doc for ${entry.name}`, labels);
-				const idx = picked ? labels.indexOf(picked) : -1;
-				if (idx >= 0) {
-					await openFile(governing[idx]!.file.path, { keep: true });
+				if (picked) {
+					await openFile(picked.path, { keep: true });
 					return;
 				}
 				back = entry.path;
@@ -534,9 +590,29 @@ function bytesToBase64(bytes: Uint8Array): string {
 	return btoa(binary);
 }
 
-function sanitizeDropName(raw: string): string {
-	const cleaned = raw.replace(/[\\/:*?"<>|]+/g, "-").replace(/^\.+/, "").trim();
+/** Client-side size limit for external OS file drops before reading bytes into memory. */
+export const MAX_DROP_FILE_BYTES = 20 * 1024 * 1024;
+
+/** Sanitizes a dropped file's name: removes control chars, path/Windows-illegal chars, leading/trailing dots & spaces. */
+export function sanitizeDropName(raw: string): string {
+	const cleaned = raw
+		.replace(/[\u0000-\u001f\u007f]+/g, "")
+		.replace(/[\\/:*?"<>|]+/g, "-")
+		.replace(/^[\s.]+/, "")
+		.replace(/[\s.]+$/, "");
 	return cleaned || "imported";
+}
+
+/** Decodes dropped text bytes strictly as UTF-8, falling back to Windows-1252 so legacy STARLIMS files never get U+FFFD corruption. */
+export function decodeDroppedText(bytes: Uint8Array): string {
+	try {
+		return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+	} catch (e) {
+		if (e instanceof TypeError) {
+			return new TextDecoder("windows-1252").decode(bytes);
+		}
+		throw e;
+	}
 }
 
 function isExternalFileDrag(e: DragEvent): boolean {
@@ -564,18 +640,45 @@ async function importExternalFiles(files: File[], into: string): Promise<void> {
 		existing.add(finalName.toLowerCase());
 		return finalName;
 	};
+	const existsOnDisk = async (path: string): Promise<boolean> => {
+		try {
+			const sizes = await backend.sizes([path]);
+			return path in sizes;
+		} catch {
+			return false;
+		}
+	};
+	const reserveAvailableDest = async (wanted: string): Promise<{ name: string; path: string } | null> => {
+		let candidate = reserveName(wanted);
+		for (let attempt = 0; attempt < 50; attempt++) {
+			const destPath = joinPath(into, candidate);
+			if (await existsOnDisk(destPath)) {
+				existing.add(candidate.toLowerCase());
+				candidate = reserveName(wanted);
+				continue;
+			}
+			if (await heldFromBefore(destPath)) return null;
+			return { name: candidate, path: destPath };
+		}
+		throw new Error(`could not find an unused file name for ${wanted}`);
+	};
 
 	const imported: string[] = [];
 	const errors: string[] = [];
 	let extractedImages = 0;
 
 	for (const file of files) {
+		if (file.size > MAX_DROP_FILE_BYTES) {
+			errors.push(`${file.name}: exceeds the ${Math.round(MAX_DROP_FILE_BYTES / (1024 * 1024))} MB drop size limit`);
+			continue;
+		}
 		const safeName = sanitizeDropName(file.name);
 		try {
 			if (/\.docx$/i.test(safeName)) {
 				const stem = safeName.replace(/\.docx$/i, "") || "imported";
-				const mdName = reserveName(`${stem}.md`);
-				const docxNameForBackend = `${mdName.replace(/\.md$/i, "")}.docx`;
+				const dest = await reserveAvailableDest(`${stem}.md`);
+				if (!dest) continue;
+				const docxNameForBackend = `${dest.name.replace(/\.md$/i, "")}.docx`;
 				const bytes = new Uint8Array(await file.arrayBuffer());
 				const res = await backend.importDocxBytes({
 					fileName: docxNameForBackend,
@@ -587,28 +690,29 @@ async function importExternalFiles(files: File[], into: string): Promise<void> {
 				extractedImages += res.images.length;
 			} else if (/\.html?$/i.test(safeName)) {
 				const stem = safeName.replace(/\.html?$/i, "") || "imported";
-				const mdName = reserveName(`${stem}.md`);
-				const destPath = joinPath(into, mdName);
-				const md = htmlToMarkdown(await file.text());
-				await backend.write(destPath, md.endsWith("\n") ? md : `${md}\n`, true);
-				imported.push(destPath);
-			} else if (imageType(safeName)) {
-				const imgName = reserveName(safeName);
-				const destPath = joinPath(into, imgName);
+				const dest = await reserveAvailableDest(`${stem}.md`);
+				if (!dest) continue;
 				const bytes = new Uint8Array(await file.arrayBuffer());
-				await backend.writeImage(destPath, bytesToBase64(bytes));
-				imported.push(destPath);
+				const md = htmlToMarkdown(decodeDroppedText(bytes));
+				await backend.write(dest.path, md.endsWith("\n") ? md : `${md}\n`, true);
+				imported.push(dest.path);
+			} else if (imageType(safeName)) {
+				const dest = await reserveAvailableDest(safeName);
+				if (!dest) continue;
+				const bytes = new Uint8Array(await file.arrayBuffer());
+				await backend.writeImage(dest.path, bytesToBase64(bytes));
+				imported.push(dest.path);
 			} else {
 				const bytes = new Uint8Array(await file.arrayBuffer());
 				if (looksBinary(bytes)) {
 					errors.push(`${file.name}: binary files other than images and .docx cannot be dropped here`);
 					continue;
 				}
-				const textName = reserveName(safeName);
-				const destPath = joinPath(into, textName);
-				const text = new TextDecoder("utf-8").decode(bytes);
-				await backend.write(destPath, text, true);
-				imported.push(destPath);
+				const dest = await reserveAvailableDest(safeName);
+				if (!dest) continue;
+				const text = decodeDroppedText(bytes);
+				await backend.write(dest.path, text, true);
+				imported.push(dest.path);
 			}
 		} catch (e: any) {
 			errors.push(`${file.name}: ${errorText(e)}`);
@@ -721,12 +825,18 @@ export function showInExplorer(path: string) {
 	const viewRootCanon = canonical(viewRoot);
 	for (let dir = dirName(path); !top && canonical(dir) !== viewRootCanon && isInside(viewRoot, dir); dir = dirName(dir)) above.push(dir);
 	setExpanded((set) => new Set([...set, ...above]));
+	setWsOpen(true);
+	remember("explorer.workspace", "open");
+	cancelExplorerFocusSearch();
+	const seq = ++focusSearchSeq;
 	showPanel("explorer");
 	// The rows above it are read from the disk as they open: the row is looked for until it is there.
 	let tries = 0;
 	const look = () => {
+		if (seq !== focusSearchSeq) return;
+		focusSearchTimer = null;
 		if (document.querySelector(`[data-panel="explorer"] [data-row${top ? "" : `="${CSS.escape(path)}"`}]`) || tries++ > 20) return void tree?.focus(top ? undefined : path);
-		setTimeout(look, 100);
+		focusSearchTimer = setTimeout(look, 100);
 	};
 	look();
 }
@@ -735,15 +845,21 @@ export function showInExplorer(path: string) {
 export function browseFolderInExplorer(folderPath: string, label?: string) {
 	const root = state.workspace?.root;
 	if (!root || !isInside(root, folderPath)) return notify("That folder is not in this workspace.");
+	setWsOpen(true);
+	remember("explorer.workspace", "open");
 	setScopedFolder({ path: folderPath, label });
+	cancelExplorerFocusSearch();
+	const seq = ++focusSearchSeq;
 	showPanel("explorer");
 	let tries = 0;
 	const look = () => {
+		if (seq !== focusSearchSeq) return;
+		focusSearchTimer = null;
 		if (document.querySelector(`[data-panel="explorer"] .explorer-scope-bar`) || tries++ > 20) {
 			tree?.focus();
 			return;
 		}
-		setTimeout(look, 60);
+		focusSearchTimer = setTimeout(look, 60);
 	};
 	look();
 }
@@ -787,12 +903,21 @@ export function Explorer() {
 		on(
 			() => state.workspace?.root,
 			(root) => {
+				if (root !== lastWorkspaceRoot) {
+					lastWorkspaceRoot = root;
+					setClip(null);
+				}
 				const cur = scopedFolder();
 				if (cur && (!root || !isInside(root, cur.path))) setScopedFolder(null);
+				if (!root) {
+					recalledFor = undefined;
+					setExpanded(new Set<string>());
+					return;
+				}
 				// Once for a workspace, not each time the panel comes back: what was opened while another panel was
 				// showing (the folders above a file another panel asked to be shown here) is not shut again by the
 				// panel's return. Folders opened before the first showing are kept beside the ones remembered.
-				if (!root || !keeps() || recalledFor === root) return;
+				if (!keeps() || recalledFor === root) return;
 				recalledFor = root;
 				setExpanded((set) => new Set([...openFolders(recall(`tree:${root}`), root), ...[...set].filter((path) => isInside(root, path))]));
 			},
@@ -805,21 +930,20 @@ export function Explorer() {
 	});
 	onCleanup(() => {
 		document.removeEventListener("focusin", forget);
+		cancelExplorerFocusSearch();
 		setFocused(null);
 		tree = undefined;
 	});
 	const [openEdOpen, setOpenEdOpen] = createSignal(recall("explorer.openEditors") !== "closed");
-	const savedOpenEdH = Number(recall("explorer.openEditors.h"));
-	const [openEdH, setOpenEdH] = createSignal(Number.isFinite(savedOpenEdH) && savedOpenEdH >= 56 ? savedOpenEdH : 120);
+	const [openEdH, setOpenEdH] = createSignal(clampExplorerHeight(recall("explorer.openEditors.h"), OPEN_EDITORS_MIN_H, OPEN_EDITORS_MAX_H, 120));
 	const toggleOpenEd = () => {
 		const next = !openEdOpen();
 		setOpenEdOpen(next);
 		remember("explorer.openEditors", next ? "open" : "closed");
 	};
-	const openEdCap = () => Math.max(44, openEditorRows().length * 26 + 16);
+	const openEdCap = () => Math.max(OPEN_EDITORS_MIN_H, openEditorRows().length * 26 + 16);
 	const resizeOpenEd = (delta: number) => {
-		const base = Math.min(openEdH(), openEdCap());
-		const next = Math.max(44, Math.min(360, base + delta));
+		const next = resizeOpenEditorsHeight(openEdH(), openEdCap(), delta);
 		setOpenEdH(next);
 		remember("explorer.openEditors.h", String(Math.round(next)));
 	};
@@ -828,7 +952,6 @@ export function Explorer() {
 		remember("explorer.openEditors.h", "120");
 	};
 
-	const [wsOpen, setWsOpen] = createSignal(recall("explorer.workspace") !== "closed");
 	const [outlineFilter, setOutlineFilter] = createSignal("");
 	createEffect(() => {
 		if (scopedFolder()) setWsOpen(true);
@@ -836,12 +959,12 @@ export function Explorer() {
 	const toggleWs = () => {
 		const next = !wsOpen();
 		setWsOpen(next);
+		if (!next) tree = undefined;
 		remember("explorer.workspace", next ? "open" : "closed");
 	};
 
 	const [outlineOpen, setOutlineOpen] = createSignal(recall("explorer.outline") !== "closed");
-	const savedOutlineH = Number(recall("explorer.outline.h"));
-	const [outlineH, setOutlineH] = createSignal(Number.isFinite(savedOutlineH) && savedOutlineH >= 80 ? savedOutlineH : 210);
+	const [outlineH, setOutlineH] = createSignal(clampExplorerHeight(recall("explorer.outline.h"), 80, 480, 210));
 	const toggleOutline = () => {
 		const next = !outlineOpen();
 		setOutlineOpen(next);
@@ -934,40 +1057,53 @@ export function Explorer() {
 						<Show when={openEditorRows().length} fallback={<p class="hint explorer-empty-hint">No open editors.</p>}>
 							<div class="tree explorer-open-list" role="list" aria-label="Open editors">
 								<For each={openEditorRows()}>
-									{(item) => (
-										<div
-											class="tree-row open-editor-row"
-											role="listitem"
-											classList={{ selected: item.active, dirty: item.dirty }}
-											title={isUntitled(item.path) ? `${item.name} (unsaved buffer)` : item.path}
-											onClick={() => {
-												closeComparison();
-												setState("centerView", "editors");
-												setState("activeGroup", item.groupIndex);
-												setState("groups", item.groupIndex, "active", item.path);
-											}}
-										>
-											<button
-												class="open-editor-close"
-												title={`Close ${item.name}`}
-												aria-label={`Close ${item.name}`}
-												onClick={(e) => {
-													e.stopPropagation();
-													void closeTab(item.path, item.groupIndex);
+									{(item) => {
+										const activateOpenEditor = () => {
+											closeComparison();
+											if (state.bottomMaximized) setState("bottomMaximized", false);
+											setState("centerView", "editors");
+											setState("activeGroup", item.groupIndex);
+											setState("groups", item.groupIndex, "active", item.path);
+											focusEditor();
+										};
+										return (
+											<div
+												class="tree-row open-editor-row"
+												role="listitem"
+												tabindex={0}
+												classList={{ selected: item.active, dirty: item.dirty }}
+												title={isUntitled(item.path) ? `${item.name} (unsaved buffer)` : item.path}
+												onClick={activateOpenEditor}
+												onKeyDown={(e) => {
+													if (e.target !== e.currentTarget) return;
+													if (e.key === "Enter" || e.key === " ") {
+														e.preventDefault();
+														activateOpenEditor();
+													}
 												}}
 											>
-												<Show when={item.dirty} fallback={<Icon name="close" />}>
-													<span class="open-editor-dot" aria-hidden="true" />
-													<Icon name="close" class="open-editor-x" />
+												<button
+													class="open-editor-close"
+													title={`Close ${item.name}`}
+													aria-label={`Close ${item.name}`}
+													onClick={(e) => {
+														e.stopPropagation();
+														void closeTab(item.path, item.groupIndex);
+													}}
+												>
+													<Show when={item.dirty} fallback={<Icon name="close" />}>
+														<span class="open-editor-dot" aria-hidden="true" />
+														<Icon name="close" class="open-editor-x" />
+													</Show>
+												</button>
+												<FileMark name={item.name} />
+												<span class="label">{item.name}</span>
+												<Show when={item.folder}>
+													<span class="meta open-editor-folder">{item.folder}</span>
 												</Show>
-											</button>
-											<FileMark name={item.name} />
-											<span class="label">{item.name}</span>
-											<Show when={item.folder}>
-												<span class="meta open-editor-folder">{item.folder}</span>
-											</Show>
-										</div>
-									)}
+											</div>
+										);
+									}}
 								</For>
 							</div>
 						</Show>
@@ -977,9 +1113,9 @@ export function Explorer() {
 			<Show when={openEdOpen() && openEditorRows().length > 0}>
 				<SectionSplitter
 					label="Height of Open editors"
-					value={openEdH()}
-					min={56}
-					max={360}
+					value={Math.min(openEdH(), openEdCap())}
+					min={OPEN_EDITORS_MIN_H}
+					max={OPEN_EDITORS_MAX_H}
 					onDrag={resizeOpenEd}
 					onReset={resetOpenEd}
 				/>

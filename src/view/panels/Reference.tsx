@@ -1,14 +1,15 @@
 // Built-in functions, classes and keywords from the language server's
 // bundled reference, read through completion and hover on a scratch document.
-import { createMemo, createResource, createSignal, For, Show } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, For, on, Show } from "solid-js";
 import type { DocFile } from "../../shared/protocol";
 import { Icon } from "../Icon";
 import { monaco } from "../editor/monaco";
 import { activeEditor } from "../editor/EditorGroup";
 import { activeLiveEditor } from "../editor/liveBridge";
-import { session } from "../lsp/session";
+import { review } from "../editor/Review";
+import { lspReadyEpoch, session } from "../lsp/session";
 import { docs } from "../project";
-import { notify, openFile, state } from "../state";
+import { activeDoc, notify, openFile, state } from "../state";
 import { focusRowsBelow, IconButton, Row, RowGroup, Rows } from "./Rows";
 import { searchFor } from "./Search";
 import { SectionSplitter } from "./SectionSplitter";
@@ -32,8 +33,50 @@ const KINDS: [kind: number, title: string][] = [
 ];
 const LISTED = new Set(KINDS.map(([kind]) => kind));
 
+let refScratchSeq = 0;
+
+/** Allocates a unique scratch document URI so concurrent Reference requests never collide or close each other's buffer. */
+export function nextReferenceScratchUri(root: string): string {
+	return monaco.Uri.file(`${root}/.ssl-studio/reference-scratch-${++refScratchSeq}.ssl`).toString();
+}
+
+/** Clamps a recalled splitter height into `[min, max]`, falling back when missing or non-numeric. */
+export function clampReferenceHeight(raw: string | null, min = 100, max = 520, fallback = 220): number {
+	if (raw === null || raw.trim() === "") return fallback;
+	const n = Number(raw);
+	return Number.isFinite(n) ? Math.max(min, Math.min(max, n)) : fallback;
+}
+
+/** Inserts a reference identifier into the active visible text editor (CM6 Live or visible Monaco), never into hidden/binary views. */
+export function insertReferenceText(label: string): boolean {
+	if (state.centerView !== "editors" || review()) {
+		notify(`Switch to an editable text view to insert ${label}.`);
+		return false;
+	}
+	const doc = activeDoc();
+	if (!doc || doc.binary) {
+		notify(`Open an editable text file to insert ${label}.`);
+		return false;
+	}
+	const live = activeLiveEditor();
+	if (live) {
+		live.insertText(label);
+		return true;
+	}
+	const editor = activeEditor();
+	const model = editor?.getModel();
+	if (!editor || !model || model.isDisposed() || !editor.getDomNode()?.offsetParent) {
+		notify(`Switch to an editable text view to insert ${label}.`);
+		return false;
+	}
+	editor.focus();
+	editor.trigger("reference", "type", { text: label });
+	return true;
+}
+
 async function loadReference(root: string): Promise<Entry[]> {
-	const uri = monaco.Uri.file(`${root}/.ssl-studio/reference-scratch.ssl`).toString();
+	await session.waitReady();
+	const uri = nextReferenceScratchUri(root);
 	session.client.notify("textDocument/didOpen", { textDocument: { uri, languageId: "ssl", version: 1, text: "\n" } });
 	try {
 		const result = await session.request("textDocument/completion", { textDocument: { uri }, position: { line: 0, character: 0 } });
@@ -54,9 +97,11 @@ async function loadReference(root: string): Promise<Entry[]> {
  */
 async function describe(entry: Entry, root: string): Promise<string> {
 	const short = () => [entry.detail ? `\`${entry.detail}\`` : "", entry.doc ?? ""].filter(Boolean).join("\n\n");
-	const uri = monaco.Uri.file(`${root}/.ssl-studio/reference-scratch.ssl`).toString();
-	session.client.notify("textDocument/didOpen", { textDocument: { uri, languageId: "ssl", version: 1, text: entry.label } });
+	let uri: string | null = null;
 	try {
+		await session.waitReady();
+		uri = nextReferenceScratchUri(root);
+		session.client.notify("textDocument/didOpen", { textDocument: { uri, languageId: "ssl", version: 1, text: entry.label } });
 		const hover = await session.request("textDocument/hover", { textDocument: { uri }, position: { line: 0, character: 1 } });
 		const contents = hover?.contents;
 		const full = (Array.isArray(contents) ? contents : [contents]).map((c: any) => (typeof c === "string" ? c : c?.value ?? "")).join("\n\n");
@@ -64,7 +109,7 @@ async function describe(entry: Entry, root: string): Promise<string> {
 	} catch {
 		return short();
 	} finally {
-		session.client.notify("textDocument/didClose", { textDocument: { uri } });
+		if (uri) session.client.notify("textDocument/didClose", { textDocument: { uri } });
 	}
 }
 
@@ -74,8 +119,14 @@ export const describeElement = (name: string, root: string) => describe({ label:
 export function Reference() {
 	const [filter, setFilter] = createSignal("");
 	const [open, setOpen] = createSignal<Entry | null>(null);
-	const savedDetailH = Number(recall("reference.detail.h"));
-	const [detailH, setDetailH] = createSignal(Number.isFinite(savedDetailH) && savedDetailH >= 100 ? savedDetailH : 220);
+	createEffect(
+		on(
+			() => state.workspace?.root,
+			() => setOpen(null),
+			{ defer: true },
+		),
+	);
+	const [detailH, setDetailH] = createSignal(clampReferenceHeight(recall("reference.detail.h"), 100, 520, 220));
 	const resizeDetail = (delta: number) => {
 		const next = Math.max(100, Math.min(520, detailH() + delta));
 		setDetailH(next);
@@ -86,12 +137,20 @@ export function Reference() {
 		remember("reference.detail.h", "220");
 	};
 	const [reference, { refetch }] = createResource(
-		() => state.lsp.state === "running" && state.workspace?.root,
-		(root) => loadReference(root as string).then((entries) => ({ entries, error: "" }), (e) => ({ entries: [] as Entry[], error: String(e?.message ?? e) })),
+		() => {
+			const epoch = lspReadyEpoch();
+			const root = state.workspace?.root;
+			return state.lsp.state === "running" && epoch > 0 && root ? ([root, epoch] as const) : false;
+		},
+		([root]) => loadReference(root).then((entries) => ({ entries, error: "" }), (e) => ({ entries: [] as Entry[], error: String(e?.message ?? e) })),
 	);
 	const entries = () => reference()?.entries ?? [];
 	const [details] = createResource(
-		() => open() && state.workspace && ([open()!, state.workspace.root] as const),
+		() => {
+			const cur = open();
+			const root = state.workspace?.root;
+			return cur && root ? ([cur, root, lspReadyEpoch()] as const) : false;
+		},
 		([entry, root]) => describe(entry, root).catch(() => entry.detail ?? ""),
 	);
 	const shown = () => entries().filter((e) => !filter() || e.label.toLowerCase().includes(filter().toLowerCase()));
@@ -108,17 +167,12 @@ export function Reference() {
 		searchFor(label, { wholeWord: true, include: "", exclude: "" });
 	};
 	const insert = (label: string) => {
-		const live = activeLiveEditor();
-		if (live) return live.insertText(label);
-		const editor = activeEditor();
-		if (!editor?.getModel()) return notify(`Open a file to insert ${label}.`);
-		editor.focus();
-		editor.trigger("reference", "type", { text: label });
+		insertReferenceText(label);
 	};
 	/** Why the list is empty, and whether trying again can help. */
 	const empty = (): { text: string; retry?: boolean } => {
 		if (serverDown()) return { text: `${serverDown()} The reference comes from it.` };
-		if (reference.loading && !entries().length) return { text: "Loading the reference…" };
+		if ((reference.loading || (state.lsp.state === "running" && lspReadyEpoch() === 0)) && !entries().length) return { text: "Loading the reference…" };
 		if (reference()?.error) return { text: `The reference could not be loaded: ${reference()!.error}`, retry: true };
 		if (!entries().length) return { text: "The language server sent no reference entries.", retry: true };
 		return { text: `No entry matches “${filter()}”. Clear the filter to see them all.` };

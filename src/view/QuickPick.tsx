@@ -3,7 +3,7 @@
 // What it lists is said by the first character in it (src/shared/quickPrefix.ts): the box opens with
 // that character, and typing another, or taking it out, lists something else without closing the box.
 import { FileMark } from "./FileMark";
-import { createEffect, createMemo, createResource, createSignal, createUniqueId, For, Show } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, createUniqueId, For, onCleanup, Show } from "solid-js";
 import { backend } from "./backend";
 import { commands, keysFor, recentCommands, runCommand } from "./commands";
 import { jumpToTableColumn } from "./editor/liveBridge";
@@ -58,7 +58,7 @@ function docDisplayTitle(doc: DocFile): string {
 	return doc.ticket || doc.title || doc.heading || doc.name;
 }
 
-function matchesDocType(doc: DocFile | undefined, path: string, wantedRaw: string): boolean {
+export function matchesDocType(doc: DocFile | undefined, path: string, wantedRaw: string): boolean {
 	const w = wantedRaw.toLowerCase();
 	switch (w) {
 		case "spec":
@@ -97,7 +97,7 @@ function matchesDocType(doc: DocFile | undefined, path: string, wantedRaw: strin
 		case "ssl":
 		case "script":
 		case "code":
-			return /\.(ssl|srvscr|ds)$/i.test(path);
+			return /\.(ssl|srvscr|ds)(\.txt)?$/i.test(path);
 		default:
 			return doc?.group?.toLowerCase() === w || doc?.kind?.toLowerCase() === w;
 	}
@@ -114,14 +114,45 @@ function Picker(props: { mode: QuickMode }) {
 	const [failed, setFailed] = createSignal("");
 	const close = () => setState("quickPick", null);
 	const rel = (path: string) => relativeTo(state.workspace?.root, path);
+	createEffect(() => {
+		void mode();
+		void state.workspace?.root;
+		setFailed("");
+	});
 	const [files] = createResource(
 		() => mode() === "files" && state.workspace?.root,
-		() => backend.files().catch((e: any) => (setFailed(String(e?.message ?? e)), [] as string[])),
+		() => {
+			setFailed("");
+			return backend.files().catch((e: any) => (setFailed(String(e?.message ?? e)), [] as string[]));
+		},
 	);
-	const [symbols] = createResource(
-		() => (mode() === "symbols" ? query() : false),
-		(q) => session.workspaceSymbols(q as string).catch(() => []),
-	);
+	const [debouncedSymbolQuery, setDebouncedSymbolQuery] = createSignal<string | false>(false);
+	const [symbolsPending, setSymbolsPending] = createSignal(false);
+	createEffect(() => {
+		if (mode() !== "symbols") {
+			setSymbolsPending(false);
+			setDebouncedSymbolQuery(false);
+			return;
+		}
+		const q = query();
+		setSymbolsPending(true);
+		const timer = setTimeout(() => {
+			setSymbolsPending(false);
+			setDebouncedSymbolQuery(q);
+		}, 120);
+		onCleanup(() => clearTimeout(timer));
+	});
+	let symbolSeq = 0;
+	onCleanup(() => symbolSeq++);
+	const [symbols] = createResource(debouncedSymbolQuery, async (q) => {
+		const seq = ++symbolSeq;
+		try {
+			const list = await session.workspaceSymbols(q);
+			return seq === symbolSeq ? list : [];
+		} catch {
+			return [];
+		}
+	});
 	const items = createMemo<Item[]>(() => {
 		if (mode() === "files") {
 			// Parse `tag:`, `status:`, `type:` facets, then `file#heading` or `file:line:col`.
@@ -470,9 +501,14 @@ function Picker(props: { mode: QuickMode }) {
 			setSelected(0);
 		}
 	};
-	// Enter pressed before the list arrived picks once it does.
+	// Clamp selection reactively whenever the result list shrinks or changes.
+	createEffect(() => {
+		const max = Math.max(0, items().length - 1);
+		setSelected((i) => Math.max(0, Math.min(i, max)));
+	});
+	// Enter pressed while the list is still empty and loading picks once it arrives.
 	const [pendingEnter, setPendingEnter] = createSignal(false);
-	const loading = () => (mode() === "files" && files.loading) || (mode() === "symbols" && symbols.loading);
+	const loading = () => (mode() === "files" && files.loading) || (mode() === "symbols" && (symbolsPending() || symbols.loading));
 	createEffect(() => {
 		if (pendingEnter() && !loading()) {
 			setPendingEnter(false);
@@ -483,7 +519,7 @@ function Picker(props: { mode: QuickMode }) {
 	const status = () => {
 		if (items().length) return "";
 		if (loading()) return "Loading…";
-		if (failed()) return failed();
+		if (mode() === "files" && failed()) return failed();
 		if (mode() === "files") return !state.workspace ? "Open a folder to go to its files." : query().trim() ? "No files match." : "This folder has no files.";
 		if (mode() === "symbols") return !docs().length && state.lsp.state !== "running" ? "The language server is not running." : query().trim() ? "No symbols, headings, or tagged documents match." : "Type a symbol, #tag, heading, ticket key, or document title.";
 		if (mode() === "outline") {
@@ -501,7 +537,7 @@ function Picker(props: { mode: QuickMode }) {
 		if (mode() === "line") return !activePath() ? "Open a file to go to a line of it." : activeDoc()?.binary ? "The open file is not text: it has no lines to go to." : `Type a line number, 1 to ${activeDoc()?.model.getLineCount() ?? 1}; 12:5 is line 12, column 5.`;
 		return "No commands match.";
 	};
-	const move = (by: number) => setSelected((i) => Math.max(0, Math.min(i + by, items().length - 1)));
+	const move = (by: number) => setSelected((i) => Math.max(0, Math.min(i + by, Math.max(0, items().length - 1))));
 	// The selected row stays in view when the arrows take it past the edge.
 	let list: HTMLDivElement | undefined;
 	createEffect(() => {
@@ -535,11 +571,18 @@ function Picker(props: { mode: QuickMode }) {
 				// What is typed after Enter was pressed is a new question: the Enter that was waiting for the list is let go.
 				onInput={(e) => (setText(e.currentTarget.value), setSelected(0), setPendingEnter(false))}
 				onKeyDown={(e) => {
+					if (e.isComposing || e.keyCode === 229) return;
 					if (e.key === "ArrowDown") (e.preventDefault(), move(1));
 					else if (e.key === "ArrowUp") (e.preventDefault(), move(-1));
 					else if (e.key === "PageDown") (e.preventDefault(), move(PAGE));
 					else if (e.key === "PageUp") (e.preventDefault(), move(-PAGE));
-					else if (e.key === "Enter") (e.preventDefault(), e.stopPropagation(), loading() ? setPendingEnter(true) : pick(items()[selected()]));
+					else if (e.key === "Enter") {
+						e.preventDefault();
+						e.stopPropagation();
+						const current = items()[selected()];
+						if (current) pick(current);
+						else if (loading()) setPendingEnter(true);
+					}
 				}}
 			/>
 			<div class="items" role="listbox" id={listId} aria-label={TITLES[mode()]} ref={list}>

@@ -2,9 +2,10 @@
 // the snippets the project keeps in its knowledge base (ADR 0012), inserted
 // as they are written. When a plan chart is open, Palette switches cleanly to
 // business-analyst process shapes and stage navigation (ADR 0027).
-import { createEffect, createResource, createSignal, For, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, Show } from "solid-js";
 import { snippetAsText, TEMPLATES, type Template } from "../../shared/houseStyle";
 import { CALLOUT_PRESETS } from "../../shared/markdownEdit";
+import { createEmptyTable } from "../../shared/markdownTables";
 import { baseName, joinPath, relativeTo } from "../../shared/paths";
 import { isCatalog, registryTitle, toneOf } from "../../shared/projectDocs";
 import type { DocFile } from "../../shared/protocol";
@@ -13,7 +14,9 @@ import { backend } from "../backend";
 import { quickPick, type QuickPickOption } from "../dialogs";
 import { activeEditor } from "../editor/EditorGroup";
 import { activeLiveEditor } from "../editor/liveBridge";
+import { monaco } from "../editor/monaco";
 import { regionColor } from "../editor/regions";
+import { review } from "../editor/Review";
 import { Icon, type IconName } from "../Icon";
 import { activeGraphBridge } from "../graph/graphBridge";
 import {
@@ -36,26 +39,115 @@ import "../plan/planExtra.css";
 import { NodeTests, PlanTests } from "../plan/PlanTests";
 import { assistOf } from "../plan/run";
 import { docs, isMarkdown } from "../project";
-import { activePath, applyText, markdownMode, notify, openFile, planMode, setMarkdownMode, state } from "../state";
+import { activeDoc, activePath, applyText, markdownMode, notify, openFile, planMode, setMarkdownMode, state } from "../state";
 import { insertCalloutInteractive, insertImageInteractive, insertMarkdownTemplate, loadMarkdownTemplates, manageTemplates, newNoteFromTemplate } from "../templater";
 import { IconButton, Row, RowGroup, Rows, setFolds } from "./Rows";
 import { SectionSplitter } from "./SectionSplitter";
 
+let lastHandledPlanTabSeq = 0;
+
+/** Clamps a recalled splitter height into `[min, max]`, falling back when missing or non-numeric. */
+export function clampPaletteHeight(raw: string | null, min = 80, max = 440, fallback = 190): number {
+	if (raw === null || raw.trim() === "") return fallback;
+	const n = Number(raw);
+	return Number.isFinite(n) ? Math.max(min, Math.min(max, n)) : fallback;
+}
+
+/** Formats a kept project snippet for either a Markdown document (wrapping SQL/SSL in fenced blocks) or a code editor. */
+export function formatSnippetForEditor(text: string, snippetFileName: string, targetIsMarkdown: boolean): string {
+	const normalized = text.replace(/\r\n/g, "\n");
+	if (!targetIsMarkdown) return normalized;
+	const raw = normalized.trimEnd();
+	const lang = /\.sql$/i.test(snippetFileName) ? "sql" : /\.(ssl|srvscr|ds)$/i.test(snippetFileName) ? "ssl" : "";
+	return lang ? `\`\`\`${lang}\n${raw}\n\`\`\`\n` : `${raw}\n`;
+}
+
+/** Returns the active Monaco editor and model only when a non-binary text editor is genuinely visible in front. */
+function visibleMonacoEditor(): { editor: monaco.editor.IStandaloneCodeEditor; model: monaco.editor.ITextModel; doc: NonNullable<ReturnType<typeof activeDoc>> } | null {
+	if (state.centerView !== "editors" || review()) return null;
+	const doc = activeDoc();
+	if (!doc || doc.binary) return null;
+	const editor = activeEditor();
+	const model = editor?.getModel();
+	if (!editor || !model || model.isDisposed() || !editor.getDomNode()?.offsetParent) return null;
+	return { editor, model, doc };
+}
+
+/** Inserts text into a visible Monaco editor as one undoable edit, optionally as a standalone block with cursor placement. */
+function insertBlockIntoMonaco(
+	editor: monaco.editor.IStandaloneCodeEditor,
+	model: monaco.editor.ITextModel,
+	text: string,
+	cursorOffset?: number,
+	opts?: { asBlock?: boolean; source?: string; selectLength?: number },
+): void {
+	const position = editor.getPosition() ?? model.getFullModelRange().getEndPosition();
+	const sel = editor.getSelection() ?? {
+		startLineNumber: position.lineNumber,
+		startColumn: position.column,
+		endLineNumber: position.lineNumber,
+		endColumn: position.column,
+	};
+	const isEmpty = sel.startLineNumber === sel.endLineNumber && sel.startColumn === sel.endColumn;
+	const eol = model.getEOL();
+	const normText = text.replace(/\r?\n/g, eol);
+	const normCursor = cursorOffset !== undefined ? text.slice(0, cursorOffset).replace(/\r?\n/g, eol).length : null;
+	let insertText = normText;
+	let offsetDelta = 0;
+	let range: monaco.IRange = sel;
+	if (opts?.asBlock && isEmpty) {
+		const lineContent = model.getLineContent(sel.startLineNumber);
+		if (lineContent.trim()) {
+			const endCol = lineContent.length + 1;
+			range = { startLineNumber: sel.startLineNumber, startColumn: endCol, endLineNumber: sel.startLineNumber, endColumn: endCol };
+			insertText = `${eol}${eol}${normText}`;
+			offsetDelta = eol.length * 2;
+		}
+	}
+	const startOffset = model.getOffsetAt({ lineNumber: range.startLineNumber, column: range.startColumn });
+	editor.pushUndoStop();
+	editor.executeEdits(opts?.source ?? "palette", [{ range, text: insertText, forceMoveMarkers: true }]);
+	editor.pushUndoStop();
+	if (normCursor !== null) {
+		const targetPos = model.getPositionAt(startOffset + offsetDelta + normCursor);
+		if (opts?.selectLength && opts.selectLength > 0) {
+			const endPos = model.getPositionAt(startOffset + offsetDelta + normCursor + opts.selectLength);
+			editor.setSelection(new monaco.Range(targetPos.lineNumber, targetPos.column, endPos.lineNumber, endPos.column));
+		} else {
+			editor.setPosition(targetPos);
+		}
+		editor.revealPositionInCenterIfOutsideViewport(targetPos);
+	}
+	editor.focus();
+}
+
 export function insertTemplate(template: Template) {
+	if (state.centerView !== "editors" || review()) return notify("Switch to an editable text view to insert a template.");
+	const doc = activeDoc();
+	if (!doc || doc.binary) return notify("Open an editable text file to insert a template.");
 	const live = activeLiveEditor();
 	if (live) {
 		live.insertText(snippetAsText(template.body()));
 		return;
 	}
-	const editor = activeEditor();
-	if (!editor?.getModel()) return notify("Open a file to insert a template.");
+	const target = visibleMonacoEditor();
+	if (!target) return notify("Switch to an editable text view to insert a template.");
+	const { editor, model } = target;
+	const existingPos = editor.getPosition();
+	const position = existingPos ?? model.getFullModelRange().getEndPosition();
+	if (!existingPos) editor.setPosition(position);
 	editor.focus();
 	const snippets = editor.getContribution("snippetController2") as unknown as { insert(text: string): void } | null;
-	const position = editor.getPosition()!;
-	const line = editor.getModel()!.getLineContent(position.lineNumber);
+	const line = model.getLineContent(position.lineNumber);
 	// Templates start a line of their own.
 	const body = template.body();
-	snippets?.insert(line.trim() && position.column > 1 ? `\n${body}` : body);
+	const needsNewline = Boolean(line.trim() && position.column > 1);
+	if (snippets) {
+		snippets.insert(needsNewline ? `\n${body}` : body);
+	} else {
+		const plain = snippetAsText(body);
+		insertBlockIntoMonaco(editor, model, needsNewline ? `\n${plain}` : plain, undefined, { source: "template" });
+	}
 }
 
 /** What is shown under the list in the SSL palette: a template, or a snippet the project keeps, with what it would insert. */
@@ -78,41 +170,113 @@ export const keptSnippets = (): DocFile[] => docs().filter((d) => d.exists && d.
 
 const snippetText = (file: DocFile) => backend.read(file.path).then((f) => f.text);
 
-/** Puts a kept snippet at the cursor, as it is written: a `$` in a query is a `$`, not a field to fill. */
-export async function insertSnippet(file: DocFile) {
-	let live = activeLiveEditor();
+async function ensureEditableMd() {
+	if (state.centerView !== "editors" || review()) {
+		notify("Switch to an editable Markdown view to insert that block.");
+		return null;
+	}
 	const path = activePath();
+	const doc = activeDoc();
+	if (!path || !doc || doc.binary || !isMarkdown(doc.path)) {
+		notify("Open a Markdown document to insert that block.");
+		return null;
+	}
+	const startRoot = state.workspace?.root;
+	if (!activeLiveEditor() && !activeEditor()?.getDomNode()?.offsetParent) {
+		if (markdownMode(path) === "read") {
+			setMarkdownMode(path, state.settings.livePreview === false ? "source" : "live");
+			await new Promise((r) => setTimeout(r, 40));
+			if (state.centerView !== "editors" || review() || state.workspace?.root !== startRoot || activePath() !== path) return null;
+		}
+	}
+	const live = activeLiveEditor();
+	if (live) return { kind: "live" as const, live };
+	const monacoTarget = visibleMonacoEditor();
+	if (monacoTarget && isMarkdown(monacoTarget.doc.path)) {
+		return { kind: "source" as const, editor: monacoTarget.editor, model: monacoTarget.model };
+	}
+	notify("Switch to an editable Markdown view to insert that block.");
+	return null;
+}
+
+/** Inserts a 3×2 Markdown table into the active Markdown editor (CM6 Live Preview or visible Monaco Source mode). */
+export async function insertTableInMd(): Promise<boolean> {
+	const target = await ensureEditableMd();
+	if (!target) return false;
+	if (target.kind === "live") {
+		target.live.runAction("md-table-insert");
+		return true;
+	}
+	const { text, cursorOffset } = createEmptyTable(3, 2);
+	insertBlockIntoMonaco(target.editor, target.model, `${text}\n`, cursorOffset, {
+		asBlock: true,
+		source: "md-table-insert",
+		selectLength: "Column 1".length,
+	});
+	return true;
+}
+
+/** Inserts a fenced Mermaid flowchart block into the active Markdown editor (CM6 Live Preview or visible Monaco Source mode). */
+export async function insertMermaidInMd(): Promise<boolean> {
+	const target = await ensureEditableMd();
+	if (!target) return false;
+	const block = "```mermaid\nflowchart LR\n\tA[Start] --> B[End]\n```\n";
+	const cursorOffset = "```mermaid\nflowchart LR\n\t".length;
+	if (target.kind === "live") {
+		target.live.insertText(block, cursorOffset, { asBlock: true });
+		return true;
+	}
+	insertBlockIntoMonaco(target.editor, target.model, block, cursorOffset, { asBlock: true, source: "md-mermaid-insert" });
+	return true;
+}
+
+/** Puts a kept snippet at the cursor, as it is written: a `$` in a query is a `$`, not a field to fill. */
+export async function insertSnippet(file: DocFile, readSnippet: (f: DocFile) => Promise<string> = snippetText) {
+	if (state.centerView !== "editors" || review()) return notify("Switch to an editable text view to insert a snippet.");
+	const startDoc = activeDoc();
+	if (!startDoc || startDoc.binary) return notify("Open an editable text file to insert a snippet into. Its row's title says where it is kept.");
+	const startRoot = state.workspace?.root;
+	const path = activePath();
+	let live = activeLiveEditor();
 	if (!live && path && isMarkdown(path) && !activeEditor()?.getDomNode()?.offsetParent) {
 		if (markdownMode(path) === "read") {
 			setMarkdownMode(path, state.settings.livePreview === false ? "source" : "live");
 			await new Promise((r) => setTimeout(r, 40));
+			if (state.centerView !== "editors" || review() || state.workspace?.root !== startRoot || activePath() !== path) return;
 			live = activeLiveEditor();
 		}
 	}
-	const editor = activeEditor();
-	const model = editor?.getModel();
-	if (!live && (!editor || !model)) return notify("Open a file to insert a snippet into. Its row's title says where it is kept.");
+	if (!live && !visibleMonacoEditor()) return notify("Open an editable text view to insert a snippet into. Its row's title says where it is kept.");
 	let text: string;
 	try {
-		text = await snippetText(file);
+		text = await readSnippet(file);
 	} catch (e: any) {
 		return notify(`The snippet could not be read: ${e?.message ?? e}`, "error");
 	}
-	if (live) {
-		const raw = text.replace(/\r\n/g, "\n").trimEnd();
-		const lang = /\.sql$/i.test(file.name) ? "sql" : /\.(ssl|srvscr|ds)$/i.test(file.name) ? "ssl" : "";
-		live.insertText(lang ? `\`\`\`${lang}\n${raw}\n\`\`\`\n` : `${raw}\n`, undefined, { asBlock: true });
+	if (state.centerView !== "editors" || review() || state.workspace?.root !== startRoot || activePath() !== path) return;
+	const curDoc = activeDoc();
+	if (!curDoc || curDoc.binary) return;
+	const curLive = activeLiveEditor();
+	if (curLive) {
+		curLive.insertText(formatSnippetForEditor(text, file.name, true), undefined, { asBlock: true });
 		return;
 	}
-	const position = editor!.getPosition() ?? model!.getFullModelRange().getEndPosition();
-	const selection = editor!.getSelection();
+	const target = visibleMonacoEditor();
+	if (!target) return notify("Open an editable text view to insert a snippet into. Its row's title says where it is kept.");
+	const { editor, model } = target;
+	if (isMarkdown(curDoc.path)) {
+		insertBlockIntoMonaco(editor, model, formatSnippetForEditor(text, file.name, true), undefined, { asBlock: true, source: "snippet" });
+		return;
+	}
+	const position = editor.getPosition() ?? model.getFullModelRange().getEndPosition();
+	const selection = editor.getSelection();
 	const range = selection && !selection.isEmpty() ? selection : { startLineNumber: position.lineNumber, startColumn: position.column, endLineNumber: position.lineNumber, endColumn: position.column };
 	// A snippet starts a line of its own, as a template does.
-	const ownLine = model!.getLineContent(range.startLineNumber).slice(0, range.startColumn - 1).trim() ? "\n" : "";
-	editor!.pushUndoStop();
-	editor!.executeEdits("snippet", [{ range, text: `${ownLine}${text.replace(/\r\n/g, "\n")}`, forceMoveMarkers: true }]);
-	editor!.pushUndoStop();
-	editor!.focus();
+	const ownLine = model.getLineContent(range.startLineNumber).slice(0, range.startColumn - 1).trim() ? "\n" : "";
+	editor.pushUndoStop();
+	editor.executeEdits("snippet", [{ range, text: `${ownLine}${formatSnippetForEditor(text, file.name, false)}`, forceMoveMarkers: true }]);
+	editor.pushUndoStop();
+	editor.focus();
 }
 
 type PlanShapeItem = {
@@ -201,28 +365,7 @@ export function Palette() {
 			() => askedMdSnippet === file.path && setShownMd({ kind: "snippet", file, text: "", note: "It could not be read." }),
 		);
 	};
-	const ensureLiveMd = async () => {
-		const path = activeMdPath();
-		if (!path) return null;
-		if (!activeLiveEditor() && !activeEditor()?.getDomNode()?.offsetParent) {
-			if (markdownMode(path) === "read") {
-				setMarkdownMode(path, state.settings.livePreview === false ? "source" : "live");
-				await new Promise((r) => setTimeout(r, 40));
-			}
-		}
-		return activeLiveEditor() ?? null;
-	};
-	const insertTableInMd = async () => {
-		(await ensureLiveMd())?.runAction("md-table-insert");
-	};
-	const insertMermaidInMd = async () => {
-		const live = await ensureLiveMd();
-		if (!live) return;
-		const block = "```mermaid\nflowchart LR\n\tA[Start] --> B[End]\n```\n";
-		live.insertText(block, "```mermaid\nflowchart LR\n\t".length, { asBlock: true });
-	};
-	const savedPreviewH = Number(recall("palette.preview.h"));
-	const [previewH, setPreviewH] = createSignal(Number.isFinite(savedPreviewH) && savedPreviewH >= 80 ? savedPreviewH : 190);
+	const [previewH, setPreviewH] = createSignal(clampPaletteHeight(recall("palette.preview.h"), 80, 440, 190));
 	const resizePreview = (delta: number) => {
 		const next = Math.max(80, Math.min(440, previewH() - delta));
 		setPreviewH(next);
@@ -360,8 +503,22 @@ export function Palette() {
 	};
 	createEffect(() => {
 		const req = planPaletteTabRequest();
-		if (req) setPlanTab(req.tab);
+		if (!req || req.seq <= lastHandledPlanTabSeq) return;
+		lastHandledPlanTabSeq = req.seq;
+		setPlanTab(req.tab);
 	});
+	createEffect(
+		on(
+			() => state.workspace?.root,
+			() => {
+				asked = "";
+				askedMdSnippet = "";
+				setShown(null);
+				setShownMd(null);
+			},
+			{ defer: true },
+		),
+	);
 	const commitOnEnter = (e: KeyboardEvent) => {
 		if (e.key === "Enter" && !e.shiftKey) {
 			e.preventDefault();
@@ -1203,6 +1360,7 @@ export function Palette() {
 																		);
 																	});
 																};
+																const visibleLinkableDocs = createMemo(() => filteredLinkableDocs().slice(0, 40));
 																const linkDoc = (d: DocFile) => {
 																	const cur = p();
 																	if (!cur) return;
@@ -1389,7 +1547,7 @@ export function Palette() {
 																									setDocPickerIdx(0);
 																								}}
 																								onKeyDown={(e) => {
-																									const opts = filteredLinkableDocs();
+																									const opts = visibleLinkableDocs();
 																									if (e.key === "Escape") {
 																										e.preventDefault();
 																										e.stopPropagation();
@@ -1403,13 +1561,13 @@ export function Palette() {
 																										if (opts.length) setDocPickerIdx((i) => (i - 1 + opts.length) % opts.length);
 																									} else if (e.key === "Enter") {
 																										e.preventDefault();
-																										const picked = opts[docPickerIdx()];
+																										const picked = opts[Math.min(docPickerIdx(), opts.length - 1)];
 																										if (picked) linkDoc(picked);
 																									}
 																								}}
 																							/>
 																							<Show
-																								when={filteredLinkableDocs().length > 0}
+																								when={visibleLinkableDocs().length > 0}
 																								fallback={
 																									<p class="hint plan-doc-picker-empty">
 																										{docPickerQuery().trim()
@@ -1419,7 +1577,7 @@ export function Palette() {
 																								}
 																							>
 																								<ul class="plan-doc-picker-list" role="listbox" aria-label="Workspace documents">
-																									<For each={filteredLinkableDocs().slice(0, 40)}>
+																									<For each={visibleLinkableDocs()}>
 																										{(doc, i) => (
 																											<li>
 																												<button

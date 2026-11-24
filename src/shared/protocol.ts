@@ -187,7 +187,7 @@ export type GitBranchesResult = { current: string; branches: GitBranchInfo[] };
 export type GitActionResult = { ok: boolean; message: string };
 export type GitStashResult = { ok: boolean; message: string; entries?: { ref: string; message: string }[] };
 
-export type SearchHit = { path: string; line: number; column: number; length: number; text: string };
+export type SearchHit = { path: string; line: number; column: number; length: number; text: string; textOffset?: number };
 
 export type ToolStatus = {
 	/** Found and runnable. */

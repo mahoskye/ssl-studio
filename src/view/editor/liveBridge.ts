@@ -145,8 +145,10 @@ export const liveEditorAt = (group: number): LiveEditorHandle | undefined => liv
  * shortcuts like Ctrl+B (Bold) take precedence over non-editing window shortcuts.
  */
 export function isInMarkdownTextEditor(target: EventTarget | null, activeLanguage?: string): boolean {
-	const el = target instanceof Element ? target : document.activeElement;
+	const el = typeof Element !== "undefined" && target instanceof Element ? target : typeof document !== "undefined" ? document.activeElement : null;
 	if (!el) return false;
+	if (el.closest(".cm-panels, .cm-md-table-wrap, .find-widget, .rename-input")) return false;
+	if (el.closest("input, textarea:not(.inputarea)")) return false;
 	if (el.closest(".cm-editor") && !el.closest(".cm-md-read")) return true;
 	if (el.closest(".monaco-editor") && activeLanguage === "markdown") return true;
 	return false;

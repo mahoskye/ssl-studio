@@ -61,7 +61,7 @@ export type FileTarget = {
  */
 export function fileTarget(query: string): FileTarget {
 	const trimmed = query.trim();
-	const hash = /^(.+?[^\s#])#(.*)$/.exec(trimmed);
+	const hash = /^(.*?[^\s#])#(.*)$/.exec(trimmed);
 	if (hash) {
 		const file = hash[1]!.trim();
 		const heading = hash[2]!.trim() || null;

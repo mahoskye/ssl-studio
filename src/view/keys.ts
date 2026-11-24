@@ -32,10 +32,35 @@ export function keyNames(e: KeyPress): string[] {
 	return digit && e.key !== digit && !typing ? [modifiers(e) + digit, raw] : [raw];
 }
 
-type Parsed = { ctrl: boolean; alt: boolean; shift: boolean; key: string };
+/**
+ * Platform-aware key names for command matching:
+ * - On non-Mac: identical to `keyNames(e)`.
+ * - On Mac:
+ *   - `Cmd+...` (`metaKey && !ctrlKey`) emits `"cmd+..."` first (so Mac-specific bindings
+ *     like `"cmd+-"` coexist cleanly with `"ctrl+-"`) followed by cross-platform `"ctrl+..."` aliases.
+ *   - Bare physical `Ctrl+<letter>` (`ctrlKey && !metaKey && !altKey && !shiftKey && /^[a-z]$/i`)
+ *     emits `[]` so native macOS Cocoa/Emacs cursor keys (`Ctrl+A/E/K/P/N/B/F/D/H/O/T/W`)
+ *     are never hijacked by `Cmd`-intended shortcuts.
+ *   - Other physical `Ctrl+...` chords (`Ctrl+-`, `Ctrl+Shift+-`, `Ctrl+Tab`, `Ctrl+PageUp`)
+ *     emit `keyNames(e)` (`"ctrl+..."`).
+ */
+export function keyNamesForPlatform(e: KeyPress, mac: boolean): string[] {
+	if (!mac) return keyNames(e);
+	if (e.metaKey && !e.ctrlKey) {
+		const base = keyNames(e);
+		const cmd = base.map((name) => name.replace(/^ctrl\+/, "cmd+"));
+		return [...cmd, ...base];
+	}
+	if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && /^[a-z]$/i.test(e.key)) {
+		return [];
+	}
+	return keyNames(e);
+}
+
+type Parsed = { cmd: boolean; ctrl: boolean; alt: boolean; shift: boolean; key: string };
 function parse(name: string): Parsed {
-	const out: Parsed = { ctrl: false, alt: false, shift: false, key: name };
-	for (const mod of ["ctrl", "alt", "shift"] as const) {
+	const out: Parsed = { cmd: false, ctrl: false, alt: false, shift: false, key: name };
+	for (const mod of ["cmd", "ctrl", "alt", "shift"] as const) {
 		if (out.key.startsWith(mod + "+") && out.key.length > mod.length + 1) {
 			out[mod] = true;
 			out.key = out.key.slice(mod.length + 1);
@@ -50,21 +75,22 @@ const KEY_LABELS: Record<string, string> = { pagedown: "PageDown", pageup: "Page
 export function displayKey(name: string): string {
 	const p = parse(name);
 	const key = KEY_LABELS[p.key] ?? p.key.charAt(0).toUpperCase() + p.key.slice(1);
-	return `${p.ctrl ? "Ctrl+" : ""}${p.alt ? "Alt+" : ""}${p.shift ? "Shift+" : ""}${key}`;
+	return `${p.cmd ? "Cmd+" : ""}${p.ctrl ? "Ctrl+" : ""}${p.alt ? "Alt+" : ""}${p.shift ? "Shift+" : ""}${key}`;
 }
 
 /** The keys text is edited with: a shortcut on one of them would take it away everywhere. */
 const EDITING_KEYS = new Set(["ctrl+c", "ctrl+x", "ctrl+v", "ctrl+z", "ctrl+shift+z", "ctrl+y", "ctrl+a"]);
 
 /**
- * Whether a key may be a shortcut. It needs Ctrl or Alt, or to be a function
+ * Whether a key may be a shortcut. It needs Cmd, Ctrl or Alt, or to be a function
  * key: a bare or shifted key would swallow that letter wherever it is typed.
  */
 export function bindable(name: string): { ok: true } | { ok: false; why: string } {
-	const p = parse(name.toLowerCase());
+	const lower = name.toLowerCase();
+	const p = parse(lower);
 	if (/^f([1-9]|1\d|2[0-4])$/.test(p.key)) return { ok: true };
-	if (!p.ctrl && !p.alt) return { ok: false, why: `${displayKey(name)} cannot be a shortcut: it needs Ctrl or Alt, or a function key.` };
-	if (EDITING_KEYS.has(name.toLowerCase())) return { ok: false, why: `${displayKey(name)} cannot be a shortcut: text is edited with it.` };
+	if (!p.cmd && !p.ctrl && !p.alt) return { ok: false, why: `${displayKey(name)} cannot be a shortcut: it needs Ctrl or Alt, or a function key.` };
+	if (EDITING_KEYS.has(lower.replace(/^cmd\+/, "ctrl+"))) return { ok: false, why: `${displayKey(name)} cannot be a shortcut: text is edited with it.` };
 	return { ok: true };
 }
 

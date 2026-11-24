@@ -2,44 +2,88 @@
 // process, Monaco's Uri.fsPath, the language server's URIs) on Linux, macOS
 // and Windows: either separator, and drive letters in either case.
 
-const isWindowsPath = (p: string) => /^[a-zA-Z]:[\\/]/.test(p) || p.includes("\\");
+const isWindowsPath = (p: string) => /^[a-zA-Z]:(?:[\\/]|$)/.test(p) || p.includes("\\") || /^\/\/[^/]/.test(p);
 
-/** Normalizes separators, collapses `.` and `..` segments, and lowercases Windows paths. */
-function collapsePath(p: string): string {
+type CollapsedPath = {
+	prefix: string;
+	segments: string[];
+	windows: boolean;
+};
+
+/** Parses a path into its immutable root prefix and collapsed segments, preserving original casing. */
+function parseCollapsed(p: string): CollapsedPath {
+	const windows = isWindowsPath(p);
 	const forward = p.replace(/\\/g, "/");
-	const lower = isWindowsPath(p) ? forward.toLowerCase() : forward;
 	let prefix = "";
-	let rest = lower;
-	const drive = /^[a-zA-Z]:(?=\/|$)/.exec(lower);
+	let rest = forward;
+	const drive = /^[a-zA-Z]:(?=\/|$)/.exec(forward);
 	if (drive) {
-		prefix = `${drive[0].toLowerCase()}/`;
-		rest = lower.slice(drive[0].length);
-	} else if (lower.startsWith("//") && lower[2] !== "/") {
-		prefix = "//";
-		rest = lower.slice(2);
-	} else if (lower.startsWith("/")) {
+		prefix = `${drive[0]}/`;
+		rest = forward.slice(drive[0].length);
+	} else if (forward.startsWith("//") && forward[2] !== "/") {
+		// Pin UNC `//server/share` as an immutable prefix so `..` segments cannot escape the share root.
+		const parts = forward.slice(2).split("/");
+		const server = parts[0] ?? "";
+		const share = parts[1] ?? "";
+		if (server && share) {
+			prefix = `//${server}/${share}`;
+			rest = parts.slice(2).join("/");
+		} else if (server) {
+			prefix = `//${server}`;
+			rest = "";
+		} else {
+			prefix = "//";
+			rest = "";
+		}
+	} else if (forward.startsWith("/")) {
 		prefix = "/";
-		rest = lower.slice(1);
+		rest = forward.slice(1);
 	}
-	const out: string[] = [];
+	const segments: string[] = [];
 	for (const part of rest.split("/")) {
 		if (!part || part === ".") continue;
 		if (part === "..") {
-			if (out.length > 0 && out[out.length - 1] !== "..") out.pop();
-			else if (!prefix) out.push("..");
+			if (segments.length > 0 && segments[segments.length - 1] !== "..") segments.pop();
+			else if (!prefix) segments.push("..");
 		} else {
-			out.push(part);
+			segments.push(part);
 		}
 	}
-	return prefix + out.join("/");
+	return { prefix, segments, windows };
+}
+
+/** Normalizes separators, collapses `.` and `..` segments, and lowercases Windows paths. */
+function collapsePath(p: string): string {
+	const { prefix, segments, windows } = parseCollapsed(p);
+	const normPrefix = windows ? prefix.toLowerCase() : prefix;
+	const normSegments = windows ? segments.map((s) => s.toLowerCase()) : segments;
+	if (!normPrefix) return normSegments.join("/");
+	if (normPrefix.endsWith("/")) return normPrefix + normSegments.join("/");
+	return normSegments.length ? `${normPrefix}/${normSegments.join("/")}` : normPrefix;
 }
 
 export const baseName = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() ?? path;
 
-export const dirName = (path: string) => {
-	const cut = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-	const dir = cut <= 0 ? path.slice(0, cut + 1) : path.slice(0, cut);
-	return /^[a-zA-Z]:$/.test(dir) ? dir + path[cut] : dir;
+export const dirName = (path: string): string => {
+	if (!path) return "";
+	if (/^\/+$/.test(path)) return "/";
+	const winRoot = /^([a-zA-Z]:)([\\/])[\\/]*$/.exec(path);
+	if (winRoot) return winRoot[1]! + winRoot[2]!;
+	const uncRoot = /^([\\/]{2}[^\\/]+[\\/][^\\/]+)[\\/]*$/.exec(path);
+	if (uncRoot) return uncRoot[1]!;
+
+	const trimmed = path.replace(/[\\/]+$/, "");
+	const cut = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
+	if (cut < 0) return "";
+	if (cut === 0) return trimmed[0]!;
+	const dir = trimmed.slice(0, cut);
+	if (/^[a-zA-Z]:$/.test(dir)) return dir + trimmed[cut]!;
+	const dirWinRoot = /^([a-zA-Z]:)([\\/])[\\/]*$/.exec(dir);
+	if (dirWinRoot) return dirWinRoot[1]! + dirWinRoot[2]!;
+	if (/^\/+$/.test(dir)) return "/";
+	const uncPrefix = /^([\\/]{2}[^\\/]+[\\/][^\\/]+)[\\/]*$/.exec(dir);
+	if (uncPrefix) return uncPrefix[1]!;
+	return dir.replace(/[\\/]+$/, "");
 };
 
 /** Joins with the separator the base path already uses. */
@@ -71,7 +115,9 @@ export function isInside(root: string, path: string): boolean {
 /** The path relative to root, with forward slashes; the path itself when outside. */
 export function relativeTo(root: string | undefined | null, path: string): string {
 	if (!root || !isInside(root, path)) return path;
-	return path.replace(/\\/g, "/").slice(root.replace(/[\\/]+$/, "").length + 1);
+	const r = parseCollapsed(root);
+	const p = parseCollapsed(path);
+	return p.segments.slice(r.segments.length).join("/");
 }
 
 /**
@@ -93,13 +139,16 @@ export function plainFileError(message: string, root?: string | null): string {
 
 /** The way from one folder to a file, with forward slashes: "../design/A.plan.md". Both are whole paths. */
 export function relativePath(fromDir: string, to: string): string {
-	const split = (path: string) => path.split(/[\\/]/).filter(Boolean);
-	const [from, target] = [split(fromDir), split(to)];
-	// A drive's letter is the same drive in either case: one side may have come through a URI, which lowers it.
-	const alike = (a: string, b: string) => a === b || (/^[A-Za-z]:$/.test(a) && a.toLowerCase() === b.toLowerCase());
+	const from = parseCollapsed(fromDir);
+	const target = parseCollapsed(to);
+	const win = from.windows || target.windows;
+	const norm = (s: string) => (win ? s.toLowerCase() : s);
+	if (norm(from.prefix) !== norm(target.prefix)) return to;
 	let same = 0;
-	while (same < from.length && same < target.length && alike(from[same]!, target[same]!)) same++;
-	return [...from.slice(same).map(() => ".."), ...target.slice(same)].join("/");
+	while (same < from.segments.length && same < target.segments.length && norm(from.segments[same]!) === norm(target.segments[same]!)) {
+		same++;
+	}
+	return [...from.segments.slice(same).map(() => ".."), ...target.segments.slice(same)].join("/");
 }
 
 /** The folders no listing of a workspace shows: version control, what is installed or built, and the app's own. */

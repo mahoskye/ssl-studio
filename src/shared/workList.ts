@@ -1,7 +1,6 @@
-import { dirName, relativeTo, resolvePath } from "./paths";
 import { isCatalog, toneOf, type Tone } from "./projectDocs";
 import type { DocFile } from "./protocol";
-import { workLinkOf, type WorkLink } from "./workContext";
+import { pathMatchesRef, workLinkOf, type WorkLink } from "./workContext";
 
 // The Work list of the Docs panel (ADR 0012): the tickets with what was
 // planned and spec'd for each under it, a ticket that is part of another
@@ -40,7 +39,7 @@ const same = (a: string | undefined, b: string | undefined) => Boolean(a && b &&
  * counts as under way. Finished tickets beyond a few are left out unless
  * `all` asks for them, and counted. Archived tickets live in `archived`.
  */
-export function workList(files: readonly DocFile[], root: string | undefined | null, options: { all?: boolean; sort?: WorkSort } = {}): WorkList {
+export function workList(files: readonly DocFile[], _root: string | undefined | null, options: { all?: boolean; sort?: WorkSort } = {}): WorkList {
 	const real = files.filter((file) => file.exists && !isCatalog(file));
 	const allTickets = real.filter((file) => file.group === "tickets");
 	const tickets = allTickets.filter((file) => !isArchivedTicket(file));
@@ -55,32 +54,22 @@ export function workList(files: readonly DocFile[], root: string | undefined | n
 	}
 	const planCharts = plans.filter((file) => !isPlanDoc(file));
 	const standalonePlanDocs = plans.filter((file) => isPlanDoc(file) && !planCharts.some((c) => normPath(c.path) === normPath(file.path.replace(/\.plan\.md$/i, ".plan.json"))));
-	const rel = (path: string) => relativeTo(root, path).split("\\").join("/");
-	const matchesRef = (filePath: string, ref: string, fromPath?: string) => {
-		const raw = ref.split("\\").join("/").split(/[?#]/)[0]!.trim();
-		if (!raw) return false;
-		if (fromPath && /^\.{1,2}\//.test(raw)) {
-			const resolved = resolvePath(dirName(fromPath), raw).split("\\").join("/").toLowerCase();
-			return filePath.split("\\").join("/").toLowerCase() === resolved;
-		}
-		return rel(filePath).toLowerCase() === raw.replace(/^\.?\/+/, "").toLowerCase();
-	};
-	const specsOf = (ticket: DocFile) => specs.filter((spec) => spec.tickets?.some((key) => same(key, ticket.ticket)) || ticket.specs?.some((path) => matchesRef(spec.path, path, ticket.path)));
+	const specsOf = (ticket: DocFile) => specs.filter((spec) => spec.tickets?.some((key) => same(key, ticket.ticket)) || ticket.specs?.some((path) => pathMatchesRef(spec.path, path, ticket.path)));
 	const plansOf = (ticket: DocFile) => {
 		const matchedCharts = planCharts.filter((chart) => {
 			const pairedDoc = planDocsByChart.get(normPath(chart.path));
 			return (
 				chart.tickets?.some((key) => same(key, ticket.ticket)) ||
-				ticket.plans?.some((path) => matchesRef(chart.path, path, ticket.path)) ||
+				ticket.plans?.some((path) => pathMatchesRef(chart.path, path, ticket.path)) ||
 				Boolean(
 					pairedDoc &&
 						(pairedDoc.tickets?.some((key) => same(key, ticket.ticket)) ||
-							ticket.plans?.some((path) => matchesRef(pairedDoc.path, path, ticket.path))),
+							ticket.plans?.some((path) => pathMatchesRef(pairedDoc.path, path, ticket.path))),
 				)
 			);
 		});
 		const matchedStandalone = standalonePlanDocs.filter(
-			(doc) => doc.tickets?.some((key) => same(key, ticket.ticket)) || ticket.plans?.some((path) => matchesRef(doc.path, path, ticket.path)),
+			(doc) => doc.tickets?.some((key) => same(key, ticket.ticket)) || ticket.plans?.some((path) => pathMatchesRef(doc.path, path, ticket.path)),
 		);
 		return { charts: matchedCharts, standalone: matchedStandalone };
 	};

@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import { reconcile } from "solid-js/store";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tabLabels } from "../src/view/editor/tabs";
@@ -415,7 +416,7 @@ async function disconnectTestRpc() {
 
 function resetAppState() {
 	for (const doc of [...documents.values()]) {
-		doc.model.dispose();
+		doc.model?.dispose?.();
 	}
 	documents.clear();
 	fakeModels.clear();
@@ -429,8 +430,8 @@ function resetAppState() {
 	setState("workspace", { root: "/ws", name: "ws" });
 	setState("groups", [{ tabs: [], active: null }]);
 	setState("activeGroup", 0);
-	setState("dirty", {});
-	setState("conflicts", {});
+	setState("dirty", reconcile({}));
+	setState("conflicts", reconcile({}));
 	setState("messages", []);
 	setState("lsp", { state: "stopped" });
 	setState("info", null);
@@ -571,6 +572,7 @@ describe("state.ts — lifecycle & race-condition repairs", () => {
 		setState("conflicts", "/ws/target.ssl", true);
 
 		askAnswer = "target.ssl";
+		chooseAnswer = "Overwrite";
 		const saved = await save(untitledPath);
 		expect(saved).toBe(true);
 

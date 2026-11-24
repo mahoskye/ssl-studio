@@ -136,31 +136,55 @@ function useTheme() {
 	createEffect(() => applyFonts({ uiFont: state.settings.uiFont, codeFont: state.settings.codeFont, readFont: state.settings.readFont }));
 }
 
-function useLayoutPersistence() {
+function useLayoutPersistence(isTemporaryNarrowLeft: () => boolean) {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	/** The folder whose layout was last refused a save, which has been said: said again for another folder. */
 	let layoutRefused: string | null = null;
+	let lastRoot: string | undefined = state.workspace?.root;
+	let wasReady = isTabsReady();
+	onCleanup(() => clearTimeout(timer));
 	createEffect(
 		on(
-			() => JSON.stringify(state.settings.layout),
-			(layout, previous) => {
+			() => {
+				const current = state.settings.layout;
+				const persisted = isTemporaryNarrowLeft() ? { ...current, left: false } : current;
+				return [state.workspace?.root, isTabsReady(), JSON.stringify(persisted)] as const;
+			},
+			([root, ready, layout], previous) => {
+				if (root !== lastRoot) {
+					clearTimeout(timer);
+					timer = undefined;
+					lastRoot = root;
+					wasReady = ready;
+					return;
+				}
+				if (!ready) {
+					clearTimeout(timer);
+					timer = undefined;
+					wasReady = false;
+					return;
+				}
+				if (!wasReady) {
+					wasReady = true;
+					return;
+				}
 				// The self-test opens the fixture itself, not a copy: it leaves no trace in it.
-				if (previous === undefined || !state.workspace || state.info?.selftest) return;
+				if (previous === undefined || !root || state.info?.selftest) return;
 				clearTimeout(timer);
-				timer = setTimeout(
-					() =>
-						void backend.saveSettings("workspace", { layout: JSON.parse(layout) }).then(
-							() => (layoutRefused = null),
-							(e) => {
-								// The folder's settings file cannot be written (it does not read as settings, say). Said once
-								// for a folder, not at every move of a panel; said again after a save has gone through.
-								const root = state.workspace?.root ?? "";
-								if (layoutRefused !== root) notify(`The window's layout is not being kept for this folder: ${String(e?.message ?? e)}`, "error");
-								layoutRefused = root;
-							},
-						),
-					600,
-				);
+				const targetRoot = root;
+				timer = setTimeout(() => {
+					if (state.workspace?.root !== targetRoot) return;
+					void backend.saveSettings("workspace", { layout: JSON.parse(layout) }).then(
+						() => (layoutRefused = null),
+						(e) => {
+							// The folder's settings file cannot be written (it does not read as settings, say). Said once
+							// for a folder, not at every move of a panel; said again after a save has gone through.
+							if (state.workspace?.root !== targetRoot) return;
+							if (layoutRefused !== targetRoot) notify(`The window's layout is not being kept for this folder: ${String(e?.message ?? e)}`, "error");
+							layoutRefused = targetRoot;
+						},
+					);
+				}, 600);
 			},
 		),
 	);
@@ -238,7 +262,8 @@ export function App() {
 	useProject();
 	useNavigation();
 	useGit();
-	useLayoutPersistence();
+	const [narrowOpenedLeft, setNarrowOpenedLeft] = createSignal(false);
+	useLayoutPersistence(narrowOpenedLeft);
 	// Each side shows a panel that is docked on it. One that was moved away, or put back by "Reset the layout", or
 	// was never chosen (the app has only just started) gives way to one that is docked there; with none, the side closes.
 	createEffect(() => {
@@ -421,29 +446,50 @@ export function App() {
 	const gap = () => (size().width <= 780 ? 0 : 5);
 	const splitSize = () => Math.max(4, gap());
 	const chrome = () => ({ activity: ACTIVITY * scale(), gap: gap(), splitter: splitSize() });
+	const positiveDim = (v: unknown, fallback: number) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : fallback);
+	const safeLeftWidth = () => positiveDim(layout().leftWidth, 260);
+	const safeRightWidth = () => positiveDim(layout().rightWidth, 360);
+	const safeBottomHeight = () => positiveDim(layout().bottomHeight, 200);
 	const isNarrowPair = () => !canFitBothPanels(size().width, chrome());
 	createEffect(() => {
 		const narrow = isNarrowPair();
 		setNarrowPanels(narrow);
 		if (narrow) {
 			if (state.workspace && layout().right && !narrowHosted() && (lastShown() === "right" || !layout().left)) {
-				setNarrowHosted(state.rightView);
-				setState("settings", "layout", "left", true);
+				batch(() => {
+					if (!layout().left) setNarrowOpenedLeft(true);
+					setNarrowHosted(state.rightView);
+					setState("settings", "layout", "left", true);
+				});
 			}
 		} else {
 			const hosted = narrowHosted();
-			if (hosted) {
-				setNarrowHosted(null);
-				if (sideOf(hosted) === "right") {
-					setState("rightView", hosted);
-					setState("settings", "layout", "right", true);
-				}
+			const restoreLeftClosed = narrowOpenedLeft();
+			if (hosted || restoreLeftClosed) {
+				batch(() => {
+					if (restoreLeftClosed) setNarrowOpenedLeft(false);
+					if (hosted) {
+						setNarrowHosted(null);
+						if (sideOf(hosted) === "right") {
+							setState("rightView", hosted);
+							setState("settings", "layout", "right", true);
+						}
+					}
+					if (restoreLeftClosed) setState("settings", "layout", "left", false);
+				});
 			}
 		}
 	});
+	// If the user explicitly dismisses the narrow-hosted panel or closes the left sidebar while narrow,
+	// clear the temporary auto-open flag so widening respects their explicit choice.
+	createEffect(() => {
+		if (narrowPanels() && narrowOpenedLeft() && (!narrowHosted() || !layout().left)) {
+			setNarrowOpenedLeft(false);
+		}
+	});
 	// In narrow layout, right-docked panels are hosted in the left slot so the right column never crowds or overflows.
-	const rightW = () => (layout().right && state.workspace && !narrowPanels() ? layout().rightWidth : 0);
-	const fit = () => fitPanels(size().width, layout().left && state.workspace ? layout().leftWidth : 0, rightW(), lastShown(), chrome());
+	const rightW = () => (layout().right && state.workspace && !narrowPanels() ? safeRightWidth() : 0);
+	const fit = () => fitPanels(size().width, layout().left && state.workspace ? safeLeftWidth() : 0, rightW(), lastShown(), chrome());
 	const usableWidth = () => {
 		const f = fit();
 		return Math.max(0, size().width - horizontalChrome(f.left > 0, f.right > 0, chrome()));
@@ -467,12 +513,35 @@ export function App() {
 		}
 		return "code";
 	};
-	const bottomByMode: Record<ModeKey, boolean> = { code: true, plan: false, graph: false, doc: false, table: false, review: false, welcome: false };
+	const DEFAULT_BOTTOM_BY_MODE: Record<ModeKey, boolean> = { code: true, plan: false, graph: false, doc: false, table: false, review: false, welcome: false };
+	const bottomByMode: Record<ModeKey, boolean> = { ...DEFAULT_BOTTOM_BY_MODE };
 	let syncingBottomMode = false;
+	let bottomModeRoot: string | undefined = state.workspace?.root;
+	createEffect(
+		on(
+			() => state.workspace?.root,
+			(root) => {
+				bottomModeRoot = root;
+				setNarrowHosted(null);
+				setNarrowOpenedLeft(false);
+				Object.assign(bottomByMode, DEFAULT_BOTTOM_BY_MODE);
+				if (root) bottomByMode[activeMode()] = state.settings.layout.bottom;
+			},
+		),
+	);
+	createEffect(
+		on(
+			() => [state.workspace?.root, isTabsReady()] as const,
+			([root, ready]) => {
+				if (root && ready) bottomByMode[activeMode()] = state.settings.layout.bottom;
+			},
+		),
+	);
 	createEffect(
 		on(activeMode, (mode, prev) => {
 			if (!state.workspace) return;
-			if (prev === undefined) {
+			if (!isTabsReady() && !state.info?.selftest) return;
+			if (prev === undefined || state.workspace.root !== bottomModeRoot) {
 				bottomByMode[mode] = state.settings.layout.bottom;
 				return;
 			}
@@ -518,7 +587,7 @@ export function App() {
 	const verticalChrome = () => (state.settings.menuBar !== false ? 34 : 0) * scale() + 24 * scale() + gap();
 	const effectiveCenterH = () => centerH() || Math.max(0, size().height - verticalChrome());
 	const maxBottom = () => Math.max(BOTTOM_MIN, Math.floor(effectiveCenterH() - splitSize() - EDITOR_MIN_HEIGHT));
-	const bottom = () => (layout().bottom && state.workspace ? Math.max(BOTTOM_MIN, Math.min(layout().bottomHeight, maxBottom())) : 0);
+	const bottom = () => (layout().bottom && state.workspace ? Math.max(BOTTOM_MIN, Math.min(safeBottomHeight(), maxBottom())) : 0);
 
 	// VS Code sash drag state: snapshot at drag start so overshooting never drifts,
 	// dragging below half minimum snap-closes, and dragging the bottom panel past the
@@ -633,7 +702,7 @@ export function App() {
 	onCleanup(
 		focusRequest.listen((target) => {
 			// The panel's search box or its list, never a button: a stray key must not press something.
-			if (target === "side") queueMicrotask(() => focusPanel(state.leftView));
+			if (target === "side") queueMicrotask(() => focusPanel((narrowPanels() && narrowHosted()) || state.leftView));
 		}),
 	);
 	const docAreas = createMemo(() => CATALOG_AREAS.filter((area) => area !== "schema" || folderParts(state.project?.schema ?? "schema").length > 0));
@@ -663,9 +732,9 @@ export function App() {
 		<div
 			class="app"
 			style={{
-				"--left": `${snapHide() === "left" ? 0 : fit().left}px`,
-				"--right": `${snapHide() === "right" ? 0 : fit().right}px`,
-				"--bottom": `${snapHide() === "bottom" ? 0 : bottom()}px`,
+				"--left": `${snapHide() === "left" ? 0 : Math.max(0, Number.isFinite(fit().left) ? fit().left : 0)}px`,
+				"--right": `${snapHide() === "right" ? 0 : Math.max(0, Number.isFinite(fit().right) ? fit().right : 0)}px`,
+				"--bottom": `${snapHide() === "bottom" ? 0 : Math.max(0, Number.isFinite(bottom()) ? bottom() : 0)}px`,
 			}}
 		>
 			<Show when={state.settings.menuBar !== false}>

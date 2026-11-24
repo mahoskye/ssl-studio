@@ -166,11 +166,11 @@ export function focusPanel(id: PanelId) {
 	if (target instanceof HTMLInputElement) target.select();
 }
 
-/** The panel a side shows, or would show: null when no panel is docked on it. */
+/** The panel a side shows, or would show: null when no available panel is docked on it. */
 export const panelOn = (side: Side): PanelId | null =>
 	dockedView(
 		state[viewKey(side)],
-		PANELS.filter((panel) => sideOf(panel.id) === side).map((panel) => panel.id),
+		PANELS.filter((panel) => sideOf(panel.id) === side && isPanelAvailable(panel.id)).map((panel) => panel.id),
 	);
 
 /**
@@ -225,7 +225,7 @@ export function movePanel(id: PanelId) {
 	setState("settings", "layout", "dock", (dock) => ({ ...(dock ?? {}), [id]: to }));
 	// The side it left shows another of its panels, or closes.
 	if (wasShown) {
-		const next = PANELS.find((p) => p.id !== id && sideOf(p.id) === from);
+		const next = PANELS.find((p) => p.id !== id && sideOf(p.id) === from && isPanelAvailable(p.id));
 		if (next) setState(viewKey(from), next.id);
 		else setState("settings", "layout", from, false);
 	}

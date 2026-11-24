@@ -5,7 +5,7 @@
 // one expression (src/shared/searchPattern.ts), so they agree.
 import { Icon } from "../Icon";
 import { FileMark } from "../FileMark";
-import { createEffect, createMemo, createResource, createSignal, For, Show } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, For, onCleanup, Show } from "solid-js";
 import { monaco } from "../editor/monaco";
 import { symbolPath } from "../editor/regions";
 import { session } from "../lsp/session";
@@ -15,13 +15,13 @@ import { choose, quickPick } from "../dialogs";
 import { activePath, canonical, documents, fileChangedOnDisk, isUntitled, notify, openFile, save, saveAll, setState, state } from "../state";
 import { baseName, isInside, relativeTo } from "../../shared/paths";
 import { parseCsv } from "../../shared/csv";
-import { fileChosen } from "../../shared/fileGlob";
+import { createFileFilter } from "../../shared/fileGlob";
 import { frontMatter, HEADING, many, one, plainMarkdown } from "../../shared/frontMatter";
 import { overlapsProtectedSpan, planLineBreadcrumb, protectedMarkdownSpans, replaceSafeInText, type TextSpan } from "../../shared/menuBar";
 import { DOC_FOLDERS, isCatalog, toneOf } from "../../shared/projectDocs";
-import { matchesOn, SEARCH_LIMIT, searchPattern, type SearchOptions } from "../../shared/searchPattern";
+import { excerptForMatch, matchesOn, SEARCH_LIMIT, SEARCH_LINE_WINDOW, searchPattern, type SearchOptions } from "../../shared/searchPattern";
 import { outline } from "../../shared/outline";
-import { tagSearchPattern, workspaceTags } from "../../shared/tags";
+import { workspaceTags } from "../../shared/tags";
 import { codeMatchesRef, descendantTickets, scriptsForTicket, ticketForFile, ticketWork } from "../../shared/workContext";
 import { recall, remember } from "../graph/canvas";
 import { nodeLines, parsePlan } from "../plan/model";
@@ -29,7 +29,16 @@ import { docs } from "../project";
 import { ticketAtHand } from "../projectDocs";
 import { focusRowsBelow, IconButton, Row, RowGroup, Rows } from "./Rows";
 import { showPanel } from "./registry";
-import { byLine, markedColumns, segments, type LineHit } from "./searchLines";
+import {
+	byLine,
+	markedColumns,
+	parseDocFilterTokens,
+	resolveSearchQuery,
+	segments,
+	type LineHit,
+	type ParsedDocFilters,
+	type SearchScopeKind,
+} from "./searchLines";
 
 const count = (n: number, oneWord: string, manyWord = `${oneWord}s`) => `${n} ${n === 1 ? oneWord : manyWord}`;
 
@@ -48,6 +57,7 @@ const [exclude, setExclude] = createSignal("");
 /** Shows the Search panel scoped to a specific folder (relative to workspace root). */
 export function findInFolder(relFolder: string) {
 	const cleaned = relFolder.replace(/^[./\\]+|[\\/]+$/g, "").replace(/\\/g, "/");
+	setTicketScopeKey(null);
 	setInclude(cleaned ? `${cleaned}/**` : "");
 	setChoosing(true);
 	showPanel("search");
@@ -84,15 +94,16 @@ function replaceInModel(
 	return edits.length;
 }
 
-/** Scans a single in-memory text buffer using the exact same `searchPattern` + `matchesOn` walk as backend search. */
+/** Scans a single in-memory text buffer using the exact same `searchPattern` + `matchesOn` + windowing walk as backend search. */
 function scanTextBuffer(path: string, text: string, pattern: RegExp, isRegex: boolean, limit: number): SearchHit[] {
 	const out: SearchHit[] = [];
 	const lines = text.split(/\r?\n/);
 	for (let i = 0; i < lines.length && out.length < limit; i++) {
 		const line = lines[i]!;
-		const found = matchesOn(line, pattern, "", isRegex);
+		const found = matchesOn(line, pattern, "", isRegex, limit - out.length);
 		for (const m of found) {
-			out.push({ path, line: i + 1, column: m.column, length: m.length, text: line });
+			const { text: excerpt, textOffset } = excerptForMatch(line, m.column, m.length);
+			out.push({ path, line: i + 1, column: m.column, length: m.length, text: excerpt, ...(textOffset > 0 ? { textOffset } : {}) });
 			if (out.length >= limit) break;
 		}
 	}
@@ -118,15 +129,48 @@ const [status, setStatus] = createSignal<"idle" | "busy" | "done" | "failed">("i
 const [asked, setAsked] = createSignal("");
 const [effectiveAsked, setEffectiveAsked] = createSignal("");
 /** The switches and the files the results on screen were found with: a replace uses these, not what has been changed since. */
-const [searched, setSearched] = createSignal<SearchOptions>({});
+const [searched, setSearched] = createSignal<SearchOptions & { syntheticQuery?: boolean }>({});
 const [failure, setFailure] = createSignal("");
 const [docFilterNote, setDocFilterNote] = createSignal("");
 /** True when post-filters (`heading:` / `task:`) narrowed results to specific lines within files. */
 const [lineFiltered, setLineFiltered] = createSignal(false);
+/** True when backend/dirty search hit `SEARCH_LIMIT` before post-filtering or deduping. */
+const [truncated, setTruncated] = createSignal(false);
+/** Active ticket key when scoped to an active ticket via explicit `paths` allowlist. */
+const [ticketScopeKey, setTicketScopeKey] = createSignal<string | null>(null);
+/** Re-entrancy guard for Replace All and Replace Preview flows. */
+const [replaceActive, setReplaceActive] = createSignal(false);
+let replaceBusy = false;
 /** Per-file and per-line exclusions dismissed from the current result set before Replace All. */
 const [dismissedFiles, setDismissedFiles] = createSignal<Set<string>>(new Set());
 const [dismissedLines, setDismissedLines] = createSignal<Set<string>>(new Set());
+/** Document-level Markdown protected-span cache for open editors keyed by canonical path and model version. */
+const openMdSpanCache = new Map<string, { version: number; spans: Map<number, TextSpan[]> }>();
 let latest = 0;
+let lastWorkspaceRoot: string | undefined;
+
+/** Clears workspace-scoped Search state whenever the open workspace changes (A -> B). */
+function resetSearchState() {
+	latest++;
+	replaceBusy = false;
+	setReplaceActive(false);
+	setHits([]);
+	setStatus("idle");
+	setAsked("");
+	setEffectiveAsked("");
+	setSearched({});
+	setFailure("");
+	setDocFilterNote("");
+	setLineFiltered(false);
+	setTruncated(false);
+	setDismissedFiles(new Set<string>());
+	setDismissedLines(new Set<string>());
+	setTicketScopeKey(null);
+	setInclude("");
+	setExclude("");
+	setChoosing(false);
+	openMdSpanCache.clear();
+}
 
 // --- Search query history (persisted across reloads, up to 25 queries) -------
 const HISTORY_KEY = "search.history";
@@ -150,122 +194,7 @@ function recordHistory(q: string) {
 
 // --- Expanded metadata search grammar ----------------------------------------
 
-type ParsedDocFilters = {
-	text: string;
-	tags: string[];
-	statuses: string[];
-	tickets: string[];
-	parents: string[];
-	groups: string[];
-	kinds: string[];
-	headings: string[];
-	tasks: ("open" | "done" | "all")[];
-	props: { key: string; value: string }[];
-	/** Unknown lowercase `key:val` tokens that might be custom YAML frontmatter properties. */
-	customProps: { key: string; value: string; raw: string }[];
-};
-
-const KNOWN_DOC_PROP_KEYS = new Set([
-	"owner",
-	"reviewer",
-	"release",
-	"priority",
-	"version",
-	"approved-by",
-	"approvedby",
-	"approved-date",
-	"approveddate",
-	"change-control",
-	"changecontrol",
-	"gxp-impact",
-	"gxpimpact",
-	"source",
-	"blocks",
-	"blocked-by",
-	"blockedby",
-	"supersedes",
-	"superseded-by",
-	"supersededby",
-]);
-
-const NON_PROP_SCHEMES = new Set(["http", "https", "file", "mailto", "data", "ftp", "ssh", "git"]);
-
-/** Extracts structured metadata filter tokens from a search query string (supports quoted values). */
-function parseDocFilterTokens(raw: string): ParsedDocFilters {
-	const tags: string[] = [];
-	const statuses: string[] = [];
-	const tickets: string[] = [];
-	const parents: string[] = [];
-	const groups: string[] = [];
-	const kinds: string[] = [];
-	const headings: string[] = [];
-	const tasks: ("open" | "done" | "all")[] = [];
-	const props: { key: string; value: string }[] = [];
-	const customProps: { key: string; value: string; raw: string }[] = [];
-
-	const rest = raw
-		.replace(/(?:^|\s)([A-Za-z][A-Za-z0-9_-]{1,}):(?:"([^"]+)"|'([^']+)'|(\S+))/g, (full, rawKey: string, dq?: string, sq?: string, bare?: string) => {
-			const val = (dq ?? sq ?? bare ?? "").trim();
-			if (!val) return full;
-			const key = rawKey.toLowerCase();
-			if (NON_PROP_SCHEMES.has(key) || val.startsWith("//") || val.startsWith("\\")) return full;
-			if (key === "tag") {
-				const clean = val.replace(/^#+/, "");
-				if (!clean) return full;
-				tags.push(clean);
-				return " ";
-			}
-			if (key === "status") {
-				statuses.push(val);
-				return " ";
-			}
-			if (key === "ticket") {
-				tickets.push(val);
-				return " ";
-			}
-			if (key === "parent") {
-				parents.push(val);
-				return " ";
-			}
-			if (key === "group") {
-				groups.push(val.toLowerCase());
-				return " ";
-			}
-			if (key === "kind") {
-				kinds.push(val.toLowerCase());
-				return " ";
-			}
-			if (key === "heading") {
-				headings.push(val);
-				return " ";
-			}
-			if (key === "task") {
-				const v = val.toLowerCase();
-				if (v === "open" || v === "todo" || v === "unchecked") tasks.push("open");
-				else if (v === "done" || v === "closed" || v === "checked") tasks.push("done");
-				else if (v === "all" || v === "any") tasks.push("all");
-				else return full;
-				return " ";
-			}
-			if (KNOWN_DOC_PROP_KEYS.has(key)) {
-				props.push({ key, value: val });
-				return " ";
-			}
-			// Keep arbitrary lowercase `prop:val` as a candidate custom frontmatter property (avoid SSL `Me:sField`).
-			if (rawKey === key && !/[A-Z]/.test(rawKey)) {
-				customProps.push({ key, value: val, raw: full.trim() });
-				return " ";
-			}
-			return full;
-		})
-		.replace(/\s+/g, " ")
-		.trim();
-
-	return { text: rest, tags, statuses, tickets, parents, groups, kinds, headings, tasks, props, customProps };
-}
-
 const normStatus = (s?: string) => (s ?? "").toLowerCase().replace(/[-_]+/g, " ").trim();
-const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const GROUP_ALIASES: Record<string, string> = {
 	spec: "specs",
@@ -393,12 +322,12 @@ function docMatchesMetadata(doc: DocFile, parsed: ParsedDocFilters): boolean {
 	return true;
 }
 
-/** Reads a file's text from an open dirty editor buffer when available, else from disk. */
+/** Reads a file's text from an open editor buffer when available, else from disk. */
 async function currentTextFor(path: string): Promise<string> {
 	const at = canonical(path);
 	const open = documents.get(at);
-	if (open && !open.binary && state.dirty[at]) return open.model.getValue();
-	return backend.read(path).then((r) => r.text, () => "");
+	if (open && !open.binary) return open.model.getValue();
+	return backend.read(path).then((r) => (r.binary ? "" : r.text), () => "");
 }
 
 /** Computes a `Row Key · Column` breadcrumb for a matched line/column inside a CSV/TSV file. */
@@ -450,6 +379,18 @@ export function Search() {
 	let historyIdx = -1;
 	let historyDraft = "";
 
+	createEffect(() => {
+		const currentRoot = state.workspace?.root ?? "";
+		if (lastWorkspaceRoot === undefined) {
+			lastWorkspaceRoot = currentRoot;
+			return;
+		}
+		if (currentRoot !== lastWorkspaceRoot) {
+			lastWorkspaceRoot = currentRoot;
+			resetSearchState();
+		}
+	});
+
 	const [workspaceFiles] = createResource(
 		() => (state.workspace?.root ? `${state.workspace.root}#${state.treeVersion}` : false),
 		() => backend.files().catch(() => [] as string[]),
@@ -479,13 +420,74 @@ export function Search() {
 		]
 			.filter(Boolean)
 			.join(", ");
-	const scopeActive = (inc: string, exc = "") => (choosing() ? include().trim() === inc && exclude().trim() === exc : !inc && !exc);
+	const scopeActive = (inc: string, exc = "") =>
+		!ticketScopeKey() && (choosing() ? include().trim() === inc && exclude().trim() === exc : !inc && !exc);
+	const inCodeScope = () => scopeActive("", codeExcludeGlob());
+	const inDocsScope = () => scopeActive(docsIncludeGlob(), "");
+
+	const activeTicketScope = createMemo(() => {
+		const root = state.workspace?.root;
+		const allDocs = docs();
+		const key = state.settings.activeTicket?.trim() || ticketForFile(allDocs, activePath(), root) || ticketAtHand();
+		if (!key) return null;
+		const found = allDocs.find((d) => d.exists && d.group === "tickets" && d.ticket?.toLowerCase() === key.toLowerCase());
+		if (!found) return null;
+		const descendants = descendantTickets(allDocs, key);
+		const allWs = workspaceFiles() ?? [];
+		const pathSet = new Set<string>();
+		const addRel = (absPath: string) => {
+			if (!root || !isInside(root, absPath)) return;
+			const relPath = relativeTo(root, absPath).replace(/\\/g, "/");
+			if (relPath) pathSet.add(relPath);
+		};
+		const addTicketTree = (ticketDoc: typeof found) => {
+			addRel(ticketDoc.path);
+			if (ticketDoc.ticketFolder) {
+				for (const filePath of allWs) {
+					if (isInside(ticketDoc.ticketFolder, filePath)) addRel(filePath);
+				}
+				for (const [docPath] of documents) {
+					if (isInside(ticketDoc.ticketFolder, docPath)) addRel(docPath);
+				}
+			}
+			const tKey = ticketDoc.ticket;
+			if (!tKey) return;
+			for (const group of ticketWork(allDocs, tKey)) {
+				if (group.kind === "ticket") continue;
+				for (const ref of group.files) addRel(ref.path);
+			}
+		};
+		addTicketTree(found);
+		for (const desc of descendants) addTicketTree(desc);
+		// Resolve referenced scripts across the ticket & all descendant tickets against real workspace paths.
+		const refs = scriptsForTicket(allDocs, key, { includeDescendants: true });
+		let resolvedScripts = 0;
+		if (refs.length) {
+			for (const filePath of allWs) {
+				if (refs.some((ref) => codeMatchesRef(filePath, ref, root))) {
+					addRel(filePath);
+					resolvedScripts++;
+				}
+			}
+		}
+		const extras = [
+			descendants.length ? `${descendants.length} sub-${descendants.length === 1 ? "ticket" : "tickets"}` : "",
+			resolvedScripts ? `${resolvedScripts} ${resolvedScripts === 1 ? "script" : "scripts"}` : "",
+		].filter(Boolean);
+		return {
+			key,
+			paths: [...pathSet],
+			tip: `Search ${key}${extras.length ? ` (${extras.join(", ")})` : ""}, its folder, and all linked specs/plans/decisions`,
+		};
+	});
 
 	const run = async () => {
 		const rawQuery = input.value;
 		const mine = ++latest;
+		const startRoot = state.workspace?.root;
 		setDocFilterNote("");
 		setLineFiltered(false);
+		setTruncated(false);
 		setDismissedFiles(new Set<string>());
 		setDismissedLines(new Set<string>());
 		if (!rawQuery) {
@@ -498,33 +500,26 @@ export function Search() {
 		setStatus("busy");
 		setAsked(rawQuery);
 
-		const parsed = !regex()
-			? parseDocFilterTokens(rawQuery)
-			: { text: rawQuery, tags: [], statuses: [], tickets: [], parents: [], groups: [], kinds: [], headings: [], tasks: [], props: [], customProps: [] };
-
 		const baseInclude = choosing() ? include() : "";
 		const baseExclude = choosing() ? exclude() : "";
-		const root = state.workspace?.root;
+		const root = startRoot;
+		const activeTicket = ticketScopeKey() && activeTicketScope()?.key === ticketScopeKey() ? activeTicketScope() : null;
+		const scopeKind: SearchScopeKind = inCodeScope()
+			? "code"
+			: inDocsScope()
+				? "docs"
+				: activeTicket
+					? "ticket"
+					: baseInclude.trim() || baseExclude.trim()
+						? "custom"
+						: "all";
 
-		// Resolve candidate custom frontmatter `prop:val` tokens: keep as metadata filter when in Docs scope,
-		// when combined with other metadata tokens, or when any workspace doc defines that frontmatter key.
-		let activeCustomProps: { key: string; value: string }[] = [];
-		let freeText = parsed.text;
-		const hasKnownDocFilters = Boolean(
-			parsed.tags.length ||
-				parsed.statuses.length ||
-				parsed.tickets.length ||
-				parsed.parents.length ||
-				parsed.groups.length ||
-				parsed.kinds.length ||
-				parsed.props.length,
-		);
-		const inDocsScope = scopeActive(docsIncludeGlob(), "");
+		const preParsed = !regex() && scopeKind !== "code" ? parseDocFilterTokens(rawQuery) : undefined;
 		const customMatchedByPath = new Map<string, Record<string, string | string[]>>();
+		const keysSeen = new Set<string>();
 
-		if (parsed.customProps.length) {
+		if (preParsed?.customProps.length) {
 			const mdDocs = docs().filter((d) => d.exists && !isCatalog(d) && /\.(md|markdown)$/i.test(d.path)).slice(0, 200);
-			const keysSeen = new Set<string>();
 			await Promise.all(
 				mdDocs.map(async (d) => {
 					const text = await currentTextFor(d.path);
@@ -536,30 +531,23 @@ export function Search() {
 					}
 				}),
 			);
-			if (mine !== latest) return;
-			const literalRestored: string[] = [];
-			for (const cp of parsed.customProps) {
-				if (inDocsScope || hasKnownDocFilters || keysSeen.has(cp.key)) {
-					activeCustomProps.push({ key: cp.key, value: cp.value });
-				} else {
-					literalRestored.push(cp.raw);
-				}
-			}
-			if (literalRestored.length) {
-				freeText = `${freeText ? `${freeText} ` : ""}${literalRestored.join(" ")}`.trim();
-			}
+			if (mine !== latest || state.workspace?.root !== startRoot) return;
 		}
 
-		let effectiveQuery = freeText;
-		let effectiveRegex = regex();
-		let effectiveWhole = wholeWord();
-		let effectiveCase = caseSensitive();
-		let effectiveInclude = baseInclude;
-		const effectiveExclude = baseExclude;
+		const resolved = resolveSearchQuery({
+			rawQuery,
+			regex: regex(),
+			caseSensitive: caseSensitive(),
+			wholeWord: wholeWord(),
+			scope: scopeKind,
+			knownCustomKeys: keysSeen,
+			parsed: preParsed,
+		});
 
-		const hasDocMetaFilters = hasKnownDocFilters || activeCustomProps.length > 0;
-		const hasHeadingFilter = parsed.headings.length > 0;
-		const hasTaskFilter = parsed.tasks.length > 0;
+		const { parsed, activeCustomProps, effectiveQuery, effectiveRegex, effectiveCase, effectiveWhole, syntheticQuery, hasDocMetaFilters, hasHeadingFilter, hasTaskFilter } = resolved;
+		let effectiveInclude = baseInclude;
+		let effectiveExclude = baseExclude;
+		let effectivePaths: string[] | undefined = activeTicket ? activeTicket.paths : undefined;
 
 		const filterNotes: string[] = [
 			...parsed.tags.map((t) => `tag:${t}`),
@@ -595,99 +583,60 @@ export function Search() {
 			if (hasHeadingFilter || hasTaskFilter) {
 				matchedDocs = matchedDocs.filter((d) => /\.(md|markdown)$/i.test(d.path));
 			}
-			// Intersect with active include/exclude scope (e.g. Active Ticket or custom include globs) instead of overwriting it!
+			// Intersect with active ticket paths or include/exclude scope instead of overwriting them.
+			if (effectivePaths !== undefined) {
+				const ticketPathSet = new Set(effectivePaths.map((p) => p.replace(/\\/g, "/")));
+				matchedDocs = matchedDocs.filter((d) => ticketPathSet.has(relativeTo(root, d.path).replace(/\\/g, "/")));
+			}
 			if (baseInclude.trim() || baseExclude.trim()) {
-				matchedDocs = matchedDocs.filter((d) => {
-					const relPath = relativeTo(root, d.path).replace(/\\/g, "/");
-					return fileChosen(relPath, baseInclude, baseExclude);
-				});
+				const scopeFilter = createFileFilter(baseInclude, baseExclude);
+				matchedDocs = matchedDocs.filter((d) => scopeFilter(relativeTo(root, d.path).replace(/\\/g, "/")));
 			}
 			setDocFilterNote(`${filterNotes.join(" ")} (${matchedDocs.length} ${matchedDocs.length === 1 ? "doc" : "docs"})`);
 			if (!matchedDocs.length) {
 				setHits([]);
-				setSearched({ regex: effectiveRegex, caseSensitive: effectiveCase, wholeWord: effectiveWhole });
+				setTruncated(false);
+				setSearched({ regex: effectiveRegex, caseSensitive: effectiveCase, wholeWord: effectiveWhole, ...(syntheticQuery ? { syntheticQuery: true } : {}) });
 				setStatus("done");
 				return;
 			}
 			allowedDocSet = new Set(matchedDocs.map((d) => canonical(d.path)));
-			effectiveInclude = matchedDocs.map((d) => relativeTo(root, d.path).replace(/\\/g, "/")).join(", ");
+			effectivePaths = matchedDocs.map((d) => relativeTo(root, d.path).replace(/\\/g, "/"));
+			effectiveInclude = "";
+			effectiveExclude = "";
 		} else if (hasHeadingFilter || hasTaskFilter) {
 			setDocFilterNote(filterNotes.join(" "));
-			if (!effectiveInclude.trim()) {
+			if (effectivePaths !== undefined) {
+				effectivePaths = effectivePaths.filter((p) => /\.(md|markdown)$/i.test(p));
+			} else if (!effectiveInclude.trim()) {
 				effectiveInclude = "*.md, *.markdown";
 			}
 		}
 
-		// Choose default search pattern when only metadata/heading/task tokens were entered with no free text.
-		if (!effectiveQuery) {
-			if (hasHeadingFilter) {
-				const first = parsed.headings[0]!;
-				effectiveQuery = first === "*" ? "^\\s{0,3}#{1,6}\\s+\\S" : `^\\s{0,3}#{1,6}\\s+.*${escapeRegex(first)}`;
-				effectiveRegex = true;
-				effectiveWhole = false;
-			} else if (hasTaskFilter) {
-				const mode = parsed.tasks[0]!;
-				effectiveQuery =
-					mode === "open"
-						? "^\\s*(?:>\\s*)*(?:(?:[-*+]|\\d+[.)])\\s+)+\\[ \\]"
-						: mode === "done"
-							? "^\\s*(?:>\\s*)*(?:(?:[-*+]|\\d+[.)])\\s+)+\\[[xX]\\]"
-							: "^\\s*(?:>\\s*)*(?:(?:[-*+]|\\d+[.)])\\s+)+\\[[ xX]\\]";
-				effectiveRegex = true;
-				effectiveWhole = false;
-			} else if (parsed.tags.length) {
-				effectiveQuery = tagSearchPattern(parsed.tags[0]!);
-				effectiveRegex = true;
-				effectiveWhole = false;
-			} else if (parsed.statuses.length) {
-				effectiveQuery = "^status\\s*:";
-				effectiveRegex = true;
-				effectiveCase = false;
-				effectiveWhole = false;
-			} else if (parsed.tickets.length) {
-				effectiveQuery = escapeRegex(parsed.tickets[0]!);
-				effectiveRegex = true;
-				effectiveCase = false;
-				effectiveWhole = false;
-			} else if (parsed.parents.length) {
-				effectiveQuery = "^parent\\s*:";
-				effectiveRegex = true;
-				effectiveCase = false;
-				effectiveWhole = false;
-			} else if (parsed.props.length || activeCustomProps.length) {
-				const firstKey = (parsed.props[0] ?? activeCustomProps[0])!.key;
-				effectiveQuery = `^${escapeRegex(firstKey)}\\s*:`;
-				effectiveRegex = true;
-				effectiveCase = false;
-				effectiveWhole = false;
-			} else {
-				effectiveQuery = "^(?:title\\s*:|#{1,6}\\s+)";
-				effectiveRegex = true;
-				effectiveCase = false;
-				effectiveWhole = false;
-			}
-		}
-
-		const options: SearchOptions = {
+		const backendOptions: SearchOptions = {
 			regex: effectiveRegex,
 			caseSensitive: effectiveCase,
 			wholeWord: effectiveWhole,
-			...(effectiveInclude || effectiveExclude ? { include: effectiveInclude, exclude: effectiveExclude } : {}),
+			...(effectiveInclude ? { include: effectiveInclude } : {}),
+			...(effectiveExclude ? { exclude: effectiveExclude } : {}),
+			...(effectivePaths !== undefined ? { paths: effectivePaths } : {}),
 		};
-		setSearched(options);
+		setSearched({ ...backendOptions, ...(syntheticQuery ? { syntheticQuery: true } : {}) });
 		setEffectiveAsked(effectiveQuery);
 		setLineFiltered(hasHeadingFilter || hasTaskFilter);
 
 		try {
-			const diskHits = await backend.search(effectiveQuery, options);
-			if (mine !== latest) return;
+			const diskHits = await backend.search(effectiveQuery, backendOptions);
+			if (mine !== latest || state.workspace?.root !== startRoot) return;
 
 			// Overlay unsaved dirty open editor buffers so freshly edited unsaved text is always searchable.
 			const dirtyPaths = new Set<string>();
 			const dirtyHits: SearchHit[] = [];
+			const dirtyFilter = createFileFilter(effectiveInclude, effectiveExclude);
+			const pathAllowSet = effectivePaths !== undefined ? new Set(effectivePaths.map((p) => p.replace(/\\/g, "/"))) : null;
 			let compiledPattern: RegExp | null = null;
 			try {
-				compiledPattern = searchPattern(effectiveQuery, options);
+				compiledPattern = searchPattern(effectiveQuery, backendOptions);
 			} catch {
 				compiledPattern = null;
 			}
@@ -697,10 +646,11 @@ export function Search() {
 					if (!state.dirty[at] || doc.binary) continue;
 					if (allowedDocSet && !allowedDocSet.has(at)) continue;
 					if (isUntitled(at)) {
-						if (effectiveInclude.trim()) continue;
+						if (effectiveInclude.trim() || pathAllowSet !== null) continue;
 					} else if (root && isInside(root, at)) {
 						const relPath = relativeTo(root, at).replace(/\\/g, "/");
-						if (!fileChosen(relPath, effectiveInclude, effectiveExclude)) continue;
+						if (pathAllowSet !== null && !pathAllowSet.has(relPath)) continue;
+						if (!dirtyFilter(relPath)) continue;
 					} else {
 						continue;
 					}
@@ -716,33 +666,51 @@ export function Search() {
 				...diskHits.filter((h) => !dirtyPaths.has(canonical(h.path))),
 				...dirtyHits,
 			];
+			const wasTruncated = diskHits.length >= SEARCH_LIMIT || dirtyHits.length >= SEARCH_LIMIT || merged.length >= SEARCH_LIMIT;
 
 			// Enforce heading:/task: line-level constraints (only Markdown files & matching heading/task lines).
 			if (hasHeadingFilter || hasTaskFilter) {
-				merged = merged.filter((h) => {
-					if (!/\.(md|markdown)$/i.test(h.path)) return false;
+				const fullLinesCache = new Map<string, string[]>();
+				const filtered: SearchHit[] = [];
+				for (const h of merged) {
+					if (!/\.(md|markdown)$/i.test(h.path)) continue;
+					let lineText = h.text;
+					if (h.textOffset) {
+						const canon = canonical(h.path);
+						let lines = fullLinesCache.get(canon);
+						if (!lines) {
+							const docText = await currentTextFor(h.path);
+							if (mine !== latest || state.workspace?.root !== startRoot) return;
+							lines = docText.split(/\r?\n/);
+							fullLinesCache.set(canon, lines);
+						}
+						lineText = lines[h.line - 1] ?? h.text;
+					}
 					if (hasHeadingFilter) {
-						const m = HEADING.exec(h.text);
-						if (!m) return false;
+						const m = HEADING.exec(lineText);
+						if (!m) continue;
 						const headingPlain = plainMarkdown(m[2]!).toLowerCase();
-						if (!parsed.headings.every((wanted) => wanted === "*" || headingPlain.includes(wanted.toLowerCase()))) return false;
+						if (!parsed.headings.every((wanted) => wanted === "*" || headingPlain.includes(wanted.toLowerCase()))) continue;
 					}
 					if (hasTaskFilter) {
 						const matchesTask = parsed.tasks.every((mode) =>
-							mode === "open" ? TASK_OPEN_RE.test(h.text) : mode === "done" ? TASK_DONE_RE.test(h.text) : TASK_ANY_RE.test(h.text),
+							mode === "open" ? TASK_OPEN_RE.test(lineText) : mode === "done" ? TASK_DONE_RE.test(lineText) : TASK_ANY_RE.test(lineText),
 						);
-						if (!matchesTask) return false;
+						if (!matchesTask) continue;
 					}
-					return true;
-				});
+					filtered.push(h);
+				}
+				merged = filtered;
 			}
 
 			if (merged.length > SEARCH_LIMIT) merged = merged.slice(0, SEARCH_LIMIT);
+			setTruncated(wasTruncated);
 			setHits(merged);
 			setStatus("done");
 		} catch (e: any) {
-			if (mine !== latest) return;
+			if (mine !== latest || state.workspace?.root !== startRoot) return;
 			setHits([]);
+			setTruncated(false);
 			setFailure(String(e?.message ?? e));
 			setStatus("failed");
 		}
@@ -760,6 +728,7 @@ export function Search() {
 		setCaseSensitive(Boolean(wanted.caseSensitive));
 		const nextInc = wanted.include ?? "";
 		const nextExc = wanted.exclude ?? "";
+		setTicketScopeKey(null);
 		setInclude(nextInc);
 		setExclude(nextExc);
 		setChoosing(Boolean(nextInc.trim() || nextExc.trim()));
@@ -803,92 +772,103 @@ export function Search() {
 		return [...map];
 	};
 
-	// Where each line sits: SSL region › procedure (from starlims-lsp), Markdown # Heading (from shared/outline),
-	// or CSV/TSV Row Key · Column (from shared/csv). Reads dirty open buffers when present so line numbers stay exact.
+	// Where each line sits: SSL region › procedure (from starlims-lsp via ephemeral scratchSymbols),
+	// Markdown # Heading (from shared/outline), or CSV/TSV Row Key · Column (from shared/csv).
+	// Keyed on raw `hits()` so dismissing rows never re-reads files, and cleans up on unmount.
 	let placesSeq = 0;
-	const [places] = createResource(groups, async (list) => {
-		const mine = ++placesSeq;
-		const out = new Map<string, string>();
-		let sslChecked = 0;
-		for (const [path, lines] of list) {
-			if (mine !== placesSeq) return out;
-			if (/\.(md|markdown)$/i.test(path)) {
-				const text = await currentTextFor(path);
-				if (!text || mine !== placesSeq) continue;
-				const mdSymbols = outline("markdown", text);
-				for (const line of lines) {
-					const trail: string[] = [];
-					const walk = (nodes: typeof mdSymbols) => {
-						for (const n of nodes) {
-							if (line.line >= n.line && line.line <= n.endLine) {
-								trail.push(n.name);
-								if (n.children?.length) walk(n.children);
-								break;
+	onCleanup(() => placesSeq++);
+	const [places] = createResource(
+		() => ({ root: state.workspace?.root ?? "", hits: hits() }),
+		async ({ root: startRoot, hits: rawHits }) => {
+			const mine = ++placesSeq;
+			const out = new Map<string, string>();
+			if (!rawHits.length) return out;
+			const list = new Map<string, LineHit[]>();
+			for (const line of byLine(rawHits)) {
+				const arr = list.get(line.path);
+				if (arr) arr.push(line);
+				else list.set(line.path, [line]);
+			}
+			let sslChecked = 0;
+			for (const [path, lines] of list) {
+				if (mine !== placesSeq || (state.workspace?.root ?? "") !== startRoot) return out;
+				if (/\.(md|markdown)$/i.test(path)) {
+					const text = await currentTextFor(path);
+					if (!text || mine !== placesSeq || (state.workspace?.root ?? "") !== startRoot) continue;
+					const mdSymbols = outline("markdown", text);
+					for (const line of lines) {
+						const trail: string[] = [];
+						const walk = (nodes: typeof mdSymbols) => {
+							for (const n of nodes) {
+								if (line.line >= n.line && line.line <= n.endLine) {
+									trail.push(n.name);
+									if (n.children?.length) walk(n.children);
+									break;
+								}
+							}
+						};
+						walk(mdSymbols);
+						if (trail.length) out.set(`${path}:${line.line}`, trail.join(" › "));
+					}
+					continue;
+				}
+				if (/\.(csv|tsv)$/i.test(path)) {
+					const text = await currentTextFor(path);
+					if (!text || mine !== placesSeq || (state.workspace?.root ?? "") !== startRoot) continue;
+					for (const line of lines) {
+						const crumb = csvBreadcrumbForLine(text, line.line, line.matches[0]?.column ?? 1);
+						if (crumb) out.set(`${path}:${line.line}`, crumb);
+					}
+					continue;
+				}
+				if (/\.plan\.json$/i.test(path)) {
+					const text = await currentTextFor(path);
+					if (!text || mine !== placesSeq || (state.workspace?.root ?? "") !== startRoot) continue;
+					const parsed = parsePlan(text);
+					if (!parsed.plan) continue;
+					const nLines = nodeLines(text, parsed.plan);
+					const groupById = new Map(parsed.plan.groups.map((g) => [g.id, g.name]));
+					const nodeById = new Map(parsed.plan.nodes.map((n) => [n.id, n]));
+					const lineToNodeId = new Map<number, string>();
+					for (const [id, ln] of nLines) lineToNodeId.set(ln, id);
+					for (const line of lines) {
+						const directId = lineToNodeId.get(line.line);
+						if (directId) {
+							const n = nodeById.get(directId);
+							if (n) {
+								const stage = n.group ? groupById.get(n.group) : undefined;
+								const kindLabel =
+									n.kind === "decision" ? "Decision" : n.kind === "call" ? "Call" : n.kind === "start" ? "Start" : n.kind === "end" ? "End" : "Step";
+								const cleanTxt = n.text.replace(/\s+/g, " ").trim() || directId;
+								const shortTxt = cleanTxt.length > 38 ? `${cleanTxt.slice(0, 37)}…` : cleanTxt;
+								out.set(`${path}:${line.line}`, `${stage || kindLabel} › ${shortTxt}`);
+								continue;
 							}
 						}
-					};
-					walk(mdSymbols);
-					if (trail.length) out.set(`${path}:${line.line}`, trail.join(" › "));
-				}
-				continue;
-			}
-			if (/\.(csv|tsv)$/i.test(path)) {
-				const text = await currentTextFor(path);
-				if (!text || mine !== placesSeq) continue;
-				for (const line of lines) {
-					const crumb = csvBreadcrumbForLine(text, line.line, line.matches[0]?.column ?? 1);
-					if (crumb) out.set(`${path}:${line.line}`, crumb);
-				}
-				continue;
-			}
-			if (/\.plan\.json$/i.test(path)) {
-				const text = await currentTextFor(path);
-				if (!text || mine !== placesSeq) continue;
-				const parsed = parsePlan(text);
-				if (!parsed.plan) continue;
-				const nLines = nodeLines(text, parsed.plan);
-				const groupById = new Map(parsed.plan.groups.map((g) => [g.id, g.name]));
-				const nodeById = new Map(parsed.plan.nodes.map((n) => [n.id, n]));
-				const lineToNodeId = new Map<number, string>();
-				for (const [id, ln] of nLines) lineToNodeId.set(ln, id);
-				for (const line of lines) {
-					const directId = lineToNodeId.get(line.line);
-					if (directId) {
-						const n = nodeById.get(directId);
-						if (n) {
-							const stage = n.group ? groupById.get(n.group) : undefined;
-							const kindLabel =
-								n.kind === "decision" ? "Decision" : n.kind === "call" ? "Call" : n.kind === "start" ? "Start" : n.kind === "end" ? "End" : "Step";
-							const cleanTxt = n.text.replace(/\s+/g, " ").trim() || directId;
-							const shortTxt = cleanTxt.length > 38 ? `${cleanTxt.slice(0, 37)}…` : cleanTxt;
-							out.set(`${path}:${line.line}`, `${stage || kindLabel} › ${shortTxt}`);
-							continue;
-						}
+						const crumb = planLineBreadcrumb(text, line.line);
+						if (crumb) out.set(`${path}:${line.line}`, crumb);
 					}
-					const crumb = planLineBreadcrumb(text, line.line);
-					if (crumb) out.set(`${path}:${line.line}`, crumb);
+					continue;
 				}
-				continue;
+				if (!/\.(ssl|srvscr|ds)$/i.test(path) || sslChecked >= 60) continue;
+				sslChecked++;
+				const text = await currentTextFor(path);
+				if (!text || mine !== placesSeq || (state.workspace?.root ?? "") !== startRoot) continue;
+				const symbols = await session.scratchSymbols(text).catch(() => []);
+				if (mine !== placesSeq || (state.workspace?.root ?? "") !== startRoot) return out;
+				for (const line of lines) {
+					out.set(
+						`${path}:${line.line}`,
+						symbolPath(symbols, line.line)
+							.filter((s) => s.kind === monaco.languages.SymbolKind.Namespace || s.kind === monaco.languages.SymbolKind.Function || s.kind === monaco.languages.SymbolKind.Method)
+							.map((s) => s.name)
+							.join(" › "),
+					);
+				}
 			}
-			if (!/\.(ssl|srvscr|ds)$/i.test(path) || sslChecked >= 60) continue;
-			sslChecked++;
-			const model = await session.ensureModel(monaco.Uri.file(path).toString());
-			if (mine !== placesSeq) return out;
-			if (!model || model.getLanguageId() !== "ssl") continue;
-			const symbols = await session.documentSymbols(model).catch(() => []);
-			if (mine !== placesSeq) return out;
-			for (const line of lines) {
-				out.set(
-					`${path}:${line.line}`,
-					symbolPath(symbols, line.line)
-						.filter((s) => s.kind === monaco.languages.SymbolKind.Namespace || s.kind === monaco.languages.SymbolKind.Function || s.kind === monaco.languages.SymbolKind.Method)
-						.map((s) => s.name)
-						.join(" › "),
-				);
-			}
-		}
-		return out;
-	});
+			return out;
+		},
+	);
 	const place = (line: LineHit) => places()?.get(`${line.path}:${line.line}`) ?? "";
 	const byPlace = (list: LineHit[]) => {
 		const map = new Map<string, LineHit[]>();
@@ -899,55 +879,7 @@ export function Search() {
 	const matchesIn = (list: LineHit[]) => list.reduce((n, line) => n + line.matches.length, 0);
 	/** The switches that narrow a search, by the names on their buttons: what to try without when nothing is found. */
 	const switchesOn = () => [caseSensitive() ? "Aa" : "", wholeWord() ? "ab" : "", regex() ? ".*" : ""].filter(Boolean);
-	const narrowed = () => Boolean(searched().include?.trim() || searched().exclude?.trim());
-
-	const activeTicketScope = createMemo(() => {
-		const root = state.workspace?.root;
-		const allDocs = docs();
-		const key = state.settings.activeTicket?.trim() || ticketForFile(allDocs, activePath(), root) || ticketAtHand();
-		if (!key) return null;
-		const found = allDocs.find((d) => d.exists && d.group === "tickets" && d.ticket?.toLowerCase() === key.toLowerCase());
-		if (!found) return null;
-		const descendants = descendantTickets(allDocs, key);
-		const globs = new Set<string>();
-		const addTicketTree = (ticketDoc: typeof found) => {
-			globs.add(relativeTo(root, ticketDoc.path).replace(/\\/g, "/"));
-			if (ticketDoc.ticketFolder) {
-				globs.add(`${relativeTo(root, ticketDoc.ticketFolder).replace(/\\/g, "/")}/**`);
-			}
-			const tKey = ticketDoc.ticket;
-			if (!tKey) return;
-			for (const group of ticketWork(allDocs, tKey)) {
-				if (group.kind === "ticket") continue;
-				for (const ref of group.files) {
-					globs.add(relativeTo(root, ref.path).replace(/\\/g, "/"));
-				}
-			}
-		};
-		addTicketTree(found);
-		for (const desc of descendants) addTicketTree(desc);
-		// Resolve referenced scripts across the ticket & all descendant tickets against real workspace paths.
-		const refs = scriptsForTicket(allDocs, key, { includeDescendants: true });
-		let resolvedScripts = 0;
-		if (refs.length) {
-			const allWs = workspaceFiles() ?? [];
-			for (const filePath of allWs) {
-				if (refs.some((ref) => codeMatchesRef(filePath, ref, root))) {
-					globs.add(relativeTo(root, filePath).replace(/\\/g, "/"));
-					resolvedScripts++;
-				}
-			}
-		}
-		const extras = [
-			descendants.length ? `${descendants.length} sub-${descendants.length === 1 ? "ticket" : "tickets"}` : "",
-			resolvedScripts ? `${resolvedScripts} ${resolvedScripts === 1 ? "script" : "scripts"}` : "",
-		].filter(Boolean);
-		return {
-			key,
-			glob: [...globs].filter(Boolean).join(", "),
-			tip: `Search ${key}${extras.length ? ` (${extras.join(", ")})` : ""}, its folder, and all linked specs/plans/decisions`,
-		};
-	});
+	const narrowed = () => Boolean(searched().include?.trim() || searched().exclude?.trim() || searched().paths !== undefined);
 
 	const topTags = createMemo(() => workspaceTags(docs()).slice(0, 4));
 	/** Distinct statuses actually present across workspace docs (with sensible fallback if none exist yet). */
@@ -983,15 +915,25 @@ export function Search() {
 		return new RegExp(`(?:^|\\s)${esc}(?=\\s|$)`, "i").test(typed());
 	};
 	const showDocChips = () =>
-		scopeActive(docsIncludeGlob(), "") ||
-		Boolean(docFilterNote()) ||
-		/\b(?:tag|status|ticket|parent|group|kind|heading|task):/i.test(typed());
+		!inCodeScope() &&
+		(inDocsScope() ||
+			Boolean(docFilterNote()) ||
+			/\b(?:tag|status|ticket|parent|group|kind|heading|task):/i.test(typed()));
 
 	const applyScope = (inc: string, exc = "") => {
+		setTicketScopeKey(null);
 		setInclude(inc);
 		setExclude(exc);
 		setChoosing(Boolean(inc || exc));
-		if (typed().trim()) void run();
+		if (typed()) void run();
+	};
+
+	const applyTicketScope = (key: string) => {
+		setTicketScopeKey(key);
+		setInclude("");
+		setExclude("");
+		setChoosing(false);
+		if (typed()) void run();
 	};
 
 	// --- replacing -------------------------------------------------------------
@@ -1005,11 +947,104 @@ export function Search() {
 			return null;
 		}
 	});
-	/** What each marked match of a line would become, by the column it starts at (skipping Safe-docs link targets on Markdown lines). */
+
+	// Document-level Safe Docs cache for Markdown protected spans & .plan.json validation during Replace preview.
+	let safeCacheSeq = 0;
+	onCleanup(() => safeCacheSeq++);
+	const [safeDocInfo] = createResource(
+		() => {
+			if (!replacing() || !safeDocs() || searched().syntheticQuery) return null;
+			const list = hits();
+			if (!list.length) return null;
+			const uniquePaths: string[] = [];
+			const seen = new Set<string>();
+			for (const h of list) {
+				if (!/\.(md|markdown)$/i.test(h.path) && !/\.plan\.json$/i.test(h.path)) continue;
+				const canon = canonical(h.path);
+				if (seen.has(canon)) continue;
+				seen.add(canon);
+				uniquePaths.push(h.path);
+			}
+			if (!uniquePaths.length) return null;
+			return { root: state.workspace?.root ?? "", paths: uniquePaths };
+		},
+		async (req) => {
+			const mine = ++safeCacheSeq;
+			const mdSpans = new Map<string, Map<number, TextSpan[]>>();
+			const planTexts = new Map<string, string>();
+			for (const path of req.paths) {
+				if (mine !== safeCacheSeq || (state.workspace?.root ?? "") !== req.root) return { mdSpans, planTexts };
+				const canon = canonical(path);
+				const text = await currentTextFor(path);
+				if (mine !== safeCacheSeq || (state.workspace?.root ?? "") !== req.root) return { mdSpans, planTexts };
+				if (!text) continue;
+				if (/\.(md|markdown)$/i.test(path)) mdSpans.set(canon, protectedMarkdownSpans(text));
+				else if (/\.plan\.json$/i.test(path)) planTexts.set(canon, text);
+			}
+			return { mdSpans, planTexts };
+		},
+	);
+
+	const markdownSpansFor = (path: string): Map<number, TextSpan[]> | undefined => {
+		const canon = canonical(path);
+		const open = documents.get(canon);
+		if (open && !open.binary) {
+			const version = open.model.getVersionId();
+			const cached = openMdSpanCache.get(canon);
+			if (cached && cached.version === version) return cached.spans;
+			const spans = protectedMarkdownSpans(open.model.getValue());
+			openMdSpanCache.set(canon, { version, spans });
+			return spans;
+		}
+		return safeDocInfo()?.mdSpans.get(canon);
+	};
+
+	const allowedLinesFor = (path: string, fileLines: readonly LineHit[]): ReadonlySet<number> | undefined => {
+		const at = canonical(path);
+		const skipLines = dismissedLines();
+		const hasPartialLines = lineFiltered() || [...skipLines].some((k) => k.startsWith(`${at}:`));
+		return hasPartialLines ? new Set(fileLines.map((l) => l.line)) : undefined;
+	};
+
+	const invalidPlanPaths = createMemo(() => {
+		const bad = new Set<string>();
+		if (!replacing() || !safeDocs() || searched().syntheticQuery) return bad;
+		const found = pattern();
+		if (!found) return bad;
+		const info = safeDocInfo();
+		const with_ = replacement();
+		const isRegex = Boolean(searched().regex);
+		for (const [path, fileLines] of groups()) {
+			if (!/\.plan\.json$/i.test(path)) continue;
+			const canon = canonical(path);
+			const open = documents.get(canon);
+			const text = open && !open.binary ? open.model.getValue() : info?.planTexts.get(canon);
+			if (!text) continue;
+			const res = replaceSafeInText(text, found, with_, isRegex, {
+				allowedLines: allowedLinesFor(path, fileLines),
+				isPlanJson: true,
+				safeDocs: true,
+				maxSamples: 0,
+			});
+			if (res.invalidJson) bad.add(canon);
+		}
+		return bad;
+	});
+
+	/** What each marked match of a line would become, by the column it starts at (using document-level Safe Docs spans). */
 	const becomes = (line: LineHit) => {
 		const found = pattern();
-		if (!found) return new Map<number, string>();
-		const lineSpans = safeDocs() && /\.(md|markdown)$/i.test(line.path) ? protectedMarkdownSpans(line.text).get(1) : undefined;
+		if (!found || searched().syntheticQuery) return new Map<number, string>();
+		const canon = canonical(line.path);
+		if (safeDocs() && /\.plan\.json$/i.test(line.path) && invalidPlanPaths().has(canon)) {
+			return new Map<number, string>();
+		}
+		let lineSpans: TextSpan[] | undefined;
+		if (safeDocs() && /\.(md|markdown)$/i.test(line.path)) {
+			const docSpans = markdownSpansFor(line.path);
+			if (!docSpans && safeDocInfo.loading) return new Map<number, string>();
+			lineSpans = docSpans?.get(line.line);
+		}
 		const entries: [number, string][] = [];
 		for (const match of matchesOn(line.text, found, replacement(), Boolean(searched().regex))) {
 			if (overlapsProtectedSpan(match.column, match.length, lineSpans)) continue;
@@ -1019,19 +1054,16 @@ export function Search() {
 	};
 	/** Why "Replace all" cannot be pressed now; "" when it can. */
 	const noReplace = () => {
-		if (status() === "busy") return "The search is still running";
+		if (status() === "busy" || replaceActive()) return "The search is still running";
+		if (searched().syntheticQuery) return "Enter search text to replace — filter-only queries cannot replace";
 		if (status() !== "done" || !visibleHits().length) return "Search for something first: what is found is what is replaced";
-		if (hits().length >= SEARCH_LIMIT) return `There are ${SEARCH_LIMIT} results or more, and only the first are listed: narrow the search before replacing`;
+		if (truncated() || hits().length >= SEARCH_LIMIT) return `There are ${SEARCH_LIMIT} results or more, and only the first are listed: narrow the search before replacing`;
 		return "";
 	};
-	const allowedLinesFor = (path: string, fileLines: readonly LineHit[]): ReadonlySet<number> | undefined => {
-		const at = canonical(path);
-		const skipLines = dismissedLines();
-		const hasPartialLines = lineFiltered() || [...skipLines].some((k) => k.startsWith(`${at}:`));
-		return hasPartialLines ? new Set(fileLines.map((l) => l.line)) : undefined;
-	};
 	const executeReplace = async (skipConfirm: boolean) => {
-		if (noReplace()) return;
+		if (replaceBusy || noReplace()) return;
+		const startRoot = state.workspace?.root;
+		const startSearchId = latest;
 		const query = effectiveAsked() || asked();
 		const options = searched();
 		const with_ = replacement();
@@ -1042,133 +1074,163 @@ export function Search() {
 		const total = visibleHits().length;
 		const protect = safeDocs();
 
-		if (!skipConfirm) {
-			const safeTail = protect ? " Safe docs skips YAML keys, Markdown link targets, and invalid .plan.json edits." : "";
-			const prompt = `Replace ${count(total, "match", "matches")} in ${count(paths.length, "file")} with ${with_ ? `“${with_}”` : "nothing"}? Each file that is written is first kept as it was in its local history.${safeTail}`;
-			if (paths.length > 1) {
-				const REPLACE = "Replace all";
-				const PREVIEW = "Preview changes…";
-				const answer = await choose(prompt, [REPLACE, PREVIEW]);
-				if (answer === PREVIEW) {
-					await previewReplace();
-					return;
-				}
-				if (answer !== REPLACE) return;
-			} else {
-				const answer = await choose(prompt, ["Replace"]);
-				if (answer !== "Replace") return;
-			}
-		}
-
-		setStatus("busy");
-		let done = 0;
-		let files = 0;
-		let skippedProtected = 0;
-		const unsaved: string[] = [];
-		const skippedJson: string[] = [];
-		const failed: string[] = [];
-		const onDiskFull: string[] = [];
+		replaceBusy = true;
+		setReplaceActive(true);
+		let handoffToPreview = false;
+		let ranReplace = false;
 		try {
-			for (const [path, fileLines] of activeGroups) {
-				const at = canonical(path);
-				const allowedLines = allowedLinesFor(path, fileLines);
-				const isMd = /\.(md|markdown)$/i.test(path);
-				const isPlan = /\.plan\.json$/i.test(path);
-				const needsSafe = protect && (isMd || isPlan);
+			if (!skipConfirm) {
+				const safeTail = protect ? " Safe docs skips YAML keys, Markdown link targets, and invalid .plan.json edits." : "";
+				const prompt = `Replace ${count(total, "match", "matches")} in ${count(paths.length, "file")} with ${with_ ? `“${with_}”` : "nothing"}? Each file that is written is first kept as it was in its local history.${safeTail}`;
+				if (paths.length > 1) {
+					const REPLACE = "Replace all";
+					const PREVIEW = "Preview changes…";
+					const answer = await choose(prompt, [REPLACE, PREVIEW]);
+					if (state.workspace?.root !== startRoot || latest !== startSearchId) return;
+					if (answer === PREVIEW) {
+						handoffToPreview = true;
+						return;
+					}
+					if (answer !== REPLACE) return;
+				} else {
+					const answer = await choose(prompt, ["Replace"]);
+					if (state.workspace?.root !== startRoot || latest !== startSearchId) return;
+					if (answer !== "Replace") return;
+				}
+			}
 
-				const doc = documents.get(at);
-				const tabbed = state.groups.some((group) => group.tabs.includes(at));
-				if (!doc || doc.binary || (!tabbed && !state.dirty[at])) {
-					if (!allowedLines && !needsSafe) {
-						onDiskFull.push(path);
+			ranReplace = true;
+			setStatus("busy");
+			let done = 0;
+			let files = 0;
+			let skippedProtected = 0;
+			const unsaved: string[] = [];
+			const skippedJson: string[] = [];
+			const failed: string[] = [];
+			const onDiskPaths: string[] = [];
+			const linesByPath: Record<string, number[]> = {};
+			try {
+				for (const [path, fileLines] of activeGroups) {
+					if (state.workspace?.root !== startRoot) return;
+					const at = canonical(path);
+					const allowedLines = allowedLinesFor(path, fileLines);
+					const isMd = /\.(md|markdown)$/i.test(path);
+					const isPlan = /\.plan\.json$/i.test(path);
+					const needsSafe = protect && (isMd || isPlan);
+
+					const doc = documents.get(at);
+					const tabbed = state.groups.some((group) => group.tabs.includes(at));
+					if (!doc || doc.binary || (!tabbed && !state.dirty[at])) {
+						// Route all closed-file replacements (including safeDocs and partial lines) through locked backend.replace.
+						onDiskPaths.push(path);
+						if (allowedLines) linesByPath[path] = [...allowedLines];
 						continue;
 					}
-					try {
-						const read = await backend.read(path);
-						if (read.binary) continue;
-						const res = replaceSafeInText(read.text, found, with_, Boolean(options.regex), {
+
+					const currentValue = doc.model.getValue();
+					let mdProtected: Map<number, TextSpan[]> | undefined;
+					if (needsSafe) {
+						const sim = replaceSafeInText(currentValue, found, with_, Boolean(options.regex), {
 							allowedLines,
 							isMarkdown: isMd,
 							isPlanJson: isPlan,
 							safeDocs: protect,
 						});
-						skippedProtected += res.skippedProtected;
-						if (res.invalidJson) {
+						skippedProtected += sim.skippedProtected;
+						if (sim.invalidJson) {
 							skippedJson.push(baseName(path));
 							continue;
 						}
-						if (!res.count) continue;
-						await backend.historyKeep(path).catch(() => {});
-						await backend.write(path, res.text, true);
-						done += res.count;
-						files++;
-						await fileChangedOnDisk(path);
-					} catch (err: any) {
-						failed.push(`${baseName(path)}: ${err?.message ?? err}`);
+						if (!sim.count) continue;
+						if (isMd) mdProtected = protectedMarkdownSpans(currentValue);
 					}
-					continue;
+					const wasUnsaved = Boolean(state.dirty[at]);
+					if (!wasUnsaved) {
+						await backend.historyKeep(at).catch(() => {});
+						if (state.workspace?.root !== startRoot) return;
+					}
+					const changed = replaceInModel(doc.model, found, with_, Boolean(options.regex), allowedLines, mdProtected);
+					if (!changed) continue;
+					done += changed;
+					files++;
+					if (wasUnsaved) unsaved.push(path);
+					else {
+						const saved = await save(at, { format: false });
+						if (state.workspace?.root !== startRoot) return;
+						if (!saved) failed.push(`${baseName(path)}: it is changed in the editor, and could not be saved`);
+					}
 				}
-
-				const currentValue = doc.model.getValue();
-				let mdProtected: Map<number, TextSpan[]> | undefined;
-				if (needsSafe) {
-					const sim = replaceSafeInText(currentValue, found, with_, Boolean(options.regex), {
-						allowedLines,
-						isMarkdown: isMd,
-						isPlanJson: isPlan,
+				if (onDiskPaths.length) {
+					const replaceOptions: SearchOptions = {
+						regex: options.regex,
+						caseSensitive: options.caseSensitive,
+						wholeWord: options.wholeWord,
 						safeDocs: protect,
-					});
-					skippedProtected += sim.skippedProtected;
-					if (sim.invalidJson) {
-						skippedJson.push(baseName(path));
-						continue;
+						...(Object.keys(linesByPath).length ? { linesByPath } : {}),
+					};
+					const results = (await backend.replace(query, with_, replaceOptions, onDiskPaths)) as {
+						path: string;
+						count: number;
+						error?: string;
+						skippedProtected?: number;
+						invalidJson?: boolean;
+					}[];
+					if (state.workspace?.root !== startRoot) return;
+					for (const result of results) {
+						if (result.skippedProtected) skippedProtected += result.skippedProtected;
+						if (result.invalidJson) {
+							skippedJson.push(baseName(result.path));
+							continue;
+						}
+						if (result.error) failed.push(`${baseName(result.path)}: ${result.error}`);
+						if (!result.count) continue;
+						done += result.count;
+						files++;
+						await fileChangedOnDisk(result.path);
+						if (state.workspace?.root !== startRoot) return;
 					}
-					if (!sim.count) continue;
-					if (isMd) mdProtected = protectedMarkdownSpans(currentValue);
 				}
-				const wasUnsaved = Boolean(state.dirty[at]);
-				if (!wasUnsaved) await backend.historyKeep(at).catch(() => {});
-				const changed = replaceInModel(doc.model, found, with_, Boolean(options.regex), allowedLines, mdProtected);
-				if (!changed) continue;
-				done += changed;
-				files++;
-				if (wasUnsaved) unsaved.push(path);
-				else if (!(await save(at, { format: false }))) failed.push(`${baseName(path)}: it is changed in the editor, and could not be saved`);
+			} catch (e: any) {
+				if (state.workspace?.root !== startRoot) return;
+				failed.push(String(e?.message ?? e));
 			}
-			for (const result of onDiskFull.length ? await backend.replace(query, with_, options, onDiskFull) : []) {
-				if (result.error) failed.push(`${baseName(result.path)}: ${result.error}`);
-				if (!result.count) continue;
-				done += result.count;
-				files++;
-				await fileChangedOnDisk(result.path);
+			if (state.workspace?.root !== startRoot) return;
+			setState("treeVersion", (v) => v + 1);
+			const protectedNote = skippedProtected
+				? ` (${count(skippedProtected, "protected doc match", "protected doc matches")} skipped by Safe docs)`
+				: "";
+			const differs = done !== total && !failed.length && !skippedProtected && !skippedJson.length
+				? ` ${count(total, "match", "matches")} were listed: a file has changed since the search.`
+				: "";
+			const note = `Replaced ${count(done, "match", "matches")} in ${count(files, "file")}.${protectedNote}${differs}`;
+			if (unsaved.length) {
+				notify(
+					`${note} ${unsaved.length === 1 ? `${baseName(unsaved[0]!)} had unsaved changes: it is changed in the editor and not saved.` : `${unsaved.length} files had unsaved changes: they are changed in the editor and not saved.`}`,
+					"info",
+					{ label: "Save all", run: () => void saveAll() },
+				);
+			} else notify(note);
+			if (skippedJson.length) {
+				notify(`Skipped ${skippedJson.join(", ")}: replacement would break .plan.json JSON syntax.`, "error");
 			}
-		} catch (e: any) {
-			failed.push(String(e?.message ?? e));
+			if (failed.length) notify(`Not replaced: ${failed.join("; ")}`, "error");
+		} finally {
+			replaceBusy = false;
+			setReplaceActive(false);
 		}
-		setState("treeVersion", (v) => v + 1);
-		const protectedNote = skippedProtected
-			? ` (${count(skippedProtected, "protected doc match", "protected doc matches")} skipped by Safe docs)`
-			: "";
-		const differs = done !== total && !failed.length && !skippedProtected && !skippedJson.length
-			? ` ${count(total, "match", "matches")} were listed: a file has changed since the search.`
-			: "";
-		const note = `Replaced ${count(done, "match", "matches")} in ${count(files, "file")}.${protectedNote}${differs}`;
-		if (unsaved.length) {
-			notify(
-				`${note} ${unsaved.length === 1 ? `${baseName(unsaved[0]!)} had unsaved changes: it is changed in the editor and not saved.` : `${unsaved.length} files had unsaved changes: they are changed in the editor and not saved.`}`,
-				"info",
-				{ label: "Save all", run: () => void saveAll() },
-			);
-		} else notify(note);
-		if (skippedJson.length) {
-			notify(`Skipped ${skippedJson.join(", ")}: replacement would break .plan.json JSON syntax.`, "error");
+		if (handoffToPreview) {
+			if (state.workspace?.root === startRoot && latest === startSearchId) await previewReplace();
+			return;
 		}
-		if (failed.length) notify(`Not replaced: ${failed.join("; ")}`, "error");
-		await run();
+		if (ranReplace && state.workspace?.root === startRoot) {
+			await run();
+		}
 	};
 	const replaceAll = () => executeReplace(false);
 	const previewReplace = async () => {
-		if (noReplace()) return;
+		if (replaceBusy || noReplace()) return;
+		const startRoot = state.workspace?.root;
+		const startSearchId = latest;
 		const options = searched();
 		const with_ = replacement();
 		const found = pattern();
@@ -1190,92 +1252,108 @@ export function Search() {
 		let totalProtected = 0;
 		let invalidCount = 0;
 
-		for (const [path, fileLines] of activeGroups) {
-			const text = await currentTextFor(path);
-			if (!text) continue;
-			const isMd = /\.(md|markdown)$/i.test(path);
-			const isPlan = /\.plan\.json$/i.test(path);
-			const res = replaceSafeInText(text, found, with_, Boolean(options.regex), {
-				allowedLines: allowedLinesFor(path, fileLines),
-				isMarkdown: isMd,
-				isPlanJson: isPlan,
-				safeDocs: protect,
-				maxSamples: 1,
-			});
-			totalProtected += res.skippedProtected;
-			if (res.invalidJson) {
-				invalidCount++;
+		replaceBusy = true;
+		setReplaceActive(true);
+		let applyAfter = false;
+		let openTarget: { path: string; line?: number } | null = null;
+		try {
+			for (const [path, fileLines] of activeGroups) {
+				const text = await currentTextFor(path);
+				if (state.workspace?.root !== startRoot || latest !== startSearchId) return;
+				if (!text) continue;
+				const isMd = /\.(md|markdown)$/i.test(path);
+				const isPlan = /\.plan\.json$/i.test(path);
+				const res = replaceSafeInText(text, found, with_, Boolean(options.regex), {
+					allowedLines: allowedLinesFor(path, fileLines),
+					isMarkdown: isMd,
+					isPlanJson: isPlan,
+					safeDocs: protect,
+					maxSamples: 1,
+				});
+				totalProtected += res.skippedProtected;
+				if (res.invalidJson) {
+					invalidCount++;
+					rows.push({
+						path,
+						relPath: rel(path),
+						count: 0,
+						skippedProtected: res.skippedProtected,
+						invalidJson: true,
+						sampleLine: fileLines[0]?.line,
+						sampleSummary: "Skipped: replacement would produce invalid JSON",
+					});
+					continue;
+				}
+				if (!res.count && !res.skippedProtected) continue;
+				totalMatches += res.count;
+				const sample = res.samples[0];
+				const trim = (s: string) => (s.length > 36 ? `${s.slice(0, 35)}…` : s);
 				rows.push({
 					path,
 					relPath: rel(path),
-					count: 0,
+					count: res.count,
 					skippedProtected: res.skippedProtected,
-					invalidJson: true,
-					sampleLine: fileLines[0]?.line,
-					sampleSummary: "Skipped: replacement would produce invalid JSON",
+					invalidJson: false,
+					sampleLine: sample?.line ?? fileLines[0]?.line,
+					sampleSummary: sample
+						? `L${sample.line}: ${trim(sample.before)} -> ${trim(sample.after)}`
+						: res.skippedProtected
+							? `${count(res.skippedProtected, "match", "matches")} protected by Safe docs`
+							: undefined,
 				});
-				continue;
 			}
-			if (!res.count && !res.skippedProtected) continue;
-			totalMatches += res.count;
-			const sample = res.samples[0];
-			const trim = (s: string) => (s.length > 36 ? `${s.slice(0, 35)}…` : s);
-			rows.push({
-				path,
-				relPath: rel(path),
-				count: res.count,
-				skippedProtected: res.skippedProtected,
-				invalidJson: false,
-				sampleLine: sample?.line ?? fileLines[0]?.line,
-				sampleSummary: sample
-					? `L${sample.line}: ${trim(sample.before)} -> ${trim(sample.after)}`
-					: res.skippedProtected
-						? `${count(res.skippedProtected, "match", "matches")} protected by Safe docs`
-						: undefined,
-			});
-		}
 
-		const readyFiles = rows.filter((r) => r.count > 0 && !r.invalidJson).length;
-		const APPLY = "__apply__";
-		const picked = await quickPick<string>({
-			title: `Replace preview: ${count(totalMatches, "match", "matches")} in ${count(readyFiles, "file")}`,
-			placeholder: "Apply replace or pick a file to inspect…",
-			items: [
-				...(totalMatches > 0
-					? [
-							{
-								label: `Apply replace (${count(totalMatches, "match", "matches")} in ${count(readyFiles, "file")})`,
-								value: APPLY,
-								icon: "check" as const,
-								detail: [
-									totalProtected ? `${totalProtected} protected skipped` : "",
-									invalidCount ? `${invalidCount} invalid JSON skipped` : "",
-								]
-									.filter(Boolean)
-									.join(" · ") || "Local history snapshots kept before writing",
-							},
-						]
-					: []),
-				...rows.map((r, idx) => ({
-					label: `${r.relPath} (${r.invalidJson ? "invalid JSON" : count(r.count, "change")})`,
-					value: r.path,
-					file: baseName(r.path),
-					danger: r.invalidJson,
-					divide: idx === 0 && totalMatches > 0,
-					description: r.sampleSummary,
-					detail: r.skippedProtected && !r.invalidJson ? `${r.skippedProtected} protected` : undefined,
-				})),
-			],
-			empty: "No eligible matches remain to replace.",
-		});
-		if (!picked) return;
-		if (picked === APPLY) {
-			await executeReplace(true);
+			const readyFiles = rows.filter((r) => r.count > 0 && !r.invalidJson).length;
+			const APPLY = "__apply__";
+			const picked = await quickPick<string>({
+				title: `Replace preview: ${count(totalMatches, "match", "matches")} in ${count(readyFiles, "file")}`,
+				placeholder: "Apply replace or pick a file to inspect…",
+				items: [
+					...(totalMatches > 0
+						? [
+								{
+									label: `Apply replace (${count(totalMatches, "match", "matches")} in ${count(readyFiles, "file")})`,
+									value: APPLY,
+									icon: "check" as const,
+									detail: [
+										totalProtected ? `${totalProtected} protected skipped` : "",
+										invalidCount ? `${invalidCount} invalid JSON skipped` : "",
+									]
+										.filter(Boolean)
+										.join(" · ") || "Local history snapshots kept before writing",
+								},
+							]
+						: []),
+					...rows.map((r, idx) => ({
+						label: `${r.relPath} (${r.invalidJson ? "invalid JSON" : count(r.count, "change")})`,
+						value: r.path,
+						file: baseName(r.path),
+						danger: r.invalidJson,
+						divide: idx === 0 && totalMatches > 0,
+						description: r.sampleSummary,
+						detail: r.skippedProtected && !r.invalidJson ? `${r.skippedProtected} protected` : undefined,
+					})),
+				],
+				empty: "No eligible matches remain to replace.",
+			});
+			if (state.workspace?.root !== startRoot || latest !== startSearchId) return;
+			if (!picked) return;
+			if (picked === APPLY) {
+				applyAfter = true;
+				return;
+			}
+			const targetRow = rows.find((r) => r.path === picked);
+			if (targetRow) openTarget = { path: targetRow.path, line: targetRow.sampleLine };
+		} finally {
+			replaceBusy = false;
+			setReplaceActive(false);
+		}
+		if (applyAfter) {
+			if (state.workspace?.root === startRoot && latest === startSearchId) await executeReplace(true);
 			return;
 		}
-		const targetRow = rows.find((r) => r.path === picked);
-		if (targetRow) {
-			await openFile(targetRow.path, { keep: true, ...(targetRow.sampleLine ? { reveal: { line: targetRow.sampleLine } } : {}) });
+		if (openTarget && state.workspace?.root === startRoot) {
+			await openFile(openTarget.path, { keep: true, ...(openTarget.line ? { reveal: { line: openTarget.line } } : {}) });
 		}
 	};
 
@@ -1291,7 +1369,13 @@ export function Search() {
 			if (dismissedHitCount()) return `All ${count(hits().length, "result")} for “${asked()}” were dismissed.`;
 			return `Nothing found for “${asked()}”${filterTail}${narrowed() && !docFilterNote() ? " in the files chosen" : ""}. Check the spelling${switchesOn().length ? `, or switch ${switchesOn().join(" and ")} off` : ""}${narrowed() ? ", or look in more files" : ""}.`;
 		}
-		return `${hits().length >= SEARCH_LIMIT ? `The first ${SEARCH_LIMIT} results` : count(visibleHits().length, "result")} in ${count(groups().length, "file")} for “${asked()}”${filterTail}${dismissedTail}${narrowed() && !docFilterNote() ? ", in the files chosen" : ""}`;
+		const countText =
+			hits().length >= SEARCH_LIMIT
+				? `The first ${SEARCH_LIMIT} results`
+				: truncated()
+					? `Partial results (${count(visibleHits().length, "result")} shown; hit ${SEARCH_LIMIT}-match limit)`
+					: count(visibleHits().length, "result");
+		return `${countText} in ${count(groups().length, "file")} for “${asked()}”${filterTail}${dismissedTail}${narrowed() && !docFilterNote() ? ", in the files chosen" : ""}`;
 	};
 
 	const dismissBtnStyle = {
@@ -1314,8 +1398,12 @@ export function Search() {
 			let mark = 0;
 			return segments(props.line, LEAD).map((part) => ({ ...part, column: part.match ? columns[mark++] : undefined }));
 		};
-		// A line cut short for the list cannot say what a match near its cut would become: it is only marked.
-		const after = createMemo(() => (replacing() && props.line.text.length < 400 ? becomes(props.line) : null));
+		// A line cut short for the list (or a synthetic filter-only query) cannot say what a match near its cut would become: it is only marked.
+		const after = createMemo(() =>
+			replacing() && !searched().syntheticQuery && !props.line.textOffset && props.line.text.length < SEARCH_LINE_WINDOW
+				? becomes(props.line)
+				: null,
+		);
 		return (
 			<Row
 				class="tree-row hit"
@@ -1375,8 +1463,16 @@ export function Search() {
 				class="search-form"
 				role="search"
 				onSubmit={(e) => (e.preventDefault(), void run())}
-				// With more than one box a form no longer sends itself on Enter: each box asks for the search.
-				onKeyDown={(e) => e.key === "Enter" && e.target instanceof HTMLInputElement && (e.preventDefault(), void run())}
+				// Trigger search on Enter for search/include/exclude inputs, never for Replace With or checkboxes.
+				onKeyDown={(e) => {
+					if (e.key !== "Enter" || !(e.target instanceof HTMLInputElement)) return;
+					if (e.target.type === "checkbox" || e.target.hasAttribute("data-replace-input")) {
+						e.preventDefault();
+						return;
+					}
+					e.preventDefault();
+					void run();
+				}}
 			>
 				<div class="search-row">
 					<button type="button" class="search-fold" title={replacing() ? "Hide the replace row" : "Replace across files"} aria-label="Replace across files" aria-expanded={replacing()} onClick={() => setReplacing(!replacing())}>
@@ -1434,7 +1530,7 @@ export function Search() {
 				<Show when={replacing()}>
 					<div class="search-row">
 						<span class="search-fold" aria-hidden="true" />
-						<input aria-label="Replace with" placeholder={regex() ? "Replace with ($1 is the first group)" : "Replace with"} value={replacement()} onInput={(e) => setReplacement(e.currentTarget.value)} />
+						<input data-replace-input="" aria-label="Replace with" placeholder={regex() ? "Replace with ($1 is the first group)" : "Replace with"} value={replacement()} onInput={(e) => setReplacement(e.currentTarget.value)} />
 						<button
 							type="button"
 							class="search-replace"
@@ -1463,11 +1559,11 @@ export function Search() {
 				<Show when={choosing()}>
 					<div class="search-row">
 						<span class="search-fold" aria-hidden="true" />
-						<input aria-label="Files to include" title="Patterns with commas between: *.ssl, src/DueDates, docs/**/*.md. Empty for every file." placeholder="Files to include: *.ssl, src" value={include()} onInput={(e) => setInclude(e.currentTarget.value)} />
+						<input aria-label="Files to include" title="Patterns with commas between: *.ssl, src/DueDates, docs/**/*.md. Empty for every file." placeholder="Files to include: *.ssl, src" value={include()} onInput={(e) => (setTicketScopeKey(null), setInclude(e.currentTarget.value))} />
 					</div>
 					<div class="search-row">
 						<span class="search-fold" aria-hidden="true" />
-						<input aria-label="Files to exclude" title="Patterns with commas between: tests, *.md. These are left out even when included above." placeholder="Files to exclude: tests, *.md" value={exclude()} onInput={(e) => setExclude(e.currentTarget.value)} />
+						<input aria-label="Files to exclude" title="Patterns with commas between: tests, *.md. These are left out even when included above." placeholder="Files to exclude: tests, *.md" value={exclude()} onInput={(e) => (setTicketScopeKey(null), setExclude(e.currentTarget.value))} />
 					</div>
 				</Show>
 				<div class="search-scopes" role="group" aria-label="Quick search scope">
@@ -1494,9 +1590,9 @@ export function Search() {
 						{(scope) => (
 							<button
 								type="button"
-								classList={{ on: scopeActive(scope().glob, "") }}
+								classList={{ on: ticketScopeKey() === scope().key }}
 								title={scope().tip}
-								onClick={() => applyScope(scope().glob, "")}
+								onClick={() => applyTicketScope(scope().key)}
 							>
 								{scope().key}
 							</button>

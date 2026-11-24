@@ -5,6 +5,8 @@
 
 /** As many results as a search gives back. With this many there may be more, and a replace would not know of them. */
 export const SEARCH_LIMIT = 2000;
+/** Maximum characters kept per search hit excerpt. */
+export const SEARCH_LINE_WINDOW = 400;
 
 export type SearchOptions = {
 	regex?: boolean;
@@ -14,7 +16,32 @@ export type SearchOptions = {
 	include?: string;
 	/** The files to leave out, as a list of patterns. */
 	exclude?: string;
+	/** Explicit workspace-relative normalized path allowlist (matched verbatim, avoiding glob/comma splitting). */
+	paths?: string[];
+	/** Safe Docs guard for replace: skips YAML frontmatter keys, Markdown link targets, and invalid .plan.json edits. */
+	safeDocs?: boolean;
+	/** Per-file 1-based allowed line numbers for partial-line replace (keyed by path). */
+	linesByPath?: Record<string, number[]>;
 };
+
+/**
+ * Windows a long line to at most `maxLen` characters around a 1-based `column` so matches
+ * near or beyond `maxLen` remain visible in search excerpts.
+ */
+export function excerptForMatch(
+	line: string,
+	column1Based: number,
+	length = 0,
+	maxLen = SEARCH_LINE_WINDOW,
+	lead = 100,
+): { text: string; textOffset: number } {
+	if (line.length <= maxLen) return { text: line, textOffset: 0 };
+	const matchStart = Math.max(0, column1Based - 1);
+	const matchEnd = matchStart + Math.max(1, length);
+	if (matchEnd <= maxLen - 40) return { text: line.slice(0, maxLen), textOffset: 0 };
+	const offset = Math.max(0, Math.min(matchStart - lead, line.length - maxLen));
+	return { text: line.slice(offset, offset + maxLen), textOffset: offset };
+}
 
 const literal = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -76,11 +103,18 @@ export function replacementFor(match: RegExpExecArray, replacement: string, rege
 }
 
 /** Every match on one line, left to right, with what it becomes. The same walk a search makes. */
-export function matchesOn(line: string, pattern: RegExp, replacement: string, regex: boolean): { column: number; length: number; becomes: string }[] {
+export function matchesOn(
+	line: string,
+	pattern: RegExp,
+	replacement: string,
+	regex: boolean,
+	maxMatches = Infinity,
+): { column: number; length: number; becomes: string }[] {
 	const out: { column: number; length: number; becomes: string }[] = [];
+	if (maxMatches <= 0) return out;
 	pattern.lastIndex = 0;
 	let match: RegExpExecArray | null;
-	while ((match = pattern.exec(line))) {
+	while (out.length < maxMatches && (match = pattern.exec(line))) {
 		out.push({ column: match.index + 1, length: match[0].length, becomes: replacementFor(match, replacement, regex) });
 		// After a match of nothing the walk steps on by a whole character. A character outside the first plane is
 		// two units of the string: one step would land between its halves, to split it in two or never get past it.

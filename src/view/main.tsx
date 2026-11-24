@@ -1,6 +1,7 @@
 import { registerMarkdownLinks } from "./editor/markdownLinks";
 import "./style.css";
 import { render } from "solid-js/web";
+import { reconcile } from "solid-js/store";
 import { App } from "./App";
 import { connect, backend, onConnectionLost } from "./backend";
 import { installKeys } from "./commands";
@@ -45,6 +46,13 @@ async function start() {
 	setState("info", await backend.info());
 	window.addEventListener("error", (e) => uncaught(e.error ?? e.message));
 	window.addEventListener("unhandledrejection", (e) => uncaught(e.reason));
+	// Prevent OS file drops outside explicit drop zones from navigating the webview away from SSL Studio.
+	const preventFileDropNavigation = (e: DragEvent) => {
+		const types = e.dataTransfer?.types;
+		if (types && Array.from(types).includes("Files")) e.preventDefault();
+	};
+	window.addEventListener("dragover", preventFileDropNavigation);
+	window.addEventListener("drop", preventFileDropNavigation);
 	// Closing or reloading the window with edits that are not on disk asks first.
 	window.addEventListener("beforeunload", (e) => {
 		if (state.info?.selftest || !unsavedPaths().length) return;
@@ -56,7 +64,7 @@ async function start() {
 	const workspace = await backend.workspace();
 	if (workspace) {
 		setState("workspace", workspace);
-		setState("lsp", await backend.lspState());
+		setState("lsp", reconcile(await backend.lspState()));
 		await Promise.all([loadSettings(true), loadProject()]);
 		if (state.lsp.state === "running") void session.start(workspace.root).catch(() => {});
 	}

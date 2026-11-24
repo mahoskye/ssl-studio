@@ -5402,7 +5402,7 @@ export async function pickActiveTicket(): Promise<void> {
  * references across all workspace Markdown docs, confirming impact first (ADR 0009), and
  * refreshes any existing `<!-- toc -->` block in the source document.
  */
-export async function renameHeadingAcrossWorkspace(targetPath?: string): Promise<void> {
+export async function renameHeadingAcrossWorkspace(targetPath?: string, targetLine?: number): Promise<void> {
 	if (!ready()) return;
 	const startRoot = root();
 	const docPath = targetPath ?? activePath();
@@ -5418,15 +5418,17 @@ export async function renameHeadingAcrossWorkspace(targetPath?: string): Promise
 		return;
 	}
 
-	// Determine the cursor line (works in both Live CM6 and Source Monaco modes).
-	let cursorLine = 0;
-	const live = activeLiveEditor();
-	if (live && canonical(live.path) === canonical(docPath)) {
-		cursorLine = live.getPosition().lineNumber;
-	} else {
-		const ed = activeEditor();
-		if (ed && ed.getModel() === documents.get(canonical(docPath))?.model) {
-			cursorLine = ed.getPosition()?.lineNumber ?? 0;
+	// Determine the cursor line (works in both Live CM6 and Source Monaco modes; explicit line wins for Outline/Read).
+	let cursorLine = targetLine && targetLine > 0 ? targetLine : 0;
+	if (!cursorLine) {
+		const live = activeLiveEditor();
+		if (live && canonical(live.path) === canonical(docPath)) {
+			cursorLine = live.getPosition().lineNumber;
+		} else {
+			const ed = activeEditor();
+			if (ed && ed.getModel() === documents.get(canonical(docPath))?.model) {
+				cursorLine = ed.getPosition()?.lineNumber ?? 0;
+			}
 		}
 	}
 

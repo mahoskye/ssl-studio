@@ -102,7 +102,7 @@ export function Rows(props: {
 		row.scrollIntoView({ block: "nearest" });
 	};
 	const restore = (list: HTMLElement[]) => {
-		if (list.length) focusRow(list[last ? restoreIndex(list.map(keyOf), last.key, last.index) : list.findIndex((r) => r.tabIndex === 0)], list);
+		if (list.length) focusRow(list[last ? restoreIndex(list.map(keyOf), last.key, last.index) : Math.max(0, list.findIndex((r) => r.tabIndex === 0))], list);
 		else el.focus();
 	};
 	/** A row that was asked for takes focus once it is on screen. */
@@ -467,10 +467,18 @@ export function IconButton(props: {
 	);
 }
 
-/** From a filter box, Down goes into the list under it. Returns true when it did. */
+/** From a filter box, Down goes into the first list below it in document order. Returns true when it did. */
 export function focusRowsBelow(from: Element): boolean {
-	const list = from.closest(".panel-body")?.querySelector<HTMLElement>("[data-rows]");
-	const row = list?.querySelector<HTMLElement>('[data-row][tabindex="0"]') ?? list?.querySelector<HTMLElement>("[data-row]");
-	row?.focus();
-	return Boolean(row);
+	const panel = from.closest(".panel-body");
+	if (!panel) return false;
+	const FOLLOWING = typeof Node !== "undefined" ? Node.DOCUMENT_POSITION_FOLLOWING : 4;
+	for (const list of panel.querySelectorAll<HTMLElement>("[data-rows]")) {
+		if (!(from.compareDocumentPosition(list) & FOLLOWING)) continue;
+		const row = list.querySelector<HTMLElement>('[data-row][tabindex="0"]') ?? list.querySelector<HTMLElement>("[data-row]");
+		if (row) {
+			row.focus();
+			return true;
+		}
+	}
+	return false;
 }

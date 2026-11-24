@@ -9,6 +9,7 @@ import { canGoBack, canGoForward, NO_TRAIL, stepTrail, TRAIL_LENGTH, trailRename
 import { activeEditor } from "./editor/EditorGroup";
 import { activeLiveEditor } from "./editor/liveBridge";
 import { activeGraphBridge } from "./graph/graphBridge";
+import { modalOpen } from "./modal";
 import { isPlanChartActive, narrowHosted, narrowPanels, showPanel } from "./panels/registry";
 import { activePlanTab, requestPlanPaletteTab } from "./plan/planBridge";
 import { activeDoc, activePath, notify, openFile, pathChanges, setState, state, type PanelId } from "./state";
@@ -106,8 +107,10 @@ export function useNavigation() {
 	// Record file switches, centerView switches (editors/graph/welcome), and right-panel / plan-tab switches.
 	createEffect(
 		on([activePath, currentViewKey], () => {
-			if (!state.workspace) return;
+			const root = state.workspace?.root;
+			if (!root) return;
 			queueMicrotask(() => {
+				if (state.workspace?.root !== root) return;
 				const place = here();
 				if (place) noteCursor(place);
 			});
@@ -144,6 +147,7 @@ export function useNavigation() {
 		if (e.button === 3 || e.button === 4) {
 			e.preventDefault();
 			e.stopPropagation();
+			if (modalOpen()) return;
 			void goAlong(e.button === 3 ? -1 : 1);
 			return;
 		}
@@ -187,10 +191,13 @@ export const canGo = (by: 1 | -1) => (by < 0 ? canGoBack(trail) : canGoForward(t
 
 /** One place back, or forward again. A place in a file that can no longer be opened is passed over, for the one beyond it. */
 export async function goAlong(by: 1 | -1): Promise<void> {
+	const startRoot = state.workspace?.root;
+	if (!startRoot) return;
 	// Where the cursor/panel is now is the place to come back to, even if it has not moved far enough to be one by itself.
 	const now = here();
 	if (now) noteCursor(now);
 	for (let tries = 0; tries <= TRAIL_LENGTH; tries++) {
+		if (state.workspace?.root !== startRoot) return;
 		const from = trail;
 		const next = stepTrail(trail, by);
 		if (!next) return notify(by < 0 ? "There is nowhere to go back to." : "There is nowhere to go forward to.");
@@ -210,10 +217,13 @@ export async function goAlong(by: 1 | -1): Promise<void> {
 				restoreView(next.place.view, focusId);
 			} else {
 				if (next.place.path) {
+					const cur = here();
+					const sameFile = activePath() === next.place.path;
+					const movedCursor = sameFile && (!cur || cur.line !== next.place.line || cur.column !== next.place.column);
 					const needsFileOpen =
-						activePath() !== next.place.path ||
+						!sameFile ||
 						(parsed ? parsed.center === "editors" && state.centerView !== "editors" : false) ||
-						next.place.line > 1;
+						movedCursor;
 					if (needsFileOpen) {
 						// In the group that has the file open, this one first: a place in the other group is gone to there, not
 						// opened a second time here.
@@ -221,6 +231,7 @@ export async function goAlong(by: 1 | -1): Promise<void> {
 							? state.activeGroup
 							: state.groups.findIndex((group) => group.tabs.includes(next.place.path));
 						await openFile(next.place.path, { reveal: { line: next.place.line, column: next.place.column }, ...(groupIndex >= 0 ? { group: groupIndex } : {}) });
+						if (state.workspace?.root !== startRoot) return;
 					}
 				}
 				restoreView(next.place.view);
@@ -229,6 +240,7 @@ export async function goAlong(by: 1 | -1): Promise<void> {
 			// Let reactive panel/editor effects settle before recording new stops again.
 			setTimeout(() => stepping--, 60);
 		}
+		if (state.workspace?.root !== startRoot) return;
 		if (isGraphPlace || !next.place.path || activePath() === next.place.path) return;
 		// It could not be opened (and the app has said why): its places are no use, and the cursor is where it was.
 		trail = trailWithout(from, (path) => path === next.place.path);

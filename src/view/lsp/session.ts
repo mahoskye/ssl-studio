@@ -1,5 +1,6 @@
 // One language-server session for the open workspace: documents, diagnostics
 // and every Monaco provider the server's capabilities allow.
+import { createSignal } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import { monaco } from "../editor/monaco";
 import { LEGEND, onSemanticThemeChange, refreshSemanticTokens, translateTokens } from "../editor/semantic";
@@ -21,7 +22,8 @@ export type Diagnostic = {
 };
 
 const [diagnostics, setDiagnostics] = createStore<Record<string, Diagnostic[]>>({});
-export { diagnostics };
+const [lspReadyEpoch, setLspReadyEpoch] = createSignal(0);
+export { diagnostics, lspReadyEpoch };
 
 type Range = { start: { line: number; character: number }; end: { line: number; character: number } };
 const toRange = (r: Range) => new monaco.Range(r.start.line + 1, r.start.character + 1, r.end.line + 1, r.end.character + 1);
@@ -142,6 +144,7 @@ export class LspSession {
 	private handleDown(reason: string) {
 		this.epoch++;
 		this.readyFlag = false;
+		setLspReadyEpoch(0);
 		this.initialized = null;
 		this.resetVersions();
 		this.client.rejectAll(reason);
@@ -189,6 +192,7 @@ export class LspSession {
 				this.capabilities = result?.capabilities ?? {};
 				this.client.notify("initialized", {});
 				this.readyFlag = true;
+				setLspReadyEpoch(myEpoch);
 				for (const model of monaco.editor.getModels()) {
 					const uri = model.uri.toString();
 					if (this.tracked.has(uri) && !this.versions.get(uri) && !model.isDisposed() && model.getLanguageId() === "ssl") this.open(model);

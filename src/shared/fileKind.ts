@@ -17,8 +17,9 @@ const IMAGE_TYPES: Readonly<Record<string, string>> = {
 
 /** The kind of picture a file is by its name ("image/png"), or null when it is not one this can show. */
 export function imageType(path: string): string | null {
+	const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
 	const dot = path.lastIndexOf(".");
-	return dot < 0 ? null : (IMAGE_TYPES[path.slice(dot + 1).toLowerCase()] ?? null);
+	return dot <= slash + 1 ? null : (IMAGE_TYPES[path.slice(dot + 1).toLowerCase()] ?? null);
 }
 
 /** As much of a file as is looked at to tell bytes from text. */
@@ -30,6 +31,8 @@ export const SNIFF_BYTES = 8000;
  * opens with; without the mark it is taken for bytes, as other tools take it.
  */
 export function looksBinary(bytes: Uint8Array): boolean {
+	// Exclude UTF-32 LE BOM (FF FE 00 00) before checking UTF-16 LE BOM (FF FE).
+	if (bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xfe && bytes[2] === 0x00 && bytes[3] === 0x00) return true;
 	const utf16 = bytes.length >= 2 && ((bytes[0] === 0xff && bytes[1] === 0xfe) || (bytes[0] === 0xfe && bytes[1] === 0xff));
 	if (utf16) return false;
 	const end = Math.min(bytes.length, SNIFF_BYTES);

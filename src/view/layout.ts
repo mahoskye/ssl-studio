@@ -39,33 +39,47 @@ export function horizontalChrome(hasLeft: boolean, hasRight: boolean, chrome?: L
 	return activity + gap + (hasLeft ? splitter : 0) + (hasRight ? splitter : 0);
 }
 
+const sanitizeSize = (v: number) => (Number.isFinite(v) && v > 0 ? v : 0);
+
 /** Whether the window has enough width to host both side panels beside the editor. */
 export function canFitBothPanels(window: number, chrome?: LayoutChrome): boolean {
-	return window - horizontalChrome(true, true, chrome) >= CENTER_MIN + LEFT_MIN + RIGHT_MIN;
+	return sanitizeSize(window) - horizontalChrome(true, true, chrome) >= CENTER_MIN + LEFT_MIN + RIGHT_MIN;
 }
 
 /** Fit requested side widths into the available room (window minus chrome and CENTER_MIN). */
 function share(room: number, left: number, right: number): { left: number; right: number } | null {
-	if (left <= 0 && right <= 0) return { left: 0, right: 0 };
-	const floorRoom = Math.floor(room);
-	if (left > 0 && right <= 0) {
+	const safeRoom = sanitizeSize(room);
+	const safeLeft = sanitizeSize(left);
+	const safeRight = sanitizeSize(right);
+	if (safeLeft <= 0 && safeRight <= 0) return { left: 0, right: 0 };
+	const floorRoom = Math.floor(safeRoom);
+	if (safeLeft > 0 && safeRight <= 0) {
 		if (floorRoom < LEFT_MIN) return null;
-		return { left: Math.max(LEFT_MIN, Math.min(Math.round(left), floorRoom)), right: 0 };
+		return { left: Math.max(LEFT_MIN, Math.min(Math.round(safeLeft), floorRoom)), right: 0 };
 	}
-	if (left <= 0 && right > 0) {
+	if (safeLeft <= 0 && safeRight > 0) {
 		if (floorRoom < RIGHT_MIN) return null;
-		return { left: 0, right: Math.max(RIGHT_MIN, Math.min(Math.round(right), floorRoom)) };
+		return { left: 0, right: Math.max(RIGHT_MIN, Math.min(Math.round(safeRight), floorRoom)) };
 	}
 	if (floorRoom < LEFT_MIN + RIGHT_MIN) return null;
-	let l = Math.max(LEFT_MIN, Math.round(left));
-	let r = Math.max(RIGHT_MIN, Math.round(right));
-	if (l + r <= floorRoom) return { left: l, right: r };
+	let l = Math.max(LEFT_MIN, Math.round(safeLeft));
+	let r = Math.max(RIGHT_MIN, Math.round(safeRight));
+	if (Number.isFinite(l + r) && l + r <= floorRoom) return { left: l, right: r };
 	// Window is narrower than left + right + CENTER_MIN: trim proportionally from each panel's slack above its minimum.
-	const excess = l + r - floorRoom;
 	const lSlack = l - LEFT_MIN;
 	const rSlack = r - RIGHT_MIN;
 	const totalSlack = lSlack + rSlack;
-	const lCut = totalSlack > 0 ? Math.round((excess * lSlack) / totalSlack) : 0;
+	if (!Number.isFinite(l + r) || !Number.isFinite(totalSlack) || l + r > Number.MAX_SAFE_INTEGER) {
+		const avail = floorRoom - LEFT_MIN - RIGHT_MIN;
+		const maxSlack = Math.max(lSlack, rSlack);
+		const lRatio = maxSlack > 0 ? lSlack / maxSlack / (lSlack / maxSlack + rSlack / maxSlack) : 0.5;
+		const lKeep = Math.round(avail * lRatio);
+		l = LEFT_MIN + lKeep;
+		r = floorRoom - l;
+		return { left: l, right: r };
+	}
+	const excess = l + r - floorRoom;
+	const lCut = totalSlack > 0 ? Math.round(excess * (lSlack / totalSlack)) : 0;
 	const rCut = excess - lCut;
 	l = Math.max(LEFT_MIN, l - lCut);
 	r = Math.max(RIGHT_MIN, r - rCut);
@@ -90,10 +104,13 @@ export function fitPanels(
 	prefer: "left" | "right" = "left",
 	chrome?: LayoutChrome,
 ): { left: number; right: number } {
-	const room = (hasLeft: boolean, hasRight: boolean) => Math.max(0, window - horizontalChrome(hasLeft, hasRight, chrome) - CENTER_MIN);
-	const both = () => share(room(left > 0, right > 0), left, right);
-	const leftAlone = () => (left > 0 ? share(room(true, false), left, 0) : null);
-	const rightAlone = () => (right > 0 ? share(room(false, true), 0, right) : null);
+	const safeWindow = sanitizeSize(window);
+	const safeLeft = sanitizeSize(left);
+	const safeRight = sanitizeSize(right);
+	const room = (hasLeft: boolean, hasRight: boolean) => Math.max(0, safeWindow - horizontalChrome(hasLeft, hasRight, chrome) - CENTER_MIN);
+	const both = () => share(room(safeLeft > 0, safeRight > 0), safeLeft, safeRight);
+	const leftAlone = () => (safeLeft > 0 ? share(room(true, false), safeLeft, 0) : null);
+	const rightAlone = () => (safeRight > 0 ? share(room(false, true), 0, safeRight) : null);
 	return both() ?? (prefer === "right" ? (rightAlone() ?? leftAlone()) : (leftAlone() ?? rightAlone())) ?? { left: 0, right: 0 };
 }
 

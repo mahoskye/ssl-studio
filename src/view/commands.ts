@@ -68,7 +68,7 @@ import {
 	updateManifest,
 } from "./projectDocs";
 import { insertCalloutInteractive, insertImageInteractive, insertMarkdownTemplate, manageTemplates, newNoteFromTemplate } from "./templater";
-import { displayKey, effectiveKeys, isModifierKey, keyNames, keysOf } from "./keys";
+import { displayKey, effectiveKeys, isModifierKey, keyNamesForPlatform, keysOf, type KeyPress } from "./keys";
 import { modalOpen, setFocusFallback } from "./modal";
 import { noteUsed } from "./quickRank";
 import { stepScale, UI_SCALE } from "./uiScale";
@@ -86,6 +86,8 @@ import {
 	newUntitled,
 	focusEditor,
 	focusSidePanel,
+	heldFromBefore,
+	isUntitled,
 	keepTab,
 	markdownMode,
 	nextTab,
@@ -111,12 +113,16 @@ import {
 	syncLivePreviewMode,
 	tableTextMode,
 	togglePin,
+	type PanelId,
 } from "./state";
 
 /** `label` is a verb phrase; `detail` is the quieter second line that explains it. */
 export type Command = { id: string; label: string; detail?: string; run: () => void };
 
-const toggle = (key: "bottom") => setState("settings", "layout", key, (v) => !v);
+const toggle = (key: "bottom") => {
+	if (!state.workspace) return notify("Open a folder first.");
+	setState("settings", "layout", key, (v) => !v);
+};
 /** Shows or hides a side of the window. A side no panel is docked on has nothing to show, and says so. */
 function toggleSideOf(side: "left" | "right") {
 	if (!state.workspace) return;
@@ -144,7 +150,15 @@ function toggleMaximizeBottom() {
 	}
 	setState("bottomMaximized", (m) => !m);
 }
-const showBottom = (view: "problems" | "output") => (setState("bottomView", view), setState("settings", "layout", "bottom", true));
+const showBottom = (view: "problems" | "output") => {
+	if (!state.workspace) return notify("Open a folder first.");
+	setState("bottomView", view);
+	setState("settings", "layout", "bottom", true);
+};
+const showWorkspacePanel = (id: PanelId) => {
+	if (!state.workspace) return notify("Open a folder first.");
+	showPanel(id);
+};
 /** Puts text on the clipboard: by the app's own way where there is one, by the web view's otherwise. */
 export async function copyText(text: string, said: string) {
 	const copied = (await backend.clipboard(text).catch(() => false)) || (await navigator.clipboard?.writeText(text).then(() => true, () => false));
@@ -155,6 +169,10 @@ export async function copyText(text: string, said: string) {
 /** A file's path, whole or from the project's folder, with the slashes the system writes; or its name alone. */
 export async function copyPath(kind: "whole" | "relative" | "name", path = activePath()) {
 	if (!path) return notify("No file is open to copy the path of.");
+	if (isUntitled(path)) {
+		const name = displayName(path);
+		return copyText(name, `Copied ${name}`);
+	}
 	if (kind === "name") return copyText(baseName(path), `Copied ${baseName(path)}`);
 	const root = state.workspace?.root;
 	// The path from the folder is kept with forward slashes; where the folder's own are the other kind, so are these.
@@ -311,7 +329,7 @@ export const commands: Command[] = [
 	{ id: "md-code", label: "Markdown: Toggle inline code", detail: "Wrap or unwrap selection with ` (Ctrl+` in Markdown)", run: () => runMarkdownEdit("md-code") },
 	{ id: "md-highlight", label: "Markdown: Toggle highlight", detail: "Wrap or unwrap selection with == (Ctrl+Alt+H in Markdown)", run: () => runMarkdownEdit("md-highlight") },
 	{ id: "md-link", label: "Markdown: Insert link", detail: "Insert [label](url) at selection (Ctrl+K in Markdown)", run: () => runMarkdownEdit("md-link") },
-	{ id: "md-checkbox", label: "Markdown: Toggle checkbox", detail: "Cycle task checkbox on the current line(s) (Ctrl+L in Markdown)", run: () => runMarkdownEdit("md-checkbox") },
+	{ id: "md-checkbox", label: "Markdown: Toggle checkbox", detail: "Cycle task checkbox on the current line(s) (Alt+C / Ctrl+Alt+Enter in Markdown)", run: () => runMarkdownEdit("md-checkbox") },
 	{ id: "md-insert-template", label: "Markdown: Insert template…", detail: "Expand a workspace or built-in Templater template at the cursor", run: () => void insertMarkdownTemplate() },
 	{ id: "md-new-from-template", label: "Markdown: New note from template…", detail: "Create a new note from a customizable Templater template", run: () => void newNoteFromTemplate() },
 	{ id: "md-manage-templates", label: "Markdown: Customize or create template…", detail: "Copy a built-in template or create a custom one in docs/templates/", run: () => void manageTemplates() },
@@ -437,21 +455,21 @@ export const commands: Command[] = [
 		void closeoutTicket(ticketDoc.path, key);
 	} },
 	// Panels: one form, "Show" and the panel's name
-	{ id: "explorer", label: "Show Explorer", run: () => showPanel("explorer") },
-	{ id: "docs", label: "Show Docs", run: () => showPanel("docs") },
-	{ id: "objects", label: "Show Document outline", detail: "Headings, regions and procedures of the open file", run: () => showPanel("objects") },
-	{ id: "palette", label: "Show Palette", detail: "Templates, process shapes and graph controls", run: () => showPanel("palette") },
-	{ id: "reference", label: "Show Reference", detail: "Built-in functions, classes and keywords", run: () => showPanel("reference") },
-	{ id: "search", label: "Show Search", run: () => showPanel("search") },
-	{ id: "replace-in-files", label: "Replace in files…", detail: "In Search: what would change is shown first, and nothing is written until it is confirmed", run: () => void import("./panels/Search").then((search) => search.showReplace()) },
-	{ id: "git", label: "Show Source control", detail: "What has changed since the last commit, and the next commit", run: () => showPanel("git") },
-	{ id: "history", label: "Show History", detail: "Local snapshots on save and Git commit history", run: () => showPanel("history") },
-	{ id: "health", label: "Show Health", detail: "The script against the house style", run: () => showPanel("health") },
-	{ id: "agent", label: "Show Agent", run: () => showPanel("agent") },
+	{ id: "explorer", label: "Show Explorer", run: () => showWorkspacePanel("explorer") },
+	{ id: "docs", label: "Show Docs", run: () => showWorkspacePanel("docs") },
+	{ id: "objects", label: "Show Document outline", detail: "Headings, regions and procedures of the open file", run: () => showWorkspacePanel("objects") },
+	{ id: "palette", label: "Show Palette", detail: "Templates, process shapes and graph controls", run: () => showWorkspacePanel("palette") },
+	{ id: "reference", label: "Show Reference", detail: "Built-in functions, classes and keywords", run: () => showWorkspacePanel("reference") },
+	{ id: "search", label: "Show Search", run: () => showWorkspacePanel("search") },
+	{ id: "replace-in-files", label: "Replace in files…", detail: "In Search: what would change is shown first, and nothing is written until it is confirmed", run: () => (!state.workspace ? notify("Open a folder first.") : void import("./panels/Search").then((search) => search.showReplace())) },
+	{ id: "git", label: "Show Source control", detail: "What has changed since the last commit, and the next commit", run: () => showWorkspacePanel("git") },
+	{ id: "history", label: "Show History", detail: "Local snapshots on save and Git commit history", run: () => showWorkspacePanel("history") },
+	{ id: "health", label: "Show Health", detail: "The script against the house style", run: () => showWorkspacePanel("health") },
+	{ id: "agent", label: "Show Agent", run: () => showWorkspacePanel("agent") },
 	{ id: "problems", label: "Show Problems", run: () => showBottom("problems") },
 	{ id: "output", label: "Show Output", run: () => showBottom("output") },
-	{ id: "graph", label: "Show Call graph", detail: "Again to go back to the editors", run: () => setState("centerView", state.centerView === "graph" ? "editors" : "graph") },
-	{ id: "projects", label: "Show Projects", detail: "Switch to another recent folder, or go back to the editors", run: () => setState("centerView", state.centerView === "welcome" ? "editors" : "welcome") },
+	{ id: "graph", label: "Show Call graph", detail: "Again to go back to the editors", run: () => (!state.workspace ? notify("Open a folder first.") : setState("centerView", state.centerView === "graph" ? "editors" : "graph")) },
+	{ id: "projects", label: "Show Projects", detail: "Switch to another recent folder, or go back to the editors", run: () => state.workspace && setState("centerView", state.centerView === "welcome" ? "editors" : "welcome") },
 	{ id: "toggle-sidebar", label: "Toggle side bar", run: () => toggleSideOf("left") },
 	{ id: "toggle-panel", label: "Toggle bottom panel", run: () => toggle("bottom") },
 	{ id: "toggle-panel-maximize", label: "Toggle maximized panel", detail: "Expand the bottom panel to fill the center pane, or restore its size", run: toggleMaximizeBottom },
@@ -459,16 +477,16 @@ export const commands: Command[] = [
 	{ id: "reset-layout", label: "Reset the layout", detail: "Every panel back on its own side and at its first size", run: resetLayout },
 	{ id: "menu-bar", label: "Focus the menu bar", detail: "Then the arrow keys. Alt and a menu's first letter opens that menu", run: () => void (openMenu() || notify(MENU_HIDDEN)) },
 	{ id: "toggle-menu-bar", label: "Toggle menu bar", detail: "File, Edit, Selection, View, Go and Help across the top of the window", run: () => void toggleMenuBar() },
-	{ id: "move-panel", label: "Move left panel to the right", detail: "The one that is open", run: () => state.settings.layout.left && movePanel(state.leftView) },
-	{ id: "move-panel-back", label: "Move right panel to the left", detail: "The one that is open", run: () => state.settings.layout.right && movePanel(state.rightView) },
+	{ id: "move-panel", label: "Move left panel to the right", detail: "The one that is open", run: () => state.workspace && state.settings.layout.left && movePanel(state.leftView) },
+	{ id: "move-panel-back", label: "Move right panel to the left", detail: "The one that is open", run: () => state.workspace && state.settings.layout.right && movePanel(state.rightView) },
 	// The agent
 	{ id: "agent-ask", label: "Ask the agent…", detail: "About the selection", run: () => void askCommand() },
 	{ id: "attach-file-to-agent", label: "Agent: Attach active file to Agent", detail: "Attach the open workspace file to the next Agent turn context", run: () => { const p = activePath(); if (!p) return notify("Open a file first."); attachFileToAgent(p); } },
 	{ id: "show-in-explorer", label: "Explorer: Reveal active file in Explorer", detail: "Highlight and scroll to the open file in the Explorer tree", run: () => { const p = activePath(); if (!p) return notify("Open a file first."); showInExplorer(p); } },
-	{ id: "tidy", label: "Tidy file with the agent", run: () => (startTidy(), showPanel("agent")) },
+	{ id: "tidy", label: "Tidy file with the agent", run: () => (!state.workspace ? notify("Open a folder first.") : (startTidy(), showPanel("agent"))) },
 	// The IDE
 	{ id: "style-profile", label: "Edit style profile…", detail: "How the language server formats and checks", run: () => openStyleProfile() },
-	{ id: "lsp-restart", label: "Restart language server", run: () => void backend.lspRestart() },
+	{ id: "lsp-restart", label: "Restart language server", run: () => (!state.workspace ? notify("Open a folder first.") : void backend.lspRestart()) },
 	{ id: "zoom-in", label: "Zoom in", detail: "A larger interface", run: () => zoom(1) },
 	{ id: "zoom-out", label: "Zoom out", detail: "A smaller interface", run: () => zoom(-1) },
 	{ id: "zoom-reset", label: "Reset zoom", run: () => zoom(0) },
@@ -562,12 +580,14 @@ async function toggleMenuBar() {
 
 /** Puts the selected lines inside a new comment region (a frame in blocks mode). */
 async function wrapInRegion() {
+	const doc = activeDoc();
 	const editor = activeEditor();
 	const model = editor?.getModel();
 	const selection = editor?.getSelection();
-	if (!editor || !model || !selection) return;
+	if (!doc || doc.binary || !editor || !editor.getDomNode()?.offsetParent || !model || !selection) return;
 	const name = await ask("Name of the new region");
 	if (!name) return;
+	if (model.isDisposed() || editor.getModel() !== model) return;
 	const start = selection.startLineNumber;
 	const end = selection.endColumn === 1 && selection.endLineNumber > start ? selection.endLineNumber - 1 : selection.endLineNumber;
 	const eol = model.getEOL();
@@ -587,10 +607,11 @@ async function wrapInRegion() {
 /** Blocks for a script; for a plan toggles Chart/Text, for Markdown toggles Live/Read, for a table toggles Table/Text. */
 function toggleVisual() {
 	const path = activePath();
+	if (!state.workspace || !path) return;
 	const g = state.activeGroup;
-	if (isPlanPath(path)) setPlanMode(path!, planMode(path!, g) === "chart" ? "text" : "chart", g);
+	if (isPlanPath(path)) setPlanMode(path, planMode(path, g) === "chart" ? "text" : "chart", g);
 	else if (isMarkdown(path)) toggleMarkdownMode();
-	else if (isTable(path)) setTableTextMode(path!, !tableTextMode(path!, g), g);
+	else if (isTable(path)) setTableTextMode(path, !tableTextMode(path, g), g);
 	else setState("groups", g, "mode", (m) => (m === "blocks" ? "text" : "blocks"));
 }
 
@@ -600,20 +621,33 @@ async function openProjectSettings() {
 	await openFile(state.project.path);
 }
 
-/** A new plan in `design/`, beside the tidy notes, opened as its chart (ADR 0005). */
+/** A new plan in the project's plans folder (`design/` by default), opened as its chart (ADR 0005). */
 async function newPlanCommand() {
 	if (!state.workspace) return notify("Open a folder first.");
+	const startRoot = state.workspace.root;
 	const name = (await ask("Name of the new plan"))?.trim();
 	if (!name) return;
-	const path = joinPath(state.workspace.root, "design", `${name.replace(/\.plan\.json$/i, "").replace(/[\\/:*?"<>|]+/g, "-")}.plan.json`);
+	if (state.workspace?.root !== startRoot) return;
+	const planDir = folderParts(state.project?.plans ?? "design");
+	const safeStem = name.replace(/\.plan\.json$/i, "").replace(/[\\/:*?"<>|]+/g, "-").trim();
+	if (!safeStem) return notify("Enter a valid plan name.", "error");
+	const path = joinPath(startRoot, ...planDir, `${safeStem}.plan.json`);
+	if (await heldFromBefore(path)) return;
+	if (state.workspace?.root !== startRoot) return;
 	const exists = await backend.read(path).then(
 		() => true,
 		() => false,
 	);
+	if (state.workspace?.root !== startRoot) return;
 	if (!exists) {
 		// A plan started from a ticket, or from a document that is for one, is for that ticket.
 		const ticket = ticketAtHand();
-		await backend.write(path, printPlan(ticket ? { ...newPlan(name), ticket } : newPlan(name)));
+		try {
+			await backend.write(path, printPlan(ticket ? { ...newPlan(name), ticket } : newPlan(name)));
+		} catch (e: any) {
+			return notify(String(e?.message ?? e), "error");
+		}
+		if (state.workspace?.root !== startRoot) return;
 		setState("treeVersion", (v) => v + 1);
 	}
 	await openFile(path);
@@ -621,9 +655,10 @@ async function newPlanCommand() {
 
 /** The selection, else the procedure at the cursor, else the file: formatted, then copied. */
 async function copyForDesigner() {
+	const doc = activeDoc();
 	const editor = activeEditor();
 	const model = editor?.getModel();
-	if (!editor || !model) return;
+	if (!doc || doc.binary || !editor || !editor.getDomNode()?.offsetParent || !model) return;
 	const selection = editor.getSelection();
 	let text: string;
 	let what: string;
@@ -631,7 +666,8 @@ async function copyForDesigner() {
 		text = model.getValueInRange(selection);
 		what = "selection";
 	} else {
-		const path = symbolPath(symbols(), editor.getPosition()!.lineNumber);
+		const pos = editor.getPosition();
+		const path = pos ? symbolPath(symbols(), pos.lineNumber) : [];
 		const proc = [...path].reverse().find((s) => s.kind === monaco.languages.SymbolKind.Function || s.kind === monaco.languages.SymbolKind.Method);
 		text = proc ? model.getValueInRange(new monaco.Range(proc.range.startLineNumber, 1, proc.range.endLineNumber, model.getLineMaxColumn(proc.range.endLineNumber))) : model.getValue();
 		what = proc ? `procedure ${proc.name}` : "file";
@@ -771,6 +807,7 @@ async function copyCodeCitation(withExcerpt: boolean) {
 }
 
 async function askCommand() {
+	if (!state.workspace) return notify("Open a folder first.");
 	const question = await ask("Ask the agent about the selection");
 	if (!question) return;
 	showPanel("agent");
@@ -797,6 +834,7 @@ async function generateErDiagramCommand() {
 	const allWorkspaceSql = schemaSqlPaths.length
 		? schemaSqlPaths
 		: (await backend.files().catch(() => [])).filter((p) => /\.(sql|ddl)$/i.test(p));
+	if (state.workspace?.root !== wsRoot) return;
 
 	let sourcePaths: string[] = [];
 	if (activeIsSql && active) {
@@ -805,7 +843,7 @@ async function generateErDiagramCommand() {
 			const ACTIVE_ONLY = `Active file only (${baseName(active)})`;
 			const ALL_SQL = `All workspace SQL files (${others.length + 1})`;
 			const scope = await choose("Generate Mermaid ER diagram from:", [ACTIVE_ONLY, ALL_SQL]);
-			if (!scope) return;
+			if (!scope || state.workspace?.root !== wsRoot) return;
 			sourcePaths = scope === ACTIVE_ONLY ? [active] : [active, ...others];
 		} else {
 			sourcePaths = [active];
@@ -824,6 +862,7 @@ async function generateErDiagramCommand() {
 	for (const p of orderedPaths) {
 		const open = documents.get(canonical(p));
 		const text = open ? open.model.getValue() : await backend.read(p).then((r) => (r.binary ? "" : r.text), () => "");
+		if (state.workspace?.root !== wsRoot) return;
 		if (text.trim()) sqlChunks.push(text.trimEnd());
 	}
 	if (!sqlChunks.length) return notify("No readable SQL content was found in the selected files.");
@@ -877,7 +916,7 @@ async function generateErDiagramCommand() {
 			},
 		],
 	});
-	if (!picked) return;
+	if (!picked || state.workspace?.root !== wsRoot) return;
 	if (picked === "copy") {
 		await copyText(diagram, `Copied Mermaid ER diagram (${tables.length} ${tables.length === 1 ? "table" : "tables"}).`);
 		return;
@@ -909,6 +948,7 @@ async function generateErDiagramCommand() {
 	const existing = openDest
 		? openDest.model.getValue()
 		: await backend.read(dest).then((r) => (r.binary ? null : r.text), () => null);
+	if (state.workspace?.root !== wsRoot) return;
 
 	let nextText = `# Database ER Diagram\n\n${diagram}\n`;
 	let modeNote = "Saved Mermaid ER diagram to";
@@ -925,7 +965,7 @@ async function generateErDiagramCommand() {
 				[APPEND, REPLACE],
 				{ danger: REPLACE },
 			);
-			if (!answer) return;
+			if (!answer || state.workspace?.root !== wsRoot) return;
 			if (answer === APPEND) {
 				const eol = existing.includes("\r\n") ? "\r\n" : "\n";
 				const normDiagram = diagram.replace(/\r?\n/g, eol);
@@ -938,14 +978,19 @@ async function generateErDiagramCommand() {
 		}
 	}
 
-	if (openDest) {
-		const wasClean = !state.dirty[destKey];
-		applyText(destKey, nextText);
-		if (wasClean) await save(destKey, { format: false });
-	} else {
-		if (existing !== null) await backend.historyKeep(dest).catch(() => {});
-		await backend.write(dest, nextText);
+	try {
+		if (openDest && documents.get(destKey) === openDest && !openDest.model.isDisposed()) {
+			const wasClean = !state.dirty[destKey];
+			applyText(destKey, nextText);
+			if (wasClean) await save(destKey, { format: false });
+		} else {
+			if (existing !== null) await backend.historyKeep(dest).catch(() => {});
+			await backend.write(dest, nextText);
+		}
+	} catch (e: any) {
+		return notify(String(e?.message ?? e), "error");
 	}
+	if (state.workspace?.root !== wsRoot) return;
 	setState("treeVersion", (v) => v + 1);
 	await openFile(dest);
 	notify(`${modeNote} ${relativeTo(wsRoot, dest)}.`);
@@ -1558,8 +1603,9 @@ const KEYS: Record<string, string> = {
 	"ctrl+shift+c": "copy-designer",
 	"ctrl+shift+i": "format",
 	"ctrl+=": "zoom-in",
-	// The plus key itself, where it needs no Shift, and the number pad's.
+	// The plus key itself, where it needs no Shift, US Shift+= (`+`), and the number pad's.
 	"ctrl++": "zoom-in",
+	"ctrl+shift++": "zoom-in",
 	"ctrl+-": "zoom-out",
 	"ctrl+shift+0": "zoom-reset",
 	f1: "editor-commands",
@@ -1568,16 +1614,20 @@ const KEYS: Record<string, string> = {
 
 /** On a Mac, Alt with an arrow moves the cursor by a word, in the editor and in every box: those keys stay the text's. */
 const NOT_ON_A_MAC = new Set(["alt+arrowleft", "alt+arrowright"]);
-/** macOS VS Code defaults for Go Back / Go Forward (ADR 0032). */
+/** macOS VS Code defaults for Go Back / Go Forward while keeping Cmd+- reachable as Zoom Out (ADR 0032). */
 const MAC_DEFAULT_KEYS: Record<string, string> = {
 	"ctrl+-": "go-back",
 	"ctrl+shift+-": "go-forward",
 	"ctrl+shift+_": "go-forward",
+	"cmd+-": "zoom-out",
 };
 const onMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform ?? "");
-export const DEFAULT_KEYS: Record<string, string> = onMac
-	? { ...Object.fromEntries(Object.entries(KEYS).filter(([key]) => !NOT_ON_A_MAC.has(key))), ...MAC_DEFAULT_KEYS }
-	: KEYS;
+
+export function defaultKeysForPlatform(mac: boolean): Record<string, string> {
+	return mac ? { ...Object.fromEntries(Object.entries(KEYS).filter(([key]) => !NOT_ON_A_MAC.has(key))), ...MAC_DEFAULT_KEYS } : KEYS;
+}
+
+export const DEFAULT_KEYS: Record<string, string> = defaultKeysForPlatform(onMac);
 
 /** The default shortcuts with the user's overrides ("" unbinds). */
 export function keymap(): Record<string, string> {
@@ -1592,15 +1642,33 @@ export const keysFor = (id: string) => keysOf(id, keymap()).map(displayKey).join
  * (e.g. Ctrl+B = Bold instead of Toggle side bar) whenever focus is inside a
  * Markdown text editor (CodeMirror 6 Live Preview or Monaco Source mode).
  */
-const MARKDOWN_TEXT_KEYS: Record<string, string> = {
+export const MARKDOWN_TEXT_KEYS: Record<string, string> = {
 	"ctrl+b": "md-bold",
 	"ctrl+i": "md-italic",
 	"ctrl+shift+x": "md-strike",
 	"ctrl+`": "md-code",
 	"ctrl+alt+h": "md-highlight",
 	"ctrl+k": "md-link",
-	"ctrl+l": "md-checkbox",
+	"ctrl+alt+enter": "md-checkbox",
 };
+
+/** Resolves a keydown press against `map`, preserving macOS Cmd+- as Zoom Out independently of Go Back overrides. */
+export function resolveCommandKey(
+	e: KeyPress,
+	map: Record<string, string>,
+	mac = onMac,
+	overrides: Record<string, string> = {},
+): { id: string | undefined; pressed: string[] } {
+	const pressed = keyNamesForPlatform(e, mac);
+	let id = pressed.map((name) => map[name]).find(Boolean);
+	if (mac && e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && (e.key === "-" || e.code === "Minus")) {
+		const cmdMinusUnbound = Object.entries(overrides).some(([k, v]) => k.toLowerCase() === "cmd+-" && v === "");
+		if (!cmdMinusUnbound && (id === undefined || id === "go-back")) {
+			id = "zoom-out";
+		}
+	}
+	return { id, pressed };
+}
 
 export function installKeys() {
 	setFocusFallback(focusEditor);
@@ -1610,9 +1678,9 @@ export function installKeys() {
 		(e) => {
 			// A modal has the keyboard: only its own keys work, and a shortcut
 			// being recorded in Settings runs nothing.
-			// AltGr is typing a character (a backslash on many layouts), never a shortcut.
-			if (modalOpen() || isModifierKey(e.key) || e.getModifierState("AltGraph")) return;
-			const pressed = keyNames(e);
+			// Never intercept IME composition or AltGr character typing.
+			if (e.isComposing || e.keyCode === 229 || modalOpen() || isModifierKey(e.key) || e.getModifierState?.("AltGraph")) return;
+			const pressed = keyNamesForPlatform(e, onMac);
 			// Text-editing controls supersede conflicting chrome shortcuts inside Markdown editors.
 			if (isInMarkdownTextEditor(e.target, activeDoc()?.model.getLanguageId())) {
 				const mdCmd = pressed.map((name) => MARKDOWN_TEXT_KEYS[name]).find(Boolean);
@@ -1623,10 +1691,9 @@ export function installKeys() {
 					return;
 				}
 			}
+			const overrides = state.settings.keys ?? {};
 			const map = keymap();
-			let id = pressed.map((name) => map[name]).find(Boolean);
-			// On macOS, Cmd+- stays Zoom Out while Ctrl+- runs VS Code Go Back.
-			if (onMac && id === "go-back" && e.metaKey && !e.ctrlKey && e.key === "-") id = "zoom-out";
+			const { id } = resolveCommandKey(e, map, onMac, overrides);
 			const targetEl = e.target instanceof Element ? e.target : document.activeElement;
 			const inTable = Boolean(targetEl?.closest(".cm-md-table-wrap, .table-view"));
 			const inLiveMarkdown = Boolean(targetEl?.closest(".cm-editor") && !targetEl.closest(".cm-md-read"));

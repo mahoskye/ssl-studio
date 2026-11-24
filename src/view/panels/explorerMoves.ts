@@ -25,18 +25,22 @@ export function copyName(name: string, taken: (name: string) => boolean, kind: "
 	}
 }
 
+const samePath = (a: string, b: string) => isInside(a, b) && isInside(b, a);
+
 /** Why something cannot be moved into a folder, or "" when it can. */
 export function moveProblem(from: string, into: string, root: string): string {
 	if (isInside(from, root)) return "The workspace folder itself cannot be moved from here.";
+	if (!isInside(root, from)) return `${baseName(from)} is outside the workspace.`;
 	if (!isInside(root, into)) return "That folder is outside the workspace.";
 	if (isInside(from, into)) return `${baseName(from)} cannot be moved into itself.`;
-	if (dirName(from) === into) return `${baseName(from)} is already in ${baseName(into)}.`;
+	if (samePath(dirName(from), into)) return `${baseName(from)} is already in ${baseName(into)}.`;
 	return "";
 }
 
 /** Why something cannot be copied into a folder, or "" when it can. A copy beside the original is fine: it gets a new name. */
 export function copyProblem(from: string, into: string, root: string): string {
 	if (isInside(from, root)) return "The workspace folder itself cannot be copied from here.";
+	if (!isInside(root, from)) return `${baseName(from)} is outside the workspace.`;
 	if (!isInside(root, into)) return "That folder is outside the workspace.";
 	if (isInside(from, into)) return `${baseName(from)} cannot be copied into itself.`;
 	return "";

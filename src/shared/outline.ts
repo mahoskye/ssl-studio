@@ -95,6 +95,18 @@ function markdown(lines: string[]): OutlineItem[] {
 	return top;
 }
 
+/** True when `s` contains a closing `"""` not escaped by an odd run of preceding backslashes. */
+function hasUnescapedTripleQuote(s: string, from = 0): boolean {
+	for (let i = from; i <= s.length - 3; i++) {
+		if (s[i] === "\\") {
+			i++;
+			continue;
+		}
+		if (s[i] === '"' && s[i + 1] === '"' && s[i + 2] === '"') return true;
+	}
+	return false;
+}
+
 /** TOML and INI: `[tables]` with their keys under them, and the keys before any table. */
 function tables(lines: string[], toml: boolean): OutlineItem[] {
 	const top: OutlineItem[] = [];
@@ -105,8 +117,8 @@ function tables(lines: string[], toml: boolean): OutlineItem[] {
 	for (let at = 0; at < lines.length; at++) {
 		const line = lines[at]!;
 		if (inside) {
-			// Three quotes with a backslash before them are part of the string, not its end.
-			if (inside === '"""' ? /(?<!\\)"""/.test(line) : line.includes(inside)) inside = "";
+			// Three quotes escaped by an odd run of backslashes stay inside the string; an even run (`\\"""`) closes it.
+			if (inside === '"""' ? hasUnescapedTripleQuote(line) : line.includes(inside)) inside = "";
 			continue;
 		}
 		if (depth > 0) {
@@ -130,7 +142,7 @@ function tables(lines: string[], toml: boolean): OutlineItem[] {
 		if (!toml) continue;
 		// A string of several lines opens the value: three quotes in a comment after it open nothing.
 		const triple = /^("""|''')/.exec(value);
-		if (triple && value.indexOf(triple[1]!, 3) < 0) inside = triple[1]!;
+		if (triple && (triple[1] === '"""' ? !hasUnescapedTripleQuote(value, 3) : value.indexOf("'''", 3) < 0)) inside = triple[1]!;
 		else depth = Math.max(0, brackets(value));
 	}
 	return top;
@@ -169,7 +181,17 @@ function json(text: string): OutlineItem[] {
 		else if (c === '"') {
 			const startLine = line;
 			let j = i + 1;
-			while (j < text.length && text[j] !== '"' && text[j] !== "\n") j += text[j] === "\\" ? 2 : 1;
+			while (j < text.length && text[j] !== '"' && text[j] !== "\n") {
+				if (text[j] === "\\") {
+					if (text[j + 1] === "\n") {
+						j++;
+						break;
+					}
+					j += 2;
+				} else {
+					j++;
+				}
+			}
 			const word = text.slice(i + 1, j);
 			i = j;
 			if (text[j] === "\n") line++;
@@ -210,6 +232,32 @@ function statementName(sql: string): { name: string; detail?: string } {
 	return { name: words.length > 40 ? `${words.slice(0, 40)}…` : words };
 }
 
+const SQL_STATEMENT_START = /^(?:create|alter|drop|insert|update|delete|select|with|grant|revoke|merge|truncate|comment|begin|declare|exec|execute|set|commit|rollback|prompt|whenever|show|use)\b/i;
+
+/** Returns true when a standalone `/` line is followed by EOF (or only comments/whitespace) or a new SQL statement. */
+function isOracleBatchTerminator(text: string, afterLineEnd: number): boolean {
+	let k = afterLineEnd;
+	while (k < text.length) {
+		const ch = text[k]!;
+		if (/\s/.test(ch)) {
+			k++;
+			continue;
+		}
+		if (ch === "-" && text[k + 1] === "-") {
+			const nl = text.indexOf("\n", k + 2);
+			k = nl < 0 ? text.length : nl + 1;
+			continue;
+		}
+		if (ch === "/" && text[k + 1] === "*") {
+			const close = text.indexOf("*/", k + 2);
+			k = close < 0 ? text.length : close + 2;
+			continue;
+		}
+		return SQL_STATEMENT_START.test(text.slice(k, k + 24));
+	}
+	return true;
+}
+
 /** SQL: its statements, each from its first word to its semicolon. A semicolon in a string or a comment ends nothing. */
 function sql(text: string): OutlineItem[] {
 	const items: OutlineItem[] = [];
@@ -233,11 +281,16 @@ function sql(text: string): OutlineItem[] {
 			continue;
 		}
 		// A line that is only GO ends a batch where a script has no semicolons (SQL Server): alone, with a count, or with
-		// a comment after it. A line that is only a slash does the same between statements (Oracle); inside one it divides.
+		// a comment after it. A line that is only a slash ends an Oracle batch when followed by EOF or a new statement (or
+		// between semicolon-terminated statements), while still dividing inside multi-line expressions like `SELECT a\n/\nb`.
 		if (i === 0 || text[i - 1] === "\n") {
 			const stop = text.indexOf("\n", i);
 			const whole = text.slice(i, stop < 0 ? text.length : stop).replace(/\r$/, "");
-			if (/^[ \t]*go(?:[ \t]+\d+)?[ \t]*(?:--.*)?$/i.test(whole) || (start < 0 && /^[ \t]*\/[ \t]*$/.test(whole))) {
+			const nextPos = stop < 0 ? text.length : stop + 1;
+			if (
+				/^[ \t]*go(?:[ \t]+\d+)?[ \t]*(?:--.*)?$/i.test(whole) ||
+				(/^[ \t]*\/[ \t]*$/.test(whole) && (start < 0 || (start >= 0 && isOracleBatchTerminator(text, nextPos))))
+			) {
 				end(Math.max(startLine, line - 1));
 				i += whole.length - 1;
 				continue;
@@ -384,17 +437,114 @@ export type PlanOutlineStage = {
 	nodes: PlanOutlineNode[];
 };
 
-/** Finds 1-based line numbers for every `{ "id": "..." }` inside a top-level JSON array field (e.g. `"groups"` or `"nodes"`). */
+function readJsonString(text: string, start: number): { value: string; end: number; newlines: number } {
+	let j = start + 1;
+	let newlines = 0;
+	while (j < text.length && text[j] !== '"') {
+		if (text[j] === "\\") {
+			if (text[j + 1] === "\n") {
+				newlines++;
+				j += 2;
+				continue;
+			}
+			j += 2;
+			continue;
+		}
+		if (text[j] === "\n") newlines++;
+		j++;
+	}
+	const end = j < text.length ? j : text.length - 1;
+	const raw = text.slice(start, end + 1);
+	let value: string;
+	try {
+		value = JSON.parse(raw);
+	} catch {
+		value = text.slice(start + 1, end);
+	}
+	return { value, end, newlines };
+}
+
+/** Finds 1-based line numbers for every `{ "id": "..." }` inside a top-level JSON array field (e.g. `"groups"` or `"nodes"`), regardless of indentation. */
 function planSectionLines(text: string, field: string, ids: ReadonlySet<string>): Map<string, number> {
-	const lines = text.split(/\r?\n/);
 	const result = new Map<string, number>();
-	const headerRe = new RegExp(`^\\s*"${field}"\\s*:`);
-	const start = lines.findIndex((l) => headerRe.test(l));
-	if (start < 0) return result;
-	for (let i = start; i < lines.length; i++) {
-		if (i > start && /^\s{0,2}"\w+"\s*:/.test(lines[i]!)) break;
-		for (const m of lines[i]!.matchAll(/"id"\s*:\s*"([^"]*)"/g)) {
-			if (ids.has(m[1]!) && !result.has(m[1]!)) result.set(m[1]!, i + 1);
+	if (!ids.size) return result;
+	const stack: ("{" | "[")[] = [];
+	let line = 1;
+	let awaitingFieldArray = false;
+	let inTargetArray = false;
+	let targetArrayDepth = -1;
+
+	const skipWs = (from: number): { index: number; newlines: number } => {
+		let k = from;
+		let nl = 0;
+		while (k < text.length && /\s/.test(text[k]!)) {
+			if (text[k] === "\n") nl++;
+			k++;
+		}
+		return { index: k, newlines: nl };
+	};
+
+	for (let i = 0; i < text.length; i++) {
+		const c = text[i]!;
+		if (c === "\n") {
+			line++;
+			continue;
+		}
+		if (c === '"') {
+			const keyLine = line;
+			const str = readJsonString(text, i);
+			line += str.newlines;
+			i = str.end;
+			const top = stack[stack.length - 1];
+			if (top === "{") {
+				const ws = skipWs(i + 1);
+				if (text[ws.index] === ":") {
+					if (stack.length === 1 && !inTargetArray && str.value === field) {
+						awaitingFieldArray = true;
+						line += ws.newlines;
+						i = ws.index;
+						continue;
+					}
+					if (inTargetArray && stack.length === targetArrayDepth + 1 && str.value === "id") {
+						line += ws.newlines;
+						const wsVal = skipWs(ws.index + 1);
+						line += wsVal.newlines;
+						if (text[wsVal.index] === '"') {
+							const valStr = readJsonString(text, wsVal.index);
+							line += valStr.newlines;
+							i = valStr.end;
+							if (ids.has(valStr.value) && !result.has(valStr.value)) {
+								result.set(valStr.value, keyLine);
+							}
+							continue;
+						}
+						i = wsVal.index - 1;
+						continue;
+					}
+				}
+			}
+			continue;
+		}
+		if (c === "{" || c === "[") {
+			stack.push(c);
+			if (awaitingFieldArray) {
+				if (c === "[") {
+					inTargetArray = true;
+					targetArrayDepth = stack.length;
+				}
+				awaitingFieldArray = false;
+			}
+			continue;
+		}
+		if (c === "}" || c === "]") {
+			if (inTargetArray && stack.length === targetArrayDepth && c === "]") {
+				break;
+			}
+			stack.pop();
+			continue;
+		}
+		if (awaitingFieldArray && !/\s/.test(c)) {
+			awaitingFieldArray = false;
 		}
 	}
 	return result;
@@ -607,7 +757,21 @@ export function moveMarkdownSection(text: string, headingLine: number, direction
 	const { core: coreA, pad: padA } = splitTrailingBlankLines(rawLines.slice(startA, endA + 1));
 	const { core: coreB, pad: padB } = splitTrailingBlankLines(rawLines.slice(startB, endB + 1));
 
-	const swapped = [...coreB, ...padA, ...coreA, ...padB];
+	// Adjacent siblings in Markdown satisfy `first.level >= second.level`. When `first` is deeper than
+	// `second` (e.g. `### A` followed by `## B`), placing `first` after `second` without rebasing would
+	// make `second` swallow `first` as a child; promote `first`'s subtree to `second.level` so both stay siblings.
+	const rebasedCoreA = coreA.slice();
+	const deltaA = second.level - first.level;
+	if (deltaA !== 0) {
+		for (const h of collectSectionHeadings(first)) {
+			const relIdx = h.line - first.line;
+			if (relIdx >= 0 && relIdx < rebasedCoreA.length) {
+				rebasedCoreA[relIdx] = shiftHeadingLine(rebasedCoreA[relIdx]!, h.level + deltaA);
+			}
+		}
+	}
+
+	const swapped = [...coreB, ...padA, ...rebasedCoreA, ...padB];
 	const nextLines = [...rawLines.slice(0, startA), ...swapped, ...rawLines.slice(endB + 1)];
 	const newLine = direction === "up" ? startA + 1 : startA + coreB.length + padA.length + 1;
 	const nextText = nextLines.join(eol) + (hasTrailingNewline ? eol : "");
@@ -749,14 +913,43 @@ export function demoteMarkdownSection(text: string, sectionLine: number): Markdo
 	return { text: nextText, newLine: sectionLine, changed: true };
 }
 
+/** Maximum heading level (1..6) of `section` or any descendant heading in its subtree. */
+export function maxSectionLevel(section: MarkdownSection): number {
+	let max = section.level;
+	for (const child of section.children) {
+		const childMax = maxSectionLevel(child);
+		if (childMax > max) max = childMax;
+	}
+	return max;
+}
+
+/**
+ * Whether `source` can be moved to `placement` relative to `target` without
+ * dropping onto itself/its descendants or exceeding ATX heading level 6 for any
+ * heading in `source`'s subtree.
+ */
+export function canDropSection(
+	source: MarkdownSection,
+	target: MarkdownSection,
+	placement: "before" | "after" | "inside",
+): boolean {
+	if (source.line === target.line) return false;
+	if (target.line >= source.line && target.line <= source.endLine) return false;
+	const desiredLevel = placement === "inside" ? target.level + 1 : target.level;
+	if (desiredLevel > 6) return false;
+	const delta = desiredLevel - source.level;
+	if (maxSectionLevel(source) + delta > 6) return false;
+	return true;
+}
+
 /**
  * Moves a Markdown section and its entire nested subtree to another position
  * (including across different parents):
  * - `"before"` / `"after"` places it as a sibling of `targetLine`, adopting `target.level`
  * - `"inside"` nests it at the end of `targetLine` as a child at `target.level + 1`
  * Automatically rebases descendant heading levels, ignores `#` inside fenced code
- * blocks and front matter, preserves CRLF/LF, and rejects drops onto itself or
- * inside its own descendant subtree.
+ * blocks and front matter, preserves CRLF/LF, and rejects drops onto itself,
+ * inside its own descendant subtree, or where any rebased descendant would exceed H6.
  */
 export function moveMarkdownSectionTo(
 	text: string,
@@ -771,10 +964,7 @@ export function moveMarkdownSectionTo(
 	const source = findSectionByLine(tree, sourceLine);
 	const target = findSectionByLine(tree, targetLine);
 	if (!source || !target) return noop;
-	// Reject invalid drops onto itself or inside its own descendant subtree.
-	if (target.line >= source.line && target.line <= source.endLine) return noop;
-	// ATX headings cannot exceed level 6; cannot nest a child under an H6 section.
-	if (placement === "inside" && target.level >= 6) return noop;
+	if (!canDropSection(source, target, placement)) return noop;
 
 	const desiredLevel = placement === "inside" ? target.level + 1 : target.level;
 	const delta = desiredLevel - source.level;
