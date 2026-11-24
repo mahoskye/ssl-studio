@@ -6,7 +6,12 @@ import { jsonProblem } from "./jsonCheck";
 // key written twice comes out as it went in. Only the space between things
 // changes.
 
-/** The document laid out afresh; null when it is not JSON, and is left as it is. */
+/** Maximum nesting depth formatted by `formatJson` to prevent quadratic indentation OOM on pathological input. */
+const MAX_FORMAT_DEPTH = 256;
+/** Maximum formatted output size (16 MiB) before leaving the document as-is. */
+const MAX_FORMAT_OUTPUT = 16 * 1024 * 1024;
+
+/** The document laid out afresh; null when it is not JSON (or too deeply nested to expand safely), and is left as it is. */
 export function formatJson(text: string, indent = "\t"): string | null {
 	if (!text.trim() || jsonProblem(text)) return null;
 	const eol = text.includes("\r\n") ? "\r\n" : "\n";
@@ -29,6 +34,7 @@ export function formatJson(text: string, indent = "\t"): string | null {
 				i = j;
 			} else {
 				depth++;
+				if (depth > MAX_FORMAT_DEPTH) return null;
 				out += c + line();
 			}
 		} else if (c === "}" || c === "]") {
@@ -37,6 +43,7 @@ export function formatJson(text: string, indent = "\t"): string | null {
 		} else if (c === ",") out += c + line();
 		else if (c === ":") out += ": ";
 		else if (!/\s/.test(c)) out += c;
+		if (out.length > MAX_FORMAT_OUTPUT) return null;
 	}
 	return `${out}${eol}`;
 }

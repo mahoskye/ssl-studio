@@ -45,7 +45,14 @@ export function changedRanges(before: string[], after: string[], maxCells = 4_00
 	let j = 0;
 	let start = -1;
 	const close = (end: number) => {
-		if (start >= 0) ranges.push([head + start, head + end]);
+		if (start >= 0) {
+			if (end < start) {
+				const at = Math.max(0, head + end);
+				ranges.push([at, at]);
+			} else {
+				ranges.push([head + start, head + end]);
+			}
+		}
 		start = -1;
 	};
 	while (j < b.length) {
@@ -100,9 +107,16 @@ export function applyTextEdits(text: string, edits: readonly TextEdit[]): string
 	const starts = [0];
 	for (let i = 0; i < text.length; i++) if (text[i] === "\n") starts.push(i + 1);
 	const offset = (at: { line: number; character: number }) => {
-		if (at.line >= starts.length) return text.length;
-		const end = at.line + 1 < starts.length ? starts[at.line + 1]! : text.length;
-		return Math.min(starts[at.line]! + at.character, end);
+		const line = Math.max(0, at.line);
+		if (line >= starts.length) return text.length;
+		let end: number;
+		if (line + 1 < starts.length) {
+			end = starts[line + 1]! - 1;
+			if (end > starts[line]! && text[end - 1] === "\r") end--;
+		} else {
+			end = text.length;
+		}
+		return Math.min(starts[line]! + Math.max(0, at.character), end);
 	};
 	const placed = edits.map((e) => ({ from: offset(e.range.start), to: offset(e.range.end), text: e.newText })).sort((a, b) => b.from - a.from || b.to - a.to);
 	let out = text;

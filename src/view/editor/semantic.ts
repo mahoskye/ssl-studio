@@ -42,46 +42,72 @@ const tokenName = (type: string, modifierBits: number) => [type, ...LEGEND.token
 
 function fromScopes(theme: ThemeIn, scopes: string[]): Style | null {
 	for (const scope of scopes) {
-		let best: Style | null = null;
-		let length = -1;
+		let foreground: string | undefined;
+		let fgLength = -1;
+		let fontStyle: string | undefined;
+		let fsLength = -1;
 		for (const entry of theme.tokenColors ?? []) {
 			const list = typeof entry.scope === "string" ? entry.scope.split(",") : (entry.scope ?? []);
 			for (const raw of list) {
 				const selector = raw.trim();
 				// Later entries win a tie, as in TextMate. Descendant selectors do not apply to a lone scope.
-				if (selector && !selector.includes(" ") && (scope === selector || scope.startsWith(`${selector}.`)) && selector.length >= length && (entry.settings.foreground || entry.settings.fontStyle !== undefined)) {
-					best = { foreground: entry.settings.foreground, fontStyle: entry.settings.fontStyle };
-					length = selector.length;
+				if (!selector || selector.includes(" ") || !(scope === selector || scope.startsWith(`${selector}.`))) continue;
+				if (entry.settings.foreground && selector.length >= fgLength) {
+					foreground = entry.settings.foreground;
+					fgLength = selector.length;
+				}
+				if (entry.settings.fontStyle !== undefined && selector.length >= fsLength) {
+					fontStyle = entry.settings.fontStyle;
+					fsLength = selector.length;
 				}
 			}
 		}
-		if (best) return best;
+		if (foreground !== undefined || fontStyle !== undefined) return { foreground, fontStyle };
 	}
 	return null;
 }
 
 function fromSemanticColors(theme: ThemeIn, type: string, modifiers: string[]): Style | null {
-	let best: Style | null = null;
-	let score = -1;
+	let foreground: string | undefined;
+	let fgScore = -1;
+	let fontStyle: string | undefined;
+	let fsScore = -1;
 	for (const [selector, value] of Object.entries(theme.semanticTokenColors ?? {})) {
-		const [selectorType, ...selectorModifiers] = selector.split(".");
+		const colonIdx = selector.indexOf(":");
+		let base = selector;
+		let langBonus = 0;
+		if (colonIdx >= 0) {
+			const lang = selector.slice(colonIdx + 1);
+			if (lang !== "ssl") continue;
+			base = selector.slice(0, colonIdx);
+			langBonus = 1;
+		}
+		const [selectorType, ...selectorModifiers] = base.split(".");
 		if ((selectorType !== type && selectorType !== "*") || !selectorModifiers.every((m) => modifiers.includes(m))) continue;
-		const points = selectorModifiers.length * 2 + (selectorType === type ? 1 : 0);
-		if (points < score) continue;
-		score = points;
-		if (typeof value === "string") best = { foreground: value };
-		else {
+		const points = selectorModifiers.length * 4 + (selectorType === type ? 2 : 0) + langBonus;
+		let nextFg: string | undefined;
+		let nextFs: string | undefined;
+		if (typeof value === "string") {
+			nextFg = value || undefined;
+		} else if (value) {
+			nextFg = value.foreground || undefined;
 			const flags = (["bold", "italic", "underline", "strikethrough"] as const).filter((f) => value[f]);
-			best = { foreground: value.foreground, fontStyle: value.fontStyle ?? (flags.length ? flags.join(" ") : undefined) };
+			nextFs = value.fontStyle ?? (flags.length ? flags.join(" ") : undefined);
+		}
+		if (nextFg !== undefined && points >= fgScore) {
+			foreground = nextFg;
+			fgScore = points;
+		}
+		if (nextFs !== undefined && points >= fsScore) {
+			fontStyle = nextFs;
+			fsScore = points;
 		}
 	}
-	return best;
+	if (foreground === undefined && fontStyle === undefined) return null;
+	return { foreground, fontStyle };
 }
 
-/** The style of one token under a theme, or null when the grammar's colour should stand. */
-export function tokenStyle(theme: ThemeIn, type: string, modifiers: string[]): Style | null {
-	const explicit = fromSemanticColors(theme, type, modifiers);
-	if (explicit) return explicit;
+function fromDefaultScopes(theme: ThemeIn, type: string, modifiers: string[]): Style | null {
 	for (const modifier of ["readonly", "defaultLibrary"]) {
 		const scopes = modifiers.includes(modifier) ? SCOPES[`${type}.${modifier}`] : undefined;
 		const style = scopes && fromScopes(theme, scopes);
@@ -90,9 +116,22 @@ export function tokenStyle(theme: ThemeIn, type: string, modifiers: string[]): S
 	return fromScopes(theme, SCOPES[type] ?? []);
 }
 
-const monacoColor = (color: string) => {
-	const hex = color.replace("#", "");
-	return (hex.length <= 4 ? [...hex].map((c) => c + c).join("") : hex).slice(0, 6);
+/** The style of one token under a theme, or null when the grammar's colour should stand. */
+export function tokenStyle(theme: ThemeIn, type: string, modifiers: string[]): Style | null {
+	const explicit = fromSemanticColors(theme, type, modifiers);
+	if (explicit) {
+		if (explicit.foreground !== undefined) return explicit;
+		const fallback = fromDefaultScopes(theme, type, modifiers);
+		return fallback?.foreground ? { foreground: fallback.foreground, fontStyle: explicit.fontStyle } : explicit;
+	}
+	return fromDefaultScopes(theme, type, modifiers);
+}
+
+const monacoColor = (color: string): string | undefined => {
+	const hex = color.trim().replace(/^#/, "");
+	if (/^[0-9a-f]{3,4}$/i.test(hex)) return `${hex[0]}${hex[0]}${hex[1]}${hex[1]}${hex[2]}${hex[2]}`;
+	if (/^[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(hex)) return hex.slice(0, 6);
+	return undefined;
 };
 
 let styled = new Set<string>();
@@ -114,9 +153,11 @@ export function semanticRules(theme: ThemeIn): { token: string; foreground?: str
 			for (let bits = 0; bits < 1 << LEGEND.tokenModifiers.length; bits++) {
 				const style = tokenStyle(theme, type, LEGEND.tokenModifiers.filter((_, i) => bits & (1 << i)));
 				if (!style) continue;
+				const foreground = style.foreground ? monacoColor(style.foreground) : undefined;
+				if (!foreground && style.fontStyle === undefined) continue;
 				const token = tokenName(type, bits);
 				styled.add(token);
-				rules.push({ token, foreground: style.foreground && monacoColor(style.foreground), fontStyle: style.fontStyle ?? "" });
+				rules.push({ token, foreground, fontStyle: style.fontStyle ?? "" });
 			}
 		}
 	}
@@ -141,6 +182,7 @@ export function translateTokens(data: number[], from: Legend, keep: (name: strin
 		if (type < 0) continue;
 		let bits = 0;
 		from.tokenModifiers.forEach((name, index) => {
+			if (index >= 32) return;
 			const known = LEGEND.tokenModifiers.indexOf(name);
 			if (known >= 0 && data[i + 4]! & (1 << index)) bits |= 1 << known;
 		});

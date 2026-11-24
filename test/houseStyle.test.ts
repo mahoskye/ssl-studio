@@ -21,7 +21,7 @@ test("style profile paths", () => {
 	expect(s).toEqual({ format: { sql: { enabled: true, style: "expanded" } } });
 	expect(getPath(s, "format.sql.style")).toBe("expanded");
 	expect(getPath(s, "diagnostics.rules.x")).toBeUndefined();
-	expect(setPath(s, "format.sql", undefined)).toEqual({ format: {} });
+	expect(setPath(s, "format.sql", undefined)).toEqual({});
 	expect(getPath(HOUSE_STYLE, "format.indentStyle")).toBe("tab");
 });
 

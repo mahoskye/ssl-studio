@@ -8,7 +8,7 @@ import { emitSplitScrollSync, liveEditorAt, saveMarkdownSyncAnchor, takeMarkdown
 import { MarkdownLiveEditor } from "./MarkdownLiveEditor";
 import { Icon } from "../Icon";
 import { tabShown } from "../recentTabs";
-import { createEffect, createMemo, createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { batch, createEffect, createMemo, createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { monaco } from "./monaco";
 import { activePath, canonical, closeAllTabs, closeOtherTabs, closeTab, closeTabsToRight, displayName, documents, focusRequest, isUntitled, keepTab, markdownMode, moveTab, newUntitled, notify, openFile, openToSide, planMode, revealSignal, revert, save, saveAll, saveSetting, setMarkdownMode, setPlanMode, setState, setTableTextMode, split, state, tabLeaving, tableTextMode, takeReveal, togglePin, openedForALook } from "../state";
 import { docAuditData } from "../docAudit";
@@ -51,9 +51,42 @@ import { noteCursor } from "../navigation";
 const viewStates = new Map<string, monaco.editor.ICodeEditorViewState | null>();
 /** The same by the file alone, as it was last left in any group: what a tab moved to another group opens with. */
 const lastViews = new Map<string, monaco.editor.ICodeEditorViewState | null>();
+
+/** Clears saved Monaco editor view states: all entries (workspace switch), one tab in one group, or all entries for a closed file. */
+export function clearEditorViewStates(path?: string, groupIndex?: number) {
+	if (path === undefined) {
+		viewStates.clear();
+		lastViews.clear();
+		return;
+	}
+	if (groupIndex !== undefined) {
+		viewStates.delete(`${groupIndex}:${path}`);
+		return;
+	}
+	for (const key of [...viewStates.keys()]) {
+		const sep = key.indexOf(":");
+		if (sep >= 0 && key.slice(sep + 1) === path) viewStates.delete(key);
+	}
+	lastViews.delete(path);
+}
+
 /** The editor width, in pixels, from which the minimap is shown: under it, code at the line length would run beneath the map. */
 const MINIMAP_FROM = 640;
 export const editors: monaco.editor.IStandaloneCodeEditor[] = [];
+
+/** Resolves the editor group index owning `source` (including embedded widgets like Peek views inside a group editor). */
+export function editorGroupOf(source: monaco.editor.ICodeEditor | null | undefined): number | undefined {
+	if (!source) return undefined;
+	const direct = editors.findIndex((ed) => ed === source);
+	if (direct >= 0) return direct;
+	const dom = typeof source.getDomNode === "function" ? source.getDomNode() : null;
+	if (dom) {
+		const hostIndex = editors.findIndex((ed) => Boolean(ed?.getDomNode()?.contains(dom)));
+		if (hostIndex >= 0) return hostIndex;
+	}
+	return undefined;
+}
+
 /** The tab being dragged, and the group it is in. One at a time, whichever group it is over. */
 let dragged: { path: string; group: number } | null = null;
 /** Where it would land: in which group, and before which tab (last, with null). */
@@ -62,7 +95,7 @@ const [dropAt, setDropAt] = createSignal<{ group: number; before: string | null 
 const [lastMarkdownPath, setLastMarkdownPath] = createSignal<string | null>(null);
 export const lastActiveMarkdownPath = () => lastMarkdownPath();
 
-const base = displayName;
+const base = (path: string) => displayName(path);
 
 export function EditorGroup(props: { index: number }) {
 	let host!: HTMLDivElement;
@@ -112,6 +145,7 @@ export function EditorGroup(props: { index: number }) {
 	// A table of values opens as a table, with the same switch to its text as a document has.
 	const isTabular = () => isTable(group().active) && !showFile();
 	const showTable = () => isTabular() && !tableTextMode(group().active!, props.index);
+	const isMonacoVisible = () => !showBlocks() && !showChart() && !showRendered() && !showLive() && !showTable() && !showFile();
 
 	// Horizontal tab-strip overflow detection + wheel scrolling (C9).
 	let tabsHost: HTMLDivElement | undefined;
@@ -176,9 +210,21 @@ export function EditorGroup(props: { index: number }) {
 	/** Last known visible top line while Monaco was shown (used for Source -> Live/Read scroll handoff). */
 	let lastSourceTopLine = 1;
 	let lastSavedSourceAnchorAt = 0;
+	let disposed = false;
+	let anchorRaf: number | undefined;
+	const cancelAnchorRaf = () => {
+		if (anchorRaf !== undefined) {
+			cancelAnimationFrame(anchorRaf);
+			anchorRaf = undefined;
+		}
+	};
+	onCleanup(() => {
+		disposed = true;
+		cancelAnchorRaf();
+	});
 
 	function saveSourceAnchor(path: string) {
-		if (!editor || shown !== path) return;
+		if (disposed || !state.groups[props.index] || !editor || shown !== path) return;
 		const pos = editor.getPosition();
 		const visible = editor.getVisibleRanges();
 		const topLine = visible[0]?.startLineNumber ?? lastSourceTopLine ?? pos?.lineNumber ?? 1;
@@ -191,7 +237,7 @@ export function EditorGroup(props: { index: number }) {
 	}
 
 	function applySourceAnchor(path: string): boolean {
-		if (!editor || shown !== path || showLive() || showRendered()) return false;
+		if (disposed || !state.groups[props.index] || !editor || shown !== path || showLive() || showRendered()) return false;
 		const anchor = takeMarkdownSyncAnchor(props.index, path);
 		if (!anchor) return false;
 		const model = editor.getModel();
@@ -305,7 +351,7 @@ export function EditorGroup(props: { index: number }) {
 			if (!e.scrollTopChanged) return;
 			if (e.scrollTop > 22 && !scrolled()) setScrolled(true);
 			else if (e.scrollTop < 6 && scrolled()) setScrolled(false);
-			if (shown && !showLive() && !showRendered() && !showBlocks() && !showChart() && !showTable() && !showFile()) {
+			if (shown && isMonacoVisible()) {
 				const visible = editor.getVisibleRanges();
 				const topLine = visible[0]?.startLineNumber ?? 1;
 				lastSourceTopLine = topLine;
@@ -334,31 +380,36 @@ export function EditorGroup(props: { index: number }) {
 			if (shown && e.source !== "model" && e.source !== "restoreState") noteCursor({ path: shown, line: e.position.lineNumber, column: e.position.column });
 		});
 		const stop = revealSignal.listen((path) => {
-			if (path === group().active && shown === path && !showLive() && !showRendered() && !showTable()) reveal(path);
+			if (state.activeGroup === props.index && path === group().active && shown === path && isMonacoVisible()) reveal(path);
 		});
 		// "Focus editor": the text editor, or whichever view of the file is showing in its place.
 		const stopFocus = focusRequest.listen((target) => {
 			if (target !== "editor" || state.activeGroup !== props.index) return;
 			if (showLive()) return void liveEditorAt(props.index)?.focus();
-			if (!showBlocks() && !showChart() && !showRendered() && !showTable() && !showFile()) return editor.focus();
+			if (isMonacoVisible()) return editor.focus();
 			section.querySelector<HTMLElement>(".blocks-scroll, .plan [tabindex], .cm-md-host, .md-view, .table-view td.cell-selected, .table-view, .file-view")?.focus();
 		});
 		onCleanup(() => {
+			disposed = true;
+			cancelAnchorRaf();
 			stop();
 			stopFocus();
 			if (shown) keepView(shown);
+			shown = null;
 			editor.dispose();
 		});
 	});
 
 	/** Keeps where the cursor and the scroll are in the file that is showing, before it stops showing. */
 	function keepView(path: string) {
+		const model = editor?.getModel();
+		if (!model || model.isDisposed()) return;
 		const view = editor.saveViewState();
 		viewStates.set(`${props.index}:${path}`, view);
 		lastViews.set(path, view);
 	}
 	// A tab about to leave for another group: where it was is kept now, since the group it goes to may ask first.
-	const leaving = (index: number, path: string) => index === props.index && path === shown && editor && keepView(path);
+	const leaving = (index: number, path: string) => !disposed && index === props.index && path === shown && editor && keepView(path);
 	tabLeaving.add(leaving);
 	onCleanup(() => tabLeaving.delete(leaving));
 
@@ -386,9 +437,7 @@ export function EditorGroup(props: { index: number }) {
 	 */
 	createEffect(() => {
 		const path = group().active;
-		const inLive = showLive();
-		const inRead = showRendered();
-		const inTable = showTable();
+		const monacoShown = isMonacoVisible();
 		const activeCodeFont = state.settings.codeFont?.trim() ? resolveFontStack(state.settings.codeFont, DEFAULT_CODE_FONT) : codeFont || undefined;
 		const options: monaco.editor.IEditorOptions & monaco.editor.IGlobalEditorOptions = {
 			fontSize: state.settings.fontSize,
@@ -421,8 +470,8 @@ export function EditorGroup(props: { index: number }) {
 		if (doc) {
 			const view = viewStates.get(`${props.index}:${path}`) ?? lastViews.get(path!);
 			if (view) editor.restoreViewState(view);
-			if (!inLive && !inRead && !inTable) reveal(path!);
-			if (state.activeGroup === props.index && !openedForALook(path!) && !inLive && !inRead && !inTable) editor.focus();
+			if (state.activeGroup === props.index && monacoShown) reveal(path!);
+			if (state.activeGroup === props.index && !openedForALook(path!) && monacoShown) editor.focus();
 		}
 	});
 
@@ -442,10 +491,15 @@ export function EditorGroup(props: { index: number }) {
 			return;
 		}
 		if (!inCm && (wasInCm || wasPath !== path)) {
+			cancelAnchorRaf();
 			if (!applySourceAnchor(path)) {
 				queueMicrotask(() => {
+					if (disposed || !state.groups[props.index]) return;
 					if (!applySourceAnchor(path)) {
-						requestAnimationFrame(() => void applySourceAnchor(path));
+						anchorRaf = requestAnimationFrame(() => {
+							anchorRaf = undefined;
+							void applySourceAnchor(path);
+						});
 					}
 				});
 			}
@@ -474,7 +528,10 @@ export function EditorGroup(props: { index: number }) {
 	});
 	const labels = () => tabLabels(group().tabs, state.workspace?.root);
 	const activate = (path: string, focus = false) => {
-		setState("groups", props.index, "active", path);
+		batch(() => {
+			setState("activeGroup", props.index);
+			setState("groups", props.index, "active", path);
+		});
 		if (focus) queueMicrotask(() => tabs.get(path)?.focus());
 	};
 	/** Left and Right walk the tabs, as in any tab strip; Delete closes one. */
@@ -490,8 +547,7 @@ export function EditorGroup(props: { index: number }) {
 			// Enter on a tab opened for a look keeps it, as a double click does.
 			keepTab(path, props.index);
 			activate(path);
-			if (showLive()) liveEditorAt(props.index)?.focus();
-			else editor.focus();
+			focusRequest.fire("editor");
 		} else if (e.key === "Delete") {
 			e.preventDefault();
 			void closeTab(path, props.index);
@@ -601,26 +657,33 @@ export function EditorGroup(props: { index: number }) {
 	 */
 	const fileActions = async (): Promise<MenuItem[]> => {
 		const { commands, keysFor } = await import("../commands");
-		const path = group().active;
+		const g = state.groups[props.index];
+		if (!g) return [];
+		const path = g.active;
 		const none = "Open a file first";
+		const inThisGroup = (fn: () => void) => () => {
+			setState("activeGroup", props.index);
+			fn();
+		};
 		const command = (id: string, label: string): MenuItem => {
 			const found = commands.find((c) => c.id === id);
-			return { label, keys: keysFor(id) || undefined, run: () => found?.run(), disabled: !found || !path, why: found ? none : "Not available" };
+			return { label, keys: keysFor(id) || undefined, run: inThisGroup(() => found?.run()), disabled: !found || !path, why: found ? none : "Not available" };
 		};
 		const untitled = isUntitled(path);
+		const hasOtherClosable = othersOf(g.tabs, g.pinned ?? [], path).length > 0;
 		return [
-			{ label: "Save", keys: keysFor("save") || undefined, run: () => void save(path), disabled: !path || (!state.dirty[path] && !untitled), why: path ? "Nothing to save" : none },
+			{ label: "Save", keys: keysFor("save") || undefined, run: inThisGroup(() => void save(path)), disabled: !path || (!state.dirty[path] && !untitled), why: path ? "Nothing to save" : none },
 			{ label: "Save all", keys: keysFor("save-all") || undefined, run: () => void saveAll(), disabled: !Object.values(state.dirty).some(Boolean), why: "Nothing to save" },
-			{ label: "Revert to the file on disk", run: () => path && void revert(path), disabled: !path || untitled || !state.dirty[path], why: !path ? none : untitled ? "Not saved on disk yet" : "No unsaved changes" },
+			{ label: "Revert to the file on disk", run: inThisGroup(() => path && void revert(path)), disabled: !path || untitled || !state.dirty[path], why: !path ? none : untitled ? "Not saved on disk yet" : "No unsaved changes" },
 			"separator",
 			command("format", "Format document"),
 			command("copy-designer", "Copy for Designer"),
 			command("wrap-region", "Wrap the selected lines in a region…"),
 			command("tidy", "Tidy this file with the agent"),
 			"separator",
-			{ label: "Split editor", keys: keysFor("split") || undefined, run: split, disabled: !path, why: none },
-			{ label: "Close other tabs", run: () => void closeOtherTabs(), disabled: group().tabs.length < 2, why: "No other tabs" },
-			{ label: "Close all tabs", run: () => void closeAllTabs(props.index), disabled: !group().tabs.length, why: "No tabs" },
+			{ label: "Split editor", keys: keysFor("split") || undefined, run: inThisGroup(split), disabled: !path, why: none },
+			{ label: "Close other tabs", run: inThisGroup(() => void closeOtherTabs(path, props.index)), disabled: !hasOtherClosable, why: "No other tabs" },
+			{ label: "Close all tabs", run: inThisGroup(() => void closeAllTabs(props.index)), disabled: !g.tabs.length, why: "No tabs" },
 		];
 	};
 
@@ -855,9 +918,11 @@ export function EditorGroup(props: { index: number }) {
 										e.preventDefault();
 										e.stopPropagation();
 										middleClose.press(path);
-									} else {
+									} else if (e.button === 0) {
 										middleClose.cancel();
 										activate(path);
+									} else {
+										middleClose.cancel();
 									}
 								}}
 								onMouseLeave={() => middleClose.cancel(path)}

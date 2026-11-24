@@ -55,6 +55,8 @@ export function useGitMarks(editor: monaco.editor.IStandaloneCodeEditor, active:
 			// Another file has other marks. The same file keeps the ones it has until git has answered again: asked
 			// on every save, an answer that says the same would otherwise make them blink.
 			if (path !== before?.[0] || !repository) {
+				clearTimeout(timer);
+				timer = undefined;
 				base = null;
 				marks.clear();
 			}
@@ -67,7 +69,13 @@ export function useGitMarks(editor: monaco.editor.IStandaloneCodeEditor, active:
 					base = text === null ? null : text.split(/\r?\n/);
 					draw();
 				},
-				() => {},
+				() => {
+					if (stale) return;
+					clearTimeout(timer);
+					timer = undefined;
+					base = null;
+					marks.clear();
+				},
 			);
 		}),
 	);

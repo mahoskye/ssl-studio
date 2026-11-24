@@ -5,7 +5,7 @@ import { monaco } from "../editor/monaco";
 import { LEGEND, onSemanticThemeChange, refreshSemanticTokens, translateTokens } from "../editor/semantic";
 import { backend, on } from "../backend";
 import { LspClient } from "./client";
-import { trimEdit } from "./edits";
+import { applyTextEdits, trimEdit } from "./edits";
 import { baseName } from "../../shared/paths";
 
 export type Diagnostic = {
@@ -38,25 +38,69 @@ const markdown = (value: any) => (value == null ? undefined : typeof value === "
 
 export type ServerInfo = { name: string; version: string };
 
+const LSP_MARKER_OWNER = "starlims-lsp";
+const diagnosticsByOwner = new Map<string, Map<string, Diagnostic[]>>();
+
+function setOwnerDiagnostics(uri: string, owner: string, list: Diagnostic[] | null) {
+	let byOwner = diagnosticsByOwner.get(uri);
+	if (list === null) {
+		if (byOwner) {
+			byOwner.delete(owner);
+			if (!byOwner.size) diagnosticsByOwner.delete(uri);
+		}
+	} else {
+		if (!byOwner) {
+			byOwner = new Map();
+			diagnosticsByOwner.set(uri, byOwner);
+		}
+		byOwner.set(owner, list);
+	}
+	const current = diagnosticsByOwner.get(uri);
+	if (!current || !current.size) {
+		setDiagnostics(uri, undefined!);
+		return;
+	}
+	const merged: Diagnostic[] = [];
+	for (const items of current.values()) merged.push(...items);
+	setDiagnostics(uri, reconcile(merged));
+}
+
+function clearOwnerDiagnostics(owner: string) {
+	for (const [uri, byOwner] of [...diagnosticsByOwner.entries()]) {
+		if (!byOwner.has(owner)) continue;
+		setOwnerDiagnostics(uri, owner, null);
+		const model = monaco.editor.getModel(monaco.Uri.parse(uri));
+		if (model && !model.isDisposed()) monaco.editor.setModelMarkers(model, owner, []);
+	}
+	for (const model of monaco.editor.getModels()) {
+		if (!model.isDisposed()) monaco.editor.setModelMarkers(model, owner, []);
+	}
+}
+
 /** Findings that come from SSL Studio rather than the server (a plan's check): Problems and markers, under their own owner. */
 export function publishFindings(model: monaco.editor.ITextModel, owner: string, list: Omit<Diagnostic, "uri">[] | null) {
 	const uri = model.uri.toString();
 	if (!list) {
-		setDiagnostics(uri, undefined!);
-		monaco.editor.setModelMarkers(model, owner, []);
+		setOwnerDiagnostics(uri, owner, null);
+		if (!model.isDisposed()) monaco.editor.setModelMarkers(model, owner, []);
 		return;
 	}
-	setDiagnostics(uri, reconcile(list.map((d) => ({ ...d, uri }))));
-	monaco.editor.setModelMarkers(
-		model,
-		owner,
-		list.map((d) => ({ startLineNumber: d.line, startColumn: d.column, endLineNumber: d.endLine, endColumn: d.endColumn, severity: d.severity === 1 ? monaco.MarkerSeverity.Error : d.severity === 2 ? monaco.MarkerSeverity.Warning : monaco.MarkerSeverity.Info, message: d.message, code: d.code, source: d.source })),
-	);
+	const stamped = list.map((d) => ({ ...d, uri }));
+	setOwnerDiagnostics(uri, owner, stamped);
+	if (!model.isDisposed()) {
+		monaco.editor.setModelMarkers(
+			model,
+			owner,
+			list.map((d) => ({ startLineNumber: d.line, startColumn: d.column, endLineNumber: d.endLine, endColumn: d.endColumn, severity: markerSeverity[d.severity] ?? monaco.MarkerSeverity.Info, message: d.message, code: d.code, source: d.source })),
+		);
+	}
 }
 
-class Session {
+export class LspSession {
 	readonly client = new LspClient();
 	private initialized: Promise<void> | null = null;
+	private readyFlag = false;
+	private epoch = 0;
 	private root = "";
 	private versions = new Map<string, number>();
 	private tracked = new Map<string, () => void>();
@@ -75,42 +119,88 @@ class Session {
 		this.client.onRequest("client/registerCapability", () => null);
 		this.client.onRequest("window/workDoneProgress/create", () => null);
 		on("lspState", (state) => {
-			if (state.state === "restarting" || state.state === "stopped") {
-				this.client.rejectAll(state.state);
-				this.initialized = null;
+			if (state.state === "restarting" || state.state === "stopped" || state.state === "failed") {
+				this.handleDown(state.state);
 			}
-			if (state.state === "running" && this.root) void this.start(this.root);
+			if (state.state === "running" && this.root) void this.start(this.root).catch(() => {});
 		});
+	}
+
+	private abortScratchWaiters() {
+		for (const resolve of this.scratchWaiters.values()) resolve(null);
+		this.scratchWaiters.clear();
+	}
+
+	private clearLspDiagnostics() {
+		clearOwnerDiagnostics(LSP_MARKER_OWNER);
+	}
+
+	private resetVersions() {
+		for (const uri of this.versions.keys()) this.versions.set(uri, 0);
+	}
+
+	private handleDown(reason: string) {
+		this.epoch++;
+		this.readyFlag = false;
+		this.initialized = null;
+		this.resetVersions();
+		this.client.rejectAll(reason);
+		this.abortScratchWaiters();
+		this.clearLspDiagnostics();
+	}
+
+	/** Clears session state and LSP diagnostics (e.g. when switching or closing a workspace). */
+	reset(): void {
+		this.root = "";
+		this.server = null;
+		this.capabilities = {};
+		this.handleDown("reset");
 	}
 
 	start(root: string) {
 		this.root = root;
+		const myEpoch = ++this.epoch;
+		this.readyFlag = false;
+		this.resetVersions();
 		this.initialized = (async () => {
-			const result = await this.client.request("initialize", {
-				processId: null,
-				initializationOptions: { ssl: this.sslSettings() },
-				rootUri: monaco.Uri.file(root).toString(),
-				workspaceFolders: [{ uri: monaco.Uri.file(root).toString(), name: baseName(root) }],
-				capabilities: {
-					textDocument: {
-						synchronization: { didSave: true },
-						documentSymbol: { hierarchicalDocumentSymbolSupport: true },
-						completion: { completionItem: { snippetSupport: true, documentationFormat: ["markdown", "plaintext"] } },
-						hover: { contentFormat: ["markdown", "plaintext"] },
-						signatureHelp: { signatureInformation: { documentationFormat: ["markdown", "plaintext"] } },
-						rename: { prepareSupport: true },
-						publishDiagnostics: { relatedInformation: false },
-						foldingRange: { lineFoldingOnly: true },
-						semanticTokens: { requests: { full: true }, tokenTypes: LEGEND.tokenTypes, tokenModifiers: LEGEND.tokenModifiers, formats: ["relative"] },
+			try {
+				const result = await this.client.request("initialize", {
+					processId: null,
+					initializationOptions: { ssl: this.sslSettings() },
+					rootUri: monaco.Uri.file(root).toString(),
+					workspaceFolders: [{ uri: monaco.Uri.file(root).toString(), name: baseName(root) }],
+					capabilities: {
+						textDocument: {
+							synchronization: { didSave: true },
+							documentSymbol: { hierarchicalDocumentSymbolSupport: true },
+							completion: { completionItem: { snippetSupport: true, documentationFormat: ["markdown", "plaintext"] } },
+							hover: { contentFormat: ["markdown", "plaintext"] },
+							signatureHelp: { signatureInformation: { documentationFormat: ["markdown", "plaintext"] } },
+							rename: { prepareSupport: true },
+							publishDiagnostics: { relatedInformation: false },
+							foldingRange: { lineFoldingOnly: true },
+							semanticTokens: { requests: { full: true }, tokenTypes: LEGEND.tokenTypes, tokenModifiers: LEGEND.tokenModifiers, formats: ["relative"] },
+						},
+						workspace: { workspaceFolders: true, configuration: true },
 					},
-					workspace: { workspaceFolders: true, configuration: true },
-				},
-			});
-			this.server = result?.serverInfo ?? null;
-			this.capabilities = result?.capabilities ?? {};
-			this.client.notify("initialized", {});
-			for (const model of monaco.editor.getModels()) if (this.versions.has(model.uri.toString())) this.open(model);
-			refreshSemanticTokens();
+				});
+				if (this.epoch !== myEpoch) return;
+				this.server = result?.serverInfo ?? null;
+				this.capabilities = result?.capabilities ?? {};
+				this.client.notify("initialized", {});
+				this.readyFlag = true;
+				for (const model of monaco.editor.getModels()) {
+					const uri = model.uri.toString();
+					if (this.tracked.has(uri) && !this.versions.get(uri) && !model.isDisposed() && model.getLanguageId() === "ssl") this.open(model);
+				}
+				refreshSemanticTokens();
+			} catch (err) {
+				if (this.epoch === myEpoch) {
+					this.readyFlag = false;
+					this.initialized = null;
+				}
+				throw err;
+			}
 		})();
 		return this.initialized;
 	}
@@ -137,10 +227,10 @@ class Session {
 
 	/** Sends a changed style profile; the server re-checks open documents. */
 	configure() {
-		if (this.initialized) this.client.notify("workspace/didChangeConfiguration", { settings: { ssl: this.sslSettings() } });
+		if (this.readyFlag) this.client.notify("workspace/didChangeConfiguration", { settings: { ssl: this.sslSettings() } });
 	}
 
-	private scratchWaiters = new Map<string, (diagnostics: any[]) => void>();
+	private scratchWaiters = new Map<string, (diagnostics: any[] | null) => void>();
 	private scratchCount = 0;
 
 	/**
@@ -151,6 +241,7 @@ class Session {
 	 */
 	async analyze(text: string): Promise<{ diagnostics: { code?: string; severity: number; message: string; line: number }[]; symbols: monaco.languages.DocumentSymbol[]; timedOut: boolean }> {
 		await this.ready();
+		const myEpoch = this.epoch;
 		const uri = monaco.Uri.file(`${this.root}/.ssl-studio/scratch-${++this.scratchCount}.ssl`).toString();
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		const published = new Promise<any[] | null>((resolve) => {
@@ -161,10 +252,16 @@ class Session {
 		try {
 			const answer = await published;
 			clearTimeout(timer);
+			if (this.epoch !== myEpoch || !this.readyFlag) {
+				return { diagnostics: [], symbols: [], timedOut: true };
+			}
 			const raw = answer ?? [];
 			const symbols = ((await this.client.request("textDocument/documentSymbol", { textDocument: { uri } })) ?? []).map(function convert(s: any): monaco.languages.DocumentSymbol {
-				return { name: s.name, detail: s.detail ?? "", kind: s.kind - 1, tags: [], range: toRange(s.range), selectionRange: toRange(s.selectionRange ?? s.range), children: (s.children ?? []).map(convert) };
+				return { name: s.name, detail: s.detail ?? "", kind: s.kind - 1, tags: [], range: toRange(s.range ?? s.location.range), selectionRange: toRange(s.selectionRange ?? s.range ?? s.location.range), children: (s.children ?? []).map(convert) };
 			});
+			if (this.epoch !== myEpoch || !this.readyFlag) {
+				return { diagnostics: [], symbols: [], timedOut: true };
+			}
 			return {
 				diagnostics: raw.map((d) => ({ code: d.code == null ? undefined : String(typeof d.code === "object" ? d.code.value : d.code), severity: d.severity ?? 1, message: d.message, line: d.range.start.line + 1 })),
 				symbols,
@@ -173,7 +270,7 @@ class Session {
 		} finally {
 			clearTimeout(timer);
 			this.scratchWaiters.delete(uri);
-			this.client.notify("textDocument/didClose", { textDocument: { uri } });
+			if (this.epoch === myEpoch && this.readyFlag) this.client.notify("textDocument/didClose", { textDocument: { uri } });
 		}
 	}
 
@@ -181,38 +278,48 @@ class Session {
 	async scratchCalls(text: string): Promise<{ from: string; target: string; resolved: boolean }[]> {
 		await this.ready();
 		if (!this.supports("ssl/callGraph")) return [];
-		const uri = monaco.Uri.file(`${this.root}/.ssl-studio/calls-${++this.scratchCount}.ssl`).toString();
+		const myEpoch = this.epoch;
+		const parsedUri = monaco.Uri.file(`${this.root}/.ssl-studio/calls-${++this.scratchCount}.ssl`);
+		const uri = parsedUri.toString();
+		const fsPath = parsedUri.fsPath;
 		this.client.notify("textDocument/didOpen", { textDocument: { uri, languageId: "ssl", version: 1, text } });
 		try {
 			const graph = await this.client.request("ssl/callGraph", { textDocument: { uri } });
 			const names = new Map<string, string>((graph?.nodes ?? []).map((n: any) => [n.id, n.name]));
-			return (graph?.edges ?? []).filter((e: any) => e.location?.uri === uri).map((e: any) => ({ from: names.get(e.from) ?? e.from, target: e.target, resolved: Boolean(e.resolved) }));
+			const matchesUri = (other?: string) => {
+				if (!other) return false;
+				const parsed = monaco.Uri.parse(other);
+				return parsed.toString() === uri || parsed.fsPath === fsPath;
+			};
+			return (graph?.edges ?? []).filter((e: any) => matchesUri(e.location?.uri)).map((e: any) => ({ from: names.get(e.from) ?? e.from, target: e.target, resolved: Boolean(e.resolved) }));
 		} finally {
-			this.client.notify("textDocument/didClose", { textDocument: { uri } });
+			if (this.epoch === myEpoch && this.readyFlag) this.client.notify("textDocument/didClose", { textDocument: { uri } });
 		}
 	}
 
 	/** A file changed outside the editor. The server re-reads it, so what it knows across files stays true. */
 	fileChanged(path: string, exists: boolean) {
-		if (this.initialized) this.client.notify("workspace/didChangeWatchedFiles", { changes: [{ uri: monaco.Uri.file(path).toString(), type: exists ? 2 : 3 }] });
+		if (this.readyFlag) this.client.notify("workspace/didChangeWatchedFiles", { changes: [{ uri: monaco.Uri.file(path).toString(), type: exists ? 2 : 3 }] });
 	}
 
 	/** The server's syntax tree for text not in any editor. */
 	async scratchTree(text: string): Promise<any[]> {
 		await this.ready();
 		if (!this.supports("ssl/syntaxTree")) return [];
+		const myEpoch = this.epoch;
 		const uri = monaco.Uri.file(`${this.root}/.ssl-studio/tree-${++this.scratchCount}.ssl`).toString();
 		this.client.notify("textDocument/didOpen", { textDocument: { uri, languageId: "ssl", version: 1, text } });
 		try {
 			return (await this.client.request("ssl/syntaxTree", { textDocument: { uri } }))?.nodes ?? [];
 		} finally {
-			this.client.notify("textDocument/didClose", { textDocument: { uri } });
+			if (this.epoch === myEpoch && this.readyFlag) this.client.notify("textDocument/didClose", { textDocument: { uri } });
 		}
 	}
 
 	/** Standard LSP document symbols for text not in any editor, without waiting for diagnostics. */
 	async scratchSymbols(text: string): Promise<monaco.languages.DocumentSymbol[]> {
 		await this.ready();
+		const myEpoch = this.epoch;
 		const uri = monaco.Uri.file(`${this.root}/.ssl-studio/sym-${++this.scratchCount}.ssl`).toString();
 		this.client.notify("textDocument/didOpen", { textDocument: { uri, languageId: "ssl", version: 1, text } });
 		try {
@@ -227,7 +334,7 @@ class Session {
 			});
 			return ((await this.client.request("textDocument/documentSymbol", { textDocument: { uri } })) ?? []).map(convert);
 		} finally {
-			this.client.notify("textDocument/didClose", { textDocument: { uri } });
+			if (this.epoch === myEpoch && this.readyFlag) this.client.notify("textDocument/didClose", { textDocument: { uri } });
 		}
 	}
 
@@ -251,23 +358,22 @@ class Session {
 	/** The formatter's output for text not in any editor. */
 	async formatText(text: string, options: { tabSize: number; insertSpaces: boolean }): Promise<string> {
 		await this.ready();
+		const myEpoch = this.epoch;
 		const uri = monaco.Uri.file(`${this.root}/.ssl-studio/format-${++this.scratchCount}.ssl`).toString();
 		this.client.notify("textDocument/didOpen", { textDocument: { uri, languageId: "ssl", version: 1, text } });
 		try {
 			const edits = ((await this.client.request("textDocument/formatting", { textDocument: { uri }, options })) ?? []) as { range: Range; newText: string }[];
-			const lines = text.split("\n");
-			const offset = (p: { line: number; character: number }) => lines.slice(0, p.line).reduce((n, l) => n + l.length + 1, 0) + p.character;
-			let out = text;
-			for (const e of [...edits].sort((a, b) => offset(b.range.start) - offset(a.range.start)))
-				out = out.slice(0, offset(e.range.start)) + e.newText + out.slice(Math.min(out.length, offset(e.range.end)));
-			return out;
+			return applyTextEdits(text, edits);
 		} finally {
-			this.client.notify("textDocument/didClose", { textDocument: { uri } });
+			if (this.epoch === myEpoch && this.readyFlag) this.client.notify("textDocument/didClose", { textDocument: { uri } });
 		}
 	}
 
-	private ready() {
-		return this.initialized ?? Promise.reject(new Error("language server not running"));
+	private async ready() {
+		const init = this.initialized;
+		if (!init) throw new Error("language server not running");
+		await init;
+		if (!this.readyFlag) throw new Error("language server not running");
 	}
 
 	private open(model: monaco.editor.ITextModel) {
@@ -282,12 +388,17 @@ class Session {
 		const uri = model.uri.toString();
 		if (this.tracked.has(uri)) return;
 		this.versions.set(uri, 0);
-		this.initialized?.then(() => {
-			if (this.tracked.has(uri) && !model.isDisposed() && model.getLanguageId() === "ssl") this.open(model);
-		});
+		this.initialized
+			?.then(() => {
+				if (this.readyFlag && this.tracked.has(uri) && !this.versions.get(uri) && !model.isDisposed() && model.getLanguageId() === "ssl") {
+					this.open(model);
+				}
+			})
+			.catch(() => {});
 		const changes = model.onDidChangeContent((event) => {
-			if (!this.initialized || !this.versions.get(uri)) return;
-			const version = this.versions.get(uri)! + 1;
+			const current = this.versions.get(uri) ?? 0;
+			if (!this.readyFlag || current <= 0) return;
+			const version = current + 1;
 			this.versions.set(uri, version);
 			this.client.notify("textDocument/didChange", {
 				textDocument: { uri, version },
@@ -308,26 +419,29 @@ class Session {
 		if (!stop) return;
 		this.tracked.delete(uri);
 		stop();
-		const hadOpen = Boolean(this.versions.get(uri));
+		const hadOpen = (this.versions.get(uri) ?? 0) > 0;
 		this.versions.delete(uri);
-		if (this.initialized && hadOpen) this.client.notify("textDocument/didClose", { textDocument: { uri } });
-		setDiagnostics(uri, undefined!);
-		if (!model.isDisposed()) monaco.editor.setModelMarkers(model, "ssl", []);
+		if (this.readyFlag && hadOpen) this.client.notify("textDocument/didClose", { textDocument: { uri } });
+		setOwnerDiagnostics(uri, LSP_MARKER_OWNER, null);
+		if (!model.isDisposed()) monaco.editor.setModelMarkers(model, LSP_MARKER_OWNER, []);
 	}
 
 	saved(model: monaco.editor.ITextModel) {
-		if (this.versions.get(model.uri.toString())) this.client.notify("textDocument/didSave", { textDocument: { uri: model.uri.toString() } });
+		const uri = model.uri.toString();
+		if (this.readyFlag && (this.versions.get(uri) ?? 0) > 0) this.client.notify("textDocument/didSave", { textDocument: { uri } });
 	}
 
 	private publish(params: { uri: string; diagnostics: any[] }) {
+		const parsedUri = monaco.Uri.parse(params.uri);
+		const uri = parsedUri.toString();
 		// Scratch documents (Reference panel, agent checks) are not the user's files.
-		if (params.uri.includes("/.ssl-studio/")) {
-			this.scratchWaiters.get(params.uri)?.(params.diagnostics);
+		if (uri.includes("/.ssl-studio/") || parsedUri.path.includes("/.ssl-studio/")) {
+			this.scratchWaiters.get(uri)?.(params.diagnostics);
 			return;
 		}
-		const model = monaco.editor.getModel(monaco.Uri.parse(params.uri));
+		const model = monaco.editor.getModel(parsedUri);
 		const list: Diagnostic[] = params.diagnostics.map((d) => ({
-			uri: params.uri,
+			uri,
 			line: d.range.start.line + 1,
 			column: d.range.start.character + 1,
 			endLine: d.range.end.line + 1,
@@ -337,11 +451,11 @@ class Session {
 			code: d.code == null ? undefined : String(typeof d.code === "object" ? d.code.value : d.code),
 			source: d.source,
 		}));
-		setDiagnostics(params.uri, reconcile(list));
-		if (model)
+		setOwnerDiagnostics(uri, LSP_MARKER_OWNER, list);
+		if (model && !model.isDisposed())
 			monaco.editor.setModelMarkers(
 				model,
-				"starlims-lsp",
+				LSP_MARKER_OWNER,
 				list.map((d) => ({
 					startLineNumber: d.line,
 					startColumn: d.column,
@@ -379,14 +493,21 @@ class Session {
 
 	/** Formats the given line ranges (0-based, inclusive) as small edits. */
 	async formatRanges(model: monaco.editor.ITextModel, ranges: [number, number][], options: monaco.languages.FormattingOptions) {
+		if (model.isDisposed()) return [];
+		const version = model.getVersionId();
 		const edits: monaco.editor.IIdentifiedSingleEditOperation[] = [];
 		for (const [start, end] of ranges) {
-			const range = new monaco.Range(start + 1, 1, end + 1, model.getLineMaxColumn(end + 1));
+			if (model.isDisposed() || model.getVersionId() !== version) return [];
+			const lineCount = model.getLineCount();
+			const startLine = Math.min(Math.max(1, start + 1), lineCount);
+			const endLine = Math.min(Math.max(startLine, end + 1), lineCount);
+			const range = new monaco.Range(startLine, 1, endLine, model.getLineMaxColumn(endLine));
 			const result = await this.request("textDocument/rangeFormatting", {
 				textDocument: { uri: model.uri.toString() },
 				range: toLspRange(range),
 				options: { tabSize: options.tabSize, insertSpaces: options.insertSpaces },
 			});
+			if (model.isDisposed() || model.getVersionId() !== version) return [];
 			edits.push(...toMinimalEdits(model, result ?? []));
 		}
 		return edits;
@@ -395,13 +516,34 @@ class Session {
 
 /** The formatter's edits replace whole ranges; shrink each to its changed lines. */
 export function toMinimalEdits(model: monaco.editor.ITextModel, edits: { range: Range; newText: string }[]) {
-	return edits.flatMap((edit) => {
-		const range = toRange(edit.range);
+	if (!edits.length) return [];
+	const clamped = edits.map((edit) => ({
+		range: model.validateRange(toRange(edit.range)),
+		newText: edit.newText,
+	}));
+	const eol = model.getEOL();
+	if (clamped.length > 1) {
+		const sorted = [...clamped].sort(
+			(a, b) => a.range.startLineNumber - b.range.startLineNumber || a.range.endLineNumber - b.range.endLineNumber,
+		);
+		let sharesLine = false;
+		for (let i = 1; i < sorted.length; i++) {
+			if (sorted[i]!.range.startLineNumber <= sorted[i - 1]!.range.endLineNumber) {
+				sharesLine = true;
+				break;
+			}
+		}
+		if (sharesLine) {
+			return clamped.map((edit) => ({ range: edit.range, text: edit.newText.replace(/\r?\n/g, eol) }));
+		}
+	}
+	const lineCount = model.getLineCount();
+	return clamped.flatMap((edit) => {
+		const range = edit.range;
 		// Extend to whole lines so line-based trimming is exact.
 		const full = new monaco.Range(range.startLineNumber, 1, range.endLineNumber, model.getLineMaxColumn(range.endLineNumber));
 		const before = model.getValueInRange(new monaco.Range(range.startLineNumber, 1, range.startLineNumber, range.startColumn));
 		const after = model.getValueInRange(new monaco.Range(range.endLineNumber, range.endColumn, range.endLineNumber, model.getLineMaxColumn(range.endLineNumber)));
-		const eol = model.getEOL();
 		const oldLines = model.getValueInRange(full).split(eol);
 		const newLines = (before + edit.newText.replace(/\r?\n/g, eol) + after).split(eol);
 		const trimmed = trimEdit(oldLines, newLines);
@@ -409,20 +551,28 @@ export function toMinimalEdits(model: monaco.editor.ITextModel, edits: { range: 
 		const startLine = full.startLineNumber + trimmed.startLine;
 		const endLine = full.startLineNumber + trimmed.endLine;
 		if (endLine < startLine) {
-			// Pure insertion before line `startLine`.
+			// Pure insertion before line `startLine`, or after the last line at EOF.
+			if (startLine > lineCount) {
+				const lastCol = model.getLineMaxColumn(lineCount);
+				return [{ range: new monaco.Range(lineCount, lastCol, lineCount, lastCol), text: eol + trimmed.lines.join(eol) }];
+			}
 			return [{ range: new monaco.Range(startLine, 1, startLine, 1), text: trimmed.lines.join(eol) + eol }];
 		}
 		if (!trimmed.lines.length) {
 			// Pure deletion of whole lines.
-			const next = endLine + 1 <= model.getLineCount() ? new monaco.Range(startLine, 1, endLine + 1, 1) : new monaco.Range(Math.max(1, startLine - 1), model.getLineMaxColumn(Math.max(1, startLine - 1)), endLine, model.getLineMaxColumn(endLine));
+			const next =
+				endLine + 1 <= lineCount
+					? new monaco.Range(startLine, 1, endLine + 1, 1)
+					: new monaco.Range(Math.max(1, startLine - 1), model.getLineMaxColumn(Math.max(1, startLine - 1)), endLine, model.getLineMaxColumn(endLine));
 			return [{ range: next, text: "" }];
 		}
 		return [{ range: new monaco.Range(startLine, 1, endLine, model.getLineMaxColumn(endLine)), text: trimmed.lines.join(eol) }];
 	});
 }
 
-export const session = new Session();
+export const session = new LspSession();
 
+const isFileModel = (model: monaco.editor.ITextModel) => model.uri.scheme === "file";
 const doc = (model: monaco.editor.ITextModel) => ({ textDocument: { uri: model.uri.toString() } });
 const quiet = <T>(work: Promise<T>, fallback: T) => work.catch(() => fallback);
 
@@ -442,6 +592,7 @@ export function registerProviders() {
 	monaco.languages.registerCompletionItemProvider("ssl", {
 		triggerCharacters: [":"],
 		async provideCompletionItems(model, position) {
+			if (!isFileModel(model)) return { suggestions: [] };
 			const result = await quiet(session.request("textDocument/completion", { ...doc(model), position: toPosition(position) }), null);
 			const items = (result?.items ?? result ?? []) as any[];
 			const word = model.getWordUntilPosition(position);
@@ -464,6 +615,7 @@ export function registerProviders() {
 	});
 	monaco.languages.registerHoverProvider("ssl", {
 		async provideHover(model, position) {
+			if (!isFileModel(model)) return null;
 			const hover = await quiet(session.request("textDocument/hover", { ...doc(model), position: toPosition(position) }), null);
 			if (!hover?.contents) return null;
 			const contents = (Array.isArray(hover.contents) ? hover.contents : [hover.contents]).map(markdown).filter(Boolean);
@@ -474,6 +626,7 @@ export function registerProviders() {
 		signatureHelpTriggerCharacters: ["(", ","],
 		signatureHelpRetriggerCharacters: [","],
 		async provideSignatureHelp(model, position) {
+			if (!isFileModel(model)) return null;
 			const help = await quiet(session.request("textDocument/signatureHelp", { ...doc(model), position: toPosition(position) }), null);
 			if (!help?.signatures?.length) return null;
 			return {
@@ -493,11 +646,13 @@ export function registerProviders() {
 	});
 	monaco.languages.registerDefinitionProvider("ssl", {
 		async provideDefinition(model, position) {
+			if (!isFileModel(model)) return [];
 			return locations(await quiet(session.request("textDocument/definition", { ...doc(model), position: toPosition(position) }), null));
 		},
 	});
 	monaco.languages.registerReferenceProvider("ssl", {
 		async provideReferences(model, position, context) {
+			if (!isFileModel(model)) return [];
 			return locations(
 				await quiet(session.request("textDocument/references", { ...doc(model), position: toPosition(position), context: { includeDeclaration: context.includeDeclaration } }), null),
 			);
@@ -505,10 +660,19 @@ export function registerProviders() {
 	});
 	monaco.languages.registerRenameProvider("ssl", {
 		async provideRenameEdits(model, position, newName) {
-			const edit = await session.request("textDocument/rename", { ...doc(model), position: toPosition(position), newName });
+			if (!isFileModel(model)) return { edits: [], rejectReason: "Save the file before renaming symbols." };
+			let edit: any;
+			try {
+				edit = await session.request("textDocument/rename", { ...doc(model), position: toPosition(position), newName });
+			} catch (err: any) {
+				return { edits: [], rejectReason: String(err?.message ?? "Rename failed.") };
+			}
 			const edits: monaco.languages.IWorkspaceTextEdit[] = [];
-			const changes: Record<string, any[]> = edit?.changes ?? {};
-			for (const change of edit?.documentChanges ?? []) changes[change.textDocument.uri] = [...(changes[change.textDocument.uri] ?? []), ...change.edits];
+			const changes: Record<string, any[]> = { ...(edit?.changes ?? {}) };
+			for (const change of edit?.documentChanges ?? []) {
+				if (!change?.textDocument?.uri || !Array.isArray(change.edits)) continue;
+				changes[change.textDocument.uri] = [...(changes[change.textDocument.uri] ?? []), ...change.edits];
+			}
 			for (const [uri, list] of Object.entries(changes)) {
 				await session.ensureModel(uri);
 				for (const e of list) edits.push({ resource: monaco.Uri.parse(uri), textEdit: { range: toRange(e.range), text: e.newText }, versionId: undefined });
@@ -516,17 +680,26 @@ export function registerProviders() {
 			return { edits };
 		},
 		async resolveRenameLocation(model, position) {
-			const result = await session.request("textDocument/prepareRename", { ...doc(model), position: toPosition(position) });
+			if (!isFileModel(model)) {
+				return { range: new monaco.Range(position.lineNumber, position.column, position.lineNumber, position.column), text: "", rejectReason: "Save the file before renaming symbols." };
+			}
+			let result: any;
+			try {
+				result = await session.request("textDocument/prepareRename", { ...doc(model), position: toPosition(position) });
+			} catch (err: any) {
+				return { range: new monaco.Range(position.lineNumber, position.column, position.lineNumber, position.column), text: "", rejectReason: String(err?.message ?? "Nothing to rename here.") };
+			}
 			if (!result) return { range: new monaco.Range(position.lineNumber, position.column, position.lineNumber, position.column), text: "", rejectReason: "Nothing to rename here." };
 			const range = toRange(result.range ?? result);
 			return { range, text: result.placeholder ?? model.getValueInRange(range) };
 		},
 	});
 	monaco.languages.registerDocumentSymbolProvider("ssl", {
-		provideDocumentSymbols: (model) => quiet(session.documentSymbols(model), []),
+		provideDocumentSymbols: (model) => (isFileModel(model) ? quiet(session.documentSymbols(model), []) : []),
 	});
 	monaco.languages.registerFoldingRangeProvider("ssl", {
 		async provideFoldingRanges(model) {
+			if (!isFileModel(model)) return [];
 			const folds = (await quiet(session.request("textDocument/foldingRange", doc(model)), null)) ?? [];
 			const kinds: Record<string, monaco.languages.FoldingRangeKind> = {
 				comment: monaco.languages.FoldingRangeKind.Comment,
@@ -538,24 +711,34 @@ export function registerProviders() {
 	});
 	monaco.languages.registerDocumentFormattingEditProvider("ssl", {
 		async provideDocumentFormattingEdits(model, options) {
-			const edits = await session.request("textDocument/formatting", { ...doc(model), options: { tabSize: options.tabSize, insertSpaces: options.insertSpaces } });
-			return toMinimalEdits(model, edits ?? []);
+			if (!isFileModel(model) || model.isDisposed()) return [];
+			const version = model.getVersionId();
+			const edits = await quiet(session.request("textDocument/formatting", { ...doc(model), options: { tabSize: options.tabSize, insertSpaces: options.insertSpaces } }), null);
+			if (!edits || model.isDisposed() || model.getVersionId() !== version) return [];
+			return toMinimalEdits(model, edits);
 		},
 	});
 	monaco.languages.registerDocumentRangeFormattingEditProvider("ssl", {
 		async provideDocumentRangeFormattingEdits(model, range, options) {
-			const edits = await session.request("textDocument/rangeFormatting", {
-				...doc(model),
-				range: toLspRange(range),
-				options: { tabSize: options.tabSize, insertSpaces: options.insertSpaces },
-			});
-			return toMinimalEdits(model, edits ?? []);
+			if (!isFileModel(model) || model.isDisposed()) return [];
+			const version = model.getVersionId();
+			const edits = await quiet(
+				session.request("textDocument/rangeFormatting", {
+					...doc(model),
+					range: toLspRange(range),
+					options: { tabSize: options.tabSize, insertSpaces: options.insertSpaces },
+				}),
+				null,
+			);
+			if (!edits || model.isDisposed() || model.getVersionId() !== version) return [];
+			return toMinimalEdits(model, edits);
 		},
 	});
 	monaco.languages.registerDocumentSemanticTokensProvider("ssl", {
 		onDidChange: onSemanticThemeChange,
 		getLegend: () => LEGEND,
 		async provideDocumentSemanticTokens(model) {
+			if (!isFileModel(model)) return null;
 			const result = await quiet(session.semanticTokens(model), null);
 			return result && { data: result };
 		},
@@ -563,6 +746,7 @@ export function registerProviders() {
 	});
 	monaco.languages.registerInlayHintsProvider("ssl", {
 		async provideInlayHints(model, range) {
+			if (!isFileModel(model)) return { hints: [], dispose() {} };
 			const hints = (await quiet(session.request("textDocument/inlayHint", { ...doc(model), range: toLspRange(range) }), null)) ?? [];
 			return {
 				hints: hints.map((h: any) => ({

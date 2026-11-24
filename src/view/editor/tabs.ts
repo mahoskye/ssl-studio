@@ -18,7 +18,7 @@ export function tabLabels(tabs: string[], root?: string | null): Map<string, str
 		}
 		const folder = relativeTo(root, dirName(path));
 		const where = root && (folder === "" || folder === ".") ? baseName(root) : folder.split(/[\\/]/).filter(Boolean).slice(-2).join("/");
-		labels.set(path, `${baseName(path)} · ${where}`);
+		labels.set(path, where ? `${baseName(path)} · ${where}` : baseName(path));
 	}
 	return labels;
 }

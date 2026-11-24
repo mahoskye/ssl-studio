@@ -172,9 +172,11 @@ export function CenterTabStrip(props: {
 											e.preventDefault();
 											e.stopPropagation();
 											middleClose.press(path);
-										} else {
+										} else if (e.button === 0) {
 											middleClose.cancel();
 											activateFile(path);
+										} else {
+											middleClose.cancel();
 										}
 									}}
 									onMouseLeave={() => middleClose.cancel(path)}
@@ -206,6 +208,18 @@ export function CenterTabStrip(props: {
 										<span class="pinned-dot" aria-hidden="true">
 											<span class="dot" />
 										</span>
+									</Show>
+									<Show when={group().pinned?.includes(path)}>
+										<button
+											class="pin"
+											tabindex={-1}
+											title="Pinned. Unpin"
+											aria-label={`Unpin ${displayName(path)}${state.dirty[path] ? " (unsaved changes)" : ""}`}
+											onMouseDown={(e) => e.button !== 1 && e.stopPropagation()}
+											onClick={() => togglePin(path, state.activeGroup)}
+										>
+											<span class="pin-mark" aria-hidden="true" />
+										</button>
 									</Show>
 									<button
 										class="close"

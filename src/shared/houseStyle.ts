@@ -15,8 +15,9 @@ export type SizeReport = { bytes: number; codeLines: number; historyEntries: num
 export type Limits = { bytes: number; codeLines: number; historyEntries: number };
 export type Level = "ok" | "near" | "over";
 
-/** Near means within 10% of a limit (for bytes and code lines). */
+/** Near means within 10% of a limit (for bytes and code lines). A limit of 0 (or non-positive/NaN) means off. */
 export function level(value: number, limit: number, nearShare = 0.9): Level {
+	if (!(limit > 0)) return "ok";
 	return value > limit ? "over" : value >= limit * nearShare ? "near" : "ok";
 }
 

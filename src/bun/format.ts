@@ -11,7 +11,7 @@
 // formatting exclusively (ADR 0003).
 
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import * as prettier from "prettier/standalone";
 import type { Options as PrettierOptions, Plugin } from "prettier";
 import * as pluginBabel from "prettier/plugins/babel";
@@ -28,6 +28,7 @@ import {
 	isSqlDialect,
 	type FormatDocumentRequest,
 	type FormatDocumentResult,
+	type SqlDialect,
 	type SqlKeywordCase,
 } from "../shared/format";
 
@@ -71,32 +72,62 @@ function pickPrettierOptions(raw: unknown): Record<string, unknown> {
 	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
 	const out: Record<string, unknown> = {};
 	for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-		if (PRETTIER_OPTION_KEYS.has(k) && v !== undefined) out[k] = v;
+		if (!PRETTIER_OPTION_KEYS.has(k) || v === undefined) continue;
+		if ((k === "tabWidth" || k === "printWidth") && (typeof v !== "number" || !Number.isFinite(v))) continue;
+		out[k] = v;
 	}
 	return out;
+}
+
+/** Strips YAML `#` comments only when outside single or double quotes. */
+function stripYamlComment(line: string): string {
+	let quote: '"' | "'" | null = null;
+	for (let i = 0; i < line.length; i++) {
+		const ch = line[i]!;
+		if (quote === '"') {
+			if (ch === "\\" && i + 1 < line.length) {
+				i++;
+				continue;
+			}
+			if (ch === '"') quote = null;
+		} else if (quote === "'") {
+			if (ch === "'" && line[i + 1] === "'") {
+				i++;
+				continue;
+			}
+			if (ch === "'") quote = null;
+		} else {
+			if (ch === '"' || ch === "'") quote = ch;
+			else if (ch === "#") return line.slice(0, i);
+		}
+	}
+	return line;
 }
 
 /**
  * Parses a JSON (or simple flat key: value YAML) .prettierrc file without executing JS.
  */
 function parseRcText(text: string): Record<string, unknown> | null {
-	const trimmed = text.trim();
+	const cleaned = text.startsWith("\uFEFF") ? text.slice(1) : text;
+	const trimmed = cleaned.trim();
 	if (!trimmed) return {};
 	try {
 		return pickPrettierOptions(JSON.parse(trimmed));
 	} catch {
-		// Fall through to simple key: value YAML parsing (covers typical .prettierrc YAML files).
+		// Fall through to simple top-level key: value YAML parsing (covers typical .prettierrc YAML files).
 	}
 	const out: Record<string, unknown> = {};
-	for (const rawLine of trimmed.split(/\r?\n/)) {
-		const line = rawLine.replace(/#.*$/, "").trim();
+	for (const rawLine of cleaned.split(/\r?\n/)) {
+		// Skip indented lines so YAML `overrides:` blocks never overwrite top-level options.
+		if (/^[ \t]/.test(rawLine)) continue;
+		const line = stripYamlComment(rawLine).trim();
 		if (!line) continue;
 		const match = line.match(/^([A-Za-z][A-Za-z0-9_]*)\s*:\s*(.+)$/);
 		if (!match) continue;
 		const key = match[1]!;
 		if (!PRETTIER_OPTION_KEYS.has(key)) continue;
-		let val: string = match[2]!.trim();
-		if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+		const val: string = match[2]!.trim();
+		if (val.length >= 2 && ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'")))) {
 			out[key] = val.slice(1, -1);
 		} else if (val === "true") {
 			out[key] = true;
@@ -111,19 +142,25 @@ function parseRcText(text: string): Record<string, unknown> | null {
 	return out;
 }
 
+const isWin = process.platform === "win32";
+const foldPath = (p: string) => (isWin ? p.toLowerCase() : p);
+const withSep = (p: string) => (p.endsWith(sep) || p.endsWith("/") || p.endsWith("\\") ? p : `${p}${sep}`);
+
 /**
  * Walks up from `filePath` to `workspaceRoot` looking for static Prettier config
  * (.prettierrc, .prettierrc.json, .prettierrc.yml, .prettierrc.yaml, or package.json#prettier).
  * Never executes arbitrary JS configs from untrusted workspaces.
  */
 export function loadProjectPrettierConfig(filePath: string, workspaceRoot?: string | null): Record<string, unknown> {
-	if (!filePath || filePath.startsWith("untitled:")) return {};
+	if (!filePath || filePath.startsWith("untitled:") || !isAbsolute(filePath)) return {};
 	const absFile = resolve(filePath);
 	const root = workspaceRoot ? resolve(workspaceRoot) : null;
-	if (root && absFile !== root && !absFile.startsWith(root + "/") && !absFile.startsWith(root + "\\")) {
+	const foldedFile = foldPath(absFile);
+	const foldedRoot = root ? foldPath(root) : null;
+	if (foldedRoot && foldedFile !== foldedRoot && !foldedFile.startsWith(withSep(foldedRoot))) {
 		return {};
 	}
-	let dir = dirname(absFile);
+	let dir = foldedRoot && foldedFile === foldedRoot ? absFile : dirname(absFile);
 	for (let depth = 0; depth < 32; depth++) {
 		for (const name of [".prettierrc.json", ".prettierrc", ".prettierrc.yml", ".prettierrc.yaml"]) {
 			const candidate = join(dir, name);
@@ -147,7 +184,7 @@ export function loadProjectPrettierConfig(filePath: string, workspaceRoot?: stri
 				// Ignore invalid package.json.
 			}
 		}
-		if (root && dir === root) break;
+		if (foldedRoot && foldPath(dir) === foldedRoot) break;
 		const parent = dirname(dir);
 		if (parent === dir) break;
 		dir = parent;
@@ -196,6 +233,120 @@ function conciseError(err: unknown): string {
 	return firstLine ?? "Could not format this document.";
 }
 
+/**
+ * Fast XML tag-balance guard run before `@prettier/plugin-xml`, which otherwise silently
+ * drops or rewrites mismatched closing tags on malformed XML.
+ */
+function checkXmlTagBalance(text: string): string | null {
+	const stack: string[] = [];
+	const len = text.length;
+	let i = 0;
+	while (i < len) {
+		const lt = text.indexOf("<", i);
+		if (lt < 0) break;
+		i = lt;
+		if (text.startsWith("<!--", i)) {
+			const end = text.indexOf("-->", i + 4);
+			if (end < 0) return "Unclosed XML comment.";
+			i = end + 3;
+			continue;
+		}
+		if (text.startsWith("<![CDATA[", i)) {
+			const end = text.indexOf("]]>", i + 9);
+			if (end < 0) return "Unclosed CDATA section.";
+			i = end + 3;
+			continue;
+		}
+		if (text.startsWith("<?", i)) {
+			const end = text.indexOf("?>", i + 2);
+			if (end < 0) return "Unclosed XML processing instruction.";
+			i = end + 2;
+			continue;
+		}
+		if (text.startsWith("<!", i)) {
+			let j = i + 2;
+			let quote: string | null = null;
+			let bracketDepth = 0;
+			let closed = false;
+			while (j < len) {
+				if (!quote && bracketDepth > 0 && text.startsWith("<!--", j)) {
+					const cEnd = text.indexOf("-->", j + 4);
+					if (cEnd < 0) return "Unclosed XML comment in declaration.";
+					j = cEnd + 3;
+					continue;
+				}
+				const ch = text[j]!;
+				if (quote) {
+					if (ch === quote) quote = null;
+					j++;
+					continue;
+				}
+				if (ch === '"' || ch === "'") {
+					quote = ch;
+				} else if (ch === "[") {
+					bracketDepth++;
+				} else if (ch === "]" && bracketDepth > 0) {
+					bracketDepth--;
+				} else if (ch === ">" && bracketDepth === 0) {
+					j++;
+					closed = true;
+					break;
+				}
+				j++;
+			}
+			if (!closed) return "Unclosed XML declaration.";
+			i = j;
+			continue;
+		}
+		if (text.startsWith("</", i)) {
+			let j = i + 2;
+			while (j < len && !/[\s>]/.test(text[j]!)) j++;
+			const name = text.slice(i + 2, j);
+			while (j < len && /\s/.test(text[j]!)) j++;
+			if (!name || text[j] !== ">") return `Malformed closing tag </${name}>.`;
+			if (stack.length === 0) return `Unexpected closing tag </${name}> with no matching opening tag.`;
+			const expected = stack.pop()!;
+			if (expected !== name) return `Mismatched closing tag </${name}> (expected </${expected}>).`;
+			i = j + 1;
+			continue;
+		}
+		// Opening or self-closing tag: `<name ...>` / `<name .../>`
+		let j = i + 1;
+		while (j < len && !/[\s/>]/.test(text[j]!)) j++;
+		const name = text.slice(i + 1, j);
+		if (!name) return "Malformed XML opening tag.";
+		let quote: string | null = null;
+		let selfClosing = false;
+		let closed = false;
+		while (j < len) {
+			const ch = text[j]!;
+			if (quote) {
+				if (ch === quote) quote = null;
+				j++;
+				continue;
+			}
+			if (ch === '"' || ch === "'") {
+				quote = ch;
+				j++;
+				continue;
+			}
+			if (ch === "<") return `Unclosed tag <${name}>.`;
+			if (ch === ">") {
+				selfClosing = j > i + 1 && text[j - 1] === "/";
+				j++;
+				closed = true;
+				break;
+			}
+			j++;
+		}
+		if (!closed || quote !== null) return `Unclosed tag <${name}>.`;
+		if (!selfClosing) stack.push(name);
+		i = j;
+	}
+	if (stack.length > 0) return `Unclosed XML tag <${stack[stack.length - 1]}>.`;
+	return null;
+}
+
 export async function formatDocument(
 	req: FormatDocumentRequest,
 	workspaceRoot?: string | null,
@@ -215,18 +366,25 @@ export async function formatDocument(
 	}
 
 	const eol = text.includes("\r\n") ? "\r\n" : "\n";
-	const tabWidth = Math.max(1, Math.min(16, Math.round(req.tabSize ?? 4)));
+	const rawTabSize = typeof req.tabSize === "number" && Number.isFinite(req.tabSize) ? req.tabSize : 4;
+	const tabWidth = Math.max(1, Math.min(16, Math.round(rawTabSize)));
 	const useTabs = req.insertSpaces === false;
-	const printWidth = Math.max(40, Math.min(240, Math.round(req.printWidth ?? 90)));
+	const rawPrintWidth = typeof req.printWidth === "number" && Number.isFinite(req.printWidth) ? req.printWidth : 90;
+	const printWidth = Math.max(40, Math.min(240, Math.round(rawPrintWidth)));
 
-	if (languageId === "sql") {
+	if (languageId === "sql" || languageId === "pgsql" || languageId === "mysql") {
 		if (!text.trim()) {
 			return { ok: true, text, changed: false, formatter: "sql-formatter" };
 		}
-		const language: SqlLanguage = isSqlDialect(req.sqlDialect) ? req.sqlDialect : DEFAULT_SQL_DIALECT;
+		const defaultDialect: SqlDialect =
+			languageId === "pgsql" ? "postgresql" : languageId === "mysql" ? "mysql" : DEFAULT_SQL_DIALECT;
+		const language: SqlLanguage = isSqlDialect(req.sqlDialect) ? req.sqlDialect : defaultDialect;
 		const keywordCase = normalizeKeywordCase(req.sqlKeywordCase);
 		const rc = loadProjectPrettierConfig(path, workspaceRoot);
-		const rcTabWidth = typeof rc.tabWidth === "number" ? Math.max(1, Math.min(16, Math.round(rc.tabWidth))) : tabWidth;
+		const rcTabWidth =
+			typeof rc.tabWidth === "number" && Number.isFinite(rc.tabWidth)
+				? Math.max(1, Math.min(16, Math.round(rc.tabWidth)))
+				: tabWidth;
 		const rcUseTabs = typeof rc.useTabs === "boolean" ? rc.useTabs : useTabs;
 		try {
 			const formattedBody = formatSql(text, {
@@ -253,6 +411,11 @@ export async function formatDocument(
 		return { ok: true, text, changed: false, formatter: "prettier" };
 	}
 
+	if (parser === "xml") {
+		const xmlErr = checkXmlTagBalance(text);
+		if (xmlErr) return { ok: false, error: xmlErr };
+	}
+
 	const rc = loadProjectPrettierConfig(path, workspaceRoot);
 	const options: PrettierOptions & Record<string, unknown> = {
 		parser,
@@ -277,12 +440,14 @@ export async function formatDocument(
 		// Preserve leading Templater metadata comment (`<!-- template: ... -->`) before YAML frontmatter
 		// so Prettier still recognizes line 1 `---` as YAML frontmatter instead of corrupting it as Markdown.
 		if (parser === "markdown") {
-			const tplMatch = /^(\uFEFF?[ \t]*<!--\s*template\b[\s\S]*?-->[ \t]*(?:\r?\n[ \t]*)*\r?\n)(---\r?\n)/.exec(text);
+			const tplMatch = /^(\uFEFF?[ \t]*<!--\s*template\b[\s\S]*?-->[ \t]*(?:\r?\n[ \t]*)*\r?\n)(---[ \t]*\r?\n)/i.exec(text);
 			if (tplMatch) {
 				const header = tplMatch[1]!;
 				const rest = text.slice(header.length);
 				const formattedRest = await prettier.format(rest, options);
-				const cleanHeader = header.replace(/(?:\r?\n[ \t]*)+$/, eol);
+				const effectiveEol =
+					options.endOfLine === "crlf" ? "\r\n" : options.endOfLine === "cr" ? "\r" : options.endOfLine === "lf" ? "\n" : eol;
+				const cleanHeader = header.replace(/(?:\r?\n[ \t]*)+$/, "\n").replace(/\r?\n/g, effectiveEol);
 				const formatted = `${cleanHeader}${formattedRest}`;
 				return { ok: true, text: formatted, changed: formatted !== text, formatter: "prettier" };
 			}

@@ -59,6 +59,6 @@ test("the server's edits are applied to text that is in no editor", () => {
 	// A whole-document replacement, whose end is past the last line.
 	expect(applyTextEdits(text, [{ range: { start: at(0, 0), end: at(9, 0) }, newText: "x;\n" }])).toBe("x;\n");
 	// A column past the end of its line stops at the line's end.
-	expect(applyTextEdits("ab\ncd", [{ range: { start: at(0, 99), end: at(0, 99) }, newText: "!" }])).toBe("ab\n!cd");
+	expect(applyTextEdits("ab\ncd", [{ range: { start: at(0, 99), end: at(0, 99) }, newText: "!" }])).toBe("ab!\ncd");
 	expect(applyTextEdits(text, [])).toBe(text);
 });

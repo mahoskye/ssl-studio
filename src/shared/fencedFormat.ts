@@ -3,7 +3,7 @@
 // SSL (via starlims-lsp), JavaScript/TypeScript, HTML, CSS/SCSS/Less, XML/XFD,
 // JSON/JSONC, and YAML without disturbing surrounding prose or markers.
 
-import { isFenceClose, normalizeFenceLang, parseFenceOpen } from "./codeTokens";
+import { isFenceClose, normalizeFenceLang, parseFenceOpen, scanQuotePrefix } from "./codeTokens";
 import { canFormatNonSsl, type SqlDialect } from "./format";
 import { frontMatter } from "./frontMatter";
 
@@ -97,11 +97,11 @@ function openingLinePrefix(line: string, quotePrefix: string): string {
 }
 
 /** Strips a blockquoted or list-indented fence's prefix from one body line. */
-function stripFenceLinePrefix(line: string, quotePrefix: string, indent: string): string {
+function stripFenceLinePrefix(line: string, quoteDepth: number, indent: string): string {
 	let rest = line;
-	if (quotePrefix.length > 0) {
-		const qMatch = /^(?:[ \t]*>[ \t]?)+/.exec(rest);
-		if (qMatch) rest = rest.slice(qMatch[0].length);
+	if (quoteDepth > 0) {
+		const q = scanQuotePrefix(rest, quoteDepth);
+		if (q.offset > 0) rest = rest.slice(q.offset);
 	}
 	if (indent.length > 0 && rest.startsWith(indent)) {
 		rest = rest.slice(indent.length);
@@ -117,8 +117,11 @@ function stripFenceLinePrefix(line: string, quotePrefix: string, indent: string)
 /** Finds every fenced code block in a Markdown document, skipping YAML frontmatter. */
 export function findMarkdownCodeFences(text: string): MarkdownCodeFence[] {
 	const lines = scanLines(text);
+	// Exclude the synthetic trailing empty line produced after a final `\n` so unclosed
+	// fences at EOF never include (and on replacement, delete) the document's trailing newline.
+	const lineCount = text.endsWith("\n") && lines.length > 0 ? lines.length - 1 : lines.length;
 	const fm = frontMatter(text);
-	const startIdx = fm.lines > 0 ? Math.min(fm.lines, lines.length) : 0;
+	const startIdx = fm.lines > 0 ? Math.min(fm.lines, lineCount) : 0;
 
 	const out: MarkdownCodeFence[] = [];
 	let active: {
@@ -126,18 +129,19 @@ export function findMarkdownCodeFences(text: string): MarkdownCodeFence[] {
 		fenceChar: "`" | "~";
 		fenceLen: number;
 		quotePrefix: string;
+		quoteDepth: number;
 		indent: string;
 		linePrefix: string;
 		rawLang: string;
 	} | null = null;
 
-	const finish = (closeIdx: number | null) => {
+	const finish = (closeIdx: number | null, implicitEndIdx?: number) => {
 		if (!active) return;
 		const bodyStartIdx = active.openIdx + 1;
-		const bodyEndIdx = closeIdx !== null ? closeIdx - 1 : lines.length - 1;
+		const bodyEndIdx = closeIdx !== null ? closeIdx - 1 : (implicitEndIdx ?? lineCount - 1);
 		const bodyLines: string[] = [];
 		for (let i = bodyStartIdx; i <= bodyEndIdx; i++) {
-			bodyLines.push(stripFenceLinePrefix(lines[i]!.text, active.quotePrefix, active.indent));
+			bodyLines.push(stripFenceLinePrefix(lines[i]!.text, active.quoteDepth, active.indent));
 		}
 		const hasBody = bodyStartIdx <= bodyEndIdx;
 		const bodyFrom = hasBody ? lines[bodyStartIdx]!.from : lines[active.openIdx]!.to;
@@ -159,28 +163,36 @@ export function findMarkdownCodeFences(text: string): MarkdownCodeFence[] {
 		active = null;
 	};
 
-	for (let i = startIdx; i < lines.length; i++) {
+	for (let i = startIdx; i < lineCount; i++) {
 		const line = lines[i]!.text;
-		if (!active) {
-			const open = parseFenceOpen(line);
-			if (open) {
-				const linePrefix = openingLinePrefix(line, open.quotePrefix);
-				const indent = linePrefix.slice(open.quotePrefix.length);
-				active = {
-					openIdx: i,
-					fenceChar: open.fenceChar,
-					fenceLen: open.fenceLen,
-					quotePrefix: open.quotePrefix,
-					indent,
-					linePrefix,
-					rawLang: open.lang,
-				};
+		if (active) {
+			if (active.quoteDepth > 0 && scanQuotePrefix(line, active.quoteDepth).depth < active.quoteDepth) {
+				// Leaving the enclosing blockquote closes the fence before this line without consuming it.
+				finish(null, i - 1);
+			} else if (isFenceClose(line, active.fenceChar, active.fenceLen, active.quoteDepth, active.indent)) {
+				finish(i);
+				continue;
+			} else {
+				continue;
 			}
-		} else if (isFenceClose(line, active.fenceChar, active.fenceLen, active.quotePrefix.length > 0)) {
-			finish(i);
+		}
+		const open = parseFenceOpen(line);
+		if (open) {
+			const linePrefix = openingLinePrefix(line, open.quotePrefix);
+			const indent = linePrefix.slice(open.quotePrefix.length);
+			active = {
+				openIdx: i,
+				fenceChar: open.fenceChar,
+				fenceLen: open.fenceLen,
+				quotePrefix: open.quotePrefix,
+				quoteDepth: scanQuotePrefix(open.quotePrefix).depth,
+				indent,
+				linePrefix,
+				rawLang: open.lang,
+			};
 		}
 	}
-	if (active) finish(null);
+	if (active) finish(null, lineCount - 1);
 	return out;
 }
 

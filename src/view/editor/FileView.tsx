@@ -4,19 +4,34 @@
 // type into, so nothing here can damage the file.
 import { createEffect, createResource, createSignal, on, Show } from "solid-js";
 import { sizeText } from "../../shared/fileKind";
-import { baseName, relativeTo } from "../../shared/paths";
+import { baseName, isInside, relativeTo } from "../../shared/paths";
 import { backend } from "../backend";
 import { Icon } from "../Icon";
 import { documents, notify, state } from "../state";
 
 const ZOOM_STEPS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4] as const;
 
+/** Builds a Markdown image embed (`![alt](/path)`), escaping `]` in alt text and keeping outside-workspace paths safe. */
+export function markdownEmbedFor(root: string | null | undefined, path: string): string {
+	const fileName = baseName(path);
+	const rel = (root && isInside(root, path) ? relativeTo(root, path).replace(/\\/g, "/") : "") || fileName;
+	const encoded = rel
+		.split("/")
+		.map((seg) => encodeURIComponent(seg))
+		.join("/");
+	const alt = (fileName.replace(/\.[^.]+$/, "") || fileName).replace(/\]/g, "\\]");
+	return `![${alt}](/${encoded})`;
+}
+
 export function FileView(props: { path: string }) {
-	const file = () => documents.get(props.path)?.binary;
+	const file = () => {
+		void state.kindVersion;
+		return documents.get(props.path)?.binary;
+	};
 	const name = () => baseName(props.path);
 	const [picture] = createResource(
-		() => (file()?.image ? props.path : false),
-		(path) => backend.image(path),
+		() => (file()?.image ? ([props.path, state.kindVersion] as const) : false),
+		([path]) => backend.image(path),
 	);
 	/** The picture's own size in pixels, known once it is drawn. */
 	const [pixels, setPixels] = createSignal("");
@@ -56,14 +71,7 @@ export function FileView(props: { path: string }) {
 		void import("../commands").then((m) => m.copyText(props.path, "Copied file path."));
 	};
 	const copyMarkdownEmbed = () => {
-		const root = state.workspace?.root;
-		const rel = root ? relativeTo(root, props.path).replace(/\\/g, "/") : name();
-		const encoded = rel
-			.split("/")
-			.map((seg) => encodeURIComponent(seg))
-			.join("/");
-		const alt = name().replace(/\.[^.]+$/, "");
-		const embed = `![${alt}](/${encoded})`;
+		const embed = markdownEmbedFor(state.workspace?.root, props.path);
 		void import("../commands").then((m) => m.copyText(embed, `Copied Markdown embed: ${embed}`));
 	};
 

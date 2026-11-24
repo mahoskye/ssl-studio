@@ -96,42 +96,85 @@ export type FenceOpen = {
 	lang: string;
 };
 
-const FENCE_OPEN_RE = /^((?:[ \t]*>[ \t]?)*)[ \t]*(`{3,}|~{3,})[ \t]*([^\s`~]*)/;
+/** Linearly scans leading blockquote markers (`>` with optional surrounding spaces/tabs), avoiding regex backtracking. */
+export function scanQuotePrefix(line: string, maxDepth = Infinity): { prefix: string; depth: number; offset: number } {
+	let i = 0;
+	let depth = 0;
+	while (depth < maxDepth && i < line.length) {
+		let j = i;
+		while (j < line.length && (line[j] === " " || line[j] === "\t")) j++;
+		if (line[j] !== ">") break;
+		j++;
+		if (j < line.length && (line[j] === " " || line[j] === "\t")) j++;
+		i = j;
+		depth++;
+	}
+	return { prefix: line.slice(0, i), depth, offset: i };
+}
+
+const FENCE_OPEN_REST_RE = /^[ \t]*(`{3,}|~{3,})[ \t]*(\S*)/;
 
 /** Parses an opening fenced code line (supporting top-level, list-indented, and blockquoted fences). */
 export function parseFenceOpen(line: string): FenceOpen | null {
-	const match = FENCE_OPEN_RE.exec(line);
+	const { prefix: quotePrefix, offset } = scanQuotePrefix(line);
+	const rest = line.slice(offset);
+	const match = FENCE_OPEN_REST_RE.exec(rest);
 	if (!match) return null;
-	const quotePrefix = match[1] ?? "";
-	const fence = match[2]!;
+	const fence = match[1]!;
 	const fenceChar = fence[0] as "`" | "~";
-	// Per CommonMark, a backtick fence's info string cannot contain backticks.
-	if (fenceChar === "`" && line.slice(match[0].length).includes("`")) return null;
+	const lang = match[2] ?? "";
+	// Per CommonMark, a backtick fence's info string cannot contain backticks anywhere on the opening line.
+	if (fenceChar === "`" && (lang.includes("`") || rest.slice(match[0].length).includes("`"))) return null;
 	return {
 		quotePrefix,
 		fence,
 		fenceChar,
 		fenceLen: fence.length,
-		lang: match[3] ?? "",
+		lang,
 	};
 }
 
-/** True when `line` closes a fence opened with `fenceChar` of length `fenceLen`. */
-export function isFenceClose(line: string, fenceChar: "`" | "~", fenceLen: number, quoted: boolean): boolean {
-	const rest = quoted ? line.replace(/^(?:[ \t]*>[ \t]?)+/, "") : line;
-	const trimmed = rest.trim();
-	if (trimmed.length < fenceLen) return false;
-	for (let i = 0; i < trimmed.length; i++) {
-		if (trimmed[i] !== fenceChar) return false;
+/**
+ * True when `line` closes a fence opened with `fenceChar` of length `fenceLen`.
+ * `quoted` may be an exact blockquote nesting depth (`number`) or a `boolean` for legacy callers.
+ * Leading indentation after the container prefix is capped at 0..3 spaces per CommonMark.
+ */
+export function isFenceClose(
+	line: string,
+	fenceChar: "`" | "~",
+	fenceLen: number,
+	quoted: boolean | number,
+	containerIndent = "",
+): boolean {
+	let rest = line;
+	if (typeof quoted === "number") {
+		if (quoted > 0) {
+			const q = scanQuotePrefix(line, quoted);
+			if (q.depth < quoted) return false;
+			rest = line.slice(q.offset);
+		}
+	} else if (quoted) {
+		const q = scanQuotePrefix(line);
+		if (q.depth === 0) return false;
+		rest = line.slice(q.offset);
 	}
-	return true;
+	if (containerIndent && rest.startsWith(containerIndent)) {
+		rest = rest.slice(containerIndent.length);
+	}
+	let spaces = 0;
+	while (spaces < rest.length && rest[spaces] === " ") spaces++;
+	if (spaces > 3) return false;
+	let i = spaces;
+	while (i < rest.length && rest[i] === fenceChar) i++;
+	if (i - spaces < fenceLen) return false;
+	while (i < rest.length && (rest[i] === " " || rest[i] === "\t" || rest[i] === "\r")) i++;
+	return i === rest.length;
 }
 
 /** Strips a leading blockquote prefix from a code line only when its enclosing fence is quoted. */
-export function stripQuotePrefix(line: string, quoted: boolean): { text: string; offset: number } {
+export function stripQuotePrefix(line: string, quoted: boolean | number): { text: string; offset: number } {
 	if (!quoted) return { text: line, offset: 0 };
-	const m = /^(?:[ \t]*>[ \t]?)+/.exec(line);
-	const offset = m ? m[0].length : 0;
+	const { offset } = typeof quoted === "number" ? scanQuotePrefix(line, quoted) : scanQuotePrefix(line);
 	return { text: line.slice(offset), offset };
 }
 

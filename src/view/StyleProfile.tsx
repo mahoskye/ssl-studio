@@ -2,11 +2,10 @@
 // or per workspace, with the house preset (decisions 0002, 0005, 0006).
 import { Icon } from "./Icon";
 import { createEffect, createResource, createSignal, createUniqueId, For, Show } from "solid-js";
-import { getPath, SERVER_DEFAULTS, RULE_LEVELS, SECTIONS, setPath, type Field } from "../shared/styleProfile";
+import { getPath, HOUSE_STYLE, SERVER_DEFAULTS, RULE_LEVELS, SECTIONS, setPath, type Field, type PathKey } from "../shared/styleProfile";
 import { backend } from "./backend";
 import { choose } from "./dialogs";
 import { diagnostics, session } from "./lsp/session";
-import { applyTextEdits, type TextEdit } from "./lsp/edits";
 import { monaco } from "./editor/monaco";
 import { Modal } from "./modal";
 import { loadSettings, notify, state } from "./state";
@@ -33,32 +32,35 @@ sText:=sText+aRows[nIndex][1]+chr(13);
 :ENDPROC;
 `;
 
-/** The sample as the language server formats it now, with the profile in force. */
-async function formatSample(root: string): Promise<string> {
-	const uri = monaco.Uri.file(`${root}/.ssl-studio/style-preview.ssl`).toString();
-	session.client.notify("textDocument/didOpen", { textDocument: { uri, languageId: "ssl", version: 1, text: SAMPLE } });
-	try {
-		const edits = (await session.request("textDocument/formatting", { textDocument: { uri }, options: { tabSize: 4, insertSpaces: false } })) as TextEdit[] | null;
-		return applyTextEdits(SAMPLE, edits ?? []);
-	} finally {
-		session.client.notify("textDocument/didClose", { textDocument: { uri } });
-	}
-}
+type LayersState = {
+	user: Record<string, any>;
+	workspace: Record<string, any>;
+	userPreset: "house" | "server" | undefined;
+	workspacePreset: "house" | "server" | undefined;
+};
 
 const [open, setOpen] = createSignal(false);
 export const openStyleProfile = () => setOpen(true);
 
 export function StyleProfile() {
 	const [scope, setScope] = createSignal<"user" | "workspace">("user");
-	const [layers, setLayers] = createSignal<{ user: any; workspace: any }>({ user: {}, workspace: {} });
+	const [layers, setLayers] = createSignal<LayersState>({ user: {}, workspace: {}, userPreset: undefined, workspacePreset: undefined });
 	/** Why the settings could not be read: said in the dialog, not swallowed. */
 	const [loadError, setLoadError] = createSignal("");
 	const titleId = createUniqueId();
 	const presetId = createUniqueId();
+	let writeChain: Promise<void> = Promise.resolve();
+	let pendingWrites = 0;
+
 	const reload = async () => {
 		try {
 			const s = await backend.settings();
-			setLayers({ user: s.user.ssl ?? {}, workspace: s.workspace.ssl ?? {} });
+			setLayers({
+				user: s.user.ssl ?? {},
+				workspace: s.workspace.ssl ?? {},
+				userPreset: s.user.stylePreset,
+				workspacePreset: s.workspace.stylePreset,
+			});
 			setLoadError("");
 		} catch (e: any) {
 			setLoadError(String(e?.message ?? e));
@@ -66,60 +68,176 @@ export function StyleProfile() {
 	};
 	createEffect(() => open() && void reload());
 	const current = () => layers()[scope()];
+
+	const previewTabSize = () => {
+		const raw = Number(getPath(state.settings.ssl, "format.indentSize") ?? SERVER_DEFAULTS.format.indentSize);
+		return Number.isFinite(raw) ? Math.max(1, Math.min(8, Math.round(raw))) : SERVER_DEFAULTS.format.indentSize;
+	};
+	const previewInsertSpaces = () => (getPath(state.settings.ssl, "format.indentStyle") ?? SERVER_DEFAULTS.format.indentStyle) === "space";
+
 	// What the profile does, shown: the sample is formatted again whenever a setting changes. The wait lets the
 	// change reach the server first (App sends it when the settings change).
 	const [preview] = createResource(
-		() => open() && state.lsp.state === "running" && state.workspace && ([state.workspace.root, JSON.stringify(state.settings.ssl ?? {}), state.settings.theme, state.settings.themeMaterial ?? ""] as const),
-		async ([root]) => {
+		() =>
+			open() &&
+			state.lsp.state === "running" &&
+			state.workspace &&
+			([JSON.stringify(state.settings.ssl ?? {}), state.settings.theme, state.settings.themeMaterial ?? "", previewTabSize(), previewInsertSpaces()] as const),
+		async ([, , , tabSize, insertSpaces]) => {
 			await new Promise((done) => setTimeout(done, 150));
 			try {
-				return { html: await monaco.editor.colorize(await formatSample(root), "ssl", { tabSize: 4 }), error: "" };
+				const formatted = await session.formatText(SAMPLE, { tabSize, insertSpaces });
+				return { html: await monaco.editor.colorize(formatted, "ssl", { tabSize }), error: "" };
 			} catch (e: any) {
 				return { html: "", error: String(e?.message ?? e) };
 			}
 		},
 	);
-	const write = async (ssl: any) => {
-		try {
-			await backend.saveSettings(scope(), { ssl });
-			await reload();
-			await loadSettings();
-		} catch (e: any) {
-			notify(String(e?.message ?? e), "error");
-		}
+
+	// Serialize writes and apply optimistic updates to `layers()` so rapid clicks chain cleanly instead of overwriting each other.
+	const enqueueSave = (targetScope: "user" | "workspace", patch: Record<string, unknown>) => {
+		pendingWrites++;
+		const task = writeChain.then(async () => {
+			try {
+				await backend.saveSettings(targetScope, patch);
+			} catch (e: any) {
+				notify(String(e?.message ?? e), "error");
+			} finally {
+				pendingWrites--;
+				if (pendingWrites === 0) {
+					await Promise.all([reload(), loadSettings()]);
+				}
+			}
+		});
+		writeChain = task.catch(() => {});
+		return task;
 	};
-	const preset = async (stylePreset: "house" | "server") => {
-		try {
-			await backend.saveSettings(scope(), { stylePreset });
-			await loadSettings();
-		} catch (e: any) {
-			notify(String(e?.message ?? e), "error");
-		}
+
+	const set = (path: PathKey, value: unknown) => {
+		const targetScope = scope();
+		const nextSsl = setPath(layers()[targetScope], path, value);
+		setLayers((prev) => ({ ...prev, [targetScope]: nextSsl }));
+		void enqueueSave(targetScope, { ssl: nextSsl });
 	};
+
+	const preset = (stylePreset: "house" | "server") => {
+		const targetScope = scope();
+		setLayers((prev) => ({
+			...prev,
+			...(targetScope === "user" ? { userPreset: stylePreset } : { workspacePreset: stylePreset }),
+		}));
+		void enqueueSave(targetScope, { stylePreset });
+	};
+
 	const whose = () => (scope() === "user" ? "my" : "this project's");
 	const clearAll = async () => {
-		const answer = await choose(`Clear all of ${whose()} overrides? Every value goes back to what it inherits, and this cannot be undone.`, ["Clear overrides"], { danger: "Clear overrides" });
-		if (answer) await write({});
+		const targetScope = scope();
+		const label = targetScope === "user" ? "my" : "this project's";
+		const answer = await choose(`Clear all of ${label} overrides? Every value goes back to what it inherits, and this cannot be undone.`, ["Clear overrides"], { danger: "Clear overrides" });
+		if (!answer) return;
+		setLayers((prev) => ({ ...prev, [targetScope]: {} }));
+		await enqueueSave(targetScope, { ssl: {} });
 	};
-	const set = (path: string, value: unknown) => void write(setPath(current(), path, value));
-	const effective = (path: string) => getPath(state.settings.ssl, path) ?? getPath(SERVER_DEFAULTS, path);
+
+	const userBaseStyle = () => ((layers().userPreset ?? "house") === "server" ? {} : HOUSE_STYLE);
+	const effectiveBaseStyle = () => ((layers().workspacePreset ?? state.settings.stylePreset) === "server" ? {} : HOUSE_STYLE);
+
+	/** Displayed value for the selected scope (`user`: baseStyle + user; `workspace`: full effective). */
+	const displayed = (path: PathKey) => {
+		if (scope() === "user") {
+			return getPath(layers().user, path) ?? getPath(userBaseStyle(), path) ?? getPath(SERVER_DEFAULTS, path);
+		}
+		return getPath(layers().workspace, path) ?? getPath(layers().user, path) ?? getPath(effectiveBaseStyle(), path) ?? getPath(state.settings.ssl, path) ?? getPath(SERVER_DEFAULTS, path);
+	};
+
+	/** Non-undefined when viewing user scope and the open workspace overrides this path. */
+	const workspaceOverride = (path: PathKey) => (scope() === "user" && state.workspace ? getPath(layers().workspace, path) : undefined);
+
+	const displayedRule = (rule: string): string => {
+		const path = ["diagnostics", "rules", rule] as const;
+		if (scope() === "user") {
+			return getPath(layers().user, path) ?? getPath(userBaseStyle(), path) ?? "default";
+		}
+		return getPath(layers().workspace, path) ?? getPath(layers().user, path) ?? getPath(effectiveBaseStyle(), path) ?? getPath(state.settings.ssl, path) ?? "default";
+	};
+
+	const inheritedRule = (rule: string): string | undefined => {
+		const path = ["diagnostics", "rules", rule] as const;
+		if (scope() === "workspace") {
+			return getPath(layers().user, path) ?? getPath(effectiveBaseStyle(), path);
+		}
+		return getPath(userBaseStyle(), path);
+	};
+
+	const setRule = (rule: string, val: string) => {
+		const path = ["diagnostics", "rules", rule] as const;
+		if (val === "default") {
+			const inherited = inheritedRule(rule);
+			// Write explicit "default" when a lower layer (such as HOUSE_STYLE) sets a non-default level,
+			// so resetting a rule doesn't silently snap back to "off".
+			set(path, inherited && inherited !== "default" ? "default" : undefined);
+		} else {
+			set(path, val);
+		}
+	};
+
 	const rules = () => {
-		const seen = new Set<string>(Object.keys(getPath(state.settings.ssl, "diagnostics.rules") ?? {}));
+		const seen = new Set<string>();
+		for (const src of [state.settings.ssl, layers().user, layers().workspace, userBaseStyle()]) {
+			for (const k of Object.keys(getPath(src, ["diagnostics", "rules"]) ?? {})) seen.add(k);
+		}
 		for (const list of Object.values(diagnostics)) for (const d of list ?? []) if (d.code) seen.add(d.code);
 		return [...seen].sort();
 	};
+
+	const commitNumber = (el: HTMLInputElement, field: Extract<Field, { kind: "number" }>) => {
+		const raw = el.value.trim();
+		if (raw === "") {
+			set(field.path, undefined);
+			return;
+		}
+		const parsed = Number(raw);
+		if (!Number.isFinite(parsed)) {
+			el.value = String(displayed(field.path) ?? "");
+			return;
+		}
+		let clamped = Math.round(parsed);
+		if (field.min !== undefined) clamped = Math.max(field.min, clamped);
+		if (field.max !== undefined) clamped = Math.min(field.max, clamped);
+		el.value = String(clamped);
+		set(field.path, clamped);
+	};
+
 	const Input = (props: { field: Field }) => {
 		const f = props.field;
 		const own = () => getPath(current(), f.path) !== undefined;
+		const wsOverride = () => workspaceOverride(f.path);
 		return (
-			<label class="profile-field" classList={{ own: own() }} title={own() ? `Set in ${scope()} settings` : "Inherited"}>
-				<span>{f.label}</span>
+			<label
+				class="profile-field"
+				classList={{ own: own() }}
+				title={wsOverride() !== undefined ? `Overridden in this project (${String(wsOverride())})` : own() ? `Set in ${scope()} settings` : "Inherited"}
+			>
+				<span>
+					{f.label}
+					<Show when={wsOverride() !== undefined}>
+						{" "}
+						<span class="hint">(project: {String(wsOverride())})</span>
+					</Show>
+				</span>
 				{f.kind === "boolean" ? (
-					<input type="checkbox" checked={Boolean(effective(f.path))} onChange={(e) => set(f.path, e.currentTarget.checked)} />
+					<input type="checkbox" checked={Boolean(displayed(f.path))} onChange={(e) => set(f.path, e.currentTarget.checked)} />
 				) : f.kind === "number" ? (
-					<input type="number" min={f.min} max={f.max} value={effective(f.path) ?? ""} placeholder={String(getPath(SERVER_DEFAULTS, f.path) ?? "server default")} onChange={(e) => set(f.path, e.currentTarget.value === "" ? undefined : Number(e.currentTarget.value))} />
+					<input
+						type="number"
+						min={f.min}
+						max={f.max}
+						value={displayed(f.path) ?? ""}
+						placeholder={String(getPath(SERVER_DEFAULTS, f.path) ?? "server default")}
+						onChange={(e) => commitNumber(e.currentTarget, f)}
+					/>
 				) : (
-					<select value={effective(f.path) ?? ""} onChange={(e) => set(f.path, e.currentTarget.value || undefined)}>
+					<select value={displayed(f.path) ?? ""} onChange={(e) => set(f.path, e.currentTarget.value || undefined)}>
 						<option value="">server default</option>
 						<For each={f.options}>{(o) => <option value={o}>{o}</option>}</For>
 					</select>
@@ -148,6 +266,11 @@ export function StyleProfile() {
 				<p class="hint">
 					These are the language server's own settings; it formats and checks with them. Workspace values override yours; both live outside the code.
 				</p>
+				<Show when={scope() === "user" && state.workspace && (Object.keys(layers().workspace).length > 0 || (layers().workspacePreset && layers().workspacePreset !== (layers().userPreset ?? "house")))}>
+					<p class="hint">
+						This project has workspace overrides in effect; fields marked “(project: …)” use this project's value instead of yours.
+					</p>
+				</Show>
 				<Show when={loadError()}>
 					<p class="profile-error" role="alert">
 						The settings could not be read: {loadError()}
@@ -155,7 +278,11 @@ export function StyleProfile() {
 				</Show>
 				<div class="profile-presets">
 					<label for={presetId}>Start from</label>
-					<select id={presetId} value={state.settings.stylePreset} onChange={(e) => void preset(e.currentTarget.value as "house" | "server")}>
+					<select
+						id={presetId}
+						value={scope() === "user" ? (layers().userPreset ?? "house") : (layers().workspacePreset ?? state.settings.stylePreset)}
+						onChange={(e) => preset(e.currentTarget.value as "house" | "server")}
+					>
 						<option value="house">the house style</option>
 						<option value="server">the server's defaults</option>
 					</select>
@@ -176,14 +303,34 @@ export function StyleProfile() {
 						<legend>Rules</legend>
 						<Show when={rules().length} fallback={<p class="hint">Rules appear here once the server reports them in an open file.</p>}>
 							<For each={rules()}>
-								{(rule) => (
-									<label class="profile-field">
-										<span>{rule}</span>
-										<select value={getPath(state.settings.ssl, `diagnostics.rules.${rule}`) ?? "default"} onChange={(e) => set(`diagnostics.rules.${rule}`, e.currentTarget.value === "default" ? undefined : e.currentTarget.value)}>
-											<For each={RULE_LEVELS}>{(l) => <option value={l}>{l}</option>}</For>
-										</select>
-									</label>
-								)}
+								{(rule) => {
+									const path = ["diagnostics", "rules", rule] as const;
+									const own = () => getPath(current(), path) !== undefined;
+									const wsOverride = () => workspaceOverride(path);
+									return (
+										<label
+											class="profile-field"
+											classList={{ own: own() }}
+											title={wsOverride() !== undefined ? `Overridden in this project (${String(wsOverride())})` : own() ? `Set in ${scope()} settings` : "Inherited"}
+										>
+											<span>
+												{rule}
+												<Show when={wsOverride() !== undefined}>
+													{" "}
+													<span class="hint">(project: {String(wsOverride())})</span>
+												</Show>
+											</span>
+											<select value={displayedRule(rule)} onChange={(e) => setRule(rule, e.currentTarget.value)}>
+												<For each={RULE_LEVELS}>{(l) => <option value={l}>{l}</option>}</For>
+											</select>
+											<Show when={own()}>
+												<button class="reset" title="Clear: inherit" aria-label={`Clear ${rule}: inherit`} onClick={(e) => (e.preventDefault(), set(path, undefined))}>
+													<Icon name="discard" />
+												</button>
+											</Show>
+										</label>
+									);
+								}}
 							</For>
 						</Show>
 					</fieldset>
@@ -195,7 +342,7 @@ export function StyleProfile() {
 					</h3>
 					<Show when={state.lsp.state === "running" && state.workspace} fallback={<p class="hint">The preview is formatted by the language server, and appears when it is running with a folder open.</p>}>
 						<Show when={!preview()?.error} fallback={<p class="hint">The sample could not be formatted: {preview()?.error}</p>}>
-							<pre class="block-code" innerHTML={preview.latest?.html ?? ""} />
+							<pre class="block-code" style={{ "tab-size": String(previewTabSize()) }} innerHTML={preview.latest?.html ?? ""} />
 						</Show>
 					</Show>
 				</section>

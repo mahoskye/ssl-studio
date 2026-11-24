@@ -52,73 +52,110 @@ export function jsonProblem(text: string): JsonProblem | null {
 		}
 		fail("This string is never closed.", start, n - start);
 	};
-	const value = (): void => {
+	const readObjectKey = (open: number) => {
 		space();
-		if (i >= n) fail("A value is missing here.", n - 1);
-		const c = text[i]!;
-		if (c === "{") {
-			const open = i++;
-			space();
-			if (text[i] === "}") return void i++;
+		if (i >= n) fail("This { is never closed.", open);
+		if (text[i] === "}") fail("A comma is followed by another name, not by }.", i);
+		if (text[i] === "'") fail("A name is written in double quotes.", i);
+		if (text[i] !== '"') fail("A name in double quotes is expected here.", i, Math.max(1, word().length));
+		string();
+		space();
+		if (text[i] !== ":") fail("A colon is expected after the name.");
+		i++;
+	};
+	// Iterative value parser using an explicit container stack so arbitrarily nested JSON
+	// never triggers call-stack RangeError or misreports invalid tails as valid JSON.
+	const parseValue = (): void => {
+		const stack: { kind: "object" | "array"; open: number }[] = [];
+		outer: for (;;) {
 			for (;;) {
 				space();
-				if (i >= n) fail("This { is never closed.", open);
-				if (text[i] === "}") fail("A comma is followed by another name, not by }.", i);
-				if (text[i] === "'") fail("A name is written in double quotes.", i);
-				if (text[i] !== '"') fail("A name in double quotes is expected here.", i, Math.max(1, word().length));
-				string();
-				space();
-				if (text[i] !== ":") fail("A colon is expected after the name.");
-				i++;
-				value();
-				space();
-				if (text[i] === ",") {
-					i++;
+				if (i >= n) fail("A value is missing here.", n - 1);
+				const c = text[i]!;
+				if (c === "{") {
+					const open = i++;
+					space();
+					if (text[i] === "}") {
+						i++;
+						break;
+					}
+					stack.push({ kind: "object", open });
+					readObjectKey(open);
 					continue;
 				}
-				if (text[i] === "}") return void i++;
-				if (i >= n) fail("This { is never closed.", open);
-				fail("A comma or } is expected here.");
+				if (c === "[") {
+					const open = i++;
+					space();
+					if (text[i] === "]") {
+						i++;
+						break;
+					}
+					stack.push({ kind: "array", open });
+					continue;
+				}
+				if (c === '"') {
+					string();
+					break;
+				}
+				if (c === "'") fail("A string is written in double quotes.");
+				const start = i;
+				const got = word();
+				if (!got) fail(`${c} cannot start a value.`);
+				if (got === "true" || got === "false" || got === "null") break;
+				if (/^-?(0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)?$/.test(got)) break;
+				fail(
+					/^[-+.\d]/.test(got)
+						? `${got} is not a number as JSON writes one.`
+						: `${got} is not a value: a string is in double quotes, and the only bare words are true, false and null.`,
+					start,
+					got.length,
+				);
 			}
-		}
-		if (c === "[") {
-			const open = i++;
-			space();
-			if (text[i] === "]") return void i++;
+
 			for (;;) {
+				if (stack.length === 0) break outer;
+				const top = stack[stack.length - 1]!;
 				space();
-				if (text[i] === "]") fail("A comma is followed by another value, not by ].", i);
-				value();
-				space();
-				if (text[i] === ",") {
-					i++;
-					continue;
+				if (top.kind === "object") {
+					if (text[i] === ",") {
+						i++;
+						readObjectKey(top.open);
+						continue outer;
+					}
+					if (text[i] === "}") {
+						i++;
+						stack.pop();
+						continue;
+					}
+					if (i >= n) fail("This { is never closed.", top.open);
+					fail("A comma or } is expected here.");
+				} else {
+					if (text[i] === ",") {
+						i++;
+						space();
+						if (text[i] === "]") fail("A comma is followed by another value, not by ].", i);
+						continue outer;
+					}
+					if (text[i] === "]") {
+						i++;
+						stack.pop();
+						continue;
+					}
+					if (i >= n) fail("This [ is never closed.", top.open);
+					fail("A comma or ] is expected here.");
 				}
-				if (text[i] === "]") return void i++;
-				if (i >= n) fail("This [ is never closed.", open);
-				fail("A comma or ] is expected here.");
 			}
 		}
-		if (c === '"') return string();
-		if (c === "'") fail("A string is written in double quotes.");
-		const start = i;
-		const got = word();
-		if (!got) fail(`${c} cannot start a value.`);
-		if (got === "true" || got === "false" || got === "null") return;
-		if (/^-?(0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)?$/.test(got)) return;
-		fail(/^[-+.\d]/.test(got) ? `${got} is not a number as JSON writes one.` : `${got} is not a value: a string is in double quotes, and the only bare words are true, false and null.`, start, got.length);
 	};
 	try {
 		space();
 		if (i >= n) return null;
-		value();
+		parseValue();
 		space();
 		if (i < n) fail("The document ends here: there is more after its one value.", i, Math.min(n - i, 20));
 		return null;
 	} catch (e) {
 		if (e instanceof Wrong) return { offset: e.offset, length: e.length, message: e.message };
-		// Nested deeper than this reader can follow: whether it reads is not for it to say.
-		if (e instanceof RangeError) return null;
 		throw e;
 	}
 }

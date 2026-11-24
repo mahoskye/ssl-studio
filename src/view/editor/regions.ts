@@ -7,7 +7,9 @@ export const REGION_PALETTE = ["#9d7cd8", "#5b8def", "#2aa198", "#d4a017", "#e07
 
 const hash = (s: string) => [...s].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7);
 
-export const regionColor = (name: string) => state.settings.regionColors[name] ?? REGION_PALETTE[hash(name) % REGION_PALETTE.length]!;
+export const regionColor = (name: string) =>
+	(Object.hasOwn(state.settings.regionColors, name) ? state.settings.regionColors[name] : undefined) ??
+	REGION_PALETTE[hash(name) % REGION_PALETTE.length]!;
 
 /** The region's colour moves one step through the palette: forwards, or back to the one before. */
 export function cycleRegionColor(name: string, step: 1 | -1 = 1) {

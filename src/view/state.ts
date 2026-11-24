@@ -13,6 +13,7 @@ import { session } from "./lsp/session";
 import { changedRanges, minimalReplace } from "./lsp/edits";
 import { ask, choose } from "./dialogs";
 import { closeComparison, openReview } from "./editor/Review";
+import { clearEditorViewStates } from "./editor/EditorGroup";
 import { baseName, isInside, joinPath, plainFileError } from "../shared/paths";
 import { lineEnds } from "../shared/fileKind";
 import { isPlanPath } from "./plan/model";
@@ -72,6 +73,8 @@ type Doc = {
 	encoding?: string;
 	/** The file is not text: a picture, or other bytes. Its model is empty, is never shown and is never saved. */
 	binary?: { size: number; image?: string };
+	/** Stops any active non-SSL document validator (plan/doc/json/toml/xml) on language switch or dispose. */
+	validatorDispose?: () => void;
 };
 
 export const [state, setState] = createStore({
@@ -185,10 +188,13 @@ export async function settleUnsaved(what: string): Promise<boolean> {
 
 export async function openFolder(path?: string) {
 	if (!(await settleUnsaved("Opening another folder closes them."))) return;
+	// Clear prior LSP session state before the backend restarts the server for the new folder,
+	// so an early `lspState: running` notification cannot re-initialize against the old root.
+	session.reset();
 	const workspace = await guarded(() => backend.openFolder(path));
 	if (!workspace) return;
 	setTabsReady(false);
-	for (const doc of docs.values()) doc.model.dispose();
+	const oldDocs = [...docs.values()];
 	docs.clear();
 	batch(() => {
 		setState("workspace", workspace);
@@ -203,10 +209,12 @@ export async function openFolder(path?: string) {
 		setState("project", null);
 		setState("setupDismissed", false);
 	});
+	clearEditorViewStates();
+	for (const doc of oldDocs) disposeDoc(doc);
 	await Promise.all([loadSettings(true), loadProject()]);
 	setState("info", await backend.info());
 	setState("lsp", await backend.lspState());
-	void session.start(workspace.root);
+	if (state.lsp.state === "running") void session.start(workspace.root).catch(() => {});
 	log(`opened ${workspace.root}`);
 	await restoreTabs();
 }
@@ -261,7 +269,12 @@ export async function restoreTabs() {
 			for (const path of group.tabs) {
 				if (!isInside(root, path)) continue;
 				try {
-					tabs.push((await loadDoc(path)).path);
+					const loaded = (await loadDoc(path)).path;
+					if (state.workspace?.root !== root) {
+						letGoIfOnlyRead(loaded);
+						return;
+					}
+					tabs.push(loaded);
 				} catch {
 					// Gone, or not readable any more.
 				}
@@ -284,9 +297,11 @@ export async function restoreTabs() {
 		}
 		setState("activeGroup", Math.min(saved.activeGroup, state.groups.length - 1));
 	} finally {
-		setTabsReady(true);
-		rememberTabs();
-		rememberViews();
+		if (state.workspace?.root === root) {
+			setTabsReady(true);
+			rememberTabs();
+			rememberViews();
+		}
 	}
 }
 
@@ -450,6 +465,7 @@ export function newUntitled(group = state.activeGroup, language = "plaintext"): 
 		const dirty = model.getAlternativeVersionId() !== doc.savedVersion && model.getValue() !== doc.savedText;
 		setState("dirty", path, dirty);
 	});
+	doc.validatorDispose = attachValidator(model, path, language);
 	closeComparison();
 	batch(() => {
 		setState(
@@ -467,6 +483,78 @@ export function newUntitled(group = state.activeGroup, language = "plaintext"): 
 	return path;
 }
 
+function disposeDoc(doc: Doc) {
+	doc.validatorDispose?.();
+	doc.validatorDispose = undefined;
+	if (!doc.model.isDisposed()) doc.model.dispose();
+}
+
+/**
+ * Attaches the non-SSL document validator matching `languageId` (or plan path) using a scoped model
+ * proxy so switching language mode cleanly stops timers, listeners, and markers without disposing the model.
+ */
+function attachValidator(model: monaco.editor.ITextModel, path: string, languageId: string): (() => void) | undefined {
+	if (model.isDisposed()) return undefined;
+	const wantsPlan = isPlanPath(path) && languageId === "json";
+	const wantsDoc = languageId === "markdown";
+	// A plan's own check says where it cannot be read (plan/check.ts): one source of findings to a document.
+	const wantsJson = languageId === "json" && !wantsPlan && !/\.jsonc$/i.test(path);
+	const wantsToml = languageId === "toml";
+	const wantsXml = languageId === "xml";
+	if (!wantsPlan && !wantsDoc && !wantsJson && !wantsToml && !wantsXml) return undefined;
+
+	let stopped = false;
+	let cleaning = false;
+	const cleanups: (() => void)[] = [];
+	const onDispose = (cb: () => void): monaco.IDisposable => {
+		cleanups.push(cb);
+		return {
+			dispose: () => {
+				const idx = cleanups.indexOf(cb);
+				if (idx >= 0) cleanups.splice(idx, 1);
+			},
+		};
+	};
+	const scoped = new Proxy(model, {
+		get(target, prop) {
+			// During synchronous cleanup, report the underlying model's real disposal state so
+			// `publishFindings(model, owner, null)` still clears Monaco markers on language switch;
+			// afterward report disposed so any in-flight async validator (TOML/Plan) drops stale results.
+			if (prop === "isDisposed") return () => (stopped && !cleaning) || target.isDisposed();
+			if (prop === "onWillDispose") return onDispose;
+			const value = Reflect.get(target, prop, target);
+			return typeof value === "function" ? value.bind(target) : value;
+		},
+	});
+	let returnedDispose: (() => void) | undefined;
+	const stop = () => {
+		if (stopped) return;
+		stopped = true;
+		realDisposeSub.dispose();
+		cleaning = true;
+		try {
+			for (const fn of cleanups.splice(0)) fn();
+			returnedDispose?.();
+		} finally {
+			cleaning = false;
+		}
+	};
+	const realDisposeSub = model.onWillDispose(() => stop());
+	let raw: unknown;
+	if (wantsPlan) raw = trackPlan(scoped);
+	else if (wantsDoc) raw = trackDoc(scoped, path);
+	else if (wantsJson) raw = trackJson(scoped);
+	else if (wantsToml) raw = trackToml(scoped);
+	else if (wantsXml) raw = trackXml(scoped);
+	if (typeof raw === "function") returnedDispose = raw as () => void;
+	else if (raw && typeof (raw as monaco.IDisposable).dispose === "function") returnedDispose = () => (raw as monaco.IDisposable).dispose();
+	if (!cleanups.length && !returnedDispose) {
+		realDisposeSub.dispose();
+		return undefined;
+	}
+	return stop;
+}
+
 /** Makes a model the open document for a path, and follows its edits. */
 function attach(path: string, text: string, saved: { text: string; mtime: number }): Doc {
 	const uri = monaco.Uri.file(path);
@@ -481,12 +569,7 @@ function attach(path: string, text: string, saved: { text: string; mtime: number
 		if (dirty) queueMicrotask(() => state.dirty[path] && keepTab(path));
 	});
 	session.track(model);
-	if (isPlanPath(path)) trackPlan(model);
-	if (/\.(md|markdown)$/i.test(path)) trackDoc(model, path);
-	// A plan's own check says where it cannot be read (plan/check.ts): one source of findings to a document.
-	else if (/\.json$/i.test(path) && !isPlanPath(path)) trackJson(model);
-	else if (/\.toml$/i.test(path)) trackToml(model);
-	else if (languageFor(path) === "xml") trackXml(model);
+	doc.validatorDispose = attachValidator(model, path, model.getLanguageId());
 	return doc;
 }
 
@@ -573,16 +656,19 @@ export const openedForALook = (path: string) => lookedAt === path;
  */
 export async function openFile(path: string, options: { group?: number; reveal?: Reveal; preview?: boolean; keep?: boolean } = {}) {
 	path = canonical(path);
-	const look = options.preview ? ++looks : 0;
+	const startRoot = state.workspace?.root;
+	const look = ++looks;
 	// What was only read (a definition peeked at) had no tab to keep it true, and the file may have changed, gone, or
 	// been made anew since. It is let go, and the file is read as it is now: nothing of the old reading is left to undo.
 	letGoIfOnlyRead(path);
 	const doc = await guarded(() => loadDoc(path));
 	if (!doc) return;
-	// Another file was clicked for a look while this one was being read: that one is what is wanted now. Without this
-	// the slower read would land last and take the tab of the file clicked last.
-	if (look && look !== looks) return letGoIfOnlyRead(path);
-	const group = options.group ?? state.activeGroup;
+	// The folder changed while this file was being read: let the loaded model go instead of opening it in the new workspace.
+	if (state.workspace?.root !== startRoot) return letGoIfOnlyRead(path);
+	// Another file was opened (for a look or to stay) while this preview was being read: that one is what is wanted now.
+	// Without this the slower preview read would land last and steal focus or take the tab of the file opened last.
+	if (options.preview && look !== looks) return letGoIfOnlyRead(path);
+	const group = Math.max(0, Math.min(options.group ?? state.activeGroup, Math.max(0, state.groups.length - 1)));
 	if (options.reveal) pendingReveal.set(path, options.reveal);
 	closeComparison();
 	/** The tab that gave its place to this one: it was only looked at. */
@@ -654,6 +740,7 @@ export async function closeTab(path: string, group = state.activeGroup, options:
 		// A save that failed has already said why: the tab stays, with the edits in it.
 		if (answer === "Save" && !(await save(path))) return false;
 	}
+	if (!state.groups[group]?.tabs.includes(path)) return true;
 	if (lastView && !isUntitled(path)) closedTabs.push(path);
 	batch(() => {
 		setState(
@@ -661,6 +748,7 @@ export async function closeTab(path: string, group = state.activeGroup, options:
 			group,
 			produce((g: Group) => {
 				const index = g.tabs.indexOf(path);
+				if (index < 0) return;
 				g.tabs.splice(index, 1);
 				if (g.pinned) g.pinned = g.pinned.filter((p) => p !== path);
 				if (g.preview === path) g.preview = null;
@@ -672,11 +760,13 @@ export async function closeTab(path: string, group = state.activeGroup, options:
 			setState("activeGroup", 0);
 		}
 	});
+	clearEditorViewStates(path, group);
 	if (!state.groups.some((g) => g.tabs.includes(path))) {
+		clearEditorViewStates(path);
 		const doc = docs.get(path);
 		if (doc) {
 			docs.delete(path);
-			doc.model.dispose();
+			disposeDoc(doc);
 			batch(() => {
 				setState("dirty", path, undefined!);
 				setState("conflicts", path, undefined!);
@@ -806,7 +896,7 @@ function letGoIfOnlyRead(path: string) {
 	const doc = docs.get(path);
 	if (!doc || isUntitled(path) || state.dirty[path] || state.groups.some((g) => g.tabs.includes(path))) return;
 	docs.delete(path);
-	doc.model.dispose();
+	disposeDoc(doc);
 	if (state.conflicts[path]) setState("conflicts", path, undefined!);
 }
 
@@ -842,7 +932,7 @@ export function fileRenamed(oldPath: string, newPath: string) {
 			setState("conflicts", path, undefined!);
 			setState("dirty", target, dirty || moved.savedVersion === -1);
 		});
-		doc.model.dispose();
+		disposeDoc(doc);
 	}
 }
 
@@ -997,8 +1087,32 @@ export async function save(path = activePath(), options: { /** False to leave th
 			return backend.write(target, text, true);
 		});
 		if (!created) return false;
-		const realDoc = attach(target, text, { text, mtime: created.mtime });
-		realDoc.encoding = "utf-8";
+		const existing = docs.get(target);
+		let realDoc: Doc;
+		let wasBinary = false;
+		if (existing && !existing.model.isDisposed()) {
+			wasBinary = Boolean(existing.binary);
+			existing.encoding = "utf-8";
+			existing.binary = undefined;
+			existing.savedText = text;
+			existing.mtime = created.mtime;
+			const nextEol = text.includes("\n")
+				? lineEnds(text) === "\r\n"
+					? monaco.editor.EndOfLineSequence.CRLF
+					: monaco.editor.EndOfLineSequence.LF
+				: doc.model.getEOL() === "\r\n"
+					? monaco.editor.EndOfLineSequence.CRLF
+					: monaco.editor.EndOfLineSequence.LF;
+			existing.model.setEOL(nextEol);
+			if (existing.model.getValue() !== text) {
+				existing.model.pushEditOperations([], [{ range: existing.model.getFullModelRange(), text }], () => null);
+			}
+			existing.savedVersion = existing.model.getAlternativeVersionId();
+			realDoc = existing;
+		} else {
+			realDoc = attach(target, text, { text, mtime: created.mtime });
+			realDoc.encoding = "utf-8";
+		}
 		batch(() => {
 			for (let gi = 0; gi < state.groups.length; gi++) {
 				setState(
@@ -1011,17 +1125,20 @@ export async function save(path = activePath(), options: { /** False to leave th
 							else g.tabs[idx] = target;
 						}
 						if (g.active === path) g.active = target;
-						if (g.pinned) g.pinned = g.pinned.map((p) => (p === path ? target : p));
+						if (g.pinned) g.pinned = [...new Set(g.pinned.map((p) => (p === path ? target : p)))];
 						if (g.preview === path) g.preview = null;
 					}),
 				);
 			}
 			setState("dirty", path, undefined!);
 			setState("dirty", target, false);
+			setState("conflicts", target, undefined!);
 			setState("treeVersion", (v) => v + 1);
+			if (wasBinary) setState("kindVersion", (v) => v + 1);
 		});
-		docs.delete(path);
-		doc.model.dispose();
+		clearEditorViewStates(path);
+		if (docs.get(path) === doc) docs.delete(path);
+		disposeDoc(doc);
 		session.saved(realDoc.model);
 		historyChanged.fire(target);
 		return true;
@@ -1108,8 +1225,11 @@ export function setDocumentLanguage(path: string, languageId: string): boolean {
 	const prev = doc.model.getLanguageId();
 	if (prev === languageId) return false;
 	if (prev === "ssl" && languageId !== "ssl") session.untrack(doc.model);
+	doc.validatorDispose?.();
+	doc.validatorDispose = undefined;
 	monaco.editor.setModelLanguage(doc.model, languageId);
 	if (languageId === "ssl" && prev !== "ssl") session.track(doc.model);
+	else doc.validatorDispose = attachValidator(doc.model, doc.path, languageId);
 	setState("kindVersion", (v) => v + 1);
 	return true;
 }

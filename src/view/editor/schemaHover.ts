@@ -31,6 +31,7 @@ import { activeDoc, activePath, canonical, documents, notify, openFile, state } 
 import { activeEditor } from "./EditorGroup";
 import { activeLiveEditor } from "./liveBridge";
 import { monaco } from "./monaco";
+import { sslCommentSpans } from "./textmate";
 
 const REF_SCHEME = "ssl-studio-schema-ref";
 const CODELENS_OPEN_CMD = "ssl-studio.openCodeLensTarget";
@@ -45,6 +46,150 @@ const refUri = (target: string | RefTarget) => {
 import { extractCommentSpans, findCommentDocRefsInLines, type CommentDocRef, type CommentSpan } from "../../shared/editorDocHelpers";
 export { extractCommentSpans, findCommentDocRefsInLines, type CommentDocRef, type CommentSpan };
 
+const SQL_RESERVED_KEYWORDS = new Set([
+	"select",
+	"from",
+	"where",
+	"insert",
+	"into",
+	"values",
+	"update",
+	"set",
+	"delete",
+	"create",
+	"alter",
+	"drop",
+	"table",
+	"view",
+	"index",
+	"trigger",
+	"procedure",
+	"function",
+	"join",
+	"inner",
+	"left",
+	"right",
+	"full",
+	"outer",
+	"cross",
+	"using",
+	"group",
+	"order",
+	"having",
+	"union",
+	"all",
+	"distinct",
+	"and",
+	"not",
+	"null",
+	"between",
+	"like",
+	"exists",
+	"case",
+	"when",
+	"then",
+	"else",
+	"end",
+	"asc",
+	"desc",
+	"top",
+	"limit",
+	"offset",
+	"fetch",
+	"next",
+	"rows",
+	"only",
+	"begin",
+	"commit",
+	"rollback",
+	"transaction",
+	"declare",
+	"exec",
+	"execute",
+	"return",
+	"with",
+	"grant",
+	"revoke",
+	"primary",
+	"foreign",
+	"key",
+	"references",
+	"default",
+	"check",
+	"constraint",
+	"unique",
+	"cast",
+	"convert",
+	"coalesce",
+	"count",
+	"sum",
+	"avg",
+	"min",
+	"max",
+	"true",
+	"false",
+	"for",
+	"while",
+	"elseif",
+	"endif",
+]);
+
+const SSL_DECL_LINE_RE = /^\s*:(?:DECLARE|PARAMETERS|PROCEDURE|PUBLIC|CLASS|LABEL)\b/i;
+
+function isSslDeclarationTarget(lineText: string, matchStart: number): boolean {
+	if (matchStart > 0 && lineText[matchStart - 1] === ":") return true;
+	if (!SSL_DECL_LINE_RE.test(lineText)) return false;
+	const semi = lineText.indexOf(";");
+	return semi < 0 || matchStart < semi;
+}
+
+/**
+ * Derives comment spans per line: for SSL strictly from the canonical SSL TextMate
+ * grammar (`textmate.ts` COMMENT_TOKEN, ADR 0003), and for SQL via `extractCommentSpans`.
+ */
+function commentSpansFor(lines: readonly string[], lang: "ssl" | "sql"): CommentSpan[][] {
+	if (lang === "ssl") return sslCommentSpans(lines) ?? lines.map(() => []);
+	return extractCommentSpans(lines, "sql");
+}
+
+function findCommentDocRefsFor(
+	lines: readonly string[],
+	lang: "ssl" | "sql",
+	files: readonly DocFile[],
+	root?: string | null,
+	precomputedSpans?: CommentSpan[][],
+): CommentDocRef[] {
+	if (lang === "sql" && !precomputedSpans) return findCommentDocRefsInLines(lines, "sql", files, root);
+	const spansByLine = precomputedSpans ?? commentSpansFor(lines, lang);
+	const synthetic: string[] = [];
+	const meta: { line: number; spanFrom: number }[] = [];
+	for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+		const spans = spansByLine[lineIdx];
+		if (!spans?.length) continue;
+		const lineText = lines[lineIdx]!;
+		for (const span of spans) {
+			const slice = lineText.slice(span.from, span.to);
+			if (!slice.trim()) continue;
+			synthetic.push(`-- ${slice}`);
+			meta.push({ line: lineIdx + 1, spanFrom: span.from });
+		}
+	}
+	if (!synthetic.length) return [];
+	const raw = findCommentDocRefsInLines(synthetic, "sql", files, root);
+	const out: CommentDocRef[] = [];
+	for (const r of raw) {
+		const m = meta[r.line - 1];
+		if (!m || r.from < 3) continue;
+		out.push({
+			...r,
+			line: m.line,
+			from: m.spanFrom + (r.from - 3),
+			to: m.spanFrom + (r.to - 3),
+		});
+	}
+	return out;
+}
+
 function findCommentDocRefAt(
 	model: monaco.editor.ITextModel,
 	position: monaco.Position,
@@ -57,16 +202,22 @@ function findCommentDocRefAt(
 	if (scanCount > 5000) return null;
 	const lines: string[] = [];
 	for (let i = 1; i <= scanCount; i++) lines.push(model.getLineContent(i));
-	const spans = extractCommentSpans(lines, lang)[lineNum - 1];
+	const spans = commentSpansFor(lines, lang)[lineNum - 1];
 	if (!spans?.length) return null;
 	const offset = position.column - 1;
 	if (!spans.some((s) => offset >= s.from && offset <= s.to)) return null;
-	const refs = findCommentDocRefsInLines(lines, lang, files, root);
+	const refs = findCommentDocRefsFor(
+		lines,
+		lang,
+		files,
+		root,
+		lines.map((_, idx) => (idx === lineNum - 1 ? spans : [])),
+	);
 	return refs.find((r) => r.line === lineNum && offset >= r.from && offset <= r.to) ?? null;
 }
 
-const previewCache = new Map<string, { version: string; markdown: string }>();
-const columnCache = new Map<string, { version: number; columns: SchemaColumnInfo[] }>();
+const previewCache = new Map<string, { ver: string; value: string }>();
+const columnCache = new Map<string, { ver: string; value: SchemaColumnInfo[] }>();
 const citationCache = new Map<string, { version: string; citations: CodeCitation[] }>();
 const modelSymbolCache = new Map<string, { version: number; symbols: monaco.languages.DocumentSymbol[] }>();
 
@@ -75,7 +226,7 @@ const modelSymbolCache = new Map<string, { version: number; symbols: monaco.lang
  * cached per canonical path + model versionId (ADR 0003: zero SSL parsing in the IDE).
  */
 async function documentSymbolsForModel(model: monaco.editor.ITextModel): Promise<monaco.languages.DocumentSymbol[]> {
-	if (model.uri.scheme !== "file" || model.getLanguageId() !== "ssl") return [];
+	if (model.isDisposed() || model.uri.scheme !== "file" || model.getLanguageId() !== "ssl") return [];
 	const filePath = canonical(model.uri.fsPath);
 	if (filePath === canonical(activePath() ?? "")) {
 		const activeSyms = symbols();
@@ -85,8 +236,17 @@ async function documentSymbolsForModel(model: monaco.editor.ITextModel): Promise
 	const hit = modelSymbolCache.get(filePath);
 	if (hit && hit.version === version) return hit.symbols;
 	if (state.lsp.state !== "running") return [];
-	const list = await session.documentSymbols(model).catch(() => [] as monaco.languages.DocumentSymbol[]);
-	modelSymbolCache.set(filePath, { version, symbols: list });
+	let list: monaco.languages.DocumentSymbol[];
+	try {
+		list = await session.documentSymbols(model);
+	} catch {
+		return [];
+	}
+	if (!model.isDisposed() && model.getVersionId() === version) {
+		if (modelSymbolCache.has(filePath)) modelSymbolCache.delete(filePath);
+		else if (modelSymbolCache.size >= 64) modelSymbolCache.delete(modelSymbolCache.keys().next().value!);
+		modelSymbolCache.set(filePath, { version, symbols: list });
+	}
 	return list;
 }
 
@@ -105,10 +265,10 @@ async function readDocText(docPath: string): Promise<string> {
 	return backend.read(docPath).then((r) => (r.binary ? "" : r.text), () => "");
 }
 
-function cacheKeyFor(docPath: string): { key: string; ver: number } {
+function docVersionStamp(docPath: string): string {
 	const ver = state.treeVersion;
 	const open = documents.get(canonical(docPath));
-	return { key: `${docPath}:${open ? open.model.getAlternativeVersionId() : ver}`, ver };
+	return open ? `${ver}:open:${open.model.getAlternativeVersionId()}` : `${ver}:disk`;
 }
 
 function escapeRegExp(s: string): string {
@@ -126,8 +286,7 @@ function textMentionsAny(text: string, keys: readonly string[]): boolean {
 }
 
 async function loadPlanSummary(planDoc: DocFile): Promise<ParsedPlanSummary | null> {
-	const { key, ver } = cacheKeyFor(planDoc.path);
-	const verStr = `${ver}:${key}`;
+	const verStr = docVersionStamp(planDoc.path);
 	const hit = planCache.get(planDoc.path);
 	if (hit && hit.version === verStr) return hit.data;
 	const raw = await readDocText(planDoc.path);
@@ -173,8 +332,7 @@ async function loadPlanSummary(planDoc: DocFile): Promise<ParsedPlanSummary | nu
 }
 
 async function loadDocCitations(docPath: string): Promise<CodeCitation[]> {
-	const { key, ver } = cacheKeyFor(docPath);
-	const verStr = `${ver}:${key}`;
+	const verStr = docVersionStamp(docPath);
 	const hit = citationCache.get(docPath);
 	if (hit && hit.version === verStr) return hit.citations;
 	const text = await readDocText(docPath);
@@ -233,11 +391,18 @@ async function loadRegistryRowsForTable(tableKeys: readonly string[], allDocs: r
 }
 
 async function loadSchemaMarkdown(docPath: string, doc: DocFile): Promise<string> {
-	const { key, ver } = cacheKeyFor(docPath);
 	const allDocs = docs();
-	const cacheVer = `${ver}:${allDocs.length}`;
-	const hit = previewCache.get(key);
-	if (hit && hit.version === cacheVer) return hit.markdown;
+	const openRegs = allDocs
+		.filter((d) => d.exists && d.group === "registries" && !isCatalog(d) && /\.(csv|tsv)$/i.test(d.name))
+		.map((d) => {
+			const open = documents.get(canonical(d.path));
+			return open ? `${d.path}@${open.model.getAlternativeVersionId()}` : "";
+		})
+		.filter(Boolean)
+		.join("|");
+	const cacheVer = `${docVersionStamp(docPath)}:${allDocs.length}:${openRegs}`;
+	const hit = previewCache.get(docPath);
+	if (hit && hit.ver === cacheVer) return hit.value;
 	const text = await readDocText(docPath);
 	const preview = text ? extractSchemaPreview(doc, text, 12) : doc.summary || "";
 	const rel = state.workspace?.root ? relativeTo(state.workspace.root, docPath).replace(/\\/g, "/") : doc.name;
@@ -285,19 +450,21 @@ async function loadSchemaMarkdown(docPath: string, doc: DocFile): Promise<string
 		"",
 		"*Ctrl+Click or F12 to jump directly to this schema doc.*",
 	].join("\n");
-	if (previewCache.size > 120) previewCache.delete(previewCache.keys().next().value!);
-	previewCache.set(key, { version: cacheVer, markdown });
+	if (previewCache.has(docPath)) previewCache.delete(docPath);
+	else if (previewCache.size >= 120) previewCache.delete(previewCache.keys().next().value!);
+	previewCache.set(docPath, { ver: cacheVer, value: markdown });
 	return markdown;
 }
 
 async function loadColumnsForDoc(doc: DocFile): Promise<SchemaColumnInfo[]> {
-	const { key, ver } = cacheKeyFor(doc.path);
-	const hit = columnCache.get(key);
-	if (hit && hit.version === ver) return hit.columns;
+	const cacheVer = docVersionStamp(doc.path);
+	const hit = columnCache.get(doc.path);
+	if (hit && hit.ver === cacheVer) return hit.value;
 	const text = await readDocText(doc.path);
 	const columns = text ? extractSchemaColumns(doc, text) : [];
-	if (columnCache.size > 120) columnCache.delete(columnCache.keys().next().value!);
-	columnCache.set(key, { version: ver, columns });
+	if (columnCache.has(doc.path)) columnCache.delete(doc.path);
+	else if (columnCache.size >= 120) columnCache.delete(columnCache.keys().next().value!);
+	columnCache.set(doc.path, { ver: cacheVer, value: columns });
 	return columns;
 }
 
@@ -466,8 +633,8 @@ async function buildProcedureHoverMarkdown(
 	const fileSyms = flattenSymbols(rawSyms, HOVER_SYMBOL_KINDS);
 	const wordLower = word.toLowerCase();
 	const matchedSym =
-		fileSyms.find((s) => s.name.toLowerCase() === wordLower) ??
-		fileSyms.find((s) => s.selectionRange.startLineNumber === lineNumber && s.name.toLowerCase() === wordLower);
+		fileSyms.find((s) => s.selectionRange.startLineNumber === lineNumber && s.name.toLowerCase() === wordLower) ??
+		fileSyms.find((s) => s.name.toLowerCase() === wordLower);
 
 	const planMatches = await planMatchesForProcedure(filePath, word, allDocs, wsRoot);
 	if (!matchedSym && !planMatches.length) return null;
@@ -542,6 +709,12 @@ async function buildProcedureHoverMarkdown(
 		lines.push("", ...citationLines.slice(0, 3));
 	}
 	return lines.join("\n");
+}
+
+async function definitionLocation(path: string, line = 1): Promise<monaco.languages.Location> {
+	const uri = monaco.Uri.file(path);
+	await session.ensureModel(uri.toString());
+	return { uri, range: new monaco.Range(line, 1, line, 1) };
 }
 
 let registered = false;
@@ -629,33 +802,38 @@ export function registerSchemaHoverProviders(): void {
 					}
 				}
 
-				// 2. Documented schema table hover (enriched with governing decisions, open questions & registry rows)
+				// 2. SSL procedure / symbol hover BEFORE unscoped bare table/column matches so governed SSL
+				// symbols are not shadowed by common column/table names (ID, STATUS, NAME, etc.).
+				if (lang === "ssl" && model.uri.scheme === "file") {
+					const procMd = await buildProcedureHoverMarkdown(model, canonical(model.uri.fsPath), word.word, position.lineNumber, allDocs, wsRoot);
+					if (procMd) return { range, contents: [{ value: procMd }] };
+				}
+
+				const wordLower = word.word.toLowerCase();
+				if (SQL_RESERVED_KEYWORDS.has(wordLower) || (lang === "ssl" && isSslDeclarationTarget(lineText, word.startColumn - 1))) {
+					return null;
+				}
+
+				// 3. Documented schema table hover (enriched with governing decisions, open questions & registry rows)
 				const tableDoc = findSchemaDocForIdentifier(word.word, allDocs);
 				if (tableDoc) {
 					const value = await loadSchemaMarkdown(tableDoc.path, tableDoc);
 					return { range, contents: [{ value }] };
 				}
 
-				// 3. Column hover for tables referenced elsewhere in this file
+				// 4. Column hover for tables referenced elsewhere in this file
 				if (model.getValueLength() <= 200_000) {
 					const refTables = referencedSchemaTables(model.getValue(), allDocs, 8);
 					if (refTables.length) {
-						const colLower = word.word.toLowerCase();
 						const matches: SchemaColumnInfo[] = [];
 						for (const refDoc of refTables) {
 							const cols = await loadColumnsForDoc(refDoc);
 							for (const col of cols) {
-								if (col.name.toLowerCase() === colLower) matches.push(col);
+								if (col.name.toLowerCase() === wordLower) matches.push(col);
 							}
 						}
 						if (matches.length) return { range, contents: [{ value: columnHoverMarkdown(matches) }] };
 					}
-				}
-
-				// 4. SSL procedure / symbol hover enriched with governing docs, decisions, questions & plan steps
-				if (lang === "ssl" && model.uri.scheme === "file") {
-					const procMd = await buildProcedureHoverMarkdown(model, canonical(model.uri.fsPath), word.word, position.lineNumber, allDocs, wsRoot);
-					if (procMd) return { range, contents: [{ value: procMd }] };
 				}
 
 				return null;
@@ -678,38 +856,27 @@ export function registerSchemaHoverProviders(): void {
 							const found = text ? findHeadingLine(text, commentRef.heading) : null;
 							if (found) targetLine = found;
 						}
-						return {
-							uri: monaco.Uri.file(commentRef.doc.path),
-							range: new monaco.Range(targetLine, 1, targetLine, 1),
-						};
+						return definitionLocation(commentRef.doc.path, targetLine);
 					}
 				}
 
 				const ticketHit = findTicketAtPosition(lineText, position.column);
 				if (ticketHit) {
-					return {
-						uri: monaco.Uri.file(ticketHit.doc.path),
-						range: new monaco.Range(1, 1, 1, 1),
-					};
+					return definitionLocation(ticketHit.doc.path, 1);
 				}
 				const word = model.getWordAtPosition(position);
 				if (!word || word.word.length < 2) return null;
-				const tableDoc = findSchemaDocForIdentifier(word.word, allDocs);
-				if (tableDoc) {
-					return {
-						uri: monaco.Uri.file(tableDoc.path),
-						range: new monaco.Range(1, 1, 1, 1),
-					};
-				}
 				const qualifier = qualifierBeforeWord(lineText, word.startColumn);
 				if (qualifier) {
 					const qDoc = findSchemaDocForIdentifier(qualifier, allDocs);
-					if (qDoc) {
-						return {
-							uri: monaco.Uri.file(qDoc.path),
-							range: new monaco.Range(1, 1, 1, 1),
-						};
-					}
+					if (qDoc) return definitionLocation(qDoc.path, 1);
+				}
+				if (SQL_RESERVED_KEYWORDS.has(word.word.toLowerCase()) || (lang === "ssl" && isSslDeclarationTarget(lineText, word.startColumn - 1))) {
+					return null;
+				}
+				const tableDoc = findSchemaDocForIdentifier(word.word, allDocs);
+				if (tableDoc) {
+					return definitionLocation(tableDoc.path, 1);
 				}
 				return null;
 			},
@@ -835,7 +1002,7 @@ export function registerSchemaHoverProviders(): void {
 
 				const lines: string[] = [];
 				for (let lineNum = 1; lineNum <= lineCount; lineNum++) lines.push(model.getLineContent(lineNum));
-				const commentRefs = findCommentDocRefsInLines(lines, lang, allDocs, wsRoot);
+				const commentRefs = findCommentDocRefsFor(lines, lang, allDocs, wsRoot);
 				const commentRefsByLine = new Map<number, CommentDocRef[]>();
 				for (const r of commentRefs) {
 					const list = commentRefsByLine.get(r.line);
@@ -888,6 +1055,8 @@ export function registerSchemaHoverProviders(): void {
 							const from = m.index;
 							const to = from + m[0].length;
 							if (taken.some(([a, b]) => from < b && to > a)) continue;
+							if (SQL_RESERVED_KEYWORDS.has(m[0].toLowerCase())) continue;
+							if (lang === "ssl" && isSslDeclarationTarget(text, from)) continue;
 							const doc = findSchemaDocForIdentifier(m[0], allDocs);
 							if (!doc) continue;
 							const rel = wsRoot ? relativeTo(wsRoot, doc.path).replace(/\\/g, "/") : doc.name;
@@ -905,7 +1074,7 @@ export function registerSchemaHoverProviders(): void {
 	}
 
 	// Ticket-key Hover, Definition, and Link providers on config/form/plan languages (.xfd, .plan.json).
-	for (const lang of ["xml", "json", "jsonc"] as const) {
+	for (const lang of ["xml", "json"] as const) {
 		monaco.languages.registerHoverProvider(lang, {
 			provideHover(model, position) {
 				const ticketHit = findTicketAtPosition(model.getLineContent(position.lineNumber), position.column);
@@ -918,13 +1087,10 @@ export function registerSchemaHoverProviders(): void {
 		});
 
 		monaco.languages.registerDefinitionProvider(lang, {
-			provideDefinition(model, position) {
+			async provideDefinition(model, position) {
 				const ticketHit = findTicketAtPosition(model.getLineContent(position.lineNumber), position.column);
 				if (!ticketHit) return null;
-				return {
-					uri: monaco.Uri.file(ticketHit.doc.path),
-					range: new monaco.Range(1, 1, 1, 1),
-				};
+				return definitionLocation(ticketHit.doc.path, 1);
 			},
 		});
 
@@ -963,7 +1129,7 @@ export function registerSchemaHoverProviders(): void {
 				if (lineNum > 5000) return { suggestions: [] };
 				const lines: string[] = [];
 				for (let i = 1; i <= lineNum; i++) lines.push(model.getLineContent(i));
-				const spans = extractCommentSpans(lines, commentLang)[lineNum - 1];
+				const spans = commentSpansFor(lines, commentLang)[lineNum - 1];
 				const offset = position.column - 1;
 				if (!spans?.some((s) => offset >= s.from && offset <= s.to)) {
 					return { suggestions: [] };

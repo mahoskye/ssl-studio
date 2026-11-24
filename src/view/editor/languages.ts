@@ -368,6 +368,8 @@ export async function formatFenceInModel(
 	model: monaco.editor.ITextModel,
 	lineNumber: number,
 ): Promise<"changed" | "unchanged" | "error" | "none"> {
+	if (model.isDisposed()) return "none";
+	const version = model.getVersionId();
 	const path = model.uri.fsPath || model.uri.path;
 	const text = model.getValue();
 	const fence = fenceAtLine(text, lineNumber);
@@ -379,6 +381,7 @@ export async function formatFenceInModel(
 	if (fence.bodyStartLine > fence.bodyEndLine || !fence.code.trim()) return "unchanged";
 	const eol = model.getEOL();
 	const res = await formatCodeFence(fence, path, eol);
+	if (model.isDisposed() || model.getVersionId() !== version) return "unchanged";
 	if (!res.ok) {
 		lastFormatError = { uri: model.uri.toString(), at: Date.now() };
 		formattingHost.onError(res.error, path);
@@ -398,6 +401,7 @@ async function computeNonSslFormat(
 	indent: { tabSize: number; insertSpaces: boolean },
 ): Promise<{ ok: true; text: string; changed: boolean } | { ok: false }> {
 	const languageId = model.getLanguageId();
+	const uri = model.uri.toString();
 	const path = model.uri.fsPath || model.uri.path;
 	if (!canFormatNonSsl(languageId, path)) return { ok: true, text: model.getValue(), changed: false };
 	const text = model.getValue();
@@ -414,7 +418,7 @@ async function computeNonSslFormat(
 			sqlKeywordCase: extra.sqlKeywordCase,
 		});
 		if (!result.ok) {
-			lastFormatError = { uri: model.uri.toString(), at: Date.now() };
+			lastFormatError = { uri, at: Date.now() };
 			formattingHost.onError(result.error, path);
 			return { ok: false };
 		}
@@ -437,7 +441,7 @@ async function computeNonSslFormat(
 			const fallback = formatJson(text, indent.insertSpaces ? " ".repeat(indent.tabSize) : "\t");
 			if (fallback !== null) return { ok: true, text: fallback, changed: fallback !== text };
 		}
-		lastFormatError = { uri: model.uri.toString(), at: Date.now() };
+		lastFormatError = { uri, at: Date.now() };
 		formattingHost.onError(String(err?.message ?? err), path);
 		return { ok: false };
 	}
@@ -445,8 +449,11 @@ async function computeNonSslFormat(
 
 /** Formats a non-SSL model directly (used for Markdown Live mode where Monaco is hidden). */
 export async function formatNonSslModel(model: monaco.editor.ITextModel): Promise<"changed" | "unchanged" | "error"> {
+	if (model.isDisposed()) return "unchanged";
+	const version = model.getVersionId();
 	const opts = model.getOptions();
 	const res = await computeNonSslFormat(model, { tabSize: opts.tabSize, insertSpaces: opts.insertSpaces });
+	if (model.isDisposed() || model.getVersionId() !== version) return "unchanged";
 	if (!res.ok) return "error";
 	if (!res.changed) return "unchanged";
 	model.pushStackElement();
@@ -461,7 +468,10 @@ export async function formatNonSslModel(model: monaco.editor.ITextModel): Promis
 for (const languageId of FORMATTABLE_NON_SSL_LANGUAGES) {
 	monaco.languages.registerDocumentFormattingEditProvider(languageId, {
 		async provideDocumentFormattingEdits(model, options) {
+			if (model.isDisposed()) return [];
+			const version = model.getVersionId();
 			const res = await computeNonSslFormat(model, options);
+			if (model.isDisposed() || model.getVersionId() !== version) return [];
 			if (!res.ok || !res.changed) return [];
 			return [{ range: model.getFullModelRange(), text: res.text }];
 		},

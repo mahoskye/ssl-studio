@@ -11,6 +11,8 @@ export type MarkerLike = {
 	severity: number;
 	source?: string;
 	code?: string | { value: string };
+	startLineNumber?: number;
+	endLineNumber?: number;
 };
 
 export function severityName(severity: number): HoverSeverity {
@@ -20,32 +22,59 @@ export function severityName(severity: number): HoverSeverity {
 	return "hint";
 }
 
-function markerDetailLabel(marker: MarkerLike): string {
+const normalizeSpace = (s: string) => s.replace(/\s+/g, " ").trim();
+
+function markerDetailLabels(marker: MarkerLike): string[] {
 	const codeVal = typeof marker.code === "string" ? marker.code : marker.code?.value;
-	if (marker.source && codeVal) return `${marker.source}(${codeVal})`;
-	if (marker.source) return marker.source;
-	if (codeVal) return `(${codeVal})`;
-	return "";
+	const src = marker.source ? normalizeSpace(marker.source) : "";
+	const code = codeVal ? normalizeSpace(codeVal) : "";
+	if (src && code) return [`${src}(${code})`, `${src}${code}`, `${src} (${code})`, `${src} ${code}`];
+	if (src) return [src];
+	if (code) return [`(${code})`, code];
+	return [];
 }
 
-/** Matches a rendered Monaco `.marker.hover-contents` row back to its model marker severity. */
-export function matchMarkerSeverity(messageText: string, detailText: string, markers: readonly MarkerLike[]): HoverSeverity {
-	const msg = messageText.trim();
-	const detail = detailText.trim();
-	if (!msg || !markers.length) return "warning";
-
+function matchIn(msg: string, detail: string, markers: readonly MarkerLike[]): HoverSeverity | null {
 	let bestExact = -1;
 	let bestMsg = -1;
 	for (const m of markers) {
-		if (m.message.trim() !== msg) continue;
+		if (normalizeSpace(m.message) !== msg) continue;
 		if (m.severity > bestMsg) bestMsg = m.severity;
-		if (detail && markerDetailLabel(m) === detail && m.severity > bestExact) {
+		if (detail && markerDetailLabels(m).includes(detail) && m.severity > bestExact) {
 			bestExact = m.severity;
 		}
 	}
 	if (bestExact >= 0) return severityName(bestExact);
 	if (bestMsg >= 0) return severityName(bestMsg);
-	return "warning";
+	return null;
+}
+
+/** Matches a rendered Monaco `.marker.hover-contents` row back to its model marker severity. */
+export function matchMarkerSeverity(
+	messageText: string,
+	detailText: string,
+	markers: readonly MarkerLike[],
+	lineNumber?: number | null,
+): HoverSeverity {
+	const msg = normalizeSpace(messageText);
+	const detail = normalizeSpace(detailText);
+	if (!msg || !markers.length) return "warning";
+
+	if (lineNumber != null && lineNumber > 0) {
+		const scoped = markers.filter(
+			(m) =>
+				m.startLineNumber !== undefined &&
+				m.endLineNumber !== undefined &&
+				lineNumber >= m.startLineNumber &&
+				lineNumber <= m.endLineNumber,
+		);
+		if (scoped.length) {
+			const hit = matchIn(msg, detail, scoped);
+			if (hit) return hit;
+		}
+	}
+
+	return matchIn(msg, detail, markers) ?? "warning";
 }
 
 /**
@@ -58,6 +87,7 @@ export function observeMarkerHoverSeverity(editor: monaco.editor.ICodeEditor): (
 	if (typeof MutationObserver === "undefined") return () => {};
 	let observer: MutationObserver | null = null;
 	let observedEl: Element | null = null;
+	let hoveredLine: number | null = null;
 
 	const stamp = () => {
 		const model = editor.getModel();
@@ -66,13 +96,14 @@ export function observeMarkerHoverSeverity(editor: monaco.editor.ICodeEditor): (
 		const markerNodes = root.querySelectorAll<HTMLElement>(".monaco-hover .marker.hover-contents");
 		if (!markerNodes.length) return;
 		const markers = monaco.editor.getModelMarkers({ resource: model.uri });
+		const line = hoveredLine ?? editor.getPosition()?.lineNumber ?? null;
 		for (const el of markerNodes) {
 			const row = el.closest<HTMLElement>(".hover-row");
 			if (!row) continue;
 			const spans = el.querySelectorAll<HTMLElement>(":scope > span");
-			const msg = spans[0]?.textContent ?? el.textContent ?? "";
-			const detail = spans[1]?.textContent ?? "";
-			const sev = matchMarkerSeverity(msg, detail, markers);
+			const msg = spans[0]?.innerText ?? spans[0]?.textContent ?? el.innerText ?? el.textContent ?? "";
+			const detail = spans[1]?.innerText ?? spans[1]?.textContent ?? "";
+			const sev = matchMarkerSeverity(msg, detail, markers, line);
 			if (row.dataset.severity !== sev) row.dataset.severity = sev;
 		}
 	};
@@ -93,9 +124,16 @@ export function observeMarkerHoverSeverity(editor: monaco.editor.ICodeEditor): (
 		stamp();
 	};
 
-	const sub = editor.onDidChangeModel(attach);
+	const moveSub = editor.onMouseMove?.((e) => {
+		hoveredLine = e.target?.position?.lineNumber ?? null;
+	});
+	const sub = editor.onDidChangeModel(() => {
+		hoveredLine = null;
+		attach();
+	});
 	attach();
 	return () => {
+		moveSub?.dispose();
 		sub.dispose();
 		observer?.disconnect();
 		observer = null;

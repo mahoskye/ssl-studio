@@ -40,6 +40,21 @@ const PROBE_LINE = PROBE_SCOPES.map((_, i) => `S${i}`).join(" ");
 let probe: IGrammar;
 const FONT_STYLES = (style: number) => [style & 1 && "italic", style & 2 && "bold", style & 4 && "underline", style & 8 && "strikethrough"].filter(Boolean).join(" ");
 
+/** Expands 3/4-digit shorthand hex colors (#RGB / #RGBA) to 6-digit hex and validates RRGGBB for Monaco theme rules. */
+export function normalizeMonacoHex(color: string | undefined): string | undefined {
+	if (!color) return undefined;
+	const hex = color.trim().replace(/^#/, "");
+	let normalized: string;
+	if (/^[0-9a-f]{3,4}$/i.test(hex)) {
+		normalized = `${hex[0]}${hex[0]}${hex[1]}${hex[1]}${hex[2]}${hex[2]}`;
+	} else if (/^[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(hex)) {
+		normalized = hex.slice(0, 6);
+	} else {
+		return undefined;
+	}
+	return /^[0-9a-f]{6}$/i.test(normalized) ? normalized : undefined;
+}
+
 export async function loadGrammar() {
 	await oniguruma.loadWASM({ data: await (await fetch("./onig.wasm")).arrayBuffer() });
 	registry = new Registry({
@@ -64,12 +79,11 @@ export function applyTokenTheme(theme: IRawTheme): monaco.editor.ITokenThemeRule
 	const colors = registry.getColorMap();
 	const rules: monaco.editor.ITokenThemeRule[] = [];
 	colors.forEach((color, id) => {
-		if (!color) return;
+		const foreground = normalizeMonacoHex(color);
+		if (!foreground) return;
 		for (let style = 0; style < 16; style++) {
-			const fontStyle = [style & 1 && "italic", style & 2 && "bold", style & 4 && "underline", style & 8 && "strikethrough"]
-				.filter(Boolean)
-				.join(" ");
-			rules.push({ token: `c${id}.${style}`, foreground: color.replace("#", ""), fontStyle });
+			const fontStyle = FONT_STYLES(style);
+			rules.push({ token: `c${id}.${style}`, foreground, fontStyle });
 		}
 	});
 	// The documents' tokens: each takes the colour and style the theme gives its scope.
@@ -82,9 +96,9 @@ export function applyTokenTheme(theme: IRawTheme): monaco.editor.ITokenThemeRule
 	}
 	for (const [token, scope] of Object.entries(DOCUMENT_SCOPES)) {
 		const m = styleOf.get(scope);
-		const color = m === undefined ? undefined : colors[FOREGROUND(m)];
-		if (!color) continue;
-		const rule = { foreground: color.replace("#", ""), fontStyle: FONT_STYLES(FONT_STYLE(m!)) };
+		const foreground = normalizeMonacoHex(m === undefined ? undefined : colors[FOREGROUND(m)]);
+		if (!foreground) continue;
+		const rule = { foreground, fontStyle: FONT_STYLES(FONT_STYLE(m!)) };
 		rules.push({ token, ...rule });
 		// And once for each language: the editor's own themes have rules such as "string.sql", which would win over "string".
 		for (const postfix of DOCUMENT_POSTFIXES) if (!token.endsWith(`.${postfix}`)) rules.push({ token: `${token}.${postfix}`, ...rule });
@@ -146,6 +160,35 @@ export function codeOnly(text: string): string {
 			const token = line.slice(result.tokens[i]!, end);
 			out += TOKEN_TYPE(result.tokens[i + 1]!) === STRING_TOKEN ? token : token.replace(/\s+/g, "");
 		}
+	}
+	return out;
+}
+
+/**
+ * Comment character spans per line derived strictly from the canonical SSL
+ * TextMate grammar (ADR 0003). Returns null before `loadGrammar()` completes.
+ */
+export function sslCommentSpans(
+	lines: readonly string[],
+	targetGrammar: IGrammar | undefined = grammar,
+): { from: number; to: number }[][] | null {
+	if (!targetGrammar) return null;
+	let stack = INITIAL;
+	const out: { from: number; to: number }[][] = [];
+	for (const line of lines) {
+		const result = targetGrammar.tokenizeLine2(line, stack, 500);
+		stack = result.ruleStack;
+		const spans: { from: number; to: number }[] = [];
+		for (let i = 0; i < result.tokens.length; i += 2) {
+			if (TOKEN_TYPE(result.tokens[i + 1]!) !== COMMENT_TOKEN) continue;
+			const from = result.tokens[i]!;
+			const to = i + 2 < result.tokens.length ? result.tokens[i + 2]! : line.length;
+			if (to <= from) continue;
+			const prev = spans.at(-1);
+			if (prev && prev.to === from) prev.to = to;
+			else spans.push({ from, to });
+		}
+		out.push(spans);
 	}
 	return out;
 }

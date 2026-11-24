@@ -123,7 +123,11 @@ export function trackXml(model: monaco.editor.ITextModel) {
 		const text = model.getValue();
 		if (!looksLikeXml(text) || text.length > XML_CHARS) return publishFindings(model, XML_OWNER, []);
 		// The reader reports a fault as an element in what it returns; its message is the element's own block of text.
-		const error = new DOMParser().parseFromString(text, "application/xml").querySelector("parsererror");
+		// Verify the parsererror namespace so valid XML containing a literal `<parsererror>` element is not flagged.
+		const doc = new DOMParser().parseFromString(text, "application/xml");
+		const error = Array.from(doc.querySelectorAll("parsererror")).find(
+			(el) => el.namespaceURI === "http://www.mozilla.org/newlayout/xml/parsererror.xml" || el.namespaceURI === "http://www.w3.org/1999/xhtml",
+		);
 		const said = error?.querySelector("div")?.textContent || error?.textContent;
 		if (!said) return publishFindings(model, XML_OWNER, []);
 		const problem = xmlProblem(said);

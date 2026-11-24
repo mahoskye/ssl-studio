@@ -58,7 +58,7 @@ async function start() {
 		setState("workspace", workspace);
 		setState("lsp", await backend.lspState());
 		await Promise.all([loadSettings(true), loadProject()]);
-		void session.start(workspace.root);
+		if (state.lsp.state === "running") void session.start(workspace.root).catch(() => {});
 	}
 	render(() => <App />, document.getElementById("app")!);
 	// The folder opens with the files it was left with.

@@ -20,6 +20,8 @@ export type SqlKeywordCase = "upper" | "lower" | "preserve";
 
 export const FORMATTABLE_NON_SSL_LANGUAGES = new Set([
 	"sql",
+	"pgsql",
+	"mysql",
 	"javascript",
 	"typescript",
 	"html",
