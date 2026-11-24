@@ -42,7 +42,7 @@ export type SchemaList = {
 
 const parts = (file: DocFile) => file.name.split(/[\\/]/);
 const isReadme = (file: DocFile) => /^readme\.(md|markdown)$/i.test(parts(file).at(-1) ?? "");
-const byName = (a: string, b: string) => a.localeCompare(b, undefined, { sensitivity: "base", numeric: true });
+const byName = (a: string, b: string) => a.localeCompare(b, undefined, { sensitivity: "base", numeric: true }) || a.localeCompare(b);
 
 /**
  * The schema list. A kind the app knows is shown once the project is set up, empty or not (it is where the first of
@@ -64,7 +64,11 @@ export function schemaList(files: readonly DocFile[], options: { configured?: bo
 				...kind,
 				folder,
 				files: all.filter((file) => parts(file).length <= 2),
-				parts: inside.map((name) => ({ name, folder: `${folder}/${name}`, files: all.filter((file) => parts(file).length > 2 && parts(file)[1] === name) })),
+				parts: inside.map((name) => {
+					const partFiles = all.filter((file) => parts(file).length > 2 && parts(file)[1] === name);
+					const partFolder = partFiles[0] ? parts(partFiles[0]).slice(0, 2).join("/") : `${folder}/${name}`;
+					return { name, folder: partFolder, files: partFiles };
+				}),
 				count: all.length,
 			};
 		})
@@ -80,5 +84,5 @@ export function schemaList(files: readonly DocFile[], options: { configured?: bo
  */
 export function schemaRowTitle(file: DocFile, under: number): string {
 	const rest = parts(file).slice(under).join("/");
-	return isReadme(file) ? rest : file.title || rest;
+	return isReadme(file) ? rest : file.title?.trim() || rest;
 }

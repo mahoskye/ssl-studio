@@ -27,23 +27,49 @@ export type Table = {
 };
 export type CsvTable = Table;
 
+function detectCsvDelimiter(text: string, bomOffset: number): CsvDelimiter {
+	const n = text.length;
+	let i = bomOffset;
+	// Skip leading blank lines starting after BOM before inspecting the first logical record.
+	while (i < n && (text[i] === "\r" || text[i] === "\n")) i++;
+	// Extract unquoted characters of the first logical record up to the first unquoted CR/LF,
+	// respecting quoted spans (including multiline headers like `"Last,\nFirst"\tStatus`).
+	let unquoted = "";
+	let atFieldStart = true;
+	while (i < n) {
+		const ch = text[i]!;
+		if (ch === "\r" || ch === "\n") break;
+		if (atFieldStart && ch === '"') {
+			i++;
+			while (i < n) {
+				if (text[i] === '"') {
+					if (text[i + 1] === '"') {
+						i += 2;
+						continue;
+					}
+					i++;
+					break;
+				}
+				i++;
+			}
+			atFieldStart = false;
+			continue;
+		}
+		unquoted += ch;
+		atFieldStart = ch === "," || ch === "\t" || ch === ";" || ch === "|";
+		i++;
+	}
+	if (unquoted.includes("\t") && !unquoted.includes(",")) return "\t";
+	if (unquoted.includes(";") && !unquoted.includes(",") && !unquoted.includes("\t")) return ";";
+	if (unquoted.includes("|") && !unquoted.includes(",") && !unquoted.includes("\t") && !unquoted.includes(";")) return "|";
+	return ",";
+}
+
 /** Reads the rows, a quoted cell holding the delimiter, a line end or a doubled quote as itself. Blank lines are passed over. */
 export function parseCsv(text: string, options?: ParseCsvOptions): Table {
 	// Skip UTF-8 BOM without shifting offsets into `text` so cell edits land on exact byte/char ranges.
 	const bomOffset = text.startsWith("\uFEFF") ? 1 : 0;
-	const firstEnd = text.search(/\r?\n|$/);
-	const firstLine = text.slice(bomOffset, firstEnd < 0 ? text.length : firstEnd);
-	// Strip quoted sections on line 1 before detecting delimiter so `"Last, First"\tStatus` is recognized as TSV.
-	const unquotedFirst = firstLine.replace(/"(?:""|[^"])*"/g, "");
-	const delimiter: CsvDelimiter =
-		options?.delimiter ??
-		(unquotedFirst.includes("\t") && !unquotedFirst.includes(",")
-			? "\t"
-			: unquotedFirst.includes(";") && !unquotedFirst.includes(",") && !unquotedFirst.includes("\t")
-				? ";"
-				: unquotedFirst.includes("|") && !unquotedFirst.includes(",") && !unquotedFirst.includes("\t") && !unquotedFirst.includes(";")
-					? "|"
-					: ",");
+	const delimiter: CsvDelimiter = options?.delimiter ?? detectCsvDelimiter(text, bomOffset);
 	const all: Cell[][] = [];
 	let row: Cell[] = [];
 	let i = bomOffset;
@@ -124,8 +150,9 @@ export function csvCell(value: string, delimiter: Table["delimiter"] = ","): str
 	return value.includes(delimiter) || /["\r\n]/.test(value) || value !== value.trim() ? `"${value.replace(/"/g, '""')}"` : value;
 }
 
-/** A whole row as a line of text. */
-export const csvRow = (values: readonly string[], delimiter: Table["delimiter"] = ",") => values.map((v) => csvCell(v, delimiter)).join(delimiter);
+/** A whole row as a line of text. Preserves a 1-column empty row as `""` so re-parsing never drops it as a blank line. */
+export const csvRow = (values: readonly string[], delimiter: Table["delimiter"] = ",") =>
+	values.length === 1 && values[0] === "" ? '""' : values.map((v) => csvCell(v, delimiter)).join(delimiter);
 
 /** The place of the column of that name, whatever its case; -1 when there is none. */
 export const columnOf = (table: Pick<Table, "header">, name: string) => table.header.findIndex((c) => c.text.trim().toLowerCase() === name.toLowerCase());
@@ -270,13 +297,14 @@ export function addCsvColumn(text: string, table: Table, name: string, defaultVa
 	for (let r = 0; r < allRows.length; r++) {
 		const cells = allRows[r]!;
 		if (!cells.length) continue;
-		const rowEnd = cells[cells.length - 1]!.end;
-		out += text.slice(cursor, rowEnd);
 		const isHeaderRow = !headerless && r === 0;
+		const isLongRagged = !isHeaderRow && cells.length > count;
+		const insertAt = isLongRagged ? cells[count - 1]!.end : cells[cells.length - 1]!.end;
+		out += text.slice(cursor, insertAt);
 		const padCount = isHeaderRow ? 0 : Math.max(0, count - cells.length);
 		const val = isHeaderRow ? csvCell(trimmed, table.delimiter) : csvCell(defaultValue, table.delimiter);
 		out += table.delimiter.repeat(padCount + 1) + val;
-		cursor = rowEnd;
+		cursor = insertAt;
 	}
 	out += text.slice(cursor);
 	return out;
@@ -313,8 +341,9 @@ export function deleteCsvColumn(text: string, table: Table, colIdx: number): str
 			const c = cells[i]!;
 			kept.push(text.slice(c.start, c.end));
 		}
-		// If deleting column `colIdx` on a ragged 1-cell row leaves zero kept cells, emit `""` so the row isn't silently dropped as a blank line!
-		out += kept.length ? kept.join(table.delimiter) : '""';
+		// If deleting column `colIdx` leaves zero cells or a single empty unquoted cell,
+		// emit `""` so the row isn't silently dropped as a blank line on re-parse.
+		out += kept.length === 0 || (kept.length === 1 && kept[0] === "") ? '""' : kept.join(table.delimiter);
 		cursor = rowEnd;
 	}
 	out += text.slice(cursor);
@@ -463,6 +492,7 @@ export function csvDuplicateKeys(table: Table, colIdx = 0): { key: string; rows:
 export function parseClipboardGrid(raw: string): string[][] {
 	const clean = raw.replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\n$/, "");
 	if (!clean) return [];
+	const hasGridSeparator = clean.includes("\t") || clean.includes("\n");
 	const grid: string[][] = [];
 	let row: string[] = [];
 	let i = 0;
@@ -470,20 +500,31 @@ export function parseClipboardGrid(raw: string): string[][] {
 	while (i <= n) {
 		let val = "";
 		if (clean[i] === '"') {
-			i++;
-			while (i < n) {
-				if (clean[i] === '"') {
-					if (clean[i + 1] === '"') {
-						val += '"';
-						i += 2;
+			let j = i + 1;
+			let unquoted = "";
+			let closed = false;
+			let hasEscapedQuote = false;
+			while (j < n) {
+				if (clean[j] === '"') {
+					if (clean[j + 1] === '"') {
+						unquoted += '"';
+						hasEscapedQuote = true;
+						j += 2;
 						continue;
 					}
-					i++;
+					j++;
+					closed = true;
 					break;
 				}
-				val += clean[i++];
+				unquoted += clean[j++];
 			}
-			while (i < n && clean[i] !== "\t" && clean[i] !== "\n") val += clean[i++];
+			const followedByBoundary = closed && (j >= n || clean[j] === "\t" || clean[j] === "\n");
+			if (followedByBoundary && (hasGridSeparator || hasEscapedQuote)) {
+				val = unquoted;
+				i = j;
+			} else {
+				while (i < n && clean[i] !== "\t" && clean[i] !== "\n") val += clean[i++];
+			}
 		} else {
 			while (i < n && clean[i] !== "\t" && clean[i] !== "\n") val += clean[i++];
 		}

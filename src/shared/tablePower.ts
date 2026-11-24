@@ -164,12 +164,13 @@ export function sanitizeTableViewState(raw: unknown, colCount?: number): TableVi
 		return out;
 	};
 
-	const frozenCols = uniqueCols(obj.frozenCols);
 	const colOrder = uniqueCols(obj.colOrder);
 	let hiddenCols = uniqueCols(obj.hiddenCols);
 	if (colCount !== undefined && colCount > 0 && hiddenCols.length >= colCount) {
 		hiddenCols = hiddenCols.slice(0, colCount - 1);
 	}
+	const hiddenSet = new Set(hiddenCols);
+	const frozenCols = uniqueCols(obj.frozenCols).filter((col) => !hiddenSet.has(col));
 
 	const order: SortSpec[] = [];
 	if (Array.isArray(obj.order)) {
@@ -483,6 +484,10 @@ function escapeRegExpLiteral(str: string): string {
 	return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+const CELL_WORD_CHAR = "[A-Za-z0-9_]";
+const CELL_WORD_START = `(?:(?<!${CELL_WORD_CHAR})(?=${CELL_WORD_CHAR})|(?!${CELL_WORD_CHAR}))`;
+const CELL_WORD_END = `(?:(?<=${CELL_WORD_CHAR})(?!${CELL_WORD_CHAR})|(?<!${CELL_WORD_CHAR}))`;
+
 /**
  * Compiles a cell search query into a safe global `RegExp` supporting case sensitivity,
  * whole-word boundaries, and regular expressions. Never throws on invalid regex syntax.
@@ -492,7 +497,7 @@ export function compileCellMatcher(query: string, opts?: CellFindOptions): Compi
 	const flags = opts?.caseSensitive ? "g" : "gi";
 	let pattern: string;
 	if (opts?.regex) {
-		pattern = opts.wholeWord ? `\\b(?:${query})\\b` : query;
+		pattern = opts.wholeWord ? `${CELL_WORD_START}(?:${query})${CELL_WORD_END}` : query;
 	} else {
 		const escaped = escapeRegExpLiteral(query);
 		if (opts?.wholeWord) {
@@ -504,6 +509,7 @@ export function compileCellMatcher(query: string, opts?: CellFindOptions): Compi
 		}
 	}
 	try {
+		if (opts?.regex && opts.wholeWord) new RegExp(query, flags);
 		return { ok: true, regex: new RegExp(pattern, flags) };
 	} catch (e: any) {
 		return { ok: false, error: e?.message ? String(e.message) : "Invalid regular expression" };

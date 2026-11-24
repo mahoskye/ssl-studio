@@ -24,6 +24,12 @@ export type SqlForeignKeyDef = {
 	column: string;
 	refTable: string;
 	refColumn?: string;
+	/** Local column list when this is a composite foreign key (`FOREIGN KEY (c1, c2)`). */
+	columns?: string[];
+	/** Referenced column list when this is a composite foreign key (`REFERENCES tbl (r1, r2)`). */
+	refColumns?: string[];
+	/** Optional `ON DELETE` referential action (e.g. `CASCADE`, `SET NULL`). */
+	onDelete?: string;
 };
 
 export type SqlIndexDef = {
@@ -48,10 +54,48 @@ export type SqlSchemaDrift = {
 	dropped: string[];
 };
 
+const isIdentChar = (ch: string | undefined) => Boolean(ch && /[A-Za-z0-9_$#]/.test(ch));
+
+/** Returns the closing delimiter for an Oracle Q-quoted string (`q'[...]'`, `q'(...)'`, `q'!...!'`). */
+function oracleQCloseDelim(open: string): string {
+	if (open === "[") return "]";
+	if (open === "(") return ")";
+	if (open === "{") return "}";
+	if (open === "<") return ">";
+	return open;
+}
+
+/** Detects an Oracle Q-quote opener (`[qQ]'<delim>`) at `pos` when not preceded by an identifier character. */
+function matchOracleQQuote(src: string, pos: number): { closeDelim: string; bodyStart: number } | null {
+	const ch = src[pos];
+	if ((ch !== "q" && ch !== "Q") || src[pos + 1] !== "'" || pos + 2 >= src.length) return null;
+	if (pos > 0) {
+		const prev = src[pos - 1]!;
+		const isNationalPrefix = (prev === "n" || prev === "N") && (pos < 2 || !isIdentChar(src[pos - 2]));
+		if (isIdentChar(prev) && !isNationalPrefix) return null;
+	}
+	const delim = src[pos + 2]!;
+	if (/\s/.test(delim)) return null;
+	return { closeDelim: oracleQCloseDelim(delim), bodyStart: pos + 3 };
+}
+
+/** Detects a PostgreSQL dollar-quote opener (`$$` or `$tag$`) at `pos` when not preceded by an identifier character. */
+function matchPgDollarTag(src: string, pos: number): string | null {
+	if (src[pos] !== "$") return null;
+	if (pos > 0 && isIdentChar(src[pos - 1])) return null;
+	let j = pos + 1;
+	while (j < src.length && /[A-Za-z0-9_]/.test(src[j]!)) j++;
+	if (j < src.length && src[j] === "$") {
+		return src.slice(pos, j + 1);
+	}
+	return null;
+}
+
 /**
- * Strips `--` line comments and `/* ... *\/` block comments while preserving SQL
- * single-quoted strings (`'-- keep --'`, `'it''s'`) and quoted identifiers.
- * When `maskStrings` is true, replaces single-quoted string contents with spaces
+ * Strips `--` line comments and nested `/* ... *\/` block comments while preserving SQL
+ * single-quoted strings (`'-- keep --'`, `'it''s'`), Oracle Q-quoted strings (`q'[...]'`),
+ * PostgreSQL dollar-quoted strings (`$$...$$`, `$tag$...$tag$`), and quoted/bracketed/backtick identifiers.
+ * When `maskStrings` is true, replaces string literal contents with spaces (preserving `\n` and exact offsets)
  * so dynamic SQL like `EXEC('CREATE TABLE ...')` never triggers false object hits.
  */
 function sanitizeSql(sql: string, maskStrings = false): string {
@@ -61,6 +105,42 @@ function sanitizeSql(sql: string, maskStrings = false): string {
 	while (i < n) {
 		const ch = sql[i]!;
 		const next = sql[i + 1];
+		// Oracle Q-quoted string literal (`q'[...]'`, `Q'!...!'`)
+		const qOpen = matchOracleQQuote(sql, i);
+		if (qOpen) {
+			const { closeDelim, bodyStart } = qOpen;
+			const closeSeq = `${closeDelim}'`;
+			const closePos = sql.indexOf(closeSeq, bodyStart);
+			const endPos = closePos >= 0 ? closePos + 2 : n;
+			if (!maskStrings) {
+				out += sql.slice(i, endPos);
+			} else {
+				// Preserve exact character offsets and newlines while neutralizing delimiters and contents.
+				out += " ' ";
+				const innerEnd = closePos >= 0 ? closePos : n;
+				for (let k = bodyStart; k < innerEnd; k++) out += sql[k] === "\n" ? "\n" : " ";
+				if (closePos >= 0) out += " '";
+			}
+			i = endPos;
+			continue;
+		}
+		// PostgreSQL dollar-quoted string literal (`$$...$$`, `$tag$...$tag$`)
+		const dollarTag = matchPgDollarTag(sql, i);
+		if (dollarTag) {
+			const bodyStart = i + dollarTag.length;
+			const closePos = sql.indexOf(dollarTag, bodyStart);
+			const endPos = closePos >= 0 ? closePos + dollarTag.length : n;
+			if (!maskStrings) {
+				out += sql.slice(i, endPos);
+			} else {
+				out += " ".repeat(dollarTag.length - 1) + "'";
+				const innerEnd = closePos >= 0 ? closePos : n;
+				for (let k = bodyStart; k < innerEnd; k++) out += sql[k] === "\n" ? "\n" : " ";
+				if (closePos >= 0) out += "'" + " ".repeat(dollarTag.length - 1);
+			}
+			i = endPos;
+			continue;
+		}
 		// Single-quoted string literal
 		if (ch === "'") {
 			out += ch;
@@ -81,15 +161,22 @@ function sanitizeSql(sql: string, maskStrings = false): string {
 			}
 			continue;
 		}
-		// Double-quoted or bracketed identifier (preserved verbatim)
-		if (ch === '"' || ch === "[") {
-			const endCh = ch === "[" ? "]" : '"';
+		// Double-quoted, backtick-quoted, or bracketed identifier (preserved verbatim)
+		if (ch === '"' || ch === "[" || ch === "`") {
+			const endCh = ch === "[" ? "]" : ch;
 			out += ch;
 			i++;
-			while (i < n && sql[i] !== endCh) {
+			while (i < n) {
+				if (sql[i] === endCh) {
+					out += sql[i++];
+					if (i < n && sql[i] === endCh) {
+						out += sql[i++];
+						continue;
+					}
+					break;
+				}
 				out += sql[i++];
 			}
-			if (i < n) out += sql[i++];
 			continue;
 		}
 		// Line comment `-- ...`
@@ -97,14 +184,24 @@ function sanitizeSql(sql: string, maskStrings = false): string {
 			while (i < n && sql[i] !== "\n") i++;
 			continue;
 		}
-		// Block comment `/* ... */`
+		// Nested block comment `/* ... /* ... */ ... */`
 		if (ch === "/" && next === "*") {
+			let depth = 1;
 			i += 2;
-			while (i < n && !(sql[i] === "*" && sql[i + 1] === "/")) {
+			while (i < n && depth > 0) {
+				if (sql[i] === "/" && sql[i + 1] === "*") {
+					depth++;
+					i += 2;
+					continue;
+				}
+				if (sql[i] === "*" && sql[i + 1] === "/") {
+					depth--;
+					i += 2;
+					continue;
+				}
 				if (sql[i] === "\n") out += "\n";
 				i++;
 			}
-			if (i < n) i += 2;
 			out += " ";
 			continue;
 		}
@@ -112,6 +209,100 @@ function sanitizeSql(sql: string, maskStrings = false): string {
 		i++;
 	}
 	return out;
+}
+
+/** Replaces single-quoted, Oracle Q-quoted, and PG dollar-quoted string contents with spaces at identical offsets. */
+function maskSingleQuoted(text: string): string {
+	let out = "";
+	let i = 0;
+	const n = text.length;
+	while (i < n) {
+		const qOpen = matchOracleQQuote(text, i);
+		if (qOpen) {
+			const closePos = text.indexOf(`${qOpen.closeDelim}'`, qOpen.bodyStart);
+			const endPos = closePos >= 0 ? closePos + 2 : n;
+			out += " ' ";
+			const innerEnd = closePos >= 0 ? closePos : n;
+			for (let k = qOpen.bodyStart; k < innerEnd; k++) out += text[k] === "\n" ? "\n" : " ";
+			if (closePos >= 0) out += " '";
+			i = endPos;
+			continue;
+		}
+		const dollarTag = matchPgDollarTag(text, i);
+		if (dollarTag) {
+			const bodyStart = i + dollarTag.length;
+			const closePos = text.indexOf(dollarTag, bodyStart);
+			const endPos = closePos >= 0 ? closePos + dollarTag.length : n;
+			out += " ".repeat(dollarTag.length - 1) + "'";
+			const innerEnd = closePos >= 0 ? closePos : n;
+			for (let k = bodyStart; k < innerEnd; k++) out += text[k] === "\n" ? "\n" : " ";
+			if (closePos >= 0) out += "'" + " ".repeat(dollarTag.length - 1);
+			i = endPos;
+			continue;
+		}
+		if (text[i] === "'") {
+			out += "'";
+			i++;
+			while (i < n) {
+				if (text[i] === "'") {
+					if (text[i + 1] === "'") {
+						out += "  ";
+						i += 2;
+						continue;
+					}
+					out += "'";
+					i++;
+					break;
+				}
+				out += text[i] === "\n" ? "\n" : " ";
+				i++;
+			}
+			continue;
+		}
+		out += text[i++]!;
+	}
+	return out;
+}
+
+/** Masks single-quoted literals AND `CHECK (...)` expressions so constraint checks never match inside string defaults or CHECK clauses. */
+function maskQuotedAndChecks(text: string): string {
+	const masked = maskSingleQuoted(text);
+	const chars = masked.split("");
+	const checkRe = /\bCHECK\s*\(/gi;
+	for (const m of masked.matchAll(checkRe)) {
+		const start = m.index ?? 0;
+		const openParen = start + m[0].length - 1;
+		const scanned = scanBalancedParens(masked, openParen);
+		const end = scanned ? scanned.end : masked.length;
+		for (let k = start; k < end; k++) {
+			if (chars[k] !== "\n") chars[k] = " ";
+		}
+	}
+	return chars.join("");
+}
+
+/** Finds the start offset of the current SQL statement before `pos` on comment/string-masked SQL. */
+function findStatementStart(maskedSql: string, pos: number): number {
+	let i = pos - 1;
+	while (i >= 0) {
+		const ch = maskedSql[i]!;
+		if (ch === ";") return i + 1;
+		if (ch === "]" || ch === '"' || ch === "`") {
+			const open = ch === "]" ? "[" : ch;
+			i--;
+			while (i >= 0 && maskedSql[i] !== open) i--;
+			i--;
+			continue;
+		}
+		if (ch === "\n") {
+			const lineStart = maskedSql.lastIndexOf("\n", i - 1) + 1;
+			if (/^[ \t]*GO[ \t]*\r?$/i.test(maskedSql.slice(lineStart, i))) {
+				return i + 1;
+			}
+		}
+		i--;
+	}
+	return 0;
 }
 
 const cleanIdent = (raw: string) => raw.trim().replace(/^[[`"]|[\]`"]$/g, "");
@@ -131,6 +322,30 @@ function normalizeObjectName(raw: string): { name: string; bareName: string } {
 	return { name, bareName };
 }
 
+const bareTableKey = (raw: string): string => {
+	const { bareName, name } = normalizeObjectName(raw);
+	return (bareName || name || raw).trim().toLowerCase();
+};
+
+const fkLocalCols = (fk: SqlForeignKeyDef): string[] =>
+	fk.columns?.length
+		? fk.columns
+		: fk.column
+				.split(",")
+				.map((c) => cleanIdent(c))
+				.filter(Boolean);
+
+const fkRefCols = (fk: SqlForeignKeyDef): string[] => {
+	if (fk.refColumns?.length) return fk.refColumns;
+	if (fk.refColumn) {
+		return fk.refColumn
+			.split(",")
+			.map((c) => cleanIdent(c))
+			.filter(Boolean);
+	}
+	return [];
+};
+
 /**
  * Extracts created (and optionally altered) database object names and kinds from
  * SQL Server (T-SQL) and Oracle (PL/SQL) DDL. Excludes indexes by default
@@ -141,7 +356,7 @@ export function extractSqlObjects(sql: string, options: { includeIndexes?: boole
 	const out: SqlObjectEntry[] = [];
 	const seen = new Set<string>();
 	const modifiers =
-		"(?:OR\\s+(?:REPLACE|ALTER)|UNIQUE|CLUSTERED|NONCLUSTERED|BITMAP|COLUMNSTORE|MATERIALIZED|GLOBAL\\s+TEMPORARY|PRIVATE\\s+TEMPORARY|LOCAL\\s+TEMPORARY|TEMPORARY|TEMP|FORCE|NOFORCE|EDITIONABLE|NONEDITIONABLE|PUBLIC)";
+		"(?:OR\\s+(?:REPLACE|ALTER)|UNIQUE|CLUSTERED|NONCLUSTERED|BITMAP|COLUMNSTORE|MATERIALIZED|GLOBAL\\s+TEMPORARY|PRIVATE\\s+TEMPORARY|LOCAL\\s+TEMPORARY|TEMPORARY|TEMP|UNLOGGED|FORCE|NOFORCE|EDITIONABLE|NONEDITIONABLE|PUBLIC|FULLTEXT|SPATIAL)";
 	const kinds = "TABLE|VIEW|PROC(?:EDURE)?|FUNCTION|TRIGGER|SEQUENCE|PACKAGE(?:\\s+BODY)?|SYNONYM|TYPE|INDEX";
 	const classifyKind = (rawKind: string): SqlObjectEntry["kind"] => {
 		const u = rawKind.toUpperCase();
@@ -156,7 +371,9 @@ export function extractSqlObjects(sql: string, options: { includeIndexes?: boole
 		if (u.startsWith("INDEX")) return "index";
 		return "table";
 	};
-	const addMatch = (rawKind: string, rawName: string, action: "create" | "alter") => {
+	const addMatch = (rawKind: string, rawName: string, action: "create" | "alter", matchIndex: number) => {
+		const stmtBefore = cleaned.slice(findStatementStart(cleaned, matchIndex), matchIndex).trimStart();
+		if (/^(?:GRANT|REVOKE|DENY)\b/i.test(stmtBefore)) return;
 		const kind = classifyKind(rawKind);
 		if (kind === "index" && !options.includeIndexes) return;
 		const { name, bareName } = normalizeObjectName(rawName);
@@ -168,17 +385,20 @@ export function extractSqlObjects(sql: string, options: { includeIndexes?: boole
 		out.push({ name, bareName, kind, ...(action === "alter" ? { action } : {}) });
 	};
 
-	const createRe = new RegExp(`\\bCREATE\\s+(?:${modifiers}\\s+)*(${kinds})\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${QUALIFIED_NAME})`, "gi");
-	for (const m of cleaned.matchAll(createRe)) addMatch(m[1]!, m[2]!, "create");
+	const createRe = new RegExp(
+		`\\bCREATE\\s+(?:${modifiers}\\s+)*(${kinds})\\s+(?:CONCURRENTLY\\s+)?(?:IF\\s+NOT\\s+EXISTS\\s+)?(${QUALIFIED_NAME})`,
+		"gi",
+	);
+	for (const m of cleaned.matchAll(createRe)) addMatch(m[1]!, m[2]!, "create", m.index ?? 0);
 
 	if (options.includeAlter) {
 		const alterRe = new RegExp(`\\bALTER\\s+(?:${modifiers}\\s+)*(${kinds})\\s+(?:IF\\s+EXISTS\\s+)?(${QUALIFIED_NAME})`, "gi");
-		for (const m of cleaned.matchAll(alterRe)) addMatch(m[1]!, m[2]!, "alter");
+		for (const m of cleaned.matchAll(alterRe)) addMatch(m[1]!, m[2]!, "alter", m.index ?? 0);
 	}
 	return out;
 }
 
-/** Splits a parenthesized SQL column list on top-level commas (respecting nested parens, quotes, and `[bracketed]` identifiers). */
+/** Splits a parenthesized SQL column list on top-level commas (respecting nested parens, quotes, backticks, Q/dollar quotes, and `[bracketed]` identifiers). */
 function splitTopLevelCommas(body: string): string[] {
 	const parts: string[] = [];
 	let cur = "";
@@ -206,12 +426,29 @@ function splitTopLevelCommas(body: string): string[] {
 			}
 			continue;
 		}
+		const qOpen = matchOracleQQuote(body, i);
+		if (qOpen) {
+			const closePos = body.indexOf(`${qOpen.closeDelim}'`, qOpen.bodyStart);
+			const endPos = closePos >= 0 ? closePos + 2 : body.length;
+			cur += body.slice(i, endPos);
+			i = endPos - 1;
+			continue;
+		}
+		const dollarTag = matchPgDollarTag(body, i);
+		if (dollarTag) {
+			const bodyStart = i + dollarTag.length;
+			const closePos = body.indexOf(dollarTag, bodyStart);
+			const endPos = closePos >= 0 ? closePos + dollarTag.length : body.length;
+			cur += body.slice(i, endPos);
+			i = endPos - 1;
+			continue;
+		}
 		if (ch === "[") {
 			bracket = true;
 			cur += ch;
 			continue;
 		}
-		if (ch === "'" || ch === '"') {
+		if (ch === "'" || ch === '"' || ch === "`") {
 			quote = ch;
 			cur += ch;
 			continue;
@@ -229,40 +466,113 @@ function splitTopLevelCommas(body: string): string[] {
 	return parts;
 }
 
+const KNOWN_SQL_PARAM_TYPES = new Set([
+	"varchar", "varchar2", "nvarchar", "nvarchar2", "char", "nchar", "character",
+	"number", "numeric", "decimal", "dec", "float", "double", "real", "fixed",
+	"int", "integer", "bigint", "smallint", "tinyint", "mediumint", "bit",
+	"binary", "varbinary", "raw", "timestamp", "datetime", "datetime2", "datetimeoffset",
+	"time", "interval", "year", "enum", "set", "vector", "string", "bytes", "bfile", "urowid",
+]);
+
+const COL_CONSTRAINT_START_RE =
+	/^(?:(?:NOT\s+)?NULL|PRIMARY\s+KEY|UNIQUE|CHECK(?=\s*\()|DEFAULT|REFERENCES|CONSTRAINT|COLLATE|AUTOINCREMENT|IDENTITY|GENERATED)\b/i;
+
 /** Parses one column definition line from a `CREATE TABLE` or `ALTER TABLE ADD` list. */
 function parseColumnClause(rawClause: string): SqlColumnDef | null {
 	const line = rawClause.replace(/\s+/g, " ").trim();
 	if (!line) return null;
-	// Skip table-level constraints and SQL Server temporal table PERIOD clauses.
-	if (/^(?:CONSTRAINT|PRIMARY\s+KEY|FOREIGN\s+KEY|UNIQUE|CHECK|PERIOD\s+FOR\s+SYSTEM_TIME)\b/i.test(line)) return null;
-	// Skip MySQL-style table-level `INDEX idx_name (col)` / `KEY (col)` while keeping real columns named `KEY VARCHAR(50)`.
-	if (/^(?:INDEX|KEY)\s+(?:[A-Za-z_][\w$#]*\s*)?\(/i.test(line)) return null;
+	// Skip table-level constraints, PostgreSQL EXCLUDE/LIKE clauses, and SQL Server temporal table PERIOD clauses.
+	if (/^(?:CONSTRAINT|PRIMARY\s+KEY|FOREIGN\s+KEY|UNIQUE|CHECK|PERIOD\s+FOR\s+SYSTEM_TIME|EXCLUDE\s+USING|LIKE)\b/i.test(line)) {
+		return null;
+	}
+	// Skip MySQL/SQL Server table-level index clauses (`INDEX [ix] (...)`, `INDEX ix NONCLUSTERED (...)`, `KEY (...)`)
+	// while keeping real columns named `KEY VARCHAR(50)` / `KEY NUMBER(10,2)` / `INDEX VARCHAR(20)`.
+	if (/^(?:(?:FULLTEXT|SPATIAL)\s+)?(?:INDEX|KEY)\s*\(/i.test(line)) return null;
+	if (
+		new RegExp(
+			`^(?:(?:FULLTEXT|SPATIAL)\\s+)?(?:INDEX|KEY)\\s+(?:${IDENT_PART}\\s+)+(?:CLUSTERED|NONCLUSTERED|COLUMNSTORE|USING\\s+[A-Za-z_][\\w$]*|HASH|BTREE)\\b`,
+			"i",
+		).test(line)
+	) {
+		return null;
+	}
+	const maybeTblIdx = new RegExp(`^(?:(?:FULLTEXT|SPATIAL)\\s+)?(?:INDEX|KEY)\\s+(${IDENT_PART})\\s*\\(([^)]*)\\)`, "i").exec(line);
+	if (maybeTblIdx) {
+		const word = cleanIdent(maybeTblIdx[1]!).toLowerCase();
+		const parenInner = maybeTblIdx[2]!.trim();
+		const looksLikeTypeParam = /^(?:\d+(?:\s*,\s*\d+)?(?:\s+(?:CHAR|BYTE))?|MAX)$/i.test(parenInner);
+		if (!KNOWN_SQL_PARAM_TYPES.has(word) && !looksLikeTypeParam) return null;
+	}
 
-	// Column name
+	// Bare SQLite typeless column (`G`)
+	const bareMatch = new RegExp(`^(${IDENT_PART})$`).exec(line);
+	if (bareMatch) {
+		const bare = cleanIdent(bareMatch[1]!);
+		if (!bare || COL_CONSTRAINT_START_RE.test(bare)) return null;
+		return { name: bare, type: "", constraints: "" };
+	}
+
+	// Column name + remainder
 	const nameMatch = new RegExp(`^(${IDENT_PART})\\s+([\\s\\S]+)$`).exec(line);
 	if (!nameMatch) return null;
 	const colName = cleanIdent(nameMatch[1]!);
+	if (!colName || (!/^[\["`]/.test(nameMatch[1]!) && /^(?:DEFAULT|ON|USING|WITH)$/i.test(colName))) return null;
 	const rest = nameMatch[2]!.trim();
 
-	// Computed column: `FULL_NAME AS (A + B) PERSISTED`
-	const computedMatch = /^AS\s+(\([\s\S]*?\))(.*)$/i.exec(rest);
-	if (computedMatch) {
+	// Computed column with balanced parens: `FULL_NAME AS (COALESCE(A, '') + B) PERSISTED`
+	if (/^AS\s*\(/i.test(rest)) {
+		const openPos = rest.indexOf("(");
+		const scanned = scanBalancedParens(rest, openPos);
+		if (scanned) {
+			const expr = rest.slice(openPos, scanned.end);
+			const tail = rest.slice(scanned.end).trim();
+			return {
+				name: colName,
+				type: "COMPUTED",
+				constraints: `AS ${expr}${tail ? ` ${tail}` : ""}`,
+			};
+		}
+	}
+	// Paren-less computed column: `TOTAL AS PRICE * QTY PERSISTED`
+	if (/^AS\s+/i.test(rest)) {
+		return { name: colName, type: "COMPUTED", constraints: rest };
+	}
+	// Typeless generated column: `TOTAL GENERATED ALWAYS AS (PRICE * QTY) VIRTUAL`
+	if (/^GENERATED\s+(?:ALWAYS|BY\s+DEFAULT(?:\s+ON\s+NULL)?)\s+AS\b/i.test(rest)) {
+		return { name: colName, type: "COMPUTED", constraints: rest };
+	}
+
+	// SQLite typeless column with constraints: `F NOT NULL`, `F PRIMARY KEY`, `F DEFAULT 0`
+	if (COL_CONSTRAINT_START_RE.test(rest)) {
+		return { name: colName, type: "", constraints: rest };
+	}
+
+	// ANSI/Oracle/PostgreSQL INTERVAL types (`INTERVAL YEAR TO MONTH`, `INTERVAL DAY(2) TO SECOND(6)`)
+	const intervalMatch =
+		/^(INTERVAL(?:\s+(?:YEAR|MONTH|DAY|HOUR|MINUTE|SECOND)(?:\s*\([^)]*\))?(?:\s+TO\s+(?:YEAR|MONTH|DAY|HOUR|MINUTE|SECOND)(?:\s*\([^)]*\))?)?|\s*\([^)]*\))?)(?=\s|$)([\s\S]*)$/i.exec(
+			rest,
+		);
+	if (intervalMatch) {
 		return {
 			name: colName,
-			type: "COMPUTED",
-			constraints: `AS ${computedMatch[1]!}${computedMatch[2]!.trim() ? ` ${computedMatch[2]!.trim()}` : ""}`,
+			type: intervalMatch[1]!.replace(/\s+/g, " ").trim(),
+			constraints: intervalMatch[2]!.trim(),
 		};
 	}
 
 	// Data type: handles SSMS bracketed types `[varchar](20)`, schema-qualified `[sys].[xml]`,
-	// multi-word types `CHARACTER VARYING(100)`, `DOUBLE PRECISION`, `LONG RAW`, `TIMESTAMP(6) WITH LOCAL TIME ZONE`.
+	// `NATIONAL CHARACTER VARYING(100)`, `CHARACTER VARYING(100)`, `DOUBLE PRECISION`, `LONG RAW`,
+	// `TIMESTAMP(6) WITH LOCAL TIME ZONE`, Oracle `CHAR`/`BYTE` length semantics, MySQL `UNSIGNED`, and PG arrays `TEXT[]`.
 	const typeRe = new RegExp(
-		`^((?:${IDENT_PART}\\s*\\.\\s*)?${IDENT_PART}(?:\\s+(?:VARYING|PRECISION|RAW|OBJECT))?(?:\\s*\\([^)]*\\))?(?:\\s+(?:WITH(?:OUT)?\\s+(?:LOCAL\\s+)?TIME\\s+ZONE|CHAR|BYTE))?)(.*)$`,
+		`^((?:NATIONAL\\s+)?(?:${IDENT_PART}\\s*\\.\\s*)?${IDENT_PART}(?:\\s+(?:CHARACTER|CHAR|VARCHAR|VARYING|PRECISION|RAW|OBJECT|INT|INTEGER)){0,2}(?:\\s*\\([^)]*\\))?(?:\\s+(?:WITH(?:OUT)?\\s+(?:LOCAL\\s+)?TIME\\s+ZONE|(?:CHAR|BYTE)\\b|UNSIGNED\\b|ZEROFILL\\b|ARRAY\\b))*(?:\\s*\\[\\s*\\d*\\s*\\])*)(?=\\s|$)([\\s\\S]*)$`,
 		"i",
 	);
 	const typeMatch = typeRe.exec(rest);
 	if (!typeMatch) return null;
-	const cleanType = typeMatch[1]!.replace(/\[([^\]]+)\]/g, "$1").replace(/\s+/g, " ").trim();
+	const cleanType = typeMatch[1]!
+		.replace(/\[([^\]]+)\]/g, (m, inner: string) => (/^\s*\d*\s*$/.test(inner) ? m : inner))
+		.replace(/\s+/g, " ")
+		.trim();
 	return {
 		name: colName,
 		type: cleanType,
@@ -292,14 +602,28 @@ function scanBalancedParens(text: string, openParenPos: number): { inner: string
 				if (text[i + 1] === quote) i++;
 				else quote = null;
 			}
-		} else if (ch === "[") {
-			bracket = true;
-		} else if (ch === "'" || ch === '"') {
-			quote = ch;
-		} else if (ch === "(") {
-			depth++;
-		} else if (ch === ")") {
-			depth--;
+		} else {
+			const qOpen = matchOracleQQuote(text, i);
+			if (qOpen) {
+				const closePos = text.indexOf(`${qOpen.closeDelim}'`, qOpen.bodyStart);
+				i = closePos >= 0 ? closePos + 2 : text.length;
+				continue;
+			}
+			const dollarTag = matchPgDollarTag(text, i);
+			if (dollarTag) {
+				const closePos = text.indexOf(dollarTag, i + dollarTag.length);
+				i = closePos >= 0 ? closePos + dollarTag.length : text.length;
+				continue;
+			}
+			if (ch === "[") {
+				bracket = true;
+			} else if (ch === "'" || ch === '"' || ch === "`") {
+				quote = ch;
+			} else if (ch === "(") {
+				depth++;
+			} else if (ch === ")") {
+				depth--;
+			}
 		}
 		i++;
 	}
@@ -307,7 +631,11 @@ function scanBalancedParens(text: string, openParenPos: number): { inner: string
 	return { inner: text.slice(openParenPos + 1, i - 1), end: i };
 }
 
-/** Extracts an `ALTER TABLE` clause body: balanced `(...)` when parenthesized, otherwise up to `;`, `GO`, or next DDL keyword. */
+/**
+ * Extracts an `ALTER TABLE` clause body: balanced `(...)` when parenthesized, otherwise scans outside
+ * quotes, backticks, brackets, and parentheses up to `;`, `GO`, or the next top-level DDL/DML statement
+ * (without cutting off PostgreSQL comma-chained `, ADD COLUMN ...` / `, DROP COLUMN ...` / `, ALTER COLUMN ...` actions).
+ */
 function extractAlterBody(cleaned: string, masked: string, pos: number): string {
 	while (pos < cleaned.length && /\s/.test(cleaned[pos]!)) pos++;
 	if (pos >= cleaned.length) return "";
@@ -315,13 +643,77 @@ function extractAlterBody(cleaned: string, masked: string, pos: number): string 
 		const scanned = scanBalancedParens(cleaned, pos);
 		return scanned ? scanned.inner.trim() : "";
 	}
-	const restMasked = masked.slice(pos);
-	const stopMatch = /;|(?:^|\r?\n)[ \t]*GO[ \t]*(?=\r?\n|$)|(?:\r?\n[ \t]*|\b)(?:CREATE|ALTER|DROP|GRANT|REVOKE|EXEC(?:UTE)?)\b/i.exec(restMasked);
-	const end = stopMatch ? pos + stopMatch.index : cleaned.length;
-	return cleaned.slice(pos, end).trim();
+	const stmtStartKwRe =
+		/^(?:CREATE\s+(?:OR\s+(?:REPLACE|ALTER)\s+)?|ALTER\s+(?:TABLE|INDEX|VIEW|PROC(?:EDURE)?|FUNCTION|TRIGGER|SEQUENCE|PACKAGE|SYNONYM|TYPE|SCHEMA|DATABASE)\b|DROP\s+(?:TABLE|INDEX|VIEW|PROC(?:EDURE)?|FUNCTION|TRIGGER|SEQUENCE|PACKAGE|SYNONYM|TYPE|SCHEMA|DATABASE)\b|GRANT\b|REVOKE\b|DENY\b|EXEC(?:UTE)?\b|COMMENT\s+ON\b|SELECT\b|INSERT\b|UPDATE\b|DELETE\b|MERGE\b)/i;
+	let i = pos;
+	const n = masked.length;
+	let depth = 0;
+	let quote: string | null = null;
+	let bracket = false;
+	let lastNonWs = "";
+	while (i < n) {
+		const ch = masked[i]!;
+		if (bracket) {
+			if (ch === "]") {
+				if (masked[i + 1] === "]") i++;
+				else bracket = false;
+			}
+			i++;
+			continue;
+		}
+		if (quote) {
+			if (ch === quote) {
+				if (masked[i + 1] === quote) i++;
+				else quote = null;
+			}
+			i++;
+			continue;
+		}
+		if (ch === "[") {
+			bracket = true;
+			lastNonWs = ch;
+			i++;
+			continue;
+		}
+		if (ch === "'" || ch === '"' || ch === "`") {
+			quote = ch;
+			lastNonWs = ch;
+			i++;
+			continue;
+		}
+		if (ch === "(") {
+			depth++;
+			lastNonWs = ch;
+			i++;
+			continue;
+		}
+		if (ch === ")") {
+			if (depth > 0) depth--;
+			lastNonWs = ch;
+			i++;
+			continue;
+		}
+		if (depth === 0) {
+			if (ch === ";") break;
+			if ((i === pos || masked[i - 1] === "\n") && /^[ \t]*GO[ \t]*(?=\r?\n|$)/i.test(masked.slice(i))) break;
+			if (
+				i > pos &&
+				lastNonWs !== "," &&
+				(i === pos || !isIdentChar(masked[i - 1])) &&
+				stmtStartKwRe.test(masked.slice(i))
+			) {
+				// Allow `ON DELETE CASCADE` / `ON UPDATE CASCADE` / `SET DEFAULT ...` inside column specs.
+				const prevSlice = masked.slice(Math.max(pos, i - 16), i);
+				if (!/\bON\s+$/i.test(prevSlice)) break;
+			}
+		}
+		if (!/\s/.test(ch)) lastNonWs = ch;
+		i++;
+	}
+	return cleaned.slice(pos, i).trim();
 }
 
-/** Parses a table-level `[CONSTRAINT name] FOREIGN KEY (col1, ...) REFERENCES refTable[(refCol1, ...)]` clause. */
+/** Parses a table-level `[CONSTRAINT name] FOREIGN KEY (col1, ...) REFERENCES refTable[(refCol1, ...)] [ON DELETE ...]`. */
 function parseTableForeignKeys(rawClause: string): SqlForeignKeyDef[] {
 	const line = rawClause.replace(/\s+/g, " ").trim();
 	const fkRe = new RegExp(
@@ -330,28 +722,56 @@ function parseTableForeignKeys(rawClause: string): SqlForeignKeyDef[] {
 	);
 	const m = fkRe.exec(line);
 	if (!m) return [];
-	const localCols = m[1]!.split(",").map((c) => cleanIdent(c)).filter(Boolean);
+	const localCols = splitTopLevelCommas(m[1]!).map((c) => cleanIdent(c)).filter(Boolean);
 	const { bareName, name } = normalizeObjectName(m[2]!);
 	const refTable = bareName || name;
 	if (!refTable || !localCols.length) return [];
-	const refCols = m[3] ? m[3].split(",").map((c) => cleanIdent(c)).filter(Boolean) : [];
-	return localCols.map((column, idx) => {
-		const refColumn = refCols[idx] || refCols[0];
-		return { column, refTable, ...(refColumn ? { refColumn } : {}) };
-	});
+	const refCols = m[3] ? splitTopLevelCommas(m[3]).map((c) => cleanIdent(c)).filter(Boolean) : [];
+	const tail = maskSingleQuoted(line.slice(m[0].length));
+	const onDelMatch = /\bON\s+DELETE\s+(CASCADE|SET\s+NULL|SET\s+DEFAULT|RESTRICT|NO\s+ACTION)\b/i.exec(tail);
+	const onDelete = onDelMatch ? onDelMatch[1]!.replace(/\s+/g, " ").toUpperCase() : undefined;
+	if (localCols.length === 1) {
+		const refColumn = refCols[0];
+		return [
+			{
+				column: localCols[0]!,
+				refTable,
+				...(refColumn ? { refColumn } : {}),
+				...(onDelete ? { onDelete } : {}),
+			},
+		];
+	}
+	return [
+		{
+			column: localCols.join(", "),
+			columns: localCols,
+			refTable,
+			...(refCols.length ? { refColumn: refCols.join(", "), refColumns: refCols } : {}),
+			...(onDelete ? { onDelete } : {}),
+		},
+	];
 }
 
-/** Parses an inline column-level `REFERENCES refTable[(refCol)]` constraint. */
+/** Parses an inline column-level `REFERENCES refTable[(refCol)] [ON DELETE ...]` constraint. */
 function parseInlineForeignKey(col: SqlColumnDef): SqlForeignKeyDef | null {
-	if (!col.constraints || !/\bREFERENCES\b/i.test(col.constraints)) return null;
+	if (!col.constraints) return null;
+	const masked = maskSingleQuoted(col.constraints);
+	if (!/\bREFERENCES\b/i.test(masked)) return null;
 	const refRe = new RegExp(`\\bREFERENCES\\s+(${QUALIFIED_NAME})(?:\\s*\\(([^)]+)\\))?`, "i");
-	const m = refRe.exec(col.constraints);
+	const m = refRe.exec(masked);
 	if (!m) return null;
 	const { bareName, name } = normalizeObjectName(m[1]!);
 	const refTable = bareName || name;
 	if (!refTable) return null;
-	const refColumn = m[2] ? cleanIdent(m[2].split(",")[0]!) : undefined;
-	return { column: col.name, refTable, ...(refColumn ? { refColumn } : {}) };
+	const refColumn = m[2] ? cleanIdent(splitTopLevelCommas(m[2])[0] ?? "") || undefined : undefined;
+	const onDelMatch = /\bON\s+DELETE\s+(CASCADE|SET\s+NULL|SET\s+DEFAULT|RESTRICT|NO\s+ACTION)\b/i.exec(masked.slice((m.index ?? 0) + m[0].length));
+	const onDelete = onDelMatch ? onDelMatch[1]!.replace(/\s+/g, " ").toUpperCase() : undefined;
+	return {
+		column: col.name,
+		refTable,
+		...(refColumn ? { refColumn } : {}),
+		...(onDelete ? { onDelete } : {}),
+	};
 }
 
 /** Parses a table-level `[CONSTRAINT name] PRIMARY KEY (col1, ...)` clause. */
@@ -363,8 +783,7 @@ function parseTablePrimaryKeyCols(rawClause: string): string[] {
 	);
 	const m = pkRe.exec(line);
 	if (!m) return [];
-	return m[1]!
-		.split(",")
+	return splitTopLevelCommas(m[1]!)
 		.map((part) => {
 			const ident = new RegExp(`^\\s*(${IDENT_PART})`).exec(part);
 			return ident ? cleanIdent(ident[1]!) : "";
@@ -374,11 +793,14 @@ function parseTablePrimaryKeyCols(rawClause: string): string[] {
 
 function addForeignKey(target: SqlTableDef, fk: SqlForeignKeyDef) {
 	if (!target.foreignKeys) target.foreignKeys = [];
+	const localKey = fkLocalCols(fk).map((c) => c.toLowerCase()).join(",");
+	const refTblKey = bareTableKey(fk.refTable);
+	const refColKey = fkRefCols(fk).map((c) => c.toLowerCase()).join(",");
 	const exists = target.foreignKeys.some(
 		(e) =>
-			e.column.toLowerCase() === fk.column.toLowerCase() &&
-			e.refTable.toLowerCase() === fk.refTable.toLowerCase() &&
-			(e.refColumn ?? "").toLowerCase() === (fk.refColumn ?? "").toLowerCase(),
+			fkLocalCols(e).map((c) => c.toLowerCase()).join(",") === localKey &&
+			bareTableKey(e.refTable) === refTblKey &&
+			fkRefCols(e).map((c) => c.toLowerCase()).join(",") === refColKey,
 	);
 	if (!exists) target.foreignKeys.push(fk);
 }
@@ -397,76 +819,35 @@ function addIndex(target: SqlTableDef, idx: SqlIndexDef) {
 }
 
 /**
- * Extracts effective `CREATE TABLE` definitions from SQL DDL text, applying in-order
- * `ALTER TABLE ... ADD`, `DROP COLUMN`, `ALTER COLUMN` (T-SQL/ANSI), Oracle `MODIFY`,
- * and inline / table-level `FOREIGN KEY` constraints.
+ * Extracts effective `CREATE TABLE` definitions from SQL DDL text, processing
+ * `CREATE TABLE`, `DROP TABLE`, `DROP INDEX`, `ALTER TABLE` (`ADD`, `DROP COLUMN`,
+ * `ALTER COLUMN`, Oracle `MODIFY`, `RENAME COLUMN`), `CREATE INDEX`, and
+ * `COMMENT ON COLUMN` in exact source order.
  */
 export function parseCreateTables(sql: string, options?: { includeStandaloneAlter?: boolean }): SqlTableDef[] {
 	// `cleaned` preserves string literal values (like `DEFAULT '-- none --'`);
-	// `masked` blanks single-quoted strings at identical character offsets so `EXEC('CREATE TABLE ...')` never matches.
+	// `masked` blanks string literals at identical character offsets so `EXEC('CREATE TABLE ...')` never matches.
 	const cleaned = sanitizeSql(sql, false);
 	const masked = sanitizeSql(sql, true);
 	const tables: SqlTableDef[] = [];
 	const byKey = new Map<string, SqlTableDef>();
-	const headRe = new RegExp(
-		`\\bCREATE\\s+(?:(?:OR\\s+REPLACE|GLOBAL\\s+TEMPORARY|PRIVATE\\s+TEMPORARY|LOCAL\\s+TEMPORARY|TEMPORARY|TEMP)\\s+)*TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${QUALIFIED_NAME})\\s*\\(`,
-		"gi",
-	);
 
-	for (const m of masked.matchAll(headRe)) {
-		const { name, bareName } = normalizeObjectName(m[1]!);
-		if (!bareName || bareName.startsWith("#")) continue;
-		const tableName = bareName || name;
-		const parenPos = (m.index ?? 0) + m[0].length - 1;
-		const scanned = scanBalancedParens(cleaned, parenPos);
-		if (!scanned) continue;
-		const columns: SqlColumnDef[] = [];
-		const def: SqlTableDef = { tableName, columns };
-		const pkCols = new Set<string>();
-		for (const item of splitTopLevelCommas(scanned.inner)) {
-			const tableFks = parseTableForeignKeys(item);
-			if (tableFks.length) {
-				for (const fk of tableFks) addForeignKey(def, fk);
-				continue;
-			}
-			const pkList = parseTablePrimaryKeyCols(item);
-			if (pkList.length) {
-				for (const c of pkList) pkCols.add(c.toLowerCase());
-				continue;
-			}
-			const parsed = parseColumnClause(item);
-			if (parsed) {
-				columns.push(parsed);
-				const inlineFk = parseInlineForeignKey(parsed);
-				if (inlineFk) addForeignKey(def, inlineFk);
-			}
+	const removeTableDef = (existing: SqlTableDef) => {
+		const idx = tables.indexOf(existing);
+		if (idx >= 0) tables.splice(idx, 1);
+		for (const [k, v] of byKey) {
+			if (v === existing) byKey.delete(k);
 		}
-		if (pkCols.size) {
-			for (const col of columns) {
-				if (pkCols.has(col.name.toLowerCase()) && !/\bPRIMARY\s+KEY\b/i.test(col.constraints)) {
-					col.constraints = col.constraints ? `${col.constraints} PRIMARY KEY` : "PRIMARY KEY";
-				}
-			}
-		}
+	};
+
+	const registerTable = (name: string, bareName: string, def: SqlTableDef) => {
+		const prev = byKey.get(name.toLowerCase());
+		if (prev) removeTableDef(prev);
 		tables.push(def);
 		byKey.set(name.toLowerCase(), def);
-		if (!byKey.has(bareName.toLowerCase())) byKey.set(bareName.toLowerCase(), def);
-	}
+		byKey.set(bareName.toLowerCase(), def);
+	};
 
-	// Apply ALTER TABLE (ADD / WITH [NO]CHECK ADD / DROP COLUMN / ALTER COLUMN / MODIFY / RENAME COLUMN)
-	// and Oracle/ANSI COMMENT ON COLUMN statements in exact source order.
-	const alterRe = new RegExp(
-		`\\bALTER\\s+TABLE\\s+(${QUALIFIED_NAME})\\s+(?:WITH\\s+(?:NO)?CHECK\\s+)?(ADD|DROP|ALTER|MODIFY|RENAME)\\b`,
-		"gi",
-	);
-	const commentColRe = new RegExp(
-		`\\bCOMMENT\\s+ON\\s+COLUMN\\s+((?:${IDENT_PART}\\s*\\.\\s*){1,3}${IDENT_PART})\\s+IS\\s+'`,
-		"gi",
-	);
-	const indexRe = new RegExp(
-		`\\bCREATE\\s+(?:(UNIQUE)\\s+)?(?:(?:CLUSTERED|NONCLUSTERED|BITMAP|FULLTEXT|SPATIAL)\\s+)*INDEX\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${QUALIFIED_NAME})\\s+ON\\s+(${QUALIFIED_NAME})\\s*\\(`,
-		"gi",
-	);
 	const ensureTarget = (rawName: string, allowStub: boolean): SqlTableDef | undefined => {
 		const { name, bareName } = normalizeObjectName(rawName);
 		let target = byKey.get(name.toLowerCase()) ?? byKey.get(bareName.toLowerCase());
@@ -479,10 +860,16 @@ export function parseCreateTables(sql: string, options?: { includeStandaloneAlte
 		return target;
 	};
 
-	const readSingleQuoted = (src: string, openQuotePos: number): string => {
-		if (src[openQuotePos] !== "'") return "";
+	const readCommentLiteral = (src: string, startPos: number): string => {
+		const qOpen = matchOracleQQuote(src, startPos);
+		if (qOpen) {
+			const closePos = src.indexOf(`${qOpen.closeDelim}'`, qOpen.bodyStart);
+			const inner = closePos >= 0 ? src.slice(qOpen.bodyStart, closePos) : src.slice(qOpen.bodyStart);
+			return inner.replace(/\s+/g, " ").trim();
+		}
+		if (src[startPos] !== "'") return "";
 		let val = "";
-		let i = openQuotePos + 1;
+		let i = startPos + 1;
 		while (i < src.length) {
 			if (src[i] === "'") {
 				if (src[i + 1] === "'") {
@@ -498,7 +885,25 @@ export function parseCreateTables(sql: string, options?: { includeStandaloneAlte
 		return val.replace(/\s+/g, " ").trim();
 	};
 
-	const upsertModifiedColumn = (target: SqlTableDef, rawItem: string, allowInsert: boolean) => {
+	const stripDefaultClause = (constraints: string): string => {
+		const m = maskSingleQuoted(constraints);
+		const dm = /\bDEFAULT\b/i.exec(m);
+		if (!dm) return constraints;
+		const start = dm.index;
+		let pos = start + dm[0].length;
+		while (pos < constraints.length && /\s/.test(constraints[pos]!)) pos++;
+		if (pos < constraints.length && constraints[pos] === "(") {
+			const scanned = scanBalancedParens(constraints, pos);
+			pos = scanned ? scanned.end : constraints.length;
+		} else {
+			const endRe = /\s+(?:NOT\s+NULL|NULL|PRIMARY\s+KEY|UNIQUE|CHECK\b|REFERENCES\b|CONSTRAINT\b|COLLATE\b|ON\s+DELETE\b|ON\s+UPDATE\b)/i;
+			const em = endRe.exec(m.slice(pos));
+			pos = em ? pos + em.index : constraints.length;
+		}
+		return `${constraints.slice(0, start)} ${constraints.slice(pos)}`.replace(/\s+/g, " ").trim();
+	};
+
+	const upsertModifiedColumn = (target: SqlTableDef, rawItem: string, allowInsert: boolean, isModifyOp: boolean) => {
 		const trimmed = rawItem.replace(/\s+/g, " ").trim();
 		if (!trimmed) return;
 		// PostgreSQL `ALTER COLUMN col SET NOT NULL` / `DROP NOT NULL`
@@ -508,7 +913,7 @@ export function parseCreateTables(sql: string, options?: { includeStandaloneAlte
 			const existing = target.columns.find((c) => c.name.toLowerCase() === colName);
 			if (existing) {
 				if (pgNull[2]!.toUpperCase() === "SET") {
-					if (!/\bNOT\s+NULL\b/i.test(existing.constraints)) {
+					if (!/\bNOT\s+NULL\b/i.test(maskSingleQuoted(existing.constraints))) {
 						existing.constraints = existing.constraints ? `${existing.constraints} NOT NULL` : "NOT NULL";
 					}
 				} else {
@@ -517,24 +922,95 @@ export function parseCreateTables(sql: string, options?: { includeStandaloneAlte
 			}
 			return;
 		}
-		// Oracle constraint-only MODIFY (`MODIFY (COL NOT NULL)` / `MODIFY COL DEFAULT 0`)
+		// PostgreSQL `ALTER COLUMN col SET DEFAULT <expr>` / `DROP DEFAULT`
+		const pgSetDefault = new RegExp(`^(${IDENT_PART})\\s+SET\\s+DEFAULT\\s+([\\s\\S]+)$`, "i").exec(trimmed);
+		if (pgSetDefault) {
+			const colName = cleanIdent(pgSetDefault[1]!).toLowerCase();
+			const existing = target.columns.find((c) => c.name.toLowerCase() === colName);
+			if (existing) {
+				const base = stripDefaultClause(existing.constraints);
+				const defExpr = `DEFAULT ${pgSetDefault[2]!.trim()}`;
+				existing.constraints = base ? `${base} ${defExpr}` : defExpr;
+			}
+			return;
+		}
+		const pgDropDefault = new RegExp(`^(${IDENT_PART})\\s+DROP\\s+DEFAULT\\b`, "i").exec(trimmed);
+		if (pgDropDefault) {
+			const colName = cleanIdent(pgDropDefault[1]!).toLowerCase();
+			const existing = target.columns.find((c) => c.name.toLowerCase() === colName);
+			if (existing) {
+				existing.constraints = stripDefaultClause(existing.constraints);
+			}
+			return;
+		}
+		// Ignore PostgreSQL metadata-only `ALTER COLUMN` operations (`SET STATISTICS`, `SET STORAGE`, `DROP EXPRESSION`, `DROP IDENTITY`, `ADD GENERATED`)
+		if (
+			new RegExp(
+				`^(${IDENT_PART})\\s+(?:SET\\s+(?:STATISTICS|STORAGE|COMPRESSION|\\()|RESET\\s*\\(|DROP\\s+(?:EXPRESSION|IDENTITY)|ADD\\s+GENERATED|RESTART\\b)`,
+				"i",
+			).test(trimmed)
+		) {
+			return;
+		}
+		// Oracle constraint-only MODIFY (`MODIFY (COL NOT NULL)` / `MODIFY COL NULL` / `MODIFY COL DEFAULT 0`)
 		const constraintOnly = new RegExp(`^(${IDENT_PART})\\s+((?:NOT\\s+)?NULL\\b[\\s\\S]*|DEFAULT\\b[\\s\\S]*)$`, "i").exec(trimmed);
 		if (constraintOnly) {
 			const colName = cleanIdent(constraintOnly[1]!).toLowerCase();
 			const existing = target.columns.find((c) => c.name.toLowerCase() === colName);
 			if (existing) {
-				existing.constraints = constraintOnly[2]!.trim();
+				const clause = constraintOnly[2]!.trim();
+				const clauseMask = maskSingleQuoted(clause);
+				const prevMask = maskSingleQuoted(existing.constraints);
+				if (/^DEFAULT\b/i.test(clauseMask)) {
+					const base = stripDefaultClause(existing.constraints);
+					existing.constraints = base ? `${base} ${clause}` : clause;
+				} else if (/^NOT\s+NULL\b/i.test(clauseMask)) {
+					const withoutNull = existing.constraints.replace(/(?:^|\s)NULL\b/gi, " ").replace(/\s+/g, " ").trim();
+					existing.constraints = /\bNOT\s+NULL\b/i.test(prevMask)
+						? existing.constraints
+						: withoutNull
+							? `NOT NULL ${withoutNull}`
+							: clause;
+				} else {
+					// Explicit `NULL`
+					const withoutNotNull = existing.constraints.replace(/\bNOT\s+NULL\b/gi, "").replace(/\s+/g, " ").trim();
+					existing.constraints = withoutNotNull ? `${withoutNotNull} NULL` : "NULL";
+				}
 			}
 			return;
 		}
-		// Normalize PostgreSQL `col TYPE newType` -> `col newType`
-		const normalized = trimmed.replace(new RegExp(`^(${IDENT_PART})\\s+TYPE\\s+`, "i"), "$1 ");
+		// Normalize PostgreSQL `col [SET DATA] TYPE newType [USING expr]` -> `col newType`
+		const pgTypeRe = new RegExp(`^(${IDENT_PART})\\s+(?:SET\\s+DATA\\s+)?TYPE\\s+`, "i");
+		const isPgType = pgTypeRe.test(trimmed);
+		let normalized = isPgType ? trimmed.replace(pgTypeRe, "$1 ") : trimmed;
+		if (isPgType) {
+			const usingMatch = /\s+USING\s+[\s\S]*$/i.exec(maskSingleQuoted(normalized));
+			if (usingMatch) normalized = normalized.slice(0, usingMatch.index).trim();
+		}
 		const parsed = parseColumnClause(normalized);
 		if (!parsed) return;
 		const existing = target.columns.find((c) => c.name.toLowerCase() === parsed.name.toLowerCase());
 		if (existing) {
-			existing.type = parsed.type;
-			existing.constraints = parsed.constraints;
+			if (parsed.type) existing.type = parsed.type;
+			if (!isPgType) {
+				const parsedMask = maskSingleQuoted(parsed.constraints);
+				const prevMask = maskSingleQuoted(existing.constraints);
+				const explicitNull = /(?:^|\s)NULL\b/i.test(parsedMask) && !/\bNOT\s+NULL\b/i.test(parsedMask);
+				const explicitNotNull = /\bNOT\s+NULL\b/i.test(parsedMask);
+				const explicitPk = /\bPRIMARY\s+KEY\b/i.test(parsedMask);
+				const prevNotNull = /\bNOT\s+NULL\b/i.test(prevMask);
+				const prevPk = /\bPRIMARY\s+KEY\b/i.test(prevMask);
+				let nextCons = parsed.constraints;
+				if (!explicitNull) {
+					if (isModifyOp && prevNotNull && !explicitNotNull) {
+						nextCons = nextCons ? `${nextCons} NOT NULL` : "NOT NULL";
+					}
+					if (prevPk && !explicitPk) {
+						nextCons = nextCons ? `${nextCons} PRIMARY KEY` : "PRIMARY KEY";
+					}
+				}
+				existing.constraints = nextCons;
+			}
 		} else if (allowInsert) {
 			target.columns.push(parsed);
 		}
@@ -542,17 +1018,181 @@ export function parseCreateTables(sql: string, options?: { includeStandaloneAlte
 		if (inlineFk) addForeignKey(target, inlineFk);
 	};
 
+	const applyDropColumn = (target: SqlTableDef, rawItem: string) => {
+		const stripped = rawItem
+			.replace(/^(?:DROP\s+)?(?:COLUMN\s+)?(?:IF\s+EXISTS\s+)?/i, "")
+			.trim();
+		if (/^(?:CONSTRAINT|PRIMARY\s+KEY|FOREIGN\s+KEY|UNIQUE|INDEX|CHECK|TRIGGER)\b/i.test(stripped)) return;
+		const identMatch = new RegExp(`^(${IDENT_PART})`).exec(stripped);
+		if (!identMatch) return;
+		const dropKey = cleanIdent(identMatch[1]!).toLowerCase();
+		const idx = target.columns.findIndex((c) => c.name.toLowerCase() === dropKey);
+		if (idx >= 0) target.columns.splice(idx, 1);
+		if (target.foreignKeys?.length) {
+			target.foreignKeys = target.foreignKeys.filter((fk) => !fkLocalCols(fk).some((c) => c.toLowerCase() === dropKey));
+			if (!target.foreignKeys.length) delete target.foreignKeys;
+		}
+		if (target.indexes?.length) {
+			target.indexes = target.indexes
+				.map((ix) => ({ ...ix, columns: ix.columns.filter((c) => c.toLowerCase() !== dropKey) }))
+				.filter((ix) => ix.columns.length > 0);
+			if (!target.indexes.length) delete target.indexes;
+		}
+	};
+
+	const applyAddItem = (target: SqlTableDef, rawItem: string) => {
+		const stripped = rawItem
+			.replace(/^(?:ADD\s+)?(?:COLUMN\s+)?(?:IF\s+NOT\s+EXISTS\s+)?/i, "")
+			.trim();
+		if (!stripped) return;
+		// Reject T-SQL `ADD DEFAULT <val> FOR <col>` (not a column definition).
+		if (/^DEFAULT\b/i.test(stripped)) return;
+		const tableFks = parseTableForeignKeys(stripped);
+		if (tableFks.length) {
+			for (const fk of tableFks) addForeignKey(target, fk);
+			return;
+		}
+		const pkList = parseTablePrimaryKeyCols(stripped);
+		if (pkList.length) {
+			for (const pk of pkList) {
+				const col = target.columns.find((c) => c.name.toLowerCase() === pk.toLowerCase());
+				if (col && !/\bPRIMARY\s+KEY\b/i.test(maskSingleQuoted(col.constraints))) {
+					col.constraints = col.constraints ? `${col.constraints} PRIMARY KEY` : "PRIMARY KEY";
+				}
+			}
+			return;
+		}
+		const col = parseColumnClause(stripped);
+		if (col && !target.columns.some((c) => c.name.toLowerCase() === col.name.toLowerCase())) {
+			target.columns.push(col);
+			const inlineFk = parseInlineForeignKey(col);
+			if (inlineFk) addForeignKey(target, inlineFk);
+		}
+	};
+
+	const createTableRe = new RegExp(
+		`\\bCREATE\\s+(?:(?:OR\\s+REPLACE|GLOBAL\\s+TEMPORARY|PRIVATE\\s+TEMPORARY|LOCAL\\s+TEMPORARY|TEMPORARY|TEMP|UNLOGGED)\\s+)*TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${QUALIFIED_NAME})\\s*\\(`,
+		"gi",
+	);
+	const dropTableRe = new RegExp(`\\bDROP\\s+TABLE\\s+(?:IF\\s+EXISTS\\s+)?`, "gi");
+	const dropIndexRe = new RegExp(
+		`\\bDROP\\s+INDEX\\s+(?:CONCURRENTLY\\s+)?(?:IF\\s+EXISTS\\s+)?(${QUALIFIED_NAME})(?:\\s+ON\\s+(${QUALIFIED_NAME}))?`,
+		"gi",
+	);
+	const alterRe = new RegExp(
+		`\\bALTER\\s+TABLE\\s+(?:IF\\s+EXISTS\\s+)?(?:ONLY\\s+)?(${QUALIFIED_NAME})\\s+(?:WITH\\s+(?:NO)?CHECK\\s+)?(ADD|DROP|ALTER|MODIFY|RENAME)\\b`,
+		"gi",
+	);
+	const commentColRe = new RegExp(
+		`\\bCOMMENT\\s+ON\\s+COLUMN\\s+((?:${IDENT_PART}\\s*\\.\\s*){1,3}${IDENT_PART})\\s+IS\\s+(?:[qQ]?')`,
+		"gi",
+	);
+	const indexRe = new RegExp(
+		`\\bCREATE\\s+(?:(UNIQUE)\\s+)?(?:(?:CLUSTERED|NONCLUSTERED|COLUMNSTORE|BITMAP|FULLTEXT|SPATIAL)\\s+)*INDEX\\s+(?:CONCURRENTLY\\s+)?(?:IF\\s+NOT\\s+EXISTS\\s+)?(${QUALIFIED_NAME})\\s+ON\\s+(?:ONLY\\s+)?(${QUALIFIED_NAME})(?:\\s+USING\\s+[A-Za-z_][\\w$]*)?\\s*\\(`,
+		"gi",
+	);
+
 	type DdlEvent =
+		| { index: number; kind: "createTable"; match: RegExpExecArray }
+		| { index: number; kind: "dropTable"; match: RegExpExecArray }
+		| { index: number; kind: "dropIndex"; match: RegExpExecArray }
 		| { index: number; kind: "alter"; match: RegExpExecArray }
 		| { index: number; kind: "comment"; match: RegExpExecArray }
 		| { index: number; kind: "index"; match: RegExpExecArray };
 	const events: DdlEvent[] = [];
+	for (const m of masked.matchAll(createTableRe)) events.push({ index: m.index ?? 0, kind: "createTable", match: m });
+	for (const m of masked.matchAll(dropTableRe)) events.push({ index: m.index ?? 0, kind: "dropTable", match: m });
+	for (const m of masked.matchAll(dropIndexRe)) events.push({ index: m.index ?? 0, kind: "dropIndex", match: m });
 	for (const m of masked.matchAll(alterRe)) events.push({ index: m.index ?? 0, kind: "alter", match: m });
 	for (const m of masked.matchAll(commentColRe)) events.push({ index: m.index ?? 0, kind: "comment", match: m });
 	for (const m of masked.matchAll(indexRe)) events.push({ index: m.index ?? 0, kind: "index", match: m });
 	events.sort((a, b) => a.index - b.index);
 
 	for (const ev of events) {
+		if (ev.kind === "createTable") {
+			const m = ev.match;
+			const stmtBefore = masked.slice(findStatementStart(masked, ev.index), ev.index).trimStart();
+			if (/^(?:GRANT|REVOKE|DENY)\b/i.test(stmtBefore)) continue;
+			const { name, bareName } = normalizeObjectName(m[1]!);
+			if (!bareName || bareName.startsWith("#")) continue;
+			const tableName = bareName || name;
+			const parenPos = ev.index + m[0].length - 1;
+			const scanned = scanBalancedParens(cleaned, parenPos);
+			if (!scanned) continue;
+			const columns: SqlColumnDef[] = [];
+			const def: SqlTableDef = { tableName, columns };
+			const pkCols = new Set<string>();
+			for (const item of splitTopLevelCommas(scanned.inner)) {
+				const tableFks = parseTableForeignKeys(item);
+				if (tableFks.length) {
+					for (const fk of tableFks) addForeignKey(def, fk);
+					continue;
+				}
+				const pkList = parseTablePrimaryKeyCols(item);
+				if (pkList.length) {
+					for (const c of pkList) pkCols.add(c.toLowerCase());
+					continue;
+				}
+				const parsed = parseColumnClause(item);
+				if (parsed) {
+					columns.push(parsed);
+					const inlineFk = parseInlineForeignKey(parsed);
+					if (inlineFk) addForeignKey(def, inlineFk);
+				}
+			}
+			if (pkCols.size) {
+				for (const col of columns) {
+					if (pkCols.has(col.name.toLowerCase()) && !/\bPRIMARY\s+KEY\b/i.test(maskSingleQuoted(col.constraints))) {
+						col.constraints = col.constraints ? `${col.constraints} PRIMARY KEY` : "PRIMARY KEY";
+					}
+				}
+			}
+			registerTable(name, bareName, def);
+			continue;
+		}
+
+		if (ev.kind === "dropTable") {
+			const m = ev.match;
+			const stmtBefore = masked.slice(findStatementStart(masked, ev.index), ev.index).trimStart();
+			if (/^(?:GRANT|REVOKE|DENY)\b/i.test(stmtBefore)) continue;
+			const rawList = extractAlterBody(cleaned, masked, ev.index + m[0].length)
+				.replace(/\s+(?:CASCADE(?:\s+CONSTRAINTS)?|RESTRICT|PURGE)\b[\s\S]*$/i, "")
+				.trim();
+			for (const part of splitTopLevelCommas(rawList)) {
+				const { name, bareName } = normalizeObjectName(part);
+				const existing = byKey.get(name.toLowerCase()) ?? byKey.get(bareName.toLowerCase());
+				if (existing) removeTableDef(existing);
+			}
+			continue;
+		}
+
+		if (ev.kind === "dropIndex") {
+			const m = ev.match;
+			const stmtBefore = masked.slice(findStatementStart(masked, ev.index), ev.index).trimStart();
+			if (/^(?:GRANT|REVOKE|DENY)\b/i.test(stmtBefore)) continue;
+			const partRe = new RegExp(IDENT_PART, "g");
+			const ixParts = [...m[1]!.matchAll(partRe)].map((p) => cleanIdent(p[0]!)).filter(Boolean);
+			const ixBare = (ixParts[ixParts.length - 1] ?? "").toLowerCase();
+			if (!ixBare) continue;
+			const removeIx = (target: SqlTableDef) => {
+				if (!target.indexes?.length) return;
+				target.indexes = target.indexes.filter((ix) => ix.name.toLowerCase() !== ixBare);
+				if (!target.indexes.length) delete target.indexes;
+			};
+			if (m[2]) {
+				const target = ensureTarget(m[2], false);
+				if (target) removeIx(target);
+			} else {
+				const maybeTbl = ixParts.length >= 2 ? byKey.get(ixParts[ixParts.length - 2]!.toLowerCase()) : undefined;
+				if (maybeTbl) {
+					removeIx(maybeTbl);
+				} else {
+					for (const t of tables) removeIx(t);
+				}
+			}
+			continue;
+		}
+
 		if (ev.kind === "index") {
 			const m = ev.match;
 			const unique = Boolean(m[1]);
@@ -564,69 +1204,50 @@ export function parseCreateTables(sql: string, options?: { includeStandaloneAlte
 			if (!scanned) continue;
 			const cols = splitTopLevelCommas(scanned.inner)
 				.map((part) => {
-					const ident = new RegExp(`^\\s*(${IDENT_PART})`).exec(part);
-					return ident ? cleanIdent(ident[1]!) : "";
+					const noDir = part.trim().replace(/(?:\s+(?:ASC|DESC|NULLS\s+(?:FIRST|LAST)))+\s*$/i, "").trim();
+					if (!noDir) return "";
+					if (/[()]/.test(noDir) && !/^[\["`]/.test(noDir)) {
+						return noDir.replace(/\s+/g, " ");
+					}
+					const ident = new RegExp(`^(${IDENT_PART})`).exec(noDir);
+					return ident ? cleanIdent(ident[1]!) : noDir;
 				})
 				.filter(Boolean);
 			addIndex(target, { name: idxBare || idxName, columns: cols, ...(unique ? { unique: true } : {}) });
 			continue;
 		}
+
 		if (ev.kind === "comment") {
 			const m = ev.match;
 			const partRe = new RegExp(IDENT_PART, "g");
 			const parts = [...m[1]!.matchAll(partRe)].map((p) => cleanIdent(p[0]!)).filter(Boolean);
 			if (parts.length < 2) continue;
 			const colName = parts[parts.length - 1]!;
-			const tblRaw = parts.length >= 3 ? `${parts[parts.length - 3]}.${parts[parts.length - 2]}` : parts[parts.length - 2]!;
-			const target = ensureTarget(tblRaw, false);
+			const bareTbl = parts[parts.length - 2]!;
+			const qualTbl = parts.length >= 3 ? `${parts[parts.length - 3]}.${bareTbl}` : bareTbl;
+			const target = byKey.get(qualTbl.toLowerCase()) ?? byKey.get(bareTbl.toLowerCase());
 			if (!target) continue;
 			const col = target.columns.find((c) => c.name.toLowerCase() === colName.toLowerCase());
 			if (!col) continue;
-			const quotePos = ev.index + m[0].length - 1;
-			const commentText = readSingleQuoted(cleaned, quotePos);
+			// Find the start of the string literal (`'` or `q'`) right after `IS `
+			const matchEnd = ev.index + m[0].length;
+			const litStart =
+				matchEnd >= 2 && (cleaned[matchEnd - 2] === "q" || cleaned[matchEnd - 2] === "Q") && cleaned[matchEnd - 1] === "'"
+					? matchEnd - 2
+					: matchEnd - 1;
+			const commentText = readCommentLiteral(cleaned, litStart);
 			if (commentText) col.comment = commentText;
 			continue;
 		}
 
 		const m = ev.match;
-		const op = m[2]!.toUpperCase();
+		const stmtBefore = masked.slice(findStatementStart(masked, ev.index), ev.index).trimStart();
+		if (/^(?:GRANT|REVOKE|DENY)\b/i.test(stmtBefore)) continue;
+		const initialOp = m[2]!.toUpperCase();
 		let pos = (m.index ?? 0) + m[0].length;
 		while (pos < cleaned.length && /\s/.test(cleaned[pos]!)) pos++;
 
-		if (op === "ADD") {
-			const target = ensureTarget(m[1]!, true);
-			if (!target) continue;
-			const colKw = /^COLUMN\b\s*/i.exec(masked.slice(pos));
-			if (colKw) pos += colKw[0].length;
-			const rawSpec = extractAlterBody(cleaned, masked, pos);
-			if (!rawSpec) continue;
-			for (const item of splitTopLevelCommas(rawSpec)) {
-				const tableFks = parseTableForeignKeys(item);
-				if (tableFks.length) {
-					for (const fk of tableFks) addForeignKey(target, fk);
-					continue;
-				}
-				const pkList = parseTablePrimaryKeyCols(item);
-				if (pkList.length) {
-					for (const pk of pkList) {
-						const col = target.columns.find((c) => c.name.toLowerCase() === pk.toLowerCase());
-						if (col && !/\bPRIMARY\s+KEY\b/i.test(col.constraints)) {
-							col.constraints = col.constraints ? `${col.constraints} PRIMARY KEY` : "PRIMARY KEY";
-						}
-					}
-					continue;
-				}
-				const col = parseColumnClause(item);
-				if (col && !target.columns.some((c) => c.name.toLowerCase() === col.name.toLowerCase())) {
-					target.columns.push(col);
-					const inlineFk = parseInlineForeignKey(col);
-					if (inlineFk) addForeignKey(target, inlineFk);
-				}
-			}
-			continue;
-		}
-
-		if (op === "RENAME") {
+		if (initialOp === "RENAME") {
 			const target = ensureTarget(m[1]!, false);
 			if (!target) continue;
 			const colKw = /^COLUMN\b\s*/i.exec(masked.slice(pos));
@@ -637,21 +1258,32 @@ export function parseCreateTables(sql: string, options?: { includeStandaloneAlte
 			const oldName = cleanIdent(renMatch[1]!);
 			const newName = cleanIdent(renMatch[2]!);
 			if (!oldName || !newName) continue;
-			const existing = target.columns.find((c) => c.name.toLowerCase() === oldName.toLowerCase());
+			const oldLow = oldName.toLowerCase();
+			const existing = target.columns.find((c) => c.name.toLowerCase() === oldLow);
 			if (existing) existing.name = newName;
 			if (target.foreignKeys?.length) {
 				for (const fk of target.foreignKeys) {
-					if (fk.column.toLowerCase() === oldName.toLowerCase()) fk.column = newName;
+					if (fk.columns?.length) {
+						fk.columns = fk.columns.map((c) => (c.toLowerCase() === oldLow ? newName : c));
+						fk.column = fk.columns.join(", ");
+					} else if (fk.column.toLowerCase() === oldLow) {
+						fk.column = newName;
+					}
 				}
 			}
 			if (target.indexes?.length) {
 				for (const ix of target.indexes) {
-					ix.columns = ix.columns.map((c) => (c.toLowerCase() === oldName.toLowerCase() ? newName : c));
+					ix.columns = ix.columns.map((c) => (c.toLowerCase() === oldLow ? newName : c));
 				}
 			}
+			const targetBare = bareTableKey(target.tableName);
 			for (const other of tables) {
 				for (const fk of other.foreignKeys ?? []) {
-					if (fk.refTable.toLowerCase() === target.tableName.toLowerCase() && fk.refColumn?.toLowerCase() === oldName.toLowerCase()) {
+					if (bareTableKey(fk.refTable) !== targetBare) continue;
+					if (fk.refColumns?.length) {
+						fk.refColumns = fk.refColumns.map((c) => (c.toLowerCase() === oldLow ? newName : c));
+						fk.refColumn = fk.refColumns.join(", ");
+					} else if (fk.refColumn?.toLowerCase() === oldLow) {
 						fk.refColumn = newName;
 					}
 				}
@@ -659,66 +1291,94 @@ export function parseCreateTables(sql: string, options?: { includeStandaloneAlte
 			continue;
 		}
 
-		if (op === "DROP") {
-			const target = ensureTarget(m[1]!, false);
-			if (!target) continue;
-			const restMasked = masked.slice(pos);
-			// Ignore `DROP CONSTRAINT`, `DROP PRIMARY KEY`, `DROP INDEX`, etc.
-			if (/^(?:CONSTRAINT|PRIMARY\s+KEY|FOREIGN\s+KEY|UNIQUE|INDEX|CHECK|TRIGGER)\b/i.test(restMasked)) continue;
-			const colKw = /^COLUMN\b\s*/i.exec(restMasked);
-			let rawSpec = "";
-			if (colKw) {
-				rawSpec = extractAlterBody(cleaned, masked, pos + colKw[0].length);
-			} else if (cleaned[pos] === "(") {
-				// Oracle `ALTER TABLE tbl DROP (col1, col2)`
-				rawSpec = extractAlterBody(cleaned, masked, pos);
-			} else {
-				continue;
-			}
-			if (!rawSpec) continue;
-			for (const item of splitTopLevelCommas(rawSpec)) {
-				const stripped = item
-					.replace(/^(?:COLUMN\s+)?(?:IF\s+EXISTS\s+)?/i, "")
-					.trim();
-				const identMatch = new RegExp(`^(${IDENT_PART})`).exec(stripped);
-				if (!identMatch) continue;
-				const dropKey = cleanIdent(identMatch[1]!).toLowerCase();
-				const idx = target.columns.findIndex((c) => c.name.toLowerCase() === dropKey);
-				if (idx >= 0) target.columns.splice(idx, 1);
-				if (target.foreignKeys?.length) {
-					target.foreignKeys = target.foreignKeys.filter((fk) => fk.column.toLowerCase() !== dropKey);
-					if (!target.foreignKeys.length) delete target.foreignKeys;
-				}
-				if (target.indexes?.length) {
-					target.indexes = target.indexes
-						.map((ix) => ({ ...ix, columns: ix.columns.filter((c) => c.toLowerCase() !== dropKey) }))
-						.filter((ix) => ix.columns.length > 0);
-					if (!target.indexes.length) delete target.indexes;
-				}
-			}
-			continue;
-		}
-
-		if (op === "ALTER") {
-			const colKw = /^COLUMN\b\s*/i.exec(masked.slice(pos));
-			if (!colKw) continue;
-			const target = ensureTarget(m[1]!, Boolean(options?.includeStandaloneAlter));
-			if (!target) continue;
-			const rawSpec = extractAlterBody(cleaned, masked, pos + colKw[0].length);
-			if (!rawSpec) continue;
-			upsertModifiedColumn(target, rawSpec, Boolean(options?.includeStandaloneAlter));
-			continue;
-		}
-
-		if (op === "MODIFY") {
-			const target = ensureTarget(m[1]!, Boolean(options?.includeStandaloneAlter));
-			if (!target) continue;
+		// Handle single and comma-chained ALTER TABLE actions (`ADD`, `DROP`, `ALTER`, `MODIFY`).
+		let activeOp = initialOp;
+		if (activeOp === "ADD") {
 			const colKw = /^COLUMN\b\s*/i.exec(masked.slice(pos));
 			if (colKw) pos += colKw[0].length;
-			const rawSpec = extractAlterBody(cleaned, masked, pos);
-			if (!rawSpec) continue;
-			for (const item of splitTopLevelCommas(rawSpec)) {
-				upsertModifiedColumn(target, item, Boolean(options?.includeStandaloneAlter));
+		} else if (activeOp === "DROP") {
+			const restMasked = masked.slice(pos);
+			const colKw = /^COLUMN\b\s*/i.exec(restMasked);
+			if (colKw) {
+				pos += colKw[0].length;
+			} else if (cleaned[pos] !== "(") {
+				// `DROP CONSTRAINT`, `DROP PRIMARY KEY`, `DROP INDEX`, etc. — still extract body in case chained PG actions follow.
+				if (/^(?:CONSTRAINT|PRIMARY\s+KEY|FOREIGN\s+KEY|UNIQUE|INDEX|CHECK|TRIGGER)\b/i.test(restMasked)) {
+					const restBody = extractAlterBody(cleaned, masked, pos);
+					const items = splitTopLevelCommas(restBody).slice(1);
+					if (!items.length) continue;
+					for (const item of items) {
+						const subOp = /^(ADD|DROP|ALTER|MODIFY)\b\s*/i.exec(item.trim());
+						if (!subOp) continue;
+						const nextOp = subOp[1]!.toUpperCase();
+						const subRest = item.trim().slice(subOp[0].length).trim();
+						if (nextOp === "ADD") {
+							const t = ensureTarget(m[1]!, true);
+							if (t) applyAddItem(t, subRest);
+						} else if (nextOp === "DROP") {
+							const t = ensureTarget(m[1]!, false);
+							if (t) applyDropColumn(t, subRest);
+						} else if (nextOp === "ALTER" || nextOp === "MODIFY") {
+							const t = ensureTarget(m[1]!, Boolean(options?.includeStandaloneAlter));
+							if (t) upsertModifiedColumn(t, subRest.replace(/^COLUMN\b\s*/i, ""), Boolean(options?.includeStandaloneAlter), nextOp === "MODIFY");
+						}
+					}
+				}
+				continue;
+			}
+		} else if (activeOp === "ALTER") {
+			const colKw = /^COLUMN\b\s*/i.exec(masked.slice(pos));
+			if (!colKw) continue;
+			pos += colKw[0].length;
+		} else if (activeOp === "MODIFY") {
+			const colKw = /^COLUMN\b\s*/i.exec(masked.slice(pos));
+			if (colKw) pos += colKw[0].length;
+		}
+
+		const rawSpec = extractAlterBody(cleaned, masked, pos);
+		if (!rawSpec) continue;
+
+		for (const rawItem of splitTopLevelCommas(rawSpec)) {
+			const itemTrim = rawItem.trim();
+			if (!itemTrim) continue;
+			let itemOp = activeOp;
+			let itemBody = itemTrim;
+			// Detect PostgreSQL chained action switches (`ADD COLUMN ...`, `DROP COLUMN ...`, `ALTER COLUMN ...`, `MODIFY ...`)
+			const chainedOp = /^(ADD|DROP|ALTER|MODIFY)\s+(?:(COLUMN)\s+)?([\s\S]+)$/i.exec(itemTrim);
+			if (chainedOp) {
+				const kw = chainedOp[1]!.toUpperCase();
+				const hasColKw = Boolean(chainedOp[2]);
+				if (kw === "ADD" && (hasColKw || /^(?:IF\s+NOT\s+EXISTS|CONSTRAINT|FOREIGN\s+KEY|PRIMARY\s+KEY)/i.test(chainedOp[3]!))) {
+					itemOp = "ADD";
+					itemBody = chainedOp[3]!.trim();
+					activeOp = "ADD";
+				} else if (kw === "DROP" && (hasColKw || /^(?:IF\s+EXISTS|CONSTRAINT|PRIMARY\s+KEY|FOREIGN\s+KEY|UNIQUE|INDEX|CHECK|TRIGGER)\b/i.test(chainedOp[3]!))) {
+					itemOp = "DROP";
+					itemBody = chainedOp[3]!.trim();
+					activeOp = "DROP";
+				} else if (kw === "ALTER" && hasColKw) {
+					itemOp = "ALTER";
+					itemBody = chainedOp[3]!.trim();
+					activeOp = "ALTER";
+				} else if (kw === "MODIFY") {
+					itemOp = "MODIFY";
+					itemBody = chainedOp[3]!.trim();
+					activeOp = "MODIFY";
+				}
+			}
+
+			if (itemOp === "ADD") {
+				const target = ensureTarget(m[1]!, true);
+				if (target) applyAddItem(target, itemBody);
+			} else if (itemOp === "DROP") {
+				const target = ensureTarget(m[1]!, false);
+				if (target) applyDropColumn(target, itemBody);
+			} else if (itemOp === "ALTER") {
+				const target = ensureTarget(m[1]!, Boolean(options?.includeStandaloneAlter));
+				if (target) upsertModifiedColumn(target, itemBody, Boolean(options?.includeStandaloneAlter), false);
+			} else if (itemOp === "MODIFY") {
+				const target = ensureTarget(m[1]!, Boolean(options?.includeStandaloneAlter));
+				if (target) upsertModifiedColumn(target, itemBody, Boolean(options?.includeStandaloneAlter), true);
 			}
 		}
 	}
@@ -732,6 +1392,108 @@ const SCHEMA_SUBSECTION_RE =
 const formatMarkdownIndexCols = (cols: readonly string[], esc: (s: string) => string) =>
 	cols.map((c) => `\`${esc(c)}\``).join(", ");
 
+type FenceState = { ch: string; len: number } | null;
+
+function updateFenceState(line: string, fence: FenceState): FenceState {
+	const m = /^\s*(`{3,}|~{3,})(.*)$/.exec(line);
+	if (!m) return fence;
+	const marker = m[1]!;
+	const rest = m[2]!.trim();
+	if (!fence) {
+		if (marker[0] === "`" && rest.includes("`")) return fence;
+		return { ch: marker[0]!, len: marker.length };
+	}
+	if (marker[0] === fence.ch && marker.length >= fence.len && !rest) {
+		return null;
+	}
+	return fence;
+}
+
+/** Strips matches of `re` that fall outside single-quoted string literals. */
+function stripOutsideQuotes(text: string, re: RegExp): string {
+	const masked = maskSingleQuoted(text);
+	const flags = re.flags.includes("g") ? re.flags : `${re.flags}g`;
+	const globalRe = new RegExp(re.source, flags);
+	const chars = text.split("");
+	for (const m of masked.matchAll(globalRe)) {
+		const start = m.index ?? 0;
+		for (let k = start; k < start + m[0].length && k < chars.length; k++) {
+			chars[k] = " ";
+		}
+	}
+	return chars.join("").replace(/\s+/g, " ").trim();
+}
+
+/** Compacts verbose SQL type names into ADR-0008-compliant short names (<= 20 chars) while preserving semantic equivalence. */
+function compactSqlTypeForMarkdown(rawType: string): { display: string; overflow?: string } {
+	const t = rawType.replace(/\s+/g, " ").trim();
+	if (!t) return { display: "" };
+	if (t.length <= 20) return { display: t };
+	let compact = t
+		.replace(/\bNATIONAL\s+CHAR(?:ACTER)?\s+VARYING\b/i, "NVARCHAR")
+		.replace(/\bNATIONAL\s+CHARACTER\b/i, "NCHAR")
+		.replace(/\bCHAR(?:ACTER)?\s+VARYING\b/i, "VARCHAR")
+		.replace(/\bTIMESTAMP(\s*\([^)]*\))?\s+WITH\s+LOCAL\s+TIME\s+ZONE\b/i, "TIMESTAMPLTZ$1")
+		.replace(/\bTIMESTAMP(\s*\([^)]*\))?\s+WITH\s+TIME\s+ZONE\b/i, "TIMESTAMPTZ$1")
+		.replace(/\bTIMESTAMP(\s*\([^)]*\))?\s+WITHOUT\s+TIME\s+ZONE\b/i, "TIMESTAMP$1")
+		.replace(/\bTIME(\s*\([^)]*\))?\s+WITH\s+TIME\s+ZONE\b/i, "TIMETZ$1")
+		.replace(/\bTIME(\s*\([^)]*\))?\s+WITHOUT\s+TIME\s+ZONE\b/i, "TIME$1")
+		.replace(/\bINTERVAL\s+YEAR(?:\s*\([^)]*\))?\s+TO\s+MONTH\b/i, "INTERVAL YM")
+		.replace(/\bINTERVAL\s+DAY(?:\s*\([^)]*\))?\s+TO\s+SECOND(?:\s*\([^)]*\))?\b/i, "INTERVAL DS")
+		.replace(/\s*\(\s*/g, "(")
+		.replace(/\s*,\s*/g, ",")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (compact.length <= 20) return { display: compact };
+	return { display: `${compact.slice(0, 19).trimEnd()}…`, overflow: `Type: ${t}` };
+}
+
+/** Formats column constraints + comments into ADR-0008-compliant `Constraints` (<= 20 chars) and `Notes` (<= 100 chars) cells. */
+function formatColumnCellsForMarkdown(col: SqlColumnDef, esc: (s: string) => string): { typeCell: string; consCell: string; noteCell: string } {
+	const { display: shortType, overflow: typeOverflow } = compactSqlTypeForMarkdown(col.type);
+	const typeCell = shortType ? `\`${esc(shortType)}\`` : "—";
+	const rawCons = (col.constraints || "").replace(/\s+/g, " ").trim();
+	const overflowNotes: string[] = [];
+	if (typeOverflow) overflowNotes.push(typeOverflow);
+
+	let consCell = "—";
+	if (rawCons) {
+		if (rawCons.length <= 20) {
+			consCell = esc(rawCons);
+		} else {
+			const maskedCons = maskQuotedAndChecks(rawCons);
+			const isPk = /\bPRIMARY\s+KEY\b/i.test(maskedCons);
+			const isNotNull = /\bNOT\s+NULL\b/i.test(maskedCons);
+			const isUnique = /\bUNIQUE\b/i.test(maskedCons);
+			const isNull = !isNotNull && !isPk && /(?:^|\s)NULL\b/i.test(maskedCons);
+			const flags: string[] = [];
+			if (isNotNull) flags.push("NOT NULL");
+			if (isPk) flags.push("PRIMARY KEY");
+			else if (isUnique) flags.push("UNIQUE");
+			else if (isNull) flags.push("NULL");
+			let compactFlags = flags.join(" ");
+			if (compactFlags.length > 20) {
+				compactFlags = [isNotNull ? "NN" : "", isPk ? "PK" : "", !isPk && isUnique ? "UNIQUE" : ""].filter(Boolean).join(" ");
+			}
+			consCell = compactFlags || "—";
+			let detail = rawCons;
+			if (isNotNull) detail = stripOutsideQuotes(detail, /\bNOT\s+NULL\b/gi);
+			if (isPk) detail = stripOutsideQuotes(detail, /\bPRIMARY\s+KEY\b/gi);
+			if (!isPk && isUnique) detail = stripOutsideQuotes(detail, /\bUNIQUE\b/gi);
+			if (isNull) detail = stripOutsideQuotes(detail, /(?:^|\s)NULL\b/gi);
+			detail = detail.replace(/\s+/g, " ").trim();
+			if (detail) overflowNotes.push(detail);
+		}
+	}
+
+	const noteParts: string[] = [];
+	if (col.comment?.trim()) noteParts.push(col.comment.replace(/\s+/g, " ").trim());
+	if (overflowNotes.length) noteParts.push(...overflowNotes);
+	let rawNote = noteParts.join("; ").trim();
+	if (rawNote.length > 100) rawNote = `${rawNote.slice(0, 99).trimEnd()}…`;
+	return { typeCell, consCell, noteCell: rawNote ? esc(rawNote) : "" };
+}
+
 /** Formats parsed `CREATE TABLE` definitions (including foreign keys and indexes) into a clean ADR-0008-compliant Markdown schema document. */
 export function sqlTablesToMarkdown(tables: readonly SqlTableDef[], sourceLabel?: string): string {
 	if (!tables.length) return "";
@@ -743,16 +1505,21 @@ export function sqlTablesToMarkdown(tables: readonly SqlTableDef[], sourceLabel?
 		lines.push("| Column | Type | Constraints | Notes |");
 		lines.push("| --- | --- | --- | --- |");
 		for (const col of t.columns) {
-			const note = col.comment ? esc(col.comment) : "";
-			lines.push(`| \`${esc(col.name)}\` | \`${esc(col.type)}\` | ${esc(col.constraints || "—")} | ${note} |`);
+			const { typeCell, consCell, noteCell } = formatColumnCellsForMarkdown(col, esc);
+			lines.push(`| \`${esc(col.name)}\` | ${typeCell} | ${consCell} | ${noteCell} |`);
 		}
 		if (t.foreignKeys?.length) {
 			lines.push("", "## Foreign keys", "");
 			lines.push("| Column | Target table | Target column | Notes |");
 			lines.push("| --- | --- | --- | --- |");
 			for (const fk of t.foreignKeys) {
-				const refCol = fk.refColumn || fk.column;
-				lines.push(`| \`${esc(fk.column)}\` | \`${esc(fk.refTable)}\` | \`${esc(refCol)}\` |  |`);
+				const locals = fkLocalCols(fk);
+				const refs = fkRefCols(fk);
+				const refCols = refs.length ? refs : locals;
+				const fkNote = fk.onDelete ? `ON DELETE ${esc(fk.onDelete)}` : "";
+				lines.push(
+					`| ${formatMarkdownIndexCols(locals, esc)} | \`${esc(fk.refTable)}\` | ${formatMarkdownIndexCols(refCols, esc)} | ${fkNote} |`,
+				);
 			}
 		}
 		if (t.indexes?.length) {
@@ -785,8 +1552,10 @@ function splitMarkdownRow(line: string): string[] {
 	return cells;
 }
 
+const unescPipe = (s: string) => s.replace(/\\\|/g, "|");
+
 const stripMarkdownCell = (s: string) =>
-	s
+	unescPipe(s)
 		.trim()
 		.replace(/^\[([^\]]+)\]\([^)]*\)$/, "$1")
 		.replace(/^\[\[[^[\]|]+\|([^\]]+)\]\]$/, "$1")
@@ -802,9 +1571,31 @@ const isIndexesHeader = (hdr: readonly string[]) =>
 	hdr.some((c) => c === "columns" || c === "column" || c === "fields") &&
 	hdr.some((c) => c === "unique" || c === "uniqueness" || c === "index" || c === "index name" || c === "name");
 
+function parseSchemaHeading(line: string): { level: number; text: string; tableToken: string } | null {
+	const hm = /^(#{1,3})\s+(.+?)\s*$/.exec(line.trim());
+	if (!hm) return null;
+	const level = hm[1]!.length;
+	const text = hm[2]!.replace(/\s+#+\s*$/, "").replace(/^`|`$/g, "").trim();
+	if (!text) return null;
+	const lead = /^`?([A-Za-z_][\w$.]*(?:\s+[A-Za-z_][\w$.]*)*)`?(?:\s*(?:\(|—|–|-\s|:)|$)/.exec(text);
+	const tableToken = lead ? lead[1]!.trim() : text;
+	return { level, text, tableToken };
+}
+
+function findColumnHeaderIndex(hdr: readonly string[]): number {
+	const colIdx = hdr.findIndex((c) => c === "column" || c === "field" || c === "name" || c.includes("column"));
+	if (colIdx < 0) return -1;
+	if (hdr[colIdx] === "name") {
+		const hasSchemaCol = hdr.some((c, idx) => idx !== colIdx && (c.includes("type") || c.includes("null") || c.includes("constraint")));
+		if (!hasSchemaCol) return -1;
+	}
+	return colIdx;
+}
+
 /**
  * Non-destructively merges SQL DDL column, foreign-key, and index definitions into an existing
- * Markdown schema doc while preserving frontmatter, surrounding prose, and hand-written `Notes` cells (ADR 0002).
+ * Markdown schema doc while preserving frontmatter, fenced code blocks, surrounding prose,
+ * table column layouts (3-col / 4-col), and hand-written `Notes` cells (ADR 0002).
  * Columns absent from SQL are preserved and clearly tagged `[deprecated / dropped in SQL]`.
  */
 export function mergeSqlTablesIntoMarkdown(
@@ -823,16 +1614,35 @@ export function mergeSqlTablesIntoMarkdown(
 	let droppedColumns = 0;
 	const esc = (s: string) => s.replace(/\|/g, "\\|");
 
+	const getBodyStart = (): number => {
+		if (lines[0]?.replace(/^\uFEFF/, "").trim() === "---") {
+			const end = lines.findIndex((l, i) => i > 0 && /^(---|\.\.\.)\s*$/.test(l.trim()));
+			if (end > 0) return end + 1;
+		}
+		return 0;
+	};
+
 	const findTableBlock = (tableName: string): { headLine: number; tableStart: number; tableEnd: number } | null => {
 		const target = tableName.toLowerCase();
-		let startSearch = 0;
+		const targetBare = target.includes(".") ? target.split(".").pop()! : target;
+		const bodyStart = getBodyStart();
+		let startSearch = bodyStart;
 		let headLine = -1;
-		for (let i = 0; i < lines.length; i++) {
-			const hm = /^#{1,3}\s+`?([A-Za-z_][\w$. ]*?)`?\s*$/.exec(lines[i]!.trim());
+		let fence: FenceState = null;
+		for (let i = bodyStart; i < lines.length; i++) {
+			const nextFence = updateFenceState(lines[i]!, fence);
+			if (nextFence !== fence) {
+				fence = nextFence;
+				continue;
+			}
+			if (fence) continue;
+			const hm = parseSchemaHeading(lines[i]!);
 			if (hm) {
-				const hName = hm[1]!.trim().toLowerCase();
-				const bare = hName.includes(".") ? hName.split(".").pop()! : hName;
-				if (hName === target || bare === target) {
+				const hName = hm.text.toLowerCase();
+				const hBare = hName.includes(".") ? hName.split(".").pop()! : hName;
+				const tok = hm.tableToken.toLowerCase();
+				const tokBare = tok.includes(".") ? tok.split(".").pop()! : tok;
+				if (hName === target || hBare === target || hBare === targetBare || tok === target || tokBare === target || tokBare === targetBare) {
 					headLine = i;
 					startSearch = i + 1;
 					break;
@@ -840,13 +1650,21 @@ export function mergeSqlTablesIntoMarkdown(
 			}
 		}
 		if (headLine < 0 && tables.length > 1) return null;
+		fence = null;
 		for (let i = startSearch; i < lines.length; i++) {
+			const nextFence = updateFenceState(lines[i]!, fence);
+			if (nextFence !== fence) {
+				fence = nextFence;
+				continue;
+			}
+			if (fence) continue;
 			const trimmed = lines[i]!.trim();
-			const hm = /^#{1,3}\s+`?([A-Za-z_][\w$. ]*?)`?\s*$/.exec(trimmed);
-			if (headLine >= 0 && hm && !SCHEMA_SUBSECTION_RE.test(hm[1]!.trim())) break;
+			const hm = parseSchemaHeading(trimmed);
+			if (headLine >= 0 && hm && !SCHEMA_SUBSECTION_RE.test(hm.text)) break;
 			if (!trimmed.startsWith("|")) continue;
-			const hdr = splitMarkdownRow(lines[i]!).map((c) => c.toLowerCase());
-			if (!hdr[0]?.includes("column") || isForeignKeysHeader(hdr) || isIndexesHeader(hdr)) continue;
+			const hdr = splitMarkdownRow(lines[i]!).map((c) => stripMarkdownCell(c).toLowerCase());
+			if (isForeignKeysHeader(hdr) || isIndexesHeader(hdr)) continue;
+			if (findColumnHeaderIndex(hdr) < 0) continue;
 			if (i + 1 >= lines.length || !/^\s*\|?\s*:?-{2,}/.test(lines[i + 1]!)) continue;
 			let end = i + 2;
 			while (end < lines.length && lines[end]!.trim().startsWith("|")) end++;
@@ -856,9 +1674,19 @@ export function mergeSqlTablesIntoMarkdown(
 	};
 
 	const findTableScopeEnd = (afterLine: number): number => {
+		let fence: FenceState = null;
 		for (let i = afterLine; i < lines.length; i++) {
-			const hm = /^#{1,2}\s+`?([A-Za-z_][\w$. ]*?)`?\s*$/.exec(lines[i]!.trim());
-			if (hm && !SCHEMA_SUBSECTION_RE.test(hm[1]!.trim())) return i;
+			const nextFence = updateFenceState(lines[i]!, fence);
+			if (nextFence !== fence) {
+				fence = nextFence;
+				continue;
+			}
+			if (fence) continue;
+			const hm = /^#{1,2}\s+(.+)$/.exec(lines[i]!.trim());
+			if (hm) {
+				const headingText = hm[1]!.replace(/\s+#+\s*$/, "").replace(/^`|`$/g, "").trim();
+				if (headingText && !SCHEMA_SUBSECTION_RE.test(headingText)) return i;
+			}
 		}
 		return lines.length;
 	};
@@ -869,11 +1697,19 @@ export function mergeSqlTablesIntoMarkdown(
 		headingRe: RegExp,
 	): { headLine: number; tableStart: number; tableEnd: number } | null => {
 		let subHead = -1;
+		let fence: FenceState = null;
 		for (let i = fromLine; i < scopeEnd; i++) {
+			const nextFence = updateFenceState(lines[i]!, fence);
+			if (nextFence !== fence) {
+				fence = nextFence;
+				continue;
+			}
+			if (fence) continue;
 			const hm = /^#{2,3}\s+(.+?)\s*$/.exec(lines[i]!.trim());
 			if (hm) {
 				if (subHead >= 0) break;
-				if (headingRe.test(hm[1]!.trim())) subHead = i;
+				const headingText = hm[1]!.replace(/\s+#+\s*$/, "").replace(/^`|`$/g, "").trim();
+				if (headingRe.test(headingText)) subHead = i;
 				continue;
 			}
 			if (subHead >= 0 && lines[i]!.trim().startsWith("|")) {
@@ -887,6 +1723,36 @@ export function mergeSqlTablesIntoMarkdown(
 		return null;
 	};
 
+	const removeEmptySubsectionTable = (sub: { headLine: number; tableStart: number; tableEnd: number }, scopeEnd: number) => {
+		const hasProseBetween = lines.slice(sub.headLine + 1, sub.tableStart).some((l) => l.trim() !== "");
+		let hasProseAfter = false;
+		let fence: FenceState = null;
+		for (let k = sub.tableEnd; k < scopeEnd; k++) {
+			const nf = updateFenceState(lines[k]!, fence);
+			if (nf !== fence) {
+				hasProseAfter = true;
+				break;
+			}
+			if (!fence && /^#{1,3}\s+/.test(lines[k]!.trim())) break;
+			if (lines[k]!.trim() !== "") {
+				hasProseAfter = true;
+				break;
+			}
+		}
+		if (hasProseBetween || hasProseAfter) {
+			// Preserve the heading and all hand-written prose (ADR 0002); remove only the stale table lines.
+			let delStart = sub.tableStart;
+			const delEnd = sub.tableEnd;
+			if (delStart > sub.headLine + 1 && lines[delStart - 1]?.trim() === "" && (delEnd >= lines.length || lines[delEnd]?.trim() === "")) {
+				delStart--;
+			}
+			lines.splice(delStart, delEnd - delStart);
+		} else {
+			const start = sub.headLine > 0 && lines[sub.headLine - 1]?.trim() === "" ? sub.headLine - 1 : sub.headLine;
+			lines.splice(start, sub.tableEnd - start);
+		}
+	};
+
 	for (const tbl of tables) {
 		const block = findTableBlock(tbl.tableName);
 		if (!block) {
@@ -898,15 +1764,27 @@ export function mergeSqlTablesIntoMarkdown(
 			continue;
 		}
 		const hdr = splitMarkdownRow(lines[block.tableStart]!);
-		const hdrLow = hdr.map((c) => c.toLowerCase());
-		const isNullCol = Boolean(hdrLow[2]?.includes("null"));
-		const notesCol = Math.max(3, hdr.length - 1);
+		const hdrLow = hdr.map((c) => stripMarkdownCell(c).toLowerCase());
+		const colCount = hdr.length;
+		const colIdx = Math.max(0, findColumnHeaderIndex(hdrLow));
+		const typeIdx = hdrLow.findIndex((c, idx) => idx !== colIdx && c.includes("type"));
+		const consIdx = hdrLow.findIndex(
+			(c, idx) => idx !== colIdx && idx !== typeIdx && (c.includes("constraint") || c.includes("key") || c.includes("null")),
+		);
+		const noteIdx = hdrLow.findIndex(
+			(c, idx) =>
+				idx !== colIdx &&
+				idx !== typeIdx &&
+				idx !== consIdx &&
+				(c.includes("note") || c.includes("desc") || c.includes("meaning") || c.includes("holds") || c.includes("what") || c.includes("purpose") || c.includes("comment")),
+		);
+		const isNullCol = consIdx >= 0 && hdrLow[consIdx]!.includes("null");
 		const existingByCol = new Map<string, { cells: string[]; index: number }>();
 		const dataLines = lines.slice(block.tableStart + 2, block.tableEnd);
 		const existingOrder: string[] = [];
 		dataLines.forEach((raw, idx) => {
 			const cells = splitMarkdownRow(raw);
-			const colKey = stripMarkdownCell(cells[0] ?? "").toLowerCase();
+			const colKey = stripMarkdownCell(cells[colIdx] ?? "").toLowerCase();
 			if (colKey) {
 				existingByCol.set(colKey, { cells, index: idx });
 				existingOrder.push(colKey);
@@ -919,25 +1797,46 @@ export function mergeSqlTablesIntoMarkdown(
 			const key = col.name.toLowerCase();
 			seen.add(key);
 			const prev = existingByCol.get(key);
-			const rawNote = prev?.cells[notesCol] ?? "";
+			const cells = prev ? prev.cells.slice(0, colCount) : new Array<string>(colCount).fill("");
+			while (cells.length < colCount) cells.push("");
+			const rawNote = noteIdx >= 0 ? (prev?.cells[noteIdx] ?? "") : "";
 			const cleanedNote = rawNote.replace(/\s*\[deprecated\s*\/\s*dropped in sql\]/gi, "").trim();
 			const note = cleanedNote || (col.comment ? esc(col.comment) : "");
-			const newType = isNullCol ? esc(col.type.toLowerCase()) : `\`${esc(col.type)}\``;
-			const newCons = isNullCol
-				? /\b(?:not\s+null|primary\s+key)\b/i.test(col.constraints)
-					? "no"
-					: "yes"
-				: esc(col.constraints || "—");
+			const newType = !col.type ? "—" : isNullCol ? esc(col.type.toLowerCase()) : `\`${esc(col.type)}\``;
+			let newCons = "";
+			if (consIdx >= 0) {
+				if (isNullCol) {
+					const maskedSqlCons = maskQuotedAndChecks(col.constraints);
+					const isSqlPk = /\bPRIMARY\s+KEY\b/i.test(maskedSqlCons);
+					const isSqlNotNull = isSqlPk || /\bNOT\s+NULL\b/i.test(maskedSqlCons);
+					const prevConsRaw = (prev?.cells[consIdx] ?? "").trim();
+					const prevConsHasPk = /\b(?:primary\s+key|pk)\b/i.test(prevConsRaw);
+					const noteMentionsPk = noteIdx >= 0 && /\b(?:primary\s+key|pk)\b/i.test(note);
+					if (isSqlPk) {
+						newCons = prev && !prevConsHasPk && noteMentionsPk ? "no" : "PK";
+					} else {
+						newCons = isSqlNotNull ? "no" : "yes";
+					}
+				} else {
+					newCons = esc(col.constraints || "—");
+				}
+			}
+
+			cells[colIdx] = `\`${esc(col.name)}\``;
+			if (typeIdx >= 0) cells[typeIdx] = newType;
+			if (consIdx >= 0) cells[consIdx] = newCons;
+			if (noteIdx >= 0) cells[noteIdx] = note;
+
 			if (!prev) {
 				addedColumns++;
 			} else if (
-				stripMarkdownCell(prev.cells[1] ?? "").toLowerCase() !== col.type.toLowerCase() ||
-				(prev.cells[2] ?? "").trim() !== newCons ||
-				rawNote.trim() !== note
+				(typeIdx >= 0 && stripMarkdownCell(prev.cells[typeIdx] ?? "").toLowerCase() !== col.type.toLowerCase()) ||
+				(consIdx >= 0 && (prev.cells[consIdx] ?? "").trim() !== newCons) ||
+				(noteIdx >= 0 && rawNote.trim() !== note)
 			) {
 				updatedColumns++;
 			}
-			nextRows.push(`| \`${esc(col.name)}\` | ${newType} | ${newCons} | ${note} |`);
+			nextRows.push(`| ${cells.join(" | ")} |`);
 		}
 		for (const key of existingOrder) {
 			if (!seen.has(key)) {
@@ -946,81 +1845,126 @@ export function mergeSqlTablesIntoMarkdown(
 				if (!markDropped || alreadyMarked) {
 					nextRows.push(dataLines[prev.index]!);
 				} else {
-					const cells = [...prev.cells];
-					while (cells.length <= notesCol) cells.push("");
-					const curNote = cells[notesCol]!.trim();
-					cells[notesCol] = curNote ? `${curNote} ${DROPPED_NOTE_TAG}` : DROPPED_NOTE_TAG;
+					const cells = prev.cells.slice(0, colCount);
+					while (cells.length < colCount) cells.push("");
+					const targetNoteCol = noteIdx >= 0 ? noteIdx : colCount - 1;
+					const curNote = cells[targetNoteCol]!.trim();
+					cells[targetNoteCol] = curNote ? `${curNote} ${DROPPED_NOTE_TAG}` : DROPPED_NOTE_TAG;
 					droppedColumns++;
 					nextRows.push(`| ${cells.join(" | ")} |`);
 				}
 			}
 		}
 		lines.splice(block.tableStart + 2, block.tableEnd - (block.tableStart + 2), ...nextRows);
-		let afterCols = block.tableStart + 2 + nextRows.length;
+		const afterColsBase = block.tableStart + 2 + nextRows.length;
 
 		// Merge or append `## Foreign keys` when SQL defines foreign keys or the doc already has a Foreign keys table.
-		const scopeEndAfterCols = findTableScopeEnd(afterCols);
-		const existingFkSub = findSubsectionTable(afterCols, scopeEndAfterCols, /^foreign\s+keys?$/i);
+		const scopeEndAfterCols = findTableScopeEnd(afterColsBase);
+		const existingFkSub = findSubsectionTable(afterColsBase, scopeEndAfterCols, /^foreign\s+keys?$/i);
 		if (tbl.foreignKeys?.length) {
 			if (existingFkSub) {
-				const fkHdr = splitMarkdownRow(lines[existingFkSub.tableStart]!).map((c) => c.toLowerCase());
-				const fkNoteCol = fkHdr.findIndex((c) => c.includes("note") || c.includes("desc") || c.includes("purpose"));
-				const oldFkNotes = new Map<string, string>();
+				const fkHdr = splitMarkdownRow(lines[existingFkSub.tableStart]!).map((c) => stripMarkdownCell(c).toLowerCase());
+				const fkColIdx = Math.max(0, fkHdr.findIndex((c) => c === "column" || c === "columns" || c === "local column" || c === "field"));
+				const refTblIdx = fkHdr.findIndex(
+					(c, idx) => idx !== fkColIdx && (c === "target table" || c === "referenced table" || c === "table" || c.includes("reference") || c.includes("target")),
+				);
+				const refColIdx = fkHdr.findIndex(
+					(c, idx) => idx !== fkColIdx && idx !== refTblIdx && (c === "target column" || c === "referenced column" || c.includes("target col") || c.includes("ref col")),
+				);
+				const onDelIdx = fkHdr.findIndex((c, idx) => idx !== fkColIdx && idx !== refTblIdx && idx !== refColIdx && c.includes("delete"));
+				const fkNoteCol = fkHdr.findIndex(
+					(c, idx) => idx !== fkColIdx && idx !== refTblIdx && idx !== refColIdx && idx !== onDelIdx && (c.includes("note") || c.includes("desc") || c.includes("purpose")),
+				);
+				const oldFkRows = new Map<string, string[]>();
 				for (const raw of lines.slice(existingFkSub.tableStart + 2, existingFkSub.tableEnd)) {
 					const c = splitMarkdownRow(raw);
-					const k = `${stripMarkdownCell(c[0] ?? "").toLowerCase()}->${stripMarkdownCell(c[1] ?? "").toLowerCase()}`;
-					if (fkNoteCol >= 0 && c[fkNoteCol]) oldFkNotes.set(k, c[fkNoteCol]!.trim());
+					const localPart = (c[fkColIdx] ?? "")
+						.split(",")
+						.map((p) => stripMarkdownCell(p).toLowerCase())
+						.filter(Boolean)
+						.join(",");
+					const rawRefCell = refTblIdx >= 0 ? stripMarkdownCell(c[refTblIdx] ?? "") : "";
+					const refTblOnly = rawRefCell.replace(/\s*\([^)]*\)\s*$/, "");
+					const k = `${localPart}->${bareTableKey(refTblOnly)}`;
+					if (localPart) oldFkRows.set(k, c);
 				}
 				const fkRows = tbl.foreignKeys.map((fk) => {
-					const refCol = fk.refColumn || fk.column;
-					const note = oldFkNotes.get(`${fk.column.toLowerCase()}->${fk.refTable.toLowerCase()}`) ?? "";
-					return `| \`${esc(fk.column)}\` | \`${esc(fk.refTable)}\` | \`${esc(refCol)}\` | ${note} |`;
+					const locals = fkLocalCols(fk);
+					const refs = fkRefCols(fk);
+					const refCols = refs.length ? refs : locals;
+					const k = `${locals.map((c) => c.toLowerCase()).join(",")}->${bareTableKey(fk.refTable)}`;
+					const prevRow = oldFkRows.get(k);
+					const cells = prevRow ? prevRow.slice(0, fkHdr.length) : new Array<string>(fkHdr.length).fill("");
+					while (cells.length < fkHdr.length) cells.push("");
+					cells[fkColIdx] = formatMarkdownIndexCols(locals, esc);
+					if (refColIdx >= 0) {
+						if (refTblIdx >= 0) cells[refTblIdx] = `\`${esc(fk.refTable)}\``;
+						cells[refColIdx] = formatMarkdownIndexCols(refCols, esc);
+					} else if (refTblIdx >= 0) {
+						cells[refTblIdx] = refs.length
+							? `\`${esc(fk.refTable)}(${refs.map(esc).join(", ")})\``
+							: `\`${esc(fk.refTable)}\``;
+					}
+					if (onDelIdx >= 0) {
+						cells[onDelIdx] = fk.onDelete ? esc(fk.onDelete) : (prevRow?.[onDelIdx]?.trim() ?? "");
+					}
+					if (fkNoteCol >= 0) {
+						const prevNote = prevRow?.[fkNoteCol]?.trim() ?? "";
+						cells[fkNoteCol] = prevNote || (onDelIdx < 0 && fk.onDelete ? `ON DELETE ${esc(fk.onDelete)}` : "");
+					}
+					return `| ${cells.join(" | ")} |`;
 				});
 				lines.splice(existingFkSub.tableStart + 2, existingFkSub.tableEnd - (existingFkSub.tableStart + 2), ...fkRows);
-				afterCols = existingFkSub.tableStart + 2 + fkRows.length;
-			} else if (existingFkSub === null && findTableScopeEnd(afterCols) === scopeEndAfterCols) {
-				// Only append a new `## Foreign keys` section if the doc does not already have one; keep existing section-less docs
-				// clean unless the table actually has FKs and is newly synced with `sqlTablesToMarkdown`, OR insert before `## Indexes`.
-				const insertAt = findSubsectionTable(afterCols, scopeEndAfterCols, /^index(?:es)?$|^indices$/i)?.headLine ?? scopeEndAfterCols;
+			} else {
+				const insertAt = findSubsectionTable(afterColsBase, scopeEndAfterCols, /^index(?:es)?$|^indices$/i)?.headLine ?? scopeEndAfterCols;
 				const fkBlock = [
 					...(insertAt > 0 && lines[insertAt - 1]?.trim() !== "" ? [""] : []),
 					"## Foreign keys",
 					"",
 					"| Column | Target table | Target column | Notes |",
 					"| --- | --- | --- | --- |",
-					...tbl.foreignKeys.map((fk) => `| \`${esc(fk.column)}\` | \`${esc(fk.refTable)}\` | \`${esc(fk.refColumn || fk.column)}\` |  |`),
+					...tbl.foreignKeys.map((fk) => {
+						const locals = fkLocalCols(fk);
+						const refs = fkRefCols(fk);
+						const refCols = refs.length ? refs : locals;
+						const note = fk.onDelete ? `ON DELETE ${esc(fk.onDelete)}` : "";
+						return `| ${formatMarkdownIndexCols(locals, esc)} | \`${esc(fk.refTable)}\` | ${formatMarkdownIndexCols(refCols, esc)} | ${note} |`;
+					}),
 					...(insertAt < lines.length && lines[insertAt]?.trim() !== "" ? [""] : []),
 				];
 				lines.splice(insertAt, 0, ...fkBlock);
-				afterCols = insertAt + fkBlock.length;
 			}
 		} else if (existingFkSub) {
-			const start = existingFkSub.headLine > 0 && lines[existingFkSub.headLine - 1]?.trim() === "" ? existingFkSub.headLine - 1 : existingFkSub.headLine;
-			lines.splice(start, existingFkSub.tableEnd - start);
+			removeEmptySubsectionTable(existingFkSub, scopeEndAfterCols);
 		}
 
 		// Merge or append `## Indexes` when SQL defines indexes or the doc already has an Indexes table.
-		const scopeEndAfterFks = findTableScopeEnd(afterCols);
-		const existingIdxSub = findSubsectionTable(block.tableStart + 2 + nextRows.length, scopeEndAfterFks, /^index(?:es)?$|^indices$/i);
+		const scopeEndAfterFks = findTableScopeEnd(afterColsBase);
+		const existingIdxSub = findSubsectionTable(afterColsBase, scopeEndAfterFks, /^index(?:es)?$|^indices$/i);
 		if (tbl.indexes?.length) {
 			if (existingIdxSub) {
-				const ixHdr = splitMarkdownRow(lines[existingIdxSub.tableStart]!).map((c) => c.toLowerCase());
-				const ixNoteCol = ixHdr.findIndex((c) => c.includes("purpose") || c.includes("note") || c.includes("desc"));
-				const colsFirst = ixHdr[1] === "columns" || ixHdr[1] === "column";
-				const oldIxNotes = new Map<string, string>();
+				const ixHdr = splitMarkdownRow(lines[existingIdxSub.tableStart]!).map((c) => stripMarkdownCell(c).toLowerCase());
+				const nameIdx = Math.max(0, ixHdr.findIndex((c) => c === "name" || c === "index" || c === "index name"));
+				const colsIdx = ixHdr.findIndex((c, idx) => idx !== nameIdx && (c === "columns" || c === "column" || c === "fields"));
+				const uniqIdx = ixHdr.findIndex((c, idx) => idx !== nameIdx && idx !== colsIdx && (c === "unique" || c === "uniqueness" || c === "kind"));
+				const ixNoteCol = ixHdr.findIndex(
+					(c, idx) => idx !== nameIdx && idx !== colsIdx && idx !== uniqIdx && (c.includes("purpose") || c.includes("note") || c.includes("desc")),
+				);
+				const oldIxRows = new Map<string, string[]>();
 				for (const raw of lines.slice(existingIdxSub.tableStart + 2, existingIdxSub.tableEnd)) {
 					const c = splitMarkdownRow(raw);
-					const k = stripMarkdownCell(c[0] ?? "").toLowerCase();
-					if (ixNoteCol >= 0 && c[ixNoteCol]) oldIxNotes.set(k, c[ixNoteCol]!.trim());
+					const k = stripMarkdownCell(c[nameIdx] ?? "").toLowerCase();
+					if (k) oldIxRows.set(k, c);
 				}
 				const ixRows = tbl.indexes.map((ix) => {
-					const colsText = formatMarkdownIndexCols(ix.columns, esc);
-					const uniqText = ix.unique ? "yes" : "no";
-					if (ixNoteCol >= 0 && colsFirst) {
-						const note = oldIxNotes.get(ix.name.toLowerCase()) ?? "";
-						return `| \`${esc(ix.name)}\` | ${colsText} | ${uniqText} | ${note} |`;
-					}
-					return `| \`${esc(ix.name)}\` | ${uniqText} | ${colsText} |`;
+					const prevRow = oldIxRows.get(ix.name.toLowerCase());
+					const cells = prevRow ? prevRow.slice(0, ixHdr.length) : new Array<string>(ixHdr.length).fill("");
+					while (cells.length < ixHdr.length) cells.push("");
+					cells[nameIdx] = `\`${esc(ix.name)}\``;
+					if (colsIdx >= 0) cells[colsIdx] = formatMarkdownIndexCols(ix.columns, esc);
+					if (uniqIdx >= 0) cells[uniqIdx] = ix.unique ? "yes" : "no";
+					if (ixNoteCol >= 0) cells[ixNoteCol] = prevRow?.[ixNoteCol]?.trim() ?? "";
+					return `| ${cells.join(" | ")} |`;
 				});
 				lines.splice(existingIdxSub.tableStart + 2, existingIdxSub.tableEnd - (existingIdxSub.tableStart + 2), ...ixRows);
 			} else {
@@ -1037,14 +1981,13 @@ export function mergeSqlTablesIntoMarkdown(
 				lines.splice(insertAt, 0, ...ixBlock);
 			}
 		} else if (existingIdxSub) {
-			const start = existingIdxSub.headLine > 0 && lines[existingIdxSub.headLine - 1]?.trim() === "" ? existingIdxSub.headLine - 1 : existingIdxSub.headLine;
-			lines.splice(start, existingIdxSub.tableEnd - start);
+			removeEmptySubsectionTable(existingIdxSub, scopeEndAfterFks);
 		}
 	}
 	return { text: lines.join(eol), addedColumns, updatedColumns, addedTables, droppedColumns };
 }
 
-type DocForeignKey = SqlForeignKeyDef & { onDelete?: string };
+type DocForeignKey = SqlForeignKeyDef;
 
 type DocTableCols = {
 	tableName: string;
@@ -1057,20 +2000,40 @@ type DocTableCols = {
 	indexes: SqlIndexDef[];
 };
 
+const COMMON_SQL_SCHEMAS = new Set([
+	"dbo", "public", "sys", "lims", "starlims", "app", "core", "audit", "stg", "staging",
+	"ref", "admin", "hr", "fin", "ops", "lab", "qa", "dev", "prod", "master", "tempdb", "model", "msdb",
+]);
+
+/** Splits a dotted FK reference (`dbo.CUSTOMERS` vs `ORDERS.ORDNO` vs `dbo.CUSTOMERS.ID`) without misparsing `schema.TABLE` as `table.col`. */
+function parseDottedFkTarget(rawRef: string, hasDedicatedRefCol: boolean): { refTable: string; refColumn?: string } {
+	const parts = rawRef.split(".").map((p) => cleanIdent(p)).filter(Boolean);
+	if (parts.length <= 1 || hasDedicatedRefCol) {
+		return { refTable: rawRef };
+	}
+	if (parts.length >= 3) {
+		return { refTable: `${parts[parts.length - 3]}.${parts[parts.length - 2]}`, refColumn: parts[parts.length - 1] };
+	}
+	const [first, second] = [parts[0]!, parts[1]!];
+	// Known SQL schema prefixes (`dbo.CUSTOMERS`, `public.USERS`) or lowercase.UPPERCASE (`myschema.ORDERS`) are schema.table, NOT table.column.
+	if (COMMON_SQL_SCHEMAS.has(first.toLowerCase()) || (/^[a-z_][a-z0-9_]*$/.test(first) && /^[A-Z_][A-Z0-9_]*$/.test(second))) {
+		return { refTable: rawRef };
+	}
+	return { refTable: first, refColumn: second };
+}
+
 function parseInlineDocFk(column: string, constraints: string): DocForeignKey | null {
-	const text = constraints.replace(/`/g, "").trim();
+	const text = unescPipe(constraints).replace(/`/g, "").trim();
 	if (!text) return null;
 	const refMatch =
 		/(?:\bREFERENCES\s+|(?:\bFK\b|foreign\s+key)\s*(?:->|→|to)\s*)([A-Za-z_][\w$.]*)(?:\s*\(\s*([A-Za-z_][\w$]*)\s*\))?/i.exec(text);
 	if (!refMatch) return null;
 	let refTable = refMatch[1]!;
-	let refColumn = refMatch[2];
+	let refColumn: string | undefined = refMatch[2];
 	if (!refColumn && refTable.includes(".")) {
-		const parts = refTable.split(".");
-		if (parts.length === 2) {
-			refTable = parts[0]!;
-			refColumn = parts[1]!;
-		}
+		const parsed = parseDottedFkTarget(refTable, false);
+		refTable = parsed.refTable;
+		refColumn = parsed.refColumn;
 	}
 	const onDel = /\bON\s+DELETE\s+(CASCADE|SET\s+NULL|SET\s+DEFAULT|RESTRICT|NO\s+ACTION)\b/i.exec(text)?.[1];
 	return {
@@ -1081,12 +2044,19 @@ function parseInlineDocFk(column: string, constraints: string): DocForeignKey | 
 	};
 }
 
+function stripOuterBalancedParens(s: string): string {
+	const t = s.trim();
+	if (!t.startsWith("(") || !t.endsWith(")")) return t;
+	const scanned = scanBalancedParens(t, 0);
+	return scanned && scanned.end === t.length ? scanned.inner.trim() : t;
+}
+
 function parseMarkdownSchemaTables(schemaMd: string): DocTableCols[] {
 	const lines = schemaMd.replace(/^\uFEFF/, "").split(/\r?\n/);
 	let idx = 0;
 	let fmTitle = "";
 	if (lines[0]?.trim() === "---") {
-		const end = lines.findIndex((l, i) => i > 0 && /^(---|\.\.\.)\s*$/.test(l));
+		const end = lines.findIndex((l, i) => i > 0 && /^(---|\.\.\.)\s*$/.test(l.trim()));
 		if (end > 0) {
 			for (let j = 1; j < end; j++) {
 				const tm = /^title\s*:\s*(.+)$/i.exec(lines[j]!.trim());
@@ -1099,28 +2069,35 @@ function parseMarkdownSchemaTables(schemaMd: string): DocTableCols[] {
 	let currentTable = fmTitle;
 	let currentDoc: DocTableCols | null = null;
 	let sectionKind: "columns" | "fks" | "indexes" | "other" = "columns";
-	let inFence = false;
+	let fence: FenceState = null;
 	const addDocFk = (target: DocTableCols, fk: DocForeignKey) => {
-		const exists = target.foreignKeys.some(
-			(e) =>
-				e.column.toLowerCase() === fk.column.toLowerCase() &&
-				e.refTable.toLowerCase() === fk.refTable.toLowerCase() &&
-				(e.refColumn ?? e.column).toLowerCase() === (fk.refColumn ?? fk.column).toLowerCase(),
-		);
+		const localKey = fkLocalCols(fk).map((c) => c.toLowerCase()).join(",");
+		const refTblKey = bareTableKey(fk.refTable);
+		const refCols = fkRefCols(fk);
+		const refColKey = (refCols.length ? refCols : fkLocalCols(fk)).map((c) => c.toLowerCase()).join(",");
+		const exists = target.foreignKeys.some((e) => {
+			const eRefCols = fkRefCols(e);
+			return (
+				fkLocalCols(e).map((c) => c.toLowerCase()).join(",") === localKey &&
+				bareTableKey(e.refTable) === refTblKey &&
+				(eRefCols.length ? eRefCols : fkLocalCols(e)).map((c) => c.toLowerCase()).join(",") === refColKey
+			);
+		});
 		if (!exists) target.foreignKeys.push(fk);
 	};
 
 	for (let i = idx; i < lines.length; i++) {
 		const raw = lines[i]!;
-		const trimmed = raw.trim();
-		if (/^(`{3,}|~{3,})/.test(trimmed)) {
-			inFence = !inFence;
+		const nextFence = updateFenceState(raw, fence);
+		if (nextFence !== fence) {
+			fence = nextFence;
 			continue;
 		}
-		if (inFence) continue;
-		const hm = /^#{1,3}\s+`?([A-Za-z_][\w$. ]*?)`?\s*$/.exec(trimmed);
+		if (fence) continue;
+		const trimmed = raw.trim();
+		const hm = parseSchemaHeading(trimmed);
 		if (hm) {
-			const hText = hm[1]!.trim();
+			const hText = hm.text;
 			if (/^foreign\s+keys?$/i.test(hText)) {
 				sectionKind = "fks";
 			} else if (/^index(?:es)?$|^indices$/i.test(hText)) {
@@ -1130,7 +2107,7 @@ function parseMarkdownSchemaTables(schemaMd: string): DocTableCols[] {
 			} else if (SCHEMA_SUBSECTION_RE.test(hText)) {
 				sectionKind = "other";
 			} else {
-				currentTable = hText;
+				currentTable = hm.tableToken;
 				currentDoc = null;
 				sectionKind = "columns";
 			}
@@ -1138,12 +2115,12 @@ function parseMarkdownSchemaTables(schemaMd: string): DocTableCols[] {
 		}
 		if (!trimmed.startsWith("|")) continue;
 		if (i + 1 >= lines.length || !/^\s*\|?\s*:?-{2,}/.test(lines[i + 1]!)) continue;
-		const hdr = splitMarkdownRow(raw).map((c) => c.toLowerCase());
+		const hdr = splitMarkdownRow(raw).map((c) => stripMarkdownCell(c).toLowerCase());
 
 		// Foreign keys table
 		if (sectionKind === "fks" || isForeignKeysHeader(hdr)) {
 			const target = currentDoc ?? out[out.length - 1];
-			const fkColIdx = hdr.findIndex((c) => c === "column" || c === "local column" || c === "field");
+			const fkColIdx = hdr.findIndex((c) => c === "column" || c === "columns" || c === "local column" || c === "field");
 			const refTblIdx = hdr.findIndex((c) => c === "target table" || c === "referenced table" || c === "table" || c.includes("reference"));
 			const refColIdx = hdr.findIndex((c) => c === "target column" || c === "referenced column");
 			const onDelIdx = hdr.findIndex((c) => c.includes("delete"));
@@ -1153,35 +2130,54 @@ function parseMarkdownSchemaTables(schemaMd: string): DocTableCols[] {
 				target.hasForeignKeysSection = true;
 				for (; i < lines.length && lines[i]!.trim().startsWith("|"); i++) {
 					const cells = splitMarkdownRow(lines[i]!);
-					const colName = stripMarkdownCell(cells[fkColIdx] ?? "");
+					const rawLocalCell = unescPipe(cells[fkColIdx] ?? "").trim();
+					const localCols = splitTopLevelCommas(rawLocalCell)
+						.map((p) => stripMarkdownCell(p))
+						.filter((p) => Boolean(p) && p !== "…");
 					const rawRef = stripMarkdownCell(cells[refTblIdx] ?? "");
-					if (!colName || !rawRef || colName === "…") continue;
+					if (!localCols.length || !rawRef) continue;
 					let refTable = rawRef;
-					let refColumn = refColIdx >= 0 ? stripMarkdownCell(cells[refColIdx] ?? "") : "";
-					if (!refColumn) {
-						const paren = /^([A-Za-z_][\w$.]*)\s*\(\s*([A-Za-z_][\w$]*)\s*\)$/.exec(rawRef);
+					const rawRefColCell = refColIdx >= 0 ? unescPipe(cells[refColIdx] ?? "").trim() : "";
+					let refCols = rawRefColCell
+						? splitTopLevelCommas(rawRefColCell)
+								.map((p) => stripMarkdownCell(p))
+								.filter((p) => Boolean(p) && p !== "…")
+						: [];
+					if (!refCols.length) {
+						const paren = /^([A-Za-z_][\w$.]*)\s*\(([^)]+)\)$/.exec(rawRef);
 						if (paren) {
 							refTable = paren[1]!;
-							refColumn = paren[2]!;
+							refCols = splitTopLevelCommas(paren[2]!)
+								.map((p) => stripMarkdownCell(p))
+								.filter(Boolean);
 						} else if (rawRef.includes(".")) {
-							const parts = rawRef.split(".");
-							if (parts.length === 2) {
-								refTable = parts[0]!;
-								refColumn = parts[1]!;
-							}
+							const parsed = parseDottedFkTarget(rawRef, refColIdx >= 0);
+							refTable = parsed.refTable;
+							if (parsed.refColumn) refCols = [parsed.refColumn];
 						}
 					}
 					const rawDel = onDelIdx >= 0 ? stripMarkdownCell(cells[onDelIdx] ?? "") : "";
-					const noteText = noteIdx >= 0 ? (cells[noteIdx] ?? "") : "";
+					const noteText = noteIdx >= 0 ? unescPipe(cells[noteIdx] ?? "") : "";
 					const delMatch =
 						/^(CASCADE|SET\s+NULL|SET\s+DEFAULT|RESTRICT|NO\s+ACTION)$/i.exec(rawDel) ??
 						/\bON\s+DELETE\s+(CASCADE|SET\s+NULL|SET\s+DEFAULT|RESTRICT|NO\s+ACTION)\b/i.exec(noteText);
-					addDocFk(target, {
-						column: colName,
-						refTable,
-						...(refColumn ? { refColumn } : {}),
-						...(delMatch ? { onDelete: delMatch[1]!.replace(/\s+/g, " ").toUpperCase() } : {}),
-					});
+					const onDelete = delMatch ? delMatch[1]!.replace(/\s+/g, " ").toUpperCase() : undefined;
+					if (localCols.length === 1) {
+						addDocFk(target, {
+							column: localCols[0]!,
+							refTable,
+							...(refCols[0] ? { refColumn: refCols[0] } : {}),
+							...(onDelete ? { onDelete } : {}),
+						});
+					} else {
+						addDocFk(target, {
+							column: localCols.join(", "),
+							columns: localCols,
+							refTable,
+							...(refCols.length ? { refColumn: refCols.join(", "), refColumns: refCols } : {}),
+							...(onDelete ? { onDelete } : {}),
+						});
+					}
 				}
 			} else {
 				while (i < lines.length && lines[i]!.trim().startsWith("|")) i++;
@@ -1202,13 +2198,11 @@ function parseMarkdownSchemaTables(schemaMd: string): DocTableCols[] {
 				for (; i < lines.length && lines[i]!.trim().startsWith("|"); i++) {
 					const cells = splitMarkdownRow(lines[i]!);
 					const ixName = stripMarkdownCell(cells[nameIdx] ?? "");
-					const rawCols = (cells[colsIdx] ?? "").trim();
+					const rawCols = unescPipe(cells[colsIdx] ?? "").trim();
 					if (!ixName || !rawCols || ixName === "…") continue;
-					const cols = rawCols
-						.split(",")
+					const cols = splitTopLevelCommas(rawCols)
 						.map((p) =>
-							stripMarkdownCell(p)
-								.replace(/^\(|\)$/g, "")
+							stripOuterBalancedParens(stripMarkdownCell(p))
 								.replace(/\s+(?:ASC|DESC|NULLS\s+(?:FIRST|LAST))$/i, "")
 								.trim(),
 						)
@@ -1234,11 +2228,22 @@ function parseMarkdownSchemaTables(schemaMd: string): DocTableCols[] {
 			continue;
 		}
 
-		const colIdx = hdr.findIndex((c) => c === "column" || c === "field" || c === "name");
-		if (colIdx < 0) continue;
-		const typeIdx = hdr.findIndex((c) => c.includes("type"));
-		const consIdx = hdr.findIndex((c) => c.includes("constraint") || c.includes("key") || c.includes("null"));
-		const noteIdx = hdr.findIndex((c) => c.includes("note") || c.includes("desc") || c.includes("meaning") || c.includes("holds") || c.includes("what"));
+		const colIdx = findColumnHeaderIndex(hdr);
+		if (colIdx < 0) {
+			i += 2;
+			while (i < lines.length && lines[i]!.trim().startsWith("|")) i++;
+			i--;
+			continue;
+		}
+		const typeIdx = hdr.findIndex((c, ci) => ci !== colIdx && c.includes("type"));
+		const consIdx = hdr.findIndex((c, ci) => ci !== colIdx && ci !== typeIdx && (c.includes("constraint") || c.includes("key") || c.includes("null")));
+		const noteIdx = hdr.findIndex(
+			(c, ci) =>
+				ci !== colIdx &&
+				ci !== typeIdx &&
+				ci !== consIdx &&
+				(c.includes("note") || c.includes("desc") || c.includes("meaning") || c.includes("holds") || c.includes("what")),
+		);
 		const hasNullCol = consIdx >= 0 && hdr[consIdx]!.includes("null");
 		const hasConstraintsCol = consIdx >= 0 && !hasNullCol;
 		const cols = new Map<string, { name: string; type: string; constraints: string; notes: string }>();
@@ -1257,13 +2262,14 @@ function parseMarkdownSchemaTables(schemaMd: string): DocTableCols[] {
 			const cells = splitMarkdownRow(lines[i]!);
 			const colName = stripMarkdownCell(cells[colIdx] ?? "");
 			if (!colName || colName === "…" || colName.startsWith("(")) continue;
-			const notes = noteIdx >= 0 ? (cells[noteIdx] ?? "").trim() : "";
-			const constraints = consIdx >= 0 ? (cells[consIdx] ?? "").trim() : "";
+			const notes = noteIdx >= 0 ? unescPipe(cells[noteIdx] ?? "").trim() : "";
+			const constraints = consIdx >= 0 ? unescPipe(cells[consIdx] ?? "").trim() : "";
 			// Already-acknowledged dropped columns no longer masquerade as live schema drift.
 			if (DROPPED_NOTE_RE.test(notes) || DROPPED_NOTE_RE.test(constraints)) continue;
+			const rawType = typeIdx >= 0 ? stripMarkdownCell(cells[typeIdx] ?? "") : "";
 			cols.set(colName.toLowerCase(), {
 				name: colName,
-				type: typeIdx >= 0 ? stripMarkdownCell(cells[typeIdx] ?? "") : "",
+				type: rawType === "—" || rawType === "-" ? "" : rawType,
 				constraints,
 				notes,
 			});
@@ -1285,7 +2291,48 @@ const normalizeSqlType = (t: string) =>
 		.replace(/\s*\(\s*/g, "(")
 		.replace(/\s*\)/g, ")")
 		.replace(/\s*,\s*/g, ",")
-		.replace(/\s+/g, " ");
+		.replace(/\s+/g, " ")
+		.replace(/^national char(?:acter)? varying\b/, "nvarchar")
+		.replace(/^national character\b/, "nchar")
+		.replace(/^char(?:acter)? varying\b/, "varchar")
+		.replace(/^timestamp(\([^)]*\))? with local time zone$/, "timestampltz$1")
+		.replace(/^timestamp(\([^)]*\))? with time zone$/, "timestamptz$1")
+		.replace(/^timestamp(\([^)]*\))? without time zone$/, "timestamp$1")
+		.replace(/^time(\([^)]*\))? with time zone$/, "timetz$1")
+		.replace(/^time(\([^)]*\))? without time zone$/, "time$1")
+		.replace(/^interval year(?:\([^)]*\))? to month$/, "interval ym")
+		.replace(/^interval day(?:\([^)]*\))? to second(?:\([^)]*\))?$/, "interval ds");
+
+/** Replaces top-level commas (outside parentheses and single-quoted literals) with spaces. */
+function replaceTopLevelCommasWithSpace(text: string): string {
+	let out = "";
+	let depth = 0;
+	let inSingle = false;
+	for (let i = 0; i < text.length; i++) {
+		const ch = text[i]!;
+		if (inSingle) {
+			out += ch;
+			if (ch === "'") {
+				if (text[i + 1] === "'") out += text[++i]!;
+				else inSingle = false;
+			}
+			continue;
+		}
+		if (ch === "'") {
+			inSingle = true;
+			out += ch;
+			continue;
+		}
+		if (ch === "(") depth++;
+		else if (ch === ")" && depth > 0) depth--;
+		else if (ch === "," && depth === 0) {
+			out += " ";
+			continue;
+		}
+		out += ch;
+	}
+	return out.replace(/\s+/g, " ").trim();
+}
 
 /**
  * Filters a multi-table SQL DDL list down to the specific table(s) already documented
@@ -1312,9 +2359,9 @@ export function filterSqlTablesForMarkdown(tables: readonly SqlTableDef[], exist
 }
 
 /**
- * Generates clean, formatted `CREATE TABLE` (+ `FOREIGN KEY` constraints and `CREATE [UNIQUE ]INDEX`)
- * SQL DDL directly from a Markdown schema document's column, foreign-key, and index tables.
- * Output round-trips cleanly against `diffSqlAgainstSchemaMarkdown()` with zero drift.
+ * Generates clean, formatted `CREATE TABLE` (+ composite/single `PRIMARY KEY`, `FOREIGN KEY` constraints,
+ * and `CREATE [UNIQUE ]INDEX`) SQL DDL directly from a Markdown schema document's column, foreign-key,
+ * and index tables. Output round-trips cleanly against `diffSqlAgainstSchemaMarkdown()` with zero drift.
  */
 export function schemaMarkdownToSql(
 	schemaMd: string,
@@ -1335,7 +2382,7 @@ export function schemaMarkdownToSql(
 	): string => {
 		if (docTbl.hasNullCol) {
 			const notNull = /^(?:no|false|not\s*null|nn|pk|primary\s*key)$/i.test(col.constraints);
-			const isPk = /\b(?:primary\s+key|pk)\b/i.test(col.constraints) || /\bprimary\s+key\b/i.test(col.notes);
+			const isPk = /\b(?:primary\s+key|pk)\b/i.test(col.constraints) || /\b(?:primary\s+key|pk)\b/i.test(col.notes);
 			const isUnique = /\bunique\b/i.test(col.constraints) || /\bunique\b/i.test(col.notes);
 			return [notNull || isPk ? "NOT NULL" : "", isPk ? "PRIMARY KEY" : "", !isPk && isUnique ? "UNIQUE" : ""]
 				.filter(Boolean)
@@ -1344,11 +2391,15 @@ export function schemaMarkdownToSql(
 		if (docTbl.hasConstraintsCol) {
 			const raw = col.constraints.replace(/`/g, "").trim();
 			if (!raw || raw === "—" || raw === "-" || /^null$/i.test(raw)) return "";
-			return raw
+			// Strip shorthand `FK -> ...` / `foreign key to ...` phrases (emitted as table-level constraints).
+			const withoutFkPhrase = raw.replace(
+				/(?:^|[,;]\s*|\s+)(?:FK|foreign\s+key)\s*(?:->|→|to)\s*[A-Za-z_][\w$.]*(?:\s*\([^)]*\))?(?:\s+ON\s+DELETE\s+(?:CASCADE|SET\s+NULL|SET\s+DEFAULT|RESTRICT|NO\s+ACTION))?/gi,
+				" ",
+			);
+			const expanded = withoutFkPhrase
 				.replace(/\bpk\b/gi, "PRIMARY KEY")
-				.replace(/\bnn\b/gi, "NOT NULL")
-				.replace(/\s+/g, " ")
-				.trim();
+				.replace(/\bnn\b/gi, "NOT NULL");
+			return replaceTopLevelCommasWithSpace(expanded);
 		}
 		return /\bprimary\s+key\b/i.test(col.notes) ? "NOT NULL PRIMARY KEY" : "";
 	};
@@ -1365,19 +2416,38 @@ export function schemaMarkdownToSql(
 			type: formatType(col.type),
 			constraints: formatConstraints(docTbl, col),
 		}));
+
+		// Composite primary key: when > 1 columns carry PRIMARY KEY, strip inline PRIMARY KEY and emit one table-level PK constraint.
+		const pkCols = rows.filter((r) => /\bPRIMARY\s+KEY\b/i.test(maskQuotedAndChecks(r.constraints))).map((r) => r.name);
+		const pkLines: string[] = [];
+		if (pkCols.length > 1) {
+			for (const r of rows) {
+				if (/\bPRIMARY\s+KEY\b/i.test(maskQuotedAndChecks(r.constraints))) {
+					r.constraints = stripOutsideQuotes(r.constraints, /\bPRIMARY\s+KEY\b/gi);
+				}
+			}
+			const pkName = `PK_${tableName}`.replace(/[^A-Za-z0-9_]/g, "_");
+			pkLines.push(`    CONSTRAINT ${pkName} PRIMARY KEY (${pkCols.join(", ")})`);
+		}
+
 		const maxName = Math.max(...rows.map((r) => r.name.length));
 		const maxType = Math.max(...rows.map((r) => r.type.length));
 		// Skip table-level FK clause if the column already carries an inline `REFERENCES ...` constraint.
 		const inlineFkCols = new Set(
-			rows.filter((r) => /\bREFERENCES\b/i.test(r.constraints)).map((r) => r.name.toLowerCase()),
+			rows.filter((r) => /\bREFERENCES\b/i.test(maskSingleQuoted(r.constraints))).map((r) => r.name.toLowerCase()),
 		);
 		const fkLines = docTbl.foreignKeys
-			.filter((fk) => !inlineFkCols.has(fk.column.toLowerCase()))
+			.filter((fk) => {
+				const locals = fkLocalCols(fk);
+				return !(locals.length === 1 && inlineFkCols.has(locals[0]!.toLowerCase()));
+			})
 			.map((fk) => {
-				const fkName = `FK_${tableName}_${fk.column}`.replace(/[^A-Za-z0-9_]/g, "_");
-				const target = fk.refColumn ? `${fk.refTable} (${fk.refColumn})` : fk.refTable;
+				const locals = fkLocalCols(fk);
+				const refs = fkRefCols(fk);
+				const fkName = `FK_${tableName}_${locals.join("_")}`.replace(/[^A-Za-z0-9_]/g, "_");
+				const target = refs.length ? `${fk.refTable} (${refs.join(", ")})` : fk.refTable;
 				const onDel = fk.onDelete ? ` ON DELETE ${fk.onDelete}` : "";
-				return `    CONSTRAINT ${fkName} FOREIGN KEY (${fk.column}) REFERENCES ${target}${onDel}`;
+				return `    CONSTRAINT ${fkName} FOREIGN KEY (${locals.join(", ")}) REFERENCES ${target}${onDel}`;
 			});
 		const bodyLines = [
 			...rows.map((r) =>
@@ -1385,6 +2455,7 @@ export function schemaMarkdownToSql(
 					? `    ${r.name.padEnd(maxName)} ${r.type.padEnd(maxType)} ${r.constraints}`
 					: `    ${r.name.padEnd(maxName)} ${r.type}`,
 			),
+			...pkLines,
 			...fkLines,
 		].map((line, idx, all) => (idx < all.length - 1 ? `${line},` : line));
 		let stmt = `CREATE TABLE ${tableName} (\n${bodyLines.join("\n")}\n);`;
@@ -1426,8 +2497,12 @@ export function diffSqlAgainstSchemaMarkdown(sqlText: string, schemaMd: string):
 	};
 
 	const matchedAnyDocTable = docTables.length > 0 && sqlTables.some((sqlTbl) => Boolean(findDocTable(sqlTbl.tableName)));
-	const fkKey = (fk: SqlForeignKeyDef) =>
-		`${fk.column.toLowerCase()}->${fk.refTable.toLowerCase()}(${(fk.refColumn || fk.column).toLowerCase()})`;
+	const fkKey = (fk: SqlForeignKeyDef) => {
+		const locals = fkLocalCols(fk).map((c) => c.toLowerCase());
+		const refs = fkRefCols(fk).map((c) => c.toLowerCase());
+		const effectiveRefs = refs.length ? refs : locals;
+		return `${locals.join(",")}->${bareTableKey(fk.refTable)}(${effectiveRefs.join(",")})`;
+	};
 
 	for (const sqlTbl of sqlTables) {
 		const docTbl = findDocTable(sqlTbl.tableName);
@@ -1455,16 +2530,29 @@ export function diffSqlAgainstSchemaMarkdown(sqlText: string, schemaMd: string):
 				added.push(col.name);
 				continue;
 			}
-			const typeChanged = Boolean(docCol.type) && normalizeSqlType(col.type) !== normalizeSqlType(docCol.type);
+			const normSqlType = normalizeSqlType(col.type);
+			const normDocType = normalizeSqlType(docCol.type);
+			const typeChanged =
+				Boolean(normDocType) &&
+				normSqlType !== normDocType &&
+				!(normDocType.endsWith("…") && normSqlType.startsWith(normDocType.slice(0, -1)));
 			let nullChanged = false;
+			let pkChanged = false;
 			if (docTbl.hasConstraintsCol || docTbl.hasNullCol) {
-				const sqlNotNull = /\b(?:not\s+null|primary\s+key)\b/i.test(col.constraints);
+				const sqlConsMasked = maskQuotedAndChecks(col.constraints);
+				const docConsMasked = maskQuotedAndChecks(docCol.constraints);
+				const sqlIsPk = /\bPRIMARY\s+KEY\b/i.test(sqlConsMasked);
+				const sqlNotNull = sqlIsPk || /\bNOT\s+NULL\b/i.test(sqlConsMasked);
+				const docIsPk = docTbl.hasNullCol
+					? /\b(?:primary\s+key|pk)\b/i.test(docConsMasked) || /\b(?:primary\s+key|pk)\b/i.test(docCol.notes)
+					: /\b(?:primary\s+key|pk)\b/i.test(docConsMasked);
 				const docNotNull = docTbl.hasNullCol
-					? /^(?:no|false|not\s*null|nn|pk|primary\s*key)$/i.test(docCol.constraints)
-					: /\b(?:not\s+null|primary\s+key|pk)\b/i.test(docCol.constraints);
+					? /^(?:no|false|not\s*null|nn|pk|primary\s*key)$/i.test(docConsMasked.trim()) || docIsPk
+					: /\b(?:not\s+null|nn|primary\s+key|pk)\b/i.test(docConsMasked);
 				nullChanged = sqlNotNull !== docNotNull;
+				pkChanged = sqlIsPk !== docIsPk;
 			}
-			if (typeChanged || nullChanged) {
+			if (typeChanged || nullChanged || pkChanged) {
 				modified.push(col.name);
 			}
 		}
@@ -1475,10 +2563,10 @@ export function diffSqlAgainstSchemaMarkdown(sqlText: string, schemaMd: string):
 			const sqlFks = new Map((sqlTbl.foreignKeys ?? []).map((fk) => [fkKey(fk), fk]));
 			const docFks = new Map(docTbl.foreignKeys.map((fk) => [fkKey(fk), fk]));
 			for (const [k, fk] of sqlFks) {
-				if (!docFks.has(k)) added.push(`FK: ${fk.column} -> ${fk.refTable}`);
+				if (!docFks.has(k)) added.push(`FK: ${fkLocalCols(fk).join(", ")} -> ${fk.refTable}`);
 			}
 			for (const [k, fk] of docFks) {
-				if (!sqlFks.has(k)) dropped.push(`FK: ${fk.column} -> ${fk.refTable}`);
+				if (!sqlFks.has(k)) dropped.push(`FK: ${fkLocalCols(fk).join(", ")} -> ${fk.refTable}`);
 			}
 		}
 		if (docTbl.hasIndexesSection || docTbl.indexes.length > 0) {
@@ -1516,14 +2604,144 @@ const SQL_QUERY_KEYWORDS = new Set([
 	"create", "alter", "drop", "exec", "execute", "declare", "begin", "commit", "rollback", "return",
 	"if", "while", "try", "catch", "output", "default", "current", "timestamp", "date", "time",
 	"year", "month", "day", "hour", "minute", "second", "both", "leading", "trailing", "dual",
-	"inserted", "deleted", "values",
+	"inserted", "deleted", "of", "statistics",
 ]);
 
 const SYSTEM_SCHEMAS = new Set(["sys", "information_schema", "pg_catalog", "mysql", "performance_schema"]);
 
 const looksLikeSqlStatement = (s: string) =>
-	(/\b(?:SELECT|INSERT|UPDATE|DELETE|MERGE)\b/i.test(s) && /\b(?:FROM|SET|INTO|VALUES)\b/i.test(s)) ||
+	(/\b(?:SELECT|INSERT|UPDATE|DELETE|MERGE)\b/i.test(s) && /\b(?:FROM|SET|INTO|VALUES|USING)\b/i.test(s)) ||
 	/\bDELETE\s+(?:TOP\s*\([^)]*\)\s*(?:PERCENT\s+)?)?(?:[A-Za-z_[\]"`][\w$#.[\]"`]*)\s+WHERE\b/i.test(s);
+
+/**
+ * Strips SQL comments (`-- ...`, nested `/* ... *\/`) and SSL comments (`// ...`, unclosed `/* ... ;`)
+ * while optionally masking both `'...'` and `"..."` string contents so SSL vs SQL classification
+ * never trips over comments or string literals.
+ */
+function stripCommentsForModeDetect(text: string, maskAllStrings: boolean): string {
+	let out = "";
+	let i = 0;
+	const n = text.length;
+	const lastBlockClose = text.lastIndexOf("*/");
+	while (i < n) {
+		const ch = text[i]!;
+		const next = text[i + 1];
+		const qOpen = matchOracleQQuote(text, i);
+		if (qOpen) {
+			const closePos = text.indexOf(`${qOpen.closeDelim}'`, qOpen.bodyStart);
+			const endPos = closePos >= 0 ? closePos + 2 : n;
+			if (!maskAllStrings) {
+				out += text.slice(i, endPos);
+			} else {
+				for (let k = i; k < endPos; k++) out += text[k] === "\n" ? "\n" : " ";
+			}
+			i = endPos;
+			continue;
+		}
+		const dollarTag = matchPgDollarTag(text, i);
+		if (dollarTag) {
+			const closePos = text.indexOf(dollarTag, i + dollarTag.length);
+			const endPos = closePos >= 0 ? closePos + dollarTag.length : n;
+			if (!maskAllStrings) {
+				out += text.slice(i, endPos);
+			} else {
+				for (let k = i; k < endPos; k++) out += text[k] === "\n" ? "\n" : " ";
+			}
+			i = endPos;
+			continue;
+		}
+		if (ch === "'" || ch === '"') {
+			const q = ch;
+			out += maskAllStrings ? " " : ch;
+			i++;
+			while (i < n) {
+				if (text[i] === "\\" && q === '"' && i + 1 < n) {
+					out += maskAllStrings ? (text[i + 1] === "\n" ? "\n" : "  ") : text.slice(i, i + 2);
+					i += 2;
+					continue;
+				}
+				if (text[i] === q) {
+					if (text[i + 1] === q && q === "'") {
+						out += maskAllStrings ? "  " : "''";
+						i += 2;
+						continue;
+					}
+					out += maskAllStrings ? " " : q;
+					i++;
+					break;
+				}
+				out += maskAllStrings ? (text[i] === "\n" ? "\n" : " ") : text[i]!;
+				i++;
+			}
+			continue;
+		}
+		if (ch === "-" && next === "-") {
+			while (i < n && text[i] !== "\n") i++;
+			continue;
+		}
+		if (ch === "/" && next === "/") {
+			while (i < n && text[i] !== "\n") i++;
+			continue;
+		}
+		if (ch === "/" && next === "*") {
+			// Check whether this is a standard closed SQL block comment `/* ... */` or an SSL `/* ... ;` comment.
+			if (lastBlockClose < i + 2) {
+				let k = i + 2;
+				while (k < n && text[k] !== ";") {
+					if (text[k] === "\n") out += "\n";
+					k++;
+				}
+				if (k < n) k++;
+				out += " ";
+				i = k;
+				continue;
+			}
+			let j = i + 2;
+			let depth = 1;
+			let sslSemiEnd = -1;
+			while (j < n && depth > 0) {
+				if (text[j] === "/" && text[j + 1] === "*") {
+					depth++;
+					j += 2;
+					continue;
+				}
+				if (text[j] === "*" && text[j + 1] === "/") {
+					depth--;
+					j += 2;
+					continue;
+				}
+				if (depth === 1 && text[j] === ";" && sslSemiEnd < 0) {
+					// If `;` sits at EOL followed by a new SSL directive (`:`) or another `/*`, treat as SSL `/* ... ;`.
+					const tailLine = text.slice(j + 1, j + 48);
+					if (/^[ \t]*\r?\n[ \t]*(?:\/\*|:[A-Za-z])/.test(tailLine)) {
+						sslSemiEnd = j + 1;
+						break;
+					}
+				}
+				j++;
+			}
+			if (depth === 0 && sslSemiEnd < 0) {
+				for (let k = i; k < j; k++) if (text[k] === "\n") out += "\n";
+				out += " ";
+				i = j;
+			} else {
+				// Unclosed `/*` (no `*/` before EOF) or SSL banner `;` -> close at first `;`.
+				const endPos = sslSemiEnd >= 0 ? sslSemiEnd : (() => {
+					let k = i + 2;
+					while (k < n && text[k] !== ";") k++;
+					return k < n ? k + 1 : n;
+				})();
+				for (let k = i; k < endPos; k++) if (text[k] === "\n") out += "\n";
+				out += " ";
+				i = endPos;
+			}
+			continue;
+		}
+		out += ch;
+		i++;
+	}
+	return out;
+}
 
 /** Strips SSL comments (`/* ... ;`, `/* ... *\/`, `// ...`) from a short gap slice between string literals. */
 function stripSslComments(gap: string): string {
@@ -1556,10 +2774,29 @@ function stripSslComments(gap: string): string {
 	return out;
 }
 
+/** Returns true when `rawGap` is an SSL string concatenation bridge (`+`, `+ CRLF +`, `+ Chr(13) + Chr(10) +`, `+ sVar +`). */
+function isSslConcatBridge(rawGap: string): boolean {
+	const g = rawGap.trim();
+	if (!g.startsWith("+") || !g.endsWith("+")) return false;
+	if (g.length === 1) return true;
+	if (g.length > 240 || /[;{}]/.test(g)) return false;
+	if (/(?:^|\s):[A-Za-z]/.test(g)) return false;
+	let depth = 0;
+	for (const ch of g) {
+		if (ch === "(" || ch === "[") depth++;
+		else if (ch === ")" || ch === "]") {
+			depth--;
+			if (depth < 0) return false;
+		}
+	}
+	return depth === 0;
+}
+
 /**
  * Extracts SQL string literals embedded inside STARLIMS SSL `.ds` files while preserving exact
- * character offsets and line numbers. Non-SQL English error/log strings (e.g. "Failed reading
- * from config", "Update status failed") are masked out so they never produce bogus table hits.
+ * character offsets and line numbers. Bridges `+ CRLF +` / `+ Chr(13) +` / `+ var +` string concatenation,
+ * balances/neutralizes unclosed single quotes or block comments per literal group so one query can never
+ * swallow subsequent queries, and masks out non-SQL English log/error strings.
  */
 function extractSslEmbeddedSql(text: string): string {
 	type SslLit = { start: number; end: number; contentStart: number; contentEnd: number; content: string };
@@ -1612,7 +2849,7 @@ function extractSslEmbeddedSql(text: string): string {
 		i++;
 	}
 
-	// Group string literals connected via `+` or sequential `<var> +=` / `<var> := <var> +` concatenation.
+	// Group string literals connected via `+` (including `+ CRLF +`, `+ Chr(13) +`, `+ var +`) or `<var> +=` / `<var> := <var> +`.
 	const groups: SslLit[][] = [];
 	let curGroup: SslLit[] = [];
 	let curVar = "";
@@ -1629,11 +2866,16 @@ function extractSslEmbeddedSql(text: string): string {
 		}
 		const prev = curGroup[curGroup.length - 1]!;
 		const gap = stripSslComments(text.slice(prev.end, lit.start));
-		const isPlusConcat = /^\s*\+\s*$/.test(gap);
+		const isPlusConcat = isSslConcatBridge(gap);
 		const appendMatch = curVar
-			? /^\s*;\s*([A-Za-z_]\w*)\s*(?:\+=|:=\s*\1\s*\+)\s*$/i.exec(gap)
+			? /^\s*;\s*([A-Za-z_]\w*)\s*(?:\+=|:=\s*\1\s*\+)\s*([\s\S]*)$/i.exec(gap)
 			: null;
-		const isSameVarAppend = Boolean(appendMatch && appendMatch[1]!.toLowerCase() === curVar);
+		const appendTail = appendMatch ? appendMatch[2]!.trim() : "";
+		const isSameVarAppend = Boolean(
+			appendMatch &&
+				appendMatch[1]!.toLowerCase() === curVar &&
+				(!appendTail || isSslConcatBridge(`+${appendTail}`)),
+		);
 		if (isPlusConcat || isSameVarAppend) {
 			curGroup.push(lit);
 		} else {
@@ -1650,13 +2892,61 @@ function extractSslEmbeddedSql(text: string): string {
 	for (const group of groups) {
 		const combined = group.map((g) => g.content).join(" ");
 		if (!looksLikeSqlStatement(combined)) continue;
+		const groupStart = group[0]!.contentStart;
+		const groupEnd = group[group.length - 1]!.contentEnd;
 		for (const lit of group) {
 			for (let k = 0; k < lit.content.length && lit.contentStart + k < n; k++) {
 				chars[lit.contentStart + k] = lit.content[k]!;
 			}
 		}
-		const lastEnd = group[group.length - 1]!.end - 1;
-		if (lastEnd >= 0 && lastEnd < n && chars[lastEnd] !== "\n") {
+		// Neutralize any unclosed single quote or unclosed `/*` within this group so it cannot swallow later queries.
+		let inSingle = false;
+		let openSinglePos = -1;
+		let blockDepth = 0;
+		const openBlockPositions: number[] = [];
+		for (let p = groupStart; p < groupEnd && p < n; p++) {
+			const c = chars[p]!;
+			if (blockDepth > 0) {
+				if (c === "/" && chars[p + 1] === "*") {
+					blockDepth++;
+					openBlockPositions.push(p);
+					p++;
+				} else if (c === "*" && chars[p + 1] === "/") {
+					blockDepth--;
+					openBlockPositions.pop();
+					p++;
+				}
+				continue;
+			}
+			if (inSingle) {
+				if (c === "'") {
+					if (p + 1 < groupEnd && chars[p + 1] === "'") {
+						p++;
+					} else {
+						inSingle = false;
+						openSinglePos = -1;
+					}
+				}
+				continue;
+			}
+			if (c === "'") {
+				inSingle = true;
+				openSinglePos = p;
+			} else if (c === "/" && chars[p + 1] === "*") {
+				blockDepth = 1;
+				openBlockPositions.push(p);
+				p++;
+			}
+		}
+		if (inSingle && openSinglePos >= 0) {
+			chars[openSinglePos] = " ";
+		}
+		for (const bp of openBlockPositions) {
+			if (bp >= 0 && bp < n && chars[bp] !== "\n") chars[bp] = " ";
+		}
+		const lastLit = group[group.length - 1]!;
+		const lastEnd = lastLit.end - 1;
+		if (lastEnd >= lastLit.contentEnd && lastEnd < n && chars[lastEnd] !== "\n") {
 			chars[lastEnd] = ";";
 		}
 	}
@@ -1732,20 +3022,138 @@ function consumeOptionalAliasAndHint(sql: string, startPos: number): { end: numb
 	return { end: pos, ...(alias ? { alias } : {}) };
 }
 
+/** Returns true when `pos` sits immediately inside a function call matching `fnRe` (supporting arbitrary nested parens). */
+function isInsideFunctionCall(sql: string, pos: number, fnRe: RegExp): boolean {
+	let depth = 0;
+	for (let i = pos - 1; i >= 0; i--) {
+		const ch = sql[i]!;
+		if (ch === ";") return false;
+		if (ch === "]" || ch === '"' || ch === "`") {
+			const open = ch === "]" ? "[" : ch;
+			i--;
+			while (i >= 0 && sql[i] !== open) i--;
+			continue;
+		}
+		if (ch === ")") {
+			depth++;
+		} else if (ch === "(") {
+			if (depth === 0) {
+				const head = sql.slice(Math.max(0, i - 24), i);
+				return fnRe.test(head);
+			}
+			depth--;
+		}
+	}
+	return false;
+}
+
+/** Strips parenthesized sub-expressions from `sql` (preserving brackets/quotes) to inspect depth-0 statement verbs. */
+function stripParenthesized(sql: string): string {
+	let out = "";
+	let depth = 0;
+	let quote: string | null = null;
+	let bracket = false;
+	for (let i = 0; i < sql.length; i++) {
+		const ch = sql[i]!;
+		if (bracket) {
+			if (depth === 0) out += ch;
+			if (ch === "]") {
+				if (sql[i + 1] === "]") {
+					if (depth === 0) out += sql[++i]!;
+					else i++;
+				} else bracket = false;
+			}
+			continue;
+		}
+		if (quote) {
+			if (depth === 0) out += ch;
+			if (ch === quote) {
+				if (sql[i + 1] === quote) {
+					if (depth === 0) out += sql[++i]!;
+					else i++;
+				} else quote = null;
+			}
+			continue;
+		}
+		if (ch === "[") {
+			bracket = true;
+			if (depth === 0) out += ch;
+			continue;
+		}
+		if (ch === "'" || ch === '"' || ch === "`") {
+			quote = ch;
+			if (depth === 0) out += ch;
+			continue;
+		}
+		if (ch === "(") {
+			depth++;
+			out += " ";
+		} else if (ch === ")") {
+			if (depth > 0) depth--;
+			out += " ";
+		} else if (depth === 0) {
+			out += ch;
+		} else if (ch === "\n") {
+			out += "\n";
+		}
+	}
+	return out;
+}
+
 /**
  * Extracts depth-0 table aliases declared in the `FROM` / `JOIN` clauses of the current
  * `UPDATE` or `DELETE` statement (starting after `UPDATE <target>` or `DELETE <target>`),
  * so T-SQL `UPDATE smp SET ... FROM dbo.SAMPLES smp` never treats `smp` as a table name.
  */
 function statementFromAliases(cleaned: string, startPos: number): Set<string> {
-	// Build a depth-0 slice of the statement up to `;`, `GO`, or next top-level DML statement.
+	// Build a depth-0 slice of the statement up to `;`, `GO`, or next top-level DML statement, respecting brackets and quotes.
 	let depth0 = "";
 	let i = startPos;
 	let depth = 0;
+	let quote: string | null = null;
+	let bracket = false;
 	const n = cleaned.length;
 	const stmtBoundaryRe = /^(?:SELECT|INSERT|UPDATE|DELETE|MERGE|CREATE|ALTER|DROP|EXEC(?:UTE)?)\b/i;
 	while (i < n) {
 		const ch = cleaned[i]!;
+		if (bracket) {
+			if (depth === 0) depth0 += ch;
+			else depth0 += " ";
+			if (ch === "]") {
+				if (cleaned[i + 1] === "]") {
+					i++;
+					if (depth === 0) depth0 += cleaned[i]!;
+					else depth0 += " ";
+				} else bracket = false;
+			}
+			i++;
+			continue;
+		}
+		if (quote) {
+			if (depth === 0) depth0 += ch;
+			else depth0 += " ";
+			if (ch === quote) {
+				if (cleaned[i + 1] === quote) {
+					i++;
+					if (depth === 0) depth0 += cleaned[i]!;
+					else depth0 += " ";
+				} else quote = null;
+			}
+			i++;
+			continue;
+		}
+		if (ch === "[") {
+			bracket = true;
+			depth0 += depth === 0 ? ch : " ";
+			i++;
+			continue;
+		}
+		if (ch === "'" || ch === '"' || ch === "`") {
+			quote = ch;
+			depth0 += depth === 0 ? ch : " ";
+			i++;
+			continue;
+		}
 		if (ch === "(") {
 			depth++;
 			depth0 += " ";
@@ -1765,7 +3173,7 @@ function statementFromAliases(cleaned: string, startPos: number): Set<string> {
 		}
 		if (ch === ";") break;
 		if ((i === startPos || cleaned[i - 1] === "\n") && /^[ \t]*GO[ \t]*(?=\r?\n|$)/i.test(cleaned.slice(i))) break;
-		if ((i === startPos || !/[\w$]/.test(cleaned[i - 1]!)) && stmtBoundaryRe.test(cleaned.slice(i))) {
+		if ((i === startPos || !isIdentChar(cleaned[i - 1])) && stmtBoundaryRe.test(cleaned.slice(i))) {
 			const prev = cleaned.slice(Math.max(startPos, i - 16), i);
 			if (!/\b(?:FOR|ON)\s+$/i.test(prev)) break;
 		}
@@ -1775,8 +3183,8 @@ function statementFromAliases(cleaned: string, startPos: number): Set<string> {
 
 	const aliases = new Set<string>();
 	const realTables = new Set<string>();
-	const fromJoinRe = new RegExp(`\\b(FROM|JOIN)\\s+(${QUALIFIED_NAME})`, "gi");
-	const qualAtStartRe = new RegExp(`^(${QUALIFIED_NAME})`);
+	const fromJoinRe = new RegExp(`\\b(FROM|JOIN)\\s+(?:ONLY\\s+)?(${QUALIFIED_NAME})`, "gi");
+	const qualAtStartRe = new RegExp(`^(?:ONLY\\s+)?(${QUALIFIED_NAME})`, "i");
 	const partRe = new RegExp(IDENT_PART, "g");
 	const recordName = (raw: string) => {
 		const parts = [...raw.matchAll(partRe)].map((p) => cleanIdent(p[0]!)).filter(Boolean);
@@ -1811,16 +3219,25 @@ function statementFromAliases(cleaned: string, startPos: number): Set<string> {
 }
 
 /**
- * Extracts queried/mutated table names after `FROM` (including ANSI-89 comma joins), `JOIN`,
- * `INTO`, `UPDATE` (excluding T-SQL `FROM` aliases), and `DELETE` (with or without `FROM`)
+ * Extracts queried/mutated table names after `FROM` (including `FROM ONLY` and ANSI-89 comma joins
+ * after tables or derived tables), `JOIN`, `INSERT [TOP (N)] [INTO]`, `MERGE [INTO] ... USING`,
+ * `UPDATE [TOP (N) [PERCENT]]` (excluding T-SQL `FROM` aliases), and `DELETE` (with or without `FROM`)
  * in `.sql` and STARLIMS `.ds` Data Sources, ignoring CTE names, `#temp` tables, SQL keywords,
+ * PL/SQL `SELECT/RETURNING ... INTO` targets, `REVOKE ... FROM`, `TRIM`/`EXTRACT` calls,
  * system catalogs (`sys.*`, `information_schema.*`), non-SQL SSL strings, and comments.
  */
 export function extractQueriedTablesFromSql(text: string): { object: string; line: number }[] {
 	if (!text.trim()) return [];
+	const commentStripped = stripCommentsForModeDetect(text, false);
+	const noCommentsNoStrings = stripCommentsForModeDetect(text, true);
+	const hasTopLevelSql =
+		/\b(?:SELECT\b[\s\S]{1,400}?\bFROM|INSERT\s+(?:TOP\s*(?:\([^)]*\)|\d+)\s*(?:PERCENT\s+)?)?INTO|UPDATE\s+(?:TOP\s*(?:\([^)]*\)|\d+)\s*(?:PERCENT\s+)?)?(?:ONLY\s+)?(?:\[[^\]]+\]|"[^"]+"|`[^`]+`|[A-Za-z_][\w$.#]*)\s+SET|DELETE\s+(?:TOP\s*(?:\([^)]*\)|\d+)\s*(?:PERCENT\s+)?)?FROM|MERGE\s+(?:TOP\s*(?:\([^)]*\)|\d+)\s*(?:PERCENT\s+)?)?(?:INTO\s+)?(?:\[[^\]]+\]|"[^"]+"|`[^`]+`|[A-Za-z_][\w$.#]*)\b[\s\S]{0,120}?\bUSING|CREATE\s+(?:OR\s+(?:REPLACE|ALTER)\s+)?(?:TABLE|VIEW|PROC(?:EDURE)?|FUNCTION))\b/i.test(
+			noCommentsNoStrings,
+		);
 	const looksLikeSslDs =
-		/^\s*:(?:PARAMETERS|DECLARE|RETURN|IF|FOR|PROCEDURE)\b/im.test(text) ||
-		/\b(?:SQLExecute(?:Ex)?|RunSQL|LSelect|LimSelect)\s*\(/i.test(text);
+		!hasTopLevelSql &&
+		(/^\s*:(?:PARAMETERS|DECLARE|RETURN|IF|FOR|PROCEDURE)\b/im.test(commentStripped) ||
+			/\b(?:SQLExecute(?:Ex)?|RunSQL|LSelect|LimSelect)\s*\(/i.test(commentStripped));
 	const sqlSurface = looksLikeSslDs ? extractSslEmbeddedSql(text) : text;
 	const cleaned = sanitizeSql(sqlSurface, true);
 	const cteNames = extractCteNames(cleaned);
@@ -1833,10 +3250,9 @@ export function extractQueriedTablesFromSql(text: string): { object: string; lin
 		return line;
 	};
 
-	const out: { object: string; line: number }[] = [];
-	const seen = new Set<string>();
+	const byLower = new Map<string, { object: string; line: number; offset: number }>();
 	const partRe = new RegExp(IDENT_PART, "g");
-	const qualAtStartRe = new RegExp(`^(${QUALIFIED_NAME})`);
+	const qualAtStartRe = new RegExp(`^(?:ONLY\\s+)?(${QUALIFIED_NAME})`, "i");
 
 	const pushTable = (rawName: string, offset: number, afterSlice: string, beforeSlice: string, skipTvf: boolean) => {
 		if (beforeSlice.endsWith("?") || afterSlice.startsWith("?")) return;
@@ -1850,29 +3266,98 @@ export function extractQueriedTablesFromSql(text: string): { object: string; lin
 		if (schemaName && SYSTEM_SCHEMAS.has(schemaName)) return;
 		const low = bareName.toLowerCase();
 		if (SQL_QUERY_KEYWORDS.has(low) || cteNames.has(low)) return;
-		if (seen.has(low)) return;
-		seen.add(low);
-		out.push({ object: bareName, line: lineAt(offset) });
+		const prev = byLower.get(low);
+		if (!prev || offset < prev.offset) {
+			byLower.set(low, { object: bareName, line: lineAt(offset), offset });
+		}
 	};
 
+	const walkCommaJoins = (startPos: number) => {
+		let pos = startPos;
+		while (pos < cleaned.length) {
+			while (pos < cleaned.length && /\s/.test(cleaned[pos]!)) pos++;
+			if (cleaned[pos] !== ",") break;
+			pos++;
+			while (pos < cleaned.length && /\s/.test(cleaned[pos]!)) pos++;
+			if (/^LATERAL\s*\(/i.test(cleaned.slice(pos))) {
+				pos += cleaned.slice(pos).indexOf("(");
+			}
+			if (cleaned[pos] === "(") {
+				const scanned = scanBalancedParens(cleaned, pos);
+				if (!scanned) break;
+				pos = consumeOptionalAliasAndHint(cleaned, scanned.end).end;
+				continue;
+			}
+			const nextMatch = qualAtStartRe.exec(cleaned.slice(pos));
+			if (!nextMatch) break;
+			const nextRaw = nextMatch[1]!;
+			const nextEnd = pos + nextMatch[0].length;
+			const nextBefore = cleaned.slice(Math.max(0, pos - 8), pos);
+			const nextAfter = cleaned.slice(nextEnd, nextEnd + 16);
+			pushTable(nextRaw, pos, nextAfter, nextBefore, true);
+			pos = consumeOptionalAliasAndHint(cleaned, nextEnd).end;
+		}
+	};
+
+	const TOP_OPT = `(?:TOP\\s*(?:\\((?:[^()]*|\\([^()]*\\))*\\)|\\d+)\\s*(?:PERCENT\\s+)?)?`;
 	const clauseRe = new RegExp(
-		`\\b(?:(FROM|JOIN|INTO|UPDATE)\\s+(${QUALIFIED_NAME})|(DELETE)\\s+(?:TOP\\s*\\([^)]*\\)\\s*(?:PERCENT\\s+)?)?(?!FROM\\b)(${QUALIFIED_NAME}))`,
+		`\\b(?:` +
+			`(FROM)\\s+(?:LATERAL\\s+)?\\(` +
+			`|(FROM|JOIN)\\s+(?:ONLY\\s+)?(${QUALIFIED_NAME})` +
+			`|(USING)\\s+(${QUALIFIED_NAME})` +
+			`|(INTO)\\s+(${QUALIFIED_NAME})` +
+			`|(INSERT)\\s+${TOP_OPT}(?:INTO\\s+)?(${QUALIFIED_NAME})` +
+			`|(MERGE)\\s+${TOP_OPT}(?:INTO\\s+)?(${QUALIFIED_NAME})` +
+			`|(UPDATE)\\s+${TOP_OPT}(?:ONLY\\s+)?(${QUALIFIED_NAME})` +
+			`|(DELETE)\\s+${TOP_OPT}(?!FROM\\b)(?:ONLY\\s+)?(${QUALIFIED_NAME})` +
+		`)`,
 		"gi",
 	);
 
 	for (const m of cleaned.matchAll(clauseRe)) {
-		const kw = (m[1] ?? m[3])!.toUpperCase();
-		const rawName = (m[2] ?? m[4])!;
 		const matchStart = m.index ?? 0;
 		const matchEnd = matchStart + m[0].length;
+
+		// Derived table in FROM (`FROM (SELECT 1) sub, OTHER_TBL`): walk any ANSI-89 comma joins that follow it.
+		if (m[1]) {
+			if (isInsideFunctionCall(cleaned, matchStart, /\b(?:EXTRACT|TRIM|SUBSTRING)\s*$/i)) continue;
+			const stmtPrefix = cleaned.slice(findStatementStart(cleaned, matchStart), matchStart).trimStart();
+			if (/^REVOKE\b/i.test(stmtPrefix)) continue;
+			const openParenPos = matchEnd - 1;
+			const scanned = scanBalancedParens(cleaned, openParenPos);
+			if (scanned) {
+				walkCommaJoins(consumeOptionalAliasAndHint(cleaned, scanned.end).end);
+			}
+			continue;
+		}
+
+		const kw = (m[2] ?? m[4] ?? m[6] ?? m[8] ?? m[10] ?? m[12] ?? m[14])!.toUpperCase();
+		const rawName = (m[3] ?? m[5] ?? m[7] ?? m[9] ?? m[11] ?? m[13] ?? m[15])!;
 		const before = cleaned.slice(Math.max(0, matchStart - 48), matchStart);
 		const after = cleaned.slice(matchEnd, matchEnd + 16);
 
-		// Skip `FOR UPDATE`, `ON UPDATE CASCADE`, `ON DELETE CASCADE`, `EXTRACT(x FROM y)`, `TRIM(x FROM y)`, `SUBSTRING(x FROM y)`, `FETCH ... INTO`.
+		// Skip `FOR UPDATE`, `ON UPDATE CASCADE`, `ON DELETE CASCADE`, `TRIM(... FROM ...)`, `EXTRACT(... FROM ...)`, `SUBSTRING(... FROM ...)`, `REVOKE ... FROM`.
 		if (kw === "UPDATE" && /\b(?:FOR|ON)\s+$/i.test(before)) continue;
 		if (kw === "DELETE" && /\bON\s+$/i.test(before)) continue;
-		if (kw === "FROM" && /\b(?:EXTRACT|TRIM|SUBSTRING)\s*\([^)]*$/i.test(before)) continue;
-		if (kw === "INTO" && /\b(?:FETCH|BULK\s+COLLECT)\b[^;]*$/i.test(before)) continue;
+		if (kw === "FROM") {
+			if (isInsideFunctionCall(cleaned, matchStart, /\b(?:EXTRACT|TRIM|SUBSTRING)\s*$/i)) continue;
+			const stmtPrefix = cleaned.slice(findStatementStart(cleaned, matchStart), matchStart).trimStart();
+			if (/^REVOKE\b/i.test(stmtPrefix)) continue;
+		}
+		if (kw === "INTO") {
+			const stmtPrefix = stripParenthesized(cleaned.slice(findStatementStart(cleaned, matchStart), matchStart));
+			const verbs = [...stmtPrefix.matchAll(/\b(INSERT|MERGE|SELECT|RETURNING|FETCH|BULK\s+COLLECT|EXECUTE)\b/gi)];
+			const lastVerb = verbs.length ? verbs[verbs.length - 1]![1]!.replace(/\s+/g, " ").toUpperCase() : "";
+			if (!lastVerb || lastVerb === "SELECT" || lastVerb === "RETURNING" || lastVerb === "FETCH" || lastVerb === "BULK COLLECT" || lastVerb === "EXECUTE") {
+				continue;
+			}
+		}
+		if (kw === "USING") {
+			const stmtPrefix = stripParenthesized(cleaned.slice(findStatementStart(cleaned, matchStart), matchStart));
+			const verbs = [...stmtPrefix.matchAll(/\b(MERGE|DELETE|CREATE|ALTER|EXECUTE|EXEC)\b/gi)];
+			const lastVerb = verbs.length ? verbs[verbs.length - 1]![1]!.toUpperCase() : "";
+			if (lastVerb !== "MERGE" && lastVerb !== "DELETE") continue;
+		}
 
 		// Exclude T-SQL `FROM` table aliases from `UPDATE <alias> SET ... FROM dbo.SAMPLES <alias>` and `DELETE <alias> FROM dbo.SAMPLES <alias>`.
 		if (kw === "UPDATE" || kw === "DELETE") {
@@ -1883,35 +3368,23 @@ export function extractQueriedTablesFromSql(text: string): { object: string; lin
 			}
 		}
 
-		pushTable(rawName, matchStart, after, before, kw === "FROM" || kw === "JOIN");
+		pushTable(rawName, matchStart, after, before, kw === "FROM" || kw === "JOIN" || kw === "USING");
 
 		// Support ANSI-89 comma joins (`FROM FOLDERS f, SAMPLES s, RESULTS r WHERE ...`).
 		if (kw === "FROM") {
-			let pos = consumeOptionalAliasAndHint(cleaned, matchEnd).end;
-			while (pos < cleaned.length) {
-				while (pos < cleaned.length && /\s/.test(cleaned[pos]!)) pos++;
-				if (cleaned[pos] !== ",") break;
-				pos++;
-				while (pos < cleaned.length && /\s/.test(cleaned[pos]!)) pos++;
-				if (cleaned[pos] === "(") {
-					const scanned = scanBalancedParens(cleaned, pos);
-					if (!scanned) break;
-					pos = consumeOptionalAliasAndHint(cleaned, scanned.end).end;
-					continue;
-				}
-				const nextMatch = qualAtStartRe.exec(cleaned.slice(pos));
-				if (!nextMatch) break;
-				const nextRaw = nextMatch[1]!;
-				const nextEnd = pos + nextMatch[0].length;
-				const nextBefore = cleaned.slice(Math.max(0, pos - 8), pos);
-				const nextAfter = cleaned.slice(nextEnd, nextEnd + 16);
-				pushTable(nextRaw, pos, nextAfter, nextBefore, true);
-				pos = consumeOptionalAliasAndHint(cleaned, nextEnd).end;
-			}
+			walkCommaJoins(consumeOptionalAliasAndHint(cleaned, matchEnd).end);
 		}
 	}
-	return out;
+
+	return [...byLower.values()]
+		.sort((a, b) => a.offset - b.offset)
+		.map(({ object, line }) => ({ object, line }));
 }
+
+const MERMAID_RESERVED_ENTITIES = new Set([
+	"end", "class", "style", "subgraph", "classdef", "one", "many", "to", "direction", "acctitle", "accdescr",
+]);
+const MERMAID_RESERVED_ATTRS = new Set(["pk", "fk", "uk"]);
 
 /** Generates a clean fenced Mermaid `erDiagram` block from parsed SQL tables and their FK relationships. */
 export function generateMermaidErDiagram(tables: readonly SqlTableDef[]): string {
@@ -1920,6 +3393,14 @@ export function generateMermaidErDiagram(tables: readonly SqlTableDef[]): string
 		const cleaned = raw.trim().replace(/[^A-Za-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "");
 		return cleaned && /^[A-Za-z_]/.test(cleaned) ? cleaned : `T_${cleaned || "TABLE"}`;
 	};
+	const formatEntity = (raw: string) => {
+		const ident = sanitizeIdent(raw);
+		return MERMAID_RESERVED_ENTITIES.has(ident.toLowerCase()) ? `"${ident}"` : ident;
+	};
+	const formatAttrName = (raw: string) => {
+		const ident = sanitizeIdent(raw);
+		return MERMAID_RESERVED_ATTRS.has(ident.toLowerCase()) ? `\`${ident}\`` : ident;
+	};
 	const sanitizeType = (raw: string) => {
 		const compact = raw
 			.trim()
@@ -1927,37 +3408,58 @@ export function generateMermaidErDiagram(tables: readonly SqlTableDef[]): string
 			.replace(/\s*\)/g, ")")
 			.replace(/\s*,\s*/g, "_")
 			.replace(/\s+/g, "_")
-			.replace(/[^A-Za-z0-9_()_-]/g, "");
-		return compact || "TEXT";
+			.replace(/[^A-Za-z0-9_()[\]_-]/g, "");
+		if (!compact) return "TEXT";
+		return /^[A-Za-z_]/.test(compact) ? compact : `T_${compact}`;
 	};
 
 	const lines: string[] = [];
-	const rels: string[] = [];
-	const seenRel = new Set<string>();
+	const relOrder: string[] = [];
+	const relByPair = new Map<string, { parent: string; entity: string; labels: string[]; seenLabels: Set<string> }>();
 
 	for (const tbl of tables) {
-		const entity = sanitizeIdent(tbl.tableName);
-		const fkCols = new Set((tbl.foreignKeys ?? []).map((fk) => fk.column.toLowerCase()));
+		const entity = formatEntity(tbl.tableName);
+		const fkCols = new Set<string>();
+		for (const fk of tbl.foreignKeys ?? []) {
+			for (const c of fkLocalCols(fk)) fkCols.add(c.toLowerCase());
+		}
 		lines.push(`    ${entity} {`);
 		for (const col of tbl.columns) {
 			const keys: string[] = [];
-			if (/\bPRIMARY\s+KEY\b/i.test(col.constraints)) keys.push("PK");
-			if (fkCols.has(col.name.toLowerCase())) keys.push("FK");
-			if (/\bUNIQUE\b/i.test(col.constraints) && !keys.includes("PK")) keys.push("UK");
+			const maskedCons = maskQuotedAndChecks(col.constraints);
+			if (/\bPRIMARY\s+KEY\b/i.test(maskedCons)) keys.push("PK");
+			if (fkCols.has(col.name.toLowerCase()) || /\bREFERENCES\b/i.test(maskedCons)) keys.push("FK");
+			if (/\bUNIQUE\b/i.test(maskedCons) && !keys.includes("PK")) keys.push("UK");
 			const keySuffix = keys.length ? ` ${keys.join(",")}` : "";
-			lines.push(`        ${sanitizeType(col.type)} ${sanitizeIdent(col.name)}${keySuffix}`);
+			lines.push(`        ${sanitizeType(col.type)} ${formatAttrName(col.name)}${keySuffix}`);
 		}
 		lines.push("    }");
 		for (const fk of tbl.foreignKeys ?? []) {
-			const parent = sanitizeIdent(fk.refTable);
-			const label = fk.refColumn && fk.refColumn.toLowerCase() !== fk.column.toLowerCase() ? `${fk.column} to ${fk.refColumn}` : fk.column;
-			const relLine = `    ${parent} ||--o{ ${entity} : "${label.replace(/"/g, "'")}"`;
-			if (!seenRel.has(relLine)) {
-				seenRel.add(relLine);
-				rels.push(relLine);
+			const parent = formatEntity(fk.refTable);
+			const locals = fkLocalCols(fk);
+			const refs = fkRefCols(fk);
+			const localStr = locals.join(", ");
+			const refStr = refs.join(", ");
+			const label = refStr && refStr.toLowerCase() !== localStr.toLowerCase() ? `${localStr} to ${refStr}` : localStr;
+			const pairKey = `${parent.toLowerCase()}->${entity.toLowerCase()}`;
+			let entry = relByPair.get(pairKey);
+			if (!entry) {
+				entry = { parent, entity, labels: [], seenLabels: new Set() };
+				relByPair.set(pairKey, entry);
+				relOrder.push(pairKey);
+			}
+			const normLabel = label.toLowerCase();
+			if (label && !entry.seenLabels.has(normLabel)) {
+				entry.seenLabels.add(normLabel);
+				entry.labels.push(label);
 			}
 		}
 	}
+
+	const rels = relOrder.map((pairKey) => {
+		const { parent, entity, labels } = relByPair.get(pairKey)!;
+		return `    ${parent} ||--o{ ${entity} : "${labels.join(", ").replace(/"/g, "'")}"`;
+	});
 
 	return ["```mermaid", "erDiagram", ...lines, ...rels, "```"].join("\n");
 }

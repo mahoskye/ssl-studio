@@ -6,23 +6,42 @@ import type { DocFile } from "./protocol";
 import { extractQueriedTablesFromSql, parseCreateTables, sqlTablesToMarkdown } from "./sqlSchema";
 
 const SCHEMA_EXT_RE = /\.(md|markdown|sql|ddl|pks|pkb)$/i;
+const DROPPED_NOTE_RE = /\[deprecated\s*\/\s*dropped in sql\]/i;
+
+type FenceState = { ch: string; len: number } | null;
+
+function updateFenceState(line: string, fence: FenceState): FenceState {
+	const m = /^\s*(`{3,}|~{3,})(.*)$/.exec(line);
+	if (!m) return fence;
+	const marker = m[1]!;
+	const rest = m[2]!.trim();
+	if (!fence) {
+		if (marker[0] === "`" && rest.includes("`")) return fence;
+		return { ch: marker[0]!, len: marker.length };
+	}
+	if (marker[0] === fence.ch && marker.length >= fence.len && !rest) {
+		return null;
+	}
+	return fence;
+}
 
 /** Returns canonical lookup names (table stem, title, qualified/bare names, and multi-table `schemaObjects`) for one schema DocFile. */
 export function schemaDocKeys(file: DocFile): string[] {
-	if (!file.exists || file.group !== "schema" || isCatalog(file)) return [];
+	if (!file.exists || file.group !== "schema" || isCatalog(file) || !SCHEMA_EXT_RE.test(file.name)) return [];
 	const keys = new Set<string>();
 	const addIdent = (raw: string) => {
 		const t = raw.trim();
-		if (!t || t.length < 2) return;
+		if (!t || t.length < 2 || /^readme$/i.test(t)) return;
 		keys.add(t.toLowerCase());
 		if (t.includes(".")) {
 			const bare = t.split(".").pop()!.trim();
-			if (bare.length >= 2) keys.add(bare.toLowerCase());
+			if (bare.length >= 2 && !/^readme$/i.test(bare)) keys.add(bare.toLowerCase());
 		}
 	};
 	const base = file.name.split(/[\\/]/).pop() ?? file.name;
 	const stem = base.replace(SCHEMA_EXT_RE, "").trim();
-	if (stem && stem.length >= 2) keys.add(stem.toLowerCase());
+	if (/^readme$/i.test(stem)) return [];
+	if (stem) addIdent(stem);
 	if (file.title?.trim()) {
 		const t = file.title.trim();
 		// Add single-token or SQL-identifier titles (e.g. `DEMO_HOLIDAYS`, `dbo.DEMO_HOLIDAYS`).
@@ -50,7 +69,14 @@ export function extractSchemaColumns(doc: DocFile, content: string): SchemaColum
 	if (/\.(sql|ddl|pks|pkb)$/i.test(doc.name)) {
 		for (const tbl of parseCreateTables(content, { includeStandaloneAlter: true })) {
 			for (const col of tbl.columns) {
-				out.push({ table: tbl.tableName, name: col.name, type: col.type, constraints: col.constraints, notes: "", docPath: doc.path });
+				out.push({
+					table: tbl.tableName,
+					name: col.name,
+					type: col.type,
+					constraints: col.constraints,
+					notes: col.comment ?? "",
+					docPath: doc.path,
+				});
 			}
 		}
 		return out;
@@ -70,8 +96,15 @@ export function extractSchemaColumns(doc: DocFile, content: string): SchemaColum
 
 	const subHeadingRe = /^(?:columns?|fields?|foreign\s+keys?|indexes?|indices|keys?|constraints?|triggers?|notes?|rules?|usage|examples?|history|relationships?)$/i;
 	let inNonColumnSub = false;
+	let fence: FenceState = null;
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i]!;
+		const nextFence = updateFenceState(line, fence);
+		if (nextFence !== fence) {
+			fence = nextFence;
+			continue;
+		}
+		if (fence) continue;
 		const hm = /^#{1,3}\s+`?([A-Za-z_][\w$. ]{1,64})`?\s*$/.exec(line.trim());
 		if (hm) {
 			const hText = hm[1]!.trim();
@@ -86,28 +119,49 @@ export function extractSchemaColumns(doc: DocFile, content: string): SchemaColum
 			continue;
 		}
 		if (inNonColumnSub || !line.trim().startsWith("|")) continue;
-		const hdr = splitCells(line).map((c) => c.toLowerCase());
+		if (i + 1 >= lines.length || !/^\s*\|?\s*:?-{2,}/.test(lines[i + 1]!)) continue;
+		const hdr = splitCells(line).map((c) => strip(c).toLowerCase());
 		const isFkOrIdx =
 			!hdr.some((c) => c.includes("type")) &&
 			(hdr.some((c) => c.includes("reference") || c.includes("target")) ||
-				(hdr.some((c) => c === "columns" || c === "column") && hdr.some((c) => c === "unique" || c === "index")));
-		if (isFkOrIdx) continue;
+				(hdr.some((c) => c === "columns" || c === "column" || c === "fields") &&
+					hdr.some((c) => c === "unique" || c === "uniqueness" || c === "index" || c === "index name" || c === "name")));
+		if (isFkOrIdx) {
+			i += 2;
+			while (i < lines.length && lines[i]!.trim().startsWith("|")) i++;
+			i--;
+			continue;
+		}
 		const colIdx = hdr.findIndex((c) => c === "column" || c === "field" || c === "name");
-		if (colIdx < 0 || i + 1 >= lines.length || !/^\s*\|?\s*:?-{2,}/.test(lines[i + 1]!)) continue;
-		const typeIdx = hdr.findIndex((c) => c.includes("type"));
-		const consIdx = hdr.findIndex((c) => c.includes("constraint") || c.includes("key") || c.includes("null"));
-		const noteIdx = hdr.findIndex((c) => c.includes("note") || c.includes("desc") || c.includes("meaning") || c.includes("holds") || c.includes("what"));
+		const typeIdx = hdr.findIndex((c, ci) => ci !== colIdx && c.includes("type"));
+		const consIdx = hdr.findIndex((c, ci) => ci !== colIdx && ci !== typeIdx && (c.includes("constraint") || c.includes("key") || c.includes("null")));
+		if (colIdx < 0 || (hdr[colIdx] === "name" && typeIdx < 0 && consIdx < 0)) {
+			i += 2;
+			while (i < lines.length && lines[i]!.trim().startsWith("|")) i++;
+			i--;
+			continue;
+		}
+		const noteIdx = hdr.findIndex(
+			(c, ci) =>
+				ci !== colIdx &&
+				ci !== typeIdx &&
+				ci !== consIdx &&
+				(c.includes("note") || c.includes("desc") || c.includes("meaning") || c.includes("holds") || c.includes("what")),
+		);
 		i += 2;
 		for (; i < lines.length && lines[i]!.trim().startsWith("|"); i++) {
 			const cells = splitCells(lines[i]!);
 			const colName = strip(cells[colIdx] ?? "");
 			if (!colName || colName === "…" || colName.startsWith("(")) continue;
+			const constraints = consIdx >= 0 ? (cells[consIdx] ?? "") : "";
+			const notes = noteIdx >= 0 ? (cells[noteIdx] ?? "") : "";
+			if (DROPPED_NOTE_RE.test(notes) || DROPPED_NOTE_RE.test(constraints)) continue;
 			out.push({
 				table: currentTable,
 				name: colName,
 				type: typeIdx >= 0 ? strip(cells[typeIdx] ?? "") : "",
-				constraints: consIdx >= 0 ? (cells[consIdx] ?? "") : "",
-				notes: noteIdx >= 0 ? (cells[noteIdx] ?? "") : "",
+				constraints,
+				notes,
 				docPath: doc.path,
 			});
 		}
@@ -116,21 +170,38 @@ export function extractSchemaColumns(doc: DocFile, content: string): SchemaColum
 	return out;
 }
 
-/** Finds the best documented schema file (`schema/database/*.md` preferred over `.sql`) matching SQL/SSL identifier `word`. */
+/** Finds the best documented schema file (`schema/database/*.md` preferred over `.sql`, exact qualified match preferred over bare fallback) matching SQL/SSL identifier `word`. */
 export function findSchemaDocForIdentifier(word: string, files: readonly DocFile[]): DocFile | null {
-	const raw = word.trim().replace(/^[[`"]|[\]`"]$/g, "");
-	if (!raw || raw.length < 2) return null;
-	const lower = raw.toLowerCase();
-	const bare = lower.includes(".") ? lower.split(".").pop()! : lower;
-	const candidates = files.filter((f) => f.exists && f.group === "schema" && !isCatalog(f));
-	let sqlFallback: DocFile | null = null;
+	const segRe = /(?:\[[^\]]+\]|"[^"]+"|`[^`]+`|[^.\s]+)/g;
+	const segments = [...word.trim().matchAll(segRe)]
+		.map((m) => m[0]!.trim().replace(/^[[`"]|[\]`"]$/g, "").trim())
+		.filter(Boolean);
+	if (!segments.length) return null;
+	const bare = segments[segments.length - 1]!.toLowerCase();
+	if (bare.length < 2) return null;
+	const lower = segments.length >= 2 ? `${segments[segments.length - 2]!.toLowerCase()}.${bare}` : bare;
+
+	const candidates = files.filter((f) => f.exists && f.group === "schema" && !isCatalog(f) && SCHEMA_EXT_RE.test(f.name));
+	let exactSql: DocFile | null = null;
+	let bareMd: DocFile | null = null;
+	let bareSql: DocFile | null = null;
 	for (const doc of candidates) {
 		const keys = schemaDocKeys(doc);
-		if (!keys.includes(lower) && !keys.includes(bare)) continue;
-		if (/\.(md|markdown)$/i.test(doc.name)) return doc;
-		if (!sqlFallback) sqlFallback = doc;
+		const isMd = /\.(md|markdown)$/i.test(doc.name);
+		if (keys.includes(lower)) {
+			if (isMd) return doc;
+			if (!exactSql) exactSql = doc;
+			continue;
+		}
+		if (bare !== lower && keys.includes(bare)) {
+			if (isMd) {
+				if (!bareMd) bareMd = doc;
+			} else if (!bareSql) {
+				bareSql = doc;
+			}
+		}
 	}
-	return sqlFallback;
+	return exactSql ?? bareMd ?? bareSql;
 }
 
 /**
@@ -139,7 +210,7 @@ export function findSchemaDocForIdentifier(word: string, files: readonly DocFile
  */
 export function extractSchemaPreview(doc: DocFile, content: string, maxRows = 16): string {
 	if (/\.(sql|ddl|pks|pkb)$/i.test(doc.name)) {
-		const tables = parseCreateTables(content);
+		const tables = parseCreateTables(content, { includeStandaloneAlter: true });
 		if (!tables.length) return doc.summary ? `${doc.title || doc.name}: ${doc.summary}` : doc.title || doc.name;
 		const md = sqlTablesToMarkdown(tables.slice(0, 3));
 		return md.split(/\r?\n/).slice(0, maxRows + 8).join("\n").trim();
@@ -148,14 +219,32 @@ export function extractSchemaPreview(doc: DocFile, content: string, maxRows = 16
 	const lines = body.split("\n");
 	const out: string[] = [];
 	let tableRows = 0;
+	let tableTotalRows = 0;
 	let inTable = false;
-	for (const line of lines) {
+	let fence: FenceState = null;
+	for (let idx = 0; idx < lines.length; idx++) {
+		const line = lines[idx]!;
+		const nextFence = updateFenceState(line, fence);
+		if (nextFence !== fence) {
+			fence = nextFence;
+			if (inTable) break;
+			continue;
+		}
+		if (fence) continue;
 		const trimmed = line.trim();
 		if (trimmed.startsWith("|")) {
-			inTable = true;
+			if (!inTable) {
+				inTable = true;
+				let end = idx;
+				while (end < lines.length && lines[end]!.trim().startsWith("|")) end++;
+				tableTotalRows = end - idx;
+			}
 			tableRows++;
 			if (tableRows <= maxRows + 2) out.push(line);
-			else if (tableRows === maxRows + 3) out.push(`| … | (${lines.filter((l) => l.trim().startsWith("|")).length - maxRows - 2} more rows) | | |`);
+			else if (tableRows === maxRows + 3) {
+				const remaining = tableTotalRows - maxRows - 2;
+				if (remaining > 0) out.push(`| … | (${remaining} more ${remaining === 1 ? "row" : "rows"}) | | |`);
+			}
 			continue;
 		}
 		if (inTable) {
@@ -167,15 +256,127 @@ export function extractSchemaPreview(doc: DocFile, content: string, maxRows = 16
 	return out.join("\n").trim();
 }
 
+const TWO_CHAR_STOP_WORDS = new Set([
+	"if", "to", "in", "on", "as", "or", "by", "is", "of", "at", "no", "do", "go", "id",
+	"an", "be", "he", "it", "me", "my", "so", "up", "us", "we", "ok", "eq", "ne", "gt", "lt", "ge", "le",
+]);
+
+/** Strips SQL (`--`, `/* ... *\/`) and SSL (`//`, `/* ... ;`) comments once while preserving string literal contents (where SSL SQL queries live). */
+function stripCodeComments(code: string): string {
+	let out = "";
+	let i = 0;
+	const n = code.length;
+	const lastBlockClose = code.lastIndexOf("*/");
+	while (i < n) {
+		const ch = code[i]!;
+		const next = code[i + 1];
+		if (ch === '"' || ch === "'") {
+			const q = ch;
+			out += ch;
+			i++;
+			while (i < n) {
+				if (code[i] === "\\" && q === '"' && i + 1 < n) {
+					out += code[i]! + code[i + 1]!;
+					i += 2;
+					continue;
+				}
+				if (code[i] === q) {
+					out += q;
+					i++;
+					if (q === "'" && code[i] === "'") {
+						out += "'";
+						i++;
+						continue;
+					}
+					break;
+				}
+				out += code[i++]!;
+			}
+			continue;
+		}
+		if ((ch === "-" && next === "-") || (ch === "/" && next === "/")) {
+			while (i < n && code[i] !== "\n") i++;
+			out += " ";
+			continue;
+		}
+		if (ch === "/" && next === "*") {
+			if (lastBlockClose < i + 2) {
+				let k = i + 2;
+				while (k < n && code[k] !== ";") k++;
+				i = k < n ? k + 1 : n;
+				out += " ";
+				continue;
+			}
+			let j = i + 2;
+			let depth = 1;
+			let sslSemiEnd = -1;
+			while (j < n && depth > 0) {
+				if (code[j] === "/" && code[j + 1] === "*") {
+					depth++;
+					j += 2;
+					continue;
+				}
+				if (code[j] === "*" && code[j + 1] === "/") {
+					depth--;
+					j += 2;
+					continue;
+				}
+				if (depth === 1 && code[j] === ";" && sslSemiEnd < 0) {
+					if (/^[ \t]*\r?\n[ \t]*(?:\/\*|:[A-Za-z])/.test(code.slice(j + 1, j + 48))) {
+						sslSemiEnd = j + 1;
+						break;
+					}
+				}
+				j++;
+			}
+			if (depth === 0 && sslSemiEnd < 0) {
+				i = j;
+			} else if (sslSemiEnd >= 0) {
+				i = sslSemiEnd;
+			} else {
+				let k = i + 2;
+				while (k < n && code[k] !== ";") k++;
+				i = k < n ? k + 1 : n;
+			}
+			out += " ";
+			continue;
+		}
+		out += ch;
+		i++;
+	}
+	return out;
+}
+
 /**
- * Scans `codeText` (an SSL/SQL script or selection) for whole-word references to documented
- * schema tables/objects (e.g. `DEMO_HOLIDAYS`, `DEMO_OUTAGES`) so the Agent can inject their
- * exact column definitions instead of a generic 25-table summary.
+ * Scans `codeText` (an SSL/SQL script or selection) in O(N) time for whole-identifier references
+ * to documented schema tables/objects (e.g. `DEMO_HOLIDAYS`, `DEMO_OUTAGES`) so the Agent can inject
+ * their exact column definitions instead of a generic 25-table summary.
  */
 export function referencedSchemaTables(codeText: string, files: readonly DocFile[], limit = 8): DocFile[] {
 	if (!codeText.trim()) return [];
-	const schemaDocs = files.filter((f) => f.exists && f.group === "schema" && !isCatalog(f) && /\.(md|markdown|sql|ddl|pks|pkb)$/i.test(f.name));
+	const schemaDocs = files.filter((f) => f.exists && f.group === "schema" && !isCatalog(f) && SCHEMA_EXT_RE.test(f.name));
 	if (!schemaDocs.length) return [];
+
+	// Strip SQL/SSL comments once and tokenize into a lowercase Set for O(1) per-key lookup.
+	// Normalize bracketed/quoted dot-joins (`[dbo].[ORDERS]` -> `dbo.ORDERS`) without breaking `$`/`#` word boundaries.
+	const stripped = stripCodeComments(codeText).replace(/[\]"`]\s*\.\s*[\["`]/g, ".");
+	const tokens = new Set<string>();
+	const tokenRe = /[A-Za-z_][A-Za-z0-9_$#]*(?:\.[A-Za-z_][A-Za-z0-9_$#]*)*/g;
+	for (const m of stripped.matchAll(tokenRe)) {
+		const low = m[0]!.toLowerCase();
+		tokens.add(low);
+		if (low.includes(".")) {
+			const segs = low.split(".");
+			for (const seg of segs) {
+				if (seg) tokens.add(seg);
+			}
+			for (let s = 0; s + 1 < segs.length; s++) {
+				tokens.add(`${segs[s]}.${segs[s + 1]}`);
+			}
+		}
+	}
+	if (!tokens.size) return [];
+
 	// Prefer Markdown docs over SQL when both share a stem.
 	const ordered = [...schemaDocs].sort((a, b) => {
 		const aMd = /\.(md|markdown)$/i.test(a.name) ? 0 : 1;
@@ -185,13 +386,9 @@ export function referencedSchemaTables(codeText: string, files: readonly DocFile
 	const found: DocFile[] = [];
 	const seenKeys = new Set<string>();
 	for (const doc of ordered) {
-		const keys = schemaDocKeys(doc).filter((k) => k.length >= 3);
+		const keys = schemaDocKeys(doc).filter((k) => k.length >= 3 || (k.length === 2 && !TWO_CHAR_STOP_WORDS.has(k)));
 		if (!keys.length) continue;
-		const matched = keys.find((k) => {
-			if (seenKeys.has(k)) return false;
-			const esc = k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-			return new RegExp(`(?<![A-Za-z0-9_])${esc}(?![A-Za-z0-9_])`, "i").test(codeText);
-		});
+		const matched = keys.find((k) => !seenKeys.has(k) && tokens.has(k));
 		if (matched) {
 			for (const k of keys) seenKeys.add(k);
 			found.push(doc);
@@ -300,7 +497,7 @@ const classifyUsageCategory = (relPath: string, testsFolder?: string): SchemaUsa
 	const low = norm.toLowerCase();
 	if (
 		(cleanTests && (low === cleanTests || low.startsWith(`${cleanTests}/`))) ||
-		/(?:^|\/)(?:tests?|__tests__)\/|(?:\.test\.|\.spec\.|tests?\.(?:ssl|srvscr|ts|js))$/i.test(norm)
+		/(?:^|\/)(?:tests?|__tests__)\/|(?:\.test\.|\.spec\.|(?:[._-]tests?|\.spec)\.(?:ssl|srvscr|ts|js))$/i.test(norm)
 	) {
 		return "tests";
 	}
@@ -320,7 +517,7 @@ export function groupSchemaUsages(
 	options?: { testsFolder?: string; canonicalize?: (p: string) => string },
 ): SchemaUsageGroup[] {
 	const canon = options?.canonicalize ?? ((p: string) => p.replace(/\\/g, "/"));
-	const byFile = new Map<string, SchemaUsageEntry & { seenLines: Set<number> }>();
+	const byFile = new Map<string, SchemaUsageEntry & { seenLines: Map<number, SchemaUsageHit> }>();
 
 	for (const h of codeHits) {
 		const key = canon(h.path);
@@ -339,14 +536,19 @@ export function groupSchemaUsages(
 				category: classifyUsageCategory(rel, options?.testsFolder),
 				hits: [],
 				count: 0,
-				seenLines: new Set<number>(),
+				seenLines: new Map<number, SchemaUsageHit>(),
 			};
 			byFile.set(key, entry);
 		}
 		entry.count++;
-		if (!entry.seenLines.has(h.line)) {
-			entry.seenLines.add(h.line);
-			entry.hits.push({ line: h.line, text: trimUsageSnippet(h.text ?? "") });
+		const snippet = trimUsageSnippet(h.text ?? "");
+		const existingHit = entry.seenLines.get(h.line);
+		if (!existingHit) {
+			const hit = { line: h.line, text: snippet };
+			entry.seenLines.set(h.line, hit);
+			entry.hits.push(hit);
+		} else if (!existingHit.text && snippet) {
+			existingHit.text = snippet;
 		}
 	}
 
@@ -360,24 +562,37 @@ export function groupSchemaUsages(
 	}
 
 	if (registries.length) {
-		const regItems: SchemaUsageEntry[] = registries.map((r) => ({
-			path: r.path,
-			rel: r.rel ?? r.fileName,
-			name: r.title,
-			fileName: r.fileName,
-			dir: r.fileName,
-			category: "registries",
-			hits: [],
-			count: 1,
-		}));
-		buckets.set("registries", regItems);
+		const seenReg = new Set<string>();
+		const regItems: SchemaUsageEntry[] = [];
+		for (const r of registries) {
+			const regKey = canon(r.path);
+			if (seenReg.has(regKey)) continue;
+			seenReg.add(regKey);
+			regItems.push({
+				path: r.path,
+				rel: (r.rel ?? r.fileName).replace(/\\/g, "/"),
+				name: r.title,
+				fileName: r.fileName,
+				dir: r.fileName,
+				category: "registries",
+				hits: [],
+				count: 1,
+			});
+		}
+		if (regItems.length) buckets.set("registries", regItems);
 	}
 
 	const groups: SchemaUsageGroup[] = [];
 	for (const meta of USAGE_GROUP_META) {
 		const items = buckets.get(meta.id);
 		if (!items?.length) continue;
-		items.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base", numeric: true }) || a.dir.localeCompare(b.dir, undefined, { sensitivity: "base" }));
+		items.sort(
+			(a, b) =>
+				a.name.localeCompare(b.name, undefined, { sensitivity: "base", numeric: true }) ||
+				a.dir.localeCompare(b.dir, undefined, { sensitivity: "base", numeric: true }) ||
+				a.rel.localeCompare(b.rel, undefined, { sensitivity: "base", numeric: true }) ||
+				a.rel.localeCompare(b.rel),
+		);
 		groups.push({
 			id: meta.id,
 			label: meta.label,
@@ -392,20 +607,26 @@ export function groupSchemaUsages(
 export function filterSchemaUsageGroups(groups: readonly SchemaUsageGroup[], query: string): SchemaUsageGroup[] {
 	const needle = query.trim().toLowerCase();
 	if (!needle) return [...groups];
+	const pathNeedle = needle.replace(/\\/g, "/");
 	const out: SchemaUsageGroup[] = [];
 	for (const group of groups) {
 		const matchedItems: SchemaUsageEntry[] = [];
 		for (const item of group.items) {
+			const normDir = item.dir.replace(/\\/g, "/").toLowerCase();
+			const normRel = item.rel.replace(/\\/g, "/").toLowerCase();
 			const metaMatch =
-				item.name.toLowerCase().includes(needle) ||
-				item.dir.toLowerCase().includes(needle) ||
-				item.rel.toLowerCase().includes(needle) ||
-				group.label.toLowerCase().includes(needle);
+				item.name.toLowerCase().includes(pathNeedle) ||
+				normDir.includes(pathNeedle) ||
+				normRel.includes(pathNeedle) ||
+				group.label.toLowerCase().includes(pathNeedle);
 			if (metaMatch) {
 				matchedItems.push(item);
 				continue;
 			}
-			const matchedHits = item.hits.filter((h) => h.text.toLowerCase().includes(needle));
+			const matchedHits = item.hits.filter((h) => {
+				const low = h.text.toLowerCase();
+				return low.includes(needle) || low.includes(pathNeedle);
+			});
 			if (matchedHits.length) {
 				matchedItems.push({ ...item, hits: matchedHits, count: matchedHits.length });
 			}

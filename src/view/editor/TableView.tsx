@@ -7,7 +7,7 @@
 // row/cell/column actions live in right-click context menus, a blank final row
 // lets users add entries without writing empty lines until content is entered,
 // and code-usage checks target the exact column, rows, and file globs chosen.
-import { createEffect, createMemo, createSignal, createUniqueId, For, Index, on, onCleanup, onMount, Show, type JSX } from "solid-js";
+import { batch, createEffect, createMemo, createSignal, createUniqueId, For, Index, on, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { Portal } from "solid-js/web";
 import {
 	addCsvColumn,
@@ -215,8 +215,8 @@ type ActiveCell =
 	| { ghost: true; column: number };
 
 type EditingCell =
-	| { ghost: false; row: number; column: number; seed?: string; forceMultiline?: boolean }
-	| { ghost: true; column: number; seed?: string; forceMultiline?: boolean };
+	| { ghost: false; row: number; column: number; seed?: string; forceMultiline?: boolean; caret?: number }
+	| { ghost: true; column: number; seed?: string; forceMultiline?: boolean; caret?: number };
 
 type CodeCheckResult = {
 	column: number;
@@ -264,10 +264,130 @@ type CellPickerOption = {
 };
 
 type DisplayEntry =
-	| { kind: "group"; key: string; label: string; count: number; rowIndices: number[]; collapsed: boolean }
-	| { kind: "row"; index: number; cells: Cell[] };
+	| { kind: "group"; entryId: string; entryKey: number; key: string; label: string; count: number; rowIndices: number[]; collapsed: boolean }
+	| { kind: "row"; entryId: string; index: number; cells: Cell[] };
 
 type CommitMove = "none" | "stay" | "next" | "prev" | "down" | "range";
+
+export type OffsetTextEdit = { start: number; end: number; text: string };
+
+/**
+ * Serializes a cell value for a row of `cellCount` cells. In 1-column CSVs or
+ * ragged 1-cell rows, an empty value must be written as `""` so `parseCsv`
+ * preserves the row instead of dropping an empty blank line.
+ */
+export function serializeCellInRow(value: string, cellCount: number, delimiter: CsvDelimiter = ","): string {
+	return value === "" && cellCount <= 1 ? '""' : csvCell(value, delimiter);
+}
+
+/**
+ * Merges zero-width insertions (`start === end`) that target the same offset
+ * in insertion order so Monaco never receives colliding zero-width ranges
+ * (e.g. an empty trailing cell + ragged-row padding + EOF appended rows).
+ */
+export function coalesceZeroWidthEdits(edits: readonly OffsetTextEdit[]): OffsetTextEdit[] {
+	const out: OffsetTextEdit[] = [];
+	const zeroByOffset = new Map<number, OffsetTextEdit>();
+	for (const ed of edits) {
+		if (ed.start === ed.end) {
+			const prev = zeroByOffset.get(ed.start);
+			if (prev) {
+				prev.text += ed.text;
+			} else {
+				const copy: OffsetTextEdit = { start: ed.start, end: ed.end, text: ed.text };
+				zeroByOffset.set(ed.start, copy);
+				out.push(copy);
+			}
+		} else {
+			out.push({ start: ed.start, end: ed.end, text: ed.text });
+		}
+	}
+	return out;
+}
+
+/** Remaps selected row indices after inserting a row at `targetRow` (`r >= targetRow ? r + 1 : r`). */
+export function remapRowSetOnInsert(rows: ReadonlySet<number>, targetRow: number): Set<number> {
+	const next = new Set<number>();
+	for (const r of rows) next.add(r >= targetRow ? r + 1 : r);
+	return next;
+}
+
+/** Remaps a single row index after inserting a row at `targetRow`. */
+export function remapRowIndexOnInsert(row: number | null, targetRow: number): number | null {
+	if (row === null) return null;
+	return row >= targetRow ? row + 1 : row;
+}
+
+/** Remaps selected row indices after deleting `deletedRow` (drops `deletedRow`, shifts `r > deletedRow`). */
+export function remapRowSetOnDelete(rows: ReadonlySet<number>, deletedRow: number): Set<number> {
+	const next = new Set<number>();
+	for (const r of rows) {
+		if (r === deletedRow) continue;
+		next.add(r > deletedRow ? r - 1 : r);
+	}
+	return next;
+}
+
+/** Remaps a single row index after deleting `deletedRow`. */
+export function remapRowIndexOnDelete(row: number | null, deletedRow: number): number | null {
+	if (row === null || row === deletedRow) return null;
+	return row > deletedRow ? row - 1 : row;
+}
+
+/** True when a split chunk inside a ticket cell consists solely of whitespace, comma, or semicolon separators. */
+export function isTicketSeparatorChunk(chunk: string): boolean {
+	return /^[\s,;]+$/.test(chunk);
+}
+
+/** Directed transition key for schema Undo/Redo UI snapshots (`"fromAlt->toAlt"`). */
+export function colSnapshotTransitionKey(fromAlt: number, toAlt: number): string {
+	return `${fromAlt}->${toAlt}`;
+}
+
+/** Formats a single cell value for clipboard copy, TSV-quoting values with line breaks or tabs so pasting back stays in 1 cell. */
+export function formatSingleCellForClipboard(val: string): string {
+	return /[\r\n\t]/.test(val) ? csvCell(val, "\t") : val;
+}
+
+/** Returns the number of frozen columns currently visible (excluding pruned hidden columns). */
+export function countVisibleFrozenColumns(headerCount: number, frozen: readonly number[], hidden: ReadonlySet<number>): number {
+	const prunedHidden = pruneHiddenColumns(hidden, headerCount);
+	return pruneFrozenColumns(frozen, headerCount).filter((c) => !prunedHidden.has(c)).length;
+}
+
+const ABSOLUTE_PATH_RE = /^(?:[a-zA-Z]:[\\/]|\\\\|\/)/;
+
+/**
+ * Resolves a cell value to a strictly workspace-internal file path, or returns `null`
+ * if it is not a file path, contains illegal characters, or points outside `root`
+ * (including out-of-workspace POSIX, Windows drive, and UNC absolute paths).
+ */
+export function resolveWorkspaceFileLink(root: string, rawVal: string): string | null {
+	const trimmed = rawVal.trim();
+	if (!root || !trimmed) return null;
+	if (/^(?:https?:|mailto:|ftp:)/i.test(trimmed)) return null;
+	if (/[\r\n<>|*?"]/.test(trimmed) || trimmed === "." || trimmed === "..") return null;
+	const looksLikePath = /[\\/]/.test(trimmed) || /\.[A-Za-z0-9]{1,10}$/.test(trimmed);
+	if (!looksLikePath) return null;
+	if (ABSOLUTE_PATH_RE.test(trimmed)) {
+		if (!isInside(root, trimmed) || isInside(trimmed, root)) return null;
+		if (trimmed.includes("..") && !trimmed.startsWith("\\\\") && !trimmed.startsWith("//")) {
+			const drive = /^[a-zA-Z]:(?=[\\/])/.exec(trimmed);
+			const normalized = drive
+				? resolvePath(`${drive[0]}${trimmed[2]}`, trimmed.slice(3))
+				: resolvePath("/", trimmed);
+			if (!isInside(root, normalized) || isInside(normalized, root)) return null;
+			return normalized;
+		}
+		return trimmed;
+	}
+	if (/^[a-zA-Z]:/.test(trimmed)) return null;
+	const parts = trimmed.split(/[\\/]/).filter((p) => p && p !== ".");
+	if (!parts.length) return null;
+	const resolved = parts.includes("..") ? resolvePath(root, trimmed) : joinPath(root, ...parts);
+	if (!isInside(root, resolved) || isInside(resolved, root)) return null;
+	return resolved;
+}
 
 const shortLabel = (text: string, max = 26) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
 
@@ -396,7 +516,8 @@ export function TableView(props: { path: string; group?: number }) {
 		codeCheck: CodeCheckResult | null;
 		groupByCol: number | null;
 	};
-	const colSnapshots = new Map<number, ColumnUiSnapshot>();
+	const colSnapshots = new Map<string, ColumnUiSnapshot>();
+	let lastAltVersion = model?.getAlternativeVersionId() ?? 0;
 	const captureColUi = (): ColumnUiSnapshot => ({
 		colFilters: new Map(colFilters()),
 		order: order().map((s) => ({ ...s })),
@@ -408,6 +529,11 @@ export function TableView(props: { path: string; group?: number }) {
 		groupByCol: groupByCol(),
 	});
 	const restoreColUi = (snap: ColumnUiSnapshot) => {
+		if (checking()) {
+			userCancelledRunId = 0;
+			checkRunId++;
+			setChecking(null);
+		}
 		setColFilters(new Map(snap.colFilters));
 		setOrder(snap.order.map((s) => ({ ...s })));
 		setFrozenCols([...snap.frozenCols]);
@@ -418,11 +544,20 @@ export function TableView(props: { path: string; group?: number }) {
 		setGroupByCol(snap.groupByCol);
 	};
 	const listener = model?.onDidChangeContent(() => {
+		const prevAlt = lastAltVersion;
+		const curAlt = model.getAlternativeVersionId();
+		lastAltVersion = curAlt;
+		const prevCount = table().rows.length;
 		const next = model.getValue();
 		setText(next);
-		const snap = colSnapshots.get(model.getAlternativeVersionId());
-		if (snap) restoreColUi(snap);
+		const snap = colSnapshots.get(colSnapshotTransitionKey(prevAlt, curAlt));
+		if (snap) {
+			restoreColUi(snap);
+			clearFindSelectionScope();
+			clearRowHeights();
+		}
 		const count = table().rows.length;
+		if (count !== prevCount) clearRowHeights();
 		const cur = current();
 		if (cur !== null && cur >= count) setCurrent(count > 0 ? count - 1 : null);
 	});
@@ -489,7 +624,11 @@ export function TableView(props: { path: string; group?: number }) {
 	const clearCellSelection = () => {
 		setCellAnchor(null);
 		setActiveCell(null);
-		if (document.activeElement instanceof HTMLElement && document.activeElement.closest(".table-view td")) {
+		if (
+			document.activeElement instanceof HTMLElement &&
+			rootEl?.contains(document.activeElement) &&
+			document.activeElement.closest(".table-view td")
+		) {
 			document.activeElement.blur();
 		}
 	};
@@ -512,6 +651,10 @@ export function TableView(props: { path: string; group?: number }) {
 	const [findMatchIdx, setFindMatchIdx] = createSignal(0);
 	let findInputEl: HTMLInputElement | undefined;
 	let replaceInputEl: HTMLInputElement | undefined;
+	const clearFindSelectionScope = () => {
+		setFindInSelection(false);
+		setFindSelectionScope(null);
+	};
 
 	// Press Escape (when no edit input, popover, menu, modal, or drag is active) to close Find or clear cell selection.
 	createEffect(() => {
@@ -519,15 +662,15 @@ export function TableView(props: { path: string; group?: number }) {
 		const onKeyDown = (e: KeyboardEvent) => {
 			if (e.key !== "Escape" || e.defaultPrevented) return;
 			if (editing() || filterMenu() || colDrag() || rowDrag() || fillDrag() || modalOpen() || rowMenuOpen()) return;
-			const target = e.target as HTMLElement | null;
+			const target = e.target as Node | null;
+			if (!target || !rootEl?.contains(target)) return;
+			const targetEl = target instanceof Element ? target : null;
 			if (findOpen()) {
-				if (target?.closest(".table-view")) {
-					e.preventDefault();
-					closeFind();
-				}
+				e.preventDefault();
+				closeFind();
 				return;
 			}
-			if (target?.closest("input, textarea")) return;
+			if (targetEl?.closest("input, textarea")) return;
 			e.preventDefault();
 			clearCellSelection();
 		};
@@ -573,6 +716,38 @@ export function TableView(props: { path: string; group?: number }) {
 	/** Measured row height cache (keyed by data row index >= 0 or negative group entry key) for drift-free virtualization. */
 	const rowHeights = new Map<number, number>();
 	const [rowHeightVer, setRowHeightVer] = createSignal(0);
+	const clearRowHeights = () => {
+		const hadEntries = rowHeights.size > 0;
+		rowHeights.clear();
+		if (hadEntries) setRowHeightVer((v) => v + 1);
+	};
+
+	/** Targeted code-usage check state (specific column, scope, match options, and cancellable progress). */
+	const [codeCheck, setCodeCheck] = createSignal<CodeCheckResult | null>(null);
+	const [checking, setChecking] = createSignal<{ done: number; total: number; columnName: string } | null>(null);
+	const [onlyMissing, setOnlyMissing] = createSignal(false);
+	let checkRunId = 0;
+	let userCancelledRunId = 0;
+	let disposed = false;
+	onCleanup(() => {
+		disposed = true;
+		checkRunId++;
+	});
+
+	const cancelCodeCheck = () => {
+		if (!checking()) return;
+		userCancelledRunId = checkRunId;
+		checkRunId++;
+		setChecking(null);
+	};
+
+	const clearCodeCheck = () => {
+		userCancelledRunId = 0;
+		checkRunId++;
+		setChecking(null);
+		setCodeCheck(null);
+		setOnlyMissing(false);
+	};
 
 	/** Workspace-scoped per-file view-state persistence (localStorage LRU, max 40 files; never edits CSV text — ADR 0002). */
 	const viewStateStorageKey = createMemo(() => tableViewStateStorageKey(state.workspace?.root));
@@ -595,6 +770,7 @@ export function TableView(props: { path: string; group?: number }) {
 
 	createEffect(
 		on([() => props.path, () => state.workspace?.root], () => {
+			clearCodeCheck();
 			hydratedViewKey = null;
 			setSelectedRows(new Set<number>());
 			setLastClickedRow(null);
@@ -638,6 +814,24 @@ export function TableView(props: { path: string; group?: number }) {
 		}),
 	);
 
+	// Invalidate cached off-screen row heights when column widths, column visibility, format overrides, or grouping change.
+	createEffect(
+		on([colWidths, hiddenCols], () => {
+			clearRowHeights();
+		}, { defer: true }),
+	);
+	createEffect(
+		on([hasHeader, delimiterOverride], () => {
+			clearFindSelectionScope();
+			clearRowHeights();
+		}, { defer: true }),
+	);
+	createEffect(
+		on([groupByCol, collapsedGroups], () => {
+			clearRowHeights();
+		}, { defer: true }),
+	);
+
 	createEffect(() => {
 		const storageKey = viewStateStorageKey();
 		const fileKey = viewStateFileKey();
@@ -661,6 +855,13 @@ export function TableView(props: { path: string; group?: number }) {
 	const visibleColumns = createMemo(() =>
 		visualColumnOrder(table().header.length, frozenCols(), colOrder().length ? colOrder() : undefined, hiddenCols()),
 	);
+	/** Currently visible frozen columns (excludes any hidden columns so frozen/hidden overlap never freezes an unfrozen slot). */
+	const visibleFrozenCols = createMemo(() => {
+		const count = table().header.length;
+		const prunedHidden = pruneHiddenColumns(hiddenCols(), count);
+		return pruneFrozenColumns(frozenCols(), count).filter((c) => !prunedHidden.has(c));
+	});
+	const visibleFrozenCount = createMemo(() => visibleFrozenCols().length);
 	const hasCustomOrder = createMemo(
 		() => colOrder().length > 0 && !isNaturalOrder(pruneColumnOrder(colOrder(), table().header.length)),
 	);
@@ -693,7 +894,7 @@ export function TableView(props: { path: string; group?: number }) {
 		notify("Reset table view to defaults.");
 	};
 	const cellStyle = (col: number, visIdx: number): JSX.CSSProperties | undefined => {
-		const isFrozen = visIdx < frozenCols().length;
+		const isFrozen = visIdx < visibleFrozenCount();
 		const w = colWidths()[col];
 		if (!isFrozen && w === undefined) return undefined;
 		const style: JSX.CSSProperties = {};
@@ -733,6 +934,7 @@ export function TableView(props: { path: string; group?: number }) {
 		setEditDraft(initVal);
 		setEditDirty(ed.seed !== undefined);
 		setPickerIdx(-1);
+		if (isMultiline) activeInputEl = undefined;
 		setPickerOpen(!isMultiline);
 	});
 
@@ -791,8 +993,7 @@ export function TableView(props: { path: string; group?: number }) {
 		if (curGroup !== null && (curGroup < 0 || curGroup >= count)) setGroupByCol(null);
 		const chk = codeCheck();
 		if (chk && chk.column >= count) {
-			setCodeCheck(null);
-			setOnlyMissing(false);
+			clearCodeCheck();
 		}
 	});
 
@@ -911,27 +1112,6 @@ export function TableView(props: { path: string; group?: number }) {
 		defaultExcludePattern([state.project?.docs ?? "docs", state.project?.plans ?? "design", ".ssl-studio"]),
 	);
 
-	/** Targeted code-usage check state (specific column, scope, match options, and cancellable progress). */
-	const [codeCheck, setCodeCheck] = createSignal<CodeCheckResult | null>(null);
-	const [checking, setChecking] = createSignal<{ done: number; total: number; columnName: string } | null>(null);
-	const [onlyMissing, setOnlyMissing] = createSignal(false);
-	let checkRunId = 0;
-	onCleanup(() => {
-		checkRunId++;
-	});
-
-	const cancelCodeCheck = () => {
-		checkRunId++;
-		setChecking(null);
-	};
-
-	const clearCodeCheck = () => {
-		checkRunId++;
-		setChecking(null);
-		setCodeCheck(null);
-		setOnlyMissing(false);
-	};
-
 	/** Looks up the targeted check result(s) for a specific cell when that column was checked. */
 	const cellHasMissingCheck = (cells: Cell[], chk: CodeCheckResult): boolean => {
 		const raw = cells[chk.column]?.text ?? "";
@@ -945,7 +1125,7 @@ export function TableView(props: { path: string; group?: number }) {
 		return [...chk.counts.values()].filter((n) => n === 0).length;
 	});
 
-	const runCodeCheck = async (spec: CodeCheckSpec, mergeExisting = false) => {
+	const runCodeCheck = async (spec: CodeCheckSpec, mergeExisting = false, targetRow?: number) => {
 		if (!state.workspace?.root) {
 			notify("Open a project folder to check values in code.", "error");
 			return;
@@ -958,7 +1138,7 @@ export function TableView(props: { path: string; group?: number }) {
 			caseSensitive: spec.caseSensitive,
 		});
 
-		const curIdx = current();
+		const curIdx = targetRow ?? current();
 		const targetRows: readonly Cell[][] =
 			spec.rowScope === "selected" && curIdx !== null && table().rows[curIdx]
 				? [table().rows[curIdx]!]
@@ -981,6 +1161,7 @@ export function TableView(props: { path: string; group?: number }) {
 
 		const options = codeCheckSearchOptions(spec, defaultExclude());
 		const runId = ++checkRunId;
+		userCancelledRunId = 0;
 		const existing = codeCheck();
 		const canMerge =
 			mergeExisting &&
@@ -1003,13 +1184,13 @@ export function TableView(props: { path: string; group?: number }) {
 				while (!cancelled) {
 					const idx = nextIdx++;
 					if (idx >= terms.length) return;
-					if (runId !== checkRunId) {
+					if (disposed || runId !== checkRunId) {
 						cancelled = true;
 						return;
 					}
 					const term = terms[idx]!;
 					const hits = await backend.search(term, options);
-					if (runId !== checkRunId) {
+					if (disposed || runId !== checkRunId) {
 						cancelled = true;
 						return;
 					}
@@ -1019,7 +1200,10 @@ export function TableView(props: { path: string; group?: number }) {
 				}
 			};
 			await Promise.all(Array.from({ length: Math.min(CONCURRENCY, terms.length) }, () => worker()));
-			if (!cancelled || completed > 0) {
+			const isCurrentRun = !disposed && runId === checkRunId;
+			const isUserCancelled = !disposed && userCancelledRunId === runId;
+			if (isUserCancelled) userCancelledRunId = 0;
+			if (isCurrentRun || (isUserCancelled && completed > 0)) {
 				setCodeCheck({
 					column: spec.column,
 					columnName: colName,
@@ -1029,14 +1213,19 @@ export function TableView(props: { path: string; group?: number }) {
 					counts,
 				});
 				if (![...counts.values()].some((n) => n === 0)) setOnlyMissing(false);
-				notify(codeCheckSummary(colName, counts, cancelled));
+				notify(codeCheckSummary(colName, counts, !isCurrentRun));
 			}
 		} catch (e: any) {
+			cancelled = true;
 			if (runId === checkRunId) {
-				notify(`Code check failed: ${e?.message ?? e}`, "error");
+				checkRunId++;
+				if (!disposed) {
+					setChecking(null);
+					notify(`Code check failed: ${e?.message ?? e}`, "error");
+				}
 			}
 		} finally {
-			if (runId === checkRunId) setChecking(null);
+			if (!disposed && runId === checkRunId) setChecking(null);
 		}
 	};
 
@@ -1106,20 +1295,9 @@ export function TableView(props: { path: string; group?: number }) {
 	const fileLinkForCell = (col: number, rawVal: string): { path: string; missing: boolean } | null => {
 		if (!isPathColumn(col)) return null;
 		const root = state.workspace?.root;
-		const trimmed = rawVal.trim();
-		if (!root || !trimmed) return null;
-		if (/^(?:https?:|mailto:|ftp:)/i.test(trimmed)) return null;
-		if (/[\r\n<>|*?"]/.test(trimmed) || trimmed === "." || trimmed === "..") return null;
-		const looksLikePath = /[\\/]/.test(trimmed) || /\.[A-Za-z0-9]{1,10}$/.test(trimmed);
-		if (!looksLikePath) return null;
-		const parts = trimmed.split(/[\\/]/).filter((p) => p && p !== ".");
-		if (!parts.length) return null;
-		const resolved = parts.includes("..")
-			? resolvePath(root, trimmed)
-			: isInside(root, trimmed)
-				? trimmed
-				: joinPath(root, ...parts);
-		if (!isInside(root, resolved) || canonical(resolved) === canonical(root)) return null;
+		if (!root) return null;
+		const resolved = resolveWorkspaceFileLink(root, rawVal);
+		if (!resolved || canonical(resolved) === canonical(root)) return null;
 		const knownFiles = wsFileSet();
 		const missing = knownFiles !== null && knownFiles.size > 0 && !knownFiles.has(canonical(resolved));
 		return { path: resolved, missing };
@@ -1127,7 +1305,7 @@ export function TableView(props: { path: string; group?: number }) {
 
 	/** Flags malformed paths (e.g. traversal outside workspace or illegal characters) in `files.csv`/`files.tsv` `path` columns. */
 	const isMalformedFilePath = (col: number, rawVal: string): boolean => {
-		if (!isFilesRegistry() || !isPathColumn(col)) return false;
+		if (!isFilesRegistry() || !isPathColumn(col) || !state.workspace?.root) return false;
 		const trimmed = rawVal.trim();
 		if (!trimmed) return false;
 		if (/^(?:https?:|mailto:|ftp:)/i.test(trimmed)) return false;
@@ -1195,6 +1373,7 @@ export function TableView(props: { path: string; group?: number }) {
 					) : (
 						<For each={seg.text.split(/([\s,;]+)/)}>
 							{(chunk) => {
+								if (!chunk || isTicketSeparatorChunk(chunk)) return chunk;
 								const trimmedChunk = chunk.trim();
 								if (!trimmedChunk || TICKET_PLACEHOLDER_RE.test(trimmedChunk)) return chunk;
 								return (
@@ -1489,6 +1668,14 @@ export function TableView(props: { path: string; group?: number }) {
 			onlyIssues(),
 	);
 
+	const pinRowIfFiltered = (row: number) => {
+		if (hasActiveFilters()) setPinnedRow(row);
+	};
+
+	createEffect(() => {
+		if (!hasActiveFilters() && pinnedRow() !== null) setPinnedRow(null);
+	});
+
 	const isColFiltered = (col: number) => isColumnFilterActive(colFilters().get(col));
 
 	const setColumnFilter = (col: number, next: ColumnFilter | undefined) => {
@@ -1606,7 +1793,7 @@ export function TableView(props: { path: string; group?: number }) {
 	const displayEntries = createMemo<DisplayEntry[]>(() => {
 		const groups = orderedGroups();
 		if (!groups) {
-			return rows().map((r) => ({ kind: "row" as const, index: r.index, cells: r.cells }));
+			return rows().map((r) => ({ kind: "row" as const, entryId: `r:${r.index}`, index: r.index, cells: r.cells }));
 		}
 		const collapsed = collapsedGroups();
 		const out: DisplayEntry[] = [];
@@ -1614,6 +1801,8 @@ export function TableView(props: { path: string; group?: number }) {
 			const isCollapsed = collapsed.has(grp.key);
 			out.push({
 				kind: "group",
+				entryId: `g:${grp.key}`,
+				entryKey: -(out.length + 1),
 				key: grp.key,
 				label: grp.label,
 				count: grp.items.length,
@@ -1622,11 +1811,17 @@ export function TableView(props: { path: string; group?: number }) {
 			});
 			if (!isCollapsed) {
 				for (const item of grp.items) {
-					out.push({ kind: "row", index: item.index, cells: item.cells });
+					out.push({ kind: "row", entryId: `r:${item.index}`, index: item.index, cells: item.cells });
 				}
 			}
 		}
 		return out;
+	});
+
+	const displayEntryMap = createMemo(() => {
+		const map = new Map<string, DisplayEntry>();
+		for (const e of displayEntries()) map.set(e.entryId, e);
+		return map;
 	});
 
 	/** All filtered/sorted rows in exact visual group order INCLUDING collapsed groups (used by Find & Replace and F8 navigation). */
@@ -1763,7 +1958,7 @@ export function TableView(props: { path: string; group?: number }) {
 	const virtualWindow = createMemo(() => {
 		rowHeightVer();
 		const all = displayEntries();
-		const keys = all.map((e, idx) => (e.kind === "row" ? e.index : -(idx + 1)));
+		const keys = all.map((e) => (e.kind === "row" ? e.index : e.entryKey));
 		return computeVirtualWindow(
 			keys,
 			rowHeights,
@@ -1781,13 +1976,16 @@ export function TableView(props: { path: string; group?: number }) {
 		const all = displayEntries();
 		const slice = win.virtual ? all.slice(win.start, win.end) : all;
 		const ed = editing();
-		const focusRow = ed && !ed.ghost ? ed.row : pinnedRow();
-		const beyond =
-			focusRow !== null && !slice.some((e) => e.kind === "row" && e.index === focusRow)
-				? all.find((e) => e.kind === "row" && e.index === focusRow)
-				: undefined;
-		return beyond ? [...slice, beyond] : slice;
+		const focusRow = ed && !ed.ghost ? ed.row : null;
+		if (focusRow === null || slice.some((e) => e.kind === "row" && e.index === focusRow)) return slice;
+		const beyondIdx = all.findIndex((e) => e.kind === "row" && e.index === focusRow);
+		if (beyondIdx < 0) return slice;
+		const beyond = all[beyondIdx]!;
+		return beyondIdx < win.start ? [beyond, ...slice] : [...slice, beyond];
 	});
+
+	/** Stable primitive entry keys for `<For>` rendering so virtual scrolling never shifts slots or unmounts active inline editors. */
+	const drawnEntryIds = createMemo(() => drawnEntries().map((e) => e.entryId));
 
 	/** Roving tabindex target (ADR 0010): exactly one cell in tbody/tfoot gets tabindex=0 so Tab never traps users. */
 	const rovingCell = createMemo<ActiveCell | null>(() => {
@@ -1888,6 +2086,8 @@ export function TableView(props: { path: string; group?: number }) {
 	createEffect(() => {
 		drawnEntries();
 		colWidths();
+		hiddenCols();
+		editing();
 		text();
 		const raf = requestAnimationFrame(() => {
 			if (!body) return;
@@ -1911,7 +2111,7 @@ export function TableView(props: { path: string; group?: number }) {
 
 	// Measure cumulative widths of frozen columns so multi-column freezing locks seamlessly with zero overlap/gap.
 	createEffect(() => {
-		const count = frozenCols().length;
+		const count = visibleFrozenCount();
 		// Track visual layout dependencies so resizing/reordering/hiding/checking recalculates sticky offsets.
 		visibleColumns();
 		colWidths();
@@ -2007,7 +2207,7 @@ export function TableView(props: { path: string; group?: number }) {
 		if (!opts?.keepAnchor) setCellAnchor(null);
 		const visIdx = visEntryIdxForRow(row);
 		if (visIdx >= 0) {
-			setPinnedRow(row);
+			pinRowIfFiltered(row);
 			ensureVisRowInWindow(visIdx, opts?.align ?? "nearest");
 		}
 		setActiveCell({ ghost: false, row, column });
@@ -2058,7 +2258,7 @@ export function TableView(props: { path: string; group?: number }) {
 		if (!target) return;
 		const nextRow = target.index;
 		if (!opts?.keepAnchor) setCellAnchor(null);
-		setPinnedRow(nextRow);
+		pinRowIfFiltered(nextRow);
 		const entryIdx = visEntryIdxForRow(nextRow);
 		ensureVisRowInWindow(entryIdx >= 0 ? entryIdx : targetVis, opts?.align ?? "nearest");
 		setActiveCell({ ghost: false, row: nextRow, column });
@@ -2084,7 +2284,7 @@ export function TableView(props: { path: string; group?: number }) {
 			}
 			colsMap.set(u.col, u.value);
 		}
-		const cellEdits: { start: number; end: number; text: string }[] = [];
+		const cellEdits: OffsetTextEdit[] = [];
 		let changedCells = 0;
 		for (const [rowIdx, colsMap] of byRow) {
 			const cells = t.rows[rowIdx];
@@ -2092,15 +2292,21 @@ export function TableView(props: { path: string; group?: number }) {
 			let maxColNeeded = -1;
 			const tailVals = new Map<number, string>();
 			for (const [colIdx, val] of colsMap) {
-				const existing = cells[colIdx];
-				if (existing) {
-					if (existing.text !== val) {
-						cellEdits.push({ start: existing.start, end: existing.end, text: csvCell(val, t.delimiter) });
-						changedCells++;
-					}
-				} else if (val !== "") {
+				if (!cells[colIdx] && val !== "") {
 					tailVals.set(colIdx, val);
 					if (colIdx > maxColNeeded) maxColNeeded = colIdx;
+				}
+			}
+			const finalCellCount = tailVals.size && maxColNeeded >= cells.length ? maxColNeeded + 1 : cells.length;
+			for (const [colIdx, val] of colsMap) {
+				const existing = cells[colIdx];
+				if (existing && existing.text !== val) {
+					cellEdits.push({
+						start: existing.start,
+						end: existing.end,
+						text: serializeCellInRow(val, finalCellCount, t.delimiter),
+					});
+					changedCells++;
 				}
 			}
 			if (tailVals.size && maxColNeeded >= cells.length) {
@@ -2114,7 +2320,7 @@ export function TableView(props: { path: string; group?: number }) {
 			}
 		}
 		if (!cellEdits.length) return 0;
-		const ops = cellEdits
+		const ops = coalesceZeroWidthEdits(cellEdits)
 			.sort((a, b) => b.start - a.start || b.end - a.end)
 			.map((ed) => {
 				const from = model.getPositionAt(ed.start);
@@ -2570,7 +2776,7 @@ export function TableView(props: { path: string; group?: number }) {
 		if (cell && cell.text === value) return;
 		const last = cells[cells.length - 1]!;
 		const [start, end, written] = cell
-			? [cell.start, cell.end, csvCell(value, delimiter)]
+			? [cell.start, cell.end, serializeCellInRow(value, cells.length, delimiter)]
 			: [last.end, last.end, delimiter.repeat(column - cells.length + 1) + csvCell(value, delimiter)];
 		const from = model.getPositionAt(start);
 		const to = model.getPositionAt(end);
@@ -2582,7 +2788,7 @@ export function TableView(props: { path: string; group?: number }) {
 	/** Commits an existing cell edit (or writes across the whole multi-cell range on Ctrl+Enter) and optionally moves focus. */
 	const commitCell = (row: number, column: number, value: string, move: CommitMove) => {
 		// Pin the edited row under active filters so editing a cell doesn't immediately drop the row and strand Tab/focus.
-		if (hasActiveFilters()) setPinnedRow(row);
+		pinRowIfFiltered(row);
 		if (move === "range") {
 			const range = cellRange();
 			if (range && range.isMulti) {
@@ -2710,21 +2916,25 @@ export function TableView(props: { path: string; group?: number }) {
 		model.pushStackElement();
 
 		const newRow = table().rows.length - 1;
-		setPinnedRow(newRow);
+		pinRowIfFiltered(newRow);
 		setCurrent(newRow);
 
 		if (move === "next") {
 			if (visCol >= 0 && visCol + 1 < cols.length) {
-				setActiveCell({ ghost: false, row: newRow, column: cols[visCol + 1]! });
-				setEditing({ ghost: false, row: newRow, column: cols[visCol + 1]! });
+				const nextCol = cols[visCol + 1]!;
+				setActiveCell({ ghost: false, row: newRow, column: nextCol });
+				setEditing({ ghost: false, row: newRow, column: nextCol });
 			} else {
-				setActiveCell({ ghost: true, column: cols[0] ?? 0 });
-				setEditing({ ghost: true, column: cols[0] ?? 0 });
+				const firstCol = cols[0] ?? 0;
+				setActiveCell({ ghost: true, column: firstCol });
+				setEditing({ ghost: true, column: firstCol });
 			}
 			return;
 		}
 		if (move === "prev" && visCol > 0) {
-			setEditing({ ghost: false, row: newRow, column: cols[visCol - 1]! });
+			const prevCol = cols[visCol - 1]!;
+			setActiveCell({ ghost: false, row: newRow, column: prevCol });
+			setEditing({ ghost: false, row: newRow, column: prevCol });
 			return;
 		}
 		setEditing(null);
@@ -2765,6 +2975,8 @@ export function TableView(props: { path: string; group?: number }) {
 		if (pin !== null) setPinnedRow(remapIndexAfterMove(pin, fromRow, toRow));
 		setCellAnchor(null);
 		setEditing(null);
+		clearFindSelectionScope();
+		clearRowHeights();
 
 		const fullRange = model.getFullModelRange();
 		model.pushStackElement();
@@ -2869,13 +3081,20 @@ export function TableView(props: { path: string; group?: number }) {
 		const line = table().header.length > 1 ? csvRow(table().header.map(() => ""), table().delimiter) : '""';
 		const edit = insertRowEdit(model.getValue(), table(), row, position, line, model.getEOL());
 		if (!edit) return;
-		const pos = model.getPositionAt(edit.offset);
-		model.pushStackElement();
-		model.pushEditOperations([], [{ range: { startLineNumber: pos.lineNumber, startColumn: pos.column, endLineNumber: pos.lineNumber, endColumn: pos.column }, text: edit.text }], () => null);
-		model.pushStackElement();
 		const targetRow = position === "above" ? row : row + 1;
-		setPinnedRow(targetRow);
-		setCurrent(targetRow);
+		const pos = model.getPositionAt(edit.offset);
+		batch(() => {
+			model.pushStackElement();
+			model.pushEditOperations([], [{ range: { startLineNumber: pos.lineNumber, startColumn: pos.column, endLineNumber: pos.lineNumber, endColumn: pos.column }, text: edit.text }], () => null);
+			model.pushStackElement();
+			setSelectedRows((prev) => (prev.size ? remapRowSetOnInsert(prev, targetRow) : prev));
+			setLastClickedRow((prev) => remapRowIndexOnInsert(prev, targetRow));
+			setCellAnchor((prev) => (prev ? { ...prev, row: remapRowIndexOnInsert(prev.row, targetRow)! } : null));
+			clearFindSelectionScope();
+			clearRowHeights();
+			pinRowIfFiltered(targetRow);
+			setCurrent(targetRow);
+		});
 		queueMicrotask(() => setEditing({ ghost: false, row: targetRow, column: visibleColumns()[0] ?? 0 }));
 	};
 
@@ -2885,13 +3104,20 @@ export function TableView(props: { path: string; group?: number }) {
 		if (raw === null) return;
 		const edit = insertRowEdit(model.getValue(), table(), row, "below", raw, model.getEOL());
 		if (!edit) return;
-		const pos = model.getPositionAt(edit.offset);
-		model.pushStackElement();
-		model.pushEditOperations([], [{ range: { startLineNumber: pos.lineNumber, startColumn: pos.column, endLineNumber: pos.lineNumber, endColumn: pos.column }, text: edit.text }], () => null);
-		model.pushStackElement();
 		const targetRow = row + 1;
-		setPinnedRow(targetRow);
-		setCurrent(targetRow);
+		const pos = model.getPositionAt(edit.offset);
+		batch(() => {
+			model.pushStackElement();
+			model.pushEditOperations([], [{ range: { startLineNumber: pos.lineNumber, startColumn: pos.column, endLineNumber: pos.lineNumber, endColumn: pos.column }, text: edit.text }], () => null);
+			model.pushStackElement();
+			setSelectedRows((prev) => (prev.size ? remapRowSetOnInsert(prev, targetRow) : prev));
+			setLastClickedRow((prev) => remapRowIndexOnInsert(prev, targetRow));
+			setCellAnchor((prev) => (prev ? { ...prev, row: remapRowIndexOnInsert(prev.row, targetRow)! } : null));
+			clearFindSelectionScope();
+			clearRowHeights();
+			pinRowIfFiltered(targetRow);
+			setCurrent(targetRow);
+		});
 		focusCell(targetRow, visibleColumns()[0] ?? 0);
 	};
 
@@ -2901,16 +3127,28 @@ export function TableView(props: { path: string; group?: number }) {
 		if (!span) return;
 		const from = model.getPositionAt(span.start);
 		const to = model.getPositionAt(span.end);
-		model.pushStackElement();
-		model.pushEditOperations([], [{ range: { startLineNumber: from.lineNumber, startColumn: from.column, endLineNumber: to.lineNumber, endColumn: to.column }, text: "" }], () => null);
-		model.pushStackElement();
-		const remaining = table().rows.length;
-		const nextRow = remaining > 0 ? Math.min(row, remaining - 1) : null;
-		setCurrent(nextRow);
-		setEditing(null);
-		const pin = pinnedRow();
-		if (pin === row) setPinnedRow(null);
-		else if (pin !== null && pin > row) setPinnedRow(pin - 1);
+		let nextRow: number | null = null;
+		batch(() => {
+			setSelectedRows((prev) => (prev.size ? remapRowSetOnDelete(prev, row) : prev));
+			setLastClickedRow((prev) => remapRowIndexOnDelete(prev, row));
+			setCellAnchor((prev) => {
+				if (!prev) return null;
+				const remapped = remapRowIndexOnDelete(prev.row, row);
+				return remapped === null ? null : { ...prev, row: remapped };
+			});
+			clearFindSelectionScope();
+			clearRowHeights();
+			model.pushStackElement();
+			model.pushEditOperations([], [{ range: { startLineNumber: from.lineNumber, startColumn: from.column, endLineNumber: to.lineNumber, endColumn: to.column }, text: "" }], () => null);
+			model.pushStackElement();
+			const remaining = table().rows.length;
+			nextRow = remaining > 0 ? Math.min(row, remaining - 1) : null;
+			setCurrent(nextRow);
+			setEditing(null);
+			const pin = pinnedRow();
+			if (pin === row) setPinnedRow(null);
+			else if (pin !== null && pin > row) setPinnedRow(pin - 1);
+		});
 		queueMicrotask(() => {
 			if (nextRow !== null) focusCell(nextRow, activeCell()?.column ?? visibleColumns()[0] ?? 0);
 			else rootEl?.focus();
@@ -2957,7 +3195,7 @@ export function TableView(props: { path: string; group?: number }) {
 			if (cell && cell.text === value) continue;
 			const last = cells[cells.length - 1]!;
 			const [start, end, written] = cell
-				? [cell.start, cell.end, csvCell(value, t.delimiter)]
+				? [cell.start, cell.end, serializeCellInRow(value, cells.length, t.delimiter)]
 				: [last.end, last.end, t.delimiter.repeat(colIdx - cells.length + 1) + csvCell(value, t.delimiter)];
 			const from = model.getPositionAt(start);
 			const to = model.getPositionAt(end);
@@ -2982,8 +3220,11 @@ export function TableView(props: { path: string; group?: number }) {
 		if (nextText === null) return;
 		setSelectedRows(new Set<number>());
 		setLastClickedRow(null);
+		setCellAnchor(null);
 		setEditing(null);
 		setPinnedRow(null);
+		clearFindSelectionScope();
+		clearRowHeights();
 		applyFullText(nextText, `Deleted ${targetRows.length} ${targetRows.length === 1 ? "row" : "rows"} (Ctrl+Z to undo).`);
 	};
 
@@ -3146,7 +3387,8 @@ export function TableView(props: { path: string; group?: number }) {
 		if (!model) return;
 		const name = (await ask("New column name"))?.trim();
 		if (!name) return;
-		const defVal = (await ask(`Default value for existing rows in “${name}” (leave blank for empty)`, "")) ?? "";
+		const defVal = await ask(`Default value for existing rows in “${name}” (leave blank for empty)`, "");
+		if (defVal === null) return;
 		const next = addCsvColumn(model.getValue(), table(), name, defVal);
 		if (next) applyFullText(next, `Added column “${name}” (Ctrl+Z to undo).`);
 	};
@@ -3168,7 +3410,8 @@ export function TableView(props: { path: string; group?: number }) {
 		const fresh = parseCurrentCsv(raw);
 		const next = deleteCsvColumn(raw, fresh, col);
 		if (!next) return;
-		colSnapshots.set(model.getAlternativeVersionId(), captureColUi());
+		const beforeAlt = model.getAlternativeVersionId();
+		const beforeSnap = captureColUi();
 		const shift = (idx: number) => (idx === col ? -1 : idx > col ? idx - 1 : idx);
 
 		// Remap sort, grouping, code-check, frozen/hidden/order/widths/filters for remaining columns cleanly.
@@ -3209,9 +3452,16 @@ export function TableView(props: { path: string; group?: number }) {
 		});
 		setEditing(null);
 		setCellAnchor(null);
+		clearFindSelectionScope();
+		clearRowHeights();
 		closeFilterMenu(false);
 		applyFullText(next, `Deleted column “${name}” (Ctrl+Z to undo).`);
-		colSnapshots.set(model.getAlternativeVersionId(), captureColUi());
+		const afterAlt = model.getAlternativeVersionId();
+		if (afterAlt !== beforeAlt) {
+			const afterSnap = captureColUi();
+			colSnapshots.set(colSnapshotTransitionKey(afterAlt, beforeAlt), beforeSnap);
+			colSnapshots.set(colSnapshotTransitionKey(beforeAlt, afterAlt), afterSnap);
+		}
 	};
 
 	const applySortToFile = async () => {
@@ -3244,6 +3494,8 @@ export function TableView(props: { path: string; group?: number }) {
 		setCellAnchor(null);
 		setActiveCell(null);
 		setEditing(null);
+		clearFindSelectionScope();
+		clearRowHeights();
 		applyFullText(next, "Saved row sort order to file (Ctrl+Z to undo).");
 	};
 
@@ -3253,7 +3505,9 @@ export function TableView(props: { path: string; group?: number }) {
 		const bodyRows = rows().map((r) => cols.map((c) => r.cells[c]?.text ?? ""));
 		const out =
 			fmt === "tsv"
-				? tableToTsv(headers, bodyRows)
+				? hasHeader()
+					? tableToTsv(headers, bodyRows)
+					: bodyRows.map((r) => r.map((v) => csvCell(v, "\t")).join("\t")).join("\n")
 				: fmt === "csv"
 					? (hasHeader() ? [csvRow(headers, table().delimiter), ...bodyRows.map((r) => csvRow(r, table().delimiter))] : bodyRows.map((r) => csvRow(r, table().delimiter))).join("\n")
 					: cellsToMarkdownTable(headers, bodyRows);
@@ -3535,13 +3789,11 @@ export function TableView(props: { path: string; group?: number }) {
 			}
 
 			if (appendedText) {
-				const eofTail = rawEdits.find((ed) => ed.start === textNow.length && ed.end === textNow.length);
-				if (eofTail) eofTail.text += appendedText;
-				else rawEdits.push({ start: textNow.length, end: textNow.length, text: appendedText });
+				rawEdits.push({ start: textNow.length, end: textNow.length, text: appendedText });
 			}
 
 			if (!rawEdits.length) return;
-			const ops = rawEdits
+			const ops = coalesceZeroWidthEdits(rawEdits)
 				.sort((a, b) => b.start - a.start || b.end - a.end)
 				.map((ed) => {
 					const from = model.getPositionAt(ed.start);
@@ -3601,7 +3853,7 @@ export function TableView(props: { path: string; group?: number }) {
 		if (startVisRow < 0) return;
 
 		// Build strictly minimal cell-level edits so ragged trailing cells and untouched cell formatting stay verbatim.
-		const cellEdits: { start: number; end: number; text: string }[] = [];
+		const cellEdits: OffsetTextEdit[] = [];
 		const appended: string[][] = [];
 		for (let rOff = 0; rOff < grid.length; rOff++) {
 			const pasteRow = grid[rOff]!;
@@ -3614,19 +3866,25 @@ export function TableView(props: { path: string; group?: number }) {
 					-1,
 					...pasteRow.map((_, cOff) => cols[startVisCol + cOff] ?? -1),
 				);
-				// Handle cells that exist in `cells` individually, and pad any missing trailing cells in one tail edit.
+				// Collect missing trailing cells first so we know the resulting row width before serializing existing cells.
 				const tailVals = new Map<number, string>();
+				for (let cOff = 0; cOff < pasteRow.length; cOff++) {
+					const targetCol = cols[startVisCol + cOff];
+					if (targetCol === undefined) break;
+					if (!cells[targetCol]) tailVals.set(targetCol, pasteRow[cOff]!);
+				}
+				const finalCellCount = tailVals.size && maxColNeeded >= cells.length ? maxColNeeded + 1 : cells.length;
 				for (let cOff = 0; cOff < pasteRow.length; cOff++) {
 					const targetCol = cols[startVisCol + cOff];
 					if (targetCol === undefined) break;
 					const val = pasteRow[cOff]!;
 					const existing = cells[targetCol];
-					if (existing) {
-						if (existing.text !== val) {
-							cellEdits.push({ start: existing.start, end: existing.end, text: csvCell(val, t.delimiter) });
-						}
-					} else {
-						tailVals.set(targetCol, val);
+					if (existing && existing.text !== val) {
+						cellEdits.push({
+							start: existing.start,
+							end: existing.end,
+							text: serializeCellInRow(val, finalCellCount, t.delimiter),
+						});
 					}
 				}
 				if (tailVals.size && maxColNeeded >= cells.length) {
@@ -3651,12 +3909,15 @@ export function TableView(props: { path: string; group?: number }) {
 		if (appended.length) {
 			const nl = model.getEOL();
 			const prefix = curText && !/\r?\n$/.test(curText) ? nl : "";
-			const block = prefix + appended.map((vals) => csvRow(vals, t.delimiter)).join(nl) + nl;
-			const eofTail = cellEdits.find((ed) => ed.start === curText.length && ed.end === curText.length);
-			if (eofTail) eofTail.text += block;
-			else cellEdits.push({ start: curText.length, end: curText.length, text: block });
+			const block =
+				prefix +
+				appended
+					.map((vals) => (vals.length <= 1 ? serializeCellInRow(vals[0] ?? "", vals.length, t.delimiter) : csvRow(vals, t.delimiter)))
+					.join(nl) +
+				nl;
+			cellEdits.push({ start: curText.length, end: curText.length, text: block });
 		}
-		const ops = cellEdits
+		const ops = coalesceZeroWidthEdits(cellEdits)
 			.sort((a, b) => b.start - a.start || b.end - a.end)
 			.map((ed) => {
 				const from = model.getPositionAt(ed.start);
@@ -3667,7 +3928,7 @@ export function TableView(props: { path: string; group?: number }) {
 		model.pushStackElement();
 		model.pushEditOperations([], ops, () => null);
 		model.pushStackElement();
-		if (appended.length === 1) setPinnedRow(t.rows.length);
+		if (appended.length === 1) pinRowIfFiltered(t.rows.length);
 		notify(`Pasted ${grid.length} × ${Math.max(...grid.map((r) => r.length))} cells (Ctrl+Z to undo).`);
 	};
 
@@ -3787,7 +4048,7 @@ export function TableView(props: { path: string; group?: number }) {
 
 	const revealMatch = (match: { row: number; visRow: number; column: number }) => {
 		expandGroupForRow(match.row);
-		setPinnedRow(match.row);
+		pinRowIfFiltered(match.row);
 		const entryIdx = visEntryIdxForRow(match.row);
 		ensureVisRowInWindow(entryIdx >= 0 ? entryIdx : match.visRow, "center");
 		if (!findInSelection()) {
@@ -3851,7 +4112,7 @@ export function TableView(props: { path: string; group?: number }) {
 		const oldVal = table().rows[match.row]?.[match.column]?.text ?? "";
 		const nextVal = replaceCellMatches(oldVal, query, rep, opts);
 		if (nextVal !== oldVal) {
-			if (hasActiveFilters()) setPinnedRow(match.row);
+			pinRowIfFiltered(match.row);
 			changeCell(match.row, match.column, nextVal);
 		}
 		// If replacement still matches query (e.g. replacing "a" with "aa"), advance index to avoid sticking on the same cell.
@@ -3872,36 +4133,25 @@ export function TableView(props: { path: string; group?: number }) {
 		if (!model || !query || !compiled || !compiled.ok) return;
 		const opts = findOptions();
 		const rep = replaceText();
-		const curText = model.getValue();
-		const t = parseCurrentCsv(curText);
+		const t = parseCurrentCsv(model.getValue());
 		const matches = findMatches();
 		if (!matches.length) return;
-		const cellEdits: { start: number; end: number; text: string }[] = [];
+		const updates: { row: number; col: number; value: string }[] = [];
 		const seen = new Set<string>();
 		for (const m of matches) {
 			const key = `${m.row}:${m.column}`;
 			if (seen.has(key)) continue;
 			seen.add(key);
-			const cell = t.rows[m.row]?.[m.column];
-			if (!cell) continue;
-			const nextVal = replaceCellMatches(cell.text, query, rep, opts);
-			if (nextVal !== cell.text) {
-				cellEdits.push({ start: cell.start, end: cell.end, text: csvCell(nextVal, t.delimiter) });
+			const oldVal = t.rows[m.row]?.[m.column]?.text ?? "";
+			const nextVal = replaceCellMatches(oldVal, query, rep, opts);
+			if (nextVal !== oldVal) {
+				updates.push({ row: m.row, col: m.column, value: nextVal });
 			}
 		}
-		if (!cellEdits.length) return;
-		const ops = cellEdits
-			.sort((a, b) => b.start - a.start || b.end - a.end)
-			.map((ed) => {
-				const from = model.getPositionAt(ed.start);
-				const to = model.getPositionAt(ed.end);
-				return { range: { startLineNumber: from.lineNumber, startColumn: from.column, endLineNumber: to.lineNumber, endColumn: to.column }, text: ed.text };
-			});
-		model.pushStackElement();
-		model.pushEditOperations([], ops, () => null);
-		model.pushStackElement();
+		const changed = applyCellUpdates(updates);
+		if (!changed) return;
 		setFindMatchIdx(0);
-		notify(`Replaced in ${ops.length} ${ops.length === 1 ? "cell" : "cells"} (Ctrl+Z to undo).`);
+		notify(`Replaced in ${changed} ${changed === 1 ? "cell" : "cells"} (Ctrl+Z to undo).`);
 	};
 
 	/** Jumps to the next (`delta = 1`, F8) or previous (`delta = -1`, Shift+F8) inline validation issue. */
@@ -3920,7 +4170,7 @@ export function TableView(props: { path: string; group?: number }) {
 		const target = pool[idx]!;
 		if (hiddenCols().has(target.column)) showCol(target.column);
 		expandGroupForRow(target.row);
-		setPinnedRow(target.row);
+		pinRowIfFiltered(target.row);
 		focusCell(target.row, target.column, { align: "center" });
 	};
 
@@ -3997,7 +4247,7 @@ export function TableView(props: { path: string; group?: number }) {
 		}
 		if (hiddenCols().has(matchedCol)) showCol(matchedCol);
 		expandGroupForRow(matchedRow);
-		setPinnedRow(matchedRow);
+		pinRowIfFiltered(matchedRow);
 		const entryIdx = visEntryIdxForRow(matchedRow);
 		ensureVisRowInWindow(entryIdx, "center");
 		setCellAnchor(null);
@@ -4040,7 +4290,7 @@ export function TableView(props: { path: string; group?: number }) {
 				const sRect = scrollEl.getBoundingClientRect();
 				const thRect = th.getBoundingClientRect();
 				const frozenWidth = (() => {
-					const lastFrozenIdx = frozenCols().length - 1;
+					const lastFrozenIdx = visibleFrozenCount() - 1;
 					if (lastFrozenIdx < 0) return headRow?.querySelector<HTMLElement>("th.table-sel-col")?.getBoundingClientRect().width ?? 56;
 					const lastTh = headRow?.querySelectorAll<HTMLElement>("th[data-col]")[lastFrozenIdx];
 					return lastTh ? lastTh.getBoundingClientRect().right - sRect.left : 56;
@@ -4227,7 +4477,7 @@ export function TableView(props: { path: string; group?: number }) {
 
 	/** Returns whether `col` can move by `delta` (-1 left, +1 right) within its zone (frozen or unfrozen). */
 	const canMoveColumn = (col: number, delta: -1 | 1): boolean => {
-		const frozen = frozenCols();
+		const frozen = visibleFrozenCols();
 		const frozenIdx = frozen.indexOf(col);
 		if (frozenIdx >= 0) {
 			const next = frozenIdx + delta;
@@ -4243,23 +4493,27 @@ export function TableView(props: { path: string; group?: number }) {
 	const moveColumnTo = (col: number, targetVisIdx: number) => {
 		const count = table().header.length;
 		if (count < 2) return;
-		const frozen = frozenCols();
-		const frozenIdx = frozen.indexOf(col);
-		if (frozenIdx >= 0) {
-			const clamped = Math.max(0, Math.min(targetVisIdx, frozen.length - 1));
-			if (clamped === frozenIdx) return;
-			const nextFrozen = moveColumnInList(frozen, frozenIdx, clamped);
+		const visibleFrozen = visibleFrozenCols();
+		const visFrozenIdx = visibleFrozen.indexOf(col);
+		if (visFrozenIdx >= 0) {
+			const clamped = Math.max(0, Math.min(targetVisIdx, visibleFrozen.length - 1));
+			if (clamped === visFrozenIdx) return;
+			const allFrozen = frozenCols();
+			const fromF = allFrozen.indexOf(col);
+			const toF = allFrozen.indexOf(visibleFrozen[clamped]!);
+			if (fromF < 0 || toF < 0 || fromF === toF) return;
+			const nextFrozen = moveColumnInList(allFrozen, fromF, toF);
 			setFrozenCols(nextFrozen);
 			const nextFull = fullColumnOrder(count, nextFrozen, colOrder().length ? colOrder() : undefined);
 			setColOrder(isNaturalOrder(nextFull) ? [] : nextFull);
 			return;
 		}
 		const full = colOrder().length ? pruneColumnOrder(colOrder(), count) : Array.from({ length: count }, (_, i) => i);
-		const pinnedSet = new Set(frozen);
+		const pinnedSet = new Set(frozenCols());
 		const hiddenSet = hiddenCols();
 		const unfrozenVisible = full.filter((c) => !pinnedSet.has(c) && !hiddenSet.has(c));
 		const fromU = unfrozenVisible.indexOf(col);
-		const toU = Math.max(0, Math.min(targetVisIdx - frozen.length, unfrozenVisible.length - 1));
+		const toU = Math.max(0, Math.min(targetVisIdx - visibleFrozen.length, unfrozenVisible.length - 1));
 		if (fromU < 0 || fromU === toU) return;
 		const nextUnfrozen = moveColumnInList(unfrozenVisible, fromU, toU);
 		let u = 0;
@@ -4440,7 +4694,10 @@ export function TableView(props: { path: string; group?: number }) {
 		}
 		closeFilterMenu(false);
 		setEditing(null);
-		colSnapshots.set(model.getAlternativeVersionId(), captureColUi());
+		clearFindSelectionScope();
+		clearRowHeights();
+		const beforeAlt = model.getAlternativeVersionId();
+		const beforeSnap = captureColUi();
 
 		const fullRange = model.getFullModelRange();
 		model.pushStackElement();
@@ -4502,7 +4759,12 @@ export function TableView(props: { path: string; group?: number }) {
 		}
 
 		setColOrder([]);
-		colSnapshots.set(model.getAlternativeVersionId(), captureColUi());
+		const afterAlt = model.getAlternativeVersionId();
+		if (afterAlt !== beforeAlt) {
+			const afterSnap = captureColUi();
+			colSnapshots.set(colSnapshotTransitionKey(afterAlt, beforeAlt), beforeSnap);
+			colSnapshots.set(colSnapshotTransitionKey(beforeAlt, afterAlt), afterSnap);
+		}
 		notify("Saved column order to file (Ctrl+Z to undo).");
 		queueMicrotask(() => rootEl?.focus());
 	};
@@ -4512,7 +4774,7 @@ export function TableView(props: { path: string; group?: number }) {
 		if (e.button !== 0) return;
 		const target = e.target as HTMLElement | null;
 		if (target?.closest(".table-th-pin, .table-th-filter, .table-col-resizer")) return;
-		const frozenCount = frozenCols().length;
+		const frozenCount = visibleFrozenCount();
 		const isFrozen = visIdx < frozenCount;
 		const minVis = isFrozen ? 0 : frozenCount;
 		const maxVis = isFrozen ? frozenCount - 1 : visibleColumns().length - 1;
@@ -4908,7 +5170,7 @@ export function TableView(props: { path: string; group?: number }) {
 		} else if (picked === "clear-range" && curRange) {
 			clearCellRange(curRange);
 		} else if (picked === "copy-cell") {
-			await copyText(cells[column]?.text ?? "", "Copied cell value.");
+			await copyText(formatSingleCellForClipboard(cells[column]?.text ?? ""), "Copied cell value.");
 		} else if (picked === "copy-row") {
 			const raw = model ? rawRowText(model.getValue(), table(), row) : null;
 			await copyText(raw ?? csvRow(cells.map((c) => c.text), table().delimiter), "Copied row.");
@@ -4929,6 +5191,7 @@ export function TableView(props: { path: string; group?: number }) {
 					splitLists: false,
 				},
 				true,
+				row,
 			);
 		} else if (picked === "check-col") {
 			setCheckDialog({ open: true, column, rowScope: hasActiveFilters() ? "filtered" : "all" });
@@ -5359,7 +5622,7 @@ export function TableView(props: { path: string; group?: number }) {
 					if (ac && !ac.ghost) {
 						const val = table().rows[ac.row]?.[ac.column]?.text ?? "";
 						e.preventDefault();
-						void copyText(val, "Copied cell value.");
+						void copyText(formatSingleCellForClipboard(val), "Copied cell value.");
 					}
 				}
 			}}
@@ -5962,8 +6225,8 @@ export function TableView(props: { path: string; group?: number }) {
 									const col = () => colAcc();
 									const name = () => headerName(col());
 									const filtered = () => isColFiltered(col());
-									const isFrozen = () => visIdx < frozenCols().length;
-									const isLastFrozen = () => isFrozen() && visIdx === frozenCols().length - 1;
+									const isFrozen = () => visIdx < visibleFrozenCount();
+									const isLastFrozen = () => isFrozen() && visIdx === visibleFrozenCount() - 1;
 									const isDragging = () => colDrag()?.col === col();
 									const isDropBefore = () => {
 										const d = colDrag();
@@ -6099,437 +6362,366 @@ export function TableView(props: { path: string; group?: number }) {
 								<td colSpan={visibleColumns().length + 1} style={{ height: `${virtualWindow().topPad}px`, padding: "0", border: "0" }} />
 							</tr>
 						</Show>
-						<Index each={drawnEntries()}>
-							{(entryItem, drawIdx) => {
-								const isGroup = () => entryItem().kind === "group";
-								const groupEntry = () => {
-									const e = entryItem();
-									return e.kind === "group" ? e : null;
-								};
-								const groupEntryKey = () => -(virtualWindow().start + drawIdx + 1);
-								const index = () => {
-									const e = entryItem();
-									return e.kind === "row" ? e.index : -1;
-								};
-								const cells = () => {
-									const e = entryItem();
-									return e.kind === "row" ? e.cells : [];
-								};
-								return (
-									<Show
-										when={!isGroup()}
-										fallback={(() => {
-											const ge = () => groupEntry()!;
-											const allInGroupSelected = () => {
-												const sel = selectedRows();
-												const ids = ge().rowIndices;
-												return ids.length > 0 && ids.every((r) => sel.has(r));
-											};
-											const someInGroupSelected = () => {
-												const sel = selectedRows();
-												const ids = ge().rowIndices;
-												const hit = ids.filter((r) => sel.has(r)).length;
-												return hit > 0 && hit < ids.length;
-											};
-											const groupTone = () => {
-												const gCol = groupByCol();
-												if (gCol === null) return null;
-												return badgeToneForValue(columnRule(gCol), ge().label);
-											};
-											return (
-												<tr class="table-group-row" data-entry-key={groupEntryKey()}>
-													<td class="table-sel-col" onClick={(e) => e.stopPropagation()}>
-														<div class="table-sel-inner">
-															<input
-																type="checkbox"
-																checked={allInGroupSelected()}
-																ref={(el) => {
-																	createEffect(() => {
-																		el.indeterminate = someInGroupSelected();
-																	});
-																}}
-																aria-label={`Select all ${ge().count} rows in group ${ge().label || "(empty)"}`}
-																title={`Select/deselect all ${ge().count} rows in “${ge().label || "(empty)"}”`}
-																onClick={(e) => {
-																	e.stopPropagation();
-																	toggleGroupSelect(ge().rowIndices);
-																}}
-																onChange={() => {}}
-															/>
-														</div>
-													</td>
-													<td colSpan={visibleColumns().length}>
-														<button
-															type="button"
-															class="table-group-toggle"
-															aria-expanded={!ge().collapsed}
-															onClick={() => toggleGroupCollapsed(ge().key)}
-														>
-															<Icon name={ge().collapsed ? "chevron-right" : "chevron-down"} />
-															<Show
-																when={ge().label}
-																fallback={<span class="table-filter-blank">(empty)</span>}
+						<For each={drawnEntryIds()}>
+							{(entryId) => {
+								if (entryId.startsWith("g:")) {
+									const groupEntry = () => {
+										const e = displayEntryMap().get(entryId);
+										return e && e.kind === "group" ? e : null;
+									};
+									return (
+										<Show when={groupEntry()}>
+											{(ge) => {
+												const allInGroupSelected = () => {
+													const sel = selectedRows();
+													const ids = ge().rowIndices;
+													return ids.length > 0 && ids.every((r) => sel.has(r));
+												};
+												const someInGroupSelected = () => {
+													const sel = selectedRows();
+													const ids = ge().rowIndices;
+													const hit = ids.filter((r) => sel.has(r)).length;
+													return hit > 0 && hit < ids.length;
+												};
+												const groupTone = () => {
+													const gCol = groupByCol();
+													if (gCol === null) return null;
+													return badgeToneForValue(columnRule(gCol), ge().label);
+												};
+												return (
+													<tr class="table-group-row" data-entry-key={ge().entryKey}>
+														<td class="table-sel-col" onClick={(e) => e.stopPropagation()}>
+															<div class="table-sel-inner">
+																<input
+																	type="checkbox"
+																	checked={allInGroupSelected()}
+																	ref={(el) => {
+																		createEffect(() => {
+																			el.indeterminate = someInGroupSelected();
+																		});
+																	}}
+																	aria-label={`Select all ${ge().count} rows in group ${ge().label || "(empty)"}`}
+																	title={`Select/deselect all ${ge().count} rows in “${ge().label || "(empty)"}”`}
+																	onClick={(e) => {
+																		e.stopPropagation();
+																		toggleGroupSelect(ge().rowIndices);
+																	}}
+																	onChange={() => {}}
+																/>
+															</div>
+														</td>
+														<td colSpan={visibleColumns().length}>
+															<button
+																type="button"
+																class="table-group-toggle"
+																aria-expanded={!ge().collapsed}
+																onClick={() => toggleGroupCollapsed(ge().key)}
 															>
-																<Show when={groupTone()} fallback={<span>{ge().label}</span>}>
-																	{(tone) => <span class={`doc-status tone-${tone()}`}>{ge().label}</span>}
-																</Show>
-															</Show>
-															<span class="table-group-count">
-																{ge().count} {ge().count === 1 ? "row" : "rows"}
-															</span>
-														</button>
-													</td>
-												</tr>
-											);
-										})()}
-									>
-										<tr
-											data-row={index()}
-											classList={{
-												"row-current": current() === index(),
-												"row-selected": selectedRows().has(index()),
-												"row-revealed": revealedRow() === index(),
-												"row-dragging": rowDrag()?.fromRow === index(),
-												"row-drop-before": Boolean(rowDrag() && rowDrag()!.dropRow === index() && rowDrag()!.side === "before"),
-												"row-drop-after": Boolean(rowDrag() && rowDrag()!.dropRow === index() && rowDrag()!.side === "after"),
-											}}
-										>
-											<td
-												class="table-sel-col"
-												onClick={(e) => e.stopPropagation()}
-												onPointerDown={(e) => onRowGripPointerDown(e, index())}
-											>
-												<div class="table-sel-inner">
-													<span
-														class="table-row-num"
-														classList={{ draggable: canReorderRows() && table().rows.length > 1 }}
-														title={
-															canReorderRows() && table().rows.length > 1
-																? `Row ${index() + 1} — drag to reorder (or Alt+Up / Alt+Down)`
-																: `Row ${index() + 1}`
-														}
-													>
-														{index() + 1}
-													</span>
-													<input
-														type="checkbox"
-														tabindex={isRovingRow(index()) ? 0 : -1}
-														checked={selectedRows().has(index())}
-														aria-label={`Select row ${index() + 1}`}
-														onClick={(e) => {
-															e.stopPropagation();
-															toggleRowSelect(index(), e.shiftKey);
-														}}
-														onChange={() => {}}
-													/>
-												</div>
-											</td>
-											<Index each={visibleColumns()}>
-												{(colAcc, visIdx) => {
-													const col = () => colAcc();
-													const value = () => cells()[col()]?.text ?? "";
-													const open = () => {
-														const ed = editing();
-														return Boolean(ed && !ed.ghost && ed.row === index() && ed.column === col());
-													};
-													const rule = () => columnRule(col());
-													const badgeTone = () => badgeToneForValue(rule(), value());
-													const unrecognizedBadge = () => isUnrecognizedBadgeValue(rule(), value());
-													const emptyPrimaryKey = () =>
-														col() === 0 &&
-														isCol0KeyLike() &&
-														!value().trim() &&
-														cells().some((c, ci) => ci !== 0 && Boolean(c.text.trim()));
-													const checkedHere = () => {
-														const chk = codeCheck();
-														return chk && chk.column === col() ? chk : null;
-													};
-													const isFrozen = () => visIdx < frozenCols().length;
-													const isLastFrozen = () => isFrozen() && visIdx === frozenCols().length - 1;
-													const cellTabIndex = () => (isRovingBodyCell(index(), col()) ? 0 : -1);
-													const isDupeKeyCell = () => col() === 0 && duplicateRowSet().has(index());
-													const isFindMatch = () => findOpen() && findMatchSet().has(`${index()}:${col()}`);
-													const isCurrentMatch = () => {
-														const m = activeFindMatch();
-														return Boolean(findOpen() && m && m.row === index() && m.column === col());
-													};
-													const schemaDoc = () => schemaDocForCell(col(), value());
-													const fileLink = () => (!schemaDoc() ? fileLinkForCell(col(), value()) : null);
-													const malformedPath = () => (!schemaDoc() && !fileLink() ? isMalformedFilePath(col(), value()) : false);
-													const cellTitle = () => {
-														if (emptyPrimaryKey()) return `Missing primary key in “${headerName(0) || "Column 1"}”`;
-														if (unrecognizedBadge()) return `Unrecognized value “${value().trim()}” for ${headerName(col()) || `Column ${col() + 1}`}`;
-														return "Double-click, Enter or F2 to edit; right-click or Shift+F10 for actions";
-													};
-													const hasFillHandle = () => {
-														const fh = fillHandleCell();
-														return Boolean(fh && fh.row === index() && fh.col === col());
-													};
-													return (
-														<td
-															tabindex={cellTabIndex()}
-															data-col={col()}
-															style={cellStyle(col(), visIdx)}
-															classList={{
-																number: /^-?\d[\d.,]*$/.test(value().trim()),
-																"col-frozen": isFrozen(),
-																"col-frozen-last": isLastFrozen(),
-																"cell-selected": isCellSelected(index(), col()),
-																"cell-in-range": isCellInRange(index(), col()),
-																"cell-fill-target": isCellFillTarget(index(), col()),
-																"cell-has-fill-handle": hasFillHandle(),
-																"cell-editing": open(),
-																"cell-dupe": isDupeKeyCell(),
-																"cell-empty-key": emptyPrimaryKey(),
-																"cell-find-match": isFindMatch(),
-																"cell-find-current": isCurrentMatch(),
-															}}
-															title={cellTitle()}
-															onMouseDown={(e) => onCellMouseDown(e, index(), col())}
-															onFocus={() => setActiveCell({ ghost: false, row: index(), column: col() })}
-															onClick={(e) => {
-																if ((e.ctrlKey || e.metaKey) && !open() && openCellLink(col(), value())) {
-																	e.preventDefault();
-																	e.stopPropagation();
-																}
-															}}
-															onDblClick={() => {
-																if (!isCellInRange(index(), col())) setCellAnchor(null);
-																setEditing({ ghost: false, row: index(), column: col() });
-															}}
-															onKeyDown={(e) => onCellKey(e, index(), col())}
-															onContextMenu={(e) => void onCellContextMenu(e, index(), col())}
-														>
-															<Show
-																when={open()}
-																fallback={
-																	<Show
-																		when={checkedHere()?.splitLists && value().trim()}
-																		fallback={
-																			<>
-																				<Show
-																					when={isTicketCol(col()) && value().trim()}
-																					fallback={
-																						<Show
-																							when={schemaDoc()}
-																							fallback={
-																								<Show
-																									when={fileLink()}
-																									fallback={
-																										<Show
-																											when={malformedPath()}
-																											fallback={
-																												<Show
-																													when={emptyPrimaryKey()}
-																													fallback={
-																														<Show
-																															when={unrecognizedBadge()}
-																															fallback={
-																																<Show when={badgeTone()} fallback={richTextCell(value(), cellTabIndex)}>
-																																	{(tone) => <span class={`doc-status tone-${tone()}`}>{value()}</span>}
-																																</Show>
-																															}
-																														>
-																															<span
-																																class="table-badge-warn"
-																																title={`Unrecognized value “${value().trim()}” for ${headerName(col()) || `Column ${col() + 1}`}`}
-																															>
-																																<Show when={badgeTone()} fallback={<span class="table-val-warn">{value()}</span>}>
-																																	{(tone) => <span class={`doc-status tone-${tone()}`}>{value()}</span>}
-																																</Show>
-																																<span class="table-badge-warn-icon" aria-hidden="true">
-																																	<Icon name="warning" />
-																																</span>
-																															</span>
-																														</Show>
-																													}
-																												>
-																													<span class="table-empty-key-warn" title={`Missing primary key in “${headerName(0) || "Column 1"}”`}>
-																														<Icon name="warning" />
-																													</span>
-																												</Show>
-																											}
-																										>
-																											<span class="table-val-warn" title="Path looks malformed or points outside the workspace">
-																												{value()}
-																											</span>
-																										</Show>
-																									}
-																								>
-																									{(fl) => (
-																										<button
-																											type="button"
-																											tabindex={cellTabIndex()}
-																											class="link table-cell-link"
-																											classList={{ "table-val-warn": fl().missing }}
-																											title={
-																												fl().missing
-																													? `${value().trim()} — file not found in workspace`
-																													: `Open ${value().trim()} (Click or Ctrl+Click)`
-																											}
-																											onClick={(e) => (e.stopPropagation(), void openFile(fl().path))}
-																											onDblClick={(e) => e.stopPropagation()}
-																										>
-																											{value()}
-																										</button>
-																									)}
-																								</Show>
-																							}
-																						>
-																							{(doc) => (
-																								<button
-																									type="button"
-																									tabindex={cellTabIndex()}
-																									class="link table-cell-link"
-																									title={`Open schema doc: ${relativeTo(state.workspace?.root, doc().path)} (Click or Ctrl+Click)`}
-																									onClick={(e) => (e.stopPropagation(), void openFile(doc().path))}
-																									onDblClick={(e) => e.stopPropagation()}
-																								>
-																									{value()}
-																								</button>
-																							)}
-																						</Show>
-																					}
-																				>
-																					{ticketCell(value(), cellTabIndex)}
-																				</Show>
-																				<Show when={checkedHere()}>
-																					{(chk) => {
-																						const trimmed = value().trim();
-																						if (!trimmed) return null;
-																						const count = chk().counts.get(termLookupKey(trimmed, chk().caseSensitive));
-																						return renderCheckBadge(trimmed, count, chk().options, cellTabIndex());
-																					}}
-																				</Show>
-																			</>
-																		}
-																	>
-																		{/* Split comma/semicolon list cell with per-term code check counts */}
-																		<For each={value().split(/([,;\r\n]+\s*)/)}>
-																			{(part) => {
-																				const trimmed = part.trim();
-																				const chk = checkedHere();
-																				if (!trimmed || /^[,;\r\n]+$/.test(trimmed) || !chk) return part;
-																				const count = chk.counts.get(termLookupKey(trimmed, chk.caseSensitive));
-																				return (
-																					<>
-																						{part}
-																						{renderCheckBadge(trimmed, count, chk.options, cellTabIndex())}
-																					</>
-																				);
-																			}}
-																		</For>
+																<Icon name={ge().collapsed ? "chevron-right" : "chevron-down"} />
+																<Show
+																	when={ge().label}
+																	fallback={<span class="table-filter-blank">(empty)</span>}
+																>
+																	<Show when={groupTone()} fallback={<span>{ge().label}</span>}>
+																		{(tone) => <span class={`doc-status tone-${tone()}`}>{ge().label}</span>}
 																	</Show>
-																}
-															>
-																{(() => {
-																	let done = false;
-																	const rowIdx = index();
-																	const targetCol = col();
-																	const ed = editing();
-																	const seed = ed && !ed.ghost && ed.seed !== undefined ? ed.seed : undefined;
-																	const initVal = seed !== undefined ? seed : value();
-																	const finish = (val: string, move: CommitMove) => {
-																		if (done) return;
-																		done = true;
-																		commitCell(rowIdx, targetCol, val, move);
-																	};
-																	commitActiveEdit = finish;
-																	const multiline = Boolean(ed && !ed.ghost && ed.forceMultiline) || (seed === undefined && /[\r\n]/.test(value()));
-																	if (multiline) {
-																		return (
-																			<textarea
-																				class="table-cell-multiline"
-																				value={initVal}
-																				rows={Math.min(6, Math.max(2, initVal.split(/\r?\n/).length))}
-																				aria-label={`${headerName(targetCol) || "Cell"}, row ${rowIdx + 1} (Ctrl+Enter to save)`}
-																				ref={(el) =>
-																					queueMicrotask(() => {
-																						el.focus();
-																						if (seed !== undefined) el.setSelectionRange(seed.length, seed.length);
-																						else el.select();
-																					})
+																</Show>
+																<span class="table-group-count">
+																	{ge().count} {ge().count === 1 ? "row" : "rows"}
+																</span>
+															</button>
+														</td>
+													</tr>
+												);
+											}}
+										</Show>
+									);
+								}
+								const rowIndex = Number(entryId.slice(2));
+								const index = () => rowIndex;
+								const cells = () => table().rows[rowIndex] ?? [];
+								return (
+									<tr
+										data-row={index()}
+										classList={{
+											"row-current": current() === index(),
+											"row-selected": selectedRows().has(index()),
+											"row-revealed": revealedRow() === index(),
+											"row-dragging": rowDrag()?.fromRow === index(),
+											"row-drop-before": Boolean(rowDrag() && rowDrag()!.dropRow === index() && rowDrag()!.side === "before"),
+											"row-drop-after": Boolean(rowDrag() && rowDrag()!.dropRow === index() && rowDrag()!.side === "after"),
+										}}
+									>
+										<td
+											class="table-sel-col"
+											onClick={(e) => e.stopPropagation()}
+											onPointerDown={(e) => onRowGripPointerDown(e, index())}
+										>
+											<div class="table-sel-inner">
+												<span
+													class="table-row-num"
+													classList={{ draggable: canReorderRows() && table().rows.length > 1 }}
+													title={
+														canReorderRows() && table().rows.length > 1
+															? `Row ${index() + 1} — drag to reorder (or Alt+Up / Alt+Down)`
+															: `Row ${index() + 1}`
+													}
+												>
+													{index() + 1}
+												</span>
+												<input
+													type="checkbox"
+													tabindex={isRovingRow(index()) ? 0 : -1}
+													checked={selectedRows().has(index())}
+													aria-label={`Select row ${index() + 1}`}
+													onClick={(e) => {
+														e.stopPropagation();
+														toggleRowSelect(index(), e.shiftKey);
+													}}
+													onChange={() => {}}
+												/>
+											</div>
+										</td>
+										<Index each={visibleColumns()}>
+											{(colAcc, visIdx) => {
+												const col = () => colAcc();
+												const value = () => cells()[col()]?.text ?? "";
+												const openEdit = () => {
+													const ed = editing();
+													return ed && !ed.ghost && ed.row === index() && ed.column === col() ? ed : null;
+												};
+												const open = () => openEdit() !== null;
+												const rule = () => columnRule(col());
+												const badgeTone = () => badgeToneForValue(rule(), value());
+												const unrecognizedBadge = () => isUnrecognizedBadgeValue(rule(), value());
+												const emptyPrimaryKey = () =>
+													col() === 0 &&
+													isCol0KeyLike() &&
+													!value().trim() &&
+													cells().some((c, ci) => ci !== 0 && Boolean(c.text.trim()));
+												const checkedHere = () => {
+													const chk = codeCheck();
+													return chk && chk.column === col() ? chk : null;
+												};
+												const isFrozen = () => visIdx < visibleFrozenCount();
+												const isLastFrozen = () => isFrozen() && visIdx === visibleFrozenCount() - 1;
+												const cellTabIndex = () => (isRovingBodyCell(index(), col()) ? 0 : -1);
+												const isDupeKeyCell = () => col() === 0 && duplicateRowSet().has(index());
+												const isFindMatch = () => findOpen() && findMatchSet().has(`${index()}:${col()}`);
+												const isCurrentMatch = () => {
+													const m = activeFindMatch();
+													return Boolean(findOpen() && m && m.row === index() && m.column === col());
+												};
+												const schemaDoc = () => schemaDocForCell(col(), value());
+												const fileLink = () => (!schemaDoc() ? fileLinkForCell(col(), value()) : null);
+												const malformedPath = () => (!schemaDoc() && !fileLink() ? isMalformedFilePath(col(), value()) : false);
+												const cellTitle = () => {
+													if (emptyPrimaryKey()) return `Missing primary key in “${headerName(0) || "Column 1"}”`;
+													if (unrecognizedBadge()) return `Unrecognized value “${value().trim()}” for ${headerName(col()) || `Column ${col() + 1}`}`;
+													return "Double-click, Enter or F2 to edit; right-click or Shift+F10 for actions";
+												};
+												const hasFillHandle = () => {
+													const fh = fillHandleCell();
+													return Boolean(fh && fh.row === index() && fh.col === col());
+												};
+												return (
+													<td
+														tabindex={cellTabIndex()}
+														data-col={col()}
+														style={cellStyle(col(), visIdx)}
+														classList={{
+															number: /^-?\d[\d.,]*$/.test(value().trim()),
+															"col-frozen": isFrozen(),
+															"col-frozen-last": isLastFrozen(),
+															"cell-selected": isCellSelected(index(), col()),
+															"cell-in-range": isCellInRange(index(), col()),
+															"cell-fill-target": isCellFillTarget(index(), col()),
+															"cell-has-fill-handle": hasFillHandle(),
+															"cell-editing": open(),
+															"cell-dupe": isDupeKeyCell(),
+															"cell-empty-key": emptyPrimaryKey(),
+															"cell-find-match": isFindMatch(),
+															"cell-find-current": isCurrentMatch(),
+														}}
+														title={cellTitle()}
+														onMouseDown={(e) => onCellMouseDown(e, index(), col())}
+														onFocus={() => setActiveCell({ ghost: false, row: index(), column: col() })}
+														onClick={(e) => {
+															if ((e.ctrlKey || e.metaKey) && !open() && openCellLink(col(), value())) {
+																e.preventDefault();
+																e.stopPropagation();
+															}
+														}}
+														onDblClick={() => {
+															if (!isCellInRange(index(), col())) setCellAnchor(null);
+															setEditing({ ghost: false, row: index(), column: col() });
+														}}
+														onKeyDown={(e) => onCellKey(e, index(), col())}
+														onContextMenu={(e) => void onCellContextMenu(e, index(), col())}
+													>
+														<Show
+															when={openEdit()}
+															keyed
+															fallback={
+																<Show
+																	when={checkedHere()?.splitLists && value().trim()}
+																	fallback={
+																		<>
+																			<Show
+																				when={isTicketCol(col()) && value().trim()}
+																				fallback={
+																					<Show
+																						when={schemaDoc()}
+																						fallback={
+																							<Show
+																								when={fileLink()}
+																								fallback={
+																									<Show
+																										when={malformedPath()}
+																										fallback={
+																											<Show
+																												when={emptyPrimaryKey()}
+																												fallback={
+																													<Show
+																														when={unrecognizedBadge()}
+																														fallback={
+																															<Show when={badgeTone()} fallback={richTextCell(value(), cellTabIndex)}>
+																																{(tone) => <span class={`doc-status tone-${tone()}`}>{value()}</span>}
+																															</Show>
+																														}
+																													>
+																														<span
+																															class="table-badge-warn"
+																															title={`Unrecognized value “${value().trim()}” for ${headerName(col()) || `Column ${col() + 1}`}`}
+																														>
+																															<Show when={badgeTone()} fallback={<span class="table-val-warn">{value()}</span>}>
+																																{(tone) => <span class={`doc-status tone-${tone()}`}>{value()}</span>}
+																															</Show>
+																															<span class="table-badge-warn-icon" aria-hidden="true">
+																																<Icon name="warning" />
+																															</span>
+																														</span>
+																													</Show>
+																												}
+																											>
+																												<span class="table-empty-key-warn" title={`Missing primary key in “${headerName(0) || "Column 1"}”`}>
+																													<Icon name="warning" />
+																												</span>
+																											</Show>
+																										}
+																									>
+																										<span class="table-val-warn" title="Path looks malformed or points outside the workspace">
+																											{value()}
+																										</span>
+																									</Show>
+																								}
+																							>
+																								{(fl) => (
+																									<button
+																										type="button"
+																										tabindex={cellTabIndex()}
+																										class="link table-cell-link"
+																										classList={{ "table-val-warn": fl().missing }}
+																										title={
+																											fl().missing
+																												? `${value().trim()} — file not found in workspace`
+																												: `Open ${value().trim()} (Click or Ctrl+Click)`
+																										}
+																										onClick={(e) => (e.stopPropagation(), void openFile(fl().path))}
+																										onDblClick={(e) => e.stopPropagation()}
+																									>
+																										{value()}
+																									</button>
+																								)}
+																							</Show>
+																						}
+																					>
+																						{(doc) => (
+																							<button
+																								type="button"
+																								tabindex={cellTabIndex()}
+																								class="link table-cell-link"
+																								title={`Open schema doc: ${relativeTo(state.workspace?.root, doc().path)} (Click or Ctrl+Click)`}
+																								onClick={(e) => (e.stopPropagation(), void openFile(doc().path))}
+																								onDblClick={(e) => e.stopPropagation()}
+																							>
+																								{value()}
+																							</button>
+																						)}
+																					</Show>
 																				}
-																				onKeyDown={(e) => {
-																					e.stopPropagation();
-																					if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-																						e.preventDefault();
-																						finish(e.currentTarget.value, cellRange()?.isMulti ? "range" : "down");
-																					} else if (e.key === "Tab") {
-																						e.preventDefault();
-																						finish(e.currentTarget.value, e.shiftKey ? "prev" : "next");
-																					} else if (e.key === "Escape") {
-																						e.preventDefault();
-																						done = true;
-																						setEditing(null);
-																						focusCell(rowIdx, targetCol);
-																					}
+																			>
+																				{ticketCell(value(), cellTabIndex)}
+																			</Show>
+																			<Show when={checkedHere()}>
+																				{(chk) => {
+																					const trimmed = value().trim();
+																					if (!trimmed) return null;
+																					const count = chk().counts.get(termLookupKey(trimmed, chk().caseSensitive));
+																					return renderCheckBadge(trimmed, count, chk().options, cellTabIndex());
 																				}}
-																				onBlur={(e) => finish(e.currentTarget.value, "none")}
-																			/>
-																		);
+																			</Show>
+																		</>
 																	}
+																>
+																	{/* Split comma/semicolon list cell with per-term code check counts */}
+																	<For each={value().split(/([,;\r\n]+\s*)/)}>
+																		{(part) => {
+																			const trimmed = part.trim();
+																			const chk = checkedHere();
+																			if (!trimmed || /^[,;\r\n]+$/.test(trimmed) || !chk) return part;
+																			const count = chk.counts.get(termLookupKey(trimmed, chk.caseSensitive));
+																			return (
+																				<>
+																					{part}
+																					{renderCheckBadge(trimmed, count, chk.options, cellTabIndex())}
+																				</>
+																			);
+																		}}
+																	</For>
+																</Show>
+															}
+														>
+															{(ed) => {
+																let done = false;
+																const rowIdx = ed.row;
+																const targetCol = ed.column;
+																const seed = ed.seed;
+																const initVal = seed !== undefined ? seed : value();
+																const finish = (val: string, move: CommitMove) => {
+																	if (done) return;
+																	done = true;
+																	commitCell(rowIdx, targetCol, val, move);
+																};
+																commitActiveEdit = finish;
+																const multiline = Boolean(ed.forceMultiline) || (seed === undefined && /[\r\n]/.test(value()));
+																if (multiline) {
 																	return (
-																		<input
-																			role="combobox"
-																			aria-autocomplete="list"
-																			aria-expanded={pickerOpen() && pickerOptions().length > 0}
-																			aria-controls={pickerOpen() && pickerOptions().length > 0 ? pickerListboxId : undefined}
+																		<textarea
+																			class="table-cell-multiline"
 																			value={initVal}
-																			aria-label={`${headerName(targetCol) || "Cell"}, row ${rowIdx + 1} (Shift+Enter for new line)`}
-																			ref={(el) => {
-																				activeInputEl = el;
+																			rows={Math.min(6, Math.max(2, initVal.split(/\r?\n/).length))}
+																			aria-label={`${headerName(targetCol) || "Cell"}, row ${rowIdx + 1} (Ctrl+Enter to save)`}
+																			ref={(el) =>
 																				queueMicrotask(() => {
+																					if (!el.isConnected) return;
 																					el.focus();
-																					if (seed !== undefined) el.setSelectionRange(seed.length, seed.length);
-																					else el.select();
-																					setPickerAnchor(el.getBoundingClientRect());
-																				});
-																			}}
-																			onInput={(e) => {
-																				setEditDraft(e.currentTarget.value);
-																				setEditDirty(true);
-																				setPickerOpen(true);
-																				setPickerIdx(-1);
-																				setPickerAnchor(e.currentTarget.getBoundingClientRect());
-																			}}
+																					if (seed !== undefined) {
+																						const pos = ed.caret ?? seed.length;
+																						el.setSelectionRange(pos, pos);
+																					} else {
+																						el.select();
+																					}
+																				})
+																			}
 																			onKeyDown={(e) => {
 																				e.stopPropagation();
-																				const opts = pickerOptions();
-																				if (pickerOpen() && opts.length > 0) {
-																					if (e.key === "ArrowDown") {
-																						e.preventDefault();
-																						setPickerIdx((i) => (i + 1) % opts.length);
-																						return;
-																					}
-																					if (e.key === "ArrowUp") {
-																						e.preventDefault();
-																						setPickerIdx((i) => (i <= 0 ? opts.length - 1 : i - 1));
-																						return;
-																					}
-																				}
 																				if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
 																					e.preventDefault();
-																					const chosen = pickerOpen() && pickerIdx() >= 0 ? opts[pickerIdx()] : undefined;
-																					const val = chosen ? resolvePickerChoice(chosen.value, e.currentTarget.value) : e.currentTarget.value;
-																					finish(val, cellRange()?.isMulti ? "range" : "stay");
-																				} else if (e.key === "Enter" && (e.shiftKey || e.altKey)) {
-																					e.preventDefault();
-																					const el = e.currentTarget;
-																					const at = el.selectionStart ?? el.value.length;
-																					const nextSeed = `${el.value.slice(0, at)}\n${el.value.slice(el.selectionEnd ?? at)}`;
-																					done = true;
-																					setEditing({ ghost: false, row: rowIdx, column: targetCol, seed: nextSeed, forceMultiline: true });
-																				} else if (e.key === "Enter") {
-																					e.preventDefault();
-																					const chosen = pickerOpen() && pickerIdx() >= 0 ? opts[pickerIdx()] : undefined;
-																					const val = chosen ? resolvePickerChoice(chosen.value, e.currentTarget.value) : e.currentTarget.value;
-																					finish(val, "down");
+																					finish(e.currentTarget.value, cellRange()?.isMulti ? "range" : "down");
 																				} else if (e.key === "Tab") {
 																					e.preventDefault();
-																					const chosen = pickerOpen() && pickerIdx() >= 0 ? opts[pickerIdx()] : undefined;
-																					const val = chosen ? resolvePickerChoice(chosen.value, e.currentTarget.value) : e.currentTarget.value;
-																					finish(val, e.shiftKey ? "prev" : "next");
+																					finish(e.currentTarget.value, e.shiftKey ? "prev" : "next");
 																				} else if (e.key === "Escape") {
 																					e.preventDefault();
 																					done = true;
@@ -6540,26 +6732,99 @@ export function TableView(props: { path: string; group?: number }) {
 																			onBlur={(e) => finish(e.currentTarget.value, "none")}
 																		/>
 																	);
-																})()}
-															</Show>
-															<Show when={hasFillHandle()}>
-																<div
-																	class="table-fill-handle"
-																	aria-hidden="true"
-																	title="Drag to fill series (hold Alt to copy without incrementing)"
-																	onPointerDown={onFillHandlePointerDown}
-																	onDblClick={(e) => (e.stopPropagation(), e.preventDefault())}
-																/>
-															</Show>
-														</td>
-													);
-												}}
-											</Index>
-										</tr>
-									</Show>
+																}
+																return (
+																	<input
+																		role="combobox"
+																		aria-autocomplete="list"
+																		aria-expanded={pickerOpen() && pickerOptions().length > 0}
+																		aria-controls={pickerOpen() && pickerOptions().length > 0 ? pickerListboxId : undefined}
+																		value={initVal}
+																		aria-label={`${headerName(targetCol) || "Cell"}, row ${rowIdx + 1} (Shift+Enter for new line)`}
+																		ref={(el) => {
+																			activeInputEl = el;
+																			queueMicrotask(() => {
+																				if (!el.isConnected) return;
+																				el.focus();
+																				if (seed !== undefined) el.setSelectionRange(seed.length, seed.length);
+																				else el.select();
+																				setPickerAnchor(el.getBoundingClientRect());
+																			});
+																		}}
+																		onInput={(e) => {
+																			setEditDraft(e.currentTarget.value);
+																			setEditDirty(true);
+																			setPickerOpen(true);
+																			setPickerIdx(-1);
+																			setPickerAnchor(e.currentTarget.getBoundingClientRect());
+																		}}
+																		onKeyDown={(e) => {
+																			e.stopPropagation();
+																			const opts = pickerOptions();
+																			if (pickerOpen() && opts.length > 0) {
+																				if (e.key === "ArrowDown") {
+																					e.preventDefault();
+																					setPickerIdx((i) => (i + 1) % opts.length);
+																					return;
+																				}
+																				if (e.key === "ArrowUp") {
+																					e.preventDefault();
+																					setPickerIdx((i) => (i <= 0 ? opts.length - 1 : i - 1));
+																					return;
+																				}
+																			}
+																			if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+																				e.preventDefault();
+																				const chosen = pickerOpen() && pickerIdx() >= 0 ? opts[pickerIdx()] : undefined;
+																				const val = chosen ? resolvePickerChoice(chosen.value, e.currentTarget.value) : e.currentTarget.value;
+																				finish(val, cellRange()?.isMulti ? "range" : "stay");
+																			} else if (e.key === "Enter" && (e.shiftKey || e.altKey)) {
+																				e.preventDefault();
+																				const el = e.currentTarget;
+																				const at = el.selectionStart ?? el.value.length;
+																				const nextSeed = `${el.value.slice(0, at)}\n${el.value.slice(el.selectionEnd ?? at)}`;
+																				done = true;
+																				const nextEdit = { ghost: false as const, row: rowIdx, column: targetCol, seed: nextSeed, forceMultiline: true, caret: at + 1 };
+																				setTimeout(() => setEditing(nextEdit), 0);
+																			} else if (e.key === "Enter") {
+																				e.preventDefault();
+																				const chosen = pickerOpen() && pickerIdx() >= 0 ? opts[pickerIdx()] : undefined;
+																				const val = chosen ? resolvePickerChoice(chosen.value, e.currentTarget.value) : e.currentTarget.value;
+																				finish(val, "down");
+																			} else if (e.key === "Tab") {
+																				e.preventDefault();
+																				const chosen = pickerOpen() && pickerIdx() >= 0 ? opts[pickerIdx()] : undefined;
+																				const val = chosen ? resolvePickerChoice(chosen.value, e.currentTarget.value) : e.currentTarget.value;
+																				finish(val, e.shiftKey ? "prev" : "next");
+																			} else if (e.key === "Escape") {
+																				e.preventDefault();
+																				done = true;
+																				setEditing(null);
+																				focusCell(rowIdx, targetCol);
+																			}
+																		}}
+																		onBlur={(e) => finish(e.currentTarget.value, "none")}
+																	/>
+																);
+															}}
+														</Show>
+														<Show when={hasFillHandle()}>
+															<div
+																class="table-fill-handle"
+																aria-hidden="true"
+																title="Drag to fill series (hold Alt to copy without incrementing)"
+																onPointerDown={onFillHandlePointerDown}
+																onDblClick={(e) => (e.stopPropagation(), e.preventDefault())}
+															/>
+														</Show>
+													</td>
+												);
+											}}
+										</Index>
+									</tr>
 								);
 							}}
-						</Index>
+						</For>
 						<Show when={virtualWindow().bottomPad > 0}>
 							<tr class="table-virt-spacer" aria-hidden="true">
 								<td colSpan={visibleColumns().length + 1} style={{ height: `${virtualWindow().bottomPad}px`, padding: "0", border: "0" }} />
@@ -6575,13 +6840,14 @@ export function TableView(props: { path: string; group?: number }) {
 								<Index each={visibleColumns()}>
 									{(colAcc, visIdx) => {
 										const col = () => colAcc();
-										const open = () => {
+										const openGhostEdit = () => {
 											const ed = editing();
-											return Boolean(ed && ed.ghost && ed.column === col());
+											return ed && ed.ghost && ed.column === col() ? ed : null;
 										};
+										const open = () => openGhostEdit() !== null;
 										const colLabel = () => headerName(col()) || `Column ${col() + 1}`;
-										const isFrozen = () => visIdx < frozenCols().length;
-										const isLastFrozen = () => isFrozen() && visIdx === frozenCols().length - 1;
+										const isFrozen = () => visIdx < visibleFrozenCount();
+										const isLastFrozen = () => isFrozen() && visIdx === visibleFrozenCount() - 1;
 										return (
 											<td
 												tabindex={isRovingGhostCell(col()) ? 0 : -1}
@@ -6605,7 +6871,8 @@ export function TableView(props: { path: string; group?: number }) {
 												onContextMenu={(e) => void onGhostContextMenu(e, col())}
 											>
 												<Show
-													when={open()}
+													when={openGhostEdit()}
+													keyed
 													fallback={
 														<Show when={visIdx === 0}>
 															<span class="table-ghost-placeholder">
@@ -6614,11 +6881,10 @@ export function TableView(props: { path: string; group?: number }) {
 														</Show>
 													}
 												>
-													{(() => {
+													{(ed) => {
 														let done = false;
-														const targetCol = col();
-														const ed = editing();
-														const seed = ed && ed.ghost && ed.seed ? ed.seed : "";
+														const targetCol = ed.column;
+														const seed = ed.seed ?? "";
 														const finish = (val: string, move: CommitMove) => {
 															if (done) return;
 															done = true;
@@ -6637,6 +6903,7 @@ export function TableView(props: { path: string; group?: number }) {
 																ref={(el) => {
 																	activeInputEl = el;
 																	queueMicrotask(() => {
+																		if (!el.isConnected) return;
 																		el.focus();
 																		if (seed) el.setSelectionRange(seed.length, seed.length);
 																		setPickerAnchor(el.getBoundingClientRect());
@@ -6684,7 +6951,7 @@ export function TableView(props: { path: string; group?: number }) {
 																onBlur={(e) => finish(e.currentTarget.value, "none")}
 															/>
 														);
-													})()}
+													}}
 												</Show>
 											</td>
 										);

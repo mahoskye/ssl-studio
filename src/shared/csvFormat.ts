@@ -44,9 +44,11 @@ const REGISTRY_STATUS_VALUES: Record<string, BadgeTone> = {
 	found: "waiting",
 	open: "waiting",
 	pending: "waiting",
+	changed: "warn",
 	blocked: "error",
 	"not needed": "off",
 	dropped: "off",
+	gone: "off",
 };
 
 /** Common STARLIMS sample, folder, test, and result lifecycle statuses. */
@@ -80,6 +82,22 @@ const STARLIMS_STATUS_VALUES: Record<string, BadgeTone> = {
 	Disposed: "off",
 };
 
+/** Case-insensitively deduplicates a badge value -> tone map (later case-colliding entries override earlier ones). */
+function dedupeBadgeValues(raw: Record<string, unknown>): Record<string, BadgeTone> {
+	const out: Record<string, BadgeTone> = {};
+	const keyByLower = new Map<string, string>();
+	for (const [k, v] of Object.entries(raw)) {
+		const key = k.trim();
+		if (!key || typeof v !== "string" || !VALID_BADGE_TONES.has(v)) continue;
+		const lower = key.toLowerCase();
+		const prev = keyByLower.get(lower);
+		if (prev !== undefined && prev !== key) delete out[prev];
+		keyByLower.set(lower, key);
+		out[key] = v as BadgeTone;
+	}
+	return out;
+}
+
 export type CsvStatusPresetId = "default" | "starlims" | "registry";
 
 export const CSV_STATUS_PRESETS: readonly { id: CsvStatusPresetId; name: string; about: string; config: CsvTableConfig }[] = [
@@ -92,7 +110,7 @@ export const CSV_STATUS_PRESETS: readonly { id: CsvStatusPresetId; name: string;
 			rules: [
 				{
 					columns: ["status", "state", "sample_status", "result_status"],
-					values: { ...REGISTRY_STATUS_VALUES, ...STARLIMS_STATUS_VALUES },
+					values: dedupeBadgeValues({ ...REGISTRY_STATUS_VALUES, ...STARLIMS_STATUS_VALUES }),
 					fallback: "waiting",
 				},
 			],
@@ -153,18 +171,22 @@ export function effectiveCsvTableConfig(saved?: Partial<CsvTableConfig> | null):
 	const rules: CsvBadgeRule[] = [];
 	for (const raw of saved.rules) {
 		if (!raw || typeof raw !== "object") continue;
-		const columns = Array.isArray(raw.columns)
-			? [...new Set(raw.columns.map((c) => (typeof c === "string" ? c.trim() : "")).filter(Boolean))]
-			: [];
-		const values: Record<string, BadgeTone> = {};
-		if (raw.values && typeof raw.values === "object" && !Array.isArray(raw.values)) {
-			for (const [k, v] of Object.entries(raw.values)) {
-				const key = k.trim();
-				if (key && typeof v === "string" && VALID_BADGE_TONES.has(v)) {
-					values[key] = v as BadgeTone;
-				}
+		const columns: string[] = [];
+		const seenCols = new Set<string>();
+		if (Array.isArray(raw.columns)) {
+			for (const c of raw.columns) {
+				const trimmed = typeof c === "string" ? c.trim() : "";
+				if (!trimmed) continue;
+				const lower = trimmed.toLowerCase();
+				if (seenCols.has(lower)) continue;
+				seenCols.add(lower);
+				columns.push(trimmed);
 			}
 		}
+		const values =
+			raw.values && typeof raw.values === "object" && !Array.isArray(raw.values)
+				? dedupeBadgeValues(raw.values as Record<string, unknown>)
+				: {};
 		const fallback: BadgeTone | "none" =
 			raw.fallback === "none" ? "none" : typeof raw.fallback === "string" && VALID_BADGE_TONES.has(raw.fallback) ? (raw.fallback as BadgeTone) : "waiting";
 		if (columns.length) rules.push({ columns, values, fallback });
@@ -189,9 +211,11 @@ export function badgeToneForValue(rule: CsvBadgeRule | null, rawValue: string): 
 	const trimmed = rawValue.trim();
 	if (!trimmed) return null;
 	const lower = trimmed.toLowerCase();
+	let matched: BadgeTone | undefined;
 	for (const [key, tone] of Object.entries(rule.values)) {
-		if (key.trim().toLowerCase() === lower) return tone;
+		if (key.trim().toLowerCase() === lower) matched = tone;
 	}
+	if (matched !== undefined) return matched;
 	if (rule.fallback === "none") return null;
 	return rule.fallback ?? "waiting";
 }
@@ -214,17 +238,15 @@ export function isUnrecognizedBadgeValue(rule: CsvColumnFormatRule | null | unde
 /** Returns the configured canonical `{ value, tone }` badge options for a column rule (deduplicated case-insensitively). */
 export function knownBadgeValues(rule: CsvColumnFormatRule | null | undefined): { value: string; tone: BadgeTone }[] {
 	if (!rule) return [];
-	const seen = new Set<string>();
-	const out: { value: string; tone: BadgeTone }[] = [];
+	const byLower = new Map<string, { value: string; tone: BadgeTone }>();
 	for (const [key, tone] of Object.entries(rule.values)) {
 		const trimmed = key.trim();
 		if (!trimmed) continue;
 		const lower = trimmed.toLowerCase();
-		if (seen.has(lower)) continue;
-		seen.add(lower);
-		out.push({ value: trimmed, tone });
+		byLower.delete(lower);
+		byLower.set(lower, { value: trimmed, tone });
 	}
-	return out;
+	return [...byLower.values()];
 }
 
 /** Autocomplete values for editing a cell in a badged column: existing table values followed by the rule's configured values. */

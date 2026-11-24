@@ -439,7 +439,7 @@
 
 .table-view tbody tr td.cell-has-fill-handle:not(.col-frozen) {
 	position: relative;
-	z-index: 2;
+	z-index: 1;
 }
 .table-view tbody tr td.col-frozen.cell-has-fill-handle {
 	z-index: 3;

@@ -22,8 +22,8 @@ import { Icon } from "../Icon";
 import { Modal } from "../modal";
 import { notify, saveSetting, state } from "../state";
 
-type DraftEntry = { id: number; value: string; tone: BadgeTone };
-type DraftRule = {
+export type DraftEntry = { id: number; value: string; tone: BadgeTone };
+export type DraftRule = {
 	id: number;
 	columnsText: string;
 	fallback: BadgeTone | "none";
@@ -48,15 +48,21 @@ function toDraftRules(rules: readonly CsvBadgeRule[]): DraftRule[] {
 	}));
 }
 
-function fromDraft(badgeFormatting: boolean, rules: readonly DraftRule[]): CsvTableConfig {
+export function fromDraft(badgeFormatting: boolean, rules: readonly DraftRule[]): CsvTableConfig {
 	const out: CsvBadgeRule[] = [];
 	for (const r of rules) {
 		const columns = parseColumns(r.columnsText);
 		if (!columns.length) continue;
 		const values: Record<string, BadgeTone> = {};
+		const keyByLower = new Map<string, string>();
 		for (const e of r.entries) {
 			const key = e.value.trim();
-			if (key) values[key] = e.tone;
+			if (!key) continue;
+			const lower = key.toLowerCase();
+			const prevKey = keyByLower.get(lower);
+			if (prevKey !== undefined && prevKey !== key) delete values[prevKey];
+			keyByLower.set(lower, key);
+			values[key] = e.tone;
 		}
 		out.push({ columns, values, fallback: r.fallback });
 	}
@@ -136,10 +142,14 @@ export function CsvFormatDialog(props: {
 	};
 
 	const removeEntry = (ruleId: number, entryId: number) => {
-		updateRule(ruleId, (r) => ({
-			...r,
-			entries: r.entries.filter((e) => e.id !== entryId),
-		}));
+		updateRule(ruleId, (r) => {
+			const entries = r.entries.filter((e) => e.id !== entryId);
+			return {
+				...r,
+				entries,
+				search: entries.length <= 6 ? "" : r.search,
+			};
+		});
 	};
 
 	const unmappedFromTable = (rule: DraftRule): string[] => {
@@ -273,7 +283,7 @@ export function CsvFormatDialog(props: {
 										<span class="csv-fmt-values-count">
 											Value styles ({rule.entries.length})
 										</span>
-										<Show when={rule.entries.length > 6}>
+										<Show when={rule.entries.length > 6 || rule.search.length > 0}>
 											<input
 												type="search"
 												class="csv-fmt-values-search"

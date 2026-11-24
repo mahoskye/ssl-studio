@@ -154,7 +154,7 @@ CREATE SEQUENCE dbo.SEQ_RULES START WITH 1;
 		expect(tables[0]!.columns.map((c) => c.name)).toEqual(["RULE_ID", "SITE_CODE", "DAYS_ALLOWED", "KEY", "FULL_LABEL", "EXTRA_FLAG"]);
 		const md = sqlTablesToMarkdown(tables, "schema/database/due_date_rules.sql");
 		expect(md).toContain("| `RULE_ID` | `int` | NOT NULL PRIMARY KEY |  |");
-		expect(md).toContain("| `SITE_CODE` | `varchar(32)` | NOT NULL DEFAULT '-- none --' |  |");
+		expect(md).toContain("| `SITE_CODE` | `varchar(32)` | NOT NULL | DEFAULT '-- none --' |");
 	});
 });
 

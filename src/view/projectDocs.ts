@@ -3015,8 +3015,9 @@ export async function generateSchemaDocFromSql(sqlPath?: string, targetDocPath?:
 		// Unify dropped/modified detection via `diffSqlAgainstSchemaMarkdown` so already-tagged
 		// `[deprecated / dropped in SQL]` rows are never re-prompted.
 		const drifts = diffSqlAgainstSchemaMarkdown(sqlText, existingMd);
-		const dropped = drifts.flatMap((d) => d.dropped.map((col) => (tables.length > 1 ? `${d.table}.${col}` : col)));
-		const modified = drifts.flatMap((d) => d.modified.map((col) => (tables.length > 1 ? `${d.table}.${col}` : col)));
+		const isColumnEntry = (entry: string) => !/^(?:FK|INDEX): /.test(entry);
+		const dropped = drifts.flatMap((d) => d.dropped.filter(isColumnEntry).map((col) => (tables.length > 1 ? `${d.table}.${col}` : col)));
+		const modified = drifts.flatMap((d) => d.modified.filter(isColumnEntry).map((col) => (tables.length > 1 ? `${d.table}.${col}` : col)));
 
 		// Prompt BEFORE merging so "Keep existing rows as-is" genuinely leaves dropped rows untagged (ADR 0002 / 0009).
 		let markDropped = false;
