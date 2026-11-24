@@ -705,3 +705,55 @@ describe("R10B #8 — Redundant no-op buttons dropped beside Dialog's automatic 
 		expect(cmdSrc).not.toContain('[ADD_FILE, "Done"]');
 	});
 });
+
+describe("R11 — Final Clean-Sweep Verification Fixes", () => {
+	test("parseOpencodeCommandEnv trims and collapses whitespace on fallback splitting", () => {
+		expect(parseOpencodeCommandEnv("  bun   /tmp/fake-opencode.ts  ")).toEqual(["bun", "/tmp/fake-opencode.ts"]);
+		expect(parseOpencodeCommandEnv("\tbun\t--flag\tscript.ts\n")).toEqual(["bun", "--flag", "script.ts"]);
+		expect(parseOpencodeCommandEnv("   ")).toBeUndefined();
+	});
+
+	test("backend open() captures restartSeq and yields LSP ownership to concurrent lspRestart()", async () => {
+		const backendSrc = readSrc("src/bun/backend.ts");
+		expect(backendSrc).toContain("const restartSeq = ++lspRestartSeq;");
+		expect(backendSrc).toContain("if (restartSeq === lspRestartSeq) {");
+
+		// Live concurrency check: open() + immediate lspRestart() never orphans two processes on the old binary.
+		await withTempDirs(async () => {
+			const wsDir = mkdtempSync(join(rootTmp, "ws-r11-"));
+			const binDir = mkdtempSync(join(rootTmp, "bin-r11-"));
+			const marker = join(binDir, "started.log");
+			const lspV1 = makeFakeLspScript(binDir, "lsp-v1.sh", "0.31.0", marker);
+			const lspV2 = makeFakeLspScript(binDir, "lsp-v2.sh", "0.32.0", marker);
+
+			const host = {
+				emit: () => {},
+				pick: async () => null,
+				trash: async () => {},
+				app: "test",
+				kind: "browser" as const,
+				quit: () => {},
+			};
+			const b = createBackend(host);
+			try {
+				await b.api.saveSettings("user", { lspPath: lspV1 });
+				const opening = b.api.openFolder(wsDir);
+				// Immediately switch lspPath and trigger lspRestart() while open() is in flight.
+				await b.api.saveSettings("user", { lspPath: lspV2 });
+				const restarting = b.api.lspRestart();
+				await Promise.all([opening, restarting]);
+				await new Promise((r) => setTimeout(r, 80));
+				const info = await b.api.info();
+				expect(info.lsp.path).toBe(lspV2);
+				expect(info.lsp.version).toBe("0.32.0");
+			} finally {
+				b.dispose();
+			}
+		});
+	});
+
+	test("state.ts openFolder() cancel restarts LSP via restartLsp() rather than double-initializing", () => {
+		const stateSrc = readSrc("src/view/state.ts");
+		expect(stateSrc).toMatch(/if \(!workspace\) \{[\s\S]*?session\.setRoot\(prevRoot\);[\s\S]*?void restartLsp\(\);/);
+	});
+});

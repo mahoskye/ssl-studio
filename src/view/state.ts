@@ -207,7 +207,10 @@ export async function openFolder(path?: string) {
 		if (prevRoot) {
 			session.setRoot(prevRoot);
 			if (prevLspRunning || state.lsp.state === "running") {
-				void session.start(prevRoot).catch(() => {});
+				// Spawn a fresh language server process: starlims-lsp ignores a second
+				// `initialize` on an already-initialized process, so calling
+				// `session.start(prevRoot)` directly would deadlock forever.
+				void restartLsp();
 			}
 		}
 		return;
@@ -256,7 +259,8 @@ export async function openFolder(path?: string) {
 export async function restartLsp(): Promise<void> {
 	await guarded(async () => {
 		await backend.lspRestart();
-		setState("info", await backend.info());
+		const next = await backend.info();
+		if (next) setState("info", next);
 	});
 }
 

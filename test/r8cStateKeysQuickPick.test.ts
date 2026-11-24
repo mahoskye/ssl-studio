@@ -606,8 +606,9 @@ describe("R8C P1 — workspace switch, cancel openFolder, watcher race, recentTa
 	afterAll(disconnectTestRpc);
 	beforeEach(resetAppState);
 
-	test("cancelling openFolder restores live LSP session for previous workspace", async () => {
+	test("cancelling openFolder restarts live LSP via backend.lspRestart() for previous workspace without double-initializing", async () => {
 		const started: string[] = [];
+		const restarted: string[] = [];
 		const origStart = session.start.bind(session);
 		const origReset = session.reset.bind(session);
 		(session as any).start = (root: string) => {
@@ -618,10 +619,20 @@ describe("R8C P1 — workspace switch, cancel openFolder, watcher race, recentTa
 		try {
 			setState("workspace", { root: "/ws-prev", name: "ws-prev" });
 			setState("lsp", reconcile({ state: "running" }));
-			rpcHandler = (method) => (method === "openFolder" ? null : null);
+			rpcHandler = (method) => {
+				if (method === "openFolder") return null;
+				if (method === "lspRestart") {
+					restarted.push("lspRestart");
+					return null;
+				}
+				return null;
+			};
 
 			await openFolder();
-			expect(started).toEqual(["/ws-prev"]);
+			await new Promise((r) => setTimeout(r, 15));
+			expect(restarted).toEqual(["lspRestart"]);
+			// Direct session.start() must NOT be sent to the already-initialized starlims-lsp process.
+			expect(started).toEqual([]);
 		} finally {
 			(session as any).start = origStart;
 			(session as any).reset = origReset;

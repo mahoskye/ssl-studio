@@ -36,7 +36,7 @@ export function parseOpencodeCommandEnv(raw: string | undefined): string[] | und
 			// Fall back to space-delimited parsing when not valid JSON.
 		}
 	}
-	return raw.split(" ");
+	return trimmed.split(/\s+/);
 }
 
 function pathTaken(p: string): boolean {
@@ -158,7 +158,7 @@ export function createBackend(host: Host, initial?: string) {
 		history = nextHistory;
 		lsp = null;
 		lspPath = "";
-		lspRestartSeq++;
+		const restartSeq = ++lspRestartSeq;
 		asked = null;
 		prevFiles?.close();
 		prevLsp?.stop();
@@ -181,22 +181,24 @@ export function createBackend(host: Host, initial?: string) {
 				nextFiles.close();
 				return { root: nextFiles.root, name: basename(nextFiles.root) };
 			}
-			if (status.ok && status.path) {
-				const nextLsp = new LspProcess(
-					status.path,
-					(m) => {
-						if (!isStale() && lsp === nextLsp) host.emit("lsp", m);
-					},
-					(s) => {
-						if (!isStale() && lsp === nextLsp) emitLspState(s);
-					},
-				);
-				startedLsp = nextLsp;
-				lsp = nextLsp;
-				lspPath = status.path;
-				nextLsp.start();
-			} else {
-				emitLspState({ state: "failed", message: status.message });
+			if (restartSeq === lspRestartSeq) {
+				if (status.ok && status.path) {
+					const nextLsp = new LspProcess(
+						status.path,
+						(m) => {
+							if (!isStale() && lsp === nextLsp) host.emit("lsp", m);
+						},
+						(s) => {
+							if (!isStale() && lsp === nextLsp) emitLspState(s);
+						},
+					);
+					startedLsp = nextLsp;
+					lsp = nextLsp;
+					lspPath = status.path;
+					nextLsp.start();
+				} else {
+					emitLspState({ state: "failed", message: status.message });
+				}
 			}
 			await agent.workspaceChanged();
 			if (isStale()) {
