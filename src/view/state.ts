@@ -1226,8 +1226,15 @@ export async function fileChangedOnDisk(changed: string) {
 }
 
 // The desktop window was asked to close with edits that are not on disk.
+let closePromptOpen = false;
 on("closeRequested", async () => {
-	if (await settleUnsaved("Closing the window would lose them.")) await backend.closeWindow();
+	if (closePromptOpen) return;
+	closePromptOpen = true;
+	try {
+		if (await settleUnsaved("Closing the window would lose them.")) await backend.closeWindow();
+	} finally {
+		closePromptOpen = false;
+	}
 });
 
 on("lspState", (lsp) => {

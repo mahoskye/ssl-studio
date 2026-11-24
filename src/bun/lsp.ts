@@ -23,13 +23,33 @@ export class LspProcess {
 		this.onState({ state: "starting" });
 		const proc = Bun.spawn([this.path, "--stdio"], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
 		this.proc = proc;
-		const read = createFrameReader(this.onMessage);
+		const read = createFrameReader((body) => {
+			try {
+				this.onMessage(body);
+			} catch (err: any) {
+				this.lastError = String(err?.message ?? err).slice(-500);
+			}
+		});
 		(async () => {
-			for await (const chunk of proc.stdout) read(chunk);
+			try {
+				for await (const chunk of proc.stdout) {
+					try {
+						read(chunk);
+					} catch (err: any) {
+						this.lastError = String(err?.message ?? err).slice(-500);
+					}
+				}
+			} catch {
+				// Stream closed on process exit/stop.
+			}
 		})();
 		(async () => {
-			// The server logs to stderr; keep the tail for crash messages.
-			for await (const chunk of proc.stderr) this.lastError = new TextDecoder().decode(chunk).slice(-500);
+			try {
+				// The server logs to stderr; keep the tail for crash messages.
+				for await (const chunk of proc.stderr) this.lastError = new TextDecoder().decode(chunk).slice(-500);
+			} catch {
+				// Stream closed on process exit/stop.
+			}
 		})();
 		proc.exited.then((code) => this.exited(proc, code));
 		this.onState({ state: "running" });

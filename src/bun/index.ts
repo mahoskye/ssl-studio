@@ -1,8 +1,8 @@
 // The desktop app: one Electrobun window, the backend over Electrobun's RPC.
 //
 //   hutch run start [folder]
-import { BrowserView, BrowserWindow, Screen, Utils } from "electrobun/main";
-import type { ElectrobunRPCSchema, RPCSchema } from "electrobun/main";
+import Electrobun, { BrowserView, BrowserWindow, Screen, Utils } from "electrobun/main";
+import type { ElectrobunEvent, ElectrobunRPCSchema, RPCSchema } from "electrobun/main";
 import type { BackendEvents } from "../shared/protocol";
 import { createBackend, dispatch } from "./backend";
 import { fitWindow } from "./window";
@@ -15,12 +15,21 @@ type Schema = {
 
 const folder = process.argv.slice(2).find((a) => !a.startsWith("-")) ?? process.env.SSL_STUDIO_FOLDER;
 
+let rpcReady = false;
+
 const backend = createBackend(
 	{
 		app: "0.1.0",
 		kind: "app",
 		quit: () => Utils.quit(),
-		emit: (event, payload) => rpc.send.event({ event, payload }),
+		emit: (event, payload) => {
+			if (!rpcReady) return;
+			try {
+				rpc.send.event({ event, payload });
+			} catch {
+				// Transport not ready or already torn down.
+			}
+		},
 		pick: async (kind, types) => {
 			const paths = await Utils.openFileDialog({
 				startingFolder: homedir(),
@@ -32,7 +41,7 @@ const backend = createBackend(
 			return paths.find((p) => p) ?? null;
 		},
 		trash: async (path) => {
-			Utils.moveToTrash(path);
+			if (!Utils.moveToTrash(path)) throw new Error(`Could not move ${path} to Trash.`);
 		},
 		clipboard: (text) => Utils.clipboardWriteText(text),
 	},
@@ -58,6 +67,15 @@ const window = new BrowserWindow({
 	rpc,
 	frame: fitWindow(Screen.getPrimaryDisplay().workArea),
 });
+rpcReady = true;
+
+let disposed = false;
+const disposeOnce = () => {
+	if (disposed) return;
+	disposed = true;
+	rpcReady = false;
+	backend.dispose();
+};
 
 // Electrobun asks before a window closes, and takes no for an answer: with
 // unsaved edits the window stays, and the view asks the user (ADR 0009).
@@ -65,4 +83,17 @@ window.on("will-close", (event: unknown) => {
 	if (!backend.mayClose()) (event as { response?: { allow: boolean } }).response = { allow: false };
 });
 
-process.on("exit", () => backend.dispose());
+window.on("close", () => {
+	disposeOnce();
+});
+
+// Cmd+Q / Dock Quit / Utils.quit() also check for unsaved work and clean up synchronously when allowed.
+Electrobun.events.on("before-quit", (event: ElectrobunEvent<{}, { allow: boolean }>) => {
+	if (!backend.mayClose()) {
+		event.response = { allow: false };
+		return;
+	}
+	disposeOnce();
+});
+
+process.on("exit", disposeOnce);

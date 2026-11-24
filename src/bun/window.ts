@@ -6,8 +6,10 @@ export type Rect = { x: number; y: number; width: number; height: number };
 const WANTED = { width: 1400, height: 900, x: 80, y: 60 };
 
 export function fitWindow(workArea: Rect): Rect {
-	// An unknown screen reports an empty work area: keep the wanted frame.
-	if (workArea.width <= 0 || workArea.height <= 0) return { ...WANTED };
+	// An unknown screen reports an empty or non-finite work area: keep the wanted frame.
+	if (!workArea || ![workArea.x, workArea.y, workArea.width, workArea.height].every(Number.isFinite) || workArea.width <= 0 || workArea.height <= 0) {
+		return { ...WANTED };
+	}
 	const width = Math.min(WANTED.width, workArea.width);
 	const height = Math.min(WANTED.height, workArea.height);
 	return {

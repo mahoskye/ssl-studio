@@ -4,7 +4,33 @@
 // as what it is and written back as what it was, so that an edit changes the
 // characters edited and nothing else.
 
+import { looksBinary as sharedLooksBinary, SNIFF_BYTES } from "../shared/fileKind";
+
 export type Encoding = "utf-8" | "utf-8-bom" | "utf-16le" | "utf-16be" | "windows-1252";
+
+const isUtf32Bom = (bytes: Uint8Array) =>
+	bytes.length >= 4 &&
+	((bytes[0] === 0xff && bytes[1] === 0xfe && bytes[2] === 0x00 && bytes[3] === 0x00) ||
+		(bytes[0] === 0x00 && bytes[1] === 0x00 && bytes[2] === 0xfe && bytes[3] === 0xff));
+
+/**
+ * Whether bytes are not text. Extends the shared check to treat UTF-32 BOMs as binary,
+ * reject UTF-16 BOM buffers that contain NUL code units (00 00), and reject odd-length
+ * complete UTF-16 BOM buffers (`partial = false`).
+ */
+export function looksBinary(bytes: Uint8Array, partial = false): boolean {
+	if (isUtf32Bom(bytes)) return true;
+	const utf16 = bytes.length >= 2 && ((bytes[0] === 0xff && bytes[1] === 0xfe) || (bytes[0] === 0xfe && bytes[1] === 0xff));
+	if (utf16) {
+		if (!partial && bytes.length % 2 === 1) return true;
+		const end = Math.min(bytes.length, SNIFF_BYTES);
+		for (let at = 2; at + 1 < end; at += 2) {
+			if (bytes[at] === 0 && bytes[at + 1] === 0) return true;
+		}
+		return false;
+	}
+	return sharedLooksBinary(bytes);
+}
 
 /** What the bytes are written in: by the mark they open with; failing a mark, UTF-8 where they read as it, else Windows-1252. */
 export function encodingOf(bytes: Uint8Array, part = false): Encoding {
@@ -32,15 +58,21 @@ export function encodingOf(bytes: Uint8Array, part = false): Encoding {
  * cannot be read is nothing.
  */
 export function decodePart(bytes: Uint8Array, cut = true): string {
+	if (isUtf32Bom(bytes)) return "";
 	// Only a start that was cut may end in the middle of a character: a whole file that ends on such a byte is in
 	// a one-byte encoding, and that byte is its last letter.
 	const encoding = encodingOf(bytes, cut);
 	try {
-		if (encoding === "utf-8") return new TextDecoder("utf-8").decode(bytes, { stream: cut });
-		if (encoding === "utf-8-bom") return new TextDecoder("utf-8").decode(bytes.subarray(3), { stream: cut });
+		if (encoding === "utf-8") return new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes, { stream: cut });
+		if (encoding === "utf-8-bom") return new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes.subarray(3), { stream: cut });
 		if (encoding === "windows-1252") return new TextDecoder("windows-1252").decode(bytes);
 		const even = bytes.subarray(2, bytes.length - ((bytes.length - 2) % 2));
-		return (encoding === "utf-16be" ? Buffer.from(even).swap16() : Buffer.from(even)).toString("utf16le");
+		let text = (encoding === "utf-16be" ? Buffer.from(even).swap16() : Buffer.from(even)).toString("utf16le");
+		if (cut && text.length > 0) {
+			const last = text.charCodeAt(text.length - 1);
+			if (last >= 0xd800 && last <= 0xdbff) text = text.slice(0, -1);
+		}
+		return text;
 	} catch {
 		return "";
 	}
@@ -49,7 +81,9 @@ export function decodePart(bytes: Uint8Array, cut = true): string {
 /** A whole file as text for a listing or a search: read as what it is written in; "" when it cannot be read. */
 export async function textOf(path: string): Promise<string> {
 	try {
-		return decode(new Uint8Array(await Bun.file(path).arrayBuffer())).text;
+		const bytes = new Uint8Array(await Bun.file(path).arrayBuffer());
+		if (looksBinary(bytes)) return "";
+		return decode(bytes).text;
 	} catch {
 		return "";
 	}

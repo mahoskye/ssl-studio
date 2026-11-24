@@ -10,20 +10,64 @@ export const OPENCODE_RANGE = { min: "2.2.5", below: "2.4.0" };
 
 async function run(cmd: string[]): Promise<string | null> {
 	try {
-		const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe" });
-		const timer = setTimeout(() => proc.kill(), 5000);
-		const out = await new Response(proc.stdout).text();
-		clearTimeout(timer);
-		return (await proc.exited) === 0 ? out : null;
+		const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "ignore" });
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		let killTimer: ReturnType<typeof setTimeout> | undefined;
+		void proc.exited.finally(() => {
+			if (killTimer !== undefined) clearTimeout(killTimer);
+		});
+		const timeout = new Promise<null>((resolve) => {
+			timer = setTimeout(() => {
+				try {
+					proc.kill();
+				} catch {
+					// Already exited.
+				}
+				killTimer = setTimeout(() => {
+					try {
+						proc.kill("SIGKILL");
+					} catch {
+						// Already exited.
+					}
+				}, 250);
+				killTimer.unref?.();
+				resolve(null);
+			}, 5000);
+		});
+		const stdout = new Response(proc.stdout).text().catch(() => "");
+		try {
+			return await Promise.race([
+				Promise.all([stdout, proc.exited]).then(([out, code]) => (code === 0 ? out : null)),
+				timeout,
+			]);
+		} finally {
+			if (timer !== undefined) clearTimeout(timer);
+		}
 	} catch {
 		return null;
 	}
 }
 
+function parseVersion(value: string): number[] | null {
+	const trimmed = value.trim();
+	if (!trimmed) return null;
+	const parts = trimmed.split(".");
+	if (parts.some((p) => !/^\d+$/.test(p))) return null;
+	const nums = parts.map(Number);
+	if (nums.some((n) => !Number.isSafeInteger(n))) return null;
+	return nums;
+}
+
 export function compareVersions(a: string, b: string): number {
-	const pa = a.split(".").map(Number);
-	const pb = b.split(".").map(Number);
-	for (let i = 0; i < 3; i++) if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) - (pb[i] ?? 0);
+	const pa = parseVersion(a);
+	const pb = parseVersion(b);
+	if (!pa || !pb) return Number.NaN;
+	const len = Math.max(3, pa.length, pb.length);
+	for (let i = 0; i < len; i++) {
+		const da = pa[i] ?? 0;
+		const db = pb[i] ?? 0;
+		if (da !== db) return da - db;
+	}
 	return 0;
 }
 

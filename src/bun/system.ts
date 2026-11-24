@@ -2,6 +2,48 @@
 // always know. On Linux a GTK web view takes its light or dark from GTK's own
 // settings, which a desktop may leave alone while it tells every other
 // program, through the settings portal, that it prefers dark.
+import { dirname } from "node:path";
+import { pathToFileURL } from "node:url";
+
+async function run(cmd: string[], timeoutMs: number): Promise<string | null> {
+	try {
+		const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "ignore" });
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		let killTimer: ReturnType<typeof setTimeout> | undefined;
+		void proc.exited.finally(() => {
+			if (killTimer !== undefined) clearTimeout(killTimer);
+		});
+		const timeout = new Promise<null>((resolve) => {
+			timer = setTimeout(() => {
+				try {
+					proc.kill();
+				} catch {
+					// Already exited.
+				}
+				killTimer = setTimeout(() => {
+					try {
+						proc.kill("SIGKILL");
+					} catch {
+						// Already exited.
+					}
+				}, 250);
+				killTimer.unref?.();
+				resolve(null);
+			}, timeoutMs);
+		});
+		const stdout = new Response(proc.stdout).text().catch(() => "");
+		try {
+			return await Promise.race([
+				Promise.all([stdout, proc.exited]).then(([out, code]) => (code === 0 ? out : null)),
+				timeout,
+			]);
+		} finally {
+			if (timer !== undefined) clearTimeout(timer);
+		}
+	} catch {
+		return null;
+	}
+}
 
 /**
  * Whether the system prefers a dark appearance: true or false when it says,
@@ -10,18 +52,11 @@
  */
 export async function systemPrefersDark(): Promise<boolean | undefined> {
 	if (process.platform !== "linux") return undefined;
-	try {
-		const proc = Bun.spawn(
-			["gdbus", "call", "--session", "--dest", "org.freedesktop.portal.Desktop", "--object-path", "/org/freedesktop/portal/desktop", "--method", "org.freedesktop.portal.Settings.Read", "org.freedesktop.appearance", "color-scheme"],
-			{ stdout: "pipe", stderr: "ignore" },
-		);
-		const timer = setTimeout(() => proc.kill(), 1500);
-		const out = await new Response(proc.stdout).text();
-		clearTimeout(timer);
-		return (await proc.exited) === 0 ? portalScheme(out) : undefined;
-	} catch {
-		return undefined;
-	}
+	const out = await run(
+		["gdbus", "call", "--session", "--dest", "org.freedesktop.portal.Desktop", "--object-path", "/org/freedesktop/portal/desktop", "--method", "org.freedesktop.portal.Settings.Read", "org.freedesktop.appearance", "color-scheme"],
+		1500,
+	);
+	return out === null ? undefined : portalScheme(out);
 }
 
 /** The portal's answer read: 1 is "prefer dark", 2 is "prefer light", 0 is no preference. */
@@ -30,17 +65,21 @@ export function portalScheme(answer: string): boolean | undefined {
 	return value === "1" ? true : value === "2" ? false : undefined;
 }
 
-import { dirname } from "node:path";
+/** Builds the OS command to open a file in its default application without invoking a shell. */
+export function openFileCommand(platform: NodeJS.Platform, filePath: string): string[] {
+	if (platform === "darwin") return ["open", filePath];
+	if (platform === "win32") return ["rundll32.exe", "url.dll,FileProtocolHandler", filePath];
+	return ["xdg-open", filePath];
+}
+
+/** Encodes a local path as a file:// URI safe inside a single-quoted GVariant array literal. */
+export function fileUriForDbus(filePath: string): string {
+	return pathToFileURL(filePath).href.replace(/'/g, "%27");
+}
 
 /** Opens a workspace-validated file path in the OS default application without shell interpolation. */
 export async function openInSystemApp(filePath: string): Promise<void> {
-	const cmd =
-		process.platform === "darwin"
-			? ["open", filePath]
-			: process.platform === "win32"
-				? ["cmd", "/c", "start", "", filePath]
-				: ["xdg-open", filePath];
-	const proc = Bun.spawn(cmd, { stdout: "ignore", stderr: "ignore" });
+	const proc = Bun.spawn(openFileCommand(process.platform, filePath), { stdout: "ignore", stderr: "ignore" });
 	proc.unref();
 }
 
@@ -58,7 +97,7 @@ export async function revealPathInFileManager(filePath: string): Promise<void> {
 	}
 	// Linux: try freedesktop FileManager1 ShowItems first, fall back to opening the parent folder.
 	try {
-		const fileUri = `file://${encodeURI(filePath)}`;
+		const fileUri = fileUriForDbus(filePath);
 		const dbus = Bun.spawn(
 			[
 				"gdbus",
@@ -70,13 +109,42 @@ export async function revealPathInFileManager(filePath: string): Promise<void> {
 				"/org/freedesktop/FileManager1",
 				"--method",
 				"org.freedesktop.FileManager1.ShowItems",
-				`['${fileUri.replace(/'/g, "%27")}']`,
+				`['${fileUri}']`,
 				"",
 			],
 			{ stdout: "ignore", stderr: "ignore" },
 		);
-		const code = await Promise.race([dbus.exited, new Promise<number>((r) => setTimeout(() => (dbus.kill(), r(1)), 1200))]);
-		if (code === 0) return;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		let killTimer: ReturnType<typeof setTimeout> | undefined;
+		void dbus.exited.finally(() => {
+			if (killTimer !== undefined) clearTimeout(killTimer);
+		});
+		try {
+			const code = await Promise.race([
+				dbus.exited,
+				new Promise<number>((resolve) => {
+					timer = setTimeout(() => {
+						try {
+							dbus.kill();
+						} catch {
+							// Already exited.
+						}
+						killTimer = setTimeout(() => {
+							try {
+								dbus.kill("SIGKILL");
+							} catch {
+								// Already exited.
+							}
+						}, 250);
+						killTimer.unref?.();
+						resolve(1);
+					}, 1200);
+				}),
+			]);
+			if (code === 0) return;
+		} finally {
+			if (timer !== undefined) clearTimeout(timer);
+		}
 	} catch {
 		// Fallback below.
 	}

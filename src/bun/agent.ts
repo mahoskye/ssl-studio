@@ -155,7 +155,7 @@ export class Agent {
 			}
 			const info = await this.api("GET", "/api/info");
 			const version: string = info?.data?.version ?? info?.version;
-			if (!version || compareVersions(version, OPENCODE_RANGE.min) < 0 || compareVersions(version, OPENCODE_RANGE.below) >= 0)
+			if (!version || !(compareVersions(version, OPENCODE_RANGE.min) >= 0) || !(compareVersions(version, OPENCODE_RANGE.below) < 0))
 				throw new Error(`opencode ${version ?? "(unknown version)"} is outside the supported range ${OPENCODE_RANGE.min} to below ${OPENCODE_RANGE.below}.`);
 			this.subscribe();
 			this.setStatus({ state: "ready", version });
@@ -183,7 +183,29 @@ export class Agent {
 	}
 
 	dispose() {
+		const proc = this.proc;
+		this.proc = undefined;
 		this.stop();
+		if (!proc) return;
+		try {
+			proc.stdin.end();
+		} catch {
+			// Already closed.
+		}
+		if (proc.exitCode !== null) return;
+		if (process.platform === "win32" && this.command[0]?.toLowerCase() === "cmd.exe" && proc.pid) {
+			try {
+				Bun.spawnSync(["taskkill", "/T", "/F", "/PID", String(proc.pid)], { stdout: "ignore", stderr: "ignore" });
+				return;
+			} catch {
+				// Fall through to direct kill.
+			}
+		}
+		try {
+			proc.kill();
+		} catch {
+			// Already exited.
+		}
 	}
 
 	private async api(method: string, path: string, body?: unknown): Promise<any> {

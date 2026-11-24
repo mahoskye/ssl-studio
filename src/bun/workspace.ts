@@ -1,17 +1,41 @@
 // Files inside one workspace folder. Every path the UI sends is absolute
 // and must stay inside the root.
-import { chmodSync, mkdirSync, readdirSync, realpathSync, renameSync, statSync, watch, existsSync, type FSWatcher } from "node:fs";
-import { cp, rm } from "node:fs/promises";
+import {
+	chmodSync,
+	constants,
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	readdirSync,
+	readlinkSync,
+	realpathSync,
+	renameSync,
+	rmSync,
+	statSync,
+	watch,
+	type FSWatcher,
+} from "node:fs";
+import { cp, open, rm, writeFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type { Entry, FileText, SearchHit } from "../shared/protocol";
 import { matchesOn, replaceIn, SEARCH_LIMIT, searchPattern, type SearchOptions } from "../shared/searchPattern";
 import { fileChosen } from "../shared/fileGlob";
-import { decode, encode, encodingOf, textOf, type Encoding } from "./encoding";
-import { imageType, looksBinary, sizeText } from "../shared/fileKind";
+import { decode, encode, encodingOf, looksBinary, textOf, type Encoding } from "./encoding";
+import { imageType, sizeText, SNIFF_BYTES } from "../shared/fileKind";
 import { UNLISTED } from "../shared/paths";
 import { Serial } from "./serial";
 
 const SKIP = new Set<string>(UNLISTED);
+const TMP_SUFFIX = ".ssl-studio-tmp";
+const OWN_WRITE_TTL_MS = 5000;
+const MAX_SYMLINK_DEPTH = 40;
+
+/** Ensures a trailing path separator without doubling root paths like `/` or `C:\`. */
+export function withSep(p: string): string {
+	return p.endsWith(sep) ? p : p + sep;
+}
+
 /**
  * The work on each file, one after another. One for the whole process, not for each open folder: a folder opened
  * again is the same files.
@@ -55,34 +79,84 @@ const IMAGE_MAX_BYTES = 20 * 1024 * 1024;
 
 export class WorkspaceFiles {
 	readonly root: string;
+	private readonly realRoot: string;
 	private watcher?: FSWatcher;
 	/** How long work on a folder waits for the saves inside it to stop coming, in milliseconds. */
 	static quietMs = 10_000;
-	/** Paths this process wrote recently; their watch events are not external changes. */
+	/** Paths (normalized via fileKey) this process wrote recently; their watch events are not external changes. */
 	private ownWrites = new Map<string, number>();
 
 	constructor(root: string) {
 		this.root = resolve(root);
 		if (!statSync(this.root).isDirectory()) throw new Error(`not a folder: ${root}`);
+		this.realRoot = realpathSync.native(this.root);
+	}
+
+	private resolveReal(target: string, origPath: string, depth = 0): string {
+		if (depth > MAX_SYMLINK_DEPTH) throw new Error(`outside the workspace: ${origPath}`);
+		let realErr: any = null;
+		try {
+			return realpathSync.native(target);
+		} catch (e: any) {
+			realErr = e;
+			if (e?.code !== "ENOENT" && e?.code !== "ENOTDIR" && e?.code !== "ELOOP" && e?.code !== "EACCES") throw e;
+		}
+		// Check whether `target` itself is a dangling/unreadable symlink (or symlink loop) before walking to its parent.
+		try {
+			const lst = lstatSync(target);
+			if (lst.isSymbolicLink()) {
+				const linkTarget = readlinkSync(target);
+				const parentReal = this.resolveReal(dirname(target), origPath, depth + 1);
+				return this.resolveReal(resolve(parentReal, linkTarget), origPath, depth + 1);
+			}
+		} catch (e: any) {
+			if (e?.code !== "ENOENT" && e?.code !== "ENOTDIR") throw e;
+		}
+		if (realErr?.code === "EACCES") throw realErr;
+		const parent = dirname(target);
+		if (parent === target) return target;
+		const parentReal = this.resolveReal(parent, origPath, depth + 1);
+		return resolve(parentReal, basename(target));
 	}
 
 	inside(path: string): string {
 		const full = resolve(path);
 		// Windows paths compare without case (drive letters come both ways).
 		const fold = (p: string) => (process.platform === "win32" ? p.toLowerCase() : p);
-		if (fold(full) !== fold(this.root) && !fold(full).startsWith(fold(this.root) + sep)) throw new Error(`outside the workspace: ${path}`);
+		const fullF = fold(full);
+		const rootF = fold(this.root);
+		if (fullF !== rootF && !fullF.startsWith(withSep(rootF))) {
+			throw new Error(`outside the workspace: ${path}`);
+		}
+		// Resolve real path through symlinks (including dangling symlinks and non-existent descendants).
+		const resolvedReal = this.resolveReal(full, path);
+		const cmp = (p: string) => (process.platform === "win32" || process.platform === "darwin" ? p.toLowerCase() : p);
+		const realF = cmp(resolvedReal);
+		const realRootF = cmp(this.realRoot);
+		if (realF !== realRootF && !realF.startsWith(withSep(realRootF))) {
+			throw new Error(`outside the workspace: ${path}`);
+		}
 		return full;
 	}
 
 	list(dir: string): Entry[] {
 		const full = this.inside(dir);
-		return readdirSync(full, { withFileTypes: true })
-			.filter((d) => !SKIP.has(d.name) && (d.isDirectory() || d.isFile()))
-			.map((d) => {
-				const path = join(full, d.name);
-				return { name: d.name, path, kind: d.isDirectory() ? "dir" : "file", size: d.isFile() ? statSync(path).size : 0 } as Entry;
-			})
-			.sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name, undefined, { sensitivity: "base" }) : a.kind === "dir" ? -1 : 1));
+		const out: Entry[] = [];
+		for (const d of readdirSync(full, { withFileTypes: true })) {
+			if (SKIP.has(d.name) || d.name.endsWith(TMP_SUFFIX)) continue;
+			if (!d.isDirectory() && !d.isFile()) continue;
+			const path = join(full, d.name);
+			if (d.isDirectory()) {
+				out.push({ name: d.name, path, kind: "dir", size: 0 });
+			} else {
+				try {
+					out.push({ name: d.name, path, kind: "file", size: statSync(path).size });
+				} catch {
+					// File vanished between readdir and stat.
+				}
+			}
+		}
+		return out.sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name, undefined, { sensitivity: "base" }) : a.kind === "dir" ? -1 : 1));
 	}
 
 	/**
@@ -92,10 +166,19 @@ export class WorkspaceFiles {
 	async read(path: string): Promise<FileText> {
 		const full = this.inside(path);
 		try {
-			const bytes = new Uint8Array(await Bun.file(full).arrayBuffer());
-			const mtime = statSync(full).mtimeMs;
+			const st = statSync(full);
+			if (!st.isFile()) {
+				const err = new Error(`${relative(this.root, full)} is not a file`) as NodeJS.ErrnoException;
+				if (st.isDirectory()) err.code = "EISDIR";
+				throw err;
+			}
+			const mtime = st.mtimeMs;
 			const image = imageType(full);
-			if (image || looksBinary(bytes)) return { path: full, text: "", mtime, binary: { size: bytes.length, ...(image ? { image } : {}) } };
+			if (image) return { path: full, text: "", mtime, binary: { size: st.size, image } };
+			const file = Bun.file(full);
+			const sniff = new Uint8Array(await file.slice(0, SNIFF_BYTES).arrayBuffer());
+			if (looksBinary(sniff, true)) return { path: full, text: "", mtime, binary: { size: st.size } };
+			const bytes = st.size <= SNIFF_BYTES && sniff.length === st.size ? sniff : new Uint8Array(await file.arrayBuffer());
 			const { text, encoding } = decode(bytes);
 			return { path: full, text, mtime, encoding };
 		} catch (e: any) {
@@ -113,6 +196,18 @@ export class WorkspaceFiles {
 	async write(path: string, text: string, asText = false) {
 		const full = this.inside(path);
 		return writes.run(fileKey(full), () => this.writeNow(full, text, asText));
+	}
+
+	/**
+	 * Atomic serialized binary write inside the workspace (used for `.docx` exports and extracted images).
+	 */
+	async writeBytes(path: string, bytes: Uint8Array): Promise<{ path: string; size: number; mtime: number }> {
+		const full = this.inside(path);
+		return writes.run(fileKey(full), async () => {
+			this.inside(full);
+			await this.atomicWriteFile(full, bytes);
+			return { path: full, size: bytes.byteLength, mtime: statSync(full).mtimeMs };
+		});
 	}
 
 	/**
@@ -160,7 +255,7 @@ export class WorkspaceFiles {
 	 * this (two folders moved into each other at once), is said to be busy, and the work is not done.
 	 */
 	private async quiet<T>(folders: string[], own: string[], work: () => Promise<T> | T): Promise<T> {
-		const inside = folders.map((folder) => fileKey(folder) + sep);
+		const inside = folders.map((folder) => withSep(fileKey(folder)));
 		const until = Date.now() + WorkspaceFiles.quietMs;
 		for (;;) {
 			const pending = writes.pending((other) => !own.includes(other) && inside.some((folder) => other.startsWith(folder)));
@@ -175,20 +270,89 @@ export class WorkspaceFiles {
 		}
 	}
 
-	private async writeNow(full: string, text: string, asText: boolean) {
+	private markOwnWrite(full: string) {
+		const now = Date.now();
+		for (const [k, ts] of this.ownWrites) {
+			if (now - ts > OWN_WRITE_TTL_MS) this.ownWrites.delete(k);
+		}
+		this.ownWrites.set(fileKey(full), now);
+	}
+
+	private async atomicWriteFile(full: string, bytes: Uint8Array, mode?: number) {
+		this.inside(full);
 		mkdirSync(dirname(full), { recursive: true });
-		const temp = join(dirname(full), `.${basename(full)}.ssl-studio-tmp`);
+		const temp = join(dirname(full), `.${basename(full)}.${process.pid}.${randomBytes(6).toString("hex")}${TMP_SUFFIX}`);
+		const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
+		let created = false;
+		try {
+			const fh = await open(temp, flags, 0o666);
+			created = true;
+			try {
+				await fh.writeFile(bytes);
+			} finally {
+				await fh.close();
+			}
+			if (mode !== undefined) {
+				try {
+					chmodSync(temp, mode);
+				} catch {
+					// A system that keeps no such thing has nothing to carry over.
+				}
+			}
+			this.markOwnWrite(full);
+			renameSync(temp, full);
+			created = false;
+			this.markOwnWrite(full);
+		} catch (e) {
+			if (created) {
+				try {
+					rmSync(temp, { force: true });
+				} catch {
+					// Best-effort cleanup of temp file.
+				}
+			}
+			throw e;
+		}
+	}
+
+	private async writeNow(full: string, text: string, asText: boolean) {
+		// Re-check containment inside the serialized lock (blocks symlinks pointing outside root).
+		this.inside(full);
+		// A picture by its name is never text, even if the file does not exist yet.
+		if (imageType(full)) throw new Error(`${relative(this.root, full)} is not text: it is not written over from here.`);
+
 		let encoding: Encoding = "utf-8";
 		let bytesNow: Uint8Array | null = null;
+		let prevMode: number | undefined;
 		try {
-			if (existsSync(full)) bytesNow = new Uint8Array(await Bun.file(full).arrayBuffer());
-		} catch {
-			// A file that cannot be read now is written as a new one would be.
+			const st = lstatSync(full);
+			if (st.isDirectory()) {
+				const err = new Error(`EISDIR: illegal operation on a directory, open '${full}'`) as NodeJS.ErrnoException;
+				err.code = "EISDIR";
+				throw err;
+			}
+			if (st.isSymbolicLink()) {
+				const targetStat = statSync(full);
+				if (targetStat.isDirectory()) {
+					const err = new Error(`EISDIR: illegal operation on a directory, open '${full}'`) as NodeJS.ErrnoException;
+					err.code = "EISDIR";
+					throw err;
+				}
+				prevMode = targetStat.mode;
+			} else {
+				prevMode = st.mode;
+			}
+			bytesNow = new Uint8Array(await Bun.file(full).arrayBuffer());
+		} catch (e: any) {
+			if (e?.code !== "ENOENT") throw e;
+			// ENOENT: new file, write as UTF-8.
 		}
 		// What is read as bytes has no text here, and text written over it would be the end of it.
-		// A picture by its name is never text. Other bytes are let be, unless what is written is known to be the
-		// file's own text (a zero byte typed into it, and saved, makes it look like bytes from then on).
-		if (bytesNow && (imageType(full) || (looksBinary(bytesNow) && !asText))) throw new Error(`${relative(this.root, full)} is not text: it is not written over from here.`);
+		// Other bytes are let be, unless what is written is known to be the file's own text
+		// (a zero byte typed into it, and saved, makes it look like bytes from then on).
+		if (bytesNow && looksBinary(bytesNow) && !asText) {
+			throw new Error(`${relative(this.root, full)} is not text: it is not written over from here.`);
+		}
 		if (bytesNow) encoding = encodingOf(bytesNow);
 		let bytes: Uint8Array;
 		try {
@@ -196,28 +360,40 @@ export class WorkspaceFiles {
 		} catch (e: any) {
 			throw new Error(`${relative(this.root, full)}: ${e?.message ?? e}`);
 		}
-		this.ownWrites.set(full, Date.now());
-		await Bun.write(temp, bytes);
-		// The file that takes its place has what the file had: who may read it, and whether it may be run.
-		if (bytesNow) {
-			try {
-				chmodSync(temp, statSync(full).mode);
-			} catch {
-				// A system that keeps no such thing has nothing to carry over.
-			}
-		}
-		renameSync(temp, full);
+		await this.atomicWriteFile(full, bytes, prevMode);
 		return { mtime: statSync(full).mtimeMs };
 	}
 
 	async create(path: string, kind: "file" | "dir") {
 		const full = this.inside(path);
-		if (existsSync(full)) throw new Error(`already exists: ${relative(this.root, full)}`);
-		if (kind === "dir") mkdirSync(full, { recursive: true });
-		else {
-			mkdirSync(dirname(full), { recursive: true });
-			await Bun.write(full, "");
-		}
+		await writes.run(fileKey(full), async () => {
+			this.inside(full);
+			let exists = false;
+			try {
+				lstatSync(full);
+				exists = true;
+			} catch (e: any) {
+				if (e?.code !== "ENOENT") throw e;
+			}
+			if (exists) throw new Error(`already exists: ${relative(this.root, full)}`);
+			if (kind === "dir") {
+				mkdirSync(dirname(full), { recursive: true });
+				try {
+					mkdirSync(full);
+				} catch (e: any) {
+					if (e?.code === "EEXIST") throw new Error(`already exists: ${relative(this.root, full)}`);
+					throw e;
+				}
+			} else {
+				mkdirSync(dirname(full), { recursive: true });
+				try {
+					await writeFile(full, "", { flag: "wx" });
+				} catch (e: any) {
+					if (e?.code === "EEXIST") throw new Error(`already exists: ${relative(this.root, full)}`);
+					throw e;
+				}
+			}
+		});
 	}
 
 	/**
@@ -228,8 +404,29 @@ export class WorkspaceFiles {
 	async rename(from: string, to: string) {
 		const source = this.inside(from);
 		const target = this.inside(to);
+		const rootKey = fileKey(this.root);
+		const srcKey = fileKey(source);
+		const dstKey = fileKey(target);
+		if (srcKey === rootKey || dstKey === rootKey) {
+			throw new Error("cannot rename the workspace root");
+		}
+		if (dstKey.startsWith(withSep(srcKey))) {
+			throw new Error(`${relative(this.root, source)} cannot be moved into itself`);
+		}
 		await this.held([source, target], () => {
-			if (existsSync(target)) throw new Error(`already exists: ${relative(this.root, target)}`);
+			this.inside(source);
+			this.inside(target);
+			const caseOnly = srcKey === dstKey && source !== target;
+			if (!caseOnly) {
+				let targetExists = false;
+				try {
+					lstatSync(target);
+					targetExists = true;
+				} catch (e: any) {
+					if (e?.code !== "ENOENT") throw e;
+				}
+				if (targetExists) throw new Error(`already exists: ${relative(this.root, target)}`);
+			}
 			// A name with a folder in it moves the file there, and the folder is made if it is not there yet.
 			mkdirSync(dirname(target), { recursive: true });
 			renameSync(source, target);
@@ -241,8 +438,9 @@ export class WorkspaceFiles {
 		const full = this.inside(path);
 		const type = imageType(full);
 		if (!type) throw new Error(`${relative(this.root, full)} is not a picture this can show.`);
-		const size = statSync(full).size;
-		if (size > IMAGE_MAX_BYTES) throw new Error(`${relative(this.root, full)} is ${sizeText(size)}: too large to show here (the most is ${sizeText(IMAGE_MAX_BYTES)}).`);
+		const st = statSync(full);
+		if (!st.isFile()) throw new Error(`${relative(this.root, full)} is not a file.`);
+		if (st.size > IMAGE_MAX_BYTES) throw new Error(`${relative(this.root, full)} is ${sizeText(st.size)}: too large to show here (the most is ${sizeText(IMAGE_MAX_BYTES)}).`);
 		return { type, base64: Buffer.from(await Bun.file(full).arrayBuffer()).toString("base64") };
 	}
 
@@ -250,14 +448,21 @@ export class WorkspaceFiles {
 	async writeImage(path: string, base64: string) {
 		const full = this.inside(path);
 		if (!imageType(full)) throw new Error(`${relative(this.root, full)} is not a supported image format.`);
-		const bytes = Buffer.from(base64, "base64");
+		const maxB64 = Math.ceil((IMAGE_MAX_BYTES * 4) / 3) + 4;
+		if (base64.length > maxB64 * 2) {
+			throw new Error(`${relative(this.root, full)} is too large to save (the most is ${sizeText(IMAGE_MAX_BYTES)}).`);
+		}
+		const compact = /\s/.test(base64) ? base64.replace(/\s+/g, "") : base64;
+		const pad = compact.endsWith("==") ? 2 : compact.endsWith("=") ? 1 : 0;
+		const estimated = Math.floor((compact.length * 3) / 4) - pad;
+		if (estimated > IMAGE_MAX_BYTES) {
+			throw new Error(`${relative(this.root, full)} is ${sizeText(estimated)}: too large to save (the most is ${sizeText(IMAGE_MAX_BYTES)}).`);
+		}
+		const bytes = Buffer.from(compact, "base64");
 		if (bytes.length > IMAGE_MAX_BYTES) throw new Error(`${relative(this.root, full)} is ${sizeText(bytes.length)}: too large to save (the most is ${sizeText(IMAGE_MAX_BYTES)}).`);
 		return writes.run(fileKey(full), async () => {
-			mkdirSync(dirname(full), { recursive: true });
-			const temp = join(dirname(full), `.${basename(full)}.ssl-studio-tmp`);
-			this.ownWrites.set(full, Date.now());
-			await Bun.write(temp, bytes);
-			renameSync(temp, full);
+			this.inside(full);
+			await this.atomicWriteFile(full, bytes);
 			return { path: full, size: bytes.length };
 		});
 	}
@@ -269,18 +474,37 @@ export class WorkspaceFiles {
 	async copy(from: string, to: string) {
 		const source = this.inside(from);
 		const target = this.inside(to);
+		const srcKey = fileKey(source);
+		const dstKey = fileKey(target);
 		// A folder copied into itself would be copied into its own copy, without end.
-		if (target === source || target.startsWith(source + sep)) throw new Error(`${relative(this.root, source)} cannot be copied into itself`);
+		if (dstKey === srcKey || dstKey.startsWith(withSep(srcKey))) {
+			throw new Error(`${relative(this.root, source)} cannot be copied into itself`);
+		}
 		// After a save of the file that is under way, so that the copy is of what was saved; and with the name the
 		// copy is to take held too, so that whether it is taken is asked when the copy is made, and what is taken
 		// away when a copy fails is only ever what the copy itself put there.
 		await this.held([source, target], async () => {
-			if (existsSync(target)) throw new Error(`already exists: ${relative(this.root, target)}`);
+			this.inside(source);
+			this.inside(target);
+			let targetExists = false;
+			try {
+				lstatSync(target);
+				targetExists = true;
+			} catch (e: any) {
+				if (e?.code !== "ENOENT") throw e;
+			}
+			if (targetExists) throw new Error(`already exists: ${relative(this.root, target)}`);
 			mkdirSync(dirname(target), { recursive: true });
 			try {
 				await cp(source, target, { recursive: true, errorOnExist: true, force: false });
-			} catch (e) {
-				await rm(target, { recursive: true, force: true });
+			} catch (e: any) {
+				if (e?.code !== "EEXIST" && e?.code !== "ERR_FS_CP_EEXIST") {
+					try {
+						await rm(target, { recursive: true, force: true });
+					} catch {
+						// Ignore cleanup errors.
+					}
+				}
 				throw e;
 			}
 		});
@@ -294,7 +518,7 @@ export class WorkspaceFiles {
 			return;
 		}
 		for (const d of entries) {
-			if (SKIP.has(d.name)) continue;
+			if (SKIP.has(d.name) || d.name.endsWith(TMP_SUFFIX)) continue;
 			const path = join(dir, d.name);
 			if (d.isDirectory()) yield* this.files(path);
 			else if (d.isFile()) yield path;
@@ -306,12 +530,21 @@ export class WorkspaceFiles {
 		const pattern = searchPattern(query, options);
 		const hits: SearchHit[] = [];
 		for (const path of this.files()) {
+			if (imageType(path)) continue;
 			if (!fileChosen(relative(this.root, path), options.include, options.exclude)) continue;
 			try {
-				if (statSync(path).size > SEARCH_MAX_BYTES) continue;
+				const st = statSync(path);
+				if (!st.isFile() || st.size > SEARCH_MAX_BYTES) continue;
 			} catch {
 				continue;
 			}
+			let sniff: Uint8Array;
+			try {
+				sniff = new Uint8Array(await Bun.file(path).slice(0, SNIFF_BYTES).arrayBuffer());
+			} catch {
+				continue;
+			}
+			if (looksBinary(sniff, true)) continue;
 			const text = await textOf(path);
 			if (text.includes("\u0000")) continue;
 			const lines = text.split(/\r?\n/);
@@ -340,15 +573,22 @@ export class WorkspaceFiles {
 	}
 
 	watch(onChange: (path: string) => void) {
+		this.watcher?.close();
+		this.watcher = undefined;
 		try {
-			this.watcher = watch(this.root, { recursive: true }, (_event, name) => {
+			const watcher = watch(this.root, { recursive: true }, (_event, name) => {
 				if (!name) return;
-				const path = join(this.root, String(name));
-				if (path.split(sep).some((part) => SKIP.has(part)) || path.endsWith(".ssl-studio-tmp")) return;
-				const own = this.ownWrites.get(path);
+				const rel = String(name);
+				if (rel.split(/[\\/]/).some((part) => SKIP.has(part)) || rel.endsWith(TMP_SUFFIX)) return;
+				const path = join(this.root, rel);
+				const own = this.ownWrites.get(fileKey(path));
 				if (own && Date.now() - own < 1500) return;
 				onChange(path);
 			});
+			watcher.on("error", () => {
+				// Async watcher errors must never crash the host process.
+			});
+			this.watcher = watcher;
 		} catch {
 			// No recursive watch here: external changes show on the next open.
 		}
@@ -356,5 +596,7 @@ export class WorkspaceFiles {
 
 	close() {
 		this.watcher?.close();
+		this.watcher = undefined;
+		this.ownWrites.clear();
 	}
 }

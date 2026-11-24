@@ -1,7 +1,8 @@
 // The BackendApi (src/shared/protocol.ts), whichever host carries it.
 import { openInSystemApp, revealPathInFileManager, systemPrefersDark } from "./system";
-import { basename, dirname, extname, join, relative, sep } from "node:path";
-import { existsSync, mkdirSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, extname, isAbsolute, join, relative, sep } from "node:path";
+import { lstatSync, statSync } from "node:fs";
 import type { BackendApi, BackendEvents, Info, LspState, Workspace } from "../shared/protocol";
 import { linkWritten } from "../shared/docLinks";
 import { htmlToMarkdown } from "../shared/htmlToMarkdown";
@@ -12,10 +13,41 @@ import { LspProcess } from "./lsp";
 import { catalogFilesOf, docAudit, docsTruncated, EXPORT_TYPES, fileManifest, linksTo, listDocs, namesIn, readExport, readProject, setupProject, tomlProblem, undoSetup } from "./project";
 import { recent, SettingsStore } from "./settings";
 import { findLsp, findOpencode } from "./tools";
-import { WorkspaceFiles } from "./workspace";
+import { fileKey, WorkspaceFiles } from "./workspace";
 import { Git } from "./git";
 import { Agent } from "./agent";
 import { formatDocument } from "./format";
+
+const IMPORT_MAX_BYTES = 20 * 1024 * 1024;
+const ALLOWED_IMPORT_EXTS = new Set([".docx", ".html", ".htm", ".md", ".markdown"]);
+
+function pathTaken(p: string): boolean {
+	try {
+		lstatSync(p);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function decodeBase64Capped(base64: string, maxBytes: number, label: string): Uint8Array {
+	const raw = base64 ?? "";
+	const maxB64 = Math.ceil((maxBytes * 4) / 3) + 4;
+	if (raw.length > maxB64 * 2) {
+		throw new Error(`${label} is too large to import (maximum is 20 MB).`);
+	}
+	const compact = /\s/.test(raw) ? raw.replace(/\s+/g, "") : raw;
+	const pad = compact.endsWith("==") ? 2 : compact.endsWith("=") ? 1 : 0;
+	const estimated = Math.floor((compact.length * 3) / 4) - pad;
+	if (estimated > maxBytes) {
+		throw new Error(`${label} is too large to import (maximum is 20 MB).`);
+	}
+	const bytes = Uint8Array.from(Buffer.from(compact, "base64"));
+	if (bytes.byteLength > maxBytes) {
+		throw new Error(`${label} is too large to import (maximum is 20 MB).`);
+	}
+	return bytes;
+}
 
 export type Host = {
 	emit<K extends keyof BackendEvents>(event: K, payload: BackendEvents[K]): void;
@@ -23,6 +55,9 @@ export type Host = {
 	pick(kind: "folder" | "file", types?: string): Promise<string | null>;
 	trash(path: string): Promise<void>;
 	clipboard?(text: string): void;
+	/** When true (or when kind === "browser"), restrict readExport and importDocFile sourcePath to the open workspace. */
+	restrictPaths?: boolean;
+	isWebHost?: boolean;
 	app: string;
 	kind: "app" | "browser";
 	quit(): void;
@@ -34,6 +69,12 @@ export function createBackend(host: Host, initial?: string) {
 	let lsp: LspProcess | null = null;
 	let info: Info | null = null;
 	let lspState: LspState = { state: "stopped" };
+	let openSeq = 0;
+	let closing = false;
+	let disposed = false;
+
+	const restricted = () => host.kind === "browser" || Boolean(host.restrictPaths) || Boolean(host.isWebHost);
+
 	const emitLspState = (state: LspState) => {
 		lspState = state;
 		host.emit("lspState", state);
@@ -46,6 +87,11 @@ export function createBackend(host: Host, initial?: string) {
 	const need = () => {
 		if (!files) throw new Error("no workspace open");
 		return files;
+	};
+	const rejectRoot = (ws: WorkspaceFiles, full: string, action: string) => {
+		if (fileKey(full) === fileKey(ws.root)) {
+			throw new Error(`cannot ${action} the workspace root`);
+		}
 	};
 	/** git for the open workspace: one for as long as the folder is open, so that what it learned of the repository is asked once. */
 	let asked: { root: string; git: Git } | null = null;
@@ -65,21 +111,67 @@ export function createBackend(host: Host, initial?: string) {
 	}
 
 	async function open(path: string): Promise<Workspace> {
-		files?.close();
-		lsp?.stop();
-		files = new WorkspaceFiles(path);
-		history = new History(files.root);
-		await recent(files.root);
-		files.watch((changed) => host.emit("fileChanged", { path: changed }));
-		const { lsp: status } = await loadInfo();
-		if (status.ok && status.path) {
-			lsp = new LspProcess(status.path, (m) => host.emit("lsp", m), emitLspState);
-			lsp.start();
-		} else {
-			emitLspState({ state: "failed", message: status.message });
+		if (disposed) throw new Error("backend is disposed");
+		// Validate and construct BEFORE tearing down the active workspace so a bad path leaves it intact.
+		const nextFiles = new WorkspaceFiles(path);
+		const nextHistory = new History(nextFiles.root);
+		const seq = ++openSeq;
+
+		const prevFiles = files;
+		const prevLsp = lsp;
+		files = nextFiles;
+		history = nextHistory;
+		lsp = null;
+		asked = null;
+		prevFiles?.close();
+		prevLsp?.stop();
+
+		const isStale = () => disposed || seq !== openSeq;
+		nextFiles.watch((changed) => {
+			if (!isStale()) host.emit("fileChanged", { path: changed });
+		});
+
+		let startedLsp: LspProcess | null = null;
+		try {
+			await recent(nextFiles.root);
+			if (isStale()) {
+				nextFiles.close();
+				return { root: nextFiles.root, name: basename(nextFiles.root) };
+			}
+			const { lsp: status } = await loadInfo();
+			if (isStale()) {
+				nextFiles.close();
+				return { root: nextFiles.root, name: basename(nextFiles.root) };
+			}
+			if (status.ok && status.path) {
+				startedLsp = new LspProcess(
+					status.path,
+					(m) => {
+						if (!isStale()) host.emit("lsp", m);
+					},
+					(s) => {
+						if (!isStale()) emitLspState(s);
+					},
+				);
+				lsp = startedLsp;
+				startedLsp.start();
+			} else {
+				emitLspState({ state: "failed", message: status.message });
+			}
+			await agent.workspaceChanged();
+			if (isStale()) {
+				nextFiles.close();
+				startedLsp?.stop();
+				return { root: nextFiles.root, name: basename(nextFiles.root) };
+			}
+			return { root: nextFiles.root, name: basename(nextFiles.root) };
+		} catch (e) {
+			if (isStale()) {
+				nextFiles.close();
+				startedLsp?.stop();
+			}
+			throw e;
 		}
-		await agent.workspaceChanged();
-		return { root: files.root, name: basename(files.root) };
 	}
 
 	const api: BackendApi = {
@@ -98,10 +190,11 @@ export function createBackend(host: Host, initial?: string) {
 		},
 		read: (path) => need().read(path),
 		sizes: async (paths) => {
+			const ws = need();
 			const out: Record<string, number> = {};
 			for (const path of paths) {
 				try {
-					out[path] = statSync(need().inside(path)).size;
+					out[path] = statSync(ws.inside(path)).size;
 				} catch {
 					// Outside the workspace or gone.
 				}
@@ -109,9 +202,14 @@ export function createBackend(host: Host, initial?: string) {
 			return out;
 		},
 		write: async (path, text, asText) => {
-			const result = await need().write(path, text, asText);
-			await history!.record(need().inside(path), text);
-			return result;
+			const ws = need();
+			const hist = history!;
+			const full = ws.inside(path);
+			return ws.alone(full, async (writeNow) => {
+				const result = await writeNow(text, asText);
+				await hist.record(full, text);
+				return result;
+			});
 		},
 		create: (path, kind) => need().create(path, kind),
 		rename: async (from, to) => need().rename(from, to),
@@ -119,9 +217,11 @@ export function createBackend(host: Host, initial?: string) {
 		image: (path) => need().image(path),
 		writeImage: (path, base64) => need().writeImage(path, base64),
 		historyKeep: async (path) => {
-			const full = need().inside(path);
-			const now = await need().read(full);
-			if (!now.binary) await history!.record(full, now.text);
+			const ws = need();
+			const hist = history!;
+			const full = ws.inside(path);
+			const now = await ws.read(full);
+			if (!now.binary) await hist.record(full, now.text);
 		},
 		gitStatus: async () => (files ? git().status() : null),
 		gitBase: (path, from) => git().base(need().inside(path), from),
@@ -143,12 +243,15 @@ export function createBackend(host: Host, initial?: string) {
 		// A discard and a trash wait for a save of the file that is under way, and the saves asked for after them
 		// wait in turn: thrown away in the middle of a save, the file would have come back.
 		gitDiscard: async (path) => {
-			const full = need().inside(path);
-			await need().alone(full, async () => {
+			const ws = need();
+			const hist = history!;
+			const full = ws.inside(path);
+			rejectRoot(ws, full, "discard");
+			await ws.alone(full, async () => {
 				// What is about to go is kept first, where it is text: a discard by mistake has a way back.
 				try {
-					const now = await need().read(full);
-					if (!now.binary) await history!.record(full, now.text);
+					const now = await ws.read(full);
+					if (!now.binary) await hist.record(full, now.text);
 				} catch {
 					// Not there to read (it was removed): there is nothing of it to keep.
 				}
@@ -158,26 +261,30 @@ export function createBackend(host: Host, initial?: string) {
 			});
 		},
 		trash: async (path) => {
-			const full = need().inside(path);
-			await need().alone(full, () => host.trash(full));
+			const ws = need();
+			const full = ws.inside(path);
+			rejectRoot(ws, full, "trash");
+			await ws.alone(full, () => host.trash(full));
 		},
 		search: (query, options) => need().search(query, options),
 		replace: async (query, replacement, options, paths) => {
+			const ws = need();
+			const hist = history!;
 			const done: { path: string; count: number; error?: string }[] = [];
 			for (const path of paths) {
 				// One file that cannot be written (its encoding has no way to write the replacement, say) does not
 				// stop the others: it is left as it was, and says why.
 				try {
-					const full = need().inside(path);
+					const full = ws.inside(path);
 					// Read and written as one step: a save of the file that landed between the two would have been
 					// written away by text worked out from the file as it was before it.
-					const count = await need().alone(full, async (write) => {
-						const change = await need().replaced(full, query, replacement, options);
+					const count = await ws.alone(full, async (write) => {
+						const change = await ws.replaced(full, query, replacement, options);
 						if (!change) return 0;
 						// The file as it was goes into local history first, so that there is a way back.
-						await history!.record(full, change.before);
+						await hist.record(full, change.before);
 						await write(change.after);
-						await history!.record(full, change.after);
+						await hist.record(full, change.after);
 						return change.count;
 					});
 					if (count) done.push({ path: full, count });
@@ -194,23 +301,28 @@ export function createBackend(host: Host, initial?: string) {
 		setupPreview: async () => setupProject(need().root, true),
 		setupUndo: async () => undoSetup(need().root),
 		unsavedChanged: async (count) => {
+			if (closing) return;
 			unsaved = Math.max(0, Number(count) || 0);
 		},
 		closeWindow: async () => {
+			closing = true;
 			unsaved = 0;
 			setTimeout(() => host.quit(), 50);
 		},
 		docs: async (options) => {
+			const ws = need();
 			const effective = options?.templatesFolder !== undefined ? options.templatesFolder : (await settings.load()).effective.templatesFolder;
-			return listDocs(need(), await readProject(need().root), { templatesFolder: effective });
+			return listDocs(ws, await readProject(ws.root), { templatesFolder: effective });
 		},
 		docsTruncated: async () => {
+			const ws = need();
 			const effective = (await settings.load()).effective.templatesFolder;
-			return docsTruncated(need(), await readProject(need().root), { templatesFolder: effective });
+			return docsTruncated(ws, await readProject(ws.root), { templatesFolder: effective });
 		},
 		docAudit: async (attachmentsFolder, options) => {
+			const ws = need();
 			const effective = options?.templatesFolder !== undefined ? options.templatesFolder : (await settings.load()).effective.templatesFolder;
-			return docAudit(need(), await readProject(need().root), attachmentsFolder, { ...options, templatesFolder: effective });
+			return docAudit(ws, await readProject(ws.root), attachmentsFolder, { ...options, templatesFolder: effective });
 		},
 		openExternal: async (path) => {
 			const full = need().inside(path);
@@ -221,9 +333,12 @@ export function createBackend(host: Host, initial?: string) {
 			await revealPathInFileManager(full);
 		},
 		exportDocx: async (request) => {
-			const full = need().inside(request.path);
-			mkdirSync(dirname(full), { recursive: true });
-			const baseDir = request.baseDir ? need().inside(request.baseDir) : dirname(full);
+			const ws = need();
+			const full = ws.inside(request.path);
+			if (extname(full).toLowerCase() !== ".docx") {
+				throw new Error(`Export path must end with .docx: ${relative(ws.root, full)}`);
+			}
+			const baseDir = request.baseDir ? ws.inside(request.baseDir) : dirname(full);
 			const opts: Parameters<typeof markdownToDocx>[0] & {
 				attachmentsFolder?: string;
 				docsFolder?: string;
@@ -235,7 +350,7 @@ export function createBackend(host: Host, initial?: string) {
 				subtitle: request.subtitle,
 				markdown: request.markdown,
 				baseDir,
-				workspaceRoot: need().root,
+				workspaceRoot: ws.root,
 				meta: request.meta,
 				mermaidPngs: request.mermaidPngs,
 				...(request.attachmentsFolder !== undefined ? { attachmentsFolder: request.attachmentsFolder } : {}),
@@ -245,17 +360,34 @@ export function createBackend(host: Host, initial?: string) {
 				...(request.headerFooter !== undefined ? { headerFooter: request.headerFooter } : {}),
 			};
 			const bytes = markdownToDocx(opts);
-			await Bun.write(full, bytes);
-			return { path: full, bytes: bytes.length };
+			const written = await ws.writeBytes(full, bytes);
+			return { path: written.path, bytes: written.size };
 		},
 		importDocFile: async (request) => {
 			const ws = need();
-			const src = request.sourcePath?.trim() || (await host.pick("file", "docx,html,htm,md,markdown"));
-			if (!src) return null;
-			const destDir = ws.inside(request.destDir);
-			const attachDir = request.attachmentsDir ? ws.inside(request.attachmentsDir) : join(ws.root, "docs", "attachments");
-			mkdirSync(destDir, { recursive: true });
+			const hist = history!;
+			const rawSrc = request.sourcePath?.trim() || (await host.pick("file", "docx,html,htm,md,markdown"));
+			if (!rawSrc) return null;
+			const src = restricted() ? ws.inside(rawSrc) : rawSrc;
 			const ext = extname(src).toLowerCase();
+			if (!ALLOWED_IMPORT_EXTS.has(ext)) {
+				throw new Error(`Unsupported document format: ${ext || "(none)"}. Only .docx, .html, .htm, .md, and .markdown files can be imported.`);
+			}
+			let srcStat;
+			try {
+				srcStat = statSync(src);
+			} catch (e: any) {
+				throw new Error(`Cannot read ${src}: ${e?.message ?? e}`);
+			}
+			if (!srcStat.isFile()) {
+				throw new Error(`${src} is not a regular file.`);
+			}
+			if (srcStat.size > IMPORT_MAX_BYTES) {
+				throw new Error(`${basename(src)} is too large to import (maximum is 20 MB).`);
+			}
+
+			const destDir = ws.inside(request.destDir);
+			const attachDir = request.attachmentsDir ? ws.inside(request.attachmentsDir) : ws.inside(join(ws.root, "docs", "attachments"));
 			const kind: "docx" | "html" | "md" = ext === ".docx" ? "docx" : ext === ".html" || ext === ".htm" ? "html" : "md";
 			const rawStem = basename(src, ext).replace(/[\\/:*?"<>|]+/g, "-").trim() || "imported";
 			const baseDestPath = ws.inside(join(destDir, `${rawStem}.md`));
@@ -264,7 +396,7 @@ export function createBackend(host: Host, initial?: string) {
 			const reserveUniquePath = (dir: string, stem: string, fileExt: string, reserved?: Set<string>): string => {
 				let candidate = ws.inside(join(dir, `${stem}${fileExt}`));
 				let n = 2;
-				while (existsSync(candidate) || reserved?.has(candidate.toLowerCase())) {
+				while (pathTaken(candidate) || reserved?.has(candidate.toLowerCase())) {
 					candidate = ws.inside(join(dir, `${stem}-${n}${fileExt}`));
 					n++;
 				}
@@ -273,7 +405,7 @@ export function createBackend(host: Host, initial?: string) {
 			};
 
 			let destPath = baseDestPath;
-			if (existsSync(baseDestPath)) {
+			if (pathTaken(baseDestPath)) {
 				if (mode === "prompt") {
 					return { path: baseDestPath, images: [], kind, conflict: true, existingPath: baseDestPath };
 				}
@@ -282,7 +414,7 @@ export function createBackend(host: Host, initial?: string) {
 				} else if (mode === "overwrite") {
 					try {
 						const before = await ws.read(baseDestPath);
-						if (!before.binary) await history!.record(baseDestPath, before.text);
+						if (!before.binary) await hist.record(baseDestPath, before.text);
 					} catch {
 						// Ignore if unreadable before snapshot.
 					}
@@ -296,14 +428,13 @@ export function createBackend(host: Host, initial?: string) {
 				const parsed = parseDocxToMarkdown(bytes) as ReturnType<typeof parseDocxToMarkdown> & { warnings?: string[] };
 				let md = parsed.markdown;
 				if (parsed.images.length) {
-					mkdirSync(attachDir, { recursive: true });
 					for (const img of parsed.images) {
 						const safeImg = `${rawStem}-${img.name.replace(/[^A-Za-z0-9._-]+/g, "-")}`;
 						const imgExt = extname(safeImg);
 						const imgStem = imgExt ? safeImg.slice(0, -imgExt.length) : safeImg;
 						const imgPath = reserveUniquePath(attachDir, imgStem, imgExt, reservedImgs);
 						const finalName = basename(imgPath);
-						await Bun.write(imgPath, img.bytes);
+						await ws.writeBytes(imgPath, img.bytes);
 						savedImages.push(imgPath);
 						md = md.split(`{{DOCX_IMG:${img.name}}}`).join(`![[${finalName}]]`);
 					}
@@ -338,9 +469,9 @@ export function createBackend(host: Host, initial?: string) {
 						const subtype = (srcMatch[2] ?? srcMatch[4] ?? srcMatch[6] ?? "png").toLowerCase();
 						const b64 = (srcMatch[3] ?? srcMatch[5] ?? srcMatch[7] ?? "").replace(/\s+/g, "");
 						const imgExt = EXT_MAP[subtype] ?? ".png";
-						mkdirSync(attachDir, { recursive: true });
 						const imgPath = reserveUniquePath(attachDir, `${rawStem}-image-${++imgIdx}`, imgExt, reservedImgs);
-						await Bun.write(imgPath, Uint8Array.from(Buffer.from(b64, "base64")));
+						const imgBytes = decodeBase64Capped(b64, IMPORT_MAX_BYTES, basename(imgPath));
+						await ws.writeBytes(imgPath, imgBytes);
 						savedImages.push(imgPath);
 						const relImg = linkWritten(relative(dirname(destPath), imgPath).split(sep).join("/"));
 						const updatedTag = `${tag.slice(0, srcMatch.index)}${srcMatch[1]}"${relImg}"${tag.slice(srcMatch.index + srcMatch[0].length)}`;
@@ -360,9 +491,10 @@ export function createBackend(host: Host, initial?: string) {
 		},
 		importDocxBytes: async (request) => {
 			const ws = need();
+			const hist = history!;
+			const bytes = decodeBase64Capped(request.base64, IMPORT_MAX_BYTES, request.fileName || "document.docx");
 			const destDir = ws.inside(request.destDir);
-			const attachDir = request.attachmentsDir ? ws.inside(request.attachmentsDir) : join(ws.root, "docs", "attachments");
-			mkdirSync(destDir, { recursive: true });
+			const attachDir = request.attachmentsDir ? ws.inside(request.attachmentsDir) : ws.inside(join(ws.root, "docs", "attachments"));
 			const ext = extname(request.fileName);
 			const rawStem = basename(request.fileName, ext).replace(/[\\/:*?"<>|]+/g, "-").trim() || "imported";
 			const baseDestPath = ws.inside(join(destDir, `${rawStem}.md`));
@@ -371,7 +503,7 @@ export function createBackend(host: Host, initial?: string) {
 			const reserveUniquePath = (dir: string, stem: string, fileExt: string, reserved?: Set<string>): string => {
 				let candidate = ws.inside(join(dir, `${stem}${fileExt}`));
 				let n = 2;
-				while (existsSync(candidate) || reserved?.has(candidate.toLowerCase())) {
+				while (pathTaken(candidate) || reserved?.has(candidate.toLowerCase())) {
 					candidate = ws.inside(join(dir, `${stem}-${n}${fileExt}`));
 					n++;
 				}
@@ -380,7 +512,7 @@ export function createBackend(host: Host, initial?: string) {
 			};
 
 			let destPath = baseDestPath;
-			if (existsSync(baseDestPath)) {
+			if (pathTaken(baseDestPath)) {
 				if (mode === "prompt") {
 					return { path: baseDestPath, images: [], conflict: true, existingPath: baseDestPath };
 				}
@@ -389,27 +521,25 @@ export function createBackend(host: Host, initial?: string) {
 				} else if (mode === "overwrite") {
 					try {
 						const before = await ws.read(baseDestPath);
-						if (!before.binary) await history!.record(baseDestPath, before.text);
+						if (!before.binary) await hist.record(baseDestPath, before.text);
 					} catch {
 						// Ignore if unreadable before snapshot.
 					}
 				}
 			}
 
-			const bytes = Uint8Array.from(Buffer.from(request.base64, "base64"));
 			const parsed = parseDocxToMarkdown(bytes) as ReturnType<typeof parseDocxToMarkdown> & { warnings?: string[] };
 			let md = parsed.markdown;
 			const savedImages: string[] = [];
 			const reservedImgs = new Set<string>();
 			if (parsed.images.length) {
-				mkdirSync(attachDir, { recursive: true });
 				for (const img of parsed.images) {
 					const safeImg = `${rawStem}-${img.name.replace(/[^A-Za-z0-9._-]+/g, "-")}`;
 					const imgExt = extname(safeImg);
 					const imgStem = imgExt ? safeImg.slice(0, -imgExt.length) : safeImg;
 					const imgPath = reserveUniquePath(attachDir, imgStem, imgExt, reservedImgs);
 					const finalName = basename(imgPath);
-					await Bun.write(imgPath, img.bytes);
+					await ws.writeBytes(imgPath, img.bytes);
 					savedImages.push(imgPath);
 					md = md.split(`{{DOCX_IMG:${img.name}}}`).join(`![[${finalName}]]`);
 				}
@@ -435,9 +565,18 @@ export function createBackend(host: Host, initial?: string) {
 			const path = await host.pick("file", EXPORT_TYPES);
 			return path ? { path, text: await readExport(path) } : null;
 		},
-		readExport: async (path) => readExport(path),
+		readExport: async (path) => {
+			if (restricted()) {
+				let cleaned = path.trim().replace(/^(["'])(.*)\1$/, "$2");
+				if (/^~[\\/]/.test(cleaned)) cleaned = join(homedir(), cleaned.slice(2));
+				if (!isAbsolute(cleaned)) throw new Error(`${path} is not a whole path.`);
+				need().inside(cleaned);
+			}
+			return readExport(path);
+		},
 		lspSend: async (message) => lsp?.send(message),
 		lspRestart: async () => {
+			if (disposed) return;
 			if (lsp) lsp.restart();
 			else if (files) await open(files.root);
 		},
@@ -474,13 +613,18 @@ export function createBackend(host: Host, initial?: string) {
 		 * they have saved or chosen to discard (ADR 0009).
 		 */
 		mayClose: () => {
-			if (!unsaved) return true;
+			if (closing || !unsaved) return true;
 			host.emit("closeRequested", {});
 			return false;
 		},
 		dispose: () => {
+			if (disposed) return;
+			disposed = true;
+			openSeq++;
 			files?.close();
+			files = null;
 			lsp?.stop();
+			lsp = null;
 			agent.dispose();
 		},
 	};
@@ -488,7 +632,13 @@ export function createBackend(host: Host, initial?: string) {
 
 /** Runs one call from the UI and returns a reply, errors included. */
 export async function dispatch(api: BackendApi, method: string, args: unknown[]) {
-	const fn = (api as any)[method];
+	if (typeof method !== "string" || !Object.hasOwn(api, method)) {
+		throw new Error(`unknown method: ${String(method)}`);
+	}
+	if (!Array.isArray(args)) {
+		throw new Error(`invalid arguments for ${method}`);
+	}
+	const fn = (api as unknown as Record<string, unknown>)[method];
 	if (typeof fn !== "function") throw new Error(`unknown method: ${method}`);
 	return fn(...args);
 }
