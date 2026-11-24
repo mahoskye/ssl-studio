@@ -1,9 +1,10 @@
 // Local history: a snapshot of a file on every save that changes it, kept
 // outside the workspace (ARCHITECTURE, "Settings and state").
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import type { Snapshot } from "../shared/protocol";
+import { renameReplacing } from "./atomic";
 import { dirs } from "./paths";
 import { Serial } from "./serial";
 
@@ -20,9 +21,13 @@ async function atomicWrite(path: string, content: string): Promise<void> {
 	const temp = `${path}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
 	try {
 		await Bun.write(temp, content);
-		renameSync(temp, path);
+		await renameReplacing(temp, path);
 	} catch (err) {
-		rmSync(temp, { force: true });
+		try {
+			rmSync(temp, { force: true });
+		} catch {
+			// Best-effort cleanup of temp file.
+		}
 		throw err;
 	}
 }

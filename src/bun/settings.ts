@@ -2,11 +2,12 @@
 // (.ssl-studio/project.toml), then what the IDE saved for this workspace
 // (.ssl-studio/settings.json): each later one wins.
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { parseJsonc } from "../shared/jsonc";
 import { DEFAULT_SETTINGS, type Settings, type SettingsPatch, type SettingsScope, type ThemeFile } from "../shared/protocol";
 import { HOUSE_STYLE } from "../shared/styleProfile";
+import { renameReplacing } from "./atomic";
 import { dirs, workspaceDir } from "./paths";
 import { projectSettings, readProject } from "./project";
 import { Serial } from "./serial";
@@ -46,9 +47,13 @@ async function atomicWrite(path: string, content: string): Promise<void> {
 	const temp = `${path}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
 	try {
 		await Bun.write(temp, content);
-		renameSync(temp, path);
+		await renameReplacing(temp, path);
 	} catch (err) {
-		rmSync(temp, { force: true });
+		try {
+			rmSync(temp, { force: true });
+		} catch {
+			// Best-effort cleanup of temp file.
+		}
 		throw err;
 	}
 }

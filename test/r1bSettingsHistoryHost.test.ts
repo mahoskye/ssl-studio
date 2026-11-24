@@ -3,6 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, w
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "../src/bun/agent";
+import { renameReplacing } from "../src/bun/atomic";
 import { createFrameReader, frame, MAX_HEADER_BYTES, MAX_MESSAGE_BYTES } from "../src/bun/frames";
 import { History, historyKey, MAX_SNAPSHOT_BYTES } from "../src/bun/history";
 import { LspProcess } from "../src/bun/lsp";
@@ -522,5 +523,57 @@ describe("window frame clamping with non-finite workArea", () => {
 		expect(fitWindow({ x: 0, y: 0, width: Number.POSITIVE_INFINITY, height: 1080 })).toEqual(wanted);
 		expect(fitWindow({ x: 0, y: 0, width: 1920, height: Number.NEGATIVE_INFINITY })).toEqual(wanted);
 		expect(fitWindow({ x: 0, y: 0, width: Number.NaN, height: Number.NaN })).toEqual(wanted);
+	});
+});
+
+describe("renameReplacing Windows transient lock retry", () => {
+	test("retries transient EPERM/EACCES/EBUSY on Windows and succeeds once the lock clears", async () => {
+		const codes = ["EPERM", "EACCES", "EBUSY"];
+		let calls = 0;
+		await renameReplacing("a.tmp", "a.json", {
+			win32: true,
+			baseDelayMs: 1,
+			rename: () => {
+				const code = codes[calls++];
+				if (code) {
+					const err: any = new Error(code);
+					err.code = code;
+					throw err;
+				}
+			},
+		});
+		expect(calls).toBe(4);
+	});
+
+	test("rethrows non-transient errors (ENOENT) and POSIX errors without retrying", async () => {
+		let calls = 0;
+		await expect(
+			renameReplacing("a.tmp", "a.json", {
+				win32: true,
+				baseDelayMs: 1,
+				rename: () => {
+					calls++;
+					const err: any = new Error("ENOENT");
+					err.code = "ENOENT";
+					throw err;
+				},
+			}),
+		).rejects.toThrow("ENOENT");
+		expect(calls).toBe(1);
+
+		let posixCalls = 0;
+		await expect(
+			renameReplacing("a.tmp", "a.json", {
+				win32: false,
+				baseDelayMs: 1,
+				rename: () => {
+					posixCalls++;
+					const err: any = new Error("EPERM");
+					err.code = "EPERM";
+					throw err;
+				},
+			}),
+		).rejects.toThrow("EPERM");
+		expect(posixCalls).toBe(1);
 	});
 });

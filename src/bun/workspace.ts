@@ -22,6 +22,7 @@ import type { Entry, FileText, SearchHit } from "../shared/protocol";
 import { excerptForMatch, matchesOn, REGEX_MAX_LINE_LENGTH, replaceIn, SEARCH_LIMIT, searchPattern, type SearchOptions } from "../shared/searchPattern";
 import { createFileFilter } from "../shared/fileGlob";
 import { replaceSafeInText } from "../shared/menuBar";
+import { renameReplacing } from "./atomic";
 import { decode, encode, encodingOf, looksBinary, textOf, type Encoding } from "./encoding";
 import { imageType, sizeText, SNIFF_BYTES } from "../shared/fileKind";
 import { UNLISTED } from "../shared/paths";
@@ -308,7 +309,7 @@ export class WorkspaceFiles {
 				}
 			}
 			this.markOwnWrite(full);
-			renameSync(temp, full);
+			await renameReplacing(temp, full);
 			created = false;
 			this.markOwnWrite(full);
 		} catch (e) {
