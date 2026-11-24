@@ -7,7 +7,7 @@ import { marked } from "marked";
 import { parseCsv } from "../../shared/csv";
 import { DEFAULT_CODE_FONT, resolveFontStack } from "../../shared/fonts";
 import { frontMatter } from "../../shared/frontMatter";
-import { diffInlineWords, diffMarkdownBlocks, type MarkdownDiffRow } from "../../shared/markdownDiff";
+import { diffMarkdownBlocks, diffPlainTextHtml, type MarkdownDiffRow } from "../../shared/markdownDiff";
 import { initialReviewLayout, reviewLayoutKey, type ReviewFormat, type ReviewLayout } from "../../shared/menuBar";
 import { Icon } from "../Icon";
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, untrack } from "solid-js";
@@ -54,6 +54,8 @@ export type Review = {
 	 * two sides. Neither side can be edited, and the one button closes.
 	 */
 	compare?: { left: string; right: string };
+	/** True when replacing this review loses nothing (read-only comparisons) and needs no prompt. */
+	replaceable?: boolean;
 	/** May fail: the review then stays open and shows the error. */
 	onAccept: (text: string) => void | Promise<void>;
 	onReject?: () => void | Promise<void>;
@@ -79,6 +81,7 @@ const flow = reviewFlow<Review>({
 	// Looked up when asked, not when this module loads: state.ts and this file import each other.
 	choose: (title, buttons) => choose(title, buttons),
 	fail: (text) => notify(text, "error"),
+	replaceable: (r) => Boolean(r.replaceable || r.compare),
 });
 
 /**
@@ -87,16 +90,15 @@ const flow = reviewFlow<Review>({
  * the open one, so this one was not shown.
  */
 export const openReview = (r: Review): Promise<boolean> => {
-	// A comparison holds nothing that could be lost: the next thing to look at takes its place without a question.
-	if (untrack(review)?.compare) setReview(null);
 	// What is accepted here is written into the file's document: a tab it has for a look is kept, so that the next
 	// file clicked does not take the document away under the review. A comparison writes nothing, and keeps nothing.
 	if (!r.compare && r.path && state.workspace) keepTab(canonical(isInside(state.workspace.root, r.path) ? r.path : joinPath(state.workspace.root, ...r.path.split(/[\\/]/))));
 	return flow.open(r);
 };
-export const closeReview = () => setReview(null);
+/** Force-closes any open review without prompting, notifying its owner via `onReject`. */
+export const closeReview = () => flow.close();
 /** A comparison gives way to a file that is opened: it holds nothing to lose, and would otherwise stand in front of the file. */
-export const closeComparison = () => void (untrack(review)?.compare && setReview(null));
+export const closeComparison = () => void (untrack(review)?.compare && flow.close());
 
 /** Opens a read-only side-by-side comparison (`before` on the left vs `after` on the right) in ReviewView. */
 export function openComparison(input: ComparisonInput): Promise<boolean> {
@@ -107,6 +109,7 @@ export function openComparison(input: ComparisonInput): Promise<boolean> {
 		proposed: input.after,
 		language: input.language ?? (input.path ? languageFor(input.path) : "plaintext"),
 		compare: { left: input.beforeLabel, right: input.afterLabel },
+		replaceable: true,
 		effect: input.effect ?? `${input.beforeLabel} compared with ${input.afterLabel}. Nothing here changes either.`,
 		onAccept: () => {},
 	});
@@ -119,7 +122,44 @@ type CsvDiffRow = {
 	newCells?: string[];
 };
 
-const FORBID_TAGS = ["iframe", "object", "embed", "script", "style", "form", "input", "textarea", "select"];
+const FORBID_TAGS = [
+	"script",
+	"style",
+	"iframe",
+	"object",
+	"embed",
+	"form",
+	"input",
+	"button",
+	"textarea",
+	"select",
+	"img",
+	"picture",
+	"source",
+	"video",
+	"audio",
+	"svg",
+	"math",
+	"canvas",
+	"dialog",
+	"area",
+	"track",
+];
+const FORBID_ATTR = [
+	"style",
+	"background",
+	"poster",
+	"src",
+	"srcset",
+	"ping",
+	"action",
+	"formaction",
+	"popover",
+	"popovertarget",
+	"command",
+	"commandfor",
+];
+const REVIEW_PURIFY_CONFIG = { FORBID_TAGS, FORBID_ATTR, ALLOW_DATA_ATTR: false };
 
 function escapeHtmlText(text: string): string {
 	return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -127,7 +167,7 @@ function escapeHtmlText(text: string): string {
 
 function renderMarkdownBlockHtml(source: string, preRendered?: boolean): string {
 	const rawHtml = preRendered ? source : (marked.parse(source, { async: false, gfm: true }) as string);
-	const clean = DOMPurify.sanitize(rawHtml, { FORBID_TAGS });
+	const clean = DOMPurify.sanitize(rawHtml, REVIEW_PURIFY_CONFIG);
 	return preRendered ? clean : finishMarkdown(clean, { anchors: false });
 }
 
@@ -161,9 +201,9 @@ function buildRenderedMarkdownDiff(beforeText: string, afterText: string): Rende
 			fmBeforeHtml = escapeHtmlText(fmBeforeRaw);
 			fmAfterHtml = escapeHtmlText(fmAfterRaw);
 		} else if (fmBeforeRaw && fmAfterRaw) {
-			const fmDiff = diffInlineWords(escapeHtmlText(fmBeforeRaw), escapeHtmlText(fmAfterRaw));
-			fmBeforeHtml = DOMPurify.sanitize(fmDiff.before, { FORBID_TAGS });
-			fmAfterHtml = DOMPurify.sanitize(fmDiff.after, { FORBID_TAGS });
+			const fmDiff = diffPlainTextHtml(fmBeforeRaw, fmAfterRaw);
+			fmBeforeHtml = DOMPurify.sanitize(fmDiff.before, REVIEW_PURIFY_CONFIG);
+			fmAfterHtml = DOMPurify.sanitize(fmDiff.after, REVIEW_PURIFY_CONFIG);
 		} else if (fmBeforeRaw) {
 			fmBeforeHtml = `<del class="md-diff-del">${escapeHtmlText(fmBeforeRaw)}</del>`;
 		} else {
@@ -295,6 +335,7 @@ export function ReviewView() {
 	const reviewFormat: ReviewFormat = isMdReview ? "markdown" : isCsvReview ? "csv" : "code";
 	const layoutKey = reviewLayoutKey(reviewFormat);
 	const [busy, setBusy] = createSignal(false);
+	const [rejecting, setRejecting] = createSignal(false);
 	const [error, setError] = createSignal("");
 	/** The lines the proposal adds and takes away, once the diff has been worked out. */
 	const [size, setSize] = createSignal("");
@@ -378,6 +419,7 @@ export function ReviewView() {
 	onMount(() => {
 		const original = monaco.editor.createModel(r.original, r.language);
 		const proposed = (proposedModel = monaco.editor.createModel(r.proposed, r.language));
+		if (r.original.includes("\n")) proposed.setEOL(original.getEndOfLineSequence());
 		const diff = (editor = monaco.editor.createDiffEditor(host, {
 			automaticLayout: true,
 			renderSideBySide: diffLayout() !== "inline",
@@ -432,7 +474,7 @@ export function ReviewView() {
 	// Undoing every edit counts as not edited: the version id goes back with the text.
 	const edited = () => !isReadOnly && Boolean(proposedModel && !proposedModel.isDisposed() && proposedModel.getAlternativeVersionId() !== untouched);
 	const accept = async () => {
-		if (busy() || r.blocked || !proposedModel) return;
+		if (busy() || rejecting() || r.blocked || !proposedModel) return;
 		setBusy(true);
 		setError("");
 		const nextText = r.acceptSide === "original" ? r.original : proposedModel.getValue();
@@ -440,18 +482,24 @@ export function ReviewView() {
 		setBusy(false);
 		if (failed !== null) setError(failed);
 	};
-	const reject = () => {
-		if (!busy()) void flow.reject(r, edited());
+	const reject = async () => {
+		if (busy() || rejecting()) return;
+		setRejecting(true);
+		try {
+			await flow.reject(r, edited());
+		} finally {
+			setRejecting(false);
+		}
 	};
 	// Monaco takes Escape first when it has a use for it (a find box, a selection) and stops it there.
 	const onKey = (e: KeyboardEvent) => {
 		if (e.key !== "Escape" || e.defaultPrevented) return;
 		e.preventDefault();
-		reject();
+		void reject();
 	};
 
 	return (
-		<CenterTabStrip title={tabTitle} tooltip={r.path ?? r.title} icon="split-horizontal" onClose={reject}>
+		<CenterTabStrip title={tabTitle} tooltip={r.path ?? r.title} icon="split-horizontal" onClose={() => void reject()}>
 			<div class="diff" ref={root} tabindex={-1} onKeyDown={onKey}>
 				<div class="diff-bar review-bar">
 					<div class="review-head">
@@ -508,15 +556,15 @@ export function ReviewView() {
 						<Show
 							when={!r.compare}
 							fallback={
-								<button class="primary" title="Close this comparison (Esc)" onClick={reject}>
+								<button class="primary" title="Close this comparison (Esc)" onClick={() => void reject()}>
 									Close
 								</button>
 							}
 						>
-							<button class="primary" disabled={Boolean(r.blocked) || busy()} title={r.blocked ?? (busy() ? "Accepting…" : effect)} onClick={() => void accept()}>
+							<button class="primary" disabled={Boolean(r.blocked) || busy() || rejecting()} title={r.blocked ?? (busy() ? "Accepting…" : effect)} onClick={() => void accept()}>
 								{label}
 							</button>
-							<button disabled={busy()} title={busy() ? "Wait for the accept to finish." : `${rejectLabel}: close this review and change nothing (Esc)`} onClick={reject}>
+							<button disabled={busy() || rejecting()} title={busy() ? "Wait for the accept to finish." : `${rejectLabel}: close this review and change nothing (Esc)`} onClick={() => void reject()}>
 								{rejectLabel}
 							</button>
 						</Show>

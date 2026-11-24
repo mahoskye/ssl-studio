@@ -24,6 +24,7 @@ import { tasks as tasksIn, taskTally } from "../shared/tasks";
 import { classifyTicketEntries, type ScannedTicketEntry } from "../shared/ticketBundle";
 import type { AuditCitationIssue, DocAuditResult, DocFile, LinkTo, ManifestFile, NameIn, OpenTaskItem, Project, SchemaDriftItem, Settings, UndocumentedSchemaRef, WorkspaceDocIssue } from "../shared/protocol";
 import { workspaceDir } from "./paths";
+import { isLocalModelRef } from "./agent";
 import { WorkspaceFiles } from "./workspace";
 
 export const PROJECT_FILE = "project.toml";
@@ -65,9 +66,12 @@ export async function readProject(root: string): Promise<Project> {
 	return project;
 }
 
-/** The settings a project chooses for everyone who opens it. */
+/** The settings a project chooses for everyone who opens it. Never emits a non-local (potentially paid) model. */
 export function projectSettings(project: Project): Partial<Settings> {
-	return { agentModel: project.agentModel, stylePreset: project.stylePreset };
+	return {
+		...(isLocalModelRef(project.agentModel) ? { agentModel: project.agentModel } : {}),
+		stylePreset: project.stylePreset,
+	};
 }
 
 /** The file's name as it is on disk, whatever its case (readme.md, Readme.md). */

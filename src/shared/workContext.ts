@@ -136,8 +136,33 @@ export function ticketAtHand(files: readonly DocFile[], path?: string | null): s
 
 const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
+/**
+ * True when a work-context file attachment is safe to include in a prompt:
+ * rejects hidden dotfiles (`.env`, `.npmrc`, `.git/...`, `sub/.env.local`),
+ * traversal segments (`..`), NUL bytes, and absolute relative paths.
+ */
+export function isAllowedWorkAttachment(rel: string, path?: string): boolean {
+	if (typeof rel !== "string") return false;
+	const trimmed = rel.trim();
+	if (!trimmed || trimmed.includes("\0")) return false;
+	const normRel = slashes(trimmed);
+	if (normRel.startsWith("/") || /^[A-Za-z]:/.test(normRel)) return false;
+	const relSegs = normRel.split("/").filter((s) => s.length > 0);
+	if (!relSegs.length || relSegs.some((seg) => seg.startsWith("."))) return false;
+	if (path !== undefined) {
+		if (typeof path !== "string" || !path.trim() || path.includes("\0")) return false;
+		const normPath = slashes(path.trim());
+		const pathSegs = normPath.split("/").filter((s) => s.length > 0);
+		if (!pathSegs.length) return false;
+		if (pathSegs[pathSegs.length - 1]!.startsWith(".")) return false;
+		if (pathSegs.some((seg) => seg === "..")) return false;
+	}
+	return true;
+}
+
 /** What is sent, in a few words: "DEMO-103, 1 spec, 1 open question, 2 decisions". */
 export function workLabel(work: Work, options: WorkTextOptions = {}): string {
+	const safeTicketFiles = (options.ticketFiles ?? []).filter((tf) => isAllowedWorkAttachment(tf.rel, tf.path));
 	return [
 		work.ticket.ticket ?? work.ticket.name,
 		options.specs !== false && work.specs.length ? count(work.specs.length, "spec") : "",
@@ -148,7 +173,7 @@ export function workLabel(work: Work, options: WorkTextOptions = {}): string {
 		options.includeSchema && work.schemas?.length ? "schema" : "",
 		options.includeRegistries && work.registries?.length ? count(work.registries.length, "registry", "registries") : "",
 		options.includeState && work.stateDoc ? "STATE.md" : "",
-		options.ticketFiles?.length ? count(options.ticketFiles.length, "ticket file") : "",
+		safeTicketFiles.length ? count(safeTicketFiles.length, "ticket file") : "",
 	]
 		.filter(Boolean)
 		.join(", ");
@@ -162,12 +187,33 @@ const EXTRA_FILE_CHARS = 3500;
 /** Hard upper character cap across the whole assembled work context so local Ollama models never OOM. */
 export const MAX_WORK_PROMPT_CHARS = 18_000;
 
+/** Returns the active unclosed CommonMark fenced code block in `snippet`, or null when all fences are balanced. */
+function unclosedCodeFence(snippet: string): { ch: string; len: number } | null {
+	let open: { ch: string; len: number } | null = null;
+	for (const line of snippet.split(/\r?\n/)) {
+		const m = /^[ \t]{0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+		if (!m) continue;
+		const ch = m[1]![0]!;
+		const len = m[1]!.length;
+		const info = m[2]!;
+		if (!open) {
+			if (ch === "`" && info.includes("`")) continue;
+			open = { ch, len };
+		} else if (ch === open.ch && len >= open.len && info.trim() === "") {
+			open = null;
+		}
+	}
+	return open;
+}
+
 export function cut(text: string, limit: number): string {
 	if (text.length <= limit) return text;
 	const spaceAt = text.lastIndexOf(" ", limit);
 	// Never let lastIndexOf return -1 (spaceless minified JSON/XML/HL7) and slice(0, -1) the entire file!
 	const end = spaceAt > limit * 0.5 ? spaceAt : limit;
-	return `${text.slice(0, end)} … (cut short)`;
+	const head = text.slice(0, end);
+	const open = unclosedCodeFence(head);
+	return open ? `${head} … (cut short)\n${open.ch.repeat(open.len)}` : `${head} … (cut short)`;
 }
 /** A document's own words: without its front matter and its first heading, which the line above it already says. */
 const body = (text: string) => frontMatter(text).body.replace(/^\s*#\s+.*\r?\n/, "").trim();
@@ -286,6 +332,7 @@ export async function workText(work: Work, readFile: (path: string) => Promise<s
 	}
 	if (options.ticketFiles?.length) {
 		for (const tf of options.ticketFiles) {
+			if (!isAllowedWorkAttachment(tf.rel, tf.path)) continue;
 			const content = await read(tf.path);
 			if (content !== null) {
 				parts.push("", `ATTACHED TICKET FILE ${tf.rel}:`, cut(content, EXTRA_FILE_CHARS));
@@ -293,15 +340,19 @@ export async function workText(work: Work, readFile: (path: string) => Promise<s
 		}
 	}
 	if (ticket.ticketFiles?.length) {
-		const shown = ticket.ticketFiles.slice(0, 25);
-		const total = ticket.ticketFileCount ?? ticket.ticketFiles.length;
-		const more = Math.max(0, total - shown.length);
-		parts.push(
-			"",
-			"TICKET FOLDER FILES (reference docs, code samples, and fixtures kept beside this ticket):",
-			...shown.map((f) => `- ${f.rel}`),
-			...(more > 0 ? [`- … and ${more} more`] : []),
-		);
+		const safeFiles = ticket.ticketFiles.filter((f) => isAllowedWorkAttachment(f.rel, f.path));
+		if (safeFiles.length) {
+			const dropped = ticket.ticketFiles.length - safeFiles.length;
+			const shown = safeFiles.slice(0, 25);
+			const total = Math.max(safeFiles.length, (ticket.ticketFileCount ?? ticket.ticketFiles.length) - dropped);
+			const more = Math.max(0, total - shown.length);
+			parts.push(
+				"",
+				"TICKET FOLDER FILES (reference docs, code samples, and fixtures kept beside this ticket):",
+				...shown.map((f) => `- ${f.rel}`),
+				...(more > 0 ? [`- … and ${more} more`] : []),
+			);
+		}
 	}
 	const assembled = parts.join("\n");
 	return assembled.length <= MAX_WORK_PROMPT_CHARS ? assembled : cut(assembled, MAX_WORK_PROMPT_CHARS);

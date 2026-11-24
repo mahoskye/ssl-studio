@@ -17,7 +17,23 @@ import { canonical, documents, openFile, state } from "../state";
  * A reply is a model's words, and may repeat text it was shown. Nothing in it
  * may load from the network or take input: an image address can carry data out.
  */
-const FORBIDDEN = ["img", "picture", "source", "video", "audio", "iframe", "object", "embed", "form", "input", "button", "select", "textarea", "style", "svg", "math"];
+const FORBIDDEN = [
+	"img", "picture", "source", "video", "audio", "iframe", "object", "embed",
+	"form", "input", "button", "select", "textarea", "style", "svg", "math",
+	"canvas", "dialog", "area", "track",
+];
+
+const FORBIDDEN_ATTRS = [
+	"style", "background", "poster", "src", "srcset", "ping",
+	"action", "formaction", "popover", "popovertarget", "command", "commandfor",
+];
+
+export const REPLY_PURIFY_CONFIG = {
+	FORBID_TAGS: FORBIDDEN,
+	FORBID_ATTR: FORBIDDEN_ATTRS,
+	ALLOW_DATA_ATTR: false,
+	ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|ticket|wiki|file-ref):|[^a-z]|[a-z+.-]+(?:[^a-z+.-:]|$))/i,
+};
 
 const WORKSPACE_FILE_EXT = "(?:ssl|srvscr|ds|sql|ddl|pks|pkb|xfd|hl7|astm|ini|config|svg|md|markdown|csv|tsv|json|toml|ya?ml|xml|xsd|txt|ts|tsx|js|css)";
 const SINGLE_FILE_COLON_LINK_RE = new RegExp(`\\[([^\\]]+)\\]\\(([^\\s()/:]+\\.${WORKSPACE_FILE_EXT}:\\d+(?:-\\d+)?)\\)`, "gi");
@@ -34,9 +50,9 @@ function existingLinkRanges(line: string): [number, number][] {
 
 /**
  * Protects single-filename `:line` links (`[foo.ssl:42](foo.ssl:42)`) and backticked workspace paths
- * from being mangled as unknown URI schemes by DOMPurify, turning them into clickable `data-file-ref` links.
+ * from being mangled as unknown URI schemes by DOMPurify, turning them into clickable `file-ref://` links.
  */
-function rewriteFileLinksBeforeParse(text: string): string {
+export function rewriteFileLinksBeforeParse(text: string): string {
 	// Skip fenced code blocks while rewriting prose lines.
 	const lines = text.replace(/\r\n/g, "\n").split("\n");
 	let fence: { ch: string; len: number } | null = null;
@@ -44,19 +60,32 @@ function rewriteFileLinksBeforeParse(text: string): string {
 	for (const line of lines) {
 		const fm = /^[ \t]{0,3}(`{3,}|~{3,})(.*)$/.exec(line);
 		if (fm) {
-			if (!fence) fence = { ch: fm[1]![0]!, len: fm[1]!.length };
-			else if (fm[1]![0] === fence.ch && fm[1]!.length >= fence.len && fm[2]!.trim() === "") fence = null;
-			out.push(line);
-			continue;
+			const ch = fm[1]![0]!;
+			const len = fm[1]!.length;
+			const info = fm[2]!;
+			if (!fence) {
+				// Per CommonMark §4.5, a backtick fence's info string cannot contain backticks
+				// (lines like ```` ```foo.ssl``` ```` are inline code spans, not opening fences).
+				if (!(ch === "`" && info.includes("`"))) {
+					fence = { ch, len };
+					out.push(line);
+					continue;
+				}
+			} else if (ch === fence.ch && len >= fence.len && info.trim() === "") {
+				fence = null;
+				out.push(line);
+				continue;
+			}
 		}
 		if (fence) {
 			out.push(line);
 			continue;
 		}
 		let next = line.replace(SINGLE_FILE_COLON_LINK_RE, (_, label: string, ref: string) => `[${label}](file-ref://${encodeURIComponent(ref)})`);
-		// Linkify standalone backticked workspace file paths (skipping anything inside existing `[...](...)` links).
+		// Linkify standalone backticked workspace file paths (skipping anything inside existing `[...](...)` links or multi-backtick code spans).
 		const linkSpans = next.includes("](") ? existingLinkRanges(next) : [];
-		next = next.replace(BACKTICK_PATH_RE, (full, ref: string, offset: number) => {
+		next = next.replace(BACKTICK_PATH_RE, (full, ref: string, offset: number, whole: string) => {
+			if ((offset > 0 && whole[offset - 1] === "`") || whole[offset + full.length] === "`") return full;
 			if (linkSpans.some(([from, to]) => offset >= from && offset < to)) return full;
 			const trimmed = ref.trim();
 			if (!trimmed || /^\s|\s$/.test(ref)) return full;
@@ -93,10 +122,7 @@ export function renderReply(text: string): string {
 	};
 	const prepared = rewriteFileLinksBeforeParse(text);
 	const html = marked.parse(prepared, { async: false, gfm: true }) as string;
-	const clean = DOMPurify.sanitize(html, {
-		FORBID_TAGS: FORBIDDEN,
-		ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|ticket|wiki|file-ref):|[^a-z]|[a-z+.-]+(?:[^a-z+.-:]|$))/i,
-	});
+	const clean = DOMPurify.sanitize(html, REPLY_PURIFY_CONFIG);
 	return finishMarkdown(clean, { tickets: tickets.length ? tickets : undefined, named });
 }
 

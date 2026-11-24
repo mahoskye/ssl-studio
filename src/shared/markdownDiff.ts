@@ -190,6 +190,130 @@ export function segmentMarkdownBlocks(md: string): MarkdownBlock[] {
 	return blocks;
 }
 
+/** Exact DP LCS over sub-ranges `a[a0..a1)` and `b[b0..b1)`. Caller ensures `(m + 1) * (n + 1) <= maxCells`. */
+function dpLcsAnchors(a: readonly string[], b: readonly string[], a0: number, a1: number, b0: number, b1: number): [number, number][] {
+	const m = a1 - a0;
+	const n = b1 - b0;
+	if (m <= 0 || n <= 0) return [];
+	const width = n + 1;
+	const dp = new Uint32Array((m + 1) * width);
+	for (let i = m - 1; i >= 0; i--) {
+		const ai = a[a0 + i]!;
+		const row = i * width;
+		const nextRow = (i + 1) * width;
+		for (let j = n - 1; j >= 0; j--) {
+			if (ai === b[b0 + j]) dp[row + j] = dp[nextRow + j + 1]! + 1;
+			else dp[row + j] = Math.max(dp[nextRow + j]!, dp[row + j + 1]!);
+		}
+	}
+
+	const out: [number, number][] = [];
+	let i = 0;
+	let j = 0;
+	while (i < m && j < n) {
+		if (a[a0 + i] === b[b0 + j]) {
+			out.push([a0 + i, b0 + j]);
+			i++;
+			j++;
+		} else if (dp[(i + 1) * width + j]! >= dp[i * width + j + 1]!) {
+			i++;
+		} else {
+			j++;
+		}
+	}
+	return out;
+}
+
+/**
+ * Linear-time bounded-lookahead cursor matching for very large slices: maintains one
+ * advancing cursor per token value in `b` so repeated tokens (spaces, punctuation) are
+ * never rescanned, and caps jumps so a single moved token cannot skip to EOF.
+ */
+function boundedCursorAnchors(a: readonly string[], b: readonly string[], a0: number, a1: number, b0: number, b1: number): [number, number][] {
+	const m = a1 - a0;
+	const n = b1 - b0;
+	if (m <= 0 || n <= 0) return [];
+	const posB = new Map<string, number[]>();
+	for (let j = 0; j < n; j++) {
+		const val = b[b0 + j]!;
+		let list = posB.get(val);
+		if (!list) {
+			list = [];
+			posB.set(val, list);
+		}
+		list.push(j);
+	}
+	const cursors = new Map<string, number>();
+	const out: [number, number][] = [];
+	let lastI = -1;
+	let lastJ = -1;
+	for (let i = 0; i < m; i++) {
+		const val = a[a0 + i]!;
+		const list = posB.get(val);
+		if (!list) continue;
+		let c = cursors.get(val) ?? 0;
+		while (c < list.length && list[c]! <= lastJ) c++;
+		cursors.set(val, c);
+		if (c >= list.length) continue;
+		const nextJ = list[c]!;
+		const maxJump = Math.min(128, Math.max(16, (i - lastI) * 4));
+		if (nextJ - lastJ <= maxJump) {
+			// Avoid jumping over `b[lastJ + 1]` when the very next token `a[i + 1]` aligns directly with it.
+			if (nextJ > lastJ + 1 && i + 1 < m && lastJ + 1 < n && a[a0 + i + 1] === b[b0 + lastJ + 1]) continue;
+			out.push([a0 + i, b0 + nextJ]);
+			lastI = i;
+			lastJ = nextJ;
+			cursors.set(val, c + 1);
+		}
+	}
+	return out;
+}
+
+/** Patience unique-token LIS anchors in O((m + n) log U) time, rejecting moved outliers. */
+function patienceLisAnchors(a: readonly string[], b: readonly string[], a0: number, a1: number, b0: number, b1: number): [number, number][] {
+	const uniqueA = new Map<string, number>();
+	for (let i = a0; i < a1; i++) {
+		const v = a[i]!;
+		uniqueA.set(v, uniqueA.has(v) ? -1 : i);
+	}
+	const uniqueB = new Map<string, number>();
+	for (let j = b0; j < b1; j++) {
+		const v = b[j]!;
+		const ia = uniqueA.get(v);
+		if (ia === undefined || ia < 0) continue;
+		uniqueB.set(v, uniqueB.has(v) ? -1 : j);
+	}
+	const pairs: [number, number][] = [];
+	for (let i = a0; i < a1; i++) {
+		const v = a[i]!;
+		if (uniqueA.get(v) !== i) continue;
+		const j = uniqueB.get(v);
+		if (j !== undefined && j >= 0) pairs.push([i, j]);
+	}
+	if (!pairs.length) return [];
+
+	const tails: number[] = [];
+	const prev = new Int32Array(pairs.length).fill(-1);
+	for (let k = 0; k < pairs.length; k++) {
+		const j = pairs[k]![1];
+		let lo = 0;
+		let hi = tails.length;
+		while (lo < hi) {
+			const mid = (lo + hi) >>> 1;
+			if (pairs[tails[mid]!]![1] < j) lo = mid + 1;
+			else hi = mid;
+		}
+		if (lo > 0) prev[k] = tails[lo - 1]!;
+		tails[lo] = k;
+	}
+	const lis: [number, number][] = [];
+	for (let k = tails[tails.length - 1]!; k >= 0; k = prev[k]!) {
+		lis.push(pairs[k]!);
+	}
+	lis.reverse();
+	return lis;
+}
+
 /** Exact LCS index pairs for two string arrays, with common-prefix/suffix trimming and size guard. */
 function lcsAnchors(a: readonly string[], b: readonly string[], maxCells = 200_000): [number, number][] {
 	let start = 0;
@@ -213,55 +337,63 @@ function lcsAnchors(a: readonly string[], b: readonly string[], maxCells = 200_0
 	const n = endB - start;
 	if (m === 0 || n === 0) return [...prefix, ...suffix];
 
-	if (m * n > maxCells) {
-		// Fast linear fallback on very large documents: match unique items in order.
-		const posB = new Map<string, number[]>();
-		for (let j = 0; j < n; j++) {
-			const val = b[start + j]!;
-			const list = posB.get(val);
-			if (list) list.push(j);
-			else posB.set(val, [j]);
-		}
-		const mid: [number, number][] = [];
-		let lastJ = -1;
-		for (let i = 0; i < m; i++) {
-			const list = posB.get(a[start + i]!);
-			if (!list) continue;
-			const nextJ = list.find((j) => j > lastJ);
-			if (nextJ !== undefined) {
-				mid.push([start + i, start + nextJ]);
-				lastJ = nextJ;
+	if ((m + 1) * (n + 1) > maxCells) {
+		// Fast fallback on large slices: Patience unique-token LIS + gap prefix/suffix/bounded fill,
+		// compared against bounded-lookahead per-token cursor matching when repeated tokens dominate.
+		const lis = patienceLisAnchors(a, b, start, endA, start, endB);
+		const patienceMid: [number, number][] = [];
+		let dpBudget = maxCells;
+		const fillGap = (ga0: number, ga1: number, gb0: number, gb1: number) => {
+			let lA = ga0;
+			let rA = ga1;
+			let lB = gb0;
+			let rB = gb1;
+			const gapSuffix: [number, number][] = [];
+			while (lA < rA && lB < rB && a[lA] === b[lB]) {
+				patienceMid.push([lA, lB]);
+				lA++;
+				lB++;
 			}
+			while (rA > lA && rB > lB && a[rA - 1] === b[rB - 1]) {
+				rA--;
+				rB--;
+				gapSuffix.push([rA, rB]);
+			}
+			const gm = rA - lA;
+			const gn = rB - lB;
+			if (gm > 0 && gn > 0) {
+				const cells = (gm + 1) * (gn + 1);
+				if (cells <= dpBudget) {
+					dpBudget -= cells;
+					for (const p of dpLcsAnchors(a, b, lA, rA, lB, rB)) patienceMid.push(p);
+				} else {
+					for (const p of boundedCursorAnchors(a, b, lA, rA, lB, rB)) patienceMid.push(p);
+				}
+			}
+			for (let k = gapSuffix.length - 1; k >= 0; k--) patienceMid.push(gapSuffix[k]!);
+		};
+
+		if (lis.length > 0) {
+			let prevA = start;
+			let prevB = start;
+			for (const [ia, ib] of lis) {
+				fillGap(prevA, ia, prevB, ib);
+				patienceMid.push([ia, ib]);
+				prevA = ia + 1;
+				prevB = ib + 1;
+			}
+			fillGap(prevA, endA, prevB, endB);
+		}
+
+		let mid = patienceMid;
+		if (patienceMid.length < Math.min(m, n) * 0.5) {
+			const cursorMid = boundedCursorAnchors(a, b, start, endA, start, endB);
+			if (cursorMid.length > patienceMid.length) mid = cursorMid;
 		}
 		return [...prefix, ...mid, ...suffix];
 	}
 
-	const width = n + 1;
-	const dp = new Uint32Array((m + 1) * width);
-	for (let i = m - 1; i >= 0; i--) {
-		const ai = a[start + i]!;
-		const row = i * width;
-		const nextRow = (i + 1) * width;
-		for (let j = n - 1; j >= 0; j--) {
-			if (ai === b[start + j]) dp[row + j] = dp[nextRow + j + 1]! + 1;
-			else dp[row + j] = Math.max(dp[nextRow + j]!, dp[row + j + 1]!);
-		}
-	}
-
-	const mid: [number, number][] = [];
-	let i = 0;
-	let j = 0;
-	while (i < m && j < n) {
-		if (a[start + i] === b[start + j]) {
-			mid.push([start + i, start + j]);
-			i++;
-			j++;
-		} else if (dp[(i + 1) * width + j]! >= dp[i * width + j + 1]!) {
-			i++;
-		} else {
-			j++;
-		}
-	}
+	const mid = dpLcsAnchors(a, b, start, endA, start, endB);
 	return [...prefix, ...mid, ...suffix];
 }
 
@@ -269,7 +401,8 @@ function escapeHtml(text: string): string {
 	return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-const WORD_TOKEN_RE = /`[^`\n]+`|!?\[[^\]]*\]\([^)]*\)|\*\*|__|~~|\s+|[A-Za-z0-9_'-]+|[^\sA-Za-z0-9_'-]/g;
+const WORD_TOKEN_RE =
+	/(`+)(?!`)(?:(?!(?<!`)\1(?!`))[^\n])+?(?<!`)\1(?!`)|<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*>|!?\[[^\]]*\]\([^)]*\)|\*\*|__|~~|\s+|[A-Za-z0-9_'-]+|[^\sA-Za-z0-9_'-]/g;
 
 function tokenizeInline(text: string): string[] {
 	return text.match(WORD_TOKEN_RE) ?? [];
@@ -280,13 +413,12 @@ function wordSet(text: string): Set<string> {
 	return new Set(words ?? []);
 }
 
-function tokenSimilarity(a: string, b: string): number {
-	const sa = wordSet(a);
-	const sb = wordSet(b);
+function wordSetSimilarity(sa: ReadonlySet<string>, sb: ReadonlySet<string>): number {
 	if (!sa.size && !sb.size) return 1;
 	if (!sa.size || !sb.size) return 0;
+	const [small, large] = sa.size <= sb.size ? [sa, sb] : [sb, sa];
 	let inter = 0;
-	for (const w of sa) if (sb.has(w)) inter++;
+	for (const w of small) if (large.has(w)) inter++;
 	return (2 * inter) / (sa.size + sb.size);
 }
 
@@ -395,9 +527,64 @@ function diffQuoteLines(beforeRaw: string, afterRaw: string): { before: string; 
 	return { before: outA.join("\n"), after: outB.join("\n") };
 }
 
-function splitTableRow(row: string): string[] {
-	const trimmed = row.trim().replace(/^\|/, "").replace(/\|$/, "");
-	return trimmed.split("|").map((c) => c.trim());
+function hasEvenBackslashesBefore(s: string, idx: number): boolean {
+	let bs = 0;
+	for (let k = idx - 1; k >= 0 && s[k] === "\\"; k--) bs++;
+	return bs % 2 === 0;
+}
+
+function findClosingBackticks(s: string, from: number, tickLen: number): number {
+	let i = from;
+	while (i < s.length) {
+		if (s[i] === "`") {
+			let end = i;
+			while (end < s.length && s[end] === "`") end++;
+			if (end - i === tickLen) return i;
+			i = end;
+		} else {
+			i++;
+		}
+	}
+	return -1;
+}
+
+export function splitTableRow(row: string): string[] {
+	let s = row.trim();
+	if (s.startsWith("|")) s = s.slice(1);
+	const rawCells: string[] = [];
+	let cur = "";
+	let i = 0;
+	while (i < s.length) {
+		const ch = s[i]!;
+		if (ch === "`" && hasEvenBackslashesBefore(s, i)) {
+			let tickEnd = i;
+			while (tickEnd < s.length && s[tickEnd] === "`") tickEnd++;
+			const tickLen = tickEnd - i;
+			const closeAt = findClosingBackticks(s, tickEnd, tickLen);
+			if (closeAt >= 0) {
+				const spanEnd = closeAt + tickLen;
+				cur += s.slice(i, spanEnd);
+				i = spanEnd;
+				continue;
+			}
+			cur += s.slice(i, tickEnd);
+			i = tickEnd;
+			continue;
+		}
+		if (ch === "|" && hasEvenBackslashesBefore(s, i)) {
+			rawCells.push(cur);
+			cur = "";
+			i++;
+			continue;
+		}
+		cur += ch;
+		i++;
+	}
+	rawCells.push(cur);
+	if (rawCells.length > 1 && rawCells[rawCells.length - 1]!.trim() === "" && s.endsWith("|") && hasEvenBackslashesBefore(s, s.length - 1)) {
+		rawCells.pop();
+	}
+	return rawCells.map((c) => c.trim());
 }
 
 function formatTableRow(cells: readonly string[]): string {
@@ -519,6 +706,47 @@ function diffEscapedCodeLine(aLine: string, bLine: string): { before: string; af
 	return { before: outA.join(""), after: outB.join("") };
 }
 
+/**
+ * Diffs raw plain-text / YAML frontmatter lines and tokens, escaping each token to HTML inside the
+ * formatter so HTML entities like `&lt;` / `&gt;` / `&quot;` are never split across `<del>`/`<ins>`.
+ */
+export function diffPlainTextHtml(beforeRaw: string, afterRaw: string): { before: string; after: string } {
+	const aLines = beforeRaw.replace(/\r\n/g, "\n").split("\n");
+	const bLines = afterRaw.replace(/\r\n/g, "\n").split("\n");
+	const anchors = lcsAnchors(aLines, bLines, 30_000);
+	const outA: string[] = [];
+	const outB: string[] = [];
+	let ai = 0;
+	let bi = 0;
+	const flush = (na: number, nb: number) => {
+		const countA = na - ai;
+		const countB = nb - bi;
+		const paired = Math.min(countA, countB);
+		for (let k = 0; k < paired; k++) {
+			const d = diffEscapedCodeLine(aLines[ai + k]!, bLines[bi + k]!);
+			outA.push(d.before);
+			outB.push(d.after);
+		}
+		for (let k = paired; k < countA; k++) {
+			const line = escapeHtml(aLines[ai + k]!);
+			outA.push(line ? `<del class="md-diff-del">${line}</del>` : "");
+		}
+		for (let k = paired; k < countB; k++) {
+			const line = escapeHtml(bLines[bi + k]!);
+			outB.push(line ? `<ins class="md-diff-ins">${line}</ins>` : "");
+		}
+	};
+	for (const [ma, mb] of anchors) {
+		flush(ma, mb);
+		outA.push(escapeHtml(aLines[ma]!));
+		outB.push(escapeHtml(bLines[mb]!));
+		ai = ma + 1;
+		bi = mb + 1;
+	}
+	flush(aLines.length, bLines.length);
+	return { before: outA.join("\n"), after: outB.join("\n") };
+}
+
 function diffCodeBlockHtml(beforeRaw: string, afterRaw: string): { before: string; after: string } {
 	const a = unpackFence(beforeRaw);
 	const b = unpackFence(afterRaw);
@@ -633,18 +861,24 @@ export function diffMarkdownBlocks(beforeMd: string, afterMd: string): MarkdownD
 			return;
 		}
 
-		// Monotonic greedy pairing by kind compatibility + token similarity.
+		// Monotonic greedy pairing by kind compatibility + precomputed token similarity (bounded lookahead).
+		const BLOCK_PAIR_LOOKAHEAD = 32;
+		const leftSets = left.map((b) => wordSet(b.raw));
+		const rightSets = right.map((b) => wordSet(b.raw));
 		const pairs: [number, number][] = [];
 		let rCursor = 0;
-		for (let li = 0; li < left.length; li++) {
+		for (let li = 0; li < left.length && rCursor < right.length; li++) {
 			let bestRi = -1;
-			let bestScore = 0.25;
-			for (let ri = rCursor; ri < right.length; ri++) {
+			let bestScore = -1;
+			const rLimit = Math.min(right.length, rCursor + BLOCK_PAIR_LOOKAHEAD);
+			const sa = leftSets[li]!;
+			for (let ri = rCursor; ri < rLimit; ri++) {
 				if (!areCompatible(left[li]!, right[ri]!)) continue;
-				const score = tokenSimilarity(left[li]!.raw, right[ri]!.raw);
-				if (score >= bestScore) {
+				const score = wordSetSimilarity(sa, rightSets[ri]!);
+				if (score >= 0.25 && score > bestScore) {
 					bestScore = score;
 					bestRi = ri;
+					if (score === 1) break;
 				}
 			}
 			if (bestRi >= 0) {

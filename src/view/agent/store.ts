@@ -35,9 +35,50 @@ export type SavedThread = {
 
 const MAX_THREADS = 5;
 const MAX_THREAD_ENTRIES = 40;
+export const MAX_SAVED_ENTRY_CHARS = 16_000;
+export const MAX_SAVED_THREADS_CHARS = 256_000;
+const TRUNC_SUFFIX = "\n… (truncated)";
 const threadStorageKey = (canonRoot: string) => `agent.threads.v1:${canonRoot}`;
 
 let activeWorkspaceKey: string | null = null;
+/** Monotonic epoch incremented on workspace switches / conversation resets so late turn events never bleed across workspaces. */
+let turnEpoch = 0;
+
+function clipSavedText(text: string, limit: number): string {
+	if (text.length <= limit) return text;
+	const keep = Math.max(0, limit - TRUNC_SUFFIX.length);
+	return `${text.slice(0, keep)}${TRUNC_SUFFIX}`;
+}
+
+/** Caps per-entry length and total serialized JSON payload size so large agent replies cannot exhaust localStorage quota. */
+export function trimThreadsForStorage(
+	threads: readonly SavedThread[],
+	maxEntryChars = MAX_SAVED_ENTRY_CHARS,
+	maxTotalChars = MAX_SAVED_THREADS_CHARS,
+): SavedThread[] {
+	const list: SavedThread[] = threads.slice(0, MAX_THREADS).map((t) => ({
+		...t,
+		entries: t.entries.slice(-MAX_THREAD_ENTRIES).map((e) => ({
+			...e,
+			text: clipSavedText(e.text, maxEntryChars),
+		})),
+	}));
+	while (list.length > 1 && JSON.stringify(list).length > maxTotalChars) {
+		list.pop();
+	}
+	if (list.length === 1) {
+		const only = list[0]!;
+		while (only.entries.length > 1 && JSON.stringify(list).length > maxTotalChars) {
+			only.entries.shift();
+		}
+		if (only.entries.length === 1 && JSON.stringify(list).length > maxTotalChars) {
+			const overhead = JSON.stringify([{ ...only, entries: [{ ...only.entries[0]!, text: "" }] }]).length;
+			const room = Math.max(64, maxTotalChars - overhead - 64);
+			only.entries[0] = { ...only.entries[0]!, text: clipSavedText(only.entries[0]!.text, room) };
+		}
+	}
+	return list;
+}
 
 function readSavedThreads(canonRoot: string): SavedThread[] {
 	try {
@@ -83,15 +124,44 @@ function readSavedThreads(canonRoot: string): SavedThread[] {
 	}
 }
 
-function writeSavedThreads(canonRoot: string, threads: readonly SavedThread[]) {
-	try {
-		const trimmed = threads.slice(0, MAX_THREADS).map((t) => ({
-			...t,
-			entries: t.entries.slice(-MAX_THREAD_ENTRIES),
-		}));
-		localStorage.setItem(threadStorageKey(canonRoot), JSON.stringify(trimmed));
-	} catch {
-		// localStorage unavailable or quota reached: ignore cleanly.
+export function writeSavedThreads(
+	canonRoot: string,
+	threads: readonly SavedThread[],
+	storage: Pick<Storage, "setItem" | "removeItem"> = localStorage,
+	maxEntryChars = MAX_SAVED_ENTRY_CHARS,
+	maxTotalChars = MAX_SAVED_THREADS_CHARS,
+) {
+	const key = threadStorageKey(canonRoot);
+	const candidate = trimThreadsForStorage(threads, maxEntryChars, maxTotalChars).map((t) => ({
+		...t,
+		entries: [...t.entries],
+	}));
+	while (candidate.length > 0) {
+		try {
+			storage.setItem(key, JSON.stringify(candidate));
+			return;
+		} catch {
+			if (candidate.length > 1) {
+				candidate.pop();
+				continue;
+			}
+			const only = candidate[0]!;
+			if (only.entries.length > 1) {
+				only.entries.shift();
+				continue;
+			}
+			const single = only.entries[0];
+			if (single && single.text.length > 256) {
+				only.entries[0] = { ...single, text: clipSavedText(single.text, Math.floor(single.text.length / 2)) };
+				continue;
+			}
+			try {
+				storage.removeItem(key);
+			} catch {
+				// localStorage unavailable or quota exhausted: ignore cleanly.
+			}
+			return;
+		}
 	}
 }
 
@@ -126,8 +196,14 @@ export const [agent, setAgent] = createStore({
 let nextEntry = 1;
 /** The reply being written, by session: the entry its text goes into. */
 const streaming = new Map<string, number>();
-/** Metadata for the turn currently in flight so streamed agent replies bind to their own turn's ticket/file. */
-let activeTurnMeta: EntryMeta | undefined;
+type ActiveTurn = {
+	epoch: number;
+	workspaceKey: string | null;
+	meta?: EntryMeta;
+	streamedEntryId: number | null;
+};
+/** Active in-flight turn binding metadata and stream state to its workspace + epoch. */
+let activeTurn: ActiveTurn | null = null;
 /** The turn in flight, from the moment it is asked for (logic.ts). */
 const turns = new Turns((sessionID) => backend.agent("interrupt", [sessionID]));
 
@@ -171,6 +247,8 @@ export function persistCurrentThread() {
 export function syncWorkspaceThreads(canonRoot: string | null) {
 	if (canonRoot === activeWorkspaceKey) return;
 	persistCurrentThread();
+	turnEpoch++;
+	streaming.clear();
 	activeWorkspaceKey = canonRoot;
 	if (!canonRoot) {
 		setAgent({ threads: [], activeThreadId: null, entries: [], chatSession: null });
@@ -192,6 +270,8 @@ export function switchThread(threadId: string) {
 	persistCurrentThread();
 	const target = agent.threads.find((t) => t.id === threadId);
 	if (!target) return;
+	turnEpoch++;
+	streaming.clear();
 	const restored: Entry[] = target.entries.map((e) => ({ ...e, id: nextEntry++ }));
 	setAgent({ entries: restored, activeThreadId: target.id, chatSession: null });
 }
@@ -200,6 +280,8 @@ export function switchThread(threadId: string) {
 export function startNewThread(noteText?: string) {
 	if (agent.busy) return;
 	persistCurrentThread();
+	turnEpoch++;
+	streaming.clear();
 	const entries: Entry[] = noteText ? [{ id: nextEntry++, role: "note", text: noteText }] : [];
 	setAgent({ entries, activeThreadId: null, chatSession: null });
 }
@@ -207,6 +289,8 @@ export function startNewThread(noteText?: string) {
 /** Removes all saved threads for the current workspace from localStorage. */
 export function clearSavedThreads() {
 	if (agent.busy) return;
+	turnEpoch++;
+	streaming.clear();
 	if (activeWorkspaceKey) {
 		try {
 			localStorage.removeItem(threadStorageKey(activeWorkspaceKey));
@@ -218,6 +302,8 @@ export function clearSavedThreads() {
 }
 
 export function clearEntries() {
+	turnEpoch++;
+	streaming.clear();
 	setAgent({ entries: [], activeThreadId: null, chatSession: null });
 }
 
@@ -227,21 +313,37 @@ export const safely = <T>(what: string, work: () => T | Promise<T>, failed?: (me
 on("agent", ({ type, data }) => {
 	const d = data as any;
 	turns.event(type, d);
-	if (type === "status") setAgent("status", d as AgentStatus);
-	else if (type === "guard") addEntry({ role: "note", text: `Stopped the turn: the agent reached for ${d.tool}, which opencode runs without asking permission.`, sessionID: d.sessionID });
-	else if (type === "session.text.delta") {
-		let id = streaming.get(d.sessionID);
-		if (id === undefined) {
-			id = addEntry({ role: "agent", text: "", sessionID: d.sessionID, streaming: true, ...(activeTurnMeta ? { turn: activeTurnMeta } : {}) });
-			streaming.set(d.sessionID, id);
+	if (type === "status") {
+		const nextStatus = d as AgentStatus;
+		if (nextStatus?.state === "off" || nextStatus?.state === "failed") {
+			setAgent({ status: nextStatus, chatSession: null });
+		} else {
+			setAgent("status", nextStatus);
 		}
+		return;
+	}
+	// Drop late streaming/tool events from an older turn epoch or another workspace.
+	const turnMatches = activeTurn !== null && activeTurn.epoch === turnEpoch && activeTurn.workspaceKey === activeWorkspaceKey;
+	if (!turnMatches) return;
+	if (type === "guard") {
+		addEntry({ role: "note", text: `Stopped the turn: the agent reached for ${d?.tool}, which opencode runs without asking permission.`, sessionID: d?.sessionID });
+	} else if (type === "session.text.delta") {
+		if (typeof d?.delta !== "string" || !d.delta) return;
+		const sid = typeof d.sessionID === "string" ? d.sessionID : "";
+		let id = streaming.get(sid);
+		if (id === undefined) {
+			id = addEntry({ role: "agent", text: "", sessionID: sid || undefined, streaming: true, ...(activeTurn?.meta ? { turn: activeTurn.meta } : {}) });
+			streaming.set(sid, id);
+		}
+		if (activeTurn) activeTurn.streamedEntryId = id;
 		setAgent("entries", (e) => e.id === id, produce((e: Entry) => void (e.text += d.delta)));
 	} else if (type === "session.tool.called") {
-		addEntry({ role: "note", text: `tool: ${d.input?.code ? "execute (code)" : JSON.stringify(d.input).slice(0, 120)}`, sessionID: d.sessionID });
+		addEntry({ role: "note", text: `tool: ${d?.input?.code ? "execute (code)" : JSON.stringify(d?.input).slice(0, 120)}`, sessionID: d?.sessionID });
 	} else if (/^session\.execution\.(succeeded|failed|interrupted)$/.test(type)) {
-		const id = streaming.get(d.sessionID);
+		const sid = typeof d?.sessionID === "string" ? d.sessionID : "";
+		const id = streaming.get(sid);
 		if (id !== undefined) setAgent("entries", (e) => e.id === id, "streaming", false);
-		streaming.delete(d.sessionID);
+		streaming.delete(sid);
 	}
 });
 
@@ -255,25 +357,37 @@ export async function resume() {
 		const status = (await backend.agent("status", [])) as AgentStatus;
 		// A turn may have started it meanwhile; what that set stands.
 		if (agent.status.state !== "off" || status.state === "off") return;
-		setAgent("status", status);
-		if (status.state === "ready") setAgent("models", (await backend.agent("models", [])) as AgentModel[]);
+		if (status.state === "failed") {
+			setAgent({ status, chatSession: null });
+		} else {
+			setAgent("status", status);
+			if (status.state === "ready") setAgent("models", (await backend.agent("models", [])) as AgentModel[]);
+		}
 	});
 }
 
 export async function start() {
 	try {
-		setAgent("status", (await backend.agent("start", [])) as AgentStatus);
-		setAgent("models", (await backend.agent("models", [])) as AgentModel[]);
+		const status = (await backend.agent("start", [])) as AgentStatus;
+		if (status.state === "off" || status.state === "failed") {
+			setAgent({ status, chatSession: null });
+		} else {
+			setAgent("status", status);
+			setAgent("models", (await backend.agent("models", [])) as AgentModel[]);
+		}
 	} catch (e) {
 		// The panel shows the message under the status line; Output keeps it.
-		setAgent("status", { state: "failed", message: errorText(e) });
+		setAgent({ status: { state: "failed", message: errorText(e) }, chatSession: null });
 		log(`opencode did not start: ${errorText(e)}`);
 	}
 }
 
 /** Stops the opencode server (not one reply: that is `interrupt`). */
 export async function stop() {
-	await safely("opencode did not stop", async () => setAgent("status", (await backend.agent("stop", [])) as AgentStatus));
+	await safely("opencode did not stop", async () => {
+		const status = (await backend.agent("stop", [])) as AgentStatus;
+		setAgent({ status, chatSession: null });
+	});
 }
 
 export const currentModel = () => {
@@ -282,14 +396,19 @@ export const currentModel = () => {
 	return local ? `${local.providerID}/${local.id}` : "";
 };
 
-/** Says whether the model was saved. False: the user backed out, and the model in use has not changed. */
+/** Says whether the model was saved. False: the user backed out or saving failed, and the model in use has not changed. */
 export async function chooseModel(ref: string): Promise<boolean> {
 	const decision = await decideModel(ref, agent.models, choose);
 	if (!decision) return false;
-	if (decision.own) await saveSetting({ agentOwnModels: [...new Set([...(state.settings.agentOwnModels ?? []), ref])] });
+	const chosen = decision.model;
+	if (decision.own && chosen) {
+		const savedOwn = await saveSetting({ agentOwnModels: [...new Set([...(state.settings.agentOwnModels ?? []), chosen])] });
+		if (!savedOwn) return false;
+	}
 	// A project that names its model wins over the user's own setting, so the choice is kept with the workspace there.
 	// An empty choice takes the setting out, so the default model shows through.
-	await saveSetting({ agentModel: ref || null }, state.project?.agentModel ? "workspace" : "user");
+	const savedModel = await saveSetting({ agentModel: chosen || null }, state.project?.agentModel ? "workspace" : "user");
+	if (!savedModel) return false;
 	setAgent("models", (await backend.agent("models", [])) as AgentModel[]);
 	setAgent("chatSession", null);
 	return true;
@@ -301,13 +420,27 @@ export async function ask(text: string, options: { title?: string; skills?: stri
 		notify("The agent is still working on the last request.");
 		return null;
 	}
+	const myWorkspace = activeWorkspaceKey;
+	const myEpoch = ++turnEpoch;
+	const turnState: ActiveTurn = { epoch: myEpoch, workspaceKey: myWorkspace, meta: options.turn, streamedEntryId: null };
+	const stillCurrent = () => turnEpoch === myEpoch && activeWorkspaceKey === myWorkspace;
 	setAgent("busy", true);
-	activeTurnMeta = options.turn;
+	activeTurn = turnState;
 	turns.begin(options.sessionID);
 	addEntry({ role: "user", text: options.show ?? text, ...(options.turn ? { turn: options.turn } : {}) });
 	try {
 		if (agent.status.state !== "ready") await start();
+		if (!stillCurrent()) return null;
+		if (agent.status.state !== "ready") {
+			const msg = agent.status.message || "opencode is not ready.";
+			addEntry({ role: "note", text: `failed: ${msg}` });
+			return null;
+		}
 		const reply = (await backend.agent("ask", [{ text, title: options.title, skills: options.skills, keep: options.keep, sessionID: options.sessionID, toolLimit: options.toolLimit }])) as AgentReply;
+		if (!stillCurrent()) return null;
+		if (turnState.streamedEntryId === null && typeof reply.text === "string" && reply.text.length > 0) {
+			addEntry({ role: "agent", text: reply.text, sessionID: reply.sessionID, ...(options.turn ? { turn: options.turn } : {}) });
+		}
 		const cost = reply.cost ? `, cost ${reply.cost}` : "";
 		const outcome = reply.outcome === "interrupted" && turns.stopping ? "stopped by you" : reply.outcome;
 		addEntry({ role: "note", text: `${outcome} · ${reply.tokens?.input ?? 0} in / ${reply.tokens?.output ?? 0} out tokens${cost}${reply.error ? ` · ${reply.error}` : ""}` });
@@ -318,17 +451,19 @@ export async function ask(text: string, options: { title?: string; skills?: stri
 		if (reply.outcome !== "succeeded" && outcome !== "stopped by you") log(`agent turn ${reply.outcome}${reply.error ? `: ${reply.error}` : ""}`);
 		return reply;
 	} catch (e) {
-		addEntry({ role: "note", text: `failed: ${errorText(e)}` });
+		if (stillCurrent()) addEntry({ role: "note", text: `failed: ${errorText(e)}` });
 		log(`agent request failed: ${errorText(e)}`);
 		return null;
 	} finally {
 		turns.end();
-		activeTurnMeta = undefined;
+		if (activeTurn === turnState) activeTurn = null;
 		// A turn that ended without its closing event (a lost stream) must not stay marked as being written.
-		for (const id of streaming.values()) setAgent("entries", (e) => e.id === id, "streaming", false);
-		streaming.clear();
+		if (stillCurrent()) {
+			for (const id of streaming.values()) setAgent("entries", (e) => e.id === id, "streaming", false);
+			streaming.clear();
+		}
 		setAgent({ busy: false, stopping: false });
-		persistCurrentThread();
+		if (stillCurrent()) persistCurrentThread();
 	}
 }
 

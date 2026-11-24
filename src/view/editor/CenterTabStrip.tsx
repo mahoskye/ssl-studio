@@ -4,12 +4,12 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, Show, type JSX } from "solid-js";
 import { submenuOrInline, type RowMenuEntry } from "../../shared/contextMenu";
 import { createMiddleCloseTracker } from "../../shared/middleClickGuard";
-import { isInside } from "../../shared/paths";
+import { isInside, joinPath } from "../../shared/paths";
 import { othersOf, rightOf } from "../../shared/tabOrder";
 import { FileMark } from "../FileMark";
 import { Icon, type IconName } from "../Icon";
 import { chooseFromMenu } from "../panels/RowMenu";
-import { closeAllTabs, closeOtherTabs, closeTab, closeTabsToRight, displayName, isUntitled, keepTab, newUntitled, notify, setState, state, togglePin } from "../state";
+import { canonical, closeTab, displayName, isUntitled, keepTab, newUntitled, notify, setState, state, togglePin } from "../state";
 import { closeComparison, review } from "./Review";
 import { tabLabels } from "./tabs";
 
@@ -57,6 +57,37 @@ export function CenterTabStrip(props: {
 		queueMicrotask(updateTabOverflow);
 	});
 
+	const reviewedTargetPath = (): string | null => {
+		const activeReview = review();
+		if (!activeReview || activeReview.compare || !activeReview.path) return null;
+		const raw = activeReview.path;
+		if (raw.startsWith("untitled:")) return raw;
+		const root = state.workspace?.root;
+		if (root && !isInside(root, raw) && !raw.startsWith("/") && !/^[A-Za-z]:[\\/]/.test(raw)) {
+			return canonical(joinPath(root, ...raw.split(/[\\/]/)));
+		}
+		return canonical(raw);
+	};
+
+	const isBlockedByReview = (path: string): boolean => {
+		const target = reviewedTargetPath();
+		return Boolean(target && canonical(path) === target);
+	};
+
+	const tryCloseTab = async (path: string, groupIdx: number) => {
+		if (isBlockedByReview(path)) {
+			notify("Accept or reject the open review before closing this file.");
+			return false;
+		}
+		return closeTab(path, groupIdx);
+	};
+
+	const tryCloseTabs = async (paths: readonly string[], groupIdx: number) => {
+		for (const p of paths) {
+			if (!(await tryCloseTab(p, groupIdx))) return;
+		}
+	};
+
 	const activateFile = (path: string) => {
 		const activeReview = review();
 		if (activeReview && !activeReview.compare) {
@@ -101,11 +132,12 @@ export function CenterTabStrip(props: {
 		];
 		const picked = await chooseFromMenu(`Actions for the tab ${displayName(path)}`, items, at);
 		if (!picked) return;
-		if (picked === CLOSE) await closeTab(path, gIdx);
+		const latestGroup = state.groups[gIdx];
+		if (picked === CLOSE) await tryCloseTab(path, gIdx);
 		else if (picked === KEEP) keepTab(path, gIdx);
-		else if (picked === OTHERS) await closeOtherTabs(path, gIdx);
-		else if (picked === RIGHT) await closeTabsToRight(path, gIdx);
-		else if (picked === ALL) await closeAllTabs(gIdx);
+		else if (picked === OTHERS) await tryCloseTabs(othersOf(latestGroup?.tabs ?? [], latestGroup?.pinned ?? [], path), gIdx);
+		else if (picked === RIGHT) await tryCloseTabs(rightOf(latestGroup?.tabs ?? [], latestGroup?.pinned ?? [], path), gIdx);
+		else if (picked === ALL) await tryCloseTabs(othersOf(latestGroup?.tabs ?? [], latestGroup?.pinned ?? [], null), gIdx);
 		else if (picked === PIN) togglePin(path, gIdx);
 		else if (picked === PATH || picked === RELATIVE || picked === NAME) {
 			await (await import("../commands")).copyPath(picked === PATH ? "whole" : picked === NAME ? "name" : "relative", path);
@@ -184,13 +216,13 @@ export function CenterTabStrip(props: {
 										if (e.button !== 1) return;
 										e.preventDefault();
 										e.stopPropagation();
-										middleClose.release(path, () => void closeTab(path, state.activeGroup));
+										middleClose.release(path, () => void tryCloseTab(path, state.activeGroup));
 									}}
 									onAuxClick={(e) => {
 										if (e.button !== 1) return;
 										e.preventDefault();
 										e.stopPropagation();
-										middleClose.auxClick(path, () => void closeTab(path, state.activeGroup));
+										middleClose.auxClick(path, () => void tryCloseTab(path, state.activeGroup));
 									}}
 									onContextMenu={(e) => {
 										e.preventDefault();
@@ -227,7 +259,7 @@ export function CenterTabStrip(props: {
 										title="Close"
 										aria-label={`Close ${displayName(path)}`}
 										onMouseDown={(e) => e.button !== 1 && e.stopPropagation()}
-										onClick={() => void closeTab(path, state.activeGroup)}
+										onClick={() => void tryCloseTab(path, state.activeGroup)}
 									>
 										<span class="dot" aria-hidden="true" />
 										<Icon name="close" class="x" />

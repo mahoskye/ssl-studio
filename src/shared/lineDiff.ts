@@ -29,7 +29,7 @@ export function lineChanges(before: readonly string[], after: readonly string[],
 		else if (came) out.push({ kind: "added", line: next - came + 1, endLine: next });
 		else if (gone) out.push({ kind: "removed", line: next, endLine: next });
 	};
-	if (!a.length || !b.length || a.length * b.length > maxCells) {
+	if (!a.length || !b.length || (a.length + 1) * (b.length + 1) > maxCells) {
 		block(a.length, b.length, head + b.length);
 		return out;
 	}

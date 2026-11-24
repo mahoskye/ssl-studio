@@ -147,21 +147,33 @@ export function measure(text: string): { codeLines: number; bannerLines: string[
 	return { codeLines, bannerLines: lines.slice(0, bannerEnd < 0 ? lines.length : bannerEnd) };
 }
 
-/** The text without comments or whitespace: equal before and after means only comments and layout changed. */
-export function codeOnly(text: string): string {
+/**
+ * The text without comments, normalized so token boundaries stay distinct:
+ * equal before and after means only comments and layout changed.
+ * Returns null before `loadGrammar()` completes.
+ */
+export function codeOnly(text: string, targetGrammar: IGrammar | undefined = grammar): string | null {
+	if (!targetGrammar) return null;
 	let stack = INITIAL;
-	let out = "";
+	const pieces: string[] = [];
 	for (const line of text.split(/\r?\n/)) {
-		const result = grammar.tokenizeLine2(line, stack, 500);
+		const result = targetGrammar.tokenizeLine2(line, stack, 500);
 		stack = result.ruleStack;
 		for (let i = 0; i < result.tokens.length; i += 2) {
-			if (TOKEN_TYPE(result.tokens[i + 1]!) === COMMENT_TOKEN) continue;
+			const type = TOKEN_TYPE(result.tokens[i + 1]!);
+			if (type === COMMENT_TOKEN) continue;
 			const end = i + 2 < result.tokens.length ? result.tokens[i + 2]! : line.length;
 			const token = line.slice(result.tokens[i]!, end);
-			out += TOKEN_TYPE(result.tokens[i + 1]!) === STRING_TOKEN ? token : token.replace(/\s+/g, "");
+			if (type === STRING_TOKEN) {
+				pieces.push(token);
+			} else {
+				for (const part of token.split(/\s+/)) {
+					if (part) pieces.push(part);
+				}
+			}
 		}
 	}
-	return out;
+	return pieces.join(" ");
 }
 
 /**

@@ -180,8 +180,8 @@ export type ManifestFile = { path: string; kind: string; bytes: number; lines: n
 
 export type Snapshot = { id: string; time: number; size: number };
 export type GitCommit = { sha: string; shortSha: string; time: number; author: string; subject: string; path: string };
-export type TicketGitCommit = { sha: string; shortSha: string; time: number; author: string; subject: string; files: { status: string; path: string }[] };
-export type GitBlameLine = { sha: string; shortSha: string; author: string; date: string; summary: string; ticket?: string };
+export type TicketGitCommit = { sha: string; shortSha: string; time: number; author: string; subject: string; files: { status: string; path: string; repoPath?: string; inWorkspace?: boolean }[] };
+export type GitBlameLine = { sha: string; shortSha: string; author: string; date: string; summary: string; ticket?: string; filename?: string };
 export type GitBranchInfo = { name: string; current: boolean; upstream?: string; lastSubject?: string };
 export type GitBranchesResult = { current: string; branches: GitBranchInfo[] };
 export type GitActionResult = { ok: boolean; message: string };

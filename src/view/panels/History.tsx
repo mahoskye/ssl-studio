@@ -1,13 +1,13 @@
 // File history: local save snapshots AND per-file Git commits (with proper chronological
 // before->after diffs, commit-vs-parent diffs, snapshot-vs-snapshot compare, and restore in ReviewView).
 import { createEffect, createResource, createSignal, For, onCleanup, Show } from "solid-js";
-import { baseName } from "../../shared/paths";
+import { baseName, isInside } from "../../shared/paths";
 import type { GitCommit, Snapshot } from "../../shared/protocol";
 import { backend } from "../backend";
 import { openComparison, openReview } from "../editor/Review";
 import { gitStatus, gitVersion } from "../git";
 import { Icon } from "../Icon";
-import { activeDoc, activePath, applyText, historyChanged, notify } from "../state";
+import { activeDoc, activePath, applyText, documents, historyChanged, notify, state } from "../state";
 import { chooseFromMenu, type RowMenuEntry } from "./RowMenu";
 import { Row, RowGroup, Rows, type Point } from "./Rows";
 
@@ -24,9 +24,9 @@ export function History() {
 		setBaseRev(null);
 	});
 	const [history] = createResource(
-		() => [activePath(), version()] as const,
-		([path]) =>
-			path
+		() => [activePath(), version(), state.workspace?.root ?? ""] as const,
+		([path, , root]) =>
+			path && !path.startsWith("untitled:") && Boolean(root && isInside(root, path))
 				? backend.history(path).then(
 						(list) => ({ list, error: "" }),
 						(e) => ({ list: [] as Snapshot[], error: String(e?.message ?? e) }),
@@ -34,9 +34,9 @@ export function History() {
 				: { list: [] as Snapshot[], error: "" },
 	);
 	const [commits] = createResource(
-		() => [activePath(), gitVersion(), Boolean(gitStatus())] as const,
-		([path, , inRepo]) =>
-			path && inRepo && !path.startsWith("untitled:")
+		() => [activePath(), gitVersion(), Boolean(gitStatus()), state.workspace?.root ?? ""] as const,
+		([path, , inRepo, root]) =>
+			path && inRepo && !path.startsWith("untitled:") && Boolean(root && isInside(root, path))
 				? backend.gitLog(path, 25).catch(() => [] as GitCommit[])
 				: Promise.resolve([] as GitCommit[]),
 	);
@@ -83,27 +83,44 @@ export function History() {
 	const showSnapshot = async (snap: Snapshot) => {
 		const path = activePath();
 		const doc = activeDoc();
-		if (!path || !doc) return notify("Open the file again to see its snapshots.", "error");
+		if (!path || !doc || doc.model.isDisposed()) return notify("Open the file again to see its snapshots.", "error");
+		if (doc.binary) return notify(`${baseName(path)} is not text: there is nothing of it to compare.`);
+		const docVersion = doc.model.getVersionId();
+		const currentText = doc.model.getValue();
 		const revLabel = `Snapshot ${shortTime(snap.time)}`;
 		try {
 			const text = await backend.snapshot(path, snap.id);
+			if (activePath() !== path || doc.model.isDisposed() || doc.binary) return;
+			if (doc.model.getVersionId() !== docVersion) {
+				notify(`${baseName(path)} changed while loading the snapshot. Try again.`);
+				return;
+			}
 			void openReview({
 				title: `${revLabel} vs Current`,
 				path,
 				effect: "Left is the older snapshot; right is your current buffer. Restoring puts the snapshot into the editor as one undoable edit; nothing is saved until you save.",
 				original: text,
-				proposed: doc.model.getValue(),
+				proposed: currentText,
 				sides: { left: revLabel, right: "Current" },
 				acceptSide: "original",
 				language: doc.model.getLanguageId(),
 				acceptLabel: "Restore this snapshot",
 				rejectLabel: "Close",
 				onAccept: (restored) => {
-					applyText(path, restored);
+					if (doc.model.isDisposed() || documents.get(path) !== doc || doc.binary) {
+						throw new Error(`${baseName(path)} is no longer open as text.`);
+					}
+					if (doc.model.getVersionId() !== docVersion) {
+						throw new Error(`${baseName(path)} changed while the review was open. Reopen the snapshot to review against the latest text.`);
+					}
+					if (!applyText(path, restored)) {
+						throw new Error(`Could not restore ${baseName(path)} because the editor buffer is no longer available.`);
+					}
 					notify("Snapshot restored into the editor. Save to keep it; undo to go back.");
 				},
 			});
 		} catch (e: any) {
+			if (activePath() !== path || doc.model.isDisposed()) return;
 			notify(`The snapshot of ${when(snap.time)} could not be opened: ${String(e?.message ?? e)}`, "error");
 		}
 	};
@@ -112,9 +129,17 @@ export function History() {
 	const showCommitVsCurrent = async (commit: GitCommit) => {
 		const path = activePath();
 		const doc = activeDoc();
-		if (!path || !doc) return notify("Open the file again to inspect its Git history.", "error");
+		if (!path || !doc || doc.model.isDisposed()) return notify("Open the file again to inspect its Git history.", "error");
+		if (doc.binary) return notify(`${baseName(path)} is not text: there is nothing of it to compare.`);
+		const docVersion = doc.model.getVersionId();
+		const currentText = doc.model.getValue();
 		try {
 			const historical = await backend.gitShow(path, commit.sha, commit.path);
+			if (activePath() !== path || doc.model.isDisposed() || doc.binary) return;
+			if (doc.model.getVersionId() !== docVersion) {
+				notify(`${baseName(path)} changed while loading commit ${commit.shortSha}. Try again.`);
+				return;
+			}
 			if (historical === null) {
 				notify(`Could not read ${baseName(path)} at commit ${commit.shortSha}.`, "error");
 				return;
@@ -124,18 +149,27 @@ export function History() {
 				path,
 				effect: `Left is commit ${commit.shortSha}; right is your current buffer. Restoring puts ${commit.shortSha} into the editor as one undoable edit; nothing is saved until you save.`,
 				original: historical,
-				proposed: doc.model.getValue(),
+				proposed: currentText,
 				sides: { left: commit.shortSha, right: "Current" },
 				acceptSide: "original",
 				language: doc.model.getLanguageId(),
 				acceptLabel: `Restore ${commit.shortSha}`,
 				rejectLabel: "Close",
 				onAccept: (restored) => {
-					applyText(path, restored);
+					if (doc.model.isDisposed() || documents.get(path) !== doc || doc.binary) {
+						throw new Error(`${baseName(path)} is no longer open as text.`);
+					}
+					if (doc.model.getVersionId() !== docVersion) {
+						throw new Error(`${baseName(path)} changed while the review was open. Reopen ${commit.shortSha} to review against the latest text.`);
+					}
+					if (!applyText(path, restored)) {
+						throw new Error(`Could not restore ${baseName(path)} because the editor buffer is no longer available.`);
+					}
 					notify(`Restored ${baseName(path)} from ${commit.shortSha} into the editor. Save to keep it; undo to go back.`);
 				},
 			});
 		} catch (e: any) {
+			if (activePath() !== path || doc.model.isDisposed()) return;
 			notify(`Could not load commit ${commit.shortSha}: ${String(e?.message ?? e)}`, "error");
 		}
 	};
@@ -144,9 +178,11 @@ export function History() {
 	const showCommitDiff = async (commit: GitCommit) => {
 		const path = activePath();
 		const doc = activeDoc();
-		if (!path || !doc) return notify("Open the file again to inspect its Git history.", "error");
+		if (!path || !doc || doc.model.isDisposed()) return notify("Open the file again to inspect its Git history.", "error");
+		if (doc.binary) return notify(`${baseName(path)} is not text: there is nothing of it to compare.`);
 		try {
 			const { before, after } = await backend.gitCommitFile(path, commit.sha, commit.path);
+			if (activePath() !== path || doc.model.isDisposed() || documents.get(path) !== doc || doc.binary) return;
 			if (before === null && after === null) {
 				notify(`Could not read text diff for ${baseName(path)} at commit ${commit.shortSha}.`, "error");
 				return;
@@ -162,6 +198,7 @@ export function History() {
 				effect: `Changes introduced by commit ${commit.shortSha} (${shortDay(commit.time)}). Nothing here changes the file.`,
 			});
 		} catch (e: any) {
+			if (activePath() !== path || doc.model.isDisposed()) return;
 			notify(`Could not load diff for commit ${commit.shortSha}: ${String(e?.message ?? e)}`, "error");
 		}
 	};
@@ -170,11 +207,13 @@ export function History() {
 	const compareTwoRevs = async (a: HistoryRev, b: HistoryRev) => {
 		const path = activePath();
 		const doc = activeDoc();
-		if (!path || !doc) return notify("Open the file again to compare revisions.", "error");
+		if (!path || !doc || doc.model.isDisposed()) return notify("Open the file again to compare revisions.", "error");
+		if (doc.binary) return notify(`${baseName(path)} is not text: there is nothing of it to compare.`);
 		if (a.key === b.key) return notify("Choose a different revision to compare with.");
 		const [older, newer] = a.time <= b.time ? [a, b] : [b, a];
 		try {
 			const [before, after] = await Promise.all([loadRevText(path, older), loadRevText(path, newer)]);
+			if (activePath() !== path || doc.model.isDisposed() || documents.get(path) !== doc || doc.binary) return;
 			if (before === null || after === null) {
 				notify(`Could not read both revisions (${older.label} and ${newer.label}) as text.`, "error");
 				return;
@@ -191,6 +230,7 @@ export function History() {
 				effect: `Comparing ${older.label} (older) with ${newer.label} (newer). Nothing here changes the file.`,
 			});
 		} catch (e: any) {
+			if (activePath() !== path || doc.model.isDisposed()) return;
 			notify(`Could not compare ${older.label} and ${newer.label}: ${String(e?.message ?? e)}`, "error");
 		}
 	};
@@ -209,6 +249,9 @@ export function History() {
 	};
 
 	const openSnapshotMenu = async (snap: Snapshot, at: Point) => {
+		const path = activePath();
+		const doc = activeDoc();
+		if (!path || !doc || doc.model.isDisposed()) return;
 		const rev = snapToRev(snap);
 		const base = baseRev();
 		const CMP_CURRENT = "Compare with current";
@@ -221,12 +264,16 @@ export function History() {
 			SET_BASE,
 		];
 		const picked = await chooseFromMenu(rev.label, entries, at);
+		if (!picked || activePath() !== path || doc.model.isDisposed() || documents.get(path) !== doc) return;
 		if (picked === CMP_CURRENT) void showSnapshot(snap);
 		else if (CMP_BASE && picked === CMP_BASE && base) void compareTwoRevs(base, rev);
 		else if (picked === SET_BASE) setBaseRev(base?.key === rev.key ? null : rev);
 	};
 
 	const openCommitMenu = async (commit: GitCommit, at: Point) => {
+		const path = activePath();
+		const doc = activeDoc();
+		if (!path || !doc || doc.model.isDisposed()) return;
 		const rev = commitToRev(commit);
 		const base = baseRev();
 		const COMMIT_DIFF = `View commit diff (${commit.shortSha}~1..${commit.shortSha})`;
@@ -241,6 +288,7 @@ export function History() {
 			SET_BASE,
 		];
 		const picked = await chooseFromMenu(`${commit.shortSha}: ${commit.subject}`, entries, at);
+		if (!picked || activePath() !== path || doc.model.isDisposed() || documents.get(path) !== doc) return;
 		if (picked === COMMIT_DIFF) void showCommitDiff(commit);
 		else if (picked === CMP_CURRENT) void showCommitVsCurrent(commit);
 		else if (CMP_BASE && picked === CMP_BASE && base) void compareTwoRevs(base, rev);

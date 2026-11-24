@@ -12,7 +12,8 @@ import { getPath, SERVER_DEFAULTS } from "../shared/styleProfile";
 import { session } from "./lsp/session";
 import { changedRanges, minimalReplace } from "./lsp/edits";
 import { ask, choose } from "./dialogs";
-import { closeComparison, openReview } from "./editor/Review";
+import { closeComparison, closeReview, openReview } from "./editor/Review";
+import { syncWorkspaceThreads } from "./agent/store";
 import { clearEditorViewStates } from "./editor/EditorGroup";
 import { invalidateImageCache } from "./editor/imageResolve";
 import { baseName, isInside, joinPath, plainFileError } from "../shared/paths";
@@ -194,6 +195,8 @@ export async function openFolder(path?: string) {
 	session.reset();
 	const workspace = await guarded(() => backend.openFolder(path));
 	if (!workspace) return;
+	closeReview();
+	syncWorkspaceThreads(canonical(workspace.root));
 	setTabsReady(false);
 	const oldDocs = [...docs.values()];
 	docs.clear();
@@ -1237,11 +1240,11 @@ export function setDocumentLanguage(path: string, languageId: string): boolean {
 }
 
 /** Replaces a document's text with one undoable edit over the part that changed. */
-export function applyText(path: string, text: string) {
+export function applyText(path: string, text: string): boolean {
 	const doc = docs.get(path);
-	if (!doc) return;
+	if (!doc || doc.model.isDisposed()) return false;
 	const edit = minimalReplace(doc.model.getValue(), text.replace(/\r?\n/g, doc.model.getEOL()));
-	if (!edit) return;
+	if (!edit) return true;
 	doc.model.pushStackElement();
 	doc.model.pushEditOperations(
 		[],
@@ -1249,6 +1252,7 @@ export function applyText(path: string, text: string) {
 		() => null,
 	);
 	doc.model.pushStackElement();
+	return true;
 }
 
 /** Says whether every file was saved: it stops at the first that could not be. */

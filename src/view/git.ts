@@ -4,12 +4,12 @@
 // leaves this machine.
 import { createEffect, createSignal, on, onCleanup } from "solid-js";
 import { branchLabel, changeWord, type GitFile, type GitStatus } from "../shared/gitStatus";
-import { baseName, relativeTo } from "../shared/paths";
+import { baseName, isInside, relativeTo } from "../shared/paths";
 import { backend } from "./backend";
 import { choose } from "./dialogs";
 import { openReview } from "./editor/Review";
 import { languageFor } from "./editor/languages";
-import { canonical, changingOnDisk, documents, fileChangedOnDisk, fileRemoved, notify, setState, state } from "./state";
+import { canonical, changingOnDisk, documents, fileChangedOnDisk, fileRemoved, historyChanged, notify, revert, setState, state } from "./state";
 
 /** What git says: null outside a repository (or with no git), undefined before it was first asked. */
 const [status, setStatus] = createSignal<GitStatus | null | undefined>(undefined);
@@ -21,19 +21,32 @@ export { failure as gitFailure, gitVersion, status as gitStatus };
 
 let asking = 0;
 let timer: ReturnType<typeof setTimeout> | undefined;
+let statusRoot: string | undefined;
 
 /** Asks git again, now. Answers that come back out of order are dropped. */
 export async function refreshGit(): Promise<void> {
 	clearTimeout(timer);
 	const mine = ++asking;
-	if (!state.workspace) return void setStatus(undefined);
+	const root = state.workspace?.root;
+	if (!root) {
+		statusRoot = undefined;
+		setFailure("");
+		setStatus(undefined);
+		return;
+	}
+	if (statusRoot !== root) {
+		setStatus(undefined);
+		setFailure("");
+	}
 	try {
 		const next = await backend.gitStatus();
-		if (mine !== asking) return;
+		if (mine !== asking || state.workspace?.root !== root) return;
+		statusRoot = root;
 		setFailure("");
 		setStatus(next);
 	} catch (e: any) {
-		if (mine !== asking) return;
+		if (mine !== asking || state.workspace?.root !== root) return;
+		if (statusRoot !== root) setStatus(undefined);
 		setFailure(String(e?.message ?? e));
 	}
 	setGitVersion((v) => v + 1);
@@ -47,7 +60,17 @@ export function refreshGitSoon() {
 
 /** Keeps the status in step with the workspace: when a folder opens, when files change, and when the window is come back to. Called once, from the window. */
 export function useGit() {
-	createEffect(on(() => state.workspace?.root, () => void refreshGit()));
+	createEffect(
+		on(
+			() => state.workspace?.root,
+			() => {
+				statusRoot = undefined;
+				setStatus(undefined);
+				setFailure("");
+				void refreshGit();
+			},
+		),
+	);
 	// A save, a new file, a rename, a change on disk: each moves the tree's version.
 	createEffect(on(() => state.treeVersion, refreshGitSoon, { defer: true }));
 	// A commit made in a terminal is not heard of: coming back to the window asks again.
@@ -62,12 +85,39 @@ export const changedCount = () => status()?.files.length ?? 0;
 const failed = (what: string) => (e: any) => notify(`${what}: ${String(e?.message ?? e)}`, "error");
 
 export async function stage(files: GitFile[]): Promise<void> {
-	await backend.gitStage(files.map((file) => file.path)).then(refreshGit, failed("Not staged"));
-	// git stages what is on disk: edits that are only in the editor are not in it, and that is said.
-	const unsaved = files.filter((file) => state.dirty[canonical(file.path)]);
-	if (unsaved.length) notify(`${unsaved.length === 1 ? `${baseName(unsaved[0]!.path)} has` : `${unsaved.length} of these files have`} unsaved changes: what is staged is what is saved.`);
+	if (!files.length) return;
+	await backend.gitStage(files.map((file) => file.path)).then(
+		async () => {
+			await refreshGit();
+			// git stages what is on disk: edits that are only in the editor are not in it, and that is said.
+			const unsaved = files.filter((file) => state.dirty[canonical(file.path)]);
+			if (unsaved.length) notify(`${unsaved.length === 1 ? `${baseName(unsaved[0]!.path)} has` : `${unsaved.length} of these files have`} unsaved changes: what is staged is what is saved.`);
+		},
+		failed("Not staged"),
+	);
 }
-export const unstage = (files: GitFile[]) => backend.gitUnstage(files.map((file) => file.path)).then(refreshGit, failed("Not unstaged"));
+
+/** Paths to pass to `gitUnstage`, including rename origins (`file.from`) so staged renames unstage cleanly. */
+export function unstagePaths(files: readonly GitFile[], root?: string | null): string[] {
+	const paths: string[] = [];
+	const seen = new Set<string>();
+	const add = (p: string) => {
+		if (!p || seen.has(p)) return;
+		seen.add(p);
+		paths.push(p);
+	};
+	for (const file of files) {
+		add(file.path);
+		if (file.from && (!root || isInside(root, file.from))) add(file.from);
+	}
+	return paths;
+}
+
+export async function unstage(files: GitFile[]): Promise<void> {
+	const paths = unstagePaths(files, state.workspace?.root);
+	if (!paths.length) return;
+	await backend.gitUnstage(paths).then(refreshGit, failed("Not unstaged"));
+}
 
 /** Commits what is staged. True when it was made. */
 export async function commit(message: string): Promise<boolean> {
@@ -86,34 +136,50 @@ export async function commit(message: string): Promise<boolean> {
 
 /** Lets a file's unstaged changes go, after asking. An open copy of it follows what is then on disk. */
 export async function discard(file: GitFile): Promise<void> {
+	const root = state.workspace?.root;
+	const canon = canonical(file.path);
 	const name = baseName(file.path);
 	const untracked = file.unstaged === "untracked";
-	const open = documents.get(canonical(file.path));
-	const unsaved = Boolean(open && state.dirty[canonical(file.path)]);
+	const open = documents.get(canon);
+	const unsaved = Boolean(open && state.dirty[canon]);
 	const DISCARD = untracked ? "Move to trash" : "Discard changes";
 	const what = untracked
 		? `${name} is new, and git has nothing of it to go back to. Move it to the trash?`
 		: `Discard the changes to ${name} that are not staged? The file goes back to what git has of it${unsaved ? ", and the unsaved changes in the editor go with them" : ""}. Where it is text, the file as it is now on disk is kept in its local history.`;
 	if ((await choose(what, [DISCARD], { danger: DISCARD })) !== DISCARD) return;
+	if (state.workspace?.root !== root) return;
 	try {
 		// The file changes under the editor's copy on purpose: no "changed on disk" is raised while it does.
 		await changingOnDisk(file.path, () => backend.gitDiscard(file.path));
 	} catch (e) {
 		return failed("Not discarded")(e);
 	}
-	if (untracked) fileRemoved(file.path);
-	else if (open) {
-		// The editor's copy goes back with the file, unsaved changes included: that is what was asked.
-		setState("dirty", canonical(file.path), false);
+	if (state.workspace?.root !== root) return;
+	const onDisk = await backend.sizes([file.path]).then(
+		(sizes) => (sizes ? file.path in sizes : !untracked),
+		() => !untracked,
+	);
+	if (state.workspace?.root !== root) return;
+	if (!onDisk) {
+		fileRemoved(file.path);
+	} else if (documents.get(canon)) {
+		// Reload cleanly from disk (unsaved changes included) without closing the open tab.
+		await revert(canon);
+	} else {
 		await fileChangedOnDisk(file.path);
 	}
+	historyChanged.fire(canon);
 	setState("treeVersion", (v) => v + 1);
 	await refreshGit();
 }
 
+let showingChange = 0;
+
 /** Shows a change: the file as git has it beside the file as it is. `staged` is the change that is staged for the next commit. */
 export async function showChange(file: GitFile, staged: boolean): Promise<void> {
 	const root = state.workspace?.root;
+	const req = ++showingChange;
+	const stale = () => req !== showingChange || state.workspace?.root !== root;
 	const name = relativeTo(root, file.path);
 	const kind = staged ? file.staged : file.unstaged;
 	try {
@@ -121,7 +187,9 @@ export async function showChange(file: GitFile, staged: boolean): Promise<void> 
 		if (kind === "conflict") return notify(`${baseName(file.path)} is in conflict: there is no one earlier text to show beside it. Open the file to see git's marks in it.`);
 		// Staged: the last commit against what is staged. Not staged: what is staged against the folder.
 		const was = kind === "untracked" || kind === "added" ? "" : await backend.gitBase(file.from && staged ? file.from : file.path, staged ? "head" : "index");
+		if (stale()) return;
 		const staging = staged && file.staged !== "deleted" ? await backend.gitBase(file.path, "index") : "";
+		if (stale()) return;
 		// git has it, and not as text: bytes are not shown side by side.
 		if (was === null || staging === null) return notify(`${baseName(file.path)} is not text in git: there is nothing of it to compare.`);
 		const before = was;
@@ -129,10 +197,14 @@ export async function showChange(file: GitFile, staged: boolean): Promise<void> 
 		if (staged) after = staging;
 		else if (file.unstaged !== "deleted") {
 			const open = documents.get(canonical(file.path));
-			const read = open ? null : await backend.read(file.path);
+			if (open?.binary) return notify(`${baseName(file.path)} is not text: there is nothing of it to compare.`);
+			const usableOpen = open && !open.model.isDisposed() ? open : null;
+			const read = usableOpen ? null : await backend.read(file.path);
+			if (stale()) return;
 			if (read?.binary) return notify(`${baseName(file.path)} is not text: there is nothing of it to compare.`);
-			after = open ? open.model.getValue() : read!.text;
+			after = usableOpen ? usableOpen.model.getValue() : read!.text;
 		}
+		if (stale()) return;
 		await openReview({
 			title: `${baseName(file.path)}: ${kind ? changeWord(kind) : "changed"}${staged ? ", staged" : ""}`,
 			path: file.path,
@@ -144,6 +216,7 @@ export async function showChange(file: GitFile, staged: boolean): Promise<void> 
 			onAccept: () => {},
 		});
 	} catch (e) {
+		if (stale()) return;
 		failed(`${baseName(file.path)} could not be compared`)(e);
 	}
 }

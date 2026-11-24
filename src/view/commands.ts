@@ -1392,7 +1392,7 @@ async function gitBlameLineCommand() {
 	}
 	if (action === "diff") {
 		try {
-			const { before, after } = await backend.gitCommitFile(p, blame.sha);
+			const { before, after } = await backend.gitCommitFile(p, blame.sha, blame.filename);
 			if (before === null && after === null) {
 				return notify(`Could not read text diff for ${baseName(p)} at ${blame.shortSha}.`, "error");
 			}

@@ -12,7 +12,7 @@ import { projectSettings, readProject } from "./project";
 import { Serial } from "./serial";
 
 /** Settings that control executable paths, remote servers, or billing trust: never honored from workspace files. */
-export const USER_ONLY_SETTINGS = new Set(["lspPath", "agentServerUrl", "agentServerConfig", "agentOwnModels"]);
+export const USER_ONLY_SETTINGS = new Set(["lspPath", "agentServerUrl", "agentServerConfig", "agentOwnModels", "agentModel"]);
 
 const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 const OBJECT_KEYS = new Set(["layout", "limits", "regionColors", "keys", "ssl"]);

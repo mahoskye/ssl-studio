@@ -97,8 +97,22 @@ export function createBackend(host: Host, initial?: string) {
 	let asked: { root: string; git: Git } | null = null;
 	const git = () => {
 		const root = need().root;
-		if (asked?.root !== root) asked = { root, git: new Git(root) };
+		if (asked?.root !== root) {
+			asked?.git.dispose();
+			asked = { root, git: new Git(root) };
+		}
 		return asked.git;
+	};
+	/** Validates a path inside the workspace, or (for staged rename `from` paths in a subdir repo) inside the enclosing git repo. */
+	const insideWorkspaceOrStagedRenameSource = async (ws: WorkspaceFiles, g: Git, path: string): Promise<string> => {
+		try {
+			return ws.inside(path);
+		} catch (err) {
+			if (await g.isStagedRenameSource(path)) {
+				return g.insideRepo(path);
+			}
+			throw err;
+		}
 	};
 	/** How many open files have edits that are not on disk, as the view last said. */
 	let unsaved = 0;
@@ -119,12 +133,14 @@ export function createBackend(host: Host, initial?: string) {
 
 		const prevFiles = files;
 		const prevLsp = lsp;
+		const prevAsked = asked;
 		files = nextFiles;
 		history = nextHistory;
 		lsp = null;
 		asked = null;
 		prevFiles?.close();
 		prevLsp?.stop();
+		prevAsked?.git.dispose();
 
 		const isStale = () => disposed || seq !== openSeq;
 		nextFiles.watch((changed) => {
@@ -224,21 +240,35 @@ export function createBackend(host: Host, initial?: string) {
 			if (!now.binary) await hist.record(full, now.text);
 		},
 		gitStatus: async () => (files ? git().status() : null),
-		gitBase: (path, from) => git().base(need().inside(path), from),
-		gitLog: (path, limit) => (files ? git().log(need().inside(path), limit) : Promise.resolve([])),
+		gitBase: async (path, from) => {
+			const ws = need();
+			const g = git();
+			return g.base(await insideWorkspaceOrStagedRenameSource(ws, g, path), from);
+		},
+		gitLog: async (path, limit) => (files ? git().log(need().inside(path), limit) : []),
 		gitTicketLog: (ticketKey, limit) => (files ? git().ticketLog(ticketKey, limit) : Promise.resolve([])),
-		gitShow: (path, sha, repoPath) => (files ? git().show(need().inside(path), sha, repoPath) : Promise.resolve(null)),
-		gitDiff: (options) => (files ? git().diff(options) : Promise.resolve("")),
+		gitShow: async (path, sha, repoPath) => (files ? git().show(need().inside(path), sha, repoPath) : null),
+		gitDiff: async (options) => {
+			if (!files) return "";
+			const ws = need();
+			const scoped = options?.paths?.length ? { ...options, paths: options.paths.map((p) => ws.inside(p)) } : options;
+			return git().diff(scoped);
+		},
 		gitTags: () => (files ? git().tags() : Promise.resolve([])),
 		gitHeadSha: () => (files ? git().headSha() : Promise.resolve(null)),
 		gitRangeLog: (from, to, limit) => (files ? git().rangeLog(from, to, limit) : Promise.resolve([])),
-		gitCommitFile: (path, sha, repoPath) => (files ? git().commitFile(need().inside(path), sha, repoPath) : Promise.resolve({ before: null, after: null })),
-		gitBlameLine: (path, line) => (files ? git().blameLine(need().inside(path), line) : Promise.resolve(null)),
+		gitCommitFile: async (path, sha, repoPath) => (files ? git().commitFile(need().inside(path), sha, repoPath) : { before: null, after: null }),
+		gitBlameLine: async (path, line) => (files ? git().blameLine(need().inside(path), line) : null),
 		gitBranches: () => (files ? git().branches() : Promise.resolve(null)),
 		gitCheckout: (branch) => (files ? git().checkout(branch) : Promise.resolve({ ok: false, message: "No workspace open." })),
 		gitStash: (action, message) => (files ? git().stash(action, message) : Promise.resolve({ ok: false, message: "No workspace open." })),
-		gitStage: (paths) => git().stage(paths.map((path) => need().inside(path))),
-		gitUnstage: (paths) => git().unstage(paths.map((path) => need().inside(path))),
+		gitStage: async (paths) => git().stage(paths.map((path) => need().inside(path))),
+		gitUnstage: async (paths) => {
+			const ws = need();
+			const g = git();
+			const validated = await Promise.all(paths.map((path) => insideWorkspaceOrStagedRenameSource(ws, g, path)));
+			return g.unstage(validated);
+		},
 		gitCommit: (message) => git().commit(message),
 		// A discard and a trash wait for a save of the file that is under way, and the saves asked for after them
 		// wait in turn: thrown away in the middle of a save, the file would have come back.
@@ -582,8 +612,15 @@ export function createBackend(host: Host, initial?: string) {
 		},
 		lspState: async () => lspState,
 		agent: async (method, args) => {
-			const { effective } = await settings.load();
-			agent.configure({ serverConfig: effective.agentServerConfig, serverUrl: effective.agentServerUrl, model: effective.agentModel, ownModels: effective.agentOwnModels });
+			const { effective, user } = await settings.load();
+			const confirmedModels = typeof user.agentModel === "string" && user.agentModel.trim() ? [user.agentModel.trim()] : [];
+			agent.configure({
+				serverConfig: effective.agentServerConfig,
+				serverUrl: effective.agentServerUrl,
+				model: effective.agentModel,
+				ownModels: effective.agentOwnModels,
+				confirmedModels,
+			});
 			return agent.call(method, args);
 		},
 		clipboard: async (text) => {
@@ -625,6 +662,8 @@ export function createBackend(host: Host, initial?: string) {
 			files = null;
 			lsp?.stop();
 			lsp = null;
+			asked?.git.dispose();
+			asked = null;
 			agent.dispose();
 		},
 	};

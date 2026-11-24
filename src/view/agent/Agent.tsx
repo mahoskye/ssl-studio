@@ -9,9 +9,21 @@ import { activeLiveEditor, liveSelectionVersion } from "../editor/liveBridge";
 import { review, openReview, type Check } from "../editor/Review";
 import { activeDoc, activePath, applyText, canonical, documents, notify, openFile, save, scriptsCameTo, setState, state } from "../state";
 import { agent, ask, chooseModel, clearEntries, clearSavedThreads, currentModel, interrupt, resume, safely, setAgent, start, startNewThread, stop, switchThread, syncWorkspaceThreads, type Entry } from "./store";
-import { groupModels, composeQuestion, composerSend, modelRef, stepAction } from "./logic";
+import {
+	applySimpleUnifiedDiff,
+	composeQuestion,
+	composerSend,
+	createContextAccumulator,
+	extractFencedBlocks,
+	groupModels,
+	modelRef,
+	stepAction,
+	type FencedBlock,
+	type PreparedContextResult,
+} from "./logic";
 import { followReplyLink, renderReply } from "./markdown";
 import { notePath, proposalOf, runStep, showReview, startTidy, STEPS, tidy } from "./tidy";
+import { isAllowedContextPath } from "../plan/assist";
 import { parseCsv } from "../../shared/csv";
 import { checkTables } from "../../shared/docTables";
 import { frontMatter, withFrontMatter } from "../../shared/frontMatter";
@@ -49,8 +61,9 @@ export function attachFileToAgent(path: string) {
 	ensureAgentWorkspace();
 	const root = state.workspace?.root;
 	if (!root || !isInside(root, path)) return notify("That file is not in this workspace.", "error");
-	const key = canonical(path);
 	const rel = relativeTo(root, path).replace(/\\/g, "/");
+	if (!isAllowedContextPath(rel)) return notify("Hidden files and dotfiles cannot be attached to Agent context.", "error");
+	const key = canonical(path);
 	setAttachedFiles((prev) => (prev.some((f) => canonical(f.path) === key) ? prev : [...prev, { path, rel }]));
 	showPanel("agent");
 	notify(`Attached ${baseName(path)} to Agent context.`);
@@ -67,18 +80,11 @@ const [withGitDiff, setWithGitDiff] = createSignal(false);
 const [withGoverningDocs, setWithGoverningDocs] = createSignal(false);
 const [attachedFiles, setAttachedFiles] = createSignal<{ path: string; rel: string }[]>([]);
 const [sentTick, setSentTick] = createSignal(0);
+/** Synchronous preparing lock held across async context assembly before `ask()` sets `agent.busy`. */
+const [preparing, setPreparing] = createSignal(false);
+let preparingLock = false;
 
 const CODE_FILE_RE = /\.(ssl|srvscr|ds|sql|ddl|pks|pkb|xfd|xml|js|ts|css|html)$/i;
-
-/** Fast deterministic content fingerprint so mid-session edits to tickets/specs/files trigger an automatic delta re-send. */
-function hashText(s: string): string {
-	let h = 2166136261 >>> 0;
-	for (let i = 0; i < s.length; i++) {
-		h ^= s.charCodeAt(i);
-		h = Math.imul(h, 16777619) >>> 0;
-	}
-	return `${s.length}:${h.toString(36)}`;
-}
 
 /** Per-session tracker of already-sent context slices (key -> contentHash) so unchanged context is skipped and edited context re-sends cleanly. */
 let sentContext: { session: string | null; root: string | null; hashes: Map<string, string> } = {
@@ -119,7 +125,9 @@ export function currentAgentContext(): { includeWork: boolean; ticket: string; w
 	const ticket = picked === null ? auto : picked;
 	const includeWork = Boolean(ticket) && (picked !== null || withWork());
 	const root = state.workspace?.root ?? "";
-	const safeFiles = root ? attachedFiles().filter((f) => isInside(root, f.path)) : [];
+	const safeFiles = root
+		? attachedFiles().filter((f) => isInside(root, f.path) && isAllowedContextPath(relativeTo(root, f.path)))
+		: [];
 	return {
 		includeWork,
 		ticket,
@@ -156,7 +164,9 @@ export function selectionContext(): { label: string; code: string } | null {
 
 async function readForPrompt(path: string): Promise<string | null> {
 	const root = state.workspace?.root;
-	if (root && !isInside(root, path)) return null;
+	if (!root || !isInside(root, path)) return null;
+	const rel = relativeTo(root, path).replace(/\\/g, "/");
+	if (!isAllowedContextPath(rel)) return null;
 	const open = documents.get(canonical(path));
 	if (open) return open.model.getValue();
 	return backend.read(path).then((f) => (f.binary ? null : f.text), () => null);
@@ -260,6 +270,15 @@ function formatGoverningDocExcerpt(doc: DocFile, raw: string): string {
 	return cut(body || clean, 1800);
 }
 
+function wrapDiffFence(body: string): string {
+	let ticks = 3;
+	for (const m of body.matchAll(/`{3,}/g)) {
+		if (m[0].length >= ticks) ticks = m[0].length + 1;
+	}
+	const fence = "`".repeat(ticks);
+	return `${fence}diff\n${body}\n${fence}`;
+}
+
 /** Fetches compact staged + unstaged unified diff via `backend.gitDiff` (falling back cleanly outside git). */
 async function buildGitDiffSlice(): Promise<string> {
 	const [stagedDiff, unstagedDiff] = await Promise.all([
@@ -267,23 +286,18 @@ async function buildGitDiffSlice(): Promise<string> {
 		backend.gitDiff({ maxBytes: 24000 }).catch(() => ""),
 	]);
 	const chunks: string[] = [];
-	if (stagedDiff.trim()) chunks.push(`STAGED GIT DIFF:\n\`\`\`diff\n${cut(stagedDiff.trim(), 5500)}\n\`\`\``);
-	if (unstagedDiff.trim()) chunks.push(`UNSTAGED GIT DIFF:\n\`\`\`diff\n${cut(unstagedDiff.trim(), 5500)}\n\`\`\``);
+	if (stagedDiff.trim()) chunks.push(`STAGED GIT DIFF:\n${wrapDiffFence(cut(stagedDiff.trim(), 5500))}`);
+	if (unstagedDiff.trim()) chunks.push(`UNSTAGED GIT DIFF:\n${wrapDiffFence(cut(unstagedDiff.trim(), 5500))}`);
 	if (!chunks.length) return "";
 	return cut(chunks.join("\n\n"), 9500);
 }
 
-type PreparedContext = {
-	text: string;
-	labels: string[];
-	slices: Map<string, string>;
-	breakdown: { label: string; chars: number; status: "pending" | "edited" | "sent" }[];
-};
+type PreparedContext = PreparedContextResult;
 
 /**
  * Computes the exact pending context delta (ticket work, Git diff, governing docs, schema,
- * referenced tables, registries, STATE.md, attached files) with content-hash change detection:
- * unchanged already-sent slices are skipped, while edited slices re-send automatically.
+ * referenced tables, registries, STATE.md, attached files) with content-hash change detection
+ * and incremental `MAX_WORK_PROMPT_CHARS` budgeting so slices that don't fit are never marked sent.
  */
 async function prepareContextDelta(
 	ticket: string,
@@ -292,37 +306,20 @@ async function prepareContextDelta(
 ): Promise<PreparedContext> {
 	const root = state.workspace?.root ?? "";
 	const all = docs().filter((d) => d.exists && !isCatalog(d));
-	const parts: string[] = [];
-	const labels: string[] = [];
-	const slices = new Map<string, string>();
-	const breakdown: PreparedContext["breakdown"] = [];
-
-	const addSlice = (key: string, label: string, content: string) => {
-		const trimmed = content.trim();
-		if (!trimmed) return;
-		const h = hashText(trimmed);
-		const prev = alreadySent.get(key);
-		if (prev === h) {
-			breakdown.push({ label, chars: 0, status: "sent" });
-			return;
-		}
-		parts.push(trimmed);
-		labels.push(prev ? `${label} (updated)` : label);
-		slices.set(key, h);
-		breakdown.push({ label, chars: trimmed.length, status: prev ? "edited" : "pending" });
-	};
+	const { addSlice, finish } = createContextAccumulator(alreadySent, MAX_WORK_PROMPT_CHARS, cut);
 
 	// 1. Core ticket work (without standalone toggles so each slice is independently hash-tracked across Turn 1 and Turn 2+).
 	const sentByTicket = new Set<string>();
 	if (ticket) {
 		const work = await workPrompt(ticket, { includeSchema: false, includeRegistries: false, includeState: false, ticketFiles: [] });
 		if (work) {
-			addSlice(`ticket:${ticket.toLowerCase()}`, work.label, work.text);
-			const wf = workFor(all, ticket);
-			if (wf) {
-				sentByTicket.add(canonical(wf.ticket.path));
-				for (const s of wf.specs) sentByTicket.add(canonical(s.path));
-				for (const p of wf.plans ?? []) sentByTicket.add(canonical(p.path));
+			if (addSlice(`ticket:${ticket.toLowerCase()}`, work.label, work.text)) {
+				const wf = workFor(all, ticket);
+				if (wf) {
+					sentByTicket.add(canonical(wf.ticket.path));
+					for (const s of wf.specs) sentByTicket.add(canonical(s.path));
+					for (const p of wf.plans ?? []) sentByTicket.add(canonical(p.path));
+				}
 			}
 		}
 	}
@@ -407,9 +404,9 @@ async function prepareContextDelta(
 		if (regText) addSlice(regKey, "registries", regText);
 	}
 
-	// 5. Attached files (strictly guarded inside the active workspace root).
+	// 5. Attached files (strictly guarded inside the active workspace root and excluding hidden dotfiles).
 	for (const tf of workOpts.ticketFiles ?? []) {
-		if (root && !isInside(root, tf.path)) continue;
+		if (!root || !isInside(root, tf.path) || !isAllowedContextPath(relativeTo(root, tf.path))) continue;
 		const content = await readForPrompt(tf.path);
 		if (content !== null) {
 			addSlice(
@@ -420,12 +417,10 @@ async function prepareContextDelta(
 		}
 	}
 
-	const joined = parts.join("\n\n");
-	const capped = joined.length <= MAX_WORK_PROMPT_CHARS ? joined : cut(joined, MAX_WORK_PROMPT_CHARS);
-	return { text: capped, labels, slices, breakdown };
+	return finish();
 }
 
-export async function askAbout(
+async function runAskAbout(
 	question: string,
 	includeSelection: boolean,
 	includeWork = false,
@@ -441,11 +436,13 @@ export async function askAbout(
 
 	// Reset delta tracker whenever starting a brand-new conversation session or switching workspaces.
 	const curRoot = root ? canonical(root) : null;
+	const sameWorkspace = () => (state.workspace?.root ? canonical(state.workspace.root) : null) === curRoot;
 	if (!agent.chatSession || sentContext.session !== agent.chatSession || sentContext.root !== curRoot) {
 		sentContext = { session: agent.chatSession, root: curRoot, hashes: new Map() };
 	}
 
 	const prepared = await prepareContextDelta(ticket, workOpts, sentContext.hashes);
+	if (!sameWorkspace()) return;
 	const text = composeQuestion(question, context && { ...context, file }, prepared.text || undefined);
 	const withWhat = [context ? `${file} ${context.label}` : "", ...prepared.labels].filter(Boolean).join("; ");
 	const isCatalogPrompt = /INDEX\.md|Update catalogs/i.test(question);
@@ -460,14 +457,15 @@ export async function askAbout(
 			isCatalogPrompt,
 		},
 	});
+	// Discard post-await session & context hash updates if the workspace changed mid-turn.
+	if (!sameWorkspace()) return;
 	if (reply) {
 		setAgent("chatSession", reply.sessionID);
 		// Commit context slice hashes ONLY when the turn actually succeeded (never on failed/interrupted turns!).
 		if (reply.outcome === "succeeded") {
 			if (sentContext.session !== reply.sessionID) {
-				const next = new Map(sentContext.hashes);
-				for (const [k, v] of prepared.slices) next.set(k, v);
-				sentContext = { session: reply.sessionID, root: curRoot, hashes: next };
+				// Brand-new session: populate ONLY from slices actually sent in this turn (never copy dead session hashes).
+				sentContext = { session: reply.sessionID, root: curRoot, hashes: new Map(prepared.slices) };
 			} else {
 				for (const [k, v] of prepared.slices) sentContext.hashes.set(k, v);
 			}
@@ -476,83 +474,24 @@ export async function askAbout(
 	}
 }
 
-type FencedBlock = { lang: string; code: string };
-
-/** Fence-depth-aware Markdown block extractor supporting ``` and ~~~ fences and nested blocks inside markdown replies. */
-function extractFencedBlocks(markdown: string): FencedBlock[] {
-	const lines = markdown.replace(/\r\n/g, "\n").split("\n");
-	const blocks: FencedBlock[] = [];
-	let active: { ch: string; len: number; lang: string; lines: string[] } | null = null;
-	for (const line of lines) {
-		if (!active) {
-			const m = /^[ \t]{0,3}(`{3,}|~{3,})([^\n]*)$/.exec(line);
-			if (m) {
-				const ch = m[1]![0]!;
-				const info = m[2]!.trim();
-				if (ch === "`" && info.includes("`")) continue;
-				active = { ch, len: m[1]!.length, lang: (info.split(/\s+/)[0] ?? "").toLowerCase(), lines: [] };
-			}
-		} else {
-			const isClose = new RegExp(`^[ \\t]{0,3}${active.ch}{${active.len},}[ \\t]*$`).test(line);
-			if (isClose) {
-				const code = active.lines.join("\n").trim();
-				if (code) blocks.push({ lang: active.lang, code });
-				active = null;
-			} else {
-				active.lines.push(line);
-			}
-		}
+export async function askAbout(
+	question: string,
+	includeSelection: boolean,
+	includeWork = false,
+	extra?: { ticket?: string; workOptions?: WorkTextOptions },
+) {
+	if (agent.busy || preparingLock) {
+		notify("The agent is still working on the last request.");
+		return;
 	}
-	return blocks;
-}
-
-/** Applies a simple unified diff hunk block onto `original`; returns `null` if hunks do not cleanly apply. */
-function applySimpleUnifiedDiff(original: string, diffText: string): string | null {
-	const origLines = original.replace(/\r\n/g, "\n").split("\n");
-	const diffLines = diffText.replace(/\r\n/g, "\n").split("\n");
-	const hunks: { oldStart: number; lines: string[] }[] = [];
-	let cur: { oldStart: number; lines: string[] } | null = null;
-	for (const line of diffLines) {
-		const h = /^@@\s+-(\d+)(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@/.exec(line);
-		if (h) {
-			cur = { oldStart: Math.max(1, Number(h[1])), lines: [] };
-			hunks.push(cur);
-		} else if (cur && (/^[ +-]/.test(line) || line === "")) {
-			cur.lines.push(line === "" ? " " : line);
-		}
+	preparingLock = true;
+	setPreparing(true);
+	try {
+		await runAskAbout(question, includeSelection, includeWork, extra);
+	} finally {
+		preparingLock = false;
+		setPreparing(false);
 	}
-	if (!hunks.length) return null;
-	const result = [...origLines];
-	let delta = 0;
-	for (const hunk of hunks) {
-		const expectedOld = hunk.lines.filter((l) => l[0] === " " || l[0] === "-").map((l) => l.slice(1));
-		const nextNew = hunk.lines.filter((l) => l[0] === " " || l[0] === "+").map((l) => l.slice(1));
-		const at = hunk.oldStart - 1 + delta;
-		const matchesAt = (pos: number) =>
-			pos >= 0 &&
-			pos + expectedOld.length <= result.length &&
-			expectedOld.every((line, i) => result[pos + i] === line);
-		let pos = at;
-		if (!matchesAt(pos)) {
-			// Search within +/-15 lines for shifted hunk context.
-			let found = -1;
-			for (let off = 1; off <= 15; off++) {
-				if (matchesAt(at - off)) {
-					found = at - off;
-					break;
-				}
-				if (matchesAt(at + off)) {
-					found = at + off;
-					break;
-				}
-			}
-			if (found < 0) return null;
-			pos = found;
-		}
-		result.splice(pos, expectedOld.length, ...nextNew);
-		delta += nextNew.length - expectedOld.length;
-	}
-	return result.join("\n");
 }
 
 /** Extracts the best fenced code/Markdown block (prompting when multiple blocks exist) and opens side-by-side ReviewView against a workspace file. */
@@ -563,12 +502,12 @@ async function reviewProposedEdit(replyText: string, preferredPath?: string) {
 	const curActive = activePath() || "";
 	const openCur = preferredPath || curActive;
 	const candidates: { label: string; path: string }[] = [];
-	if (openCur && isInside(root, openCur)) {
+	if (openCur && isInside(root, openCur) && isAllowedContextPath(relativeTo(root, openCur))) {
 		const tag = preferredPath && canonical(preferredPath) !== canonical(curActive) ? "(from turn)" : "(active file)";
 		candidates.push({ label: `${relativeTo(root, openCur)} ${tag}`, path: openCur });
 	}
 	const PICK_OTHER = "Choose another workspace file…";
-	let targetPath = openCur;
+	let targetPath = candidates[0]?.path ?? "";
 	if (candidates.length) {
 		const picked = await choose("Compare proposed reply against which file?", [candidates[0]!.label, PICK_OTHER]);
 		if (!picked) return;
@@ -580,6 +519,9 @@ async function reviewProposedEdit(replyText: string, preferredPath?: string) {
 			root,
 		});
 		if (!chosen || !isInside(root, chosen.path)) return;
+		if (!isAllowedContextPath(relativeTo(root, chosen.path))) {
+			return notify("Hidden files and dotfiles cannot be modified from an Agent diff proposal.", "error");
+		}
 		targetPath = chosen.path;
 	}
 
@@ -608,19 +550,31 @@ async function reviewProposedEdit(replyText: string, preferredPath?: string) {
 		chosenBlock = extraction.choices[picked]?.block ?? null;
 	}
 
-	let proposed = `${(chosenBlock ? chosenBlock.code : replyText).trim()}\n`;
+	const eol = original.includes("\r\n") ? "\r\n" : "\n";
+	const rawProposed = chosenBlock
+		? chosenBlock.code.replace(/^\r?\n/, "").replace(/\r?\n$/, "")
+		: replyText.trim();
+	let proposed = rawProposed.endsWith("\n") ? rawProposed : `${rawProposed}${eol}`;
+	let blocked: string | undefined;
+	const checks: Check[] = [];
 	const isDiffBlock = Boolean(chosenBlock && (/^(diff|patch)$/i.test(chosenBlock.lang) || /^@@\s+-\d+/m.test(chosenBlock.code)));
 	if (isDiffBlock && chosenBlock) {
-		const patched = applySimpleUnifiedDiff(original, chosenBlock.code);
+		const patched = applySimpleUnifiedDiff(original, chosenBlock.code, targetPath);
 		if (patched !== null) {
-			proposed = patched.endsWith("\n") ? patched : `${patched}\n`;
+			proposed = patched.endsWith("\n") || !original.endsWith("\n") ? patched : `${patched}${eol}`;
 		} else {
-			notify("The reply contains a unified diff patch that could not be cleanly applied automatically; inspect the right pane before accepting.", "error");
+			blocked =
+				"This unified diff patch could not be cleanly applied to the target file (mismatched target, multi-file diff, or invalid hunk). Accepting is blocked so raw diff syntax cannot overwrite the file.";
+			checks.push({
+				label: "Unified diff patch",
+				ok: false,
+				detail: "Could not apply cleanly to the target file; review manually instead of accepting raw diff syntax",
+			});
+			notify("The reply contains a unified diff patch that could not be cleanly applied; Accept is blocked.", "error");
 		}
 	}
 
-	const checks: Check[] = [];
-	if (targetLang === "markdown" || /\.(md|markdown)$/i.test(targetPath)) {
+	if (!blocked && (targetLang === "markdown" || /\.(md|markdown)$/i.test(targetPath))) {
 		const tableFindings = checkTables(proposed);
 		if (tableFindings.length) {
 			checks.push({
@@ -635,7 +589,7 @@ async function reviewProposedEdit(replyText: string, preferredPath?: string) {
 				detail: "Within 4-column and cell-width limits",
 			});
 		}
-	} else if (/\.(csv|tsv)$/i.test(targetPath)) {
+	} else if (!blocked && /\.(csv|tsv)$/i.test(targetPath)) {
 		const parsed = parseCsv(proposed);
 		if (parsed.problems.length) {
 			checks.push({
@@ -653,20 +607,24 @@ async function reviewProposedEdit(replyText: string, preferredPath?: string) {
 	}
 
 	const rel = relativeTo(root, targetPath).replace(/\\/g, "/");
-	openReview({
+	await openReview({
 		title: `Agent proposal: ${rel}`,
 		path: targetPath,
 		original,
 		proposed,
 		language: languageFor(targetPath),
 		...(checks.length ? { checks } : {}),
+		...(blocked ? { blocked } : {}),
 		effect: documents.get(canonical(targetPath))
 			? `Accepting puts the right side into ${rel} as one undoable editor edit (not saved yet).`
 			: `Accepting saves the right side to ${rel} on disk.`,
 		onAccept: async (final) => {
+			if (blocked) throw new Error(blocked);
 			const key = canonical(targetPath);
 			if (documents.get(key)) {
-				applyText(key, final);
+				if (!applyText(key, final)) {
+					throw new Error(`${rel} could not be updated because its editor was closed.`);
+				}
 			} else {
 				await backend.historyKeep(targetPath).catch(() => {});
 				await backend.write(targetPath, final);
@@ -935,7 +893,7 @@ function EntryView(props: { entry: Entry }) {
 						<button type="button" class="link" title="Copy reply as Markdown" onClick={copyReply}>
 							Copy
 						</button>
-						<button type="button" class="link" title="Compare this reply against a workspace file in ReviewView before applying" onClick={() => void reviewProposedEdit(props.entry.text, entryCode())}>
+						<button type="button" class="link" title="Compare this reply against a workspace file in ReviewView before applying" onClick={() => void safely("Could not open review diff", () => reviewProposedEdit(props.entry.text, entryCode()))}>
 							Review diff…
 						</button>
 						<Show when={extractedTests().length > 0}>
@@ -943,31 +901,31 @@ function EntryView(props: { entry: Entry }) {
 								type="button"
 								class="link"
 								title={`Add ${extractedTests().length} extracted test ${extractedTests().length === 1 ? "case" : "cases"} to a .plan.json`}
-								onClick={() => void addReplyToPlanTests()}
+								onClick={() => void safely("Could not add tests to plan", () => addReplyToPlanTests())}
 							>
 								Add to Plan tests…
 							</button>
 						</Show>
 						<Show when={hasCatalogDrift()}>
-							<button type="button" class="link" title="Apply Update catalogs now (manual ADR 0031 reconciliation)" onClick={() => void updateCatalogs()}>
+							<button type="button" class="link" title="Apply Update catalogs now (manual ADR 0031 reconciliation)" onClick={() => void safely("Could not update catalogs", () => updateCatalogs())}>
 								Update catalogs
 							</button>
 						</Show>
 						<Show when={replyCodeBlocks().length > 0}>
-							<button type="button" class="link" title="Save code block as a kept snippet in docs/knowledge/snippets/" onClick={() => void saveReplySnippet()}>
+							<button type="button" class="link" title="Save code block as a kept snippet in docs/knowledge/snippets/" onClick={() => void safely("Could not save snippet", () => saveReplySnippet())}>
 								Save as Snippet
 							</button>
 						</Show>
-						<button type="button" class="link" title="Save this reply as a Spec in docs/specs/ linked to the active ticket" onClick={() => void saveReplyAsSpec(props.entry.text, activeTicketForReply() || undefined)}>
+						<button type="button" class="link" title="Save this reply as a Spec in docs/specs/ linked to the active ticket" onClick={() => void safely("Could not save spec", () => saveReplyAsSpec(props.entry.text, activeTicketForReply() || undefined))}>
 							Save as Spec…
 						</button>
-						<button type="button" class="link" title="Save this reply as a Decision ADR" onClick={() => void promoteToKnowledge("decisions", { body: props.entry.text, ticket: activeTicketForReply() || undefined, codePath: entryCode() })}>
+						<button type="button" class="link" title="Save this reply as a Decision ADR" onClick={() => void safely("Could not save decision", () => promoteToKnowledge("decisions", { body: props.entry.text, ticket: activeTicketForReply() || undefined, codePath: entryCode() }))}>
 							Save as Decision
 						</button>
-						<button type="button" class="link" title="Save this reply as a Question" onClick={() => void promoteToKnowledge("questions", { body: props.entry.text, ticket: activeTicketForReply() || undefined, codePath: entryCode() })}>
+						<button type="button" class="link" title="Save this reply as a Question" onClick={() => void safely("Could not save question", () => promoteToKnowledge("questions", { body: props.entry.text, ticket: activeTicketForReply() || undefined, codePath: entryCode() }))}>
 							Save as Question
 						</button>
-						<button type="button" class="link" title="Save this reply as a Reference note" onClick={() => void promoteToKnowledge("reference", { body: props.entry.text, ticket: activeTicketForReply() || undefined, codePath: entryCode() })}>
+						<button type="button" class="link" title="Save this reply as a Reference note" onClick={() => void safely("Could not save note", () => promoteToKnowledge("reference", { body: props.entry.text, ticket: activeTicketForReply() || undefined, codePath: entryCode() }))}>
 							Save as Note
 						</button>
 						<Show when={openQuestionsForTicket().length > 0}>
@@ -975,14 +933,14 @@ function EntryView(props: { entry: Entry }) {
 								type="button"
 								class="link"
 								title={`Write this reply into ## Answer for an open question on ${activeTicketForReply()}`}
-								onClick={() => void answerOpenQuestion()}
+								onClick={() => void safely("Could not record answer", () => answerOpenQuestion())}
 							>
 								Answer open question…
 							</button>
 						</Show>
 						<Show when={activeTicketForReply()}>
 							{(key) => (
-								<button type="button" class="link" title={`Append this reply as a dated note on ${key()}`} onClick={() => void appendNoteToTicket(key(), props.entry.text)}>
+								<button type="button" class="link" title={`Append this reply as a dated note on ${key()}`} onClick={() => void safely("Could not append note to ticket", () => appendNoteToTicket(key(), props.entry.text))}>
 									Append to {key()}
 								</button>
 							)}
@@ -1047,19 +1005,21 @@ export function AgentPanel() {
 	});
 	const [notSent, setNotSent] = createSignal("");
 	const [withSelection, setWithSelection] = createSignal(true);
-	// The ticket at hand and selection size react immediately to editor edits AND cursor selection changes.
-	const [edited, setEdited] = createSignal(0);
+	const isBusy = () => agent.busy || preparing();
+	// Separate content edits from cursor-selection moves so moving the cursor never triggers gitDiff/disk reads.
+	const [contentEdited, setContentEdited] = createSignal(0);
+	const [selectionMoved, setSelectionMoved] = createSignal(0);
 	createEffect(() => {
 		const doc = activeDoc();
 		const editor = activeEditor();
-		const d1 = doc?.model.onDidChangeContent(() => setEdited((n) => n + 1));
-		const d2 = editor?.onDidChangeCursorSelection(() => setEdited((n) => n + 1));
+		const d1 = doc?.model.onDidChangeContent(() => setContentEdited((n) => n + 1));
+		const d2 = editor?.onDidChangeCursorSelection(() => setSelectionMoved((n) => n + 1));
 		onCleanup(() => {
 			d1?.dispose();
 			d2?.dispose();
 		});
 	});
-	const autoTicket = createMemo(() => (edited(), resolvedAutoTicket()));
+	const autoTicket = createMemo(() => (contentEdited(), resolvedAutoTicket()));
 	const allTickets = createMemo(() =>
 		docs()
 			.filter((d) => d.exists && d.group === "tickets" && d.ticket)
@@ -1074,7 +1034,8 @@ export function AgentPanel() {
 		return key ? allTickets().find((d) => d.ticket?.toLowerCase() === key.toLowerCase()) : undefined;
 	});
 	const detectedRefTables = createMemo(() => {
-		edited();
+		contentEdited();
+		selectionMoved();
 		liveSelectionVersion();
 		const doc = activeDoc();
 		if (!doc || doc.binary) return [] as DocFile[];
@@ -1091,49 +1052,56 @@ export function AgentPanel() {
 			activePath(),
 		);
 	});
-	// Real measured next-turn delta size & token budget (approx 1 token ≈ 4 chars), reflecting sent/edited/pending slices.
-	const [measuredDelta] = createResource(
-		() => {
-			const targetTicket = ticket();
-			const sendWork = Boolean(targetTicket) && (pickedTicket() !== null || withWork());
-			return {
-				root: state.workspace?.root ?? "",
-				ticket: sendWork ? targetTicket : "",
-				schema: withSchema(),
-				refTables: withRefTables(),
-				regs: withRegistries(),
-				st: withState(),
-				gitDiff: withGitDiff(),
-				govDocs: withGoverningDocs(),
-				gitVer: gitVersion(),
-				curPath: activePath() ?? "",
-				files: attachedFiles().map((f) => `${f.path}|${f.rel}`),
-				tree: state.treeVersion,
-				sent: sentTick(),
-				ed: edited(),
-				liveSel: liveSelectionVersion(),
-				session: agent.chatSession ?? "",
-			};
-		},
-		async (src) => {
-			if (!src.root) return { chars: 0, breakdown: [] as PreparedContext["breakdown"] };
-			const curRoot = canonical(src.root);
-			const already = sentContext.session === (src.session || null) && sentContext.root === curRoot ? sentContext.hashes : new Map<string, string>();
-			const prepared = await prepareContextDelta(
-				src.ticket,
-				{
-					includeSchema: src.schema,
-					includeRegistries: src.regs,
-					includeState: src.st,
-					ticketFiles: attachedFiles(),
-				},
-				already,
-			);
-			return { chars: prepared.text.length, breakdown: prepared.breakdown };
-		},
-	);
+	// Real measured next-turn delta size & token budget (approx 1 token ≈ 4 chars), debounced (350ms) and decoupled from cursor-selection moves.
+	const rawDeltaSrc = createMemo(() => {
+		const targetTicket = ticket();
+		const sendWork = Boolean(targetTicket) && (pickedTicket() !== null || withWork());
+		const files = attachedFiles();
+		return {
+			root: state.workspace?.root ?? "",
+			ticket: sendWork ? targetTicket : "",
+			schema: withSchema(),
+			refTables: withRefTables(),
+			refTableKey: withRefTables() ? detectedRefTables().map((d) => canonical(d.path)).join(",") : "",
+			regs: withRegistries(),
+			st: withState(),
+			gitDiff: withGitDiff(),
+			govDocs: withGoverningDocs(),
+			gitVer: gitVersion(),
+			curPath: activePath() ?? "",
+			files,
+			filesKey: files.map((f) => `${f.path}|${f.rel}`).join("\n"),
+			tree: state.treeVersion,
+			sent: sentTick(),
+			ed: contentEdited(),
+			session: agent.chatSession ?? "",
+		};
+	});
+	const [debouncedDeltaSrc, setDebouncedDeltaSrc] = createSignal(rawDeltaSrc());
+	createEffect(() => {
+		const next = rawDeltaSrc();
+		const timer = setTimeout(() => setDebouncedDeltaSrc(next), 350);
+		onCleanup(() => clearTimeout(timer));
+	});
+	const [measuredDelta] = createResource(debouncedDeltaSrc, async (src) => {
+		if (!src.root) return { chars: 0, breakdown: [] as PreparedContext["breakdown"] };
+		const curRoot = canonical(src.root);
+		const already = sentContext.session === (src.session || null) && sentContext.root === curRoot ? sentContext.hashes : new Map<string, string>();
+		const prepared = await prepareContextDelta(
+			src.ticket,
+			{
+				includeSchema: src.schema,
+				includeRegistries: src.regs,
+				includeState: src.st,
+				ticketFiles: src.files,
+			},
+			already,
+		);
+		return { chars: prepared.text.length, breakdown: prepared.breakdown };
+	});
 	const preSendEstimate = createMemo(() => {
-		edited();
+		contentEdited();
+		selectionMoved();
 		liveSelectionVersion();
 		let chars = draft().length;
 		const parts: string[] = [];
@@ -1163,7 +1131,9 @@ export function AgentPanel() {
 		const root = state.workspace?.root;
 		if (!root) return notify("Open a folder first.");
 		const already = new Set(attachedFiles().map((f) => canonical(f.path)));
-		const ticketFiles = (activeTicketDoc()?.ticketFiles ?? []).filter((f) => !already.has(canonical(f.path)));
+		const ticketFiles = (activeTicketDoc()?.ticketFiles ?? []).filter(
+			(f) => !already.has(canonical(f.path)) && isInside(root, f.path) && isAllowedContextPath(relativeTo(root, f.path)),
+		);
 		const picked = await browseWorkspaceFile({
 			title: "Attach file to Agent",
 			root,
@@ -1172,8 +1142,13 @@ export function AgentPanel() {
 			exclude: attachedFiles().map((f) => f.path),
 		});
 		if (!picked || !isInside(root, picked.path)) return;
+		const rel = relativeTo(root, picked.path).replace(/\\/g, "/");
+		if (!isAllowedContextPath(rel)) {
+			notify("Hidden files and dotfiles cannot be attached to Agent context.", "error");
+			return;
+		}
 		setAttachedFiles((prev) =>
-			prev.some((f) => canonical(f.path) === canonical(picked.path)) ? prev : [...prev, picked],
+			prev.some((f) => canonical(f.path) === canonical(picked.path)) ? prev : [...prev, { path: picked.path, rel }],
 		);
 	};
 	const modelOf = (ref: string) => agent.models.find((m) => modelRef(m) === ref);
@@ -1193,18 +1168,20 @@ export function AgentPanel() {
 		if (pinned) scroller.scrollTop = scroller.scrollHeight;
 	});
 	// The reason goes when it no longer holds.
-	createEffect(() => !agent.busy && setNotSent(""));
+	createEffect(() => !isBusy() && setNotSent(""));
 
 	const send = () => {
-		const result = composerSend(draft(), agent.busy);
+		const result = composerSend(draft(), agent.busy || preparingLock);
 		setDraft(result.draft);
 		setNotSent(result.why ?? "");
 		if (result.send === null) return;
+		preparingLock = true;
+		setPreparing(true);
 		toEnd();
 		const targetTicket = ticket();
 		const sendWork = Boolean(targetTicket) && (pickedTicket() !== null || withWork());
 		void safely("The question was not sent", () =>
-			askAbout(result.send!, withSelection(), sendWork, {
+			runAskAbout(result.send!, withSelection(), sendWork, {
 				ticket: targetTicket,
 				workOptions: {
 					includeSchema: withSchema(),
@@ -1213,7 +1190,10 @@ export function AgentPanel() {
 					ticketFiles: attachedFiles(),
 				},
 			}),
-		);
+		).finally(() => {
+			preparingLock = false;
+			setPreparing(false);
+		});
 	};
 	const pickModel = async (select: HTMLSelectElement) => {
 		const saved = await safely("The model was not changed", () => chooseModel(select.value));
@@ -1555,9 +1535,9 @@ export function AgentPanel() {
 					<button
 						type="button"
 						class="agent-hdr-btn"
-						disabled={agent.busy}
+						disabled={isBusy()}
 						title={agent.threads.length ? `Switch between ${agent.threads.length} saved workspace conversations` : "Conversation history (last 5 workspace threads)"}
-						onClick={() => void openThreadHistory()}
+						onClick={() => void safely("Could not open thread history", () => openThreadHistory())}
 					>
 						<Icon name="list-flat" />
 						<span>History{agent.threads.length ? ` (${agent.threads.length})` : ""}</span>
@@ -1566,9 +1546,9 @@ export function AgentPanel() {
 						<button
 							type="button"
 							class="agent-hdr-btn"
-							disabled={agent.busy}
+							disabled={isBusy()}
 							title="Export this conversation as a Question, Decision ADR, or active ticket note"
-							onClick={() => void exportThread()}
+							onClick={() => void safely("Could not export conversation", () => exportThread())}
 						>
 							<Icon name="note" />
 							<span>Export…</span>
@@ -1901,11 +1881,11 @@ export function AgentPanel() {
 					</div>
 				</Show>
 				<div class="composer-bar">
-					<button type="button" aria-label="Start a new conversation" disabled={agent.busy} title={agent.busy ? "Wait for this reply, or stop it, before starting a new conversation." : "Start a new conversation: the agent will not see the earlier questions"} onClick={newConversation}>
+					<button type="button" aria-label="Start a new conversation" disabled={isBusy()} title={isBusy() ? "Wait for this reply, or stop it, before starting a new conversation." : "Start a new conversation: the agent will not see the earlier questions"} onClick={newConversation}>
 						New
 					</button>
 					<Show when={agent.entries.length > 0}>
-						<button type="button" aria-label="Clear conversation" disabled={agent.busy} title="Clear conversation history and return to starter prompts" onClick={clearConversation}>
+						<button type="button" aria-label="Clear conversation" disabled={isBusy()} title="Clear conversation history and return to starter prompts" onClick={clearConversation}>
 							Clear
 						</button>
 					</Show>
@@ -1927,7 +1907,7 @@ export function AgentPanel() {
 							{agent.stopping ? "Stopping…" : "Stop this reply"}
 						</button>
 					</Show>
-					<button class="primary" type="submit" disabled={agent.busy} title={agent.busy ? "The agent is still working on the last request. Stop this reply to send another." : "Send (Ctrl+Enter)"}>
+					<button class="primary" type="submit" disabled={isBusy()} title={isBusy() ? "The agent is still working on the last request. Stop this reply to send another." : "Send (Ctrl+Enter)"}>
 						Send
 					</button>
 				</div>

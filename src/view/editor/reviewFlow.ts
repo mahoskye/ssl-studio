@@ -4,6 +4,8 @@
 
 export type Reviewable = {
 	title: string;
+	/** True when replacing this review loses nothing (e.g. read-only comparisons) and needs no prompt. */
+	replaceable?: boolean;
 	onAccept: (text: string) => void | Promise<void>;
 	onReject?: () => void | Promise<void>;
 };
@@ -14,6 +16,8 @@ export type ReviewIO<R> = {
 	choose: (title: string, buttons: string[]) => Promise<string | null>;
 	/** A failure the user has to see. */
 	fail: (text: string) => void;
+	/** Optional predicate for reviews that may be replaced without prompting. */
+	replaceable?: (review: R) => boolean;
 };
 
 export const KEEP = "Keep reviewing";
@@ -25,8 +29,12 @@ const errorText = (e: unknown) => String((e as { message?: unknown } | null)?.me
 export function reviewFlow<R extends Reviewable>(io: ReviewIO<R>) {
 	/** The review whose accept is running. */
 	let accepting: R | null = null;
+	/** The review whose reject confirmation is running. */
+	let rejecting: R | null = null;
 	/** Opens wait their turn: the dialog can hold one question at a time. */
 	let queue: Promise<unknown> = Promise.resolve();
+
+	const isReplaceable = (review: R) => Boolean(review.replaceable || io.replaceable?.(review));
 
 	/** Tells a review's owner it was dropped. A failure in there is shown, not thrown at whoever dropped it. */
 	const drop = (review: R) => {
@@ -41,12 +49,16 @@ export function reviewFlow<R extends Reviewable>(io: ReviewIO<R>) {
 
 	async function open(next: R): Promise<boolean> {
 		const current = io.current();
-		// A review that is being accepted is done with: what its accept opens follows it without a question.
+		// A review that is being accepted, or a replaceable comparison, gives way without a question.
 		if (current && current !== next && current !== accepting) {
-			const answer = await io.choose(`"${current.title}" is still open for review. Replace it with "${next.title}"? Replacing rejects the one that is open.`, [KEEP, REPLACE]);
-			if (answer !== REPLACE) return false;
-			// It may have been accepted or rejected while the question was up.
-			if (io.current() === current) drop(current);
+			if (isReplaceable(current)) {
+				drop(current);
+			} else {
+				const answer = await io.choose(`"${current.title}" is still open for review. Replace it with "${next.title}"? Replacing rejects the one that is open.`, [KEEP, REPLACE]);
+				if (answer !== REPLACE) return false;
+				// It may have been accepted or rejected while the question was up.
+				if (io.current() === current) drop(current);
+			}
 		}
 		io.show(next);
 		return true;
@@ -67,6 +79,7 @@ export function reviewFlow<R extends Reviewable>(io: ReviewIO<R>) {
 		 */
 		async accept(review: R, text: string): Promise<string | null> {
 			if (accepting) return accepting === review ? "It is being accepted." : `"${accepting.title}" is still being accepted.`;
+			if (rejecting === review) return "It is being rejected.";
 			accepting = review;
 			try {
 				await review.onAccept(text);
@@ -83,15 +96,28 @@ export function reviewFlow<R extends Reviewable>(io: ReviewIO<R>) {
 
 		/** Rejects, after asking when the proposed side was edited. False: the user kept reviewing. */
 		async reject(review: R, edited: boolean): Promise<boolean> {
-			if (accepting === review) return false;
-			if (edited) {
-				const answer = await io.choose(`You edited the proposed text of "${review.title}". Rejecting loses those edits.`, [KEEP, LOSE_EDITS]);
-				if (answer !== LOSE_EDITS) return false;
+			if (accepting === review || rejecting === review) return false;
+			rejecting = review;
+			try {
+				if (edited) {
+					const answer = await io.choose(`You edited the proposed text of "${review.title}". Rejecting loses those edits.`, [KEEP, LOSE_EDITS]);
+					if (answer !== LOSE_EDITS) return false;
+				}
+				if (io.current() !== review) return false;
+				io.show(null);
+				drop(review);
+				return true;
+			} finally {
+				if (rejecting === review) rejecting = null;
 			}
-			if (io.current() !== review) return false;
+		},
+
+		/** Force-closes any open review without prompting, notifying its owner via `onReject`. */
+		close(): void {
+			const current = io.current();
+			if (!current) return;
 			io.show(null);
-			drop(review);
-			return true;
+			if (current !== accepting) drop(current);
 		},
 	};
 }

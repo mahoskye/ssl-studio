@@ -4,7 +4,7 @@
 // or lets its changes go (after asking). Everything stays on this machine:
 // there is no fetch, pull or push here.
 import { Icon } from "../Icon";
-import { createMemo, createResource, createSignal, For, Show } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, For, on, Show } from "solid-js";
 import { changeLetter, changeWord, commitProblem, GIT_ACTIONS, rowMenuEntries, stagedOf, unstagedOf, type GitFile } from "../../shared/gitStatus";
 import { draftCommitMessage, formatTicketChangelog } from "../../shared/markdownDiff";
 import { detectBranchTicketMismatch } from "../../shared/menuBar";
@@ -28,6 +28,8 @@ const { show: SHOW, open: OPEN, stage: STAGE, unstage: UNSTAGE, discard: DISCARD
 /** What the next commit is to say. Kept while the panel is away: a message half written is not lost to a look at another panel. */
 const [message, setMessage] = createSignal("");
 const [busy, setBusy] = createSignal(false);
+let messageRoot: string | undefined;
+let commitDiffReq = 0;
 
 /** As many files as a list shows: a folder of thousands that git was never told to ignore must not become thousands of rows. */
 const ROWS_SHOWN = 500;
@@ -48,6 +50,17 @@ function formatCommitDate(ms: number): string {
 }
 
 export function GitPanel() {
+	createEffect(
+		on(
+			() => state.workspace?.root,
+			(root) => {
+				if (root !== messageRoot) {
+					messageRoot = root;
+					setMessage("");
+				}
+			},
+		),
+	);
 	const staged = () => (gitStatus() ? stagedOf(gitStatus()!) : []);
 	const changes = () => (gitStatus() ? unstagedOf(gitStatus()!) : []);
 	/** Files staged above the workspace's folder: not listed, and in the commit all the same. */
@@ -334,10 +347,29 @@ export function GitPanel() {
 	};
 	const make = async () => {
 		if (problem()) return notify(`${problem()}.`);
+		const submitted = message();
+		const root = state.workspace?.root;
 		setBusy(true);
-		const made = await commit(message().trim());
-		setBusy(false);
-		if (made) setMessage("");
+		let made = false;
+		try {
+			made = await commit(submitted.trim());
+		} finally {
+			setBusy(false);
+		}
+		if (made && state.workspace?.root === root && message() === submitted) setMessage("");
+	};
+	const stageAll = async () => {
+		const all = changes();
+		const stageable = all.filter((f) => f.unstaged !== "conflict");
+		const skipped = all.length - stageable.length;
+		if (stageable.length) await stage(stageable);
+		if (skipped > 0) {
+			notify(
+				skipped === 1
+					? "Skipped 1 conflicted file: resolve merge conflicts before staging it."
+					: `Skipped ${skipped} conflicted files: resolve merge conflicts before staging them.`,
+			);
+		}
 	};
 	const draftMessage = () => {
 		const st = staged();
@@ -354,41 +386,60 @@ export function GitPanel() {
 		});
 		if (drafted) setMessage(drafted);
 	};
-	const openCommitFileDiff = async (commitItem: TicketGitCommit, f: { status: string; path: string }) => {
+	type CommitFileEntry = TicketGitCommit["files"][number];
+	const openCommitFileDiff = async (commitItem: TicketGitCommit, f: CommitFileEntry) => {
 		const root = state.workspace?.root;
 		if (!root) return;
-		const full = resolvePath(root, f.path);
-		if (!isInside(root, full)) return;
+		const req = ++commitDiffReq;
+		const stale = () => req !== commitDiffReq || state.workspace?.root !== root;
+		const outside = f.inWorkspace === false;
+		const repoPath = f.repoPath || (outside ? f.path : undefined);
+		let targetPath: string;
+		if (outside) {
+			targetPath = root;
+		} else {
+			const full = resolvePath(root, f.path);
+			if (!isInside(root, full)) return;
+			targetPath = full;
+		}
+		const displayPath = outside ? (repoPath ?? f.path) : targetPath;
 		try {
-			const { before, after } = await backend.gitCommitFile(full, commitItem.sha);
+			const { before, after } = await backend.gitCommitFile(targetPath, commitItem.sha, repoPath);
+			if (stale()) return;
 			if (before === null && after === null) {
 				notify(`Could not read text diff for ${f.path} at commit ${commitItem.shortSha}.`, "error");
 				return;
 			}
 			await openComparison({
 				title: `${commitItem.shortSha}: ${baseName(f.path)}`,
-				path: full,
+				path: displayPath,
 				before: before ?? "",
 				after: after ?? "",
 				beforeLabel: before === null ? "(not in parent)" : `${commitItem.shortSha}~1`,
 				afterLabel: after === null ? "(deleted)" : commitItem.shortSha,
-				language: languageFor(full),
+				language: languageFor(displayPath),
 				effect: `${commitItem.shortSha} (${commitItem.subject}) — commit diff for ${f.path}. Nothing here changes the file.`,
 			});
 		} catch (e: any) {
+			if (stale()) return;
 			notify(`Could not open commit diff for ${f.path}: ${String(e?.message ?? e)}`, "error");
 		}
 	};
-	const openCommitCurrentFile = (f: { path: string }) => {
+	const openCommitCurrentFile = (f: CommitFileEntry) => {
 		const root = state.workspace?.root;
 		if (!root) return;
+		if (f.inWorkspace === false) {
+			notify(`${f.path} is outside the open workspace folder.`);
+			return;
+		}
 		const full = resolvePath(root, f.path);
 		if (isInside(root, full)) void openFile(full, { keep: true });
 	};
-	const commitFileMenu = async (commitItem: TicketGitCommit, f: { status: string; path: string }, at: Point) => {
+	const commitFileMenu = async (commitItem: TicketGitCommit, f: CommitFileEntry, at: Point) => {
 		const VIEW_DIFF = "View commit diff";
 		const OPEN_CUR = "Open current file";
-		const action = await chooseFromMenu(baseName(f.path), [VIEW_DIFF, OPEN_CUR], at);
+		const entries = f.inWorkspace === false ? [VIEW_DIFF] : [VIEW_DIFF, OPEN_CUR];
+		const action = await chooseFromMenu(baseName(f.path), entries, at);
 		if (action === VIEW_DIFF) await openCommitFileDiff(commitItem, f);
 		else if (action === OPEN_CUR) openCommitCurrentFile(f);
 	};
@@ -776,7 +827,7 @@ export function GitPanel() {
 									<>
 										<span class="label">Changes</span>
 										<span class="count">{changes().length}</span>
-										<IconButton label="Stage all" title="Put every change into the commit" icon="add" onClick={() => void stage(changes())} />
+										<IconButton label="Stage all" title="Put every non-conflicted change into the commit" icon="add" onClick={() => void stageAll()} />
 									</>
 								}
 							>
