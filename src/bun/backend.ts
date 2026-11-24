@@ -88,6 +88,7 @@ export function createBackend(host: Host, initial?: string) {
 	let lspPath = "";
 	let lspRestartSeq = 0;
 	let info: Info | null = null;
+	let infoSeq = 0;
 	let lspState: LspState = { state: "stopped" };
 	let openSeq = 0;
 	let closing = false;
@@ -138,10 +139,12 @@ export function createBackend(host: Host, initial?: string) {
 	let unsaved = 0;
 
 	async function loadInfo(): Promise<Info> {
+		const seq = ++infoSeq;
 		const { effective } = await settings.load();
 		const [lspStatus, opencode, systemDark] = await Promise.all([findLsp(effective.lspPath), findOpencode(), systemPrefersDark()]);
-		info = { systemDark, app: host.app, lsp: lspStatus, opencode, host: host.kind, selftest: Boolean(process.env.SSL_STUDIO_SELFTEST), selftestCycle: Boolean(process.env.SSL_STUDIO_SELFTEST_CYCLE), selftestClose: Boolean(process.env.SSL_STUDIO_SELFTEST_CLOSE) };
-		return info;
+		const next: Info = { systemDark, app: host.app, lsp: lspStatus, opencode, host: host.kind, selftest: Boolean(process.env.SSL_STUDIO_SELFTEST), selftestCycle: Boolean(process.env.SSL_STUDIO_SELFTEST_CYCLE), selftestClose: Boolean(process.env.SSL_STUDIO_SELFTEST_CLOSE) };
+		if (!disposed && seq === infoSeq) info = next;
+		return next;
 	}
 
 	async function open(path: string): Promise<Workspace> {
@@ -162,6 +165,7 @@ export function createBackend(host: Host, initial?: string) {
 		asked = null;
 		prevFiles?.close();
 		prevLsp?.stop();
+		if (prevLsp || lspState.state !== "stopped") emitLspState({ state: "stopped" });
 		prevAsked?.git.dispose();
 
 		const isStale = () => disposed || seq !== openSeq;
@@ -176,28 +180,30 @@ export function createBackend(host: Host, initial?: string) {
 				nextFiles.close();
 				return { root: nextFiles.root, name: basename(nextFiles.root) };
 			}
-			const { lsp: status } = await loadInfo();
-			if (isStale()) {
-				nextFiles.close();
-				return { root: nextFiles.root, name: basename(nextFiles.root) };
-			}
 			if (restartSeq === lspRestartSeq) {
-				if (status.ok && status.path) {
-					const nextLsp = new LspProcess(
-						status.path,
-						(m) => {
-							if (!isStale() && lsp === nextLsp) host.emit("lsp", m);
-						},
-						(s) => {
-							if (!isStale() && lsp === nextLsp) emitLspState(s);
-						},
-					);
-					startedLsp = nextLsp;
-					lsp = nextLsp;
-					lspPath = status.path;
-					nextLsp.start();
-				} else {
-					emitLspState({ state: "failed", message: status.message });
+				const { lsp: status } = await loadInfo();
+				if (isStale()) {
+					nextFiles.close();
+					return { root: nextFiles.root, name: basename(nextFiles.root) };
+				}
+				if (restartSeq === lspRestartSeq) {
+					if (status.ok && status.path) {
+						const nextLsp = new LspProcess(
+							status.path,
+							(m) => {
+								if (!isStale() && lsp === nextLsp) host.emit("lsp", m);
+							},
+							(s) => {
+								if (!isStale() && lsp === nextLsp) emitLspState(s);
+							},
+						);
+						startedLsp = nextLsp;
+						lsp = nextLsp;
+						lspPath = status.path;
+						nextLsp.start();
+					} else {
+						emitLspState({ state: "failed", message: status.message });
+					}
 				}
 			}
 			await agent.workspaceChanged();
@@ -729,6 +735,8 @@ export function createBackend(host: Host, initial?: string) {
 			disposed = true;
 			openSeq++;
 			lspRestartSeq++;
+			infoSeq++;
+			info = null;
 			files?.close();
 			files = null;
 			lsp?.stop();

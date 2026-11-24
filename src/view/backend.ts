@@ -53,7 +53,7 @@ async function connectElectrobun(): Promise<Caller> {
 let closeActiveSocket: (() => void) | null = null;
 
 function readAuthToken(): string {
-	if (typeof document === "undefined") return "";
+	if (typeof document === "undefined" || typeof document.querySelector !== "function") return "";
 	return document.querySelector('meta[name="ssl-studio-token"]')?.getAttribute("content") ?? "";
 }
 

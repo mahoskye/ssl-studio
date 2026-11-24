@@ -755,5 +755,20 @@ describe("R11 — Final Clean-Sweep Verification Fixes", () => {
 	test("state.ts openFolder() cancel restarts LSP via restartLsp() rather than double-initializing", () => {
 		const stateSrc = readSrc("src/view/state.ts");
 		expect(stateSrc).toMatch(/if \(!workspace\) \{[\s\S]*?session\.setRoot\(prevRoot\);[\s\S]*?void restartLsp\(\);/);
+		expect(stateSrc).toMatch(/export async function restartLsp\(\)[\s\S]*?const seq = openSeq;[\s\S]*?if \(next && seq === openSeq\) setState\("info", next\);/);
+	});
+
+	test("R12: loadInfo() monotonic infoSeq, open() emits stopped on teardown, readAuthToken guards partial document, and GraphView uses restartLsp()", () => {
+		const backendSrc = readSrc("src/bun/backend.ts");
+		expect(backendSrc).toContain("const seq = ++infoSeq;");
+		expect(backendSrc).toContain("if (!disposed && seq === infoSeq) info = next;");
+		expect(backendSrc).toContain('if (prevLsp || lspState.state !== "stopped") emitLspState({ state: "stopped" });');
+
+		const viewBackendSrc = readSrc("src/view/backend.ts");
+		expect(viewBackendSrc).toContain('typeof document.querySelector !== "function"');
+
+		const graphSrc = readSrc("src/view/graph/GraphView.tsx");
+		expect(graphSrc).toContain("void restartLsp()");
+		expect(graphSrc).not.toContain("backend.lspRestart()");
 	});
 });

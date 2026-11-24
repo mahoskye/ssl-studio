@@ -257,10 +257,11 @@ export async function openFolder(path?: string) {
 
 /** Restarts the language server (re-resolving `lspPath`) and refreshes `state.info` so Settings and StatusBar stay current. */
 export async function restartLsp(): Promise<void> {
+	const seq = openSeq;
 	await guarded(async () => {
 		await backend.lspRestart();
 		const next = await backend.info();
-		if (next) setState("info", next);
+		if (next && seq === openSeq) setState("info", next);
 	});
 }
 

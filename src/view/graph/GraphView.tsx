@@ -22,7 +22,7 @@ import { batch, createEffect, createMemo, createSignal, createUniqueId, For, on,
 import { level } from "../../shared/houseStyle";
 import { backend } from "../backend";
 import { regionColor } from "../editor/regions";
-import { canonical, documents, notify, openFile, openToSide, setState, state } from "../state";
+import { canonical, documents, notify, openFile, openToSide, restartLsp, setState, state } from "../state";
 import { canvasMeasure, clearLabels, clearOf, fitShare, fitView, legibleScale, mapArea, outOfSight, nearest, recall, remember, reveal, smoothEdgePath, smoothEdgePoint, zoomAt, type Point } from "./canvas";
 import { loadGraph } from "./load";
 import { Minimap, type MapBox } from "./Minimap";
@@ -1831,7 +1831,7 @@ export function GraphView() {
 							<p class="hint">{why().hint}</p>
 						</Show>
 						<Show when={why().restart}>
-							<button class="primary" onClick={() => void backend.lspRestart()}>
+							<button class="primary" onClick={() => void restartLsp()}>
 								Restart the language server
 							</button>
 						</Show>
