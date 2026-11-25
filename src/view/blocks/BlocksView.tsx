@@ -3,8 +3,8 @@
 // is a text edit on the model the text editor shows, so one undo stack serves
 // both modes (ADR 0002).
 import { Icon } from "../Icon";
-import { createEffect, createMemo, createResource, createSignal, For, Match, on, onCleanup, Show, Switch } from "solid-js";
-import { createStore, reconcile } from "solid-js/store";
+import { createEffect, createMemo, createSignal, createStore, For, Match, onCleanup, reconcile, Show, Switch } from "solid-js";
+import { createAsyncQuery } from "../asyncQuery";
 import { findCodeCitations } from "../../shared/codeCitations";
 import { dirName, isInside, joinPath, relativeTo, resolvePath } from "../../shared/paths";
 import { isCatalog } from "../../shared/projectDocs";
@@ -59,7 +59,7 @@ function toSymbols(list: monaco.languages.DocumentSymbol[]): SymbolIn[] {
 /** Theme-coloured HTML for a few lines of SSL, through the same tokenizer as the editor. */
 function Code(props: { text: string }) {
 	// One string for the source: text that reads the same is not coloured again, however often it is asked for.
-	const [html] = createResource(
+	const [html] = createAsyncQuery(
 		() => `${state.settings.theme}\u0000${state.settings.themeMaterial ?? ""}\u0000${props.text}`,
 		(source) => monaco.editor.colorize(source.slice(source.indexOf("\u0000", source.indexOf("\u0000") + 1) + 1), "ssl", { tabSize: 4 }),
 	);
@@ -106,36 +106,39 @@ export function BlocksView(props: { path: string; group: number }) {
 		timer = undefined;
 	});
 	// Clear per-file fold memory when switching workspaces.
-	createEffect(() => {
-		const root = state.workspace?.root;
-		if (collapsedRoot !== undefined && collapsedRoot !== root) {
-			collapsedByPath.clear();
-			setCollapseVersion((v) => v + 1);
-		}
-		collapsedRoot = root;
-	});
+	const workspaceRoot = createMemo(() => state.workspace?.root);
 	createEffect(
-		on(
-			() => [props.path, state.lsp.state] as const,
-			() => {
-				treeVersionId = -1;
-				const model = doc()?.model;
-				if (!model || model.isDisposed()) return;
-				const sub = model.onDidChangeContent(() => {
-					clearTimeout(timer);
-					timer = setTimeout(() => setVersion((v) => v + 1), 300);
-				});
-				refreshNow();
-				onCleanup(() => {
-					clearTimeout(timer);
-					timer = undefined;
-					sub.dispose();
-				});
-			},
-		),
+		() => workspaceRoot(),
+		(root) => {
+			if (collapsedRoot !== undefined && collapsedRoot !== root) {
+				collapsedByPath.clear();
+				setCollapseVersion((v) => v + 1);
+			}
+			collapsedRoot = root;
+		},
+	);
+	const pathAndLsp = createMemo(() => `${props.path}\u0000${state.lsp.state}`);
+	createEffect(
+		() => pathAndLsp(),
+		() => {
+			treeVersionId = -1;
+			const model = doc()?.model;
+			if (!model || model.isDisposed()) return;
+			const sub = model.onDidChangeContent(() => {
+				clearTimeout(timer);
+				timer = setTimeout(() => setVersion((v) => v + 1), 300);
+			});
+			refreshNow();
+			return () => {
+				clearTimeout(timer);
+				timer = undefined;
+				sub.dispose();
+			};
+		},
 	);
 	createEffect(
-		on(version, async () => {
+		() => version(),
+		() => {
 			const req = ++reqSeq;
 			const model = doc()?.model;
 			if (!model || model.isDisposed()) return;
@@ -145,63 +148,71 @@ export function BlocksView(props: { path: string; group: number }) {
 			}
 			const startVersion = model.getVersionId();
 			const stale = () => req !== reqSeq || model.isDisposed() || doc()?.model !== model || model.getVersionId() !== startVersion;
-			try {
-				await session.waitReady().catch(() => {});
-				if (stale()) return;
-				if (state.lsp.state !== "running") {
-					setFailed(null);
-					return;
-				}
-				let root: Node;
-				if (session.supports("ssl/syntaxTree")) {
-					// The server's own parse (L1): statement-level chips, arms, unreadable spans.
-					const [result, symbols] = await Promise.all([
-						session.request("ssl/syntaxTree", { textDocument: { uri: model.uri.toString() } }),
-						session.documentSymbols(model).catch(() => []),
-					]);
+			void (async () => {
+				try {
+					await session.waitReady().catch(() => {});
 					if (stale()) return;
-					// Parameter names come from the outline, which lists them per procedure.
-					const params = new Map<string, string[]>();
-					const walk = (list: monaco.languages.DocumentSymbol[]) =>
-						list.forEach((s) => (s.kind === monaco.languages.SymbolKind.Function || s.kind === monaco.languages.SymbolKind.Method ? params.set(s.name, (s.children ?? []).map((c) => c.name)) : walk(s.children ?? [])));
-					walk(symbols);
-					root = treeFromSyntax(model.getLinesContent(), result?.nodes ?? [], (name) => params.get(name));
-				} else {
-					const [symbols, folds] = await Promise.all([
-						session.documentSymbols(model),
-						session.request("textDocument/foldingRange", { textDocument: { uri: model.uri.toString() } }).then((f) => f ?? []),
-					]);
-					if (stale()) return;
-					root = buildTree(model.getLinesContent(), toSymbols(symbols), folds);
-				}
-				// The answer is for the text as it was when asked: a file closed, edited, or swapped since is not this one.
-				if (stale()) return;
-				const first = tree.root === null;
-				treeVersionId = startVersion;
-				setFailed(null);
-				setTree("root", reconcile(root, { key: "key", merge: false }));
-				setRead((v) => v + 1);
-				// The banner opens folded; long files open as a region outline.
-				if (first) {
-					const banner = root.children.find((c) => c.kind === "comment" && c.start === 1);
-					if (banner) collapsed().add(banner.key);
-					if (model.getLineCount() > 300) {
-						const walk = (n: Node) => n.children.forEach((c) => (c.kind === "procedure" || c.kind === "comment" ? collapsed().add(c.key) : walk(c)));
-						walk(root);
+					if (state.lsp.state !== "running") {
+						setFailed(null);
+						return;
 					}
-					setCollapseVersion((v) => v + 1);
-				}
-			} catch (e: any) {
-				if (stale()) return;
-				if (state.lsp.state !== "running") {
+					let root: Node;
+					if (session.supports("ssl/syntaxTree")) {
+						// The server's own parse (L1): statement-level chips, arms, unreadable spans.
+						const [result, symbols] = await Promise.all([
+							session.request("ssl/syntaxTree", { textDocument: { uri: model.uri.toString() } }),
+							session.documentSymbols(model).catch(() => []),
+						]);
+						if (stale()) return;
+						// Parameter names come from the outline, which lists them per procedure.
+						const params = new Map<string, string[]>();
+						const walk = (list: monaco.languages.DocumentSymbol[]) =>
+							list.forEach((s) => (s.kind === monaco.languages.SymbolKind.Function || s.kind === monaco.languages.SymbolKind.Method ? params.set(s.name, (s.children ?? []).map((c) => c.name)) : walk(s.children ?? [])));
+						walk(symbols);
+						root = treeFromSyntax(model.getLinesContent(), result?.nodes ?? [], (name) => params.get(name));
+					} else {
+						const [symbols, folds] = await Promise.all([
+							session.documentSymbols(model),
+							session.request("textDocument/foldingRange", { textDocument: { uri: model.uri.toString() } }).then((f) => f ?? []),
+						]);
+						if (stale()) return;
+						root = buildTree(model.getLinesContent(), toSymbols(symbols), folds);
+					}
+					// The answer is for the text as it was when asked: a file closed, edited, or swapped since is not this one.
+					if (stale()) return;
+					let first = false;
+					treeVersionId = startVersion;
 					setFailed(null);
-					return;
+					setTree((s) => {
+						first = s.root === null;
+						if (s.root && s.root.key === root.key) reconcile(root, "key")(s.root);
+						else s.root = root;
+					});
+					setRead((v) => v + 1);
+					// The banner opens folded; long files open as a region outline.
+					if (first) {
+						const banner = root.children.find((c) => c.kind === "comment" && c.start === 1);
+						if (banner) collapsed().add(banner.key);
+						if (model.getLineCount() > 300) {
+							const walk = (n: Node) => n.children.forEach((c) => (c.kind === "procedure" || c.kind === "comment" ? collapsed().add(c.key) : walk(c)));
+							walk(root);
+						}
+						setCollapseVersion((v) => v + 1);
+					}
+				} catch (e: any) {
+					if (stale()) return;
+					if (state.lsp.state !== "running") {
+						setFailed(null);
+						return;
+					}
+					treeVersionId = -1;
+					setTree((s) => {
+						s.root = null;
+					});
+					setFailed(String(e?.message ?? e));
 				}
-				treeVersionId = -1;
-				setTree("root", null);
-				setFailed(String(e?.message ?? e));
-			}
-		}),
+			})();
+		},
 	);
 
 	// The tree is read a moment after the text changes, so a node can point past the
@@ -224,7 +235,6 @@ export function BlocksView(props: { path: string; group: number }) {
 	const select = (n: Node, focusText = false) => {
 		const editor = editors[props.group];
 		const model = doc()?.model;
-		setState("activeGroup", props.group);
 		if (model && !model.isDisposed()) {
 			const lineCount = model.getLineCount();
 			const start = Math.max(1, Math.min(n.start, lineCount));
@@ -234,9 +244,12 @@ export function BlocksView(props: { path: string; group: number }) {
 		} else {
 			editor?.setSelection(new monaco.Range(n.start, 1, n.end, 1));
 		}
-		setState("cursor", { line: n.start, column: 1 });
+		setState((s) => {
+			s.activeGroup = props.group;
+			s.cursor = { line: n.start, column: 1 };
+			if (focusText && s.groups[props.group]) s.groups[props.group]!.mode = "text";
+		});
 		if (focusText) {
-			setState("groups", props.group, "mode", "text");
 			queueMicrotask(() => {
 				editor?.revealLineInCenter(n.start);
 				editor?.focus();
@@ -309,7 +322,7 @@ export function BlocksView(props: { path: string; group: number }) {
 		const gov = docsGoverningFile(docs(), props.path, state.workspace?.root);
 		return `${props.path}|${state.treeVersion}|${gov.map((g) => g.file.path).join(",")}`;
 	});
-	const [traceData] = createResource(govFingerprint, async () => {
+	const [traceData] = createAsyncQuery(govFingerprint, async () => {
 		const wsRoot = state.workspace?.root;
 		const allDocs = docs();
 		const gov = docsGoverningFile(allDocs, props.path, wsRoot);
@@ -673,11 +686,21 @@ export function BlocksView(props: { path: string; group: number }) {
 	};
 	let scroller: HTMLDivElement | undefined;
 	// The selected block is kept in view, whether the keys here moved it or the text cursor did.
-	createEffect(() => {
-		if (selectedKey()) queueMicrotask(() => scroller?.querySelector(".selected")?.scrollIntoView({ block: "nearest" }));
-	});
+	const selectedKeyMemo = createMemo(selectedKey);
+	createEffect(
+		() => selectedKeyMemo(),
+		(key) => {
+			if (key) queueMicrotask(() => scroller?.querySelector(".selected")?.scrollIntoView({ block: "nearest" }));
+		},
+	);
 	// Leaving an edit gives the keys back to the view.
-	createEffect(on(editing, (now, before) => before && !now && scroller?.focus({ preventScroll: true }), { defer: true }));
+	createEffect(
+		() => editing(),
+		(now, before) => {
+			if (before && !now) scroller?.focus({ preventScroll: true });
+		},
+		{ defer: true },
+	);
 
 	/** A block's first line: keyword, an editable condition field, and the rest as written. */
 	const HeadLine = (props: { node: Node }) => {
@@ -717,7 +740,7 @@ export function BlocksView(props: { path: string; group: number }) {
 							/>
 						</Show>
 						{/* What closes the line stands against the condition, as it does in the text: "DueRule;", not "DueRule ;". */}
-						<span classList={{ "b-tight": /^[;),]/.test((parts().after + parts().rest).trim()) }}>
+						<span class={{ "b-tight": /^[;),]/.test((parts().after + parts().rest).trim()) }}>
 							<Code text={(parts().after + parts().rest).trim()} />
 						</span>
 					</span>
@@ -779,8 +802,8 @@ export function BlocksView(props: { path: string; group: number }) {
 			flex: "none",
 		});
 		const header = (label: any, meta?: () => string | undefined) => (
-			<div class="block-head" {...dropZone(n.start)} classList={{ drop: dropAt() === n.start }} onClick={() => select(n)} onDblClick={() => toggle(n)}>
-				<button class="twisty" tabindex={-1} aria-label={isCollapsed(n) ? "Unfold" : "Fold"} aria-expanded={!isCollapsed(n)} onClick={(e) => (e.stopPropagation(), toggle(n))}>
+			<div class={["block-head", { drop: dropAt() === n.start }]} {...dropZone(n.start)} onClick={() => select(n)} onDblClick={() => toggle(n)}>
+				<button class="twisty" tabindex={-1} aria-label={isCollapsed(n) ? "Unfold" : "Fold"} aria-expanded={!isCollapsed(n) ? "true" : "false"} onClick={(e) => (e.stopPropagation(), toggle(n))}>
 					<Icon name={isCollapsed(n) ? "chevron-right" : "chevron-down"} />
 				</button>
 				<span class="block-label">{label}</span>
@@ -891,7 +914,7 @@ export function BlocksView(props: { path: string; group: number }) {
 		return (
 			<Switch>
 				<Match when={n.kind === "region"}>
-					<section class="b-region" classList={{ selected: selectedKey() === n.key }} style={{ "--region": regionColor(n.name!) }}>
+					<section class={["b-region", { selected: selectedKey() === n.key }]} style={{ "--region": regionColor(n.name!) }}>
 						{header(<strong>{n.name}</strong>, () => `${from()} · ${size()} · ${n.children.filter((c) => c.kind === "procedure").length} procedures`)}
 						<Show when={!isCollapsed(n)}>
 							<div class="block-body">
@@ -901,7 +924,7 @@ export function BlocksView(props: { path: string; group: number }) {
 					</section>
 				</Match>
 				<Match when={n.kind === "procedure"}>
-					<section class="b-procedure" classList={{ selected: selectedKey() === n.key }}>
+					<section class={["b-procedure", { selected: selectedKey() === n.key }]}>
 						{header(
 							<>
 								<span class="proc-icon">ƒ</span> <strong>{n.name}</strong>
@@ -917,7 +940,7 @@ export function BlocksView(props: { path: string; group: number }) {
 					</section>
 				</Match>
 				<Match when={n.kind === "block"}>
-					<section class="b-block" classList={{ selected: selectedKey() === n.key, "b-class": Boolean(n.classHead) }}>
+					<section class={["b-block", { selected: selectedKey() === n.key, "b-class": Boolean(n.classHead) }]}>
 						{header(
 							<>
 								<Show when={n.classHead}>
@@ -937,7 +960,7 @@ export function BlocksView(props: { path: string; group: number }) {
 					</section>
 				</Match>
 				<Match when={n.kind === "comment"}>
-					<section class="b-comment" classList={{ selected: selectedKey() === n.key, banner: n.start === 1, "b-doc": Boolean(n.doc) }}>
+					<section class={["b-comment", { selected: selectedKey() === n.key, banner: n.start === 1, "b-doc": Boolean(n.doc) }]}>
 						{header(
 							n.start === 1 ? (
 								<strong>File banner</strong>
@@ -963,7 +986,7 @@ export function BlocksView(props: { path: string; group: number }) {
 					<Show
 						when={editing() === n.key}
 						fallback={
-							<div class="b-text" {...dropZone(n.start)} classList={{ selected: selectedKey() === n.key, drop: dropAt() === n.start }} title="Double-click, or Enter, to edit" onClick={() => select(n)} onDblClick={() => setEditing(n.key)}>
+							<div class={["b-text", { selected: selectedKey() === n.key, drop: dropAt() === n.start }]} {...dropZone(n.start)} title="Double-click, or Enter, to edit" onClick={() => select(n)} onDblClick={() => setEditing(n.key)}>
 								<Code text={lines(n)} />
 							</div>
 						}
@@ -989,7 +1012,7 @@ export function BlocksView(props: { path: string; group: number }) {
 					</Show>
 				</Match>
 				<Match when={n.kind === "raw"}>
-					<div class="b-text b-raw" classList={{ selected: selectedKey() === n.key }} title="The language server could not read this; it is kept as written. Double-click, or Enter, to edit." onClick={() => select(n)} onDblClick={() => setEditing(n.key)}>
+					<div class={["b-text b-raw", { selected: selectedKey() === n.key }]} title="The language server could not read this; it is kept as written. Double-click, or Enter, to edit." onClick={() => select(n)} onDblClick={() => setEditing(n.key)}>
 						<Show when={editing() === n.key} fallback={<Code text={lines(n)} />}>
 							<textarea
 								class="b-edit"
@@ -1013,7 +1036,7 @@ export function BlocksView(props: { path: string; group: number }) {
 					</div>
 				</Match>
 				<Match when={n.kind === "blank"}>
-					<div class="b-blank" {...dropZone(n.start)} classList={{ drop: dropAt() === n.start }} />
+					<div class={["b-blank", { drop: dropAt() === n.start }]} {...dropZone(n.start)} />
 				</Match>
 			</Switch>
 		);

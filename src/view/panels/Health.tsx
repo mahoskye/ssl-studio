@@ -147,9 +147,12 @@ export function Health() {
 	const [healthMode, setHealthMode] = createSignal<"all" | "ticket" | "warnings">("all");
 	const [healthQuery, setHealthQuery] = createSignal("");
 	const activeTicketKey = () => state.settings.activeTicket?.trim() || "";
-	createEffect(() => {
-		if (!activeTicketKey() && healthMode() === "ticket") setHealthMode("all");
-	});
+	createEffect(
+		() => !activeTicketKey() && healthMode() === "ticket",
+		(shouldReset) => {
+			if (shouldReset) setHealthMode("all");
+		},
+	);
 	const activeTicketScope = createMemo(() => {
 		const key = activeTicketKey();
 		if (!key) return { paths: new Set<string>(), folders: [] as string[], keys: new Set<string>() };
@@ -285,7 +288,7 @@ export function Health() {
 		const next = `${cur.slice(0, offset)}x${cur.slice(offset + 1)}`;
 		try {
 			await writeDocEdit(task.path, next);
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			refreshDocAudit();
 			notify(`Ticked off task in ${task.ticket ?? task.title ?? baseName(task.path)}.`);
 		} catch (e: any) {
@@ -301,7 +304,7 @@ export function Health() {
 		if (next === cur) return;
 		try {
 			await writeDocEdit(issue.docPath, next);
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			refreshDocAudit();
 			notify(`Re-anchored citation to L${issue.reanchor.from}-L${issue.reanchor.to}.`);
 		} catch (e: any) {
@@ -334,7 +337,7 @@ export function Health() {
 		if (!next || next === freshDoc) return notify("Could not refresh excerpt — the document changed since.", "error");
 		try {
 			await writeDocEdit(issue.docPath, next);
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			refreshDocAudit();
 			notify(`Refreshed quoted excerpt in ${baseName(issue.docPath)}.`);
 		} catch (e: any) {
@@ -386,7 +389,7 @@ export function Health() {
 			}
 		}
 		if (changedFiles) {
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			refreshDocAudit();
 		}
 		if (updated) {
@@ -405,7 +408,7 @@ export function Health() {
 		try {
 			await backend.trash(path);
 			fileRemoved(path);
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			refreshDocAudit();
 			notify(`Moved unused attachment ${baseName(path)} to trash.`);
 		} catch (e: any) {
@@ -439,7 +442,7 @@ export function Health() {
 			}
 		}
 		if (trashed) {
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			refreshDocAudit();
 			notify(`Moved ${count(trashed, "unused attachment")} to trash${failed ? ` (${failed} failed)` : ""}.`);
 		}
@@ -452,7 +455,7 @@ export function Health() {
 		if (!done || after === before) return notify("Those wikilinks could not be mended — the document may have already changed.");
 		try {
 			await writeDocEdit(path, after);
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			refreshDocAudit();
 			notify(`Mended ${count(done, "wikilink")} in ${baseName(path)}.`);
 		} catch (e: any) {
@@ -471,7 +474,7 @@ export function Health() {
 		if (!next || next === before) return notify(`${baseName(fixSpec.path)} already lists ${fixSpec.field}: ${fixSpec.value}.`);
 		try {
 			await writeDocEdit(fixSpec.path, next);
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			refreshDocAudit();
 			notify(`Added ${fixSpec.field}: ${fixSpec.value} to ${baseName(fixSpec.path)}.`);
 		} catch (e: any) {
@@ -531,7 +534,7 @@ export function Health() {
 			}
 		}
 		if (mendedPaths.size) {
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			refreshDocAudit();
 		}
 		if (mendedLinks) {
@@ -843,6 +846,26 @@ export function Health() {
 		if (picked === open) await openCheck(check);
 		else if (picked && picked === put) fix(check);
 	};
+	const bindTaskSpace = () => {
+		let boundEl: HTMLElement | undefined;
+		const onTaskSpace = (e: KeyboardEvent) => {
+			if (e.key !== " " || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+			const row = (e.target as HTMLElement | null)?.closest<HTMLElement>("[data-row]");
+			const rowKey = row?.dataset.row;
+			if (!rowKey) return;
+			const task = filteredOpenTasks().find((t) => `${t.path}:${t.line}:${t.offset}` === rowKey);
+			if (!task) return;
+			e.preventDefault();
+			e.stopPropagation();
+			void tickOpenTask(task);
+		};
+		onCleanup(() => boundEl?.removeEventListener("keydown", onTaskSpace, true));
+		return (el: HTMLElement) => {
+			boundEl?.removeEventListener("keydown", onTaskSpace, true);
+			boundEl = el;
+			el.addEventListener("keydown", onTaskSpace, true);
+		};
+	};
 	const fileState = (file: { exists: boolean; untouched?: boolean }) => (!file.exists ? "missing" : file.untouched ? "still the template text" : "written");
 	return (
 		<div class="panel-body health" data-panel="health">
@@ -868,13 +891,13 @@ export function Health() {
 					onKeyDown={(e) => e.key === "ArrowDown" && focusRowsBelow(e.currentTarget) && e.preventDefault()}
 				/>
 				<div class="docs-filter-pills" role="group" aria-label="Health filter mode">
-					<button type="button" classList={{ on: healthMode() === "all" }} onClick={() => setHealthMode("all")}>
+					<button type="button" class={{ on: healthMode() === "all" }} onClick={() => setHealthMode("all")}>
 						All
 					</button>
 					<Show when={activeTicketKey()}>
 						<button
 							type="button"
-							classList={{ on: healthMode() === "ticket" }}
+							class={{ on: healthMode() === "ticket" }}
 							title={`Show only Health items for ${activeTicketKey()} and its linked work`}
 							onClick={() => setHealthMode("ticket")}
 						>
@@ -883,7 +906,7 @@ export function Health() {
 					</Show>
 					<button
 						type="button"
-						classList={{ on: healthMode() === "warnings" }}
+						class={{ on: healthMode() === "warnings" }}
 						title="Show only warning-level checks and citations"
 						onClick={() => setHealthMode("warnings")}
 					>
@@ -1178,23 +1201,7 @@ export function Health() {
 				</section>
 			</Show>
 			<Show when={filteredOpenTasks().length > 0}>
-				<section
-					ref={(el) => {
-						const onTaskSpace = (e: KeyboardEvent) => {
-							if (e.key !== " " || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
-							const row = (e.target as HTMLElement | null)?.closest<HTMLElement>("[data-row]");
-							const rowKey = row?.dataset.row;
-							if (!rowKey) return;
-							const task = filteredOpenTasks().find((t) => `${t.path}:${t.line}:${t.offset}` === rowKey);
-							if (!task) return;
-							e.preventDefault();
-							e.stopPropagation();
-							void tickOpenTask(task);
-						};
-						el.addEventListener("keydown", onTaskSpace, true);
-						onCleanup(() => el.removeEventListener("keydown", onTaskSpace, true));
-					}}
-				>
+				<section ref={bindTaskSpace()}>
 					<h3 title="Unchecked - [ ] tasks across active tickets, specs, and project notes">
 						Open tasks <span class="meta">{filteredOpenTasks().length}</span>
 					</h3>
@@ -1425,7 +1432,12 @@ export function Health() {
 										key={rule}
 										label={rule}
 										title={`${rule}: ${count(entry.count, "finding")} (${SEVERITY[entry.severity]!.toLowerCase()}). Click, or press Enter, to see them in Problems.`}
-										onActivate={() => (setState("bottomView", "problems"), setState("settings", "layout", "bottom", true))}
+										onActivate={() =>
+											setState((s) => {
+												s.bottomView = "problems";
+												s.settings.layout.bottom = true;
+											})
+										}
 									>
 										<SeverityMark severity={entry.severity} />
 										<span class="label">{rule}</span>

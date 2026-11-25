@@ -1,7 +1,6 @@
 // One language-server session for the open workspace: documents, diagnostics
 // and every Monaco provider the server's capabilities allow.
-import { createSignal } from "solid-js";
-import { createStore, reconcile } from "solid-js/store";
+import { createSignal, createStore } from "solid-js";
 import { monaco } from "../editor/monaco";
 import { LEGEND, onSemanticThemeChange, refreshSemanticTokens, translateTokens } from "../editor/semantic";
 import { backend, on } from "../backend";
@@ -59,12 +58,16 @@ function setOwnerDiagnostics(uri: string, owner: string, list: Diagnostic[] | nu
 	}
 	const current = diagnosticsByOwner.get(uri);
 	if (!current || !current.size) {
-		setDiagnostics(uri, undefined!);
+		setDiagnostics((s) => {
+			delete s[uri];
+		});
 		return;
 	}
 	const merged: Diagnostic[] = [];
 	for (const items of current.values()) merged.push(...items);
-	setDiagnostics(uri, reconcile(merged));
+	setDiagnostics((s) => {
+		s[uri] = merged;
+	});
 }
 
 function clearOwnerDiagnostics(owner: string) {

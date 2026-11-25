@@ -2,7 +2,7 @@
 // date, and the steps of making a commit. Everything is asked of the
 // backend, which asks the user's own git (src/bun/git.ts); nothing here
 // leaves this machine.
-import { createEffect, createSignal, on, onCleanup } from "solid-js";
+import { createEffect, createMemo, createSignal, onSettled, snapshot } from "solid-js";
 import { branchLabel, changeWord, type GitFile, type GitStatus } from "../shared/gitStatus";
 import { baseName, isInside, relativeTo } from "../shared/paths";
 import { backend } from "./backend";
@@ -27,7 +27,7 @@ let statusRoot: string | undefined;
 export async function refreshGit(): Promise<void> {
 	clearTimeout(timer);
 	const mine = ++asking;
-	const root = state.workspace?.root;
+	const root = snapshot(state).workspace?.root;
 	if (!root) {
 		statusRoot = undefined;
 		setFailure("");
@@ -40,12 +40,12 @@ export async function refreshGit(): Promise<void> {
 	}
 	try {
 		const next = await backend.gitStatus();
-		if (mine !== asking || state.workspace?.root !== root) return;
+		if (mine !== asking || snapshot(state).workspace?.root !== root) return;
 		statusRoot = root;
 		setFailure("");
 		setStatus(next);
 	} catch (e: any) {
-		if (mine !== asking || state.workspace?.root !== root) return;
+		if (mine !== asking || snapshot(state).workspace?.root !== root) return;
 		if (statusRoot !== root) setStatus(undefined);
 		setFailure(String(e?.message ?? e));
 	}
@@ -60,23 +60,28 @@ export function refreshGitSoon() {
 
 /** Keeps the status in step with the workspace: when a folder opens, when files change, and when the window is come back to. Called once, from the window. */
 export function useGit() {
-	createEffect(
-		on(
-			() => state.workspace?.root,
-			() => {
-				statusRoot = undefined;
-				setStatus(undefined);
-				setFailure("");
-				void refreshGit();
-			},
-		),
-	);
+	const root = createMemo(() => state.workspace?.root);
+	createEffect(root, () => {
+		statusRoot = undefined;
+		setStatus(undefined);
+		setFailure("");
+		void refreshGit();
+	});
 	// A save, a new file, a rename, a change on disk: each moves the tree's version.
-	createEffect(on(() => state.treeVersion, refreshGitSoon, { defer: true }));
+	createEffect(
+		() => state.treeVersion,
+		() => refreshGitSoon(),
+		{ defer: true },
+	);
 	// A commit made in a terminal is not heard of: coming back to the window asks again.
-	const focused = () => state.workspace && refreshGitSoon();
-	window.addEventListener("focus", focused);
-	onCleanup(() => window.removeEventListener("focus", focused));
+	onSettled(() => {
+		const focused = () => snapshot(state).workspace && refreshGitSoon();
+		window.addEventListener("focus", focused);
+		return () => {
+			clearTimeout(timer);
+			window.removeEventListener("focus", focused);
+		};
+	});
 }
 
 export const branchText = () => (status() ? branchLabel(status()!) : "");
@@ -169,7 +174,9 @@ export async function discard(file: GitFile): Promise<void> {
 		await fileChangedOnDisk(file.path);
 	}
 	historyChanged.fire(canon);
-	setState("treeVersion", (v) => v + 1);
+	setState((s) => {
+		s.treeVersion += 1;
+	});
 	await refreshGit();
 }
 

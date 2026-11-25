@@ -316,7 +316,7 @@ describe("PlanView.tsx — pure helpers & layout invariants", () => {
 		expect(src).toMatch(/catch \(e: any\) \{\s*if \(run !== layoutRun\) return;/);
 
 		// Text -> Chart fit() effect watches isTextMode() and layout().
-		expect(src).toMatch(/createEffect\(\(\) => \{\s*if \(isTextMode\(\) \|\| !layout\(\) \|\| fitted\) return;\s*if \(fit\(\)\)/);
+		expect(src).toMatch(/createEffect\(\s*\(\) => \[isTextMode\(\), layout\(\)\] as const,\s*\(\[inText, l\]\) => \{\s*if \(inText \|\| !l \|\| fitted\) return;\s*if \(fit\(\)\)/);
 
 		// Float-bar non-editing buttons call refocus().
 		const floatBarIdx = src.indexOf('class="plan-float-bar"');
@@ -445,7 +445,7 @@ describe("PlanTests.tsx — validTestScript, draft cleanup, and Generate button 
 
 		// TestCaseList supports onConsumeDraft and NodeTests clears draftReq on node change
 		expect(src).toContain("onConsumeDraft?: () => void;");
-		expect(src).toMatch(/props\.node\.id;\s*setJourneyFilter\(null\);\s*setDraftReq\(null\);/);
+		expect(src).toMatch(/\(\) => nodeId\(\),\s*\(\) => \{\s*setJourneyFilter\(null\);\s*setDraftReq\(null\);/);
 		expect(src).toContain("onConsumeDraft={() => setDraftReq(null)}");
 
 		// No stale "Soon" pill or "Scheduled —" tooltip, and NodeTests forwards props.node.id

@@ -360,7 +360,9 @@ export class TableWidget extends WidgetType {
 						await backend.create(dest, "file");
 					}
 					await backend.write(dest, csvText);
-					setState("treeVersion", (v) => v + 1);
+					setState((s) => {
+						s.treeVersion += 1;
+					});
 					notify(`Exported table to ${relativeTo(appState.workspace.root, dest)}.`);
 				} catch (err: any) {
 					notify(`Could not export CSV: ${err?.message ?? err}`, "error");

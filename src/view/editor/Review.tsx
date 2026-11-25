@@ -10,7 +10,7 @@ import { frontMatter } from "../../shared/frontMatter";
 import { diffMarkdownBlocks, diffPlainTextHtml, type MarkdownDiffRow } from "../../shared/markdownDiff";
 import { initialReviewLayout, reviewLayoutKey, type ReviewFormat, type ReviewLayout } from "../../shared/menuBar";
 import { Icon } from "../Icon";
-import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, untrack } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onSettled, Show, untrack } from "solid-js";
 import { choose } from "../dialogs";
 import { canonical, keepTab, state, notify } from "../state";
 import { baseName, isInside, joinPath, relativeTo } from "../../shared/paths";
@@ -357,7 +357,7 @@ export function ReviewView() {
 	const rightLabel = r.compare?.right ?? r.sides?.right ?? "Proposed";
 	const label = r.acceptLabel ?? "Accept";
 	const rejectLabel = r.rejectLabel ?? "Reject";
-	const file = r.path ? relativeTo(state.workspace?.root, r.path) : "";
+	const file = () => (r.path ? relativeTo(state.workspace?.root, r.path) : "");
 	const tabTitle = r.path ? (r.compare ? `${baseName(r.path)} (diff)` : `Review: ${baseName(r.path)}`) : r.title;
 	const effect = r.effect ?? `"${label}" applies the ${r.acceptSide === "original" ? "left" : "right"} side.`;
 
@@ -366,9 +366,6 @@ export function ReviewView() {
 	let rightPaneEl: HTMLDivElement | undefined;
 	let syncingFrom: "left" | "right" | null = null;
 	let syncFrame = 0;
-	onCleanup(() => {
-		if (syncFrame) cancelAnimationFrame(syncFrame);
-	});
 	const syncRenderedScroll = (from: "left" | "right") => {
 		const src = from === "left" ? leftPaneEl : rightPaneEl;
 		const dst = from === "left" ? rightPaneEl : leftPaneEl;
@@ -416,7 +413,7 @@ export function ReviewView() {
 		});
 	};
 
-	onMount(() => {
+	onSettled(() => {
 		const original = monaco.editor.createModel(r.original, r.language);
 		const proposed = (proposedModel = monaco.editor.createModel(r.proposed, r.language));
 		if (r.original.includes("\n")) proposed.setEOL(original.getEndOfLineSequence());
@@ -438,11 +435,6 @@ export function ReviewView() {
 		const sized = diff.onDidUpdateDiff(() => setSize(changeSize(diff.getLineChanges())));
 		const synced = proposed.onDidChangeContent(() => setLiveProposed(proposed.getValue()));
 		const stopHoverSevs = [diff.getOriginalEditor(), diff.getModifiedEditor()].map((side) => observeMarkerHoverSeverity(side));
-		onCleanup(() => {
-			sized.dispose();
-			synced.dispose();
-			for (const stop of stopHoverSevs) stop();
-		});
 		untouched = proposed.getAlternativeVersionId();
 		// Escape needs the keyboard in here. Typing somewhere else (the agent's composer) is left alone.
 		const focused = document.activeElement;
@@ -450,26 +442,36 @@ export function ReviewView() {
 			if (isCodeDiff()) diff.getModifiedEditor().focus();
 			else root.focus();
 		}
-		onCleanup(() => {
+		return () => {
+			if (syncFrame) cancelAnimationFrame(syncFrame);
+			sized.dispose();
+			synced.dispose();
+			for (const stop of stopHoverSevs) stop();
 			editor = undefined;
+			proposedModel = undefined;
 			diff.dispose();
 			original.dispose();
 			proposed.dispose();
-		});
+		};
 	});
 	// Both sides follow the Font size, Code font, and explicit Side-by-Side / Inline layout choice.
-	createEffect(() => {
-		const fontSize = state.settings.fontSize;
-		const fontFamily = state.settings.codeFont?.trim() ? resolveFontStack(state.settings.codeFont, DEFAULT_CODE_FONT) : undefined;
-		const sideBySide = diffLayout() !== "inline";
-		editor?.updateOptions({
-			fontSize,
-			renderSideBySide: sideBySide,
-			useInlineViewWhenSpaceIsLimited: false,
-			...(fontFamily ? { fontFamily } : {}),
-		});
-		if (isCodeDiff()) queueMicrotask(() => editor?.layout());
-	});
+	createEffect(
+		() => ({
+			fontSize: state.settings.fontSize,
+			fontFamily: state.settings.codeFont?.trim() ? resolveFontStack(state.settings.codeFont, DEFAULT_CODE_FONT) : undefined,
+			sideBySide: diffLayout() !== "inline",
+			codeDiff: isCodeDiff(),
+		}),
+		({ fontSize, fontFamily, sideBySide, codeDiff }) => {
+			editor?.updateOptions({
+				fontSize,
+				renderSideBySide: sideBySide,
+				useInlineViewWhenSpaceIsLimited: false,
+				...(fontFamily ? { fontFamily } : {}),
+			});
+			if (codeDiff) queueMicrotask(() => editor?.layout());
+		},
+	);
 
 	// Undoing every edit counts as not edited: the version id goes back with the text.
 	const edited = () => !isReadOnly && Boolean(proposedModel && !proposedModel.isDisposed() && proposedModel.getAlternativeVersionId() !== untouched);
@@ -505,9 +507,9 @@ export function ReviewView() {
 					<div class="review-head">
 						<div class="review-what">
 							<strong>{r.title}</strong>
-							<Show when={file}>
+							<Show when={file()}>
 								<span class="review-path" title={r.path}>
-									{file}
+									{file()}
 								</span>
 							</Show>
 						</div>
@@ -526,16 +528,16 @@ export function ReviewView() {
 					</div>
 					<div class="review-actions">
 						<div class="mode-switch diff-layout-switch" role="group" aria-label="Diff layout">
-							<button classList={{ on: diffLayout() === "split" }} aria-pressed={diffLayout() === "split"} title="Show left and right versions side by side" onClick={() => chooseLayout("split")}>
+							<button class={{ on: diffLayout() === "split" }} aria-pressed={diffLayout() === "split" ? "true" : "false"} title="Show left and right versions side by side" onClick={() => chooseLayout("split")}>
 								Side-by-Side
 							</button>
-							<button classList={{ on: diffLayout() === "inline" }} aria-pressed={diffLayout() === "inline"} title="Show changes inline in one column" onClick={() => chooseLayout("inline")}>
+							<button class={{ on: diffLayout() === "inline" }} aria-pressed={diffLayout() === "inline" ? "true" : "false"} title="Show changes inline in one column" onClick={() => chooseLayout("inline")}>
 								Inline
 							</button>
 							<Show when={isMdReview}>
 								<button
-									classList={{ on: diffLayout() === "rendered" }}
-									aria-pressed={diffLayout() === "rendered"}
+									class={{ on: diffLayout() === "rendered" }}
+									aria-pressed={diffLayout() === "rendered" ? "true" : "false"}
 									title="Show rendered Markdown diff side by side with inline highlights"
 									onClick={() => chooseLayout("rendered")}
 								>
@@ -544,8 +546,8 @@ export function ReviewView() {
 							</Show>
 							<Show when={isCsvReview}>
 								<button
-									classList={{ on: diffLayout() === "table" }}
-									aria-pressed={diffLayout() === "table"}
+									class={{ on: diffLayout() === "table" }}
+									aria-pressed={diffLayout() === "table" ? "true" : "false"}
 									title="Show structured CSV/TSV row and cell diff"
 									onClick={() => chooseLayout("table")}
 								>
@@ -761,7 +763,7 @@ export function ReviewView() {
 													<th class="csv-diff-gutter" aria-label="Change" />
 													<For each={diff().headers}>
 														{(h) => (
-															<th classList={{ "csv-cell-changed": h.changed }}>
+															<th class={{ "csv-cell-changed": h.changed }}>
 																<Show when={h.changed} fallback={h.cur || h.old}>
 																	<del class="csv-diff-old">{h.old || "(empty)"}</del>
 																	<span class="csv-diff-arrow" aria-hidden="true">
@@ -787,7 +789,7 @@ export function ReviewView() {
 																	const newVal = () => row.newCells?.[colIdx()] ?? "";
 																	const cellChanged = () => row.kind === "modified" && oldVal() !== newVal();
 																	return (
-																		<td classList={{ "csv-cell-changed": cellChanged() }}>
+																		<td class={{ "csv-cell-changed": cellChanged() }}>
 																			<Show
 																				when={cellChanged()}
 																				fallback={row.kind === "removed" ? oldVal() : newVal()}

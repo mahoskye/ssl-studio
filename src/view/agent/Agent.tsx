@@ -3,7 +3,8 @@
 import { Icon, type IconName } from "../Icon";
 import { Menu, type MenuItem } from "../Menu";
 import { showPanel } from "../panels/registry";
-import { createEffect, createMemo, createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onSettled, Show } from "solid-js";
+import { createAsyncQuery } from "../asyncQuery";
 import { activeEditor } from "../editor/EditorGroup";
 import { activeLiveEditor, liveSelectionVersion } from "../editor/liveBridge";
 import { review, openReview, type Check } from "../editor/Review";
@@ -460,7 +461,9 @@ async function runAskAbout(
 	// Discard post-await session & context hash updates if the workspace changed mid-turn.
 	if (!sameWorkspace()) return;
 	if (reply) {
-		setAgent("chatSession", reply.sessionID);
+		setAgent((s) => {
+			s.chatSession = reply.sessionID;
+		});
 		// Commit context slice hashes ONLY when the turn actually succeeded (never on failed/interrupted turns!).
 		if (reply.outcome === "succeeded") {
 			if (sentContext.session !== reply.sessionID) {
@@ -629,7 +632,7 @@ async function reviewProposedEdit(replyText: string, preferredPath?: string) {
 				await backend.historyKeep(targetPath).catch(() => {});
 				await backend.write(targetPath, final);
 				void scriptsCameTo(targetPath, targetPath, "file");
-				setState("treeVersion", (v) => v + 1);
+				setState((s) => { s.treeVersion += 1; });
 			}
 			notify(`Applied reviewed edit to ${rel}.`);
 		},
@@ -703,7 +706,7 @@ async function saveReplyAsSpec(replyText: string, ticketKey?: string): Promise<s
 		notify(String(e?.message ?? e), "error");
 		return null;
 	}
-	setState("treeVersion", (v) => v + 1);
+	setState((s) => { s.treeVersion += 1; });
 	refreshDocAudit();
 	await openFile(dest, { keep: true });
 	notify(`Saved spec ${baseName(dest)}${linkedTicket ? ` linked to ${linkedTicket}` : ""}.`);
@@ -830,7 +833,7 @@ function EntryView(props: { entry: Entry }) {
 			await backend.historyKeep(pickedPlan.path).catch(() => {});
 			await backend.write(pickedPlan.path, printed);
 		}
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		await openFile(pickedPlan.path, { keep: true });
 		notify(`Added ${added} test ${added === 1 ? "case" : "cases"} to ${baseName(pickedPlan.path)}.`);
 	};
@@ -897,13 +900,13 @@ function EntryView(props: { entry: Entry }) {
 			await backend.historyKeep(target.path).catch(() => {});
 			await backend.write(target.path, next);
 		}
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		refreshDocAudit();
 		await openFile(target.path, { keep: true });
 		notify(`Recorded answer in ${target.title || baseName(target.path)}.`);
 	};
 	return (
-		<div class={`entry ${props.entry.role}`} classList={{ streaming: Boolean(props.entry.streaming) }} aria-busy={props.entry.streaming ? "true" : undefined}>
+		<div class={["entry", props.entry.role, { streaming: Boolean(props.entry.streaming) }]} aria-busy={props.entry.streaming ? "true" : undefined}>
 			<Show when={props.entry.role === "agent"} fallback={<pre>{props.entry.text}</pre>}>
 				<div class="md" innerHTML={html()} onClick={(e) => void followReplyLink(e)} />
 				<Show when={!props.entry.streaming && props.entry.text.trim()}>
@@ -986,57 +989,65 @@ async function wordsOf(file: DocFile): Promise<string> {
 const STARTERS = ["Explain what this does, step by step.", "What could go wrong here, and with which input?", "Which cases should a test of this cover?", "Is anything here against the house style?"];
 
 export function AgentPanel() {
-	onMount(() => void resume());
-	createEffect(() => {
-		state.workspace?.root;
-		ensureAgentWorkspace();
+	onSettled(() => {
+		void resume();
 	});
+	createEffect(
+		() => state.workspace?.root,
+		() => {
+			ensureAgentWorkspace();
+		},
+	);
 	const [draft, setDraft] = createSignal("");
 	/** The box the question is typed in, for a starter to hand the keyboard to. */
 	let box: HTMLTextAreaElement | undefined;
-	createEffect(() => {
-		const handed = pendingDraft();
-		if (!handed) return;
-		setPendingDraft(null);
-		void (async () => {
-			const existing = draft().trim();
-			if (existing && existing !== handed.text.trim()) {
-				const REPLACE = "Replace draft";
-				const picked = await choose("Replace your current Agent draft?", [REPLACE]);
-				if (picked !== REPLACE) return;
-			}
-			if (handed.cleanContext) {
-				setWithSelection(false);
-				setPickedTicket("");
-				setWithSchema(false);
-				setWithRefTables(false);
-				setWithRegistries(false);
-				setWithState(false);
-				setWithGitDiff(false);
-				setWithGoverningDocs(false);
-				setAttachedFiles([]);
-			}
-			setDraft(handed.text);
-			setNotSent("");
-			queueMicrotask(() => box?.focus());
-		})();
-	});
+	createEffect(
+		() => pendingDraft(),
+		(handed) => {
+			if (!handed) return;
+			setPendingDraft(null);
+			void (async () => {
+				const existing = draft().trim();
+				if (existing && existing !== handed.text.trim()) {
+					const REPLACE = "Replace draft";
+					const picked = await choose("Replace your current Agent draft?", [REPLACE]);
+					if (picked !== REPLACE) return;
+				}
+				if (handed.cleanContext) {
+					setWithSelection(false);
+					setPickedTicket("");
+					setWithSchema(false);
+					setWithRefTables(false);
+					setWithRegistries(false);
+					setWithState(false);
+					setWithGitDiff(false);
+					setWithGoverningDocs(false);
+					setAttachedFiles([]);
+				}
+				setDraft(handed.text);
+				setNotSent("");
+				queueMicrotask(() => box?.focus());
+			})();
+		},
+	);
 	const [notSent, setNotSent] = createSignal("");
 	const [withSelection, setWithSelection] = createSignal(true);
 	const isBusy = () => agent.busy || preparing();
 	// Separate content edits from cursor-selection moves so moving the cursor never triggers gitDiff/disk reads.
 	const [contentEdited, setContentEdited] = createSignal(0);
 	const [selectionMoved, setSelectionMoved] = createSignal(0);
-	createEffect(() => {
-		const doc = activeDoc();
-		const editor = activeEditor();
-		const d1 = doc?.model.onDidChangeContent(() => setContentEdited((n) => n + 1));
-		const d2 = editor?.onDidChangeCursorSelection(() => setSelectionMoved((n) => n + 1));
-		onCleanup(() => {
-			d1?.dispose();
-			d2?.dispose();
-		});
-	});
+	const curDoc = createMemo(() => activeDoc());
+	createEffect(
+		() => [curDoc(), activeEditor()] as const,
+		([doc, editor]) => {
+			const d1 = doc?.model.onDidChangeContent(() => setContentEdited((n) => n + 1));
+			const d2 = editor?.onDidChangeCursorSelection(() => setSelectionMoved((n) => n + 1));
+			return () => {
+				d1?.dispose();
+				d2?.dispose();
+			};
+		},
+	);
 	const autoTicket = createMemo(() => (contentEdited(), resolvedAutoTicket()));
 	const allTickets = createMemo(() =>
 		docs()
@@ -1095,13 +1106,21 @@ export function AgentPanel() {
 			session: agent.chatSession ?? "",
 		};
 	});
-	const [debouncedDeltaSrc, setDebouncedDeltaSrc] = createSignal(rawDeltaSrc());
-	createEffect(() => {
-		const next = rawDeltaSrc();
-		const timer = setTimeout(() => setDebouncedDeltaSrc(next), 350);
-		onCleanup(() => clearTimeout(timer));
-	});
-	const [measuredDelta] = createResource(debouncedDeltaSrc, async (src) => {
+	const [debouncedDeltaSrc, setDebouncedDeltaSrc] = createSignal<ReturnType<typeof rawDeltaSrc> | null>(null);
+	let deltaSrcInitialized = false;
+	createEffect(
+		() => rawDeltaSrc(),
+		(next) => {
+			if (!deltaSrcInitialized) {
+				deltaSrcInitialized = true;
+				setDebouncedDeltaSrc(next);
+				return;
+			}
+			const timer = setTimeout(() => setDebouncedDeltaSrc(next), 350);
+			return () => clearTimeout(timer);
+		},
+	);
+	const [measuredDelta] = createAsyncQuery(debouncedDeltaSrc, async (src) => {
 		if (!src.root) return { chars: 0, breakdown: [] as PreparedContext["breakdown"] };
 		const curRoot = canonical(src.root);
 		const already = sentContext.session === (src.session || null) && sentContext.root === curRoot ? sentContext.hashes : new Map<string, string>();
@@ -1179,14 +1198,19 @@ export function AgentPanel() {
 		pinned = true;
 		scroller.scrollTop = scroller.scrollHeight;
 	};
-	createEffect(() => {
-		// Text arriving in any entry moves the end, as a new entry does.
-		agent.entries.reduce((n, e) => n + e.text.length, agent.entries.length);
-		agent.busy;
-		if (pinned) scroller.scrollTop = scroller.scrollHeight;
-	});
+	createEffect(
+		() => [agent.entries.reduce((n, e) => n + e.text.length, agent.entries.length), agent.busy] as const,
+		() => {
+			if (pinned && scroller) scroller.scrollTop = scroller.scrollHeight;
+		},
+	);
 	// The reason goes when it no longer holds.
-	createEffect(() => !isBusy() && setNotSent(""));
+	createEffect(
+		() => !isBusy(),
+		(idle) => {
+			if (idle) setNotSent("");
+		},
+	);
 
 	const send = () => {
 		const result = composerSend(draft(), agent.busy || preparingLock);
@@ -1812,9 +1836,8 @@ export function AgentPanel() {
 						<Show when={detectedRefTables().length > 0 || withRefTables()}>
 							<button
 								type="button"
-								class="agent-ctx-chip"
-								classList={{ active: withRefTables() }}
-								aria-pressed={withRefTables()}
+								class={["agent-ctx-chip", { active: withRefTables() }]}
+								aria-pressed={withRefTables() ? "true" : "false"}
 								title={
 									detectedRefTables().length
 										? `Inject exact column definitions for schema tables referenced in this file: ${detectedRefTables().map((d) => d.title || d.name).join(", ")}`
@@ -1827,9 +1850,8 @@ export function AgentPanel() {
 						</Show>
 						<button
 							type="button"
-							class="agent-ctx-chip"
-							classList={{ active: withSchema() }}
-							aria-pressed={withSchema()}
+							class={["agent-ctx-chip", { active: withSchema() }]}
+							aria-pressed={withSchema() ? "true" : "false"}
 							title="Include project schema summaries in the next turn"
 							onClick={() => setWithSchema((v) => !v)}
 						>
@@ -1837,9 +1859,8 @@ export function AgentPanel() {
 						</button>
 						<button
 							type="button"
-							class="agent-ctx-chip"
-							classList={{ active: withRegistries() }}
-							aria-pressed={withRegistries()}
+							class={["agent-ctx-chip", { active: withRegistries() }]}
+							aria-pressed={withRegistries() ? "true" : "false"}
 							title={ticket() ? `Include CSV registry rows mentioning ${ticket()}` : "Include project CSV registry summary"}
 							onClick={() => setWithRegistries((v) => !v)}
 						>
@@ -1847,9 +1868,8 @@ export function AgentPanel() {
 						</button>
 						<button
 							type="button"
-							class="agent-ctx-chip"
-							classList={{ active: withState() }}
-							aria-pressed={withState()}
+							class={["agent-ctx-chip", { active: withState() }]}
+							aria-pressed={withState() ? "true" : "false"}
 							title="Include project STATE.md summary"
 							onClick={() => setWithState((v) => !v)}
 						>
@@ -1857,9 +1877,8 @@ export function AgentPanel() {
 						</button>
 						<button
 							type="button"
-							class="agent-ctx-chip"
-							classList={{ active: withGitDiff() }}
-							aria-pressed={withGitDiff()}
+							class={["agent-ctx-chip", { active: withGitDiff() }]}
+							aria-pressed={withGitDiff() ? "true" : "false"}
 							title={
 								gitStatus()
 									? `Include compact staged + unstaged Git diff (${gitStatus()!.files.length} changed ${gitStatus()!.files.length === 1 ? "file" : "files"})`
@@ -1871,9 +1890,8 @@ export function AgentPanel() {
 						</button>
 						<button
 							type="button"
-							class="agent-ctx-chip"
-							classList={{ active: withGoverningDocs() }}
-							aria-pressed={withGoverningDocs()}
+							class={["agent-ctx-chip", { active: withGoverningDocs() }]}
+							aria-pressed={withGoverningDocs() ? "true" : "false"}
 							title={
 								detectedGoverningDocs().length
 									? `Include compact excerpts of governing docs for active/changed code files: ${detectedGoverningDocs().map((g) => g.file.title || g.file.name).join(", ")}`
@@ -1921,8 +1939,7 @@ export function AgentPanel() {
 					<span class="spacer" />
 					<Show when={preSendEstimate().tokens > 0}>
 						<span
-							class="agent-token-meter"
-							classList={{ warn: preSendEstimate().warn }}
+							class={["agent-token-meter", { warn: preSendEstimate().warn }]}
 							title={`Measured next-turn context: ${preSendEstimate().summary}${preSendEstimate().warn ? " (large for a 4K local model — consider trimming chips)" : ""}`}
 						>
 							~{preSendEstimate().tokens} tok

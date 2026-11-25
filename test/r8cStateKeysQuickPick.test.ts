@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { reconcile } from "solid-js/store";
+import { flush } from "solid-js";
 import { findCommentDocRefsInLines } from "../src/shared/editorDocHelpers";
 import { imageType, looksBinary } from "../src/shared/fileKind";
 import { DEFAULT_SETTINGS, type DocFile } from "../src/shared/protocol";
@@ -418,18 +418,21 @@ function resetAppState() {
 	askHandler = () => null;
 	chooseHandler = () => null;
 	rpcHandler = () => null;
-	setState("workspace", { root: "/ws", name: "ws" });
-	setState("project", { root: "/ws", path: "/ws/.ssl-studio/project.toml", configured: true, docs: "docs", plans: "design", schema: "schema" } as any);
-	setState("groups", [{ tabs: [], active: null }]);
-	setState("activeGroup", 0);
-	setState("dirty", reconcile({}));
-	setState("conflicts", reconcile({}));
-	setState("messages", []);
-	setState("lsp", reconcile({ state: "stopped" }));
-	setState("settings", reconcile(structuredClone(DEFAULT_SETTINGS)));
-	setState("bottomMaximized", false);
-	setState("centerView", "editors");
-	setState("info", null);
+	setState((s) => {
+		s.workspace = { root: "/ws", name: "ws" };
+		s.project = { root: "/ws", path: "/ws/.ssl-studio/project.toml", configured: true, docs: "docs", plans: "design", schema: "schema" } as any;
+		s.groups = [{ tabs: [], active: null }];
+		s.activeGroup = 0;
+		s.dirty = {};
+		s.conflicts = {};
+		s.messages = [];
+		s.lsp = { state: "stopped" };
+		s.settings = structuredClone(DEFAULT_SETTINGS);
+		s.bottomMaximized = false;
+		s.centerView = "editors";
+		s.info = null;
+	});
+	flush();
 }
 
 // =============================================================================
@@ -441,10 +444,13 @@ describe("R8C P0 — SolidJS createStore reconcile() fixes in state.ts", () => {
 	beforeEach(resetAppState);
 
 	test("openFolder() clears stale dirty, conflicts, bottomMaximized, and lsp.message via reconcile()", async () => {
-		setState("dirty", "/ws/old.ssl", true);
-		setState("conflicts", "/ws/old.ssl", true);
-		setState("bottomMaximized", true);
-		setState("lsp", reconcile({ state: "error", message: "old crash" } as any));
+		setState((s) => {
+			s.dirty["/ws/old.ssl"] = true;
+			s.conflicts["/ws/old.ssl"] = true;
+			s.bottomMaximized = true;
+			s.lsp = { state: "error", message: "old crash" } as any;
+		});
+		flush();
 
 		chooseHandler = () => "Discard changes";
 		rpcHandler = (method, args) => {
@@ -458,6 +464,7 @@ describe("R8C P0 — SolidJS createStore reconcile() fixes in state.ts", () => {
 		};
 
 		await openFolder("/ws2");
+		flush();
 
 		expect(Object.keys(state.dirty)).toEqual([]);
 		expect(unsavedPaths()).toEqual([]);
@@ -468,7 +475,10 @@ describe("R8C P0 — SolidJS createStore reconcile() fixes in state.ts", () => {
 	});
 
 	test("loadSettings() and saveSetting() remove cleared optional keys via reconcile()", async () => {
-		setState("settings", reconcile({ ...DEFAULT_SETTINGS, activeTicket: "DEMO-101", wordWrap: true, sqlDialect: "tsql" } as any));
+		setState((s) => {
+			s.settings = { ...DEFAULT_SETTINGS, activeTicket: "DEMO-101", wordWrap: true, sqlDialect: "tsql" } as any;
+		});
+		flush();
 		expect(state.settings.activeTicket).toBe("DEMO-101");
 		expect(state.settings.wordWrap).toBe(true);
 
@@ -480,13 +490,18 @@ describe("R8C P0 — SolidJS createStore reconcile() fixes in state.ts", () => {
 		};
 
 		await saveSetting({ activeTicket: null });
+		flush();
 		expect("activeTicket" in state.settings).toBe(false);
 		expect(state.settings.activeTicket).toBeUndefined();
 		expect("wordWrap" in state.settings).toBe(false);
 		expect("sqlDialect" in state.settings).toBe(false);
 
-		setState("settings", "activeTicket", "OLD-99");
+		setState((s) => {
+			s.settings.activeTicket = "OLD-99";
+		});
+		flush();
 		await loadSettings(false);
+		flush();
 		expect("activeTicket" in state.settings).toBe(false);
 		expect(state.settings.activeTicket).toBeUndefined();
 	});
@@ -547,12 +562,14 @@ describe("R8C P0 — untitled save overwrite safety & in-flight save() race", ()
 
 		const u = newUntitled(0, "ssl");
 		documents.get(u)!.model.setValue(":RETURN 1;");
+		flush();
 		expect(state.dirty[u]).toBe(true);
 
 		chooseHandler = () => "Save";
 		askHandler = () => "saved_on_close.ssl";
 
 		const closed = await closeTab(u, 0);
+		flush();
 		expect(closed).toBe(true);
 		expect(state.groups[0]!.tabs).toEqual([]);
 		expect(documents.has(u)).toBe(false);
@@ -587,6 +604,7 @@ describe("R8C P0 — untitled save overwrite safety & in-flight save() race", ()
 		await openFile("/ws/race.ssl");
 		const doc = documents.get("/ws/race.ssl")!;
 		doc.model.setValue("v2");
+		flush();
 		expect(state.dirty["/ws/race.ssl"]).toBe(true);
 
 		const saving = save("/ws/race.ssl", { format: false });
@@ -597,6 +615,7 @@ describe("R8C P0 — untitled save overwrite safety & in-flight save() race", ()
 
 		resolveWrite({ mtime: 20 });
 		expect(await saving).toBe(true);
+		flush();
 		expect(doc.savedText).toBe("v2");
 		expect(state.dirty["/ws/race.ssl"]).toBe(true);
 	});
@@ -621,8 +640,11 @@ describe("R8C P1 — workspace switch, cancel openFolder, watcher race, recentTa
 		};
 		(session as any).reset = () => origReset();
 		try {
-			setState("workspace", { root: "/ws-prev", name: "ws-prev" });
-			setState("lsp", reconcile({ state: "running" }));
+			setState((s) => {
+				s.workspace = { root: "/ws-prev", name: "ws-prev" };
+				s.lsp = { state: "running" };
+			});
+			flush();
 			rpcHandler = (method) => {
 				if (method === "openFolder") return null;
 				if (method === "lspRestart") {
@@ -702,9 +724,11 @@ describe("R8C P1 — workspace switch, cancel openFolder, watcher race, recentTa
 		const watching = fileChangedOnDisk("/ws/watch.ssl");
 		await new Promise((r) => setTimeout(r, 10));
 		doc.model.setValue("my-unsaved-edit");
+		flush();
 		expect(state.dirty["/ws/watch.ssl"]).toBe(true);
 		resolveSecondRead({ text: "external-v3", mtime: 3, encoding: "utf-8" });
 		await watching;
+		flush();
 
 		expect(doc.model.getValue()).toBe("my-unsaved-edit");
 		expect(state.conflicts["/ws/watch.ssl"]).toBe(true);
@@ -736,6 +760,7 @@ describe("R8C P1 — workspace switch, cancel openFolder, watcher race, recentTa
 		// fileRenamed deduplicates when target is already open in the same group
 		await openFile("/ws/b.ssl");
 		fileRenamed("/ws/a.ssl", "/ws/b.ssl");
+		flush();
 		expect(state.groups[0]!.tabs).toEqual(["/ws/b.ssl"]);
 
 		// restoreTabs drops empty leading Group 0 when Group 1 still has valid files
@@ -761,20 +786,26 @@ describe("R8C P1 — workspace switch, cancel openFolder, watcher race, recentTa
 		expect(state.activeGroup).toBe(0);
 
 		// newUntitled guards !state.workspace and clamps group index
-		setState("workspace", null);
+		setState((s) => { s.workspace = null; });
+		flush();
 		expect(newUntitled()).toBe("");
-		setState("workspace", { root: "/ws", name: "ws" });
+		setState((s) => { s.workspace = { root: "/ws", name: "ws" }; });
+		flush();
 		const clamped = newUntitled(99, "ssl");
+		flush();
 		expect(clamped).toMatch(/^untitled:Untitled-/);
 		expect(state.activeGroup).toBe(0);
 	});
 
 	test("recentTabs steps synchronously A -> B -> C, tracks renames, and shifts group MRU on group removal", async () => {
-		setState("groups", [
-			{ tabs: ["/ws/a.ssl", "/ws/b.ssl", "/ws/c.ssl"], active: "/ws/c.ssl" },
-			{ tabs: ["/ws/x.ssl", "/ws/y.ssl"], active: "/ws/y.ssl" },
-		]);
-		setState("activeGroup", 0);
+		setState((s) => {
+			s.groups = [
+				{ tabs: ["/ws/a.ssl", "/ws/b.ssl", "/ws/c.ssl"], active: "/ws/c.ssl" },
+				{ tabs: ["/ws/x.ssl", "/ws/y.ssl"], active: "/ws/y.ssl" },
+			];
+			s.activeGroup = 0;
+		});
+		flush();
 		tabShown(0, "/ws/a.ssl");
 		tabShown(0, "/ws/b.ssl");
 		tabShown(0, "/ws/c.ssl");
@@ -783,21 +814,31 @@ describe("R8C P1 — workspace switch, cancel openFolder, watcher race, recentTa
 
 		// Rapid Ctrl+Tab steps (hold = true) advance synchronously C -> B -> A
 		stepRecent(1, true);
+		flush();
 		expect(state.groups[0]!.active).toBe("/ws/b.ssl");
 		stepRecent(1, true);
+		flush();
 		expect(state.groups[0]!.active).toBe("/ws/a.ssl");
 
 		// Rename updates MRU & active walk
 		pathChanges.renamed.forEach((fn) => fn((p) => (p === "/ws/b.ssl" ? "/ws/b2.ssl" : p)));
-		setState("groups", 0, "tabs", ["/ws/a.ssl", "/ws/b2.ssl", "/ws/c.ssl"]);
+		setState((s) => {
+			s.groups[0]!.tabs = ["/ws/a.ssl", "/ws/b2.ssl", "/ws/c.ssl"];
+		});
+		flush();
 		stepRecent(-1, false);
+		flush();
 		expect(state.groups[0]!.active).toBe("/ws/b2.ssl");
 
 		// Removing group 0 shifts group 1's MRU to group 0 instead of inheriting group 0's MRU
 		removeRecentGroup(0);
-		setState("groups", [{ tabs: ["/ws/x.ssl", "/ws/y.ssl"], active: "/ws/y.ssl" }]);
-		setState("activeGroup", 0);
+		setState((s) => {
+			s.groups = [{ tabs: ["/ws/x.ssl", "/ws/y.ssl"], active: "/ws/y.ssl" }];
+			s.activeGroup = 0;
+		});
+		flush();
 		stepRecent(1, false);
+		flush();
 		expect(state.groups[0]!.active).toBe("/ws/x.ssl");
 	});
 
@@ -833,9 +874,11 @@ describe("R8C P1 — workspace switch, cancel openFolder, watcher race, recentTa
 		noteCursor({ path: "/ws/a.ssl", line: 10, column: 1 });
 		const nav = goAlong(-1);
 		await new Promise((r) => setTimeout(r, 10));
-		setState("workspace", { root: "/ws-other", name: "other" });
+		setState((s) => { s.workspace = { root: "/ws-other", name: "other" }; });
+		flush();
 		resolveSlow({ text: "slow", mtime: 1, encoding: "utf-8" });
 		await nav;
+		flush();
 		expect(state.workspace?.root).toBe("/ws-other");
 		expect(documents.has("/ws/slow.ssl")).toBe(false);
 	});
@@ -889,9 +932,11 @@ describe("R8C P1 — workspace switch, cancel openFolder, watcher race, recentTa
 		const treeBefore = state.treeVersion;
 		const undoing = undoSetUp();
 		await new Promise((r) => setTimeout(r, 10));
-		setState("workspace", { root: "/ws2", name: "ws2" });
+		setState((s) => { s.workspace = { root: "/ws2", name: "ws2" }; });
+		flush();
 		resolveUndo({ removed: ["README.md"], kept: [] });
 		await undoing;
+		flush();
 		expect(state.treeVersion).toBe(treeBefore);
 
 		// newDocIn aborts before write if workspace switches during create
@@ -909,7 +954,8 @@ describe("R8C P1 — workspace switch, cancel openFolder, watcher race, recentTa
 		};
 		const making = newDocIn("docs");
 		await new Promise((r) => setTimeout(r, 10));
-		setState("workspace", { root: "/ws2", name: "ws2" });
+		setState((s) => { s.workspace = { root: "/ws2", name: "ws2" }; });
+		flush();
 		resolveCreate();
 		expect(await making).toBe(false);
 		expect(wrote).toBe(false);
@@ -1010,11 +1056,14 @@ describe("R8C P1 — keys.ts, commands.ts, and isInMarkdownTextEditor", () => {
 			expect(copied).toBe("Untitled-3");
 
 			// Workspace-only commands refuse cleanly when !state.workspace
-			setState("workspace", null);
+			setState((s) => { s.workspace = null; });
+			flush();
 			const beforeBottom = state.settings.layout.bottom;
 			runCommand("toggle-panel");
+			flush();
 			expect(state.settings.layout.bottom).toBe(beforeBottom);
 			runCommand("graph");
+			flush();
 			expect(state.centerView).toBe("editors");
 		} finally {
 			await disconnectTestRpc();
@@ -1077,7 +1126,7 @@ describe("R8C P1 — quickRank memoization, quickPrefix 1-char prefix, layout sa
 		expect(qp).toContain("120");
 
 		const app = readSrc("../src/view/App.tsx");
-		expect(app).toContain("onCleanup(() => clearTimeout(timer))");
+		expect(app).toContain("return () => clearTimeout(timer);");
 		expect(app).toContain("if (state.workspace?.root !== targetRoot) return");
 		expect(app).toContain("focusPanel((narrowPanels() && narrowHosted()) || state.leftView)");
 		expect(app).toContain("narrowOpenedLeft");

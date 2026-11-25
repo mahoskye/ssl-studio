@@ -153,10 +153,12 @@ export function PlanTextView(props: {
 	const hasActiveFilter = createMemo(() => builderOpen() && (Object.keys(choices()).length > 0 || Boolean(anchorNodeId())));
 
 	// Clear focus if the focused step or stage was deleted from the plan.
-	createEffect(() => {
-		const f = focus();
-		if (f && !focusView()) setFocus(null);
-	});
+	createEffect(
+		() => Boolean(focus() && !focusView()),
+		(missing) => {
+			if (missing) setFocus(null);
+		},
+	);
 
 	// Scroll smoothly to a row when selected or peeked from Find / Palette / Tests.
 	const scrollToNode = (id: string) => {
@@ -165,10 +167,12 @@ export function PlanTextView(props: {
 		el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
 	};
 
-	createEffect(() => {
-		const id = props.peekedId;
-		if (id) scrollToNode(id);
-	});
+	createEffect(
+		() => props.peekedId,
+		(id) => {
+			if (id) scrollToNode(id);
+		},
+	);
 
 	const refitBoxes = () => {
 		queueMicrotask(() => {
@@ -256,19 +260,21 @@ export function PlanTextView(props: {
 
 	// React to external "Build in Text" requests triggered from Chart/Palette.
 	let handledSeq = 0;
-	createEffect(() => {
-		const req = props.builderRequest;
-		if (!req || req.seq === handledSeq) return;
-		handledSeq = req.seq;
-		if (req.testId) {
-			const tc = planTestsOf(props.plan).find((t) => t.id === req.testId);
-			if (tc) {
-				openEditTest(tc);
-				return;
+	createEffect(
+		() => props.builderRequest,
+		(req) => {
+			if (!req || req.seq === handledSeq) return;
+			handledSeq = req.seq;
+			if (req.testId) {
+				const tc = planTestsOf(props.plan).find((t) => t.id === req.testId);
+				if (tc) {
+					openEditTest(tc);
+					return;
+				}
 			}
-		}
-		openFreshBuilder({ nodeId: req.nodeId, journeyIndex: req.journeyIndex });
-	});
+			openFreshBuilder({ nodeId: req.nodeId, journeyIndex: req.journeyIndex });
+		},
+	);
 
 	const toggleBranchChoice = (decisionId: string, branchLabel: string) => {
 		const cur = choices();
@@ -485,7 +491,7 @@ export function PlanTextView(props: {
 				>
 					<For each={items()}>
 						{(item) => (
-							<span class="plan-node-doc-chip" classList={{ missing: !item.doc }}>
+							<span class={["plan-node-doc-chip", { missing: !item.doc }]}>
 								<button
 									type="button"
 									class="plan-node-doc-open"
@@ -581,17 +587,19 @@ export function PlanTextView(props: {
 
 		return (
 			<li
-				class={`plan-text-row kind-${p.row.node.kind === "call" ? "step" : p.row.node.kind}`}
-				classList={{
-					selected: isSelected(),
-					peeked: isPeeked(),
-					focused: isFocused(),
-					anchored: isAnchor(),
-					decided: builderOpen() && Boolean(chosenBranch()),
-					"on-path": onJourney() || (hasActiveFilter() && choiceMatch().reachableNodeIds.has(nid)),
-					"off-path": dimmed(),
-					trouble: Boolean(trouble()?.length),
-				}}
+				class={[
+					`plan-text-row kind-${p.row.node.kind === "call" ? "step" : p.row.node.kind}`,
+					{
+						selected: isSelected(),
+						peeked: isPeeked(),
+						focused: isFocused(),
+						anchored: isAnchor(),
+						decided: builderOpen() && Boolean(chosenBranch()),
+						"on-path": onJourney() || (hasActiveFilter() && choiceMatch().reachableNodeIds.has(nid)),
+						"off-path": dimmed(),
+						trouble: Boolean(trouble()?.length),
+					},
+				]}
 				data-plan-node={nid}
 				onClick={(e) => {
 					if ((e.target as HTMLElement).closest("button")) return;
@@ -645,7 +653,7 @@ export function PlanTextView(props: {
 						<button
 							type="button"
 							class="graph-list-focus plan-text-row-focus"
-							aria-pressed={isFocused()}
+							aria-pressed={isFocused() ? "true" : "false"}
 							title={isFocused() ? "Clear focus" : `Show what leads into and out of "${p.row.node.text.trim() || nid}"`}
 							onClick={(e) => {
 								e.stopPropagation();
@@ -671,7 +679,7 @@ export function PlanTextView(props: {
 										Boolean(link.label && chosenBranch()?.toLowerCase() === link.label.toLowerCase());
 									const otherPicked = () => Boolean(chosenBranch() && !isPicked());
 									return (
-										<li class="plan-text-link-row" classList={{ "branch-other": canPick() && otherPicked() }}>
+										<li class={["plan-text-link-row", { "branch-other": canPick() && otherPicked() }]}>
 											<Show
 												when={canPick()}
 												fallback={
@@ -710,9 +718,8 @@ export function PlanTextView(props: {
 											>
 												<button
 													type="button"
-													class={`plan-text-branch-pick ${toneOf(link.label)}`}
-													classList={{ picked: isPicked(), other: otherPicked() }}
-													aria-pressed={isPicked()}
+													class={[`plan-text-branch-pick ${toneOf(link.label)}`, { picked: isPicked(), other: otherPicked() }]}
+													aria-pressed={isPicked() ? "true" : "false"}
 													title={
 														isPicked()
 															? `Click to un-pick "${link.label}" from your test scenario`
@@ -757,10 +764,9 @@ export function PlanTextView(props: {
 
 	return (
 		<div
-			class="plan-text-view"
-			classList={{ "building-test": builderOpen() }}
+			class={["plan-text-view", { "building-test": builderOpen() }]}
 			ref={container}
-			tabIndex={0}
+			tabindex={0}
 			aria-label={`${props.plan.title || "Plan"}, text outline`}
 			onKeyDown={(e) => {
 				if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "f") {
@@ -816,7 +822,7 @@ export function PlanTextView(props: {
 							<button type="button" title="Next journey" aria-label="Next journey" onClick={() => props.onStepPath(1)}>
 								<Icon name="chevron-right" />
 							</button>
-							<button type="button" title="Hide journey highlight" aria-label="Hide journey highlight" onClick={props.onClearPath}>
+							<button type="button" title="Hide journey highlight" aria-label="Hide journey highlight" onClick={() => props.onClearPath()}>
 								<Icon name="close" />
 							</button>
 						</div>
@@ -829,8 +835,7 @@ export function PlanTextView(props: {
 						<Show when={ticketText()}>
 							<button
 								type="button"
-								class="plan-text-ticket"
-								classList={{ linked: Boolean(ticketDoc()) }}
+								class={["plan-text-ticket", { linked: Boolean(ticketDoc()) }]}
 								title={
 									ticketDoc()
 										? `Open ticket ${ticketDoc()!.ticket}${ticketDoc()!.title ? `: ${ticketDoc()!.title}` : ""}`
@@ -1229,11 +1234,13 @@ export function PlanTextView(props: {
 						<For each={visibleSections()}>
 							{(section) => (
 								<section
-									class="plan-text-section"
-									classList={{
-										staged: Boolean(section.stageId),
-										unreachable: Boolean(section.unreachable),
-									}}
+									class={[
+										"plan-text-section",
+										{
+											staged: Boolean(section.stageId),
+											unreachable: Boolean(section.unreachable),
+										},
+									]}
 								>
 									<Show when={section.heading}>
 										<div class="plan-text-section-head">
@@ -1251,7 +1258,7 @@ export function PlanTextView(props: {
 												<button
 													type="button"
 													class="graph-list-focus"
-													aria-pressed={focusActive("stage", section.stageId!)}
+													aria-pressed={focusActive("stage", section.stageId!) ? "true" : "false"}
 													title={
 														focusActive("stage", section.stageId!)
 															? "Show all stages"
@@ -1300,7 +1307,7 @@ export function PlanTextView(props: {
 									const stepName = () => (tc.node ? props.plan.nodes.find((n) => n.id === tc.node)?.text.trim() : undefined);
 									const jIdx = () => (tc.journey && tc.journey >= 1 && tc.journey <= props.allPaths.paths.length ? tc.journey - 1 : null);
 									return (
-										<li class="plan-text-test-card" classList={{ editing: editingTestId() === tc.id }}>
+										<li class={["plan-text-test-card", { editing: editingTestId() === tc.id }]}>
 											<div class="plan-text-test-head">
 												<strong>{tc.title}</strong>
 												<div class="plan-text-test-badges">
@@ -1320,8 +1327,7 @@ export function PlanTextView(props: {
 													<Show when={jIdx() !== null}>
 														<button
 															type="button"
-															class="plan-test-case-step journey"
-															classList={{ active: props.activePathIndex === jIdx() }}
+															class={["plan-test-case-step journey", { active: props.activePathIndex === jIdx() }]}
 															onClick={() => props.onHighlightPath(props.activePathIndex === jIdx() ? null : jIdx())}
 														>
 															<Icon name="eye" />

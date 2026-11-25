@@ -1,6 +1,7 @@
 // App commands: the command list shows them, the keyboard runs them.
 // A command's keys are in DEFAULT_KEYS and nowhere else; the user's own are
 // in the `keys` setting.
+import { snapshot } from "solid-js";
 import { ask, choose, quickPick } from "./dialogs";
 import { activeEditor, lastActiveMarkdownPath } from "./editor/EditorGroup";
 import { formatFenceInModel, formatNonSslModel, hadRecentFormatError, languageName } from "./editor/languages";
@@ -121,12 +122,14 @@ import {
 export type Command = { id: string; label: string; detail?: string; run: () => void };
 
 const toggle = (key: "bottom") => {
-	if (!state.workspace) return notify("Open a folder first.");
-	setState("settings", "layout", key, (v) => !v);
+	if (!snapshot(state).workspace) return notify("Open a folder first.");
+	setState((s) => {
+		s.settings.layout[key] = !s.settings.layout[key];
+	});
 };
 /** Shows or hides a side of the window. A side no panel is docked on has nothing to show, and says so. */
 function toggleSideOf(side: "left" | "right") {
-	if (!state.workspace) return;
+	if (!snapshot(state).workspace) return;
 	if (!panelOn(side)) return notify(`No panel is docked on the ${side}. Right-click a panel's button to move it there.`);
 	toggleSide(side);
 }
@@ -136,28 +139,35 @@ function toggleSideOf(side: "left" | "right") {
  * Showing the bar saves a setting; what comes back from a save leaves the layout on screen alone (state.ts).
  */
 function resetLayout() {
-	setState("bottomMaximized", false);
+	const cur = snapshot(state);
+	setState((s) => {
+		s.bottomMaximized = false;
+		s.settings.layout = { ...defaultLayout(), dock: {} };
+	});
 	resetOutlineActive();
 	resetPlanPaletteActive();
-	setState("settings", "layout", { ...defaultLayout(), dock: {} });
-	if (state.settings.menuBar === false) void switchSetting("menuBar", true, (settings) => settings.menuBar !== false);
+	if (cur.settings.menuBar === false) void switchSetting("menuBar", true, (settings) => settings.menuBar !== false);
 }
 function toggleMaximizeBottom() {
-	if (!state.workspace) return;
-	if (!state.settings.layout.bottom) {
-		setState("settings", "layout", "bottom", true);
-		setState("bottomMaximized", true);
-		return;
-	}
-	setState("bottomMaximized", (m) => !m);
+	if (!snapshot(state).workspace) return;
+	setState((s) => {
+		if (!s.settings.layout.bottom) {
+			s.settings.layout.bottom = true;
+			s.bottomMaximized = true;
+			return;
+		}
+		s.bottomMaximized = !s.bottomMaximized;
+	});
 }
 const showBottom = (view: "problems" | "output") => {
-	if (!state.workspace) return notify("Open a folder first.");
-	setState("bottomView", view);
-	setState("settings", "layout", "bottom", true);
+	if (!snapshot(state).workspace) return notify("Open a folder first.");
+	setState((s) => {
+		s.bottomView = view;
+		s.settings.layout.bottom = true;
+	});
 };
 const showWorkspacePanel = (id: PanelId) => {
-	if (!state.workspace) return notify("Open a folder first.");
+	if (!snapshot(state).workspace) return notify("Open a folder first.");
 	showPanel(id);
 };
 /** Puts text on the clipboard: by the app's own way where there is one, by the web view's otherwise. */
@@ -287,10 +297,10 @@ const zoom = (by: 1 | -1 | 0) => void saveSetting({ uiScale: by ? stepScale(stat
 export const commands: Command[] = [
 	// Files and tabs
 	{ id: "open-folder", label: "Open folder…", run: () => void openFolderCommand() },
-	{ id: "quick-open", label: "Go to file…", run: () => setState("quickPick", "files") },
-	{ id: "quick-outline", label: "Go to symbol in file…", detail: "Procedures, regions, headings, or sections in the active file", run: () => (activePath() ? setState("quickPick", "outline") : notify("Open a file first.")) },
-	{ id: "symbols", label: "Go to symbol…", detail: "Anywhere in the workspace", run: () => setState("quickPick", "symbols") },
-	{ id: "command-palette", label: "Show all commands", run: () => setState("quickPick", "commands") },
+	{ id: "quick-open", label: "Go to file…", run: () => setState((s) => { s.quickPick = "files"; }) },
+	{ id: "quick-outline", label: "Go to symbol in file…", detail: "Procedures, regions, headings, or sections in the active file", run: () => (activePath() ? setState((s) => { s.quickPick = "outline"; }) : notify("Open a file first.")) },
+	{ id: "symbols", label: "Go to symbol…", detail: "Anywhere in the workspace", run: () => setState((s) => { s.quickPick = "symbols"; }) },
+	{ id: "command-palette", label: "Show all commands", run: () => setState((s) => { s.quickPick = "commands"; }) },
 	{ id: "new-untitled", label: "New untitled file", detail: "A floating buffer that stays in memory until saved", run: () => void newUntitled() },
 	{ id: "new-file", label: "New file or folder…", detail: "In the Explorer's folder, or beside the open file", run: () => void explorerNewFile() },
 	{ id: "rename-file", label: "Rename…", detail: "The Explorer's file, or the open one", run: () => void explorerRename() },
@@ -319,7 +329,7 @@ export const commands: Command[] = [
 	{ id: "copy-relative-path", label: "Copy path in the project", detail: "The open file's path from the project's folder", run: () => void copyPath("relative") },
 	{ id: "copy-file-name", label: "Copy file name", detail: "The open file's name, without its folder", run: () => void copyPath("name") },
 	{ id: "word-wrap", label: "Toggle word wrap", detail: "Long lines wrapped at the editor's edge, or not", run: () => void switchSetting("wordWrap", !state.settings.wordWrap, (settings) => Boolean(settings.wordWrap)) },
-	{ id: "live-preview", label: "Toggle Markdown live preview", detail: "A document drawn as it is written, or as its plain text", run: () => { const next = state.settings.livePreview === false; syncLivePreviewMode(next); void switchSetting("livePreview", next, (settings) => settings.livePreview !== false); } },
+	{ id: "live-preview", label: "Toggle Markdown live preview", detail: "A document drawn as it is written, or as its plain text", run: () => { const next = snapshot(state).settings.livePreview === false; syncLivePreviewMode(next); void switchSetting("livePreview", next, (settings) => settings.livePreview !== false); } },
 	{ id: "toggle-markdown-reading-highlight", label: "Toggle Markdown reading highlight", detail: "Subtly dim lines below the active cursor or mouse pointer in Markdown Live and Read views", run: () => void switchSetting("markdownReadingHighlight", state.settings.markdownReadingHighlight === false, (settings) => settings.markdownReadingHighlight !== false) },
 	{ id: "toggle-markdown-mode", label: "Toggle Markdown Live / Read view", detail: "Switch a Markdown note between Live Preview editing and Reading view", run: toggleMarkdownMode },
 	{ id: "split-markdown-read", label: "Markdown: Split Read preview to side", detail: "Keep editing in this group while previewing Read view side-by-side", run: () => void splitMarkdownRead() },
@@ -358,7 +368,7 @@ export const commands: Command[] = [
 	{ id: "wrap-region", label: "Wrap in region…", detail: "The selected lines", run: () => void wrapInRegion() },
 	{ id: "insert-banner", label: "Insert file banner", run: () => insertTemplate(TEMPLATES.find((t) => t.id === "banner")!) },
 	{ id: "insert-procedure", label: "Insert procedure", run: () => insertTemplate(TEMPLATES.find((t) => t.id === "procedure")!) },
-	{ id: "editor-commands", label: "Show editor commands…", detail: "The text editor's own list", run: () => (activeLiveEditor() ? setState("quickPick", "commands") : activeEditor()?.trigger("app", "editor.action.quickCommand", null)) },
+	{ id: "editor-commands", label: "Show editor commands…", detail: "The text editor's own list", run: () => (activeLiveEditor() ? setState((s) => { s.quickPick = "commands"; }) : activeEditor()?.trigger("app", "editor.action.quickCommand", null)) },
 	// The project
 	{ id: "setup-project", label: "Set up project", detail: "Settings, README, AGENTS", run: () => void setUpProject() },
 	{ id: "undo-setup-project", label: "Undo set up project", detail: "Removes what it created and nobody has changed since", run: () => void undoSetUp() },
@@ -469,8 +479,8 @@ export const commands: Command[] = [
 	{ id: "agent", label: "Show Agent", run: () => showWorkspacePanel("agent") },
 	{ id: "problems", label: "Show Problems", run: () => showBottom("problems") },
 	{ id: "output", label: "Show Output", run: () => showBottom("output") },
-	{ id: "graph", label: "Show Call graph", detail: "Again to go back to the editors", run: () => (!state.workspace ? notify("Open a folder first.") : setState("centerView", state.centerView === "graph" ? "editors" : "graph")) },
-	{ id: "projects", label: "Show Projects", detail: "Switch to another recent folder, or go back to the editors", run: () => state.workspace && setState("centerView", state.centerView === "welcome" ? "editors" : "welcome") },
+	{ id: "graph", label: "Show Call graph", detail: "Again to go back to the editors", run: () => (!snapshot(state).workspace ? notify("Open a folder first.") : setState((s) => { s.centerView = s.centerView === "graph" ? "editors" : "graph"; })) },
+	{ id: "projects", label: "Show Projects", detail: "Switch to another recent folder, or go back to the editors", run: () => snapshot(state).workspace && setState((s) => { s.centerView = s.centerView === "welcome" ? "editors" : "welcome"; }) },
 	{ id: "toggle-sidebar", label: "Toggle side bar", run: () => toggleSideOf("left") },
 	{ id: "toggle-panel", label: "Toggle bottom panel", run: () => toggle("bottom") },
 	{ id: "toggle-panel-maximize", label: "Toggle maximized panel", detail: "Expand the bottom panel to fill the center pane, or restore its size", run: toggleMaximizeBottom },
@@ -478,8 +488,8 @@ export const commands: Command[] = [
 	{ id: "reset-layout", label: "Reset the layout", detail: "Every panel back on its own side and at its first size", run: resetLayout },
 	{ id: "menu-bar", label: "Focus the menu bar", detail: "Then the arrow keys. Alt and a menu's first letter opens that menu", run: () => void (openMenu() || notify(MENU_HIDDEN)) },
 	{ id: "toggle-menu-bar", label: "Toggle menu bar", detail: "File, Edit, Selection, View, Go and Help across the top of the window", run: () => void toggleMenuBar() },
-	{ id: "move-panel", label: "Move left panel to the right", detail: "The one that is open", run: () => state.workspace && state.settings.layout.left && movePanel(state.leftView) },
-	{ id: "move-panel-back", label: "Move right panel to the left", detail: "The one that is open", run: () => state.workspace && state.settings.layout.right && movePanel(state.rightView) },
+	{ id: "move-panel", label: "Move left panel to the right", detail: "The one that is open", run: () => { const cur = snapshot(state); if (cur.workspace && cur.settings.layout.left) movePanel(cur.leftView); } },
+	{ id: "move-panel-back", label: "Move right panel to the left", detail: "The one that is open", run: () => { const cur = snapshot(state); if (cur.workspace && cur.settings.layout.right) movePanel(cur.rightView); } },
 	// The agent
 	{ id: "agent-ask", label: "Ask the agent…", detail: "About the selection", run: () => void askCommand() },
 	{ id: "attach-file-to-agent", label: "Agent: Attach active file to Agent", detail: "Attach the open workspace file to the next Agent turn context", run: () => { const p = activePath(); if (!p) return notify("Open a file first."); attachFileToAgent(p); } },
@@ -607,13 +617,18 @@ async function wrapInRegion() {
 
 /** Blocks for a script; for a plan toggles Chart/Text, for Markdown toggles Live/Read, for a table toggles Table/Text. */
 function toggleVisual() {
-	const path = activePath();
-	if (!state.workspace || !path) return;
-	const g = state.activeGroup;
+	const cur = snapshot(state);
+	const path = cur.groups[cur.activeGroup]?.active ?? null;
+	if (!cur.workspace || !path) return;
+	const g = cur.activeGroup;
 	if (isPlanPath(path)) setPlanMode(path, planMode(path, g) === "chart" ? "text" : "chart", g);
 	else if (isMarkdown(path)) toggleMarkdownMode();
 	else if (isTable(path)) setTableTextMode(path, !tableTextMode(path, g), g);
-	else setState("groups", g, "mode", (m) => (m === "blocks" ? "text" : "blocks"));
+	else
+		setState((s) => {
+			const grp = s.groups[g];
+			if (grp) grp.mode = grp.mode === "blocks" ? "text" : "blocks";
+		});
 }
 
 async function openProjectSettings() {
@@ -649,7 +664,7 @@ async function newPlanCommand() {
 			return notify(String(e?.message ?? e), "error");
 		}
 		if (state.workspace?.root !== startRoot) return;
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 	}
 	await openFile(path);
 }
@@ -995,7 +1010,7 @@ async function generateErDiagramCommand() {
 		return notify(String(e?.message ?? e), "error");
 	}
 	if (state.workspace?.root !== wsRoot) return;
-	setState("treeVersion", (v) => v + 1);
+	setState((s) => { s.treeVersion += 1; });
 	await openFile(dest);
 	notify(`${modeNote} ${relativeTo(wsRoot, dest)}.`);
 }
@@ -1376,7 +1391,7 @@ async function importMermaidPlanCommand() {
 		await backend.historyKeep(dest).catch(() => {});
 	}
 	await backend.write(dest, printPlan(finalPlan));
-	setState("treeVersion", (v) => v + 1);
+	setState((s) => { s.treeVersion += 1; });
 	await openFile(dest, { keep: true });
 	notify(`Imported Mermaid flowchart to ${relativeTo(wsRoot, dest)} (${finalPlan.nodes.length} nodes).`);
 }
@@ -1484,7 +1499,7 @@ async function gitSwitchBranchCommand() {
 	const res = await backend.gitCheckout(picked).catch((e: any) => ({ ok: false, message: String(e?.message ?? e) }));
 	const { refreshGit } = await import("./git");
 	await refreshGit();
-	setState("treeVersion", (v) => v + 1);
+	setState((s) => { s.treeVersion += 1; });
 	notify(res.message || (res.ok ? `Switched to branch ${picked}.` : `Could not switch to branch ${picked}.`), res.ok ? "info" : "error");
 }
 
@@ -1527,14 +1542,14 @@ async function gitStashCommand() {
 		if (msg === null) return;
 		const res = await backend.gitStash("push", msg.trim() || undefined).catch((e: any) => ({ ok: false, message: String(e?.message ?? e) }));
 		await refreshGit();
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(res.message || (res.ok ? "Stashed working changes." : "Could not stash changes."), res.ok ? "info" : "error");
 		return;
 	}
 	if (action === "pop") {
 		const res = await backend.gitStash("pop").catch((e: any) => ({ ok: false, message: String(e?.message ?? e) }));
 		await refreshGit();
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(res.message || (res.ok ? "Popped latest stash." : "Could not pop stash."), res.ok ? "info" : "error");
 		return;
 	}

@@ -1,7 +1,7 @@
 // Diagnostics from the language server for every open file, by file, then
 // by rule.
 import { Icon, type IconName } from "../Icon";
-import { createEffect, createMemo, createSignal, For, on, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import { monaco } from "../editor/monaco";
 import { docAuditData } from "../docAudit";
 import { diagnostics, type Diagnostic } from "../lsp/session";
@@ -106,16 +106,21 @@ export function Problems() {
 	const hasDocIssues = createMemo(() =>
 		mergedFiles().some(({ uri, list }) => list.some((d) => isDocDiag(uri, d))),
 	);
-	createEffect(() => {
-		const root = state.workspace?.root;
-		if (root !== lastProblemsRoot) {
-			lastProblemsRoot = root;
-			setProblemsScope("all");
-		}
-	});
-	createEffect(() => {
-		if (!hasDocIssues() && problemsScope() !== "all") setProblemsScope("all");
-	});
+	createEffect(
+		() => state.workspace?.root,
+		(root) => {
+			if (root !== lastProblemsRoot) {
+				lastProblemsRoot = root;
+				setProblemsScope("all");
+			}
+		},
+	);
+	createEffect(
+		() => !hasDocIssues() && problemsScope() !== "all",
+		(shouldReset) => {
+			if (shouldReset) setProblemsScope("all");
+		},
+	);
 	const scopeCounts = createMemo(() => {
 		let code = 0;
 		let docsN = 0;
@@ -153,8 +158,8 @@ export function Problems() {
 					<button
 						type="button"
 						role="tab"
-						aria-selected={problemsScope() === "all"}
-						classList={{ active: problemsScope() === "all" }}
+						aria-selected={problemsScope() === "all" ? "true" : "false"}
+						class={{ active: problemsScope() === "all" }}
 						onClick={() => setProblemsScope("all")}
 					>
 						All <span class="meta">{scopeCounts().all}</span>
@@ -162,8 +167,8 @@ export function Problems() {
 					<button
 						type="button"
 						role="tab"
-						aria-selected={problemsScope() === "code"}
-						classList={{ active: problemsScope() === "code" }}
+						aria-selected={problemsScope() === "code" ? "true" : "false"}
+						class={{ active: problemsScope() === "code" }}
 						onClick={() => setProblemsScope("code")}
 					>
 						Code <span class="meta">{scopeCounts().code}</span>
@@ -171,8 +176,8 @@ export function Problems() {
 					<button
 						type="button"
 						role="tab"
-						aria-selected={problemsScope() === "docs"}
-						classList={{ active: problemsScope() === "docs" }}
+						aria-selected={problemsScope() === "docs" ? "true" : "false"}
+						class={{ active: problemsScope() === "docs" }}
 						onClick={() => setProblemsScope("docs")}
 					>
 						Docs <span class="meta">{scopeCounts().docs}</span>
@@ -248,12 +253,10 @@ export function Output() {
 	let box: HTMLPreElement | undefined;
 	// A new line is followed while the view is at the end; someone reading further up is left where they are.
 	createEffect(
-		on(
-			() => state.output.length,
-			() => {
-				if (box && box.scrollHeight - box.scrollTop - box.clientHeight < 40) queueMicrotask(() => box && (box.scrollTop = box.scrollHeight));
-			},
-		),
+		() => state.output.length,
+		() => {
+			if (box && box.scrollHeight - box.scrollTop - box.clientHeight < 40) queueMicrotask(() => box && (box.scrollTop = box.scrollHeight));
+		},
 	);
 	return (
 		<pre class="output" ref={box}>

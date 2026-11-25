@@ -8,7 +8,8 @@ import { emitSplitScrollSync, liveEditorAt, saveMarkdownSyncAnchor, takeMarkdown
 import { MarkdownLiveEditor } from "./MarkdownLiveEditor";
 import { Icon } from "../Icon";
 import { tabShown } from "../recentTabs";
-import { batch, createEffect, createMemo, createResource, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createRoot, createSignal, flush, For, getOwner, onCleanup, onSettled, runWithOwner, Show } from "solid-js";
+import { createAsyncQuery } from "../asyncQuery";
 import { monaco } from "./monaco";
 import { activePath, canonical, closeAllTabs, closeOtherTabs, closeTab, closeTabsToRight, displayName, documents, focusRequest, isUntitled, keepTab, markdownMode, moveTab, newUntitled, notify, openFile, openToSide, planMode, revealSignal, revert, save, saveAll, saveSetting, setMarkdownMode, setPlanMode, setState, setTableTextMode, split, state, tabLeaving, tableTextMode, takeReveal, togglePin, openedForALook } from "../state";
 import { docAuditData } from "../docAudit";
@@ -105,6 +106,8 @@ const base = (path: string) => displayName(path);
 export function EditorGroup(props: { index: number }) {
 	let host!: HTMLDivElement;
 	let editor: monaco.editor.IStandaloneCodeEditor;
+	const owner = getOwner();
+	const [mountedEditor, setMountedEditor] = createSignal<monaco.editor.IStandaloneCodeEditor | undefined>(undefined);
 	const group = () => state.groups[props.index]!;
 	let shown: string | null = null;
 	const [lineCount, setLineCount] = createSignal(0);
@@ -136,7 +139,9 @@ export function EditorGroup(props: { index: number }) {
 		notify(`SQL formatting dialect set to ${found.label}.`);
 	};
 	const runFormat = () => {
-		setState("activeGroup", props.index);
+		setState((s) => {
+			s.activeGroup = props.index;
+		});
 		void import("../commands").then((all) => all.runCommand("format"));
 	};
 	// Blocks are a view of SSL only. The group remembers the choice, so the next
@@ -167,25 +172,36 @@ export function EditorGroup(props: { index: number }) {
 		tabsHost.scrollBy({ left: delta, behavior: "smooth" });
 		setTimeout(updateTabOverflow, 180);
 	};
-	const bindTabsHost = (el: HTMLDivElement) => {
-		tabsHost = el;
-		const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(() => updateTabOverflow()) : null;
-		ro?.observe(el);
-		queueMicrotask(updateTabOverflow);
-		onCleanup(() => {
-			ro?.disconnect();
-			if (tabsHost === el) tabsHost = undefined;
-		});
-	};
-	createEffect(() => {
-		// Re-check overflow & keep the active tab scrolled into view whenever tabs or selection change.
-		const active = group().active;
-		void group().tabs.length;
-		queueMicrotask(() => {
-			if (active) tabs.get(active)?.scrollIntoView({ inline: "nearest", block: "nearest" });
-			updateTabOverflow();
-		});
-	});
+	const hasTabs = createMemo(() => group().tabs.length > 0);
+	createEffect(
+		() => hasTabs(),
+		(shownTabs) => {
+			if (!shownTabs || !tabsHost) {
+				tabsHost = undefined;
+				setCanScrollLeft(false);
+				setCanScrollRight(false);
+				return;
+			}
+			const el = tabsHost;
+			const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(() => updateTabOverflow()) : null;
+			ro?.observe(el);
+			queueMicrotask(updateTabOverflow);
+			return () => {
+				ro?.disconnect();
+				if (tabsHost === el) tabsHost = undefined;
+			};
+		},
+	);
+	createEffect(
+		() => ({ active: group().active, len: group().tabs.length }),
+		({ active }) => {
+			// Re-check overflow & keep the active tab scrolled into view whenever tabs or selection change.
+			queueMicrotask(() => {
+				if (active) tabs.get(active)?.scrollIntoView({ inline: "nearest", block: "nearest" });
+				updateTabOverflow();
+			});
+		},
+	);
 
 	/** The ruler at the style's line length, and the fainter ones the chosen number of columns to each side of it. */
 	const rulers = () =>
@@ -261,7 +277,47 @@ export function EditorGroup(props: { index: number }) {
 		return true;
 	}
 
-	onMount(() => {
+	// The editor is filed under the group's place in the row, and filed again when that place changes (the group
+	// before it closed): "the active editor" is looked up by place.
+	createEffect(
+		() => ({ at: props.index, ed: mountedEditor() }),
+		({ at, ed }) => {
+			if (!ed) return;
+			editors[at] = ed;
+			return () => {
+				if (editors[at] === ed) delete editors[at];
+			};
+		},
+	);
+
+	createEffect(
+		() => ({
+			ed: mountedEditor(),
+			isActive: state.activeGroup === props.index,
+			path: activePath(),
+			groupActive: group().active,
+			liveShown: showLive(),
+			monacoShown: isMonacoVisible(),
+		}),
+		({ ed, isActive, path, groupActive, liveShown, monacoShown }) => {
+			if (!ed || !isActive || !path || path !== groupActive || disposed) return;
+			if (liveShown) {
+				const pos = liveEditorAt(props.index)?.getPosition();
+				if (pos)
+					setState((s) => {
+						s.cursor = { line: pos.lineNumber, column: pos.column };
+					});
+			} else if (monacoShown) {
+				const pos = ed.getPosition();
+				if (pos)
+					setState((s) => {
+						s.cursor = { line: pos.lineNumber, column: pos.column };
+					});
+			}
+		},
+	);
+
+	onSettled(() => {
 		editor = monaco.editor.create(host, {
 			model: null,
 			theme: "studio",
@@ -283,13 +339,6 @@ export function EditorGroup(props: { index: number }) {
 			allowVariableFontsInAccessibilityMode: true,
 			// Prevent Linux X11 middle-click primary-selection paste into code/docs.
 			selectionClipboard: false,
-		});
-		// The editor is filed under the group's place in the row, and filed again when that place changes (the group
-		// before it closed): "the active editor" is looked up by place.
-		createEffect(() => {
-			const at = props.index;
-			editors[at] = editor;
-			onCleanup(() => editors[at] === editor && delete editors[at]);
 		});
 		// The app's own commands for the code at hand, sectioned cleanly on the editor's right-click menu.
 		for (const [groupId, order, id, label] of [
@@ -336,7 +385,13 @@ export function EditorGroup(props: { index: number }) {
 				})();
 			},
 		});
-		useGitMarks(editor, () => group().active);
+		let disposeGitMarks: (() => void) | undefined;
+		runWithOwner(owner, () => {
+			createRoot((dispose) => {
+				disposeGitMarks = dispose;
+				useGitMarks(editor, () => group().active);
+			});
+		});
 		// The editor keeps Ctrl+F12 for "Go to definition" to where it is told it is in a web view, where F12 alone
 		// may be the browser's. It was never told, so the key the Go menu shows (the last the editor lists) did
 		// nothing. Told here: Ctrl+F12 goes to the definition, and F12 goes on doing so where the window has it.
@@ -345,16 +400,15 @@ export function EditorGroup(props: { index: number }) {
 		codeFont = editor.getOption(monaco.editor.EditorOption.fontFamily);
 		const listKeys = continueLists(editor);
 		const stopHoverSeverity = observeMarkerHoverSeverity(editor);
-		onCleanup(() => {
-			listKeys.dispose();
-			stopHoverSeverity();
-		});
 		setRoomy(editor.getLayoutInfo().width >= MINIMAP_FROM);
 		editor.onDidLayoutChange((layout) => setRoomy(layout.width >= MINIMAP_FROM));
 		editor.onDidFocusEditorText(() => {
-			setState("activeGroup", props.index);
 			const at = editor.getPosition();
-			if (at && isMonacoVisible()) setState("cursor", { line: at.lineNumber, column: at.column });
+			const updateCursor = Boolean(at && isMonacoVisible());
+			setState((s) => {
+				s.activeGroup = props.index;
+				if (updateCursor && at) s.cursor = { line: at.lineNumber, column: at.column };
+			});
 		});
 		editor.onDidScrollChange((e) => {
 			if (!e.scrollTopChanged) return;
@@ -379,28 +433,19 @@ export function EditorGroup(props: { index: number }) {
 			// A file taken up with the cursor where the editor already had it moves no cursor: without this the status bar
 			// would go on saying the last file's line.
 			const at = editor.getPosition();
-			if (at && state.activeGroup === props.index) setState("cursor", { line: at.lineNumber, column: at.column });
+			if (at && state.activeGroup === props.index)
+				setState((s) => {
+					s.cursor = { line: at.lineNumber, column: at.column };
+				});
 		});
 		editor.onDidChangeCursorPosition((e) => {
 			if (state.activeGroup !== props.index) return;
-			setState("cursor", { line: e.position.lineNumber, column: e.position.column });
+			setState((s) => {
+				s.cursor = { line: e.position.lineNumber, column: e.position.column };
+			});
 			// Where the cursor comes to rest is somewhere to go back to. Not where the editor puts it as it takes a file
 			// up or puts it back as it was: the file coming to the front says that, once it is where it was asked to be.
 			if (shown && e.source !== "model" && e.source !== "restoreState") noteCursor({ path: shown, line: e.position.lineNumber, column: e.position.column });
-		});
-		createEffect(() => {
-			const isActive = state.activeGroup === props.index;
-			const path = activePath();
-			const liveShown = showLive();
-			const monacoShown = isMonacoVisible();
-			if (!isActive || !path || path !== group().active || disposed) return;
-			if (liveShown) {
-				const pos = liveEditorAt(props.index)?.getPosition();
-				if (pos) setState("cursor", { line: pos.lineNumber, column: pos.column });
-			} else if (monacoShown) {
-				const pos = editor?.getPosition();
-				if (pos) setState("cursor", { line: pos.lineNumber, column: pos.column });
-			}
 		});
 		const stop = revealSignal.listen((path) => {
 			if (state.activeGroup === props.index && path === group().active && shown === path && isMonacoVisible()) reveal(path);
@@ -412,15 +457,20 @@ export function EditorGroup(props: { index: number }) {
 			if (isMonacoVisible()) return editor.focus();
 			section.querySelector<HTMLElement>(".blocks-scroll, .plan [tabindex], .cm-md-host, .md-view, .table-view td.cell-selected, .table-view, .file-view")?.focus();
 		});
-		onCleanup(() => {
+		setMountedEditor(editor);
+		return () => {
 			disposed = true;
 			cancelAnchorRaf();
 			stop();
 			stopFocus();
+			listKeys.dispose();
+			stopHoverSeverity();
+			disposeGitMarks?.();
+			setMountedEditor(undefined);
 			if (shown) keepView(shown);
 			shown = null;
 			editor.dispose();
-		});
+		};
 	});
 
 	/** Keeps where the cursor and the scroll are in the file that is showing, before it stops showing. */
@@ -458,102 +508,122 @@ export function EditorGroup(props: { index: number }) {
 	 * The file that is showing, and how the Monaco editor is configured for it (all code files
 	 * plus Markdown in raw Source mode; Markdown Live Preview renders in CodeMirror 6).
 	 */
-	createEffect(() => {
-		const path = group().active;
-		const monacoShown = isMonacoVisible();
-		const activeCodeFont = state.settings.codeFont?.trim() ? resolveFontStack(state.settings.codeFont, DEFAULT_CODE_FONT) : codeFont || undefined;
-		const options: monaco.editor.IEditorOptions & monaco.editor.IGlobalEditorOptions = {
+	createEffect(
+		() => ({
+			ed: mountedEditor(),
+			path: group().active,
+			monacoShown: isMonacoVisible(),
 			fontSize: state.settings.fontSize,
-			fontFamily: activeCodeFont,
-			minimap: { enabled: minimap() },
-			wordWrap: state.settings.wordWrap ? "on" : "off",
-			inlayHints: { enabled: state.settings.inlayHints === false ? "off" : "on" },
-			rulers: rulers(),
-			lineNumbers: "on",
-			lineDecorationsWidth: 10,
-			renderLineHighlight: "line",
-			guides: { indentation: true },
-			wordBasedSuggestions: "matchingDocuments",
-			stickyScroll: { enabled: true },
-			wrappingStrategy: "simple",
-			padding: { top: 0, bottom: 0 },
-			selectionClipboard: false,
-		};
-		if (!editor) return;
-		if (path === shown) {
-			editor.updateOptions(options);
-			return;
-		}
-		if (shown) keepView(shown);
-		const doc = path ? documents.get(path) : undefined;
-		editor.setModel(null);
-		editor.updateOptions(options);
-		editor.setModel(doc?.model ?? null);
-		shown = doc ? path : null;
-		if (doc) {
-			const view = viewStates.get(`${props.index}:${path}`) ?? lastViews.get(path!);
-			if (view) editor.restoreViewState(view);
-			if (state.activeGroup === props.index && monacoShown) reveal(path!);
-			if (state.activeGroup === props.index && !openedForALook(path!) && monacoShown) editor.focus();
-		}
-	});
+			codeFontSetting: state.settings.codeFont,
+			minimapEnabled: minimap(),
+			wordWrap: state.settings.wordWrap,
+			inlayHints: state.settings.inlayHints,
+			rulerList: rulers(),
+		}),
+		({ ed, path, monacoShown, fontSize, codeFontSetting, minimapEnabled, wordWrap, inlayHints, rulerList }) => {
+			if (!ed) return;
+			const activeCodeFont = codeFontSetting?.trim() ? resolveFontStack(codeFontSetting, DEFAULT_CODE_FONT) : codeFont || undefined;
+			const options: monaco.editor.IEditorOptions & monaco.editor.IGlobalEditorOptions = {
+				fontSize,
+				fontFamily: activeCodeFont,
+				minimap: { enabled: minimapEnabled },
+				wordWrap: wordWrap ? "on" : "off",
+				inlayHints: { enabled: inlayHints === false ? "off" : "on" },
+				rulers: rulerList,
+				lineNumbers: "on",
+				lineDecorationsWidth: 10,
+				renderLineHighlight: "line",
+				guides: { indentation: true },
+				wordBasedSuggestions: "matchingDocuments",
+				stickyScroll: { enabled: true },
+				wrappingStrategy: "simple",
+				padding: { top: 0, bottom: 0 },
+				selectionClipboard: false,
+			};
+			if (path === shown) {
+				ed.updateOptions(options);
+				return;
+			}
+			if (shown) keepView(shown);
+			const doc = path ? documents.get(path) : undefined;
+			ed.setModel(null);
+			ed.updateOptions(options);
+			ed.setModel(doc?.model ?? null);
+			shown = doc ? path : null;
+			if (doc) {
+				const view = viewStates.get(`${props.index}:${path}`) ?? lastViews.get(path!);
+				if (view) ed.restoreViewState(view);
+				if (state.activeGroup === props.index && monacoShown) reveal(path!);
+				if (state.activeGroup === props.index && !openedForALook(path!) && monacoShown) ed.focus();
+			}
+		},
+	);
 
 	// Bidirectional Live/Read <-> Source cursor & scroll sync (works even when `path === shown`).
 	let prevMdPath: string | null = null;
 	let prevMdInCm = false;
-	createEffect(() => {
-		const path = group().active;
-		const inCm = showLive() || showRendered();
-		const wasInCm = prevMdInCm;
-		const wasPath = prevMdPath;
-		prevMdPath = path;
-		prevMdInCm = inCm;
-		if (!path || !isMarkdown(path)) return;
-		if (inCm && !wasInCm && wasPath === path) {
-			if (Date.now() - lastSavedSourceAnchorAt > 100) saveSourceAnchor(path);
-			return;
-		}
-		if (!inCm && (wasInCm || wasPath !== path)) {
-			cancelAnchorRaf();
-			if (!applySourceAnchor(path)) {
-				queueMicrotask(() => {
-					if (disposed || !state.groups[props.index]) return;
-					if (!applySourceAnchor(path)) {
-						anchorRaf = requestAnimationFrame(() => {
-							anchorRaf = undefined;
-							void applySourceAnchor(path);
-						});
-					}
-				});
+	createEffect(
+		() => ({ path: group().active, inCm: showLive() || showRendered() }),
+		({ path, inCm }) => {
+			const wasInCm = prevMdInCm;
+			const wasPath = prevMdPath;
+			prevMdPath = path;
+			prevMdInCm = inCm;
+			if (!path || !isMarkdown(path)) return;
+			if (inCm && !wasInCm && wasPath === path) {
+				if (Date.now() - lastSavedSourceAnchorAt > 100) saveSourceAnchor(path);
+				return;
 			}
-		}
-	});
+			if (!inCm && (wasInCm || wasPath !== path)) {
+				cancelAnchorRaf();
+				if (!applySourceAnchor(path)) {
+					queueMicrotask(() => {
+						if (disposed || !state.groups[props.index]) return;
+						if (!applySourceAnchor(path)) {
+							anchorRaf = requestAnimationFrame(() => {
+								anchorRaf = undefined;
+								void applySourceAnchor(path);
+							});
+						}
+					});
+				}
+			}
+		},
+	);
 
 	// The order tabs were used in: what Ctrl+Tab goes back through. Also track the most recent Markdown tab.
-	createEffect(() => {
-		const path = group().active;
-		if (path) {
-			tabShown(props.index, path);
-			if (isMarkdown(path)) setLastMarkdownPath(path);
-		}
-	});
+	createEffect(
+		() => ({ index: props.index, path: group().active }),
+		({ index, path }) => {
+			if (path) {
+				tabShown(index, path);
+				if (isMarkdown(path)) setLastMarkdownPath(path);
+			}
+		},
+	);
 
 	// The active tab is always in view, however many are open.
 	const tabs = new Map<string, HTMLElement>();
 	/** Closes tabs on middle-button release (`auxclick`/macrotask fallback) instead of mousedown so Linux primary-selection paste cannot leak into the revealed editor. */
 	const middleClose = createMiddleCloseTracker();
 	onCleanup(() => middleClose.dispose());
-	createEffect(() => {
-		const path = group().active;
-		// Where it stands in the row matters too: a tab that is pinned moves to the front.
-		const at = path ? group().tabs.indexOf(path) : -1;
-		if (path && at >= 0) queueMicrotask(() => tabs.get(path)?.scrollIntoView({ block: "nearest", inline: "nearest" }));
-	});
+	createEffect(
+		() => {
+			const path = group().active;
+			// Where it stands in the row matters too: a tab that is pinned moves to the front.
+			const at = path ? group().tabs.indexOf(path) : -1;
+			return { path, at };
+		},
+		({ path, at }) => {
+			if (path && at >= 0) queueMicrotask(() => tabs.get(path)?.scrollIntoView({ block: "nearest", inline: "nearest" }));
+		},
+	);
 	const labels = () => tabLabels(group().tabs, state.workspace?.root);
 	const activate = (path: string, focus = false) => {
-		batch(() => {
-			setState("activeGroup", props.index);
-			setState("groups", props.index, "active", path);
+		setState((s) => {
+			s.activeGroup = props.index;
+			const g = s.groups[props.index];
+			if (g) g.active = path;
 		});
 		if (focus) queueMicrotask(() => tabs.get(path)?.focus());
 	};
@@ -570,7 +640,7 @@ export function EditorGroup(props: { index: number }) {
 			// Enter on a tab opened for a look keeps it, as a double click does.
 			keepTab(path, props.index);
 			activate(path);
-			focusRequest.fire("editor");
+			queueMicrotask(() => focusRequest.fire("editor"));
 		} else if (e.key === "Delete") {
 			e.preventDefault();
 			void closeTab(path, props.index);
@@ -634,12 +704,10 @@ export function EditorGroup(props: { index: number }) {
 		else if (picked === SHOW) (await import("../panels/Explorer")).showInExplorer(path);
 		else if (picked === SIDE) {
 			// This group is the one at hand, even when the keyboard came to its tabs without a click.
-			setState("activeGroup", props.index);
 			activate(path);
-			split();
+			void openToSide(path);
 		} else if (picked === SIDE_READ) {
 			const otherGroup = props.index === 0 ? 1 : 0;
-			setState("activeGroup", props.index);
 			activate(path);
 			await openToSide(path);
 			setMarkdownMode(path, "read", otherGroup);
@@ -685,7 +753,10 @@ export function EditorGroup(props: { index: number }) {
 		const path = g.active;
 		const none = "Open a file first";
 		const inThisGroup = (fn: () => void) => () => {
-			setState("activeGroup", props.index);
+			setState((s) => {
+				s.activeGroup = props.index;
+			});
+			flush();
 			fn();
 		};
 		const command = (id: string, label: string): MenuItem => {
@@ -727,7 +798,7 @@ export function EditorGroup(props: { index: number }) {
 		const p = group().active;
 		return Boolean(p && !isUntitled(p) && !isMarkdown(p) && !isTable(p) && !isPlanPath(p) && state.workspace?.root);
 	};
-	const [governingLinks] = createResource(
+	const [governingLinks] = createAsyncQuery(
 		() => {
 			if (!isGovernableFile()) return null;
 			return { path: group().active!, fp: docsFingerprint() };
@@ -844,13 +915,19 @@ export function EditorGroup(props: { index: number }) {
 	return (
 		<section
 			ref={section}
-			class="group"
-			classList={{
-				active: state.activeGroup === props.index,
-				empty: !group().active,
-				"first-tab-active": Boolean(group().tabs.length && group().tabs[0] === group().active),
-			}}
-			onMouseDown={() => setState("activeGroup", props.index)}
+			class={[
+				"group",
+				{
+					active: state.activeGroup === props.index,
+					empty: !group().active,
+					"first-tab-active": Boolean(group().tabs.length && group().tabs[0] === group().active),
+				},
+			]}
+			onMouseDown={() =>
+				setState((s) => {
+					s.activeGroup = props.index;
+				})
+			}
 		>
 			<Show when={group().tabs.length > 0}>
 				<div class="tabs-row">
@@ -865,13 +942,12 @@ export function EditorGroup(props: { index: number }) {
 							<Icon name="chevron-left" />
 						</button>
 					</Show>
-					<div class="tabs-scroll-wrap" classList={{ "can-left": canScrollLeft(), "can-right": canScrollRight() }}>
+					<div class={["tabs-scroll-wrap", { "can-left": canScrollLeft(), "can-right": canScrollRight() }]}>
 						<div
-							ref={bindTabsHost}
-							class="tabs"
+							ref={(el) => (tabsHost = el)}
+							class={["tabs", { "drop-end": dropAt()?.group === props.index && dropAt()?.before === null }]}
 							role="tablist"
 							aria-label="Open files"
-							classList={{ "drop-end": dropAt()?.group === props.index && dropAt()?.before === null }}
 							title="Double-click empty space to open a new untitled file"
 							onScroll={updateTabOverflow}
 							onWheel={(e) => {
@@ -891,11 +967,27 @@ export function EditorGroup(props: { index: number }) {
 							onDrop={drop}
 						>
 					<For each={group().tabs}>
-						{(path) => (
+						{(path) => {
+							let tabEl: HTMLDivElement | undefined;
+							onCleanup(() => {
+								if (tabs.get(path) === tabEl) tabs.delete(path);
+							});
+							return (
 							<div
-								class="tab"
+								class={[
+									"tab",
+									{
+										active: group().active === path,
+										dirty: Boolean(state.dirty[path]),
+										conflict: Boolean(state.conflicts[path]),
+										pinned: Boolean(group().pinned?.includes(path)),
+										// Opened for a look by one click in a list: its name is in italics until it is kept.
+										preview: group().preview === path,
+										"drop-before": dropAt()?.group === props.index && dropAt()?.before === path,
+									},
+								]}
 								role="tab"
-								draggable={true}
+								draggable="true"
 								onDragStart={(e) => {
 									dragged = { path, group: props.index };
 									// The tab's own kind of thing: dropped on the text, or outside the app, it is nothing.
@@ -915,20 +1007,14 @@ export function EditorGroup(props: { index: number }) {
 									const row = group().tabs;
 									markDrop(props.index, e.clientX > box.left + box.width / 2 ? (row[row.indexOf(path) + 1] ?? null) : path);
 								}}
-								ref={(el) => (tabs.set(path, el), onCleanup(() => tabs.delete(path)))}
+								ref={(el) => {
+									tabEl = el;
+									tabs.set(path, el);
+								}}
 								title={`${isUntitled(path) ? `${base(path)} (unsaved buffer)` : path}${state.conflicts[path] ? "\nChanged on disk since you opened it" : state.dirty[path] ? "\nUnsaved changes" : ""}${group().preview === path ? "\nOpened for a look: the next file clicked takes this tab. Double-click the tab, or press Enter on it, to keep it." : ""}`}
 								tabindex={group().active === path ? 0 : -1}
 								aria-label={`${labels().get(path) ?? base(path)}${group().preview === path ? ", opened for a look" : ""}${group().pinned?.includes(path) ? ", pinned" : ""}${state.conflicts[path] ? ", changed on disk" : state.dirty[path] ? ", unsaved changes" : ""}`}
-								aria-selected={group().active === path}
-								classList={{
-									active: group().active === path,
-									dirty: Boolean(state.dirty[path]),
-									conflict: Boolean(state.conflicts[path]),
-									pinned: Boolean(group().pinned?.includes(path)),
-									// Opened for a look by one click in a list: its name is in italics until it is kept.
-									preview: group().preview === path,
-									"drop-before": dropAt()?.group === props.index && dropAt()?.before === path,
-								}}
+								aria-selected={group().active === path ? "true" : "false"}
 								aria-haspopup="menu"
 								onKeyDown={(e) => e.target === e.currentTarget && onTabKey(e, path)}
 								onDblClick={() => keepTab(path, props.index)}
@@ -986,7 +1072,8 @@ export function EditorGroup(props: { index: number }) {
 									<Icon name="close" class="x" />
 								</button>
 							</div>
-						)}
+							);
+						}}
 					</For>
 						</div>
 					</div>
@@ -1008,10 +1095,28 @@ export function EditorGroup(props: { index: number }) {
 				</Show>
 				<Show when={isSsl() && !isPlan() && !showFile()}>
 					<div class="mode-switch" role="group" aria-label="View of this script">
-						<button classList={{ on: group().mode !== "blocks" }} aria-pressed={group().mode !== "blocks"} onClick={() => setState("groups", props.index, "mode", "text")}>
+						<button
+							class={{ on: group().mode !== "blocks" }}
+							aria-pressed={group().mode !== "blocks" ? "true" : "false"}
+							onClick={() =>
+								setState((s) => {
+									const g = s.groups[props.index];
+									if (g) g.mode = "text";
+								})
+							}
+						>
 							Text
 						</button>
-						<button classList={{ on: group().mode === "blocks" }} aria-pressed={group().mode === "blocks"} onClick={() => setState("groups", props.index, "mode", "blocks")}>
+						<button
+							class={{ on: group().mode === "blocks" }}
+							aria-pressed={group().mode === "blocks" ? "true" : "false"}
+							onClick={() =>
+								setState((s) => {
+									const g = s.groups[props.index];
+									if (g) g.mode = "blocks";
+								})
+							}
+						>
 							Blocks
 						</button>
 					</div>
@@ -1019,8 +1124,8 @@ export function EditorGroup(props: { index: number }) {
 				<Show when={isPlan()}>
 					<div class="mode-switch" role="group" aria-label="View of this plan">
 						<button
-							classList={{ on: planViewMode() === "source" }}
-							aria-pressed={planViewMode() === "source"}
+							class={{ on: planViewMode() === "source" }}
+							aria-pressed={planViewMode() === "source" ? "true" : "false"}
 							title="Raw JSON source of this plan"
 							onClick={() => {
 								setPlanMode(group().active!, "source", props.index);
@@ -1030,16 +1135,16 @@ export function EditorGroup(props: { index: number }) {
 							Source
 						</button>
 						<button
-							classList={{ on: planViewMode() === "text" }}
-							aria-pressed={planViewMode() === "text"}
+							class={{ on: planViewMode() === "text" }}
+							aria-pressed={planViewMode() === "text" ? "true" : "false"}
 							title="Readable structured list and Focus view of the process"
 							onClick={() => setPlanMode(group().active!, "text", props.index)}
 						>
 							Text
 						</button>
 						<button
-							classList={{ on: planViewMode() === "chart" }}
-							aria-pressed={planViewMode() === "chart"}
+							class={{ on: planViewMode() === "chart" }}
+							aria-pressed={planViewMode() === "chart" ? "true" : "false"}
 							title="Visual interactive flowchart"
 							onClick={() => setPlanMode(group().active!, "chart", props.index)}
 						>
@@ -1049,10 +1154,10 @@ export function EditorGroup(props: { index: number }) {
 				</Show>
 				<Show when={isTabular()}>
 					<div class="mode-switch" role="group" aria-label="View of this table">
-						<button classList={{ on: !showTable() }} aria-pressed={!showTable()} onClick={() => setTableTextMode(group().active!, true, props.index)}>
+						<button class={{ on: !showTable() }} aria-pressed={!showTable() ? "true" : "false"} onClick={() => setTableTextMode(group().active!, true, props.index)}>
 							Text
 						</button>
-						<button classList={{ on: showTable() }} aria-pressed={showTable()} onClick={() => setTableTextMode(group().active!, false, props.index)}>
+						<button class={{ on: showTable() }} aria-pressed={showTable() ? "true" : "false"} onClick={() => setTableTextMode(group().active!, false, props.index)}>
 							Table
 						</button>
 					</div>
@@ -1060,8 +1165,8 @@ export function EditorGroup(props: { index: number }) {
 				<Show when={isDoc()}>
 					<div class="mode-switch" role="group" aria-label="View of this document">
 						<button
-							classList={{ on: mdViewMode() === "source" }}
-							aria-pressed={mdViewMode() === "source"}
+							class={{ on: mdViewMode() === "source" }}
+							aria-pressed={mdViewMode() === "source" ? "true" : "false"}
 							title="Raw unformatted Markdown text"
 							onClick={() => {
 								setMarkdownMode(group().active!, "source", props.index);
@@ -1071,8 +1176,8 @@ export function EditorGroup(props: { index: number }) {
 							Source
 						</button>
 						<button
-							classList={{ on: mdViewMode() === "live" }}
-							aria-pressed={mdViewMode() === "live"}
+							class={{ on: mdViewMode() === "live" }}
+							aria-pressed={mdViewMode() === "live" ? "true" : "false"}
 							title="Live Preview while editing (Ctrl+E toggles Live and Read)"
 							onClick={() => {
 								const p = group().active!;
@@ -1084,8 +1189,8 @@ export function EditorGroup(props: { index: number }) {
 							Live
 						</button>
 						<button
-							classList={{ on: mdViewMode() === "read" }}
-							aria-pressed={mdViewMode() === "read"}
+							class={{ on: mdViewMode() === "read" }}
+							aria-pressed={mdViewMode() === "read" ? "true" : "false"}
 							title="Finished reading view (Ctrl+E toggles Live and Read)"
 							onClick={() => {
 								const p = group().active!;
@@ -1102,7 +1207,7 @@ export function EditorGroup(props: { index: number }) {
 			<div class="editor-sheet">
 				{/* Smooth scroll-collapsing Folio header (ADR 0027): one persistent DOM node, pure sans-serif, clickable breadcrumbs. */}
 				<Show when={group().active && !showRendered() && !showLive() && !showTable() && !showChart() && !showFile()}>
-					<nav class="folio-hdr" classList={{ "is-compact": folioCompact() }} aria-label="File header and breadcrumbs">
+					<nav class={["folio-hdr", { "is-compact": folioCompact() }]} aria-label="File header and breadcrumbs">
 						<div class="folio-title-row">
 							<div class="folio-title-left">
 								<Show when={folioFolder()}>
@@ -1242,7 +1347,7 @@ export function EditorGroup(props: { index: number }) {
 				<Show when={showTable() && group().active} keyed>
 					{(path) => <TableView path={path} group={props.index} />}
 				</Show>
-				<div class="editor-row" classList={{ hidden: showBlocks() || showChart() || showRendered() || showLive() || showTable() || showFile() }}>
+				<div class={["editor-row", { hidden: showBlocks() || showChart() || showRendered() || showLive() || showTable() || showFile() }]}>
 					{/* An overview of the whole file, top to bottom, to the left of the line numbers: not marks on the lines in view. */}
 					<Show when={group().active && group().active === activePath() && lineCount() > 0 && flatRegions(symbols()).length}>
 						<nav class="region-strip" aria-label="Regions in this file, top to bottom" onKeyDown={onStripKey}>

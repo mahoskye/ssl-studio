@@ -2,7 +2,8 @@
 // five-state code status breakdown, open questions/suggestions, flowchart test
 // walkthroughs, and spec status. Answers and accepted suggestions are undoable
 // text edits on the plan (ADR 0002).
-import { createEffect, createMemo, createResource, createSignal, createUniqueId, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, createUniqueId, For, onCleanup, onSettled, Show } from "solid-js";
+import { createAsyncQuery } from "../asyncQuery";
 import { Icon } from "../Icon";
 import { agent, currentModel } from "../agent/store";
 import { choose } from "../dialogs";
@@ -111,7 +112,9 @@ export function PlanAssistant(props: {
 	let draftSeq = 0;
 	const customTests = createMemo(() => planTestsOf(props.plan));
 
-	onMount(() => void loadRun(props.path));
+	onSettled(() => {
+		void loadRun(props.path);
+	});
 
 	const run = () => a().run;
 	const STATUS = { pending: "Waiting", running: "Building", passed: "Passed", stuck: "Stuck", skipped: "Waiting on a stuck unit", kept: "Untouched" } as const;
@@ -130,20 +133,30 @@ export function PlanAssistant(props: {
 	const inputCount = () => open().length + a().suggestions.length;
 
 	// Clear any pending journey test draft when collapsing the Tests card or switching plans.
-	createEffect(() => {
-		props.path;
-		setDraftReq(null);
-	});
-	createEffect(() => {
-		if (!testsOpen()) setDraftReq(null);
-	});
+	const planPath = createMemo(() => props.path);
+	createEffect(
+		() => planPath(),
+		() => {
+			setDraftReq(null);
+		},
+	);
+	createEffect(
+		() => testsOpen(),
+		(isOpen) => {
+			if (!isOpen) setDraftReq(null);
+		},
+	);
 
 	// Auto-open "Needs your input" whenever questions or suggestions arrive.
-	createEffect(() => {
-		if (inputCount() > 0) setInputOpen(true);
-	});
+	const inputTotal = createMemo(() => inputCount());
+	createEffect(
+		() => inputTotal(),
+		(count) => {
+			if (count > 0) setInputOpen(true);
+		},
+	);
 
-	const [spec] = createResource(
+	const [spec] = createAsyncQuery(
 		() => [props.path, props.text, a().specVersion] as const,
 		([path]) => specState(path),
 	);
@@ -186,13 +199,22 @@ export function PlanAssistant(props: {
 	};
 
 	// Keep legacy onPath prop synced when running standalone (without shared PlanView path index).
-	createEffect(() => {
-		if (props.onSetActivePathIndex) return;
-		const at = localPath();
-		const path = at === null ? undefined : paths().paths[at];
-		if (at !== null && !path) return void setLocalPath(null);
-		props.onPath?.(path ? path.steps.map((step) => step.id) : null);
-	});
+	createEffect(
+		() => {
+			if (props.onSetActivePathIndex) return { skip: true as const };
+			const at = localPath();
+			const path = at === null ? undefined : paths().paths[at];
+			return { skip: false as const, at, path };
+		},
+		(res) => {
+			if (res.skip) return;
+			if (res.at !== null && !res.path) {
+				setLocalPath(null);
+				return;
+			}
+			props.onPath?.(res.path ? res.path.steps.map((step) => step.id) : null);
+		},
+	);
 	onCleanup(() => {
 		if (!props.onSetActivePathIndex) props.onPath?.(null);
 	});
@@ -259,7 +281,7 @@ export function PlanAssistant(props: {
 	};
 
 	return (
-		<aside class="plan-assist" classList={{ "in-palette": Boolean(props.inPalette) }} id={props.id} hidden={props.hidden} aria-label="Plan assistant">
+		<aside class={["plan-assist", { "in-palette": Boolean(props.inPalette) }]} id={props.id} hidden={props.hidden} aria-label="Plan assistant">
 			{/* 1. Workflow Header & Primary Actions Card */}
 			<section class="pa-card pa-hero" aria-label="Plan workflow and actions">
 				<div class="pa-hero-actions">
@@ -355,11 +377,11 @@ export function PlanAssistant(props: {
 
 			{/* 2. Needs Your Input Card (Questions, Suggestions, Decisions) */}
 			<section class="pa-card" aria-label="Questions and suggestions">
-				<button type="button" class="pa-card-head" aria-expanded={inputOpen()} onClick={() => setInputOpen((o) => !o)}>
+				<button type="button" class="pa-card-head" aria-expanded={inputOpen() ? "true" : "false"} onClick={() => setInputOpen((o) => !o)}>
 					<Icon name={inputOpen() ? "chevron-down" : "chevron-right"} />
 					<span class="pa-card-title">Needs your input</span>
 					<span class="spacer" />
-					<span class="pa-card-meta" classList={{ accent: inputCount() > 0 }}>
+					<span class={["pa-card-meta", { accent: inputCount() > 0 }]}>
 						{inputCount() > 0 ? `${inputCount()} open` : closed().length ? `${closed().length} decided` : "None"}
 					</span>
 				</button>
@@ -448,7 +470,7 @@ export function PlanAssistant(props: {
 						</Show>
 
 						<Show when={closed().length}>
-							<button type="button" class="pa-subtoggle" aria-expanded={decidedOpen()} onClick={() => setDecidedOpen((o) => !o)}>
+							<button type="button" class="pa-subtoggle" aria-expanded={decidedOpen() ? "true" : "false"} onClick={() => setDecidedOpen((o) => !o)}>
 								<Icon name={decidedOpen() ? "chevron-down" : "chevron-right"} />
 								<span>What you decided ({closed().length})</span>
 							</button>
@@ -489,7 +511,7 @@ export function PlanAssistant(props: {
 
 			{/* 3. Build & Code Sync Card */}
 			<section class="pa-card" aria-label="Build and code status">
-				<button type="button" class="pa-card-head" aria-expanded={buildOpen()} onClick={() => setBuildOpen((o) => !o)}>
+				<button type="button" class="pa-card-head" aria-expanded={buildOpen() ? "true" : "false"} onClick={() => setBuildOpen((o) => !o)}>
 					<Icon name={buildOpen() ? "chevron-down" : "chevron-right"} />
 					<span class="pa-card-title">Build &amp; code</span>
 					<span class="spacer" />
@@ -513,8 +535,7 @@ export function PlanAssistant(props: {
 													<Show when={count() > 0 || kind === "green" || kind === "grey"}>
 														<button
 															type="button"
-															class={`pa-code-pill ${kind}`}
-															classList={{ active: active(), empty: count() === 0 }}
+															class={[`pa-code-pill ${kind}`, { active: active(), empty: count() === 0 }]}
 															disabled={count() === 0}
 															title={`${CODE_INDICATOR_WORDS[kind].label}: ${CODE_INDICATOR_WORDS[kind].detail}`}
 															onClick={() => setPickedCodeState((cur) => (cur === kind ? null : kind))}
@@ -677,7 +698,7 @@ export function PlanAssistant(props: {
 										{(d) => {
 											const openAction = () => resolveDriftOpenAction(d, built()?.units ?? [], planTargets(), nodeIdSet());
 											return (
-												<p class="plan-drift" classList={{ warning: d.severity === "warning" }}>
+												<p class={["plan-drift", { warning: d.severity === "warning" }]}>
 													{d.message}{" "}
 													<Show when={openAction()} keyed>
 														{(action) => (
@@ -717,11 +738,11 @@ export function PlanAssistant(props: {
 
 			{/* 4. Tests & Scenarios Card (Always Visible — Business Test Cases + Flowchart Journeys) */}
 			<section class="pa-card" aria-label="Flowchart tests">
-				<button type="button" class="pa-card-head" aria-expanded={testsOpen()} onClick={() => setTestsOpen((o) => !o)}>
+				<button type="button" class="pa-card-head" aria-expanded={testsOpen() ? "true" : "false"} onClick={() => setTestsOpen((o) => !o)}>
 					<Icon name={testsOpen() ? "chevron-down" : "chevron-right"} />
 					<span class="pa-card-title">Tests</span>
 					<span class="spacer" />
-					<span class="pa-card-meta" classList={{ accent: shownPath() !== null || customTests().length > 0 }}>
+					<span class={["pa-card-meta", { accent: shownPath() !== null || customTests().length > 0 }]}>
 						{customTests().length ? `${customTests().length} ${customTests().length === 1 ? "test" : "tests"} · ` : ""}
 						{paths().paths.length}
 						{paths().truncated ? "+" : ""} {paths().paths.length === 1 ? "journey" : "journeys"}
@@ -870,7 +891,7 @@ export function PlanAssistant(props: {
 
 			{/* 5. Plan Doc Card */}
 			<section class="pa-card" aria-label="Plan doc">
-				<button type="button" class="pa-card-head" aria-expanded={specOpen()} onClick={() => setSpecOpen((o) => !o)}>
+				<button type="button" class="pa-card-head" aria-expanded={specOpen() ? "true" : "false"} onClick={() => setSpecOpen((o) => !o)}>
 					<Icon name={specOpen() ? "chevron-down" : "chevron-right"} />
 					<span class="pa-card-title">Plan doc</span>
 					<span class="spacer" />

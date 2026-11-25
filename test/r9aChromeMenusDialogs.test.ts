@@ -418,7 +418,7 @@ describe("R9A P1 — Menu.tsx modal close, focusout/blur/scroll close, loader er
 
 	test("Menu.tsx closes on modalOpen/blur/scroll/focusout, catches async loader errors, opens on ArrowDown/Up, clamps non-floating, and focuses list fallback", () => {
 		const src = readSrc("../src/view/Menu.tsx");
-		expect(src).toContain("if (modalOpen() && items() !== null) close(false);");
+		expect(src).toMatch(/modalOpen\(\) && items\(\) !== null[\s\S]*?if \(shouldClose\) close\(false\);/);
 		expect(src).toContain('window.addEventListener("blur", onBlur)');
 		expect(src).toContain('window.addEventListener("scroll", onScroll, true)');
 		expect(src).toContain("onFocusOut={onFocusOut}");
@@ -517,25 +517,36 @@ describe("R9A P1 — Settings.tsx, templater.ts, and USER_ONLY_SETTINGS security
 		expect(clampNumericSetting("120", 0, 60, 10)).toBe(60);
 	});
 
-	test("templatesFolderPath confines custom templatesFolder inside workspace root", () => {
-		setState("workspace", { root: "/work/project", name: "project" } as any);
-		setState("project", { docs: "docs" } as any);
+	test("templatesFolderPath confines custom templatesFolder inside workspace root", async () => {
+		const { flush } = await import("solid-js");
+		setState((s) => {
+			s.workspace = { root: "/work/project", name: "project" } as any;
+			s.project = { docs: "docs" } as any;
+		});
+		flush();
 		try {
-			setState("settings", "templatesFolder", "custom/tpls");
+			setState((s) => { s.settings.templatesFolder = "custom/tpls"; });
+			flush();
 			expect(templatesFolderPath()).toBe("/work/project/custom/tpls");
 
-			setState("settings", "templatesFolder", "../../etc/evil");
+			setState((s) => { s.settings.templatesFolder = "../../etc/evil"; });
+			flush();
 			expect(templatesFolderPath()).toBe("/work/project/docs/templates");
 
-			setState("settings", "templatesFolder", "/etc/evil");
+			setState((s) => { s.settings.templatesFolder = "/etc/evil"; });
+			flush();
 			expect(templatesFolderPath()).toBe("/work/project/docs/templates");
 
-			setState("settings", "templatesFolder", "C:\\Windows\\System32");
+			setState((s) => { s.settings.templatesFolder = "C:\\Windows\\System32"; });
+			flush();
 			expect(templatesFolderPath()).toBe("/work/project/docs/templates");
 		} finally {
-			setState("settings", "templatesFolder", undefined);
-			setState("workspace", null);
-			setState("project", null);
+			setState((s) => {
+				s.settings.templatesFolder = undefined;
+				s.workspace = null;
+				s.project = null;
+			});
+			flush();
 		}
 	});
 
@@ -621,11 +632,11 @@ describe("R9A P1 — languages, monaco, StatusBar, EditorGroup cursor sync, file
 		expect(sbSrc).toContain("placeAnchoredMenu(");
 		expect(sbSrc).toContain("doc.model.isDisposed()");
 		expect(sbSrc).toContain("displayName(doc.path)");
-		expect(sbSrc).toContain("on([activePath, () => state.kindVersion]");
+		expect(sbSrc).toContain("${activePath() ?? \"\"}\\0${state.kindVersion}");
 		expect(sbSrc).toContain("if (!state.workspace) return;");
 
 		const egSrc = readSrc("../src/view/editor/EditorGroup.tsx");
-		expect(egSrc).toMatch(/onDidFocusEditorText\(\(\) => \{\s*setState\("activeGroup", props\.index\);\s*const at = editor\.getPosition\(\);/);
+		expect(egSrc).toMatch(/onDidFocusEditorText\(\(\) => \{\s*const at = editor\.getPosition\(\);[\s\S]*?s\.activeGroup = props\.index;/);
 		expect(egSrc).toContain("liveEditorAt(props.index)?.getPosition()");
 
 		const wSrc = readSrc("../src/view/Welcome.tsx");

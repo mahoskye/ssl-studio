@@ -2,9 +2,10 @@
 // is shown with zoom and copy/open actions; other bytes say what they are,
 // how large, and offer OS open/reveal/copy controls. There is nothing here to
 // type into, so nothing here can damage the file.
-import { createEffect, createResource, createSignal, on, Show } from "solid-js";
+import { createEffect, createSignal, Show } from "solid-js";
 import { sizeText } from "../../shared/fileKind";
 import { baseName, isInside, relativeTo } from "../../shared/paths";
+import { createAsyncQuery } from "../asyncQuery";
 import { backend } from "../backend";
 import { Icon } from "../Icon";
 import { documents, notify, state } from "../state";
@@ -29,7 +30,7 @@ export function FileView(props: { path: string }) {
 		return documents.get(props.path)?.binary;
 	};
 	const name = () => baseName(props.path);
-	const [picture] = createResource(
+	const [picture] = createAsyncQuery(
 		() => (file()?.image ? ([props.path, state.kindVersion] as const) : false),
 		([path]) => backend.image(path),
 	);
@@ -40,14 +41,12 @@ export function FileView(props: { path: string }) {
 	const [zoom, setZoom] = createSignal<number | null>(null);
 
 	createEffect(
-		on(
-			() => props.path,
-			() => {
-				setZoom(null);
-				setPixels("");
-				setNatural(null);
-			},
-		),
+		() => props.path,
+		() => {
+			setZoom(null);
+			setPixels("");
+			setNatural(null);
+		},
 	);
 
 	const stepZoom = (dir: -1 | 1) => {
@@ -116,7 +115,7 @@ export function FileView(props: { path: string }) {
 						</button>
 						<button
 							type="button"
-							classList={{ active: zoom() === null }}
+							class={{ active: zoom() === null }}
 							title="Fit image to window"
 							onClick={() => setZoom(null)}
 						>
@@ -143,7 +142,7 @@ export function FileView(props: { path: string }) {
 				<Show when={!picture.error} fallback={<p class="file-note warn">{name()} could not be shown: {String((picture.error as Error)?.message ?? picture.error)}</p>}>
 					<Show when={picture()} fallback={<p class="hint">Reading the picture…</p>}>
 						{(read) => (
-							<div class="file-picture" classList={{ zoomed: zoom() !== null }}>
+							<div class={["file-picture", { zoomed: zoom() !== null }]}>
 								<img
 									src={`data:${read().type};base64,${read().base64}`}
 									alt={name()}

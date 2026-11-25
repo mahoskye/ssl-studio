@@ -18,7 +18,8 @@ import {
 	type ThemeMaterial,
 	type ThemeTone,
 } from "../shared/oklchTheme";
-import { createSignal, createUniqueId, For, Show, type JSX } from "solid-js";
+import { createSignal, createUniqueId, For, Show } from "solid-js";
+import type { JSX } from "@solidjs/web";
 import { isInside, resolvePath } from "../shared/paths";
 import type { Settings, SettingsPatch } from "../shared/protocol";
 import { backend, inApp } from "./backend";
@@ -215,12 +216,12 @@ export function SettingsDialog() {
 						</label>
 						<span class="settings-hint" id={ids.hint}>
 							{p.hint ? `${p.hint}. ` : ""}
-							<span class="settings-scope" classList={{ project: scopeOf(p.setting) === "workspace" }}>
+							<span class={["settings-scope", { project: scopeOf(p.setting) === "workspace" }]}>
 								{scopeOf(p.setting) === "workspace" ? "Saved for this project" : "Saved for you"}
 							</span>
 						</span>
 					</div>
-					<div class="settings-control" classList={{ wide: p.wide }}>
+					<div class={["settings-control", { wide: p.wide }]}>
 						{p.children(ids)}
 					</div>
 				</div>
@@ -231,7 +232,13 @@ export function SettingsDialog() {
 	const sections = new Map<Group, HTMLElement>();
 	const Section = (p: { title: Group; when: boolean; children: JSX.Element }) => (
 		<Show when={p.when}>
-			<section class="settings-group" aria-label={p.title} ref={(el) => sections.set(p.title, el)}>
+			<section
+				class="settings-group"
+				aria-label={p.title}
+				ref={(el) => {
+					sections.set(p.title, el);
+				}}
+			>
 				<h3>{p.title}</h3>
 				{p.children}
 			</section>
@@ -338,7 +345,7 @@ export function SettingsDialog() {
 		<Show when={open()}>
 			<Modal class="dialog settings" labelledBy={titleId} onClose={close} onKey={onKey}>
 				<h2 id={titleId}>Settings</h2>
-				<input class="settings-search" data-autofocus aria-label="Search settings" placeholder="Search settings" autocomplete="off" spellcheck={false} value={query()} onInput={(e) => setQuery(e.currentTarget.value)} onMouseDown={() => setCapturing(null)} />
+				<input class="settings-search" data-autofocus aria-label="Search settings" placeholder="Search settings" autocomplete="off" spellcheck="false" value={query()} onInput={(e) => setQuery(e.currentTarget.value)} onMouseDown={() => setCapturing(null)} />
 				{/* The sections by name: the list is long, and a name goes straight to its part of it. */}
 				<nav class="settings-nav" aria-label="Sections">
 					<For each={SECTIONS.filter(([, key]) => groups[key]())}>
@@ -358,8 +365,8 @@ export function SettingsDialog() {
 									<div class="settings-theme-bar" role="group" aria-label="Surface tone" aria-describedby={ids.hint}>
 										<button
 											type="button"
-											aria-pressed={state.settings.theme === "system"}
-											classList={{ active: state.settings.theme === "system" }}
+											aria-pressed={state.settings.theme === "system" ? "true" : "false"}
+											class={{ active: state.settings.theme === "system" }}
 											onClick={() => pickTone("system")}
 										>
 											System
@@ -368,8 +375,8 @@ export function SettingsDialog() {
 											{(tone) => (
 												<button
 													type="button"
-													aria-pressed={parsedOklch()?.tone === tone}
-													classList={{ active: parsedOklch()?.tone === tone }}
+													aria-pressed={parsedOklch()?.tone === tone ? "true" : "false"}
+													class={{ active: parsedOklch()?.tone === tone }}
 													onClick={() => pickTone(tone)}
 												>
 													{TONE_INFO[tone].label}
@@ -385,9 +392,8 @@ export function SettingsDialog() {
 												return (
 													<button
 														type="button"
-														class="settings-swatch"
-														aria-pressed={active()}
-														classList={{ active: active() }}
+														class={["settings-swatch", { active: active() }]}
+														aria-pressed={active() ? "true" : "false"}
 														onClick={() => pickMaterial(mat)}
 													>
 														<span class="settings-swatch-dot" style={{ background: info.swatch }} aria-hidden="true" />
@@ -602,7 +608,7 @@ export function SettingsDialog() {
 									id={ids.control}
 									aria-describedby={ids.hint}
 									autocomplete="off"
-									spellcheck={false}
+									spellcheck="false"
 									placeholder={state.info?.lsp.path ?? "Found automatically"}
 									value={state.settings.lspPath ?? ""}
 									onKeyDown={commitOnEnter}

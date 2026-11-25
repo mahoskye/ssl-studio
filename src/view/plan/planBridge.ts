@@ -87,6 +87,6 @@ export function requestPlanPaletteTab(tab: "design" | "assistant") {
 export function registerPlanBridge(bridge: ActivePlanBridge): () => void {
 	setActivePlanBridge(bridge);
 	return () => {
-		if (activePlanBridge() === bridge) setActivePlanBridge(null);
+		setActivePlanBridge((cur) => (cur === bridge ? null : cur));
 	};
 }

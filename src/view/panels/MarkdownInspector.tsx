@@ -2,8 +2,9 @@
 // Readiness, Linked Tickets, Schema Usages, and Links Inspector).
 // Stays live-synced with the active Markdown document across Live, Read, and Source
 // modes via the underlying Monaco ITextModel (ADR 0002).
-import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, Show, untrack } from "solid-js";
-import { Portal } from "solid-js/web";
+import { createEffect, createMemo, createSignal, For, onCleanup, Show, untrack } from "solid-js";
+import { Portal } from "@solidjs/web";
+import { createAsyncQuery } from "../asyncQuery";
 import { placeAnchoredMenu, type RectBox } from "../../shared/contextMenu";
 import { localDay } from "../../shared/dates";
 import { evaluateTicketReadiness } from "../../shared/docExport";
@@ -229,23 +230,29 @@ export function MarkdownInspector() {
 	};
 
 	// Sync live text with the open Monaco model across Live, Read, and Source modes.
-	createEffect(() => {
-		const d = activeMdDoc();
-		if (!d) {
-			setText("");
-			return;
-		}
-		setText(d.model.getValue());
-		const sub = d.model.onDidChangeContent(() => {
+	createEffect(
+		() => activeMdDoc(),
+		(d) => {
+			if (!d) {
+				setText("");
+				return;
+			}
 			setText(d.model.getValue());
-		});
-		onCleanup(() => sub.dispose());
-	});
+			const sub = d.model.onDidChangeContent(() => {
+				setText(d.model.getValue());
+			});
+			return () => sub.dispose();
+		},
+	);
 
 	// Publish YAML editor open state so Live-mode Replace All knows whether frontmatter is being edited.
-	createEffect(() => {
-		setMarkdownYamlEditorOpen(editYaml() && !isRead());
-	});
+	const yamlOpenForEdit = createMemo(() => editYaml() && !isRead());
+	createEffect(
+		() => yamlOpenForEdit(),
+		(open) => {
+			setMarkdownYamlEditorOpen(open);
+		},
+	);
 	onCleanup(() => {
 		setMarkdownYamlEditorOpen(false);
 		setMarkdownLinksSummary(null);
@@ -256,7 +263,8 @@ export function MarkdownInspector() {
 
 	// Reset transient editing states when switching files or entering Read mode.
 	createEffect(
-		on(path, (p) => {
+		() => path(),
+		(p) => {
 			yamlCompleter?.dispose();
 			yamlCompleter = undefined;
 			setEditYaml(false);
@@ -277,11 +285,12 @@ export function MarkdownInspector() {
 			setUsageGroupFold({});
 			setUsageGroupShowAll({});
 			setUsageExpandedFiles({});
-		}),
+		},
 	);
 
 	createEffect(
-		on(isRead, (read) => {
+		() => isRead(),
+		(read) => {
 			if (!read) return;
 			setEditingProp(null);
 			if (editYaml()) {
@@ -289,7 +298,7 @@ export function MarkdownInspector() {
 				yamlCompleter = undefined;
 				setEditYaml(false);
 			}
-		}),
+		},
 	);
 
 	// --- Model Editing (ADR 0002: single source of truth via Monaco model) ---
@@ -318,31 +327,36 @@ export function MarkdownInspector() {
 	const facts = createMemo(() => extractDisplayProperties(front().values));
 	const groupedFacts = createMemo(() => groupPropertiesForInspector(facts()));
 
-	createEffect(() => {
-		const open = editYaml();
-		const inner = yamlSpan()?.inner ?? "";
-		if (!open) return;
-		queueMicrotask(() => {
-			if (!yamlInputEl) return;
-			if (yamlInputEl.value !== inner) yamlInputEl.value = inner;
-			resizeYamlInput(yamlInputEl);
-		});
-	});
+	const yamlSync = createMemo(() => (editYaml() ? (yamlSpan()?.inner ?? "") : null));
+	createEffect(
+		() => yamlSync(),
+		(inner) => {
+			if (inner === null) return;
+			queueMicrotask(() => {
+				if (!yamlInputEl) return;
+				if (yamlInputEl.value !== inner) yamlInputEl.value = inner;
+				resizeYamlInput(yamlInputEl);
+			});
+		},
+	);
 
-	createEffect(() => {
-		if (!editYaml() || typeof ResizeObserver === "undefined") return;
-		let ro: ResizeObserver | undefined;
-		const frame = requestAnimationFrame(() => {
-			if (!yamlInputEl) return;
-			resizeYamlInput(yamlInputEl);
-			ro = new ResizeObserver(() => resizeYamlInput(yamlInputEl));
-			ro.observe(yamlInputEl);
-		});
-		onCleanup(() => {
-			cancelAnimationFrame(frame);
-			ro?.disconnect();
-		});
-	});
+	createEffect(
+		() => editYaml(),
+		(open) => {
+			if (!open || typeof ResizeObserver === "undefined") return;
+			let ro: ResizeObserver | undefined;
+			const frame = requestAnimationFrame(() => {
+				if (!yamlInputEl) return;
+				resizeYamlInput(yamlInputEl);
+				ro = new ResizeObserver(() => resizeYamlInput(yamlInputEl));
+				ro.observe(yamlInputEl);
+			});
+			return () => {
+				cancelAnimationFrame(frame);
+				ro?.disconnect();
+			};
+		},
+	);
 
 	const applyYamlInnerEdit = (nextInner: string) => {
 		const d = activeMdDoc();
@@ -468,7 +482,7 @@ export function MarkdownInspector() {
 		return out;
 	});
 
-	const [allWorkspaceFiles] = createResource(
+	const [allWorkspaceFiles] = createAsyncQuery(
 		() => (state.workspace?.root ? { root: state.workspace.root, ver: state.treeVersion } : null),
 		async ({ root }) => ({
 			key: root,
@@ -536,7 +550,7 @@ export function MarkdownInspector() {
 		const root = state.workspace?.root;
 		return ident && root ? `${root}\0${ident}` : null;
 	});
-	const [schemaUsages] = createResource(
+	const [schemaUsages] = createAsyncQuery(
 		() => {
 			const ident = schemaIdent();
 			const root = state.workspace?.root;
@@ -600,7 +614,7 @@ export function MarkdownInspector() {
 		return p && root ? `${root}\0${p}` : null;
 	});
 
-	const [linked] = createResource(
+	const [linked] = createAsyncQuery(
 		() => {
 			const p = path();
 			const root = state.workspace?.root;
@@ -645,7 +659,7 @@ export function MarkdownInspector() {
 	});
 	const brokenOutgoingCount = createMemo(() => outgoingLinks().filter((o) => o.broken).length);
 
-	const [unlinkedMentions] = createResource(
+	const [unlinkedMentions] = createAsyncQuery(
 		() => {
 			const p = path();
 			const root = state.workspace?.root;
@@ -711,64 +725,65 @@ export function MarkdownInspector() {
 	);
 
 	// Publish live link counts back to the compact editor strip & Objects tab badge.
-	createEffect(() => {
-		const p = path();
-		if (!p) {
-			setMarkdownLinksSummary(null);
-			return;
-		}
-		const key = linksResourceKey();
-		const backlinksFresh = key ? freshResourceValue(linked.loading, linked(), key) : [];
-		const unlinkedFresh = key ? freshResourceValue(unlinkedMentions.loading, unlinkedMentions(), key) : [];
-		if (key && (backlinksFresh === undefined || unlinkedFresh === undefined)) {
-			setMarkdownLinksSummary(null);
-			return;
-		}
-		const backlinks = backlinksFresh?.length ?? 0;
-		const outgoing = outgoingLinks().length;
-		const unlinked = unlinkedFresh?.length ?? 0;
-		const broken = brokenOutgoingCount();
-		setMarkdownLinksSummary({
-			path: p,
-			backlinks,
-			outgoing,
-			unlinked,
-			broken,
-			total: backlinks + outgoing + unlinked,
-		});
-	});
+	createEffect(
+		() => {
+			const p = path();
+			if (!p) return null;
+			const key = linksResourceKey();
+			const backlinksFresh = key ? freshResourceValue(linked.loading, linked(), key) : [];
+			const unlinkedFresh = key ? freshResourceValue(unlinkedMentions.loading, unlinkedMentions(), key) : [];
+			if (key && (backlinksFresh === undefined || unlinkedFresh === undefined)) return null;
+			const backlinks = backlinksFresh?.length ?? 0;
+			const outgoing = outgoingLinks().length;
+			const unlinked = unlinkedFresh?.length ?? 0;
+			const broken = brokenOutgoingCount();
+			return {
+				path: p,
+				backlinks,
+				outgoing,
+				unlinked,
+				broken,
+				total: backlinks + outgoing + unlinked,
+			};
+		},
+		(summary) => {
+			setMarkdownLinksSummary(summary);
+		},
+	);
 
 	// Respond to editor focus requests (`properties`, `yaml`, `work`, `links`).
-	createEffect(() => {
-		const req = markdownPanelTabRequest();
-		if (!req || req.tab !== "info" || !req.focus || req.seq <= lastConsumedFocusSeq) return;
-		lastConsumedFocusSeq = req.seq;
-		const target = req.focus;
-		if (target === "properties") {
-			setPropsOpen(true);
-			requestAnimationFrame(() => propsSectionEl?.scrollIntoView({ behavior: "smooth", block: "start" }));
-		} else if (target === "yaml") {
-			if (!isRead()) ensureFrontmatterAndOpenYaml();
-			else setPropsOpen(true);
-			requestAnimationFrame(() => propsSectionEl?.scrollIntoView({ behavior: "smooth", block: "start" }));
-		} else if (target === "work") {
-			setWorkOpen(true);
-			requestAnimationFrame(() => workSectionEl?.scrollIntoView({ behavior: "smooth", block: "start" }));
-		} else if (target === "links") {
-			setLinksOpen(true);
-			const key = linksResourceKey();
-			setLinksTab(
-				chooseDefaultLinksTab({
-					backlinks: currentBacklinks().length,
-					outgoing: outgoingLinks().length,
-					unlinked: currentUnlinked().length,
-					brokenOutgoing: brokenOutgoingCount(),
-					backlinksLoading: Boolean(key && (linked.loading || linked()?.key !== key)),
-				}),
-			);
-			requestAnimationFrame(() => linksSectionEl?.scrollIntoView({ behavior: "smooth", block: "start" }));
-		}
-	});
+	createEffect(
+		() => markdownPanelTabRequest(),
+		(req) => {
+			if (!req || req.tab !== "info" || !req.focus || req.seq <= lastConsumedFocusSeq) return;
+			lastConsumedFocusSeq = req.seq;
+			const target = req.focus;
+			if (target === "properties") {
+				setPropsOpen(true);
+				requestAnimationFrame(() => propsSectionEl?.scrollIntoView({ behavior: "smooth", block: "start" }));
+			} else if (target === "yaml") {
+				if (!isRead()) ensureFrontmatterAndOpenYaml();
+				else setPropsOpen(true);
+				requestAnimationFrame(() => propsSectionEl?.scrollIntoView({ behavior: "smooth", block: "start" }));
+			} else if (target === "work") {
+				setWorkOpen(true);
+				requestAnimationFrame(() => workSectionEl?.scrollIntoView({ behavior: "smooth", block: "start" }));
+			} else if (target === "links") {
+				setLinksOpen(true);
+				const key = linksResourceKey();
+				setLinksTab(
+					chooseDefaultLinksTab({
+						backlinks: currentBacklinks().length,
+						outgoing: outgoingLinks().length,
+						unlinked: currentUnlinked().length,
+						brokenOutgoing: brokenOutgoingCount(),
+						backlinksLoading: Boolean(key && (linked.loading || linked()?.key !== key)),
+					}),
+				);
+				requestAnimationFrame(() => linksSectionEl?.scrollIntoView({ behavior: "smooth", block: "start" }));
+			}
+		},
+	);
 
 	// --- Navigation, Property Pickers & Link Actions -------------------------
 	const called = (targetPath: string) => {
@@ -849,7 +864,9 @@ export function MarkdownInspector() {
 		try {
 			await backend.create(dest, "file");
 			await backend.write(dest, `# ${parsed.name.replace(/\.md$/i, "")}\n\n`);
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => {
+				s.treeVersion += 1;
+			});
 			await openFile(dest);
 		} catch (e: any) {
 			notify(`Could not create note: ${e?.message ?? e}`, "error");
@@ -1282,7 +1299,9 @@ export function MarkdownInspector() {
 				await backend.historyKeep(mention.path).catch(() => {});
 				await backend.write(mention.path, next);
 			}
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => {
+				s.treeVersion += 1;
+			});
 			setLinksRefresh((v) => v + 1);
 			notify(`Linked mention in ${called(key)}.`);
 		} catch (err: any) {
@@ -1460,7 +1479,7 @@ export function MarkdownInspector() {
 														<Show
 															when={!isRead() && !isListProperty(rowProps.fact.key)}
 															fallback={
-																<span classList={{ "doc-status": rowProps.fact.key === "status", [`tone-${toneOf(value)}`]: rowProps.fact.key === "status" }}>
+																<span class={{ "doc-status": rowProps.fact.key === "status", [`tone-${toneOf(value)}`]: rowProps.fact.key === "status" }}>
 																	{value}
 																</span>
 															}
@@ -1470,8 +1489,7 @@ export function MarkdownInspector() {
 																fallback={
 																	<button
 																		type="button"
-																		class="cm-md-prop-scalar-btn"
-																		classList={{ "doc-status": rowProps.fact.key === "status", [`tone-${toneOf(value)}`]: rowProps.fact.key === "status" }}
+																		class={["cm-md-prop-scalar-btn", { "doc-status": rowProps.fact.key === "status", [`tone-${toneOf(value)}`]: rowProps.fact.key === "status" }]}
 																		title={`Click to edit ${rowProps.fact.key}`}
 																		onClick={() => void editScalarPropertyInteractive(rowProps.fact.key, value)}
 																	>
@@ -1620,9 +1638,8 @@ export function MarkdownInspector() {
 					<button
 						ref={yamlEditBtnEl}
 						type="button"
-						class="md-insp-btn"
-						classList={{ active: editYaml() }}
-						aria-expanded={editYaml()}
+						class={["md-insp-btn", { active: editYaml() }]}
+						aria-expanded={editYaml() ? "true" : "false"}
 						title={editYaml() ? "Hide raw YAML frontmatter (Esc)" : "Edit raw YAML frontmatter"}
 						onClick={toggleEditYaml}
 					>
@@ -1648,7 +1665,7 @@ export function MarkdownInspector() {
 					<button
 						type="button"
 						class="md-insp-sec-toggle"
-						aria-expanded={propsOpen()}
+						aria-expanded={propsOpen() ? "true" : "false"}
 						onClick={() => setPropsOpen((v) => !v)}
 					>
 						<Icon name={propsOpen() ? "chevron-down" : "chevron-right"} />
@@ -1685,7 +1702,7 @@ export function MarkdownInspector() {
 									ref={(el) => {
 										yamlCompleter?.dispose();
 										yamlInputEl = el;
-										el.value = span().inner;
+										el.value = untrack(() => span().inner);
 										yamlCompleter = createTextareaCompleter(el, {
 											mode: "yaml",
 											filePath: () => path(),
@@ -1699,7 +1716,7 @@ export function MarkdownInspector() {
 									}}
 									class="cm-md-props-yaml"
 									aria-label="Raw YAML frontmatter"
-									spellcheck={false}
+									spellcheck="false"
 									rows={3}
 									onInput={(e) => {
 										const el = e.currentTarget;
@@ -1756,7 +1773,7 @@ export function MarkdownInspector() {
 						<button
 							type="button"
 							class="md-insp-sec-toggle"
-							aria-expanded={workOpen()}
+							aria-expanded={workOpen() ? "true" : "false"}
 							onClick={() => setWorkOpen((v) => !v)}
 						>
 							<Icon name={workOpen() ? "chevron-down" : "chevron-right"} />
@@ -1778,7 +1795,7 @@ export function MarkdownInspector() {
 									<button
 										type="button"
 										class="md-readiness-toggle"
-										aria-expanded={readinessOpen()}
+										aria-expanded={readinessOpen() ? "true" : "false"}
 										title="STARLIMS transport & release readiness checklist for this ticket"
 										onClick={() => setReadinessOpen((v) => !v)}
 									>
@@ -1907,9 +1924,8 @@ export function MarkdownInspector() {
 							</Menu>
 							<button
 								type="button"
-								class="md-work-btn md-insp-icon-only"
-								classList={{ active: workGuideOpen() }}
-								aria-expanded={workGuideOpen()}
+								class={["md-work-btn md-insp-icon-only", { active: workGuideOpen() }]}
+								aria-expanded={workGuideOpen() ? "true" : "false"}
 								aria-label="How ticket links work"
 								title="How documents and plans associate with a ticket"
 								onClick={() => setWorkGuideOpen((v) => !v)}
@@ -2085,7 +2101,7 @@ export function MarkdownInspector() {
 						<button
 							type="button"
 							class="md-insp-sec-toggle"
-							aria-expanded={linkedTicketsOpen()}
+							aria-expanded={linkedTicketsOpen() ? "true" : "false"}
 							onClick={() => setLinkedTicketsOpen((v) => !v)}
 						>
 							<Icon name={linkedTicketsOpen() ? "chevron-down" : "chevron-right"} />
@@ -2175,7 +2191,7 @@ export function MarkdownInspector() {
 								<button
 									type="button"
 									class="md-insp-sec-toggle"
-									aria-expanded={sqlSourceOpen()}
+									aria-expanded={sqlSourceOpen() ? "true" : "false"}
 									onClick={() => setSqlSourceOpen((v) => !v)}
 								>
 									<Icon name={sqlSourceOpen() ? "chevron-down" : "chevron-right"} />
@@ -2308,7 +2324,7 @@ export function MarkdownInspector() {
 								<button
 									type="button"
 									class="md-insp-sec-toggle"
-									aria-expanded={schemaUsagesOpen()}
+									aria-expanded={schemaUsagesOpen() ? "true" : "false"}
 									onClick={() => setSchemaUsagesOpen((v) => !v)}
 								>
 									<Icon name={schemaUsagesOpen() ? "chevron-down" : "chevron-right"} />
@@ -2367,7 +2383,7 @@ export function MarkdownInspector() {
 														<button
 															type="button"
 															class="md-usage-group-head"
-															aria-expanded={open()}
+															aria-expanded={open() ? "true" : "false"}
 															onClick={() => toggleGroup(group.id)}
 														>
 															<Icon name={open() ? "chevron-down" : "chevron-right"} class="md-usage-twisty" />
@@ -2422,9 +2438,8 @@ export function MarkdownInspector() {
 																						>
 																							<button
 																								type="button"
-																								class="md-usage-refs-btn"
-																								classList={{ open: expanded() }}
-																								aria-expanded={expanded()}
+																								class={["md-usage-refs-btn", { open: expanded() }]}
+																								aria-expanded={expanded() ? "true" : "false"}
 																								title={`${expanded() ? "Hide" : "Show"} all ${item.hits.length} matching lines in ${item.name}`}
 																								onClick={() => toggleFileHits(item.path)}
 																							>
@@ -2501,7 +2516,7 @@ export function MarkdownInspector() {
 					<button
 						type="button"
 						class="md-insp-sec-toggle"
-						aria-expanded={linksOpen()}
+						aria-expanded={linksOpen() ? "true" : "false"}
 						onClick={() => setLinksOpen((v) => !v)}
 					>
 						<Icon name={linksOpen() ? "chevron-down" : "chevron-right"} />
@@ -2529,8 +2544,8 @@ export function MarkdownInspector() {
 						<button
 							type="button"
 							role="tab"
-							classList={{ active: linksTab() === "backlinks" }}
-							aria-selected={linksTab() === "backlinks"}
+							class={{ active: linksTab() === "backlinks" }}
+							aria-selected={linksTab() === "backlinks" ? "true" : "false"}
 							onClick={() => setLinksTab("backlinks")}
 						>
 							<span>Backlinks ({currentBacklinks().length})</span>
@@ -2538,8 +2553,8 @@ export function MarkdownInspector() {
 						<button
 							type="button"
 							role="tab"
-							classList={{ active: linksTab() === "outgoing" }}
-							aria-selected={linksTab() === "outgoing"}
+							class={{ active: linksTab() === "outgoing" }}
+							aria-selected={linksTab() === "outgoing" ? "true" : "false"}
 							onClick={() => setLinksTab("outgoing")}
 						>
 							<span>Outgoing ({outgoingLinks().length})</span>
@@ -2553,8 +2568,8 @@ export function MarkdownInspector() {
 						<button
 							type="button"
 							role="tab"
-							classList={{ active: linksTab() === "unlinked" }}
-							aria-selected={linksTab() === "unlinked"}
+							class={{ active: linksTab() === "unlinked" }}
+							aria-selected={linksTab() === "unlinked" ? "true" : "false"}
 							onClick={() => setLinksTab("unlinked")}
 						>
 							<span>Unlinked ({currentUnlinked().length})</span>

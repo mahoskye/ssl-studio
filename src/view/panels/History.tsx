@@ -1,8 +1,9 @@
 // File history: local save snapshots AND per-file Git commits (with proper chronological
 // before->after diffs, commit-vs-parent diffs, snapshot-vs-snapshot compare, and restore in ReviewView).
-import { createEffect, createResource, createSignal, For, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onSettled, Show } from "solid-js";
 import { baseName, isInside } from "../../shared/paths";
 import type { GitCommit, Snapshot } from "../../shared/protocol";
+import { createAsyncQuery } from "../asyncQuery";
 import { backend } from "../backend";
 import { openComparison, openReview } from "../editor/Review";
 import { gitStatus, gitVersion } from "../git";
@@ -18,12 +19,20 @@ type HistoryRev =
 export function History() {
 	const [version, setVersion] = createSignal(0);
 	const [baseRev, setBaseRev] = createSignal<HistoryRev | null>(null);
-	onCleanup(historyChanged.listen((path) => path === activePath() && setVersion((v) => v + 1)));
-	createEffect(() => {
-		activePath();
-		setBaseRev(null);
+	onSettled(() => {
+		const off = historyChanged.listen((path) => path === activePath() && setVersion((v) => v + 1));
+		return () => {
+			off();
+		};
 	});
-	const [history] = createResource(
+	const currentPath = createMemo(() => activePath());
+	createEffect(
+		() => currentPath(),
+		() => {
+			setBaseRev(null);
+		},
+	);
+	const [history] = createAsyncQuery(
 		() => [activePath(), version(), state.workspace?.root ?? ""] as const,
 		([path, , root]) =>
 			path && !path.startsWith("untitled:") && Boolean(root && isInside(root, path))
@@ -33,7 +42,7 @@ export function History() {
 					)
 				: { list: [] as Snapshot[], error: "" },
 	);
-	const [commits] = createResource(
+	const [commits] = createAsyncQuery(
 		() => [activePath(), gitVersion(), Boolean(gitStatus()), state.workspace?.root ?? ""] as const,
 		([path, , inRepo, root]) =>
 			path && inRepo && !path.startsWith("untitled:") && Boolean(root && isInside(root, path))

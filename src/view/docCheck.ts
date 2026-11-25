@@ -2,6 +2,7 @@
 // in Problems like any other finding. The rule is advice for a project's own
 // documents, so each finding is information, not a warning: a README that
 // came from somewhere else is not this project's to fix.
+import { snapshot } from "solid-js";
 import { checkTables } from "../shared/docTables";
 import { jsonProblem } from "../shared/jsonCheck";
 import { isInside, joinPath } from "../shared/paths";
@@ -14,11 +15,12 @@ import { state } from "./state";
 const OWNER = "doc-tables";
 
 function isSchemaDoc(path?: string): boolean {
-	if (!path || !state.workspace?.root) return false;
-	const parts = (state.project?.schema ?? "schema").split(/[\\/]/).filter((p) => p && p !== ".");
+	const cur = snapshot(state);
+	if (!path || !cur.workspace?.root) return false;
+	const parts = (cur.project?.schema ?? "schema").split(/[\\/]/).filter((p) => p && p !== ".");
 	// If `schema = "."`, the schema folder IS the project root — do not silence ADR 0008 table checks across every doc.
 	if (!parts.length) return false;
-	const schemaDir = joinPath(state.workspace.root, ...parts);
+	const schemaDir = joinPath(cur.workspace.root, ...parts);
 	return isInside(schemaDir, path);
 }
 

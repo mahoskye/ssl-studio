@@ -1,7 +1,8 @@
 // Persistent Tucked Folio tab strip for workspace-level center views (Call Graph,
 // Diff Review, Projects switcher) so open document tabs stay one click away
 // inside the same framed Folio Bento island (ADR 0027).
-import { createEffect, createMemo, createSignal, For, onCleanup, Show, type JSX } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onSettled, Show } from "solid-js";
+import type { JSX } from "@solidjs/web";
 import { submenuOrInline, type RowMenuEntry } from "../../shared/contextMenu";
 import { createMiddleCloseTracker } from "../../shared/middleClickGuard";
 import { isInside, joinPath } from "../../shared/paths";
@@ -25,7 +26,6 @@ export function CenterTabStrip(props: {
 
 	let tabsHost: HTMLDivElement | undefined;
 	const middleClose = createMiddleCloseTracker();
-	onCleanup(() => middleClose.dispose());
 	const [canScrollLeft, setCanScrollLeft] = createSignal(false);
 	const [canScrollRight, setCanScrollRight] = createSignal(false);
 	const updateTabOverflow = () => {
@@ -39,23 +39,26 @@ export function CenterTabStrip(props: {
 		tabsHost.scrollBy({ left: delta, behavior: "smooth" });
 		setTimeout(updateTabOverflow, 180);
 	};
-	const bindTabsHost = (el: HTMLDivElement) => {
-		tabsHost = el;
-		const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(() => updateTabOverflow()) : null;
-		ro?.observe(el);
-		queueMicrotask(() => {
+	onSettled(() => {
+		const el = tabsHost;
+		const ro = el && typeof ResizeObserver !== "undefined" ? new ResizeObserver(() => updateTabOverflow()) : null;
+		if (el) {
+			ro?.observe(el);
 			el.scrollLeft = el.scrollWidth;
 			updateTabOverflow();
-		});
-		onCleanup(() => {
+		}
+		return () => {
 			ro?.disconnect();
-			if (tabsHost === el) tabsHost = undefined;
-		});
-	};
-	createEffect(() => {
-		void group().tabs.length;
-		queueMicrotask(updateTabOverflow);
+			if (el && tabsHost === el) tabsHost = undefined;
+			middleClose.dispose();
+		};
 	});
+	createEffect(
+		() => group().tabs.length,
+		() => {
+			queueMicrotask(updateTabOverflow);
+		},
+	);
 
 	const reviewedTargetPath = (): string | null => {
 		const activeReview = review();
@@ -95,8 +98,11 @@ export function CenterTabStrip(props: {
 			return;
 		}
 		closeComparison();
-		setState("centerView", "editors");
-		setState("groups", state.activeGroup, "active", path);
+		setState((s) => {
+			s.centerView = "editors";
+			const g = s.groups[s.activeGroup];
+			if (g) g.active = path;
+		});
 	};
 
 	const openTabMenu = async (path: string, at: { x: number; y: number }) => {
@@ -146,8 +152,7 @@ export function CenterTabStrip(props: {
 
 	return (
 		<section
-			class="group active virtual-group"
-			classList={{ "first-tab-active": group().tabs.length === 0 }}
+			class={["group active virtual-group", { "first-tab-active": group().tabs.length === 0 }]}
 		>
 			<div class="tabs-row">
 				<Show when={canScrollLeft() || canScrollRight()}>
@@ -161,9 +166,9 @@ export function CenterTabStrip(props: {
 						<Icon name="chevron-left" />
 					</button>
 				</Show>
-				<div class="tabs-scroll-wrap" classList={{ "can-left": canScrollLeft(), "can-right": canScrollRight() }}>
+				<div class={["tabs-scroll-wrap", { "can-left": canScrollLeft(), "can-right": canScrollRight() }]}>
 					<div
-						ref={bindTabsHost}
+						ref={tabsHost}
 						class="tabs"
 						role="tablist"
 						aria-label="Open files"
@@ -188,17 +193,19 @@ export function CenterTabStrip(props: {
 						<For each={group().tabs}>
 							{(path) => (
 								<div
-									class="tab"
+									class={[
+										"tab",
+										{
+											dirty: Boolean(state.dirty[path]),
+											conflict: Boolean(state.conflicts[path]),
+											pinned: Boolean(group().pinned?.includes(path)),
+											preview: group().preview === path,
+										},
+									]}
 									role="tab"
 									aria-selected="false"
 									tabindex={-1}
 									title={path}
-									classList={{
-										dirty: Boolean(state.dirty[path]),
-										conflict: Boolean(state.conflicts[path]),
-										pinned: Boolean(group().pinned?.includes(path)),
-										preview: group().preview === path,
-									}}
 									onMouseDown={(e) => {
 										if (e.button === 1) {
 											e.preventDefault();
@@ -315,7 +322,7 @@ export function CenterTabStrip(props: {
 								title={`Close ${props.title}`}
 								aria-label={`Close ${props.title}`}
 								onMouseDown={(e) => e.button !== 1 && e.stopPropagation()}
-								onClick={props.onClose}
+								onClick={() => props.onClose()}
 							>
 								<Icon name="close" class="x" />
 							</button>

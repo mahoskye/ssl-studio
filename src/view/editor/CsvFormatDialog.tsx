@@ -1,7 +1,7 @@
 // Configurable CSV column badge formatting modal: inspect, edit, disable,
 // or extend which CSV columns render values as colored badges and which
 // values map to which tones (with STARLIMS and registry presets).
-import { createSignal, createUniqueId, For, onMount, Show } from "solid-js";
+import { createMemo, createSignal, createUniqueId, For, onSettled, Show } from "solid-js";
 import type { Table } from "../../shared/csv";
 import {
 	BADGE_TONES,
@@ -76,7 +76,7 @@ export function CsvFormatDialog(props: {
 	onClose: () => void;
 }) {
 	const titleId = createUniqueId();
-	const init = (() => {
+	const init = createMemo(() => {
 		const base = effectiveCsvTableConfig(state.settings.csvTable);
 		if (props.initialColumn?.trim()) {
 			const samples = distinctTableValuesForColumns(props.table, [props.initialColumn]);
@@ -84,21 +84,25 @@ export function CsvFormatDialog(props: {
 			return { cfg: ensured.config, focusIdx: ensured.ruleIndex };
 		}
 		return { cfg: base, focusIdx: 0 };
-	})();
+	});
 
-	const [enabled, setEnabled] = createSignal(init.cfg.badgeFormatting);
-	const [rules, setRules] = createSignal<DraftRule[]>(toDraftRules(init.cfg.rules));
+	const [enabled, setEnabled] = createSignal(() => init().cfg.badgeFormatting);
+	const [rules, setRules] = createSignal<DraftRule[]>(() => toDraftRules(init().cfg.rules));
 	const [scope, setScope] = createSignal<SettingsScope>("user");
 	const [saving, setSaving] = createSignal(false);
 
-	onMount(() => {
+	onSettled(() => {
 		if (!state.workspace) return;
+		let alive = true;
 		void backend.settings().then(
 			(layers) => {
-				if ("csvTable" in layers.workspace) setScope("workspace");
+				if (alive && "csvTable" in layers.workspace) setScope("workspace");
 			},
 			() => {},
 		);
+		return () => {
+			alive = false;
+		};
 	});
 
 	const updateRule = (id: number, patch: (r: DraftRule) => DraftRule) => {
@@ -207,7 +211,7 @@ export function CsvFormatDialog(props: {
 					<h2 id={titleId}>CSV column formatting</h2>
 					<p class="csv-fmt-sub">Configure which columns render values as colored badges and how each value is styled.</p>
 				</div>
-				<button type="button" class="icon-btn" aria-label="Close" title="Close (Esc)" onClick={props.onClose}>
+				<button type="button" class="icon-btn" aria-label="Close" title="Close (Esc)" onClick={() => props.onClose()}>
 					<Icon name="close" />
 				</button>
 			</div>
@@ -236,7 +240,7 @@ export function CsvFormatDialog(props: {
 				</div>
 			</div>
 
-			<div class="csv-fmt-body" classList={{ dimmed: !enabled() }}>
+			<div class={["csv-fmt-body", { dimmed: !enabled() }]}>
 				<Show when={rules().length} fallback={<p class="hint">No column formatting rules configured. Every CSV column will display as plain text.</p>}>
 					<For each={rules()}>
 						{(rule, idx) => {
@@ -252,7 +256,7 @@ export function CsvFormatDialog(props: {
 											<span>Column names (comma-separated)</span>
 											<input
 												type="text"
-												data-autofocus={idx() === init.focusIdx ? "" : undefined}
+												data-autofocus={idx() === init().focusIdx ? "" : undefined}
 												placeholder="e.g. status, state, sample_status"
 												value={rule.columnsText}
 												onInput={(e) => updateRule(rule.id, (r) => ({ ...r, columnsText: e.currentTarget.value }))}
@@ -366,7 +370,7 @@ export function CsvFormatDialog(props: {
 					</div>
 				</Show>
 				<span class="spacer" />
-				<button type="button" onClick={props.onClose}>
+				<button type="button" onClick={() => props.onClose()}>
 					Cancel
 				</button>
 				<button type="button" class="primary" disabled={saving()} onClick={() => void save()}>

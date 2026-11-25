@@ -5,7 +5,7 @@
 // model (ADR 0002). Assistant (Refine, Questions, Spec, Build, Tests) lives
 // cleanly in the Palette panel's Assistant tab so the chart stays unobstructed.
 import ELK from "elkjs/lib/elk.bundled.js";
-import { createEffect, createMemo, createSignal, createUniqueId, For, on, onCleanup, onMount, Show, untrack } from "solid-js";
+import { createEffect, createMemo, createSignal, createUniqueId, flush, For, onCleanup, onSettled, Show } from "solid-js";
 import { baseName, dirName, joinPath, relativeTo } from "../../shared/paths";
 import { isCatalog, registryTitle, ticketKey, toneOf } from "../../shared/projectDocs";
 import type { DocFile } from "../../shared/protocol";
@@ -493,7 +493,7 @@ function typingElsewhere() {
 export function PlanView(props: { path: string; group: number; mode?: "text" | "chart" }) {
 	const isTextMode = () => props.mode === "text";
 	const doc = () => documents.get(props.path);
-	const [text, setTextSignal] = createSignal(doc()?.model.getValue() ?? "");
+	const [text, setTextSignal] = createSignal(() => doc()?.model.getValue() ?? "");
 	const parsed = createMemo(() => parsePlan(text()));
 	const plan = () => parsed().plan;
 	const [baseLayout, setBaseLayout] = createSignal<Layout | null>(null);
@@ -508,14 +508,16 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 	const [builderRequest, setBuilderRequest] = createSignal<TextTestBuilderRequest | null>(null);
 	let builderReqSeq = 0;
 	let focusFinder: (() => void) | undefined;
-	createEffect(() => {
-		const g = props.group;
-		const trigger = () => focusFinder?.();
-		planFinders.set(g, trigger);
-		onCleanup(() => {
-			if (planFinders.get(g) === trigger) planFinders.delete(g);
-		});
-	});
+	createEffect(
+		() => props.group,
+		(g) => {
+			const trigger = () => focusFinder?.();
+			planFinders.set(g, trigger);
+			return () => {
+				if (planFinders.get(g) === trigger) planFinders.delete(g);
+			};
+		},
+	);
 	const [pointed, setPointed] = createSignal<string | null>(null);
 	const [peeked, setPeeked] = createSignal<{ id: string; pinned: boolean } | null>(null);
 	let peekTimer: ReturnType<typeof setTimeout> | undefined;
@@ -556,17 +558,18 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		const next = cur === null ? (by > 0 ? 0 : count - 1) : (cur + by + count) % count;
 		setActivePathIndex(next);
 	};
-	createEffect(() => {
-		const idx = activePathIndex();
-		const list = allPaths().paths;
-		if (idx === null) return;
-		if (!list[idx]) {
-			setActivePathIndexSignal(null);
-			setWalked(null);
-		} else {
-			setWalked(list[idx]!.steps.map((s) => s.id));
-		}
-	});
+	createEffect(
+		() => [activePathIndex(), allPaths().paths] as const,
+		([idx, list]) => {
+			if (idx === null) return;
+			if (!list[idx]) {
+				setActivePathIndexSignal(null);
+				setWalked(null);
+			} else {
+				setWalked(list[idx]!.steps.map((s) => s.id));
+			}
+		},
+	);
 	const activePathInfo = createMemo(() => {
 		const idx = activePathIndex();
 		const list = allPaths().paths;
@@ -637,7 +640,14 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		return best;
 	};
 
+	let canvasWatchCleanup: (() => void) | undefined;
+	onCleanup(() => {
+		canvasWatchCleanup?.();
+		canvasWatchCleanup = undefined;
+	});
 	const watchCanvas = (el: HTMLDivElement) => {
+		canvasWatchCleanup?.();
+		canvasWatchCleanup = undefined;
 		if (typeof ResizeObserver === "undefined") return;
 		let frame = 0;
 		const observer = new ResizeObserver((entries) => {
@@ -658,7 +668,10 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 			});
 		});
 		observer.observe(el);
-		onCleanup(() => (cancelAnimationFrame(frame), observer.disconnect()));
+		canvasWatchCleanup = () => {
+			cancelAnimationFrame(frame);
+			observer.disconnect();
+		};
 	};
 
 	const refocus = () => queueMicrotask(() => !editing() && !isTextMode() && canvas?.focus());
@@ -666,14 +679,14 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		if (e.detail > 0) refocus();
 	};
 
-	onMount(() => {
+	onSettled(() => {
 		const model = doc()?.model;
 		if (!model) return;
 		const sub = model.onDidChangeContent(() => setTextSignal(model.getValue()));
-		onCleanup(() => sub.dispose());
 		recheckPlan(model.uri.toString());
 		const look = openedForALook(props.path);
 		queueMicrotask(() => !look && !typingElsewhere() && !document.querySelector(".overlay") && canvas?.focus());
+		return () => sub.dispose();
 	});
 
 	// Re-run ELK only when chart topology, text, labels, groups, suggestions, or direction change — NOT on manual drag offsets.
@@ -693,7 +706,8 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 	let layoutRun = 0;
 	onCleanup(() => ++layoutRun);
 	createEffect(
-		on(topologyKey, (key) => {
+		() => topologyKey(),
+		(key) => {
 			const p = plan();
 			if (!key || !p) {
 				++layoutRun;
@@ -707,6 +721,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 					const next = await layoutPlan(previewPlan(p, suggestions), measure, dir);
 					if (run !== layoutRun) return;
 					setBaseLayout(next);
+					flush();
 					if (!fitted || suggestions.length !== seen) {
 						if (fit()) fitted = true;
 					}
@@ -716,7 +731,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 					notify(`Could not lay out the chart: ${e?.message ?? e}`, "error");
 				}
 			})();
-		}),
+		},
 	);
 
 	// Pure synchronous 60fps layout projection: overlays saved + live node/stage/wire offsets onto ELK's base layout.
@@ -845,27 +860,34 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		return nodeAtLine(text(), p, state.cursor.line);
 	});
 	// Prune multi-selection whenever nodes are removed (e.g. Undo or split Source edit).
-	createEffect(() => {
-		const valid = new Set((plan()?.nodes ?? []).map((n) => n.id));
-		setSelectedIds((prev) => pruneSelectedIds(prev, valid));
-	});
+	const validNodeIds = createMemo(() => new Set((plan()?.nodes ?? []).map((n) => n.id)));
+	createEffect(
+		() => validNodeIds(),
+		(valid) => {
+			setSelectedIds((prev) => pruneSelectedIds(prev, valid));
+		},
+	);
 	// Sync/clear multi-selection whenever cursor selection changes externally (Undo, split Source edit, etc.).
 	createEffect(
-		on(selected, (sel) => {
+		() => selected(),
+		(sel) => {
 			setSelectedIds((prev) => syncSelectedIds(prev, sel));
-		}),
+		},
 	);
 	const selectedNode = () => plan()?.nodes.find((n) => n.id === selected());
 	const moveCursor = (line: number) => {
-		setState("activeGroup", props.group);
 		editors[props.group]?.setSelection(new monaco.Range(line, 1, line, 1));
-		setState("cursor", { line, column: 1 });
+		setState((s) => {
+			s.activeGroup = props.group;
+			s.cursor = { line, column: 1 };
+		});
 	};
-	const select = (id: string | null | undefined, keepMulti = false) => {
+	const select = (id: string | null | undefined, keepMulti = false, latest?: { text: string; plan: Plan }) => {
 		setEdge(null);
 		if (!keepMulti) setSelectedIds(id ? new Set([id]) : new Set<string>());
-		const p = plan();
-		const line = id && p ? nodeLines(text(), p).get(id) : undefined;
+		const p = latest?.plan ?? plan();
+		const raw = latest?.text ?? text();
+		const line = id && p ? nodeLines(raw, p).get(id) : undefined;
 		moveCursor(line ?? 1);
 	};
 	const activeSelectedIds = (): Set<string> => {
@@ -939,17 +961,20 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 	};
 
 	// Fit the chart when switching from Text mode to Chart mode if initial layout completed while unmounted.
-	createEffect(() => {
-		if (isTextMode() || !layout() || fitted) return;
-		if (fit()) {
-			fitted = true;
-			return;
-		}
-		const frame = requestAnimationFrame(() => {
-			if (!isTextMode() && !fitted && layout() && fit()) fitted = true;
-		});
-		onCleanup(() => cancelAnimationFrame(frame));
-	});
+	createEffect(
+		() => [isTextMode(), layout()] as const,
+		([inText, l]) => {
+			if (inText || !l || fitted) return;
+			if (fit()) {
+				fitted = true;
+				return;
+			}
+			const frame = requestAnimationFrame(() => {
+				if (!isTextMode() && !fitted && layout() && fit()) fitted = true;
+			});
+			return () => cancelAnimationFrame(frame);
+		},
+	);
 
 	const far = () => view().scale < FAR_UNDER;
 	const farScale = createMemo(() => (far() ? view().scale : 0));
@@ -989,21 +1014,21 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		setView((v) => zoomAt(v, at ?? { x: box.width / 2, y: box.height / 2 }, factor, MIN_ZOOM, MAX_ZOOM));
 	};
 
-	createEffect(() => {
-		const id = selected();
-		const chosen = edge();
-		const l = layout();
-		if (!l || !canvas) return;
-		const size = canvas.getBoundingClientRect();
-		if (size.width < 10 || size.height < 10) return;
-		const line = chosen && l.lines.find((x) => x.from === chosen.from && x.to === chosen.to);
-		const box = line ? { x: line.at.x - 30, y: line.at.y - 12, width: 60, height: 24 } : l.boxes.find((b) => b.node && b.id === id);
-		if (!box) return;
-		const v = untrack(view);
-		const shown = reveal(v, box, size);
-		const next = outOfSight(l, shown, size) ? clearOf(shown, box, mapArea(l, size)) : shown;
-		if (next !== v) setView(next);
-	});
+	createEffect(
+		() => [selected(), edge(), layout()] as const,
+		([id, chosen, l]) => {
+			if (!l || !canvas) return;
+			const size = canvas.getBoundingClientRect();
+			if (size.width < 10 || size.height < 10) return;
+			const line = chosen && l.lines.find((x) => x.from === chosen.from && x.to === chosen.to);
+			const box = line ? { x: line.at.x - 30, y: line.at.y - 12, width: 60, height: 24 } : l.boxes.find((b) => b.node && b.id === id);
+			if (!box) return;
+			const v = view();
+			const shown = reveal(v, box, size);
+			const next = outOfSight(l, shown, size) ? clearOf(shown, box, mapArea(l, size)) : shown;
+			if (next !== v) setView(next);
+		},
+	);
 
 	const goTo = (id: string) => {
 		setPeeked(null);
@@ -1300,7 +1325,9 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 			try {
 				await backend.historyKeep(target.path).catch(() => {});
 				await backend.write(target.path, next, true);
-				setState("treeVersion", (v) => v + 1);
+				setState((s) => {
+					s.treeVersion += 1;
+				});
 			} catch (e: any) {
 				notify(`Could not update ${baseName(target.path)}: ${e?.message ?? e}`, "error");
 				return;
@@ -1515,8 +1542,9 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 	// --- Plan Mutations (each is one undoable text edit on doc.model) ---------
 
 	const apply = (next: Plan, selectId?: string | null) => {
-		applyText(props.path, printPlan(next));
-		if (selectId !== undefined) select(selectId);
+		const printed = printPlan(next);
+		applyText(props.path, printed);
+		if (selectId !== undefined) select(selectId, false, { text: printed, plan: next });
 	};
 	const applyEdit = (result: Edit | null, edit = false) => {
 		if (!result) return;
@@ -2554,99 +2582,103 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 	const groupName = () => plan()?.groups.find((g) => g.id === selectedNode()?.group)?.name ?? "";
 
 	// Expose reactive plan state, editing actions, and Assistant callbacks to the Palette panel.
-	createEffect(() => {
+	const bridgeKey = createMemo(() => {
 		const active =
 			state.activeGroup === props.group &&
 			state.groups[props.group]?.active === props.path &&
 			planMode(props.path, props.group) !== "source";
-		const hasPlan = Boolean(plan());
-		if (!active || !hasPlan) return;
-		const unregister = registerPlanBridge({
-			path: props.path,
-			planUri,
-			plan,
-			text,
-			selectedId: selected,
-			selectedNode,
-			selectedLinks: () => linksOf(selected()),
-			builtUnits: () => {
-				const cur = plan();
-				return cur ? (builtOf(cur)?.units ?? []) : [];
-			},
-			groupName,
-			linking: () => Boolean(linking()),
-			layoutDir: direction,
-			stages: () => {
-				const cur = plan();
-				if (!cur) return [];
-				return cur.groups.map((g) => {
-					const members = cur.nodes.filter((n) => n.group === g.id);
-					return { id: g.id, name: g.name, count: members.length, firstNodeId: members[0]?.id };
-				});
-			},
-			codeStateOf,
-			codeStatusCounts,
-			nodesByCodeState,
-			allPaths,
-			activePathIndex,
-			setActivePathIndex,
-			stepActivePath,
-			scheduledNotice: () => null,
-			clearScheduledNotice: () => {},
-			triggerScheduledBuild,
-			openAssistant,
-			setPlanField: (field, value) => setPlanField(field, field === "ticket" ? ticketKey(value) : value),
-			setTargets,
-			addTestCase: (input) => {
-				const p = plan();
-				if (p) apply(addPlanTest(p, input));
-			},
-			updateTestCase: (id, patch) => {
-				const p = plan();
-				if (p) apply(updatePlanTest(p, id, patch));
-			},
-			removeTestCase: (id) => {
-				const p = plan();
-				if (p) apply(removePlanTest(p, id));
-			},
-			setNodeText: (value) => {
-				const p = plan();
-				const node = selectedNode();
-				if (p && node && value.trim() && value.trim() !== node.text) apply(setText(p, node.id, value.trim()));
-			},
-			setNodeKind: (kind) => {
-				const node = selectedNode();
-				if (!node) return;
-				if (kind === "step" && node.kind === "call") return;
-				changeKind(node.id, kind);
-			},
-			setNodeField,
-			setNodeRef,
-			setNodeGroup: (name) => {
-				const p = plan();
-				const node = selectedNode();
-				if (p && node) apply(setGroup(p, node.id, name));
-			},
-			renameStage: (groupId) => void renameStageAsk(groupId),
-			openCodeUnit: (unit) => void openProcedure(planUri(), unit),
-			openReference: (ref) => void openReference(ref),
-			openScript: (script, line) => void openScript(script, line),
-			selectNode: (id) => goTo(id),
-			clearSelection: () => (select(null), refocus()),
-			setWalkedPath: (nodes) => setWalked(nodes),
-			addStep: () => (addNext(), refocus()),
-			addDecision: () => (addDecisionNode(), refocus()),
-			addBranch: () => (addBranchFrom(selected()), refocus()),
-			addCall: () => void addCallAsk(),
-			addStageGroup: () => void addStageGroupAsk(),
-			toggleConnect: () => (linking() ? setLinking(null) : beginLink(), refocus()),
-			toggleLayoutDir: toggleDirection,
-			jumpToNode: goTo,
-			peekNode,
-			openTextTestBuilder,
-		});
-		onCleanup(unregister);
+		return active && Boolean(plan()) ? props.path : null;
 	});
+	createEffect(
+		() => bridgeKey(),
+		(activePathKey) => {
+			if (!activePathKey) return;
+			return registerPlanBridge({
+				path: activePathKey,
+				planUri,
+				plan,
+				text,
+				selectedId: selected,
+				selectedNode,
+				selectedLinks: () => linksOf(selected()),
+				builtUnits: () => {
+					const cur = plan();
+					return cur ? (builtOf(cur)?.units ?? []) : [];
+				},
+				groupName,
+				linking: () => Boolean(linking()),
+				layoutDir: direction,
+				stages: () => {
+					const cur = plan();
+					if (!cur) return [];
+					return cur.groups.map((g) => {
+						const members = cur.nodes.filter((n) => n.group === g.id);
+						return { id: g.id, name: g.name, count: members.length, firstNodeId: members[0]?.id };
+					});
+				},
+				codeStateOf,
+				codeStatusCounts,
+				nodesByCodeState,
+				allPaths,
+				activePathIndex,
+				setActivePathIndex,
+				stepActivePath,
+				scheduledNotice: () => null,
+				clearScheduledNotice: () => {},
+				triggerScheduledBuild,
+				openAssistant,
+				setPlanField: (field, value) => setPlanField(field, field === "ticket" ? ticketKey(value) : value),
+				setTargets,
+				addTestCase: (input) => {
+					const p = plan();
+					if (p) apply(addPlanTest(p, input));
+				},
+				updateTestCase: (id, patch) => {
+					const p = plan();
+					if (p) apply(updatePlanTest(p, id, patch));
+				},
+				removeTestCase: (id) => {
+					const p = plan();
+					if (p) apply(removePlanTest(p, id));
+				},
+				setNodeText: (value) => {
+					const p = plan();
+					const node = selectedNode();
+					if (p && node && value.trim() && value.trim() !== node.text) apply(setText(p, node.id, value.trim()));
+				},
+				setNodeKind: (kind) => {
+					const node = selectedNode();
+					if (!node) return;
+					if (kind === "step" && node.kind === "call") return;
+					changeKind(node.id, kind);
+				},
+				setNodeField,
+				setNodeRef,
+				setNodeGroup: (name) => {
+					const p = plan();
+					const node = selectedNode();
+					if (p && node) apply(setGroup(p, node.id, name));
+				},
+				renameStage: (groupId) => void renameStageAsk(groupId),
+				openCodeUnit: (unit) => void openProcedure(planUri(), unit),
+				openReference: (ref) => void openReference(ref),
+				openScript: (script, line) => void openScript(script, line),
+				selectNode: (id) => goTo(id),
+				clearSelection: () => (select(null), refocus()),
+				setWalkedPath: (nodes) => setWalked(nodes),
+				addStep: () => (addNext(), refocus()),
+				addDecision: () => (addDecisionNode(), refocus()),
+				addBranch: () => (addBranchFrom(selected()), refocus()),
+				addCall: () => void addCallAsk(),
+				addStageGroup: () => void addStageGroupAsk(),
+				toggleConnect: () => (linking() ? setLinking(null) : beginLink(), refocus()),
+				toggleLayoutDir: toggleDirection,
+				jumpToNode: goTo,
+				peekNode,
+				openTextTestBuilder,
+			});
+		},
+	);
 
 	const healthMenu = (): MenuItem[] => {
 		const count = findingCount();
@@ -2656,7 +2688,11 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 		return [
 			{
 				label: count ? `Show ${count} ${count === 1 ? "finding" : "findings"} in Problems` : "Open Problems panel",
-				run: () => (setState("bottomView", "problems"), setState("settings", "layout", "bottom", true)),
+				run: () =>
+					setState((s) => {
+						s.bottomView = "problems";
+						s.settings.layout.bottom = true;
+					}),
 			},
 			{
 				label: "Compare chart and code",
@@ -2820,8 +2856,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 
 	return (
 		<div
-			class="plan"
-			classList={{ compact: compact(), tight: tight() }}
+			class={["plan", { compact: compact(), tight: tight() }]}
 			onKeyDown={(e) => {
 				if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "f") {
 					e.preventDefault();
@@ -2841,7 +2876,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 				}
 			>
 				{/* Slim, calm top bar: title, step finder, layout direction switch (chart), health pill, overflow menu. */}
-				<div class="plan-topbar" classList={{ compact: compact(), tight: tight() }}>
+				<div class={["plan-topbar", { compact: compact(), tight: tight() }]}>
 					<span class="plan-topbar-title" title={plan()!.title || "Plan"}>
 						{plan()!.title || "Plan"}
 					</span>
@@ -2875,8 +2910,8 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 						<div class="plan-dir-switch" role="group" aria-label="Flowchart layout direction">
 							<button
 								type="button"
-								classList={{ on: direction() === "DOWN" }}
-								aria-pressed={direction() === "DOWN"}
+								class={{ on: direction() === "DOWN" }}
+								aria-pressed={direction() === "DOWN" ? "true" : "false"}
 								title="Top-to-bottom vertical layout"
 								onClick={(e) => (setDirection("DOWN"), after(e))}
 							>
@@ -2885,8 +2920,8 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 							</button>
 							<button
 								type="button"
-								classList={{ on: direction() === "RIGHT" }}
-								aria-pressed={direction() === "RIGHT"}
+								class={{ on: direction() === "RIGHT" }}
+								aria-pressed={direction() === "RIGHT" ? "true" : "false"}
 								title="Left-to-right horizontal layout"
 								onClick={(e) => (setDirection("RIGHT"), after(e))}
 							>
@@ -2957,21 +2992,23 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 						}
 					>
 					<div
-						class="plan-canvas"
+						class={[
+							"plan-canvas",
+							{
+								linking: Boolean(linking()),
+								wiring: Boolean(wireDrag()?.dragged),
+								panning: panning() || Boolean(nodeDrag()?.moved),
+								pathing: Boolean(onPath()),
+								far: far(),
+							},
+						]}
 						ref={(el) => {
 							canvas = el;
 						}}
-						tabIndex={0}
+						tabindex={0}
 						role="application"
 						aria-label="Plan chart. Hover any node or edge to add steps or drag connections; arrow keys navigate."
 						aria-describedby={keysOpen() ? keysId : undefined}
-						classList={{
-							linking: Boolean(linking()),
-							wiring: Boolean(wireDrag()?.dragged),
-							panning: panning() || Boolean(nodeDrag()?.moved),
-							pathing: Boolean(onPath()),
-							far: far(),
-						}}
 						onKeyDown={onKey}
 						onContextMenu={(e) => void canvasContextMenu(e)}
 						onWheel={(e) => {
@@ -3189,17 +3226,19 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 											return (
 												<Show when={line()}>
 													<g
-														class="plan-edge"
-														classList={{
-															on: on(),
-															near: near(),
-															back: Boolean(line()?.back),
-															pending: Boolean(line()?.pending),
-															removing: Boolean(line()?.removing),
-															dragging: Boolean(activeDrag()),
-															"drop-target": isDrop(),
-															"on-path": Boolean(onPath()?.ways.has(ek)),
-														}}
+														class={[
+															"plan-edge",
+															{
+																on: on(),
+																near: near(),
+																back: Boolean(line()?.back),
+																pending: Boolean(line()?.pending),
+																removing: Boolean(line()?.removing),
+																dragging: Boolean(activeDrag()),
+																"drop-target": isDrop(),
+																"on-path": Boolean(onPath()?.ways.has(ek)),
+															},
+														]}
 														role="img"
 														aria-label={plan() && line() ? describeEdge(plan()!, line()!) : undefined}
 														onContextMenu={(e) => line() && void edgeContextMenu(e, line()!)}
@@ -3255,14 +3294,16 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 												return (
 													<Show when={line()?.shown}>
 														<g
-															class="plan-label"
-															classList={{
-																on: on(),
-																missing: Boolean(line()?.missing),
-																yes: lowerLabel() === "yes" || lowerLabel() === "true",
-																no: lowerLabel() === "no" || lowerLabel() === "false",
-																"on-path": Boolean(onPath()?.ways.has(ek)),
-															}}
+															class={[
+																"plan-label",
+																{
+																	on: on(),
+																	missing: Boolean(line()?.missing),
+																	yes: lowerLabel() === "yes" || lowerLabel() === "true",
+																	no: lowerLabel() === "no" || lowerLabel() === "false",
+																	"on-path": Boolean(onPath()?.ways.has(ek)),
+																},
+															]}
 															onMouseDown={(e) => e.stopPropagation()}
 															onClick={choose}
 															onDblClick={(e) => {
@@ -3297,8 +3338,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 											return (
 												<Show when={b() && b()!.group !== undefined}>
 													<g
-														class="plan-group-header"
-														classList={{ dragging: nodeDrag()?.kind === "group" && nodeDrag()?.id === gid && Boolean(nodeDrag()?.moved) }}
+														class={["plan-group-header", { dragging: nodeDrag()?.kind === "group" && nodeDrag()?.id === gid && Boolean(nodeDrag()?.moved) }]}
 														onMouseDown={(e) => startGroupDrag(e, gid)}
 														onContextMenu={(e) => b()?.group !== undefined && void groupContextMenu(e, gid, b()!.group!)}
 														onDblClick={(e) => {
@@ -3436,22 +3476,24 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 											return (
 												<Show when={b() && n()}>
 													<g
-														class={`plan-node ${visualKind()} unit-${unitStatuses().get(nid) ?? "none"}`}
-														classList={{
-															"on-path": Boolean(onPath()?.nodes.has(nid)),
-															selected: isSel(),
-															peeked: peeked()?.id === nid && !isSel(),
-															dragging:
-																nodeDrag()?.kind === "node" &&
-																Boolean(nodeDrag()?.moved) &&
-																(nodeDrag()?.id === nid || Boolean(nodeDrag()?.multiIds?.includes(nid))),
-															origin: linking() === nid || wireDrag()?.fromId === nid,
-															"drop-target": dropNodeId() === nid,
-															trouble: Boolean(trouble()),
-															pending: Boolean(n()!.pending),
-															changed: changedOnly().has(nid),
-															gone: gone().has(nid),
-														}}
+														class={[
+															`plan-node ${visualKind()} unit-${unitStatuses().get(nid) ?? "none"}`,
+															{
+																"on-path": Boolean(onPath()?.nodes.has(nid)),
+																selected: isSel(),
+																peeked: peeked()?.id === nid && !isSel(),
+																dragging:
+																	nodeDrag()?.kind === "node" &&
+																	Boolean(nodeDrag()?.moved) &&
+																	(nodeDrag()?.id === nid || Boolean(nodeDrag()?.multiIds?.includes(nid))),
+																origin: linking() === nid || wireDrag()?.fromId === nid,
+																"drop-target": dropNodeId() === nid,
+																trouble: Boolean(trouble()),
+																pending: Boolean(n()!.pending),
+																changed: changedOnly().has(nid),
+																gone: gone().has(nid),
+															},
+														]}
 														role="img"
 														aria-label={describeNode(n()!, stateOf(n()!))}
 														onMouseDown={(e) => n() && startNodeDrag(e, n()!)}
@@ -3684,8 +3726,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 													<For each={activeHandles()}>
 														{({ line, h, active }) => (
 															<g
-																class={`plan-seg-handle ${h.axis}`}
-																classList={{ active }}
+																class={[`plan-seg-handle ${h.axis}`, { active }]}
 																transform={`translate(${h.x},${h.y})`}
 																onMouseDown={(e) => startRouteDrag(e, line, h)}
 																onClick={(e) => e.stopPropagation()}
@@ -3724,7 +3765,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 											<For each={farNames()}>
 												{(name) => (
 													<text
-														classList={{ folder: !name.item.stage }}
+														class={{ folder: !name.item.stage }}
 														x={name.x + name.width / 2}
 														y={name.y + name.size * 0.95}
 														text-anchor="middle"
@@ -3805,7 +3846,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 																</button>
 																<button
 																	type="button"
-																	classList={{ on: n.kind === "decision" }}
+																	class={{ on: n.kind === "decision" }}
 																	title="Toggle Step / Decision (D)"
 																	onClick={() => (toggleDecision(n.id), refocus())}
 																>
@@ -3815,7 +3856,7 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 															<Show when={n.kind !== "end"}>
 																<button
 																	type="button"
-																	classList={{ on: linking() === n.id }}
+																	class={{ on: linking() === n.id }}
 																	title="Connect to another node (C)"
 																	onClick={() => (linking() ? setLinking(null) : beginLink(n.id), refocus())}
 																>
@@ -3909,8 +3950,8 @@ export function PlanView(props: { path: string; group: number; mode?: "text" | "
 							</button>
 							<button
 								type="button"
-								classList={{ on: keysOpen() }}
-								aria-pressed={keysOpen()}
+								class={{ on: keysOpen() }}
+								aria-pressed={keysOpen() ? "true" : "false"}
 								title="Keyboard shortcuts & shape legend (?)"
 								aria-label="Keyboard shortcuts and legend"
 								onClick={() => setKeysOpen((open) => !open)}

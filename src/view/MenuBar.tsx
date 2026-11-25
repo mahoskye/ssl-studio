@@ -14,7 +14,7 @@
 // At the bar's far end are the window's parts as buttons: the side panel, the
 // bottom panel and the right panel, each shown or hidden by a press, and a
 // menu for the rest of the layout.
-import { createMemo, createSignal, createUniqueId, For, onCleanup, onMount, Show } from "solid-js";
+import { createMemo, createSignal, createUniqueId, For, onFlush, onSettled, Show } from "solid-js";
 import { clampMenuBarLeftOffset } from "../shared/contextMenu";
 import { FIELD_COMMANDS, letterItem, MENU_BAR, missing, stepMenu, type BarEntry, type Has } from "../shared/menuBar";
 import { keysFor, onOpenMenu, runCommand } from "./commands";
@@ -93,7 +93,9 @@ function runEditor(id: string, shown: boolean) {
 	if (!shown) {
 		if (id === "actions.find" && (activeLiveEditor()?.runAction(id) || openReadFind())) return;
 		if (id === "editor.action.quickOutline") {
-			setState("quickPick", "outline");
+			setState((s) => {
+				s.quickPick = "outline";
+			});
 			return;
 		}
 		return void (id === "undo" ? activeDoc()?.model.undo() : id === "redo" ? activeDoc()?.model.redo() : undefined);
@@ -287,16 +289,28 @@ function LayoutControls() {
 	};
 	return (
 		<div class="layout-controls" role="group" aria-label="Layout">
-			<button title={tip(left(), "side panel", "toggle-sidebar", "left")} aria-label="Side panel" aria-pressed={left()} disabled={!folder() || undocked("left")} onClick={() => runCommand("toggle-sidebar")}>
+			<button
+				title={tip(left(), "side panel", "toggle-sidebar", "left")}
+				aria-label="Side panel"
+				aria-pressed={left() ? "true" : "false"}
+				disabled={!folder() || undocked("left")}
+				onClick={() => runCommand("toggle-sidebar")}
+			>
 				<Icon name={left() ? "layout-sidebar-left" : "layout-sidebar-left-off"} />
 			</button>
-			<button title={tip(bottom(), "bottom panel", "toggle-panel")} aria-label="Bottom panel" aria-pressed={bottom()} disabled={!folder()} onClick={() => runCommand("toggle-panel")}>
+			<button
+				title={tip(bottom(), "bottom panel", "toggle-panel")}
+				aria-label="Bottom panel"
+				aria-pressed={bottom() ? "true" : "false"}
+				disabled={!folder()}
+				onClick={() => runCommand("toggle-panel")}
+			>
 				<Icon name={bottom() ? "layout-panel" : "layout-panel-off"} />
 			</button>
 			<button
 				title={tip(right(), "right panel", "toggle-right-panel", "right")}
 				aria-label="Right panel"
-				aria-pressed={right()}
+				aria-pressed={right() ? "true" : "false"}
 				disabled={!folder() || undocked("right")}
 				onClick={() => runCommand("toggle-right-panel")}
 			>
@@ -369,7 +383,7 @@ export function MenuBar() {
 		window.addEventListener("resize", reposition);
 		names()[index]?.focus();
 		moving = false;
-		if (keyboard) queueMicrotask(() => rows()[nextItem(loaded, -1, 1)]?.focus());
+		if (keyboard) onFlush(() => rows()[nextItem(loaded, -1, 1)]?.focus());
 	};
 	/** The keyboard goes back to what had it; to the editor when that is gone. */
 	const leave = () => {
@@ -391,15 +405,15 @@ export function MenuBar() {
 		if (to === "before") leave();
 		else if (to === "nowhere") before = null;
 	};
-	onMount(() => {
+	onSettled(() => {
 		onOpenMenu((index) => (index === undefined ? names()[stop()]?.focus() : show(index, true)));
 		window.addEventListener("mousemove", track, true);
-	});
-	onCleanup(() => {
-		onOpenMenu(null);
-		document.removeEventListener("mousedown", outside, true);
-		window.removeEventListener("resize", reposition);
-		window.removeEventListener("mousemove", track, true);
+		return () => {
+			onOpenMenu(null);
+			document.removeEventListener("mousedown", outside, true);
+			window.removeEventListener("resize", reposition);
+			window.removeEventListener("mousemove", track, true);
+		};
 	});
 
 	/** A menu that would run past the window's edge is moved back inside it (clamped >= 8px on both edges). */
@@ -435,7 +449,7 @@ export function MenuBar() {
 			if (at !== null) to(nextItem(all, on < 0 ? all.length : on, -1));
 			else {
 				show(menu, false);
-				queueMicrotask(() => to(nextItem(items(), items().length, -1)));
+				onFlush(() => to(nextItem(items(), items().length, -1)));
 			}
 		} else if (e.key === "Home" && at !== null) to(nextItem(all, -1, 1));
 		else if (e.key === "End" && at !== null) to(nextItem(all, all.length, -1));
@@ -460,12 +474,15 @@ export function MenuBar() {
 		<div class="menubar">
 			<Show when={state.workspace}>
 				<button
-					class="menubar-home"
-					classList={{ active: state.centerView === "welcome" }}
+					class={["menubar-home", { active: state.centerView === "welcome" }]}
 					aria-label="Projects: switch workspace or view recent folders"
-					aria-pressed={state.centerView === "welcome"}
+					aria-pressed={state.centerView === "welcome" ? "true" : "false"}
 					title={state.centerView === "welcome" ? `Return to ${state.workspace!.name}` : "Projects: switch folder or open a recent workspace"}
-					onClick={() => setState("centerView", state.centerView === "welcome" ? "editors" : "welcome")}
+					onClick={() =>
+						setState((s) => {
+							s.centerView = s.centerView === "welcome" ? "editors" : "welcome";
+						})
+					}
 				>
 					<Icon name="home" />
 				</button>
@@ -491,11 +508,10 @@ export function MenuBar() {
 					{(menu, index) => (
 						<span class="menu">
 							<button
-								class="menubar-name"
-								classList={{ open: open() === index() }}
+								class={["menubar-name", { open: open() === index() }]}
 								role="menuitem"
 								aria-haspopup="menu"
-								aria-expanded={open() === index()}
+								aria-expanded={open() === index() ? "true" : "false"}
 								title={`${menu.name} (Alt+${menu.letter.toUpperCase()})`}
 								tabindex={stop() === index() ? 0 : -1}
 								// A press does not move the keyboard by itself in every web view: the click does it, and says how it came.
@@ -540,7 +556,7 @@ export function MenuBar() {
 										}
 									</For>
 									{/* Why the entry at hand cannot run. Always there, so that what reads the screen aloud hears it change. */}
-									<div class="menu-why" id={whyId} role="status" classList={{ shown: Boolean(why()) }}>
+									<div class={["menu-why", { shown: Boolean(why()) }]} id={whyId} role="status">
 										{why()}
 									</div>
 								</div>
@@ -567,8 +583,7 @@ export function MenuBar() {
 					<Show when={hasAnyTickets()}>
 						<button
 							type="button"
-							class="title-ticket"
-							classList={{ active: Boolean(focusedTicket()) }}
+							class={["title-ticket", { active: Boolean(focusedTicket()) }]}
 							title={
 								focusedTicket()
 									? `Active working ticket: ${focusedTicket()} (coordinates Docs, Agent, Git, Search & Graph). Click to switch or clear.`

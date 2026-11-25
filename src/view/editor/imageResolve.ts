@@ -346,7 +346,9 @@ export async function saveImageAttachment(file: File | Blob, docPath: string): P
 			cacheSetImage(savedPath, dataUrl);
 		}
 		workspaceFilesCache = null;
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => {
+			s.treeVersion += 1;
+		});
 		const rel = docInWorkspace ? relativePath(dirName(docPath), savedPath) : `/${relativeTo(root, savedPath)}`;
 		const alt = meaningfulName ? meaningfulName.replace(/[-_]+/g, " ") : "";
 		const encodedRel = rel

@@ -1,7 +1,7 @@
 import { registerMarkdownLinks } from "./editor/markdownLinks";
 import "./style.css";
-import { render } from "solid-js/web";
-import { reconcile } from "solid-js/store";
+import { Errored } from "solid-js";
+import { render } from "@solidjs/web";
 import { App } from "./App";
 import { connect, backend, onConnectionLost } from "./backend";
 import { installKeys } from "./commands";
@@ -44,7 +44,10 @@ async function start() {
 	registerMarkdownLinks();
 	installKeys();
 	installContextMenu();
-	setState("info", await backend.info());
+	const info = await backend.info();
+	setState((s) => {
+		s.info = info;
+	});
 	window.addEventListener("error", (e) => uncaught(e.error ?? e.message));
 	window.addEventListener("unhandledrejection", (e) => uncaught(e.reason));
 	// Prevent OS file drops outside explicit drop zones from navigating the webview away from SSL Studio.
@@ -64,14 +67,65 @@ async function start() {
 	// The app may have been started with a folder: pick it up.
 	const workspace = await backend.workspace();
 	if (workspace) {
-		setState("workspace", workspace);
+		setState((s) => {
+			s.workspace = workspace;
+		});
 		syncWorkspaceThreads(canonical(workspace.root));
-		setState("lsp", reconcile(await backend.lspState()));
+		const lsp = await backend.lspState();
+		setState((s) => {
+			s.lsp = lsp;
+		});
 		await Promise.all([loadSettings(true), loadProject()]);
 		session.setRoot(workspace.root);
 		if (state.lsp.state === "running") void session.start(workspace.root).catch(() => {});
 	}
-	render(() => <App />, document.getElementById("app")!);
+	render(
+		() => (
+			<Errored
+				fallback={(err, reset) => {
+					const message = () => {
+						const e = err();
+						return e instanceof Error ? e.message : String(e ?? "Unknown error");
+					};
+					return (
+						<div
+							role="alert"
+							style={{
+								display: "flex",
+								"flex-direction": "column",
+								"align-items": "flex-start",
+								gap: "12px",
+								padding: "24px",
+								margin: "48px auto",
+								"max-width": "560px",
+								background: "var(--panel, #1e1e1e)",
+								color: "var(--fg, #e0e0e0)",
+								border: "1px solid var(--border, #3c3c3c)",
+								"border-radius": "6px",
+								"font-family": "var(--ui-font, system-ui, sans-serif)",
+							}}
+						>
+							<h2 style={{ margin: "0", "font-size": "16px" }}>SSL Studio encountered a display error</h2>
+							<p style={{ margin: "0", "font-size": "13px", opacity: "0.85", "white-space": "pre-wrap", "word-break": "break-word" }}>
+								{message()}
+							</p>
+							<div style={{ display: "flex", gap: "8px" }}>
+								<button type="button" class="primary" onClick={() => reset()}>
+									Try again
+								</button>
+								<button type="button" onClick={() => window.location.reload()}>
+									Reload window
+								</button>
+							</div>
+						</div>
+					);
+				}}
+			>
+				<App />
+			</Errored>
+		),
+		document.getElementById("app")!,
+	);
 	// The folder opens with the files it was left with.
 	await restoreTabs();
 	if (state.info?.selftestClose) void import("./selftestClose").then((m) => m.selftestClose());

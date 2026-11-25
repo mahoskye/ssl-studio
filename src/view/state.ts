@@ -1,8 +1,7 @@
 // App state: the workspace, open documents, editor groups and panels.
 // Documents are Monaco models; the text in them is the source of truth
 // (ADR 0002).
-import { batch, createSignal } from "solid-js";
-import { createStore, produce, reconcile, unwrap } from "solid-js/store";
+import { createSignal, createStore, flush, onFlush, snapshot } from "solid-js";
 import { DEFAULT_SETTINGS, type Info, type LspState, type Project, type Settings, type SettingsPatch, type ThemeFile, type Workspace } from "../shared/protocol";
 import { backend, on } from "./backend";
 import { removeRecentGroup, resetRecentTabs } from "./recentTabs";
@@ -132,15 +131,22 @@ export function notify(text: string, kind: Message["kind"] = "info", action?: Me
 		log(`error: ${text}`);
 		text = plainFileError(text, state.workspace?.root);
 	}
-	setState("messages", (list) => [...list.filter((m) => m.text !== text).slice(-4), { id, kind, text, action }]);
+	setState((s) => {
+		s.messages = [...s.messages.filter((m) => m.text !== text).slice(-4), { id, kind, text, action }];
+	});
 	// A note that offers something to do stays long enough to do it.
 	if (kind !== "error") setTimeout(() => dismiss(id), action ? 20000 : 4000);
 }
 
-export const dismiss = (id: number) => setState("messages", (list) => list.filter((m) => m.id !== id));
+export const dismiss = (id: number) =>
+	setState((s) => {
+		s.messages = s.messages.filter((m) => m.id !== id);
+	});
 
 export function log(line: string) {
-	setState("output", (list) => [...list.slice(-499), `${new Date().toLocaleTimeString()}  ${line}`]);
+	setState((s) => {
+		s.output = [...s.output.slice(-499), `${new Date().toLocaleTimeString()}  ${line}`];
+	});
 }
 
 /** Asks the editor, or the open side panel, to take the keyboard. */
@@ -154,7 +160,7 @@ export const focusRequest = (() => {
 export const focusEditor = () => focusRequest.fire("editor");
 export const focusSidePanel = () => {
 	if (!state.workspace) return;
-	if (!state.settings.layout.left) setState("settings", "layout", "left", true);
+	if (!state.settings.layout.left) setState((s) => { s.settings.layout.left = true; });
 	focusRequest.fire("side");
 };
 
@@ -218,26 +224,28 @@ export async function openFolder(path?: string) {
 	closeReview();
 	resetTidy();
 	syncWorkspaceThreads(canonical(workspace.root));
-	setTabsReady(false);
+	setTabsReadyFlag(false);
 	closedTabs.length = 0;
 	pendingReveal.clear();
 	resetRecentTabs();
 	const oldDocs = [...docs.values()];
 	docs.clear();
-	batch(() => {
-		setState("workspace", workspace);
-		setState("groups", [{ tabs: [], active: null }]);
-		setState("activeGroup", 0);
-		setState("dirty", reconcile({}));
-		setState("conflicts", reconcile({}));
-		setState("bottomMaximized", false);
+	setState((s) => {
+		s.workspace = workspace;
+		s.groups = [{ tabs: [], active: null }];
+		s.activeGroup = 0;
+		s.dirty = {};
+		s.conflicts = {};
+		s.bottomMaximized = false;
 		// What was said about the folder that is gone is no longer news.
-		setState("messages", []);
-		setState("centerView", "editors");
-		setState("treeVersion", (v) => v + 1);
-		setState("project", null);
-		setState("setupDismissed", false);
+		s.messages = [];
+		s.centerView = "editors";
+		s.treeVersion += 1;
+		s.project = null;
+		s.setupDismissed = false;
 	});
+	// Commit cleared groups before disposing old Monaco models so editors detach first.
+	flush();
 	clearEditorViewStates();
 	invalidateImageCache();
 	for (const doc of oldDocs) disposeDoc(doc);
@@ -245,12 +253,16 @@ export async function openFolder(path?: string) {
 	if (seq !== openSeq) return;
 	const info = await backend.info();
 	if (seq !== openSeq) return;
-	setState("info", info);
+	setState((s) => {
+		s.info = info;
+	});
 	const lsp = await backend.lspState();
 	if (seq !== openSeq) return;
-	setState("lsp", reconcile(lsp));
+	setState((s) => {
+		s.lsp = lsp;
+	});
 	session.setRoot(workspace.root);
-	if (state.lsp.state === "running") void session.start(workspace.root).catch(() => {});
+	if (lsp.state === "running") void session.start(workspace.root).catch(() => {});
 	log(`opened ${workspace.root}`);
 	await restoreTabs();
 }
@@ -261,7 +273,7 @@ export async function restartLsp(): Promise<void> {
 	await guarded(async () => {
 		await backend.lspRestart();
 		const next = await backend.info();
-		if (next && seq === openSeq) setState("info", next);
+		if (next && seq === openSeq) setState((s) => { s.info = next; });
 	});
 }
 
@@ -269,18 +281,24 @@ export async function restartLsp(): Promise<void> {
 
 /** False while a folder is being opened: its tabs are not yet the ones to remember. */
 const [tabsReady, setTabsReady] = createSignal(false);
+let tabsReadyNow = false;
+const setTabsReadyFlag = (v: boolean) => {
+	tabsReadyNow = v;
+	setTabsReady(v);
+};
 export const isTabsReady = tabsReady;
 
 /** Keeps which files are open in this folder, for the next time it is opened. */
 export function rememberTabs() {
-	const root = state.workspace?.root;
-	if (!root || !tabsReady()) return;
+	const cur = snapshot(state);
+	const root = cur.workspace?.root;
+	if (!root || !tabsReadyNow) return;
 	// Floating untitled buffers are not persisted across workspace sessions.
-	const savedGroups = state.groups.map((g) => {
+	const savedGroups = cur.groups.map((g) => {
 		const tabs = g.tabs.filter((p) => !isUntitled(p));
 		return { ...g, tabs, active: g.active && !isUntitled(g.active) ? g.active : (tabs[0] ?? null) };
 	});
-	remember(tabsKey(root), packTabs(savedGroups, state.activeGroup));
+	remember(tabsKey(root), packTabs(savedGroups, cur.activeGroup));
 }
 
 /** The side panels there are, and the bottom ones: what a kept choice must be one of. */
@@ -289,8 +307,9 @@ const BOTTOM_VIEWS: readonly BottomView[] = ["problems", "output"];
 
 /** Keeps which side panel, bottom panel and right panel are showing in this folder, for the next time it is opened. */
 export function rememberViews() {
-	const root = state.workspace?.root;
-	if (root && tabsReady()) remember(viewsKey(root), packViews(state.leftView, state.bottomView, state.rightView));
+	const cur = snapshot(state);
+	const root = cur.workspace?.root;
+	if (root && tabsReadyNow) remember(viewsKey(root), packViews(cur.leftView, cur.bottomView, cur.rightView));
 }
 
 /**
@@ -298,17 +317,22 @@ export function rememberViews() {
  * since, or is no longer inside the folder, is passed over without a word.
  */
 export async function restoreTabs() {
-	const root = state.workspace?.root;
+	const curStart = snapshot(state);
+	const root = curStart.workspace?.root;
 	// A self-test starts from nothing open, and leaves nothing behind for the next run.
-	if (state.info?.selftest || state.info?.selftestClose) return;
-	setTabsReady(false);
+	if (curStart.info?.selftest || curStart.info?.selftestClose) return;
+	setTabsReadyFlag(false);
 	try {
 		// The panels first: they are there at once, and the files take a moment to read.
 		const views = root ? unpackViews(recall(viewsKey(root)), LEFT_VIEWS, BOTTOM_VIEWS) : {};
-		if (views.left) setState("leftView", views.left as PanelId);
-		if (views.bottom) setState("bottomView", views.bottom as BottomView);
-		// Where it is no longer docked on the right, the window's layout shows another that is (App.tsx).
-		if (views.right) setState("rightView", views.right as PanelId);
+		if (views.left || views.bottom || views.right) {
+			setState((s) => {
+				if (views.left) s.leftView = views.left as PanelId;
+				if (views.bottom) s.bottomView = views.bottom as BottomView;
+				// Where it is no longer docked on the right, the window's layout shows another that is (App.tsx).
+				if (views.right) s.rightView = views.right as PanelId;
+			});
+		}
 		const saved = root ? unpackTabs(recall(tabsKey(root))) : null;
 		if (!root || !saved) return;
 		for (const [index, group] of saved.groups.entries()) {
@@ -317,7 +341,7 @@ export async function restoreTabs() {
 				if (!isInside(root, path)) continue;
 				try {
 					const loaded = (await loadDoc(path)).path;
-					if (state.workspace?.root !== root) {
+					if (snapshot(state).workspace?.root !== root) {
 						letGoIfOnlyRead(loaded);
 						return;
 					}
@@ -327,38 +351,42 @@ export async function restoreTabs() {
 				}
 			}
 			// The folder may have been changed for another while these were read.
-			if (state.workspace?.root !== root) return;
+			if (snapshot(state).workspace?.root !== root) return;
 			// And a file may have gone while the others were read: it is no longer there to have a tab.
 			for (const path of [...tabs]) if (!docs.has(path)) tabs.splice(tabs.indexOf(path), 1);
 			if (!tabs.length && index > 0) continue;
 			const active = group.active && tabs.includes(canonical(group.active)) ? canonical(group.active) : (tabs[tabs.length - 1] ?? null);
-			setState("groups", (groups) => {
-				const next = groups.map((g) => ({ ...g }));
-				while (next.length <= index) next.push({ tabs: [], active: null });
+			setState((s) => {
+				while (s.groups.length <= index) s.groups.push({ tabs: [], active: null });
 				const pinned = (group.pinned ?? []).map(canonical).filter((path) => tabs.includes(path));
 				// The pinned stand first, also before a tab that was opened while these were being read.
-				const all = [...new Set([...next[index]!.tabs, ...tabs])];
-				next[index] = { ...next[index]!, tabs: [...pinned, ...all.filter((tab) => !pinned.includes(tab))], active: next[index]!.active ?? active, ...(pinned.length ? { pinned } : {}) };
-				return next;
+				const curGroup = s.groups[index]!;
+				const all = [...new Set([...curGroup.tabs, ...tabs])];
+				s.groups[index] = {
+					...curGroup,
+					tabs: [...pinned, ...all.filter((tab) => !pinned.includes(tab))],
+					active: curGroup.active ?? active,
+					...(pinned.length ? { pinned } : {}),
+				};
 			});
 		}
 		// Drop empty leading groups if Group 0's files were all deleted while a later group still has tabs.
-		if (state.groups.length > 1 && state.groups.some((g) => !g.tabs.length) && state.groups.some((g) => g.tabs.length > 0)) {
-			const keptIndices: number[] = [];
-			state.groups.forEach((g, i) => {
-				if (g.tabs.length > 0) keptIndices.push(i);
-			});
-			const mappedActive = keptIndices.indexOf(saved.activeGroup);
-			batch(() => {
-				setState("groups", (groups) => groups.filter((g) => g.tabs.length > 0));
-				setState("activeGroup", mappedActive >= 0 ? mappedActive : 0);
-			});
-		} else {
-			setState("activeGroup", Math.min(saved.activeGroup, state.groups.length - 1));
-		}
+		setState((s) => {
+			if (s.groups.length > 1 && s.groups.some((g) => !g.tabs.length) && s.groups.some((g) => g.tabs.length > 0)) {
+				const keptIndices: number[] = [];
+				s.groups.forEach((g, i) => {
+					if (g.tabs.length > 0) keptIndices.push(i);
+				});
+				const mappedActive = keptIndices.indexOf(saved.activeGroup);
+				s.groups = s.groups.filter((g) => g.tabs.length > 0);
+				s.activeGroup = mappedActive >= 0 ? mappedActive : 0;
+			} else {
+				s.activeGroup = Math.min(saved.activeGroup, s.groups.length - 1);
+			}
+		});
 	} finally {
-		if (state.workspace?.root === root) {
-			setTabsReady(true);
+		if (snapshot(state).workspace?.root === root) {
+			setTabsReadyFlag(true);
 			rememberTabs();
 			rememberViews();
 		}
@@ -366,9 +394,9 @@ export async function restoreTabs() {
 }
 
 export async function loadProject() {
-	const startRoot = state.workspace?.root;
+	const startRoot = snapshot(state).workspace?.root;
 	const project = await guarded(() => backend.project());
-	if (project && state.workspace?.root === startRoot) setState("project", project);
+	if (project && snapshot(state).workspace?.root === startRoot) setState((s) => { s.project = project; });
 }
 
 /**
@@ -377,13 +405,13 @@ export async function loadProject() {
  * not be on disk yet (see saveSetting).
  */
 export async function loadSettings(fresh = false) {
-	const startRoot = state.workspace?.root;
+	const startRoot = snapshot(state).workspace?.root;
 	const [{ effective }, themes] = await Promise.all([backend.settings(), backend.themes()]);
-	if (state.workspace?.root !== startRoot) return;
+	if (snapshot(state).workspace?.root !== startRoot) return;
 	const { layout: _onDisk, ...rest } = effective;
-	batch(() => {
-		setState("settings", reconcile(fresh ? effective : { ...rest, layout: unwrap(state.settings.layout) }));
-		setState("themes", themes);
+	setState((s) => {
+		s.settings = fresh ? effective : { ...rest, layout: snapshot(s.settings.layout) };
+		s.themes = themes;
 	});
 }
 
@@ -407,9 +435,9 @@ let settingFailed = false;
 export async function saveSetting(patch: SettingsPatch, scope: "user" | "workspace" = "user"): Promise<Settings | undefined> {
 	const mine = ++settingsAsked;
 	settingsOut++;
-	batch(() => {
+	setState((s) => {
 		for (const key of WORKED_OUT_HERE) {
-			if (patch[key] !== undefined && patch[key] !== null) setState("settings", key, reconcile(patch[key] as any));
+			if (patch[key] !== undefined && patch[key] !== null) (s.settings as any)[key] = structuredClone(patch[key]);
 		}
 	});
 	const effective = await guarded(() => backend.saveSettings(scope, patch));
@@ -422,7 +450,9 @@ export async function saveSetting(patch: SettingsPatch, scope: "user" | "workspa
 		// What comes back is the settings as they are on disk. The layout is the view's own, and is saved a moment
 		// after it changes (App.tsx): the one on disk may be older, and must not come back over the one on screen.
 		const { layout: _onDisk, ...rest } = effective;
-		setState("settings", reconcile("layout" in patch ? effective : { ...rest, layout: unwrap(state.settings.layout) }));
+		setState((s) => {
+			s.settings = "layout" in patch ? effective : { ...rest, layout: snapshot(s.settings.layout) };
+		});
 	}
 	// A save that failed has said so. What is on screen may then hold a value shown at once that was never saved,
 	// or lack one from an answer passed over above: it is put back to what is on disk, once every save asked for
@@ -437,7 +467,9 @@ export async function saveSetting(patch: SettingsPatch, scope: "user" | "workspa
 		);
 		if (disk && asked === settingsAsked) {
 			const { layout: _onDisk, ...rest } = disk;
-			setState("settings", reconcile({ ...rest, layout: unwrap(state.settings.layout) }));
+			setState((s) => {
+				s.settings = { ...rest, layout: snapshot(s.settings.layout) };
+			});
 		}
 	}
 	return effective;
@@ -456,11 +488,11 @@ export function planMode(_path: string, group?: number): PlanViewMode {
 }
 
 export function setPlanMode(_path: string, mode: PlanViewMode, group?: number) {
-	const g = group ?? state.activeGroup;
-	batch(() => {
-		if (state.groups[g]) setState("groups", g, "planMode", mode);
-		if (shouldUpdateDefaultMode(group, state.groups.length)) {
-			setState("planViewMode", mode);
+	setState((s) => {
+		const g = group ?? s.activeGroup;
+		if (s.groups[g]) s.groups[g]!.planMode = mode;
+		if (shouldUpdateDefaultMode(group, s.groups.length)) {
+			s.planViewMode = mode;
 			remember(PLAN_MODE_KEY, mode);
 		}
 	});
@@ -472,11 +504,11 @@ export function markdownMode(_path: string, group?: number): MarkdownViewMode {
 	return resolveMarkdownMode(state.groups[g]?.mdMode, state.mdViewMode, state.settings.livePreview);
 }
 export function setMarkdownMode(_path: string, mode: MarkdownViewMode, group?: number) {
-	const g = group ?? state.activeGroup;
-	batch(() => {
-		if (state.groups[g]) setState("groups", g, "mdMode", mode);
-		if (shouldUpdateDefaultMode(group, state.groups.length)) {
-			setState("mdViewMode", mode);
+	setState((s) => {
+		const g = group ?? s.activeGroup;
+		if (s.groups[g]) s.groups[g]!.mdMode = mode;
+		if (shouldUpdateDefaultMode(group, s.groups.length)) {
+			s.mdViewMode = mode;
 			remember(MARKDOWN_MODE_KEY, mode);
 		}
 	});
@@ -486,14 +518,14 @@ export function setMarkdownMode(_path: string, mode: MarkdownViewMode, group?: n
 export function syncLivePreviewMode(enabled: boolean) {
 	const from: MarkdownViewMode = enabled ? "source" : "live";
 	const to: MarkdownViewMode = enabled ? "live" : "source";
-	batch(() => {
-		if (state.mdViewMode === from) {
-			setState("mdViewMode", to);
+	setState((s) => {
+		if (s.mdViewMode === from) {
+			s.mdViewMode = to;
 			remember(MARKDOWN_MODE_KEY, to);
 		}
-		state.groups.forEach((g, idx) => {
-			if (g.mdMode === from) setState("groups", idx, "mdMode", to);
-		});
+		for (const g of s.groups) {
+			if (g.mdMode === from) g.mdMode = to;
+		}
 	});
 }
 
@@ -504,11 +536,11 @@ export function tableTextMode(_path: string, group?: number): boolean {
 }
 
 export function setTableTextMode(_path: string, text: boolean, group?: number) {
-	const g = group ?? state.activeGroup;
-	batch(() => {
-		if (state.groups[g]) setState("groups", g, "tableText", text);
-		if (shouldUpdateDefaultMode(group, state.groups.length)) {
-			setState("tableTextDefault", text);
+	setState((s) => {
+		const g = group ?? s.activeGroup;
+		if (s.groups[g]) s.groups[g]!.tableText = text;
+		if (shouldUpdateDefaultMode(group, s.groups.length)) {
+			s.tableTextDefault = text;
 			remember(TABLE_TEXT_MODE_KEY, String(text));
 		}
 	});
@@ -518,13 +550,14 @@ export function setTableTextMode(_path: string, text: boolean, group?: number) {
 export const canonical = (path: string) => (isUntitled(path) ? path : monaco.Uri.file(path).fsPath);
 
 /** Opens a floating untitled buffer (Untitled-1, Untitled-2, ...) that stays in memory until saved. */
-export function newUntitled(group = state.activeGroup, language = "plaintext"): string {
-	if (!state.workspace) {
+export function newUntitled(group = snapshot(state).activeGroup, language = "plaintext"): string {
+	const cur = snapshot(state);
+	if (!cur.workspace) {
 		notify("Open a folder first.");
 		return "";
 	}
-	const targetGroup = Math.max(0, Math.min(group, Math.max(0, state.groups.length - 1)));
-	if (!state.groups[targetGroup]) return "";
+	const targetGroup = Math.max(0, Math.min(group, Math.max(0, cur.groups.length - 1)));
+	if (!cur.groups[targetGroup]) return "";
 	let n = 1;
 	while (docs.has(`untitled:Untitled-${n}`)) n++;
 	const path = `untitled:Untitled-${n}`;
@@ -534,21 +567,20 @@ export function newUntitled(group = state.activeGroup, language = "plaintext"): 
 	docs.set(path, doc);
 	model.onDidChangeContent(() => {
 		const dirty = model.getAlternativeVersionId() !== doc.savedVersion && model.getValue() !== doc.savedText;
-		setState("dirty", path, dirty);
+		setState((s) => {
+			s.dirty[path] = dirty;
+		});
 	});
 	doc.validatorDispose = attachValidator(model, path, language);
 	closeComparison();
-	batch(() => {
-		setState(
-			"groups",
-			targetGroup,
-			produce((g: Group) => {
-				if (!g.tabs.includes(path)) g.tabs.push(path);
-				g.active = path;
-			}),
-		);
-		setState("activeGroup", targetGroup);
-		setState("centerView", "editors");
+	setState((s) => {
+		const g = s.groups[targetGroup];
+		if (g) {
+			if (!g.tabs.includes(path)) g.tabs.push(path);
+			g.active = path;
+		}
+		s.activeGroup = targetGroup;
+		s.centerView = "editors";
 	});
 	focusEditor();
 	return path;
@@ -634,10 +666,12 @@ function attach(path: string, text: string, saved: { text: string; mtime: number
 	docs.set(path, doc);
 	model.onDidChangeContent(() => {
 		const dirty = model.getAlternativeVersionId() !== doc.savedVersion && model.getValue() !== doc.savedText;
-		setState("dirty", path, dirty);
+		setState((s) => {
+			s.dirty[path] = dirty;
+		});
 		// A file that is being written in is not one that was only looked at: its tab stays. Asked a moment later: a
 		// reload from disk is an edit too, and says the file is unchanged once it is done.
-		if (dirty) queueMicrotask(() => state.dirty[path] && keepTab(path));
+		if (dirty) queueMicrotask(() => snapshot(state).dirty[path] && keepTab(path));
 	});
 	session.track(model);
 	doc.validatorDispose = attachValidator(model, path, model.getLanguageId());
@@ -707,7 +741,10 @@ export const takeReveal = (path: string) => {
 /** Each look asked for, counted: one that is still being read when a later one is asked for gives way to it. */
 let looks = 0;
 /** A document that is not to be given up without a question: it has unsaved changes, or differs from its file on disk. */
-const heldOpen = (path: string) => Boolean(state.dirty[path] || state.conflicts[path]);
+const heldOpen = (path: string) => {
+	const cur = snapshot(state);
+	return Boolean(cur.dirty[path] || cur.conflicts[path]);
+};
 
 /** The file being brought to the front for a look, while it is: a click on its row in a list, whether or not it had a tab. */
 let lookedAt: string | null = null;
@@ -727,52 +764,54 @@ export const openedForALook = (path: string) => lookedAt === path;
  */
 export async function openFile(path: string, options: { group?: number; reveal?: Reveal; preview?: boolean; keep?: boolean } = {}) {
 	path = canonical(path);
-	const startRoot = state.workspace?.root;
+	const startRoot = snapshot(state).workspace?.root;
 	const look = ++looks;
 	// What was only read (a definition peeked at) had no tab to keep it true, and the file may have changed, gone, or
 	// been made anew since. It is let go, and the file is read as it is now: nothing of the old reading is left to undo.
 	letGoIfOnlyRead(path);
 	const doc = await guarded(() => loadDoc(path));
 	if (!doc) return;
+	const curAfterRead = snapshot(state);
 	// The folder changed while this file was being read: let the loaded model go instead of opening it in the new workspace.
-	if (state.workspace?.root !== startRoot) return letGoIfOnlyRead(path);
+	if (curAfterRead.workspace?.root !== startRoot) return letGoIfOnlyRead(path);
 	// Another file was opened (for a look or to stay) while this preview was being read: that one is what is wanted now.
 	// Without this the slower preview read would land last and steal focus or take the tab of the file opened last.
 	if (options.preview && look !== looks) return letGoIfOnlyRead(path);
-	const group = Math.max(0, Math.min(options.group ?? state.activeGroup, Math.max(0, state.groups.length - 1)));
+	const group = Math.max(0, Math.min(options.group ?? curAfterRead.activeGroup, Math.max(0, curAfterRead.groups.length - 1)));
 	if (options.reveal) pendingReveal.set(path, options.reveal);
 	closeComparison();
 	/** The tab that gave its place to this one: it was only looked at. */
 	let replaced: string | null = null as string | null;
-	// Said for as long as the editors hear of the change, which is within this batch.
+	// Said for as long as the editors hear of the change during the pending flush.
 	lookedAt = options.preview ? path : null;
-	batch(() => {
-		setState(
-			"groups",
-			group,
-			produce((g: Group) => {
-				if (g.tabs.includes(path)) {
-					// A tab opened for a look, and now opened to stay, is kept.
-					if (options.keep && g.preview === path) g.preview = null;
-				} else if (options.preview && !heldOpen(path)) {
-					// A tab that shows unsaved changes, or a file changed on disk, is never the one that gives way.
-					const next = previewed(g.tabs, g.pinned ?? [], g.preview, path, heldOpen);
-					g.tabs = next.tabs;
-					g.preview = path;
-					replaced = next.replaced;
-				} else g.tabs.push(path);
-				g.active = path;
-			}),
-		);
-		setState("activeGroup", group);
+	setState((s) => {
+		const g = s.groups[group];
+		if (g) {
+			if (g.tabs.includes(path)) {
+				// A tab opened for a look, and now opened to stay, is kept.
+				if (options.keep && g.preview === path) g.preview = null;
+			} else if (options.preview && !heldOpen(path)) {
+				// A tab that shows unsaved changes, or a file changed on disk, is never the one that gives way.
+				const next = previewed(g.tabs, g.pinned ?? [], g.preview, path, heldOpen);
+				g.tabs = next.tabs;
+				g.preview = path;
+				replaced = next.replaced;
+			} else g.tabs.push(path);
+			g.active = path;
+		}
+		s.activeGroup = group;
 		// The call graph covers the editors: a file opened behind it would look like nothing happened.
-		setState("centerView", "editors");
+		s.centerView = "editors";
 		// A maximized bottom panel covers the editors too: opening a file restores it so the file is visible.
-		if (state.bottomMaximized) setState("bottomMaximized", false);
+		if (s.bottomMaximized) s.bottomMaximized = false;
 	});
-	lookedAt = null;
+	if (lookedAt === path) {
+		onFlush(() => {
+			if (lookedAt === path) lookedAt = null;
+		});
+	}
 	// What was only looked at and has no tab left is let go. It has no unsaved changes: a tab that shows some never gives way.
-	if (replaced && !state.groups.some((g) => g.tabs.includes(replaced!))) letGoIfOnlyRead(replaced);
+	if (replaced && !snapshot(state).groups.some((g) => g.tabs.includes(replaced!))) letGoIfOnlyRead(replaced);
 	revealSignal.fire(path);
 	// Opened to stay (a double click, Enter in a list of files): the keyboard goes to it, also when it was already
 	// showing for a look and the editor had no change of file to hear of.
@@ -781,7 +820,11 @@ export async function openFile(path: string, options: { group?: number; reveal?:
 
 /** Keeps a tab that was opened for a look: in one group, or in every group that has it so. */
 export function keepTab(path: string, group?: number) {
-	state.groups.forEach((g, index) => (group === undefined || group === index) && g.preview === path && setState("groups", index, "preview", null));
+	setState((s) => {
+		s.groups.forEach((g, index) => {
+			if ((group === undefined || group === index) && g.preview === path) g.preview = null;
+		});
+	});
 }
 
 /** Lets an already-visible editor scroll to a new reveal. */
@@ -797,16 +840,17 @@ export const revealSignal = (() => {
 const closedTabs: string[] = [];
 
 /** Says whether the tab closed: a refused or failed save keeps it open. */
-export async function closeTab(path: string, group = state.activeGroup, options: { discard?: boolean; pinned?: boolean } = {}): Promise<boolean> {
-	if (!state.groups[group]?.tabs.includes(path)) return true;
+export async function closeTab(path: string, group = snapshot(state).activeGroup, options: { discard?: boolean; pinned?: boolean } = {}): Promise<boolean> {
+	const curBefore = snapshot(state);
+	if (!curBefore.groups[group]?.tabs.includes(path)) return true;
 	// A pinned tab stays until it is let go: a close by key or by pointer says so and leaves it.
-	if (state.groups[group]!.pinned?.includes(path) && !options.pinned) {
+	if (curBefore.groups[group]!.pinned?.includes(path) && !options.pinned) {
 		notify(`${baseName(path)} is pinned. Unpin it to close it: right-click its tab.`);
 		return false;
 	}
 	let closePath = path;
-	const lastView = state.groups.filter((g) => g.tabs.includes(path)).length === 1;
-	if (state.dirty[path] && lastView && !options.discard) {
+	const lastView = curBefore.groups.filter((g) => g.tabs.includes(path)).length === 1;
+	if (curBefore.dirty[path] && lastView && !options.discard) {
 		const answer = await choose(`${displayName(path)} has unsaved changes.`, ["Save", "Discard changes"], { danger: "Discard changes" });
 		if (!answer) return false;
 		// A save that failed has already said why: the tab stays, with the edits in it.
@@ -816,40 +860,38 @@ export async function closeTab(path: string, group = state.activeGroup, options:
 			if (promoted) closePath = promoted;
 		}
 	}
-	if (!state.groups[group]?.tabs.includes(closePath)) return true;
-	const closingLastView = state.groups.filter((g) => g.tabs.includes(closePath)).length === 1;
+	const curNow = snapshot(state);
+	if (!curNow.groups[group]?.tabs.includes(closePath)) return true;
+	const closingLastView = curNow.groups.filter((g) => g.tabs.includes(closePath)).length === 1;
 	if (closingLastView && !isUntitled(closePath)) closedTabs.push(closePath);
 	let removedGroup = false;
-	batch(() => {
-		setState(
-			"groups",
-			group,
-			produce((g: Group) => {
-				const index = g.tabs.indexOf(closePath);
-				if (index < 0) return;
-				g.tabs.splice(index, 1);
-				if (g.pinned) g.pinned = g.pinned.filter((p) => p !== closePath);
-				if (g.preview === closePath) g.preview = null;
-				if (g.active === closePath) g.active = g.tabs[Math.min(index, g.tabs.length - 1)] ?? null;
-			}),
-		);
-		if (state.groups.length > 1 && !state.groups[group]!.tabs.length) {
-			setState("groups", (groups) => groups.filter((_, i) => i !== group));
-			setState("activeGroup", 0);
+	setState((s) => {
+		const g = s.groups[group];
+		if (!g) return;
+		const index = g.tabs.indexOf(closePath);
+		if (index < 0) return;
+		g.tabs.splice(index, 1);
+		if (g.pinned) g.pinned = g.pinned.filter((p) => p !== closePath);
+		if (g.preview === closePath) g.preview = null;
+		if (g.active === closePath) g.active = g.tabs[Math.min(index, g.tabs.length - 1)] ?? null;
+		if (s.groups.length > 1 && !g.tabs.length) {
+			s.groups.splice(group, 1);
+			s.activeGroup = 0;
 			removedGroup = true;
 		}
 	});
 	if (removedGroup) removeRecentGroup(group);
 	clearEditorViewStates(closePath, group);
-	if (!state.groups.some((g) => g.tabs.includes(closePath))) {
+	if (!snapshot(state).groups.some((g) => g.tabs.includes(closePath))) {
+		flush();
 		clearEditorViewStates(closePath);
 		const doc = docs.get(closePath);
 		if (doc) {
 			docs.delete(closePath);
 			disposeDoc(doc);
-			batch(() => {
-				setState("dirty", closePath, undefined!);
-				setState("conflicts", closePath, undefined!);
+			setState((s) => {
+				delete s.dirty[closePath];
+				delete s.conflicts[closePath];
 			});
 		}
 		if (isUntitled(closePath)) {
@@ -861,10 +903,13 @@ export async function closeTab(path: string, group = state.activeGroup, options:
 
 /** The tabs of the active group, to step through. */
 function stepTab(by: number) {
-	const group = state.groups[state.activeGroup];
+	const cur = snapshot(state);
+	const group = cur.groups[cur.activeGroup];
 	if (!group?.active || group.tabs.length < 2) return;
 	const next = group.tabs[(group.tabs.indexOf(group.active) + by + group.tabs.length) % group.tabs.length]!;
-	setState("groups", state.activeGroup, "active", next);
+	setState((s) => {
+		if (s.groups[cur.activeGroup]) s.groups[cur.activeGroup]!.active = next;
+	});
 	revealSignal.fire(next);
 	focusEditor();
 }
@@ -897,11 +942,12 @@ export const tabLeaving = new Set<(group: number, path: string) => void>();
 
 /** Moves the open tab to the other group, making one when there is only one. The keyboard's way to do what a drag does. */
 export function sendTabAcross() {
-	const path = activePath();
+	const cur = snapshot(state);
+	const path = cur.groups[cur.activeGroup]?.active ?? null;
 	if (!path) return;
-	if (state.groups.length === 1 && state.groups[0]!.tabs.length <= 1) return;
-	const from = state.activeGroup;
-	if (state.groups.length === 1) setState("groups", (groups) => [...groups, { tabs: [], active: null }]);
+	if (cur.groups.length === 1 && cur.groups[0]!.tabs.length <= 1) return;
+	const from = cur.activeGroup;
+	if (cur.groups.length === 1) setState((s) => { s.groups.push({ tabs: [], active: null }); });
 	moveTab(path, from, from === 0 ? 1 : 0, null);
 }
 
@@ -914,16 +960,26 @@ export function moveTab(path: string, from: number, to: number, before: string |
 	// A tab that is put somewhere by hand is one to keep.
 	keepTab(path);
 	if (from !== to) tabLeaving.forEach((told) => told(from, path));
-	const next = movedAcross(state.groups as Group[], path, from, to, before);
-	const fields = (g: Group) => ({ tabs: g.tabs, active: g.active, ...(g.pinned ? { pinned: g.pinned } : {}) });
-	const removedGroup = next.groups.length < state.groups.length;
-	batch(() => {
+	const curGroups = snapshot(state).groups as Group[];
+	const next = movedAcross(curGroups, path, from, to, before);
+	const removedGroup = next.groups.length < curGroups.length;
+	setState((s) => {
+		const apply = (target: Group, src: Group) => {
+			target.tabs = src.tabs;
+			target.active = src.active;
+			if (src.pinned) target.pinned = src.pinned;
+			else delete target.pinned;
+		};
 		if (removedGroup) {
 			// The group it left is gone: the one it came to is changed where it stands, so that its editor stays.
-			setState("groups", to, fields(next.groups[next.active]!));
-			setState("groups", (groups) => groups.filter((_, i) => i !== from));
-		} else next.groups.forEach((g, i) => (i === from || i === to) && setState("groups", i, fields(g)));
-		setState("activeGroup", next.active);
+			if (s.groups[to]) apply(s.groups[to]!, next.groups[next.active]!);
+			s.groups.splice(from, 1);
+		} else {
+			next.groups.forEach((g, i) => {
+				if ((i === from || i === to) && s.groups[i]) apply(s.groups[i]!, g);
+			});
+		}
+		s.activeGroup = next.active;
 	});
 	if (removedGroup) removeRecentGroup(from);
 	if (from !== to) revealSignal.fire(path);
@@ -931,25 +987,29 @@ export function moveTab(path: string, from: number, to: number, before: string |
 }
 
 /** The open tab one place along its row, left or right, among the pinned or among the others. */
-export function shiftTab(by: 1 | -1, group = state.activeGroup) {
-	const g = state.groups[group];
+export function shiftTab(by: 1 | -1, group = snapshot(state).activeGroup) {
+	const g = snapshot(state).groups[group];
 	const path = g?.active;
 	if (!g || !path) return;
 	const at = g.tabs.indexOf(path);
 	const before = by < 0 ? (g.tabs[at - 1] ?? path) : (g.tabs[at + 2] ?? null);
 	keepTab(path, group);
-	setState("groups", group, "tabs", placed(g.tabs, g.pinned ?? [], path, before));
+	setState((s) => {
+		if (s.groups[group]) s.groups[group]!.tabs = placed(g.tabs, g.pinned ?? [], path, before);
+	});
 }
 
 /** Pins a tab, or lets a pinned one go. */
-export function togglePin(path = activePath(), group = state.activeGroup) {
-	const g = state.groups[group];
+export function togglePin(path = activePath(), group = snapshot(state).activeGroup) {
+	const g = snapshot(state).groups[group];
 	if (!path || !g?.tabs.includes(path)) return;
 	keepTab(path, group);
 	const next = withPin(g.tabs, g.pinned ?? [], path, !g.pinned?.includes(path));
-	batch(() => {
-		setState("groups", group, "tabs", next.tabs);
-		setState("groups", group, "pinned", next.pinned);
+	setState((s) => {
+		if (s.groups[group]) {
+			s.groups[group]!.tabs = next.tabs;
+			s.groups[group]!.pinned = next.pinned;
+		}
 	});
 	rememberTabs();
 }
@@ -980,10 +1040,11 @@ export const pathChanges = {
  */
 function letGoIfOnlyRead(path: string) {
 	const doc = docs.get(path);
-	if (!doc || isUntitled(path) || state.dirty[path] || state.groups.some((g) => g.tabs.includes(path))) return;
+	const cur = snapshot(state);
+	if (!doc || isUntitled(path) || cur.dirty[path] || cur.groups.some((g) => g.tabs.includes(path))) return;
 	docs.delete(path);
 	disposeDoc(doc);
-	if (state.conflicts[path]) setState("conflicts", path, undefined!);
+	if (cur.conflicts[path]) setState((s) => { delete s.conflicts[path]; });
 }
 
 /** A file or folder was renamed in the Explorer: its open tabs follow it, with their edits. */
@@ -997,7 +1058,7 @@ export function fileRenamed(oldPath: string, newPath: string) {
 	for (const [path, doc] of [...docs]) {
 		if (path !== oldPath && !isInside(oldPath, path)) continue;
 		const target = path === oldPath ? newPath : newPath + path.slice(oldPath.length);
-		const dirty = Boolean(state.dirty[path]);
+		const dirty = Boolean(snapshot(state).dirty[path]);
 		const text = doc.model.getValue();
 		docs.delete(path);
 		const prevTarget = docs.get(target);
@@ -1008,21 +1069,16 @@ export function fileRenamed(oldPath: string, newPath: string) {
 		const moved = attach(target, text, { text: doc.savedText, mtime: doc.mtime });
 		moved.encoding = doc.encoding;
 		moved.binary = doc.binary;
-		batch(() => {
-			setState(
-				"groups",
-				produce((groups: Group[]) => {
-					for (const g of groups) {
-						g.tabs = [...new Set(g.tabs.map((tab) => (tab === path ? target : tab)))];
-						if (g.pinned) g.pinned = [...new Set(g.pinned.map((tab) => (tab === path ? target : tab)))];
-						if (g.preview === path) g.preview = target;
-						if (g.active === path) g.active = target;
-					}
-				}),
-			);
-			setState("dirty", path, undefined!);
-			setState("conflicts", path, undefined!);
-			setState("dirty", target, dirty || moved.savedVersion === -1);
+		setState((s) => {
+			for (const g of s.groups) {
+				g.tabs = [...new Set(g.tabs.map((tab) => (tab === path ? target : tab)))];
+				if (g.pinned) g.pinned = [...new Set(g.pinned.map((tab) => (tab === path ? target : tab)))];
+				if (g.preview === path) g.preview = target;
+				if (g.active === path) g.active = target;
+			}
+			delete s.dirty[path];
+			delete s.conflicts[path];
+			s.dirty[target] = dirty || moved.savedVersion === -1;
 		});
 		disposeDoc(doc);
 	}
@@ -1102,16 +1158,18 @@ export function fileRemoved(removed: string) {
 
 /** Opens a file in the group beside the one at hand, which is made if there is none. */
 export async function openToSide(path: string) {
+	const curBefore = snapshot(state);
 	// With nothing open there is no side to open it to: it opens where a file would.
-	if (state.groups.length === 1 && !state.groups[0]!.tabs.length) return openFile(path, { keep: true });
-	const made = state.groups.length === 1;
-	if (made) setState("groups", (groups) => [...groups, { tabs: [], active: null }]);
-	await openFile(path, { group: state.activeGroup === 0 ? 1 : 0, keep: true });
+	if (curBefore.groups.length === 1 && !curBefore.groups[0]!.tabs.length) return openFile(path, { keep: true });
+	const made = curBefore.groups.length === 1;
+	if (made) setState((s) => { s.groups.push({ tabs: [], active: null }); });
+	await openFile(path, { group: curBefore.activeGroup === 0 ? 1 : 0, keep: true });
 	// A file that could not be read opened nothing: the group made for it is not left standing empty.
-	if (made && state.groups.length === 2 && !state.groups[1]!.tabs.length) {
-		batch(() => {
-			setState("groups", (groups) => groups.slice(0, 1));
-			setState("activeGroup", 0);
+	const curAfter = snapshot(state);
+	if (made && curAfter.groups.length === 2 && !curAfter.groups[1]!.tabs.length) {
+		setState((s) => {
+			s.groups = s.groups.slice(0, 1);
+			s.activeGroup = 0;
 		});
 		removeRecentGroup(1);
 	}
@@ -1237,28 +1295,22 @@ export async function save(
 			realDoc = attach(target, currentText, { text, mtime: created.mtime });
 			realDoc.encoding = "utf-8";
 		}
-		batch(() => {
-			for (let gi = 0; gi < state.groups.length; gi++) {
-				setState(
-					"groups",
-					gi,
-					produce((g: Group) => {
-						const idx = g.tabs.indexOf(path);
-						if (idx >= 0) {
-							if (g.tabs.includes(target)) g.tabs.splice(idx, 1);
-							else g.tabs[idx] = target;
-						}
-						if (g.active === path) g.active = target;
-						if (g.pinned) g.pinned = [...new Set(g.pinned.map((p) => (p === path ? target : p)))];
-						if (g.preview === path) g.preview = null;
-					}),
-				);
+		setState((s) => {
+			for (const g of s.groups) {
+				const idx = g.tabs.indexOf(path);
+				if (idx >= 0) {
+					if (g.tabs.includes(target)) g.tabs.splice(idx, 1);
+					else g.tabs[idx] = target;
+				}
+				if (g.active === path) g.active = target;
+				if (g.pinned) g.pinned = [...new Set(g.pinned.map((p) => (p === path ? target : p)))];
+				if (g.preview === path) g.preview = null;
 			}
-			setState("dirty", path, undefined!);
-			setState("dirty", target, stillDirty);
-			setState("conflicts", target, undefined!);
-			setState("treeVersion", (v) => v + 1);
-			if (wasBinary) setState("kindVersion", (v) => v + 1);
+			delete s.dirty[path];
+			s.dirty[target] = stillDirty;
+			delete s.conflicts[target];
+			s.treeVersion += 1;
+			if (wasBinary) s.kindVersion += 1;
 		});
 		pathChanges.renamed.forEach((told) => told((p) => (p === path ? target : p)));
 		clearEditorViewStates(path);
@@ -1287,10 +1339,10 @@ export async function save(
 	doc.savedVersion = version;
 	doc.mtime = result.mtime;
 	const stillDirty = doc.model.getAlternativeVersionId() !== version && doc.model.getValue() !== text;
-	batch(() => {
-		setState("dirty", path, stillDirty);
-		setState("conflicts", path, undefined!);
-		setState("treeVersion", (v) => v + 1);
+	setState((s) => {
+		s.dirty[path] = stillDirty;
+		delete s.conflicts[path];
+		s.treeVersion += 1;
 	});
 	session.saved(doc.model);
 	historyChanged.fire(path);
@@ -1365,7 +1417,9 @@ export function setDocumentLanguage(path: string, languageId: string): boolean {
 	monaco.editor.setModelLanguage(doc.model, languageId);
 	if (languageId === "ssl" && prev !== "ssl") session.track(doc.model);
 	else doc.validatorDispose = attachValidator(doc.model, doc.path, languageId);
-	setState("kindVersion", (v) => v + 1);
+	setState((s) => {
+		s.kindVersion += 1;
+	});
 	return true;
 }
 
@@ -1402,10 +1456,10 @@ function applyFileToDoc(path: string, doc: Doc, file: { text: string; mtime: num
 	doc.savedText = file.text;
 	doc.savedVersion = doc.model.getAlternativeVersionId();
 	doc.mtime = file.mtime;
-	batch(() => {
-		setState("dirty", path, false);
-		setState("conflicts", path, undefined!);
-		setState("kindVersion", (v) => v + 1);
+	setState((s) => {
+		s.dirty[path] = false;
+		delete s.conflicts[path];
+		s.kindVersion += 1;
 	});
 }
 
@@ -1440,7 +1494,9 @@ export async function fileChangedOnDisk(changed: string) {
 	if (awaited.has(path)) return;
 	const startRoot = state.workspace?.root;
 	invalidateImageCache(path);
-	setState("treeVersion", (v) => v + 1);
+	setState((s) => {
+		s.treeVersion += 1;
+	});
 	const doc = docs.get(path);
 	// The kinds of file the server asks to be told about.
 	const script = isScript(path);
@@ -1454,14 +1510,15 @@ export async function fileChangedOnDisk(changed: string) {
 	try {
 		file = await backend.read(path);
 	} catch {
-		if (state.workspace?.root === startRoot) {
+		if (snapshot(state).workspace?.root === startRoot) {
 			told(false);
 			// Deleted or moved: a copy open in a tab is kept, and one that was only read is not.
 			letGoIfOnlyRead(path);
 		}
 		return;
 	}
-	if (!state.workspace || state.workspace.root !== startRoot || !isInside(state.workspace.root, path)) return;
+	const cur = snapshot(state);
+	if (!cur.workspace || cur.workspace.root !== startRoot || !isInside(cur.workspace.root, path)) return;
 	told(true);
 	// It may have been let go, or moved away, while the file was read.
 	if (!doc || docs.get(path) !== doc || doc.model.isDisposed()) return;
@@ -1470,7 +1527,9 @@ export async function fileChangedOnDisk(changed: string) {
 		if (file.mtime !== doc.mtime) {
 			doc.mtime = file.mtime;
 			doc.binary = file.binary;
-			setState("kindVersion", (v) => v + 1);
+			setState((s) => {
+				s.kindVersion += 1;
+			});
 		}
 		return;
 	}
@@ -1482,10 +1541,12 @@ export async function fileChangedOnDisk(changed: string) {
 		doc.mtime = file.mtime;
 		return;
 	}
-	if (state.dirty[path]) {
-		if (!state.conflicts[path]) notify(`${baseName(path)} changed on disk while you have unsaved edits. Saving will ask which to keep.`, "error");
-		setState("conflicts", path, true);
-	} else if (!state.dirty[path] && state.workspace && isInside(state.workspace.root, path)) {
+	if (cur.dirty[path]) {
+		if (!cur.conflicts[path]) notify(`${baseName(path)} changed on disk while you have unsaved edits. Saving will ask which to keep.`, "error");
+		setState((s) => {
+			s.conflicts[path] = true;
+		});
+	} else if (!cur.dirty[path] && cur.workspace && isInside(cur.workspace.root, path)) {
 		applyFileToDoc(path, doc, file);
 		log(`reloaded ${path} after an external change`);
 	}
@@ -1504,6 +1565,8 @@ on("closeRequested", async () => {
 });
 
 on("lspState", (lsp) => {
-	setState("lsp", reconcile(lsp));
+	setState((s) => {
+		s.lsp = lsp;
+	});
 	if (lsp.message) log(lsp.message);
 });

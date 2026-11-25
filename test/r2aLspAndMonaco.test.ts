@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, mock, test } from "bun:test";
+import { flush } from "solid-js";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -643,12 +644,15 @@ describe("session.ts toMinimalEdits, multi-owner diagnostics, and untrack owner 
 		const uri = model.uri.toString();
 		publishFindings(model, "ownerA", [{ line: 1, column: 1, endLine: 1, endColumn: 2, severity: 1, message: "A err" }]);
 		publishFindings(model, "ownerB", [{ line: 1, column: 1, endLine: 1, endColumn: 2, severity: 2, message: "B warn" }]);
+		flush();
 		expect(diagnostics[uri]?.map((d) => d.message)).toEqual(["A err", "B warn"]);
 
 		publishFindings(model, "ownerA", null);
+		flush();
 		expect(diagnostics[uri]?.map((d) => d.message)).toEqual(["B warn"]);
 
 		publishFindings(model, "ownerB", null);
+		flush();
 		expect(diagnostics[uri]).toBeUndefined();
 		model.dispose();
 	});
@@ -663,10 +667,12 @@ describe("session.ts toMinimalEdits, multi-owner diagnostics, and untrack owner 
 			uri,
 			diagnostics: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, severity: 1, message: "Bad token" }],
 		});
+		flush();
 		expect(mockMarkers.get(uri)?.get("starlims-lsp")?.length).toBe(1);
 		expect(diagnostics[uri]?.length).toBe(1);
 
 		sess.untrack(model);
+		flush();
 		expect(mockMarkers.get(uri)?.get("starlims-lsp")).toEqual([]);
 		expect(diagnostics[uri]).toBeUndefined();
 
@@ -675,8 +681,10 @@ describe("session.ts toMinimalEdits, multi-owner diagnostics, and untrack owner 
 			uri,
 			diagnostics: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, severity: 2, message: "Warn" }],
 		});
+		flush();
 		expect(diagnostics[uri]?.length).toBe(1);
 		sess.reset();
+		flush();
 		expect(mockMarkers.get(uri)?.get("starlims-lsp")).toEqual([]);
 		expect(diagnostics[uri]).toBeUndefined();
 		model.dispose();

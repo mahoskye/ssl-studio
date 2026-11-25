@@ -7,8 +7,8 @@
 // row/cell/column actions live in right-click context menus, a blank final row
 // lets users add entries without writing empty lines until content is entered,
 // and code-usage checks target the exact column, rows, and file globs chosen.
-import { batch, createEffect, createMemo, createSignal, createUniqueId, For, Index, on, onCleanup, onMount, Show, type JSX } from "solid-js";
-import { Portal } from "solid-js/web";
+import { createEffect, createMemo, createSignal, createUniqueId, flush, For, onCleanup, onSettled, Show, untrack } from "solid-js";
+import { Portal, type JSX } from "@solidjs/web";
 import {
 	addCsvColumn,
 	appendRowEdit,
@@ -494,7 +494,7 @@ export function TableView(props: { path: string; group?: number }) {
 			clearFindSelectionScope();
 			clearRowHeights();
 		}
-		const count = table().rows.length;
+		const count = parseCurrentCsv(next).rows.length;
 		if (count !== prevCount) clearRowHeights();
 		const cur = current();
 		if (cur !== null && cur >= count) setCurrent(count > 0 ? count - 1 : null);
@@ -595,43 +595,48 @@ export function TableView(props: { path: string; group?: number }) {
 	};
 
 	// Press Escape (when no edit input, popover, menu, modal, or drag is active) to close Find or clear cell selection.
-	createEffect(() => {
-		if (!activeCell() && !findOpen()) return;
-		const onKeyDown = (e: KeyboardEvent) => {
-			if (e.key !== "Escape" || e.defaultPrevented) return;
-			if (editing() || filterMenu() || colDrag() || rowDrag() || fillDrag() || modalOpen() || rowMenuOpen()) return;
-			const target = e.target as Node | null;
-			if (!target || !rootEl?.contains(target)) return;
-			const targetEl = target instanceof Element ? target : null;
-			if (findOpen()) {
+	const hasSelectionOrFind = createMemo(() => Boolean(activeCell() || findOpen()));
+	createEffect(
+		() => hasSelectionOrFind(),
+		(active) => {
+			if (!active) return;
+			const onKeyDown = (e: KeyboardEvent) => {
+				if (e.key !== "Escape" || e.defaultPrevented) return;
+				if (editing() || filterMenu() || colDrag() || rowDrag() || fillDrag() || modalOpen() || rowMenuOpen()) return;
+				const target = e.target as Node | null;
+				if (!target || !rootEl?.contains(target)) return;
+				const targetEl = target instanceof Element ? target : null;
+				if (findOpen()) {
+					e.preventDefault();
+					closeFind();
+					return;
+				}
+				if (targetEl?.closest("input, textarea")) return;
 				e.preventDefault();
-				closeFind();
-				return;
-			}
-			if (targetEl?.closest("input, textarea")) return;
-			e.preventDefault();
-			clearCellSelection();
-		};
-		window.addEventListener("keydown", onKeyDown);
-		onCleanup(() => window.removeEventListener("keydown", onKeyDown));
-	});
+				clearCellSelection();
+			};
+			window.addEventListener("keydown", onKeyDown);
+			return () => window.removeEventListener("keydown", onKeyDown);
+		},
+	);
 
 	/** Selected row indices (0-based in `table().rows`) for bulk operations. */
 	const [selectedRows, setSelectedRows] = createSignal<Set<number>>(new Set());
 	const [lastClickedRow, setLastClickedRow] = createSignal<number | null>(null);
 	// Prune selected row indices when rows are deleted from the file.
-	createEffect(() => {
-		const rowCount = table().rows.length;
-		const sel = selectedRows();
-		if (!sel.size) return;
-		let dirty = false;
-		for (const r of sel) if (r < 0 || r >= rowCount) dirty = true;
-		if (dirty) {
-			const next = new Set<number>();
-			for (const r of sel) if (r >= 0 && r < rowCount) next.add(r);
-			setSelectedRows(next);
-		}
-	});
+	createEffect(
+		() => ({ rowCount: table().rows.length, sel: selectedRows() }),
+		({ rowCount, sel }) => {
+			if (!sel.size) return;
+			let dirty = false;
+			for (const r of sel) if (r < 0 || r >= rowCount) dirty = true;
+			if (dirty) {
+				const next = new Set<number>();
+				for (const r of sel) if (r >= 0 && r < rowCount) next.add(r);
+				setSelectedRows(next);
+			}
+		},
+	);
 
 	/** Keeps a newly created/inserted row visible while editing even when filters are active. */
 	const [pinnedRow, setPinnedRow] = createSignal<number | null>(null);
@@ -690,7 +695,7 @@ export function TableView(props: { path: string; group?: number }) {
 	/** Workspace-scoped per-file view-state persistence (localStorage LRU, max 40 files; never edits CSV text — ADR 0002). */
 	const viewStateStorageKey = createMemo(() => tableViewStateStorageKey(state.workspace?.root));
 	const viewStateFileKey = createMemo(() => tableViewFileKey(props.path, state.workspace?.root));
-	let hydratedViewKey: string | null = null;
+	const [hydratedViewKey, setHydratedViewKey] = createSignal<string | null>(null);
 	const loadViewStore = (storageKey: string) => {
 		try {
 			return parseTableViewStateStore(typeof localStorage !== "undefined" ? localStorage.getItem(storageKey) : null);
@@ -707,9 +712,9 @@ export function TableView(props: { path: string; group?: number }) {
 	};
 
 	createEffect(
-		on([() => props.path, () => state.workspace?.root], () => {
+		() => [props.path, state.workspace?.root, viewStateStorageKey(), viewStateFileKey()] as const,
+		([, , storageKey, fileKey]) => {
 			clearCodeCheck();
-			hydratedViewKey = null;
 			setSelectedRows(new Set<number>());
 			setLastClickedRow(null);
 			setCellAnchor(null);
@@ -729,8 +734,6 @@ export function TableView(props: { path: string; group?: number }) {
 			rowHeights.clear();
 			setRowHeightVer((v) => v + 1);
 
-			const storageKey = viewStateStorageKey();
-			const fileKey = viewStateFileKey();
 			const colCount = table().header.length;
 			const saved = getTableViewState(loadViewStore(storageKey), fileKey, colCount > 0 ? colCount : undefined);
 			if (saved) {
@@ -748,43 +751,54 @@ export function TableView(props: { path: string; group?: number }) {
 				setOrder([]);
 				setGroupByCol(null);
 			}
-			hydratedViewKey = `${storageKey}::${fileKey}`;
-		}),
+			setHydratedViewKey(`${storageKey}::${fileKey}`);
+		},
 	);
 
 	// Invalidate cached off-screen row heights when column widths, column visibility, format overrides, or grouping change.
 	createEffect(
-		on([colWidths, hiddenCols], () => {
+		() => [colWidths(), hiddenCols()] as const,
+		() => {
 			clearRowHeights();
-		}, { defer: true }),
+		},
+		{ defer: true },
 	);
 	createEffect(
-		on([hasHeader, delimiterOverride], () => {
+		() => [hasHeader(), delimiterOverride()] as const,
+		() => {
 			clearFindSelectionScope();
 			clearRowHeights();
-		}, { defer: true }),
+		},
+		{ defer: true },
 	);
 	createEffect(
-		on([groupByCol, collapsedGroups], () => {
+		() => [groupByCol(), collapsedGroups()] as const,
+		() => {
 			clearRowHeights();
-		}, { defer: true }),
+		},
+		{ defer: true },
 	);
 
-	createEffect(() => {
-		const storageKey = viewStateStorageKey();
-		const fileKey = viewStateFileKey();
-		const snapshot = {
-			colWidths: colWidths(),
-			frozenCols: frozenCols(),
-			colOrder: colOrder(),
-			hiddenCols: [...hiddenCols()].sort((a, b) => a - b),
-			order: order(),
-			groupByCol: groupByCol(),
-		};
-		if (hydratedViewKey !== `${storageKey}::${fileKey}`) return;
-		const nextStore = upsertTableViewState(loadViewStore(storageKey), fileKey, snapshot);
-		writeViewStore(storageKey, nextStore);
-	});
+	createEffect(
+		() => ({
+			hydrated: hydratedViewKey(),
+			storageKey: viewStateStorageKey(),
+			fileKey: viewStateFileKey(),
+			snap: {
+				colWidths: colWidths(),
+				frozenCols: frozenCols(),
+				colOrder: colOrder(),
+				hiddenCols: [...hiddenCols()].sort((a, b) => a - b),
+				order: order(),
+				groupByCol: groupByCol(),
+			},
+		}),
+		({ hydrated, storageKey, fileKey, snap }) => {
+			if (hydrated !== `${storageKey}::${fileKey}`) return;
+			const nextStore = upsertTableViewState(loadViewStore(storageKey), fileKey, snap);
+			writeViewStore(storageKey, nextStore);
+		},
+	);
 	/** Complete left-to-right column order (including hidden columns) used when applying order to the file. */
 	const fullColumns = createMemo(() =>
 		fullColumnOrder(table().header.length, frozenCols(), colOrder().length ? colOrder() : undefined),
@@ -856,95 +870,112 @@ export function TableView(props: { path: string; group?: number }) {
 	let commitActiveEdit: ((val: string, move: CommitMove) => void) | null = null;
 	const pickerListboxId = createUniqueId();
 
-	createEffect(() => {
-		const ed = editing();
-		if (!ed) {
-			setPickerOpen(false);
-			setPickerAnchor(null);
+	createEffect(
+		() => editing(),
+		(ed) => {
+			if (!ed) {
+				setPickerOpen(false);
+				setPickerAnchor(null);
+				setPickerIdx(-1);
+				activeInputEl = undefined;
+				commitActiveEdit = null;
+				return;
+			}
+			const existingVal = ed.ghost ? "" : (table().rows[ed.row]?.[ed.column]?.text ?? "");
+			const initVal = ed.seed !== undefined ? ed.seed : existingVal;
+			const isMultiline = Boolean(ed.forceMultiline) || (ed.seed === undefined && !ed.ghost && /[\r\n]/.test(existingVal));
+			setEditDraft(initVal);
+			setEditDirty(ed.seed !== undefined);
 			setPickerIdx(-1);
-			activeInputEl = undefined;
-			commitActiveEdit = null;
-			return;
-		}
-		const existingVal = ed.ghost ? "" : (table().rows[ed.row]?.[ed.column]?.text ?? "");
-		const initVal = ed.seed !== undefined ? ed.seed : existingVal;
-		const isMultiline = Boolean(ed.forceMultiline) || (ed.seed === undefined && !ed.ghost && /[\r\n]/.test(existingVal));
-		setEditDraft(initVal);
-		setEditDirty(ed.seed !== undefined);
-		setPickerIdx(-1);
-		if (isMultiline) activeInputEl = undefined;
-		setPickerOpen(!isMultiline);
-	});
+			if (isMultiline) activeInputEl = undefined;
+			setPickerOpen(!isMultiline);
+		},
+	);
 
 	// Prune column filters, frozen/hidden columns, widths, custom order, grouping, popovers, or code-check state if columns were removed in Text view.
-	createEffect(() => {
-		const count = table().header.length;
-		const cur = colFilters();
-		let stale = false;
-		for (const col of cur.keys()) {
-			if (col < 0 || col >= count) stale = true;
-		}
-		if (stale) {
-			const next = new Map<number, ColumnFilter>();
-			for (const [col, f] of cur) if (col >= 0 && col < count) next.set(col, f);
-			setColFilters(next);
-		}
-		const prunedFrozen = pruneFrozenColumns(frozenCols(), count);
-		if (prunedFrozen.length !== frozenCols().length) setFrozenCols(prunedFrozen);
-		const curHidden = hiddenCols();
-		if (curHidden.size) {
-			const prunedHidden = pruneHiddenColumns(curHidden, count);
-			if (prunedHidden.size !== curHidden.size || [...prunedHidden].some((c) => !curHidden.has(c))) {
-				setHiddenCols(prunedHidden);
+	createEffect(
+		() => ({
+			count: table().header.length,
+			cur: colFilters(),
+			frozen: frozenCols(),
+			curHidden: hiddenCols(),
+			curWidths: colWidths(),
+			curOrder: colOrder(),
+			ac: activeCell(),
+			menu: filterMenu(),
+			curSort: order(),
+			curGroup: groupByCol(),
+			chk: codeCheck(),
+		}),
+		({ count, cur, frozen, curHidden, curWidths, curOrder, ac, menu, curSort, curGroup, chk }) => {
+			let stale = false;
+			for (const col of cur.keys()) {
+				if (col < 0 || col >= count) stale = true;
 			}
-		}
-		const curWidths = colWidths();
-		const widthKeys = Object.keys(curWidths);
-		if (widthKeys.some((k) => Number(k) < 0 || Number(k) >= count)) {
-			const nextWidths: Record<number, number> = {};
-			for (const k of widthKeys) {
-				const idx = Number(k);
-				if (idx >= 0 && idx < count) nextWidths[idx] = curWidths[idx]!;
+			if (stale) {
+				const next = new Map<number, ColumnFilter>();
+				for (const [col, f] of cur) if (col >= 0 && col < count) next.set(col, f);
+				setColFilters(next);
 			}
-			setColWidths(nextWidths);
-		}
-		const curOrder = colOrder();
-		if (curOrder.length) {
-			const prunedOrder = pruneColumnOrder(curOrder, count);
-			if (isNaturalOrder(prunedOrder)) setColOrder([]);
-			else if (prunedOrder.length !== curOrder.length || prunedOrder.some((c, i) => c !== curOrder[i])) setColOrder(prunedOrder);
-		}
-		const ac = activeCell();
-		if (ac && (ac.column < 0 || ac.column >= count)) {
-			const fallbackCol = visibleColumns()[0];
-			if (fallbackCol === undefined) setActiveCell(null);
-			else setActiveCell(ac.ghost ? { ghost: true, column: fallbackCol } : { ghost: false, row: ac.row, column: fallbackCol });
-		}
-		const menu = filterMenu();
-		if (menu && menu.column >= count) setFilterMenu(null);
-		const curSort = order();
-		if (curSort.length) {
-			const prunedSort = pruneSortSpecs(curSort, count);
-			if (prunedSort.length !== curSort.length) setOrder(prunedSort);
-		}
-		const curGroup = groupByCol();
-		if (curGroup !== null && (curGroup < 0 || curGroup >= count)) setGroupByCol(null);
-		const chk = codeCheck();
-		if (chk && chk.column >= count) {
-			clearCodeCheck();
-		}
-	});
+			const prunedFrozen = pruneFrozenColumns(frozen, count);
+			if (prunedFrozen.length !== frozen.length) setFrozenCols(prunedFrozen);
+			let nextHidden = curHidden;
+			if (curHidden.size) {
+				const prunedHidden = pruneHiddenColumns(curHidden, count);
+				if (prunedHidden.size !== curHidden.size || [...prunedHidden].some((c) => !curHidden.has(c))) {
+					nextHidden = prunedHidden;
+					setHiddenCols(prunedHidden);
+				}
+			}
+			const widthKeys = Object.keys(curWidths);
+			if (widthKeys.some((k) => Number(k) < 0 || Number(k) >= count)) {
+				const nextWidths: Record<number, number> = {};
+				for (const k of widthKeys) {
+					const idx = Number(k);
+					if (idx >= 0 && idx < count) nextWidths[idx] = curWidths[idx]!;
+				}
+				setColWidths(nextWidths);
+			}
+			let nextOrder = curOrder;
+			if (curOrder.length) {
+				const prunedOrder = pruneColumnOrder(curOrder, count);
+				if (isNaturalOrder(prunedOrder)) {
+					nextOrder = [];
+					setColOrder([]);
+				} else if (prunedOrder.length !== curOrder.length || prunedOrder.some((c, i) => c !== curOrder[i])) {
+					nextOrder = prunedOrder;
+					setColOrder(prunedOrder);
+				}
+			}
+			if (ac && (ac.column < 0 || ac.column >= count)) {
+				const fallbackCol = visualColumnOrder(count, prunedFrozen, nextOrder.length ? nextOrder : undefined, nextHidden)[0];
+				if (fallbackCol === undefined) setActiveCell(null);
+				else setActiveCell(ac.ghost ? { ghost: true, column: fallbackCol } : { ghost: false, row: ac.row, column: fallbackCol });
+			}
+			if (menu && menu.column >= count) setFilterMenu(null);
+			if (curSort.length) {
+				const prunedSort = pruneSortSpecs(curSort, count);
+				if (prunedSort.length !== curSort.length) setOrder(prunedSort);
+			}
+			if (curGroup !== null && (curGroup < 0 || curGroup >= count)) setGroupByCol(null);
+			if (chk && chk.column >= count) {
+				clearCodeCheck();
+			}
+		},
+	);
 
 	/** The ticket the rows are narrowed to: those whose ticket column names it, and no row that merely holds the same letters. */
 	const [onlyTicket, setOnlyTicket] = createSignal<string | null>(null);
 	// Rows asked for from a ticket's page.
-	createEffect(() => {
-		const asked = rowsAsked();
-		if (!asked || canonical(asked.path) !== canonical(props.path)) return;
-		setOnlyTicket(asked.ticket);
-		setPinnedRow(null);
-		rowsShown();
-	});
+	createEffect(
+		() => rowsAsked(),
+		(asked) => {
+			if (!asked || canonical(asked.path) !== canonical(props.path)) return;
+			setOnlyTicket(asked.ticket);
+			setPinnedRow(null);
+			rowsShown();
+		},
+	);
 	const ticketAt = () => ticketColumn(table());
 	const isTicketCol = (col: number) => col === ticketAt() || isDedicatedTicketColumn(headerName(col));
 	const tickets = createMemo(() => new Map(docs().flatMap((d) => (d.group === "tickets" && d.exists && d.ticket ? [[d.ticket.toLowerCase(), d] as const] : []))));
@@ -952,10 +983,16 @@ export function TableView(props: { path: string; group?: number }) {
 	const known = createMemo(() => new Set(tickets().keys()));
 	const namesTicket = (cells: Cell[], key: string) => keysIn(cells[ticketAt()]?.text ?? "", known()).some((named) => named.toLowerCase() === key.toLowerCase());
 	// A ticket no row names any more (the last was changed), or a table with no such column, has nothing to narrow to.
-	createEffect(() => {
-		const wanted = onlyTicket();
-		if (wanted !== null && (ticketAt() < 0 || !table().rows.some((cells) => namesTicket(cells, wanted)))) setOnlyTicket(null);
-	});
+	createEffect(
+		() => {
+			const wanted = onlyTicket();
+			if (wanted === null) return false;
+			return ticketAt() < 0 || !table().rows.some((cells) => namesTicket(cells, wanted));
+		},
+		(shouldClear) => {
+			if (shouldClear) setOnlyTicket(null);
+		},
+	);
 
 	/** Applies a picked dropdown option to the active input value (preserving prior comma-separated ticket keys in ticket columns). */
 	const resolvePickerChoice = (pickedValue: string, currentDraft: string): string => {
@@ -1197,7 +1234,8 @@ export function TableView(props: { path: string; group?: number }) {
 	{
 		let seq = 0;
 		createEffect(
-			on([() => state.workspace?.root, () => state.treeVersion, hasPathColumn], ([root, , needed]) => {
+			() => [state.workspace?.root, state.treeVersion, hasPathColumn()] as const,
+			([root, , needed]) => {
 				const mySeq = ++seq;
 				if (!root || !needed) {
 					setWsFileSet(null);
@@ -1217,7 +1255,7 @@ export function TableView(props: { path: string; group?: number }) {
 						if (mySeq === seq) setWsFileSet(null);
 					},
 				);
-			}),
+			},
 		);
 	}
 
@@ -1319,30 +1357,36 @@ export function TableView(props: { path: string; group?: number }) {
 										{(part) => {
 											const trimmed = part.trim();
 											if (!trimmed || trimmed === "/") return part;
-											const matchedKey = keyOf(part, known());
-											const ticket = matchedKey ? tickets().get(matchedKey.toLowerCase()) : undefined;
-											if (ticket) {
-												return (
-													<button
-														type="button"
-														tabindex={cellTabIndex()}
-														class="link table-ticket"
-														title={`${ticket.ticket}: ${ticket.title ?? ""}${ticket.status ? ` (${ticket.status})` : ""}. Open the ticket.`}
-														onClick={(e) => (e.stopPropagation(), void openFile(ticket.path))}
-														onDblClick={(e) => e.stopPropagation()}
-													>
-														{part}
-													</button>
-												);
-											}
-											if (hasTickets() && !TICKET_PLACEHOLDER_RE.test(trimmed)) {
-												return (
-													<span class="table-val-warn" title={`Ticket “${trimmed}” not found in workspace docs`}>
-														{part}
-													</span>
-												);
-											}
-											return part;
+											return (
+												<>
+													{() => {
+														const matchedKey = keyOf(part, known());
+														const ticket = matchedKey ? tickets().get(matchedKey.toLowerCase()) : undefined;
+														if (ticket) {
+															return (
+																<button
+																	type="button"
+																	tabindex={cellTabIndex()}
+																	class="link table-ticket"
+																	title={`${ticket.ticket}: ${ticket.title ?? ""}${ticket.status ? ` (${ticket.status})` : ""}. Open the ticket.`}
+																	onClick={(e) => (e.stopPropagation(), void openFile(ticket.path))}
+																	onDblClick={(e) => e.stopPropagation()}
+																>
+																	{part}
+																</button>
+															);
+														}
+														if (hasTickets() && !TICKET_PLACEHOLDER_RE.test(trimmed)) {
+															return (
+																<span class="table-val-warn" title={`Ticket “${trimmed}” not found in workspace docs`}>
+																	{part}
+																</span>
+															);
+														}
+														return part;
+													}}
+												</>
+											);
 										}}
 									</For>
 								);
@@ -1377,21 +1421,28 @@ export function TableView(props: { path: string; group?: number }) {
 						);
 					}
 					if (seg.kind === "ticket") {
-						const ticket = tickets().get(seg.key.toLowerCase());
-						if (ticket) {
-							return (
-								<button
-									type="button"
-									tabindex={cellTabIndex()}
-									class="link table-ticket"
-									title={`${ticket.ticket}: ${ticket.title ?? ""}${ticket.status ? ` (${ticket.status})` : ""}. Open the ticket.`}
-									onClick={(e) => (e.stopPropagation(), void openFile(ticket.path))}
-									onDblClick={(e) => e.stopPropagation()}
-								>
-									{seg.text}
-								</button>
-							);
-						}
+						return (
+							<>
+								{() => {
+									const ticket = tickets().get(seg.key.toLowerCase());
+									if (ticket) {
+										return (
+											<button
+												type="button"
+												tabindex={cellTabIndex()}
+												class="link table-ticket"
+												title={`${ticket.ticket}: ${ticket.title ?? ""}${ticket.status ? ` (${ticket.status})` : ""}. Open the ticket.`}
+												onClick={(e) => (e.stopPropagation(), void openFile(ticket.path))}
+												onDblClick={(e) => e.stopPropagation()}
+											>
+												{seg.text}
+											</button>
+										);
+									}
+									return seg.text;
+								}}
+							</>
+						);
 					}
 					return seg.text;
 				}}
@@ -1440,9 +1491,12 @@ export function TableView(props: { path: string; group?: number }) {
 		}
 		return set;
 	});
-	createEffect(() => {
-		if (onlyDupes() && duplicateRowSet().size === 0) setOnlyDupes(false);
-	});
+	createEffect(
+		() => onlyDupes() && duplicateRowSet().size === 0,
+		(shouldClear) => {
+			if (shouldClear) setOnlyDupes(false);
+		},
+	);
 
 	/**
 	 * Aggregates all 5 inline cell validation checks into a unified issue navigator (`F8`):
@@ -1538,9 +1592,12 @@ export function TableView(props: { path: string; group?: number }) {
 		return set;
 	});
 
-	createEffect(() => {
-		if (onlyIssues() && tableIssues().length === 0) setOnlyIssues(false);
-	});
+	createEffect(
+		() => onlyIssues() && tableIssues().length === 0,
+		(shouldClear) => {
+			if (shouldClear) setOnlyIssues(false);
+		},
+	);
 
 	/** Rows after global/ticket/missing/dupes/issues filters, before per-column filters (used for faceted header counts). */
 	const baseRows = createMemo(() => {
@@ -1610,9 +1667,12 @@ export function TableView(props: { path: string; group?: number }) {
 		if (hasActiveFilters()) setPinnedRow(row);
 	};
 
-	createEffect(() => {
-		if (!hasActiveFilters() && pinnedRow() !== null) setPinnedRow(null);
-	});
+	createEffect(
+		() => !hasActiveFilters() && pinnedRow() !== null,
+		(shouldClear) => {
+			if (shouldClear) setPinnedRow(null);
+		},
+	);
 
 	const isColFiltered = (col: number) => isColumnFilterActive(colFilters().get(col));
 
@@ -1660,29 +1720,33 @@ export function TableView(props: { path: string; group?: number }) {
 	};
 
 	// Dismiss open filter popover on outside click or Escape.
-	createEffect(() => {
-		if (!filterMenu()) return;
-		const onMouseDown = (e: MouseEvent) => {
-			const target = e.target as HTMLElement | null;
-			if (!target) return;
-			if (target.closest(".table-filter-pop")) return;
-			if (target.closest(".table-th-filter")) return;
-			closeFilterMenu(false);
-		};
-		const onKeyDown = (e: KeyboardEvent) => {
-			if (e.key === "Escape") {
-				e.preventDefault();
-				e.stopPropagation();
-				closeFilterMenu(true);
-			}
-		};
-		window.addEventListener("mousedown", onMouseDown, true);
-		window.addEventListener("keydown", onKeyDown, true);
-		onCleanup(() => {
-			window.removeEventListener("mousedown", onMouseDown, true);
-			window.removeEventListener("keydown", onKeyDown, true);
-		});
-	});
+	const hasFilterMenu = createMemo(() => Boolean(filterMenu()));
+	createEffect(
+		() => hasFilterMenu(),
+		(open) => {
+			if (!open) return;
+			const onMouseDown = (e: MouseEvent) => {
+				const target = e.target as HTMLElement | null;
+				if (!target) return;
+				if (target.closest(".table-filter-pop")) return;
+				if (target.closest(".table-th-filter")) return;
+				closeFilterMenu(false);
+			};
+			const onKeyDown = (e: KeyboardEvent) => {
+				if (e.key === "Escape") {
+					e.preventDefault();
+					e.stopPropagation();
+					closeFilterMenu(true);
+				}
+			};
+			window.addEventListener("mousedown", onMouseDown, true);
+			window.addEventListener("keydown", onKeyDown, true);
+			return () => {
+				window.removeEventListener("mousedown", onMouseDown, true);
+				window.removeEventListener("keydown", onKeyDown, true);
+			};
+		},
+	);
 
 	const disableBadgeForColumn = async (colName: string) => {
 		const next = removeColumnFromRules(csvConfig(), colName);
@@ -2021,80 +2085,82 @@ export function TableView(props: { path: string; group?: number }) {
 	});
 
 	// Measure mounted `tr` elements via `offsetHeight` so multiline/wrapped rows never drift during virtual scroll/jump.
-	createEffect(() => {
-		drawnEntries();
-		colWidths();
-		hiddenCols();
-		editing();
-		text();
-		const raf = requestAnimationFrame(() => {
-			if (!body) return;
-			let changed = false;
-			const trs = body.querySelectorAll<HTMLTableRowElement>("tr[data-row], tr[data-entry-key]");
-			for (const tr of trs) {
-				const rawKey = tr.getAttribute("data-row") ?? tr.getAttribute("data-entry-key");
-				if (rawKey === null) continue;
-				const key = Number(rawKey);
-				if (!Number.isInteger(key)) continue;
-				const h = tr.offsetHeight;
-				if (h > 0 && rowHeights.get(key) !== h) {
-					rowHeights.set(key, h);
-					changed = true;
+	createEffect(
+		() => [drawnEntries(), colWidths(), hiddenCols(), editing(), text()] as const,
+		() => {
+			const raf = requestAnimationFrame(() => {
+				if (!body) return;
+				let changed = false;
+				const trs = body.querySelectorAll<HTMLTableRowElement>("tr[data-row], tr[data-entry-key]");
+				for (const tr of trs) {
+					const rawKey = tr.getAttribute("data-row") ?? tr.getAttribute("data-entry-key");
+					if (rawKey === null) continue;
+					const key = Number(rawKey);
+					if (!Number.isInteger(key)) continue;
+					const h = tr.offsetHeight;
+					if (h > 0 && rowHeights.get(key) !== h) {
+						rowHeights.set(key, h);
+						changed = true;
+					}
 				}
-			}
-			if (changed) setRowHeightVer((v) => v + 1);
-		});
-		onCleanup(() => cancelAnimationFrame(raf));
-	});
+				if (changed) setRowHeightVer((v) => v + 1);
+			});
+			return () => cancelAnimationFrame(raf);
+		},
+	);
 
 	// Measure cumulative widths of frozen columns so multi-column freezing locks seamlessly with zero overlap/gap.
-	createEffect(() => {
-		const count = visibleFrozenCount();
-		// Track visual layout dependencies so resizing/reordering/hiding/checking recalculates sticky offsets.
-		visibleColumns();
-		colWidths();
-		hiddenCols();
-		table();
-		rows();
-		codeCheck();
-		order();
-		groupByCol();
-		if (!count) {
-			setFrozenLefts([]);
-			return;
-		}
-		const measure = () => {
-			if (!headRow) return;
-			const selTh = headRow.querySelector<HTMLElement>("th.table-sel-col");
-			const dataThs = headRow.querySelectorAll<HTMLElement>("th[data-col]");
-			const next: number[] = [];
-			let x = selTh ? selTh.getBoundingClientRect().width : 0;
-			for (let i = 0; i < count; i++) {
-				next.push(x);
-				const th = dataThs[i];
-				x += th ? th.getBoundingClientRect().width : 0;
+	createEffect(
+		() => ({
+			count: visibleFrozenCount(),
+			// Track visual layout dependencies so resizing/reordering/hiding/checking recalculates sticky offsets.
+			cols: visibleColumns(),
+			widths: colWidths(),
+			hidden: hiddenCols(),
+			t: table(),
+			r: rows(),
+			chk: codeCheck(),
+			ord: order(),
+			grp: groupByCol(),
+		}),
+		({ count }) => {
+			if (!count) {
+				setFrozenLefts([]);
+				return;
 			}
-			setFrozenLefts((prev) =>
-				prev.length === next.length && prev.every((v, idx) => Math.abs(v - next[idx]!) < 0.25) ? prev : next,
-			);
-		};
-		const raf = requestAnimationFrame(measure);
-		let ro: ResizeObserver | undefined;
-		if (typeof ResizeObserver !== "undefined" && headRow) {
-			ro = new ResizeObserver(measure);
-			const selTh = headRow.querySelector<HTMLElement>("th.table-sel-col");
-			if (selTh) ro.observe(selTh);
-			const dataThs = headRow.querySelectorAll<HTMLElement>("th[data-col]");
-			for (let i = 0; i < count; i++) {
-				const th = dataThs[i];
-				if (th) ro.observe(th);
+			const measure = () => {
+				if (!headRow) return;
+				const selTh = headRow.querySelector<HTMLElement>("th.table-sel-col");
+				const dataThs = headRow.querySelectorAll<HTMLElement>("th[data-col]");
+				const next: number[] = [];
+				let x = selTh ? selTh.getBoundingClientRect().width : 0;
+				for (let i = 0; i < count; i++) {
+					next.push(x);
+					const th = dataThs[i];
+					x += th ? th.getBoundingClientRect().width : 0;
+				}
+				setFrozenLefts((prev) =>
+					prev.length === next.length && prev.every((v, idx) => Math.abs(v - next[idx]!) < 0.25) ? prev : next,
+				);
+			};
+			const raf = requestAnimationFrame(measure);
+			let ro: ResizeObserver | undefined;
+			if (typeof ResizeObserver !== "undefined" && headRow) {
+				ro = new ResizeObserver(measure);
+				const selTh = headRow.querySelector<HTMLElement>("th.table-sel-col");
+				if (selTh) ro.observe(selTh);
+				const dataThs = headRow.querySelectorAll<HTMLElement>("th[data-col]");
+				for (let i = 0; i < count; i++) {
+					const th = dataThs[i];
+					if (th) ro.observe(th);
+				}
 			}
-		}
-		onCleanup(() => {
-			cancelAnimationFrame(raf);
-			ro?.disconnect();
-		});
-	});
+			return () => {
+				cancelAnimationFrame(raf);
+				ro?.disconnect();
+			};
+		},
+	);
 
 	const visEntryIdxForRow = (rowIdx: number) => displayEntries().findIndex((e) => e.kind === "row" && e.index === rowIdx);
 
@@ -2156,9 +2222,10 @@ export function TableView(props: { path: string; group?: number }) {
 				nudgeCellOutFromHeader(td);
 				return;
 			}
+			const latestVisIdx = visEntryIdxForRow(row);
 			const win = virtualWindow();
-			if (win.virtual && scrollEl && visIdx >= 0) {
-				const estTop = win.offsets[visIdx] ?? visIdx * DEFAULT_ROW_HEIGHT;
+			if (win.virtual && scrollEl && latestVisIdx >= 0) {
+				const estTop = win.offsets[latestVisIdx] ?? latestVisIdx * DEFAULT_ROW_HEIGHT;
 				const targetTop = Math.max(0, estTop - Math.floor((viewportH() || 600) / 3));
 				scrollEl.scrollTop = targetTop;
 				setScrollTop(targetTop);
@@ -2400,7 +2467,12 @@ export function TableView(props: { path: string; group?: number }) {
 		if (!src) return;
 		const srcBounds = src;
 		let literal = e.altKey;
-		setFillDrag({ src: srcBounds, axis: null, target: null, literal });
+		let latestFill: FillDrag = { src: srcBounds, axis: null, target: null, literal };
+		const setFillState = (next: FillDrag) => {
+			latestFill = next;
+			setFillDrag(next);
+		};
+		setFillState(latestFill);
 
 		const cleanup = () => {
 			window.removeEventListener("pointermove", onMove, true);
@@ -2438,19 +2510,19 @@ export function TableView(props: { path: string; group?: number }) {
 			const maxX = Math.max(dxRight, dxLeft);
 
 			if (maxY === 0 && maxX === 0) {
-				setFillDrag({ src: srcBounds, axis: null, target: null, literal });
+				setFillState({ src: srcBounds, axis: null, target: null, literal });
 				return;
 			}
 			if (maxY >= maxX) {
 				if (dyDown > 0) {
-					setFillDrag({
+					setFillState({
 						src: srcBounds,
 						axis: "down",
 						target: { r1: srcBounds.r2 + 1, r2: vr, c1: srcBounds.c1, c2: srcBounds.c2 },
 						literal,
 					});
 				} else {
-					setFillDrag({
+					setFillState({
 						src: srcBounds,
 						axis: "up",
 						target: { r1: vr, r2: srcBounds.r1 - 1, c1: srcBounds.c1, c2: srcBounds.c2 },
@@ -2458,14 +2530,14 @@ export function TableView(props: { path: string; group?: number }) {
 					});
 				}
 			} else if (dxRight > 0) {
-				setFillDrag({
+				setFillState({
 					src: srcBounds,
 					axis: "right",
 					target: { r1: srcBounds.r1, r2: srcBounds.r2, c1: srcBounds.c2 + 1, c2: vc },
 					literal,
 				});
 			} else {
-				setFillDrag({
+				setFillState({
 					src: srcBounds,
 					axis: "left",
 					target: { r1: srcBounds.r1, r2: srcBounds.r2, c1: vc, c2: srcBounds.c1 - 1 },
@@ -2494,12 +2566,13 @@ export function TableView(props: { path: string; group?: number }) {
 			}
 			if (ev.key === "Alt") {
 				literal = ev.altKey;
+				latestFill = { ...latestFill, literal: ev.altKey };
 				setFillDrag((cur) => (cur ? { ...cur, literal: ev.altKey } : cur));
 			}
 		};
 
 		const onUp = (ev: PointerEvent) => {
-			const drag = fillDrag();
+			const drag = latestFill;
 			const useLiteral = ev.altKey || Boolean(drag?.literal);
 			cleanup();
 			setFillDrag(null);
@@ -2853,7 +2926,7 @@ export function TableView(props: { path: string; group?: number }) {
 		model.pushEditOperations([], [{ range: { startLineNumber: pos.lineNumber, startColumn: pos.column, endLineNumber: pos.lineNumber, endColumn: pos.column }, text: edit.text }], () => null);
 		model.pushStackElement();
 
-		const newRow = table().rows.length - 1;
+		const newRow = parseCurrentCsv(model.getValue()).rows.length - 1;
 		pinRowIfFiltered(newRow);
 		setCurrent(newRow);
 
@@ -2877,7 +2950,7 @@ export function TableView(props: { path: string; group?: number }) {
 		}
 		setEditing(null);
 		if (move === "down") focusGhostCell(column);
-		else if (move === "stay") focusCell(newRow, column);
+		else if (move === "stay") queueMicrotask(() => focusCell(newRow, column));
 	};
 
 	const moveRowTo = (fromRow: number, toRow: number, focusCol?: number) => {
@@ -2922,7 +2995,7 @@ export function TableView(props: { path: string; group?: number }) {
 		model.pushStackElement();
 
 		const col = focusCol ?? activeCell()?.column ?? visibleColumns()[0] ?? 0;
-		focusCell(toRow, col);
+		queueMicrotask(() => focusCell(toRow, col));
 	};
 
 	const onRowGripPointerDown = (e: PointerEvent, rowIdx: number) => {
@@ -2933,6 +3006,7 @@ export function TableView(props: { path: string; group?: number }) {
 		const startY = e.clientY;
 		const label = table().rows[rowIdx]?.[0]?.text.trim() || `Row ${rowIdx + 1}`;
 		let dragging = false;
+		let latestRowDrag: RowDrag | null = null;
 
 		const computeDrop = (clientY: number): { dropRow: number; side: "before" | "after" } => {
 			if (!body) return { dropRow: rowIdx, side: "before" };
@@ -2976,11 +3050,12 @@ export function TableView(props: { path: string; group?: number }) {
 				else if (ev.clientY < sRect.top + 48) scrollEl.scrollTop -= 14;
 			}
 			const { dropRow, side } = computeDrop(ev.clientY);
-			setRowDrag({ fromRow: rowIdx, dropRow, side, label: shortLabel(label), x: ev.clientX, y: ev.clientY });
+			latestRowDrag = { fromRow: rowIdx, dropRow, side, label: shortLabel(label), x: ev.clientX, y: ev.clientY };
+			setRowDrag(latestRowDrag);
 		};
 
 		const onUp = () => {
-			const drag = rowDrag();
+			const drag = latestRowDrag;
 			cleanup();
 			if (dragging && drag) {
 				let target = drag.dropRow + (drag.side === "after" ? 1 : 0);
@@ -3021,18 +3096,16 @@ export function TableView(props: { path: string; group?: number }) {
 		if (!edit) return;
 		const targetRow = position === "above" ? row : row + 1;
 		const pos = model.getPositionAt(edit.offset);
-		batch(() => {
-			model.pushStackElement();
-			model.pushEditOperations([], [{ range: { startLineNumber: pos.lineNumber, startColumn: pos.column, endLineNumber: pos.lineNumber, endColumn: pos.column }, text: edit.text }], () => null);
-			model.pushStackElement();
-			setSelectedRows((prev) => (prev.size ? remapRowSetOnInsert(prev, targetRow) : prev));
-			setLastClickedRow((prev) => remapRowIndexOnInsert(prev, targetRow));
-			setCellAnchor((prev) => (prev ? { ...prev, row: remapRowIndexOnInsert(prev.row, targetRow)! } : null));
-			clearFindSelectionScope();
-			clearRowHeights();
-			pinRowIfFiltered(targetRow);
-			setCurrent(targetRow);
-		});
+		model.pushStackElement();
+		model.pushEditOperations([], [{ range: { startLineNumber: pos.lineNumber, startColumn: pos.column, endLineNumber: pos.lineNumber, endColumn: pos.column }, text: edit.text }], () => null);
+		model.pushStackElement();
+		setSelectedRows((prev) => (prev.size ? remapRowSetOnInsert(prev, targetRow) : prev));
+		setLastClickedRow((prev) => remapRowIndexOnInsert(prev, targetRow));
+		setCellAnchor((prev) => (prev ? { ...prev, row: remapRowIndexOnInsert(prev.row, targetRow)! } : null));
+		clearFindSelectionScope();
+		clearRowHeights();
+		pinRowIfFiltered(targetRow);
+		setCurrent(targetRow);
 		queueMicrotask(() => setEditing({ ghost: false, row: targetRow, column: visibleColumns()[0] ?? 0 }));
 	};
 
@@ -3044,19 +3117,17 @@ export function TableView(props: { path: string; group?: number }) {
 		if (!edit) return;
 		const targetRow = row + 1;
 		const pos = model.getPositionAt(edit.offset);
-		batch(() => {
-			model.pushStackElement();
-			model.pushEditOperations([], [{ range: { startLineNumber: pos.lineNumber, startColumn: pos.column, endLineNumber: pos.lineNumber, endColumn: pos.column }, text: edit.text }], () => null);
-			model.pushStackElement();
-			setSelectedRows((prev) => (prev.size ? remapRowSetOnInsert(prev, targetRow) : prev));
-			setLastClickedRow((prev) => remapRowIndexOnInsert(prev, targetRow));
-			setCellAnchor((prev) => (prev ? { ...prev, row: remapRowIndexOnInsert(prev.row, targetRow)! } : null));
-			clearFindSelectionScope();
-			clearRowHeights();
-			pinRowIfFiltered(targetRow);
-			setCurrent(targetRow);
-		});
-		focusCell(targetRow, visibleColumns()[0] ?? 0);
+		model.pushStackElement();
+		model.pushEditOperations([], [{ range: { startLineNumber: pos.lineNumber, startColumn: pos.column, endLineNumber: pos.lineNumber, endColumn: pos.column }, text: edit.text }], () => null);
+		model.pushStackElement();
+		setSelectedRows((prev) => (prev.size ? remapRowSetOnInsert(prev, targetRow) : prev));
+		setLastClickedRow((prev) => remapRowIndexOnInsert(prev, targetRow));
+		setCellAnchor((prev) => (prev ? { ...prev, row: remapRowIndexOnInsert(prev.row, targetRow)! } : null));
+		clearFindSelectionScope();
+		clearRowHeights();
+		pinRowIfFiltered(targetRow);
+		setCurrent(targetRow);
+		queueMicrotask(() => focusCell(targetRow, visibleColumns()[0] ?? 0));
 	};
 
 	const deleteRowAt = (row: number) => {
@@ -3065,28 +3136,25 @@ export function TableView(props: { path: string; group?: number }) {
 		if (!span) return;
 		const from = model.getPositionAt(span.start);
 		const to = model.getPositionAt(span.end);
-		let nextRow: number | null = null;
-		batch(() => {
-			setSelectedRows((prev) => (prev.size ? remapRowSetOnDelete(prev, row) : prev));
-			setLastClickedRow((prev) => remapRowIndexOnDelete(prev, row));
-			setCellAnchor((prev) => {
-				if (!prev) return null;
-				const remapped = remapRowIndexOnDelete(prev.row, row);
-				return remapped === null ? null : { ...prev, row: remapped };
-			});
-			clearFindSelectionScope();
-			clearRowHeights();
-			model.pushStackElement();
-			model.pushEditOperations([], [{ range: { startLineNumber: from.lineNumber, startColumn: from.column, endLineNumber: to.lineNumber, endColumn: to.column }, text: "" }], () => null);
-			model.pushStackElement();
-			const remaining = table().rows.length;
-			nextRow = remaining > 0 ? Math.min(row, remaining - 1) : null;
-			setCurrent(nextRow);
-			setEditing(null);
-			const pin = pinnedRow();
-			if (pin === row) setPinnedRow(null);
-			else if (pin !== null && pin > row) setPinnedRow(pin - 1);
+		setSelectedRows((prev) => (prev.size ? remapRowSetOnDelete(prev, row) : prev));
+		setLastClickedRow((prev) => remapRowIndexOnDelete(prev, row));
+		setCellAnchor((prev) => {
+			if (!prev) return null;
+			const remapped = remapRowIndexOnDelete(prev.row, row);
+			return remapped === null ? null : { ...prev, row: remapped };
 		});
+		clearFindSelectionScope();
+		clearRowHeights();
+		model.pushStackElement();
+		model.pushEditOperations([], [{ range: { startLineNumber: from.lineNumber, startColumn: from.column, endLineNumber: to.lineNumber, endColumn: to.column }, text: "" }], () => null);
+		model.pushStackElement();
+		const remaining = parseCurrentCsv(model.getValue()).rows.length;
+		const nextRow: number | null = remaining > 0 ? Math.min(row, remaining - 1) : null;
+		setCurrent(nextRow);
+		setEditing(null);
+		const pin = pinnedRow();
+		if (pin === row) setPinnedRow(null);
+		else if (pin !== null && pin > row) setPinnedRow(pin - 1);
 		queueMicrotask(() => {
 			if (nextRow !== null) focusCell(nextRow, activeCell()?.column ?? visibleColumns()[0] ?? 0);
 			else rootEl?.focus();
@@ -3354,40 +3422,42 @@ export function TableView(props: { path: string; group?: number }) {
 
 		// Remap sort, grouping, code-check, frozen/hidden/order/widths/filters for remaining columns cleanly.
 		const curSort = order();
-		if (curSort.length) setOrder(remapSortSpecs(curSort, shift));
+		const nextSort = curSort.length ? remapSortSpecs(curSort, shift) : [];
+		if (curSort.length) setOrder(nextSort);
 		const curGrp = groupByCol();
-		if (curGrp !== null) {
-			const mapped = shift(curGrp);
-			setGroupByCol(mapped >= 0 ? mapped : null);
-		}
+		const nextGrp = curGrp !== null ? (shift(curGrp) >= 0 ? shift(curGrp) : null) : null;
+		if (curGrp !== null) setGroupByCol(nextGrp);
 		const curChk = codeCheck();
+		let nextChk: CodeCheckResult | null = curChk;
 		if (curChk) {
 			const mapped = shift(curChk.column);
-			if (mapped >= 0) setCodeCheck({ ...curChk, column: mapped });
-			else clearCodeCheck();
+			if (mapped >= 0) {
+				nextChk = { ...curChk, column: mapped };
+				setCodeCheck(nextChk);
+			} else {
+				nextChk = null;
+				clearCodeCheck();
+			}
 		}
-		setFrozenCols((prev) => prev.map(shift).filter((c) => c >= 0));
-		setHiddenCols((prev) => new Set([...prev].map(shift).filter((c) => c >= 0)));
-		setColOrder((prev) => {
-			const remapped = prev.map(shift).filter((c) => c >= 0);
-			return isNaturalOrder(remapped) ? [] : remapped;
-		});
-		setColWidths((prev) => {
-			const out: Record<number, number> = {};
-			for (const [k, w] of Object.entries(prev)) {
-				const m = shift(Number(k));
-				if (m >= 0) out[m] = w;
-			}
-			return out;
-		});
-		setColFilters((prev) => {
-			const out = new Map<number, ColumnFilter>();
-			for (const [k, f] of prev) {
-				const m = shift(k);
-				if (m >= 0) out.set(m, f);
-			}
-			return out;
-		});
+		const nextFrozen = frozenCols().map(shift).filter((c) => c >= 0);
+		setFrozenCols(nextFrozen);
+		const nextHidden = new Set([...hiddenCols()].map(shift).filter((c) => c >= 0));
+		setHiddenCols(nextHidden);
+		const remappedOrder = colOrder().map(shift).filter((c) => c >= 0);
+		const nextOrder = isNaturalOrder(remappedOrder) ? [] : remappedOrder;
+		setColOrder(nextOrder);
+		const nextWidths: Record<number, number> = {};
+		for (const [k, w] of Object.entries(colWidths())) {
+			const m = shift(Number(k));
+			if (m >= 0) nextWidths[m] = w;
+		}
+		setColWidths(nextWidths);
+		const nextFilters = new Map<number, ColumnFilter>();
+		for (const [k, f] of colFilters()) {
+			const m = shift(k);
+			if (m >= 0) nextFilters.set(m, f);
+		}
+		setColFilters(nextFilters);
 		setEditing(null);
 		setCellAnchor(null);
 		clearFindSelectionScope();
@@ -3396,7 +3466,16 @@ export function TableView(props: { path: string; group?: number }) {
 		applyFullText(next, `Deleted column “${name}” (Ctrl+Z to undo).`);
 		const afterAlt = model.getAlternativeVersionId();
 		if (afterAlt !== beforeAlt) {
-			const afterSnap = captureColUi();
+			const afterSnap: ColumnUiSnapshot = {
+				colFilters: new Map(nextFilters),
+				order: nextSort.map((s) => ({ ...s })),
+				frozenCols: [...nextFrozen],
+				hiddenCols: new Set(nextHidden),
+				colOrder: [...nextOrder],
+				colWidths: { ...nextWidths },
+				codeCheck: nextChk ? { ...nextChk } : null,
+				groupByCol: nextGrp,
+			};
 			colSnapshots.set(colSnapshotTransitionKey(afterAlt, beforeAlt), beforeSnap);
 			colSnapshots.set(colSnapshotTransitionKey(beforeAlt, afterAlt), afterSnap);
 		}
@@ -3910,6 +3989,12 @@ export function TableView(props: { path: string; group?: number }) {
 		return { rows: rowSet, cols: colSet, rowCount: rowSet.size, colCount: colSet.size };
 	};
 
+	const revealFirstMatchAfterFlush = () => {
+		flush();
+		const first = findMatches()[0];
+		if (first) revealMatch(first);
+	};
+
 	const toggleFindInSelection = () => {
 		if (findInSelection()) {
 			setFindInSelection(false);
@@ -3925,8 +4010,7 @@ export function TableView(props: { path: string; group?: number }) {
 			setFindInSelection(true);
 		}
 		setFindMatchIdx(0);
-		const first = findMatches()[0];
-		if (first) revealMatch(first);
+		revealFirstMatchAfterFlush();
 	};
 
 	const findMatches = createMemo(() => {
@@ -3998,7 +4082,17 @@ export function TableView(props: { path: string; group?: number }) {
 			if (td) {
 				td.scrollIntoView({ block: "nearest", inline: "nearest" });
 				nudgeCellOutFromHeader(td);
+				return;
 			}
+			const latestEntryIdx = visEntryIdxForRow(match.row);
+			ensureVisRowInWindow(latestEntryIdx >= 0 ? latestEntryIdx : match.visRow, "center");
+			requestAnimationFrame(() => {
+				const retry = body?.querySelector<HTMLElement>(`tr[data-row="${match.row}"] > td[data-col="${match.column}"]`);
+				if (retry) {
+					retry.scrollIntoView({ block: "nearest", inline: "nearest" });
+					nudgeCellOutFromHeader(retry);
+				}
+			});
 		});
 	};
 
@@ -4045,6 +4139,7 @@ export function TableView(props: { path: string; group?: number }) {
 		const query = findQuery();
 		const compiled = compiledFindMatcher();
 		if (!model || !match || !query || !compiled || !compiled.ok) return;
+		const prevIdx = currentMatchIdx();
 		const opts = findOptions();
 		const rep = replaceText();
 		const oldVal = table().rows[match.row]?.[match.column]?.text ?? "";
@@ -4053,14 +4148,15 @@ export function TableView(props: { path: string; group?: number }) {
 			pinRowIfFiltered(match.row);
 			changeCell(match.row, match.column, nextVal);
 		}
+		flush();
 		// If replacement still matches query (e.g. replacing "a" with "aa"), advance index to avoid sticking on the same cell.
 		compiled.regex.lastIndex = 0;
 		const stillMatches = compiled.regex.test(nextVal);
 		const remaining = findMatches();
 		if (!remaining.length) return;
 		const nextIdx = stillMatches
-			? (((currentMatchIdx() + 1) % remaining.length) + remaining.length) % remaining.length
-			: Math.min(currentMatchIdx(), remaining.length - 1);
+			? (((prevIdx + 1) % remaining.length) + remaining.length) % remaining.length
+			: Math.min(prevIdx, remaining.length - 1);
 		setFindMatchIdx(nextIdx);
 		revealMatch(remaining[nextIdx]!);
 	};
@@ -4202,9 +4298,10 @@ export function TableView(props: { path: string; group?: number }) {
 				td.focus();
 				return true;
 			};
+			const latestEntryIdx = visEntryIdxForRow(matchedRow);
 			const win = virtualWindow();
-			if (!tryFocus() && win.virtual && scrollEl && entryIdx >= 0) {
-				const estTop = win.offsets[entryIdx] ?? entryIdx * DEFAULT_ROW_HEIGHT;
+			if (!tryFocus() && win.virtual && scrollEl && latestEntryIdx >= 0) {
+				const estTop = win.offsets[latestEntryIdx] ?? latestEntryIdx * DEFAULT_ROW_HEIGHT;
 				const targetTop = Math.max(0, estTop - Math.floor((viewportH() || 600) / 2));
 				scrollEl.scrollTop = targetTop;
 				setScrollTop(targetTop);
@@ -4258,20 +4355,31 @@ export function TableView(props: { path: string; group?: number }) {
 	};
 
 	// Register Find/Replace and Outline column-jump bridges for MenuBar & Document Outline.
-	createEffect(() => {
-		const grp = resolvedGroup();
-		const opener = (rep?: boolean) => openFind(Boolean(rep));
-		const jumper = (colIdx: number) => jumpToColumn(colIdx);
-		registerTableFind(grp, opener);
-		registerTableColumnJump(grp, jumper);
-		onCleanup(() => {
-			registerTableFind(grp, undefined);
-			registerTableColumnJump(grp, undefined);
-		});
-	});
+	createEffect(
+		() => resolvedGroup(),
+		(grp) => {
+			const opener = (rep?: boolean) => openFind(Boolean(rep));
+			const jumper = (colIdx: number) => jumpToColumn(colIdx);
+			registerTableFind(grp, opener);
+			registerTableColumnJump(grp, jumper);
+			return () => {
+				registerTableFind(grp, undefined);
+				registerTableColumnJump(grp, undefined);
+			};
+		},
+	);
 
-	// Honor pending reveals on mount and live `revealSignal` updates from Search / Outline / Nav history.
-	onMount(() => {
+	// Honor pending reveals on mount, live `revealSignal` updates from Search / Outline / Nav history, and scroll viewport observer.
+	onSettled(() => {
+		let ro: ResizeObserver | undefined;
+		if (scrollEl) {
+			const el = scrollEl;
+			setViewportH(el.clientHeight || 640);
+			if (typeof ResizeObserver !== "undefined") {
+				ro = new ResizeObserver(() => setViewportH(el.clientHeight || 640));
+				ro.observe(el);
+			}
+		}
 		const pending = takeReveal(props.path);
 		if (pending) revealAt(pending);
 		const stopReveal = revealSignal.listen((path) => {
@@ -4279,7 +4387,10 @@ export function TableView(props: { path: string; group?: number }) {
 			const r = takeReveal(path) ?? takeReveal(props.path);
 			if (r) revealAt(r);
 		});
-		onCleanup(stopReveal);
+		return () => {
+			ro?.disconnect();
+			stopReveal();
+		};
 	});
 
 	// --- Inline status tally strip (`tally(table(), "status")`) --------------
@@ -4470,14 +4581,15 @@ export function TableView(props: { path: string; group?: number }) {
 		const count = table().header.length;
 		const next = hideColumn(hiddenCols(), col, count);
 		if (next.size === hiddenCols().size) return;
-		if (isFrozenCol(col)) setFrozenCols((prev) => prev.filter((c) => c !== col));
+		const nextFrozen = isFrozenCol(col) ? frozenCols().filter((c) => c !== col) : frozenCols();
+		if (isFrozenCol(col)) setFrozenCols(nextFrozen);
 		if (filterMenu()?.column === col) closeFilterMenu(false);
 		const ed = editing();
 		if (ed && ed.column === col) setEditing(null);
 		setHiddenCols(next);
 		const ac = activeCell();
 		if (ac && ac.column === col) {
-			const fallback = visibleColumns()[0];
+			const fallback = visualColumnOrder(count, nextFrozen, colOrder().length ? colOrder() : undefined, next)[0];
 			if (fallback === undefined) setActiveCell(null);
 			else setActiveCell(ac.ghost ? { ghost: true, column: fallback } : { ghost: false, row: ac.row, column: fallback });
 		}
@@ -4651,8 +4763,9 @@ export function TableView(props: { path: string; group?: number }) {
 		setColFilters(nextFilters);
 
 		const curSort = order();
+		const nextSort = curSort.length ? remapSortSpecs(curSort, (oldCol) => remapColumnIndex(oldCol, applied)) : [];
 		if (curSort.length) {
-			setOrder(remapSortSpecs(curSort, (oldCol) => remapColumnIndex(oldCol, applied)));
+			setOrder(nextSort);
 		}
 
 		const nextFrozen = frozenCols()
@@ -4685,21 +4798,32 @@ export function TableView(props: { path: string; group?: number }) {
 			setCellAnchor(mapped >= 0 ? { row: anc.row, column: mapped } : null);
 		}
 		const curGrp = groupByCol();
+		const nextGrp = curGrp !== null ? (remapColumnIndex(curGrp, applied) >= 0 ? remapColumnIndex(curGrp, applied) : null) : null;
 		if (curGrp !== null) {
-			const mapped = remapColumnIndex(curGrp, applied);
-			setGroupByCol(mapped >= 0 ? mapped : null);
+			setGroupByCol(nextGrp);
 		}
 
 		const curCheck = codeCheck();
+		let nextCheck: CodeCheckResult | null = curCheck;
 		if (curCheck) {
 			const mapped = remapColumnIndex(curCheck.column, applied);
-			setCodeCheck(mapped >= 0 ? { ...curCheck, column: mapped } : null);
+			nextCheck = mapped >= 0 ? { ...curCheck, column: mapped } : null;
+			setCodeCheck(nextCheck);
 		}
 
 		setColOrder([]);
 		const afterAlt = model.getAlternativeVersionId();
 		if (afterAlt !== beforeAlt) {
-			const afterSnap = captureColUi();
+			const afterSnap: ColumnUiSnapshot = {
+				colFilters: new Map(nextFilters),
+				order: nextSort.map((s) => ({ ...s })),
+				frozenCols: [...nextFrozen],
+				hiddenCols: new Set(nextHidden),
+				colOrder: [],
+				colWidths: { ...nextWidths },
+				codeCheck: nextCheck ? { ...nextCheck } : null,
+				groupByCol: nextGrp,
+			};
 			colSnapshots.set(colSnapshotTransitionKey(afterAlt, beforeAlt), beforeSnap);
 			colSnapshots.set(colSnapshotTransitionKey(beforeAlt, afterAlt), afterSnap);
 		}
@@ -4721,6 +4845,7 @@ export function TableView(props: { path: string; group?: number }) {
 		const startX = e.clientX;
 		const label = headerName(col) || `Column ${col + 1}`;
 		let dragging = false;
+		let latestColDrag: ColDrag | null = null;
 
 		const computeDrop = (clientX: number): { dropVis: number; side: "before" | "after" } => {
 			if (!headRow) return { dropVis: visIdx, side: "before" };
@@ -4768,11 +4893,12 @@ export function TableView(props: { path: string; group?: number }) {
 				else if (ev.clientX < sRect.left + 28) scrollEl.scrollLeft -= 14;
 			}
 			const { dropVis, side } = computeDrop(ev.clientX);
-			setColDrag({ col, label, fromVis: visIdx, dropVis, side, x: ev.clientX, y: ev.clientY });
+			latestColDrag = { col, label, fromVis: visIdx, dropVis, side, x: ev.clientX, y: ev.clientY };
+			setColDrag(latestColDrag);
 		};
 
 		const onUp = () => {
-			const drag = colDrag();
+			const drag = latestColDrag;
 			cleanup();
 			if (dragging) {
 				suppressSortClick = true;
@@ -5490,7 +5616,7 @@ export function TableView(props: { path: string; group?: number }) {
 	return (
 		<div
 			ref={rootEl}
-			tabIndex={-1}
+			tabindex={-1}
 			class="table-view"
 			onPaste={(e) => {
 				if (editing()) return;
@@ -5587,7 +5713,7 @@ export function TableView(props: { path: string; group?: number }) {
 						<button
 							type="button"
 							class="doc-status table-dupes-chip table-issues-toggle"
-							aria-pressed={onlyIssues()}
+							aria-pressed={onlyIssues() ? "true" : "false"}
 							title={`${summarizeTableIssues(tableIssues())}. Click to filter to rows with issues.`}
 							onClick={() => (setPinnedRow(null), setOnlyIssues(!onlyIssues()))}
 						>
@@ -5670,7 +5796,7 @@ export function TableView(props: { path: string; group?: number }) {
 								<button
 									type="button"
 									class="doc-status tone-off table-missing"
-									aria-pressed={onlyMissing()}
+									aria-pressed={onlyMissing() ? "true" : "false"}
 									title={`Show only rows whose “${chk().columnName}” value was not found in the searched code files`}
 									onClick={() => (setPinnedRow(null), setOnlyMissing(!onlyMissing()))}
 								>
@@ -5804,10 +5930,9 @@ export function TableView(props: { path: string; group?: number }) {
 					</Show>
 					<button
 						type="button"
-						class="icon-btn table-find-open-btn"
-						classList={{ active: findOpen() }}
+						class={["icon-btn table-find-open-btn", { active: findOpen() }]}
 						aria-label="Find and replace in table"
-						aria-pressed={findOpen()}
+						aria-pressed={findOpen() ? "true" : "false"}
 						title="Find & replace in table (Ctrl+F / Ctrl+H)"
 						onClick={() => (findOpen() ? closeFind() : openFind(false))}
 					>
@@ -5815,8 +5940,7 @@ export function TableView(props: { path: string; group?: number }) {
 					</button>
 					<button
 						type="button"
-						class="table-format-btn"
-						classList={{ active: matchedBadgeCols().length > 0 }}
+						class={["table-format-btn", { active: matchedBadgeCols().length > 0 }]}
 						title={
 							!csvConfig().badgeFormatting
 								? "Column badge formatting is off. Configure CSV column badges…"
@@ -5893,7 +6017,7 @@ export function TableView(props: { path: string; group?: number }) {
 						<button
 							type="button"
 							class="icon-btn table-find-icon-btn"
-							aria-expanded={replaceOpen()}
+							aria-expanded={replaceOpen() ? "true" : "false"}
 							aria-label={replaceOpen() ? "Hide replace" : "Show replace"}
 							title={replaceOpen() ? "Hide replace" : "Show replace (Ctrl+H)"}
 							onClick={() => setReplaceOpen((v) => !v)}
@@ -5903,17 +6027,15 @@ export function TableView(props: { path: string; group?: number }) {
 						<input
 							ref={findInputEl}
 							type="search"
-							class="table-find-input"
-							classList={{ invalid: Boolean(findRegexError()) }}
+							class={["table-find-input", { invalid: Boolean(findRegexError()) }]}
 							placeholder="Find in table…"
 							aria-label="Find in table"
-							aria-invalid={Boolean(findRegexError())}
+							aria-invalid={findRegexError() ? "true" : "false"}
 							value={findQuery()}
 							onInput={(e) => {
 								setFindQuery(e.currentTarget.value);
 								setFindMatchIdx(0);
-								const first = findMatches()[0];
-								if (first) revealMatch(first);
+								revealFirstMatchAfterFlush();
 							}}
 							onKeyDown={(e) => {
 								if (e.key === "Enter") {
@@ -5935,8 +6057,7 @@ export function TableView(props: { path: string; group?: number }) {
 							}
 						>
 							<span
-								class="table-find-count"
-								classList={{ empty: Boolean(findQuery()) && findMatches().length === 0 }}
+								class={["table-find-count", { empty: Boolean(findQuery()) && findMatches().length === 0 }]}
 								role="status"
 								aria-live="polite"
 							>
@@ -5970,13 +6091,12 @@ export function TableView(props: { path: string; group?: number }) {
 						<button
 							type="button"
 							class="table-find-toggle"
-							aria-pressed={findCaseSensitive()}
+							aria-pressed={findCaseSensitive() ? "true" : "false"}
 							title="Match case"
 							onClick={() => {
 								setFindCaseSensitive((v) => !v);
 								setFindMatchIdx(0);
-								const first = findMatches()[0];
-								if (first) revealMatch(first);
+								revealFirstMatchAfterFlush();
 							}}
 						>
 							Aa
@@ -5984,14 +6104,13 @@ export function TableView(props: { path: string; group?: number }) {
 						<button
 							type="button"
 							class="table-find-toggle"
-							aria-pressed={findWholeWord()}
+							aria-pressed={findWholeWord() ? "true" : "false"}
 							aria-label="Match whole word"
 							title="Match whole word"
 							onClick={() => {
 								setFindWholeWord((v) => !v);
 								setFindMatchIdx(0);
-								const first = findMatches()[0];
-								if (first) revealMatch(first);
+								revealFirstMatchAfterFlush();
 							}}
 						>
 							ab
@@ -5999,14 +6118,13 @@ export function TableView(props: { path: string; group?: number }) {
 						<button
 							type="button"
 							class="table-find-toggle"
-							aria-pressed={findRegex()}
+							aria-pressed={findRegex() ? "true" : "false"}
 							aria-label="Use regular expression"
 							title="Use regular expression"
 							onClick={() => {
 								setFindRegex((v) => !v);
 								setFindMatchIdx(0);
-								const first = findMatches()[0];
-								if (first) revealMatch(first);
+								revealFirstMatchAfterFlush();
 							}}
 						>
 							.*
@@ -6014,7 +6132,7 @@ export function TableView(props: { path: string; group?: number }) {
 						<button
 							type="button"
 							class="table-find-toggle"
-							aria-pressed={findCurrentColOnly()}
+							aria-pressed={findCurrentColOnly() ? "true" : "false"}
 							title={`Search only in “${headerName(findColumn()) || `Column ${findColumn() + 1}`}”`}
 							onClick={() => {
 								const next = !findCurrentColOnly();
@@ -6024,8 +6142,7 @@ export function TableView(props: { path: string; group?: number }) {
 								}
 								setFindCurrentColOnly(next);
 								setFindMatchIdx(0);
-								const first = findMatches()[0];
-								if (first) revealMatch(first);
+								revealFirstMatchAfterFlush();
 							}}
 						>
 							{findCurrentColOnly()
@@ -6035,7 +6152,7 @@ export function TableView(props: { path: string; group?: number }) {
 						<button
 							type="button"
 							class="table-find-toggle"
-							aria-pressed={findInSelection()}
+							aria-pressed={findInSelection() ? "true" : "false"}
 							disabled={!findInSelection() && !cellRange()?.isMulti}
 							title={
 								findInSelection() && findSelectionScope()
@@ -6114,23 +6231,17 @@ export function TableView(props: { path: string; group?: number }) {
 			</Show>
 
 			<div
-				class="table-scroll"
-				ref={(el) => {
-					scrollEl = el;
-					setViewportH(el.clientHeight || 640);
-					if (typeof ResizeObserver !== "undefined") {
-						const ro = new ResizeObserver(() => setViewportH(el.clientHeight || 640));
-						ro.observe(el);
-						onCleanup(() => ro.disconnect());
-					}
-				}}
-				classList={{
-					"is-dragging-col": Boolean(colDrag()),
-					"is-dragging-row": Boolean(rowDrag()),
-					"is-resizing-col": resizingCol() !== null,
-					"is-drag-selecting": isDragSelecting(),
-					"is-fill-dragging": Boolean(fillDrag()),
-				}}
+				ref={scrollEl}
+				class={[
+					"table-scroll",
+					{
+						"is-dragging-col": Boolean(colDrag()),
+						"is-dragging-row": Boolean(rowDrag()),
+						"is-resizing-col": resizingCol() !== null,
+						"is-drag-selecting": isDragSelecting(),
+						"is-fill-dragging": Boolean(fillDrag()),
+					},
+				]}
 				onScroll={(e) => {
 					setScrollTop(e.currentTarget.scrollTop);
 					if (editing() && activeInputEl?.isConnected) {
@@ -6158,7 +6269,7 @@ export function TableView(props: { path: string; group?: number }) {
 									</div>
 								</th>
 							</Show>
-							<Index each={visibleColumns()}>
+							<For each={visibleColumns()} keyed={false}>
 								{(colAcc, visIdx) => {
 									const col = () => colAcc();
 									const name = () => headerName(col());
@@ -6191,7 +6302,7 @@ export function TableView(props: { path: string; group?: number }) {
 											scope="col"
 											data-col={col()}
 											style={cellStyle(col(), visIdx)}
-											classList={{
+											class={{
 												"col-filtered": filtered(),
 												"col-checked": codeCheck()?.column === col(),
 												"col-frozen": isFrozen(),
@@ -6268,11 +6379,10 @@ export function TableView(props: { path: string; group?: number }) {
 												</button>
 												<button
 													type="button"
-													class="table-th-filter"
-													classList={{ active: filtered(), open: filterMenu()?.column === col() }}
+													class={["table-th-filter", { active: filtered(), open: filterMenu()?.column === col() }]}
 													aria-label={`Filter ${name() || `column ${col() + 1}`}`}
 													aria-haspopup="dialog"
-													aria-expanded={filterMenu()?.column === col()}
+													aria-expanded={filterMenu()?.column === col() ? "true" : "false"}
 													title={filterTip()}
 													onClick={(e) => openFilterMenu(col(), e.currentTarget)}
 												>
@@ -6280,8 +6390,7 @@ export function TableView(props: { path: string; group?: number }) {
 												</button>
 											</div>
 											<div
-												class="table-col-resizer"
-												classList={{ active: resizingCol() === col() }}
+												class={["table-col-resizer", { active: resizingCol() === col() }]}
 												title={`Drag to resize “${name() || `Column ${col() + 1}`}”; double-click to fit content`}
 												onPointerDown={(e) => onResizerPointerDown(e, col())}
 												onDblClick={(e) => (e.stopPropagation(), e.preventDefault(), autoFitColumn(col()))}
@@ -6290,14 +6399,14 @@ export function TableView(props: { path: string; group?: number }) {
 										</th>
 									);
 								}}
-							</Index>
+							</For>
 						</tr>
 					</thead>
 
 					<tbody ref={body}>
 						<Show when={virtualWindow().topPad > 0}>
 							<tr class="table-virt-spacer" aria-hidden="true">
-								<td colSpan={visibleColumns().length + 1} style={{ height: `${virtualWindow().topPad}px`, padding: "0", border: "0" }} />
+								<td colspan={visibleColumns().length + 1} style={{ height: `${virtualWindow().topPad}px`, padding: "0", border: "0" }} />
 							</tr>
 						</Show>
 						<For each={drawnEntryIds()}>
@@ -6326,6 +6435,13 @@ export function TableView(props: { path: string; group?: number }) {
 													if (gCol === null) return null;
 													return badgeToneForValue(columnRule(gCol), ge().label);
 												};
+												let groupCbEl: HTMLInputElement | undefined;
+												createEffect(
+													() => someInGroupSelected(),
+													(ind) => {
+														if (groupCbEl) groupCbEl.indeterminate = ind;
+													},
+												);
 												return (
 													<tr class="table-group-row" data-entry-key={ge().entryKey}>
 														<td class="table-sel-col" onClick={(e) => e.stopPropagation()}>
@@ -6334,9 +6450,7 @@ export function TableView(props: { path: string; group?: number }) {
 																	type="checkbox"
 																	checked={allInGroupSelected()}
 																	ref={(el) => {
-																		createEffect(() => {
-																			el.indeterminate = someInGroupSelected();
-																		});
+																		groupCbEl = el;
 																	}}
 																	aria-label={`Select all ${ge().count} rows in group ${ge().label || "(empty)"}`}
 																	title={`Select/deselect all ${ge().count} rows in “${ge().label || "(empty)"}”`}
@@ -6348,11 +6462,11 @@ export function TableView(props: { path: string; group?: number }) {
 																/>
 															</div>
 														</td>
-														<td colSpan={visibleColumns().length}>
+														<td colspan={visibleColumns().length}>
 															<button
 																type="button"
 																class="table-group-toggle"
-																aria-expanded={!ge().collapsed}
+																aria-expanded={!ge().collapsed ? "true" : "false"}
 																onClick={() => toggleGroupCollapsed(ge().key)}
 															>
 																<Icon name={ge().collapsed ? "chevron-right" : "chevron-down"} />
@@ -6381,7 +6495,7 @@ export function TableView(props: { path: string; group?: number }) {
 								return (
 									<tr
 										data-row={index()}
-										classList={{
+										class={{
 											"row-current": current() === index(),
 											"row-selected": selectedRows().has(index()),
 											"row-revealed": revealedRow() === index(),
@@ -6397,8 +6511,7 @@ export function TableView(props: { path: string; group?: number }) {
 										>
 											<div class="table-sel-inner">
 												<span
-													class="table-row-num"
-													classList={{ draggable: canReorderRows() && table().rows.length > 1 }}
+													class={["table-row-num", { draggable: canReorderRows() && table().rows.length > 1 }]}
 													title={
 														canReorderRows() && table().rows.length > 1
 															? `Row ${index() + 1} — drag to reorder (or Alt+Up / Alt+Down)`
@@ -6420,7 +6533,7 @@ export function TableView(props: { path: string; group?: number }) {
 												/>
 											</div>
 										</td>
-										<Index each={visibleColumns()}>
+										<For each={visibleColumns()} keyed={false}>
 											{(colAcc, visIdx) => {
 												const col = () => colAcc();
 												const value = () => cells()[col()]?.text ?? "";
@@ -6467,7 +6580,7 @@ export function TableView(props: { path: string; group?: number }) {
 														tabindex={cellTabIndex()}
 														data-col={col()}
 														style={cellStyle(col(), visIdx)}
-														classList={{
+														class={{
 															number: /^-?\d[\d.,]*$/.test(value().trim()),
 															"col-frozen": isFrozen(),
 															"col-frozen-last": isLastFrozen(),
@@ -6558,8 +6671,7 @@ export function TableView(props: { path: string; group?: number }) {
 																									<button
 																										type="button"
 																										tabindex={cellTabIndex()}
-																										class="link table-cell-link"
-																										classList={{ "table-val-warn": fl().missing }}
+																										class={["link table-cell-link", { "table-val-warn": fl().missing }]}
 																										title={
 																											fl().missing
 																												? `${value().trim()} — file not found in workspace`
@@ -6592,12 +6704,16 @@ export function TableView(props: { path: string; group?: number }) {
 																				{ticketCell(value(), cellTabIndex)}
 																			</Show>
 																			<Show when={checkedHere()}>
-																				{(chk) => {
-																					const trimmed = value().trim();
-																					if (!trimmed) return null;
-																					const count = chk().counts.get(termLookupKey(trimmed, chk().caseSensitive));
-																					return renderCheckBadge(trimmed, count, chk().options, cellTabIndex());
-																				}}
+																				{(chk) => (
+																					<>
+																						{() => {
+																							const trimmed = value().trim();
+																							if (!trimmed) return null;
+																							const count = chk().counts.get(termLookupKey(trimmed, chk().caseSensitive));
+																							return renderCheckBadge(trimmed, count, chk().options, cellTabIndex());
+																						}}
+																					</>
+																				)}
 																			</Show>
 																		</>
 																	}
@@ -6606,13 +6722,16 @@ export function TableView(props: { path: string; group?: number }) {
 																	<For each={value().split(/([,;\r\n]+\s*)/)}>
 																		{(part) => {
 																			const trimmed = part.trim();
-																			const chk = checkedHere();
-																			if (!trimmed || /^[,;\r\n]+$/.test(trimmed) || !chk) return part;
-																			const count = chk.counts.get(termLookupKey(trimmed, chk.caseSensitive));
+																			if (!trimmed || /^[,;\r\n]+$/.test(trimmed)) return part;
 																			return (
 																				<>
 																					{part}
-																					{renderCheckBadge(trimmed, count, chk.options, cellTabIndex())}
+																					{() => {
+																						const chk = checkedHere();
+																						if (!chk) return null;
+																						const count = chk.counts.get(termLookupKey(trimmed, chk.caseSensitive));
+																						return renderCheckBadge(trimmed, count, chk.options, cellTabIndex());
+																					}}
 																				</>
 																			);
 																		}}
@@ -6625,14 +6744,15 @@ export function TableView(props: { path: string; group?: number }) {
 																const rowIdx = ed.row;
 																const targetCol = ed.column;
 																const seed = ed.seed;
-																const initVal = seed !== undefined ? seed : value();
+																const initialCellText = untrack(value);
+																const initVal = seed !== undefined ? seed : initialCellText;
 																const finish = (val: string, move: CommitMove) => {
 																	if (done) return;
 																	done = true;
 																	commitCell(rowIdx, targetCol, val, move);
 																};
 																commitActiveEdit = finish;
-																const multiline = Boolean(ed.forceMultiline) || (seed === undefined && /[\r\n]/.test(value()));
+																const multiline = Boolean(ed.forceMultiline) || (seed === undefined && /[\r\n]/.test(initialCellText));
 																if (multiline) {
 																	return (
 																		<textarea
@@ -6675,7 +6795,7 @@ export function TableView(props: { path: string; group?: number }) {
 																	<input
 																		role="combobox"
 																		aria-autocomplete="list"
-																		aria-expanded={pickerOpen() && pickerOptions().length > 0}
+																		aria-expanded={pickerOpen() && pickerOptions().length > 0 ? "true" : "false"}
 																		aria-controls={pickerOpen() && pickerOptions().length > 0 ? pickerListboxId : undefined}
 																		value={initVal}
 																		aria-label={`${headerName(targetCol) || "Cell"}, row ${rowIdx + 1} (Shift+Enter for new line)`}
@@ -6758,14 +6878,14 @@ export function TableView(props: { path: string; group?: number }) {
 													</td>
 												);
 											}}
-										</Index>
+										</For>
 									</tr>
 								);
 							}}
 						</For>
 						<Show when={virtualWindow().bottomPad > 0}>
 							<tr class="table-virt-spacer" aria-hidden="true">
-								<td colSpan={visibleColumns().length + 1} style={{ height: `${virtualWindow().bottomPad}px`, padding: "0", border: "0" }} />
+								<td colspan={visibleColumns().length + 1} style={{ height: `${virtualWindow().bottomPad}px`, padding: "0", border: "0" }} />
 							</tr>
 						</Show>
 					</tbody>
@@ -6775,7 +6895,7 @@ export function TableView(props: { path: string; group?: number }) {
 						<tfoot ref={foot}>
 							<tr class="table-ghost-row">
 								<td class="table-sel-col" aria-hidden="true" />
-								<Index each={visibleColumns()}>
+								<For each={visibleColumns()} keyed={false}>
 									{(colAcc, visIdx) => {
 										const col = () => colAcc();
 										const openGhostEdit = () => {
@@ -6791,7 +6911,7 @@ export function TableView(props: { path: string; group?: number }) {
 												tabindex={isRovingGhostCell(col()) ? 0 : -1}
 												data-col={col()}
 												style={cellStyle(col(), visIdx)}
-												classList={{
+												class={{
 													"ghost-editing": open(),
 													"col-frozen": isFrozen(),
 													"col-frozen-last": isLastFrozen(),
@@ -6833,7 +6953,7 @@ export function TableView(props: { path: string; group?: number }) {
 															<input
 																role="combobox"
 																aria-autocomplete="list"
-																aria-expanded={pickerOpen() && pickerOptions().length > 0}
+																aria-expanded={pickerOpen() && pickerOptions().length > 0 ? "true" : "false"}
 																aria-controls={pickerOpen() && pickerOptions().length > 0 ? pickerListboxId : undefined}
 																value={seed}
 																placeholder={colLabel()}
@@ -6894,7 +7014,7 @@ export function TableView(props: { path: string; group?: number }) {
 											</td>
 										);
 									}}
-								</Index>
+								</For>
 							</tr>
 						</tfoot>
 					</Show>
@@ -6941,7 +7061,7 @@ export function TableView(props: { path: string; group?: number }) {
 														<button
 															type="button"
 															class={`doc-status tone-${tone()} table-status-pill`}
-															aria-pressed={isActive()}
+															aria-pressed={isActive() ? "true" : "false"}
 															title={
 																isActive()
 																	? `Showing status “${label()}” (${count}). Click to clear status filter.`
@@ -7027,17 +7147,21 @@ export function TableView(props: { path: string; group?: number }) {
 								<For each={opts()}>
 									{(opt, idx) => {
 										const isActive = () => pickerIdx() === idx();
+										let optEl: HTMLButtonElement | undefined;
+										createEffect(
+											() => isActive(),
+											(active) => {
+												if (active) optEl?.scrollIntoView({ block: "nearest" });
+											},
+										);
 										return (
 											<button
 												type="button"
 												role="option"
-												aria-selected={isActive()}
-												class="table-cell-picker-opt"
-												classList={{ active: isActive(), current: Boolean(opt.isCurrent) }}
+												aria-selected={isActive() ? "true" : "false"}
+												class={["table-cell-picker-opt", { active: isActive(), current: Boolean(opt.isCurrent) }]}
 												ref={(el) => {
-													createEffect(() => {
-														if (isActive()) el.scrollIntoView({ block: "nearest" });
-													});
+													optEl = el;
 												}}
 												onMouseEnter={() => setPickerIdx(idx())}
 												onClick={() => {
@@ -7107,11 +7231,11 @@ export function TableView(props: { path: string; group?: number }) {
 					const selectNoneValues = () => {
 						setColumnFilter(col(), { text: curFilter()?.text ?? "", values: new Set() });
 					};
-					const [popPos, setPopPos] = createSignal<{ left: number; top: number; maxHeight: number }>({
+					const [popPos, setPopPos] = createSignal<{ left: number; top: number; maxHeight: number }>(() => ({
 						left: menu().x,
 						top: menu().y,
 						maxHeight: menu().maxHeight,
-					});
+					}));
 					let popEl: HTMLDivElement | undefined;
 					const remeasurePopover = () => {
 						const cur = menu();
@@ -7135,23 +7259,24 @@ export function TableView(props: { path: string; group?: number }) {
 								: { left: placed.left, top: placed.top, maxHeight: placed.maxHeight },
 						);
 					};
-					createEffect(() => {
-						menu();
-						visibleOptions();
-						const raf = requestAnimationFrame(remeasurePopover);
-						const onWinResize = () => remeasurePopover();
-						window.addEventListener("resize", onWinResize);
-						let ro: ResizeObserver | undefined;
-						if (typeof ResizeObserver !== "undefined" && popEl) {
-							ro = new ResizeObserver(remeasurePopover);
-							ro.observe(popEl);
-						}
-						onCleanup(() => {
-							cancelAnimationFrame(raf);
-							window.removeEventListener("resize", onWinResize);
-							ro?.disconnect();
-						});
-					});
+					createEffect(
+						() => [menu(), visibleOptions()] as const,
+						() => {
+							const raf = requestAnimationFrame(remeasurePopover);
+							const onWinResize = () => remeasurePopover();
+							window.addEventListener("resize", onWinResize);
+							let ro: ResizeObserver | undefined;
+							if (typeof ResizeObserver !== "undefined" && popEl) {
+								ro = new ResizeObserver(remeasurePopover);
+								ro.observe(popEl);
+							}
+							return () => {
+								cancelAnimationFrame(raf);
+								window.removeEventListener("resize", onWinResize);
+								ro?.disconnect();
+							};
+						},
+					);
 					return (
 						<Portal>
 							<div
@@ -7175,8 +7300,7 @@ export function TableView(props: { path: string; group?: number }) {
 									<div class="table-filter-sort-btns" role="group" aria-label={`Sort ${colName()}`}>
 										<button
 											type="button"
-											class="icon-btn"
-											classList={{ active: order().some((s) => s.column === col() && !s.down) }}
+											class={["icon-btn", { active: order().some((s) => s.column === col() && !s.down) }]}
 											title="Sort ascending (Shift+Click to add secondary sort)"
 											aria-label="Sort ascending"
 											onClick={(e) => setOrder((prev) => setColumnSortDirection(prev, col(), false, e.shiftKey))}
@@ -7185,8 +7309,7 @@ export function TableView(props: { path: string; group?: number }) {
 										</button>
 										<button
 											type="button"
-											class="icon-btn"
-											classList={{ active: order().some((s) => s.column === col() && s.down) }}
+											class={["icon-btn", { active: order().some((s) => s.column === col() && s.down) }]}
 											title="Sort descending (Shift+Click to add secondary sort)"
 											aria-label="Sort descending"
 											onClick={(e) => setOrder((prev) => setColumnSortDirection(prev, col(), true, e.shiftKey))}
@@ -7232,7 +7355,7 @@ export function TableView(props: { path: string; group?: number }) {
 											{(opt) => {
 												const tone = () => badgeToneForValue(rule(), opt.label);
 												return (
-													<div class="table-filter-item" classList={{ zero: opt.count === 0 }}>
+													<div class={["table-filter-item", { zero: opt.count === 0 }]}>
 														<label class="table-filter-check">
 															<input type="checkbox" checked={isChecked(opt.key)} onChange={() => toggleKey(opt.key)} />
 															<Show

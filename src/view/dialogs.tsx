@@ -2,7 +2,8 @@
 // (single- and multi-select), and a searchable Workspace File Browser
 // (ADR 0032). Every overlay serializes through one unified FIFO queue so two
 // overlays can never mount on top of each other simultaneously.
-import { createEffect, createMemo, createResource, createSignal, createUniqueId, For, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, createUniqueId, For, Show } from "solid-js";
+import { createAsyncQuery } from "./asyncQuery";
 import {
 	initialMultiSelectIndices,
 	resolveMultiSelectValues,
@@ -149,15 +150,18 @@ function QuickPickModal(props: { req: QuickPickRequest }) {
 			.map((x) => x.item);
 	});
 
-	createEffect(() => {
-		const len = filtered().length;
-		if (selected() >= len) setSelected(Math.max(0, len - 1));
-	});
-	createEffect(() => {
-		const idx = selected();
-		filtered();
-		listEl?.children[idx]?.scrollIntoView({ block: "nearest" });
-	});
+	createEffect(
+		() => [filtered().length, selected()] as const,
+		([len, idx]) => {
+			if (idx >= len) setSelected(Math.max(0, len - 1));
+		},
+	);
+	createEffect(
+		() => [selected(), filtered()] as const,
+		([idx]) => {
+			listEl?.children[idx]?.scrollIntoView({ block: "nearest" });
+		},
+	);
 
 	const finish = (value: any | null) => queue.finishOverlay(req, value);
 	const move = (by: number) => setSelected((i) => Math.max(0, Math.min(i + by, filtered().length - 1)));
@@ -192,7 +196,7 @@ function QuickPickModal(props: { req: QuickPickRequest }) {
 					aria-autocomplete="list"
 					aria-activedescendant={filtered().length ? `${listId}-${selected()}` : undefined}
 					autocomplete="off"
-					spellcheck={false}
+					spellcheck="false"
 					placeholder={req.placeholder}
 					value={query()}
 					onInput={(e) => (setQuery(e.currentTarget.value), setSelected(0))}
@@ -231,16 +235,18 @@ function QuickPickModal(props: { req: QuickPickRequest }) {
 				<For each={filtered()}>
 					{(item, i) => (
 						<div
-							class="item"
-							classList={{
-								selected: i() === selected(),
-								"quick-noted": Boolean(item.description),
-								"quick-divide": Boolean(item.divide && !query().trim()),
-								"quick-danger": Boolean(item.danger),
-							}}
+							class={[
+								"item",
+								{
+									selected: i() === selected(),
+									"quick-noted": Boolean(item.description),
+									"quick-divide": Boolean(item.divide && !query().trim()),
+									"quick-danger": Boolean(item.danger),
+								},
+							]}
 							role="option"
 							id={`${listId}-${i()}`}
-							aria-selected={i() === selected()}
+							aria-selected={i() === selected() ? "true" : "false"}
 							onMouseMove={(e) => pointed(e, i())}
 							onMouseDown={(e) => e.button === 0 && (e.preventDefault(), pick(item))}
 						>
@@ -300,15 +306,18 @@ function QuickPickManyModal(props: { req: QuickPickManyRequest }) {
 			.map((x) => x.entry);
 	});
 
-	createEffect(() => {
-		const len = filtered().length;
-		if (focused() >= len) setFocused(Math.max(0, len - 1));
-	});
-	createEffect(() => {
-		const idx = focused();
-		filtered();
-		listEl?.children[idx]?.scrollIntoView({ block: "nearest" });
-	});
+	createEffect(
+		() => [filtered().length, focused()] as const,
+		([len, idx]) => {
+			if (idx >= len) setFocused(Math.max(0, len - 1));
+		},
+	);
+	createEffect(
+		() => [focused(), filtered()] as const,
+		([idx]) => {
+			listEl?.children[idx]?.scrollIntoView({ block: "nearest" });
+		},
+	);
 
 	const finish = (values: any[] | null) => queue.finishOverlay(req, values);
 	const confirm = () => finish(resolveMultiSelectValues(req.items, picked()));
@@ -420,7 +429,7 @@ function QuickPickManyModal(props: { req: QuickPickManyRequest }) {
 				aria-autocomplete="list"
 				aria-activedescendant={filtered().length ? `${listId}-${focused()}` : undefined}
 				autocomplete="off"
-				spellcheck={false}
+				spellcheck="false"
 				placeholder={req.placeholder}
 				value={query()}
 				onInput={(e) => {
@@ -467,17 +476,20 @@ function QuickPickManyModal(props: { req: QuickPickManyRequest }) {
 						const isChecked = () => picked().has(entry.index);
 						return (
 							<div
-								class="item quick-multi-item"
-								classList={{
-									selected: i() === focused(),
-									"quick-multi-checked": isChecked(),
-									"quick-noted": Boolean(item.description),
-									"quick-divide": Boolean(item.divide && !query().trim()),
-									"quick-danger": Boolean(item.danger),
-								}}
+								class={[
+									"item",
+									"quick-multi-item",
+									{
+										selected: i() === focused(),
+										"quick-multi-checked": isChecked(),
+										"quick-noted": Boolean(item.description),
+										"quick-divide": Boolean(item.divide && !query().trim()),
+										"quick-danger": Boolean(item.danger),
+									},
+								]}
 								role="option"
 								id={`${listId}-${i()}`}
-								aria-selected={isChecked()}
+								aria-selected={isChecked() ? "true" : "false"}
 								onMouseMove={(e) => pointed(e, i())}
 								onMouseDown={(e) => e.button === 0 && e.preventDefault()}
 								onClick={() => {
@@ -485,7 +497,7 @@ function QuickPickManyModal(props: { req: QuickPickManyRequest }) {
 									toggleIndex(entry.index);
 								}}
 							>
-								<span class="quick-checkbox" classList={{ checked: isChecked() }} aria-hidden="true">
+								<span class={["quick-checkbox", { checked: isChecked() }]} aria-hidden="true">
 									<Show when={isChecked()}>
 										<Icon name="check" />
 									</Show>
@@ -534,12 +546,12 @@ function FileBrowserModal(props: { req: FileBrowserRequest }) {
 	let inputEl: HTMLInputElement | undefined;
 	let listEl: HTMLDivElement | undefined;
 
-	const [entries] = createResource(dir, (folder) =>
+	const [entries] = createAsyncQuery(dir, (folder) =>
 		backend.list(folder).catch(() => []),
 	);
-	const [allFiles] = createResource(
+	const [allFiles] = createAsyncQuery(
 		() => Boolean(query().trim()),
-		(need) => (need ? backend.files().catch(() => [] as string[]) : Promise.resolve([] as string[])),
+		() => backend.files().catch(() => [] as string[]),
 	);
 
 	const breadcrumbs = createMemo(() => {
@@ -617,15 +629,18 @@ function FileBrowserModal(props: { req: FileBrowserRequest }) {
 		return out;
 	});
 
-	createEffect(() => {
-		const len = rows().length;
-		if (selected() >= len) setSelected(Math.max(0, len - 1));
-	});
-	createEffect(() => {
-		const idx = selected();
-		rows();
-		listEl?.children[idx]?.scrollIntoView({ block: "nearest" });
-	});
+	createEffect(
+		() => [rows().length, selected()] as const,
+		([len, idx]) => {
+			if (idx >= len) setSelected(Math.max(0, len - 1));
+		},
+	);
+	createEffect(
+		() => [selected(), rows()] as const,
+		([idx]) => {
+			listEl?.children[idx]?.scrollIntoView({ block: "nearest" });
+		},
+	);
 
 	const finish = (picked: { path: string; rel: string } | null) => queue.finishOverlay(req, picked);
 	const move = (by: number) => setSelected((i) => Math.max(0, Math.min(i + by, rows().length - 1)));
@@ -668,8 +683,7 @@ function FileBrowserModal(props: { req: FileBrowserRequest }) {
 								</Show>
 								<button
 									type="button"
-									class="file-browser-crumb"
-									classList={{ current: i() === breadcrumbs().length - 1 }}
+									class={["file-browser-crumb", { current: i() === breadcrumbs().length - 1 }]}
 									onClick={() => (setDir(crumb.path), setSelected(0), inputEl?.focus())}
 								>
 									{crumb.label}
@@ -689,7 +703,7 @@ function FileBrowserModal(props: { req: FileBrowserRequest }) {
 				aria-autocomplete="list"
 				aria-activedescendant={rows().length ? `${listId}-${selected()}` : undefined}
 				autocomplete="off"
-				spellcheck={false}
+				spellcheck="false"
 				placeholder="Type to search any workspace file, or browse folders below…"
 				value={query()}
 				onInput={(e) => (setQuery(e.currentTarget.value), setSelected(0))}
@@ -716,14 +730,16 @@ function FileBrowserModal(props: { req: FileBrowserRequest }) {
 				<For each={rows()}>
 					{(row, i) => (
 						<div
-							class="item"
-							classList={{
-								selected: i() === selected(),
-								"quick-divide": row.kind !== "up" && Boolean(row.divide),
-							}}
+							class={[
+								"item",
+								{
+									selected: i() === selected(),
+									"quick-divide": row.kind !== "up" && Boolean(row.divide),
+								},
+							]}
 							role="option"
 							id={`${listId}-${i()}`}
-							aria-selected={i() === selected()}
+							aria-selected={i() === selected() ? "true" : "false"}
 							onMouseMove={(e) => pointed(e, i())}
 							onMouseDown={(e) => e.button === 0 && (e.preventDefault(), activate(row))}
 						>
@@ -775,28 +791,31 @@ function ChooseQuickPick(props: { request: Request }) {
 	let listEl: HTMLDivElement | undefined;
 	const longPrompt = request.title.length > 64 || request.title.includes("\n");
 
-	const filtered = createMemo(() => {
-		const q = query().trim();
+	const filterButtons = (raw: string) => {
+		const q = raw.trim();
 		if (!q) return request.buttons;
 		return request.buttons
 			.map((b) => ({ button: b, score: matchWords(q, b, request.details?.[b] ?? "") }))
 			.filter((x) => x.score > 0)
 			.sort((a, b) => b.score - a.score)
 			.map((x) => x.button);
-	});
+	};
+	const filtered = createMemo(() => filterButtons(query()));
 
-	createEffect(() => {
-		const list = filtered();
-		const idx = selected();
-		if (idx >= list.length || (idx >= 0 && list[idx] === request.danger && !explicitPick())) {
-			setSelected(safeQuickPickInitialIndex(list, request.danger));
-		}
-	});
-	createEffect(() => {
-		const idx = selected();
-		filtered();
-		if (idx >= 0) listEl?.children[idx]?.scrollIntoView({ block: "nearest" });
-	});
+	createEffect(
+		() => [filtered(), selected(), explicitPick()] as const,
+		([list, idx, explicit]) => {
+			if (idx >= list.length || (idx >= 0 && list[idx] === request.danger && !explicit)) {
+				setSelected(safeQuickPickInitialIndex(list, request.danger));
+			}
+		},
+	);
+	createEffect(
+		() => [selected(), filtered()] as const,
+		([idx]) => {
+			if (idx >= 0) listEl?.children[idx]?.scrollIntoView({ block: "nearest" });
+		},
+	);
 
 	const finish = (button: string | null) => queue.finish(request, button ? { button, value: "" } : null);
 	const pick = (button: string | undefined) => {
@@ -853,13 +872,14 @@ function ChooseQuickPick(props: { request: Request }) {
 					aria-autocomplete="list"
 					aria-activedescendant={filtered().length && selected() >= 0 ? `${listId}-${selected()}` : undefined}
 					autocomplete="off"
-					spellcheck={false}
+					spellcheck="false"
 					placeholder="Type to filter options…"
 					value={query()}
 					onInput={(e) => {
-						setQuery(e.currentTarget.value);
+						const val = e.currentTarget.value;
+						setQuery(val);
 						setExplicitPick(false);
-						setSelected(safeQuickPickInitialIndex(filtered(), request.danger));
+						setSelected(safeQuickPickInitialIndex(filterButtons(val), request.danger));
 					}}
 					onKeyDown={(e) => {
 						if (e.isComposing || e.keyCode === 229) return;
@@ -883,15 +903,17 @@ function ChooseQuickPick(props: { request: Request }) {
 				<For each={filtered()}>
 					{(button, i) => (
 						<div
-							class="item"
-							classList={{
-								selected: i() === selected(),
-								"quick-noted": Boolean(request.details?.[button]),
-								"quick-danger": button === request.danger,
-							}}
+							class={[
+								"item",
+								{
+									selected: i() === selected(),
+									"quick-noted": Boolean(request.details?.[button]),
+									"quick-danger": button === request.danger,
+								},
+							]}
 							role="option"
 							id={`${listId}-${i()}`}
-							aria-selected={i() === selected()}
+							aria-selected={i() === selected() ? "true" : "false"}
 							onMouseMove={(e) => pointed(e, i())}
 							onMouseDown={(e) => e.button === 0 && (e.preventDefault(), finish(button))}
 						>
@@ -942,15 +964,15 @@ function Dialog(props: { request: Request }) {
 			>
 				<label for={inputId}>
 					<span id={titleId}>{request.title}</span>
-					<input id={inputId} ref={input} value={request.value ?? ""} data-autofocus="select" autocomplete="off" spellcheck={false} />
+					<input id={inputId} ref={input} value={request.value ?? ""} data-autofocus="select" autocomplete="off" spellcheck="false" />
 				</label>
 			</Show>
-			<div class="buttons" classList={{ list: Boolean(request.details) }}>
+			<div class={["buttons", { list: Boolean(request.details) }]}>
 				<For each={request.buttons}>
 					{(button) => (
 						<button
 							type={button === enter ? "submit" : "button"}
-							classList={{ primary: button === enter, danger: button === request.danger }}
+							class={{ primary: button === enter, danger: button === request.danger }}
 							data-autofocus={!request.input && button === enter ? "" : undefined}
 							onClick={() => button !== enter && finish(button)}
 						>
@@ -961,7 +983,7 @@ function Dialog(props: { request: Request }) {
 						</button>
 					)}
 				</For>
-				<button type="button" classList={{ primary: enter === null }} data-autofocus={!request.input && enter === null ? "" : undefined} onClick={() => finish(null)}>
+				<button type="button" class={{ primary: enter === null }} data-autofocus={!request.input && enter === null ? "" : undefined} onClick={() => finish(null)}>
 					Cancel
 				</button>
 			</div>

@@ -383,7 +383,7 @@ export async function newNoteFromTemplate(explicit?: MarkdownTemplate): Promise<
 		await backend.create(dest, "file");
 		await backend.write(dest, rendered.text);
 		if (state.workspace?.root !== root) return;
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		ensureEditableMarkdown(canonical(dest));
 		const reveal = (() => {
 			if (rendered.cursorOffset === null) return undefined;
@@ -427,7 +427,7 @@ export async function manageTemplates(copyBuiltin?: MarkdownTemplate): Promise<v
 				await backend.create(dest, "file");
 				await backend.write(dest, header + copyBuiltin.content);
 				if (state.workspace?.root !== startRoot) return;
-				setState("treeVersion", (v) => v + 1);
+				setState((s) => { s.treeVersion += 1; });
 				notify(`Saved customizable copy to ${relativeTo(startRoot, dest)}.`);
 			} catch (e: any) {
 				notify(`Could not save custom template: ${e?.message ?? e}`, "error");
@@ -509,7 +509,7 @@ export async function manageTemplates(copyBuiltin?: MarkdownTemplate): Promise<v
 					await backend.trash(customPath);
 					if (state.workspace?.root !== startRoot) return;
 					fileRemoved(customPath);
-					setState("treeVersion", (v) => v + 1);
+					setState((s) => { s.treeVersion += 1; });
 					notify(`Moved ${chosenCustom.name} to trash.`);
 				} catch (e: any) {
 					notify(`Could not move template to trash: ${e?.message ?? e}`, "error");
@@ -564,7 +564,7 @@ status: draft
 			await backend.create(dest, "file");
 			await backend.write(dest, starter);
 			if (state.workspace?.root !== startRoot) return;
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 		} catch (e: any) {
 			notify(`Could not create custom template: ${e?.message ?? e}`, "error");
 			return;

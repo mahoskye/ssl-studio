@@ -5,8 +5,7 @@
 // onto a folder is moved there, after asking.
 import { Icon } from "../Icon";
 import { FileMark } from "../FileMark";
-import { batch, createEffect, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
-import { createStore, reconcile } from "solid-js/store";
+import { createEffect, createMemo, createSignal, createStore, For, onSettled, reconcile, Show } from "solid-js";
 import type { DocFile, Entry } from "../../shared/protocol";
 import { level } from "../../shared/houseStyle";
 import { backend } from "../backend";
@@ -127,7 +126,10 @@ export function resizeOpenEditorsHeight(current: number, cap: number, delta: num
 
 const kb = (bytes: number) => `${Math.round(bytes / 1024)} KB`;
 const indent = (depth: number) => ({ "padding-left": `${8 + depth * 14}px` });
-const refresh = () => setState("treeVersion", (v) => v + 1);
+const refresh = () =>
+	setState((s) => {
+		s.treeVersion += 1;
+	});
 /**
  * The tree has changed by the app's own hand: it is read again, and the catalog of a folder that has one and holds
  * one of these files is written afresh, so that it goes on saying what the folder holds.
@@ -146,24 +148,46 @@ type Listing = { path: string; error: string; entries: Entry[] };
  */
 function useListing(source: () => readonly [string, number] | false | null | undefined) {
 	const [listing, setListing] = createStore<Listing>({ path: "", error: "", entries: [] });
+	const keyMemo = createMemo(source, {
+		equals: (a, b) =>
+			a === b ||
+			(Boolean(a && b) &&
+				(a as readonly [string, number])[0] === (b as readonly [string, number])[0] &&
+				(a as readonly [string, number])[1] === (b as readonly [string, number])[1]),
+	});
 	createEffect(
-		on(source, (key) => {
+		() => keyMemo(),
+		(key) => {
 			if (!key) return;
 			let stale = false;
-			onCleanup(() => (stale = true));
 			const [path] = key;
 			backend.list(path).then(
 				(entries) => {
 					if (stale) return;
-					if (listing.path !== path) return setListing({ path, error: "", entries });
-					batch(() => {
-						setListing("error", "");
-						setListing("entries", reconcile(entries, { key: "path" }));
+					setListing((s) => {
+						if (s.path !== path) {
+							s.path = path;
+							s.error = "";
+							s.entries = entries;
+						} else {
+							s.error = "";
+							reconcile(entries, "path")(s.entries);
+						}
 					});
 				},
-				(e) => !stale && setListing({ path, error: errorText(e), entries: [] }),
+				(e) => {
+					if (stale) return;
+					setListing((s) => {
+						s.path = path;
+						s.error = errorText(e);
+						s.entries = [];
+					});
+				},
 			);
-		}),
+			return () => {
+				stale = true;
+			};
+		},
 	);
 	return listing;
 }
@@ -816,9 +840,12 @@ export function showInExplorer(path: string) {
 	const root = state.workspace?.root;
 	if (!root || !isInside(root, path)) return notify("That file is not in this folder.");
 	// If Explorer is scoped to a subfolder that doesn't contain `path` (or IS `path`), step back to the full workspace first.
-	const scope = scopedFolder();
-	if (scope && (canonical(path) === canonical(scope.path) || !isInside(scope.path, path))) setScopedFolder(null);
-	const viewRoot = scopedFolder()?.path ?? root;
+	let scope = scopedFolder();
+	if (scope && (canonical(path) === canonical(scope.path) || !isInside(scope.path, path))) {
+		setScopedFolder(null);
+		scope = null;
+	}
+	const viewRoot = scope?.path ?? root;
 	// The folder itself has no row of its own: its rows are shown, and the keyboard goes where it last was among them.
 	const top = isInside(path, viewRoot);
 	const above: string[] = [];
@@ -896,44 +923,46 @@ export function Explorer() {
 	const rootMenu = (at: Point) => activeRootPath() && void entryMenu({ name: activeRootName(), path: activeRootPath(), kind: "dir", size: 0 }, at);
 	// A row stays "the focused row" while a dialog, the palette, its own menu or the menu bar has the keyboard, and no longer.
 	const forget = (e: FocusEvent) => !(e.target as Element | null)?.closest?.(".explorer, .overlay, .quickpick, .row-menu, .menubar") && setFocused(null);
-	onMount(() => document.addEventListener("focusin", forget));
+	onSettled(() => {
+		document.addEventListener("focusin", forget);
+		return () => {
+			document.removeEventListener("focusin", forget);
+			cancelExplorerFocusSearch();
+			setFocused(null);
+			tree = undefined;
+		};
+	});
 	// The folders that were open in this workspace are open again next time. A self-test starts from a closed tree.
 	const keeps = () => !state.info?.selftest && !state.info?.selftestClose;
+	const workspaceRoot = createMemo(() => state.workspace?.root);
 	createEffect(
-		on(
-			() => state.workspace?.root,
-			(root) => {
-				if (root !== lastWorkspaceRoot) {
-					lastWorkspaceRoot = root;
-					setClip(null);
-				}
-				const cur = scopedFolder();
-				if (cur && (!root || !isInside(root, cur.path))) setScopedFolder(null);
-				if (!root) {
-					recalledFor = undefined;
-					setExpanded(new Set<string>());
-					return;
-				}
-				// Once for a workspace, not each time the panel comes back: what was opened while another panel was
-				// showing (the folders above a file another panel asked to be shown here) is not shut again by the
-				// panel's return. Folders opened before the first showing are kept beside the ones remembered.
-				if (!keeps() || recalledFor === root) return;
-				recalledFor = root;
-				setExpanded((set) => new Set([...openFolders(recall(`tree:${root}`), root), ...[...set].filter((path) => isInside(root, path))]));
-			},
-		),
+		() => workspaceRoot(),
+		(root) => {
+			if (root !== lastWorkspaceRoot) {
+				lastWorkspaceRoot = root;
+				setClip(null);
+			}
+			const cur = scopedFolder();
+			if (cur && (!root || !isInside(root, cur.path))) setScopedFolder(null);
+			if (!root) {
+				recalledFor = undefined;
+				setExpanded(new Set<string>());
+				return;
+			}
+			// Once for a workspace, not each time the panel comes back: what was opened while another panel was
+			// showing (the folders above a file another panel asked to be shown here) is not shut again by the
+			// panel's return. Folders opened before the first showing are kept beside the ones remembered.
+			if (!keeps() || recalledFor === root) return;
+			recalledFor = root;
+			setExpanded((set) => new Set([...openFolders(recall(`tree:${root}`), root), ...[...set].filter((path) => isInside(root, path))]));
+		},
 	);
-	createEffect(() => {
-		const root = state.workspace?.root;
-		const open = [...expanded()];
-		if (root && keeps()) remember(`tree:${root}`, JSON.stringify(open));
-	});
-	onCleanup(() => {
-		document.removeEventListener("focusin", forget);
-		cancelExplorerFocusSearch();
-		setFocused(null);
-		tree = undefined;
-	});
+	createEffect(
+		() => ({ root: state.workspace?.root, open: [...expanded()], keep: keeps() }),
+		({ root, open, keep }) => {
+			if (root && keep) remember(`tree:${root}`, JSON.stringify(open));
+		},
+	);
 	const [openEdOpen, setOpenEdOpen] = createSignal(recall("explorer.openEditors") !== "closed");
 	const [openEdH, setOpenEdH] = createSignal(clampExplorerHeight(recall("explorer.openEditors.h"), OPEN_EDITORS_MIN_H, OPEN_EDITORS_MAX_H, 120));
 	const toggleOpenEd = () => {
@@ -953,9 +982,13 @@ export function Explorer() {
 	};
 
 	const [outlineFilter, setOutlineFilter] = createSignal("");
-	createEffect(() => {
-		if (scopedFolder()) setWsOpen(true);
-	});
+	const hasScope = createMemo(() => Boolean(scopedFolder()));
+	createEffect(
+		() => hasScope(),
+		(scoped) => {
+			if (scoped) setWsOpen(true);
+		},
+	);
 	const toggleWs = () => {
 		const next = !wsOpen();
 		setWsOpen(next);
@@ -1024,9 +1057,8 @@ export function Explorer() {
 	};
 	return (
 		<div
-			class="panel-body explorer"
+			class={["panel-body explorer", { "drop-root": dropInto() !== null && dropInto() === activeRootPath() }]}
 			data-panel="explorer"
-			classList={{ "drop-root": dropInto() !== null && dropInto() === activeRootPath() }}
 			// Below the rows, or between them: the active root folder (workspace or scoped ticket folder).
 			onDragOver={(e) => activeRootPath() && dragOver(e, activeRootPath())}
 			onDragLeave={(e) => !e.currentTarget.contains(e.relatedTarget as Node | null) && setDropInto(null)}
@@ -1037,9 +1069,9 @@ export function Explorer() {
 			</div>
 
 			{/* VS Code-style Open Editors accordion section */}
-			<section class="explorer-section explorer-open-editors" classList={{ open: openEdOpen() }} aria-label="Open editors">
+			<section class={["explorer-section explorer-open-editors", { open: openEdOpen() }]} aria-label="Open editors">
 				<div class="explorer-section-head">
-					<button class="explorer-section-toggle" aria-expanded={openEdOpen()} onClick={toggleOpenEd}>
+					<button class="explorer-section-toggle" aria-expanded={openEdOpen() ? "true" : "false"} onClick={toggleOpenEd}>
 						<Icon name={openEdOpen() ? "chevron-down" : "chevron-right"} class="twisty" />
 						<span class="explorer-section-title">Open editors</span>
 					</button>
@@ -1060,18 +1092,20 @@ export function Explorer() {
 									{(item) => {
 										const activateOpenEditor = () => {
 											closeComparison();
-											if (state.bottomMaximized) setState("bottomMaximized", false);
-											setState("centerView", "editors");
-											setState("activeGroup", item.groupIndex);
-											setState("groups", item.groupIndex, "active", item.path);
+											setState((s) => {
+												if (s.bottomMaximized) s.bottomMaximized = false;
+												s.centerView = "editors";
+												s.activeGroup = item.groupIndex;
+												const grp = s.groups[item.groupIndex];
+												if (grp) grp.active = item.path;
+											});
 											focusEditor();
 										};
 										return (
 											<div
-												class="tree-row open-editor-row"
+												class={["tree-row open-editor-row", { selected: item.active, dirty: item.dirty }]}
 												role="listitem"
 												tabindex={0}
-												classList={{ selected: item.active, dirty: item.dirty }}
 												title={isUntitled(item.path) ? `${item.name} (unsaved buffer)` : item.path}
 												onClick={activateOpenEditor}
 												onKeyDown={(e) => {
@@ -1122,9 +1156,9 @@ export function Explorer() {
 			</Show>
 
 			{/* Collapsible Workspace root section (or focused subfolder scope, e.g. a ticket bundle folder) */}
-			<section class="explorer-section explorer-workspace" classList={{ open: wsOpen(), scoped: Boolean(scopedFolder()) }} aria-label={`Folder ${activeRootName()}`}>
+			<section class={["explorer-section explorer-workspace", { open: wsOpen(), scoped: Boolean(scopedFolder()) }]} aria-label={`Folder ${activeRootName()}`}>
 				<div class="explorer-section-head">
-					<button class="explorer-section-toggle" aria-expanded={wsOpen()} onClick={toggleWs}>
+					<button class="explorer-section-toggle" aria-expanded={wsOpen() ? "true" : "false"} onClick={toggleWs}>
 						<Icon name={wsOpen() ? "chevron-down" : "chevron-right"} class="twisty" />
 						<span class="explorer-section-title">{activeRootName()}</span>
 					</button>
@@ -1215,9 +1249,9 @@ export function Explorer() {
 					onReset={resetOutline}
 				/>
 			</Show>
-			<section class="explorer-section explorer-outline" classList={{ open: outlineOpen() }} aria-label="Outline">
+			<section class={["explorer-section explorer-outline", { open: outlineOpen() }]} aria-label="Outline">
 				<div class="explorer-section-head">
-					<button class="explorer-section-toggle" aria-expanded={outlineOpen()} onClick={toggleOutline}>
+					<button class="explorer-section-toggle" aria-expanded={outlineOpen() ? "true" : "false"} onClick={toggleOutline}>
 						<Icon name={outlineOpen() ? "chevron-down" : "chevron-right"} class="twisty" />
 						<span class="explorer-section-title">Outline</span>
 					</button>

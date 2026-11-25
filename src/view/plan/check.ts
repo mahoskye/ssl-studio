@@ -3,7 +3,7 @@
 // answers whether a call node's target exists; if it cannot be asked, that one
 // check waits rather than reporting everything as missing. Once built, the drift
 // between chart and code is reported the same way, and re-read as scripts change.
-import { createEffect, createRoot, on } from "solid-js";
+import { createEffect, createRoot, runWithOwner } from "solid-js";
 import { jsonProblem } from "../../shared/jsonCheck";
 import { baseName } from "../../shared/paths";
 import { backend } from "../backend";
@@ -169,10 +169,16 @@ export function trackPlan(model: monaco.editor.ITextModel) {
 	};
 	monaco.editor.getModels().forEach(watch);
 	const created = monaco.editor.onDidCreateModel(watch);
-	const disposeDocs = createRoot((dispose) => {
-		createEffect(on(docs, () => soon(300), { defer: true }));
-		return dispose;
-	});
+	const disposeDocs = runWithOwner(null, () =>
+		createRoot((dispose) => {
+			createEffect(
+				() => docs(),
+				() => soon(300),
+				{ defer: true },
+			);
+			return dispose;
+		}),
+	);
 	rechecks.set(uri, () => {
 		indexRetries = 0;
 		soon(1000);

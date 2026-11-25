@@ -6,7 +6,7 @@
 // design/<name>.tidy.md. Each step's result is checked as the cleanup
 // runner did: no new findings, procedures and parameters unchanged, and the
 // comments step changing comments only.
-import { createStore } from "solid-js/store";
+import { createStore } from "solid-js";
 import { localDay } from "../../shared/dates";
 import { backend } from "../backend";
 import { openReview, type Check, type Review } from "../editor/Review";
@@ -66,14 +66,22 @@ export function startTidy() {
 	// The steps are proposed for this file: its tab stays while they are.
 	keepTab(path);
 	proposals.clear();
-	setTidy({ path, steps: STEPS.map(() => "pending"), problems: STEPS.map(() => "") });
+	setTidy((s) => {
+		s.path = path;
+		s.steps = STEPS.map(() => "pending");
+		s.problems = STEPS.map(() => "");
+	});
 }
 
 /** Clears tidy state and pending step proposals (e.g. when switching workspaces). */
 export function resetTidy() {
 	generation++;
 	proposals.clear();
-	setTidy({ path: null, steps: STEPS.map(() => "pending"), problems: STEPS.map(() => "") });
+	setTidy((s) => {
+		s.path = null;
+		s.steps = STEPS.map(() => "pending");
+		s.problems = STEPS.map(() => "");
+	});
 }
 
 /** The proposal a step has under review, if any: the panel compares it with the review that is open. */
@@ -89,7 +97,9 @@ export async function showReview(index: number) {
 async function present(index: number, proposal: Review) {
 	const shown = await openReview(proposal);
 	if (proposals.get(index) !== proposal) return;
-	setTidy("problems", index, shown ? "" : "Its proposal is waiting: press Show review when the other review is closed.");
+	setTidy((s) => {
+		s.problems[index] = shown ? "" : "Its proposal is waiting: press Show review when the other review is closed.";
+	});
 	if (!shown) notify(`${STEPS[index]!.title}: the proposal is kept. Press Show review in the Agent panel to see it.`);
 }
 
@@ -336,8 +346,10 @@ export async function runStep(index: number) {
 	const mark = (to: StepState, problem = "") => {
 		if (mine !== generation || !stillSameWorkspace()) return;
 		if (to !== "review") proposals.delete(index);
-		setTidy("steps", index, to);
-		setTidy("problems", index, problem);
+		setTidy((s) => {
+			s.steps[index] = to;
+			s.problems[index] = problem;
+		});
 	};
 	/** Puts a proposal up for review and remembers it until it is accepted or rejected. */
 	const propose = async (proposal: Review) => {

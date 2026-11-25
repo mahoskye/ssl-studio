@@ -1,6 +1,6 @@
 // The window: menu bar, activity bar, side bar, editor groups, bottom panel, status bar.
 import { Icon } from "./Icon";
-import { batch, createEffect, createMemo, createSignal, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Match, onCleanup, onSettled, Show, snapshot, Switch, untrack } from "solid-js";
 import { docChecks } from "../shared/docChecks";
 import { folderParts } from "../shared/docSections";
 import { CATALOG_AREAS } from "../shared/projectDocs";
@@ -69,8 +69,15 @@ function Splitter(props: {
 	onCleanup(() => cleanupDrag?.());
 	return (
 		<div
-			class={`splitter ${props.axis}${props.column === 5 ? " after-editors" : ""}${props.extraClass ? ` ${props.extraClass}` : ""}`}
-			classList={{ dragging: dragging() }}
+			class={[
+				"splitter",
+				props.axis,
+				{
+					"after-editors": props.column === 5,
+					dragging: dragging(),
+				},
+				props.extraClass,
+			]}
 			role="separator"
 			tabindex={0}
 			aria-orientation={props.axis === "x" ? "vertical" : "horizontal"}
@@ -80,7 +87,7 @@ function Splitter(props: {
 			aria-valuemax={props.max}
 			title={`${props.label}: drag, or use the arrow keys. Double-click to reset.`}
 			style={props.column ? { "grid-column": String(props.column) } : undefined}
-			onDblClick={props.onReset}
+			onDblClick={() => props.onReset()}
 			onKeyDown={(e) => {
 				const step = e.shiftKey ? 64 : 16;
 				const map: Record<string, number> = props.axis === "x" ? { ArrowLeft: -step, ArrowRight: step } : { ArrowUp: -step, ArrowDown: step };
@@ -131,67 +138,77 @@ function useTheme() {
 	// In the desktop app the system is asked for its preference at startup; once a live OS
 	// media-query change arrives, follow the live preference instead of the startup snapshot.
 	const system = () => liveDark() ?? (state.info?.host === "app" ? state.info.systemDark : undefined);
-	const apply = () => applyTheme(resolveTheme(state.settings.theme, state.themes, system(), state.settings.themeMaterial));
-	createEffect(on([() => state.settings.theme, () => state.settings.themeMaterial, () => state.themes, system], apply));
+	createEffect(
+		() => resolveTheme(state.settings.theme, state.themes, system(), state.settings.themeMaterial),
+		(resolved) => {
+			applyTheme(resolved);
+		},
+	);
 	if (media) {
 		const onMediaChange = (e: MediaQueryListEvent) => setLiveDark(typeof e?.matches === "boolean" ? e.matches : media.matches);
 		media.addEventListener("change", onMediaChange);
 		onCleanup(() => media.removeEventListener("change", onMediaChange));
 	}
-	createEffect(() => applyFonts({ uiFont: state.settings.uiFont, codeFont: state.settings.codeFont, readFont: state.settings.readFont }));
+	createEffect(
+		() => ({ uiFont: state.settings.uiFont, codeFont: state.settings.codeFont, readFont: state.settings.readFont }),
+		(fonts) => {
+			applyFonts(fonts);
+		},
+	);
 }
 
 function useLayoutPersistence(isTemporaryNarrowLeft: () => boolean) {
-	let timer: ReturnType<typeof setTimeout> | undefined;
 	/** The folder whose layout was last refused a save, which has been said: said again for another folder. */
 	let layoutRefused: string | null = null;
-	let lastRoot: string | undefined = state.workspace?.root;
-	let wasReady = isTabsReady();
-	onCleanup(() => clearTimeout(timer));
+	let lastRoot: string | undefined;
+	let wasReady = false;
+	const persistedKey = createMemo(
+		() => {
+			const current = state.settings.layout;
+			const persisted = isTemporaryNarrowLeft() ? { ...current, left: false } : current;
+			return [state.workspace?.root, isTabsReady(), JSON.stringify(persisted)] as const;
+		},
+		{ equals: (a, b) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2] },
+	);
 	createEffect(
-		on(
-			() => {
-				const current = state.settings.layout;
-				const persisted = isTemporaryNarrowLeft() ? { ...current, left: false } : current;
-				return [state.workspace?.root, isTabsReady(), JSON.stringify(persisted)] as const;
-			},
-			([root, ready, layout], previous) => {
-				if (root !== lastRoot) {
-					clearTimeout(timer);
-					timer = undefined;
-					lastRoot = root;
-					wasReady = ready;
-					return;
-				}
-				if (!ready) {
-					clearTimeout(timer);
-					timer = undefined;
-					wasReady = false;
-					return;
-				}
-				if (!wasReady) {
-					wasReady = true;
-					return;
-				}
-				// The self-test opens the fixture itself, not a copy: it leaves no trace in it.
-				if (previous === undefined || !root || state.info?.selftest) return;
-				clearTimeout(timer);
-				const targetRoot = root;
-				timer = setTimeout(() => {
-					if (state.workspace?.root !== targetRoot) return;
-					void backend.saveSettings("workspace", { layout: JSON.parse(layout) }).then(
-						() => (layoutRefused = null),
-						(e) => {
-							// The folder's settings file cannot be written (it does not read as settings, say). Said once
-							// for a folder, not at every move of a panel; said again after a save has gone through.
-							if (state.workspace?.root !== targetRoot) return;
-							if (layoutRefused !== targetRoot) notify(`The window's layout is not being kept for this folder: ${String(e?.message ?? e)}`, "error");
-							layoutRefused = targetRoot;
-						},
-					);
-				}, 600);
-			},
-		),
+		() => persistedKey(),
+		([root, ready, layout], previous) => {
+			if (previous === undefined) {
+				lastRoot = root;
+				wasReady = ready;
+				return;
+			}
+			if (root !== lastRoot) {
+				lastRoot = root;
+				wasReady = ready;
+				return;
+			}
+			if (!ready) {
+				wasReady = false;
+				return;
+			}
+			if (!wasReady) {
+				wasReady = true;
+				return;
+			}
+			// The self-test opens the fixture itself, not a copy: it leaves no trace in it.
+			if (!root || snapshot(state).info?.selftest) return;
+			const targetRoot = root;
+			const timer = setTimeout(() => {
+				if (state.workspace?.root !== targetRoot) return;
+				void backend.saveSettings("workspace", { layout: JSON.parse(layout) }).then(
+					() => (layoutRefused = null),
+					(e) => {
+						// The folder's settings file cannot be written (it does not read as settings, say). Said once
+						// for a folder, not at every move of a panel; said again after a save has gone through.
+						if (state.workspace?.root !== targetRoot) return;
+						if (layoutRefused !== targetRoot) notify(`The window's layout is not being kept for this folder: ${String(e?.message ?? e)}`, "error");
+						layoutRefused = targetRoot;
+					},
+				);
+			}, 600);
+			return () => clearTimeout(timer);
+		},
 	);
 }
 
@@ -242,9 +259,9 @@ function PanelButton(props: { id: PanelId; badge?: string; badgeNote?: string })
 		<button
 			title={usable() ? `${panel().title}${props.badgeNote ? ` — ${props.badgeNote}` : ""}${shortcut(props.id)}\nRight-click, or the command "Move ${sideOf(props.id)} panel", moves it to the ${sideOf(props.id) === "left" ? "right" : "left"} side.` : `${name()}: open a folder first`}
 			aria-label={usable() && props.badgeNote ? `${name()}: ${props.badgeNote}` : name()}
-			aria-pressed={usable() && isShown(props.id)}
+			aria-pressed={usable() && isShown(props.id) ? "true" : "false"}
 			disabled={!usable()}
-			classList={{ active: usable() && isShown(props.id) }}
+			class={{ active: usable() && isShown(props.id) }}
 			onClick={() => togglePanel(props.id)}
 			onContextMenu={(e) => (e.preventDefault(), movePanel(props.id))}
 		>
@@ -262,7 +279,14 @@ function PanelButton(props: { id: PanelId; badge?: string; badgeNote?: string })
 export function App() {
 	useTheme();
 	// A changed style profile goes to the language server, which re-checks.
-	createEffect(on(() => JSON.stringify(state.settings.ssl), (_now, before) => before !== undefined && session.configure()));
+	const sslJson = createMemo(() => JSON.stringify(state.settings.ssl));
+	createEffect(
+		() => sslJson(),
+		() => {
+			session.configure();
+		},
+		{ defer: true },
+	);
 	useSymbols();
 	useProject();
 	useNavigation();
@@ -271,175 +295,268 @@ export function App() {
 	useLayoutPersistence(narrowOpenedLeft);
 	// Each side shows a panel that is docked on it. One that was moved away, or put back by "Reset the layout", or
 	// was never chosen (the app has only just started) gives way to one that is docked there; with none, the side closes.
-	createEffect(() => {
-		for (const side of ["left", "right"] as const) {
-			const key = side === "left" ? "leftView" : "rightView";
-			const view = panelOn(side);
-			if (view === null) state.settings.layout[side] && setState("settings", "layout", side, false);
-			else if (view !== state[key]) setState(key, view);
-		}
-	});
+	createEffect(
+		() =>
+			(["left", "right"] as const).map((side) => {
+				const key = side === "left" ? ("leftView" as const) : ("rightView" as const);
+				return { side, key, view: panelOn(side), open: state.settings.layout[side], current: state[key] };
+			}),
+		(sides) => {
+			const needsUpdate = sides.some(({ view, open, current }) => (view === null ? open : view !== current));
+			if (!needsUpdate) return;
+			setState((s) => {
+				for (const { side, key, view, open, current } of sides) {
+					if (view === null) {
+						if (open) s.settings.layout[side] = false;
+					} else if (view !== current) {
+						s[key] = view;
+					}
+				}
+			});
+		},
+	);
 	// Document outline ("objects") defaults to the right side when available and remembers
 	// whether the user left it active or inactive across tab switches and sessions.
-	let syncingOutline = false;
+	let syncingOutline = 0;
+	const outlineAvailKey = createMemo(
+		() => {
+			const side = sideOf("objects");
+			const key = side === "left" ? ("leftView" as const) : ("rightView" as const);
+			const avail = isPanelAvailable("objects");
+			return [state.workspace?.root, isTabsReady(), avail, side, narrowPanels(), !avail && state[key] === "objects"] as const;
+		},
+		{ equals: (a, b) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2] && a[3] === b[3] && a[4] === b[4] && a[5] === b[5] },
+	);
 	createEffect(
-		on(
-			() => {
-				const side = sideOf("objects");
-				const key = side === "left" ? "leftView" : "rightView";
-				const avail = isPanelAvailable("objects");
-				return [state.workspace?.root, isTabsReady(), avail, side, narrowPanels(), !avail && state[key] === "objects"] as const;
-			},
-			([root, ready, avail, side, narrow], prev) => {
-				if (root !== prev?.[0]) loadOutlineMemory(root);
-				if (!root || !ready || state.info?.selftest) return;
-				const key = side === "left" ? "leftView" : "rightView";
+		() => outlineAvailKey(),
+		([root, ready, avail, side, narrow], prev) => {
+			if (root !== prev?.[0]) loadOutlineMemory(root);
+			const res = untrack(() => {
+				if (!root || !ready || state.info?.selftest) return null;
+				const key = side === "left" ? ("leftView" as const) : ("rightView" as const);
 				const current = { open: state.settings.layout[side], view: state[key] };
 				const fallback = PANELS.find((p) => p.id !== "objects" && sideOf(p.id) === side && isPanelAvailable(p.id))?.id ?? null;
-				const res = transitionOutlineAvailability(
-					avail,
-					current,
-					getOutlineMemory(),
-					fallback,
-					(id) => sideOf(id) === side && isPanelAvailable(id),
-					narrow && side === "right",
-				);
-				setOutlineMemory(res.memory);
-				if (!res.apply) return;
-				syncingOutline = true;
-				try {
-					batch(() => {
-						if (res.apply!.view !== undefined) setState(key, res.apply!.view);
-						if (res.apply!.open !== undefined) setState("settings", "layout", side, res.apply!.open);
-					});
-				} finally {
-					syncingOutline = false;
-				}
-			},
-		),
+				return {
+					key,
+					transition: transitionOutlineAvailability(
+						avail,
+						current,
+						getOutlineMemory(),
+						fallback,
+						(id) => sideOf(id) === side && isPanelAvailable(id),
+						narrow && side === "right",
+					),
+				};
+			});
+			if (!res) return;
+			setOutlineMemory(res.transition.memory);
+			const toApply = res.transition.apply;
+			if (!toApply) return;
+			syncingOutline++;
+			setState((s) => {
+				if (toApply.view !== undefined) s[res.key] = toApply.view;
+				if (toApply.open !== undefined) s.settings.layout[side] = toApply.open;
+			});
+			queueMicrotask(() => {
+				syncingOutline = Math.max(0, syncingOutline - 1);
+			});
+		},
 	);
 	// Record user-driven activation or deactivation of Document outline while it is available.
+	const outlineSideState = createMemo(
+		() => {
+			const side = sideOf("objects");
+			const key = side === "left" ? ("leftView" as const) : ("rightView" as const);
+			return [state.settings.layout[side], state[key]] as const;
+		},
+		{ equals: (a, b) => a[0] === b[0] && a[1] === b[1] },
+	);
 	createEffect(
-		on(
-			() => {
-				const side = sideOf("objects");
-				const key = side === "left" ? "leftView" : "rightView";
-				return [state.settings.layout[side], state[key]] as const;
-			},
-			([open, view], prev) => {
-				if (syncingOutline || !state.workspace || !isTabsReady() || state.info?.selftest) return;
-				if (!isPanelAvailable("objects")) return;
-				if (narrowPanels() && sideOf("objects") === "right") return;
-				const nowActive = open && view === "objects";
-				const prevSnap = prev && prev[1] !== "objects" ? { open: prev[0], view: prev[1] } : undefined;
-				recordOutlineActive(nowActive, nowActive ? prevSnap : null);
-			},
-		),
+		() => outlineSideState(),
+		([open, view], prev) => {
+			if (syncingOutline > 0) return;
+			const canRecord = untrack(
+				() =>
+					Boolean(state.workspace) &&
+					isTabsReady() &&
+					!state.info?.selftest &&
+					isPanelAvailable("objects") &&
+					!(narrowPanels() && sideOf("objects") === "right"),
+			);
+			if (!canRecord) return;
+			const nowActive = open && view === "objects";
+			const prevSnap = prev && prev[1] !== "objects" ? { open: prev[0], view: prev[1] } : undefined;
+			recordOutlineActive(nowActive, nowActive ? prevSnap : null);
+		},
 	);
 	// Plan Palette ("palette") loads by default when viewing a plan chart and remembers
 	// whether the user left it active or inactive across tab switches and reloads.
 	// Outside plan charts, Palette remains user-openable on SSL, Markdown, and Call Graph views.
-	let syncingPlanPalette = false;
+	let syncingPlanPalette = 0;
+	const paletteAvailKey = createMemo(
+		() => {
+			const side = sideOf("palette");
+			const key = side === "left" ? ("leftView" as const) : ("rightView" as const);
+			const inPlan = isPlanChartActive();
+			const avail = isPanelAvailable("palette");
+			return [state.workspace?.root, isTabsReady(), inPlan, side, narrowPanels(), !avail && state[key] === "palette", avail] as const;
+		},
+		{
+			equals: (a, b) =>
+				a[0] === b[0] && a[1] === b[1] && a[2] === b[2] && a[3] === b[3] && a[4] === b[4] && a[5] === b[5] && a[6] === b[6],
+		},
+	);
 	createEffect(
-		on(
-			() => {
-				const side = sideOf("palette");
-				const key = side === "left" ? "leftView" : "rightView";
-				const inPlan = isPlanChartActive();
-				const avail = isPanelAvailable("palette");
-				return [state.workspace?.root, isTabsReady(), inPlan, side, narrowPanels(), !avail && state[key] === "palette", avail] as const;
-			},
-			([root, ready, inPlan, side, narrow, , avail], prev) => {
-				if (root !== prev?.[0]) loadPlanPaletteMemory(root);
-				if (!root || !ready || state.info?.selftest) return;
+		() => paletteAvailKey(),
+		([root, ready, inPlan, side, narrow, , avail], prev) => {
+			if (root !== prev?.[0]) loadPlanPaletteMemory(root);
+			const res = untrack(() => {
+				if (!root || !ready || state.info?.selftest) return null;
 				// If Palette is legitimately available outside a plan chart (Markdown, SSL, Call Graph)
 				// and we are not just transitioning away from a plan chart, never evict a user-opened Palette.
-				if (!inPlan && !prev?.[2] && avail) return;
-				const key = side === "left" ? "leftView" : "rightView";
+				if (!inPlan && !prev?.[2] && avail) return null;
+				const key = side === "left" ? ("leftView" as const) : ("rightView" as const);
 				const current = { open: state.settings.layout[side], view: state[key] };
 				const fallback = PANELS.find((p) => p.id !== "palette" && sideOf(p.id) === side && isPanelAvailable(p.id))?.id ?? null;
-				const res = transitionPanelAvailability(
-					"palette",
-					inPlan,
-					current,
-					getPlanPaletteMemory(),
-					fallback,
-					(id) => sideOf(id) === side && isPanelAvailable(id),
-					narrow && side === "right",
-					side === "right",
-				);
-				setPlanPaletteMemory(res.memory);
-				if (!res.apply) return;
-				syncingPlanPalette = true;
-				try {
-					batch(() => {
-						if (res.apply!.view !== undefined) setState(key, res.apply!.view);
-						if (res.apply!.open !== undefined) setState("settings", "layout", side, res.apply!.open);
-					});
-				} finally {
-					syncingPlanPalette = false;
-				}
-			},
-		),
+				return {
+					key,
+					transition: transitionPanelAvailability(
+						"palette",
+						inPlan,
+						current,
+						getPlanPaletteMemory(),
+						fallback,
+						(id) => sideOf(id) === side && isPanelAvailable(id),
+						narrow && side === "right",
+						side === "right",
+					),
+				};
+			});
+			if (!res) return;
+			setPlanPaletteMemory(res.transition.memory);
+			const toApply = res.transition.apply;
+			if (!toApply) return;
+			syncingPlanPalette++;
+			setState((s) => {
+				if (toApply.view !== undefined) s[res.key] = toApply.view;
+				if (toApply.open !== undefined) s.settings.layout[side] = toApply.open;
+			});
+			queueMicrotask(() => {
+				syncingPlanPalette = Math.max(0, syncingPlanPalette - 1);
+			});
+		},
 	);
 	// Record user-driven activation or deactivation of Palette while viewing a plan chart.
+	const paletteSideState = createMemo(
+		() => {
+			const side = sideOf("palette");
+			const key = side === "left" ? ("leftView" as const) : ("rightView" as const);
+			return [state.settings.layout[side], state[key]] as const;
+		},
+		{ equals: (a, b) => a[0] === b[0] && a[1] === b[1] },
+	);
 	createEffect(
-		on(
-			() => {
-				const side = sideOf("palette");
-				const key = side === "left" ? "leftView" : "rightView";
-				return [state.settings.layout[side], state[key]] as const;
-			},
-			([open, view], prev) => {
-				if (syncingPlanPalette || !state.workspace || !isTabsReady() || state.info?.selftest) return;
-				if (!isPlanChartActive()) return;
-				if (narrowPanels() && sideOf("palette") === "right") return;
-				const nowActive = open && view === "palette";
-				const prevSnap = prev && prev[1] !== "palette" ? { open: prev[0], view: prev[1] } : undefined;
-				recordPlanPaletteActive(nowActive, nowActive ? prevSnap : null);
-			},
-		),
+		() => paletteSideState(),
+		([open, view], prev) => {
+			if (syncingPlanPalette > 0) return;
+			const canRecord = untrack(
+				() =>
+					Boolean(state.workspace) &&
+					isTabsReady() &&
+					!state.info?.selftest &&
+					isPlanChartActive() &&
+					!(narrowPanels() && sideOf("palette") === "right"),
+			);
+			if (!canRecord) return;
+			const nowActive = open && view === "palette";
+			const prevSnap = prev && prev[1] !== "palette" ? { open: prev[0], view: prev[1] } : undefined;
+			recordPlanPaletteActive(nowActive, nowActive ? prevSnap : null);
+		},
 	);
 	// When other context-gated panels (e.g. Palette outside plan charts) become irrelevant to the open file/view,
 	// switch their side cleanly to the first available panel docked on that side (skipped during selftest).
-	createEffect(() => {
-		if (!state.workspace || state.info?.selftest) return;
-		for (const side of ["left", "right"] as const) {
-			const key = side === "left" ? "leftView" : "rightView";
-			const current = state[key];
-			if (current === "objects") continue;
-			if (current === "palette" && getPlanPaletteMemory().before !== null) continue;
-			if (!isPanelAvailable(current)) {
-				const fallback = PANELS.find((p) => sideOf(p.id) === side && isPanelAvailable(p.id));
-				if (fallback) setState(key, fallback.id);
-				else if (state.settings.layout[side]) setState("settings", "layout", side, false);
+	createEffect(
+		() => {
+			if (!state.workspace || state.info?.selftest) return null;
+			const updates: { side: "left" | "right"; key: "leftView" | "rightView"; fallback?: PanelId; close?: boolean }[] = [];
+			for (const side of ["left", "right"] as const) {
+				const key = side === "left" ? ("leftView" as const) : ("rightView" as const);
+				const current = state[key];
+				if (current === "objects") continue;
+				if (current === "palette" && getPlanPaletteMemory().before !== null) continue;
+				if (!isPanelAvailable(current)) {
+					const fallback = PANELS.find((p) => sideOf(p.id) === side && isPanelAvailable(p.id));
+					if (fallback) updates.push({ side, key, fallback: fallback.id });
+					else if (state.settings.layout[side]) updates.push({ side, key, close: true });
+				}
 			}
-		}
-		const hosted = narrowHosted();
-		if (hosted && !isPanelAvailable(hosted)) setNarrowHosted(null);
-	});
+			const hosted = narrowHosted();
+			const clearHosted = Boolean(hosted && !isPanelAvailable(hosted));
+			return updates.length || clearHosted ? { updates, clearHosted } : null;
+		},
+		(plan) => {
+			if (!plan) return;
+			if (plan.updates.length) {
+				setState((s) => {
+					for (const u of plan.updates) {
+						if (u.fallback) s[u.key] = u.fallback;
+						else if (u.close) s.settings.layout[u.side] = false;
+					}
+				});
+			}
+			if (plan.clearHosted) setNarrowHosted(null);
+		},
+	);
 	// Which files are open is kept with the folder, so that it opens next time as it was left.
-	createEffect(on(() => JSON.stringify([state.groups.map((g) => [g.tabs, g.active]), state.activeGroup]), rememberTabs));
+	const tabsKeyJson = createMemo(() => JSON.stringify([state.groups.map((g) => [g.tabs, g.active]), state.activeGroup]));
+	createEffect(
+		() => tabsKeyJson(),
+		() => {
+			rememberTabs();
+		},
+	);
 	// And so are the side panel, the bottom panel and the right panel that were showing.
-	createEffect(on(() => [state.leftView, state.bottomView, state.rightView], rememberViews));
+	const viewsKeyTuple = createMemo(
+		() => [state.leftView, state.bottomView, state.rightView] as const,
+		{ equals: (a, b) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2] },
+	);
+	createEffect(
+		() => viewsKeyTuple(),
+		() => {
+			rememberViews();
+		},
+	);
 	// The app is told how much is unsaved, so that it can refuse to close its window until the user has been asked.
-	createEffect(() => void backend.unsavedChanged(unsavedPaths().length).catch(() => undefined));
+	const unsavedCount = createMemo(() => unsavedPaths().length);
+	createEffect(
+		() => unsavedCount(),
+		(count) => {
+			void backend.unsavedChanged(count).catch(() => undefined);
+		},
+	);
 	// A review takes the editors' place: one opened while the call graph is showing must not open behind it.
-	createEffect(() => review() && setState("centerView", "editors"));
+	createEffect(
+		() => Boolean(review()),
+		(hasReview) => {
+			if (hasReview) setState((s) => { s.centerView = "editors"; });
+		},
+	);
 	// Keep Call Graph mounted once opened in the current workspace so pan/zoom, folds, focus, and impact state survive jumps to code/docs.
 	const [graphMounted, setGraphMounted] = createSignal(false);
+	const workspaceRoot = createMemo(() => state.workspace?.root);
 	createEffect(
-		on(
-			() => state.workspace?.root,
-			() => {
-				setGraphMounted(false);
-				resetGraphState();
-			},
-		),
+		() => workspaceRoot(),
+		() => {
+			setGraphMounted(false);
+			resetGraphState();
+		},
 	);
-	createEffect(() => {
-		if (state.workspace && state.centerView === "graph") setGraphMounted(true);
-	});
+	createEffect(
+		() => Boolean(state.workspace) && state.centerView === "graph",
+		(showGraph) => {
+			if (showGraph) setGraphMounted(true);
+		},
+	);
 	const layout = () => state.settings.layout;
 	const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
 	// The window's size, to keep the side panels from crowding out the editors.
@@ -456,42 +573,63 @@ export function App() {
 	const safeRightWidth = () => positiveDim(layout().rightWidth, 360);
 	const safeBottomHeight = () => positiveDim(layout().bottomHeight, 200);
 	const isNarrowPair = () => !canFitBothPanels(size().width, chrome());
-	createEffect(() => {
-		const narrow = isNarrowPair();
-		setNarrowPanels(narrow);
-		if (narrow) {
-			if (state.workspace && layout().right && !narrowHosted() && (lastShown() === "right" || !layout().left)) {
-				batch(() => {
-					if (!layout().left) setNarrowOpenedLeft(true);
-					setNarrowHosted(state.rightView);
-					setState("settings", "layout", "left", true);
-				});
+	createEffect(
+		() => {
+			const narrow = isNarrowPair();
+			if (narrow) {
+				const shouldHost = Boolean(
+					state.workspace && layout().right && !narrowHosted() && (lastShown() === "right" || !layout().left),
+				);
+				return {
+					narrow: true as const,
+					shouldHost,
+					leftClosed: shouldHost && !layout().left,
+					rightView: shouldHost ? state.rightView : null,
+				};
 			}
-		} else {
 			const hosted = narrowHosted();
 			const restoreLeftClosed = narrowOpenedLeft();
-			if (hosted || restoreLeftClosed) {
-				batch(() => {
-					if (restoreLeftClosed) setNarrowOpenedLeft(false);
-					if (hosted) {
-						setNarrowHosted(null);
-						if (sideOf(hosted) === "right") {
-							setState("rightView", hosted);
-							setState("settings", "layout", "right", true);
+			const hostedOnRight = Boolean(hosted && sideOf(hosted) === "right");
+			return {
+				narrow: false as const,
+				hosted,
+				restoreLeftClosed,
+				hostedOnRight,
+			};
+		},
+		(next) => {
+			setNarrowPanels(next.narrow);
+			if (next.narrow) {
+				if (next.shouldHost && next.rightView) {
+					if (next.leftClosed) setNarrowOpenedLeft(true);
+					setNarrowHosted(next.rightView);
+					setState((s) => {
+						s.settings.layout.left = true;
+					});
+				}
+			} else if (next.hosted || next.restoreLeftClosed) {
+				if (next.restoreLeftClosed) setNarrowOpenedLeft(false);
+				if (next.hosted) setNarrowHosted(null);
+				if ((next.hosted && next.hostedOnRight) || next.restoreLeftClosed) {
+					setState((s) => {
+						if (next.hosted && next.hostedOnRight) {
+							s.rightView = next.hosted;
+							s.settings.layout.right = true;
 						}
-					}
-					if (restoreLeftClosed) setState("settings", "layout", "left", false);
-				});
+						if (next.restoreLeftClosed) s.settings.layout.left = false;
+					});
+				}
 			}
-		}
-	});
+		},
+	);
 	// If the user explicitly dismisses the narrow-hosted panel or closes the left sidebar while narrow,
 	// clear the temporary auto-open flag so widening respects their explicit choice.
-	createEffect(() => {
-		if (narrowPanels() && narrowOpenedLeft() && (!narrowHosted() || !layout().left)) {
-			setNarrowOpenedLeft(false);
-		}
-	});
+	createEffect(
+		() => narrowPanels() && narrowOpenedLeft() && (!narrowHosted() || !layout().left),
+		(shouldClear) => {
+			if (shouldClear) setNarrowOpenedLeft(false);
+		},
+	);
 	// In narrow layout, right-docked panels are hosted in the left slot so the right column never crowds or overflows.
 	const rightW = () => (layout().right && state.workspace && !narrowPanels() ? safeRightWidth() : 0);
 	const fit = () => fitPanels(size().width, layout().left && state.workspace ? safeLeftWidth() : 0, rightW(), lastShown(), chrome());
@@ -502,11 +640,19 @@ export function App() {
 	const maxLeft = () => Math.max(LEFT_MIN, Math.floor(usableWidth() - CENTER_MIN - fit().right));
 	const maxRight = () => Math.max(RIGHT_MIN, Math.floor(usableWidth() - CENTER_MIN - fit().left));
 	// A side that is open and got no room: its button is not pressed, and pressing it brings the panel back.
-	createEffect(() => setCrowded(state.workspace ? crowdedSides({ left: layout().left, right: layout().right && !narrowPanels() }, fit()) : { left: false, right: false }));
+	createEffect(
+		() =>
+			state.workspace
+				? crowdedSides({ left: layout().left, right: layout().right && !narrowPanels() }, fit())
+				: { left: false, right: false },
+		(next) => {
+			setCrowded(next);
+		},
+	);
 
 	// Per-mode bottom panel memory (ADR 0027): default open in Code, hidden in Graph/Plan/Docs/Table/Review/Welcome.
 	type ModeKey = "code" | "plan" | "graph" | "doc" | "table" | "review" | "welcome";
-	const activeMode = (): ModeKey => {
+	const activeMode = createMemo<ModeKey>(() => {
 		if (state.centerView === "graph") return "graph";
 		if (state.centerView === "welcome") return "welcome";
 		if (review()) return "review";
@@ -517,54 +663,64 @@ export function App() {
 			if (isTable(path) && !tableTextMode(path)) return "table";
 		}
 		return "code";
-	};
+	});
 	const DEFAULT_BOTTOM_BY_MODE: Record<ModeKey, boolean> = { code: true, plan: false, graph: false, doc: false, table: false, review: false, welcome: false };
 	const bottomByMode: Record<ModeKey, boolean> = { ...DEFAULT_BOTTOM_BY_MODE };
-	let syncingBottomMode = false;
-	let bottomModeRoot: string | undefined = state.workspace?.root;
+	let syncingBottomMode = 0;
+	let bottomModeRoot: string | undefined;
 	createEffect(
-		on(
-			() => state.workspace?.root,
-			(root) => {
-				bottomModeRoot = root;
-				setNarrowHosted(null);
-				setNarrowOpenedLeft(false);
-				Object.assign(bottomByMode, DEFAULT_BOTTOM_BY_MODE);
-				if (root) bottomByMode[activeMode()] = state.settings.layout.bottom;
-			},
-		),
+		() => workspaceRoot(),
+		(root) => {
+			bottomModeRoot = root;
+			setNarrowHosted(null);
+			setNarrowOpenedLeft(false);
+			Object.assign(bottomByMode, DEFAULT_BOTTOM_BY_MODE);
+			if (root) untrack(() => { bottomByMode[activeMode()] = state.settings.layout.bottom; });
+		},
+	);
+	const rootReadyKey = createMemo(
+		() => [state.workspace?.root, isTabsReady()] as const,
+		{ equals: (a, b) => a[0] === b[0] && a[1] === b[1] },
 	);
 	createEffect(
-		on(
-			() => [state.workspace?.root, isTabsReady()] as const,
-			([root, ready]) => {
-				if (root && ready) bottomByMode[activeMode()] = state.settings.layout.bottom;
-			},
-		),
+		() => rootReadyKey(),
+		([root, ready]) => {
+			if (root && ready) untrack(() => { bottomByMode[activeMode()] = state.settings.layout.bottom; });
+		},
 	);
 	createEffect(
-		on(activeMode, (mode, prev) => {
-			if (!state.workspace) return;
-			if (!isTabsReady() && !state.info?.selftest) return;
-			if (prev === undefined || state.workspace.root !== bottomModeRoot) {
-				bottomByMode[mode] = state.settings.layout.bottom;
-				return;
+		() => activeMode(),
+		(mode, prev) => {
+			const want = untrack(() => {
+				if (!state.workspace) return null;
+				if (!isTabsReady() && !state.info?.selftest) return null;
+				if (prev === undefined || state.workspace.root !== bottomModeRoot) {
+					bottomByMode[mode] = state.settings.layout.bottom;
+					return null;
+				}
+				const target = bottomByMode[mode];
+				return state.settings.layout.bottom !== target ? target : null;
+			});
+			if (want !== null) {
+				syncingBottomMode++;
+				setState((s) => {
+					s.settings.layout.bottom = want;
+				});
+				queueMicrotask(() => {
+					syncingBottomMode = Math.max(0, syncingBottomMode - 1);
+				});
 			}
-			const want = bottomByMode[mode];
-			if (state.settings.layout.bottom !== want) {
-				syncingBottomMode = true;
-				setState("settings", "layout", "bottom", want);
-				queueMicrotask(() => (syncingBottomMode = false));
-			}
-		}),
+		},
 	);
+	const bottomOpen = createMemo(() => state.settings.layout.bottom);
 	createEffect(
-		on(
-			() => state.settings.layout.bottom,
-			(open) => {
-				if (!syncingBottomMode && state.workspace) bottomByMode[activeMode()] = open;
-			},
-		),
+		() => bottomOpen(),
+		(open) => {
+			if (syncingBottomMode > 0) return;
+			untrack(() => {
+				if (state.workspace) bottomByMode[activeMode()] = open;
+			});
+		},
 	);
 	let centerEl: HTMLElement | undefined;
 	const [centerH, setCenterH] = createSignal(0);
@@ -573,22 +729,28 @@ export function App() {
 		const setup = centerEl.querySelector<HTMLElement>(".setup-bar");
 		setCenterH(Math.max(0, centerEl.clientHeight - (setup?.offsetHeight ?? 0)));
 	};
-	onMount(() => {
+	onSettled(() => {
 		measureCenter();
 		if (!centerEl || typeof ResizeObserver === "undefined") return;
 		const ro = new ResizeObserver(measureCenter);
 		ro.observe(centerEl);
-		onCleanup(() => ro.disconnect());
+		return () => ro.disconnect();
 	});
-	createEffect(() => {
-		// Re-measure when the setup bar appears or is dismissed.
-		void (state.project && !state.project.configured && !state.setupDismissed);
-		queueMicrotask(measureCenter);
-	});
+	const setupBarVisible = createMemo(() => Boolean(state.project && !state.project.configured && !state.setupDismissed));
+	createEffect(
+		() => setupBarVisible(),
+		() => {
+			// Re-measure when the setup bar appears or is dismissed.
+			queueMicrotask(measureCenter);
+		},
+	);
 	// Closing the bottom panel clears maximize so reopening shows the editor beside it.
-	createEffect(() => {
-		if (!layout().bottom && state.bottomMaximized) setState("bottomMaximized", false);
-	});
+	createEffect(
+		() => !layout().bottom && state.bottomMaximized,
+		(clearMax) => {
+			if (clearMax) setState((s) => { s.bottomMaximized = false; });
+		},
+	);
 	const verticalChrome = () => (state.settings.menuBar !== false ? 34 : 0) * scale() + 24 * scale() + gap();
 	const effectiveCenterH = () => centerH() || Math.max(0, size().height - verticalChrome());
 	const maxBottom = () => Math.max(BOTTOM_MIN, Math.floor(effectiveCenterH() - splitSize() - EDITOR_MIN_HEIGHT));
@@ -606,14 +768,22 @@ export function App() {
 	const applyHorizontal = (side: "left" | "right", startL: number, startR: number, usable: number, delta: number, allowSnap: boolean) => {
 		const res = dragHorizontalPanel(side, startL, startR, usable, delta, allowSnap);
 		if (res.collapsed) {
-			if (side === "left" && startR > 0) setState("settings", "layout", "rightWidth", startR);
-			if (side === "right" && startL > 0) setState("settings", "layout", "leftWidth", startL);
+			if ((side === "left" && startR > 0) || (side === "right" && startL > 0)) {
+				setState((s) => {
+					if (side === "left" && startR > 0) s.settings.layout.rightWidth = startR;
+					if (side === "right" && startL > 0) s.settings.layout.leftWidth = startL;
+				});
+			}
 			setSnapHide(side);
 			return;
 		}
 		if (snapHide() === side) setSnapHide(null);
-		if (startL > 0) setState("settings", "layout", "leftWidth", res.left);
-		if (startR > 0) setState("settings", "layout", "rightWidth", res.right);
+		if (startL > 0 || startR > 0) {
+			setState((s) => {
+				if (startL > 0) s.settings.layout.leftWidth = res.left;
+				if (startR > 0) s.settings.layout.rightWidth = res.right;
+			});
+		}
 	};
 	const startHorizontalDrag = (side: "left" | "right") => {
 		const f = fit();
@@ -631,12 +801,16 @@ export function App() {
 			setSnapHide(null);
 			// Keep pre-drag width so reopening restores the panel as the user had it.
 			if (snap.side === "left") {
-				setState("settings", "layout", "leftWidth", snap.left);
 				if (narrowPanels() && narrowHosted()) setNarrowHosted(null);
-				setState("settings", "layout", "left", false);
+				setState((s) => {
+					s.settings.layout.leftWidth = snap.left;
+					s.settings.layout.left = false;
+				});
 			} else {
-				setState("settings", "layout", "rightWidth", snap.right);
-				setState("settings", "layout", "right", false);
+				setState((s) => {
+					s.settings.layout.rightWidth = snap.right;
+					s.settings.layout.right = false;
+				});
 			}
 			queueMicrotask(() => (!document.activeElement || document.activeElement === document.body) && focusEditor());
 		}
@@ -669,7 +843,9 @@ export function App() {
 			return;
 		}
 		setSnapMaximize(false);
-		setState("settings", "layout", "bottomHeight", res.height);
+		setState((s) => {
+			s.settings.layout.bottomHeight = res.height;
+		});
 	};
 	const endBottomDrag = () => {
 		const snap = bSnap;
@@ -679,31 +855,42 @@ export function App() {
 		if (!snap) return;
 		if (snapHide() === "bottom") {
 			setSnapHide(null);
-			setState("bottomMaximized", false);
-			setState("settings", "layout", "bottomHeight", snap.savedHeight);
-			setState("settings", "layout", "bottom", false);
+			setState((s) => {
+				s.bottomMaximized = false;
+				s.settings.layout.bottomHeight = snap.savedHeight;
+				s.settings.layout.bottom = false;
+			});
 			queueMicrotask(() => (!document.activeElement || document.activeElement === document.body) && focusEditor());
 			return;
 		}
 		if (maxNow === true) {
 			// Keep pre-drag height so Restore brings the panel back where it was.
-			setState("settings", "layout", "bottomHeight", snap.savedHeight);
-			setState("bottomMaximized", true);
+			setState((s) => {
+				s.settings.layout.bottomHeight = snap.savedHeight;
+				s.bottomMaximized = true;
+			});
 		} else if (maxNow === false) {
-			setState("bottomMaximized", false);
+			setState((s) => {
+				s.bottomMaximized = false;
+			});
 		}
 	};
 	const stepBottom = (delta: number) => {
 		const res = dragBottomPanel(bottom(), effectiveCenterH(), splitSize(), delta, false, state.bottomMaximized);
-		setState("bottomMaximized", res.maximized);
-		if (!res.maximized) setState("settings", "layout", "bottomHeight", res.height);
+		setState((s) => {
+			s.bottomMaximized = res.maximized;
+			if (!res.maximized) s.settings.layout.bottomHeight = res.height;
+		});
 	};
 
 	// The interface's size scales the type and spacing scales in style.css; the code's size is its own setting.
-	createEffect(() => {
-		document.documentElement.style.setProperty("--ui-scale", String(scale()));
-		document.documentElement.style.setProperty("--code-size", `${clamp(Number(state.settings.fontSize) || 13, 8, 40)}px`);
-	});
+	createEffect(
+		() => [String(scale()), `${clamp(Number(state.settings.fontSize) || 13, 8, 40)}px`] as const,
+		([uiScale, codeSize]) => {
+			document.documentElement.style.setProperty("--ui-scale", uiScale);
+			document.documentElement.style.setProperty("--code-size", codeSize);
+		},
+	);
 	onCleanup(
 		focusRequest.listen((target) => {
 			// The panel's search box or its list, never a button: a stray key must not press something.
@@ -750,10 +937,14 @@ export function App() {
 				<button
 					title={state.workspace ? `Call graph${shortcut("graph")}` : "Call graph: open a folder first"}
 					aria-label="Call graph"
-					aria-pressed={state.centerView === "graph"}
+					aria-pressed={state.centerView === "graph" ? "true" : "false"}
 					disabled={!state.workspace}
-					classList={{ active: Boolean(state.workspace) && state.centerView === "graph" }}
-					onClick={() => setState("centerView", state.centerView === "graph" ? "editors" : "graph")}
+					class={{ active: Boolean(state.workspace) && state.centerView === "graph" }}
+					onClick={() =>
+						setState((s) => {
+							s.centerView = s.centerView === "graph" ? "editors" : "graph";
+						})
+					}
 				>
 					<span class="codicon-glyph" aria-hidden="true">
 						{"\uebb9"}
@@ -764,7 +955,7 @@ export function App() {
 					<span class="activity-divider" aria-hidden="true" />
 				</Show>
 				<For each={PANELS.filter((p) => sideOf(p.id) === "right" && isPanelAvailable(p.id))}>{(p) => <PanelButton id={p.id} badge={panelBadge(p.id)} badgeNote={panelBadgeNote(p.id)} />}</For>
-				<button title={`All commands${shortcut("command-palette")}`} aria-label="All commands" onClick={() => setState("quickPick", "commands")}>
+				<button title={`All commands${shortcut("command-palette")}`} aria-label="All commands" onClick={() => setState((s) => { s.quickPick = "commands"; })}>
 					<span class="codicon-glyph" aria-hidden="true">
 						{"\ueb94"}
 					</span>
@@ -776,7 +967,7 @@ export function App() {
 				</button>
 			</nav>
 			<Show when={fit().left > 0 && state.workspace}>
-				<aside class="sidebar" classList={{ "snap-hidden": snapHide() === "left" }} aria-label="Side panel">
+				<aside class={["sidebar", { "snap-hidden": snapHide() === "left" }]} aria-label="Side panel">
 					<Show when={narrowPanels() && narrowHosted()}>
 						{(hostedId) => (
 							<div class="narrow-dock-bar">
@@ -814,7 +1005,7 @@ export function App() {
 					onDragDelta={dragHorizontal}
 					onDragEnd={endHorizontalDrag}
 					onStep={(d) => stepHorizontal("left", d)}
-					onReset={() => setState("settings", "layout", "leftWidth", Math.min(260, maxLeft()))}
+					onReset={() => setState((s) => { s.settings.layout.leftWidth = Math.min(260, maxLeft()); })}
 				/>
 			</Show>
 			<main class="center" ref={centerEl}>
@@ -824,10 +1015,10 @@ export function App() {
 						<button class="primary" onClick={() => void setUpProject()}>
 							Set up project
 						</button>
-						<button onClick={() => setState("setupDismissed", true)}>Not now</button>
+						<button onClick={() => setState((s) => { s.setupDismissed = true; })}>Not now</button>
 					</div>
 				</Show>
-				<div class="editors" classList={{ "panel-maximized": layout().bottom && Boolean(state.workspace) && isBottomMaximized() }}>
+				<div class={["editors", { "panel-maximized": layout().bottom && Boolean(state.workspace) && isBottomMaximized() }]}>
 					<Show when={state.workspace} fallback={<Welcome />}>
 						<Show when={graphMounted()}>
 							<div
@@ -843,7 +1034,7 @@ export function App() {
 							</div>
 						</Show>
 						<Show when={state.centerView === "welcome"}>
-							<CenterTabStrip title="Projects" tooltip="Switch workspace or open a recent folder" icon="home" onClose={() => setState("centerView", "editors")}>
+							<CenterTabStrip title="Projects" tooltip="Switch workspace or open a recent folder" icon="home" onClose={() => setState((s) => { s.centerView = "editors"; })}>
 								<Welcome />
 							</CenterTabStrip>
 						</Show>
@@ -866,21 +1057,36 @@ export function App() {
 						onDragDelta={dragBottom}
 						onDragEnd={endBottomDrag}
 						onStep={stepBottom}
-						onReset={() => (setState("bottomMaximized", false), setState("settings", "layout", "bottomHeight", 200))}
+						onReset={() =>
+							setState((s) => {
+								s.bottomMaximized = false;
+								s.settings.layout.bottomHeight = 200;
+							})
+						}
 					/>
-					<section class="bottom" classList={{ "snap-hidden": snapHide() === "bottom", maximized: isBottomMaximized() }} aria-label="Bottom panel">
+					<section class={["bottom", { "snap-hidden": snapHide() === "bottom", maximized: isBottomMaximized() }]} aria-label="Bottom panel">
 						<div
 							class="bottom-tabs"
 							role="tablist"
 							aria-label="Bottom panel"
 							onDblClick={(e) => {
-								if (!(e.target as HTMLElement).closest("button")) setState("bottomMaximized", (m) => !m);
+								if (!(e.target as HTMLElement).closest("button")) setState((s) => { s.bottomMaximized = !s.bottomMaximized; });
 							}}
 						>
-							<button role="tab" aria-selected={state.bottomView === "problems"} classList={{ active: state.bottomView === "problems" }} onClick={() => setState("bottomView", "problems")}>
+							<button
+								role="tab"
+								aria-selected={state.bottomView === "problems" ? "true" : "false"}
+								class={{ active: state.bottomView === "problems" }}
+								onClick={() => setState((s) => { s.bottomView = "problems"; })}
+							>
 								Problems <span class="count">{counts().errors + counts().warnings + counts().other}</span>
 							</button>
-							<button role="tab" aria-selected={state.bottomView === "output"} classList={{ active: state.bottomView === "output" }} onClick={() => setState("bottomView", "output")}>
+							<button
+								role="tab"
+								aria-selected={state.bottomView === "output" ? "true" : "false"}
+								class={{ active: state.bottomView === "output" }}
+								onClick={() => setState((s) => { s.bottomView = "output"; })}
+							>
 								Output
 							</button>
 							<span class="spacer" />
@@ -888,12 +1094,12 @@ export function App() {
 								class="bottom-action"
 								title={`${isBottomMaximized() ? "Restore panel size" : "Maximize panel size"}${shortcut("toggle-panel-maximize")}`}
 								aria-label={isBottomMaximized() ? "Restore panel size" : "Maximize panel size"}
-								aria-pressed={isBottomMaximized()}
-								onClick={() => setState("bottomMaximized", (m) => !m)}
+								aria-pressed={isBottomMaximized() ? "true" : "false"}
+								onClick={() => setState((s) => { s.bottomMaximized = !s.bottomMaximized; })}
 							>
 								<Icon name={isBottomMaximized() ? "chevron-down" : "chevron-up"} />
 							</button>
-							<button class="bottom-action" title={`Close panel${shortcut("toggle-panel")}`} aria-label="Close the bottom panel" onClick={() => setState("settings", "layout", "bottom", false)}>
+							<button class="bottom-action" title={`Close panel${shortcut("toggle-panel")}`} aria-label="Close the bottom panel" onClick={() => setState((s) => { s.settings.layout.bottom = false; })}>
 								<Icon name="close" />
 							</button>
 						</div>
@@ -920,9 +1126,9 @@ export function App() {
 					onDragDelta={dragHorizontal}
 					onDragEnd={endHorizontalDrag}
 					onStep={(d) => stepHorizontal("right", d)}
-					onReset={() => setState("settings", "layout", "rightWidth", Math.min(360, maxRight()))}
+					onReset={() => setState((s) => { s.settings.layout.rightWidth = Math.min(360, maxRight()); })}
 				/>
-				<aside class="rightbar" classList={{ "snap-hidden": snapHide() === "right" }} aria-label="Right panel">
+				<aside class={["rightbar", { "snap-hidden": snapHide() === "right" }]} aria-label="Right panel">
 					<Panel id={state.rightView} />
 				</aside>
 			</Show>

@@ -312,21 +312,27 @@ describe("R10B #1 — chooseModel() persists agentModel to 'user' scope even whe
 				return null;
 			},
 			async () => {
+				const { flush } = await import("solid-js");
 				const { setState } = await import("../src/view/state");
 				const { chooseModel, setAgent } = await import("../src/view/agent/store");
-				setState("project", {
-					configured: true,
-					path: "/ws/.ssl-studio/project.toml",
-					name: "Demo",
-					description: "",
-					docs: "docs",
-					schema: "schema",
-					tests: "tests",
-					code: ".",
-					plans: "design",
-					agentModel: "ollama/qwen3:8b",
+				setState((s) => {
+					s.project = {
+						configured: true,
+						path: "/ws/.ssl-studio/project.toml",
+						name: "Demo",
+						description: "",
+						docs: "docs",
+						schema: "schema",
+						tests: "tests",
+						code: ".",
+						plans: "design",
+						agentModel: "ollama/qwen3:8b",
+					};
 				});
-				setAgent("models", [{ providerID: "ollama", id: "llama3:8b", name: "Llama 3", local: true, tools: true, variants: [] }]);
+				setAgent((s) => {
+					s.models = [{ providerID: "ollama", id: "llama3:8b", name: "Llama 3", local: true, tools: true, variants: [] }];
+				});
+				flush();
 
 				const ok = await chooseModel("ollama/llama3:8b");
 				expect(ok).toBe(true);
@@ -361,12 +367,20 @@ describe("R10B #2 — Startup workspace syncWorkspaceThreads & ask() defense-in-
 				return null;
 			},
 			async () => {
+				const { flush } = await import("solid-js");
 				const { canonical, setState } = await import("../src/view/state");
 				const { agent, ask, setAgent, syncWorkspaceThreads } = await import("../src/view/agent/store");
 				const startupRoot = "/ws/startup-demo";
 				syncWorkspaceThreads(null);
-				setState("workspace", { root: startupRoot, name: "startup-demo" });
-				setAgent({ status: { state: "ready" }, busy: false, entries: [] });
+				setState((s) => {
+					s.workspace = { root: startupRoot, name: "startup-demo" };
+				});
+				setAgent((s) => {
+					s.status = { state: "ready" };
+					s.busy = false;
+					s.entries = [];
+				});
+				flush();
 
 				const turnPromise = ask("Explain startup sync");
 				// Calling syncWorkspaceThreads for the same startup root mid-turn must be a no-op and NOT bump turnEpoch.
@@ -374,6 +388,7 @@ describe("R10B #2 — Startup workspace syncWorkspaceThreads & ask() defense-in-
 				releaseAsk();
 
 				const reply = await turnPromise;
+				flush();
 				expect(reply).not.toBeNull();
 				expect(reply!.text).toBe("Startup turn answer");
 				expect(agent.entries.some((e) => e.role === "agent" && e.text === "Startup turn answer")).toBe(true);
@@ -384,7 +399,7 @@ describe("R10B #2 — Startup workspace syncWorkspaceThreads & ask() defense-in-
 	test("main.tsx syncs workspace threads immediately on startup workspace load", () => {
 		const mainSrc = readSrc("src/view/main.tsx");
 		expect(mainSrc).toContain('import { syncWorkspaceThreads } from "./agent/store";');
-		expect(mainSrc).toMatch(/setState\("workspace", workspace\);\s*syncWorkspaceThreads\(canonical\(workspace\.root\)\);/);
+		expect(mainSrc).toMatch(/setState\(\(s\)\s*=>\s*\{\s*s\.workspace = workspace;\s*\}\);\s*syncWorkspaceThreads\(canonical\(workspace\.root\)\);/);
 	});
 });
 
@@ -522,15 +537,20 @@ describe("R10B #3 — LSP recovery from initial failure, lspRestart() lspPath pi
 				return null;
 			},
 			async () => {
+				const { flush } = await import("solid-js");
 				const { restartLsp, setState, state } = await import("../src/view/state");
-				setState("info", {
-					app: "0.1.0",
-					host: "app",
-					selftest: false,
-					lsp: { ok: false, message: "not found" },
-					opencode: { ok: false },
+				setState((s) => {
+					s.info = {
+						app: "0.1.0",
+						host: "app",
+						selftest: false,
+						lsp: { ok: false, message: "not found" },
+						opencode: { ok: false },
+					};
 				});
+				flush();
 				await restartLsp();
+				flush();
 				expect(restartCount).toBe(1);
 				expect(state.info?.lsp.ok).toBe(true);
 				expect(state.info?.lsp.path).toBe("/opt/bin/starlims-lsp");
@@ -547,16 +567,19 @@ describe("R10B #3 — LSP recovery from initial failure, lspRestart() lspPath pi
 
 describe("R10B #4 — resetTidy() clears tidy store and proposals across workspace switch A -> B", () => {
 	test("resetTidy() resets tidy.path, all step states, all problems, and clears cached proposals", async () => {
+		const { flush } = await import("solid-js");
 		const { proposalOf, resetTidy, setTidy, STEPS, tidy } = await import("../src/view/agent/tidy");
-		setTidy({
-			path: "/ws-a/src/Order.ssl",
-			steps: STEPS.map((_, idx) => (idx === 0 ? "accepted" : idx === 1 ? "review" : "pending")),
-			problems: STEPS.map((_, idx) => (idx === 1 ? "Waiting on review" : "")),
+		setTidy((s) => {
+			s.path = "/ws-a/src/Order.ssl";
+			s.steps = STEPS.map((_, idx) => (idx === 0 ? "accepted" : idx === 1 ? "review" : "pending"));
+			s.problems = STEPS.map((_, idx) => (idx === 1 ? "Waiting on review" : ""));
 		});
+		flush();
 		expect(tidy.path).toBe("/ws-a/src/Order.ssl");
 		expect(tidy.steps[1]).toBe("review");
 
 		resetTidy();
+		flush();
 		expect(tidy.path).toBeNull();
 		expect([...tidy.steps]).toEqual(STEPS.map(() => "pending"));
 		expect([...tidy.problems]).toEqual(STEPS.map(() => ""));
@@ -774,7 +797,7 @@ describe("R11 — Final Clean-Sweep Verification Fixes", () => {
 	test("state.ts openFolder() cancel restarts LSP via restartLsp() rather than double-initializing", () => {
 		const stateSrc = readSrc("src/view/state.ts");
 		expect(stateSrc).toMatch(/if \(!workspace\) \{[\s\S]*?session\.setRoot\(prevRoot\);[\s\S]*?void restartLsp\(\);/);
-		expect(stateSrc).toMatch(/export async function restartLsp\(\)[\s\S]*?const seq = openSeq;[\s\S]*?if \(next && seq === openSeq\) setState\("info", next\);/);
+		expect(stateSrc).toMatch(/export async function restartLsp\(\)[\s\S]*?const seq = openSeq;[\s\S]*?if \(next && seq === openSeq\) setState\(\(s\) => \{ s\.info = next; \}\);/);
 	});
 
 	test("R12: loadInfo() monotonic infoSeq, open() emits stopped on teardown, readAuthToken guards partial document, and GraphView uses restartLsp()", () => {

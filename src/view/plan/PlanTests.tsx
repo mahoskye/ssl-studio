@@ -56,13 +56,13 @@ export function TestCaseForm(props: {
 	onCancel: () => void;
 	onDelete?: () => void;
 }) {
-	const [title, setTitle] = createSignal(props.initial?.title ?? "");
-	const [nodeId, setNodeId] = createSignal(props.initial?.node ?? "");
-	const [journey, setJourney] = createSignal(props.initial?.journey ? String(props.initial.journey) : "");
-	const [given, setGiven] = createSignal(props.initial?.given ?? "");
-	const [expect, setExpect] = createSignal(props.initial?.expect ?? "");
-	const [notes, setNotes] = createSignal(props.initial?.notes ?? "");
-	const [notesOpen, setNotesOpen] = createSignal(Boolean(props.initial?.notes?.trim()));
+	const [title, setTitle] = createSignal(() => props.initial?.title ?? "");
+	const [nodeId, setNodeId] = createSignal(() => props.initial?.node ?? "");
+	const [journey, setJourney] = createSignal(() => (props.initial?.journey ? String(props.initial.journey) : ""));
+	const [given, setGiven] = createSignal(() => props.initial?.given ?? "");
+	const [expect, setExpect] = createSignal(() => props.initial?.expect ?? "");
+	const [notes, setNotes] = createSignal(() => props.initial?.notes ?? "");
+	const [notesOpen, setNotesOpen] = createSignal(() => Boolean(props.initial?.notes?.trim()));
 
 	const selectedJourneySummary = createMemo(() => {
 		const n = journey() ? Number.parseInt(journey(), 10) : 0;
@@ -215,12 +215,12 @@ export function TestCaseForm(props: {
 				<button type="submit" class="primary" disabled={!title().trim()}>
 					{props.saveLabel}
 				</button>
-				<button type="button" onClick={props.onCancel}>
+				<button type="button" onClick={() => props.onCancel()}>
 					Cancel
 				</button>
 				<Show when={props.onDelete}>
 					<span class="spacer" />
-					<button type="button" class="plan-test-delete-btn" onClick={props.onDelete}>
+					<button type="button" class="plan-test-delete-btn" onClick={() => props.onDelete?.()}>
 						Delete
 					</button>
 				</Show>
@@ -261,21 +261,27 @@ export function TestCaseList(props: {
 	const nodeText = (id?: string) => (id ? props.plan.nodes.find((n) => n.id === id)?.text.trim() : undefined);
 
 	// Reset inline editing when switching selected step context.
-	createEffect(() => {
-		props.defaultNodeId;
-		setAdding(null);
-		setEditingId(null);
-		props.onConsumeDraft?.();
-	});
+	const defaultNodeId = createMemo(() => props.defaultNodeId);
+	createEffect(
+		() => defaultNodeId(),
+		() => {
+			setAdding(null);
+			setEditingId(null);
+			props.onConsumeDraft?.();
+		},
+		{ defer: true },
+	);
 
 	// Open pre-filled form when user clicks "Add test details" on a flowchart journey, and consume so collapsing never resurrects it.
-	createEffect(() => {
-		const req = props.externalDraft;
-		if (!req) return;
-		setEditingId(null);
-		setAdding(req.draft);
-		props.onConsumeDraft?.();
-	});
+	createEffect(
+		() => props.externalDraft,
+		(req) => {
+			if (!req) return;
+			setEditingId(null);
+			setAdding(req.draft);
+			props.onConsumeDraft?.();
+		},
+	);
 
 	return (
 		<div class="plan-impl-group">
@@ -301,8 +307,7 @@ export function TestCaseList(props: {
 						</Show>
 						<button
 							type="button"
-							class="plan-test-add-btn"
-							classList={{ subtle: Boolean(props.onOpenTextBuilder) }}
+							class={["plan-test-add-btn", { subtle: Boolean(props.onOpenTextBuilder) }]}
 							title="Quickly write a test case right here in the sidebar"
 							onClick={() => {
 								setEditingId(null);
@@ -361,12 +366,12 @@ export function TestCaseList(props: {
 								<Show
 									when={isEditing()}
 									fallback={
-										<div class="plan-test-case" classList={{ open: isOpen() }}>
+										<div class={["plan-test-case", { open: isOpen() }]}>
 											<div class="plan-test-case-head">
 												<button
 													type="button"
 													class="plan-test-case-toggle"
-													aria-expanded={isOpen()}
+													aria-expanded={isOpen() ? "true" : "false"}
 													title={isOpen() ? "Hide test details" : "Click to inspect or modify test details"}
 													onClick={() => setExpandedId((cur) => (cur === item.id ? null : item.id))}
 												>
@@ -435,8 +440,7 @@ export function TestCaseList(props: {
 															<Show when={journeyIdx() !== null}>
 																<button
 																	type="button"
-																	class="plan-test-case-step journey"
-																	classList={{ active: journeyActive() }}
+																	class={["plan-test-case-step journey", { active: journeyActive() }]}
 																	title={journeyActive() ? "Hide journey on chart" : `Highlight Journey #${item.journey} on chart`}
 																	onClick={() => props.onHighlightPath(journeyActive() ? null : journeyIdx())}
 																>
@@ -452,7 +456,7 @@ export function TestCaseList(props: {
 														<Show
 															when={bulletLines(item.given)}
 															fallback={
-																<p class="plan-test-detail-val" classList={{ muted: !item.given }}>
+																<p class={["plan-test-detail-val", { muted: !item.given }]}>
 																	{item.given || "Not specified yet"}
 																</p>
 															}
@@ -466,7 +470,7 @@ export function TestCaseList(props: {
 													</div>
 													<div class="plan-test-detail-row">
 														<span class="plan-test-kw expect">Expect</span>
-														<p class="plan-test-detail-val" classList={{ muted: !item.expect }}>
+														<p class={["plan-test-detail-val", { muted: !item.expect }]}>
 															{item.expect || "Not specified yet"}
 														</p>
 													</div>
@@ -610,7 +614,7 @@ function JourneyDetailBox(props: {
 													const isCurrent = () =>
 														Boolean(props.defaultNodeId && (item.nodeId === props.defaultNodeId || item.targetId === props.defaultNodeId));
 													return (
-														<div class="plan-journey-item" classList={{ current: isCurrent(), gate: Boolean(item.isLoopGate) }} role="listitem">
+														<div class={["plan-journey-item", { current: isCurrent(), gate: Boolean(item.isLoopGate) }]} role="listitem">
 															<Show when={item.context}>
 																<span class="plan-journey-context">{item.context}</span>
 															</Show>
@@ -702,14 +706,21 @@ export function NodeTests(props: {
 	let draftSeq = 0;
 
 	// Clear any active branch/outcome filter and draft form when switching to another step or collapsing the drawer.
-	createEffect(() => {
-		props.node.id;
-		setJourneyFilter(null);
-		setDraftReq(null);
-	});
-	createEffect(() => {
-		if (!props.open) setDraftReq(null);
-	});
+	const nodeId = createMemo(() => props.node.id);
+	createEffect(
+		() => nodeId(),
+		() => {
+			setJourneyFilter(null);
+			setDraftReq(null);
+		},
+	);
+	const isOpen = createMemo(() => props.open);
+	createEffect(
+		() => isOpen(),
+		(open) => {
+			if (!open) setDraftReq(null);
+		},
+	);
 
 	const info = createMemo(() => pathsForNode(props.plan, props.node.id, props.allPaths));
 	const ctx = createMemo(() => nodeTestContext(props.plan, props.node.id, props.allPaths));
@@ -776,14 +787,14 @@ export function NodeTests(props: {
 			<button
 				type="button"
 				class="plan-impl-toggle"
-				aria-expanded={props.open}
-				onClick={props.onToggle}
+				aria-expanded={props.open ? "true" : "false"}
+				onClick={() => props.onToggle()}
 				title="See and edit plain-English test cases for this step, and inspect every flowchart journey through it"
 			>
 				<Icon name={props.open ? "chevron-down" : "chevron-right"} />
 				<span class="plan-impl-label">Tests</span>
 				<span class="spacer" />
-				<span class="plan-impl-meta" classList={{ linked: stepCases().length > 0 || sharedCases().length > 0 || info().matches.length > 0 }}>
+				<span class={["plan-impl-meta", { linked: stepCases().length > 0 || sharedCases().length > 0 || info().matches.length > 0 }]}>
 					{summary()}
 				</span>
 			</button>
@@ -894,9 +905,8 @@ export function NodeTests(props: {
 													return (
 														<button
 															type="button"
-															class="plan-test-filter-row"
-															classList={{ active: active(), empty: b.count === 0 }}
-															aria-pressed={active()}
+															class={["plan-test-filter-row", { active: active(), empty: b.count === 0 }]}
+															aria-pressed={active() ? "true" : "false"}
 															disabled={b.count === 0}
 															title={
 																b.count === 0
@@ -933,9 +943,8 @@ export function NodeTests(props: {
 													return (
 														<button
 															type="button"
-															class="plan-test-filter-row"
-															classList={{ active: active() }}
-															aria-pressed={active()}
+															class={["plan-test-filter-row", { active: active() }]}
+															aria-pressed={active() ? "true" : "false"}
 															title={
 																active()
 																	? "Click to show all journeys through this step"
@@ -978,9 +987,8 @@ export function NodeTests(props: {
 										return (
 											<button
 												type="button"
-												class="plan-test-row"
-												classList={{ active: active() }}
-												aria-pressed={active()}
+												class={["plan-test-row", { active: active() }]}
+												aria-pressed={active() ? "true" : "false"}
 												title={`${active() ? "Click to clear chart highlight" : "Click to inspect and highlight this journey on the chart"}\n\n${m.story}`}
 												onClick={() => props.onHighlightPath(active() ? null : m.pathIndex)}
 											>
@@ -1074,9 +1082,13 @@ export function PlanTests(props: {
 	const [draftReq, setDraftReq] = createSignal<{ draft: TestCaseDraft; seq: number } | null>(null);
 	let draftSeq = 0;
 
-	createEffect(() => {
-		if (!props.open) setDraftReq(null);
-	});
+	const isOpen = createMemo(() => props.open);
+	createEffect(
+		() => isOpen(),
+		(open) => {
+			if (!open) setDraftReq(null);
+		},
+	);
 
 	const pathsResult = createMemo(() => props.allPaths ?? planPaths(props.plan));
 	const cases = createMemo(() => planTestsOf(props.plan));
@@ -1101,14 +1113,14 @@ export function PlanTests(props: {
 			<button
 				type="button"
 				class="plan-impl-toggle"
-				aria-expanded={props.open}
-				onClick={props.onToggle}
+				aria-expanded={props.open ? "true" : "false"}
+				onClick={() => props.onToggle()}
 				title="Add and edit business test cases, and walk through end-to-end flowchart journeys"
 			>
 				<Icon name={props.open ? "chevron-down" : "chevron-right"} />
 				<span class="plan-impl-label">Tests</span>
 				<span class="spacer" />
-				<span class="plan-impl-meta" classList={{ linked: cases().length > 0 || pathsResult().paths.length > 0 }}>
+				<span class={["plan-impl-meta", { linked: cases().length > 0 || pathsResult().paths.length > 0 }]}>
 					{summary()}
 				</span>
 			</button>
@@ -1179,9 +1191,8 @@ export function PlanTests(props: {
 										return (
 											<button
 												type="button"
-												class="plan-test-row"
-												classList={{ active: active() }}
-												aria-pressed={active()}
+												class={["plan-test-row", { active: active() }]}
+												aria-pressed={active() ? "true" : "false"}
 												title={`${active() ? "Click to clear chart highlight" : "Click to inspect and highlight this journey on the chart"}\n\n${pathStory(path)}`}
 												onClick={() => props.onHighlightPath(active() ? null : idx())}
 											>

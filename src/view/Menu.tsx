@@ -2,8 +2,8 @@
 // near the bottom of the window) it. For the actions that otherwise live only
 // in the command palette, where nobody who does not already know their names
 // will find them.
-import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
-import { Portal } from "solid-js/web";
+import { createEffect, createSignal, For, onCleanup, onFlush, Show } from "solid-js";
+import { Portal } from "@solidjs/web";
 import { placeAnchoredMenu } from "../shared/contextMenu";
 import { Icon } from "./Icon";
 import { modalOpen } from "./modal";
@@ -74,9 +74,12 @@ export function Menu(props: {
 		const to = e.relatedTarget as Node | null;
 		if (to && !list?.contains(to) && !button.contains(to)) close(false);
 	};
-	createEffect(() => {
-		if (modalOpen() && items() !== null) close(false);
-	});
+	createEffect(
+		() => modalOpen() && items() !== null,
+		(shouldClose) => {
+			if (shouldClose) close(false);
+		},
+	);
 	const reposition = () => {
 		if (!list || !button.isConnected) return;
 		// Clear previous constraints so window resizes re-measure natural dimensions cleanly.
@@ -144,7 +147,7 @@ export function Menu(props: {
 		window.addEventListener("resize", reposition);
 		window.addEventListener("blur", onBlur);
 		window.addEventListener("scroll", onScroll, true);
-		queueMicrotask(() => {
+		onFlush(() => {
 			if (disposed || seq !== openSeq) return;
 			reposition();
 			focusAt(focus === "last" ? nextItem(loaded, loaded.length, -1) : nextItem(loaded, -1, 1));
@@ -177,12 +180,13 @@ export function Menu(props: {
 
 	const renderPopup = (all: () => MenuItem[]) => (
 		<div
-			class="menu-pop"
-			classList={{ "menu-pop-floating": isFloating() }}
+			class={["menu-pop", { "menu-pop-floating": isFloating() }]}
 			role="menu"
 			aria-label={props.label}
 			tabindex={-1}
-			ref={(el) => (list = el)}
+			ref={(el) => {
+				list = el;
+			}}
 			onKeyDown={onKey}
 			onFocusOut={onFocusOut}
 		>
@@ -194,7 +198,7 @@ export function Menu(props: {
 						<button
 							class="menu-item"
 							role={item.checked !== undefined ? "menuitemcheckbox" : "menuitem"}
-							aria-checked={item.checked !== undefined ? item.checked : undefined}
+							aria-checked={item.checked !== undefined ? (item.checked ? "true" : "false") : undefined}
 							data-item
 							tabindex={-1}
 							disabled={item.disabled}
@@ -223,13 +227,13 @@ export function Menu(props: {
 	);
 
 	return (
-		<span class={`menu ${props.class ?? ""}`}>
+		<span class={["menu", props.class]}>
 			<button
 				ref={button}
 				title={props.title}
 				aria-label={props.label}
 				aria-haspopup="menu"
-				aria-expanded={items() !== null}
+				aria-expanded={items() !== null ? "true" : "false"}
 				onClick={() => (items() ? close() : void open())}
 				onFocusOut={onFocusOut}
 				onKeyDown={(e) => {

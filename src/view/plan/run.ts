@@ -2,7 +2,7 @@
 // workspace, the agent asks and suggests, then writes a spec for review. The code
 // is not touched here. As in the tidy steps, the agent has no file tools: what it
 // needs arrives in the prompt, and what it returns is applied after you agree.
-import { createStore } from "solid-js/store";
+import { createStore } from "solid-js";
 import { backend } from "../backend";
 import { ask, agent, currentModel, interrupt, start } from "../agent/store";
 import { openReview, type Check } from "../editor/Review";
@@ -27,8 +27,9 @@ const newIds = new Map<string, Map<string, string>>();
 
 export const assistOf = (path: string): AssistState => assists[path] ?? blank();
 const update = (path: string, patch: Partial<AssistState>) => {
-	if (!assists[path]) setAssists(path, blank());
-	setAssists(path, patch);
+	setAssists((s) => {
+		s[path] = { ...(s[path] ?? blank()), ...patch };
+	});
 };
 export const updateAssist = update;
 
@@ -343,7 +344,9 @@ export function writeSpec(path: string) {
 				if (state.workspace?.root !== root) return;
 				await backend.write(file, final);
 				if (state.workspace?.root !== root) return;
-				setState("treeVersion", (v) => v + 1);
+				setState((s) => {
+					s.treeVersion += 1;
+				});
 				update(path, { specVersion: assistOf(path).specVersion + 1 });
 				notify("Plan doc approved and saved.");
 			},

@@ -7,8 +7,8 @@ import { closeSearchPanel, openSearchPanel, searchPanelOpen } from "@codemirror/
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { Annotation, Compartment, EditorSelection, EditorState, RangeSetBuilder, StateEffect, StateField, Transaction, type Extension } from "@codemirror/state";
 import { Decoration, type DecorationSet, drawSelection, dropCursor, EditorView, highlightSpecialChars } from "@codemirror/view";
-import { createEffect, createMemo, createSignal, on, onCleanup, onMount, Show } from "solid-js";
-import { Portal } from "solid-js/web";
+import { createEffect, createMemo, createSignal, onCleanup, onSettled, Show } from "solid-js";
+import { Portal } from "@solidjs/web";
 import { fenced } from "../../shared/catalog";
 import { placeAnchoredMenu, submenuOrInline, type RectBox } from "../../shared/contextMenu";
 import { linkLeads, withLinkFile } from "../../shared/docLinks";
@@ -341,18 +341,25 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		setActiveHeadingId(currentId);
 	};
 
-	createEffect(() => {
-		if (state.activeGroup !== props.group) return;
-		const active = state.groups[state.activeGroup]?.active;
-		if (active !== props.path) return;
-		const list = headings();
-		setMdOutline({
-			path: props.path,
-			headings: list,
-			activeId: activeHeadingId() || (list[0]?.id ?? ""),
-			goTo: goToHeading,
-		});
-	});
+	createEffect(
+		() => ({
+			activeGroup: state.activeGroup,
+			group: props.group,
+			active: state.groups[state.activeGroup]?.active,
+			list: headings(),
+			activeId: activeHeadingId(),
+		}),
+		({ activeGroup, group, active, list, activeId }) => {
+			if (activeGroup !== group) return;
+			if (active !== props.path) return;
+			setMdOutline({
+				path: props.path,
+				headings: list,
+				activeId: activeId || (list[0]?.id ?? ""),
+				goTo: goToHeading,
+			});
+		},
+	);
 	onCleanup(() => {
 		const cur = mdOutline();
 		if (state.activeGroup === props.group && cur?.path === props.path && cur.goTo === goToHeading) {
@@ -481,11 +488,13 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		}
 		if (!assistFrame) assistFrame = requestAnimationFrame(applyReadAssist);
 	};
-	createEffect(() => {
-		void isRead();
-		if (!readingHighlightEnabled()) clearReadAssist();
-		else scheduleReadAssist();
-	});
+	createEffect(
+		() => ({ read: isRead(), enabled: readingHighlightEnabled() }),
+		({ enabled }) => {
+			if (!enabled) clearReadAssist();
+			else scheduleReadAssist();
+		},
+	);
 	onCleanup(clearReadAssist);
 
 	// --- Raw Table Toolbar HUD (shown ONLY when explicitly editing a table in `Raw` pipe mode;
@@ -585,7 +594,9 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		try {
 			await backend.create(dest, "file");
 			await backend.write(dest, `# ${parsed.name.replace(/\.md$/i, "")}\n\n`);
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => {
+				s.treeVersion += 1;
+			});
 			await openFile(dest);
 		} catch (e: any) {
 			notify(`Could not create note: ${e?.message ?? e}`, "error");
@@ -627,7 +638,12 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			() => null,
 		);
 		model.pushStackElement();
-		if (clean) void save(props.path).then(() => setState("treeVersion", (v) => v + 1));
+		if (clean)
+			void save(props.path).then(() =>
+				setState((s) => {
+					s.treeVersion += 1;
+				}),
+			);
 	};
 
 	const resizeImageAt = (from: number, to: number, width: number | null) => {
@@ -1010,7 +1026,9 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 				void exportDocAs(props.path, "print");
 			} else if (picked === EDIT) {
 				setMarkdownMode(props.path, "live", props.group);
-				setState("activeGroup", props.group);
+				setState((s) => {
+					s.activeGroup = props.group;
+				});
 				queueMicrotask(() => cmView?.focus());
 			} else if (picked === TO_SOURCE) {
 				saveSyncAnchor();
@@ -1146,7 +1164,9 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 					const titleStem = baseName(missingTargetPath).replace(/\.(md|markdown)$/i, "");
 					await backend.write(missingTargetPath, `# ${titleStem}\n\n`);
 				}
-				setState("treeVersion", (v) => v + 1);
+				setState((s) => {
+					s.treeVersion += 1;
+				});
 				await openFile(missingTargetPath);
 			} catch (err: any) {
 				notify(`Could not create file: ${err?.message ?? err}`, "error");
@@ -1262,7 +1282,9 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		const lineNumber = line.number;
 		const column = head - line.from + 1;
 		if (state.activeGroup === props.group) {
-			setState("cursor", { line: lineNumber, column });
+			setState((s) => {
+				s.cursor = { line: lineNumber, column };
+			});
 			if (userMoved) noteCursor({ path: props.path, line: lineNumber, column });
 		}
 	};
@@ -1421,7 +1443,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 	});
 
 	// --- Lifecycle & Bidirectional Binding -----------------------------------
-	onMount(() => {
+	onSettled(() => {
 		const initial = (model?.getValue() ?? "").replace(/\r\n/g, "\n");
 		const syncAnchor = takeMarkdownSyncAnchor(props.group, props.path);
 		const saved = savedLiveViews.get(`${props.group}:${props.path}`);
@@ -1541,7 +1563,9 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 						try {
 							await backend.create(dest, "file");
 							await backend.write(dest, `${header.replace(/\n*$/, "\n\n")}${code}\n`);
-							setState("treeVersion", (v) => v + 1);
+							setState((s) => {
+								s.treeVersion += 1;
+							});
 							notify(`Saved snippet to ${relativeTo(state.workspace.root, dest)}.`);
 						} catch (e: any) {
 							notify(`Could not save snippet: ${e?.message ?? e}`, "error");
@@ -1575,7 +1599,9 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 				cmMarkdownKeymap,
 				EditorView.domEventHandlers({
 					focus: (_e, view) => {
-						setState("activeGroup", props.group);
+						setState((s) => {
+							s.activeGroup = props.group;
+						});
 						// Re-evaluate transclusions when returning focus after editing an embedded doc in another tab/split.
 						if (view.state.doc.toString().includes("![[")) {
 							view.dispatch({ effects: refreshLiveEffect.of(++refreshSeq) });
@@ -1754,7 +1780,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			queueMicrotask(() => cmView?.focus());
 		}
 
-		onCleanup(() => {
+		return () => {
 			cancelHover();
 			if (scrollSyncRaf) {
 				cancelAnimationFrame(scrollSyncRaf);
@@ -1770,67 +1796,62 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 			stopReveal();
 			cmView?.destroy();
 			cmView = undefined;
-		});
+		};
 	});
 
 	// Single authoritative liveBridge registration for this pane, identity-checked on cleanup across split/mode changes.
-	createEffect(() => {
-		const view = mountedView();
-		if (!view) return;
-		const at = props.group;
-		const read = isRead();
-		if (read) {
-			const opener = () => {
-				if (cmView) openSearchPanel(cmView);
-			};
-			registerReadFind(at, opener);
-			onCleanup(() => unregisterReadFinder(at, opener));
-		} else {
+	createEffect(
+		() => ({ view: mountedView(), at: props.group, read: isRead() }),
+		({ view, at, read }) => {
+			if (!view) return;
+			if (read) {
+				const opener = () => {
+					if (cmView) openSearchPanel(cmView);
+				};
+				registerReadFind(at, opener);
+				return () => unregisterReadFinder(at, opener);
+			}
 			const handle = makeHandle(view);
 			registerLiveEditor(at, handle);
-			onCleanup(() => unregisterLiveEditor(at, handle));
-		}
-	});
+			return () => unregisterLiveEditor(at, handle);
+		},
+	);
 
 	// Seamlessly switch between Live and Read modes on the SAME CM6 instance with zero flash or scroll jump!
 	createEffect(
-		on(
-			isRead,
-			(read) => {
-				if (!cmView) return;
-				if (read) {
-					setSelBubble(null);
-				}
-				cmView.dispatch({
-					effects: [
-						modeCompartment.reconfigure(modeExtensions(read)),
-						...(read ? [setRawEditBlockEffect.of(null)] : []),
-						refreshLiveEffect.of(++refreshSeq),
-					],
-				});
-				if (read) {
-					setTableHud(null);
-				} else {
-					queueMicrotask(() => updateTableHud(cmView));
-				}
-				queueMicrotask(() => {
-					updateOutlineScrollspy();
-					if (pointerY !== null) scheduleReadAssist();
-				});
-			},
-			{ defer: true },
-		),
+		() => isRead(),
+		(read) => {
+			if (!cmView) return;
+			if (read) {
+				setSelBubble(null);
+			}
+			cmView.dispatch({
+				effects: [
+					modeCompartment.reconfigure(modeExtensions(read)),
+					...(read ? [setRawEditBlockEffect.of(null)] : []),
+					refreshLiveEffect.of(++refreshSeq),
+				],
+			});
+			if (read) {
+				setTableHud(null);
+			} else {
+				queueMicrotask(() => updateTableHud(cmView));
+			}
+			queueMicrotask(() => {
+				updateOutlineScrollspy();
+				if (pointerY !== null) scheduleReadAssist();
+			});
+		},
+		{ defer: true },
 	);
 
 	// Refresh Live/Read decorations whenever workspace docs, tree version, or broken-link status updates.
 	createEffect(
-		on(
-			[docs, () => state.treeVersion],
-			() => {
-				if (cmView) cmView.dispatch({ effects: refreshLiveEffect.of(++refreshSeq) });
-			},
-			{ defer: true },
-		),
+		() => [docs(), state.treeVersion] as const,
+		() => {
+			if (cmView) cmView.dispatch({ effects: refreshLiveEffect.of(++refreshSeq) });
+		},
+		{ defer: true },
 	);
 
 	// Keep CM6 Git gutter marks synced with `backend.gitBase` and live document edits.
@@ -1845,15 +1866,16 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 		const changes = lineChanges(gitBaseLines, cmView.state.doc.toString().split(/\r?\n/));
 		cmView.dispatch({ effects: setGitChangesEffect.of(changes) });
 	};
+	const hasGitRepo = createMemo(() => Boolean(gitStatus()));
 	createEffect(
-		on([() => props.path, gitVersion, () => Boolean(gitStatus())], ([path, , repo]) => {
+		() => [props.path, gitVersion(), hasGitRepo()] as const,
+		([path, , repo]) => {
 			if (!repo || !path || path.startsWith("untitled:")) {
 				gitBaseLines = null;
 				redrawGitMarks();
 				return;
 			}
 			let stale = false;
-			onCleanup(() => (stale = true));
 			backend.gitBase(path, "index").then(
 				(baseText) => {
 					if (stale) return;
@@ -1862,38 +1884,36 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 				},
 				() => {},
 			);
-		}),
+			return () => {
+				stale = true;
+			};
+		},
 	);
 	createEffect(
-		on(
-			text,
-			() => {
-				if (!gitBaseLines) return;
-				clearTimeout(gitDrawTimer);
-				gitDrawTimer = setTimeout(redrawGitMarks, 300);
-			},
-			{ defer: true },
-		),
+		() => text(),
+		() => {
+			if (!gitBaseLines) return;
+			clearTimeout(gitDrawTimer);
+			gitDrawTimer = setTimeout(redrawGitMarks, 300);
+		},
+		{ defer: true },
 	);
 	onCleanup(() => clearTimeout(gitDrawTimer));
 
 	// Re-tokenize fenced code blocks and callout snippets whenever the active theme changes.
 	createEffect(
-		on(
-			themeVersion,
-			() => {
-				if (cmView) cmView.dispatch({ effects: refreshLiveEffect.of(++refreshSeq) });
-			},
-			{ defer: true },
-		),
+		() => themeVersion(),
+		() => {
+			if (cmView) cmView.dispatch({ effects: refreshLiveEffect.of(++refreshSeq) });
+		},
+		{ defer: true },
 	);
 
 	return (
 		<div
 			ref={hostEl}
-			class="cm-md-host"
-			classList={{ "cm-md-read": isRead(), "cm-md-live": !isRead() }}
-			tabIndex={isRead() ? 0 : undefined}
+			class={["cm-md-host", { "cm-md-read": isRead(), "cm-md-live": !isRead() }]}
+			tabindex={isRead() ? 0 : undefined}
 			aria-label={`${baseName(props.path)}, ${isRead() ? "rendered" : "live preview"}`}
 			aria-haspopup="menu"
 			onScroll={() => {
@@ -1913,7 +1933,9 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 								emitSplitScrollSync(props.group, props.path, topLine, ratio);
 							}
 						} else if (state.activeGroup === props.group) {
-							setState("cursor", { line: topLine, column: 1 });
+							setState((s) => {
+								s.cursor = { line: topLine, column: 1 };
+							});
 						}
 					});
 				}
@@ -1936,7 +1958,9 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 				}
 			}}
 			onMouseDown={(e) => {
-				setState("activeGroup", props.group);
+				setState((s) => {
+					s.activeGroup = props.group;
+				});
 				// In Live mode, clicking empty page margin below editor puts cursor at the end (Obsidian feel).
 				if (!isRead() && (e.target === hostEl || e.target === pageEl)) {
 					if (!cmView) return;
@@ -2007,13 +2031,13 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 							</div>
 							<span class="cm-tbl-sep" aria-hidden="true" />
 							<div class="cm-tbl-group" role="group" aria-label="Column alignment">
-								<button type="button" classList={{ active: hud().align === "left" }} title="Align column left" onClick={() => runTableToolbarAction("md-table-align-left")}>
+								<button type="button" class={{ active: hud().align === "left" }} title="Align column left" onClick={() => runTableToolbarAction("md-table-align-left")}>
 									L
 								</button>
-								<button type="button" classList={{ active: hud().align === "center" }} title="Align column center" onClick={() => runTableToolbarAction("md-table-align-center")}>
+								<button type="button" class={{ active: hud().align === "center" }} title="Align column center" onClick={() => runTableToolbarAction("md-table-align-center")}>
 									C
 								</button>
-								<button type="button" classList={{ active: hud().align === "right" }} title="Align column right" onClick={() => runTableToolbarAction("md-table-align-right")}>
+								<button type="button" class={{ active: hud().align === "right" }} title="Align column right" onClick={() => runTableToolbarAction("md-table-align-right")}>
 									R
 								</button>
 							</div>
@@ -2072,8 +2096,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 					<div class="cm-md-compact-actions">
 						<button
 							type="button"
-							class="cm-md-compact-btn"
-							classList={{ active: isInfoPanelActive() }}
+							class={["cm-md-compact-btn", { active: isInfoPanelActive() }]}
 							title="Open Document Info panel (Properties, Work, Export & Links)"
 							onClick={() => requestMarkdownInspector()}
 						>
@@ -2323,7 +2346,7 @@ export function MarkdownLiveEditor(props: { path: string; group: number; mode?: 
 								<Icon name="close" />
 							</button>
 						</div>
-						<div class="md-lightbox-stage" classList={{ "is-full": Boolean(box().zoomFull) }} onClick={(e) => e.target === e.currentTarget && setLightbox(null)}>
+						<div class={["md-lightbox-stage", { "is-full": Boolean(box().zoomFull) }]} onClick={(e) => e.target === e.currentTarget && setLightbox(null)}>
 							<img src={box().src} alt={box().alt} />
 						</div>
 					</Modal>

@@ -1,7 +1,8 @@
 // The style profile editor: the language server's `ssl` settings, per user
 // or per workspace, with the house preset (decisions 0002, 0005, 0006).
 import { Icon } from "./Icon";
-import { createEffect, createResource, createSignal, createUniqueId, For, Show } from "solid-js";
+import { createEffect, createSignal, createUniqueId, For, Show } from "solid-js";
+import { createAsyncQuery } from "./asyncQuery";
 import { getPath, HOUSE_STYLE, SERVER_DEFAULTS, RULE_LEVELS, SECTIONS, setPath, type Field, type PathKey } from "../shared/styleProfile";
 import { backend } from "./backend";
 import { choose } from "./dialogs";
@@ -66,7 +67,12 @@ export function StyleProfile() {
 			setLoadError(String(e?.message ?? e));
 		}
 	};
-	createEffect(() => open() && void reload());
+	createEffect(
+		() => open(),
+		(isOpen) => {
+			if (isOpen) void reload();
+		},
+	);
 	const current = () => layers()[scope()];
 
 	const previewTabSize = () => {
@@ -77,12 +83,11 @@ export function StyleProfile() {
 
 	// What the profile does, shown: the sample is formatted again whenever a setting changes. The wait lets the
 	// change reach the server first (App sends it when the settings change).
-	const [preview] = createResource(
-		() =>
-			open() &&
-			state.lsp.state === "running" &&
-			state.workspace &&
-			([JSON.stringify(state.settings.ssl ?? {}), state.settings.theme, state.settings.themeMaterial ?? "", previewTabSize(), previewInsertSpaces()] as const),
+	const [preview] = createAsyncQuery(
+		() => {
+			if (!open() || state.lsp.state !== "running" || !state.workspace) return false as const;
+			return [JSON.stringify(state.settings.ssl ?? {}), state.settings.theme, state.settings.themeMaterial ?? "", previewTabSize(), previewInsertSpaces()] as const;
+		},
 		async ([, , , tabSize, insertSpaces]) => {
 			await new Promise((done) => setTimeout(done, 150));
 			try {
@@ -214,8 +219,7 @@ export function StyleProfile() {
 		const wsOverride = () => workspaceOverride(f.path);
 		return (
 			<label
-				class="profile-field"
-				classList={{ own: own() }}
+				class={["profile-field", { own: own() }]}
 				title={wsOverride() !== undefined ? `Overridden in this project (${String(wsOverride())})` : own() ? `Set in ${scope()} settings` : "Inherited"}
 			>
 				<span>
@@ -309,8 +313,7 @@ export function StyleProfile() {
 									const wsOverride = () => workspaceOverride(path);
 									return (
 										<label
-											class="profile-field"
-											classList={{ own: own() }}
+											class={["profile-field", { own: own() }]}
 											title={wsOverride() !== undefined ? `Overridden in this project (${String(wsOverride())})` : own() ? `Set in ${scope()} settings` : "Inherited"}
 										>
 											<span>

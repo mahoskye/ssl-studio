@@ -1,5 +1,5 @@
 import { defineConfig } from "vite";
-import solid from "vite-plugin-solid";
+import solid from "@solidjs/vite-plugin";
 import { resolve } from "node:path";
 import { existsSync } from "node:fs";
 

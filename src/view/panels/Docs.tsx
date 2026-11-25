@@ -3,7 +3,7 @@
 // plans. Which folders those are comes from .ssl-studio/project.toml.
 import { Icon } from "../Icon";
 import { FileMark } from "../FileMark";
-import { createContext, createEffect, createMemo, createSignal, For, on, onCleanup, Show, useContext } from "solid-js";
+import { createContext, createEffect, createMemo, createSignal, For, Show, useContext } from "solid-js";
 import type { DocFile } from "../../shared/protocol";
 import { backend } from "../backend";
 import { ask, choose, quickPick, type QuickPickOption } from "../dialogs";
@@ -287,7 +287,9 @@ async function archiveSpecOrDecision(file: DocFile): Promise<void> {
 		await backend.rename(file.path, dest);
 		fileRenamed(file.path, dest);
 	} catch (e: any) {
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => {
+			s.treeVersion += 1;
+		});
 		notify(String(e?.message ?? e), "error");
 		return;
 	}
@@ -299,7 +301,9 @@ async function archiveSpecOrDecision(file: DocFile): Promise<void> {
 			notify(`Archived, but could not update status on ${baseName(dest)}: ${e?.message ?? e}`, "error");
 		}
 	}
-	setState("treeVersion", (v) => v + 1);
+	setState((s) => {
+		s.treeVersion += 1;
+	});
 	refreshDocAudit();
 	try {
 		await followRename(file.path, dest, beforeDocs);
@@ -398,7 +402,9 @@ async function archiveAllDoneTickets(): Promise<void> {
 		}
 	}
 	if (archived) {
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => {
+			s.treeVersion += 1;
+		});
 		refreshDocAudit();
 		notify(`Archived ${archived} done ${archived === 1 ? "ticket" : "tickets"} to ${relArchive}/${skipped.length ? ` (skipped: ${skipped.join(", ")})` : ""}.`);
 	} else if (skipped.length) {
@@ -754,7 +760,7 @@ function ItemRow(props: {
 			</Show>
 			<Show when={props.note}>
 				{/* In a narrow panel a note that has a shorter way of saying itself says it that way, and the title keeps the room. */}
-				<span class="meta" classList={{ aside: props.aside, shortens: Boolean(props.short) }} title={props.short ? props.note : undefined}>
+				<span class={["meta", { aside: props.aside, shortens: Boolean(props.short) }]} title={props.short ? props.note : undefined}>
 					<span class="long">{props.note}</span>
 					<Show when={props.short}>
 						<span class="short" aria-hidden="true">
@@ -951,13 +957,13 @@ function Work(props: { files: DocFile[]; empty?: string; filtered?: boolean }) {
 			<Show when={activeTicketCount() > 1}>
 				<div class="docs-work-sort" role="group" aria-label="Sort tickets">
 					<span class="docs-sort-label">Sort</span>
-					<button type="button" classList={{ on: sort() === "status" }} onClick={() => chooseSort("status")}>
+					<button type="button" class={{ on: sort() === "status" }} onClick={() => chooseSort("status")}>
 						Status
 					</button>
-					<button type="button" classList={{ on: sort() === "key" }} onClick={() => chooseSort("key")}>
+					<button type="button" class={{ on: sort() === "key" }} onClick={() => chooseSort("key")}>
 						Key
 					</button>
-					<button type="button" classList={{ on: sort() === "title" }} onClick={() => chooseSort("title")}>
+					<button type="button" class={{ on: sort() === "title" }} onClick={() => chooseSort("title")}>
 						Title
 					</button>
 				</div>
@@ -1165,51 +1171,58 @@ export function Docs() {
 	const [truncated, setTruncated] = createSignal<{ folder: string; limit: number; total: number }[]>([]);
 	let truncSeq = 0;
 	let prevRoot: string | undefined;
-	onCleanup(() => {
-		truncSeq++;
-	});
 	createEffect(
-		on(
-			() => [state.workspace?.root, state.treeVersion, docs().length] as const,
-			([root]) => {
-				const seq = ++truncSeq;
-				const rootChanged = root !== prevRoot;
-				prevRoot = root;
-				if (rootChanged) {
-					setTruncated([]);
-					setSelectedPaths(new Set<string>());
-					anchorPath = null;
-				}
-				if (!root) {
-					setTruncated([]);
-					return;
-				}
-				void backend
-					.docsTruncated()
-					.then((list) => {
-						if (seq === truncSeq) setTruncated(list);
-					})
-					.catch(() => {
-						if (seq === truncSeq) setTruncated([]);
-					});
-			},
-		),
+		() => [state.workspace?.root, state.treeVersion, docs().length] as const,
+		([root]) => {
+			const seq = ++truncSeq;
+			const rootChanged = root !== prevRoot;
+			prevRoot = root;
+			if (rootChanged) {
+				setTruncated([]);
+				setSelectedPaths(new Set<string>());
+				anchorPath = null;
+			}
+			if (!root) {
+				setTruncated([]);
+				return () => {
+					truncSeq++;
+				};
+			}
+			void backend
+				.docsTruncated()
+				.then((list) => {
+					if (seq === truncSeq) setTruncated(list);
+				})
+				.catch(() => {
+					if (seq === truncSeq) setTruncated([]);
+				});
+			return () => {
+				truncSeq++;
+			};
+		},
 	);
 
 	const focusedTicket = () => state.settings.activeTicket?.trim() || "";
-	createEffect(() => {
-		if (!focusedTicket() && mode() === "ticket") setMode("all");
-	});
+	createEffect(
+		() => !focusedTicket() && mode() === "ticket",
+		(shouldReset) => {
+			if (shouldReset) setMode("all");
+		},
+	);
 	const releases = createMemo(() =>
 		[...new Set(docs().filter((d) => d.exists && !isCatalog(d) && d.release?.trim()).map((d) => d.release!.trim()))].sort((a, b) =>
 			a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }),
 		),
 	);
-	createEffect(() => {
-		if (releaseFilter() && !releases().some((r) => r.toLowerCase() === releaseFilter().toLowerCase())) {
-			setReleaseFilter("");
-		}
-	});
+	createEffect(
+		() => {
+			const rel = releaseFilter();
+			return Boolean(rel && !releases().some((r) => r.toLowerCase() === rel.toLowerCase()));
+		},
+		(staleRelease) => {
+			if (staleRelease) setReleaseFilter("");
+		},
+	);
 	const tags = createMemo(() => workspaceTags(docs()));
 	const filtering = () => Boolean(filter().trim()) || mode() !== "all" || Boolean(activeTag()) || Boolean(releaseFilter());
 	const hasIssue = (d: DocFile) => hasAnyDocIssue(d, issuesByPath(), canonical);
@@ -1314,7 +1327,9 @@ export function Docs() {
 		}
 		if (targets.length > 1) {
 			if (changed) {
-				setState("treeVersion", (v) => v + 1);
+				setState((s) => {
+					s.treeVersion += 1;
+				});
 				refreshDocAudit();
 			}
 			if (changed) {
@@ -1380,7 +1395,9 @@ export function Docs() {
 			}
 		}
 		if (changed) {
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => {
+				s.treeVersion += 1;
+			});
 			refreshDocAudit();
 		}
 		if (changed) {
@@ -1440,7 +1457,9 @@ export function Docs() {
 			}
 		}
 		if (changed) {
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => {
+				s.treeVersion += 1;
+			});
 			refreshDocAudit();
 		}
 		if (changed) {
@@ -1509,7 +1528,9 @@ export function Docs() {
 			}
 		}
 		if (changed) {
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => {
+				s.treeVersion += 1;
+			});
 			refreshDocAudit();
 		}
 		if (changed) {
@@ -1682,7 +1703,9 @@ export function Docs() {
 			});
 		}
 		if (archived) {
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => {
+				s.treeVersion += 1;
+			});
 			refreshDocAudit();
 			notify(`Archived ${archived} ${archived === 1 ? "document" : "documents"}${skipped.length ? ` (skipped: ${skipped.join(", ")})` : ""}.`);
 		} else if (skipped.length) {
@@ -1744,20 +1767,23 @@ export function Docs() {
 		return shown().filter((d) => sel.has(d.path) && isBulkSelectable(d));
 	});
 	// Prune multi-selected paths against currently visible selectable docs (`shown()`) so hidden/filtered docs are never bulk-mutated.
-	createEffect(() => {
-		const valid = new Set(visibleSelectablePaths());
-		setSelectedPaths((prev) => {
-			if (!prev.size) return prev;
-			let changed = false;
-			const next = new Set<string>();
-			for (const p of prev) {
-				if (valid.has(p)) next.add(p);
-				else changed = true;
-			}
-			return changed ? next : prev;
-		});
-		if (anchorPath && !valid.has(anchorPath)) anchorPath = null;
-	});
+	createEffect(
+		() => visibleSelectablePaths(),
+		(paths) => {
+			const valid = new Set(paths);
+			setSelectedPaths((prev) => {
+				if (!prev.size) return prev;
+				let changed = false;
+				const next = new Set<string>();
+				for (const p of prev) {
+					if (valid.has(p)) next.add(p);
+					else changed = true;
+				}
+				return changed ? next : prev;
+			});
+			if (anchorPath && !valid.has(anchorPath)) anchorPath = null;
+		},
+	);
 	const allVisibleSelected = createMemo(() => {
 		const vis = visibleSelectablePaths();
 		const sel = selectedPaths();
@@ -1820,7 +1846,7 @@ export function Docs() {
 		openBulkMenu,
 	};
 	return (
-		<DocsPanelContext.Provider value={panelCtx}>
+		<DocsPanelContext value={panelCtx}>
 		<div
 			ref={panelEl}
 			class="panel-body"
@@ -1869,7 +1895,7 @@ export function Docs() {
 				</Menu>
 				<IconButton label="Collapse all" title={filtering() ? `Collapse all: not while filtering. ${LOCKED}.` : "Collapse all: shut every group and ticket"} icon="collapse-all" disabled={filtering()} onClick={() => setFolds(allFolds(), true)} />
 				<IconButton label="Expand all" title={filtering() ? `Expand all: not while filtering. ${LOCKED}.` : "Expand all: open every group and ticket"} icon="expand-all" disabled={filtering()} onClick={() => setFolds(allFolds(), false)} />
-				<IconButton label="Refresh the document list" title="Refresh" icon="refresh" onClick={() => setState("treeVersion", (v) => v + 1)} />
+				<IconButton label="Refresh the document list" title="Refresh" icon="refresh" onClick={() => setState((s) => { s.treeVersion += 1; })} />
 			</div>
 			<Show when={state.project?.description}>
 				<p class="hint">{state.project!.description}</p>
@@ -1962,16 +1988,16 @@ export function Docs() {
 						onKeyDown={(e) => e.key === "ArrowDown" && focusRowsBelow(e.currentTarget) && e.preventDefault()}
 					/>
 					<div class="docs-filter-pills" role="group" aria-label="Document filter mode">
-						<button type="button" classList={{ on: mode() === "all" }} onClick={() => setMode("all")}>
+						<button type="button" class={{ on: mode() === "all" }} onClick={() => setMode("all")}>
 							All
 						</button>
-						<button type="button" classList={{ on: mode() === "active" }} title="Active and waiting work (excludes archived tickets)" onClick={() => setMode("active")}>
+						<button type="button" class={{ on: mode() === "active" }} title="Active and waiting work (excludes archived tickets)" onClick={() => setMode("active")}>
 							Active
 						</button>
 						<Show when={focusedTicket()}>
 							<button
 								type="button"
-								classList={{ on: mode() === "ticket" }}
+								class={{ on: mode() === "ticket" }}
 								title={`Show only ${focusedTicket()} and its linked specs, plans, decisions, questions, schemas, and registries`}
 								onClick={() => setMode("ticket")}
 							>
@@ -1980,7 +2006,7 @@ export function Docs() {
 						</Show>
 						<button
 							type="button"
-							classList={{ on: mode() === "problems" }}
+							class={{ on: mode() === "problems" }}
 							title="Documents with broken links, missing files, stale catalogs, audit issues, citation drift, or governance warnings"
 							onClick={() => setMode("problems")}
 						>
@@ -2161,6 +2187,6 @@ export function Docs() {
 				</Show>
 			</Rows>
 		</div>
-		</DocsPanelContext.Provider>
+		</DocsPanelContext>
 	);
 }

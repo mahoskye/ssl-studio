@@ -1,5 +1,5 @@
 // The Agent panel's state: opencode's status, models, the conversation.
-import { createStore, produce } from "solid-js/store";
+import { createStore, snapshot } from "solid-js";
 import type { AgentModel, AgentReply, AgentStatus } from "../../shared/protocol";
 import { backend, on } from "../backend";
 import { canonical, log, notify, saveSetting, state } from "../state";
@@ -209,16 +209,19 @@ const turns = new Turns((sessionID) => backend.agent("interrupt", [sessionID]));
 
 export function addEntry(entry: Omit<Entry, "id">) {
 	const id = nextEntry++;
-	setAgent("entries", (list) => [...list.slice(-199), { ...entry, id }]);
+	setAgent((s) => {
+		s.entries = [...s.entries.slice(-199), { ...entry, id }];
+	});
 	return id;
 }
 
 /** Persists the active thread (capped to 5 threads × 40 entries) to per-workspace localStorage only. */
 export function persistCurrentThread() {
 	if (!activeWorkspaceKey) return;
-	const hasContent = agent.entries.some((e) => (e.role === "user" || e.role === "agent") && e.text.trim().length > 0);
+	const cur = snapshot(agent);
+	const hasContent = cur.entries.some((e) => (e.role === "user" || e.role === "agent") && e.text.trim().length > 0);
 	if (!hasContent) return;
-	const cleanEntries: SavedThreadEntry[] = agent.entries
+	const cleanEntries: SavedThreadEntry[] = cur.entries
 		.filter((e) => e.text.trim().length > 0)
 		.slice(-MAX_THREAD_ENTRIES)
 		.map(({ id: _id, streaming: _s, sessionID: _sid, ...rest }) => ({
@@ -228,18 +231,21 @@ export function persistCurrentThread() {
 			...(rest.turn ? { turn: { ...rest.turn } } : {}),
 		}));
 	if (!cleanEntries.length) return;
-	const id = agent.activeThreadId ?? `thr_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
-	const ticket = deriveThreadTicket(agent.entries);
+	const id = cur.activeThreadId ?? `thr_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+	const ticket = deriveThreadTicket(cur.entries);
 	const saved: SavedThread = {
 		id,
-		title: deriveThreadTitle(agent.entries),
+		title: deriveThreadTitle(cur.entries),
 		updatedAt: Date.now(),
 		...(ticket ? { ticket } : {}),
 		entries: cleanEntries,
 	};
-	const others = agent.threads.filter((t) => t.id !== id);
+	const others = cur.threads.filter((t) => t.id !== id);
 	const next = [saved, ...others].slice(0, MAX_THREADS);
-	setAgent({ activeThreadId: id, threads: next });
+	setAgent((s) => {
+		s.activeThreadId = id;
+		s.threads = next;
+	});
 	writeSavedThreads(activeWorkspaceKey, next);
 }
 
@@ -251,44 +257,67 @@ export function syncWorkspaceThreads(canonRoot: string | null) {
 	streaming.clear();
 	activeWorkspaceKey = canonRoot;
 	if (!canonRoot) {
-		setAgent({ threads: [], activeThreadId: null, entries: [], chatSession: null });
+		setAgent((s) => {
+			s.threads = [];
+			s.activeThreadId = null;
+			s.entries = [];
+			s.chatSession = null;
+		});
 		return;
 	}
 	const loaded = readSavedThreads(canonRoot);
 	if (loaded.length > 0) {
 		const latest = loaded[0]!;
 		const restored: Entry[] = latest.entries.map((e) => ({ ...e, id: nextEntry++ }));
-		setAgent({ threads: loaded, activeThreadId: latest.id, entries: restored, chatSession: null });
+		setAgent((s) => {
+			s.threads = loaded;
+			s.activeThreadId = latest.id;
+			s.entries = restored;
+			s.chatSession = null;
+		});
 	} else {
-		setAgent({ threads: [], activeThreadId: null, entries: [], chatSession: null });
+		setAgent((s) => {
+			s.threads = [];
+			s.activeThreadId = null;
+			s.entries = [];
+			s.chatSession = null;
+		});
 	}
 }
 
 /** Switches the conversation view to a previously saved thread from this workspace's History. */
 export function switchThread(threadId: string) {
-	if (agent.busy) return;
+	if (snapshot(agent).busy) return;
 	persistCurrentThread();
-	const target = agent.threads.find((t) => t.id === threadId);
+	const target = snapshot(agent).threads.find((t) => t.id === threadId);
 	if (!target) return;
 	turnEpoch++;
 	streaming.clear();
 	const restored: Entry[] = target.entries.map((e) => ({ ...e, id: nextEntry++ }));
-	setAgent({ entries: restored, activeThreadId: target.id, chatSession: null });
+	setAgent((s) => {
+		s.entries = restored;
+		s.activeThreadId = target.id;
+		s.chatSession = null;
+	});
 }
 
 /** Archives the current thread into History and starts a fresh conversation thread. */
 export function startNewThread(noteText?: string) {
-	if (agent.busy) return;
+	if (snapshot(agent).busy) return;
 	persistCurrentThread();
 	turnEpoch++;
 	streaming.clear();
 	const entries: Entry[] = noteText ? [{ id: nextEntry++, role: "note", text: noteText }] : [];
-	setAgent({ entries, activeThreadId: null, chatSession: null });
+	setAgent((s) => {
+		s.entries = entries;
+		s.activeThreadId = null;
+		s.chatSession = null;
+	});
 }
 
 /** Removes all saved threads for the current workspace from localStorage. */
 export function clearSavedThreads() {
-	if (agent.busy) return;
+	if (snapshot(agent).busy) return;
 	turnEpoch++;
 	streaming.clear();
 	if (activeWorkspaceKey) {
@@ -298,13 +327,22 @@ export function clearSavedThreads() {
 			// ignore
 		}
 	}
-	setAgent({ threads: [], activeThreadId: null, entries: [], chatSession: null });
+	setAgent((s) => {
+		s.threads = [];
+		s.activeThreadId = null;
+		s.entries = [];
+		s.chatSession = null;
+	});
 }
 
 export function clearEntries() {
 	turnEpoch++;
 	streaming.clear();
-	setAgent({ entries: [], activeThreadId: null, chatSession: null });
+	setAgent((s) => {
+		s.entries = [];
+		s.activeThreadId = null;
+		s.chatSession = null;
+	});
 }
 
 /** For work nobody waits for: a failure is shown and written to Output, never dropped. */
@@ -315,11 +353,10 @@ on("agent", ({ type, data }) => {
 	turns.event(type, d);
 	if (type === "status") {
 		const nextStatus = d as AgentStatus;
-		if (nextStatus?.state === "off" || nextStatus?.state === "failed") {
-			setAgent({ status: nextStatus, chatSession: null });
-		} else {
-			setAgent("status", nextStatus);
-		}
+		setAgent((s) => {
+			s.status = nextStatus;
+			if (nextStatus?.state === "off" || nextStatus?.state === "failed") s.chatSession = null;
+		});
 		return;
 	}
 	// Drop late streaming/tool events from an older turn epoch or another workspace.
@@ -336,13 +373,21 @@ on("agent", ({ type, data }) => {
 			streaming.set(sid, id);
 		}
 		if (activeTurn) activeTurn.streamedEntryId = id;
-		setAgent("entries", (e) => e.id === id, produce((e: Entry) => void (e.text += d.delta)));
+		setAgent((s) => {
+			const hit = s.entries.find((e) => e.id === id);
+			if (hit) hit.text += d.delta;
+		});
 	} else if (type === "session.tool.called") {
 		addEntry({ role: "note", text: `tool: ${d?.input?.code ? "execute (code)" : JSON.stringify(d?.input).slice(0, 120)}`, sessionID: d?.sessionID });
 	} else if (/^session\.execution\.(succeeded|failed|interrupted)$/.test(type)) {
 		const sid = typeof d?.sessionID === "string" ? d.sessionID : "";
 		const id = streaming.get(sid);
-		if (id !== undefined) setAgent("entries", (e) => e.id === id, "streaming", false);
+		if (id !== undefined) {
+			setAgent((s) => {
+				const hit = s.entries.find((e) => e.id === id);
+				if (hit) hit.streaming = false;
+			});
+		}
 		streaming.delete(sid);
 	}
 });
@@ -352,16 +397,26 @@ on("agent", ({ type, data }) => {
  * or a second window, finds opencode as the app left it, already running or not.
  */
 export async function resume() {
-	if (agent.status.state !== "off") return;
+	if (snapshot(agent).status.state !== "off") return;
 	await safely("opencode's state could not be read", async () => {
 		const status = (await backend.agent("status", [])) as AgentStatus;
 		// A turn may have started it meanwhile; what that set stands.
-		if (agent.status.state !== "off" || status.state === "off") return;
+		if (snapshot(agent).status.state !== "off" || status.state === "off") return;
 		if (status.state === "failed") {
-			setAgent({ status, chatSession: null });
+			setAgent((s) => {
+				s.status = status;
+				s.chatSession = null;
+			});
 		} else {
-			setAgent("status", status);
-			if (status.state === "ready") setAgent("models", (await backend.agent("models", [])) as AgentModel[]);
+			setAgent((s) => {
+				s.status = status;
+			});
+			if (status.state === "ready") {
+				const models = (await backend.agent("models", [])) as AgentModel[];
+				setAgent((s) => {
+					s.models = models;
+				});
+			}
 		}
 	});
 }
@@ -370,14 +425,23 @@ export async function start() {
 	try {
 		const status = (await backend.agent("start", [])) as AgentStatus;
 		if (status.state === "off" || status.state === "failed") {
-			setAgent({ status, chatSession: null });
+			setAgent((s) => {
+				s.status = status;
+				s.chatSession = null;
+			});
 		} else {
-			setAgent("status", status);
-			setAgent("models", (await backend.agent("models", [])) as AgentModel[]);
+			const models = (await backend.agent("models", [])) as AgentModel[];
+			setAgent((s) => {
+				s.status = status;
+				s.models = models;
+			});
 		}
 	} catch (e) {
 		// The panel shows the message under the status line; Output keeps it.
-		setAgent({ status: { state: "failed", message: errorText(e) }, chatSession: null });
+		setAgent((s) => {
+			s.status = { state: "failed", message: errorText(e) };
+			s.chatSession = null;
+		});
 		log(`opencode did not start: ${errorText(e)}`);
 	}
 }
@@ -386,7 +450,10 @@ export async function start() {
 export async function stop() {
 	await safely("opencode did not stop", async () => {
 		const status = (await backend.agent("stop", [])) as AgentStatus;
-		setAgent({ status, chatSession: null });
+		setAgent((s) => {
+			s.status = status;
+			s.chatSession = null;
+		});
 	});
 }
 
@@ -398,44 +465,51 @@ export const currentModel = () => {
 
 /** Says whether the model was saved. False: the user backed out or saving failed, and the model in use has not changed. */
 export async function chooseModel(ref: string): Promise<boolean> {
-	const decision = await decideModel(ref, agent.models, choose);
+	const decision = await decideModel(ref, snapshot(agent).models, choose);
 	if (!decision) return false;
 	const chosen = decision.model;
 	if (decision.own && chosen) {
-		const savedOwn = await saveSetting({ agentOwnModels: [...new Set([...(state.settings.agentOwnModels ?? []), chosen])] });
+		const savedOwn = await saveSetting({ agentOwnModels: [...new Set([...(snapshot(state).settings.agentOwnModels ?? []), chosen])] });
 		if (!savedOwn) return false;
 	}
 	// `agentModel` is a user-only setting (workspace saves strip USER_ONLY_SETTINGS).
 	// An empty choice takes the setting out, so the default model shows through.
 	const savedModel = await saveSetting({ agentModel: chosen || null }, "user");
 	if (!savedModel) return false;
-	setAgent("models", (await backend.agent("models", [])) as AgentModel[]);
-	setAgent("chatSession", null);
+	const models = (await backend.agent("models", [])) as AgentModel[];
+	setAgent((s) => {
+		s.models = models;
+		s.chatSession = null;
+	});
 	return true;
 }
 
 /** One prompt; streams into the conversation; returns the reply. */
 export async function ask(text: string, options: { title?: string; skills?: string[]; show?: string; keep?: boolean; sessionID?: string; toolLimit?: number; turn?: EntryMeta } = {}): Promise<AgentReply | null> {
-	if (agent.busy) {
+	if (snapshot(agent).busy) {
 		notify("The agent is still working on the last request.");
 		return null;
 	}
-	if (activeWorkspaceKey === null && state.workspace?.root) {
-		syncWorkspaceThreads(canonical(state.workspace.root));
+	const root = snapshot(state).workspace?.root;
+	if (activeWorkspaceKey === null && root) {
+		syncWorkspaceThreads(canonical(root));
 	}
 	const myWorkspace = activeWorkspaceKey;
 	const myEpoch = ++turnEpoch;
 	const turnState: ActiveTurn = { epoch: myEpoch, workspaceKey: myWorkspace, meta: options.turn, streamedEntryId: null };
 	const stillCurrent = () => turnEpoch === myEpoch && activeWorkspaceKey === myWorkspace;
-	setAgent("busy", true);
+	setAgent((s) => {
+		s.busy = true;
+	});
 	activeTurn = turnState;
 	turns.begin(options.sessionID);
 	addEntry({ role: "user", text: options.show ?? text, ...(options.turn ? { turn: options.turn } : {}) });
 	try {
-		if (agent.status.state !== "ready") await start();
+		if (snapshot(agent).status.state !== "ready") await start();
 		if (!stillCurrent()) return null;
-		if (agent.status.state !== "ready") {
-			const msg = agent.status.message || "opencode is not ready.";
+		const statusNow = snapshot(agent).status;
+		if (statusNow.state !== "ready") {
+			const msg = statusNow.message || "opencode is not ready.";
 			addEntry({ role: "note", text: `failed: ${msg}` });
 			return null;
 		}
@@ -462,10 +536,21 @@ export async function ask(text: string, options: { title?: string; skills?: stri
 		if (activeTurn === turnState) activeTurn = null;
 		// A turn that ended without its closing event (a lost stream) must not stay marked as being written.
 		if (stillCurrent()) {
-			for (const id of streaming.values()) setAgent("entries", (e) => e.id === id, "streaming", false);
+			const ids = [...streaming.values()];
+			if (ids.length) {
+				setAgent((s) => {
+					for (const id of ids) {
+						const hit = s.entries.find((e) => e.id === id);
+						if (hit) hit.streaming = false;
+					}
+				});
+			}
 			streaming.clear();
 		}
-		setAgent({ busy: false, stopping: false });
+		setAgent((s) => {
+			s.busy = false;
+			s.stopping = false;
+		});
 		if (stillCurrent()) persistCurrentThread();
 	}
 }
@@ -477,9 +562,13 @@ export async function ask(text: string, options: { title?: string; skills?: stri
 export async function interrupt() {
 	if (!turns.busy) return;
 	const first = !turns.stopping;
-	setAgent("stopping", true);
+	setAgent((s) => {
+		s.stopping = true;
+	});
 	const result = await turns.stop();
 	// The turn may have ended while the interrupt was on its way.
-	setAgent("stopping", turns.stopping);
+	setAgent((s) => {
+		s.stopping = turns.stopping;
+	});
 	if (result === "waiting" && first && turns.stopping) addEntry({ role: "note", text: "Stopping: opencode has not started on this request yet. It will be stopped as soon as it does." });
 }

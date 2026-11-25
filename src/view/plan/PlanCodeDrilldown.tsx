@@ -56,35 +56,41 @@ export function NodeImplementation(props: {
 	const [missing, setMissing] = createSignal(false);
 
 	// Reset custom call selection whenever the selected node changes.
-	createEffect(() => {
-		props.node.id;
-		setPickedTarget(null);
-	});
+	const nodeId = createMemo(() => props.node.id);
+	createEffect(
+		() => nodeId(),
+		() => {
+			setPickedTarget(null);
+		},
+	);
 
 	const activeTarget = createMemo(() => pickedTarget() ?? defaultTarget());
 
 	let fetchSeq = 0;
-	createEffect(() => {
-		const isOpen = props.open;
-		const target = activeTarget();
-		const uri = props.planUri;
-		if (!isOpen || !target) {
+	createEffect(
+		() => [props.open, activeTarget(), props.planUri] as const,
+		([isOpen, target, uri]) => {
+			if (!isOpen || !target) {
+				setPreview(null);
+				setLoading(false);
+				setMissing(false);
+				return;
+			}
+			const seq = ++fetchSeq;
 			setPreview(null);
-			setLoading(false);
+			setLoading(true);
 			setMissing(false);
-			return;
-		}
-		const seq = ++fetchSeq;
-		setPreview(null);
-		setLoading(true);
-		setMissing(false);
-		void readProcedurePreview(uri, { name: target.name, script: target.script, hintScript: target.hintScript }).then((res) => {
-			if (seq !== fetchSeq) return;
-			setLoading(false);
-			setPreview(res);
-			setMissing(!res);
-		});
-	});
+			void readProcedurePreview(uri, { name: target.name, script: target.script, hintScript: target.hintScript }).then((res) => {
+				if (seq !== fetchSeq) return;
+				setLoading(false);
+				setPreview(res);
+				setMissing(!res);
+			});
+			return () => {
+				fetchSeq++;
+			};
+		},
+	);
 
 	const isPreviewing = (name: string) => activeTarget()?.name.toLowerCase() === name.toLowerCase();
 
@@ -93,14 +99,14 @@ export function NodeImplementation(props: {
 			<button
 				type="button"
 				class="plan-impl-toggle"
-				aria-expanded={props.open}
-				onClick={props.onToggle}
+				aria-expanded={props.open ? "true" : "false"}
+				onClick={() => props.onToggle()}
 				title="Show or hide the scripts, functions, and code behind this step"
 			>
 				<Icon name={props.open ? "chevron-down" : "chevron-right"} />
 				<span class="plan-impl-label">Implementation</span>
 				<span class="spacer" />
-				<span class="plan-impl-meta" classList={{ linked: details().units.length > 0 || Boolean(details().primaryRef) }}>
+				<span class={["plan-impl-meta", { linked: details().units.length > 0 || Boolean(details().primaryRef) }]}>
 					{summary()}
 				</span>
 			</button>
@@ -122,7 +128,7 @@ export function NodeImplementation(props: {
 									const file = () => baseName(unit.script);
 									const folder = () => dirName(unit.script);
 									return (
-										<div class="plan-impl-card" classList={{ active: isPreviewing(unit.name) }}>
+										<div class={["plan-impl-card", { active: isPreviewing(unit.name) }]}>
 											<div class="plan-impl-card-row">
 												<button
 													type="button"
@@ -170,11 +176,13 @@ export function NodeImplementation(props: {
 									{(call) => (
 										<button
 											type="button"
-											class="plan-impl-chip"
-											classList={{
-												active: isPreviewing(call),
-												primary: details().primaryRef?.toLowerCase() === call.toLowerCase(),
-											}}
+											class={[
+												"plan-impl-chip",
+												{
+													active: isPreviewing(call),
+													primary: details().primaryRef?.toLowerCase() === call.toLowerCase(),
+												},
+											]}
 											title={`Click to preview ${call}; double-click to open in editor`}
 											onClick={() => setPickedTarget({ name: call, hintScript: details().units[0]?.script, label: call })}
 											onDblClick={() => props.onOpenRef(call)}
@@ -278,14 +286,14 @@ export function PlanImplementation(props: {
 			<button
 				type="button"
 				class="plan-impl-toggle"
-				aria-expanded={props.open}
-				onClick={props.onToggle}
+				aria-expanded={props.open ? "true" : "false"}
+				onClick={() => props.onToggle()}
 				title="Show or hide the scripts and functions implementing this plan"
 			>
 				<Icon name={props.open ? "chevron-down" : "chevron-right"} />
 				<span class="plan-impl-label">Implementation</span>
 				<span class="spacer" />
-				<span class="plan-impl-meta" classList={{ linked: allScripts().length > 0 || props.builtUnits.length > 0 }}>
+				<span class={["plan-impl-meta", { linked: allScripts().length > 0 || props.builtUnits.length > 0 }]}>
 					{summary()}
 				</span>
 			</button>
@@ -349,7 +357,7 @@ export function PlanImplementation(props: {
 							rows={2}
 							value={scriptsText()}
 							placeholder="Sample/Release.ssl"
-							onKeyDown={props.onCommitOnEnter}
+							onKeyDown={(e) => props.onCommitOnEnter(e)}
 							onInput={(e) => props.fitTextarea(e.currentTarget)}
 							onChange={(e) => props.onSetTargets(e.currentTarget.value)}
 						/>

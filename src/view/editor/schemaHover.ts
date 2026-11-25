@@ -2,7 +2,7 @@
 // SSL/SQL/Markdown/XML/JSON code to documented `schema/` tables/columns, workspace tickets,
 // governing plans/ADRs/questions, and comment doc references (ADR 0003: matches identifiers
 // strictly against workspace docs, DDL, and starlims-lsp symbols, never parsing SSL).
-import { createEffect, createRoot } from "solid-js";
+import { createEffect, createMemo, createRoot, runWithOwner } from "solid-js";
 import { findCodeCitations, type CodeCitation } from "../../shared/codeCitations";
 import { parseCsv } from "../../shared/csv";
 import { linkBeingWritten } from "../../shared/docLinks";
@@ -1410,20 +1410,24 @@ export function registerSchemaHoverProviders(): void {
 	monaco.languages.registerCodeLensProvider("ssl", codeLensProvider);
 
 	// Refresh CodeLenses reactively whenever LSP state/symbols, workspace docs, or doc audit results update.
-	createRoot(() => {
-		createEffect(() => {
-			void state.workspace?.root;
-			void state.lsp.state;
-			modelSymbolCache.clear();
-			lensEmitter.fire(codeLensProvider);
-		});
-		createEffect(() => {
-			void symbols();
-			void docs();
-			void docAuditData();
-			lensEmitter.fire(codeLensProvider);
-		});
-	});
+	runWithOwner(null, () =>
+		createRoot(() => {
+			const env = createMemo(
+				() => [state.workspace?.root, state.lsp.state] as const,
+				{ equals: (a, b) => a[0] === b[0] && a[1] === b[1] },
+			);
+			createEffect(env, () => {
+				modelSymbolCache.clear();
+				lensEmitter.fire(codeLensProvider);
+			});
+			createEffect(
+				() => [symbols(), docs(), docAuditData()] as const,
+				() => {
+					lensEmitter.fire(codeLensProvider);
+				},
+			);
+		}),
+	);
 }
 
 /** Command Palette action: jumps from the identifier under cursor in SSL/SQL/Markdown to its documented schema file. */

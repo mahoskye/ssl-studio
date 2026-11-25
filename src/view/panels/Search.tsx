@@ -5,7 +5,8 @@
 // one expression (src/shared/searchPattern.ts), so they agree.
 import { Icon } from "../Icon";
 import { FileMark } from "../FileMark";
-import { createEffect, createMemo, createResource, createSignal, For, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
+import { createAsyncQuery } from "../asyncQuery";
 import { monaco } from "../editor/monaco";
 import { symbolPath } from "../editor/regions";
 import { session } from "../lsp/session";
@@ -382,19 +383,22 @@ export function Search() {
 	let historyIdx = -1;
 	let historyDraft = "";
 
-	createEffect(() => {
-		const currentRoot = state.workspace?.root ?? "";
-		if (lastWorkspaceRoot === undefined) {
-			lastWorkspaceRoot = currentRoot;
-			return;
-		}
-		if (currentRoot !== lastWorkspaceRoot) {
-			lastWorkspaceRoot = currentRoot;
-			resetSearchState();
-		}
-	});
+	const workspaceRoot = createMemo(() => state.workspace?.root ?? "");
+	createEffect(
+		() => workspaceRoot(),
+		(currentRoot) => {
+			if (lastWorkspaceRoot === undefined) {
+				lastWorkspaceRoot = currentRoot;
+				return;
+			}
+			if (currentRoot !== lastWorkspaceRoot) {
+				lastWorkspaceRoot = currentRoot;
+				resetSearchState();
+			}
+		},
+	);
 
-	const [workspaceFiles] = createResource(
+	const [workspaceFiles] = createAsyncQuery(
 		() => (state.workspace?.root ? `${state.workspace.root}#${state.treeVersion}` : false),
 		() => backend.files().catch(() => [] as string[]),
 	);
@@ -484,8 +488,19 @@ export function Search() {
 		};
 	});
 
-	const run = async () => {
-		const rawQuery = input.value;
+	type RunOverrides = {
+		query?: string;
+		regex?: boolean;
+		caseSensitive?: boolean;
+		wholeWord?: boolean;
+		choosing?: boolean;
+		include?: string;
+		exclude?: string;
+		ticketScopeKey?: string | null;
+	};
+
+	const run = async (overrides: RunOverrides = {}) => {
+		const rawQuery = overrides.query ?? input.value;
 		const mine = ++latest;
 		const startRoot = state.workspace?.root;
 		setDocFilterNote("");
@@ -503,13 +518,23 @@ export function Search() {
 		setStatus("busy");
 		setAsked(rawQuery);
 
-		const baseInclude = choosing() ? include() : "";
-		const baseExclude = choosing() ? exclude() : "";
+		const curChoosing = overrides.choosing ?? choosing();
+		const curInclude = overrides.include ?? include();
+		const curExclude = overrides.exclude ?? exclude();
+		const curTicketScopeKey = overrides.ticketScopeKey !== undefined ? overrides.ticketScopeKey : ticketScopeKey();
+		const curRegex = overrides.regex ?? regex();
+		const curCaseSensitive = overrides.caseSensitive ?? caseSensitive();
+		const curWholeWord = overrides.wholeWord ?? wholeWord();
+
+		const baseInclude = curChoosing ? curInclude : "";
+		const baseExclude = curChoosing ? curExclude : "";
 		const root = startRoot;
-		const activeTicket = ticketScopeKey() && activeTicketScope()?.key === ticketScopeKey() ? activeTicketScope() : null;
-		const scopeKind: SearchScopeKind = inCodeScope()
+		const activeTicket = curTicketScopeKey && activeTicketScope()?.key === curTicketScopeKey ? activeTicketScope() : null;
+		const isScopeActive = (inc: string, exc = "") =>
+			!curTicketScopeKey && (curChoosing ? curInclude.trim() === inc && curExclude.trim() === exc : !inc && !exc);
+		const scopeKind: SearchScopeKind = isScopeActive("", codeExcludeGlob())
 			? "code"
-			: inDocsScope()
+			: isScopeActive(docsIncludeGlob(), "")
 				? "docs"
 				: activeTicket
 					? "ticket"
@@ -517,7 +542,7 @@ export function Search() {
 						? "custom"
 						: "all";
 
-		const preParsed = !regex() && scopeKind !== "code" ? parseDocFilterTokens(rawQuery) : undefined;
+		const preParsed = !curRegex && scopeKind !== "code" ? parseDocFilterTokens(rawQuery) : undefined;
 		const customMatchedByPath = new Map<string, Record<string, string | string[]>>();
 		const keysSeen = new Set<string>();
 
@@ -539,9 +564,9 @@ export function Search() {
 
 		const resolved = resolveSearchQuery({
 			rawQuery,
-			regex: regex(),
-			caseSensitive: caseSensitive(),
-			wholeWord: wholeWord(),
+			regex: curRegex,
+			caseSensitive: curCaseSensitive,
+			wholeWord: curWholeWord,
 			scope: scopeKind,
 			knownCustomKeys: keysSeen,
 			parsed: preParsed,
@@ -720,27 +745,43 @@ export function Search() {
 	};
 
 	// A search asked for from elsewhere is put in the box and run, as if it had been typed.
-	createEffect(() => {
-		const wanted = request();
-		if (!wanted || !input) return;
-		setRequest(null);
-		input.value = wanted.query;
-		setTyped(wanted.query);
-		setRegex(Boolean(wanted.regex));
-		setWholeWord(Boolean(wanted.wholeWord));
-		setCaseSensitive(Boolean(wanted.caseSensitive));
-		const nextInc = wanted.include ?? "";
-		const nextExc = wanted.exclude ?? "";
-		setTicketScopeKey(null);
-		setInclude(nextInc);
-		setExclude(nextExc);
-		setChoosing(Boolean(nextInc.trim() || nextExc.trim()));
-		void run();
-	});
+	createEffect(
+		() => request(),
+		(wanted) => {
+			if (!wanted || !input) return;
+			setRequest(null);
+			input.value = wanted.query;
+			const nextRegex = Boolean(wanted.regex);
+			const nextWhole = Boolean(wanted.wholeWord);
+			const nextCase = Boolean(wanted.caseSensitive);
+			const nextInc = wanted.include ?? "";
+			const nextExc = wanted.exclude ?? "";
+			const nextChoosing = Boolean(nextInc.trim() || nextExc.trim());
+			setTyped(wanted.query);
+			setRegex(nextRegex);
+			setWholeWord(nextWhole);
+			setCaseSensitive(nextCase);
+			setTicketScopeKey(null);
+			setInclude(nextInc);
+			setExclude(nextExc);
+			setChoosing(nextChoosing);
+			void run({
+				query: wanted.query,
+				regex: nextRegex,
+				wholeWord: nextWhole,
+				caseSensitive: nextCase,
+				include: nextInc,
+				exclude: nextExc,
+				choosing: nextChoosing,
+				ticketScopeKey: null,
+			});
+		},
+	);
 	// A switch changes what the results on screen mean, so they are fetched again.
-	const flip = (set: (v: boolean) => void, now: boolean) => {
-		set(!now);
-		if (status() !== "idle") void run();
+	const flip = (kind: "caseSensitive" | "wholeWord" | "regex", set: (v: boolean) => void, now: boolean) => {
+		const next = !now;
+		set(next);
+		if (status() !== "idle") void run({ [kind]: next });
 	};
 
 	const visibleHits = createMemo(() => {
@@ -780,7 +821,7 @@ export function Search() {
 	// Keyed on raw `hits()` so dismissing rows never re-reads files, and cleans up on unmount.
 	let placesSeq = 0;
 	onCleanup(() => placesSeq++);
-	const [places] = createResource(
+	const [places] = createAsyncQuery(
 		() => ({ root: state.workspace?.root ?? "", hits: hits() }),
 		async ({ root: startRoot, hits: rawHits }) => {
 			const mine = ++placesSeq;
@@ -924,11 +965,12 @@ export function Search() {
 			/\b(?:tag|status|ticket|parent|group|kind|heading|task):/i.test(typed()));
 
 	const applyScope = (inc: string, exc = "") => {
+		const nextChoosing = Boolean(inc || exc);
 		setTicketScopeKey(null);
 		setInclude(inc);
 		setExclude(exc);
-		setChoosing(Boolean(inc || exc));
-		if (typed()) void run();
+		setChoosing(nextChoosing);
+		if (typed()) void run({ ticketScopeKey: null, include: inc, exclude: exc, choosing: nextChoosing });
 	};
 
 	const applyTicketScope = (key: string) => {
@@ -936,7 +978,7 @@ export function Search() {
 		setInclude("");
 		setExclude("");
 		setChoosing(false);
-		if (typed()) void run();
+		if (typed()) void run({ ticketScopeKey: key, include: "", exclude: "", choosing: false });
 	};
 
 	// --- replacing -------------------------------------------------------------
@@ -954,7 +996,7 @@ export function Search() {
 	// Document-level Safe Docs cache for Markdown protected spans & .plan.json validation during Replace preview.
 	let safeCacheSeq = 0;
 	onCleanup(() => safeCacheSeq++);
-	const [safeDocInfo] = createResource(
+	const [safeDocInfo] = createAsyncQuery(
 		() => {
 			if (!replacing() || !safeDocs() || searched().syntheticQuery) return null;
 			const list = hits();
@@ -1192,7 +1234,9 @@ export function Search() {
 				failed.push(String(e?.message ?? e));
 			}
 			if (state.workspace?.root !== startRoot) return;
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => {
+				s.treeVersion += 1;
+			});
 			const protectedNote = skippedProtected
 				? ` (${count(skippedProtected, "protected doc match", "protected doc matches")} skipped by Safe docs)`
 				: "";
@@ -1472,7 +1516,7 @@ export function Search() {
 				}}
 			>
 				<div class="search-row">
-					<button type="button" class="search-fold" title={replacing() ? "Hide the replace row" : "Replace across files"} aria-label="Replace across files" aria-expanded={replacing()} onClick={() => setReplacing(!replacing())}>
+					<button type="button" class="search-fold" title={replacing() ? "Hide the replace row" : "Replace across files"} aria-label="Replace across files" aria-expanded={replacing() ? "true" : "false"} onClick={() => setReplacing(!replacing())}>
 						<Icon name={replacing() ? "chevron-down" : "chevron-right"} />
 					</button>
 					<input
@@ -1509,18 +1553,19 @@ export function Search() {
 							if (e.key === "ArrowDown" && focusRowsBelow(el)) e.preventDefault();
 						}}
 					/>
-					<IconButton label="Match case" glyph="Aa" pressed={caseSensitive()} onClick={() => flip(setCaseSensitive, caseSensitive())} />
-					<IconButton label="Match whole word" title="Whole word" glyph="ab" pressed={wholeWord()} onClick={() => flip(setWholeWord, wholeWord())} />
-					<IconButton label="Use a regular expression" title="Regular expression" glyph=".*" pressed={regex()} onClick={() => flip(setRegex, regex())} />
+					<IconButton label="Match case" glyph="Aa" pressed={caseSensitive()} onClick={() => flip("caseSensitive", setCaseSensitive, caseSensitive())} />
+					<IconButton label="Match whole word" title="Whole word" glyph="ab" pressed={wholeWord()} onClick={() => flip("wholeWord", setWholeWord, wholeWord())} />
+					<IconButton label="Use a regular expression" title="Regular expression" glyph=".*" pressed={regex()} onClick={() => flip("regex", setRegex, regex())} />
 					<IconButton
 						label="Choose which files to search"
 						title="Which files: to include, to exclude"
 						icon="ellipsis"
 						pressed={choosing()}
 						onClick={() => {
-							setChoosing(!choosing());
+							const nextChoosing = !choosing();
+							setChoosing(nextChoosing);
 							// Patterns that were narrowing the results stop when their boxes go, and start when they come back.
-							if (status() !== "idle" && (include().trim() || exclude().trim())) void run();
+							if (status() !== "idle" && (include().trim() || exclude().trim())) void run({ choosing: nextChoosing });
 						}}
 					/>
 				</div>
@@ -1564,12 +1609,12 @@ export function Search() {
 					</div>
 				</Show>
 				<div class="search-scopes" role="group" aria-label="Quick search scope">
-					<button type="button" classList={{ on: scopeActive("", "") }} title="Search all workspace files" onClick={() => applyScope("", "")}>
+					<button type="button" class={{ on: scopeActive("", "") }} title="Search all workspace files" onClick={() => applyScope("", "")}>
 						All
 					</button>
 					<button
 						type="button"
-						classList={{ on: scopeActive("", codeExcludeGlob()) }}
+						class={{ on: scopeActive("", codeExcludeGlob()) }}
 						title="Search code files only (exclude docs, design, schema, and catalogs)"
 						onClick={() => applyScope("", codeExcludeGlob())}
 					>
@@ -1577,7 +1622,7 @@ export function Search() {
 					</button>
 					<button
 						type="button"
-						classList={{ on: scopeActive(docsIncludeGlob(), "") }}
+						class={{ on: scopeActive(docsIncludeGlob(), "") }}
 						title="Search project documentation, plans, schema, and Markdown files"
 						onClick={() => applyScope(docsIncludeGlob(), "")}
 					>
@@ -1587,7 +1632,7 @@ export function Search() {
 						{(scope) => (
 							<button
 								type="button"
-								classList={{ on: ticketScopeKey() === scope().key }}
+								class={{ on: ticketScopeKey() === scope().key }}
 								title={scope().tip}
 								onClick={() => applyTicketScope(scope().key)}
 							>
@@ -1604,7 +1649,7 @@ export function Search() {
 								return (
 									<button
 										type="button"
-										classList={{ on: hasQueryToken(tok) }}
+										class={{ on: hasQueryToken(tok) }}
 										title={`Filter Docs by #${bucket.tag} (${bucket.count})`}
 										onClick={() => toggleQueryToken(tok)}
 									>
@@ -1619,7 +1664,7 @@ export function Search() {
 								return (
 									<button
 										type="button"
-										classList={{ on: hasQueryToken(tok) }}
+										class={{ on: hasQueryToken(tok) }}
 										title={`Filter Docs by ${tok}${st.count ? ` (${st.count})` : ""}`}
 										onClick={() => toggleQueryToken(tok)}
 									>
@@ -1630,7 +1675,7 @@ export function Search() {
 						</For>
 						<button
 							type="button"
-							classList={{ on: hasQueryToken("task:open") }}
+							class={{ on: hasQueryToken("task:open") }}
 							title="Match unchecked checklist tasks (- [ ])"
 							onClick={() => toggleQueryToken("task:open")}
 						>
@@ -1639,7 +1684,7 @@ export function Search() {
 					</div>
 				</Show>
 			</form>
-			<p class="hint" classList={{ warn: status() === "failed" }} role="status">
+			<p class={["hint", { warn: status() === "failed" }]} role="status">
 				{summary()}
 			</p>
 			<Rows label="Search results">

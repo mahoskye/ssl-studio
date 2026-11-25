@@ -625,11 +625,11 @@ describe("R6B — store.ts localStorage budget & Agent/Tidy wiring invariants", 
 	test("store.ts, Agent.tsx, markdown.ts, and tidy.ts keep all Round 6B lifecycle & safety guards wired", () => {
 		const storeSrc = readSrc("../src/view/agent/store.ts");
 		expect(storeSrc).toContain('nextStatus?.state === "off" || nextStatus?.state === "failed"');
-		expect(storeSrc).toContain("setAgent({ status, chatSession: null })");
+		expect(storeSrc).toContain("s.chatSession = null;");
 		expect(storeSrc).toContain("activeTurn.epoch === turnEpoch && activeTurn.workspaceKey === activeWorkspaceKey");
 		expect(storeSrc).toContain('typeof d?.delta !== "string"');
 		expect(storeSrc).toContain("turnState.streamedEntryId === null && typeof reply.text === \"string\"");
-		expect(storeSrc).toContain('if (agent.status.state !== "ready")');
+		expect(storeSrc).toContain('snapshot(agent).status.state !== "ready"');
 		expect(storeSrc).toContain("if (!savedModel) return false;");
 
 		const agentSrc = readSrc("../src/view/agent/Agent.tsx");

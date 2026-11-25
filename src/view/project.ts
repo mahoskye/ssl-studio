@@ -1,7 +1,7 @@
 // The open folder as a project: its settings (.ssl-studio/project.toml) and
 // its documents. The Bun process reads them (src/bun/project.ts); the Docs
 // and Health panels show them.
-import { createEffect, createSignal, on, onCleanup } from "solid-js";
+import { createEffect, createMemo, createSignal, onCleanup, snapshot } from "solid-js";
 import type { DocFile } from "../shared/protocol";
 import { folderParts, folderSaid, typedDocument, typedParts } from "../shared/docSections";
 import { joinPath } from "../shared/paths";
@@ -35,42 +35,51 @@ export function useProject() {
 		clearTimeout(timer);
 		seq++;
 	});
-	createEffect(
-		on([() => state.workspace?.root, () => state.treeVersion], ([root]) => {
-			clearTimeout(timer);
-			const mySeq = ++seq;
-			const rootChanged = root !== prevRoot;
-			prevRoot = root;
-			if (!root) {
-				setDocs([]);
-				setDocsLoading(false);
-				setDocsError("");
-				return;
-			}
-			if (rootChanged) {
-				setDocs([]);
-				setDocsError("");
-			}
-			setDocsLoading(true);
-			// A save or a burst of file events asks once.
-			timer = setTimeout(() => {
-				void backend.docs().then(
-					(list) => {
-						if (mySeq !== seq) return;
-						setDocs(list);
-						setDocsError("");
-						setDocsLoading(false);
-					},
-					(e) => {
-						if (mySeq !== seq) return;
-						setDocs([]);
-						setDocsError(String(e?.message ?? e));
-						setDocsLoading(false);
-					},
-				);
-			}, 150);
-		}),
+	const source = createMemo(
+		() => [state.workspace?.root, state.treeVersion] as const,
+		{ equals: (a, b) => a[0] === b[0] && a[1] === b[1] },
 	);
+	createEffect(source, ([root]) => {
+		clearTimeout(timer);
+		const mySeq = ++seq;
+		const rootChanged = root !== prevRoot;
+		prevRoot = root;
+		if (!root) {
+			setDocs([]);
+			setDocsLoading(false);
+			setDocsError("");
+			return () => {
+				clearTimeout(timer);
+				seq++;
+			};
+		}
+		if (rootChanged) {
+			setDocs([]);
+			setDocsError("");
+		}
+		setDocsLoading(true);
+		// A save or a burst of file events asks once.
+		timer = setTimeout(() => {
+			void backend.docs().then(
+				(list) => {
+					if (mySeq !== seq) return;
+					setDocs(list);
+					setDocsError("");
+					setDocsLoading(false);
+				},
+				(e) => {
+					if (mySeq !== seq) return;
+					setDocs([]);
+					setDocsError(String(e?.message ?? e));
+					setDocsLoading(false);
+				},
+			);
+		}, 150);
+		return () => {
+			clearTimeout(timer);
+			seq++;
+		};
+	});
 }
 
 /** The sentence that asks before "Set up project" writes anything. */
@@ -98,8 +107,10 @@ export async function setUpProject() {
 	}
 	if (!state.workspace || state.workspace.root !== startRoot) return;
 	await Promise.all([loadProject(), loadSettings()]);
-	if (!state.workspace || state.workspace.root !== startRoot) return;
-	setState("treeVersion", (v) => v + 1);
+	if (!snapshot(state).workspace || snapshot(state).workspace?.root !== startRoot) return;
+	setState((s) => {
+		s.treeVersion += 1;
+	});
 	notify(made.length ? `Created ${made.join(", ")}.` : "This project already has its settings, README and AGENTS files.", "info", made.length ? { label: "Undo", run: () => void undoSetUp() } : undefined);
 	showPanel("docs");
 	let readme: DocFile | undefined;
@@ -127,8 +138,10 @@ export async function undoSetUp() {
 	if (state.workspace?.root !== root) return;
 	for (const file of result.removed) fileRemoved(joinPath(root, ...file.split(/[\\/]/)));
 	await Promise.all([loadProject(), loadSettings()]);
-	if (state.workspace?.root !== root) return;
-	setState("treeVersion", (v) => v + 1);
+	if (snapshot(state).workspace?.root !== root) return;
+	setState((s) => {
+		s.treeVersion += 1;
+	});
 	if (!result.removed.length && !result.kept.length) return notify("Nothing to undo: no project was set up here in this session.");
 	notify(`${result.removed.length ? `Removed ${result.removed.join(", ")}.` : "Nothing was removed."}${result.kept.length ? ` Kept, because ${result.kept.length === 1 ? "it has" : "they have"} been changed since: ${result.kept.join(", ")}.` : ""}`);
 }
@@ -162,8 +175,10 @@ export async function newDocIn(folder?: string): Promise<boolean> {
 	} catch (e: any) {
 		return notify(String(e?.message ?? e), "error"), false;
 	}
-	if (!state.workspace || state.workspace.root !== startRoot) return false;
-	setState("treeVersion", (v) => v + 1);
+	if (!snapshot(state).workspace || snapshot(state).workspace?.root !== startRoot) return false;
+	setState((s) => {
+		s.treeVersion += 1;
+	});
 	await openFile(path);
 	return true;
 }
@@ -191,8 +206,10 @@ export async function newFolderIn(folder: string, first: boolean | ((made: strin
 	} catch (e: any) {
 		return notify(String(e?.message ?? e), "error"), false;
 	}
-	if (!state.workspace || state.workspace.root !== startRoot) return false;
-	setState("treeVersion", (v) => v + 1);
+	if (!snapshot(state).workspace || snapshot(state).workspace?.root !== startRoot) return false;
+	setState((s) => {
+		s.treeVersion += 1;
+	});
 	if (first && (await (typeof first === "function" ? first(made) : newDocIn(made)))) return true;
 	if (!state.workspace || state.workspace.root !== startRoot) return true;
 	notify(`Made the folder ${made}/. It is empty, so this list does not show it yet; the Explorer does.`);

@@ -1,6 +1,7 @@
 import { describe, expect, mock, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { flush } from "solid-js";
 import { normalizeMenuEntries, type RowMenuEntry } from "../src/shared/contextMenu";
 import { TEMPLATES } from "../src/shared/houseStyle";
 import { copyProblem, moveProblem } from "../src/view/panels/explorerMoves";
@@ -290,10 +291,13 @@ function setActiveTab(path: string, model: any, extra: { binary?: { size: number
 		mtime: 1,
 		binary: extra.binary,
 	});
-	setState("workspace", { root: "/w", name: "w" } as any);
-	setState("centerView", "editors");
-	setState("activeGroup", 0);
-	setState("groups", [{ tabs: [path], active: path, mode: "text" } as any]);
+	setState((s) => {
+		s.workspace = { root: "/w", name: "w" } as any;
+		s.centerView = "editors";
+		s.activeGroup = 0;
+		s.groups = [{ tabs: [path], active: path, mode: "text" } as any];
+	});
+	flush();
 }
 
 describe("R8B-1 — Reference & Palette hidden-view/binary guards + Markdown Source mode", () => {
@@ -335,14 +339,16 @@ describe("R8B-1 — Reference & Palette hidden-view/binary guards + Markdown Sou
 			const graphFake = makeFakeMonaco("original", { visible: true });
 			editors[0] = graphFake.editor;
 			setActiveTab("/w/src/DueRules.ssl", graphFake.model);
-			setState("centerView", "graph");
+			setState((s) => { s.centerView = "graph"; });
+			flush();
 			expect(insertReferenceText("SQLExecute")).toBe(false);
 			insertTemplate(tpl);
 			await insertSnippet(snippetFile, readFakeSnippet);
 			expect(graphFake.getText()).toBe("original");
 
 			// 4. ReviewView open over editor
-			setState("centerView", "editors");
+			setState((s) => { s.centerView = "editors"; });
+			flush();
 			await openReview({
 				title: "Diff",
 				original: "a",
@@ -551,7 +557,7 @@ describe("R8B-3 — RowMenu submenus under { box } (menu.keep), pointer tracking
 		const subIdx = src.indexOf("row-submenu");
 		const subBlock = src.slice(subIdx, subIdx + 600);
 		expect(subBlock).toContain("onMouseDown={(e) => menu.keep && e.preventDefault()}");
-		expect(subBlock).toContain("classList={{ kept: menu.keep }}");
+		expect(subBlock).toContain("{ kept: menu.keep }");
 	});
 });
 
@@ -577,7 +583,7 @@ describe("R8B-4 — Problems panel untitled URI preservation, same-line dedup, a
 
 	test("Problems.tsx resets problemsScope to 'all' on !hasDocIssues() and workspace root change", () => {
 		const src = readSrc("../src/view/panels/Problems.tsx");
-		expect(src).toContain('if (!hasDocIssues() && problemsScope() !== "all") setProblemsScope("all")');
+		expect(src).toMatch(/!hasDocIssues\(\) && problemsScope\(\) !== "all"[\s\S]*?if \(shouldReset\) setProblemsScope\("all"\)/);
 		expect(src).toContain("if (root !== lastProblemsRoot)");
 		expect(src).toContain("openFile(problemPath(uri)");
 	});
@@ -761,7 +767,7 @@ describe("R8B-6 — Explorer hardening, explorerMoves, and Rows focus", () => {
 		expect(expSrc).toContain("if (await heldFromBefore(destPath))");
 		expect(expSrc).toContain("backend.sizes([path])");
 		expect(expSrc).toContain("cancelExplorerFocusSearch()");
-		expect(expSrc).toContain('if (state.bottomMaximized) setState("bottomMaximized", false);');
+		expect(expSrc).toContain("if (s.bottomMaximized) s.bottomMaximized = false;");
 		expect(expSrc).toContain("focusEditor();");
 
 		const rowsSrc = readSrc("../src/view/panels/Rows.tsx");
@@ -773,31 +779,38 @@ describe("R8B-7 — Panel registry panelOn availability filtering and narrow tog
 	test("panelOn('right') skips unavailable 'objects' and falls back to 'agent' so narrow toggleSide('right') opens Agent", () => {
 		// No outlineable file open -> isPanelAvailable("objects") is false
 		documents.clear();
-		setState("groups", [{ tabs: [], active: null, mode: "text" } as any]);
-		setState("activeGroup", 0);
-		setState("centerView", "editors");
-		setState("rightView", "objects");
-		setState("settings", "layout", "dock", {});
-		setState("settings", "layout", "left", false);
+		setState((s) => {
+			s.groups = [{ tabs: [], active: null, mode: "text" } as any];
+			s.activeGroup = 0;
+			s.centerView = "editors";
+			s.rightView = "objects";
+			s.settings.layout.dock = {};
+			s.settings.layout.left = false;
+		});
 		setNarrowHosted(null);
 		setNarrowPanels(true);
+		flush();
 
 		expect(panelOn("right")).toBe("agent");
 		toggleSide("right");
+		flush();
 		expect(narrowHosted()).toBe("agent");
 		expect(state.rightView).toBe("agent");
 		expect(state.settings.layout.left).toBe(true);
 
 		// Toggling right again in narrow mode closes the hosted panel cleanly
 		toggleSide("right");
+		flush();
 		expect(narrowHosted()).toBeNull();
 		expect(state.settings.layout.left).toBe(false);
 
 		// When an SSL file IS open, objects IS available and panelOn("right") respects rightView = "objects"
 		const sslFake = makeFakeMonaco(":PROCEDURE Foo;\n:ENDPROC;", { languageId: "ssl", visible: true });
 		setActiveTab("/w/src/Foo.ssl", sslFake.model);
-		setState("rightView", "objects");
+		setState((s) => { s.rightView = "objects"; });
+		flush();
 		expect(panelOn("right")).toBe("objects");
 		setNarrowPanels(false);
+		flush();
 	});
 });

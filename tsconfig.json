@@ -24,7 +24,7 @@
 		"noFallthroughCasesInSwitch": true,
 		"moduleResolution": "bundler",
 		"jsx": "preserve",
-		"jsxImportSource": "solid-js"
+		"jsxImportSource": "@solidjs/web"
 	},
 	"include": ["src", "test", "scripts"],
 	"exclude": ["node_modules", "dist", "build", "../../package/dist"]

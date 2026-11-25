@@ -145,7 +145,9 @@ export function writeTests(path: string) {
 				if (!existsNow) {
 					await backend.write(full, final);
 					if (state.workspace?.root !== root) return;
-					setState("treeVersion", (v) => v + 1);
+					setState((s) => {
+						s.treeVersion += 1;
+					});
 					void catalogsKeptFor([full]);
 					await openFile(full);
 				} else {

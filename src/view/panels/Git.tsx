@@ -4,7 +4,8 @@
 // or lets its changes go (after asking). Everything stays on this machine:
 // there is no fetch, pull or push here.
 import { Icon } from "../Icon";
-import { createEffect, createMemo, createResource, createSignal, For, on, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
+import { createAsyncQuery } from "../asyncQuery";
 import { changeLetter, changeWord, commitProblem, GIT_ACTIONS, rowMenuEntries, stagedOf, unstagedOf, type GitFile } from "../../shared/gitStatus";
 import { draftCommitMessage, formatTicketChangelog } from "../../shared/markdownDiff";
 import { detectBranchTicketMismatch } from "../../shared/menuBar";
@@ -51,15 +52,13 @@ function formatCommitDate(ms: number): string {
 
 export function GitPanel() {
 	createEffect(
-		on(
-			() => state.workspace?.root,
-			(root) => {
-				if (root !== messageRoot) {
-					messageRoot = root;
-					setMessage("");
-				}
-			},
-		),
+		() => state.workspace?.root,
+		(root) => {
+			if (root !== messageRoot) {
+				messageRoot = root;
+				setMessage("");
+			}
+		},
 	);
 	const staged = () => (gitStatus() ? stagedOf(gitStatus()!) : []);
 	const changes = () => (gitStatus() ? unstagedOf(gitStatus()!) : []);
@@ -277,7 +276,7 @@ export function GitPanel() {
 		};
 	});
 
-	const [ticketCommits] = createResource(
+	const [ticketCommits] = createAsyncQuery(
 		() => {
 			const root = state.workspace?.root;
 			const key = displayedCommitTicket();
@@ -472,7 +471,7 @@ export function GitPanel() {
 				onMenu={(at) => void menu(props.file, props.staged, at)}
 			>
 				<FileMark name={name()} />
-				<span class="label" classList={{ gone: kind() === "deleted" }}>
+				<span class={["label", { gone: kind() === "deleted" }]}>
 					{name()}
 					<Show when={folder(props.file.path)}>
 						<span class="git-folder">{folder(props.file.path)}</span>
@@ -553,7 +552,7 @@ export function GitPanel() {
 						<button
 							type="button"
 							class="git-drift-toggle"
-							aria-expanded={driftOpen()}
+							aria-expanded={driftOpen() ? "true" : "false"}
 							title="Non-blocking pre-commit checklist: governing docs, open ticket tasks/questions, plan specs, staged Markdown issues, registries, citations, and catalogs"
 							onClick={() => setDriftOpen((v) => !v)}
 						>
@@ -857,7 +856,7 @@ export function GitPanel() {
 										"text-align": "left",
 										"min-width": 0,
 									}}
-									aria-expanded={commitsOpen()}
+									aria-expanded={commitsOpen() ? "true" : "false"}
 									onClick={() => setCommitsOpen((v) => !v)}
 								>
 									<Icon name={commitsOpen() ? "chevron-down" : "chevron-right"} class="twisty" />
@@ -883,7 +882,7 @@ export function GitPanel() {
 								<div class="git-ticket-scope" role="group" aria-label="Ticket commit filter source">
 									<button
 										type="button"
-										classList={{ on: commitScope() === "active" || !fileTicketKey() }}
+										class={{ on: commitScope() === "active" || !fileTicketKey() }}
 										disabled={!activeTicketKey()}
 										title={activeTicketKey() ? `Show commits mentioning active ticket ${activeTicketKey()}` : "No active ticket set"}
 										onClick={() => setCommitScope("active")}
@@ -892,7 +891,7 @@ export function GitPanel() {
 									</button>
 									<button
 										type="button"
-										classList={{ on: commitScope() === "file" || !activeTicketKey() }}
+										class={{ on: commitScope() === "file" || !activeTicketKey() }}
 										disabled={!fileTicketKey()}
 										title={fileTicketKey() ? `Show commits mentioning current file's ticket ${fileTicketKey()}` : "Current file is not linked to a ticket"}
 										onClick={() => setCommitScope("file")}

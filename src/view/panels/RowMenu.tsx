@@ -9,8 +9,8 @@
 // A menu for a text box (`box`) leaves the keyboard in the box: a box that
 // saves or shuts when the keyboard leaves it (a table's cell, a block's text)
 // must not do so because its own menu opened.
-import { createEffect, createSignal, createUniqueId, For, onCleanup, onMount, Show } from "solid-js";
-import { Portal } from "solid-js/web";
+import { createEffect, createSignal, createUniqueId, For, onCleanup, onSettled, Show } from "solid-js";
+import { Portal } from "@solidjs/web";
 import {
 	normalizeMenuEntries,
 	placeMenu,
@@ -47,11 +47,13 @@ type OpenSub = {
 	focusFirst: boolean;
 };
 
+let currentOpen: Open | null = null;
 const [open, setOpen] = createSignal<Open | null>(null);
 
 function finish(item: string | null, refocus = true) {
-	const menu = open();
+	const menu = currentOpen;
 	if (!menu) return;
+	currentOpen = null;
 	setOpen(null);
 	// Focus goes back to where it was; a dialog that follows takes it from there, and gives it back.
 	// A menu that left the keyboard where it was has nothing to give back.
@@ -75,20 +77,25 @@ export function chooseFromMenu(
 	// The menu is tied to the box it was asked for, which is not always what has the keyboard (a right-click on one
 	// box while another's menu was open does not move it).
 	options.box?.focus();
-	return new Promise((resolve) =>
-		setOpen({
+	return new Promise((resolve) => {
+		const next: Open = {
 			label,
 			items: normalized,
 			at,
 			opener: options.box ?? document.activeElement,
 			keep: Boolean(options.box),
 			resolve,
-		}),
-	);
+		};
+		currentOpen = next;
+		setOpen(next);
+	});
 }
 
 /** True while a row's menu is open: a dialog under it leaves the menu's own keys to it. */
-export const rowMenuOpen = () => open() !== null;
+export const rowMenuOpen = () => {
+	void open();
+	return currentOpen !== null;
+};
 
 export type NavigableMenuEntry = { entryIdx: number; entry: ResolvedMenuLeaf | ResolvedMenuSub };
 export type KeptMenuMark = { depth: number; index: number };
@@ -291,10 +298,10 @@ export function RowMenu() {
 				};
 
 				// Close on window resize so menus never float out-of-bounds.
-				onMount(() => {
+				onSettled(() => {
 					const onResize = () => finish(null);
 					window.addEventListener("resize", onResize);
-					onCleanup(() => window.removeEventListener("resize", onResize));
+					return () => window.removeEventListener("resize", onResize);
 				});
 
 				/** The entry the arrow keys or the pointer have marked, in a menu that does not hold the keyboard. */
@@ -378,15 +385,18 @@ export function RowMenu() {
 						else if (own === null) box.removeAttribute(ATTR);
 						else box.setAttribute(ATTR, own);
 					};
-					createEffect(() => name(marked()));
-					onMount(() => {
+					createEffect(
+						() => marked(),
+						(m) => name(m),
+					);
+					onSettled(() => {
 						window.addEventListener("keydown", onWindowKey, true);
 						menu.opener?.addEventListener("blur", onLeave);
-					});
-					onCleanup(() => {
-						window.removeEventListener("keydown", onWindowKey, true);
-						menu.opener?.removeEventListener("blur", onLeave);
-						name({ depth: 0, index: -1 });
+						return () => {
+							window.removeEventListener("keydown", onWindowKey, true);
+							menu.opener?.removeEventListener("blur", onLeave);
+							name({ depth: 0, index: -1 });
+						};
 					});
 				}
 
@@ -450,36 +460,38 @@ export function RowMenu() {
 						<For each={entries}>
 							{(entry, entryIdx) => {
 								if (entry === "separator") return <div class="menu-sep" role="separator" />;
-								const navIdx = navIndexByEntry.get(entryIdx()) ?? -1;
-								const isMarked = () => menu.keep && navIdx >= 0 && marked().depth === depth && marked().index === navIdx;
+								const navIdx = () => navIndexByEntry.get(entryIdx()) ?? -1;
+								const isMarked = () => menu.keep && navIdx() >= 0 && marked().depth === depth && marked().index === navIdx();
 								if (entry.kind === "submenu") {
 									const isOpen = () => trail()[depth]?.parentIdx === entryIdx();
 									return (
 										<button
 											type="button"
-											class="menu-item menu-sub-trigger"
-											classList={{ "sub-open": isOpen(), marked: isMarked(), danger: Boolean(entry.danger) }}
-											id={menu.keep && navIdx >= 0 ? `${id}-${depth}-${navIdx}` : undefined}
+											class={["menu-item menu-sub-trigger", { "sub-open": isOpen(), marked: isMarked(), danger: Boolean(entry.danger) }]}
+											id={menu.keep && navIdx() >= 0 ? `${id}-${depth}-${navIdx()}` : undefined}
 											role="menuitem"
 											aria-haspopup="menu"
-											aria-expanded={isOpen()}
+											aria-expanded={isOpen() ? "true" : "false"}
 											data-sub-idx={String(entryIdx())}
 											tabindex={-1}
 											onMouseEnter={(e) => {
 												if (!pointerMoved(e)) return;
-												if (menu.keep && navIdx >= 0) setMarked({ depth, index: navIdx });
+												const idx = navIdx();
+												if (menu.keep && idx >= 0) setMarked({ depth, index: idx });
 												scheduleOpenSub(depth, entryIdx(), entry, e.currentTarget);
 											}}
 											onMouseMove={(e) => {
 												if (!pointerMoved(e)) return;
-												if (menu.keep && navIdx >= 0 && (marked().depth !== depth || marked().index !== navIdx)) {
-													setMarked({ depth, index: navIdx });
+												const idx = navIdx();
+												if (menu.keep && idx >= 0 && (marked().depth !== depth || marked().index !== idx)) {
+													setMarked({ depth, index: idx });
 												}
 												scheduleOpenSub(depth, entryIdx(), entry, e.currentTarget);
 											}}
 											onClick={(e) => {
 												e.stopPropagation();
-												if (menu.keep && navIdx >= 0) setMarked({ depth, index: navIdx });
+												const idx = navIdx();
+												if (menu.keep && idx >= 0) setMarked({ depth, index: idx });
 												openSubAt(depth, entryIdx(), entry, e.currentTarget, !menu.keep);
 											}}
 										>
@@ -494,23 +506,24 @@ export function RowMenu() {
 								return (
 									<button
 										type="button"
-										class="menu-item"
-										classList={{ marked: isMarked(), danger: Boolean(entry.danger) }}
-										id={menu.keep && navIdx >= 0 ? `${id}-${depth}-${navIdx}` : undefined}
+										class={["menu-item", { marked: isMarked(), danger: Boolean(entry.danger) }]}
+										id={menu.keep && navIdx() >= 0 ? `${id}-${depth}-${navIdx()}` : undefined}
 										role={entry.checked !== undefined ? "menuitemcheckbox" : "menuitem"}
-										aria-checked={entry.checked !== undefined ? entry.checked : undefined}
+										aria-checked={entry.checked === undefined ? undefined : entry.checked ? "true" : "false"}
 										disabled={entry.disabled}
 										tabindex={-1}
 										onMouseEnter={(e) => {
 											if (!pointerMoved(e)) return;
 											scheduleCloseSub(depth);
-											if (menu.keep && navIdx >= 0) setMarked({ depth, index: navIdx });
+											const idx = navIdx();
+											if (menu.keep && idx >= 0) setMarked({ depth, index: idx });
 										}}
 										onMouseMove={(e) => {
 											if (!pointerMoved(e)) return;
 											scheduleCloseSub(depth);
-											if (menu.keep && navIdx >= 0 && (marked().depth !== depth || marked().index !== navIdx)) {
-												setMarked({ depth, index: navIdx });
+											const idx = navIdx();
+											if (menu.keep && idx >= 0 && (marked().depth !== depth || marked().index !== idx)) {
+												setMarked({ depth, index: idx });
 											}
 										}}
 										onClick={() => !entry.disabled && finish(entry.value)}
@@ -560,8 +573,7 @@ export function RowMenu() {
 						>
 							<div
 								ref={(el) => queueMicrotask(() => placeRoot(el))}
-								class="menu-pop row-menu"
-								classList={{ kept: menu.keep }}
+								class={["menu-pop row-menu", { kept: menu.keep }]}
 								data-menu-depth="0"
 								role="menu"
 								aria-label={menu.label}
@@ -581,8 +593,7 @@ export function RowMenu() {
 									return (
 										<div
 											ref={(el) => queueMicrotask(() => placeSub(el, sub, depth()))}
-											class="menu-pop row-menu row-submenu"
-											classList={{ kept: menu.keep }}
+											class={["menu-pop row-menu row-submenu", { kept: menu.keep }]}
 											data-menu-depth={String(depth())}
 											role="menu"
 											aria-label={sub.entry.label}

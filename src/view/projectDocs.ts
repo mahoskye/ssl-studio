@@ -248,7 +248,7 @@ async function start(path: string, text: string, _area?: CatalogArea) {
 	} catch (e: any) {
 		return notify(String(e?.message ?? e), "error");
 	}
-	setState("treeVersion", (v) => v + 1);
+	setState((s) => { s.treeVersion += 1; });
 	await openFile(path);
 }
 
@@ -395,7 +395,7 @@ export async function createTicketFolder(ticketPath: string): Promise<string | n
 		return null;
 	}
 	fileRenamed(ticketPath, targetPath);
-	setState("treeVersion", (v) => v + 1);
+	setState((s) => { s.treeVersion += 1; });
 	try {
 		await followRename(ticketPath, targetPath, beforeDocs);
 	} catch (e: any) {
@@ -593,7 +593,7 @@ export async function importTickets() {
 		}
 	}
 	if (!state.workspace || root() !== startRoot) return;
-	if (counts.made || counts.updated) setState("treeVersion", (v) => v + 1);
+	if (counts.made || counts.updated) setState((s) => { s.treeVersion += 1; });
 	if (counts.made || counts.updated || counts.same || !failed) {
 		notify(`${importSummary(counts)}${failed ? ` (${failed} failed)` : ""}`);
 	}
@@ -725,7 +725,7 @@ export async function startFolderCatalogs() {
 			}
 			if (await writeCatalog(area, await backend.docs(), { start: true })) started.push(catalogSaid(area));
 		}
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		const own = theirs.length ? ` ${theirs.join(", ")} ${theirs.length === 1 ? "is a document of your own and is" : "are documents of your own and are"} left as ${theirs.length === 1 ? "it is" : "they are"}.` : "";
 		notify(started.length ? `Started ${started.join(", ")}.${own}` : `Nothing to start: the docs, code and tests folders have their catalogs, or hold nothing to list.${own}`);
 	} catch (e: any) {
@@ -864,7 +864,7 @@ export async function setStatus(path: string, status: string) {
 	if (after === before) return;
 	try {
 		await put(path, after, true);
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 	} catch (e: any) {
 		notify(String(e?.message ?? e), "error");
 		return;
@@ -950,10 +950,10 @@ export async function setStatus(path: string, status: string) {
 						linked = true;
 					}
 				}
-				if (linked) setState("treeVersion", (v) => v + 1);
+				if (linked) setState((s) => { s.treeVersion += 1; });
 				notify(`Linked ${newStem} as superseding ${oldStem}.`);
 			} catch (e: any) {
-				if (linked) setState("treeVersion", (v) => v + 1);
+				if (linked) setState((s) => { s.treeVersion += 1; });
 				notify(`Could not link superseding decision: ${e?.message ?? e}`, "error");
 			}
 		} else if (picked === CREATE) {
@@ -996,7 +996,7 @@ export async function tickTask(path: string, index: number) {
 	if (after === null || after === before) return;
 	try {
 		await put(path, after, true);
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 	} catch (e: any) {
 		notify(String(e?.message ?? e), "error");
 	}
@@ -1014,7 +1014,7 @@ export async function mendLinks(path: string, mends: readonly LinkMend[]) {
 	if (!done) return notify("The link is not where it was: the document has changed since. Mend it in the text.", "error");
 	try {
 		await put(path, after, true);
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(done === 1 && mends.length === 1 ? `The link now leads to ${mends[0]!.instead}.` : `${done} ${done === 1 ? "link now leads" : "links now lead"} to where ${done === 1 ? "its file is" : "their files are"}.`);
 	} catch (e: any) {
 		notify(String(e?.message ?? e), "error");
@@ -1425,7 +1425,7 @@ async function followPaths(
 			notify(String(e?.message ?? e), "error");
 		}
 	}
-	setState("treeVersion", (v) => v + 1);
+	setState((s) => { s.treeVersion += 1; });
 	if (done) notify(`${done} ${done === 1 ? "place was" : "places were"} written anew for ${baseName(primary.to)}.`);
 	const left = total - done;
 	if (left > 0) notify(`${left} of them ${left === 1 ? "is" : "are"} not where ${left === 1 ? "it was" : "they were"}: the document has changed since. Mend ${left === 1 ? "it" : "them"} in the text.`, "error");
@@ -1592,7 +1592,7 @@ async function followPlanPaths(rawPairs: readonly { from: string; to: string }[]
 		}
 	}
 	if (written) {
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(`Updated ${writtenHits} ${writtenHits === 1 ? "path" : "paths"} in ${written} ${written === 1 ? "plan" : "plans"} for ${baseName(primary.to)}.`);
 	}
 }
@@ -1654,7 +1654,7 @@ async function followRegistryPaths(
 		}
 	}
 	if (written) {
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(`Updated ${writtenHits} ${writtenHits === 1 ? "path cell" : "path cells"} in ${written} ${written === 1 ? "registry" : "registries"} for ${baseName(primary.to)}.`);
 	}
 }
@@ -1718,7 +1718,7 @@ async function followCodeCommentLinks(
 		}
 	}
 	if (written) {
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(`Updated ${writtenHits} ${writtenHits === 1 ? "comment reference" : "comment references"} across ${written} ${written === 1 ? "file" : "files"} for ${baseName(primary.to)}.`);
 	}
 }
@@ -1889,7 +1889,7 @@ async function followNames(rawPairs: readonly { from: string; to: string }[], li
 					notify(String(e?.message ?? e), "error");
 				}
 			}
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			if (done) notify(`${done} ${done === 1 ? "link by name was" : "links by name were"} written anew for ${baseName(primary.to)}.`);
 			const left = follow.length - done;
 			if (left > 0) notify(`${left} of them ${left === 1 ? "is" : "are"} not where ${left === 1 ? "it was" : "they were"}: the document has changed since. Mend ${left === 1 ? "it" : "them"} in the text.`, "error");
@@ -1936,7 +1936,7 @@ async function followNames(rawPairs: readonly { from: string; to: string }[], li
 					}
 				}
 				if (updatedCount) {
-					setState("treeVersion", (v) => v + 1);
+					setState((s) => { s.treeVersion += 1; });
 					notify(`Updated supersedes / superseded-by in ${updatedCount} ${updatedCount === 1 ? "decision" : "decisions"} for ${newStem}.`);
 				}
 			}
@@ -1960,7 +1960,7 @@ export async function updateCatalogs() {
 			// The docs folder's names the catalogs under it, which this pass may have just started: listed afresh for it.
 			if (await writeCatalog(area, area === "docs" ? await backend.docs() : files, { alone: true })) changed.push(catalogSaid(area));
 		}
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(changed.length ? `Updated ${changed.join(", ")}.` : "Every catalog already says what its folder holds.");
 	} catch (e: any) {
 		notify(String(e?.message ?? e), "error");
@@ -2074,7 +2074,7 @@ export async function updateManifest() {
 			if (picked === MARK) change = mergeManifest(before, files, { markChangedAfterDone: true });
 		}
 		if (before !== change.text) await put(path, change.text, before !== null);
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(manifestSummary(change));
 		await openFile(path);
 	} catch (e: any) {
@@ -2190,7 +2190,7 @@ export async function linkDocumentToTicket(ticketPath: string, key: string): Pro
 				if (before === null) return;
 				const next = withFrontMatter(before, "parent", key);
 				if (next && next !== before) await put(target.path, next, true);
-				setState("treeVersion", (v) => v + 1);
+				setState((s) => { s.treeVersion += 1; });
 				notify(`Set parent: ${key} on ${otherKey}.`);
 				return;
 			}
@@ -2199,7 +2199,7 @@ export async function linkDocumentToTicket(ticketPath: string, key: string): Pro
 			if (before === null) return;
 			const next = addToFrontMatterList(before, field, otherKey);
 			if (next && next !== before) await put(ticketPath, next, true);
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			notify(`Linked ${otherKey} under ${field}: in ${baseName(ticketPath)}.`);
 			return;
 		}
@@ -2214,7 +2214,7 @@ export async function linkDocumentToTicket(ticketPath: string, key: string): Pro
 				return;
 			}
 			if (next !== before) await put(ticketPath, next, true);
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			notify(`Linked ${baseName(target.path)} — added to ${field}: in ${baseName(ticketPath)}.`);
 			return;
 		}
@@ -2242,7 +2242,7 @@ export async function linkDocumentToTicket(ticketPath: string, key: string): Pro
 			return;
 		}
 		if (next !== before) await put(target.path, next, true);
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(`Linked ${baseName(target.path)} to ${key}.`);
 	} catch (e: any) {
 		notify(String(e?.message ?? e), "error");
@@ -2309,7 +2309,7 @@ export async function unlinkDocumentFromTicket(ticketPath: string, key: string, 
 			}
 		}
 		if (changed) {
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			notify(`Unlinked ${target.ticket ?? target.title ?? baseName(target.path)} from ${key}.`);
 		} else {
 			notify(`That link is inferred (e.g. via a paired plan or ticket folder) and cannot be unlinked from YAML.`);
@@ -2363,7 +2363,7 @@ export async function linkNonTicketToTicket(docPath: string): Promise<void> {
 	if (next && next !== fresh) {
 		try {
 			await put(docPath, next, true);
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			notify(`Linked ${baseName(docPath)} to ${ticket.ticket}.`);
 		} catch (e: any) {
 			notify(String(e?.message ?? e), "error");
@@ -2442,7 +2442,7 @@ export async function addRegistryRowForTicket(key: string, initialItem?: string)
 	}
 	try {
 		await put(reg.path, nextText, true);
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(`Added “${name}” to ${reg.name} for ${key}.`);
 		await openFile(reg.path);
 	} catch (e: any) {
@@ -2500,7 +2500,7 @@ export async function trashTicket(file: DocFile): Promise<void> {
 		const stillExists = await backend.read(file.path).then(() => true, () => false);
 		if (!stillExists) {
 			await clearActiveIfMatching().catch(() => {});
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 		}
 		return;
 	}
@@ -2556,20 +2556,20 @@ export async function trashTicket(file: DocFile): Promise<void> {
 			primaryTrashed = true;
 			retargetScopedFolder(folder, null);
 			await clearActiveIfMatching().catch(() => {});
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			notify(`Moved ${isLayout2 ? `${baseName(file.path)} and ` : ""}${relFolder}/ to the trash.`);
 		} else {
 			await backend.trash(file.path);
 			fileRemoved(file.path);
 			primaryTrashed = true;
 			await clearActiveIfMatching().catch(() => {});
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			notify(`Moved ${relativeTo(startRoot, file.path)} to the trash.`);
 		}
 	} catch (e: any) {
 		if (primaryTrashed) {
 			await clearActiveIfMatching().catch(() => {});
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 		}
 		notify(String(e?.message ?? e), "error");
 	}
@@ -2669,7 +2669,7 @@ export async function renameTicket(file: DocFile): Promise<void> {
 			}
 		}
 	} catch (e: any) {
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(String(e?.message ?? e), "error");
 		return;
 	}
@@ -2772,7 +2772,7 @@ export async function renameTicket(file: DocFile): Promise<void> {
 			}
 		}
 	}
-	setState("treeVersion", (v) => v + 1);
+	setState((s) => { s.treeVersion += 1; });
 	notify(`Renamed ${oldKey} to ${newKey}${refactored ? ` and updated ${refactored} referencing ${refactored === 1 ? "file" : "files"}` : ""}.`);
 }
 
@@ -2834,7 +2834,7 @@ export async function archiveTicket(file: DocFile): Promise<void> {
 			retargetScopedFolder(fromPrimary, toPrimary);
 		}
 	} catch (e: any) {
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(String(e?.message ?? e), "error");
 		return;
 	}
@@ -2848,7 +2848,7 @@ export async function archiveTicket(file: DocFile): Promise<void> {
 	if (file.ticket && state.settings.activeTicket?.trim().toLowerCase() === file.ticket.toLowerCase()) {
 		await saveSetting({ activeTicket: null }, "workspace").catch(() => {});
 	}
-	setState("treeVersion", (v) => v + 1);
+	setState((s) => { s.treeVersion += 1; });
 	try {
 		const coMoved = fromSibling && toSibling ? [{ from: fromSibling, to: toSibling }] : undefined;
 		await followRename(fromPrimary, toPrimary, beforeDocs, coMoved);
@@ -2920,7 +2920,7 @@ export async function unarchiveTicket(file: DocFile): Promise<void> {
 			retargetScopedFolder(fromPrimary, toPrimary);
 		}
 	} catch (e: any) {
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(String(e?.message ?? e), "error");
 		return;
 	}
@@ -2930,7 +2930,7 @@ export async function unarchiveTicket(file: DocFile): Promise<void> {
 	if (picked === RESTORE_ACTIVE) {
 		await setStatus(movedTicketPath, "in progress");
 	}
-	setState("treeVersion", (v) => v + 1);
+	setState((s) => { s.treeVersion += 1; });
 	try {
 		const coMoved = fromSibling && toSibling ? [{ from: fromSibling, to: toSibling }] : undefined;
 		await followRename(fromPrimary, toPrimary, beforeDocs, coMoved);
@@ -3124,7 +3124,7 @@ export async function appendNoteToTicket(key: string, noteMarkdown: string): Pro
 	const next = `${before}${sep}## Agent note (${today()})\n\n${noteMarkdown.trim()}\n`;
 	try {
 		await put(target.path, next, true);
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(`Appended note to ${target.ticket ?? target.name}.`);
 		await openFile(target.path);
 	} catch (e: any) {
@@ -3275,7 +3275,7 @@ export async function generateSchemaDocFromSql(sqlPath?: string, targetDocPath?:
 			}
 			try {
 				await put(dest, nextText, true);
-				setState("treeVersion", (v) => v + 1);
+				setState((s) => { s.treeVersion += 1; });
 				notify(`Updated ${baseName(dest)} with ${missingObjs.length} new SQL ${missingObjs.length === 1 ? "object" : "objects"} from ${baseName(sourcePath)}.`);
 				await openFile(dest);
 			} catch (e: any) {
@@ -3346,7 +3346,7 @@ export async function generateSchemaDocFromSql(sqlPath?: string, targetDocPath?:
 		}
 		try {
 			await put(dest, nextText, true);
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			void import("./docAudit").then((m) => m.refreshDocAudit());
 			const parts = [
 				merged.addedTables ? `${merged.addedTables} ${merged.addedTables === 1 ? "table" : "tables"} added` : "",
@@ -3465,7 +3465,7 @@ export async function generateSqlFromSchemaDoc(mdPath: string): Promise<void> {
 				if (updatedMd && updatedMd !== latestMd) await put(mdPath, updatedMd, true);
 			}
 		}
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		void import("./docAudit").then((m) => m.refreshDocAudit());
 		notify(`Generated ${baseName(dest)} (${finalGenerated.tables.join(", ")}) from ${baseName(mdPath)}.`);
 		await openFile(dest);
@@ -3483,7 +3483,7 @@ export async function unlinkSchemaDocSql(mdPath: string): Promise<void> {
 	if (next === cur) return;
 	try {
 		await put(mdPath, next, true);
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		void import("./docAudit").then((m) => m.refreshDocAudit());
 		notify(`Unlinked SQL source from ${baseName(mdPath)}.`);
 	} catch (e: any) {
@@ -3575,7 +3575,7 @@ export async function linkSchemaDocToSql(mdPath: string): Promise<void> {
 	if (!next || next === freshCur) return;
 	try {
 		await put(mdPath, next, true);
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		void import("./docAudit").then((m) => m.refreshDocAudit());
 		notify(`Linked ${baseName(mdPath)} to ${relSql}.`);
 	} catch (e: any) {
@@ -4105,7 +4105,7 @@ async function saveExportFile(
 				await backend.write(dest, payload);
 				if (documents.get(openKey)) await revert(openKey);
 			});
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			notify(`Saved export to ${relativeTo(startRoot, dest)}.`);
 			return true;
 		} catch (e: any) {
@@ -4411,7 +4411,7 @@ async function saveDocxExport(
 			...(options?.toc !== undefined ? { toc: options.toc } : {}),
 			headerFooter: options?.headerFooter ?? true,
 		});
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(`Saved Word document to ${relativeTo(state.workspace.root, res.path)}.`, "info", {
 			label: "Open externally",
 			run: () => void backend.openExternal(res.path),
@@ -5115,7 +5115,7 @@ export async function closeoutTicket(ticketPath: string, key: string): Promise<v
 		await saveSetting({ activeTicket: null }, "workspace").catch(() => {});
 	}
 
-	setState("treeVersion", (v) => v + 1);
+	setState((s) => { s.treeVersion += 1; });
 	// Respect ADR 0031: never auto-rewrite INDEX.md catalogs silently — check fresh backend docs and offer manual trigger if stale.
 	const freshDocs = await backend.docs().catch(() => docs());
 	const staleInfo = staleCatalogSummary(freshDocs);
@@ -5334,7 +5334,7 @@ export async function renameTagAcrossWorkspace(oldTag: string): Promise<void> {
 		}
 	}
 	if (changedCount) {
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(`Renamed #${cleanOld} to #${typed} in ${changedCount} ${changedCount === 1 ? "document" : "documents"}${failedCount ? ` (${failedCount} failed)` : ""}.`);
 	}
 }
@@ -5603,7 +5603,7 @@ export async function renameHeadingAcrossWorkspace(targetPath?: string, targetLi
 		}
 	}
 	if (written) {
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(
 			writtenRefs > 0
 				? `Renamed heading to “${typed}” and updated ${writtenRefs} ${writtenRefs === 1 ? "reference" : "references"} across ${written} ${written === 1 ? "file" : "files"}.`
@@ -6264,7 +6264,7 @@ export async function importLegacyDoc(
 			if (!res) return;
 		}
 		await syncImportedBuffer(res.path);
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		const imgNote = res.images.length ? ` (${res.images.length} ${res.images.length === 1 ? "image" : "images"} extracted)` : "";
 		notify(`Imported ${relativeTo(root(), res.path)} from ${res.kind.toUpperCase()}${imgNote}.`);
 		if (res.warnings?.length) {
@@ -6318,7 +6318,7 @@ export async function importDocxDrop(options: {
 			});
 		}
 		await syncImportedBuffer(res.path);
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		const imgNote = res.images.length ? ` (${res.images.length} ${res.images.length === 1 ? "image" : "images"} extracted)` : "";
 		notify(`Imported ${relativeTo(root(), res.path)}${imgNote}.`);
 		if (res.warnings?.length) {
@@ -6423,6 +6423,7 @@ export async function onboardBrownfieldWorkspace(): Promise<void> {
 	}
 
 	const created: string[] = [];
+	let docsAreaLabel = areaSaid("docs");
 	try {
 		if (needsSetup) {
 			const made = await backend.setupProject();
@@ -6430,7 +6431,11 @@ export async function onboardBrownfieldWorkspace(): Promise<void> {
 			created.push(...made);
 			const refreshed = await backend.project();
 			if (!state.workspace || root() !== wsRoot) return;
-			setState("project", refreshed);
+			setState((s) => {
+				s.project = refreshed;
+			});
+			const refreshedDocsFolder = joinPath(wsRoot, ...(refreshed.docs ?? "docs").split(/[\\/]/).filter((part) => part && part !== "."));
+			docsAreaLabel = relativeTo(wsRoot, refreshedDocsFolder).split("\\").join("/");
 		}
 
 		if (!hasDbCsv && sqlFiles.length) {
@@ -6464,9 +6469,9 @@ export async function onboardBrownfieldWorkspace(): Promise<void> {
 		}
 
 		if (!state.workspace || root() !== wsRoot) return;
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		const legacyNote = legacyMdFiles.length
-			? ` Found ${legacyMdFiles.length} legacy Markdown ${legacyMdFiles.length === 1 ? "doc" : "docs"} outside ${areaSaid("docs")}/ (${legacyMdFiles.slice(0, 4).join(", ")}${legacyMdFiles.length > 4 ? "…" : ""}).`
+			? ` Found ${legacyMdFiles.length} legacy Markdown ${legacyMdFiles.length === 1 ? "doc" : "docs"} outside ${docsAreaLabel}/ (${legacyMdFiles.slice(0, 4).join(", ")}${legacyMdFiles.length > 4 ? "…" : ""}).`
 			: "";
 		notify(
 			created.length
@@ -6697,7 +6702,7 @@ export async function recordDocApproval(targetPath?: string): Promise<void> {
 	});
 	try {
 		await put(docPath, after, true);
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(`Recorded approval on ${baseName(docPath)} (${nextVersion ? `v${nextVersion}, ` : ""}${approver}, ${approvalDate}).`);
 		await openFile(docPath);
 	} catch (e: any) {
@@ -7204,7 +7209,7 @@ export async function splitTicketSubticket(targetPath?: string): Promise<void> {
 		}
 		const nextParent = splitParentTicketChecklist(freshSrcText, removedSet, childKey, childTitle);
 		await put(srcDoc.path, nextParent, true);
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(`Split ${pickedItems.length} ${pickedItems.length === 1 ? "item" : "items"} from ${parentKey} into ${childKey}.`);
 		await openFile(childDest);
 	} catch (e: any) {
@@ -7231,7 +7236,7 @@ export async function addDatabaseRegistryRow(objectName: string, sourcePath: str
 		const fresh = `${csvRow(dbKind.columns)}\n${csvRow([cleanObj, "table", relSrc, "", "found", citeNote])}\n`;
 		try {
 			await put(dbPath, fresh, false);
-			setState("treeVersion", (v) => v + 1);
+			setState((s) => { s.treeVersion += 1; });
 			notify(`Created database.csv and added ${cleanObj}.`);
 		} catch (e: any) {
 			notify(String(e?.message ?? e), "error");
@@ -7267,7 +7272,7 @@ export async function addDatabaseRegistryRow(objectName: string, sourcePath: str
 	const nextText = `${existingText}${prefix}${csvRow(newRow, table.delimiter)}${nl}`;
 	try {
 		await put(dbPath, nextText, true);
-		setState("treeVersion", (v) => v + 1);
+		setState((s) => { s.treeVersion += 1; });
 		notify(`Added ${cleanObj} to database.csv (${relSrc}).`);
 	} catch (e: any) {
 		notify(String(e?.message ?? e), "error");

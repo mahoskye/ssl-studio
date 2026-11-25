@@ -17,6 +17,8 @@ const packages = [
 	"@lezer/markdown",
 	"@lezer/highlight",
 	"solid-js",
+	"@solidjs/web",
+	"@solidjs/signals",
 	"vscode-textmate",
 	"vscode-oniguruma",
 	"elkjs",

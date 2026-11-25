@@ -5,7 +5,8 @@
 // Plan (.plan.json) stages & steps + drag-to-chart SSL procedures, and
 // outlines for TOML / INI / JSON / SQL / YAML (shared/outline.ts).
 import { Icon, type IconName } from "../Icon";
-import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onSettled, Show } from "solid-js";
+import { createAsyncQuery } from "../asyncQuery";
 import { backend } from "../backend";
 import { activeLiveEditor, jumpToTableColumn, liveSelectionVersion, onSplitScrollSync } from "../editor/liveBridge";
 import { mdOutline } from "../editor/mdOutline";
@@ -123,10 +124,16 @@ const isActiveCsv = () => {
 
 export function useSymbols() {
 	let timer: ReturnType<typeof setTimeout> | undefined;
+	const deps = createMemo(
+		() => [activePath(), state.lsp.state, lspReadyEpoch(), state.kindVersion] as const,
+		{
+			equals: (a, b) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2] && a[3] === b[3],
+		},
+	);
 	createEffect(
-		on([activePath, () => state.lsp.state, lspReadyEpoch, () => state.kindVersion], () => {
+		() => deps(),
+		([path]) => {
 			clearTimeout(timer);
-			const path = activePath();
 			const doc = activeDoc();
 			setSymbols([]);
 			setMdSections([]);
@@ -145,8 +152,10 @@ export function useSymbols() {
 					clearTimeout(timer);
 					timer = setTimeout(readPlan, 250);
 				});
-				onCleanup(() => (clearTimeout(timer), sub.dispose()));
-				return;
+				return () => {
+					clearTimeout(timer);
+					sub.dispose();
+				};
 			}
 
 			if (isMarkdown(path)) {
@@ -161,8 +170,10 @@ export function useSymbols() {
 					clearTimeout(timer);
 					timer = setTimeout(readMd, 250);
 				});
-				onCleanup(() => (clearTimeout(timer), sub.dispose()));
-				return;
+				return () => {
+					clearTimeout(timer);
+					sub.dispose();
+				};
 			}
 
 			if (isTable(path) || doc.model.getLanguageId() === "csv") {
@@ -177,8 +188,10 @@ export function useSymbols() {
 					clearTimeout(timer);
 					timer = setTimeout(readCsv, 250);
 				});
-				onCleanup(() => (clearTimeout(timer), sub.dispose()));
-				return;
+				return () => {
+					clearTimeout(timer);
+					sub.dispose();
+				};
 			}
 
 			// A document that is not SSL is outlined here, from its own text: nothing is asked of the language server.
@@ -189,8 +202,10 @@ export function useSymbols() {
 					clearTimeout(timer);
 					timer = setTimeout(read, 300);
 				});
-				onCleanup(() => (clearTimeout(timer), sub.dispose()));
-				return;
+				return () => {
+					clearTimeout(timer);
+					sub.dispose();
+				};
 			}
 			if (doc.model.getLanguageId() !== "ssl") return;
 			let current = true;
@@ -217,12 +232,12 @@ export function useSymbols() {
 				clearTimeout(timer);
 				timer = setTimeout(load, 400);
 			});
-			onCleanup(() => {
+			return () => {
 				current = false;
 				clearTimeout(timer);
 				sub.dispose();
-			});
-		}),
+			};
+		},
 	);
 }
 
@@ -231,11 +246,11 @@ const PROCEDURE_KINDS = new Set([6, 12]);
 
 /** With a plan open: the workspace's procedures, to drag into the chart as calls. */
 function Procedures(props: { filter: string }) {
-	const [all] = createResource(
+	const [all] = createAsyncQuery(
 		() => {
 			const epoch = lspReadyEpoch();
 			const root = state.workspace?.root;
-			return state.lsp.state === "running" && epoch > 0 && root ? ([root, epoch] as const) : false;
+			return state.lsp.state === "running" && epoch > 0 && root ? `${root}\0${epoch}` : false;
 		},
 		() => session.workspaceSymbols("").then((list) => ({ list, error: "" }), (e) => ({ list: [], error: String(e?.message ?? e) })),
 	);
@@ -540,19 +555,38 @@ function MarkdownOutline(props: { filter?: string; compact?: boolean; label?: st
 	const [trackSource, setTrackSource] = createSignal<"cursor" | "scroll">("cursor");
 	const [sourceScrollLine, setSourceScrollLine] = createSignal<{ path: string; line: number } | null>(null);
 
-	createEffect(on(() => state.cursor.line, () => setTrackSource("cursor"), { defer: true }));
-	createEffect(on(() => liveSelectionVersion(), () => setTrackSource("cursor"), { defer: true }));
-	createEffect(on(() => mdOutline()?.activeId, () => setTrackSource("scroll"), { defer: true }));
-	createEffect(() => {
-		const unsub = onSplitScrollSync((payload) => {
+	const cursorLine = createMemo(() => state.cursor.line);
+	const mdActiveId = createMemo(() => mdOutline()?.activeId);
+	createEffect(
+		() => cursorLine(),
+		() => {
+			setTrackSource("cursor");
+		},
+		{ defer: true },
+	);
+	createEffect(
+		() => liveSelectionVersion(),
+		() => {
+			setTrackSource("cursor");
+		},
+		{ defer: true },
+	);
+	createEffect(
+		() => mdActiveId(),
+		() => {
+			setTrackSource("scroll");
+		},
+		{ defer: true },
+	);
+	onSettled(() =>
+		onSplitScrollSync((payload) => {
 			const p = activePath();
 			if (!p || !isMarkdown(p) || canonical(payload.path) !== canonical(p)) return;
 			if (markdownMode(p) !== "source") return;
 			setSourceScrollLine({ path: payload.path, line: payload.topLine });
 			setTrackSource("scroll");
-		});
-		onCleanup(unsub);
-	});
+		}),
+	);
 
 	const toggle = (key: string) =>
 		setOutlineClosed((set) => {
@@ -629,7 +663,9 @@ function MarkdownOutline(props: { filter?: string; compact?: boolean; label?: st
 		if (live && canonical(live.path) === canonical(path)) {
 			live.reveal({ line: newLine, column: 1 });
 		} else {
-			setState("cursor", { line: newLine, column: 1 });
+			setState((s) => {
+				s.cursor = { line: newLine, column: 1 };
+			});
 			if (markdownMode(path) === "source") void openFile(path, { reveal: { line: newLine, column: 1 } });
 		}
 	};
@@ -990,7 +1026,9 @@ function PlanOutline(props: { filter?: string; compact?: boolean; label?: string
 	const jumpToLine = (line: number) => {
 		const path = activePath();
 		if (!path) return;
-		setState("cursor", { line, column: 1 });
+		setState((s) => {
+			s.cursor = { line, column: 1 };
+		});
 		void openFile(path, { reveal: { line, column: 1 } });
 	};
 
@@ -1230,9 +1268,11 @@ export function Objects() {
 	let mdInfoTabEl: HTMLButtonElement | undefined;
 	let mdOutlineTabEl: HTMLButtonElement | undefined;
 
+	const currentActivePath = createMemo(() => activePath());
 	// Default to Info for Markdown files with frontmatter or ticket metadata when user hasn't pinned a preference yet.
 	createEffect(
-		on(activePath, (p) => {
+		() => currentActivePath(),
+		(p) => {
 			if (!p || !isMarkdown(p) || hasSavedMarkdownTab()) return;
 			const key = canonical(p);
 			if (key === lastAutoDefaultMdPath) return;
@@ -1241,16 +1281,17 @@ export function Objects() {
 			const hasFm = Boolean(d && !d.binary && frontMatter(d.model.getValue()).lines > 0);
 			const isTicketDoc = docs().some((f) => f.group === "tickets" && f.ticket && canonical(f.path) === key);
 			setActiveMarkdownTab(defaultMarkdownPanelTab(hasFm || isTicketDoc, null));
-		}),
+		},
 	);
 
 	// Honor explicit tab-switch requests from the Markdown editor (Info / Links / Edit YAML).
 	createEffect(
-		on(markdownPanelTabRequest, (req) => {
+		() => markdownPanelTabRequest(),
+		(req) => {
 			if (!req || req.seq <= lastHandledMdTabReqSeq) return;
 			lastHandledMdTabReqSeq = req.seq;
 			setActiveMarkdownTab(req.tab);
-		}),
+		},
 	);
 
 	const mdBrokenCount = createMemo(() => {
@@ -1305,8 +1346,8 @@ export function Objects() {
 						ref={mdInfoTabEl}
 						type="button"
 						role="tab"
-						aria-selected={mdTab() === "info"}
-						classList={{ on: mdTab() === "info" }}
+						aria-selected={mdTab() === "info" ? "true" : "false"}
+						class={{ on: mdTab() === "info" }}
 						onClick={() => chooseMarkdownPanelTab("info")}
 					>
 						<span>Info</span>
@@ -1322,8 +1363,8 @@ export function Objects() {
 						ref={mdOutlineTabEl}
 						type="button"
 						role="tab"
-						aria-selected={mdTab() === "outline"}
-						classList={{ on: mdTab() === "outline" }}
+						aria-selected={mdTab() === "outline" ? "true" : "false"}
+						class={{ on: mdTab() === "outline" }}
 						onClick={() => chooseMarkdownPanelTab("outline")}
 					>
 						Outline
@@ -1340,8 +1381,8 @@ export function Objects() {
 					<button
 						type="button"
 						role="tab"
-						aria-selected={planTab() === "outline"}
-						classList={{ on: planTab() === "outline" }}
+						aria-selected={planTab() === "outline" ? "true" : "false"}
+						class={{ on: planTab() === "outline" }}
 						onClick={() => setPlanTab("outline")}
 					>
 						Plan Outline
@@ -1349,8 +1390,8 @@ export function Objects() {
 					<button
 						type="button"
 						role="tab"
-						aria-selected={planTab() === "procedures"}
-						classList={{ on: planTab() === "procedures" }}
+						aria-selected={planTab() === "procedures" ? "true" : "false"}
+						class={{ on: planTab() === "procedures" }}
 						onClick={() => setPlanTab("procedures")}
 					>
 						SSL Procedures

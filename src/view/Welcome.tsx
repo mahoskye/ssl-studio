@@ -1,5 +1,6 @@
 // Shown until a folder is open.
-import { createResource, For, Show } from "solid-js";
+import { For, Show } from "solid-js";
+import { createAsyncQuery } from "./asyncQuery";
 import { backend, inApp } from "./backend";
 import { ask } from "./dialogs";
 import { canonical, openFolder, setState, state } from "./state";
@@ -21,13 +22,13 @@ const ALSO: readonly (readonly [id: string, label: string])[] = [
 ];
 
 export function Welcome() {
-	const [recent] = createResource(
+	const [recent] = createAsyncQuery(
 		() => state.workspace?.root ?? "",
 		() => backend.recent().catch(() => [] as string[]),
 	);
 	// commands.ts imports the editors, so it is loaded here when it is needed, not at the top.
 	const commandsPromise = import("./commands").catch(() => null);
-	const [loaded] = createResource(() => commandsPromise);
+	const [loaded] = createAsyncQuery(() => commandsPromise);
 	const keys = (id: string) => loaded()?.keysFor(id) ?? "";
 	const runAlso = async (id: string) => {
 		const mod = loaded() ?? (await commandsPromise);
@@ -50,7 +51,7 @@ export function Welcome() {
 					<kbd>{keys("open-folder")}</kbd>
 				</Show>
 				<Show when={state.workspace}>
-					<button onClick={() => setState("centerView", "editors")}>
+					<button onClick={() => setState((s) => { s.centerView = "editors"; })}>
 						Return to {state.workspace!.name}
 					</button>
 				</Show>
@@ -65,7 +66,10 @@ export function Welcome() {
 								<li>
 									<button
 										title={current() ? `Return to ${path}` : `Open ${path}`}
-										onClick={() => (current() ? setState("centerView", "editors") : void openFolder(path))}
+										onClick={() => {
+											if (current()) setState((s) => { s.centerView = "editors"; });
+											else void openFolder(path);
+										}}
 									>
 										<FileMark name={path} folder={{ open: current() }} />
 										<span class="recent-name">{baseName(path)}</span>

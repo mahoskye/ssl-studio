@@ -2,7 +2,8 @@
 // the snippets the project keeps in its knowledge base (ADR 0012), inserted
 // as they are written. When a plan chart is open, Palette switches cleanly to
 // business-analyst process shapes and stage navigation (ADR 0027).
-import { createEffect, createMemo, createResource, createSignal, For, on, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
+import { createAsyncQuery } from "../asyncQuery";
 import { snippetAsText, TEMPLATES, type Template } from "../../shared/houseStyle";
 import { CALLOUT_PRESETS } from "../../shared/markdownEdit";
 import { createEmptyTable } from "../../shared/markdownTables";
@@ -351,7 +352,7 @@ export function Palette() {
 		const path = activePath();
 		return path && isMarkdown(path) ? path : null;
 	};
-	const [mdTemplates] = createResource(
+	const [mdTemplates] = createAsyncQuery(
 		() => (activeMdPath() ? ([state.workspace?.root ?? "", state.treeVersion, state.settings.templatesFolder ?? ""] as const) : null),
 		() => loadMarkdownTemplates(),
 	);
@@ -501,23 +502,24 @@ export function Palette() {
 		setPlanTabSignal(tab);
 		setActivePlanTab(tab);
 	};
-	createEffect(() => {
-		const req = planPaletteTabRequest();
-		if (!req || req.seq <= lastHandledPlanTabSeq) return;
-		lastHandledPlanTabSeq = req.seq;
-		setPlanTab(req.tab);
-	});
 	createEffect(
-		on(
-			() => state.workspace?.root,
-			() => {
-				asked = "";
-				askedMdSnippet = "";
-				setShown(null);
-				setShownMd(null);
-			},
-			{ defer: true },
-		),
+		() => planPaletteTabRequest(),
+		(req) => {
+			if (!req || req.seq <= lastHandledPlanTabSeq) return;
+			lastHandledPlanTabSeq = req.seq;
+			setPlanTab(req.tab);
+		},
+	);
+	const wsRoot = createMemo(() => state.workspace?.root);
+	createEffect(
+		() => wsRoot(),
+		() => {
+			asked = "";
+			askedMdSnippet = "";
+			setShown(null);
+			setShownMd(null);
+		},
+		{ defer: true },
 	);
 	const commitOnEnter = (e: KeyboardEvent) => {
 		if (e.key === "Enter" && !e.shiftKey) {
@@ -529,27 +531,38 @@ export function Palette() {
 		el.style.height = "auto";
 		el.style.height = `${Math.min(200, Math.max(36, el.scrollHeight + 2))}px`;
 	};
-	const bindAutoTextarea = (value?: () => string) => (el: HTMLTextAreaElement) => {
-		const refit = () => fitTextarea(el);
-		queueMicrotask(refit);
+	const bindAutoTextarea = (value?: () => string) => {
+		let el: HTMLTextAreaElement | undefined;
+		let ro: ResizeObserver | undefined;
+		const refit = () => {
+			if (el) fitTextarea(el);
+		};
 		if (value) {
-			createEffect(() => {
-				value();
-				queueMicrotask(refit);
-			});
+			createEffect(
+				() => value(),
+				() => {
+					queueMicrotask(refit);
+				},
+			);
 		}
-		if (typeof ResizeObserver !== "undefined") {
-			let lastWidth = -1;
-			const ro = new ResizeObserver((entries) => {
-				const w = Math.round(entries[0]?.contentRect.width ?? 0);
-				if (w > 0 && w !== lastWidth) {
-					lastWidth = w;
-					refit();
-				}
-			});
-			ro.observe(el);
-			onCleanup(() => ro.disconnect());
-		}
+		onCleanup(() => ro?.disconnect());
+		return (nextEl: HTMLTextAreaElement) => {
+			el = nextEl;
+			ro?.disconnect();
+			ro = undefined;
+			queueMicrotask(refit);
+			if (typeof ResizeObserver !== "undefined") {
+				let lastWidth = -1;
+				ro = new ResizeObserver((entries) => {
+					const w = Math.round(entries[0]?.contentRect.width ?? 0);
+					if (w > 0 && w !== lastWidth) {
+						lastWidth = w;
+						refit();
+					}
+				});
+				ro.observe(nextEl);
+			}
+		};
 	};
 	const showTemplate = (t: Template) => void setShown({ label: t.label, note: t.note, text: snippetAsText(t.body()) });
 	/** A snippet's text is read when it is pointed at: the row asked for last is the one shown. */
@@ -1008,8 +1021,8 @@ export function Palette() {
 										<button
 											type="button"
 											role="tab"
-											aria-selected={planTab() === "design"}
-											classList={{ on: planTab() === "design" }}
+											aria-selected={planTab() === "design" ? "true" : "false"}
+											class={{ on: planTab() === "design" }}
 											onClick={() => setPlanTab("design")}
 										>
 											Design
@@ -1017,8 +1030,8 @@ export function Palette() {
 										<button
 											type="button"
 											role="tab"
-											aria-selected={planTab() === "assistant"}
-											classList={{ on: planTab() === "assistant" }}
+											aria-selected={planTab() === "assistant" ? "true" : "false"}
+											class={{ on: planTab() === "assistant" }}
 											onClick={() => setPlanTab("assistant")}
 										>
 											<span>Assistant</span>
@@ -1042,22 +1055,23 @@ export function Palette() {
 												const threshold = Math.max(24, shapeGridEl.offsetTop + 26);
 												setShapesScrolled(scrollEl.scrollTop > threshold);
 											};
-											createEffect(() => {
-												plan.selectedId();
-												setSelectedShapesExpanded(false);
-												setDocPickerOpen(false);
-												setDocPickerQuery("");
-												setDocPickerIdx(0);
-												queueMicrotask(syncDock);
-											});
-											createEffect(() => {
-												shapesCollapsed();
-												nodeImplOpen();
-												planImplOpen();
-												nodeTestsOpen();
-												planTestsOpen();
-												queueMicrotask(syncDock);
-											});
+											const selectedId = createMemo(() => plan.selectedId());
+											createEffect(
+												() => selectedId(),
+												() => {
+													setSelectedShapesExpanded(false);
+													setDocPickerOpen(false);
+													setDocPickerQuery("");
+													setDocPickerIdx(0);
+													queueMicrotask(syncDock);
+												},
+											);
+											createEffect(
+												() => [shapesCollapsed(), nodeImplOpen(), planImplOpen(), nodeTestsOpen(), planTestsOpen()] as const,
+												() => {
+													queueMicrotask(syncDock);
+												},
+											);
 											const startShapeDrag = (e: DragEvent, shape: PlanShapeItem) => {
 												if (!shape.dragKind) return;
 												e.dataTransfer?.setData(SHAPE_DRAG, shape.dragKind);
@@ -1076,22 +1090,20 @@ export function Palette() {
 													scrollEl?.scrollTo({ top: 0, behavior: "smooth" });
 												}
 											};
-											const renderRail = (className: string, visible: boolean) => (
+											const renderRail = (className: string, visible: () => boolean) => (
 												<div
-													class={className}
-													classList={{ visible }}
+													class={[className, { visible: visible() }]}
 													role="toolbar"
 													aria-label="Process shapes"
-													aria-hidden={!visible}
+													aria-hidden={visible() ? "false" : "true"}
 												>
 													<For each={PLAN_SHAPES}>
 														{(shape) => (
 															<button
 																type="button"
-																class="plan-dock-btn"
-																classList={{ active: Boolean(shape.active?.(plan)) }}
-																tabIndex={visible ? 0 : -1}
-																draggable={Boolean(shape.dragKind)}
+																class={["plan-dock-btn", { active: Boolean(shape.active?.(plan)) }]}
+																tabindex={visible() ? 0 : -1}
+																draggable={shape.dragKind ? "true" : "false"}
 																onDragStart={(e) => startShapeDrag(e, shape)}
 																onClick={() => shape.run(plan)}
 																title={`${shape.label}: ${shape.about}`}
@@ -1104,7 +1116,7 @@ export function Palette() {
 													<button
 														type="button"
 														class="plan-rail-toggle"
-														tabIndex={visible ? 0 : -1}
+														tabindex={visible() ? 0 : -1}
 														onClick={expandFromRail}
 														title="Expand process shapes"
 														aria-label="Expand process shapes"
@@ -1116,10 +1128,10 @@ export function Palette() {
 											return (
 												<div class="plan-palette-wrap">
 													{/* Top icon rail: shown directly when collapsed (auto on selected step, or manually collapsed). */}
-													<Show when={shapesCollapsed()}>{renderRail("plan-shape-rail", true)}</Show>
+													<Show when={shapesCollapsed()}>{renderRail("plan-shape-rail", () => true)}</Show>
 
 													{/* Scroll-triggered top icon rail when Process shapes is expanded and scrolled out of view. */}
-													<Show when={!shapesCollapsed()}>{renderRail("plan-shape-dock", shapesScrolled())}</Show>
+													<Show when={!shapesCollapsed()}>{renderRail("plan-shape-dock", shapesScrolled)}</Show>
 
 													<div class="plan-palette-scroll" ref={scrollEl} onScroll={syncDock}>
 														{/* Full Process shapes grid when expanded; manually collapsible to top rail. */}
@@ -1143,12 +1155,14 @@ export function Palette() {
 																		{(shape) => (
 																			<button
 																				type="button"
-																				class="plan-shape-tile"
-																				classList={{
-																					active: Boolean(shape.active?.(plan)),
-																					wide: shape.id === "plan-connect",
-																				}}
-																				draggable={Boolean(shape.dragKind)}
+																				class={[
+																					"plan-shape-tile",
+																					{
+																						active: Boolean(shape.active?.(plan)),
+																						wide: shape.id === "plan-connect",
+																					},
+																				]}
+																				draggable={shape.dragKind ? "true" : "false"}
 																				onDragStart={(e) => startShapeDrag(e, shape)}
 																				onClick={() => shape.run(plan)}
 																				onMouseEnter={() => setPlanNote(shape.about)}
@@ -1442,8 +1456,8 @@ export function Palette() {
 																						{(k) => (
 																							<button
 																								type="button"
-																								classList={{ on: displayKind === k }}
-																								aria-pressed={displayKind === k}
+																								class={{ on: displayKind === k }}
+																								aria-pressed={displayKind === k ? "true" : "false"}
 																								onClick={() => plan.setNodeKind(k)}
 																							>
 																								{k === "step" ? "Step" : "Decision"}
@@ -1493,7 +1507,7 @@ export function Palette() {
 																							ref={addDocBtn}
 																							type="button"
 																							class="plan-node-doc-add"
-																							aria-expanded={docPickerOpen()}
+																							aria-expanded={docPickerOpen() ? "true" : "false"}
 																							title="Link a decision, question, reference, snippet, spec, schema, registry, or ticket to this step"
 																							onClick={() => {
 																								setDocPickerOpen((o) => !o);
@@ -1508,7 +1522,7 @@ export function Palette() {
 																						<div class="plan-node-doc-chips">
 																							<For each={linkedDocs()}>
 																								{(item) => (
-																									<span class="plan-node-doc-chip" classList={{ missing: !item.doc }}>
+																									<span class={["plan-node-doc-chip", { missing: !item.doc }]}>
 																										<button
 																											type="button"
 																											class="plan-node-doc-open"
@@ -1583,9 +1597,8 @@ export function Palette() {
 																												<button
 																													type="button"
 																													role="option"
-																													aria-selected={docPickerIdx() === i()}
-																													class="plan-doc-picker-item"
-																													classList={{ active: docPickerIdx() === i() }}
+																													aria-selected={docPickerIdx() === i() ? "true" : "false"}
+																													class={["plan-doc-picker-item", { active: docPickerIdx() === i() }]}
 																													title={docRelPath(doc)}
 																													onMouseEnter={() => setDocPickerIdx(i())}
 																													onClick={() => linkDoc(doc)}

@@ -1,7 +1,8 @@
 // Built-in functions, classes and keywords from the language server's
 // bundled reference, read through completion and hover on a scratch document.
-import { createEffect, createMemo, createResource, createSignal, For, on, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import type { DocFile } from "../../shared/protocol";
+import { createAsyncQuery } from "../asyncQuery";
 import { Icon } from "../Icon";
 import { monaco } from "../editor/monaco";
 import { activeEditor } from "../editor/EditorGroup";
@@ -119,12 +120,13 @@ export const describeElement = (name: string, root: string) => describe({ label:
 export function Reference() {
 	const [filter, setFilter] = createSignal("");
 	const [open, setOpen] = createSignal<Entry | null>(null);
+	const wsRoot = createMemo(() => state.workspace?.root);
 	createEffect(
-		on(
-			() => state.workspace?.root,
-			() => setOpen(null),
-			{ defer: true },
-		),
+		() => wsRoot(),
+		() => {
+			setOpen(null);
+		},
+		{ defer: true },
 	);
 	const [detailH, setDetailH] = createSignal(clampReferenceHeight(recall("reference.detail.h"), 100, 520, 220));
 	const resizeDetail = (delta: number) => {
@@ -136,7 +138,7 @@ export function Reference() {
 		setDetailH(220);
 		remember("reference.detail.h", "220");
 	};
-	const [reference, { refetch }] = createResource(
+	const [reference, { refetch }] = createAsyncQuery(
 		() => {
 			const epoch = lspReadyEpoch();
 			const root = state.workspace?.root;
@@ -145,7 +147,7 @@ export function Reference() {
 		([root]) => loadReference(root).then((entries) => ({ entries, error: "" }), (e) => ({ entries: [] as Entry[], error: String(e?.message ?? e) })),
 	);
 	const entries = () => reference()?.entries ?? [];
-	const [details] = createResource(
+	const [details] = createAsyncQuery(
 		() => {
 			const cur = open();
 			const root = state.workspace?.root;

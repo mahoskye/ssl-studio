@@ -16,21 +16,22 @@
     "@lezer/highlight": "1.2.5",
     "@lezer/markdown": "1.8.1",
     "@prettier/plugin-xml": "3.4.2",
+    "@solidjs/web": "2.0.3",
     "dompurify": "3.5.0",
     "elkjs": "0.12.1",
     "marked": "18.3.0",
     "monaco-editor": "0.58.0",
     "prettier": "3.10.1",
-    "solid-js": "1.9.17",
+    "solid-js": "2.0.3",
     "sql-formatter": "15.10.0",
     "vscode-oniguruma": "2.0.1",
     "vscode-textmate": "9.3.2",
     "mermaid": "12.3.0"
   },
   "devDependencies": {
+    "@solidjs/vite-plugin": "3.0.1",
     "@types/bun": "1.4.5",
     "typescript": "7.0.2",
-    "vite": "8.3.8",
-    "vite-plugin-solid": "2.11.17"
+    "vite": "8.3.8"
   }
 }

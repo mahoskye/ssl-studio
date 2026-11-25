@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { flush } from "solid-js";
 import { frontMatter } from "../src/shared/frontMatter";
 import { validateFrontmatterProperty } from "../src/view/editor/markdownHtml";
 import {
@@ -54,9 +55,11 @@ describe("Markdown inspector bridge request signals", () => {
 		});
 
 		chooseMarkdownPanelTab("outline");
+		flush();
 		expect(activeMarkdownTab()).toBe("outline");
 
 		requestMarkdownInspector("links");
+		flush();
 		const first = markdownPanelTabRequest();
 		expect(activeMarkdownTab()).toBe("info");
 		expect(first?.tab).toBe("info");
@@ -64,6 +67,7 @@ describe("Markdown inspector bridge request signals", () => {
 		expect(openCalls).toBe(1);
 
 		requestMarkdownInspector("yaml");
+		flush();
 		const second = markdownPanelTabRequest();
 		expect(second?.tab).toBe("info");
 		expect(second?.focus).toBe("yaml");
@@ -71,16 +75,20 @@ describe("Markdown inspector bridge request signals", () => {
 		expect(openCalls).toBe(2);
 
 		requestMarkdownPanelTab("outline");
+		flush();
 		expect(activeMarkdownTab()).toBe("outline");
 		expect(markdownPanelTabRequest()?.tab).toBe("outline");
 		expect(openCalls).toBe(3);
 
 		setMarkdownYamlEditorOpen(true);
+		flush();
 		expect(markdownYamlEditorOpen()).toBe(true);
 		setMarkdownYamlEditorOpen(false);
+		flush();
 		expect(markdownYamlEditorOpen()).toBe(false);
 
 		setMarkdownLinksSummary({ path: "/ws/docs/a.md", backlinks: 2, outgoing: 3, unlinked: 1, broken: 1, total: 6 });
+		flush();
 		expect(markdownLinksSummary()?.total).toBe(6);
 		expect(markdownLinksSummary()?.broken).toBe(1);
 	});

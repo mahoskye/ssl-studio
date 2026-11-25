@@ -2,7 +2,7 @@
 // through the ones before that. The order is kept for each editor group;
 // while Ctrl is held the tabs that pass by are looked at, not used, and the
 // one that is showing when Ctrl is let go is the one that was gone to.
-import { batch } from "solid-js";
+import { snapshot } from "solid-js";
 import { ofOpen, stepped, used, walkHolds } from "../shared/tabOrder";
 import { focusEditor, pathChanges, revealSignal, setState, state } from "./state";
 
@@ -76,15 +76,16 @@ function settle() {
 	const { group } = stepping;
 	stepping = null;
 	// The tab showing when the key is let go is the one that was gone to, however it came to show.
-	const showing = state.groups[group]?.active;
+	const showing = snapshot(state).groups[group]?.active;
 	if (showing) tabShown(group, showing);
 }
 
 /** To the tab used before this one (`by` 1), or the other way round the order (`by` -1). */
 export function stepRecent(by: 1 | -1, hold?: boolean) {
 	ensureSubscribed();
-	const index = state.activeGroup;
-	const group = state.groups[index];
+	const cur = snapshot(state);
+	const index = cur.activeGroup;
+	const group = cur.groups[index];
 	if (!group?.active) return;
 	// A walk that a closed tab, or a tab shown some other way, has overtaken is over: this step starts from what shows now.
 	if (!stepping || stepping.group !== index || !walkHolds(stepping.order, stepping.at, group.tabs, group.active)) {
@@ -94,10 +95,11 @@ export function stepRecent(by: 1 | -1, hold?: boolean) {
 	if (!next) return void (stepping = null);
 	stepping.at = next.at;
 	// Activate the already-open tab synchronously so rapid Ctrl+Tab steps advance A -> B -> C without racing async openFile.
-	batch(() => {
-		setState("groups", index, "active", next.path);
-		if (state.centerView !== "editors") setState("centerView", "editors");
-		if (state.bottomMaximized) setState("bottomMaximized", false);
+	setState((s) => {
+		const g = s.groups[index];
+		if (g) g.active = next.path;
+		if (s.centerView !== "editors") s.centerView = "editors";
+		if (s.bottomMaximized) s.bottomMaximized = false;
 	});
 	revealSignal.fire(next.path);
 	focusEditor();
