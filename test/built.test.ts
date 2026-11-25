@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { planHash, unaccounted, specPrompt, type SpecUnit } from "../src/view/plan/assist";
-import { assembleScript, newRun, nextUnit, nodeStatuses, procedureSpans, procedureText, reviewPrompt, unbuiltNodes, unitPrompt, type BuildRun, type BuildUnit } from "../src/view/plan/build";
-import { anyChanges, builtOf, changesSince, changeText, chartChanges, classifyUnits, driftFindings, driftOf, nodePrint, pathLine, pathsMissing, planPaths, recordBuilt, recordTests, revisionText, settleBuilt, settledNodes, testsPrompt, unitsOfNode, type Reading } from "../src/view/plan/built";
+import { assembleScript, newRun, nextUnit, nodeStatuses, procedureBodySpan, procedureSpans, procedureText, reviewPrompt, scriptEntrySpan, unbuiltNodes, unitPrompt, type BuildRun, type BuildUnit } from "../src/view/plan/build";
+import { anyChanges, builtOf, changesSince, changeText, chartChanges, classifyUnits, driftFindings, driftOf, journeyBreakdown, journeyDraft, journeyOptionLabel, nodeCodeDetails, nodePrint, nodeTestContext, pathLine, pathsForNode, pathsMissing, planPaths, recordBuilt, recordTests, revisionText, settleBuilt, settledNodes, testsPrompt, unitsOfNode, type Reading } from "../src/view/plan/built";
 import { checkPlan, parsePlan, printPlan, setText, type Plan } from "../src/view/plan/model";
 
 const plan = (): Plan => ({
@@ -340,5 +340,147 @@ describe("paths through the chart", () => {
 	test("the tests' file is remembered against the chart it was written from", () => {
 		const p = recordTests(built(), "Sample/ReleaseTests.ssl");
 		expect(builtOf(p)!.tests).toEqual({ script: "Sample/ReleaseTests.ssl", hash: planHash(plan()) });
+	});
+	test("pathsForNode finds paths covering a decision with outgoing branch labels, milestone summaries, and sibling steps", () => {
+		const p = plan();
+		const res = pathsForNode(p, "n3");
+		expect(res.total).toBe(2);
+		expect(res.matches.map((m) => ({ index: m.index, branchOut: m.branchOut }))).toEqual([
+			{ index: 1, branchOut: "yes" },
+			{ index: 2, branchOut: "no" },
+		]);
+		expect(res.matches[0]!.siblingIds).toEqual(["n2", "n4", "n5", "n6"]);
+		expect(res.matches[1]!.siblingIds).toEqual(["n2", "n6"]);
+		expect(res.coTestedIds).toEqual(["n2", "n4", "n5", "n6"]);
+		// Milestone-based plain-English summaries instead of raw "yes / no" chains.
+		expect(res.matches[0]!.summary).toBe("Mark released · Return");
+		expect(res.matches[1]!.summary).toBe("Usable? (no) · Return");
+		expect(res.matches[0]!.story).toContain("Usable? -> yes: Mark released");
+		// A step only on the yes branch matches only Path 1.
+		const markRes = pathsForNode(p, "n4");
+		expect(markRes.matches.map((m) => m.index)).toEqual([1]);
+		expect(markRes.matches[0]!.siblingIds).toContain("n5");
+		// Custom business test cases on the plan are included in testsPrompt (including linked journey and notes).
+		const withCase: Plan = {
+			...p,
+			tests: [{ id: "t1", title: "Already released sample", node: "n4", journey: 1, given: "Sample already Released", expect: "Skips duplicate release", notes: "Verify audit row unchanged" }],
+		};
+		const prompt = testsPrompt(withCase, "ReleaseTests.ssl", planPaths(withCase).paths, [{ name: "Mark", callAs: "Sample.Release.Mark", text: "CODE" }], "SPEC");
+		expect(prompt).toContain("Already released sample");
+		expect(prompt).toContain("(Path 1)");
+		expect(prompt).toContain("Skips duplicate release");
+		expect(prompt).toContain("Notes: Verify audit row unchanged");
+	});
+	test("nodeTestContext extracts invariant prerequisites, governing branches, and reachable outcomes", () => {
+		const p = plan();
+		// Step behind a decision: requires Usable? = yes, ends at Return.
+		const markCtx = nodeTestContext(p, "n4");
+		expect(markCtx.requires).toEqual([{ nodeId: "n3", text: "Usable?", label: "yes" }]);
+		expect(markCtx.branchDecision).toBeNull();
+		expect(markCtx.outcomes).toEqual([{ nodeId: "n6", text: "Return", count: 1, pathIndices: [0] }]);
+
+		// Step immediately before a decision: no prerequisites, next check is Usable? with yes/no counts.
+		const checkCtx = nodeTestContext(p, "n2");
+		expect(checkCtx.requires).toEqual([]);
+		expect(checkCtx.branchDecision).toEqual({ nodeId: "n3", text: "Usable?", isSelf: false });
+		expect(checkCtx.branches).toEqual([
+			{ label: "yes", targetId: "n4", targetText: "Mark released", count: 1, pathIndices: [0] },
+			{ label: "no", targetId: "n6", targetText: "Return", count: 1, pathIndices: [1] },
+		]);
+
+		// Decision itself: isSelf true with outgoing branch filters.
+		const decCtx = nodeTestContext(p, "n3");
+		expect(decCtx.branchDecision).toEqual({ nodeId: "n3", text: "Usable?", isSelf: true });
+		expect(decCtx.branches.map((b) => [b.label, b.count])).toEqual([["yes", 1], ["no", 1]]);
+
+		// Loop exit prerequisite: when a loop returns to n3 and exits via no to n6, n6 always requires n3 = no,
+		// and a step looping back to n3 (n5 -> n3) does not report the loop header as a fresh "next check".
+		const looped: Plan = { ...p, edges: [...p.edges.filter((e) => e.from !== "n5"), { from: "n5", to: "n3" }] };
+		const endCtx = nodeTestContext(looped, "n6");
+		expect(endCtx.requires).toEqual([{ nodeId: "n3", text: "Usable?", label: "no" }]);
+		expect(nodeTestContext(looped, "n5").branchDecision).toBeNull();
+	});
+	test("journeyBreakdown builds a structured stage-aware timeline and journeyDraft formats readable multi-line Given bullets", () => {
+		const p = plan();
+		const { paths } = planPaths(p);
+		const bd = journeyBreakdown(p, paths[0]!);
+		expect(bd.outcome).toBe("Return");
+		expect(bd.items).toEqual([
+			{ nodeId: "n3", context: "Check the id", question: "Usable?", answer: "yes", targetId: "n4", result: "Mark released" },
+		]);
+
+		// Loop path omits the duplicate second-visit loop exit and flags loop gate cleanly.
+		const looped: Plan = { ...p, edges: [...p.edges.filter((e) => e.from !== "n5"), { from: "n5", to: "n3" }] };
+		const loopPaths = planPaths(looped).paths;
+		const loopBd = journeyBreakdown(looped, loopPaths[0]!);
+		expect(loopBd.items.length).toBe(1);
+		expect(loopBd.items[0]!.isLoopGate).toBe(true);
+
+		// Draft produces multi-line "- ..." Given lines and compact option label.
+		const draft = journeyDraft(p, paths[0]!, paths, 0, "n4");
+		expect(draft.journey).toBe(1);
+		expect(draft.node).toBe("n4");
+		expect(draft.given).toBe("- Check the id (Usable?): yes");
+		expect(draft.expect).toBe("Return");
+		expect(journeyOptionLabel(paths[0]!, paths, p, 0)).toContain("#1");
+	});
+});
+
+describe("nodeCodeDetails (developer drill-down)", () => {
+	test("summarizes implementing functions, scripts, shared step count, and deduplicated calls for steps and decisions", () => {
+		const p = built();
+		const decision = p.nodes.find((n) => n.id === "n3")!;
+		const decisionDetails = nodeCodeDetails(p, decision);
+		expect(decisionDetails.units.map((u) => u.name)).toEqual(["Release"]);
+		expect(decisionDetails.scripts).toEqual(["Sample/Release.ssl"]);
+		expect(decisionDetails.primaryRef).toBeNull();
+		expect(decisionDetails.calls).toEqual(["Mark", "Notify"]);
+		expect(decisionDetails.sharedCount).toBeGreaterThanOrEqual(1);
+
+		// A step with a linked ref places its own ref first in calls, deduplicated against unit calls.
+		const refNode = p.nodes.find((n) => n.id === "n2")!;
+		const refDetails = nodeCodeDetails(p, refNode);
+		expect(refDetails.units.map((u) => u.name)).toEqual(["Release"]);
+		expect(refDetails.primaryRef).toBe("Regions.IsUsableId");
+		expect(refDetails.calls[0]).toBe("Regions.IsUsableId");
+		expect(refDetails.calls).toContain("Mark");
+	});
+
+	test("handles unbuilt nodes with or without an explicit linked function ref", () => {
+		const p = plan();
+		const refOnly = nodeCodeDetails(p, p.nodes.find((n) => n.id === "n2")!);
+		expect(refOnly.units).toEqual([]);
+		expect(refOnly.primaryRef).toBe("Regions.IsUsableId");
+		expect(refOnly.calls).toEqual(["Regions.IsUsableId"]);
+
+		const bareStep = nodeCodeDetails(p, p.nodes.find((n) => n.id === "n4")!);
+		expect(bareStep.units).toEqual([]);
+		expect(bareStep.primaryRef).toBeNull();
+		expect(bareStep.calls).toEqual([]);
+		expect(bareStep.sharedCount).toBe(0);
+	});
+
+	test("procedureBodySpan returns exact procedure lines without leading docblock, and scriptEntrySpan skips the file banner", () => {
+		const nodes = [
+			{ kind: "banner", range: { start: { line: 0 }, end: { line: 14 } } },
+			{ kind: "blankLines", range: { start: { line: 15 }, end: { line: 15 } } },
+			{ kind: "parameters", range: { start: { line: 16 }, end: { line: 16 } } },
+			{ kind: "try", range: { start: { line: 30 }, end: { line: 39 } } },
+			{ kind: "statement", range: { start: { line: 41 }, end: { line: 41 } } },
+			{ kind: "blankLines", range: { start: { line: 42 }, end: { line: 42 } } },
+			{ kind: "docBlock", range: { start: { line: 43 }, end: { line: 49 } } },
+			{ kind: "comment", range: { start: { line: 50 }, end: { line: 50 } } },
+			{ kind: "procedure", name: "WriteDueDates", range: { start: { line: 51 }, end: { line: 96 } } },
+			{
+				kind: "region",
+				name: "Helpers",
+				range: { start: { line: 98 }, end: { line: 141 } },
+				children: [{ kind: "procedure", name: "SaveDueDate", range: { start: { line: 130 }, end: { line: 141 } } }],
+			},
+		];
+		expect(procedureBodySpan(nodes, "writeduedates")).toEqual({ name: "WriteDueDates", startLine: 51, endLine: 96 });
+		expect(procedureBodySpan(nodes, "SaveDueDate")).toEqual({ name: "SaveDueDate", startLine: 130, endLine: 141 });
+		expect(procedureBodySpan(nodes, "Missing")).toBeNull();
+		expect(scriptEntrySpan(nodes)).toEqual({ startLine: 16, endLine: 41 });
 	});
 });

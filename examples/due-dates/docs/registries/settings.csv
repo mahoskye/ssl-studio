@@ -1,0 +1,11 @@
+name,value,where,status,ticket,note
+MaxWalkDays,730,DueDates.DueDateConstants,verified,DEMO-101,The most days a walk looks ahead
+PriorityRoutine,ROUTINE,DueDates.DueDateConstants,verified,DEMO-101,
+PriorityRush,RUSH,DueDates.DueDateConstants,verified,DEMO-102,
+SkipNoReceived,NO_RECEIVED_DATE,DueDates.DueDateConstants,migrated,DEMO-101,A skip's code; its words are beside it
+SkipNoTurnaround,NO_TURNAROUND,DueDates.DueDateConstants,migrated,DEMO-101,
+SkipNotReached,TURNAROUND_NOT_REACHED,DueDates.DueDateConstants,migrated,DEMO-101,
+SkipNotWaiting,NOT_WAITING,DueDates.DueDateConstants,migrated,DEMO-101,
+StatusDueToday,DUE_TODAY,DueDates.DueDateConstants,found,DEMO-103,Used by the report only
+StatusDueNextDay,DUE_NEXT_DAY,DueDates.DueDateConstants,found,DEMO-103,Used by the report only
+StatusDueSoon,DUE_SOON,DueDates.DueDateConstants,found,DEMO-103,Used by the report only

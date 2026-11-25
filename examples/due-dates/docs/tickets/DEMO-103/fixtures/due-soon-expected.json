@@ -1,0 +1,39 @@
+{
+  "asOf": "2026-11-20",
+  "windowDays": 3,
+  "heading": "Samples due from 2026-11-20 through 2026-11-23",
+  "rows": [
+    {
+      "sampleId": "S-1001",
+      "priority": "ROUTINE",
+      "instrumentId": null,
+      "dueOn": "2026-11-19",
+      "status": "DUE_LATE",
+      "workingDaysLeft": -1
+    },
+    {
+      "sampleId": "S-1004",
+      "priority": "RUSH",
+      "instrumentId": null,
+      "dueOn": "2026-11-21",
+      "status": "DUE_NEXT_DAY",
+      "workingDaysLeft": 1
+    },
+    {
+      "sampleId": "S-1002",
+      "priority": "ROUTINE",
+      "instrumentId": "BAL-01",
+      "dueOn": "2026-11-23",
+      "status": "DUE_NEXT_DAY",
+      "workingDaysLeft": 1
+    },
+    {
+      "sampleId": "S-1003",
+      "priority": "ROUTINE",
+      "instrumentId": null,
+      "dueOn": "2026-11-23",
+      "status": "DUE_NEXT_DAY",
+      "workingDaysLeft": 1
+    }
+  ]
+}

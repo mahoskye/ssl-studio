@@ -1,0 +1,666 @@
+/* Round 4 TableView enhancements: inline Find & Replace, registry links & validation,
+   duplicate-key chip/indicator, and compact footer summary strip (ADR 0007, ADR 0010). */
+
+/* Clickable schema doc & workspace file links inside table cells (matches .table-ticket). */
+.table-view td button.table-cell-link {
+	min-height: 0;
+	padding: 0;
+	font: inherit;
+	color: var(--accent);
+	text-align: left;
+	max-width: 100%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	vertical-align: bottom;
+}
+.table-view td button.table-cell-link:hover {
+	text-decoration: underline;
+	text-underline-offset: 2px;
+}
+
+/* Inline validation warning highlights (unknown ticket keys, missing/malformed file paths). */
+.table-view td .table-val-warn {
+	text-decoration: underline dotted var(--warning);
+	text-decoration-thickness: 1.5px;
+	text-underline-offset: 3px;
+}
+.table-view td button.table-cell-link.table-val-warn {
+	color: var(--warning);
+	text-decoration: underline dashed var(--warning);
+	text-underline-offset: 3px;
+}
+
+/* Subtle duplicate-key indicator on column 0 cells + toolbar toggle chip. */
+.table-view td.cell-dupe:not(.col-frozen-last) {
+	box-shadow: inset 2px 0 0 color-mix(in srgb, var(--warning) 75%, transparent);
+}
+.table-view td.cell-dupe.col-frozen-last {
+	box-shadow:
+		inset 2px 0 0 color-mix(in srgb, var(--warning) 75%, transparent),
+		2px 0 0 color-mix(in srgb, var(--accent) 42%, var(--border)),
+		6px 0 12px -4px rgb(0 0 0 / .24);
+}
+.table-bar .doc-status.table-dupes-chip {
+	min-height: 0;
+	line-height: 1.6;
+	gap: var(--space-1);
+	color: var(--warning);
+	border-color: color-mix(in srgb, var(--warning) 45%, transparent);
+}
+.table-bar .doc-status.table-dupes-chip:hover {
+	border-color: var(--warning);
+}
+.table-bar .doc-status.table-dupes-chip[aria-pressed="true"] {
+	background: color-mix(in srgb, var(--warning) 12%, transparent);
+	border-color: var(--warning);
+	color: var(--strong-fg);
+}
+.table-bar .table-find-open-btn {
+	padding: var(--space-1) var(--space-2);
+	min-height: 0;
+	color: var(--muted);
+}
+.table-bar .table-find-open-btn:hover,
+.table-bar .table-find-open-btn.active {
+	color: var(--accent);
+}
+
+/* Compact inline Find & Replace bar (Ctrl+F / Ctrl+H). */
+.table-find-bar {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: var(--space-2);
+	padding: var(--space-1) var(--space-4);
+	border-bottom: 1px solid var(--border);
+	background: var(--tab-bg);
+	font-size: var(--text-sm);
+	flex: none;
+}
+.table-find-group {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--space-1);
+	min-width: 0;
+}
+.table-find-input {
+	width: clamp(120px, 16vw, 210px);
+	min-height: 0;
+	padding: 2px var(--space-2);
+	font-size: var(--text-sm);
+	font-family: var(--ui-font);
+	color: var(--input-fg);
+	background: var(--input-bg);
+	border: 1px solid var(--input-border);
+	border-radius: var(--radius-sm);
+}
+.table-find-input:focus {
+	border-color: var(--accent);
+}
+.table-find-input:focus:not(:focus-visible) {
+	outline: none;
+}
+.table-find-input:focus-visible {
+	outline: 2px solid var(--accent);
+	outline-offset: -1px;
+	border-color: var(--accent);
+}
+.table-find-count {
+	min-width: 5.5ch;
+	text-align: center;
+	font-size: var(--text-xs);
+	color: var(--muted);
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+}
+.table-find-count.empty {
+	color: var(--warning);
+}
+.table-find-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 3px;
+	min-height: 0;
+	padding: 2px var(--space-2);
+	font-size: var(--text-xs);
+	color: var(--fg);
+	background: var(--side-bg);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-sm);
+	white-space: nowrap;
+}
+.table-find-btn:hover:not(:disabled) {
+	border-color: var(--accent);
+	color: var(--strong-fg);
+}
+.table-find-btn:disabled {
+	opacity: 0.45;
+	cursor: default;
+}
+.table-find-toggle {
+	min-height: 0;
+	padding: 2px var(--space-2);
+	font-size: var(--text-xs);
+	color: var(--muted);
+	background: transparent;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-sm);
+	white-space: nowrap;
+}
+.table-find-toggle:hover {
+	color: var(--strong-fg);
+	border-color: var(--input-border);
+}
+.table-find-toggle[aria-pressed="true"] {
+	color: var(--accent);
+	border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+	background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.table-find-icon-btn {
+	min-height: 0;
+	padding: 2px 4px;
+	color: var(--muted);
+}
+.table-find-icon-btn:hover:not(:disabled) {
+	color: var(--strong-fg);
+}
+.table-find-icon-btn:disabled {
+	opacity: 0.4;
+	cursor: default;
+}
+.table-find-close {
+	margin-left: auto;
+}
+
+/* Find match highlights inside table body cells (keeps frozen cells opaque). */
+.table-view tbody tr td.cell-find-match,
+.table-view tbody tr td.col-frozen.cell-find-match {
+	background: color-mix(in srgb, var(--warning) 18%, var(--bg));
+}
+.table-view tbody tr:hover td.cell-find-match,
+.table-view tbody tr.row-current td.cell-find-match {
+	background: color-mix(in srgb, var(--warning) 24%, var(--bg));
+}
+.table-view tbody tr td.cell-find-current,
+.table-view tbody tr:hover td.cell-find-current,
+.table-view tbody tr.row-current td.cell-find-current,
+.table-view tbody tr.row-current:hover td.cell-find-current,
+.table-view tbody tr td.cell-selected.cell-find-current,
+.table-view tbody tr td.col-frozen.cell-find-current {
+	background: color-mix(in srgb, var(--warning) 30%, var(--bg));
+	color: var(--strong-fg);
+	outline: 2px solid var(--warning);
+	outline-offset: -2px;
+}
+
+/* Compact bottom summary strip: row counts, selection count, focused column stats. */
+.table-footer {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--space-1) var(--space-4);
+	padding: 3px var(--space-4);
+	border-top: 1px solid var(--border);
+	background: var(--tab-bg);
+	font-size: var(--text-xs);
+	color: var(--muted);
+	font-variant-numeric: tabular-nums;
+	flex: none;
+	user-select: none;
+}
+.table-footer-left,
+.table-footer-right {
+	display: inline-flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: var(--space-2);
+	min-width: 0;
+}
+.table-footer-col {
+	color: var(--fg);
+	font-weight: 600;
+	max-width: 24ch;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.table-footer-sep {
+	display: inline-block;
+	width: 1px;
+	height: 10px;
+	background: var(--border);
+	vertical-align: middle;
+}
+.table-footer-val {
+	color: var(--fg);
+}
+
+
+/* --- Round 5 & Consolidated Table Power Styles: Selection, Row Reorder, Custom Cell Picker, Grouping & Warnings --- */
+
+.table-view th.table-sel-col,
+.table-view td.table-sel-col {
+	width: 56px;
+	min-width: 56px;
+	max-width: 56px;
+}
+
+.table-sel-inner {
+	display: inline-flex;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 5px;
+	width: 100%;
+	padding: 0 6px;
+	box-sizing: border-box;
+}
+.table-row-num {
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+	color: var(--muted);
+	font-variant-numeric: tabular-nums;
+	min-width: 2ch;
+	text-align: right;
+	user-select: none;
+}
+.table-row-num.draggable {
+	cursor: grab;
+}
+.table-row-num.draggable:hover {
+	color: var(--strong-fg);
+}
+.table-scroll.is-dragging-row,
+.table-scroll.is-dragging-row td,
+.table-scroll.is-dragging-row tr {
+	cursor: grabbing;
+	user-select: none;
+}
+.table-scroll.is-drag-selecting,
+.table-scroll.is-drag-selecting td {
+	user-select: none;
+}
+.table-view tbody tr.row-dragging {
+	opacity: 0.45;
+}
+.table-view tbody tr.row-drop-before td {
+	box-shadow: inset 0 2px 0 var(--accent);
+}
+.table-view tbody tr.row-drop-after td {
+	box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.table-view tbody tr.row-revealed td,
+.table-view tbody tr.row-revealed:hover td,
+.table-view tbody tr.row-revealed td.col-frozen,
+.table-view tbody tr.row-revealed:hover td.col-frozen {
+	background: color-mix(in srgb, var(--accent) 20%, var(--bg));
+	transition: background-color 350ms ease;
+}
+
+.table-view tbody tr td.cell-in-range,
+.table-view tbody tr:hover td.cell-in-range,
+.table-view tbody tr.row-current td.cell-in-range,
+.table-view tbody tr.row-current:hover td.cell-in-range,
+.table-view tbody tr td.col-frozen.cell-in-range {
+	background: color-mix(in srgb, var(--accent) 15%, var(--bg));
+}
+.table-view tbody tr td.cell-in-range.cell-selected,
+.table-view tbody tr:hover td.cell-in-range.cell-selected,
+.table-view tbody tr.row-current td.cell-in-range.cell-selected,
+.table-view tbody tr td.col-frozen.cell-in-range.cell-selected {
+	background: color-mix(in srgb, var(--accent) 24%, var(--bg));
+	outline: 2px solid var(--accent);
+	outline-offset: -2px;
+}
+
+.table-badge-warn {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	max-width: 100%;
+	color: var(--warning);
+}
+.table-badge-warn-icon {
+	color: var(--warning);
+	font-size: 12px;
+	flex: none;
+	display: inline-flex;
+	align-items: center;
+}
+.table-view tbody tr td.cell-empty-key:not(.col-frozen-last) {
+	box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--warning) 70%, transparent);
+	background: color-mix(in srgb, var(--warning) 7%, var(--bg));
+}
+.table-view tbody tr td.cell-empty-key.col-frozen-last {
+	box-shadow:
+		inset 0 0 0 1.5px color-mix(in srgb, var(--warning) 70%, transparent),
+		2px 0 0 color-mix(in srgb, var(--accent) 42%, var(--border)),
+		6px 0 12px -4px rgb(0 0 0 / .24);
+	background: color-mix(in srgb, var(--warning) 7%, var(--bg));
+}
+.table-empty-key-warn {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	color: var(--warning);
+	font: var(--text-xs) var(--ui-font);
+	font-style: italic;
+}
+
+.table-cell-picker {
+	position: fixed;
+	z-index: 58;
+	min-width: 185px;
+	max-width: min(340px, calc(100vw - 16px));
+	max-height: 250px;
+	overflow: auto;
+	padding: 4px;
+	background: var(--side-bg);
+	color: var(--side-fg);
+	border: 1px solid var(--input-border);
+	border-radius: var(--radius-md);
+	box-shadow: var(--shadow);
+	font-family: var(--ui-font);
+	font-size: var(--text-sm);
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+.table-cell-picker-opt {
+	flex: none;
+	display: flex;
+	align-items: center;
+	gap: var(--space-2);
+	width: 100%;
+	min-height: calc(26px * var(--ui-scale));
+	padding: 4px 8px;
+	box-sizing: border-box;
+	border: 0;
+	border-radius: var(--radius-sm);
+	background: transparent;
+	color: var(--fg);
+	text-align: left;
+	font-size: var(--text-sm);
+	line-height: 1.3;
+	cursor: pointer;
+	overflow: hidden;
+}
+.table-cell-picker-opt:hover,
+.table-cell-picker-opt.active {
+	background: var(--selected);
+	color: var(--strong-fg);
+}
+.table-cell-picker-opt.active {
+	outline: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+	outline-offset: -1px;
+}
+.table-cell-picker-val {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-family: var(--code-font);
+	font-size: var(--text-sm);
+}
+.table-cell-picker-meta {
+	margin-left: auto;
+	color: var(--muted);
+	font-size: var(--text-xs);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	max-width: 18ch;
+	white-space: nowrap;
+}
+.table-cell-picker-check {
+	margin-left: auto;
+	color: var(--accent);
+	flex: none;
+	display: inline-flex;
+	align-items: center;
+}
+
+.table-view tbody tr.table-group-row td {
+	background: color-mix(in srgb, var(--fg) 4%, var(--side-bg));
+	border-bottom: 1px solid var(--border);
+	padding: 4px var(--space-4);
+	font-family: var(--ui-font);
+	font-size: var(--text-sm);
+	font-weight: 600;
+	overflow: visible;
+}
+.table-view tbody tr.table-group-row:hover td {
+	background: color-mix(in srgb, var(--fg) 7%, var(--side-bg));
+}
+.table-view tbody tr.table-group-row td.table-sel-col {
+	padding: 0;
+	background: color-mix(in srgb, var(--fg) 4%, var(--side-bg));
+	overflow: hidden;
+}
+.table-view tbody tr.table-group-row:hover td.table-sel-col {
+	background: color-mix(in srgb, var(--fg) 7%, var(--side-bg));
+}
+.table-group-toggle {
+	position: sticky;
+	left: 58px;
+	display: inline-flex;
+	align-items: center;
+	gap: var(--space-2);
+	padding: 1px 4px;
+	min-height: 0;
+	border: 0;
+	background: transparent;
+	color: var(--strong-fg);
+	font: 600 var(--text-sm) var(--ui-font);
+	cursor: pointer;
+}
+.table-group-count {
+	font-size: var(--text-xs);
+	font-weight: 400;
+	color: var(--muted);
+	font-variant-numeric: tabular-nums;
+}
+
+.table-status-strip {
+	display: inline-flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 4px;
+	min-width: 0;
+}
+.table-status-pill {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	min-height: 0;
+	padding: 1px 7px;
+	font-size: var(--text-xs);
+	line-height: 1.5;
+	cursor: pointer;
+}
+.table-status-pill[aria-pressed="true"] {
+	outline: 1.5px solid var(--accent);
+	outline-offset: -1px;
+	font-weight: 600;
+}
+.table-status-pill-count {
+	margin-left: 3px;
+	font-variant-numeric: tabular-nums;
+}
+.table-fmt-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	padding: 1px 7px;
+	border-radius: var(--radius-sm);
+	border: 1px solid var(--border);
+	background: transparent;
+	color: var(--muted);
+	font-size: var(--text-xs);
+	cursor: pointer;
+}
+.table-bar .doc-status.table-fmt-chip {
+	min-height: 0;
+	line-height: 1.6;
+	gap: var(--space-1);
+	color: var(--fg);
+	border-color: var(--input-border);
+}
+.table-fmt-chip:hover {
+	color: var(--strong-fg);
+	background: var(--hover);
+}
+
+/* --- Round 6: Multi-Sort Badges, Excel Fill Handle, Find Regex/Selection, Unified Issues Pill & URL Links --- */
+
+.table-view th .table-th-sort .table-sort-indicator {
+	flex: none;
+	margin-left: auto;
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+	color: var(--accent);
+}
+.table-view th .table-th-sort .table-sort-indicator .codicon-glyph {
+	margin-left: 0;
+}
+.table-sort-prio {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	min-width: 14px;
+	min-height: calc(14px * var(--ui-scale));
+	height: auto;
+	padding: 0 4px;
+	box-sizing: border-box;
+	border-radius: 999px;
+	font-size: 10px;
+	font-weight: 700;
+	line-height: 1.3;
+	font-variant-numeric: tabular-nums;
+	background: color-mix(in srgb, var(--accent) 12%, transparent);
+	border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+	color: var(--strong-fg);
+}
+
+.table-view tbody tr td.cell-has-fill-handle:not(.col-frozen) {
+	position: relative;
+	z-index: 1;
+}
+.table-view tbody tr td.col-frozen.cell-has-fill-handle {
+	z-index: 3;
+}
+.table-fill-handle {
+	position: absolute;
+	right: 0;
+	bottom: 0;
+	width: 8px;
+	height: 8px;
+	box-sizing: border-box;
+	background: var(--accent);
+	border: 1.5px solid var(--bg);
+	border-radius: 1px;
+	cursor: crosshair;
+	z-index: 4;
+	transition: transform 80ms ease;
+}
+.table-fill-handle:hover {
+	transform: scale(1.2);
+}
+.table-scroll.is-fill-dragging,
+.table-scroll.is-fill-dragging td {
+	cursor: crosshair;
+	user-select: none;
+}
+.table-view tbody tr td.cell-fill-target,
+.table-view tbody tr:hover td.cell-fill-target,
+.table-view tbody tr.row-current td.cell-fill-target,
+.table-view tbody tr td.col-frozen.cell-fill-target {
+	background: color-mix(in srgb, var(--accent) 15%, var(--bg));
+	outline: 1.5px dashed var(--accent);
+	outline-offset: -1.5px;
+}
+
+.table-find-input.invalid {
+	border-color: var(--error, var(--warning));
+}
+.table-find-err {
+	font-size: var(--text-xs);
+	font-weight: 500;
+	color: var(--error, var(--warning));
+	white-space: nowrap;
+}
+.table-find-toggle:disabled {
+	opacity: 0.42;
+	cursor: default;
+}
+
+.table-issues-pill {
+	display: inline-flex;
+	align-items: stretch;
+	border-radius: 999px;
+	overflow: hidden;
+	border: 1px solid color-mix(in srgb, var(--warning) 48%, transparent);
+	background: color-mix(in srgb, var(--warning) 7%, transparent);
+}
+.table-bar .doc-status.table-issues-toggle {
+	border: 0;
+	border-radius: 0;
+	padding: 1px 8px;
+	background: transparent;
+}
+.table-bar .doc-status.table-issues-toggle:hover {
+	background: color-mix(in srgb, var(--warning) 10%, transparent);
+	color: var(--strong-fg);
+}
+.table-bar .doc-status.table-issues-toggle[aria-pressed="true"] {
+	background: color-mix(in srgb, var(--warning) 11%, transparent);
+	color: var(--strong-fg);
+}
+.table-issues-next {
+	min-height: 0;
+	padding: 1px 8px;
+	border: 0;
+	border-left: 1px solid color-mix(in srgb, var(--warning) 36%, transparent);
+	border-radius: 0;
+	background: transparent;
+	color: var(--warning);
+	font-size: var(--text-xs);
+	font-weight: 600;
+	line-height: 1.6;
+	cursor: pointer;
+}
+.table-issues-next:hover {
+	background: color-mix(in srgb, var(--warning) 16%, transparent);
+	color: var(--strong-fg);
+}
+
+.table-bar .table-reset-view-btn {
+	padding: var(--space-1) var(--space-2);
+	min-height: 0;
+	color: var(--muted);
+}
+.table-bar .table-reset-view-btn:hover {
+	color: var(--accent);
+}
+
+.table-view td button.table-url-link {
+	text-decoration: underline;
+	text-decoration-color: color-mix(in srgb, var(--accent) 45%, transparent);
+	text-underline-offset: 2px;
+}
+.table-view td button.table-url-link:hover {
+	text-decoration-color: var(--accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.table-fill-handle,
+	.table-view tbody tr.row-revealed td,
+	.table-view tbody tr.row-revealed:hover td,
+	.table-view tbody tr.row-revealed td.col-frozen,
+	.table-view tbody tr.row-revealed:hover td.col-frozen {
+		transition: none;
+	}
+}

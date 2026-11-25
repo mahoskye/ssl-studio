@@ -1,0 +1,130 @@
+/********************************************************************************
+Description.. : Constants the due-date scripts share, each one a procedure. A script
+                pulls them in with :INCLUDE DueDates.DueDateConstants and reads one
+                with DoProc("MaxWalkDays"). A class that included them would get each
+                as a method, so the rule class asks for the one it needs with
+                ExecFunction("DueDates.DueDateConstants.MaxWalkDays").
+Parameters... : -
+Returns...... : -
+Author....... :
+Date......... : 2026-11-18
+********************************************************************************
+_______________________________________________________________________________
+Modification. : The constants are procedures, where they were variables set by
+                this script's own statements. Those statements run only as part
+                of the main body of the script that includes them, and a
+                procedure another script calls by its three-part name never runs
+                that body: it read variables nobody had set.
+Author....... :
+Date......... : 2026-11-18
+_______________________________________________________________________________
+********************************************************************************/;
+
+/* region The day limit and the priorities;
+
+/*
+ * Procedure: MaxWalkDays
+ * Description: Says how many calendar days ahead a walk through the calendar may look. An
+ *              outage with no known end is recorded with a far-off last day, and
+ *              without a limit a walk would follow it day by day.
+ * Returns: 730
+;
+:PROCEDURE MaxWalkDays;
+	:RETURN 730;
+:ENDPROC;
+
+/*
+ * Procedure: PriorityRoutine
+ * Description: Names routine work in DEMO_SAMPLES.PRIORITY. Anything that is not rush is routine.
+ * Returns: "ROUTINE"
+;
+:PROCEDURE PriorityRoutine;
+	:RETURN "ROUTINE";
+:ENDPROC;
+
+/*
+ * Procedure: PriorityRush
+ * Description: Names rush work in DEMO_SAMPLES.PRIORITY.
+ * Returns: "RUSH"
+;
+:PROCEDURE PriorityRush;
+	:RETURN "RUSH";
+:ENDPROC;
+
+/* endregion;
+
+/* region Why a sample was left alone;
+
+/* Each skip is {sCode, sText}. A caller tests the code. The text is for people
+   and may be reworded;
+
+/*
+ * Procedure: SkipNoReceived
+ * Description: The skip for a sample with no received date.
+ * Returns: {"NO_RECEIVED_DATE", its text}
+;
+:PROCEDURE SkipNoReceived;
+	:RETURN {"NO_RECEIVED_DATE", "No received date"};
+:ENDPROC;
+
+/*
+ * Procedure: SkipNoTurnaround
+ * Description: The skip for a sample whose turnaround is empty, zero or less.
+ * Returns: {"NO_TURNAROUND", its text}
+;
+:PROCEDURE SkipNoTurnaround;
+	:RETURN {"NO_TURNAROUND", "No turnaround"};
+:ENDPROC;
+
+/*
+ * Procedure: SkipNotReached
+ * Description: The skip for a sample whose turnaround is not reached within the day limit.
+ * Returns: {"TURNAROUND_NOT_REACHED", its text}
+;
+:PROCEDURE SkipNotReached;
+	:RETURN {"TURNAROUND_NOT_REACHED", "Turnaround beyond the day limit"};
+:ENDPROC;
+
+/*
+ * Procedure: SkipNotWaiting
+ * Description: The skip for a sample that got a due date, or was removed, before its own was written.
+ * Returns: {"NOT_WAITING", its text}
+;
+:PROCEDURE SkipNotWaiting;
+	:RETURN {"NOT_WAITING", "No longer waiting for a due date"};
+:ENDPROC;
+
+/* endregion;
+
+/* region How close a due date is;
+
+/* Each status is {sCode, sText}, for DueSoonReport;
+
+/*
+ * Procedure: StatusDueToday
+ * Description: The status of a sample due on the day of the report.
+ * Returns: {"DUE_TODAY", its text}
+;
+:PROCEDURE StatusDueToday;
+	:RETURN {"DUE_TODAY", "due today"};
+:ENDPROC;
+
+/*
+ * Procedure: StatusDueNextDay
+ * Description: The status of a sample due by the next working day.
+ * Returns: {"DUE_NEXT_DAY", its text}
+;
+:PROCEDURE StatusDueNextDay;
+	:RETURN {"DUE_NEXT_DAY", "due the next working day"};
+:ENDPROC;
+
+/*
+ * Procedure: StatusDueSoon
+ * Description: The status of a sample due later than the next working day.
+ * Returns: {"DUE_SOON", its text}
+;
+:PROCEDURE StatusDueSoon;
+	:RETURN {"DUE_SOON", "due soon"};
+:ENDPROC;
+
+/* endregion;

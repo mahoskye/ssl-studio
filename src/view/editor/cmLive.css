@@ -1,0 +1,3295 @@
+/* Obsidian-grade CodeMirror 6 Live Preview styles (ADR 0028).
+   All colors inherit SSL Studio's decoupled --editor-* and chrome OKLCH tokens. */
+
+.cm-md-host {
+	flex: 1;
+	min-height: 0;
+	min-width: 0;
+	overflow-y: auto;
+	overflow-x: hidden;
+	background: var(--editor-bg, var(--bg));
+	color: var(--editor-fg, var(--fg));
+	position: relative;
+	container-type: inline-size;
+}
+
+.cm-md-page {
+	width: min(820px, 100%);
+	margin: 0 auto;
+	padding: var(--space-4) var(--space-7) 0;
+	box-sizing: border-box;
+	display: flex;
+	flex-direction: column;
+	position: relative;
+}
+
+@container (max-width: 480px) {
+	.cm-md-page {
+		padding: var(--space-3) var(--space-4) 0;
+	}
+}
+
+/* Whisper-quiet single-line top strip: ticket/status on the left, Info & Links triggers on the right. */
+.cm-md-compact-bar {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 4px 8px;
+	min-height: 24px;
+	margin: 0 0 var(--space-3);
+	padding: 0;
+	border: 0;
+	background: transparent;
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+}
+
+.cm-md-compact-meta {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	min-height: 22px;
+	padding: 1px 6px 1px 4px;
+	margin-left: -4px;
+	border: 0;
+	border-radius: var(--radius-sm);
+	background: transparent;
+	color: var(--editor-muted, var(--muted));
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+	cursor: pointer;
+	transition: background 120ms ease, color 120ms ease;
+}
+
+.cm-md-compact-meta:hover,
+.cm-md-compact-meta:focus-visible {
+	background: var(--hover);
+	color: var(--editor-strong, var(--strong-fg));
+}
+
+.cm-md-compact-key {
+	font-family: var(--code-font);
+	font-weight: 600;
+	letter-spacing: 0.02em;
+	color: var(--editor-strong, var(--strong-fg));
+}
+
+.cm-md-compact-actions {
+	display: inline-flex;
+	align-items: center;
+	gap: 2px;
+	margin-left: auto;
+}
+
+.cm-md-compact-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	min-height: calc(22px * var(--ui-scale));
+	padding: 1px 7px;
+	border: 0;
+	border-radius: var(--radius-sm);
+	background: transparent;
+	color: var(--editor-muted, var(--muted));
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+	font-weight: 500;
+	cursor: pointer;
+	white-space: nowrap;
+	transition: background 120ms ease, color 120ms ease;
+}
+
+.cm-md-compact-btn:hover,
+.cm-md-compact-btn:focus-visible {
+	color: var(--editor-fg, var(--fg));
+	background: var(--hover);
+}
+
+.cm-md-compact-btn.active {
+	color: var(--editor-accent, var(--accent));
+	background: color-mix(in srgb, var(--editor-accent, var(--accent)) 10%, transparent);
+}
+
+.cm-md-compact-btn .codicon-glyph {
+	font-size: 12px;
+	line-height: 1;
+	flex: none;
+}
+
+.cm-md-compact-broken {
+	display: inline-flex;
+	align-items: center;
+	gap: 2px;
+	color: var(--error);
+	font-weight: 600;
+}
+
+.cm-md-page.full-width {
+	width: 100%;
+	max-width: none;
+}
+
+.cm-md-editor-wrap {
+	min-height: 260px;
+	min-width: 0;
+	max-width: 100%;
+}
+
+/* Keep CM6 content strictly within the page column so wide images/tables never clip callouts or cards at narrow widths. */
+.cm-md-host .cm-editor {
+	max-width: 100%;
+	min-width: 0;
+}
+
+.cm-md-host .cm-scroller {
+	max-width: 100%;
+	min-width: 0;
+	overflow-x: auto;
+}
+
+.cm-md-host .cm-content {
+	max-width: 100%;
+	min-width: 0;
+	width: 100%;
+	box-sizing: border-box;
+}
+
+.cm-md-host .cm-line {
+	max-width: 100%;
+	box-sizing: border-box;
+	position: relative;
+}
+
+.cm-md-host .cm-line.cm-git-added {
+	--md-list-base: 8px;
+	box-shadow: inset 3px 0 0 var(--ok);
+	padding-left: 8px;
+}
+
+.cm-md-host .cm-line.cm-git-modified {
+	--md-list-base: 8px;
+	box-shadow: inset 3px 0 0 var(--accent);
+	padding-left: 8px;
+}
+
+.cm-md-host .cm-line.cm-git-removed {
+	--md-list-base: 8px;
+	box-shadow: inset 3px 0 0 var(--error);
+	padding-left: 8px;
+}
+
+/* Mermaid diagrams rendered inline inside Live & Read views */
+.cm-md-mermaid-card {
+	margin: var(--space-3) 0;
+	border: 1px solid var(--editor-border, var(--border));
+	border-radius: var(--radius-md);
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 2.5%, var(--editor-bg, var(--bg)));
+	overflow: hidden;
+}
+
+.cm-md-mermaid-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 4px var(--space-3);
+	border-bottom: 1px solid color-mix(in srgb, var(--editor-border, var(--border)) 75%, transparent);
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 3.5%, transparent);
+	font-family: var(--ui-font);
+}
+
+.cm-md-mermaid-stage {
+	padding: var(--space-4);
+	overflow-x: auto;
+	display: flex;
+	justify-content: safe center;
+}
+
+.cm-md-mermaid-stage svg {
+	max-width: 100%;
+	height: auto;
+	margin: 0 auto;
+}
+
+.cm-md-mermaid-loading {
+	font-size: var(--text-sm);
+	color: var(--editor-muted, var(--muted));
+}
+
+.cm-md-mermaid-error {
+	font-size: var(--text-sm);
+	color: var(--error);
+	margin-bottom: var(--space-2);
+}
+
+/* Note / section transclusion embeds (`![[doc]]`, `![[doc#Heading]]`) */
+.cm-md-embed-card {
+	margin: var(--space-3) 0;
+	border: 1px solid var(--editor-border, var(--border));
+	border-left: 3px solid var(--editor-accent, var(--accent));
+	border-radius: var(--radius-md);
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 2.5%, var(--editor-bg, var(--bg)));
+	overflow: hidden;
+}
+
+.cm-md-embed-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--space-2);
+	padding: 5px var(--space-3);
+	border-bottom: 1px solid color-mix(in srgb, var(--editor-border, var(--border)) 75%, transparent);
+	font-family: var(--ui-font);
+}
+
+.cm-md-embed-title {
+	color: var(--editor-accent, var(--accent));
+	font-size: var(--text-sm);
+	font-weight: 600;
+	text-align: left;
+}
+
+.cm-md-embed-title:hover {
+	text-decoration: underline;
+}
+
+.cm-md-embed-body {
+	padding: var(--space-3) var(--space-4);
+	max-height: 300px;
+	overflow: auto;
+	font-size: 0.94em;
+}
+
+.cm-md-embed-missing,
+.cm-md-embed-loading {
+	margin: 0;
+	font-size: var(--text-sm);
+	color: var(--editor-muted, var(--muted));
+}
+
+/* Footnotes (`[^1]` and `[^1]: ...`) */
+.cm-md-footnote-ref {
+	vertical-align: super;
+	font-size: 0.78em;
+	color: var(--editor-accent, var(--accent));
+	cursor: pointer;
+	font-weight: 600;
+}
+
+.cm-md-footnote-ref:hover {
+	text-decoration: underline;
+}
+
+.cm-md-footnote-def {
+	font-family: var(--code-font);
+	font-size: 0.88em;
+	color: var(--editor-accent, var(--accent));
+	font-weight: 600;
+}
+
+/* Read mode shares the exact same CM6 engine with natural reading cursor & footer spacing. */
+.cm-md-host.cm-md-read .cm-content {
+	padding: 8px 0 12vh;
+	cursor: default;
+}
+
+.cm-md-host.cm-md-read .cm-md-callout,
+.cm-md-host.cm-md-read .cm-md-table-wrap,
+.cm-md-host.cm-md-read .cm-md-hr-wrap {
+	cursor: default;
+}
+
+.cm-md-host.cm-md-read .cm-md-image-wrap img {
+	cursor: zoom-in;
+}
+
+/* Unified pointer-Y reading assist across margins, gaps, and widgets (both Live & Read). */
+.cm-md-host .cm-content > *,
+.cm-md-host .cm-md-backlinks {
+	transition: opacity 120ms ease;
+}
+
+.cm-md-host .cm-md-read-below {
+	opacity: 0.68;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.cm-md-host .cm-content > *,
+	.cm-md-host .cm-md-backlinks {
+		transition: none;
+	}
+}
+
+/* Inline Properties header bar inside Live Preview (matching Obsidian Properties). */
+.cm-md-props {
+	margin: 0 0 var(--space-5);
+	border: 1px solid var(--editor-border, var(--border));
+	border-radius: var(--radius-lg);
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 3.5%, var(--editor-bg, var(--bg)));
+	font-family: var(--ui-font);
+	font-size: var(--text-md);
+}
+
+.cm-md-props-head {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: var(--space-1) var(--space-2);
+	padding: var(--space-2) var(--space-4);
+}
+
+.cm-md-props-toggle {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--space-2);
+	padding: var(--space-1) 0;
+	color: var(--editor-muted, var(--muted));
+	font-size: var(--text-sm);
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: .06em;
+}
+
+.cm-md-props-toggle:hover {
+	color: var(--editor-strong, var(--strong-fg));
+}
+
+.cm-md-props-edit,
+.cm-md-props-menu > button {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	font-size: var(--text-sm);
+	color: var(--editor-muted, var(--muted));
+	padding: 2px var(--space-3);
+	border-radius: var(--radius-sm);
+}
+
+.cm-md-props-edit {
+	margin-left: auto;
+}
+
+.cm-md-props-edit .codicon-glyph,
+.cm-md-props-menu > button .codicon-glyph {
+	font-size: calc(12px * var(--ui-scale));
+	line-height: 1;
+	flex: none;
+}
+
+.cm-md-props-edit:hover,
+.cm-md-props-menu > button:hover,
+.cm-md-props-menu > button[aria-expanded="true"] {
+	color: var(--editor-strong, var(--strong-fg));
+	background: var(--hover);
+}
+
+.cm-md-props-menu .menu-pop {
+	font-size: var(--text-base);
+}
+
+.cm-md-props-edit.active {
+	color: var(--accent);
+	background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.cm-md-props-yaml-wrap {
+	border-top: 1px solid color-mix(in srgb, var(--editor-border, var(--border)) 70%, transparent);
+	padding: var(--space-3) var(--space-5) var(--space-4);
+	background: color-mix(in srgb, var(--editor-bg, var(--bg)) 65%, var(--side-bg));
+	border-bottom-left-radius: var(--radius-lg);
+	border-bottom-right-radius: var(--radius-lg);
+}
+
+.cm-md-props-yaml-fence {
+	font-family: var(--code-font, ui-monospace, monospace);
+	font-size: calc(var(--code-size) - 1px);
+	line-height: 1.5;
+	color: var(--editor-muted, var(--muted));
+	opacity: 0.7;
+	user-select: none;
+}
+
+.cm-md-props-yaml {
+	display: block;
+	width: 100%;
+	box-sizing: border-box;
+	margin: var(--space-1) 0;
+	padding: var(--space-2) var(--space-3);
+	border: 1px solid color-mix(in srgb, var(--editor-border, var(--border)) 75%, transparent);
+	border-radius: var(--radius-md);
+	background: var(--editor-bg, var(--bg));
+	color: var(--editor-fg, var(--fg));
+	font-family: var(--code-font, ui-monospace, monospace);
+	font-size: calc(var(--code-size) - 1px);
+	line-height: 1.55;
+	resize: none;
+	outline: none;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	overflow: hidden;
+}
+
+.cm-md-props-yaml:focus {
+	border-color: var(--accent);
+	box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.cm-md-props-list {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--space-2) var(--space-6);
+	margin: 0;
+	padding: var(--space-2) var(--space-5) var(--space-4);
+	border-top: 1px solid color-mix(in srgb, var(--editor-border, var(--border)) 70%, transparent);
+}
+
+.cm-md-props-list > div {
+	display: flex;
+	align-items: baseline;
+	gap: var(--space-3);
+	min-width: 0;
+}
+
+.cm-md-props-list dt {
+	color: var(--editor-muted, var(--muted));
+	font-size: var(--text-sm);
+	text-transform: uppercase;
+	letter-spacing: .04em;
+}
+
+.cm-md-props-list dd {
+	margin: 0;
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--space-2) var(--space-4);
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+
+/* Ticket work & Backlinks panels inside Live Preview, keeping margins aligned with prose. */
+.cm-md-page .md-work {
+	margin: 0 0 var(--space-5);
+	font-family: var(--ui-font);
+	border-color: var(--editor-border, var(--border));
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 2.5%, var(--editor-bg, var(--bg)));
+}
+
+.md-work-head {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--space-2) var(--space-4);
+	margin-bottom: var(--space-3);
+}
+
+.md-work-head h2 {
+	margin: 0;
+}
+
+.md-work-actions {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 4px;
+}
+
+.md-work-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	min-height: calc(24px * var(--ui-scale));
+	height: auto;
+	padding: 2px 8px;
+	border-radius: var(--radius-sm);
+	border: 1px solid color-mix(in srgb, var(--editor-border, var(--border)) 85%, transparent);
+	background: transparent;
+	color: var(--editor-muted, var(--muted));
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+	font-weight: 500;
+	cursor: pointer;
+	white-space: nowrap;
+	transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.md-work-btn .codicon {
+	font-size: 13px;
+}
+
+.md-work-btn:hover {
+	color: var(--editor-strong, var(--strong-fg));
+	background: var(--hover);
+	border-color: color-mix(in srgb, var(--editor-fg, var(--fg)) 24%, transparent);
+}
+
+.md-work-btn.active {
+	color: var(--editor-accent, var(--accent));
+	background: color-mix(in srgb, var(--editor-accent, var(--accent)) 12%, transparent);
+	border-color: color-mix(in srgb, var(--editor-accent, var(--accent)) 42%, transparent);
+}
+
+.md-work-guide {
+	margin: 0 0 var(--space-3);
+	padding: var(--space-3) var(--space-4);
+	border-radius: var(--radius-md);
+	border: 1px solid color-mix(in srgb, var(--editor-border, var(--border)) 85%, transparent);
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 4%, var(--editor-bg, var(--bg)));
+	font-size: var(--text-sm);
+	line-height: 1.5;
+	color: var(--editor-fg, var(--fg));
+}
+
+.md-work-guide-intro {
+	margin: 0 0 var(--space-2);
+	color: var(--editor-muted, var(--muted));
+}
+
+.md-work-guide-intro strong {
+	color: var(--editor-strong, var(--strong-fg));
+}
+
+.md-work-guide-list {
+	margin: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.md-work-guide-list > div {
+	display: grid;
+	grid-template-columns: 10.5em 1fr;
+	gap: 2px var(--space-3);
+	align-items: baseline;
+}
+
+.md-work-guide-list dt {
+	color: var(--editor-muted, var(--muted));
+	font-weight: 600;
+}
+
+.md-work-guide-list dd {
+	margin: 0;
+	min-width: 0;
+	overflow-wrap: break-word;
+}
+
+.md-work-guide code {
+	font-family: var(--code-font);
+	font-size: 0.9em;
+	padding: 1px 5px;
+	border-radius: var(--radius-sm);
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 8%, transparent);
+	color: var(--editor-strong, var(--strong-fg));
+}
+
+.md-work-empty {
+	margin: 0;
+	padding: var(--space-2) 0 0;
+	font-size: var(--text-sm);
+	color: var(--editor-muted, var(--muted));
+	line-height: 1.5;
+}
+
+.md-work-empty strong {
+	color: var(--editor-fg, var(--fg));
+	font-weight: 600;
+}
+
+.md-work-file-row {
+	align-items: center !important;
+	gap: 6px var(--space-3) !important;
+}
+
+.md-work-folder-link {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+}
+
+.md-work-folder-link .codicon {
+	font-size: 13px;
+	flex: none;
+}
+
+.md-work-via {
+	display: inline-block;
+	padding: 1px 7px;
+	border-radius: var(--radius-sm);
+	border: 1px solid color-mix(in srgb, var(--editor-border, var(--border)) 80%, transparent);
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 4.5%, transparent);
+	color: var(--editor-muted, var(--muted));
+	font-family: var(--code-font);
+	font-size: 11px;
+	line-height: 1.45;
+	max-width: 100%;
+	overflow-wrap: break-word;
+}
+
+.md-work-unlink {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 18px;
+	height: 18px;
+	padding: 0;
+	border-radius: var(--radius-sm);
+	color: var(--editor-muted, var(--muted));
+	opacity: 0;
+	transition: opacity 100ms ease, color 100ms ease, background-color 100ms ease;
+}
+
+.md-work li:hover .md-work-unlink,
+.md-linked-tickets li:hover .md-work-unlink,
+.md-work-unlink:focus-visible {
+	opacity: 1;
+}
+
+.md-work-unlink:hover {
+	color: var(--error);
+	background: color-mix(in srgb, var(--error) 12%, transparent);
+}
+
+.md-work-unlink .codicon {
+	font-size: 12px;
+}
+
+.md-linked-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--space-2);
+	margin-bottom: var(--space-2);
+}
+
+.md-linked-head h2 {
+	margin: 0 !important;
+}
+
+.md-work-rollup {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px var(--space-4);
+	margin: 0 0 var(--space-3);
+	padding: var(--space-2) var(--space-3);
+	border-radius: var(--radius-sm);
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 3.5%, transparent);
+	font-size: var(--text-xs);
+	color: var(--editor-muted, var(--muted));
+}
+
+.md-work-rollup strong {
+	color: var(--editor-strong, var(--strong-fg));
+	font-weight: 600;
+}
+
+/* Compact "Linked tickets" strip at the top of non-ticket documents (specs, plans, decisions, questions). */
+.md-linked-tickets {
+	margin: 0 0 var(--space-5);
+	padding: var(--space-3) var(--space-5);
+	border: 1px solid var(--editor-border, var(--border));
+	border-radius: var(--radius-lg);
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 2.5%, var(--editor-bg, var(--bg)));
+	font-family: var(--ui-font);
+	font-size: var(--text-md);
+}
+
+.md-linked-tickets h2 {
+	margin: 0 0 var(--space-2);
+	font-size: var(--text-sm);
+	font-weight: 600;
+	color: var(--editor-muted, var(--muted));
+	text-transform: uppercase;
+	letter-spacing: .04em;
+}
+
+.md-linked-tickets ul {
+	margin: 0;
+	padding: 0;
+	list-style: none;
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-2);
+	min-width: 0;
+}
+
+.md-linked-tickets li {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: var(--space-2) var(--space-3);
+	min-width: 0;
+}
+
+.md-linked-tickets li button {
+	text-align: left;
+	overflow-wrap: break-word;
+}
+
+@container (max-width: 520px) {
+	.md-work-guide-list > div {
+		grid-template-columns: 1fr;
+	}
+}
+
+.cm-md-backlinks {
+	margin: var(--space-7) 0 var(--space-10);
+	padding-top: var(--space-4);
+	border-top: 1px solid var(--editor-border, var(--border));
+	font-family: var(--ui-font);
+	font-size: var(--text-md);
+}
+
+.cm-md-backlinks-toggle {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--space-2);
+	padding: var(--space-1) 0;
+	color: var(--editor-muted, var(--muted));
+	font-size: var(--text-sm);
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: .05em;
+}
+
+.cm-md-backlinks-toggle:hover {
+	color: var(--editor-strong, var(--strong-fg));
+}
+
+.cm-md-backlinks ul {
+	margin: var(--space-3) 0 0;
+	padding: 0;
+	list-style: none;
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-2);
+}
+
+.cm-md-backlinks li {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: var(--space-2) var(--space-4);
+}
+
+/* --- Live Preview Typography & Token Styles ------------------------------------ */
+
+.cm-editor .cm-md-h1 {
+	font-size: 1.72em;
+	font-weight: 600;
+	line-height: 1.28;
+	color: var(--editor-strong, var(--strong-fg));
+	padding-top: 0.35em;
+	padding-bottom: 0.25em;
+	border-bottom: 1px solid color-mix(in srgb, var(--editor-border, var(--border)) 75%, transparent);
+	margin-bottom: 0.15em;
+}
+
+.cm-editor .cm-md-h2 {
+	font-size: 1.38em;
+	font-weight: 600;
+	line-height: 1.3;
+	color: var(--editor-strong, var(--strong-fg));
+	padding-top: 0.45em;
+	padding-bottom: 0.2em;
+	border-bottom: 1px solid color-mix(in srgb, var(--editor-border, var(--border)) 55%, transparent);
+	margin-bottom: 0.1em;
+}
+
+.cm-editor .cm-md-h3 {
+	font-size: 1.18em;
+	font-weight: 600;
+	line-height: 1.35;
+	color: var(--editor-strong, var(--strong-fg));
+	padding-top: 0.35em;
+}
+
+.cm-editor .cm-md-h4,
+.cm-editor .cm-md-h5,
+.cm-editor .cm-md-h6 {
+	font-size: 1.04em;
+	font-weight: 600;
+	line-height: 1.4;
+	color: var(--editor-strong, var(--strong-fg));
+	padding-top: 0.25em;
+}
+
+.cm-editor .cm-md-syntax {
+	color: var(--editor-muted, var(--muted));
+	font-family: var(--code-font);
+	font-size: 0.88em;
+	font-weight: 400;
+}
+
+.cm-editor .cm-md-strong {
+	font-weight: 700;
+	color: var(--editor-strong, var(--strong-fg));
+}
+
+.cm-editor .cm-md-em {
+	font-style: italic;
+}
+
+.cm-editor .cm-md-strike {
+	text-decoration: line-through;
+	opacity: 0.72;
+}
+
+.cm-editor .cm-md-code {
+	font-family: var(--code-font);
+	font-size: 0.88em;
+	padding: 1px 5px;
+	border-radius: var(--radius-sm);
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 8%, transparent);
+	color: var(--editor-accent, var(--accent));
+}
+
+.cm-editor .cm-md-highlight,
+.md mark.md-highlight {
+	background: color-mix(in srgb, var(--warning) 28%, transparent);
+	color: inherit;
+	padding: 0 3px;
+	border-radius: 3px;
+}
+
+.cm-editor .cm-md-tag,
+.md .md-tag {
+	display: inline;
+	font-family: var(--ui-font);
+	font-size: 0.84em;
+	font-weight: 500;
+	color: var(--editor-accent, var(--accent));
+	background: color-mix(in srgb, var(--editor-accent, var(--accent)) 13%, transparent);
+	border-radius: 999px;
+	padding: 1px 7px;
+	cursor: pointer;
+	text-decoration: none;
+}
+
+.cm-editor .cm-md-tag:hover,
+.md .md-tag:hover {
+	background: color-mix(in srgb, var(--editor-accent, var(--accent)) 22%, transparent);
+}
+
+.cm-editor .cm-md-link {
+	color: var(--editor-accent, var(--accent));
+	text-decoration: underline;
+	text-underline-offset: 3px;
+	text-decoration-color: color-mix(in srgb, var(--editor-accent, var(--accent)) 55%, transparent);
+	cursor: pointer;
+}
+
+.cm-editor .cm-md-link:hover {
+	text-decoration-color: currentColor;
+}
+
+.cm-editor .cm-md-link-missing {
+	color: var(--editor-muted, var(--muted));
+	text-decoration: underline dotted var(--warning);
+	text-underline-offset: 3px;
+	cursor: pointer;
+}
+
+.cm-editor .cm-md-link-broken {
+	color: var(--warning);
+	text-decoration: underline dashed;
+	text-underline-offset: 3px;
+	cursor: pointer;
+}
+
+.cm-editor .cm-md-ticket {
+	color: inherit;
+	text-decoration: underline dotted var(--editor-accent, var(--accent));
+	text-underline-offset: 3px;
+	cursor: pointer;
+}
+
+.cm-editor .cm-md-ticket:hover {
+	color: var(--editor-accent, var(--accent));
+	text-decoration: underline;
+}
+
+/* Hanging-indent alignment for bullet, numbered, and task lists: wrapped lines align seamlessly under item text. */
+.cm-md-host .cm-line.cm-md-list-line {
+	padding-left: calc(var(--md-list-base, 6px) + var(--md-list-indent, 0em) + var(--md-list-hang, 1.5em));
+	text-indent: calc(-1 * var(--md-list-hang, 1.5em));
+}
+
+.cm-md-host .cm-line.cm-md-list-line.cm-md-list-raw {
+	padding-left: calc(var(--md-list-base, 6px) + var(--md-list-indent, 0em) + var(--md-list-hang, 1.5em));
+	text-indent: calc(-1 * (var(--md-list-indent, 0em) + var(--md-list-hang, 1.5em)));
+}
+
+/* Reset inherited negative text-indent on inline-block/inline-flex list widgets & pills. */
+.cm-md-host .cm-line.cm-md-list-line :is(.cm-md-bullet, .cm-md-check-slot, .cm-md-ol-num, .cm-md-tag, .cm-md-math-inline, .cm-md-image-wrap) {
+	text-indent: 0;
+}
+
+/* Clean visual bullets, ordered markers, and real interactive task checkboxes (drawn via CSS dot, ADR 0023). */
+.cm-md-bullet {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: var(--md-list-hang, 1.5em);
+	height: 1em;
+	padding-right: 0.25em;
+	box-sizing: border-box;
+	vertical-align: middle;
+	color: var(--editor-accent, var(--accent));
+	user-select: none;
+}
+
+.cm-md-bullet::before {
+	content: "";
+	width: 5px;
+	height: 5px;
+	border-radius: 50%;
+	background: currentColor;
+}
+
+.cm-md-ol-num {
+	display: inline-block;
+	width: var(--md-list-hang, 1.75em);
+	padding-right: 0.45em;
+	box-sizing: border-box;
+	text-align: right;
+	font-variant-numeric: tabular-nums;
+	color: var(--editor-muted, var(--muted));
+	user-select: none;
+}
+
+.cm-md-check-slot {
+	display: inline-flex;
+	align-items: center;
+	justify-content: flex-start;
+	width: var(--md-list-hang, 1.7em);
+	padding-left: 0.1em;
+	box-sizing: border-box;
+	vertical-align: middle;
+}
+
+.cm-md-checkbox {
+	width: 1.05em;
+	height: 1.05em;
+	margin: 0;
+	vertical-align: -0.15em;
+	cursor: pointer;
+	accent-color: var(--editor-accent, var(--accent));
+}
+
+.cm-editor .cm-md-task-done {
+	color: var(--editor-muted, var(--muted));
+	text-decoration: line-through;
+}
+
+/* Blockquotes & Horizontal rules. */
+.cm-editor .cm-md-quote-line {
+	--md-list-base: 14px;
+	border-left: 3px solid color-mix(in srgb, var(--editor-accent, var(--accent)) 55%, transparent);
+	padding-left: 14px;
+	color: var(--editor-muted, var(--muted));
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 2.5%, transparent);
+}
+.cm-md-host .cm-line.cm-md-quote-line.cm-md-list-line {
+	padding-left: calc(14px + var(--md-list-indent, 0em) + var(--md-list-hang, 1.5em));
+}
+
+.cm-md-hr-wrap {
+	padding: 10px 0;
+	cursor: pointer;
+}
+
+.cm-md-hr {
+	border: 0;
+	border-top: 1px solid var(--editor-border, var(--border));
+	margin: 0;
+}
+
+/* Fenced code blocks inside Live & Read views (syntax-coloured with the editor's Monaco/TextMate tokens). */
+.cm-editor .cm-md-codeblock-line {
+	font-family: var(--code-font);
+	font-size: calc(var(--code-size) - 0.5px);
+	line-height: 1.5;
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 5.5%, var(--editor-bg, var(--bg)));
+	padding-left: 14px !important;
+	padding-right: 14px !important;
+}
+
+.cm-editor .cm-md-codeblock-line .cm-md-code-tok,
+.cm-editor .cm-md-codeblock-line > span:not(.cm-md-code-header):not(.cm-md-fence-hidden) {
+	font-family: var(--code-font);
+	font-size: inherit;
+}
+
+.cm-editor .cm-md-codeblock-first {
+	border-top-left-radius: var(--radius-md);
+	border-top-right-radius: var(--radius-md);
+	padding-top: 6px !important;
+}
+
+.cm-editor .cm-md-codeblock-last {
+	border-bottom-left-radius: var(--radius-md);
+	border-bottom-right-radius: var(--radius-md);
+	padding-bottom: 8px !important;
+}
+
+.cm-md-code-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+	color: var(--editor-muted, var(--muted));
+	user-select: none;
+	padding-bottom: 4px;
+	border-bottom: 1px solid color-mix(in srgb, var(--editor-border, var(--border)) 55%, transparent);
+	margin-bottom: 4px;
+}
+
+.cm-md-code-lang {
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	font-weight: 600;
+}
+
+.cm-md-code-actions {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+}
+
+.cm-md-code-btn,
+.cm-md-code-copy {
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+	color: color-mix(in srgb, var(--editor-strong, var(--strong-fg)) 78%, var(--editor-muted, var(--muted)));
+	padding: 1px 7px;
+	border-radius: var(--radius-sm);
+	border: 1px solid transparent;
+	background: transparent;
+	cursor: pointer;
+}
+
+.cm-md-code-btn:hover:not(:disabled),
+.cm-md-code-copy:hover:not(:disabled) {
+	color: var(--editor-strong, var(--strong-fg));
+	background: var(--hover);
+	border-color: var(--editor-border, var(--border));
+}
+
+.cm-md-code-btn:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
+.cm-md-fence-hidden {
+	display: inline-block;
+	height: 2px;
+	width: 100%;
+}
+
+/* Raw YAML frontmatter lines when expanded for direct editing. */
+.cm-editor .cm-md-frontmatter-line {
+	font-family: var(--code-font);
+	font-size: calc(var(--code-size) - 1px);
+	color: var(--editor-muted, var(--muted));
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 3.5%, var(--editor-bg, var(--bg)));
+	padding-left: 12px !important;
+}
+
+.cm-md-fm-hidden,
+.cm-md-comment-hidden {
+	height: 0;
+	overflow: hidden;
+}
+
+/* HTML comments (`<!-- ... -->`) revealed while the cursor is on them in Live mode. */
+.cm-editor .cm-md-comment-line {
+	font-family: var(--code-font);
+	font-size: calc(var(--code-size) - 1px);
+	color: var(--editor-muted, var(--muted));
+	font-style: italic;
+}
+
+.cm-editor .cm-md-comment {
+	font-family: var(--code-font);
+	font-size: 0.9em;
+	color: var(--editor-muted, var(--muted));
+	font-style: italic;
+}
+
+/* Interactive Live Table Grid & Read-mode Table Widget (ADR 0028). */
+.cm-md-table-wrap {
+	margin: 10px 0 6px;
+	max-width: 100%;
+	border-radius: var(--radius-md);
+	box-sizing: border-box;
+	white-space: normal;
+}
+
+.cm-md-table-card.is-read {
+	margin: 10px 0 14px;
+}
+
+.cm-md-table-scroll {
+	max-width: 100%;
+	overflow-x: auto;
+	box-sizing: border-box;
+}
+
+.cm-md-table-grid-row {
+	display: flex;
+	align-items: stretch;
+	width: fit-content;
+	max-width: none;
+}
+
+.cm-md-table-wrap table {
+	border-collapse: collapse;
+	width: auto;
+	font-family: var(--read-font, var(--ui-font));
+	font-size: calc(var(--code-size) + 0.5px);
+	line-height: 1.5;
+}
+
+.cm-md-table-wrap th,
+.cm-md-table-wrap td {
+	position: relative;
+	border: 1px solid var(--editor-border, var(--border));
+	padding: 6px 12px;
+	text-align: left;
+	vertical-align: top;
+	box-sizing: border-box;
+}
+
+.cm-md-table-card:not(.is-read) th,
+.cm-md-table-card:not(.is-read) td {
+	min-width: 68px;
+	cursor: text;
+}
+
+.cm-md-table-wrap th {
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 5%, var(--editor-bg, var(--bg)));
+	color: var(--editor-strong, var(--strong-fg));
+	font-weight: 600;
+}
+
+.cm-md-table-wrap td.short,
+.cm-md-table-wrap th.short {
+	white-space: nowrap;
+}
+
+.cm-md-table-wrap tbody tr:hover td:not(.is-active-cell) {
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 3%, transparent);
+}
+
+.cm-md-table-wrap th.is-active-cell,
+.cm-md-table-wrap td.is-active-cell {
+	box-shadow: inset 0 0 0 2px var(--editor-accent, var(--accent));
+	background: color-mix(in srgb, var(--editor-accent, var(--accent)) 6.5%, var(--editor-bg, var(--bg))) !important;
+}
+
+.cm-tbl-cell-view {
+	min-height: 22px;
+	overflow-wrap: break-word;
+	word-break: normal;
+}
+
+.cm-tbl-cell-view.is-empty {
+	user-select: none;
+}
+
+.cm-tbl-cell-input {
+	display: block;
+	width: 100%;
+	min-width: 60px;
+	min-height: 22px;
+	margin: 0;
+	padding: 0;
+	border: 0;
+	outline: none !important;
+	box-shadow: none !important;
+	resize: none;
+	overflow: hidden;
+	background: transparent;
+	color: inherit;
+	font: inherit;
+	line-height: inherit;
+	letter-spacing: inherit;
+	white-space: pre-wrap;
+	box-sizing: border-box;
+}
+
+.cm-tbl-cell-input:focus,
+.cm-tbl-cell-input:focus-visible {
+	outline: none !important;
+	box-shadow: none !important;
+}
+
+.cm-md-table-wrap a {
+	color: var(--editor-accent, var(--accent));
+	text-decoration: underline;
+	text-underline-offset: 2px;
+}
+
+/* Subtle edge `+ Add col` & `+ Add row` controls (revealed smoothly on hover or while editing; hidden in Read mode). */
+.cm-tbl-add-col,
+.cm-tbl-add-row {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 4px;
+	border: 1px dashed color-mix(in srgb, var(--editor-border, var(--border)) 85%, transparent);
+	background: transparent;
+	color: var(--editor-muted, var(--muted));
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+	font-weight: 500;
+	border-radius: var(--radius-sm);
+	cursor: pointer;
+	opacity: 0;
+	transition: opacity 130ms ease, background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.cm-tbl-add-col[hidden],
+.cm-tbl-add-row[hidden] {
+	display: none !important;
+}
+
+.cm-tbl-add-col {
+	width: 22px;
+	margin-left: 5px;
+	flex: none;
+}
+
+.cm-tbl-add-row {
+	margin-top: 4px;
+	height: 22px;
+	padding: 0 10px;
+}
+
+.cm-md-table-card:hover .cm-tbl-add-col,
+.cm-md-table-card:hover .cm-tbl-add-row,
+.cm-md-table-card[data-editing="true"] .cm-tbl-add-col,
+.cm-md-table-card[data-editing="true"] .cm-tbl-add-row,
+.cm-tbl-add-col:focus-visible,
+.cm-tbl-add-row:focus-visible {
+	opacity: 0.9;
+}
+
+.cm-tbl-add-col:hover,
+.cm-tbl-add-row:hover {
+	opacity: 1;
+	color: var(--editor-accent, var(--accent));
+	border-color: color-mix(in srgb, var(--editor-accent, var(--accent)) 55%, transparent);
+	background: color-mix(in srgb, var(--editor-accent, var(--accent)) 10%, transparent);
+}
+
+/* Bottom-docked interactive table controls bar (sits BELOW the table so table rows never shift vertically!). */
+.cm-tbl-bar {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 4px;
+	margin-top: 6px;
+	padding: 4px 8px;
+	max-width: 100%;
+	box-sizing: border-box;
+	border-radius: var(--radius-md);
+	border: 1px solid var(--input-border, var(--border));
+	background: var(--side-bg, var(--panel-bg));
+	color: var(--side-fg, var(--fg));
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+}
+
+.cm-md-table-card[data-editing="false"] .cm-tbl-bar,
+.cm-md-table-card.is-read .cm-tbl-bar {
+	display: none;
+}
+
+/* Raw pipe table editing lines (when user explicitly toggles `Raw`): crisp monospace alignment & subtle pipe dimming. */
+.cm-editor .cm-md-table-line {
+	font-family: var(--code-font);
+	font-size: calc(var(--code-size) - 0.5px);
+	line-height: 1.55;
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 4%, var(--editor-bg, var(--bg)));
+	padding-left: 10px !important;
+	padding-right: 10px !important;
+	border-left: 2px solid color-mix(in srgb, var(--editor-accent, var(--accent)) 45%, transparent);
+	white-space: pre !important;
+}
+
+.cm-editor .cm-md-table-first {
+	border-top-left-radius: var(--radius-sm);
+	border-top-right-radius: var(--radius-sm);
+	padding-top: 5px !important;
+}
+
+.cm-editor .cm-md-table-header {
+	font-weight: 600;
+	color: var(--editor-strong, var(--strong-fg));
+}
+
+.cm-editor .cm-md-table-delim {
+	color: var(--editor-muted, var(--muted));
+	opacity: 0.72;
+}
+
+.cm-editor .cm-md-table-last {
+	border-bottom-left-radius: var(--radius-sm);
+	border-bottom-right-radius: var(--radius-sm);
+	padding-bottom: 5px !important;
+}
+
+.cm-editor .cm-md-table-pipe {
+	color: var(--editor-muted, var(--muted));
+	opacity: 0.62;
+	font-weight: 400;
+}
+
+/* Sticky Contextual Advanced Tables Toolbar (shown only when explicitly editing a table in `Raw` mode). */
+.cm-md-table-toolbar-wrap {
+	position: sticky;
+	top: 0;
+	z-index: 12;
+	width: 100%;
+	box-sizing: border-box;
+	padding: 6px var(--space-5);
+	background: color-mix(in srgb, var(--editor-bg, var(--bg)) 92%, transparent);
+	backdrop-filter: blur(6px);
+	border-bottom: 1px solid var(--editor-border, var(--border));
+}
+
+/* Keep the CodeMirror Find/Replace bar above the sticky Raw table toolbar so Ctrl+F is never occluded. */
+.cm-md-host .cm-panels.cm-panels-top {
+	z-index: 16;
+}
+
+@container (max-width: 480px) {
+	.cm-md-table-toolbar-wrap {
+		padding: 6px var(--space-3);
+	}
+}
+
+.cm-md-table-toolbar {
+	width: min(820px, 100%);
+	margin: 0 auto;
+	box-sizing: border-box;
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 4px;
+	padding: 4px 8px;
+	border-radius: var(--radius-md);
+	border: 1px solid var(--input-border, var(--border));
+	background: var(--side-bg, var(--panel-bg));
+	color: var(--side-fg, var(--fg));
+	box-shadow: var(--shadow);
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+}
+
+.cm-tbl-pos {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	color: var(--muted);
+	font-weight: 600;
+	padding: 0 4px;
+	white-space: nowrap;
+}
+
+.cm-tbl-sep {
+	width: 1px;
+	height: 15px;
+	background: var(--border);
+	opacity: 0.6;
+	margin: 0 2px;
+}
+
+.cm-tbl-group {
+	display: inline-flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 2px;
+	max-width: 100%;
+}
+
+.cm-md-table-toolbar button,
+.cm-tbl-bar button {
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+	min-height: calc(24px * var(--ui-scale));
+	height: auto;
+	padding: 2px 6px;
+	border-radius: var(--radius-sm);
+	border: 1px solid transparent;
+	background: transparent;
+	color: var(--side-fg, var(--fg));
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+	font-weight: 500;
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+.cm-md-table-toolbar button:hover:not(:disabled),
+.cm-tbl-bar button:hover:not(:disabled) {
+	background: var(--hover);
+	color: var(--strong-fg);
+}
+
+.cm-md-table-toolbar button.active,
+.cm-tbl-bar button.active {
+	background: color-mix(in srgb, var(--accent) 18%, transparent);
+	border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+	color: var(--accent);
+	font-weight: 600;
+}
+
+.cm-md-table-toolbar button.danger:hover:not(:disabled),
+.cm-tbl-bar button.danger:hover:not(:disabled) {
+	color: var(--error);
+	background: color-mix(in srgb, var(--error) 12%, transparent);
+}
+
+.cm-md-table-toolbar button:disabled,
+.cm-tbl-bar button:disabled {
+	opacity: 0.35;
+	cursor: default;
+}
+
+/* Obsidian Callouts (interactive in-place cards in Live mode; identical clean cards in Read & Hover views). */
+.cm-md-callout,
+.md .md-callout {
+	margin: 12px 0 14px;
+	max-width: 100%;
+	box-sizing: border-box;
+	border-radius: var(--radius-md);
+	border: 1px solid color-mix(in srgb, var(--callout-tone, var(--info)) 32%, transparent);
+	border-left: 4px solid var(--callout-tone, var(--info));
+	background: color-mix(in srgb, var(--callout-tone, var(--info)) 6%, var(--bg));
+	overflow: hidden;
+	cursor: text;
+	white-space: normal;
+	transition: box-shadow 120ms ease, border-color 120ms ease;
+}
+
+.cm-md-callout:not(.is-read):focus-within,
+.cm-md-callout[data-editing="true"] {
+	border-color: color-mix(in srgb, var(--callout-tone, var(--info)) 58%, transparent);
+	box-shadow: 0 0 0 1px color-mix(in srgb, var(--callout-tone, var(--info)) 35%, transparent);
+}
+
+.cm-md-callout.tone-info, .md .md-callout.tone-info, .cm-editor .cm-md-callout-editing.tone-info, .cm-callout-pick.tone-info { --callout-tone: var(--info); }
+.cm-md-callout.tone-ok, .md .md-callout.tone-ok, .cm-editor .cm-md-callout-editing.tone-ok, .cm-callout-pick.tone-ok { --callout-tone: var(--ok); }
+.cm-md-callout.tone-accent, .md .md-callout.tone-accent, .cm-editor .cm-md-callout-editing.tone-accent, .cm-callout-pick.tone-accent { --callout-tone: var(--accent); }
+.cm-md-callout.tone-warning, .md .md-callout.tone-warning, .cm-editor .cm-md-callout-editing.tone-warning, .cm-callout-pick.tone-warning { --callout-tone: var(--warning); }
+.cm-md-callout.tone-error, .md .md-callout.tone-error, .cm-editor .cm-md-callout-editing.tone-error, .cm-callout-pick.tone-error { --callout-tone: var(--error); }
+.cm-md-callout.tone-muted, .md .md-callout.tone-muted, .cm-editor .cm-md-callout-editing.tone-muted, .cm-callout-pick.tone-muted { --callout-tone: var(--muted); }
+
+.cm-md-callout-head,
+.md .md-callout-head {
+	display: flex;
+	align-items: center;
+	gap: var(--space-2);
+	padding: 6px var(--space-4);
+	background: color-mix(in srgb, var(--callout-tone, var(--info)) 4%, transparent);
+	font-family: var(--ui-font);
+	font-weight: 600;
+	font-size: var(--text-base);
+	color: var(--callout-tone, var(--info));
+}
+
+.cm-md-callout.is-folded .cm-md-callout-head {
+	background: transparent;
+}
+
+.cm-callout-type-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 24px;
+	height: 24px;
+	padding: 0;
+	border: 1px solid transparent;
+	border-radius: var(--radius-sm);
+	background: transparent;
+	color: inherit;
+	cursor: pointer;
+	flex: none;
+	transition: background 120ms ease, border-color 120ms ease;
+}
+
+.cm-callout-type-btn:hover:not(:disabled) {
+	background: color-mix(in srgb, var(--callout-tone, var(--info)) 18%, transparent);
+	border-color: color-mix(in srgb, var(--callout-tone, var(--info)) 38%, transparent);
+}
+
+.cm-callout-type-btn:disabled {
+	cursor: default;
+	width: 18px;
+}
+
+.cm-md-callout-icon,
+.md .md-callout-icon {
+	font: normal 15px/1 codicon;
+	flex: none;
+}
+
+.cm-md-callout-title {
+	flex: 1;
+	min-width: 0;
+}
+
+.cm-md-callout-title[hidden],
+.cm-callout-title-input[hidden],
+.cm-callout-actions[hidden],
+.cm-md-callout-fold[hidden],
+.cm-callout-type-picker[hidden] {
+	display: none !important;
+}
+
+.cm-callout-title-input {
+	flex: 1;
+	min-width: 0;
+	border: 0;
+	outline: none !important;
+	box-shadow: none !important;
+	margin: -2px 0;
+	padding: 2px 6px;
+	border-radius: var(--radius-sm);
+	background: transparent;
+	color: inherit;
+	font: inherit;
+	box-sizing: border-box;
+	transition: background 120ms ease;
+}
+
+.cm-callout-title-input::placeholder {
+	color: color-mix(in srgb, var(--callout-tone, var(--info)) 60%, transparent);
+}
+
+.cm-callout-title-input:hover {
+	background: color-mix(in srgb, var(--editor-bg, var(--bg)) 38%, transparent);
+}
+
+.cm-callout-title-input:focus,
+.cm-callout-title-input:focus-visible {
+	outline: none !important;
+	box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--callout-tone, var(--info)) 45%, transparent) !important;
+	background: color-mix(in srgb, var(--editor-bg, var(--bg)) 60%, transparent);
+}
+
+.cm-callout-actions {
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+	flex: none;
+	opacity: 0;
+	transition: opacity 120ms ease;
+}
+
+.cm-md-callout:hover .cm-callout-actions,
+.cm-md-callout:focus-within .cm-callout-actions,
+.cm-md-callout[data-editing="true"] .cm-callout-actions {
+	opacity: 1;
+}
+
+.cm-callout-action-btn {
+	min-height: calc(20px * var(--ui-scale));
+	height: auto;
+	padding: 1px 7px;
+	border-radius: var(--radius-sm);
+	border: 1px solid transparent;
+	background: transparent;
+	color: var(--editor-muted, var(--muted));
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+	font-weight: 500;
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+.cm-callout-action-btn:hover {
+	color: var(--editor-strong, var(--strong-fg));
+	background: color-mix(in srgb, var(--editor-bg, var(--bg)) 55%, transparent);
+	border-color: color-mix(in srgb, var(--callout-tone, var(--info)) 30%, transparent);
+}
+
+.cm-md-callout-fold {
+	color: var(--editor-muted, var(--muted));
+	padding: 2px 5px;
+	border-radius: var(--radius-sm);
+	cursor: pointer;
+	background: transparent;
+	border: 0;
+	font: normal 14px/1 codicon;
+	flex: none;
+}
+
+.cm-md-callout-fold:hover {
+	color: var(--editor-strong, var(--strong-fg));
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 8%, transparent);
+}
+
+/* Inline callout type chip picker strip. */
+.cm-callout-type-picker {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+	padding: 7px var(--space-4);
+	border-bottom: 1px solid color-mix(in srgb, var(--callout-tone, var(--info)) 22%, transparent);
+	background: color-mix(in srgb, var(--editor-bg, var(--bg)) 72%, transparent);
+}
+
+.cm-callout-pick {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	min-height: calc(24px * var(--ui-scale));
+	height: auto;
+	padding: 2px 8px;
+	border-radius: var(--radius-sm);
+	border: 1px solid color-mix(in srgb, var(--callout-tone, var(--info)) 26%, transparent);
+	background: color-mix(in srgb, var(--callout-tone, var(--info)) 8%, transparent);
+	color: var(--callout-tone, var(--info));
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+	font-weight: 500;
+	cursor: pointer;
+}
+
+.cm-callout-pick .cm-md-callout-icon {
+	font-size: 13px;
+}
+
+.cm-callout-pick:hover {
+	background: color-mix(in srgb, var(--callout-tone, var(--info)) 12%, transparent);
+	border-color: color-mix(in srgb, var(--callout-tone, var(--info)) 55%, transparent);
+	color: var(--strong-fg);
+}
+
+.cm-callout-pick.active {
+	background: color-mix(in srgb, var(--callout-tone, var(--info)) 12%, transparent);
+	border-color: var(--callout-tone, var(--info));
+	color: var(--strong-fg);
+	font-weight: 600;
+}
+
+.cm-md-callout-body,
+.md .md-callout-body {
+	padding: var(--space-3) var(--space-5) var(--space-3);
+	color: var(--fg);
+	line-height: 1.55;
+}
+
+.cm-callout-body-input {
+	display: block;
+	width: 100%;
+	min-height: 26px;
+	margin: 0;
+	padding: 0;
+	border: 0;
+	outline: none !important;
+	box-shadow: none !important;
+	resize: none;
+	overflow: hidden;
+	background: transparent;
+	color: var(--editor-fg, var(--fg));
+	font-family: var(--read-font, var(--ui-font));
+	font-size: inherit;
+	line-height: 1.55;
+	white-space: pre-wrap;
+	box-sizing: border-box;
+}
+
+.cm-callout-body-input:focus,
+.cm-callout-body-input:focus-visible {
+	outline: none !important;
+	box-shadow: none !important;
+}
+
+.cm-callout-body-input::placeholder {
+	color: var(--editor-muted, var(--muted));
+	opacity: 0.7;
+}
+
+.cm-callout-placeholder {
+	color: var(--editor-muted, var(--muted));
+	font-style: italic;
+	opacity: 0.72;
+	font-size: 0.94em;
+	user-select: none;
+}
+
+.cm-md-callout-body > :first-child,
+.md .md-callout-body > :first-child {
+	margin-top: 0;
+}
+
+.cm-md-callout-body > :last-child,
+.md .md-callout-body > :last-child {
+	margin-bottom: 0;
+}
+
+.cm-md-callout-body p {
+	margin: 0.35em 0;
+}
+
+.cm-md-callout-body ul,
+.cm-md-callout-body ol {
+	margin: 0.3em 0;
+	padding-left: 1.4em;
+}
+
+.cm-md-callout-body li > p {
+	margin: 0;
+}
+
+.cm-md-callout-body li:has(> input[type="checkbox"]) {
+	list-style: none;
+	margin-left: -1.3em;
+}
+
+.cm-md-callout-body a {
+	color: var(--editor-accent, var(--accent));
+	text-decoration: underline;
+	text-underline-offset: 2px;
+}
+
+.cm-md-callout-body code {
+	font-family: var(--code-font);
+	font-size: 0.88em;
+	padding: 1px 5px;
+	border-radius: var(--radius-sm);
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 8%, transparent);
+}
+
+.cm-md-callout-body pre {
+	margin: 0.45em 0;
+	padding: 8px 12px;
+	border-radius: var(--radius-sm);
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 5.5%, var(--editor-bg, var(--bg)));
+	color: var(--editor-fg, var(--fg));
+	font-family: var(--code-font);
+	font-size: calc(var(--code-size) - 0.5px);
+	line-height: 1.5;
+	overflow-x: auto;
+}
+
+.cm-md-callout-body pre code {
+	padding: 0;
+	border-radius: 0;
+	background: none;
+	font-size: inherit;
+}
+
+/* Preserve callout visual identity while editing raw `> [!important]` lines in Live mode. */
+.cm-editor .cm-md-callout-editing {
+	border-left: 4px solid var(--callout-tone, var(--info)) !important;
+	padding-left: 14px !important;
+	background: color-mix(in srgb, var(--callout-tone, var(--info)) 7.5%, var(--editor-bg, var(--bg))) !important;
+	color: var(--editor-fg, var(--fg));
+}
+
+.cm-editor .cm-md-callout-editing-first {
+	border-top-right-radius: var(--radius-md);
+	padding-top: 6px !important;
+	font-weight: 600;
+	color: var(--callout-tone, var(--info));
+}
+
+.cm-editor .cm-md-callout-editing-last {
+	border-bottom-right-radius: var(--radius-md);
+	padding-bottom: 6px !important;
+}
+
+/* Inline & Block Image Widgets in Live Preview & Read mode. */
+.cm-md-image-wrap {
+	margin: 10px 0 14px;
+	max-width: 100%;
+	box-sizing: border-box;
+	cursor: pointer;
+}
+
+.cm-md-image-wrap.is-inline {
+	display: inline-block;
+	margin: 0 3px;
+	vertical-align: middle;
+}
+
+.cm-md-image-frame {
+	position: relative;
+	display: inline-block;
+	max-width: 100%;
+	box-sizing: border-box;
+	line-height: 0;
+}
+
+.cm-md-image-wrap img {
+	display: block;
+	max-width: 100% !important;
+	max-height: 520px;
+	height: auto;
+	box-sizing: border-box;
+	object-fit: contain;
+	border-radius: var(--radius-md);
+	border: 1px solid var(--editor-border, var(--border));
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 3%, transparent);
+}
+
+.cm-md-image-wrap.is-inline img {
+	display: inline-block;
+	max-height: 220px;
+	vertical-align: middle;
+}
+
+.cm-md-image-tools {
+	position: absolute;
+	top: 8px;
+	right: 8px;
+	display: flex;
+	align-items: center;
+	gap: 3px;
+	padding: 3px 4px;
+	border-radius: var(--radius-md);
+	background: color-mix(in srgb, var(--side-bg, #1c1917) 88%, transparent);
+	border: 1px solid color-mix(in srgb, var(--input-border, var(--border)) 85%, transparent);
+	box-shadow: var(--shadow);
+	opacity: 0;
+	pointer-events: none;
+	transition: opacity 120ms ease;
+	line-height: 1;
+}
+
+.cm-md-image-frame:hover .cm-md-image-tools,
+.cm-md-image-frame:focus-within .cm-md-image-tools {
+	opacity: 1;
+	pointer-events: auto;
+}
+
+.cm-md-img-btn {
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+	font-weight: 500;
+	color: var(--side-fg, var(--fg));
+	background: transparent;
+	border: 1px solid transparent;
+	border-radius: var(--radius-sm);
+	padding: 3px 7px;
+	cursor: pointer;
+}
+
+.cm-md-img-btn:hover {
+	background: var(--hover);
+	color: var(--strong-fg);
+}
+
+.cm-md-img-btn.active {
+	background: color-mix(in srgb, var(--accent) 20%, transparent);
+	border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+	color: var(--accent);
+}
+
+.cm-md-image-caption {
+	font-family: var(--ui-font);
+	font-size: var(--text-sm);
+	color: var(--editor-muted, var(--muted));
+	margin-top: 6px;
+}
+
+.cm-md-image-missing {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 10px;
+	border-radius: var(--radius-md);
+	border: 1px dashed var(--warning);
+	color: var(--warning);
+	background: color-mix(in srgb, var(--warning) 8%, transparent);
+	font-family: var(--ui-font);
+	font-size: var(--text-sm);
+	line-height: 1.4;
+}
+
+/* Image & Mermaid Lightbox Modal (portaled inside <Modal>'s .overlay at z-index: 80). */
+.md-lightbox-modal {
+	position: relative;
+	width: 100%;
+	height: 100%;
+	min-width: 0;
+	min-height: 0;
+	overflow: hidden;
+	z-index: 80;
+	display: flex;
+	flex-direction: column;
+	background: rgba(12, 11, 10, 0.86);
+	backdrop-filter: blur(4px);
+	outline: none;
+}
+
+.md-lightbox-modal:focus-visible {
+	outline: none;
+}
+
+.md-lightbox-bar {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: var(--space-2) var(--space-3);
+	min-width: 0;
+	padding: var(--space-3) var(--space-5);
+	background: color-mix(in srgb, var(--side-bg) 92%, transparent);
+	border-bottom: 1px solid var(--border);
+	color: var(--side-fg);
+	font-family: var(--ui-font);
+	font-size: var(--text-md);
+}
+
+.md-lightbox-caption {
+	flex: 0 1 auto;
+	min-width: 0;
+	font-weight: 600;
+	color: var(--strong-fg);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.md-lightbox-path {
+	flex: 0 1 auto;
+	min-width: 0;
+	font-size: var(--text-xs);
+	color: var(--muted);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.md-lightbox-btn {
+	flex: none;
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	padding: 4px 10px;
+	border-radius: var(--radius-sm);
+	border: 1px solid var(--border);
+	background: var(--panel-bg);
+	color: var(--fg);
+	font-family: var(--ui-font);
+	font-size: var(--text-sm);
+	white-space: nowrap;
+	cursor: pointer;
+}
+
+.md-lightbox-btn:hover {
+	background: var(--hover);
+	color: var(--strong-fg);
+}
+
+.md-lightbox-stage {
+	flex: 1;
+	min-height: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	overflow: auto;
+	padding: var(--space-6);
+}
+
+.md-lightbox-stage img {
+	max-width: 100%;
+	max-height: 100%;
+	object-fit: contain;
+	border-radius: var(--radius-md);
+	box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+
+.md-lightbox-stage.is-full {
+	align-items: flex-start;
+	justify-content: flex-start;
+}
+
+.md-lightbox-stage.is-full img {
+	max-width: none;
+	max-height: none;
+}
+
+.md-mermaid-lightbox-stage {
+	overflow: hidden;
+	cursor: grab;
+	user-select: none;
+}
+
+.md-mermaid-lightbox-stage:active {
+	cursor: grabbing;
+}
+
+.md-mermaid-lightbox-canvas {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	padding: var(--space-5);
+	border-radius: var(--radius-md);
+	background: var(--editor-bg);
+	border: 1px solid var(--border);
+	box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+	transform-origin: center center;
+}
+
+.md-mermaid-lightbox-canvas svg {
+	max-width: none;
+	height: auto;
+	display: block;
+}
+
+/* Hover Page Preview popover (Obsidian-style: Markdown, Flowcharts, Registries & Code). */
+.md-hover-card {
+	position: fixed;
+	z-index: 56;
+	width: min(460px, calc(100vw - 32px));
+	max-height: min(380px, calc(100vh - 32px));
+	overflow: auto;
+	background: var(--side-bg);
+	color: var(--side-fg);
+	border: 1px solid var(--input-border);
+	border-radius: var(--radius-lg);
+	box-shadow: var(--shadow);
+	padding: var(--space-4) var(--space-5);
+	font-family: var(--ui-font);
+	font-size: var(--text-md);
+	pointer-events: auto;
+}
+
+.md-hover-head {
+	display: flex;
+	align-items: center;
+	gap: var(--space-2);
+	padding-bottom: var(--space-3);
+	margin-bottom: var(--space-3);
+	border-bottom: 1px solid var(--border);
+}
+
+.md-hover-title {
+	font-weight: 600;
+	color: var(--strong-fg);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	flex: 1;
+	text-align: left;
+	background: transparent;
+	border: 0;
+	padding: 0;
+	cursor: pointer;
+	font: inherit;
+}
+
+.md-hover-title:hover {
+	color: var(--accent);
+	text-decoration: underline;
+}
+
+.md-hover-badge {
+	font-size: var(--text-xs);
+	color: var(--muted);
+	background: color-mix(in srgb, var(--fg) 8%, transparent);
+	padding: 1px 7px;
+	border-radius: 999px;
+	white-space: nowrap;
+}
+
+.md-hover-path {
+	font-size: var(--text-xs);
+	color: var(--muted);
+	white-space: nowrap;
+	max-width: 150px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.md-hover-body {
+	font-family: var(--read-font, var(--ui-font));
+	font-size: var(--text-md);
+	line-height: 1.55;
+}
+
+.md-hover-body h1,
+.md-hover-body h2,
+.md-hover-body h3 {
+	font-size: 1.08em;
+	margin: 0.6em 0 0.3em;
+}
+
+.md-hover-body h1:first-child {
+	margin-top: 0;
+}
+
+.md-hover-body p {
+	margin: 0 0 0.55em;
+}
+
+.md-hover-body img {
+	max-width: 100%;
+	max-height: 180px;
+	border-radius: var(--radius-sm);
+}
+
+.md-hover-goal {
+	margin: 0 0 var(--space-3);
+	color: var(--fg);
+}
+
+.md-hover-stats {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	margin-bottom: var(--space-3);
+}
+
+.md-hover-stats span {
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+	color: var(--muted);
+	background: color-mix(in srgb, var(--fg) 7%, transparent);
+	padding: 2px 8px;
+	border-radius: 999px;
+}
+
+.md-hover-plan-list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 5px;
+	font-family: var(--ui-font);
+	font-size: var(--text-sm);
+}
+
+.md-hover-plan-list li {
+	display: flex;
+	align-items: baseline;
+	gap: 7px;
+	line-height: 1.4;
+}
+
+.md-hover-step-kind {
+	flex: none;
+	font-size: 10px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	padding: 1px 5px;
+	border-radius: 4px;
+	background: color-mix(in srgb, var(--fg) 9%, transparent);
+	color: var(--muted);
+}
+
+.md-hover-step-kind.kind-decision {
+	background: color-mix(in srgb, var(--warning) 16%, transparent);
+	color: var(--warning);
+}
+
+.md-hover-step-kind.kind-end {
+	background: color-mix(in srgb, var(--ok) 16%, transparent);
+	color: var(--ok);
+}
+
+.md-hover-step-stage {
+	margin-left: auto;
+	font-size: var(--text-xs);
+	color: var(--muted);
+	white-space: nowrap;
+}
+
+.md-hover-more,
+.md-hover-empty {
+	color: var(--muted);
+	font-size: var(--text-xs);
+	margin: 6px 0 0;
+}
+
+.md-hover-table-wrap {
+	overflow-x: auto;
+}
+
+.md-hover-table-wrap table {
+	border-collapse: collapse;
+	width: 100%;
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+}
+
+.md-hover-table-wrap th,
+.md-hover-table-wrap td {
+	border: 1px solid var(--border);
+	padding: 4px 7px;
+	text-align: left;
+}
+
+.md-hover-table-wrap th {
+	background: color-mix(in srgb, var(--fg) 5%, transparent);
+	font-weight: 600;
+}
+
+.md-hover-body pre,
+.md-hover-code {
+	margin: 0 0 0.55em;
+	padding: 8px 10px;
+	border-radius: var(--radius-sm);
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 4%, var(--editor-bg, var(--bg)));
+	color: var(--editor-fg, var(--fg));
+	border: 1px solid var(--editor-border, var(--border));
+	font-family: var(--code-font);
+	font-size: var(--text-xs);
+	line-height: 1.45;
+	overflow-x: auto;
+}
+
+.md-hover-body pre:last-child,
+.md-hover-code:last-child {
+	margin-bottom: 0;
+}
+
+.md-hover-body pre code,
+.md-hover-code code {
+	padding: 0;
+	background: none;
+	font-size: inherit;
+}
+
+/* Fold gutter chevron visibility on active/hovered lines. */
+.cm-editor .cm-foldGutter .cm-gutterElement {
+	min-width: 14px;
+}
+
+.cm-editor:hover .cm-foldGutter .cm-gutterElement {
+	opacity: 0.5;
+}
+
+.cm-md-props-actions {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	margin-left: auto;
+}
+
+.cm-md-props-actions .cm-md-props-edit,
+.cm-md-doc-bar .cm-md-props-edit {
+	margin-left: 0;
+}
+
+.cm-md-prop-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+}
+
+.cm-md-prop-scalar-btn {
+	border: none;
+	background: transparent;
+	padding: 0 3px;
+	margin: 0 -3px;
+	border-radius: 3px;
+	color: inherit;
+	font: inherit;
+	cursor: pointer;
+	text-align: left;
+}
+
+.cm-md-prop-scalar-btn:hover,
+.cm-md-prop-scalar-btn:focus-visible {
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 10%, transparent);
+}
+
+.cm-md-prop-rm,
+.cm-md-prop-edit,
+.cm-md-prop-add {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 16px;
+	height: 16px;
+	padding: 0;
+	border: none;
+	border-radius: 3px;
+	background: transparent;
+	color: var(--editor-muted, var(--muted));
+	cursor: pointer;
+	opacity: 0.45;
+}
+
+.cm-md-prop-chip:hover .cm-md-prop-rm,
+.cm-md-prop-chip:hover .cm-md-prop-edit,
+.cm-md-prop-rm:focus-visible,
+.cm-md-prop-edit:focus-visible,
+.cm-md-prop-add:hover,
+.cm-md-prop-add:focus-visible {
+	opacity: 1;
+	color: var(--editor-fg, var(--fg));
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 10%, transparent);
+}
+
+.cm-md-prop-rm .codicon,
+.cm-md-prop-edit .codicon,
+.cm-md-prop-add .codicon,
+.cm-md-prop-rm .codicon-glyph,
+.cm-md-prop-edit .codicon-glyph,
+.cm-md-prop-add .codicon-glyph {
+	font-size: 11px;
+}
+
+.cm-md-prop-tag {
+	border: none;
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+	font-weight: 500;
+	color: var(--editor-accent, var(--accent));
+	background: color-mix(in srgb, var(--editor-accent, var(--accent)) 13%, transparent);
+	border-radius: 999px;
+	padding: 1px 7px;
+	cursor: pointer;
+	line-height: 1.45;
+}
+
+.cm-md-prop-tag:hover,
+.cm-md-prop-tag:focus-visible {
+	background: color-mix(in srgb, var(--editor-accent, var(--accent)) 22%, transparent);
+}
+
+/* Collapsible <details>/<summary> blocks in Live & Read modes (Wave 3.7) */
+.cm-md-details-card {
+	margin: var(--space-3) 0;
+	border: 1px solid var(--editor-border, var(--border));
+	border-radius: var(--radius-md);
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 2.5%, var(--editor-bg, var(--bg)));
+	overflow: hidden;
+}
+
+.cm-md-details-summary {
+	display: flex;
+	align-items: center;
+	gap: var(--space-2);
+	padding: 7px var(--space-4);
+	cursor: pointer;
+	user-select: none;
+	font-family: var(--ui-font);
+	font-weight: 600;
+	font-size: var(--text-md);
+	color: var(--editor-strong, var(--strong-fg));
+	list-style: none;
+}
+
+.cm-md-details-summary::-webkit-details-marker {
+	display: none;
+}
+
+.cm-md-details-summary::before {
+	content: "\eab6";
+	font-family: codicon;
+	font-size: 14px;
+	line-height: 1;
+	color: var(--editor-muted, var(--muted));
+	transition: transform 120ms ease;
+	flex: none;
+}
+
+.cm-md-details[open] > .cm-md-details-summary::before {
+	transform: rotate(90deg);
+}
+
+.cm-md-details-summary:hover {
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 4%, transparent);
+}
+
+.cm-md-details-title {
+	flex: 1;
+	min-width: 0;
+}
+
+.cm-md-details-edit {
+	opacity: 0;
+	transition: opacity 120ms ease;
+	margin-left: auto;
+}
+
+.cm-md-details-card:hover .cm-md-details-edit,
+.cm-md-details-edit:focus-visible {
+	opacity: 1;
+}
+
+.cm-md-details-body {
+	padding: var(--space-3) var(--space-4) var(--space-4);
+	border-top: 1px solid color-mix(in srgb, var(--editor-border, var(--border)) 70%, transparent);
+}
+
+.cm-md-details-body > :first-child {
+	margin-top: 0;
+}
+
+.cm-md-details-body > :last-child {
+	margin-bottom: 0;
+}
+
+/* Lazy-loaded KaTeX Math widgets (Wave 3.7) */
+.cm-md-math-block,
+.md-math-display {
+	margin: var(--space-3) 0;
+	padding: var(--space-3) var(--space-4);
+	border-radius: var(--radius-md);
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 2%, transparent);
+	overflow-x: auto;
+	text-align: center;
+	cursor: pointer;
+}
+
+.cm-md-host.cm-md-read .cm-md-math-block,
+.cm-md-host.cm-md-read .cm-md-math-inline {
+	cursor: default;
+}
+
+.cm-md-math-inline {
+	display: inline-block;
+	vertical-align: baseline;
+	padding: 0 2px;
+	border-radius: 3px;
+	cursor: pointer;
+}
+
+.cm-md-live .cm-md-math-block:hover,
+.cm-md-live .cm-md-math-inline:hover {
+	background: color-mix(in srgb, var(--editor-accent, var(--accent)) 10%, transparent);
+}
+
+.cm-md-math-pending {
+	font-family: var(--code-font);
+	font-size: 0.9em;
+	color: var(--editor-muted, var(--muted));
+}
+
+/* Read-only Markdown Find bar: hide Replace inputs/buttons so Ctrl+F stays a crisp Find-only bar. */
+.cm-md-read .cm-search input[name="replace"],
+.cm-md-read .cm-search button[name="replace"],
+.cm-md-read .cm-search button[name="replaceAll"],
+.cm-md-read .cm-search br {
+	display: none !important;
+}
+
+/* Minimal action strip shown on Markdown docs without YAML frontmatter (README, STATE, plain notes). */
+.cm-md-doc-bar {
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 6px;
+	margin: 0 0 10px;
+}
+
+/* Ticket Release Readiness Gate strip inside .md-work. */
+.md-readiness {
+	margin: 4px 0 10px;
+	padding: 6px 8px;
+	border: 1px solid color-mix(in srgb, var(--editor-border, var(--border)) 85%, transparent);
+	border-radius: var(--radius-md);
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 3%, transparent);
+}
+
+.md-readiness-toggle {
+	display: flex;
+	align-items: center;
+	width: 100%;
+	gap: 6px;
+	border: none;
+	background: none;
+	padding: 2px 2px;
+	border-radius: var(--radius-sm);
+	color: var(--editor-fg, var(--fg));
+	font-size: var(--text-xs);
+	font-weight: 600;
+	cursor: pointer;
+	text-align: left;
+}
+
+.md-readiness-toggle:hover {
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 7%, transparent);
+}
+
+.md-readiness-badge {
+	display: inline-flex;
+	align-items: center;
+	margin-left: auto;
+	padding: 1px 6px;
+	border-radius: 999px;
+	font-size: 10.5px;
+	font-weight: 600;
+}
+
+.md-readiness-badge.ready {
+	background: color-mix(in srgb, var(--editor-ok, var(--ok)) 12%, transparent);
+	border: 1px solid color-mix(in srgb, var(--editor-ok, var(--ok)) 42%, transparent);
+	color: var(--editor-strong, var(--strong-fg));
+}
+
+.md-readiness-badge.pending {
+	background: color-mix(in srgb, var(--editor-warning, var(--warning)) 12%, transparent);
+	border: 1px solid color-mix(in srgb, var(--editor-warning, var(--warning)) 45%, transparent);
+	color: var(--editor-strong, var(--strong-fg));
+}
+
+.md-readiness-list {
+	list-style: none;
+	margin: 6px 0 0;
+	padding: 0;
+	display: grid;
+	gap: 4px;
+}
+
+.md-readiness-row {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	font-size: var(--text-xs);
+	color: var(--editor-fg, var(--fg));
+}
+
+.md-readiness-row.level-pass .codicon {
+	color: var(--editor-ok, var(--ok));
+}
+
+.md-readiness-row.level-warn .codicon {
+	color: var(--editor-warning, var(--warning));
+}
+
+.md-readiness-row.level-note .codicon {
+	color: var(--editor-info, var(--info));
+}
+
+.md-readiness-detail {
+	color: var(--editor-muted, var(--muted));
+}
+
+/* Clean print / Save-as-PDF layout: hide IDE chrome, keep headings attached to content, avoid splitting tables/callouts/diagrams. */
+@media print {
+	.menubar,
+	.activity,
+	.sidebar,
+	.rightbar,
+	.bottom,
+	.statusbar,
+	.tabs-row,
+	.folio-hdr,
+	.splitter,
+	.toasts,
+	.cm-md-table-toolbar-wrap,
+	.cm-md-compact-bar,
+	.cm-md-props-actions,
+	.cm-md-doc-bar,
+	.md-work-actions,
+	.md-work-unlink,
+	.md-work-guide,
+	.cm-md-code-actions,
+	.cm-tbl-bar,
+	.cm-tbl-hover-bar,
+	.cm-tbl-th-sort,
+	.cm-tbl-add-row,
+	.cm-tbl-add-col,
+	.cm-callout-actions,
+	.cm-md-mermaid-actions,
+	.cm-md-embed-actions,
+	.cm-md-heading-link,
+	.cm-md-sel-bubble,
+	.cm-md-image-resize-handle,
+	.cm-md-image-width-badge,
+	.cm-md-prop-rm,
+	.cm-md-prop-edit,
+	.cm-md-prop-add,
+	.cm-md-prop-issue,
+	.cm-md-details-edit,
+	.md-readiness,
+	.cm-gutters,
+	.cm-search {
+		display: none !important;
+	}
+	.cm-md-host,
+	.md-view {
+		--editor-bg: #ffffff;
+		--editor-fg: #111111;
+		--editor-strong: #000000;
+		--editor-muted: #4b5563;
+		--editor-accent: #1d4ed8;
+		--editor-border: #d1d5db;
+		--editor-strip-bg: #f8fafc;
+		--editor-ok: #15803d;
+		--editor-warning: #92400e;
+		--editor-error: #b91c1c;
+		--editor-info: #1d4ed8;
+		--bg: #ffffff;
+		--fg: #111111;
+		--strong-fg: #000000;
+		--muted: #4b5563;
+		--accent: #1d4ed8;
+		--border: #d1d5db;
+		--side-bg: #f8fafc;
+		--side-fg: #111111;
+		--input-bg: #f8fafc;
+		--input-fg: #111111;
+		--ok: #15803d;
+		--warning: #92400e;
+		--error: #b91c1c;
+		--info: #1d4ed8;
+		color-scheme: light;
+		overflow: visible !important;
+		height: auto !important;
+		background: #ffffff !important;
+		color: #111111 !important;
+	}
+	.cm-md-page {
+		max-width: none !important;
+		padding: 0 !important;
+		margin: 0 !important;
+	}
+	.cm-md-h1,
+	.cm-md-h2,
+	.cm-md-h3,
+	.cm-md-h4 {
+		break-after: avoid;
+		page-break-after: avoid;
+	}
+	.cm-md-table-wrap,
+	.cm-md-callout,
+	.cm-md-mermaid-card,
+	.cm-md-embed-card,
+	.md-work {
+		break-inside: avoid;
+		page-break-inside: avoid;
+	}
+}
+
+
+/* --- Round 5: Live Mermaid Split Preview, Footnotes in Read Mode, Widget Autocomplete & Links Inspector --- */
+
+.cm-editor .cm-md-fm-search-line {
+	font-family: var(--code-font);
+	font-size: calc(var(--code-size) - 1px);
+	color: var(--editor-muted, var(--muted));
+	background: color-mix(in srgb, var(--warning) 8%, var(--editor-bg, var(--bg)));
+	padding-left: 12px !important;
+	border-left: 2px solid color-mix(in srgb, var(--warning) 55%, transparent);
+}
+
+.cm-md-fn-ref-read {
+	display: inline-block;
+	font-size: 0.72em;
+	line-height: 1;
+	vertical-align: super;
+	padding: 1px 3px;
+	margin: 0 1px;
+	border-radius: 3px;
+	color: var(--editor-accent, var(--accent));
+	background: color-mix(in srgb, var(--editor-accent, var(--accent)) 10%, transparent);
+	font-weight: 600;
+	cursor: pointer;
+	text-decoration: none;
+}
+.cm-md-fn-ref-read:hover {
+	background: color-mix(in srgb, var(--editor-accent, var(--accent)) 22%, transparent);
+}
+.cm-md-fn-def-read {
+	display: inline-block;
+	font-weight: 600;
+	color: var(--editor-accent, var(--accent));
+	margin-right: 4px;
+	cursor: pointer;
+}
+.cm-editor .cm-md-fn-def-line {
+	font-size: calc(var(--code-size) - 1px);
+	color: var(--editor-muted, var(--muted));
+}
+
+.cm-md-mermaid-live-preview {
+	margin: 6px 0 10px;
+	padding: 8px 12px;
+	border: 1px solid var(--editor-border, var(--border));
+	border-radius: var(--radius-md);
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 3%, var(--editor-bg, var(--bg)));
+}
+.cm-md-mermaid-live-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	margin-bottom: 6px;
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+	color: var(--editor-muted, var(--muted));
+}
+.cm-md-mermaid-live-title {
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+}
+.cm-md-mermaid-live-status {
+	font-variant-numeric: tabular-nums;
+}
+.cm-md-mermaid-err-banner {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 6px 10px;
+	margin-bottom: 6px;
+	border-radius: var(--radius-sm);
+	border: 1px solid color-mix(in srgb, var(--error) 45%, transparent);
+	background: color-mix(in srgb, var(--error) 10%, var(--editor-bg, var(--bg)));
+	color: var(--error);
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+}
+.cm-md-mermaid-err-msg {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.cm-md-mermaid-err-line-btn {
+	flex: none;
+	padding: 1px 7px;
+	border-radius: var(--radius-sm);
+	border: 1px solid color-mix(in srgb, var(--error) 45%, transparent);
+	background: transparent;
+	color: var(--error);
+	font-size: var(--text-xs);
+	font-weight: 600;
+	cursor: pointer;
+}
+.cm-md-mermaid-err-line-btn:hover {
+	background: color-mix(in srgb, var(--error) 16%, transparent);
+}
+
+.cm-widget-ac {
+	position: fixed;
+	z-index: 58;
+	min-width: 190px;
+	max-width: min(340px, calc(100vw - 16px));
+	max-height: 220px;
+	overflow-y: auto;
+	padding: 4px;
+	background: var(--side-bg);
+	color: var(--side-fg);
+	border: 1px solid var(--input-border);
+	border-radius: var(--radius-md);
+	box-shadow: var(--shadow);
+	font-family: var(--ui-font);
+	font-size: var(--text-sm);
+}
+.cm-widget-ac-item {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	width: 100%;
+	padding: 4px 8px;
+	border: 0;
+	border-radius: var(--radius-sm);
+	background: transparent;
+	color: inherit;
+	text-align: left;
+	cursor: pointer;
+	white-space: nowrap;
+}
+.cm-widget-ac-item:hover,
+.cm-widget-ac-item.active {
+	background: var(--selected);
+	color: var(--strong-fg);
+}
+
+.cm-md-links-pill {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	padding: 1px 7px;
+	border-radius: 999px;
+	border: 1px solid var(--editor-border, var(--border));
+	background: transparent;
+	color: var(--editor-muted, var(--muted));
+	font-size: var(--text-xs);
+	cursor: pointer;
+}
+.cm-md-links-pill:hover {
+	color: var(--editor-strong, var(--strong-fg));
+	background: var(--hover);
+}
+.cm-md-links-inspector {
+	margin-top: 28px;
+	padding-top: 14px;
+	border-top: 1px solid var(--editor-border, var(--border));
+	font-family: var(--ui-font);
+}
+.cm-md-links-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	margin-bottom: 8px;
+}
+.cm-md-links-tabs {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+}
+.cm-md-links-tabs button {
+	padding: 2px 9px;
+	border-radius: var(--radius-sm);
+	border: 1px solid transparent;
+	background: transparent;
+	color: var(--editor-muted, var(--muted));
+	font-size: var(--text-xs);
+	font-weight: 500;
+	cursor: pointer;
+}
+.cm-md-links-tabs button:hover {
+	color: var(--editor-strong, var(--strong-fg));
+	background: var(--hover);
+}
+.cm-md-links-tabs button.on {
+	color: var(--editor-strong, var(--strong-fg));
+	background: var(--selected);
+	border-color: var(--editor-border, var(--border));
+}
+.cm-md-link-snippet {
+	display: block;
+	margin-top: 2px;
+	font-size: var(--text-xs);
+	color: var(--editor-muted, var(--muted));
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* --- Round 6: Inline Frontmatter Editing, Validation Pills, Table Power, Foldable/Nested Callouts, Selection Bubble, Drag-Resize & Heading Copy Link --- */
+
+/* Inline scalar/date property editor inside .cm-md-props */
+.cm-md-prop-inline-input {
+	font-family: var(--ui-font);
+	font-size: var(--text-sm);
+	line-height: 1.35;
+	color: var(--editor-strong, var(--strong-fg));
+	background: var(--editor-bg, var(--bg));
+	border: 1px solid var(--editor-accent, var(--accent));
+	border-radius: var(--radius-sm);
+	padding: 1px 6px;
+	min-width: 96px;
+	max-width: 260px;
+	outline: none;
+	box-shadow: 0 0 0 1px color-mix(in srgb, var(--editor-accent, var(--accent)) 32%, transparent);
+}
+
+.cm-md-prop-inline-input[type="date"] {
+	min-width: 130px;
+	color-scheme: inherit;
+}
+
+/* Quiet inline metadata validation warning pill */
+.cm-md-prop-issue {
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+	padding: 1px 6px;
+	min-height: calc(18px * var(--ui-scale));
+	height: auto;
+	border-radius: 999px;
+	border: 1px solid color-mix(in srgb, var(--warning) 42%, transparent);
+	background: color-mix(in srgb, var(--warning) 12%, transparent);
+	color: var(--warning);
+	font-family: var(--ui-font);
+	font-size: 11px;
+	font-weight: 500;
+	line-height: 1;
+	white-space: nowrap;
+	cursor: help;
+}
+
+.cm-md-prop-issue .codicon,
+.cm-md-prop-issue .codicon-glyph {
+	font-size: 11px;
+	line-height: 1;
+}
+
+/* Quiet top hover toolbar on Live & Read Markdown tables */
+.cm-tbl-hover-bar {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 3px;
+	min-height: 22px;
+	margin-bottom: 4px;
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+	opacity: 0;
+	transition: opacity 130ms ease;
+}
+
+.cm-md-table-card:hover .cm-tbl-hover-bar,
+.cm-md-table-card:focus-within .cm-tbl-hover-bar,
+.cm-md-table-card[data-editing="true"] .cm-tbl-hover-bar,
+.cm-md-table-card[data-has-range="true"] .cm-tbl-hover-bar {
+	opacity: 1;
+}
+
+.cm-tbl-qbtn {
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+	min-height: calc(21px * var(--ui-scale));
+	height: auto;
+	padding: 1px 6px;
+	border-radius: var(--radius-sm);
+	border: 1px solid color-mix(in srgb, var(--editor-border, var(--border)) 80%, transparent);
+	background: color-mix(in srgb, var(--editor-fg, var(--fg)) 3.5%, var(--editor-bg, var(--bg)));
+	color: var(--editor-muted, var(--muted));
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+	font-weight: 500;
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+.cm-tbl-qbtn:hover {
+	color: var(--editor-strong, var(--strong-fg));
+	background: var(--hover);
+	border-color: color-mix(in srgb, var(--editor-fg, var(--fg)) 26%, transparent);
+}
+
+.cm-tbl-qbtn .codicon-glyph {
+	font-size: 12px;
+	line-height: 1;
+}
+
+.cm-tbl-range-badge {
+	display: inline-flex;
+	align-items: center;
+	min-height: calc(20px * var(--ui-scale));
+	height: auto;
+	padding: 1px 7px;
+	margin-right: auto;
+	border-radius: 999px;
+	background: color-mix(in srgb, var(--editor-accent, var(--accent)) 14%, transparent);
+	border: 1px solid color-mix(in srgb, var(--editor-accent, var(--accent)) 36%, transparent);
+	color: var(--editor-accent, var(--accent));
+	font-size: 11px;
+	font-weight: 600;
+	white-space: nowrap;
+}
+
+/* Subtle column header sort affordance */
+.cm-tbl-th-inner {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 6px;
+}
+
+.cm-tbl-th-inner > .cm-tbl-cell-view {
+	flex: 1;
+	min-width: 0;
+}
+
+.cm-tbl-th-sort {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 18px;
+	height: 18px;
+	padding: 0;
+	margin-top: 1px;
+	flex: none;
+	border: 0;
+	border-radius: var(--radius-sm);
+	background: transparent;
+	color: var(--editor-muted, var(--muted));
+	cursor: pointer;
+	opacity: 0;
+	transition: opacity 120ms ease, background 120ms ease, color 120ms ease;
+}
+
+.cm-md-table-wrap th:hover .cm-tbl-th-sort,
+.cm-tbl-th-sort.is-sorted,
+.cm-tbl-th-sort:focus-visible {
+	opacity: 0.85;
+}
+
+.cm-tbl-th-sort:hover,
+.cm-tbl-th-sort.is-sorted {
+	opacity: 1;
+	color: var(--editor-accent, var(--accent));
+	background: color-mix(in srgb, var(--editor-accent, var(--accent)) 14%, transparent);
+}
+
+.cm-tbl-th-sort .codicon-glyph {
+	font-size: 12px;
+	line-height: 1;
+}
+
+/* Shift+Click rectangular cell range selection highlight */
+.cm-md-table-wrap th.is-range-selected,
+.cm-md-table-wrap td.is-range-selected {
+	background: color-mix(in srgb, var(--editor-accent, var(--accent)) 16%, var(--editor-bg, var(--bg))) !important;
+	box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--editor-accent, var(--accent)) 55%, transparent);
+}
+
+/* Transclusion header actions (Refresh + Edit) */
+.cm-md-embed-actions {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	flex: none;
+}
+
+.cm-md-embed-refresh {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	padding: 2px 5px;
+}
+
+.cm-md-embed-refresh .codicon-glyph {
+	font-size: 13px;
+	line-height: 1;
+}
+
+/* Foldable `<details class="md-callout">` and nested callouts inside Callout / Read / Hover bodies */
+details.md-callout > summary.md-callout-head {
+	cursor: pointer;
+	user-select: none;
+	list-style: none;
+}
+
+details.md-callout > summary.md-callout-head::-webkit-details-marker {
+	display: none;
+}
+
+details.md-callout > summary.md-callout-head::after {
+	content: "\eab6";
+	font-family: codicon;
+	font-size: 13px;
+	line-height: 1;
+	margin-left: auto;
+	color: var(--muted);
+	transition: transform 120ms ease;
+	flex: none;
+}
+
+details.md-callout[open] > summary.md-callout-head::after {
+	transform: rotate(90deg);
+}
+
+details.md-callout:not([open]) > summary.md-callout-head {
+	background: transparent;
+}
+
+.cm-md-callout-body .md-callout,
+.md-callout-body .md-callout {
+	margin: 8px 0;
+	border-radius: var(--radius-sm);
+}
+
+.cm-md-callout-body .md-callout-head,
+.md-callout-body .md-callout-head {
+	padding: 5px var(--space-3);
+	font-size: var(--text-sm);
+}
+
+.cm-md-callout-body .md-callout-body,
+.md-callout-body .md-callout-body {
+	padding: var(--space-2) var(--space-3);
+}
+
+/* Inline image lightbox cursor + Block image right-edge drag-to-resize handle */
+.cm-md-image-wrap.is-inline img {
+	cursor: zoom-in;
+}
+
+.cm-md-image-resize-handle {
+	position: absolute;
+	top: 12%;
+	bottom: 12%;
+	right: -5px;
+	width: 10px;
+	cursor: ew-resize;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	opacity: 0;
+	transition: opacity 120ms ease;
+	z-index: 4;
+}
+
+.cm-md-image-resize-handle::after {
+	content: "";
+	width: 4px;
+	height: 36px;
+	max-height: 60%;
+	border-radius: 999px;
+	background: var(--editor-accent, var(--accent));
+	box-shadow: 0 0 0 1px var(--editor-bg, var(--bg));
+}
+
+.cm-md-image-frame:hover .cm-md-image-resize-handle,
+.cm-md-image-frame.is-resizing .cm-md-image-resize-handle {
+	opacity: 1;
+}
+
+.cm-md-image-frame.is-resizing img {
+	outline: 2px solid color-mix(in srgb, var(--editor-accent, var(--accent)) 70%, transparent);
+	outline-offset: 1px;
+}
+
+.cm-md-image-width-badge {
+	position: absolute;
+	bottom: 8px;
+	right: 10px;
+	padding: 2px 7px;
+	border-radius: var(--radius-sm);
+	background: color-mix(in srgb, var(--side-bg, #1c1917) 90%, transparent);
+	border: 1px solid var(--input-border, var(--border));
+	color: var(--strong-fg);
+	font-family: var(--code-font);
+	font-size: var(--text-xs);
+	font-weight: 600;
+	line-height: 1.3;
+	pointer-events: none;
+	z-index: 5;
+}
+
+/* Quiet hover `#` copy-link affordance on headings (Live & Read) */
+.cm-md-heading-link {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	margin-left: 8px;
+	padding: 0 5px;
+	height: 1.15em;
+	vertical-align: middle;
+	border: 0;
+	border-radius: var(--radius-sm);
+	background: transparent;
+	color: var(--editor-muted, var(--muted));
+	font-family: var(--ui-font);
+	font-size: 0.62em;
+	font-weight: 600;
+	line-height: 1;
+	cursor: pointer;
+	opacity: 0;
+	user-select: none;
+	transition: opacity 120ms ease, color 120ms ease, background 120ms ease;
+}
+
+.cm-line:hover .cm-md-heading-link,
+.cm-md-heading-link:focus-visible,
+.cm-md-heading-link.is-copied {
+	opacity: 0.72;
+}
+
+.cm-md-heading-link:hover {
+	opacity: 1;
+	color: var(--editor-accent, var(--accent));
+	background: color-mix(in srgb, var(--editor-accent, var(--accent)) 12%, transparent);
+}
+
+.cm-md-heading-link.is-copied {
+	opacity: 1;
+	color: var(--ok);
+}
+
+/* Floating Selection Formatting Toolbar in Live Mode */
+.cm-md-sel-bubble {
+	position: fixed;
+	z-index: 57;
+	display: inline-flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 2px;
+	max-width: calc(100vw - 16px);
+	padding: 3px 5px;
+	border-radius: var(--radius-md);
+	border: 1px solid var(--input-border, var(--border));
+	background: var(--side-bg, var(--panel-bg));
+	color: var(--side-fg, var(--fg));
+	box-shadow: var(--shadow);
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+}
+
+.cm-md-sel-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	min-height: calc(24px * var(--ui-scale));
+	height: auto;
+	padding: 2px 7px;
+	border: 1px solid transparent;
+	border-radius: var(--radius-sm);
+	background: transparent;
+	color: var(--side-fg, var(--fg));
+	font-family: var(--ui-font);
+	font-size: var(--text-xs);
+	font-weight: 500;
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+.cm-md-sel-btn:hover {
+	background: var(--hover);
+	color: var(--strong-fg);
+}
+
+.cm-md-sel-bold {
+	font-weight: 700;
+}
+
+.cm-md-sel-italic {
+	font-style: italic;
+	font-family: Georgia, serif;
+}
+
+.cm-md-sel-code {
+	font-family: var(--code-font);
+}
+
+.cm-md-sel-hl {
+	background: color-mix(in srgb, var(--warning) 20%, transparent);
+}
+
+.cm-md-sel-sep {
+	width: 1px;
+	height: 15px;
+	background: var(--border);
+	opacity: 0.65;
+	margin: 0 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.cm-md-compact-meta,
+	.cm-md-compact-btn,
+	.md-work-btn,
+	.md-work-unlink,
+	.cm-tbl-add-col,
+	.cm-tbl-add-row,
+	.cm-md-callout,
+	.cm-callout-type-btn,
+	.cm-callout-title-input,
+	.cm-callout-actions,
+	.cm-md-image-tools,
+	.cm-md-details-summary::before,
+	.cm-md-details-edit,
+	.cm-tbl-hover-bar,
+	.cm-tbl-th-sort,
+	.cm-md-image-resize-handle,
+	.cm-md-heading-link,
+	details.md-callout > summary.md-callout-head::after {
+		transition: none;
+	}
+}

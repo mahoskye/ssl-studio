@@ -1,0 +1,127 @@
+/********************************************************************************
+Description.. : Unit tests for the classes DueDates.DueRule and DueDates.RushDueRule: every
+                sample of docs/Worked-examples.md, S-1001 to S-1007, and one more.
+                No database is read or written.
+                Run DueDatesTests.DueRuleTests.RunTests. It returns the tally.
+Parameters... : -
+Returns...... : -
+Author....... :
+Date......... : 2026-11-17
+********************************************************************************
+_______________________________________________________________________________
+Modification. : The runner and the rule fixture are the shared ones, S-1006 and
+                S-1007 are tested, and the other cases have their own script.
+Author....... :
+Date......... : 2026-11-18
+_______________________________________________________________________________
+********************************************************************************/;
+
+/*
+ * Procedure: RunTests
+ * Description: Runs every test of this script, each on its own.
+ * Returns: {nPassed, nTotal, aResults}, each result {sLabel, bPassed}
+;
+:PROCEDURE RunTests;
+	:DECLARE aArgs, aTests;
+
+	aTests := {
+		"TestNoInstrumentPlainDays", "TestOutagePushesDueDate", "TestOtherOutageIgnored",
+		"TestRoutineSkipsSaturday", "TestRushCountsSaturday", "TestDueDateSkipsHoliday",
+		"TestLaterOutageIgnored", "TestNoTurnaroundNoDueDate"
+	};
+	aArgs := {"DueDatesTests.DueRuleTests", aTests};
+
+	:RETURN ExecFunction("DueDatesTests.TestSupport.RunAll", aArgs);
+:ENDPROC;
+
+/* region Instruments and outages;
+
+:PROCEDURE TestNoInstrumentPlainDays;
+	/* S-1001: Monday 16 November 2026, 3 days, no instrument: Tuesday to Thursday count;
+	:DECLARE dActual, oRule;
+
+	oRule := ExecFunction("DueDatesTests.TestSupport.NewRule", {3});
+	dActual := oRule:DueDate(DateFromNumbers(2026, 11, 16), "");
+
+	:RETURN {"S-1001: no instrument, no outage", "20261119", dActual};
+:ENDPROC;
+
+:PROCEDURE TestOutagePushesDueDate;
+	/* S-1002: the same on BAL-01, out on 18 and 19: Tuesday, Friday and Monday count;
+	:DECLARE dActual, oRule;
+
+	oRule := ExecFunction("DueDatesTests.TestSupport.NewRule", {3});
+	dActual := oRule:DueDate(DateFromNumbers(2026, 11, 16), "BAL-01");
+
+	:RETURN {"S-1002: an outage pushes the due date", "20261123", dActual};
+:ENDPROC;
+
+:PROCEDURE TestOtherOutageIgnored;
+	/* Not in the worked examples: S-1002 on HPLC-02, which is not out until
+	   December. The BAL-01 outage does not apply to it;
+	:DECLARE dActual, oRule;
+
+	oRule := ExecFunction("DueDatesTests.TestSupport.NewRule", {3});
+	dActual := oRule:DueDate(DateFromNumbers(2026, 11, 16), "HPLC-02");
+
+	:RETURN {"Another instrument's outage does not count", "20261119", dActual};
+:ENDPROC;
+
+:PROCEDURE TestLaterOutageIgnored;
+	/* S-1006: Friday 27, 1 day, on HPLC-02: Monday 30 counts. HPLC-02 is out
+	   from 1 December, after the sample is due, and that changes nothing;
+	:DECLARE dActual, oRule;
+
+	oRule := ExecFunction("DueDatesTests.TestSupport.NewRule", {1});
+	dActual := oRule:DueDate(DateFromNumbers(2026, 11, 27), "HPLC-02");
+
+	:RETURN {"S-1006: an outage after the due date", "20261130", dActual};
+:ENDPROC;
+
+/* endregion;
+
+/* region Calendar and turnaround;
+
+:PROCEDURE TestRoutineSkipsSaturday;
+	/* S-1003: Thursday 19, 2 days: Friday 20 and Monday 23 count, the weekend does not;
+	:DECLARE dActual, oRule;
+
+	oRule := ExecFunction("DueDatesTests.TestSupport.NewRule", {2});
+	dActual := oRule:DueDate(DateFromNumbers(2026, 11, 19), "");
+
+	:RETURN {"S-1003: routine work skips the weekend", "20261123", dActual};
+:ENDPROC;
+
+:PROCEDURE TestRushCountsSaturday;
+	/* S-1004: the same as rush: Friday 20 and Saturday 21 count. DueDate is the
+	   base's, so this passes only when it asks the rush CountsSaturday;
+	:DECLARE dActual, oRule;
+
+	oRule := ExecFunction("DueDatesTests.TestSupport.NewRule", {2, .T.});
+	dActual := oRule:DueDate(DateFromNumbers(2026, 11, 19), "");
+
+	:RETURN {"S-1004: rush work counts Saturday", "20261121", dActual};
+:ENDPROC;
+
+:PROCEDURE TestDueDateSkipsHoliday;
+	/* S-1005: Tuesday 24, 2 days, Thursday 26 a holiday: Wednesday and Friday count;
+	:DECLARE dActual, oRule;
+
+	oRule := ExecFunction("DueDatesTests.TestSupport.NewRule", {2});
+	dActual := oRule:DueDate(DateFromNumbers(2026, 11, 24), "");
+
+	:RETURN {"S-1005: a holiday is not counted", "20261127", dActual};
+:ENDPROC;
+
+:PROCEDURE TestNoTurnaroundNoDueDate;
+	/* S-1007: no turnaround. The NULL of the table is read as 0, and 0 days is
+	   no turnaround: there is no due date, not the received date;
+	:DECLARE dActual, oRule;
+
+	oRule := ExecFunction("DueDatesTests.TestSupport.NewRule", {0});
+	dActual := oRule:DueDate(DateFromNumbers(2026, 11, 16), "");
+
+	:RETURN {"S-1007: no turnaround, no due date", "", dActual};
+:ENDPROC;
+
+/* endregion;

@@ -770,3 +770,71 @@ operations may change between releases.
   which model it uses; how `delivery: "steer"` behaves mid-turn; and how cost
   and token usage arrive (`session.usage.updated`). One prompt against the
   local ollama model, with the user's agreement, would answer most of these.
+
+## 13. Checked against 2.3.2 (2026-11-18)
+
+opencode on the development machine had moved to **2.3.2**, outside the
+range the adapter accepted (`>=2.2.5 <2.3.0`), so the Agent panel was off.
+The adapter was run against it as it is, with the local Ollama model only
+(`qwen3:14b` through a scratch `OPENCODE_CONFIG`; no paid provider was sent
+anything).
+
+What held, unchanged:
+
+- `serve --stdio` and its first line, Basic auth, `/api/info` (`2.3.2`).
+- `/api/model` and `/api/skill` (33 skills, the `ssl-*` ones among them).
+- `session.create` with a model, a directory and deny rules; the rules are
+  stored and echoed.
+- `prompt`, with and without `skills: [{ id }]`.
+- The events the IDE reads: `session.text.delta`, `session.execution.*`,
+  `session.tool.called`, `session.usage.updated`.
+- `message` listing, tokens, cost (0 for the local model), `interrupt`
+  (the turn ends `interrupted`), and a second prompt on a kept session.
+
+What is new in 2.3 and what was done about it:
+
+- **An image tool, `experimental_image_generate`**, offered "while a
+  connected provider has an image model". It asks permission under its own
+  name, then `edit` for the file it writes. A model with only the old rules
+  listed it among its tools. It calls a provider that may bill, so every
+  session now denies it.
+- **MCP resource tools** (`opencode_list_mcp_resources`,
+  `opencode_read_mcp_resource`, `opencode_watch_mcp_event`) read from the
+  servers the user has connected: outside the workspace. Denied as well,
+  and `browser`, which 2.2.5 named among its actions.
+- With those rules the model named its tools as `glob`, `grep`, `read`,
+  `skill` and `subagent`, and asked to create a file by any means, it could
+  not: no file appeared.
+- **Tools of the model's own.** 2.2.5 gave a model code mode and nothing
+  else; 2.3 gives it `read`, `glob`, `grep`, `subagent` and `skill`
+  directly. Three sets of rules were tried, each with the same two
+  questions in one conversation (the first carrying a ticket):
+
+| Also denied | Model is left | Overhead, tokens |
+| --- | --- | --- |
+| nothing | file tools, `skill` | about 1,600 |
+| file tools, `subagent` | `skill` | about 480 |
+| those and `skill` | code mode | about 2,570 |
+
+  - With the file tools, the second question sent the model searching
+    the folder for what the first had already carried; the context
+    (4096 tokens, Ollama's default) filled and the prompt was cut.
+  - With only `skill`, the second question made it load a skill that had
+    nothing to do with it, and it answered about that.
+  - With `skill` denied too, it is in code mode as on 2.2.5 (`execute`,
+    with the helpers the adapter already guards against). Both questions
+    were answered from what was sent, with no tool call, and a skill
+    attached to a prompt still arrived.
+  - The adapter denies all five: a turn is then what its prompt says it
+    is, on either version (ADR 0004). The cost is the largest overhead of
+    the three; the middle row is worth another look for a small context.
+
+Not checked: opencode 2.2.x with the longer rule list (it is not installed
+here any more; a rule for an action a server does not have should deny
+nothing, and the rules are plain strings in its API); whether the two
+helpers the adapter guards against (`worktree_create`, `session_move`) still
+skip the permission check in 2.3; any 2.3.x other than 2.3.2. The overhead
+figures are what the model reported for a prompt of a line or two, once
+each.
+
+The range is now `>=2.2.5 <2.4.0`.

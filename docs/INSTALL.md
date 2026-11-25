@@ -4,10 +4,10 @@
 
 | | Needed for | Notes |
 | --- | --- | --- |
-| `starlims-lsp` 0.30.0 | everything SSL | Release builds carry it (`app/bin/starlims-lsp`). From source, put it on `PATH`, set `STARLIMS_LSP`, or set `lspPath` in Settings. Another version runs with a warning in the status bar. |
-| opencode 2.2.x | the Agent panel only | On `PATH`. The IDE starts its own private server; nothing is shared with opencode's background service. |
+| `starlims-lsp` 0.31.0 | everything SSL | Release builds carry it (`app/bin/starlims-lsp`). From source, put it on `PATH`, set `STARLIMS_LSP`, or set `lspPath` in Settings. Another version runs with a warning in the status bar. |
+| opencode 2.2.5 to 2.3.x | the Agent panel only | On `PATH`. The IDE starts its own private server; nothing is shared with opencode's background service. |
 | A local model | the Agent panel's default | Ollama through opencode's `ollama` provider, or any provider set in `agentServerConfig`. A paid provider is used only after you choose it. |
-| WebKitGTK 4.1 (Linux) | the window | The system webview Electrobun uses on Linux (`libwebkit2gtk-4.1`). Present on current Ubuntu and Fedora desktops. |
+| GTK 3, WebKitGTK 4.1, Ayatana AppIndicator, librsvg (Linux) | the window | Native Electrobun runtime libraries. Install the packages for your distribution below. |
 
 ## Installing a release (Linux)
 
@@ -18,8 +18,10 @@ tar xzf linux-x64-SSLStudio-Setup.tar.gz
 
 The installer puts the app in `~/.local/share/` and adds a desktop shortcut.
 Settings live in `~/.config/ssl-studio/`, local history in
-`~/.local/share/ssl-studio/history/`, and per-workspace settings (region
-colours, layout, style overrides) in `<workspace>/.ssl-studio/`.
+`~/.local/share/ssl-studio/history/`, and per-workspace settings in
+`<workspace>/.ssl-studio/`: `project.toml` for what the project is (you edit
+it), `settings.json` for region colours, layout and style overrides (the IDE
+writes it).
 
 ## Building
 
@@ -32,9 +34,28 @@ bun scripts/bundle-lsp.ts --download     # once per OS: the pinned language serv
 hutch run build                          # artifacts/ gets the installer and the update bundle
 ```
 
-`bundle-lsp.ts` without `--download` copies a local starlims-lsp 0.30.0
+`bundle-lsp.ts` without `--download` copies a local starlims-lsp 0.31.0
 instead. The build also writes `THIRD-PARTY-NOTICES.md` (the bundled
 packages' licenses) into the app.
+
+`prepare` caches Hutch under `~/.hutch/npm/electrobun/2.0.5/<platform>/bin`; it
+does not add the `hutch` command to `PATH`. Make that directory available in
+your shell before running the commands below, or use an existing Hutch install.
+The platform directory is `linux-x64`, `linux-arm64`, `macos-x64`,
+`macos-arm64`, `windows-x64` or `windows-arm64`.
+
+### Linux desktop libraries
+
+The browser host does not need these packages. The Electrobun desktop window
+does. On Arch Linux or Manjaro, install them with:
+
+```bash
+sudo pacman -S --needed gtk3 webkit2gtk-4.1 libayatana-appindicator librsvg
+```
+
+On Ubuntu/Debian, use `libgtk-3-0 libwebkit2gtk-4.1-0
+libayatana-appindicator3-1 librsvg2-2`. On Fedora/RHEL, use `gtk3
+webkit2gtk4.1 libappindicator-gtk3 librsvg2`.
 
 ## Checking a build
 
@@ -43,11 +64,18 @@ hutch run selftest
 ```
 
 Opens the app on `fixtures/workspace`, checks highlighting, the language
-server, symbols, diagnostics, hover and format with undo, writes
-`selftest.json` and quits. Its settings go to `.selftest/`, not yours. `hutch run selftest-cycle`
+server, symbols, diagnostics, hover, format with undo and what the Docs panel
+lists, writes `selftest.json` and quits. Its settings go to `.selftest/`, not yours. `hutch run selftest-cycle`
 does the same and then drives a plan's whole life in the window (build, follow a link, see drift,
 change the chart and rebuild, write the tests), on a copy of the workspace, with the recorded
-fake in place of a model. It costs nothing.
+fake in place of a model. On that copy it also presses "Set up project" and reads the documents
+that makes, rendered and as text. It costs nothing.
+
+`hutch run selftest-close` checks that closing the window never loses work. It makes an edit on a
+copy of the workspace, leaves it unsaved, and presses the window's close button from outside. The
+window has to stay and ask; cancelled, the edit is still there; asked again and told to save, the
+app saves the file and closes. It runs on Linux with X11 and `xdotool`, and on Windows; it is not
+written for macOS.
 
 ## A local model through Ollama
 

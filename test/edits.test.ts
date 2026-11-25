@@ -43,3 +43,22 @@ describe("minimalReplace", () => {
 		test(`${JSON.stringify(a)} → ${JSON.stringify(b)}`, () => expect(apply(a!, b!)).toBe(b!));
 	test("small span", () => expect(minimalReplace("hello world", "hello there world")).toEqual({ start: 6, end: 6, text: "there " }));
 });
+
+import { applyTextEdits } from "../src/view/lsp/edits";
+
+test("the server's edits are applied to text that is in no editor", () => {
+	const at = (line: number, character: number) => ({ line, character });
+	const text = "a:=1;\nb:=2;\n";
+	// Two edits, given first to last: the later one is not moved by the earlier.
+	expect(
+		applyTextEdits(text, [
+			{ range: { start: at(0, 1), end: at(0, 3) }, newText: " := " },
+			{ range: { start: at(1, 1), end: at(1, 3) }, newText: " := " },
+		]),
+	).toBe("a := 1;\nb := 2;\n");
+	// A whole-document replacement, whose end is past the last line.
+	expect(applyTextEdits(text, [{ range: { start: at(0, 0), end: at(9, 0) }, newText: "x;\n" }])).toBe("x;\n");
+	// A column past the end of its line stops at the line's end.
+	expect(applyTextEdits("ab\ncd", [{ range: { start: at(0, 99), end: at(0, 99) }, newText: "!" }])).toBe("ab!\ncd");
+	expect(applyTextEdits(text, [])).toBe(text);
+});

@@ -5,6 +5,8 @@ All four stages of the build order are done: the chart, refine and spec, build a
 review, and what follows a build. The [spike](spikes/planning-mode.md) found a local
 model good for refining a plan and for a first draft, not for a working script; this
 design reflects that. Neither a stronger model nor a real STARLIMS run has been tried.
+Ongoing design for agent build triggers, Assistant UX, flowchart testing, and the
+five-state code indicator is tracked in [AGENT-INTEGRATION.md](AGENT-INTEGRATION.md).
 
 **The idea, in the user's words:** "a planning mode where I can use a flow
 chart to design a process or script and then have an agent take over and work
@@ -19,10 +21,10 @@ your files until you have reviewed the finished change set.
 | Stage | Who works | What comes out | You decide |
 | --- | --- | --- | --- |
 | 1. Draw | You | `design/<name>.plan.json` | When it is ready |
-| 2. Refine | Agent | Answers to its questions; chart suggestions | Each question and suggestion |
-| 3. Spec | Agent | `design/<name>.spec.md` | Approve, or send it back |
-| 4. Build | Agent, unattended | A pending change set; no file changes | Only what it cannot resolve |
-| 5. Review | You, helped by a second agent | Accepted edits in the editor | Each file: accept, or reject with a reason |
+| 2. Refine | Agent | Questions and suggestions | Each question and suggestion |
+| 3. Plan doc | Agent | `design/<name>.plan.md` | Approve, or send it back |
+| 4. Build | Agent, unattended | Pending change set | Only what it cannot resolve |
+| 5. Review | You + reviewer | Accepted edits in editor | Accept, or reject with reason |
 
 Stages 2 to 5 reuse what the tidy steps already proved: SSL Studio supplies the
 context, the agent replies in fenced blocks, the language server checks the
@@ -83,9 +85,14 @@ A plan is one file, kept with the project in `design/` beside the tidy notes:
   back to an earlier node.
 - **Groups become regions.** A group in the chart is a comment region in the
   code, with the same colour in the chart, blocks and graph.
+- **A plan can name its ticket:** `"ticket": "LIMS-123"`, set in the plan's
+  details. The agent is then told what the ticket asks, the open questions
+  and the decisions that stand when it refines the plan or writes the spec
+  ([ADR 0013](adr/0013-the-agent-is-told-the-work-a-question-is-for.md)).
 - **No positions are stored.** ELK lays the chart out, as in graph mode. Diffs
   stay small, and there is nothing to tidy by hand. Keyboard first: Enter adds
-  the next step, Tab adds a branch, double-click edits the words.
+  the next step, B adds a branch, double-click edits the words. Tab is left
+  alone: it moves on to the next part of the window (ADR 0010).
 - **A check with no agent and no cost:** unreachable nodes, dead ends, a decision
   with one way out, unlabelled branches, a `ref` the server cannot resolve. These
   show in Problems like any other finding.
@@ -256,7 +263,8 @@ Each step is usable before the next starts.
 
 1. **P1, the chart. Done (2026-11-03).** File format, Chart and Text views,
    keyboard editing, the no-agent check, drag from Objects. No model. New plan is
-   in the command palette. Keys: Enter adds the next step, Tab a branch, F2 edits
+   in the command palette. Keys: Enter adds the next step, B a branch (Tab until
+   2026-11-18, when it was given back to moving focus), F2 edits
    the words, D switches step and decision, C connects, Delete removes, arrows
    move, Ctrl+Z undoes.
 2. **Spike, before P2. Done (2026-11-03),** [results](spikes/planning-mode.md). A

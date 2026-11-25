@@ -3,8 +3,9 @@
 // The judge is shaped by what went wrong in docs/spikes/planning-mode.md: replies with
 // no code, comments in place of a step, calls to procedures that do not exist. Nothing
 // here parses SSL (ADR 0003): findings, symbols and calls all come from the server.
-import { decisionsOf, readBlocks, type NodeMap, type SpecUnit } from "./assist";
-import type { Plan } from "./model";
+import { bannerTemplate } from "../../shared/houseStyle";
+import { decisionsOf, hashText, planTargetsOf, readBlocks, type NodeMap, type SpecUnit } from "./assist";
+import { nodeDocsOf, type Plan } from "./model";
 
 /** `kept`: already built, and the chart has not touched it. It is never sent to the agent or reprinted. */
 export type UnitStatus = "pending" | "running" | "passed" | "stuck" | "skipped" | "kept";
@@ -154,8 +155,8 @@ export function judgeUnit(j: Judged): string[] {
 	const mine = j.edges.filter((e) => e.from.toLowerCase() === name);
 	for (const e of mine) if (!e.resolved && !planned.has(lastPart(e.target))) problems.push(`It calls ${e.target}, which does not exist in the workspace.`);
 	for (const required of j.mustCall) if (!mine.some((e) => lastPart(e.target) === lastPart(required))) problems.push(`The spec says it calls ${required}, and it does not.`);
-	if (j.size.bytes > j.limits.bytes) problems.push(`The script is now ${Math.round(j.size.bytes / 1024)} KB, over the ${Math.round(j.limits.bytes / 1024)} KB limit.`);
-	if (j.size.codeLines > j.limits.codeLines) problems.push(`The script is now ${j.size.codeLines} code lines, over the ${j.limits.codeLines} limit.`);
+	if (j.limits.bytes > 0 && j.size.bytes > j.limits.bytes) problems.push(`The script is now ${Math.round(j.size.bytes / 1024)} KB, over the ${Math.round(j.limits.bytes / 1024)} KB limit.`);
+	if (j.limits.codeLines > 0 && j.size.codeLines > j.limits.codeLines) problems.push(`The script is now ${j.size.codeLines} code lines, over the ${j.limits.codeLines} limit.`);
 	return problems;
 }
 
@@ -185,14 +186,43 @@ export function unbuiltNodes(plan: Plan, run: BuildRun): string[] {
 	return plan.nodes.filter((n) => (statuses.has(n.id) ? !done(n.id) : !said.has(n.id))).map((n) => n.text);
 }
 
-export const scriptOf = (unit: SpecUnit, plan: Plan) => unit.script ?? (Array.isArray(plan.targets) && plan.targets.length ? String(plan.targets[0]) : `${plan.title.replace(/[^\w-]+/g, "") || "Plan"}.ssl`);
+export const scriptOf = (unit: SpecUnit, plan: Plan) =>
+	unit.script?.trim() || planTargetsOf(plan)[0] || `${plan.title.replace(/[^\w-]+/g, "") || "Plan"}.ssl`;
+
+/** Sanitizes free-text titles/stage names for single-line SSL comments (`/* ... ;`). */
+const sanitizeSslComment = (text: string): string =>
+	text
+		.replace(/[\r\n]+/g, " ")
+		.replace(/;/g, ",")
+		.replace(/\s+/g, " ")
+		.trim();
+
+/** Deterministic per-plan run filename incorporating a short hash of the relative path so sibling folders don't collide. */
+export function runFileName(relPath: string): string {
+	const norm = relPath.trim().replace(/\\/g, "/").replace(/^\.?\/+/, "");
+	const base = norm.split("/").at(-1) ?? "plan";
+	const stem = base.replace(/\.plan\.json$/i, "") || "plan";
+	return `${stem}-${hashText(norm.toLowerCase())}.run.json`;
+}
+
+/** House file banner for a new SSL script built from `plan`, safe against `;`, newlines, and `$`-replacement sequences. */
+export function bannerFor(plan: Plan): string {
+	const raw = typeof plan.goal === "string" && plan.goal.trim() ? plan.goal : plan.title;
+	const safeGoal = sanitizeSslComment(String(raw ?? ""));
+	return bannerTemplate()
+		.replace(/\$\{(?!1\})\d+:([^}]*)\}/g, "$1")
+		.replace("${1}", () => safeGoal);
+}
 
 /** Passed units, in order, wrapped in the regions their chart groups name. */
-function assembleUnits(units: BuildUnit[], plan: Plan): string {
+function assembleUnits(units: BuildUnit[], plan: Plan, eol = "\n"): string {
 	const groupOf = (unit: BuildUnit) => {
 		for (const id of unit.nodes ?? []) {
 			const group = plan.groups.find((g) => g.id === plan.nodes.find((n) => n.id === id)?.group);
-			if (group) return group.name;
+			if (group) {
+				const safe = sanitizeSslComment(group.name);
+				if (safe) return safe;
+			}
 		}
 		return null;
 	};
@@ -205,10 +235,10 @@ function assembleUnits(units: BuildUnit[], plan: Plan): string {
 			if (group) parts.push(`/* region ${group};`);
 			open = group;
 		}
-		parts.push(unit.code!.trim());
+		parts.push(unit.code!.trim().replace(/\r?\n/g, eol));
 	}
 	if (open) parts.push("/* endregion;");
-	return parts.join("\n\n");
+	return parts.join(`${eol}${eol}`);
 }
 
 /** Where a procedure sits, in 0-based lines, with the doc comment directly above it. */
@@ -237,7 +267,42 @@ const spanOf = (spans: ProcedureSpan[], name: string) => spans.find((s) => s.nam
 /** A procedure's text as it stands, from its span. */
 export function procedureText(text: string, spans: ProcedureSpan[], name: string): string | null {
 	const span = spanOf(spans, name);
-	return span ? text.split("\n").slice(span.startLine, span.endLine + 1).join("\n").trim() : null;
+	return span ? text.split(/\r?\n/).slice(span.startLine, span.endLine + 1).join("\n").trim() : null;
+}
+
+/** Exact 0-based `:PROCEDURE ... :ENDPROC;` range (without leading doc comments) for code previewing. */
+export function procedureBodySpan(nodes: any[], name: string): ProcedureSpan | null {
+	const wanted = name.toLowerCase();
+	let found: ProcedureSpan | null = null;
+	const walk = (list: any[]) => {
+		for (const node of list) {
+			if (found) return;
+			if (node.kind === "procedure" && typeof node.name === "string" && node.name.toLowerCase() === wanted && node.range) {
+				found = { name: node.name, startLine: node.range.start.line, endLine: node.range.end.line };
+				return;
+			}
+			if (Array.isArray(node.children) && node.children.length) walk(node.children);
+		}
+	};
+	walk(nodes);
+	return found;
+}
+
+const NON_CODE_KINDS = new Set(["banner", "docBlock", "comment", "blankLines", "blank"]);
+
+/** Exact 0-based range of a script's top-level entry section (after the file banner, before the first procedure/region). */
+export function scriptEntrySpan(nodes: any[]): { startLine: number; endLine: number } | null {
+	const top: any[] = [];
+	for (const node of nodes) {
+		if (node.kind === "procedure" || node.kind === "region") break;
+		top.push(node);
+	}
+	let first = 0;
+	while (first < top.length && NON_CODE_KINDS.has(top[first].kind)) first++;
+	let last = top.length - 1;
+	while (last >= first && NON_CODE_KINDS.has(top[last].kind)) last--;
+	if (first > last || !top[first]?.range || !top[last]?.range) return null;
+	return { startLine: top[first].range.start.line, endLine: top[last].range.end.line };
 }
 
 /**
@@ -246,17 +311,18 @@ export function procedureText(text: string, spans: ProcedureSpan[], name: string
  * never touched: this is a text edit on ranges the server gave (ADR 0002).
  */
 export function assembleScript(existing: string | null, banner: string, units: BuildUnit[], plan: Plan, spans: ProcedureSpan[] = []): string {
+	const eol = existing?.includes("\r\n") ? "\r\n" : "\n";
 	const coded = units.filter((u) => u.code);
 	const inPlace = existing === null ? [] : coded.filter((u) => u.change && spanOf(spans, u.name));
-	const lines = (existing ?? banner).split("\n");
+	const lines = (existing ?? banner).split(/\r?\n/);
 	for (const unit of [...inPlace].sort((a, b) => spanOf(spans, b.name)!.startLine - spanOf(spans, a.name)!.startLine)) {
 		const span = spanOf(spans, unit.name)!;
-		lines.splice(span.startLine, span.endLine - span.startLine + 1, ...unit.code!.trim().split("\n"));
+		lines.splice(span.startLine, span.endLine - span.startLine + 1, ...unit.code!.trim().split(/\r?\n/));
 	}
-	const head = lines.join("\n").trimEnd();
+	const head = lines.join(eol).trimEnd();
 	const rest = coded.filter((u) => !inPlace.includes(u));
-	if (!rest.length) return `${head}\n`;
-	return `${head ? `${head}\n\n` : ""}${assembleUnits(rest, plan)}\n`;
+	if (!rest.length) return `${head}${eol}`;
+	return `${head ? `${head}${eol}${eol}` : ""}${assembleUnits(rest, plan, eol)}${eol}`;
 }
 
 /** A question for you, if the agent's reply asks one instead of answering. */
@@ -284,7 +350,8 @@ export function patternsFrom(templates: { label: string; group: string; body: ()
 
 export function unitPrompt(plan: Plan, spec: string, unit: BuildUnit, built: BuildUnit[], callable: string, patterns = "", changing = ""): string {
 	const nodes = plan.nodes.filter((n) => unit.nodes?.includes(n.id));
-	const decided = decisionsOf(plan).filter((d) => d.answer?.trim());
+	const refDocs = [...new Set(nodes.flatMap((n) => nodeDocsOf(n)))];
+	const decided = decisionsOf(plan).filter((d) => typeof d.answer === "string" && d.answer.trim());
 	return [
 		`PLAN STAGE: build ${unit.name}`,
 		NO_TOOLS,
@@ -294,7 +361,17 @@ export function unitPrompt(plan: Plan, spec: string, unit: BuildUnit, built: Bui
 		"THE UNIT:",
 		JSON.stringify({ name: unit.name, script: unit.script, parameters: unit.parameters, calls: unit.calls }),
 		...(changing ? ["", changing] : []),
-		...(nodes.length ? ["", "THE STEPS IT CARRIES OUT, FROM THE CHART:", ...nodes.map((n) => `- ${n.text}${n.notes ? ` (${n.notes})` : ""}`)] : []),
+		...(nodes.length
+			? [
+					"",
+					"THE STEPS IT CARRIES OUT, FROM THE CHART:",
+					...nodes.map((n) => {
+						const stepDocs = nodeDocsOf(n);
+						return `- ${n.text}${n.notes ? ` (${n.notes})` : ""}${stepDocs.length ? ` [docs: ${stepDocs.join(", ")}]` : ""}`;
+					}),
+				]
+			: []),
+		...(refDocs.length ? ["", `Referenced docs: ${refDocs.join(", ")}`] : []),
 		...(decided.length ? ["", "WHAT THE USER DECIDED:", ...decided.map((d) => `- ${d.question} ${d.answer}`)] : []),
 		...(unit.question && unit.answer ? ["", `YOU ASKED: ${unit.question}`, `THE USER SAID: ${unit.answer}`] : []),
 		...(unit.feedback ? ["", `THE USER REJECTED THE LAST VERSION: ${unit.feedback}`] : []),

@@ -7,7 +7,10 @@ import { fenced } from "../agent/tidy";
 import { openReview, type Check } from "../editor/Review";
 import { monaco } from "../editor/monaco";
 import { session } from "../lsp/session";
-import { applyText, notify, openFile, setState, state } from "../state";
+import { ticketForFile } from "../../shared/workContext";
+import { docs } from "../project";
+import { catalogsKeptFor, workPrompt } from "../projectDocs";
+import { applyText, canonical, documents, notify, openFile, setState, state } from "../state";
 import { baseName, joinPath } from "../../shared/paths";
 import { TEMPLATES } from "../../shared/houseStyle";
 import { MAX_ATTEMPTS, patternsFrom, placeholderIn, procedureText, retryPrompt } from "./build";
@@ -26,13 +29,17 @@ function testFile(path: string, plan: Plan) {
 	return `${script.slice(0, at + 1)}${baseName(path).replace(/\.plan\.json$/i, "")}Tests.ssl`;
 }
 
-async function codeUnderTest(plan: Plan) {
+async function codeUnderTest(plan: Plan, root: string) {
 	const code: { name: string; callAs: string; text: string }[] = [];
 	for (const unit of builtOf(plan)!.units) {
-		const text = await readScript(unit.script);
+		if (state.workspace?.root !== root) return [];
+		const text = await readScript(unit.script, root);
+		if (state.workspace?.root !== root) return [];
 		const found = text === null ? null : procedureText(text, await spansIn(text), unit.name);
+		if (state.workspace?.root !== root) return [];
 		if (!found) continue;
-		const script = (await readingOf(unit.script))?.name;
+		const script = (await readingOf(unit.script, root))?.name;
+		if (state.workspace?.root !== root) return [];
 		code.push({ name: unit.name, callAs: script ? `${script}.${unit.name}` : unit.name, text: found });
 	}
 	return code;
@@ -52,41 +59,55 @@ function problemsIn(code: string | null, reading: Awaited<ReturnType<typeof read
 
 export function writeTests(path: string) {
 	return begin(path, "tests", async () => {
+		const root = state.workspace?.root;
+		if (!root) return;
 		const plan = planOf(path);
 		if (!plan) return notify("Fix the plan's text first.");
 		if (!builtOf(plan)?.units.length) return notify("Accept a build first: the tests are written from its code.");
 		const { paths, truncated } = planPaths(plan);
 		if (!paths.length) return notify("Nothing leads from a start through this chart.");
 		const skills = ((await backend.agent("skills", []).catch(() => [])) as { id: string }[]).map((s) => s.id);
+		if (state.workspace?.root !== root) return;
 		if (!skills.includes("ssl-unit-test")) return notify("The style guide's ssl-unit-test skill is not installed, and writing the tests needs it.", "error");
 		updateAssist(path, { progress: "Reading the code under test…" });
-		const code = await codeUnderTest(plan);
+		const code = await codeUnderTest(plan, root);
+		if (state.workspace?.root !== root) return;
 		if (!code.length) return notify("The procedures this chart built are not there now.");
 		const spec = await backend.read(specPath(path)).then(
 			(f) => f.text.split("\n## Units")[0]!.trim(),
 			() => "",
 		);
+		if (state.workspace?.root !== root) return;
 		const file = testFile(path, plan);
-		const base = testsPrompt(plan, baseName(file), paths, code, spec, patternsFrom(TEMPLATES));
+		const ticketKey = (typeof plan.ticket === "string" && plan.ticket.trim()) || ticketForFile(docs(), path, root);
+		const work = ticketKey ? await workPrompt(ticketKey, { specs: false, plans: false }).catch(() => null) : null;
+		if (state.workspace?.root !== root) return;
+		const rawBase = testsPrompt(plan, baseName(file), paths, code, spec, patternsFrom(TEMPLATES));
+		const base = work ? `${rawBase}\n\n${work.text}` : rawBase;
 		let prompt = base;
 		let best: string | null = null;
 		let reading: Awaited<ReturnType<typeof read>> | null = null;
 		let problems: string[] = [];
 		for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+			if (state.workspace?.root !== root) return;
 			const reply = await askAgent(path, `Write the tests (try ${attempt} of ${MAX_ATTEMPTS})`, prompt, ["ssl-unit-test"], TOOL_LIMIT);
+			if (state.workspace?.root !== root) return;
 			if (reply === null) {
 				problems = ["The agent did not finish its turn."];
 				continue;
 			}
 			const attemptCode = fenced(reply, "ssl").at(-1) ?? null;
 			const attemptReading = attemptCode ? await read(attemptCode) : null;
+			if (state.workspace?.root !== root) return;
 			problems = problemsIn(attemptCode, attemptReading, paths.length);
 			if (attemptCode) (best = attemptCode), (reading = attemptReading);
 			if (!problems.length) break;
 			prompt = retryPrompt(base, attemptCode, problems);
 		}
+		if (state.workspace?.root !== root) return;
 		if (!best || !reading) return notify(`The agent did not write a test script: ${problems[0] ?? "it gave no code."}`, "error");
 		const proposed = await session.formatText(best, { tabSize: 4, insertSpaces: false }).catch(() => best!);
+		if (state.workspace?.root !== root) return;
 		const missing = pathsMissing(best, paths.length);
 		const unresolved = [...new Set(reading.edges.filter((e) => !e.resolved).map((e) => e.target))];
 		const local = agent.models.find((m) => `${m.providerID}/${m.id}` === currentModel())?.local ?? true;
@@ -98,7 +119,8 @@ export function writeTests(path: string) {
 			{ label: "These tests have not been run", ok: null, detail: "SSL Studio cannot run SSL. Call RunTests in STARLIMS and read the server log." },
 			...(local ? [{ label: "A draft from a local model", ok: null, detail: "check that each test really tests its path" }] : []),
 		];
-		const existing = await readScript(file);
+		const existing = await readScript(file, root);
+		if (state.workspace?.root !== root) return;
 		openReview({
 			title: `Tests: ${file}`,
 			original: existing ?? "",
@@ -108,16 +130,30 @@ export function writeTests(path: string) {
 			note: problems.length ? `The agent did not get these right in ${MAX_ATTEMPTS} tries:\n\n${problems.map((p) => `- ${p}`).join("\n")}` : undefined,
 			acceptLabel: existing === null ? "Accept and create the file" : "Accept into the editor",
 			onAccept: async (final) => {
+				if (state.workspace?.root !== root) return;
 				if (!planOf(path)) await openFile(path);
-				const full = joinPath(state.workspace!.root, file);
-				if (existing === null) {
+				if (state.workspace?.root !== root) return;
+				const full = joinPath(root, file);
+				const openNow = documents.has(canonical(full)) || documents.has(full);
+				const existsNow =
+					openNow ||
+					(await backend.read(full).then(
+						() => true,
+						() => false,
+					));
+				if (state.workspace?.root !== root) return;
+				if (!existsNow) {
 					await backend.write(full, final);
+					if (state.workspace?.root !== root) return;
 					setState("treeVersion", (v) => v + 1);
+					void catalogsKeptFor([full]);
 					await openFile(full);
 				} else {
 					await openFile(full);
+					if (state.workspace?.root !== root) return;
 					applyText(monaco.Uri.file(full).fsPath, final);
 				}
+				if (state.workspace?.root !== root) return;
 				const latest = planOf(path);
 				if (latest) savePlan(path, recordTests(latest, file));
 				notify(`Wrote ${file}. These tests have not been run: run them in STARLIMS.`);

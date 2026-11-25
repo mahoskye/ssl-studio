@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { allOklchThemes } from "../src/shared/oklchTheme";
 import { LEGEND, semanticRules, tokenStyle, translateTokens } from "../src/view/editor/semantic";
 import dark from "../src/view/themes/studio-dark.json";
 import light from "../src/view/themes/studio-light.json";
@@ -49,7 +50,7 @@ describe("Monaco rules for a theme", () => {
 		expect(rules.find((r) => r.token === "variable")).toBeUndefined();
 	});
 	test("the built-in themes opt in and colour the server's own modifiers", () => {
-		for (const builtIn of [dark, light] as any[]) {
+		for (const builtIn of [dark, light, ...allOklchThemes()] as any[]) {
 			const rules = semanticRules(builtIn);
 			for (const token of ["variable.public", "variable.unknown", "parameter", "function.declaration", "function.defaultLibrary", "method", "property", "class.defaultLibrary", "variable.defaultLibrary.readonly"])
 				expect(rules.some((r) => r.token === token && r.foreground)).toBe(true);

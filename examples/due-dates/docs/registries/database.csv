@@ -1,0 +1,8 @@
+object,kind,used by,ticket,status,note
+DEMO_SAMPLES,table,"SetSampleDueDates, SaveDueDates, SamplesDueSoon",DEMO-101,verified,Read and written
+DEMO_HOLIDAYS,table,Holidays,DEMO-101,verified,Read only
+DEMO_INSTRUMENTS,table,"DEMO_OUTAGES, DEMO_SAMPLES",DEMO-101,verified,Reference catalog
+DEMO_OUTAGES,table,Outages,DEMO-101,verified,Read only
+DueDates.Holidays,data source,"SetSampleDueDates, DueSoonReport",DEMO-101,migrated,
+DueDates.Outages,data source,"SetSampleDueDates, DueSoonReport",DEMO-101,migrated,
+DueDates.SamplesDueSoon,data source,DueSoonReport,DEMO-103,found,Its late-sample column is not built

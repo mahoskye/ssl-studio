@@ -19,6 +19,14 @@ export type Node = {
 	params?: string[];
 	/** A block's opening statement, when the server gives it on one line (L1). */
 	header?: Header;
+	/** A statement's leading keyword, uppercase without its colon, as the server names it ("DECLARE", "INHERIT"). */
+	keyword?: string;
+	/** A comment the server says is the doc block of the procedure below it. */
+	doc?: boolean;
+	/** The head of a class file: `:CLASS`, with the `:INHERIT` and field `:DECLARE` lines under it. */
+	classHead?: boolean;
+	/** A container's closing line (`:ENDPROC;`, `:ENDIF;`, `/* endregion;`, etc.), kept in place. */
+	closer?: boolean;
 	children: Node[];
 	/** Stable across edits that do not move the node: kind, name and start. */
 	key: string;
@@ -81,24 +89,33 @@ export function buildTree(lines: string[], symbols: SymbolIn[], folds: FoldIn[])
 const LEAVES = new Set<NodeKind>(["text", "blank", "raw"]);
 
 /** Fills the lines no child covers with text and blank leaves. */
-function fill(node: Node, lines: string[]) {
+function fill(node: Node, lines: string[], closers?: WeakMap<Node, { start: number; end: number }>) {
 	if (LEAVES.has(node.kind)) return;
 	const filled: Node[] = [];
+	const closer = closers?.get(node);
 	// A container's own first line is its header; leaves start after it.
 	let line = node.kind === "file" ? node.start : node.start + 1;
 	const gap = (from: number, to: number) => {
 		let i = from;
 		while (i <= to) {
 			const blank = !lines[i - 1]!.trim();
+			const isCloser = Boolean(closer && i >= closer.start && i <= closer.end);
 			let j = i;
-			while (j + 1 <= to && !lines[j]!.trim() === blank) j++;
-			filled.push({ kind: blank ? "blank" : "text", start: i, end: j, children: [], key: `${blank ? "blank" : "text"}:${i}` });
+			while (
+				j + 1 <= to &&
+				!lines[j]!.trim() === blank &&
+				Boolean(closer && j + 1 >= closer.start && j + 1 <= closer.end) === isCloser
+			)
+				j++;
+			const leaf: Node = { kind: blank ? "blank" : "text", start: i, end: j, children: [], key: `${blank ? "blank" : "text"}:${i}` };
+			if (isCloser && !blank) leaf.closer = true;
+			filled.push(leaf);
 			i = j + 1;
 		}
 	};
 	for (const child of node.children) {
 		if (child.start > line) gap(line, child.start - 1);
-		fill(child, lines);
+		fill(child, lines, closers);
 		filled.push(child);
 		line = child.end + 1;
 	}
@@ -118,10 +135,11 @@ export function pathTo(node: Node, line: number): Node[] {
 	return [];
 }
 
-/** Siblings a node can swap with: containers only, skipping blank and text leaves. */
+/** Siblings a node can swap with: skipping blank leaves and container closing lines. */
 export function neighbour(parent: Node, node: Node, direction: -1 | 1): Node | undefined {
-	const movable = parent.children.filter((c) => c.kind !== "blank");
+	const movable = parent.children.filter((c) => c.kind !== "blank" && !c.closer);
 	const index = movable.indexOf(node);
+	if (index < 0) return undefined;
 	return movable[index + direction];
 }
 
@@ -164,6 +182,8 @@ const lastLine = (r: { start: Position; end: Position }) => (r.end.character ===
 export function treeFromSyntax(lines: string[], nodes: SyntaxNodeIn[], paramsOf?: (procedure: string) => string[] | undefined): Node {
 	const count = lines.length;
 	const root: Node = { kind: "file", start: 1, end: count, children: [], key: "file" };
+	const statementRanges = new WeakMap<Node, RangeIn>();
+	const closers = new WeakMap<Node, { start: number; end: number }>();
 	const convert = (n: SyntaxNodeIn, parent: Node) => {
 		// `if` and `try` hold only branches, and the first one opens on the block's
 		// own first line: its body is the block's body, the later arms nest inside.
@@ -171,26 +191,93 @@ export function treeFromSyntax(lines: string[], nodes: SyntaxNodeIn[], paramsOf?
 			const [first, ...rest] = n.children;
 			n = { ...n, keyword: first!.keyword, headerRange: first!.headerRange, children: [...(first!.children ?? []), ...rest] };
 		}
-		const start = n.range.start.line + 1;
+		let start = n.range.start.line + 1;
 		const end = Math.min(count, lastLine(n.range) + 1);
 		if (start < 1 || end < start || start < parent.start || end > parent.end) return;
 		// A container's first line is its header; a child must start after it.
 		if (parent.kind !== "file" && start <= parent.start) return;
-		const previous = parent.children.at(-1);
-		if (previous && start <= previous.end) return;
 		const children = n.children ?? [];
 		const kind = viewKind(n.kind, children.length > 0);
+		const previous = parent.children.at(-1);
+		if (previous && start <= previous.end) {
+			if (kind === "raw" && end > previous.end) start = previous.end + 1;
+			else return;
+		}
 		const params = kind === "procedure" ? paramsOf?.(n.name ?? "") : undefined;
 		const node: Node = { kind, start, end, name: n.name, params, children: [], key: `${kind}:${n.name ?? ""}:${start}` };
+		if (kind === "text" && n.keyword) {
+			node.keyword = n.keyword.toUpperCase();
+			statementRanges.set(node, n.range);
+		}
+		if (kind === "comment" && n.kind.toLowerCase() === "docblock") node.doc = true;
 		const h = n.headerRange;
 		if (kind === "block" && h && n.keyword && h.start.line === h.end.line && h.start.line + 1 === start)
 			node.header = { line: start, startColumn: h.start.character + 1, endColumn: h.end.character + 1, keyword: n.keyword };
+		if (!LEAVES.has(kind) && kind !== "comment" && n.closerRange) {
+			const cStart = n.closerRange.start.line + 1;
+			const cEnd = Math.min(count, lastLine(n.closerRange) + 1);
+			if (cStart > start && cEnd >= cStart && cEnd <= end) closers.set(node, { start: cStart, end: cEnd });
+		}
 		parent.children.push(node);
 		if (!LEAVES.has(kind) && kind !== "comment") for (const c of children) convert(c, node);
 	};
 	for (const n of nodes) convert(n, root);
-	fill(root, lines);
+	groupClassHead(root, statementRanges);
+	fill(root, lines, closers);
 	return root;
+}
+
+/** What may sit under `:CLASS` in a class's head. */
+const CLASS_HEAD = new Set(["INHERIT", "DECLARE"]);
+
+/**
+ * A class file opens with `:CLASS Name;`, then perhaps `:INHERIT` and the
+ * `:DECLARE`s of its fields. The server gives each as a statement with its
+ * keyword; here they become one block, headed by the `:CLASS` line, so that a
+ * class reads as a class. Nothing is read from the text: the grouping is by
+ * the server's own keywords, and blank lines between them go along.
+ */
+function groupClassHead(root: Node, ranges: WeakMap<Node, RangeIn>) {
+	const at = root.children.findIndex((c) => c.kind === "text" && c.keyword === "CLASS" && c.start === c.end);
+	if (at < 0) return;
+	const head = root.children[at]!;
+	let last = at;
+	for (let i = at + 1; i < root.children.length; i++) {
+		const c = root.children[i]!;
+		if (c.kind === "blank") continue;
+		if (c.kind !== "text" || !c.keyword || !CLASS_HEAD.has(c.keyword)) break;
+		last = i;
+	}
+	const inside = root.children.slice(at + 1, last + 1);
+	const range = ranges.get(head);
+	const node: Node = { kind: "block", start: head.start, end: inside.at(-1)?.end ?? head.end, classHead: true, children: inside, key: `class:${head.start}` };
+	if (range && range.start.line === range.end.line) node.header = { line: head.start, startColumn: range.start.character + 1, endColumn: range.end.character + 1, keyword: "CLASS" };
+	root.children.splice(at, last - at + 1, node);
+}
+
+/**
+ * What a view draws as one card: a procedure with the doc block the server
+ * says is its own, and whatever sits between the two (a visibility
+ * annotation, blank lines). Every other node is a group of one. The tree is
+ * not changed: each line still belongs to the node it did.
+ */
+export function procedureGroups(children: Node[]): Node[][] {
+	const groups: Node[][] = [];
+	for (let i = 0; i < children.length; i++) {
+		const child = children[i]!;
+		if (child.kind === "comment" && child.doc) {
+			let j = i + 1;
+			// Between a doc block and its procedure: blank lines, and comments of one line (the annotation).
+			while (j < children.length && (children[j]!.kind === "blank" || (children[j]!.kind === "comment" && !children[j]!.doc && children[j]!.start === children[j]!.end))) j++;
+			if (children[j]?.kind === "procedure") {
+				groups.push(children.slice(i, j + 1));
+				i = j;
+				continue;
+			}
+		}
+		groups.push([child]);
+	}
+	return groups;
 }
 
 /**

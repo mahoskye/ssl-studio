@@ -1,0 +1,42 @@
+/********************************************************************************
+Description.. : Picks the due-date rule class for a priority, so that no script names
+                the rule classes itself.
+Parameters... : -
+Returns...... : -
+Author....... :
+Date......... : 2026-11-18
+********************************************************************************
+_______________________________________________________________________________
+Modification. : MaxWalkDays moved to DueDates.DueDateConstants, where every
+                other constant is, and the rule classes ask for it there.
+Author....... :
+Date......... : 2026-11-18
+_______________________________________________________________________________
+********************************************************************************/;
+
+:INCLUDE DueDates.DueDateConstants;
+
+/*
+ * Procedure: RuleFor
+ * Description: Picks the due-date rule for a priority.
+ * Parameters:
+ *   sPriority - RUSH for the rush rule, anything else for the routine rule
+ *   nDays     - the turnaround, how many days the work takes
+ *   aHolidays - the holidays, an array of dates
+ *   aOutages  - the outages, each row {sInstrumentId, dFrom, dTo} with dTo included
+ * Returns: a DueDates.RushDueRule object for RUSH in any case, otherwise a DueDates.DueRule
+;
+:PROCEDURE RuleFor;
+	:PARAMETERS sPriority, nDays, aHolidays, aOutages;
+	:DEFAULT sPriority, "";
+	:DEFAULT nDays, 0;
+	:DEFAULT aHolidays, {};
+	:DEFAULT aOutages, {};
+
+	/* The priority is typed by people, so it is matched trimmed and in any case;
+	:IF Upper(AllTrim(sPriority)) == DoProc("PriorityRush");
+		:RETURN CreateUdObject("DueDates.RushDueRule", {nDays, aHolidays, aOutages});
+	:ENDIF;
+
+	:RETURN CreateUdObject("DueDates.DueRule", {nDays, aHolidays, aOutages});
+:ENDPROC;

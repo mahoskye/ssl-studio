@@ -1,0 +1,47 @@
+/* =============================================================================;
+/* DATA SOURCE: SamplesDueSoon (SSL);
+/* PURPOSE:     The samples due from a day through nDays days after it, soonest
+                first. Samples due before that day are left out;
+/* PARAMS:      nDays - how many days ahead to look, 0 or more
+                dFrom - the first day of the window. Empty means today;
+/* RETURNS:     rows {SAMPLE_ID, PRIORITY, INSTRUMENT_ID, RECEIVED_ON, DUE_ON,
+                TURNAROUND_DAYS}. No rows when nDays is not a number or is less
+                than 0, or dFrom is neither empty nor a date;
+/* MODIFIED:    2026-11-18 - nDays is checked, dFrom lets a caller name the day,
+                and TURNAROUND_DAYS is returned as a sixth column;
+/* =============================================================================;
+:PARAMETERS nDays := 3, dFrom := NIL;
+:DECLARE dTo;
+
+/* The type is tested before the value, so a text is never compared with 0;
+:IF LimsTypeEx(nDays) != "NUMERIC";
+	:RETURN {};
+:ENDIF;
+
+:IF nDays < 0;
+	:RETURN {};
+:ENDIF;
+
+:IF Empty(dFrom);
+	dFrom := Today();
+:ENDIF;
+
+:IF LimsTypeEx(dFrom) != "DATE";
+	:RETURN {};
+:ENDIF;
+
+/* The window is in whole days: its first day is rebuilt as an invariant date at
+   midnight, whatever time or kind of date the caller gave;
+dFrom := DateFromNumbers(Year(dFrom), Month(dFrom), Day(dFrom),,,,, .T.);
+dTo := dFrom + nDays;
+
+/* The two date columns are whole days, so they are read without timezone
+   conversion. A NULL comes back as the empty value of its column: an empty
+   date, 0 or "";
+:RETURN SQLExecute("
+    SELECT SAMPLE_ID, PRIORITY, INSTRUMENT_ID, RECEIVED_ON, DUE_ON, TURNAROUND_DAYS
+    FROM DEMO_SAMPLES
+    WHERE DUE_ON >= ?dFrom?
+      AND DUE_ON <= ?dTo?
+    ORDER BY DUE_ON, SAMPLE_ID
+",,, .T., {"RECEIVED_ON", "DUE_ON"});

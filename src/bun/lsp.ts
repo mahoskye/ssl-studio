@@ -3,6 +3,7 @@
 import type { Subprocess } from "bun";
 import type { LspState } from "../shared/protocol";
 import { createFrameReader, frame } from "./frames";
+import { lspCommand } from "./tools";
 
 const MAX_RESTARTS = 3;
 const RESTART_WINDOW_MS = 60_000;
@@ -20,16 +21,51 @@ export class LspProcess {
 
 	start() {
 		this.stopping = false;
+		this.lastError = "";
 		this.onState({ state: "starting" });
-		const proc = Bun.spawn([this.path, "--stdio"], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+		let proc: Subprocess<"pipe", "pipe", "pipe">;
+		try {
+			proc = Bun.spawn(lspCommand(this.path, ["--stdio"]), { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+		} catch (err: any) {
+			this.proc = undefined;
+			const msg = String(err?.message ?? err).slice(-500);
+			this.lastError = msg;
+			this.onState({ state: "failed", message: `Failed to start starlims-lsp: ${msg}`.trim() });
+			return;
+		}
 		this.proc = proc;
-		const read = createFrameReader(this.onMessage);
+		const read = createFrameReader((body) => {
+			if (proc !== this.proc || this.stopping) return;
+			try {
+				this.onMessage(body);
+			} catch (err: any) {
+				if (proc === this.proc && !this.stopping) this.lastError = String(err?.message ?? err).slice(-500);
+			}
+		});
 		(async () => {
-			for await (const chunk of proc.stdout) read(chunk);
+			try {
+				for await (const chunk of proc.stdout) {
+					if (proc !== this.proc || this.stopping) break;
+					try {
+						read(chunk);
+					} catch (err: any) {
+						if (proc === this.proc && !this.stopping) this.lastError = String(err?.message ?? err).slice(-500);
+					}
+				}
+			} catch {
+				// Stream closed on process exit/stop.
+			}
 		})();
 		(async () => {
-			// The server logs to stderr; keep the tail for crash messages.
-			for await (const chunk of proc.stderr) this.lastError = new TextDecoder().decode(chunk).slice(-500);
+			try {
+				// The server logs to stderr; keep the tail for crash messages.
+				for await (const chunk of proc.stderr) {
+					if (proc !== this.proc || this.stopping) break;
+					this.lastError = new TextDecoder().decode(chunk).slice(-500);
+				}
+			} catch {
+				// Stream closed on process exit/stop.
+			}
 		})();
 		proc.exited.then((code) => this.exited(proc, code));
 		this.onState({ state: "running" });
@@ -42,7 +78,9 @@ export class LspProcess {
 		const now = Date.now();
 		this.crashes = [...this.crashes.filter((t) => now - t < RESTART_WINDOW_MS), now];
 		if (this.crashes.length > MAX_RESTARTS) {
-			this.onState({ state: "failed", message: `starlims-lsp exited ${code} ${MAX_RESTARTS + 1} times in a minute. ${this.lastError}`.trim() });
+			const errorTail = this.lastError;
+			this.proc = undefined;
+			this.onState({ state: "failed", message: `starlims-lsp exited ${code} ${MAX_RESTARTS + 1} times in a minute. ${errorTail}`.trim() });
 			return;
 		}
 		this.onState({ state: "restarting", message: `starlims-lsp exited ${code}; restarting.` });
@@ -50,7 +88,13 @@ export class LspProcess {
 	}
 
 	send(message: string) {
-		this.proc?.stdin.write(frame(message));
+		if (!this.proc || this.stopping) return;
+		try {
+			const written = this.proc.stdin.write(frame(message));
+			if (written && typeof (written as any).catch === "function") (written as Promise<unknown>).catch(() => {});
+		} catch (err: any) {
+			if (!this.stopping) this.lastError = String(err?.message ?? err).slice(-500);
+		}
 	}
 
 	restart() {
@@ -61,8 +105,19 @@ export class LspProcess {
 
 	stop() {
 		this.stopping = true;
-		this.proc?.kill();
+		const proc = this.proc;
 		this.proc = undefined;
+		try {
+			const ended = proc?.stdin.end();
+			if (ended && typeof (ended as any).catch === "function") (ended as Promise<unknown>).catch(() => {});
+		} catch {
+			// Stdin already closed.
+		}
+		try {
+			proc?.kill();
+		} catch {
+			// Process already exited.
+		}
 		this.onState({ state: "stopped" });
 	}
 }

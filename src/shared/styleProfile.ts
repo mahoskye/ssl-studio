@@ -115,16 +115,53 @@ export const SECTIONS: { title: string; fields: Field[] }[] = [
 
 export const RULE_LEVELS = ["default", "off", "hint", "info", "warning", "error"] as const;
 
-export function getPath(object: any, path: string): any {
-	return path.split(".").reduce((o, k) => (o == null ? undefined : o[k]), object);
+export type PathKey = string | readonly string[];
+
+const UNSAFE_PATH_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+function toKeys(path: PathKey): readonly string[] {
+	return typeof path === "string" ? path.split(".") : path;
 }
 
-export function setPath(object: any, path: string, value: any): any {
-	const keys = path.split(".");
+export function getPath(object: any, path: PathKey): any {
+	return toKeys(path).reduce(
+		(o, k) => (o != null && typeof o === "object" && Object.prototype.hasOwnProperty.call(o, k) ? o[k] : undefined),
+		object,
+	);
+}
+
+export function setPath(object: any, path: PathKey, value: any): any {
+	const keys = toKeys(path);
 	const copy = structuredClone(object ?? {});
+	if (!keys.length || keys.some((k) => UNSAFE_PATH_KEYS.has(k))) return copy;
+	if (value === undefined) {
+		const trail: { parent: any; key: string }[] = [];
+		let o = copy;
+		for (let i = 0; i < keys.length - 1; i++) {
+			const k = keys[i]!;
+			if (!o || typeof o !== "object" || !Object.prototype.hasOwnProperty.call(o, k)) return copy;
+			trail.push({ parent: o, key: k });
+			o = o[k];
+		}
+		if (o && typeof o === "object") {
+			delete o[keys[keys.length - 1]!];
+		}
+		// Prune empty parent objects so clearing all fields leaves `{}` and disables "Clear overrides".
+		for (let i = trail.length - 1; i >= 0; i--) {
+			const { parent, key } = trail[i]!;
+			const child = parent[key];
+			if (child && typeof child === "object" && !Array.isArray(child) && Object.keys(child).length === 0) {
+				delete parent[key];
+			} else {
+				break;
+			}
+		}
+		return copy;
+	}
 	let o = copy;
-	for (const k of keys.slice(0, -1)) o = o[k] = typeof o[k] === "object" && o[k] ? o[k] : {};
-	if (value === undefined) delete o[keys.at(-1)!];
-	else o[keys.at(-1)!] = value;
+	for (const k of keys.slice(0, -1)) {
+		o = o[k] = typeof o[k] === "object" && o[k] && !Array.isArray(o[k]) ? o[k] : {};
+	}
+	o[keys[keys.length - 1]!] = value;
 	return copy;
 }

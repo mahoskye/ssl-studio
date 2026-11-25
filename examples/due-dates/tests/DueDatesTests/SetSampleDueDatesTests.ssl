@@ -1,0 +1,137 @@
+/********************************************************************************
+Description.. : Tests for DueDates.SetSampleDueDates against the database.
+                NEEDS THE ROWS OF schema/database/demo.sql, loaded fresh: no sample has a due
+                date yet. Each test writes inside a transaction that is rolled back,
+                so the rows are left as they were.
+                Run DueDatesTests.SetSampleDueDatesTests.RunTests. It returns the tally.
+Parameters... : -
+Returns...... : -
+Author....... :
+Date......... : 2026-11-18
+********************************************************************************
+_______________________________________________________________________________
+Modification. : TestRollbackLeavesNothing moved to DueDatesTests.RollbackTests. It
+                has to own the outermost transaction, and here every test runs
+                inside one.
+Author....... :
+Date......... : 2026-11-18
+_______________________________________________________________________________
+********************************************************************************/;
+
+/*
+ * Procedure: RunTests
+ * Description: Runs every test of this script, each on its own and rolled back.
+ * Returns: {nPassed, nTotal, aResults}, each result {sLabel, bPassed}
+;
+:PROCEDURE RunTests;
+	:DECLARE aArgs, aTests;
+
+	aTests := {
+		"TestEnvelopeAndCounts", "TestSetsWorkedExamples", "TestSkipsNoTurnaround",
+		"TestSkipsNoReceivedDate", "TestSkipsOutOfReach", "TestRoutesRush",
+		"TestRoutesUnknownPriority"
+	};
+	aArgs := {"DueDatesTests.SetSampleDueDatesTests", aTests, .T.};
+
+	:RETURN ExecFunction("DueDatesTests.TestSupport.RunAll", aArgs);
+:ENDPROC;
+
+/* region The demo rows;
+
+:PROCEDURE TestEnvelopeAndCounts;
+	/* Success path: {.T., {nSet, nSkipped, aSkipped}}. Of the seven demo samples
+	   six get a due date and S-1007 is skipped;
+	:DECLARE aResult, aValues, sActual, sFmt, sOutcome;
+
+	sFmt := "";
+	aResult := ExecFunction("DueDates.SetSampleDueDates");
+	sOutcome := IIf(aResult[1], "ok", "failed");
+	aValues := {sOutcome, aResult[2][1], aResult[2][2]};
+	sActual := sFmt:Format("{0}, set {1}, skipped {2}", aValues);
+
+	:RETURN {"Success envelope and counts", "ok, set 6, skipped 1", sActual};
+:ENDPROC;
+
+:PROCEDURE TestSetsWorkedExamples;
+	/* The due dates of S-1001 to S-1006, as docs/Worked-examples.md works them out;
+	:DECLARE aIds, dDue, nIndex, sActual, sExpected;
+
+	ExecFunction("DueDates.SetSampleDueDates");
+	aIds := {"S-1001", "S-1002", "S-1003", "S-1004", "S-1005", "S-1006"};
+	sActual := "";
+
+	:FOR nIndex := 1 :TO ALen(aIds);
+		dDue := ExecFunction("DueDatesTests.DbTestSupport.DueOn", {aIds[nIndex]});
+		sActual += DToS(dDue) + " ";
+	:NEXT;
+
+	sExpected := "20261119 20261123 20261123 20261121 20261127 20261130 ";
+
+	:RETURN {"The worked examples are saved", sExpected, sActual};
+:ENDPROC;
+
+:PROCEDURE TestSkipsNoTurnaround;
+	/* S-1007 has no turnaround. The code is tested, not the text;
+	:DECLARE aResult, sActual;
+
+	aResult := ExecFunction("DueDates.SetSampleDueDates");
+	sActual := ExecFunction("DueDatesTests.DbTestSupport.SkipCode", {aResult, "S-1007"});
+
+	:RETURN {"No turnaround is skipped", "NO_TURNAROUND", sActual};
+:ENDPROC;
+
+/* endregion;
+
+/* region Rows the tests add;
+
+:PROCEDURE TestSkipsNoReceivedDate;
+	/* A sample with no received date has nothing to count from;
+	:DECLARE aResult, aSample, sActual;
+
+	aSample := {"T-9001", CToD(""), "ROUTINE", 2};
+	ExecFunction("DueDatesTests.DbTestSupport.AddSample", aSample);
+	aResult := ExecFunction("DueDates.SetSampleDueDates");
+	sActual := ExecFunction("DueDatesTests.DbTestSupport.SkipCode", {aResult, "T-9001"});
+
+	:RETURN {"No received date is skipped", "NO_RECEIVED_DATE", sActual};
+:ENDPROC;
+
+:PROCEDURE TestSkipsOutOfReach;
+	/* 521 working days from Monday 16 November 2026 is one more than the day
+	   limit holds, as DueRuleEdgeTests works out;
+	:DECLARE aResult, aSample, sActual;
+
+	aSample := {"T-9002", DateFromNumbers(2026, 11, 16), "ROUTINE", 521};
+	ExecFunction("DueDatesTests.DbTestSupport.AddSample", aSample);
+	aResult := ExecFunction("DueDates.SetSampleDueDates");
+	sActual := ExecFunction("DueDatesTests.DbTestSupport.SkipCode", {aResult, "T-9002"});
+
+	:RETURN {"Past the day limit is skipped", "TURNAROUND_NOT_REACHED", sActual};
+:ENDPROC;
+
+:PROCEDURE TestRoutesRush;
+	/* Thursday 19, 2 days, with the priority typed as "rush": rush work all the
+	   same, so Saturday counts and it is due on Saturday 21;
+	:DECLARE aSample, dActual;
+
+	aSample := {"T-9003", DateFromNumbers(2026, 11, 19), "rush", 2};
+	ExecFunction("DueDatesTests.DbTestSupport.AddSample", aSample);
+	ExecFunction("DueDates.SetSampleDueDates");
+	dActual := ExecFunction("DueDatesTests.DbTestSupport.DueOn", {"T-9003"});
+
+	:RETURN {"A lower-case rush is rush work", "20261121", dActual};
+:ENDPROC;
+
+:PROCEDURE TestRoutesUnknownPriority;
+	/* The same sample with a priority nobody defined is routine work, due Monday 23;
+	:DECLARE aSample, dActual;
+
+	aSample := {"T-9004", DateFromNumbers(2026, 11, 19), "URGENT", 2};
+	ExecFunction("DueDatesTests.DbTestSupport.AddSample", aSample);
+	ExecFunction("DueDates.SetSampleDueDates");
+	dActual := ExecFunction("DueDatesTests.DbTestSupport.DueOn", {"T-9004"});
+
+	:RETURN {"An unknown priority is routine work", "20261123", dActual};
+:ENDPROC;
+
+/* endregion;

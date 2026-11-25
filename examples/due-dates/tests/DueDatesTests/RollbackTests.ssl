@@ -1,0 +1,122 @@
+/********************************************************************************
+Description.. : Tests for what a rollback leaves in the database: nothing.
+                NEEDS THE ROWS OF schema/database/demo.sql, loaded fresh: no sample has a due
+                date yet. These tests are NOT run inside a transaction of the runner:
+                each has to own the outermost one, because a rollback made inside
+                another transaction is carried out only when the outer one ends. A
+                test that passes leaves the rows as they were. If one fails, load
+                demo.sql again.
+                Run DueDatesTests.RollbackTests.RunTests. It returns the tally.
+Parameters... : -
+Returns...... : -
+Author....... :
+Date......... : 2026-11-18
+********************************************************************************
+_______________________________________________________________________________
+Modification. :
+Author....... :
+Date......... :
+_______________________________________________________________________________
+********************************************************************************/;
+
+/*
+ * Procedure: RunTests
+ * Description: Runs every test of this script, each on its own.
+ * Returns: {nPassed, nTotal, aResults}, each result {sLabel, bPassed}
+;
+:PROCEDURE RunTests;
+	:DECLARE aArgs, aTests;
+
+	aTests := {
+		"TestRollbackLeavesNothing", "TestFailedWriteUndoesEarlier",
+		"TestFirstRowWasWritten"
+	};
+	aArgs := {"DueDatesTests.RollbackTests", aTests};
+
+	:RETURN ExecFunction("DueDatesTests.TestSupport.RunAll", aArgs);
+:ENDPROC;
+
+:PROCEDURE TestRollbackLeavesNothing;
+	/* The script commits its own transaction. Run inside one that is rolled back,
+	   it leaves no due date behind. Every test that writes counts on that;
+	:DECLARE aArgs, aRows;
+
+	aArgs := {"DueDates.SetSampleDueDates"};
+	ExecFunction("DueDatesTests.DbTestSupport.RolledBack", aArgs);
+	aRows := LSelect1("
+	    SELECT SAMPLE_ID
+	    FROM DEMO_SAMPLES
+	    WHERE DUE_ON IS NOT NULL
+	");
+
+	:RETURN {"A rolled-back run leaves no due dates", 0, ALen(aRows)};
+:ENDPROC;
+
+:PROCEDURE TestFailedWriteUndoesEarlier;
+	/* Failure path: the second row has no day, so it is refused after the first
+	   row was written. The call fails with its fixed code, and its rollback takes
+	   the first row's date back: S-1001 has no due date;
+	:DECLARE aResult, sActual, sDue, sExpected, sFmt;
+
+	sFmt := "";
+	aResult := ExecFunction("DueDates.SaveDueDates", {DoProc("BatchWithBadRow")});
+	sDue := DoProc("Due", {"S-1001"});
+	sActual := sFmt:Format("{0}, S-1001 due [{1}]", {aResult[2][1], sDue});
+	sExpected := "DUE_DATES_NOT_SAVED, S-1001 due []";
+
+	:RETURN {"One failing write undoes the ones before it", sExpected, sActual};
+:ENDPROC;
+
+:PROCEDURE TestFirstRowWasWritten;
+	/* The same batch inside a transaction of this test. The rollback of the failed
+	   call waits for this outer transaction, so until it ends the first row's date
+	   can be read: it was written before the second row failed. Then it is gone;
+	:DECLARE bStarted, sActual, sDuring, sFmt;
+
+	sFmt := "";
+	bStarted := .F.;
+
+	:TRY;
+		bStarted := BeginLimsTransaction();
+		ExecFunction("DueDates.SaveDueDates", {DoProc("BatchWithBadRow")});
+		sDuring := DoProc("Due", {"S-1001"});
+	:FINALLY;
+		:IF bStarted;
+			EndLimsTransaction(, .F.);
+		:ENDIF;
+	:ENDTRY;
+
+	sActual := sFmt:Format("[{0}] then [{1}]", {sDuring, DoProc("Due", {"S-1001"})});
+
+	:RETURN {"The first row was written, then taken back", "[20261119] then []", sActual};
+:ENDPROC;
+
+/*
+ * Procedure: BatchWithBadRow
+ * Description: Builds a plan whose first row can be saved and whose second cannot.
+ * Returns: {{"S-1001", 19 November 2026}, {"S-1002", an empty date}}
+;
+:PROCEDURE BatchWithBadRow;
+	:DECLARE aGood;
+
+	aGood := ExecFunction("DueDatesTests.DbTestSupport.PlannedRow", {"S-1001", 19});
+
+	:RETURN {aGood, {"S-1002", CToD("")}};
+:ENDPROC;
+
+/*
+ * Procedure: Due
+ * Description: Reads the due date of a sample as text.
+ * Parameters:
+ *   sSampleId - the sample, which must exist
+ * Returns: its DUE_ON as yyyyMMdd, "" when it has none
+;
+:PROCEDURE Due;
+	:PARAMETERS sSampleId;
+
+	:DECLARE dDue;
+
+	dDue := ExecFunction("DueDatesTests.DbTestSupport.DueOn", {sSampleId});
+
+	:RETURN AllTrim(DToS(dDue));
+:ENDPROC;

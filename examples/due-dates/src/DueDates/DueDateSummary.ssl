@@ -1,0 +1,78 @@
+/********************************************************************************
+Description.. : Puts together what a run of due dates did: the samples skipped while
+                the dates were worked out, and what saving the dates answered.
+                No database is read or written, and nothing is raised.
+Parameters... : -
+Returns...... : -
+Author....... :
+Date......... : 2026-11-18
+********************************************************************************
+_______________________________________________________________________________
+Modification. :
+Author....... :
+Date......... :
+_______________________________________________________________________________
+********************************************************************************/;
+
+/*
+ * Procedure: Combine
+ * Description: Joins the skips found while planning with the answer of DueDates.SaveDueDates.
+ * Parameters:
+ *   aPlanSkips - the samples skipped while planning, each {sSampleId, sCode, sText}. Left as given
+ *   aSaved     - what DueDates.SaveDueDates answered, {.T., {nSet, nSkipped, aSkipped}} on success
+ * Returns: {sProblem, aSummary}
+ *   Success: "" and {nSet, nSkipped, aSkipped}, the planning skips first, then the saving skips
+ *   Failure: what was wrong with aPlanSkips or aSaved, and {}. Nothing is raised
+;
+:PROCEDURE Combine;
+	:PARAMETERS aPlanSkips, aSaved;
+	:DEFAULT aPlanSkips, {};
+
+	:DECLARE aPayload, aSkipped, nIndex;
+
+	/* Each type is tested before the value is read, so nothing is indexed or
+	   counted that cannot be. .OR. stops at the first .T., which is what lets a
+	   length follow a type on one line;
+	:IF LimsTypeEx(aPlanSkips) != "ARRAY";
+		:RETURN {"The skips found while planning are not a list", {}};
+	:ENDIF;
+
+	:IF LimsTypeEx(aSaved) != "ARRAY" .OR. ALen(aSaved) < 2;
+		:RETURN {"DueDates.SaveDueDates did not answer with its envelope", {}};
+	:ENDIF;
+
+	:IF LimsTypeEx(aSaved[1]) != "LOGIC";
+		:RETURN {"DueDates.SaveDueDates did not say whether it saved", {}};
+	:ENDIF;
+
+	/* Its failure envelope: every write was rolled back, and it logged why;
+	:IF .NOT. aSaved[1];
+		:RETURN {"DueDates.SaveDueDates saved no due dates", {}};
+	:ENDIF;
+
+	/* From here the dates are saved. A summary that cannot be read is still a
+	   problem: the caller would report counts that are not there;
+	aPayload := aSaved[2];
+
+	:IF LimsTypeEx(aPayload) != "ARRAY" .OR. ALen(aPayload) < 3;
+		:RETURN {"DueDates.SaveDueDates answered success without its summary", {}};
+	:ENDIF;
+
+	:IF LimsTypeEx(aPayload[1]) != "NUMERIC" .OR. LimsTypeEx(aPayload[3]) != "ARRAY";
+		:RETURN {"The summary of DueDates.SaveDueDates is not a count and its skips", {}};
+	:ENDIF;
+
+	/* A new list, so that the one the caller handed over is not added to;
+	aSkipped := {};
+
+	:FOR nIndex := 1 :TO ALen(aPlanSkips);
+		AAdd(aSkipped, aPlanSkips[nIndex]);
+	:NEXT;
+
+	/* Its skips are the samples that stopped waiting after they were read;
+	:FOR nIndex := 1 :TO ALen(aPayload[3]);
+		AAdd(aSkipped, aPayload[3][nIndex]);
+	:NEXT;
+
+	:RETURN {"", {aPayload[1], ALen(aSkipped), aSkipped}};
+:ENDPROC;

@@ -42,16 +42,17 @@ jobs:
       - name: Packages
         run: hutch install --frozen-lockfile
 
+      # Before the tests: test/examples.test.ts checks the demo project against the pinned server.
+      - name: Language server
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bun scripts/bundle-lsp.ts --download
+
       - name: Type check and tests
         run: |
           bun scripts/assets.ts
           hutch run check
           bun test
-
-      - name: Language server
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: bun scripts/bundle-lsp.ts --download
 
       - name: Release build
         run: hutch run build

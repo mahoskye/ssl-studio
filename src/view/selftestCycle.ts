@@ -4,7 +4,9 @@
 // so this presses the same buttons from inside it.
 import { backend } from "./backend";
 import { baseName, joinPath } from "../shared/paths";
+import { showPanel } from "./panels/registry";
 import { parsePlan, printPlan } from "./plan/model";
+import { requestPlanPaletteTab } from "./plan/planBridge";
 import { applyText, canonical, documents, openFile, state } from "./state";
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -17,13 +19,19 @@ async function until<T>(get: () => T | undefined | null | false, ms = 30000): Pr
 	}
 	return null;
 }
-const button = (text: RegExp) => [...document.querySelectorAll("button")].find((b) => text.test(b.innerText.trim()) && !b.disabled);
-async function press(text: RegExp) {
-	const found = await until(() => button(text));
+const visibleAssistant = () => document.querySelector<HTMLElement>(".plan-assist:not([hidden])");
+const button = (text: RegExp, root: ParentNode = document) =>
+	[...root.querySelectorAll("button")].find((b) => !b.closest("[hidden]") && text.test(b.innerText.trim()) && !b.disabled);
+async function press(text: RegExp, scope: () => ParentNode | null = () => document) {
+	const found = await until(() => {
+		const root = scope();
+		return root ? button(text, root) : null;
+	});
 	if (!found) throw new Error(`no button matching ${text}`);
 	found.click();
 }
-const assistant = () => document.querySelector<HTMLElement>(".plan-assist")?.innerText ?? "";
+const pressAssistant = (text: RegExp) => press(text, visibleAssistant);
+const assistant = () => visibleAssistant()?.innerText ?? "";
 
 /** Runs each step in turn, and stops at the first that fails: the later ones build on it. */
 export async function selftestCycle(plan: string): Promise<Record<string, boolean | string>> {
@@ -34,19 +42,21 @@ export async function selftestCycle(plan: string): Promise<Record<string, boolea
 	const text = () => documents.get(script)?.model.getValue() ?? "";
 	const toPlan = async () => {
 		await openFile(planPath);
-		await until(() => document.querySelector(".plan-assist"));
+		showPanel("palette");
+		requestPlanPaletteTab("assistant");
+		await until(() => visibleAssistant());
 	};
 	const step = async (name: string, work: () => Promise<boolean | null | undefined | void>) => {
 		const outcome = await work();
 		steps[name] = outcome !== false && outcome !== null;
 		if (!steps[name]) throw new Error(`step failed: ${name}`);
 	};
-	/** Spec, approve, build, review, accept. */
+	/** Plan doc, approve, build, review, accept. */
 	const buildIt = async (start: RegExp, accept: RegExp) => {
-		await press(/^Write spec$/);
-		await press(/^Approve the spec$/);
-		await press(start);
-		await press(/^Review /);
+		await pressAssistant(/^Write plan doc$/);
+		await press(/^Approve the plan doc$/);
+		await pressAssistant(start);
+		await pressAssistant(/^Review /);
 		await press(accept);
 		await until(() => baseName(state.groups[state.activeGroup]?.active ?? "") === "Release.ssl");
 	};
@@ -77,7 +87,9 @@ export async function selftestCycle(plan: string): Promise<Record<string, boolea
 			const broken = whole.replace(/ExecFunction\("Regions\.IsUsableId", \{\w+\}\)/, ".T.");
 			if (broken === whole) return false;
 			applyText(script, broken);
-			const found = await until(() => [...document.querySelectorAll(".plan-drift")].some((d) => d.textContent?.includes("IsUsableId")));
+			const found = await until(() =>
+				[...(visibleAssistant()?.querySelectorAll(".plan-drift") ?? [])].some((d) => d.textContent?.includes("IsUsableId")),
+			);
 			applyText(script, whole);
 			return Boolean(found && (await until(() => assistant().includes("They agree"))));
 		});
@@ -96,7 +108,7 @@ export async function selftestCycle(plan: string): Promise<Record<string, boolea
 			return Boolean(await until(() => !assistant().includes("Since it was built")));
 		});
 		await step("writesTests", async () => {
-			await press(/^Write the test script$/);
+			await pressAssistant(/^Write the test script$/);
 			await press(/^Accept and create the file$/);
 			const tests = canonical(joinPath(root, "Sample", "ReleaseTests.ssl"));
 			await until(() => documents.has(tests));
