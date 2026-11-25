@@ -16,10 +16,10 @@
     "@lezer/highlight": "1.2.5",
     "@lezer/markdown": "1.8.1",
     "@prettier/plugin-xml": "3.4.2",
-    "dompurify": "3.4.15",
-    "elkjs": "0.12.0",
-    "marked": "14.0.0",
-    "monaco-editor": "0.57.0",
+    "dompurify": "3.5.0",
+    "elkjs": "0.12.1",
+    "marked": "18.3.0",
+    "monaco-editor": "0.58.0",
     "prettier": "3.10.1",
     "solid-js": "1.9.17",
     "sql-formatter": "15.10.0",
@@ -28,9 +28,9 @@
     "mermaid": "12.3.0"
   },
   "devDependencies": {
-    "@types/bun": "1.4.3",
-    "typescript": "5.9.3",
-    "vite": "7.3.7",
-    "vite-plugin-solid": "2.11.14"
+    "@types/bun": "1.4.5",
+    "typescript": "7.0.2",
+    "vite": "8.3.8",
+    "vite-plugin-solid": "2.11.17"
   }
 }

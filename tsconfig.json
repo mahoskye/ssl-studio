@@ -1,6 +1,14 @@
 {
-	"extends": "./.hutch/devkit/tsconfig.json",
 	"compilerOptions": {
+		"paths": {
+			"electrobun": ["./.hutch/devkit/api/sdks/main/index.ts"],
+			"electrobun/main": ["./.hutch/devkit/api/sdks/main/index.ts"],
+			"electrobun/main/*": ["./.hutch/devkit/api/sdks/main/entries/*.ts"],
+			"electrobun/bun": ["./.hutch/devkit/api/sdks/main/index.ts"],
+			"electrobun/bun/*": ["./.hutch/devkit/api/sdks/main/entries/*.ts"],
+			"electrobun/rpc": ["./.hutch/devkit/api/sdks/main/entries/rpc.ts"],
+			"electrobun/view": ["./.hutch/devkit/api/browser/index.ts"]
+		},
 		"target": "ESNext",
 		"useDefineForClassFields": true,
 		"module": "ESNext",

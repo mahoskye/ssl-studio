@@ -11,6 +11,8 @@ import type { LiveEditorHandle } from "../src/view/editor/liveBridge";
 if (typeof (globalThis as any).window === "undefined") {
 	(globalThis as any).window = {
 		Error,
+		Map,
+		Set,
 		addEventListener() {},
 		removeEventListener() {},
 		location: { href: "http://localhost/", protocol: "http:", host: "127.0.0.1:5190" },
@@ -18,6 +20,8 @@ if (typeof (globalThis as any).window === "undefined") {
 	};
 } else {
 	if (!(globalThis as any).window.Error) (globalThis as any).window.Error = Error;
+	if (!(globalThis as any).window.Map) (globalThis as any).window.Map = Map;
+	if (!(globalThis as any).window.Set) (globalThis as any).window.Set = Set;
 	if (!(globalThis as any).window.location) (globalThis as any).window.location = { href: "http://localhost/", protocol: "http:", host: "127.0.0.1:5190" };
 	if (!(globalThis as any).window.location.protocol) (globalThis as any).window.location.protocol = "http:";
 	if (!(globalThis as any).window.location.host) (globalThis as any).window.location.host = "127.0.0.1:5190";

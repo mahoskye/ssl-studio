@@ -22,9 +22,7 @@ const katexCache = new Map<string, string>();
 export function loadKatex(): Promise<KatexModule> {
 	if (katexMod) return Promise.resolve(katexMod);
 	if (!katexLoading) {
-		const cssImport =
-			// @ts-expect-error Vite bundles the KaTeX CSS dynamically at runtime (no .d.ts shipped for .css).
-			import("katex/dist/katex.min.css");
+		const cssImport = import("katex/dist/katex.min.css");
 		katexLoading = Promise.all([import("katex"), cssImport])
 			.then(([mod]) => {
 				katexMod = mod.default ?? (mod as unknown as KatexModule);

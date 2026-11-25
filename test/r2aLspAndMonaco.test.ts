@@ -13,13 +13,17 @@ import { applyTextEdits, changedRanges } from "../src/view/lsp/edits";
 if (typeof (globalThis as any).window === "undefined") {
 	(globalThis as any).window = {
 		Error,
+		Map,
+		Set,
 		addEventListener() {},
 		removeEventListener() {},
 		location: { href: "http://localhost/" },
 		matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
 	};
-} else if (!(globalThis as any).window.Error) {
-	(globalThis as any).window.Error = Error;
+} else {
+	if (!(globalThis as any).window.Error) (globalThis as any).window.Error = Error;
+	if (!(globalThis as any).window.Map) (globalThis as any).window.Map = Map;
+	if (!(globalThis as any).window.Set) (globalThis as any).window.Set = Set;
 }
 if (typeof (globalThis as any).document === "undefined") {
 	(globalThis as any).document = {

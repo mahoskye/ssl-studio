@@ -138,6 +138,8 @@ const cancelledRafIds: number[] = [];
 (globalThis as any).document = mockDocument;
 (globalThis as any).window = {
 	Error,
+	Map,
+	Set,
 	addEventListener() {},
 	removeEventListener() {},
 	location: { href: "http://127.0.0.1/" },

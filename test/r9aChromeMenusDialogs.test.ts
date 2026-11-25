@@ -114,6 +114,8 @@ if (typeof (globalThis as any).localStorage === "undefined") {
 if (typeof (globalThis as any).window === "undefined") {
 	(globalThis as any).window = {
 		Error,
+		Map,
+		Set,
 		innerWidth: 1280,
 		innerHeight: 900,
 		addEventListener() {},

@@ -18,6 +18,8 @@ if (typeof (globalThis as any).localStorage === "undefined") {
 if (typeof (globalThis as any).window === "undefined") {
 	(globalThis as any).window = {
 		Error,
+		Map,
+		Set,
 		innerWidth: 1280,
 		innerHeight: 900,
 		addEventListener() {},
@@ -25,8 +27,10 @@ if (typeof (globalThis as any).window === "undefined") {
 		location: { href: "http://localhost/", protocol: "http:", host: "127.0.0.1:5190" },
 		matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
 	};
-} else if (!(globalThis as any).window.Error) {
-	(globalThis as any).window.Error = Error;
+} else {
+	if (!(globalThis as any).window.Error) (globalThis as any).window.Error = Error;
+	if (!(globalThis as any).window.Map) (globalThis as any).window.Map = Map;
+	if (!(globalThis as any).window.Set) (globalThis as any).window.Set = Set;
 }
 if (typeof (globalThis as any).document === "undefined") {
 	(globalThis as any).document = {

@@ -3,10 +3,10 @@ import solid from "vite-plugin-solid";
 import { resolve } from "node:path";
 import { existsSync } from "node:fs";
 
-const devkit = resolve(__dirname, ".hutch/devkit");
+const devkit = resolve(import.meta.dirname, ".hutch/devkit");
 // The browser host (`hutch run web`) builds without the devkit projected.
 const aliases = existsSync(devkit)
-	? (await import("./.hutch/devkit/api/config/electrobun-vite")).electrobunViteAliases(devkit)
+	? (await import("./.hutch/devkit/api/config/electrobun-vite.ts")).electrobunViteAliases(devkit)
 	: {};
 
 export default defineConfig({
